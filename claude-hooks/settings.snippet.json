@@ -1,0 +1,19 @@
+{
+  "_comment": "Reference only. Run `node claude-hooks/install-hooks.mjs` to merge this into ~/.claude/settings.json safely (it substitutes your real home path, dedupes, and backs up first). The paths below use $HOME as a placeholder.",
+  "statusLine": {
+    "type": "command",
+    "command": "node $HOME/.claude/deckhand-statusline.mjs",
+    "refreshInterval": 15
+  },
+  "hooks": {
+    "SessionStart":       [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
+    "SessionEnd":         [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
+    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
+    "PreToolUse":         [{ "matcher": "AskUserQuestion|ExitPlanMode", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
+    "PostToolUse":        [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
+    "PostToolUseFailure": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
+    "PermissionRequest":  [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
+    "Notification":       [{ "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
+    "Stop":               [{ "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }]
+  }
+}

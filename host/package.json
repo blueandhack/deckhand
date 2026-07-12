@@ -1,0 +1,16 @@
+{
+  "name": "deckhand-host",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Streams live Claude Code status to the Deckhand ESP32 display over USB serial and/or BLE.",
+  "scripts": {
+    "start": "node index.mjs",
+    "build-app": "./build-app.sh"
+  },
+  "dependencies": {
+    "@abandonware/noble": "^1.9.2-26",
+    "ccusage": "^20.0.14",
+    "serialport": "^12.0.0"
+  }
+}

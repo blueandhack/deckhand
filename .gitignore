@@ -1,0 +1,17 @@
+# Node
+host/node_modules/
+
+# The BLE wrapper app embeds a machine-specific copy of node (~200MB) and is
+# built locally by host/build-app.sh - never commit it. Only the plist
+# template (DeckhandBLE.plist) and the build script are tracked.
+host/DeckhandBLE.app/
+
+# macOS
+.DS_Store
+
+# Local editor/tooling
+.vscode/
+*.log
+
+# Claude Code local project permissions (personal, machine-specific)
+.claude/settings.local.json
