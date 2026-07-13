@@ -12,6 +12,8 @@
   <string>Deckhand</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>LSBackgroundOnly</key>
+  <true/>
   <key>CFBundleShortVersionString</key>
   <string>1.0</string>
   <key>NSBluetoothAlwaysUsageDescription</key>
