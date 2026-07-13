@@ -57,7 +57,9 @@ for (const [event, extra] of Object.entries(HOOK_EVENTS)) {
   const groups = settings.hooks[event];
   const already = groups.some((g) => (g.hooks ?? []).some((h) => h.command === HOOK));
   if (!already) {
-    groups.push({ ...extra, hooks: [{ type: "command", command: HOOK }] });
+    // timeout must exceed the hook's REMOTE_WAIT_MS (90s) so Claude Code
+    // doesn't kill it mid-wait while a prompt is answerable from the device.
+    groups.push({ ...extra, hooks: [{ type: "command", command: HOOK, timeout: 100 }] });
     added++;
   }
 }

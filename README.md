@@ -53,12 +53,17 @@ option answers the real prompt in Claude Code.
   buttons; your choice is delivered to Claude as the user's answer.
 - **Plan approvals** — a plan summary -> Approve / Keep planning.
 
-Long detail text is paged ("pg 1/3 — tap text for more"). After you tap an
+Commands render as a code block, questions/plans as prose. Newlines are
+flattened to spaces (the display font can't draw control characters). If the
+detail is long, a **READ ALL** button (top-right, well clear of the decision
+buttons) opens a full-screen reader with prev/next paging. After you tap an
 option it fills solid ("Allow — sent"), and the screen returns to the list
-once Claude moves on.
+once Claude moves on. If a session shows NEEDS INPUT but its prompt isn't
+answerable here (it fired while the display was disconnected, or the answer
+window has closed), the detail screen says "Answer this one on your Mac".
 
 How it works underneath: the session hook publishes the prompt details and
-then waits (up to 30 seconds) for an answer file before letting the normal
+then waits (up to 90 seconds) for an answer file before letting the normal
 dialog flow continue. The device's tap travels over USB/BLE to the host,
 which writes that answer file; the hook wakes and emits a real hook
 decision (allow/deny/approve, or the chosen option). The hook only ever
@@ -203,7 +208,7 @@ Claude Code hooks (any surface: terminal, desktop app, VS Code)
         PostToolUse, PostToolUseFailure, Notification, Stop, SessionEnd
             -> ~/.claude/deckhand-session-hook.mjs -> ~/.claude/deckhand-sessions/<id>.json
                (for answerable prompts: publishes the question, then waits up
-                to 30s for ~/.claude/deckhand-answers/<id>.json before falling
+                to 90s for ~/.claude/deckhand-answers/<id>.json before falling
                 back to the normal dialog)
 
 host/index.mjs (device tick every 5s)
@@ -327,7 +332,7 @@ macOS quarantine flag, cleared with
   min on HTTP 429. If the Mac goes weeks with no Claude Code use at all,
   the Keychain token can expire; opening any Claude Code surface once
   refreshes it.
-- **Remote answering has a 30s window** per prompt (the hook can't wait
+- **Remote answering has a 90s window** per prompt (the hook can't wait
   forever), shows up to ~400 characters of detail (tap READ ALL for a
   full-screen reader with prev/next), and doesn't support multi-select
   questions. Question answers reach Claude as a "user already answered: X"

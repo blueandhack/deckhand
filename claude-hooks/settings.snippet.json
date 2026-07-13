@@ -6,14 +6,110 @@
     "refreshInterval": 15
   },
   "hooks": {
-    "SessionStart":       [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
-    "SessionEnd":         [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
-    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
-    "PreToolUse":         [{ "matcher": "AskUserQuestion|ExitPlanMode", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
-    "PostToolUse":        [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
-    "PostToolUseFailure": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
-    "PermissionRequest":  [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
-    "Notification":       [{ "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }],
-    "Stop":               [{ "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs" }] }]
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $HOME/.claude/deckhand-session-hook.mjs",
+            "timeout": 100
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $HOME/.claude/deckhand-session-hook.mjs",
+            "timeout": 100
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $HOME/.claude/deckhand-session-hook.mjs",
+            "timeout": 100
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $HOME/.claude/deckhand-session-hook.mjs",
+            "timeout": 100
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $HOME/.claude/deckhand-session-hook.mjs",
+            "timeout": 100
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $HOME/.claude/deckhand-session-hook.mjs",
+            "timeout": 100
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $HOME/.claude/deckhand-session-hook.mjs",
+            "timeout": 100
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $HOME/.claude/deckhand-session-hook.mjs",
+            "timeout": 100
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $HOME/.claude/deckhand-session-hook.mjs",
+            "timeout": 100
+          }
+        ]
+      }
+    ]
   }
 }

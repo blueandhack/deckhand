@@ -132,8 +132,8 @@ two things `host/index.mjs` cannot get any other way:
   `PostToolUseFailure` maps to `working` so a *denied* permission clears `asking`.
 - **Remote answering** (the device as a prompt remote) lives in the same hook. For answerable
   prompts (`PermissionRequest`, `PreToolUse` on `AskUserQuestion`/`ExitPlanMode`) the hook
-  publishes an `ask` object (pid, title, ≤400-char detail, ≤4 option labels) in the session
-  file, then **blocks up to 30s** polling `~/.claude/deckhand-answers/<session_id>.json`. A device
+  publishes an `ask` object (pid, title, ≤600-char control-char-flattened detail, ≤4 option labels) in the session
+  file, then **blocks up to 90s** (settings.json hook `timeout` is 100s to match) polling `~/.claude/deckhand-answers/<session_id>.json`. A device
   tap produces that file (device → `ANSWER <id12> <pid> <idx> <hmac>` line → host verifies +
   writes it); the hook
   then emits the decision JSON for the right event dialect: `PermissionRequest` decision
@@ -141,7 +141,7 @@ two things `host/index.mjs` cannot get any other way:
   whose reason carries the chosen option to Claude (there's no native remote-answer channel for
   questions). On timeout it strips the `ask` and exits silently — stock dialog behavior.
   Two hard rules: the hook waits **only** when `/tmp/deckhand-host-alive` (host heartbeat, written
-  every tick) is fresh and says `connected` — otherwise every prompt would stall 30s for
+  every tick) is fresh and says `connected` — otherwise every prompt would stall 90s for
   nothing — and it must never write anything to stdout **except** a genuine `emitDecision()`,
   because any stray JSON on a `PermissionRequest` hook's stdout can auto-allow/deny the dialog.
 - **Remote-answer authentication (A + B), so only the paired Mac can decide.** (A) The device

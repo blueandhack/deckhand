@@ -409,7 +409,7 @@ struct SessionInfo {
   char askKind[10]; // "perm" | "question" | "plan" - styles the detail text
   char askNonce[20]; // host-issued, single-use; HMAC'd into the answer
   char askTitle[28];
-  char askDetail[408];
+  char askDetail[608];
   char askOpts[4][26];
   uint8_t askOptCount;
 };
@@ -1640,6 +1640,15 @@ void drawSessionDetail(int idx) {
   tft.drawString(labelForStatus(status), CARD_X + PAD + 20, cardY + 33);
   detailDurCache[0] = '\0'; // full repaint - the duration line must redraw
 
+  // Asking, but no answerable prompt attached: it either wasn't published
+  // (host wasn't connected when it fired) or the remote window has closed.
+  // Say so, so "needs input" with no buttons isn't confusing.
+  if (strcmp(status, "asking") == 0) {
+    tft.setTextFont(1);
+    tft.setTextColor(COLOR_WARN, COLOR_CARD);
+    tft.drawString("Answer this one on your Mac", CARD_X + PAD, cardY + 56);
+  }
+
   tft.drawFastHLine(CARD_X + PAD, cardY + 72, CARD_W - 2 * PAD, COLOR_LABEL);
   drawDetailRow(cardY + 82, "PATH", s.path);
   tft.drawFastHLine(CARD_X + PAD, cardY + 124, CARD_W - 2 * PAD, COLOR_LABEL);
@@ -2222,6 +2231,11 @@ void handleLine(const String& line) {
         copyField(info.askNonce, sizeof(info.askNonce), ask["nonce"] | "");
         copyField(info.askTitle, sizeof(info.askTitle), ask["title"] | "");
         copyField(info.askDetail, sizeof(info.askDetail), ask["detail"] | "");
+        // Defense in depth: the host already flattens control bytes, but any
+        // that slip through render as garbage glyphs on this font, so blank
+        // them to spaces here too.
+        for (char* p = info.askTitle; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
+        for (char* p = info.askDetail; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
         JsonArray opts = ask["options"].as<JsonArray>();
         if (!opts.isNull()) {
           for (JsonVariant o : opts) {
@@ -2316,7 +2330,7 @@ class BLERxCallbacks : public BLECharacteristicCallbacks {
 };
 
 void setupBLE() {
-  bleRxStream = xStreamBufferCreate(4096, 1); // several full JSON lines of headroom
+  bleRxStream = xStreamBufferCreate(8192, 1); // several full JSON lines of headroom
   // Unique per board (from the factory eFuse MAC) so several units in one
   // room advertise different names and hosts don't cross-connect. The host
   // learns this exact name over USB (HELLO) and pins BLE to it.
@@ -2435,7 +2449,7 @@ void feedChar(char c, String& buf, unsigned long* lastRxTimestamp, bool fromUsb)
     processCompletedLine(buf, lastRxTimestamp, fromUsb);
   } else if (c != '\r') {
     buf += c;
-    if (buf.length() > 4800) buf = ""; // guard against garbage (ask payloads make lines longer)
+    if (buf.length() > 8000) buf = ""; // guard against garbage (ask payloads make lines longer)
   }
 }
 

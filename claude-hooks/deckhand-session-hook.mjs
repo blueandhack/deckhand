@@ -47,7 +47,21 @@ const DEBUG_LOG = path.join(os.homedir(), ".claude", "deckhand-session-hook-debu
 // Written by host/index.mjs every tick; tells us a display is actually
 // connected. Without it we never block waiting for a remote answer.
 const HOST_ALIVE = "/tmp/deckhand-host-alive";
-const REMOTE_WAIT_MS = 30_000;
+// How long the prompt stays answerable from the device. The matching hook
+// `timeout` in settings.json must be a few seconds LONGER, or Claude Code
+// kills the hook before this elapses.
+const REMOTE_WAIT_MS = 90_000;
+
+// The device font can't render control bytes (newlines, tabs) - they show as
+// garbage glyphs - so flatten them to spaces. Commands lose their line breaks
+// but read cleanly; nothing renders as mojibake.
+function clean(s, max) {
+  return String(s ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ") // control bytes (newlines/tabs) -> space
+    .replace(/ {2,}/g, " ")                    // collapse runs
+    .trim()
+    .slice(0, max);
+}
 
 function remoteAvailable() {
   try {
@@ -69,19 +83,19 @@ function buildAsk(data) {
     return {
       pid,
       kind: "perm",
-      title: `Allow ${data.tool_name ?? "tool"}?`,
-      detail: String(detail).slice(0, 400),
+      title: clean(`Allow ${data.tool_name ?? "tool"}?`, 26),
+      detail: clean(detail, 600),
       options: ["Allow", "Deny"],
     };
   }
   if (data.tool_name === "AskUserQuestion") {
     const q = data.tool_input?.questions?.[0] ?? {};
-    const opts = (q.options ?? []).slice(0, 4).map((o) => String(o?.label ?? o).slice(0, 24));
+    const opts = (q.options ?? []).slice(0, 4).map((o) => clean(o?.label ?? o, 24));
     return {
       pid,
       kind: "question",
-      title: String(q.header ?? "Question").slice(0, 26),
-      detail: String(q.question ?? "").slice(0, 400),
+      title: clean(q.header ?? "Question", 26),
+      detail: clean(q.question ?? "", 600),
       options: opts.length ? opts : ["OK"],
     };
   }
@@ -90,7 +104,7 @@ function buildAsk(data) {
       pid,
       kind: "plan",
       title: "Approve plan?",
-      detail: String(data.tool_input?.plan ?? "").slice(0, 400),
+      detail: clean(data.tool_input?.plan ?? "", 600),
       options: ["Approve", "Keep planning"],
     };
   }
@@ -239,17 +253,23 @@ try {
       writeRecord(filePath, record);
 
       if (ask) {
-        // Block (bounded, well under the hook timeout) so a device tap can
-        // decide this prompt. No tap -> exit silently and the normal dialog
-        // flow continues untouched.
+        // Block (bounded, under the hook timeout) so a device tap can decide
+        // this prompt. No tap -> exit silently and the normal dialog flow
+        // continues untouched.
         const answer = await waitForRemoteAnswer(sessionId, ask.pid, REMOTE_WAIT_MS);
-        // Either way the window is over: stop offering buttons on the device.
-        delete record.ask;
-        record.updated_at = Date.now();
+        // Window over: stop offering buttons. Re-read current state rather
+        // than rewriting our stale `record` - another event (e.g. PostToolUse
+        // when the user answered on the Mac) may have updated status meanwhile,
+        // and we must not clobber it back to "asking".
         try {
-          writeRecord(filePath, record);
+          const cur = JSON.parse(fs.readFileSync(filePath, "utf8"));
+          if (cur.ask && cur.ask.pid === ask.pid) {
+            delete cur.ask;
+            cur.updated_at = Date.now();
+            writeRecord(filePath, cur);
+          }
         } catch {
-          // best effort
+          // file gone (SessionEnd) or unreadable - nothing to strip
         }
         if (answer) {
           try {
