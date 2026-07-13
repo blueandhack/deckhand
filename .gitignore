@@ -15,3 +15,6 @@ host/DeckhandBLE.app/
 
 # Claude Code local project permissions (personal, machine-specific)
 .claude/settings.local.json
+
+# Built locally by mac-app/build.sh (embeds this machine's host path)
+mac-app/DeckhandMenuBar.app/

@@ -321,6 +321,25 @@ seal), and — if you download the repo as a zip rather than `git clone` — the
 macOS quarantine flag, cleared with
 `xattr -dr com.apple.quarantine host/DeckhandBLE.app`.
 
+## Menu-bar app (optional)
+
+If you'd rather not touch the terminal, `mac-app/` is a tiny native
+menu-bar controller (Swift, macOS 13+). Build and launch it:
+
+```
+mac-app/build.sh
+open mac-app/DeckhandMenuBar.app
+```
+
+It puts a ship's-wheel icon in the menu bar whose dropdown shows connection
+status and quota, with **Start / Stop Deckhand**, a **Launch at login**
+toggle (so it comes back after a reboot with nothing to do), and **Quit**.
+It doesn't touch Bluetooth itself — it just runs and watches the same
+`DeckhandBLE.app` host — so the proven transport path is unchanged. The
+built app embeds this machine's repo path, so re-run `build.sh` if you move
+the repo. Ad-hoc signed; `SMAppService` may need the app in `/Applications`
+to self-register as a login item.
+
 ## Known limitations
 
 - **~5s delay**: the host polls every `POLL_INTERVAL_MS` (5000ms in
