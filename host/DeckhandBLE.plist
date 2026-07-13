@@ -6,6 +6,8 @@
   <string>Deckhand</string>
   <key>CFBundleIdentifier</key>
   <string>com.deckhand.ble-host</string>
+  <key>CFBundleIconFile</key>
+  <string>Deckhand</string>
   <key>CFBundleName</key>
   <string>Deckhand</string>
   <key>CFBundlePackageType</key>

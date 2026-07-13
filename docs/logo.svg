@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Deckhand logo">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E38C62"/>
+      <stop offset="1" stop-color="#BF5D39"/>
+    </linearGradient>
+    <g id="spoke">
+      <rect x="247" y="132" width="18" height="90" rx="9" fill="#F6F0E6"/>
+      <rect x="244" y="70" width="24" height="50" rx="12" fill="#F6F0E6"/>
+    </g>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#tile)"/>
+  <circle cx="256" cy="256" r="129" fill="none" stroke="#F6F0E6" stroke-width="22"/>
+  <use href="#spoke" transform="rotate(0 256 256)"/>
+  <use href="#spoke" transform="rotate(45 256 256)"/>
+  <use href="#spoke" transform="rotate(90 256 256)"/>
+  <use href="#spoke" transform="rotate(135 256 256)"/>
+  <use href="#spoke" transform="rotate(180 256 256)"/>
+  <use href="#spoke" transform="rotate(225 256 256)"/>
+  <use href="#spoke" transform="rotate(270 256 256)"/>
+  <use href="#spoke" transform="rotate(315 256 256)"/>
+  <circle cx="256" cy="256" r="46" fill="#F6F0E6"/>
+  <circle cx="256" cy="256" r="20" fill="#FF9E44"/>
+</svg>

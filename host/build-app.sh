@@ -31,9 +31,11 @@ APP="DeckhandBLE.app"
 
 echo "Building $APP from $NODE"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp DeckhandBLE.plist "$APP/Contents/Info.plist"
 cp "$NODE" "$APP/Contents/MacOS/Deckhand"
+# App icon (Info.plist references Deckhand.icns via CFBundleIconFile).
+[ -f Deckhand.icns ] && cp Deckhand.icns "$APP/Contents/Resources/Deckhand.icns"
 
 # Copy any @rpath-linked dylibs node needs (Homebrew's node links
 # libnode.<ver>.dylib dynamically; statically-linked node installs have none,

@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.svg" width="120" alt="Deckhand logo"></p>
+
 # Deckhand
 
 A little desk display and remote for Claude Code — the crew member who keeps
