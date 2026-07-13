@@ -1690,10 +1690,15 @@ const int BRIGHT_CARD_Y = CONN_CARD_Y + CONN_CARD_H + 6;
 const int SLEEP_CARD_Y = BRIGHT_CARD_Y + STEPPER_CARD_H + 6;
 const int CALIB_BTN_Y = SLEEP_CARD_Y + STEPPER_CARD_H + 6;
 const int CALIB_BTN_H = 38;
-// CALIBRATE and the SOUND toggle share the bottom row as half-width buttons.
+// Bottom action row: three equal buttons, color-coded by role - CALIBRATE
+// (accent, a setup action), SOUND (a state toggle), POWER OFF (alert color,
+// a deliberate "leaving" action). A single row keeps everything above it
+// clear of the footer; the screen has no vertical room for a second row.
 const int SETUP_BTN_GAP = 6;
-const int SETUP_BTN_W = (CARD_W - SETUP_BTN_GAP) / 2;
-const int SOUND_BTN_X = CARD_X + SETUP_BTN_W + SETUP_BTN_GAP;
+const int SETUP_BTN_W = (CARD_W - 2 * SETUP_BTN_GAP) / 3;
+const int CAL_BTN_X = CARD_X;
+const int SND_BTN_X = CARD_X + SETUP_BTN_W + SETUP_BTN_GAP;
+const int PWR_BTN_X = CARD_X + 2 * (SETUP_BTN_W + SETUP_BTN_GAP);
 // Rows inside the DEVICE card (y offsets from CONN_CARD_Y).
 const int CONN_ROW_BT = 20;
 const int CONN_ROW_USB = 44;
@@ -1771,15 +1776,23 @@ void drawSettingsStatic() {
   drawStepperCard(BRIGHT_CARD_Y, "BRIGHTNESS");
   drawStepperCard(SLEEP_CARD_Y, "SLEEP AFTER");
 
-  tft.fillRoundRect(CARD_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, COLOR_CARD);
-  tft.drawRoundRect(CARD_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, COLOR_ACCENT);
-  tft.setTextFont(2);
-  tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
+  int btnCy = CALIB_BTN_Y + CALIB_BTN_H / 2;
+  tft.setTextFont(1);
   tft.setTextDatum(MC_DATUM);
-  tft.drawString("CALIBRATE", CARD_X + SETUP_BTN_W / 2, CALIB_BTN_Y + CALIB_BTN_H / 2);
+  // CALIBRATE (left) - accent outline.
+  tft.fillRoundRect(CAL_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, COLOR_CARD);
+  tft.drawRoundRect(CAL_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, COLOR_ACCENT);
+  tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
+  tft.drawString("CALIBRATE", CAL_BTN_X + SETUP_BTN_W / 2, btnCy);
+  // POWER OFF (right) - alert color, so it reads as a careful action and
+  // won't be confused with the "SLEEP AFTER" backlight setting above.
+  tft.fillRoundRect(PWR_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, COLOR_CARD);
+  tft.drawRoundRect(PWR_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, COLOR_BAD);
+  tft.setTextColor(COLOR_BAD, COLOR_CARD);
+  tft.drawString("POWER OFF", PWR_BTN_X + SETUP_BTN_W / 2, btnCy);
   tft.setTextDatum(TL_DATUM);
-  // The SOUND toggle is drawn entirely by renderSettingsTab: unlike the
-  // CALIBRATE action button, its whole appearance changes with its state.
+  // SOUND (middle) is drawn by renderSettingsTab - its whole look changes
+  // with its on/off state.
 }
 
 // -/+ glyph plus button border, greyed out when the value can't move
@@ -1877,14 +1890,14 @@ void renderSettingsTab() {
   if ((int) beepEnabled != soundBtnCache) {
     soundBtnCache = (int) beepEnabled;
     uint16_t fill = beepEnabled ? COLOR_ACCENT : COLOR_CARD;
-    tft.fillRoundRect(SOUND_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, fill);
-    tft.drawRoundRect(SOUND_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS,
+    tft.fillRoundRect(SND_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, fill);
+    tft.drawRoundRect(SND_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS,
                       beepEnabled ? COLOR_ACCENT : COLOR_LABEL);
-    tft.setTextFont(2);
+    tft.setTextFont(1);
     tft.setTextColor(beepEnabled ? COLOR_BG : COLOR_LABEL, fill);
     tft.setTextDatum(MC_DATUM);
     tft.drawString(beepEnabled ? "SOUND ON" : "SOUND OFF",
-                   SOUND_BTN_X + SETUP_BTN_W / 2, CALIB_BTN_Y + CALIB_BTN_H / 2);
+                   SND_BTN_X + SETUP_BTN_W / 2, CALIB_BTN_Y + CALIB_BTN_H / 2);
     tft.setTextDatum(TL_DATUM);
   }
 }
@@ -1932,7 +1945,8 @@ void handleSettingsTouch(int sx, int sy) {
   }
 
   if (sy >= CALIB_BTN_Y && sy < CALIB_BTN_Y + CALIB_BTN_H) {
-    if (sx < SOUND_BTN_X) {
+    if (sx < SND_BTN_X) {
+      // CALIBRATE
       runCalibration();
       everReceived = false;
       tft.fillScreen(COLOR_BG);
@@ -1940,13 +1954,17 @@ void handleSettingsTouch(int sx, int sy) {
       drawFooterChrome();
       drawSettingsStatic();
       resetSettingsCaches();
-    } else {
+    } else if (sx < PWR_BTN_X) {
+      // SOUND toggle
       beepEnabled = !beepEnabled;
       saveBeepEnabled();
       // Confirmation beep on enable doubles as a speaker test; disabling is
       // silent by definition.
       if (beepEnabled) startBeep();
       renderSettingsTab();
+    } else {
+      // POWER OFF - manual deep sleep (touch to wake), same as holding BOOT.
+      powerOff();
     }
   }
 }

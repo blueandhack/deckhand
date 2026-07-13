@@ -30,8 +30,9 @@ device. Three tabs:
 - **SETUP** — device status and controls: Bluetooth/USB connection state
   (from the device's own perspective — more trustworthy than macOS's
   Bluetooth settings panel, which can say "not connected" for a live link),
-  battery % and voltage, brightness and sleep-timeout steppers, a sound
-  on/off toggle, and a touch-recalibration button.
+  battery % and voltage, brightness and sleep-timeout steppers, and a
+  three-button action row (color-coded): CALIBRATE, SOUND on/off toggle, and
+  POWER OFF (deep-sleep, in the alert color).
 
 A persistent footer on every tab shows a live clock, a battery pill
 (fill level + `chg`/`full`/`%`), and "Xs ago" data freshness, so the
@@ -144,7 +145,8 @@ on macOS since it's what nearly all modern accessories use.
   after 15s–5m of no touch, or OFF to never sleep; any touch wakes it
   (that touch is consumed, so it won't also press whatever is underneath).
 - **Sound**: SETUP toggle; turning it on plays the beep as a speaker test.
-- **Power off**: hold the **BOOT** key ~1 second. This is ESP32 deep sleep
+- **Power off**: tap **POWER OFF** on the SETUP tab, or hold the **BOOT** key
+  ~1 second. This is ESP32 deep sleep
   (a true software power-off doesn't exist): screen, backlight, CPU, and
   radio all stop, dropping from ~100–150mA to a few mA — weeks of standby
   on battery instead of hours. **Touch the screen to turn it back on.**
