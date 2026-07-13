@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Commands
 
@@ -47,7 +47,7 @@ Trigger on-device actions without reflashing, by writing to a file the running h
 watches and forwards over whichever transport(s) are already connected:
 
 ```
-echo "RECAL" > ~/.claude/deckhand-device-command   # force touch recalibration
+echo "RECAL" > ~/.Codex/deckhand-device-command   # force touch recalibration
 ```
 
 Do **not** open a second/new USB serial connection to send ad-hoc commands (e.g. via a one-off
@@ -65,13 +65,13 @@ This is a three-part system, and the interesting behavior only makes sense once 
 data flows across all three:
 
 ```
-Claude Code hooks (ANY surface: terminal, desktop app, VS Code) + statusLine (terminal only)
+Codex hooks (ANY surface: terminal, desktop app, VS Code) + statusLine (terminal only)
         |
         v
-~/.claude/deckhand-statusline.mjs, ~/.claude/deckhand-session-hook.mjs   (live outside this repo)
+~/.Codex/deckhand-statusline.mjs, ~/.Codex/deckhand-session-hook.mjs   (live outside this repo)
         |  write to
         v
-~/.claude/deckhand-rate-limits.json, ~/.claude/deckhand-sessions/*.json
+~/.Codex/deckhand-rate-limits.json, ~/.Codex/deckhand-sessions/*.json
         |  read every 5s by                       Anthropic OAuth usage endpoint
         v                                          (polled every 5 min) |
 host/index.mjs  <----------------------------------------------------- +
@@ -104,17 +104,17 @@ and it finally tripped. On the host side, BLE scans by **advertised name** ("Dec
 not by service UUID — the 128-bit custom UUID usually doesn't fit in the 31-byte primary BLE
 advertisement alongside anything else, so a UUID-filtered scan can miss the device entirely.
 
-**The two files under `~/.claude/` are not part of this repo but are load-bearing.** They're
-registered in `~/.claude/settings.json` (`statusLine` + `hooks`) and are the *only* source for
+**The two files under `~/.Codex/` are not part of this repo but are load-bearing.** They're
+registered in `~/.Codex/settings.json` (`statusLine` + `hooks`) and are the *only* source for
 two things `host/index.mjs` cannot get any other way:
 
 - FALLBACK "% of plan quota used" (`deckhand-statusline.mjs`, via `rate_limits.five_hour` /
   `.seven_day` in the statusLine JSON). The statusLine only runs in *terminal* sessions (the
   desktop app and VS Code extension never invoke it), so this cache can go hours-stale. The
   PRIMARY quota source is now in `host/index.mjs` itself: it polls Anthropic's OAuth usage
-  endpoint (`api.anthropic.com/api/oauth/usage`, the same data Claude Code's `/usage` screen
+  endpoint (`api.anthropic.com/api/oauth/usage`, the same data Codex's `/usage` screen
   shows) every 5 minutes, authenticating with the OAuth token read from the macOS Keychain
-  ("Claude Code-credentials") — read-only, never refreshed/mutated from here, falling back to
+  ("Codex-credentials") — read-only, never refreshed/mutated from here, falling back to
   the statusLine cache on any failure (it rate-limits bursts with HTTP 429; back off, don't
   hammer).
 - Per-project session status (`deckhand-session-hook.mjs`, via `SessionStart`, `UserPromptSubmit`,
@@ -133,12 +133,12 @@ two things `host/index.mjs` cannot get any other way:
 - **Remote answering** (the device as a prompt remote) lives in the same hook. For answerable
   prompts (`PermissionRequest`, `PreToolUse` on `AskUserQuestion`/`ExitPlanMode`) the hook
   publishes an `ask` object (pid, title, ≤400-char detail, ≤4 option labels) in the session
-  file, then **blocks up to 30s** polling `~/.claude/deckhand-answers/<session_id>.json`. A device
+  file, then **blocks up to 30s** polling `~/.Codex/deckhand-answers/<session_id>.json`. A device
   tap produces that file (device → `ANSWER <id12> <pid> <idx> <hmac>` line → host verifies +
   writes it); the hook
   then emits the decision JSON for the right event dialect: `PermissionRequest` decision
   allow/deny, `ExitPlanMode` PreToolUse allow/deny, and `AskUserQuestion` a PreToolUse deny
-  whose reason carries the chosen option to Claude (there's no native remote-answer channel for
+  whose reason carries the chosen option to Codex (there's no native remote-answer channel for
   questions). On timeout it strips the `ask` and exits silently — stock dialog behavior.
   Two hard rules: the hook waits **only** when `/tmp/deckhand-host-alive` (host heartbeat, written
   every tick) is fresh and says `connected` — otherwise every prompt would stall 30s for
@@ -149,7 +149,7 @@ two things `host/index.mjs` cannot get any other way:
   exact name over USB (`HELLO <name>`), pins BLE to it — no cross-connecting to another unit in
   the room. Because the longer name plus the 128-bit service UUID overflow the 31-byte BLE
   advertisement, the firmware **does not advertise the service UUID** (the host matches by name
-  anyway). (B) Host and device share a 128-bit secret in `~/.claude/deckhand-secret` (mode 600,
+  anyway). (B) Host and device share a 128-bit secret in `~/.Codex/deckhand-secret` (mode 600,
   host-generated, secure by default), pushed to the device **only over USB** via `PROVISION`
   (stored in NVS; BLE `PROVISION` is ignored — the whole point). Each forwarded `ask` carries a
   per-prompt `nonce`; the device returns `ANSWER … <hmac>` where hmac =
@@ -223,23 +223,13 @@ Other things that aren't obvious from a single file:
   session *transitions into* `asking` (detected in `handleLine` by diffing against the previous
   poll's list); test it without real prompts by dropping a fake session file:
   `echo '{"session_id":"t","cwd":"/tmp/x","status":"asking","updated_at":'$(date +%s)'000}' >
-  ~/.claude/deckhand-sessions/t.json` (delete it afterwards).
+  ~/.Codex/deckhand-sessions/t.json` (delete it afterwards).
 - "Power off" (hold BOOT ~1s) is ESP32 deep sleep, not a real power cut: panel DISPOFF+SLPIN,
   backlight pin latched low via `gpio_hold_en` (GPIOs float in deep sleep — and setup() must
   `gpio_hold_dis` it again after wake, before re-attaching LEDC), wake via ext0 on IO36 (the
   XPT2046's PENIRQ, which works while the ESP32 sleeps because the 3.3V rail stays up). Wake is
   deliberately **touch, not the BOOT key**: GPIO0 held low across the wake reset straps the
-  chip into the serial bootloader and it looks bricked until a manual reset. The manual power-off
-  and the automatic battery-idle sleep share `enterDeepSleep()`.
-- Automatic deep-sleep (`AUTO_SLEEP_IDLE_MS`, 20 min): fires only when **on battery** with no
-  fresh active session for the interval; touch and any fresh session reset `lastNonIdleMillis`.
-  "On battery" is `!(lastRxUSBMillis fresh within 60s) && batteryPresent()` — deliberately a
-  **60s** USB-quiet window, not `batteryState()==DISCHARGING` (which flips on the 10s
-  `usbLinkActive` threshold and briefly reads "battery" during a slow host tick, which once
-  caused spurious sleeps). Debugging note: the SESSIONS feature captures each Bash command as a
-  `PermissionRequest` ask detail, so any word you `grep` for that's also in your command shows up
-  inside the host log's tick JSON — match device prints by the `^[device/usb] ` line prefix, not
-  a bare substring, or you'll chase phantom events.
+  chip into the serial bootloader and it looks bricked until a manual reset.
 - The sessions list's row height is computed from the session count (tall rows for 1-3
   sessions, compact for 5-6); touch hit-testing in `handleTouch` uses the same `sessionRowH`
   global, so any layout change must keep those two in sync. Status urgency is encoded as pill
@@ -248,8 +238,8 @@ Other things that aren't obvious from a single file:
 - The OAuth usage endpoint rate-limits bursty callers (HTTP 429, observed after several rapid
   host restarts). The poller backs off 15 minutes on 429 (persisted to /tmp across restarts,
   honoring Retry-After) — don't "fix" apparent staleness by polling faster. The Keychain token
-  read (`security find-generic-password -s "Claude Code-credentials" -w`) is read-only; never
-  refresh or rewrite those credentials from here, or Claude Code itself may get logged out.
+  read (`security find-generic-password -s "Codex-credentials" -w`) is read-only; never
+  refresh or rewrite those credentials from here, or Codex itself may get logged out.
   The host also sends `quotaAgeSec` so the USAGE cards can flag stale quota ("stale 3h" in the
   alert color) — the footer's freshness only vouches for the transport, not the data.
 - The needs-input beep is capped at 3 per asking-event (`beepsLeft` budget carried across
@@ -262,9 +252,9 @@ Other things that aren't obvious from a single file:
   `sendAnswerToHost()` (which transmits on USB **and** BLE TX notify, in ≤20-byte chunks).
   Long detail text pages by tapping the text block — deliberate: drag-scrolling flickers and
   misfires on this resistive panel, discrete pages don't.
-- Easter egg: 5 taps on the footer within 4s summons **Clawd** (Claude Code's pixel mascot;
+- Easter egg: 5 taps on the footer within 4s summons **Clawd** (Codex's pixel mascot;
   the 17x5 grid in `CLAWD_ROWS[]` was decoded from the CLI welcome screen's half-block art,
-  captured by running `claude` in a pty). It animates via a ~54KB `TFT_eSprite` pushed whole
+  captured by running `Codex` in a pty). It animates via a ~54KB `TFT_eSprite` pushed whole
   (the one sanctioned full-region redraw, since sprites can't flicker), degrades to slow
   direct drawing if the allocation fails, returns the RAM on exit, and suppresses normal
   rendering (`octoActive` gates `handleLine`'s draw path) while data keeps flowing.

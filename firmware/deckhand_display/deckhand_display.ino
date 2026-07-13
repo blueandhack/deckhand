@@ -212,6 +212,14 @@ unsigned long sleepTimeoutMs = 30000;
 unsigned long lastActivityMillis = 0;
 bool isAsleep = false;
 
+// Automatic full deep-sleep (not just backlight-off) to protect the battery:
+// when running on battery with no fresh active session for this long, the
+// device powers down (touch to wake). Never triggers while on USB power, and
+// touch or any active session resets the timer. This is separate from, and
+// stronger than, the SETUP "SLEEP AFTER" backlight dimming above.
+const unsigned long AUTO_SLEEP_IDLE_MS = 20UL * 60 * 1000; // 20 minutes
+unsigned long lastNonIdleMillis = 0;
+
 void applySleepPreset() {
   sleepTimeoutMs = SLEEP_PRESETS_MS[sleepPresetIdx];
 }
@@ -555,6 +563,26 @@ void updateBeep() {
 // serial bootloader and the device would look dead until a manual reset.
 const unsigned long POWER_OFF_HOLD_MS = 1000;
 
+// The actual teardown into deep sleep, shared by the manual power-off (BOOT
+// hold) and the automatic battery-idle sleep. Assumes a farewell has already
+// been drawn (or not) by the caller.
+void enterDeepSleep() {
+  tft.writecommand(0x28); // DISPOFF
+  tft.writecommand(0x10); // SLPIN
+  delay(120);             // ILI9341 datasheet minimum after SLPIN
+
+  // GPIOs float in deep sleep; latch the backlight pin low so the panel
+  // doesn't glow dimly off a floating gate.
+  ledcDetach(TFT_BL_PIN);
+  pinMode(TFT_BL_PIN, OUTPUT);
+  digitalWrite(TFT_BL_PIN, LOW);
+  gpio_hold_en((gpio_num_t) TFT_BL_PIN);
+  gpio_deep_sleep_hold_en();
+
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0); // PENIRQ: low = touched
+  esp_deep_sleep_start();
+}
+
 void powerOff() {
   Serial.println("POWER: shutting down (deep sleep, touch to wake)");
 
@@ -575,21 +603,26 @@ void powerOff() {
     digitalWrite(AUDIO_EN_PIN, HIGH);
   }
   delay(1200); // let the message be read; we're leaving, blocking is fine
+  enterDeepSleep();
+}
 
-  tft.writecommand(0x28); // DISPOFF
-  tft.writecommand(0x10); // SLPIN
-  delay(120);             // ILI9341 datasheet minimum after SLPIN
-
-  // GPIOs float in deep sleep; latch the backlight pin low so the panel
-  // doesn't glow dimly off a floating gate.
-  ledcDetach(TFT_BL_PIN);
-  pinMode(TFT_BL_PIN, OUTPUT);
-  digitalWrite(TFT_BL_PIN, LOW);
-  gpio_hold_en((gpio_num_t) TFT_BL_PIN);
-  gpio_deep_sleep_hold_en();
-
-  esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0); // PENIRQ: low = touched
-  esp_deep_sleep_start();
+// Auto-sleep to save the battery when the device has been idle. No beep (the
+// user isn't there), and the backlight is forced back on just long enough to
+// show why - in case someone glances over as it goes dark.
+void autoDeepSleep() {
+  Serial.println("POWER: auto deep sleep (on battery, idle 20 min)");
+  isAsleep = false;
+  ledcWrite(TFT_BL_PIN, brightnessPct * 255 / 100);
+  tft.fillScreen(COLOR_BG);
+  tft.setTextFont(2);
+  tft.setTextColor(COLOR_VALUE, COLOR_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Sleeping to save battery", tft.width() / 2, tft.height() / 2 - 12);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.drawString("touch screen to wake", tft.width() / 2, tft.height() / 2 + 12);
+  tft.setTextDatum(TL_DATUM);
+  delay(1500);
+  enterDeepSleep();
 }
 
 void checkPowerButton() {
@@ -2076,6 +2109,7 @@ void handleTouch() {
   }
   wasTouching = true;
   lastActivityMillis = millis();
+  lastNonIdleMillis = millis(); // interacting = not idle, postpone auto deep-sleep
 
   // First tap after sleep only wakes the screen - it doesn't also register
   // as a tab switch or button press on whatever happens to be underneath.
@@ -2344,6 +2378,7 @@ void setup() {
   loadBeepEnabled();
   pairingSecret = prefs.getString("blesecret", ""); // remote-answer auth key
   lastActivityMillis = millis(); // don't start the sleep countdown from millis()==0
+  lastNonIdleMillis = millis();  // 20-min battery auto-sleep timer starts now
 
   // Announce our unique BLE name to the host over USB so it pins BLE to this
   // exact device. Opening the USB port resets the ESP32, so this boot-time
@@ -2427,6 +2462,21 @@ void loop() {
   checkPowerButton();
 
   if (sleepTimeoutMs > 0 && !isAsleep && millis() - lastActivityMillis > sleepTimeoutMs) enterSleep();
+
+  // A fresh, active session means the device is doing its job - not idle.
+  // Stale data (host gone) does NOT count, so a disconnected device on
+  // battery still powers down. Checked here (cheap) every loop.
+  if (sessionCount > 0 && everReceived && (millis() - lastRxMillis) < 30000) {
+    lastNonIdleMillis = millis();
+  }
+  // Auto deep-sleep only when genuinely on battery: no USB data for a full
+  // minute (immune to the occasional slow host tick, unlike the 10s
+  // usbLinkActive threshold) AND a battery is actually present. On USB power
+  // the device stays up indefinitely regardless of idle time, as requested.
+  bool onUsbPower = lastRxUSBMillis > 0 && (millis() - lastRxUSBMillis) < 60000;
+  if (!onUsbPower && batteryPresent() && millis() - lastNonIdleMillis > AUTO_SLEEP_IDLE_MS) {
+    autoDeepSleep();
+  }
 
   // Sample even while asleep so the reading is already settled on wake, and
   // so a dead battery is visible in the serial log. Rendering stays gated

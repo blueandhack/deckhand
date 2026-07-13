@@ -144,6 +144,13 @@ on macOS since it's what nearly all modern accessories use.
   (Wake is deliberately touch, not the BOOT key — GPIO0 is a strapping
   pin, and waking with it held would boot into the serial bootloader.)
   The RESET key is always a hard power-on.
+- **Auto power-off on battery**: if the device runs **on battery** with no
+  active session for 20 minutes, it deep-sleeps by itself to save the
+  battery (touch to wake) — the same power-down as holding BOOT. It **never**
+  auto-sleeps while on USB power, no matter how long it's idle. Touch or any
+  active session resets the 20-minute timer. (This is separate from, and
+  goes further than, the SETUP "SLEEP AFTER" backlight dimming, which only
+  turns the backlight off.)
 - Settings (brightness, sleep, sound, touch calibration) persist across
   reboots and reflashes.
 
@@ -336,7 +343,10 @@ macOS quarantine flag, cleared with
   state relies on USB *data* being present — a wall charger with no data
   shows "on battery" while silently charging fine.
 - **"Off" is deep sleep**, a few mA, not a hard power cut — the CH340 and
-  regulator stay powered. For true zero draw, unplug the battery.
+  regulator stay powered. For true zero draw, unplug the battery. Because
+  there's no VBUS-sense pin, "on USB power" is inferred from recent USB data,
+  so a *data-less* wall charger counts as "on battery" for the 20-minute
+  auto-sleep — plugged into your Mac (data flowing) it never auto-sleeps.
 - **Touch calibration** is a simple 2-point linear mapping. If it ever
   feels wrong after a firmware change, tap CALIBRATE on the SETUP tab, or
   send `RECAL` via the trigger file
