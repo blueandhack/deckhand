@@ -104,15 +104,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 : (s.deviceConnected ? nil : NSColor.systemOrange)
         }
         if !s.running {
-            statusLine.title = "◦  Host not running"
+            statusLine.title = "◦  Stopped"
         } else if s.deviceConnected {
-            statusLine.title = "●  Connected" + (s.via.map { "  ·  \($0)" } ?? "")
+            statusLine.title = "●  Syncing" + (s.via.map { "  ·  \($0)" } ?? "")
         } else {
-            statusLine.title = "◦  Host up, device offline"
+            statusLine.title = "◦  Running  ·  device offline"
         }
         quotaLine.title = s.quota ?? "quota: —"
         quotaLine.isHidden = s.quota == nil
-        startStop.title = s.running ? "Stop Deckhand" : "Start Deckhand"
+        startStop.title = s.running ? "Stop syncing" : "Start syncing"
         loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
     }
 
