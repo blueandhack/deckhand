@@ -132,9 +132,10 @@ two things `host/index.mjs` cannot get any other way:
   `PostToolUseFailure` maps to `working` so a *denied* permission clears `asking`.
 - **Remote answering** (the device as a prompt remote) lives in the same hook. For answerable
   prompts (`PermissionRequest`, `PreToolUse` on `AskUserQuestion`/`ExitPlanMode`) the hook
-  publishes an `ask` object (pid, title, ≤180-char detail, ≤4 option labels) in the session
+  publishes an `ask` object (pid, title, ≤400-char detail, ≤4 option labels) in the session
   file, then **blocks up to 30s** polling `~/.claude/deckhand-answers/<session_id>.json`. A device
-  tap produces that file (device → `ANSWER <id12> <pid> <idx>` line → host writes it); the hook
+  tap produces that file (device → `ANSWER <id12> <pid> <idx> <hmac>` line → host verifies +
+  writes it); the hook
   then emits the decision JSON for the right event dialect: `PermissionRequest` decision
   allow/deny, `ExitPlanMode` PreToolUse allow/deny, and `AskUserQuestion` a PreToolUse deny
   whose reason carries the chosen option to Claude (there's no native remote-answer channel for
@@ -143,6 +144,20 @@ two things `host/index.mjs` cannot get any other way:
   every tick) is fresh and says `connected` — otherwise every prompt would stall 30s for
   nothing — and it must never write anything to stdout **except** a genuine `emitDecision()`,
   because any stray JSON on a `PermissionRequest` hook's stdout can auto-allow/deny the dialog.
+- **Remote-answer authentication (A + B), so only the paired Mac can decide.** (A) The device
+  advertises a unique name `Deckhand-XXXX` (from its eFuse MAC) and the host, having learned that
+  exact name over USB (`HELLO <name>`), pins BLE to it — no cross-connecting to another unit in
+  the room. Because the longer name plus the 128-bit service UUID overflow the 31-byte BLE
+  advertisement, the firmware **does not advertise the service UUID** (the host matches by name
+  anyway). (B) Host and device share a 128-bit secret in `~/.claude/deckhand-secret` (mode 600,
+  host-generated, secure by default), pushed to the device **only over USB** via `PROVISION`
+  (stored in NVS; BLE `PROVISION` is ignored — the whole point). Each forwarded `ask` carries a
+  per-prompt `nonce`; the device returns `ANSWER … <hmac>` where hmac =
+  HMAC-SHA256(secret, `nonce:pid:idx`)[:16] — ESP32 `mbedtls_md_hmac` on one side, Node
+  `crypto.createHmac` on the other, **verified interoperable**. The host rejects answers with a
+  bad/missing MAC and consumes the nonce on success (single-use, no replay). This protects the
+  *decision*, not the confidentiality of the (still-unencrypted) BLE data — deliberate, since
+  macOS + noble handle BLE bonding poorly.
 
 **`host/index.mjs`** polls every `POLL_INTERVAL_MS` (5000ms) for: `ccusage blocks --active`
 and `ccusage weekly` (token counts), the rate-limit cache file, and the sessions directory

@@ -16,6 +16,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
 import { createWriteStream } from "node:fs";
+import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
 
@@ -102,6 +103,63 @@ const HOST_ALIVE = "/tmp/deckhand-host-alive";
 // 20 bytes is the default ATT payload before any negotiation, so this works
 // even in the worst case.
 const BLE_CHUNK_SIZE = 20;
+
+// ---------- Remote-answer authentication (A + B) ----------
+// { secret, device } persisted here. `secret` is the shared key that
+// authenticates every ANSWER; `device` is the specific BLE name we pin to
+// (learned over USB) so we never cross-connect to someone else's unit.
+const PAIR_FILE = path.join(os.homedir(), ".claude", "deckhand-secret");
+let pairSecret = "";   // hex; auto-generated on first run (secure by default)
+let pairDevice = "";   // e.g. "Deckhand-A37A"; "" until learned over USB
+
+async function loadPairing() {
+  try {
+    const p = JSON.parse(await fs.readFile(PAIR_FILE, "utf8"));
+    pairSecret = p.secret ?? "";
+    pairDevice = p.device ?? "";
+  } catch {
+    // no file yet
+  }
+  if (!pairSecret) {
+    pairSecret = crypto.randomBytes(16).toString("hex"); // 128-bit
+    await savePairing();
+    console.log("Auth: generated a new pairing secret (secure mode).");
+  }
+}
+async function savePairing() {
+  await fs
+    .writeFile(PAIR_FILE, JSON.stringify({ secret: pairSecret, device: pairDevice }, null, 2), {
+      mode: 0o600,
+    })
+    .catch((e) => console.error("Auth: could not save pairing file:", e.message));
+}
+
+// Per-prompt nonce so an ANSWER can't be replayed and is bound to one
+// prompt. Same nonce is sent for a given pid across ticks (the device HMACs
+// whatever it last received); pruned once the prompt is long gone.
+const askNonces = new Map(); // pid -> { nonce, seen }
+function nonceForPid(pid) {
+  let e = askNonces.get(pid);
+  if (!e) {
+    e = { nonce: crypto.randomBytes(8).toString("hex"), seen: Date.now() };
+    askNonces.set(pid, e);
+  } else {
+    e.seen = Date.now();
+  }
+  return e.nonce;
+}
+function pruneNonces() {
+  const now = Date.now();
+  for (const [pid, e] of askNonces) if (now - e.seen > 60_000) askNonces.delete(pid);
+}
+
+function expectedHmac(nonce, pid, idx) {
+  return crypto
+    .createHmac("sha256", pairSecret)
+    .update(`${nonce}:${pid}:${idx}`)
+    .digest("hex")
+    .slice(0, 16);
+}
 
 async function runCcusage(args) {
   const { stdout } = await execFileAsync(CCUSAGE_BIN, [...args, "--json"], {
@@ -311,8 +369,9 @@ async function readSessions() {
         branch: (await gitBranch(record.cwd || "")).slice(0, 20),
       };
       // Pending question (already truncated by the hook) rides along so the
-      // device can display it and offer the options as buttons.
-      if (record.ask) item.ask = record.ask;
+      // device can display it and offer the options as buttons. We attach a
+      // per-prompt nonce; the device HMACs it back so we can trust the answer.
+      if (record.ask) item.ask = { ...record.ask, nonce: nonceForPid(record.ask.pid) };
       return item;
     })
   );
@@ -395,16 +454,50 @@ let lastAnswerAt = 0;
 
 async function handleDeviceLine(line, via) {
   console.log(`[device/${via}] ${line}`);
+
+  // Device announces its unique BLE name over USB (trusted): pin BLE to it,
+  // and push it the shared secret so it can authenticate answers. HELLO is
+  // only honored over USB - a BLE peer must not be able to steer us.
+  if (line.startsWith("HELLO ") && via === "usb") {
+    const name = line.slice(6).trim();
+    if (name && name !== pairDevice) {
+      pairDevice = name;
+      await savePairing();
+      console.log(`Auth: paired device is ${name} (BLE pinned to it).`);
+    }
+    if (usbPort) usbPort.write(`PROVISION ${pairSecret}\n`); // over USB only
+    return;
+  }
+
   if (!line.startsWith("ANSWER ")) return;
   // The device sends on USB and BLE simultaneously - process one copy.
   if (line === lastAnswerKey && Date.now() - lastAnswerAt < 3000) return;
   lastAnswerKey = line;
   lastAnswerAt = Date.now();
-  const parts = line.trim().split(/\s+/); // ANSWER <id12> <pid> <idx>
-  if (parts.length !== 4) return;
-  const [, id12, pid, idxStr] = parts;
+  const parts = line.trim().split(/\s+/); // ANSWER <id12> <pid> <idx> <hmac>
+  if (parts.length < 4) return;
+  const [, id12, pid, idxStr, mac] = parts;
   const idx = parseInt(idxStr, 10);
   if (!Number.isInteger(idx) || idx < 0) return;
+
+  // Authenticate: the answer must carry a valid HMAC over the nonce we issued
+  // for THIS prompt. Rejects forged answers from an impersonating peripheral
+  // and replays (the nonce is consumed on success).
+  const entry = askNonces.get(pid);
+  const want = entry ? expectedHmac(entry.nonce, pid, idx) : "";
+  const good =
+    !!entry &&
+    typeof mac === "string" &&
+    mac.length === want.length &&
+    crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want));
+  if (!good) {
+    console.error(
+      `Remote answer REJECTED (bad/missing auth) for prompt ${pid} via ${via} - ignoring.`
+    );
+    return;
+  }
+  askNonces.delete(pid); // single-use: no replay
+
   try {
     const files = await fs.readdir(SESSIONS_DIR);
     const file = files.find((f) => f.endsWith(".json") && f.startsWith(id12));
@@ -425,7 +518,7 @@ async function handleDeviceLine(line, via) {
       path.join(ANSWERS_DIR, `${sessionId}.json`),
       JSON.stringify({ pid, idx, label, written_at: Date.now() })
     );
-    console.log(`Remote answer: ${id12} prompt ${pid} -> [${idx}] ${label}`);
+    console.log(`Remote answer: ${id12} prompt ${pid} -> [${idx}] ${label} (auth ok)`);
   } catch (err) {
     console.error("Remote answer failed:", err.message);
   }
@@ -508,7 +601,14 @@ function startBle() {
 
   noble.on("discover", async (peripheral) => {
     const name = peripheral.advertisement.localName || "";
-    if (name !== "Deckhand") return;
+    // Connect only to OUR device: the exact name learned over USB if we have
+    // it (so we never grab a neighbor's unit in a shared room), otherwise any
+    // "Deckhand[-XXXX]" as a first-run bootstrap.
+    if (pairDevice) {
+      if (name !== pairDevice) return;
+    } else if (name !== "Deckhand" && !name.startsWith("Deckhand-")) {
+      return;
+    }
     await noble.stopScanningAsync().catch(() => {});
     console.log(`BLE: found ${name}, connecting...`);
     try {
@@ -572,6 +672,7 @@ async function sendOverBle(text) {
 // ---------- Shared tick: compute usage once, send to whichever transports are live ----------
 async function tick() {
   try {
+    pruneNonces();
     // Heartbeat for the session hook: it only blocks waiting for a remote
     // answer when a display is genuinely connected right now.
     await fs
@@ -610,6 +711,8 @@ setInterval(async () => {
   }
 }, 500);
 
+await loadPairing();
+if (pairDevice) console.log(`Auth: BLE pinned to ${pairDevice}.`);
 connectUsb();
 startBle();
 // If the persisted snapshot is still inside the poll interval, wait out the

@@ -24,6 +24,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <esp_sleep.h>
+#include <mbedtls/md.h>
 #include <driver/gpio.h>
 
 // Nordic UART Service - a de facto standard GATT service for serial-like
@@ -94,10 +95,43 @@ StreamBufferHandle_t bleRxStream = nullptr;
 
 // Declared early: the Arduino build system auto-generates function
 // prototypes and inserts them before these types would otherwise be defined,
-// which breaks compilation for any function taking/returning them.
+// which breaks compilation for any function taking/returning them. (Keep
+// these enums above the first function definition in the file.)
 enum Tab { TAB_USAGE = 0, TAB_SESSIONS = 1, TAB_SETTINGS = 2 };
 Tab currentTab = TAB_USAGE;
 enum BattState { BATT_NONE = 0, BATT_DISCHARGING = 1, BATT_CHARGING = 2, BATT_FULL = 3 };
+
+// ---------- Remote-answer authentication ----------
+// Only the paired Mac may approve prompts from the device. The host and
+// device share a secret, PROVISIONed once over the trusted USB link (never
+// over BLE), stored in NVS here. Every ANSWER carries an HMAC over a
+// host-issued per-prompt nonce, so an impersonator advertising the same name
+// but lacking the secret cannot forge an approval, and answers can't be
+// replayed. The BLE link itself stays unencrypted - this protects the
+// decision, not the confidentiality of the display data.
+String pairingSecret = "";           // hex string, "" = not yet provisioned
+bool deviceNameReported = false;     // sent our BLE name to the host over USB yet?
+// Advertised name is unique per board (Deckhand-XXXX from the MAC) so many
+// units in one room don't collide; set in setupBLE from the real MAC.
+char deviceName[20] = "Deckhand";
+
+// HMAC-SHA256(secret, msg), first 16 hex chars. Matches the host's
+// crypto.createHmac('sha256', secret).update(msg).digest('hex').slice(0,16).
+String authHmac(const String& msg) {
+  if (pairingSecret.length() == 0) return String("");
+  uint8_t out[32];
+  const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  mbedtls_md_setup(&ctx, info, 1); // 1 = HMAC mode
+  mbedtls_md_hmac_starts(&ctx, (const uint8_t*) pairingSecret.c_str(), pairingSecret.length());
+  mbedtls_md_hmac_update(&ctx, (const uint8_t*) msg.c_str(), msg.length());
+  mbedtls_md_hmac_finish(&ctx, out);
+  mbedtls_md_free(&ctx);
+  char hex[17];
+  for (int i = 0; i < 8; i++) sprintf(hex + i * 2, "%02x", out[i]);
+  return String(hex);
+}
 
 // ---------- Layout constants ----------
 const int TAB_BAR_H = 34;
@@ -365,6 +399,7 @@ struct SessionInfo {
   // screen answers the real prompt back through host + hook.
   char askPid[12];
   char askKind[10]; // "perm" | "question" | "plan" - styles the detail text
+  char askNonce[20]; // host-issued, single-use; HMAC'd into the answer
   char askTitle[28];
   char askDetail[408];
   char askOpts[4][26];
@@ -1480,11 +1515,18 @@ void handleReaderTouch(int sx, int sy) {
 // id back to the full session and writes the answer file for the hook.
 void sendAnswerToHost(int idx, int optIdx) {
   SessionInfo& s = sessions[idx];
-  char line[52];
-  snprintf(line, sizeof(line), "ANSWER %s %s %d", s.id, s.askPid, optIdx);
+  // HMAC over "nonce:pid:idx" proves this answer came from the paired device
+  // and pins it to this one prompt (the nonce is single-use host-side). "0"
+  // when unprovisioned - the host rejects that in secure mode.
+  char msg[40];
+  snprintf(msg, sizeof(msg), "%s:%s:%d", s.askNonce, s.askPid, optIdx);
+  String mac = authHmac(String(msg));
+  if (mac.length() == 0) mac = "0";
+  char line[80];
+  snprintf(line, sizeof(line), "ANSWER %s %s %d %s", s.id, s.askPid, optIdx, mac.c_str());
   Serial.println(line);
   if (bleConnected && bleTxChar) {
-    char out[56];
+    char out[84];
     snprintf(out, sizeof(out), "%s\n", line);
     size_t len = strlen(out);
     for (size_t i = 0; i < len; i += 20) {
@@ -1593,7 +1635,6 @@ void renderDetailDuration() {
 }
 
 // ---------- Settings tab ----------
-#define BT_DEVICE_NAME "Deckhand"
 
 // Layout: one CONNECTIONS card (BT + USB as two matching rows), then two
 // identical stepper cards (brightness, sleep) so both settings share one
@@ -1676,11 +1717,13 @@ void drawSettingsStatic() {
   tft.drawString("USB", CARD_X + PAD + 20, CONN_CARD_Y + CONN_ROW_USB);
   tft.drawString("Battery", CARD_X + PAD + 20, CONN_CARD_Y + CONN_ROW_BATT);
 
-  // Device identity (how it appears in a BLE scan) - fixed at boot, so it
-  // can live in the static pass.
-  snprintf(buf, sizeof(buf), "%s  %s", BT_DEVICE_NAME, btMacAddress.c_str());
+  // Device identity (unique BLE name) + whether remote answering is secured
+  // by a provisioned pairing secret. Fixed at boot, so it lives in the
+  // static pass.
+  snprintf(buf, sizeof(buf), "%s  %s", deviceName,
+           pairingSecret.length() ? "paired" : "unpaired");
   tft.setTextFont(1);
-  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.setTextColor(pairingSecret.length() ? COLOR_GOOD : COLOR_WARN, COLOR_CARD);
   tft.drawString(buf, CARD_X + PAD, CONN_CARD_Y + CONN_ROW_ID);
 
   drawStepperCard(BRIGHT_CARD_Y, "BRIGHTNESS");
@@ -2134,6 +2177,7 @@ void handleLine(const String& line) {
       copyField(info.branch, sizeof(info.branch), s["branch"] | "");
       info.askPid[0] = '\0';
       info.askKind[0] = '\0';
+      info.askNonce[0] = '\0';
       info.askTitle[0] = '\0';
       info.askDetail[0] = '\0';
       info.askOptCount = 0;
@@ -2141,6 +2185,7 @@ void handleLine(const String& line) {
       if (!ask.isNull()) {
         copyField(info.askPid, sizeof(info.askPid), ask["pid"] | "");
         copyField(info.askKind, sizeof(info.askKind), ask["kind"] | "");
+        copyField(info.askNonce, sizeof(info.askNonce), ask["nonce"] | "");
         copyField(info.askTitle, sizeof(info.askTitle), ask["title"] | "");
         copyField(info.askDetail, sizeof(info.askDetail), ask["detail"] | "");
         JsonArray opts = ask["options"].as<JsonArray>();
@@ -2238,7 +2283,11 @@ class BLERxCallbacks : public BLECharacteristicCallbacks {
 
 void setupBLE() {
   bleRxStream = xStreamBufferCreate(4096, 1); // several full JSON lines of headroom
-  BLEDevice::init(BT_DEVICE_NAME);
+  // Unique per board (from the factory eFuse MAC) so several units in one
+  // room advertise different names and hosts don't cross-connect. The host
+  // learns this exact name over USB (HELLO) and pins BLE to it.
+  snprintf(deviceName, sizeof(deviceName), "Deckhand-%04X", (uint16_t)(ESP.getEfuseMac() & 0xFFFF));
+  BLEDevice::init(deviceName);
   bleServer = BLEDevice::createServer();
   bleServer->setCallbacks(new BLEServerCallbacksImpl());
 
@@ -2252,11 +2301,15 @@ void setupBLE() {
   rxChar->setCallbacks(new BLERxCallbacks());
 
   service->start();
-  BLEDevice::getAdvertising()->addServiceUUID(BLE_SERVICE_UUID);
+  // Deliberately do NOT advertise the 128-bit service UUID: it's 16 bytes,
+  // and together with the now-longer unique name ("Deckhand-XXXX", 13 bytes)
+  // it overflows the 31-byte advertisement, which drops the name - and the
+  // host matches by name, not UUID. Leaving the UUID out keeps the full name
+  // in the packet. (The service is still discoverable after connecting.)
   BLEDevice::startAdvertising();
 
   btMacAddress = BLEDevice::getAddress().toString();
-  Serial.printf("BLE: advertising as \"%s\" at %s\n", BT_DEVICE_NAME, btMacAddress.c_str());
+  Serial.printf("BLE: advertising as \"%s\" at %s\n", deviceName, btMacAddress.c_str());
 }
 
 void setup() {
@@ -2289,7 +2342,13 @@ void setup() {
   loadBrightness();
   loadSleepTimeout();
   loadBeepEnabled();
+  pairingSecret = prefs.getString("blesecret", ""); // remote-answer auth key
   lastActivityMillis = millis(); // don't start the sleep countdown from millis()==0
+
+  // Announce our unique BLE name to the host over USB so it pins BLE to this
+  // exact device. Opening the USB port resets the ESP32, so this boot-time
+  // line reliably reaches a host that connects at any time.
+  Serial.printf("HELLO %s\n", deviceName);
 
   tft.fillScreen(COLOR_BG);
   drawTabBar();
@@ -2304,7 +2363,7 @@ void setup() {
 // Shared between the USB (polled Stream) and BLE (onWrite callback)
 // transports, so whichever one the host actually has open drives the
 // display identically.
-void processCompletedLine(String& buf, unsigned long* lastRxTimestamp) {
+void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool fromUsb) {
   if (buf == "RECAL") {
     runCalibration();
     everReceived = false;
@@ -2315,6 +2374,20 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp) {
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.setTextDatum(TL_DATUM);
     tft.drawString("Waiting for host script...", 12, CONTENT_Y + 26);
+  } else if (buf.startsWith("PROVISION ")) {
+    // Set the shared secret - ONLY over USB. A BLE peer must never be able to
+    // provision its own key (that would defeat the whole scheme), so this is
+    // ignored on the BLE path.
+    if (fromUsb) {
+      String sec = buf.substring(10);
+      sec.trim();
+      if (sec.length() >= 8 && sec != pairingSecret) {
+        pairingSecret = sec;
+        prefs.putString("blesecret", pairingSecret);
+        Serial.println("PROVISION: pairing secret stored");
+      }
+      deviceNameReported = false; // re-announce our name after (re)provisioning
+    }
   } else {
     *lastRxTimestamp = millis();
     handleLine(buf);
@@ -2322,9 +2395,9 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp) {
   buf = "";
 }
 
-void feedChar(char c, String& buf, unsigned long* lastRxTimestamp) {
+void feedChar(char c, String& buf, unsigned long* lastRxTimestamp, bool fromUsb) {
   if (c == '\n') {
-    processCompletedLine(buf, lastRxTimestamp);
+    processCompletedLine(buf, lastRxTimestamp, fromUsb);
   } else if (c != '\r') {
     buf += c;
     if (buf.length() > 4800) buf = ""; // guard against garbage (ask payloads make lines longer)
@@ -2333,7 +2406,7 @@ void feedChar(char c, String& buf, unsigned long* lastRxTimestamp) {
 
 void pumpStream(Stream& s, String& buf, unsigned long* lastRxTimestamp) {
   while (s.available()) {
-    feedChar((char) s.read(), buf, lastRxTimestamp);
+    feedChar((char) s.read(), buf, lastRxTimestamp, true); // Serial == USB
   }
 }
 
@@ -2345,7 +2418,7 @@ void loop() {
     char chunk[64];
     size_t n;
     while ((n = xStreamBufferReceive(bleRxStream, chunk, sizeof(chunk), 0)) > 0) {
-      for (size_t i = 0; i < n; i++) feedChar(chunk[i], serialBufBLE, &lastRxBLEMillis);
+      for (size_t i = 0; i < n; i++) feedChar(chunk[i], serialBufBLE, &lastRxBLEMillis, false); // BLE, untrusted for PROVISION
     }
   }
 

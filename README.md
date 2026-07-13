@@ -67,6 +67,36 @@ host refreshes every tick — so with the device unplugged, prompts behave
 exactly as stock. If you don't answer on the device within the window,
 everything falls back to the normal dialog with no side effects.
 
+## Security of the remote
+
+Because the device can approve tool calls, the answer channel is
+authenticated so that **only your paired Mac can make a decision** — a
+stranger in Bluetooth range can't approve your prompts.
+
+- **Unique name.** Each board advertises `Deckhand-XXXX` (from its MAC), so
+  several units in one room don't collide, and your host connects only to
+  the specific device it learned about over USB.
+- **Signed answers.** The host and device share a 128-bit secret, generated
+  by the host and pushed to the device **once over the trusted USB cable**
+  (never over BLE). Every answer carries an HMAC over a per-prompt nonce the
+  host issues, so a device that doesn't hold the secret can't forge an
+  approval, and answers can't be replayed. Forged/unauthenticated answers
+  are logged and dropped. The SETUP tab shows `paired` (secret provisioned)
+  or `unpaired`.
+- **One-time USB step.** Provisioning happens automatically whenever the
+  device is on USB (which it is while flashing). A device that has only ever
+  seen BLE can't be trusted to answer until you connect it via USB once.
+- **Scope:** this protects the *decision* (integrity), not the
+  confidentiality of the display data — the BLE link itself is unencrypted,
+  so an eavesdropper in range could still read your session list and the
+  prompt text. If that matters, use USB for the sensitive sessions. Full
+  link encryption would need BLE bonding, which macOS + noble supports
+  poorly (the reason this uses application-layer auth instead).
+
+The secret lives in `~/.claude/deckhand-secret` (mode 600, machine-local,
+never committed). Delete it to re-pair; the host regenerates one and
+re-provisions over USB.
+
 ## Hardware
 
 ELEGOO E32R28T / E32N28T — 2.8" ESP32-32E display module, 240x320 ILI9341
@@ -291,11 +321,13 @@ macOS quarantine flag, cleared with
   the Keychain token can expire; opening any Claude Code surface once
   refreshes it.
 - **Remote answering has a 30s window** per prompt (the hook can't wait
-  forever), shows at most ~180 characters of detail (a command fits, a full
-  plan doesn't — page through what's there, or walk to the computer for
-  long ones), and doesn't support multi-select questions. Question answers
-  reach Claude as a "user already answered: X" hook message rather than a
-  native picker selection — functionally equivalent.
+  forever), shows up to ~400 characters of detail (tap READ ALL for a
+  full-screen reader with prev/next), and doesn't support multi-select
+  questions. Question answers reach Claude as a "user already answered: X"
+  hook message rather than a native picker selection — functionally
+  equivalent. Answering is authenticated (see [Security](#security-of-the-remote));
+  a device that hasn't been USB-provisioned with the pairing secret can't
+  approve anything until you connect it via USB once.
 - **Stale quota is flagged, not hidden**: if the quota numbers are older
   than 15 minutes (endpoint outage + stale cache), the USAGE cards show
   "stale 3h" in the alert color where the reset time normally sits.

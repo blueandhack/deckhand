@@ -31,5 +31,10 @@ Still to do by hand (see README):
   2. Start the host (first launch asks for Bluetooth permission -> click Allow):
        open "$REPO/host/DeckhandBLE.app" --args "$REPO/host/index.mjs"
 
+Pairing is automatic: while the device is on USB, the host generates a
+secret (~/.claude/deckhand-secret) and provisions it to the device, so only
+your Mac can answer prompts from it. Keep it plugged in via USB at least
+once; the SETUP tab shows "paired" once done.
+
 USB-only, no Bluetooth needed? Just run:  node "$REPO/host/index.mjs"
 EOF
