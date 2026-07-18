@@ -1270,26 +1270,6 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
            sessions[idx].askPid, answeredPid[0] ? answeredIdx : -1);
 }
 
-void drawDetailRow(int y, const char* label, const char* value) {
-  tft.setTextFont(2);
-  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString(label, CARD_X + PAD, y);
-  tft.setTextColor(COLOR_VALUE, COLOR_CARD);
-  const char* v = value[0] ? value : "-";
-  int maxW = CARD_W - 2 * PAD;
-  if (tft.textWidth(v) > maxW) {
-    // Too long to fit (paths, mostly): keep the tail - the deepest path
-    // segments are the informative part - and mark the cut with "..".
-    int dotsW = tft.textWidth("..");
-    while (*v && tft.textWidth(v) > maxW - dotsW) v++;
-    tft.drawString("..", CARD_X + PAD, y + 18);
-    tft.drawString(v, CARD_X + PAD + dotsW, y + 18);
-  } else {
-    tft.drawString(v, CARD_X + PAD, y + 18);
-  }
-}
-
 const int DETAIL_CARD_Y = CONTENT_Y + 26;
 
 // How many characters of text (from pos) fit in maxW pixels with the
@@ -1635,6 +1615,35 @@ bool handleAskTouch(int sx, int sy) {
   return true;
 }
 
+// Label used inside the status pill on the detail screen.
+const char* pillLabel(const char* status) {
+  if (strcmp(status, "working") == 0) return "WORKING";
+  if (strcmp(status, "asking") == 0) return "NEEDS INPUT";
+  return "READY";
+}
+
+// Single-line value in font `fnt`, clipping the TAIL with ".." if it
+// overflows (model names / branches read left-to-right, so keep the start).
+void drawDetailValue(int y, const char* value, uint8_t fnt) {
+  tft.setTextFont(fnt);
+  tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  char buf[40];
+  snprintf(buf, sizeof(buf), "%s", value[0] ? value : "-");
+  int maxW = CARD_W - 2 * PAD;
+  int dotsW = tft.textWidth("..");
+  if (tft.textWidth(buf) > maxW) {
+    while (strlen(buf) > 2 && tft.textWidth(buf) > maxW - dotsW) buf[strlen(buf) - 1] = '\0';
+    strncat(buf, "..", sizeof(buf) - strlen(buf) - 1);
+  }
+  tft.drawString(buf, CARD_X + PAD, y);
+}
+
+// Redesigned to fit the content instead of stretching three sparse rows over
+// a tall card: big project name, a status pill with the live duration beside
+// it, then compact PATH (wrapped - paths are long) / MODEL / GIT BRANCH rows.
+const int DETAIL_CARD_H = 196;
+
 void drawSessionDetail(int idx) {
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
   if (idx < 0 || idx >= sessionCount) return;
@@ -1646,42 +1655,58 @@ void drawSessionDetail(int idx) {
   SessionInfo& s = sessions[idx];
   const char* status = s.status;
   uint16_t color = colorForStatus(status);
+  const int cardY = DETAIL_CARD_Y;
+  const int maxW = CARD_W - 2 * PAD;
 
   tft.setTextFont(2);
   tft.setTextColor(COLOR_ACCENT, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("< Back to sessions", CARD_X, CONTENT_Y + 4);
+  tft.drawString("< Back", CARD_X, CONTENT_Y + 4);
 
-  const int cardY = DETAIL_CARD_Y;
-  const int cardH = contentBottom() - cardY - 24; // leaves room for the hint below
-  tft.fillRoundRect(CARD_X, cardY, CARD_W, cardH, RADIUS, COLOR_CARD);
-  tft.drawRoundRect(CARD_X, cardY, CARD_W, cardH, RADIUS, color);
-  tft.drawRoundRect(CARD_X + 1, cardY + 1, CARD_W - 2, cardH - 2, RADIUS - 1, color);
+  tft.fillRoundRect(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, COLOR_CARD);
+  tft.drawRoundRect(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, color);
+  tft.drawRoundRect(CARD_X + 1, cardY + 1, CARD_W - 2, DETAIL_CARD_H - 2, RADIUS - 1, color);
 
-  tft.setTextFont(2);
+  // Project name - large; clip to card width in the big font.
+  char nameBuf[24];
+  snprintf(nameBuf, sizeof(nameBuf), "%s", s.name);
+  tft.setTextFont(4);
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
-  tft.drawString(s.name, CARD_X + PAD, cardY + 10);
+  while (strlen(nameBuf) > 1 && tft.textWidth(nameBuf) > maxW) nameBuf[strlen(nameBuf) - 1] = '\0';
+  tft.drawString(nameBuf, CARD_X + PAD, cardY + 8);
 
-  drawStatusDot(CARD_X + PAD + 6, cardY + 40, 6, status, COLOR_CARD);
-  tft.setTextColor(color, COLOR_CARD);
-  tft.drawString(labelForStatus(status), CARD_X + PAD + 20, cardY + 33);
-  detailDurCache[0] = '\0'; // full repaint - the duration line must redraw
+  // Status pill (duration is drawn to its right by renderDetailDuration).
+  drawStatusPill(CARD_X + PAD, cardY + 42, pillLabel(status), status, false);
+  detailDurCache[0] = '\0'; // force the duration to redraw after this repaint
 
-  // Asking, but no answerable prompt attached: it either wasn't published
-  // (host wasn't connected when it fired) or the remote window has closed.
-  // Say so, so "needs input" with no buttons isn't confusing.
+  tft.drawFastHLine(CARD_X + PAD, cardY + 70, maxW, COLOR_LABEL);
+
+  // PATH - wrapped (paths are long; two lines fill the space usefully).
+  tft.setTextFont(1);
+  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.drawString("PATH", CARD_X + PAD, cardY + 78);
+  drawWrappedText(s.path[0] ? s.path : "-", CARD_X + PAD, cardY + 90, 1, 11, maxW, 0, 2,
+                  COLOR_VALUE, COLOR_CARD);
+
+  tft.setTextFont(1);
+  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.drawString("MODEL", CARD_X + PAD, cardY + 120);
+  drawDetailValue(cardY + 132, s.model, 2);
+
+  tft.setTextFont(1);
+  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.drawString("GIT BRANCH", CARD_X + PAD, cardY + 158);
+  drawDetailValue(cardY + 170, s.branch, 2);
+
+  // Asking but no answerable prompt attached (fired while disconnected, or the
+  // window closed) - say so instead of leaving "needs input" unexplained.
   if (strcmp(status, "asking") == 0) {
     tft.setTextFont(1);
-    tft.setTextColor(COLOR_WARN, COLOR_CARD);
-    tft.drawString("Answer this one on your Mac", CARD_X + PAD, cardY + 56);
+    tft.setTextColor(COLOR_WARN, COLOR_BG);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("answer this one on your Mac", tft.width() / 2, cardY + DETAIL_CARD_H + 8);
+    tft.setTextDatum(TL_DATUM);
   }
-
-  tft.drawFastHLine(CARD_X + PAD, cardY + 72, CARD_W - 2 * PAD, COLOR_LABEL);
-  drawDetailRow(cardY + 82, "PATH", s.path);
-  tft.drawFastHLine(CARD_X + PAD, cardY + 124, CARD_W - 2 * PAD, COLOR_LABEL);
-  drawDetailRow(cardY + 134, "MODEL", s.model);
-  tft.drawFastHLine(CARD_X + PAD, cardY + 176, CARD_W - 2 * PAD, COLOR_LABEL);
-  drawDetailRow(cardY + 186, "GIT BRANCH", s.branch);
 
   tft.setTextFont(1);
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
@@ -1690,17 +1715,17 @@ void drawSessionDetail(int idx) {
   tft.setTextDatum(TL_DATUM);
 }
 
-// The "in this state for Xm" line ticks on its own cache so it can update
-// every second without repainting the whole detail card.
+// The "for Xm" duration ticks on its own cache (right of the status pill) so
+// it can update every second without repainting the whole card.
 void renderDetailDuration() {
   if (detailIndex < 0 || detailIndex >= sessionCount) return;
   if (sessions[detailIndex].askPid[0]) return; // ask screen has its own layout
   char dur[10], buf[16];
   formatDuration(sessions[detailIndex].statusSinceMillis, dur, sizeof(dur));
   snprintf(buf, sizeof(buf), "for %s", dur);
-  padTo(buf, sizeof(buf), 12);
-  drawIfChanged(detailDurCache, sizeof(detailDurCache), buf, CARD_X + PAD + 20,
-                DETAIL_CARD_Y + 52, 1, 1, COLOR_LABEL, COLOR_CARD);
+  padLeftTo(buf, sizeof(buf), 12);
+  drawIfChanged(detailDurCache, sizeof(detailDurCache), buf, CARD_X + CARD_W - PAD,
+                DETAIL_CARD_Y + 46, 1, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
 }
 
 // ---------- Settings tab ----------
