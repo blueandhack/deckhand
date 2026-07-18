@@ -27,12 +27,12 @@ device. Three tabs:
   admits to the rest (a hidden needs-input session is called out loudly).
   Tap a row for a detail screen — and **if the session is waiting on a
   prompt, the detail screen is an answer screen**: see below.
-- **SETUP** — device status and controls: Bluetooth/USB connection state
-  (from the device's own perspective — more trustworthy than macOS's
-  Bluetooth settings panel, which can say "not connected" for a live link),
-  battery % and voltage, brightness and sleep-timeout steppers, and a
-  three-button action row (color-coded): CALIBRATE, SOUND on/off toggle, and
-  POWER OFF (deep-sleep, in the alert color).
+- **SETTINGS** — paginated (tap the `‹` / `›` pager), three pages:
+  **STATUS** (Bluetooth/USB connection state — more trustworthy than macOS's
+  Bluetooth panel — plus battery % / voltage and the device's pairing state),
+  **DISPLAY & SOUND** (brightness, sleep-timeout, and speaker **volume**
+  LOW/MED/HIGH steppers, plus a sound on/off toggle), and **ACTIONS**
+  (CALIBRATE TOUCH, and POWER OFF in the alert color).
 
 A persistent footer on every tab shows a live clock, a battery pill
 (fill level + `chg`/`full`/`%`), and "Xs ago" data freshness, so the
@@ -42,7 +42,7 @@ The device **double-beeps whenever a session transitions into "needs
 input"** — the point of the whole build: you find out a session is blocked
 on you without checking windows. It beeps at most 3 times per prompt (one
 alert + two reminders 30s apart), then stays quiet even if the prompt sits
-unanswered. Toggle sound with SOUND on the SETUP tab.
+unanswered. Toggle sound with SOUND on the SETTINGS tab.
 
 ## Answering prompts from the device
 
@@ -89,7 +89,7 @@ stranger in Bluetooth range can't approve your prompts.
   (never over BLE). Every answer carries an HMAC over a per-prompt nonce the
   host issues, so a device that doesn't hold the secret can't forge an
   approval, and answers can't be replayed. Forged/unauthenticated answers
-  are logged and dropped. The SETUP tab shows `paired` (secret provisioned)
+  are logged and dropped. The SETTINGS tab shows `paired` (secret provisioned)
   or `unpaired`.
 - **One-time USB step.** Provisioning happens automatically whenever the
   device is on USB (which it is while flashing). A device that has only ever
@@ -122,12 +122,13 @@ Optional add-ons (both plug into the board, no soldering):
   board's TP4054 charges at ~290mA whenever USB-C is present, and a P-FET
   power path runs the module from the battery the moment USB is unplugged.
   The firmware reads the level through the board's divider on IO34 and
-  shows it in the footer and on SETUP. Heads-up: there is no VBUS-sense
+  shows it in the footer and on SETTINGS. Heads-up: there is no VBUS-sense
   pin, so a *data-less* wall charger displays as "on battery" even while
   the hardware is charging.
 - **Speaker** — a 1W 8Ω mini speaker on the JP1 terminals, driven by the
-  onboard FM8002E amplifier. Used for the needs-input beep. Volume is the
-  `BEEP_DUTY` constant in the firmware.
+  onboard FM8002E amplifier. Used for the needs-input beep. Volume is set on
+  the device (SETTINGS → DISPLAY & SOUND → VOLUME: LOW/MED/HIGH); the levels
+  are the `VOL_PRESETS` duty values in the firmware.
 
 Bluetooth is **BLE** (a custom GATT service, the Nordic UART Service
 pattern), not classic Bluetooth SPP. SPP was tried first and abandoned:
@@ -138,14 +139,14 @@ on macOS since it's what nearly all modern accessories use.
 
 ## Controls
 
-- **Tabs**: tap USAGE / SESSIONS / SETUP in the top bar.
+- **Tabs**: tap USAGE / SESSIONS / SETTINGS in the top bar.
 - **Session detail**: tap a session row; tap anywhere to go back.
-- **Brightness / sleep timeout**: `-`/`+` steppers on SETUP (the whole
+- **Brightness / sleep timeout**: `-`/`+` steppers on SETTINGS (the whole
   left/right third of each card is a hit zone). Sleep = backlight off
   after 15s–5m of no touch, or OFF to never sleep; any touch wakes it
   (that touch is consumed, so it won't also press whatever is underneath).
-- **Sound**: SETUP toggle; turning it on plays the beep as a speaker test.
-- **Power off**: tap **POWER OFF** on the SETUP tab, or hold the **BOOT** key
+- **Sound**: SETTINGS toggle; turning it on plays the beep as a speaker test.
+- **Power off**: tap **POWER OFF** on the SETTINGS tab, or hold the **BOOT** key
   ~1 second. This is ESP32 deep sleep
   (a true software power-off doesn't exist): screen, backlight, CPU, and
   radio all stop, dropping from ~100–150mA to a few mA — weeks of standby
@@ -158,7 +159,7 @@ on macOS since it's what nearly all modern accessories use.
   battery (touch to wake) — the same power-down as holding BOOT. It **never**
   auto-sleeps while on USB power, no matter how long it's idle. Touch or any
   active session resets the 20-minute timer. (This is separate from, and
-  goes further than, the SETUP "SLEEP AFTER" backlight dimming, which only
+  goes further than, the SETTINGS "SLEEP AFTER" backlight dimming, which only
   turns the backlight off.)
 - Settings (brightness, sleep, sound, touch calibration) persist across
   reboots and reflashes.
@@ -376,7 +377,7 @@ to self-register as a login item.
   so a *data-less* wall charger counts as "on battery" for the 20-minute
   auto-sleep — plugged into your Mac (data flowing) it never auto-sleeps.
 - **Touch calibration** is a simple 2-point linear mapping. If it ever
-  feels wrong after a firmware change, tap CALIBRATE on the SETUP tab, or
+  feels wrong after a firmware change, tap CALIBRATE on the SETTINGS tab, or
   send `RECAL` via the trigger file
   (`echo "RECAL" > ~/.claude/deckhand-device-command`) — never by opening a
   new USB connection, which resets the board via the CH340's RTS line.

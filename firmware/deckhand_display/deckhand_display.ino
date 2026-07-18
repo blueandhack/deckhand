@@ -114,6 +114,7 @@ bool deviceNameReported = false;     // sent our BLE name to the host over USB y
 // Advertised name is unique per board (Deckhand-XXXX from the MAC) so many
 // units in one room don't collide; set in setupBLE from the real MAC.
 char deviceName[20] = "Deckhand";
+String btMacAddress; // set once in setupBLE(), shown on the STATUS page
 
 // HMAC-SHA256(secret, msg), first 16 hex chars. Matches the host's
 // crypto.createHmac('sha256', secret).update(msg).digest('hex').slice(0,16).
@@ -514,21 +515,32 @@ BattState batteryState() {
 // that stays "asking" doesn't keep beeping. Non-blocking: loop() advances
 // the pattern via updateBeep(), no delay() anywhere.
 const int BEEP_FREQ = 2093; // C7 - small cavity speakers are loudest ~2kHz
-// Square-wave duty out of 255. This is the volume knob: 128 = max (painful
-// on a 1W amp at desk distance), single digits = soft.
-const int BEEP_DUTY = 16;
+// Square-wave duty out of 255 - the volume knob (128 = max, painful on a 1W
+// amp at desk distance; single digits = soft). Set from the VOLUME stepper
+// on the SETTINGS tab; presets chosen for an audible LOW..HIGH spread.
+const int VOL_PRESETS[] = {6, 18, 45};
+const char* VOL_LABELS[] = {"LOW", "MED", "HIGH"};
+const int VOL_PRESETS_COUNT = 3;
+int volPresetIdx = 1;     // default MED
+int beepDuty = 18;        // = VOL_PRESETS[volPresetIdx]
 // on, gap, on (milliseconds)
 const unsigned long BEEP_PATTERN_MS[] = {120, 90, 120};
 const int BEEP_STEPS = 3;
 int beepStep = -1; // -1 = idle
 unsigned long beepStepStart = 0;
-bool beepEnabled = true; // SOUND toggle on the SETUP tab, persisted
+bool beepEnabled = true; // SOUND toggle on the SETTINGS tab, persisted
 // Gap between the reminder beeps while a session stays "asking" (3 beeps
 // total per event - see SessionInfo.beepsLeft).
 const unsigned long REBEEP_INTERVAL_MS = 30000;
 
 void loadBeepEnabled() { beepEnabled = prefs.getBool("beepOn", true); }
 void saveBeepEnabled() { prefs.putBool("beepOn", beepEnabled); }
+void applyVolume() { beepDuty = VOL_PRESETS[volPresetIdx]; }
+void loadVolume() {
+  volPresetIdx = constrain(prefs.getInt("vol", 1), 0, VOL_PRESETS_COUNT - 1);
+  applyVolume();
+}
+void saveVolume() { prefs.putInt("vol", volPresetIdx); }
 
 void startBeep() {
   if (!beepEnabled) return;
@@ -536,7 +548,7 @@ void startBeep() {
   beepStep = 0;
   beepStepStart = millis();
   digitalWrite(AUDIO_EN_PIN, LOW); // amp on
-  ledcWrite(AUDIO_OUT_PIN, BEEP_DUTY);
+  ledcWrite(AUDIO_OUT_PIN, beepDuty);
 }
 
 void updateBeep() {
@@ -550,7 +562,7 @@ void updateBeep() {
     digitalWrite(AUDIO_EN_PIN, HIGH); // amp back off
     return;
   }
-  ledcWrite(AUDIO_OUT_PIN, beepStep % 2 == 1 ? 0 : BEEP_DUTY);
+  ledcWrite(AUDIO_OUT_PIN, beepStep % 2 == 1 ? 0 : beepDuty);
 }
 
 // ---------- Power off ----------
@@ -597,7 +609,7 @@ void powerOff() {
 
   if (beepEnabled) { // single short blip as tactile confirmation
     digitalWrite(AUDIO_EN_PIN, LOW);
-    ledcWrite(AUDIO_OUT_PIN, BEEP_DUTY);
+    ledcWrite(AUDIO_OUT_PIN, beepDuty);
     delay(90);
     ledcWrite(AUDIO_OUT_PIN, 0);
     digitalWrite(AUDIO_EN_PIN, HIGH);
@@ -793,7 +805,7 @@ const int TAB_COUNT = 3;
 
 void drawTabBar() {
   tft.fillRect(0, 0, tft.width(), TAB_BAR_H, COLOR_CARD);
-  const char* labels[TAB_COUNT] = {"USAGE", "SESSIONS", "SETUP"};
+  const char* labels[TAB_COUNT] = {"USAGE", "SESSIONS", "SETTINGS"};
   int tabW = tft.width() / TAB_COUNT;
   for (int i = 0; i < TAB_COUNT; i++) {
     bool active = (i == (int) currentTab);
@@ -1678,46 +1690,49 @@ void renderDetailDuration() {
 
 // ---------- Settings tab ----------
 
-// Layout: one CONNECTIONS card (BT + USB as two matching rows), then two
-// identical stepper cards (brightness, sleep) so both settings share one
-// interaction pattern, then a full-width CALIBRATE button - the lone
-// action, kept visually separate from the settings above it.
-const int CONN_CARD_Y = 40;
-const int CONN_CARD_H = 96;
+// SETTINGS is paginated (3 pages), not scrollable - drag-scroll misfires on
+// this resistive panel, so discrete pages with a prev/next pager are used
+// (same reasoning as the ask-detail reader). Pages:
+//   0 STATUS   - device connections, battery, pairing (read-only)
+//   1 CONTROLS - brightness, sleep-after, volume steppers + sound toggle
+//   2 ACTIONS  - calibrate touch, power off
+const int SETTINGS_PAGES = 3;
+int settingsPage = 0;
+
+const int PAGER_H = 26;                       // pager band under the tab bar
+const int PAGE_TOP = CONTENT_Y + PAGER_H + 4; // top of each page's content
+
 const int STEPPER_CARD_H = 48;
 const int STEP_BTN_SIZE = 30;
-const int BRIGHT_CARD_Y = CONN_CARD_Y + CONN_CARD_H + 6;
-const int SLEEP_CARD_Y = BRIGHT_CARD_Y + STEPPER_CARD_H + 6;
-const int CALIB_BTN_Y = SLEEP_CARD_Y + STEPPER_CARD_H + 6;
-const int CALIB_BTN_H = 38;
-// Bottom action row: three equal buttons, color-coded by role - CALIBRATE
-// (accent, a setup action), SOUND (a state toggle), POWER OFF (alert color,
-// a deliberate "leaving" action). A single row keeps everything above it
-// clear of the footer; the screen has no vertical room for a second row.
-const int SETUP_BTN_GAP = 6;
-const int SETUP_BTN_W = (CARD_W - 2 * SETUP_BTN_GAP) / 3;
-const int CAL_BTN_X = CARD_X;
-const int SND_BTN_X = CARD_X + SETUP_BTN_W + SETUP_BTN_GAP;
-const int PWR_BTN_X = CARD_X + 2 * (SETUP_BTN_W + SETUP_BTN_GAP);
-// Rows inside the DEVICE card (y offsets from CONN_CARD_Y).
-const int CONN_ROW_BT = 20;
-const int CONN_ROW_USB = 44;
-const int CONN_ROW_BATT = 68;
-const int CONN_ROW_ID = 84;
+int stepBtnY(int cardY) { return cardY + STEPPER_CARD_H - STEP_BTN_SIZE - 4; }
 
-String btMacAddress; // fetched once in setup(), never changes at runtime
+// Page 0 - DEVICE card
+const int DEV_CARD_Y = PAGE_TOP + 4;
+const int DEV_CARD_H = 120;
+const int DROW_BT = 24, DROW_USB = 52, DROW_BATT = 80, DROW_ID = 100;
 
-int battRowCache = -1;
+// Page 1 - three steppers + full-width sound toggle
+const int P1_BRIGHT_Y = PAGE_TOP + 4;
+const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + 8;
+const int P1_VOL_Y = P1_SLEEP_Y + STEPPER_CARD_H + 8;
+const int P1_SOUND_Y = P1_VOL_Y + STEPPER_CARD_H + 8;
+const int P1_SOUND_H = 34;
+
+// Page 2 - two large action buttons
+const int P2_CAL_Y = PAGE_TOP + 24;
+const int P2_BTN_H = 52;
+const int P2_PWR_Y = P2_CAL_Y + P2_BTN_H + 16;
+
+int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
 char battRowTextCache[16] = "";
 int soundBtnCache = -1;
-int stepGlyphCache[4] = {-1, -1, -1, -1}; // bright-, bright+, sleep-, sleep+
-int btDotCache = -1, usbDotCache = -1;
+int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+
 char brightPctCache[8] = "";
 int brightBarCache = -1;
 char sleepValCache[8] = "";
+char volValCache[8] = "";
 
-// Simple binary connection indicator - filled dot when connected, hollow
-// ring when not. Distinct from drawStatusDot's working/asking/waiting shapes.
+// Filled dot when connected, hollow ring when not.
 void drawConnDot(int cx, int cy, int r, bool connected, uint16_t bg) {
   tft.fillRect(cx - r - 1, cy - r - 1, r * 2 + 2, r * 2 + 2, bg);
   if (connected) {
@@ -1728,10 +1743,6 @@ void drawConnDot(int cx, int cy, int r, bool connected, uint16_t bg) {
   }
 }
 
-// -/+ buttons sit at the same offsets in every stepper card; the space
-// between them is the card's value area (drawn in renderSettingsTab).
-int stepBtnY(int cardY) { return cardY + STEPPER_CARD_H - STEP_BTN_SIZE - 4; }
-
 void drawStepperCard(int y0, const char* label) {
   tft.fillRoundRect(CARD_X, y0, CARD_W, STEPPER_CARD_H, RADIUS, COLOR_CARD);
   tft.drawRoundRect(CARD_X, y0, CARD_W, STEPPER_CARD_H, RADIUS, COLOR_LABEL);
@@ -1739,65 +1750,14 @@ void drawStepperCard(int y0, const char* label) {
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(label, CARD_X + PAD, y0 + 6);
-
   int btnY = stepBtnY(y0);
   int rightBtnX = CARD_X + CARD_W - PAD - STEP_BTN_SIZE;
   tft.fillRoundRect(CARD_X + PAD, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, 6, COLOR_BG);
   tft.fillRoundRect(rightBtnX, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, 6, COLOR_BG);
-  // Borders and -/+ glyphs are drawn by renderSettingsTab (drawStepGlyph):
-  // they grey out when the value hits its end of the range.
+  // Borders + -/+ glyphs drawn by drawStepGlyph (they grey out at range ends).
 }
 
-void drawSettingsStatic() {
-  char buf[36];
-
-  tft.fillRoundRect(CARD_X, CONN_CARD_Y, CARD_W, CONN_CARD_H, RADIUS, COLOR_CARD);
-  tft.drawRoundRect(CARD_X, CONN_CARD_Y, CARD_W, CONN_CARD_H, RADIUS, COLOR_LABEL);
-  tft.setTextFont(1);
-  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("DEVICE", CARD_X + PAD, CONN_CARD_Y + 6);
-
-  tft.setTextFont(2);
-  tft.setTextColor(COLOR_VALUE, COLOR_CARD);
-  tft.drawString("Bluetooth", CARD_X + PAD + 20, CONN_CARD_Y + CONN_ROW_BT);
-  tft.drawString("USB", CARD_X + PAD + 20, CONN_CARD_Y + CONN_ROW_USB);
-  tft.drawString("Battery", CARD_X + PAD + 20, CONN_CARD_Y + CONN_ROW_BATT);
-
-  // Device identity (unique BLE name) + whether remote answering is secured
-  // by a provisioned pairing secret. Fixed at boot, so it lives in the
-  // static pass.
-  snprintf(buf, sizeof(buf), "%s  %s", deviceName,
-           pairingSecret.length() ? "paired" : "unpaired");
-  tft.setTextFont(1);
-  tft.setTextColor(pairingSecret.length() ? COLOR_GOOD : COLOR_WARN, COLOR_CARD);
-  tft.drawString(buf, CARD_X + PAD, CONN_CARD_Y + CONN_ROW_ID);
-
-  drawStepperCard(BRIGHT_CARD_Y, "BRIGHTNESS");
-  drawStepperCard(SLEEP_CARD_Y, "SLEEP AFTER");
-
-  int btnCy = CALIB_BTN_Y + CALIB_BTN_H / 2;
-  tft.setTextFont(1);
-  tft.setTextDatum(MC_DATUM);
-  // CALIBRATE (left) - accent outline.
-  tft.fillRoundRect(CAL_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, COLOR_CARD);
-  tft.drawRoundRect(CAL_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, COLOR_ACCENT);
-  tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
-  tft.drawString("CALIBRATE", CAL_BTN_X + SETUP_BTN_W / 2, btnCy);
-  // POWER OFF (right) - alert color, so it reads as a careful action and
-  // won't be confused with the "SLEEP AFTER" backlight setting above.
-  tft.fillRoundRect(PWR_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, COLOR_CARD);
-  tft.drawRoundRect(PWR_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, COLOR_BAD);
-  tft.setTextColor(COLOR_BAD, COLOR_CARD);
-  tft.drawString("POWER OFF", PWR_BTN_X + SETUP_BTN_W / 2, btnCy);
-  tft.setTextDatum(TL_DATUM);
-  // SOUND (middle) is drawn by renderSettingsTab - its whole look changes
-  // with its on/off state.
-}
-
-// -/+ glyph plus button border, greyed out when the value can't move
-// further in that direction - an outlined accent button that silently does
-// nothing at the range limit otherwise looks broken, not full/empty.
+// -/+ glyph plus button border, greyed out at the range end.
 void drawStepGlyph(int cacheIdx, int x, int btnY, const char* glyph, bool enabled) {
   if (stepGlyphCache[cacheIdx] == (int) enabled) return;
   stepGlyphCache[cacheIdx] = (int) enabled;
@@ -1810,12 +1770,52 @@ void drawStepGlyph(int cacheIdx, int x, int btnY, const char* glyph, bool enable
   tft.setTextDatum(TL_DATUM);
 }
 
-// One connection row: dot on the left, right-aligned status text. Only ever
-// called from a state-change guard, so it blanks its own status area with a
-// fillRect instead of relying on trailing-space padding (which can't blank
-// right-aligned proportional text).
-void drawConnRow(int rowY, bool connected) {
-  int y = CONN_CARD_Y + rowY;
+// The pager band: < chevron, page title + dots, > chevron.
+void drawPager() {
+  tft.fillRect(0, CONTENT_Y, tft.width(), PAGER_H + 4, COLOR_BG);
+  const char* titles[SETTINGS_PAGES] = {"STATUS", "DISPLAY & SOUND", "ACTIONS"};
+  int cy = CONTENT_Y + PAGER_H / 2;
+  tft.setTextFont(2);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("<", CARD_X, cy);
+  tft.setTextDatum(MR_DATUM);
+  tft.drawString(">", tft.width() - CARD_X, cy);
+  tft.setTextFont(1);
+  tft.setTextColor(COLOR_VALUE, COLOR_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(titles[settingsPage], tft.width() / 2, cy - 5);
+  int spacing = 12, startX = tft.width() / 2 - (SETTINGS_PAGES - 1) * spacing / 2;
+  for (int i = 0; i < SETTINGS_PAGES; i++) {
+    if (i == settingsPage) tft.fillCircle(startX + i * spacing, cy + 8, 3, COLOR_ACCENT);
+    else tft.drawCircle(startX + i * spacing, cy + 8, 3, COLOR_LABEL);
+  }
+  tft.setTextDatum(TL_DATUM);
+}
+
+// ----- Page 0: STATUS -----
+void drawStatusPageStatic() {
+  char buf[36];
+  tft.fillRoundRect(CARD_X, DEV_CARD_Y, CARD_W, DEV_CARD_H, RADIUS, COLOR_CARD);
+  tft.drawRoundRect(CARD_X, DEV_CARD_Y, CARD_W, DEV_CARD_H, RADIUS, COLOR_LABEL);
+  tft.setTextFont(1);
+  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("DEVICE", CARD_X + PAD, DEV_CARD_Y + 6);
+  tft.setTextFont(2);
+  tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+  tft.drawString("Bluetooth", CARD_X + PAD + 20, DEV_CARD_Y + DROW_BT);
+  tft.drawString("USB", CARD_X + PAD + 20, DEV_CARD_Y + DROW_USB);
+  tft.drawString("Battery", CARD_X + PAD + 20, DEV_CARD_Y + DROW_BATT);
+  snprintf(buf, sizeof(buf), "%s  %s", deviceName, pairingSecret.length() ? "paired" : "unpaired");
+  tft.setTextFont(1);
+  tft.setTextColor(pairingSecret.length() ? COLOR_GOOD : COLOR_WARN, COLOR_CARD);
+  tft.drawString(buf, CARD_X + PAD, DEV_CARD_Y + DROW_ID);
+}
+
+// One connection row: dot left, right-aligned status text.
+void drawConnRow(int rowOff, bool connected) {
+  int y = DEV_CARD_Y + rowOff;
   drawConnDot(CARD_X + PAD + 6, y + 8, 6, connected, COLOR_CARD);
   int xRight = CARD_X + CARD_W - PAD;
   tft.fillRect(xRight - 100, y, 100, 16, COLOR_CARD);
@@ -1826,98 +1826,123 @@ void drawConnRow(int rowY, bool connected) {
   tft.setTextDatum(TL_DATUM);
 }
 
-void renderSettingsTab() {
+void renderStatusPage() {
   char buf[36];
   bool btConnected = bleConnected;
-
-  int btState = btConnected ? 1 : 0;
-  if (btState != btDotCache) {
-    btDotCache = btState;
-    drawConnRow(CONN_ROW_BT, btConnected);
-  }
-
+  if ((btConnected ? 1 : 0) != btDotCache) { btDotCache = btConnected ? 1 : 0; drawConnRow(DROW_BT, btConnected); }
   bool usbConnected = usbLinkActive();
-  int usbState = usbConnected ? 1 : 0;
-  if (usbState != usbDotCache) {
-    usbDotCache = usbState;
-    drawConnRow(CONN_ROW_USB, usbConnected);
-  }
-
-  // Battery row: dot = "healthy" (filled when charged/charging, hollow when
-  // low or absent), detail text on the right in fixed-width font 1 so
-  // left-padding blanks reliably.
+  if ((usbConnected ? 1 : 0) != usbDotCache) { usbDotCache = usbConnected ? 1 : 0; drawConnRow(DROW_USB, usbConnected); }
   BattState bst = batteryState();
   int pct = batteryPresent() ? batteryPct() : -1;
   int battHealthy = (bst == BATT_CHARGING || bst == BATT_FULL || pct > 20) ? 1 : 0;
   if (battHealthy != battRowCache) {
     battRowCache = battHealthy;
-    drawConnDot(CARD_X + PAD + 6, CONN_CARD_Y + CONN_ROW_BATT + 8, 6, battHealthy, COLOR_CARD);
+    drawConnDot(CARD_X + PAD + 6, DEV_CARD_Y + DROW_BATT + 8, 6, battHealthy, COLOR_CARD);
   }
-  // Always % + voltage, in every state - charge/full/discharge is already
-  // conveyed by the footer pill, and the % is what you actually check here.
-  if (bst == BATT_NONE) {
-    snprintf(buf, sizeof(buf), "not found");
-  } else {
-    snprintf(buf, sizeof(buf), "%d%% %d.%02dV", pct, batteryMv / 1000, (batteryMv % 1000) / 10);
-  }
+  if (bst == BATT_NONE) snprintf(buf, sizeof(buf), "not found");
+  else snprintf(buf, sizeof(buf), "%d%% %d.%02dV", pct, batteryMv / 1000, (batteryMv % 1000) / 10);
   padLeftTo(buf, sizeof(buf), 12);
   drawIfChanged(battRowTextCache, sizeof(battRowTextCache), buf, CARD_X + CARD_W - PAD,
-                CONN_CARD_Y + CONN_ROW_BATT + 4, 1, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
+                DEV_CARD_Y + DROW_BATT + 4, 1, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
+}
 
+// ----- Page 1: CONTROLS -----
+void drawControlsPageStatic() {
+  drawStepperCard(P1_BRIGHT_Y, "BRIGHTNESS");
+  drawStepperCard(P1_SLEEP_Y, "SLEEP AFTER");
+  drawStepperCard(P1_VOL_Y, "VOLUME");
+  // SOUND toggle drawn by renderControlsPage (look changes with state).
+}
+
+void renderControlsPage() {
+  char buf[16];
   int rightBtnX = CARD_X + CARD_W - PAD - STEP_BTN_SIZE;
-  int btnY = stepBtnY(BRIGHT_CARD_Y);
+  int btnY = stepBtnY(P1_BRIGHT_Y);
   int barX = CARD_X + PAD + STEP_BTN_SIZE + 10;
   int barW = CARD_W - 2 * (PAD + STEP_BTN_SIZE + 10);
   snprintf(buf, sizeof(buf), "%d%%", brightnessPct);
   padTo(buf, sizeof(buf), 5);
-  drawIfChanged(brightPctCache, sizeof(brightPctCache), buf, tft.width() / 2, btnY + 8,
-                2, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
+  drawIfChanged(brightPctCache, sizeof(brightPctCache), buf, tft.width() / 2, btnY + 8, 2, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
   drawBar(&brightBarCache, barX, btnY + 20, barW, 6, brightnessPct, COLOR_ACCENT);
   drawStepGlyph(0, CARD_X + PAD, btnY, "-", brightnessPct > BRIGHTNESS_MIN);
   drawStepGlyph(1, rightBtnX, btnY, "+", brightnessPct < 100);
 
-  btnY = stepBtnY(SLEEP_CARD_Y);
+  btnY = stepBtnY(P1_SLEEP_Y);
   formatSleepValue(buf, sizeof(buf));
   padTo(buf, sizeof(buf), 5);
-  drawIfChanged(sleepValCache, sizeof(sleepValCache), buf, tft.width() / 2,
-                btnY + STEP_BTN_SIZE / 2, 2, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
+  drawIfChanged(sleepValCache, sizeof(sleepValCache), buf, tft.width() / 2, btnY + STEP_BTN_SIZE / 2, 2, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
   drawStepGlyph(2, CARD_X + PAD, btnY, "-", sleepPresetIdx > 0);
   drawStepGlyph(3, rightBtnX, btnY, "+", sleepPresetIdx < SLEEP_PRESETS_COUNT - 1);
 
-  // SOUND is a stateful toggle, visually distinct from the CALIBRATE action:
-  // solid accent fill when on, dim outline when off. Luminance (not hue)
-  // carries the state, so it reads fine under any color vision.
+  btnY = stepBtnY(P1_VOL_Y);
+  snprintf(buf, sizeof(buf), "%s", VOL_LABELS[volPresetIdx]);
+  padTo(buf, sizeof(buf), 5);
+  drawIfChanged(volValCache, sizeof(volValCache), buf, tft.width() / 2, btnY + STEP_BTN_SIZE / 2, 2, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
+  drawStepGlyph(4, CARD_X + PAD, btnY, "-", volPresetIdx > 0);
+  drawStepGlyph(5, rightBtnX, btnY, "+", volPresetIdx < VOL_PRESETS_COUNT - 1);
+
   if ((int) beepEnabled != soundBtnCache) {
     soundBtnCache = (int) beepEnabled;
     uint16_t fill = beepEnabled ? COLOR_ACCENT : COLOR_CARD;
-    tft.fillRoundRect(SND_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS, fill);
-    tft.drawRoundRect(SND_BTN_X, CALIB_BTN_Y, SETUP_BTN_W, CALIB_BTN_H, RADIUS,
-                      beepEnabled ? COLOR_ACCENT : COLOR_LABEL);
-    tft.setTextFont(1);
+    tft.fillRoundRect(CARD_X, P1_SOUND_Y, CARD_W, P1_SOUND_H, RADIUS, fill);
+    tft.drawRoundRect(CARD_X, P1_SOUND_Y, CARD_W, P1_SOUND_H, RADIUS, beepEnabled ? COLOR_ACCENT : COLOR_LABEL);
+    tft.setTextFont(2);
     tft.setTextColor(beepEnabled ? COLOR_BG : COLOR_LABEL, fill);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(beepEnabled ? "SOUND ON" : "SOUND OFF",
-                   SND_BTN_X + SETUP_BTN_W / 2, CALIB_BTN_Y + CALIB_BTN_H / 2);
+    tft.drawString(beepEnabled ? "SOUND ON" : "SOUND OFF", tft.width() / 2, P1_SOUND_Y + P1_SOUND_H / 2);
     tft.setTextDatum(TL_DATUM);
   }
 }
 
-void resetSettingsCaches() {
-  btDotCache = -1;
-  usbDotCache = -1;
-  battRowCache = -1;
-  battRowTextCache[0] = '\0';
-  soundBtnCache = -1;
-  for (int i = 0; i < 4; i++) stepGlyphCache[i] = -1;
-  brightPctCache[0] = '\0';
-  brightBarCache = -1;
-  sleepValCache[0] = '\0';
+// ----- Page 2: ACTIONS -----
+void drawActionsPageStatic() {
+  tft.setTextFont(2);
+  tft.setTextDatum(MC_DATUM);
+  tft.fillRoundRect(CARD_X, P2_CAL_Y, CARD_W, P2_BTN_H, RADIUS, COLOR_CARD);
+  tft.drawRoundRect(CARD_X, P2_CAL_Y, CARD_W, P2_BTN_H, RADIUS, COLOR_ACCENT);
+  tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
+  tft.drawString("CALIBRATE TOUCH", tft.width() / 2, P2_CAL_Y + P2_BTN_H / 2);
+  tft.fillRoundRect(CARD_X, P2_PWR_Y, CARD_W, P2_BTN_H, RADIUS, COLOR_CARD);
+  tft.drawRoundRect(CARD_X, P2_PWR_Y, CARD_W, P2_BTN_H, RADIUS, COLOR_BAD);
+  tft.setTextColor(COLOR_BAD, COLOR_CARD);
+  tft.drawString("POWER OFF", tft.width() / 2, P2_PWR_Y + P2_BTN_H / 2);
+  tft.setTextFont(1);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.drawString("deep sleep - touch screen to wake", tft.width() / 2, P2_PWR_Y + P2_BTN_H + 14);
+  tft.setTextDatum(TL_DATUM);
 }
 
-// Anywhere in the left/right third of a stepper card counts as -/+, not just
-// the 30px button glyph - resistive touch plus a fingertip isn't precise
-// enough to demand exact hits, and there's nothing else on the card to
-// mis-trigger.
+// ----- Dispatch -----
+void drawSettingsStatic() {
+  drawPager();
+  if (settingsPage == 0) drawStatusPageStatic();
+  else if (settingsPage == 1) drawControlsPageStatic();
+  else drawActionsPageStatic();
+}
+
+void renderSettingsTab() {
+  if (settingsPage == 0) renderStatusPage();
+  else if (settingsPage == 1) renderControlsPage();
+  // page 2 is static
+}
+
+void resetSettingsCaches() {
+  btDotCache = -1; usbDotCache = -1; battRowCache = -1; battRowTextCache[0] = '\0';
+  soundBtnCache = -1; brightBarCache = -1;
+  brightPctCache[0] = '\0'; sleepValCache[0] = '\0'; volValCache[0] = '\0';
+  for (int i = 0; i < 6; i++) stepGlyphCache[i] = -1;
+}
+
+void gotoSettingsPage(int p) {
+  settingsPage = (p + SETTINGS_PAGES) % SETTINGS_PAGES;
+  tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
+  resetSettingsCaches();
+  drawSettingsStatic();
+  renderSettingsTab();
+}
+
+// Left/right third of a stepper card counts as -/+ (resistive touch is
+// imprecise; nothing else on the card to mis-trigger).
 bool stepperHit(int sx, int sy, int cardY, int* dir) {
   if (sy < cardY || sy >= cardY + STEPPER_CARD_H) return false;
   if (sx < CARD_X + CARD_W / 3) { *dir = -1; return true; }
@@ -1926,52 +1951,54 @@ bool stepperHit(int sx, int sy, int cardY, int* dir) {
 }
 
 void handleSettingsTouch(int sx, int sy) {
-  int dir;
-  if (stepperHit(sx, sy, BRIGHT_CARD_Y, &dir)) {
-    setBacklight(brightnessPct + dir * BRIGHTNESS_STEP);
-    saveBrightness();
-    renderSettingsTab();
+  // Pager band: left third = previous page, right third = next page.
+  if (sy < PAGE_TOP) {
+    if (sx < tft.width() / 3) gotoSettingsPage(settingsPage - 1);
+    else if (sx >= tft.width() * 2 / 3) gotoSettingsPage(settingsPage + 1);
     return;
   }
-  if (stepperHit(sx, sy, SLEEP_CARD_Y, &dir)) {
-    int idx = constrain(sleepPresetIdx + dir, 0, SLEEP_PRESETS_COUNT - 1);
-    if (idx != sleepPresetIdx) {
-      sleepPresetIdx = idx;
-      applySleepPreset();
-      saveSleepTimeout();
-      renderSettingsTab();
+  if (settingsPage == 1) {
+    int dir;
+    if (stepperHit(sx, sy, P1_BRIGHT_Y, &dir)) {
+      setBacklight(brightnessPct + dir * BRIGHTNESS_STEP);
+      saveBrightness();
+      renderControlsPage();
+    } else if (stepperHit(sx, sy, P1_SLEEP_Y, &dir)) {
+      int idx = constrain(sleepPresetIdx + dir, 0, SLEEP_PRESETS_COUNT - 1);
+      if (idx != sleepPresetIdx) { sleepPresetIdx = idx; applySleepPreset(); saveSleepTimeout(); renderControlsPage(); }
+    } else if (stepperHit(sx, sy, P1_VOL_Y, &dir)) {
+      int idx = constrain(volPresetIdx + dir, 0, VOL_PRESETS_COUNT - 1);
+      if (idx != volPresetIdx) {
+        volPresetIdx = idx; applyVolume(); saveVolume(); renderControlsPage();
+        if (beepEnabled) startBeep(); // test the new level
+      }
+    } else if (sy >= P1_SOUND_Y && sy < P1_SOUND_Y + P1_SOUND_H) {
+      beepEnabled = !beepEnabled;
+      saveBeepEnabled();
+      if (beepEnabled) startBeep(); // confirmation doubles as a speaker test
+      renderControlsPage();
     }
-    return;
-  }
-
-  if (sy >= CALIB_BTN_Y && sy < CALIB_BTN_Y + CALIB_BTN_H) {
-    if (sx < SND_BTN_X) {
-      // CALIBRATE
+  } else if (settingsPage == 2) {
+    if (sy >= P2_CAL_Y && sy < P2_CAL_Y + P2_BTN_H) {
       runCalibration();
       everReceived = false;
       tft.fillScreen(COLOR_BG);
       drawTabBar();
       drawFooterChrome();
-      drawSettingsStatic();
       resetSettingsCaches();
-    } else if (sx < PWR_BTN_X) {
-      // SOUND toggle
-      beepEnabled = !beepEnabled;
-      saveBeepEnabled();
-      // Confirmation beep on enable doubles as a speaker test; disabling is
-      // silent by definition.
-      if (beepEnabled) startBeep();
+      drawSettingsStatic();
       renderSettingsTab();
-    } else {
-      // POWER OFF - manual deep sleep (touch to wake), same as holding BOOT.
+    } else if (sy >= P2_PWR_Y && sy < P2_PWR_Y + P2_BTN_H) {
       powerOff();
     }
   }
+  // page 0 is read-only
 }
 
 void drawSettingsTab() {
-  drawSettingsStatic();
+  settingsPage = 0; // always enter on the STATUS page
   resetSettingsCaches();
+  drawSettingsStatic();
   renderSettingsTab();
 }
 
@@ -2408,6 +2435,7 @@ void setup() {
   loadBrightness();
   loadSleepTimeout();
   loadBeepEnabled();
+  loadVolume();
   pairingSecret = prefs.getString("blesecret", ""); // remote-answer auth key
   lastActivityMillis = millis(); // don't start the sleep countdown from millis()==0
   lastNonIdleMillis = millis();  // 20-min battery auto-sleep timer starts now
