@@ -116,18 +116,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
     }
 
-    @objc func toggleHost() {
-        let s = readStatus()
+    func run(_ path: String, _ args: [String]) {
         let p = Process()
-        if s.running {
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            p.arguments = ["-f", hostScript()] // unique to the node host; won't hit this app
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        do { try p.run(); p.waitUntilExit() } catch { NSLog("Deckhand: \(path) failed: \(error)") }
+    }
+
+    @objc func toggleHost() {
+        // hostScript() is unique to the node host, so pkill -f can't hit this app.
+        if readStatus().running {
+            run("/usr/bin/pkill", ["-f", hostScript()]) // graceful stop
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
         } else {
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            p.arguments = [hostApp(), "--args", hostScript()]
+            // Force-clear any wedged/stale host first: `open` won't relaunch an
+            // app macOS still thinks is running, so a frozen node would just get
+            // re-activated instead of replaced. Then launch a fresh one.
+            run("/usr/bin/pkill", ["-9", "-f", hostScript()])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                self.run("/usr/bin/open", [hostApp(), "--args", hostScript()])
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.refresh() }
+            }
         }
-        try? p.run()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.refresh() }
     }
 
     @objc func toggleLogin() {
