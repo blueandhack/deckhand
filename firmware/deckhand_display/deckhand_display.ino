@@ -430,8 +430,13 @@ char overflowCache[32] = "";
 int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
 
 // Session detail screen (tap a row in the SESSIONS list to open it).
+// Anchored by session id, not array index: the host re-sorts the list every
+// tick (asking > waiting > working, then recency), so an index would start
+// pointing at a different session when the order shifts. detailIndex is
+// re-resolved from detailId each render.
 bool showingDetail = false;
 int detailIndex = -1;
+char detailId[16] = "";
 char detailSigCache[208] = "";
 char detailDurCache[16] = "";
 // Ask-screen state: which prompt (if any) was already answered from this
@@ -1219,8 +1224,18 @@ void drawSessionsAll() {
   renderSessionsList();
 }
 
+// Current array index of the session under the detail view, found by its
+// stable id, or -1 if it's no longer in the list.
+int resolveDetailIndex() {
+  if (!detailId[0]) return -1;
+  for (int i = 0; i < sessionCount; i++)
+    if (strcmp(sessions[i].id, detailId) == 0) return i;
+  return -1;
+}
+
 void renderSessionsTab() {
   if (showingDetail) {
+    detailIndex = resolveDetailIndex(); // re-anchor after any reorder
     if (detailIndex >= 0 && detailIndex < sessionCount) {
       // A remote answer was accepted (the ask vanished from the feed):
       // the job here is done, return to the list automatically.
@@ -2137,6 +2152,7 @@ void switchTab(Tab newTab) {
 void openSessionDetail(int idx) {
   showingDetail = true;
   detailIndex = idx;
+  copyField(detailId, sizeof(detailId), sessions[idx].id); // anchor by id, not index
   readerActive = false;
   readerPage = 0;
   drawSessionDetail(idx);
@@ -2146,6 +2162,7 @@ void openSessionDetail(int idx) {
 void closeSessionDetail() {
   showingDetail = false;
   detailIndex = -1;
+  detailId[0] = '\0';
   drawSessionsAll();
 }
 
@@ -2187,6 +2204,8 @@ void handleTouch() {
                 calRawX1, calRawY1, calRawX2, calRawY2);
 
   if (showingDetail) {
+    detailIndex = resolveDetailIndex(); // ensure the tap acts on the right session
+    if (detailIndex < 0) { closeSessionDetail(); return; }
     if (!handleAskTouch(sx, sy)) closeSessionDetail();
     return;
   }
@@ -2331,8 +2350,10 @@ void handleLine(const String& line) {
   if (readerActive) {
     // Keep the reader up while its ask still exists; if the prompt was
     // answered elsewhere or timed out, land back on the sessions list.
-    bool askAlive = showingDetail && detailIndex >= 0 && detailIndex < sessionCount &&
-                    sessions[detailIndex].askPid[0];
+    // Re-resolve by id so a reorder while reading doesn't point us at the
+    // wrong session.
+    detailIndex = resolveDetailIndex();
+    bool askAlive = showingDetail && detailIndex >= 0 && sessions[detailIndex].askPid[0];
     if (askAlive) return;
     exitReaderToList();
     return;
