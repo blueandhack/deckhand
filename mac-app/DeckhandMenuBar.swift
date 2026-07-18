@@ -75,6 +75,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let startStop = NSMenuItem(title: "", action: #selector(toggleHost), keyEquivalent: "")
     let loginItem = NSMenuItem(title: "Launch at login", action: #selector(toggleLogin), keyEquivalent: "")
 
+    // Watchdog state. wantRunning persists the user's intent ("syncing should
+    // be on") so a deliberate Stop is respected but a frozen/crashed host is
+    // auto-restarted - and it survives app relaunches (login item after a
+    // reboot). downSince/lastRestart debounce the restart.
+    var downSince: Date?
+    var lastRestart = Date.distantPast
+    var wantRunning: Bool {
+        get { UserDefaults.standard.bool(forKey: "wantRunning") }
+        set { UserDefaults.standard.set(newValue, forKey: "wantRunning") }
+    }
+
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
@@ -92,6 +103,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         refresh()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
+
+        // Adopt the current state: if the host is already syncing, keep it
+        // alive from now on. If syncing was meant to be on but the host is
+        // down (e.g. after a reboot via the login item), start it.
+        if readStatus().running { wantRunning = true }
+        if wantRunning && !readStatus().running {
+            lastRestart = Date()
+            startHost()
+        }
     }
 
     func refresh() {
@@ -114,6 +134,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         quotaLine.isHidden = s.quota == nil
         startStop.title = s.running ? "Stop syncing" : "Start syncing"
         loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+
+        // Watchdog: if syncing is meant to be on but the host has been down or
+        // frozen (stale heartbeat) for a sustained window, restart it. Only
+        // acts when wantRunning, so a deliberate Stop is honored. The 30s
+        // cooldown avoids re-restarting while a fresh host is still connecting.
+        if wantRunning && !s.running {
+            if downSince == nil { downSince = Date() }
+            else if Date().timeIntervalSince(downSince!) > 20,
+                    Date().timeIntervalSince(lastRestart) > 30 {
+                NSLog("Deckhand watchdog: host down, restarting")
+                lastRestart = Date()
+                downSince = nil
+                startHost()
+            }
+        } else {
+            downSince = nil
+        }
     }
 
     func run(_ path: String, _ args: [String]) {
@@ -123,20 +160,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         do { try p.run(); p.waitUntilExit() } catch { NSLog("Deckhand: \(path) failed: \(error)") }
     }
 
+    // Force-clear any wedged/stale host first (`open` won't relaunch an app
+    // macOS still thinks is running, so a frozen node would just get
+    // re-activated), then launch a fresh one.
+    func startHost() {
+        run("/usr/bin/pkill", ["-9", "-f", hostScript()])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            self.run("/usr/bin/open", [hostApp(), "--args", hostScript()])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.refresh() }
+        }
+    }
+
+    func stopHost() {
+        run("/usr/bin/pkill", ["-f", hostScript()]) // graceful
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
+    }
+
     @objc func toggleHost() {
-        // hostScript() is unique to the node host, so pkill -f can't hit this app.
         if readStatus().running {
-            run("/usr/bin/pkill", ["-f", hostScript()]) // graceful stop
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
+            wantRunning = false
+            downSince = nil
+            stopHost()
         } else {
-            // Force-clear any wedged/stale host first: `open` won't relaunch an
-            // app macOS still thinks is running, so a frozen node would just get
-            // re-activated instead of replaced. Then launch a fresh one.
-            run("/usr/bin/pkill", ["-9", "-f", hostScript()])
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                self.run("/usr/bin/open", [hostApp(), "--args", hostScript()])
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.refresh() }
-            }
+            wantRunning = true
+            lastRestart = Date() // don't let the watchdog also fire right now
+            downSince = nil
+            startHost()
         }
     }
 
