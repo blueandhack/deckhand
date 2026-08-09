@@ -1,20 +1,34 @@
-# Node
-host/node_modules/
+# --- macOS / editor junk ---
+.DS_Store
+__pycache__/
+*.pyc
 
-# The BLE wrapper app embeds a machine-specific copy of node (~200MB) and is
-# built locally by host/build-app.sh - never commit it. Only the plist
-# template (DeckhandBLE.plist) and the build script are tracked.
+# --- local Claude Code settings (contains machine-specific paths) ---
+.claude/
+
+# --- host runtime ---
+host/node_modules/
+# DeckhandBLE.app embeds a COPY of the Homebrew `node` binary (~72MB) plus
+# libnode.dylib. It is machine- and version-specific, and redistributing
+# someone else's node build is not ours to do - rebuild it locally instead
+# (see README / CLAUDE.md).
 host/DeckhandBLE.app/
 
-# macOS
-.DS_Store
-
-# Local editor/tooling
-.vscode/
-*.log
-
-# Claude Code local project permissions (personal, machine-specific)
-.claude/settings.local.json
-
-# Built locally by mac-app/build.sh (embeds this machine's host path)
+# --- build output (regenerate with mac-app/build.sh) ---
 mac-app/DeckhandMenuBar.app/
+
+# --- personal build photos: useful to me, not to anyone reading the repo ---
+case/photos/
+
+# --- third-party reference models (not ours to redistribute) ---
+case/example/
+
+# --- scratch renders ---
+case/preview_*.png
+!case/preview_hero.png
+
+# --- anything that looks like a credential, belt and braces ---
+*.pem
+*.key
+.env
+deckhand-secret*

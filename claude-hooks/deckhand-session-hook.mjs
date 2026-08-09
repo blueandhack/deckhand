@@ -45,12 +45,40 @@ const SESSIONS_DIR = path.join(os.homedir(), ".claude", "deckhand-sessions");
 const ANSWERS_DIR = path.join(os.homedir(), ".claude", "deckhand-answers");
 const DEBUG_LOG = path.join(os.homedir(), ".claude", "deckhand-session-hook-debug.log");
 // Written by host/index.mjs every tick; tells us a display is actually
-// connected. Without it we never block waiting for a remote answer.
+// connected, and whether the user has opted into answering FROM the device.
+// Without it we never block waiting for a remote answer.
 const HOST_ALIVE = "/tmp/deckhand-host-alive";
 // How long the prompt stays answerable from the device. The matching hook
 // `timeout` in settings.json must be a few seconds LONGER, or Claude Code
 // kills the hook before this elapses.
 const REMOTE_WAIT_MS = 90_000;
+
+// WHICH EVENT WE BLOCK ON - measured, not assumed. This is the whole trick.
+//
+// Both surfaces can be live at once, but only on the right event. Measured from
+// 3066 real hook events in ~/.claude/deckhand-session-hook-debug.log:
+//
+//   PermissionRequest - Claude Code shows its dialog WHILE this hook runs. 310
+//     samples resolved in a smooth 2-60s human-response curve with NO spike at
+//     the 90s timeout, which is only possible if the dialog was on screen the
+//     whole time. So blocking here costs the Mac nothing: the Mac dialog and the
+//     device's buttons race, and the first one to answer wins. THIS is where we
+//     wait.
+//   PreToolUse (AskUserQuestion / ExitPlanMode) - the TOOL draws the dialog, and
+//     it doesn't run until this process exits, so nothing is on screen while we
+//     wait. Measured: three AskUserQuestion prompts sat at exactly 90.1s, the
+//     full timeout, answerable nowhere but the device. Blocking here is pure
+//     dead delay. We NEVER wait on this event - we only publish the ask so the
+//     device can start displaying the question immediately.
+//
+// A question fires BOTH events (PreToolUse first, then PermissionRequest ~0ms
+// later), and the PermissionRequest payload carries the full question with its
+// real option labels - verified against a captured payload. So a question is
+// answerable from the device via its PermissionRequest, with the Mac's own
+// dialog visible the entire time. Nothing is given up.
+//
+// `remoteAnswer` (default ON) is just an off switch: with it off we never block,
+// and the device becomes a read-only mirror.
 
 // The device font can't render control bytes (newlines, tabs) - they show as
 // garbage glyphs - so flatten them to spaces. Commands lose their line breaks
@@ -63,39 +91,60 @@ function clean(s, max) {
     .slice(0, max);
 }
 
-function remoteAvailable() {
+// Like clean(), but for the detail field, which the device now renders as a
+// code block when it contains newlines - so KEEP '\n' as a hard line break.
+// Tabs become spaces; other control bytes and code-fence lines are stripped;
+// blank-line runs collapse so a snippet stays compact on the small screen.
+// Per-line leading whitespace is preserved (indentation reads as code).
+function cleanMultiline(s, max) {
+  return String(s ?? "")
+    .replace(/\r\n?/g, "\n")                    // normalize newlines
+    .replace(/\t/g, "  ")                         // tabs -> 2 spaces
+    .replace(/^\`\`\`.*$/gm, "")             // drop \`\`\` fence lines
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, " ") // controls except \n
+    .replace(/[ ]+$/gm, "")                        // trailing spaces per line
+    .replace(/\n{3,}/g, "\n\n")                 // collapse blank-line runs
+    .replace(/^\n+/, "")                          // strip leading blank lines
+    .trimEnd()
+    .slice(0, max);
+}
+
+// `display`  - a device is connected right now, so an ask is worth publishing.
+// `answerable` - the device is allowed to decide prompts. Only ever acted on for
+//              PermissionRequest, where the Mac's dialog stays visible anyway.
+function remoteState() {
   try {
     const st = fs.statSync(HOST_ALIVE);
-    if (Date.now() - st.mtimeMs > 15_000) return false;
-    return JSON.parse(fs.readFileSync(HOST_ALIVE, "utf8")).connected === true;
+    if (Date.now() - st.mtimeMs > 15_000) return { display: false, answerable: false };
+    const hb = JSON.parse(fs.readFileSync(HOST_ALIVE, "utf8"));
+    return {
+      display: hb.connected === true,
+      // Absent (older host) means ON: waiting on a PermissionRequest doesn't
+      // cost the Mac its dialog, so the useful default is to allow it.
+      answerable: hb.connected === true && hb.remoteAnswer !== false,
+    };
   } catch {
-    return false;
+    return { display: false, answerable: false };
   }
 }
 
 // Extract "what is being asked" from the hook payload, for the device to
 // display. pid ties a device answer back to this exact prompt.
+// NOTE the order: the TOOL is checked before the event. A question or a plan
+// approval raises a PermissionRequest too, and that payload carries the real
+// question and its option labels - so it must build the question/plan ask, not a
+// generic "Allow AskUserQuestion?" with Allow/Deny. Getting this backwards is
+// what would make the device offer two meaningless buttons for a 4-way question.
 function buildAsk(data) {
   const pid = Math.random().toString(36).slice(2, 10);
-  if (data.hook_event_name === "PermissionRequest") {
-    const ti = data.tool_input ?? {};
-    const detail = ti.command ?? ti.description ?? ti.file_path ?? ti.url ?? JSON.stringify(ti);
-    return {
-      pid,
-      kind: "perm",
-      title: clean(`Allow ${data.tool_name ?? "tool"}?`, 26),
-      detail: clean(detail, 600),
-      options: ["Allow", "Deny"],
-    };
-  }
   if (data.tool_name === "AskUserQuestion") {
     const q = data.tool_input?.questions?.[0] ?? {};
-    const opts = (q.options ?? []).slice(0, 4).map((o) => clean(o?.label ?? o, 24));
+    const opts = (q.options ?? []).slice(0, 4).map((o) => clean(o?.label ?? o, 32));
     return {
       pid,
       kind: "question",
-      title: clean(q.header ?? "Question", 26),
-      detail: clean(q.question ?? "", 600),
+      title: clean(q.header ?? "Question", 34),
+      detail: cleanMultiline(q.question ?? "", 1400),
       options: opts.length ? opts : ["OK"],
     };
   }
@@ -104,8 +153,19 @@ function buildAsk(data) {
       pid,
       kind: "plan",
       title: "Approve plan?",
-      detail: clean(data.tool_input?.plan ?? "", 600),
+      detail: cleanMultiline(data.tool_input?.plan ?? "", 1400),
       options: ["Approve", "Keep planning"],
+    };
+  }
+  if (data.hook_event_name === "PermissionRequest") {
+    const ti = data.tool_input ?? {};
+    const detail = ti.command ?? ti.description ?? ti.file_path ?? ti.url ?? JSON.stringify(ti);
+    return {
+      pid,
+      kind: "perm",
+      title: clean(`Allow ${data.tool_name ?? "tool"}?`, 34),
+      detail: cleanMultiline(detail, 1400),
+      options: ["Allow", "Deny"],
     };
   }
   return null;
@@ -113,7 +173,13 @@ function buildAsk(data) {
 
 // Poll for the answer file the host writes when the device user taps an
 // option. A stale answer for a different prompt is deleted, not honored.
-async function waitForRemoteAnswer(sessionId, pid, timeoutMs) {
+//
+// Also watches for the Mac winning the race. Because the Mac's dialog is on
+// screen the whole time we wait, it usually answers first - and when it does,
+// the next event for this session (PostToolUse -> "working") rewrites the record
+// without our `ask`. Spotting that lets us exit in ~1s instead of holding a node
+// process for the full 90s on every single prompt.
+async function waitForRemoteAnswer(sessionId, pid, timeoutMs, sessionFile) {
   const answerPath = path.join(ANSWERS_DIR, `${sessionId}.json`);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -124,6 +190,13 @@ async function waitForRemoteAnswer(sessionId, pid, timeoutMs) {
     } catch {
       // no answer yet
     }
+    // Answered on the Mac (or the session ended): our ask is gone, stop waiting.
+    try {
+      const cur = JSON.parse(fs.readFileSync(sessionFile, "utf8"));
+      if (!cur.ask || cur.ask.pid !== pid) return null;
+    } catch {
+      return null; // file gone - SessionEnd
+    }
     await new Promise((r) => setTimeout(r, 300));
   }
   return null;
@@ -131,18 +204,37 @@ async function waitForRemoteAnswer(sessionId, pid, timeoutMs) {
 
 // The ONLY place this script may write to stdout: a real decision, in the
 // hook's decision-JSON dialect for the event that asked.
+//
+// We only ever block on PermissionRequest, so that's the dialect that matters;
+// the PreToolUse branch is kept for safety in case a future change waits there
+// again. Note `kind` (what is being asked) is independent of the event dialect:
+// a QUESTION can arrive as a PermissionRequest, and then the answer has to ride
+// out as a deny whose message carries the chosen option, because there is no
+// native channel for handing Claude a selected answer.
 function emitDecision(data, ask, answer) {
+  const chose = answer.label || `option ${answer.idx + 1}`;
+  const carriedAnswer =
+    `The user answered this from their Deckhand display. ` +
+    `Their answer: "${chose}". ` +
+    `Treat this as the user's response and continue; do not re-ask.`;
+
   let out;
-  if (ask.kind === "perm") {
-    out = {
-      hookSpecificOutput: {
-        hookEventName: "PermissionRequest",
-        decision:
-          answer.idx === 0
-            ? { behavior: "allow" }
-            : { behavior: "deny", message: "Denied by the user from the Deckhand display remote." },
-      },
-    };
+  if (data.hook_event_name === "PermissionRequest") {
+    let decision;
+    if (ask.kind === "question") {
+      decision = { behavior: "deny", message: carriedAnswer };
+    } else if (answer.idx === 0) {
+      decision = { behavior: "allow" };
+    } else {
+      decision = {
+        behavior: "deny",
+        message:
+          ask.kind === "plan"
+            ? "The user chose to keep planning (answered from the Deckhand display)."
+            : "Denied by the user from the Deckhand display.",
+      };
+    }
+    out = { hookSpecificOutput: { hookEventName: "PermissionRequest", decision } };
   } else if (ask.kind === "plan") {
     out = {
       hookSpecificOutput: {
@@ -150,20 +242,15 @@ function emitDecision(data, ask, answer) {
         permissionDecision: answer.idx === 0 ? "allow" : "deny",
         ...(answer.idx === 0
           ? {}
-          : { permissionDecisionReason: "The user chose to keep planning (answered from the Deckhand display remote)." }),
+          : { permissionDecisionReason: "The user chose to keep planning (answered from the Deckhand display)." }),
       },
     };
   } else {
-    // AskUserQuestion has no native remote-answer channel; a deny whose
-    // reason carries the chosen option delivers the answer to Claude.
     out = {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason:
-          `The user already answered this question from their remote display. ` +
-          `Their answer: "${answer.label || `option ${answer.idx + 1}`}". ` +
-          `Treat this as the user's response and continue; do not re-ask.`,
+        permissionDecisionReason: carriedAnswer,
       },
     };
   }
@@ -231,13 +318,20 @@ try {
       ) {
         status = "asking";
       }
-      // For prompts the device can answer, publish the question alongside
-      // the status - but only bother when a display is connected.
-      const canAsk =
-        data.hook_event_name === "PermissionRequest" ||
-        (data.hook_event_name === "PreToolUse" &&
-          (data.tool_name === "AskUserQuestion" || data.tool_name === "ExitPlanMode"));
-      const ask = canAsk && remoteAvailable() ? buildAsk(data) : null;
+      // Publish the prompt for the device to show - but only bother when a
+      // display is actually connected.
+      const isPermEvent = data.hook_event_name === "PermissionRequest";
+      const isPreAsk =
+        data.hook_event_name === "PreToolUse" &&
+        (data.tool_name === "AskUserQuestion" || data.tool_name === "ExitPlanMode");
+      const remote = isPermEvent || isPreAsk ? remoteState() : { display: false, answerable: false };
+      const ask = remote.display ? buildAsk(data) : null;
+      // Answerable ONLY on PermissionRequest (see the note at the top): that's
+      // the event whose dialog stays on screen while we wait, so a tap here
+      // races the Mac instead of replacing it. A PreToolUse ask is published for
+      // display only - the device renders those options as a read-only list, and
+      // the matching PermissionRequest arrives moments later with real buttons.
+      if (ask) ask.answerable = isPermEvent && remote.answerable;
 
       const record = {
         cwd: data.cwd ?? existing.cwd ?? "",
@@ -252,11 +346,16 @@ try {
       };
       writeRecord(filePath, record);
 
-      if (ask) {
-        // Block (bounded, under the hook timeout) so a device tap can decide
-        // this prompt. No tap -> exit silently and the normal dialog flow
-        // continues untouched.
-        const answer = await waitForRemoteAnswer(sessionId, ask.pid, REMOTE_WAIT_MS);
+      // A display-only ask stops here: we exit at once so nothing is delayed.
+      // Its `ask` is cleared by the next event for this session (PostToolUse /
+      // PostToolUseFailure -> "working"), or replaced moments later by the
+      // answerable PermissionRequest for the same prompt.
+      if (ask && ask.answerable) {
+        // Wait for a device tap, bounded well under the hook timeout. The Mac's
+        // dialog is on screen throughout, so this is a race, not an intercept:
+        // whichever surface answers first wins, and if the Mac wins we bail out
+        // early rather than idling here.
+        const answer = await waitForRemoteAnswer(sessionId, ask.pid, REMOTE_WAIT_MS, filePath);
         // Window over: stop offering buttons. Re-read current state rather
         // than rewriting our stale `record` - another event (e.g. PostToolUse
         // when the user answered on the Mac) may have updated status meanwhile,

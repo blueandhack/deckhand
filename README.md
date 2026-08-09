@@ -5,9 +5,9 @@
 A little desk display and remote for Claude Code — the crew member who keeps
 lookout and relays your orders. Built on an ELEGOO 2.8" ESP32 touchscreen
 module, with optional battery and speaker. It shows live plan usage and
-per-project session status, beeps when a session needs you, and lets you
-answer permission prompts, questions, and plan approvals right from the
-device. Three tabs:
+per-project session status, beeps when a session needs you, and shows permission
+prompts, questions, and plan approvals so you can read *and* answer them from
+across the room — without taking the dialog away from your Mac. Three tabs:
 
 - **USAGE** — real plan-quota percentage for the current 5-hour session
   window and the current 7-day (weekly, all models) window. Each card has a
@@ -26,13 +26,13 @@ device. Three tabs:
   sessions than fit, the six most urgent are shown and a "+N more" strip
   admits to the rest (a hidden needs-input session is called out loudly).
   Tap a row for a detail screen — and **if the session is waiting on a
-  prompt, the detail screen is an answer screen**: see below.
+  prompt, that screen is an answer screen**: see below.
 - **SETTINGS** — paginated (tap the `‹` / `›` pager), three pages:
   **STATUS** (Bluetooth/USB connection state — more trustworthy than macOS's
   Bluetooth panel — plus battery % / voltage and the device's pairing state),
   **DISPLAY & SOUND** (brightness, sleep-timeout, and speaker **volume**
   LOW/MED/HIGH steppers, plus a sound on/off toggle), and **ACTIONS**
-  (CALIBRATE TOUCH, and POWER OFF in the alert color).
+  (CALIBRATE TOUCH, RESET PAIRING, and POWER OFF in the alert color).
 
 A persistent footer on every tab shows a live clock, a battery pill
 (fill level + `chg`/`full`/`%`), and "Xs ago" data freshness, so the
@@ -46,34 +46,48 @@ unanswered. Toggle sound with SOUND on the SETTINGS tab.
 
 ## Answering prompts from the device
 
-The display is also a remote: when a session needs input, tapping its row
-opens an **answer screen** showing what's being asked, and tapping an
-option answers the real prompt in Claude Code.
+When a session needs input, tapping its row opens a screen showing exactly
+what's being asked:
 
 - **Permission prompts** — "Allow Bash?" plus the actual command text ->
   Allow / Deny.
-- **Questions (AskUserQuestion)** — the question and up to four option
-  buttons; your choice is delivered to Claude as the user's answer.
+- **Questions (AskUserQuestion)** — the question and up to four options.
 - **Plan approvals** — a plan summary -> Approve / Keep planning.
 
-Commands render as a code block, questions/plans as prose. Newlines are
-flattened to spaces (the display font can't draw control characters). If the
-detail is long, a **READ ALL** button (top-right, well clear of the decision
-buttons) opens a full-screen reader with prev/next paging. After you tap an
-option it fills solid ("Allow — sent"), and the screen returns to the list
-once Claude moves on. If a session shows NEEDS INPUT but its prompt isn't
-answerable here (it fired while the display was disconnected, or the answer
-window has closed), the detail screen says "Answer this one on your Mac".
+**Both surfaces are live at once, and the first answer wins.** The prompt appears
+in Claude Code exactly as normal *and* on the device with working buttons — click
+it on the Mac or tap it on the device, whichever is closer. Nothing is delayed
+and nothing is hidden: answer on the Mac and the device just stops offering it.
 
-How it works underneath: the session hook publishes the prompt details and
-then waits (up to 90 seconds) for an answer file before letting the normal
-dialog flow continue. The device's tap travels over USB/BLE to the host,
-which writes that answer file; the hook wakes and emits a real hook
-decision (allow/deny/approve, or the chosen option). The hook only ever
-waits when a display is actually connected — it checks a heartbeat the
-host refreshes every tick — so with the device unplugged, prompts behave
-exactly as stock. If you don't answer on the device within the window,
-everything falls back to the normal dialog with no side effects.
+Turn off **Answer prompts on device** in the menu bar to make the device a
+read-only mirror instead — it still shows every prompt (handy for reading a long
+command from across the room), under an "ANSWER ON YOUR MAC" heading.
+
+Anything with code — a command, or a question/plan that contains line breaks —
+renders as a code block in the **Cozette** bitmap font (crisp at this panel's
+resolution), with its indentation and line breaks preserved; plain single-line
+prose renders in a larger proportional font.
+(Tabs become spaces and ``` fences are stripped, but real newlines survive all
+the way to the screen.) If the detail is long, a **READ ALL** button
+(top-right, well clear of the decision buttons) opens a full-screen reader with
+prev/next paging. Tapping an option fills it solid ("Allow — sent") and the
+screen returns to the list once Claude moves on. If a session shows NEEDS INPUT
+but its prompt isn't answerable here (it fired while the display was
+disconnected, or the answer window has closed), the detail screen says "Answer
+this one on your Mac".
+
+How it works underneath: the session hook publishes the prompt details into a
+per-session file, which the host forwards to the device, and then waits (up to 90
+seconds) for an answer. Your tap travels over USB/BLE to the host, which verifies
+it and writes an answer file; the hook wakes and emits a real hook decision
+(allow/deny/approve, or the chosen option). The reason this doesn't delay or hide
+anything on the Mac is *which* hook event it waits on — Claude Code shows its
+permission dialog concurrently with that event, so waiting is a race rather than
+an interception. If the Mac answers first the hook notices within a second and
+gets out of the way. It only waits at all when a display is actually connected
+(it checks a heartbeat the host refreshes every tick), so with the device
+unplugged prompts behave exactly as stock, and an unanswered prompt just falls
+through to the normal dialog with no side effects.
 
 ## Security of the remote
 
@@ -104,6 +118,22 @@ stranger in Bluetooth range can't approve your prompts.
 The secret lives in `~/.claude/deckhand-secret` (mode 600, machine-local,
 never committed). Delete it to re-pair; the host regenerates one and
 re-provisions over USB.
+
+**Switching pairs.** To move the device to a **different Mac**, just plug it
+into that Mac over USB with the host running — it re-pairs automatically (the
+device announces its name, the new Mac provisions its own secret). To point a
+Mac at a **different device**, connect the new device over USB. Two explicit
+controls make switching clean:
+
+- **Device › SETTINGS › ACTIONS › RESET PAIRING** wipes the device's stored
+  secret so it reads `unpaired` and bonds fresh to the next Mac. Use it before
+  handing the device to someone else.
+- **Menu-bar app › Forget device** drops the Mac's Bluetooth pin (it shows the
+  paired device name too), so the Mac re-pairs to whatever device you next
+  connect over USB.
+
+Either way, re-pairing always needs a **USB connection once** — Bluetooth alone
+can't provision (that's the security boundary).
 
 ## Hardware
 

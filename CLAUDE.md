@@ -40,14 +40,60 @@ bundle has to *be* node, and it has to be launched via `open` (not by executing 
 directly) for TCC to recognize it as a real app capable of showing a permission prompt rather
 than an unprompted denial.
 
-If you only need USB, plain `node index.mjs` still works fine — the BLE half fails silently and
-USB is unaffected, since the two transports are fully independent (see Architecture).
+**Plain `node index.mjs` does NOT work, even for USB-only.** This file used to claim the BLE half
+"fails silently and USB is unaffected" — that is false on macOS 26. noble's CoreBluetooth init gets
+the process **SIGABRT'd** (exit 134) a second or two after startup; the crash report says
+`"namespace": "TCC"`. So there is no bare-node fallback: always launch via `DeckhandBLE.app`. For a
+genuinely USB-only job (e.g. driving one command and reading the reply), write a throwaway script
+that imports **only** `serialport` and never touches noble — that survives, because nothing in it
+touches CoreBluetooth.
+
+Two more traps that will cost you an hour if you don't know them:
+
+- **`DeckhandBLE.app` breaks when Homebrew's node moves.** Symptom: `open DeckhandBLE.app` appears
+  to succeed (it even returns 0) but no process survives and `/tmp/deckhand-host.log` is never
+  created. The crash report under `~/Library/Logs/DiagnosticReports/Deckhand-*.ips` says
+  `"namespace": "DYLD", "indicator": "Library missing"` — e.g. `libada.3.dylib` missing after
+  `ada-url` moved to 4.x. Fix is the documented rebuild at the bottom of this file (re-copy `node`
+  + `libnode.*.dylib` into the bundle, re-`codesign`). Check crash reports FIRST when the host
+  won't start; a silently-exiting `open` looks exactly like a code bug and isn't one.
+- **The CH340 only flushes its receive buffer when the host WRITES.** A listen-only serial probe
+  reads **zero bytes** from a perfectly healthy device — verified: 8 seconds of boot log arrived in
+  one burst the instant a single byte was sent. Any ad-hoc probe must write periodically (a bare
+  `"\n"` is ignored by the device) or you will conclude the board is dead when it is fine.
 
 Trigger on-device actions without reflashing, by writing to a file the running host script
 watches and forwards over whichever transport(s) are already connected:
 
 ```
 echo "RECAL" > ~/.claude/deckhand-device-command   # force touch recalibration
+echo "MICTEST" > ~/.claude/deckhand-device-command # 10s mic level report (beeps, then speak)
+echo "MICMON" > ~/.claude/deckhand-device-command  # live mic meter on the device (tap to exit)
+echo "MICREC" > ~/.claude/deckhand-device-command  # 4s one-shot capture (mu-law, known-good)
+echo "MICSTREAM" > ~/.claude/deckhand-device-command # stream until tapped (ADPCM, up to 120s)
+```
+
+The on-screen record button runs the STREAMING path (`micStream`), not `MICREC` - tap to start,
+tap to stop, up to 120s. `MICREC` is the short one-shot fallback. Captures land
+in `~/Deckhand-audio/capture-<ts>.txt`. Turn one into a playable WAV and measure what's in it
+(de-combs the BLE interference, band-passes for speech, prints before/after SNR, refuses anything
+under 98% complete, writes `<out>` and `<out>-clean.wav`):
+
+```
+node host/mic-wav.mjs [capture-or-log] [outfile] [last|loudest|<index>]
+```
+
+Decode **and transcribe locally** with whisper.cpp (see the STT note under Architecture):
+
+```
+host/mic-stt.sh            # newest capture -> SNR + transcript
+```
+
+**Find the serial port dynamically** — it renumbers (it has been both `usbserial-110` and
+`usbserial-10`, and a hardcoded path fails confusingly):
+
+```
+PORT=$(ls /dev/cu.usbserial-* | head -1)
 ```
 
 Do **not** open a second/new USB serial connection to send ad-hoc commands (e.g. via a one-off
@@ -114,9 +160,10 @@ two things `host/index.mjs` cannot get any other way:
   PRIMARY quota source is now in `host/index.mjs` itself: it polls Anthropic's OAuth usage
   endpoint (`api.anthropic.com/api/oauth/usage`, the same data Claude Code's `/usage` screen
   shows) every 5 minutes, authenticating with the OAuth token read from the macOS Keychain
-  ("Claude Code-credentials") — read-only, never refreshed/mutated from here, falling back to
-  the statusLine cache on any failure (it rate-limits bursts with HTTP 429; back off, don't
-  hammer).
+  ("Claude Code-credentials"), falling back to the statusLine cache on any failure (it
+  rate-limits bursts with HTTP 429; back off, don't hammer). The host **does refresh** that
+  token when it's expired/near-expiry (see the token-refresh note below) — the always-on host
+  can't rely on a Claude Code surface being open to renew it.
 - Per-project session status (`deckhand-session-hook.mjs`, via `SessionStart`, `UserPromptSubmit`,
   `PreToolUse` matched to `AskUserQuestion|ExitPlanMode`, `PermissionRequest`, `PostToolUse`,
   `PostToolUseFailure`, `Notification`, `Stop`, `SessionEnd`). Status is one of `working` /
@@ -130,41 +177,147 @@ two things `host/index.mjs` cannot get any other way:
   real payload); any other Notification (idle nudges) maps to `waiting`, which can't incorrectly
   override an already-correct `waiting` status the way blindly mapping to `asking` once did.
   `PostToolUseFailure` maps to `working` so a *denied* permission clears `asking`.
-- **Remote answering** (the device as a prompt remote) lives in the same hook. For answerable
-  prompts (`PermissionRequest`, `PreToolUse` on `AskUserQuestion`/`ExitPlanMode`) the hook
-  publishes an `ask` object (pid, title, ≤600-char control-char-flattened detail, ≤4 option labels) in the session
-  file, then **blocks up to 90s** (settings.json hook `timeout` is 100s to match) polling `~/.claude/deckhand-answers/<session_id>.json`. A device
-  tap produces that file (device → `ANSWER <id12> <pid> <idx> <hmac>` line → host verifies +
-  writes it); the hook
-  then emits the decision JSON for the right event dialect: `PermissionRequest` decision
-  allow/deny, `ExitPlanMode` PreToolUse allow/deny, and `AskUserQuestion` a PreToolUse deny
-  whose reason carries the chosen option to Claude (there's no native remote-answer channel for
-  questions). On timeout it strips the `ask` and exits silently — stock dialog behavior.
+- **Remote answering — WHICH EVENT WE BLOCK ON IS THE WHOLE TRICK, and it was measured, not
+  reasoned.** For answerable prompts the hook publishes an `ask` object (pid, single-line-flattened
+  ≤34-char title, ≤1400-char detail, ≤4 option labels of ≤32 chars) in the session file so the
+  device can display it. Whether it then **waits** depends entirely on the event:
+  - **`PermissionRequest` → WAIT.** Claude Code shows its dialog *while this hook runs*, so waiting
+    costs the Mac nothing: the Mac dialog and the device's buttons are both live and the first
+    answer wins. The hook blocks up to 90s (settings.json hook `timeout` is 100s to match) polling
+    `~/.claude/deckhand-answers/<session_id>.json`.
+  - **`PreToolUse` (`AskUserQuestion`/`ExitPlanMode`) → NEVER WAIT.** The *tool* draws that dialog
+    and it doesn't run until the hook exits, so nothing is on screen while you wait. Publish the
+    ask for display only, then exit (~30ms).
+
+  Evidence, from 3066 real events in `~/.claude/deckhand-session-hook-debug.log` (re-derive it there
+  before changing this): 310 `PermissionRequest` prompts resolved on a smooth 2–60s human-response
+  curve with **no spike at the 90s timeout** — impossible unless the dialog was on screen the whole
+  time. Meanwhile three `AskUserQuestion` `PreToolUse` events sat at **exactly 90.1s**, the full
+  timeout, answerable nowhere but the device. That second case shipped once as the unconditional
+  behavior and read as a bug ("when Claude Code asks questions, the options only show on the
+  device") — the fix was to move the wait to the right event, **not** to stop waiting.
+
+  **A question fires BOTH events**, `PreToolUse` first then `PermissionRequest` ~0ms later, and the
+  `PermissionRequest` payload carries the full `questions[0]` with its real option labels (verified
+  against a captured payload). So questions are answerable from the device via their
+  `PermissionRequest`, with the Mac's dialog visible throughout — nothing is given up. This is why
+  `buildAsk()` checks `tool_name` **before** `hook_event_name`: get that order backwards and a 4-way
+  question renders as a generic "Allow AskUserQuestion?" with Allow/Deny.
+  `emitDecision()` therefore switches on the **event** for the dialect and on `ask.kind` for the
+  meaning: allow/deny for a `perm` or `plan`, and for a `question` a **deny whose message carries
+  the chosen option** (there's no native channel for handing Claude a selected answer).
+  Because the Mac usually wins the race, `waitForRemoteAnswer()` also watches the session record and
+  **bails the moment its `ask` disappears** (the next event rewrote it) — 1.8s measured instead of
+  holding a node process for the full 90s on every prompt.
+  `remoteAnswer` (in `~/.claude/deckhand-secret`, surfaced in the heartbeat and every payload,
+  toggled by the menu bar's **Answer prompts on device** → `REMOTE on|off`) is **on by default** and
+  is just an off switch: off means never wait, i.e. a read-only mirror. Absent/unset reads as on.
+  The device keys off the **per-prompt** `ask.answerable` stamped by the hook, *not* the live global
+  flag — that's what makes flipping the toggle mid-prompt safe, and it's what marks a `PreToolUse`
+  ask read-only while its `PermissionRequest` twin is answerable. For a read-only ask the device
+  draws the options as a flat list under "ANSWER ON YOUR MAC" and swallows taps, so it never offers
+  a control that can't work (and `visLines` reserves that caption's row, or a full-length detail
+  runs into it). The host also drops `ANSWER` lines while answering is off.
+  Nothing strips a display-only `ask` — the next event for that session
+  (`PostToolUse`/`PostToolUseFailure` → `working`) rebuilds the record without it.
   Two hard rules: the hook waits **only** when `/tmp/deckhand-host-alive` (host heartbeat, written
-  every tick) is fresh and says `connected` — otherwise every prompt would stall 90s for
-  nothing — and it must never write anything to stdout **except** a genuine `emitDecision()`,
-  because any stray JSON on a `PermissionRequest` hook's stdout can auto-allow/deny the dialog.
+  every tick) is fresh, says `connected`, **and** doesn't say `remoteAnswer:false` — otherwise every
+  prompt would stall 90s for nothing — and it must never write anything to stdout **except** a
+  genuine `emitDecision()`, because any stray JSON on a `PermissionRequest` hook's stdout can
+  auto-allow/deny the dialog.
 - **Remote-answer authentication (A + B), so only the paired Mac can decide.** (A) The device
   advertises a unique name `Deckhand-XXXX` (from its eFuse MAC) and the host, having learned that
   exact name over USB (`HELLO <name>`), pins BLE to it — no cross-connecting to another unit in
   the room. Because the longer name plus the 128-bit service UUID overflow the 31-byte BLE
   advertisement, the firmware **does not advertise the service UUID** (the host matches by name
-  anyway). (B) Host and device share a 128-bit secret in `~/.claude/deckhand-secret` (mode 600,
-  host-generated, secure by default), pushed to the device **only over USB** via `PROVISION`
-  (stored in NVS; BLE `PROVISION` is ignored — the whole point). Each forwarded `ask` carries a
-  per-prompt `nonce`; the device returns `ANSWER … <hmac>` where hmac =
+  anyway). (B) Host and device share a 128-bit secret, pushed to the device **only over USB** via
+  `PROVISION` (stored in NVS; BLE `PROVISION` is ignored — the whole point). Each forwarded `ask`
+  carries a per-prompt `nonce`; the device returns `ANSWER … <hmac>` where hmac =
   HMAC-SHA256(secret, `nonce:pid:idx`)[:16] — ESP32 `mbedtls_md_hmac` on one side, Node
   `crypto.createHmac` on the other, **verified interoperable**. The host rejects answers with a
   bad/missing MAC and consumes the nonce on success (single-use, no replay). This protects the
   *decision*, not the confidentiality of the (still-unencrypted) BLE data — deliberate, since
   macOS + noble handle BLE bonding poorly.
+- **Multi-pairing: one key per (Mac, device) couple.** Both sides remember several partners, each
+  with its **own** key, so forgetting one revokes only that pair and a leaked key can't
+  authenticate anything else. The Mac has a stable `hostId` (8 hex) that it sends on `PROVISION`
+  **and in every payload**; the device uses it to pick which stored key to sign an answer with, so
+  a device shared between Macs always answers the one that asked. An unknown `hostId` leaves
+  `activeHost = -1` and `authHmac()` refuses to sign — the host then rejects the unsigned answer,
+  which is the safe direction. Host store (`~/.claude/deckhand-secret`, mode 600) is
+  `{version:2, hostId, devices:[{name,secret,label,lastSeen}], selected}`; v1 `{secret, device}`
+  files migrate in place **keeping the old key**, so an existing pair survives the upgrade.
+  `savePairing()` also `chmod`s every write — `writeFile`'s `mode` only applies on creation, so a
+  pre-existing file would otherwise keep loose permissions. Device stores up to `MAX_HOSTS` (4)
+  NVS slots (`h<i>id`/`h<i>sec`/`h<i>lb`, plus `hallow`), and migrates the legacy single
+  `blesecret` into slot 0. Answer verification is **per transport**: `deviceNameFor(via)` keys off
+  the BLE peer we connected to, or the USB name from `HELLO` — falling back to the selected device,
+  since the `HELLO` burst is boot-only and we may have attached mid-run (a wrong guess just fails
+  the HMAC).
+- **Protocol versioning — `HELLO <name> v2`.** The device advertises which pairing protocol it
+  speaks. Only for `v2` does the host send the new `PROVISION <hostId> <secret> <label>`; older
+  firmware gets the bare `PROVISION <secret>`, which still works because the key sent *is* that
+  pair's key. This gate is load-bearing: pre-v2 firmware treats everything after `PROVISION ` as
+  the secret, so sending the new form to it would silently store the wrong key and break answering.
+  The label may contain spaces (it's the Mac's hostname) — the device splits on the first two
+  spaces only.
+- **Choosing which pair is live.** Mac side: the menu bar's **Device** submenu lists every paired
+  device with a checkmark on the chosen one, plus **Any device**; picking one writes
+  `SELECT <name>` to the command-trigger file, and the host re-points its BLE scan (dropping the
+  current link via `rescanBle()`). Device side: **SETTINGS › PAIRED MACS** lists the remembered
+  Macs — tap one to restrict answering to it (`hallow`), tap again or tap **ANY MAC** to clear,
+  tap the `x` to forget just that Mac. `uiListRow` takes a `rightInset` so the "ONLY" tag is
+  placed clear of the `x` (they overlapped when both were right-aligned to the same edge).
+- **Confirm dialog (one component, every consequential action).** RESET PAIRING, POWER OFF,
+  CALIBRATE TOUCH and a host row's `x` all route through `pendingConfirm` + `drawPendingConfirm()`
+  rather than firing on the tap. The dialog states the **consequence**, not just the question
+  ("every paired Mac is forgotten", "deep sleep - touch the screen to wake"), CANCEL keeps the
+  accent as the safe default, and the action button carries its own severity colour. It is
+  **modal**: `handleSettingsTouch` handles it first and swallows every other touch including the
+  pager, so a stray tap can't page away and strand it; taps in the gap between the two buttons are
+  ignored rather than guessed. `drawSettingsStatic()` clears `pendingConfirm`, so a page redraw can
+  never re-enter a stale dialog, and **`renderSettingsTab()` returns early while a dialog is up** —
+  without that, the periodic repaint (every host tick, ~5s) painted the page's values straight over
+  the dialog: it looked half-erased AND `pendingConfirm` stayed set, so touches outside the button
+  row were swallowed and the UI appeared frozen.
+  **`drawSettingsStatic()` resets the settings caches itself.** It repaints the chrome the
+  change-only fields are drawn ON, so those caches are stale by definition; a caller that forgot
+  left the values BLANK (they hadn't "changed", so `drawIfChanged` skipped them). That was the
+  empty page after CANCEL and the intermittent missing text. Resetting inside the function rather
+  than at each call site makes the invariant impossible to forget. **Two calibration paths deliberately skip the dialog**: the
+  first-boot run (touch isn't calibrated yet, so a confirm button would be untappable) and the
+  `RECAL` command from the host — that one is an explicit instruction from the Mac and is the
+  escape hatch when touch is misaligned, so requiring a tap to confirm would defeat it.
+- **Re-pairing controls (switching device⇄Mac).** Device side: **SETTINGS › Actions › RESET
+  PAIRING** (`resetPairing()`) now wipes **every** slot (and the legacy `blesecret`, so a migration
+  can't resurrect it) so the device reads "unpaired" and bonds fresh to the next Mac it's USB'd
+  into; it deliberately does **not** re-`HELLO` (that would let the current Mac instantly re-pair,
+  defeating a move). To drop one Mac and keep the rest, use PAIRED MACS instead. Host side: the
+  menu-bar app's **Forget device** writes `FORGET <name>` (explicitly named, so it forgets the one
+  shown rather than whatever is current when the host reads the file); the host intercepts it (not
+  forwarded to the device) and deletes that entry *and its key*. The heartbeat carries `device`
+  (who we're actually talking to), `selected`, and `devices[]`, so the menu bar renders the picker
+  without ever reading the secrets file.
+- **Device names are validated against `/^Deckhand-[0-9A-Fa-f]{4}$/` before they can become a
+  pairing**, both on load and on every `HELLO`. During the baud experiments, corrupted `HELLO` lines
+  (garbled by a mismatched rate) minted junk entries like `"Deckhand-\ufffd\ufffd\u0002v2"`, which
+  burn slots in a list capped at `MAX_PAIRED_DEVICES` and would eventually push the real device out.
+  Malformed entries already in the file are dropped on load, with a log line saying how many.
+- **`HELLO` is re-announced in a burst for the first 15s after boot** (every 2s, in `loop()`), not
+  just once in `setup()`. The single boot `HELLO` can land before the host's serial reader is ready —
+  harmless normally (the host also loads the selection from `deckhand-secret`), but after a host-side
+  `FORGET` the pin is empty and re-pairing *depends* on catching a fresh `HELLO`, which the one-shot
+  missed. The burst is idempotent (host re-pins/re-provisions only on a change) and boot-only, so a
+  device-side RESET PAIRING (no reboot) still won't silently re-pair. (`deviceNameReported` is now
+  vestigial — nothing gates on it.)
 
 **`host/index.mjs`** polls every `POLL_INTERVAL_MS` (5000ms) for: `ccusage blocks --active`
 and `ccusage weekly` (token counts), the rate-limit cache file, and the sessions directory
 (pruning any session file older than `SESSION_STALE_MS`, since a closed terminal may never
 fire `SessionEnd`). It assembles one JSON object and writes it to USB (if `usbPort` is set) and
 BLE (if `bleCharacteristic` is set) independently every tick, and refreshes the
-`/tmp/deckhand-host-alive` heartbeat that gates the hook's remote-answer wait. The **device→host
+`/tmp/deckhand-host-alive` heartbeat (`connected` + `remoteAnswer`) that gates whether the hook
+waits for a remote answer at all. The **device→host
 lane** exists too: USB serial RX plus a subscription to the BLE TX characteristic's
 notifications, both funneled through `handleDeviceLine()` — `ANSWER` lines become answer files
 for the hook (deduped, since the device transmits on both transports simultaneously); anything
@@ -199,12 +352,21 @@ Other things that aren't obvious from a single file:
 - The touch controller (XPT2046) is wired to a **separate SPI bus** from the TFT (see the pin
   table comment at the top of the `.ino`), so it can't use TFT_eSPI's built-in touch support —
   it needs its own `SPIClass` instance and the standalone `XPT2046_Touchscreen` library.
-- Touch calibration data must be stored as a real array (`calData[4]`), not four separate
-  global variables read/written as a raw byte blob — separate globals aren't guaranteed
-  contiguous in memory, and that exact mistake previously corrupted calibration silently. The
-  Preferences keys are versioned (`cal3`/`calValid3`) specifically so a firmware change that
-  fixes calibration logic also forces a fresh calibration run, rather than reloading
-  now-incompatible old data.
+- Touch calibration is a **5-point least-squares AFFINE fit** (four corners + centre):
+  `sx = A*rx + B*ry + C`, `sy = D*rx + E*ry + F`, solved in `fitAffine()` — both axes share one
+  3x3 normal-equation matrix, so it inverts once. The old 2-point fit derived `sx` from `rx`
+  alone, so it could correct scale and offset but **not skew/rotation between the panel and the
+  glass**, and it had no redundancy (one sloppy tap went straight into the mapping, and it always
+  reported a perfect fit because it passes through both points by construction). Verified against
+  synthetic panels: a 3-degree skew leaves a 0.03px residual under the affine fit versus **16.6px**
+  under the old separable one. `runCalibration()` reports the **worst residual** at the targets and
+  flags a loose run, and `fitAffine` returns false on a singular (collinear/nonsense) set so a
+  broken mapping is never installed — it keeps the previous one instead. Coefficients are stored
+  as a real array, not separate globals: separate globals aren't guaranteed contiguous, which
+  previously corrupted this data when saved as a raw byte blob via Preferences. The Preferences
+  keys are **versioned** (`cal5`/`calValid5`): v1 was corrupted, v2 used the wrong axis mapping,
+  and v3's 2-point bytes mean nothing to the affine model, so bumping the key forces one fresh run
+  rather than silently misreading old data as coefficients.
 - `TOUCH_SWAP_XY` exists because this board's touch controller axes are swapped relative to
   the display; it's already set correctly for this exact board.
 - The backlight is LEDC PWM on IO21 for the brightness setting, and `ledcAttach(TFT_BL_PIN,...)`
@@ -224,6 +386,343 @@ Other things that aren't obvious from a single file:
   poll's list); test it without real prompts by dropping a fake session file:
   `echo '{"session_id":"t","cwd":"/tmp/x","status":"asking","updated_at":'$(date +%s)'000}' >
   ~/.claude/deckhand-sessions/t.json` (delete it afterwards).
+- **Microphone (MAX4466 electret amp) — IO35 is the only pin that can do this.** Wired to the
+  board's 4-pin **Expand** connector: `VCC`→3.3V, `GND`→GND, `OUT`→**IO35**. That pin is forced,
+  not chosen: touch took ADC1's 32/33/36/39 and the battery divider took 34, leaving IO35 as the
+  only free ADC1 channel — and ADC1 is mandatory because ADC2 is dead while BT is active. IO35 is
+  input-only, which an ADC pin doesn't mind. The pin needs **11dB attenuation**
+  (`analogSetPinAttenuation`); the module idles at VCC/2 (~1.65V) and at the default range that
+  bias sits against the ceiling and clips everything.
+  **Never power it from 5V** even though the module accepts 2.4–5.5V: IO35 is not 5V tolerant, and
+  at a 5V supply the op-amp biases at 2.5V and swings toward 5V, past the pin's absolute maximum.
+  The SPI connector is useless for this (IO23/19/18/22 are digital-only or ADC2).
+  **A miswired module hangs `setup()` and looks exactly like bricked firmware**: reverse polarity
+  makes the module conduct through its ESD diodes and drag the 3.3V rail, so the chip answers
+  esptool all day (download mode draws little) but the sketch dies the moment it powers the
+  backlight and BLE. Zero serial output plus a chip that still reads its MAC = suspect the
+  peripheral, not the code. (Absence of ROM boot text proves nothing here — TFT_CS is GPIO15,
+  which straps the ROM log off.)
+- **Mic bring-up: three commands, and the reason each exists.**
+  - `MICTEST` — one-shot level report: DC bias (proves power + the OUT wire), per-window
+    peak-to-peak, clip count, and a floor/peak **ratio**. The window is **10s on purpose**. At 4s
+    the talking kept landing either side of the capture and every run read as room tone; the
+    per-window profile still shows exactly when sound arrived, so a miss is distinguishable from a
+    deaf mic. It beeps to mark the start (`MIC_CUE_DUTY`, deliberately independent of the SOUND
+    setting — here the cue *is* the test) and the verdict requires **3+ elevated windows**, because
+    speech is sustained and one elevated window is a knock. Judging by overall peak-to-peak
+    reported "reacted to sound" for runs that were pure hum.
+  - `MICMON` — live meter on the device's own screen, because the setting you want is "highest gain
+    whose floor stays low" and that can only be found by watching the floor WHILE turning the screw.
+    One-shot tests cost a round trip per quarter-turn, and the trimmer silently drifted back into
+    oscillation between two of them.
+  - `MICREC` — records real audio and dumps it as base64 for `host/mic-wav.mjs` to turn into a WAV.
+    Levels only ever say "louder than the floor"; only listening settles usability.
+- **`MICREC` samples by DMA (`adc_continuous`) at 32kHz, decimated 2:1 to 16kHz.** Every part of
+  that sentence is forced:
+  - A busy-loop capture would starve the core's IDLE task and trip the task watchdog, and the
+    obvious workaround (yield every 200ms) punches 1ms holes in the audio at 5Hz — a buzz that
+    wrecks the exact judgement being made. `adc_continuous_read()` blocks on a semaphore, so the
+    hardware fills buffers gap-free while the CPU is free.
+  - **16kHz because that is what Whisper is trained on.** At 8kHz everything above 4kHz is gone,
+    and that band is where consonants separate (s/f/th) — it costs real transcription accuracy.
+  - **32kHz because the driver's MINIMUM is above the rate we want**: on this chip
+    `SOC_ADC_SAMPLE_FREQ_THRES_LOW` is 20kHz, so 16kHz cannot be requested directly either.
+  - `adc_continuous_deinit()` is **not optional** — battery sampling needs ADC1 back for `analogRead`.
+  - **ORDER IS LOAD-BEARING: create the ADC handle BEFORE the big audio buffer.** Backwards, this
+    crash-LOOPS the device, and no error check can save you. `adc_continuous_new_handle` needs
+    internal DMA-capable memory; with 64KB of audio buffer already taken there isn't enough, and on
+    that failure the IDF's own cleanup calls `adc_continuous_deinit()`, which frees an APB peripheral
+    it never claimed and calls `abort()` — a `SW_CPU_RESET`, not a return code. The abort happens
+    *inside* the call. Decoded backtrace, for the record: `abort <- adc_apb_periph_free <-
+    adc_continuous_deinit <- adc_continuous_new_handle <- micRecord`. Symptom from the outside:
+    "white screen, then restart", looping.
+- **Audio is stored as 8-bit G.711 mu-law, and that is what makes 16kHz possible at all.**
+  16kHz × 16-bit × 5s is 160KB; free heap after BLE is ~94KB, so linear PCM capped a take at **2
+  seconds** — too short to reliably catch a sentence. mu-law is logarithmic, keeping fine resolution
+  near zero where this quiet signal lives, and 5s costs the same 80KB that 8kHz/16-bit did. Scaled
+  ×8 into mu-law's 16-bit input range on the way in (the signal peaks ~150 ADC counts, so scaling
+  keeps it clear of the coarsest steps); divided back out host-side.
+  - The DC bias must come off **before** encoding — mu-law is non-linear, so there is no re-centring
+    it afterwards the way linear PCM allowed. Measured over the first 200ms of frames, not assumed
+    to be mid-scale (the real bias is ~1893, not 2048).
+  - No digital gain, so the Mac can measure true SNR; scaling for audibility happens host-side,
+    after measurement, where it can't flatter the numbers.
+  - The 5s request falls back to 4s/3s when the heap won't take it, and reports what it got. **~4s is
+    the ceiling** on this module (ESP32-32E **N4** — 4MB flash, no PSRAM), not a preference.
+- **Recording is user-terminated and shows a live meter.** Tap the floating button to start, tap
+  again to stop; it also stops when the buffer fills, and the log says which (`AUDIO stopped by
+  tap|buffer full`). A fixed length is the wrong default for dictation. Meter and transfer progress
+  live in a **pill over the bottom of the content area, not a full-screen takeover** — this device
+  exists to show session/usage state, and blanking it for the ~13s a capture takes hides the thing
+  it is for. The level bar earns its place: it is the only way to know the mic is hearing you
+  *before* spending 9s shipping the audio. Metering runs between DMA reads, never inside the sample
+  loop (4096-byte store buffer ≈ 64ms of slack, versus ~2ms to draw).
+- **`micRestoreUi()` must reset the change-only caches, and delegates to `forceFullRepaint()`.**
+  Repainting chrome WITHOUT resetting them leaves every field **blank**, because `drawIfChanged`
+  sees an unchanged string and skips a field whose pixels were just erased. That shipped once as
+  "USAGE shows no numbers after recording" — the identical trap `drawSettingsStatic()` already
+  documents. Going through `forceFullRepaint()` also means values return from data already in hand,
+  with no wait for the next host tick.
+- **Long recordings STREAM (`micStream()`), because buffering physically cannot reach a minute.**
+  60s at 16kHz is 960KB against ~94KB of free heap, and this module has no PSRAM — that is the whole
+  reason `MICREC`'s one-shot path caps at ~4s. Streaming sends while recording, so RAM stops
+  mattering and the LINK becomes the constraint. The rate budget at 115200 (11.5KB/s, this CH340's
+  hard ceiling — see the baud note):
+  | format | rate | verdict |
+  |---|---|---|
+  | 16kHz mu-law + base64 (the one-shot path) | 21.3KB/s | 185% — impossible |
+  | 16kHz mu-law, raw binary | 16.0KB/s | 139% — impossible |
+  | **16kHz IMA ADPCM (4-bit), raw binary** | **8.0KB/s** | **70% — fits** |
+  So it takes **both** 4-bit IMA ADPCM *and* raw binary framing. Dropping base64 matters as much as
+  the codec: its 33% tax alone is the difference between fitting and not.
+  **Verified: 120.0s captured in 120.0s elapsed — 1,920,000 samples, `dropped=0 gaps=0`** — and a
+  35.5s real dictation transcribed coherently. The bonus is bigger than the duration: the transfer
+  finishes **when you stop talking**, so the ~9s post-capture wait is gone.
+- **Streaming wire protocol.** Text control lines, binary payload:
+  ```
+  AUDIO stream rate=16000 codec=ima4 chunk=1024 scale=8 dc=1894
+  AUDIO bin <seq> <n>\n   followed by exactly <n> RAW bytes (no trailing newline)
+  AUDIO streamend samples=.. chunks=.. dropped=.. secs=.. by=tap|cap
+  ```
+  Host replies `AUDIO ack <seq>` per frame. Saved as the same base64 `AUDIO begin ...` envelope
+  one-shot captures use, so the decoder needs no new file format — only the `ima4` branch. The
+  decoder accepts **either** `AUDIO begin` or `AUDIO stream` as the header, because that is what the
+  device actually emits and relying on the host to rewrite it broke once already.
+- **The host's USB reader accumulates BYTES, not a string.** `chunk.toString("utf8")` mangles every
+  non-ASCII byte silently, which is fatal for binary frames. It is a two-state machine over a
+  `Buffer`: line mode until an `AUDIO bin` header says how many raw bytes follow, then byte-count
+  mode for exactly that many. `mic-wav.mjs` picks the newest capture by the **timestamp embedded in
+  the filename**, not by `sort()` — plain sort puts every `stream-*` after every `capture-*`
+  regardless of age, so an old stream would shadow a fresh capture.
+- **Flow control is a credit window, and three separate bugs had to be fixed to make it work. All
+  three were silent.**
+  - **`Serial.write` blocking ate 20% of the audio.** A 1024-byte chunk takes ~89ms to clock out at
+    115200, but the ADC's DMA buffer held only ~64ms — so it overflowed *in hardware*, mid-write.
+    Symptom: a 99s stream contained only 79s of samples, with `dropped=0` (the ring never overflowed;
+    the loss was upstream of it). Fixed by **`Serial.setTxBufferSize(8192)` BEFORE `Serial.begin()`**
+    so writes return immediately, a 16KB `max_store_buf_size`, and bulk `Serial.write(ptr, n)` calls
+    instead of per-byte.
+  - **The default 256-byte RX buffer deadlocked the window.** The host keeps sending its ~1KB payload
+    every 5s during a capture; at 256 bytes that overflows while the device is busy sending, and the
+    discarded bytes include the ACKs. Result: 8 chunks in 18s and half the samples dropped. Fixed by
+    **`Serial.setRxBufferSize(4096)`**, a window of 8, and a **500ms safety valve** that slides the
+    window by one on a stall — a lost ACK must cost throughput, never wedge the stream. The host
+    detects any real gap by sequence number and reports it; the device reports `dropped` when its own
+    ring overflows. Between them, loss is always visible.
+  - **A spurious `ts.touched()` ended a 99s take early**, logged as `by=tap` when nothing was
+    touched. Stopping now needs **two consecutive** touch reads — the panel throws occasional false
+    positives, and one of them shouldn't end a long dictation.
+- **`MICREC` (4s, mu-law, base64) is deliberately KEPT** alongside `micStream()` as a known-good
+  short path to fall back on, and it is what the `MICREC` command still runs. The floating button and
+  `MICSTREAM` use the streaming path. The 120s cap (`MIC_STREAM_MAX_MS`) and tap-only stop are
+  arbitrary choices, not constraints.
+- **The BLE radio puts a 33.3Hz comb across the speech band, and it's cancelled in software.**
+  MEASURED, on two independent captures: macOS negotiates a **30ms** connection interval
+  (240 samples at 8kHz — exactly 24 × 1.25ms), and each transmit burst pulls current on the 3.3V
+  rail the mic amp shares. The result is a harmonic series — 66/100/133Hz at **+20 to +30dB** over
+  the local floor and still ~+21dB of tonal noise at 300–600Hz, right where the voice is. Dropping
+  the link removes it entirely (voice-band tones fall ~11x), but that would stop the device being a
+  display while it records, so **BLE deliberately stays connected** and `host/mic-wav.mjs` cancels
+  the comb instead. It is removable *because* it's periodic: it repeats every 240 samples and speech
+  doesn't. Two details are load-bearing:
+  - **MEDIAN per phase, not mean.** A mean is dragged around by whatever speech lands on a given
+    phase; the median ignores those outliers and converges on the interference alone.
+  - **The period is found by minimising the post-cancellation residual, NOT by autocorrelation.**
+    Autocorrelation is captured by whatever is loudest — here a 70Hz rumble — and returned 222
+    samples when the harmonic spacing plainly said 240; the filter then did nothing (16.8 vs
+    16.9dB). Residual-minimisation optimises the actual goal and lands on 240 every time. It needs
+    an `N/(N-P)` correction or a P-parameter template just picks the largest period on offer.
+  - Processed in **~1s blocks**: the ESP32's sample clock and the Mac's BLE clock are independent,
+    so the period drifts a fraction of a sample per second and one global template smears.
+  Result on a real capture: SNR 13.3dB → **27.0dB**, noise floor 7.0 → 0.9, worst voice-band tone
+  from +21.5dB prominence down to +6.1dB. Nothing about this requires offline processing — the
+  period is stable, so it runs streaming with ~30ms of latency.
+- **Analog mic gain: the trimmer's real failure mode is oscillation, not mis-level.** `VR1` is a
+  `TC33X-2-104E`, a **single-turn** (~270°) 100K pot; gain is `1 + (R7+VR1)/R5` = **23x to 123x**.
+  At high gain the amp **oscillates** on long unshielded leads: the floor sat at ~750 counts p-p
+  (~600mV) of low-frequency, sound-insensitive hash that buried speech. Turning the gain down
+  collapsed it to ~40 — an **18x** drop, far more than the 5.3x gain range can explain, which is
+  what identifies it as oscillation rather than "too much amplification". A floor at ~40 equals the
+  bare-ADC noise (35 counts with the mic unplugged), i.e. too little gain to prove the mic is even
+  connected; aim for **~100–150**. Direction of rotation doesn't matter — turn fully one way, note
+  the floor, then fully the other; the higher floor is the high-gain end.
+- **Diagnosing mic noise: use the SPECTRUM, not peak-to-peak.** This cost most of a session.
+  Broadband RMS/peak-to-peak said BLE was innocent (7.2 vs 7.7) and that a real voice was
+  "indistinguishable from room tone"; the per-tone analysis found a 33Hz comb at +30dB and a clean
+  +10 to +12dB of voice at 200–1200Hz. A narrow tone barely moves a wideband number while being
+  plainly audible, and a listener hears speech far below where an RMS ratio calls it buried. Ranking
+  noise by *band* also matters: the noise was a 70Hz rumble sitting where there is almost no voice,
+  so a 180Hz high-pass (cascaded **twice** — 70Hz is only ~1.4 octaves down, one section only gets
+  ~16dB) plus a 3kHz low-pass is nearly free of cost to the speech.
+- **Captures go to `~/Deckhand-audio/capture-<ts>.txt`, NOT through the host log.** `AUDIO d` lines
+  are handled in `handleDeviceLine()` ahead of any logging, deliberately: `console.log` writes to the
+  log file **and** stdout, and under `open DeckhandBLE.app` stdout has no reader — so once that pipe
+  fills the write blocks, the serial reader stops draining, and the OS buffer overflows. That cost
+  ~19% of a dump's lines at 460800. It also keeps a megabyte of base64 out of the log. Output lives
+  under `$HOME`, not `/tmp`: macOS prunes `/tmp` and has already eaten recordings wanted for
+  comparison. One summary line per capture is logged, with a completeness percentage.
+- **`host/mic-wav.mjs` REFUSES a capture under 98% complete (exit 2), and `mic-stt.sh` won't
+  transcribe one.** A correctness guard, not politeness: truncation leaves holes in the base64,
+  misaligned mu-law decodes as loud garbage, and Whisper transcribed one such capture as a confident
+  *"I don't know. I don't know."* that nobody said. A plausible fake transcript is the most dangerous
+  failure mode in this pipeline. It defaults to the newest capture FILE and prints a numbered list so
+  an index can be passed. (It still falls back to the host log for older inline-base64 builds. Beware
+  "last" as a default there — a stale `MICREC` in the command file is replayed on host restart and
+  appends silent captures *after* the one you want, which once produced a confident and wrong "the
+  capsule is dead, buy an INMP441".)
+- **Local speech-to-text: `host/mic-stt.sh` → whisper.cpp, genuinely fast and free.**
+  `brew install whisper-cpp`; models are NOT bundled by brew — fetch from
+  `huggingface.co/ggerganov/whisper.cpp` into `~/.cache/whisper.cpp/`. Runs on Metal, offline, no API
+  cost, and the audio never leaves the machine — which matters for a mic on the desk all day. It
+  feeds the **cleaned** wav (the raw one still carries the BLE comb; Whisper has no reason to cope
+  with interference we can remove first).
+- **Use `ggml-large-v3-turbo-q5_0.bin` (547MB), NOT `base.en`.** Benchmarked on real captures from
+  this mic, and the gap is not subtle:
+  | said | base.en (141MB) | large-v3-turbo q5_0 |
+  |---|---|---|
+  | "Update CLAUDE.md file" | "update, CLAUDE and D5" | **correct** |
+  | a spoken first name | invented a different name entirely | within one phoneme |
+  | "Can you design a system?" | "Can you see that in the system?" | **correct** |
+  | 35.5s clip | 341ms | **840ms (42x realtime)** |
+  Turbo's decoder is 4 layers instead of 32, so it stays far faster than realtime while being much
+  more accurate. `base.en` is the second-SMALLEST model and was inventing proper nouns.
+- **Vocabulary priming (`--prompt` + `--carry-initial-prompt`) is free accuracy.** Whisper has no
+  idea what this project's nouns are: a real dictation of "update CLAUDE.md" came back as "update
+  core code MD5". An initial prompt listing the expected terms biases the decoder at zero cost.
+  `--carry-initial-prompt` re-applies it to every 30s window, which matters for long dictations -
+  without it only the first window is conditioned. Priming alone did NOT fix `base.en`
+  ("update, CLAUDE and D5"); priming plus turbo did. Both overridable via `WHISPER_MODEL` /
+  `WHISPER_PROMPT`.
+- **Parakeet is a dead end for now, despite the runtime being installed.** whisper-cpp 1.9.2 ships
+  `parakeet-cli`, `parakeet-quantize`, `libparakeet.dylib` and `parakeet.h`, and `parakeet-cli`
+  defaults to `ggml-parakeet-tdt-0.6b-v3.bin` — but no compatible model is published. The only GGUF
+  found (`cstr/parakeet-tdt-0.6b-v3-GGUF`) fails with `invalid model data (bad magic)`: it targets a
+  different runtime. Every plausible `ggml-parakeet-*` repo 404s, and brew ships no conversion
+  script, so producing one means converting NVIDIA's NeMo checkpoint with torch/NeMo. Worth
+  revisiting only if someone publishes a real ggml `.bin` — Parakeet TDT is a transducer, so it
+  would be faster than Whisper, but turbo already solves the accuracy problem.
+- **Voice → a real session: the channel is `claude -p --resume <session_id>`, and there is no other
+  one.** Hooks can observe and DECIDE, but they cannot inject a prompt into a running interactive
+  session, so a dictation is delivered by continuing the conversation headlessly, in that session's
+  own `cwd`, detached (a dictated task can run for minutes and must not block the host's poller).
+  Which session? **Context picks the target**: the device stamps `target=<id12>` into the stream
+  header when the recording starts from a session's detail screen, and `-` otherwise. A capture with
+  no target is transcribed, logged, and NOT dispatched — a voice memo. No extra UI, no mode to get
+  stuck in.
+- **The dispatch deliberately runs at the DEFAULT permission mode.** A dictated instruction still has
+  to clear the normal permission prompts, so a misheard command cannot quietly run a tool. This was
+  verified the hard way: "update CLAUDE.md" (heard as "update core code MD5") reached the session,
+  Claude worked out the intent, prepared the edit, and **stopped to ask for write permission**.
+  Raising this to `acceptEdits`/`bypassPermissions` removes that safeguard and is the user's call.
+- **A headless `claude -p` run does NOT appear to fire `PermissionRequest`** — so the device cannot
+  approve dictated work. Measured: the hook debug log for such a run shows
+  `UserPromptSubmit → PostToolUse → Stop → SessionEnd` with no `PermissionRequest`, and the session
+  record carried no `ask`. Consequence: a dictated task that needs permission REPORTS BACK instead of
+  completing. Safe, but it means dictation is best used for read/analysis work ("what's failing in
+  the tests?") unless you raise the permission mode.
+- **Absolute paths are mandatory in the host's voice path.** The host runs under
+  `open DeckhandBLE.app`, which does not inherit a shell PATH, so bare `claude`/`whisper-cli`/`node`
+  are unfindable. `CLAUDE_BIN`/`WHISPER_BIN`/`WHISPER_MODEL` default to absolute paths, and the
+  decoder is spawned with **`process.execPath`** — the node copy inside the bundle — not `"node"`.
+- **Two touch-ordering traps, both of which broke the feature in practice:**
+  - **The FAB's hit test must run BEFORE the detail/ask handler.** That handler treats any unclaimed
+    tap as "close this page", so a tap on the button closed the detail screen instead of recording,
+    and the hold gesture never armed. "Floats above everything" has to mean it is hit-tested first,
+    not merely drawn last.
+  - **`micWaitRelease()` before handing the screen back.** The tap that STOPS a recording is often
+    still down when `handleTouch` resumes; it gets read as a fresh press and closed the page the
+    instant you stopped dictating.
+- **Two-way feedback: the voice result card, and the 32-bit trap that hid it.** A dictation used to
+  vanish - you could not see WHAT was transcribed (and it matters: "update CLAUDE.md" was heard as
+  "update core code MD5", then later as "update the cloud.md file") nor whether Claude acted. The
+  host now keeps the last exchange (`lastVoice`) and publishes it to **both** surfaces: into the
+  device payload (which raises a card showing `YOU SAID` and `CLAUDE`, dismissed by any tap) and into
+  the heartbeat (the menu bar shows `🎤 "..."` with a `↳` reply line). This is the only Mac-side
+  visibility there is - a headless `claude -p --resume` never appears in any Claude Code window.
+  - **The card is keyed off a small `seq` counter, NOT the host's `Date.now()`.** That was a real bug
+    with a silent failure: `long` on ESP32 is 32-bit (max 2,147,483,647) and a JS millisecond
+    timestamp is ~1.79e12, so it overflowed and the "is this a new exchange?" comparison never fired.
+    The card code was correct all along and simply never triggered. `at` is still sent for the Mac,
+    which has no such limit.
+  - Raised only for `sent`/`done`/`memo`/`error`, never the transient `heard` (transcript-only, a
+    second before dispatch) - otherwise it flickers up for nothing. A dismissed card cannot be
+    resurrected by the next 5s tick because `voiceSeqShown` is remembered.
+  - The transcript renders in **Cozette on a panel**, the same treatment as code and commands,
+    because it is verbatim quoted text and should not read as prose.
+  - Text is capped host-side (200 chars transcript, 420 reply): the device's line buffer must hold a
+    whole payload and asks already claim up to 1400 chars of it.
+- **Session names come from the git repo ROOT, not the cwd.** The hook rewrites `cwd` on every event
+  with Claude Code's *live* working directory, so `basename(cwd)` renamed a session mid-task the
+  moment anything ran `cd` into a subdirectory - "core" became "host" while working. `projectName()`
+  uses `git rev-parse --show-toplevel` instead, which is stable across any `cd` inside the repo and
+  is what a person means by "the project"; outside a repo it falls back to the directory name. Cached
+  per cwd, because it runs for every session on every 5s tick and the answer never changes. The
+  `path` field deliberately still shows the LIVE cwd - that's useful for knowing where a session is
+  actually working, so only the name is pinned.
+- **`claude -p` waits on stdin unless you close it**, logging `no stdin data received in 3s` and
+  stalling every dictation by three seconds. The dispatch passes
+  `stdio: ["ignore", "pipe", "pipe"]`.
+- **One-shot `MICREC` captures are transcribed too**, landing as memos (they carry no target). Only
+  streams were, originally. This also gives a way to exercise the whole voice path - transcript,
+  device card, menu bar - with a 4s capture instead of a 120s stream.
+- **A plain session detail screen goes back via its HEADER ROW only, not "tap anywhere".** It used to
+  close on any tap, which collided head-on with a recording's "tap anywhere to stop". The `< Back`
+  label was already being drawn there, so honouring it merely makes the page behave the way it
+  already looked. Taps elsewhere are inert. The FAB is visible on a plain detail screen (that is how
+  you aim a dictation) but hidden whenever an **ask** is pending, so it can never overlap Allow/Deny.
+- **The serial link will NOT go faster than 115200 on this CH340; raising it loses data silently.**
+  Tried specifically to speed up audio. Percentage of a 64000-sample capture actually arriving:
+  `115200 → 100%` · `230400 → 87%` · `460800 → 81-94%` · `921600 → garbage` (3% printable, and
+  host→device commands stopped arriving too). Loss begins as soon as you exceed 115200, so it is not
+  a rate you can tune around, and it is invisible without the completeness check above. The ROM
+  bootloader and panic handler always print at **115200** regardless, so at any other rate a crash
+  dump reads as garbage — its own debugging trap. The fix for throughput is flow control
+  (chunk + ACK), not a bigger number.
+- **The floating record button (FAB), and why it is NOT the BOOT key.** Recording is triggered by a
+  round, **unfilled** button floating over the content area. Two earlier homes were both wrong:
+  - **BOOT key (GPIO0) — abandoned, and it bricked the device twice.** GPIO0 is also the serial
+    bootloader strap and is driven by the USB adapter's **DTR** line, so it goes LOW after every reset
+    and whenever the host merely opens the port. A tap handler therefore fired recordings by itself
+    on flashing, and a strap held low past `POWER_OFF_HOLD_MS` sent the device into **deep sleep
+    during boot** — which presents as bricked firmware: no serial output at ANY baud, dark screen,
+    while esptool still talks to the chip happily. If that ever recurs, suspect sleep before code.
+    Only the deliberate long HOLD (power off) remains on GPIO0, guarded by a 3s arming window and a
+    "must have been seen HIGH" flag.
+  - **Fixed slot in the tab bar — abandoned** because it cost the three tabs 42px and could still sit
+    over something.
+  Interaction: **TAP** records, **HOLD 700ms then DRAG** moves it, **RELEASE** drops and persists to
+  NVS (`fabx`/`faby`). Acting on RELEASE is what lets one control carry both gestures — a hold is
+  already recognised by the time the finger lifts.
+  Visual: a **grey 2px ring with a white centre dot** - the universal record symbol,
+  unmistakable at 48px, and ~90% of the button's area stays see-through. Idle is neutral
+  (`COLOR_LABEL` ring, `COLOR_VALUE` dot) *on purpose*: a control that floats over content should
+  recede until you look for it, and earlier revisions in `COLOR_ACCENT` competed with the accent
+  already used for active tabs, badges and pill borders. Orange is kept for the **pressed** state
+  only, where it marks the action actually happening. Dragging switches to a white ring **plus arrow
+  stubs**, so the mode differs by SHAPE as well as tone - colour is never the only carrier of
+  meaning here. Earlier iterations that were rejected: a thin ring with a tiny centre speck (read as
+  a reticle - mostly dead space) and a filled mic glyph (two ideas competing at 48px).
+  Three things are non-obvious and load-bearing:
+  - **"Transparent" is an unfilled ring, not alpha.** The panel is written directly with no
+    framebuffer and no blending, so real translucency would mean reading pixels back (slow, and
+    unreliable on this ILI9341 wiring). ~15% of the button's area is painted. The 1px `COLOR_BG`
+    haloes either side of the ring are what make an outline control survive over arbitrary content —
+    without them it vanishes wherever button and background share a tone.
+  - **The drag happens on a CLEARED content area.** Not cosmetic: with no framebuffer to read back
+    there is no way to restore arbitrary content from under a moving object, so dragging over live
+    content smears a trail. Clearing gives a known background (erase = one `fillCircle`), and the
+    real content is restored by `forceFullRepaint()` on drop.
+  - Dragging on a **resistive** panel needs help — the same reason ask-detail text pages by taps
+    instead of scrolling. A **70px spike reject** (one bad sample would fling the button somewhere the
+    finger never was), a 2px deadband, and `lastNonIdleMillis` refreshed during the drag so a slow
+    careful move doesn't look idle to the auto-sleep timer.
+  Position is clamped to the **content area**, never the tab bar or footer: a movable control that
+  can park on the tabs would block tab switching outright. It hides itself (`fabVisible()`) on the
+  ask/answer screen, the reader, the crab, and while asleep — a floating button overlapping an
+  Allow/Deny decision is a hazard, not a cosmetic issue.
+- If this mic is ever replaced, an **INMP441** (I2S) is viable and needs no analog tuning:
+  `SCK`→IO18, `WS`→IO19, `SD`→IO35. IO18/19/23 are the **microSD** bus and this firmware contains
+  no SD code at all, so they're free as long as the card slot is unused.
 - "Power off" (hold BOOT ~1s) is ESP32 deep sleep, not a real power cut: panel DISPOFF+SLPIN,
   backlight pin latched low via `gpio_hold_en` (GPIOs float in deep sleep — and setup() must
   `gpio_hold_dis` it again after wake, before re-attaching LEDC), wake via ext0 on IO36 (the
@@ -246,28 +745,141 @@ Other things that aren't obvious from a single file:
   fill (solid = asking, outline = waiting, boxless dim text = working), consistent with the
   color-never-alone rule.
 - The OAuth usage endpoint rate-limits bursty callers (HTTP 429, observed after several rapid
-  host restarts). The poller backs off 15 minutes on 429 (persisted to /tmp across restarts,
-  honoring Retry-After) — don't "fix" apparent staleness by polling faster. The Keychain token
-  read (`security find-generic-password -s "Claude Code-credentials" -w`) is read-only; never
-  refresh or rewrite those credentials from here, or Claude Code itself may get logged out.
+  host restarts). The poller backs off 15 minutes on 429 (persisted to `/tmp/deckhand-oauth-backoff.json`
+  across restarts, honoring Retry-After) — don't "fix" apparent staleness by polling faster.
+  **Two** persisted guards keep restarts from bursting the limiter: the back-off above, and a
+  last-ATTEMPT timestamp (`/tmp/deckhand-oauth-attempt.json`, written just before every network
+  hit — success or failure) that `pollOauthUsage` checks to enforce a minimum `OAUTH_POLL_INTERVAL_MS`
+  (5 min) between hits regardless of how many times the host restarts. The back-off alone wasn't
+  enough: between a back-off expiring and the next 429, each dev reflash's startup poll hit the
+  endpoint immediately (startup used to schedule off the last *success* time), which is what
+  compounded into hours-long penalties. Startup now just calls `setTimeout(pollOauthUsage, 0)`
+  and lets those two guards self-throttle.
+- **OAuth token refresh (the host renews its own access token).** The Keychain access token lives
+  ~8h; when it expires and no Claude Code surface is running to renew it (the app-only + always-on
+  case), the host was left sending an expired token and getting HTTP **401** — distinct from the
+  429 rate-limit, and not fixed by the guards above. `getFreshAccessToken()` now checks
+  `claudeAiOauth.expiresAt` and, if within `OAUTH_REFRESH_MARGIN_MS` (5 min) of expiry, calls
+  `refreshOauthToken()`: POST `grant_type=refresh_token` to `console.anthropic.com/v1/oauth/token`
+  with the same public `OAUTH_CLIENT_ID` Claude Code uses, then writes the **rotated** tokens
+  (access + the new refresh token + both expiries) back into the *same* keychain item in place
+  (`security add-generic-password -U -a <acct> -s "Claude Code-credentials" -w <json>`), preserving
+  every other field. A `pollOauthUsage` 401 on a not-just-refreshed token triggers one reactive
+  refresh+retry (never a loop). This **reverses the old "never mutate the credential" rule** —
+  deliberately, because it's the only way the app-only case stays live — but the safeguards are
+  load-bearing: only ever exchange a **still-valid** refresh token (bail with a clear
+  "sign in again" error if the refresh token is expired, so we don't hammer the token endpoint or
+  imply a refresh can fix a real logout), and the rotated refresh token MUST be persisted or Claude
+  Code's next refresh fails with `invalid_grant`. Verified interoperable (dry-run refresh → 200,
+  persisted, usage endpoint then 200; and the live path via a force-expired token → auto-refresh).
   The host also sends `quotaAgeSec` so the USAGE cards can flag stale quota ("stale 3h" in the
-  alert color) — the footer's freshness only vouches for the transport, not the data.
+  alert color) — the footer's freshness only vouches for the transport, not the data. When
+  `quotaAgeSec > 900` (15 min) the big hero % is also **dimmed** to `COLOR_LABEL` (via
+  `renderCard`), so a frozen value — e.g. a 5-hour % stuck at "0%" while the OAuth poller is in
+  a long 429 back-off — doesn't masquerade as a live reading. `renderUsageTab` busts the
+  `pctNCache` on each stale-flag flip, since `drawBigNumber` only repaints on a text change and
+  a stale % often keeps the same digits.
 - The needs-input beep is capped at 3 per asking-event (`beepsLeft` budget carried across
   polls). Sessions are matched across polls **by id, never by name** — two sessions on the
   same project share a name, and name-matching once made an asking session look newly-asking
   every poll (endless beeping).
-- The device line buffers (`feedChar`'s 4800-char guard, the 4096-byte BLE stream buffer) are
-  sized for payloads carrying `ask` objects; shrinking them silently drops whole updates.
+- The device line buffers (`feedChar`'s 16000-char guard, the 16384-byte BLE stream buffer) are
+  sized for payloads carrying `ask` objects; shrinking them silently drops whole updates. They
+  were bumped from 8000/8192 when the ask caps grew (title 34, detail 1400, options 4×32,
+  `askDetail[1424]`/`askTitle[36]`/`askOpts[4][34]`) so up to 6 simultaneous asks with full
+  1400-char details can't overflow one JSON line. ArduinoJson v7's `JsonDocument` is elastic, so
+  the parse side has no fixed capacity - the line guard and RAM (`SessionInfo`×6 plus a
+  `prevSessions`×6 diff copy) are the real ceilings.
 - The ask/answer screen: tapping an asking session's row opens option buttons wired to
   `sendAnswerToHost()` (which transmits on USB **and** BLE TX notify, in ≤20-byte chunks).
   Long detail text pages by tapping the text block — deliberate: drag-scrolling flickers and
   misfires on this resistive panel, discrete pages don't.
-- Easter egg: 5 taps on the footer within 4s summons **Clawd** (Claude Code's pixel mascot;
-  the 17x5 grid in `CLAWD_ROWS[]` was decoded from the CLI welcome screen's half-block art,
-  captured by running `claude` in a pty). It animates via a ~54KB `TFT_eSprite` pushed whole
-  (the one sanctioned full-region redraw, since sprites can't flicker), degrades to slow
-  direct drawing if the allocation fails, returns the RAM on exit, and suppresses normal
-  rendering (`octoActive` gates `handleLine`'s draw path) while data keeps flowing.
+- **Code-friendly detail rendering.** The detail can be a code block, so `\n` is preserved
+  end-to-end: the hook's `cleanMultiline()` (in `deckhand-session-hook.mjs`, used for the
+  `detail` field only — `title`/`options` still use single-line `clean()`) keeps newlines while
+  stripping tabs→spaces, ``` fences, and other control bytes; the device's ask-parse sanitize
+  loop blanks control bytes **except `\n`**; and `wrapLineLen`/`countWrappedLines`/
+  `drawWrappedText` treat `\n` as a hard line break. `detailLooksLikeCode(kind, detail)` (true
+  for any `perm` prompt, or any detail containing a `\n`) drives the *style* in both
+  `drawAskDetail` and `drawReader`: the **Cozette** bitmap font on a `COLOR_CARD` panel for
+  code, the larger proportional font 2 for plain one-line prose. `isPerm`/`isPlan` still pick
+  the badge label and button colors — only the text styling moved to `isCode`.
+- **Cozette code font.** Code blocks render in Cozette 6x13 (`Cozette6x13.h`), an Adafruit-GFX
+  bitmap font, *not* a numbered GLCD font — a hand-hinted bitmap font stays crisp at this
+  panel's low DPI where a downscaled/anti-aliased vector font goes fuzzy. It's selected through
+  the `FONT_CODE` sentinel (200, not a real TFT_eSPI font number): `applyContentFont()` maps it
+  to `tft.setFreeFont(&Cozette6x13)` and any real number to `setTextFont()` (which also clears
+  the GFX font, so the two never leak). Only `countWrappedLines`/`drawWrappedText` — i.e. the
+  ask detail and full-screen reader — ever pass `FONT_CODE`; the per-second footer/USAGE fields
+  stay on GLCD, so the flicker-free redraw discipline is untouched. TFT_eSPI's free-font path
+  only engages when the active font is 1 **and** `gfxFont` is set (which `setFreeFont` does), and
+  with `TL_DATUM` it adds the ascent so the text top lands at the given `y`. The header is
+  regenerated from the upstream BDF by `firmware/deckhand_display/bdf2gfx.py` (see its docstring);
+  the 668KB BDF itself is deliberately **not** committed — the ~1KB header is self-contained.
+- **Screen flip (180°) for charging.** SETTINGS › DISPLAY & SOUND has two half-width toggles
+  sharing the bottom row — SOUND and NORMAL/FLIPPED — because a full-width row for each doesn't
+  fit (only 32px remain under it). Flipping swaps `tft.setRotation()` between `SCREEN_ROTATION`
+  and `2`; both are portrait, so no layout constant moves. The catch is touch: the panel is glued
+  to the glass and does **not** rotate with the image, so `getTouchPoint()` mirrors its mapped
+  result (`w-1-x`, `h-1-y`) when flipped — that keeps ONE calibration valid for both orientations
+  instead of forcing a recalibration on every flip. Consequently `runCalibration()` **forces the
+  unflipped rotation** for its duration (crosshairs would otherwise be drawn mirrored and the
+  saved `calData` would come out inverted), and every call site restores the user's choice with
+  `applyScreenRotation()` afterwards. Persisted as NVS `flip`, loaded in `setup()` right after
+  `loadOrRunCalibration()` (which is where `prefs.begin` happens) — so it also survives the
+  deep-sleep/wake cycle, since wake re-runs `setup()`.
+- **"Working" spinner — the Claude spark (the one timer-driven redraw).** A working session cycles
+  8 frames of the Claude spark (`drawWorkingSpinner`), advanced by `tickWorkingSpinner()` from
+  `loop()` every `ANIM_INTERVAL_MS` (120ms, ~1s per cycle). The art lives in `ClaudeSpark.h`,
+  **generated** by `firmware/deckhand_display/spark2c.py`; the source frames
+  (`SparkFrames.swift`) are **not** kept in the repo, so `ClaudeSpark.h` IS the art now — to change
+  it, supply the frames again and run `python3 spark2c.py <frames> > ClaudeSpark.h` (the script
+  takes a .swift with quoted base64, or one base64 PNG per line). The source PNGs are 60x60 RGBA that are
+  pure black with 4 alpha levels, i.e. **masks**: the converter keeps only alpha, box-filters to
+  32x32 and quantises to 2 bits, so the firmware tints them with the status colour at draw time
+  (one copy serves any colour, and no PNG decoder is needed on-device). Cost: **2KB flash**
+  (8x32x32x2bits) and only a **64-byte** line buffer — it blits one ROW at a time rather than
+  composing a whole 2KB frame. `fillRect` is used rather than `pushImage` for the same byte-order reason as the crab (see the
+  easter-egg note) — it takes an ordinary colour, so no `swapBytes` juggling. Further compression isn't worth it, measured: RLE saves only 8%
+  (the art is too detailed for long runs), zlib 45% but needs a runtime inflate, and 1bpp halves
+  it at the cost of the anti-aliased edges.
+  **32x32 is a floor, not a preference**: at the old dot size (14-18px) the thin spokes turn to
+  mush, and 24px is marginal — measured, not guessed. It still fits the row's indicator slot
+  (spans x 12..44 with the name starting at x=48) and the tightest 38px row (y+3..y+35), so no
+  text moved. Each frame is composed into `sparkBuf` and pushed as ONE `pushImage` rather than
+  1024 `drawPixel` calls, and because it repaints the whole box there's no separate clear.
+  This is the sole place that repaints on a timer instead of on a value change; it stays within
+  the flicker-free discipline because it's one small blit, never a cleared region. Gated to the
+  sessions list actually being visible (`!isAsleep && !octoActive && !showingDetail &&
+  !readerActive && currentTab == TAB_SESSIONS`), and it deliberately does **not** touch
+  `lastNonIdleMillis` — an animation must never look like activity to the auto-sleep timer. The
+  spark is a distinct radiating shape, so working is still told apart from asking (filled square)
+  and waiting (hollow ring) by **shape alone**: motion is an extra cue, never the only one.
+- Easter egg: 5 taps on the footer within 4s summons **Clawd** — the real crab-walk sprite
+  animation. 20 frames of 51x36 in `ClawdCrab.h`, **generated** by
+  `firmware/deckhand_display/crab2c.py`; the source frames (`CrabFrames.swift`)
+  are **not** kept in the repo, so `ClawdCrab.h` IS the art now — to change it, supply the frames
+  again and run `python3 crab2c.py <frames> > ClawdCrab.h`. PNG alpha is composited
+  against `COLOR_BG` **at build time**, then the frames are **RLE'd as (palette index, run length)
+  pairs** with runs never crossing a row. That RLE *is* the draw format: `drawCrab` turns each run
+  straight into one `fillRect`, so nothing is decompressed into RAM, the art is 21KB instead of
+  37KB (RGB565 raw would be 73KB), and a frame costs ~527 draw calls instead of 1836 pixels.
+  Palette entry 0 is `COLOR_BG` and is skipped, since the target was just cleared. Drawn into a
+  `TFT_eSprite` (240x108, ~51KB, returned on exit) pushed whole — the one sanctioned full-region
+  redraw, since sprites can't flicker — with a direct-draw fallback, and `octoActive` gates
+  `handleLine`'s draw path while data keeps flowing.
+  **Two TFT_eSPI traps caused real bugs here, both silent — use `fillRect`, not `pushImage`, when
+  drawing generated art:** (1) `pushImage` takes a raw buffer whose byte order depends on the
+  target's `swapBytes` flag, and **a sprite stores its pixels byte-SWAPPED internally**
+  (`TFT_eSprite::drawPixel` does `color>>8 | color<<8`; `pushSprite` then pushes with
+  `swapBytes=false`) — getting this wrong is what made the colours come out wrong. `fillRect`
+  takes an ordinary `0xF800`-style colour and handles the internal representation itself, so it is
+  correct on both a sprite and the screen with no flag juggling. (2) **`pushImage` is NOT virtual**
+  — only `drawPixel`/`drawChar`/`readPixel`/`setWindow`/`pushColor` are — so through a `TFT_eSPI&`
+  reference it binds to the SCREEN version and bypasses the sprite entirely; that's why the crab
+  was invisible at first. `drawCrab` is **templated on the target type** so the right overload
+  resolves at compile time. The old procedural art only worked because `fillRect`/`drawCircle`
+  route through the virtual `drawPixel`.
 - TFT_eSPI's pin/driver config lives in the *library's* `User_Setup.h`
   (`~/Documents/Arduino/libraries/TFT_eSPI/User_Setup.h`), not in this repo, since that's how
   TFT_eSPI is configured. If TFT_eSPI is ever reinstalled, that file needs to be recreated with
@@ -282,4 +894,17 @@ Other things that aren't obvious from a single file:
 - `DeckhandBLE.app` embeds a literal copy of `node` + `libnode.147.dylib`, so it's tied to whatever
   Homebrew node version was current when it was built. After `brew upgrade node`, re-copy both
   files into `host/DeckhandBLE.app/Contents/MacOS/` and re-run
-  `codesign --force --deep --sign - host/DeckhandBLE.app`.
+  `codesign --force --deep --sign - host/DeckhandBLE.app`. The bundled files are mode 444, so
+  `rm` them first — `cp` onto a read-only destination fails. This has actually bitten: node moved to
+  26.7.0 (needing `libada.4.dylib`) while the bundle still referenced `libada.3.dylib`, and the app
+  died at launch with a DYLD "Library missing" crash and no log file. The re-signed bundle keeps its
+  Bluetooth permission (identifier `com.deckhand.ble-host` is unchanged), so no `tccutil` reset is
+  needed for a straight rebuild:
+
+  ```
+  cd host && NODE=$(readlink -f $(which node))
+  rm -f DeckhandBLE.app/Contents/MacOS/{Deckhand,libnode.147.dylib}
+  cp "$NODE" DeckhandBLE.app/Contents/MacOS/Deckhand
+  cp "$(dirname $(dirname $NODE))/lib/libnode.147.dylib" DeckhandBLE.app/Contents/MacOS/
+  codesign --force --deep --sign - DeckhandBLE.app
+  ```

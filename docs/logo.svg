@@ -1,24 +1,52 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Deckhand logo">
   <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#E38C62"/>
-      <stop offset="1" stop-color="#BF5D39"/>
+    <linearGradient id="tile" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#4C9BE0"/>
+      <stop offset="1" stop-color="#12508F"/>
     </linearGradient>
-    <g id="spoke">
-      <rect x="247" y="132" width="18" height="90" rx="9" fill="#F6F0E6"/>
-      <rect x="244" y="70" width="24" height="50" rx="12" fill="#F6F0E6"/>
-    </g>
+    <clipPath id="tileClip">
+      <rect x="16" y="16" width="480" height="480" rx="118"/>
+    </clipPath>
+
+    <!-- one spoke = a full diameter bar, so three of them make six arms -->
+    <rect id="spoke" x="236" y="138" width="28" height="200" rx="14"/>
+    <!-- one handle, sitting just outside the rim -->
+    <rect id="grip" x="238" y="83" width="24" height="40" rx="12"/>
+    <!-- one finger: a short bar that crosses the rim radially -->
+    <rect id="finger" x="-19" y="-12" width="38" height="24" rx="12"/>
   </defs>
-  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#tile)"/>
-  <circle cx="256" cy="256" r="129" fill="none" stroke="#F6F0E6" stroke-width="22"/>
-  <use href="#spoke" transform="rotate(0 256 256)"/>
-  <use href="#spoke" transform="rotate(45 256 256)"/>
-  <use href="#spoke" transform="rotate(90 256 256)"/>
-  <use href="#spoke" transform="rotate(135 256 256)"/>
-  <use href="#spoke" transform="rotate(180 256 256)"/>
-  <use href="#spoke" transform="rotate(225 256 256)"/>
-  <use href="#spoke" transform="rotate(270 256 256)"/>
-  <use href="#spoke" transform="rotate(315 256 256)"/>
-  <circle cx="256" cy="256" r="46" fill="#F6F0E6"/>
-  <circle cx="256" cy="256" r="20" fill="#FF9E44"/>
+
+  <g clip-path="url(#tileClip)">
+    <rect x="16" y="16" width="480" height="480" rx="118" fill="url(#tile)"/>
+
+    <!-- arm + palm, BEHIND the wheel -->
+    <g fill="#E89A6B">
+      <path d="M327 362 L452 522" stroke="#E89A6B" stroke-width="68" stroke-linecap="round"/>
+      <rect x="268" y="316" width="118" height="92" rx="42" transform="rotate(-32 327 362)"/>
+    </g>
+
+    <!-- the wheel -->
+    <g fill="#FBF4E9">
+      <use href="#spoke" transform="rotate(0 250 238)"/>
+      <use href="#spoke" transform="rotate(60 250 238)"/>
+      <use href="#spoke" transform="rotate(120 250 238)"/>
+      <use href="#grip" transform="rotate(0 250 238)"/>
+      <use href="#grip" transform="rotate(60 250 238)"/>
+      <use href="#grip" transform="rotate(120 250 238)"/>
+      <use href="#grip" transform="rotate(180 250 238)"/>
+      <use href="#grip" transform="rotate(240 250 238)"/>
+      <use href="#grip" transform="rotate(300 250 238)"/>
+      <circle cx="250" cy="238" r="98" fill="none" stroke="#FBF4E9" stroke-width="30"/>
+      <circle cx="250" cy="238" r="36"/>
+    </g>
+    <circle cx="250" cy="238" r="14" fill="#1B5FA6"/>
+
+    <!-- fingers, IN FRONT of the rim, wrapping across it -->
+    <g fill="#F8BE92">
+      <use href="#finger" transform="translate(331 293) rotate(34)"/>
+      <use href="#finger" transform="translate(313 313) rotate(50)"/>
+      <use href="#finger" transform="translate(290 328) rotate(66)"/>
+      <use href="#finger" transform="translate(264 335) rotate(82)"/>
+    </g>
+  </g>
 </svg>

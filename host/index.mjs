@@ -59,6 +59,14 @@ const RATE_LIMIT_CACHE = path.join(os.homedir(), ".claude", "deckhand-rate-limit
 // ourselves and risking invalidating Claude Code's session.
 const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_KEYCHAIN_SERVICE = "Claude Code-credentials";
+// Token refresh (so an always-on host isn't stuck when the ~8h access token
+// expires and no Claude Code surface is running to renew it - the app-only
+// case). Same public OAuth client Claude Code uses; we only ever exchange a
+// still-valid refresh token, then write the rotated tokens straight back to the
+// same keychain item so Claude Code stays in sync. Verified interoperable.
+const OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
+const OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const OAUTH_REFRESH_MARGIN_MS = 5 * 60_000; // refresh this long before expiry
 // Gentle cadence: the endpoint rate-limits bursty callers (observed HTTP
 // 429 after several rapid host restarts), and quota % barely moves in five
 // minutes anyway.
@@ -75,6 +83,10 @@ const OAUTH_CACHE_FILE = "/tmp/deckhand-oauth-usage.json";
 const SESSIONS_DIR = path.join(os.homedir(), ".claude", "deckhand-sessions");
 const SESSION_STALE_MS = 20 * 60 * 1000; // 20 min with no update = treat as dead
 
+// Must match Serial.begin() in the firmware exactly - a mismatch yields pure
+// garbage, not a degraded link. Stays at 115200: every higher rate silently drops
+// bytes on this CH340 (measured 87% at 230400, 81-94% at 460800, unusable at
+// 921600). See the note at Serial.begin() in the firmware.
 const BAUD_RATE = 115200;
 const POLL_INTERVAL_MS = 5000;
 const RECONNECT_INTERVAL_MS = 3000;
@@ -96,6 +108,12 @@ const BLE_TX_CHAR_UUID = "6e400003b5a3f393e0a9e50e24dcca9e"; // device -> host n
 // the user taps an option on an asking session's detail screen; we write it
 // where the (blocked, waiting) session hook picks it up and turns it into a
 // real hook decision.
+//
+// The device and the Mac RACE for this: the hook only ever waits on a
+// PermissionRequest, whose dialog Claude Code shows concurrently, so both
+// surfaces are live and the first answer wins. See the measured note at the top
+// of claude-hooks/deckhand-session-hook.mjs for why that event and not the
+// PreToolUse one.
 const ANSWERS_DIR = path.join(os.homedir(), ".claude", "deckhand-answers");
 // Heartbeat the session hook checks before blocking on a remote answer.
 const HOST_ALIVE = "/tmp/deckhand-host-alive";
@@ -104,34 +122,128 @@ const HOST_ALIVE = "/tmp/deckhand-host-alive";
 // even in the worst case.
 const BLE_CHUNK_SIZE = 20;
 
-// ---------- Remote-answer authentication (A + B) ----------
-// { secret, device } persisted here. `secret` is the shared key that
-// authenticates every ANSWER; `device` is the specific BLE name we pin to
-// (learned over USB) so we never cross-connect to someone else's unit.
+// ---------- Remote-answer authentication (A + B), MULTI-PAIRING ----------
+// This Mac remembers MANY devices, each with its OWN secret, so a pairing is the
+// couple (this Mac, that device). That isolation is the point: forgetting one
+// device revokes only that pair, and a leaked key can't authenticate answers
+// coming from any other device.
+//
+//   { version: 2, hostId, devices: [ { name, secret, label, lastSeen } ], selected }
+//
+// `hostId` is this Mac's stable identity. It goes to the device on PROVISION and
+// rides in every payload, so a device paired with several Macs knows which of
+// its stored keys to sign an answer with. v1 files ({ secret, device }) are
+// migrated in place on first load, keeping the existing pair working.
 const PAIR_FILE = path.join(os.homedir(), ".claude", "deckhand-secret");
-let pairSecret = "";   // hex; auto-generated on first run (secure by default)
-let pairDevice = "";   // e.g. "Deckhand-A37A"; "" until learned over USB
+const MAX_PAIRED_DEVICES = 8;
+let hostId = "";                 // this Mac, e.g. "9f3c1a20"
+let hostLabel = os.hostname().replace(/\.local$/, "");
+let pairedDevices = [];          // [{ name, secret, label, lastSeen }]
+let selectedDevice = "";         // "" = auto (talk to any remembered device)
+let usbDeviceName = "";          // device currently on USB (learned from HELLO)
+let bleDeviceName = "";          // device currently on BLE
+// May the device DECIDE prompts, not just display them? On by default, because
+// it costs the Mac nothing: the hook only ever waits on a PermissionRequest, and
+// Claude Code shows that dialog concurrently - so the two surfaces race and the
+// first answer wins. Turn it off to make the device a read-only mirror.
+// Persisted alongside the pairings; toggled from the menu-bar app.
+let remoteAnswer = true;
+
+const deviceEntry = (name) => pairedDevices.find((d) => d.name === name) ?? null;
+// A device name is always "Deckhand-XXXX" with XXXX from the eFuse MAC. Validate
+// it before it can ever become a pairing: during the baud experiments, corrupted
+// HELLO lines (garbled by a mismatched rate) minted junk entries like
+// "Deckhand-\ufffd\ufffd\u0002v2", which burn slots in a list capped at
+// MAX_PAIRED_DEVICES and would eventually push a real device out.
+const VALID_DEVICE_NAME = /^Deckhand-[0-9A-Fa-f]{4}$/;
+const isValidDeviceName = (n) => typeof n === "string" && VALID_DEVICE_NAME.test(n);
+
+
+// The device we're actually talking to on a given transport. Answers are
+// verified with THAT device's key, never a blanket one.
+// BLE always knows who it connected to. USB learns the name from HELLO, which
+// the device only bursts for ~15s after boot - so if we attached mid-run we may
+// not have it, and fall back to the device we believe is selected. That's safe:
+// if the guess is wrong the HMAC simply fails and the answer is rejected.
+function deviceNameFor(via) {
+  if (via === "ble") return bleDeviceName;
+  return usbDeviceName || selectedDevice;
+}
 
 async function loadPairing() {
+  let p = null;
   try {
-    const p = JSON.parse(await fs.readFile(PAIR_FILE, "utf8"));
-    pairSecret = p.secret ?? "";
-    pairDevice = p.device ?? "";
+    p = JSON.parse(await fs.readFile(PAIR_FILE, "utf8"));
   } catch {
     // no file yet
   }
-  if (!pairSecret) {
-    pairSecret = crypto.randomBytes(16).toString("hex"); // 128-bit
-    await savePairing();
-    console.log("Auth: generated a new pairing secret (secure mode).");
+  if (p && Array.isArray(p.devices)) {
+    hostId = p.hostId ?? "";
+    const before = p.devices.length;
+    pairedDevices = p.devices.filter((d) => d && d.secret && isValidDeviceName(d.name));
+    if (pairedDevices.length !== before)
+      console.log(`Auth: dropped ${before - pairedDevices.length} malformed device name(s) from the pairing file.`);
+    selectedDevice = p.selected ?? "";
+    // Absent (a file written before this flag existed) means ON - the default.
+    remoteAnswer = p.remoteAnswer !== false;
+  } else if (p && p.secret) {
+    // ---- migrate v1: a single { secret, device } becomes one entry ----
+    hostId = "";
+    pairedDevices = p.device
+      ? [{ name: p.device, secret: p.secret, label: "", lastSeen: Date.now() }]
+      : [];
+    selectedDevice = p.device ?? "";
+    console.log(
+      `Auth: migrated pairing file to multi-device format${p.device ? ` (kept ${p.device})` : ""}.`
+    );
   }
+  if (!hostId) {
+    hostId = crypto.randomBytes(4).toString("hex");
+    console.log(`Auth: this Mac's pairing id is ${hostId} (${hostLabel}).`);
+  }
+  // A selection pointing at a device we no longer remember is meaningless.
+  if (selectedDevice && !deviceEntry(selectedDevice)) selectedDevice = "";
+  await savePairing();
 }
+
 async function savePairing() {
+  const body = {
+    version: 2,
+    hostId,
+    hostLabel,
+    devices: pairedDevices,
+    selected: selectedDevice,
+    remoteAnswer,
+  };
   await fs
-    .writeFile(PAIR_FILE, JSON.stringify({ secret: pairSecret, device: pairDevice }, null, 2), {
-      mode: 0o600,
-    })
+    .writeFile(PAIR_FILE, JSON.stringify(body, null, 2), { mode: 0o600 })
     .catch((e) => console.error("Auth: could not save pairing file:", e.message));
+  // writeFile's `mode` only applies when it CREATES the file, so a pre-existing
+  // file (restored from a backup, copied between machines, made by an older
+  // build) would keep whatever loose permissions it had. This holds every
+  // device's key now, so tighten it every time.
+  await fs.chmod(PAIR_FILE, 0o600).catch(() => {});
+}
+
+// Find this device's pairing, minting a fresh per-pair key the first time we
+// meet it. Only ever called for a device seen over USB, which is the trusted
+// link - a BLE peer can't talk us into creating a pairing for itself.
+async function rememberDevice(name) {
+  let entry = deviceEntry(name);
+  if (!entry) {
+    entry = { name, secret: crypto.randomBytes(16).toString("hex"), label: "", lastSeen: 0 };
+    pairedDevices.push(entry);
+    // Oldest-seen entries fall off the end rather than growing without bound.
+    if (pairedDevices.length > MAX_PAIRED_DEVICES) {
+      pairedDevices.sort((a, b) => (b.lastSeen ?? 0) - (a.lastSeen ?? 0));
+      const dropped = pairedDevices.splice(MAX_PAIRED_DEVICES);
+      for (const d of dropped) console.log(`Auth: forgot ${d.name} (pairing list full).`);
+    }
+    console.log(`Auth: new pairing with ${name} (its own key).`);
+  }
+  entry.lastSeen = Date.now();
+  await savePairing();
+  return entry;
 }
 
 // Per-prompt nonce so an ANSWER can't be replayed and is bound to one
@@ -153,9 +265,13 @@ function pruneNonces() {
   for (const [pid, e] of askNonces) if (now - e.seen > 60_000) askNonces.delete(pid);
 }
 
-function expectedHmac(nonce, pid, idx) {
+// Keyed with the secret of the DEVICE that sent the answer, so a device we're
+// paired with can only ever authenticate as itself.
+function expectedHmac(deviceName, nonce, pid, idx) {
+  const entry = deviceEntry(deviceName);
+  if (!entry) return "";
   return crypto
-    .createHmac("sha256", pairSecret)
+    .createHmac("sha256", entry.secret)
     .update(`${nonce}:${pid}:${idx}`)
     .digest("hex")
     .slice(0, 16);
@@ -197,15 +313,116 @@ try {
 // on every firmware flash during development, and an immediate poll per
 // restart once compounded into an hours-long rate-limit penalty.
 const OAUTH_BACKOFF_STATE = "/tmp/deckhand-oauth-backoff.json";
+// Last poll ATTEMPT (success OR failure), persisted across restarts. The
+// back-off file only exists after a 429; this bounds every network hit to at
+// most one per poll interval regardless of how many times the host restarts,
+// so a burst of dev reflashes can't escalate the endpoint's rate limiter.
+const OAUTH_ATTEMPT_STATE = "/tmp/deckhand-oauth-attempt.json";
 
-async function readOauthToken() {
+async function readOauthCredential() {
   const { stdout } = await execFileAsync("security", [
     "find-generic-password",
     "-s",
     OAUTH_KEYCHAIN_SERVICE,
     "-w",
   ]);
-  return JSON.parse(stdout).claudeAiOauth?.accessToken ?? null;
+  return JSON.parse(stdout);
+}
+
+// Exchange the (still-valid) refresh token for a fresh access token and write
+// the rotated tokens back into the SAME keychain item in place, preserving
+// every other field Claude Code stored. Only ever called when the access token
+// is expired/near-expiry; refuses if the refresh token itself is expired (that
+// needs a real re-login, and we must not hammer the token endpoint).
+async function refreshOauthToken(cred, retried = false) {
+  const o = cred.claudeAiOauth;
+  if (!o?.refreshToken) throw new Error("no refresh token in Keychain");
+  const triedToken = o.refreshToken;
+  // Deliberately NOT pre-rejecting on refreshTokenExpiresAt. That timestamp
+  // goes stale: the endpoint rotates the refresh token without always restating
+  // its lifetime, so the value we hold can describe a token we no longer have.
+  // Refusing on it stranded a perfectly good credential ("refresh token expired"
+  // while Claude Code itself was working fine). The server is authoritative -
+  // ask it, and treat only its rejection as a real logout.
+
+  const resp = await fetch(OAUTH_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      refresh_token: o.refreshToken,
+      client_id: OAUTH_CLIENT_ID,
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!resp.ok) {
+    // 400/401 from the token endpoint is the server saying this grant is dead
+    // (invalid_grant) - that IS a real re-login, unlike a 5xx or a timeout.
+    let detail = "";
+    try {
+      const e = await resp.json();
+      detail = e.error || e.error_description || "";
+    } catch {}
+    if (resp.status === 400 || resp.status === 401) {
+      // Refresh tokens ROTATE, and Claude Code itself refreshes the same one we
+      // do - so "invalid_grant" often just means it beat us to it and our copy
+      // is one generation stale. Re-read the keychain: if the stored token has
+      // moved on, retry once with the current one instead of declaring a
+      // logout. Only a genuinely dead grant should ask the user to sign in.
+      if (!retried) {
+        const fresh = await readOauthCredential().catch(() => null);
+        const newTok = fresh?.claudeAiOauth?.refreshToken;
+        if (newTok && newTok !== triedToken) {
+          console.log("OAuth: refresh token had been rotated elsewhere - retrying with the current one.");
+          return refreshOauthToken(fresh, true);
+        }
+      }
+      throw new Error(
+        `refresh rejected${detail ? ` (${detail})` : ""} - sign in to Claude Code again`
+      );
+    }
+    throw new Error(`token refresh HTTP ${resp.status}`);
+  }
+  const d = await resp.json();
+  if (!d.access_token) throw new Error("refresh response missing access_token");
+
+  const now = Date.now();
+  o.accessToken = d.access_token;
+  if (d.expires_in) o.expiresAt = now + d.expires_in * 1000;
+  if (d.refresh_token) {
+    o.refreshToken = d.refresh_token; // rotates - MUST persist
+    // New token, and the response didn't say how long it lives: drop the old
+    // expiry instead of carrying it forward, or it ends up describing the
+    // token we just replaced (which is what stranded us in the first place).
+    if (d.refresh_token_expires_in) o.refreshTokenExpiresAt = now + d.refresh_token_expires_in * 1000;
+    else delete o.refreshTokenExpiresAt;
+  } else if (d.refresh_token_expires_in) {
+    o.refreshTokenExpiresAt = now + d.refresh_token_expires_in * 1000;
+  }
+
+  // Update the keychain item in place (-U), matched by its own account + service.
+  // Value passed as a direct argv (no shell) so the token bytes aren't mangled.
+  const meta = (await execFileAsync("security", ["find-generic-password", "-s", OAUTH_KEYCHAIN_SERVICE])).stdout;
+  const acct = (meta.match(/"acct"<blob>="([^"]*)"/) || [])[1];
+  if (!acct) throw new Error("could not read keychain account");
+  await execFileAsync("security", [
+    "add-generic-password", "-U", "-a", acct, "-s", OAUTH_KEYCHAIN_SERVICE, "-w", JSON.stringify(cred),
+  ]);
+  console.log(`OAuth: refreshed access token (valid ${(d.expires_in / 3600).toFixed(1)}h), rotated tokens persisted.`);
+  return o.accessToken;
+}
+
+// A currently-valid access token, refreshing proactively if it's expired or
+// within the margin. Returns { token, cred } so a 401 can trigger one reactive
+// retry without re-reading.
+async function getFreshAccessToken() {
+  const cred = await readOauthCredential();
+  const o = cred.claudeAiOauth;
+  if (!o?.accessToken) throw new Error("no OAuth token in Keychain");
+  if (!o.expiresAt || o.expiresAt < Date.now() + OAUTH_REFRESH_MARGIN_MS) {
+    return { token: await refreshOauthToken(cred), cred, refreshed: true };
+  }
+  return { token: o.accessToken, cred, refreshed: false };
 }
 
 async function fetchOauthUsage(token) {
@@ -235,13 +452,40 @@ async function pollOauthUsage() {
       // no back-off state, proceed
     }
 
-    // Read the token fresh on every poll (cheap at this cadence). Claude
-    // Code rotates it; holding a cached copy once pinned the poller in a
-    // rate-limit loop while the Keychain already had a good token.
-    const token = await readOauthToken();
-    if (!token) throw new Error("no OAuth token in Keychain");
+    // Minimum spacing between network hits, enforced across restarts. Each
+    // restart is a fresh process that would otherwise poll immediately with a
+    // stale cache; persisting the last ATTEMPT time (not just successes) keeps
+    // a burst of reflashes to one hit per interval, so we never escalate the
+    // limiter. Cheap files, so this is belt-and-suspenders with the back-off.
+    try {
+      const { at } = JSON.parse(await fs.readFile(OAUTH_ATTEMPT_STATE, "utf8"));
+      const sinceAttempt = Date.now() - at;
+      if (sinceAttempt >= 0 && sinceAttempt < OAUTH_POLL_INTERVAL_MS) {
+        setTimeout(pollOauthUsage, OAUTH_POLL_INTERVAL_MS - sinceAttempt);
+        return;
+      }
+    } catch {
+      // no attempt record, proceed
+    }
 
-    const resp = await fetchOauthUsage(token);
+    // Read the token fresh on every poll (cheap at this cadence). Claude Code
+    // rotates it; holding a cached copy once pinned the poller in a rate-limit
+    // loop while the Keychain already had a good token. Refresh proactively if
+    // it's expired/near-expiry so an always-on host survives the app being shut.
+    const { token, cred, refreshed } = await getFreshAccessToken();
+
+    // Record the attempt BEFORE the network call so a failure (429, timeout)
+    // still counts against the spacing above - otherwise a failing endpoint
+    // would let every restart retry immediately.
+    await fs.writeFile(OAUTH_ATTEMPT_STATE, JSON.stringify({ at: Date.now() })).catch(() => {});
+
+    let resp = await fetchOauthUsage(token);
+    // A 401 with a token we didn't just refresh means it was rejected anyway
+    // (revoked/rotated elsewhere) - refresh once and retry, never in a loop.
+    if (resp.status === 401 && !refreshed) {
+      console.error("OAuth usage: 401 on a non-expired token, refreshing once and retrying");
+      resp = await fetchOauthUsage(await refreshOauthToken(cred));
+    }
     if (resp.status === 429) {
       const retryAfterSec = parseInt(resp.headers.get("retry-after") ?? "", 10);
       const backoffMs = Number.isFinite(retryAfterSec)
@@ -315,6 +559,32 @@ async function modelFromTranscript(transcriptPath) {
   }
 }
 
+// The PROJECT name, not the current directory's name. The hook rewrites `cwd` on
+// every event with Claude Code's live working directory, so a `cd` into a
+// subdirectory renamed the session on the device mid-task ("core" became "host").
+// The git repo ROOT is stable across any `cd` within the repo and is what a person
+// means by "the project", so use that and fall back to the raw cwd outside a repo.
+//
+// Cached by cwd: this runs per session per 5s tick, and spawning git that often for
+// an answer that never changes is waste.
+const repoRootCache = new Map();
+async function projectName(cwd) {
+  if (!cwd) return "unknown";
+  if (repoRootCache.has(cwd)) return repoRootCache.get(cwd);
+  let name = path.basename(cwd) || "unknown";
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
+      timeout: 1000,
+    });
+    const root = stdout.trim();
+    if (root) name = path.basename(root);
+  } catch {
+    // not a git repo (or no git) - the directory name is the best we have
+  }
+  repoRootCache.set(cwd, name);
+  return name;
+}
+
 async function gitBranch(cwd) {
   try {
     const { stdout } = await execFileAsync("git", ["-C", cwd, "branch", "--show-current"], {
@@ -362,7 +632,7 @@ async function readSessions() {
     top.map(async (record) => {
       const item = {
         id: (record.id || "").slice(0, 12), // 12 uuid chars is plenty to disambiguate
-        name: (path.basename(record.cwd || "") || "unknown").slice(0, 20),
+        name: (await projectName(record.cwd || "")).slice(0, 20),
         status: record.status,
         path: truncatePath(record.cwd || "", 48),
         model: ((await modelFromTranscript(record.transcript)) || record.model || "").slice(0, 20),
@@ -452,24 +722,309 @@ async function readUsage() {
 let lastAnswerKey = "";
 let lastAnswerAt = 0;
 
+// ---------- audio capture sink ----------
+// MICREC dumps ~445 base64 lines back to back. Those must NOT go through
+// console.log: it writes to the log file AND to stdout, and under `open
+// DeckhandBLE.app` stdout has no reader - so once that pipe fills, the write
+// blocks, this reader stops draining the serial port, and the OS buffer
+// overflows. MEASURED: at 460800 that lost ~19% of the lines (362 of 445
+// arriving), and the surviving mu-law decoded as loud garbage that Whisper
+// confidently transcribed as words nobody said. Writing straight to a file keeps
+// the reader hot and keeps a megabyte of base64 out of the log.
+const AUDIO_DIR = path.join(os.homedir(), "Deckhand-audio");
+// ---------- voice -> prompt ----------
+// Absolute paths on purpose: this process is launched via `open DeckhandBLE.app`,
+// which does NOT inherit the shell's PATH, so bare "claude"/"whisper-cli" are not
+// findable. Overridable for a different install.
+const CLAUDE_BIN = process.env.CLAUDE_BIN || path.join(os.homedir(), ".local/bin/claude");
+const WHISPER_BIN = process.env.WHISPER_BIN || "/opt/homebrew/bin/whisper-cli";
+// Vocabulary priming. Whisper has no idea what this project's nouns are: a real
+// dictation of "update CLAUDE.md" came back as "update core code MD5". An initial
+// prompt biases the decoder toward expected terms and costs nothing - no bigger
+// model, no extra time. --carry-initial-prompt re-applies it to every window, which
+// matters for a 30s+ dictation (otherwise it only conditions the first 30s).
+const WHISPER_PROMPT =
+  process.env.WHISPER_PROMPT ||
+  "Deckhand, CLAUDE.md, README.md, ESP32, firmware, flash, BLE, ADPCM, Whisper, " +
+    "git commit, refactor, repository, session, transcript, host script, microphone.";
+const WHISPER_MODEL =
+  process.env.WHISPER_MODEL || path.join(os.homedir(), ".cache/whisper.cpp/ggml-large-v3-turbo-q5_0.bin");
+
+// Transcribe a saved capture, and - if the dictation was aimed at a session -
+// hand the text to that session as a new prompt.
+//
+// The channel is `claude -p --resume <session_id>`, which is the only supported
+// way to add a turn to an existing conversation: hooks can observe and decide, but
+// they cannot inject a prompt into a RUNNING interactive session. So this appends
+// to the conversation headlessly, which is the right shape for this device anyway
+// - the whole point is that you are not sitting at the Mac.
+//
+// Deliberately left at the DEFAULT permission mode. A dictated instruction still
+// has to clear the normal permission prompts, which the device itself can answer
+// (see the remote-answering note) - so a misheard command cannot quietly run a
+// tool. Raising it to acceptEdits/bypassPermissions would remove that safeguard,
+// and that is the user's call to make, not a default to inherit.
+async function transcribeAndDispatch(captureFile, target) {
+  const wav = path.join(AUDIO_DIR, "latest.wav");
+  const clean = path.join(AUDIO_DIR, "latest-clean.wav");
+  try {
+    // process.execPath, not "node": this process is the node copy inside
+    // DeckhandBLE.app and has no PATH to find a bare "node" with.
+    await execFileAsync(process.execPath, [path.join(__dirname, "mic-wav.mjs"), captureFile, wav]);
+  } catch (err) {
+    console.error(`Voice: decode failed (truncated capture?): ${err.message.split("\n")[0]}`);
+    return;
+  }
+  let text = "";
+  try {
+    const args = ["-m", WHISPER_MODEL, "-f", clean, "-nt"];
+    if (WHISPER_PROMPT) args.push("--prompt", WHISPER_PROMPT, "--carry-initial-prompt");
+    const { stdout } = await execFileAsync(WHISPER_BIN, args, {
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    text = stdout.replace(/\s+/g, " ").trim();
+  } catch (err) {
+    console.error(`Voice: whisper failed: ${err.message.split("\n")[0]}`);
+    setVoice("error", { reply: "transcription failed" });
+    return;
+  }
+  if (!text) {
+    console.log("Voice: nothing recognised - not dispatching.");
+    return;
+  }
+  console.log(`Voice: transcript = "${text}"`);
+  setVoice("heard", { text });
+  if (!target || target === "-") {
+    console.log("Voice: no target session (recorded from a tab, not a session) - kept as a memo.");
+    setVoice("memo", { text });
+    return;
+  }
+  // The device only knows the first 12 chars of the id; resolve the real one.
+  let sessionId = null, cwd = null;
+  try {
+    const files = await fs.readdir(SESSIONS_DIR);
+    const file = files.find((f) => f.endsWith(".json") && f.startsWith(target));
+    if (file) {
+      sessionId = path.basename(file, ".json");
+      cwd = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, file), "utf8")).cwd || undefined;
+    }
+  } catch {}
+  if (!sessionId) {
+    console.error(`Voice: no session matching ${target} - transcript not dispatched.`);
+    setVoice("error", { text, reply: "no matching session" });
+    return;
+  }
+  console.log(`Voice: -> session ${sessionId}${cwd ? ` (cwd ${cwd})` : ""}`);
+  setVoice("sent", { text, session: target });
+  // Detached: a dictated task can run for minutes and must not block this poller.
+  const child = execFile(
+    CLAUDE_BIN,
+    ["-p", "--resume", sessionId, text],
+    // stdin ignored on purpose: `claude -p` otherwise waits on it and warns
+    // "no stdin data received in 3s" before proceeding.
+    { cwd, maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] },
+    (err, stdout, stderr) => {
+      if (err) {
+        console.error(`Voice: claude failed: ${(stderr || err.message).split("\n")[0]}`);
+        setVoice("error", { reply: (stderr || err.message).split("\n")[0] });
+        return;
+      }
+      // Log the reply itself, not just its length: without it a dictation is a
+      // black hole - you can see that something happened but never what.
+      const reply = stdout.trim().replace(/\s+/g, " ");
+      console.log(
+        `Voice: claude replied (${reply.length} chars): ` +
+          (reply.length > 400 ? reply.slice(0, 400) + " ..." : reply)
+      );
+      setVoice("done", { reply });
+    }
+  );
+  child.unref?.();
+}
+
+let audioCapture = null; // { header, lines: [], started }
+
+async function finishAudioCapture(complete) {
+  if (!audioCapture) return;
+  const cap = audioCapture;
+  audioCapture = null;
+  const claimed = Number((cap.header.match(/samples=(\d+)/) ?? [, 0])[1]);
+  const bytes = cap.lines.reduce((n, l) => n + l.length, 0);
+  const got = Math.floor((bytes * 3) / 4);
+  const file = path.join(AUDIO_DIR, `capture-${cap.started}.txt`);
+  try {
+    await fs.mkdir(AUDIO_DIR, { recursive: true });
+    await fs.writeFile(
+      file,
+      [cap.header, ...cap.lines.map((l) => `AUDIO d ${l}`), "AUDIO end"].join("\n") + "\n"
+    );
+  } catch (err) {
+    console.error(`Audio: could not save capture: ${err.message}`);
+    return;
+  }
+  const pct = claimed ? Math.round((got / claimed) * 100) : 0;
+  console.log(
+    `Audio: saved ${file} (${cap.lines.length} lines, ~${got}/${claimed} samples = ${pct}%` +
+      `${complete ? "" : ", NO 'AUDIO end' - truncated"}${pct < 98 ? ", INCOMPLETE" : ""})`
+  );
+  // One-shot captures get transcribed too. They carry no target, so they land as a
+  // memo rather than being dispatched anywhere.
+  if (pct >= 98) transcribeAndDispatch(file, "-").catch((e) => console.error("Voice:", e.message));
+}
+
+// ---------- streaming audio sink ----------
+// Frames are ACKed so the device can throttle itself. Without that a host stall
+// (a ccusage spawn, a slow log write) silently overflows the OS serial buffer -
+// the failure that once produced a truncated capture Whisper "transcribed" as
+// words nobody said. The device allows MIC_STREAM_WINDOW frames in flight.
+// The last voice exchange, published to BOTH surfaces so a dictation is never
+// invisible: into the device payload (it draws a result card) and into the
+// heartbeat (the menu bar shows it). Before this, the only way to know what you
+// had said - or whether Claude acted on it - was to tail the host log.
+// Text is capped: the device's line buffer has to hold a whole payload, and asks
+// already claim up to 1400 chars of it.
+let lastVoice = null; // { seq, at, state, text, reply, session }
+let voiceSeq = 0;
+const VOICE_TEXT_MAX = 200;
+const VOICE_REPLY_MAX = 420;
+function setVoice(state, fields = {}) {
+  lastVoice = {
+    // Small monotonic counter for the DEVICE. Date.now() is ~1.79e12 and `long` on
+    // ESP32 is 32-bit, so a ms timestamp overflows and every comparison against it
+    // is meaningless. `at` stays for the Mac side, which has no such limit.
+    seq: ++voiceSeq,
+    at: Date.now(),
+    state,
+    text: (fields.text ?? lastVoice?.text ?? "").slice(0, VOICE_TEXT_MAX),
+    reply: (fields.reply ?? "").slice(0, VOICE_REPLY_MAX),
+    session: fields.session ?? lastVoice?.session ?? "",
+  };
+}
+
+let audioStream = null; // { header, rate, chunks: [], expectSeq, gaps, started }
+
+function onAudioFrame(seq, payload) {
+  if (!audioStream) return; // frame outside a stream: nothing to attach it to
+  if (seq !== audioStream.expectSeq) {
+    audioStream.gaps++;
+    console.error(`Audio: frame gap - expected ${audioStream.expectSeq}, got ${seq}`);
+  }
+  audioStream.expectSeq = seq + 1;
+  audioStream.chunks.push(Buffer.from(payload));
+  if (usbPort) usbPort.write(`AUDIO ack ${seq}\n`);
+}
+
+async function finishAudioStream(tail) {
+  if (!audioStream) return;
+  const st = audioStream;
+  audioStream = null;
+  const data = Buffer.concat(st.chunks);
+  const file = path.join(AUDIO_DIR, `stream-${st.started}.txt`);
+  try {
+    await fs.mkdir(AUDIO_DIR, { recursive: true });
+    // Written as the same base64 text envelope mic-wav.mjs already understands,
+    // so the decoder needs no new file format - only the ima4 codec.
+    const lines = [];
+    for (let i = 0; i < data.length; i += 144)
+      lines.push("AUDIO d " + data.subarray(i, i + 144).toString("base64"));
+    // Normalise to the SAME "AUDIO begin ..." envelope one-shot captures use, so
+    // mic-wav.mjs needs no new file format - only the ima4 codec branch.
+    const f = (k, d) => (st.header.match(new RegExp(k + "=(-?\\d+)")) ?? [, d])[1];
+    const header =
+      `AUDIO begin rate=${f("rate", 16000)} bits=4 codec=ima4 scale=${f("scale", 8)} ` +
+      `samples=${st.samples ?? data.length * 2} dc=${f("dc", 0)} bytes=${data.length}`;
+    await fs.writeFile(file, [header, ...lines, "AUDIO end"].join("\n") + "\n");
+  } catch (err) {
+    console.error(`Audio: could not save stream: ${err.message}`);
+    return;
+  }
+  console.log(
+    `Audio: saved ${file} (${data.length} bytes, ${st.chunks.length} frames, ` +
+      `${(data.length / 8000).toFixed(1)}s at 16kHz ima4, gaps=${st.gaps})  ${tail}`
+  );
+  // Fire and forget: transcription plus a dictated task can take a while, and the
+  // serial reader must keep draining throughout.
+  transcribeAndDispatch(file, st.target).catch((e) => console.error("Voice:", e.message));
+}
+
 async function handleDeviceLine(line, via) {
+  // Audio first, and deliberately unlogged - see the note above.
+  if (via === "usb") {
+    if (line.startsWith("AUDIO begin ")) {
+      if (audioCapture) await finishAudioCapture(false);
+      audioCapture = { header: line, lines: [], started: Date.now() };
+      console.log(`[device/${via}] ${line}`);
+      return;
+    }
+    if (line.startsWith("AUDIO d ")) {
+      if (audioCapture) audioCapture.lines.push(line.slice(8));
+      return; // never logged
+    }
+    if (line === "AUDIO end") {
+      await finishAudioCapture(true);
+      return;
+    }
+    if (line.startsWith("AUDIO stream ")) {
+      const tm = line.match(/target=(\S+)/);
+      audioStream = { header: line, target: tm ? tm[1] : "-", chunks: [], expectSeq: 0, gaps: 0, started: Date.now() };
+      console.log(`[device/${via}] ${line}`);
+      return;
+    }
+    if (line.startsWith("AUDIO streamend")) {
+      const m = line.match(/samples=(\d+)/);
+      if (audioStream && m) audioStream.samples = parseInt(m[1], 10);
+      console.log(`[device/${via}] ${line}`);
+      await finishAudioStream(line.replace("AUDIO streamend ", ""));
+      return;
+    }
+  }
   console.log(`[device/${via}] ${line}`);
 
   // Device announces its unique BLE name over USB (trusted): pin BLE to it,
   // and push it the shared secret so it can authenticate answers. HELLO is
   // only honored over USB - a BLE peer must not be able to steer us.
   if (line.startsWith("HELLO ") && via === "usb") {
-    const name = line.slice(6).trim();
-    if (name && name !== pairDevice) {
-      pairDevice = name;
-      await savePairing();
-      console.log(`Auth: paired device is ${name} (BLE pinned to it).`);
+    // "HELLO <name> [v2]" - v2 firmware understands the per-Mac PROVISION form.
+    // Older firmware sends just the name and stores ONE secret, so we send it
+    // the bare key instead; that still works, because the key we send is this
+    // pair's own key and the device signs with exactly what it was given.
+    const [name, proto = ""] = line.slice(6).trim().split(/\s+/);
+    if (name && !isValidDeviceName(name)) {
+      console.error(`Auth: ignoring HELLO with malformed name ${JSON.stringify(name)} (line corruption?).`);
+      return;
     }
-    if (usbPort) usbPort.write(`PROVISION ${pairSecret}\n`); // over USB only
+    if (name) {
+      usbDeviceName = name;
+      const entry = await rememberDevice(name); // mints a key for a new device
+      // Nothing chosen yet (first run, or the selection was forgotten): adopt
+      // the device that's physically plugged in. An existing choice is left
+      // alone, so plugging a second unit in to charge doesn't steal the link.
+      if (!selectedDevice) {
+        selectedDevice = name;
+        await savePairing();
+        console.log(`Auth: selected ${name}.`);
+      }
+      // hostId tells a device paired with several Macs which key to sign with.
+      if (usbPort) {
+        usbPort.write(
+          proto === "v2"
+            ? `PROVISION ${hostId} ${entry.secret} ${hostLabel}\n` // USB only
+            : `PROVISION ${entry.secret}\n` // pre-multi-pairing firmware
+        );
+      }
+    }
     return;
   }
 
   if (!line.startsWith("ANSWER ")) return;
+  // In mirror mode nothing is waiting for an answer file and the Mac owns the
+  // decision, so drop taps rather than leaving a file that could decide a LATER
+  // prompt. (Current firmware won't send these - it renders the options
+  // read-only - but an older build on the same key still would.)
+  if (!remoteAnswer) {
+    console.log("Remote answer ignored - mirror mode (answer on the Mac, or enable it in the menu bar).");
+    return;
+  }
   // The device sends on USB and BLE simultaneously - process one copy.
   if (line === lastAnswerKey && Date.now() - lastAnswerAt < 3000) return;
   lastAnswerKey = line;
@@ -484,15 +1039,17 @@ async function handleDeviceLine(line, via) {
   // for THIS prompt. Rejects forged answers from an impersonating peripheral
   // and replays (the nonce is consumed on success).
   const entry = askNonces.get(pid);
-  const want = entry ? expectedHmac(entry.nonce, pid, idx) : "";
+  const from = deviceNameFor(via); // which paired device this arrived from
+  const want = entry && from ? expectedHmac(from, entry.nonce, pid, idx) : "";
   const good =
-    !!entry &&
+    !!want &&
     typeof mac === "string" &&
     mac.length === want.length &&
     crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want));
   if (!good) {
     console.error(
-      `Remote answer REJECTED (bad/missing auth) for prompt ${pid} via ${via} - ignoring.`
+      `Remote answer REJECTED (bad/missing auth) for prompt ${pid} via ${via}` +
+        `${from ? ` from ${from}` : " (unknown device)"} - ignoring.`
     );
     return;
   }
@@ -560,13 +1117,35 @@ async function connectUsb() {
   console.log("USB: connected.");
   usbPort = port;
 
-  let rxBuf = "";
+  // Accumulates BYTES, not a string. Streaming audio arrives as raw binary frames
+  // ("AUDIO bin <seq> <n>" then exactly n bytes), and `chunk.toString("utf8")`
+  // would mangle every byte outside ASCII - lossily and silently. So the reader is
+  // a small state machine over a Buffer: line mode until a frame header says how
+  // many raw bytes follow, then byte-count mode for exactly that many.
+  let rxBuf = Buffer.alloc(0);
+  let wantBytes = 0; // >0 = mid-frame, collecting binary
+  let wantSeq = 0;
   port.on("data", (chunk) => {
-    rxBuf += chunk.toString("utf8");
-    let idx;
-    while ((idx = rxBuf.indexOf("\n")) !== -1) {
-      const line = rxBuf.slice(0, idx).trim();
-      rxBuf = rxBuf.slice(idx + 1);
+    rxBuf = rxBuf.length ? Buffer.concat([rxBuf, chunk]) : chunk;
+    for (;;) {
+      if (wantBytes > 0) {
+        if (rxBuf.length < wantBytes) return; // wait for the rest of the frame
+        const payload = rxBuf.subarray(0, wantBytes);
+        rxBuf = rxBuf.subarray(wantBytes);
+        wantBytes = 0;
+        onAudioFrame(wantSeq, payload);
+        continue;
+      }
+      const idx = rxBuf.indexOf(0x0a); // '\n'
+      if (idx === -1) return;
+      const line = rxBuf.subarray(0, idx).toString("latin1").trim();
+      rxBuf = rxBuf.subarray(idx + 1);
+      const m = line.match(/^AUDIO bin (\d+) (\d+)$/);
+      if (m) {
+        wantSeq = parseInt(m[1], 10);
+        wantBytes = parseInt(m[2], 10);
+        continue;
+      }
       if (line) handleDeviceLine(line, "usb");
     }
   });
@@ -580,6 +1159,19 @@ async function connectUsb() {
 
 // ---------- BLE transport ----------
 let bleCharacteristic = null;
+let blePeripheral = null; // kept so switching devices can drop the old link
+
+// Drop the current BLE link and go back to scanning - used when the chosen
+// device changes, so we don't stay stuck on the previous one.
+async function rescanBle(why) {
+  if (blePeripheral) {
+    console.log(`BLE: ${why}, disconnecting from ${bleDeviceName || "device"}...`);
+    await blePeripheral.disconnectAsync().catch(() => {});
+    // the 'disconnect' handler clears state and restarts the scan
+  } else {
+    startBleScan();
+  }
+}
 
 // Scans for every device rather than filtering by our 128-bit service UUID:
 // that UUID is 16 bytes, which usually doesn't fit in the 31-byte primary
@@ -601,11 +1193,13 @@ function startBle() {
 
   noble.on("discover", async (peripheral) => {
     const name = peripheral.advertisement.localName || "";
-    // Connect only to OUR device: the exact name learned over USB if we have
-    // it (so we never grab a neighbor's unit in a shared room), otherwise any
-    // "Deckhand[-XXXX]" as a first-run bootstrap.
-    if (pairDevice) {
-      if (name !== pairDevice) return;
+    // Connect only to OUR device, so we never grab a neighbour's unit in a
+    // shared room: the one that's been chosen, else any device we're already
+    // paired with, else any "Deckhand[-XXXX]" as a first-run bootstrap.
+    if (selectedDevice) {
+      if (name !== selectedDevice) return;
+    } else if (pairedDevices.length) {
+      if (!deviceEntry(name)) return;
     } else if (name !== "Deckhand" && !name.startsWith("Deckhand-")) {
       return;
     }
@@ -641,15 +1235,21 @@ function startBle() {
           console.error("BLE: TX subscribe failed:", err.message);
         });
       }
-      console.log("BLE: connected and ready.");
+      blePeripheral = peripheral;
+      bleDeviceName = name; // answers over BLE are verified with THIS device's key
+      console.log(`BLE: connected to ${name} and ready.`);
       peripheral.once("disconnect", () => {
         console.log("BLE: disconnected, re-scanning...");
         bleCharacteristic = null;
+        blePeripheral = null;
+        bleDeviceName = "";
         startBleScan();
       });
     } catch (err) {
       console.error("BLE: connect failed:", err.message);
       bleCharacteristic = null;
+      blePeripheral = null;
+      bleDeviceName = "";
       startBleScan();
     }
   });
@@ -674,13 +1274,33 @@ async function tick() {
   try {
     pruneNonces();
     // Heartbeat for the session hook: it only blocks waiting for a remote
-    // answer when a display is genuinely connected right now.
+    // answer when a display is genuinely connected right now AND the user has
+    // opted into device answering (otherwise blocking would hide the Mac's own
+    // dialog, which is exactly what mirror mode avoids).
     await fs
-      .writeFile(HOST_ALIVE, JSON.stringify({ connected: !!(usbPort || bleCharacteristic), at: Date.now() }))
+      .writeFile(
+        HOST_ALIVE,
+        JSON.stringify({
+          connected: !!(usbPort || bleCharacteristic),
+          remoteAnswer,
+          at: Date.now(),
+          // `device` = who we're actually talking to (falls back to the choice);
+          // `devices`/`selected` let the menu bar render the picker without ever
+          // reading the secrets file.
+          device: bleDeviceName || usbDeviceName || selectedDevice || null,
+          selected: selectedDevice || null,
+          devices: pairedDevices.map((d) => d.name),
+          voice: lastVoice,
+        })
+      )
       .catch(() => {});
 
     const usage = await readUsage();
-    const line = JSON.stringify(usage) + "\n";
+    // hostId rides along so a device paired with several Macs knows which of
+    // its stored keys to sign this prompt's answer with. remoteAnswer tells the
+    // device whether its option buttons are live or read-only, so it never
+    // offers a control that can't do anything.
+    const line = JSON.stringify({ ...usage, hostId, remoteAnswer, voice: lastVoice }) + "\n";
     if (usbPort) usbPort.write(line);
     if (bleCharacteristic) await sendOverBle(line);
     console.log(
@@ -701,25 +1321,94 @@ setInterval(async () => {
   try {
     const command = (await fs.readFile(COMMAND_TRIGGER_PATH, "utf8")).trim();
     await fs.rm(COMMAND_TRIGGER_PATH, { force: true });
-    if (command) {
-      console.log(`Sending command to device: ${command}`);
-      if (usbPort) usbPort.write(command + "\n");
-      if (bleCharacteristic) await sendOverBle(command + "\n");
+    if (!command) return;
+    // FORGET is a host-side command (from the menu-bar app), not forwarded to
+    // the device: drop the BLE pin so we re-pair to whatever device is next
+    // plugged in over USB (its HELLO re-pins us). The device keeps its own
+    // secret until a new Mac re-provisions it; use the device's "Reset pairing"
+    // button to wipe that side.
+    // SELECT <name> — choose which remembered device to talk to. "SELECT" with
+    // no name (or "SELECT auto") goes back to "any remembered device".
+    // REMOTE on|off — may the device DECIDE prompts, or only display them?
+    // Host-side only (the device learns it from the payload flag). "off" is
+    // mirror mode: the hook never blocks, so the Mac keeps its own dialog.
+    if (command === "REMOTE" || command.startsWith("REMOTE ")) {
+      const arg = command.slice(6).trim().toLowerCase();
+      const want = arg === "on" ? true : arg === "off" ? false : !remoteAnswer;
+      if (want !== remoteAnswer) {
+        remoteAnswer = want;
+        await savePairing();
+      }
+      console.log(
+        remoteAnswer
+          ? "Remote answering ON - device and Mac both live; first answer wins."
+          : "Remote answering OFF - the device mirrors prompts read-only; the Mac decides them."
+      );
+      return;
     }
+    if (command === "SELECT" || command.startsWith("SELECT ")) {
+      const want = command.slice(6).trim();
+      if (!want || want.toLowerCase() === "auto") {
+        selectedDevice = "";
+        await savePairing();
+        console.log("Auth: selection cleared - will talk to any remembered device.");
+        await rescanBle("selection cleared");
+      } else if (!deviceEntry(want)) {
+        console.error(`Auth: SELECT ${want} ignored - not a remembered device.`);
+      } else if (want !== selectedDevice) {
+        selectedDevice = want;
+        await savePairing();
+        console.log(`Auth: selected ${want}.`);
+        await rescanBle(`switching to ${want}`);
+      }
+      return;
+    }
+    // FORGET [name] — drop one pairing (its key with it). With no name, forget
+    // whichever device is current. The device keeps its own copy until a new Mac
+    // re-provisions it or you use its own "Reset pairing" button.
+    if (command === "FORGET" || command.startsWith("FORGET ")) {
+      const want = command.slice(6).trim() || bleDeviceName || usbDeviceName || selectedDevice;
+      if (!want) {
+        console.log("Auth: FORGET ignored - no device to forget.");
+        return;
+      }
+      const before = pairedDevices.length;
+      pairedDevices = pairedDevices.filter((d) => d.name !== want);
+      if (pairedDevices.length === before) {
+        console.error(`Auth: FORGET ${want} ignored - not a remembered device.`);
+        return;
+      }
+      if (selectedDevice === want) selectedDevice = "";
+      await savePairing();
+      console.log(`Auth: forgot ${want} (its key is gone); re-pairs on its next USB HELLO.`);
+      if (bleDeviceName === want) await rescanBle(`forgot ${want}`);
+      return;
+    }
+    console.log(`Sending command to device: ${command}`);
+    if (usbPort) usbPort.write(command + "\n");
+    if (bleCharacteristic) await sendOverBle(command + "\n");
   } catch {
     // no trigger file waiting, nothing to do
   }
 }, 500);
 
 await loadPairing();
-if (pairDevice) console.log(`Auth: BLE pinned to ${pairDevice}.`);
+console.log(
+  `Auth: ${pairedDevices.length} paired device(s)${
+    pairedDevices.length ? `: ${pairedDevices.map((d) => d.name).join(", ")}` : ""
+  }.`
+);
+if (selectedDevice) console.log(`Auth: BLE pinned to ${selectedDevice}.`);
+else if (pairedDevices.length) console.log("Auth: no device selected - will take any remembered one.");
+console.log(
+  remoteAnswer
+    ? "Prompts: answerable on the device AND on the Mac (first answer wins)."
+    : "Prompts: mirror only (shown on the device, decided on the Mac)."
+);
 connectUsb();
 startBle();
-// If the persisted snapshot is still inside the poll interval, wait out the
-// remainder instead of polling on startup - restarts must not burst the
-// endpoint's rate limiter.
-{
-  const age = oauthUsage ? Date.now() - oauthUsage.fetchedAt : Infinity;
-  setTimeout(pollOauthUsage, age < OAUTH_POLL_INTERVAL_MS ? OAUTH_POLL_INTERVAL_MS - age : 0);
-}
+// Kick the poller; it self-throttles on the persisted back-off AND last-attempt
+// state, so a restart never bursts the endpoint's rate limiter even with a
+// stale cache - no need to compute a startup delay here anymore.
+setTimeout(pollOauthUsage, 0);
 tick();
