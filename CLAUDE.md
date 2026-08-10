@@ -311,6 +311,65 @@ two things `host/index.mjs` cannot get any other way:
   device-side RESET PAIRING (no reboot) still won't silently re-pair. (`deviceNameReported` is now
   vestigial — nothing gates on it.)
 
+- **Codex support is PULL, not push — it has no hooks, and that shapes everything.**
+  Claude Code state arrives because `deckhand-session-hook.mjs` is *invoked* on every
+  event. Codex offers no such mechanism, so the host reads its files instead. Verified
+  against real rollouts on this machine:
+  Everything comes from `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl`:
+  `session_meta` (cwd, `thread_source`), `turn_context` (live cwd, model), `event_msg`
+  `task_started`/`task_complete`, and `token_count.rate_limits`.
+  Consequences worth knowing before changing any of it:
+  - **Freshness is the rollout file's MTIME. `session_index.jsonl` is NOT used, and
+    that's the first thing that broke in real use.** That file exists, has one line per
+    thread with an `updated_at`, and looks like exactly the right index — but Codex
+    appends to a rollout LIVE and only rewrites the index later. Measured while a
+    thread was actively in use: index said **26 minutes idle**, the rollout had been
+    touched **1 minute** ago. Keying off the index made an open Codex session invisible
+    on the device. Walking the tree is cheap (one directory per day, a couple of dozen
+    files after months of use) so it runs every tick — and an early version that cached
+    id→path lookups *including misses* permanently hid any thread whose rollout didn't
+    exist yet at first look.
+  - **Rollouts are read HEAD **and** TAIL, never whole.** `session_meta` is the FIRST
+    record (cwd, `thread_source`) while status and `rate_limits` are in the LAST ones,
+    and a long thread's file runs to megabytes. Two 64KB windows keep it O(1) per
+    thread. A window can slice a line in half, so every line is parsed defensively.
+  - **The id alone doesn't give the path** — files are named `rollout-<timestamp>-<id>`
+    under a date tree, so the host walks the tree once and caches id→path (misses
+    cached too, or it re-walks every 5s tick).
+  - **`thread_source != "user"` is skipped.** Codex spawns subagent threads for
+    auto-review and guardian; they are not something a person is waiting on, and they
+    would crowd the 6-row list.
+  - **A Codex row can only ever be `working` or `waiting`.** No approval event appears
+    in any rollout on this machine, so there is nothing to map to `asking`. This is a
+    real gap, not an oversight: the device exists to show who needs input, and for
+    Codex it can only show who is busy. Codex threads also can't be answered from the
+    device, since there's no channel to answer through.
+  - **Usage comes from `token_count.rate_limits`, and it is ONE number.** `primary` is
+    the only populated window (`window_minutes: 10080` = 7 days on a Plus plan);
+    `secondary` is null but is passed through if a plan ever fills it. There is no
+    endpoint to ask — unlike the Claude side's OAuth poller — so the newest
+    `rate_limits` ever seen is retained across ticks and published with `cxAgeSec`, and
+    the device dims it past 15 minutes for exactly the reason `quotaAgeSec` exists: a
+    value read from a file that stopped being written is not a live reading.
+  - Payload keys are short (`cxPct`/`cxResetMin`/`cxWin`/`cxAgeSec`, `agent:"cc"|"cx"`)
+    because they ride in **every** tick and the device's line buffer is sized for asks
+    carrying 1400-char details.
+- **Mixing the two on screen: text, never colour or an icon.** Sessions from both tools
+  go into the SAME list and the same urgency ranking, so a mixed set sorts by how much
+  it needs you rather than by which tool it came from. Each row is tagged `CC`/`CX` in
+  its sub-line (and spelled `CLAUDE`/`CODEX` top-right on tall rows, where the sub-line
+  is suppressed under 70px to clear the status pill). Same rule as the status shapes:
+  colour is never the only carrier of meaning here, and a tag also has to survive a model rename.
+- **The USAGE tab had to give up 18px per card to fit Codex.** The two Claude cards were
+  122 tall and, with the gaps, filled the content area exactly — there was no room
+  anywhere. They are now 104: only the padding around the hero number tightened (its
+  offsets moved 20/78/92/107 → 20/62/74/89), so the 39px Cozette figures you actually
+  read did not shrink. Codex gets a 36px single row rather than a card, because one
+  percentage plus a reset countdown is all it publishes — no token count, no second
+  window, nothing to plot a pace against, so a full card would be mostly empty chrome.
+  It shows `--`, never `0%`, when no `rate_limits` has ever been seen; 0% is a
+  measurement and "never measured" is not.
+
 **`host/index.mjs`** polls every `POLL_INTERVAL_MS` (5000ms) for: `ccusage blocks --active`
 and `ccusage weekly` (token counts), the rate-limit cache file, and the sessions directory
 (pruning any session file older than `SESSION_STALE_MS`, since a closed terminal may never
@@ -386,23 +445,56 @@ Other things that aren't obvious from a single file:
   poll's list); test it without real prompts by dropping a fake session file:
   `echo '{"session_id":"t","cwd":"/tmp/x","status":"asking","updated_at":'$(date +%s)'000}' >
   ~/.claude/deckhand-sessions/t.json` (delete it afterwards).
-- **Microphone (MAX4466 electret amp) — IO35 is the only pin that can do this.** Wired to the
-  board's 4-pin **Expand** connector: `VCC`→3.3V, `GND`→GND, `OUT`→**IO35**. That pin is forced,
-  not chosen: touch took ADC1's 32/33/36/39 and the battery divider took 34, leaving IO35 as the
-  only free ADC1 channel — and ADC1 is mandatory because ADC2 is dead while BT is active. IO35 is
-  input-only, which an ADC pin doesn't mind. The pin needs **11dB attenuation**
+- **Microphone (MAX4466 electret amp) — HOW TO WIRE IT, and IO35 is the only pin that can do
+  this.** Three wires, to the board's 4-pin **Expand** connector:
+
+  | module pad | goes to | why |
+  |---|---|---|
+  | `VCC` | **3.3V** — never 5V | see the 5V warning below; this is the one that can destroy the pin |
+  | `GND` | GND | — |
+  | `OUT` | **IO35** | the only free ADC1 channel on this board |
+
+  **Identify the Expand pins from the header's own silkscreen, and meter the rail before you plug
+  the module in.** This repo does not record the physical pin ORDER of that connector — only the
+  net each wire must reach — because guessing it is how you get the failure below. Confirm which
+  pin is 3.3V and which is GND with a meter first; the remaining signal pin is IO35.
+  IO35 is forced, not chosen: touch took ADC1's 32/33/36/39 and the battery divider took 34,
+  leaving IO35 as the only free ADC1 channel — and ADC1 is mandatory because ADC2 is dead while BT
+  is active. IO35 is input-only, which an ADC pin doesn't mind. The pin needs **11dB attenuation**
   (`analogSetPinAttenuation`); the module idles at VCC/2 (~1.65V) and at the default range that
-  bias sits against the ceiling and clips everything.
+  bias sits against the ceiling and clips everything. The SPI connector is useless for this
+  (IO23/19/18/22 are digital-only or ADC2).
   **Never power it from 5V** even though the module accepts 2.4–5.5V: IO35 is not 5V tolerant, and
   at a 5V supply the op-amp biases at 2.5V and swings toward 5V, past the pin's absolute maximum.
-  The SPI connector is useless for this (IO23/19/18/22 are digital-only or ADC2).
   **A miswired module hangs `setup()` and looks exactly like bricked firmware**: reverse polarity
   makes the module conduct through its ESD diodes and drag the 3.3V rail, so the chip answers
   esptool all day (download mode draws little) but the sketch dies the moment it powers the
   backlight and BLE. Zero serial output plus a chip that still reads its MAC = suspect the
   peripheral, not the code. (Absence of ROM boot text proves nothing here — TFT_CS is GPIO15,
   which straps the ROM log off.)
-- **Mic bring-up: three commands, and the reason each exists.**
+- **Checking the wiring: the DC bias is the whole test, and it distinguishes all three faults.**
+  Tap **SETTINGS › ACTIONS › MIC TEST** on the device, or run `MICTEST` for the serial report.
+  What the numbers mean:
+
+  | reading | meaning |
+  |---|---|
+  | `dc` ≈ **1893** counts (~1.65V), floor ~100–150 | wired correctly |
+  | `dc` near 0, `min=0`, lots of `clipped` | **OUT not connected, or no power** — the firmware says this verbatim: `pinned near 0` |
+  | `dc` ≈ 1893 but floor ~35 | powered, but gain is at the bottom — see the trimmer note |
+  | `dc` ≈ 1893, floor ~750 | gain too high, the amp is oscillating — see the trimmer note |
+  | device won't boot at all, dark screen, esptool still works | polarity reversed; unplug the module and it boots |
+
+  The bias proves power AND the OUT wire in one number, which is why it is printed first.
+- **Mic bring-up: three commands plus an on-device button, and the reason each exists.**
+  - **SETTINGS › ACTIONS › MIC TEST** — runs `micMonitor()` (the live meter below) with no host
+    involved. It is the first button on that page and deliberately has **no confirm dialog**: it
+    changes nothing, exits on a tap, and you run it repeatedly while turning the trimmer. Two
+    non-obvious requirements: `micWaitRelease()` must run BEFORE the meter loop (the tap that
+    launched it is still down, and the loop exits on a touch, so it returned instantly without
+    this), and the exit needs **two consecutive** `ts.touched()` reads (the same false positive
+    that once ended a 99s recording nobody touched). On exit `micRestoreUi()` falls back to the
+    "waiting for host" screen when no payload has ever arrived — which is exactly the standalone
+    case a mic test happens in — so the settings handler repaints explicitly in that case only.
   - `MICTEST` — one-shot level report: DC bias (proves power + the OUT wire), per-window
     peak-to-peak, clip count, and a floor/peak **ratio**. The window is **10s on purpose**. At 4s
     the talking kept landing either side of the capture and every run read as room tone; the
@@ -855,6 +947,36 @@ Other things that aren't obvious from a single file:
   `lastNonIdleMillis` — an animation must never look like activity to the auto-sleep timer. The
   spark is a distinct radiating shape, so working is still told apart from asking (filled square)
   and waiting (hollow ring) by **shape alone**: motion is an extra cue, never the only one.
+- **Codex's "working" animation — the Codex mark, rotating (`CodexMark.h`).** A Codex
+  session that is working gets its own animation next to the Claude spark, generated by
+  `firmware/deckhand_display/codex2c.py` from the Codex mark SVG. Same format as the
+  spark (8 frames, 32x32, **2 bits of alpha**, tinted with the status colour at draw
+  time), so `drawAgentSpinner()` is one blitter over two tables and the only difference
+  is which art it reads — the status colour still means status, and the **shape** is
+  what says which tool. Costs another 2KB of flash.
+  Three things about generating it are load-bearing:
+  - **The glyphs are HOLES, not shapes.** The mark is one path with three contours and
+    `fill-rule="evenodd"`: an 8-lobed blob, a chevron, and an underscore, where the
+    latter two punch through. Split into separate paths they stop being holes, so the
+    script draws the blob white and then paints the two glyphs **black** over a black
+    background — which reproduces the holes exactly and makes luminance the mask.
+  - **Only the blob rotates.** Rotating the glyphs too would spin the `>_` prompt
+    upside down; leaving them upright keeps the mark readable in every frame while the
+    lobes carry the motion. 8 frames x 45 degrees = one full turn, so the loop is
+    seamless. 45 is not a no-op despite the 8 lobes: measured at **19.5/255** mean
+    absolute luminance difference from the original, because the lobes are organic
+    rather than exactly repeated. (If they ever were exact, 45 would emit 8 identical
+    frames and the step would have to become 45/8.)
+  - **Rasterising uses headless Google Chrome**, because this toolchain has no SVG
+    rasteriser at all — no `rsvg-convert`, `inkscape`, `cairosvg`, or even Pillow. The
+    script also contains its own ~40-line PNG reader (zlib inflate + unfilter) for the
+    same reason. Frames render at 128px and are box-filtered 4x4 down to 32, which is
+    where the anti-aliasing comes from.
+  - **SVG numbers can run together with no separator** — `M8.086.457` is *two* numbers,
+    and a naive `[\d.]+` swallows both and then fails to parse. The contour splitter
+    scans numbers properly, and converts each later contour's relative `m` into an
+    absolute `M` (a `z` returns to the contour's own start, so contour 2 opens relative
+    to where contour 1 began, not to the origin).
 - Easter egg: 5 taps on the footer within 4s summons **Clawd** — the real crab-walk sprite
   animation. 20 frames of 51x36 in `ClawdCrab.h`, **generated** by
   `firmware/deckhand_display/crab2c.py`; the source frames (`CrabFrames.swift`)

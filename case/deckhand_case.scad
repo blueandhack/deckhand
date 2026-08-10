@@ -73,9 +73,33 @@ usb_cham  = 1.5;                 // USB-C opening flares this much wider all rou
 usb_cham_d = 1.2;                //   at the OUTER face, over this depth (funnels the plug in)
 reset_dx = -12.0; boot_dx = 12.0; btn_in = 8.0; btn_d = 4.5;
 
+// ---------- Relief for the Expand-pin cable (the microphone lead) ----------
+// clr_w is 0, so the board's long edges sit right against the walls. The mic plugs
+// into the 4-pin "Expand" connector on the board's BACK face near one long edge,
+// and the mated plug stands ~1.5 mm proud of the board edge - enough to stop the
+// board seating. This is a shallow pocket in the wall's INNER face over that
+// connector only; it does not go through, so the outside stays closed.
+//
+// Position derived from the board photo, scaled on the known 86 mm length: the
+// connector sits ~18 mm in from the end OPPOSITE the USB-C.
+//
+// SIDE IS THE HIGH-X WALL, confirmed against the real board. Do not re-derive this
+// from a photo of the board's back: that view MIRRORS left/right relative to this
+// model's X axis, which is referenced to the front (screen) face. Reasoning from
+// reset_dx being negative gave the wrong wall for exactly that reason.
+exp_side  = 1;     // -1 = low-X wall, +1 = high-X wall
+exp_from_far = 18.1; // connector centre, in from the non-USB end
+exp_w     = 12.0;  // pocket width along the case length (generous for the cable)
+exp_relief = 1.8;  // depth into the 2.6 mm wall, leaving 0.8 mm of material
+exp_z_pad = 0.5;   // start just below the board's back plane so the edge is clear too
+
 // Battery is pushed toward the USB-C end, leaving a clear strip at the far end
 // for the speaker (both sit BEHIND the board; the columns are in FRONT of it).
 batt_w = 36.0; batt_h = 68.0; batt_t = 10.0; batt_dy = 14.0;
+// Shift the pack AWAY from the high-X wall to clear the microphone, which now
+// lives against that wall beside its Expand-pin connector. 36 mm of pack in 51 mm
+// of cavity leaves 15 mm of slack; this spends 10 of it on the mic side.
+batt_dx = 5.0;
 batt_extra = 5.5;   // headroom above the pack (it bulges + sits on components); also margin so
                     // the cover closes. This is the knob that sets TOTAL THICKNESS: raising the
                     // support shoulder pushes the board deeper, so trim the same amount here to
@@ -83,6 +107,99 @@ batt_extra = 5.5;   // headroom above the pack (it bulges + sits on components);
 // Speaker pocket: in the strip at the end opposite USB-C, centred. It's on an
 // 85 mm lead so it can go anywhere that's clear on YOUR board — tweak spk_cx/cy.
 spk_w = 17.0; spk_h = 10.0; spk_t = 4.0;
+
+// ---------- Microphone (MAX4466 module, carried by the RETAINER) ----------
+// Stands VERTICALLY against the high-X wall - the same wall its cable plugs into -
+// with the electret firing sideways through a port in that wall. Held in slots in
+// the retainer, so the mic goes in with the insert rather than being fixed to the
+// cover.
+//
+// The capsule stops at the wall's INNER face and does not nest into it. That is
+// forced by assembly order: the retainer drops straight down into the body, so
+// anything protruding into a side wall would collide on the way in. The 2.6 mm
+// wall becomes a short acoustic channel instead, which an electret is perfectly
+// happy with.
+//
+// Sizes measured off the module, with the header pins trimmed and leads soldered
+// direct (~2.8 mm of joints under the board).
+// PCB length (board only - the 4-pin header is NOT included; it stands outside the
+// room's open end). Estimated at 16 from the photos of the real module against the
+// printed room; the earlier 20.8 came from a module with the pins trimmed and read
+// long. THIS is the number to correct if the room is still the wrong length - nothing
+// else needs touching, because the capsule end is anchored (see mic_y1).
+mic_l   = 16.0;
+mic_w   = 13.8;   // PCB width  -> stands up the cavity (Z). Must clear the cover
+                  // lip, which claims the top 4 mm of cavity depth at the perimeter.
+// Board thickness the SLOT has to swallow - measured at ~3 mm, not the bare 1.6 mm
+// FR4: the trimmed pins and solder on its back face are part of what goes in the slot.
+// This drives the whole X chain, so widening it moves the module inboard by the same
+// amount and eats into the battery clearance (1.0 mm left at the pad end, was 2.4).
+mic_t   = 3.0;
+// Extra allowance for solder proud of mic_t, AT THE PAD END ONLY - that is the only
+// place there is any, and the room's inner wall is set back past it everywhere.
+mic_under = 2.8;
+mic_can_d = 10.0;
+mic_can_h = 5.4;  // capsule height -> here it is a HORIZONTAL reach toward the wall
+// Capsule centre, in from the PCB's far (high-Y) end. The PADS therefore face the
+// LOW-Y end, i.e. back toward the Expand connector, making the cable run as short
+// as this layout allows.
+mic_can_from_end = 6.5;
+mic_gap  = 0.4;   // clearance between the module and the room's walls, all round.
+                  // The module SITS in the room - it is not gripped by it, exactly like
+                  // the speaker in its pocket. An earlier revision pinched the board
+                  // between a bump and a wall and had to be forced in.
+mic_rib  = 1.8;   // slot wall thickness
+mic_port_d = 5.0; // sound port through the side wall
+// PCB low-Y end, retainer-local. Placed near the USB-C end: the board's Expand-side
+// long edge carries no JST connectors for the first ~36 mm in from that end, so this
+// is the only stretch of that edge with nothing to foul. 57 and not higher - the
+// retainer's top end cap spans Y 82.5..87 at full width, and the capsule would
+// otherwise sit on it.
+// The board's FAR (capsule) end is the anchor, not its near end. The sound port is
+// drilled on the capsule's axis, so if the length knob moved that end, every change to
+// mic_l would walk the port off the capsule. Anchoring here means mic_l only opens or
+// closes the pin end of the room.
+mic_y1 = 77.8;
+mic_y0 = mic_y1 - mic_l;
+// Vertical channel in the side wall over the mic, 1.8 mm deep - the same trick as
+// the Expand-pin relief. It buys 1.8 mm of clearance from the battery AND, because
+// it runs full height to the back opening, the capsule can drop straight down into
+// it. A blind pocket could not be assembled: the retainer goes in vertically.
+mic_relief = 1.8;
+mic_can_gap = 0.3; // air between the capsule's face and the channel floor. Without it
+                   // the can bottoms dead on the wall, and any tolerance the wrong way
+                   // pushes the whole module inboard, out of the slot.
+// NO slot floor: the module rests directly on the board's back face, the same way
+// the battery and the speaker do. Raise this if it won't sit flat - solder blobs at
+// the board's bottom edge, or a component on the PCB underneath, are the two things
+// that would stop it.
+mic_floor  = 0.0;
+// Nothing on the mic mount rises above retainer_h - same rule as everything else on
+// the insert. An earlier version stood 17.6 so a lip could hook over the board's top
+// edge; it wasn't needed. The board must rise ~10 mm to leave the room, and the cover
+// sits well above its top edge, so the COVER is the backstop.
+mic_pad_len = 7.0; // length of the module's pad/solder end. Used only by the preview
+                   // ghost now: the room's inner wall is set back past mic_under for its
+                   // whole length, so nothing has to step round the joints any more.
+// Closed top, open bottom: what used to be a floor under the board is now a plate
+// over it. The module loads from BELOW and the board's own back face closes the
+// bottom, exactly like the battery corral and the speaker pocket.
+// NOTHING here rises above retainer_h. The consequence is that the board POKES
+// THROUGH the plate: it stands 13.8 tall on the PCB and the plate caps at 11.7, so
+// the plate has a slot for it. Over the board's own length the plate is therefore
+// only a pair of flanges on the wall tops - it earns its keep at the FAR END, past
+// the board, where it crosses the slot uninterrupted. That crossing is the tie
+// between the two walls, and the outer wall's only route back to the rest of the
+// insert.
+mic_roof_t = 1.6;   // plate thickness; its top face IS retainer_h
+mic_win_pad = 0.6;  // clearance round the capsule's window in the outer wall
+// The pin end of the room is left WIDE OPEN - no end wall, no plate over it. The module
+// still has its 4-pin header, which stands ~7mm off the board edge in the board's own
+// plane, and it is rigid: a closed end there is exactly what stopped the module going
+// in. (The dimensions above were taken from a module with the pins TRIMMED and leads
+// soldered direct; they are not, so the header needs somewhere to go.) The opening is
+// the room's full section, so a DuPont shell on the pins clears it too.
+mic_pin_open = true;
 spk_cx = 0;      // speaker centre, X offset from board centre (+right)
 spk_cy = 7.0;    // speaker centre, distance in from the far (non-USB) edge
 retainer_h = 11.7; // retainer wall height (just corrals the pack; well under the cavity)
@@ -150,6 +267,15 @@ total_th   = body_d + cover_th;
 
 // ---------- Plan geometry ----------
 in_w = board_w + 2*clr_w;  in_h = board_h + 2*clr;
+
+// The ONE definition of where the mic module sits across the case: retainer-local X of
+// the PCB's inner face. Both the slot and the preview ghost derive from it - they were
+// separate expressions once, and drifting them apart is a silent misfit. It lives HERE,
+// not up with the other mic_* params, because it needs in_w: OpenSCAD does not hoist,
+// so referencing a variable defined further down the file yields a silent `undef` (it
+// put the whole module at the origin and every clearance probe read as a collision).
+//   joints 41.3..44.1 | PCB 44.1..47.1 | capsule 47.1..52.5 | channel floor 52.8
+mic_pcb_x0 = in_w + mic_relief - mic_can_gap - mic_can_h - mic_t;
 out_w = in_w + 2*wall;   out_h = in_h + 2*wall;
 bx0 = wall + clr_w;  by0 = wall + clr;
 bcx = bx0 + board_w/2;  bcy = by0 + board_h/2;
@@ -242,6 +368,26 @@ module body(){
       translate([bcx+usb_dx, usb_outer_y+usb_in*usb_cham_d, usb_z]) rotate([90,0,0])
         linear_extrude(0.02) rrect_c(usb_w, usb_h, usb_h/2.2);
     }
+    // Microphone: a vertical channel in the high-X wall over the module, then a
+    // small port through the 0.8 mm left outboard of it. The channel runs from the
+    // board's back plane to the back opening so the capsule can drop in with the
+    // retainer; a blind pocket would collide on assembly.
+    let (my0 = wall + mic_y0, mlen = mic_l,
+         cy  = wall + mic_y0 + mic_l - mic_can_from_end,
+         cz  = z_pcb_b + mic_floor + mic_w/2)  // the slot floor lifts the board
+      union(){
+        translate([out_w - wall, my0 - 1.0, z_pcb_b - 0.5])
+          cube([mic_relief, mlen + 2.0, z_floor - z_pcb_b + 0.51]);   // full height = droppable
+        translate([out_w - wall + mic_relief - 0.01, cy, cz]) rotate([0, 90, 0])
+          cylinder(d = mic_port_d, h = wall - mic_relief + 0.02);
+      }
+    // Expand-pin cable relief — see exp_* above. Cut from just under the board's
+    // back plane through to the back opening, so the plug and its cable have room
+    // for their whole height, not just at the board surface.
+    let (exp_y = usb_at_top ? by0 + exp_from_far : by0 + board_h - exp_from_far,
+         exp_x = exp_side < 0 ? wall - exp_relief : out_w - wall)
+      translate([exp_x, exp_y - exp_w/2, z_pcb_b - exp_z_pad])
+        cube([exp_relief, exp_w, z_floor - z_pcb_b + exp_z_pad + 0.01]);
     // snap-catch windows in the walls (the cover barbs hook into these)
     // enlarged symmetrically about the original centre, so the catch position
     // (and therefore how the cover seats) is unchanged — only the opening grows
@@ -283,10 +429,64 @@ module body(){
 // strong bed adhesion, and they tie the thin corral walls rigid. They're short
 // (cap_h) and sit well below the cover's lip, so the cover needs no notches and
 // closes cleanly over the whole insert. Prints flat, no support.
+// Microphone ROOM: a walled pocket the module sits in, open at the bottom and capped
+// by a plate at the top - the same construction as the speaker pocket, and for the same
+// reason. The module is not gripped by anything: it drops into the room, rests on the
+// board's back face, and the plate's slot locates its top. Everything caps at
+// retainer_h.
+//   local X: joints 41.3..44.1 | PCB 44.1..47.1 | capsule 47.1..52.5 | channel floor 52.8
+//   local Z: board 0..13.8 | capsule 1.9..11.9
+// The room is sized to the module's WHOLE footprint, joints included - that is what lets
+// the inner wall run straight for the full length instead of stepping round the solder.
+// Two details are still forced:
+//  - The outer wall carries a WINDOW for the capsule, which overhangs the board's outer
+//    face by 5.4mm across the middle 10mm of its length. Its top edge bridges like any
+//    printed doorway.
+//  - The board POKES THROUGH the plate: it stands 13.8 tall and the cap is 11.7, so the
+//    plate is slotted. The slot is what locates the board across the room.
+module mic_slot(x_join){
+  t    = mic_rib;
+  ix0  = mic_pcb_x0 - mic_under - mic_gap;      // room interior, inner face
+  ix1  = mic_pcb_x0 + mic_t + mic_gap;          // room interior, outer face
+  iy0  = mic_y0 - mic_gap;
+  iy1  = mic_y0 + mic_l + mic_gap;
+  h    = retainer_h;
+  can_y = mic_y0 + mic_l - mic_can_from_end;
+  difference(){
+    union(){
+      // the ring of walls. Its inner wall overlaps the battery corral, which is both
+      // how the room is tied in and why it needs no separate gusset.
+      linear_extrude(h) difference(){
+        translate([ix0 - t, iy0 - t]) square([ix1 - ix0 + 2*t, iy1 - iy0 + 2*t]);
+        translate([ix0, iy0])         square([ix1 - ix0, iy1 - iy0]);
+      }
+      translate([ix0 - t, iy0 - t, h - mic_roof_t])
+        cube([ix1 - ix0 + 2*t, iy1 - iy0 + 2*t, mic_roof_t]);
+    }
+    // the board's slot through the plate - this is what holds it upright. Cut only
+    // over the board's OWN length, so the end walls keep their full tops.
+    translate([mic_pcb_x0 - mic_gap/2, mic_y0 - 0.2, h - mic_roof_t - 0.01])
+      cube([mic_t + mic_gap, mic_l + 0.4, mic_roof_t + 0.02]);
+    // the capsule's window through the outer wall
+    translate([ix1 - 0.5, can_y - mic_can_d/2 - mic_win_pad,
+               mic_w/2 - mic_can_d/2 - mic_win_pad])
+      cube([t + 1.0, mic_can_d + 2*mic_win_pad, mic_can_d + 2*mic_win_pad]);
+    // the pin end: take away the whole end wall AND the plate above it, so the header
+    // (and a DuPont shell on it) passes straight out. The plate is still carried by the
+    // two side walls, and the room is still tied in through the inner wall's root.
+    // Cut all the way to the board's own low-Y edge, not just to the room's interior:
+    // stopping at iy0 left a 0.19mm sliver of the PLATE spanning the mouth, which is
+    // invisible in a render and blocks the board outright.
+    if (mic_pin_open)
+      translate([ix0 - t - 1, iy0 - t - 1, -1])
+        cube([(ix1 + t) - (ix0 - t) + 2, (mic_y0 + 0.01) - (iy0 - t - 1), h + 2]);
+  }
+}
+
 module retainer(){
   t = 1.8;  h = retainer_h;  cap_h = 5.0;  fit = 0.6;
   r_cav = max(oc_r-wall, 2);                // the body cavity's corner radius (must match body())
-  bx = (in_w-batt_w)/2;  by = batt_y0 - wall;
+  bx = (in_w-batt_w)/2 - batt_dx;  by = batt_y0 - wall;
   bl = min(batt_h, in_h - by - 1.2);
   cyb = by;  cyt = by + bl;                 // corral bottom (speaker end) / top (USB-C end)
   spx = spk_px - wall;  spy = spk_py - wall;
@@ -294,6 +494,15 @@ module retainer(){
   // Everything is TRIMMED to the body cavity's ROUNDED profile (inset by `fit`),
   // so the end caps get corner radii matching the body instead of square
   // corners — square corners jam on the cavity's radii and stop it seating.
+  // The mic slot is added OUTSIDE that trim: it's a `linear_extrude(h+1)`, i.e. a
+  // hard cap at z=12.7, which silently shortened the tines and made any slot height
+  // over 11.1 mm a fiction. The slot needs no rounded-profile trim anyway - at this
+  // Y the cavity wall is straight, and the tines span local X 44.0..49.4, inside the
+  // 50.4 limit.
+  union(){
+  // -0.4 so it OVERLAPS the corral wall rather than touching it: a coincident face is
+  // a zero-thickness join, and the union came out as two separate shells.
+  mic_slot(x_join = bx + batt_w + t - 0.4);
   difference(){
     intersection(){
       union(){
@@ -337,6 +546,7 @@ module retainer(){
       translate([gx-wire_w/2, spy-wire_w/2, -0.2])
         cube([wire_w, (by+1)-(spy-wire_w/2), wire_h+0.2]);
     }
+  }
   }
 }
 
@@ -435,13 +645,26 @@ module stand_placed(){
       translate([0,0,-ks_bz]) stand();
 }
 
+// The MAX4466 module as fitted, for preview only: PCB on edge in the retainer's
+// slot, capsule reaching into the side wall's channel, pads facing the low-Y end
+// (toward the Expand connector).
+module mic_module(){
+  x0 = wall + mic_pcb_x0;
+  z0 = z_pcb_b + mic_floor;
+  translate([x0, wall + mic_y0, z0]) cube([mic_t, mic_l, mic_w]);
+  translate([x0 - mic_under, wall + mic_y0, z0]) cube([mic_under, mic_pad_len - 1.0, 4.0]); // pins/solder
+  translate([x0 + mic_t, wall + mic_y0 + mic_l - mic_can_from_end, z0 + mic_w/2])
+    rotate([0,90,0]) cylinder(d = mic_can_d, h = mic_can_h);
+}
+
 module assembly(){
   color("DimGray") body();
   color("Tan") translate([wall,wall,z_pcb_b]) retainer();
   color([.82,.82,.85]) translate([out_w,0,total_th]) rotate([0,180,0]) cover();  // flipped onto the back
   color("SteelBlue") stand_placed();
   %translate([bx0,by0,z_glass]) cube([board_w,board_h,glass_up+board_t]);       // board+display
-  %translate([wall+(in_w-batt_w)/2,batt_y0,z_pcb_b+batt_seat]) cube([batt_w,batt_h,batt_t]);
+  %translate([wall+(in_w-batt_w)/2-batt_dx,batt_y0,z_pcb_b+batt_seat]) cube([batt_w,batt_h,batt_t]);
+  color("DarkSlateGray") mic_module();
   color("SeaGreen") translate([spk_px-spk_w/2, spk_py-spk_h/2, z_pcb_b]) cube([spk_w,spk_h,spk_t]);
 }
 module section(){
@@ -456,4 +679,8 @@ else if (part=="cover")    translate([0,0,cover_th]) rotate([180,0,0]) cover();
 else if (part=="stand")    stand();
 else if (part=="retainer") retainer();
 else if (part=="section")  section();
+// A deliberate no-op, for `include`-based clearance probes: `include` re-runs this
+// dispatch, so without it every probe silently unioned the whole assembly in and
+// reported a collision no matter what was being tested.
+else if (part=="none")     { }
 else                      assembly();

@@ -596,6 +596,183 @@ async function gitBranch(cwd) {
   }
 }
 
+// ---------- Codex sessions + usage ----------
+// Codex has no hook mechanism, so nothing can push state at us the way
+// deckhand-session-hook.mjs does for Claude Code. What it does have is a rollout
+// JSONL per thread, appended live, plus a cheap index of threads. So this half is
+// PULL, not push, and everything below is derived by reading those files.
+//
+// Where the facts come from (verified against real rollouts on this machine):
+//   sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl - the file's MTIME is the activity
+//   time; see codexRolloutFiles for why session_index.jsonl is NOT used:
+//     session_meta   (first record)  -> cwd, originator, thread_source
+//     turn_context   (once per turn) -> cwd, model
+//     event_msg task_started/task_complete -> working vs idle
+//     event_msg token_count -> .rate_limits, which is the usage number
+const CODEX_DIR = path.join(os.homedir(), ".codex");
+const CODEX_SESSIONS_DIR = path.join(CODEX_DIR, "sessions");
+
+// Discovery walks the rollout files and uses each file's MTIME as the activity time.
+// It deliberately does NOT use session_index.jsonl, even though that file exists and
+// looks like exactly the right index: Codex appends to a rollout LIVE but only
+// rewrites the index later, so a thread being actively used reads as 26 minutes idle
+// in the index while its rollout was touched 1 minute ago. Keying freshness off the
+// index made an in-progress Codex session invisible on the device - the first thing
+// that went wrong in real use.
+// Walking is cheap (one directory per day, a couple of dozen files after months of
+// use) so it happens every tick rather than being cached into staleness. An earlier
+// version cached id->path lookups INCLUDING misses, which permanently hid any thread
+// whose rollout did not exist yet at first look.
+async function codexRolloutFiles() {
+  const out = [];
+  const stack = [CODEX_SESSIONS_DIR];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) stack.push(full);
+      else if (e.name.startsWith("rollout-") && e.name.endsWith(".jsonl")) {
+        // rollout-<ISO timestamp>-<uuid>.jsonl - the id is the trailing uuid
+        const stem = e.name.slice("rollout-".length, -".jsonl".length);
+        const id = stem.slice(-36);
+        try {
+          const st = await fs.stat(full);
+          out.push({ id, file: full, mtimeMs: st.mtimeMs });
+        } catch {
+          /* vanished between readdir and stat */
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// HEAD **and** TAIL, not the whole file: session_meta is the FIRST record (cwd,
+// thread_source) while status and rate_limits are in the LAST ones, and a long thread's
+// rollout runs to megabytes. Two windows keep this O(1) per thread. A window can slice
+// a line in half, so every line is parsed defensively.
+const CODEX_READ_BYTES = 65536;
+async function readCodexRollout(file) {
+  let fh;
+  try {
+    fh = await fs.open(file, "r");
+    const { size } = await fh.stat();
+    const bufs = [];
+    const head = Buffer.alloc(Math.min(CODEX_READ_BYTES, size));
+    await fh.read(head, 0, head.length, 0);
+    bufs.push(head);
+    if (size > CODEX_READ_BYTES) {
+      const tailLen = Math.min(CODEX_READ_BYTES, size - CODEX_READ_BYTES);
+      const tail = Buffer.alloc(tailLen);
+      await fh.read(tail, 0, tailLen, size - tailLen);
+      bufs.push(tail);
+    }
+    const out = {};
+    for (const buf of bufs) {
+      for (const line of buf.toString("utf8").split("\n")) {
+        if (!line.startsWith("{")) continue;
+        let d;
+        try {
+          d = JSON.parse(line);
+        } catch {
+          continue; // a partial line at a window edge, or a write in flight
+        }
+        const p = d.payload && typeof d.payload === "object" ? d.payload : {};
+        if (d.type === "session_meta") {
+          out.cwd = p.cwd || out.cwd;
+          out.threadSource = p.thread_source || out.threadSource;
+        } else if (d.type === "turn_context") {
+          if (p.cwd) out.cwd = p.cwd; // later turns win: this is the LIVE cwd
+          if (p.model) out.model = p.model;
+        } else if (d.type === "event_msg") {
+          if (p.type === "task_started" || p.type === "task_complete" || p.type === "turn_aborted") {
+            out.lastTask = p.type;
+          }
+          if (p.type === "token_count" && p.rate_limits) out.rateLimits = p.rate_limits;
+        }
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
+// Latest rate_limits seen from any Codex thread. Kept across ticks because a thread
+// that has gone quiet still holds the newest number we ever saw - and unlike the
+// Claude side there is no endpoint to ask, so the rollouts are the only source.
+let codexRateLimits = null;
+
+async function readCodexSessions() {
+  let files;
+  try {
+    files = await codexRolloutFiles();
+  } catch {
+    return []; // Codex not installed, or it has never run
+  }
+
+  const out = [];
+  for (const f of files) {
+    const roll = await readCodexRollout(f.file);
+    if (!roll) continue;
+    if (roll.rateLimits && (!codexRateLimits || f.mtimeMs >= codexRateLimits.at)) {
+      codexRateLimits = { ...roll.rateLimits, at: f.mtimeMs };
+    }
+    if (Date.now() - f.mtimeMs > SESSION_STALE_MS) continue;
+    // Subagent threads are Codex talking to itself (auto-review, guardian). They are
+    // not something a person is waiting on, and they would crowd the 6-row list.
+    if (roll.threadSource && roll.threadSource !== "user") continue;
+    out.push({
+      id: f.id.slice(0, 12),
+      cwd: roll.cwd || "",
+      // No "asking": Codex writes no approval event to the rollout, so the device can
+      // only ever show a Codex thread as working or waiting. Saying so matters - this
+      // display exists to show who needs input.
+      status: roll.lastTask === "task_started" ? "working" : "waiting",
+      model: roll.model || "",
+      updated_at: f.mtimeMs,
+      agent: "codex",
+    });
+  }
+  return out;
+}
+
+// Codex reports ONE window in `primary` (10080 minutes = 7 days on this plan);
+// `secondary` is null here but is passed through if a plan ever populates it.
+function codexUsage() {
+  const rl = codexRateLimits;
+  if (!rl) return {};
+  const win = (w) =>
+    w && typeof w.used_percent === "number"
+      ? {
+          pct: Math.round(w.used_percent),
+          resetInMin: w.resets_at ? Math.max(0, Math.round((w.resets_at * 1000 - Date.now()) / 60000)) : null,
+          windowMin: w.window_minutes ?? null,
+        }
+      : null;
+  const primary = win(rl.primary);
+  const secondary = win(rl.secondary);
+  return {
+    cxPct: primary?.pct ?? null,
+    cxResetMin: primary?.resetInMin ?? null,
+    cxWin: primary?.windowMin ?? null,
+    cxPct2: secondary?.pct ?? null,
+    cxResetMin2: secondary?.resetInMin ?? null,
+    cxPlan: rl.plan_type || null,
+    // Same reason the Claude quota carries quotaAgeSec: a number read out of a file
+    // that stopped being written is not a live reading, and the device dims it.
+    cxAgeSec: rl.at ? Math.round((Date.now() - rl.at) / 1000) : null,
+  };
+}
+
 async function readSessions() {
   let files;
   try {
@@ -616,11 +793,16 @@ async function readSessions() {
       }
       // The filename IS the session id - carry it so the device can match
       // sessions across polls even when two sessions share a project name.
-      records.push({ ...record, id: path.basename(file, ".json") });
+      records.push({ ...record, id: path.basename(file, ".json"), agent: "claude" });
     } catch {
       // ignore unreadable/partially-written file this tick
     }
   }
+
+  // Codex threads join the SAME list and the same ranking, so a mixed set sorts by
+  // how much it needs you rather than by which tool it came from. They arrive
+  // pre-shaped by readCodexSessions().
+  records.push(...(await readCodexSessions()));
 
   // Urgency first, recency second: the display fits 6 sessions, and when
   // there are more, a session that NEEDS INPUT must never be the hidden one.
@@ -635,8 +817,14 @@ async function readSessions() {
         name: (await projectName(record.cwd || "")).slice(0, 20),
         status: record.status,
         path: truncatePath(record.cwd || "", 48),
-        model: ((await modelFromTranscript(record.transcript)) || record.model || "").slice(0, 20),
+        model: (record.agent === "codex"
+          ? record.model || ""
+          : (await modelFromTranscript(record.transcript)) || record.model || ""
+        ).slice(0, 20),
         branch: (await gitBranch(record.cwd || "")).slice(0, 20),
+        // Short on purpose: this rides in every payload, and the device's line
+        // buffer is sized for asks carrying 1400-char details.
+        agent: record.agent === "codex" ? "cx" : "cc",
       };
       // Pending question (already truncated by the hook) rides along so the
       // device can display it and offer the options as buttons. We attach a
@@ -707,6 +895,7 @@ async function readUsage() {
     // How old the quota numbers actually are, so the device can flag stale
     // data on screen - the footer's freshness only covers the transport.
     quotaAgeSec: quotaAt > 0 ? Math.round((Date.now() - quotaAt) / 1000) : null,
+    ...codexUsage(),
     sessions: sessions.list,
     sessionsTotal: sessions.total,
     hiddenAsking: sessions.hiddenAsking,
@@ -1308,7 +1497,11 @@ async function tick() {
         `7d=${usage.sevenDayPct ?? "?"}% (resets ${usage.sevenDayResetInMin ?? "?"}m) ` +
         `sessionTok=${usage.sessionTokens} weekTok=${usage.weekAllTokens} ` +
         `weekFableTok=${usage.weekFableTokens} weekFablePct=${usage.weekFablePct ?? "?"} ` +
-        `src=${usage.quotaSource} sessions(${usage.sessionsTotal})=${JSON.stringify(usage.sessions)} ` +
+        `src=${usage.quotaSource} ` +
+        `codex=${usage.cxPct == null ? "?" : `${usage.cxPct}%`}` +
+        `${usage.cxWin ? `/${Math.round(usage.cxWin / 1440)}d` : ""}` +
+        `${usage.cxResetMin == null ? "" : ` (resets ${usage.cxResetMin}m)`} ` +
+        `sessions(${usage.sessionsTotal})=${JSON.stringify(usage.sessions)} ` +
         `via=${[usbPort && "usb", bleCharacteristic && "ble"].filter(Boolean).join(",") || "none"}`
     );
   } catch (err) {

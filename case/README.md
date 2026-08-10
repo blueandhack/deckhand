@@ -107,6 +107,88 @@ the bed (the nose is tangent to that plane, never below it), the taper is all
 shallow overhang, and the bore is a **teardrop** so its top is a self-supporting
 point rather than a ceiling that sags into strings.
 
+## The microphone (MAX4466 on the Expand connector)
+
+The electret amp module stands **on edge in the retainer**, against the **same
+side wall its cable plugs into** — the wall with the board's *Expand* header. Two
+gaps are cut into that wall's inner face, both **full-height vertical channels**
+rather than blind pockets, because the retainer drops in **vertically** and a
+blind pocket has nothing to drop into:
+
+- **Expand-cable relief** (`exp_*`) — the plug plus its DuPont shells stand ~1.5 mm
+  proud of the header; this channel gives them somewhere to go.
+- **Mic channel** (`mic_relief`) — 1.8 mm deep over the module's footprint. It
+  earns its keep twice: it buys 1.8 mm of clearance from the battery, and the
+  capsule *bottoms in it*, so the wall is what stops the module leaning outward.
+  A **Ø5 sound port** pierces the 0.8 mm of wall left outboard, on the capsule's
+  axis. The wall becomes a short acoustic channel, which an electret is perfectly
+  happy with.
+
+It sits near the **USB-C end**, because that is the only stretch of that long
+edge with nothing to foul — the board's SPEAKER/SPI/Expand JSTs all live in the
+far half. The **pads face the other way** (back toward the Expand connector) so
+the cable run is as short as this layout allows, and the **battery is shifted**
+`batt_dx` away from that wall to make the strip.
+
+The slot is sized for a **~3 mm** board, not the bare 1.6 mm of FR4 — the trimmed
+pins and solder on its back face go into the slot too. That thickness drives the
+whole X chain, so widening it moves the module inboard by the same amount: the
+pad-end joints now clear the battery corral by **1.0 mm** rather than 2.4 mm. Set
+`mic_t` to whatever your module actually measures and the rest follows.
+
+The mount is a **walled room the module sits in** — the same construction as the
+speaker pocket, and for the same reasons: a ring of walls, **open at the bottom** so
+the contents rest straight on the board's back face, capped by a **plate at the top**.
+Nothing grips the mic. It drops into the room, the plate's slot locates it upright,
+and the board's own back face floors it.
+
+The room is sized to the module's **whole footprint, solder joints included** (0.4 mm
+of clearance all round). That is what lets the inner wall run straight for the full
+length: earlier revisions had to step around the ~2.8 mm of solder standing proud of
+the board's inner face at the pad end, which produced a stub that was neither use nor
+ornament. The room's inner wall overlaps the battery corral, which is both how it is
+tied into the insert and why it needs no separate gusset.
+
+**Nothing rises above `retainer_h`.** Two things follow from that:
+
+- **The board pokes through the plate** — it stands 13.8 mm on the PCB and the cap is
+  11.7, so the plate is slotted. The slot is cut only over the board's own length, so
+  the end walls keep their full tops, and it is what locates the board across the room.
+- **The outer wall carries a window** for the capsule, which overhangs the board's
+  outer face by 5.4 mm across the middle 10 mm of its length and up to z 11.9 — nearly
+  the full wall height. Its top edge bridges like any printed doorway.
+
+Because the mount stays under the cover lip's z entirely, the lip is no longer a
+constraint on it at all.
+
+### Wiring it
+
+Three wires, into the board's 4-pin **Expand** connector:
+
+| module pad | goes to |
+|---|---|
+| `VCC` | **3.3 V — never 5 V** |
+| `GND` | GND |
+| `OUT` | **IO35** |
+
+**Meter the connector before you plug the module in.** Identify 3.3 V and GND from
+the header's own silkscreen and confirm with a meter; the remaining signal pin is
+IO35. The physical pin *order* is deliberately not recorded here, because getting
+it wrong has a nasty failure mode: reverse polarity makes the module conduct
+through its ESD diodes and drag the 3.3 V rail, so the board **won't boot and
+looks exactly like bricked firmware** — dark screen, no serial output, while
+esptool still talks to the chip happily. Unplug the module and it boots.
+
+**Never power it from 5 V** even though the module accepts 2.4–5.5 V: IO35 is not
+5 V tolerant, and at 5 V the op-amp biases at 2.5 V and swings toward 5 V, past
+the pin's absolute maximum.
+
+To check the wiring, tap **SETTINGS › ACTIONS › MIC TEST** on the device. A working
+module idles at **~1.65 V** (DC bias ~1893 counts); a reading pinned near 0 means
+`OUT` isn't connected or the module has no power. Set the gain with the same meter
+screen — aim for a floor of **~100–150** when silent (~35 means barely any gain,
+~750 means the amp is oscillating). See CLAUDE.md for the firmware side.
+
 ## Where things go inside (depths)
 
 Important: the **4 posts are in FRONT of the board** — they hold it up off the
@@ -114,7 +196,10 @@ front face. The **battery and speaker sit BEHIND the board**, in the cavity. So
 the posts never collide with the battery/speaker (different depths); any
 overlap you see in a flat top view is just the projection.
 
-- **Battery:** on the back of the board, centred, pushed toward the USB-C end.
+- **Battery:** on the back of the board, pushed toward the USB-C end, and offset
+  `batt_dx` away from the Expand-side wall to leave the microphone strip.
+- **Microphone:** on edge against the Expand-side wall, near the USB-C end (see
+  above).
 - **Speaker (17×10×4 mm):** in the cleared strip at the **end opposite USB-C**,
   centred. It's on an 85 mm lead and only 4 mm thick, so it's flexible — if your
   board has a tall part there, move it with `spk_cx` / `spk_cy` (or just let it
@@ -139,10 +224,16 @@ body's 4 moulded pins, and the cover snaps onto the body.
 3. **Drop the retainer** into the cavity — it just sits in, located by its end
    caps against the walls (no press-fit). Set the **speaker** into its pocket
    and drop the **battery** into the open corral (it rests on the board).
-4. **Snap the cover on** — press until the barbs click into the wall slots. It
+4. **Microphone** (if fitted): plug its cable into *Expand* first — the header is
+   buried once the module is in — then push the module down between the pillars,
+   capsule-first toward the wall, past both pinch bumps, until it rests on the
+   board. The capsule should sit in the wall channel with the sound port centred on
+   it. Route the cable down the strip and through the Expand relief. Check it with
+   **SETTINGS › ACTIONS › MIC TEST** before closing the cover.
+5. **Snap the cover on** — press until the barbs click into the wall slots. It
    should feel tight with no rattle; if it's stiff, raise `g` in `cover()`, and
    if it's loose, lower `g` or deepen the barb's catch shelf.
-5. **Kickstand:** sit the blade's notches over the cover's two bosses, then run an
+6. **Kickstand:** sit the blade's notches over the cover's two bosses, then run an
    **M3 × 10** hex-socket cap screw into each outer edge — it drops into the
    counterbore and threads into the boss. Tighten until the blade holds any angle
    but still folds; the head finishes below flush.
@@ -180,6 +271,26 @@ Measure your board and set:
   fingertip can reach the screen's edge instead of hitting a vertical lip.
   Bigger = easier edge touches but exposes a little more of the black border on
   the bevel; 0 for a square opening.
+- `mic_*` — the microphone mount. `mic_l`/`mic_w`/`mic_t` are the module's PCB —
+  **`mic_t` is the board's real thickness (~3 mm), not the bare FR4** —
+  `mic_can_d`/`mic_can_h` its capsule, `mic_under` the solder joints on the back
+  face. `mic_y0` slides it along the wall (raise it toward the USB-C end; it is
+  bounded by the retainer's top end cap at local Y 82.5). `mic_gap` is the
+  clearance round the module inside the room (0.4 all round). It is a **fit, not a
+  grip** — nothing should have to be forced in.
+  `mic_floor` is 0 so the module rests on the board, `mic_roof_t` is the top plate's
+  thickness (its top face *is* `retainer_h`), and `mic_win_pad` is the clearance round
+  the capsule's window.
+  `mic_relief` is
+  the wall channel depth and `mic_can_gap` the air left in front of the capsule.
+  `mic_port_d` is the sound port. Set `mic_relief = 0` and delete the slot if you
+  are building without a mic.
+- `exp_side`, `exp_from_far`, `exp_w`, `exp_relief` — the Expand-cable channel.
+  **`exp_side` is easy to get backwards:** a photo of the board's *back* mirrors X
+  relative to this model, which is front-referenced. +1 is the wall the Expand
+  header is actually on.
+- `batt_dx` — shifts the pack away from the Expand-side wall to make room for the
+  microphone. Set it to 0 to re-centre the pack if you skip the mic.
 - `comp_back`, `batt_seat`, `batt_extra` — clearances behind the board.
   `batt_extra` sets the depth margin so the cover closes; reduce it to slim the
   case if your pack + components allow.
@@ -190,6 +301,24 @@ Re-export:
 cd case
 for p in body retainer cover stand; do openscad -o stl/deckhand_$p.stl -D "part=\"$p\"" deckhand_case.scad; done
 ```
+
+When you change anything in the cavity, **probe it** rather than eyeballing the
+preview. `part="none"` renders nothing on purpose, so an `include`-based probe
+can intersect two things and ask whether the result is empty:
+
+```
+printf 'include <deckhand_case.scad>\nintersection(){ mic_module(); body(); }\n' > /tmp/p.scad
+rm -f /tmp/p.stl && openscad -o /tmp/p.stl -D 'part="none"' /tmp/p.scad; test -s /tmp/p.stl && echo COLLISION || echo clear
+```
+
+Three traps, all of which produced a wrong answer here: `include` re-runs the
+part dispatch (hence the `none` branch — without it every probe silently unioned
+the whole assembly in and reported a collision); `use` imports modules but **not
+variables**, so coordinates come out `undef` and land at the origin; and
+OpenSCAD **does not hoist**, so referencing a variable defined further down the
+file is a silent `undef` too. Coincident faces also read as a "collision" — check
+the result's bounding box, and if one axis is a single value it is a
+zero-thickness sheet, i.e. two surfaces touching, not real interference.
 
 > **Print the body first as a fit check** — confirm the 4 locating pins drop
 > into your board's holes and the window frames the screen before final prints.
