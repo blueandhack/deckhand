@@ -25,8 +25,13 @@ down. The board is held only at its 4 mounting holes — flat PCB — so uneven
 component height doesn't matter.
 
 The **battery** lies on the back of the board in the cavity behind it. The
-**back cover snaps on** (barbed lip into slots in the walls) — no screws
-through the back.
+**back cover snaps on** (barbed lip into catches in the walls) — no screws
+through the back. Those catches are **blind pockets**, not holes: `snap_skin`
+(0.8 mm) of wall is left on the outside, so nothing shows from the exterior.
+They used to cut clean through, which put two visible holes in each end wall
+with the barb rattling inside them. The barb's catch shelf only reaches 0.9 mm
+into the 2.6 mm wall, so it still hooks the pocket's bottom edge exactly as
+before — verified clear of the new skin by 0.9 mm.
 
 USB-C exits the **top** edge; RESET/BOOT are back-face access holes.
 
@@ -230,7 +235,7 @@ body's 4 moulded pins, and the cover snaps onto the body.
    board. The capsule should sit in the wall channel with the sound port centred on
    it. Route the cable down the strip and through the Expand relief. Check it with
    **SETTINGS › ACTIONS › MIC TEST** before closing the cover.
-5. **Snap the cover on** — press until the barbs click into the wall slots. It
+5. **Snap the cover on** — press until the barbs click into the wall pockets. It
    should feel tight with no rattle; if it's stiff, raise `g` in `cover()`, and
    if it's loose, lower `g` or deepen the barb's catch shelf.
 6. **Kickstand:** sit the blade's notches over the cover's two bosses, then run an

@@ -92,6 +92,13 @@ exp_from_far = 18.1; // connector centre, in from the non-USB end
 exp_w     = 12.0;  // pocket width along the case length (generous for the cable)
 exp_relief = 1.8;  // depth into the 2.6 mm wall, leaving 0.8 mm of material
 exp_z_pad = 0.5;   // start just below the board's back plane so the edge is clear too
+exp_top   = 4.0;   // wall left above the relief, so it doesn't notch the top rim
+mic_chan_top = 4.0; // ...and the same above the mic channel. This closes the last notch
+                   // in the top rim. The cost is that the capsule can no longer descend
+                   // into the channel with the retainer: it has to enter from the cavity
+                   // side, i.e. the module goes in pushed inboard and is then slid
+                   // outboard into the channel. The room has 0.8 mm of X play, so if it
+                   // will not seat, widen the room (mic_gap) or lower this to 0.   // start just below the board's back plane so the edge is clear too
 
 // Battery is pushed toward the USB-C end, leaving a clear strip at the far end
 // for the speaker (both sit BEHIND the board; the columns are in FRONT of it).
@@ -328,6 +335,13 @@ module soft_box(w,h,d,r,er){
 // out smaller than drawn and pinches the barb. snap_win_extra opens the window up
 // all round to absorb that. Raise it if the cover still won't click home.
 snap_win_extra = 0.4;
+// ...and they are BLIND: snap_skin of wall is left on the OUTER face, so nothing shows
+// from outside. They used to cut clean through, which put two visible holes in each end
+// wall with the barb rattling around inside them. The barb's catch shelf reaches 0.9 mm
+// into the wall's thickness, so it still hooks the pocket's bottom edge exactly as
+// before - only the daylight is gone. The pocket's top edge is the same short bridge it
+// always was, now with a skin above it. Set this to 0 to go back to open windows.
+snap_skin = 0.8;
 
 // snap positions: two barbs on each long side
 function snaps() = [ [out_w*0.30, wall/2], [out_w*0.70, wall/2],
@@ -368,31 +382,41 @@ module body(){
       translate([bcx+usb_dx, usb_outer_y+usb_in*usb_cham_d, usb_z]) rotate([90,0,0])
         linear_extrude(0.02) rrect_c(usb_w, usb_h, usb_h/2.2);
     }
-    // Microphone: a vertical channel in the high-X wall over the module, then a
-    // small port through the 0.8 mm left outboard of it. The channel runs from the
-    // board's back plane to the back opening so the capsule can drop in with the
-    // retainer; a blind pocket would collide on assembly.
-    let (my0 = wall + mic_y0, mlen = mic_l,
-         cy  = wall + mic_y0 + mic_l - mic_can_from_end,
-         cz  = z_pcb_b + mic_floor + mic_w/2)  // the slot floor lifts the board
+    // Microphone: a vertical channel in the high-X wall, then a small port through the
+    // 0.8 mm left outboard of it.
+    // The channel stops mic_chan_top below the rim, so it leaves no notch in the top
+    // edge. That is a deliberate trade: the capsule stands 1.5 mm proud of the cavity
+    // wall, so with the channel closed at the top it can no longer ride down inside it
+    // as the retainer is lowered - the module has to go in pushed inboard and then be
+    // slid outboard into the channel. Set mic_chan_top to 0 to get the drop-in back.
+    // What the channel does NOT need is the module's whole length - only the CAPSULE reaches past
+    // the wall; the PCB clears it by 3.9 mm. Narrowing the channel to the capsule's own
+    // span shrinks the visible notch from mic_l+2 to mic_can_d+2.
+    let (cy  = wall + mic_y0 + mic_l - mic_can_from_end,
+         cz  = z_pcb_b + mic_floor + mic_w/2)
       union(){
-        translate([out_w - wall, my0 - 1.0, z_pcb_b - 0.5])
-          cube([mic_relief, mlen + 2.0, z_floor - z_pcb_b + 0.51]);   // full height = droppable
+        translate([out_w - wall, cy - mic_can_d/2 - 1.0, z_pcb_b - 0.5])
+          cube([mic_relief, mic_can_d + 2.0, z_floor - z_pcb_b + 0.51 - mic_chan_top]);
         translate([out_w - wall + mic_relief - 0.01, cy, cz]) rotate([0, 90, 0])
           cylinder(d = mic_port_d, h = wall - mic_relief + 0.02);
       }
-    // Expand-pin cable relief — see exp_* above. Cut from just under the board's
-    // back plane through to the back opening, so the plug and its cable have room
-    // for their whole height, not just at the board surface.
+    // Expand-pin cable relief - see exp_* above. Cut from just under the board's back
+    // plane, but it STOPS exp_top below the rim rather than running out through it. It
+    // used to break the rim, which left a visible notch in the top edge of the wall.
+    // Nothing has to descend into this one: the plug sits at board level (z 8.4..16.4,
+    // far below), and it is pushed onto the header by hand, not lowered down a channel.
+    // The mic channel below is the one that genuinely cannot be closed.
     let (exp_y = usb_at_top ? by0 + exp_from_far : by0 + board_h - exp_from_far,
          exp_x = exp_side < 0 ? wall - exp_relief : out_w - wall)
       translate([exp_x, exp_y - exp_w/2, z_pcb_b - exp_z_pad])
-        cube([exp_relief, exp_w, z_floor - z_pcb_b + exp_z_pad + 0.01]);
+        cube([exp_relief, exp_w, z_floor - z_pcb_b + exp_z_pad - exp_top]);
     // snap-catch windows in the walls (the cover barbs hook into these)
     // enlarged symmetrically about the original centre, so the catch position
     // (and therefore how the cover seats) is unchanged — only the opening grows
+    // Cut from just inside the OUTER face (leaving snap_skin) inward past the wall,
+    // rather than straight through it.
     for(s=snaps()) translate([s[0],s[1],body_d-3.2]) rotate([0,0, s[1]<out_h/2?0:180])
-      translate([-4-snap_win_extra, -wall, -snap_win_extra])
+      translate([-4-snap_win_extra, -wall/2 + snap_skin, -snap_win_extra])
         cube([8+2*snap_win_extra, wall*2, 1.6+2*snap_win_extra]);
   }
   // 4 mounting posts, same idea as example/weather_station_*.stl: a col_d
