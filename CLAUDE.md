@@ -354,37 +354,65 @@ two things `host/index.mjs` cannot get any other way:
   - Payload keys are short (`cxPct`/`cxResetMin`/`cxWin`/`cxAgeSec`, `agent:"cc"|"cx"`)
     because they ride in **every** tick and the device's line buffer is sized for asks
     carrying 1400-char details.
-- **Session history is PULL and on demand, and the selection is the whole trick.** Opening
-  a session's detail screen and tapping the card opens a HISTORY reader; the device sends
-  `HISTORY <id12>` and the host replies with ONE JSON line whose only key is `hist`, so it
-  can never be confused with a tick payload (the device bails out of the parser before any
-  usage field is touched). It is deliberately not in the 5s payload: a transcript is
-  thousands of lines and megabytes, and it only matters while someone is reading it.
+- **Session history is PULL, on demand, and PAGED FROM THE MAC.** Opening a session's
+  detail screen and tapping the card opens a HISTORY reader. The device sends
+  `HISTORY <id12> <chat|all> <page|last|item:N>` and the host replies with ONE JSON line
+  whose only key is `hist`, so it can never be confused with a tick payload (the device
+  bails out of the parser before any usage field is touched).
+  **The device stores only the screen it is showing.** Measured on a real transcript: 2515
+  entries / 584KB, of which the conversation alone is 122KB, against ~94KB of free heap
+  after the BLE stack — no device-side buffer can ever hold a session's history, so a
+  bigger buffer is never the answer. The Mac keeps all of it and serves one screen at a
+  time, which makes history length unbounded: that same session pages to **399 screens of
+  chat, 1853 of everything**, and the biggest page is **774 bytes**.
   Everything comes from Claude Code's own transcript JSONL, whose path the hook records
   per session — `user`→`you`, `assistant [text]`→`claude`, `[tool_use]`→`ran` (tool name
   plus the one interesting field, not a JSON dump), `[tool_result]`→`out` or `no` when
   `is_error`. `[thinking]` and the meta types are dropped. **A denied permission and a
   chosen option both arrive as tool_results**, which is how "what I chose" shows up
   without a separate channel.
-  - **Do NOT take a flat tail of the last N entries.** Measured on a real transcript: tool
-    calls and results outnumber conversation about 2:1, so the last 40 entries contained
-    ONE assistant message and NONE of the user's prompts — the conversation had scrolled
-    out entirely, which is the opposite of what the screen is for. The two kinds are
-    sampled separately (24 conversation + 16 command) and merged back in chronological
-    order, and the device's **CHAT/ALL chip** filters to just the conversation by default.
+  - **TWO LEVELS, because one length can't serve both.** The list shows 300-char previews
+    so a screen holds several rows; **tapping a row fetches that entry WHOLE** (4000-char
+    cap, matching the device's buffer) into its own pager. With a single cap this failed
+    both ways: at 600 chars the list was sparse AND long messages were still cut — and
+    worse, an entry taller than one screen was silently CLIPPED by the device with no way
+    to reach the rest. That is what "I can't see the full message" was.
+  - **Body tap opens the row under the finger; paging is the buttons and the scrubber.**
+    Spending the body tap on "next page" was the wrong trade, because reading a whole
+    message was the thing the list could not do at all.
+  - **The jump bar is a proportional SCRUBBER, not one segment per page.** At 399 pages a
+    segment each would be a pixel wide. Tap anywhere along the track to jump to that
+    fraction; the header shows position in the whole history (`412/628`), not a page number.
+  - **CHAT is the default filter.** Tool calls outnumber conversation about 2:1, so an
+    unfiltered view is mostly commands. The chip toggles to ALL.
   - **The reply goes over USB when USB is up, and BLE only as a fallback — never both.**
     BLE writes go out in 20-byte chunks with a response awaited on each, so at the 30ms
-    connection interval macOS negotiates, a 5.7KB history line is ~285 round trips: about
-    **8.5 seconds with the tick loop blocked behind it**. Both transports reach the same
-    device, so USB simply wins; when BLE is the only link the history is trimmed to 16
-    shorter entries, keeping the transfer near the ~1KB a normal payload already costs.
+    connection interval macOS negotiates even a few KB is seconds, with the tick loop
+    blocked behind it. Both transports reach the same device, so USB simply wins.
+  - The parsed transcript is cached per session (paging 399 screens must not re-read a
+    megabyte each time) but the cache is **bounded to the 2 most recently used** — a parsed
+    transcript is ~600KB of strings and this process runs for days, so an unbounded cache
+    grew by another transcript for every session ever opened.
+  - The device's page arena is sized to what ONE SCREEN can hold (2.4KB), not to 24
+    worst-case entries (15KB) — that difference comes straight out of the heap the audio
+    path needs. If the host's wrap estimate lets a page arrive slightly oversized, the
+    device drops the tail rather than overrunning the arena.
   - Paginated **by entry, not by line** — splitting an entry across a page makes it
-    unreadable — and it opens on the NEWEST page. Three ways to move (PREV/NEXT, a jump
-    bar of one tappable segment per page, and a body tap that advances and wraps), because
-    drag-scrolling misfires on this resistive panel.
+    unreadable — and it opens on the NEWEST page.
   - The reader owns the whole screen, so it has to absorb the 5s tick the same way the
     settings confirm dialog does; without that the periodic repaint paints the detail
     screen straight over it.
+- **Housekeeping: the host's own files are capped, because both grew forever.** Measured:
+  the log appends a ~700-byte tick line every 5s = **4.4MB/day, ~131MB/month**, and audio
+  captures are never overwritten (each is timestamped) at ~100KB–1MB a take.
+  `/tmp/deckhand-host.log` now rotates at 5MB keeping one previous generation (`.1`), so a
+  crash's context survives the rotation that follows it; size is tracked from what we write
+  rather than `stat`ing every line, with the counter **seeded from the existing file at
+  startup**. Audio captures older than 7 days are pruned, but the **newest 10 always
+  survive regardless of age** — comparing an old capture against a new one is a real
+  workflow here, and a long quiet spell must not wipe the lot. `latest.wav` /
+  `latest-clean.wav` are left alone (mic-wav.mjs regenerates them). Pruning runs after each
+  capture AND once at startup, since captures accumulate across runs.
 - **Mixing the two on screen: text, never colour or an icon.** Sessions from both tools
   go into the SAME list and the same urgency ranking, so a mixed set sorts by how much
   it needs you rather than by which tool it came from. Each row is tagged `CC`/`CX` in

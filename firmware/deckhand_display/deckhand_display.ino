@@ -737,35 +737,48 @@ bool readerActive = false;
 int readerPage = 0;
 
 // ---------- Session history ----------
-// Fetched ON DEMAND when a detail screen opens, never in the 5s payload: a transcript is
-// megabytes and only matters while someone is reading it. The host sends one JSON line
-// whose only key is `hist`, so it can't be confused with a tick payload.
-// 40 x 152 is ~6KB of static RAM - affordable, and a hard ceiling means a long session
-// can't grow the buffer under us.
-#define HIST_MAX 40
-#define HIST_TEXT 152
-#define HIST_MAX_PAGES 24
-char histText[HIST_MAX][HIST_TEXT];
-uint8_t histRole[HIST_MAX];   // 0 you, 1 claude, 2 ran, 3 result, 4 denied/error
-int histCount = 0;
-char histId[16] = "";         // which session the buffer belongs to
-bool histActive = false;      // the history reader is on screen
-bool histPending = false;     // asked the host, nothing back yet
-int histPage = 0;
+// Fetched ON DEMAND and PAGED FROM THE MAC. The device stores only the page it is showing:
+// measured, a real session's history is 2515 entries / 584KB, against ~94KB of free heap
+// after the BLE stack - no device-side buffer can ever hold it, so the Mac keeps all of it
+// and serves one screen at a time. History length is therefore unbounded.
+// The host sends one JSON line whose only key is `hist`, so it can't be confused with a
+// tick payload.
+// Sized to what ONE SCREEN can hold, not to the worst case per entry. The reader fits ~14
+// lines of 36 chars, so a page carries ~500 characters of text - or a single long entry the
+// host let through whole. A flat arena costs 2.4KB; 24 fixed 620-char slots cost 15KB and
+// would have come straight out of the heap the audio path needs.
+#define HIST_MAX 16          // entries on one screen
+#define HIST_ARENA 2400      // characters of text for the whole page
+char histArena[HIST_ARENA];
+uint16_t histOff[HIST_MAX];  // offset of each entry's text within the arena
+int histArenaUsed = 0;
+uint8_t histRole[HIST_MAX];  // 0 you, 1 claude, 2 ran, 3 result, 4 denied/error
+const char* histTextAt(int i) { return &histArena[histOff[i]]; }
+int histCount = 0;           // entries on THIS page
+char histId[16] = "";        // which session the page belongs to
+bool histActive = false;     // the history reader is on screen
+bool histPending = false;    // asked the host, nothing back yet
+int histPage = 0;            // 0-based, as told by the host
 int histPages = 1;
-// CHAT hides the command traffic. It is the DEFAULT because a transcript's tool calls
-// outnumber the conversation about 2:1, so an unfiltered view is mostly commands - the
-// host now samples both kinds so either filter has something to show.
+// CHAT hides the command traffic and is the DEFAULT: a transcript's tool calls outnumber
+// the conversation about 2:1, so an unfiltered view is mostly commands.
 bool histChatOnly = true;
-uint8_t histView[HIST_MAX];               // item indices passing the filter
-int histViewCount = 0;
-uint8_t histPageStart[HIST_MAX_PAGES];    // first VIEW slot on each page
+
+// Second level: ONE entry, in full, in its own pager. The list rows are previews, and an
+// entry longer than a screen used to be clipped with no way to reach the rest.
+#define HIST_FULL_MAX 4001
+char histFull[HIST_FULL_MAX];
+uint8_t histFullRole = 0;
+bool histFullActive = false;
+int histFullPage = 0;
+int histFrom = 0;             // global index of this page's first row
+int histTotal = 0;            // entries in the whole filtered history
+int histRowY[HIST_MAX + 1];   // y bounds of each drawn row, for hit-testing a tap
 
 const int HIST_TOP = 28;
 const int HIST_JUMP_Y = 248;
 const int HIST_JUMP_H = 16;
 const int HIST_LINE_H = 13;   // Cozette
-const int HIST_VIS_LINES = (HIST_JUMP_Y - 6 - HIST_TOP) / HIST_LINE_H;
 
 const char* histRoleLabel(uint8_t r) {
   switch (r) {
@@ -3185,31 +3198,6 @@ const int READER_CTRL_Y = 272;
 // Paginated by ITEM, not by line: an entry is a label plus its wrapped text, and
 // splitting one across a page boundary makes it unreadable. An item taller than a whole
 // page gets its own page and is clipped rather than lost.
-void histPaginate() {
-  // Rebuild the filtered view first: everything below pages over the VIEW, not the raw
-  // buffer, so switching filter re-paginates instead of showing gaps.
-  histViewCount = 0;
-  for (int i = 0; i < histCount; i++) {
-    bool conv = histRole[i] == 0 || histRole[i] == 1;
-    if (histChatOnly && !conv) continue;
-    histView[histViewCount++] = i;
-  }
-  histPages = 0;
-  int used = 0;
-  for (int v = 0; v < histViewCount; v++) {
-    setUIFont(FONT_CODE);
-    int lines = 1 + countWrappedLines(histText[histView[v]], FONT_CODE, tft.width() - 24);
-    if (used == 0 || used + lines > HIST_VIS_LINES) {
-      if (histPages >= HIST_MAX_PAGES) break;
-      histPageStart[histPages++] = v;
-      used = lines;
-    } else {
-      used += lines;
-    }
-  }
-  if (histPages < 1) { histPages = 1; histPageStart[0] = 0; }
-}
-
 void drawHistory() {
   if (detailIndex < 0 || detailIndex >= sessionCount) return;
   const SessionInfo& s = sessions[detailIndex];
@@ -3231,28 +3219,27 @@ void drawHistory() {
   char hdr[40];
   snprintf(hdr, sizeof(hdr), "%s", s.name);
   tft.drawString(hdr, 10 + chipW + 8, 8);
-  char pg[12];
+  // Position in the WHOLE history, not just the page number - with hundreds of pages,
+  // "412/628 entries" is what tells you where you are.
+  char pg[20];
   if (histPending) snprintf(pg, sizeof(pg), "...");
+  else if (histTotal > 0) snprintf(pg, sizeof(pg), "%d/%d", histFrom + 1, histTotal);
   else snprintf(pg, sizeof(pg), "%d/%d", histPage + 1, histPages);
   tft.setTextDatum(TR_DATUM);
   tft.drawString(pg, tft.width() - 12, 8);
   tft.setTextDatum(TL_DATUM);
   tft.drawFastHLine(0, 22, tft.width(), COLOR_LABEL);
 
-  if (histPending || histViewCount == 0) {
+  if (histPending || histCount == 0) {
     setUIFont(2);
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(histPending ? "Asking the Mac..."
-                              : (histCount ? "Nothing in this filter" : "No history yet"),
-                   tft.width() / 2, 130);
+    tft.drawString(histPending ? "Asking the Mac..." : "Nothing here", tft.width() / 2, 130);
     tft.setTextDatum(TL_DATUM);
   } else {
-    int first = histPageStart[histPage];
-    int last = (histPage + 1 < histPages) ? histPageStart[histPage + 1] : histViewCount;
     int y = HIST_TOP;
-    for (int v = first; v < last; v++) {
-      int i = histView[v];
+    for (int i = 0; i < histCount; i++) {
+      histRowY[i] = y;
       if (y + HIST_LINE_H > HIST_JUMP_Y - 4) break;
       setUIFont(1);
       tft.setTextColor(histRoleColor(histRole[i]), COLOR_BG);
@@ -3260,27 +3247,24 @@ void drawHistory() {
       y += HIST_LINE_H;
       int room = (HIST_JUMP_Y - 4 - y) / HIST_LINE_H;
       if (room <= 0) break;
-      int drew = drawWrappedText(histText[i], 12, y, FONT_CODE, HIST_LINE_H,
+      int drew = drawWrappedText(histTextAt(i), 12, y, FONT_CODE, HIST_LINE_H,
                                  tft.width() - 24, 0, room, COLOR_VALUE, COLOR_BG);
       y += drew * HIST_LINE_H + 3;
+      histRowY[i + 1] = y;
     }
   }
 
-  // JUMP BAR: one segment per page, so you can go straight to a page instead of
-  // tapping NEXT a dozen times. The current page is filled; the rest are outlined.
+  // SCRUBBER, not one segment per page: a session can run to hundreds of pages, and a
+  // segment each would be a pixel wide. Tap anywhere along it to jump to that fraction of
+  // the history; the knob shows where you are and roughly how much there is.
   if (histPages > 1) {
-    int gap = 2;
-    int segW = (tft.width() - 24 - gap * (histPages - 1)) / histPages;
-    if (segW < 3) segW = 3;
-    for (int i = 0; i < histPages; i++) {
-      int x = 12 + i * (segW + gap);
-      if (x + segW > tft.width() - 12) break;
-      if (i == histPage) tft.fillRect(x, HIST_JUMP_Y, segW, HIST_JUMP_H, COLOR_ACCENT);
-      else {
-        tft.fillRect(x, HIST_JUMP_Y, segW, HIST_JUMP_H, COLOR_CARD);
-        tft.drawRect(x, HIST_JUMP_Y, segW, HIST_JUMP_H, COLOR_LABEL);
-      }
-    }
+    int trackX = 12, trackW = tft.width() - 24;
+    tft.fillRect(trackX, HIST_JUMP_Y, trackW, HIST_JUMP_H, COLOR_CARD);
+    tft.drawRect(trackX, HIST_JUMP_Y, trackW, HIST_JUMP_H, COLOR_LABEL);
+    int knobW = trackW / histPages;
+    if (knobW < 6) knobW = 6;
+    int kx = trackX + (long) (trackW - knobW) * histPage / (histPages - 1);
+    tft.fillRect(kx, HIST_JUMP_Y + 1, knobW, HIST_JUMP_H - 2, COLOR_ACCENT);
   }
 
   struct { int x, w; const char* label; bool enabled; } btns[3] = {
@@ -3300,28 +3284,71 @@ void drawHistory() {
   }
 }
 
-void requestHistory(int idx) {
+// `HISTORY <id> <chat|all> <page|last>`. Every page turn is a round trip - instant over
+// USB, and it is what keeps the device from having to hold the whole transcript.
+// Full-entry pager. Same shape as the ask reader: page by tapping, PREV/CLOSE/NEXT below.
+void drawHistFull() {
+  int maxW = tft.width() - 24;
+  int textTop = 30;
+  int visLines = (READER_CTRL_Y - 8 - textTop) / HIST_LINE_H;
+  setUIFont(FONT_CODE);
+  int totalLines = countWrappedLines(histFull, FONT_CODE, maxW);
+  int pages = (totalLines + visLines - 1) / visLines;
+  if (pages < 1) pages = 1;
+  if (histFullPage >= pages) histFullPage = pages - 1;
+  if (histFullPage < 0) histFullPage = 0;
+
+  tft.fillScreen(COLOR_BG);
+  setUIFont(1);
+  tft.setTextColor(histRoleColor(histFullRole), COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(histRoleLabel(histFullRole), 12, 8);
+  char pg[12];
+  snprintf(pg, sizeof(pg), "%d/%d", histFullPage + 1, pages);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString(pg, tft.width() - 12, 8);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawFastHLine(0, 22, tft.width(), COLOR_LABEL);
+
+  drawWrappedText(histFull, 12, textTop, FONT_CODE, HIST_LINE_H, maxW,
+                  histFullPage * visLines, visLines, COLOR_VALUE, COLOR_BG);
+
+  struct { int x, w; const char* label; bool enabled; } btns[3] = {
+    {8, 70, "< PREV", histFullPage > 0},
+    {86, 68, "BACK", true},
+    {162, 70, "NEXT >", histFullPage < pages - 1},
+  };
+  for (int i = 0; i < 3; i++) {
+    uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
+    tft.fillRoundRect(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD);
+    tft.drawRoundRect(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, c);
+    setUIFont(2);
+    tft.setTextColor(c, COLOR_CARD);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + 21);
+    tft.setTextDatum(TL_DATUM);
+  }
+}
+
+void requestHistory(int idx, const char* want) {
   if (idx < 0 || idx >= sessionCount) return;
-  char line[32];
-  snprintf(line, sizeof(line), "HISTORY %s", sessions[idx].id);
+  histPending = true;
+  char line[48];
+  snprintf(line, sizeof(line), "HISTORY %s %s %s", sessions[idx].id,
+           histChatOnly ? "chat" : "all", want);
   sendLineToHost(line);
 }
 
 void openHistory(int idx) {
   if (idx < 0 || idx >= sessionCount) return;
   histActive = true;
+  histCount = 0;
+  histPages = 1;
   histPage = 0;
-  // Only re-ask when the buffer belongs to a different session; flipping back into the
-  // same one shows what we already have instead of blanking the screen for a round trip.
-  if (strcmp(histId, sessions[idx].id) != 0) {
-    histCount = 0;
-    histPages = 1;
-    histPending = true;
-    strncpy(histId, sessions[idx].id, sizeof(histId) - 1);
-    histId[sizeof(histId) - 1] = '\0';
-  }
+  strncpy(histId, sessions[idx].id, sizeof(histId) - 1);
+  histId[sizeof(histId) - 1] = '\0';
+  requestHistory(idx, "last");   // newest screen first - that is what you came for
   drawHistory();
-  if (histPending) requestHistory(idx);
 }
 
 void exitHistory() {
@@ -3340,33 +3367,67 @@ void exitHistory() {
 
 // Tap map: control bar, then the jump bar, then the body (body = next page, wrapping,
 // which is how you skim without reaching for the buttons).
+// Every navigation is a request; the host owns the pagination, so the device never has to
+// know how long the history is.
+void histGoto(int page) {
+  if (page < 0) page = 0;
+  if (page > histPages - 1) page = histPages - 1;
+  if (page == histPage && !histPending) return;
+  histPage = page;
+  requestHistory(detailIndex, String(page).c_str());
+  drawHistory();   // shows "Asking the Mac..." until the page lands
+}
+
 bool handleHistoryTouch(int sx, int sy) {
-  if (sy <= 24 && sx < 76) {           // the filter chip
+  if (sy <= 24 && sx < 76) {             // the filter chip
     histChatOnly = !histChatOnly;
-    histPaginate();
-    histPage = histPages - 1;          // newest again, in the new filter
+    histCount = 0;
+    requestHistory(detailIndex, "last"); // page counts differ per filter: start at newest
     drawHistory();
     return true;
   }
   if (sy >= READER_CTRL_Y) {
-    if (sx < 78) { if (histPage > 0) { histPage--; drawHistory(); } }
+    if (sx < 78) histGoto(histPage - 1);
     else if (sx < 156) exitHistory();
-    else if (histPage < histPages - 1) { histPage++; drawHistory(); }
+    else histGoto(histPage + 1);
     return true;
   }
   if (sy >= HIST_JUMP_Y && sy < HIST_JUMP_Y + HIST_JUMP_H && histPages > 1) {
-    int gap = 2;
-    int segW = (tft.width() - 24 - gap * (histPages - 1)) / histPages;
-    if (segW < 3) segW = 3;
-    int i = (sx - 12) / (segW + gap);
-    if (i >= 0 && i < histPages && i != histPage) { histPage = i; drawHistory(); }
+    int trackX = 12, trackW = tft.width() - 24;
+    long f = (long) (sx - trackX) * (histPages - 1) / (trackW > 1 ? trackW - 1 : 1);
+    histGoto((int) f);
     return true;
   }
-  if (sy > 22 && histPages > 1) {
-    histPage = (histPage + 1) % histPages;
-    drawHistory();
+  // A tap in the body OPENS the row under the finger, in full. Paging is the buttons and
+  // the scrubber - which is the right split, because reading a whole message was the thing
+  // the list could not do.
+  if (sy > 22 && histCount > 0 && !histPending) {
+    for (int i = 0; i < histCount; i++) {
+      if (sy >= histRowY[i] && sy < histRowY[i + 1]) {
+        char want[24];
+        snprintf(want, sizeof(want), "item:%d", histFrom + i);
+        histFull[0] = '\0';
+        histFullRole = histRole[i];
+        histFullPage = 0;
+        histFullActive = true;
+        histPending = true;
+        requestHistory(detailIndex, want);
+        drawHistFull();
+        return true;
+      }
+    }
+  }
+  return true;
+}
+
+bool handleHistFullTouch(int sx, int sy) {
+  if (sy >= READER_CTRL_Y) {
+    if (sx < 78) { if (histFullPage > 0) { histFullPage--; drawHistFull(); } }
+    else if (sx < 156) { histFullActive = false; drawHistory(); }
+    else { histFullPage++; drawHistFull(); }
     return true;
   }
+  if (sy > 22) { histFullPage++; drawHistFull(); }   // tap to page, like the ask reader
   return true;
 }
 
@@ -4503,7 +4564,8 @@ void handleTouch() {
   }
 
   if (histActive) {
-    handleHistoryTouch(sx, sy);
+    if (histFullActive) handleHistFullTouch(sx, sy);
+    else handleHistoryTouch(sx, sy);
     return;
   }
 
@@ -4632,24 +4694,59 @@ void handleLine(const String& line) {
     strncpy(histId, hid, sizeof(histId) - 1);
     histId[sizeof(histId) - 1] = '\0';
     histCount = 0;
+    histArenaUsed = 0;
     JsonArray items = hist["items"].as<JsonArray>();
     if (!items.isNull()) {
       for (JsonObject it : items) {
         if (histCount >= HIST_MAX) break;
+        const char* t = it["t"] | "";
+        int len = strlen(t);
+        // The host lays pages out from an ESTIMATE of the wrapping, so a page can arrive
+        // slightly bigger than expected. Drop the tail rather than overrun the arena; the
+        // page still reads, and the next page starts where the host says it does.
+        if (histArenaUsed + len + 1 > HIST_ARENA) break;
         const char* r = it["r"] | "out";
         histRole[histCount] = strcmp(r, "you") == 0      ? 0
                               : strcmp(r, "claude") == 0 ? 1
                               : strcmp(r, "ran") == 0    ? 2
                               : strcmp(r, "no") == 0     ? 4
                                                          : 3;
-        copyField(histText[histCount], HIST_TEXT, it["t"] | "");
-        for (char* q = histText[histCount]; *q; q++) if ((uint8_t) *q < 0x20) *q = ' ';
+        histOff[histCount] = histArenaUsed;
+        char* dst = &histArena[histArenaUsed];
+        for (int k = 0; k < len; k++) dst[k] = ((uint8_t) t[k] < 0x20) ? ' ' : t[k];
+        dst[len] = '\0';
+        histArenaUsed += len + 1;
         histCount++;
       }
     }
+    // One entry, in full: the second level of the reader.
+    JsonObject full = hist["full"];
+    if (!full.isNull()) {
+      const char* t = full["t"] | "";
+      const char* r = full["r"] | "out";
+      histFullRole = strcmp(r, "you") == 0      ? 0
+                     : strcmp(r, "claude") == 0 ? 1
+                     : strcmp(r, "ran") == 0    ? 2
+                     : strcmp(r, "no") == 0     ? 4
+                                                : 3;
+      int n = 0;
+      for (; t[n] && n < HIST_FULL_MAX - 1; n++)
+        histFull[n] = ((uint8_t) t[n] < 0x20) ? ' ' : t[n];
+      histFull[n] = '\0';
+      histPending = false;
+      histFullPage = 0;
+      if (histFullActive) drawHistFull();
+      return;
+    }
+
+    histPage = hist["page"] | 0;
+    histPages = hist["pages"] | 1;
+    if (histPages < 1) histPages = 1;
+    histFrom = hist["from"] | 0;
+    histTotal = hist["total"] | 0;
+    const char* f = hist["f"] | "chat";
+    histChatOnly = strcmp(f, "all") != 0;   // trust the host's echo, not our own guess
     histPending = false;
-    histPaginate();
-    histPage = histPages - 1;   // land on the NEWEST page - that's what you came for
     if (histActive) drawHistory();
     return;
   }

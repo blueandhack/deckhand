@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, renameSync, statSync } from "node:fs";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
@@ -29,15 +29,43 @@ const CCUSAGE_BIN = path.join(__dirname, "node_modules", ".bin", "ccusage");
 // inherited by whatever shell launched it, so console.log alone goes
 // nowhere useful. Write directly to a log file too, always.
 const LOG_FILE = "/tmp/deckhand-host.log";
-const logStream = createWriteStream(LOG_FILE, { flags: "a" });
+// ROTATED, because this appends a ~700-byte tick line every 5s: measured at 4.4 MB/day,
+// ~131 MB/month. One previous generation is kept (.1) so a crash's context survives the
+// rotation that follows it. Size is tracked from what we write rather than by stat()ing on
+// every line - the counter is seeded from the existing file at startup.
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+let logStream = createWriteStream(LOG_FILE, { flags: "a" });
+let logBytes = 0;
+try {
+  logBytes = statSync(LOG_FILE).size;
+} catch {
+  logBytes = 0;
+}
+function rotateLogIfNeeded() {
+  if (logBytes < LOG_MAX_BYTES) return;
+  const old = logStream;
+  logBytes = 0;
+  try {
+    renameSync(LOG_FILE, `${LOG_FILE}.1`); // replaces any previous generation
+  } catch {
+    return; // couldn't rotate (permissions, races) - keep writing to the same file
+  }
+  logStream = createWriteStream(LOG_FILE, { flags: "a" });
+  old.end();
+}
 const rawLog = console.log.bind(console);
 const rawError = console.error.bind(console);
+function writeLog(line) {
+  logStream.write(line);
+  logBytes += Buffer.byteLength(line);
+  rotateLogIfNeeded();
+}
 console.log = (...args) => {
-  logStream.write(args.map(String).join(" ") + "\n");
+  writeLog(args.map(String).join(" ") + "\n");
   rawLog(...args);
 };
 console.error = (...args) => {
-  logStream.write(args.map(String).join(" ") + "\n");
+  writeLog(args.map(String).join(" ") + "\n");
   rawError(...args);
 };
 
@@ -789,23 +817,29 @@ function codexUsage() {
 //   are not what a person is trying to catch up on.
 // A DENIED permission and a CHOSEN option both arrive as tool_results, which is how
 // "what I chose" shows up without needing a separate channel.
-const HIST_MAX_ITEMS = 40;
-const HIST_MAX_CHARS = 150;
-// The tail is NOT simply the last N entries. Measured on a real transcript: tool calls
-// and their results outnumber conversation about 2:1, so the last 40 entries contained
-// ONE assistant message and NONE of the user's prompts - the conversation, which is the
-// thing you actually want to catch up on, had scrolled out entirely. So the two kinds are
-// sampled separately and merged back in chronological order: you get the recent
-// conversation AND the recent commands, and the device can filter to just the chat.
-const HIST_CONV_ITEMS = 24;   // you / claude
-const HIST_CMD_ITEMS = 16;    // ran / out / no
-const HIST_TAIL_BYTES = 400 * 1024;
+// Paged from HERE, not shipped as a window. Measured on a real transcript: 2515 entries,
+// 584KB at full text length, of which the conversation alone is 122KB - and the device has
+// ~94KB of free heap after the BLE stack. So no buffer on the device can ever hold a
+// session's history. Instead the Mac holds all of it and serves ONE SCREEN at a time; the
+// device stores only what it is displaying. History length is then unbounded, and every
+// transfer stays small enough to be instant over USB and tolerable over BLE.
+//
+// Everything comes from Claude Code's own transcript JSONL, whose path the hook records per
+// session: `user`->`you`, `assistant [text]`->`claude`, `[tool_use]`->`ran` (tool name plus
+// the one interesting field, never a JSON dump), `[tool_result]`->`out`, or `no` when
+// is_error. `[thinking]` and the meta record types are dropped - they are not what a person
+// is catching up on. A DENIED permission and a CHOSEN option both arrive as tool_results,
+// which is how "what I chose" appears without needing a separate channel.
+// Two lengths, because the reader has two levels. The LIST shows a preview so a screen
+// holds several entries; opening one fetches it WHOLE. A single cap can't serve both - at
+// 600 the list was sparse and long messages were still cut mid-sentence.
+const HIST_PREVIEW_CAP = 300;
+const HIST_FULL_CAP = 4000;   // matches the device's full-entry buffer
+const HIST_LINE_CHARS = 36;   // Cozette 6px across the reader's 216px text column
+const HIST_PAGE_LINES = 14;   // the reader fits 16; 2 lines of slack absorbs the fact that
+                              // real word-wrap differs from this estimate
 
-// session id -> transcript path, learned while building each payload (the hook puts the
-// path in the session record; the device only ever sends us the id).
-const transcriptById = new Map();
-
-function histFlatten(v, max = HIST_MAX_CHARS) {
+function histFlatten(v, max = HIST_PREVIEW_CAP) {
   const t = String(v ?? "")
     .replace(/[\u0000-\u001f]+/g, " ")
     .replace(/\s+/g, " ")
@@ -813,38 +847,57 @@ function histFlatten(v, max = HIST_MAX_CHARS) {
   return t.length > max ? t.slice(0, max - 1) + "\u2026" : t;
 }
 
-// One line that says what a tool call actually did. The interesting field differs per
-// tool, and a raw JSON dump of the input is unreadable at 240px.
-function histToolSummary(name, input, maxChars = HIST_MAX_CHARS) {
+// One line that says what a tool call actually did. The interesting field differs per tool,
+// and a raw JSON dump of the input is unreadable at 240px.
+function histToolSummary(name, input, max = HIST_PREVIEW_CAP) {
   const i = input && typeof input === "object" ? input : {};
   const first =
     i.command ?? i.file_path ?? i.path ?? i.pattern ?? i.query ?? i.url ?? i.prompt ?? "";
-  return histFlatten(first ? `${name}: ${first}` : name, maxChars);
+  return histFlatten(first ? `${name}: ${first}` : name, max);
 }
 
-async function readSessionHistory(transcript, maxItems = HIST_MAX_ITEMS, maxChars = HIST_MAX_CHARS) {
-  let text;
+// session id -> transcript path, learned while building each payload (the hook puts the path
+// in the session record; the device only ever sends us the id).
+const transcriptById = new Map();
+// id -> { mtimeMs, items } so a transcript is parsed once per version, not once per page
+// turn. Paging through 300 screens must not re-read a megabyte each time.
+// BOUNDED, because a parsed transcript is big: a real one is 2500 entries / ~600KB of
+// strings, and this process runs for days. Only one session's history is ever on screen,
+// so keeping the 2 most recently used is plenty and caps the cost at ~1.2MB instead of
+// growing by another transcript for every session ever opened.
+const HIST_CACHE_MAX = 2;
+const histCache = new Map();
+
+async function histItems(id) {
+  const transcript = transcriptById.get(id);
+  if (!transcript) return [];
+  let st;
   try {
-    const fh = await fs.open(transcript, "r");
-    try {
-      const { size } = await fh.stat();
-      const len = Math.min(HIST_TAIL_BYTES, size);
-      const buf = Buffer.alloc(len);
-      await fh.read(buf, 0, len, size - len);
-      text = buf.toString("utf8");
-    } finally {
-      await fh.close();
-    }
+    st = await fs.stat(transcript);
   } catch {
     return [];
   }
+  const hit = histCache.get(id);
+  if (hit && hit.mtimeMs === st.mtimeMs) {
+    histCache.delete(id);
+    histCache.set(id, hit);   // touch: most recently used goes last
+    return hit.items;
+  }
 
+  let text;
+  try {
+    text = await fs.readFile(transcript, "utf8"); // whole file: paging needs all of it
+  } catch {
+    return [];
+  }
   const items = [];
+  // Each entry keeps its preview AND its full text. The full text is never sent with a
+  // page - only when that entry is opened - so the list stays small.
   const push = (r, t) => {
-    if (t) items.push({ r, t });
+    if (t) items.push({ r, t: histFlatten(t, HIST_PREVIEW_CAP), full: histFlatten(t, HIST_FULL_CAP) });
   };
   for (const line of text.split("\n")) {
-    if (!line.startsWith("{")) continue; // the tail can slice the first line in half
+    if (!line.startsWith("{")) continue;
     let d;
     try {
       d = JSON.parse(line);
@@ -854,60 +907,98 @@ async function readSessionHistory(transcript, maxItems = HIST_MAX_ITEMS, maxChar
     if (d.type !== "user" && d.type !== "assistant") continue;
     const c = d.message?.content;
     if (typeof c === "string") {
-      push("you", histFlatten(c, maxChars));
+      push("you", c);
       continue;
     }
     if (!Array.isArray(c)) continue;
     for (const b of c) {
       if (!b || typeof b !== "object") continue;
-      if (b.type === "text") push(d.type === "user" ? "you" : "claude", histFlatten(b.text, maxChars));
+      if (b.type === "text") push(d.type === "user" ? "you" : "claude", b.text);
       else if (b.type === "image") push("you", "(image)");
-      else if (b.type === "tool_use") push("ran", histToolSummary(b.name, b.input, maxChars));
+      else if (b.type === "tool_use") push("ran", histToolSummary(b.name, b.input, HIST_FULL_CAP));
       else if (b.type === "tool_result") {
         const body = Array.isArray(b.content)
           ? b.content.map((x) => (typeof x === "string" ? x : x?.text ?? "")).join(" ")
           : b.content;
-        push(b.is_error ? "no" : "out", histFlatten(body, maxChars));
+        push(b.is_error ? "no" : "out", body);
       }
       // thinking: deliberately dropped
     }
   }
-  // Sample the two kinds separately, then merge by original position so the result is
-  // still in reading order (with gaps where older commands were dropped).
-  const isConv = (r) => r === "you" || r === "claude";
-  const convBudget = Math.min(HIST_CONV_ITEMS, maxItems);
-  const cmdBudget = Math.max(0, Math.min(HIST_CMD_ITEMS, maxItems - convBudget));
-  const keep = new Set();
-  let n = 0;
-  for (let i = items.length - 1; i >= 0 && n < convBudget; i--)
-    if (isConv(items[i].r)) { keep.add(i); n++; }
-  n = 0;
-  for (let i = items.length - 1; i >= 0 && n < cmdBudget; i--)
-    if (!isConv(items[i].r)) { keep.add(i); n++; }
-  return items.filter((_, i) => keep.has(i)).slice(-maxItems);
+  histCache.delete(id); // re-insert so Map iteration order is least-recently-used first
+  histCache.set(id, { mtimeMs: st.mtimeMs, items });
+  while (histCache.size > HIST_CACHE_MAX) histCache.delete(histCache.keys().next().value);
+  return items;
 }
 
-// Reply on the same transports the payload uses. Sent as its own JSON line so the
-// device's existing parser handles it; `hist` is the only key, so a tick payload can
-// never be confused with a history reply.
-// Sent over USB when USB is up, and over BLE only as a fallback - NOT both. BLE writes
-// go out in 20-byte chunks with a response awaited on each, so at the 30 ms connection
-// interval macOS negotiates, a 5.7 KB history line is ~285 round trips - about 8.5
-// seconds, with the tick loop blocked behind it. Both transports reach the same device
-// anyway, so USB simply wins. When BLE is the only link the history is trimmed instead,
-// which keeps the transfer near the ~1 KB the normal payload already costs.
-async function sendHistory(id) {
-  const transcript = transcriptById.get(id);
-  const bleOnly = !usbPort && !!bleCharacteristic;
-  const items = transcript
-    ? await readSessionHistory(transcript, bleOnly ? 16 : HIST_MAX_ITEMS, bleOnly ? 100 : HIST_MAX_CHARS)
-    : [];
-  const line = JSON.stringify({ hist: { id, items } }) + "\n";
+// Page boundaries for one filter, computed the way the device lays the screen out: each
+// entry costs a label line plus its wrapped text, and an entry is never split across a page
+// because that makes it unreadable.
+function histPaginate(items) {
+  const pages = [];
+  let used = 0;
+  items.forEach((it, i) => {
+    const lines = 1 + Math.max(1, Math.ceil(it.t.length / HIST_LINE_CHARS));
+    if (used === 0 || used + lines > HIST_PAGE_LINES) {
+      pages.push(i);
+      used = lines;
+    } else {
+      used += lines;
+    }
+  });
+  if (!pages.length) pages.push(0);
+  return pages;
+}
+
+// `HISTORY <id> <chat|all> item:<n>` - one entry, WHOLE. This is the second level of the
+// reader: the list shows previews, and opening a row fetches all of it. Without this a
+// message longer than the screen was simply unreachable.
+async function sendHistoryItem(id, filter, index) {
+  const all = await histItems(id);
+  const chatOnly = filter !== "all";
+  const items = chatOnly ? all.filter((x) => x.r === "you" || x.r === "claude") : all;
+  const it = items[index];
+  const line =
+    JSON.stringify({ hist: { id, full: { i: index, r: it ? it.r : "out", t: it ? it.full : "" } } }) + "\n";
+  if (usbPort) usbPort.write(line);
+  else if (bleCharacteristic) await sendOverBle(line);
+  console.log(`History: ${id} entry ${index} in full (${line.length} bytes)`);
+}
+
+// `HISTORY <id> <chat|all> <page|last>`. Replies with just that page plus the page count,
+// so the device can show "12/340" and scrub without ever holding the whole thing.
+async function sendHistory(id, filter, want) {
+  const all = await histItems(id);
+  const chatOnly = filter !== "all";
+  const items = chatOnly ? all.filter((x) => x.r === "you" || x.r === "claude") : all;
+  const bounds = histPaginate(items);
+  const pages = bounds.length;
+  let page = want === "last" ? pages - 1 : Number.parseInt(want, 10);
+  if (!Number.isFinite(page)) page = pages - 1;
+  page = Math.max(0, Math.min(pages - 1, page));
+  const from = bounds[page];
+  const to = page + 1 < pages ? bounds[page + 1] : items.length;
+  const line =
+    JSON.stringify({
+      hist: {
+        id,
+        f: chatOnly ? "chat" : "all",
+        page,
+        pages,
+        from,                       // global index of the first row, for "open this entry"
+        total: items.length,
+        items: items.slice(from, to).map((x) => ({ r: x.r, t: x.t })),   // previews only
+      },
+    }) + "\n";
+  // USB when USB is up, BLE only as a fallback - never both. BLE writes go out in 20-byte
+  // chunks with a response awaited on each, so at the 30ms connection interval macOS
+  // negotiates even a few KB is seconds, with the tick loop blocked behind it. Both
+  // transports reach the same device, so USB simply wins.
   if (usbPort) usbPort.write(line);
   else if (bleCharacteristic) await sendOverBle(line);
   console.log(
-    `History: sent ${items.length} item(s) for ${id} (${line.length} bytes` +
-      `${bleOnly ? ", trimmed for BLE" : ""}) via ${usbPort ? "usb" : bleCharacteristic ? "ble" : "nothing"}`
+    `History: ${id} ${chatOnly ? "chat" : "all"} page ${page + 1}/${pages} ` +
+      `(${to - from} of ${items.length} entries, ${line.length} bytes) via ${usbPort ? "usb" : "ble"}`
   );
 }
 
@@ -1062,6 +1153,45 @@ let lastAnswerAt = 0;
 // confidently transcribed as words nobody said. Writing straight to a file keeps
 // the reader hot and keeps a megabyte of base64 out of the log.
 const AUDIO_DIR = path.join(os.homedir(), "Deckhand-audio");
+// Captures are never overwritten (each is timestamped), so without this the directory only
+// grows - ~100KB to 1MB per take. Age-based, with a floor on the count so a long quiet
+// spell can't wipe the lot: the newest AUDIO_KEEP_MIN survive regardless of age, which
+// matters because comparing an old capture against a new one is a real workflow here.
+// Only capture-*/stream-*.txt are considered; latest.wav and latest-clean.wav are
+// regenerated by mic-wav.mjs and left alone.
+const AUDIO_KEEP_DAYS = 7;
+const AUDIO_KEEP_MIN = 10;
+async function pruneAudioCaptures() {
+  let names;
+  try {
+    names = await fs.readdir(AUDIO_DIR);
+  } catch {
+    return;
+  }
+  const takes = [];
+  for (const n of names) {
+    if (!/^(capture|stream)-\d+\.txt$/.test(n)) continue;
+    const full = path.join(AUDIO_DIR, n);
+    try {
+      takes.push({ full, n, mtimeMs: (await fs.stat(full)).mtimeMs });
+    } catch {
+      /* vanished */
+    }
+  }
+  takes.sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
+  const cutoff = Date.now() - AUDIO_KEEP_DAYS * 86400_000;
+  let removed = 0;
+  for (let i = AUDIO_KEEP_MIN; i < takes.length; i++) {
+    if (takes[i].mtimeMs >= cutoff) continue;
+    try {
+      await fs.rm(takes[i].full, { force: true });
+      removed++;
+    } catch {
+      /* leave it */
+    }
+  }
+  if (removed) console.log(`Audio: pruned ${removed} capture(s) older than ${AUDIO_KEEP_DAYS}d`);
+}
 // ---------- voice -> prompt ----------
 // Absolute paths on purpose: this process is launched via `open DeckhandBLE.app`,
 // which does NOT inherit the shell's PATH, so bare "claude"/"whisper-cli" are not
@@ -1200,6 +1330,7 @@ async function finishAudioCapture(complete) {
   // One-shot captures get transcribed too. They carry no target, so they land as a
   // memo rather than being dispatched anywhere.
   if (pct >= 98) transcribeAndDispatch(file, "-").catch((e) => console.error("Voice:", e.message));
+  pruneAudioCaptures().catch(() => {});
 }
 
 // ---------- streaming audio sink ----------
@@ -1275,15 +1406,17 @@ async function finishAudioStream(tail) {
   // Fire and forget: transcription plus a dictated task can take a while, and the
   // serial reader must keep draining throughout.
   transcribeAndDispatch(file, st.target).catch((e) => console.error("Voice:", e.message));
+  pruneAudioCaptures().catch(() => {});
 }
 
 async function handleDeviceLine(line, via) {
   // History request from the detail screen. Handled here rather than in the tick so the
   // transcript is only read when someone is actually looking at it.
   if (line.startsWith("HISTORY ")) {
-    const id = line.slice(8).trim();
+    const [id, filter = "chat", want = "last"] = line.slice(8).trim().split(/\s+/);
     console.log(`[device/${via}] ${line}`);
-    await sendHistory(id);
+    if (want.startsWith("item:")) await sendHistoryItem(id, filter, Number.parseInt(want.slice(5), 10) || 0);
+    else await sendHistory(id, filter, want);
     return;
   }
   // Audio first, and deliberately unlogged - see the note above.
@@ -1753,4 +1886,7 @@ startBle();
 // state, so a restart never bursts the endpoint's rate limiter even with a
 // stale cache - no need to compute a startup delay here anymore.
 setTimeout(pollOauthUsage, 0);
+// Prune once at startup too: captures accumulate across runs, and a host that is only
+// restarted occasionally would otherwise never clear anything left by the previous one.
+pruneAudioCaptures().catch(() => {});
 tick();
