@@ -773,6 +773,144 @@ function codexUsage() {
   };
 }
 
+// ---------- Session history (on demand) ----------
+// The device asks for this when you open a session's detail screen; it is NOT part of
+// the 5s payload. A transcript runs to thousands of lines and megabytes, so pushing any
+// of it every tick would be waste - and the device's line buffer is already sized for
+// asks carrying 1400-char details.
+//
+// Everything comes from Claude Code's own transcript JSONL, whose path the hook gives us
+// per session. What each entry becomes on screen:
+//   user    (string or [text])   -> "you"    what you typed
+//   assistant [text]             -> "claude" what it said
+//   assistant [tool_use]         -> "ran"    tool name + a one-line summary of the input
+//   user    [tool_result]        -> "out"    the result, or "no" when is_error
+//   [thinking] and the meta types (last-prompt, mode, ai-title, ...) are dropped: they
+//   are not what a person is trying to catch up on.
+// A DENIED permission and a CHOSEN option both arrive as tool_results, which is how
+// "what I chose" shows up without needing a separate channel.
+const HIST_MAX_ITEMS = 40;
+const HIST_MAX_CHARS = 150;
+// The tail is NOT simply the last N entries. Measured on a real transcript: tool calls
+// and their results outnumber conversation about 2:1, so the last 40 entries contained
+// ONE assistant message and NONE of the user's prompts - the conversation, which is the
+// thing you actually want to catch up on, had scrolled out entirely. So the two kinds are
+// sampled separately and merged back in chronological order: you get the recent
+// conversation AND the recent commands, and the device can filter to just the chat.
+const HIST_CONV_ITEMS = 24;   // you / claude
+const HIST_CMD_ITEMS = 16;    // ran / out / no
+const HIST_TAIL_BYTES = 400 * 1024;
+
+// session id -> transcript path, learned while building each payload (the hook puts the
+// path in the session record; the device only ever sends us the id).
+const transcriptById = new Map();
+
+function histFlatten(v, max = HIST_MAX_CHARS) {
+  const t = String(v ?? "")
+    .replace(/[\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return t.length > max ? t.slice(0, max - 1) + "\u2026" : t;
+}
+
+// One line that says what a tool call actually did. The interesting field differs per
+// tool, and a raw JSON dump of the input is unreadable at 240px.
+function histToolSummary(name, input, maxChars = HIST_MAX_CHARS) {
+  const i = input && typeof input === "object" ? input : {};
+  const first =
+    i.command ?? i.file_path ?? i.path ?? i.pattern ?? i.query ?? i.url ?? i.prompt ?? "";
+  return histFlatten(first ? `${name}: ${first}` : name, maxChars);
+}
+
+async function readSessionHistory(transcript, maxItems = HIST_MAX_ITEMS, maxChars = HIST_MAX_CHARS) {
+  let text;
+  try {
+    const fh = await fs.open(transcript, "r");
+    try {
+      const { size } = await fh.stat();
+      const len = Math.min(HIST_TAIL_BYTES, size);
+      const buf = Buffer.alloc(len);
+      await fh.read(buf, 0, len, size - len);
+      text = buf.toString("utf8");
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return [];
+  }
+
+  const items = [];
+  const push = (r, t) => {
+    if (t) items.push({ r, t });
+  };
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("{")) continue; // the tail can slice the first line in half
+    let d;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (d.type !== "user" && d.type !== "assistant") continue;
+    const c = d.message?.content;
+    if (typeof c === "string") {
+      push("you", histFlatten(c, maxChars));
+      continue;
+    }
+    if (!Array.isArray(c)) continue;
+    for (const b of c) {
+      if (!b || typeof b !== "object") continue;
+      if (b.type === "text") push(d.type === "user" ? "you" : "claude", histFlatten(b.text, maxChars));
+      else if (b.type === "image") push("you", "(image)");
+      else if (b.type === "tool_use") push("ran", histToolSummary(b.name, b.input, maxChars));
+      else if (b.type === "tool_result") {
+        const body = Array.isArray(b.content)
+          ? b.content.map((x) => (typeof x === "string" ? x : x?.text ?? "")).join(" ")
+          : b.content;
+        push(b.is_error ? "no" : "out", histFlatten(body, maxChars));
+      }
+      // thinking: deliberately dropped
+    }
+  }
+  // Sample the two kinds separately, then merge by original position so the result is
+  // still in reading order (with gaps where older commands were dropped).
+  const isConv = (r) => r === "you" || r === "claude";
+  const convBudget = Math.min(HIST_CONV_ITEMS, maxItems);
+  const cmdBudget = Math.max(0, Math.min(HIST_CMD_ITEMS, maxItems - convBudget));
+  const keep = new Set();
+  let n = 0;
+  for (let i = items.length - 1; i >= 0 && n < convBudget; i--)
+    if (isConv(items[i].r)) { keep.add(i); n++; }
+  n = 0;
+  for (let i = items.length - 1; i >= 0 && n < cmdBudget; i--)
+    if (!isConv(items[i].r)) { keep.add(i); n++; }
+  return items.filter((_, i) => keep.has(i)).slice(-maxItems);
+}
+
+// Reply on the same transports the payload uses. Sent as its own JSON line so the
+// device's existing parser handles it; `hist` is the only key, so a tick payload can
+// never be confused with a history reply.
+// Sent over USB when USB is up, and over BLE only as a fallback - NOT both. BLE writes
+// go out in 20-byte chunks with a response awaited on each, so at the 30 ms connection
+// interval macOS negotiates, a 5.7 KB history line is ~285 round trips - about 8.5
+// seconds, with the tick loop blocked behind it. Both transports reach the same device
+// anyway, so USB simply wins. When BLE is the only link the history is trimmed instead,
+// which keeps the transfer near the ~1 KB the normal payload already costs.
+async function sendHistory(id) {
+  const transcript = transcriptById.get(id);
+  const bleOnly = !usbPort && !!bleCharacteristic;
+  const items = transcript
+    ? await readSessionHistory(transcript, bleOnly ? 16 : HIST_MAX_ITEMS, bleOnly ? 100 : HIST_MAX_CHARS)
+    : [];
+  const line = JSON.stringify({ hist: { id, items } }) + "\n";
+  if (usbPort) usbPort.write(line);
+  else if (bleCharacteristic) await sendOverBle(line);
+  console.log(
+    `History: sent ${items.length} item(s) for ${id} (${line.length} bytes` +
+      `${bleOnly ? ", trimmed for BLE" : ""}) via ${usbPort ? "usb" : bleCharacteristic ? "ble" : "nothing"}`
+  );
+}
+
 async function readSessions() {
   let files;
   try {
@@ -826,6 +964,9 @@ async function readSessions() {
         // buffer is sized for asks carrying 1400-char details.
         agent: record.agent === "codex" ? "cx" : "cc",
       };
+      // Remember where this session's transcript lives, keyed by the SAME truncated id
+      // the device sees - that id is all it can send back when asking for history.
+      if (record.transcript) transcriptById.set(item.id, record.transcript);
       // Pending question (already truncated by the hook) rides along so the
       // device can display it and offer the options as buttons. We attach a
       // per-prompt nonce; the device HMACs it back so we can trust the answer.
@@ -1137,6 +1278,14 @@ async function finishAudioStream(tail) {
 }
 
 async function handleDeviceLine(line, via) {
+  // History request from the detail screen. Handled here rather than in the tick so the
+  // transcript is only read when someone is actually looking at it.
+  if (line.startsWith("HISTORY ")) {
+    const id = line.slice(8).trim();
+    console.log(`[device/${via}] ${line}`);
+    await sendHistory(id);
+    return;
+  }
   // Audio first, and deliberately unlogged - see the note above.
   if (via === "usb") {
     if (line.startsWith("AUDIO begin ")) {

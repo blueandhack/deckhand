@@ -736,6 +736,57 @@ bool askOverflow = false; // preview didn't fit; READ FULL TEXT button shown
 bool readerActive = false;
 int readerPage = 0;
 
+// ---------- Session history ----------
+// Fetched ON DEMAND when a detail screen opens, never in the 5s payload: a transcript is
+// megabytes and only matters while someone is reading it. The host sends one JSON line
+// whose only key is `hist`, so it can't be confused with a tick payload.
+// 40 x 152 is ~6KB of static RAM - affordable, and a hard ceiling means a long session
+// can't grow the buffer under us.
+#define HIST_MAX 40
+#define HIST_TEXT 152
+#define HIST_MAX_PAGES 24
+char histText[HIST_MAX][HIST_TEXT];
+uint8_t histRole[HIST_MAX];   // 0 you, 1 claude, 2 ran, 3 result, 4 denied/error
+int histCount = 0;
+char histId[16] = "";         // which session the buffer belongs to
+bool histActive = false;      // the history reader is on screen
+bool histPending = false;     // asked the host, nothing back yet
+int histPage = 0;
+int histPages = 1;
+// CHAT hides the command traffic. It is the DEFAULT because a transcript's tool calls
+// outnumber the conversation about 2:1, so an unfiltered view is mostly commands - the
+// host now samples both kinds so either filter has something to show.
+bool histChatOnly = true;
+uint8_t histView[HIST_MAX];               // item indices passing the filter
+int histViewCount = 0;
+uint8_t histPageStart[HIST_MAX_PAGES];    // first VIEW slot on each page
+
+const int HIST_TOP = 28;
+const int HIST_JUMP_Y = 248;
+const int HIST_JUMP_H = 16;
+const int HIST_LINE_H = 13;   // Cozette
+const int HIST_VIS_LINES = (HIST_JUMP_Y - 6 - HIST_TOP) / HIST_LINE_H;
+
+const char* histRoleLabel(uint8_t r) {
+  switch (r) {
+    case 0: return "YOU";
+    case 1: return "CLAUDE";
+    case 2: return "RAN";
+    case 3: return "RESULT";
+    default: return "DENIED / ERROR";
+  }
+}
+// Colour follows the palette's roles, but the LABEL is what actually carries the
+// meaning - same rule as the status shapes: colour is never the only carrier of meaning.
+uint16_t histRoleColor(uint8_t r) {
+  switch (r) {
+    case 0: return COLOR_ACCENT;
+    case 1: return COLOR_GOOD;
+    case 4: return COLOR_BAD;
+    default: return COLOR_LABEL;
+  }
+}
+
 // ---------- Shared state ----------
 unsigned long lastRxMillis = 0;
 bool everReceived = false;
@@ -2250,7 +2301,7 @@ void saveFabPos() { prefs.putInt("fabx", fabX); prefs.putInt("faby", fabY); }
 // screen's Allow/Deny buttons above all - a floating control overlapping a
 // permission decision is a genuine hazard, not just a cosmetic one.
 bool fabVisible() {
-  if (isAsleep || octoActive || readerActive || voiceCardActive) return false;
+  if (isAsleep || octoActive || readerActive || histActive || voiceCardActive) return false;
   // Allowed on a session's PLAIN detail screen - that's how you aim a dictation
   // at a specific session. Still hidden whenever an ask is pending, because a
   // floating control overlapping an Allow/Deny decision is a hazard.
@@ -2841,7 +2892,7 @@ void renderSessionsList() {
 // never look like activity to the auto-sleep timer.
 extern bool octoActive;   // defined with the Clawd easter egg, further down
 void tickWorkingSpinner() {
-  if (isAsleep || octoActive || showingDetail || readerActive) return;
+  if (isAsleep || octoActive || showingDetail || readerActive || histActive) return;
   if (currentTab != TAB_SESSIONS || sessionCount == 0) return;
   if (millis() - lastAnimMs < ANIM_INTERVAL_MS) return;
   lastAnimMs = millis();
@@ -3130,6 +3181,195 @@ void drawAskDetail(int idx) {
 // and footer suppressed) plus a chunky control bar - PREV / CLOSE / NEXT.
 const int READER_CTRL_Y = 272;
 
+// ---------- History reader ----------
+// Paginated by ITEM, not by line: an entry is a label plus its wrapped text, and
+// splitting one across a page boundary makes it unreadable. An item taller than a whole
+// page gets its own page and is clipped rather than lost.
+void histPaginate() {
+  // Rebuild the filtered view first: everything below pages over the VIEW, not the raw
+  // buffer, so switching filter re-paginates instead of showing gaps.
+  histViewCount = 0;
+  for (int i = 0; i < histCount; i++) {
+    bool conv = histRole[i] == 0 || histRole[i] == 1;
+    if (histChatOnly && !conv) continue;
+    histView[histViewCount++] = i;
+  }
+  histPages = 0;
+  int used = 0;
+  for (int v = 0; v < histViewCount; v++) {
+    setUIFont(FONT_CODE);
+    int lines = 1 + countWrappedLines(histText[histView[v]], FONT_CODE, tft.width() - 24);
+    if (used == 0 || used + lines > HIST_VIS_LINES) {
+      if (histPages >= HIST_MAX_PAGES) break;
+      histPageStart[histPages++] = v;
+      used = lines;
+    } else {
+      used += lines;
+    }
+  }
+  if (histPages < 1) { histPages = 1; histPageStart[0] = 0; }
+}
+
+void drawHistory() {
+  if (detailIndex < 0 || detailIndex >= sessionCount) return;
+  const SessionInfo& s = sessions[detailIndex];
+  if (histPage >= histPages) histPage = histPages - 1;
+  if (histPage < 0) histPage = 0;
+
+  tft.fillScreen(COLOR_BG);
+  // Filter chip, tappable: CHAT (conversation only) <-> ALL (plus commands and results).
+  const char* chip = histChatOnly ? "CHAT" : "ALL";
+  int chipW = histChatOnly ? 40 : 32;
+  tft.fillRoundRect(10, 4, chipW, 17, 3, COLOR_ACCENT);
+  setUIFont(1);
+  tft.setTextColor(COLOR_BG, COLOR_ACCENT);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(chip, 10 + chipW / 2, 13);
+  tft.setTextDatum(TL_DATUM);
+  setUIFont(1);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  char hdr[40];
+  snprintf(hdr, sizeof(hdr), "%s", s.name);
+  tft.drawString(hdr, 10 + chipW + 8, 8);
+  char pg[12];
+  if (histPending) snprintf(pg, sizeof(pg), "...");
+  else snprintf(pg, sizeof(pg), "%d/%d", histPage + 1, histPages);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString(pg, tft.width() - 12, 8);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawFastHLine(0, 22, tft.width(), COLOR_LABEL);
+
+  if (histPending || histViewCount == 0) {
+    setUIFont(2);
+    tft.setTextColor(COLOR_LABEL, COLOR_BG);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(histPending ? "Asking the Mac..."
+                              : (histCount ? "Nothing in this filter" : "No history yet"),
+                   tft.width() / 2, 130);
+    tft.setTextDatum(TL_DATUM);
+  } else {
+    int first = histPageStart[histPage];
+    int last = (histPage + 1 < histPages) ? histPageStart[histPage + 1] : histViewCount;
+    int y = HIST_TOP;
+    for (int v = first; v < last; v++) {
+      int i = histView[v];
+      if (y + HIST_LINE_H > HIST_JUMP_Y - 4) break;
+      setUIFont(1);
+      tft.setTextColor(histRoleColor(histRole[i]), COLOR_BG);
+      tft.drawString(histRoleLabel(histRole[i]), 12, y);
+      y += HIST_LINE_H;
+      int room = (HIST_JUMP_Y - 4 - y) / HIST_LINE_H;
+      if (room <= 0) break;
+      int drew = drawWrappedText(histText[i], 12, y, FONT_CODE, HIST_LINE_H,
+                                 tft.width() - 24, 0, room, COLOR_VALUE, COLOR_BG);
+      y += drew * HIST_LINE_H + 3;
+    }
+  }
+
+  // JUMP BAR: one segment per page, so you can go straight to a page instead of
+  // tapping NEXT a dozen times. The current page is filled; the rest are outlined.
+  if (histPages > 1) {
+    int gap = 2;
+    int segW = (tft.width() - 24 - gap * (histPages - 1)) / histPages;
+    if (segW < 3) segW = 3;
+    for (int i = 0; i < histPages; i++) {
+      int x = 12 + i * (segW + gap);
+      if (x + segW > tft.width() - 12) break;
+      if (i == histPage) tft.fillRect(x, HIST_JUMP_Y, segW, HIST_JUMP_H, COLOR_ACCENT);
+      else {
+        tft.fillRect(x, HIST_JUMP_Y, segW, HIST_JUMP_H, COLOR_CARD);
+        tft.drawRect(x, HIST_JUMP_Y, segW, HIST_JUMP_H, COLOR_LABEL);
+      }
+    }
+  }
+
+  struct { int x, w; const char* label; bool enabled; } btns[3] = {
+    {8, 70, "< PREV", histPage > 0},
+    {86, 68, "CLOSE", true},
+    {162, 70, "NEXT >", histPage < histPages - 1},
+  };
+  for (int i = 0; i < 3; i++) {
+    uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
+    tft.fillRoundRect(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD);
+    tft.drawRoundRect(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, c);
+    setUIFont(2);
+    tft.setTextColor(c, COLOR_CARD);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + 21);
+    tft.setTextDatum(TL_DATUM);
+  }
+}
+
+void requestHistory(int idx) {
+  if (idx < 0 || idx >= sessionCount) return;
+  char line[32];
+  snprintf(line, sizeof(line), "HISTORY %s", sessions[idx].id);
+  sendLineToHost(line);
+}
+
+void openHistory(int idx) {
+  if (idx < 0 || idx >= sessionCount) return;
+  histActive = true;
+  histPage = 0;
+  // Only re-ask when the buffer belongs to a different session; flipping back into the
+  // same one shows what we already have instead of blanking the screen for a round trip.
+  if (strcmp(histId, sessions[idx].id) != 0) {
+    histCount = 0;
+    histPages = 1;
+    histPending = true;
+    strncpy(histId, sessions[idx].id, sizeof(histId) - 1);
+    histId[sizeof(histId) - 1] = '\0';
+  }
+  drawHistory();
+  if (histPending) requestHistory(idx);
+}
+
+void exitHistory() {
+  histActive = false;
+  tft.fillScreen(COLOR_BG);
+  drawTabBar();
+  drawFooterChrome();
+  if (showingDetail && detailIndex >= 0 && detailIndex < sessionCount) {
+    drawSessionDetail(detailIndex);
+    buildDetailSignature(detailIndex, detailSigCache, sizeof(detailSigCache));
+  } else {
+    drawSessionsAll();
+  }
+  renderFooter();
+}
+
+// Tap map: control bar, then the jump bar, then the body (body = next page, wrapping,
+// which is how you skim without reaching for the buttons).
+bool handleHistoryTouch(int sx, int sy) {
+  if (sy <= 24 && sx < 76) {           // the filter chip
+    histChatOnly = !histChatOnly;
+    histPaginate();
+    histPage = histPages - 1;          // newest again, in the new filter
+    drawHistory();
+    return true;
+  }
+  if (sy >= READER_CTRL_Y) {
+    if (sx < 78) { if (histPage > 0) { histPage--; drawHistory(); } }
+    else if (sx < 156) exitHistory();
+    else if (histPage < histPages - 1) { histPage++; drawHistory(); }
+    return true;
+  }
+  if (sy >= HIST_JUMP_Y && sy < HIST_JUMP_Y + HIST_JUMP_H && histPages > 1) {
+    int gap = 2;
+    int segW = (tft.width() - 24 - gap * (histPages - 1)) / histPages;
+    if (segW < 3) segW = 3;
+    int i = (sx - 12) / (segW + gap);
+    if (i >= 0 && i < histPages && i != histPage) { histPage = i; drawHistory(); }
+    return true;
+  }
+  if (sy > 22 && histPages > 1) {
+    histPage = (histPage + 1) % histPages;
+    drawHistory();
+    return true;
+  }
+  return true;
+}
+
 void drawReader() {
   if (detailIndex < 0 || detailIndex >= sessionCount) return;
   SessionInfo& s = sessions[detailIndex];
@@ -3233,6 +3473,24 @@ void handleReaderTouch(int sx, int sy) {
 
 // Device -> host, over whichever transports are up. The host maps the short
 // id back to the full session and writes the answer file for the hook.
+// Both device->host lines go out this way: USB and BLE at once, BLE in <=20-byte
+// notifies with a breath between them. Factored out of sendAnswerToHost when the history
+// request became a second caller.
+void sendLineToHost(const char* line) {
+  Serial.println(line);
+  if (bleConnected && bleTxChar) {
+    char out[96];
+    snprintf(out, sizeof(out), "%s\n", line);
+    size_t len = strlen(out);
+    for (size_t i = 0; i < len; i += 20) {
+      size_t n = len - i > 20 ? 20 : len - i;
+      bleTxChar->setValue((uint8_t*) (out + i), n);
+      bleTxChar->notify();
+      delay(12); // give the stack breathing room between notifies
+    }
+  }
+}
+
 void sendAnswerToHost(int idx, int optIdx) {
   SessionInfo& s = sessions[idx];
   // HMAC over "nonce:pid:idx" proves this answer came from the paired device
@@ -3244,18 +3502,7 @@ void sendAnswerToHost(int idx, int optIdx) {
   if (mac.length() == 0) mac = "0";
   char line[80];
   snprintf(line, sizeof(line), "ANSWER %s %s %d %s", s.id, s.askPid, optIdx, mac.c_str());
-  Serial.println(line);
-  if (bleConnected && bleTxChar) {
-    char out[84];
-    snprintf(out, sizeof(out), "%s\n", line);
-    size_t len = strlen(out);
-    for (size_t i = 0; i < len; i += 20) {
-      size_t n = len - i > 20 ? 20 : len - i;
-      bleTxChar->setValue((uint8_t*) (out + i), n);
-      bleTxChar->notify();
-      delay(12); // give the stack breathing room between notifies
-    }
-  }
+  sendLineToHost(line);
 }
 
 // Touch on the detail screen when an ask is showing. Returns true if the
@@ -3270,7 +3517,11 @@ bool handleAskTouch(int sx, int sy) {
     // "< Back" label was already being drawn here, so this simply makes the page
     // behave the way it already looked.
     if (sy < CONTENT_Y + 28) return false; // header row = back
-    return true;                          // everything else is inert
+    // Body opens the HISTORY reader. It used to be inert, which left the most useful
+    // thing about a finished session - what it actually did - unreachable from the
+    // device. The FAB is hit-tested before this, so dictation still wins its own area.
+    openHistory(detailIndex);
+    return true;
   }
 
   int optTop = askOptionsTop(detailIndex);
@@ -3403,7 +3654,11 @@ void drawSessionDetail(int idx) {
   setUIFont(1);
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
   tft.setTextDatum(MC_DATUM);
-  tft.drawString("tap anywhere to go back", tft.width() / 2, contentBottom() - 10);
+  // Says what the screen actually does. It read "tap anywhere to go back", which stopped
+  // being true when back moved to the header row only, and is doubly wrong now the body
+  // opens the history reader.
+  tft.drawString("< Back up top  -  tap here for history", tft.width() / 2,
+                 contentBottom() - 10);
   tft.setTextDatum(TL_DATUM);
 }
 
@@ -4247,6 +4502,11 @@ void handleTouch() {
     return;
   }
 
+  if (histActive) {
+    handleHistoryTouch(sx, sy);
+    return;
+  }
+
   Serial.printf("TOUCH raw=(%d,%d) sx=%d sy=%d showingDetail=%d currentTab=%d cal=(%d,%d,%d,%d)\n",
                 lastRawX, lastRawY, sx, sy, showingDetail, (int) currentTab,
                 (int) calAff[0], (int) calAff[1], (int) calAff[2], (int) calAff[3]);
@@ -4364,6 +4624,36 @@ void handleLine(const String& line) {
     }
   }
 
+  // History reply: its own line, `hist` the only key. Bail out before any of the usage
+  // parsing below, which would otherwise reset every field to "missing".
+  JsonObject hist = doc["hist"];
+  if (!hist.isNull()) {
+    const char* hid = hist["id"] | "";
+    strncpy(histId, hid, sizeof(histId) - 1);
+    histId[sizeof(histId) - 1] = '\0';
+    histCount = 0;
+    JsonArray items = hist["items"].as<JsonArray>();
+    if (!items.isNull()) {
+      for (JsonObject it : items) {
+        if (histCount >= HIST_MAX) break;
+        const char* r = it["r"] | "out";
+        histRole[histCount] = strcmp(r, "you") == 0      ? 0
+                              : strcmp(r, "claude") == 0 ? 1
+                              : strcmp(r, "ran") == 0    ? 2
+                              : strcmp(r, "no") == 0     ? 4
+                                                         : 3;
+        copyField(histText[histCount], HIST_TEXT, it["t"] | "");
+        for (char* q = histText[histCount]; *q; q++) if ((uint8_t) *q < 0x20) *q = ' ';
+        histCount++;
+      }
+    }
+    histPending = false;
+    histPaginate();
+    histPage = histPages - 1;   // land on the NEWEST page - that's what you came for
+    if (histActive) drawHistory();
+    return;
+  }
+
   usage.fiveHourPct = doc["fiveHourPct"].isNull() ? -1 : (int) round((double) doc["fiveHourPct"]);
   usage.fiveHourResetInMin = doc["fiveHourResetInMin"].isNull() ? -1 : (long) doc["fiveHourResetInMin"];
   usage.sessionTokens = doc["sessionTokens"] | 0UL;
@@ -4474,6 +4764,14 @@ void handleLine(const String& line) {
   everReceived = true;
 
   if (octoActive) return; // data absorbed; the octopus keeps the screen
+  // The history reader owns the whole screen. Absorb the tick - without this the
+  // periodic repaint paints the detail screen straight over it, the same way it once
+  // painted over the settings confirm dialog.
+  if (histActive) {
+    detailIndex = resolveDetailIndex();
+    if (detailIndex < 0) { histActive = false; exitReaderToList(); }
+    return;
+  }
   if (readerActive) {
     // Keep the reader up while its ask still exists; if the prompt was
     // answered elsewhere or timed out, land back on the sessions list.
@@ -4798,9 +5096,9 @@ void loop() {
 
   // The reader is a static full-screen page: keep the display awake while
   // it's open, and keep the footer/tab renderers off its pixels.
-  if (readerActive) lastActivityMillis = millis();
+  if (readerActive || histActive) lastActivityMillis = millis();
 
-  if (!isAsleep && !octoActive && !readerActive) {
+  if (!isAsleep && !octoActive && !readerActive && !histActive) {
     static unsigned long lastFooterTick = 0;
     if (millis() - lastFooterTick > 1000) {
       lastFooterTick = millis();

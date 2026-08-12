@@ -354,6 +354,37 @@ two things `host/index.mjs` cannot get any other way:
   - Payload keys are short (`cxPct`/`cxResetMin`/`cxWin`/`cxAgeSec`, `agent:"cc"|"cx"`)
     because they ride in **every** tick and the device's line buffer is sized for asks
     carrying 1400-char details.
+- **Session history is PULL and on demand, and the selection is the whole trick.** Opening
+  a session's detail screen and tapping the card opens a HISTORY reader; the device sends
+  `HISTORY <id12>` and the host replies with ONE JSON line whose only key is `hist`, so it
+  can never be confused with a tick payload (the device bails out of the parser before any
+  usage field is touched). It is deliberately not in the 5s payload: a transcript is
+  thousands of lines and megabytes, and it only matters while someone is reading it.
+  Everything comes from Claude Code's own transcript JSONL, whose path the hook records
+  per session — `user`→`you`, `assistant [text]`→`claude`, `[tool_use]`→`ran` (tool name
+  plus the one interesting field, not a JSON dump), `[tool_result]`→`out` or `no` when
+  `is_error`. `[thinking]` and the meta types are dropped. **A denied permission and a
+  chosen option both arrive as tool_results**, which is how "what I chose" shows up
+  without a separate channel.
+  - **Do NOT take a flat tail of the last N entries.** Measured on a real transcript: tool
+    calls and results outnumber conversation about 2:1, so the last 40 entries contained
+    ONE assistant message and NONE of the user's prompts — the conversation had scrolled
+    out entirely, which is the opposite of what the screen is for. The two kinds are
+    sampled separately (24 conversation + 16 command) and merged back in chronological
+    order, and the device's **CHAT/ALL chip** filters to just the conversation by default.
+  - **The reply goes over USB when USB is up, and BLE only as a fallback — never both.**
+    BLE writes go out in 20-byte chunks with a response awaited on each, so at the 30ms
+    connection interval macOS negotiates, a 5.7KB history line is ~285 round trips: about
+    **8.5 seconds with the tick loop blocked behind it**. Both transports reach the same
+    device, so USB simply wins; when BLE is the only link the history is trimmed to 16
+    shorter entries, keeping the transfer near the ~1KB a normal payload already costs.
+  - Paginated **by entry, not by line** — splitting an entry across a page makes it
+    unreadable — and it opens on the NEWEST page. Three ways to move (PREV/NEXT, a jump
+    bar of one tappable segment per page, and a body tap that advances and wraps), because
+    drag-scrolling misfires on this resistive panel.
+  - The reader owns the whole screen, so it has to absorb the 5s tick the same way the
+    settings confirm dialog does; without that the periodic repaint paints the detail
+    screen straight over it.
 - **Mixing the two on screen: text, never colour or an icon.** Sessions from both tools
   go into the SAME list and the same urgency ranking, so a mixed set sorts by how much
   it needs you rather than by which tool it came from. Each row is tagged `CC`/`CX` in
