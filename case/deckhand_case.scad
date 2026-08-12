@@ -93,6 +93,14 @@ exp_w     = 12.0;  // pocket width along the case length (generous for the cable
 exp_relief = 1.8;  // depth into the 2.6 mm wall, leaving 0.8 mm of material
 exp_z_pad = 0.5;   // start just below the board's back plane so the edge is clear too
 exp_top   = 4.0;   // wall left above the relief, so it doesn't notch the top rim
+// Both wall channels get a SLOPED roof instead of a flat one. Two reasons, and the
+// geometry is the same for both: closing their tops turned each ceiling into a flat
+// 12 mm bridge printed face-down, which sags; and a ramp gives the mic capsule a
+// lead-in so it cams itself outward into the channel instead of having to be lined up
+// blind. 1.8 of depth over 2.4 of height is 37 degrees off vertical - well inside what
+// prints unsupported. It cannot be much taller on the mic side: the capsule's top is at
+// z 20.3 and the channel roof starts at 22.9, so the ramp has 2.6 to live in.
+chan_slope = 2.4;
 mic_chan_top = 4.0; // ...and the same above the mic channel. This closes the last notch
                    // in the top rim. The cost is that the capsule can no longer descend
                    // into the channel with the retainer: it has to enter from the cavity
@@ -395,8 +403,17 @@ module body(){
     let (cy  = wall + mic_y0 + mic_l - mic_can_from_end,
          cz  = z_pcb_b + mic_floor + mic_w/2)
       union(){
-        translate([out_w - wall, cy - mic_can_d/2 - 1.0, z_pcb_b - 0.5])
-          cube([mic_relief, mic_can_d + 2.0, z_floor - z_pcb_b + 0.51 - mic_chan_top]);
+        let (ch_top = z_floor + 0.01 - mic_chan_top,
+             ch_y0  = cy - mic_can_d/2 - 1.0,
+             ch_w   = mic_can_d + 2.0){
+          translate([out_w - wall, ch_y0, z_pcb_b - 0.5])
+            cube([mic_relief, ch_w, (ch_top - chan_slope) - (z_pcb_b - 0.5)]);
+          // sloped roof: full depth at the bottom of the ramp, flush with the wall's
+          // inner face at the top, so there is no flat ceiling to bridge
+          translate([out_w - wall, ch_y0 + ch_w, ch_top - chan_slope])
+            rotate([90, 0, 0]) linear_extrude(ch_w)
+              polygon([[0, 0], [mic_relief, 0], [0, chan_slope]]);
+        }
         translate([out_w - wall + mic_relief - 0.01, cy, cz]) rotate([0, 90, 0])
           cylinder(d = mic_port_d, h = wall - mic_relief + 0.02);
       }
@@ -408,8 +425,16 @@ module body(){
     // The mic channel below is the one that genuinely cannot be closed.
     let (exp_y = usb_at_top ? by0 + exp_from_far : by0 + board_h - exp_from_far,
          exp_x = exp_side < 0 ? wall - exp_relief : out_w - wall)
-      translate([exp_x, exp_y - exp_w/2, z_pcb_b - exp_z_pad])
-        cube([exp_relief, exp_w, z_floor - z_pcb_b + exp_z_pad - exp_top]);
+      let (ex_top = z_floor - exp_top, ex_y0 = exp_y - exp_w/2){
+        translate([exp_x, ex_y0, z_pcb_b - exp_z_pad])
+          cube([exp_relief, exp_w, (ex_top - chan_slope) - (z_pcb_b - exp_z_pad)]);
+        // The taper always runs to zero at the wall's INNER face, which is the high-X
+        // side of the cut on the +X wall and the low-X side on the -X wall.
+        translate([exp_x, ex_y0 + exp_w, ex_top - chan_slope])
+          rotate([90, 0, 0]) linear_extrude(exp_w)
+            polygon(exp_side < 0 ? [[0, 0], [exp_relief, 0], [exp_relief, chan_slope]]
+                                 : [[0, 0], [exp_relief, 0], [0, chan_slope]]);
+      }
     // snap-catch windows in the walls (the cover barbs hook into these)
     // enlarged symmetrically about the original centre, so the catch position
     // (and therefore how the cover seats) is unchanged — only the opening grows

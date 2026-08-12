@@ -116,18 +116,25 @@ point rather than a ceiling that sags into strings.
 
 The electret amp module stands **on edge in the retainer**, against the **same
 side wall its cable plugs into** — the wall with the board's *Expand* header. Two
-gaps are cut into that wall's inner face, both **full-height vertical channels**
-rather than blind pockets, because the retainer drops in **vertically** and a
-blind pocket has nothing to drop into:
+pockets are cut into that wall's inner face. Neither reaches the rim: both stop
+4 mm short (`exp_top`, `mic_chan_top`) so the top edge of the wall is unbroken —
+they used to run out through it, which left two visible notches. Each has a
+**sloped roof** rather than a flat one (`chan_slope`, 1.8 mm of depth over 2.4 mm
+of height, 37° off vertical): a flat ceiling would be a 12 mm bridge printed
+face-down, and the ramp doubles as a lead-in for the mic capsule.
 
 - **Expand-cable relief** (`exp_*`) — the plug plus its DuPont shells stand ~1.5 mm
-  proud of the header; this channel gives them somewhere to go.
-- **Mic channel** (`mic_relief`) — 1.8 mm deep over the module's footprint. It
-  earns its keep twice: it buys 1.8 mm of clearance from the battery, and the
-  capsule *bottoms in it*, so the wall is what stops the module leaning outward.
-  A **Ø5 sound port** pierces the 0.8 mm of wall left outboard, on the capsule's
-  axis. The wall becomes a short acoustic channel, which an electret is perfectly
-  happy with.
+  proud of the header; this pocket gives them somewhere to go. It never needed to
+  reach the rim: the plug sits at board level and is pushed on by hand.
+- **Mic channel** (`mic_relief`) — 1.8 mm deep, and only as long as the **capsule**
+  (12 mm), since the PCB clears the wall by 3.9 mm. It earns its keep twice: it
+  buys 1.8 mm of clearance from the battery, and the capsule *bottoms in it*, so
+  the wall is what stops the module leaning outward. A **Ø5 sound port** pierces
+  the 0.8 mm of wall left outboard, on the capsule's axis — a short acoustic
+  channel, which an electret is perfectly happy with. **Closing its top means the
+  capsule can no longer descend into it with the retainer**: the module goes in
+  pushed inboard and is then slid outboard into the channel, and the ramp cams it
+  the last of the way. `mic_chan_top = 0` restores the drop-in if you'd rather.
 
 It sits near the **USB-C end**, because that is the only stretch of that long
 edge with nothing to foul — the board's SPEAKER/SPI/Expand JSTs all live in the
