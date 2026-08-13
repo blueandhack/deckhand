@@ -2,6 +2,8 @@
 
 # Deckhand
 
+[github.com/blueandhack/deckhand](https://github.com/blueandhack/deckhand) &middot; MIT
+
 A little desk display and remote for Claude Code — the crew member who keeps
 lookout and relays your orders. Built on an ELEGOO 2.8" ESP32 touchscreen
 module, with optional battery and speaker. It shows live plan usage and
@@ -201,7 +203,7 @@ You need: a Mac with [Node.js](https://nodejs.org) (`brew install node`),
 ELEGOO board.
 
 ```
-git clone <your-fork-url> deckhand && cd deckhand
+git clone git@github.com:blueandhack/deckhand.git && cd deckhand
 ./install.sh
 ```
 

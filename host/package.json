@@ -4,6 +4,15 @@
   "private": true,
   "type": "module",
   "description": "Streams live Claude Code status to the Deckhand ESP32 display over USB serial and/or BLE.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blueandhack/deckhand.git"
+  },
+  "homepage": "https://github.com/blueandhack/deckhand#readme",
+  "bugs": {
+    "url": "https://github.com/blueandhack/deckhand/issues"
+  },
+  "license": "MIT",
   "scripts": {
     "start": "node index.mjs",
     "build-app": "./build-app.sh"

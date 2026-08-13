@@ -1086,7 +1086,8 @@ Other things that aren't obvious from a single file:
   TFT_eSPI is configured. If TFT_eSPI is ever reinstalled, that file needs to be recreated with
   this board's pin mapping (documented in the `.ino`'s header comment).
 - Colors deliberately avoid a green/yellow/red scheme (the `COLOR_GOOD`/`WARN`/`BAD` constants
-  use a blue/orange/reddish-purple palette instead) because a green/yellow/red scheme collapses under the most common colour-vision deficiency, and
+  use a blue/orange/reddish-purple palette instead) because a green/yellow/red scheme collapses
+  under the most common colour-vision deficiency, and
   status is also conveyed by shape (`drawStatusDot`: filled circle / filled square / hollow
   ring), never by color alone.
 - If Bluetooth permission ever gets stuck (the process crashes again after previously working,
