@@ -62,6 +62,12 @@ const HOST_ALIVE = "/tmp/deckhand-host-alive";
 // kills the hook before this elapses.
 const REMOTE_WAIT_MS = 90_000;
 
+// Which tool invoked us. Codex's payload is field-identical to Claude Code's and carries
+// no agent marker, so the registration says so explicitly rather than the hook guessing
+// from a transcript path neither tool guarantees. Defaults to claude, so the existing
+// ~/.claude/settings.json registration needs no migration.
+const AGENT = (process.argv.find((a) => a.startsWith("--agent=")) ?? "").slice(8) || "claude";
+
 // The only writer for DEBUG_LOG. Entirely best-effort: this is a debug trail, and a
 // hook that throws while trying to log would be far worse than a missing line.
 //
@@ -376,6 +382,7 @@ try {
         // message in it records its model - the host reads it from there.
         transcript: data.transcript_path ?? existing.transcript ?? "",
         status,
+        agent: AGENT,
         updated_at: Date.now(),
         ...(ask ? { ask } : {}),
       };
