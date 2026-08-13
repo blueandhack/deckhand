@@ -128,11 +128,16 @@ model, task start/finish events, and quota.
 
 Two consequences are worth knowing before you rely on it:
 
-- **A Codex row can only ever be WORKING or READY.** No approval event appears
-  in any rollout, so there is nothing to map to NEEDS INPUT. This is a real
-  gap, not an oversight: the device exists to show who needs you, and for Codex
-  it can only show who is busy. Codex threads also can't be answered from the
-  device, because there's no channel to answer through.
+- **A Codex row can only ever be WORKING or READY today.** No approval event
+  appears in a rollout, so there is nothing to map to NEEDS INPUT, and Codex
+  threads can't be answered from the device. That's a real gap, not an
+  oversight: the device exists to show who needs you, and for Codex it can
+  currently only show who is busy.
+  **This is likely fixable now.** Codex CLI 0.147.0 ships a hooks system that
+  closely mirrors Claude Code's — including a `permission_request` event and a
+  matching decision contract — so Codex could push its state the way Claude
+  Code does instead of being read from files, and its prompts could be answered
+  from the device. It isn't built yet.
 - **Codex quota is one number**, read from whatever `rate_limits` record was
   seen most recently. There's no endpoint to ask (unlike the Claude side's
   OAuth poller), so if Codex stops running the number stops being updated — the

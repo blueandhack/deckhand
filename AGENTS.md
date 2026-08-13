@@ -321,7 +321,84 @@ two things `host/index.mjs` cannot get any other way:
 
 - **Codex support is PULL, not push — it has no hooks, and that shapes everything.**
   Claude Code state arrives because `deckhand-session-hook.mjs` is *invoked* on every
-  event. Codex offers no such mechanism, so the host reads its files instead. Verified
+  event. Codex offered no such mechanism when this was written, so the host reads its
+  files instead.
+  **THAT IS NO LONGER TRUE, and it is the biggest open opportunity in this repo.**
+  Codex CLI **0.147.0** ships a hooks system that closely mirrors Claude Code's -
+  confirmed from the binary's embedded JSON schema and its own validation strings, not
+  from docs. Config lives in `~/.codex/hooks.json` (also project-local `.codex/`, plus a
+  managed dir), and the events are `pre_tool_use`, **`permission_request`**,
+  `post_tool_use`, `pre_compact`, `post_compact`, `session_start`, `session_end`,
+  `user_prompt_submit`, `subagent_start`, `subagent_stop`. The decision contract matches
+  too (`PermissionRequestDecisionWire`, `PreToolUseHookSpecificOutputWire`, with
+  `continue`/`stopReason`/`suppressOutput`/`systemMessage`), and it even reads
+  `CLAUDE_PLUGIN_ROOT`/`CLAUDE_PLUGIN_DATA` - deliberate compatibility with Claude Code's
+  hook ecosystem.
+  **VERIFIED by running it, not read off the binary.** A capture hook registered in
+  `~/.codex/hooks.json` (Claude-style: keyed by PascalCase event names, `matcher` plus
+  `hooks:[{type:"command",command}]`) produced these real payloads:
+  ```
+  {"session_id":..,"transcript_path":"..rollout-...jsonl","cwd":"/private/tmp",
+   "hook_event_name":"SessionStart","model":"gpt-5.6-sol",
+   "permission_mode":"bypassPermissions","source":"startup"}
+  {"session_id":..,"turn_id":..,"hook_event_name":"PreToolUse","tool_name":"Bash",
+   "tool_input":{"command":"echo deckhand-probe"},"tool_use_id":"exec-.."}
+  ```
+  The field names are **identical to Claude Code's**, down to the tool being called
+  `Bash` - `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`,
+  `tool_name`, `tool_input`, plus `turn_id`/`permission_mode`/`tool_use_id`. So
+  `deckhand-session-hook.mjs` reads the right fields ALREADY; this is far closer to a
+  registration exercise than a port.
+  Two things that are not yet settled, and both matter before building:
+  - **`PermissionRequest` IS captured, from a real interactive session:**
+    ```
+    {"hook_event_name":"PermissionRequest","tool_name":"Bash","permission_mode":"default",
+     "tool_input":{"command":"curl -sI https://example.com | head -1",
+                   "description":"Allow this read-only network request to example.com .."},
+     "session_id":..,"turn_id":..,"transcript_path":..,"cwd":"/private/tmp"}
+    ```
+    `buildAsk()` already reads exactly `tool_name` + `tool_input.command`, so it yields
+    "Allow Bash?" with the command as detail **with no changes at all**. Codex also
+    supplies a `description` saying WHY approval is needed, which Claude Code does not -
+    worth showing. Note the observed order: `PreToolUse` -> `PostToolUse` with an EMPTY
+    `tool_response` (the sandboxed attempt failed silently) -> `PreToolUse` again ->
+    `PermissionRequest`. Codex tries, gets blocked, then escalates - so a naive reading of
+    PostToolUse would record a "completed" tool call that never ran.
+    It cannot be captured from `codex exec`, which forces
+    `permission_mode: bypassPermissions` regardless of `-c approval_policy`.
+    **PROVEN end to end:** feeding that captured payload to the UNMODIFIED
+    `deckhand-session-hook.mjs` (throwaway `$HOME`) produced
+    `status:"asking"` with `ask:{kind:"perm",title:"Allow Bash?",detail:"curl -sI ...",
+    options:["Allow","Deny"],answerable:true}` and an empty stdout.
+    **The DECISION dialect is round-tripped too, against a live session.** A one-shot hook
+    emitting Claude Code's exact shape -
+    `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":..}}}`
+    - was honoured: Codex blocked the command and fed our message back to the model as the
+    tool result, which appears verbatim in its own rollout as a
+    `custom_tool_call_output` ("Deckhand round-trip test: denied by the hook."), after
+    which the assistant reported it could not run. So **every** piece of the answering
+    path is verified end to end: event, payload, ask construction, and decision.
+    **Design snag to solve first:** a Codex hook writing into
+    `~/.claude/deckhand-sessions/` would DOUBLE-COUNT, because the host also pulls the
+    same thread from its rollout. Either the pull skips hook-covered sessions or the two
+    are merged by id.
+  - **The TRUST GATE is real, and it is what makes hooks safe.** Measured A/B: two
+    identical runs, hooks fired ONLY with `--dangerously-bypass-hook-trust`. An untrusted
+    `hooks.json` is inert - which also means a stray one cannot run behind your back, and
+    that shipping this needs a real trust step, not the bypass flag. The interactive TUI
+    is where that step happens: it shows "Hooks need review / Hooks can run outside the
+    sandbox after you trust them" with **Trust all and continue** / Review hooks /
+    Continue without trusting, and a hook sits at "New hook - review required" (or
+    "Modified since last trusted") until accepted. So installing this cannot be silent -
+    the user has to agree once, per change to the hook.
+  What that unlocks: **Codex prompts could be answered from the device**, because the
+  device is already agent-agnostic - it renders whatever `ask` object is in a session
+  record and signs answers with the pairing key regardless of which tool asked. The work
+  is a Codex-flavoured sibling of `deckhand-session-hook.mjs` registered in `hooks.json`,
+  not new firmware. Two caveats before building it: hooks sit behind a **trust gate**
+  (`hooks.state`, `--dangerously-bypass-hook-trust`), and the payload field names above
+  are inferred from the Claude Code parallel rather than observed from a live run.
+  The rest of this section describes the PULL path, which is what ships today. Verified
   against real rollouts on this machine:
   Everything comes from `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl`:
   `session_meta` (cwd, `thread_source`), `turn_context` (live cwd, model), `event_msg`
@@ -347,7 +424,9 @@ two things `host/index.mjs` cannot get any other way:
   - **`thread_source != "user"` is skipped.** Codex spawns subagent threads for
     auto-review and guardian; they are not something a person is waiting on, and they
     would crowd the 6-row list.
-  - **A Codex row can only ever be `working` or `waiting`.** No approval event appears
+  - **A Codex row can only ever be `working` or `waiting` — with the PULL path, which is
+    what ships.** See the hooks note above: Codex 0.147.0 could push `asking` too, and
+    that is the fix for this gap when someone builds it. No approval event appears
     in any rollout on this machine, so there is nothing to map to `asking`. This is a
     real gap, not an oversight: the device exists to show who needs input, and for
     Codex it can only show who is busy. Codex threads also can't be answered from the
