@@ -34,7 +34,9 @@ Still to do by hand (see README):
 Pairing is automatic: while the device is on USB, the host generates a
 secret (~/.claude/deckhand-secret) and provisions it to the device, so only
 your Mac can answer prompts from it. Keep it plugged in via USB at least
-once; the SETUP tab shows "paired" once done.
+once; the SETTINGS tab shows "paired" once done.
 
-USB-only, no Bluetooth needed? Just run:  node "$REPO/host/index.mjs"
+Launch via the bundle even for USB-only work: plain \`node index.mjs\` is
+killed by macOS (SIGABRT/exit 134) as soon as noble touches CoreBluetooth,
+so there is no bare-node fallback.
 EOF

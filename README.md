@@ -9,7 +9,9 @@ lookout and relays your orders. Built on an ELEGOO 2.8" ESP32 touchscreen
 module, with optional battery and speaker. It shows live plan usage and
 per-project session status, beeps when a session needs you, and shows permission
 prompts, questions, and plan approvals so you can read *and* answer them from
-across the room — without taking the dialog away from your Mac. Three tabs:
+across the room — without taking the dialog away from your Mac. **Codex threads
+appear in the same list**, read-only — Codex has no hook mechanism, so they can
+be shown but not answered (see [Codex support](#codex-support)). Three tabs:
 
 - **USAGE** — real plan-quota percentage for the current 5-hour session
   window and the current 7-day (weekly, all models) window. Each card has a
@@ -17,24 +19,37 @@ across the room — without taking the dialog away from your Mac. Three tabs:
   and a **pace tick** on the bar: a small white marker at the fraction of
   the window that has elapsed, so fill ahead of the tick = burning quota
   faster than time is passing. The weekly card also shows Fable's own
-  weekly cap ("Fable: 9%").
-- **SESSIONS** — which Claude Code projects are currently running on this
-  Mac and whether each needs you. Rows stretch to fill the screen when
+  weekly cap ("Fable: 9%"). Under the two cards, a single **CODEX** row
+  carries Codex's own quota percentage and reset countdown — a row rather
+  than a card because one percentage is all Codex publishes (no token count,
+  no second window, nothing to plot a pace against). It reads `--`, never
+  `0%`, until a rate-limit record has actually been seen: 0% is a
+  measurement, and "never measured" is not.
+- **SESSIONS** — which Claude Code and Codex projects are currently running
+  on this Mac and whether each needs you. Rows stretch to fill the screen when
   you're monitoring only a few projects. Status is a pill whose weight
   matches urgency: solid **NEEDS INPUT** (permission prompt, question, or
   plan approval — Claude is blocked on you), outlined **READY** (turn
   finished), boxless dim **WORKING** (no attention needed). Each row shows
-  model + git branch and a live "in this state for 3m" duration. With more
+  model + git branch and a live "in this state for 3m" duration, and is
+  tagged `CC` or `CX` (spelled `CLAUDE` / `CODEX` on tall rows) so the two
+  tools are told apart by text rather than by colour or an icon. Both go
+  into one list and one urgency ranking, so a mixed set sorts by how much it
+  needs you rather than by which tool it came from. With more
   sessions than fit, the six most urgent are shown and a "+N more" strip
   admits to the rest (a hidden needs-input session is called out loudly).
   Tap a row for a detail screen — and **if the session is waiting on a
   prompt, that screen is an answer screen**: see below.
-- **SETTINGS** — paginated (tap the `‹` / `›` pager), three pages:
+- **SETTINGS** — paginated (tap the `‹` / `›` pager), four pages:
   **STATUS** (Bluetooth/USB connection state — more trustworthy than macOS's
   Bluetooth panel — plus battery % / voltage and the device's pairing state),
   **DISPLAY & SOUND** (brightness, sleep-timeout, and speaker **volume**
-  LOW/MED/HIGH steppers, plus a sound on/off toggle), and **ACTIONS**
-  (CALIBRATE TOUCH, RESET PAIRING, and POWER OFF in the alert color).
+  LOW/MED/HIGH steppers, plus sound on/off and NORMAL/FLIPPED screen-rotation
+  toggles sharing the bottom row), **ACTIONS** (MIC TEST, CALIBRATE TOUCH,
+  RESET PAIRING, and POWER OFF in the alert color), and **PAIRED MACS** (every
+  Mac the device remembers — tap one to restrict answering to it, tap the `x`
+  to forget just that one). Every consequential action routes through a confirm
+  dialog that states the consequence, not just the question.
 
 A persistent footer on every tab shows a live clock, a battery pill
 (fill level + `chg`/`full`/`%`), and "Xs ago" data freshness, so the
@@ -90,6 +105,32 @@ gets out of the way. It only waits at all when a display is actually connected
 (it checks a heartbeat the host refreshes every tick), so with the device
 unplugged prompts behave exactly as stock, and an unanswered prompt just falls
 through to the normal dialog with no side effects.
+
+## Codex support
+
+Codex threads show up in the same SESSIONS list, but the mechanism is the
+opposite of the Claude Code half and that shapes what you get. Claude Code
+state *arrives* because a hook is invoked on every event; Codex offers no hook
+mechanism at all, so the host **reads its files** instead — the per-thread
+rollout JSONL under `~/.codex/sessions/YYYY/MM/DD/`, for the working directory,
+model, task start/finish events, and quota.
+
+Two consequences are worth knowing before you rely on it:
+
+- **A Codex row can only ever be WORKING or READY.** No approval event appears
+  in any rollout, so there is nothing to map to NEEDS INPUT. This is a real
+  gap, not an oversight: the device exists to show who needs you, and for Codex
+  it can only show who is busy. Codex threads also can't be answered from the
+  device, because there's no channel to answer through.
+- **Codex quota is one number**, read from whatever `rate_limits` record was
+  seen most recently. There's no endpoint to ask (unlike the Claude side's
+  OAuth poller), so if Codex stops running the number stops being updated — the
+  device dims it past 15 minutes for the same reason stale Claude quota is
+  flagged. A value read from a file that stopped being written is not a live
+  reading.
+
+Threads Codex spawns for itself (auto-review, guardian) are skipped: nobody is
+waiting on those, and they'd crowd the six-row list.
 
 ## Talking to a session (speech-to-text)
 
@@ -340,11 +381,19 @@ deckhand_display.ino (ESP32)
 ```
 
 **Quota numbers** come primarily from the same endpoint Claude Code's own
-`/usage` screen uses, authenticated with the OAuth token Claude Code
-stores in the macOS Keychain (read-only — the host never refreshes or
-modifies the credential). This works with zero Claude sessions open and
-reflects account-wide usage from every surface. The statusLine cache is
-kept as a fallback since the endpoint is undocumented.
+`/usage` screen uses, authenticated with the OAuth token Claude Code stores in
+the macOS Keychain. This works with zero Claude sessions open and reflects
+account-wide usage from every surface. The statusLine cache is kept as a
+fallback since the endpoint is undocumented.
+
+The host **does refresh that token** when it's expired or near expiry, writing
+the rotated tokens back into the same Keychain item in place. That's necessary
+rather than optional: the access token lives ~8h, and an always-on host can't
+rely on a Claude Code surface being open to renew it — without this it just
+sat there getting HTTP 401s. It only ever exchanges a still-valid refresh
+token, and persists the rotated one (skipping that would break Claude Code's
+own next refresh with `invalid_grant`). If the refresh is genuinely rejected
+it says so and asks you to sign in again, rather than hammering the endpoint.
 
 **Session status** works in every surface. The needs-input state is driven
 by the `PermissionRequest` hook (fires when an allow/deny dialog appears)
@@ -375,7 +424,8 @@ reference and for the firmware, which is always hands-on.
    default 1.2MB — needed because the Bluetooth stack alone is ~700KB+;
    this project doesn't use OTA or SPIFFS, so the tradeoff is free. On
    **first boot** the screen prompts for a one-time touch calibration —
-   touch the two crosshairs; it's saved to flash and survives reflashing.
+   touch the five crosshairs (four corners and the centre); it's saved to
+   flash and survives reflashing.
 3. **Register the Claude Code hooks** — these feed per-session status (and
    the statusLine quota fallback). Without them the SESSIONS tab stays empty
    and remote answering is off.
@@ -398,9 +448,14 @@ reference and for the firmware, which is always hands-on.
    No manual Bluetooth pairing is needed — the host scans for a device named
    "Deckhand" and connects directly.
 
-   USB-only and don't need Bluetooth? Just `node host/index.mjs` — the BLE
-   half fails silently and USB is unaffected (the two transports are
-   independent).
+   **Launch via the bundle even if you only want USB.** Plain
+   `node host/index.mjs` does *not* work on current macOS: noble's
+   CoreBluetooth init gets the process `SIGABRT`'d (exit 134) a second or two
+   after startup, with the crash report blaming `TCC` — so there is no
+   bare-node fallback, and USB doesn't survive it either. For a genuinely
+   USB-only one-off job, write a throwaway script that imports **only**
+   `serialport` and never touches noble; that survives, because nothing in it
+   reaches CoreBluetooth.
 
 ### Speech-to-text (only if you fitted the microphone)
 
@@ -476,7 +531,7 @@ to self-register as a login item.
   the Keychain token can expire; opening any Claude Code surface once
   refreshes it.
 - **Remote answering has a 90s window** per prompt (the hook can't wait
-  forever), shows up to ~400 characters of detail (tap READ ALL for a
+  forever), shows up to 1400 characters of detail (tap READ ALL for a
   full-screen reader with prev/next), and doesn't support multi-select
   questions. Question answers reach Claude as a "user already answered: X"
   hook message rather than a native picker selection — functionally
@@ -495,7 +550,11 @@ to self-register as a login item.
   there's no VBUS-sense pin, "on USB power" is inferred from recent USB data,
   so a *data-less* wall charger counts as "on battery" for the 20-minute
   auto-sleep — plugged into your Mac (data flowing) it never auto-sleeps.
-- **Touch calibration** is a simple 2-point linear mapping. If it ever
+- **Touch calibration** is a 5-point least-squares *affine* fit (four corners
+  plus the centre), so it corrects skew and rotation between the panel and the
+  glass, not just scale and offset. It reports the worst residual at the
+  targets and refuses to install a mapping from a nonsense set of taps, keeping
+  the previous one instead. If it ever
   feels wrong after a firmware change, tap CALIBRATE on the SETTINGS tab, or
   send `RECAL` via the trigger file
   (`echo "RECAL" > ~/.claude/deckhand-device-command`) — never by opening a

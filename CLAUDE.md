@@ -448,7 +448,7 @@ in particular — don't carry a model field. It also writes all `console.log` ou
 `open`-launched apps don't inherit the launching shell's stdout redirection.
 
 **`firmware/deckhand_display/deckhand_display.ino`** parses each JSON line and renders three tabs
-(USAGE, SESSIONS, SETUP) plus a persistent footer (clock | battery pill | "Xs ago" freshness,
+(USAGE, SESSIONS, SETTINGS) plus a persistent footer (clock | battery pill | "Xs ago" freshness,
 three fixed-width zones that cannot grow into each other). The one rule that
 matters everywhere in this file: **every field is redrawn only when its value changes**, using
 fixed-width padded strings compared against a per-field cache, never a
@@ -457,7 +457,7 @@ entire screen every second and visibly flickered — the discipline was added sp
 fix that, and any new UI element needs to follow the same pattern (see `drawIfChanged`,
 `drawBar`, `drawCardBorder` for the established helpers) or it will reintroduce flicker.
 
-The **SETUP** tab shows Bluetooth/USB connection status from the device's own perspective
+The **SETTINGS** tab shows Bluetooth/USB connection status from the device's own perspective
 (`bleConnected`, set via `BLEServerCallbacks`; USB inferred from recent RX activity since a
 CH340 UART has no real "connected" signal) — this is deliberately more trustworthy than macOS's
 Bluetooth settings panel, which showed "not connected" for a link that was actually live during
