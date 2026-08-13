@@ -15,8 +15,13 @@ ok()   { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', want '$3')"; fi; }
 
-T=$(mktemp -d); mkdir -p "$T/.claude"
+T=$(mktemp -d); mkdir -p "$T/.claude" "$T/tmp"
 export HOME="$T"
+# The host's runtime state is at ABSOLUTE /tmp paths, so $HOME does not sandbox it. Without
+# this the test deleted the LIVE host's log and its persisted OAuth throttle state - the
+# guards that stop a restart bursting the usage endpoint into a 429. Redirect them, and
+# assert below that the real ones survive.
+export DECKHAND_TMP="$T/tmp"
 C="$T/.claude"
 
 # Canonical form (2-space + trailing newline) so a byte comparison is meaningful.
@@ -67,6 +72,21 @@ check "answers dir removed" "$([ -d "$C/deckhand-answers" ] && echo yes || echo 
 check "debug log removed" "$([ -f "$C/deckhand-session-hook-debug.log" ] && echo yes || echo no)" "no"
 check "SECRET KEPT (no --purge)" "$([ -f "$C/deckhand-secret" ] && echo yes || echo no)" "yes"
 check "snapshot taken before removing" "$([ "$(ls "$T/Deckhand-backups" | wc -l | tr -d ' ')" -gt "$BEFORE_BK" ] && echo yes || echo no)" "yes"
+
+echo "== 4b. REGRESSION: must not touch the REAL /tmp host state =="
+# Sentinels at the real paths. If uninstall ignores DECKHAND_TMP these get deleted, which
+# is exactly what happened to the running host before the seam existed.
+REAL_LOG=/tmp/deckhand-host.log; REAL_ATT=/tmp/deckhand-oauth-attempt.json
+touch "$REAL_LOG.testsentinel" "$REAL_ATT.testsentinel"
+had_log=$([ -e "$REAL_LOG" ] && echo 1 || echo 0)
+echo "sentinel" > "$T/tmp/deckhand-host.log"
+stage
+"$REPO/uninstall.sh" --yes >/dev/null
+check "sandboxed /tmp state was removed" "$([ -e "$T/tmp/deckhand-host.log" ] && echo yes || echo no)" "no"
+check "real /tmp untouched (log)" "$([ -e "$REAL_LOG.testsentinel" ] && echo yes || echo no)" "yes"
+check "real /tmp untouched (oauth attempt)" "$([ -e "$REAL_ATT.testsentinel" ] && echo yes || echo no)" "yes"
+check "real running host's log not deleted" "$([ "$had_log" = 1 ] && { [ -e "$REAL_LOG" ] && echo kept || echo DELETED; } || echo n/a)" "$([ "$had_log" = 1 ] && echo kept || echo n/a)"
+rm -f "$REAL_LOG.testsentinel" "$REAL_ATT.testsentinel"
 
 echo "== 5. --purge removes the keys =="
 stage

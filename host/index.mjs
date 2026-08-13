@@ -559,31 +559,85 @@ function truncatePath(p, maxLen) {
   return "..." + p.slice(-(maxLen - 3));
 }
 
-// Claude Code doesn't hand the model to most hook events (desktop-app
-// sessions never see it at all), but every assistant message in the session
-// transcript records which model produced it. Read the tail of the JSONL and
-// take the most recent occurrence - this also tracks mid-session /model
-// switches, which a SessionStart-time snapshot would not.
-async function modelFromTranscript(transcriptPath) {
-  if (!transcriptPath) return "";
+// Two facts, ONE tail read. Claude Code doesn't hand the model to most hook events
+// (desktop-app sessions never see it at all), and it doesn't hand over the session title
+// at all - but the transcript records both: every assistant message carries its model,
+// and Claude Code writes `ai-title` records (plus `custom-title` if you named the session
+// yourself). Reading the file twice would double the I/O for every session on every 5s
+// tick, so both come out of the same 64KB window.
+//
+// Taking the LAST occurrence of each matters: it tracks a mid-session /model switch and a
+// retitled session, which a SessionStart-time snapshot would not.
+const RE_MODEL = /"model":"(claude-[a-z0-9.-]+)"/g;
+const RE_AI_TITLE = /"aiTitle":"((?:[^"\\]|\\.)*)"/g;
+const RE_CUSTOM_TITLE = /"customTitle":"((?:[^"\\]|\\.)*)"/g;
+// What you last asked this session, verbatim. Claude Code writes a `last-prompt` record
+// for it, which is the most informative single line about what a session is actually
+// doing - far better than model+branch for "which one was this again?".
+const RE_LAST_PROMPT = /"lastPrompt":"((?:[^"\\]|\\.)*)"/g;
+
+// Seconds since LOCAL midnight, which is the device's own clock format (it ticks
+// hostSecondsSinceMidnight forward with millis() between polls). Deliberately not an
+// epoch: `long` on ESP32 is 32-bit and a millisecond epoch overflows it - the bug that
+// silently broke the voice card. Returns -1 when the moment isn't today, so the device
+// can say "earlier" instead of printing a time from a different day as if it were now.
+function secondsSinceMidnight(ms) {
+  if (!ms) return -1;
+  const d = new Date(ms), now = new Date();
+  if (d.toDateString() !== now.toDateString()) return -1;
+  return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+}
+
+function lastMatch(re, text) {
+  re.lastIndex = 0; // shared global regex - a stale lastIndex would skip the start
+  let m, last = "";
+  while ((m = re.exec(text)) !== null) last = m[1];
+  return last;
+}
+
+// The captured group is still JSON-escaped, and the device's font renders control bytes
+// as garbage, so unescape then flatten to a single line.
+function cleanTitle(raw) {
+  if (!raw) return "";
+  let s = raw;
+  try {
+    s = JSON.parse(`"${raw}"`);
+  } catch {
+    // keep the raw text rather than losing the title over one odd escape
+  }
+  return s.replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+async function transcriptInfo(transcriptPath) {
+  const out = { model: "", title: "", prompt: "", startedMs: 0 };
+  if (!transcriptPath) return out;
   try {
     const fh = await fs.open(transcriptPath, "r");
     try {
-      const { size } = await fh.stat();
+      const st = await fh.stat();
+      const { size } = st;
+      // When the session began. Taken from the transcript's birthtime rather than adding
+      // a field to the hook: a hook change would need reinstalling into ~/.claude before
+      // it did anything, and this stat is already paid for.
+      out.startedMs = st.birthtimeMs || st.ctimeMs || 0;
       const len = Math.min(size, 64 * 1024);
-      if (len === 0) return "";
+      if (len === 0) return out;
       const buf = Buffer.alloc(len);
       await fh.read(buf, 0, len, size - len);
-      const matches = buf.toString("utf8").match(/"model":"(claude-[a-z0-9.-]+)"/g);
-      if (!matches || matches.length === 0) return "";
-      return matches[matches.length - 1]
-        .slice('"model":"'.length, -1)
-        .replace(/-\d{8}$/, ""); // drop dated suffixes like -20251001
+      // The window can slice a line in half; that's harmless here because every regex
+      // needs its closing quote, so a truncated record simply doesn't match.
+      const text = buf.toString("utf8");
+      const model = lastMatch(RE_MODEL, text);
+      if (model) out.model = model.replace(/-\d{8}$/, ""); // drop dated suffixes
+      // A title you set yourself outranks a generated one.
+      out.title = cleanTitle(lastMatch(RE_CUSTOM_TITLE, text) || lastMatch(RE_AI_TITLE, text));
+      out.prompt = cleanTitle(lastMatch(RE_LAST_PROMPT, text));
+      return out;
     } finally {
       await fh.close();
     }
   } catch {
-    return ""; // transcript missing/unreadable - fall back to the hook's value
+    return out; // transcript missing/unreadable - fall back to the hook's values
   }
 }
 
@@ -1041,16 +1095,38 @@ async function readSessions() {
 
   const list = await Promise.all(
     top.map(async (record) => {
+      // One tail read per session per tick, giving both the live model and the session
+      // title. Codex has neither in this shape, so it doesn't pay for the read.
+      const tx =
+        record.agent === "codex"
+          ? { model: "", title: "", prompt: "", startedMs: 0 }
+          : await transcriptInfo(record.transcript);
       const item = {
         id: (record.id || "").slice(0, 12), // 12 uuid chars is plenty to disambiguate
-        name: (await projectName(record.cwd || "")).slice(0, 20),
+        // 22, matching what the device can actually draw: a tall row's name lane fits 22
+        // characters once it drops to the small font, and SessionInfo.name is char[24].
+        // Sending more would only be trimmed to "..." on arrival.
+        name: (await projectName(record.cwd || "")).slice(0, 22),
         status: record.status,
-        path: truncatePath(record.cwd || "", 48),
+        // 64, not 48: the detail screen gives the path two lines of ~31 characters, and
+        // the old cap threw away the middle of any deep worktree path.
+        path: truncatePath(record.cwd || "", 64),
         model: (record.agent === "codex"
           ? record.model || ""
-          : (await modelFromTranscript(record.transcript)) || record.model || ""
+          : tx.model || record.model || ""
         ).slice(0, 20),
         branch: (await gitBranch(record.cwd || "")).slice(0, 20),
+        // Only sent when there IS one, so a titleless session costs no payload bytes.
+        // 40 chars: the device's title lane fits ~28 and trims the rest with "...", and
+        // this rides in every tick alongside asks that can claim 1400 chars.
+        ...(tx.title ? { title: tx.title.slice(0, 40) } : {}),
+        // Detail-screen extras. Short keys and only-when-present, because these ride in
+        // EVERY tick: the prompt is the expensive one at ~100 chars x 6 sessions.
+        ...(tx.prompt ? { prompt: tx.prompt.slice(0, 100) } : {}),
+        // Wall-clock times as seconds-since-local-midnight (see secondsSinceMidnight):
+        // when the session began, and when it last did anything.
+        startSec: secondsSinceMidnight(tx.startedMs),
+        actSec: secondsSinceMidnight(record.updated_at),
         // Short on purpose: this rides in every payload, and the device's line
         // buffer is sized for asks carrying 1400-char details.
         agent: record.agent === "codex" ? "cx" : "cc",

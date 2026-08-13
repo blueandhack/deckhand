@@ -30,7 +30,15 @@ be shown but not answered (see [Codex support](#codex-support)). Three tabs:
   you're monitoring only a few projects. Status is a pill whose weight
   matches urgency: solid **NEEDS INPUT** (permission prompt, question, or
   plan approval — Claude is blocked on you), outlined **READY** (turn
-  finished), boxless dim **WORKING** (no attention needed). Each row shows
+  finished), boxless dim **WORKING** (no attention needed). A project name too
+  long for the big font **shrinks one step so you see it whole** rather than
+  being cut off (up to 22 characters), and the space it has is measured against
+  whatever else is on that row, not assumed. With **1-3 sessions on screen** the
+  rows are tall enough to also carry the **session title** — Claude Code's own
+  generated title, or one you set yourself, which takes precedence ("Refactor
+  task modal logic", "Build Docker image version fetcher"). With 4 or more there
+  isn't room and the title is dropped rather than squeezed. Codex rows don't show
+  one. Each row shows
   model + git branch and a live "in this state for 3m" duration, and is
   tagged `CC` or `CX` (spelled `CLAUDE` / `CODEX` on tall rows) so the two
   tools are told apart by text rather than by colour or an icon. Both go
@@ -38,8 +46,11 @@ be shown but not answered (see [Codex support](#codex-support)). Three tabs:
   needs you rather than by which tool it came from. With more
   sessions than fit, the six most urgent are shown and a "+N more" strip
   admits to the rest (a hidden needs-input session is called out loudly).
-  Tap a row for a detail screen — and **if the session is waiting on a
-  prompt, that screen is an answer screen**: see below.
+  Tap a row for a detail screen showing the project, its title, the status
+  with both how long ("for 12m") and when ("14:31"), **the last thing you
+  asked it**, the path, and model / branch / start time / agent in paired
+  columns — and **if the session is waiting on a prompt, that screen is an
+  answer screen** instead: see below.
 - **SETTINGS** — paginated (tap the `‹` / `›` pager), four pages:
   **STATUS** (Bluetooth/USB connection state — more trustworthy than macOS's
   Bluetooth panel — plus battery % / voltage and the device's pairing state),

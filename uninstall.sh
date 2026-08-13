@@ -37,6 +37,13 @@ for arg in "$@"; do
 done
 
 SECRET="$CLAUDE_DIR/deckhand-secret"
+# TEST SEAM, and it is load-bearing. The host's runtime state lives at ABSOLUTE /tmp
+# paths, so unlike everything else here it is not covered by pointing $HOME at a
+# throwaway tree - claude-hooks/test-install-cycle.sh ran the real uninstall and deleted
+# the live host's log AND its persisted OAuth throttle state, which is what stops a
+# restart bursting the usage endpoint into a 429. Overriding this is how the test stays
+# hermetic; in normal use it is /tmp.
+DECK_TMP="${DECKHAND_TMP:-/tmp}"
 
 echo "== Deckhand uninstall${DRY:+}$([ "$DRY" = 1 ] && echo "  [dry run]") =="
 echo ""
@@ -46,7 +53,7 @@ echo ""
 if pgrep -qf 'DeckhandBLE.app|deckhand/host/index.mjs' 2>/dev/null; then
   echo "warning: the Deckhand host looks like it is still running."
   echo "         Stop it first (menu-bar app -> Stop syncing, or kill the process),"
-  echo "         or it will keep recreating /tmp/deckhand-host-alive."
+  echo "         or it will keep recreating $DECK_TMP/deckhand-host-alive."
   echo ""
 fi
 
@@ -55,7 +62,7 @@ echo "  - Deckhand's entries in $CLAUDE_DIR/settings.json (surgically; yours are
 echo "  - $CLAUDE_DIR/deckhand-session-hook.mjs, deckhand-statusline.mjs"
 echo "  - $CLAUDE_DIR/deckhand-sessions/, deckhand-answers/, deckhand-device-command"
 echo "  - $CLAUDE_DIR/deckhand-session-hook-debug.log (and .1)"
-echo "  - /tmp/deckhand-* (heartbeat, host log, OAuth throttle state)"
+echo "  - $DECK_TMP/deckhand-* (heartbeat, host log, OAuth throttle state)"
 if [ "$PURGE" = 1 ]; then
   echo "  - $SECRET   <-- --purge: every device must be re-paired over USB afterwards"
 fi
@@ -114,9 +121,9 @@ fi
 echo "[4/4] Removing host runtime state"
 # Globbed rather than listed so a file added later is still cleaned up. nullglob-ish:
 # under `set -u` an unmatched glob would otherwise be passed through literally.
-for f in /tmp/deckhand-host-alive /tmp/deckhand-host.log /tmp/deckhand-host.log.1 \
-         /tmp/deckhand-oauth-usage.json /tmp/deckhand-oauth-backoff.json \
-         /tmp/deckhand-oauth-attempt.json; do
+for f in "$DECK_TMP/deckhand-host-alive" "$DECK_TMP/deckhand-host.log" \
+         "$DECK_TMP/deckhand-host.log.1" "$DECK_TMP/deckhand-oauth-usage.json" \
+         "$DECK_TMP/deckhand-oauth-backoff.json" "$DECK_TMP/deckhand-oauth-attempt.json"; do
   [ -e "$f" ] || continue
   run rm -f "$f"
 done

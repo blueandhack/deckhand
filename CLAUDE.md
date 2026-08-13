@@ -457,6 +457,14 @@ two things `host/index.mjs` cannot get any other way:
   `claude-hooks/test-install-cycle.sh` exercises the whole cycle against a throwaway
   `$HOME` (bash reads `$HOME`, node's `os.homedir()` returns it), which is the only way to
   test scripts that mutate the `~/.claude` every session on the machine shares.
+  **`$HOME` is not enough on its own, and that bit us.** The host's runtime state lives at
+  ABSOLUTE `/tmp/deckhand-*` paths, so it escapes the sandbox: running the test deleted the
+  LIVE host's log (leaving it writing into an unlinked inode - confirmed with `lsof`) and,
+  worse, its persisted `deckhand-oauth-attempt.json` / `-backoff.json`, which are the
+  guards that stop a restart bursting the usage endpoint into a 429. `uninstall.sh` now
+  reads `DECKHAND_TMP` (defaulting to `/tmp`) purely as a test seam, and the test asserts
+  that sentinels at the REAL paths survive - the assertion whose absence let this through.
+  Any future cleanup added there must go through `$DECK_TMP`, never a literal `/tmp`.
 - **Mixing the two on screen: text, never colour or an icon.** Sessions from both tools
   go into the SAME list and the same urgency ranking, so a mixed set sorts by how much
   it needs you rather than by which tool it came from. Each row is tagged `CC`/`CX` in
@@ -956,7 +964,79 @@ Other things that aren't obvious from a single file:
   a bare substring, or you'll chase phantom events.
 - The sessions list's row height is computed from the session count (tall rows for 1-3
   sessions, compact for 5-6); touch hit-testing in `handleTouch` uses the same `sessionRowH`
-  global, so any layout change must keep those two in sync. Status urgency is encoded as pill
+  global, so any layout change must keep those two in sync.
+- **The session DETAIL screen is laid out by a running cursor, and its extra text all
+  comes from the same transcript read.** It carries name, title, status pill (with
+  `for 12m - 14:31` beside it), LAST PROMPT, PATH, and then MODEL/GIT BRANCH and
+  STARTED/AGENT as **paired columns** rather than a four-row ladder — the pairing is what
+  buys room for the new text without a taller card. Offsets are a `cy` cursor, not the
+  hand-derived `cardY + 78 / +120 / +158` constants it used to have; those had to be
+  re-derived by hand whenever a field moved, which is how the screen drifted sparse.
+  Where the values come from: `lastPrompt` and the title from the **same 64KB tail** as
+  the model, the start time from the transcript's **birthtime** (deliberately not a new
+  hook field — that would need reinstalling into `~/.claude` before it did anything),
+  last-active from the record the host already has. Times ride as **seconds since local
+  midnight**, never an epoch — `long` here is 32-bit and a ms epoch overflows it, the same
+  trap that silently broke the voice card — with **-1 meaning "not today"**, drawn as
+  "earlier" instead of a time from another day masquerading as this one.
+  Three things are load-bearing, and two of them are the same silent bug:
+  - **A change-only cache shorter than the string it stores stops noticing changes.**
+    `drawIfChanged` compares `cacheSize` bytes, so `detailDurCache[16]` holding a 22-char
+    `"for 12m - 14:31"` never compared the trailing clock — the time would have frozen
+    while the duration beside it kept ticking. Same for `detailSigCache[208]` against a
+    signature that now runs to ~327 chars: edits past that point would never repaint.
+    Now 28 and 352. **Any new field must have its cache checked against its padded
+    length.**
+  - **The detail signature must include `title` and `prompt` but NOT `actSec`.** The first
+    two are drawn on the static card, so omitting them means a new prompt never repaints
+    the screen you are reading. `actSec` changes on every event, and a full card repaint
+    per tick is exactly the flicker the discipline exists to prevent — it reaches the
+    screen through `renderDetailDuration`'s own per-second cache instead.
+  - **Last-active appears ONCE, beside the pill.** It was briefly also a STARTED/LAST
+    ACTIVE column pair, which both said the same thing twice and created a field that
+    could only update by repainting the whole card. The column pairs with AGENT instead,
+    and both of those never change for a session.
+- **The session TITLE is a third row line, and it comes from the transcript, not a hook.**
+  Claude Code writes `{"type":"ai-title","aiTitle":...}` records into the session
+  transcript (and `custom-title` if you named the session yourself) — no hook event
+  carries it. `transcriptInfo()` pulls the title and the model out of the **same 64KB tail
+  read**, so this costs no extra I/O per session per tick; a `custom-title` outranks an
+  `ai-title`, and the newest of each wins so a retitled session updates. Verified on real
+  transcripts: all four projects on this machine resolve a title, including a **28MB**
+  one, so the tail window is not the practical limit it looks like. If no record lands in
+  that window the row simply falls back to the two-line layout.
+  The row height cap went **72 → 90** to make space. That is arithmetic, not taste: with
+  `avail = 264`, 1–2 sessions land on the cap and 3 comes out at 86, so all three clear
+  `SESSION_TITLE_MIN_H` (85) while 4+ stay at 63/50/41 and keep the old layout. 85 is
+  itself forced — the sub-line ends at `y+60` and the pill top is `y+rowH-22`, so a
+  shorter row would draw the pill over the text.
+  **The title MUST be in the row's repaint signature.** Leave it out and the row keeps
+  showing a stale title forever, since nothing else about the row changed — the silent
+  failure this change-only redraw discipline is prone to. The signature and
+  `rowSigCache` grew 96 → 160 because a 40-char title no longer fits beside the rest.
+  Codex rows carry no title (nothing in a rollout was verifiable as one) and collapse
+  back to two lines. Cost: **+912 bytes of RAM, ~100 bytes of flash.**
+- **A long project name SHRINKS one step rather than being cut, and the lane is measured
+  rather than counted.** `drawSessionRow` computes the name's available width from what
+  actually sits at the top of the row — the `CLAUDE`/`CODEX` tag on tall rows, the status
+  pill (`textWidth(label) + 12`) on compact ones — because those labels differ in width
+  (`WORKING` is two characters wider than `READY`). It then tries the big font and falls
+  back to the small one **only if the name doesn't fit**, so a long name is shown whole; a
+  shrunk name is re-centred in the 26px band the big one would have filled. `fitText()`
+  trims with **three ASCII dots**, since Cozette6x13 is `0x20-0x7E` only and U+2026 would
+  draw as a blank box. Three things worth knowing before touching it:
+  - **There is no intermediate size.** `uiTextSize()` returns 2 or 1 and Cozette is a
+    bitmap font, so the only options are 12px and 6px characters — "scale the font to
+    fit" is not available, which is why this is a single step.
+  - **The old fixed 11/12-character cap was both too small and too big.** Measured: compact
+    rows had room for 18-20 characters and were showing 11, while a tall row's 12-character
+    name ran to x=192 against a `CLAUDE` tag whose left edge is x=184 — **an 8px overlap**.
+    Any hardcoded character count reintroduces one or the other.
+  - Costs nothing in the redraw discipline: rows repaint wholesale when their
+    `name|status|sub` signature changes, so a per-row font size needs no extra cache.
+    Measured cost of the whole change: **+288 bytes of flash, zero RAM**.
+  The host caps the name at **22** to match what the small font can draw on a tall row
+  (`SessionInfo.name` is `char[24]`); sending more would only be trimmed on arrival. Status urgency is encoded as pill
   fill (solid = asking, outline = waiting, boxless dim text = working), consistent with the
   color-never-alone rule.
 - The OAuth usage endpoint rate-limits bursty callers (HTTP 429, observed after several rapid

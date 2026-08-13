@@ -668,8 +668,18 @@ struct SessionInfo {
                // share a name, and matching by name once made an asking
                // session look "newly asking" every poll (endless beeping)
   char name[24];
+  // Session title (Claude Code's own `ai-title`, or a `custom-title` you set). Host caps
+  // it at 40; only drawn on rows tall enough for a third line. Codex sends none.
+  char title[44];
   char status[10]; // "working" or "waiting"
-  char path[52];
+  char path[68];   // host caps at 64; two ~31-char lines on the detail screen
+  // Detail-screen only, so none of this is drawn on the list. `prompt` is what you last
+  // asked this session (host caps it at 100). The two times are SECONDS SINCE LOCAL
+  // MIDNIGHT, never an epoch - `long` here is 32-bit and a ms epoch overflows it. -1
+  // means "not today", which the screen says rather than printing a stale-looking time.
+  char prompt[104];
+  long startSec;
+  long actSec;
   char model[24];
   char branch[24];
   // "cc" (Claude Code) or "cx" (Codex). Kept as text, not a colour or an icon:
@@ -712,7 +722,7 @@ int hiddenAskingCount = 0;
 // Per-row render caches: a row only redraws when its own signature changes,
 // so one session flipping status doesn't flash the whole list. The duration
 // field ticks on its own cache, independent of the rest of the row.
-char rowSigCache[MAX_SESSIONS][96];
+char rowSigCache[MAX_SESSIONS][160]; // must match the sig buffer in renderSessionsList
 char rowDurCache[MAX_SESSIONS][8];
 char overflowCache[32] = "";
 int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
@@ -725,8 +735,16 @@ int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
 bool showingDetail = false;
 int detailIndex = -1;
 char detailId[16] = "";
-char detailSigCache[208] = "";
-char detailDurCache[16] = "";
+// 352: the signature now carries path(68) + title(44) + prompt(104) on top of the rest,
+// worst case ~327. drawIfChanged-style comparisons only look at cacheSize bytes, so a
+// cache shorter than the string silently stops noticing changes past that point - here
+// that would mean editing your prompt never repaints the screen.
+char detailSigCache[352] = "";
+// 28, not 16: this now holds "for 12m - 14:31" padded to 22, and drawIfChanged compares
+// only the first cacheSize bytes. At 16 the trailing clock fell outside the comparison
+// entirely, so the time would silently freeze while the duration beside it kept ticking.
+// Any field whose cache is shorter than its padded string has this bug.
+char detailDurCache[28] = "";
 // Ask-screen state: which prompt (if any) was already answered from this
 // device (keeps the chosen button highlighted, prevents double-sends), plus
 // the full-screen reader for long detail text.
@@ -2702,6 +2720,10 @@ void drawUsageStatic() {
 
 // ---------- Sessions tab ----------
 const int SESSION_ROW_Y0 = CONTENT_Y + 4;
+// Smallest row that can carry name + title + model/branch + pill without them touching.
+// 85 is not a preference, it is the arithmetic: the sub-line ends at y+60 and the pill
+// top sits at y+rowH-22, so anything under 85 would draw the pill over the text.
+const int SESSION_TITLE_MIN_H = 85;
 const int SESSION_ROW_GAP = 3;
 const int SESSION_ROW_X = 8;
 const int SESSION_ROW_W = 224;
@@ -2772,6 +2794,30 @@ void drawStatusPill(int xEdge, int y, const char* label, const char* status, boo
   tft.setTextDatum(TL_DATUM);
 }
 
+// Fit `src` into maxW pixels at the CURRENTLY SET font/size, trimming with "..." when
+// it cannot fit whole. The caller must setUIFont() first, because textWidth() measures
+// the active font - measuring in one size and drawing in another is the bug this
+// signature is shaped to prevent.
+//
+// Three ASCII dots, not a real ellipsis: Cozette6x13 carries printable ASCII
+// 0x20-0x7E only, so U+2026 would render as a blank box.
+void fitText(char* out, size_t outSize, const char* src, int maxW) {
+  snprintf(out, outSize, "%s", src);
+  if (tft.textWidth(out) <= maxW) return;
+  // Longest prefix whose text-plus-dots still fits. Walked down a character at a time
+  // rather than divided by an assumed character width: that assumption is exactly what
+  // made the old fixed 11/12-char cap wrong for a proportionally-measured lane.
+  for (int n = (int) strlen(src) - 1; n >= 0; n--) {
+    char probe[40];
+    snprintf(probe, sizeof(probe), "%.*s...", n, src);
+    if (tft.textWidth(probe) <= maxW) {
+      snprintf(out, outSize, "%s", probe);
+      return;
+    }
+  }
+  out[0] = '\0'; // nothing fits at all
+}
+
 void drawSessionRow(int i) {
   int rowH = sessionRowH;
   bool large = sessionRowsLarge();
@@ -2791,18 +2837,50 @@ void drawSessionRow(int i) {
   drawStatusDot(SESSION_ROW_X + 20, dotCy, large ? 9 : 7, s.status, COLOR_CARD,
                 strcmp(s.agent, "cx") == 0);
 
-  // Clip the name to its lane (large rows give the name its own line).
-  char nameBuf[14];
-  size_t maxLen = large ? 12 : 11;
-  snprintf(nameBuf, sizeof(nameBuf), "%s", s.name);
-  if (strlen(s.name) > maxLen) {
-    nameBuf[maxLen - 1] = '.';
-    nameBuf[maxLen] = '\0';
+  // ---- Name: MEASURE the lane, then shrink one step rather than truncate ----
+  // The lane's right bound is whatever else sits at the top of the row: the
+  // CLAUDE/CODEX tag on tall rows, the status pill on compact ones. Both labels vary in
+  // width ("WORKING" is 2 characters wider than "READY", "CODEX" one narrower than
+  // "CLAUDE"), so the bound is computed from the real text. The old code assumed a flat
+  // 11/12 characters, which was far too conservative on compact rows - they had room for
+  // about 19 and were throwing half of it away.
+  // Does this row carry a title line? Decided BEFORE the name is drawn, because it
+  // shifts the name up to make room.
+  bool showTitle = large && rowH >= SESSION_TITLE_MIN_H && s.title[0];
+
+  const int nameX = SESSION_ROW_X + 40;
+  const char* agentTag = strcmp(s.agent, "cx") == 0 ? "CODEX" : "CLAUDE";
+  const char* pillLbl =
+      working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "INPUT" : "READY");
+  setUIFont(1); // both blockers render at size 1, so measure them there
+  int laneRight = large
+      ? SESSION_ROW_X + SESSION_ROW_W - 12 - tft.textWidth(agentTag)
+      : SESSION_ROW_X + SESSION_ROW_W - 16 - (tft.textWidth(pillLbl) + 12); // pill = text + 12
+  int laneW = laneRight - nameX - 6; // 6px so the name never kisses the tag/pill
+
+  // Tall rows try the big font and drop to the small one only when the name doesn't fit,
+  // so a long project name is shown WHOLE instead of cut short. This is one hard step,
+  // not a gradient: Cozette is a bitmap font scaled by an integer (uiTextSize returns 2
+  // or 1), so the only sizes available are 12px and 6px characters.
+  char nameBuf[28]; // host caps the name at 22, plus "..." and a NUL
+  bool smallName = !large;
+  if (large) {
+    setUIFont(4);
+    if (tft.textWidth(s.name) > laneW) {
+      smallName = true;
+      setUIFont(2);
+    }
+  } else {
+    setUIFont(2);
   }
-  setUIFont(large ? 4 : 2);
+  fitText(nameBuf, sizeof(nameBuf), s.name, laneW);
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(nameBuf, SESSION_ROW_X + 40, y + 6);
+  // A shrunk name is centred in the band the big one would have filled (26px vs 13px),
+  // so it doesn't hang off the top of the row with a gap under it. A title row starts
+  // 2px higher to buy the third line its space.
+  int nameTop = y + (showTitle ? 4 : 6);
+  tft.drawString(nameBuf, nameX, (large && smallName) ? nameTop + 6 : nameTop);
 
   char sub[26];
   buildSessionSubline(i, sub, sizeof(sub));
@@ -2810,9 +2888,23 @@ void drawSessionRow(int i) {
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
 
   if (large) {
-    // Tall row: name line, optional model/branch line, then a status line
-    // with the pill on the left and the live duration on the right.
-    if (rowH >= 70 && sub[0]) tft.drawString(sub, SESSION_ROW_X + 40, y + 34);
+    // Tall row: name line, optional title line, optional model/branch line, then a
+    // status line with the pill on the left and the live duration on the right.
+    if (showTitle) {
+      // What the session is ABOUT, one step brighter than the model/branch line beneath
+      // it: more important than the metadata, less than the project name above.
+      // The lane runs to the row's right edge - nothing shares this y.
+      char titleBuf[48];
+      setUIFont(2);
+      fitText(titleBuf, sizeof(titleBuf), s.title,
+              SESSION_ROW_X + SESSION_ROW_W - 12 - nameX);
+      tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+      tft.drawString(titleBuf, nameX, y + 32);
+      tft.setTextColor(COLOR_LABEL, COLOR_CARD); // restore for the sub-line below
+      if (sub[0]) tft.drawString(sub, nameX, y + 47);
+    } else if (rowH >= 70 && sub[0]) {
+      tft.drawString(sub, SESSION_ROW_X + 40, y + 34);
+    }
     // Tall rows keep the top-right corner free (their pill sits at the bottom), so
     // the agent gets its full name there - and it still shows on the 56..69px rows
     // where the sub-line above is suppressed to clear the pill.
@@ -2821,7 +2913,9 @@ void drawSessionRow(int i) {
                    SESSION_ROW_X + SESSION_ROW_W - 12, y + 8);
     tft.setTextDatum(TL_DATUM);
     const char* label = working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "NEEDS INPUT" : "READY");
-    drawStatusPill(SESSION_ROW_X + 40, y + rowH - 24, label, s.status, false);
+    // 22 rather than 24 on a title row: the sub-line now ends at y+60, and the extra 2px
+    // is what keeps the pill clear of it at the 86px height three sessions produce.
+    drawStatusPill(SESSION_ROW_X + 40, y + rowH - (showTitle ? 22 : 24), label, s.status, false);
   } else {
     if (sub[0]) tft.drawString(sub, SESSION_ROW_X + 40, y + 25);
     const char* label = working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "INPUT" : "READY");
@@ -2843,8 +2937,13 @@ void renderSessionsList() {
     if (sessionCount > 0) {
       // The overflow strip ("+N more") takes the bottom 16px when present.
       int avail = contentBottom() - SESSION_ROW_Y0 - (hiddenCount > 0 ? 16 : 0);
+      // Cap raised 72 -> 90 so a row can carry a THIRD line (the session title) without
+      // pushing the model/branch line out. Measured against the real content area
+      // (avail = 264): 1-2 sessions land on the 90 cap and 3 comes out at 86, all of
+      // which clear SESSION_TITLE_MIN_H; 4+ are unchanged at 63/50/41 and keep today's
+      // two-line layout.
       sessionRowH = constrain(
-          (avail - SESSION_ROW_GAP * (sessionCount - 1)) / sessionCount, 38, 72);
+          (avail - SESSION_ROW_GAP * (sessionCount - 1)) / sessionCount, 38, 90);
     }
     tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
     for (int i = 0; i < MAX_SESSIONS; i++) rowSigCache[i][0] = '\0';
@@ -2862,8 +2961,13 @@ void renderSessionsList() {
   for (int i = 0; i < sessionCount; i++) {
     char sub[26];
     buildSessionSubline(i, sub, sizeof(sub));
-    char sig[96];
-    snprintf(sig, sizeof(sig), "%s|%s|%s", sessions[i].name, sessions[i].status, sub);
+    // The TITLE belongs in this signature. Leave it out and a row keeps showing the old
+    // title forever, because nothing else about the row changed - the exact silent
+    // staleness the change-only redraw discipline is prone to. 160 because a 40-char
+    // title no longer fits alongside the rest in 96.
+    char sig[160];
+    snprintf(sig, sizeof(sig), "%s|%s|%s|%s", sessions[i].name, sessions[i].status, sub,
+             sessions[i].title);
     if (strncmp(sig, rowSigCache[i], sizeof(rowSigCache[i])) != 0) {
       strncpy(rowSigCache[i], sig, sizeof(rowSigCache[i]) - 1);
       rowSigCache[i][sizeof(rowSigCache[i]) - 1] = '\0';
@@ -2970,9 +3074,15 @@ void renderSessionsTab() {
 
 // ---------- Session detail screen ----------
 void buildDetailSignature(int idx, char* out, size_t outSize) {
-  snprintf(out, outSize, "%s|%s|%s|%s|%s|%s|%d", sessions[idx].name, sessions[idx].status,
-           sessions[idx].path, sessions[idx].model, sessions[idx].branch,
-           sessions[idx].askPid, answeredPid[0] ? answeredIdx : -1);
+  // title and prompt MUST be here: they are drawn on the static card, so leaving them out
+  // means sending a new prompt never repaints the screen you are looking at.
+  // actSec deliberately is NOT: it changes on every event, and a full card repaint per
+  // tick is exactly the flicker this discipline exists to prevent. It reaches the screen
+  // through renderDetailDuration's own per-second cache instead.
+  snprintf(out, outSize, "%s|%s|%s|%s|%s|%s|%d|%s|%s|%ld", sessions[idx].name,
+           sessions[idx].status, sessions[idx].path, sessions[idx].model,
+           sessions[idx].branch, sessions[idx].askPid, answeredPid[0] ? answeredIdx : -1,
+           sessions[idx].title, sessions[idx].prompt, sessions[idx].startSec);
 }
 
 const int DETAIL_CARD_Y = CONTENT_Y + 26;
@@ -3632,6 +3742,34 @@ const char* pillLabel(const char* status) {
 
 // Single-line value in font `fnt`, clipping the TAIL with ".." if it
 // overflows (model names / branches read left-to-right, so keep the start).
+// Where the status pill ended up this repaint. The duration ticks on its own cache every
+// second, so it has to know the row the (now variable) layout put the pill on - a fixed
+// offset would drift the moment a title or prompt appears above it.
+int detailPillY = 0;
+
+// A column value, clipped to its own width. The two-column pairs need this rather than
+// drawDetailValue, which assumes the full card width.
+void drawColValue(int x, int y, const char* value, int w) {
+  setUIFont(2);
+  tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%s", value[0] ? value : "-");
+  if (tft.textWidth(buf) > w) {
+    int dots = tft.textWidth("..");
+    while (strlen(buf) > 2 && tft.textWidth(buf) > w - dots) buf[strlen(buf) - 1] = '\0';
+    strncat(buf, "..", sizeof(buf) - strlen(buf) - 1);
+  }
+  tft.drawString(buf, x, y);
+}
+
+// Seconds-since-local-midnight -> "14:31". -1 means the host said "not today", which is
+// printed as "earlier" rather than a time from another day masquerading as this one.
+void formatClock(long sec, char* buf, size_t n) {
+  if (sec < 0) snprintf(buf, n, "earlier");
+  else snprintf(buf, n, "%02ld:%02ld", (sec / 3600) % 24, (sec / 60) % 60);
+}
+
 void drawDetailValue(int y, const char* value, uint8_t fnt) {
   setUIFont(fnt);
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
@@ -3650,7 +3788,10 @@ void drawDetailValue(int y, const char* value, uint8_t fnt) {
 // Redesigned to fit the content instead of stretching three sparse rows over
 // a tall card: big project name, a status pill with the live duration beside
 // it, then compact PATH (wrapped - paths are long) / MODEL / GIT BRANCH rows.
-const int DETAIL_CARD_H = 196;
+// 224, up from 196: the card now carries the title, the last prompt and the paired
+// short-field columns. Checked against the screen rather than eyeballed - the card runs
+// y 60..284 and the "tap here for history" hint sits at 292.
+const int DETAIL_CARD_H = 224;
 
 void drawSessionDetail(int idx) {
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
@@ -3675,36 +3816,87 @@ void drawSessionDetail(int idx) {
   tft.drawRoundRect(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, color);
   tft.drawRoundRect(CARD_X + 1, cardY + 1, CARD_W - 2, DETAIL_CARD_H - 2, RADIUS - 1, color);
 
-  // Project name - large; clip to card width in the big font.
-  char nameBuf[24];
+  // Laid out with a running cursor rather than the hand-derived offsets this screen used
+  // to carry (cardY + 78 / +120 / +158). Those had to be re-derived by hand every time a
+  // field moved, which is how the screen ended up sparse in the first place.
+  int cy = cardY + 6;
+  const int LX = CARD_X + PAD;              // label/value left edge
+  const int RX = CARD_X + CARD_W / 2 + 2;   // right column, for the paired short fields
+  const int colW = CARD_W / 2 - PAD - 4;
+
+  // Project name - large, clipped to the card in the big font.
+  char nameBuf[26];
   snprintf(nameBuf, sizeof(nameBuf), "%s", s.name);
   setUIFont(4);
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
   while (strlen(nameBuf) > 1 && tft.textWidth(nameBuf) > maxW) nameBuf[strlen(nameBuf) - 1] = '\0';
-  tft.drawString(nameBuf, CARD_X + PAD, cardY + 8);
+  tft.drawString(nameBuf, LX, cy);
+  cy += 26;
 
-  // Status pill (duration is drawn to its right by renderDetailDuration).
-  drawStatusPill(CARD_X + PAD, cardY + 42, pillLabel(status), status, false);
+  // What the session is about, straight under its name - the same title the list row
+  // shows, which was previously nowhere on this screen.
+  if (s.title[0]) {
+    char titleBuf[48];
+    setUIFont(2);
+    fitText(titleBuf, sizeof(titleBuf), s.title, maxW);
+    tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
+    tft.drawString(titleBuf, LX, cy);
+    cy += 15;
+  }
+
+  // Status pill; renderDetailDuration draws "for 12m - 14:31" to its right.
+  detailPillY = cy;
+  drawStatusPill(LX, cy, pillLabel(status), status, false);
   detailDurCache[0] = '\0'; // force the duration to redraw after this repaint
+  cy += 24;
 
-  tft.drawFastHLine(CARD_X + PAD, cardY + 70, maxW, COLOR_LABEL);
+  tft.drawFastHLine(LX, cy, maxW, COLOR_LABEL);
+  cy += 7;
 
-  // PATH - wrapped (paths are long; two lines fill the space usefully).
+  // LAST PROMPT - the most useful text on the screen: what you actually asked.
+  if (s.prompt[0]) {
+    setUIFont(1);
+    tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+    tft.drawString("LAST PROMPT", LX, cy);
+    cy += 13;
+    drawWrappedText(s.prompt, LX, cy, 1, 11, maxW, 0, 2, COLOR_VALUE, COLOR_CARD);
+    cy += 24;
+    tft.drawFastHLine(LX, cy, maxW, COLOR_LABEL);
+    cy += 7;
+  }
+
+  // PATH - wrapped, since paths are long and the tail is the informative end.
   setUIFont(1);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-  tft.drawString("PATH", CARD_X + PAD, cardY + 78);
-  drawWrappedText(s.path[0] ? s.path : "-", CARD_X + PAD, cardY + 90, 1, 11, maxW, 0, 2,
-                  COLOR_VALUE, COLOR_CARD);
+  tft.drawString("PATH", LX, cy);
+  cy += 13;
+  drawWrappedText(s.path[0] ? s.path : "-", LX, cy, 1, 11, maxW, 0, 2, COLOR_VALUE, COLOR_CARD);
+  cy += 24;
 
+  // The four short fields pair into two columns instead of a four-row ladder. That is
+  // what buys the room for the title and the prompt above without a taller card.
   setUIFont(1);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-  tft.drawString("MODEL", CARD_X + PAD, cardY + 120);
-  drawDetailValue(cardY + 132, s.model, 2);
+  tft.drawString("MODEL", LX, cy);
+  tft.drawString("GIT BRANCH", RX, cy);
+  cy += 12;
+  drawColValue(LX, cy, s.model, colW);
+  drawColValue(RX, cy, s.branch, colW);
+  cy += 18;
 
+  // STARTED pairs with the agent, NOT with "last active" - that already sits beside the
+  // pill above as part of "for 12m - 14:31". Repeating it here would both say the same
+  // thing twice and create a field that goes stale, since a value on the static card can
+  // only update by repainting the whole card. Both of these never change for a session.
   setUIFont(1);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-  tft.drawString("GIT BRANCH", CARD_X + PAD, cardY + 158);
-  drawDetailValue(cardY + 170, s.branch, 2);
+  tft.drawString("STARTED", LX, cy);
+  tft.drawString("AGENT", RX, cy);
+  cy += 12;
+  char t1[10];
+  formatClock(s.startSec, t1, sizeof(t1));
+  drawColValue(LX, cy, t1, colW);
+  drawColValue(RX, cy, strcmp(s.agent, "cx") == 0 ? "Codex" : "Claude Code", colW);
 
   // Asking but no answerable prompt attached (fired while disconnected, or the
   // window closed) - say so instead of leaving "needs input" unexplained.
@@ -3732,12 +3924,18 @@ void drawSessionDetail(int idx) {
 void renderDetailDuration() {
   if (detailIndex < 0 || detailIndex >= sessionCount) return;
   if (sessions[detailIndex].askPid[0]) return; // ask screen has its own layout
-  char dur[10], buf[16];
-  formatDuration(sessions[detailIndex].statusSinceMillis, dur, sizeof(dur));
-  snprintf(buf, sizeof(buf), "for %s", dur);
-  padLeftTo(buf, sizeof(buf), 12);
+  const SessionInfo& s = sessions[detailIndex];
+  char dur[10], clk[10], buf[26];
+  formatDuration(s.statusSinceMillis, dur, sizeof(dur));
+  formatClock(s.actSec, clk, sizeof(clk));
+  // How long in this state AND when it last happened. The duration alone can't tell a
+  // session that went quiet a minute ago from one idle since this morning.
+  if (s.actSec >= 0) snprintf(buf, sizeof(buf), "for %s - %s", dur, clk);
+  else snprintf(buf, sizeof(buf), "for %s", dur);
+  padLeftTo(buf, sizeof(buf), 22);
+  // Follows the pill's actual y, which the variable layout decides.
   drawIfChanged(detailDurCache, sizeof(detailDurCache), buf, CARD_X + CARD_W - PAD,
-                DETAIL_CARD_Y + 46, 1, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
+                detailPillY + 4, 1, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
 }
 
 // ---------- Settings tab ----------
@@ -4791,6 +4989,10 @@ void handleLine(const String& line) {
       copyField(info.name, sizeof(info.name), s["name"] | "?");
       copyField(info.status, sizeof(info.status), s["status"] | "waiting");
       copyField(info.path, sizeof(info.path), s["path"] | "");
+      copyField(info.title, sizeof(info.title), s["title"] | "");
+      copyField(info.prompt, sizeof(info.prompt), s["prompt"] | "");
+      info.startSec = s["startSec"] | -1;
+      info.actSec = s["actSec"] | -1;
       copyField(info.model, sizeof(info.model), s["model"] | "");
       copyField(info.branch, sizeof(info.branch), s["branch"] | "");
       // Absent = a host too old to tag sessions, and everything it sends is Claude.
