@@ -752,10 +752,30 @@ Other things that aren't obvious from a single file:
   script, so producing one means converting NVIDIA's NeMo checkpoint with torch/NeMo. Worth
   revisiting only if someone publishes a real ggml `.bin` — Parakeet TDT is a transducer, so it
   would be faster than Whisper, but turbo already solves the accuracy problem.
-- **Voice → a real session: the channel is `claude -p --resume <session_id>`, and there is no other
-  one.** Hooks can observe and DECIDE, but they cannot inject a prompt into a running interactive
-  session, so a dictation is delivered by continuing the conversation headlessly, in that session's
-  own `cwd`, detached (a dictated task can run for minutes and must not block the host's poller).
+- **A dictation is DELIVERED TO YOU, not run for you (`DECKHAND_VOICE_DELIVERY`, default
+  `clipboard`).** The transcript goes to the Mac's clipboard plus a notification naming the project
+  to paste into; the device card reads COPIED - PASTE IT. `dispatch` restores the original
+  behaviour below. The default flipped after the first real use, which produced all three of these
+  at once: the headless run became a **second author** appending to the same conversation
+  concurrently (both writing one transcript, neither able to see the other), nothing needing
+  permission could finish (see below), and a mis-heard word went straight to work — "make sure
+  there is no sensitive data and **some** sensitive information", inverting half the instruction.
+  Handing it over costs hands-free operation and fixes all three. Note the split in the
+  implementation: the **clipboard gets the text verbatim** (quotes, backslashes, newlines all
+  matter for pasting) while the **notification gets a sanitised one-liner**, because that string is
+  interpolated into AppleScript where a stray quote breaks or alters the script. The `clip` state
+  is backward-compatible — an older device falls through to a generic "VOICE" label — so the host
+  half ships on its own.
+  **There is no way to inject a prompt into a running interactive session**, which is why the
+  fallback is headless. Checked, not assumed: the transcript's `queue-operation` records are an
+  *effect* the app writes (enqueue then dequeue), not an input, and no queue file exists under
+  `~/.claude`; `--resume`/`--continue` both start a new process against a session's history; and
+  `~/.claude/ide/<port>.lock` does describe a live websocket with an auth token (the port is open),
+  but it belongs to the VS Code integration, is an undocumented internal protocol, and delivers to
+  whichever editor holds the lock rather than the session you aimed at.
+- **The headless fallback (`dispatch`): `claude -p --resume <session_id>`.** Continues the
+  conversation in that session's own `cwd`, detached (a dictated task can run for minutes and must
+  not block the host's poller).
   Which session? **Context picks the target**: the device stamps `target=<id12>` into the stream
   header when the recording starts from a session's detail screen, and `-` otherwise. A capture with
   no target is transcribed, logged, and NOT dispatched — a voice memo. No extra UI, no mode to get

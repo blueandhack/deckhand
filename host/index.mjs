@@ -9,7 +9,7 @@
 // process outright (not even a permission prompt) if it touches CoreBluetooth
 // without an Info.plist declaring NSBluetoothAlwaysUsageDescription.
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -1193,6 +1193,52 @@ async function pruneAudioCaptures() {
   if (removed) console.log(`Audio: pruned ${removed} capture(s) older than ${AUDIO_KEEP_DAYS}d`);
 }
 // ---------- voice -> prompt ----------
+// HOW a dictation aimed at a session gets delivered.
+//   "clipboard" (default) - put the transcript on the Mac's clipboard and post a
+//       notification; YOU paste it into the session yourself.
+//   "dispatch"            - the original behaviour: spawn `claude -p --resume <id>`.
+// Clipboard is the default because dispatch has three problems that showed up the first
+// time it was used in anger: the headless run becomes a SECOND author appending to the
+// same conversation concurrently (both were writing to one transcript, neither able to
+// see the other), a headless `claude -p` does not fire PermissionRequest so nothing that
+// needs approval can finish, and a mis-heard word goes straight to work - a real
+// dictation came through as "make sure there is no sensitive data and SOME sensitive
+// information", inverting half the instruction. Handing it to you costs hands-free
+// operation and fixes all three: it arrives as an ordinary message, in one voice, with
+// permissions behaving normally, and you get to read it before anything acts on it.
+const VOICE_DELIVERY = process.env.DECKHAND_VOICE_DELIVERY || "clipboard";
+const PBCOPY_BIN = "/usr/bin/pbcopy";
+const OSASCRIPT_BIN = "/usr/bin/osascript";
+
+function copyToClipboard(text) {
+  return new Promise((resolve) => {
+    try {
+      const p = spawn(PBCOPY_BIN, { stdio: ["pipe", "ignore", "ignore"] });
+      p.on("error", () => resolve(false));
+      p.on("close", (code) => resolve(code === 0));
+      p.stdin.end(text);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+// AppleScript string literals are double-quoted with backslash escapes, and a stray quote
+// or newline in a transcript would otherwise break the script (or worse, change it).
+function asLiteral(s) {
+  return `"${String(s).replace(/[\\"]/g, " ").replace(/[\r\n]+/g, " ").slice(0, 200)}"`;
+}
+
+function notify(title, subtitle, body) {
+  return new Promise((resolve) => {
+    execFile(
+      OSASCRIPT_BIN,
+      ["-e", `display notification ${asLiteral(body)} with title ${asLiteral(title)} subtitle ${asLiteral(subtitle)}`],
+      () => resolve()
+    );
+  });
+}
+
 // Absolute paths on purpose: this process is launched via `open DeckhandBLE.app`,
 // which does NOT inherit the shell's PATH, so bare "claude"/"whisper-cli" are not
 // findable. Overridable for a different install.
@@ -1274,6 +1320,20 @@ async function transcribeAndDispatch(captureFile, target) {
     setVoice("error", { text, reply: "no matching session" });
     return;
   }
+  const where = cwd ? await projectName(cwd) : target;
+  if (VOICE_DELIVERY !== "dispatch") {
+    const ok = await copyToClipboard(text);
+    if (!ok) {
+      console.error("Voice: could not reach pbcopy - transcript NOT delivered.");
+      setVoice("error", { text, reply: "clipboard unavailable" });
+      return;
+    }
+    console.log(`Voice: copied to the clipboard for ${where} (${sessionId}) - paste it there.`);
+    await notify("Deckhand heard you", `Paste into ${where}`, text);
+    setVoice("clip", { text, session: target, reply: `Copied. Paste it into ${where} on your Mac.` });
+    return;
+  }
+
   console.log(`Voice: -> session ${sessionId}${cwd ? ` (cwd ${cwd})` : ""}`);
   setVoice("sent", { text, session: target });
   // Detached: a dictated task can run for minutes and must not block this poller.
@@ -1885,6 +1945,11 @@ startBle();
 // Kick the poller; it self-throttles on the persisted back-off AND last-attempt
 // state, so a restart never bursts the endpoint's rate limiter even with a
 // stale cache - no need to compute a startup delay here anymore.
+console.log(
+  VOICE_DELIVERY === "dispatch"
+    ? "Voice: dictation will RUN HEADLESSLY (claude -p --resume). Set DECKHAND_VOICE_DELIVERY=clipboard to hand it to you instead."
+    : "Voice: dictation goes to the CLIPBOARD + a notification; paste it yourself. Set DECKHAND_VOICE_DELIVERY=dispatch for the old headless behaviour."
+);
 setTimeout(pollOauthUsage, 0);
 // Prune once at startup too: captures accumulate across runs, and a host that is only
 // restarted occasionally would otherwise never clear anything left by the previous one.

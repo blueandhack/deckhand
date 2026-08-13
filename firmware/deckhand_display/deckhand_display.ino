@@ -1028,6 +1028,10 @@ const char* voiceStateLabel() {
   if (!strcmp(voiceState, "heard")) return "TRANSCRIBED";
   if (!strcmp(voiceState, "memo")) return "SAVED AS MEMO";
   if (!strcmp(voiceState, "sent")) return "SENT TO SESSION";
+  // Delivery is the clipboard by default now - the host hands it to the user rather than
+  // running it headlessly. (An older device just falls through to "VOICE", so the host
+  // change is safe to ship on its own.)
+  if (!strcmp(voiceState, "clip")) return "COPIED - PASTE IT";
   if (!strcmp(voiceState, "done")) return "CLAUDE REPLIED";
   if (!strcmp(voiceState, "error")) return "FAILED";
   return "VOICE";
