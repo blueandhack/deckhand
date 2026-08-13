@@ -91,6 +91,47 @@ gets out of the way. It only waits at all when a display is actually connected
 unplugged prompts behave exactly as stock, and an unanswered prompt just falls
 through to the normal dialog with no side effects.
 
+## Talking to a session (speech-to-text)
+
+With the microphone fitted you can dictate to a session: open its detail screen,
+tap the round **record button**, speak, tap again to stop. Up to 120 seconds.
+
+**Transcription is local and free.** The host decodes the capture and runs
+[whisper.cpp](https://github.com/ggerganov/whisper.cpp) on Metal —
+`ggml-large-v3-turbo-q5_0` transcribes ~40x faster than realtime. Nothing is
+uploaded, there is no API cost, and **the audio never leaves the machine**, which
+matters for a microphone sitting on a desk all day. A vocabulary prompt primes the
+decoder with this project's nouns, because without it "update CLAUDE.md" came back
+as "update core code MD5".
+
+**What happens to the transcript: it goes to your clipboard, plus a notification
+naming the project to paste into.** The device card reads `COPIED - PASTE IT`. You
+paste it into the session yourself.
+
+That is deliberate. The original version ran it for you
+(`claude -p --resume <session>`), and the first real use produced three problems at
+once: the headless run became a **second author** appending to the same conversation
+concurrently, nothing needing permission could finish (a headless run doesn't raise
+permission prompts, so it can't be approved from the device either), and a mis-heard
+word went straight to work — "make sure there is no sensitive data and **some**
+sensitive information" inverted half the instruction. Handing it over costs
+hands-free operation and fixes all three: it arrives as an ordinary message, in one
+voice, with permissions behaving normally, and you get to read it first.
+
+Set `DECKHAND_VOICE_DELIVERY=dispatch` if you want the old headless behaviour.
+Recording from a *tab* rather than a session's detail screen keeps the transcript as
+a memo and delivers nothing.
+
+To decode and transcribe a capture by hand:
+
+```
+host/mic-stt.sh              # newest capture -> SNR + transcript
+node host/mic-wav.mjs        # just the WAV, plus before/after noise figures
+```
+
+Both refuse a capture under 98% complete: truncation makes the audio decode as
+garbage, which Whisper will happily transcribe into confident words nobody said.
+
 ## Security of the remote
 
 Because the device can approve tool calls, the answer channel is
@@ -147,7 +188,8 @@ connected (it's normal and expected for both to be connected at once).
 Pin mapping (LCD + touch + battery ADC + audio) is documented at the top
 of `firmware/deckhand_display/deckhand_display.ino`.
 
-Optional add-ons (both plug into the board, no soldering):
+Optional add-ons — the battery and speaker just plug in; the microphone needs
+three wires:
 
 - **Battery** — a 1S LiPo on the JST 1.25 battery connector (tested with a
   3000mAh cell). Charging and power switching are pure hardware: the
@@ -162,6 +204,29 @@ Optional add-ons (both plug into the board, no soldering):
   the device (SETTINGS → DISPLAY & SOUND → VOLUME: LOW/MED/HIGH); the levels
   are the `VOL_PRESETS` duty values in the firmware.
 
+- **Microphone** — a MAX4466 electret amp module, for dictating to a session
+  (see *Talking to a session*). Three wires to the board's 4-pin **Expand**
+  connector:
+
+  | module pad | goes to |
+  |---|---|
+  | `VCC` | **3.3 V — never 5 V** |
+  | `GND` | GND |
+  | `OUT` | **IO35** |
+
+  `IO35` isn't a choice: touch takes ADC1's 32/33/36/39 and the battery divider
+  takes 34, leaving it as the only free ADC1 channel — and ADC1 is mandatory
+  because ADC2 is dead while Bluetooth is active. **Never power it from 5 V**
+  even though the module accepts 2.4–5.5 V: IO35 is not 5 V tolerant. Identify
+  3.3 V and GND from the header's silkscreen and *meter them before plugging in* —
+  reverse polarity drags the 3.3 V rail and the board won't boot, which looks
+  exactly like bricked firmware (dark screen, no serial, while esptool still
+  answers).
+  To check it, tap **SETTINGS → ACTIONS → MIC TEST** for a live level meter. A
+  working module idles at **~1.65 V** (VCC/2); a reading pinned near 0 means `OUT`
+  isn't connected or it has no power. Aim for a silent floor of ~100–150 on the
+  gain trimmer.
+
 Bluetooth is **BLE** (a custom GATT service, the Nordic UART Service
 pattern), not classic Bluetooth SPP. SPP was tried first and abandoned:
 macOS's classic-BT stack would silently accept writes into a connection
@@ -172,7 +237,15 @@ on macOS since it's what nearly all modern accessories use.
 ## Controls
 
 - **Tabs**: tap USAGE / SESSIONS / SETTINGS in the top bar.
-- **Session detail**: tap a session row; tap anywhere to go back.
+- **Session detail**: tap a session row. **`< Back`** (top row) returns to the
+  list; tapping the card opens the **history reader** — what you asked, what
+  Claude said, what it ran, what came back, and what you allowed or denied,
+  pulled from the Mac on demand. A `CHAT`/`ALL` chip filters conversation vs
+  commands, and you move with `< PREV`/`NEXT >`, the scrubber bar, or by tapping
+  a row to read that entry in full.
+- **Record button**: a round ring-and-dot button floating over the content area.
+  **Tap** to start dictating, tap again to stop; **hold 700ms then drag** to move
+  it, and it remembers where you put it. See *Talking to a session*.
 - **Brightness / sleep timeout**: `-`/`+` steppers on SETTINGS (the whole
   left/right third of each card is a hit zone). Sleep = backlight off
   after 15s–5m of no touch, or OFF to never sleep; any touch wakes it
@@ -328,6 +401,20 @@ reference and for the firmware, which is always hands-on.
    USB-only and don't need Bluetooth? Just `node host/index.mjs` — the BLE
    half fails silently and USB is unaffected (the two transports are
    independent).
+
+### Speech-to-text (only if you fitted the microphone)
+
+```
+brew install whisper-cpp
+mkdir -p ~/.cache/whisper.cpp && cd ~/.cache/whisper.cpp
+curl -LO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
+```
+
+Brew does **not** bundle models, hence the second step. Use
+`large-v3-turbo-q5_0` (547MB) rather than `base.en` (141MB) — benchmarked on real
+captures from this microphone, `base.en` turned "Update CLAUDE.md file" into
+"update, CLAUDE and D5" and invented proper nouns, while turbo got it right and
+still ran at ~40x realtime. Override with `WHISPER_MODEL` / `WHISPER_PROMPT`.
 
 ## Why an app bundle?
 
