@@ -35,7 +35,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp DeckhandBLE.plist "$APP/Contents/Info.plist"
 cp "$NODE" "$APP/Contents/MacOS/Deckhand"
 # App icon (Info.plist references Deckhand.icns via CFBundleIconFile).
-[ -f Deckhand.icns ] && cp Deckhand.icns "$APP/Contents/Resources/Deckhand.icns"
+# The `|| true` is load-bearing under `set -e`: a bare `[ -f x ] && cp` is itself the
+# last command of the line, so a MISSING icon makes the line return 1 and aborts the
+# whole build with no message. The icon is cosmetic; it must never stop the bundle.
+if [ -f Deckhand.icns ]; then cp Deckhand.icns "$APP/Contents/Resources/Deckhand.icns"; fi
 
 # Copy any @rpath-linked dylibs node needs (Homebrew's node links
 # libnode.<ver>.dylib dynamically; statically-linked node installs have none,

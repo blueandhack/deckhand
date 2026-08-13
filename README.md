@@ -321,12 +321,50 @@ git clone git@github.com:blueandhack/deckhand.git && cd deckhand
 ./install.sh
 ```
 
-`install.sh` copies the Claude Code hook scripts into `~/.claude/`,
-registers them in `settings.json` (backing yours up and merging - it won't
-clobber existing hooks), runs `npm install`, and builds `DeckhandBLE.app`
-from your own Node. Then two manual steps it prints for you: flash the
-firmware, and start the host. **Restart Claude Code afterwards** so it picks
-up the new hooks. The detailed walk-through is under [Setup](#setup) below.
+`install.sh` snapshots any existing Deckhand state to `~/Deckhand-backups`,
+copies the Claude Code hook scripts into `~/.claude/`, registers them in
+`settings.json` (backing yours up and merging - it won't clobber existing
+hooks), runs `npm install`, and builds `DeckhandBLE.app` from your own Node.
+Then two manual steps it prints for you: flash the firmware, and start the
+host. **Restart Claude Code afterwards** so it picks up the new hooks. The
+detailed walk-through is under [Setup](#setup) below.
+
+## Backing out (uninstall and restore)
+
+```
+./uninstall.sh --dry-run      # print exactly what would happen, change nothing
+./uninstall.sh                # confirm, then remove
+./uninstall.sh --purge        # ...and forget the device pairing keys too
+```
+
+It takes a snapshot before it removes anything, so the uninstall itself is
+undoable, and it **un-registers surgically** — it deletes only the entries whose
+command is Deckhand's, so any hooks or settings you added since installing
+survive. What it deliberately keeps: your **pairing keys** (unless `--purge`,
+since losing them means re-pairing every device over USB), `~/Deckhand-backups`,
+`~/Deckhand-audio`, and this repo's build artifacts. It prints the command for
+those last ones rather than reaching into your working tree.
+
+State that lives outside the repo — the two hook scripts, your `settings.json`,
+the pairing keys, and `~/.codex/config.toml` — is managed separately:
+
+```
+node claude-hooks/deckhand-backup.mjs backup            # snapshot -> ~/Deckhand-backups
+node claude-hooks/deckhand-backup.mjs status            # drift: installed vs repo vs backup
+node claude-hooks/deckhand-backup.mjs restore latest --dry-run
+node claude-hooks/deckhand-backup.mjs restore latest
+```
+
+Snapshots go to `~/Deckhand-backups` (directory `700`, the key file `600`) and
+**never into the repo**, which is tracked by git and could be pushed. A restore
+snapshots what's currently installed first, so a wrong restore is one more
+restore away from being undone. The directory is capped the way audio captures
+are — the newest 10 always survive, anything older than 30 days is pruned, and
+what got removed is printed rather than dropped silently.
+
+Because these scripts mutate `~/.claude`, which every Claude Code session on the
+machine shares, they have a real test: `claude-hooks/test-install-cycle.sh` runs
+the whole install → uninstall → restore cycle against a throwaway `$HOME`.
 
 ## Project layout
 

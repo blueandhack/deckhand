@@ -6,18 +6,41 @@ CLAUDE_DIR="$HOME/.claude"
 
 echo "== Deckhand setup =="
 
-echo "[1/4] Installing Claude Code hook scripts -> $CLAUDE_DIR"
+# Snapshot BEFORE anything is overwritten. The cp below replaces the two hook scripts
+# outright, so without this a re-run silently destroys any local edits you made to them
+# (install-hooks.mjs backs up settings.json, but it cannot back up files it is about to
+# be handed). Also captures ~/.claude/deckhand-secret, whose loss means re-pairing every
+# device over USB.
+echo "[1/5] Snapshotting existing Deckhand state -> ~/Deckhand-backups"
+HAD_INSTALL=0
+if [ -f "$CLAUDE_DIR/deckhand-session-hook.mjs" ] || [ -f "$CLAUDE_DIR/deckhand-statusline.mjs" ]; then
+  HAD_INSTALL=1
+fi
+if ! node "$REPO/claude-hooks/deckhand-backup.mjs" backup; then
+  # Conditional on purpose. With something already installed, proceeding would destroy
+  # the only copy - so stop. With nothing installed there is nothing to lose, and
+  # refusing to install over a backup hiccup would be obstructive.
+  if [ "$HAD_INSTALL" = 1 ]; then
+    echo "error: backup failed, and hook scripts are already installed." >&2
+    echo "       Refusing to overwrite them. Fix the backup problem (is ~/Deckhand-backups" >&2
+    echo "       writable?) or move them aside, then re-run." >&2
+    exit 1
+  fi
+  echo "  warning: backup failed, but nothing is installed yet - continuing." >&2
+fi
+
+echo "[2/5] Installing Claude Code hook scripts -> $CLAUDE_DIR"
 mkdir -p "$CLAUDE_DIR"
 cp "$REPO/claude-hooks/deckhand-statusline.mjs"  "$CLAUDE_DIR/"
 cp "$REPO/claude-hooks/deckhand-session-hook.mjs" "$CLAUDE_DIR/"
 
-echo "[2/4] Registering hooks in settings.json (backs up first, merges safely)"
+echo "[3/5] Registering hooks in settings.json (backs up first, merges safely)"
 node "$REPO/claude-hooks/install-hooks.mjs"
 
-echo "[3/4] Installing host dependencies (npm)"
+echo "[4/5] Installing host dependencies (npm)"
 ( cd "$REPO/host" && npm install --no-fund --no-audit )
 
-echo "[4/4] Building DeckhandBLE.app from your node"
+echo "[5/5] Building DeckhandBLE.app from your node"
 "$REPO/host/build-app.sh"
 
 cat <<EOF
@@ -39,4 +62,8 @@ once; the SETTINGS tab shows "paired" once done.
 Launch via the bundle even for USB-only work: plain \`node index.mjs\` is
 killed by macOS (SIGABRT/exit 134) as soon as noble touches CoreBluetooth,
 so there is no bare-node fallback.
+
+To back out: ./uninstall.sh  (--dry-run to see it first). Snapshots and
+pairing keys are kept unless you pass --purge, and any snapshot can be put
+back with:  node claude-hooks/deckhand-backup.mjs restore latest
 EOF

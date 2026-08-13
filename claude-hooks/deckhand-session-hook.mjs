@@ -44,6 +44,15 @@ import path from "node:path";
 const SESSIONS_DIR = path.join(os.homedir(), ".claude", "deckhand-sessions");
 const ANSWERS_DIR = path.join(os.homedir(), ".claude", "deckhand-answers");
 const DEBUG_LOG = path.join(os.homedir(), ".claude", "deckhand-session-hook-debug.log");
+// ROTATED, for the same reason the host's log is: this appends on EVERY hook event,
+// and PostToolUse is registered with matcher ".*" - so it is one line per tool call
+// across every Claude Code session on the machine, plus the FULL JSON payload of
+// every Notification and PermissionRequest. A single real debugging session put 3066
+// events in here. Unrotated it grows without bound inside ~/.claude.
+// 5MB with one previous generation (.1) matches host/index.mjs, so the repo has one
+// rule rather than two - and keeping a generation means the events leading UP TO a
+// problem survive the rotation that follows it.
+const DEBUG_MAX_BYTES = 5 * 1024 * 1024;
 // Written by host/index.mjs every tick; tells us a display is actually
 // connected, and whether the user has opted into answering FROM the device.
 // Without it we never block waiting for a remote answer.
@@ -52,6 +61,37 @@ const HOST_ALIVE = "/tmp/deckhand-host-alive";
 // `timeout` in settings.json must be a few seconds LONGER, or Claude Code
 // kills the hook before this elapses.
 const REMOTE_WAIT_MS = 90_000;
+
+// The only writer for DEBUG_LOG. Entirely best-effort: this is a debug trail, and a
+// hook that throws while trying to log would be far worse than a missing line.
+//
+// Unlike the host, this process is SHORT-LIVED - one invocation per event - so it
+// cannot track its own size in memory the way host/index.mjs does; it has to ask.
+// statSync is a single cheap syscall next to the readFileSync/writeFileSync this hook
+// already does per event, and it happens BEFORE the append so the file can never sit
+// over the cap.
+//
+// Concurrent invocations (several sessions at once) can both decide to rotate. That
+// races, but harmlessly: renameSync is atomic, so the worst case is one extra
+// generation boundary, never a corrupt line or a thrown exception. Never a reason to
+// take a lock in a hook on the critical path of every tool call.
+//
+// NOTE: nothing here may ever reach stdout. A PermissionRequest hook's stdout is a
+// decision channel, and stray output there can auto-allow or auto-deny the dialog.
+function dlog(text) {
+  try {
+    let size = 0;
+    try {
+      size = fs.statSync(DEBUG_LOG).size;
+    } catch {
+      // no log yet - nothing to rotate
+    }
+    if (size >= DEBUG_MAX_BYTES) fs.renameSync(DEBUG_LOG, `${DEBUG_LOG}.1`);
+    fs.appendFileSync(DEBUG_LOG, text);
+  } catch {
+    // debug trail is best-effort only, and must never break the session
+  }
+}
 
 // WHICH EVENT WE BLOCK ON - measured, not assumed. This is the whole trick.
 //
@@ -271,18 +311,13 @@ try {
       const data = JSON.parse(input);
       const sessionId = data.session_id;
 
-      try {
-        fs.appendFileSync(
-          DEBUG_LOG,
-          `${new Date().toISOString()} event=${data.hook_event_name} tool=${data.tool_name ?? ""} session=${sessionId ?? ""}\n`
-        );
-        // Full payload for the two "user is being asked something" events,
-        // so payload shape differences across surfaces stay diagnosable.
-        if (data.hook_event_name === "Notification" || data.hook_event_name === "PermissionRequest") {
-          fs.appendFileSync(DEBUG_LOG, `  full payload: ${JSON.stringify(data)}\n`);
-        }
-      } catch {
-        // debug trail is best-effort only
+      dlog(
+        `${new Date().toISOString()} event=${data.hook_event_name} tool=${data.tool_name ?? ""} session=${sessionId ?? ""}\n`
+      );
+      // Full payload for the two "user is being asked something" events,
+      // so payload shape differences across surfaces stay diagnosable.
+      if (data.hook_event_name === "Notification" || data.hook_event_name === "PermissionRequest") {
+        dlog(`  full payload: ${JSON.stringify(data)}\n`);
       }
 
       if (!sessionId) return;
@@ -371,9 +406,7 @@ try {
           // file gone (SessionEnd) or unreadable - nothing to strip
         }
         if (answer) {
-          try {
-            fs.appendFileSync(DEBUG_LOG, `  remote answer: pid=${ask.pid} idx=${answer.idx} label=${answer.label ?? ""}\n`);
-          } catch {}
+          dlog(`  remote answer: pid=${ask.pid} idx=${answer.idx} label=${answer.label ?? ""}\n`);
           emitDecision(data, ask, answer);
         }
       }

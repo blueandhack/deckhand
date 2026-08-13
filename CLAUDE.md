@@ -413,6 +413,50 @@ two things `host/index.mjs` cannot get any other way:
   workflow here, and a long quiet spell must not wipe the lot. `latest.wav` /
   `latest-clean.wav` are left alone (mic-wav.mjs regenerates them). Pruning runs after each
   capture AND once at startup, since captures accumulate across runs.
+  **The hook's debug log is capped the same way, and it is the one that grows fastest.**
+  `~/.claude/deckhand-session-hook-debug.log` gets a line on EVERY event — and
+  `PostToolUse` is registered with matcher `.*`, so that is one line per tool call across
+  every Claude Code session on the machine, plus the **full JSON payload** of every
+  `Notification` and `PermissionRequest`. One real debugging session left 3066 events in
+  it. Same rule as the host (5MB, one `.1` generation) so the repo has one policy, but the
+  mechanism has to differ: the hook is a **short-lived process, one invocation per event**,
+  so it cannot track its own size in memory and instead `statSync`s before appending —
+  a single cheap syscall next to the record read/write it already does. Concurrent
+  invocations can both decide to rotate; that races harmlessly (`renameSync` is atomic, so
+  the worst case is an early generation boundary) and is not worth a lock on the critical
+  path of every tool call. All of it goes through the single `dlog()` writer, which
+  swallows every error — a hook that threw while logging would be far worse than a missing
+  line — and which must never reach stdout, since a `PermissionRequest` hook's stdout is a
+  decision channel.
+- **Install/uninstall/restore, and the two silent bugs found while building it.**
+  `install.sh` **snapshots before it copies** — its `cp` replaces the two hook scripts
+  outright, so without that a re-run destroys local edits to them; `install-hooks.mjs`
+  backs up `settings.json` but cannot back up files it is merely handed. That guard is
+  **conditional on purpose**: if the scripts are already installed and the snapshot fails,
+  it ABORTS (proceeding would destroy the only copy); with nothing installed it warns and
+  continues, because refusing to install over a backup hiccup is just obstructive.
+  `uninstall.sh` un-registers **surgically** rather than restoring the pre-install
+  `settings.json` — you may have added hooks since — and that removal lives in
+  `install-hooks.mjs --remove` so it shares the `HOOK`/`STATUSLINE` command strings with
+  the code that wrote them. Duplicating those constants in a second file is exactly how an
+  uninstall leaves a dead hook behind, and a dead hook means every event spawns a node
+  process that errors. It keeps the pairing keys unless `--purge` (losing them means
+  re-pairing every device over USB), and never touches the repo or `~/Deckhand-backups`.
+  Two bugs the cycle test caught, both silent:
+  - **Snapshot names were second-resolution, and `mkdirSync({recursive:true}) does not
+    throw` on an existing path.** Two snapshots in the same second therefore wrote into
+    ONE directory - the second overwriting the first's files while leaving behind any it
+    didn't have - producing a snapshot that claimed to be one point in time and wasn't,
+    with a manifest describing only the later half. Now millisecond-stamped plus a
+    uniqueness loop. Back-to-back snapshots are ordinary (install then uninstall), so this
+    had to be impossible rather than unlikely.
+  - **`prune()` must never run on the restore path.** It ran before the copy loop, and an
+    old snapshot outside the newest `KEEP_MIN` is exactly what you reach for in a
+    recovery - so restoring one could delete the directory being restored FROM, after
+    which the copy loop found nothing and silently restored nothing. Only `backup` prunes.
+  `claude-hooks/test-install-cycle.sh` exercises the whole cycle against a throwaway
+  `$HOME` (bash reads `$HOME`, node's `os.homedir()` returns it), which is the only way to
+  test scripts that mutate the `~/.claude` every session on the machine shares.
 - **Mixing the two on screen: text, never colour or an icon.** Sessions from both tools
   go into the SAME list and the same urgency ranking, so a mixed set sorts by how much
   it needs you rather than by which tool it came from. Each row is tagged `CC`/`CX` in

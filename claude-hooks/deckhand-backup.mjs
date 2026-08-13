@@ -39,8 +39,14 @@ const HOME = flag("home", os.homedir());
 const BACKUP_ROOT = flag("dir", path.join(HOME, "Deckhand-backups"));
 const REPO = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname));
 
-// What matters, and why. Caches are deliberately absent: deckhand-rate-limits.json,
-// deckhand-sessions/, deckhand-answers/ and the debug log all regenerate themselves.
+// What matters, and why. Caches are deliberately absent - deckhand-sessions/,
+// deckhand-answers/ and the debug log all regenerate themselves - with ONE exception
+// noted on deckhand-rate-limits.json below.
+//
+// The /tmp/deckhand-* host state is also deliberately absent: it is OAuth throttle
+// files plus a log, all of which regenerate, macOS prunes /tmp anyway, and it lives
+// outside $HOME - which would break the --home flag that makes this tool testable
+// against a throwaway tree. Losing it costs one 5-minute poll of blank quota.
 const FILES = [
   { rel: ".claude/deckhand-session-hook.mjs", need: true,  repo: "deckhand-session-hook.mjs",
     why: "per-session status + remote answering; the device shows nothing without it" },
@@ -50,17 +56,64 @@ const FILES = [
     why: "registers the hook + statusLine; yours, not ours - never in git" },
   { rel: ".claude/deckhand-secret",           need: false, repo: null, secret: true,
     why: "device pairing keys; losing it means re-pairing over USB" },
+  { rel: ".claude/deckhand-rate-limits.json", need: false, repo: null,
+    why: "fallback quota cache - regenerates, but only in a TERMINAL session, so on a desktop-app-only machine it can be the newest reading there is" },
   { rel: ".codex/config.toml",                need: false, repo: null,
     why: "Codex settings (model, notify, trusted projects)" },
 ];
+
+// Cap the backup directory. Repeated installs, uninstalls and restores each drop a
+// snapshot in here, so without this it grows forever - the same problem the host log
+// and the hook's debug log both had. Same SHAPE as the audio-capture prune in
+// host/index.mjs, so the repo has one policy: the newest KEEP_MIN always survive
+// regardless of age, and only what is older than KEEP_DAYS is removed. The count floor
+// matters because a snapshot is the only copy of your keys and settings.json - a long
+// quiet spell must not leave you with none.
+// pre-restore-* snapshots age out on the same terms; they are an undo for a bad
+// restore, not an archive.
+const KEEP_MIN = 10;
+const KEEP_DAYS = 30;
+function prune() {
+  const all = backups(); // oldest first (names are timestamped, sorted ascending)
+  const cutoff = Date.now() - KEEP_DAYS * 86400_000;
+  const removed = [];
+  // Everything except the newest KEEP_MIN is a candidate; age decides from there.
+  for (const dir of all.slice(0, Math.max(0, all.length - KEEP_MIN))) {
+    let at;
+    try {
+      at = fs.statSync(path.join(dir, "manifest.json")).mtimeMs;
+    } catch {
+      continue; // unreadable - leave it alone rather than guess
+    }
+    if (at >= cutoff) continue;
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      removed.push(path.basename(dir));
+    } catch {
+      /* leave it */
+    }
+  }
+  // Reported, never silent: a cap that hides what it dropped reads as "kept everything".
+  if (removed.length)
+    console.log(`Pruned ${removed.length} backup(s) older than ${KEEP_DAYS}d: ${removed.join(", ")}`);
+}
 
 const sha = (p) => crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex").slice(0, 12);
 const abs = (rel) => path.join(HOME, rel);
 const human = (n) => (n < 1024 ? `${n}B` : `${(n / 1024).toFixed(1)}K`);
 
 function snapshot(label) {
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const dir = path.join(BACKUP_ROOT, `${label}-${stamp}`);
+  // MILLISECONDS, not seconds, and then a uniqueness loop on top. Seconds alone was a
+  // silent data-loss bug: two snapshots in the same second produce the same directory
+  // name, and mkdirSync({recursive:true}) does NOT throw on an existing path - so the
+  // second snapshot wrote INTO the first, overwriting its files while leaving behind any
+  // the second didn't have. The result claimed to be one point in time and wasn't, and
+  // the manifest only described the later half. Back-to-back calls are ordinary (install
+  // then uninstall, or any script chaining them), so this has to be impossible, not
+  // unlikely. Fixed width, so names still sort chronologically.
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
+  let dir = path.join(BACKUP_ROOT, `${label}-${stamp}`);
+  for (let n = 2; fs.existsSync(dir); n++) dir = path.join(BACKUP_ROOT, `${label}-${stamp}-${n}`);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.chmodSync(dir, 0o700);
   const manifest = { created: new Date().toISOString(), home: HOME, files: [] };
@@ -95,6 +148,7 @@ function main() {
  if (cmd === "backup") {
   console.log(`Backing up Deckhand's external state (home: ${HOME})`);
   const dir = snapshot("backup");
+  prune();
   console.log(`\nDone: ${dir}`);
   console.log("Contains pairing secrets - keep it as private as you'd keep an SSH key.");
 } else if (cmd === "list") {
@@ -139,6 +193,11 @@ function main() {
   if (!dry) {
     console.log("First, snapshotting what is installed now so this is undoable:");
     const pre = snapshot("pre-restore");
+    // Deliberately NO prune() here. Pruning during a restore can delete the directory
+    // being restored FROM - it runs before the copy loop below, and an old snapshot
+    // outside the newest KEEP_MIN is exactly what you reach for in a recovery - after
+    // which the copy loop finds nothing and silently restores nothing. Deleting backups
+    // in the middle of a recovery is the wrong instinct anyway; only `backup` prunes.
     console.log(`  -> ${pre}\n`);
   }
   for (const f of FILES) {
