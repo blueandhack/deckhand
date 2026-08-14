@@ -21,9 +21,12 @@ to a read-only view (see [Codex support](#codex-support)). Three tabs:
   the window that has elapsed, so fill ahead of the tick = burning quota
   faster than time is passing. The weekly card also shows Fable's own
   weekly cap ("Fable: 9%"). Under the two cards, a single **CODEX** row
-  carries Codex's own quota percentage and reset countdown — a row rather
-  than a card because one percentage is all Codex publishes (no token count,
-  no second window, nothing to plot a pace against). It reads `--`, never
+  carries Codex's own quota percentage, its reset countdown and wall-clock
+  reset time, and **its own pace bar with the same pace tick** — Codex
+  publishes enough (a reset time and a window length) to work out how much
+  of the window has elapsed, so it reads exactly like the cards above it.
+  It stays a row rather than a card because it has no token count and no
+  second window, which would leave a card half empty. It reads `--`, never
   `0%`, until a rate-limit record has actually been seen: 0% is a
   measurement, and "never measured" is not.
 - **SESSIONS** — which Claude Code and Codex projects are currently running

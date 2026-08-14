@@ -621,11 +621,31 @@ two things `host/index.mjs` cannot get any other way:
   122 tall and, with the gaps, filled the content area exactly — there was no room
   anywhere. They are now 104: only the padding around the hero number tightened (its
   offsets moved 20/78/92/107 → 20/62/74/89), so the 39px Cozette figures you actually
-  read did not shrink. Codex gets a 36px single row rather than a card, because one
-  percentage plus a reset countdown is all it publishes — no token count, no second
-  window, nothing to plot a pace against, so a full card would be mostly empty chrome.
+  read did not shrink. Codex gets a **46px** row rather than a full card, because it
+  publishes one percentage and a reset time — no token count and no second window, so a
+  card's other two lines would be empty chrome.
   It shows `--`, never `0%`, when no `rate_limits` has ever been seen; 0% is a
   measurement and "never measured" is not.
+- **Codex DOES get a pace bar, and the note above used to say it couldn't.** The claim was
+  "nothing to plot a pace against" — wrong: `resets_at` plus `window_minutes` give the
+  elapsed fraction, so the tick is the identical calculation the Claude cards use
+  (`100 - resetInMin * 100 / windowMin`), and `drawPaceBar` already renders `tickPct < 0`
+  as "no tick" for the case where either input is missing. The row now carries a
+  full-height `BAR_H` bar plus the wall-clock reset time, so all three figures on the tab
+  read the same way.
+  **The 10px it needed came from the GAPS, not the cards** (10/8/6 → 6/4/4, cards
+  unchanged at 104). Shrinking them to 98 was the obvious move and is wrong: a card's
+  content ends at `y0+102` (label +6, hero +20..60, bar +62..72, stats +74, reset line
+  +89..102), so 98 clips the reset line by 4px — and the hero figures are the one thing
+  the 122→104 pass explicitly protected.
+  Two details are load-bearing: the text sits at `+8` and the bar at `+26` because
+  `drawPaceBar` clears from `y-4` to cover its tick overhang, which at `+11`/`+26` would
+  have shaved the text's bottom row; and the row's stale dimming keys off **`cxAgeSec`,
+  Codex's own reading age**, not the Claude quota's `quotaAgeSec`. It used to hang off the
+  latter, which was wrong both ways — Codex going stale while the OAuth poller stayed
+  fresh left the row bright, and a Claude flip repainted a row that hadn't changed. The
+  bar has to be busted on that flip too, since `drawPaceBar` caches on `(pct, tick)` alone
+  and would never repaint a colour-only change.
 
 **`host/index.mjs`** polls every `POLL_INTERVAL_MS` (5000ms) for: `ccusage blocks --active`
 and `ccusage weekly` (token counts), the rate-limit cache file, and the sessions directory

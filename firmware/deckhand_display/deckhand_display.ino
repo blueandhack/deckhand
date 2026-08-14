@@ -533,10 +533,18 @@ struct Usage {
 // around the hero number tightened, the number itself is the same 39px Cozette, so
 // the figures you actually read did not shrink.
 const int CARD_X = 12, CARD_W = 216, CARD_H = 104;
-const int CARD1_Y = 44, CARD2_Y = 156;
+// Gaps tightened 10/8/6 -> 6/4/4 to free the 10px the Codex row needed for a real pace
+// bar. The 10px came from the GAPS, deliberately not from the cards: a card's content
+// ends at y0+102 (label +6, hero +20..60, bar +62..72, stats +74, reset line +89..102)
+// inside CARD_H 104, so shrinking them to 98 would have clipped the reset line by 4px.
+// The hero figures are also the one thing the 122->104 pass explicitly protected.
+const int CARD1_Y = 40, CARD2_Y = 148;
 // Codex gets a single compact row rather than a full card, because it publishes a
 // single percentage - there is no token count, no second window, and no pace to plot.
-const int CODEX_Y = 266, CODEX_H = 36;
+// 46 (was 36), ending exactly on contentBottom() at 302: one text line at +10 plus a
+// full-height BAR_H pace bar at +26, so Codex reads the same way the Claude cards do
+// rather than being the one figure with no bar to judge it against.
+const int CODEX_Y = 256, CODEX_H = 46;
 const int PAD = 14, BAR_H = 10, RADIUS = 10;
 
 // ============================================================================
@@ -637,7 +645,12 @@ char pct2Cache[8] = "", left2Cache[24] = "", right2Cache[20] = "", fable2Cache[2
 char resetAt2Cache[14] = "";
 int bar2Cache = -2, border2Cache = -1;
 char cxPctCache[16] = "", cxRightCache[20] = "";
-int cxBorderCache = -1;
+int cxBorderCache = -1, cxBarCache = -1;
+// The Codex row's dim state follows cxAgeSec - Codex's OWN reading age - not the Claude
+// quota's quotaAgeSec. They are independent: the OAuth poller can be fresh while Codex
+// has been quiet for an hour, or the reverse. Tracked separately so the row's colour
+// flips repaint on the flag that actually governs them.
+int cxStaleCache = -1;
 // Tracks the quota-staleness flag across renders so the hero numbers can be
 // dimmed when the % is stale (a frozen bold value otherwise reads as live).
 int quotaStaleCache = -1;
@@ -2460,6 +2473,7 @@ void resetUsageCaches() {
   pct2Cache[0] = '\0'; left2Cache[0] = '\0'; right2Cache[0] = '\0'; fable2Cache[0] = '\0';
   resetAt2Cache[0] = '\0'; bar2Cache = -2; border2Cache = -1;
   cxPctCache[0] = '\0'; cxRightCache[0] = '\0'; cxBorderCache = -1;
+  cxBarCache = -1; cxStaleCache = -1;
 }
 
 void drawCardChrome(int y0, const char* label) {
@@ -2676,19 +2690,46 @@ void renderCodexRow() {
     snprintf(buf, sizeof(buf), "CODEX");
   }
   padTo(buf, sizeof(buf), 11);
-  drawIfChanged(cxPctCache, 16, buf, CARD_X + PAD, CODEX_Y + 11, 2, 1,
+  drawIfChanged(cxPctCache, 16, buf, CARD_X + PAD, CODEX_Y + 8, 2, 1,
                 COLOR_LABEL, COLOR_CARD);
 
-  // Right lane: the percentage, then the reset countdown. "--" when the host has
-  // never seen a rate_limits record, which is what an unused Codex install looks
-  // like - deliberately NOT 0%, which would read as a live measurement.
-  if (!have) snprintf(buf, sizeof(buf), "--");
-  else if (usage.cxResetInMin >= 0)
-    snprintf(buf, sizeof(buf), "%d%%  %s", usage.cxPct, formatResetIn(usage.cxResetInMin).c_str());
-  else snprintf(buf, sizeof(buf), "%d%%", usage.cxPct);
-  padLeftTo(buf, sizeof(buf), 14);
-  drawIfChanged(cxRightCache, 20, buf, CARD_X + CARD_W - PAD, CODEX_Y + 11, 2, 1,
+  // Right lane: the percentage, the reset countdown, and the wall-clock time it resets
+  // at - the same three facts the Claude cards give, so the row can be read the same way.
+  // "--" when the host has never seen a rate_limits record, which is what an unused
+  // Codex install looks like - deliberately NOT 0%, which would read as a measurement.
+  if (!have) {
+    snprintf(buf, sizeof(buf), "--");
+  } else if (usage.cxResetInMin >= 0) {
+    long nowSec = hostNowSec();
+    // Same arithmetic renderCard uses for its "at 14:32", including the same guard: with
+    // no host clock yet there is nothing to add the countdown to, so print the countdown
+    // alone rather than a time computed from zero.
+    if (nowSec >= 0) {
+      long atSec = (nowSec + usage.cxResetInMin * 60) % 86400;
+      snprintf(buf, sizeof(buf), "%d%%  %s  %02ld:%02ld", usage.cxPct,
+               formatResetIn(usage.cxResetInMin).c_str(), atSec / 3600, (atSec / 60) % 60);
+    } else {
+      snprintf(buf, sizeof(buf), "%d%%  %s", usage.cxPct,
+               formatResetIn(usage.cxResetInMin).c_str());
+    }
+  } else {
+    snprintf(buf, sizeof(buf), "%d%%", usage.cxPct);
+  }
+  padLeftTo(buf, sizeof(buf), 20);
+  drawIfChanged(cxRightCache, 24, buf, CARD_X + CARD_W - PAD, CODEX_Y + 8, 2, 1,
                 stale ? COLOR_LABEL : (have ? COLOR_VALUE : COLOR_LABEL), COLOR_CARD, TR_DATUM);
+
+  // Pace bar, with the same tick the Claude cards carry: fill ahead of the marker means
+  // quota is going faster than time. tickPct -1 when either input is missing, which
+  // drawPaceBar already renders as "no tick" - no special case needed here.
+  // The bar dims WITH the number when the reading is stale; a bright bar beside a dimmed
+  // percentage would read as live data. drawPaceBar caches on (pct, tick) only, so the
+  // colour change alone would not repaint - renderUsageTab busts cxBarCache on the flip.
+  int tickPct = (have && usage.cxResetInMin >= 0 && usage.cxWindowMin > 0)
+                    ? (int) (100 - usage.cxResetInMin * 100 / usage.cxWindowMin)
+                    : -1;
+  drawPaceBar(&cxBarCache, CARD_X + PAD, CODEX_Y + 26, CARD_W - 2 * PAD, BAR_H,
+              have ? usage.cxPct : 0, tickPct, stale ? COLOR_LABEL : color);
 }
 
 void renderUsageTab() {
@@ -2701,7 +2742,19 @@ void renderUsageTab() {
     quotaStaleCache = stale;
     pct1Cache[0] = '\0';
     pct2Cache[0] = '\0';
-    cxRightCache[0] = '\0';   // its colour flips on staleness, and the digits often don't
+  }
+  // Codex's row dims on ITS OWN age, so it gets its own flip. This used to hang off the
+  // Claude flag above, which was wrong in both directions: Codex going stale while the
+  // OAuth poller stayed fresh left the row bright, and a Claude flip repainted a Codex
+  // row whose state had not changed. The bar must be busted too - drawPaceBar keys its
+  // cache on (pct, tick) alone, so a dim-only change would never repaint.
+  int cxStale = usage.cxAgeSec > 900 ? 1 : 0;
+  if (cxStale != cxStaleCache) {
+    cxStaleCache = cxStale;
+    cxRightCache[0] = '\0';
+    cxPctCache[0] = '\0';
+    cxBarCache = -1;
+    cxBorderCache = -1;
   }
   renderCard(CARD1_Y, usage.fiveHourPct, usage.sessionTokens, usage.fiveHourResetInMin,
              5 * 60, pct1Cache, left1Cache, right1Cache, fable1Cache, resetAt1Cache,
