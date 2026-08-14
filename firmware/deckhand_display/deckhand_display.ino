@@ -655,19 +655,45 @@ const uint8_t T_META  = 1;   // secondary labels, hints, units
 // settings/overlay restyle, where the button widths get re-derived.
 
 // ---------- Components ----------
+// ROUNDED SHAPES ARE ANTI-ALIASED, and the backdrop is never optional.
+// fillRoundRect/drawRoundRect plot hard pixels, so a 10px corner is a visible
+// staircase at this DPI. TFT_eSPI's smooth variants blend the edge instead, but
+// they need to know what the shape sits ON: their bg_color default of
+// 0x00FFFFFF is a SENTINEL meaning "read the pixel back off the panel", and
+// readback is slow and unreliable on this ILI9341 wiring (the same reason the
+// FAB is an unfilled ring rather than a translucent one). So `behind` is a
+// required argument here, and passing the wrong one shows up as a coloured
+// halo around the shape rather than as nothing at all.
+// Components take `behind` as a defaulted parameter; because C++ evaluates a
+// default argument at each call, it picks up the LIVE palette and so still
+// follows a DARK/LIGHT switch.
+inline void uiFillRound(int x, int y, int w, int h, int r, uint16_t fill, uint16_t behind) {
+  tft.fillSmoothRoundRect(x, y, w, h, r, fill, behind);
+}
+// A stroke of `thickness` px inset from the outer edge. drawSmoothRoundRect
+// takes an outer AND inner radius, so one call draws an even ring - unlike two
+// nested drawRoundRects, whose arcs don't nest and leave holes (measured on the
+// FAB's 2px ring: 4 of 360 radial rays crossed no ring pixel at all).
+inline void uiStrokeRound(int x, int y, int w, int h, int r, int thickness,
+                          uint16_t stroke, uint16_t behind) {
+  tft.drawSmoothRoundRect(x, y, r, r - thickness, w, h, stroke, behind);
+}
+
 // Surface behind grouped content.
-void uiCard(int x, int y, int w, int h, uint16_t border = COLOR_LABEL) {
-  tft.fillRoundRect(x, y, w, h, R_MD, COLOR_CARD);
-  tft.drawRoundRect(x, y, w, h, R_MD, border);
+void uiCard(int x, int y, int w, int h, uint16_t border = COLOR_LABEL,
+            uint16_t behind = COLOR_BG) {
+  uiFillRound(x, y, w, h, R_MD, COLOR_CARD, behind);
+  uiStrokeRound(x, y, w, h, R_MD, 1, border, behind);
 }
 
 // One button style, three intents. `filled` marks the active/selected state so
 // selection never rests on colour alone.
 void uiButton(int x, int y, int w, int h, const char* label,
-              uint16_t tint = COLOR_ACCENT, bool filled = false) {
+              uint16_t tint = COLOR_ACCENT, bool filled = false,
+              uint16_t behind = COLOR_BG) {
   uint16_t bg = filled ? tint : COLOR_CARD;
-  tft.fillRoundRect(x, y, w, h, R_MD, bg);
-  tft.drawRoundRect(x, y, w, h, R_MD, tint);
+  uiFillRound(x, y, w, h, R_MD, bg, behind);
+  uiStrokeRound(x, y, w, h, R_MD, 1, tint, behind);
   setUIFont(T_TITLE);
   tft.setTextColor(filled ? COLOR_BG : tint, bg);
   tft.setTextDatum(MC_DATUM);
@@ -685,11 +711,12 @@ void uiToggle(int x, int y, int w, int h, const char* onLabel, const char* offLa
 // `rightInset` reserves space at the right edge for a trailing control (e.g. a
 // forget button), so the tag is placed clear of it instead of underneath.
 void uiListRow(int x, int y, int w, int h, const char* label, bool selected,
-               const char* tag = nullptr, int rightInset = SP_3) {
+               const char* tag = nullptr, int rightInset = SP_3,
+               uint16_t behind = COLOR_BG) {
   uint16_t tint = selected ? COLOR_ACCENT : COLOR_LABEL;
   uint16_t bg = selected ? COLOR_ACCENT : COLOR_CARD;
-  tft.fillRoundRect(x, y, w, h, R_MD, bg);
-  tft.drawRoundRect(x, y, w, h, R_MD, tint);
+  uiFillRound(x, y, w, h, R_MD, bg, behind);
+  uiStrokeRound(x, y, w, h, R_MD, 1, tint, behind);
   setUIFont(T_BODY);
   tft.setTextColor(selected ? COLOR_BG : COLOR_VALUE, bg);
   tft.setTextDatum(ML_DATUM);
@@ -2295,12 +2322,15 @@ void drawBar(int* cache, int x, int y, int w, int h, int pct, uint16_t fg) {
   int clamped = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
   if (clamped == *cache) return;
   *cache = clamped;
-  tft.fillRoundRect(x, y, w, h, h / 2, COLOR_BG);
+  // The track sits on the card, but the FILL sits on the track - so they blend
+  // against different colours. Getting these two the same way round is what
+  // stops a halo appearing along the fill's leading edge.
+  uiFillRound(x, y, w, h, h / 2, COLOR_BG, COLOR_CARD);
   int filled = w * clamped / 100;
   if (filled >= h) {
-    tft.fillRoundRect(x, y, filled, h, h / 2, fg);
+    uiFillRound(x, y, filled, h, h / 2, fg, COLOR_BG);
   } else if (filled > 0) {
-    tft.fillCircle(x + h / 2, y + h / 2, h / 2, fg);
+    tft.fillSmoothCircle(x + h / 2, y + h / 2, h / 2, fg, COLOR_BG);
   }
 }
 
@@ -2315,12 +2345,12 @@ void drawPaceBar(int* cache, int x, int y, int w, int h, int pct, int tickPct, u
   if (code == *cache) return;
   *cache = code;
   tft.fillRect(x - 1, y - 4, w + 2, h + 8, COLOR_CARD); // covers the tick overhang
-  tft.fillRoundRect(x, y, w, h, h / 2, COLOR_BG);
+  uiFillRound(x, y, w, h, h / 2, COLOR_BG, COLOR_CARD);
   int filled = w * clamped / 100;
   if (filled >= h) {
-    tft.fillRoundRect(x, y, filled, h, h / 2, fg);
+    uiFillRound(x, y, filled, h, h / 2, fg, COLOR_BG);
   } else if (filled > 0) {
-    tft.fillCircle(x + h / 2, y + h / 2, h / 2, fg);
+    tft.fillSmoothCircle(x + h / 2, y + h / 2, h / 2, fg, COLOR_BG);
   }
   if (tick >= 0) {
     int tx = x + (w - 3) * tick / 100;
@@ -2331,8 +2361,9 @@ void drawPaceBar(int* cache, int x, int y, int w, int h, int pct, int tickPct, u
 void drawCardBorder(int* cache, int x, int y, int w, int h, uint16_t color) {
   if ((int) color == *cache) return;
   *cache = (int) color;
-  tft.drawRoundRect(x, y, w, h, RADIUS, color);
-  tft.drawRoundRect(x + 1, y + 1, w - 2, h - 2, RADIUS - 1, color);
+  // One 2px ring, not two nested outlines: adjacent Bresenham arcs don't nest,
+  // so the old pair left holes where both traces landed on the same pixel.
+  uiStrokeRound(x, y, w, h, RADIUS, 2, color, COLOR_BG);
 }
 
 String formatTokens(unsigned long tokens) {
@@ -2918,12 +2949,13 @@ void drawStatusPill(int xEdge, int y, const char* label, const char* status, boo
   int w = tft.textWidth(label) + 12;
   int x = rightAlign ? xEdge - w : xEdge;
   if (asking) {
-    tft.fillRoundRect(x, y, w, 18, 9, color);
+    // Pills sit on a row/card surface, never on the page background.
+    uiFillRound(x, y, w, 18, 9, color, COLOR_CARD);
     tft.setTextColor(COLOR_BG, color);
   } else if (working) {
     tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   } else {
-    tft.drawRoundRect(x, y, w, 18, 9, color);
+    uiStrokeRound(x, y, w, 18, 9, 1, color, COLOR_CARD);
     tft.setTextColor(color, COLOR_CARD);
   }
   tft.setTextDatum(MC_DATUM);
