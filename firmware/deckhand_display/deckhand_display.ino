@@ -2995,29 +2995,37 @@ void drawSessionRow(int i) {
       : SESSION_ROW_X + SESSION_ROW_W - 16 - (tft.textWidth(pillLbl) + 12); // pill = text + 12
   int laneW = laneRight - nameX - 6; // 6px so the name never kisses the tag/pill
 
-  // Tall rows try the big font and drop to the small one only when the name doesn't fit,
-  // so a long project name is shown WHOLE instead of cut short. This is one hard step,
-  // not a gradient: Cozette is a bitmap font scaled by an integer (uiTextSize returns 2
-  // or 1), so the only sizes available are 12px and 6px characters.
+  // Three rungs, largest first: 12x26 -> 10x18 -> 6x13, taking the first whose
+  // measured width fits the lane, so a long project name is shown WHOLE rather
+  // than cut short. Before T_HEAD existed this was a single 26->13 cliff.
+  // Compact rows start at the bottom rung, exactly as they always have: 26px
+  // does not fit a 41-63px row.
+  static const uint8_t NAME_RUNGS[] = { T_HERO, T_HEAD, T_BODY };
   char nameBuf[28]; // host caps the name at 22, plus "..." and a NUL
-  bool smallName = !large;
-  if (large) {
-    setUIFont(4);
-    if (tft.textWidth(s.name) > laneW) {
-      smallName = true;
-      setUIFont(2);
-    }
-  } else {
-    setUIFont(2);
+  uint8_t nameFont = T_BODY;
+  for (int r = large ? 0 : 2; r < 3; r++) {
+    nameFont = NAME_RUNGS[r];
+    setUIFont(nameFont);
+    if (tft.textWidth(s.name) <= laneW) break;
   }
   fitText(nameBuf, sizeof(nameBuf), s.name, laneW);
+  if (nameBuf[0] == '\0' && nameFont != T_BODY) {
+    // fitText gives up entirely when not even one character plus "..." fits.
+    // That is reachable at 10px in a narrow lane where it never was at 6px, so
+    // fall to the smallest rung rather than render a blank name.
+    nameFont = T_BODY;
+    setUIFont(nameFont);
+    fitText(nameBuf, sizeof(nameBuf), s.name, laneW);
+  }
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
   tft.setTextDatum(TL_DATUM);
-  // A shrunk name is centred in the band the big one would have filled (26px vs 13px),
-  // so it doesn't hang off the top of the row with a gap under it. A title row starts
-  // 2px higher to buy the third line its space.
+  // A shrunk name is centred in the 26px band the big font would have filled, so
+  // it doesn't hang off the top of the row with a gap under it. The old hardcoded
+  // +6 was exactly this: (26 - 13) / 2. A title row starts 2px higher to buy the
+  // third line its space.
   int nameTop = y + (showTitle ? 4 : 6);
-  tft.drawString(nameBuf, nameX, (large && smallName) ? nameTop + 6 : nameTop);
+  int nameOffset = large ? (uiLineH(T_HERO) - uiLineH(nameFont)) / 2 : 0;
+  tft.drawString(nameBuf, nameX, nameTop + nameOffset);
 
   char sub[26];
   buildSessionSubline(i, sub, sizeof(sub));
