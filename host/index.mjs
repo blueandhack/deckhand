@@ -19,6 +19,7 @@ import { createWriteStream, renameSync, statSync } from "node:fs";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
+import { mergeById } from "./sessions-merge.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1076,7 +1077,13 @@ async function readSessions() {
       }
       // The filename IS the session id - carry it so the device can match
       // sessions across polls even when two sessions share a project name.
-      records.push({ ...record, id: path.basename(file, ".json"), agent: "claude" });
+      // The record says which tool wrote it (the hook stamps it). Only fall back to
+      // "claude" for records written before that field existed.
+      records.push({
+        ...record,
+        id: path.basename(file, ".json"),
+        agent: record.agent === "codex" ? "codex" : "claude",
+      });
     } catch {
       // ignore unreadable/partially-written file this tick
     }
@@ -1085,7 +1092,10 @@ async function readSessions() {
   // Codex threads join the SAME list and the same ranking, so a mixed set sorts by
   // how much it needs you rather than by which tool it came from. They arrive
   // pre-shaped by readCodexSessions().
-  records.push(...(await readCodexSessions()));
+  // Codex arrives from both directions now; the hook record wins where both exist.
+  const merged = mergeById(await readCodexSessions(), records);
+  records.length = 0;
+  records.push(...merged);
 
   // Urgency first, recency second: the display fits 6 sessions, and when
   // there are more, a session that NEEDS INPUT must never be the hidden one.
