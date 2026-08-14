@@ -38,6 +38,11 @@ if (!fs.existsSync(CODEX_DIR)) {
   process.exit(0);
 }
 
+if (REMOVE && !fs.existsSync(HOOKS)) {
+  console.log(`No ${HOOKS} - nothing to un-register.`);
+  process.exit(0);
+}
+
 let cfg = {};
 if (fs.existsSync(HOOKS)) {
   try {

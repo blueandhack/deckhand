@@ -43,6 +43,13 @@ check("ours removed", cfg.hooks.PermissionRequest, undefined);
 check("yours still there after removal",
   cfg.hooks.PostToolUse.some((g) => g.hooks.some((h) => h.command === "node /my/own/hook.mjs")), true);
 
+// Regression: --remove on a bare .codex with no hooks.json should not create one.
+const bare = fs.mkdtempSync(path.join(os.tmpdir(), "deckhand-cxbare-"));
+fs.mkdirSync(path.join(bare, ".codex"), { recursive: true });
+execFileSync(process.execPath, [SCRIPT, "--remove"], { env: { ...process.env, HOME: bare } });
+check("--remove does not create hooks.json", fs.existsSync(path.join(bare, ".codex", "hooks.json")), false);
+fs.rmSync(bare, { recursive: true, force: true });
+
 fs.rmSync(home, { recursive: true, force: true });
 console.log(`\n== ${pass} passed, ${fail} failed ==`);
 process.exit(fail ? 1 : 0);
