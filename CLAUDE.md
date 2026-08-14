@@ -1301,7 +1301,9 @@ Other things that aren't obvious from a single file:
   exactly `(26 - 13) / 2`, so the offset is now derived and reproduces it. `fitText` returns an
   empty string when nothing fits at all, which is reachable at 10px where it was not at 6px, so
   the ladder falls through to the smallest rung rather than draw a blank name.
-  Cost: **+2850 bytes of flash** per face, zero RAM (`PROGMEM`). Regenerate with
+  Cost: **+3524 bytes of flash total, zero RAM** (`PROGMEM`) — 2850 of that is the Terminus font
+  data itself (roughly what a second added face would cost), the rest is the registry table,
+  tokens, and comments, plus the ladder code. Regenerate with
   `python3 bdf2gfx.py <bdf> <Name> <yAdvance> > <Name>.h`; the BDFs are **not** committed (Cozette
   668KB, Terminus 1.1MB) but the generated headers and both licence texts
   (`licenses/Terminus-OFL.txt`, `licenses/Cozette-MIT.txt`) are.
