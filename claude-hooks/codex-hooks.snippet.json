@@ -1,0 +1,11 @@
+{
+  "_comment": "Reference only. Run `node claude-hooks/install-codex-hooks.mjs` to merge this into ~/.codex/hooks.json safely (it backs up, dedupes, and substitutes your real home path). Codex will ask you to trust the hooks on next launch. $HOME below is a placeholder.",
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs --agent=codex", "timeout": 100 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs --agent=codex", "timeout": 100 }] }],
+    "PermissionRequest": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs --agent=codex", "timeout": 100 }] }],
+    "PostToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs --agent=codex", "timeout": 100 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs --agent=codex", "timeout": 100 }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "node $HOME/.claude/deckhand-session-hook.mjs --agent=codex", "timeout": 100 }] }]
+  }
+}
