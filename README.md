@@ -120,12 +120,13 @@ through to the normal dialog with no side effects.
 
 ## Codex support
 
-Codex threads show up in the same SESSIONS list, but the mechanism is the
-opposite of the Claude Code half and that shapes what you get. Claude Code
-state *arrives* because a hook is invoked on every event; Codex offers no hook
-mechanism at all, so the host **reads its files** instead — the per-thread
-rollout JSONL under `~/.codex/sessions/YYYY/MM/DD/`, for the working directory,
-model, task start/finish events, and quota.
+Codex threads show up in the same SESSIONS list. Since 0.147.0, Codex CLI ships
+a hooks system Deckhand can push through, the same way Claude Code state
+*arrives* — a hook invoked on every event. Where that isn't available yet (the
+hooks trust prompt hasn't been accepted, or the Codex version predates hooks),
+the host falls back to **reading Codex's own files** — the per-thread rollout
+JSONL under `~/.codex/sessions/YYYY/MM/DD/`, for the working directory, model,
+task start/finish events, and quota.
 
 Two consequences are worth knowing before you rely on it:
 
@@ -137,8 +138,10 @@ Two consequences are worth knowing before you rely on it:
   hooks review prompt; hooks do nothing until you do, and editing them
   (including a Deckhand upgrade) asks again. After that, a Codex thread
   waiting on a permission prompt shows NEEDS INPUT exactly like a Claude Code
-  session, and ended threads disappear immediately instead of lingering for
-  20 minutes.
+  session. Ending a thread removes its pushed record at once — but the
+  rollout-derived fallback row for that same thread still ages out on its own
+  over ~20 minutes, so an ended Codex thread can still linger on screen until
+  then.
   The file-reading approach described above **remains as a fallback**, for
   Codex installs where the hooks trust prompt hasn't been accepted yet (or
   Codex versions that predate hooks): it still shows WORKING/READY from the

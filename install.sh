@@ -38,7 +38,8 @@ echo "[3/6] Registering hooks in settings.json (backs up first, merges safely)"
 node "$REPO/claude-hooks/install-hooks.mjs"
 
 echo "[4/6] Registering Codex hooks (only if Codex is installed)"
-node "$REPO/claude-hooks/install-codex-hooks.mjs"
+node "$REPO/claude-hooks/install-codex-hooks.mjs" || \
+  echo "  warning: Codex hook registration failed - continuing (Codex threads stay read-only)." >&2
 
 echo "[5/6] Installing host dependencies (npm)"
 ( cd "$REPO/host" && npm install --no-fund --no-audit )

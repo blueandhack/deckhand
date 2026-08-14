@@ -311,11 +311,19 @@ two things `host/index.mjs` cannot get any other way:
   device-side RESET PAIRING (no reboot) still won't silently re-pair. (`deviceNameReported` is now
   vestigial — nothing gates on it.)
 
-- **Codex support is PULL, not push — it has no hooks, and that shapes everything.**
-  Claude Code state arrives because `deckhand-session-hook.mjs` is *invoked* on every
-  event. Codex offered no such mechanism when this was written, so the host reads its
-  files instead.
-  **THAT IS NO LONGER TRUE, and it is the biggest open opportunity in this repo.**
+- **Codex support is PUSH via hooks, with PULL retained as a fallback.** Claude Code
+  state arrives because `deckhand-session-hook.mjs` is *invoked* on every event; Codex
+  now gets the identical treatment — `install.sh` registers that same hook with Codex
+  CLI (0.147.0+, `--agent=codex`), so a Codex thread pushes its own status and can be
+  answered from the device exactly like a Claude Code session. The host also still
+  reads Codex's rollout files directly, as a fallback for installs where Codex's hooks
+  trust prompt hasn't been accepted yet (or on Codex versions older than 0.147.0) — see
+  below for how that pull path works and what it can't do (no NEEDS INPUT, no
+  answering, and an ended thread still ages out over ~20 minutes rather than vanishing
+  at once).
+  Codex had no hooks mechanism at all when this integration was first written; the
+  investigation below (all measured on 0.147.0, not inferred) is what established a
+  hooks-based push was possible, and it's kept as the record of how that was verified:
   Codex CLI **0.147.0** ships a hooks system that closely mirrors Claude Code's -
   confirmed from the binary's embedded JSON schema and its own validation strings, not
   from docs. Config lives in `~/.codex/hooks.json` (also project-local `.codex/`, plus a
@@ -392,9 +400,15 @@ two things `host/index.mjs` cannot get any other way:
   for `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`, and
   `SessionEnd` - deliberately **not** `PreToolUse`, which on Codex fires for every tool
   call with nothing to matcher-filter it against, unlike Claude Code's
-  `AskUserQuestion|ExitPlanMode` matcher). `SessionEnd` deletes the record outright, which
-  is what fixes the PULL path's 20-minute ghost-session problem for any thread the hook
-  actually covers.
+  `AskUserQuestion|ExitPlanMode` matcher). `SessionEnd` deletes the *pushed* record at
+  once — but `readCodexSessions()` still admits that thread's rollout file for up to
+  `SESSION_STALE_MS` (20 min) afterward, and `mergeById()` (`host/sessions-merge.mjs`)
+  only lets a hook record SHADOW a pull record while both exist; once the hook record is
+  gone there is nothing left to shadow, so the rollout-derived row survives as `waiting`
+  until it ages out on its own. So a hook-covered Codex thread's pushed record disappears
+  at once, but the thread's row on screen can still linger up to ~20 minutes on the pull
+  fallback before it clears — `SessionEnd` narrows the PULL path's ghost-session window,
+  it does not eliminate it.
   **The `hooks.json` key for a hook's own timeout is `timeout`, not `timeoutSec` - this
   was established by experiment, not inference, and it is exactly the kind of thing a
   future maintainer "fixes" into broken code.** Codex's `HookMetadata` struct (the

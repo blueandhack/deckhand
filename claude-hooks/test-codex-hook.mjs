@@ -27,8 +27,26 @@ async function runHook(fixture, args, home) {
   home ??= fs.mkdtempSync(path.join(os.tmpdir(), "deckhand-test-"));
   fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
   const payload = fs.readFileSync(path.join(DIR, "fixtures", fixture), "utf8");
+  // The hook only builds/publishes an `ask` (and only then can it wait or write
+  // to stdout) when it sees a fresh, connected heartbeat - normally written by
+  // host/index.mjs every tick at /tmp/deckhand-host-alive. Running this test on
+  // a machine with no Deckhand host live would otherwise fail every ask-shaped
+  // assertion for a reason that has nothing to do with the hook logic under
+  // test, AND silently turn "stdout empty (decision channel)" - the most
+  // security-relevant assertion here - vacuous: with no ask ever built, the
+  // hook exits before reaching any code path that could write to stdout, so
+  // that check would pass even if emitDecision() were broken. DECKHAND_TMP
+  // (the same seam uninstall.sh uses as $DECK_TMP) points the hook at a fake
+  // heartbeat scoped to this sandbox HOME instead, so the test is deterministic
+  // and the stdout assertion actually exercises the code it claims to.
+  const tmp = path.join(home, "tmp");
+  fs.mkdirSync(tmp, { recursive: true });
+  fs.writeFileSync(
+    path.join(tmp, "deckhand-host-alive"),
+    JSON.stringify({ connected: true, remoteAnswer: true, at: Date.now() })
+  );
   const p = spawn(process.execPath, [HOOK, ...args], {
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, HOME: home, DECKHAND_TMP: tmp },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";

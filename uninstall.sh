@@ -113,7 +113,8 @@ echo "[3/5] Un-registering Codex hooks"
 if [ "$DRY" = 1 ]; then
   echo "  \$ node $REPO/claude-hooks/install-codex-hooks.mjs --remove"
 else
-  node "$REPO/claude-hooks/install-codex-hooks.mjs" --remove
+  node "$REPO/claude-hooks/install-codex-hooks.mjs" --remove || \
+    echo "  warning: Codex hook removal failed - continuing (this is the uninstall escape hatch; it must not abort here)." >&2
 fi
 
 echo "[4/5] Removing hook scripts and per-session state"

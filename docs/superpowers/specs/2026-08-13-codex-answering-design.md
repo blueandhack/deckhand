@@ -56,7 +56,11 @@ Registered a capture hook in `~/.codex/hooks.json` and drove real sessions:
 ## Goals
 
 - A Codex thread can show NEEDS INPUT and be answered from the device.
-- An ended Codex thread disappears at once.
+- An ended Codex thread's *pushed* record is removed at once — but the
+  rollout-derived fallback row for that same thread still ages out over
+  `SESSION_STALE_MS` (~20 min) on its own, so an ended Codex thread can still
+  linger on screen until then. (See Merge rule below: once the pushed record
+  is gone there is nothing left to shadow the pull record.)
 - No firmware change. The device is already agent-agnostic: it renders whatever `ask` is
   in a session record and signs answers with the pairing key regardless of origin.
 
@@ -109,7 +113,7 @@ less detailed.
 | `PermissionRequest` | `asking` | publishes the `ask`; the only event that waits |
 | `PostToolUse` | `working` | clears `asking` after a decision |
 | `Stop` | `waiting` | "right before Codex ends its turn" |
-| `SessionEnd` | *delete the record* | this is what kills the 20-minute ghosts |
+| `SessionEnd` | *delete the record* | deletes the *pushed* record only — the pull-side row for the same thread still ages out over `SESSION_STALE_MS` (~20 min) independently, since the merge only lets a hook record shadow a pull record while both exist |
 
 `PreToolUse` is deliberately **not** registered for Codex. On the Claude side it is
 matched only to `AskUserQuestion|ExitPlanMode`; Codex has no equivalent, and there it
@@ -145,9 +149,10 @@ because it rides in every tick). The flag uses the RECORD vocabulary. Concretely
 
 ## Risks and open questions
 
-1. **The hook `timeout` must exceed the 90s remote wait.** `settings.json` uses
-   `timeout: 100` for exactly this reason; `hooks.json` has its own `timeout` field and
-   needs the same. Getting it wrong kills the hook mid-wait.
+1. **The hook `timeout` must exceed the remote wait.** `settings.json` uses `timeout: 100`
+   against Claude Code's 90s wait; `hooks.json` also uses `timeout: 100`, now against a
+   15s Codex wait (the two are no longer the same number — see Risk 3 below for why the
+   Codex side shipped shorter). Getting either wrong kills the hook mid-wait.
 2. **STILL UNVERIFIED: what does Codex do with a `PermissionRequest` hook that times
    out?** Claude Code falls through to its own dialog when its hook expires. Whether
    Codex does the same, or instead treats expiry as a denial, is not known.
@@ -156,10 +161,10 @@ because it rides in every tick). The flag uses the RECORD vocabulary. Concretely
    `PermissionRequest` never fires outside the interactive TUI, and there is no way to
    script "start Codex, trigger a real approval, let the hook time out" without a human
    at the keyboard accepting the trust prompt and issuing the command.
-   The risk is bounded in normal operation, not open-ended: the hook self-exits at 90s
-   (`REMOTE_WAIT_MS`) under a 100s `timeout` (see Risk 1), so expiry is reachable only
-   through a pathological overrun — a wedged device, a host that never comes back, or a
-   hook process that hangs past its own wait. It is not something a slow-but-working
+   The risk is bounded in normal operation, not open-ended: the hook self-exits at 15s
+   (Codex's `REMOTE_WAIT_MS`) under a 100s `timeout` (see Risk 1), so expiry is reachable
+   only through a pathological overrun — a wedged device, a host that never comes back, or
+   a hook process that hangs past its own wait. It is not something a slow-but-working
    device triggers in ordinary use.
    The exact experiment a human can run to close this, when someone is available to sit
    with the TUI:
@@ -170,17 +175,35 @@ because it rides in every tick). The flag uses the RECORD vocabulary. Concretely
    4. Ask it to run `curl -sI https://example.com | head -1`.
    5. Observe what happens once the hook is killed at 5s:
       - **Codex shows its own approval prompt** — expiry falls through, exactly like
-        Claude Code. Safe; no design change needed.
-      - **Codex denies the command** — expiry is a denial. The 90s wait would need to be
-        shortened or dropped for Codex specifically, since an unanswered prompt should
-        never resolve to "denied" as its default.
+        Claude Code. Safe; the 15s Codex wait could then be raised back toward parity
+        with Claude Code's 90s if that were ever wanted.
+      - **Codex denies the command** — expiry is a denial. The wait would need to be
+        shortened further (or dropped) for Codex specifically, since an unanswered
+        prompt should never resolve to "denied" as its default.
    This has not been run. Nothing in this document should be read as claiming a result
    either way.
-3. **Editing `hooks.json` re-triggers the trust prompt** ("Modified since last trusted"),
+3. **STILL UNVERIFIED: is Codex's own approval UI concurrent with the hook, or serialised
+   behind it?** CLAUDE.md justifies the 90s remote wait with a real measurement — 310
+   `PermissionRequest` samples with no spike at the timeout, proving Claude Code's dialog
+   is on screen the whole time the hook runs, so waiting there costs nothing extra. That
+   measurement is Claude-Code-only. Nothing establishes whether Codex's approval prompt
+   is drawn while its hook is still running (same as Claude Code, so waiting is free) or
+   only after the hook exits (so waiting would just add up to 90s of dead time to *every*
+   Codex permission prompt). Until this is measured, the implementation caps the Codex
+   wait at 15s instead of reusing the 90s figure — a conservative, unmeasured default
+   traded deliberately against the alternative: a needlessly short window is a smaller
+   harm (the device answers a little less often than it might) than every Codex prompt
+   hanging for up to 90s would be if the concurrency assumption turned out to be wrong.
+   The same manual experiment written up in Risk 2 above answers both open questions in
+   one run: watching whether Codex's own approval prompt appears on screen immediately
+   (while the hook is still running) or only after the hook is killed tells you both
+   whether expiry falls through safely *and* whether the wait can safely be lengthened.
+   This has not been run either.
+4. **Editing `hooks.json` re-triggers the trust prompt** ("Modified since last trusted"),
    so every upgrade needs re-accepting. The installer must say so.
-4. **A node process per tool call**, now for both tools. Same cost the Claude side already
+5. **A node process per tool call**, now for both tools. Same cost the Claude side already
    pays, but it doubles on a machine running both.
-5. **Codex retries before escalating.** Observed order: `PreToolUse` → `PostToolUse` with
+6. **Codex retries before escalating.** Observed order: `PreToolUse` → `PostToolUse` with
    an EMPTY `tool_response` (the sandboxed attempt failed silently) → `PreToolUse` →
    `PermissionRequest`. A naive reading of `PostToolUse` records a completed tool call
    that never ran. We only use it to set `working`, so this is currently harmless — but it

@@ -56,17 +56,38 @@ const DEBUG_MAX_BYTES = 5 * 1024 * 1024;
 // Written by host/index.mjs every tick; tells us a display is actually
 // connected, and whether the user has opted into answering FROM the device.
 // Without it we never block waiting for a remote answer.
-const HOST_ALIVE = "/tmp/deckhand-host-alive";
-// How long the prompt stays answerable from the device. The matching hook
-// `timeout` in settings.json must be a few seconds LONGER, or Claude Code
-// kills the hook before this elapses.
-const REMOTE_WAIT_MS = 90_000;
+// DECKHAND_TMP is the same test/override seam uninstall.sh already uses (its
+// $DECK_TMP) - it lets a test drive this off a fake heartbeat instead of
+// depending on a real host running on the machine that executes the tests.
+const HOST_ALIVE = path.join(process.env.DECKHAND_TMP || "/tmp", "deckhand-host-alive");
 
 // Which tool invoked us. Codex's payload is field-identical to Claude Code's and carries
 // no agent marker, so the registration says so explicitly rather than the hook guessing
 // from a transcript path neither tool guarantees. Defaults to claude, so the existing
 // ~/.claude/settings.json registration needs no migration.
+//
+// Declared BEFORE REMOTE_WAIT_MS below, which reads it.
 const AGENT = (process.argv.find((a) => a.startsWith("--agent=")) ?? "").slice(8) || "claude";
+
+// How long the prompt stays answerable from the device. The matching hook
+// `timeout` (settings.json for Claude Code, hooks.json for Codex) must be a
+// few seconds LONGER, or the tool kills the hook before this elapses.
+//
+// The 90s figure is justified in CLAUDE.md by 310 real PermissionRequest samples
+// showing NO spike at the timeout - proof that Claude Code's own dialog is on
+// screen the whole time, so waiting there is a race rather than a stall. That
+// measurement is Claude-Code-only. Nothing has measured whether Codex's approval
+// UI is similarly concurrent with the hook or is instead serialised behind it -
+// if it's serialised, every Codex permission prompt would stall for the full
+// wait before falling through to Codex's own prompt. Until that experiment is
+// run (see the spec's Risks section), Codex gets a conservative 15s cap instead
+// of 90s: the two failure modes are not symmetric. A needlessly short wait on
+// Codex costs at most "answered on the device slightly less often than it could
+// have been" (the Mac side of the race, if one exists, still answers on its own
+// schedule). An unmeasured 90s wait, if Codex actually serialises, costs a full
+// 90s of hang on every single Codex permission prompt. Smaller, bounded harm now
+// beats a possible large, repeated one.
+const REMOTE_WAIT_MS = AGENT === "codex" ? 15_000 : 90_000;
 
 // The only writer for DEBUG_LOG. Entirely best-effort: this is a debug trail, and a
 // hook that throws while trying to log would be far worse than a missing line.
