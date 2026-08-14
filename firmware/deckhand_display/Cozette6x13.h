@@ -1,6 +1,7 @@
-// Cozette 6x13 - Adafruit_GFX font, printable ASCII 0x20-0x7E only.
-// Generated from cozette.bdf by bdf2gfx.py. (c) Ines, OFL/MIT.
-// Used for the code-block detail/reader rendering (crisp bitmap at this DPI).
+// Cozette 13px - Adafruit_GFX font, printable ASCII 0x20-0x7E only.
+// Generated from cozette.bdf by bdf2gfx.py - do not edit by hand.
+// (c) 2020-2025 Ines <ines@moonwit.ch>
+// Licence: firmware/deckhand_display/licenses/ has the full text.
 #pragma once
 #include <Arduino.h>
 

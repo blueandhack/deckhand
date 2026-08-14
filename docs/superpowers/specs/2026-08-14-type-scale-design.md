@@ -1,7 +1,6 @@
 # Type Scale — Design
 
-**Status:** proposed
-**Date:** 2026-08-14
+**Status:** design, approved for planning · **Date:** 2026-08-14
 **Sub-project:** A of the device UI restyle (font → spacing tokens → USAGE → SESSIONS → SETTINGS/overlays)
 
 ## Problem

@@ -1186,14 +1186,17 @@ Other things that aren't obvious from a single file:
   rather than counted.** `drawSessionRow` computes the name's available width from what
   actually sits at the top of the row — the `CLAUDE`/`CODEX` tag on tall rows, the status
   pill (`textWidth(label) + 12`) on compact ones — because those labels differ in width
-  (`WORKING` is two characters wider than `READY`). It then tries the big font and falls
-  back to the small one **only if the name doesn't fit**, so a long name is shown whole; a
-  shrunk name is re-centred in the 26px band the big one would have filled. `fitText()`
-  trims with **three ASCII dots**, since Cozette6x13 is `0x20-0x7E` only and U+2026 would
-  draw as a blank box. Three things worth knowing before touching it:
-  - **There is no intermediate size.** `uiTextSize()` returns 2 or 1 and Cozette is a
-    bitmap font, so the only options are 12px and 6px characters — "scale the font to
-    fit" is not available, which is why this is a single step.
+  (`WORKING` is two characters wider than `READY`). It then walks the ladder — 12x26 →
+  10x18 → 6x13 — and takes the first whose measured width fits, so a long name is shown
+  whole; a shrunk name is re-centred in the 26px band the big font would have filled.
+  `fitText()` trims with **three ASCII dots**, since Cozette6x13 is `0x20-0x7E` only and
+  U+2026 would draw as a blank box. Three things worth knowing before touching it:
+  - **The middle rung had to come from a second font family.** Cozette alone only offers
+    6x13 and a mechanical 2x scale of it (12x26) — nothing in between, so "shrink one
+    step" used to mean a single hard jump straight from 12px to 6px. `uiTextSize()` now
+    returns a registry index rather than a raw 2-or-1 scale factor, and the type-scale
+    work added Terminus 10x18 bold as the rung between them, which is why the ladder is
+    three steps (12x26 → 10x18 → 6x13) rather than one.
   - **The old fixed 11/12-character cap was both too small and too big.** Measured: compact
     rows had room for 18-20 characters and were showing 11, while a tall row's 12-character
     name ran to x=192 against a `CLAUDE` tag whose left edge is x=184 — **an 8px overlap**.
@@ -1305,7 +1308,7 @@ Other things that aren't obvious from a single file:
   data itself (roughly what a second added face would cost), the rest is the registry table,
   tokens, and comments, plus the ladder code. Regenerate with
   `python3 bdf2gfx.py <bdf> <Name> <yAdvance> > <Name>.h`; the BDFs are **not** committed (Cozette
-  668KB, Terminus 1.1MB) but the generated headers and both licence texts
+  667KB, Terminus 235KB) but the generated headers and both licence texts
   (`licenses/Terminus-OFL.txt`, `licenses/Cozette-MIT.txt`) are.
   `bdf2gfx.py --verify <bdf> <header>` decodes a header and compares it glyph-for-glyph with its
   source, and `--selftest` corrupts one byte of `A` and fails if that goes unnoticed — the same
