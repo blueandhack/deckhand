@@ -88,6 +88,14 @@ check "real /tmp untouched (oauth attempt)" "$([ -e "$REAL_ATT.testsentinel" ] &
 check "real running host's log not deleted" "$([ "$had_log" = 1 ] && { [ -e "$REAL_LOG" ] && echo kept || echo DELETED; } || echo n/a)" "$([ "$had_log" = 1 ] && echo kept || echo n/a)"
 rm -f "$REAL_LOG.testsentinel" "$REAL_ATT.testsentinel"
 
+echo "== 4c. Codex hooks are registered and removed =="
+mkdir -p "$T/.codex"
+node "$REPO/claude-hooks/install-codex-hooks.mjs" >/dev/null
+check "codex hooks.json created" "$([ -f "$T/.codex/hooks.json" ] && echo yes || echo no)" "yes"
+check "PermissionRequest registered" "$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.env.HOME+"/.codex/hooks.json","utf8"));console.log(c.hooks.PermissionRequest?1:0)')" "1"
+node "$REPO/claude-hooks/install-codex-hooks.mjs" --remove >/dev/null
+check "codex hooks removed" "$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.env.HOME+"/.codex/hooks.json","utf8"));console.log(c.hooks?.PermissionRequest?1:0)')" "0"
+
 echo "== 5. --purge removes the keys =="
 stage
 "$REPO/uninstall.sh" --yes --purge >/dev/null
@@ -165,7 +173,7 @@ chmod 700 "$T/Deckhand-backups"
 check "install.sh exited non-zero" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
 check "refused to overwrite" "$(echo "$ERR" | grep -c 'Refusing to overwrite')" "1"
 check "hook script survived the abort" "$([ -f "$C/deckhand-session-hook.mjs" ] && echo yes || echo no)" "yes"
-check "npm never ran (aborted at step 1)" "$(echo "$ERR" | grep -c '\[4/5\]')" "0"
+check "npm never ran (aborted at step 1)" "$(echo "$ERR" | grep -c '\[5/6\]')" "0"
 
 rm -rf "$T"
 echo ""

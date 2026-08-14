@@ -58,6 +58,8 @@ const FILES = [
     why: "device pairing keys; losing it means re-pairing over USB" },
   { rel: ".claude/deckhand-rate-limits.json", need: false, repo: null,
     why: "fallback quota cache - regenerates, but only in a TERMINAL session, so on a desktop-app-only machine it can be the newest reading there is" },
+  { rel: ".codex/hooks.json",                 need: false, repo: null,
+    why: "Codex hook registration; without it Codex threads are read-only on the device" },
   { rel: ".codex/config.toml",                need: false, repo: null,
     why: "Codex settings (model, notify, trusted projects)" },
 ];

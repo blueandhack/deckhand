@@ -11,7 +11,7 @@ echo "== Deckhand setup =="
 # (install-hooks.mjs backs up settings.json, but it cannot back up files it is about to
 # be handed). Also captures ~/.claude/deckhand-secret, whose loss means re-pairing every
 # device over USB.
-echo "[1/5] Snapshotting existing Deckhand state -> ~/Deckhand-backups"
+echo "[1/6] Snapshotting existing Deckhand state -> ~/Deckhand-backups"
 HAD_INSTALL=0
 if [ -f "$CLAUDE_DIR/deckhand-session-hook.mjs" ] || [ -f "$CLAUDE_DIR/deckhand-statusline.mjs" ]; then
   HAD_INSTALL=1
@@ -29,18 +29,21 @@ if ! node "$REPO/claude-hooks/deckhand-backup.mjs" backup; then
   echo "  warning: backup failed, but nothing is installed yet - continuing." >&2
 fi
 
-echo "[2/5] Installing Claude Code hook scripts -> $CLAUDE_DIR"
+echo "[2/6] Installing Claude Code hook scripts -> $CLAUDE_DIR"
 mkdir -p "$CLAUDE_DIR"
 cp "$REPO/claude-hooks/deckhand-statusline.mjs"  "$CLAUDE_DIR/"
 cp "$REPO/claude-hooks/deckhand-session-hook.mjs" "$CLAUDE_DIR/"
 
-echo "[3/5] Registering hooks in settings.json (backs up first, merges safely)"
+echo "[3/6] Registering hooks in settings.json (backs up first, merges safely)"
 node "$REPO/claude-hooks/install-hooks.mjs"
 
-echo "[4/5] Installing host dependencies (npm)"
+echo "[4/6] Registering Codex hooks (only if Codex is installed)"
+node "$REPO/claude-hooks/install-codex-hooks.mjs"
+
+echo "[5/6] Installing host dependencies (npm)"
 ( cd "$REPO/host" && npm install --no-fund --no-audit )
 
-echo "[5/5] Building DeckhandBLE.app from your node"
+echo "[6/6] Building DeckhandBLE.app from your node"
 "$REPO/host/build-app.sh"
 
 cat <<EOF
@@ -62,6 +65,10 @@ once; the SETTINGS tab shows "paired" once done.
 Launch via the bundle even for USB-only work: plain \`node index.mjs\` is
 killed by macOS (SIGABRT/exit 134) as soon as noble touches CoreBluetooth,
 so there is no bare-node fallback.
+
+If you use Codex: start it once and choose "Trust all and continue" on the
+hooks review prompt. Codex hooks do not run until trusted, and changing them
+asks again. Until then Deckhand still shows Codex threads, just read-only.
 
 To back out: ./uninstall.sh  (--dry-run to see it first). Snapshots and
 pairing keys are kept unless you pass --purge, and any snapshot can be put

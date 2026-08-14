@@ -59,6 +59,7 @@ fi
 
 echo "Will remove:"
 echo "  - Deckhand's entries in $CLAUDE_DIR/settings.json (surgically; yours are kept)"
+echo "  - Deckhand's entries in ~/.codex/hooks.json (if Codex is installed)"
 echo "  - $CLAUDE_DIR/deckhand-session-hook.mjs, deckhand-statusline.mjs"
 echo "  - $CLAUDE_DIR/deckhand-sessions/, deckhand-answers/, deckhand-device-command"
 echo "  - $CLAUDE_DIR/deckhand-session-hook-debug.log (and .1)"
@@ -94,21 +95,28 @@ run() {
 # Snapshot first, so the uninstall itself is undoable. Skipped under --dry-run (a dry run
 # must write nothing at all, and a snapshot is a write).
 if [ "$DRY" = 0 ]; then
-  echo "[1/4] Snapshotting current state first, so this is undoable"
+  echo "[1/5] Snapshotting current state first, so this is undoable"
   node "$REPO/claude-hooks/deckhand-backup.mjs" backup || \
     echo "  warning: snapshot failed - continuing, but you will have no undo." >&2
 else
-  echo "[1/4] (dry run) would snapshot to ~/Deckhand-backups"
+  echo "[1/5] (dry run) would snapshot to ~/Deckhand-backups"
 fi
 
-echo "[2/4] Un-registering from settings.json"
+echo "[2/5] Un-registering from settings.json"
 if [ "$DRY" = 1 ]; then
   echo "  \$ node $REPO/claude-hooks/install-hooks.mjs --remove"
 else
   node "$REPO/claude-hooks/install-hooks.mjs" --remove
 fi
 
-echo "[3/4] Removing hook scripts and per-session state"
+echo "[3/5] Un-registering Codex hooks"
+if [ "$DRY" = 1 ]; then
+  echo "  \$ node $REPO/claude-hooks/install-codex-hooks.mjs --remove"
+else
+  node "$REPO/claude-hooks/install-codex-hooks.mjs" --remove
+fi
+
+echo "[4/5] Removing hook scripts and per-session state"
 run rm -f "$CLAUDE_DIR/deckhand-session-hook.mjs" "$CLAUDE_DIR/deckhand-statusline.mjs"
 run rm -rf "$CLAUDE_DIR/deckhand-sessions" "$CLAUDE_DIR/deckhand-answers"
 run rm -f "$CLAUDE_DIR/deckhand-device-command" \
@@ -118,7 +126,7 @@ if [ "$PURGE" = 1 ]; then
   run rm -f "$SECRET"
 fi
 
-echo "[4/4] Removing host runtime state"
+echo "[5/5] Removing host runtime state"
 # Globbed rather than listed so a file added later is still cleaned up. nullglob-ish:
 # under `set -u` an unmatched glob would otherwise be passed through literally.
 for f in "$DECK_TMP/deckhand-host-alive" "$DECK_TMP/deckhand-host.log" \
