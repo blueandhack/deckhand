@@ -678,6 +678,11 @@ inline void uiStrokeRound(int x, int y, int w, int h, int r, int thickness,
                           uint16_t stroke, uint16_t behind) {
   tft.drawSmoothRoundRect(x, y, r, r - thickness, w, h, stroke, behind);
 }
+// Circular ring, same idea: a full 0-360 arc with an outer and inner radius is
+// one even annulus, where drawCircle(r) + drawCircle(r-1) is not.
+inline void uiRing(int cx, int cy, int r, int thickness, uint16_t stroke, uint16_t behind) {
+  tft.drawSmoothArc(cx, cy, r, r - thickness, 0, 360, stroke, behind);
+}
 
 // Surface behind grouped content.
 void uiCard(int x, int y, int w, int h, uint16_t border = COLOR_LABEL,
@@ -1188,7 +1193,7 @@ void drawVoiceCard() {
   // Cozette on a panel: this is quoted text, and the code style reads as "verbatim".
   int lines = countWrappedLines(voiceText, FONT_CODE, maxW - 14);
   int h = (lines > 6 ? 6 : lines) * 13 + 12;
-  tft.fillRoundRect(CARD_X - 4, y, maxW + 8, h, R_SM, COLOR_CARD);
+  uiFillRound(CARD_X - 4, y, maxW + 8, h, R_SM, COLOR_CARD, COLOR_BG);
   drawWrappedText(voiceText, CARD_X + 3, y + 6, FONT_CODE, 13, maxW - 14, 0, 6,
                   COLOR_VALUE, COLOR_CARD);
   y += h + 10;
@@ -1242,11 +1247,11 @@ int micPillY() { return contentBottom() - MIC_PILL_H - 8; }
 
 void micPillFrame(const char* title) {
   int x = micPillX(), y = micPillY(), w = micPillW();
-  tft.fillRoundRect(x, y, w, MIC_PILL_H, R_MD, COLOR_CARD);
-  tft.drawRoundRect(x, y, w, MIC_PILL_H, R_MD, COLOR_ACCENT);
+  uiFillRound(x, y, w, MIC_PILL_H, R_MD, COLOR_CARD, COLOR_BG);
+  uiStrokeRound(x, y, w, MIC_PILL_H, R_MD, 1, COLOR_ACCENT, COLOR_BG);
   // A filled dot beside the title marks "live" by shape, the same way the status
   // pills on the sessions list do.
-  tft.fillCircle(x + SP_3 + 3, y + 13, 4, COLOR_ACCENT);
+  tft.fillSmoothCircle(x + SP_3 + 3, y + 13, 4, COLOR_ACCENT, COLOR_CARD);
   setUIFont(1);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
@@ -1254,8 +1259,8 @@ void micPillFrame(const char* title) {
   // Draw the meter's TRACK once, here, so the per-frame update only has to paint
   // the bar itself - repainting a rounded track 8x a second would flicker.
   int bx = x + SP_3, by = y + 26, bw = w - 2 * SP_3, bh = 14;
-  tft.fillRoundRect(bx, by, bw, bh, R_SM, COLOR_BG);
-  tft.drawRoundRect(bx, by, bw, bh, R_SM, COLOR_LABEL);
+  uiFillRound(bx, by, bw, bh, R_SM, COLOR_BG, COLOR_CARD);
+  uiStrokeRound(bx, by, bw, bh, R_SM, 1, COLOR_LABEL, COLOR_CARD);
 }
 
 // level 0..1000. `right` is the elapsed/percentage readout, `hint` the caption.
@@ -2313,8 +2318,7 @@ void drawStatusDot(int cx, int cy, int r, const char* status, uint16_t bg = COLO
   if (strcmp(status, "asking") == 0) {
     tft.fillRect(cx - r, cy - r, r * 2, r * 2, color);
   } else {
-    tft.drawCircle(cx, cy, r, color);
-    tft.drawCircle(cx, cy, r - 1, color);
+    uiRing(cx, cy, r, 2, color, bg);
   }
 }
 
@@ -2506,8 +2510,9 @@ void drawFab(int state) {
   if (!fabVisible()) return;
 
   if (state == 1) { // pressed: solid disc, unmistakable feedback
-    tft.fillCircle(fabX, fabY, FAB_R - 1, COLOR_ACCENT);
-    tft.fillCircle(fabX, fabY, 7, COLOR_BG);
+    tft.fillSmoothCircle(fabX, fabY, FAB_R - 1, COLOR_ACCENT, COLOR_BG);
+    // The hole sits ON the accent disc, so that is what it blends against.
+    tft.fillSmoothCircle(fabX, fabY, 7, COLOR_BG, COLOR_ACCENT);
     return;
   }
 
@@ -2515,20 +2520,22 @@ void drawFab(int state) {
   const uint16_t dot = state == 2 ? COLOR_VALUE : COLOR_VALUE;
   // 1px COLOR_BG haloes either side of the ring: without them an outline control
   // vanishes wherever it happens to share a tone with whatever is behind it.
-  tft.drawCircle(fabX, fabY, FAB_R, COLOR_BG);
-  tft.drawCircle(fabX, fabY, FAB_R - 1, ring);
-  tft.drawCircle(fabX, fabY, FAB_R - 2, ring);
-  tft.drawCircle(fabX, fabY, FAB_R - 3, COLOR_BG);
+  // One even 2px annulus between two 1px haloes. The old four nested drawCircles
+  // did not nest: measured, 4 of 360 radial rays crossed no ring pixel at all
+  // and 48 more thinned to a single pixel, which is what made it look lumpy.
+  uiRing(fabX, fabY, FAB_R, 1, COLOR_BG, COLOR_BG);
+  uiRing(fabX, fabY, FAB_R - 1, 2, ring, COLOR_BG);
+  uiRing(fabX, fabY, FAB_R - 3, 1, COLOR_BG, COLOR_BG);
 
   if (state == 2) {
     for (int i = 0; i < 4; i++) {
       int dx = (i == 0) - (i == 1), dy = (i == 2) - (i == 3);
       tft.fillRect(fabX - 2 + dx * 11, fabY - 2 + dy * 11, 5, 5, COLOR_VALUE);
     }
-    tft.drawCircle(fabX, fabY, 5, COLOR_VALUE);
+    tft.drawSmoothCircle(fabX, fabY, 5, COLOR_VALUE, COLOR_BG);
     return;
   }
-  tft.fillCircle(fabX, fabY, 7, dot);
+  tft.fillSmoothCircle(fabX, fabY, 7, dot, COLOR_BG);
 }
 
 // Picked up: hand the content area over to a blank placement canvas (see the note
@@ -2556,6 +2563,9 @@ void fabDragTo(int sx, int sy) {
     fabX = oldX; fabY = oldY;
     return;
   }
+  // Deliberately the HARD fillCircle, not the smooth one: this is an erase, and
+  // an anti-aliased edge would leave part-blended pixels behind - a faint ghost
+  // trail following the drag, exactly where the erase has to be total.
   tft.fillCircle(oldX, oldY, FAB_R + 1, COLOR_BG); // erase from the known canvas
   drawFab(2);
 }
@@ -2995,12 +3005,12 @@ void drawSessionRow(int i) {
   bool working = strcmp(s.status, "working") == 0;
   uint16_t color = colorForStatus(s.status);
 
-  tft.fillRoundRect(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, COLOR_CARD);
+  uiFillRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, COLOR_CARD, COLOR_BG);
   // Working rows get a quiet grey border; colored borders are reserved for
   // the two states that want the user's eyes.
   uint16_t border = working ? COLOR_LABEL : color;
-  tft.drawRoundRect(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, border);
-  tft.drawRoundRect(SESSION_ROW_X + 1, y + 1, SESSION_ROW_W - 2, rowH - 2, R_MD - 1, border);
+  // One even 2px ring; two nested outlines leave holes where their arcs collide.
+  uiStrokeRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, 2, border, COLOR_BG);
 
   int dotCy = large ? y + 19 : y + rowH / 2;
   drawStatusDot(SESSION_ROW_X + 20, dotCy, large ? 9 : 7, s.status, COLOR_CARD,
@@ -3413,7 +3423,7 @@ void drawAskDetail(int idx) {
   if (shown < 1) shown = 1;
 
   if (isCode) {
-    tft.fillRoundRect(CARD_X - 4, textTop, maxW + 8, shown * dLineH + 2 * pad, R_SM, COLOR_CARD);
+    uiFillRound(CARD_X - 4, textTop, maxW + 8, shown * dLineH + 2 * pad, R_SM, COLOR_CARD, COLOR_BG);
   }
   drawWrappedText(s.askDetail, CARD_X + pad, textTop + pad, dFont, dLineH, textW,
                   0, visLines, COLOR_VALUE, textBg);
@@ -3426,8 +3436,8 @@ void drawAskDetail(int idx) {
     tft.drawString("...", tft.width() - CARD_X - pad, textTop + pad + (shown - 1) * dLineH);
     tft.setTextDatum(TL_DATUM);
     // ...and the READ ALL button up in the header row.
-    tft.fillRoundRect(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, 24, R_SM, COLOR_CARD);
-    tft.drawRoundRect(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, 24, R_SM, COLOR_ACCENT);
+    uiFillRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, 24, R_SM, COLOR_CARD, COLOR_BG);
+    uiStrokeRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, 24, R_SM, 1, COLOR_ACCENT, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
@@ -3467,9 +3477,9 @@ void drawAskDetail(int idx) {
     if ((isPerm || isPlan) && k == 0) oc = COLOR_GOOD;
     else if (isPerm && k == 1) oc = COLOR_BAD;
     uint16_t fill = chosen ? oc : COLOR_CARD;
-    tft.fillRoundRect(CARD_X, by, CARD_W, ASK_OPT_H, 8, fill);
-    tft.drawRoundRect(CARD_X, by, CARD_W, ASK_OPT_H, 8,
-                      answered && !chosen ? COLOR_LABEL : oc);
+    uiFillRound(CARD_X, by, CARD_W, ASK_OPT_H, 8, fill, COLOR_BG);
+    uiStrokeRound(CARD_X, by, CARD_W, ASK_OPT_H, 8, 1,
+                  answered && !chosen ? COLOR_LABEL : oc, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(chosen ? COLOR_BG : (answered ? COLOR_LABEL : oc), fill);
     tft.setTextDatum(MC_DATUM);
@@ -3499,7 +3509,7 @@ void drawHistory() {
   // Filter chip, tappable: CHAT (conversation only) <-> ALL (plus commands and results).
   const char* chip = histChatOnly ? "CHAT" : "ALL";
   int chipW = histChatOnly ? 40 : 32;
-  tft.fillRoundRect(10, 4, chipW, 17, 3, COLOR_ACCENT);
+  uiFillRound(10, 4, chipW, 17, 3, COLOR_ACCENT, COLOR_BG);
   setUIFont(1);
   tft.setTextColor(COLOR_BG, COLOR_ACCENT);
   tft.setTextDatum(MC_DATUM);
@@ -3565,8 +3575,8 @@ void drawHistory() {
   };
   for (int i = 0; i < 3; i++) {
     uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
-    tft.fillRoundRect(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD);
-    tft.drawRoundRect(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, c);
+    uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD, COLOR_BG);
+    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, 1, c, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(c, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
@@ -3611,8 +3621,8 @@ void drawHistFull() {
   };
   for (int i = 0; i < 3; i++) {
     uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
-    tft.fillRoundRect(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD);
-    tft.drawRoundRect(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, c);
+    uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD, COLOR_BG);
+    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, 1, c, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(c, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
@@ -3766,8 +3776,8 @@ void drawReader() {
   };
   for (int i = 0; i < 3; i++) {
     uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
-    tft.fillRoundRect(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD);
-    tft.drawRoundRect(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, c);
+    uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD, COLOR_BG);
+    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, 1, c, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(c, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
@@ -3989,9 +3999,8 @@ void drawSessionDetail(int idx) {
   tft.setTextDatum(TL_DATUM);
   tft.drawString("< Back", CARD_X, CONTENT_Y + 4);
 
-  tft.fillRoundRect(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, COLOR_CARD);
-  tft.drawRoundRect(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, color);
-  tft.drawRoundRect(CARD_X + 1, cardY + 1, CARD_W - 2, DETAIL_CARD_H - 2, RADIUS - 1, color);
+  uiFillRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, COLOR_CARD, COLOR_BG);
+  uiStrokeRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, 2, color, COLOR_BG);
 
   // Laid out with a running cursor rather than the hand-derived offsets this screen used
   // to carry (cardY + 78 / +120 / +158). Those had to be re-derived by hand every time a
@@ -4210,10 +4219,9 @@ char volValCache[8] = "";
 void drawConnDot(int cx, int cy, int r, bool connected, uint16_t bg) {
   tft.fillRect(cx - r - 1, cy - r - 1, r * 2 + 2, r * 2 + 2, bg);
   if (connected) {
-    tft.fillCircle(cx, cy, r, COLOR_GOOD);
+    tft.fillSmoothCircle(cx, cy, r, COLOR_GOOD, COLOR_CARD);
   } else {
-    tft.drawCircle(cx, cy, r, COLOR_UNKNOWN);
-    tft.drawCircle(cx, cy, r - 1, COLOR_UNKNOWN);
+    uiRing(cx, cy, r, 2, COLOR_UNKNOWN, COLOR_CARD);
   }
 }
 
@@ -4225,8 +4233,8 @@ void drawStepperCard(int y0, const char* label) {
   tft.drawString(label, CARD_X + PAD, y0 + STEP_LABEL_Y);
   int btnY = stepBtnY(y0);
   int rightBtnX = CARD_X + CARD_W - PAD - STEP_BTN_SIZE;
-  tft.fillRoundRect(CARD_X + PAD, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, R_SM, COLOR_BG);
-  tft.fillRoundRect(rightBtnX, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, R_SM, COLOR_BG);
+  uiFillRound(CARD_X + PAD, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, R_SM, COLOR_BG, COLOR_CARD);
+  uiFillRound(rightBtnX, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, R_SM, COLOR_BG, COLOR_CARD);
   // Borders + -/+ glyphs drawn by drawStepGlyph (they grey out at range ends).
 }
 
@@ -4235,7 +4243,7 @@ void drawStepGlyph(int cacheIdx, int x, int btnY, const char* glyph, bool enable
   if (stepGlyphCache[cacheIdx] == (int) enabled) return;
   stepGlyphCache[cacheIdx] = (int) enabled;
   uint16_t c = enabled ? COLOR_ACCENT : COLOR_LABEL;
-  tft.drawRoundRect(x, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, 6, c);
+  uiStrokeRound(x, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, 6, 1, c, COLOR_BG);
   setUIFont(2);
   tft.setTextColor(c, COLOR_BG);
   tft.setTextDatum(MC_DATUM);
@@ -4254,8 +4262,8 @@ void drawPager() {
   int by = CONTENT_Y + 4, bh = PAGER_H - 8;
   for (int side = 0; side < 2; side++) {
     int bx = side == 0 ? PAGER_BTN_X0 : tft.width() - PAGER_BTN_X0 - PAGER_BTN_W;
-    tft.fillRoundRect(bx, by, PAGER_BTN_W, bh, RADIUS, COLOR_CARD);
-    tft.drawRoundRect(bx, by, PAGER_BTN_W, bh, RADIUS, COLOR_ACCENT);
+    uiFillRound(bx, by, PAGER_BTN_W, bh, RADIUS, COLOR_CARD, COLOR_BG);
+    uiStrokeRound(bx, by, PAGER_BTN_W, bh, RADIUS, 1, COLOR_ACCENT, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
@@ -4267,8 +4275,8 @@ void drawPager() {
   tft.drawString(titles[settingsPage], tft.width() / 2, cy - 5);
   int spacing = 12, startX = tft.width() / 2 - (SETTINGS_PAGES - 1) * spacing / 2;
   for (int i = 0; i < SETTINGS_PAGES; i++) {
-    if (i == settingsPage) tft.fillCircle(startX + i * spacing, cy + 8, 3, COLOR_ACCENT);
-    else tft.drawCircle(startX + i * spacing, cy + 8, 3, COLOR_LABEL);
+    if (i == settingsPage) tft.fillSmoothCircle(startX + i * spacing, cy + 8, 3, COLOR_ACCENT, COLOR_BG);
+    else tft.drawSmoothCircle(startX + i * spacing, cy + 8, 3, COLOR_LABEL, COLOR_BG);
   }
   tft.setTextDatum(TL_DATUM);
 }
