@@ -621,7 +621,7 @@ two things `host/index.mjs` cannot get any other way:
   122 tall and, with the gaps, filled the content area exactly — there was no room
   anywhere. They are now 104: only the padding around the hero number tightened (its
   offsets moved 20/78/92/107 → 20/62/74/89), so the 39px Cozette figures you actually
-  read did not shrink. Codex gets a **46px** row rather than a full card, because it
+  read did not shrink. Codex gets a **44px** row rather than a full card, because it
   publishes one percentage and a reset time — no token count and no second window, so a
   card's other two lines would be empty chrome.
   It shows `--`, never `0%`, when no `rate_limits` has ever been seen; 0% is a
@@ -638,6 +638,15 @@ two things `host/index.mjs` cannot get any other way:
   content ends at `y0+102` (label +6, hero +20..60, bar +62..72, stats +74, reset line
   +89..102), so 98 clips the reset line by 4px — and the hero figures are the one thing
   the 122→104 pass explicitly protected.
+  **The column must NOT end flush on `contentBottom()`, and it used to.** 6+104+4+104+4+46
+  spent all 268px of the content area, so the Codex row's bottom edge landed exactly on
+  302 and sat against the footer with no gap — the two read as one joined block. The four
+  gaps are now a uniform **4/4/4/4**: two px came off the top gap (`CARD1_Y` 40→38,
+  `CARD2_Y` 148→146, `CODEX_Y` 256→254) and two off the row itself (`CODEX_H` 46→44), so
+  the column ends at 298 with 4px of air below it. The row keeps its slack — content
+  reaches `+39` (the pace bar clears from `y-4` for 18 rows) inside 44, leaving the 2px
+  border at `+42..+43` clear of it. Any future addition here has to come out of the same
+  268px; there is no spare.
   Two details are load-bearing: the text sits at `+8` and the bar at `+26` because
   `drawPaceBar` clears from `y-4` to cover its tick overhang, which at `+11`/`+26` would
   have shaved the text's bottom row; and the row's stale dimming keys off **`cxAgeSec`,

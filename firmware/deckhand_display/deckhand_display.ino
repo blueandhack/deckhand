@@ -597,18 +597,26 @@ struct Usage {
 // around the hero number tightened, the number itself is the same 39px Cozette, so
 // the figures you actually read did not shrink.
 const int CARD_X = 12, CARD_W = 216, CARD_H = 104;
-// Gaps tightened 10/8/6 -> 6/4/4 to free the 10px the Codex row needed for a real pace
-// bar. The 10px came from the GAPS, deliberately not from the cards: a card's content
-// ends at y0+102 (label +6, hero +20..60, bar +62..72, stats +74, reset line +89..102)
-// inside CARD_H 104, so shrinking them to 98 would have clipped the reset line by 4px.
-// The hero figures are also the one thing the 122->104 pass explicitly protected.
-const int CARD1_Y = 40, CARD2_Y = 148;
+// Gaps were tightened 10/8/6 -> 6/4/4 to free the 10px the Codex row needed for a real
+// pace bar, and are now a uniform 4 - see the bottom-gap note on CODEX_H below. The
+// space came from the GAPS, deliberately not from the cards: a card's content ends at
+// y0+102 (label +6, hero +20..60, bar +62..72, stats +74, reset line +89..102) inside
+// CARD_H 104, so shrinking them to 98 would have clipped the reset line by 4px. The
+// hero figures are also the one thing the 122->104 pass explicitly protected.
+const int CARD1_Y = 38, CARD2_Y = 146;
 // Codex gets a single compact row rather than a full card, because it publishes a
-// single percentage - there is no token count, no second window, and no pace to plot.
-// 46 (was 36), ending exactly on contentBottom() at 302: one text line at +10 plus a
-// full-height BAR_H pace bar at +26, so Codex reads the same way the Claude cards do
-// rather than being the one figure with no bar to judge it against.
-const int CODEX_Y = 256, CODEX_H = 46;
+// single percentage - there is no token count and no second window. One text line at
+// +8 plus a full-height BAR_H pace bar at +26, so Codex reads the same way the Claude
+// cards do rather than being the one figure with no bar to judge it against.
+//
+// THE COLUMN MUST NOT END FLUSH ON contentBottom(). It used to: 6+104+4+104+4+46 spent
+// all 268px of the content area, so this row's bottom edge landed exactly on 302 and
+// sat against the footer with no gap, reading as one joined block. The four gaps are
+// now 4/4/4/4 - two px came off the top gap and two off this row - so the column ends
+// at 298 with 4px of air below it, matching the gaps between the cards. The row keeps
+// its slack: content reaches +39 (the pace bar's clear starts 4px above the bar at +26
+// and runs 18 rows) inside CODEX_H 44, leaving the 2px border at +42..+43 clear of it.
+const int CODEX_Y = 254, CODEX_H = 44;
 const int PAD = 14, BAR_H = 10, RADIUS = 10;
 
 // ============================================================================
