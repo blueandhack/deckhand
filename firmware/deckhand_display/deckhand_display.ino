@@ -215,20 +215,60 @@ const int CONTENT_Y = TAB_BAR_H;
 const int FOOTER_H = 18;
 int contentBottom() { return tft.height() - FOOTER_H; }
 
-const uint16_t COLOR_BG = TFT_BLACK;
-const uint16_t COLOR_CARD = 0x18C4;     // dark slate card fill, lifts off pure black
-const uint16_t COLOR_LABEL = 0x8410;    // mid grey
-const uint16_t COLOR_VALUE = TFT_WHITE;
-const uint16_t COLOR_ACCENT = 0xFD20;   // Claude orange
+// ---------- Colour tokens ----------
+// NOT const: these are the live palette, rewritten by applyTheme() from the THEMES table
+// below. They stay plain globals with their original names deliberately - the nine names
+// are referenced 385 times across this sketch, and keeping them means a whole theme system
+// costs zero changes at those call sites.
+uint16_t COLOR_BG = TFT_BLACK;
+uint16_t COLOR_CARD = 0x18C4;     // dark slate card fill, lifts off pure black
+uint16_t COLOR_LABEL = 0x8410;    // mid grey
+uint16_t COLOR_VALUE = TFT_WHITE;
+uint16_t COLOR_ACCENT = 0xFD20;   // Claude orange
 // Colorblind-safe trio (Okabe-Ito palette: blue / orange / reddish-purple).
 // A green/yellow/red traffic-light scheme is the single worst choice here -
 // it collapses under red-green color vision deficiency, the most common
 // type. Blue vs. orange vs. purple stays distinguishable under protanopia,
 // deuteranopia, and tritanopia alike.
-const uint16_t COLOR_GOOD = 0x0396;     // blue, <70% / waiting for input
-const uint16_t COLOR_WARN = 0xE4E0;     // orange, 70-89% / working
-const uint16_t COLOR_BAD = 0xCBD4;      // reddish-purple, >=90%
-const uint16_t COLOR_UNKNOWN = 0x7BEF;  // grey, no data yet / stale
+uint16_t COLOR_GOOD = 0x0396;     // blue, <70% / waiting for input
+uint16_t COLOR_WARN = 0xE4E0;     // orange, 70-89% / working
+uint16_t COLOR_BAD = 0xCBD4;      // reddish-purple, >=90%
+uint16_t COLOR_UNKNOWN = 0x7BEF;  // grey, no data yet / stale
+
+// The palettes, as data. Values are validated by palette-check.mjs, which must be kept in
+// step with this table - it checks text contrast AND that the status trio stays separable
+// both for a deuteranope and in greyscale. LIGHT inverts the figure/ground relationship
+// (grey page, white cards) and darkens the hues, because the DARK values were chosen
+// against black and lose contrast on white.
+struct Theme {
+  const char* name;
+  uint16_t bg, card, label, value, accent, good, warn, bad, unknown;
+};
+const Theme THEMES[] = {
+  { "DARK",  0x0000, 0x18C4, 0x8410, 0xFFFF, 0xFD20, 0x0396, 0xE4E0, 0xCBD4, 0x7BEF },
+  { "LIGHT", 0xEF5C, 0xFFFF, 0x62CA, 0x18C3, 0xB240, 0x12F4, 0xB3A0, 0x6887, 0x8C30 },
+};
+const int THEME_COUNT = sizeof(THEMES) / sizeof(THEMES[0]);
+uint8_t themeIndex = 0;
+
+// Copies one palette into the live tokens. Does NOT repaint: setup() needs the values in
+// place before its first draw, whereas a runtime switch must repaint afterwards. A caller
+// that forgets forceFullRepaint() leaves the screen showing the previous palette, because
+// every change-only cache here keys on content rather than colour.
+void applyTheme(uint8_t idx) {
+  if (idx >= THEME_COUNT) idx = 0;
+  themeIndex = idx;
+  const Theme& t = THEMES[idx];
+  COLOR_BG = t.bg;
+  COLOR_CARD = t.card;
+  COLOR_LABEL = t.label;
+  COLOR_VALUE = t.value;
+  COLOR_ACCENT = t.accent;
+  COLOR_GOOD = t.good;
+  COLOR_WARN = t.warn;
+  COLOR_BAD = t.bad;
+  COLOR_UNKNOWN = t.unknown;
+}
 
 // ---------- Calibration ----------
 // Two-point calibration: touch a crosshair at each of these screen
@@ -376,8 +416,11 @@ void waitForStableTouch(int16_t& outX, int16_t& outY) {
 }
 
 void drawCrosshair(int x, int y) {
-  tft.drawFastHLine(x - 10, y, 21, TFT_WHITE);
-  tft.drawFastVLine(x, y - 10, 21, TFT_WHITE);
+  // COLOR_VALUE, not TFT_WHITE: calibration clears to COLOR_BG first, so a literal white
+  // crosshair is invisible under the LIGHT theme and the user cannot finish a calibration
+  // they cannot see. The token is near-black on LIGHT and white on DARK - correct in both.
+  tft.drawFastHLine(x - 10, y, 21, COLOR_VALUE);
+  tft.drawFastVLine(x, y - 10, 21, COLOR_VALUE);
 }
 
 // Least-squares affine fit over the CAL_N samples. Both axes share the same
