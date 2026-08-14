@@ -141,11 +141,16 @@ the two disagree and the bug returns in a narrower form.
 
 ### 3. `uiLineH`
 
-`uiLineH(f)` (line 134) becomes a registry lookup. Call sites passing a literal `13` as the
-line-height argument to `drawWrappedText` / `countWrappedLines` (lines 1132, 1135, 1146, 3218,
-3234, 3310, 3334, 3342, 3465, 3510, 3528, 3662) switch to `uiLineH(font)`. Those sites all use
-`FONT_CODE` or body, so their rendered output does not change — the literal simply stops being
-a second source of truth.
+`uiLineH(f)` (line 134) becomes a registry lookup. It currently has **zero call sites** — it is
+declared and never used — so this is free; `drawIfChanged` becomes its first consumer.
+
+**The `lineH` argument of `drawWrappedText` is deliberately left alone.** It looks like a
+duplicate of the cell height but is not: it is a *leading* parameter, and the call sites pass
+distinct, intentional values — `11` for the detail screen's prompt and path (**tighter** than
+the 13px cell), `13` for code blocks, `17` for the ask title (**looser**), and the computed
+`dLineH` / `HIST_LINE_H` elsewhere. Replacing them with `uiLineH(font)` would retighten the ask
+title and loosen the detail screen, changing two layouts this sub-project has no business
+touching. Leading stays a caller's choice, independent of cell height.
 
 ### 4. `setUIFont`
 
