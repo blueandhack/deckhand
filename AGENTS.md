@@ -1285,6 +1285,39 @@ Other things that aren't obvious from a single file:
   with `TL_DATUM` it adds the ascent so the text top lands at the given `y`. The header is
   regenerated from the upstream BDF by `firmware/deckhand_display/bdf2gfx.py` (see its docstring);
   the 668KB BDF itself is deliberately **not** committed — the ~1KB header is self-contained.
+- **The type scale is three rungs, and two of them are Cozette's only options.** `UI_FONTS[]`
+  maps a font id to `(face, size, cellH)`: `T_META`/`T_BODY` → Cozette 6x13, `T_HEAD` → Terminus
+  10x18 bold, `T_HERO` → Cozette 12x26. The ids are the legacy TFT_eSPI numbers the ~72 existing
+  call sites already pass, so the registry landed **inert** — adding a face cost zero changes at
+  those sites. Two cheaper options were tested and ruled out, not argued about: Cozette's
+  `cozette_hidpi.bdf` is a **byte-identical mechanical 2x upscale** (decoded glyph-for-glyph), and
+  a 1px synthetic double-strike has nowhere to go because **78 of 95 glyphs already reach or pass
+  the 6px advance** (`4` reaches 7). So Cozette offers exactly one size and its double, and a
+  genuine middle rung has to come from another family.
+  **`T_TITLE` still resolves to body on purpose.** It is used inside `uiButton`, the single shared
+  button style, so pointing it at `T_HEAD` would widen EVERY button label on the device —
+  Allow/Deny and the confirm dialogs included — by 67%, past widths chosen for a 6px face
+  (`CALIBRATE TOUCH` is 90px at 6x13 and 150px at 10x18). It migrates with the settings/overlay
+  restyle, where those widths get re-derived.
+  **`drawIfChanged` derives its erase height from the registry, never a literal.** It used to
+  compute `th = 13 * tft.textsize`, baking Cozette's cell height into every field's erase
+  rectangle; any taller face clears part of its own box and ghosts on every update. Same class of
+  silent bug as a change-only cache shorter than the string it holds.
+  Session names use all three rungs: `drawSessionRow` walks 12x26 → 10x18 → 6x13 and takes the
+  first whose measured width fits, so a long name shrinks a step instead of being cut. The shrunk
+  name is centred in the 26px band the big font would have filled — the old hardcoded `+6` was
+  exactly `(26 - 13) / 2`, so the offset is now derived and reproduces it. `fitText` returns an
+  empty string when nothing fits at all, which is reachable at 10px where it was not at 6px, so
+  the ladder falls through to the smallest rung rather than draw a blank name.
+  Cost: **+2850 bytes of flash** per face, zero RAM (`PROGMEM`). Regenerate with
+  `python3 bdf2gfx.py <bdf> <Name> <yAdvance> > <Name>.h`; the BDFs are **not** committed (Cozette
+  668KB, Terminus 1.1MB) but the generated headers and both licence texts
+  (`licenses/Terminus-OFL.txt`, `licenses/Cozette-MIT.txt`) are.
+  `bdf2gfx.py --verify <bdf> <header>` decodes a header and compares it glyph-for-glyph with its
+  source, and `--selftest` corrupts one byte of `A` and fails if that goes unnoticed — the same
+  teeth-proving trick as `palette-check.mjs --selftest`. That check earned its place: the
+  generator had only ever been run on Cozette, whose glyphs are tightly cropped, and Terminus
+  declares a uniform full-cell `BBX` that exercises packing paths which had never run.
 - **Screen flip (180°) for charging.** SETTINGS › DISPLAY & SOUND has two half-width toggles
   sharing the bottom row — SOUND and NORMAL/FLIPPED — because a full-width row for each doesn't
   fit (only 32px remain under it). Flipping swaps `tft.setRotation()` between `SCREEN_ROTATION`
