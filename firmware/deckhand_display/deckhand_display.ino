@@ -2630,6 +2630,11 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
 
 void drawFooterChrome() {
   tft.drawFastHLine(0, contentBottom(), tft.width(), COLOR_LABEL);
+  // Clear the whole band, not just the divider. Everything else down here is painted by
+  // drawIfChanged, which fills only each field's own glyph box - so without this the gaps
+  // between the clock, battery and freshness zones keep whatever colour they had, which a
+  // theme switch makes glaringly visible and nothing in normal operation ever repairs.
+  tft.fillRect(0, contentBottom() + 1, tft.width(), FOOTER_H - 1, COLOR_BG);
   // Every full-screen rebuild goes through here, so stale footer caches
   // (which would otherwise skip redrawing an erased field) reset with it.
   clockCache[0] = '\0';

@@ -112,12 +112,17 @@ deep-sleep/wake cycle because wake re-runs `setup()`.
 
 ## The crab
 
-`ClawdCrab.h` has its PNG alpha **composited against `COLOR_BG` at build time**, so its
+`ClawdCrab.h` has its PNG alpha **composited against black at build time**, so its
 anti-aliased edges carry black fringes that cannot follow a theme. It is not regenerated
-and not composited at runtime: the easter egg takes over the whole screen anyway, so it
-clears to the DARK background and draws itself there regardless of the active theme. The
-Claude spark and Codex mark need no such treatment — they are 2-bit alpha masks tinted with
-the status colour at draw time, so they follow the theme for free.
+and not composited at runtime — but its background is not hard-coded to DARK either:
+`startOctopus()` and `renderOctoFrame()` clear with the **live** `COLOR_BG`, and `drawCrab()`
+skips palette index 0 (the build-time black, on the assumption the target was just cleared
+to match) rather than substituting the live background colour. Under DARK those two blacks
+coincide and the edges look seamless; under LIGHT they don't, so the crab appears on the
+light-grey background with a dark anti-aliased fringe around it (the sprite is drawn at
+3x scale, so that fringe reads as a few pixels of dark rim). The Claude spark and Codex mark
+need no such treatment — they are 2-bit alpha masks tinted with the status colour at draw
+time, so they follow the theme for free.
 
 ## Risks
 

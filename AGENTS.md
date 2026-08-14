@@ -110,6 +110,14 @@ before anything reaches it. Always go through the trigger-file mechanism above s
 rides the connection the running host script already has open. (BLE doesn't have this problem —
 only USB's CH340 auto-reset behaves this way.)
 
+Validate the DARK/LIGHT palettes (contrast plus colour-blind/greyscale separability) and prove
+the checker itself has teeth:
+
+```
+node firmware/deckhand_display/palette-check.mjs
+node firmware/deckhand_display/palette-check.mjs --selftest
+```
+
 There is no test suite or linter in this repo; verification is "compile, flash, watch the
 Serial Monitor / host log, and check the physical screen."
 
@@ -1400,8 +1408,12 @@ Other things that aren't obvious from a single file:
   `drawCrosshair()` draws in `COLOR_VALUE` rather than literal `TFT_WHITE`, because under LIGHT
   (near-white background, near-black value) a literal white crosshair would be invisible and
   touch calibration would become impossible to complete. The crab easter egg deliberately does
-  NOT theme: `ClawdCrab.h`'s alpha is composited against `COLOR_BG` **at build time**, so it always
-  renders in DARK's colours regardless of the live theme.
+  NOT theme its art: `ClawdCrab.h`'s alpha is composited against black **at build time**, so its
+  anti-aliased fringe can't follow a theme. Its background isn't hard-coded to DARK, though —
+  `startOctopus()`/`renderOctoFrame()` clear with the **live** `COLOR_BG`, and `drawCrab()` skips
+  palette index 0 (the build-time black) rather than substituting the live background — so under
+  LIGHT the crab appears on the light-grey background with a dark anti-aliased fringe around it,
+  not on a dark background.
 - If Bluetooth permission ever gets stuck (the process crashes again after previously working,
   usually after iterating on `DeckhandBLE.app`'s signature), reset the cached TCC decision with
   `tccutil reset BluetoothAlways com.deckhand.ble-host` before assuming the code is broken.

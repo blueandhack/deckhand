@@ -52,7 +52,8 @@ const LUM_MIN = 6;       // percent; below this they merge in greyscale
 
 const PAIRS = [["value", "bg"], ["value", "card"], ["label", "bg"], ["label", "card"],
                ["accent", "bg"], ["accent", "card"], ["good", "card"], ["warn", "card"],
-               ["bad", "card"]];
+               ["bad", "card"],
+               ["unknown", "bg"], ["unknown", "card"], ["good", "bg"], ["warn", "bg"], ["bad", "bg"]];
 
 function check(theme, quiet = false) {
   const fails = [];
