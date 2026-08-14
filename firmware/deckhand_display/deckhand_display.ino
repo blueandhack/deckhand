@@ -2679,6 +2679,16 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
   // at x~170). The paddings are the lane widths - a longer string in either
   // field would blank or overwrite its neighbor, which happened once when
   // the right lane grew for the staleness text without shrinking this one.
+  //
+  // IT SITS AT +88, AND +89 ATE THE CARD BORDER. drawIfChanged clears its own
+  // box before drawing - fillRect(fx-1, fy-1, tw+2, th+2) - so a 13px line at
+  // +89 clears rows +88..+102, and the card's 2px border owns +102..+103. The
+  // TEXT never overlapped anything; the CLEAR did, rubbing out the border's
+  // inner row along exactly the width of these two strings, which reads as a
+  // gap in the card outline under them. At +88 the clear ends at +101, one row
+  // clear of the border. The row above (stats, +74..+86) is untouched: this
+  // clear starts at +87, which is past the last row of that text.
+  // Anything drawn on this card must therefore END BY +101, not +102.
   long nowSec = hostNowSec();
   if (quotaStale) {
     long m = usage.quotaAgeSec / 60;
@@ -2691,7 +2701,7 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
     buf[0] = '\0';
   }
   padLeftTo(buf, sizeof(buf), 10);
-  drawIfChanged(resetAtCache, 14, buf, CARD_X + CARD_W - PAD, y0 + 89, 1, 1,
+  drawIfChanged(resetAtCache, 14, buf, CARD_X + CARD_W - PAD, y0 + 88, 1, 1,
                 quotaStale ? COLOR_BAD : COLOR_LABEL, COLOR_CARD, TR_DATUM);
 
   // Fable has its own (scarcer) weekly cap: show its real % when the host
@@ -2709,7 +2719,7 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
   }
   if (buf[0]) {
     padTo(buf, sizeof(buf), 18);
-    drawIfChanged(fableCache, 24, buf, CARD_X + PAD, y0 + 89, 1, 1, COLOR_ACCENT, COLOR_CARD);
+    drawIfChanged(fableCache, 24, buf, CARD_X + PAD, y0 + 88, 1, 1, COLOR_ACCENT, COLOR_CARD);
   }
 }
 

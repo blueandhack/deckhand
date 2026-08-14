@@ -647,6 +647,17 @@ two things `host/index.mjs` cannot get any other way:
   reaches `+39` (the pace bar clears from `y-4` for 18 rows) inside 44, leaving the 2px
   border at `+42..+43` clear of it. Any future addition here has to come out of the same
   268px; there is no spare.
+  **A field's CLEAR box can rub out the card border, and it did.** `drawIfChanged`
+  clears its own box first — `fillRect(fx-1, fy-1, tw+2, th+2)` — so the shared bottom
+  row (Fable on the left, reset-time/staleness on the right) drawn at `y0+89` cleared
+  rows `+88..+102` in a 104-tall card whose 2px border owns `+102..+103`. The TEXT
+  overlapped nothing; the CLEAR rubbed out the border's inner row along exactly the
+  width of those two strings, which reads as a gap in the outline beneath them. The row
+  moved to `+88` (clear ends `+101`). So: **anything drawn on a usage card must end by
+  `+101`**, and the same arithmetic applies to any surface with a 2px border — check the
+  clear box, not the glyphs. Audited at the time: the Codex row is fine (content reaches
+  `+39` inside 44), and session rows and the detail card repaint wholesale rather than
+  per-field, so no clear box can reach their borders.
   Two details are load-bearing: the text sits at `+8` and the bar at `+26` because
   `drawPaceBar` clears from `y-4` to cover its tick overhang, which at `+11`/`+26` would
   have shaved the text's bottom row; and the row's stale dimming keys off **`cxAgeSec`,
