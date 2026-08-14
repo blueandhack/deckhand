@@ -148,11 +148,34 @@ because it rides in every tick). The flag uses the RECORD vocabulary. Concretely
 1. **The hook `timeout` must exceed the 90s remote wait.** `settings.json` uses
    `timeout: 100` for exactly this reason; `hooks.json` has its own `timeout` field and
    needs the same. Getting it wrong kills the hook mid-wait.
-2. **UNKNOWN, and it must be tested before shipping: what does Codex do with a
-   `PermissionRequest` hook that times out?** Claude Code falls through to its own dialog.
-   If Codex instead treats expiry as a denial, then every prompt nobody answers on the
-   device would be denied — a correctness problem, and it would force the wait to be much
-   shorter or removed for Codex.
+2. **STILL UNVERIFIED: what does Codex do with a `PermissionRequest` hook that times
+   out?** Claude Code falls through to its own dialog when its hook expires. Whether
+   Codex does the same, or instead treats expiry as a denial, is not known.
+   It cannot be tested non-interactively: `codex exec` forces
+   `permission_mode: bypassPermissions` regardless of `-c approval_policy`, so
+   `PermissionRequest` never fires outside the interactive TUI, and there is no way to
+   script "start Codex, trigger a real approval, let the hook time out" without a human
+   at the keyboard accepting the trust prompt and issuing the command.
+   The risk is bounded in normal operation, not open-ended: the hook self-exits at 90s
+   (`REMOTE_WAIT_MS`) under a 100s `timeout` (see Risk 1), so expiry is reachable only
+   through a pathological overrun — a wedged device, a host that never comes back, or a
+   hook process that hangs past its own wait. It is not something a slow-but-working
+   device triggers in ordinary use.
+   The exact experiment a human can run to close this, when someone is available to sit
+   with the TUI:
+   1. Set the `PermissionRequest` timeout to `5` in `~/.codex/hooks.json` (temporarily —
+      restore the real value afterwards).
+   2. Stop the Deckhand host, so nothing answers and the hook waits its full duration.
+   3. Start `codex` interactively and accept the "Trust all and continue" hooks prompt.
+   4. Ask it to run `curl -sI https://example.com | head -1`.
+   5. Observe what happens once the hook is killed at 5s:
+      - **Codex shows its own approval prompt** — expiry falls through, exactly like
+        Claude Code. Safe; no design change needed.
+      - **Codex denies the command** — expiry is a denial. The 90s wait would need to be
+        shortened or dropped for Codex specifically, since an unanswered prompt should
+        never resolve to "denied" as its default.
+   This has not been run. Nothing in this document should be read as claiming a result
+   either way.
 3. **Editing `hooks.json` re-triggers the trust prompt** ("Modified since last trusted"),
    so every upgrade needs re-accepting. The installer must say so.
 4. **A node process per tool call**, now for both tools. Same cost the Claude side already

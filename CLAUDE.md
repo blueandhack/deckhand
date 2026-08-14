@@ -383,15 +383,57 @@ two things `host/index.mjs` cannot get any other way:
     Continue without trusting, and a hook sits at "New hook - review required" (or
     "Modified since last trusted") until accepted. So installing this cannot be silent -
     the user has to agree once, per change to the hook.
-  What that unlocks: **Codex prompts could be answered from the device**, because the
-  device is already agent-agnostic - it renders whatever `ask` object is in a session
-  record and signs answers with the pairing key regardless of which tool asked. The work
-  is a Codex-flavoured sibling of `deckhand-session-hook.mjs` registered in `hooks.json`,
-  not new firmware. Two caveats before building it: hooks sit behind a **trust gate**
-  (`hooks.state`, `--dangerously-bypass-hook-trust`), and the payload field names above
-  are inferred from the Claude Code parallel rather than observed from a live run.
-  The rest of this section describes the PULL path, which is what ships today. Verified
-  against real rollouts on this machine:
+  What that unlocked, and now ships: **Codex prompts can be answered from the device**,
+  because the device is already agent-agnostic - it renders whatever `ask` object is in a
+  session record and signs answers with the pairing key regardless of which tool asked.
+  The implementation is a Codex-flavoured sibling of `deckhand-session-hook.mjs` - the
+  *same file*, invoked with **`--agent=codex`**
+  (`claude-hooks/install-codex-hooks.mjs` registers that command in `~/.codex/hooks.json`
+  for `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`, and
+  `SessionEnd` - deliberately **not** `PreToolUse`, which on Codex fires for every tool
+  call with nothing to matcher-filter it against, unlike Claude Code's
+  `AskUserQuestion|ExitPlanMode` matcher). `SessionEnd` deletes the record outright, which
+  is what fixes the PULL path's 20-minute ghost-session problem for any thread the hook
+  actually covers.
+  **The `hooks.json` key for a hook's own timeout is `timeout`, not `timeoutSec` - this
+  was established by experiment, not inference, and it is exactly the kind of thing a
+  future maintainer "fixes" into broken code.** Codex's `HookMetadata` struct (the
+  metadata/API type) lists `timeoutSec`, and it is tempting to assume `hooks.json` takes
+  the same field name. It does not: a hook made to sleep 10s under `{"timeout": 3}` was
+  **killed** at 7s elapsed, while the identical hook under `{"timeoutSec": 3}` **ran to
+  completion** at 14s elapsed - `timeoutSec` in `hooks.json` is silently ignored, so a
+  "harmless" rename would quietly remove the 100s ceiling and let a hung hook block the
+  triggering tool call indefinitely. `install-codex-hooks.mjs` and
+  `codex-hooks.snippet.json` both correctly use `timeout`; keep it that way.
+  Hooks are **trust-gated** (`hooks.state`) and do nothing until the user accepts Codex's
+  own "Hooks need review" / "Trust all and continue" prompt, so a fresh install or an
+  untrusted Codex is not silently broken: the PULL path described below still runs
+  unconditionally and covers exactly that gap - an unaccepted trust prompt costs "no NEEDS
+  INPUT and a 20-minute-stale end", never invisibility.
+  Because push and pull both run, the same thread can arrive from both, and the host
+  merges them by id (`host/sessions-merge.mjs`), hook record winning on a collision (it is
+  the only one push-fresh and the only one carrying `ask`). **The merge key is truncated
+  to 12 characters on both sides before comparing** - `readCodexSessions()` (the PULL
+  reader) has always kept only a 12-char id, the same length the device itself keys rows
+  on, while a hook record carries Codex's full UUID; comparing the raw strings would never
+  match and the merge would silently do nothing, which looks exactly like the bug it
+  exists to prevent.
+  **The hook-expiry question is UNVERIFIED, not resolved - see Risk 2 in
+  `docs/superpowers/specs/2026-08-13-codex-answering-design.md`.** Whether a
+  `PermissionRequest` hook that times out falls through to Codex's own approval prompt
+  (safe, like Claude Code) or resolves as a denial (unsafe, since an unanswered prompt
+  would then default to blocking every command) cannot be tested non-interactively:
+  `codex exec` forces `permission_mode: bypassPermissions` regardless of
+  `-c approval_policy`, so `PermissionRequest` never fires outside the interactive TUI, and
+  there is no scriptable way to drive that TUI through a real approval and a real timeout.
+  In ordinary operation the risk is bounded regardless of the answer: the hook self-exits
+  at 90s (`REMOTE_WAIT_MS`) comfortably inside the 100s `timeout` the registrar sets, so
+  expiry is reachable only through a pathological overrun (a wedged device, a host that
+  never comes back), not routine slowness. The spec records the exact manual experiment
+  (shorten the timeout, stop the host, drive a real prompt from the interactive TUI, watch
+  what happens at expiry) that would close this out; it has not been run.
+  The rest of this section describes the PULL path, which now serves as the fallback for
+  untrusted installs. Verified against real rollouts on this machine:
   Everything comes from `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl`:
   `session_meta` (cwd, `thread_source`), `turn_context` (live cwd, model), `event_msg`
   `task_started`/`task_complete`, and `token_count.rate_limits`.
@@ -416,13 +458,16 @@ two things `host/index.mjs` cannot get any other way:
   - **`thread_source != "user"` is skipped.** Codex spawns subagent threads for
     auto-review and guardian; they are not something a person is waiting on, and they
     would crowd the 6-row list.
-  - **A Codex row can only ever be `working` or `waiting` — with the PULL path, which is
-    what ships.** See the hooks note above: Codex 0.147.0 could push `asking` too, and
-    that is the fix for this gap when someone builds it. No approval event appears
-    in any rollout on this machine, so there is nothing to map to `asking`. This is a
-    real gap, not an oversight: the device exists to show who needs input, and for
-    Codex it can only show who is busy. Codex threads also can't be answered from the
-    device, since there's no channel to answer through.
+  - **A Codex row can now show `asking` and be answered — that was the whole point of
+    building the push path above.** The PULL reader described in this bullet still can
+    only ever produce `working` or `waiting` on its own: no approval event appears in any
+    rollout on this machine, so there is nothing here to map to `asking`. What changed is
+    that this is no longer the only source - the hook-pushed record supplies `asking` and
+    wins the merge whenever Codex's hooks are trusted, so a live thread with a pending
+    approval shows NEEDS INPUT and can be answered from the device exactly like a Claude
+    Code session. An install where the trust prompt hasn't been accepted yet falls back to
+    this PULL path alone, degrading to the old working/waiting-only behaviour rather than
+    losing the thread entirely.
   - **Usage comes from `token_count.rate_limits`, and it is ONE number.** `primary` is
     the only populated window (`window_minutes: 10080` = 7 days on a Plus plan);
     `secondary` is null but is passed through if a plan ever fills it. There is no

@@ -10,8 +10,9 @@ module, with optional battery and speaker. It shows live plan usage and
 per-project session status, beeps when a session needs you, and shows permission
 prompts, questions, and plan approvals so you can read *and* answer them from
 across the room — without taking the dialog away from your Mac. **Codex threads
-appear in the same list**, read-only — Codex has no hook mechanism, so they can
-be shown but not answered (see [Codex support](#codex-support)). Three tabs:
+appear in the same list** and, once Codex's own hooks trust prompt is accepted,
+can be answered the same way; installs where that hasn't happened yet fall back
+to a read-only view (see [Codex support](#codex-support)). Three tabs:
 
 - **USAGE** — real plan-quota percentage for the current 5-hour session
   window and the current 7-day (weekly, all models) window. Each card has a
@@ -128,16 +129,29 @@ model, task start/finish events, and quota.
 
 Two consequences are worth knowing before you rely on it:
 
-- **A Codex row can only ever be WORKING or READY today.** No approval event
-  appears in a rollout, so there is nothing to map to NEEDS INPUT, and Codex
-  threads can't be answered from the device. That's a real gap, not an
-  oversight: the device exists to show who needs you, and for Codex it can
-  currently only show who is busy.
-  **This is likely fixable now.** Codex CLI 0.147.0 ships a hooks system that
-  closely mirrors Claude Code's — including a `permission_request` event and a
-  matching decision contract — so Codex could push its state the way Claude
-  Code does instead of being read from files, and its prompts could be answered
-  from the device. It isn't built yet.
+- **Codex threads now push their own state, and can be answered from the
+  device.** `./install.sh` registers Deckhand's hook with Codex CLI
+  (0.147.0+) in `~/.codex/hooks.json` — the same script that serves Claude
+  Code, invoked with `--agent=codex` so it knows which tool called it. Once
+  registered, start Codex and accept **"Trust all and continue"** on its
+  hooks review prompt; hooks do nothing until you do, and editing them
+  (including a Deckhand upgrade) asks again. After that, a Codex thread
+  waiting on a permission prompt shows NEEDS INPUT exactly like a Claude Code
+  session, and ended threads disappear immediately instead of lingering for
+  20 minutes.
+  The file-reading approach described above **remains as a fallback**, for
+  Codex installs where the hooks trust prompt hasn't been accepted yet (or
+  Codex versions that predate hooks): it still shows WORKING/READY from the
+  rollout files, just without NEEDS INPUT or answering. The host merges a
+  pushed and a pulled record for the same thread into one row rather than
+  showing it twice.
+  One thing about this is still unverified: what happens if a permission
+  hook's wait (90s) is somehow exceeded rather than answered in time — whether
+  Codex falls through to its own prompt (safe) or treats it as a denial. This
+  can't be tested outside Codex's interactive TUI (`codex exec` always
+  bypasses permissions), so it hasn't been. In practice the hook exits well
+  inside its 100s timeout budget, so this only matters for a pathological
+  overrun, not ordinary use.
 - **Codex quota is one number**, read from whatever `rate_limits` record was
   seen most recently. There's no endpoint to ask (unlike the Claude side's
   OAuth poller), so if Codex stops running the number stops being updated — the
