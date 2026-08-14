@@ -4074,8 +4074,12 @@ const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + SP_1;
 const int P1_VOL_Y = P1_SLEEP_Y + STEPPER_CARD_H + SP_1;
 const int P1_SOUND_Y = P1_VOL_Y + STEPPER_CARD_H + SP_1;
 const int P1_SOUND_H = H_ROW;   // toggles; H_ROW keeps the page inside its budget
-const int P1_HALF_W  = (CARD_W - 8) / 2;      // two toggles share the bottom row
-const int P1_FLIP_X  = CARD_X + P1_HALF_W + 8;
+// Three toggles share the bottom row: SOUND | FLIPPED | theme. (216-16)/3 = 66px each
+// against a longest label of 42px (FLIPPED at Cozette's 6px advance), so no new page and
+// no geometry growth were needed to add the theme switch.
+const int P1_THIRD_W = (CARD_W - 16) / 3;
+const int P1_FLIP_X  = CARD_X + P1_THIRD_W + 8;
+const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
 
 // Page 2 - three large action buttons (calibrate, reset pairing, power off)
 // Four buttons now, so the height came down from 46 and the gap from 12. 38px is
@@ -4277,17 +4281,20 @@ void renderControlsPage() {
   drawStepGlyph(4, CARD_X + PAD, btnY, "-", volPresetIdx > 0);
   drawStepGlyph(5, rightBtnX, btnY, "+", volPresetIdx < VOL_PRESETS_COUNT - 1);
 
-  // Two half-width toggles sharing the bottom row: SOUND and the screen flip.
+  // Three toggles sharing the bottom row: SOUND, the screen flip, and the theme.
   // A full-width row for each wouldn't fit (only 32px left under this one), and
-  // both are booleans so they read naturally side by side. State is shown by
+  // all three are booleans so they read naturally side by side. State is shown by
   // fill AND by the label text, never colour alone.
   if ((int) beepEnabled != soundBtnCache) {
     soundBtnCache = (int) beepEnabled;
-    uiToggle(CARD_X, P1_SOUND_Y, P1_HALF_W, P1_SOUND_H, "SOUND", "MUTED", beepEnabled);
+    uiToggle(CARD_X, P1_SOUND_Y, P1_THIRD_W, P1_SOUND_H, "SOUND", "MUTED", beepEnabled);
   }
   if ((int) screenFlipped != flipBtnCache) {
     flipBtnCache = (int) screenFlipped;
-    uiToggle(P1_FLIP_X, P1_SOUND_Y, P1_HALF_W, P1_SOUND_H, "FLIPPED", "NORMAL", screenFlipped);
+    uiToggle(P1_FLIP_X, P1_SOUND_Y, P1_THIRD_W, P1_SOUND_H, "FLIPPED", "NORMAL", screenFlipped);
+    // Labelled by what tapping GIVES you, matching its neighbours: the pill reads LIGHT
+    // when light is active, the same way FLIPPED reads when flipped is active.
+    uiToggle(P1_THEME_X, P1_SOUND_Y, P1_THIRD_W, P1_SOUND_H, "LIGHT", "DARK", themeIndex == 1);
   }
 }
 
@@ -4543,7 +4550,7 @@ void handleSettingsTouch(int sx, int sy) {
       saveBeepEnabled();
       if (beepEnabled) startBeep(); // confirmation doubles as a speaker test
       renderControlsPage();
-    } else if (sy >= P1_SOUND_Y && sy < P1_SOUND_Y + P1_SOUND_H && sx >= P1_FLIP_X) {
+    } else if (sy >= P1_SOUND_Y && sy < P1_SOUND_Y + P1_SOUND_H && sx < P1_THEME_X) {
       // Flip 180 so the USB-C port can face the other way while charging.
       screenFlipped = !screenFlipped;
       saveScreenFlip();
@@ -4559,6 +4566,13 @@ void handleSettingsTouch(int sx, int sy) {
       resetUsageCaches();   // the other tabs repaint via switchTab()
       drawSettingsStatic();
       renderSettingsTab();
+    } else if (sy >= P1_SOUND_Y && sy < P1_SOUND_Y + P1_SOUND_H && sx >= P1_THEME_X) {
+      applyTheme((themeIndex + 1) % THEME_COUNT);
+      prefs.putUChar("theme", themeIndex);
+      // Mandatory, not cosmetic: every change-only cache in this sketch keys on content,
+      // so without a full repaint the screen keeps the old palette until something else
+      // happens to change a value.
+      forceFullRepaint();
     }
   } else if (settingsPage == 2) {
     // MIC TEST runs straight away - NO confirm dialog. The meter changes nothing
@@ -5309,6 +5323,10 @@ void setup() {
 
   loadOrRunCalibration();
   loadScreenFlip();
+  // After prefs.begin() (inside loadOrRunCalibration) and BEFORE the first draw, so the
+  // opening screen is already in the right palette rather than flashing the default.
+  // Wake from deep sleep re-runs setup(), so this restores the theme then too.
+  applyTheme(prefs.getUChar("theme", 0));
   loadFabPos();        // prefs is open from here on
   applyScreenRotation();   // also restores it after a calibration run
   loadBrightness();

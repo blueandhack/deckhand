@@ -1380,6 +1380,28 @@ Other things that aren't obvious from a single file:
   under the most common colour-vision deficiency, and
   status is also conveyed by shape (`drawStatusDot`: filled circle / filled square / hollow
   ring), never by color alone.
+- **DARK and LIGHT themes, switchable on-device and persisted in NVS.** The nine `COLOR_*`
+  tokens (`COLOR_BG`/`CARD`/`LABEL`/`VALUE`/`ACCENT`/`GOOD`/`WARN`/`BAD`/`UNKNOWN`) are no longer
+  `const` — they're plain globals rewritten from a `THEMES[]` table by `applyTheme(uint8_t)`. They
+  kept their original names and stayed globals deliberately: those nine names are referenced 385
+  times across this sketch, so a whole theme system costs zero changes at those call sites.
+  **A theme switch MUST call `forceFullRepaint()`** — every change-only cache in this sketch keys
+  on CONTENT (`drawIfChanged` on the text it's given, `drawPaceBar` on `(pct, tick)`), so a
+  colour-only change is otherwise skipped entirely and the screen keeps the old palette.
+  `firmware/deckhand_display/palette-check.mjs` is the authority on both palettes: it checks text
+  contrast AND that the status trio (`good`/`warn`/`bad`) stays separable both for a deuteranope
+  approximation and in flat greyscale, and its `--selftest` flag proves the checker has teeth by
+  feeding it a deliberately broken palette it must reject. This caught a real near-miss: the first
+  LIGHT candidate passed every contrast check but failed separability, with luminance gaps of only
+  4%, 1%, and 5% between its three status colours — indistinguishable in greyscale despite looking
+  fine in colour. DARK deliberately keeps its own sub-AA `good`-on-`card` contrast (3.38, below the
+  usual 4.5 body-text threshold) because that pair is a pill fill and bar segment, not body text,
+  and the palette was chosen with that trade-off in mind rather than by accident.
+  `drawCrosshair()` draws in `COLOR_VALUE` rather than literal `TFT_WHITE`, because under LIGHT
+  (near-white background, near-black value) a literal white crosshair would be invisible and
+  touch calibration would become impossible to complete. The crab easter egg deliberately does
+  NOT theme: `ClawdCrab.h`'s alpha is composited against `COLOR_BG` **at build time**, so it always
+  renders in DARK's colours regardless of the live theme.
 - If Bluetooth permission ever gets stuck (the process crashes again after previously working,
   usually after iterating on `DeckhandBLE.app`'s signature), reset the cached TCC decision with
   `tccutil reset BluetoothAlways com.deckhand.ble-host` before assuming the code is broken.

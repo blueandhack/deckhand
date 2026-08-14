@@ -59,12 +59,16 @@ to a read-only view (see [Codex support](#codex-support)). Three tabs:
   **STATUS** (Bluetooth/USB connection state — more trustworthy than macOS's
   Bluetooth panel — plus battery % / voltage and the device's pairing state),
   **DISPLAY & SOUND** (brightness, sleep-timeout, and speaker **volume**
-  LOW/MED/HIGH steppers, plus sound on/off and NORMAL/FLIPPED screen-rotation
-  toggles sharing the bottom row), **ACTIONS** (MIC TEST, CALIBRATE TOUCH,
-  RESET PAIRING, and POWER OFF in the alert color), and **PAIRED MACS** (every
-  Mac the device remembers — tap one to restrict answering to it, tap the `x`
-  to forget just that one). Every consequential action routes through a confirm
-  dialog that states the consequence, not just the question.
+  LOW/MED/HIGH steppers, plus sound on/off, NORMAL/FLIPPED screen-rotation, and
+  DARK/LIGHT theme toggles sharing the bottom row), **ACTIONS** (MIC TEST,
+  CALIBRATE TOUCH, RESET PAIRING, and POWER OFF in the alert color), and
+  **PAIRED MACS** (every Mac the device remembers — tap one to restrict
+  answering to it, tap the `x` to forget just that one). Every consequential
+  action routes through a confirm dialog that states the consequence, not just
+  the question. Both themes are validated for text contrast and for
+  colour-blind / greyscale separability of the status colours — consistent
+  with status never being carried by colour alone elsewhere in the UI — and
+  the choice persists across reboots.
 
 A persistent footer on every tab shows a live clock, a battery pill
 (fill level + `chg`/`full`/`%`), and "Xs ago" data freshness, so the
