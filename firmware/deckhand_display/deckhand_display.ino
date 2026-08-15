@@ -559,7 +559,6 @@ void uiListRow(int x, int y, int w, int h, const char* label, bool selected,
     tft.drawString(tag, x + w - rightInset, y + h / 2);
   }
   tft.setTextDatum(TL_DATUM);
-  drawFab(0);   // the bar owns it now, so it is painted with the rest of the bar
 }
 
 // Secondary caption under a control or at the foot of a page.
@@ -1342,6 +1341,12 @@ void drawTabBar() {
     }
   }
   tft.setTextDatum(TL_DATUM);
+  // MUST be last, and must be here. The fillRect above clears the WHOLE bar,
+  // record slot included, so any repaint of the tab bar erases the button - and
+  // this is the only place that puts it back. Leaving it out is what made the
+  // button vanish on a tab switch or a full repaint and reappear only when some
+  // unrelated path happened to call drawFab().
+  drawFab(0);
 }
 
 
@@ -1913,7 +1918,6 @@ void forceFullRepaint() {
     renderSettingsTab();
   }
   renderFooter();
-  drawFab(0);
 }
 
 void switchTab(Tab newTab) {
@@ -1932,7 +1936,6 @@ void switchTab(Tab newTab) {
   } else {
     drawSettingsTab();
   }
-  drawFab(0);
 }
 
 void openSessionDetail(int idx) {
@@ -1950,7 +1953,10 @@ void closeSessionDetail() {
   detailIndex = -1;
   detailId[0] = '\0';
   drawSessionsAll();
-  drawFab(0); // hidden while the detail/ask screen was up - bring it back now
+  // drawSessionsAll() repaints the content area but not the bar, so the button
+  // is untouched here - this is belt and braces, kept because closing a detail
+  // screen is exactly where the button used to go missing.
+  drawFab(0);
 }
 
 void handleTouch() {

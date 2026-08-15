@@ -169,8 +169,7 @@ void micRestoreUi() {
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.setTextDatum(TL_DATUM);
     tft.drawString("Waiting for host script...", 12, CONTENT_Y + 26);
-    drawFab(0);
-    return;
+    return;   // drawTabBar() above already painted the record button
   }
   forceFullRepaint();
 }
