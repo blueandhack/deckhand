@@ -4537,21 +4537,55 @@ void drawConfirm(const char* title, const char* emph, const char* note,
                  const char* yesLabel, uint16_t yesColor) {
   tft.fillRect(0, PAGE_TOP, tft.width(), contentBottom() - PAGE_TOP, COLOR_BG);
   uiCard(CARD_X, CFM_Y, CARD_W, CFM_H, yesColor);
-  setUIFont(T_TITLE);
+
+  // EVERY STRING IS MEASURED OR WRAPPED AGAINST THIS LANE. The old dialog drew
+  // each line with one centred drawString and no width at all, so a note wider
+  // than the card - three of the four were, up to 228px against a 212px
+  // interior - ran past both edges. Worse than spilling: drawString paints an
+  // OPAQUE background box, so the overflow rubbed out the card border it
+  // crossed, which is what made the text look like it was overlapping the
+  // dialog rather than sitting in it.
+  const int lane  = CARD_W - 2 * SP_3;
+  const int laneX = CARD_X + SP_3;
+  const int top   = CFM_Y + BORDER_CARD;
+  const int avail = CFM_BTN_Y - top;          // room above the button row
+
+  char emphBuf[40];
+  if (emph) { setUIFont(T_BODY); fitText(emphBuf, sizeof(emphBuf), emph, lane); }
+  const int noteLines = countWrappedLines(note, T_META, lane) > 1 ? 2 : 1;
+
+  // Laid out as one block and centred in the space above the buttons, rather
+  // than pinned to hand-picked offsets - so a one-line note and a two-line note
+  // both sit right, instead of one of them being correct and the other tuned.
+  const int blockH = uiLineH(T_HEAD)
+                   + (emph ? SP_2 - 2 + uiLineH(T_BODY) : 0)
+                   + SP_2 + noteLines * uiLineH(T_META);
+  int cy = top + (avail - blockH) / 2;
+
+  setUIFont(T_HEAD);                          // the question, in the title rung
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
   tft.setTextDatum(MC_DATUM);
-  tft.drawString(title, tft.width() / 2, CFM_Y + 26);
+  tft.drawString(title, tft.width() / 2, cy + uiLineH(T_HEAD) / 2);
+  cy += uiLineH(T_HEAD);
   if (emph) {
+    cy += SP_2 - 2;
+    setUIFont(T_BODY);
     tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
-    tft.drawString(emph, tft.width() / 2, CFM_Y + 52);
+    tft.drawString(emphBuf, tft.width() / 2, cy + uiLineH(T_BODY) / 2);
+    cy += uiLineH(T_BODY);
   }
-  setUIFont(T_META);
-  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-  tft.drawString(note, tft.width() / 2, CFM_Y + (emph ? 74 : 56));
   tft.setTextDatum(TL_DATUM);
-  // Cancel keeps the accent (safe default); the action carries its own weight.
-  uiButton(CFM_NO_X,  CFM_BTN_Y, CFM_BTN_W, H_BTN, "CANCEL", COLOR_ACCENT);
-  uiButton(CFM_YES_X, CFM_BTN_Y, CFM_BTN_W, H_BTN, yesLabel, yesColor);
+  cy += SP_2;
+  drawWrappedText(note, laneX, cy, T_META, uiLineH(T_META), lane, 0, noteLines,
+                  COLOR_LABEL, COLOR_CARD);
+
+  // The SAFE option is the prominent one: CANCEL is filled, the action is only
+  // outlined in its severity colour. A destructive choice should not also be the
+  // easiest thing to hit. Both pass COLOR_CARD as their backdrop - they sit ON
+  // the dialog, and defaulting to COLOR_BG gave their anti-aliased edges a
+  // fringe of the page background against the card.
+  uiButton(CFM_NO_X,  CFM_BTN_Y, CFM_BTN_W, H_BTN, "CANCEL", COLOR_ACCENT, true, COLOR_CARD);
+  uiButton(CFM_YES_X, CFM_BTN_Y, CFM_BTN_W, H_BTN, yesLabel, yesColor, false, COLOR_CARD);
 }
 
 void drawPendingConfirm() {

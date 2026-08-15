@@ -296,6 +296,22 @@ two things `host/index.mjs` cannot get any other way:
   first-boot run (touch isn't calibrated yet, so a confirm button would be untappable) and the
   `RECAL` command from the host — that one is an explicit instruction from the Mac and is the
   escape hatch when touch is misaligned, so requiring a tap to confirm would defeat it.
+  **Every string is measured or wrapped against the card's text lane, and skipping that is what
+  made the text look like it overlapped the dialog.** Each line used to be one centred
+  `drawString` with no width given, so a note wider than the card ran past both edges - three of
+  the four were, up to 228px against a 212px interior. `drawString` paints an OPAQUE background
+  box, so the overflow did not merely spill: it rubbed out the card border it crossed. The note now
+  goes through `drawWrappedText` bounded to `CARD_W - 2*SP_3` (192px), the emphasis line through
+  `fitText`, and the title renders in `T_HEAD` where the longest ("Recalibrate touch?") is 180px
+  and fits.
+  The three text elements are laid out as ONE BLOCK and centred in the space above the buttons,
+  rather than pinned to hand-picked offsets - so a one-line note and a two-line note both sit
+  correctly, instead of one being right and the other tuned to match. Measured clearance above the
+  button row is 11-27px across all four dialogs.
+  **CANCEL is the FILLED button and the action is only outlined** in its severity colour: the safe
+  option should be the prominent one, and a destructive choice should not also be the easiest thing
+  to hit. Both pass `COLOR_CARD` as their backdrop, because they sit ON the dialog - the default
+  `COLOR_BG` gave their anti-aliased edges a fringe of the page background against the card.
 - **Re-pairing controls (switching device⇄Mac).** Device side: **SETTINGS › Actions › RESET
   PAIRING** (`resetPairing()`) now wipes **every** slot (and the legacy `blesecret`, so a migration
   can't resurrect it) so the device reads "unpaired" and bonds fresh to the next Mac it's USB'd
