@@ -701,6 +701,33 @@ in particular — don't carry a model field. It also writes all `console.log` ou
 `/tmp/deckhand-host.log` via its own file stream (not just relying on stdout), because
 `open`-launched apps don't inherit the launching shell's stdout redirection.
 
+**The firmware is SEVERAL `.ino` files in one sketch folder, not one file.** The Arduino build
+concatenates every `.ino` in the folder into a single translation unit - the one matching the
+folder name FIRST, then the rest alphabetically - so they still share every global and there are
+no headers, no `extern`s and no build-config changes. `deckhand_display.ino` keeps the includes,
+constants, type definitions, globals, `setup()`/`loop()`, the shared components and the touch
+dispatch; the rest is grouped by what it draws:
+
+| file | what |
+|---|---|
+| `deckhand_display.ino` | types, globals, components, tab bar, record button, setup/loop, protocol |
+| `usage.ino` | USAGE tab, Codex row, footer |
+| `sessions.ino` | session rows, detail screen, ask/answer |
+| `reader.ino` | history browser and full-screen reader |
+| `settings.ino` | the four settings pages, steppers, pager, confirm dialog |
+| `audio.ino` | mic test, MICREC, streaming capture, voice card |
+| `power.ino` | backlight, battery, beeper, volume, sleep |
+| `touch_cal.ino` | raw touch, the 5-point affine calibration, orientation |
+| `pairing.ino` | per-Mac NVS key slots and the answer HMAC |
+
+**The one rule that governs what may move:** Arduino inserts its auto-generated prototypes ABOVE
+the first function definition, so a moved function whose SIGNATURE names a type declared after
+that point would not compile. `HostPairing`, `Theme`, `Usage`, `SessionInfo` and `ConfirmAction`
+are all declared after it. This was checked before splitting and **no function in the sketch names
+one of those in its signature**, which is why the split was possible at all - but a future function
+that takes, say, a `SessionInfo&` must either stay in the main file or have its type hoisted above
+line ~150 first. The split changed the binary by 8 bytes and no behaviour.
+
 **`firmware/deckhand_display/deckhand_display.ino`** parses each JSON line and renders three tabs
 (USAGE, SESSIONS, SETTINGS) plus a persistent footer (clock | battery pill | "Xs ago" freshness,
 three fixed-width zones that cannot grow into each other). The one rule that
