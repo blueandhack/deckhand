@@ -2434,63 +2434,44 @@ const int TAB_COUNT = 3;
 // fabVisible() can hide the button while the crab has the screen.
 extern bool octoActive;
 
-// ---------- Floating record button (FAB) ----------
+// ---------- Record button ----------
 // Replaces both the BOOT-key trigger (GPIO0 doubles as the bootloader strap, so
 // the USB adapter's DTR line fired it by itself) and the fixed tab-bar button
-// (which cost the tabs 42px and could still be in the way).
+// (which cost the three tabs 42px).
 //
-// INTERACTION - the standard long-press-then-drag idiom:
-//     TAP                    -> record
-//     HOLD (700ms) then DRAG -> the button follows your finger
-//     RELEASE                -> drops there, position saved to NVS
+// FIXED at the top right of the CONTENT area, and now a plain button: tap to
+// start, tap to stop. It used to float and be draggable - hold 700ms, drag,
+// release to persist the position to NVS - which on a resistive panel needed a
+// 70px spike reject, a 2px deadband, and a CLEARED content area to drag over
+// (with no framebuffer to read back, there is no way to restore what was under
+// a moving object). All of that went with the gesture; a fixed button only has
+// to be hit-tested.
 //
-// Acting on RELEASE rather than press is what lets one control carry both
-// gestures: a hold has already been recognised by the time the finger lifts.
-//
-// Dragging on THIS panel needs help, because a resistive touchscreen misreports
-// coordinates while the contact patch is moving (the same reason ask-detail text
-// pages by taps instead of scrolling). Three guards make it usable:
-//   - a 70px SPIKE REJECT, so one bad sample can't fling the button across the
-//     screen - it is discarded, not followed;
-//   - a 2px deadband, so jitter while holding still doesn't cause constant
-//     repaints;
-//   - the drag happens on a CLEARED content area. That isn't cosmetic: with no
-//     framebuffer to read back, there is no way to restore arbitrary content from
-//     under a moving object, so dragging over live content would smear a trail.
-//     Clearing gives a known background, erasing is one filled circle, and the
-//     real content comes back on drop.
+// It stays inside the content area rather than the tab bar or footer, so it can
+// never block tab switching - and it is hidden on SETTINGS, because the pager's
+// "next" key occupies this same corner and the button takes touches first. See
+// fabVisible().
 const int FAB_R = 24;              // 48px across - well over the 40px touch floor
 const int FAB_MARGIN = 10;
-const unsigned long FAB_HOLD_MS = 700;
 
-int fabX = -1, fabY = -1;          // centre, in content coordinates
-bool fabDragging = false;          // picked up, following the finger
-unsigned long fabHoldStart = 0;    // 0 = the press didn't start on the button
+int fabX = -1, fabY = -1;          // centre; fixed, resolved once in setup()
+bool fabPressed = false;           // the press currently down started on the button
 
-int fabDefaultX() { return tft.width() - FAB_R - FAB_MARGIN; }
-int fabDefaultY() { return contentBottom() - FAB_R - FAB_MARGIN; }
-
-// Clamped to the CONTENT area on purpose. "Anywhere" would include the tab bar
-// and the footer, and a floating button parked on top of those would block tab
-// switching outright - a movable control must never be able to trap the user.
-void fabClamp() {
-  fabX = constrain(fabX, FAB_R + 2, tft.width() - FAB_R - 2);
-  fabY = constrain(fabY, CONTENT_Y + FAB_R + 2, contentBottom() - FAB_R - 2);
+void initFabPos() {
+  fabX = tft.width() - FAB_R - FAB_MARGIN;
+  fabY = CONTENT_Y + FAB_R + FAB_MARGIN;
 }
-
-void loadFabPos() {
-  fabX = prefs.getInt("fabx", -1);
-  fabY = prefs.getInt("faby", -1);
-  if (fabX < 0 || fabY < 0) { fabX = fabDefaultX(); fabY = fabDefaultY(); }
-  fabClamp();
-}
-void saveFabPos() { prefs.putInt("fabx", fabX); prefs.putInt("faby", fabY); }
 
 // Hidden wherever it could cover something that must not be covered: the ask
 // screen's Allow/Deny buttons above all - a floating control overlapping a
 // permission decision is a genuine hazard, not just a cosmetic one.
 bool fabVisible() {
   if (isAsleep || octoActive || readerActive || histActive || voiceCardActive) return false;
+  // SETTINGS: the pager's "next" key sits in this exact corner, and fabHit()
+  // runs before every other touch handler - so a button here would swallow the
+  // tap and paging would simply stop working. There is also nothing on a
+  // settings page to aim a dictation at.
+  if (currentTab == TAB_SETTINGS && !showingDetail) return false;
   // Allowed on a session's PLAIN detail screen - that's how you aim a dictation
   // at a specific session. Still hidden whenever an ask is pending, because a
   // floating control overlapping an Allow/Deny decision is a hazard.
@@ -2543,60 +2524,19 @@ void drawFab(int state) {
     return;
   }
 
-  const uint16_t ring = state == 2 ? COLOR_VALUE : COLOR_LABEL;
-  const uint16_t dot = state == 2 ? COLOR_VALUE : COLOR_VALUE;
   // 1px COLOR_BG haloes either side of the ring: without them an outline control
   // vanishes wherever it happens to share a tone with whatever is behind it.
   // One even 2px annulus between two 1px haloes. The old four nested drawCircles
   // did not nest: measured, 4 of 360 radial rays crossed no ring pixel at all
   // and 48 more thinned to a single pixel, which is what made it look lumpy.
   uiRing(fabX, fabY, FAB_R, 1, COLOR_BG, COLOR_BG);
-  uiRing(fabX, fabY, FAB_R - 1, 2, ring, COLOR_BG);
+  uiRing(fabX, fabY, FAB_R - 1, 2, COLOR_LABEL, COLOR_BG);
   uiRing(fabX, fabY, FAB_R - 3, 1, COLOR_BG, COLOR_BG);
-
-  if (state == 2) {
-    for (int i = 0; i < 4; i++) {
-      int dx = (i == 0) - (i == 1), dy = (i == 2) - (i == 3);
-      tft.fillRect(fabX - 2 + dx * 11, fabY - 2 + dy * 11, 5, 5, COLOR_VALUE);
-    }
-    tft.drawSmoothCircle(fabX, fabY, 5, COLOR_VALUE, COLOR_BG);
-    return;
-  }
-  tft.fillSmoothCircle(fabX, fabY, 7, dot, COLOR_BG);
+  tft.fillSmoothCircle(fabX, fabY, 7, COLOR_VALUE, COLOR_BG);
 }
 
 // Picked up: hand the content area over to a blank placement canvas (see the note
 // above on why the drag can't happen over live content).
-void fabBeginDrag() {
-  tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
-  setUIFont(1);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(COLOR_WARN, COLOR_BG);
-  tft.drawString("DRAG TO MOVE", tft.width() / 2, CONTENT_Y + 10);
-  tft.drawString("RELEASE TO PLACE", tft.width() / 2, CONTENT_Y + 24);
-  tft.setTextDatum(TL_DATUM);
-  drawFab(2);
-}
-
-void fabDragTo(int sx, int sy) {
-  // Spike reject: a resistive panel emits wild samples mid-movement. Following
-  // one would fling the button somewhere the finger never was, so discard it.
-  if (abs(sx - fabX) > 70 || abs(sy - fabY) > 70) return;
-  int nx = sx, ny = sy;
-  int oldX = fabX, oldY = fabY;
-  fabX = nx; fabY = ny;
-  fabClamp();
-  if (abs(fabX - oldX) < 2 && abs(fabY - oldY) < 2) { // deadband: ignore jitter
-    fabX = oldX; fabY = oldY;
-    return;
-  }
-  // Deliberately the HARD fillCircle, not the smooth one: this is an erase, and
-  // an anti-aliased edge would leave part-blended pixels behind - a faint ghost
-  // trail following the drag, exactly where the erase has to be total.
-  tft.fillCircle(oldX, oldY, FAB_R + 1, COLOR_BG); // erase from the known canvas
-  drawFab(2);
-}
-
 void drawTabBar() {
   tft.fillRect(0, 0, tft.width(), TAB_BAR_H, COLOR_CARD);
   const char* labels[TAB_COUNT] = {"USAGE", "SESSIONS", "SETTINGS"};
@@ -4959,34 +4899,13 @@ void handleTouch() {
   int sx, sy;
   bool touching = getTouchPoint(sx, sy);
 
-  // ---- floating record button: press / hold / release ----
-  // Held, still down: promote to move mode once the hold threshold passes. This
-  // has to run WHILE the finger is down, which is why it sits ahead of the
-  // press-edge early return below.
-  if (touching && wasTouching) {
-    if (fabHoldStart && !fabDragging && millis() - fabHoldStart >= FAB_HOLD_MS) {
-      fabDragging = true;
-      fabBeginDrag();
-      lastNonIdleMillis = millis();
-    }
-    if (fabDragging) {
-      fabDragTo(sx, sy);
-      lastNonIdleMillis = millis(); // a long drag must not look idle to auto-sleep
-    }
-    return;
-  }
-  // Released: drop it, or - if the finger never lingered - treat it as a tap.
+  // A finger still down has nothing left to do: the button acts on RELEASE.
+  if (touching && wasTouching) return;
+  // Released: if the press started on the record button, that was a tap on it.
   if (!touching && wasTouching) {
     wasTouching = false;
-    const bool wasDrag = fabDragging;
-    const bool onFab = fabHoldStart != 0;
-    fabDragging = false;
-    fabHoldStart = 0;
-    if (wasDrag) {
-      saveFabPos();
-      forceFullRepaint(); // bring the real content back under the new position
-      return;
-    }
+    const bool onFab = fabPressed;
+    fabPressed = false;
     if (onFab) {
       drawFab(0);
       micStream(); // streams for as long as you talk; MICREC is the short fallback
@@ -5031,13 +4950,12 @@ void handleTouch() {
                 lastRawX, lastRawY, sx, sy, showingDetail, (int) currentTab,
                 (int) calAff[0], (int) calAff[1], (int) calAff[2], (int) calAff[3]);
 
-  // The button floats above everything, so it gets first refusal on a press -
+  // The button sits above everything, so it gets first refusal on a press -
   // BEFORE the detail/ask handler, which treats any unclaimed tap as "close this
-  // page". This only ARMS the gesture: recording happens on release, dragging
-  // after the hold threshold, both handled at the top of this function.
+  // page". This only ARMS it; recording starts on release, at the top of this
+  // function.
   if (fabHit(sx, sy)) {
-    fabHoldStart = millis();
-    fabDragging = false;
+    fabPressed = true;
     drawFab(1); // immediate pressed feedback
     return;
   }
@@ -5473,7 +5391,7 @@ void setup() {
   // opening screen is already in the right palette rather than flashing the default.
   // Wake from deep sleep re-runs setup(), so this restores the theme then too.
   applyTheme(prefs.getUChar("theme", 0));
-  loadFabPos();        // prefs is open from here on
+  initFabPos();        // fixed, top right of the content area
   applyScreenRotation();   // also restores it after a calibration run
   loadBrightness();
   loadSleepTimeout();

@@ -1087,48 +1087,44 @@ Other things that aren't obvious from a single file:
   bootloader and panic handler always print at **115200** regardless, so at any other rate a crash
   dump reads as garbage — its own debugging trap. The fix for throughput is flow control
   (chunk + ACK), not a bigger number.
-- **The floating record button (FAB), and why it is NOT the BOOT key.** Recording is triggered by a
-  round, **unfilled** button floating over the content area. Two earlier homes were both wrong:
-  - **BOOT key (GPIO0) — abandoned, and it bricked the device twice.** GPIO0 is also the serial
-    bootloader strap and is driven by the USB adapter's **DTR** line, so it goes LOW after every reset
-    and whenever the host merely opens the port. A tap handler therefore fired recordings by itself
-    on flashing, and a strap held low past `POWER_OFF_HOLD_MS` sent the device into **deep sleep
-    during boot** — which presents as bricked firmware: no serial output at ANY baud, dark screen,
-    while esptool still talks to the chip happily. If that ever recurs, suspect sleep before code.
-    Only the deliberate long HOLD (power off) remains on GPIO0, guarded by a 3s arming window and a
-    "must have been seen HIGH" flag.
-  - **Fixed slot in the tab bar — abandoned** because it cost the three tabs 42px and could still sit
-    over something.
-  Interaction: **TAP** records, **HOLD 700ms then DRAG** moves it, **RELEASE** drops and persists to
-  NVS (`fabx`/`faby`). Acting on RELEASE is what lets one control carry both gestures — a hold is
-  already recognised by the time the finger lifts.
-  Visual: a **grey 2px ring with a white centre dot** - the universal record symbol,
-  unmistakable at 48px, and ~90% of the button's area stays see-through. Idle is neutral
-  (`COLOR_LABEL` ring, `COLOR_VALUE` dot) *on purpose*: a control that floats over content should
-  recede until you look for it, and earlier revisions in `COLOR_ACCENT` competed with the accent
-  already used for active tabs, badges and pill borders. Orange is kept for the **pressed** state
-  only, where it marks the action actually happening. Dragging switches to a white ring **plus arrow
-  stubs**, so the mode differs by SHAPE as well as tone - colour is never the only carrier of
-  meaning here. Earlier iterations that were rejected: a thin ring with a tiny centre speck (read as
-  a reticle - mostly dead space) and a filled mic glyph (two ideas competing at 48px).
-  Three things are non-obvious and load-bearing:
+- **The record button is FIXED, top right of the content area, and is NOT the BOOT key.**
+  Tap to start, tap to stop. Two earlier homes were both wrong:
+  - **BOOT key (GPIO0) - abandoned, and it bricked the device twice.** GPIO0 is also the serial
+    bootloader strap and is driven by the USB adapter's **DTR** line, so it goes LOW after every
+    reset and whenever the host merely opens the port. A tap handler therefore fired recordings by
+    itself on flashing, and a strap held low past `POWER_OFF_HOLD_MS` sent the device into **deep
+    sleep during boot** - which presents as bricked firmware: no serial output at ANY baud, dark
+    screen, while esptool still talks to the chip happily. If that ever recurs, suspect sleep
+    before code. Only the deliberate long HOLD (power off) remains on GPIO0, guarded by a 3s arming
+    window and a "must have been seen HIGH" flag.
+  - **Fixed slot in the tab bar - abandoned** because it cost the three tabs 42px.
+  It was also **draggable** for a while (hold 700ms, drag, release, position persisted to NVS as
+  `fabx`/`faby`), which on a resistive panel needed a 70px spike reject, a 2px deadband, and a
+  CLEARED content area to drag over - with no framebuffer to read back, there is no way to restore
+  what was under a moving object. All of that went when the position was fixed; a fixed button only
+  has to be hit-tested, and dropping it took **1300 bytes of flash** with it. The `fabx`/`faby` NVS
+  keys may still exist on devices flashed before the change; nothing reads them.
+  Visual: a **grey 2px ring with a white centre dot** - the universal record symbol, unmistakable
+  at 48px, and ~90% of the button's area stays see-through. Idle is neutral (`COLOR_LABEL` ring,
+  `COLOR_VALUE` dot) *on purpose*: a control that floats over content should recede until you look
+  for it. Orange is kept for the **pressed** state only. Earlier iterations that were rejected: a
+  thin ring with a tiny centre speck (read as a reticle) and a filled mic glyph (two ideas
+  competing at 48px).
+  Three things are load-bearing:
   - **"Transparent" is an unfilled ring, not alpha.** The panel is written directly with no
     framebuffer and no blending, so real translucency would mean reading pixels back (slow, and
     unreliable on this ILI9341 wiring). ~15% of the button's area is painted. The 1px `COLOR_BG`
-    haloes either side of the ring are what make an outline control survive over arbitrary content —
-    without them it vanishes wherever button and background share a tone.
-  - **The drag happens on a CLEARED content area.** Not cosmetic: with no framebuffer to read back
-    there is no way to restore arbitrary content from under a moving object, so dragging over live
-    content smears a trail. Clearing gives a known background (erase = one `fillCircle`), and the
-    real content is restored by `forceFullRepaint()` on drop.
-  - Dragging on a **resistive** panel needs help — the same reason ask-detail text pages by taps
-    instead of scrolling. A **70px spike reject** (one bad sample would fling the button somewhere the
-    finger never was), a 2px deadband, and `lastNonIdleMillis` refreshed during the drag so a slow
-    careful move doesn't look idle to the auto-sleep timer.
-  Position is clamped to the **content area**, never the tab bar or footer: a movable control that
-  can park on the tabs would block tab switching outright. It hides itself (`fabVisible()`) on the
-  ask/answer screen, the reader, the crab, and while asleep — a floating button overlapping an
-  Allow/Deny decision is a hazard, not a cosmetic issue.
+    haloes either side of the ring are what make an outline control survive over arbitrary content.
+  - **It is hit-tested FIRST**, before the detail/ask handler that treats any unclaimed tap as
+    "close this page" - otherwise a tap on the button closed the page instead of recording.
+  - **It is hidden on SETTINGS**, because the pager's "next" key occupies that same corner and the
+    button takes touches first, so paging would simply stop working. `fabVisible()` also hides it
+    on the ask screen (a control overlapping Allow/Deny is a hazard), the reader, the crab, and
+    while asleep. It IS shown on a session's plain detail screen - that is how a dictation is aimed
+    at a specific session.
+  Being fixed, it overlaps whatever is in that corner: the top-right of the 5-hour card on USAGE,
+  and the first session row's tag/pill corner on SESSIONS. `drawFab(0)` therefore runs **last** in
+  the tick repaint, after whatever the tab just painted.
 - If this mic is ever replaced, an **INMP441** (I2S) is viable and needs no analog tuning:
   `SCK`→IO18, `WS`→IO19, `SD`→IO35. IO18/19/23 are the **microSD** bus and this firmware contains
   no SD code at all, so they're free as long as the card slot is unused.
