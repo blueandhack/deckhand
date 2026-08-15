@@ -677,6 +677,15 @@ struct SessionInfo {
   bool askVoice;              // this ask may be answered by voice (question only)
   char askVoiceText[204];     // transcript awaiting confirmation ("" = none)
   char askVoiceSha[20];       // hash of exactly the text above
+  // Device-local suppression, not host protocol: the host parks a transcribed
+  // answer for up to 5 minutes and keeps republishing it every tick regardless
+  // of what the device does with it. Set on CANCEL to the sha being rejected;
+  // handleLine then treats a republished ask carrying this same sha as if no
+  // transcript had arrived, so a cancelled answer can never be sent by a tap
+  // that lands on what looks like a normal option button underneath. Cleared
+  // the moment askPid changes, so it can never suppress a later prompt's
+  // transcript.
+  char askVoiceCancelSha[20];
 };
 SessionInfo sessions[MAX_SESSIONS];
 int sessionCount = 0;
@@ -2311,6 +2320,9 @@ void handleLine(const String& line) {
       info.askVoice = false;
       info.askVoiceText[0] = '\0';
       info.askVoiceSha[0] = '\0';
+      // Default: not suppressing anything. Carried forward from prevSessions
+      // below, but ONLY while askPid stays the same prompt - see there.
+      info.askVoiceCancelSha[0] = '\0';
       JsonObject ask = s["ask"];
       if (!ask.isNull()) {
         // Absent = fall back to the host-wide flag (a hook too old to stamp the
@@ -2356,6 +2368,27 @@ void handleLine(const String& line) {
             info.statusSinceMillis = prevSessions[j].statusSinceMillis;
             info.beepsLeft = prevSessions[j].beepsLeft;
             info.nextBeepMillis = prevSessions[j].nextBeepMillis;
+          }
+          // Carry the voice-cancel suppression forward, but ONLY while this
+          // is still the SAME prompt (askPid unchanged) - a different askPid
+          // is a later question, and a stale cancelled-hash must never be
+          // able to suppress ITS transcript. Gated on info.askPid[0] too: an
+          // ask that's gone entirely has nothing left to suppress.
+          if (info.askPid[0] && strcmp(prevSessions[j].askPid, info.askPid) == 0) {
+            copyField(info.askVoiceCancelSha, sizeof(info.askVoiceCancelSha),
+                      prevSessions[j].askVoiceCancelSha);
+            // The host parks a transcribed answer for up to 5 minutes and
+            // keeps republishing it every tick regardless of what the device
+            // did with it - CANCEL only clears the LOCAL askVoiceText, so
+            // without this the very next tick would silently repopulate it
+            // with the transcript the user just rejected, and a tap on what
+            // looks like a normal option button underneath would send it. A
+            // genuinely new recording produces a different sha and is
+            // unaffected.
+            if (info.askVoiceCancelSha[0] &&
+                strcmp(info.askVoiceSha, info.askVoiceCancelSha) == 0) {
+              info.askVoiceText[0] = '\0';
+            }
           }
           // The prompt was answered elsewhere (usually on the Mac, which is
           // the common case). info.askVoiceText already reflects THIS tick

@@ -600,6 +600,14 @@ bool handleAskTouch(int sx, int sy) {
         micStream();                 // capped at 20s because micAnswerPid is set
         micAnswerPid[0] = '\0';      // one capture only; never leaks into a dictation
       } else {                                  // CANCEL
+        // Remember the rejected hash: the host parks this transcript for up
+        // to 5 minutes and keeps republishing it every tick regardless of
+        // what we do here, so clearing askVoiceText alone would only last
+        // until the next tick silently repopulates it - and a tap on what
+        // then looks like a normal option button underneath would send the
+        // very answer just rejected. handleLine suppresses any republish
+        // carrying this sha; a genuinely new recording gets a different one.
+        copyField(s.askVoiceCancelSha, sizeof(s.askVoiceCancelSha), s.askVoiceSha);
         s.askVoiceText[0] = '\0';               // back to the option buttons
         drawAskDetail(detailIndex);
       }
