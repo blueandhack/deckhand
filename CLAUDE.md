@@ -1213,8 +1213,22 @@ Other things that aren't obvious from a single file:
   `esp_timer_get_time()` into RTC memory (which survives deep sleep); the next real wake prints
   `SLEEP report: <hours>, <mV> -> <mV> (<delta>, <mV/h>), spurious wakes=<n>`. mV/h is the raw
   datum on purpose - converting it to mA needs the cell's discharge curve, which we do not have.
-  It reports elapsed as **unknown** rather than guessing if `esp_timer` ever fails to span the
-  sleep, and flags the reading when USB is attached, because that is not a battery measurement.
+  **Timing comes from `gettimeofday()`, NOT `esp_timer_get_time()`** - measured: an overnight run
+  reported "elapsed unknown" because esp_timer does not span deep sleep on this core, which is
+  exactly what the guard was added to catch. ESP-IDF advances `gettimeofday` by the RTC-measured
+  sleep duration on wake, so the DELTA is right even though the absolute time is meaningless
+  (nothing sets the clock). Verified over a 3-minute sleep.
+  Two things stop it reporting nonsense. The EMA is **settled with 12 samples before comparing** -
+  `batteryMv` resets to -1 on boot, so a single read is RAW while the pre-sleep figure was
+  smoothed, and comparing the two attributes the difference between two METHODS to the battery.
+  And **no rate is printed for a sleep under 30 minutes**: a 3-minute run with a 7mV delta, which
+  is inside the ADC's own noise, produced "-133.7 mV/h" - a flat cell in four hours. That is noise
+  multiplied by 20, and printing it invites precisely the wrong conclusion.
+  There is deliberately **no "on USB" flag**. `usbLinkActive()` keys off host traffic and on wake
+  `millis()` has restarted with none yet, so it was always false regardless of the cable; this
+  board has no VBUS-sense pin, so the firmware genuinely cannot tell. A flag that is silently
+  always-false is worse than none, because its absence reads as "not on USB". A RISING value is
+  reported instead, since that can only mean it was charging.
   Spurious wakes accumulate across re-sleeps and are reported with the drain, so the guard's value
   is visible rather than assumed.
 - "Power off" (hold BOOT ~1s) is ESP32 deep sleep, not a real power cut: panel DISPOFF+SLPIN,

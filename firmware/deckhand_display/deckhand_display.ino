@@ -24,6 +24,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <esp_sleep.h>
+#include <sys/time.h>   // gettimeofday: ESP-IDF advances it across deep sleep
 #include <mbedtls/md.h>
 #include <driver/gpio.h>
 #include <esp_adc/adc_continuous.h>
@@ -95,7 +96,12 @@ SPIClass touchSPI(HSPI);
 // Survives deep sleep (RTC memory). Two jobs: measuring what sleep actually
 // costs, and telling a deliberate wake from a knock.
 RTC_DATA_ATTR int     rtcSleepMv    = -1;   // battery mV when we went to sleep
-RTC_DATA_ATTR int64_t rtcSleepUs    = 0;    // esp_timer at that moment
+// MEASURED: esp_timer_get_time() does NOT span deep sleep on this core - an
+// overnight run came back "elapsed unknown", which is why the guard exists.
+// gettimeofday() is the documented one: ESP-IDF adds the RTC-measured sleep
+// duration back on wake, so the DELTA is right even though the absolute time is
+// meaningless (nothing ever sets the clock).
+RTC_DATA_ATTR int64_t rtcSleepUs    = 0;    // gettimeofday at that moment
 RTC_DATA_ATTR uint32_t rtcSpuriousWakes = 0;
 const unsigned long WAKE_HOLD_MS = 350;     // how long a wake touch must be held
 XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
@@ -2512,25 +2518,50 @@ void setup() {
     // A real wake: report what the sleep cost. mV/hour is the raw datum -
     // turning it into mA needs the cell's discharge curve, which we do not have.
     if (rtcSleepMv > 0) {
-      sampleBattery();
+      // Settle the EMA before comparing. batteryMv resets to -1 on boot, so a
+      // single call returns a RAW sample while the pre-sleep figure was smoothed
+      // over many - comparing the two attributes the difference between the two
+      // METHODS to the battery. 12 samples is well past the 1/8 EMA's settling.
+      for (int i = 0; i < 12; i++) sampleBattery();
       // esp_timer is RTC-backed and IDF adds the sleep duration back on wake, so
       // this should span the sleep - but if that ever stops holding, a bogus
       // elapsed would silently turn into a bogus mV/h. Report it as unknown
       // rather than print a number that looks measured and is not.
-      int64_t us = esp_timer_get_time() - rtcSleepUs;
+      timeval tv; gettimeofday(&tv, nullptr);
+      int64_t us = ((int64_t) tv.tv_sec * 1000000 + tv.tv_usec) - rtcSleepUs;
       int drop = rtcSleepMv - batteryMv;
       if (us <= 0) {
         Serial.printf("SLEEP report: elapsed unknown (timer did not span sleep), "
-                      "%d -> %d mV (%+d mV), spurious wakes=%lu\n",
-                      rtcSleepMv, batteryMv, -drop, (unsigned long) rtcSpuriousWakes);
+                      "%d -> %d mV (%+d mV), spurious wakes=%lu%s\n",
+                      rtcSleepMv, batteryMv, -drop, (unsigned long) rtcSpuriousWakes,
+                      usbLinkActive() ? " [ON USB - not a battery measurement]" : "");
       } else {
         double hours = us / 3600e6;
-        Serial.printf("SLEEP report: %.2fh, %d -> %d mV (%+d mV, %.1f mV/h), "
-                      "spurious wakes=%lu%s\n",
-                      hours, rtcSleepMv, batteryMv, -drop,
-                      hours > 0.01 ? -drop / hours : 0.0,
-                      (unsigned long) rtcSpuriousWakes,
-                      usbLinkActive() ? " [ON USB - not a battery measurement]" : "");
+        // A rate is only reported for a sleep long enough to mean something. At
+        // 3 minutes a 7mV delta - which is inside the ADC's own noise - came out
+        // as "-133.7 mV/h", i.e. a flat cell in four hours. That is not a
+        // measurement, it is noise multiplied by 20, and printing it invites
+        // exactly the wrong conclusion.
+        //
+        // There is deliberately NO "on USB" flag here. usbLinkActive() keys off
+        // host traffic, and on wake millis() has restarted with no traffic yet,
+        // so it is always false at this point regardless of the cable. This board
+        // has no VBUS-sense pin (see the battery note), so the firmware genuinely
+        // cannot tell - and a flag that is silently always-false is worse than
+        // none, because its absence reads as "not on USB".
+        if (hours < 0.5) {
+          Serial.printf("SLEEP report: %.2fh, %d -> %d mV (%+d mV) - too short to "
+                        "rate, and a rising value means it was charging. "
+                        "spurious wakes=%lu\n",
+                        hours, rtcSleepMv, batteryMv, -drop,
+                        (unsigned long) rtcSpuriousWakes);
+        } else {
+          Serial.printf("SLEEP report: %.2fh, %d -> %d mV (%+d mV, %.1f mV/h), "
+                        "spurious wakes=%lu%s\n",
+                        hours, rtcSleepMv, batteryMv, -drop, -drop / hours,
+                        (unsigned long) rtcSpuriousWakes,
+                        drop < 0 ? " - value ROSE, so it was on USB and charging" : "");
+        }
       }
       rtcSpuriousWakes = 0;
     }
@@ -2630,6 +2661,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.setTextDatum(TL_DATUM);
     tft.drawString("Waiting for host script...", 12, CONTENT_Y + 26);
+  } else if (buf == "SLEEP") {
+    // Remote "power off", so the sleep-drain path can be exercised without
+    // holding the BOOT key. Wakes on a held touch like any other sleep.
+    powerOff();
   } else if (buf.startsWith("TAB ")) {
     // Remote tab switch. Added so screenshots can be taken of every tab without
     // someone standing at the device - the capture path can only ever record

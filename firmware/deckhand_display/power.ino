@@ -126,7 +126,8 @@ void enterDeepSleep() {
   // RTC memory survives deep sleep and esp_timer keeps counting through it.
   sampleBattery();
   rtcSleepMv = batteryMv;
-  rtcSleepUs = esp_timer_get_time();
+  timeval tv; gettimeofday(&tv, nullptr);
+  rtcSleepUs = (int64_t) tv.tv_sec * 1000000 + tv.tv_usec;
 
   esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0); // PENIRQ: low = touched
   esp_deep_sleep_start();
