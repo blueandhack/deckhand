@@ -682,14 +682,20 @@ inline void uiFillRound(int x, int y, int w, int h, int r, uint16_t fill, uint16
 // takes an outer AND inner radius, so one call draws an even ring - unlike two
 // nested drawRoundRects, whose arcs don't nest and leave holes (measured on the
 // FAB's 2px ring: 4 of 360 radial rays crossed no ring pixel at all).
+// NOTE the +1: TFT_eSPI's inner radius is INCLUSIVE, so it renders
+// `r - ir + 1` pixels, not `r - ir` (its own drawSmoothArc comment says so).
+// Passing ir = r - thickness therefore drew everything a pixel too thick - 1px
+// outlines came out at 2 and the 2px card border at 3 - which on a FILLED
+// control put an anti-aliased rim of the page background inside the shape and
+// made it look like the fill stopped short of its own edge.
 inline void uiStrokeRound(int x, int y, int w, int h, int r, int thickness,
                           uint16_t stroke, uint16_t behind) {
-  tft.drawSmoothRoundRect(x, y, r, r - thickness, w, h, stroke, behind);
+  tft.drawSmoothRoundRect(x, y, r, r - thickness + 1, w, h, stroke, behind);
 }
 // Circular ring, same idea: a full 0-360 arc with an outer and inner radius is
 // one even annulus, where drawCircle(r) + drawCircle(r-1) is not.
 inline void uiRing(int cx, int cy, int r, int thickness, uint16_t stroke, uint16_t behind) {
-  tft.drawSmoothArc(cx, cy, r, r - thickness, 0, 360, stroke, behind);
+  tft.drawSmoothArc(cx, cy, r, r - thickness + 1, 0, 360, stroke, behind);
 }
 
 // Surface behind grouped content.
@@ -706,7 +712,10 @@ void uiButton(int x, int y, int w, int h, const char* label,
               uint16_t behind = COLOR_BG) {
   uint16_t bg = filled ? tint : COLOR_CARD;
   uiFillRound(x, y, w, h, R_MD, bg, behind);
-  uiStrokeRound(x, y, w, h, R_MD, 1, tint, behind);
+  // A filled button's outline is the same colour as its fill, so stroking it
+  // adds nothing and only re-blends the edge pixels a second time. Skip it and
+  // let the fill's own anti-aliased edge be the silhouette.
+  if (!filled) uiStrokeRound(x, y, w, h, R_MD, 1, tint, behind);
   setUIFont(T_TITLE);
   tft.setTextColor(filled ? COLOR_BG : tint, bg);
   tft.setTextDatum(MC_DATUM);
@@ -729,7 +738,7 @@ void uiListRow(int x, int y, int w, int h, const char* label, bool selected,
   uint16_t tint = selected ? COLOR_ACCENT : COLOR_LABEL;
   uint16_t bg = selected ? COLOR_ACCENT : COLOR_CARD;
   uiFillRound(x, y, w, h, R_MD, bg, behind);
-  uiStrokeRound(x, y, w, h, R_MD, 1, tint, behind);
+  if (!selected) uiStrokeRound(x, y, w, h, R_MD, 1, tint, behind); // see uiButton
   setUIFont(T_BODY);
   tft.setTextColor(selected ? COLOR_BG : COLOR_VALUE, bg);
   tft.setTextDatum(ML_DATUM);
@@ -4167,7 +4176,14 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4; // top of each page's content
 // label and the value text collided with it.
 const int STEPPER_CARD_H = 56;
 const int STEP_LABEL_Y   = 2;    // label band, from the card top
-const int STEP_BTN_TOP   = 12;   // key band, below the label
+// Key band, below the label. The label's cap-height ink ends at +11 (cell +2,
+// Cozette ascent 10, caps 8 tall), so at +12 the keys began on the very next
+// row and the two read as one block. +14 buys 2px of air and is close to the
+// ceiling: a 1px border leaves the interior at +1..+54, and a 13px label cell
+// plus 40px keys - 40 is TAP_MIN and cannot shrink - need 53 of those 54 rows.
+// A comfortable gap here needs a TALLER CARD, which needs page budget this page
+// does not have (its four rows end flush on contentBottom()).
+const int STEP_BTN_TOP   = 14;
 const int STEP_BTN_SIZE = 40;   // +/- keys: meets TAP_MIN; the value bar absorbs the width
 int stepBtnY(int cardY) { return cardY + STEP_BTN_TOP; }
 
