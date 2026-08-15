@@ -1074,10 +1074,12 @@ Other things that aren't obvious from a single file:
   words. The host re-hashes the transcript it still holds and refuses a mismatch.
   Six things are load-bearing:
   - **Questions only.** `emitDecision` carries free text for a question
-    (`{behavior:"deny", message: carriedAnswer}`) and DISCARDS it for a plan, where both branches
-    send a fixed "keep planning" string - a spoken answer to a plan would reach Claude with none of
-    what was said while the device reported success. A permission prompt can only be DENIED, so
-    speaking "yes, go ahead" there would deny the call with that as the reason.
+    (`{behavior:"deny", message: carriedAnswer}`) but for a plan takes the `answer.idx === 0` branch
+    — `{behavior:"allow"}` — since a voice answer always writes `idx: 0`; a spoken answer to a plan
+    would therefore be silently APPROVED, discarding the words entirely, not merely replaced with a
+    generic string. That is the worst failure shape available: indistinguishable from working. A
+    permission prompt can only be DENIED, so speaking "yes, go ahead" there would deny the call with
+    that as the reason.
   - **The hook is NOT modified.** The answer file carries `idx: 0` with the transcript as `label`,
     and `chose = answer.label || ...` does the rest. That file's stdout is a decision channel.
   - **Cap the transcript BEFORE hashing it.** The device displays the capped string, so that is the

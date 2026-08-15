@@ -31,12 +31,15 @@ into an *answer to a pending prompt*.
 
 **Questions only** (`ask.kind === "question"`). Two exclusions, for different reasons.
 
-**Plans are excluded because the text would be silently dropped.** Found while planning, by reading
-`emitDecision()` rather than trusting this spec's earlier claim: only the `question` branch carries
-free text (`{ behavior: "deny", message: carriedAnswer }`). Both plan branches send a FIXED string —
-`"The user chose to keep planning (answered from the Deckhand display)."` — so a spoken answer to a
-plan prompt would reach Claude with none of what was said, while the device reported success. That
-is the worst failure shape available: silent, and indistinguishable from working. Supporting plans
+**Plans are excluded because a voice answer would be silently APPROVED, not merely lost.** Found
+while planning, by reading `emitDecision()` rather than trusting this spec's earlier claim: only the
+`question` branch carries free text (`{ behavior: "deny", message: carriedAnswer }`). A voice answer
+always writes `idx: 0`, and for a plan that hits the `answer.idx === 0` branch —
+`{ behavior: "allow" }` — with no message at all; only the `idx !== 0` branch (unreachable from
+voice) sends the fixed string `"The user chose to keep planning (answered from the Deckhand
+display)."` So a spoken answer to a plan prompt would auto-approve it and discard the words
+entirely, while the device reported success. That is the worst failure shape available: silent, and
+indistinguishable from working. Supporting plans
 needs a small change to `emitDecision` to use the spoken text as the reason when one is present;
 that is a separate, deliberate edit to the most safety-critical file in the project (its stdout is
 a decision channel), and is deferred rather than bundled in.
@@ -98,9 +101,9 @@ device -> host
 rather than misinterpreting. The device sends only the hash, never the text: the host already holds
 the transcript, and echoing it back would add a second copy to authenticate for no benefit.
 
-The host checks, in order: that `mac`/`sha16` are well-formed; that a secret and an unconsumed nonce
-exist for this pid (the same check that rejects a never-paired device also catches a replayed nonce,
-since consuming a nonce deletes its map entry); that `sha16` matches the transcript it still holds;
+The host checks, in order: that a secret and an unconsumed nonce exist for this pid (the same check
+that rejects a never-paired device also catches a replayed nonce, since consuming a nonce deletes its
+map entry); that `mac`/`sha16` are well-formed; that `sha16` matches the transcript it still holds;
 then the HMAC last. Order is immaterial to security — both gates must pass, and an attacker supplies
 both the text and the hash, so neither ordering leaks anything to them — but it is a known
 diagnostics limitation: `verifyVoiceAnswer` reports the same reason, `"missing pairing/nonce state"`,
