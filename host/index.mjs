@@ -1688,6 +1688,58 @@ async function finishAudioStream(tail) {
   pruneAudioCaptures().catch(() => {});
 }
 
+// A confirmed spoken answer. The device signs a hash of the text it DISPLAYED,
+// so verifying here proves both that the paired device authorised it and that
+// the text is the one a human read.
+async function handleVoiceAnswer(parts, via) {
+  const [, id12, pid, , sha16, mac] = parts;
+  const entry = askNonces.get(pid);
+  const from = deviceNameFor(via);
+  const dev = from ? deviceEntry(from) : null;
+  const pend = pendingVoiceAnswers.get(pid);
+
+  if (!pend) {
+    console.error(`Voice answer: no pending transcript for prompt ${pid} - ignoring.`);
+    return;
+  }
+  const v = verifyVoiceAnswer({
+    secret: dev?.secret, nonce: entry?.nonce, pid, sha16, mac, text: pend.text,
+  });
+  if (!v.ok) {
+    // Loud on purpose: "text does not match the signed hash" is the tamper case
+    // and must not look like an ordinary rejection.
+    console.error(
+      `Voice answer REJECTED (${v.why}) for prompt ${pid} via ${via}` +
+        `${from ? ` from ${from}` : " (unknown device)"} - ignoring.`
+    );
+    return;
+  }
+  askNonces.delete(pid);          // single-use, as with an option answer
+  pendingVoiceAnswers.delete(pid);
+
+  try {
+    const files = await fs.readdir(SESSIONS_DIR);
+    const file = files.find((f) => f.endsWith(".json") && f.startsWith(id12));
+    if (!file) {
+      console.error(`Voice answer: no session matching ${id12}`);
+      return;
+    }
+    const sessionId = path.basename(file, ".json");
+    await fs.mkdir(ANSWERS_DIR, { recursive: true });
+    // idx 0 and the transcript as `label`: emitDecision builds its message from
+    // `answer.label || \`option ${idx+1}\``, so the spoken text flows through the
+    // existing question path untouched. The hook is NOT modified.
+    await fs.writeFile(
+      path.join(ANSWERS_DIR, `${sessionId}.json`),
+      JSON.stringify({ pid, idx: 0, label: pend.text, voice: true, written_at: Date.now() })
+    );
+    console.log(`Voice answer accepted for ${sessionId} (pid ${pid}): "${pend.text}"`);
+    setVoice("asksent", { text: pend.text, reply: "sent to Claude" });
+  } catch (err) {
+    console.error(`Voice answer: could not write answer file: ${err.message}`);
+  }
+}
+
 async function handleDeviceLine(line, via) {
   // History request from the detail screen. Handled here rather than in the tick so the
   // transcript is only read when someone is actually looking at it.
@@ -1808,7 +1860,13 @@ async function handleDeviceLine(line, via) {
   if (line === lastAnswerKey && Date.now() - lastAnswerAt < 3000) return;
   lastAnswerKey = line;
   lastAnswerAt = Date.now();
-  const parts = line.trim().split(/\s+/); // ANSWER <id12> <pid> <idx> <hmac>
+  const parts = line.trim().split(/\s+/);
+  // Voice form: ANSWER <id12> <pid> TEXT <sha16> <hmac>. Checked before the
+  // option form so the two parsers never see each other's shape.
+  if (parts[3] === "TEXT") {
+    await handleVoiceAnswer(parts, via);
+    return;
+  }
   if (parts.length < 4) return;
   const [, id12, pid, idxStr, mac] = parts;
   const idx = parseInt(idxStr, 10);
