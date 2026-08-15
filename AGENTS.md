@@ -1592,8 +1592,7 @@ Other things that aren't obvious from a single file:
 - **TFT_eSPI's pin/driver config now lives in THIS REPO at `firmware/tft_setup/User_Setup.h`**, and
   is copied into the library. TFT_eSPI reads it from a file *inside the library*, so it used to
   exist only there - which meant reinstalling or updating TFT_eSPI silently wiped the board's pin
-  mapping, and CI could not build the firmware at all because it had no way to know it. Restore a
-  local machine with:
+  mapping, with no record of it anywhere in the repo. Restore a local machine with:
   `cp firmware/tft_setup/User_Setup.h ~/Documents/Arduino/libraries/TFT_eSPI/`
   The committed copy is byte-identical (comments aside) to the one that builds today, and the only
   file ever modified inside that library is this one - `User_Setup_Select.h` is stock and includes
