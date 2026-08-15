@@ -2181,10 +2181,14 @@ void handleLine(const String& line) {
     for (char* p = voiceReply; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
     if (seq > voiceSeq) {
       voiceSeq = seq;
-      // "heard" is transient (the transcript, before dispatch); show the card on
-      // the states that are worth interrupting for.
+      // "heard"/"askheard" are transient (the transcript, before dispatch or
+      // before the confirm screen takes over); show the card on the states
+      // that are worth interrupting for. "askerror"/"asksent" are included so
+      // an answer-flow failure or success is never silent - without them the
+      // user taps SPEAK, speaks, and nothing visibly happens at all.
       if (seq > voiceSeqShown && (!strcmp(voiceState, "sent") || !strcmp(voiceState, "done") ||
-                                  !strcmp(voiceState, "memo") || !strcmp(voiceState, "error"))) {
+                                  !strcmp(voiceState, "memo") || !strcmp(voiceState, "error") ||
+                                  !strcmp(voiceState, "askerror") || !strcmp(voiceState, "asksent"))) {
         voiceSeqShown = seq;
         voiceCardActive = true;
         showingDetail = false;   // the card owns the content area
@@ -2336,6 +2340,9 @@ void handleLine(const String& line) {
         info.askVoice = ask["voice"] | false;
         copyField(info.askVoiceText, sizeof(info.askVoiceText), ask["voiceText"] | "");
         copyField(info.askVoiceSha, sizeof(info.askVoiceSha), ask["voiceSha"] | "");
+        // The confirm screen keys off askVoiceText alone, so a transcript that
+        // somehow arrives for a non-question ask must not be able to raise it.
+        if (strcmp(info.askKind, "question") != 0) info.askVoiceText[0] = '\0';
         // Defense in depth: the host already flattens control bytes, but any
         // that slip through render as garbage glyphs on this font, so blank
         // them to spaces here too. The detail keeps '\n' (it drives code-block

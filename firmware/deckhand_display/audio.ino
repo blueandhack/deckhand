@@ -113,10 +113,18 @@ const char* voiceStateLabel() {
   if (!strcmp(voiceState, "clip")) return "COPIED - PASTE IT";
   if (!strcmp(voiceState, "done")) return "CLAUDE REPLIED";
   if (!strcmp(voiceState, "error")) return "FAILED";
+  // Answer-flow states: without these, "capture incomplete", "transcription
+  // failed" and "nothing recognised" were invisible - the user tapped SPEAK,
+  // spoke, and nothing happened at all, burning the 90s hook budget with no
+  // signal to retry. "askheard" deliberately has no card (the confirm screen
+  // is already about to show the text) so it isn't listed here as a raise
+  // state, but it falls through to "VOICE" harmlessly if ever drawn.
+  if (!strcmp(voiceState, "askerror")) return "VOICE FAILED";
+  if (!strcmp(voiceState, "asksent")) return "ANSWER SENT";
   return "VOICE";
 }
 void drawVoiceCard() {
-  const bool bad = !strcmp(voiceState, "error");
+  const bool bad = !strcmp(voiceState, "error") || !strcmp(voiceState, "askerror");
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
   setUIFont(1);
   tft.setTextDatum(TL_DATUM);

@@ -20,6 +20,20 @@ export function voiceAnswerHmac(secret, nonce, pid, sha16) {
     .slice(0, 16);
 }
 
+// Caps a string to at most maxBytes of UTF-8, never splitting a codepoint in
+// half. Kept here (not inline in index.mjs) so it can be exercised without a
+// device: the whole design rests on the signed hash covering exactly the text
+// a human read, and a cap that could slice a multi-byte character would leave
+// the device holding a truncated/mangled tail while the host had already
+// capped (and would hash) the full, untruncated string.
+export function capUtf8(s, maxBytes) {
+  const buf = Buffer.from(s, "utf8");
+  if (buf.length <= maxBytes) return s;
+  let end = maxBytes;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--; // never split a codepoint
+  return buf.subarray(0, end).toString("utf8");
+}
+
 // Returns a reason as well as a verdict: a rejected answer must be logged with
 // WHY, because the difference between "wrong device" and "text was altered" is
 // the difference between a misconfiguration and an attack.

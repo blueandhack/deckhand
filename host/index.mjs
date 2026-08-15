@@ -20,7 +20,7 @@ import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
 import { mergeById } from "./sessions-merge.mjs";
-import { voiceSha, verifyVoiceAnswer } from "./voice-answer.mjs";
+import { voiceSha, verifyVoiceAnswer, capUtf8 } from "./voice-answer.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1568,8 +1568,10 @@ async function transcribeForAnswer(captureFile, pid) {
   }
   // Cap FIRST, then hash: the device displays the capped string, so that is the
   // string that must be signed. Hashing before capping would sign text the human
-  // never saw.
-  text = text.slice(0, VOICE_TEXT_MAX);
+  // never saw. This cap is BYTES, not characters (see VOICE_ANSWER_TEXT_MAX_BYTES) -
+  // the device stores this in a fixed char[204] and a character cap can silently
+  // overflow it with Whisper's multi-byte punctuation.
+  text = capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES);
   pendingVoiceAnswers.set(pid, { text, sha: voiceSha(text), at: Date.now() });
   console.log(`Voice answer: pid=${pid} transcript = "${text}"`);
   setVoice("askheard", { text });
@@ -1621,6 +1623,14 @@ let lastVoice = null; // { seq, at, state, text, reply, session }
 let voiceSeq = 0;
 const VOICE_TEXT_MAX = 200;
 const VOICE_REPLY_MAX = 420;
+// An answer transcript is capped by BYTES, not characters, and lower than a
+// dictation's: the device stores it in a fixed char[204] and DISPLAYS it on one
+// screen, and the whole design rests on the signed hash covering exactly the
+// text a human read. Whisper emits multi-byte punctuation freely, so a
+// character cap can overflow the device buffer and be silently truncated there
+// while the host hashes the full string - verification would pass and the host
+// would write text nobody saw.
+const VOICE_ANSWER_TEXT_MAX_BYTES = 150;
 function setVoice(state, fields = {}) {
   lastVoice = {
     // Small monotonic counter for the DEVICE. Date.now() is ~1.79e12 and `long` on
@@ -1725,6 +1735,22 @@ async function handleVoiceAnswer(parts, via) {
       return;
     }
     const sessionId = path.basename(file, ".json");
+    let rec = null;
+    try {
+      rec = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, file), "utf8"));
+    } catch (err) {
+      console.error(`Voice answer: could not read session record for ${sessionId}: ${err.message}`);
+      return;
+    }
+    // Defence in depth: ask.voice gates the BUTTON, not the write. A transcript
+    // parked against a plan would land as idx:0, which emitDecision turns into
+    // {behavior:"allow"} - silently approving a plan. The kind is re-checked
+    // here so the device is not the only thing standing between a stray pid and
+    // an auto-approval.
+    if (rec?.ask?.kind !== "question" || rec?.ask?.pid !== pid) {
+      console.error(`Voice answer REJECTED (not a pending question) for prompt ${pid} - ignoring.`);
+      return;
+    }
     await fs.mkdir(ANSWERS_DIR, { recursive: true });
     // idx 0 and the transcript as `label`: emitDecision builds its message from
     // `answer.label || \`option ${idx+1}\``, so the spoken text flows through the

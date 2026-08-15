@@ -365,6 +365,14 @@ int askOptionsTop(int idx) {
 // askOptionsTop() does.
 inline int askVoiceRedoY() { return contentBottom() - H_BTN; }
 inline int askVoiceSendY() { return askVoiceRedoY() - H_BTN - SP_2; }
+// True when the transcript doesn't fit within the confirm screen's line cap -
+// the belt-and-braces case the host's 150-byte cap is meant to prevent, but
+// that must never be the ONLY thing standing between a person and signing
+// text they can't fully see. Shared by the draw and the touch handler so they
+// can never disagree about whether SEND is actually offered.
+bool askVoiceTooLong(int idx) {
+  return countWrappedLines(sessions[idx].askVoiceText, FONT_CODE, CARD_W - 8) > 8;
+}
 // The answer screen: question title, paged detail text, and one big button
 // per option. Tapping an option sends the answer to the host, which hands
 // it to the (waiting) session hook to decide the real prompt.
@@ -388,13 +396,30 @@ void drawAskDetail(int idx) {
     tft.setTextDatum(TL_DATUM);
     tft.drawString("YOU SAID", CARD_X, CONTENT_Y + 6);
     // Cozette on a panel: this is verbatim quoted text, the same treatment code
-    // and commands already get.
+    // and commands already get. Cap raised 6 -> 8: at CARD_W-8=208px, Cozette6x13
+    // (6px/char) fits 34 chars/line, and the host now caps an answer transcript
+    // at 150 UTF-8 bytes (VOICE_ANSWER_TEXT_MAX_BYTES), which needs at most ~5
+    // lines even with word-wrap losses - 8 leaves real headroom, and the panel
+    // (8*13+12=116px tall) still clears askVoiceSendY() by 34px.
     int lines = countWrappedLines(s.askVoiceText, FONT_CODE, CARD_W - 8);
-    if (lines > 6) lines = 6;
+    if (lines > 8) lines = 8;
     uiFillRound(CARD_X - 4, CONTENT_Y + 22, CARD_W + 8, lines * 13 + 12, R_SM, COLOR_CARD, COLOR_BG);
     drawWrappedText(s.askVoiceText, CARD_X, CONTENT_Y + 28, FONT_CODE, 13, CARD_W - 8,
                     0, lines, COLOR_VALUE, COLOR_CARD);
-    uiButton(CARD_X, askVoiceSendY(), CARD_W, H_BTN, "SEND", COLOR_ACCENT, true);
+    // Belt-and-braces: the host's byte cap is meant to guarantee this always
+    // fits, but that guarantee must not be the only gate. If it somehow
+    // doesn't, never offer SEND for text the user cannot fully see -
+    // RE-RECORD and CANCEL still work.
+    if (askVoiceTooLong(idx)) {
+      tft.setTextColor(COLOR_BAD, COLOR_BG);
+      setUIFont(T_META);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawString("TOO LONG - ANSWER ON YOUR MAC", tft.width() / 2,
+                      askVoiceSendY() + H_BTN / 2);
+      tft.setTextDatum(TL_DATUM);
+    } else {
+      uiButton(CARD_X, askVoiceSendY(), CARD_W, H_BTN, "SEND", COLOR_ACCENT, true);
+    }
     uiButton(CARD_X, askVoiceRedoY(), (CARD_W - SP_2) / 2, H_BTN, "RE-RECORD", COLOR_LABEL);
     uiButton(CARD_X + (CARD_W + SP_2) / 2, askVoiceRedoY(), (CARD_W - SP_2) / 2, H_BTN,
              "CANCEL", COLOR_LABEL);
@@ -591,11 +616,20 @@ bool handleAskTouch(int sx, int sy) {
   // option buttons underneath and send a DIFFERENT answer.
   if (s.askVoiceText[0]) {
     if (sy >= askVoiceSendY() && sy < askVoiceSendY() + H_BTN) {
-      sendVoiceAnswerToHost(detailIndex);
+      // No SEND button is drawn in the "too long" belt-and-braces case (see
+      // drawAskDetail) - mirror that here so a tap in the same rectangle can
+      // never sign text the screen didn't actually offer to send.
+      if (!askVoiceTooLong(detailIndex)) sendVoiceAnswerToHost(detailIndex);
       return true;
     }
     if (sy >= askVoiceRedoY() && sy < askVoiceRedoY() + H_BTN) {
       if (sx < CARD_X + CARD_W / 2) {          // RE-RECORD
+        // Starting a fresh recording is an explicit request to see a new
+        // transcript, so any earlier CANCEL suppression for this prompt is
+        // spent - otherwise saying the same words again would hash identically
+        // and be silently swallowed forever (handleLine suppresses a republish
+        // matching this sha).
+        s.askVoiceCancelSha[0] = '\0';
         copyField(micAnswerPid, sizeof(micAnswerPid), s.askPid);
         micStream();                 // capped at 20s because micAnswerPid is set
         micAnswerPid[0] = '\0';      // one capture only; never leaks into a dictation
@@ -634,6 +668,11 @@ bool handleAskTouch(int sx, int sy) {
   // option hit-testing below, at the same y the draw used, so the two can
   // never disagree about where the button is.
   if (askVoiceRows(detailIndex) && sy >= contentBottom() - ASK_OPT_H) {
+    // Same reasoning as RE-RECORD above: this is the path a CANCEL actually
+    // returns to (it reverts to the option buttons, SPEAK row included), so a
+    // suppression from an earlier CANCEL on this prompt must not survive a
+    // fresh recording started here.
+    s.askVoiceCancelSha[0] = '\0';
     copyField(micAnswerPid, sizeof(micAnswerPid), s.askPid);
     micStream();                 // capped at 20s because micAnswerPid is set
     micAnswerPid[0] = '\0';      // one capture only; never leaks into a dictation
