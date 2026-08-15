@@ -1542,7 +1542,9 @@ Other things that aren't obvious from a single file:
   command-trigger file) reads the framebuffer with `readRect()` and ships it as base64 RGB565;
   `finishShot()` in `host/index.mjs` rebuilds it and writes a PNG straight to `~/Deckhand-shots/`
   (zlib is in node and a PNG is four chunks, so no external encoder and no intermediate file).
-  240x320x2 = 153,600 bytes -> ~205KB of base64 -> **~18s at 115200**, measured. Nothing is blanked
+  `TAB 0|1|2` and `PAGE 0..3` switch what is displayed first, because the capture path can only
+  record what is currently on the glass - without them every screenshot is of whatever tab someone
+  last touched. 240x320x2 = 153,600 bytes -> ~205KB of base64 -> **~18s at 115200**, measured. Nothing is blanked
   or redrawn while it runs, so the capture is exactly what was on the glass.
   Two measured facts underpin it, and the second cost a wasted capture:
   - **Readback works.** The FAB note says it is unreliable here; that is a SPEED argument about

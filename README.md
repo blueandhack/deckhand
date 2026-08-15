@@ -386,6 +386,10 @@ The device can photograph itself — no camera, no mockup:
 echo "SCREENSHOT" > ~/.claude/deckhand-device-command
 ```
 
+`TAB 0|1|2` and `PAGE 0..3` switch what is on screen first, so every tab can be
+captured without standing at the device — the capture path can only ever record
+what is currently on the glass.
+
 It reads the panel back over SPI and ships it as base64 RGB565; the host rebuilds
 it and writes a PNG to `~/Deckhand-shots/`. 240x320 is 153,600 bytes, so it takes
 about 18 seconds at 115200. Nothing is blanked or redrawn while it runs, so what

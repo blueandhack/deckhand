@@ -2630,6 +2630,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.setTextDatum(TL_DATUM);
     tft.drawString("Waiting for host script...", 12, CONTENT_Y + 26);
+  } else if (buf.startsWith("TAB ")) {
+    // Remote tab switch. Added so screenshots can be taken of every tab without
+    // someone standing at the device - the capture path can only ever record
+    // what is currently on the glass.
+    int t = buf.substring(4).toInt();
+    if (t >= 0 && t < TAB_COUNT) switchTab((Tab) t);
+  } else if (buf.startsWith("PAGE ")) {
+    // Settings page, for the same reason. No-op unless SETTINGS is showing.
+    int pg = buf.substring(5).toInt();
+    if (currentTab == TAB_SETTINGS) gotoSettingsPage(pg);
   } else if (buf == "SCREENSHOT") {
     // Reads the panel back and ships it as base64 RGB565. Readback was assumed
     // impossible here - the FAB note says so, because per-pixel reads for
