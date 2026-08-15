@@ -336,8 +336,16 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
 }
 // Index-based (not SessionInfo&) for the same Arduino auto-prototype reason
 // as buildSessionSubline.
+// 1 when this ask offers a SPEAK row, 0 otherwise. Used by BOTH askOptionsTop()
+// and the draw, so the buttons and their hit tests can never disagree about how
+// many rows are in the stack - which is exactly how a fixed offset would drift.
+int askVoiceRows(int idx) {
+  const SessionInfo& s = sessions[idx];
+  return (s.askVoice && s.askAnswerable && !s.askVoiceText[0]) ? 1 : 0;
+}
 int askOptionsTop(int idx) {
-  return contentBottom() - sessions[idx].askOptCount * (ASK_OPT_H + ASK_OPT_GAP);
+  return contentBottom() -
+         (sessions[idx].askOptCount + askVoiceRows(idx)) * (ASK_OPT_H + ASK_OPT_GAP);
 }
 // The answer screen: question title, paged detail text, and one big button
 // per option. Tapping an option sends the answer to the host, which hands
@@ -465,6 +473,17 @@ void drawAskDetail(int idx) {
     tft.drawString(label, tft.width() / 2, by + ASK_OPT_H / 2);
     tft.setTextDatum(TL_DATUM);
   }
+
+  // Voice is offered only where free text is actually delivered: a question.
+  // A plan's answer text is discarded by the hook and a permission prompt can
+  // only be denied, so neither gets this control. It is one more row in the
+  // same bottom-anchored stack as the option buttons (askOptionsTop already
+  // reserved the room for it via askVoiceRows), so it can never overlap them
+  // regardless of askOptCount.
+  if (askVoiceRows(idx)) {
+    uiButton(CARD_X, contentBottom() - ASK_OPT_H, CARD_W, ASK_OPT_H,
+             "SPEAK YOUR ANSWER", COLOR_ACCENT);
+  }
 }
 // Device -> host, over whichever transports are up. The host maps the short
 // id back to the full session and writes the answer file for the hook.
@@ -518,6 +537,15 @@ bool handleAskTouch(int sx, int sy) {
   }
 
   int optTop = askOptionsTop(detailIndex);
+  // SPEAK occupies its own row at the bottom of the stack - test it before the
+  // option hit-testing below, at the same y the draw used, so the two can
+  // never disagree about where the button is.
+  if (askVoiceRows(detailIndex) && sy >= contentBottom() - ASK_OPT_H) {
+    copyField(micAnswerPid, sizeof(micAnswerPid), s.askPid);
+    micStream();                 // capped at 20s because micAnswerPid is set
+    micAnswerPid[0] = '\0';      // one capture only; never leaks into a dictation
+    return true;
+  }
   if (sy >= optTop) {
     // Mirror mode: the options are a read-only list. Swallow the tap (so it
     // can't fall through to "back") but never send an answer - the Mac's

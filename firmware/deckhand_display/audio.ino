@@ -303,8 +303,9 @@ void micStream() {
   const char* target = "-";
   if (showingDetail && detailIndex >= 0 && detailIndex < sessionCount)
     target = sessions[detailIndex].id;
-  Serial.printf("AUDIO stream rate=%d codec=ima4 chunk=%d scale=8 dc=%d target=%s\n",
-                MIC_REC_RATE_OUT, MIC_STREAM_CHUNK, dc, target);
+  Serial.printf("AUDIO stream rate=%d codec=ima4 chunk=%d scale=8 dc=%d target=%s answer=%s\n",
+                MIC_REC_RATE_OUT, MIC_STREAM_CHUNK, dc, target,
+                micAnswerPid[0] ? micAnswerPid : "-");
 
   int pred = 0, index = 0;          // ADPCM state
   int head = 0, tail = 0, ringUsed = 0;
@@ -330,7 +331,9 @@ void micStream() {
   unsigned long windowBlockedAt = 0;
   String inLine;
 
-  while (millis() - start < MIC_STREAM_MAX_MS) {
+  // 20s for an answer, 120s for a dictation - see MIC_ANSWER_MAX_MS.
+  const unsigned long cap = micAnswerPid[0] ? MIC_ANSWER_MAX_MS : MIC_STREAM_MAX_MS;
+  while (millis() - start < cap) {
     uint32_t len = 0;
     if (adc_continuous_read(adc, frame, sizeof(frame), &len, 100) == ESP_OK) {
       for (uint32_t i = 0; i + SOC_ADC_DIGI_RESULT_BYTES <= len; i += SOC_ADC_DIGI_RESULT_BYTES) {

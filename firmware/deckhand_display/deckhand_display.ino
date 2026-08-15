@@ -674,6 +674,9 @@ struct SessionInfo {
   // live buttons for a hook that already returned, or a read-only list for one
   // that is still waiting (which would hang the prompt for 90s).
   bool askAnswerable;
+  bool askVoice;              // this ask may be answered by voice (question only)
+  char askVoiceText[204];     // transcript awaiting confirmation ("" = none)
+  char askVoiceSha[20];       // hash of exactly the text above
 };
 SessionInfo sessions[MAX_SESSIONS];
 int sessionCount = 0;
@@ -947,7 +950,11 @@ const int MIC_STREAM_CHUNK = 1024;      // bytes per frame on the wire
 const int MIC_STREAM_RING = 16384;      // ~2s of slack, absorbs host jitter
 const int MIC_STREAM_WINDOW = 8;        // unacked chunks allowed in flight
 const unsigned long MIC_STREAM_MAX_MS = 120000UL;
-
+// An ANSWER recording is capped far shorter than a dictation. The hook blocks
+// for REMOTE_WAIT_MS (90s) and that is the whole budget for record + transfer +
+// transcribe + read + confirm; 20s of speech is far more than an answer needs.
+const unsigned long MIC_ANSWER_MAX_MS = 20000UL;
+char micAnswerPid[24] = "";   // non-empty => this capture answers that prompt
 
 
 
@@ -2295,6 +2302,9 @@ void handleLine(const String& line) {
       info.askDetail[0] = '\0';
       info.askOptCount = 0;
       info.askAnswerable = remoteAnswerEnabled;
+      info.askVoice = false;
+      info.askVoiceText[0] = '\0';
+      info.askVoiceSha[0] = '\0';
       JsonObject ask = s["ask"];
       if (!ask.isNull()) {
         // Absent = fall back to the host-wide flag (a hook too old to stamp the
@@ -2305,12 +2315,18 @@ void handleLine(const String& line) {
         copyField(info.askNonce, sizeof(info.askNonce), ask["nonce"] | "");
         copyField(info.askTitle, sizeof(info.askTitle), ask["title"] | "");
         copyField(info.askDetail, sizeof(info.askDetail), ask["detail"] | "");
+        info.askVoice = ask["voice"] | false;
+        copyField(info.askVoiceText, sizeof(info.askVoiceText), ask["voiceText"] | "");
+        copyField(info.askVoiceSha, sizeof(info.askVoiceSha), ask["voiceSha"] | "");
         // Defense in depth: the host already flattens control bytes, but any
         // that slip through render as garbage glyphs on this font, so blank
         // them to spaces here too. The detail keeps '\n' (it drives code-block
         // line breaks in the wrapper); the title is always single-line.
         for (char* p = info.askTitle; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
         for (char* p = info.askDetail; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
+        // Control bytes would corrupt the line we later HMAC, and the sha must
+        // be over exactly what is displayed.
+        for (char* p = info.askVoiceText; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
         JsonArray opts = ask["options"].as<JsonArray>();
         if (!opts.isNull()) {
           for (JsonVariant o : opts) {
