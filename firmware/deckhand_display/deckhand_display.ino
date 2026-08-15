@@ -4192,12 +4192,25 @@ const int DEV_CARD_Y = PAGE_TOP + 4;
 const int DEV_CARD_H = 120;
 const int DROW_BT = 24, DROW_USB = 52, DROW_BATT = 80, DROW_ID = 100;
 
-// Page 1 - three steppers + full-width sound toggle
-const int P1_BRIGHT_Y = PAGE_TOP + 2;
-const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + SP_1;
-const int P1_VOL_Y = P1_SLEEP_Y + STEPPER_CARD_H + SP_1;
-const int P1_SOUND_Y = P1_VOL_Y + STEPPER_CARD_H + SP_1;
-const int P1_SOUND_H = H_ROW;   // toggles; H_ROW keeps the page inside its budget
+// Page 1 - three steppers + a row of three toggles.
+//
+// THIS PAGE IS OVER-SUBSCRIBED, so its gaps are page-local rather than SP_1.
+// The region runs PAGE_TOP(80)..contentBottom(302) = 222px, and the content is
+// 3*STEPPER_CARD_H + H_ROW = 208 of it. Neither number can give: 40 is TAP_MIN
+// for the toggles, and the steppers are already 1px from being unable to hold a
+// label plus 40px keys (see STEP_BTN_TOP). That leaves 14px to spread across
+// five gaps - top, three between rows, and the one under the bottom row.
+// The bottom one is NOT optional: with SP_1 (4) throughout, the toggle row ended
+// at exactly 302 and sat against the footer with no separation, which is what
+// made MUTE/NORMAL/LIGHT read as part of the status line. Budget is now 1 top,
+// 3/3/3 between, 4 below - the bottom gap matching the USAGE tab's.
+// Anything added to this page has to come out of those 14px.
+const int P1_GAP = 3;
+const int P1_BRIGHT_Y = PAGE_TOP + 1;
+const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
+const int P1_VOL_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_GAP;
+const int P1_SOUND_Y = P1_VOL_Y + STEPPER_CARD_H + P1_GAP;
+const int P1_SOUND_H = H_ROW;   // toggles; H_ROW is TAP_MIN and cannot shrink
 // Three toggles share the bottom row: SOUND | FLIPPED | theme. (216-16)/3 = 66px each
 // against a longest label of 42px (FLIPPED at Cozette's 6px advance), so no new page and
 // no geometry growth were needed to add the theme switch.
