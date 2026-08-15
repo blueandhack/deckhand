@@ -759,6 +759,7 @@ void uiListRow(int x, int y, int w, int h, const char* label, bool selected,
     tft.drawString(tag, x + w - rightInset, y + h / 2);
   }
   tft.setTextDatum(TL_DATUM);
+  drawFab(0);   // the bar owns it now, so it is painted with the rest of the bar
 }
 
 // Secondary caption under a control or at the foot of a page.
@@ -2439,54 +2440,51 @@ extern bool octoActive;
 // the USB adapter's DTR line fired it by itself) and the fixed tab-bar button
 // (which cost the three tabs 42px).
 //
-// FIXED at the top right of the CONTENT area, and now a plain button: tap to
-// start, tap to stop. It used to float and be draggable - hold 700ms, drag,
-// release to persist the position to NVS - which on a resistive panel needed a
-// 70px spike reject, a 2px deadband, and a CLEARED content area to drag over
-// (with no framebuffer to read back, there is no way to restore what was under
-// a moving object). All of that went with the gesture; a fixed button only has
-// to be hit-tested.
+// IT LIVES IN THE TAB BAR, in a reserved slot at the right end, so it is chrome
+// rather than something floating over content. That costs the three tabs width
+// (80px each -> 66) but buys back everything a floating button was fighting:
+// it can no longer cover a card, a status pill, or the settings pager's "next"
+// key, and it no longer has to appear and disappear per screen to stay safe.
 //
-// It stays inside the content area rather than the tab bar or footer, so it can
-// never block tab switching - and it is hidden on SETTINGS, because the pager's
-// "next" key occupies this same corner and the button takes touches first. See
-// fabVisible().
-const int FAB_R = 24;              // 48px across - well over the 40px touch floor
-const int FAB_MARGIN = 10;
-
-int fabX = -1, fabY = -1;          // centre; fixed, resolved once in setup()
+// It used to float and be draggable - hold 700ms, drag, release to persist the
+// position to NVS - which on a resistive panel needed a 70px spike reject, a 2px
+// deadband, and a CLEARED content area to drag over (with no framebuffer to read
+// back, there is no way to restore what was under a moving object). All of that
+// went with the gesture.
+//
+// The slot is 40px wide against a 34px-tall bar, so the ring is 26px rather than
+// the old 48. Its tap target is the full slot. That is under TAP_MIN (40) in
+// height - unavoidable, and no worse than the three tabs beside it, which have
+// always been 34 tall.
+const int TAB_REC_W = 40;                       // slot reserved at the right end
+inline int tabsW() { return tft.width() - TAB_REC_W; }   // width the 3 tabs share
+inline int recCX() { return tabsW() + TAB_REC_W / 2; }
+inline int recCY() { return TAB_BAR_H / 2; }
+const int REC_R = 13;                           // 26px ring, fits the 34px bar
 bool fabPressed = false;           // the press currently down started on the button
-
-void initFabPos() {
-  fabX = tft.width() - FAB_R - FAB_MARGIN;
-  fabY = CONTENT_Y + FAB_R + FAB_MARGIN;
-}
 
 // Hidden wherever it could cover something that must not be covered: the ask
 // screen's Allow/Deny buttons above all - a floating control overlapping a
 // permission decision is a genuine hazard, not just a cosmetic one.
+// Now that it is part of the tab bar, it is drawn whenever the bar is, and the
+// old per-screen exclusions are gone with the hazards that motivated them: it
+// cannot overlap Allow/Deny, a card, or the pager, because it is not over the
+// content area at all. Chrome that blinks in and out reads as a glitch, so the
+// only things that hide it are the two states where the bar itself is gone.
 bool fabVisible() {
-  if (isAsleep || octoActive || readerActive || histActive || voiceCardActive) return false;
-  // SETTINGS: the pager's "next" key sits in this exact corner, and fabHit()
-  // runs before every other touch handler - so a button here would swallow the
-  // tap and paging would simply stop working. There is also nothing on a
-  // settings page to aim a dictation at.
-  if (currentTab == TAB_SETTINGS && !showingDetail) return false;
-  // Allowed on a session's PLAIN detail screen - that's how you aim a dictation
-  // at a specific session. Still hidden whenever an ask is pending, because a
-  // floating control overlapping an Allow/Deny decision is a hazard.
-  if (showingDetail) {
-    if (detailIndex < 0 || detailIndex >= sessionCount) return false;
-    return sessions[detailIndex].askPid[0] == '\0';
-  }
+  if (isAsleep || octoActive) return false;
+  // Shown on the session detail screen too - that is how a dictation is aimed at
+  // a specific session. It used to be hidden there whenever an ask was pending,
+  // because a control floating over Allow/Deny is a hazard; in the tab bar it is
+  // nowhere near those buttons, so that exclusion went away with the float.
   return true;
 }
 
 bool fabHit(int sx, int sy) {
   if (!fabVisible()) return false;
-  long dx = sx - fabX, dy = sy - fabY;
-  // Slightly generous radius: a fingertip on a resistive panel lands a few px off.
-  return dx * dx + dy * dy <= (long) (FAB_R + 6) * (FAB_R + 6);
+  // The whole slot is the target, not just the ring: a 26px circle is well under
+  // a fingertip, and the slot is the only thing in that corner of the bar.
+  return sy < TAB_BAR_H && sx >= tabsW();
 }
 
 // TRANSPARENT by construction, not by alpha: this panel is written directly with
@@ -2517,22 +2515,23 @@ bool fabHit(int sx, int sy) {
 void drawFab(int state) {
   if (!fabVisible()) return;
 
+  const int cx = recCX(), cy = recCY();
+  // It sits on the tab bar's own fill, so COLOR_CARD is the backdrop to blend
+  // against - and the 1px haloes the floating version needed are gone with it:
+  // those existed to keep an outline readable over ARBITRARY content, and this
+  // background is now known and flat.
+  tft.fillRect(tabsW(), 0, TAB_REC_W, TAB_BAR_H, COLOR_CARD);
   if (state == 1) { // pressed: solid disc, unmistakable feedback
-    tft.fillSmoothCircle(fabX, fabY, FAB_R - 1, COLOR_ACCENT, COLOR_BG);
+    tft.fillSmoothCircle(cx, cy, REC_R, COLOR_ACCENT, COLOR_CARD);
     // The hole sits ON the accent disc, so that is what it blends against.
-    tft.fillSmoothCircle(fabX, fabY, 7, COLOR_BG, COLOR_ACCENT);
+    tft.fillSmoothCircle(cx, cy, 4, COLOR_CARD, COLOR_ACCENT);
     return;
   }
-
-  // 1px COLOR_BG haloes either side of the ring: without them an outline control
-  // vanishes wherever it happens to share a tone with whatever is behind it.
-  // One even 2px annulus between two 1px haloes. The old four nested drawCircles
-  // did not nest: measured, 4 of 360 radial rays crossed no ring pixel at all
-  // and 48 more thinned to a single pixel, which is what made it look lumpy.
-  uiRing(fabX, fabY, FAB_R, 1, COLOR_BG, COLOR_BG);
-  uiRing(fabX, fabY, FAB_R - 1, 2, COLOR_LABEL, COLOR_BG);
-  uiRing(fabX, fabY, FAB_R - 3, 1, COLOR_BG, COLOR_BG);
-  tft.fillSmoothCircle(fabX, fabY, 7, COLOR_VALUE, COLOR_BG);
+  // One even 2px annulus. Four nested drawCircles did not nest: measured, 4 of
+  // 360 radial rays crossed no ring pixel at all and 48 more thinned to a single
+  // pixel, which is what made the old ring look lumpy.
+  uiRing(cx, cy, REC_R, 2, COLOR_LABEL, COLOR_CARD);
+  tft.fillSmoothCircle(cx, cy, 4, COLOR_VALUE, COLOR_CARD);
 }
 
 // Picked up: hand the content area over to a blank placement canvas (see the note
@@ -2540,7 +2539,7 @@ void drawFab(int state) {
 void drawTabBar() {
   tft.fillRect(0, 0, tft.width(), TAB_BAR_H, COLOR_CARD);
   const char* labels[TAB_COUNT] = {"USAGE", "SESSIONS", "SETTINGS"};
-  int tabW = tft.width() / TAB_COUNT;
+  int tabW = tabsW() / TAB_COUNT;   // the record slot owns the rest
   for (int i = 0; i < TAB_COUNT; i++) {
     bool active = (i == (int) currentTab);
     setUIFont(1);
@@ -4969,7 +4968,10 @@ void handleTouch() {
 
 
   if (sy < TAB_BAR_H) {
-    int tabW = tft.width() / TAB_COUNT;
+    // A tap in the record slot never reaches here - fabHit() claims it earlier,
+    // ahead of the showingDetail branch, so the button also works on the detail
+    // screen where the tab bar itself is inert.
+    int tabW = tabsW() / TAB_COUNT;
     Tab tapped = (Tab) constrain(sx / tabW, 0, TAB_COUNT - 1);
     switchTab(tapped);
     return;
@@ -5276,7 +5278,13 @@ void handleLine(const String& line) {
   else if (currentTab == TAB_SESSIONS) renderSessionsTab();
   else renderSettingsTab();
   renderFooter();
-  drawFab(0); // last: it floats above whatever the tab just painted
+  // No drawFab() here any more. It used to be repainted last on every tick,
+  // because a floating button had to survive whatever the tab had just painted
+  // underneath it. In the tab bar nothing paints over it, and drawFab now clears
+  // its slot before drawing - so a per-tick call would be a clear-then-redraw
+  // every 5s, which is precisely the flicker this file's redraw discipline
+  // exists to prevent. The bar paints it, and the bar only repaints on a tab
+  // switch or a full repaint.
 }
 
 class BLEServerCallbacksImpl : public BLEServerCallbacks {
@@ -5391,7 +5399,6 @@ void setup() {
   // opening screen is already in the right palette rather than flashing the default.
   // Wake from deep sleep re-runs setup(), so this restores the theme then too.
   applyTheme(prefs.getUChar("theme", 0));
-  initFabPos();        // fixed, top right of the content area
   applyScreenRotation();   // also restores it after a calibration run
   loadBrightness();
   loadSleepTimeout();
