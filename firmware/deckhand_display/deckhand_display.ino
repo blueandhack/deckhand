@@ -5085,8 +5085,12 @@ void closeSessionDetail() {
 
 void handleTouch() {
   static bool wasTouching = false;
+  // 15ms, not 40. At 40 the UI polled at 25Hz: up to 40ms before a press was even
+  // seen, and a tap shorter than 40ms could fall between two polls and be lost
+  // outright - the same failure the recording stop-tap had. Touch is on its OWN
+  // SPI bus (the TFT is on the other), so polling faster contends with nothing.
   static unsigned long lastPoll = 0;
-  if (millis() - lastPoll < 40) return;
+  if (millis() - lastPoll < 15) return;
   lastPoll = millis();
 
   int sx, sy;
@@ -5625,6 +5629,28 @@ void setup() {
 // Shared between the USB (polled Stream) and BLE (onWrite callback)
 // transports, so whichever one the host actually has open drives the
 // display identically.
+// BOTH TRANSPORTS CARRY THE SAME PAYLOAD EVERY TICK. USB and BLE are independent
+// links, not a fallback pair, so the host sends each tick down both - 4998
+// `via=usb,ble` ticks in one log. The device was parsing and rendering all of it
+// twice: 2 x deserializeJson over ~785 bytes plus a full pass over every
+// change-only cache, for a second render that by construction can only produce
+// the pixels the first one just drew.
+//
+// The window is 1000ms deliberately. The two copies arrive milliseconds apart,
+// while consecutive ticks are 5000ms apart - so two genuinely different ticks
+// that happen to be byte-identical are still both processed, and only the
+// duplicate is dropped. HISTORY replies are excluded outright: they are their own
+// line, they only travel over USB anyway, and paging back to a page you just
+// viewed is a legitimate repeat that must still repaint.
+uint32_t payloadHash32(const String& s) {
+  uint32_t h = 2166136261u;                       // FNV-1a
+  for (size_t i = 0; i < s.length(); i++) { h ^= (uint8_t) s[i]; h *= 16777619u; }
+  return h;
+}
+uint32_t lastPayloadHash = 0;
+unsigned long lastPayloadMillis = 0;
+const unsigned long PAYLOAD_DEDUP_MS = 1000;
+
 void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool fromUsb) {
   if (buf == "RECAL") {
     runCalibration();
@@ -5672,7 +5698,22 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     }
   } else {
     *lastRxTimestamp = millis();
-    handleLine(buf);
+    uint32_t h = payloadHash32(buf);
+    bool dup = h == lastPayloadHash &&
+               lastPayloadMillis && millis() - lastPayloadMillis < PAYLOAD_DEDUP_MS &&
+               !buf.startsWith("{\"hist\"");
+    if (dup) {
+      // Still stamp liveness. These live INSIDE handleLine, so skipping it
+      // wholesale would freeze the footer's "Xs ago" on whichever transport
+      // happened to lose the race - the freshness would tick only every other
+      // arrival, or stop entirely if the winner went away.
+      lastRxMillis = millis();
+      everReceived = true;
+    } else {
+      lastPayloadHash = h;
+      lastPayloadMillis = millis();
+      handleLine(buf);
+    }
   }
   buf = "";
 }
