@@ -638,6 +638,16 @@ const int SP_1 = 4, SP_2 = 8, SP_3 = 12, SP_4 = 16;
 const int R_SM = 6;    // chips, pills, small controls
 const int R_MD = 10;   // cards, buttons, rows  (== RADIUS)
 
+// BORDER WEIGHTS - two, and which one a surface gets is decided by WHAT IT IS,
+// not by where it was written. A CARD is a surface you read content off; a
+// CONTROL is something you press or that reports a state. Settings cards used
+// to be the odd ones out at 1px while the usage cards, session rows and the
+// session detail card were all 2px, so the same kind of object had two
+// different outlines depending on the tab you were looking at. Use these
+// constants rather than a literal, so that can't drift apart again.
+const int BORDER_CARD = 2;   // usage cards, session rows, settings cards, dialogs
+const int BORDER_CTRL = 1;   // buttons, list rows, pills, chips, pager keys
+
 // TOUCH - the panel is resistive and fingertips are ~9mm. 320px of height can't
 // give every control 9mm, so this is the floor everything tappable must clear,
 // and the vertical budget is spent to get as close to it as each page allows.
@@ -702,7 +712,7 @@ inline void uiRing(int cx, int cy, int r, int thickness, uint16_t stroke, uint16
 void uiCard(int x, int y, int w, int h, uint16_t border = COLOR_LABEL,
             uint16_t behind = COLOR_BG) {
   uiFillRound(x, y, w, h, R_MD, COLOR_CARD, behind);
-  uiStrokeRound(x, y, w, h, R_MD, 1, border, behind);
+  uiStrokeRound(x, y, w, h, R_MD, BORDER_CARD, border, behind);
 }
 
 // One button style, three intents. `filled` marks the active/selected state so
@@ -715,7 +725,7 @@ void uiButton(int x, int y, int w, int h, const char* label,
   // A filled button's outline is the same colour as its fill, so stroking it
   // adds nothing and only re-blends the edge pixels a second time. Skip it and
   // let the fill's own anti-aliased edge be the silhouette.
-  if (!filled) uiStrokeRound(x, y, w, h, R_MD, 1, tint, behind);
+  if (!filled) uiStrokeRound(x, y, w, h, R_MD, BORDER_CTRL, tint, behind);
   setUIFont(T_TITLE);
   tft.setTextColor(filled ? COLOR_BG : tint, bg);
   tft.setTextDatum(MC_DATUM);
@@ -738,7 +748,7 @@ void uiListRow(int x, int y, int w, int h, const char* label, bool selected,
   uint16_t tint = selected ? COLOR_ACCENT : COLOR_LABEL;
   uint16_t bg = selected ? COLOR_ACCENT : COLOR_CARD;
   uiFillRound(x, y, w, h, R_MD, bg, behind);
-  if (!selected) uiStrokeRound(x, y, w, h, R_MD, 1, tint, behind); // see uiButton
+  if (!selected) uiStrokeRound(x, y, w, h, R_MD, BORDER_CTRL, tint, behind); // see uiButton
   setUIFont(T_BODY);
   tft.setTextColor(selected ? COLOR_BG : COLOR_VALUE, bg);
   tft.setTextDatum(ML_DATUM);
@@ -1265,7 +1275,7 @@ int micPillY() { return contentBottom() - MIC_PILL_H - 8; }
 void micPillFrame(const char* title) {
   int x = micPillX(), y = micPillY(), w = micPillW();
   uiFillRound(x, y, w, MIC_PILL_H, R_MD, COLOR_CARD, COLOR_BG);
-  uiStrokeRound(x, y, w, MIC_PILL_H, R_MD, 1, COLOR_ACCENT, COLOR_BG);
+  uiStrokeRound(x, y, w, MIC_PILL_H, R_MD, BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
   // A filled dot beside the title marks "live" by shape, the same way the status
   // pills on the sessions list do.
   tft.fillSmoothCircle(x + SP_3 + 3, y + 13, 4, COLOR_ACCENT, COLOR_CARD);
@@ -1277,7 +1287,7 @@ void micPillFrame(const char* title) {
   // the bar itself - repainting a rounded track 8x a second would flicker.
   int bx = x + SP_3, by = y + 26, bw = w - 2 * SP_3, bh = 14;
   uiFillRound(bx, by, bw, bh, R_SM, COLOR_BG, COLOR_CARD);
-  uiStrokeRound(bx, by, bw, bh, R_SM, 1, COLOR_LABEL, COLOR_CARD);
+  uiStrokeRound(bx, by, bw, bh, R_SM, BORDER_CTRL, COLOR_LABEL, COLOR_CARD);
 }
 
 // level 0..1000. `right` is the elapsed/percentage readout, `hint` the caption.
@@ -2384,7 +2394,7 @@ void drawCardBorder(int* cache, int x, int y, int w, int h, uint16_t color) {
   *cache = (int) color;
   // One 2px ring, not two nested outlines: adjacent Bresenham arcs don't nest,
   // so the old pair left holes where both traces landed on the same pixel.
-  uiStrokeRound(x, y, w, h, RADIUS, 2, color, COLOR_BG);
+  uiStrokeRound(x, y, w, h, RADIUS, BORDER_CARD, color, COLOR_BG);
 }
 
 String formatTokens(unsigned long tokens) {
@@ -2992,7 +3002,7 @@ void drawStatusPill(int xEdge, int y, const char* label, const char* status, boo
   } else if (working) {
     tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   } else {
-    uiStrokeRound(x, y, w, 18, 9, 1, color, COLOR_CARD);
+    uiStrokeRound(x, y, w, 18, 9, BORDER_CTRL, color, COLOR_CARD);
     tft.setTextColor(color, COLOR_CARD);
   }
   tft.setTextDatum(MC_DATUM);
@@ -3037,7 +3047,7 @@ void drawSessionRow(int i) {
   // the two states that want the user's eyes.
   uint16_t border = working ? COLOR_LABEL : color;
   // One even 2px ring; two nested outlines leave holes where their arcs collide.
-  uiStrokeRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, 2, border, COLOR_BG);
+  uiStrokeRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, BORDER_CARD, border, COLOR_BG);
 
   int dotCy = large ? y + 19 : y + rowH / 2;
   drawStatusDot(SESSION_ROW_X + 20, dotCy, large ? 9 : 7, s.status, COLOR_CARD,
@@ -3464,7 +3474,7 @@ void drawAskDetail(int idx) {
     tft.setTextDatum(TL_DATUM);
     // ...and the READ ALL button up in the header row.
     uiFillRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, 24, R_SM, COLOR_CARD, COLOR_BG);
-    uiStrokeRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, 24, R_SM, 1, COLOR_ACCENT, COLOR_BG);
+    uiStrokeRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, 24, R_SM, BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
@@ -3505,7 +3515,7 @@ void drawAskDetail(int idx) {
     else if (isPerm && k == 1) oc = COLOR_BAD;
     uint16_t fill = chosen ? oc : COLOR_CARD;
     uiFillRound(CARD_X, by, CARD_W, ASK_OPT_H, 8, fill, COLOR_BG);
-    uiStrokeRound(CARD_X, by, CARD_W, ASK_OPT_H, 8, 1,
+    uiStrokeRound(CARD_X, by, CARD_W, ASK_OPT_H, 8, BORDER_CTRL,
                   answered && !chosen ? COLOR_LABEL : oc, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(chosen ? COLOR_BG : (answered ? COLOR_LABEL : oc), fill);
@@ -3603,7 +3613,7 @@ void drawHistory() {
   for (int i = 0; i < 3; i++) {
     uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
     uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD, COLOR_BG);
-    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, 1, c, COLOR_BG);
+    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, BORDER_CTRL, c, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(c, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
@@ -3649,7 +3659,7 @@ void drawHistFull() {
   for (int i = 0; i < 3; i++) {
     uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
     uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD, COLOR_BG);
-    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, 1, c, COLOR_BG);
+    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, BORDER_CTRL, c, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(c, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
@@ -3804,7 +3814,7 @@ void drawReader() {
   for (int i = 0; i < 3; i++) {
     uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
     uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD, COLOR_BG);
-    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, 1, c, COLOR_BG);
+    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, BORDER_CTRL, c, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(c, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
@@ -4027,7 +4037,7 @@ void drawSessionDetail(int idx) {
   tft.drawString("< Back", CARD_X, CONTENT_Y + 4);
 
   uiFillRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, COLOR_CARD, COLOR_BG);
-  uiStrokeRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, 2, color, COLOR_BG);
+  uiStrokeRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, BORDER_CARD, color, COLOR_BG);
 
   // Laid out with a running cursor rather than the hand-derived offsets this screen used
   // to carry (cardY + 78 / +120 / +158). Those had to be re-derived by hand every time a
@@ -4290,7 +4300,7 @@ void drawStepGlyph(int cacheIdx, int x, int btnY, const char* glyph, bool enable
   if (stepGlyphCache[cacheIdx] == (int) enabled) return;
   stepGlyphCache[cacheIdx] = (int) enabled;
   uint16_t c = enabled ? COLOR_ACCENT : COLOR_LABEL;
-  uiStrokeRound(x, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, 6, 1, c, COLOR_BG);
+  uiStrokeRound(x, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, 6, BORDER_CTRL, c, COLOR_BG);
   setUIFont(2);
   tft.setTextColor(c, COLOR_BG);
   tft.setTextDatum(MC_DATUM);
@@ -4310,7 +4320,7 @@ void drawPager() {
   for (int side = 0; side < 2; side++) {
     int bx = side == 0 ? PAGER_BTN_X0 : tft.width() - PAGER_BTN_X0 - PAGER_BTN_W;
     uiFillRound(bx, by, PAGER_BTN_W, bh, RADIUS, COLOR_CARD, COLOR_BG);
-    uiStrokeRound(bx, by, PAGER_BTN_W, bh, RADIUS, 1, COLOR_ACCENT, COLOR_BG);
+    uiStrokeRound(bx, by, PAGER_BTN_W, bh, RADIUS, BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
