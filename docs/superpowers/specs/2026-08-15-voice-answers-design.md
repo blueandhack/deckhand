@@ -17,7 +17,9 @@ into an *answer to a pending prompt*.
 
 - **The delivery channel.** `emitDecision()` has no native way to hand Claude a chosen answer, so
   for a question it sends `{ behavior: "deny", message: carriedAnswer }` — and that message reaches
-  Claude verbatim as the tool result. **Free text needs no hook change at all.**
+  Claude verbatim as the tool result. **For a question, free text needs no hook change at all** —
+  `chose` is `answer.label || \`option ${answer.idx + 1}\``, so an answer file carrying the
+  transcript as `label` flows through untouched. This holds ONLY for questions; see Scope.
 - **`target=<id12>`** is already stamped into the stream header when a recording starts from a
   session's detail screen.
 - **Per-prompt nonces** (`askNonces`, 8 random bytes, single-use, consumed on a successful answer)
@@ -27,8 +29,19 @@ into an *answer to a pending prompt*.
 
 ## Scope
 
-**Questions and plans only** (`ask.kind === "question"` or `"plan"`). **Permission prompts are
-excluded**, and that is a safety decision rather than an omission: a spoken answer can only be
+**Questions only** (`ask.kind === "question"`). Two exclusions, for different reasons.
+
+**Plans are excluded because the text would be silently dropped.** Found while planning, by reading
+`emitDecision()` rather than trusting this spec's earlier claim: only the `question` branch carries
+free text (`{ behavior: "deny", message: carriedAnswer }`). Both plan branches send a FIXED string —
+`"The user chose to keep planning (answered from the Deckhand display)."` — so a spoken answer to a
+plan prompt would reach Claude with none of what was said, while the device reported success. That
+is the worst failure shape available: silent, and indistinguishable from working. Supporting plans
+needs a small change to `emitDecision` to use the spoken text as the reason when one is present;
+that is a separate, deliberate edit to the most safety-critical file in the project (its stdout is
+a decision channel), and is deferred rather than bundled in.
+
+**Permission prompts are excluded** as a safety decision rather than an omission: a spoken answer can only be
 delivered as a *deny with message*, so speaking "yes, go ahead" at a permission prompt would DENY
 the tool call with that text as the reason. There is no allow-with-a-note channel. Perms keep their
 Allow/Deny buttons, which are unambiguous and already work.
@@ -114,7 +127,7 @@ read + confirm.
 ## Device UI
 
 The ask screen gains a **SPEAK** control alongside the option buttons, shown only for a `question`
-or `plan` ask that is `answerable`. Recording uses the existing pill and level meter.
+ask that is `answerable` — not for plans or permission prompts, per Scope. Recording uses the existing pill and level meter.
 
 After transcription the confirm screen is the existing voice card plus three buttons:
 
