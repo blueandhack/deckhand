@@ -1132,10 +1132,18 @@ Other things that aren't obvious from a single file:
     switch or a full repaint.
   - **The 1px `COLOR_BG` haloes are gone.** They existed to keep an outline readable over ARBITRARY
     content; the tab bar's fill is known and flat, so the ring blends against `COLOR_CARD` instead.
-  Visual: a grey 2px ring with a white centre dot - the universal record symbol. Idle is neutral
-  (`COLOR_LABEL` ring, `COLOR_VALUE` dot) so it recedes until looked for; orange marks the
-  **pressed** state only. `fabVisible()` now hides it only when asleep or when the crab owns the
-  screen, because chrome that blinks in and out reads as a glitch.
+  **Visual: it is drawn as a FOURTH TAB, not as a shape of its own.** Same Cozette 6x13 label
+  (`REC`), same `COLOR_LABEL` / `COLOR_VALUE` pair, and the same 3px `COLOR_ACCENT` underline inset
+  8px that marks a tab as active - pressed here means what active means there, so every item in the
+  bar reports its state the same way. It replaced a 26px ring, which was a second visual language
+  sitting inside a bar that already had one.
+  The one deliberate difference is the **leading dot**: a bare `REC` among three navigation labels
+  reads as a fourth destination, and the dot is the universal record mark saying this one DOES
+  something rather than going somewhere. Dot and label are laid out as a single group and centred
+  together (6 + 3 + 18 = 27px in the 40px slot), so the pair is optically centred instead of the
+  text being centred with the dot hanging off its left.
+  `fabVisible()` hides it only when asleep or when the crab owns the screen, because chrome that
+  blinks in and out reads as a glitch.
 - If this mic is ever replaced, an **INMP441** (I2S) is viable and needs no analog tuning:
   `SCK`→IO18, `WS`→IO19, `SD`→IO35. IO18/19/23 are the **microSD** bus and this firmware contains
   no SD code at all, so they're free as long as the card slot is unused.

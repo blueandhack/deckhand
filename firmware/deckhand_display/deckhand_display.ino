@@ -2460,7 +2460,6 @@ const int TAB_REC_W = 40;                       // slot reserved at the right en
 inline int tabsW() { return tft.width() - TAB_REC_W; }   // width the 3 tabs share
 inline int recCX() { return tabsW() + TAB_REC_W / 2; }
 inline int recCY() { return TAB_BAR_H / 2; }
-const int REC_R = 13;                           // 26px ring, fits the 34px bar
 bool fabPressed = false;           // the press currently down started on the button
 
 // Hidden wherever it could cover something that must not be covered: the ask
@@ -2515,23 +2514,33 @@ bool fabHit(int sx, int sy) {
 void drawFab(int state) {
   if (!fabVisible()) return;
 
-  const int cx = recCX(), cy = recCY();
-  // It sits on the tab bar's own fill, so COLOR_CARD is the backdrop to blend
-  // against - and the 1px haloes the floating version needed are gone with it:
-  // those existed to keep an outline readable over ARBITRARY content, and this
-  // background is now known and flat.
+  // Drawn as a FOURTH TAB, using the tab bar's own vocabulary rather than a
+  // shape of its own: same Cozette 6x13 label, same COLOR_LABEL / COLOR_VALUE
+  // pair, and the same 3px COLOR_ACCENT underline inset 8px that marks a tab as
+  // active. Pressed here means what active means there, so the two states are
+  // told apart the same way across the whole bar.
+  //
+  // The one deliberate difference is the leading dot. A bare "REC" among three
+  // navigation labels reads as a fourth destination; the dot is the universal
+  // record mark and says this one DOES something instead of going somewhere.
+  // Dot and label are laid out as one group and centred together, so the pair
+  // stays optically centred in the slot rather than the text alone being centred
+  // with the dot hanging off its left.
+  const int cy = recCY();
+  const uint16_t fg = (state == 1) ? COLOR_VALUE : COLOR_LABEL;
   tft.fillRect(tabsW(), 0, TAB_REC_W, TAB_BAR_H, COLOR_CARD);
-  if (state == 1) { // pressed: solid disc, unmistakable feedback
-    tft.fillSmoothCircle(cx, cy, REC_R, COLOR_ACCENT, COLOR_CARD);
-    // The hole sits ON the accent disc, so that is what it blends against.
-    tft.fillSmoothCircle(cx, cy, 4, COLOR_CARD, COLOR_ACCENT);
-    return;
+  setUIFont(1);
+  tft.setTextColor(fg, COLOR_CARD);
+  const int dotR = 3, gap = 3;
+  const int groupW = dotR * 2 + gap + tft.textWidth("REC");
+  const int x0 = recCX() - groupW / 2;
+  tft.fillSmoothCircle(x0 + dotR, cy, dotR, fg, COLOR_CARD);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("REC", x0 + dotR * 2 + gap, cy);
+  tft.setTextDatum(TL_DATUM);
+  if (state == 1) {
+    tft.fillRect(tabsW() + 8, TAB_BAR_H - 3, TAB_REC_W - 16, 3, COLOR_ACCENT);
   }
-  // One even 2px annulus. Four nested drawCircles did not nest: measured, 4 of
-  // 360 radial rays crossed no ring pixel at all and 48 more thinned to a single
-  // pixel, which is what made the old ring look lumpy.
-  uiRing(cx, cy, REC_R, 2, COLOR_LABEL, COLOR_CARD);
-  tft.fillSmoothCircle(cx, cy, 4, COLOR_VALUE, COLOR_CARD);
 }
 
 // Picked up: hand the content area over to a blank placement canvas (see the note
