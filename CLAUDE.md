@@ -1342,6 +1342,26 @@ Other things that aren't obvious from a single file:
   teeth-proving trick as `palette-check.mjs --selftest`. That check earned its place: the
   generator had only ever been run on Cozette, whose glyphs are tightly cropped, and Terminus
   declares a uniform full-cell `BBX` that exercises packing paths which had never run.
+- **The BRIGHTNESS / SLEEP AFTER / VOLUME steppers put the label in the MIDDLE column, and that
+  is what makes the keys fit.** The label used to sit top-left, in the same column as the left
+  key, so the keys had to start below it - at `+14` in a 56px card whose 2px border owns
+  `+54..+55`, which left them ending flush on that border with no padding at all. Moving the label
+  above the value it names frees the whole interior height: keys are now **44px** (4px OVER
+  `TAP_MIN`, not merely at it) at `+6..+49`, with 4px of air top and bottom. Label centres at
+  `+15`, value at `+32`, and the bar at `+43..+48`.
+  Three things worth keeping:
+  - **The value renders in `T_HEAD`** (Terminus 10x18 bold), and the `+`/`-` glyphs too. At body
+    size the number was the same weight as the label naming it, and a 6px glyph on a 44px key was
+    a speck. This is the type scale's middle rung doing the job it was added for.
+  - **Only BRIGHTNESS gets a bar.** It is the one continuous 0-100 setting, so the bar says where
+    in the range you are. Sleep and volume are discrete presets whose label already says that, and
+    a bar there would be decoration.
+  - **The touch zones are much bigger than the keys and always were**: `stepperHit` claims the
+    left third of the card for decrement and the right third for increment, over the full card
+    height - roughly 72x56 each, against a 44px key. Worth knowing before "fixing" a hit test that
+    is not the problem. The centred label spans x 87..153, clear of both zones, so a tap on it
+    cannot step the value by accident.
+
 - **Screen flip (180°) for charging.** SETTINGS › DISPLAY & SOUND has two half-width toggles
   sharing the bottom row — SOUND and NORMAL/FLIPPED — because a full-width row for each doesn't
   fit (only 32px remain under it). Flipping swaps `tft.setRotation()` between `SCREEN_ROTATION`

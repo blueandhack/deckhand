@@ -4133,16 +4133,18 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4; // top of each page's content
 // its contents; when the key grew to meet TAP_MIN it no longer fitted under the
 // label and the value text collided with it.
 const int STEPPER_CARD_H = 56;
-const int STEP_LABEL_Y   = 2;    // label band, from the card top
-// Key band, below the label. The label's cap-height ink ends at +11 (cell +2,
-// Cozette ascent 10, caps 8 tall), so at +12 the keys began on the very next
-// row and the two read as one block. +14 buys 2px of air and is close to the
-// ceiling: a 1px border leaves the interior at +1..+54, and a 13px label cell
-// plus 40px keys - 40 is TAP_MIN and cannot shrink - need 53 of those 54 rows.
-// A comfortable gap here needs a TALLER CARD, which needs page budget this page
-// does not have (its four rows end flush on contentBottom()).
-const int STEP_BTN_TOP   = 14;
-const int STEP_BTN_SIZE = 40;   // +/- keys: meets TAP_MIN; the value bar absorbs the width
+// The label used to sit top-left, in the SAME COLUMN as the left key, which is
+// what forced the keys down until they ended flush on the bottom border with no
+// padding at all. Moving it into the middle column - above the value it names -
+// frees the whole interior height for the keys, so they get bigger AND gain 4px
+// of air top and bottom. Layout inside a 56px card (2px border, interior
+// +2..+53): keys +6..+49, label centred +15, value centred +32, and for
+// BRIGHTNESS only a bar at +43..+48.
+const int STEP_LABEL_CY  = 15;   // label centre, from the card top
+const int STEP_VALUE_CY  = 32;   // value centre
+const int STEP_BAR_Y     = 43;   // BRIGHTNESS bar
+const int STEP_BTN_TOP   = 6;    // 4px clear of the 2px border
+const int STEP_BTN_SIZE = 44;   // +/- keys: 4px OVER TAP_MIN, not merely at it
 int stepBtnY(int cardY) { return cardY + STEP_BTN_TOP; }
 
 // Page 0 - DEVICE card
@@ -4232,10 +4234,13 @@ void drawConnDot(int cx, int cy, int r, bool connected, uint16_t bg) {
 
 void drawStepperCard(int y0, const char* label) {
   uiCard(CARD_X, y0, CARD_W, STEPPER_CARD_H);
-  setUIFont(1);
+  // Label sits in the middle column, directly above the value it names, rather
+  // than in the top-left corner where it collided with the left key.
+  setUIFont(T_META);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(label, tft.width() / 2, y0 + STEP_LABEL_CY);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(label, CARD_X + PAD, y0 + STEP_LABEL_Y);
   int btnY = stepBtnY(y0);
   int rightBtnX = CARD_X + CARD_W - PAD - STEP_BTN_SIZE;
   uiFillRound(CARD_X + PAD, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, R_SM, COLOR_BG, COLOR_CARD);
@@ -4249,7 +4254,9 @@ void drawStepGlyph(int cacheIdx, int x, int btnY, const char* glyph, bool enable
   stepGlyphCache[cacheIdx] = (int) enabled;
   uint16_t c = enabled ? COLOR_ACCENT : COLOR_LABEL;
   uiStrokeRound(x, btnY, STEP_BTN_SIZE, STEP_BTN_SIZE, 6, BORDER_CTRL, c, COLOR_BG);
-  setUIFont(2);
+  // T_HEAD, not body: a 6px glyph on a 44px key was a speck. This is the type
+  // scale's middle rung doing the job it was added for.
+  setUIFont(T_HEAD);
   tft.setTextColor(c, COLOR_BG);
   tft.setTextDatum(MC_DATUM);
   tft.drawString(glyph, x + STEP_BTN_SIZE / 2, btnY + STEP_BTN_SIZE / 2);
@@ -4350,30 +4357,36 @@ void drawControlsPageStatic() {
 
 void renderControlsPage() {
   char buf[16];
-  int rightBtnX = CARD_X + CARD_W - PAD - STEP_BTN_SIZE;
-  int btnY = stepBtnY(P1_BRIGHT_Y);
-  int barX = CARD_X + PAD + STEP_BTN_SIZE + 10;
-  int barW = CARD_W - 2 * (PAD + STEP_BTN_SIZE + 10);
+  const int rightBtnX = CARD_X + CARD_W - PAD - STEP_BTN_SIZE;
+  const int cx = tft.width() / 2;
+  // Values render in T_HEAD (Terminus 10x18 bold), the type scale's middle rung:
+  // the number is what you are actually reading here, and at body size it was the
+  // same weight as the label naming it.
   snprintf(buf, sizeof(buf), "%d%%", brightnessPct);
   padTo(buf, sizeof(buf), 5);
-  drawIfChanged(brightPctCache, sizeof(brightPctCache), buf, tft.width() / 2, btnY + 8, 2, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
-  drawBar(&brightBarCache, barX, btnY + 20, barW, 6, brightnessPct, COLOR_ACCENT);
-  drawStepGlyph(0, CARD_X + PAD, btnY, "-", brightnessPct > BRIGHTNESS_MIN);
-  drawStepGlyph(1, rightBtnX, btnY, "+", brightnessPct < 100);
+  drawIfChanged(brightPctCache, sizeof(brightPctCache), buf, cx, P1_BRIGHT_Y + STEP_VALUE_CY,
+                T_HEAD, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
+  // Only BRIGHTNESS gets a bar. It is the one continuous 0-100 setting, so the
+  // bar says where in the range you are; sleep and volume are discrete presets
+  // where the label already says that, and a bar would be decoration.
+  drawBar(&brightBarCache, CARD_X + PAD + STEP_BTN_SIZE + 10, P1_BRIGHT_Y + STEP_BAR_Y,
+          CARD_W - 2 * (PAD + STEP_BTN_SIZE + 10), 6, brightnessPct, COLOR_ACCENT);
+  drawStepGlyph(0, CARD_X + PAD, stepBtnY(P1_BRIGHT_Y), "-", brightnessPct > BRIGHTNESS_MIN);
+  drawStepGlyph(1, rightBtnX, stepBtnY(P1_BRIGHT_Y), "+", brightnessPct < 100);
 
-  btnY = stepBtnY(P1_SLEEP_Y);
   formatSleepValue(buf, sizeof(buf));
   padTo(buf, sizeof(buf), 5);
-  drawIfChanged(sleepValCache, sizeof(sleepValCache), buf, tft.width() / 2, btnY + STEP_BTN_SIZE / 2, 2, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
-  drawStepGlyph(2, CARD_X + PAD, btnY, "-", sleepPresetIdx > 0);
-  drawStepGlyph(3, rightBtnX, btnY, "+", sleepPresetIdx < SLEEP_PRESETS_COUNT - 1);
+  drawIfChanged(sleepValCache, sizeof(sleepValCache), buf, cx, P1_SLEEP_Y + STEP_VALUE_CY,
+                T_HEAD, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
+  drawStepGlyph(2, CARD_X + PAD, stepBtnY(P1_SLEEP_Y), "-", sleepPresetIdx > 0);
+  drawStepGlyph(3, rightBtnX, stepBtnY(P1_SLEEP_Y), "+", sleepPresetIdx < SLEEP_PRESETS_COUNT - 1);
 
-  btnY = stepBtnY(P1_VOL_Y);
   snprintf(buf, sizeof(buf), "%s", VOL_LABELS[volPresetIdx]);
   padTo(buf, sizeof(buf), 5);
-  drawIfChanged(volValCache, sizeof(volValCache), buf, tft.width() / 2, btnY + STEP_BTN_SIZE / 2, 2, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
-  drawStepGlyph(4, CARD_X + PAD, btnY, "-", volPresetIdx > 0);
-  drawStepGlyph(5, rightBtnX, btnY, "+", volPresetIdx < VOL_PRESETS_COUNT - 1);
+  drawIfChanged(volValCache, sizeof(volValCache), buf, cx, P1_VOL_Y + STEP_VALUE_CY,
+                T_HEAD, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
+  drawStepGlyph(4, CARD_X + PAD, stepBtnY(P1_VOL_Y), "-", volPresetIdx > 0);
+  drawStepGlyph(5, rightBtnX, stepBtnY(P1_VOL_Y), "+", volPresetIdx < VOL_PRESETS_COUNT - 1);
 
   // Three toggles sharing the bottom row: SOUND, the screen flip, and the theme.
   // A full-width row for each wouldn't fit (only 32px left under this one), and
