@@ -1734,10 +1734,16 @@ async function handleDeviceLine(line, via) {
     if (line.startsWith("AUDIO stream ")) {
       const tm = line.match(/target=(\S+)/);
       const am = line.match(/answer=(\S+)/);
+      const answerPid = am && am[1] !== "-" ? am[1] : "";
+      // A new answer recording supersedes any transcript already parked for
+      // this prompt. Cleared on ARRIVAL rather than on success, so a failed
+      // attempt cannot leave the previous text confirmable - RE-RECORD exists
+      // to discard text, and must never end up transmitting it.
+      if (answerPid) pendingVoiceAnswers.delete(answerPid);
       audioStream = {
         header: line,
         target: tm ? tm[1] : "-",
-        answerPid: am && am[1] !== "-" ? am[1] : "",
+        answerPid,
         chunks: [], expectSeq: 0, gaps: 0, started: Date.now(),
       };
       console.log(`[device/${via}] ${line}`);
