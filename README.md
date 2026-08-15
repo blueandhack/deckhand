@@ -3,10 +3,14 @@
 # Deckhand
 
 <p align="center">
-  <img src="docs/screenshot-usage.png" width="240"
-       alt="The USAGE tab: a 5-hour window card at 9%, a 7-day card at 22%, a Codex row, and the clock, battery and freshness footer">
+  <img src="docs/screenshot-usage.png" width="200"
+       alt="USAGE tab: a 5-hour window card at 9%, a 7-day card at 22%, a Codex row, and the footer">
+  <img src="docs/screenshot-sessions.png" width="200"
+       alt="SESSIONS tab: one working session showing the animated Claude spark, project name, title, model and branch">
+  <img src="docs/screenshot-settings.png" width="200"
+       alt="SETTINGS tab: brightness, sleep and volume steppers, and the sound, orientation and theme toggles">
   <br>
-  <em>The USAGE tab, in LIGHT. A real capture read back off the panel, not a mockup —
+  <em>USAGE, SESSIONS and SETTINGS - real captures read back off the panel, not mockups.
   <code>echo SCREENSHOT &gt; ~/.claude/deckhand-device-command</code> writes a PNG to
   <code>~/Deckhand-shots/</code>.</em>
 </p>
