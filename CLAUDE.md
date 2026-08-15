@@ -1065,6 +1065,42 @@ Other things that aren't obvious from a single file:
   `~/.claude/ide/<port>.lock` does describe a live websocket with an auth token (the port is open),
   but it belongs to the VS Code integration, is an undocumented internal protocol, and delivers to
   whichever editor holds the lock rather than the session you aimed at.
+- **A pending QUESTION can be answered by speaking, and the confirm tap is what authorises it.**
+  The device records with the ask's pid in the stream header (`answer=<pid>`), the host transcribes
+  and PARKS the text rather than dispatching it, publishes it back on the ask (`voiceText`,
+  `voiceSha`), and the device shows it. Tapping SEND signs
+  `HMAC(secret, "nonce:pid:TEXT:<sha16>")` over a hash of **exactly the text on screen**, so one
+  signature proves both that the paired device authorised the answer and that a human read those
+  words. The host re-hashes the transcript it still holds and refuses a mismatch.
+  Six things are load-bearing:
+  - **Questions only.** `emitDecision` carries free text for a question
+    (`{behavior:"deny", message: carriedAnswer}`) and DISCARDS it for a plan, where both branches
+    send a fixed "keep planning" string - a spoken answer to a plan would reach Claude with none of
+    what was said while the device reported success. A permission prompt can only be DENIED, so
+    speaking "yes, go ahead" there would deny the call with that as the reason.
+  - **The hook is NOT modified.** The answer file carries `idx: 0` with the transcript as `label`,
+    and `chose = answer.label || ...` does the rest. That file's stdout is a decision channel.
+  - **Cap the transcript BEFORE hashing it.** The device displays the capped string, so that is the
+    string that must be signed; hashing first would sign text the human never saw.
+  - **20s cap on an answer recording** (`MIC_ANSWER_MAX_MS`) against 120s for a dictation. The hook
+    blocks for `REMOTE_WAIT_MS` (90s) and that is the whole budget for record, transfer, transcribe,
+    read and confirm. If confirmations start landing late, shorten the cap - do NOT raise
+    `REMOTE_WAIT_MS`, which is matched to the settings.json hook timeout and breaks silently if
+    raised alone.
+  - **A transcript arriving does not change `askPid`, so `askVoiceSha` had to join
+    `buildDetailSignature`.** Without it the change-only redraw never repaints and the confirm screen
+    never appears at all — the feature looks implemented and does nothing. Same trap the detail
+    signature already documents for `title` and `prompt`.
+  - **CANCEL remembers the rejected hash, because clearing the text is not enough.** The host holds
+    a parked transcript for five minutes and republishes it every tick, and `handleAskTouch` checks
+    `askVoiceText[0]` BEFORE option handling while the confirm rows overlap the option rows — so
+    after a CANCEL, a tap on what looked like an ordinary option button could transmit the transcript
+    the user had just rejected. `askVoiceCancelSha` suppresses a republished transcript carrying that
+    hash, carried across ticks by the id-matched `prevSessions` block and dropped when `askPid`
+    changes. A genuinely new recording has a different hash and still displays. Device-local on
+    purpose: a new host command would be more wire surface and another thing to authenticate.
+  `host/voice-answer-check.mjs` covers the reject cases (tampered text, tampered hash, wrong nonce,
+  wrong pid, wrong device, malformed mac) and can be run without hardware.
 - **The headless fallback (`dispatch`): `claude -p --resume <session_id>`.** Continues the
   conversation in that session's own `cwd`, detached (a dictated task can run for minutes and must
   not block the host's poller).

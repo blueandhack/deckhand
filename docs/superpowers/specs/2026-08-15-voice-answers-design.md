@@ -98,8 +98,14 @@ device -> host
 rather than misinterpreting. The device sends only the hash, never the text: the host already holds
 the transcript, and echoing it back would add a second copy to authenticate for no benefit.
 
-The host verifies, in order: the HMAC; that `sha16` matches the transcript it holds for that pid;
-that the nonce has not been consumed. Any failure logs and drops, as today.
+The host checks, in order: that `mac`/`sha16` are well-formed; that a secret and an unconsumed nonce
+exist for this pid (the same check that rejects a never-paired device also catches a replayed nonce,
+since consuming a nonce deletes its map entry); that `sha16` matches the transcript it still holds;
+then the HMAC last. Order is immaterial to security — both gates must pass, and an attacker supplies
+both the text and the hash, so neither ordering leaks anything to them — but it is a known
+diagnostics limitation: `verifyVoiceAnswer` reports the same reason, `"missing pairing/nonce state"`,
+for both a consumed nonce and an unpaired device, so the log can't yet tell those two apart. Any
+failure logs and drops, as today.
 
 ## Budgets, and why they bind
 
