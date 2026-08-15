@@ -1487,9 +1487,20 @@ Other things that aren't obvious from a single file:
   it at the cost of the anti-aliased edges.
   **32x32 is a floor, not a preference**: at the old dot size (14-18px) the thin spokes turn to
   mush, and 24px is marginal — measured, not guessed. It still fits the row's indicator slot
-  (spans x 12..44 with the name starting at x=48) and the tightest 38px row (y+3..y+35), so no
+  (spans x 15..46 with the name starting at x=48) and the tightest 38px row (y+3..y+35), so no
   text moved. Each frame is composed into `sparkBuf` and pushed as ONE `pushImage` rather than
   1024 `drawPixel` calls, and because it repaints the whole box there's no separate clear.
+  **The spinner is a BLIT, so its rectangle must clear the row's rounded corner.** It paints a
+  full 32x32 area including background pixels, and at the old centre (`SESSION_ROW_X + 20`) that
+  rect started at x=12 while the corner's 2px border reaches x~12.9 on the spinner's topmost row -
+  so the blit's `COLOR_CARD` background bit a notch out of the border. On LIGHT, where
+  `COLOR_CARD` is white, it read as a white nick in the card's rounded corner. The centre is now
+  `SESSION_DOT_CX` = `SESSION_ROW_X + 23`: the rect is x 15..46, clear of the border by 2.1px and
+  2px short of the name lane at x=48.
+  **`SESSION_DOT_CX` exists because TWO paths draw that indicator** - `drawSessionRow()` on a
+  repaint and `tickWorkingSpinner()` every 120ms - and when the fix was applied to only one of
+  them the animation happily redrew at the old x four times a second, undoing it. Any change to
+  where the indicator sits has to be to that constant, never to a call site.
   This is the sole place that repaints on a timer instead of on a value change; it stays within
   the flicker-free discipline because it's one small blit, never a cleared region. Gated to the
   sessions list actually being visible (`!isAsleep && !octoActive && !showingDetail &&

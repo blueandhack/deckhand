@@ -1485,6 +1485,14 @@ const int SESSION_ROW_Y0 = CONTENT_Y + 4;
 const int SESSION_TITLE_MIN_H = 85;
 const int SESSION_ROW_GAP = 3;
 const int SESSION_ROW_X = 8;
+// Centre of a row's status indicator. ONE definition because two paths draw it -
+// drawSessionRow() on a repaint and tickWorkingSpinner() every 120ms - and when
+// they disagreed the animation kept redrawing at the old x, undoing the fix and
+// painting over the card's rounded corner four times a second.
+// +23 is a constraint, not taste: the spinner is a 32x32 BLIT that paints its own
+// background, so its rect (x 15..46 here) has to clear both the corner curve and
+// the 2px border that follows it, and still leave the name lane at x=48 alone.
+const int SESSION_DOT_CX = SESSION_ROW_X + 23;
 const int SESSION_ROW_W = 224;
 // Rows stretch to fill the screen: this tab is a desk monitor for a few
 // projects, so with 1-3 sessions each row gets tall (big name, roomy status
@@ -1521,7 +1529,7 @@ void tickWorkingSpinner() {
     if (strcmp(sessions[i].status, "working") != 0) continue;
     int y = SESSION_ROW_Y0 + i * (sessionRowH + SESSION_ROW_GAP);
     int dotCy = large ? y + 19 : y + sessionRowH / 2;
-    drawAgentSpinner(SESSION_ROW_X + 20, dotCy, COLOR_CARD,
+    drawAgentSpinner(SESSION_DOT_CX, dotCy, COLOR_CARD,
                      strcmp(sessions[i].agent, "cx") == 0);
   }
 }

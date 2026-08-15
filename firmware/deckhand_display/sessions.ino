@@ -98,8 +98,17 @@ void drawSessionRow(int i) {
   // One even 2px ring; two nested outlines leave holes where their arcs collide.
   uiStrokeRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, BORDER_CARD, border, COLOR_BG);
 
+  // +23, not +20. The working spinner is a 32x32 BLIT - it paints a full
+  // rectangle, background pixels included - so its left edge must clear the
+  // row's rounded corner. At +20 the rect started at x=12 while the corner's 2px
+  // border reaches x~12.9 on the spinner's topmost row, so the blit's COLOR_CARD
+  // background erased a bite out of the border. On LIGHT, where COLOR_CARD is
+  // white, that read as a white notch in the card's rounded corner.
+  // At +23 the rect is x 15..46: 2.1px clear of the border, and 2px short of the
+  // name lane at x=48. The dot and square states move with it so the indicator
+  // never jumps sideways when a session changes status.
   int dotCy = large ? y + 19 : y + rowH / 2;
-  drawStatusDot(SESSION_ROW_X + 20, dotCy, large ? 9 : 7, s.status, COLOR_CARD,
+  drawStatusDot(SESSION_DOT_CX, dotCy, large ? 9 : 7, s.status, COLOR_CARD,
                 strcmp(s.agent, "cx") == 0);
 
   // ---- Name: MEASURE the lane, then shrink one step rather than truncate ----
