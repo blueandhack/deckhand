@@ -1,0 +1,128 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Versions are PINNED to what the firmware is known to build against, not
+# floated to "latest". This project has already been bitten by a dependency
+# moving underneath it (a Homebrew node bump broke the host's app bundle via a
+# missing libada), and a CI that silently follows upstream turns "my code
+# broke" and "the world moved" into the same red X.
+env:
+  ESP32_CORE: 3.3.11
+  LIB_TFT_ESPI: 2.5.43
+  LIB_XPT2046: 1.4.0
+  LIB_ARDUINOJSON: 7.4.3
+  FQBN: esp32:esp32:esp32:PartitionScheme=huge_app
+
+jobs:
+  firmware:
+    name: compile firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+            | BINDIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The ESP32 core is ~1GB and slow to unpack, so it dominates the run.
+      # Keyed on the pinned versions: a version bump busts the cache, which is
+      # exactly when it must be rebuilt.
+      - name: Cache Arduino data
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-${{ runner.os }}-${{ env.ESP32_CORE }}-${{ env.LIB_TFT_ESPI }}-${{ env.LIB_XPT2046 }}-${{ env.LIB_ARDUINOJSON }}
+
+      - name: Install core and libraries
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@${ESP32_CORE}"
+          arduino-cli lib install \
+            "TFT_eSPI@${LIB_TFT_ESPI}" \
+            "XPT2046_Touchscreen@${LIB_XPT2046}" \
+            "ArduinoJson@${LIB_ARDUINOJSON}"
+
+      # TFT_eSPI takes its pin/driver config from a file INSIDE the library, so a
+      # freshly installed copy has the wrong board entirely and the sketch either
+      # fails to compile or builds for a display that does not exist. The repo
+      # carries the real config; drop it over the stock one.
+      - name: Apply the board's TFT_eSPI config
+        run: |
+          dst="$HOME/Arduino/libraries/TFT_eSPI/User_Setup.h"
+          test -f "$dst" || { echo "TFT_eSPI not where expected"; exit 1; }
+          cp firmware/tft_setup/User_Setup.h "$dst"
+          echo "--- driver and pins now in effect ---"
+          grep -E '^#define (ILI9341_DRIVER|TFT_(MISO|MOSI|SCLK|CS|DC|RST|BL))' "$dst"
+
+      - name: Compile
+        run: |
+          arduino-cli compile --fqbn "$FQBN" --warnings default firmware/deckhand_display \
+            2>&1 | tee build.log
+          grep -E 'Sketch uses|Global variables' build.log
+
+      # The sketch is several .ino files concatenated into one translation unit,
+      # and the split only works because no function signature names a type
+      # declared after the first function definition (Arduino inserts generated
+      # prototypes above that point). A compile catches it, but say so plainly.
+      - name: Report size
+        run: |
+          flash=$(grep -oE 'Sketch uses [0-9]+' build.log | grep -oE '[0-9]+')
+          ram=$(grep -oE 'Global variables use [0-9]+' build.log | grep -oE '[0-9]+')
+          echo "### Firmware built" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | bytes | of |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| flash | $flash | 3145728 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| RAM | $ram | 327680 |" >> "$GITHUB_STEP_SUMMARY"
+
+  checks:
+    name: host checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Both palettes must pass contrast AND colour-blind/greyscale separability,
+      # and --selftest proves the checker can still fail: it feeds it a
+      # deliberately broken palette and expects a rejection. A checker that
+      # cannot fail is not a check.
+      - name: Palette validator
+        run: |
+          node firmware/deckhand_display/palette-check.mjs
+          node firmware/deckhand_display/palette-check.mjs --selftest
+
+      - name: Host scripts parse
+        run: |
+          for f in host/*.mjs claude-hooks/*.mjs; do
+            [ -e "$f" ] || continue
+            node --check "$f" && echo "ok  $f"
+          done
+
+      # AGENTS.md is a generated verbatim copy of CLAUDE.md below an 11-line
+      # header. It drifts silently if someone edits one and not the other, and
+      # nothing else would notice.
+      - name: AGENTS.md is in sync with CLAUDE.md
+        run: |
+          if diff <(tail -n +12 AGENTS.md) <(tail -n +4 CLAUDE.md) > /dev/null; then
+            echo "in sync"
+          else
+            echo "AGENTS.md is stale. Regenerate it:"
+            echo '  { head -n 11 AGENTS.md; tail -n +4 CLAUDE.md; } > AGENTS.md.new && mv AGENTS.md.new AGENTS.md'
+            diff <(tail -n +12 AGENTS.md) <(tail -n +4 CLAUDE.md) | head -20
+            exit 1
+          fi

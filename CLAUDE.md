@@ -1581,10 +1581,15 @@ Other things that aren't obvious from a single file:
   was invisible at first. `drawCrab` is **templated on the target type** so the right overload
   resolves at compile time. The old procedural art only worked because `fillRect`/`drawCircle`
   route through the virtual `drawPixel`.
-- TFT_eSPI's pin/driver config lives in the *library's* `User_Setup.h`
-  (`~/Documents/Arduino/libraries/TFT_eSPI/User_Setup.h`), not in this repo, since that's how
-  TFT_eSPI is configured. If TFT_eSPI is ever reinstalled, that file needs to be recreated with
-  this board's pin mapping (documented in the `.ino`'s header comment).
+- **TFT_eSPI's pin/driver config now lives in THIS REPO at `firmware/tft_setup/User_Setup.h`**, and
+  is copied into the library. TFT_eSPI reads it from a file *inside the library*, so it used to
+  exist only there - which meant reinstalling or updating TFT_eSPI silently wiped the board's pin
+  mapping, and CI could not build the firmware at all because it had no way to know it. Restore a
+  local machine with:
+  `cp firmware/tft_setup/User_Setup.h ~/Documents/Arduino/libraries/TFT_eSPI/`
+  The committed copy is byte-identical (comments aside) to the one that builds today, and the only
+  file ever modified inside that library is this one - `User_Setup_Select.h` is stock and includes
+  `User_Setup.h` by default, which is what makes the drop-in work.
 - Colors deliberately avoid a green/yellow/red scheme (the `COLOR_GOOD`/`WARN`/`BAD` constants
   use a blue/orange/reddish-purple palette instead) because a green/yellow/red scheme collapses
   under the most common colour-vision deficiency, and

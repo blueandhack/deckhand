@@ -451,6 +451,26 @@ Because these scripts mutate `~/.claude`, which every Claude Code session on the
 machine shares, they have a real test: `claude-hooks/test-install-cycle.sh` runs
 the whole install → uninstall → restore cycle against a throwaway `$HOME`.
 
+## Continuous integration
+
+`.github/workflows/build.yml` compiles the firmware on every push and pull
+request, and runs the host-side checks.
+
+Versions are **pinned**, not floated to latest — this project has already been
+bitten by a dependency moving underneath it (a Homebrew node bump broke the
+host's app bundle via a missing `libada`), and CI that follows upstream turns
+"my code broke" and "the world moved" into the same red X.
+
+The build only works because `firmware/tft_setup/User_Setup.h` is in the repo.
+TFT_eSPI reads its pin and driver config from a file *inside the library*, so a
+clean install targets the wrong display entirely; the workflow drops our copy
+over the stock one. That also fixes a long-standing local hazard — reinstalling
+TFT_eSPI used to wipe the board's pin mapping with no record of it anywhere.
+
+The `checks` job runs the palette validator (both themes plus its self-test),
+parses every host script, and fails if `AGENTS.md` has drifted from `CLAUDE.md`
+— it is a generated copy, and nothing else would notice.
+
 ## Project layout
 
 ```
