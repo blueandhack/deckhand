@@ -793,6 +793,11 @@ char clockCache[12] = "";
 char updatedCache[24] = "";
 int battGlyphCache = -1;
 char battTextCache[8] = "";
+// drawIfChanged compares TEXT only, so a colour that changed without the string
+// changing would never reach the panel. The battery reading now carries a level
+// colour, so its colour is cached alongside and busts the text cache on a flip -
+// the same guard renderUsageTab needs for its stale-dimmed hero numbers.
+uint16_t battTextColorCache = 0;
 
 // Clock is synced from the host's local wall-clock time on every poll tick
 // (see handleLine) and ticks forward locally via millis() in between, so it
@@ -2706,10 +2711,27 @@ void drawFooterChrome() {
 }
 
 // Battery runs the pct scale the opposite way from quota: low = bad.
+// Level colour. Note this is INVERTED against the usage palette's meaning: there
+// a high percentage is the bad one, here a low percentage is.
 uint16_t colorForBattery(int pct) {
   if (pct <= 10) return COLOR_BAD;
   if (pct <= 30) return COLOR_WARN;
   return COLOR_GOOD;
+}
+
+// What the pill actually paints. CHARGING IS A STATE, NOT A LEVEL: while power
+// is coming in, 8% is not a warning, so it takes the accent instead of the level
+// colour - otherwise a charging device sat there showing an alarm about a
+// problem that is actively being solved.
+//
+// Colour is never the only carrier here. The reading is printed as a NUMBER, the
+// glyph carries a proportional FILL, and charging/full say so in words - so the
+// three bands stay legible to a colour-blind eye and in flat greyscale, which is
+// the same rule drawStatusDot follows with its shapes.
+uint16_t colorForBatteryState(int pct, BattState st) {
+  if (st == BATT_CHARGING) return COLOR_ACCENT;
+  if (st == BATT_FULL) return COLOR_GOOD;
+  return colorForBattery(pct);
 }
 
 // 20x9 battery outline with proportional fill. Fill level (not just color)
@@ -2717,7 +2739,7 @@ uint16_t colorForBattery(int pct) {
 void drawBatteryGlyph(int x, int y, int pct, int state) {
   tft.fillRect(x, y, 21, 9, COLOR_BG);
   if (state == (int) BATT_NONE) return;
-  uint16_t c = colorForBattery(pct);
+  uint16_t c = colorForBatteryState(pct, (BattState) state);
   tft.drawRect(x, y, 18, 9, c);
   tft.fillRect(x + 18, y + 2, 2, 5, c);
   int fill = 14 * pct / 100;
@@ -2754,8 +2776,15 @@ void renderFooter() {
   else if (bst == BATT_FULL) snprintf(buf, sizeof(buf), "full");
   else snprintf(buf, sizeof(buf), "%d%%", pct);
   padTo(buf, sizeof(buf), 4);
+  // The number now reads at the same level colour as the glyph beside it, so the
+  // two cannot disagree. Bust the text cache when only the colour moved.
+  uint16_t battCol = (bst == BATT_NONE) ? COLOR_LABEL : colorForBatteryState(pct, bst);
+  if (battCol != battTextColorCache) {
+    battTextColorCache = battCol;
+    battTextCache[0] = '\0';
+  }
   drawIfChanged(battTextCache, sizeof(battTextCache), buf, 113, y, 1, 1,
-                COLOR_LABEL, COLOR_BG);
+                battCol, COLOR_BG);
 
   // Freshness, right-aligned and compact ("12s ago", not "updated 12s ago",
   // so it can't reach the battery zone even at its widest). Left-padded:
@@ -4215,6 +4244,7 @@ const int CFM_YES_X = CFM_NO_X + CFM_BTN_W + SP_3;
 
 int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
 char battRowTextCache[16] = "";
+uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
 int soundBtnCache = -1, flipBtnCache = -1;
 int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+
 char brightPctCache[8] = "";
@@ -4343,8 +4373,17 @@ void renderStatusPage() {
   if (bst == BATT_NONE) snprintf(buf, sizeof(buf), "not found");
   else snprintf(buf, sizeof(buf), "%d%% %d.%02dV", pct, batteryMv / 1000, (batteryMv % 1000) / 10);
   padLeftTo(buf, sizeof(buf), 12);
+  // Same level colour as the footer pill - the two show the same reading, so
+  // they must not disagree about how healthy it is. Cache-busted on a colour
+  // flip: plugging in changes the colour while "42% 3.85V" stays identical, and
+  // a text-only compare would never repaint it.
+  uint16_t rowCol = (bst == BATT_NONE) ? COLOR_LABEL : colorForBatteryState(pct, bst);
+  if (rowCol != battRowColorCache) {
+    battRowColorCache = rowCol;
+    battRowTextCache[0] = '\0';
+  }
   drawIfChanged(battRowTextCache, sizeof(battRowTextCache), buf, CARD_X + CARD_W - PAD,
-                DEV_CARD_Y + DROW_BATT + 4, 1, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
+                DEV_CARD_Y + DROW_BATT + 4, 1, 1, rowCol, COLOR_CARD, TR_DATUM);
 }
 
 // ----- Page 1: CONTROLS -----

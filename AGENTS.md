@@ -1370,6 +1370,24 @@ Other things that aren't obvious from a single file:
     is not the problem. The centred label spans x 87..153, clear of both zones, so a tap on it
     cannot step the value by accident.
 
+- **The battery reading is coloured by level, and charging is a STATE rather than a level.**
+  `colorForBattery` bands at <=10 `COLOR_BAD`, <=30 `COLOR_WARN`, else `COLOR_GOOD` - note this is
+  INVERTED against the usage palette's meaning, where a HIGH percentage is the bad one.
+  `colorForBatteryState` wraps it: charging returns `COLOR_ACCENT` and full returns `COLOR_GOOD`,
+  because while power is coming in 8% is not a warning, and a charging device sitting there showing
+  an alarm about a problem actively being solved is just noise. The glyph and the number both go
+  through it, so the two can never disagree.
+  **Colour is not the only carrier**, which is what keeps this inside the colour-blind rule the rest
+  of the UI follows: the reading is printed as a NUMBER, the glyph carries a proportional FILL, and
+  charging/full say so in words. The three bands stay legible to a deuteranope eye and in flat
+  greyscale without the colour doing any work.
+  **Both readings cache their COLOUR next to their text.** `drawIfChanged` compares text only, so a
+  colour that flips while the string stays identical would never reach the panel - plugging in at a
+  steady charge leaves the settings row reading `42% 3.85V` while its colour should go from good to
+  accent. `battTextColorCache` / `battRowColorCache` bust the text cache on a flip. This is the same
+  guard `renderUsageTab` needs for its stale-dimmed hero numbers, and it is easy to forget precisely
+  because the common case (the number moved too) hides it.
+
 - **Screen flip (180°) for charging.** SETTINGS › DISPLAY & SOUND has two half-width toggles
   sharing the bottom row — SOUND and NORMAL/FLIPPED — because a full-width row for each doesn't
   fit (only 32px remain under it). Flipping swaps `tft.setRotation()` between `SCREEN_ROTATION`
