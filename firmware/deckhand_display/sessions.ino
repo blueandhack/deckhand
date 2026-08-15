@@ -305,7 +305,12 @@ void renderSessionsTab() {
         closeSessionDetail();
         return;
       }
-      char sig[208];
+      // Sized to match detailSigCache, not a smaller guess: a local scratch
+      // buffer shorter than the signature it builds truncates silently, the
+      // same trap detailDurCache/detailSigCache themselves already document -
+      // and buildDetailSignature's own worst case (title 43 + prompt 103 +
+      // the rest) already runs close to 208.
+      char sig[sizeof(detailSigCache)];
       buildDetailSignature(detailIndex, sig, sizeof(sig));
       if (strncmp(sig, detailSigCache, sizeof(detailSigCache)) != 0) {
         strncpy(detailSigCache, sig, sizeof(detailSigCache) - 1);
@@ -329,10 +334,17 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
   // actSec deliberately is NOT: it changes on every event, and a full card repaint per
   // tick is exactly the flicker this discipline exists to prevent. It reaches the screen
   // through renderDetailDuration's own per-second cache instead.
-  snprintf(out, outSize, "%s|%s|%s|%s|%s|%s|%d|%s|%s|%ld", sessions[idx].name,
+  // askVoiceSha MUST be here too, and for the identical reason as title/prompt: a
+  // transcript arriving is the ONLY thing that changes when a voice confirm screen
+  // is meant to appear (askPid stays the same prompt throughout), so leaving it out
+  // means the confirm screen would never actually draw. The hash, not the up-to-204
+  // char text it stands for, because it changes if and only if the text does and
+  // costs 20 bytes instead of 204 in this signature.
+  snprintf(out, outSize, "%s|%s|%s|%s|%s|%s|%d|%s|%s|%ld|%s", sessions[idx].name,
            sessions[idx].status, sessions[idx].path, sessions[idx].model,
            sessions[idx].branch, sessions[idx].askPid, answeredPid[0] ? answeredIdx : -1,
-           sessions[idx].title, sessions[idx].prompt, sessions[idx].startSec);
+           sessions[idx].title, sessions[idx].prompt, sessions[idx].startSec,
+           sessions[idx].askVoiceSha);
 }
 // Index-based (not SessionInfo&) for the same Arduino auto-prototype reason
 // as buildSessionSubline.
@@ -347,6 +359,12 @@ int askOptionsTop(int idx) {
   return contentBottom() -
          (sessions[idx].askOptCount + askVoiceRows(idx)) * (ASK_OPT_H + ASK_OPT_GAP);
 }
+// The confirm screen (SEND / RE-RECORD / CANCEL) draws no option buttons - it
+// returns early out of drawAskDetail - so its two rows anchor to the bottom of
+// the content area rather than to a fixed offset, the same reason
+// askOptionsTop() does.
+inline int askVoiceRedoY() { return contentBottom() - H_BTN; }
+inline int askVoiceSendY() { return askVoiceRedoY() - H_BTN - SP_2; }
 // The answer screen: question title, paged detail text, and one big button
 // per option. Tapping an option sends the answer to the host, which hands
 // it to the (waiting) session hook to decide the real prompt.
@@ -355,6 +373,33 @@ void drawAskDetail(int idx) {
   bool answered = answeredPid[0] && strncmp(answeredPid, s.askPid, sizeof(answeredPid)) == 0;
   bool isPerm = strcmp(s.askKind, "perm") == 0;
   bool isPlan = strcmp(s.askKind, "plan") == 0;
+
+  // A transcript is waiting: the screen becomes a confirmation, because the
+  // confirm tap IS the authorisation - it signs a hash of exactly this text.
+  // This has to run BEFORE the "< Back"/badge header below rather than after
+  // it (the header row's text and this screen's own "YOU SAID" label share
+  // the same font and the same top-left corner, so stacking under it would
+  // overlap rather than read as two lines) - drawSessionDetail already
+  // cleared the content area before calling us, same as every other early
+  // return in this function.
+  if (s.askVoiceText[0]) {
+    setUIFont(T_META);
+    tft.setTextColor(COLOR_LABEL, COLOR_BG);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString("YOU SAID", CARD_X, CONTENT_Y + 6);
+    // Cozette on a panel: this is verbatim quoted text, the same treatment code
+    // and commands already get.
+    int lines = countWrappedLines(s.askVoiceText, FONT_CODE, CARD_W - 8);
+    if (lines > 6) lines = 6;
+    uiFillRound(CARD_X - 4, CONTENT_Y + 22, CARD_W + 8, lines * 13 + 12, R_SM, COLOR_CARD, COLOR_BG);
+    drawWrappedText(s.askVoiceText, CARD_X, CONTENT_Y + 28, FONT_CODE, 13, CARD_W - 8,
+                    0, lines, COLOR_VALUE, COLOR_CARD);
+    uiButton(CARD_X, askVoiceSendY(), CARD_W, H_BTN, "SEND", COLOR_ACCENT, true);
+    uiButton(CARD_X, askVoiceRedoY(), (CARD_W - SP_2) / 2, H_BTN, "RE-RECORD", COLOR_LABEL);
+    uiButton(CARD_X + (CARD_W + SP_2) / 2, askVoiceRedoY(), (CARD_W - SP_2) / 2, H_BTN,
+             "CANCEL", COLOR_LABEL);
+    return;
+  }
 
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
   setUIFont(2);
@@ -517,11 +562,51 @@ void sendAnswerToHost(int idx, int optIdx) {
   snprintf(line, sizeof(line), "ANSWER %s %s %d %s", s.id, s.askPid, optIdx, mac.c_str());
   sendLineToHost(line);
 }
+// Signs a hash of the text the screen is SHOWING, not the audio and not an
+// index. That single signature carries both facts the host needs: the paired
+// device authorised this, and this is the text a human read.
+void sendVoiceAnswerToHost(int idx) {
+  const SessionInfo& s = sessions[idx];
+  if (!s.askVoiceSha[0]) return;
+  String payload = String(s.askNonce) + ":" + s.askPid + ":TEXT:" + s.askVoiceSha;
+  String mac = authHmac(payload);
+  // "0" when unprovisioned, matching sendAnswerToHost. Deliberately NOT a silent
+  // return: the host logs the rejection, so an unpaired device shows up as a
+  // refused answer in the log rather than a SEND button that quietly does
+  // nothing.
+  if (mac.length() == 0) mac = "0";
+  char line[160];
+  snprintf(line, sizeof(line), "ANSWER %s %s TEXT %s %s",
+           s.id, s.askPid, s.askVoiceSha, mac.c_str());
+  sendLineToHost(line);
+}
 // Touch on the detail screen when an ask is showing. Returns true if the
 // tap was consumed (option chosen or page flipped); false = treat as back.
 bool handleAskTouch(int sx, int sy) {
   if (detailIndex < 0 || detailIndex >= sessionCount) return false;
   SessionInfo& s = sessions[detailIndex];
+  // The confirm screen (a transcript pending approval) is modal: it is checked
+  // before anything else in this function, and swallows every tap that isn't
+  // one of its own three buttons so a stray tap can never fall through to the
+  // option buttons underneath and send a DIFFERENT answer.
+  if (s.askVoiceText[0]) {
+    if (sy >= askVoiceSendY() && sy < askVoiceSendY() + H_BTN) {
+      sendVoiceAnswerToHost(detailIndex);
+      return true;
+    }
+    if (sy >= askVoiceRedoY() && sy < askVoiceRedoY() + H_BTN) {
+      if (sx < CARD_X + CARD_W / 2) {          // RE-RECORD
+        copyField(micAnswerPid, sizeof(micAnswerPid), s.askPid);
+        micStream();                 // capped at 20s because micAnswerPid is set
+        micAnswerPid[0] = '\0';      // one capture only; never leaks into a dictation
+      } else {                                  // CANCEL
+        s.askVoiceText[0] = '\0';               // back to the option buttons
+        drawAskDetail(detailIndex);
+      }
+      return true;
+    }
+    return true;   // modal: swallow everything else (including "< Back")
+  }
   if (!s.askPid[0]) {
     // Plain detail screen: ONLY the header's "< Back" goes back. This used to be
     // "tap anywhere", which collided head-on with a recording's "tap anywhere to

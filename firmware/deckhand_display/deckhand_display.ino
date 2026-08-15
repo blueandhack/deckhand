@@ -2278,6 +2278,12 @@ void handleLine(const String& line) {
 
   sessionCount = 0;
   bool newlyAsking = false;
+  // The Mac usually wins the race for a pending voice confirmation: its hook
+  // bails the moment the ask disappears. Detected below, acted on once this
+  // loop has fully rebuilt sessions[]/sessionCount for this tick - closing
+  // the detail screen from partway through would repaint the sessions list
+  // from a half-updated array.
+  bool voiceConfirmGone = false;
   JsonArray arr = doc["sessions"].as<JsonArray>();
   if (!arr.isNull()) {
     for (JsonObject s : arr) {
@@ -2351,6 +2357,16 @@ void handleLine(const String& line) {
             info.beepsLeft = prevSessions[j].beepsLeft;
             info.nextBeepMillis = prevSessions[j].nextBeepMillis;
           }
+          // The prompt was answered elsewhere (usually on the Mac, which is
+          // the common case). info.askVoiceText already reflects THIS tick
+          // (cleared above, together with askPid, whenever the ask is gone
+          // entirely) so the confirm screen's old state can only be read
+          // from prevSessions - matched by id here, not array index, since
+          // urgency-sort can reorder the list between ticks.
+          if (showingDetail && strcmp(detailId, info.id) == 0 && !info.askPid[0] &&
+              prevSessions[j].askVoiceText[0]) {
+            voiceConfirmGone = true;
+          }
           break;
         }
       }
@@ -2368,6 +2384,10 @@ void handleLine(const String& line) {
     Serial.println("BEEP: session newly asking");
     startBeep();
   }
+  // Close the confirm screen rather than leaving a SEND button that can no
+  // longer do anything - see voiceConfirmGone above. sessions[]/sessionCount
+  // are fully rebuilt for this tick now, so this repaints a consistent list.
+  if (voiceConfirmGone) closeSessionDetail();
 
   lastRxMillis = millis();
   bool firstEver = !everReceived;
