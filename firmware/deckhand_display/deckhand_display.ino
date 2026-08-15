@@ -91,6 +91,13 @@
 
 TFT_eSPI tft = TFT_eSPI();
 SPIClass touchSPI(HSPI);
+
+// Survives deep sleep (RTC memory). Two jobs: measuring what sleep actually
+// costs, and telling a deliberate wake from a knock.
+RTC_DATA_ATTR int     rtcSleepMv    = -1;   // battery mV when we went to sleep
+RTC_DATA_ATTR int64_t rtcSleepUs    = 0;    // esp_timer at that moment
+RTC_DATA_ATTR uint32_t rtcSpuriousWakes = 0;
+const unsigned long WAKE_HOLD_MS = 350;     // how long a wake touch must be held
 XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
 Preferences prefs;
 
@@ -2443,6 +2450,64 @@ void setup() {
   // stream produced 8 chunks in 18s and dropped half its samples.
   Serial.setRxBufferSize(4096);
   Serial.begin(115200);
+
+  // ---- WAKE GUARD, before anything expensive ----
+  // ext0 fires on ANY PENIRQ edge, so a sleeve, a bag or a knock used to wake
+  // the device fully: radio up, panel out of SLPIN, backlight to 100%. On a
+  // board whose sleep current is dominated by parts firmware cannot switch off
+  // (see the power note in CLAUDE.md), spurious wakes are where the battery
+  // actually goes - so the cheapest useful thing is not to have them.
+  //
+  // Touch is on its own HSPI bus and costs nothing to bring up, so it is
+  // initialised FIRST and the wake is qualified before setupBLE() or tft.init().
+  // A wake that is not a held touch goes straight back to sleep having spent a
+  // few hundred milliseconds instead of a full screen-on.
+  touchSPI.begin(TOUCH_SCK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
+  ts.begin(touchSPI);
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
+    unsigned long t0 = millis();
+    bool held = true;
+    while (millis() - t0 < WAKE_HOLD_MS) {
+      if (!ts.touched()) { held = false; break; }
+      delay(10);
+    }
+    if (!held) {
+      rtcSpuriousWakes++;
+      // Deliberately NOT enterDeepSleep(): the panel never left SLPIN and the
+      // backlight pad is still latched low from the original sleep, so touching
+      // either would only undo what is already correct. rtcSleepMv/Us are left
+      // alone too, so elapsed time keeps accumulating across these.
+      gpio_deep_sleep_hold_en();
+      esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+      esp_deep_sleep_start();
+    }
+    // A real wake: report what the sleep cost. mV/hour is the raw datum -
+    // turning it into mA needs the cell's discharge curve, which we do not have.
+    if (rtcSleepMv > 0) {
+      sampleBattery();
+      // esp_timer is RTC-backed and IDF adds the sleep duration back on wake, so
+      // this should span the sleep - but if that ever stops holding, a bogus
+      // elapsed would silently turn into a bogus mV/h. Report it as unknown
+      // rather than print a number that looks measured and is not.
+      int64_t us = esp_timer_get_time() - rtcSleepUs;
+      int drop = rtcSleepMv - batteryMv;
+      if (us <= 0) {
+        Serial.printf("SLEEP report: elapsed unknown (timer did not span sleep), "
+                      "%d -> %d mV (%+d mV), spurious wakes=%lu\n",
+                      rtcSleepMv, batteryMv, -drop, (unsigned long) rtcSpuriousWakes);
+      } else {
+        double hours = us / 3600e6;
+        Serial.printf("SLEEP report: %.2fh, %d -> %d mV (%+d mV, %.1f mV/h), "
+                      "spurious wakes=%lu%s\n",
+                      hours, rtcSleepMv, batteryMv, -drop,
+                      hours > 0.01 ? -drop / hours : 0.0,
+                      (unsigned long) rtcSpuriousWakes,
+                      usbLinkActive() ? " [ON USB - not a battery measurement]" : "");
+      }
+      rtcSpuriousWakes = 0;
+    }
+  }
+
   setupBLE();
 
   tft.init();
@@ -2464,9 +2529,7 @@ void setup() {
 
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP); // board has its own 10K pull-up too
 
-  touchSPI.begin(TOUCH_SCK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
-  ts.begin(touchSPI);
-
+  // touchSPI/ts were brought up at the top of setup() for the wake guard.
   loadOrRunCalibration();
   loadScreenFlip();
   // After prefs.begin() (inside loadOrRunCalibration) and BEFORE the first draw, so the

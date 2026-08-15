@@ -122,6 +122,12 @@ void enterDeepSleep() {
   gpio_hold_en((gpio_num_t) TFT_BL_PIN);
   gpio_deep_sleep_hold_en();
 
+  // Record what we are sleeping AT, so the next real wake can report the drain.
+  // RTC memory survives deep sleep and esp_timer keeps counting through it.
+  sampleBattery();
+  rtcSleepMv = batteryMv;
+  rtcSleepUs = esp_timer_get_time();
+
   esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0); // PENIRQ: low = touched
   esp_deep_sleep_start();
 }

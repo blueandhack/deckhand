@@ -1193,6 +1193,30 @@ Other things that aren't obvious from a single file:
 - If this mic is ever replaced, an **INMP441** (I2S) is viable and needs no analog tuning:
   `SCK`→IO18, `WS`→IO19, `SD`→IO35. IO18/19/23 are the **microSD** bus and this firmware contains
   no SD code at all, so they're free as long as the card slot is unused.
+- **There is NO true power-off on this board, and it is a hardware fact, not a missing feature.**
+  The power path is pure hardware - the TP4054 charger and the Q3 P-FET that switches USB/battery
+  have no GPIO control, and no regulator-enable or VBUS-sense line is exposed - so the MCU cannot
+  cut its own supply. Deep sleep is the deepest state firmware can reach. Estimated residual draw
+  is ~7mA, dominated by parts nothing in software can switch: an AMS1117-class LDO's quiescent
+  (~5mA) and the CH340 (~1.5mA), against ~0.5mA for the XPT2046 that must stay powered for the
+  PENIRQ wake. Sleep already removes the backlight (~100mA, ~93% of the draw). A genuine off needs
+  hardware: a switch in the battery lead, or a soft-latch (P-FET held on by a GPIO, released to cut
+  power). Do not go looking for a software answer to this again.
+- **A wake must be a HELD touch, and this is where the battery actually goes.** ext0 fires on any
+  PENIRQ edge, so a sleeve or a knock used to wake the device fully - radio up, panel out of SLPIN,
+  backlight to 100%. `setup()` now brings up the touch bus FIRST (it is on its own HSPI and costs
+  nothing), qualifies the wake before `setupBLE()` or `tft.init()`, and drops straight back to deep
+  sleep unless the touch is held for `WAKE_HOLD_MS` (350ms). The re-sleep deliberately does NOT go
+  through `enterDeepSleep()`: the panel never left SLPIN and the backlight pad is still latched low
+  from the original sleep, so touching either would only undo what is already correct.
+- **The device measures its own sleep drain.** `enterDeepSleep()` records battery mV and
+  `esp_timer_get_time()` into RTC memory (which survives deep sleep); the next real wake prints
+  `SLEEP report: <hours>, <mV> -> <mV> (<delta>, <mV/h>), spurious wakes=<n>`. mV/h is the raw
+  datum on purpose - converting it to mA needs the cell's discharge curve, which we do not have.
+  It reports elapsed as **unknown** rather than guessing if `esp_timer` ever fails to span the
+  sleep, and flags the reading when USB is attached, because that is not a battery measurement.
+  Spurious wakes accumulate across re-sleeps and are reported with the drain, so the guard's value
+  is visible rather than assumed.
 - "Power off" (hold BOOT ~1s) is ESP32 deep sleep, not a real power cut: panel DISPOFF+SLPIN,
   backlight pin latched low via `gpio_hold_en` (GPIOs float in deep sleep — and setup() must
   `gpio_hold_dis` it again after wake, before re-attaching LEDC), wake via ext0 on IO36 (the
