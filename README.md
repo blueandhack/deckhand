@@ -2,6 +2,15 @@
 
 # Deckhand
 
+<p align="center">
+  <img src="docs/screenshot-usage.png" width="240"
+       alt="The USAGE tab: a 5-hour window card at 9%, a 7-day card at 22%, a Codex row, and the clock, battery and freshness footer">
+  <br>
+  <em>The USAGE tab, in LIGHT. A real capture read back off the panel, not a mockup —
+  <code>echo SCREENSHOT &gt; ~/.claude/deckhand-device-command</code> writes a PNG to
+  <code>~/Deckhand-shots/</code>.</em>
+</p>
+
 [github.com/blueandhack/deckhand](https://github.com/blueandhack/deckhand) &middot; MIT
 
 A little desk display and remote for Claude Code — the crew member who keeps
@@ -368,6 +377,34 @@ hooks), runs `npm install`, and builds `DeckhandBLE.app` from your own Node.
 Then two manual steps it prints for you: flash the firmware, and start the
 host. **Restart Claude Code afterwards** so it picks up the new hooks. The
 detailed walk-through is under [Setup](#setup) below.
+
+## Screenshots
+
+The device can photograph itself — no camera, no mockup:
+
+```
+echo "SCREENSHOT" > ~/.claude/deckhand-device-command
+```
+
+It reads the panel back over SPI and ships it as base64 RGB565; the host rebuilds
+it and writes a PNG to `~/Deckhand-shots/`. 240x320 is 153,600 bytes, so it takes
+about 18 seconds at 115200. Nothing is blanked or redrawn while it runs, so what
+lands on the Mac is exactly what was on the glass when the command arrived.
+
+Two things this depends on, both measured rather than assumed:
+
+- **The panel really can be read back.** The FAB note elsewhere says readback is
+  unreliable here, which is a *speed* argument about per-pixel reads for
+  transparency, not a correctness one. Four known colours written and read back on
+  this wiring came back bit-identical at `SPI_READ_FREQUENCY 20000000`, and
+  `readRect()` pulls a whole row per transaction.
+- **`readRect()` returns pixels BYTE-SWAPPED**, where `readPixel()` does not:
+  writing `0xF800` gives `readPixel=0xF800` but `readRect=0x00F8`. That is the same
+  internal order sprites use, and the same trap the crab art hit with `pushImage`.
+  The firmware undoes it before encoding, so the wire format is plain big-endian
+  RGB565 and the decoder needs no endianness guess. Getting this wrong is not
+  subtle but it is not obviously wrong either — the first capture looked like a
+  perfectly good screenshot with purple text.
 
 ## Backing out (uninstall and restore)
 

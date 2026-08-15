@@ -852,6 +852,26 @@ const int MIC_CUE_DUTY = 18;
 // the wire format stays obvious when reading the host log by hand.
 static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+// One screenshot row (480 bytes) as base64 on a single "SHOT d" line. Kept
+// separate from micDumpBase64 because that one drives a progress meter and
+// chunks to 144 bytes; here a row IS the natural unit, so the host can rebuild
+// the image without tracking offsets.
+void shotDumpBase64(const uint8_t* data, size_t n) {
+  char line[660];                       // 480 bytes -> 640 chars + NUL
+  int o = 0;
+  for (size_t i = 0; i < n; i += 3) {
+    uint32_t v = (uint32_t) data[i] << 16;
+    if (i + 1 < n) v |= (uint32_t) data[i + 1] << 8;
+    if (i + 2 < n) v |= data[i + 2];
+    line[o++] = B64[(v >> 18) & 63];
+    line[o++] = B64[(v >> 12) & 63];
+    line[o++] = (i + 1 < n) ? B64[(v >> 6) & 63] : '=';
+    line[o++] = (i + 2 < n) ? B64[v & 63] : '=';
+  }
+  line[o] = '\0';
+  Serial.printf("SHOT d %s\n", line);
+}
+
 
 // Hand the screen back after a mic mode. Delegates to forceFullRepaint() rather
 // than repainting the chrome by hand, and that matters: repainting chrome WITHOUT
@@ -2610,6 +2630,35 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.setTextDatum(TL_DATUM);
     tft.drawString("Waiting for host script...", 12, CONTENT_Y + 26);
+  } else if (buf == "SCREENSHOT") {
+    // Reads the panel back and ships it as base64 RGB565. Readback was assumed
+    // impossible here - the FAB note says so, because per-pixel reads for
+    // transparency would be far too slow - but that is a SPEED argument, not a
+    // correctness one. Probed on this exact wiring at SPI_READ_FREQUENCY
+    // 20000000: four known colours read back bit-identical. readRect() pulls a
+    // whole row in one transaction, which is what makes this practical.
+    //
+    // 240x320x2 = 153600 bytes -> ~205KB of base64 -> ~18s at 115200. It blanks
+    // nothing and draws nothing, so what lands on the Mac is exactly what was on
+    // the screen when the command arrived.
+    Serial.printf("SHOT begin w=%d h=%d fmt=rgb565\n", tft.width(), tft.height());
+    static uint16_t rowBuf[240];
+    static uint8_t  rowBytes[480];
+    for (int y = 0; y < tft.height(); y++) {
+      tft.readRect(0, y, tft.width(), 1, rowBuf);
+      // readRect returns each pixel BYTE-SWAPPED - measured, not assumed:
+      // writing 0xF800 and reading it back gives readPixel=0xF800 but
+      // readRect=0x00F8. That is the same internal byte order sprites use and
+      // the same trap the crab art hit with pushImage. Undoing it here (low byte
+      // first) is what makes the wire format plain big-endian RGB565, so the
+      // decoder needs no endianness guess of its own.
+      for (int x = 0; x < tft.width(); x++) {
+        rowBytes[x * 2]     = rowBuf[x] & 0xFF;
+        rowBytes[x * 2 + 1] = rowBuf[x] >> 8;
+      }
+      shotDumpBase64(rowBytes, tft.width() * 2);
+    }
+    Serial.println("SHOT end");
   } else if (buf == "MICTEST") {
     micLevelTest();
   } else if (buf == "MICMON") {

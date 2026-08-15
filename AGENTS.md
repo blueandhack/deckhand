@@ -1546,6 +1546,22 @@ Other things that aren't obvious from a single file:
     scans numbers properly, and converts each later contour's relative `m` into an
     absolute `M` (a `z` returns to the contour's own start, so contour 2 opens relative
     to where contour 1 began, not to the origin).
+- **The device screenshots ITSELF, and the panel really can be read back.** `SCREENSHOT` (via the
+  command-trigger file) reads the framebuffer with `readRect()` and ships it as base64 RGB565;
+  `finishShot()` in `host/index.mjs` rebuilds it and writes a PNG straight to `~/Deckhand-shots/`
+  (zlib is in node and a PNG is four chunks, so no external encoder and no intermediate file).
+  240x320x2 = 153,600 bytes -> ~205KB of base64 -> **~18s at 115200**, measured. Nothing is blanked
+  or redrawn while it runs, so the capture is exactly what was on the glass.
+  Two measured facts underpin it, and the second cost a wasted capture:
+  - **Readback works.** The FAB note says it is unreliable here; that is a SPEED argument about
+    per-pixel reads for transparency, not a correctness one. Four known colours written and read
+    back on this wiring came back bit-identical at `SPI_READ_FREQUENCY 20000000`.
+  - **`readRect()` returns pixels BYTE-SWAPPED and `readPixel()` does not.** Writing `0xF800`
+    yields `readPixel=0xF800` but `readRect=0x00F8` - the same internal order sprites use, and the
+    same trap `pushImage` set for the crab art. The firmware un-swaps before encoding so the wire
+    format is plain big-endian RGB565. The failure is nasty because it is not obviously a failure:
+    the first capture was a perfectly sharp, correctly-laid-out screenshot with purple text where
+    near-black belonged.
 - Easter egg: 5 taps on the footer within 4s summons **Clawd** — the real crab-walk sprite
   animation. 20 frames of 51x36 in `ClawdCrab.h`, **generated** by
   `firmware/deckhand_display/crab2c.py`; the source frames (`CrabFrames.swift`)

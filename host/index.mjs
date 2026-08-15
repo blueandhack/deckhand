@@ -1239,6 +1239,75 @@ let lastAnswerAt = 0;
 // confidently transcribed as words nobody said. Writing straight to a file keeps
 // the reader hot and keeps a megabyte of base64 out of the log.
 const AUDIO_DIR = path.join(os.homedir(), "Deckhand-audio");
+const SHOT_DIR = path.join(os.homedir(), "Deckhand-shots");
+let shotCapture = null;
+
+// Rebuilds the panel image and writes a PNG directly - no intermediate text file
+// and no external encoder. zlib is in node, and a PNG is four chunks, so the
+// whole thing is cheaper than shipping a decoder script the user has to run.
+async function finishShot() {
+  const cap = shotCapture;
+  shotCapture = null;
+  if (!cap) return;
+  const m = cap.header.match(/w=(\d+) h=(\d+)/);
+  const w = m ? Number(m[1]) : 240, h = m ? Number(m[2]) : 320;
+  if (cap.rows.length !== h) {
+    console.log(`SHOT: incomplete - ${cap.rows.length}/${h} rows, not written`);
+    return;
+  }
+  // RGB565 big-endian (the device serialises it that way so there is nothing to
+  // guess) -> 8-bit RGB, expanding each channel by replicating its high bits so
+  // full-scale stays full-scale rather than 31/32 of it.
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  let o = 0;
+  for (let y = 0; y < h; y++) {
+    raw[o++] = 0;                                  // PNG filter: none
+    const px = Buffer.from(cap.rows[y], "base64");
+    for (let x = 0; x < w; x++) {
+      const v = (px[x * 2] << 8) | px[x * 2 + 1];
+      const r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+      raw[o++] = (r << 3) | (r >> 2);
+      raw[o++] = (g << 2) | (g >> 4);
+      raw[o++] = (b << 3) | (b >> 2);
+    }
+  }
+  const zlib = await import("node:zlib");
+  const idat = zlib.deflateSync(raw, { level: 9 });
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body) >>> 0);
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;  // 8-bit RGB
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0)),
+  ]);
+  await fs.mkdir(SHOT_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const out = path.join(SHOT_DIR, `shot-${stamp}.png`);
+  await fs.writeFile(out, png);
+  console.log(`SHOT: ${w}x${h} -> ${out} (${(png.length / 1024).toFixed(1)}KB, ` +
+              `${((Date.now() - cap.started) / 1000).toFixed(1)}s)`);
+}
+
+const CRC_TABLE = (() => {
+  const t = new Int32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c;
+  }
+  return t;
+})();
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return c ^ -1;
+}
 // Captures are never overwritten (each is timestamped), so without this the directory only
 // grows - ~100KB to 1MB per take. Age-based, with a floor on the count so a long quiet
 // spell can't wipe the lot: the newest AUDIO_KEEP_MIN survive regardless of age, which
@@ -1567,6 +1636,23 @@ async function handleDeviceLine(line, via) {
   }
   // Audio first, and deliberately unlogged - see the note above.
   if (via === "usb") {
+    // Screenshot: same shape as an audio capture - a header, base64 rows, an end
+    // marker - and deliberately unlogged for the same reason (a quarter of a
+    // megabyte of base64 must not go near the log, and console.log also writes to
+    // a stdout nobody is draining under `open`).
+    if (line.startsWith("SHOT begin ")) {
+      shotCapture = { header: line, rows: [], started: Date.now() };
+      console.log(`[device/${via}] ${line}`);
+      return;
+    }
+    if (line.startsWith("SHOT d ")) {
+      if (shotCapture) shotCapture.rows.push(line.slice(7));
+      return; // never logged
+    }
+    if (line === "SHOT end") {
+      await finishShot();
+      return;
+    }
     if (line.startsWith("AUDIO begin ")) {
       if (audioCapture) await finishAudioCapture(false);
       audioCapture = { header: line, lines: [], started: Date.now() };
