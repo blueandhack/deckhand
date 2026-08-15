@@ -1449,7 +1449,18 @@ void micStream() {
   uint32_t seqSent = 0, seqAcked = 0, samples = 0, dropped = 0;
   uint32_t acc = 0; int accN = 0;
   int lvlMin = 32767, lvlMax = -32768;
-  unsigned long start = millis(), lastUi = 0;
+  // Touch is polled on its OWN cadence, NOT inside the meter repaint. micMonitor
+  // has always done it this way (10ms, two votes); micStream had the poll nested
+  // in the 120ms UI block, so a stop needed two positives 120ms apart - 240ms at
+  // worst - and, far worse, a tap whose contact did not span two of those polls
+  // reset stopVotes to 0 and did nothing at all. A normal tap is 80-150ms, so
+  // that happened often, which is what made stopping feel unresponsive.
+  // 10, not 20: the loop already turns over every ~16ms (a 1024-byte
+  // conv_frame at 32kHz x 2 bytes), so a 20ms gate would fire on every OTHER
+  // iteration and quietly cost 64ms for two votes. At 10 the gate never delays
+  // a poll, it only bounds it if this loop ever spins faster. Two votes ~32ms.
+  const unsigned long STOP_POLL_MS = 10;
+  unsigned long start = millis(), lastUi = 0, lastStopPoll = 0;
   bool stoppedByUser = false;
   int stopVotes = 0;
   unsigned long windowBlockedAt = 0;
@@ -1518,6 +1529,21 @@ void micStream() {
       seqSent++;
     }
 
+    // Stop check, on its own fast cadence. Still TWO consecutive reads: a
+    // resistive panel throws occasional false positives, and one of them ended a
+    // 99s take early, reported as "by=tap" when nothing had been touched. At
+    // 20ms apart that debounce costs ~40ms instead of 240ms, and a normal tap
+    // spans several polls rather than risking a gap between two.
+    // The 400ms grace stops the finger lifting off the START tap ending it.
+    if (millis() - lastStopPoll >= STOP_POLL_MS) {
+      lastStopPoll = millis();
+      if (millis() - start > 400 && ts.touched()) {
+        if (++stopVotes >= 2) { stoppedByUser = true; break; }
+      } else {
+        stopVotes = 0;
+      }
+    }
+
     if (millis() - lastUi >= 120) {
       lastUi = millis();
       int pp = (lvlMax > lvlMin) ? lvlMax - lvlMin : 0;
@@ -1526,14 +1552,6 @@ void micStream() {
       unsigned long el = millis() - start;
       snprintf(t, sizeof(t), "%lu:%02lu", el / 60000, (el / 1000) % 60);
       micPillMeter(pp * 1000 / 600, t, "TAP ANYWHERE TO STOP");
-      // TWO consecutive reads: a resistive panel throws occasional false
-      // positives, and one of them ended a 99s take early, reported as "by=tap"
-      // when nothing had been touched.
-      if (el > 400 && ts.touched()) {
-        if (++stopVotes >= 2) { stoppedByUser = true; break; }
-      } else {
-        stopVotes = 0;
-      }
     }
   }
 
@@ -1675,8 +1693,10 @@ void micRecord() {
   // until the buffer is full (that cap is heap-bound - see MIC_REC_SECONDS).
   // A fixed length is the wrong default for dictation; "stop when I'm done" is.
   unsigned long deadline = millis() + (unsigned long) secs * 1000UL + 3000UL;
-  unsigned long recStart = millis(), lastUi = 0;
+  unsigned long recStart = millis(), lastUi = 0, lastStopPoll = 0;
+  const unsigned long STOP_POLL_MS = 10;   // see micStream: poll != repaint
   int lvlMin = 32767, lvlMax = -32768;
+  int stopVotes = 0;
   bool stoppedByUser = false;
   while (got < nOut && millis() < deadline) {
     uint32_t len = 0;
@@ -1684,6 +1704,18 @@ void micRecord() {
     // Meter + stop check between DMA reads, never inside the sample loop: the
     // hardware keeps filling buffers while we draw (8KB of slack ~ 128ms), so this
     // costs no audio.
+    // Stop check on its own cadence, and now with the same two-vote debounce the
+    // streaming path uses - a single read here could be ended by the same panel
+    // false positive.  400ms grace so the finger lifting off the START tap
+    // cannot stop it instantly.
+    if (millis() - lastStopPoll >= STOP_POLL_MS) {
+      lastStopPoll = millis();
+      if (millis() - recStart > 400 && ts.touched()) {
+        if (++stopVotes >= 2) { stoppedByUser = true; break; }
+      } else {
+        stopVotes = 0;
+      }
+    }
     if (millis() - lastUi >= 120) {
       lastUi = millis();
       int pp = (lvlMax > lvlMin) ? lvlMax - lvlMin : 0;
@@ -1692,8 +1724,6 @@ void micRecord() {
       unsigned long el = millis() - recStart;
       snprintf(t, sizeof(t), "%lu.%lus / %ds", el / 1000, (el % 1000) / 100, secs);
       micPillMeter(pp * 1000 / 600, t, "TAP ANYWHERE TO STOP");
-      // 400ms grace so the finger lifting off the START tap can't stop it instantly.
-      if (el > 400 && ts.touched()) { stoppedByUser = true; break; }
     }
     for (uint32_t i = 0; i + SOC_ADC_DIGI_RESULT_BYTES <= len && got < nOut;
          i += SOC_ADC_DIGI_RESULT_BYTES) {

@@ -862,6 +862,17 @@ Other things that aren't obvious from a single file:
     after measurement, where it can't flatter the numbers.
   - The 5s request falls back to 4s/3s when the heap won't take it, and reports what it got. **~4s is
     the ceiling** on this module (ESP32-32E **N4** — 4MB flash, no PSRAM), not a preference.
+- **Polling the stop-tap is NOT the same job as repainting the meter, and sharing a timer made
+  stopping feel broken.** `micStream` had its `ts.touched()` check nested inside the 120ms meter
+  repaint, with the two-consecutive-reads debounce on top - so a stop cost 120ms at best and 240ms
+  at worst, and, far worse, a tap whose contact did not span two polls 120ms apart reset the vote
+  count and did **nothing at all**. A normal tap is 80-150ms, so that happened often, and it reads
+  as an unresponsive button rather than a slow one. `micMonitor` had always done it correctly (10ms,
+  two votes); the streaming and one-shot paths now match it. The poll gate is **10ms, not 20**:
+  the loop already turns over every ~16ms (a 1024-byte `conv_frame` at 32kHz x 2 bytes), so a 20ms
+  gate would fire on every OTHER iteration and quietly cost 64ms for two votes. Two votes now cost
+  ~32ms and a normal tap spans 5-9 polls. The debounce itself is unchanged - still two consecutive
+  reads, which is what stops a single spurious `ts.touched()` ending a 99s take.
 - **Recording is user-terminated and shows a live meter.** Tap the floating button to start, tap
   again to stop; it also stops when the buffer fills, and the log says which (`AUDIO stopped by
   tap|buffer full`). A fixed length is the wrong default for dictation. Meter and transfer progress
