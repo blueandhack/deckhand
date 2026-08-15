@@ -111,8 +111,11 @@ read + confirm.
   20s of speech is far more than an answer needs, and it leaves ~70s for the rest.
 - Transfer is ~8KB/s over USB (ADPCM, measured), so 20s of audio is ~2.5s of transfer.
 - whisper large-v3-turbo runs at ~42x realtime (measured), so ~0.5s.
-- The remaining budget is displayed on the confirm screen, counting down, so a slow read is a
-  visible choice rather than a silent expiry.
+- **No countdown is displayed**, though an earlier draft of this spec promised one. The device
+  cannot compute the remaining budget: only the host knows when the hook began waiting (it issues
+  the nonce on first sight of the ask), so a countdown would need new host state published every
+  tick for marginal value. The expiry is handled instead by the failure modes below — the ask
+  disappears and the device closes the confirm screen.
 
 ## Failure modes, each with a defined behaviour
 
