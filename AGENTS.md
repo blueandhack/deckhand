@@ -1518,6 +1518,32 @@ Other things that aren't obvious from a single file:
   under the most common colour-vision deficiency, and
   status is also conveyed by shape (`drawStatusDot`: filled circle / filled square / hollow
   ring), never by color alone.
+- **The theme control has THREE modes - DARK, LIGHT and AUTO - and AUTO is a CLOCK, not a
+  sensor.** This board has no light to measure: every ADC1 channel is spoken for (touch on
+  32/33/36/39, battery 34, mic 35) and ADC2 is unusable while BT is up, so an LDR would need
+  hardware that does not exist. AUTO therefore keys off `hostNowSec()` - LIGHT from
+  `THEME_LIGHT_FROM` (07:00) to `THEME_LIGHT_TO` (19:00), DARK otherwise. That clock comes from the
+  host but advances from `millis()` once a base has been set, so AUTO keeps working while the Mac
+  is away or asleep. With no clock at all it resolves to **DARK** - the device boots before the
+  host connects, and a full-white screen is the worse thing to guess wrong at 3am.
+  `themeMode` (what the user chose) is now distinct from `themeIndex` (which palette is live); in
+  AUTO the second is derived from the first. Both share the existing `"theme"` NVS key, so an
+  install that stored 0 or 1 still reads back as DARK or LIGHT and only 2 is new.
+  Three things are load-bearing:
+  - **`tickAutoTheme()` defers while any full-screen surface is up** - the reader, history pager,
+    session detail, voice card, crab, or sleep. Switching palettes forces a full repaint, and doing
+    that under something the user is reading would wipe it. It re-checks every 30s, so the switch
+    simply lands when they return to a tab; a threshold crossing happens twice a day and being 30s
+    late costs nothing.
+  - **The control is a `uiButton`, not a `uiToggle`** - three states cannot be a boolean. It cycles
+    DARK -> LIGHT -> AUTO and shows the mode it is in, keeping its neighbours' convention: filled
+    and accented once off the default, outlined and grey while on it.
+  - **It needed its own `themeBtnCache`, and that cache MUST be reset in `resetSettingsCaches()`.**
+    It used to be drawn inside the flip toggle's cache block, which worked only because the sole
+    thing that changed it was a tap that forced a full repaint anyway. AUTO breaks that assumption -
+    it changes the palette on a timer with no tap involved - and an unreset cache leaves the button
+    BLANK after a page repaint, which is the same trap `drawSettingsStatic()` already documents.
+
 - **DARK and LIGHT themes, switchable on-device and persisted in NVS.** The nine `COLOR_*`
   tokens (`COLOR_BG`/`CARD`/`LABEL`/`VALUE`/`ACCENT`/`GOOD`/`WARN`/`BAD`/`UNKNOWN`) are no longer
   `const` — they're plain globals rewritten from a `THEMES[]` table by `applyTheme(uint8_t)`. They

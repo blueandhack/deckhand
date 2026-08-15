@@ -270,7 +270,41 @@ const Theme THEMES[] = {
   { "LIGHT", 0xEF5C, 0xFFFF, 0x62CA, 0x18C3, 0xB240, 0x12F4, 0xB3A0, 0x6887, 0x8C30 },
 };
 const int THEME_COUNT = sizeof(THEMES) / sizeof(THEMES[0]);
-uint8_t themeIndex = 0;
+uint8_t themeIndex = 0;          // which PALETTE is live (index into THEMES)
+
+// What the user CHOSE, which is not the same thing: in AUTO the live palette is
+// derived rather than picked. Persisted under the same "theme" NVS key, so an
+// install that stored 0 or 1 still reads back as DARK or LIGHT unchanged.
+//
+// AUTO is time-of-day, because this board has no light to measure: every ADC1
+// channel is spoken for (touch on 32/33/36/39, battery 34, mic 35), and ADC2 is
+// unusable while BT is up, so an LDR would need hardware that does not exist.
+// The clock comes from the host, but hostNowSec() advances from millis() once a
+// base has been set, so AUTO keeps working while the Mac is away or asleep.
+const uint8_t THEME_MODE_DARK = 0, THEME_MODE_LIGHT = 1, THEME_MODE_AUTO = 2;
+const uint8_t THEME_MODE_COUNT = 3;
+uint8_t themeMode = THEME_MODE_DARK;
+const long THEME_LIGHT_FROM = 7L * 3600;    // 07:00 local
+const long THEME_LIGHT_TO   = 19L * 3600;   // 19:00 local
+
+// Defined much further down, with the host payload handling. Declared here
+// explicitly rather than leaning on Arduino's generated prototypes - this file
+// has been bitten by their insertion order before (see the enum note above).
+long hostNowSec();
+
+// Which palette AUTO wants right now. Falls back to DARK when there is no clock
+// yet - the device boots before the host connects, and a bright white screen is
+// the worse thing to guess wrong at 3am.
+uint8_t autoThemeIndex() {
+  long now = hostNowSec();
+  if (now < 0) return THEME_MODE_DARK;
+  return (now >= THEME_LIGHT_FROM && now < THEME_LIGHT_TO) ? 1 : 0;
+}
+
+// The palette a given mode resolves to.
+uint8_t themeIndexForMode(uint8_t mode) {
+  return mode == THEME_MODE_AUTO ? autoThemeIndex() : mode;
+}
 
 // Copies one palette into the live tokens. Does NOT repaint: setup() needs the values in
 // place before its first draw, whereas a runtime switch must repaint afterwards. A caller
@@ -2580,6 +2614,26 @@ void drawFab(int state) {
 
 // Picked up: hand the content area over to a blank placement canvas (see the note
 // above on why the drag can't happen over live content).
+// AUTO re-evaluates on a slow timer rather than per tick: a threshold crossing
+// only happens twice a day, and the cost of being up to 30s late is nothing.
+//
+// Deliberately deferred while any full-screen surface is up. Switching palettes
+// forces a full repaint, and doing that under the reader, the history pager, a
+// session detail, the voice card or the crab would wipe what the user is
+// looking at. The check runs again in 30s, so the switch simply lands when they
+// come back to a tab.
+void tickAutoTheme() {
+  if (themeMode != THEME_MODE_AUTO) return;
+  if (isAsleep || octoActive || readerActive || histActive || showingDetail || voiceCardActive) return;
+  static unsigned long lastCheck = 0;
+  if (lastCheck && millis() - lastCheck < 30000) return;
+  lastCheck = millis();
+  uint8_t want = autoThemeIndex();
+  if (want == themeIndex) return;
+  applyTheme(want);
+  forceFullRepaint();   // mandatory: every cache here keys on content, not colour
+}
+
 void drawTabBar() {
   tft.fillRect(0, 0, tft.width(), TAB_BAR_H, COLOR_CARD);
   const char* labels[TAB_COUNT] = {"USAGE", "SESSIONS", "SETTINGS"};
@@ -4275,7 +4329,7 @@ const int CFM_YES_X = CFM_NO_X + CFM_BTN_W + SP_3;
 int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
 char battRowTextCache[16] = "";
 uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
-int soundBtnCache = -1, flipBtnCache = -1;
+int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
 int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+
 char brightPctCache[8] = "";
 int brightBarCache = -1;
@@ -4468,9 +4522,22 @@ void renderControlsPage() {
   if ((int) screenFlipped != flipBtnCache) {
     flipBtnCache = (int) screenFlipped;
     uiToggle(P1_FLIP_X, P1_SOUND_Y, P1_THIRD_W, P1_SOUND_H, "FLIPPED", "NORMAL", screenFlipped);
-    // Labelled by what tapping GIVES you, matching its neighbours: the pill reads LIGHT
-    // when light is active, the same way FLIPPED reads when flipped is active.
-    uiToggle(P1_THEME_X, P1_SOUND_Y, P1_THIRD_W, P1_SOUND_H, "LIGHT", "DARK", themeIndex == 1);
+  }
+  // The theme control has THREE states, so it cannot be a uiToggle - it cycles
+  // DARK -> LIGHT -> AUTO and shows the mode it is in. It also needs its OWN
+  // cache: it used to be drawn inside the flip toggle's block, so it repainted
+  // only when the FLIP state changed, and got away with it because the only
+  // thing that altered it was a tap that forced a full repaint anyway. AUTO
+  // breaks that - it changes the palette on a timer, with no tap involved.
+  if ((int) themeMode != themeBtnCache) {
+    themeBtnCache = (int) themeMode;
+    const char* lbl = themeMode == THEME_MODE_DARK  ? "DARK"
+                    : themeMode == THEME_MODE_LIGHT ? "LIGHT" : "AUTO";
+    // Same convention as its neighbours: filled and accented once it is off the
+    // default, outlined and grey while it is on it.
+    uiButton(P1_THEME_X, P1_SOUND_Y, P1_THIRD_W, P1_SOUND_H, lbl,
+             themeMode == THEME_MODE_DARK ? COLOR_LABEL : COLOR_ACCENT,
+             themeMode != THEME_MODE_DARK);
   }
 }
 
@@ -4673,7 +4740,8 @@ void renderSettingsTab() {
 
 void resetSettingsCaches() {
   btDotCache = -1; usbDotCache = -1; battRowCache = -1; battRowTextCache[0] = '\0';
-  soundBtnCache = -1; flipBtnCache = -1; brightBarCache = -1;
+  soundBtnCache = -1; flipBtnCache = -1; themeBtnCache = -1; brightBarCache = -1;
+  battRowColorCache = 0;
   brightPctCache[0] = '\0'; sleepValCache[0] = '\0'; volValCache[0] = '\0';
   for (int i = 0; i < 6; i++) stepGlyphCache[i] = -1;
 }
@@ -4777,8 +4845,9 @@ void handleSettingsTouch(int sx, int sy) {
       drawSettingsStatic();
       renderSettingsTab();
     } else if (sy >= P1_SOUND_Y && sy < P1_SOUND_Y + P1_SOUND_H && sx >= P1_THEME_X) {
-      applyTheme((themeIndex + 1) % THEME_COUNT);
-      prefs.putUChar("theme", themeIndex);
+      themeMode = (themeMode + 1) % THEME_MODE_COUNT;
+      prefs.putUChar("theme", themeMode);
+      applyTheme(themeIndexForMode(themeMode));
       // Mandatory, not cosmetic: every change-only cache in this sketch keys on content,
       // so without a full repaint the screen keeps the old palette until something else
       // happens to change a value.
@@ -5523,7 +5592,11 @@ void setup() {
   // After prefs.begin() (inside loadOrRunCalibration) and BEFORE the first draw, so the
   // opening screen is already in the right palette rather than flashing the default.
   // Wake from deep sleep re-runs setup(), so this restores the theme then too.
-  applyTheme(prefs.getUChar("theme", 0));
+  themeMode = prefs.getUChar("theme", THEME_MODE_DARK);
+  if (themeMode >= THEME_MODE_COUNT) themeMode = THEME_MODE_DARK;
+  // In AUTO this resolves to DARK here, because the host has not sent a clock
+  // yet; tickAutoTheme() corrects it within 30s of the first payload.
+  applyTheme(themeIndexForMode(themeMode));
   applyScreenRotation();   // also restores it after a calibration run
   loadBrightness();
   loadSleepTimeout();
@@ -5650,6 +5723,7 @@ void loop() {
   updateBeep();
   checkPowerButton();
   tickWorkingSpinner();
+  tickAutoTheme();      // no-op unless the theme is set to AUTO
 
   if (sleepTimeoutMs > 0 && !isAsleep && millis() - lastActivityMillis > sleepTimeoutMs) enterSleep();
 
