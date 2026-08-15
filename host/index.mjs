@@ -20,6 +20,7 @@ import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
 import { mergeById } from "./sessions-merge.mjs";
+import { voiceSha, verifyVoiceAnswer } from "./voice-answer.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -279,6 +280,10 @@ async function rememberDevice(name) {
 // prompt. Same nonce is sent for a given pid across ticks (the device HMACs
 // whatever it last received); pruned once the prompt is long gone.
 const askNonces = new Map(); // pid -> { nonce, seen }
+// A transcript waiting for the human to confirm it on the device. Keyed by the
+// ask's pid, so a second dictation for the same prompt simply replaces the
+// first. Pruned with the nonces - once a prompt is gone, so is any text for it.
+const pendingVoiceAnswers = new Map(); // pid -> { text, sha, at }
 function nonceForPid(pid) {
   let e = askNonces.get(pid);
   if (!e) {
@@ -292,6 +297,9 @@ function nonceForPid(pid) {
 function pruneNonces() {
   const now = Date.now();
   for (const [pid, e] of askNonces) if (now - e.seen > 60_000) askNonces.delete(pid);
+  for (const [pid, e] of pendingVoiceAnswers) {
+    if (Date.now() - e.at > 5 * 60_000) pendingVoiceAnswers.delete(pid);
+  }
 }
 
 // Keyed with the secret of the DEVICE that sent the answer, so a device we're
@@ -1147,7 +1155,18 @@ async function readSessions() {
       // Pending question (already truncated by the hook) rides along so the
       // device can display it and offer the options as buttons. We attach a
       // per-prompt nonce; the device HMACs it back so we can trust the answer.
-      if (record.ask) item.ask = { ...record.ask, nonce: nonceForPid(record.ask.pid) };
+      if (record.ask) {
+        item.ask = { ...record.ask, nonce: nonceForPid(record.ask.pid) };
+        // Only questions can be answered by voice: emitDecision carries free
+        // text for a question and discards it for a plan, and a spoken answer to
+        // a permission prompt could only ever be a DENY.
+        item.ask.voice = record.ask.kind === "question";
+        const pend = pendingVoiceAnswers.get(record.ask.pid);
+        if (pend) {
+          item.ask.voiceText = pend.text;
+          item.ask.voiceSha = pend.sha;
+        }
+      }
       return item;
     })
   );
@@ -1517,6 +1536,45 @@ async function transcribeAndDispatch(captureFile, target) {
   child.unref?.();
 }
 
+// Same decode-and-transcribe as a dictation, but the result is PARKED for
+// confirmation rather than delivered. Nothing here writes an answer file - the
+// device has to sign the text first.
+async function transcribeForAnswer(captureFile, pid) {
+  const wav = path.join(AUDIO_DIR, "latest.wav");
+  const clean = path.join(AUDIO_DIR, "latest-clean.wav");
+  try {
+    await execFileAsync(process.execPath, [path.join(__dirname, "mic-wav.mjs"), captureFile, wav]);
+  } catch (err) {
+    // mic-wav.mjs refuses a capture under 98% complete, because a truncated one
+    // transcribes as confident nonsense - exactly what must not become an answer.
+    console.error(`Voice answer: decode failed (truncated capture?): ${err.message.split("\n")[0]}`);
+    setVoice("askerror", { reply: "capture incomplete - record again" });
+    return;
+  }
+  let text = "";
+  try {
+    const args = ["-m", WHISPER_MODEL, "-f", clean, "-nt"];
+    if (WHISPER_PROMPT) args.push("--prompt", WHISPER_PROMPT, "--carry-initial-prompt");
+    const { stdout } = await execFileAsync(WHISPER_BIN, args, { maxBuffer: 4 * 1024 * 1024 });
+    text = stdout.replace(/\s+/g, " ").trim();
+  } catch (err) {
+    console.error(`Voice answer: whisper failed: ${err.message.split("\n")[0]}`);
+    setVoice("askerror", { reply: "transcription failed" });
+    return;
+  }
+  if (!text) {
+    setVoice("askerror", { reply: "nothing recognised - record again" });
+    return;
+  }
+  // Cap FIRST, then hash: the device displays the capped string, so that is the
+  // string that must be signed. Hashing before capping would sign text the human
+  // never saw.
+  text = text.slice(0, VOICE_TEXT_MAX);
+  pendingVoiceAnswers.set(pid, { text, sha: voiceSha(text), at: Date.now() });
+  console.log(`Voice answer: pid=${pid} transcript = "${text}"`);
+  setVoice("askheard", { text });
+}
+
 let audioCapture = null; // { header, lines: [], started }
 
 async function finishAudioCapture(complete) {
@@ -1620,7 +1678,13 @@ async function finishAudioStream(tail) {
   );
   // Fire and forget: transcription plus a dictated task can take a while, and the
   // serial reader must keep draining throughout.
-  transcribeAndDispatch(file, st.target).catch((e) => console.error("Voice:", e.message));
+  // An answer capture never dispatches: its text has to be confirmed on the
+  // device before it is allowed to become a decision.
+  if (st.answerPid) {
+    transcribeForAnswer(file, st.answerPid).catch((e) => console.error("Voice answer:", e.message));
+  } else {
+    transcribeAndDispatch(file, st.target).catch((e) => console.error("Voice:", e.message));
+  }
   pruneAudioCaptures().catch(() => {});
 }
 
@@ -1669,7 +1733,13 @@ async function handleDeviceLine(line, via) {
     }
     if (line.startsWith("AUDIO stream ")) {
       const tm = line.match(/target=(\S+)/);
-      audioStream = { header: line, target: tm ? tm[1] : "-", chunks: [], expectSeq: 0, gaps: 0, started: Date.now() };
+      const am = line.match(/answer=(\S+)/);
+      audioStream = {
+        header: line,
+        target: tm ? tm[1] : "-",
+        answerPid: am && am[1] !== "-" ? am[1] : "",
+        chunks: [], expectSeq: 0, gaps: 0, started: Date.now(),
+      };
       console.log(`[device/${via}] ${line}`);
       return;
     }
