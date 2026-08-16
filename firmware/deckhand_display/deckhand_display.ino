@@ -687,6 +687,9 @@ struct SessionInfo {
   // the moment askPid changes, so it can never suppress a later prompt's
   // transcript.
   char askVoiceCancelSha[20];
+  // Seconds the hook will still wait, published by the host. Advisory: it drives
+  // the keyboard's countdown only, and -1 means the host did not send one.
+  int askSec;
 };
 SessionInfo sessions[MAX_SESSIONS];
 int sessionCount = 0;
@@ -729,6 +732,19 @@ int answeredIdx = -1;
 bool askOverflow = false; // preview didn't fit; READ FULL TEXT button shown
 bool readerActive = false;
 int readerPage = 0;
+
+// ---- Keyboard state ----
+// One keyboard at a time, so this is global rather than per-session: it is a
+// surface, not a property of a row. kbPid pins it to the prompt it was opened
+// for, so a payload that rewrites the session list cannot redirect a typed answer.
+bool kbActive = false;
+char kbText[151];              // 150 bytes + NUL, matching the host's cap exactly
+int  kbLen = 0;
+char kbPid[24] = "";
+bool kbShift = false;          // one-shot, cleared by the next character
+bool kbSymbols = false;        // ?123 page
+bool kbWindowClosed = false;   // the ask vanished while typing - keep the text
+int kbSessionIdx = -1;
 
 // ---------- Session history ----------
 // Fetched ON DEMAND and PAGED FROM THE MAC. The device stores only the page it is showing:
@@ -1391,7 +1407,7 @@ extern bool octoActive;
 // beside drawWaitingScreen() because it needs the octoActive declaration above.
 bool waitingScreenVisible() {
   return !everReceived && !isAsleep && !octoActive && !showingDetail &&
-         !readerActive && currentTab == TAB_USAGE;
+         !readerActive && !kbActive && currentTab == TAB_USAGE;
 }
 
 // The wheel's own timer. Like the working spinner this is a small blit rather
@@ -1526,7 +1542,7 @@ void drawFab(int state) {
 // come back to a tab.
 void tickAutoTheme() {
   if (themeMode != THEME_MODE_AUTO) return;
-  if (isAsleep || octoActive || readerActive || histActive || showingDetail || voiceCardActive) return;
+  if (isAsleep || octoActive || readerActive || histActive || showingDetail || voiceCardActive || kbActive) return;
   static unsigned long lastCheck = 0;
   if (lastCheck && millis() - lastCheck < 30000) return;
   lastCheck = millis();
@@ -1722,7 +1738,7 @@ int sessionRowH = 40;
 // never look like activity to the auto-sleep timer.
 extern bool octoActive;   // defined with the Clawd easter egg, further down
 void tickWorkingSpinner() {
-  if (isAsleep || octoActive || showingDetail || readerActive || histActive) return;
+  if (isAsleep || octoActive || showingDetail || readerActive || histActive || kbActive) return;
   if (currentTab != TAB_SESSIONS || sessionCount == 0) return;
   if (millis() - lastAnimMs < ANIM_INTERVAL_MS) return;
   lastAnimMs = millis();
@@ -2255,6 +2271,10 @@ void handleTouch() {
     return;
   }
 
+  // The keyboard owns the whole screen, so it is tested before every other
+  // surface and consumes every tap - the same way the reader does.
+  if (kbActive) { kbTouch(sx, sy); lastActivityMillis = millis(); return; }
+
   if (showingDetail) {
     detailIndex = resolveDetailIndex(); // ensure the tap acts on the right session
     if (detailIndex < 0) { closeSessionDetail(); return; }
@@ -2492,6 +2512,7 @@ void handleLine(const String& line) {
       // Default: not suppressing anything. Carried forward from prevSessions
       // below, but ONLY while askPid stays the same prompt - see there.
       info.askVoiceCancelSha[0] = '\0';
+      info.askSec = -1;
       JsonObject ask = s["ask"];
       if (!ask.isNull()) {
         // Absent = fall back to the host-wide flag (a hook too old to stamp the
@@ -2505,6 +2526,7 @@ void handleLine(const String& line) {
         info.askVoice = ask["voice"] | false;
         copyField(info.askVoiceText, sizeof(info.askVoiceText), ask["voiceText"] | "");
         copyField(info.askVoiceSha, sizeof(info.askVoiceSha), ask["voiceSha"] | "");
+        info.askSec = ask["sec"] | -1;
         // The confirm screen keys off askVoiceText alone, so a transcript that
         // somehow arrives for a non-question ask must not be able to raise it.
         if (strcmp(info.askKind, "question") != 0) info.askVoiceText[0] = '\0';
@@ -2616,6 +2638,20 @@ void handleLine(const String& line) {
     bool askAlive = showingDetail && detailIndex >= 0 && sessions[detailIndex].askPid[0];
     if (askAlive) return;
     exitReaderToList();
+    return;
+  }
+  if (kbActive) {
+    // The keyboard owns the screen; absorb the tick so the periodic repaint does
+    // not paint the session list over what someone is typing - the same trap the
+    // reader and the settings confirm dialog already document. The countdown and
+    // the window-closed state are refreshed from the new payload, nothing else.
+    int idx = -1;
+    for (int i = 0; i < sessionCount; i++)
+      if (strcmp(sessions[i].askPid, kbPid) == 0) { idx = i; break; }
+    kbSessionIdx = idx;
+    bool gone = (idx < 0);
+    if (gone != kbWindowClosed) { kbWindowClosed = gone; drawKbActions(); }
+    drawKbText();          // countdown ticks down
     return;
   }
 
@@ -3100,7 +3136,11 @@ void loop() {
   // it's open, and keep the footer/tab renderers off its pixels.
   if (readerActive || histActive) lastActivityMillis = millis();
 
-  if (!isAsleep && !octoActive && !readerActive && !histActive) {
+  // kbActive excluded for the same reason readerActive/histActive already are:
+  // this local 1s tick calls renderSessionsTab()/renderSettingsTab() directly,
+  // which would paint the session list straight over the keyboard exactly the
+  // way the 5s host tick would if handleLine didn't absorb it.
+  if (!isAsleep && !octoActive && !readerActive && !histActive && !kbActive) {
     static unsigned long lastFooterTick = 0;
     if (millis() - lastFooterTick > 1000) {
       lastFooterTick = millis();

@@ -348,16 +348,30 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
 }
 // Index-based (not SessionInfo&) for the same Arduino auto-prototype reason
 // as buildSessionSubline.
-// 1 when this ask offers a SPEAK row, 0 otherwise. Used by BOTH askOptionsTop()
-// and the draw, so the buttons and their hit tests can never disagree about how
-// many rows are in the stack - which is exactly how a fixed offset would drift.
-int askVoiceRows(int idx) {
+// True when this ask may be answered by TYPING. Questions only, for the same
+// reason voice is: emitDecision discards a plan's text and a permission prompt
+// can only be denied. Codex is excluded because REMOTE_WAIT_MS is 15s there
+// against 90s for Claude Code - not enough to type a sentence - and offering a
+// control that cannot work is exactly what the read-only ask path refuses to do.
+bool askTypeOffered(int idx) {
   const SessionInfo& s = sessions[idx];
-  return (s.askVoice && s.askAnswerable && !s.askVoiceText[0]) ? 1 : 0;
+  return s.askAnswerable && strcmp(s.askKind, "question") == 0 &&
+         strcmp(s.agent, "cx") != 0 && !s.askVoiceText[0];
+}
+// 1 when this ask offers an input row (SPEAK and/or TYPE), 0 otherwise. Used by
+// BOTH askOptionsTop() and the draw, so the buttons and their hit tests can never
+// disagree about how many rows are in the stack - which is exactly how a fixed
+// offset would drift. SPEAK and TYPE SHARE one row (half-width each, the way
+// SOUND and NORMAL/FLIPPED share the settings page's bottom row) so adding typing
+// costs the options no space at all.
+int askInputRows(int idx) {
+  const SessionInfo& s = sessions[idx];
+  bool speak = s.askVoice && s.askAnswerable && !s.askVoiceText[0];
+  return (speak || askTypeOffered(idx)) ? 1 : 0;
 }
 int askOptionsTop(int idx) {
   return contentBottom() -
-         (sessions[idx].askOptCount + askVoiceRows(idx)) * (ASK_OPT_H + ASK_OPT_GAP);
+         (sessions[idx].askOptCount + askInputRows(idx)) * (ASK_OPT_H + ASK_OPT_GAP);
 }
 // The confirm screen (SEND / RE-RECORD / CANCEL) draws no option buttons - it
 // returns early out of drawAskDetail - so its two rows anchor to the bottom of
@@ -544,15 +558,26 @@ void drawAskDetail(int idx) {
     tft.setTextDatum(TL_DATUM);
   }
 
-  // Voice is offered only where free text is actually delivered: a question.
-  // A plan's answer text is discarded by the hook and a permission prompt can
-  // only be denied, so neither gets this control. It is one more row in the
-  // same bottom-anchored stack as the option buttons (askOptionsTop already
-  // reserved the room for it via askVoiceRows), so it can never overlap them
-  // regardless of askOptCount.
-  if (askVoiceRows(idx)) {
-    uiButton(CARD_X, contentBottom() - ASK_OPT_H, CARD_W, ASK_OPT_H,
-             "SPEAK YOUR ANSWER", COLOR_ACCENT);
+  // Voice/type are offered only where free text is actually delivered: a
+  // question. A plan's answer text is discarded by the hook and a permission
+  // prompt can only be denied, so neither gets this control. It is one more
+  // row in the same bottom-anchored stack as the option buttons (askOptionsTop
+  // already reserved the room for it via askInputRows), so it can never
+  // overlap them regardless of askOptCount.
+  if (askInputRows(idx)) {
+    const SessionInfo& s = sessions[idx];
+    bool speak = s.askVoice && s.askAnswerable && !s.askVoiceText[0];
+    bool type  = askTypeOffered(idx);
+    int y = contentBottom() - ASK_OPT_H;
+    if (speak && type) {
+      int halfW = (CARD_W - 8) / 2;
+      uiButton(CARD_X, y, halfW, ASK_OPT_H, "SPEAK", COLOR_ACCENT);
+      uiButton(CARD_X + halfW + 8, y, halfW, ASK_OPT_H, "TYPE", COLOR_ACCENT);
+    } else if (speak) {
+      uiButton(CARD_X, y, CARD_W, ASK_OPT_H, "SPEAK YOUR ANSWER", COLOR_ACCENT);
+    } else {
+      uiButton(CARD_X, y, CARD_W, ASK_OPT_H, "TYPE YOUR ANSWER", COLOR_ACCENT);
+    }
   }
 }
 // Device -> host, over whichever transports are up. The host maps the short
@@ -664,10 +689,16 @@ bool handleAskTouch(int sx, int sy) {
   }
 
   int optTop = askOptionsTop(detailIndex);
-  // SPEAK occupies its own row at the bottom of the stack - test it before the
-  // option hit-testing below, at the same y the draw used, so the two can
+  // SPEAK/TYPE occupy the same row at the bottom of the stack - test it before
+  // the option hit-testing below, at the same y the draw used, so the two can
   // never disagree about where the button is.
-  if (askVoiceRows(detailIndex) && sy >= contentBottom() - ASK_OPT_H) {
+  if (askInputRows(detailIndex) && sy >= contentBottom() - ASK_OPT_H) {
+    bool speak = s.askVoice && s.askAnswerable && !s.askVoiceText[0];
+    bool type  = askTypeOffered(detailIndex);
+    // Same split as the draw, derived the same way, so the halves cannot drift.
+    bool wantType = type && (!speak || sx >= CARD_X + (CARD_W - 8) / 2 + 8);
+    if (wantType) { openKeyboard(detailIndex); return true; }
+    if (!speak) return true;                 // the gap between the two buttons
     // Same reasoning as RE-RECORD above: this is the path a CANCEL actually
     // returns to (it reverts to the option buttons, SPEAK row included), so a
     // suppression from an earlier CANCEL on this prompt must not survive a
