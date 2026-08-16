@@ -1456,9 +1456,17 @@ bool fabPressed = false;           // the press currently down started on the bu
 // old per-screen exclusions are gone with the hazards that motivated them: it
 // cannot overlap Allow/Deny, a card, or the pager, because it is not over the
 // content area at all. Chrome that blinks in and out reads as a glitch, so the
-// only things that hide it are the two states where the bar itself is gone.
+// only things that hide it are the states where the bar itself is gone.
 bool fabVisible() {
-  if (isAsleep || octoActive) return false;
+  // kbActive joins isAsleep/octoActive rather than being handled by touch-order
+  // alone: drawKeyboard() fillScreens over the slot, so the button is already
+  // invisible the moment the keyboard opens, but fabHit() only checks THIS
+  // function - without this line it kept claiming taps in that corner (the
+  // keyboard's countdown sits right under the old slot), silently starting a
+  // mic capture and, on release, forceFullRepaint()ing a tab over the keyboard
+  // while kbActive stayed true. Same invariant isAsleep/octoActive already
+  // rely on: fabVisible() means "actually visible AND tappable", not just drawn.
+  if (isAsleep || octoActive || kbActive) return false;
   // Shown on the session detail screen too - that is how a dictation is aimed at
   // a specific session. It used to be hidden there whenever an ask was pending,
   // because a control floating over Allow/Deny is a hazard; in the tab bar it is
@@ -3133,8 +3141,11 @@ void loop() {
   }
 
   // The reader is a static full-screen page: keep the display awake while
-  // it's open, and keep the footer/tab renderers off its pixels.
-  if (readerActive || histActive) lastActivityMillis = millis();
+  // it's open, and keep the footer/tab renderers off its pixels. kbActive joins
+  // this for a sharper reason than annoyance: default sleep is 30s against a
+  // 90s answer budget, so without this the backlight could blank mid-answer in
+  // ordinary use, and the waking tap would be swallowed rather than typed.
+  if (readerActive || histActive || kbActive) lastActivityMillis = millis();
 
   // kbActive excluded for the same reason readerActive/histActive already are:
   // this local 1s tick calls renderSessionsTab()/renderSettingsTab() directly,

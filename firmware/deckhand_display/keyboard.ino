@@ -8,14 +8,21 @@
 // It owns the WHOLE screen - tab bar and footer included - the way the history
 // reader does. That is not cosmetic: it is what makes QWERTY viable on a 240px
 // panel. Inside the content area the keys would be 22x40; full-screen they are
-// 22x46, which is 1012px2 of target instead of 880.
+// 22x44, which is 968px2 of target instead of 880.
 
 const int KB_PITCH  = 24;      // 10 * 24 = 240, exactly the panel width
 const int KB_KEY_W  = 22;      // 2px of the pitch is the gap
-const int KB_ROW_H  = 46;
-const int KB_TEXT_Y = 4,   KB_TEXT_H = 60;
-const int KB_ROWS_Y = 68;                      // 4 rows * 46 = 184, ends at 252
-const int KB_ACT_Y  = 256, KB_ACT_H = 44;      // ends at 300, 20px spare
+const int KB_ROW_H  = 44;      // 4px over TAP_MIN (40), not merely at it
+// Text card holds 6 wrapped lines (see KB_TEXT_MAX_LINES below), not the 3 an
+// earlier pass under-provisioned - that let the card silently stop growing at
+// ~100 of 150 typeable bytes with no visible sign a keystroke had been dropped.
+// 4 (top) + 88 (text, 4..92) + 4 (gap) + 176 (4 rows * 44, 96..272) + 4 (gap)
+// + 44 (actions, 276..320) = 320 exactly - see the report for the full
+// arithmetic, including why 6 lines (not the naive ceil(150/34)=5) was chosen.
+const int KB_TEXT_Y = 4,   KB_TEXT_H = 88;
+const int KB_TEXT_MAX_LINES = 6;
+const int KB_ROWS_Y = 96;                      // 4 rows * 44 = 176, ends at 272
+const int KB_ACT_Y  = 276, KB_ACT_H = 44;      // ends at 320, 0px spare
 const int KB_MAX_BYTES = 150;                  // must equal the host's cap
 
 // Rows 0-2 are the letter/symbol pages; row 3 is fixed. Control characters stand
@@ -78,8 +85,13 @@ void drawKbText() {
     tft.setTextDatum(TL_DATUM);
     tft.drawString("Type your answer", CARD_X + 6, KB_TEXT_Y + 8);
   } else {
+    // maxLines = KB_TEXT_MAX_LINES (6), not a smaller number that silently stops
+    // growing the card - that was the bug: 150 bytes at 34 Cozette chars/line
+    // needs up to 5 lines by plain division, and 6 is chosen over that with a
+    // documented margin against word-wrap loss (see the task report for the
+    // arithmetic, including the algorithm's own worst-case bound).
     drawWrappedText(kbText, CARD_X + 6, KB_TEXT_Y + 6, FONT_CODE, 13,
-                    CARD_W - 12, 0, 3, COLOR_VALUE, COLOR_CARD);
+                    CARD_W - 12, 0, KB_TEXT_MAX_LINES, COLOR_VALUE, COLOR_CARD);
   }
   // Countdown, top-right. Amber under 20s. Advisory only - it never decides
   // whether SEND works, so a wrong value costs nothing but a wrong impression.
@@ -111,12 +123,22 @@ void drawKbActions() {
     // The prompt expired or was answered on the Mac. The text STAYS - throwing
     // away a sentence someone spent a minute on, with no explanation, is the
     // worst outcome available here - but SEND is withheld because it cannot work.
-    setUIFont(T_META);
-    tft.setTextColor(COLOR_WARN, COLOR_BG);
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString("WINDOW CLOSED - ANSWER ON YOUR MAC",
-                   CARD_X + halfW + 8 + halfW / 2, KB_ACT_Y + KB_ACT_H / 2);
-    tft.setTextDatum(TL_DATUM);
+    // The message is 34 Cozette chars (204px) but its lane - right of CANCEL,
+    // clear of the 8px gap - is only halfW (104px) wide: a single MC_DATUM
+    // line here used to run off the screen edge AND rub out CANCEL's right
+    // half with its own opaque background box. Wrapped to the lane instead,
+    // same rule CLAUDE.md states for the confirm dialog's card text. Measured
+    // (see the task report): wraps to exactly 3 lines at this width, well
+    // inside KB_ACT_H's 44px with room to spare.
+    int laneX = CARD_X + halfW + 8, laneW = CARD_W - halfW - 8;
+    // Clear first: SEND (a full uiButton fill) or an earlier draw of this same
+    // message may have left pixels here that the new wrapped text won't cover -
+    // it's narrower than the lane at every line.
+    tft.fillRect(laneX, KB_ACT_Y, laneW, KB_ACT_H, COLOR_BG);
+    const int lines = 3;   // measured at laneW - 8; re-measure if the string changes
+    int y = KB_ACT_Y + (KB_ACT_H - lines * 13) / 2;
+    drawWrappedText("WINDOW CLOSED - ANSWER ON YOUR MAC", laneX + 4, y,
+                    T_META, 13, laneW - 8, 0, lines, COLOR_WARN, COLOR_BG);
   } else {
     // An empty answer would reach Claude as a blank deny message, which reads as
     // a refusal with no reason. Offer SEND only when there is something to send.
