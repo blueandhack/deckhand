@@ -19,6 +19,17 @@ const String* activeSecret() {
   return &hosts[activeHost].secret;
 }
 bool isPaired() { return hostCount > 0; }
+// First 8 bytes of SHA-256, hex - the same 16-character form the host's voiceSha
+// produces, so both sides hash the same way. The voice path never needed this:
+// the host sent the hash of the transcript IT held. Typed text exists only on the
+// device until it is sent, so the device has to hash it.
+String sha256Hex16(const char* s) {
+  uint8_t out[32];
+  mbedtls_sha256((const unsigned char*) s, strlen(s), out, 0);  // 0 = SHA-256, not 224
+  char hex[17];
+  for (int i = 0; i < 8; i++) sprintf(hex + i * 2, "%02x", out[i]);
+  return String(hex);
+}
 // HMAC-SHA256(secret, msg), first 16 hex chars. Matches the host's
 // crypto.createHmac('sha256', secret).update(msg).digest('hex').slice(0,16).
 String authHmac(const String& msg) {

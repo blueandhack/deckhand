@@ -240,7 +240,7 @@ bool kbTouch(int sx, int sy) {
     int halfW = (tft.width() - CARD_X * 2 - 8) / 2;
     if (sx < CARD_X + halfW) { closeKeyboard(); return true; }
     if (!kbWindowClosed && kbLen > 0 && sx >= CARD_X + halfW + 8) {
-      sendTypedAnswerToHost();   // Task 4 - a no-op stub until then
+      sendTypedAnswerToHost();
       return true;
     }
     return true;                 // swallow taps in the gap rather than guessing
@@ -277,6 +277,41 @@ bool kbTouch(int sx, int sy) {
   return true;
 }
 
-// STUB - replaced in Task 4. Present only so this task compiles and the keyboard
-// can be exercised (type, backspace, shift, page, cancel) before send exists.
-void sendTypedAnswerToHost() {}
+// Base64 of the typed text. Reuses the B64 table the screenshot dumper already
+// defines rather than pulling in mbedtls, keeping the wire format readable in a
+// host log by hand. 150 bytes -> 200 characters, well inside the line buffers.
+void kbBase64(char* out, size_t outSize) {
+  int o = 0;
+  for (int i = 0; i < kbLen && o + 4 < (int) outSize; i += 3) {
+    uint32_t v = (uint32_t) (uint8_t) kbText[i] << 16;
+    if (i + 1 < kbLen) v |= (uint32_t) (uint8_t) kbText[i + 1] << 8;
+    if (i + 2 < kbLen) v |= (uint8_t) kbText[i + 2];
+    out[o++] = B64[(v >> 18) & 63];
+    out[o++] = B64[(v >> 12) & 63];
+    out[o++] = (i + 1 < kbLen) ? B64[(v >> 6) & 63] : '=';
+    out[o++] = (i + 2 < kbLen) ? B64[v & 63] : '=';
+  }
+  out[o] = '\0';
+}
+
+void sendTypedAnswerToHost() {
+  if (kbLen == 0 || kbWindowClosed) return;
+  int idx = kbSessionIdx;
+  if (idx < 0 || idx >= sessionCount) return;
+  // Sign the HASH of the text, not the base64: the two sides then agree on the
+  // signed bytes without depending on padding or case in the encoding.
+  String sha = sha256Hex16(kbText);
+  String payload = String(sessions[idx].askNonce) + ":" + kbPid + ":TYPED:" + sha;
+  String mac = authHmac(payload);
+  // "0" when unprovisioned, matching sendAnswerToHost and sendVoiceAnswerToHost.
+  // Deliberately NOT a silent return: the host logs the rejection, so an unpaired
+  // device shows up as a refused answer rather than a SEND that quietly does nothing.
+  if (mac.length() == 0) mac = "0";
+  char b64[204];
+  kbBase64(b64, sizeof(b64));
+  char line[280];
+  snprintf(line, sizeof(line), "ANSWER %s %s TYPED %s %s",
+           sessions[idx].id, kbPid, b64, mac.c_str());
+  sendLineToHost(line);
+  closeKeyboard();
+}

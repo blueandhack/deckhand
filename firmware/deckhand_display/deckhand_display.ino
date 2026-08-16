@@ -26,6 +26,7 @@
 #include <esp_sleep.h>
 #include <sys/time.h>   // gettimeofday: ESP-IDF advances it across deep sleep
 #include <mbedtls/md.h>
+#include <mbedtls/sha256.h>
 #include <driver/gpio.h>
 #include <esp_adc/adc_continuous.h>
 #include "Cozette6x13.h"
