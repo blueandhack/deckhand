@@ -2249,6 +2249,15 @@ void handleTouch() {
     return;
   }
 
+  // The keyboard owns the whole screen, so it is tested WITH the other
+  // full-screen surfaces - before voiceCardActive, readerActive and
+  // histActive, not after them - and consumes every tap. This used to run
+  // after voiceCardActive, which let a dictation reporting back (drawn a
+  // couple hundred lines away in handleLine, with no kbActive check of its
+  // own) paint over an in-progress typed answer and then have every further
+  // tap silently type into whatever the voice-card dismissal repainted.
+  if (kbActive) { kbTouch(sx, sy); lastActivityMillis = millis(); return; }
+
   if (voiceCardActive) { // any tap dismisses the voice result
     voiceCardActive = false;
     forceFullRepaint();
@@ -2279,10 +2288,6 @@ void handleTouch() {
     drawFab(1); // immediate pressed feedback
     return;
   }
-
-  // The keyboard owns the whole screen, so it is tested before every other
-  // surface and consumes every tap - the same way the reader does.
-  if (kbActive) { kbTouch(sx, sy); lastActivityMillis = millis(); return; }
 
   if (showingDetail) {
     detailIndex = resolveDetailIndex(); // ensure the tap acts on the right session
@@ -2362,36 +2367,6 @@ void handleLine(const String& line) {
   // for an answer, keeps working - otherwise its prompts would be answerable
   // nowhere. Any current host states it explicitly.
   remoteAnswerEnabled = doc["remoteAnswer"] | true;
-
-  // Voice result. Raise the card only on a NEW exchange (host timestamp), so it
-  // appears once and a later tick can't resurrect a card the user dismissed.
-  JsonObject v = doc["voice"];
-  if (!v.isNull()) {
-    int seq = v["seq"] | 0;
-    copyField(voiceState, sizeof(voiceState), v["state"] | "");
-    copyField(voiceText, sizeof(voiceText), v["text"] | "");
-    copyField(voiceReply, sizeof(voiceReply), v["reply"] | "");
-    for (char* p = voiceText; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
-    for (char* p = voiceReply; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
-    if (seq > voiceSeq) {
-      voiceSeq = seq;
-      // "heard"/"askheard" are transient (the transcript, before dispatch or
-      // before the confirm screen takes over); show the card on the states
-      // that are worth interrupting for. "askerror"/"asksent" are included so
-      // an answer-flow failure or success is never silent - without them the
-      // user taps SPEAK, speaks, and nothing visibly happens at all.
-      if (seq > voiceSeqShown && (!strcmp(voiceState, "sent") || !strcmp(voiceState, "done") ||
-                                  !strcmp(voiceState, "memo") || !strcmp(voiceState, "error") ||
-                                  !strcmp(voiceState, "askerror") || !strcmp(voiceState, "asksent"))) {
-        voiceSeqShown = seq;
-        voiceCardActive = true;
-        showingDetail = false;   // the card owns the content area
-        drawVoiceCard();
-      }
-    } else if (voiceCardActive) {
-      drawVoiceCard();           // same exchange, fresher reply text
-    }
-  }
 
   // History reply: its own line, `hist` the only key. Bail out before any of the usage
   // parsing below, which would otherwise reset every field to "missing".
@@ -2620,14 +2595,75 @@ void handleLine(const String& line) {
     Serial.println("BEEP: session newly asking");
     startBeep();
   }
+
+  // The keyboard owns the screen. Checked here - right after sessions[] is
+  // fully rebuilt for this tick, and BEFORE the voice-card raise, the
+  // voiceConfirmGone close-and-repaint below, and the octoActive/histActive/
+  // readerActive absorbs that follow - so nothing later in this function can
+  // paint over someone typing or leave showingDetail/kbActive disagreeing
+  // about what's on the glass. It used to sit after all of that (see the old
+  // kbActive block this replaced, further down where octoActive/histActive/
+  // readerActive are still checked), which let a voice-card update - raised
+  // unconditionally, ~250 lines above that old spot - paint over an
+  // in-progress typed answer. Placed here, using THIS tick's sessions[] (not
+  // last tick's), so the countdown still ticks and a closed window is still
+  // detected the same poll it closes on - the only things this absorb needs.
+  if (kbActive) {
+    int idx = -1;
+    for (int i = 0; i < sessionCount; i++)
+      if (strcmp(sessions[i].askPid, kbPid) == 0) { idx = i; break; }
+    kbSessionIdx = idx;
+    bool gone = (idx < 0);
+    if (gone != kbWindowClosed) { kbWindowClosed = gone; drawKbActions(); }
+    drawKbText();          // countdown ticks down
+    return;
+  }
+
   // Close the confirm screen rather than leaving a SEND button that can no
   // longer do anything - see voiceConfirmGone above. sessions[]/sessionCount
   // are fully rebuilt for this tick now, so this repaints a consistent list.
+  // (Now behind the kbActive guard above - this used to run whether or not
+  // the keyboard was up, and it repaints straight over it.)
   if (voiceConfirmGone) closeSessionDetail();
 
   lastRxMillis = millis();
   bool firstEver = !everReceived;
   everReceived = true;
+
+  // Voice result. Raise the card only on a NEW exchange (host timestamp), so it
+  // appears once and a later tick can't resurrect a card the user dismissed.
+  // Gated on !kbActive as defense in depth - kbActive already returned above,
+  // so this can't currently fire while typing, but a dictation reporting back
+  // must never repaint over the keyboard regardless of how this function
+  // gets reshuffled later.
+  JsonObject v = doc["voice"];
+  if (!v.isNull()) {
+    int seq = v["seq"] | 0;
+    copyField(voiceState, sizeof(voiceState), v["state"] | "");
+    copyField(voiceText, sizeof(voiceText), v["text"] | "");
+    copyField(voiceReply, sizeof(voiceReply), v["reply"] | "");
+    for (char* p = voiceText; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
+    for (char* p = voiceReply; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
+    if (seq > voiceSeq) {
+      voiceSeq = seq;
+      // "heard"/"askheard" are transient (the transcript, before dispatch or
+      // before the confirm screen takes over); show the card on the states
+      // that are worth interrupting for. "askerror"/"asksent" are included so
+      // an answer-flow failure or success is never silent - without them the
+      // user taps SPEAK, speaks, and nothing visibly happens at all.
+      if (!kbActive && seq > voiceSeqShown &&
+          (!strcmp(voiceState, "sent") || !strcmp(voiceState, "done") ||
+           !strcmp(voiceState, "memo") || !strcmp(voiceState, "error") ||
+           !strcmp(voiceState, "askerror") || !strcmp(voiceState, "asksent"))) {
+        voiceSeqShown = seq;
+        voiceCardActive = true;
+        showingDetail = false;   // the card owns the content area
+        drawVoiceCard();
+      }
+    } else if (voiceCardActive && !kbActive) {
+      drawVoiceCard();           // same exchange, fresher reply text
+    }
+  }
 
   if (octoActive) return; // data absorbed; the octopus keeps the screen
   // The history reader owns the whole screen. Absorb the tick - without this the
@@ -2647,20 +2683,6 @@ void handleLine(const String& line) {
     bool askAlive = showingDetail && detailIndex >= 0 && sessions[detailIndex].askPid[0];
     if (askAlive) return;
     exitReaderToList();
-    return;
-  }
-  if (kbActive) {
-    // The keyboard owns the screen; absorb the tick so the periodic repaint does
-    // not paint the session list over what someone is typing - the same trap the
-    // reader and the settings confirm dialog already document. The countdown and
-    // the window-closed state are refreshed from the new payload, nothing else.
-    int idx = -1;
-    for (int i = 0; i < sessionCount; i++)
-      if (strcmp(sessions[i].askPid, kbPid) == 0) { idx = i; break; }
-    kbSessionIdx = idx;
-    bool gone = (idx < 0);
-    if (gone != kbWindowClosed) { kbWindowClosed = gone; drawKbActions(); }
-    drawKbText();          // countdown ticks down
     return;
   }
 

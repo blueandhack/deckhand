@@ -188,3 +188,17 @@ exhaust it; typing plausibly can.
   input method than voice.
 - **The device becomes a text source the host must sanitise.** Step 3 above is the whole mitigation
   and must not be softened on the grounds that the HMAC already passed.
+
+## As built
+
+The shipped layout differs from the mock above in three ways; noted here rather than editing the
+mock, which was the actual proposal at the time.
+
+- **Bands are `4..92` / `96..272` (rows 44px each) / `276..320`**, not `4..64` / `68..252` (46px) /
+  `256..300`. The text card grew 60px → 88px to fit a reserved meta row (byte counter and countdown)
+  that doesn't share a line with any wrapped text — see `keyboard.ino`'s header comment for why
+  that row had to be carved out on its own.
+- **Drawn keys are 22x40 with a 22x44 touch band**, not 22x46. `KB_ROW_H` is 44 (4px over `TAP_MIN`),
+  and the drawn key is `KB_ROW_H - 4`; the touch test still covers the full 44px row.
+- **The glyphs are `CAP`/`DEL`, not `⇧`/`⌫`.** Cozette, the on-device font, is ASCII 0x20–0x7E only —
+  there is no glyph for a shift arrow or a backspace, and drawing one would paint a blank box.

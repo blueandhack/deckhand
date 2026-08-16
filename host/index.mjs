@@ -290,7 +290,7 @@ async function rememberDevice(name) {
 // Per-prompt nonce so an ANSWER can't be replayed and is bound to one
 // prompt. Same nonce is sent for a given pid across ticks (the device HMACs
 // whatever it last received); pruned once the prompt is long gone.
-const askNonces = new Map(); // pid -> { nonce, seen }
+const askNonces = new Map(); // pid -> { nonce, seen, first }
 // A transcript waiting for the human to confirm it on the device. Keyed by the
 // ask's pid, so a second dictation for the same prompt simply replaces the
 // first. Pruned with the nonces - once a prompt is gone, so is any text for it.

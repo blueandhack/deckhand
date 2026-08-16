@@ -715,10 +715,20 @@ bool handleAskTouch(int sx, int sy) {
   if (askInputRows(detailIndex) && sy >= contentBottom() - ASK_OPT_H) {
     bool speak = s.askVoice && s.askAnswerable && !s.askVoiceText[0];
     bool type  = askTypeOffered(detailIndex);
+    int gapX0 = CARD_X + (CARD_W - 8) / 2;   // SPEAK's right edge when both buttons show
+    int gapX1 = gapX0 + 8;                    // TYPE's left edge
     // Same split as the draw, derived the same way, so the halves cannot drift.
-    bool wantType = type && (!speak || sx >= CARD_X + (CARD_W - 8) / 2 + 8);
+    bool wantType = type && (!speak || sx >= gapX1);
     if (wantType) { openKeyboard(detailIndex); return true; }
-    if (!speak) return true;                 // the gap between the two buttons
+    // The 8px gap between the two half-width buttons only exists when BOTH
+    // are drawn side by side. This used to be `if (!speak) return true;`,
+    // which is dead code for that gap: it only fires when SPEAK isn't
+    // offered at all, i.e. exactly the case with no gap to protect (the row
+    // is either all-TYPE, caught by wantType above, or all-SPEAK, with
+    // nothing here to hit). A tap actually landing in the gap fell through
+    // to the SPEAK branch below and started an unwanted 20s recording.
+    if (speak && type && sx >= gapX0 && sx < gapX1) return true;
+    if (!speak) return true;                 // nothing offered here at all
     // Same reasoning as RE-RECORD above: this is the path a CANCEL actually
     // returns to (it reverts to the option buttons, SPEAK row included), so a
     // suppression from an earlier CANCEL on this prompt must not survive a

@@ -180,8 +180,11 @@ discarded. Those keep their buttons.
 ### Or by typing
 
 If speaking isn't an option — no microphone fitted, or you'd rather not talk —
-a question ask also offers **TYPE** next to SPEAK (or on its own, full-width,
-if the microphone isn't fitted at all). It opens a full-screen QWERTY
+a question ask also offers **TYPE** next to SPEAK. TYPE runs full-width only
+when the host hasn't marked the ask as voice-answerable at all (an older host
+predating the SPEAK feature); the device has no way to detect whether a
+microphone is actually wired up, so it can't be the thing deciding this - it's
+purely a property of what the host sent. It opens a full-screen QWERTY
 keyboard, with `CAP` and `DEL` in place of shift/backspace glyphs (Cozette,
 the on-device font, doesn't have those two characters — it's ASCII only).
 Text is capped at 150 characters, with a running byte counter and a countdown

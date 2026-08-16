@@ -205,9 +205,32 @@ void openKeyboard(int idx) {
 
 void closeKeyboard() {
   kbActive = false;
+  int idx = kbSessionIdx;
   kbSessionIdx = -1;
   kbPid[0] = '\0';
-  forceFullRepaint();   // returns values from data already in hand, no tick wait
+  // Return to whatever the keyboard was opened FROM - the ask/detail screen if
+  // the prompt is still live, else the sessions list - rather than always
+  // repainting the list via forceFullRepaint(). That used to leave
+  // showingDetail TRUE (this function never touched it) while the glass showed
+  // the list, so handleTouch kept routing every subsequent tap into
+  // handleAskTouch against a screen that no longer matched it: a tap on a
+  // lower session row read as "sy >= optTop" and silently answered Claude with
+  // whatever option happened to sit at that y, and a tap in the bottom band
+  // started an unwanted mic capture. Nothing repaints that state away on its
+  // own - buildDetailSignature never changes on a cancel - so it was
+  // permanent, not a 5s window. drawSessionDetail()/buildDetailSignature()
+  // mirror what openSessionDetail() does, so showingDetail, detailIndex and
+  // detailId all agree with what's back on screen; SEND (sendTypedAnswerToHost)
+  // ends up here too, so it gets the same consistent repaint rather than
+  // relying on a later "asksent" voice card to paper over the mismatch.
+  if (!kbWindowClosed && showingDetail && idx >= 0 && idx < sessionCount) {
+    detailIndex = idx;
+    copyField(detailId, sizeof(detailId), sessions[idx].id);
+    drawSessionDetail(idx);
+    buildDetailSignature(idx, detailSigCache, sizeof(detailSigCache));
+  } else {
+    closeSessionDetail();   // ask is gone or window closed: nothing to return to
+  }
 }
 
 void kbInsert(char c) {
@@ -260,8 +283,15 @@ bool kbTouch(int sx, int sy) {
     }
     return true;
   }
+  // Integer division truncates toward zero, so on a centred row (x0 > 0) a tap
+  // in the left margin (sx < x0) would otherwise divide a small NEGATIVE
+  // number and land on col 0 instead of going negative - e.g. x0=12 on the
+  // 9-cell rows meant x 0..11 pressed "a"/CAP. The right margin never had this
+  // problem: it lands past kbRowLen(r) as expected. Reject the left margin
+  // explicitly rather than relying on the division to do it.
+  if (sx < kbRowX0(r)) return true;
   int col = (sx - kbRowX0(r)) / KB_PITCH;
-  if (col < 0 || col >= kbRowLen(r)) return true;   // the centred rows' margins
+  if (col < 0 || col >= kbRowLen(r)) return true;   // the right margin
   char c = kbRow(r)[col];
   drawKbKey(r, col, true);       // flash: the only confirmation a press landed
   if (c == KB_SHIFT) {
