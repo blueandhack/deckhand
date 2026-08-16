@@ -169,15 +169,9 @@ void micWaitRelease() {
   delay(60); // let the panel settle
 }
 void micRestoreUi() {
-  if (!everReceived) { // nothing to show yet - keep the waiting message
-    tft.fillScreen(COLOR_BG);
-    drawTabBar();
-    drawFooterChrome();
-    setUIFont(2);
-    tft.setTextColor(COLOR_LABEL, COLOR_BG);
-    tft.setTextDatum(TL_DATUM);
-    tft.drawString("Waiting for host script...", 12, CONTENT_Y + 26);
-    return;   // drawTabBar() above already painted the record button
+  if (!everReceived) { // nothing to show yet - back to the standalone screen
+    drawWaitingScreen();
+    return;
   }
   forceFullRepaint();
 }
