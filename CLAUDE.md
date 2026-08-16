@@ -1072,18 +1072,42 @@ Other things that aren't obvious from a single file:
   `HMAC(secret, "nonce:pid:TEXT:<sha16>")` over a hash of **exactly the text on screen**, so one
   signature proves both that the paired device authorised the answer and that a human read those
   words. The host re-hashes the transcript it still holds and refuses a mismatch.
-  Six things are load-bearing:
-  - **Questions only.** `emitDecision` carries free text for a question
-    (`{behavior:"deny", message: carriedAnswer}`) but for a plan takes the `answer.idx === 0` branch
-    — `{behavior:"allow"}` — since a voice answer always writes `idx: 0`; a spoken answer to a plan
-    would therefore be silently APPROVED, discarding the words entirely, not merely replaced with a
-    generic string. That is the worst failure shape available: indistinguishable from working. A
-    permission prompt can only be DENIED, so speaking "yes, go ahead" there would deny the call with
-    that as the reason.
+  Nine things are load-bearing:
+  - **Questions only, and the HOST enforces that — `ask.voice` gates the BUTTON, not the write.**
+    `emitDecision` carries free text for a question (`{behavior:"deny", message: carriedAnswer}`)
+    but for a plan takes the `answer.idx === 0` branch — `{behavior:"allow"}` — since a voice answer
+    always writes `idx: 0`; a spoken answer to a plan would therefore be silently APPROVED,
+    discarding the words entirely, not merely replaced with a generic string. That is the worst
+    failure shape available: indistinguishable from working. A permission prompt can only be DENIED,
+    so speaking "yes, go ahead" there would deny the call with that as the reason.
+    So `handleVoiceAnswer` re-reads the session record and requires `ask.kind === "question"` **and**
+    a matching `ask.pid` before it writes an answer file, and the device clears `askVoiceText` for a
+    non-question ask so the confirm screen cannot be raised at all. Both halves are deliberate:
+    parking a transcript is **unauthenticated** (any peer on the link can send
+    `AUDIO stream … answer=<pid>` against a pid of its choosing), so if the device's gate were the
+    only gate, a chosen pid would reach `{behavior:"allow"}`. A read failure on the record aborts
+    rather than falling through — `undefined !== "question"` must reject, not pass.
   - **The hook is NOT modified.** The answer file carries `idx: 0` with the transcript as `label`,
     and `chose = answer.label || ...` does the rest. That file's stdout is a decision channel.
-  - **Cap the transcript BEFORE hashing it.** The device displays the capped string, so that is the
-    string that must be signed; hashing first would sign text the human never saw.
+  - **Cap the transcript BEFORE hashing it, and cap it in BYTES.** The device displays the capped
+    string, so that is the string that must be signed; hashing first would sign text the human never
+    saw. The cap has to be `capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES)` (150, on a codepoint
+    boundary) rather than a `slice()` on characters, because the device stores the answer in a fixed
+    `char[204]` and `copyField` truncates by BYTES. Whisper emits curly quotes and em-dashes freely
+    at 3 bytes each, so a 200-*character* transcript overflows that buffer: the device would display
+    a truncated string — possibly cut mid-codepoint — while signing the host's hash of the FULL one.
+    Verification passes and the host writes text nobody read, which defeats the entire point of the
+    confirm step. `capUtf8` lives in `host/voice-answer.mjs` rather than inline so
+    `voice-answer-check.mjs` exercises it; removing its boundary walk fails 3 of its 4 checks.
+  - **If the transcript will not FIT on the confirm screen, SEND is withheld rather than offered.**
+    The panel wraps to at most 8 lines and `askVoiceTooLong()` reports an overflow, which draws
+    "TOO LONG - ANSWER ON YOUR MAC" and omits SEND (RE-RECORD and CANCEL stay). The touch handler
+    tests the same helper, so the button's rectangle is inert too — a hidden control whose hit
+    region still fires is worse than a visible one. Belt and braces in practice, not load-bearing:
+    every Cozette 6x13 glyph advances 6px, so `CARD_W - 8` = 208px gives 34 characters a line, and
+    150 bytes wraps to at most exactly 8. The two caps are therefore consistent **by arithmetic**,
+    and any change to either must re-derive the other — a 6-line cap was what let SEND sign text
+    scrolled off the bottom with no indicator that anything was missing.
   - **20s cap on an answer recording** (`MIC_ANSWER_MAX_MS`) against 120s for a dictation. The hook
     blocks for `REMOTE_WAIT_MS` (90s) and that is the whole budget for record, transfer, transcribe,
     read and confirm. If confirmations start landing late, shorten the cap - do NOT raise
@@ -1098,11 +1122,25 @@ Other things that aren't obvious from a single file:
     `askVoiceText[0]` BEFORE option handling while the confirm rows overlap the option rows — so
     after a CANCEL, a tap on what looked like an ordinary option button could transmit the transcript
     the user had just rejected. `askVoiceCancelSha` suppresses a republished transcript carrying that
-    hash, carried across ticks by the id-matched `prevSessions` block and dropped when `askPid`
-    changes. A genuinely new recording has a different hash and still displays. Device-local on
-    purpose: a new host command would be more wire surface and another thing to authenticate.
+    hash, carried across ticks by the id-matched `prevSessions` block. A genuinely new recording has
+    a different hash and still displays. Device-local on purpose: a new host command would be more
+    wire surface and another thing to authenticate.
+  - **The cancel-suppression clears when a recording STARTS, not when `askPid` changes.** Keyed off
+    `askPid` alone it was a permanent dead end: CANCEL, then say the same words again, and the
+    identical transcript hashes identically and is suppressed forever for that prompt — the user
+    re-records and nothing appears, with no way out but the Mac. Starting a recording is an explicit
+    request to see a new transcript, so it spends the suppression; both entry points (SPEAK and
+    RE-RECORD) clear it, and missing either leaves the dead end half-open.
+  - **The failure states have to reach the SCREEN, or a failure is indistinguishable from nothing
+    happening.** `askerror` (capture under 98% complete, whisper failed, nothing recognised) and
+    `asksent` raise the voice card and have labels in `voiceStateLabel()`; without that the user
+    taps SPEAK, speaks, and watches an unchanged screen burn the 90s hook budget with no signal to
+    retry. `askheard` deliberately raises **no** card — it fires the instant a transcript is parked
+    and the confirm screen carrying that same text is already about to draw, so a card on top of it
+    is noise.
   `host/voice-answer-check.mjs` covers the reject cases (tampered text, tampered hash, wrong nonce,
-  wrong pid, wrong device, malformed mac) and can be run without hardware.
+  wrong pid, wrong device, malformed mac) plus `capUtf8`'s codepoint safety, and can be run without
+  hardware.
 - **The headless fallback (`dispatch`): `claude -p --resume <session_id>`.** Continues the
   conversation in that session's own `cwd`, detached (a dictated task can run for minutes and must
   not block the host's poller).
@@ -1608,6 +1646,73 @@ Other things that aren't obvious from a single file:
     format is plain big-endian RGB565. The failure is nasty because it is not obviously a failure:
     the first capture was a perfectly sharp, correctly-laid-out screenshot with purple text where
     near-black belonged.
+- **The standalone screen (`drawWaitingScreen()`) — what shows before the host has ever spoken.**
+  The ship's-wheel mark turning, the wordmark, the device's own name, a state line, and the
+  command to run on a Cozette panel. It is the first thing anyone sees, and three things about
+  it are load-bearing:
+  - **The old instruction was a command that RELIABLY FAILS.** It read "Run host/index.mjs on
+    your Mac" — the exact thing macOS TCC SIGABRTs the moment noble touches CoreBluetooth. The
+    screen now says `open DeckhandBLE.app`. Anything added here has to be a command that works
+    from a fresh checkout, not the shortest way to describe the file.
+  - **It only ever claims what the device can actually KNOW, and the cable is not on that list.**
+    There is no VBUS-sense pin and `usbLinkActive()` keys off received bytes — which are zero
+    until the host runs — so "USB connected" is unknowable here and is never stated.
+    `bleConnected` and the NVS pairing store are real, and every branch derives from those:
+    a live BLE link or a recent `lastRxMillis` means the host demonstrably EXISTS, so those
+    branches say "waiting for the next/first update" and offer **no** command — telling someone
+    to launch an app that is already running is the failure mode this replaced. The recent-RX
+    branch is what makes `RECAL` and a mic test honest, since both reset `everReceived` while
+    the host keeps ticking. A Mac is named only when exactly one is paired: `activeHost` is
+    still -1 until a payload arrives, so with several the device genuinely cannot tell which is
+    yours.
+  - **`firstEver` had to start CLEARING the content area.** The tab's static chrome only paints
+    its own boxes, so a 64px mark, a wordmark and a command panel survive underneath it. The old
+    two lines of text sat inside card 1 and were mostly overdrawn by luck; at this size the
+    residue is guaranteed.
+  It lives on USAGE (`waitingScreenVisible()`), because `renderUsageTab` bails on `!everReceived`
+  and that tab would otherwise be empty card outlines. SETTINGS stays reachable and useful while
+  waiting — it shows the link and pairing state, which is exactly what you want when nothing is
+  arriving.
+- **The logo (`DeckhandLogo.h`, generated by `logo2c.py` from `docs/logo.svg`) — FOUR LAYERS, so
+  the wheel can turn while the hand holding it stays put.** This is the one piece of art in the
+  sketch that keeps its **own colours** rather than being tinted, because it is the project's mark
+  and not a status glyph — so it deliberately does not go through `blit2bpp`. The split comes
+  straight from the SVG's own paint order: `LOGO_BG` (96x96 RGB565: the tile gradient plus the arm
+  and palm BEHIND the wheel), `LOGO_TILE` (2bpp rounded-rect silhouette), `LOGO_WHEEL` (2bpp x8,
+  the only thing that moves) and `LOGO_FG` (2bpp, the four fingers wrapping IN FRONT of the rim).
+  ~41KB of flash.
+  Three implementation facts are load-bearing:
+  - **Composed and pushed ONE ROW at a time** (`static uint16_t row[96]`, 192 bytes). A whole frame
+    is 18KB against ~94KB of free heap after the BLE stack, and per-pixel `fillRect` is hopeless
+    here because the tile is a **gradient** — runs of equal colour average 2–3px, so a frame would
+    cost thousands of calls instead of 96. This is also the one place `pushImage` is used against
+    the screen, so it sets `setSwapBytes(true)` (and restores it): `row[]` holds ordinary RGB565.
+  - **`LOGO_BG` is generated with SQUARE corners on purpose, and `LOGO_TILE` does the shaping.**
+    Baking a page colour into the art would put a hard square of the wrong shade behind the mark
+    under one of DARK/LIGHT — and it is a coin flip which. Fading the corners through the tile mask
+    into the live `COLOR_BG` is what makes one copy of the art correct in both themes.
+  - **Not 8 pre-composited full-colour frames**, which would be 147KB against 41KB, for art on a
+    screen you rarely see. The hub is punched out as a hole so the tile shows through it; the
+    source paints it `#1B5FA6` against a gradient reading ~`#2F76B8` there, which across a ~3px dot
+    is not a difference anyone can see, and a fifth layer for it would be.
+  **The rotation step is 60/8 = 7.5°, and that is forced — do not "tidy" it to 45.** The wheel has
+  EXACT 6-fold symmetry (three spokes drawn as full diameters give six arms; six grips at
+  0/60/…/300), so a 60° turn is a no-op: 8 frames at 45° would neither loop seamlessly (45 does
+  not divide 60) nor complete a cycle, and 8 at 60° would emit 8 identical frames. This is the
+  hazard `codex2c.py` flags as hypothetical for its own mark; here it is real, because these arms
+  are `use` clones rather than hand-drawn lobes. Only the WHEEL layer rotates - spinning the hand
+  too would turn the arm upside down. The generator refuses to emit a static cycle,
+  since a dead-still wheel on a waiting screen reads as a hung device — the one thing the
+  animation exists to rule out — and it **measures motion rather than comparing frames for
+  equality**, which is the difference between a guard and a decoration: a rotation that is a
+  visual no-op still leaves frames differing by rasteriser sub-pixel noise, so an equality test
+  can miss it. **The threshold is resolution-dependent and must be re-measured if the size or the
+  art changes** — at 96x96 the real 7.5° step moves at least 0.161 mean absolute alpha (units of
+  0–3) against frame 0, where at 64x64 the same step measured 0.371, so it is not a constant to
+  copy around. `MIN_MOTION` is 0.05: ~3x under the signal, and above the noise. Proven by running
+  it — forcing a 60° step exits 1.
+  The tick is `tickWaitingWheel()` at 250ms (one turn every 2s), gated on
+  `waitingScreenVisible()` and deliberately not touching `lastNonIdleMillis`.
 - Easter egg: 5 taps on the footer within 4s summons **Clawd** — the real crab-walk sprite
   animation. 20 frames of 51x36 in `ClawdCrab.h`, **generated** by
   `firmware/deckhand_display/crab2c.py`; the source frames (`CrabFrames.swift`)

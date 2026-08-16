@@ -9,8 +9,11 @@
        alt="SESSIONS tab: one working session showing the animated Claude spark, project name, title, model and branch">
   <img src="docs/screenshot-settings.png" width="200"
        alt="SETTINGS tab: brightness, sleep and volume steppers, and the sound, orientation and theme toggles">
+  <img src="docs/screenshot-waiting.png" width="200"
+       alt="Standalone screen before the host connects: the Deckhand logo with its wheel turning, the wordmark, the device name, the paired Mac by name, and the command to run">
   <br>
-  <em>USAGE, SESSIONS and SETTINGS - real captures read back off the panel, not mockups.
+  <em>USAGE, SESSIONS, SETTINGS, and the standalone screen before the host connects -
+  real captures read back off the panel, not mockups.
   <code>echo SCREENSHOT &gt; ~/.claude/deckhand-device-command</code> writes a PNG to
   <code>~/Deckhand-shots/</code>.</em>
 </p>
@@ -22,7 +25,8 @@ lookout and relays your orders. Built on an ELEGOO 2.8" ESP32 touchscreen
 module, with optional battery and speaker. It shows live plan usage and
 per-project session status, beeps when a session needs you, and shows permission
 prompts, questions, and plan approvals so you can read *and* answer them from
-across the room — without taking the dialog away from your Mac. **Codex threads
+across the room — tapping an option, or **speaking** the answer to a question if
+the microphone is fitted — without taking the dialog away from your Mac. **Codex threads
 appear in the same list** and, once Codex's own hooks trust prompt is accepted,
 can be answered the same way; installs where that hasn't happened yet fall back
 to a read-only view (see [Codex support](#codex-support)). Three tabs:
@@ -72,20 +76,28 @@ to a read-only view (see [Codex support](#codex-support)). Three tabs:
   **STATUS** (Bluetooth/USB connection state — more trustworthy than macOS's
   Bluetooth panel — plus battery % / voltage and the device's pairing state),
   **DISPLAY & SOUND** (brightness, sleep-timeout, and speaker **volume**
-  LOW/MED/HIGH steppers, plus sound on/off, NORMAL/FLIPPED screen-rotation, and
-  DARK/LIGHT theme toggles sharing the bottom row), **ACTIONS** (MIC TEST,
-  CALIBRATE TOUCH, RESET PAIRING, and POWER OFF in the alert color), and
+  LOW/MED/HIGH steppers, plus sound on/off, NORMAL/FLIPPED screen-rotation, and a
+  DARK / LIGHT / **AUTO** theme button sharing the bottom row), **ACTIONS** (MIC
+  TEST, CALIBRATE TOUCH, RESET PAIRING, and POWER OFF in the alert color), and
   **PAIRED MACS** (every Mac the device remembers — tap one to restrict
   answering to it, tap the `x` to forget just that one). Every consequential
   action routes through a confirm dialog that states the consequence, not just
-  the question. Both themes are validated for text contrast and for
+  the question. AUTO is a **clock**, not a light sensor — this board has no ADC
+  channel left to put one on — so it runs LIGHT from 07:00 to 19:00 and DARK
+  otherwise, keeping time from `millis()` when the Mac is away, and resolving to
+  DARK when it has no clock at all (a full-white screen is the worse thing to
+  guess wrong at 3am). Both themes are validated for text contrast and for
   colour-blind / greyscale separability of the status colours — consistent
   with status never being carried by colour alone elsewhere in the UI — and
   the choice persists across reboots.
 
 A persistent footer on every tab shows a live clock, a battery pill
 (fill level + `chg`/`full`/`%`), and "Xs ago" data freshness, so the
-inherent polling delay is always visible rather than hidden.
+inherent polling delay is always visible rather than hidden. The battery reading
+is coloured by level, but charging is treated as a *state* rather than a level —
+8% while plugged in is not a warning, so it reads in the accent colour instead of
+the alert one. The number, the glyph's fill and the words `chg`/`full` all say it
+independently, so nothing there depends on seeing colour.
 
 The device **double-beeps whenever a session transitions into "needs
 input"** — the point of the whole build: you find out a session is blocked
@@ -138,6 +150,33 @@ gets out of the way. It only waits at all when a display is actually connected
 unplugged prompts behave exactly as stock, and an unanswered prompt just falls
 through to the normal dialog with no side effects.
 
+### Answering a question by speaking
+
+The useful reply to an `AskUserQuestion` is often "none of those — do X instead",
+and that isn't a button. With the microphone fitted, a question ask gains a
+**SPEAK** control: tap it, say the answer, tap to stop. The Mac transcribes it
+locally and sends the text back, the device **shows you what it heard**, and
+**SEND / RE-RECORD / CANCEL** decide what happens to it. Nothing is sent until
+you tap SEND.
+
+**The confirm tap is the authorisation, not an extra step bolted on beside it.**
+The device can't transcribe — the Mac does that — so instead of signing a blank
+cheque when recording starts, it signs a hash of *the exact text it displayed*.
+That one signature proves two things at once: your paired device authorised this,
+and a human read these words. A mishearing can't get through unseen, and a
+substituted transcript can't be signed. It matters: a dictation on this project
+once turned "make sure there is no sensitive data" into "…and **some** sensitive
+information", inverting half the instruction.
+
+Recordings cap at 20 seconds here (against 120 for a dictation), because the
+whole exchange — record, transfer, transcribe, read, confirm — has to fit inside
+the 90 seconds the hook will wait. If the transcript is too long to fit on one
+screen, the device says so and **withholds SEND** rather than offering to sign
+text you can't see. Questions only: a permission prompt can only be *denied*, so
+speaking "yes, go ahead" at one would deny the command with that as its reason,
+and a spoken answer to a plan approval would be silently approved with the words
+discarded. Those keep their buttons.
+
 ## Codex support
 
 Codex threads show up in the same SESSIONS list. Since 0.147.0, Codex CLI ships
@@ -188,7 +227,10 @@ waiting on those, and they'd crowd the six-row list.
 ## Talking to a session (speech-to-text)
 
 With the microphone fitted you can dictate to a session: open its detail screen,
-tap the round **record button**, speak, tap again to stop. Up to 120 seconds.
+tap **`• REC`** in the tab bar, speak, tap again to stop. Up to 120 seconds.
+(To *answer a pending question* by voice instead, see
+[Answering a question by speaking](#answering-a-question-by-speaking) — that path
+shows you the transcript and waits for a confirming tap before anything is sent.)
 
 **Transcription is local and free.** The host decodes the capture and runs
 [whisper.cpp](https://github.com/ggerganov/whisper.cpp) on Metal —
@@ -337,13 +379,17 @@ on macOS since it's what nearly all modern accessories use.
   pulled from the Mac on demand. A `CHAT`/`ALL` chip filters conversation vs
   commands, and you move with `< PREV`/`NEXT >`, the scrubber bar, or by tapping
   a row to read that entry in full.
-- **Record button**: a round ring-and-dot button floating over the content area.
-  **Tap** to start dictating, tap again to stop; **hold 700ms then drag** to move
-  it, and it remembers where you put it. See *Talking to a session*.
-- **Brightness / sleep timeout**: `-`/`+` steppers on SETTINGS (the whole
-  left/right third of each card is a hit zone). Sleep = backlight off
-  after 15s–5m of no touch, or OFF to never sleep; any touch wakes it
-  (that touch is consumed, so it won't also press whatever is underneath).
+- **Record button**: `• REC`, a fourth slot at the right end of the tab bar.
+  **Tap** to start recording, tap again to stop. It is drawn as a tab — same font
+  and same accent underline when active — because pressed there means what active
+  means on its neighbours; the leading dot is what says this one *does* something
+  rather than going somewhere. See *Talking to a session*.
+- **Brightness / sleep timeout / volume**: `-`/`+` steppers on SETTINGS. The
+  whole left/right third of each card is a hit zone, which is much larger than
+  the keys look, and the label sits between them so tapping it can't nudge the
+  value. Sleep = backlight off after 15s–5m of no touch, or OFF to never sleep;
+  any touch wakes it (that touch is consumed, so it won't also press whatever is
+  underneath).
 - **Sound**: SETTINGS toggle; turning it on plays the beep as a speaker test.
 - **Power off**: tap **POWER OFF** on the SETTINGS tab, or hold the **BOOT** key
   ~1 second. This is ESP32 deep sleep
