@@ -4,6 +4,12 @@
 // human actually read. See docs/superpowers/specs/2026-08-15-voice-answers-design.md.
 import crypto from "node:crypto";
 
+// The cap on a remote answer's text, in BYTES (not characters - the device stores
+// it in fixed char buffers and truncates by byte). Defined HERE, once, because
+// both answer forms and index.mjs's transcript path all size themselves from it;
+// a second copy that drifted would let the host accept text the device cannot hold.
+export const ANSWER_TEXT_MAX_BYTES = 150;
+
 // 16 hex chars is 64 bits. This is an integrity check against a transcript
 // being swapped between display and confirmation - not a password - and it
 // travels in a line the device also HMACs, so a collision would have to survive

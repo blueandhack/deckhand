@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// Checks for the voice-answer crypto. Run: node host/voice-answer-check.mjs
+// Checks for the answer crypto - spoken AND typed. Run: node host/voice-answer-check.mjs
 // Deliberately covers the REJECT cases, not just the happy path: this is the
-// code that decides whether a spoken answer is allowed to reach Claude.
+// code that decides whether a remote answer is allowed to reach Claude.
 import { voiceSha, voiceAnswerHmac, verifyVoiceAnswer, capUtf8 } from "./voice-answer.mjs";
+import { TYPED_TEXT_MAX_BYTES, typedAnswerHmac, decodeTypedText, verifyTypedAnswer } from "./typed-answer.mjs";
 
 let failed = 0;
 const check = (name, cond) => {
@@ -65,6 +66,80 @@ check("sha is 16 hex chars", /^[0-9a-f]{16}$/.test(sha));
     buf.length === 150); // 151 falls 1 byte into em-dash #51, so it must back off to 150
   check("capUtf8 leaves a string under the budget untouched",
     capUtf8("short", 150) === "short");
+}
+
+// ---- typed answers ----------------------------------------------------------
+// The typed form carries the TEXT rather than a hash of a transcript the host
+// already holds, so these cover decoding and sanitising as well as the crypto.
+{
+  const b64of = (s) => Buffer.from(s, "utf8").toString("base64");
+  const tText = "use the second approach, but keep the existing tests";
+  const tB64 = b64of(tText);
+  const tMac = typedAnswerHmac(secret, nonce, pid, voiceSha(tText));
+
+  check("a valid typed answer is accepted",
+    verifyTypedAnswer({ secret, nonce, pid, b64: tB64, mac: tMac }).ok);
+
+  check("a valid typed answer returns the decoded text",
+    verifyTypedAnswer({ secret, nonce, pid, b64: tB64, mac: tMac }).text === tText);
+
+  check("tampered typed TEXT is rejected (hmac covers its hash)",
+    !verifyTypedAnswer({ secret, nonce, pid, b64: b64of(tText + " and delete the repo"), mac: tMac }).ok);
+
+  check("a wrong nonce is rejected for a typed answer",
+    !verifyTypedAnswer({ secret, nonce: "ffffffffffffffff", pid, b64: tB64, mac: tMac }).ok);
+
+  check("a wrong pid is rejected for a typed answer",
+    !verifyTypedAnswer({ secret, nonce, pid: "99999", b64: tB64, mac: tMac }).ok);
+
+  check("a wrong device secret is rejected for a typed answer",
+    !verifyTypedAnswer({ secret: "f".repeat(32), nonce, pid, b64: tB64, mac: tMac }).ok);
+
+  check("a malformed mac is rejected for a typed answer",
+    !verifyTypedAnswer({ secret, nonce, pid, b64: tB64, mac: "nothex" }).ok);
+
+  check("malformed base64 is rejected",
+    !verifyTypedAnswer({ secret, nonce, pid, b64: "not!valid!base64", mac: tMac }).ok);
+
+  // Buffer.from(.., "base64") SILENTLY IGNORES junk, so a payload with rubbish
+  // in it would otherwise decode to something plausible and be signed against.
+  check("base64 with ignorable junk is rejected, not silently reinterpreted",
+    decodeTypedText(tB64.slice(0, -4) + "!!!!") === null);
+
+  // The device can only produce printable ASCII; a control byte means the frame
+  // did not come from our firmware, and it is headed for a hook decision message.
+  {
+    const bad = "hello\x07world";   // BEL as an ESCAPE: a raw control byte in
+                                     // this file could be stripped in transit, and a
+                                     // stripped one turns the check into a silent no-op
+    check("control bytes are rejected",
+      !verifyTypedAnswer({ secret, nonce, pid, b64: b64of(bad),
+                           mac: typedAnswerHmac(secret, nonce, pid, voiceSha(bad)) }).ok);
+  }
+
+  check("empty text is rejected",
+    !verifyTypedAnswer({ secret, nonce, pid, b64: b64of(""),
+                         mac: typedAnswerHmac(secret, nonce, pid, voiceSha("")) }).ok);
+
+  {
+    const over = "x".repeat(TYPED_TEXT_MAX_BYTES + 1);
+    check("text over the byte cap is rejected",
+      !verifyTypedAnswer({ secret, nonce, pid, b64: b64of(over),
+                           mac: typedAnswerHmac(secret, nonce, pid, voiceSha(over)) }).ok);
+  }
+
+  check("text exactly at the byte cap is accepted",
+    (() => {
+      const at = "y".repeat(TYPED_TEXT_MAX_BYTES);
+      return verifyTypedAnswer({ secret, nonce, pid, b64: b64of(at),
+                                 mac: typedAnswerHmac(secret, nonce, pid, voiceSha(at)) }).ok;
+    })());
+
+  // The two forms sign DIFFERENT strings ("...:TEXT:..." vs "...:TYPED:..."), so a
+  // signature minted for one must not authenticate the other.
+  check("a voice-form mac does not authenticate a typed answer",
+    !verifyTypedAnswer({ secret, nonce, pid, b64: tB64,
+                         mac: voiceAnswerHmac(secret, nonce, pid, voiceSha(tText)) }).ok);
 }
 
 console.log(failed ? `\n${failed} check(s) FAILED` : "\nall checks passed");
