@@ -2596,6 +2596,15 @@ void handleLine(const String& line) {
     startBeep();
   }
 
+  // Record that a tick arrived BEFORE the kbActive guard below can return -
+  // the tick did arrive and the host is still live, only its RENDERING is
+  // being absorbed while someone types, and the footer's "Xs ago" freshness
+  // must not stall for the whole typing session (and read stale for another
+  // 5s after the keyboard closes) just because the guard returned early.
+  lastRxMillis = millis();
+  bool firstEver = !everReceived;
+  everReceived = true;
+
   // The keyboard owns the screen. Checked here - right after sessions[] is
   // fully rebuilt for this tick, and BEFORE the voice-card raise, the
   // voiceConfirmGone close-and-repaint below, and the octoActive/histActive/
@@ -2625,10 +2634,6 @@ void handleLine(const String& line) {
   // (Now behind the kbActive guard above - this used to run whether or not
   // the keyboard was up, and it repaints straight over it.)
   if (voiceConfirmGone) closeSessionDetail();
-
-  lastRxMillis = millis();
-  bool firstEver = !everReceived;
-  everReceived = true;
 
   // Voice result. Raise the card only on a NEW exchange (host timestamp), so it
   // appears once and a later tick can't resurrect a card the user dismissed.

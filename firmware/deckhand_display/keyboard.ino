@@ -208,6 +208,20 @@ void closeKeyboard() {
   int idx = kbSessionIdx;
   kbSessionIdx = -1;
   kbPid[0] = '\0';
+  // drawKeyboard() fillScreen's the WHOLE panel - tab bar and footer included -
+  // so closing it has to put both back, the same shape exitReader()/
+  // exitReaderToList() already use: fillScreen, then drawTabBar() (which also
+  // redraws the REC slot - see its own comment) and drawFooterChrome() (which
+  // resets the footer's change-only caches, battGlyphCache/battTextCache
+  // included) BEFORE any content, with renderFooter() LAST so it repaints from
+  // freshly-reset caches rather than drawIfChanged seeing an "unchanged"
+  // string against pixels drawFooterChrome() just erased. Skipping this left
+  // the tab labels black, the footer divider gone and the battery blank until
+  // the next tab switch or theme change - the same trap drawSettingsStatic()
+  // and micRestoreUi() already document.
+  tft.fillScreen(COLOR_BG);
+  drawTabBar();
+  drawFooterChrome();
   // Return to whatever the keyboard was opened FROM - the ask/detail screen if
   // the prompt is still live, else the sessions list - rather than always
   // repainting the list via forceFullRepaint(). That used to leave
@@ -231,6 +245,7 @@ void closeKeyboard() {
   } else {
     closeSessionDetail();   // ask is gone or window closed: nothing to return to
   }
+  renderFooter();
 }
 
 void kbInsert(char c) {
