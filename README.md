@@ -177,6 +177,28 @@ speaking "yes, go ahead" at one would deny the command with that as its reason,
 and a spoken answer to a plan approval would be silently approved with the words
 discarded. Those keep their buttons.
 
+### Or by typing
+
+If speaking isn't an option — no microphone fitted, or you'd rather not talk —
+a question ask also offers **TYPE** next to SPEAK (or on its own, full-width,
+if the microphone isn't fitted at all). It opens a full-screen QWERTY
+keyboard, with `CAP` and `DEL` in place of shift/backspace glyphs (Cozette,
+the on-device font, doesn't have those two characters — it's ASCII only).
+Text is capped at 150 characters, with a running byte counter and a countdown
+of the seconds left to answer, both shown above the text you're typing.
+
+If the countdown runs out or the prompt is answered on the Mac while you're
+still typing, the keyboard doesn't throw your text away: it stays on screen
+with SEND withheld and a note that the window closed, so at worst you have to
+retype it, rather than losing it silently mid-sentence.
+
+TYPE is questions-only, for the same reason SPEAK is: a permission prompt can
+only be denied, and a plan approval would silently discard the text and
+approve. It's also not offered on Codex threads — Codex's answer window is
+only 15 seconds (against 90 for Claude Code), which isn't enough time to type
+a reply, so the button simply doesn't appear there rather than offering
+something that can't finish in time.
+
 ## Codex support
 
 Codex threads show up in the same SESSIONS list. Since 0.147.0, Codex CLI ships

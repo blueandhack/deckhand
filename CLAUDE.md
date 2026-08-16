@@ -1141,6 +1141,99 @@ Other things that aren't obvious from a single file:
   `host/voice-answer-check.mjs` covers the reject cases (tampered text, tampered hash, wrong nonce,
   wrong pid, wrong device, malformed mac) plus `capUtf8`'s codepoint safety, and can be run without
   hardware.
+- **A pending QUESTION can also be answered by TYPING it, and the wire format is not the voice
+  path's format wearing a different label.** The design spec assumed a keyboard would reuse the
+  voice wire format verbatim; it can't, because the voice form signs a hash of a transcript the
+  HOST already holds (`handleVoiceAnswer` bails at once without a parked one), while typed text
+  exists nowhere but the device until it's sent — so the frame has to carry the text itself:
+  `ANSWER <id12> <pid> TYPED <base64text> <hmac>`. That difference makes this **the first place
+  the host accepts device-authored text**, which is why `typedTextOk()` (`host/typed-answer.mjs`)
+  is not optional ceremony: non-empty, printable ASCII only (`/^[\x20-\x7E]+$/`), ≤150 bytes
+  (`ANSWER_TEXT_MAX_BYTES`, now defined once in `host/voice-answer.mjs` and re-exported so one cap
+  covers both forms). The HMAC proves the bytes came from the paired device — it proves nothing
+  about whether the bytes are sensible, which is what the sanitiser is actually for.
+  - **`Buffer.from(.., "base64")` is lenient, so the decode re-encodes and compares.** Node
+    silently drops characters it doesn't recognise rather than rejecting them — `"abc!!!!"`
+    decodes to whatever `"abc"` meant — so `decodeTypedText()` re-encodes its own decode and
+    rejects on any mismatch, turning silent reinterpretation into a hard failure before the bytes
+    are ever hashed or signed.
+  - **The two forms sign different strings — `...:TEXT:<sha>` for voice, `...:TYPED:<sha>` for
+    typed — so a signature minted for one cannot authenticate the other**, even though both
+    ultimately sign a 16-hex SHA-256 prefix of text. Voice never needed an on-device hasher
+    because the host held the transcript to re-hash against; typed text is device-only until
+    sent, so `pairing.ino`'s `sha256Hex16()` exists purely to give the device its own copy of the
+    same hash the host will independently compute.
+  - **TYPE is hidden on Codex asks, and it's a hardcoded coupling to a constant in another file.**
+    `askTypeOffered()` (`sessions.ino`) excludes `agent == "cx"` because Codex's remote-answer
+    window is 15s (`REMOTE_WAIT_MS` in `claude-hooks/deckhand-session-hook.mjs`) against 90s for
+    Claude Code — not enough to type a sentence, and offering a control that can't work is exactly
+    what the read-only ask path already refuses to do elsewhere. `host/index.mjs`'s own
+    `HOOK_WAIT_MS = { cc: 90_000, cx: 15_000 }` mirrors that split only to drive the on-screen
+    countdown (`ask.sec`) — it's commented ADVISORY ONLY, and must never be mistaken for the
+    thing that actually gates the wait.
+  - **The countdown is derived from `first`, not `seen`, because `seen` is kept alive on
+    purpose.** `nonceForPid()`'s map entry gets `seen` refreshed on every call so the entry
+    survives the 60s prune while a prompt is still pending — a countdown built on that would never
+    move. `first` is stamped once at creation and never rewritten, so
+    `ask.sec = HOOK_WAIT_MS[agent] - (now - first)` actually counts down. It's cosmetic: nothing
+    about whether an answer is accepted is gated on `ask.sec` reaching any value.
+  - **The host still re-checks `ask.kind === "question"` before writing an answer file**, the
+    identical guard the voice path needed for the identical reason: `emitDecision`'s
+    `answer.idx === 0` branch is `{behavior:"allow"}`, so a typed answer against a *plan* would
+    silently approve it, discarding the words entirely, if the device's own `askTypeOffered()`
+    gate were the only thing standing in the way.
+  - **If the window closes mid-typing, the text stays and only SEND is withheld.**
+    `kbWindowClosed` flips when a tick no longer finds a session whose `askPid` matches `kbPid`;
+    `kbText`/`kbLen` are never cleared by that, because throwing away a sentence someone spent a
+    minute composing, with no explanation, is the worst available outcome. The action row swaps
+    SEND for a wrapped "WINDOW CLOSED - ANSWER ON YOUR MAC", and `sendTypedAnswerToHost()` /
+    `kbTouch()` both independently refuse to fire while it's set.
+  - **`sendLineToHost` used a fixed `char out[96]` copy buffer, and nothing before typed answers
+    was big enough to hit it.** Every prior caller (option answers ~53 bytes, voice answers ~77,
+    `HISTORY` ~48) fit; a typed answer's 200-char base64 body reaches ~259 bytes, and `snprintf`
+    into 96 bytes silently truncated it **and dropped the trailing `\n` with it** — exactly the
+    byte the host's BLE line-splitter keys on. The line was lost, the hook burned its full wait,
+    and the truncated fragment corrupted the *next* line. USB was unaffected (`Serial.println` has
+    no such cap), so it read as "typing only fails over Bluetooth" rather than a buffer bug. It
+    now chunks the caller's own buffer directly in 20-byte BLE notifies and sends `\n` as its own
+    final notify, so there's no fixed ceiling left to outgrow.
+  - **The text card hard-wraps at exactly 34 columns — deliberately not the word-wrap
+    `drawWrappedText` already uses elsewhere.** Word wrap's worst case leaves as few as 18 of 34
+    columns used on a line (a 17-character word pushes the break past halfway), which could push
+    150 bytes to 8-9 lines — more than the screen has room for. A fixed column count makes the
+    budget provable instead: `ceil(150/34) = 5`, always. `drawWrappedText` stays untouched because
+    the ask detail and history reader genuinely need word wrap.
+  - **The countdown and byte counter live in a reserved meta row, because `drawString` paints an
+    opaque box the full height of a text line.** A counter sharing a row with wrapped text
+    silently erases that line's tail. The meta row and the five hard-wrapped text lines are laid
+    out to share no pixel row (meta at y=10, text lines at 26/39/52/65/78) — found as this exact
+    bug twice before landing on a row neither can encroach on.
+  - **`fabVisible()` had to gain a `kbActive` check.** The record/mic button's hit test runs
+    before the keyboard branch in `handleTouch`, and its tab-bar slot sits right where the
+    keyboard's countdown corner is — a tap there started a mic capture, and on release
+    `micRestoreUi()`'s repaint painted a tab bar over the still-open keyboard while `kbActive`
+    stayed true, leaving every later tap typing invisibly into a screen that no longer looked like
+    a keyboard.
+  - **Two periodic repaints had to be absorbed, not one.** The ~5s host-driven tick (`handleLine`)
+    is intercepted while `kbActive`: it re-resolves the countdown and `kbWindowClosed` from the
+    fresh payload and returns, never repainting the session list underneath. A second, independent
+    ~1s loop-local tick that repaints the footer/tabs directly is separately gated on `!kbActive`,
+    the same way it already excludes `readerActive`/`histActive` — missing either one repaints the
+    keyboard away every few seconds. `lastActivityMillis` is also refreshed on every keyboard touch
+    **and** every loop tick while `kbActive`, because the 30s default backlight timeout sits well
+    inside the 90s answer budget: without it, typing a normal-length answer could blank the screen
+    mid-sentence and the waking tap would be swallowed rather than typed.
+  - **No cursor, backspace only.** Insertion is always append (`kbInsert`), deletion always trims
+    the end (`kbBackspace`) — there is no caret position anywhere in the state. Aiming a cursor at
+    hard-wrapped text on a resistive panel is a worse interaction than retyping up to 150
+    characters, so the capability was never built rather than built and then hidden.
+  - **Cozette is ASCII 0x20-0x7E only** — the same fact that already forces `fitText`'s
+    three-ASCII-dot ellipsis — so there's no shift-arrow or backspace glyph to draw; the keys are
+    sentinel bytes (`\x01`/`\x02`) labelled `CAP`/`DEL` in plain text instead.
+  - **Going full-screen is what makes QWERTY viable on a 240px-wide panel at all.** The drawn key
+    is 22x40, but the touch band `kbTouch()` tests is the full 22x44 row — 968px² against 880 in
+    the ordinary content area. The win going full-screen buys is in the touch target, not in the
+    artwork.
 - **The headless fallback (`dispatch`): `claude -p --resume <session_id>`.** Continues the
   conversation in that session's own `cwd`, detached (a dictated task can run for minutes and must
   not block the host's poller).
