@@ -20,7 +20,13 @@ import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
 import { mergeById } from "./sessions-merge.mjs";
-import { voiceSha, verifyVoiceAnswer, capUtf8 } from "./voice-answer.mjs";
+import {
+  voiceSha,
+  verifyVoiceAnswer,
+  capUtf8,
+  ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
+} from "./voice-answer.mjs";
+import { verifyTypedAnswer } from "./typed-answer.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -120,6 +126,11 @@ const SESSION_STALE_MS = 20 * 60 * 1000; // 20 min with no update = treat as dea
 const BAUD_RATE = 115200;
 const POLL_INTERVAL_MS = 5000;
 const RECONNECT_INTERVAL_MS = 3000;
+// Mirrors REMOTE_WAIT_MS in claude-hooks/deckhand-session-hook.mjs, per agent.
+// ADVISORY ONLY - it drives the keyboard's countdown and nothing else. If the
+// hook's value ever changes and this is missed, the countdown is wrong and no
+// decision is affected. It must never gate whether an answer is sent.
+const HOOK_WAIT_MS = { cc: 90_000, cx: 15_000 };
 
 // Drop a file at this path to send a one-off command to the device over
 // whichever transport(s) are already open. Opening a FRESH USB connection
@@ -287,7 +298,10 @@ const pendingVoiceAnswers = new Map(); // pid -> { text, sha, at }
 function nonceForPid(pid) {
   let e = askNonces.get(pid);
   if (!e) {
-    e = { nonce: crypto.randomBytes(8).toString("hex"), seen: Date.now() };
+    // `first` is set ONCE and never rewritten. `seen` cannot serve this purpose:
+    // it is refreshed on every tick below so the entry survives pruning, so a
+    // countdown derived from it would sit at the full budget forever.
+    e = { nonce: crypto.randomBytes(8).toString("hex"), seen: Date.now(), first: Date.now() };
     askNonces.set(pid, e);
   } else {
     e.seen = Date.now();
@@ -1161,6 +1175,12 @@ async function readSessions() {
         // text for a question and discards it for a plan, and a spoken answer to
         // a permission prompt could only ever be a DENY.
         item.ask.voice = record.ask.kind === "question";
+        // Seconds left before the hook stops waiting, for the keyboard countdown.
+        const ne = askNonces.get(record.ask.pid);
+        if (ne) {
+          const budget = HOOK_WAIT_MS[item.agent] ?? HOOK_WAIT_MS.cc;
+          item.ask.sec = Math.max(0, Math.round((budget - (Date.now() - ne.first)) / 1000));
+        }
         const pend = pendingVoiceAnswers.get(record.ask.pid);
         if (pend) {
           item.ask.voiceText = pend.text;
@@ -1630,7 +1650,6 @@ const VOICE_REPLY_MAX = 420;
 // character cap can overflow the device buffer and be silently truncated there
 // while the host hashes the full string - verification would pass and the host
 // would write text nobody saw.
-const VOICE_ANSWER_TEXT_MAX_BYTES = 150;
 function setVoice(state, fields = {}) {
   lastVoice = {
     // Small monotonic counter for the DEVICE. Date.now() is ~1.79e12 and `long` on
@@ -1766,6 +1785,63 @@ async function handleVoiceAnswer(parts, via) {
   }
 }
 
+// The typed sibling of handleVoiceAnswer. Same shape, one real difference: there is
+// no parked transcript to look up, because the text arrives in the frame. Every
+// other guard is deliberately identical - especially the ask.kind re-check, which
+// is what stops a chosen pid reaching emitDecision's {behavior:"allow"} plan branch.
+async function handleTypedAnswer(parts, via) {
+  const [, id12, pid, , b64, mac] = parts;
+  const entry = askNonces.get(pid);
+  const from = deviceNameFor(via);
+  const dev = from ? deviceEntry(from) : null;
+
+  const v = verifyTypedAnswer({ secret: dev?.secret, nonce: entry?.nonce, pid, b64, mac });
+  if (!v.ok) {
+    // Loud on purpose: "text is empty, over the cap, or not printable ASCII" and
+    // "bad hmac" are a foreign peer, not an ordinary rejection.
+    console.error(
+      `Typed answer REJECTED (${v.why}) for prompt ${pid} via ${via}` +
+        `${from ? ` from ${from}` : " (unknown device)"} - ignoring.`
+    );
+    return;
+  }
+  const text = v.text;
+  askNonces.delete(pid); // single-use, as with an option or voice answer
+
+  try {
+    const files = await fs.readdir(SESSIONS_DIR);
+    const file = files.find((f) => f.endsWith(".json") && f.startsWith(id12));
+    if (!file) {
+      console.error(`Typed answer: no session matching ${id12}`);
+      return;
+    }
+    const sessionId = path.basename(file, ".json");
+    let rec = null;
+    try {
+      rec = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, file), "utf8"));
+    } catch (err) {
+      console.error(`Typed answer: could not read session record for ${sessionId}: ${err.message}`);
+      return;
+    }
+    // Defence in depth, identical to handleVoiceAnswer: ask.kind is re-checked here
+    // so the device is not the only thing standing between a stray pid and an
+    // auto-approval of a plan (emitDecision's answer.idx === 0 branch is `allow`).
+    if (rec?.ask?.kind !== "question" || rec?.ask?.pid !== pid) {
+      console.error(`Typed answer REJECTED (not a pending question) for prompt ${pid} - ignoring.`);
+      return;
+    }
+    await fs.mkdir(ANSWERS_DIR, { recursive: true });
+    await fs.writeFile(
+      path.join(ANSWERS_DIR, `${sessionId}.json`),
+      JSON.stringify({ pid, idx: 0, label: text, typed: true, written_at: Date.now() })
+    );
+    console.log(`Typed answer accepted for ${sessionId} (pid ${pid}): "${text}"`);
+    setVoice("asksent", { text, reply: "sent to Claude" });
+  } catch (err) {
+    console.error(`Typed answer: could not write answer file: ${err.message}`);
+  }
+}
+
 async function handleDeviceLine(line, via) {
   // History request from the detail screen. Handled here rather than in the tick so the
   // transcript is only read when someone is actually looking at it.
@@ -1891,6 +1967,12 @@ async function handleDeviceLine(line, via) {
   // option form so the two parsers never see each other's shape.
   if (parts[3] === "TEXT") {
     await handleVoiceAnswer(parts, via);
+    return;
+  }
+  // Typed form: ANSWER <id12> <pid> TYPED <base64text> <hmac>. Like TEXT this is
+  // checked before the option form, so the two parsers never see each other's shape.
+  if (parts[3] === "TYPED") {
+    await handleTypedAnswer(parts, via);
     return;
   }
   if (parts.length < 4) return;
