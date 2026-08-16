@@ -585,18 +585,38 @@ void drawAskDetail(int idx) {
 // Both device->host lines go out this way: USB and BLE at once, BLE in <=20-byte
 // notifies with a breath between them. Factored out of sendAnswerToHost when the history
 // request became a second caller.
+//
+// Chunks `line` DIRECTLY rather than copying it into a fixed local buffer first.
+// A fixed copy buffer here used to be sized 96 (fine for every caller at the
+// time: option answers ~53 bytes, voice answers ~77, HISTORY ~48), but
+// sendTypedAnswerToHost's ANSWER line carries a full 200-char base64 body and
+// can reach ~259 bytes - snprintf into a 96-byte buffer silently truncated it
+// AND dropped the trailing '\n' with it, so host/index.mjs's BLE line-splitter
+// (which keys on that exact byte) never saw a complete line: the answer was
+// lost, the truncated fragment stuck around and corrupted the NEXT line, and
+// USB was unaffected (Serial.println has no such limit) - so it looked like
+// "typing only fails over Bluetooth", and only for longer answers. Chunking
+// the caller's own buffer removes the ceiling instead of re-deriving it for
+// the next caller that outgrows whatever number replaced 96 - any future
+// caller's line, however long, still goes out whole as long as ITS OWN buffer
+// (sized at the call site) holds it.
 void sendLineToHost(const char* line) {
   Serial.println(line);
   if (bleConnected && bleTxChar) {
-    char out[96];
-    snprintf(out, sizeof(out), "%s\n", line);
-    size_t len = strlen(out);
+    size_t len = strlen(line);
     for (size_t i = 0; i < len; i += 20) {
       size_t n = len - i > 20 ? 20 : len - i;
-      bleTxChar->setValue((uint8_t*) (out + i), n);
+      bleTxChar->setValue((uint8_t*) (line + i), n);
       bleTxChar->notify();
       delay(12); // give the stack breathing room between notifies
     }
+    // The newline is what host/index.mjs's bleLineBuf splits on - sent as its
+    // own notify so it can never be clipped by the chunk loop above, whatever
+    // length `line` turns out to be.
+    uint8_t nl = '\n';
+    bleTxChar->setValue(&nl, 1);
+    bleTxChar->notify();
+    delay(12);
   }
 }
 void sendAnswerToHost(int idx, int optIdx) {
