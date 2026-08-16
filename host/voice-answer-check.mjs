@@ -103,8 +103,31 @@ check("sha is 16 hex chars", /^[0-9a-f]{16}$/.test(sha));
 
   // Buffer.from(.., "base64") SILENTLY IGNORES junk, so a payload with rubbish
   // in it would otherwise decode to something plausible and be signed against.
+  // NOTE: this case alone doesn't exercise the re-encode-and-compare guard - the
+  // "!" characters fail the alphabet regex first. It's kept for the "rubbish
+  // outside the alphabet" case, but the two checks below are what actually
+  // reach and depend on the compare line.
   check("base64 with ignorable junk is rejected, not silently reinterpreted",
     decodeTypedText(tB64.slice(0, -4) + "!!!!") === null);
+
+  // Both of these pass the alphabet regex - every character is valid base64 -
+  // so ONLY the re-encode-and-compare line catches them. Deleting that line
+  // must fail these two specifically (proven in Step 5 of the fix report).
+  check("valid-alphabet base64 that Buffer.from would silently truncate is rejected",
+    decodeTypedText("YWJjZA") === null); // unpadded, non-multiple-of-4: decodes to
+                                         // "abcd", re-encodes to "YWJjZA==" - only the
+                                         // compare notices the missing padding.
+
+  // NOTE: an interior-whitespace/newline variant (e.g. "YWJj ZA==") was
+  // considered here too, but whitespace is outside [A-Za-z0-9+/] so the
+  // alphabet regex rejects it BEFORE the compare line runs - it wouldn't
+  // actually exercise the guard this fix is for. This case does: every
+  // character is in-alphabet and the padding count is correct, but the last
+  // character carries non-canonical padding bits Buffer.from silently drops.
+  check("valid-alphabet base64 with non-canonical padding bits is rejected",
+    decodeTypedText("YWJjZB==") === null); // decodes to "abcd" (same bytes as
+                                           // "YWJjZA=="), so ONLY the compare
+                                           // notices the input wasn't canonical.
 
   // The device can only produce printable ASCII; a control byte means the frame
   // did not come from our firmware, and it is headed for a hook decision message.
