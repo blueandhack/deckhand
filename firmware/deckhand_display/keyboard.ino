@@ -7,20 +7,38 @@
 //
 // It owns the WHOLE screen - tab bar and footer included - the way the history
 // reader does. That is not cosmetic: it is what makes QWERTY viable on a 240px
-// panel. Inside the content area the keys would be 22x40; full-screen they are
-// 22x44, which is 968px2 of target instead of 880.
+// panel. The drawn key is 22x40 (KB_ROW_H - 4) either way - what going
+// full-screen buys is the TOUCH target, which is the whole 22x44 row (kbTouch
+// tests the full row band, not just the drawn rect): 968px2 against 880 in the
+// content area, where the row itself would have to shrink with it.
 
 const int KB_PITCH  = 24;      // 10 * 24 = 240, exactly the panel width
 const int KB_KEY_W  = 22;      // 2px of the pitch is the gap
 const int KB_ROW_H  = 44;      // 4px over TAP_MIN (40), not merely at it
-// Text card holds 6 wrapped lines (see KB_TEXT_MAX_LINES below), not the 3 an
-// earlier pass under-provisioned - that let the card silently stop growing at
-// ~100 of 150 typeable bytes with no visible sign a keystroke had been dropped.
+// Text card layout, fixed round 2: HARD-wrapped at exactly KB_COLS (34) columns,
+// not drawWrappedText's word wrap. Word wrap can leave as few as 18 of 34
+// columns used on a line (a 17-char word pushes the break back past the
+// half-way point), so 150 bytes could need up to 8 lines by that algorithm -
+// more than this screen has room for. Slicing at a fixed column count makes the
+// budget PROVABLE instead: ceil(150/34) = 5 lines, always. Breaking a word
+// mid-character is fine on a field being actively composed (the security
+// property here is "the human typed it and watched it appear", which a hard
+// wrap satisfies exactly) - it would NOT be fine in the reader or the ask
+// detail screen, which is why drawWrappedText itself is untouched and this
+// keyboard gets its own small draw instead.
+// The byte counter and the countdown both used to sit ON a text row (top-right
+// over line 1, bottom-right over line 6 in the since-reverted 6-line design),
+// and each one's opaque drawString box silently erased whatever text shared its
+// row - found twice, fixed once: both now live in a RESERVED meta row that no
+// text line ever reaches, so there is no shared row left to erase.
 // 4 (top) + 88 (text, 4..92) + 4 (gap) + 176 (4 rows * 44, 96..272) + 4 (gap)
-// + 44 (actions, 276..320) = 320 exactly - see the report for the full
-// arithmetic, including why 6 lines (not the naive ceil(150/34)=5) was chosen.
+// + 44 (actions, 276..320) = 320 exactly.
 const int KB_TEXT_Y = 4,   KB_TEXT_H = 88;
-const int KB_TEXT_MAX_LINES = 6;
+const int KB_COLS = 34;                        // (CARD_W - 12) / 6, Cozette's uniform advance
+const int KB_TEXT_LINES = 5;                   // ceil(KB_MAX_BYTES / KB_COLS)
+const int KB_META_Y  = KB_TEXT_Y + 6;          // 10: byte counter left, countdown right
+const int KB_LINE0_Y = KB_TEXT_Y + 22;         // 26: first hard-wrapped line
+const int KB_LINE_PITCH = 13;                  // line 5 at 78, ends ~90 - 2px inside the card
 const int KB_ROWS_Y = 96;                      // 4 rows * 44 = 176, ends at 272
 const int KB_ACT_Y  = 276, KB_ACT_H = 44;      // ends at 320, 0px spare
 const int KB_MAX_BYTES = 150;                  // must equal the host's cap
@@ -74,27 +92,43 @@ void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
   uiButton(x, y, tft.width() - x, h, ".", COLOR_ACCENT, pressed == 2, COLOR_BG);
 }
 
+// HARD wrap, deliberately unlike drawWrappedText's word wrap - see the header
+// comment on KB_COLS for why. Slices kbText into KB_COLS-column chunks with no
+// regard for word boundaries and draws each on its own fixed line; kbLen is
+// capped at KB_MAX_BYTES (150) elsewhere, so this can never need more than
+// KB_TEXT_LINES (5) iterations - there is no overflow case to handle here.
+void drawKbHardWrapped() {
+  setUIFont(FONT_CODE);
+  tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  int pos = 0;
+  for (int i = 0; i < KB_TEXT_LINES && pos < kbLen; i++) {
+    int n = kbLen - pos < KB_COLS ? kbLen - pos : KB_COLS;
+    char line[KB_COLS + 1];
+    memcpy(line, kbText + pos, n);
+    line[n] = '\0';
+    tft.drawString(line, CARD_X + 6, KB_LINE0_Y + i * KB_LINE_PITCH);
+    pos += n;
+  }
+}
+
 // The typed text, plus the countdown. Repainted wholesale (it is one small card)
 // rather than through drawIfChanged - the text changes on every keystroke, so a
 // change-only cache would buy nothing and would need to be as long as the buffer.
 void drawKbText() {
   uiFillRound(CARD_X, KB_TEXT_Y, CARD_W, KB_TEXT_H, 6, COLOR_CARD, COLOR_BG);
-  if (kbLen == 0) {
-    setUIFont(T_BODY);
-    tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-    tft.setTextDatum(TL_DATUM);
-    tft.drawString("Type your answer", CARD_X + 6, KB_TEXT_Y + 8);
-  } else {
-    // maxLines = KB_TEXT_MAX_LINES (6), not a smaller number that silently stops
-    // growing the card - that was the bug: 150 bytes at 34 Cozette chars/line
-    // needs up to 5 lines by plain division, and 6 is chosen over that with a
-    // documented margin against word-wrap loss (see the task report for the
-    // arithmetic, including the algorithm's own worst-case bound).
-    drawWrappedText(kbText, CARD_X + 6, KB_TEXT_Y + 6, FONT_CODE, 13,
-                    CARD_W - 12, 0, KB_TEXT_MAX_LINES, COLOR_VALUE, COLOR_CARD);
-  }
-  // Countdown, top-right. Amber under 20s. Advisory only - it never decides
-  // whether SEND works, so a wrong value costs nothing but a wrong impression.
+  // Meta row: byte counter left, countdown right, both anchored to KB_META_Y -
+  // a row no text line ever occupies (see the header comment). The byte counter
+  // turns amber at the cap, so a key that stops inserting has a visible reason
+  // rather than looking like a dropped press. The countdown is amber under 20s;
+  // it is advisory only and never decides whether SEND works.
+  char cnt[16];
+  snprintf(cnt, sizeof(cnt), "%d/%d", kbLen, KB_MAX_BYTES);
+  setUIFont(T_META);
+  tft.setTextColor(kbLen >= KB_MAX_BYTES ? COLOR_WARN : COLOR_LABEL, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(cnt, CARD_X + 6, KB_META_Y);
+
   int sec = (kbSessionIdx >= 0 && kbSessionIdx < sessionCount)
               ? sessions[kbSessionIdx].askSec : -1;
   if (sec >= 0) {
@@ -103,16 +137,17 @@ void drawKbText() {
     setUIFont(T_META);
     tft.setTextColor(sec < 20 ? COLOR_WARN : COLOR_LABEL, COLOR_CARD);
     tft.setTextDatum(TR_DATUM);
-    tft.drawString(buf, CARD_X + CARD_W - 6, KB_TEXT_Y + 6);
+    tft.drawString(buf, CARD_X + CARD_W - 6, KB_META_Y);
   }
-  // The byte counter turns amber at the cap, so a key that stops inserting has a
-  // visible reason rather than looking like a dropped press.
-  char cnt[16];
-  snprintf(cnt, sizeof(cnt), "%d/%d", kbLen, KB_MAX_BYTES);
-  setUIFont(T_META);
-  tft.setTextColor(kbLen >= KB_MAX_BYTES ? COLOR_WARN : COLOR_LABEL, COLOR_CARD);
-  tft.setTextDatum(BR_DATUM);
-  tft.drawString(cnt, CARD_X + CARD_W - 6, KB_TEXT_Y + KB_TEXT_H - 4);
+
+  if (kbLen == 0) {
+    setUIFont(T_BODY);
+    tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString("Type your answer", CARD_X + 6, KB_LINE0_Y);
+  } else {
+    drawKbHardWrapped();
+  }
   tft.setTextDatum(TL_DATUM);
 }
 
