@@ -30,7 +30,18 @@ import { verifyTypedAnswer } from "./typed-answer.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CCUSAGE_BIN = path.join(__dirname, "node_modules", ".bin", "ccusage");
+// Spawned as `<this node> <script>`, NOT by executing the .bin shebang. That
+// shebang is `#!/usr/bin/env node`, which needs `node` on PATH - and under
+// launchd PATH is minimal, while this machine's node is nvm-managed at
+// ~/.nvm/versions/node/<version>/bin and is on no standard path at all. The
+// symptom was ugly and indirect: `env: node: No such file or directory` every
+// tick, readUsage() throwing, no payload sent, and a device stuck on "waiting
+// for the first update" while the host looked perfectly healthy.
+//
+// process.execPath is the node inside DeckhandBLE.app, so it always exists and
+// never depends on PATH or on which node version happens to be selected - the
+// same reason the mic decoder is spawned this way.
+const CCUSAGE_JS = path.join(__dirname, "node_modules", "ccusage", "src", "cli.js");
 
 // When launched via `open DeckhandBLE.app` (needed for the Bluetooth permission
 // prompt - see DeckhandBLE.app/Contents/Info.plist), stdout/stderr aren't
@@ -446,7 +457,7 @@ function expectedHmac(deviceName, nonce, pid, idx) {
 }
 
 async function runCcusage(args) {
-  const { stdout } = await execFileAsync(CCUSAGE_BIN, [...args, "--json"], {
+  const { stdout } = await execFileAsync(process.execPath, [CCUSAGE_JS, ...args, "--json"], {
     maxBuffer: 10 * 1024 * 1024,
     // This runs on EVERY tick, so an un-timed hang here stalls the whole poll
     // loop - the same failure class as the BLE write, just with a child process

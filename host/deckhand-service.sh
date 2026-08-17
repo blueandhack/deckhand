@@ -65,9 +65,12 @@ case "${1:-}" in
   <key>StandardErrorPath</key><string>/tmp/deckhand-launchd.err</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <!-- launchd gives a minimal PATH. The host uses absolute paths for whisper
-         and claude, but ccusage resolves through node_modules/.bin and anything
-         it shells out to needs the usual places. -->
+    <!-- launchd gives a minimal PATH, and this is deliberately NOT patched up
+         with wherever node happens to live: node here is nvm-managed, so that
+         path carries a version number and would break silently on the next
+         upgrade. Nothing needs it - the host spawns node children through
+         process.execPath (the copy inside the bundle) and uses absolute paths
+         for whisper and claude. This PATH only has to cover git and security. -->
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 </dict>
