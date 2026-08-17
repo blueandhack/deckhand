@@ -395,6 +395,31 @@ try {
       // the matching PermissionRequest arrives moments later with real buttons.
       if (ask) ask.answerable = isPermEvent && remote.answerable;
 
+      // CARRY A PENDING ASK FORWARD, because the record is rebuilt from scratch
+      // on every event and an event that builds no ask would otherwise DELETE
+      // one that is still being waited on.
+      //
+      // This was a real, measured bug, and it made remote answering of a
+      // question almost impossible. An AskUserQuestion fires PermissionRequest
+      // (which publishes the ask and then blocks up to REMOTE_WAIT_MS) and then,
+      // ~6 SECONDS LATER, a Notification for the same prompt. A Notification is
+      // neither isPermEvent nor isPreAsk, so `ask` was null and the record was
+      // rewritten without it - whereupon waitForRemoteAnswer's own "our ask is
+      // gone, stop waiting" check fired and the hook stopped listening. The
+      // device still showed the prompt and still sent a perfectly good answer;
+      // the host still wrote the answer file; nobody was left to read it, so the
+      // Mac's dialog just sat there. Measured 08:21:50.768 PermissionRequest ->
+      // 08:21:56.781 Notification, with an orphaned answer file to match.
+      //
+      // Only two kinds of event may clear an ask: one that DEFINES the current
+      // prompt (PreToolUse/PermissionRequest - their `ask`, or its absence when
+      // no display is connected, is authoritative), and one that means the
+      // prompt is over. Everything else leaves it alone.
+      const definesAsk = isPermEvent || isPreAsk;
+      const clearsAsk = ["PostToolUse", "PostToolUseFailure", "Stop", "UserPromptSubmit"]
+        .includes(data.hook_event_name);
+      const carriedAsk = !definesAsk && !clearsAsk ? existing.ask : null;
+
       const record = {
         cwd: data.cwd ?? existing.cwd ?? "",
         model: data.model ?? existing.model ?? "",
@@ -405,7 +430,7 @@ try {
         status,
         agent: AGENT,
         updated_at: Date.now(),
-        ...(ask ? { ask } : {}),
+        ...(ask ? { ask } : carriedAsk ? { ask: carriedAsk } : {}),
       };
       writeRecord(filePath, record);
 
