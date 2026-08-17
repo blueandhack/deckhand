@@ -120,6 +120,31 @@ in Claude Code exactly as normal *and* on the device with working buttons — cl
 it on the Mac or tap it on the device, whichever is closer. Nothing is delayed
 and nothing is hidden: answer on the Mac and the device just stops offering it.
 
+**How long does a prompt stay answerable from the device? By default, until you
+answer it — on either surface.** There's no countdown to beat: the Mac's dialog and
+the device's buttons are both live from the first second, it's a race, and whichever
+you use first wins. Answer on the Mac and the device just stops offering it.
+
+If you want a deadline instead, put a number of seconds in
+`~/.claude/deckhand-remote-wait`:
+
+```
+echo 90 > ~/.claude/deckhand-remote-wait     # the old behaviour: 90s, then Mac only
+echo forever > ~/.claude/deckhand-remote-wait # the default (same as no file)
+```
+
+When a deadline is set, the device shows a countdown on the typing screen and stops
+offering buttons when it lapses — the Mac's dialog is untouched and still waiting, so
+you finish there. Nothing is ever auto-decided by the deadline passing.
+
+Two caveats. **"Forever" is really 24 hours**, because Claude Code kills a hook that
+outlives its `timeout` in `settings.json`, and the hook is written to always bow out
+first rather than be killed — the two numbers are a pair, so if you raise the wait past
+a day you must raise that `timeout` too. And **Codex keeps a 15-second wait regardless**:
+unlike Claude Code, it has never been measured whether its approval UI is shown
+*concurrently* with the hook or waits behind it, and if it waits, a long timeout would
+stall or deadlock every Codex prompt. That's also why typing isn't offered on Codex asks.
+
 Turn off **Answer prompts on device** in the menu bar to make the device a
 read-only mirror instead — it still shows every prompt (handy for reading a long
 command from across the room), under an "ANSWER ON YOUR MAC" heading.

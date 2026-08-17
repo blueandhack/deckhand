@@ -114,7 +114,12 @@ for (const [event, extra] of Object.entries(HOOK_EVENTS)) {
   if (!already) {
     // timeout must exceed the hook's REMOTE_WAIT_MS (90s) so Claude Code
     // doesn't kill it mid-wait while a prompt is answerable from the device.
-    groups.push({ ...extra, hooks: [{ type: "command", command: HOOK, timeout: 100 }] });
+    // MUST stay larger than the hook's REMOTE_WAIT_MS, which now defaults to
+    // "forever" (24h minus a minute). Claude Code kills a hook that outlives this,
+    // and a killed PermissionRequest hook is an untested state - so the hook is
+    // written to always self-exit first, and these two numbers are a PAIR. Raising
+    // the wait without raising this silently reintroduces the kill.
+    groups.push({ ...extra, hooks: [{ type: "command", command: HOOK, timeout: 86_400 }] });
     added++;
   }
 }

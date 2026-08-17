@@ -276,7 +276,26 @@ const RECONNECT_INTERVAL_MS = 3000;
 // ADVISORY ONLY - it drives the keyboard's countdown and nothing else. If the
 // hook's value ever changes and this is missed, the countdown is wrong and no
 // decision is affected. It must never gate whether an answer is sent.
-const HOOK_WAIT_MS = { cc: 90_000, cx: 15_000 };
+// Mirrors the hook's REMOTE_WAIT_MS per agent, for the keyboard's countdown ONLY -
+// it never gates whether an answer is accepted. Claude Code's wait now defaults to
+// "forever", read from the same config file the hook reads, so the two cannot drift
+// apart by editing one of them. When the wait is effectively unlimited there is
+// nothing meaningful to count down to, so `ask.sec` is omitted entirely and the
+// device draws no countdown rather than a 24-hour one.
+const REMOTE_WAIT_CONFIG = path.join(os.homedir(), ".claude", "deckhand-remote-wait");
+function configuredWaitMs() {
+  let raw = "";
+  try {
+    raw = readFileSync(REMOTE_WAIT_CONFIG, "utf8").trim().toLowerCase();
+  } catch {
+    return null; // no config = the hook's default, which is unlimited
+  }
+  if (!raw || raw === "forever" || raw === "0") return null;
+  const secs = Number.parseFloat(raw);
+  if (!Number.isFinite(secs) || secs <= 0) return null;
+  return secs * 1000;
+}
+const HOOK_WAIT_MS = { cc: configuredWaitMs(), cx: 15_000 };
 
 // Drop a file at this path to send a one-off command to the device over
 // whichever transport(s) are already open. Opening a FRESH USB connection
@@ -1331,8 +1350,9 @@ async function readSessions() {
         item.ask.voice = record.ask.kind === "question";
         // Seconds left before the hook stops waiting, for the keyboard countdown.
         const ne = askNonces.get(record.ask.pid);
-        if (ne) {
-          const budget = HOOK_WAIT_MS[item.agent] ?? HOOK_WAIT_MS.cc;
+        // No budget configured (the "forever" default) means no countdown to draw.
+        if (ne && HOOK_WAIT_MS[item.agent] != null) {
+          const budget = HOOK_WAIT_MS[item.agent];
           item.ask.sec = Math.max(0, Math.round((budget - (Date.now() - ne.first)) / 1000));
         }
         const pend = pendingVoiceAnswers.get(record.ask.pid);

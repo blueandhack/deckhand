@@ -82,21 +82,59 @@ const AGENT = (process.argv.find((a) => a.startsWith("--agent=")) ?? "").slice(8
 // `timeout` (settings.json for Claude Code, hooks.json for Codex) must be a
 // few seconds LONGER, or the tool kills the hook before this elapses.
 //
-// The 90s figure is justified in CLAUDE.md by 310 real PermissionRequest samples
-// showing NO spike at the timeout - proof that Claude Code's own dialog is on
-// screen the whole time, so waiting there is a race rather than a stall. That
-// measurement is Claude-Code-only. Nothing has measured whether Codex's approval
-// UI is similarly concurrent with the hook or is instead serialised behind it -
-// if it's serialised, every Codex permission prompt would stall for the full
-// wait before falling through to Codex's own prompt. Until that experiment is
-// run (see the spec's Risks section), Codex gets a conservative 15s cap instead
-// of 90s: the two failure modes are not symmetric. A needlessly short wait on
-// Codex costs at most "answered on the device slightly less often than it could
-// have been" (the Mac side of the race, if one exists, still answers on its own
-// schedule). An unmeasured 90s wait, if Codex actually serialises, costs a full
-// 90s of hang on every single Codex permission prompt. Smaller, bounded harm now
-// beats a possible large, repeated one.
-const REMOTE_WAIT_MS = AGENT === "codex" ? 15_000 : 90_000;
+// CONFIGURABLE, and effectively UNLIMITED BY DEFAULT for Claude Code. Put a number
+// of seconds (or the word `forever`) in ~/.claude/deckhand-remote-wait to change
+// it; `forever`, `0`, an empty file or a malformed value all mean the default.
+//
+// Waiting indefinitely is safe on Claude Code for one specific, MEASURED reason:
+// its own dialog is on screen the whole time this hook blocks, so this is a race
+// and not an interception - 310 real PermissionRequest prompts resolved on a smooth
+// 2-60s human curve with NO spike at the old 90s cap, which is only possible if the
+// dialog was live throughout. The wait therefore ends the moment EITHER side
+// answers: a device answer returns it, the Mac answering strips the ask and returns
+// null, and SessionEnd removes the file entirely. A long wait only extends the case
+// where nobody has answered yet - which is exactly the case where the prompt is
+// still genuinely waiting for a human.
+//
+// It does NOT apply to Codex, and that asymmetry is deliberate rather than
+// timidity. That 310-sample measurement is Claude-Code-only, and Codex's spec
+// records BOTH open questions as unverified: whether an expired PermissionRequest
+// hook falls through or resolves as a DENIAL, and whether its approval UI is
+// concurrent with the hook or serialised behind it. If it serialises, a long wait
+// would stall every Codex permission prompt - or with no deadline, deadlock it,
+// answerable nowhere at all. The failure modes are not symmetric: a needlessly
+// short wait on Codex costs at most "answered on the device less often than it
+// could have been", so Codex keeps a conservative 15s until that experiment is run.
+// "Forever" is deliberately 24h-minus-a-minute rather than Infinity, and that is
+// not hedging. Claude Code kills a hook that outlives its settings.json `timeout`,
+// and a KILLED PermissionRequest hook is an untested state - the measured evidence
+// only ever covers a hook that exits on its own, because the old 90s wait always
+// finished inside the 100s timeout. A literal Infinity would guarantee we hit that
+// untested path on every unanswered prompt. So the invariant is kept instead: the
+// hook always self-exits before it can be killed, and HOOK_TIMEOUT_S below must
+// stay larger than this. On any human timescale it is indistinguishable from
+// forever.
+const HOOK_TIMEOUT_S = 86_400;                 // must match install-hooks.mjs
+const REMOTE_WAIT_CAP_MS = (HOOK_TIMEOUT_S - 60) * 1000;
+const REMOTE_WAIT_CONFIG = path.join(os.homedir(), ".claude", "deckhand-remote-wait");
+function readRemoteWaitMs() {
+  if (AGENT === "codex") return 15_000;
+  let raw = "";
+  try {
+    raw = fs.readFileSync(REMOTE_WAIT_CONFIG, "utf8").trim().toLowerCase();
+  } catch {
+    return REMOTE_WAIT_CAP_MS; // no config = the default, which is "forever"
+  }
+  if (!raw || raw === "forever" || raw === "0") return REMOTE_WAIT_CAP_MS;
+  const secs = Number.parseFloat(raw);
+  // A malformed value must not silently become a 0ms wait: that would turn remote
+  // answering off and present as the feature being broken rather than misconfigured.
+  if (!Number.isFinite(secs) || secs <= 0) return REMOTE_WAIT_CAP_MS;
+  // Capped for the same reason the cap exists at all - a configured value longer
+  // than the hook timeout would be silently truncated by a kill instead.
+  return Math.min(secs * 1000, REMOTE_WAIT_CAP_MS);
+}
+const REMOTE_WAIT_MS = readRemoteWaitMs();
 
 // The only writer for DEBUG_LOG. Entirely best-effort: this is a debug trail, and a
 // hook that throws while trying to log would be far worse than a missing line.

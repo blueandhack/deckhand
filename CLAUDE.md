@@ -269,6 +269,33 @@ two things `host/index.mjs` cannot get any other way:
   runs into it). The host also drops `ANSWER` lines while answering is off.
   Nothing strips a display-only `ask` — the next event for that session
   (`PostToolUse`/`PostToolUseFailure` → `working`) rebuilds the record without it.
+  **The wait is now effectively UNLIMITED for Claude Code, and configurable.**
+  `~/.claude/deckhand-remote-wait` holds seconds, or `forever`/`0`/absent for the
+  default; a malformed value also reads as the default, deliberately, because
+  falling back to a 0ms wait would silently disable remote answering and present as
+  the feature being broken rather than misconfigured. Waiting indefinitely is safe
+  here for the same measured reason the 90s cap was: Claude Code's dialog is on
+  screen throughout, so the wait ends the moment EITHER side answers - a device
+  answer returns it, the Mac answering strips the ask and returns null, SessionEnd
+  removes the file. A long wait only extends the case where nobody has answered yet.
+  **"Forever" is 86340s (23h59m), NOT Infinity, and that is not hedging.** Claude
+  Code kills a hook that outlives its settings.json `timeout`, and a *killed*
+  `PermissionRequest` hook is an untested state - the 310-sample evidence only ever
+  covers a hook that exits on its own, because the old 90s wait always finished
+  inside the old 100s timeout. Infinity would guarantee hitting that untested path
+  on every unanswered prompt, so the invariant is kept instead: **the hook always
+  self-exits before it can be killed.** `HOOK_TIMEOUT_S` (86400) in the hook and the
+  `timeout` written by `install-hooks.mjs` are a PAIR - raise the wait without
+  raising the timeout and the kill comes back silently.
+  **Codex stays at 15s regardless of the config, on purpose.** That measurement is
+  Claude-Code-only, and Codex's spec records two unverified risks: whether an expired
+  `PermissionRequest` hook falls through or resolves as a DENIAL, and whether its
+  approval UI is concurrent or serialised. If serialised, an unlimited wait deadlocks
+  the prompt into being answerable nowhere. The failure modes are not symmetric.
+  The host mirrors the same config file for the device's countdown (`ask.sec`) and
+  **omits the field entirely when the wait is unlimited**, so the device draws no
+  countdown rather than a 24-hour one; reading the same file is what stops the two
+  drifting when one is edited.
   Two hard rules: the hook waits **only** when `/tmp/deckhand-<uid>/host-alive` (host heartbeat, written
   every tick) is fresh, says `connected`, **and** doesn't say `remoteAnswer:false` — otherwise every
   prompt would stall 90s for nothing — and it must never write anything to stdout **except** a
