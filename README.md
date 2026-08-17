@@ -525,13 +525,25 @@ the whole install → uninstall → restore cycle against a throwaway `$HOME`.
 ## Project layout
 
 ```
-firmware/deckhand_display/deckhand_display.ino   Arduino sketch (ESP32)
-firmware/User_Setup.h                    TFT_eSPI pin config for this board
-host/index.mjs                           Node script (runs on your Mac)
-host/build-app.sh                        builds DeckhandBLE.app from your node
-host/DeckhandBLE.plist                   Info.plist template for that app
-claude-hooks/                            the ~/.claude hook scripts + installer
-install.sh                               one-command setup
+firmware/deckhand_display/*.ino           Arduino sketch (ESP32), several files, one build
+firmware/tft_setup/User_Setup.h           TFT_eSPI pin config for this board
+host/index.mjs                            Node script (runs on your Mac)
+host/typed-answer.mjs, voice-answer.mjs   answer crypto, pure + testable
+host/build-app.sh                         builds DeckhandBLE.app from your node
+host/DeckhandBLE.plist                    Info.plist template for that app
+host/deckhand-service.sh                  launchd supervision (install/stop/status)
+flash.sh                                  compile + flash, handles the serial port
+claude-hooks/                             the ~/.claude hook scripts + installer
+install.sh                                one-command setup
+```
+
+Runtime state, per user:
+
+```
+/tmp/deckhand-<uid>/host.log              the host's log (rotates at 5MB, keeps .1)
+/tmp/deckhand-<uid>/host-alive            heartbeat; gates the hook's remote wait
+~/.claude/deckhand-restarts.log           one line per host start (see Keeping it running)
+~/Library/Logs/deckhand-launchd.{out,err} whatever dies before the host's own logger
 ```
 
 The Claude Code hook scripts ship in `claude-hooks/` but *run* from
@@ -602,18 +614,24 @@ reference and for the firmware, which is always hands-on.
 
 1. **Prepare TFT_eSPI**: copy this board's pin config into the library:
    ```
-   cp firmware/User_Setup.h "$(arduino-cli config get directories.user)/libraries/TFT_eSPI/User_Setup.h"
+   cp firmware/tft_setup/User_Setup.h "$(arduino-cli config get directories.user)/libraries/TFT_eSPI/User_Setup.h"
    ```
    You also need the `esp32:esp32` core and the `TFT_eSPI`, `ArduinoJson`,
    and `XPT2046_Touchscreen` libraries (`Preferences` / `BLEDevice` /
    `BLEServer` / `BLEUtils` / `BLE2902` ship with the esp32 core).
 2. **Flash the firmware** (from this directory):
    ```
-   arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" firmware/deckhand_display
-   arduino-cli upload -p /dev/cu.usbserial-XXXX \
-     --fqbn "esp32:esp32:esp32:UploadSpeed=115200,FlashMode=dio,FlashFreq=80,PartitionScheme=huge_app" \
-     firmware/deckhand_display
+   ./flash.sh                 # compile + upload
+   ./flash.sh --no-compile    # upload the last build, skipping the ~3min compile
    ```
+   One command on purpose. It resolves the serial port (it renumbers between
+   plug-ins), frees it, uploads, and puts the host back afterwards — including
+   when the upload fails or you Ctrl-C, because leaving your display dead
+   because a flash went wrong would be worse than the problem it solves. If the
+   host is supervised (step 6) it stops the service properly rather than killing
+   the process, which matters: `KeepAlive` re-grabs the port within a second of
+   the process dying, so a bare `arduino-cli upload` fails on a busy port and
+   looks like a hardware fault.
    `PartitionScheme=huge_app` gives the app partition 3MB instead of the
    default 1.2MB — needed because the Bluetooth stack alone is ~700KB+;
    this project doesn't use OTA or SPIFFS, so the tradeoff is free. On
@@ -635,6 +653,8 @@ reference and for the firmware, which is always hands-on.
    host/build-app.sh            # builds the bundle from your node (one-time)
    open host/DeckhandBLE.app --args "$(pwd)/host/index.mjs"
    ```
+   Launch it by hand **this once**: only a real app launch can raise the
+   Bluetooth permission prompt. After you have clicked Allow, step 6 takes over.
    The bundle is required, not optional, for BLE — see
    [Why an app bundle?](#why-an-app-bundle) below. Click **Allow** the first
    time macOS asks for Bluetooth, and **Always Allow** if the Keychain asks
@@ -650,6 +670,59 @@ reference and for the firmware, which is always hands-on.
    USB-only one-off job, write a throwaway script that imports **only**
    `serialport` and never touches noble; that survives, because nothing in it
    reaches CoreBluetooth.
+6. **Let it run itself** — recommended, and what `install.sh` sets up for you:
+   ```
+   ./host/deckhand-service.sh install    # launchd, restarts on death, starts at login
+   ./host/deckhand-service.sh status     # running? how often has it restarted?
+   ```
+   See [Keeping it running](#keeping-it-running).
+
+### Keeping it running
+
+The host is supervised by a launchd agent, because the failure it guards against
+is one you cannot see. It has never crashed — it *hangs*, and when it does, its
+serial reader keeps working, so device→Mac traffic still flows and everything
+looks healthy while the display quietly goes stale. One stuck Bluetooth write
+left it dead for five hours that way. With supervision, a death costs about a
+second.
+
+Two layers sit under that. Inside the host, a watchdog restarts the poll loop if
+no tick completes for 30 seconds — because an `await` that never settles (rather
+than failing) stops the loop permanently, and no amount of error handling catches
+a hang. And every child process it spawns is bounded by a timeout, so a wedged
+`ccusage` or a locked Keychain can't be the thing that stops it.
+
+**Whether any of that is earning its keep is a question you can answer**, which
+matters, because a safety net you can't see working is easy to trust wrongly.
+Every start appends a line to `~/.claude/deckhand-restarts.log`, summarised by:
+
+```
+./host/deckhand-service.sh status
+  starts total: 4    in the last 7 days: 1
+  longest run: 41.2h    shortest: 12m
+  last: … start #4 | previous run 41.2h, watchdog fires 0, ended: SIGTERM
+```
+
+Read it after a week. **"0 restarts, longest run 7d" means the net is unproven
+*and unneeded*** — a perfectly good answer. A pile of restarts names what keeps
+failing, which is a cause worth fixing rather than a net worth leaning on. The
+column that matters is *last tick*, not duration: a run that lasted 5h whose last
+tick was 4h before it ended didn't die, it **hung**, and those are marked
+`STALLED`.
+
+Runtime state lives in `/tmp/deckhand-<uid>/` — the log, the heartbeat, and the
+quota throttle files — one directory per user, mode `0700`. That's per-user
+because it has to be: on a shared Mac the second user's hook would otherwise read
+the *first* user's heartbeat, decide a display was connected, and stall every
+permission prompt for 90 seconds waiting for a device that isn't theirs.
+
+To stop it, or to take the port back for something else:
+
+```
+./host/deckhand-service.sh stop     # and it stays stopped
+./host/deckhand-service.sh start
+./host/deckhand-service.sh uninstall
+```
 
 ### Speech-to-text (only if you fitted the microphone)
 

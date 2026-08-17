@@ -613,6 +613,80 @@ two things `host/index.mjs` cannot get any other way:
   - The reader owns the whole screen, so it has to absorb the 5s tick the same way the
     settings confirm dialog does; without that the periodic repaint paints the detail
     screen straight over it.
+- **A `Notification` used to DELETE the prompt it was notifying about, and that made
+  remote answering of a question almost impossible.** Measured: an `AskUserQuestion` fires
+  `PermissionRequest` (which publishes the ask and blocks up to `REMOTE_WAIT_MS`) and then,
+  **six seconds later**, a `Notification` for the same prompt - `08:21:50.768` then
+  `08:21:56.781`. The hook rebuilds the session record from scratch on every event, and a
+  Notification is neither `isPermEvent` nor `isPreAsk`, so it built no ask and the record
+  was written **without one**. `waitForRemoteAnswer`'s own "our ask is gone, they must have
+  answered on the Mac" check then fired and the hook stopped listening - six seconds in,
+  not ninety.
+  Everything downstream still looked healthy, which is what made it hard to find: the
+  device kept displaying the prompt, still signed a valid answer, and the host still
+  authenticated it and wrote the answer file. Nobody was left to read it, so the Mac's
+  dialog just sat there. **The orphaned answer file on disk was the confirmation.** It also
+  explains why this presented first as a keyboard bug and then as a voice bug - both
+  re-read the record to confirm the prompt is still a pending question, so both were
+  rejected by a guard that was telling the truth - and why tapping **Allow** always worked:
+  Bash permission prompts fire no `Notification`.
+  A pending ask is now **carried forward** (`carriedAsk`), and only two kinds of event may
+  clear it: one that DEFINES the current prompt (`PreToolUse`/`PermissionRequest`, whose
+  ask - or deliberate absence when no display is connected - is authoritative), and one
+  that means the prompt is over (`PostToolUse`, `PostToolUseFailure`, `Stop`,
+  `UserPromptSubmit`). Verified by replaying the captured payloads against a throwaway
+  `$HOME`: the ask survives a Notification, and all four clearing events still clear it.
+  **A replay test of this must assert that a heartbeat is live first** - with a stale one
+  the hook publishes NO ask at all, and "never created" is indistinguishable from
+  "stripped" unless the test refuses to run. That false negative cost real time.
+- **An `await` that never settles kills the poll loop forever, and no `catch` can help.**
+  Measured twice, hours apart, with an identical signature: the line after the final tick
+  was `BLE: adapter state = poweredOff`, and the host then sent nothing again until it was
+  restarted. noble's `writeAsync` does not reject when the adapter disappears mid-write -
+  it simply never calls back - and `tick()`'s `setTimeout(tick, ...)` sits after every
+  await, so one unsettled write means `tick()` never returns and never reschedules.
+  `try/catch` catches rejections, not hangs; a `finally` would not help either, because it
+  runs when a function COMPLETES and this failure never does.
+  The host still looked alive throughout, which is the trap: the serial reader is
+  event-driven and independent, so it kept logging `BATT` lines for five hours after the
+  last tick, and a typed answer sent from the device was still received and accepted. Only
+  the outbound half was gone. **On the device the symptom points the wrong way**: SETTINGS
+  shows Bluetooth "connected" (the link really does re-establish) but USB "disconnected",
+  because the device infers USB from bytes RECEIVED - so a host that has stopped
+  transmitting reads as a USB fault.
+  Three defences, in order of generality. The BLE write is raced against a 3s timeout, so
+  that await always settles. **Every child process is bounded** - `ccusage` runs on every
+  tick and had no timeout, `security` blocks indefinitely on a locked keychain or an auth
+  prompt, and whisper/mic-wav are slow but not endless (the `git` calls already had
+  timeouts and both `fetch` calls already had abort signals). And `tick()` has a
+  **watchdog**: if no tick completes within `TICK_WATCHDOG_MS` it starts a new chain,
+  because any await added inside `tick()` later would kill the poller the same silent way.
+  The `tickGeneration` counter is what stops the cure being worse than the disease - a
+  stalled tick that eventually resumes must not schedule alongside its replacement, or
+  every stall would permanently double the tick rate. Proven with a promise that never
+  settles: without the watchdog the loop stops dead, with it it resumes.
+- **A death now leaves evidence, and the fatal handlers must NOT use the normal logger.**
+  There were no `unhandledRejection`/`uncaughtException` handlers at all, and on modern
+  Node an unhandled rejection **terminates the process** - for a status display that is the
+  wrong trade, so it is logged and survived, while an uncaught exception still exits but
+  records why first. Both go through `logFatalSync` with `appendFileSync`, because
+  everything else writes through a STREAM whose buffer is **lost** when the process exits:
+  verified with a test that writes both ways and exits immediately - the stream line
+  disappears, the synchronous one survives.
+- **`ccusage` is spawned as `<process.execPath> <cli.js>`, never through its `.bin`
+  shebang.** That shebang is `#!/usr/bin/env node`, which needs `node` on PATH - and under
+  launchd PATH is minimal, while node on this machine is **nvm-managed** under
+  `~/.nvm/versions/node/<version>/bin`, on no standard path at all. The symptom was
+  indirect and nearly invisible from the Mac: `env: node: No such file or directory` every
+  tick, `readUsage()` throwing, no payload sent, and a device stuck on "waiting for the
+  first update" while the heartbeat stayed fresh, `via=usb,ble` looked right, and the
+  watchdog correctly did nothing (the loop was not stalled - it was completing, and
+  failing). **Adding nvm's bin to the plist would have worked until the next `nvm install`
+  and then broken the same way**, which is why the dependency was removed rather than
+  satisfied. `process.execPath` is the node inside the bundle, so it always exists - the
+  same reason the mic decoder is spawned that way. This is also a class the restart ledger
+  cannot catch: a healthy process doing no useful work.
+
 - **Housekeeping: the host's own files are capped, because both grew forever.** Measured:
   the log appends a ~700-byte tick line every 5s = **4.4MB/day, ~131MB/month**, and audio
   captures are never overwritten (each is timestamped) at ~100KB–1MB a take.
