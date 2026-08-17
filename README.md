@@ -374,9 +374,20 @@ can't provision (that's the security boundary).
 
 ## Hardware
 
-[ELEGOO E32R28T / E32N28T](https://www.amazon.com/dp/B0FJQ6RK39) — 2.8" ESP32-32E
-display module, 240x320 ILI9341 LCD + XPT2046 resistive touch. Talks to the Mac over **USB (CH340
-USB-serial) and/or BLE** — both are always enabled on the device
+| | part | what to buy |
+|---|---|---|
+| **Required** | Display board | [ELEGOO E32R28T / E32N28T](https://www.amazon.com/dp/B0FJQ6RK39) — 2.8" ESP32, 240x320 ILI9341, USB-C (2-pack) |
+| Optional | Battery | [3.7V 3000mAh LiPo](https://www.amazon.com/dp/B08T6GT7DV) — JST 1.25, protection circuit (4-pack) |
+| Optional | Speaker | [1W 8Ω mini speaker](https://www.amazon.com/dp/B0D7SC3ZFG) — JST-PH 1.25 (10-pack) |
+| Optional | Microphone | [MAX4466 electret amp module](https://www.amazon.com/dp/B08N4FNFTR) — adjustable gain (6-pack) |
+| Optional | Case | print it yourself — [`case/`](case/) |
+
+*The exact parts this was built and tested with, not recommendations. Note the
+multipacks. Listings go stale, so the specs below are what actually matter if an
+ASIN has moved on.*
+
+The board is a 240x320 ILI9341 LCD with an XPT2046 resistive touch panel, and
+talks to the Mac over **USB (CH340 USB-serial) and/or BLE** — both are always enabled on the device
 simultaneously, and the host script sends to whichever are currently
 connected (it's normal and expected for both to be connected at once).
 Pin mapping (LCD + touch + battery ADC + audio) is documented at the top
@@ -385,27 +396,21 @@ of `firmware/deckhand_display/deckhand_display.ino`.
 Optional add-ons — the battery and speaker just plug in; the microphone needs
 three wires:
 
-*The links are the exact parts this was built and tested with, not
-recommendations — and most are sold in multipacks (the board comes as 2, the
-battery 4, speakers 10, mics 6). Listings go stale, so the part names and specs
-above are what actually matter if an ASIN has moved on.*
-
-- **Battery** — a 1S LiPo on the JST 1.25 battery connector
-  ([3000mAh, JST 1.25, with protection circuit](https://www.amazon.com/dp/B08T6GT7DV) —
-  the cell this was tested with, and what the case is sized for). Charging and power switching are pure hardware: the
+- **Battery** — a 1S LiPo on the JST 1.25 battery connector (tested with a
+  3000mAh cell, which is what the case is sized for). Charging and power switching are pure hardware: the
   board's TP4054 charges at ~290mA whenever USB-C is present, and a P-FET
   power path runs the module from the battery the moment USB is unplugged.
   The firmware reads the level through the board's divider on IO34 and
   shows it in the footer and on SETTINGS. Heads-up: there is no VBUS-sense
   pin, so a *data-less* wall charger displays as "on battery" even while
   the hardware is charging.
-- **Speaker** — a [1W 8Ω mini speaker](https://www.amazon.com/dp/B0D7SC3ZFG) on the
-  JP1 terminals, driven by the onboard FM8002E amplifier. Used for the needs-input beep. Volume is set on
+- **Speaker** — a 1W 8Ω mini speaker on the JP1 terminals, driven by the
+  onboard FM8002E amplifier. Used for the needs-input beep. Volume is set on
   the device (SETTINGS → DISPLAY & SOUND → VOLUME: LOW/MED/HIGH); the levels
   are the `VOL_PRESETS` duty values in the firmware.
 
-- **Microphone** — a [MAX4466 electret amp module](https://www.amazon.com/dp/B08N4FNFTR),
-  for dictating to a session (see *Talking to a session*). Three wires to the board's 4-pin **Expand**
+- **Microphone** — a MAX4466 electret amp module, for dictating to a session
+  (see *Talking to a session*). Three wires to the board's 4-pin **Expand**
   connector:
 
   | module pad | goes to |
