@@ -2200,13 +2200,43 @@ function startBle() {
   });
 }
 
+// A promise that CANNOT hang. noble's writeAsync never settles if the adapter
+// disappears mid-write - it does not reject, it simply never calls back - and an
+// await that never settles is not something try/catch can save you from.
+const BLE_WRITE_TIMEOUT_MS = 3000;
+function withTimeout(promise, ms, what) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+// MEASURED TWICE, hours apart: a stuck BLE write killed the poll loop outright.
+// tick()'s `setTimeout(tick, ...)` sits after every await, so a write that never
+// settles means tick() never returns, never reschedules, and the host stops
+// sending forever - while its serial READER, being event-driven and independent,
+// keeps logging device lines as if nothing were wrong. Both times the line after
+// the last tick was "BLE: adapter state = poweredOff", and both times the device
+// went blank while the Mac still looked healthy.
+//
+// The symptom is deceptive on the device too: SETTINGS shows Bluetooth
+// "connected" (the link really does re-establish) but USB "disconnected",
+// because the device infers USB from bytes RECEIVED - so a host that has stopped
+// transmitting looks like a USB fault rather than a stalled host.
 async function sendOverBle(text) {
   const characteristic = bleCharacteristic;
   if (!characteristic) return;
   const buf = Buffer.from(text, "utf8");
   for (let i = 0; i < buf.length; i += BLE_CHUNK_SIZE) {
     try {
-      await characteristic.writeAsync(buf.subarray(i, i + BLE_CHUNK_SIZE), true);
+      await withTimeout(
+        characteristic.writeAsync(buf.subarray(i, i + BLE_CHUNK_SIZE), true),
+        BLE_WRITE_TIMEOUT_MS,
+        "BLE write"
+      );
     } catch (err) {
       console.error("BLE: write failed:", err.message);
       return;
@@ -2215,7 +2245,22 @@ async function sendOverBle(text) {
 }
 
 // ---------- Shared tick: compute usage once, send to whichever transports are live ----------
-async function tick() {
+// Belt and braces over the BLE write timeout above. That fix bounds the ONE await
+// known to hang; this bounds the whole function, because any future await added
+// inside tick() would kill the poller in exactly the same way - silently, with no
+// error, no log line, and a device that simply goes stale. A `finally` would not
+// help: it runs when a function completes, and the failure mode is one that never
+// completes.
+//
+// The generation counter is what stops the cure being worse than the disease: if
+// a stalled tick eventually DOES resume, it must not carry on scheduling
+// alongside the replacement the watchdog started, or every stall would
+// permanently double the tick rate.
+const TICK_WATCHDOG_MS = 30_000;      // 6 missed ticks at POLL_INTERVAL_MS
+let tickGeneration = 0;
+let lastTickCompleted = Date.now();
+
+async function tick(generation = tickGeneration) {
   try {
     pruneNonces();
     // Heartbeat for the session hook: it only blocks waiting for a remote
@@ -2263,8 +2308,22 @@ async function tick() {
   } catch (err) {
     console.error("Failed to read usage:", err.message);
   }
-  setTimeout(tick, POLL_INTERVAL_MS);
+  lastTickCompleted = Date.now();
+  // Only the current generation may reschedule - see the watchdog below.
+  if (generation === tickGeneration) {
+    setTimeout(() => tick(generation), POLL_INTERVAL_MS);
+  }
 }
+
+setInterval(() => {
+  const stalled = Date.now() - lastTickCompleted;
+  if (stalled < TICK_WATCHDOG_MS) return;
+  console.error(
+    `Poll loop stalled for ${Math.round(stalled / 1000)}s (an await never settled) - restarting it.`
+  );
+  lastTickCompleted = Date.now();   // don't re-fire every interval while it recovers
+  tick(++tickGeneration);           // orphans the stuck chain: its generation is now stale
+}, POLL_INTERVAL_MS);
 
 setInterval(async () => {
   try {
