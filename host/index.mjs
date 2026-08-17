@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { createWriteStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { createWriteStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
@@ -1621,6 +1621,17 @@ const WHISPER_PROMPT =
   process.env.WHISPER_PROMPT ||
   "Deckhand, CLAUDE.md, README.md, ESP32, firmware, flash, BLE, ADPCM, Whisper, " +
     "git commit, refactor, repository, session, transcript, host script, microphone.";
+// What dictation needs, checked as TWO separate things because they fail in
+// identically-looking ways. `brew install whisper-cpp` deliberately ships no model, so a
+// binary-only install turns "whisper-cli: ENOENT" into "failed to load model". On this
+// machine BOTH were missing, which produced 26 logged failures and zero transcripts
+// while the device only ever said FAILED.
+function voiceMissing() {
+  if (!existsSync(WHISPER_BIN)) return `whisper not installed (${WHISPER_BIN})`;
+  if (!existsSync(WHISPER_MODEL)) return `whisper model missing (${WHISPER_MODEL})`;
+  return null;
+}
+
 const WHISPER_MODEL =
   process.env.WHISPER_MODEL || path.join(os.homedir(), ".cache/whisper.cpp/ggml-large-v3-turbo-q5_0.bin");
 
@@ -1666,8 +1677,11 @@ async function transcribeAndDispatch(captureFile, target) {
     });
     text = stdout.replace(/\s+/g, " ").trim();
   } catch (err) {
-    console.error(`Voice: whisper failed: ${err.message.split("\n")[0]}`);
-    setVoice("error", { reply: "transcription failed" });
+    const miss = voiceMissing();
+    console.error(`Voice: whisper failed: ${miss || err.message.split("\n")[0]}`);
+    setVoice("error", {
+      reply: miss ? `${miss} - run host/install-voice.sh` : "transcription failed",
+    });
     return;
   }
   if (!text) {
@@ -1768,7 +1782,8 @@ async function transcribeForAnswer(captureFile, pid) {
       maxBuffer: 4 * 1024 * 1024, timeout: VOICE_CHILD_TIMEOUT_MS });
     text = stdout.replace(/\s+/g, " ").trim();
   } catch (err) {
-    console.error(`Voice answer: whisper failed: ${err.message.split("\n")[0]}`);
+    const missA = voiceMissing();
+    console.error(`Voice answer: whisper failed: ${missA || err.message.split("\n")[0]}`);
     setVoice("askerror", { reply: "transcription failed" });
     return;
   }
@@ -2614,6 +2629,17 @@ console.log(
     ? "Voice: dictation will RUN HEADLESSLY (claude -p --resume). Set DECKHAND_VOICE_DELIVERY=clipboard to hand it to you instead."
     : "Voice: dictation goes to the CLIPBOARD + a notification; paste it yourself. Set DECKHAND_VOICE_DELIVERY=dispatch for the old headless behaviour."
 );
+// Checked at STARTUP, not only on first use. The old behaviour accepted a capture, spent
+// the transfer, and failed at the end - so a missing dependency presented as "dictation
+// is broken" rather than as something to install.
+{
+  const miss = voiceMissing();
+  console.log(
+    miss
+      ? `Voice: DICTATION DISABLED - ${miss}. Run host/install-voice.sh to fix it.`
+      : "Voice: whisper ready."
+  );
+}
 setTimeout(pollOauthUsage, 0);
 // Prune once at startup too: captures accumulate across runs, and a host that is only
 // restarted occasionally would otherwise never clear anything left by the previous one.

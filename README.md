@@ -776,12 +776,25 @@ To stop it, or to take the port back for something else:
 ### Speech-to-text (only if you fitted the microphone)
 
 ```
+./host/install-voice.sh
+```
+
+Idempotent, and it resumes a part-downloaded model rather than starting again. It
+installs whisper.cpp and fetches the model — **two separate prerequisites**, which is
+the whole reason this is a script. Brew deliberately ships no model, so installing
+only the binary swaps `whisper-cli: ENOENT` for a nearly identical
+`failed to load model`, and that reads like the install not having worked.
+
+`install.sh` checks for both and tells you if they are missing; the host also says so
+at startup (`Voice: DICTATION DISABLED - ...`) rather than accepting a recording,
+spending the transfer, and only then failing. If you would rather do it by hand:
+
+```
 brew install whisper-cpp
 mkdir -p ~/.cache/whisper.cpp && cd ~/.cache/whisper.cpp
 curl -LO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
 ```
-
-Brew does **not** bundle models, hence the second step. Use
+ Use
 `large-v3-turbo-q5_0` (547MB) rather than `base.en` (141MB) — benchmarked on real
 captures from this microphone, `base.en` turned "Update CLAUDE.md file" into
 "update, CLAUDE and D5" and invented proper nouns, while turbo got it right and

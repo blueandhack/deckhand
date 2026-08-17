@@ -1247,6 +1247,22 @@ Other things that aren't obvious from a single file:
   cost, and the audio never leaves the machine — which matters for a mic on the desk all day. It
   feeds the **cleaned** wav (the raw one still carries the BLE comb; Whisper has no reason to cope
   with interference we can remove first).
+- **Dictation has TWO prerequisites and they fail in identically-looking ways, which is
+  why `host/install-voice.sh` exists.** `brew install whisper-cpp` deliberately ships no
+  model, so a binary-only install turns `whisper-cli: ENOENT` into
+  `failed to load model` - and either way the device just said FAILED. Found the hard
+  way: on this machine BOTH were missing, and the logs held **26 whisper failures and
+  zero successful transcripts** across two log generations while everything else looked
+  healthy. `voiceMissing()` names which one is absent, and it is checked at **STARTUP**
+  (`Voice: whisper ready.` / `Voice: DICTATION DISABLED - ...`) as well as on failure,
+  because the old behaviour accepted a capture, spent the whole transfer, and only then
+  failed - which presents as "dictation is broken" rather than "a dependency is
+  missing". The device's error card now names the missing piece and the script to run.
+  `install.sh` reports both but does NOT auto-install: the model is ~550MB and someone
+  who has not fitted the mic should not download it to set up a status display.
+  The installer refuses a model under 500MB rather than leaving a truncated one in
+  place - whisper emits confident nonsense from a damaged file, the same hazard that
+  makes `mic-wav.mjs` refuse a capture under 98% complete.
 - **Use `ggml-large-v3-turbo-q5_0.bin` (547MB), NOT `base.en`.** Benchmarked on real captures from
   this mic, and the gap is not subtle:
   | said | base.en (141MB) | large-v3-turbo q5_0 |
