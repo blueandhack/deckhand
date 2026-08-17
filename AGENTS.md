@@ -16,7 +16,6 @@ Compile and flash the firmware (from the repo root; find the serial port with `l
 
 ```
 arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" firmware/deckhand_display
-# ./host/deckhand-service.sh stop   # FIRST - KeepAlive would re-grab the port
 arduino-cli upload -p /dev/cu.usbserial-XXXX \
   --fqbn "esp32:esp32:esp32:UploadSpeed=115200,FlashMode=dio,FlashFreq=80,PartitionScheme=huge_app" \
   firmware/deckhand_display
@@ -44,11 +43,30 @@ it HANGS or exits, and nothing brought it back; one stuck BLE write left it sile
 dead for five hours while its serial reader kept logging device lines, so everything
 looked healthy from the Mac.
 
-**STOP THE SERVICE BEFORE FLASHING, do not just `kill` it.** KeepAlive re-grabs
-`/dev/cu.usbserial-*` the instant the process dies, so `arduino-cli upload` fails on a
-busy port; only `./deckhand-service.sh stop` (which unloads the job) actually prevents
-the respawn. `start` afterwards. `open DeckhandBLE.app --args "$(pwd)/index.mjs"` still
-works for a one-off unsupervised run.
+**To flash, run `./flash.sh` from the repo root - that is the whole procedure.** It
+compiles, resolves the port (it renumbers), frees it, uploads, and puts the host back
+the way it found it, including when the upload FAILS or you Ctrl-C - leaving the display
+dead because an upload failed would be worse than the problem it solves. It handles both
+a supervised host and a hand-started one. `./flash.sh --no-compile` skips the ~3min build.
+
+The hazard it hides, for when it is not used: KeepAlive re-grabs `/dev/cu.usbserial-*`
+within a second of the process dying, so a bare `arduino-cli upload` fails on a busy port
+and looks like a hardware fault. **Killing the process is not enough** - only
+`./host/deckhand-service.sh stop`, which unloads the job, prevents the respawn.
+`open DeckhandBLE.app --args "$(pwd)/index.mjs"` still works for a one-off unsupervised run.
+
+**Whether the supervisor is earning its place is a question you can ANSWER, not argue
+about.** A supervisor cannot be proven correct by reasoning - only time shows whether it
+catches anything - and a restart used to leave no trace at all, since launchd keeps no
+history and the host log simply resumed mid-stream. Each start now appends a line to
+`~/.claude/deckhand-restarts.log`, summarised by `./host/deckhand-service.sh status`:
+starts this week, longest and shortest run, and the last reason. Read it after a week -
+"0 restarts, longest run 7d" means the net is unproven *and unneeded*, while a pile of
+them means there is a cause still worth fixing rather than a net worth leaning on.
+The load-bearing column is **"last tick", not duration**: a run that lasted 5h whose last
+tick was 4h before it ended did not die, it HUNG, and the ledger flags that as `STALLED`.
+It costs no per-tick I/O - the previous run's final tick is read back from the heartbeat
+file, which is already written every 5s.
 
 **The LaunchAgent runs the bundle's binary DIRECTLY, not through `open`, and that is
 verified rather than assumed.** The warning below - that launching must go through

@@ -14,10 +14,12 @@
 #   ./deckhand-service.sh status      is it running, and since when
 #   ./deckhand-service.sh uninstall   remove the agent entirely
 #
-# STOP BEFORE FLASHING. KeepAlive means launchd re-grabs /dev/cu.usbserial-* the
-# instant the process dies, so `arduino-cli upload` will fail on a busy port if
-# the agent is merely killed rather than stopped. `stop` unloads the job, which
-# is what actually prevents the respawn.
+# FLASHING: just run ./flash.sh from the repo root - it handles this for you and
+# puts the host back afterwards, including when the upload fails. The hazard it
+# hides: KeepAlive re-grabs /dev/cu.usbserial-* within a second of the process
+# dying, so a bare `arduino-cli upload` fails on a busy port and looks like a
+# hardware fault. Killing the process is NOT enough; only `stop` (which unloads
+# the job) prevents the respawn.
 set -euo pipefail
 
 LABEL="com.deckhand.host"
@@ -92,6 +94,44 @@ PLIST_EOF
     fi
     pgrep -f 'MacOS/Deckhand' >/dev/null && echo "  process: running (pid $(pgrep -f 'MacOS/Deckhand' | head -1))" \
                                          || echo "  process: NOT running"
+    # The point of the ledger: whether the supervisor is actually catching
+    # anything. "0 restarts, longest run 7d" means it is unproven AND unneeded;
+    # a pile of restarts means there is still a cause worth fixing rather than
+    # a net worth relying on.
+    LEDGER="$HOME/.claude/deckhand-restarts.log"
+    if [ -s "$LEDGER" ]; then
+      echo "  --- restarts ---"
+      python3 - "$LEDGER" <<'PYEOF'
+import sys, re, datetime, signal
+# `status | head` closes stdout early; without this python prints a BrokenPipe
+# traceback that looks like a failure and isn't.
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+lines = [l for l in open(sys.argv[1]) if " start #" in l]
+now = datetime.datetime.now(datetime.timezone.utc)
+def when(l):
+    try: return datetime.datetime.fromisoformat(l.split()[0].replace("Z", "+00:00"))
+    except Exception: return None
+week = [l for l in lines if (t := when(l)) and (now - t).days < 7]
+def secs(tok):
+    m = re.search(r"previous run ([\d.]+)([hms])", tok)
+    if not m: return None
+    v, u = float(m.group(1)), m.group(2)
+    return v * {"h": 3600, "m": 60, "s": 1}[u]
+runs = [s for l in lines if (s := secs(l)) is not None]
+def human(x):
+    return f"{x/3600:.1f}h" if x >= 3600 else (f"{x/60:.0f}m" if x >= 60 else f"{x:.0f}s")
+print(f"    starts total: {len(lines)}    in the last 7 days: {len(week)}")
+if runs:
+    print(f"    longest run: {human(max(runs))}    shortest: {human(min(runs))}")
+stalled = [l for l in lines if "STALLED" in l]
+if stalled:
+    print(f"    runs that HUNG before dying: {len(stalled)}  <- the failure the watchdog targets")
+if lines:
+    print(f"    last: {lines[-1].strip()}")
+PYEOF
+    else
+      echo "  --- restarts --- none recorded yet (ledger starts at the next host start)"
+    fi
     ;;
   uninstall)
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true

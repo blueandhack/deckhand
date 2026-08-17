@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { createWriteStream, renameSync, statSync, appendFileSync } from "node:fs";
+import { createWriteStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
@@ -61,6 +61,84 @@ function rotateLogIfNeeded() {
   logStream = createWriteStream(LOG_FILE, { flags: "a" });
   old.end();
 }
+// ---------------------------------------------------------------------------
+// RESTART LEDGER — how we find out whether the supervisor is earning its place.
+//
+// A supervisor cannot be proven correct by argument; only time tells you whether
+// it is catching anything. But a restart used to leave almost no trace - launchd
+// keeps no history and the host's log simply resumed mid-stream - so a month
+// later you would be no wiser. One line per start fixes that, and turns "is this
+// working?" into something you can read off `deckhand-service.sh status`.
+//
+// The interesting column is "last tick", not "duration". A run that lasted 5h
+// but whose last tick was 4h before it ended did not die - it HUNG, which is the
+// exact failure that started all this, and the pair of numbers tells them apart.
+// It costs no per-tick I/O: the tick heartbeat is already written every 5s, so
+// the previous run's final tick is simply read back from it at startup.
+const RUN_STATE = path.join(os.homedir(), ".claude", "deckhand-run-state.json");
+const RESTART_LOG = path.join(os.homedir(), ".claude", "deckhand-restarts.log");
+let runStartedAt = Date.now();
+let watchdogFires = 0;
+
+function readJsonSync(file) {
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function recordRunStart() {
+  const prev = readJsonSync(RUN_STATE);
+  const beat = readJsonSync(HOST_ALIVE);
+  let n = 1;
+  if (prev) {
+    n = (prev.startNumber || 0) + 1;
+    const lastTick = beat?.at || prev.startedAt;
+    const ranMs = Math.max(0, lastTick - prev.startedAt);
+    // No endReason means the previous run never got to record one: it was
+    // SIGKILLed, or the machine went down under it.
+    const ended = prev.endReason || "died without recording a reason";
+    const stalledMs = prev.endedAt ? Math.max(0, prev.endedAt - lastTick) : 0;
+    const h = (ms) => (ms >= 3600_000 ? `${(ms / 3600_000).toFixed(1)}h`
+                     : ms >= 60_000 ? `${(ms / 60_000).toFixed(0)}m`
+                     : `${(ms / 1000).toFixed(0)}s`);
+    const line =
+      `${new Date().toISOString()} start #${n} | previous run ${h(ranMs)}` +
+      `${stalledMs > 30_000 ? `, STALLED ${h(stalledMs)} before it ended` : ""}` +
+      `, watchdog fires ${prev.watchdogFires || 0}, ended: ${ended}\n`;
+    try {
+      appendFileSync(RESTART_LOG, line);
+    } catch {}
+  }
+  try {
+    writeFileSync(
+      RUN_STATE,
+      JSON.stringify({ startNumber: n, startedAt: runStartedAt, pid: process.pid, watchdogFires: 0 })
+    );
+  } catch {}
+}
+
+// Best-effort and synchronous: this runs on the way out, so a stream would not
+// flush in time (measured - the buffered line is simply lost).
+function recordRunEnd(reason) {
+  const cur = readJsonSync(RUN_STATE);
+  if (!cur || cur.pid !== process.pid) return; // a newer run owns the file now
+  try {
+    writeFileSync(
+      RUN_STATE,
+      JSON.stringify({ ...cur, watchdogFires, endReason: reason, endedAt: Date.now() })
+    );
+  } catch {}
+}
+
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  process.on(sig, () => {
+    recordRunEnd(sig);
+    process.exit(0);
+  });
+}
+
 // A death must leave evidence. Everything above writes through a STREAM, whose
 // buffered contents are lost if the process exits before it drains - so the two
 // handlers below append synchronously instead. Without this, the host simply
@@ -92,6 +170,7 @@ process.on("unhandledRejection", (reason) => {
 // attached to it rather than an unexplained gap in the log.
 process.on("uncaughtException", (err) => {
   logFatalSync("UNCAUGHT EXCEPTION (exiting)", err);
+  recordRunEnd(`uncaught exception: ${err?.message || err}`);
   process.exit(1);
 });
 
@@ -2372,6 +2451,7 @@ setInterval(() => {
     `Poll loop stalled for ${Math.round(stalled / 1000)}s (an await never settled) - restarting it.`
   );
   lastTickCompleted = Date.now();   // don't re-fire every interval while it recovers
+  watchdogFires++;                  // surfaces in the restart ledger
   tick(++tickGeneration);           // orphans the stuck chain: its generation is now stale
 }, POLL_INTERVAL_MS);
 
@@ -2477,4 +2557,5 @@ setTimeout(pollOauthUsage, 0);
 // Prune once at startup too: captures accumulate across runs, and a host that is only
 // restarted occasionally would otherwise never clear anything left by the previous one.
 pruneAudioCaptures().catch(() => {});
+recordRunStart();
 tick();
