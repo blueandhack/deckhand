@@ -3,6 +3,14 @@
 # Deckhand
 
 <p align="center">
+  <img src="docs/device-hero.png" width="270"
+       alt="The 3D-printed case, front on, running the real firmware: the SESSIONS tab showing one working Claude Code session">
+  <br>
+  <em>The printable case from <code>case/</code>, with a real capture on its screen &mdash;
+  rendered from the OpenSCAD model, not a mockup (<code>case/render-hero.py</code>).</em>
+</p>
+
+<p align="center">
   <img src="docs/screenshot-usage.png" width="200"
        alt="USAGE tab: a 5-hour window card at 9%, a 7-day card at 22%, a Codex row, and the footer">
   <img src="docs/screenshot-sessions.png" width="200"

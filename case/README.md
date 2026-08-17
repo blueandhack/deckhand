@@ -7,6 +7,22 @@ glass border stays hidden).
 
 ![assembled](preview_hero.png)
 
+The view above is the back, which is the side that matters for printing &mdash; the
+stand, the cover and the vents. For a front view with the firmware actually on the
+screen, `render-hero.py` renders the assembly and composites a real screenshot into
+the window:
+
+```
+python3 render-hero.py ../docs/screenshot-sessions.png ../docs/device-hero.png
+```
+
+It finds the screen by painting it magenta in `hero.scad` and looking for those
+pixels, rather than working out where the window lands in the image &mdash; so the
+alignment survives a change to the camera or to any case dimension. The camera is
+straight-on because it has to be: the window is recessed behind a chamfer, and a
+tilted view shows an empty slot. Measured by sweeping the camera and counting visible
+screen pixels &mdash; 27,360 straight on, at most ~74 at any angle.
+
 ## How it mounts (the important part)
 
 The **body** (front) has **4 posts** aligned to the board's **4 corner mounting
