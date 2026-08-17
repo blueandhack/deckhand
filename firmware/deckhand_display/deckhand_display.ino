@@ -692,6 +692,30 @@ struct SessionInfo {
   // the keyboard's countdown only, and -1 means the host did not send one.
   int askSec;
 };
+// The nine fields the per-tick diff actually READS from the previous tick. This
+// used to be a whole SessionInfo[MAX_SESSIONS] - 13,392 bytes of DRAM, plus a 13KB
+// memcpy every 5s - to compare these ~92 bytes per session. askDetail[1424] alone
+// was 8.5KB of that, copied every tick and never read back once.
+//
+// It matters because DRAM here is not slack: measured free heap after the BLE stack
+// is ~26KB on a fresh boot, the audio path allocates its capture buffer from that,
+// and MICREC had already degraded from the documented 4-5s to 2s. 12.8KB back is
+// about half the remaining heap.
+//
+// Field widths MUST match SessionInfo's exactly. A narrower copy here would be
+// silently truncated by copyField and could then compare EQUAL to a different id or
+// askPid - the same class of bug as a change-only cache shorter than its string.
+struct PrevSession {
+  char id[16];
+  char name[24];
+  char status[10];
+  unsigned long statusSinceMillis;
+  uint8_t beepsLeft;
+  unsigned long nextBeepMillis;
+  char askPid[12];
+  char askVoiceCancelSha[20];
+  bool hadVoiceText;   // askVoiceText is only ever tested for non-empty
+};
 SessionInfo sessions[MAX_SESSIONS];
 int sessionCount = 0;
 // The host sends at most MAX_SESSIONS (urgency-sorted: asking > waiting >
@@ -2454,8 +2478,21 @@ void handleLine(const String& line) {
 
   // Snapshot the previous list so statusSinceMillis survives across polls
   // for sessions whose status didn't change (matched by name).
-  static SessionInfo prevSessions[MAX_SESSIONS];
-  memcpy(prevSessions, sessions, sizeof(prevSessions));
+  // Only the fields the diff below reads - see PrevSession for why.
+  static PrevSession prevSessions[MAX_SESSIONS];
+  for (int i = 0; i < sessionCount && i < MAX_SESSIONS; i++) {
+    const SessionInfo& src = sessions[i];
+    PrevSession& dst = prevSessions[i];
+    memcpy(dst.id, src.id, sizeof(dst.id));
+    memcpy(dst.name, src.name, sizeof(dst.name));
+    memcpy(dst.status, src.status, sizeof(dst.status));
+    dst.statusSinceMillis = src.statusSinceMillis;
+    dst.beepsLeft = src.beepsLeft;
+    dst.nextBeepMillis = src.nextBeepMillis;
+    memcpy(dst.askPid, src.askPid, sizeof(dst.askPid));
+    memcpy(dst.askVoiceCancelSha, src.askVoiceCancelSha, sizeof(dst.askVoiceCancelSha));
+    dst.hadVoiceText = src.askVoiceText[0] != '\0';
+  }
   int prevCount = sessionCount;
 
   sessionCount = 0;
@@ -2575,7 +2612,7 @@ void handleLine(const String& line) {
           // from prevSessions - matched by id here, not array index, since
           // urgency-sort can reorder the list between ticks.
           if (showingDetail && strcmp(detailId, info.id) == 0 && !info.askPid[0] &&
-              prevSessions[j].askVoiceText[0]) {
+              prevSessions[j].hadVoiceText) {
             voiceConfirmGone = true;
           }
           break;

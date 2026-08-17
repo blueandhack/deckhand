@@ -598,7 +598,7 @@ two things `host/index.mjs` cannot get any other way:
   whose only key is `hist`, so it can never be confused with a tick payload (the device
   bails out of the parser before any usage field is touched).
   **The device stores only the screen it is showing.** Measured on a real transcript: 2515
-  entries / 584KB, of which the conversation alone is 122KB, against ~94KB of free heap
+  entries / 584KB, of which the conversation alone is 122KB, against ~70KB of free heap
   after the BLE stack — no device-side buffer can ever hold a session's history, so a
   bigger buffer is never the answer. The Mac keeps all of it and serves one screen at a
   time, which makes history length unbounded: that same session pages to **399 screens of
@@ -1037,7 +1037,7 @@ Other things that aren't obvious from a single file:
     adc_continuous_deinit <- adc_continuous_new_handle <- micRecord`. Symptom from the outside:
     "white screen, then restart", looping.
 - **Audio is stored as 8-bit G.711 mu-law, and that is what makes 16kHz possible at all.**
-  16kHz × 16-bit × 5s is 160KB; free heap after BLE is ~94KB, so linear PCM capped a take at **2
+  16kHz × 16-bit × 5s is 160KB; free heap after BLE is ~70KB, so linear PCM capped a take at **2
   seconds** — too short to reliably catch a sentence. mu-law is logarithmic, keeping fine resolution
   near zero where this quiet signal lives, and 5s costs the same 80KB that 8kHz/16-bit did. Scaled
   ×8 into mu-law's 16-bit input range on the way in (the signal peaks ~150 ADC counts, so scaling
@@ -1047,8 +1047,18 @@ Other things that aren't obvious from a single file:
     to be mid-scale (the real bias is ~1893, not 2048).
   - No digital gain, so the Mac can measure true SNR; scaling for audibility happens host-side,
     after measurement, where it can't flatter the numbers.
-  - The 5s request falls back to 4s/3s when the heap won't take it, and reports what it got. **~4s is
-    the ceiling** on this module (ESP32-32E **N4** — 4MB flash, no PSRAM), not a preference.
+  - The 5s request falls back to 4s/3s/2s when the heap won't take it, and reports what it got.
+    **~3s is the ceiling as measured today** on this module (ESP32-32E **N4** — 4MB flash, no
+    PSRAM), not a preference. It was 4s when this was written; the heap has been eaten since by
+    features that grew `SessionInfo` (askDetail alone is 1424 bytes x 6). **Re-measure rather than
+    trusting this number** - trigger `MICREC` and read the `AUDIO note: only Ns fits in heap (N
+    free)` line, which is the only honest source.
+  - **`ESP.getFreeHeap()` is a SUM, and the capture buffer needs a CONTIGUOUS block, so the two
+    disagree in the direction that matters.** Measured: a device up for hours reported **42,864
+    free** and `MICREC` failed outright with `out of heap`, while a freshly booted one reported
+    only **26,028 free** and allocated successfully. Fragmentation, not exhaustion. So an
+    `out of heap` with a comfortable-looking free figure is not a contradiction to explain away -
+    it is the expected shape after uptime, and rebooting is the fix rather than a bigger number.
 - **Polling the stop-tap is NOT the same job as repainting the meter, and sharing a timer made
   stopping feel broken.** `micStream` had its `ts.touched()` check nested inside the 120ms meter
   repaint, with the two-consecutive-reads debounce on top - so a stop cost 120ms at best and 240ms
@@ -1068,6 +1078,18 @@ Other things that aren't obvious from a single file:
   it is for. The level bar earns its place: it is the only way to know the mic is hearing you
   *before* spending 9s shipping the audio. Metering runs between DMA reads, never inside the sample
   loop (4096-byte store buffer ≈ 64ms of slack, versus ~2ms to draw).
+- **`prevSessions` keeps only the nine fields the diff reads, not a whole `SessionInfo`.** It used
+  to be `SessionInfo[MAX_SESSIONS]` - **13,392 bytes of DRAM plus a 13KB `memcpy` every tick** - to
+  compare about 92 bytes per session. `askDetail[1424]` was 8.5KB of that, copied every 5s and never
+  read back once. Slimming it to `PrevSession` reclaimed **12,792 bytes** (RAM 80,988 -> 68,196),
+  which is about half the free heap on this device, and the audio path's one-shot capture went
+  straight from **2s to 3s** as a result - heap is the binding constraint here, not flash (which sits
+  at 43% with 1.78MB spare, so shrinking the firmware buys nothing).
+  **`PrevSession`'s field widths must match `SessionInfo`'s exactly.** A narrower copy would be
+  silently truncated by `copyField` and could then compare EQUAL to a *different* id or askPid -
+  the same class of bug as a change-only cache shorter than the string it stores. The one field that
+  deliberately changes shape is `askVoiceText`, which the diff only ever tests for non-empty, so it
+  becomes a single `hadVoiceText` bool rather than 204 bytes.
 - **`micRestoreUi()` must reset the change-only caches, and delegates to `forceFullRepaint()`.**
   Repainting chrome WITHOUT resetting them leaves every field **blank**, because `drawIfChanged`
   sees an unchanged string and skips a field whose pixels were just erased. That shipped once as
@@ -1075,7 +1097,7 @@ Other things that aren't obvious from a single file:
   documents. Going through `forceFullRepaint()` also means values return from data already in hand,
   with no wait for the next host tick.
 - **Long recordings STREAM (`micStream()`), because buffering physically cannot reach a minute.**
-  60s at 16kHz is 960KB against ~94KB of free heap, and this module has no PSRAM — that is the whole
+  60s at 16kHz is 960KB against ~70KB of free heap, and this module has no PSRAM — that is the whole
   reason `MICREC`'s one-shot path caps at ~4s. Streaming sends while recording, so RAM stops
   mattering and the LINK becomes the constraint. The rate budget at 115200 (11.5KB/s, this CH340's
   hard ceiling — see the baud note):
@@ -1944,7 +1966,7 @@ Other things that aren't obvious from a single file:
   ~41KB of flash.
   Three implementation facts are load-bearing:
   - **Composed and pushed ONE ROW at a time** (`static uint16_t row[96]`, 192 bytes). A whole frame
-    is 18KB against ~94KB of free heap after the BLE stack, and per-pixel `fillRect` is hopeless
+    is 18KB against ~70KB of free heap after the BLE stack, and per-pixel `fillRect` is hopeless
     here because the tile is a **gradient** — runs of equal colour average 2–3px, so a frame would
     cost thousands of calls instead of 96. This is also the one place `pushImage` is used against
     the screen, so it sets `setSwapBytes(true)` (and restores it): `row[]` holds ordinary RGB565.
