@@ -16,6 +16,7 @@ Compile and flash the firmware (from the repo root; find the serial port with `l
 
 ```
 arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" firmware/deckhand_display
+# ./host/deckhand-service.sh stop   # FIRST - KeepAlive would re-grab the port
 arduino-cli upload -p /dev/cu.usbserial-XXXX \
   --fqbn "esp32:esp32:esp32:UploadSpeed=115200,FlashMode=dio,FlashFreq=80,PartitionScheme=huge_app" \
   firmware/deckhand_display
@@ -32,8 +33,30 @@ Run the host script — **via `DeckhandBLE.app`, not plain `node`, if Bluetooth 
 
 ```
 cd host && npm install
-open DeckhandBLE.app --args "$(pwd)/index.mjs"
+./deckhand-service.sh install      # supervised by launchd - survives death and login
 ```
+
+**The host is normally supervised, and that changes the flashing procedure.**
+`deckhand-service.sh install` registers a `KeepAlive` LaunchAgent, so a killed or
+crashed host is back within ~1s (measured: SIGKILL -> revived in 1s, both transports
+up). It exists because the host has NEVER crashed - zero reports filed for the bundle -
+it HANGS or exits, and nothing brought it back; one stuck BLE write left it silently
+dead for five hours while its serial reader kept logging device lines, so everything
+looked healthy from the Mac.
+
+**STOP THE SERVICE BEFORE FLASHING, do not just `kill` it.** KeepAlive re-grabs
+`/dev/cu.usbserial-*` the instant the process dies, so `arduino-cli upload` fails on a
+busy port; only `./deckhand-service.sh stop` (which unloads the job) actually prevents
+the respawn. `start` afterwards. `open DeckhandBLE.app --args "$(pwd)/index.mjs"` still
+works for a one-off unsupervised run.
+
+**The LaunchAgent runs the bundle's binary DIRECTLY, not through `open`, and that is
+verified rather than assumed.** The warning below - that launching must go through
+`open` - is about OBTAINING the Bluetooth permission prompt. Once TCC has granted it,
+exec'ing `DeckhandBLE.app/Contents/MacOS/Deckhand` keeps the bundle's identity and
+CoreBluetooth comes up normally (measured: the process survived and reached `BLE:
+adapter state = poweredOn`, where a bare `node` is SIGABRT'd within ~2s). Going through
+`open` would also give launchd nothing to supervise, since `open` returns immediately.
 
 `DeckhandBLE.app` is a minimal ad-hoc-signed app bundle whose `Contents/MacOS/Deckhand` **is a copy
 of the real `node` binary** (plus `libnode.147.dylib` copied alongside it, since Homebrew's node

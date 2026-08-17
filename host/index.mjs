@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { createWriteStream, renameSync, statSync } from "node:fs";
+import { createWriteStream, renameSync, statSync, appendFileSync } from "node:fs";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
@@ -61,6 +61,40 @@ function rotateLogIfNeeded() {
   logStream = createWriteStream(LOG_FILE, { flags: "a" });
   old.end();
 }
+// A death must leave evidence. Everything above writes through a STREAM, whose
+// buffered contents are lost if the process exits before it drains - so the two
+// handlers below append synchronously instead. Without this, the host simply
+// vanished and the log's last line was an ordinary tick, which tells you nothing
+// about why. (Zero crash reports have ever been filed for this bundle, so the
+// deaths we have seen were exits and hangs, not signals.)
+function logFatalSync(label, err) {
+  const line = `${new Date().toISOString()} ${label}: ${err?.stack || err}\n`;
+  try {
+    appendFileSync(LOG_FILE, line);
+  } catch {
+    // last resort only - if even this fails there is nowhere left to record it
+  }
+  try {
+    process.stderr.write(line);
+  } catch {}
+}
+
+// An unhandled rejection TERMINATES the process on modern Node. For a status
+// display that is the wrong trade: one stray rejection in a peripheral path
+// (a transcript read, a voice child) should not take the screen down with it.
+// Log it loudly and keep serving; the watchdog covers the loop itself.
+process.on("unhandledRejection", (reason) => {
+  logFatalSync("UNHANDLED REJECTION (continuing)", reason);
+});
+
+// An uncaught exception leaves the process in an unknown state, so this one does
+// exit - but only after recording why, so the supervisor's restart has a cause
+// attached to it rather than an unexplained gap in the log.
+process.on("uncaughtException", (err) => {
+  logFatalSync("UNCAUGHT EXCEPTION (exiting)", err);
+  process.exit(1);
+});
+
 const rawLog = console.log.bind(console);
 const rawError = console.error.bind(console);
 function writeLog(line) {
@@ -125,6 +159,10 @@ const SESSION_STALE_MS = 20 * 60 * 1000; // 20 min with no update = treat as dea
 // 921600). See the note at Serial.begin() in the firmware.
 const BAUD_RATE = 115200;
 const POLL_INTERVAL_MS = 5000;
+// Every child process this host spawns is bounded. An un-timed execFile is the
+// same hazard as an un-timed await: it does not throw, it just never returns.
+const KEYCHAIN_TIMEOUT_MS = 10_000;   // `security` blocks on a locked keychain
+const VOICE_CHILD_TIMEOUT_MS = 180_000; // whisper/mic-wav are slow but not endless
 const RECONNECT_INTERVAL_MS = 3000;
 // Mirrors REMOTE_WAIT_MS in claude-hooks/deckhand-session-hook.mjs, per agent.
 // ADVISORY ONLY - it drives the keyboard's countdown and nothing else. If the
@@ -331,6 +369,11 @@ function expectedHmac(deviceName, nonce, pid, idx) {
 async function runCcusage(args) {
   const { stdout } = await execFileAsync(CCUSAGE_BIN, [...args, "--json"], {
     maxBuffer: 10 * 1024 * 1024,
+    // This runs on EVERY tick, so an un-timed hang here stalls the whole poll
+    // loop - the same failure class as the BLE write, just with a child process
+    // instead of a callback. execFile's timeout also kills the child, so a slow
+    // ccusage cannot accumulate orphans one per tick.
+    timeout: 20_000,
   });
   return JSON.parse(stdout);
 }
@@ -371,12 +414,14 @@ const OAUTH_BACKOFF_STATE = "/tmp/deckhand-oauth-backoff.json";
 const OAUTH_ATTEMPT_STATE = "/tmp/deckhand-oauth-attempt.json";
 
 async function readOauthCredential() {
+  // `security` blocks indefinitely on a locked keychain or an auth prompt, so
+  // every call to it is bounded - an unbounded one stalls the OAuth chain.
   const { stdout } = await execFileAsync("security", [
     "find-generic-password",
     "-s",
     OAUTH_KEYCHAIN_SERVICE,
     "-w",
-  ]);
+  ], { timeout: KEYCHAIN_TIMEOUT_MS });
   return JSON.parse(stdout);
 }
 
@@ -453,12 +498,13 @@ async function refreshOauthToken(cred, retried = false) {
 
   // Update the keychain item in place (-U), matched by its own account + service.
   // Value passed as a direct argv (no shell) so the token bytes aren't mangled.
-  const meta = (await execFileAsync("security", ["find-generic-password", "-s", OAUTH_KEYCHAIN_SERVICE])).stdout;
+  const meta = (await execFileAsync("security", ["find-generic-password", "-s", OAUTH_KEYCHAIN_SERVICE],
+    { timeout: KEYCHAIN_TIMEOUT_MS })).stdout;
   const acct = (meta.match(/"acct"<blob>="([^"]*)"/) || [])[1];
   if (!acct) throw new Error("could not read keychain account");
   await execFileAsync("security", [
     "add-generic-password", "-U", "-a", acct, "-s", OAUTH_KEYCHAIN_SERVICE, "-w", JSON.stringify(cred),
-  ]);
+  ], { timeout: KEYCHAIN_TIMEOUT_MS });
   console.log(`OAuth: refreshed access token (valid ${(d.expires_in / 3600).toFixed(1)}h), rotated tokens persisted.`);
   return o.accessToken;
 }
@@ -1470,7 +1516,8 @@ async function transcribeAndDispatch(captureFile, target) {
   try {
     // process.execPath, not "node": this process is the node copy inside
     // DeckhandBLE.app and has no PATH to find a bare "node" with.
-    await execFileAsync(process.execPath, [path.join(__dirname, "mic-wav.mjs"), captureFile, wav]);
+    await execFileAsync(process.execPath, [path.join(__dirname, "mic-wav.mjs"), captureFile, wav],
+      { timeout: VOICE_CHILD_TIMEOUT_MS });
   } catch (err) {
     console.error(`Voice: decode failed (truncated capture?): ${err.message.split("\n")[0]}`);
     return;
@@ -1481,6 +1528,7 @@ async function transcribeAndDispatch(captureFile, target) {
     if (WHISPER_PROMPT) args.push("--prompt", WHISPER_PROMPT, "--carry-initial-prompt");
     const { stdout } = await execFileAsync(WHISPER_BIN, args, {
       maxBuffer: 4 * 1024 * 1024,
+      timeout: VOICE_CHILD_TIMEOUT_MS,
     });
     text = stdout.replace(/\s+/g, " ").trim();
   } catch (err) {
@@ -1563,7 +1611,8 @@ async function transcribeForAnswer(captureFile, pid) {
   const wav = path.join(AUDIO_DIR, "latest.wav");
   const clean = path.join(AUDIO_DIR, "latest-clean.wav");
   try {
-    await execFileAsync(process.execPath, [path.join(__dirname, "mic-wav.mjs"), captureFile, wav]);
+    await execFileAsync(process.execPath, [path.join(__dirname, "mic-wav.mjs"), captureFile, wav],
+      { timeout: VOICE_CHILD_TIMEOUT_MS });
   } catch (err) {
     // mic-wav.mjs refuses a capture under 98% complete, because a truncated one
     // transcribes as confident nonsense - exactly what must not become an answer.
@@ -1575,7 +1624,8 @@ async function transcribeForAnswer(captureFile, pid) {
   try {
     const args = ["-m", WHISPER_MODEL, "-f", clean, "-nt"];
     if (WHISPER_PROMPT) args.push("--prompt", WHISPER_PROMPT, "--carry-initial-prompt");
-    const { stdout } = await execFileAsync(WHISPER_BIN, args, { maxBuffer: 4 * 1024 * 1024 });
+    const { stdout } = await execFileAsync(WHISPER_BIN, args, {
+      maxBuffer: 4 * 1024 * 1024, timeout: VOICE_CHILD_TIMEOUT_MS });
     text = stdout.replace(/\s+/g, " ").trim();
   } catch (err) {
     console.error(`Voice answer: whisper failed: ${err.message.split("\n")[0]}`);
