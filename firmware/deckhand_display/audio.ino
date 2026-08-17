@@ -231,6 +231,10 @@ void drawMicProcessingUpdate() {
 // nothing when no capture is being processed.
 void tickMicProcessing() {
   if (!micProcessing || isAsleep) return;
+  // Long past any plausible reply: take the bar down rather than hold the screen. The
+  // failure is already in the host log, and a message nobody is standing next to is not
+  // worth a permanent slab of the content area.
+  if (millis() - micProcStartMs > MIC_PROC_GIVEUP_MS) { micProcessingDone(); return; }
   if (millis() - micProcLastDraw < MIC_PROC_DRAW_MS) return;
   micProcLastDraw = millis();
   // The title changes twice at most (confirmed, then stale), and only then does the

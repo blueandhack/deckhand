@@ -990,7 +990,11 @@ unsigned long micProcStartMs = 0;
 unsigned long micProcLastDraw = 0;
 // No progress percentage anywhere in here: whisper's progress is not observable, so a
 // bar would be inventing one. Elapsed seconds are honest and let the user judge.
-const unsigned long MIC_PROC_STALE_MS = 45000;  // then say so rather than spin forever
+const unsigned long MIC_PROC_STALE_MS = 20000;   // then say so rather than spin forever
+// ...and then stop owning the screen. Saying "no reply" is useful; saying it until
+// somebody walks over and taps is not, and a transient host restart should not park a
+// message over the content area indefinitely.
+const unsigned long MIC_PROC_GIVEUP_MS = 35000;
 // 80ms, not 250: an update is two fillRects and a short string, so it is cheap, and at
 // 250 the sweep visibly jumped instead of travelling. The recording meter already
 // repaints at a similar cadence.
@@ -2719,6 +2723,15 @@ void handleLine(const String& line) {
   bool barNeedsClearing = false;
   if (!v.isNull()) {
     int seq = v["seq"] | 0;
+    // The host's voiceSeq is HOST-LIFETIME: it restarts at 1 when the host does. Held
+    // as a monotonic high-water mark, the device would then ignore every voice state
+    // until the new host's counter climbed past the old one - so a restart silently
+    // disabled the result card and left a processing bar with nothing to end it. A seq
+    // going BACKWARDS is that restart, and the only sane reading is a fresh generation.
+    if (seq < voiceSeq) {
+      voiceSeq = 0;
+      voiceSeqShown = 0;
+    }
     copyField(voiceState, sizeof(voiceState), v["state"] | "");
     copyField(voiceText, sizeof(voiceText), v["text"] | "");
     copyField(voiceReply, sizeof(voiceReply), v["reply"] | "");
@@ -2767,6 +2780,16 @@ void handleLine(const String& line) {
     } else if (voiceCardActive && !kbActive) {
       drawVoiceCard();           // same exchange, fresher reply text
     }
+  }
+  // No voice object at all means the host holds no record of any exchange - which after
+  // a restart is exactly the truth. Time-guarded, because it is also briefly true for
+  // the FIRST capture of a host's life: the bar goes up when the transfer ends, and
+  // "working" only arrives once transcription starts. Clearing on sight would kill the
+  // bar instantly in the very case it was built for.
+  if (micProcessing && v.isNull() && millis() - micProcStartMs > 12000) {
+    micProcessing = false;
+    micProcConfirmed = false;
+    barNeedsClearing = true;
   }
   // Only when nothing else is about to paint over it: the card and the confirm screen
   // both clear the content area themselves, so repainting here as well would be a

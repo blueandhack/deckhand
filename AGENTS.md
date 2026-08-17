@@ -1121,6 +1121,22 @@ Other things that aren't obvious from a single file:
     return), and any tap dismisses it. A ~45s stall relabels it `NO REPLY FROM MAC` rather
     than spinning forever - the host's own child timeout is 180s and a three-minute spinner
     would be its own bug.
+- **`voice.seq` is HOST-LIFETIME, and treating it as monotonic forever broke on every host
+  restart.** `let voiceSeq = 0` in the host, so it restarts at 1 when the process does. The
+  device held it as a high-water mark, so after a restart it ignored every voice state until
+  the new counter climbed past the old one - silently disabling the result card, and leaving
+  a processing bar with nothing that could ever end it. Observed exactly that: the bar sat on
+  `NO REPLY FROM MAC` because the host had been restarted out from under it. A seq going
+  BACKWARDS is now read as a new host generation (`voiceSeq`/`voiceSeqShown` reset).
+  Two related holes closed with it. **`voice: null` means the host holds no record of any
+  exchange**, which after a restart is the literal truth - the device's parse skipped the
+  whole block on null, so it received no signal at all. It now ends the bar on a null voice,
+  but only after 12s, because null is ALSO briefly true for the first capture of a host's
+  life (the bar goes up when the transfer ends; `working` only arrives once transcription
+  starts) and clearing on sight would kill the bar in the very case it exists for. And the
+  bar now GIVES UP at 35s instead of holding the screen until tapped: "no reply" is worth
+  saying, and is not worth a permanent slab of the content area when nobody is standing
+  next to the device.
 - **`clip` was missing from the card-raise list, and that made the DEFAULT delivery silent.**
   With `DECKHAND_VOICE_DELIVERY` unset (clipboard), a dictation ends on state `clip` - and
   since only `sent`/`done`/`memo`/`error`/`askerror`/`asksent` raised the card, the device
