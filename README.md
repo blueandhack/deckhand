@@ -290,6 +290,11 @@ tap **`• REC`** in the tab bar, speak, tap again to stop. Up to 120 seconds.
 [Answering a question by speaking](#answering-a-question-by-speaking) — that path
 shows you the transcript and waits for a confirming tap before anything is sent.)
 
+While the Mac works on it, the recording bar stays up showing **PROCESSING** with
+elapsed seconds and a moving indicator, then **TRANSCRIBING** once the Mac confirms
+it has started. If it never reaches TRANSCRIBING, the capture never arrived. Any tap
+dismisses it, and it says so rather than spinning if nothing comes back.
+
 **Transcription is local and free.** The host decodes the capture and runs
 [whisper.cpp](https://github.com/ggerganov/whisper.cpp) on Metal —
 `ggml-large-v3-turbo-q5_0` transcribes ~40x faster than realtime. Nothing is

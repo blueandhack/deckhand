@@ -1090,6 +1090,44 @@ Other things that aren't obvious from a single file:
   the same class of bug as a change-only cache shorter than the string it stores. The one field that
   deliberately changes shape is `askVoiceText`, which the diff only ever tests for non-empty, so it
   becomes a single `hadVoiceText` bool rather than 204 bytes.
+- **The recording bar has a FOURTH stage, because it used to vanish exactly when the wait
+  began.** LISTENING/DICTATING -> SENDING -> **PROCESSING** -> result. The bar was torn down
+  the instant the transfer finished, which is the moment the Mac starts the slow part -
+  decode, then whisper, then up to one 5s tick before anything comes back. Three to ten
+  seconds of nothing, longer on the first run while whisper loads its 547MB model, and it
+  reads as "my tap did nothing". Both capture paths enter it (`micProcessingBegin()`), so the
+  behaviour cannot depend on which one was used.
+  - **TWO titles, because the device knows two different things.** It knows it finished
+    SENDING (its chunks were ACKed) but not what the Mac did next, so it says `PROCESSING`
+    on its own authority and only claims `TRANSCRIBING` once the host publishes state
+    `working`. **If it never upgrades, the Mac never got the capture** - the most likely
+    failure, and otherwise indistinguishable from success. `working` is deliberately NOT in
+    the card-raise list: it is progress, not a result.
+  - **The track carries an INDETERMINATE SWEEP, never a percentage.** whisper's progress is
+    not observable, so a filling bar would be inventing one; a segment travelling back and
+    forth says "working, duration unknown". Elapsed seconds sit in the lane `micPillMeter`
+    uses for its percentage and are the honest quantity.
+  - **Frame and update are split** for the same reason `micPillMeter` splits them: the frame
+    (rounded card, stroke, dot, title) is painted on entry and only when the TITLE changes,
+    while the sweep and counter repaint at 80ms. Repainting the card several times a second
+    is exactly the flicker this file's discipline exists to prevent.
+  - **Whoever takes the bar down OWES A REPAINT**, and forgetting it was a real defect caught
+    before flashing. The bar is a 212x64 slab over the content area and the change-only
+    render will not clear it. A raised result card clears the content area itself - but
+    `heard` and `askheard` raise no card, so those left the bar stranded on screen.
+    `barNeedsClearing` repaints only when no card is coming, since doing both is a visible
+    double-draw.
+  - It absorbs the 5s tick the way the voice card does (parse everything, `renderFooter()`,
+    return), and any tap dismisses it. A ~45s stall relabels it `NO REPLY FROM MAC` rather
+    than spinning forever - the host's own child timeout is 180s and a three-minute spinner
+    would be its own bug.
+- **`clip` was missing from the card-raise list, and that made the DEFAULT delivery silent.**
+  With `DECKHAND_VOICE_DELIVERY` unset (clipboard), a dictation ends on state `clip` - and
+  since only `sent`/`done`/`memo`/`error`/`askerror`/`asksent` raised the card, the device
+  showed **nothing at all**: no transcript, no confirmation. `voiceStateLabel()` had carried a
+  `COPIED - PASTE IT` label the whole time that the raise path could never reach, and this
+  file claimed that card appeared. Same class as the `askerror`/`asksent` omission the voice
+  review found: a state the host publishes and the device surfaces nowhere.
 - **`micRestoreUi()` must reset the change-only caches, and delegates to `forceFullRepaint()`.**
   Repainting chrome WITHOUT resetting them leaves every field **blank**, because `drawIfChanged`
   sees an unchanged string and skips a field whose pixels were just erased. That shipped once as

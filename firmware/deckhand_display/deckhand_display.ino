@@ -968,6 +968,34 @@ bool voiceCardActive = false;
 // content visible, and the real content is repainted on completion.
 const int MIC_PILL_H = 64;
 
+// ---- Processing stage of the recording bar ----
+// The bar used to vanish the instant SENDING finished - which is exactly the moment
+// the Mac starts the SLOW part (decode, then whisper, then up to one 5s tick before
+// anything comes back). Three to ten seconds of nothing, and longer on the first run
+// while whisper loads its 547MB model. It read as "my tap did nothing".
+//
+// This is a fourth stage of a bar that already changes state (LISTENING/DICTATING ->
+// SENDING), not a new surface, so it inherits the position, the colours and the rule
+// that the content area is never blanked for a capture.
+//
+// TWO stages, because the device knows different things at different moments. It
+// knows it finished SENDING (the chunks were ACKed) but not what the Mac did next, so
+// it says PROCESSING on its own authority; only when the host publishes state
+// "working" does it claim TRANSCRIBING. If it never upgrades, the Mac never got the
+// capture - which is the most likely failure and is otherwise indistinguishable from
+// success.
+bool micProcessing = false;          // the bar is showing the processing stage
+bool micProcConfirmed = false;       // the host confirmed it is actually working
+unsigned long micProcStartMs = 0;
+unsigned long micProcLastDraw = 0;
+// No progress percentage anywhere in here: whisper's progress is not observable, so a
+// bar would be inventing one. Elapsed seconds are honest and let the user judge.
+const unsigned long MIC_PROC_STALE_MS = 45000;  // then say so rather than spin forever
+// 80ms, not 250: an update is two fillRects and a short string, so it is cheap, and at
+// 250 the sweep visibly jumped instead of travelling. The recording meter already
+// repaints at a similar cadence.
+const unsigned long MIC_PROC_DRAW_MS = 80;
+
 
 
 // ---------- Streaming capture (long recordings) ----------
@@ -2282,6 +2310,11 @@ void handleTouch() {
   // tap silently type into whatever the voice-card dismissal repainted.
   if (kbActive) { kbTouch(sx, sy); lastActivityMillis = millis(); return; }
 
+  if (micProcessing) {   // any tap dismisses the processing bar
+    micProcessingDone();
+    lastActivityMillis = millis();
+    return;
+  }
   if (voiceCardActive) { // any tap dismisses the voice result
     voiceCardActive = false;
     forceFullRepaint();
@@ -2679,6 +2712,11 @@ void handleLine(const String& line) {
   // must never repaint over the keyboard regardless of how this function
   // gets reshuffled later.
   JsonObject v = doc["voice"];
+  // The bar occupies a 212x64 slab of the content area, and the change-only render
+  // below will NOT clear it - so whoever takes the bar down owes a repaint. A raised
+  // result card clears the content area itself, but "heard" and "askheard" raise no
+  // card, and without this the bar was left stranded on screen after them.
+  bool barNeedsClearing = false;
   if (!v.isNull()) {
     int seq = v["seq"] | 0;
     copyField(voiceState, sizeof(voiceState), v["state"] | "");
@@ -2686,6 +2724,22 @@ void handleLine(const String& line) {
     copyField(voiceReply, sizeof(voiceReply), v["reply"] | "");
     for (char* p = voiceText; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
     for (char* p = voiceReply; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
+    // "working" is what upgrades the bar from PROCESSING to TRANSCRIBING: it is the
+    // Mac confirming it actually received the capture and started on it. Handled
+    // outside the seq gate below because it is a progress signal, not a result -
+    // it must never raise the result card.
+    if (!strcmp(voiceState, "working")) {
+      if (micProcessing && !micProcConfirmed) {
+        micProcConfirmed = true;   // tickMicProcessing repaints on the title change
+      }
+    } else if (micProcessing && voiceState[0] && seq > voiceSeq) {
+      // Any other state on a NEW exchange is the outcome, so the bar's job is over.
+      // Cleared BEFORE the card logic below, so the bar can never sit on top of
+      // whatever replaces it.
+      micProcessing = false;
+      micProcConfirmed = false;
+      barNeedsClearing = true;
+    }
     if (seq > voiceSeq) {
       voiceSeq = seq;
       // "heard"/"askheard" are transient (the transcript, before dispatch or
@@ -2693,9 +2747,17 @@ void handleLine(const String& line) {
       // that are worth interrupting for. "askerror"/"asksent" are included so
       // an answer-flow failure or success is never silent - without them the
       // user taps SPEAK, speaks, and nothing visibly happens at all.
+      // "clip" is the DEFAULT delivery's terminal state, and its absence here was a
+      // real bug: with DECKHAND_VOICE_DELIVERY unset (clipboard), a dictation ended
+      // on "clip", nothing raised the card, and the device showed NOTHING at all -
+      // no transcript, no confirmation. voiceStateLabel() has carried a
+      // "COPIED - PASTE IT" label for it the whole time that the raise path could
+      // never reach. Same class as the askerror/asksent omission above: a state
+      // published by the host and surfaced nowhere.
       if (!kbActive && seq > voiceSeqShown &&
           (!strcmp(voiceState, "sent") || !strcmp(voiceState, "done") ||
-           !strcmp(voiceState, "memo") || !strcmp(voiceState, "error") ||
+           !strcmp(voiceState, "memo") || !strcmp(voiceState, "clip") ||
+           !strcmp(voiceState, "error") ||
            !strcmp(voiceState, "askerror") || !strcmp(voiceState, "asksent"))) {
         voiceSeqShown = seq;
         voiceCardActive = true;
@@ -2706,6 +2768,10 @@ void handleLine(const String& line) {
       drawVoiceCard();           // same exchange, fresher reply text
     }
   }
+  // Only when nothing else is about to paint over it: the card and the confirm screen
+  // both clear the content area themselves, so repainting here as well would be a
+  // visible double-draw of the whole area.
+  if (barNeedsClearing && !voiceCardActive) micRestoreUi();
 
   if (octoActive) return; // data absorbed; the octopus keeps the screen
   // The history reader owns the whole screen. Absorb the tick - without this the
@@ -2740,6 +2806,13 @@ void handleLine(const String& line) {
     else drawSettingsStatic();
   }
   if (voiceCardActive) { // the card owns the content area until dismissed
+    renderFooter();
+    return;
+  }
+  if (micProcessing) {
+    // The bar sits over the bottom of the content area; a full render would paint
+    // straight over it. The payload above has already been parsed, so nothing is
+    // lost - only the redraw is deferred until the bar is done.
     renderFooter();
     return;
   }
@@ -3146,6 +3219,7 @@ void loop() {
   updateBeep();
   checkPowerButton();
   tickWorkingSpinner();
+  tickMicProcessing();  // no-op unless a capture is being processed
   tickWaitingWheel();   // no-op unless the standalone screen is on the glass
   tickAutoTheme();      // no-op unless the theme is set to AUTO
 

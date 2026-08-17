@@ -168,6 +168,96 @@ void micWaitRelease() {
   while (ts.touched() && millis() - t0 < 2000) delay(20);
   delay(60); // let the panel settle
 }
+// The fourth stage of the recording bar. Reuses micPillFrame, so the frame, position
+// and colours are the ones that were on screen a moment earlier - the point is that
+// this reads as a continuation of the same operation, not a new dialog.
+//
+// The progress track micPillFrame draws is used for an INDETERMINATE SWEEP rather than
+// a percentage. whisper's progress is not observable, so a filling bar would be
+// inventing one; a segment travelling back and forth says "working, duration unknown"
+// without claiming to know more than we do. Elapsed seconds sit where the recording
+// meter puts its value, and are the honest quantity - they let the user judge whether
+// something is wrong.
+//
+// Split frame-vs-update for the same reason micPillMeter is: repainting a rounded card
+// and its stroke several times a second is exactly the flicker this file's redraw
+// discipline exists to prevent. The frame is painted on entry and only when the TITLE
+// changes; the sweep and the counter repaint on their own.
+const char* micProcTitle() {
+  if ((millis() - micProcStartMs) > MIC_PROC_STALE_MS) return "NO REPLY FROM MAC";
+  return micProcConfirmed ? "TRANSCRIBING" : "PROCESSING";
+}
+char micProcTitleShown[20] = "";
+
+void drawMicProcessingFrame() {
+  micPillFrame(micProcTitle());
+  snprintf(micProcTitleShown, sizeof(micProcTitleShown), "%s", micProcTitle());
+  int x = micPillX(), y = micPillY(), w = micPillW();
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.setTextDatum(TC_DATUM);
+  tft.drawString("TAP TO DISMISS", x + w / 2, y + MIC_PILL_H - 15);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void drawMicProcessingUpdate() {
+  int x = micPillX(), y = micPillY(), w = micPillW();
+  unsigned long el = millis() - micProcStartMs;
+  bool stale = el > MIC_PROC_STALE_MS;
+
+  // Elapsed seconds, on the title row's right - the same lane micPillMeter uses for
+  // its percentage. Padded so a shrinking string cannot leave its own tail behind.
+  char buf[12];
+  snprintf(buf, sizeof(buf), "%lus  ", el / 1000);
+  setUIFont(1);
+  tft.setTextColor(stale ? COLOR_WARN : COLOR_VALUE, COLOR_CARD);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString(buf, x + w - SP_3, y + 6);
+  tft.setTextDatum(TL_DATUM);
+
+  // The sweep, inside the track micPillFrame already drew. Ping-pongs so it reads as
+  // activity rather than as progress towards a right-hand edge.
+  int bx = x + SP_3 + 2, by = y + 28, bw = w - 2 * SP_3 - 4, bh = 10;
+  int segW = bw / 4;
+  int span = bw - segW;
+  int t = (int) ((millis() / 12) % (unsigned long) (2 * span));
+  int pos = t < span ? t : (2 * span - t);
+  tft.fillRect(bx, by, pos, bh, COLOR_BG);
+  tft.fillRect(bx + pos, by, segW, bh, stale ? COLOR_WARN : COLOR_ACCENT);
+  tft.fillRect(bx + pos + segW, by, bw - pos - segW, bh, COLOR_BG);
+}
+
+// Called from loop(): advances the sweep and the counter. Cheap and gated, so it costs
+// nothing when no capture is being processed.
+void tickMicProcessing() {
+  if (!micProcessing || isAsleep) return;
+  if (millis() - micProcLastDraw < MIC_PROC_DRAW_MS) return;
+  micProcLastDraw = millis();
+  // The title changes twice at most (confirmed, then stale), and only then does the
+  // whole frame need repainting.
+  if (strcmp(micProcTitleShown, micProcTitle()) != 0) drawMicProcessingFrame();
+  drawMicProcessingUpdate();
+}
+
+void micProcessingBegin() {
+  micProcessing = true;
+  micProcConfirmed = false;
+  micProcStartMs = millis();
+  micProcLastDraw = 0;
+  micProcTitleShown[0] = '\0';
+  drawMicProcessingFrame();
+  drawMicProcessingUpdate();
+}
+
+// Ends the processing stage and hands the screen back. One place, so every exit - a
+// result arriving, a tap, or the caller giving up - leaves the same clean state.
+void micProcessingDone() {
+  if (!micProcessing) return;
+  micProcessing = false;
+  micProcConfirmed = false;
+  micRestoreUi();
+}
+
 void micRestoreUi() {
   if (!everReceived) { // nothing to show yet - back to the standalone screen
     drawWaitingScreen();
@@ -450,7 +540,10 @@ void micStream() {
                 (millis() - start) / 1000.0, stoppedByUser ? "tap" : "cap");
   free(ring);
   micWaitRelease();
-  micRestoreUi();
+  // Straight into the processing stage rather than restoring the UI: the transfer is
+  // done but the Mac's work has only just started, and that gap is what used to look
+  // like nothing happening.
+  micProcessingBegin();
 }
 void micRecord() {
   // ORDER IS LOAD-BEARING: the DMA driver is created BEFORE the big audio buffer.
@@ -630,7 +723,11 @@ void micRecord() {
   Serial.println("AUDIO end");
   free(pcm);
   micWaitRelease();
-  micRestoreUi();
+  // Same hand-off as the streaming path: the transfer is finished, the Mac's work is
+  // not. The one-shot path gets the identical bar so the two behave the same - "I
+  // finished recording and nothing happened" should not depend on which capture path
+  // happened to be used.
+  micProcessingBegin();
 }
 // Live level meter for tuning the gain trimmer, because doing it through
 // one-shot tests means a full round trip per quarter-turn - and the setting we

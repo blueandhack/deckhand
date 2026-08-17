@@ -1641,6 +1641,12 @@ const WHISPER_MODEL =
 async function transcribeAndDispatch(captureFile, target) {
   const wav = path.join(AUDIO_DIR, "latest.wav");
   const clean = path.join(AUDIO_DIR, "latest-clean.wav");
+  // Tell the device work has actually STARTED, so its recording bar can go from
+  // PROCESSING (its own guess, based on having finished sending) to TRANSCRIBING
+  // (confirmed). If this never arrives the device keeps saying PROCESSING, which is
+  // exactly the right report for a capture that never reached the Mac. Deliberately
+  // NOT one of the states that raises the result card - it is progress, not a result.
+  setVoice("working", {});
   try {
     // process.execPath, not "node": this process is the node copy inside
     // DeckhandBLE.app and has no PATH to find a bare "node" with.
@@ -1738,6 +1744,12 @@ async function transcribeAndDispatch(captureFile, target) {
 async function transcribeForAnswer(captureFile, pid) {
   const wav = path.join(AUDIO_DIR, "latest.wav");
   const clean = path.join(AUDIO_DIR, "latest-clean.wav");
+  // Tell the device work has actually STARTED, so its recording bar can go from
+  // PROCESSING (its own guess, based on having finished sending) to TRANSCRIBING
+  // (confirmed). If this never arrives the device keeps saying PROCESSING, which is
+  // exactly the right report for a capture that never reached the Mac. Deliberately
+  // NOT one of the states that raises the result card - it is progress, not a result.
+  setVoice("working", {});
   try {
     await execFileAsync(process.execPath, [path.join(__dirname, "mic-wav.mjs"), captureFile, wav],
       { timeout: VOICE_CHILD_TIMEOUT_MS });
