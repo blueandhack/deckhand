@@ -12,7 +12,7 @@ in this directory is a copy of the working config for the ELEGOO
 E32R28T/E32N28T board. Before compiling, copy it over the library's default:
 
 ```
-cp firmware/User_Setup.h ~/Documents/Arduino/libraries/TFT_eSPI/User_Setup.h
+cp firmware/tft_setup/User_Setup.h ~/Documents/Arduino/libraries/TFT_eSPI/User_Setup.h
 ```
 
 (Path may differ if your Arduino sketchbook is elsewhere - it's wherever

@@ -490,7 +490,14 @@ try {
         // dialog is on screen throughout, so this is a race, not an intercept:
         // whichever surface answers first wins, and if the Mac wins we bail out
         // early rather than idling here.
+        const waitStart = Date.now();
         const answer = await waitForRemoteAnswer(sessionId, ask.pid, REMOTE_WAIT_MS, filePath);
+        // Record how long we actually waited. Without this the only timings available
+        // are the surrounding EVENTS, which bracket an answer to within minutes and
+        // cannot show whether the hook was still alive at a given moment - the exact
+        // question that matters once the wait is effectively unlimited.
+        dlog(`  waited ${((Date.now() - waitStart) / 1000).toFixed(1)}s for pid=${ask.pid}` +
+             ` -> ${answer ? "device answer" : "no device answer (Mac answered, or window closed)"}\n`);
         // Window over: stop offering buttons. Re-read current state rather
         // than rewriting our stale `record` - another event (e.g. PostToolUse
         // when the user answered on the Mac) may have updated status meanwhile,
