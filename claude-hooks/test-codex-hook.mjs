@@ -29,7 +29,7 @@ async function runHook(fixture, args, home) {
   const payload = fs.readFileSync(path.join(DIR, "fixtures", fixture), "utf8");
   // The hook only builds/publishes an `ask` (and only then can it wait or write
   // to stdout) when it sees a fresh, connected heartbeat - normally written by
-  // host/index.mjs every tick at /tmp/deckhand-host-alive. Running this test on
+  // host/index.mjs every tick at <runtime dir>/host-alive. Running this test on
   // a machine with no Deckhand host live would otherwise fail every ask-shaped
   // assertion for a reason that has nothing to do with the hook logic under
   // test, AND silently turn "stdout empty (decision channel)" - the most
@@ -42,7 +42,9 @@ async function runHook(fixture, args, home) {
   const tmp = path.join(home, "tmp");
   fs.mkdirSync(tmp, { recursive: true });
   fs.writeFileSync(
-    path.join(tmp, "deckhand-host-alive"),
+    // DECKHAND_TMP is used verbatim as the runtime dir, so the file is "host-alive"
+    // inside it - matching RUNTIME_DIR in host/index.mjs and the hook.
+    path.join(tmp, "host-alive"),
     JSON.stringify({ connected: true, remoteAnswer: true, at: Date.now() })
   );
   const p = spawn(process.execPath, [HOOK, ...args], {

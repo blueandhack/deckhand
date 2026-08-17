@@ -562,7 +562,7 @@ host/index.mjs (device tick every 5s)
       statusLine hook, if the endpoint is unreachable)
     - ccusage blocks --active / weekly              -> token counts
     - ~/.claude/deckhand-sessions/*.json                -> per-project status + asks
-    - writes /tmp/deckhand-host-alive heartbeat (gates the hook's remote wait)
+    - writes /tmp/deckhand-<uid>/host-alive heartbeat (gates the hook's remote wait)
     -> JSON line over USB serial AND/OR BLE - both independent, always
        attempted; sends to whichever are currently connected
     <- "ANSWER <id> <prompt> <option>" lines from the device (USB rx or BLE

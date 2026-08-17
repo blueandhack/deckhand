@@ -23,10 +23,11 @@ function newestCapture() {
       .sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10));
     if (files.length) return `${dir}/${files[files.length - 1]}`;
   } catch {}
-  return "/tmp/deckhand-host.log";
+  return path.join(process.env.DECKHAND_TMP || `/tmp/deckhand-${process.getuid()}`, "host.log");
 }
 const logPath = process.argv[2] || newestCapture(); // "" from a caller must fall back too
-const outPath = process.argv[3] ?? "/tmp/deckhand-mic.wav";
+const outPath = process.argv[3] ??
+  path.join(process.env.DECKHAND_TMP || `/tmp/deckhand-${process.getuid()}`, "mic.wav");
 
 const lines = fs.readFileSync(logPath, "utf8").split("\n");
 // Only the USB copy: the device prints via Serial, and taking both transports'

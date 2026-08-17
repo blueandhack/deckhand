@@ -52,11 +52,20 @@ cat <<EOF
 == Setup complete ==
 
 Still to do by hand (see README):
-  1. Flash the firmware:
-       arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" firmware/deckhand_display
-       # (copy firmware/User_Setup.h into your TFT_eSPI library folder first)
-  2. Start the host (first launch asks for Bluetooth permission -> click Allow):
+  1. Copy firmware/tft_setup/User_Setup.h into your TFT_eSPI library folder,
+     then flash the firmware:
+       ./flash.sh
+     One command: it compiles, frees the serial port, uploads, and puts the
+     host back afterwards - including if the upload fails.
+  2. Start the host ONCE by hand, because the first launch is what asks for
+     Bluetooth permission and only a real app launch can show that prompt:
        open "$REPO/host/DeckhandBLE.app" --args "$REPO/host/index.mjs"
+     Click Allow, then quit it.
+  3. Have it run itself from then on (restarts after a crash or hang, and
+     starts at login):
+       ./host/deckhand-service.sh install
+     Check on it any time with:
+       ./host/deckhand-service.sh status
 
 Pairing is automatic: while the device is on USB, the host generates a
 secret (~/.claude/deckhand-secret) and provisions it to the device, so only

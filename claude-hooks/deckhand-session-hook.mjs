@@ -59,7 +59,16 @@ const DEBUG_MAX_BYTES = 5 * 1024 * 1024;
 // DECKHAND_TMP is the same test/override seam uninstall.sh already uses (its
 // $DECK_TMP) - it lets a test drive this off a fake heartbeat instead of
 // depending on a real host running on the machine that executes the tests.
-const HOST_ALIVE = path.join(process.env.DECKHAND_TMP || "/tmp", "deckhand-host-alive");
+//
+// THIS DERIVATION MUST MATCH host/index.mjs's RUNTIME_DIR EXACTLY. If the two
+// disagree we read a heartbeat that is never written, remoteState() reports no
+// display, and remote answering silently stops working - no error, just buttons
+// that never appear. It is per-user because these files used to be shared: on a
+// multi-account Mac the second user's hook would read the FIRST user's heartbeat
+// and block up to 90s on every permission prompt, waiting for a device that
+// belongs to someone else.
+const RUNTIME_DIR = process.env.DECKHAND_TMP || `/tmp/deckhand-${process.getuid()}`;
+const HOST_ALIVE = path.join(RUNTIME_DIR, "host-alive");
 
 // Which tool invoked us. Codex's payload is field-identical to Claude Code's and carries
 // no agent marker, so the registration says so explicitly rather than the hook guessing

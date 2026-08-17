@@ -100,7 +100,7 @@ touches CoreBluetooth.
 Two more traps that will cost you an hour if you don't know them:
 
 - **`DeckhandBLE.app` breaks when Homebrew's node moves.** Symptom: `open DeckhandBLE.app` appears
-  to succeed (it even returns 0) but no process survives and `/tmp/deckhand-host.log` is never
+  to succeed (it even returns 0) but no process survives and `/tmp/deckhand-<uid>/host.log` is never
   created. The crash report under `~/Library/Logs/DiagnosticReports/Deckhand-*.ips` says
   `"namespace": "DYLD", "indicator": "Library missing"` — e.g. `libada.3.dylib` missing after
   `ada-url` moved to 4.x. Fix is the documented rebuild at the bottom of this file (re-copy `node`
@@ -277,7 +277,7 @@ two things `host/index.mjs` cannot get any other way:
   runs into it). The host also drops `ANSWER` lines while answering is off.
   Nothing strips a display-only `ask` — the next event for that session
   (`PostToolUse`/`PostToolUseFailure` → `working`) rebuilds the record without it.
-  Two hard rules: the hook waits **only** when `/tmp/deckhand-host-alive` (host heartbeat, written
+  Two hard rules: the hook waits **only** when `/tmp/deckhand-<uid>/host-alive` (host heartbeat, written
   every tick) is fresh, says `connected`, **and** doesn't say `remoteAnswer:false` — otherwise every
   prompt would stall 90s for nothing — and it must never write anything to stdout **except** a
   genuine `emitDecision()`, because any stray JSON on a `PermissionRequest` hook's stdout can
@@ -616,7 +616,7 @@ two things `host/index.mjs` cannot get any other way:
 - **Housekeeping: the host's own files are capped, because both grew forever.** Measured:
   the log appends a ~700-byte tick line every 5s = **4.4MB/day, ~131MB/month**, and audio
   captures are never overwritten (each is timestamped) at ~100KB–1MB a take.
-  `/tmp/deckhand-host.log` now rotates at 5MB keeping one previous generation (`.1`), so a
+  `/tmp/deckhand-<uid>/host.log` now rotates at 5MB keeping one previous generation (`.1`), so a
   crash's context survives the rotation that follows it; size is tracked from what we write
   rather than `stat`ing every line, with the counter **seeded from the existing file at
   startup**. Audio captures older than 7 days are pruned, but the **newest 10 always
@@ -671,7 +671,7 @@ two things `host/index.mjs` cannot get any other way:
   **`$HOME` is not enough on its own, and that bit us.** The host's runtime state lives at
   ABSOLUTE `/tmp/deckhand-*` paths, so it escapes the sandbox: running the test deleted the
   LIVE host's log (leaving it writing into an unlinked inode - confirmed with `lsof`) and,
-  worse, its persisted `deckhand-oauth-attempt.json` / `-backoff.json`, which are the
+  worse, its persisted `oauth-attempt.json` / `oauth-backoff.json`, which are the
   guards that stop a restart bursting the usage endpoint into a 429. `uninstall.sh` now
   reads `DECKHAND_TMP` (defaulting to `/tmp`) purely as a test seam, and the test asserts
   that sentinels at the REAL paths survive - the assertion whose absence let this through.
@@ -732,12 +732,30 @@ two things `host/index.mjs` cannot get any other way:
   bar has to be busted on that flip too, since `drawPaceBar` caches on `(pct, tick)` alone
   and would never repaint a colour-only change.
 
+**All host runtime state lives in ONE PER-USER directory, `/tmp/deckhand-<uid>/`
+(`RUNTIME_DIR`), and the per-user part is load-bearing on a shared Mac.** It used to sit
+at fixed `/tmp/deckhand-*` paths, which collide two ways. The second user's host cannot
+write files the first user created (they land mode 644, owned by whoever got there
+first) - and far worse, the second user's session HOOK read the FIRST user's heartbeat,
+concluded a display was connected, and blocked up to 90s on every permission prompt
+waiting for a device belonging to someone else. The directory is mode 0700, so another
+account cannot even read it. Contents: `host.log` (+`.1`), `host-alive`,
+`oauth-usage.json`, `oauth-backoff.json`, `oauth-attempt.json`, `mic.wav`.
+**`host/index.mjs` and `claude-hooks/deckhand-session-hook.mjs` derive this path
+independently and the two MUST stay identical** - they cannot import from each other,
+since the hook is copied into `~/.claude`. Get it wrong and remote answering stops with
+no error at all: the hook reads a heartbeat nobody writes, decides no display is
+present, and simply never offers the buttons. `DECKHAND_TMP` overrides the whole
+directory (used verbatim) and remains the test seam. launchd's own stdout/stderr
+deliberately go to `~/Library/Logs/` instead, because launchd opens those at SPAWN time
+and a missing directory would stop the job starting rather than merely lose its log.
+
 **`host/index.mjs`** polls every `POLL_INTERVAL_MS` (5000ms) for: `ccusage blocks --active`
 and `ccusage weekly` (token counts), the rate-limit cache file, and the sessions directory
 (pruning any session file older than `SESSION_STALE_MS`, since a closed terminal may never
 fire `SessionEnd`). It assembles one JSON object and writes it to USB (if `usbPort` is set) and
 BLE (if `bleCharacteristic` is set) independently every tick, and refreshes the
-`/tmp/deckhand-host-alive` heartbeat (`connected` + `remoteAnswer`) that gates whether the hook
+`/tmp/deckhand-<uid>/host-alive` heartbeat (`connected` + `remoteAnswer`) that gates whether the hook
 waits for a remote answer at all. The **device→host
 lane** exists too: USB serial RX plus a subscription to the BLE TX characteristic's
 notifications, both funneled through `handleDeviceLine()` — `ANSWER` lines become answer files
@@ -747,7 +765,7 @@ working, then recency)** so a needs-input session can't be pushed off-screen, wi
 `sessionsTotal`/`hiddenAsking` telling the device what was cut. Per-session `model` comes from
 tailing the session transcript (last 64KB), because most hook events — and desktop-app events
 in particular — don't carry a model field. It also writes all `console.log` output directly to
-`/tmp/deckhand-host.log` via its own file stream (not just relying on stdout), because
+`/tmp/deckhand-<uid>/host.log` via its own file stream (not just relying on stdout), because
 `open`-launched apps don't inherit the launching shell's stdout redirection.
 
 **The firmware is SEVERAL `.ino` files in one sketch folder, not one file.** The Arduino build
@@ -1546,10 +1564,10 @@ Other things that aren't obvious from a single file:
   fill (solid = asking, outline = waiting, boxless dim text = working), consistent with the
   color-never-alone rule.
 - The OAuth usage endpoint rate-limits bursty callers (HTTP 429, observed after several rapid
-  host restarts). The poller backs off 15 minutes on 429 (persisted to `/tmp/deckhand-oauth-backoff.json`
+  host restarts). The poller backs off 15 minutes on 429 (persisted to `<runtime dir>/oauth-backoff.json`
   across restarts, honoring Retry-After) — don't "fix" apparent staleness by polling faster.
   **Two** persisted guards keep restarts from bursting the limiter: the back-off above, and a
-  last-ATTEMPT timestamp (`/tmp/deckhand-oauth-attempt.json`, written just before every network
+  last-ATTEMPT timestamp (`<runtime dir>/oauth-attempt.json`, written just before every network
   hit — success or failure) that `pollOauthUsage` checks to enforce a minimum `OAUTH_POLL_INTERVAL_MS`
   (5 min) between hits regardless of how many times the host restarts. The back-off alone wasn't
   enough: between a back-off expiring and the next 429, each dev reflash's startup poll hit the

@@ -58,11 +58,14 @@ case "${1:-}" in
   <!-- launchd's floor is 10s anyway; being explicit stops a crash-looping build
        from spinning as fast as the machine allows. -->
   <key>ThrottleInterval</key><integer>10</integer>
-  <!-- The host writes its own /tmp/deckhand-host.log. These two catch what dies
-       BEFORE that logger exists - a missing dylib after a brew upgrade, say,
-       which otherwise leaves no trace anywhere. -->
-  <key>StandardOutPath</key><string>/tmp/deckhand-launchd.out</string>
-  <key>StandardErrorPath</key><string>/tmp/deckhand-launchd.err</string>
+  <!-- These catch what dies BEFORE the host's own logger exists - a missing dylib
+       after a brew upgrade, say, which otherwise leaves no trace anywhere. They
+       live in ~/Library/Logs rather than the host's /tmp runtime dir on purpose:
+       launchd opens these at SPAWN time, so if the directory were ever missing
+       (macOS prunes /tmp) the job would fail to start rather than just lose its
+       log. ~/Library/Logs always exists and is per-user by definition. -->
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/deckhand-launchd.out</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/deckhand-launchd.err</string>
   <key>EnvironmentVariables</key>
   <dict>
     <!-- launchd gives a minimal PATH, and this is deliberately NOT patched up

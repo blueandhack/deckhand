@@ -79,10 +79,10 @@ echo "== 4b. REGRESSION: must not touch the REAL /tmp host state =="
 REAL_LOG=/tmp/deckhand-host.log; REAL_ATT=/tmp/deckhand-oauth-attempt.json
 touch "$REAL_LOG.testsentinel" "$REAL_ATT.testsentinel"
 had_log=$([ -e "$REAL_LOG" ] && echo 1 || echo 0)
-echo "sentinel" > "$T/tmp/deckhand-host.log"
+echo "sentinel" > "$T/tmp/host.log"
 stage
 "$REPO/uninstall.sh" --yes >/dev/null
-check "sandboxed /tmp state was removed" "$([ -e "$T/tmp/deckhand-host.log" ] && echo yes || echo no)" "no"
+check "sandboxed /tmp state was removed" "$([ -e "$T/tmp/host.log" ] && echo yes || echo no)" "no"
 check "real /tmp untouched (log)" "$([ -e "$REAL_LOG.testsentinel" ] && echo yes || echo no)" "yes"
 check "real /tmp untouched (oauth attempt)" "$([ -e "$REAL_ATT.testsentinel" ] && echo yes || echo no)" "yes"
 check "real running host's log not deleted" "$([ "$had_log" = 1 ] && { [ -e "$REAL_LOG" ] && echo kept || echo DELETED; } || echo n/a)" "$([ "$had_log" = 1 ] && echo kept || echo n/a)"

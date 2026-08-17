@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { createWriteStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { createWriteStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
@@ -47,7 +47,25 @@ const CCUSAGE_JS = path.join(__dirname, "node_modules", "ccusage", "src", "cli.j
 // prompt - see DeckhandBLE.app/Contents/Info.plist), stdout/stderr aren't
 // inherited by whatever shell launched it, so console.log alone goes
 // nowhere useful. Write directly to a log file too, always.
-const LOG_FILE = "/tmp/deckhand-host.log";
+// PER-USER runtime directory, and the "per-user" part is load-bearing on a Mac
+// with more than one account. All of this state used to sit at fixed
+// /tmp/deckhand-* paths, which collide two ways: the second user's host cannot
+// write files the first user created (they land mode 644, owned by whoever got
+// there first), and - worse - the second user's session HOOK would read the
+// first user's heartbeat, conclude a display was connected, and block up to 90s
+// on every permission prompt with no device anywhere to answer it. Mode 0700 also
+// means another account cannot read your heartbeat even by accident.
+//
+// The hook derives this identically (see claude-hooks/deckhand-session-hook.mjs);
+// the two MUST agree or remote answering silently stops working. DECKHAND_TMP
+// stays the override/test seam it already was, used verbatim when set.
+const RUNTIME_DIR = process.env.DECKHAND_TMP || `/tmp/deckhand-${process.getuid()}`;
+try {
+  mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
+} catch {
+  // Nothing to fall back to; the writes below will surface it.
+}
+const LOG_FILE = path.join(RUNTIME_DIR, "host.log");
 // ROTATED, because this appends a ~700-byte tick line every 5s: measured at 4.4 MB/day,
 // ~131 MB/month. One previous generation is kept (.1) so a crash's context survives the
 // rotation that follows it. Size is tracked from what we write rather than by stat()ing on
@@ -235,7 +253,7 @@ const OAUTH_429_BACKOFF_MS = 15 * 60_000;
 // Last successful fetch, persisted so host restarts (one per firmware flash
 // during development) neither lose good data nor fire a burst of startup
 // polls into the endpoint's rate limiter.
-const OAUTH_CACHE_FILE = "/tmp/deckhand-oauth-usage.json";
+const OAUTH_CACHE_FILE = path.join(RUNTIME_DIR, "oauth-usage.json");
 
 // Written by ~/.claude/deckhand-session-hook.mjs (registered for SessionStart,
 // UserPromptSubmit, Stop, SessionEnd). One file per session_id; deleted on
@@ -285,7 +303,7 @@ const BLE_TX_CHAR_UUID = "6e400003b5a3f393e0a9e50e24dcca9e"; // device -> host n
 // PreToolUse one.
 const ANSWERS_DIR = path.join(os.homedir(), ".claude", "deckhand-answers");
 // Heartbeat the session hook checks before blocking on a remote answer.
-const HOST_ALIVE = "/tmp/deckhand-host-alive";
+const HOST_ALIVE = path.join(RUNTIME_DIR, "host-alive");
 // Conservative chunk size that doesn't depend on MTU negotiation succeeding -
 // 20 bytes is the default ATT payload before any negotiation, so this works
 // even in the worst case.
@@ -496,12 +514,12 @@ try {
 // The 429 back-off deadline survives host restarts here. The host restarts
 // on every firmware flash during development, and an immediate poll per
 // restart once compounded into an hours-long rate-limit penalty.
-const OAUTH_BACKOFF_STATE = "/tmp/deckhand-oauth-backoff.json";
+const OAUTH_BACKOFF_STATE = path.join(RUNTIME_DIR, "oauth-backoff.json");
 // Last poll ATTEMPT (success OR failure), persisted across restarts. The
 // back-off file only exists after a 429; this bounds every network hit to at
 // most one per poll interval regardless of how many times the host restarts,
 // so a burst of dev reflashes can't escalate the endpoint's rate limiter.
-const OAUTH_ATTEMPT_STATE = "/tmp/deckhand-oauth-attempt.json";
+const OAUTH_ATTEMPT_STATE = path.join(RUNTIME_DIR, "oauth-attempt.json");
 
 async function readOauthCredential() {
   // `security` blocks indefinitely on a locked keychain or an auth prompt, so

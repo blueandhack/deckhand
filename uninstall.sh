@@ -130,7 +130,14 @@ fi
 echo "[5/5] Removing host runtime state"
 # Globbed rather than listed so a file added later is still cleaned up. nullglob-ish:
 # under `set -u` an unmatched glob would otherwise be passed through literally.
-for f in "$DECK_TMP/deckhand-host-alive" "$DECK_TMP/deckhand-host.log" \
+# Host runtime state now lives in ONE per-user directory (see RUNTIME_DIR in
+# host/index.mjs), so this removes the directory plus the pre-namespacing files an
+# older install may have left at the shared paths.
+RUNTIME_DIR="${DECKHAND_TMP:-/tmp/deckhand-$(id -u)}"
+for f in "$RUNTIME_DIR/host-alive" "$RUNTIME_DIR/host.log" "$RUNTIME_DIR/host.log.1" \
+         "$RUNTIME_DIR/oauth-usage.json" "$RUNTIME_DIR/oauth-backoff.json" \
+         "$RUNTIME_DIR/oauth-attempt.json" "$RUNTIME_DIR/mic.wav" \
+         "$DECK_TMP/deckhand-host-alive" "$DECK_TMP/deckhand-host.log" \
          "$DECK_TMP/deckhand-host.log.1" "$DECK_TMP/deckhand-oauth-usage.json" \
          "$DECK_TMP/deckhand-oauth-backoff.json" "$DECK_TMP/deckhand-oauth-attempt.json"; do
   [ -e "$f" ] || continue
