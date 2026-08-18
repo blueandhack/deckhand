@@ -839,7 +839,16 @@ open mac-app/DeckhandMenuBar.app
 
 It puts a ship's-wheel icon in the menu bar whose dropdown shows connection
 status and quota, with **Start / Stop Deckhand**, a **Launch at login**
-toggle, and **Quit**.
+toggle, and **Quit**. The icon is the project's own mark, drawn from
+`docs/logo.svg`'s geometry rather than shipped as a bitmap, so it stays crisp
+on any display and macOS inverts it for a dark menu bar. It carries the host's
+state as a **shape**, not only a colour: the whole wheel when the host is
+running, just the rim and grips when it is stopped. To see it at every size
+without hunting for it in your menu bar:
+
+```
+mac-app/DeckhandMenuBar.app/Contents/MacOS/DeckhandMenuBar --icon-preview /tmp/icons.png
+```
 
 **If the LaunchAgent is installed, the app drives it** (`launchctl bootout` /
 `bootstrap`) rather than killing the process — that is the only way Stop can mean

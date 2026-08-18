@@ -179,9 +179,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func refresh() {
         let s = readStatus()
         if let button = statusItem.button {
-            let symbol = s.running ? "sailboat.fill" : "sailboat"
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Deckhand")
-            button.image?.isTemplate = true
+            // The bar's own thickness sets the size, so this follows a
+            // 24px bar or a 22px one instead of assuming either.
+            let h = max(16, min(20, button.bounds.height - 4))
+            button.image = deckhandHelmImage(size: h, running: s.running)
             button.contentTintColor = !s.running ? NSColor.systemGray
                 : (s.deviceConnected ? nil : NSColor.systemOrange)
         }
@@ -390,8 +391,132 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func quit() { NSApp.terminate(nil) }
 }
 
+// ---------------------------------------------------------------------------
+// The menu-bar icon: the project's own ship's wheel, not a stock symbol.
+//
+// GEOMETRY IS LIFTED FROM docs/logo.svg, not eyeballed - centre (250,238),
+// overall extent 155, so every measurement below is that file's number over
+// 155. Same mark the device draws on its waiting screen and the README shows,
+// which is the whole point of replacing the SF Symbol sailboat.
+//
+// Drawn rather than shipped as an asset because a menu bar spans 1x and 2x
+// displays and the bar's height varies; a vector redraws crisp at any size,
+// and a template image lets macOS handle light/dark inversion itself.
+//
+// STATE IS CARRIED BY SHAPE, NOT ONLY BY COLOUR - the same rule the device UI
+// follows. Running draws the whole wheel; stopped draws the rim and grips with
+// a hollow centre, so it reads as a wheel with nothing driving it. The grey
+// tint is a second cue on top, never the only one.
+let WHEEL_RIM_R: CGFloat = 98.0 / 155.0     // rim stroke centreline
+let WHEEL_RIM_W: CGFloat = 30.0 / 155.0
+let WHEEL_SPOKE_HALF: CGFloat = 100.0 / 155.0  // spokes are full diameters
+let WHEEL_SPOKE_W: CGFloat = 28.0 / 155.0
+let WHEEL_GRIP_IN: CGFloat = 115.0 / 155.0     // grips sit OUTSIDE the rim
+let WHEEL_GRIP_OUT: CGFloat = 1.0
+let WHEEL_GRIP_W: CGFloat = 24.0 / 155.0
+let WHEEL_HUB_R: CGFloat = 36.0 / 155.0
+
+/// A capsule running from radius `r0` to `r1` along `deg`, centred on `c`.
+func wheelCapsule(_ c: CGPoint, _ deg: CGFloat, _ r0: CGFloat, _ r1: CGFloat,
+                  _ w: CGFloat) -> NSBezierPath {
+    let p = NSBezierPath(roundedRect: CGRect(x: -w / 2, y: r0, width: w, height: r1 - r0),
+                         xRadius: w / 2, yRadius: w / 2)
+    let t = NSAffineTransform()
+    t.translateX(by: c.x, yBy: c.y)
+    t.rotate(byDegrees: deg)
+    p.transform(using: t as AffineTransform)
+    return p
+}
+
+func deckhandHelmImage(size: CGFloat, running: Bool) -> NSImage {
+    let img = NSImage(size: CGSize(width: size, height: size), flipped: false) { _ in
+        NSColor.black.set()
+        let c = CGPoint(x: size / 2, y: size / 2)
+        // 1px of breathing room so the grips are not clipped by the bar's edge.
+        let R = size / 2 - 1
+
+        // Three bars through the centre give the mark's six arms - the same
+        // trick the SVG uses, and the reason the wheel has exact 6-fold
+        // symmetry (which is why logo2c.py's rotation step is 7.5 and not 45).
+        if running {
+            for deg in stride(from: CGFloat(0), to: 180, by: 60) {
+                wheelCapsule(c, deg, -R * WHEEL_SPOKE_HALF, R * WHEEL_SPOKE_HALF,
+                             R * WHEEL_SPOKE_W).fill()
+            }
+        }
+        for deg in stride(from: CGFloat(0), to: 360, by: 60) {
+            wheelCapsule(c, deg, R * WHEEL_GRIP_IN, R * WHEEL_GRIP_OUT,
+                         R * WHEEL_GRIP_W).fill()
+        }
+        let rr = R * WHEEL_RIM_R
+        let rim = NSBezierPath(ovalIn: CGRect(x: c.x - rr, y: c.y - rr, width: rr * 2, height: rr * 2))
+        rim.lineWidth = R * WHEEL_RIM_W
+        rim.stroke()
+        if running {
+            let hr = R * WHEEL_HUB_R
+            NSBezierPath(ovalIn: CGRect(x: c.x - hr, y: c.y - hr, width: hr * 2, height: hr * 2)).fill()
+        }
+        return true
+    }
+    // Template: macOS inverts it for a dark menu bar, so the icon is never
+    // drawn in a colour of our choosing and cannot clash with a wallpaper.
+    img.isTemplate = true
+    return img
+}
+
+/// `--icon-preview <out.png>`: a contact sheet of every icon/size pair, each
+/// at native size and again at 6x nearest-neighbour so the pixel structure is
+/// visible. This exists because "is a 6-spoke wheel legible at 18px?" is a
+/// question to LOOK at, not to reason about - the firmware learned the same
+/// lesson deciding the spark needed 32x32.
+func writeIconPreview(to path: String) {
+    let sizes: [CGFloat] = [16, 18, 22, 36]
+    let zoom: CGFloat = 6, pad: CGFloat = 8
+    let colW = sizes.map { $0 * zoom + pad }.reduce(0, +) + pad
+    let rowH = sizes.map { $0 * zoom }.max()! + pad * 2
+    let sheet = NSImage(size: CGSize(width: colW, height: rowH * 2), flipped: false) { _ in
+        for (band, running) in [(0, true), (1, false)] {
+            // Light band shows the template as macOS draws it on a light bar;
+            // dark band inverts, which is the case a black-on-black bug hides in.
+            let dark = band == 1
+            (dark ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.96, alpha: 1)).set()
+            // AppKit's origin is bottom-left, so band 0 must be drawn at the
+            // TOP or the sheet contradicts the caption it prints.
+            let y0 = CGFloat(1 - band) * rowH
+            CGRect(x: 0, y: y0, width: colW, height: rowH).fill()
+            var x = pad
+            for s in sizes {
+                let icon = deckhandHelmImage(size: s, running: running)
+                let tint = NSImage(size: icon.size, flipped: false) { r in
+                    (dark ? NSColor.white : NSColor.black).set()
+                    r.fill()
+                    icon.draw(in: r, from: .zero, operation: .destinationIn, fraction: 1)
+                    return true
+                }
+                NSGraphicsContext.current?.imageInterpolation = .none
+                tint.draw(in: CGRect(x: x, y: y0 + pad, width: s * zoom, height: s * zoom))
+                NSGraphicsContext.current?.imageInterpolation = .default
+                tint.draw(in: CGRect(x: x, y: y0 + rowH - pad - s, width: s, height: s))
+                x += s * zoom + pad
+            }
+        }
+        return true
+    }
+    let tiff = sheet.tiffRepresentation!
+    let png = NSBitmapImageRep(data: tiff)!.representation(using: .png, properties: [:])!
+    try? png.write(to: URL(fileURLWithPath: path))
+    print("wrote \(path)  (top row: running, bottom: stopped; sizes \(sizes.map { Int($0) }))")
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
+
+if let i = CommandLine.arguments.firstIndex(of: "--icon-preview") {
+    writeIconPreview(to: CommandLine.arguments.count > i + 1
+        ? CommandLine.arguments[i + 1] : "icon-preview.png")
+    exit(0)
+}
+
 app.run()
