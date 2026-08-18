@@ -2356,7 +2356,14 @@ function startBle() {
     await noble.stopScanningAsync().catch(() => {});
     console.log(`BLE: found ${name}, connecting...`);
     try {
-      await peripheral.connectAsync();
+      // noble keeps its own idea of the peripheral's state, and it can still say
+      // "connected" from a link that no longer exists - after the host restarts while
+      // BLE was up, or after the device sleeps and re-advertises. connectAsync() then
+      // throws "Peripheral already connected", which used to be caught as an ordinary
+      // failure and retried by rescanning - finding the SAME stale object and throwing
+      // again, forever. Observed wedged in exactly that loop with USB unplugged, so the
+      // device had no transport at all while the host looked perfectly healthy.
+      if (peripheral.state !== "connected") await peripheral.connectAsync();
       const { characteristics } = await peripheral.discoverSomeServicesAndCharacteristicsAsync(
         [BLE_SERVICE_UUID],
         [BLE_RX_CHAR_UUID, BLE_TX_CHAR_UUID]
@@ -2400,7 +2407,14 @@ function startBle() {
       bleCharacteristic = null;
       blePeripheral = null;
       bleDeviceName = "";
-      startBleScan();
+      // ALWAYS tear the peripheral down before retrying. Without this a stale
+      // "connected" state survives the retry and the next attempt fails identically -
+      // which is the loop this comment exists because of. Disconnecting resets noble's
+      // state so the rescan gets a genuinely fresh link.
+      await peripheral.disconnectAsync().catch(() => {});
+      // A small pause too: a tight scan/connect/fail cycle spins the radio and fills
+      // the log with thousands of identical lines, which buries whatever else is wrong.
+      setTimeout(startBleScan, 2000);
     }
   });
 }
