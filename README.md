@@ -837,14 +837,19 @@ mac-app/build.sh
 open mac-app/DeckhandMenuBar.app
 ```
 
-It puts a ship's-wheel icon in the menu bar whose dropdown shows connection
-status and quota, with **Start / Stop Deckhand**, a **Launch at login**
-toggle, and **Quit**. The icon is the project's own mark, drawn from
-`docs/logo.svg`'s geometry rather than shipped as a bitmap, so it stays crisp
-on any display and macOS inverts it for a dark menu bar. It carries the host's
-state as a **shape**, not only a colour: the whole wheel when the host is
-running, just the rim and grips when it is stopped. To see it at every size
-without hunting for it in your menu bar:
+It puts an origami paper-boat icon in the menu bar whose dropdown shows
+connection status and quota, with **Start / Stop Deckhand**, a **Launch at
+login** toggle, and **Quit**.
+
+The icon is deliberately *not* the project's ship's wheel. The wheel is the
+mark — it is on the device's waiting screen, in the hero image and in the app
+bundle — and a mark carries identity, where a menu-bar glyph has to survive at
+16px in one flat colour beside two dozen others. It is drawn from geometry
+rather than shipped as a bitmap, so it stays crisp at any bar height on any
+display, and as a template image macOS inverts it for a dark menu bar itself.
+It carries the host's state as a **shape**, not only a colour: a solid boat
+when the host is running, an outlined one when it is stopped. To see it at
+every size without hunting for it in your menu bar:
 
 ```
 mac-app/DeckhandMenuBar.app/Contents/MacOS/DeckhandMenuBar --icon-preview /tmp/icons.png

@@ -182,7 +182,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // The bar's own thickness sets the size, so this follows a
             // 24px bar or a 22px one instead of assuming either.
             let h = max(16, min(20, button.bounds.height - 4))
-            button.image = deckhandHelmImage(size: h, running: s.running)
+            button.image = deckhandPaperBoatImage(size: h, style: s.running ? .solid : .outline)
             button.contentTintColor = !s.running ? NSColor.systemGray
                 : (s.deviceConnected ? nil : NSColor.systemOrange)
         }
@@ -392,69 +392,88 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 // ---------------------------------------------------------------------------
-// The menu-bar icon: the project's own ship's wheel, not a stock symbol.
+// The menu-bar icon: an origami paper boat.
 //
-// GEOMETRY IS LIFTED FROM docs/logo.svg, not eyeballed - centre (250,238),
-// overall extent 155, so every measurement below is that file's number over
-// 155. Same mark the device draws on its waiting screen and the README shows,
-// which is the whole point of replacing the SF Symbol sailboat.
+// Deliberately NOT the project's ship's wheel. The wheel is the mark - it is on
+// the device's waiting screen, in the README hero and in the app bundle icon -
+// and a mark carries identity, where a menu-bar glyph has to survive at 16px in
+// one flat colour next to two dozen other glyphs. The boat is built for that
+// job only, which is why it lives here and nowhere else in the repo.
 //
-// Drawn rather than shipped as an asset because a menu bar spans 1x and 2x
-// displays and the bar's height varies; a vector redraws crisp at any size,
-// and a template image lets macOS handle light/dark inversion itself.
-//
-// STATE IS CARRIED BY SHAPE, NOT ONLY BY COLOUR - the same rule the device UI
-// follows. Running draws the whole wheel; stopped draws the rim and grips with
-// a hollow centre, so it reads as a wheel with nothing driving it. The grey
-// tint is a second cue on top, never the only one.
-let WHEEL_RIM_R: CGFloat = 98.0 / 155.0     // rim stroke centreline
-let WHEEL_RIM_W: CGFloat = 30.0 / 155.0
-let WHEEL_SPOKE_HALF: CGFloat = 100.0 / 155.0  // spokes are full diameters
-let WHEEL_SPOKE_W: CGFloat = 28.0 / 155.0
-let WHEEL_GRIP_IN: CGFloat = 115.0 / 155.0     // grips sit OUTSIDE the rim
-let WHEEL_GRIP_OUT: CGFloat = 1.0
-let WHEEL_GRIP_W: CGFloat = 24.0 / 155.0
-let WHEEL_HUB_R: CGFloat = 36.0 / 155.0
+// Coordinates are in a 100-wide boat space, y up, and the shape is three
+// polygons: two sail triangles meeting at a vertical crease, and a trapezoid
+// hull. THE CREASE IS THE WHOLE POINT - a single filled triangle over a hull
+// reads as a generic sailboat, and the gap down the middle is what says folded
+// paper. It is a proportion of the width rather than a fixed pixel, so it
+// survives every size and both display scales.
+let BOAT_W: CGFloat = 100
+let BOAT_APEX_Y: CGFloat = 42        // top of the sails
+let BOAT_SAIL_Y: CGFloat = -2        // sail feet, sitting on the flat gunwale
+let BOAT_SAIL_HALF: CGFloat = 34
+let BOAT_CREASE_HALF: CGFloat = 3.5  // half the fold gap
+// THE UPTURNED TIPS ARE WHAT MAKE IT PAPER. A flat-topped trapezoid hull under
+// two triangles renders as an ordinary sailboat - that was the first attempt,
+// and it did. An origami boat's prow and stern rise ABOVE the gunwale, so the
+// top edge is: tip, down to a flat gunwale under the sails, back up to the
+// other tip.
+let BOAT_TIP_Y: CGFloat = 8
+let BOAT_TIP_HALF: CGFloat = 50
+let BOAT_HULL_BOT_Y: CGFloat = -34
+let BOAT_HULL_BOT_HALF: CGFloat = 28
+// The gunwale is FLAT exactly where the sails land, so hull and sails touch
+// without overlapping. That is not cosmetic: with no overlap the same three
+// polygons stroke cleanly for the outline state, where an overlapping hull
+// would draw the sails' feet as lines across its own interior.
+let BOAT_MID_Y: CGFloat = (BOAT_APEX_Y + BOAT_HULL_BOT_Y) / 2
 
-/// A capsule running from radius `r0` to `r1` along `deg`, centred on `c`.
-func wheelCapsule(_ c: CGPoint, _ deg: CGFloat, _ r0: CGFloat, _ r1: CGFloat,
-                  _ w: CGFloat) -> NSBezierPath {
-    let p = NSBezierPath(roundedRect: CGRect(x: -w / 2, y: r0, width: w, height: r1 - r0),
-                         xRadius: w / 2, yRadius: w / 2)
-    let t = NSAffineTransform()
-    t.translateX(by: c.x, yBy: c.y)
-    t.rotate(byDegrees: deg)
-    p.transform(using: t as AffineTransform)
-    return p
-}
+// Only two states ship. A hull-only variant was tried for "stopped" and
+// rejected: without the sails it reads as a bowl, not a boat.
+enum BoatStyle { case solid, outline }
 
-func deckhandHelmImage(size: CGFloat, running: Bool) -> NSImage {
+func deckhandPaperBoatImage(size: CGFloat, style: BoatStyle) -> NSImage {
     let img = NSImage(size: CGSize(width: size, height: size), flipped: false) { _ in
         NSColor.black.set()
-        let c = CGPoint(x: size / 2, y: size / 2)
-        // 1px of breathing room so the grips are not clipped by the bar's edge.
-        let R = size / 2 - 1
+        // Width-bound: the boat is wider than it is tall, so the horizontal
+        // extent is what has to fit. 1px of inset keeps the hull corners off
+        // the bar's edge.
+        let k = (size - 2) / BOAT_W
+        let cx = size / 2, cy = size / 2
+        func P(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: cx + x * k, y: cy + (y - BOAT_MID_Y) * k)
+        }
+        func poly(_ pts: [CGPoint]) -> NSBezierPath {
+            let p = NSBezierPath()
+            p.move(to: pts[0])
+            for q in pts.dropFirst() { p.line(to: q) }
+            p.close()
+            return p
+        }
 
-        // Three bars through the centre give the mark's six arms - the same
-        // trick the SVG uses, and the reason the wheel has exact 6-fold
-        // symmetry (which is why logo2c.py's rotation step is 7.5 and not 45).
-        if running {
-            for deg in stride(from: CGFloat(0), to: 180, by: 60) {
-                wheelCapsule(c, deg, -R * WHEEL_SPOKE_HALF, R * WHEEL_SPOKE_HALF,
-                             R * WHEEL_SPOKE_W).fill()
+        let sailL = poly([P(-BOAT_SAIL_HALF, BOAT_SAIL_Y), P(-BOAT_CREASE_HALF, BOAT_SAIL_Y),
+                          P(-BOAT_CREASE_HALF, BOAT_APEX_Y)])
+        let sailR = poly([P(BOAT_SAIL_HALF, BOAT_SAIL_Y), P(BOAT_CREASE_HALF, BOAT_SAIL_Y),
+                          P(BOAT_CREASE_HALF, BOAT_APEX_Y)])
+        let hull = poly([P(-BOAT_TIP_HALF, BOAT_TIP_Y), P(-BOAT_SAIL_HALF, BOAT_SAIL_Y),
+                         P(BOAT_SAIL_HALF, BOAT_SAIL_Y), P(BOAT_TIP_HALF, BOAT_TIP_Y),
+                         P(BOAT_HULL_BOT_HALF, BOAT_HULL_BOT_Y),
+                         P(-BOAT_HULL_BOT_HALF, BOAT_HULL_BOT_Y)])
+
+        switch style {
+        case .solid:
+            sailL.fill(); sailR.fill(); hull.fill()
+        case .outline:
+            for p in [sailL, sailR, hull] {
+                p.lineWidth = max(1, (size - 2) * 0.07)
+                // Miter with a LOW LIMIT, which is neither of the two obvious
+                // choices. A plain miter shoots a spike past the silhouette at
+                // the sail apex and both hull tips - it read as a damaged shape.
+                // Round fixes that but rounds the tips into soft lumps, and
+                // folded paper is crisp. A miter limit bevels only the joins
+                // sharp enough to spike and leaves the rest pointed.
+                p.lineJoinStyle = .miter
+                p.miterLimit = 2
+                p.stroke()
             }
-        }
-        for deg in stride(from: CGFloat(0), to: 360, by: 60) {
-            wheelCapsule(c, deg, R * WHEEL_GRIP_IN, R * WHEEL_GRIP_OUT,
-                         R * WHEEL_GRIP_W).fill()
-        }
-        let rr = R * WHEEL_RIM_R
-        let rim = NSBezierPath(ovalIn: CGRect(x: c.x - rr, y: c.y - rr, width: rr * 2, height: rr * 2))
-        rim.lineWidth = R * WHEEL_RIM_W
-        rim.stroke()
-        if running {
-            let hr = R * WHEEL_HUB_R
-            NSBezierPath(ovalIn: CGRect(x: c.x - hr, y: c.y - hr, width: hr * 2, height: hr * 2)).fill()
         }
         return true
     }
@@ -464,29 +483,29 @@ func deckhandHelmImage(size: CGFloat, running: Bool) -> NSImage {
     return img
 }
 
-/// `--icon-preview <out.png>`: a contact sheet of every icon/size pair, each
-/// at native size and again at 6x nearest-neighbour so the pixel structure is
-/// visible. This exists because "is a 6-spoke wheel legible at 18px?" is a
-/// question to LOOK at, not to reason about - the firmware learned the same
-/// lesson deciding the spark needed 32x32.
+/// `--icon-preview <out.png>`: every style at every size, on light and dark
+/// bands, each at native size and again at 6x nearest-neighbour. "Does a folded
+/// crease survive at 16px?" is a question to LOOK at, not to reason about - the
+/// firmware learned the same deciding the spark needed 32x32.
 func writeIconPreview(to path: String) {
     let sizes: [CGFloat] = [16, 18, 22, 36]
+    let styles: [BoatStyle] = [.solid, .outline]
     let zoom: CGFloat = 6, pad: CGFloat = 8
     let colW = sizes.map { $0 * zoom + pad }.reduce(0, +) + pad
     let rowH = sizes.map { $0 * zoom }.max()! + pad * 2
-    let sheet = NSImage(size: CGSize(width: colW, height: rowH * 2), flipped: false) { _ in
-        for (band, running) in [(0, true), (1, false)] {
-            // Light band shows the template as macOS draws it on a light bar;
-            // dark band inverts, which is the case a black-on-black bug hides in.
-            let dark = band == 1
+    let rows = styles.count * 2
+    let sheet = NSImage(size: CGSize(width: colW, height: rowH * CGFloat(rows)), flipped: false) { _ in
+        for row in 0..<rows {
+            let style = styles[row / 2]
+            let dark = row % 2 == 1
+            // AppKit's origin is bottom-left, so row 0 must be drawn at the TOP
+            // or the sheet contradicts the caption it prints.
+            let y0 = CGFloat(rows - 1 - row) * rowH
             (dark ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.96, alpha: 1)).set()
-            // AppKit's origin is bottom-left, so band 0 must be drawn at the
-            // TOP or the sheet contradicts the caption it prints.
-            let y0 = CGFloat(1 - band) * rowH
             CGRect(x: 0, y: y0, width: colW, height: rowH).fill()
             var x = pad
-            for s in sizes {
-                let icon = deckhandHelmImage(size: s, running: running)
+            for sz in sizes {
+                let icon = deckhandPaperBoatImage(size: sz, style: style)
                 let tint = NSImage(size: icon.size, flipped: false) { r in
                     (dark ? NSColor.white : NSColor.black).set()
                     r.fill()
@@ -494,18 +513,20 @@ func writeIconPreview(to path: String) {
                     return true
                 }
                 NSGraphicsContext.current?.imageInterpolation = .none
-                tint.draw(in: CGRect(x: x, y: y0 + pad, width: s * zoom, height: s * zoom))
+                tint.draw(in: CGRect(x: x, y: y0 + pad, width: sz * zoom, height: sz * zoom))
                 NSGraphicsContext.current?.imageInterpolation = .default
-                tint.draw(in: CGRect(x: x, y: y0 + rowH - pad - s, width: s, height: s))
-                x += s * zoom + pad
+                tint.draw(in: CGRect(x: x, y: y0 + rowH - pad - sz, width: sz, height: sz))
+                x += sz * zoom + pad
             }
         }
         return true
     }
-    let tiff = sheet.tiffRepresentation!
-    let png = NSBitmapImageRep(data: tiff)!.representation(using: .png, properties: [:])!
+    let png = NSBitmapImageRep(data: sheet.tiffRepresentation!)!
+        .representation(using: .png, properties: [:])!
     try? png.write(to: URL(fileURLWithPath: path))
-    print("wrote \(path)  (top row: running, bottom: stopped; sizes \(sizes.map { Int($0) }))")
+    print("wrote \(path)")
+    print("rows top->bottom: solid/light, solid/dark, outline/light, outline/dark")
+    print("sizes left->right: \(sizes.map { Int($0) })")
 }
 
 let app = NSApplication.shared
