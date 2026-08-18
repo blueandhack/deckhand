@@ -839,7 +839,15 @@ open mac-app/DeckhandMenuBar.app
 
 It puts a ship's-wheel icon in the menu bar whose dropdown shows connection
 status and quota, with **Start / Stop Deckhand**, a **Launch at login**
-toggle (so it comes back after a reboot with nothing to do), and **Quit**.
+toggle, and **Quit**.
+
+**If the LaunchAgent is installed, the app drives it** (`launchctl bootout` /
+`bootstrap`) rather than killing the process — that is the only way Stop can mean
+stopped, because `KeepAlive` undoes a plain kill within about a second. It also
+skips its own watchdog in that case, since launchd already restarts a dead host and
+survives reboots, and two supervisors that cannot see each other will fight over one
+serial port. Without the agent it falls back to the old behaviour and keeps its
+watchdog. The tooltip on Start/Stop says which mode you are in.
 It doesn't touch Bluetooth itself — it just runs and watches the same
 `DeckhandBLE.app` host — so the proven transport path is unchanged. The
 built app embeds this machine's repo path, so re-run `build.sh` if you move

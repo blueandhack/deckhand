@@ -833,6 +833,18 @@ two things `host/index.mjs` cannot get any other way:
   bar has to be busted on that flip too, since `drawPaceBar` caches on `(pct, tick)` alone
   and would never repaint a colour-only change.
 
+**The menu-bar app must drive launchd, not go around it, and going around it fails
+quietly.** `mac-app/DeckhandMenuBar.swift` used to start/stop with `pkill` + `open` and
+carried its own watchdog. Once the `KeepAlive` LaunchAgent exists that is actively
+wrong: a `pkill` stop is undone within ~1s (measured - pid 48211 came back as 48230),
+so **Stop looks broken**; an `open` start launches a host OUTSIDE launchd while launchd
+may spawn its own, giving two processes contending for one serial port; and the app's
+watchdog becomes a second supervisor racing the first. It now shells out to
+`deckhand-service.sh start|stop` when `~/Library/LaunchAgents/com.deckhand.host.plist`
+exists, and suppresses its watchdog in that case - launchd restarts a dead host within
+a second and survives reboots, which the app cannot. Unsupervised, the old path and the
+watchdog both remain, because there is then nothing else doing the job.
+
 **All host runtime state lives in ONE PER-USER directory, `/tmp/deckhand-<uid>/`
 (`RUNTIME_DIR`), and the per-user part is load-bearing on a shared Mac.** It used to sit
 at fixed `/tmp/deckhand-*` paths, which collide two ways. The second user's host cannot

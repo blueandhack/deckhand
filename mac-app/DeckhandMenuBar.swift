@@ -23,6 +23,22 @@ func hostDir() -> String {
 }
 func hostApp() -> String { hostDir() + "/DeckhandBLE.app" }
 func hostScript() -> String { hostDir() + "/index.mjs" }
+func serviceScript() -> String { hostDir() + "/deckhand-service.sh" }
+
+// Is the host supervised by launchd? If the LaunchAgent is installed, IT owns the
+// process and this app must go through it rather than around it.
+//
+// Going around it does not work, and the failure is confusing rather than loud: the
+// agent sets KeepAlive, so a `pkill` stop is undone within about a second - the Stop
+// item looks broken - and an `open` start launches a second host OUTSIDE launchd while
+// launchd may spawn its own, leaving two processes contending for one serial port. The
+// app's own watchdog is redundant then too, and two supervisors that cannot see each
+// other will fight.
+func launchdPlist() -> String {
+    (NSHomeDirectory() as NSString)
+        .appendingPathComponent("Library/LaunchAgents/com.deckhand.host.plist")
+}
+func isSupervised() -> Bool { FileManager.default.fileExists(atPath: launchdPlist()) }
 
 struct HostStatus {
     var running = false
@@ -192,14 +208,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         remoteItem.isEnabled = s.running
         remoteItem.state = s.remoteAnswer ? .on : .off
         rebuildDeviceMenu(s)
-        startStop.title = s.running ? "Stop syncing" : "Start syncing"
+        startStop.title = s.running ? "Stop Deckhand" : "Start Deckhand"
+        // Naming the supervisor matters: with launchd in charge, a stop is permanent
+        // until Start, whereas unsupervised the app's own watchdog may bring it back.
+        startStop.toolTip = isSupervised()
+            ? "Managed by launchd (starts at login, restarts if it dies)"
+            : "Not supervised - install with host/deckhand-service.sh install"
         loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
 
         // Watchdog: if syncing is meant to be on but the host has been down or
         // frozen (stale heartbeat) for a sustained window, restart it. Only
         // acts when wantRunning, so a deliberate Stop is honored. The 30s
         // cooldown avoids re-restarting while a fresh host is still connecting.
-        if wantRunning && !s.running {
+        // Skipped entirely when launchd owns the host: it restarts a dead process within
+        // a second and survives reboots, which is strictly better than this loop, and
+        // two supervisors racing each other is worse than either alone.
+        if wantRunning && !s.running && !isSupervised() {
             if downSince == nil { downSince = Date() }
             else if Date().timeIntervalSince(downSince!) > 20,
                     Date().timeIntervalSince(lastRestart) > 30 {
@@ -224,6 +248,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // macOS still thinks is running, so a frozen node would just get
     // re-activated), then launch a fresh one.
     func startHost() {
+        if isSupervised() {
+            // `bootstrap` via the service script, so the agent is loaded and KeepAlive
+            // takes over from here. No pkill: there is nothing to force-clear, and
+            // killing first would just race the supervisor.
+            run("/bin/bash", [serviceScript(), "start"])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.refresh() }
+            return
+        }
+        // Unsupervised: force-clear any wedged host first, because `open` will not
+        // relaunch an app macOS still believes is running - a frozen node would simply
+        // be re-activated.
         run("/usr/bin/pkill", ["-9", "-f", hostScript()])
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             self.run("/usr/bin/open", [hostApp(), "--args", hostScript()])
@@ -232,6 +267,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func stopHost() {
+        if isSupervised() {
+            // `bootout` UNLOADS the job, which is the only thing that actually stops it.
+            // A plain kill is reversed by KeepAlive within a second.
+            run("/bin/bash", [serviceScript(), "stop"])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.refresh() }
+            return
+        }
         run("/usr/bin/pkill", ["-f", hostScript()]) // graceful
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
     }
