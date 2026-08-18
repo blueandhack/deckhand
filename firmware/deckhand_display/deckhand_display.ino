@@ -2053,7 +2053,10 @@ const int CFM_NO_X  = CARD_X + SP_3;
 const int CFM_YES_X = CFM_NO_X + CFM_BTN_W + SP_3;
 
 int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
-char battRowTextCache[16] = "";
+// 20, not 16: the padded string is now 15 chars + NUL, which fitted 16 EXACTLY.
+// drawIfChanged compares cacheSize bytes, so a cache shorter than its string
+// silently stops noticing changes - headroom here is cheaper than that bug.
+char battRowTextCache[20] = "";
 uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
 int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
 int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+
@@ -3270,10 +3273,23 @@ void loop() {
   if (millis() - lastBattSample > 1000) {
     lastBattSample = millis();
     sampleBattery();
+    battTrendSample();
     static unsigned long lastBattLog = 0;
     if (millis() - lastBattLog > 60000) {
       lastBattLog = millis();
-      Serial.printf("BATT mv=%d pct=%d state=%d\n", batteryMv, batteryPct(), (int) batteryState());
+      // Via sendLineToHost, NOT Serial.printf, and that is the whole reason the Mac
+      // can show this at all: Serial reaches the host only over USB, so a battery
+      // reading could otherwise only ever arrive while CHARGING - exactly when time
+      // remaining is meaningless. This goes over BLE too.
+      //
+      // pcth and span travel with it so the estimate has provenance in the host log:
+      // left=-1 span=6 means still measuring, while left=-1 span=25 means the trend
+      // was too flat or rising to state.
+      char bl[96];
+      snprintf(bl, sizeof(bl), "BATT mv=%d pct=%d state=%d left=%d pcth=%d span=%d",
+               batteryMv, batteryPct(), (int) batteryState(), battMinutesLeft(),
+               battPctPerHourX10(), battTrendSpanMin());
+      sendLineToHost(bl);
     }
 
     // Reminder beeps for sessions STILL waiting on input, capped by the

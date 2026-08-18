@@ -323,6 +323,11 @@ const BLE_TX_CHAR_UUID = "6e400003b5a3f393e0a9e50e24dcca9e"; // device -> host n
 const ANSWERS_DIR = path.join(os.homedir(), ".claude", "deckhand-answers");
 // Heartbeat the session hook checks before blocking on a remote answer.
 const HOST_ALIVE = path.join(RUNTIME_DIR, "host-alive");
+// The device's own battery reading, from its BATT line (once a minute). Kept with
+// the time it arrived, because that line stops the instant the link drops and a
+// reading from an hour ago is not a battery level - the same reason quotaAgeSec
+// exists for the OAuth cache.
+let lastBatt = null;
 // Conservative chunk size that doesn't depend on MTU negotiation succeeding -
 // 20 bytes is the default ATT payload before any negotiation, so this works
 // even in the worst case.
@@ -2048,6 +2053,28 @@ async function handleTypedAnswer(parts, via) {
 }
 
 async function handleDeviceLine(line, via) {
+  // BATT mv=3854 pct=42 state=3 left=312 pcth=81 span=27
+  //
+  // `left` is MINUTES, and -1 means "not measurable yet" - a different statement
+  // from 0, which must not be shown as one: for the first ~20 minutes off USB the
+  // device's trend is still inside its own ADC noise. pcth/span are the estimate's
+  // provenance and stay in the log rather than the heartbeat.
+  if (line.startsWith("BATT ")) {
+    const f = {};
+    for (const kv of line.slice(5).trim().split(/\s+/)) {
+      const [k, v] = kv.split("=");
+      if (k) f[k] = Number.parseInt(v, 10);
+    }
+    if (Number.isFinite(f.mv) && Number.isFinite(f.pct)) {
+      lastBatt = {
+        mv: f.mv,
+        pct: f.pct,
+        state: Number.isFinite(f.state) ? f.state : null,
+        leftMin: Number.isFinite(f.left) && f.left >= 0 ? f.left : null,
+        at: Date.now(),
+      };
+    }
+  }
   // History request from the detail screen. Handled here rather than in the tick so the
   // transcript is only read when someone is actually looking at it.
   if (line.startsWith("HISTORY ")) {
@@ -2500,6 +2527,11 @@ async function tick(generation = tickGeneration) {
           selected: selectedDevice || null,
           devices: pairedDevices.map((d) => d.name),
           voice: lastVoice,
+          // ageSec is computed on the way out rather than stored, so a stale
+          // reading cannot look fresh just because the heartbeat itself is.
+          batt: lastBatt
+            ? { ...lastBatt, ageSec: Math.round((Date.now() - lastBatt.at) / 1000) }
+            : null,
         })
       )
       .catch(() => {});

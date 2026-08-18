@@ -63,6 +63,13 @@ struct HostStatus {
     var pct7d: Int? = nil, reset7d: Int? = nil
     var cxPct: Int? = nil, cxReset: Int? = nil
     var sessions: [SessionRow] = []
+    // The device's battery, out of its BATT line. battLeftMin is nil until the
+    // device has actually measured a discharge rate - it publishes -1 for "not
+    // measurable yet", which the host converts to absent rather than to zero.
+    var battPct: Int? = nil
+    var battState: Int? = nil     // 0 none, 1 discharging, 2 charging, 3 full
+    var battLeftMin: Int? = nil
+    var battAgeSec: Int? = nil
     var asking: Int { sessions.filter { $0.status == "asking" }.count }
     var via: String? = nil
     var device: String? = nil    // device we're actually talking to, e.g. "Deckhand-A37A"
@@ -102,6 +109,12 @@ func readStatus() -> HostStatus {
             s.selected = obj["selected"] as? String
             s.devices = (obj["devices"] as? [String]) ?? []
             s.remoteAnswer = (obj["remoteAnswer"] as? Bool) ?? true
+            if let b = obj["batt"] as? [String: Any] {
+                s.battPct = b["pct"] as? Int
+                s.battState = b["state"] as? Int
+                s.battLeftMin = b["leftMin"] as? Int
+                s.battAgeSec = b["ageSec"] as? Int
+            }
             if let v = obj["voice"] as? [String: Any] {
                 s.voiceText = v["text"] as? String
                 s.voiceReply = v["reply"] as? String
@@ -295,6 +308,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let q5 = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let q7 = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let cxLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let battLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let sessionsHeader = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     // A fixed pool that is shown or hidden, never added and removed. The menu can
     // be OPEN while the 3s refresh runs, and rebuilding items under the cursor
@@ -364,7 +378,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Groups, separated: where the host stands / what quota is left / who is
         // waiting on you / the last dictation / what you can do / logs and quit.
         // Six actions used to run together under a single separator.
-        var items: [NSMenuItem] = [statusLine, deviceLine, .separator(), q5, q7, cxLine,
+        var items: [NSMenuItem] = [statusLine, deviceLine, battLine, .separator(), q5, q7, cxLine,
                                    .separator(), sessionsHeader]
         items += sessionRows
         items += [voiceSep, voiceHeard, voiceReplyItem,
@@ -416,6 +430,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         deviceLine.attributedTitle = menuTitle([
             ("      ", F_SMALL, .secondaryLabelColor),
             (s.device ?? s.selected ?? "No device paired", F_SMALL, .secondaryLabelColor)])
+
+        // Battery, as a second sub-line of the device it belongs to. Hidden when
+        // the reading is ABSENT OR STALE: BATT arrives once a minute, and the
+        // moment the link drops the last one starts aging - showing a two-hour-old
+        // level as current is the failure this whole age field exists to prevent.
+        if let pct = s.battPct, (s.battAgeSec ?? 999) < 180, (s.battState ?? 0) != 0 {
+            var note = ""
+            switch s.battState ?? 0 {
+            case 2: note = "charging"
+            case 3: note = "full"
+            default:
+                // Absent only while the device is still measuring - see
+                // battMinutesLeft() in power.ino. No placeholder, because a
+                // number derived from noise would be worse than none.
+                if let m = s.battLeftMin {
+                    note = m < 120 ? "~\(m)m left" : "~\((m + 30) / 60)h left"
+                }
+            }
+            battLine.attributedTitle = menuTitle([
+                ("      ", F_MONO, .secondaryLabelColor),
+                ("\(pct)%", F_SMALL, pct <= 10 ? .systemOrange : .secondaryLabelColor),
+                (note.isEmpty ? "" : "  ·  \(note)", F_SMALL, .secondaryLabelColor),
+            ])
+            battLine.isHidden = false
+        } else {
+            battLine.isHidden = true
+        }
 
         if let pct = s.pct5h { q5.attributedTitle = quotaTitle("5h", pct, s.reset5h) }
         if let pct = s.pct7d { q7.attributedTitle = quotaTitle("7d", pct, s.reset7d) }

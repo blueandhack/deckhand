@@ -952,6 +952,44 @@ Other things that aren't obvious from a single file:
   must run **after** `tft.init()` — TFT_eSPI's init does a plain `pinMode`/`digitalWrite(HIGH)`
   on that pin (`TFT_BL` in its `User_Setup.h`), which silently strips an earlier LEDC
   attachment; that exact bug shipped once as "brightness buttons do nothing".
+- **Time remaining on battery is MEASURED, and the noise floor is the whole design problem.**
+  There is no coulomb counter here, so runtime left can only come from watching the voltage
+  fall - and the sleep report already records what extrapolating a small delta produces: a
+  7mV drift over 3 minutes became "-133.7 mV/h", a flat cell in four hours, from noise
+  multiplied by 20. So `battMinutesLeft()` (power.ino) reports **-1 until it has earned a
+  number**: a 30-slot ring of one-minute samples, and nothing stated until the window spans
+  **20 minutes** AND the fall exceeds **25mV**. Three things about it are load-bearing:
+  - **`pctFromMv(mv)` was split out of `batteryPct()` so a STORED sample maps through the same
+    curve.** The non-linearity lives in that table, so a slope taken in millivolts is not a
+    slope in charge - the least-squares fit runs on percentages, not volts.
+  - **A NON-NEGATIVE SLOPE MEANS UNKNOWN, NOT "BATTERY FOREVER".** When the backlight blanks
+    after 30s idle the load drops and the cell voltage REBOUNDS, so a rising reading is the
+    normal consequence of the screen going off. For the same reason the window deliberately
+    does **not** reset when the backlight changes: spanning both blanked and lit periods is
+    what makes the average reflect how the device is actually used. The ring resets only when
+    the state leaves DISCHARGING or the charge rises by >40mV (a data-less wall charger reads
+    as DISCHARGING - there is no VBUS-sense pin).
+  - **Least squares over the whole window, not endpoint-to-endpoint.** One sample taken while
+    the backlight was on sits several mV below its neighbours - more movement than the trend
+    itself makes in 20 minutes.
+  Shown on **SETTINGS › STATUS** as `42% 3.85V ~5h` (`~95m` under two hours), and nowhere while
+  charging or unmeasured - no placeholder, because a number derived from noise is worse than
+  none. The padded string is 15 chars ("100% 4.20V ~99h") = 90px in Cozette 6x13, right-aligned
+  to x=214 against a "Battery" label ending at 88; `battRowTextCache` went 16 -> 20 because 15
+  chars plus NUL fitted the old size EXACTLY, and a cache shorter than its string silently stops
+  noticing changes.
+- **The `BATT` line goes through `sendLineToHost`, NOT `Serial.printf`, and that is what makes
+  the Mac able to show any of this.** Serial reaches the host only over USB, so a battery
+  reading could otherwise arrive **only while charging** - exactly when time-remaining is
+  meaningless. It now rides BLE too (verified: the first new-format line arrived as
+  `[device/ble]`). The line carries `left=` (MINUTES, -1 = not measurable yet), plus `pcth=`
+  and `span=` purely as provenance in the host log: `left=-1 span=6` is "still measuring",
+  while `left=-1 span=25` says the trend was too flat or rising to state. The host turns -1
+  into an **absent** `leftMin`, never 0 - "not measured" and "no time left" are different
+  claims - and publishes `batt:{pct,mv,state,leftMin,ageSec}` in the heartbeat, with `ageSec`
+  computed on the way out so a stale reading cannot look fresh just because the heartbeat is.
+  The menu bar hides the row past 180s of age, since BATT arrives only once a minute and the
+  last one starts aging the instant the link drops.
 - Battery: charging (TP4054, ~290mA) and USB/battery power-path switching (Q3 P-FET) are pure
   hardware — firmware only *reads* the level, via the board's 100K/100K divider from BAT+ to
   IO34 (`analogReadMilliVolts * 2`, EMA-smoothed, table-mapped to %). There is **no VBUS-sense

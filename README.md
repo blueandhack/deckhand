@@ -859,6 +859,13 @@ SESSIONS
          Read the project
 ```
 
+**Battery** appears under the device name — `78% · ~5h left` — and the hours are
+measured, not modelled: the device watches its own voltage fall and says nothing
+until that trend clears its ADC noise, roughly 20 minutes after you unplug. While
+charging it says `charging`, and a reading older than three minutes is hidden
+rather than shown as current. The same figure is on the device at
+**SETTINGS › STATUS**, as `42% 3.85V ~5h`.
+
 **Sessions come from the host's own tick line**, so they arrive already
 urgency-sorted (needs-input first) and the menu can never disagree with the
 device about which session matters most. A row reveals that project's directory

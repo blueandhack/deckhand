@@ -57,19 +57,50 @@ bool batteryPresent() { return batteryMv > 2500; }
 // Resting-voltage discharge curve for a 1S LiPo. Coarse on purpose: without
 // a coulomb counter this is an estimate, and load sag makes it read a few
 // percent low while the backlight is bright - fine for a desk gadget.
-int batteryPct() {
+// Split out from batteryPct() so a STORED sample can be mapped through the same
+// curve. The trend below needs that: the non-linearity lives in this table, so a
+// slope taken in millivolts is not a slope in charge.
+int pctFromMv(int mv) {
   static const int mvT[] = {3300, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200};
   static const int pcT[] = {0, 8, 15, 28, 45, 62, 78, 90, 100};
   const int n = 9;
-  if (batteryMv <= mvT[0]) return 0;
-  if (batteryMv >= mvT[n - 1]) return 100;
+  if (mv <= mvT[0]) return 0;
+  if (mv >= mvT[n - 1]) return 100;
   for (int i = 1; i < n; i++) {
-    if (batteryMv < mvT[i]) {
-      return pcT[i - 1] + (pcT[i] - pcT[i - 1]) * (batteryMv - mvT[i - 1]) / (mvT[i] - mvT[i - 1]);
+    if (mv < mvT[i]) {
+      return pcT[i - 1] + (pcT[i] - pcT[i - 1]) * (mv - mvT[i - 1]) / (mvT[i] - mvT[i - 1]);
     }
   }
   return 100;
 }
+int batteryPct() { return pctFromMv(batteryMv); }
+// ----- Time remaining on battery -----
+//
+// There is no coulomb counter on this board, so runtime left can only come from
+// watching the voltage fall - which makes the NOISE FLOOR the whole design
+// problem, not the arithmetic. The sleep report already records what happens
+// when a small delta is extrapolated: a 7mV drift over 3 minutes became
+// "-133.7 mV/h", a flat cell in four hours, from noise multiplied by 20. So
+// nothing is reported until the window is both long enough and has moved far
+// enough for the movement to outweigh the noise.
+const int BATT_TREND_SLOTS = 30;                       // one sample a minute
+const unsigned long BATT_TREND_INTERVAL_MS = 60000UL;  // -> a 30 minute window
+const unsigned long BATT_TREND_MIN_SPAN_MS = 1200000UL;  // 20 min before reporting
+const int BATT_TREND_MIN_DROP_MV = 25;                 // clear of the ADC's own noise
+const int BATT_TREND_MIN_PCT_PER_H_X10 = 2;            // 0.2%/h; flatter reads as unknown
+
+int battTrendMv[BATT_TREND_SLOTS];
+unsigned long battTrendAt[BATT_TREND_SLOTS];
+int battTrendCount = 0;   // slots filled
+int battTrendHead = 0;    // next slot to write
+unsigned long battTrendLast = 0;
+
+void battTrendReset() {
+  battTrendCount = 0;
+  battTrendHead = 0;
+  battTrendLast = 0;
+}
+
 BattState batteryState() {
   if (!batteryPresent()) return BATT_NONE;
   // While the TP4054 is charging, BAT_ADC reads the charge voltage, which
@@ -77,6 +108,85 @@ BattState batteryState() {
   if (usbLinkActive()) return batteryMv >= 4180 ? BATT_FULL : BATT_CHARGING;
   return BATT_DISCHARGING;
 }
+// Called from the 1s battery tick. Only accumulates while actually on battery:
+// a window that spanned a charge would average the wrong sign.
+void battTrendSample() {
+  if (batteryState() != BATT_DISCHARGING) { battTrendReset(); return; }
+  unsigned long now = millis();
+  if (battTrendLast != 0 && now - battTrendLast < BATT_TREND_INTERVAL_MS) return;
+  if (battTrendCount > 0) {
+    int prev = battTrendMv[(battTrendHead + BATT_TREND_SLOTS - 1) % BATT_TREND_SLOTS];
+    // A real rise means the cell gained charge (a data-less wall charger reads as
+    // DISCHARGING here - there is no VBUS-sense pin), and averaging across that
+    // would understate the drain. 40mV is well past sag and noise.
+    if (batteryMv > prev + 40) battTrendReset();
+  }
+  battTrendLast = now;
+  battTrendMv[battTrendHead] = batteryMv;
+  battTrendAt[battTrendHead] = now;
+  battTrendHead = (battTrendHead + 1) % BATT_TREND_SLOTS;
+  if (battTrendCount < BATT_TREND_SLOTS) battTrendCount++;
+}
+
+int battTrendSpanMin() {
+  if (battTrendCount < 2) return 0;
+  int oldest = (battTrendHead + BATT_TREND_SLOTS - battTrendCount) % BATT_TREND_SLOTS;
+  int newest = (battTrendHead + BATT_TREND_SLOTS - 1) % BATT_TREND_SLOTS;
+  return (int) ((battTrendAt[newest] - battTrendAt[oldest]) / 60000UL);
+}
+
+// Discharge rate in %/h x10, or -1 while it cannot honestly be stated.
+//
+// A NON-NEGATIVE SLOPE IS NOT "BATTERY FOREVER", IT IS UNKNOWN. When the
+// backlight blanks after 30s idle the load drops and the cell voltage REBOUNDS,
+// so a rising reading is the normal consequence of the screen going off, not
+// evidence of charging. For the same reason the window deliberately does NOT
+// reset when the backlight changes: spanning both blanked and lit periods is
+// what makes the average reflect how the device is actually being used.
+int battPctPerHourX10() {
+  if (battTrendCount < 3) return -1;
+  int oldest = (battTrendHead + BATT_TREND_SLOTS - battTrendCount) % BATT_TREND_SLOTS;
+  int newest = (battTrendHead + BATT_TREND_SLOTS - 1) % BATT_TREND_SLOTS;
+  if (battTrendAt[newest] - battTrendAt[oldest] < BATT_TREND_MIN_SPAN_MS) return -1;
+  if (battTrendMv[oldest] - battTrendMv[newest] < BATT_TREND_MIN_DROP_MV) return -1;
+  // Least squares over the whole window, not endpoint-to-endpoint: one sample
+  // taken while the backlight was on sits several mV below its neighbours, which
+  // is more movement than the trend itself makes over 20 minutes.
+  double n = 0, sx = 0, sy = 0, sxy = 0, sxx = 0;
+  for (int i = 0; i < battTrendCount; i++) {
+    int idx = (oldest + i) % BATT_TREND_SLOTS;
+    double x = (double) (battTrendAt[idx] - battTrendAt[oldest]) / 3600000.0;  // hours
+    double y = (double) pctFromMv(battTrendMv[idx]);
+    n++; sx += x; sy += y; sxy += x * y; sxx += x * x;
+  }
+  double denom = n * sxx - sx * sx;
+  if (denom <= 0) return -1;
+  double slope = (n * sxy - sx * sy) / denom;   // %/h, negative while draining
+  int rate = (int) (-slope * 10 + 0.5);
+  return rate < BATT_TREND_MIN_PCT_PER_H_X10 ? -1 : rate;
+}
+
+// Minutes of runtime left at the recent rate, or -1 when not yet measurable.
+int battMinutesLeft() {
+  int rate = battPctPerHourX10();
+  if (rate < 0) return -1;
+  int pct = batteryPct();
+  if (pct <= 0) return 0;
+  long mins = (long) pct * 600L / rate;
+  // Clamped because this is a display, not a claim: at the 0.2%/h floor the
+  // arithmetic reaches hundreds of hours, which would read as broken.
+  if (mins > 99L * 60L) mins = 99L * 60L;
+  return (int) mins;
+}
+
+// "~5h" / "~95m", or empty when unknown - compact because it shares a row with
+// the percentage and the voltage.
+void battLeftLabel(char* out, size_t n, int mins) {
+  if (mins < 0) { out[0] = '\0'; return; }
+  if (mins < 120) snprintf(out, n, "~%dm", mins);
+  else snprintf(out, n, "~%dh", (mins + 30) / 60);
+}
+
 void loadBeepEnabled() { beepEnabled = prefs.getBool("beepOn", true); }
 void saveBeepEnabled() { prefs.putBool("beepOn", beepEnabled); }
 void applyVolume() { beepDuty = VOL_PRESETS[volPresetIdx]; }

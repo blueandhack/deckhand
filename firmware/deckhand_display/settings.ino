@@ -116,8 +116,20 @@ void renderStatusPage() {
     drawConnDot(CARD_X + PAD + 6, DEV_CARD_Y + DROW_BATT + 8, 6, battHealthy, COLOR_CARD);
   }
   if (bst == BATT_NONE) snprintf(buf, sizeof(buf), "not found");
-  else snprintf(buf, sizeof(buf), "%d%% %d.%02dV", pct, batteryMv / 1000, (batteryMv % 1000) / 10);
-  padLeftTo(buf, sizeof(buf), 12);
+  else {
+    // Runtime left is appended only once it has actually been MEASURED - see
+    // battMinutesLeft(). While charging there is nothing to state, and for the
+    // first ~20 minutes off USB the trend is still inside the ADC's noise, so the
+    // row reads exactly as it always did rather than showing a placeholder.
+    char left[8] = "";
+    if (bst == BATT_DISCHARGING) battLeftLabel(left, sizeof(left), battMinutesLeft());
+    snprintf(buf, sizeof(buf), "%d%% %d.%02dV%s%s", pct, batteryMv / 1000,
+             (batteryMv % 1000) / 10, left[0] ? " " : "", left);
+  }
+  // 15 = "100% 4.20V ~99h", the widest this can be. In Cozette 6x13 that is 90px
+  // right-aligned to x=214, so it starts at 124 against a "Battery" label ending
+  // at 88 - widening the format past 15 eats that 36px of clearance.
+  padLeftTo(buf, sizeof(buf), 15);
   // Same level colour as the footer pill - the two show the same reading, so
   // they must not disagree about how healthy it is. Cache-busted on a colour
   // flip: plugging in changes the colour while "42% 3.85V" stays identical, and
