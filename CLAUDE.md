@@ -143,6 +143,15 @@ before anything reaches it. Always go through the trigger-file mechanism above s
 rides the connection the running host script already has open. (BLE doesn't have this problem —
 only USB's CH340 auto-reset behaves this way.)
 
+Exercise the battery time-remaining estimator's arithmetic and guards without waiting 20
+minutes on a real cell (it **parses the thresholds out of `power.ino`**, so a mirror that
+drifts from the firmware fails loudly instead of passing while the firmware is broken —
+verified by tampering with one: exit 1):
+
+```
+python3 firmware/deckhand_display/batt-trend-check.py
+```
+
 Validate the DARK/LIGHT palettes (contrast plus colour-blind/greyscale separability) and prove
 the checker itself has teeth:
 
