@@ -11,8 +11,16 @@
 import Cocoa
 import ServiceManagement
 
-let heartbeatPath = "/tmp/deckhand-host-alive"
-let logPath = "/tmp/deckhand-host.log"
+// PER-USER runtime dir, and this MUST match RUNTIME_DIR in host/index.mjs and the same
+// derivation in claude-hooks/deckhand-session-hook.mjs. Three places now derive it
+// independently and cannot import from one another; when this one was missed the app
+// read a heartbeat nobody writes and reported the host as down while it was running
+// perfectly, with "Open host log" opening nothing. The failure is silent in exactly the
+// way the host/hook pair is: no error, just a wrong answer.
+let runtimeDir = ProcessInfo.processInfo.environment["DECKHAND_TMP"]
+    ?? "/tmp/deckhand-\(getuid())"
+let heartbeatPath = runtimeDir + "/host-alive"
+let logPath = runtimeDir + "/host.log"
 // Drop a "FORGET" line here and the host clears its BLE pin (re-pairs to the
 // next device connected over USB). Same trigger file the host watches for
 // device commands like RECAL.

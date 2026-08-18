@@ -76,7 +76,12 @@ check "snapshot taken before removing" "$([ "$(ls "$T/Deckhand-backups" | wc -l 
 echo "== 4b. REGRESSION: must not touch the REAL /tmp host state =="
 # Sentinels at the real paths. If uninstall ignores DECKHAND_TMP these get deleted, which
 # is exactly what happened to the running host before the seam existed.
-REAL_LOG=/tmp/deckhand-host.log; REAL_ATT=/tmp/deckhand-oauth-attempt.json
+# These must track RUNTIME_DIR in host/index.mjs. Pointed at the pre-per-user flat
+# paths they still PASSED - nothing writes there any more, so the assertion had no
+# teeth and would not have caught the bug it exists for a second time.
+REAL_DIR="/tmp/deckhand-$(id -u)"
+REAL_LOG="$REAL_DIR/host.log"; REAL_ATT="$REAL_DIR/oauth-attempt.json"
+mkdir -p "$REAL_DIR"
 touch "$REAL_LOG.testsentinel" "$REAL_ATT.testsentinel"
 had_log=$([ -e "$REAL_LOG" ] && echo 1 || echo 0)
 echo "sentinel" > "$T/tmp/host.log"
