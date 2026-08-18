@@ -837,9 +837,48 @@ mac-app/build.sh
 open mac-app/DeckhandMenuBar.app
 ```
 
-It puts an origami paper-boat icon in the menu bar whose dropdown shows
-connection status and quota, with **Start / Stop Deckhand**, a **Launch at
-login** toggle, and **Quit**.
+It puts an origami paper-boat icon in the menu bar. The dropdown is grouped:
+where the host stands, what quota is left, who is waiting on you, the last
+dictation, then the controls — **Start / Stop Deckhand**, **Answer prompts on
+device**, a **Device** submenu (which is also where **Forget** lives, since it
+is a destructive per-device action), and **Launch at login**.
+
+```
+● Syncing · USB + Bluetooth
+   Deckhand-0528
+──────────────────────────────
+5h    ██░░░░░░░░   16% used
+         resets in 2h 44m
+7d    █░░░░░░░░░    2% used
+         resets in 6d 21h
+Codex ░░░░░░░░░░    0% used
+──────────────────────────────
+SESSIONS
+■  deckhand  ·  needs input
+●  api        ·  working
+         Read the project
+```
+
+**Sessions come from the host's own tick line**, so they arrive already
+urgency-sorted (needs-input first) and the menu can never disagree with the
+device about which session matters most. A row reveals that project's directory
+in Finder. When a session needs input, a **count appears beside the boat** in
+the bar — and nothing sits there otherwise, because a badge that is always
+present stops being a signal.
+
+Quota says **"% used"** with the reset time in hours and days, and the bar plus
+the words `high` / `critical` carry the same thing the orange and red do:
+informational menu rows are disabled rows, which macOS may composite at reduced
+alpha, so colour is never the only cue here — the same rule the device UI
+follows.
+
+Two flags let you inspect the menu without opening it by hand, which is
+otherwise impossible to check:
+
+```
+DeckhandMenuBar --menu-dump                 # the real menu as text, incl. hidden/disabled state
+DeckhandMenuBar --menu-preview /tmp/m.png   # its actual styling, light and dark side by side
+```
 
 The icon is deliberately *not* the project's ship's wheel. The wheel is the
 mark — it is on the device's waiting screen, in the hero image and in the app

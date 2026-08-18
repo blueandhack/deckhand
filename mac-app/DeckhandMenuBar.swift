@@ -48,10 +48,22 @@ func launchdPlist() -> String {
 }
 func isSupervised() -> Bool { FileManager.default.fileExists(atPath: launchdPlist()) }
 
+// One row of the sessions array the host already embeds in every tick line.
+struct SessionRow {
+    var id = "", name = "", status = "", path = "", title = "", agent = "cc"
+}
+
 struct HostStatus {
     var running = false
     var deviceConnected = false
-    var quota: String? = nil
+    // Quota as NUMBERS, where this used to keep one pre-formatted string. The
+    // menu now draws a bar and a humanised reset time, and neither can be
+    // recovered from "13%" after the fact.
+    var pct5h: Int? = nil, reset5h: Int? = nil
+    var pct7d: Int? = nil, reset7d: Int? = nil
+    var cxPct: Int? = nil, cxReset: Int? = nil
+    var sessions: [SessionRow] = []
+    var asking: Int { sessions.filter { $0.status == "asking" }.count }
     var via: String? = nil
     var device: String? = nil    // device we're actually talking to, e.g. "Deckhand-A37A"
     var selected: String? = nil  // the one chosen in the picker; nil = "any"
@@ -97,12 +109,17 @@ func readStatus() -> HostStatus {
             }
         }
     }
-    if s.running, let t = tail(logPath, 8192) {
+    // 32KB, not 8KB: a tick line now yields its whole sessions array and six
+    // sessions with titles and prompts runs to a couple of KB, so the smaller
+    // window held only a line or two - and a truncated oldest line is why this
+    // scans from the END for one that is complete.
+    if s.running, let t = tail(logPath, 32768) {
         for line in t.split(separator: "\n").reversed() where line.hasPrefix("5h=") {
-            if let f = field(line, "5h="), let d = field(line, "7d=") {
-                s.quota = "5h \(f)   ·   7d \(d)"
-            }
+            if let (pct, reset) = pctReset(line, "5h=") { s.pct5h = pct; s.reset5h = reset }
+            if let (pct, reset) = pctReset(line, "7d=") { s.pct7d = pct; s.reset7d = reset }
+            if let (pct, reset) = pctReset(line, "codex=") { s.cxPct = pct; s.cxReset = reset }
             s.via = field(line, "via=")
+            s.sessions = extractSessions(line)
             break
         }
     }
@@ -118,11 +135,172 @@ func field(_ line: Substring, _ key: String) -> String? {
     return String(rest)
 }
 
+/// "5h=13% (resets 176m)" -> (13, 176); "codex=0%/7d (resets 3845m)" -> (0, 3845).
+///
+/// field() above cannot do this and that is not an oversight to fix in place: it
+/// stops at the first space, which is exactly why the reset time was being read
+/// off the line and then discarded. The two forms differ after the percent
+/// ("codex" carries its window), so the reset clause is searched for rather than
+/// assumed to follow immediately.
+func pctReset(_ line: Substring, _ key: String) -> (Int, Int?)? {
+    guard let r = line.range(of: key) else { return nil }
+    let rest = line[r.upperBound...]
+    guard let pctEnd = rest.firstIndex(of: "%"), let pct = Int(rest[..<pctEnd]) else { return nil }
+    var reset: Int? = nil
+    let after = rest[rest.index(after: pctEnd)...]
+    if let rr = after.prefix(24).range(of: "(resets "),
+       let close = after[rr.upperBound...].firstIndex(of: ")") {
+        reset = Int(after[rr.upperBound..<close].dropLast())   // "176m" -> 176
+    }
+    return (pct, reset)
+}
+
+/// The sessions array out of `sessions(N)=[{...}]` in a tick line.
+///
+/// The closing bracket is found by matching depth while respecting quotes and
+/// escapes, NOT by searching for the " via=" that follows it: a session's title
+/// and prompt are in there verbatim, so anyone who dictates or types "via=" -
+/// entirely likely in a project about two transports - would corrupt the parse.
+/// Any malformed input yields an empty list; a status menu must not crash over a
+/// log line.
+func extractSessions(_ line: Substring) -> [SessionRow] {
+    guard let key = line.range(of: "sessions("),
+          let eq = line[key.upperBound...].range(of: "=[") else { return [] }
+    let start = line.index(after: eq.lowerBound)          // the '['
+    var depth = 0, inStr = false, esc = false, end: Substring.Index? = nil
+    var i = start
+    while i < line.endIndex {
+        let c = line[i]
+        if esc { esc = false }
+        else if c == "\\" { esc = true }
+        else if inStr { if c == "\"" { inStr = false } }
+        else if c == "\"" { inStr = true }
+        else if c == "[" || c == "{" { depth += 1 }
+        else if c == "]" || c == "}" {
+            depth -= 1
+            if depth == 0 { end = i; break }
+        }
+        i = line.index(after: i)
+    }
+    guard let last = end,
+          let data = String(line[start...last]).data(using: .utf8),
+          let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+    return arr.map { o in
+        var r = SessionRow()
+        r.id = o["id"] as? String ?? ""
+        r.name = o["name"] as? String ?? "?"
+        r.status = o["status"] as? String ?? ""
+        r.path = o["path"] as? String ?? ""
+        r.title = o["title"] as? String ?? ""
+        r.agent = o["agent"] as? String ?? "cc"
+        return r
+    }
+}
+
+// "usb,ble" -> "USB + Bluetooth". Both transports are normally live at once, so
+// this is a list and never a single "active transport".
+func viaLabel(_ v: String) -> String {
+    v.split(separator: ",").map {
+        $0 == "usb" ? "USB" : ($0 == "ble" ? "Bluetooth" : String($0))
+    }.joined(separator: " + ")
+}
+
+func humanMinutes(_ m: Int) -> String {
+    if m < 60 { return "\(m)m" }
+    let h = m / 60, mm = m % 60
+    if h < 24 { return mm == 0 ? "\(h)h" : "\(h)h \(mm)m" }
+    let d = h / 24, hh = h % 24
+    return hh == 0 ? "\(d)d" : "\(d)d \(hh)h"
+}
+
+// Truncate for the menu; the full text is in the host log either way.
+func clip(_ t: String, _ n: Int) -> String { t.count > n ? String(t.prefix(n)) + "…" : t }
+
+// The host caps its session list at 6, so a deeper pool could never fill.
+let MAX_SESSION_ROWS = 6
+let BAR_CELLS = 10
+func quotaBar(_ pct: Int) -> String {
+    var filled = Int((Double(pct) / 100 * Double(BAR_CELLS)).rounded())
+    // Any usage at all must show a cell: 1% rounding to an empty bar would read
+    // as "none used", which is a different claim than "barely any".
+    if pct > 0 && filled == 0 { filled = 1 }
+    filled = max(0, min(BAR_CELLS, filled))
+    // FULL BLOCK against LIGHT SHADE, not ▰/▱. The geometric pair renders at 11pt
+    // as a faint dashed line where filled and empty are barely distinguishable -
+    // checked against a render, not assumed. These two differ in ink, not shape.
+    return String(repeating: "█", count: filled) + String(repeating: "░", count: BAR_CELLS - filled)
+}
+
+// Menu text styling.
+//
+// Informational rows are DISABLED, which is the right semantics - no hover, not
+// keyboard-focusable - and AppKit may composite a disabled row at reduced alpha.
+// So a colour here can be dimmed by the system, and every threshold it marks is
+// ALSO said in words and drawn in the bar. That is the device UI's
+// colour-is-never-alone rule applying to the Mac side for the same reason.
+let F_BODY = NSFont.menuFont(ofSize: 0)
+let F_BOLD = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+let F_SMALL = NSFont.menuFont(ofSize: 11)
+let F_MONO = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+
+/// What sits beside the boat in the bar: a count when something is waiting on
+/// you, and NOTHING otherwise - a badge that is always there stops being a
+/// signal. Shared with --menu-dump on purpose: a diagnostic that recomputes the
+/// answer its own way can agree with itself while the app does something else.
+func barCountLabel(_ s: HostStatus) -> String { s.asking > 0 ? " \(s.asking)" : "" }
+
+func menuTitle(_ parts: [(String, NSFont, NSColor)]) -> NSAttributedString {
+    let out = NSMutableAttributedString()
+    for (t, f, c) in parts where !t.isEmpty {
+        out.append(NSAttributedString(string: t, attributes: [.font: f, .foregroundColor: c]))
+    }
+    return out
+}
+
+func quotaTitle(_ label: String, _ pct: Int, _ reset: Int?) -> NSAttributedString {
+    let colour: NSColor = pct >= 95 ? .systemRed : (pct >= 80 ? .systemOrange : .labelColor)
+    let note = pct >= 95 ? "  critical" : (pct >= 80 ? "  high" : "")
+    return menuTitle([
+        (label.padding(toLength: 6, withPad: " ", startingAt: 0), F_MONO, .secondaryLabelColor),
+        (quotaBar(pct), F_MONO, colour),
+        (String(format: "  %3d%% used%@", pct, note), F_MONO, colour),
+        // Indented with monospaced spaces so it sits under the bar. Padding a
+        // proportional font gave a third of the intended indent.
+        (reset.map { _ in "\n      " } ?? "", F_MONO, .secondaryLabelColor),
+        (reset.map { "resets in \(humanMinutes($0))" } ?? "", F_SMALL, .secondaryLabelColor),
+    ])
+}
+
+func sessionTitle(_ r: SessionRow) -> NSAttributedString {
+    // Shape and word, never colour alone: filled square asks, hollow ring waits,
+    // dot works - the same three states the device draws, in the same order of
+    // urgency the host already sorted them into.
+    let asking = r.status == "asking"
+    let glyph = asking ? "■" : (r.status == "waiting" ? "○" : "●")
+    var meta = "  ·  " + (asking ? "needs input" : r.status)
+    if r.agent == "cx" { meta += "  ·  Codex" }
+    return menuTitle([
+        ("\(glyph)  ", F_BODY, asking ? .systemOrange : .secondaryLabelColor),
+        (r.name, asking ? F_BOLD : F_BODY, .labelColor),
+        (meta, F_SMALL, .secondaryLabelColor),
+        (r.title.isEmpty ? "" : "\n     ", F_MONO, .secondaryLabelColor),
+        (r.title.isEmpty ? "" : clip(r.title, 40), F_SMALL, .secondaryLabelColor),
+    ])
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let quotaLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let pairedLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let deviceLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let q5 = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let q7 = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let cxLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let sessionsHeader = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    // A fixed pool that is shown or hidden, never added and removed. The menu can
+    // be OPEN while the 3s refresh runs, and rebuilding items under the cursor
+    // makes the list jump; hiding is what the voice rows already did.
+    var sessionRows: [NSMenuItem] = []
+    let voiceSep = NSMenuItem.separator()
     let startStop = NSMenuItem(title: "", action: #selector(toggleHost), keyEquivalent: "")
     let deviceItem = NSMenuItem(title: "Device", action: nil, keyEquivalent: "")
     let deviceMenu = NSMenu()
@@ -138,6 +316,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // reboot). downSince/lastRestart debounce the restart.
     var downSince: Date?
     var lastRestart = Date.distantPast
+    // --menu-dump / --menu-preview build the real menu and refresh it. Neither may
+    // start or stop anything, so the watchdog is skipped outright rather than
+    // relied on to be a no-op on a single call.
+    var dryRun = false
     var wantRunning: Bool {
         get { UserDefaults.standard.bool(forKey: "wantRunning") }
         set { UserDefaults.standard.set(newValue, forKey: "wantRunning") }
@@ -146,22 +328,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-        let menu = NSMenu()
-        statusLine.isEnabled = false
-        quotaLine.isEnabled = false
-        pairedLine.isEnabled = false
-        deviceItem.submenu = deviceMenu
-        voiceHeard.isEnabled = false
-        voiceReplyItem.isEnabled = false
-        [statusLine, quotaLine, pairedLine, voiceHeard, voiceReplyItem,
-         NSMenuItem.separator(), startStop, deviceItem, forgetItem, remoteItem, loginItem,
-         NSMenuItem(title: "Open host log", action: #selector(openLog), keyEquivalent: ""),
-         NSMenuItem.separator(),
-         NSMenuItem(title: "Quit Deckhand", action: #selector(quit), keyEquivalent: "q")].forEach {
-            $0.target = self
-            menu.addItem($0)
-        }
-        statusItem.menu = menu
+        statusItem.menu = buildMenu()
 
         refresh()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
@@ -176,43 +343,121 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Built in its own method, not inline above, so --menu-dump can construct the
+    // real menu without starting timers or adopting host state.
+    func buildMenu() -> NSMenu {
+        let menu = NSMenu()
+        // EXPLICIT enablement. With autoenablesItems on (the default) AppKit
+        // re-enables anything that has a target and an action, which silently
+        // undid the isEnabled this code sets for Forget and the Device submenu -
+        // so Forget was clickable with no device paired.
+        menu.autoenablesItems = false
+        deviceMenu.autoenablesItems = false
+        deviceItem.submenu = deviceMenu
+
+        sessionRows = (0..<MAX_SESSION_ROWS).map { _ in
+            let it = NSMenuItem(title: "", action: #selector(openSessionFolder(_:)), keyEquivalent: "")
+            it.isHidden = true
+            return it
+        }
+
+        // Groups, separated: where the host stands / what quota is left / who is
+        // waiting on you / the last dictation / what you can do / logs and quit.
+        // Six actions used to run together under a single separator.
+        var items: [NSMenuItem] = [statusLine, deviceLine, .separator(), q5, q7, cxLine,
+                                   .separator(), sessionsHeader]
+        items += sessionRows
+        items += [voiceSep, voiceHeard, voiceReplyItem,
+                  .separator(), startStop, remoteItem, deviceItem, loginItem,
+                  .separator(),
+                  NSMenuItem(title: "Open host log", action: #selector(openLog), keyEquivalent: ""),
+                  NSMenuItem(title: "Quit Deckhand", action: #selector(quit), keyEquivalent: "q")]
+        for it in items {
+            it.target = self
+            // An item with no action is information; one with an action is a
+            // control. Deriving the baseline from that makes a silently dead
+            // item impossible, which is what explicit enablement risks.
+            it.isEnabled = it.action != nil
+            menu.addItem(it)
+        }
+        return menu
+    }
+
     func refresh() {
         let s = readStatus()
-        if let button = statusItem.button {
+        if let si = statusItem, let button = si.button {
             // The bar's own thickness sets the size, so this follows a
             // 24px bar or a 22px one instead of assuming either.
             let h = max(16, min(20, button.bounds.height - 4))
             button.image = deckhandPaperBoatImage(size: h, style: s.running ? .solid : .outline)
             button.contentTintColor = !s.running ? NSColor.systemGray
                 : (s.deviceConnected ? nil : NSColor.systemOrange)
+            // A count beside the boat when something is waiting on you, and
+            // NOTHING otherwise - a badge that is always present stops being a
+            // signal. The number is the signal, not its colour.
+            button.title = barCountLabel(s)
+            button.imagePosition = button.title.isEmpty ? .imageOnly : .imageLeading
         }
         if !s.running {
-            statusLine.title = "◦  Stopped"
+            statusLine.attributedTitle = menuTitle([("◦  ", F_BODY, .secondaryLabelColor),
+                                                    ("Stopped", F_BOLD, .labelColor)])
         } else if s.deviceConnected {
-            statusLine.title = "●  Syncing" + (s.via.map { "  ·  \($0)" } ?? "")
+            statusLine.attributedTitle = menuTitle([
+                ("●  ", F_BODY, .controlAccentColor), ("Syncing", F_BOLD, .labelColor),
+                (s.via.map { "  ·  \(viaLabel($0))" } ?? "", F_SMALL, .secondaryLabelColor)])
         } else {
-            statusLine.title = "◦  Running  ·  device offline"
+            statusLine.attributedTitle = menuTitle([
+                ("◦  ", F_BODY, .systemOrange), ("Running", F_BOLD, .labelColor),
+                ("  ·  device offline", F_SMALL, .secondaryLabelColor)])
         }
-        quotaLine.title = s.quota ?? "quota: —"
-        quotaLine.isHidden = s.quota == nil
-        pairedLine.title = s.device.map { "Paired: \($0)" } ?? "No device paired"
-        forgetItem.isEnabled = s.running && s.device != nil
-        // Truncate for the menu; the full text is in the host log either way.
-        func clip(_ t: String, _ n: Int) -> String { t.count > n ? String(t.prefix(n)) + "…" : t }
+        // The paired device becomes a sub-line of the status rather than its own
+        // "Paired:" row - same information, one row fewer, and it reads as
+        // belonging to the connection above it.
+        deviceLine.attributedTitle = menuTitle([
+            ("      ", F_SMALL, .secondaryLabelColor),
+            (s.device ?? s.selected ?? "No device paired", F_SMALL, .secondaryLabelColor)])
+
+        if let pct = s.pct5h { q5.attributedTitle = quotaTitle("5h", pct, s.reset5h) }
+        if let pct = s.pct7d { q7.attributedTitle = quotaTitle("7d", pct, s.reset7d) }
+        if let pct = s.cxPct { cxLine.attributedTitle = quotaTitle("Codex", pct, s.cxReset) }
+        q5.isHidden = s.pct5h == nil
+        q7.isHidden = s.pct7d == nil
+        cxLine.isHidden = s.cxPct == nil
+
+        // Sessions keep the ORDER THE HOST SORTED THEM INTO (asking, then waiting,
+        // then working, then recency). Re-sorting here would let the menu and the
+        // device disagree about which session matters most.
+        sessionsHeader.attributedTitle = menuTitle([("SESSIONS", F_SMALL, .tertiaryLabelColor)])
+        sessionsHeader.isHidden = s.sessions.isEmpty
+        for (i, row) in sessionRows.enumerated() {
+            guard i < s.sessions.count else { row.isHidden = true; continue }
+            let r = s.sessions[i]
+            row.attributedTitle = sessionTitle(r)
+            row.representedObject = r.path
+            row.toolTip = r.path.isEmpty ? nil : "Reveal \(r.path) in Finder"
+            row.isEnabled = !r.path.isEmpty
+            row.isHidden = false
+        }
+        forgetItem.title = "Forget \(s.device ?? s.selected ?? "this device")…"
+        // The last dictation, which is the ONLY Mac-side trace of one - a headless
+        // `claude -p --resume` appears in no Claude Code window. The transcript is
+        // verbatim quoted text, so it renders monospaced for the same reason the
+        // device renders it in Cozette rather than prose.
         if let t = s.voiceText, !t.isEmpty {
-            voiceHeard.title = "🎤  \u{201C}\(clip(t, 48))\u{201D}"
-            voiceHeard.isHidden = false
             let st = s.voiceState ?? ""
-            if let r = s.voiceReply, !r.isEmpty {
-                voiceReplyItem.title = (st == "error" ? "⚠︎  " : "↳  ") + clip(r, 56)
-                voiceReplyItem.isHidden = false
-            } else {
-                voiceReplyItem.title = st == "sent" ? "↳  sent to session, waiting…" : "↳  \(st)"
-                voiceReplyItem.isHidden = st.isEmpty
-            }
+            let reply = (s.voiceReply?.isEmpty == false) ? s.voiceReply!
+                : (st == "sent" ? "sent to session, waiting…" : st)
+            voiceHeard.attributedTitle = menuTitle([("“\(clip(t, 42))”", F_MONO, .labelColor)])
+            voiceReplyItem.attributedTitle = menuTitle([
+                (st == "error" ? "⚠  " : "↳  ", F_SMALL, .secondaryLabelColor),
+                (clip(reply, 50), F_SMALL, st == "error" ? .systemOrange : .secondaryLabelColor)])
+            voiceHeard.isHidden = false
+            voiceReplyItem.isHidden = reply.isEmpty
+            voiceSep.isHidden = false
         } else {
             voiceHeard.isHidden = true
             voiceReplyItem.isHidden = true
+            voiceSep.isHidden = true
         }
         remoteItem.isEnabled = s.running
         remoteItem.state = s.remoteAnswer ? .on : .off
@@ -232,6 +477,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Skipped entirely when launchd owns the host: it restarts a dead process within
         // a second and survives reboots, which is strictly better than this loop, and
         // two supervisors racing each other is worse than either alone.
+        if dryRun { return }
         if wantRunning && !s.running && !isSupervised() {
             if downSince == nil { downSince = Date() }
             else if Date().timeIntervalSince(downSince!) > 20,
@@ -330,6 +576,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let any = NSMenuItem(title: "Any device", action: #selector(selectDevice(_:)), keyEquivalent: "")
         any.target = self
+        any.isEnabled = true
         any.representedObject = ""            // "" = auto
         any.state = (s.selected == nil) ? .on : .off
         deviceMenu.addItem(any)
@@ -343,8 +590,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             item.target = self
             item.representedObject = name
             item.state = (name == s.selected) ? .on : .off
+            item.isEnabled = true
             deviceMenu.addItem(item)
         }
+        // Forget lives HERE, not in the top-level menu: it is a destructive
+        // per-device action and this is where the devices are. It is still named
+        // explicitly, so it forgets the one shown rather than whatever is current
+        // when the host reads the trigger file.
+        deviceMenu.addItem(.separator())
+        forgetItem.isEnabled = s.running && (s.device ?? s.selected) != nil
+        deviceMenu.addItem(forgetItem)
     }
 
     // Switching is instant and harmless (the host just re-points its BLE scan),
@@ -382,6 +637,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         try? "FORGET \(target ?? "")".trimmingCharacters(in: .whitespaces)
             .write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
+    }
+
+    @objc func openSessionFolder(_ item: NSMenuItem) {
+        guard let path = item.representedObject as? String, !path.isEmpty else { return }
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
     }
 
     @objc func openLog() {
@@ -483,6 +743,69 @@ func deckhandPaperBoatImage(size: CGFloat, style: BoatStyle) -> NSImage {
     return img
 }
 
+/// `--menu-dump`: the real menu as indented text, including the submenu and every
+/// row's hidden/disabled/checked state. A menu cannot be screenshotted without
+/// opening it by hand, so without this the structure is unverifiable.
+func dumpMenu(_ m: NSMenu, indent: String = "") -> String {
+    var out = ""
+    for it in m.items {
+        var flags: [String] = []
+        if it.isHidden { flags.append("hidden") }
+        if it.isSeparatorItem { out += indent + "──────────" + (flags.isEmpty ? "" : "  [hidden]") + "\n"; continue }
+        if !it.isEnabled { flags.append("disabled") }
+        if it.state == .on { flags.append("checked") }
+        if it.submenu != nil { flags.append("submenu") }
+        let title = (it.attributedTitle?.string ?? it.title)
+            .replacingOccurrences(of: "\n", with: "\n" + indent + "   ")
+        out += indent + title + (flags.isEmpty ? "" : "   [" + flags.joined(separator: " ") + "]") + "\n"
+        if let sub = it.submenu { out += dumpMenu(sub, indent: indent + "    ") }
+    }
+    return out
+}
+
+/// `--menu-preview <out.png>`: the menu's own attributed titles drawn as they will
+/// render, in BOTH appearances side by side. Every colour here is semantic
+/// (labelColor, secondaryLabelColor) and resolves at draw time, so light-only
+/// verification would prove nothing about the dark case.
+func writeMenuPreview(to path: String, _ m: NSMenu) {
+    let W: CGFloat = 330, pad: CGFloat = 14
+    var rows: [(NSAttributedString?, CGFloat)] = []
+    for it in m.items where !it.isHidden {
+        if it.isSeparatorItem { rows.append((nil, 11)); continue }
+        let a = it.attributedTitle ?? NSAttributedString(
+            string: it.title, attributes: [.font: F_BODY, .foregroundColor: NSColor.labelColor])
+        let h = a.boundingRect(with: CGSize(width: W - pad * 2, height: 400),
+                               options: [.usesLineFragmentOrigin]).height
+        rows.append((a, max(22, h + 8)))
+    }
+    let H = rows.reduce(0) { $0 + $1.1 } + pad * 2
+    let img = NSImage(size: CGSize(width: W * 2, height: H), flipped: true) { _ in
+        for (col, name) in [(0, NSAppearance.Name.aqua), (1, .darkAqua)] {
+            NSAppearance(named: name)?.performAsCurrentDrawingAppearance {
+                let x0 = CGFloat(col) * W
+                (col == 0 ? NSColor(white: 0.97, alpha: 1) : NSColor(white: 0.13, alpha: 1)).set()
+                CGRect(x: x0, y: 0, width: W, height: H).fill()
+                var y = pad
+                for (a, h) in rows {
+                    if let a = a {
+                        a.draw(with: CGRect(x: x0 + pad, y: y + 3, width: W - pad * 2, height: h),
+                               options: [.usesLineFragmentOrigin])
+                    } else {
+                        (col == 0 ? NSColor(white: 0.85, alpha: 1) : NSColor(white: 0.3, alpha: 1)).set()
+                        CGRect(x: x0 + pad, y: y + 5, width: W - pad * 2, height: 1).fill()
+                    }
+                    y += h
+                }
+            }
+        }
+        return true
+    }
+    let png = NSBitmapImageRep(data: img.tiffRepresentation!)!
+        .representation(using: .png, properties: [:])!
+    try? png.write(to: URL(fileURLWithPath: path))
+    print("wrote \(path)  (left: light appearance, right: dark)")
+}
+
 /// `--icon-preview <out.png>`: every style at every size, on light and dark
 /// bands, each at native size and again at 6x nearest-neighbour. "Does a folded
 /// crease survive at 16px?" is a question to LOOK at, not to reason about - the
@@ -533,6 +856,27 @@ let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
+
+// Inspection modes. Both build the REAL menu and refresh it against the live
+// host, so what they show is what the bar would show - but dryRun keeps refresh
+// from touching the watchdog, because a diagnostic must never start or stop
+// anything.
+if CommandLine.arguments.contains("--menu-dump") || CommandLine.arguments.contains("--menu-preview") {
+    let d = AppDelegate()
+    d.dryRun = true
+    let m = d.buildMenu()
+    d.refresh()
+    if CommandLine.arguments.contains("--menu-dump") {
+        let st = readStatus()
+        let count = barCountLabel(st)
+        print("menu bar: boat" + (count.isEmpty ? " (no count)" : " + count\"\(count)\"") + "\n")
+        print(dumpMenu(m))
+    }
+    if let i = CommandLine.arguments.firstIndex(of: "--menu-preview"), CommandLine.arguments.count > i + 1 {
+        writeMenuPreview(to: CommandLine.arguments[i + 1], m)
+    }
+    exit(0)
+}
 
 if let i = CommandLine.arguments.firstIndex(of: "--icon-preview") {
     writeIconPreview(to: CommandLine.arguments.count > i + 1
