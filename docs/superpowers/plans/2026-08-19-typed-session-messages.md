@@ -345,8 +345,8 @@ git commit -m "Issue a per-session nonce, and only while the session is READY"
 - Modify: `host/index.mjs` (`handleDeviceLine`, beside the existing `ANSWER` handling ~line 2204)
 
 **Interfaces:**
-- Consumes: `verifyPrompt` (Task 2), `resolveSessionId` (Task 1), `nonceForSession`/`consumeSessionNonce` (Task 3), the existing `deviceNameFor(via)`, `secretFor(...)`, `VOICE_DELIVERY`, `copyToClipboard`, `notify`, `projectName`, `setVoice`, `CLAUDE_BIN`.
-- Produces: handling for `PROMPT <id12> <base64text> <hmac>`.
+- Consumes: `verifyPrompt` (Task 2), `resolveSessionId` (Task 1), `nonceForSession`/`consumeSessionNonce` (Task 3), the existing `deviceNameFor(via)`, `deviceEntry(name).secret`, `VOICE_DELIVERY`, `copyToClipboard`, `notify`, `projectName`, `setVoice`, `CLAUDE_BIN`.
+- Produces: `async function handleTypedPrompt(line, via)`, plus a `PROMPT ` branch in `handleDeviceLine` that delegates to it.
 
 - [ ] **Step 1: Add the branch**
 
@@ -384,7 +384,9 @@ git commit -m "Issue a per-session nonce, and only while the session is READY"
       return;
     }
     const device = deviceNameFor(via);
-    const secret = secretFor(device);
+    // deviceEntry() is how every other authenticated path resolves a key - one
+    // key per (Mac, device) couple, so forgetting one revokes only that pair.
+    const secret = deviceEntry(device)?.secret;
     const nonce = promptNonces.get(record.id)?.nonce;
     if (!secret || !nonce) {
       console.error(`Prompt: no ${secret ? "nonce" : "key"} for ${device || "unknown device"} - refused.`);
@@ -402,8 +404,12 @@ git commit -m "Issue a per-session nonce, and only while the session is READY"
   }
 ```
 
-Match `secretFor`/`deviceNameFor` to their real names in this file — read the
-`ANSWER … TYPED` branch and reuse exactly what it uses to get the key.
+Follow the file's own shape: the `TYPED` form is a one-line branch delegating to
+`handleTypedAnswer(parts, via)`, so put this body in
+`async function handleTypedPrompt(line, via)` and keep the branch to a
+`startsWith` test plus the call. `deviceEntry(name)?.secret` is how
+`handleTypedAnswer` gets its key (`expectedHmac` uses the same accessor); do not
+introduce a second way to reach a pairing key.
 
 - [ ] **Step 2: Extract the delivery so the mic and the keyboard share one path**
 
