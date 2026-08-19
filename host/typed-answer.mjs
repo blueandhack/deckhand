@@ -66,3 +66,38 @@ export function verifyTypedAnswer({ secret, nonce, pid, b64, mac }) {
   const ok = crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want));
   return ok ? { ok: true, why: "", text } : { ok: false, why: "bad hmac" };
 }
+
+// ---- A typed message to a READY session ----
+//
+// Same key, same nonce shape, same sanitising - and a DIFFERENT label, which is the
+// only thing separating "answer this question" from "start doing something". A
+// READY session has no pending prompt and therefore no pid, so this signs against
+// the session's own id and a per-session nonce.
+//
+// Note the secret is passed straight to createHmac exactly as the other two forms
+// do. Hex-decoding it here would keep every check in this file passing while
+// silently disagreeing with the device, which computes its HMAC over the stored
+// bytes - the failure would only show up as a rejected message on real hardware.
+export function promptHmac(secret, nonce, id12, sha16) {
+  return crypto
+    .createHmac("sha256", secret)
+    .update(`${nonce}:${id12}:PROMPT:${sha16}`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+// Mirrors verifyTypedAnswer, including reporting WHY: "wrong device" and "text was
+// altered" are a misconfiguration and an attack, and the log has to tell them apart.
+export function verifyPrompt({ secret, nonce, id12, b64, mac }) {
+  if (!secret || !nonce || !id12) return { ok: false, why: "missing pairing/nonce state" };
+  if (typeof mac !== "string" || !/^[0-9a-f]{16}$/.test(mac)) return { ok: false, why: "malformed mac" };
+  const text = decodeTypedText(b64);
+  if (text === null) return { ok: false, why: "malformed base64" };
+  if (!typedTextOk(text)) {
+    return { ok: false, why: "text is empty, over the cap, or not printable ASCII" };
+  }
+  const want = promptHmac(secret, nonce, id12, voiceSha(text));
+  // Equal lengths are guaranteed by the mac regex above, so this cannot throw.
+  const ok = crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want));
+  return ok ? { ok: true, why: "", text } : { ok: false, why: "bad hmac" };
+}

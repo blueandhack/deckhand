@@ -3,7 +3,14 @@
 // Deliberately covers the REJECT cases, not just the happy path: this is the
 // code that decides whether a remote answer is allowed to reach Claude.
 import { voiceSha, voiceAnswerHmac, verifyVoiceAnswer, capUtf8 } from "./voice-answer.mjs";
-import { TYPED_TEXT_MAX_BYTES, typedAnswerHmac, decodeTypedText, verifyTypedAnswer } from "./typed-answer.mjs";
+import {
+  TYPED_TEXT_MAX_BYTES,
+  typedAnswerHmac,
+  decodeTypedText,
+  verifyTypedAnswer,
+  promptHmac,
+  verifyPrompt,
+} from "./typed-answer.mjs";
 
 let failed = 0;
 const check = (name, cond) => {
@@ -163,6 +170,51 @@ check("sha is 16 hex chars", /^[0-9a-f]{16}$/.test(sha));
   check("a voice-form mac does not authenticate a typed answer",
     !verifyTypedAnswer({ secret, nonce, pid, b64: tB64,
                          mac: voiceAnswerHmac(secret, nonce, pid, voiceSha(tText)) }).ok);
+}
+
+// ---- PROMPT form: typed text sent to a READY session ----
+// Nothing is waiting on this one - there is no pending prompt and so no pid, so it
+// signs against a per-SESSION nonce and the session's own id.
+{
+  const pNonce = "feedfacecafebeef";
+  const id12 = "abc123456789";
+  const pText = "run the failing tests and summarise what broke";
+  const pB64 = Buffer.from(pText, "utf8").toString("base64");
+  const pSha = voiceSha(pText);
+  const pMac = promptHmac(secret, pNonce, id12, pSha);
+
+  check("PROMPT: a valid frame is accepted",
+    verifyPrompt({ secret, nonce: pNonce, id12, b64: pB64, mac: pMac }).ok);
+  check("PROMPT: the accepted text is returned verbatim",
+    verifyPrompt({ secret, nonce: pNonce, id12, b64: pB64, mac: pMac }).text === pText);
+  check("PROMPT: altered text is rejected",
+    !verifyPrompt({ secret, nonce: pNonce, id12,
+      b64: Buffer.from(pText + "!", "utf8").toString("base64"), mac: pMac }).ok);
+  check("PROMPT: a forged mac is rejected",
+    !verifyPrompt({ secret, nonce: pNonce, id12, b64: pB64, mac: "0".repeat(16) }).ok);
+  check("PROMPT: another session's nonce is rejected",
+    !verifyPrompt({ secret, nonce: "0123456789abcdef", id12, b64: pB64, mac: pMac }).ok);
+  check("PROMPT: another session's id is rejected",
+    !verifyPrompt({ secret, nonce: pNonce, id12: "def123456789", b64: pB64, mac: pMac }).ok);
+  check("PROMPT: non-ASCII text is rejected before it can be signed for",
+    !verifyPrompt({ secret, nonce: pNonce, id12,
+      b64: Buffer.from("h\u00e9llo", "utf8").toString("base64"), mac: pMac }).ok);
+  check("PROMPT: over the byte cap is rejected",
+    !verifyPrompt({ secret, nonce: pNonce, id12,
+      b64: Buffer.from("x".repeat(TYPED_TEXT_MAX_BYTES + 1), "utf8").toString("base64"),
+      mac: pMac }).ok);
+  check("PROMPT: missing pairing state is rejected, not skipped",
+    !verifyPrompt({ secret: "", nonce: pNonce, id12, b64: pB64, mac: pMac }).ok);
+
+  // THE CROSS-FORM CHECK, and the entire reason the label sits inside the signed
+  // string: a signature minted to ANSWER a question must not be able to SEND a
+  // message that starts work, even though both sign a 16-hex hash of their text
+  // with the same key and nonce.
+  const answerMac = typedAnswerHmac(secret, pNonce, id12, pSha);
+  check("PROMPT: a TYPED answer's signature cannot authenticate a PROMPT",
+    !verifyPrompt({ secret, nonce: pNonce, id12, b64: pB64, mac: answerMac }).ok);
+  check("TYPED: a PROMPT signature cannot authenticate an answer",
+    !verifyTypedAnswer({ secret, nonce: pNonce, pid: id12, b64: pB64, mac: pMac }).ok);
 }
 
 console.log(failed ? `\n${failed} check(s) FAILED` : "\nall checks passed");
