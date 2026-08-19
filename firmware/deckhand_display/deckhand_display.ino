@@ -666,6 +666,11 @@ struct SessionInfo {
   char askPid[12];
   char askKind[10]; // "perm" | "question" | "plan" - styles the detail text
   char askNonce[20]; // host-issued, single-use; HMAC'd into the answer
+  // Host-issued nonce for a typed MESSAGE to this session, present ONLY while it
+  // is READY - the host omits it otherwise, so an empty value is what tells the
+  // device it must not offer typing. Deliberately NOT on PrevSession: that struct
+  // carries only the nine fields the tick diff reads, and this is not one.
+  char promptNonce[20];
   char askTitle[36];  // hook caps title at 34 chars
   char askDetail[1424]; // hook caps detail at 1400 chars (~3 reader pages of code)
   char askOpts[4][34]; // hook caps each option label at 32 chars
@@ -2574,6 +2579,10 @@ void handleLine(const String& line) {
       info.askPid[0] = '\0';
       info.askKind[0] = '\0';
       info.askNonce[0] = '\0';
+      // A sibling of `status`, not a member of `ask` - a READY session has no ask.
+      info.promptNonce[0] = '\0';
+      if (s["pnonce"].is<const char*>())
+        copyField(info.promptNonce, sizeof(info.promptNonce), s["pnonce"]);
       info.askTitle[0] = '\0';
       info.askDetail[0] = '\0';
       info.askOptCount = 0;
