@@ -1476,6 +1476,11 @@ async function readUsage() {
 // ---------- Device -> host lines (both transports) ----------
 let lastAnswerKey = "";
 let lastAnswerAt = 0;
+// Same duplicate for the same reason (the device sends on both transports at once).
+// Kept separate from the answer key so a message and an answer cannot suppress each
+// other, which sharing one variable would allow.
+let lastPromptKey = "";
+let lastPromptAt = 0;
 
 // ---------- audio capture sink ----------
 // MICREC dumps ~445 base64 lines back to back. Those must NOT go through
@@ -2052,6 +2057,14 @@ async function handleVoiceAnswer(parts, via) {
 // Distinct from ANSWER in every way that matters: nothing is waiting on it, there is
 // no pid, and it is signed against a per-SESSION nonce with the PROMPT label.
 async function handleTypedPrompt(line, via) {
+  // The device transmits on USB and BLE simultaneously, so a single SEND arrives
+  // twice. Without this the first copy is accepted and the second is REJECTED for
+  // "missing pairing/nonce state" - correct behaviour (the nonce is single-use) that
+  // reads in the log as an authentication failure on every message sent. Same guard
+  // the answer path already uses, and the window matches it.
+  if (line === lastPromptKey && Date.now() - lastPromptAt < 3000) return;
+  lastPromptKey = line;
+  lastPromptAt = Date.now();
   const parts = line.trim().split(/\s+/);
   if (parts.length !== 4) {
     console.error("Prompt: malformed frame - ignoring.");
