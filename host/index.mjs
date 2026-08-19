@@ -466,6 +466,27 @@ const askNonces = new Map(); // pid -> { nonce, seen, first }
 // ask's pid, so a second dictation for the same prompt simply replaces the
 // first. Pruned with the nonces - once a prompt is gone, so is any text for it.
 const pendingVoiceAnswers = new Map(); // pid -> { text, sha, at }
+// Nonce for a typed MESSAGE to a READY session. askNonces cannot serve this: it is
+// keyed by an ask's pid, and a READY session has no pending prompt and therefore no
+// pid at all. Keyed by the FULL session id, since the payload's id is truncated to
+// 12 characters and the device signs against that shorter form.
+const promptNonces = new Map(); // full session id -> { nonce, seen }
+function nonceForSession(id) {
+  let e = promptNonces.get(id);
+  if (!e) {
+    e = { nonce: crypto.randomBytes(8).toString("hex"), seen: Date.now() };
+    promptNonces.set(id, e);
+  } else {
+    e.seen = Date.now();
+  }
+  return e.nonce;
+}
+// SINGLE USE. A captured frame must not be able to re-run the same instruction, and
+// unlike an answer - which the Mac's own dialog would have closed - nothing else
+// here would stop a replay.
+function consumeSessionNonce(id) {
+  promptNonces.delete(id);
+}
 function nonceForPid(pid) {
   let e = askNonces.get(pid);
   if (!e) {
@@ -482,6 +503,9 @@ function nonceForPid(pid) {
 function pruneNonces() {
   const now = Date.now();
   for (const [pid, e] of askNonces) if (now - e.seen > 60_000) askNonces.delete(pid);
+  // Same window: a session that stops being READY stops having its nonce refreshed
+  // below, so it must not leave a usable credential behind.
+  for (const [id, e] of promptNonces) if (now - e.seen > 60_000) promptNonces.delete(id);
   for (const [pid, e] of pendingVoiceAnswers) {
     if (Date.now() - e.at > 5 * 60_000) pendingVoiceAnswers.delete(pid);
   }
@@ -1348,6 +1372,11 @@ async function readSessions() {
       // Pending question (already truncated by the hook) rides along so the
       // device can display it and offer the options as buttons. We attach a
       // per-prompt nonce; the device HMACs it back so we can trust the answer.
+      // A nonce for a typed MESSAGE, present ONLY while this session is READY.
+      // Omitted otherwise, so the device is never holding a credential for a state
+      // in which it must not offer typing - the same reason ask.answerable is
+      // stamped per prompt rather than read from a live global.
+      if (record.status === "waiting" && record.id) item.pnonce = nonceForSession(record.id);
       if (record.ask) {
         item.ask = { ...record.ask, nonce: nonceForPid(record.ask.pid) };
         // Only questions can be answered by voice: emitDecision carries free
