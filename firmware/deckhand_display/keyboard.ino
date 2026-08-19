@@ -64,9 +64,11 @@ const int KB_R3_PAGE_W  = 2 * KB_PITCH;
 const int KB_R3_SPACE_W = 6 * KB_PITCH;
 
 void kbKeyLabel(char c, char* out, size_t n) {
-  if (c == KB_SHIFT)      snprintf(out, n, "CAP");
+  // CAPS vs CAP is the whole distinction between locked and one-shot, in TEXT -
+  // the fill says "active" for both, and colour must never be the only carrier.
+  if (c == KB_SHIFT)      snprintf(out, n, kbShiftMode == 2 ? "CAPS" : "CAP");
   else if (c == KB_DEL)   snprintf(out, n, "DEL");
-  else if (kbShift && c >= 'a' && c <= 'z') snprintf(out, n, "%c", c - 32);
+  else if (kbShiftMode > 0 && c >= 'a' && c <= 'z') snprintf(out, n, "%c", c - 32);
   else                    snprintf(out, n, "%c", c);
 }
 
@@ -79,6 +81,10 @@ void drawKbKey(int r, int col, bool pressed) {
   char label[8];
   kbKeyLabel(row[col], label, sizeof(label));
   int x = kbRowX0(r) + col * KB_PITCH, y = kbRowY(r);
+  // CAP draws filled whenever shift is live, so a full-board repaint cannot lose
+  // that state. It used to be restored by a follow-up drawKbKey at each call
+  // site, which is one more thing to remember at every future one.
+  if (row[col] == KB_SHIFT && kbShiftMode > 0) pressed = true;
   uiButton(x, y, KB_KEY_W, KB_ROW_H - 4, label, COLOR_ACCENT, pressed, COLOR_BG);
 }
 
@@ -112,6 +118,83 @@ void drawKbHardWrapped() {
   }
 }
 
+const unsigned long KB_REPEAT_DELAY_MS = 500;   // hold this long before repeating
+const unsigned long KB_REPEAT_EVERY_MS = 120;   // then ~8 deletions a second
+
+// Peek geometry: it covers the KEYS and the action row, never the text card - so
+// the answer you are composing stays on screen while you re-read the question.
+const int KB_PEEK_Y = KB_ROWS_Y, KB_PEEK_H = 320 - KB_ROWS_Y - 4;
+const int KB_PEEK_LINES = 13;                   // 40..212 inside the card at 13px
+
+bool kbHasDetail() {
+  return kbSessionIdx >= 0 && kbSessionIdx < sessionCount
+         && sessions[kbSessionIdx].askDetail[0] != '\0';
+}
+
+int kbPeekPages() {
+  if (!kbHasDetail()) return 0;
+  SessionInfo& sn = sessions[kbSessionIdx];
+  uint8_t font = detailLooksLikeCode(sn.askKind, sn.askDetail) ? FONT_CODE : T_BODY;
+  int lines = countWrappedLines(sn.askDetail, font, CARD_W - 12);
+  return (lines + KB_PEEK_LINES - 1) / KB_PEEK_LINES;
+}
+
+// The prompt, over the keys. Paged by tapping, because an ask detail runs to 1400
+// characters against 13 lines - the same reason the ask screen itself pages.
+void drawKbPeek() {
+  if (kbSessionIdx < 0 || kbSessionIdx >= sessionCount) return;
+  SessionInfo& sn = sessions[kbSessionIdx];
+  uiFillRound(CARD_X, KB_PEEK_Y, CARD_W, KB_PEEK_H, 6, COLOR_CARD, COLOR_BG);
+  int pages = kbPeekPages();
+
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("PROMPT", CARD_X + 6, KB_PEEK_Y + 8);
+  char nav[20];
+  if (pages > 1) snprintf(nav, sizeof(nav), "%d/%d  tap", kbPeekPage + 1, pages);
+  else           snprintf(nav, sizeof(nav), "tap to close");
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString(nav, CARD_X + CARD_W - 6, KB_PEEK_Y + 8);
+  tft.setTextDatum(TL_DATUM);
+
+  char title[KB_COLS + 1];
+  fitText(title, sizeof(title), sn.askTitle, CARD_W - 12);
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+  tft.drawString(title, CARD_X + 6, KB_PEEK_Y + 22);
+
+  // Same font choice the ask screen makes, so a command still reads as a command.
+  uint8_t font = detailLooksLikeCode(sn.askKind, sn.askDetail) ? FONT_CODE : T_BODY;
+  drawWrappedText(sn.askDetail, CARD_X + 6, KB_PEEK_Y + 40, font, 13, CARD_W - 12,
+                  kbPeekPage * KB_PEEK_LINES, KB_PEEK_LINES, COLOR_VALUE, COLOR_CARD);
+}
+
+// Hold DEL to repeat. Re-qualified against the key's OWN rectangle every tick, so
+// sliding a finger off stops it rather than deleting on whatever is under the
+// finger now - and a lift releases the key's pressed state.
+void tickKbRepeat() {
+  if (kbRepeatRow < 0) return;
+  int sx, sy;
+  bool onKey = false;
+  if (getTouchPoint(sx, sy) && sy >= KB_ROWS_Y) {
+    int r = (sy - KB_ROWS_Y) / KB_ROW_H;
+    if (r == kbRepeatRow && sx >= kbRowX0(r))
+      onKey = ((sx - kbRowX0(r)) / KB_PITCH) == kbRepeatCol;
+  }
+  if (!onKey) {
+    int r = kbRepeatRow, c = kbRepeatCol;
+    kbRepeatRow = kbRepeatCol = -1;
+    drawKbKey(r, c, false);
+    return;
+  }
+  if (millis() < kbRepeatNext) return;
+  kbRepeatNext = millis() + KB_REPEAT_EVERY_MS;
+  if (kbLen == 0) return;              // nothing left to delete; hold is harmless
+  kbBackspace();
+  drawKbKey(kbRepeatRow, kbRepeatCol, true);   // stays pressed while repeating
+}
+
 // The typed text, plus the countdown. Repainted wholesale (it is one small card)
 // rather than through drawIfChanged - the text changes on every keystroke, so a
 // change-only cache would buy nothing and would need to be as long as the buffer.
@@ -141,19 +224,45 @@ void drawKbText() {
   }
 
   if (kbLen == 0) {
+    // THE QUESTION, not "Type your answer". drawKeyboard() fillScreen's the ask
+    // screen away, so without this you are composing a reply to something you can
+    // no longer see. It gives way to your text on the first keystroke, which is
+    // why the peek below exists for the rest of the time.
+    const char* title = (kbSessionIdx >= 0 && kbSessionIdx < sessionCount)
+                          ? sessions[kbSessionIdx].askTitle : "";
+    char line[KB_COLS + 1];
+    if (title[0]) fitText(line, sizeof(line), title, CARD_W - 12);
+    else          snprintf(line, sizeof(line), "Type your answer");
     setUIFont(T_BODY);
-    tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+    tft.setTextColor(title[0] ? COLOR_VALUE : COLOR_LABEL, COLOR_CARD);
     tft.setTextDatum(TL_DATUM);
-    tft.drawString("Type your answer", CARD_X + 6, KB_LINE0_Y);
+    tft.drawString(line, CARD_X + 6, KB_LINE0_Y);
+    if (kbHasDetail()) {
+      setUIFont(T_META);
+      tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+      tft.drawString("tap here to read it", CARD_X + 6, KB_LINE0_Y + KB_LINE_PITCH);
+    }
   } else {
     drawKbHardWrapped();
+    // Caret: a block at the insertion point, so the card reads as focused and it
+    // is obvious where the next character lands. Its position is PROVABLE rather
+    // than clamped - at KB_COLS (34) and KB_MAX_BYTES (150) the furthest it can
+    // reach is line 4, column 14, inside the KB_TEXT_LINES (5) the card budgets.
+    int cl = kbLen / KB_COLS, cc = kbLen % KB_COLS;
+    if (cl < KB_TEXT_LINES)
+      tft.fillRect(CARD_X + 6 + cc * 6, KB_LINE0_Y + cl * KB_LINE_PITCH + 1, 6, 11,
+                   COLOR_ACCENT);
   }
   tft.setTextDatum(TL_DATUM);
 }
 
 void drawKbActions() {
   int halfW = (tft.width() - CARD_X * 2 - 8) / 2;
-  uiButton(CARD_X, KB_ACT_Y, halfW, KB_ACT_H, "CANCEL", COLOR_ACCENT, true, COLOR_BG);
+  // OUTLINED, where both buttons used to be filled and so had no hierarchy.
+  // SEND is what you came here to do, and CANCEL is the one that throws away a
+  // sentence you spent a minute typing - the same reasoning the confirm dialog
+  // uses when it refuses to make a destructive choice the easiest thing to hit.
+  uiButton(CARD_X, KB_ACT_Y, halfW, KB_ACT_H, "CANCEL", COLOR_ACCENT, false, COLOR_BG);
   if (kbWindowClosed) {
     // The prompt expired or was answered on the Mac. The text STAYS - throwing
     // away a sentence someone spent a minute on, with no explanation, is the
@@ -185,6 +294,7 @@ void drawKbActions() {
 void drawKeyboard() {
   tft.fillScreen(COLOR_BG);
   drawKbText();
+  if (kbPeekPage >= 0) { drawKbPeek(); return; }   // the peek owns the keys' area
   for (int r = 0; r < 3; r++)
     for (int c = 0; c < kbRowLen(r); c++) drawKbKey(r, c, false);
   drawKbRow3(-1);
@@ -196,8 +306,10 @@ void openKeyboard(int idx) {
   kbSessionIdx = idx;
   kbLen = 0;
   kbText[0] = '\0';
-  kbShift = false;
+  kbShiftMode = 0;
   kbSymbols = false;
+  kbPeekPage = -1;
+  kbRepeatRow = kbRepeatCol = -1;
   kbWindowClosed = false;
   copyField(kbPid, sizeof(kbPid), sessions[idx].askPid);
   drawKeyboard();
@@ -205,6 +317,8 @@ void openKeyboard(int idx) {
 
 void closeKeyboard() {
   kbActive = false;
+  kbPeekPage = -1;
+  kbRepeatRow = kbRepeatCol = -1;
   int idx = kbSessionIdx;
   kbSessionIdx = -1;
   kbPid[0] = '\0';
@@ -250,11 +364,11 @@ void closeKeyboard() {
 
 void kbInsert(char c) {
   if (kbLen >= KB_MAX_BYTES) { drawKbText(); return; }  // repaint so the counter shows why
-  if (kbShift && c >= 'a' && c <= 'z') c -= 32;
+  if (kbShiftMode > 0 && c >= 'a' && c <= 'z') c -= 32;
   kbText[kbLen++] = c;
   kbText[kbLen] = '\0';
-  if (kbShift) {
-    kbShift = false;
+  if (kbShiftMode == 1) {          // one-shot clears; locked stays
+    kbShiftMode = 0;
     // The whole letter page re-labels when shift clears, so repaint rows 0-2.
     for (int r = 0; r < 3; r++)
       for (int col = 0; col < kbRowLen(r); col++) drawKbKey(r, col, false);
@@ -274,6 +388,15 @@ void kbBackspace() {
 // finger is ignored by handleTouch, so one press is exactly one character with no
 // extra debounce needed here.
 bool kbTouch(int sx, int sy) {
+  // While peeking, EVERY tap is the pager - including one on the keys, which are
+  // covered by it. Past the last page it closes, so there is always a way out
+  // without hunting for a target.
+  if (kbPeekPage >= 0) {
+    kbPeekPage++;
+    if (kbPeekPage >= kbPeekPages()) kbPeekPage = -1;
+    drawKeyboard();
+    return true;
+  }
   if (sy >= KB_ACT_Y && sy < KB_ACT_Y + KB_ACT_H) {
     int halfW = (tft.width() - CARD_X * 2 - 8) / 2;
     if (sx < CARD_X + halfW) { closeKeyboard(); return true; }
@@ -283,13 +406,18 @@ bool kbTouch(int sx, int sy) {
     }
     return true;                 // swallow taps in the gap rather than guessing
   }
-  if (sy < KB_ROWS_Y) return true;             // the text card is not a control
+  // The text card: a tap peeks the prompt. It used to be inert, which is what
+  // made the question unreachable once you had typed a character.
+  if (sy < KB_ROWS_Y) {
+    if (kbHasDetail()) { kbPeekPage = 0; drawKeyboard(); }
+    return true;
+  }
   int r = (sy - KB_ROWS_Y) / KB_ROW_H;
   if (r < 0 || r > 3) return true;
   if (r == 3) {
     if (sx < KB_R3_PAGE_W) {
       kbSymbols = !kbSymbols;
-      kbShift = false;
+      kbShiftMode = 0;
       drawKeyboard();
     } else if (sx < KB_R3_PAGE_W + KB_R3_SPACE_W) {
       kbInsert(' ');
@@ -310,13 +438,21 @@ bool kbTouch(int sx, int sy) {
   char c = kbRow(r)[col];
   drawKbKey(r, col, true);       // flash: the only confirmation a press landed
   if (c == KB_SHIFT) {
-    kbShift = !kbShift;
+    kbShiftMode = (kbShiftMode + 1) % 3;   // off -> once -> locked -> off
     for (int rr = 0; rr < 3; rr++)
       for (int cc = 0; cc < kbRowLen(rr); cc++) drawKbKey(rr, cc, false);
-    drawKbKey(r, col, kbShift);
     return true;
   }
-  if (c == KB_DEL) { kbBackspace(); drawKbKey(r, col, false); return true; }
+  if (c == KB_DEL) {
+    kbBackspace();
+    // Arm the repeat and leave the key drawn PRESSED - tickKbRepeat releases it
+    // when the finger lifts or slides off, so a quick tap looks the same as
+    // before while a hold keeps deleting.
+    kbRepeatRow = r;
+    kbRepeatCol = col;
+    kbRepeatNext = millis() + KB_REPEAT_DELAY_MS;
+    return true;
+  }
   kbInsert(c);
   drawKbKey(r, col, false);
   return true;

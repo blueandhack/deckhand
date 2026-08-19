@@ -766,7 +766,18 @@ bool kbActive = false;
 char kbText[151];              // 150 bytes + NUL, matching the host's cap exactly
 int  kbLen = 0;
 char kbPid[24] = "";
-bool kbShift = false;          // one-shot, cleared by the next character
+// 0 off, 1 one-shot (cleared by the next character), 2 locked. Three states, not
+// a bool, because an acronym or a name cost one CAP tap PER LETTER. The key's
+// LABEL carries which one it is ("CAP" vs "CAPS"), so the state does not rest on
+// fill colour alone - the same rule uiToggle follows.
+int kbShiftMode = 0;
+// Peek at the prompt while typing: -1 = not peeking, else the page being shown.
+// The keyboard fillScreen's the ask screen away, so without this you are typing a
+// reply to a question you can no longer read.
+int kbPeekPage = -1;
+// Hold-to-repeat state for DEL. -1 = no key held.
+int kbRepeatRow = -1, kbRepeatCol = -1;
+unsigned long kbRepeatNext = 0;
 bool kbSymbols = false;        // ?123 page
 bool kbWindowClosed = false;   // the ask vanished while typing - keep the text
 int kbSessionIdx = -1;
@@ -3111,6 +3122,41 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // what is currently on the glass.
     int t = buf.substring(4).toInt();
     if (t >= 0 && t < TAB_COUNT) switchTab((Tab) t);
+  } else if (buf.startsWith("KBTEST")) {
+    // Opens the typed-answer keyboard against the first pending ask, for the same
+    // reason TAB and PAGE exist: the capture path can only record what is on the
+    // glass, and this screen otherwise needs a person to tap TYPE before it can be
+    // seen at all. "KBTEST peek" opens it with the prompt peek up, "KBTEST off"
+    // closes it. It cannot invent a prompt - with nothing pending it does nothing,
+    // so it can never raise a keyboard that would answer a question nobody asked.
+    String arg = buf.substring(6);
+    arg.trim();
+    // ALWAYS from a closed keyboard. Re-opening one that is already open left the
+    // screen untouched - the re-entrant path is scaffolding-only (you cannot tap
+    // TYPE while the keyboard covers the screen), so it is made impossible here
+    // rather than debugged.
+    if (kbActive) closeKeyboard();
+    if (arg != "off") {
+      for (int i = 0; i < sessionCount; i++) {
+        if (!sessions[i].askTitle[0]) continue;
+        // Through the detail screen, the way a person reaches it, so closing the
+        // keyboard returns somewhere consistent. Opening it straight from whatever
+        // tab was showing left the sessions list painted under a USAGE tab bar.
+        switchTab(TAB_SESSIONS);
+        openSessionDetail(i);
+        openKeyboard(i);
+        if (arg == "peek" && kbHasDetail()) { kbPeekPage = 0; drawKeyboard(); }
+        else if (arg == "caps") { kbShiftMode = 2; drawKeyboard(); }
+        else if (arg.startsWith("type ")) {
+          // Types the rest of the line, so the caret, the byte counter and SEND's
+          // live state can be captured without someone at the device. It cannot
+          // send - that still needs a real tap on SEND.
+          String t = arg.substring(5);
+          for (unsigned int k = 0; k < t.length(); k++) kbInsert(t[k]);
+        }
+        break;
+      }
+    }
   } else if (buf.startsWith("PAGE ")) {
     // Settings page, for the same reason. No-op unless SETTINGS is showing.
     int pg = buf.substring(5).toInt();
@@ -3324,6 +3370,11 @@ void loop() {
   // 90s answer budget, so without this the backlight could blank mid-answer in
   // ordinary use, and the waking tap would be swallowed rather than typed.
   if (readerActive || histActive || kbActive) lastActivityMillis = millis();
+
+  // Hold-to-repeat for the keyboard's DEL. Runs from here rather than handleTouch
+  // because that dispatches on PRESS and ignores a held finger - which is right
+  // for every other key, where one press must be exactly one character.
+  if (kbActive) tickKbRepeat();
 
   // kbActive excluded for the same reason readerActive/histActive already are:
   // this local 1s tick calls renderSessionsTab()/renderSettingsTab() directly,

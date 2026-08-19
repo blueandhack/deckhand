@@ -153,6 +153,12 @@ unlike Claude Code, it has never been measured whether its approval UI is shown
 *concurrently* with the hook or waits behind it, and if it waits, a long timeout would
 stall or deadlock every Codex prompt. That's also why typing isn't offered on Codex asks.
 
+On the typed-answer keyboard, the empty text box shows the **question you are
+answering** (the keyboard takes the whole screen, so the prompt is otherwise off
+it), and **tapping the text box** pages the full prompt over the keys while
+leaving your answer visible. **CAP** cycles off → one-shot → locked (`CAPS`), and
+**holding DEL** repeats after half a second.
+
 Turn off **Answer prompts on device** in the menu bar to make the device a
 read-only mirror instead — it still shows every prompt (handy for reading a long
 command from across the room), under an "ANSWER ON YOUR MAC" heading.

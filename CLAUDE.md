@@ -1534,6 +1534,48 @@ Other things that aren't obvious from a single file:
     **and** every loop tick while `kbActive`, because the 30s default backlight timeout sits well
     inside the 90s answer budget: without it, typing a normal-length answer could blank the screen
     mid-sentence and the waking tap would be swallowed rather than typed.
+  - **The placeholder is the QUESTION, and the card peeks the full prompt.**
+    `drawKeyboard()` fillScreen's the ask screen away, so without this you compose a reply
+    to something you can no longer read. While the box is empty the ask's title sits where
+    "Type your answer" used to, and **tapping the text card** pages the full detail over the
+    keys — the card used to be inert (`if (sy < KB_ROWS_Y) return true;`), so the gesture
+    costs nothing. It covers the keys and the action row but **never the text card**, so the
+    answer stays visible while you re-read the question; each further tap pages and a tap
+    past the last page closes it, so there is always a way out without hunting for a target.
+    Font follows `detailLooksLikeCode`, the same choice the ask screen makes.
+  - **CAP has THREE states — off, one-shot, locked — and the LABEL carries which.** It was a
+    bool cleared by the next character, so an acronym or a name cost one CAP tap per letter.
+    `kbShiftMode` cycles off → once → locked; only `once` clears on insert. The key reads
+    `CAP` versus `CAPS`, so the state does not rest on fill colour alone. `drawKbKey` forces
+    the filled look whenever `kbShiftMode > 0` rather than relying on a follow-up redraw at
+    each call site — a full-board repaint used to be able to lose it.
+  - **Hold DEL to repeat, and that is the ONLY held-finger path in this file.** 500ms, then
+    ~8 a second. It lives in `tickKbRepeat()` called from `loop()`, NOT in `handleTouch`,
+    which dispatches on press and ignores a held finger — right for every other key, where
+    one press must be exactly one character. The repeat re-qualifies against the key's own
+    rectangle every tick, so sliding off stops it instead of deleting on whatever is now
+    under the finger, and a lift releases the pressed look. Without it, fixing a typo near
+    the start of a 150-byte answer cost up to 150 taps.
+  - **A caret marks the insertion point, and its position is provable rather than clamped.**
+    At `KB_COLS` (34) and `KB_MAX_BYTES` (150) the furthest it can land is line 4, column
+    14 — inside the `KB_TEXT_LINES` (5) the card already budgets, so there is no overflow
+    case to handle.
+  - **SEND is the filled button and CANCEL only outlined.** Both were filled, so there was
+    no hierarchy at all — and CANCEL is the one that discards a sentence someone spent a
+    minute typing. Same reasoning the confirm dialog uses when it refuses to make a
+    destructive choice the easiest thing to hit.
+  - **`KBTEST` exists because this screen is otherwise unverifiable without a person.** It
+    opens the keyboard against the first pending ask — the same reason `TAB` and `PAGE`
+    exist, since the capture path can only record what is on the glass. `KBTEST peek`,
+    `KBTEST caps`, `KBTEST type <text>` and `KBTEST off` reach the states a screenshot
+    otherwise cannot: caret, byte counter, live SEND, caps labels. It **cannot invent a
+    prompt** (with nothing pending it does nothing) and it cannot send — that still needs a
+    real tap. It always closes an open keyboard first: re-opening one already open left the
+    screen untouched, and since you cannot tap TYPE while the keyboard covers the screen
+    that re-entrant path is scaffolding-only, so it is made impossible rather than debugged.
+    It goes through `switchTab(TAB_SESSIONS)` + `openSessionDetail(i)` the way a person
+    would, because opening straight from whatever tab was showing left the sessions list
+    painted under a USAGE tab bar when the keyboard closed.
   - **No cursor, backspace only.** Insertion is always append (`kbInsert`), deletion always trims
     the end (`kbBackspace`) — there is no caret position anywhere in the state. Aiming a cursor at
     hard-wrapped text on a resistive panel is a worse interaction than retyping up to 150
