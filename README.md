@@ -153,6 +153,15 @@ unlike Claude Code, it has never been measured whether its approval UI is shown
 *concurrently* with the hook or waits behind it, and if it waits, a long timeout would
 stall or deadlock every Codex prompt. That's also why typing isn't offered on Codex asks.
 
+A session sitting at **READY** can also be sent a typed message: open its detail
+screen and tap **TYPE** in the header. Be clear about what SEND does — with the
+default delivery it **copies the text to your Mac and notifies you to paste it**,
+because there is no way to inject a prompt into a live interactive session. Set
+`DECKHAND_VOICE_DELIVERY=dispatch` and it instead runs `claude -p --resume` in that
+session's directory, which is a second author on that conversation and halts on
+anything needing permission. The same switch governs dictation, so the mic and the
+keyboard always behave alike.
+
 On the typed-answer keyboard, the empty text box shows the **question you are
 answering** (the keyboard takes the whole screen, so the prompt is otherwise off
 it), and **tapping the text box** pages the full prompt over the keys while

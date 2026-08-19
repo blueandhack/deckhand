@@ -1587,6 +1587,52 @@ Other things that aren't obvious from a single file:
     is 22x40, but the touch band `kbTouch()` tests is the full 22x44 row — 968px² against 880 in
     the ordinary content area. The win going full-screen buys is in the touch target, not in the
     artwork.
+- **A READY session can be sent a typed MESSAGE, and it is the keyboard half of a path the
+  mic already had.** The record button is visible on a plain detail screen so a dictation can be
+  aimed at a session; **TYPE** in that screen's header row does the same with the keyboard.
+  Delivery is the SAME function for both (`deliverTextToSession`) driven by the same
+  `DECKHAND_VOICE_DELIVERY` - so with the default, SEND **copies the text to the Mac and
+  notifies you**; it runs nothing until that is set to `dispatch`. One copy of that logic is what
+  stops the two drifting, and only the log prefix differs (the `setVoice` states are identical,
+  because the device's result card and the menu bar row key off those strings).
+  - **READY only, and enforced on BOTH sides.** READY (`status:"waiting"`) means nobody is
+    mid-turn, which is what makes this safe - the voice path already found that a headless run
+    alongside an active turn becomes a second author on one conversation with neither able to see
+    the other. The device gates the button, and `handleTypedPrompt` **re-reads the record and
+    refuses anything that is not `waiting`**: a gate that exists only on the device is not a
+    gate, the identical reason `handleVoiceAnswer` re-reads before writing an answer file.
+  - **The wire form is `PROMPT <id12> <base64text> <hmac>`, signing `nonce:id12:PROMPT:sha16`.**
+    The LABEL is the whole point: `TEXT` (voice answer), `TYPED` (typed answer) and `PROMPT` all
+    sign a 16-hex hash of their text with the same key, so without it a signature minted to
+    answer a question would authenticate one that starts work. `voice-answer-check.mjs` asserts
+    both directions of that.
+  - **A per-session nonce, because `askNonces` is keyed by an ask's PID and a READY session has
+    none.** `promptNonces` is keyed by the FULL session id and published as `pnonce` **only while
+    the session is waiting** - its absence, not the status alone, is what tells the device not to
+    offer typing. Single-use: unlike an answer, there is no Mac dialog whose closing would
+    invalidate a replay.
+  - **`resolveSessionId` refuses an ambiguous 12-char prefix**, where the voice path used
+    `files.find(startsWith)` and took the first match. A message delivered into whichever session
+    sorted first is the worst failure shape available here, because it looks like success.
+  - **A duplicate arrives on every send** - the device transmits on USB and BLE at once - so the
+    second copy hits a consumed nonce. Without the dedup that logs as an authentication failure
+    on every message, which trains you to ignore the line that matters. Observed on the first
+    real send, which also proved the nonce is genuinely single-use.
+  - **The button is in the HEADER ROW because there is nowhere else.** Measured: the detail card
+    runs 60..284 with its content cursor reaching ~284 in the worst case (title and last prompt
+    both present), and the "< Back up top - tap here for history" hint owns 285..299 against a
+    `contentBottom()` of 302. A 32px control below the card would cover the card's own text or
+    replace the only thing telling you the card is tappable. Its hit zone is the whole right end
+    of that row - 100x28 for a 76x22 chip.
+  - **Prompt mode differs from answer mode in exactly the ways the situation does:** no countdown
+    (nothing is waiting, and a timer would be a lie), no peek and so no "tap here to read it"
+    hint (there is no ask, and the detail screen it opened from already shows the context), a
+    placeholder naming the session, and a window tracked by session id plus `msgOffered()` rather
+    than by `askPid`. Leaving READY withholds SEND and **keeps the text**, saying
+    `NO LONGER READY` - "answer on your Mac" would be answering a question nobody asked.
+  - **`KBTEST msg [text]`** opens it against the first READY session and optionally types, for the
+    same reason `TAB`/`PAGE` exist. It still **cannot SEND** - that needs a real tap, and keeping
+    it that way is the point rather than an inconvenience.
 - **The headless fallback (`dispatch`): `claude -p --resume <session_id>`.** Continues the
   conversation in that session's own `cwd`, detached (a dictated task can run for minutes and must
   not block the host's poller).
