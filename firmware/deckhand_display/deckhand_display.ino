@@ -786,6 +786,11 @@ unsigned long kbRepeatNext = 0;
 bool kbSymbols = false;        // ?123 page
 bool kbWindowClosed = false;   // the ask vanished while typing - keep the text
 int kbSessionIdx = -1;
+// Prompt mode: the keyboard is composing a MESSAGE to a READY session rather than
+// an answer to a pending ask. Nothing is waiting on it, so there is no countdown
+// and no ask to peek - and it pins the session ID, because there is no askPid.
+bool kbMessageMode = false;
+char kbSessionId[16] = "";
 
 // ---------- Session history ----------
 // Fetched ON DEMAND and PAGED FROM THE MAC. The device stores only the page it is showing:
@@ -2716,8 +2721,14 @@ void handleLine(const String& line) {
   // detected the same poll it closes on - the only things this absorb needs.
   if (kbActive) {
     int idx = -1;
-    for (int i = 0; i < sessionCount; i++)
-      if (strcmp(sessions[i].askPid, kbPid) == 0) { idx = i; break; }
+    for (int i = 0; i < sessionCount; i++) {
+      // In message mode there is no askPid to match on, and LEAVING READY is what
+      // closes the window - so msgOffered() is required too, which also covers the
+      // host withdrawing the nonce.
+      bool hit = kbIsMessage() ? (strcmp(sessions[i].id, kbSessionId) == 0 && msgOffered(i))
+                               : (strcmp(sessions[i].askPid, kbPid) == 0);
+      if (hit) { idx = i; break; }
+    }
     kbSessionIdx = idx;
     bool gone = (idx < 0);
     if (gone != kbWindowClosed) { kbWindowClosed = gone; drawKbActions(); }
@@ -3145,7 +3156,22 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // TYPE while the keyboard covers the screen), so it is made impossible here
     // rather than debugged.
     if (kbActive) closeKeyboard();
-    if (arg != "off") {
+    if (arg.startsWith("msg")) {
+      // A READY session instead of a pending ask - the message path has no ask at
+      // all, so it cannot share the loop below. "KBTEST msg <text>" also types, in
+      // one command: KBTEST always closes an open keyboard first, so a separate
+      // "KBTEST type ..." would drop straight back into answer mode.
+      String rest = arg.substring(3);
+      rest.trim();
+      for (int i = 0; i < sessionCount; i++) {
+        if (!msgOffered(i)) continue;
+        switchTab(TAB_SESSIONS);
+        openSessionDetail(i);
+        openKeyboardForMessage(i);
+        for (unsigned int k = 0; k < rest.length(); k++) kbInsert(rest[k]);
+        break;
+      }
+    } else if (arg != "off") {
       for (int i = 0; i < sessionCount; i++) {
         if (!sessions[i].askTitle[0]) continue;
         // Through the detail screen, the way a person reaches it, so closing the

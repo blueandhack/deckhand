@@ -126,7 +126,14 @@ const unsigned long KB_REPEAT_EVERY_MS = 120;   // then ~8 deletions a second
 const int KB_PEEK_Y = KB_ROWS_Y, KB_PEEK_H = 320 - KB_ROWS_Y - 4;
 const int KB_PEEK_LINES = 13;                   // 40..212 inside the card at 13px
 
+bool kbIsMessage() { return kbMessageMode; }
+
 bool kbHasDetail() {
+  // Never in message mode: there is no ask to read, and the detail screen this was
+  // opened from already shows the title, last prompt and path. Suppressing it here
+  // also suppresses the "tap here to read it" hint, so no control is advertised
+  // that would do nothing.
+  if (kbIsMessage()) return false;
   return kbSessionIdx >= 0 && kbSessionIdx < sessionCount
          && sessions[kbSessionIdx].askDetail[0] != '\0';
 }
@@ -212,7 +219,9 @@ void drawKbText() {
   tft.setTextDatum(TL_DATUM);
   tft.drawString(cnt, CARD_X + 6, KB_META_Y);
 
-  int sec = (kbSessionIdx >= 0 && kbSessionIdx < sessionCount)
+  // No countdown in message mode: nothing is waiting on this, so there is no window
+  // to run out, and a timer implying otherwise would be a lie.
+  int sec = (!kbIsMessage() && kbSessionIdx >= 0 && kbSessionIdx < sessionCount)
               ? sessions[kbSessionIdx].askSec : -1;
   if (sec >= 0) {
     char buf[12];
@@ -231,10 +240,21 @@ void drawKbText() {
     const char* title = (kbSessionIdx >= 0 && kbSessionIdx < sessionCount)
                           ? sessions[kbSessionIdx].askTitle : "";
     char line[KB_COLS + 1];
-    if (title[0]) fitText(line, sizeof(line), title, CARD_W - 12);
-    else          snprintf(line, sizeof(line), "Type your answer");
+    if (kbIsMessage()) {
+      // Names the session being written TO. There is no question here, and "Type
+      // your answer" would be answering nothing.
+      char label[48];
+      snprintf(label, sizeof(label), "Message %s",
+               (kbSessionIdx >= 0 && kbSessionIdx < sessionCount)
+                 ? sessions[kbSessionIdx].name : "session");
+      fitText(line, sizeof(line), label, CARD_W - 12);
+    } else if (title[0]) {
+      fitText(line, sizeof(line), title, CARD_W - 12);
+    } else {
+      snprintf(line, sizeof(line), "Type your answer");
+    }
     setUIFont(T_BODY);
-    tft.setTextColor(title[0] ? COLOR_VALUE : COLOR_LABEL, COLOR_CARD);
+    tft.setTextColor((title[0] || kbIsMessage()) ? COLOR_VALUE : COLOR_LABEL, COLOR_CARD);
     tft.setTextDatum(TL_DATUM);
     tft.drawString(line, CARD_X + 6, KB_LINE0_Y);
     if (kbHasDetail()) {
@@ -279,10 +299,15 @@ void drawKbActions() {
     // message may have left pixels here that the new wrapped text won't cover -
     // it's narrower than the lane at every line.
     tft.fillRect(laneX, KB_ACT_Y, laneW, KB_ACT_H, COLOR_BG);
-    const int lines = 3;   // measured at laneW - 8; re-measure if the string changes
+    // In message mode the prompt did not expire - the SESSION stopped being READY,
+    // and "answer on your Mac" would be answering a question nobody asked.
+    const char* why = kbIsMessage() ? "NO LONGER READY" : "WINDOW CLOSED - ANSWER ON YOUR MAC";
+    // MEASURED, not hardcoded. This was `const int lines = 3;` beside a comment
+    // telling the next person to re-measure when the string changed - exactly the
+    // instruction that gets missed, and there are two strings now.
+    int lines = countWrappedLines(why, T_META, laneW - 8);
     int y = KB_ACT_Y + (KB_ACT_H - lines * 13) / 2;
-    drawWrappedText("WINDOW CLOSED - ANSWER ON YOUR MAC", laneX + 4, y,
-                    T_META, 13, laneW - 8, 0, lines, COLOR_WARN, COLOR_BG);
+    drawWrappedText(why, laneX + 4, y, T_META, 13, laneW - 8, 0, lines, COLOR_WARN, COLOR_BG);
   } else {
     // An empty answer would reach Claude as a blank deny message, which reads as
     // a refusal with no reason. Offer SEND only when there is something to send.
@@ -308,6 +333,9 @@ void openKeyboard(int idx) {
   kbText[0] = '\0';
   kbShiftMode = 0;
   kbSymbols = false;
+  // Cleared here so an ANSWER can never inherit message mode from an earlier open.
+  kbMessageMode = false;
+  kbSessionId[0] = '\0';
   kbPeekPage = -1;
   kbRepeatRow = kbRepeatCol = -1;
   kbWindowClosed = false;
@@ -315,8 +343,22 @@ void openKeyboard(int idx) {
   drawKeyboard();
 }
 
+// Compose a MESSAGE to a READY session rather than an answer to a pending ask.
+// Goes through openKeyboard first so every reset lives in one place, then switches
+// the mode and repaints - the placeholder and the meta row both differ.
+void openKeyboardForMessage(int idx) {
+  if (idx < 0 || idx >= sessionCount) return;
+  openKeyboard(idx);
+  kbMessageMode = true;
+  kbPid[0] = '\0';                 // there is no pending prompt to pin to
+  copyField(kbSessionId, sizeof(kbSessionId), sessions[idx].id);
+  drawKeyboard();
+}
+
 void closeKeyboard() {
   kbActive = false;
+  kbMessageMode = false;
+  kbSessionId[0] = '\0';
   kbPeekPage = -1;
   kbRepeatRow = kbRepeatCol = -1;
   int idx = kbSessionIdx;
@@ -401,7 +443,8 @@ bool kbTouch(int sx, int sy) {
     int halfW = (tft.width() - CARD_X * 2 - 8) / 2;
     if (sx < CARD_X + halfW) { closeKeyboard(); return true; }
     if (!kbWindowClosed && kbLen > 0 && sx >= CARD_X + halfW + 8) {
-      sendTypedAnswerToHost();
+      if (kbIsMessage()) sendPromptToHost();
+      else sendTypedAnswerToHost();
       return true;
     }
     return true;                 // swallow taps in the gap rather than guessing
@@ -473,6 +516,26 @@ void kbBase64(char* out, size_t outSize) {
     out[o++] = (i + 2 < kbLen) ? B64[v & 63] : '=';
   }
   out[o] = '\0';
+}
+
+// A typed message to a READY session. Signs the PROMPT label so this can never
+// authenticate as an answer, over a hash of exactly the bytes on screen.
+void sendPromptToHost() {
+  if (kbLen == 0 || kbWindowClosed || !kbIsMessage()) return;
+  int idx = kbSessionIdx;
+  if (idx < 0 || idx >= sessionCount) return;
+  String sha = sha256Hex16(kbText);
+  String mac = authHmac(String(sessions[idx].promptNonce) + ":" + kbSessionId + ":PROMPT:" + sha);
+  // "0" when unprovisioned, matching every other send: the host then logs a
+  // refusal, so an unpaired device reads as a rejected message rather than a SEND
+  // that quietly did nothing.
+  if (mac.length() == 0) mac = "0";
+  char b64[204];
+  kbBase64(b64, sizeof(b64));
+  char line[280];
+  snprintf(line, sizeof(line), "PROMPT %s %s %s", kbSessionId, b64, mac.c_str());
+  sendLineToHost(line);
+  closeKeyboard();
 }
 
 void sendTypedAnswerToHost() {

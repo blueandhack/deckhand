@@ -345,6 +345,11 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
            sessions[idx].branch, sessions[idx].askPid, answeredPid[0] ? answeredIdx : -1,
            sessions[idx].title, sessions[idx].prompt, sessions[idx].startSec,
            sessions[idx].askVoiceSha);
+  // Whether the TYPE chip is showing MUST be in the signature: a session going
+  // READY while you are looking at it changes nothing else on this card, so without
+  // this the chip would not appear until something else happened to repaint.
+  size_t used = strlen(out);
+  if (used + 3 < outSize) snprintf(out + used, outSize - used, "|%c", msgOffered(idx) ? 'M' : '-');
 }
 // Index-based (not SessionInfo&) for the same Arduino auto-prototype reason
 // as buildSessionSubline.
@@ -369,6 +374,30 @@ int askInputRows(int idx) {
   bool speak = s.askVoice && s.askAnswerable && !s.askVoiceText[0];
   return (speak || askTypeOffered(idx)) ? 1 : 0;
 }
+// ---- TYPE A MESSAGE, on a plain READY detail screen ----
+//
+// IN THE HEADER ROW, and that is forced rather than chosen. A full-width button
+// below the card was the obvious place and there is no such band: the card runs
+// 60..284 with its content cursor reaching ~284 in the worst case (title and last
+// prompt both present), and the "< Back up top - tap here for history" hint owns
+// 285..299 against a contentBottom() of 302. A 32px control below the card would
+// therefore either cover the card's own text or replace the only thing that tells
+// you the card is tappable. The header row is 26px of otherwise empty space right
+// of "< Back", which costs neither.
+//
+// Gated on the NONCE as well as the status: the host omits pnonce unless the
+// session is waiting, and without one the host refuses the frame - so offering the
+// button would advertise a control that cannot work, which is exactly what the
+// read-only ask path refuses to do when it draws options as a flat list instead.
+const int MSG_BTN_W = 76, MSG_BTN_H = 22;
+int msgBtnX() { return CARD_X + CARD_W - MSG_BTN_W; }
+int msgBtnY() { return CONTENT_Y + 2; }            // 36..58, clear of the card at 60
+bool msgOffered(int idx) {
+  if (idx < 0 || idx >= sessionCount) return false;
+  const SessionInfo& s = sessions[idx];
+  return !s.askPid[0] && strcmp(s.status, "waiting") == 0 && s.promptNonce[0];
+}
+
 int askOptionsTop(int idx) {
   return contentBottom() -
          (sessions[idx].askOptCount + askInputRows(idx)) * (ASK_OPT_H + ASK_OPT_GAP);
@@ -700,7 +729,16 @@ bool handleAskTouch(int sx, int sy) {
     // stop" - ending a dictation also closed the page out from under you. The
     // "< Back" label was already being drawn here, so this simply makes the page
     // behave the way it already looked.
-    if (sy < CONTENT_Y + 28) return false; // header row = back
+    if (sy < CONTENT_Y + 28) {
+      // The whole right end of the header row, not only the drawn 76x22 chip -
+      // 100x28 of target, the same trade the tab bar's slots already make.
+      // Everything else in this row is still back.
+      if (msgOffered(detailIndex) && sx >= msgBtnX() - 24) {
+        openKeyboardForMessage(detailIndex);
+        return true;
+      }
+      return false; // header row = back
+    }
     // Body opens the HISTORY reader. It used to be inert, which left the most useful
     // thing about a finished session - what it actually did - unreachable from the
     // device. The FAB is hit-tested before this, so dictation still wins its own area.
@@ -830,6 +868,10 @@ void drawSessionDetail(int idx) {
   tft.setTextColor(COLOR_ACCENT, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("< Back", CARD_X, CONTENT_Y + 4);
+  // Outlined, not filled: it opens a screen whose own primary action is SEND, and
+  // the filled treatment belongs to that one.
+  if (msgOffered(idx))
+    uiButton(msgBtnX(), msgBtnY(), MSG_BTN_W, MSG_BTN_H, "TYPE", COLOR_ACCENT, false, COLOR_BG);
 
   uiFillRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, COLOR_CARD, COLOR_BG);
   uiStrokeRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, BORDER_CARD, color, COLOR_BG);
