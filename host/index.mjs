@@ -27,7 +27,7 @@ import {
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
 } from "./voice-answer.mjs";
 import { resolveSessionId } from "./session-lookup.mjs";
-import { verifyTypedAnswer } from "./typed-answer.mjs";
+import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1730,6 +1730,18 @@ async function transcribeAndDispatch(captureFile, target) {
     setVoice("memo", { text });
     return;
   }
+  await deliverTextToSession(target, text);
+}
+
+// Hand text to a session. This is the shared tail of a dictation aimed at a session
+// and a typed message from the keyboard: the same act, so the delivery choice
+// (DECKHAND_VOICE_DELIVERY) has to mean the same thing for both, and keeping one
+// copy is what stops them drifting.
+//
+// `tag` changes only the LOG prefix. The setVoice states are deliberately identical
+// - the device's result card and the menu bar's row key off those strings, and a
+// typed message should surface exactly the way a dictation does.
+async function deliverTextToSession(target, text, tag = "Voice") {
   // The device only knows the first 12 chars of the id; resolve the real one.
   // Through resolveSessionId, which REFUSES an ambiguous prefix - the find() this
   // replaced silently took the first match.
@@ -1737,7 +1749,7 @@ async function transcribeAndDispatch(captureFile, target) {
   try {
     const found = resolveSessionId(await fs.readdir(SESSIONS_DIR), target);
     if (!found.ok) {
-      console.error(`Voice: ${found.reason} session for ${target} - transcript not dispatched.`);
+      console.error(`${tag}: ${found.reason} session for ${target} - transcript not dispatched.`);
       setVoice("error", { text, reply: `no matching session (${found.reason})` });
       return;
     }
@@ -1747,50 +1759,50 @@ async function transcribeAndDispatch(captureFile, target) {
       undefined;
   } catch {}
   if (!sessionId) {
-    console.error(`Voice: could not read the session record for ${target} - not dispatched.`);
+    console.error(`${tag}: could not read the session record for ${target} - not dispatched.`);
     setVoice("error", { text, reply: "no matching session" });
     return;
-  }
-  const where = cwd ? await projectName(cwd) : target;
-  if (VOICE_DELIVERY !== "dispatch") {
-    const ok = await copyToClipboard(text);
-    if (!ok) {
-      console.error("Voice: could not reach pbcopy - transcript NOT delivered.");
-      setVoice("error", { text, reply: "clipboard unavailable" });
-      return;
-    }
-    console.log(`Voice: copied to the clipboard for ${where} (${sessionId}) - paste it there.`);
-    await notify("Deckhand heard you", `Paste into ${where}`, text);
-    setVoice("clip", { text, session: target, reply: `Copied. Paste it into ${where} on your Mac.` });
+}
+const where = cwd ? await projectName(cwd) : target;
+if (VOICE_DELIVERY !== "dispatch") {
+  const ok = await copyToClipboard(text);
+  if (!ok) {
+    console.error(`${tag}: could not reach pbcopy - text NOT delivered.`);
+    setVoice("error", { text, reply: "clipboard unavailable" });
     return;
   }
+  console.log(`${tag}: copied to the clipboard for ${where} (${sessionId}) - paste it there.`);
+  await notify("Deckhand heard you", `Paste into ${where}`, text);
+  setVoice("clip", { text, session: target, reply: `Copied. Paste it into ${where} on your Mac.` });
+  return;
+}
 
-  console.log(`Voice: -> session ${sessionId}${cwd ? ` (cwd ${cwd})` : ""}`);
-  setVoice("sent", { text, session: target });
-  // Detached: a dictated task can run for minutes and must not block this poller.
-  const child = execFile(
-    CLAUDE_BIN,
-    ["-p", "--resume", sessionId, text],
-    // stdin ignored on purpose: `claude -p` otherwise waits on it and warns
-    // "no stdin data received in 3s" before proceeding.
-    { cwd, maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] },
-    (err, stdout, stderr) => {
-      if (err) {
-        console.error(`Voice: claude failed: ${(stderr || err.message).split("\n")[0]}`);
-        setVoice("error", { reply: (stderr || err.message).split("\n")[0] });
-        return;
-      }
-      // Log the reply itself, not just its length: without it a dictation is a
-      // black hole - you can see that something happened but never what.
-      const reply = stdout.trim().replace(/\s+/g, " ");
-      console.log(
-        `Voice: claude replied (${reply.length} chars): ` +
-          (reply.length > 400 ? reply.slice(0, 400) + " ..." : reply)
-      );
-      setVoice("done", { reply });
+console.log(`${tag}: -> session ${sessionId}${cwd ? ` (cwd ${cwd})` : ""}`);
+setVoice("sent", { text, session: target });
+// Detached: a dictated task can run for minutes and must not block this poller.
+const child = execFile(
+  CLAUDE_BIN,
+  ["-p", "--resume", sessionId, text],
+  // stdin ignored on purpose: `claude -p` otherwise waits on it and warns
+  // "no stdin data received in 3s" before proceeding.
+  { cwd, maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] },
+  (err, stdout, stderr) => {
+    if (err) {
+      console.error(`${tag}: claude failed: ${(stderr || err.message).split("\n")[0]}`);
+      setVoice("error", { reply: (stderr || err.message).split("\n")[0] });
+      return;
     }
-  );
-  child.unref?.();
+    // Log the reply itself, not just its length: without it a dictation is a
+    // black hole - you can see that something happened but never what.
+    const reply = stdout.trim().replace(/\s+/g, " ");
+    console.log(
+      `${tag}: claude replied (${reply.length} chars): ` +
+        (reply.length > 400 ? reply.slice(0, 400) + " ..." : reply)
+    );
+    setVoice("done", { reply });
+  }
+);
+child.unref?.();
 }
 
 // Same decode-and-transcribe as a dictation, but the result is PARKED for
@@ -2035,6 +2047,57 @@ async function handleVoiceAnswer(parts, via) {
 // no parked transcript to look up, because the text arrives in the frame. Every
 // other guard is deliberately identical - especially the ask.kind re-check, which
 // is what stops a chosen pid reaching emitDecision's {behavior:"allow"} plan branch.
+// PROMPT <id12> <base64text> <hmac> - a typed message aimed at a READY session.
+//
+// Distinct from ANSWER in every way that matters: nothing is waiting on it, there is
+// no pid, and it is signed against a per-SESSION nonce with the PROMPT label.
+async function handleTypedPrompt(line, via) {
+  const parts = line.trim().split(/\s+/);
+  if (parts.length !== 4) {
+    console.error("Prompt: malformed frame - ignoring.");
+    return;
+  }
+  const [, id12, b64, mac] = parts;
+
+  let record = null;
+  try {
+    const found = resolveSessionId(await fs.readdir(SESSIONS_DIR), id12);
+    if (!found.ok) {
+      console.error(`Prompt: ${found.reason} session for ${id12} - refusing.`);
+      return;
+    }
+    record = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, `${found.id}.json`), "utf8"));
+    record.id = found.id;
+  } catch (err) {
+    console.error(`Prompt: could not read the session record - refusing (${err.message}).`);
+    return;
+  }
+
+  // RE-CHECK READY HERE. The device gates its own button on status too, but a gate
+  // that exists only on the device is not a gate - the same reason handleVoiceAnswer
+  // re-reads the record before writing an answer file. A missing or non-waiting
+  // status must REJECT, never fall through.
+  if (record.status !== "waiting") {
+    console.error(`Prompt: session ${id12} is "${record.status}", not waiting - refusing.`);
+    return;
+  }
+
+  const from = deviceNameFor(via);
+  const dev = from ? deviceEntry(from) : null;
+  const nonce = promptNonces.get(record.id)?.nonce;
+  const v = verifyPrompt({ secret: dev?.secret, nonce, id12, b64, mac });
+  if (!v.ok) {
+    console.error(
+      `Prompt REJECTED for session ${id12} via ${via}` +
+        `${from ? ` from ${from}` : " (unknown device)"} - ${v.why}.`
+    );
+    return;
+  }
+  consumeSessionNonce(record.id); // single-use: no replay
+  console.log(`Prompt: accepted ${v.text.length} chars for ${id12} from ${from}.`);
+  await deliverTextToSession(id12, v.text, "Prompt");
+}
+
 async function handleTypedAnswer(parts, via) {
   const [, id12, pid, , b64, mac] = parts;
   const entry = askNonces.get(pid);
@@ -2095,6 +2158,10 @@ async function handleDeviceLine(line, via) {
   // from 0, which must not be shown as one: for the first ~20 minutes off USB the
   // device's trend is still inside its own ADC noise. pcth/span are the estimate's
   // provenance and stay in the log rather than the heartbeat.
+  if (line.startsWith("PROMPT ")) {
+    await handleTypedPrompt(line, via);
+    return;
+  }
   if (line.startsWith("BATT ")) {
     const f = {};
     for (const kv of line.slice(5).trim().split(/\s+/)) {
