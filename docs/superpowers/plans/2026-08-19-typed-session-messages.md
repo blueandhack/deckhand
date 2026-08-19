@@ -770,7 +770,7 @@ git commit -m "Document typed messages to a READY session"
 
 **Placeholders:** none — every code step carries the code, and the two "match the
 real name in this file" instructions name the exact function to read
-(`deviceNameFor`/`secretFor` in the `TYPED` branch, the record's id property beside
+(`deviceEntry(name).secret` as `handleTypedAnswer` uses it, the record's id property beside
 `transcriptById`).
 
 **Type consistency:** `resolveSessionId` returns `{ok, id}`/`{ok, reason}` in Tasks
