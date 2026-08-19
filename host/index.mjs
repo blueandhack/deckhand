@@ -26,6 +26,7 @@ import {
   capUtf8,
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
 } from "./voice-answer.mjs";
+import { resolveSessionId } from "./session-lookup.mjs";
 import { verifyTypedAnswer } from "./typed-answer.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -1701,17 +1702,23 @@ async function transcribeAndDispatch(captureFile, target) {
     return;
   }
   // The device only knows the first 12 chars of the id; resolve the real one.
+  // Through resolveSessionId, which REFUSES an ambiguous prefix - the find() this
+  // replaced silently took the first match.
   let sessionId = null, cwd = null;
   try {
-    const files = await fs.readdir(SESSIONS_DIR);
-    const file = files.find((f) => f.endsWith(".json") && f.startsWith(target));
-    if (file) {
-      sessionId = path.basename(file, ".json");
-      cwd = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, file), "utf8")).cwd || undefined;
+    const found = resolveSessionId(await fs.readdir(SESSIONS_DIR), target);
+    if (!found.ok) {
+      console.error(`Voice: ${found.reason} session for ${target} - transcript not dispatched.`);
+      setVoice("error", { text, reply: `no matching session (${found.reason})` });
+      return;
     }
+    sessionId = found.id;
+    cwd =
+      JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, `${sessionId}.json`), "utf8")).cwd ||
+      undefined;
   } catch {}
   if (!sessionId) {
-    console.error(`Voice: no session matching ${target} - transcript not dispatched.`);
+    console.error(`Voice: could not read the session record for ${target} - not dispatched.`);
     setVoice("error", { text, reply: "no matching session" });
     return;
   }
