@@ -846,6 +846,111 @@ exists, and suppresses its watchdog in that case - launchd restarts a dead host 
 a second and survives reboots, which the app cannot. Unsupervised, the old path and the
 watchdog both remain, because there is then nothing else doing the job.
 
+**What the menu-bar ITEM shows: shape is the link, badges are the device's job when
+the device is absent, and colour carries nothing at all.** The boat is `.solid` when a
+device is actually connected and `.outline` when it is not (`barBoatStyle`) - it stands
+for the LINK, not the process, which is why it no longer keys off `running`. Beside it,
+left to right: quota `5h·7d`, then the live sessions BY STATUS in the host's own urgency
+order - `■1` needing input, `○1` waiting on you, `●1` working. Those three PARTITION the
+list the way the menu's rows do, one glyph per session, so `■1 ○1 ●1` is three sessions
+and reads as three; `●` briefly meant "every live session" and was split when waiting
+arrived, because a total that already contains the badge beside it invites adding them
+up. The usage and session badges are the device's USAGE and SESSIONS
+tabs standing in for a screen that isn't there, so by default they appear only while no
+device is connected and go quiet when one is back; the needs-input badge is not gated
+that way, because a prompt blocking your work is worth saying either way. Absent is
+always the resting state - no badge at zero, and none at all from a stale host, since
+`readStatus` only reads the log while the heartbeat is fresh.
+Four things are load-bearing:
+- **`contentTintColor` is `nil`, deliberately, and grey/orange tints were REMOVED
+  rather than fixed.** They never reached the screen: with the host running and no
+  device the bar drew a BLACK boat, not an orange one, because macOS renders a status
+  item's template image in its own menu-bar colour - which over a light-ish wallpaper is
+  black even in Dark Mode - and that overrode the tint. A colour that is silently
+  ignored is worse than no colour. Cost, accepted: stopped and device-offline both draw
+  the hollow boat, and only the menu's status line ("Stopped" vs "Running · device
+  offline") tells them apart.
+- **Numbers next to each other need SHAPE to separate them**, which is why the
+  needs-input count gained a `■` when the session counts arrived - the same three glyphs
+  the menu's rows and the device already use, now meaning exactly what they mean there.
+  Each badge is omitted at zero, independently, so an absent `○` says "none waiting"
+  rather than "not shown" - which only holds because the whole label is empty at rest.
+- **Monospaced DIGITS (`F_BAR`), not cosmetic.** These percentages are rewritten every
+  few seconds and a proportional font shifts the item's width on every digit change,
+  nudging every other menu-bar icon sideways on a timer.
+- **The four toggles under `Menu bar shows` read `object(forKey:) as? Bool ?? true`, not
+  `bool(forKey:)`.** `UserDefaults.bool(forKey:)` returns FALSE for a key nobody has
+  written, so reading it directly would ship an app whose bar is blank until three things
+  are switched on by hand. `--menu-dump` prints the composed label and the submenu's
+  checkmarks, which is the only way to verify any of this without eyes on the bar -
+  `screencapture` needs a TCC grant the host process doesn't have.
+- **The boat is drawn in the logo's mid-blue and is therefore NOT a template, and the
+  colour was measured, not chosen.** `isTemplate` is what strips colour - as a template
+  macOS renders the shape in its own menu-bar colour and discards ours, which is why
+  `contentTintColor` did nothing - so a colourful icon is exactly an icon that gives up
+  following the system. That means it must stand on its own against BOTH bars.
+  `DECK_BLUE` (#2F76B8, the midpoint of the tile gradient in `docs/logo.svg`) scores
+  **3.01** against a dark bar and **4.37** against a light one, clearing Apple's 3:1
+  non-text threshold on each. Every other logo colour fails one side: #1B5FA6 drops to
+  2.21 on dark, #4C9BE0 to 2.72 on light, and the cream #FBF4E9 to **1.00** - invisible -
+  which is what killed the obvious "cream sails, blue hull" two-tone, since half the boat
+  would vanish depending on the wallpaper. Re-measure before changing it.
+  `Settings › Colourful icon` (default on) returns the monochrome template, which is not a
+  lesser fallback: it is the only version that follows light and dark bars, and which one a
+  wallpaper favours cannot be decided from the code. Two consequences worth knowing: a
+  coloured image does NOT invert to white while the menu is open and the item is
+  highlighted (it sits on the highlight tint, like every other coloured menu-bar icon),
+  and `--icon-preview` now renders colour rows AS-IS while still faking the system tint for
+  the template rows - painting our own tint over a coloured icon would show a colour the
+  bar never renders.
+- **The menu is grouped by KIND: the top level is actions, `Settings ▸` holds every
+  preference.** Answer-prompts, Menu bar shows, Needs-input sound and Launch at login used
+  to sit in the top-level row, which had grown to three consecutive submenus and pushed
+  Quit down the menu with nothing saying which items merely change a setting and which
+  one stops the host. The moved items need `target = self` and explicit `isEnabled` set by
+  hand - `buildMenu`'s loop only walks the top-level `items` array, and the submenu
+  PARENTS have a nil action, which that loop's "an item with an action is a control" rule
+  would read as informational and dim. `Settings` stays enabled with the host DOWN (a
+  preferences door that only opens while a background process is alive is its own bug),
+  while `Device` and `Answer prompts on device` dim with it, since neither can do anything
+  without the host.
+- **The quota rows say when they are STALE, and the age comes from the host rather than
+  being re-derived.** `quotaAgeSec`/`cxAgeSec` are computed by the host (it owns the
+  oauth-vs-cache choice) and now ride the tick LOG line as `qage=`/`cxage=`, because that
+  line is the Mac's only view of the numbers - the menu could otherwise show a percentage
+  frozen by a long OAuth back-off as though it were live. Past `QUOTA_STALE_SEC` (900, the
+  same threshold the firmware dims its hero number at) the row dims and appends
+  `· stale 3h`, and the usage note is SUPPRESSED: "97% used" from an hour ago is not a
+  crisis to colour red, it is a number we cannot vouch for. Each row carries the age of
+  ITS OWN source - hanging the Codex row off the Claude quota's age was a real device-side
+  bug and is not repeated here. Deriving the age Mac-side from a file mtime was rejected:
+  it would put the "which reading is authoritative" decision in two places.
+- **Session titles are clipped at 39, ONE LESS than the host's own 40-character slice, and
+  that off-by-one is the point.** A title arriving at exactly 40 cannot be told apart from
+  one cut there, so clipping at 40 saw no overflow and left a hard mid-word cut on screen
+  ("...recommendations API wor"); one character shorter sends every at-the-cap title
+  through `clip`'s word-boundary path so it ends in an ellipsis that says "there is more".
+  The row's tooltip carries MODEL and BRANCH - the two facts the row cannot fit and
+  nothing else on the Mac shows - and deliberately not the title, which would only repeat
+  the same clipped string. `--menu-dump` prints tooltips, since a menu that cannot be
+  screenshotted leaves hovering by hand as the only other check.
+- **The Mac plays a sound on the EDGE into `asking`, and `AskWatcher` is keyed by session
+  ID for the reason the device's beep budget already documents**: two sessions on one
+  project share a name, and name-matching made an asking session look newly-asking on
+  every poll - here that would be a noise every 3s. Ids that stop asking are forgotten, so
+  an answered session that asks again is announced again, and **the first refresh only
+  PRIMES**: whatever is already asking when the app launches is not news, and without that
+  every relaunch (the login item after a reboot included) would sound off about a backlog.
+  One sound per refresh no matter how many arrive at once - two identical alerts a
+  millisecond apart is just noise. The `Needs-input sound` submenu offers Off plus four
+  system sounds, defaulting to **Submarine** (theme aside, Basso and Sosumi read as
+  ERRORS, and a prompt is not an error); picking one plays it, because a name tells you
+  nothing about a sound. `--sound-check [play]` verifies all of it with no prompt and no
+  hardware: it resolves every candidate name (a sound dropped by a future macOS must fail
+  there, not silently at 3am) and drives the watcher through launch-with-one-asking, the
+  same one sitting there, a second arriving, all clear, the first asking AGAIN, and two at
+  once.
+
 **All host runtime state lives in ONE PER-USER directory, `/tmp/deckhand-<uid>/`
 (`RUNTIME_DIR`), and the per-user part is load-bearing on a shared Mac.** It used to sit
 at fixed `/tmp/deckhand-*` paths, which collide two ways. The second user's host cannot

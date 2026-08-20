@@ -2666,6 +2666,14 @@ async function tick(generation = tickGeneration) {
         `sessionTok=${usage.sessionTokens} weekTok=${usage.weekAllTokens} ` +
         `weekFableTok=${usage.weekFableTokens} weekFablePct=${usage.weekFablePct ?? "?"} ` +
         `src=${usage.quotaSource} ` +
+        // qage/cxage are HOW OLD the two quota readings are, in seconds, and they
+        // are here for the menu-bar app rather than for a human reading the log:
+        // this tick line is the Mac's only view of the numbers, so without them
+        // the menu can only show a percentage frozen by a long OAuth back-off as
+        // though it were live. The device already gets the same two fields in its
+        // payload; publishing them here keeps ONE source for the age instead of
+        // letting the Mac re-derive it from a file mtime and drift.
+        `qage=${usage.quotaAgeSec ?? "?"} cxage=${usage.cxAgeSec ?? "?"} ` +
         `codex=${usage.cxPct == null ? "?" : `${usage.cxPct}%`}` +
         `${usage.cxWin ? `/${Math.round(usage.cxWin / 1440)}d` : ""}` +
         `${usage.cxResetMin == null ? "" : ` (resets ${usage.cxResetMin}m)`} ` +

@@ -51,6 +51,10 @@ func isSupervised() -> Bool { FileManager.default.fileExists(atPath: launchdPlis
 // One row of the sessions array the host already embeds in every tick line.
 struct SessionRow {
     var id = "", name = "", status = "", path = "", title = "", agent = "cc"
+    // Read for the row's TOOLTIP only. Both ride in every tick line already, so
+    // this costs nothing on the wire - and neither fits on a menu row that is
+    // already carrying name, status, agent and a title.
+    var model = "", branch = ""
 }
 
 struct HostStatus {
@@ -62,6 +66,14 @@ struct HostStatus {
     var pct5h: Int? = nil, reset5h: Int? = nil
     var pct7d: Int? = nil, reset7d: Int? = nil
     var cxPct: Int? = nil, cxReset: Int? = nil
+    // How old the two quota readings are. The transport being fresh says nothing
+    // about the NUMBERS: the OAuth poller backs off 15 minutes on a 429 and can
+    // sit there for hours, so a percentage can be stale while every tick arrives
+    // on time. The host computes these (it owns the cache/oauth choice) and puts
+    // them on the tick line as qage=/cxage=; deriving them here from a file mtime
+    // would mean two places deciding which reading is authoritative.
+    var quotaAgeSec: Int? = nil
+    var cxAgeSec: Int? = nil
     var sessions: [SessionRow] = []
     // The device's battery, out of its BATT line. battLeftMin is nil until the
     // device has actually measured a discharge rate - it publishes -1 for "not
@@ -131,6 +143,8 @@ func readStatus() -> HostStatus {
             if let (pct, reset) = pctReset(line, "5h=") { s.pct5h = pct; s.reset5h = reset }
             if let (pct, reset) = pctReset(line, "7d=") { s.pct7d = pct; s.reset7d = reset }
             if let (pct, reset) = pctReset(line, "codex=") { s.cxPct = pct; s.cxReset = reset }
+            s.quotaAgeSec = field(line, "qage=").flatMap { Int($0) }
+            s.cxAgeSec = field(line, "cxage=").flatMap { Int($0) }
             s.via = field(line, "via=")
             s.sessions = extractSessions(line)
             break
@@ -206,6 +220,8 @@ func extractSessions(_ line: Substring) -> [SessionRow] {
         r.path = o["path"] as? String ?? ""
         r.title = o["title"] as? String ?? ""
         r.agent = o["agent"] as? String ?? "cc"
+        r.model = o["model"] as? String ?? ""
+        r.branch = o["branch"] as? String ?? ""
         return r
     }
 }
@@ -227,7 +243,21 @@ func humanMinutes(_ m: Int) -> String {
 }
 
 // Truncate for the menu; the full text is in the host log either way.
-func clip(_ t: String, _ n: Int) -> String { t.count > n ? String(t.prefix(n)) + "…" : t }
+/// Trims to `n` characters ON A WORD BOUNDARY. A plain prefix cut mid-word - a
+/// real session row read "...recommendations API wor" - and there is nowhere else
+/// to read the rest: the host slices titles to 40 characters before either
+/// surface sees them, so the Mac cannot show a fuller one even in a tooltip.
+///
+/// It falls back to the hard cut when the last space sits in the first half,
+/// because breaking there for one long token would throw away most of what fits.
+func clip(_ t: String, _ n: Int) -> String {
+    guard t.count > n else { return t }
+    let head = String(t.prefix(n))
+    if let sp = head.lastIndex(of: " "), head.distance(from: head.startIndex, to: sp) >= n / 2 {
+        return String(head[..<sp]) + "…"
+    }
+    return head + "…"
+}
 
 // The host caps its session list at 6, so a deeper pool could never fill.
 let MAX_SESSION_ROWS = 6
@@ -256,11 +286,173 @@ let F_BOLD = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
 let F_SMALL = NSFont.menuFont(ofSize: 11)
 let F_MONO = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
 
+/// WHAT the bar is allowed to show, as user choices rather than as this file's
+/// opinion. Every one defaults to ON and `object(forKey:) as? Bool ?? true` is
+/// what makes that true of a fresh install too - `UserDefaults.bool(forKey:)`
+/// returns FALSE for a key nobody has written, so reading it directly would ship
+/// an app whose bar is blank until you go and switch three things on.
+///
+/// `onlyOffline` governs the two device-mirroring badges (usage, sessions) and
+/// deliberately NOT the needs-input count: those two stand in for a screen that
+/// is missing, while a prompt blocking your work is worth saying whether or not
+/// the device is there to say it too.
+enum BarPref: String, CaseIterable {
+    case usage = "barShowUsage"
+    case sessions = "barShowSessions"
+    case asking = "barShowAsking"
+    case onlyOffline = "barOnlyWhenOffline"
+
+    var label: String {
+        switch self {
+        case .usage: return "Quota usage"
+        case .sessions: return "Waiting / working counts"
+        case .asking: return "Needs-input count"
+        case .onlyOffline: return "Only while no device is connected"
+        }
+    }
+    var on: Bool { UserDefaults.standard.object(forKey: rawValue) as? Bool ?? true }
+    func toggle() { UserDefaults.standard.set(!on, forKey: rawValue) }
+}
+
+/// True when a device-mirroring badge may show: switched on, and either the
+/// "only while no device is connected" restriction is off or there is genuinely
+/// no device. One function so usage and sessions cannot drift apart.
+func barMirrorAllowed(_ pref: BarPref, _ s: HostStatus) -> Bool {
+    pref.on && !(BarPref.onlyOffline.on && s.deviceConnected)
+}
+
 /// What sits beside the boat in the bar: a count when something is waiting on
 /// you, and NOTHING otherwise - a badge that is always there stops being a
 /// signal. Shared with --menu-dump on purpose: a diagnostic that recomputes the
 /// answer its own way can agree with itself while the app does something else.
-func barCountLabel(_ s: HostStatus) -> String { s.asking > 0 ? " \(s.asking)" : "" }
+///
+/// The FILLED SQUARE is the same glyph an asking row carries in the menu and on
+/// the device, and it is not decoration here: the bar can hold three numbers, so
+/// a bare count would sit next to other bare counts with nothing but order to
+/// tell them apart. Shape is what separates them, which is the rule this project
+/// applies to colour everywhere else.
+///
+/// This is the first third of the partition `barSessionLabel` completes - ■ asks,
+/// ○ waits, ● works - so it must keep counting ONLY `asking`, or a session would
+/// be tallied twice.
+func barCountLabel(_ s: HostStatus) -> String {
+    (BarPref.asking.on && s.asking > 0) ? " \u{25A0}\(s.asking)" : ""
+}
+
+/// The live sessions BY STATUS - hollow ring waiting, dot working - and ONLY
+/// while no device is connected, same reasoning as `barUsageLabel`: the device's
+/// SESSIONS tab is where this is normally read, so the bar stands in for it and
+/// then gets out of the way.
+///
+/// `●` USED TO MEAN "every live session" and now means "working" alone, because
+/// adding waiting to a single total would have printed overlapping numbers - a
+/// `●3` that already contains the `○1` beside it invites adding them up. The
+/// three badges now PARTITION the list the way the menu's own rows do (■ asks,
+/// ○ waits, ● works, one glyph per session, same three shapes in the same
+/// urgency order), so `■1 ○1 ●1` is three sessions and reads as three.
+///
+/// Order follows the host's urgency sort - asking, waiting, working - so the
+/// leftmost number is always the one most likely to need you. Waiting outranks
+/// working here for the same reason it does in that sort and on the device:
+/// READY means nobody is mid-turn, i.e. it is your move.
+///
+/// A zero is drawn as NOTHING rather than as a glyph and a 0, each badge
+/// independently. A quiet Mac's resting state is an empty label, and a badge
+/// present in the resting state is the thing `barCountLabel` above refuses to
+/// be - which also means an absent `○` says "none waiting", not "not shown".
+func barSessionLabel(_ s: HostStatus) -> String {
+    guard barMirrorAllowed(.sessions, s) else { return "" }
+    let waiting = s.sessions.filter { $0.status == "waiting" }.count
+    let working = s.sessions.filter { $0.status == "working" }.count
+    return (waiting > 0 ? " \u{25CB}\(waiting)" : "") + (working > 0 ? " \u{25CF}\(working)" : "")
+}
+
+/// Filled when a device is actually connected, hollow when it is not - the icon
+/// stands for the LINK, not for the process. It used to key off `running`, which
+/// meant a host with no device on the other end drew the same solid boat as a
+/// fully live one and left the difference to a tint that never reached the
+/// screen (see `refresh`) - so the bar could not report the one fact it exists to
+/// report. Shape is now the only carrier here, which is what the rest of this
+/// file already demands of colour. Shared with --menu-dump for the same reason
+/// `barCountLabel` is.
+func barBoatStyle(_ s: HostStatus) -> BoatStyle { s.deviceConnected ? .solid : .outline }
+
+/// Usage in the BAR, and ONLY while no device is connected. The device's USAGE
+/// tab is normally where these two numbers live, so with nothing on the desk to
+/// draw them the bar takes the job over rather than making you open the menu -
+/// and it goes quiet again the moment a device is back, because a pair of
+/// percentages that is always there is chrome, not a signal. Same reasoning as
+/// `barCountLabel`, applied to the other thing the device would have shown.
+///
+/// 5h first, then 7d, in the order the menu and the device both list them. A
+/// STALE figure cannot reach the bar: `readStatus` only reads the log while the
+/// heartbeat is fresh, so a stopped host leaves both nil and this empty. They
+/// come off one tick line, so in practice they are both present or both absent -
+/// a lone percentage is possible only if the usage source omits a window, and it
+/// is shown rather than suppressed, since one real number beats none.
+func barUsageLabel(_ s: HostStatus) -> String {
+    guard barMirrorAllowed(.usage, s) else { return "" }
+    let parts = [s.pct5h, s.pct7d].compactMap { $0 }.map { "\($0)%" }
+    return parts.isEmpty ? "" : " " + parts.joined(separator: "\u{00B7}")
+}
+
+/// Everything to the right of the boat, left to right: usage, then what needs
+/// you, then what is merely live. Urgency ahead of ambience, so the number that
+/// might make you get up is never the one you have to hunt for.
+func barTitle(_ s: HostStatus) -> String {
+    barUsageLabel(s) + barCountLabel(s) + barSessionLabel(s)
+}
+
+/// A sound when a session STARTS needing input, and the edge is the whole point.
+///
+/// Keyed by session ID, never by name: two sessions on one project share a name,
+/// and name-matching is exactly what once made the device beep on every poll
+/// (see the beep-budget note in CLAUDE.md). Ids that stop asking are forgotten,
+/// so a session that is answered and asks again is announced again.
+struct AskWatcher {
+    private var announced: Set<String> = []
+    private var primed = false
+
+    /// How many sessions just entered `asking`. The FIRST call only PRIMES and
+    /// deliberately announces nothing: whatever is already waiting when the app
+    /// launches is not news, and without this every relaunch - including the
+    /// login item firing after a reboot - would sound off about a backlog you
+    /// have already seen.
+    mutating func step(_ asking: Set<String>) -> Int {
+        defer { announced = asking }
+        if !primed { primed = true; return 0 }
+        return asking.subtracting(announced).count
+    }
+}
+
+/// Which sound, as a name from /System/Library/Sounds. Empty string = silent, and
+/// that is a real choice a user can store, which is why absent (a fresh install)
+/// has to mean the DEFAULT rather than empty - the same `object(forKey:) ?? x`
+/// reason `BarPref` reads its keys the way it does.
+///
+/// Submarine is the default because it is this project's theme and, more
+/// usefully, because it does not sound like the system telling you something
+/// went wrong - Basso and Sosumi read as errors, and a prompt is not an error.
+let ASK_SOUNDS = ["Submarine", "Ping", "Glass", "Purr"]
+let ASK_SOUND_DEFAULT = "Submarine"
+var askSoundName: String {
+    UserDefaults.standard.object(forKey: "askSound") as? String ?? ASK_SOUND_DEFAULT
+}
+
+/// Plays it, or does nothing if silenced or the name has gone missing. A sound
+/// file that is absent must not throw or log on a 3s timer - macOS ships these,
+/// but a stored name outlives the OS release that had it.
+func playAskSound() {
+    guard !askSoundName.isEmpty, let snd = NSSound(named: askSoundName) else { return }
+    snd.play()
+}
+
+/// Monospaced DIGITS, at menu-bar text size. Not cosmetic: these percentages are
+/// rewritten every few seconds, and in a proportional font each digit change
+/// shifts the whole item's width, so the bar's other icons twitch sideways on a
+/// timer. Monospaced digits leave only a real change of digit COUNT moving
+/// anything.
+let F_BAR = NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
 
 func menuTitle(_ parts: [(String, NSFont, NSColor)]) -> NSAttributedString {
     let out = NSMutableAttributedString()
@@ -270,19 +462,41 @@ func menuTitle(_ parts: [(String, NSFont, NSColor)]) -> NSAttributedString {
     return out
 }
 
-func quotaTitle(_ label: String, _ pct: Int, _ reset: Int?) -> NSAttributedString {
-    let colour: NSColor = pct >= 95 ? .systemRed : (pct >= 80 ? .systemOrange : .labelColor)
-    let note = pct >= 95 ? "  critical" : (pct >= 80 ? "  high" : "")
+/// Anything past this is called stale. 15 minutes, the same threshold the
+/// firmware dims its hero number at (see `quotaAgeSec` in CLAUDE.md) - one number
+/// so the two surfaces cannot disagree about whether a reading is live.
+let QUOTA_STALE_SEC = 900
+
+func quotaTitle(_ label: String, _ pct: Int, _ reset: Int?, _ ageSec: Int? = nil) -> NSAttributedString {
+    // A STALE reading is dimmed and says so in WORDS, both - the device dims its
+    // hero % for the same reason, and the word is what carries the meaning here
+    // for anyone who cannot see the dimming. Staleness outranks the usage
+    // threshold: "97% used" from an hour ago is not a crisis to colour red, it is
+    // a number we cannot vouch for.
+    let stale = (ageSec ?? 0) > QUOTA_STALE_SEC
+    let colour: NSColor = stale ? .tertiaryLabelColor
+        : (pct >= 95 ? .systemRed : (pct >= 80 ? .systemOrange : .labelColor))
+    let note = stale ? "" : (pct >= 95 ? "  critical" : (pct >= 80 ? "  high" : ""))
+    let staleNote = stale ? "  \u{00B7} stale \(humanMinutes((ageSec ?? 0) / 60))" : ""
     return menuTitle([
         (label.padding(toLength: 6, withPad: " ", startingAt: 0), F_MONO, .secondaryLabelColor),
         (quotaBar(pct), F_MONO, colour),
         (String(format: "  %3d%% used%@", pct, note), F_MONO, colour),
+        (staleNote, F_MONO, .systemOrange),
         // Indented with monospaced spaces so it sits under the bar. Padding a
         // proportional font gave a third of the intended indent.
         (reset.map { _ in "\n      " } ?? "", F_MONO, .secondaryLabelColor),
         (reset.map { "resets in \(humanMinutes($0))" } ?? "", F_SMALL, .secondaryLabelColor),
     ])
 }
+
+/// ONE LESS than the host's own 40-character slice, and that is the whole trick.
+/// A title arriving at exactly 40 is indistinguishable from one that was cut
+/// there, so `clip` at 40 saw no overflow and left the hard mid-word cut on
+/// screen ("...recommendations API wor"). Clipping one character shorter makes
+/// every at-the-cap title go through the word-boundary path and end in an
+/// ellipsis, which says "there is more" instead of looking like a typo.
+let SESSION_TITLE_SHOW = 39
 
 func sessionTitle(_ r: SessionRow) -> NSAttributedString {
     // Shape and word, never colour alone: filled square asks, hollow ring waits,
@@ -297,7 +511,7 @@ func sessionTitle(_ r: SessionRow) -> NSAttributedString {
         (r.name, asking ? F_BOLD : F_BODY, .labelColor),
         (meta, F_SMALL, .secondaryLabelColor),
         (r.title.isEmpty ? "" : "\n     ", F_MONO, .secondaryLabelColor),
-        (r.title.isEmpty ? "" : clip(r.title, 40), F_SMALL, .secondaryLabelColor),
+        (r.title.isEmpty ? "" : clip(r.title, SESSION_TITLE_SHOW), F_SMALL, .secondaryLabelColor),
     ])
 }
 
@@ -323,6 +537,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let voiceHeard = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let voiceReplyItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let loginItem = NSMenuItem(title: "Launch at login", action: #selector(toggleLogin), keyEquivalent: "")
+    // Built ONCE from BarPref.allCases and then only re-checked, the way every
+    // other row here is - see sessionRows on why nothing is added or removed
+    // while the menu may be open under the cursor.
+    let barItem = NSMenuItem(title: "Menu bar shows", action: nil, keyEquivalent: "")
+    let barMenu = NSMenu()
+    var barPrefItems: [(BarPref, NSMenuItem)] = []
+    let colourItem = NSMenuItem(title: "Colourful icon", action: #selector(toggleColourfulIcon), keyEquivalent: "")
+    let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+    let settingsMenu = NSMenu()
+    let soundItem = NSMenuItem(title: "Needs-input sound", action: nil, keyEquivalent: "")
+    let soundMenu = NSMenu()
+    var soundItems: [(String, NSMenuItem)] = []
+    // Diffed every refresh, so it must outlive one - a local would announce
+    // every asking session on every 3s tick.
+    var askWatcher = AskWatcher()
 
     // Watchdog state. wantRunning persists the user's intent ("syncing should
     // be on") so a deliberate Stop is respected but a frozen/crashed host is
@@ -368,6 +597,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
         deviceMenu.autoenablesItems = false
         deviceItem.submenu = deviceMenu
+        barMenu.autoenablesItems = false
+        barItem.submenu = barMenu
+        soundMenu.autoenablesItems = false
+        soundItem.submenu = soundMenu
+        // PREFERENCES behind one door, so the top level is actions only. These
+        // four used to sit in the top-level row and it had grown to three
+        // consecutive submenus, which pushed Quit down the menu and left nothing
+        // saying which items merely change a setting and which one stops the host.
+        //
+        // Two things this needs that the top-level loop below would otherwise
+        // have done: autoenablesItems off (AppKit re-enables anything with a
+        // target, which is how Forget once became clickable with no device
+        // paired) and an explicit target, since that loop only walks `items`. The
+        // two submenu PARENTS are enabled explicitly - the loop's "an item with
+        // an action is a control" rule would read their nil action as
+        // informational and dim them.
+        settingsMenu.autoenablesItems = false
+        settingsItem.submenu = settingsMenu
+        for it in [remoteItem, colourItem, barItem, soundItem, loginItem] {
+            it.target = self
+            it.isEnabled = true
+            settingsMenu.addItem(it)
+        }
+        // Off FIRST, because silencing something that is currently making a noise
+        // is the reason most people open this menu, and it should not be at the
+        // bottom of a list of noises. Choosing a sound PLAYS it (see
+        // pickAskSound) - a name is not something you can evaluate by reading.
+        for name in [""] + ASK_SOUNDS {
+            let it = NSMenuItem(title: name.isEmpty ? "Off" : name,
+                                action: #selector(pickAskSound(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = name
+            soundMenu.addItem(it)
+            soundItems.append((name, it))
+            if name.isEmpty { soundMenu.addItem(.separator()) }
+        }
+        // The two device-mirroring badges, then the restriction that governs
+        // them, then - past a separator - the one that stands on its own. The
+        // grouping is what says which items "only while no device is connected"
+        // applies to, so it cannot be reordered without saying it another way.
+        for pref in [BarPref.usage, .sessions, .onlyOffline, .asking] {
+            if pref == .asking { barMenu.addItem(.separator()) }
+            let it = NSMenuItem(title: pref.label, action: #selector(toggleBarPref(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = pref.rawValue
+            if pref == .sessions {
+                it.toolTip = "\u{25CB} waiting on you, \u{25CF} working. Sessions needing input are counted by the row below."
+            }
+            if pref == .onlyOffline {
+                it.toolTip = "Applies to the two above. The needs-input count is unaffected."
+            }
+            barMenu.addItem(it)
+            barPrefItems.append((pref, it))
+        }
 
         sessionRows = (0..<MAX_SESSION_ROWS).map { _ in
             let it = NSMenuItem(title: "", action: #selector(openSessionFolder(_:)), keyEquivalent: "")
@@ -382,7 +665,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                    .separator(), sessionsHeader]
         items += sessionRows
         items += [voiceSep, voiceHeard, voiceReplyItem,
-                  .separator(), startStop, remoteItem, deviceItem, loginItem,
+                  .separator(), startStop, deviceItem, settingsItem,
                   .separator(),
                   NSMenuItem(title: "Open host log", action: #selector(openLog), keyEquivalent: ""),
                   NSMenuItem(title: "Quit Deckhand", action: #selector(quit), keyEquivalent: "q")]
@@ -403,14 +686,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // The bar's own thickness sets the size, so this follows a
             // 24px bar or a 22px one instead of assuming either.
             let h = max(16, min(20, button.bounds.height - 4))
-            button.image = deckhandPaperBoatImage(size: h, style: s.running ? .solid : .outline)
-            button.contentTintColor = !s.running ? NSColor.systemGray
-                : (s.deviceConnected ? nil : NSColor.systemOrange)
-            // A count beside the boat when something is waiting on you, and
-            // NOTHING otherwise - a badge that is always present stops being a
-            // signal. The number is the signal, not its colour.
-            button.title = barCountLabel(s)
-            button.imagePosition = button.title.isEmpty ? .imageOnly : .imageLeading
+            button.image = deckhandPaperBoatImage(size: h, style: barBoatStyle(s))
+            // NO TINT, EVER - nil, deliberately, where this used to set grey for
+            // stopped and orange for running-with-no-device. Those two colours
+            // were not reaching the screen: with the host running and no device
+            // the bar drew a BLACK boat, not an orange one, because macOS renders
+            // a status item's template image in its own menu-bar colour - which
+            // over a light-ish wallpaper is black even in Dark Mode - and that
+            // overrode the tint. A colour that is silently ignored is worse than
+            // no colour, so the icon now follows the system the way every other
+            // menu-bar glyph does: white on a dark bar, black on a light one.
+            // Cost, accepted: stopped and device-offline both draw the hollow
+            // boat and are no longer told apart in the BAR. The menu's own status
+            // line still separates them in words ("Stopped" versus "Running -
+            // device offline"), which is where this file already puts the meaning
+            // that colour is not allowed to carry alone.
+            button.contentTintColor = nil
+            // Beside the boat: usage and the live-session count while no device
+            // is connected, and a needs-input count whenever there is one -
+            // NOTHING otherwise, because a
+            // badge that is always present stops being a signal. The number is
+            // the signal, not its colour, so this is plain label colour and the
+            // menu carries the thresholds.
+            let label = barTitle(s)
+            button.attributedTitle = NSAttributedString(
+                string: label, attributes: [.font: F_BAR, .foregroundColor: NSColor.labelColor])
+            button.imagePosition = label.isEmpty ? .imageOnly : .imageLeading
         }
         if !s.running {
             statusLine.attributedTitle = menuTitle([("◦  ", F_BODY, .secondaryLabelColor),
@@ -458,9 +759,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             battLine.isHidden = true
         }
 
-        if let pct = s.pct5h { q5.attributedTitle = quotaTitle("5h", pct, s.reset5h) }
-        if let pct = s.pct7d { q7.attributedTitle = quotaTitle("7d", pct, s.reset7d) }
-        if let pct = s.cxPct { cxLine.attributedTitle = quotaTitle("Codex", pct, s.cxReset) }
+        // Each row carries the age of ITS OWN source: Codex's reading comes from a
+        // rollout file the host merely re-reads, so it goes stale independently of
+        // the OAuth poller. Hanging the Codex row off quotaAgeSec was a real bug
+        // on the device (see the Codex row note in CLAUDE.md) and there is no
+        // reason to repeat it here.
+        if let pct = s.pct5h { q5.attributedTitle = quotaTitle("5h", pct, s.reset5h, s.quotaAgeSec) }
+        if let pct = s.pct7d { q7.attributedTitle = quotaTitle("7d", pct, s.reset7d, s.quotaAgeSec) }
+        if let pct = s.cxPct { cxLine.attributedTitle = quotaTitle("Codex", pct, s.cxReset, s.cxAgeSec) }
         q5.isHidden = s.pct5h == nil
         q7.isHidden = s.pct7d == nil
         cxLine.isHidden = s.cxPct == nil
@@ -475,7 +781,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let r = s.sessions[i]
             row.attributedTitle = sessionTitle(r)
             row.representedObject = r.path
-            row.toolTip = r.path.isEmpty ? nil : "Reveal \(r.path) in Finder"
+            // The tooltip already said what the row DOES. What it ADDS is the two
+            // facts the row cannot fit and nothing else on this Mac shows - model
+            // and git branch, the same pair the device's own detail screen pairs
+            // off. Deliberately NOT the title: the host slices that to 40
+            // characters before either surface sees it, so a tooltip could only
+            // repeat the identical clipped string. The path stays the LIVE cwd the
+            // host reports, which is what the click actually reveals - the project
+            // name on the row comes from the repo ROOT instead, so the two
+            // legitimately differ and naming the real target matters.
+            let facts = [r.model, r.branch].filter { !$0.isEmpty }.joined(separator: "  ·  ")
+            let reveal = r.path.isEmpty ? "" : "Reveal \(r.path) in Finder"
+            let tip = [facts, reveal].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            row.toolTip = tip.isEmpty ? nil : tip
             row.isEnabled = !r.path.isEmpty
             row.isHidden = false
         }
@@ -510,6 +828,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ? "Managed by launchd (starts at login, restarts if it dies)"
             : "Not supervised - install with host/deckhand-service.sh install"
         loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        // The EDGE into asking, not the state - and stepped on every refresh even
+        // when silent, so switching a sound on does not then announce a backlog
+        // the watcher never saw. dryRun covers --menu-dump: a diagnostic must
+        // not make a noise.
+        let asking = Set(s.sessions.filter { $0.status == "asking" }.map { $0.id })
+        if askWatcher.step(asking) > 0 && !dryRun { playAskSound() }
+
+        colourItem.state = colourfulIcon ? .on : .off
+        colourItem.toolTip = "Off draws it in the system's own menu-bar colour, which follows light and dark bars."
+        for (name, it) in soundItems { it.state = (name == askSoundName) ? .on : .off }
+        for (pref, it) in barPrefItems {
+            it.state = pref.on ? .on : .off
+            // The restriction is meaningless with nothing left for it to
+            // restrict, and a live checkbox that changes nothing is worse than a
+            // dimmed one that explains itself.
+            if pref == .onlyOffline { it.isEnabled = BarPref.usage.on || BarPref.sessions.on }
+        }
 
         // Watchdog: if syncing is meant to be on but the host has been down or
         // frozen (stale heartbeat) for a sustained window, restart it. Only
@@ -587,6 +922,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Purely a Mac-side display choice - nothing is written to the command file
+    // and the host is not told, because the host does not care what its own
+    // numbers are rendered as.
+    @objc func toggleBarPref(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let pref = BarPref(rawValue: raw) else { return }
+        pref.toggle()
+        refresh()
+    }
+
+    @objc func toggleColourfulIcon() {
+        UserDefaults.standard.set(!colourfulIcon, forKey: "colourfulIcon")
+        refresh()
+    }
+
+    // Picking a sound PLAYS it, which is the only way to judge one, and Off is
+    // silent for the same reason - a preview of silence is not a thing.
+    @objc func pickAskSound(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(name, forKey: "askSound")
+        playAskSound()
+        refresh()
+    }
+
     @objc func toggleLogin() {
         do {
             if SMAppService.mainApp.status == .enabled {
@@ -609,6 +967,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func rebuildDeviceMenu(_ s: HostStatus) {
         deviceMenu.removeAllItems()
         deviceItem.isEnabled = s.running
+        // Settings stays reachable with the host DOWN: launch-at-login and the
+        // bar's own contents are still meaningful choices, and a preferences door
+        // that only opens while a background process is alive is its own bug.
+        settingsItem.isEnabled = true
+        barItem.isEnabled = true
+        soundItem.isEnabled = true
+        // Answering can only be toggled through the host, so it dims with it -
+        // the same rule deviceItem follows.
+        remoteItem.isEnabled = s.running
         if s.devices.isEmpty {
             let none = NSMenuItem(title: "No devices paired yet", action: nil, keyEquivalent: "")
             none.isEnabled = false
@@ -727,13 +1094,36 @@ let BOAT_HULL_BOT_HALF: CGFloat = 28
 // would draw the sails' feet as lines across its own interior.
 let BOAT_MID_Y: CGFloat = (BOAT_APEX_Y + BOAT_HULL_BOT_Y) / 2
 
-// Only two states ship. A hull-only variant was tried for "stopped" and
+// Only two states ship, and `barBoatStyle` picks between them on whether a
+// device is connected. A hull-only variant was tried for "stopped" and
 // rejected: without the sails it reads as a bowl, not a boat.
 enum BoatStyle { case solid, outline }
 
-func deckhandPaperBoatImage(size: CGFloat, style: BoatStyle) -> NSImage {
+/// The boat's own colour, from the project logo's tile gradient (`docs/logo.svg`,
+/// the midpoint of #4C9BE0 -> #12508F). It is the ONLY logo colour that survives
+/// both menu bars, and that was measured rather than picked: against a dark bar
+/// (#2A2A2A) and a light one (#F5F5F5) it scores **3.01 and 4.37**, so it clears
+/// Apple's 3:1 non-text threshold on each. The alternatives all fail one side -
+/// the deep blue #1B5FA6 drops to 2.21 on dark, the light #4C9BE0 to 2.72 on
+/// light, and the cream #FBF4E9 to **1.00**, i.e. invisible, which is what killed
+/// the obvious "cream sails, blue hull" two-tone: half the boat would disappear
+/// depending on the wallpaper. Re-measure before changing this.
+let DECK_BLUE = NSColor(srgbRed: 0x2F / 255.0, green: 0x76 / 255.0, blue: 0xB8 / 255.0, alpha: 1)
+
+/// Colour is a CHOICE, defaulting to on. The monochrome template version is not
+/// a lesser fallback - it is the only one that follows the system, so on a light
+/// bar it is arguably the better icon, and which one a given wallpaper favours
+/// cannot be decided from here (the black-boat episode in CLAUDE.md is exactly
+/// that lesson). Same `object(forKey:) ?? true` reading as `BarPref`, for the
+/// same reason: `bool(forKey:)` would ship this switched off.
+var colourfulIcon: Bool { UserDefaults.standard.object(forKey: "colourfulIcon") as? Bool ?? true }
+
+func deckhandPaperBoatImage(size: CGFloat, style: BoatStyle, colourful: Bool? = nil) -> NSImage {
+    let colour = colourful ?? colourfulIcon
     let img = NSImage(size: CGSize(width: size, height: size), flipped: false) { _ in
-        NSColor.black.set()
+        // Black for the template path: a template image is used as a MASK, so
+        // what is drawn only has to be opaque - the colour is thrown away.
+        (colour ? DECK_BLUE : NSColor.black).set()
         // Width-bound: the boat is wider than it is tall, so the horizontal
         // extent is what has to fit. 1px of inset keeps the hull corners off
         // the bar's edge.
@@ -778,9 +1168,17 @@ func deckhandPaperBoatImage(size: CGFloat, style: BoatStyle) -> NSImage {
         }
         return true
     }
-    // Template: macOS inverts it for a dark menu bar, so the icon is never
-    // drawn in a colour of our choosing and cannot clash with a wallpaper.
-    img.isTemplate = true
+    // TEMPLATE IS WHAT STRIPS COLOUR, so a colourful icon is precisely an icon
+    // that stops being one: as a template, macOS renders the shape in its own
+    // menu-bar colour and ignores everything we chose (that is why setting
+    // contentTintColor did nothing - see the note in `refresh`). The trade is
+    // real and goes both ways: a template follows the system and can never clash
+    // with a wallpaper, while a coloured one holds its own colour and therefore
+    // has to be legible against BOTH bars on its own merits, which is what
+    // DECK_BLUE was measured for. A coloured image also does not invert to white
+    // while the menu is open and the item is highlighted; it sits on the
+    // highlight tint instead, the way every other coloured menu-bar icon does.
+    img.isTemplate = !colour
     return img
 }
 
@@ -796,6 +1194,11 @@ func dumpMenu(_ m: NSMenu, indent: String = "") -> String {
         if !it.isEnabled { flags.append("disabled") }
         if it.state == .on { flags.append("checked") }
         if it.submenu != nil { flags.append("submenu") }
+        // Tooltips are otherwise verifiable only by hovering by hand, which on a
+        // menu that cannot be screenshotted means not at all.
+        if let tip = it.toolTip, !tip.isEmpty {
+            flags.append("tip=\"" + tip.replacingOccurrences(of: "\n", with: " / ") + "\"")
+        }
         let title = (it.attributedTitle?.string ?? it.title)
             .replacingOccurrences(of: "\n", with: "\n" + indent + "   ")
         out += indent + title + (flags.isEmpty ? "" : "   [" + flags.joined(separator: " ") + "]") + "\n"
@@ -857,10 +1260,14 @@ func writeIconPreview(to path: String) {
     let zoom: CGFloat = 6, pad: CGFloat = 8
     let colW = sizes.map { $0 * zoom + pad }.reduce(0, +) + pad
     let rowH = sizes.map { $0 * zoom }.max()! + pad * 2
-    let rows = styles.count * 2
+    // Every combination of style and colour mode, because the two now interact -
+    // a coloured icon and a template one are not the same picture at all.
+    let modes: [Bool] = [true, false]
+    let rows = styles.count * modes.count * 2
     let sheet = NSImage(size: CGSize(width: colW, height: rowH * CGFloat(rows)), flipped: false) { _ in
         for row in 0..<rows {
-            let style = styles[row / 2]
+            let style = styles[row / (2 * modes.count)]
+            let colourful = modes[(row / 2) % modes.count]
             let dark = row % 2 == 1
             // AppKit's origin is bottom-left, so row 0 must be drawn at the TOP
             // or the sheet contradicts the caption it prints.
@@ -869,8 +1276,12 @@ func writeIconPreview(to path: String) {
             CGRect(x: 0, y: y0, width: colW, height: rowH).fill()
             var x = pad
             for sz in sizes {
-                let icon = deckhandPaperBoatImage(size: sz, style: style)
-                let tint = NSImage(size: icon.size, flipped: false) { r in
+                let icon = deckhandPaperBoatImage(size: sz, style: style, colourful: colourful)
+                // A COLOURED icon is drawn as-is - that is the whole point of the
+                // sheet, and painting our own tint over it would show a colour
+                // the bar will never render. Only the TEMPLATE row is tinted
+                // here, standing in for what macOS does to a mask.
+                let tint = colourful ? icon : NSImage(size: icon.size, flipped: false) { r in
                     (dark ? NSColor.white : NSColor.black).set()
                     r.fill()
                     icon.draw(in: r, from: .zero, operation: .destinationIn, fraction: 1)
@@ -889,7 +1300,9 @@ func writeIconPreview(to path: String) {
         .representation(using: .png, properties: [:])!
     try? png.write(to: URL(fileURLWithPath: path))
     print("wrote \(path)")
-    print("rows top->bottom: solid/light, solid/dark, outline/light, outline/dark")
+    print("rows top->bottom: " + styles.flatMap { st in modes.flatMap { m in
+        ["light", "dark"].map { "\(st == .solid ? "solid" : "outline")/\(m ? "colour" : "template")/\($0)" } } }
+        .joined(separator: ", "))
     print("sizes left->right: \(sizes.map { Int($0) })")
 }
 
@@ -909,12 +1322,39 @@ if CommandLine.arguments.contains("--menu-dump") || CommandLine.arguments.contai
     d.refresh()
     if CommandLine.arguments.contains("--menu-dump") {
         let st = readStatus()
-        let count = barCountLabel(st)
-        print("menu bar: boat" + (count.isEmpty ? " (no count)" : " + count\"\(count)\"") + "\n")
+        let label = barTitle(st)
+        print("menu bar: boat (\(barBoatStyle(st)))"
+              + (label.isEmpty ? " (no label)" : " + label\"\(label)\"") + "\n")
         print(dumpMenu(m))
     }
     if let i = CommandLine.arguments.firstIndex(of: "--menu-preview"), CommandLine.arguments.count > i + 1 {
         writeMenuPreview(to: CommandLine.arguments[i + 1], m)
+    }
+    exit(0)
+}
+
+/// `--sound-check [play]`: proves the needs-input sound without waiting for a real
+/// prompt. It resolves every candidate name (a sound that has left the OS must
+/// fail HERE, not silently at 3am) and drives `AskWatcher` through the sequence
+/// that matters - launching with one already asking, the same one sitting there,
+/// a second arriving, everything clearing, the first asking AGAIN, and two at
+/// once. `play` also plays each sound, since a name tells you nothing about it.
+if CommandLine.arguments.contains("--sound-check") {
+    let play = CommandLine.arguments.contains("play")
+    print("sound: chosen=\(askSoundName.isEmpty ? "Off" : askSoundName)")
+    for n in ASK_SOUNDS {
+        let snd = NSSound(named: n)
+        print("  \(n.padding(toLength: 10, withPad: " ", startingAt: 0)) \(snd == nil ? "MISSING" : "ok")")
+        if play, let snd { snd.play(); usleep(1_200_000) }
+    }
+    var w = AskWatcher()
+    let script: [(String, Set<String>)] = [
+        ("launch, 'a' already asking", ["a"]), ("'a' still asking", ["a"]),
+        ("'b' also asks", ["a", "b"]), ("both answered", []),
+        ("'a' asks again", ["a"]), ("'c' and 'd' together", ["c", "d"]),
+    ]
+    for (what, ids) in script {
+        print(String(format: "  %-28s -> %d sound(s)", (what as NSString).utf8String!, w.step(ids)))
     }
     exit(0)
 }
