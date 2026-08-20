@@ -884,6 +884,48 @@ Four things are load-bearing:
   are switched on by hand. `--menu-dump` prints the composed label and the submenu's
   checkmarks, which is the only way to verify any of this without eyes on the bar -
   `screencapture` needs a TCC grant the host process doesn't have.
+- **Clicking a session row JUMPS TO THE APP that owns it, and which app that is comes out
+  of the ENVIRONMENT rather than any search.** The hook is a child of the `claude` process,
+  so it inherits `__CFBundleIdentifier` (the bundle that launched Claude Code - VS Code,
+  a terminal, the desktop app; the actionable half, since NSWorkspace resolves it) and
+  `CLAUDE_CODE_ENTRYPOINT` (Claude Code's own name for the surface, e.g. `claude-vscode`).
+  `owningApp()` reads exactly those two, so identifying the app costs two env lookups and
+  NO child processes on a file that runs for every tool call in every session on the
+  machine. Verified by running the same read from a child of a live session.
+  Two other routes were tried and rejected: `lsof` on the transcript finds nothing, because
+  Claude Code appends and closes rather than holding an fd, so there is no pid-to-session
+  mapping there; and walking the parent chain with `ps` does work (every live `claude`
+  traces to its host app) but costs several spawns per lookup for an answer the environment
+  already has.
+  The click resolves in three tiers (`sessionTarget`), because "jump to the app" means
+  different things per surface: an EDITOR session opens its workspace folder with that app,
+  which brings the existing window forward; a terminal or the desktop app is merely
+  ACTIVATED, since there is no way to focus one terminal tab and opening the folder would
+  spawn a new window; and an unknown or not-running app REVEALS the folder in Finder as
+  this menu always did. The not-running check is load-bearing - without it, clicking a
+  stale row would LAUNCH an editor for a session that no longer exists in it.
+  **The folder to open is the LOCK FILE's workspace, never the session's own path.** A
+  session's `path` is its live cwd and is routinely a subdirectory (this repo reports
+  `.../deckhand/host`), and opening that in VS Code spawns a NEW window on the subfolder
+  instead of focusing the one already open. `~/.claude/ide/<port>.lock` is written per
+  WORKSPACE - two windows on different folders give two locks sharing one pid - and carries
+  `ideName`/`workspaceFolders`, so it is both the window picker and the source of the full
+  path. That last part matters because the host's `truncatePath` prefixes `...` past 64
+  characters, and **a plain suffix test does not recover those** - measured, on a crafted
+  case that failed: truncation can begin INSIDE the workspace folder, so neither string
+  contains the other and the match has to look for a suffix of the folder that is a prefix
+  of the kept tail (with a 6-character floor, since a 2-character overlap matches almost
+  anything and picking the wrong window is worse than falling back).
+  Only surfaces MEASURED to be editors get the workspace treatment; `claude-vscode` is the
+  one observed on this machine, JetBrains is included on the same naming pattern and is
+  UNVERIFIED, and the values a terminal or the desktop app report are still unknown - no
+  such session was running when this was built, and guessing them would be inventing
+  behaviour. Anything unrecognised falls through to activate-only, which is safe.
+  `--open-session [<id-prefix>] [go]` prints what a click would do for every session,
+  resolved by the same function the click calls, and only acts when given `go` - a menu
+  cannot be clicked from a script or screenshotted, so the whole path is otherwise
+  unverifiable by hand. The row TOOLTIP is generated from that same resolver, so it can
+  never promise Finder and then open an editor.
 - **The boat is drawn in the logo's mid-blue and is therefore NOT a template, and the
   colour was measured, not chosen.** `isTemplate` is what strips colour - as a template
   macOS renders the shape in its own menu-bar colour and discards ours, which is why

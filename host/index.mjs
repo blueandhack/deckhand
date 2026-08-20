@@ -1355,6 +1355,14 @@ async function readSessions() {
         // 40 chars: the device's title lane fits ~28 and trims the rest with "...", and
         // this rides in every tick alongside asks that can claim 1400 chars.
         ...(tx.title ? { title: tx.title.slice(0, 40) } : {}),
+        // WHICH APP owns this session, stamped by the hook from the environment it
+        // inherits (see owningApp() there). Passed through for the MENU-BAR app,
+        // which uses the bundle id to jump to that app rather than only revealing
+        // the folder; the device ignores it. Only-when-present for the same reason
+        // as `title`, and absent for a Codex thread read off a rollout, where no
+        // hook ran to observe an environment.
+        ...(record.app?.id ? { app: record.app.id } : {}),
+        ...(record.app?.entry ? { appEntry: record.app.entry } : {}),
         // Detail-screen extras. Short keys and only-when-present, because these ride in
         // EVERY tick: the prompt is the expensive one at ~100 chars x 6 sessions.
         ...(tx.prompt ? { prompt: tx.prompt.slice(0, 100) } : {}),

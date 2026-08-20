@@ -371,6 +371,20 @@ function emitDecision(data, ask, answer) {
   process.stdout.write(JSON.stringify(out));
 }
 
+/// The owning app, as {id, entry}, or null when the environment says neither.
+/// Deliberately not spawned, not walked, and not guessed: `ps`-walking the
+/// parent chain also works but costs several spawns per event, and matching a
+/// session's cwd against ~/.claude/ide/*.lock mislabels a terminal session whose
+/// directory happens to be open in an editor.
+function owningApp() {
+  const id = process.env.__CFBundleIdentifier ?? "";
+  const entry = process.env.CLAUDE_CODE_ENTRYPOINT ?? "";
+  if (!id && !entry) return null;
+  // Capped because these ride in every session record and then in every host
+  // payload; a bundle id is ~30 characters and anything far longer is not one.
+  return { id: id.slice(0, 64), entry: entry.slice(0, 32) };
+}
+
 function writeRecord(filePath, record) {
   const tmp = filePath + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(record));
@@ -462,6 +476,7 @@ try {
       // prompt (PreToolUse/PermissionRequest - their `ask`, or its absence when
       // no display is connected, is authoritative), and one that means the
       // prompt is over. Everything else leaves it alone.
+      const app = owningApp();
       const definesAsk = isPermEvent || isPreAsk;
       const clearsAsk = ["PostToolUse", "PostToolUseFailure", "Stop", "UserPromptSubmit"]
         .includes(data.hook_event_name);
@@ -469,6 +484,22 @@ try {
 
       const record = {
         cwd: data.cwd ?? existing.cwd ?? "",
+        // WHICH APP this session lives in, so the Mac can jump to it rather than
+        // only reveal its folder. Both come from the environment this hook
+        // INHERITS from the claude process that spawned it - verified by running
+        // the same read from a child of a live session - so it costs two env
+        // lookups and no child processes, which matters on a file that runs for
+        // every tool call in every session on the machine.
+        //
+        // `__CFBundleIdentifier` is the actionable half (launchd sets it to the
+        // bundle that launched the process - VS Code, Terminal, iTerm, the
+        // desktop app - and NSWorkspace can resolve it), while
+        // CLAUDE_CODE_ENTRYPOINT is the readable label and the only one that
+        // says HOW Claude Code is running. Recomputed per event rather than
+        // carried, because every event for a session runs inside that same
+        // process tree; `existing` is the fallback purely for a payload that
+        // somehow arrives with neither set.
+        ...(app ? { app } : existing.app ? { app: existing.app } : {}),
         model: data.model ?? existing.model ?? "",
         // Most hook events don't carry the model (desktop-app sessions never
         // do), but the transcript path is in every payload and each assistant
