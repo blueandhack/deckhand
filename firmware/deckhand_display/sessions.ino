@@ -28,10 +28,20 @@ void buildSessionSubline(int i, char* out, size_t n) {
   // deliberately TEXT and not a colour or an icon: it has to survive a model rename
   // and stay readable for a colourblind user, same rule as the status shapes.
   const char* tag = strcmp(s.agent, "cx") == 0 ? "CX" : "CC";
-  if (model[0] && s.branch[0]) snprintf(out, n, "%s %s (%s)", tag, model, s.branch);
-  else if (model[0]) snprintf(out, n, "%s %s", tag, model);
-  else if (s.branch[0]) snprintf(out, n, "%s (%s)", tag, s.branch);
-  else snprintf(out, n, "%s", tag);
+  // Which MAC, on the same principle as which AGENT: text, never a colour or
+  // an icon - it has to survive a rename and stay readable for a colourblind
+  // user. "/" and not a middle dot - Cozette is ASCII 0x20-0x7E only, and
+  // U+00B7 would draw as a blank box. dispMacTag() already returns "" unless
+  // a second Mac is actually talking to us, so "who" collapses to the plain
+  // CC/CX tag in the ordinary single-Mac case, unchanged from before.
+  char who[12];
+  const char* mac = dispMacTag(s.hostSlot);
+  if (*mac) snprintf(who, sizeof(who), "%s/%s", tag, mac);
+  else      snprintf(who, sizeof(who), "%s", tag);
+  if (model[0] && s.branch[0]) snprintf(out, n, "%s %s (%s)", who, model, s.branch);
+  else if (model[0]) snprintf(out, n, "%s %s", who, model);
+  else if (s.branch[0]) snprintf(out, n, "%s (%s)", who, s.branch);
+  else snprintf(out, n, "%s", who);
 }
 // Status pill: visual weight matches urgency. "asking" = solid filled pill
 // (the loudest element on the tab - Claude is blocked on you), "waiting" =
@@ -128,7 +138,19 @@ void drawSessionRow(int pos) {
   bool showTitle = large && rowH >= SESSION_TITLE_MIN_H && s.title[0];
 
   const int nameX = SESSION_ROW_X + 40;
-  const char* agentTag = strcmp(s.agent, "cx") == 0 ? "CODEX" : "CLAUDE";
+  // Built ONCE, then both DRAWN (below) and MEASURED (laneRight, right here) from this
+  // same buffer - a tag measured from one string and drawn from another is exactly the
+  // 8px overlap the measured lane was written to fix. Mac tag on the same principle as
+  // the CC/CX one: text, never colour or an icon, "/" not a middle dot (Cozette is ASCII
+  // 0x20-0x7E only), and dispMacTag() gates on a second Mac actually being present so
+  // the ordinary single-Mac case is unchanged.
+  char agentTag[24];
+  {
+    const char* base = strcmp(s.agent, "cx") == 0 ? "CODEX" : "CLAUDE";
+    const char* mac = dispMacTag(s.hostSlot);
+    if (*mac) snprintf(agentTag, sizeof(agentTag), "%s/%s", base, mac);
+    else      snprintf(agentTag, sizeof(agentTag), "%s", base);
+  }
   const char* pillLbl =
       working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "INPUT" : "READY");
   setUIFont(1); // both blockers render at size 1, so measure them there
@@ -169,7 +191,9 @@ void drawSessionRow(int pos) {
   int nameOffset = large ? (uiLineH(T_HERO) - uiLineH(nameFont)) / 2 : 0;
   tft.drawString(nameBuf, nameX, nameTop + nameOffset);
 
-  char sub[26];
+  // 36, not 26: buildSessionSubline's "who" can now be "CC/studio" (9 chars) instead of
+  // just "CC", and "CC/studio opus-5 (main)" runs to 23 - still comfortably inside 36.
+  char sub[36];
   buildSessionSubline(i, sub, sizeof(sub));
   setUIFont(1);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
@@ -188,23 +212,49 @@ void drawSessionRow(int pos) {
       tft.setTextColor(COLOR_VALUE, COLOR_CARD);
       tft.drawString(titleBuf, nameX, y + 32);
       tft.setTextColor(COLOR_LABEL, COLOR_CARD); // restore for the sub-line below
-      if (sub[0]) tft.drawString(sub, nameX, y + 47);
+      // Bound to the sub-line's own lane (x=48 to the row's right edge, 184px = 30
+      // characters at Cozette's 6px advance) - a long branch name plus a Mac tag could
+      // otherwise run past the row.
+      if (sub[0]) {
+        char subFit[36];
+        fitText(subFit, sizeof(subFit), sub, 184);
+        tft.drawString(subFit, nameX, y + 47);
+      }
     } else if (rowH >= 70 && sub[0]) {
-      tft.drawString(sub, SESSION_ROW_X + 40, y + 34);
+      char subFit[36];
+      fitText(subFit, sizeof(subFit), sub, 184);
+      tft.drawString(subFit, SESSION_ROW_X + 40, y + 34);
     }
     // Tall rows keep the top-right corner free (their pill sits at the bottom), so
     // the agent gets its full name there - and it still shows on the 56..69px rows
-    // where the sub-line above is suppressed to clear the pill.
+    // where the sub-line above is suppressed to clear the pill. Drawn from the SAME
+    // agentTag buffer the name lane was measured against above.
     tft.setTextDatum(TR_DATUM);
-    tft.drawString(strcmp(s.agent, "cx") == 0 ? "CODEX" : "CLAUDE",
-                   SESSION_ROW_X + SESSION_ROW_W - 12, y + 8);
+    tft.drawString(agentTag, SESSION_ROW_X + SESSION_ROW_W - 12, y + 8);
     tft.setTextDatum(TL_DATUM);
     const char* label = working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "NEEDS INPUT" : "READY");
     // 22 rather than 24 on a title row: the sub-line now ends at y+60, and the extra 2px
     // is what keeps the pill clear of it at the 86px height three sessions produce.
     drawStatusPill(SESSION_ROW_X + 40, y + rowH - (showTitle ? 22 : 24), label, s.status, false);
   } else {
-    if (sub[0]) tft.drawString(sub, SESSION_ROW_X + 40, y + 25);
+    // NOT the 184px lane the tall-row sites use: on a compact row the duration
+    // ("10s"/"4m") is drawn at this SAME y (y+25 - see the drawIfChanged call for
+    // rowDurCache below), and drawIfChanged clears a box around it on EVERY tick,
+    // independent of whether this row is due to repaint. Before the Mac tag, the
+    // sub-line ("CC opus-5 (main)") never reached that box; "CC/studio opus-5
+    // (multi-host)" does, and the duration's periodic clear was found eating its
+    // tail live on the device - "CC/mac opus-5 (multi-" with the rest gone and no
+    // "..." (fitText never truncated it; something drawn AFTER it did). The
+    // duration is right-aligned to x=SESSION_ROW_X+SESSION_ROW_W-16 and padded to
+    // 7 characters, so its clear box's left edge is measured (not hardcoded, in
+    // case the font or padding ever changes) rather than assumed.
+    if (sub[0]) {
+      int durBoxLeft = SESSION_ROW_X + SESSION_ROW_W - 16 - tft.textWidth("0000000") - 1;
+      int subMaxW = durBoxLeft - (SESSION_ROW_X + 40) - 4; // 4px so it never kisses that box
+      char subFit[36];
+      fitText(subFit, sizeof(subFit), sub, subMaxW);
+      tft.drawString(subFit, SESSION_ROW_X + 40, y + 25);
+    }
     const char* label = working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "INPUT" : "READY");
     drawStatusPill(SESSION_ROW_X + SESSION_ROW_W - 16, y + 4, label, s.status, true);
   }
@@ -249,15 +299,25 @@ void renderSessionsList() {
     // rowSigCache is keyed by DISPLAY POSITION, which is what it has always
     // been - so pass pos where the cache is indexed and i where the row's data
     // is read.
-    char sub[26];
+    char sub[36];
     buildSessionSubline(i, sub, sizeof(sub));
     // The TITLE belongs in this signature. Leave it out and a row keeps showing the old
     // title forever, because nothing else about the row changed - the exact silent
     // staleness the change-only redraw discipline is prone to. 160 because a 40-char
     // title no longer fits alongside the rest in 96.
-    char sig[160];
-    snprintf(sig, sizeof(sig), "%s|%s|%s|%s", sessions[i].name, sessions[i].status, sub,
-             sessions[i].title);
+    //
+    // The Mac TAG belongs here too, and for a sharper reason than staleness: two
+    // sessions with an identical name|status|sub|title at the same display position on
+    // DIFFERENT Macs would compare equal and never repaint at all, so the row would go
+    // on showing whichever Mac's tag was drawn first rather than the one it now actually
+    // belongs to. dispMacTag() (not a bare hostSlot int) is what's compared, because
+    // that's the value actually drawn - it's also what makes a usedLinkCount() flip
+    // (second Mac connects/drops) repaint every row: dispMacTag() changes for every
+    // session at once even though no session's own data did. 176 because the tag adds
+    // up to 7 chars plus a separator - see the rowSigCache declaration.
+    char sig[176];
+    snprintf(sig, sizeof(sig), "%s|%s|%s|%s|%s", sessions[i].name, sessions[i].status, sub,
+             sessions[i].title, dispMacTag(sessions[i].hostSlot));
     if (strncmp(sig, rowSigCache[pos], sizeof(rowSigCache[pos])) != 0) {
       strncpy(rowSigCache[pos], sig, sizeof(rowSigCache[pos]) - 1);
       rowSigCache[pos][sizeof(rowSigCache[pos]) - 1] = '\0';
@@ -359,6 +419,16 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
   // this the chip would not appear until something else happened to repaint.
   size_t used = strlen(out);
   if (used + 3 < outSize) snprintf(out + used, outSize - used, "|%c", msgOffered(idx) ? 'M' : '-');
+  // The Mac tag MUST be here too, for the identical reason: two sessions can share
+  // every other field on this card while living on different Macs, and a
+  // usedLinkCount() flip (a second Mac connecting or dropping) changes nothing else
+  // about a session already open on screen - dispMacTag() itself is what changes, since
+  // its output for the same hostSlot depends on that count. Appended the same way the
+  // TYPE-chip flag was, rather than folded into the big snprintf above, to avoid
+  // touching that call's field count.
+  used = strlen(out);
+  if (used + 9 < outSize)
+    snprintf(out + used, outSize - used, "|%s", dispMacTag(sessions[idx].hostSlot));
 }
 // Index-based (not SessionInfo&) for the same Arduino auto-prototype reason
 // as buildSessionSubline.
@@ -960,12 +1030,30 @@ void drawSessionDetail(int idx) {
   setUIFont(1);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.drawString("STARTED", LX, cy);
-  tft.drawString("AGENT", RX, cy);
+  // Which Mac rides BESIDE the agent, not in a row of its own below it: even today's
+  // four short fields leave only ~8px of slack in the worst case (title AND prompt both
+  // present) before the card's own bottom border, and a fifth label+value row needs
+  // ~25px more - it would run past the card. Gated on usedLinkCount() > 1 via
+  // dispMacTag(), the identical reason drawCardChrome() gates the USAGE tab's tag: a
+  // real Mac's tag is never empty, so without the gate this would show permanently,
+  // disambiguating nothing with one Mac.
+  const char* mac = dispMacTag(s.hostSlot);
+  tft.drawString(mac[0] ? "AGENT / MAC" : "AGENT", RX, cy);
   cy += 12;
   char t1[10];
   formatClock(s.startSec, t1, sizeof(t1));
   drawColValue(LX, cy, t1, colW);
-  drawColValue(RX, cy, strcmp(s.agent, "cx") == 0 ? "Codex" : "Claude Code", colW);
+  // The short CC/CX form, not the spelled-out "Claude Code"/"Codex", is what leaves
+  // room for the tag in this 90px column: "Claude Code / studio" (21 chars, 126px) does
+  // not fit and drawColValue's own truncation would eat the TAIL first, dropping the
+  // Mac tag itself rather than the agent name. "CC/studio" (9 chars, 54px) fits with
+  // room to spare. Unchanged ("Claude Code"/"Codex") when there's nothing to disambiguate.
+  char agentCol[24];
+  if (mac[0]) snprintf(agentCol, sizeof(agentCol), "%s/%s",
+                       strcmp(s.agent, "cx") == 0 ? "CX" : "CC", mac);
+  else        snprintf(agentCol, sizeof(agentCol), "%s",
+                       strcmp(s.agent, "cx") == 0 ? "Codex" : "Claude Code");
+  drawColValue(RX, cy, agentCol, colW);
 
   // Asking but no answerable prompt attached (fired while disconnected, or the
   // window closed) - say so instead of leaving "needs input" unexplained.

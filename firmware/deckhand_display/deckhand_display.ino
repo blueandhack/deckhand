@@ -813,7 +813,13 @@ int hiddenAskingCount = 0;
 // Per-row render caches: a row only redraws when its own signature changes,
 // so one session flipping status doesn't flash the whole list. The duration
 // field ticks on its own cache, independent of the rest of the row.
-char rowSigCache[MAX_SESSIONS][160]; // must match the sig buffer in renderSessionsList
+// 176, not 160: the signature now carries dispMacTag() on top of name|status|sub|title.
+// Worst case name(23)+status(9)+sub(35)+title(43)+tag(7)+4 separators+NUL = 122, so 176
+// leaves real headroom - but the reason the tag is here at all is identity, not length:
+// two sessions with the same name|status|sub|title at the same display position on
+// DIFFERENT Macs would otherwise never repaint, and the row would keep showing whichever
+// Mac's tag was drawn first rather than the one it now actually belongs to.
+char rowSigCache[MAX_SESSIONS][176]; // must match the sig buffer in renderSessionsList
 char rowDurCache[MAX_SESSIONS][8];
 char overflowCache[32] = "";
 int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
@@ -826,11 +832,16 @@ int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
 bool showingDetail = false;
 int detailIndex = -1;
 char detailId[16] = "";
-// 352: the signature now carries path(68) + title(44) + prompt(104) on top of the rest,
-// worst case ~327. drawIfChanged-style comparisons only look at cacheSize bytes, so a
-// cache shorter than the string silently stops noticing changes past that point - here
-// that would mean editing your prompt never repaints the screen.
-char detailSigCache[352] = "";
+// 368: the signature now carries path(68) + title(44) + prompt(104) on top of the rest,
+// worst case ~327, PLUS dispMacTag() (up to 7 chars plus a separator) appended after the
+// existing "|%c" msgOffered flag - worst case ~350, so 368 keeps headroom. drawIfChanged-
+// style comparisons only look at cacheSize bytes, so a cache shorter than the string
+// silently stops noticing changes past that point - here that would mean editing your
+// prompt never repaints the screen. The tag is in this signature for the identical
+// reason it joined the row signature: two sessions can otherwise share every other
+// field while living on different Macs, and a usedLinkCount() flip (second Mac
+// connects/drops) changes nothing else about a session already on screen.
+char detailSigCache[368] = "";
 // 28, not 16: this now holds "for 12m - 14:31" padded to 22, and drawIfChanged compares
 // only the first cacheSize bytes. At 16 the trailing clock fell outside the comparison
 // entirely, so the time would silently freeze while the duration beside it kept ticking.
@@ -2540,6 +2551,22 @@ int usedLinkCount() {
   int n = 0;
   for (int i = 0; i < MAX_LINKS; i++) if (hostLinks[i].used) n++;
   return n;
+}
+// The Mac tag to actually SHOW beside a session - "" unless a second Mac is
+// actually talking to us right now. Same usedLinkCount() > 1 gate
+// drawCardChrome() already uses for the USAGE tab's per-card tag, and for the
+// identical reason: a real Mac's tag comes straight from its hostname
+// (macTag() in the host) and is never empty, so without this gate every
+// session row - and the detail card - would carry a tag that disambiguates
+// nothing until a second Mac actually shows up. "A label that appears and
+// disappears is how you notice the second Mac arriving," not permanent noise.
+// This is also what makes a usedLinkCount() flip itself a signature change:
+// dispMacTag()'s output for the SAME hostSlot changes the instant the count
+// does, even though nothing else about the session did - so callers that put
+// this in a repaint signature get that repaint for free.
+const char* dispMacTag(int hostSlot) {
+  const char* mac = linkTag(hostSlot);
+  return (*mac && usedLinkCount() > 1) ? mac : "";
 }
 
 // ---------- Cross-Mac session ranking (index sort, not a value sort) ----------
