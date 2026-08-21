@@ -41,6 +41,12 @@ void resetUsageCaches() {
 // -1 means no link has a usable reading yet.
 int usageSourceLink = -1;
 int cxSourceLink = -1;
+// Which Mac the tab is PINNED to, by hostId rather than slot index - a slot is
+// reused when a link drops and reconnects, and pinning "slot 0" would then
+// silently follow whoever landed there. Empty = AUTO, meaning freshest-wins,
+// which is the resting state and what a reboot lands on: a page choice is not
+// worth an NVS write, and AUTO is the right default anyway.
+char usagePinHostId[12] = "";
 // Both Macs poll the same account, so the quota is the same number twice - the
 // useful difference between them is AGE. Take the fresher reading per source
 // (Claude by quotaAgeSec, Codex independently by cxAgeSec, which is already how
@@ -67,6 +73,22 @@ void mergeUsage() {
            u.cxAgeSec < hostLinks[bestCx].usage.cxAgeSec))) bestCx = i;
     }
   }
+  // A pin overrides freshest-wins, PER SOURCE and with a fallback: pinning a
+  // Mac that has no Codex reading must not blank the Codex row, so each source
+  // keeps the freshest it found when the pinned Mac has nothing for it. The pin
+  // is DROPPED the moment its Mac stops talking to us, for the same reason a
+  // quiet link's session rows are dropped rather than dimmed - otherwise the
+  // tab sits on a departed Mac's frozen numbers and looks live.
+  if (usagePinHostId[0]) {
+    int pin = linkForHost(usagePinHostId, false);
+    if (pin < 0) {
+      usagePinHostId[0] = '\0';
+    } else {
+      const Usage& p = hostLinks[pin].usage;
+      if (p.fiveHourPct >= 0 || p.sevenDayPct >= 0) best = pin;
+      if (p.cxPct >= 0) bestCx = pin;
+    }
+  }
   usageSourceLink = best;
   cxSourceLink = bestCx;
   if (best >= 0) {
@@ -82,6 +104,28 @@ void mergeUsage() {
     usage.cxPct = u.cxPct;  usage.cxResetInMin = u.cxResetInMin;
     usage.cxWindowMin = u.cxWindowMin;  usage.cxAgeSec = u.cxAgeSec;
   }
+}
+// Tap the content area to read the OTHER Mac's own figures. Returns true only
+// when the page actually moved, so the caller repaints nothing otherwise.
+// Cycles in slot order over links that have SOME reading, wrapping, and does
+// nothing at all with fewer than two - so on an ordinary single-Mac setup a tap
+// on this tab stays as inert as it was before this existed.
+bool usageCyclePin() {
+  int live[MAX_LINKS], n = 0;
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!hostLinks[i].used) continue;
+    const Usage& u = hostLinks[i].usage;
+    if (u.fiveHourPct >= 0 || u.sevenDayPct >= 0 || u.cxPct >= 0) live[n++] = i;
+  }
+  if (n < 2) return false;
+  // Start from where the screen actually is: the pin if set, else whichever
+  // link freshest-wins chose, so the first tap always moves one step from what
+  // you are looking at rather than jumping to slot 0.
+  int cur = usagePinHostId[0] ? linkForHost(usagePinHostId, false) : usageSourceLink;
+  int at = 0;
+  for (int i = 0; i < n; i++) if (live[i] == cur) { at = i; break; }
+  strlcpy(usagePinHostId, hostLinks[live[(at + 1) % n]].hostId, sizeof(usagePinHostId));
+  return true;
 }
 void drawCardChrome(int y0, const char* label, const char* tag) {
   uiCard(CARD_X, y0, CARD_W, CARD_H, COLOR_CARD);  // border added by caller when active
@@ -100,9 +144,19 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
   // card is spoken for (the +88 row's clear box already had to move off the
   // border, and nothing here may end past +101).
   if (tag && *tag && usedLinkCount() > 1) {
+    // Accent = PINNED, grey = AUTO (freshest wins), the same convention the
+    // settings controls use: accented once off the default. It is carried by
+    // COLOUR because there is no width to carry it in text - every other row on
+    // this card spans the full interior (hero, pace bar and stats all take
+    // CARD_W - 2*PAD), and against a 144px label ("WEEK - 7 DAY, ALL MODELS")
+    // a "1/2" beside a 6-char tag would start at x=154 and collide at 170.
+    // Colour is not the only carrier: the tag TEXT changes on every tap, which
+    // is what actually tells you the page moved.
+    tft.setTextColor(usagePinHostId[0] ? COLOR_ACCENT : COLOR_LABEL, COLOR_CARD);
     tft.setTextDatum(TR_DATUM);
     tft.drawString(tag, CARD_X + CARD_W - PAD, y0 + 6);
     tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   }
 }
 void drawFooterChrome() {
@@ -340,10 +394,24 @@ void renderUsageTab() {
   }
   // A source change moves no percentage, so nothing else would repaint - the
   // same trap the stale-dim flip above has, where the digits stay identical.
-  static int srcCache = -2, cxSrcCache = -2;
-  if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink) {
+  // The PIN state belongs in this bust too: pinning the Mac that freshest-wins
+  // had already chosen moves no source and no digit, but it does flip the tag
+  // from grey to accent, and nothing else would repaint it.
+  // The LINK COUNT belongs here too, and its absence was a real bug: the tag is
+  // drawn only when usedLinkCount() > 1, but the tag lives on the card CHROME,
+  // which repaints on a source or pin change and nothing else. So a second Mac
+  // arriving after the chrome was last painted left both Claude cards untagged
+  // while the Codex row (a different draw call, rendered per tick) showed its
+  // tag - observed exactly that way on hardware, with two real Macs connected.
+  static int srcCache = -2, cxSrcCache = -2, pinCache = -1, linksCache = -1;
+  int pinNow = usagePinHostId[0] ? 1 : 0;
+  int linksNow = usedLinkCount();
+  if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink ||
+      pinCache != pinNow || linksCache != linksNow) {
     srcCache = usageSourceLink;
     cxSrcCache = cxSourceLink;
+    pinCache = pinNow;
+    linksCache = linksNow;
     drawUsageStatic();   // repaints chrome; resetUsageCaches() runs inside it
   }
   renderCard(CARD1_Y, usage.fiveHourPct, usage.sessionTokens, usage.fiveHourResetInMin,

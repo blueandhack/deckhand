@@ -2567,6 +2567,23 @@ void handleTouch() {
     return;
   }
 
+  // USAGE: a tap on the cards pages between the Macs' OWN readings, because the
+  // tab otherwise shows only whichever reading is freshest and gives you no way
+  // to ask what the other Mac thinks. Inert below two live links
+  // (usageCyclePin() returns false), so this adds nothing to the ordinary
+  // single-Mac tab. It sits after the footer branch, so the five-tap easter egg
+  // keeps its door. Repainting goes through renderUsageTab()'s own
+  // source/pin cache bust rather than a direct drawUsageStatic() here - calling
+  // both would repaint the chrome twice, which is the double-draw this file's
+  // redraw discipline exists to prevent.
+  if (currentTab == TAB_USAGE && sy >= CONTENT_Y && everReceived) {
+    if (usageCyclePin()) {
+      mergeUsage();       // move the newly selected Mac's figures into `usage`
+      renderUsageTab();
+    }
+    return;
+  }
+
   if (currentTab == TAB_SESSIONS && sessionCount > 0 && sy >= SESSION_ROW_Y0) {
     int slot = sessionRowH + SESSION_ROW_GAP;
     int row = (sy - SESSION_ROW_Y0) / slot;
