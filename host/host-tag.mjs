@@ -4,21 +4,21 @@
 // that knows its own hostname, and overridable because a hostname is not always
 // the name you think of the machine by.
 export function macTag(hostname = "", override = "") {
-  const pick = (s) => {
-    const parts = String(s || "")
-      .replace(/\.local$/i, "")
-      .split(/[-_. ]+/)
-      .filter(Boolean);
-    if (parts.length === 0) return "";
-    let segment = parts[parts.length - 1];
-    const cleaned = segment.toLowerCase().replace(/[^a-z0-9]/g, "");
-    // If the last segment becomes a single character after cleaning, prefer the
-    // previous segment if it exists (handles cases like "studio-b" → "studio")
-    if (cleaned.length === 1 && parts.length > 1) {
-      segment = parts[parts.length - 2];
-      return segment.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 6);
-    }
-    return cleaned.slice(0, 6);
-  };
-  return pick(override) || pick(hostname);
+  // An override is a user-provided TAG, so it is sanitised as a whole and never
+  // split on separators. A hostname is an OS name where the distinguishing part
+  // lives in the last segment (e.g. "air" vs "studio" in Apple defaults), so it
+  // is split and that segment is taken. The asymmetry is deliberate.
+  const cleanOverride = String(override || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 6);
+  if (cleanOverride) return cleanOverride;
+
+  const parts = String(hostname || "")
+    .replace(/\.local$/i, "")
+    .split(/[-_. ]+/)
+    .filter(Boolean);
+  if (parts.length === 0) return "";
+  const lastSegment = parts[parts.length - 1];
+  return lastSegment.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 6);
 }

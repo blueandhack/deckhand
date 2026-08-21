@@ -19,6 +19,7 @@ eq(macTag("Bob's Mac"), "mac", "spaces split, apostrophe stripped");
 eq(macTag(""), "", "no hostname yields no tag");
 eq(macTag("Yujias-MacBook-Air", "studio-b"), "studio", "override wins and is capped");
 eq(macTag("host", "  "), "host", "blank override falls through");
+eq(macTag("Mac-Studio-B"), "b", "a hostname's last segment is taken even when it is one character");
 // A tag rides in EVERY payload and is drawn in a measured lane, so an
 // over-long value is a layout bug rather than a cosmetic one.
 eq(macTag("Yujias-Extremely-Longnamedmachine").length <= 6, true, "always <= 6");
