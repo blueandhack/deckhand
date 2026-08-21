@@ -440,6 +440,36 @@ struct Usage {
   long cxAgeSec = -1;
 } usage;
 
+// ---------- Per-Mac link state ----------
+// One device serves two Macs at once, and almost everything a payload carries
+// is per-Mac: its quota reading, whether ITS hook is waiting for us, how many
+// sessions it had to leave out, and its own voice sequence. SessionInfo is the
+// one thing that cannot be per-Mac (2.2KB x 6 = 13.4KB against ~26KB free
+// heap), which is why the session list is MERGED instead - see mergeSessions().
+//
+// Keyed by hostId, NOT by BLE conn_id: conn_id is renumbered by a reconnect,
+// and USB carries the same Mac with no conn_id at all.
+const unsigned long LINK_STALE_MS = 21000;  // ~4 missed ticks
+struct HostLink {
+  bool  used = false;
+  char  hostId[12] = "";
+  char  tag[8] = "";
+  unsigned long lastPayloadMillis = 0;
+  bool  remoteAnswer = true;
+  int   sessionsTotal = 0;
+  int   hiddenAsking = 0;
+  Usage usage;
+  // Host-LIFETIME counter, so it restarts at 1 when that host process does.
+  // It MUST be per-link: shared as one high-water mark, two independent
+  // counters would trip the "seq went backwards = new host generation" reset
+  // on nearly every tick, disabling the voice card continuously rather than
+  // just after a restart.
+  long voiceSeq = 0;
+  long voiceSeqShown = 0;
+};
+HostLink hostLinks[MAX_LINKS];
+int curLink = -1;   // which link the payload being parsed came from
+
 // The two Claude cards were 122 tall and, with the gaps, filled the content area
 // exactly - there was no room for Codex anywhere. They are now 104: only the padding
 // around the hero number tightened, the number itself is the same 39px Cozette, so
@@ -2451,6 +2481,50 @@ void handleTouch() {
 }
 
 // ---------- Serial protocol ----------
+int linkForHost(const char* hostId, bool create) {
+  if (!hostId || !*hostId) return -1;
+  for (int i = 0; i < MAX_LINKS; i++)
+    if (hostLinks[i].used && strcmp(hostLinks[i].hostId, hostId) == 0) return i;
+  if (!create) return -1;
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!hostLinks[i].used) {
+      hostLinks[i] = HostLink();
+      hostLinks[i].used = true;
+      strlcpy(hostLinks[i].hostId, hostId, sizeof(hostLinks[i].hostId));
+      return i;
+    }
+  }
+  // Full: recycle the stalest link rather than ignoring a Mac that is actually
+  // talking to us. With MAX_LINKS == MAX concurrent centrals this is reachable
+  // only via USB plus two BLE links, or a stale entry that has not aged out yet.
+  int oldest = 0;
+  for (int i = 1; i < MAX_LINKS; i++)
+    if (hostLinks[i].lastPayloadMillis < hostLinks[oldest].lastPayloadMillis) oldest = i;
+  hostLinks[oldest] = HostLink();
+  hostLinks[oldest].used = true;
+  strlcpy(hostLinks[oldest].hostId, hostId, sizeof(hostLinks[oldest].hostId));
+  return oldest;
+}
+const char* linkTag(int slot) {
+  return (slot >= 0 && slot < MAX_LINKS && hostLinks[slot].used) ? hostLinks[slot].tag : "";
+}
+// A Mac that has stopped sending is a Mac whose rows are now fiction: showing
+// its pending prompt as answerable is worse than showing nothing, and it also
+// keeps the footer's single "Xs ago" honest. Rows are DROPPED, not dimmed -
+// except that the row-dropping half (dropSessionsForLink(), keyed by the
+// SessionInfo.hostSlot field) arrives with the session merge in the next
+// task. For now the session list is still wholesale-replaced on every
+// payload, so no cross-link row can be stranded by leaving that call out -
+// this just marks the link unused and logs it.
+void pruneStaleLinks() {
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!hostLinks[i].used) continue;
+    if (millis() - hostLinks[i].lastPayloadMillis <= LINK_STALE_MS) continue;
+    Serial.printf("LINK: %s went quiet, dropping its rows\n", hostLinks[i].hostId);
+    hostLinks[i].used = false;
+  }
+}
+
 void handleLine(const String& line) {
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, line);
@@ -2478,6 +2552,13 @@ void handleLine(const String& line) {
     }
     if (slot != activeHost) activeHost = slot;
   }
+  // Which LINK is this? Separate from activeHost (a pairing slot): a Mac can
+  // be talking to us without being paired, and a paired Mac can be absent.
+  curLink = linkForHost(hid, true);
+  if (curLink >= 0) {
+    hostLinks[curLink].lastPayloadMillis = millis();
+    copyField(hostLinks[curLink].tag, sizeof(hostLinks[curLink].tag), doc["hostTag"] | "");
+  }
 
   // May we DECIDE a prompt, or only display it? The Mac owns this policy,
   // because enabling it costs the Mac its own dialog (its hook has to block to
@@ -2485,6 +2566,7 @@ void handleLine(const String& line) {
   // for an answer, keeps working - otherwise its prompts would be answerable
   // nowhere. Any current host states it explicitly.
   remoteAnswerEnabled = doc["remoteAnswer"] | true;
+  if (curLink >= 0) hostLinks[curLink].remoteAnswer = remoteAnswerEnabled;
 
   // History reply: its own line, `hist` the only key. Bail out before any of the usage
   // parsing below, which would otherwise reset every field to "missing".
@@ -2564,6 +2646,7 @@ void handleLine(const String& line) {
   usage.cxResetInMin = doc["cxResetMin"].isNull() ? -1 : (long) doc["cxResetMin"];
   usage.cxWindowMin = doc["cxWin"].isNull() ? -1 : (long) doc["cxWin"];
   usage.cxAgeSec = doc["cxAgeSec"].isNull() ? -1 : (long) doc["cxAgeSec"];
+  if (curLink >= 0) hostLinks[curLink].usage = usage;   // Task 7 reverses this direction
 
   if (!doc["hostSecondsSinceMidnight"].isNull()) {
     hostSecBase = (long) doc["hostSecondsSinceMidnight"];
@@ -2730,6 +2813,7 @@ void handleLine(const String& line) {
     Serial.println("BEEP: session newly asking");
     startBeep();
   }
+  pruneStaleLinks();  // after the session list has been rebuilt for this tick
 
   // Record that a tick arrived BEFORE the kbActive guard below can return -
   // the tick did arrive and the host is still live, only its RENDERING is
@@ -3506,6 +3590,34 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       }
       deviceNameReported = false; // re-announce our name after (re)provisioning
     }
+  } else if (buf.startsWith("MULTITEST")) {
+    // Injects a payload from a SYNTHETIC second Mac, so the merge, the
+    // cross-Mac ranking, the row tags and the stale-link drop are all
+    // verifiable (and screenshottable) from one Mac. It cannot answer
+    // anything: hostId "feedfeed" matches no pairing slot, so authHmac
+    // refuses to sign - which is the safe direction and is deliberate.
+    int n = buf.substring(9).toInt();
+    if (n < 0) n = 0;
+    if (n > MAX_SESSIONS) n = MAX_SESSIONS;
+    String line = "{\"hostId\":\"feedfeed\",\"hostTag\":\"test\",\"remoteAnswer\":true,"
+                  "\"fiveHourPct\":11,\"sevenDayPct\":22,\"quotaAgeSec\":1,"
+                  "\"sessionsTotal\":" + String(n) + ",\"sessions\":[";
+    for (int i = 0; i < n; i++) {
+      if (i) line += ",";
+      // One asking row first so the cross-Mac urgency merge is exercised, then
+      // working rows - which is the ordering a real host sends.
+      line += "{\"id\":\"fake0000000" + String(i) +
+              "\",\"name\":\"testproj" + String(i) +
+              "\",\"status\":\"" + (i == 0 ? "asking" : "working") +
+              "\",\"agent\":\"cc\",\"model\":\"claude-opus-5\",\"path\":\"/tmp/test\"" +
+              (i == 0 ? ",\"ask\":{\"pid\":\"9901\",\"kind\":\"perm\",\"title\":\"Allow Bash?\","
+                        "\"detail\":\"echo synthetic\",\"options\":[\"Allow\",\"Deny\"],"
+                        "\"answerable\":true,\"nonce\":\"testnonce\"}"
+                      : "") +
+              "}";
+    }
+    line += "]}";
+    handleLine(line);
   } else {
     *lastRxTimestamp = millis();
     uint32_t h = payloadHash32(buf);
