@@ -334,28 +334,15 @@ uint8_t imaEncode(int sample, int* pred, int* index) {
   *index = constrain(*index + IMA_INDEX[code], 0, 88);
   return (uint8_t) (code & 0x0F);
 }
-// Which Mac owns ANY audio line - streamed or one-shot, with a session to
-// aim at or not. USB is unambiguous - one cable, and audio is USB-only by
-// RATE (16kHz IMA ADPCM is ~8KB/s against this CH340's 11.5KB/s ceiling, and
-// raising the baud loses data - see the baud note), not merely by the host's
-// via==="usb" gate - so whoever is plugged in is the only Mac that can ever
-// physically receive these bytes, no matter which session (if any) the
-// dictation is aimed at. See the AUDIO stream call site for why this is used
-// even when there IS a target session.
-//
-// usbUp is hoisted out of the loop below (it doesn't depend on i, so calling
-// it per-iteration was pure waste) - and, more than a style nit, the
-// original code let it gate the ONLY usbHostId check: a host ticks every 5s,
-// so a merely-quiet-for-one-tick USB link (usbLinkActive()'s window is only
-// 10s) fell straight through to the PAIRED MACS pin or "first used slot"
-// below, which can land on a BLE-only Mac - the same "addressed to a Mac
-// audio cannot reach" class of bug the call site's own fix closes. hostLinks[]
-// entries carry their own, much larger staleness guard (LINK_STALE_MS, 21s of
-// silence on ANY transport, after which dropSessionsForLink() removes them
-// entirely) - so a live usbHostId is trustworthy on its own, active or not,
-// right up until the link itself ages out. usbUp is kept (not dropped) as
-// the FIRST, fast-path check purely because it's the common case; the second
-// check below is what actually fixes the staleness gap.
+// DELIBERATELY KEPT WITH NO CALLERS, the way authHmac() is - not silently
+// dead. This existed solely to pick which Mac an AUDIO line's now-reverted
+// `to=` address should name (see the AUDIO stream call site, which no
+// longer calls this); audio rides Serial.printf, never BLE, so it always
+// reaches exactly one Mac by construction and addressing it could only ever
+// cause harm, never prevent a broadcast. Left in place - correct, exercised
+// by nothing - in case a future genuine need for "which Mac is on the USB
+// cable right now" shows up; usbHostId/curLineFromUsb in the main sketch
+// exist only to feed it and share this same status.
 int primaryLink() {
   bool usbUp = usbLinkActive();
   for (int i = 0; i < MAX_LINKS; i++)
@@ -441,24 +428,22 @@ void micStream() {
     detailIndex = resolveDetailIndex();
     if (detailIndex >= 0 && detailIndex < sessionCount) target = sessions[detailIndex].id;
   }
-  // Addressed to primaryLink(), NOT the target session's own hostSlot -
-  // deliberately, even though "the session's own Mac" looks more correct at
-  // a glance. Audio can only ever physically reach the Mac on the USB cable
-  // (see primaryLink()'s own comment), so with Mac A on USB and Mac B on BLE
-  // only, opening a Mac-B session and stamping to=B here would have A's own
-  // filter drop the whole stream on arrival - dictation vanishes with no
-  // error on either Mac, because the line addressed to B never even reaches
-  // B. Addressing to primaryLink() instead sends it to the one Mac that can
-  // actually receive it; if that Mac doesn't own the target session, ITS OWN
-  // resolveSessionId fails and LOGS the miss - a visible failure, with the
-  // transcript still delivered as a memo - rather than silence on both Macs.
-  int audioLink = primaryLink();
-  const char* audioTo = (audioLink >= 0 && audioLink < MAX_LINKS && hostLinks[audioLink].used)
-                           ? hostLinks[audioLink].hostId : "";
-  Serial.printf("AUDIO stream rate=%d codec=ima4 chunk=%d scale=8 dc=%d target=%s answer=%s%s%s\n",
+  // Deliberately UNADDRESSED, reverting an earlier ruling that this should
+  // carry `to=primaryLink()`. That ruling was wrong: this line rides
+  // Serial.printf, never BLE (audio is USB-only by RATE - 16kHz IMA ADPCM is
+  // ~8KB/s against this CH340's 11.5KB/s ceiling, and raising the baud loses
+  // data - see the baud note), so it physically reaches exactly one Mac by
+  // construction and an address can never prevent a BLE broadcast that was
+  // never happening. Its only reachable effect was harm: if primaryLink()
+  // resolved to a Mac that is NOT the one on the cable (its link aged out,
+  // usbHostId unset, or allowedHost pinned to the other Mac), the cable
+  // Mac's own lineTargetsUs filter would drop this header before logging it
+  // - audioStream never opens, no AUDIO ack is ever written, and the device
+  // streams for up to 120s on its stall valve while the capture is lost
+  // with no line in either log. Broadcast has no such failure mode.
+  Serial.printf("AUDIO stream rate=%d codec=ima4 chunk=%d scale=8 dc=%d target=%s answer=%s\n",
                 MIC_REC_RATE_OUT, MIC_STREAM_CHUNK, dc, target,
-                micAnswerPid[0] ? micAnswerPid : "-",
-                audioTo[0] ? " to=" : "", audioTo);
+                micAnswerPid[0] ? micAnswerPid : "-");
 
   int pred = 0, index = 0;          // ADPCM state
   int head = 0, tail = 0, ringUsed = 0;

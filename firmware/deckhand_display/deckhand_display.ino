@@ -483,6 +483,9 @@ int curLink = -1;   // which link the payload being parsed came from
 // curLineFromUsb false around its own handleLine() call - a synthetic
 // injection must never be mistaken for a real USB payload, whichever
 // transport actually carried the MULTITEST command itself.
+// primaryLink()'s only caller was reverted (audio no longer addresses
+// itself - see audio.ino), so this pair is exercised by nothing right now.
+// Kept rather than torn out, for the same reason primaryLink() itself is.
 char usbHostId[12] = "";
 bool curLineFromUsb = false;
 
@@ -868,6 +871,13 @@ char detailDurCache[28] = "";
 // the full-screen reader for long detail text.
 char answeredPid[12] = "";
 int answeredIdx = -1;
+// The link answeredPid was answered on. PIDs are per-machine, so widening
+// answeredPid itself to carry a hostId would just be a second copy of the
+// same string the diff already keys sessions on - a link index is enough,
+// and matches the (hostSlot, id/askPid) shape used everywhere else on this
+// branch. Without it, two Macs raising the same pid would show session B's
+// row as already-answered the instant A's was, since the bare pid matched.
+int answeredHostSlot = -1;
 bool askOverflow = false; // preview didn't fit; READ FULL TEXT button shown
 bool readerActive = false;
 int readerPage = 0;
@@ -880,6 +890,13 @@ bool kbActive = false;
 char kbText[151];              // 150 bytes + NUL, matching the host's cap exactly
 int  kbLen = 0;
 char kbPid[24] = "";
+// The Mac that raised the ask kbPid pins to. PIDs are per-machine, so kbPid
+// ALONE is not a unique key once two Macs are both ticking - two of them can
+// coincidentally raise the same pid, and without this the per-tick re-anchor
+// (see the kbActive block in handleLine()) would happily re-point a half-typed
+// answer at whichever Mac's session matches askPid FIRST, signing text typed
+// for one prompt with the other Mac's key against the other Mac's nonce.
+int kbHostSlot = -1;
 // 0 off, 1 one-shot (cleared by the next character), 2 locked. Three states, not
 // a bool, because an acronym or a name cost one CAP tap PER LETTER. The key's
 // LABEL carries which one it is ("CAP" vs "CAPS"), so the state does not rest on
@@ -3064,8 +3081,16 @@ void handleLine(const String& line) {
       // In message mode there is no askPid to match on, and LEAVING READY is what
       // closes the window - so msgOffered() is required too, which also covers the
       // host withdrawing the nonce.
+      //
+      // The answer-mode branch also requires hostSlot to match kbHostSlot - PIDs
+      // are per-machine, so two Macs can raise the SAME pid, and matching on askPid
+      // alone would re-anchor a half-typed answer onto whichever Mac's session
+      // matches first: SEND would then sign the OTHER Mac's nonce with the OTHER
+      // Mac's key, answering its prompt with text typed for this one and leaving
+      // the real target still blocked.
       bool hit = kbIsMessage() ? (strcmp(sessions[i].id, kbSessionId) == 0 && msgOffered(i))
-                               : (strcmp(sessions[i].askPid, kbPid) == 0);
+                               : (strcmp(sessions[i].askPid, kbPid) == 0 &&
+                                  sessions[i].hostSlot == (uint8_t) kbHostSlot);
       if (hit) { idx = i; break; }
     }
     kbSessionIdx = idx;

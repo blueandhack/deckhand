@@ -371,6 +371,7 @@ void renderSessionsTab() {
       if (answeredPid[0] && !sessions[detailIndex].askPid[0]) {
         answeredPid[0] = '\0';
         answeredIdx = -1;
+        answeredHostSlot = -1;
         closeSessionDetail();
         return;
       }
@@ -500,7 +501,11 @@ bool askVoiceTooLong(int idx) {
 // it to the (waiting) session hook to decide the real prompt.
 void drawAskDetail(int idx) {
   SessionInfo& s = sessions[idx];
-  bool answered = answeredPid[0] && strncmp(answeredPid, s.askPid, sizeof(answeredPid)) == 0;
+  // hostSlot too, not just the pid - PIDs are per-machine, and matching on
+  // askPid alone would show THIS row as already-answered the moment a
+  // same-numbered pid on the OTHER Mac was, see answeredHostSlot's comment.
+  bool answered = answeredPid[0] && strncmp(answeredPid, s.askPid, sizeof(answeredPid)) == 0 &&
+                  (uint8_t) answeredHostSlot == s.hostSlot;
   bool isPerm = strcmp(s.askKind, "perm") == 0;
   bool isPlan = strcmp(s.askKind, "plan") == 0;
 
@@ -896,9 +901,11 @@ bool handleAskTouch(int sx, int sy) {
     if (!s.askAnswerable) return true;
     int k = (sy - optTop) / (ASK_OPT_H + ASK_OPT_GAP);
     if (k >= 0 && k < s.askOptCount) {
-      bool already = answeredPid[0] && strncmp(answeredPid, s.askPid, sizeof(answeredPid)) == 0;
+      bool already = answeredPid[0] && strncmp(answeredPid, s.askPid, sizeof(answeredPid)) == 0 &&
+                      (uint8_t) answeredHostSlot == s.hostSlot;
       if (!already) {
         copyField(answeredPid, sizeof(answeredPid), s.askPid);
+        answeredHostSlot = s.hostSlot;
         answeredIdx = k;
         sendAnswerToHost(detailIndex, k);
         drawSessionDetail(detailIndex);

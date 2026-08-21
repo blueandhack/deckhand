@@ -340,6 +340,7 @@ void openKeyboard(int idx) {
   kbRepeatRow = kbRepeatCol = -1;
   kbWindowClosed = false;
   copyField(kbPid, sizeof(kbPid), sessions[idx].askPid);
+  kbHostSlot = sessions[idx].hostSlot;
   drawKeyboard();
 }
 
@@ -364,6 +365,7 @@ void closeKeyboard() {
   int idx = kbSessionIdx;
   kbSessionIdx = -1;
   kbPid[0] = '\0';
+  kbHostSlot = -1;
   // drawKeyboard() fillScreen's the WHOLE panel - tab bar and footer included -
   // so closing it has to put both back, the same shape exitReader()/
   // exitReaderToList() already use: fillScreen, then drawTabBar() (which also
