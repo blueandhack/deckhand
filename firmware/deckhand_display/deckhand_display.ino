@@ -114,9 +114,24 @@ Preferences prefs;
 // Stream), BLE writes arrive via the onWrite() callback below, not loop().
 BLEServer* bleServer = nullptr;
 BLECharacteristic* bleTxChar = nullptr;
-bool bleConnected = false;
-String serialBufBLE;
-unsigned long lastRxBLEMillis = 0;
+#define MAX_LINKS 2
+// One accumulator PER CENTRAL. Both Macs write into the same RX characteristic
+// in MTU-sized chunks, so their bytes interleave: sharing one accumulator makes
+// every payload corrupt JSON, and the failure is silent (handleLine returns
+// early on a parse error, so the screen simply stops updating while both links,
+// both heartbeats and both menu bars look perfectly healthy).
+//
+// No function signature may name this type - the Arduino build inserts its
+// generated prototypes above here - so every helper below takes an int slot.
+struct BleLink {
+  bool     used = false;
+  uint16_t connId = 0;
+  String   buf;                 // partial line for THIS central
+  unsigned long lastRxMillis = 0;
+};
+BleLink bleLinks[MAX_LINKS];
+bool bleConnected = false;         // still a bool: == (bleLinkCount() > 0)
+unsigned long lastRxBLEMillis = 0; // freshest of the links, for the SETTINGS page
 // Hand-off from the Bluetooth stack's task to loopTask. The BLE onWrite
 // callback runs on BTC_TASK, and processing lines there (TFT drawing, LEDC
 // beeps) crashed the scheduler: "assert failed: xTaskPriorityDisinherit"
@@ -2887,27 +2902,109 @@ void handleLine(const String& line) {
 }
 
 class BLEServerCallbacksImpl : public BLEServerCallbacks {
-  void onConnect(BLEServer* server) {
+  // Bluedroid STOPS advertising on connect, which is why a second Mac could
+  // never attach. Resume while a slot is free; refuse beyond MAX_LINKS rather
+  // than queueing, so a third central fails visibly instead of flapping.
+  void onConnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) {
+    uint16_t conn = param ? param->connect.conn_id : 0;
+    if (bleSlotForConn(conn, true) < 0) {
+      server->disconnect(conn);
+      return;
+    }
     bleConnected = true;
+    if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
-  void onDisconnect(BLEServer* server) {
-    bleConnected = false;
-    BLEDevice::startAdvertising(); // resume advertising so the host can reconnect
+  void onDisconnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) {
+    bleReleaseConn(param ? param->disconnect.conn_id : 0);
+    BLEDevice::startAdvertising();
   }
+  void onConnect(BLEServer* server) {}       // superseded by the param forms
+  void onDisconnect(BLEServer* server) { BLEDevice::startAdvertising(); }
 };
 
 class BLERxCallbacks : public BLECharacteristicCallbacks {
-  // Runs on BTC_TASK - must not render, beep, or touch any driver that
-  // loopTask also uses (see bleRxStream comment). Buffer the bytes and get
-  // out; zero timeout means a full buffer drops data rather than stalling
-  // the Bluetooth stack (the host resends a full snapshot every 5s anyway).
-  void onWrite(BLECharacteristic* characteristic) {
+  // Runs on BTC_TASK - copy bytes and get out. Now also records WHICH central
+  // sent them: conn_id goes in a 4-byte header ahead of the payload, and
+  // loop() demuxes. The header and its payload must be written ATOMICALLY -
+  // a partial write desyncs every frame that follows, where the old unframed
+  // buffer merely dropped bytes - so a chunk that does not fit whole is
+  // dropped whole. The host resends a full snapshot every 5s.
+  void onWrite(BLECharacteristic* characteristic, esp_ble_gatts_cb_param_t* param) {
     String value = characteristic->getValue();
-    if (bleRxStream && value.length() > 0) {
-      xStreamBufferSend(bleRxStream, value.c_str(), value.length(), 0);
+    size_t n = value.length();
+    if (!bleRxStream || n == 0 || n > 0xFFFF) return;
+    uint16_t conn = param ? param->write.conn_id : 0;
+    if (xStreamBufferSpacesAvailable(bleRxStream) < n + 4) return;
+    uint8_t hdr[4] = { (uint8_t)(conn & 0xFF), (uint8_t)(conn >> 8),
+                       (uint8_t)(n & 0xFF), (uint8_t)(n >> 8) };
+    xStreamBufferSend(bleRxStream, hdr, 4, 0);
+    xStreamBufferSend(bleRxStream, value.c_str(), n, 0);
+  }
+  // Keep the one-argument form delegating, so a library version that calls it
+  // instead cannot silently lose every write.
+  void onWrite(BLECharacteristic* characteristic) { onWrite(characteristic, nullptr); }
+};
+
+int bleLinkCount() {
+  int n = 0;
+  for (int i = 0; i < MAX_LINKS; i++) if (bleLinks[i].used) n++;
+  return n;
+}
+// Slot for a connection id. create=false is a pure lookup, so a stray write
+// from a central we refused cannot claim a slot.
+int bleSlotForConn(uint16_t connId, bool create) {
+  for (int i = 0; i < MAX_LINKS; i++) if (bleLinks[i].used && bleLinks[i].connId == connId) return i;
+  if (!create) return -1;
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!bleLinks[i].used) {
+      bleLinks[i].used = true;
+      bleLinks[i].connId = connId;
+      bleLinks[i].buf = "";
+      return i;
     }
   }
-};
+  return -1;
+}
+void bleReleaseConn(uint16_t connId) {
+  int i = bleSlotForConn(connId, false);
+  if (i < 0) return;
+  bleLinks[i].used = false;
+  bleLinks[i].buf = "";
+  bleConnected = bleLinkCount() > 0;
+}
+// Drains the framed stream buffer into per-link accumulators. Partial reads are
+// normal (the buffer is filled by another task), so the header and the payload
+// remainder are carried across calls in statics rather than assumed complete.
+void drainBleRx() {
+  static uint8_t hdr[4];
+  static int hdrHave = 0;
+  static int frameSlot = -1;
+  static uint16_t frameLeft = 0;
+  if (!bleRxStream) return;
+  char chunk[64];
+  for (;;) {
+    if (frameLeft == 0) {
+      size_t got = xStreamBufferReceive(bleRxStream, hdr + hdrHave, 4 - hdrHave, 0);
+      if (got == 0) return;
+      hdrHave += got;
+      if (hdrHave < 4) return;
+      hdrHave = 0;
+      uint16_t conn = (uint16_t) hdr[0] | ((uint16_t) hdr[1] << 8);
+      frameLeft = (uint16_t) hdr[2] | ((uint16_t) hdr[3] << 8);
+      frameSlot = bleSlotForConn(conn, true);
+      continue;
+    }
+    size_t want = frameLeft < sizeof(chunk) ? frameLeft : sizeof(chunk);
+    size_t got = xStreamBufferReceive(bleRxStream, chunk, want, 0);
+    if (got == 0) return;
+    frameLeft -= got;
+    if (frameSlot < 0) continue;   // a refused central: consume and discard
+    bleLinks[frameSlot].lastRxMillis = millis();
+    lastRxBLEMillis = millis();
+    for (size_t i = 0; i < got; i++)
+      feedChar(chunk[i], bleLinks[frameSlot].buf, &bleLinks[frameSlot].lastRxMillis, false);
+  }
+}
 
 void setupBLE() {
   bleRxStream = xStreamBufferCreate(16384, 1); // several full JSON lines of headroom (asks can be large)
@@ -3299,13 +3396,7 @@ void loop() {
   pumpStream(Serial, serialBufUSB, &lastRxUSBMillis);
   // BLE bytes were buffered by onWrite() on the Bluetooth task; parse and
   // render them here so every draw/beep happens on loopTask only.
-  if (bleRxStream) {
-    char chunk[64];
-    size_t n;
-    while ((n = xStreamBufferReceive(bleRxStream, chunk, sizeof(chunk), 0)) > 0) {
-      for (size_t i = 0; i < n; i++) feedChar(chunk[i], serialBufBLE, &lastRxBLEMillis, false); // BLE, untrusted for PROVISION
-    }
-  }
+  drainBleRx();
 
   // Re-announce our BLE name for a short window after boot. The host opening
   // the USB port is what reboots us, so it's already listening - but the single
@@ -3429,9 +3520,9 @@ void loop() {
 
   // Safety net: some ESP32 BLE library versions can leave advertising
   // stopped after a failed/incomplete connection attempt, with no event to
-  // hook. Cheaply re-assert it periodically whenever nobody's connected.
+  // hook. Cheaply re-assert it periodically whenever a slot is free.
   static unsigned long lastAdvCheck = 0;
-  if (!bleConnected && millis() - lastAdvCheck > 5000) {
+  if (bleLinkCount() < MAX_LINKS && millis() - lastAdvCheck > 5000) {
     lastAdvCheck = millis();
     BLEDevice::startAdvertising();
   }
