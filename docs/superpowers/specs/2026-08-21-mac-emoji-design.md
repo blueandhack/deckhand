@@ -82,22 +82,31 @@ crab's colours came out inverted. Per pixel it blends the icon's colour toward `
 
 Costs ~6.1KB flash for 16 icons, zero RAM (`PROGMEM` art, a 26-byte stack row buffer).
 
+**Vertical placement rule, once, for every surface:** an icon is 13px and so is a Cozette
+text line, so the icon's `y` is the same `y` the neighbouring text is drawn at with
+`TL_DATUM`. That is the whole point of choosing 13x13 — no surface needs its own centring
+arithmetic, and a 4px gap separates icon from text horizontally everywhere.
+
 ## Surfaces
 
 | surface | today | with an icon | measured clearance |
 |---|---|---|---|
-| Session row, tall | `CLAUDE/studio` right-aligned at x=220, 78px | `CLAUDE` + gap + icon = 56px | name lane GAINS 22px, so long names hold a bigger font rung more often |
-| Codex row | `CX pro`, 36px inside an 11-char lane from x=26 | `CX` + gap + icon = 32px, ends x=58 | 35px clear of the neighbour's clear box at x=93 |
+| Session row, tall | `CLAUDE/studio` right-aligned at x=220, 78px | `CLAUDE` (36px) + 4px gap + icon (13px) = 53px | name lane GAINS 25px, so long names hold a bigger font rung more often |
+| Codex row | `CX pro`, 36px inside an 11-char lane from x=26 | `CX` (12px) + 4px gap + icon (13px) = 29px, ends x=55 | 38px clear of the neighbour's clear box at x=93 |
 | Usage cards | text tag right-aligned at x=214 | icon at 198..214, label row | label ends at 164, so 34px clear |
 | SETTINGS › STATUS | `Mac  pro  0s ago` | `Mac  <icon> pro  0s ago` | 20px row pitch |
 | Session detail | `AGENT / MAC` -> `CC/pro` | `CC <icon> pro` | within the existing column |
 | Session row, compact | `CC/pro opus-5 (main)` | unchanged, by decision above | — |
 
 **The pin marker.** On usage cards, pinned-versus-auto currently rides the tag's COLOUR,
-which a colour sprite cannot carry. It becomes a 3px accent underline in this device's
-existing vocabulary (the tab bar's active-tab underline), drawn ABOVE the icon at `y0+5`
-rather than below it — below would land at `y0+20`, inside the hero number's box. The
-carrier is the mark's presence, not a hue, so the colour-never-alone rule still holds.
+which a colour sprite cannot carry. It becomes a **3px accent bar ABOVE the icon, at rows
+`y0+3`..`y0+5`** — borrowing the tab bar's active-tab underline as vocabulary while sitting
+on the other side of the glyph, because below the icon would land at `y0+20`, inside the
+hero number's box. Those three rows are inside the card interior (the 2px top border owns
+`y0`..`y0+1`) and above the label row, which starts at `y0+6`. It is a bar, not an
+underline, and calling it one in the code would mislead. The carrier is the mark's
+presence rather than a hue, so the colour-never-alone rule still holds. 3px above a 13px
+glyph is tight enough that the glass, not the arithmetic, is the proof.
 Confirm against the card border on the glass; the arithmetic alone is not proof.
 
 ## Caches and signatures
