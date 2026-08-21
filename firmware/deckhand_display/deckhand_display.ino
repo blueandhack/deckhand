@@ -2518,6 +2518,16 @@ int linkForHost(const char* hostId, bool create) {
 const char* linkTag(int slot) {
   return (slot >= 0 && slot < MAX_LINKS && hostLinks[slot].used) ? hostLinks[slot].tag : "";
 }
+// How many Macs are actually talking to us right now - the number a per-Mac
+// tag is gated on. Deliberately NOT bleLinkCount() + (usbLinkActive()?1:0):
+// USB and BLE are routinely the SAME Mac (the ordinary state of this device
+// is one Mac reachable both ways at once), so that sum reads 2 with a single
+// Mac present and would show a tag when there is nothing to disambiguate.
+int usedLinkCount() {
+  int n = 0;
+  for (int i = 0; i < MAX_LINKS; i++) if (hostLinks[i].used) n++;
+  return n;
+}
 
 // ---------- Cross-Mac session ranking (index sort, not a value sort) ----------
 // Display position -> array index. Each host only ever ranks its OWN list, so
@@ -2694,7 +2704,11 @@ void handleLine(const String& line) {
   usage.cxResetInMin = doc["cxResetMin"].isNull() ? -1 : (long) doc["cxResetMin"];
   usage.cxWindowMin = doc["cxWin"].isNull() ? -1 : (long) doc["cxWin"];
   usage.cxAgeSec = doc["cxAgeSec"].isNull() ? -1 : (long) doc["cxAgeSec"];
-  if (curLink >= 0) hostLinks[curLink].usage = usage;   // Task 7 reverses this direction
+  // Park this Mac's own reading in its link, then derive the global "usage"
+  // (and the Codex row) from whichever link's reading is freshest - see
+  // mergeUsage() in usage.ino.
+  if (curLink >= 0) hostLinks[curLink].usage = usage;
+  mergeUsage();
 
   if (!doc["hostSecondsSinceMidnight"].isNull()) {
     hostSecBase = (long) doc["hostSecondsSinceMidnight"];

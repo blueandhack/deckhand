@@ -37,12 +37,73 @@ void resetUsageCaches() {
   cxPctCache[0] = '\0'; cxRightCache[0] = '\0'; cxBorderCache = -1;
   cxBarCache = -1; cxStaleCache = -1;
 }
-void drawCardChrome(int y0, const char* label) {
+// Which link (Mac) supplied the figures currently on screen - see mergeUsage().
+// -1 means no link has a usable reading yet.
+int usageSourceLink = -1;
+int cxSourceLink = -1;
+// Both Macs poll the same account, so the quota is the same number twice - the
+// useful difference between them is AGE. Take the fresher reading per source
+// (Claude by quotaAgeSec, Codex independently by cxAgeSec, which is already how
+// the Codex row's staleness is judged), and remember which Mac it came from so
+// the card can say. Two pollers therefore back each other up: a Mac in a long
+// OAuth back-off is simply out-aged by the other.
+//
+// A negative age means "never measured", which must never win against a real
+// reading - and must not read as fresher than one, which is what a plain
+// comparison on -1 would do.
+void mergeUsage() {
+  int best = -1, bestCx = -1;
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!hostLinks[i].used) continue;
+    const Usage& u = hostLinks[i].usage;
+    if (u.fiveHourPct >= 0 || u.sevenDayPct >= 0) {
+      if (best < 0 || (u.quotaAgeSec >= 0 &&
+          (hostLinks[best].usage.quotaAgeSec < 0 ||
+           u.quotaAgeSec < hostLinks[best].usage.quotaAgeSec))) best = i;
+    }
+    if (u.cxPct >= 0) {
+      if (bestCx < 0 || (u.cxAgeSec >= 0 &&
+          (hostLinks[bestCx].usage.cxAgeSec < 0 ||
+           u.cxAgeSec < hostLinks[bestCx].usage.cxAgeSec))) bestCx = i;
+    }
+  }
+  usageSourceLink = best;
+  cxSourceLink = bestCx;
+  if (best >= 0) {
+    const Usage& u = hostLinks[best].usage;
+    usage.fiveHourPct = u.fiveHourPct;      usage.fiveHourResetInMin = u.fiveHourResetInMin;
+    usage.sevenDayPct = u.sevenDayPct;      usage.sevenDayResetInMin = u.sevenDayResetInMin;
+    usage.sessionTokens = u.sessionTokens;  usage.weekAllTokens = u.weekAllTokens;
+    usage.weekFableTokens = u.weekFableTokens; usage.weekFablePct = u.weekFablePct;
+    usage.quotaAgeSec = u.quotaAgeSec;
+  }
+  if (bestCx >= 0) {
+    const Usage& u = hostLinks[bestCx].usage;
+    usage.cxPct = u.cxPct;  usage.cxResetInMin = u.cxResetInMin;
+    usage.cxWindowMin = u.cxWindowMin;  usage.cxAgeSec = u.cxAgeSec;
+  }
+}
+void drawCardChrome(int y0, const char* label, const char* tag) {
   uiCard(CARD_X, y0, CARD_W, CARD_H, COLOR_CARD);  // border added by caller when active
   setUIFont(T_META);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(label, CARD_X + PAD, y0 + 6);   // usage cards have their own inset
+  // Which Mac's reading this is. Only drawn with two Macs actually TALKING TO
+  // US right now: with one Mac it is noise, and a label that appears and
+  // disappears is how you notice the second Mac arriving. Gated on used
+  // hostLinks[] entries, not transport count - USB and BLE are routinely the
+  // SAME Mac (the ordinary state of this device is one Mac reachable both
+  // ways at once: via=usb,ble to one Mac), so bleLinkCount() +
+  // (usbLinkActive()?1:0) would read 2 with nothing to disambiguate. Right-
+  // aligned in the SAME row as the label, because every other row on this
+  // card is spoken for (the +88 row's clear box already had to move off the
+  // border, and nothing here may end past +101).
+  if (tag && *tag && usedLinkCount() > 1) {
+    tft.setTextDatum(TR_DATUM);
+    tft.drawString(tag, CARD_X + CARD_W - PAD, y0 + 6);
+    tft.setTextDatum(TL_DATUM);
+  }
 }
 void drawFooterChrome() {
   tft.drawFastHLine(0, contentBottom(), tft.width(), COLOR_LABEL);
@@ -165,7 +226,18 @@ void renderCodexRow() {
 
   // Left lane: the agent's name and its window, so this can never be mistaken for
   // one of the Claude figures above.
-  if (usage.cxWindowMin > 0) {
+  //
+  // With two Macs live, the window gives way to the Mac tag instead of sharing
+  // the lane with it: this row has no free line the way a Claude card's +6 row
+  // is (its one line is already busy at +8), and the window text plus a 6-char
+  // tag can run right up against the right lane's own worst case. The window
+  // is fixed and rarely worth more than the source once there is a source to
+  // disambiguate.
+  const char* cxTag = linkTag(cxSourceLink);
+  bool showCxTag = cxTag && *cxTag && usedLinkCount() > 1;
+  if (showCxTag) {
+    snprintf(buf, sizeof(buf), "CODEX  %s", cxTag);
+  } else if (usage.cxWindowMin > 0) {
     long d = usage.cxWindowMin / 1440;
     if (d >= 1) snprintf(buf, sizeof(buf), "CODEX  %ldd", d);
     else snprintf(buf, sizeof(buf), "CODEX  %ldh", usage.cxWindowMin / 60);
@@ -238,6 +310,14 @@ void renderUsageTab() {
     cxBarCache = -1;
     cxBorderCache = -1;
   }
+  // A source change moves no percentage, so nothing else would repaint - the
+  // same trap the stale-dim flip above has, where the digits stay identical.
+  static int srcCache = -2, cxSrcCache = -2;
+  if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink) {
+    srcCache = usageSourceLink;
+    cxSrcCache = cxSourceLink;
+    drawUsageStatic();   // repaints chrome; resetUsageCaches() runs inside it
+  }
   renderCard(CARD1_Y, usage.fiveHourPct, usage.sessionTokens, usage.fiveHourResetInMin,
              5 * 60, pct1Cache, left1Cache, right1Cache, fable1Cache, resetAt1Cache,
              &bar1Cache, &border1Cache);
@@ -247,7 +327,15 @@ void renderUsageTab() {
   renderCodexRow();
 }
 void drawUsageStatic() {
-  drawCardChrome(CARD1_Y, "SESSION - 5 HOUR WINDOW");
-  drawCardChrome(CARD2_Y, "WEEK - 7 DAY, ALL MODELS");
+  // This chrome is what the change-only fields below are drawn ON, so a
+  // repaint that skips resetting their caches leaves every value BLANK
+  // ("hasn't changed" per drawIfChanged, even though its pixels were just
+  // erased) - the exact "USAGE shows no numbers after recording" bug. Reset
+  // here, once, so no call site can forget it.
+  resetUsageCaches();
+  // Both Claude cards (5h and 7d) are merged from the SAME link in
+  // mergeUsage(), so they always carry the same source tag.
+  drawCardChrome(CARD1_Y, "SESSION - 5 HOUR WINDOW", linkTag(usageSourceLink));
+  drawCardChrome(CARD2_Y, "WEEK - 7 DAY, ALL MODELS", linkTag(usageSourceLink));
   uiCard(CARD_X, CODEX_Y, CARD_W, CODEX_H, COLOR_CARD);
 }
