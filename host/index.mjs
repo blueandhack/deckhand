@@ -29,6 +29,7 @@ import {
 import { resolveSessionId } from "./session-lookup.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
+import { resolveMacEmoji } from "./mac-emoji.mjs";
 import { lineTargetsUs, stripAddress } from "./line-address.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -359,6 +360,18 @@ let hostId = "";                 // this Mac, e.g. "9f3c1a20"
 let hostLabel = os.hostname().replace(/\.local$/, "");
 // Short display form for the device's session rows. DECKHAND_MAC_TAG overrides it.
 let hostTag = macTag(hostLabel, process.env.DECKHAND_MAC_TAG || "");
+const MAC_EMOJI_FILE = path.join(os.homedir(), ".claude", "deckhand-mac-emoji");
+// Re-read per tick rather than cached at startup: the menu-bar picker writes this file
+// and the change should show on the device within a tick, not at the next restart.
+function currentMacEmoji() {
+  let file = "";
+  try {
+    file = readFileSync(MAC_EMOJI_FILE, "utf8");
+  } catch {
+    // not set
+  }
+  return resolveMacEmoji({ env: process.env.DECKHAND_MAC_EMOJI || "", file });
+}
 let pairedDevices = [];          // [{ name, secret, label, lastSeen }]
 let selectedDevice = "";         // "" = auto (talk to any remembered device)
 let usbDeviceName = "";          // device currently on USB (learned from HELLO)
@@ -2852,7 +2865,10 @@ async function tick(generation = tickGeneration) {
     // its stored keys to sign this prompt's answer with. remoteAnswer tells the
     // device whether its option buttons are live or read-only, so it never
     // offers a control that can't do anything.
-    const line = JSON.stringify({ ...usage, hostId, hostTag, remoteAnswer, voice: lastVoice }) + "\n";
+    const hostEmoji = currentMacEmoji();
+    const line = JSON.stringify({
+      ...usage, hostId, hostTag, ...(hostEmoji ? { hostEmoji } : {}), remoteAnswer, voice: lastVoice,
+    }) + "\n";
     if (usbPort) usbPort.write(line);
     if (bleCharacteristic) await sendOverBle(line);
     console.log(
@@ -2961,6 +2977,19 @@ setInterval(async () => {
       await savePairing();
       console.log(`Auth: forgot ${want} (its key is gone); re-pairs on its next USB HELLO.`);
       if (bleDeviceName === want) await rescanBle(`forgot ${want}`);
+      return;
+    }
+    // EMOJI <name> — set this Mac's icon (from the menu-bar app). Host-side only, like
+    // FORGET: the device learns the icon from the payload's hostEmoji field, not from a
+    // command.
+    if (command.startsWith("EMOJI ")) {
+      const want = resolveMacEmoji({ env: "", file: command.slice(6) });
+      if (!want) {
+        console.error(`Icon: EMOJI ignored - "${command.slice(6).trim()}" is not a known icon name.`);
+        return;
+      }
+      await fs.writeFile(MAC_EMOJI_FILE, want).catch((err) => console.error(`Icon: could not save: ${err.message}`));
+      console.log(`Icon: this Mac is now ${want}${process.env.DECKHAND_MAC_EMOJI ? " (but DECKHAND_MAC_EMOJI overrides it)" : ""}.`);
       return;
     }
     console.log(`Sending command to device: ${command}`);
