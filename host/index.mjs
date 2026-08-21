@@ -2543,6 +2543,20 @@ function startBle() {
       // that carries remote answers (and anything else it wants logged).
       const txChar = characteristics.find((c) => c.uuid === BLE_TX_CHAR_UUID);
       if (txChar) {
+        // noble caches the Characteristic object PER PERIPHERAL, so a
+        // reconnect to the same device hands back the same object with
+        // whatever "data" listener a previous connection already attached -
+        // never removed on disconnect, because there was no disconnect
+        // handler on the characteristic itself, only on the peripheral.
+        // Without this, every reconnect adds ANOTHER handler with its own
+        // closed-over bleLineBuf, so one real device line gets handled N
+        // times: N answer-file writes, N authentication-failure logs, N x
+        // the work on a 120s audio stream. Found via
+        // MaxListenersExceededWarning plus visibly duplicated handling of
+        // every line after a few reconnects - this branch makes reconnects
+        // routine (two Macs, either one can drop and rejoin), so it is no
+        // longer the rare case it used to be.
+        txChar.removeAllListeners("data");
         let bleLineBuf = "";
         txChar.on("data", (buf) => {
           bleLineBuf += buf.toString("utf8");

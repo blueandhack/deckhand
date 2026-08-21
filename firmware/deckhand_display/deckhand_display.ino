@@ -145,6 +145,13 @@ struct BleLink {
 };
 BleLink bleLinks[MAX_LINKS];
 bool bleConnected = false;         // still a bool: == (bleLinkCount() > 0)
+// Set by onConnect (BTC_TASK) when a third central is refused - the same
+// hand-off shape releasePending already uses, for the same reason: BTC_TASK
+// may do nothing here but copy a bit, never a Serial.print, so the actual
+// log line is emitted from loopTask (reapBleLinks) once per refusal. Without
+// this a refused third Mac fails SILENTLY - no line in either log - and
+// presents indistinguishably from a flaky link rather than "already full".
+volatile bool bleRefusalPending = false;
 // Vestigial: nothing currently reads this. It predates the per-link
 // bleLinks[].lastRxMillis and was kept (not deleted) rather than assumed
 // dead - a later task may still want "freshest of any link" for the
@@ -3264,6 +3271,10 @@ class BLEServerCallbacksImpl : public BLEServerCallbacks {
   void onConnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) {
     uint16_t conn = param ? param->connect.conn_id : 0;
     if (bleSlotForConn(conn, true) < 0) {
+      // Flag only - no Serial here. This runs on BTC_TASK, where this
+      // codebase's rule is "copy bytes and get out"; reapBleLinks() on
+      // loopTask emits the actual log line from this flag.
+      bleRefusalPending = true;
       server->disconnect(conn);
       return;
     }
@@ -3432,6 +3443,16 @@ int bleFrameSlot = -1;
 // mayAdvertise=true caller only touches the radio when there is something
 // to advertise for.
 void reapBleLinks(bool mayAdvertise) {
+  // Drained here (not in a dedicated function) so it rides the exact same
+  // deferred hand-off releasePending already uses, and reaches loopTask from
+  // every call site that already calls this - the ordinary drainBleRx() path
+  // AND the blocking-loop call sites (micStream, micMonitor, runCalibration,
+  // the SCREENSHOT readback) - so a refusal during a long recording is not
+  // silenced until the recording ends.
+  if (bleRefusalPending) {
+    bleRefusalPending = false;
+    Serial.println("BLE: refused a third central - already at MAX_LINKS");
+  }
   bool freedAny = false;
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!bleLinks[i].releasePending) continue;
