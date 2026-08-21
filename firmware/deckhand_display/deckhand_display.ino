@@ -128,6 +128,20 @@ struct BleLink {
   uint16_t connId = 0;
   String   buf;                 // partial line for THIS central
   unsigned long lastRxMillis = 0;
+  // Set by onDisconnect (BTC_TASK), cleared by drainBleRx's reap (loopTask) -
+  // never anywhere else. A disconnect must never touch .buf or flip .used
+  // itself (loopTask may be mid-append into that String via feedChar right
+  // now - the same rule bleRxStream exists for), so this is the ONLY thing
+  // BTC_TASK is allowed to set on an already-used slot. Living ON the slot
+  // rather than in a side queue is deliberate (fix round 2): a side queue
+  // let a recycled conn_id claim a slot that was still pending release, and
+  // let a full queue silently leak a slot forever. A slot with this set is
+  // neither MATCHABLE nor FREE to bleSlotForConn - see its comment.
+  // `volatile` here buys compiler-ordering only, not a cross-core barrier;
+  // that's sufficient for a single bool set by one task and cleared by the
+  // other, but do not assume the same guarantee if a second field is ever
+  // added alongside it.
+  volatile bool releasePending = false;
 };
 BleLink bleLinks[MAX_LINKS];
 bool bleConnected = false;         // still a bool: == (bleLinkCount() > 0)
@@ -136,14 +150,6 @@ bool bleConnected = false;         // still a bool: == (bleLinkCount() > 0)
 // dead - a later task may still want "freshest of any link" for the
 // SETTINGS page, at which point this is where that value would live.
 unsigned long lastRxBLEMillis = 0;
-// A disconnect fires on BTC_TASK, which must never touch bleLinks[].buf (a
-// heap-backed String loopTask may be mid-append into via feedChar) or flip
-// .used out from under a slot loopTask is still draining - same rule as
-// bleRxStream itself. So onDisconnect only queues the conn_id here; loopTask
-// is the sole reaper, at the top of drainBleRx(). Sized MAX_LINKS because
-// that's the most links that can ever be pending release at once.
-volatile bool blePendingReleaseFlag[MAX_LINKS] = { false, false };
-volatile uint16_t blePendingReleaseConn[MAX_LINKS] = { 0, 0 };
 // Hand-off from the Bluetooth stack's task to loopTask. The BLE onWrite
 // callback runs on BTC_TASK, and processing lines there (TFT drawing, LEDC
 // beeps) crashed the scheduler: "assert failed: xTaskPriorityDisinherit"
@@ -2926,19 +2932,28 @@ class BLEServerCallbacksImpl : public BLEServerCallbacks {
     bleConnected = true;
     if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
-  // Only QUEUES the conn_id (bleQueueRelease) - BTC_TASK must never clear
-  // .used or touch .buf itself, the same rule bleRxStream already exists
-  // for. loopTask reaps it at the top of drainBleRx(). Gated the same way
-  // onConnect is: without this, refusing and closing a third central still
-  // fires its OWN onDisconnect, which used to re-advertise unconditionally
-  // even though both real slots were still full - connect, refuse, close,
-  // advertise, repeat, exactly the flapping onConnect's gate exists to avoid.
+  // Marks the slot pending release - nothing else. BTC_TASK must never clear
+  // .used or touch .buf itself (loopTask may be mid-append into that String
+  // via feedChar right now); loopTask reaps it at the top of drainBleRx().
+  // If the conn_id doesn't resolve to a slot at all, this IS the
+  // refused-third-central case (onConnect's own server->disconnect() fires
+  // this too) - it never owned a slot, so there's nothing to mark and
+  // nothing further to do. bleLinkCount() excludes a releasePending slot,
+  // so it already reads correct the instant this line runs - the
+  // advertising gate below needs no reap to have happened first.
   void onDisconnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) {
-    bleQueueRelease(param ? param->disconnect.conn_id : 0);
+    uint16_t conn = param ? param->disconnect.conn_id : 0;
+    int slot = bleSlotForConn(conn, false);
+    if (slot >= 0) bleLinks[slot].releasePending = true;
+    bleConnected = bleLinkCount() > 0;
     if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
   void onConnect(BLEServer* server) {}       // superseded by the param forms
-  // No conn_id here, so nothing to queue for release - just the same gate.
+  // No conn_id here, so no slot can be marked pending release - a library
+  // that called only this form would leave that slot stuck used=true
+  // forever. That gap is pre-existing and out of scope for this round (the
+  // installed 3.3.11 library always calls the param form); this fallback
+  // only re-asserts the advertising gate, it does not cover release.
   void onDisconnect(BLEServer* server) {
     if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
@@ -2973,46 +2988,41 @@ class BLERxCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* characteristic) { onWrite(characteristic, nullptr); }
 };
 
+// A slot with releasePending set counts as neither present nor absent for
+// this - it's a dead link (BTC_TASK has already seen the disconnect) that
+// loopTask simply hasn't finished tearing down yet, and counting it as
+// occupied is exactly what made re-advertising wait on the reap.
 int bleLinkCount() {
   int n = 0;
-  for (int i = 0; i < MAX_LINKS; i++) if (bleLinks[i].used) n++;
+  for (int i = 0; i < MAX_LINKS; i++) if (bleLinks[i].used && !bleLinks[i].releasePending) n++;
   return n;
 }
 // Slot for a connection id. create=false is a pure lookup, so a stray write
 // from a central we refused cannot claim a slot.
+//
+// A slot with releasePending set matches in NEITHER search below. Excluding
+// it from the match loop is what stops a recycled conn_id (Bluedroid can and
+// does reuse small conn_id values right after a disconnect) from inheriting
+// a slot that's still awaiting the reap - the fastest route back to the
+// exact interleaving bug this file exists to prevent, just through the slot
+// lookup instead of the drain's old create=true. It's already excluded from
+// the free-slot search too, because releasePending is only ever set on a
+// slot that's still used=true, and the reap clears both together - there's
+// no state where a slot is free (!used) yet still pending release.
 int bleSlotForConn(uint16_t connId, bool create) {
-  for (int i = 0; i < MAX_LINKS; i++) if (bleLinks[i].used && bleLinks[i].connId == connId) return i;
+  for (int i = 0; i < MAX_LINKS; i++)
+    if (bleLinks[i].used && !bleLinks[i].releasePending && bleLinks[i].connId == connId) return i;
   if (!create) return -1;
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!bleLinks[i].used) {
       bleLinks[i].used = true;
       bleLinks[i].connId = connId;
       bleLinks[i].buf = "";
+      bleLinks[i].releasePending = false;
       return i;
     }
   }
   return -1;
-}
-// Called from BTC_TASK (BLEServerCallbacksImpl::onDisconnect). Must NOT
-// touch bleLinks[].buf or .used directly - loopTask may be mid-append into
-// that slot's String via feedChar() right now, and clearing/reassigning a
-// String out from under an in-progress append is a use-after-free. This
-// only records the conn_id; loopTask reaps it at the top of drainBleRx(),
-// which is the sole place a link's buf/used may be cleared.
-void bleQueueRelease(uint16_t connId) {
-  for (int i = 0; i < MAX_LINKS; i++) {
-    if (!blePendingReleaseFlag[i]) {
-      blePendingReleaseConn[i] = connId;
-      blePendingReleaseFlag[i] = true;
-      return;
-    }
-  }
-  // Both pending slots already taken: only reachable if MAX_LINKS disconnects
-  // land before loopTask's next drainBleRx() call. Nothing queued here would
-  // be safe to also poke at directly (that's the whole reason this function
-  // exists), so the dropped entry just means that slot stays used=true one
-  // tick longer than it has to - not a correctness problem, since the reap
-  // loop below still drains whatever IS queued every single call.
 }
 // Drains the framed stream buffer into per-link accumulators. Partial reads are
 // normal (the buffer is filled by another task), so the header and the payload
@@ -3022,26 +3032,25 @@ void drainBleRx() {
   static int hdrHave = 0;
   static int frameSlot = -1;
   static uint16_t frameLeft = 0;
-  // Reap disconnects BTC_TASK queued via bleQueueRelease(). This is the only
-  // place an already-used slot's .buf/.used may be mutated - loopTask owns
-  // both, the same way it already owns feedChar()'s appends into that same
-  // String. Clearing frameSlot when it matches the just-released slot is
-  // deliberate: any bytes still in flight for that connection are discarded
-  // rather than fed into a slot that now reads used=false and could be
-  // reclaimed by a brand new central before this frame finishes draining -
-  // which would otherwise hand that new central the old link's leftover tail.
-  bool reapedAny = false;
+  // Reap slots BTC_TASK marked releasePending (BLEServerCallbacksImpl::
+  // onDisconnect - see BleLink's own comment for why the state lives on the
+  // slot rather than in a side queue). This is the only place an
+  // already-used slot's .buf/.used may be mutated - loopTask owns both, the
+  // same way it already owns feedChar()'s appends into that same String.
+  // Clearing frameSlot when it matches is deliberate: any bytes still in
+  // flight for that connection are discarded rather than fed into a slot
+  // about to read used=false - they're still CONSUMED from the stream below
+  // to keep the framing in sync, just not appended anywhere.
+  // bleLinkCount() already excludes a releasePending slot before this loop
+  // runs, so reaping it never changes what that count reports - nothing
+  // here needs to touch bleConnected.
   for (int i = 0; i < MAX_LINKS; i++) {
-    if (!blePendingReleaseFlag[i]) continue;
-    blePendingReleaseFlag[i] = false;
-    int slot = bleSlotForConn(blePendingReleaseConn[i], false);
-    if (slot < 0) continue;
-    bleLinks[slot].used = false;
-    bleLinks[slot].buf = "";
-    if (frameSlot == slot) frameSlot = -1;
-    reapedAny = true;
+    if (!bleLinks[i].releasePending) continue;
+    bleLinks[i].used = false;
+    bleLinks[i].buf = "";
+    bleLinks[i].releasePending = false;
+    if (frameSlot == i) frameSlot = -1;
   }
-  if (reapedAny) bleConnected = bleLinkCount() > 0;
   if (!bleRxStream) return;
   char chunk[64];
   for (;;) {
