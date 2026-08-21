@@ -654,7 +654,20 @@ int bar1Cache = -2, border1Cache = -1;
 char pct2Cache[8] = "", left2Cache[24] = "", right2Cache[20] = "", fable2Cache[24] = "";
 char resetAt2Cache[14] = "";
 int bar2Cache = -2, border2Cache = -1;
-char cxPctCache[16] = "", cxRightCache[20] = "";
+// cxRightCache is 24, matching the cacheSize the drawIfChanged() call in
+// usage.ino::renderCodexRow() passes for it (24), NOT the 20-char pad width
+// the drawn string happens to use. strncpy() there always writes the full
+// cacheSize bytes (null-padding a shorter string), so a buffer smaller than
+// that call's cacheSize is an unconditional out-of-bounds write on every
+// Codex row update - it was 20 and silently corrupted 4 bytes past this
+// array every single tick. Narrowing the CALL SITE to 20 instead would be
+// its own bug: strncmp() there still compares 20 bytes against a string
+// padded to exactly 20, so a cache that only ever stores 19 of them can
+// never equal the text it is compared against and would repaint every
+// tick forever - reintroducing the flicker this file's whole redraw
+// discipline exists to prevent. If a future change grows that call's
+// cacheSize again, grow this declaration to match, not the other way.
+char cxPctCache[24] = "", cxRightCache[24] = "";
 int cxBorderCache = -1, cxBarCache = -1;
 // The Codex row's dim state follows cxAgeSec - Codex's OWN reading age - not the Claude
 // quota's quotaAgeSec. They are independent: the OAuth poller can be fresh while Codex
@@ -2918,6 +2931,18 @@ void handleLine(const String& line) {
     startBeep();
   }
   pruneStaleLinks();  // after the session list has been rebuilt for this tick
+  // mergeUsage() already ran above for this tick's own payload, but if
+  // pruneStaleLinks() just dropped a DIFFERENT link (its own tick, not this
+  // one's), usage.*/usageSourceLink/cxSourceLink still point at data from a
+  // link that's now unused - linkTag() on it correctly returns "" (used
+  // gates it), but the copied numbers don't move until something re-merges.
+  // That mismatch reached the screen once as "CODEX 7d33%": the window's
+  // pct/reset were stale 33%/2h from the just-dropped synthetic link while
+  // the tag had already vanished, so the row silently reverted to the
+  // window text with no clock-dropping guard to protect it. Cheap (MAX_LINKS
+  // == 2) and idempotent, so re-running it here every tick is not wasted
+  // even on the common case where nothing was pruned.
+  mergeUsage();
   reorderSessions();  // re-rank across both Macs before anything renders
 
   // Record that a tick arrived BEFORE the kbActive guard below can return -
@@ -3701,11 +3726,24 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // verifiable (and screenshottable) from one Mac. It cannot answer
     // anything: hostId "feedfeed" matches no pairing slot, so authHmac
     // refuses to sign - which is the safe direction and is deliberate.
+    // The tag is the full 6-char cap macTag() ever emits (e.g. a Mac named
+    // "...-studio"), not a shorter, easier-fitting one - a harness that only
+    // ever renders 4 characters would let a real collision at the true
+    // worst case pass on a lucky measurement, on this row and on the
+    // session-row CLAUDE/<tag> lane a later task adds.
+    // It also carries its own cxPct/cxAgeSec: without those, cxSourceLink
+    // can never pick this synthetic link (mergeUsage only picks a source
+    // that reports cxPct >= 0), so the Codex row's OWN tag lane - a
+    // different draw call from the Claude cards' - would never actually get
+    // exercised by this harness even though the Claude cards were. cxAgeSec
+    // of 1 wins the freshness race against whatever the real Mac's Codex
+    // poll last reported (usually minutes to hours old).
     int n = buf.substring(9).toInt();
     if (n < 0) n = 0;
     if (n > MAX_SESSIONS) n = MAX_SESSIONS;
-    String line = "{\"hostId\":\"feedfeed\",\"hostTag\":\"test\",\"remoteAnswer\":true,"
+    String line = "{\"hostId\":\"feedfeed\",\"hostTag\":\"studio\",\"remoteAnswer\":true,"
                   "\"fiveHourPct\":11,\"sevenDayPct\":22,\"quotaAgeSec\":1,"
+                  "\"cxPct\":33,\"cxResetMin\":120,\"cxWin\":10080,\"cxAgeSec\":1,"
                   "\"sessionsTotal\":" + String(n) + ",\"sessions\":[";
     for (int i = 0; i < n; i++) {
       if (i) line += ",";

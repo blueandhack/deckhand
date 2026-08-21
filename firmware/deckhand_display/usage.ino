@@ -229,14 +229,22 @@ void renderCodexRow() {
   //
   // With two Macs live, the window gives way to the Mac tag instead of sharing
   // the lane with it: this row has no free line the way a Claude card's +6 row
-  // is (its one line is already busy at +8), and the window text plus a 6-char
-  // tag can run right up against the right lane's own worst case. The window
-  // is fixed and rarely worth more than the source once there is a source to
-  // disambiguate.
+  // is (its one line is already busy at +8). The window is fixed and rarely
+  // worth more than the source once there is a source to disambiguate.
+  //
+  // "CX " rather than "CODEX  ", and MEASURED, not guessed: this exact call
+  // (font=2/T_BODY, TL_DATUM, x=CARD_X+PAD) silently renders only the first
+  // 11 characters of whatever string it's given and drops the rest with no
+  // wrap, no crash, no log line - confirmed both with a real tag ("CODEX
+  // studio" -> "CODEX  stud" on screen) and with a plain diagnostic literal
+  // ("ABCDEFGHIJKLM" -> "ABCDEFGHIJK"), so it is a hard ceiling at THIS
+  // position, not a content or a right-lane-collision issue. "CX " + a
+  // 6-char tag (the macTag() cap) is 9 characters, two clear of that ceiling
+  // regardless of how it resolves; "CODEX  " + the same tag would be 13.
   const char* cxTag = linkTag(cxSourceLink);
   bool showCxTag = cxTag && *cxTag && usedLinkCount() > 1;
   if (showCxTag) {
-    snprintf(buf, sizeof(buf), "CODEX  %s", cxTag);
+    snprintf(buf, sizeof(buf), "CX %s", cxTag);
   } else if (usage.cxWindowMin > 0) {
     long d = usage.cxWindowMin / 1440;
     if (d >= 1) snprintf(buf, sizeof(buf), "CODEX  %ldd", d);
@@ -245,13 +253,23 @@ void renderCodexRow() {
     snprintf(buf, sizeof(buf), "CODEX");
   }
   padTo(buf, sizeof(buf), 11);
-  drawIfChanged(cxPctCache, 16, buf, CARD_X + PAD, CODEX_Y + 8, 2, 1,
+  drawIfChanged(cxPctCache, 24, buf, CARD_X + PAD, CODEX_Y + 8, 2, 1,
                 COLOR_LABEL, COLOR_CARD);
 
-  // Right lane: the percentage, the reset countdown, and the wall-clock time it resets
-  // at - the same three facts the Claude cards give, so the row can be read the same way.
-  // "--" when the host has never seen a rate_limits record, which is what an unused
-  // Codex install looks like - deliberately NOT 0%, which would read as a measurement.
+  // Right lane: the percentage, the reset countdown, and (usually) the wall-clock time
+  // it resets at - the same three facts the Claude cards give, so the row can be read
+  // the same way. "--" when the host has never seen a rate_limits record, which is what
+  // an unused Codex install looks like - deliberately NOT 0%, which would read as a
+  // measurement.
+  //
+  // The wall-clock suffix is DROPPED whenever the left lane is showing the tag instead
+  // of the window (showCxTag, above). "CX <tag>" tops out at 9 characters, so this isn't
+  // load-bearing against the truncation ceiling the way an earlier "CODEX  <tag>" design
+  // was - it's a second, cheap margin against the right lane's OWN worst case ("NN%  Xd
+  // Yh left  HH:MM", up to 23 chars) ever reaching left past the tag, which pre-existed
+  // this task at the window-text width too and is unlikely but not provably impossible.
+  // The clock is the least useful of the three facts here anyway - the countdown already
+  // says the same thing in relative terms - so dropping it costs nothing to gain a margin.
   if (!have) {
     snprintf(buf, sizeof(buf), "--");
   } else if (usage.cxResetInMin >= 0) {
@@ -259,7 +277,7 @@ void renderCodexRow() {
     // Same arithmetic renderCard uses for its "at 14:32", including the same guard: with
     // no host clock yet there is nothing to add the countdown to, so print the countdown
     // alone rather than a time computed from zero.
-    if (nowSec >= 0) {
+    if (nowSec >= 0 && !showCxTag) {
       long atSec = (nowSec + usage.cxResetInMin * 60) % 86400;
       snprintf(buf, sizeof(buf), "%d%%  %s  %02ld:%02ld", usage.cxPct,
                formatResetIn(usage.cxResetInMin).c_str(), atSec / 3600, (atSec / 60) % 60);
