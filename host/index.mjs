@@ -29,6 +29,7 @@ import {
 import { resolveSessionId } from "./session-lookup.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
+import { lineTargetsUs } from "./line-address.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2176,6 +2177,10 @@ async function handleTypedAnswer(parts, via) {
 }
 
 async function handleDeviceLine(line, via) {
+  // Before ANY logging: a line addressed to the other Mac is not ours to log,
+  // authenticate, or act on.
+  if (!lineTargetsUs(line, hostId)) return;
+
   // BATT mv=3854 pct=42 state=3 left=312 pcth=81 span=27
   //
   // `left` is MINUTES, and -1 means "not measurable yet" - a different statement
