@@ -232,15 +232,25 @@ void renderCodexRow() {
   // is (its one line is already busy at +8). The window is fixed and rarely
   // worth more than the source once there is a source to disambiguate.
   //
-  // "CX " rather than "CODEX  ", and MEASURED, not guessed: this exact call
-  // (font=2/T_BODY, TL_DATUM, x=CARD_X+PAD) silently renders only the first
-  // 11 characters of whatever string it's given and drops the rest with no
-  // wrap, no crash, no log line - confirmed both with a real tag ("CODEX
-  // studio" -> "CODEX  stud" on screen) and with a plain diagnostic literal
-  // ("ABCDEFGHIJKLM" -> "ABCDEFGHIJK"), so it is a hard ceiling at THIS
-  // position, not a content or a right-lane-collision issue. "CX " + a
-  // 6-char tag (the macTag() cap) is 9 characters, two clear of that ceiling
-  // regardless of how it resolves; "CODEX  " + the same tag would be 13.
+  // "CX " rather than "CODEX  " - the label's usable lane is bounded by ITS
+  // NEIGHBOUR, not by anything of its own, and the bound is DERIVED, not a
+  // magic 11. The right field draws at CARD_X + CARD_W - PAD = 214 with
+  // TR_DATUM, padded to 20 characters = 120px in Cozette 6x13 - so it spans
+  // x 94..214, and drawIfChanged() clears fx-1 (93) before drawing it. That
+  // clear runs EVERY time the right field redraws, which is every tick, so
+  // it always lands after the left field has already drawn in full. Nothing
+  // truncates the label - TFT_eSPI draws every character it's given - the
+  // right field's neighbour simply erases whatever the label left in x
+  // 93..214 a moment later. So the label's safe width is (93 - 26) / 6 =
+  // 11.17 -> 11 characters at x = CARD_X + PAD (26), confirmed on-device
+  // both with a real tag ("CODEX  studio" -> "CODEX  stud" on screen, the
+  // "io" erased) and a plain diagnostic literal with no lowercase or spaces
+  // at all ("ABCDEFGHIJKLM" -> "ABCDEFGHIJK", cut at the identical 11th
+  // character) - proof it's positional, not a content or font issue. THIS
+  // CEILING MOVES if the right field's pad width (currently 20) ever
+  // changes - re-derive it, don't copy 11 forward. "CX " + a 6-char tag
+  // (the macTag() cap) is 9 characters, two clear of today's 11 either way;
+  // "CODEX  " + the same tag would have been 13.
   const char* cxTag = linkTag(cxSourceLink);
   bool showCxTag = cxTag && *cxTag && usedLinkCount() > 1;
   if (showCxTag) {

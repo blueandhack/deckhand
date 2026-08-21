@@ -2931,17 +2931,21 @@ void handleLine(const String& line) {
     startBeep();
   }
   pruneStaleLinks();  // after the session list has been rebuilt for this tick
-  // mergeUsage() already ran above for this tick's own payload, but if
-  // pruneStaleLinks() just dropped a DIFFERENT link (its own tick, not this
-  // one's), usage.*/usageSourceLink/cxSourceLink still point at data from a
-  // link that's now unused - linkTag() on it correctly returns "" (used
-  // gates it), but the copied numbers don't move until something re-merges.
-  // That mismatch reached the screen once as "CODEX 7d33%": the window's
-  // pct/reset were stale 33%/2h from the just-dropped synthetic link while
-  // the tag had already vanished, so the row silently reverted to the
-  // window text with no clock-dropping guard to protect it. Cheap (MAX_LINKS
-  // == 2) and idempotent, so re-running it here every tick is not wasted
-  // even on the common case where nothing was pruned.
+  // Without this, a link going stale leaves the global usage holding the
+  // DEPARTED Mac's numbers: mergeUsage() already ran above for THIS tick's
+  // own payload, but if pruneStaleLinks() just dropped a DIFFERENT link
+  // (its own tick, not this one's), usage.*/usageSourceLink/cxSourceLink
+  // still point at data from a link that is now unused. linkTag() on it
+  // correctly returns "" (it gates on `used`), but the copied numbers don't
+  // move until something re-merges - so the tag disappears one tick before
+  // the numbers it was labelling do. That mismatch reached the screen once
+  // as "CODEX 7d33%": the window's pct/reset were still the just-dropped
+  // synthetic link's stale 33%/2h while the tag had already vanished, so
+  // the row fell through to the un-guarded window+full-clock format against
+  // genuinely-too-wide content. Re-running mergeUsage() here refreshes
+  // everything in the SAME tick the link is dropped, closing that window.
+  // Cheap (MAX_LINKS == 2) and idempotent, so paying for it every tick -
+  // even the common case where nothing was pruned - is not wasted work.
   mergeUsage();
   reorderSessions();  // re-rank across both Macs before anything renders
 
