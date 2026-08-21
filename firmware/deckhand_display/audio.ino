@@ -500,6 +500,12 @@ void micStream() {
     // The 400ms grace stops the finger lifting off the START tap ending it.
     if (millis() - lastStopPoll >= STOP_POLL_MS) {
       lastStopPoll = millis();
+      // Same cadence as the touch poll it rides alongside: drainBleRx() (and
+      // therefore this reap) is only ever called from loop(), so this ~120s
+      // capture would otherwise starve a queued disconnect for its whole
+      // duration - see reapBleLinks()'s own comment. Safe here for the same
+      // reason the touch poll is: this loop runs entirely on loopTask.
+      reapBleLinks();
       if (millis() - start > 400 && ts.touched()) {
         if (++stopVotes >= 2) { stoppedByUser = true; break; }
       } else {
@@ -675,6 +681,10 @@ void micRecord() {
     // cannot stop it instantly.
     if (millis() - lastStopPoll >= STOP_POLL_MS) {
       lastStopPoll = millis();
+      // See the identical call in micStream() - same reasoning, smaller
+      // window (this path is heap-capped to a few seconds rather than 120s),
+      // added anyway since it costs nothing and shares the exact pattern.
+      reapBleLinks();
       if (millis() - recStart > 400 && ts.touched()) {
         if (++stopVotes >= 2) { stoppedByUser = true; break; }
       } else {
@@ -765,6 +775,10 @@ void micMonitor() {
   char last[16] = "";
 
   while (millis() - start < 180000UL) {
+    // Up to 180s blocking loopTask, entirely outside drainBleRx() - see
+    // reapBleLinks()'s own comment for why this matters and why it's safe
+    // to call from here (this loop runs on loopTask, same as drainBleRx()).
+    reapBleLinks();
     int pp = micWindowPP(80);
     if (pp > peak) peak = pp;
     // Bleed the peak-hold down so it follows you back after a loud moment.
@@ -870,6 +884,11 @@ void micLevelTest() {
     // this core's IDLE task and trip the task watchdog - the same failure mode
     // the BLE-callback rule exists to avoid.
     delay(1);
+    // Once per ~200ms window (10s / MIC_WIN_MS windows total) rather than per
+    // sample - the per-sample loop above paces to microsecond timing and must
+    // stay untouched. See reapBleLinks()'s own comment; safe here for the same
+    // reason it's safe in the loops above - this runs on loopTask throughout.
+    reapBleLinks();
   }
 
   int dc = n ? (int) (sum / n) : 0;

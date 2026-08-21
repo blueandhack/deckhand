@@ -2935,16 +2935,27 @@ class BLEServerCallbacksImpl : public BLEServerCallbacks {
   // Marks the slot pending release - nothing else. BTC_TASK must never clear
   // .used or touch .buf itself (loopTask may be mid-append into that String
   // via feedChar right now); loopTask reaps it at the top of drainBleRx().
-  // If the conn_id doesn't resolve to a slot at all, this IS the
-  // refused-third-central case (onConnect's own server->disconnect() fires
-  // this too) - it never owned a slot, so there's nothing to mark and
-  // nothing further to do. bleLinkCount() excludes a releasePending slot,
-  // so it already reads correct the instant this line runs - the
-  // advertising gate below needs no reap to have happened first.
+  //
+  // If the conn_id doesn't resolve to a slot at all, this connection never
+  // owned one - it's onConnect's own server->disconnect() firing this same
+  // callback for a REFUSAL, whether that refusal was because both slots are
+  // genuinely used, or because bleSlotForConn's allocator skips a slot that
+  // is used-but-releasePending (bleLinkCount() reports that slot as free
+  // room, but the allocator still won't hand it out until the reap runs -
+  // deliberately the same "room reported, nothing available yet" situation
+  // either way, from the radio's point of view). Re-advertising here would
+  // storm: connect -> refuse -> advertise -> connect, over and over, until
+  // whichever condition clears. So a refusal does NOTHING further - no
+  // advertise, no state touched - and just waits: the pending case clears
+  // itself at the next reap, the genuinely-full case waits for a real
+  // disconnect, and either way the existing 5s advertising watchdog
+  // (bleLinkCount() < MAX_LINKS) notices and resumes advertising on its own.
+  // Bounded and quiet beats an immediate but storming retry.
   void onDisconnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) {
     uint16_t conn = param ? param->disconnect.conn_id : 0;
     int slot = bleSlotForConn(conn, false);
-    if (slot >= 0) bleLinks[slot].releasePending = true;
+    if (slot < 0) return;   // a refusal's own disconnect - see comment above
+    bleLinks[slot].releasePending = true;
     bleConnected = bleLinkCount() > 0;
     if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
@@ -3027,30 +3038,56 @@ int bleSlotForConn(uint16_t connId, bool create) {
 // Drains the framed stream buffer into per-link accumulators. Partial reads are
 // normal (the buffer is filled by another task), so the header and the payload
 // remainder are carried across calls in statics rather than assumed complete.
+// Which slot the frame currently being drained belongs to (-1 = none in
+// progress, or a refused/reaped central). File-scope, not a local static in
+// drainBleRx(), so reapBleLinks() can discard it when called from OUTSIDE
+// drainBleRx() too - see that function's comment for why it needs to be.
+int bleFrameSlot = -1;
+// Reaps slots BTC_TASK marked releasePending (BLEServerCallbacksImpl::
+// onDisconnect - see BleLink's own comment for why the state lives on the
+// slot rather than in a side queue). This is the only place an already-used
+// slot's .buf/.used may be mutated - loopTask owns both, the same way it
+// already owns feedChar()'s appends into that same String.
+//
+// THE ORDER WITHIN THE LOOP IS THE INVARIANT, not tidiness: buf is cleared
+// FIRST, releasePending SECOND, and used is set false LAST. onConnect() (on
+// BTC_TASK) treats used==false as licence to claim a slot and immediately
+// assign buf="" of its own - so if used went false first, BTC_TASK could
+// claim the slot and start assigning that same String concurrently with
+// this function still clearing it, a two-instruction double-free window.
+// Publishing "free" only once the slot's contents are already safe closes
+// that window; it does not merely look tidier.
+//
+// Clearing bleFrameSlot when it matches the reaped slot is deliberate: any
+// bytes still in flight for that connection are discarded rather than fed
+// into a slot about to read used=false - drainBleRx() still CONSUMES them
+// from the stream to keep the framing in sync, it just stops appending them
+// anywhere. bleLinkCount() already excludes a releasePending slot before
+// this runs, so reaping it never changes what that count reports - nothing
+// here needs to touch bleConnected.
+//
+// Called from drainBleRx() every loop() iteration (normal operation), AND
+// directly from inside every OTHER loop that can hold loopTask away from
+// loop() for longer than a moment - micStream (up to 120s), micMonitor/
+// MICTEST (until tapped), the SCREENSHOT readback (~18s), runCalibration.
+// All of those already run on loopTask, so calling this from inside them is
+// exactly as safe as calling it from drainBleRx() itself - a disconnect
+// queued mid-recording would otherwise sit unreaped for the whole blocking
+// call, turning a millisecond window into up to two minutes.
+void reapBleLinks() {
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!bleLinks[i].releasePending) continue;
+    bleLinks[i].buf = "";
+    bleLinks[i].releasePending = false;
+    bleLinks[i].used = false;
+    if (bleFrameSlot == i) bleFrameSlot = -1;
+  }
+}
 void drainBleRx() {
   static uint8_t hdr[4];
   static int hdrHave = 0;
-  static int frameSlot = -1;
   static uint16_t frameLeft = 0;
-  // Reap slots BTC_TASK marked releasePending (BLEServerCallbacksImpl::
-  // onDisconnect - see BleLink's own comment for why the state lives on the
-  // slot rather than in a side queue). This is the only place an
-  // already-used slot's .buf/.used may be mutated - loopTask owns both, the
-  // same way it already owns feedChar()'s appends into that same String.
-  // Clearing frameSlot when it matches is deliberate: any bytes still in
-  // flight for that connection are discarded rather than fed into a slot
-  // about to read used=false - they're still CONSUMED from the stream below
-  // to keep the framing in sync, just not appended anywhere.
-  // bleLinkCount() already excludes a releasePending slot before this loop
-  // runs, so reaping it never changes what that count reports - nothing
-  // here needs to touch bleConnected.
-  for (int i = 0; i < MAX_LINKS; i++) {
-    if (!bleLinks[i].releasePending) continue;
-    bleLinks[i].used = false;
-    bleLinks[i].buf = "";
-    bleLinks[i].releasePending = false;
-    if (frameSlot == i) frameSlot = -1;
-  }
+  reapBleLinks();
   if (!bleRxStream) return;
   char chunk[64];
   for (;;) {
@@ -3072,18 +3109,18 @@ void drainBleRx() {
       // resurrect a slot for a conn_id that will never disconnect again,
       // wedging bleLinkCount() at MAX_LINKS and silencing both the onConnect
       // refusal gate and the 5s advertising watchdog.
-      frameSlot = bleSlotForConn(conn, false);
+      bleFrameSlot = bleSlotForConn(conn, false);
       continue;
     }
     size_t want = frameLeft < sizeof(chunk) ? frameLeft : sizeof(chunk);
     size_t got = xStreamBufferReceive(bleRxStream, chunk, want, 0);
     if (got == 0) return;
     frameLeft -= got;
-    if (frameSlot < 0) continue;   // a refused/reaped central: consume and discard
-    bleLinks[frameSlot].lastRxMillis = millis();
+    if (bleFrameSlot < 0) continue;   // a refused/reaped central: consume and discard
+    bleLinks[bleFrameSlot].lastRxMillis = millis();
     lastRxBLEMillis = millis();
     for (size_t i = 0; i < got; i++)
-      feedChar(chunk[i], bleLinks[frameSlot].buf, &bleLinks[frameSlot].lastRxMillis, false);
+      feedChar(chunk[i], bleLinks[bleFrameSlot].buf, &bleLinks[bleFrameSlot].lastRxMillis, false);
   }
 }
 
@@ -3389,6 +3426,12 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     static uint16_t rowBuf[240];
     static uint8_t  rowBytes[480];
     for (int y = 0; y < tft.height(); y++) {
+      // No touch poll in this loop to ride alongside, so reap on its own -
+      // once per row (~56ms apart over ~18s total) is cheap and frequent.
+      // See reapBleLinks()'s own comment; safe here for the same reason it's
+      // safe everywhere else it's called from a blocking loop - this runs on
+      // loopTask throughout, same as drainBleRx() itself.
+      reapBleLinks();
       tft.readRect(0, y, tft.width(), 1, rowBuf);
       // readRect returns each pixel BYTE-SWAPPED - measured, not assumed:
       // writing 0xF800 and reading it back gives readPixel=0xF800 but

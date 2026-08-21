@@ -22,7 +22,11 @@ void readRawTouch(int16_t& rx, int16_t& ry) {
 // Blocks until a touch is held steady for ~200ms, then averages a few
 // samples. Only used during first-boot calibration.
 void waitForStableTouch(int16_t& outX, int16_t& outY) {
-  while (!ts.touched()) delay(20);
+  // Unbounded: runCalibration() waits here for a person to notice and tap the
+  // crosshair, which can run well past a moment. See reapBleLinks()'s own
+  // comment; safe here for the same reason it's safe in every other blocking
+  // loop it's called from - this runs on loopTask throughout.
+  while (!ts.touched()) { reapBleLinks(); delay(20); }
   delay(150);
   long sumX = 0, sumY = 0;
   int samples = 8;
@@ -37,7 +41,7 @@ void waitForStableTouch(int16_t& outX, int16_t& outY) {
   outX = sumX / samples;
   outY = sumY / samples;
   Serial.printf("  cal point averaged: raw=(%d,%d)\n", outX, outY);
-  while (ts.touched()) delay(20); // wait for release
+  while (ts.touched()) { reapBleLinks(); delay(20); } // wait for release
   delay(200);
 }
 void drawCrosshair(int x, int y) {
