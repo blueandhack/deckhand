@@ -33,6 +33,22 @@ int pairingSlotForLink(int link) {
   if (link < 0 || link >= MAX_LINKS || !hostLinks[link].used) return -1;
   return findHost(hostLinks[link].hostId);
 }
+// A row's hostSlot is only ever a valid link index (0..MAX_LINKS-1) once a
+// payload carrying a real hostId has named one - see linkForHost()/isHexHostId().
+// A host old enough to send no hostId at all (or, before this task, a garbled
+// non-hex one) leaves it at SessionInfo's declared sentinel: hostSlot is a
+// uint8_t and info.hostSlot = (uint8_t) curLink with curLink == -1 wraps to
+// 255, which is deliberately >= MAX_LINKS so it can never alias a real slot.
+// Falling back to activeHost here (the pre-multi-pairing behaviour authHmac()
+// always used) is what keeps that host answerable at all - without it,
+// pairingSlotForLink(255) always fails its bounds check, every answer signs
+// as "0", and the host rejects every prompt from a Mac that never sends its
+// own hostId. This cannot weaken the two-Mac case: there, hostSlot is always
+// a real link index and this function is a no-op pass-through to it.
+int pairingSlotForRow(int hostSlot) {
+  if (hostSlot < 0 || hostSlot >= MAX_LINKS) return activeHost;
+  return pairingSlotForLink(hostSlot);
+}
 // First 8 bytes of SHA-256, hex - the same 16-character form the host's voiceSha
 // produces, so both sides hash the same way. The voice path never needed this:
 // the host sent the hash of the transcript IT held. Typed text exists only on the

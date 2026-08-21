@@ -759,13 +759,15 @@ void sendAnswerToHost(int idx, int optIdx) {
   // HMAC over "nonce:pid:idx" proves this answer came from the paired device
   // and pins it to this one prompt (the nonce is single-use host-side). "0"
   // when unprovisioned - the host rejects that in secure mode.
-  // Signed with the ROW's Mac (pairingSlotForLink(s.hostSlot)), never
+  // Signed with the ROW's Mac (pairingSlotForRow(s.hostSlot)), never
   // activeHost: with two Macs ticking every 5s, "whoever spoke last" is
   // right about half the time, and the wrong half looks like nothing more
-  // than an answer that silently didn't take.
+  // than an answer that silently didn't take. pairingSlotForRow (not
+  // pairingSlotForLink) is what still answers a legacy host that sends no
+  // hostId at all - see its comment in pairing.ino.
   char msg[40];
   snprintf(msg, sizeof(msg), "%s:%s:%d", s.askNonce, s.askPid, optIdx);
-  String mac = authHmacFor(pairingSlotForLink(s.hostSlot), String(msg));
+  String mac = authHmacFor(pairingSlotForRow(s.hostSlot), String(msg));
   if (mac.length() == 0) mac = "0";
   char line[80];
   snprintf(line, sizeof(line), "ANSWER %s %s %d %s", s.id, s.askPid, optIdx, mac.c_str());
@@ -778,7 +780,7 @@ void sendVoiceAnswerToHost(int idx) {
   const SessionInfo& s = sessions[idx];
   if (!s.askVoiceSha[0]) return;
   String payload = String(s.askNonce) + ":" + s.askPid + ":TEXT:" + s.askVoiceSha;
-  String mac = authHmacFor(pairingSlotForLink(s.hostSlot), payload);
+  String mac = authHmacFor(pairingSlotForRow(s.hostSlot), payload);
   // "0" when unprovisioned, matching sendAnswerToHost. Deliberately NOT a silent
   // return: the host logs the rejection, so an unpaired device shows up as a
   // refused answer in the log rather than a SEND button that quietly does

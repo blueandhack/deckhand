@@ -334,15 +334,36 @@ uint8_t imaEncode(int sample, int* pred, int* index) {
   *index = constrain(*index + IMA_INDEX[code], 0, 88);
   return (uint8_t) (code & 0x0F);
 }
-// Which Mac owns an audio stream with no session to aim at (a plain voice
-// memo). USB is unambiguous - one cable, and the host only ever processes an
-// AUDIO line that arrived "via usb" in the first place - so whoever is
-// plugged in owns it outright; then the Mac pinned on PAIRED MACS; then the
-// first slot. A target session's OWN Mac (sessions[i].hostSlot) always wins
-// over this when there is one - see the call site below.
+// Which Mac owns ANY audio line - streamed or one-shot, with a session to
+// aim at or not. USB is unambiguous - one cable, and audio is USB-only by
+// RATE (16kHz IMA ADPCM is ~8KB/s against this CH340's 11.5KB/s ceiling, and
+// raising the baud loses data - see the baud note), not merely by the host's
+// via==="usb" gate - so whoever is plugged in is the only Mac that can ever
+// physically receive these bytes, no matter which session (if any) the
+// dictation is aimed at. See the AUDIO stream call site for why this is used
+// even when there IS a target session.
+//
+// usbUp is hoisted out of the loop below (it doesn't depend on i, so calling
+// it per-iteration was pure waste) - and, more than a style nit, the
+// original code let it gate the ONLY usbHostId check: a host ticks every 5s,
+// so a merely-quiet-for-one-tick USB link (usbLinkActive()'s window is only
+// 10s) fell straight through to the PAIRED MACS pin or "first used slot"
+// below, which can land on a BLE-only Mac - the same "addressed to a Mac
+// audio cannot reach" class of bug the call site's own fix closes. hostLinks[]
+// entries carry their own, much larger staleness guard (LINK_STALE_MS, 21s of
+// silence on ANY transport, after which dropSessionsForLink() removes them
+// entirely) - so a live usbHostId is trustworthy on its own, active or not,
+// right up until the link itself ages out. usbUp is kept (not dropped) as
+// the FIRST, fast-path check purely because it's the common case; the second
+// check below is what actually fixes the staleness gap.
 int primaryLink() {
+  bool usbUp = usbLinkActive();
   for (int i = 0; i < MAX_LINKS; i++)
-    if (hostLinks[i].used && usbLinkActive() && strcmp(hostLinks[i].hostId, usbHostId) == 0) return i;
+    if (hostLinks[i].used && usbUp && strcmp(hostLinks[i].hostId, usbHostId) == 0) return i;
+  if (usbHostId[0]) {
+    int i = linkForHost(usbHostId, false);
+    if (i >= 0) return i;
+  }
   if (allowedHost[0]) { int i = linkForHost(allowedHost, false); if (i >= 0) return i; }
   for (int i = 0; i < MAX_LINKS; i++) if (hostLinks[i].used) return i;
   return -1;
@@ -416,19 +437,22 @@ void micStream() {
   // micProcessing is up), so a stale index could aim this dictation at
   // whatever session slid into that slot instead of the one actually opened.
   const char* target = "-";
-  int audioLink = -1;
   if (showingDetail) {
     detailIndex = resolveDetailIndex();
-    if (detailIndex >= 0 && detailIndex < sessionCount) {
-      target = sessions[detailIndex].id;
-      audioLink = sessions[detailIndex].hostSlot;
-    }
+    if (detailIndex >= 0 && detailIndex < sessionCount) target = sessions[detailIndex].id;
   }
-  // No target session (a plain memo, or the session's Mac is unknown): the
-  // primary link owns it instead. Addressed the same way sendLineToHost
-  // stamps a decision line, so the host's shared lineTargetsUs filter treats
-  // an audio stream exactly like an ANSWER - only the owning Mac processes it.
-  if (audioLink < 0) audioLink = primaryLink();
+  // Addressed to primaryLink(), NOT the target session's own hostSlot -
+  // deliberately, even though "the session's own Mac" looks more correct at
+  // a glance. Audio can only ever physically reach the Mac on the USB cable
+  // (see primaryLink()'s own comment), so with Mac A on USB and Mac B on BLE
+  // only, opening a Mac-B session and stamping to=B here would have A's own
+  // filter drop the whole stream on arrival - dictation vanishes with no
+  // error on either Mac, because the line addressed to B never even reaches
+  // B. Addressing to primaryLink() instead sends it to the one Mac that can
+  // actually receive it; if that Mac doesn't own the target session, ITS OWN
+  // resolveSessionId fails and LOGS the miss - a visible failure, with the
+  // transcript still delivered as a memo - rather than silence on both Macs.
+  int audioLink = primaryLink();
   const char* audioTo = (audioLink >= 0 && audioLink < MAX_LINKS && hostLinks[audioLink].used)
                            ? hostLinks[audioLink].hostId : "";
   Serial.printf("AUDIO stream rate=%d codec=ima4 chunk=%d scale=8 dc=%d target=%s answer=%s%s%s\n",

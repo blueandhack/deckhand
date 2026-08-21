@@ -2527,8 +2527,25 @@ void handleTouch() {
 }
 
 // ---------- Serial protocol ----------
+// Real hostIds are hex (the pairing store's 8-hex-char id, and the host's own
+// `to=` filter is regex-anchored on hex: /\sto=([0-9a-fA-F]{1,16})$/) - so a
+// non-hex id could never be addressed correctly by anyone. Without this, a
+// garbled payload (the same class of corruption the device-name check,
+// /^Deckhand-[0-9A-Fa-f]{4}$/, already guards against) could adopt a junk
+// hostId into a link slot; any answer or audio line later "addressed" to it
+// would just read back as broadcast on the host - the exact symptom this
+// task exists to remove.
+bool isHexHostId(const char* id) {
+  if (!id || !*id) return false;
+  for (const char* p = id; *p; p++) {
+    char c = *p;
+    bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    if (!hex) return false;
+  }
+  return true;
+}
 int linkForHost(const char* hostId, bool create) {
-  if (!hostId || !*hostId) return -1;
+  if (!isHexHostId(hostId)) return -1;
   for (int i = 0; i < MAX_LINKS; i++)
     if (hostLinks[i].used && strcmp(hostLinks[i].hostId, hostId) == 0) return i;
   if (!create) return -1;
