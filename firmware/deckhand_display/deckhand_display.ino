@@ -714,6 +714,11 @@ struct SessionInfo {
   // the list is mixed, and which tool a row belongs to has to survive a model
   // rename and be readable by a colourblind user.
   char agent[4];
+  // Which Mac this row lives on: an index into hostLinks[], 0xFF = unknown.
+  // The tick diff matches on (hostSlot, id), so PrevSession carries it too -
+  // its field widths must mirror this struct exactly or copyField truncates a
+  // comparison into a false match.
+  uint8_t hostSlot;
   // When this session entered its current status (device-side millis).
   // Tracked here because the host doesn't send timestamps: carried over
   // across polls by matching the previous list by id in handleLine().
@@ -732,7 +737,7 @@ struct SessionInfo {
   // Host-issued nonce for a typed MESSAGE to this session, present ONLY while it
   // is READY - the host omits it otherwise, so an empty value is what tells the
   // device it must not offer typing. Deliberately NOT on PrevSession: that struct
-  // carries only the nine fields the tick diff reads, and this is not one.
+  // carries only the ten fields the tick diff reads, and this is not one.
   char promptNonce[20];
   char askTitle[36];  // hook caps title at 34 chars
   char askDetail[1424]; // hook caps detail at 1400 chars (~3 reader pages of code)
@@ -760,7 +765,7 @@ struct SessionInfo {
   // the keyboard's countdown only, and -1 means the host did not send one.
   int askSec;
 };
-// The nine fields the per-tick diff actually READS from the previous tick. This
+// The ten fields the per-tick diff actually READS from the previous tick. This
 // used to be a whole SessionInfo[MAX_SESSIONS] - 13,392 bytes of DRAM, plus a 13KB
 // memcpy every 5s - to compare these ~92 bytes per session. askDetail[1424] alone
 // was 8.5KB of that, copied every tick and never read back once.
@@ -775,6 +780,7 @@ struct SessionInfo {
 // askPid - the same class of bug as a change-only cache shorter than its string.
 struct PrevSession {
   char id[16];
+  uint8_t hostSlot;
   char name[24];
   char status[10];
   unsigned long statusSinceMillis;
@@ -1893,9 +1899,13 @@ void tickWorkingSpinner() {
   lastAnimMs = millis();
   animPhase = (animPhase + 1) % ANIM_STEPS;
   bool large = sessionRowsLarge();
-  for (int i = 0; i < sessionCount; i++) {
+  // pos is the display row (what the y comes from); the array index it
+  // holds today can differ once two Macs are merged and re-ranked, so it is
+  // resolved through sessionAt(pos) the same way drawSessionRow does.
+  for (int pos = 0; pos < sessionCount; pos++) {
+    int i = sessionAt(pos);
     if (strcmp(sessions[i].status, "working") != 0) continue;
-    int y = SESSION_ROW_Y0 + i * (sessionRowH + SESSION_ROW_GAP);
+    int y = SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
     int dotCy = large ? y + 19 : y + sessionRowH / 2;
     drawAgentSpinner(SESSION_DOT_CX, dotCy, COLOR_CARD,
                      strcmp(sessions[i].agent, "cx") == 0);
@@ -2474,7 +2484,7 @@ void handleTouch() {
     int slot = sessionRowH + SESSION_ROW_GAP;
     int row = (sy - SESSION_ROW_Y0) / slot;
     int offsetInSlot = (sy - SESSION_ROW_Y0) % slot;
-    if (row >= 0 && row < sessionCount && offsetInSlot < sessionRowH) openSessionDetail(row);
+    if (row >= 0 && row < sessionCount && offsetInSlot < sessionRowH) openSessionDetail(sessionAt(row));
   }
 
   if (currentTab == TAB_SETTINGS) handleSettingsTouch(sx, sy);
@@ -2508,20 +2518,58 @@ int linkForHost(const char* hostId, bool create) {
 const char* linkTag(int slot) {
   return (slot >= 0 && slot < MAX_LINKS && hostLinks[slot].used) ? hostLinks[slot].tag : "";
 }
+
+// ---------- Cross-Mac session ranking (index sort, not a value sort) ----------
+// Display position -> array index. Each host only ever ranks its OWN list, so
+// with two Macs the cross-host ranking has to happen here. An index sort,
+// deliberately: a SessionInfo is 2.2KB and a value sort would memmove tens of
+// KB every tick.
+uint8_t sessionOrder[MAX_SESSIONS];
+int urgencyRank(const char* status) {
+  if (strcmp(status, "asking") == 0) return 0;
+  if (strcmp(status, "waiting") == 0) return 1;
+  return 2;
+}
+int sessionAt(int displayPos) {
+  if (displayPos < 0 || displayPos >= sessionCount) return -1;
+  return sessionOrder[displayPos];
+}
+void reorderSessions() {
+  for (int i = 0; i < sessionCount; i++) sessionOrder[i] = i;
+  for (int i = 1; i < sessionCount; i++) {
+    for (int j = i; j > 0; j--) {
+      const SessionInfo& a = sessions[sessionOrder[j - 1]];
+      const SessionInfo& b = sessions[sessionOrder[j]];
+      int ra = urgencyRank(a.status), rb = urgencyRank(b.status);
+      bool swap = (rb < ra) || (rb == ra && b.actSec > a.actSec);
+      if (!swap) break;
+      uint8_t t = sessionOrder[j - 1]; sessionOrder[j - 1] = sessionOrder[j]; sessionOrder[j] = t;
+    }
+  }
+}
+void dropSessionsForLink(int slot) {
+  int keep = 0;
+  for (int i = 0; i < sessionCount; i++) {
+    if (sessions[i].hostSlot == (uint8_t) slot) continue;
+    if (keep != i) sessions[keep] = sessions[i];
+    keep++;
+  }
+  sessionCount = keep;
+  reorderSessions();
+}
 // A Mac that has stopped sending is a Mac whose rows are now fiction: showing
 // its pending prompt as answerable is worse than showing nothing, and it also
-// keeps the footer's single "Xs ago" honest. Rows are DROPPED, not dimmed -
-// except that the row-dropping half (dropSessionsForLink(), keyed by the
-// SessionInfo.hostSlot field) arrives with the session merge in the next
-// task. For now the session list is still wholesale-replaced on every
-// payload, so no cross-link row can be stranded by leaving that call out -
-// this just marks the link unused and logs it.
+// keeps the footer's single "Xs ago" honest. Rows are DROPPED, not dimmed:
+// dropSessionsForLink() (keyed by the SessionInfo.hostSlot field) throws away
+// every row that belonged to the link going quiet and re-ranks what remains,
+// so the other Mac's rows shift up into the gap rather than leaving a hole.
 void pruneStaleLinks() {
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!hostLinks[i].used) continue;
     if (millis() - hostLinks[i].lastPayloadMillis <= LINK_STALE_MS) continue;
     Serial.printf("LINK: %s went quiet, dropping its rows\n", hostLinks[i].hostId);
     hostLinks[i].used = false;
+    dropSessionsForLink(i);
   }
 }
 
@@ -2669,10 +2717,20 @@ void handleLine(const String& line) {
     memcpy(dst.askPid, src.askPid, sizeof(dst.askPid));
     memcpy(dst.askVoiceCancelSha, src.askVoiceCancelSha, sizeof(dst.askVoiceCancelSha));
     dst.hadVoiceText = src.askVoiceText[0] != '\0';
+    dst.hostSlot = src.hostSlot;
   }
   int prevCount = sessionCount;
 
-  sessionCount = 0;
+  // Free only the rows belonging to the Mac that just spoke. The other Mac's
+  // rows must survive its silence between ticks - wholesale replacement is
+  // what made the list flap between the two.
+  int keep = 0;
+  for (int i = 0; i < sessionCount; i++) {
+    if (sessions[i].hostSlot == (uint8_t) curLink) continue;
+    if (keep != i) sessions[keep] = sessions[i];
+    keep++;
+  }
+  sessionCount = keep;
   bool newlyAsking = false;
   // The Mac usually wins the race for a pending voice confirmation: its hook
   // bails the moment the ask disappears. Detected below, acted on once this
@@ -2683,8 +2741,23 @@ void handleLine(const String& line) {
   JsonArray arr = doc["sessions"].as<JsonArray>();
   if (!arr.isNull()) {
     for (JsonObject s : arr) {
-      if (sessionCount >= MAX_SESSIONS) break;
-      SessionInfo& info = sessions[sessionCount];
+      int dst = sessionCount;
+      if (dst >= MAX_SESSIONS) {
+        // Full: evict the globally least-urgent row, but ONLY if this incoming
+        // row beats it. The incoming list is sorted, so once one fails every
+        // later one fails too.
+        int worst = -1, worstRank = -1;
+        for (int i = 0; i < MAX_SESSIONS; i++) {
+          int r = urgencyRank(sessions[i].status);
+          if (r > worstRank) { worstRank = r; worst = i; }
+        }
+        if (worst < 0 || urgencyRank(s["status"] | "waiting") >= worstRank) break;
+        dst = worst;
+      } else {
+        sessionCount++;
+      }
+      SessionInfo& info = sessions[dst];
+      info.hostSlot = (uint8_t) curLink;
       copyField(info.id, sizeof(info.id), s["id"] | "");
       copyField(info.name, sizeof(info.name), s["name"] | "?");
       copyField(info.status, sizeof(info.status), s["status"] | "waiting");
@@ -2755,9 +2828,14 @@ void handleLine(const String& line) {
       info.nextBeepMillis = 0;
       bool wasAskingBefore = false;
       for (int j = 0; j < prevCount; j++) {
-        // Match by id; name is only a fallback for a host that predates ids.
-        bool match = info.id[0] ? strcmp(prevSessions[j].id, info.id) == 0
-                                : strcmp(prevSessions[j].name, info.name) == 0;
+        // Match by (hostSlot, id); name is only a fallback for a host that
+        // predates ids. The hostSlot half matters now that prevSessions can
+        // hold rows from a Mac other than the one that just spoke - without
+        // it, a same-looking id from a different link could carry over this
+        // one's beep budget or voice-cancel suppression.
+        bool match = prevSessions[j].hostSlot == (uint8_t) curLink &&
+                     (info.id[0] ? strcmp(prevSessions[j].id, info.id) == 0
+                                 : strcmp(prevSessions[j].name, info.name) == 0);
         if (match) {
           wasAskingBefore = strcmp(prevSessions[j].status, "asking") == 0;
           if (strcmp(prevSessions[j].status, info.status) == 0) {
@@ -2804,16 +2882,29 @@ void handleLine(const String& line) {
         info.beepsLeft = 2; // reminders after the immediate beep below
         info.nextBeepMillis = millis() + REBEEP_INTERVAL_MS;
       }
-      sessionCount++;
+      // sessionCount was already advanced above (or an eviction reused an
+      // existing slot without moving it), so nothing increments here.
     }
   }
-  sessionsTotal = doc["sessionsTotal"] | sessionCount;
-  hiddenAskingCount = doc["hiddenAsking"] | 0;
+  // Per-link, then summed, so the "+N more" strip counts both Macs rather
+  // than whichever host happened to tick last.
+  if (curLink >= 0) {
+    hostLinks[curLink].sessionsTotal = doc["sessionsTotal"] | 0;
+    hostLinks[curLink].hiddenAsking = doc["hiddenAsking"] | 0;
+  }
+  sessionsTotal = 0;
+  hiddenAskingCount = 0;
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!hostLinks[i].used) continue;
+    sessionsTotal += hostLinks[i].sessionsTotal;
+    hiddenAskingCount += hostLinks[i].hiddenAsking;
+  }
   if (newlyAsking) {
     Serial.println("BEEP: session newly asking");
     startBeep();
   }
   pruneStaleLinks();  // after the session list has been rebuilt for this tick
+  reorderSessions();  // re-rank across both Macs before anything renders
 
   // Record that a tick arrived BEFORE the kbActive guard below can return -
   // the tick did arrive and the host is still live, only its RENDERING is

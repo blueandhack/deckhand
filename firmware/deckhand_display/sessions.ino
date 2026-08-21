@@ -83,10 +83,15 @@ void fitText(char* out, size_t outSize, const char* src, int maxW) {
   }
   out[0] = '\0'; // nothing fits at all
 }
-void drawSessionRow(int i) {
+// pos is the DISPLAY POSITION (what the row's on-screen y comes from); the
+// underlying array index - which may differ once two Macs are merged and
+// reordered - is resolved through sessionAt(pos) and used for every read of
+// session data.
+void drawSessionRow(int pos) {
   int rowH = sessionRowH;
   bool large = sessionRowsLarge();
-  int y = SESSION_ROW_Y0 + i * (rowH + SESSION_ROW_GAP);
+  int y = SESSION_ROW_Y0 + pos * (rowH + SESSION_ROW_GAP);
+  int i = sessionAt(pos);
   const SessionInfo& s = sessions[i];
   bool working = strcmp(s.status, "working") == 0;
   uint16_t color = colorForStatus(s.status);
@@ -239,7 +244,11 @@ void renderSessionsList() {
       tft.setTextDatum(TL_DATUM);
     }
   }
-  for (int i = 0; i < sessionCount; i++) {
+  for (int pos = 0; pos < sessionCount; pos++) {
+    int i = sessionAt(pos);
+    // rowSigCache is keyed by DISPLAY POSITION, which is what it has always
+    // been - so pass pos where the cache is indexed and i where the row's data
+    // is read.
     char sub[26];
     buildSessionSubline(i, sub, sizeof(sub));
     // The TITLE belongs in this signature. Leave it out and a row keeps showing the old
@@ -249,18 +258,18 @@ void renderSessionsList() {
     char sig[160];
     snprintf(sig, sizeof(sig), "%s|%s|%s|%s", sessions[i].name, sessions[i].status, sub,
              sessions[i].title);
-    if (strncmp(sig, rowSigCache[i], sizeof(rowSigCache[i])) != 0) {
-      strncpy(rowSigCache[i], sig, sizeof(rowSigCache[i]) - 1);
-      rowSigCache[i][sizeof(rowSigCache[i]) - 1] = '\0';
-      drawSessionRow(i);
-      rowDurCache[i][0] = '\0'; // row was repainted, duration must redraw too
+    if (strncmp(sig, rowSigCache[pos], sizeof(rowSigCache[pos])) != 0) {
+      strncpy(rowSigCache[pos], sig, sizeof(rowSigCache[pos]) - 1);
+      rowSigCache[pos][sizeof(rowSigCache[pos]) - 1] = '\0';
+      drawSessionRow(pos); // resolves i = sessionAt(pos) itself, for the row's own y
+      rowDurCache[pos][0] = '\0'; // row was repainted, duration must redraw too
     }
     char dur[8];
     formatDuration(sessions[i].statusSinceMillis, dur, sizeof(dur));
     padLeftTo(dur, sizeof(dur), 7);
-    int y = SESSION_ROW_Y0 + i * (sessionRowH + SESSION_ROW_GAP);
+    int y = SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
     int durY = sessionRowsLarge() ? y + sessionRowH - 19 : y + 25;
-    drawIfChanged(rowDurCache[i], sizeof(rowDurCache[i]), dur,
+    drawIfChanged(rowDurCache[pos], sizeof(rowDurCache[pos]), dur,
                   SESSION_ROW_X + SESSION_ROW_W - 16, durY, 1, 1,
                   COLOR_LABEL, COLOR_CARD, TR_DATUM);
   }
