@@ -469,6 +469,18 @@ struct HostLink {
 };
 HostLink hostLinks[MAX_LINKS];
 int curLink = -1;   // which link the payload being parsed came from
+// The hostId last seen arriving over the USB cable - "the Mac that's plugged
+// in", for primaryLink() in audio.ino, since raw serial can only ever reach
+// whoever is on the other end of it. Set in handleLine() when curLineFromUsb
+// is true; curLineFromUsb is a transient flag processCompletedLine() sets
+// just before calling handleLine(), because handleLine(const String&)'s
+// signature is fixed (MULTITEST calls it directly) and cannot take a new
+// parameter without disturbing that call site. MULTITEST deliberately leaves
+// curLineFromUsb false around its own handleLine() call - a synthetic
+// injection must never be mistaken for a real USB payload, whichever
+// transport actually carried the MULTITEST command itself.
+char usbHostId[12] = "";
+bool curLineFromUsb = false;
 
 // The two Claude cards were 122 tall and, with the gaps, filled the content area
 // exactly - there was no room for Codex anywhere. They are now 104: only the padding
@@ -2649,6 +2661,11 @@ void handleLine(const String& line) {
       }
     }
     if (slot != activeHost) activeHost = slot;
+    // "The Mac on the cable" - only from a genuine USB payload, never from a
+    // MULTITEST injection (curLineFromUsb is forced false around that call),
+    // or a synthetic hostId could steal ownership of the one real transport
+    // that exists and starve a legitimate audio dictation of its target.
+    if (curLineFromUsb) strlcpy(usbHostId, hid, sizeof(usbHostId));
   }
   // Which LINK is this? Separate from activeHost (a pairing slot): a Mac can
   // be talking to us without being paired, and a paired Mac can be absent.
@@ -3612,6 +3629,10 @@ unsigned long lastPayloadMillis = 0;
 const unsigned long PAYLOAD_DEDUP_MS = 1000;
 
 void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool fromUsb) {
+  // Consumed once inside handleLine(), for the same tick's hostId. Set here
+  // rather than adding a parameter to handleLine(const String&), whose fixed
+  // signature MULTITEST already calls directly.
+  curLineFromUsb = fromUsb;
   if (buf == "RECAL") {
     runCalibration();
     applyScreenRotation(); // calibration runs unflipped - restore the user's choice
@@ -3798,7 +3819,13 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // the synthetic call only, so this test harness stays inert against the
     // live device's ability to answer a real pending prompt.
     int savedActiveHost = activeHost;
+    bool savedFromUsb = curLineFromUsb;
+    // This line is synthetic, no matter which transport carried the MULTITEST
+    // command that produced it - it must never be mistaken for the real Mac
+    // on the USB cable.
+    curLineFromUsb = false;
     handleLine(line);
+    curLineFromUsb = savedFromUsb;
     activeHost = savedActiveHost;
   } else {
     *lastRxTimestamp = millis();
@@ -3917,6 +3944,10 @@ void loop() {
       snprintf(bl, sizeof(bl), "BATT mv=%d pct=%d state=%d left=%d pcth=%d span=%d",
                batteryMv, batteryPct(), (int) batteryState(), battMinutesLeft(),
                battPctPerHourX10(), battTrendSpanMin());
+      // Deliberately the one-argument (broadcast) form: there is one battery,
+      // both Macs' menu bars want it, and neither is "wrong" to receive it -
+      // unlike an ANSWER, there is no decision here for the other Mac to act
+      // on incorrectly.
       sendLineToHost(bl);
     }
 

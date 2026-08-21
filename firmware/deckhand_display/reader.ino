@@ -162,7 +162,10 @@ void requestHistory(int idx, const char* want) {
   char line[48];
   snprintf(line, sizeof(line), "HISTORY %s %s %s", sessions[idx].id,
            histChatOnly ? "chat" : "all", want);
-  sendLineToHost(line);
+  // Addressed to the session's own Mac - only it holds that transcript, and
+  // an unaddressed request would also reach the other Mac, which has no such
+  // session and would have nothing useful to reply with anyway.
+  sendLineToHost(line, sessions[idx].hostSlot);
 }
 void openHistory(int idx) {
   if (idx < 0 || idx >= sessionCount) return;

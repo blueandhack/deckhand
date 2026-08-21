@@ -525,7 +525,11 @@ void sendPromptToHost() {
   int idx = kbSessionIdx;
   if (idx < 0 || idx >= sessionCount) return;
   String sha = sha256Hex16(kbText);
-  String mac = authHmac(String(sessions[idx].promptNonce) + ":" + kbSessionId + ":PROMPT:" + sha);
+  // Signed with the session's OWN Mac, not activeHost - a message typed while
+  // a second Mac happens to have ticked most recently must still be signed
+  // (and delivered) to the Mac that actually owns this READY session.
+  String mac = authHmacFor(pairingSlotForLink(sessions[idx].hostSlot),
+                            String(sessions[idx].promptNonce) + ":" + kbSessionId + ":PROMPT:" + sha);
   // "0" when unprovisioned, matching every other send: the host then logs a
   // refusal, so an unpaired device reads as a rejected message rather than a SEND
   // that quietly did nothing.
@@ -534,7 +538,7 @@ void sendPromptToHost() {
   kbBase64(b64, sizeof(b64));
   char line[280];
   snprintf(line, sizeof(line), "PROMPT %s %s %s", kbSessionId, b64, mac.c_str());
-  sendLineToHost(line);
+  sendLineToHost(line, sessions[idx].hostSlot);
   closeKeyboard();
 }
 
@@ -546,7 +550,10 @@ void sendTypedAnswerToHost() {
   // signed bytes without depending on padding or case in the encoding.
   String sha = sha256Hex16(kbText);
   String payload = String(sessions[idx].askNonce) + ":" + kbPid + ":TYPED:" + sha;
-  String mac = authHmac(payload);
+  // Signed with the session's OWN Mac (pairingSlotForLink(s.hostSlot)), for
+  // the same reason sendAnswerToHost is: activeHost is "whoever ticked most
+  // recently", which is wrong about half the time with two Macs live.
+  String mac = authHmacFor(pairingSlotForLink(sessions[idx].hostSlot), payload);
   // "0" when unprovisioned, matching sendAnswerToHost and sendVoiceAnswerToHost.
   // Deliberately NOT a silent return: the host logs the rejection, so an unpaired
   // device shows up as a refused answer rather than a SEND that quietly does nothing.
@@ -556,6 +563,6 @@ void sendTypedAnswerToHost() {
   char line[280];
   snprintf(line, sizeof(line), "ANSWER %s %s TYPED %s %s",
            sessions[idx].id, kbPid, b64, mac.c_str());
-  sendLineToHost(line);
+  sendLineToHost(line, sessions[idx].hostSlot);
   closeKeyboard();
 }

@@ -334,6 +334,19 @@ uint8_t imaEncode(int sample, int* pred, int* index) {
   *index = constrain(*index + IMA_INDEX[code], 0, 88);
   return (uint8_t) (code & 0x0F);
 }
+// Which Mac owns an audio stream with no session to aim at (a plain voice
+// memo). USB is unambiguous - one cable, and the host only ever processes an
+// AUDIO line that arrived "via usb" in the first place - so whoever is
+// plugged in owns it outright; then the Mac pinned on PAIRED MACS; then the
+// first slot. A target session's OWN Mac (sessions[i].hostSlot) always wins
+// over this when there is one - see the call site below.
+int primaryLink() {
+  for (int i = 0; i < MAX_LINKS; i++)
+    if (hostLinks[i].used && usbLinkActive() && strcmp(hostLinks[i].hostId, usbHostId) == 0) return i;
+  if (allowedHost[0]) { int i = linkForHost(allowedHost, false); if (i >= 0) return i; }
+  for (int i = 0; i < MAX_LINKS; i++) if (hostLinks[i].used) return i;
+  return -1;
+}
 void micStream() {
   // ADC driver FIRST, before any large allocation - see the allocation-order note
   // in micRecord(): getting this backwards turns an out-of-memory into abort().
@@ -396,12 +409,32 @@ void micStream() {
 
   // Which session is this dictation FOR? Whatever detail screen you started from.
   // "-" means no target: the capture is transcribed and logged, nothing is sent.
+  // Re-resolved by id (resolveDetailIndex(), the same helper renderSessionsTab
+  // and the touch handlers use) rather than trusting whatever detailIndex
+  // already held: dropSessionsForLink() can compact the sessions array between
+  // the FAB press and this point (a 5s tick landing while voiceCardActive or
+  // micProcessing is up), so a stale index could aim this dictation at
+  // whatever session slid into that slot instead of the one actually opened.
   const char* target = "-";
-  if (showingDetail && detailIndex >= 0 && detailIndex < sessionCount)
-    target = sessions[detailIndex].id;
-  Serial.printf("AUDIO stream rate=%d codec=ima4 chunk=%d scale=8 dc=%d target=%s answer=%s\n",
+  int audioLink = -1;
+  if (showingDetail) {
+    detailIndex = resolveDetailIndex();
+    if (detailIndex >= 0 && detailIndex < sessionCount) {
+      target = sessions[detailIndex].id;
+      audioLink = sessions[detailIndex].hostSlot;
+    }
+  }
+  // No target session (a plain memo, or the session's Mac is unknown): the
+  // primary link owns it instead. Addressed the same way sendLineToHost
+  // stamps a decision line, so the host's shared lineTargetsUs filter treats
+  // an audio stream exactly like an ANSWER - only the owning Mac processes it.
+  if (audioLink < 0) audioLink = primaryLink();
+  const char* audioTo = (audioLink >= 0 && audioLink < MAX_LINKS && hostLinks[audioLink].used)
+                           ? hostLinks[audioLink].hostId : "";
+  Serial.printf("AUDIO stream rate=%d codec=ima4 chunk=%d scale=8 dc=%d target=%s answer=%s%s%s\n",
                 MIC_REC_RATE_OUT, MIC_STREAM_CHUNK, dc, target,
-                micAnswerPid[0] ? micAnswerPid : "-");
+                micAnswerPid[0] ? micAnswerPid : "-",
+                audioTo[0] ? " to=" : "", audioTo);
 
   int pred = 0, index = 0;          // ADPCM state
   int head = 0, tail = 0, ringUsed = 0;

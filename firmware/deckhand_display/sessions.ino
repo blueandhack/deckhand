@@ -688,57 +688,88 @@ void drawAskDetail(int idx) {
     }
   }
 }
+// Sends `len` bytes over BLE TX in <=20-byte notifies with a breath between
+// them. Factored out of sendLineToHost so it can chunk the caller's line and
+// the `to=` address suffix as two separate calls, with no fixed intermediate
+// buffer for either to outgrow - see the note on sendLineToHost below for why
+// a fixed buffer here is exactly the mistake to avoid repeating.
+void bleNotifyChunks(const uint8_t* data, size_t len) {
+  for (size_t i = 0; i < len; i += 20) {
+    size_t n = len - i > 20 ? 20 : len - i;
+    bleTxChar->setValue((uint8_t*) (data + i), n);
+    bleTxChar->notify();
+    delay(12); // give the stack breathing room between notifies
+  }
+}
 // Device -> host, over whichever transports are up. The host maps the short
 // id back to the full session and writes the answer file for the hook.
 // Both device->host lines go out this way: USB and BLE at once, BLE in <=20-byte
 // notifies with a breath between them. Factored out of sendAnswerToHost when the history
 // request became a second caller.
 //
-// Chunks `line` DIRECTLY rather than copying it into a fixed local buffer first.
-// A fixed copy buffer here used to be sized 96 (fine for every caller at the
-// time: option answers ~53 bytes, voice answers ~77, HISTORY ~48), but
-// sendTypedAnswerToHost's ANSWER line carries a full 200-char base64 body and
-// can reach ~259 bytes - snprintf into a 96-byte buffer silently truncated it
-// AND dropped the trailing '\n' with it, so host/index.mjs's BLE line-splitter
-// (which keys on that exact byte) never saw a complete line: the answer was
-// lost, the truncated fragment stuck around and corrupted the NEXT line, and
-// USB was unaffected (Serial.println has no such limit) - so it looked like
-// "typing only fails over Bluetooth", and only for longer answers. Chunking
-// the caller's own buffer removes the ceiling instead of re-deriving it for
-// the next caller that outgrows whatever number replaced 96 - any future
-// caller's line, however long, still goes out whole as long as ITS OWN buffer
-// (sized at the call site) holds it.
-void sendLineToHost(const char* line) {
-  Serial.println(line);
+// `link` = the Mac this line is FOR, or -1 to broadcast. Broadcast is right
+// for BATT and HELLO (both menu bars want the battery, and HELLO is how a Mac
+// discovers the device at all) and wrong for everything carrying a decision:
+// BLECharacteristic::notify() has no single-peer form - it walks every
+// connected central and calls esp_ble_gatts_send_indicate per peer, with no
+// reference to which connection asked - so an unaddressed ANSWER reaches the
+// OTHER Mac too, and it logs an authentication failure on every answer. That
+// trains you to ignore the one log line that actually means something.
+//
+// Chunks `line` and the `to=` suffix DIRECTLY, each in its own buffer sized
+// only for what it holds, rather than copying both into one fixed local
+// buffer first. A fixed copy buffer here used to be sized 96 (fine for every
+// caller at the time: option answers ~53 bytes, voice answers ~77, HISTORY
+// ~48), but sendTypedAnswerToHost's ANSWER line carries a full 200-char
+// base64 body and can reach ~259 bytes - snprintf into a 96-byte buffer
+// silently truncated it AND dropped the trailing '\n' with it, so
+// host/index.mjs's BLE line-splitter (which keys on that exact byte) never
+// saw a complete line: the answer was lost, the truncated fragment stuck
+// around and corrupted the NEXT line, and USB was unaffected (Serial.println
+// has no such limit) - so it looked like "typing only fails over Bluetooth",
+// and only for longer answers. Chunking the caller's own buffer (and a small
+// fixed buffer for the address suffix alone, which can never exceed
+// " to=" + a 12-char hostId) removes the ceiling entirely instead of
+// re-deriving a bigger number for the next caller to outgrow.
+void sendLineToHost(const char* line, int link) {
+  const char* to = (link >= 0 && link < MAX_LINKS && hostLinks[link].used)
+                     ? hostLinks[link].hostId : "";
+  char suffix[20];   // " to=" + up to 12 hostId chars (incl. NUL)
+  int sn = *to ? snprintf(suffix, sizeof(suffix), " to=%s", to) : 0;
+
+  Serial.print(line);
+  if (sn > 0) Serial.print(suffix);
+  Serial.println();
+
   if (bleConnected && bleTxChar) {
-    size_t len = strlen(line);
-    for (size_t i = 0; i < len; i += 20) {
-      size_t n = len - i > 20 ? 20 : len - i;
-      bleTxChar->setValue((uint8_t*) (line + i), n);
-      bleTxChar->notify();
-      delay(12); // give the stack breathing room between notifies
-    }
+    bleNotifyChunks((const uint8_t*) line, strlen(line));
+    if (sn > 0) bleNotifyChunks((const uint8_t*) suffix, (size_t) sn);
     // The newline is what host/index.mjs's bleLineBuf splits on - sent as its
-    // own notify so it can never be clipped by the chunk loop above, whatever
-    // length `line` turns out to be.
+    // own notify so it can never be clipped by either chunk loop above,
+    // whatever length `line` or the suffix turn out to be.
     uint8_t nl = '\n';
     bleTxChar->setValue(&nl, 1);
     bleTxChar->notify();
     delay(12);
   }
 }
+void sendLineToHost(const char* line) { sendLineToHost(line, -1); }
 void sendAnswerToHost(int idx, int optIdx) {
   SessionInfo& s = sessions[idx];
   // HMAC over "nonce:pid:idx" proves this answer came from the paired device
   // and pins it to this one prompt (the nonce is single-use host-side). "0"
   // when unprovisioned - the host rejects that in secure mode.
+  // Signed with the ROW's Mac (pairingSlotForLink(s.hostSlot)), never
+  // activeHost: with two Macs ticking every 5s, "whoever spoke last" is
+  // right about half the time, and the wrong half looks like nothing more
+  // than an answer that silently didn't take.
   char msg[40];
   snprintf(msg, sizeof(msg), "%s:%s:%d", s.askNonce, s.askPid, optIdx);
-  String mac = authHmac(String(msg));
+  String mac = authHmacFor(pairingSlotForLink(s.hostSlot), String(msg));
   if (mac.length() == 0) mac = "0";
   char line[80];
   snprintf(line, sizeof(line), "ANSWER %s %s %d %s", s.id, s.askPid, optIdx, mac.c_str());
-  sendLineToHost(line);
+  sendLineToHost(line, s.hostSlot);
 }
 // Signs a hash of the text the screen is SHOWING, not the audio and not an
 // index. That single signature carries both facts the host needs: the paired
@@ -747,7 +778,7 @@ void sendVoiceAnswerToHost(int idx) {
   const SessionInfo& s = sessions[idx];
   if (!s.askVoiceSha[0]) return;
   String payload = String(s.askNonce) + ":" + s.askPid + ":TEXT:" + s.askVoiceSha;
-  String mac = authHmac(payload);
+  String mac = authHmacFor(pairingSlotForLink(s.hostSlot), payload);
   // "0" when unprovisioned, matching sendAnswerToHost. Deliberately NOT a silent
   // return: the host logs the rejection, so an unpaired device shows up as a
   // refused answer in the log rather than a SEND button that quietly does
@@ -756,7 +787,7 @@ void sendVoiceAnswerToHost(int idx) {
   char line[160];
   snprintf(line, sizeof(line), "ANSWER %s %s TEXT %s %s",
            s.id, s.askPid, s.askVoiceSha, mac.c_str());
-  sendLineToHost(line);
+  sendLineToHost(line, s.hostSlot);
 }
 // Touch on the detail screen when an ask is showing. Returns true if the
 // tap was consumed (option chosen or page flipped); false = treat as back.

@@ -11,14 +11,28 @@ int findHost(const char* id) {
   for (int i = 0; i < hostCount; i++) if (strcmp(hosts[i].id, id) == 0) return i;
   return -1;
 }
+// The key for ONE pairing slot. authHmac's implicit "whoever spoke last"
+// (activeHost) is wrong as soon as two Macs are ticking - it would be right
+// about half the time, and the symptom is an answer intermittently rejected
+// with nothing visibly broken.
+const String* secretForSlot(int slot) {
+  if (slot < 0 || slot >= hostCount) return nullptr;
+  if (allowedHost[0] && strcmp(hosts[slot].id, allowedHost) != 0) return nullptr;
+  return &hosts[slot].secret;
+}
 // The key we may sign with right now: the active Mac's, unless the user has
 // restricted answering to one specific Mac and this isn't it.
-const String* activeSecret() {
-  if (activeHost < 0 || activeHost >= hostCount) return nullptr;
-  if (allowedHost[0] && strcmp(hosts[activeHost].id, allowedHost) != 0) return nullptr;
-  return &hosts[activeHost].secret;
-}
+const String* activeSecret() { return secretForSlot(activeHost); }
 bool isPaired() { return hostCount > 0; }
+// A link (a Mac that is talking to us) and a pairing slot (a Mac whose key we
+// hold) are different things: an unpaired Mac can send payloads, and a paired
+// Mac can be absent. -1 means "we hold no key for that Mac", and authHmacFor
+// then refuses to sign - the host rejects the unsigned answer, which is the
+// safe direction.
+int pairingSlotForLink(int link) {
+  if (link < 0 || link >= MAX_LINKS || !hostLinks[link].used) return -1;
+  return findHost(hostLinks[link].hostId);
+}
 // First 8 bytes of SHA-256, hex - the same 16-character form the host's voiceSha
 // produces, so both sides hash the same way. The voice path never needed this:
 // the host sent the hash of the transcript IT held. Typed text exists only on the
@@ -32,8 +46,12 @@ String sha256Hex16(const char* s) {
 }
 // HMAC-SHA256(secret, msg), first 16 hex chars. Matches the host's
 // crypto.createHmac('sha256', secret).update(msg).digest('hex').slice(0,16).
-String authHmac(const String& msg) {
-  const String* key = activeSecret();
+// Takes an explicit pairing slot rather than reading activeHost, because
+// activeHost means "whoever sent the most recent payload" - fine with one
+// Mac, wrong about half the time with two. Every caller that owns a
+// SessionInfo signs with pairingSlotForLink(s.hostSlot) instead.
+String authHmacFor(int slot, const String& msg) {
+  const String* key = secretForSlot(slot);
   if (!key || key->length() == 0) return String("");
   const String& pairingSecret = *key;
   uint8_t out[32];
@@ -49,6 +67,10 @@ String authHmac(const String& msg) {
   for (int i = 0; i < 8; i++) sprintf(hex + i * 2, "%02x", out[i]);
   return String(hex);
 }
+// Kept for any caller that hasn't been given a slot yet (there are none left
+// in this sketch, but the signature - and the "whoever's active" meaning -
+// stays available rather than removed out from under a future one).
+String authHmac(const String& msg) { return authHmacFor(activeHost, msg); }
 // ---------- Paired-Mac slots in NVS ----------
 // One slot per remembered Mac: h<i>id / h<i>sec / h<i>lb (NVS keys must stay
 // under 16 chars). "hallow" is the optional "only this Mac may answer" pin.
