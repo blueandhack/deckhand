@@ -81,10 +81,10 @@ ICONS = [
     ("cloud",   "☁️"),
     ("sun",     "☀️"),
     ("cat",     "\U0001F431️"),
-    ("robot",   "\U0001F916️"),
+    ("apple",   "\U0001F34E️"),
     ("gear",    "⚙️"),
 ]
-assert [n for n, _ in ICONS] == "rocket moon star bolt fire leaf wave anchor crab laptop desktop cloud sun cat robot gear".split()
+assert [n for n, _ in ICONS] == "rocket moon star bolt fire leaf wave anchor crab laptop desktop cloud sun cat apple gear".split()
 assert len(ICONS) == 16
 
 
