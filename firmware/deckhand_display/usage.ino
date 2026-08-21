@@ -143,7 +143,24 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
   // aligned in the SAME row as the label, because every other row on this
   // card is spoken for (the +88 row's clear box already had to move off the
   // border, and nothing here may end past +101).
-  if (tag && *tag && usedLinkCount() > 1) {
+  const int tagRight = CARD_X + CARD_W - PAD;
+  int cardEmoji = emojiIdForLink(usageSourceLink);
+  if (cardEmoji >= 0) {
+    // Icon shown whenever one is SET, unlike the text tag below: the tag is
+    // hidden with one Mac because a redundant 6-character word is noise, but
+    // an icon is personalisation rather than disambiguation - the user asked
+    // to tag THEIR computer, and it should show regardless of link count.
+    // Same convention the session rows already use.
+    drawEmoji(cardEmoji, tagRight - MAC_EMOJI_SIZE, y0 + 6, COLOR_CARD);
+    // Pinned-vs-auto, previously carried by the tag's colour, which a colour
+    // sprite cannot carry. A bar, not an underline: it sits ABOVE the glyph,
+    // inside the interior (the 2px border owns y0..y0+1, the label row starts
+    // at y0+6) - below the icon lands at y0+20, inside the hero number's box.
+    // Presence is the carrier, not hue.
+    if (usagePinHostId[0]) {
+      tft.fillRect(tagRight - MAC_EMOJI_SIZE, y0 + 3, MAC_EMOJI_SIZE, 3, COLOR_ACCENT);
+    }
+  } else if (tag && *tag && usedLinkCount() > 1) {
     // Accent = PINNED, grey = AUTO (freshest wins), the same convention the
     // settings controls use: accented once off the default. It is carried by
     // COLOUR because there is no width to carry it in text - every other row on
@@ -154,7 +171,7 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
     // is what actually tells you the page moved.
     tft.setTextColor(usagePinHostId[0] ? COLOR_ACCENT : COLOR_LABEL, COLOR_CARD);
     tft.setTextDatum(TR_DATUM);
-    tft.drawString(tag, CARD_X + CARD_W - PAD, y0 + 6);
+    tft.drawString(tag, tagRight, y0 + 6);
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   }
@@ -307,7 +324,13 @@ void renderCodexRow() {
   // "CODEX  " + the same tag would have been 13.
   const char* cxTag = linkTag(cxSourceLink);
   bool showCxTag = cxTag && *cxTag && usedLinkCount() > 1;
-  if (showCxTag) {
+  // Icon shown whenever one is set, same reasoning as the Claude cards' chrome:
+  // personalisation, not disambiguation, so it isn't gated on a second Mac.
+  int cxEmoji = emojiIdForLink(cxSourceLink);
+  bool showCxIcon = cxEmoji >= 0;
+  if (showCxIcon) {
+    snprintf(buf, sizeof(buf), "CX");
+  } else if (showCxTag) {
     snprintf(buf, sizeof(buf), "CX %s", cxTag);
   } else if (usage.cxWindowMin > 0) {
     long d = usage.cxWindowMin / 1440;
@@ -319,6 +342,13 @@ void renderCodexRow() {
   padTo(buf, sizeof(buf), 11);
   drawIfChanged(cxPctCache, 24, buf, CARD_X + PAD, CODEX_Y + 8, 2, 1,
                 COLOR_LABEL, COLOR_CARD);
+  if (showCxIcon) {
+    // CX (12px) + 4px gap + icon (13px) ends at x=55, well clear of the right
+    // field's clear box at x=93 - see the long derivation above for the label
+    // lane's 11-character ceiling.
+    setUIFont(2);
+    drawEmoji(cxEmoji, CARD_X + PAD + tft.textWidth("CX") + 4, CODEX_Y + 8, COLOR_CARD);
+  }
 
   // Right lane: the percentage, the reset countdown, and (usually) the wall-clock time
   // it resets at - the same three facts the Claude cards give, so the row can be read
@@ -403,15 +433,27 @@ void renderUsageTab() {
   // arriving after the chrome was last painted left both Claude cards untagged
   // while the Codex row (a different draw call, rendered per tick) showed its
   // tag - observed exactly that way on hardware, with two real Macs connected.
-  static int srcCache = -2, cxSrcCache = -2, pinCache = -1, linksCache = -1;
+  // The icon ids join the bust too: an icon change (set, cleared, or the
+  // source Mac swapping to one with a different icon) moves no percentage, no
+  // source link and no link count, so nothing else here would repaint it -
+  // and the label's own drawIfChanged clears only its own text box, never the
+  // icon beside it. Watch this on the second Mac's link ageing out: without
+  // it, a stale icon would sit there after the tag has reverted to text.
+  static int srcCache = -2, cxSrcCache = -2, pinCache = -1, linksCache = -1,
+             emojiCache = -3, cxEmojiCache = -3;
   int pinNow = usagePinHostId[0] ? 1 : 0;
   int linksNow = usedLinkCount();
+  int emojiNow = emojiIdForLink(usageSourceLink);
+  int cxEmojiNow = emojiIdForLink(cxSourceLink);
   if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink ||
-      pinCache != pinNow || linksCache != linksNow) {
+      pinCache != pinNow || linksCache != linksNow ||
+      emojiCache != emojiNow || cxEmojiCache != cxEmojiNow) {
     srcCache = usageSourceLink;
     cxSrcCache = cxSourceLink;
     pinCache = pinNow;
     linksCache = linksNow;
+    emojiCache = emojiNow;
+    cxEmojiCache = cxEmojiNow;
     drawUsageStatic();   // repaints chrome; resetUsageCaches() runs inside it
   }
   renderCard(CARD1_Y, usage.fiveHourPct, usage.sessionTokens, usage.fiveHourResetInMin,
