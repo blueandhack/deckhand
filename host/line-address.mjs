@@ -16,3 +16,21 @@ export function lineTargetsUs(line, myHostId) {
   if (!m) return true;
   return m[1].toLowerCase() === String(myHostId).toLowerCase();
 }
+
+// Removes a trailing " to=<hex>" address token, if present, so every parser
+// downstream of handleDeviceLine sees the line exactly as it looked before
+// this feature existed. Every one of those parsers - ANSWER's positional
+// destructuring, HISTORY's split, handleTypedPrompt's `parts.length !== 4` -
+// predates addressing and was never taught about an extra trailing token;
+// handleTypedPrompt's strict length check is what actually broke (every
+// typed PROMPT was rejected as "malformed frame"), and the fix is to strip
+// the address ONCE, centrally, so no future positional parser can be broken
+// by it the same way. Shares ADDR with lineTargetsUs (not a second copy of
+// the pattern) so the two can never disagree about what counts as an address.
+export function stripAddress(line) {
+  const s = String(line || "");
+  const trimmed = s.trimEnd();
+  const m = ADDR.exec(trimmed);
+  if (!m) return s;
+  return trimmed.slice(0, m.index);
+}

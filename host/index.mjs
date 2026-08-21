@@ -29,7 +29,7 @@ import {
 import { resolveSessionId } from "./session-lookup.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
-import { lineTargetsUs } from "./line-address.mjs";
+import { lineTargetsUs, stripAddress } from "./line-address.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2180,6 +2180,12 @@ async function handleDeviceLine(line, via) {
   // Before ANY logging: a line addressed to the other Mac is not ours to log,
   // authenticate, or act on.
   if (!lineTargetsUs(line, hostId)) return;
+  // Strip the address ONCE, here, before any parser below ever sees the
+  // line - see stripAddress's own comment. Every parser past this point
+  // (ANSWER, HISTORY, PROMPT's strict `parts.length !== 4`) predates
+  // addressing and is a positional destructure with no idea a trailing
+  // token could exist; PROMPT is the one that actually broke on it.
+  line = stripAddress(line);
 
   // BATT mv=3854 pct=42 state=3 left=312 pcth=81 span=27
   //
