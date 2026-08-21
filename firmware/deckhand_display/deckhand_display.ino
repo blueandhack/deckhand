@@ -492,14 +492,6 @@ int emojiIdForLink(int link) {
   if (!hostLinks[link].emoji[0]) return -1;
   return macEmojiIndex(hostLinks[link].emoji);
 }
-// "The current Mac's" icon - whichever link most recently sent a payload, updated
-// alongside hostLinks[curLink].emoji in handleLine(). -1 = none seen yet, or that
-// Mac has no icon set. Nothing in THIS task draws it (EMOJITEST exercises
-// drawEmoji() directly on every icon); it exists so the parse -> lookup path can be
-// confirmed end to end now, and so a later screen wanting "my Mac's own icon" rather
-// than a specific link's has somewhere to read it from - the same "kept, correct,
-// exercised by nothing yet" pattern primaryLink() already uses in audio.ino.
-int macEmojiId = -1;
 // The hostId last seen arriving over the USB cable - "the Mac that's plugged
 // in", for primaryLink() in audio.ino, since raw serial can only ever reach
 // whoever is on the other end of it. Set in handleLine() when curLineFromUsb
@@ -2865,7 +2857,6 @@ void handleLine(const String& line) {
     hostLinks[curLink].lastPayloadMillis = millis();
     copyField(hostLinks[curLink].tag, sizeof(hostLinks[curLink].tag), doc["hostTag"] | "");
     copyField(hostLinks[curLink].emoji, sizeof(hostLinks[curLink].emoji), doc["hostEmoji"] | "");
-    macEmojiId = emojiIdForLink(curLink);
   }
 
   // May we DECIDE a prompt, or only display it? The Mac owns this policy,

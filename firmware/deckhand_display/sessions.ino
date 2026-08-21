@@ -145,17 +145,24 @@ void drawSessionRow(int pos) {
   // 0x20-0x7E only), and dispMacTag() gates on a second Mac actually being present so
   // the ordinary single-Mac case is unchanged.
   char agentTag[24];
+  int rowEmoji = emojiIdForLink(s.hostSlot);
   {
     const char* base = strcmp(s.agent, "cx") == 0 ? "CODEX" : "CLAUDE";
     const char* mac = dispMacTag(s.hostSlot);
-    if (*mac) snprintf(agentTag, sizeof(agentTag), "%s/%s", base, mac);
-    else      snprintf(agentTag, sizeof(agentTag), "%s", base);
+    // With an icon, the agent word stays TEXT (that rule is explicit: which agent must
+    // survive a model rename and be readable to a colourblind user) and the icon
+    // replaces the Mac's text. Without one, nothing changes.
+    if (rowEmoji >= 0)   snprintf(agentTag, sizeof(agentTag), "%s", base);
+    else if (*mac)       snprintf(agentTag, sizeof(agentTag), "%s/%s", base, mac);
+    else                 snprintf(agentTag, sizeof(agentTag), "%s", base);
   }
   const char* pillLbl =
       working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "INPUT" : "READY");
   setUIFont(1); // both blockers render at size 1, so measure them there
+  // 4px gap plus the icon, when there is one - the same rule everywhere.
+  const int tagExtra = rowEmoji >= 0 ? 4 + MAC_EMOJI_SIZE : 0;
   int laneRight = large
-      ? SESSION_ROW_X + SESSION_ROW_W - 12 - tft.textWidth(agentTag)
+      ? SESSION_ROW_X + SESSION_ROW_W - 12 - tft.textWidth(agentTag) - tagExtra
       : SESSION_ROW_X + SESSION_ROW_W - 16 - (tft.textWidth(pillLbl) + 12); // pill = text + 12
   int laneW = laneRight - nameX - 6; // 6px so the name never kisses the tag/pill
 
@@ -229,8 +236,15 @@ void drawSessionRow(int pos) {
     // the agent gets its full name there - and it still shows on the 56..69px rows
     // where the sub-line above is suppressed to clear the pill. Drawn from the SAME
     // agentTag buffer the name lane was measured against above.
+    const int tagRight = SESSION_ROW_X + SESSION_ROW_W - 12;
     tft.setTextDatum(TR_DATUM);
-    tft.drawString(agentTag, SESSION_ROW_X + SESSION_ROW_W - 12, y + 8);
+    if (rowEmoji >= 0) {
+      // y + 8 for both: the icon's y is the text's y, because both are 13px.
+      drawEmoji(rowEmoji, tagRight - MAC_EMOJI_SIZE, y + 8, COLOR_CARD);
+      tft.drawString(agentTag, tagRight - MAC_EMOJI_SIZE - 4, y + 8);
+    } else {
+      tft.drawString(agentTag, tagRight, y + 8);
+    }
     tft.setTextDatum(TL_DATUM);
     const char* label = working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "NEEDS INPUT" : "READY");
     // 22 rather than 24 on a title row: the sub-line now ends at y+60, and the extra 2px
@@ -315,9 +329,13 @@ void renderSessionsList() {
     // (second Mac connects/drops) repaint every row: dispMacTag() changes for every
     // session at once even though no session's own data did. 176 because the tag adds
     // up to 7 chars plus a separator - see the rowSigCache declaration.
+    // The icon id belongs here too, for the same staleness reason as the tag: a row
+    // whose Mac's icon changes (or appears/disappears) has none of its other fields
+    // change, so without this it would keep drawing the old icon (or the old text
+    // tag) forever.
     char sig[176];
-    snprintf(sig, sizeof(sig), "%s|%s|%s|%s|%s", sessions[i].name, sessions[i].status, sub,
-             sessions[i].title, dispMacTag(sessions[i].hostSlot));
+    snprintf(sig, sizeof(sig), "%s|%s|%s|%s|%s|%d", sessions[i].name, sessions[i].status, sub,
+             sessions[i].title, dispMacTag(sessions[i].hostSlot), emojiIdForLink(sessions[i].hostSlot));
     if (strncmp(sig, rowSigCache[pos], sizeof(rowSigCache[pos])) != 0) {
       strncpy(rowSigCache[pos], sig, sizeof(rowSigCache[pos]) - 1);
       rowSigCache[pos][sizeof(rowSigCache[pos]) - 1] = '\0';
