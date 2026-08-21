@@ -223,15 +223,37 @@ glass. Coverage plan:
 
 ## Risks, unresolved
 
-1. **BLE airtime may not sustain two links.** `BLE_CHUNK_SIZE = 20` with a
-   response awaited per chunk gives ~666 B/s at the 30ms interval macOS
-   negotiates; two links share the radio, so a ~2KB payload can exceed the 5s tick
-   and back up. Only one Mac can hold USB, so the second is always on BLE. The fix
-   is chunking at the negotiated MTU−3, but **whether noble's `onMtu` path fires on
-   macOS is unverified** — `peripheral.mtu` exists and `Noble.prototype.onMtu` sets
-   it, and nothing in the mac binding was found emitting it. **Measure this before
-   implementing**, since a negative result changes the payload design (per-tick
-   trimming for the BLE-only host) rather than just a constant.
+1. **BLE airtime — measured, single link (Task 1).** `peripheral.mtu` came back
+   `undefined` after connect against this Mac's real device (`Deckhand-0528`):
+   `BLE: mtu=unreported for Deckhand-0528`. That confirms the suspicion above —
+   noble's mac binding does not emit `onMtu` — so the decided rule applies:
+   `BLE_CHUNK_SIZE` stays the module constant `20`; there is no negotiated MTU to
+   chunk against and no per-peripheral sizing to add.
+   A live payload write at that chunk size (779B, the size of a normal one-session
+   tick) resolved in 0-1ms end to end, five ticks running:
+   `BLE: wrote 779B in 1ms` / `...in 0ms` / `...in 1ms` / `...in 1ms` / `...in 1ms`.
+   That number is the local dispatch time through noble's mac binding, not a
+   measurement of over-the-air completion — `sendOverBle` writes *without
+   response* (`writeAsync(chunk, true)`), and the binding's
+   `write:...withoutResponse:` path (`ble_manager.mm`) fires the JS `Write`
+   completion event immediately after calling `-[CBPeripheral writeValue:
+   forCharacteristic:type:]`, with no wait for
+   `peripheralIsReadyToSendWriteWithoutResponse` or a radio ack; only a
+   `withResponse` write waits for `didWriteValueForCharacteristic`. So this
+   measures how fast the host can hand chunks to CoreBluetooth, not how fast they
+   cross the air.
+   Even reading it that conservatively, one link's per-payload budget
+   (`measured_ms_per_payload * 2` ≈ 2ms) is nowhere near the 5000ms tick, and the
+   theoretical bound already in this risk (~666 B/s at 20B chunks / 30ms interval,
+   ⇒ ~1.2s for a 779B payload, ~2.3s doubled for two links) also clears 5000ms with
+   room to spare. **Branch taken: mtu unreported → `BLE_CHUNK_SIZE` stays `20`; the
+   per-link budget does not exceed 5000ms, so Task 6's BLE-only-host detail trim
+   (askDetail capped to 400 chars) is NOT required by this measurement.**
+   Unresolved by this task, on purpose: two *concurrent* real BLE centrals sharing
+   one radio (Task 4 builds the second link) — this run only establishes the
+   single-link number the theoretical math above already assumed, doubled as the
+   brief instructs. Re-measure once a second link exists rather than trusting the
+   ×2 estimate as final.
 2. **Link slot reuse.** A Mac reconnecting with a fresh `conn_id` while the old
    link lingers. State is keyed by `hostId` and freed on disconnect, but stale-slot
    behaviour needs watching on real reconnects, including after device sleep.
