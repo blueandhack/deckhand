@@ -1459,7 +1459,7 @@ Other things that aren't obvious from a single file:
 - **`prevSessions` keeps only the nine fields the diff reads, not a whole `SessionInfo`.** It used
   to be `SessionInfo[MAX_SESSIONS]` - **13,392 bytes of DRAM plus a 13KB `memcpy` every tick** - to
   compare about 92 bytes per session. `askDetail[1424]` was 8.5KB of that, copied every 5s and never
-  read back once. Slimming it to `PrevSession` reclaimed **12,792 bytes** (RAM 80,988 -> 68,196),
+  read back once. Slimming it to `PrevSession` reclaimed **12,792 bytes** (RAM 80,988 -> 69,156),
   which is about half the free heap on this device, and the audio path's one-shot capture went
   straight from **2s to 3s** as a result - heap is the binding constraint here, not flash (which sits
   at 43% with 1.78MB spare, so shrinking the firmware buys nothing).

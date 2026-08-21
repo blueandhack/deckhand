@@ -22,6 +22,12 @@ const String* secretForSlot(int slot) {
 }
 // The key we may sign with right now: the active Mac's, unless the user has
 // restricted answering to one specific Mac and this isn't it.
+// DELIBERATELY KEPT WITH NO CALLERS, the way primaryLink() in audio.ino now
+// is - not silently dead. Every real signing site moved to
+// pairingSlotForRow(s.hostSlot) (the ROW's own Mac, not "whoever's active"),
+// which is what multi-pairing needed; this is left as the pre-multi-pairing
+// shape in case a genuine "sign with whatever the user currently has
+// selected" need shows up again.
 const String* activeSecret() { return secretForSlot(activeHost); }
 bool isPaired() { return hostCount > 0; }
 // A link (a Mac that is talking to us) and a pairing slot (a Mac whose key we
@@ -65,7 +71,7 @@ String sha256Hex16(const char* s) {
 // Takes an explicit pairing slot rather than reading activeHost, because
 // activeHost means "whoever sent the most recent payload" - fine with one
 // Mac, wrong about half the time with two. Every caller that owns a
-// SessionInfo signs with pairingSlotForLink(s.hostSlot) instead.
+// SessionInfo signs with pairingSlotForRow(s.hostSlot) instead.
 String authHmacFor(int slot, const String& msg) {
   const String* key = secretForSlot(slot);
   if (!key || key->length() == 0) return String("");

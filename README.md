@@ -408,8 +408,10 @@ the second Mac:
    own key.
 
 The device remembers up to **4** Macs (`MAX_HOSTS`) but talks to **2** at a
-time (`MAX_LINKS`) — the second number is the Bluetooth controller's, not a
-preference. A third Mac trying to connect is refused, not queued.
+time (`MAX_LINKS`) — a deliberate choice made well inside the Bluetooth
+controller's own ceiling of **3** concurrent BLE connections
+(`CONFIG_BTDM_CTRL_BLE_MAX_CONN`), not the controller's limit itself. A third
+Mac trying to connect is refused, not queued.
 
 While two Macs are connected, each session row and the detail screen carry a
 short tag saying which Mac the session lives on (`CLAUDE/air`, `CC/studio`),
