@@ -339,6 +339,181 @@ two things `host/index.mjs` cannot get any other way:
   the BLE peer we connected to, or the USB name from `HELLO` — falling back to the selected device,
   since the `HELLO` burst is boot-only and we may have attached mid-run (a wrong guess just fails
   the HMAC).
+- **Two Macs at once: `MAX_LINKS` (2) concurrent BLE links against `MAX_HOSTS` (4) pairing
+  slots.** Remembering a Mac and talking to it at the same moment are different limits, and it is
+  the radio that sets the smaller one. Stock Arduino esp32 3.3.11 ships
+  `CONFIG_BTDM_CTRL_BLE_MAX_CONN 3` and `CONFIG_BT_ACL_CONNECTIONS 4` — read out of the installed
+  libs rather than assumed — so two links need **no build-config change at all**, while four Macs
+  would sit exactly at the controller's ceiling. Sessions from both Macs share one urgency-ranked
+  list, a row is tagged with the Mac it lives on, an answer is signed with that Mac's own key and
+  addressed to it, and USAGE shows whichever Mac's reading is fresher. Nothing about the pairing
+  model changed: **pairing the second Mac still means plugging the device into it once**, because
+  `PROVISION` is USB-only by design and stays that way. Every trap below fails **silently**, which
+  is the reason this section is as long as it is.
+  - **Bluedroid STOPS advertising the instant a central connects**, so without `onConnect`
+    re-calling `startAdvertising()` a second Mac can never attach — and the symptom is not an
+    error anywhere, it is a second Mac whose BLE scan simply never finds a device that is sitting
+    right there, connected and healthy, to the first Mac. A third central is **refused, not
+    queued** (`server->disconnect(conn)`), and a refusal deliberately does *nothing* further — no
+    advertise, no state touched — because `onConnect` → refuse → advertise → `onConnect` storms
+    until whichever condition clears. The 5s advertising watchdog in `loop()` is what resumes
+    advertising once a slot really frees, so the quiet path costs a few seconds and the loud one
+    would cost the radio.
+  - **Two Macs write into ONE RX characteristic, so their 20-byte chunks interleave**, and a
+    single `serialBufBLE` accumulator therefore turns *every* payload into corrupt JSON. The
+    failure is the worst shape available: `handleLine` returns early on a parse error, so the
+    screen just stops updating while both links, both heartbeats and both menu bars look
+    perfectly healthy — the device-side twin of the stalled-tick bug the host's watchdog exists
+    for. `onWrite`'s two-argument overload gives `param->write.conn_id`, and each chunk is framed
+    into the existing 16KB stream buffer as `[conn_id][len16][bytes]`, demuxed by `loop()` into
+    one accumulator per link. **The header and its payload go in atomically** — a chunk that will
+    not fit whole is dropped whole — because a partial write desyncs every frame that follows,
+    where the old unframed buffer merely lost some bytes; the host resends a full snapshot every
+    5s, so dropping a whole chunk costs one tick. The one-argument `onWrite` form delegates and
+    **drops the frame rather than guessing `conn_id = 0`**: guessing would file a second central's
+    bytes onto slot 0's accumulator, which is precisely the corruption being prevented.
+  - **Releasing a BLE link slot is DEFERRED to loopTask, because `onDisconnect` runs on
+    BTC_TASK.** Clearing the slot's `String` buffer there frees memory `feedChar` may be appending
+    into on loopTask right now — a cross-core use-after-free, which on this chip presents as a
+    crash loop or corrupted text rather than as anything naming BLE. So `onDisconnect` sets
+    `releasePending` on the slot and nothing else, and `reapBleLinks()` does the teardown.
+    Two orderings inside it are load-bearing: the reap clears **`buf`, then `releasePending`, then
+    `used`** — publishing slot freedom LAST closes the window where the allocator could hand out a
+    slot whose buffer is still being cleared — and `bleSlotForConn()` matches neither a pending
+    slot nor hands it out, because Bluedroid reuses small `conn_id` values immediately after a
+    disconnect and a recycled id inheriting a pending slot lands straight back in the interleaving
+    bug through the lookup instead of the drain.
+    `reapBleLinks()` is also called from the **long blocking loops** — `micStream` (up to 120s),
+    `micMonitor`, `runCalibration` (waits on a person), the `SCREENSHOT` readback — because
+    `drainBleRx()` only runs from `loop()`, and for the whole duration of one of those calls
+    nothing would reap a pending slot: a refusal caused by that still-pending slot would leave the
+    device un-advertised for up to two minutes with no log line saying why. **Only those blocking
+    call sites pass `mayAdvertise = true`**; the ordinary path passes false, since `onDisconnect`
+    plus the 5s watchdog already cover it and advertising redundantly measurably perturbs
+    reconnect timing. Reconnect after a disconnect measured **53–697ms across 8–9 trials, mean
+    ~294ms**. (An earlier "~55ms" figure for the same thing rested on 2–3 samples and was not a
+    real baseline — do not compare against it.)
+  - **`authHmac`'s implicit `activeHost` means "whoever sent the most recent payload", which once
+    two Macs are ticking is wrong about half the time.** The symptom is an intermittently rejected
+    answer with nothing visibly broken anywhere: you tap Allow, the prompt sits there, and the
+    next attempt works. Answers sign with `pairingSlotForRow(row.hostSlot)`, falling back to
+    `activeHost` **only** when `hostSlot` is not a valid link index — a payload carrying no
+    `hostId` leaves `info.hostSlot = (uint8_t) -1` = 255, deliberately `>= MAX_LINKS` so it can
+    never alias a real slot — which is what keeps a legacy host answerable at all. In the two-Mac
+    case `hostSlot` is always a real link index and the fallback is a pass-through.
+  - **`voiceSeq` is PER-LINK, and sharing it disables the voice card continuously rather than
+    once.** It is a host-lifetime counter starting at 1, and the device already reads a
+    *backwards* seq as a new host generation (the host-restart case documented under the voice
+    card). Two independent counters against one shared high-water mark trip that reset on nearly
+    every tick, so the card never raises and a processing bar has nothing that can ever end it.
+  - **Sessions merge into ONE 6-row pool, because per-Mac arrays are arithmetically impossible.**
+    A `SessionInfo` is ~2.2KB, so a second array is 13.4KB against ~26KB of free heap — the same
+    budget the audio path's capture buffer comes out of. Each tick frees only **the sending Mac's**
+    rows (wholesale replacement made the list flap between the two Macs) and admits its new ones,
+    which arrive already urgency-sorted by that host. When the pool is full the eviction victim is
+    the **max-rank** row and eviction requires **strictly better** urgency, so an `asking` row can
+    never be evicted at all (its rank is 0, and nothing can beat it), and the first incoming row
+    that fails ends the walk. Ranking is an **INDEX sort** (`sessionOrder[]`), never a value sort:
+    a value sort would memmove tens of KB of `SessionInfo` every tick. The device now owns the
+    cross-Mac ranking, which each host can only ever apply to its own list. A link silent for
+    `LINK_STALE_MS` (21000ms, ~4 missed ticks) has its rows **DROPPED, not dimmed** — showing an
+    unreachable Mac's prompt as answerable is the worse failure, and dropping is what keeps the
+    footer's single "Xs ago" honest.
+  - **`hostSlot` is in the row's repaint signature and the Mac tag is in the detail signature —
+    for identity, not length.** Two same-named sessions on different Macs at the same display
+    position share every other field, so without it the row keeps whichever Mac's tag was drawn
+    first; and because `dispMacTag()` returns "" until a second Mac shows up, a `usedLinkCount()`
+    flip changes the signature for free. Cache sizes, since `drawIfChanged`-style comparisons only
+    look at `cacheSize` bytes and a short cache silently stops noticing changes past that point:
+    `rowSigCache` is **176** against a 122-byte worst case, and `detailSigCache` is **368** against
+    ~350 — **under 20 bytes of headroom, so it must be re-derived on the next field added to that
+    signature**, not assumed to still fit.
+  - **The Mac tag's separator is an ASCII `/`, not a middle dot** (`CLAUDE/air`, `CC/air`), because
+    Cozette is 0x20–0x7E only and U+00B7 draws as a blank box — the same constraint that already
+    forces `fitText`'s three-dot ellipsis. The tag is built **once** into `agentTag[]` and both
+    drawn and measured from that one buffer, so a wider tag drops the name a rung down the
+    12x26 → 10x18 → 6x13 ladder instead of being overlapped by it. It appears only when
+    `usedLinkCount() > 1`: with one Mac the row reads plain `CLAUDE`, never a dangling `/`, because
+    a label that disambiguates nothing is how you *stop* noticing the second Mac arriving.
+  - **USAGE takes the fresher reading PER SOURCE and names the Mac it came from.** Both Macs poll
+    the same account, so the numbers agree and the only real difference between them is AGE
+    (`mergeUsage()`: Claude by `quotaAgeSec`, Codex independently by `cxAgeSec`, which is already
+    how the Codex row judges staleness). That also makes the two Macs each other's staleness
+    backup — a Mac in a long OAuth back-off is simply out-aged by the other — and it keeps a future
+    divergence (different accounts) visible as a number that changes *label* rather than a silent
+    average. A negative age means "never measured" and must never win against a real reading, which
+    a plain `<` comparison on -1 would let it do. **A source change moves no digits, so it must bust
+    the cache itself** (`srcCache`/`cxSrcCache` → `drawUsageStatic()`) — the identical trap the
+    stale-dim flip has. And `mergeUsage()` **re-runs after `pruneStaleLinks()`**, or a departed
+    Mac's percentages stay on screen indefinitely with a tag naming a Mac that is gone.
+  - **The Mac's short tag is derived ON THE MAC** (`macTag()` in `host/host-tag.mjs`, published as
+    `hostTag`, overridable with `DECKHAND_MAC_TAG`) and **capped at 6 characters there**, not
+    trimmed on arrival, because it is drawn into a lane the device measures. Two asymmetries are
+    deliberate: an override is a user-supplied *tag*, so it is sanitised **whole** and never split
+    on separators, while a hostname is an OS name whose distinguishing part is its **last segment**
+    (`air` vs `studio` in Apple's defaults) — and that segment is taken **even when it is one
+    character**, since `Mac-Studio-B` really is "b". `host/host-tag-check.mjs` pins all of it.
+  - **The host drops a device line addressed to another Mac BEFORE logging it.**
+    `BLECharacteristic::notify()` iterates `getPeerDevices()` and sends per peer with **zero
+    references to the server's `m_connId`** — verified in the installed library source; there is no
+    single-peer notify in this API — which is *why* every device→host line carries a trailing
+    `to=<hostId>`. Without the filter the other Mac logs an authentication failure on **every**
+    answer, which trains you to ignore the one log line that means something (the same problem the
+    duplicate-`PROMPT` dedup already exists for, but firing constantly instead of occasionally).
+    Absent, empty or unparseable addresses read as **BROADCAST**, deliberately asymmetric:
+    wrongly dropping an answer strands a blocked prompt, while wrongly accepting one merely logs a
+    line twice. Trailing is also deliberate — the host parses with `startsWith` plus a positional
+    `split`, so an un-upgraded Mac ignores the extra token instead of breaking on it. `BATT` and
+    `HELLO` stay unaddressed on purpose: both Macs want the battery, and an addressed `HELLO`
+    would break pairing with a Mac that does not yet know the device's name.
+  - **The audio lane is addressed to the Mac on the CABLE (`primaryLink()`), NOT to the target
+    session's Mac** — which looks wrong at a glance and is the only correct choice. Audio is
+    USB-only by rate (~8KB/s of IMA ADPCM against this CH340's 11.5KB/s ceiling), so with Mac A on
+    USB and Mac B on BLE only, stamping `to=B` on a stream opened from a Mac-B session would have
+    **A's own `to=` filter drop the whole thing on arrival**: the dictation vanishes with no error
+    on either Mac, because the line addressed to B never reaches B. Addressed to `primaryLink()`
+    it reaches the one Mac that can physically receive it, and if that Mac does not own the target
+    session its own `resolveSessionId` fails and **logs** the miss with the transcript still
+    delivered as a memo — a visible failure instead of silence on both.
+  - **BLE chunking and what the airtime numbers do and do not say.** noble on macOS does not
+    report an MTU (`peripheral.mtu` came back `undefined` against the real device), so
+    `BLE_CHUNK_SIZE` stays the module constant **20** — there is nothing negotiated to size
+    against. A 779-byte payload (a normal one-session tick) dispatched in **0–1ms** over five
+    consecutive ticks, but that is the time to hand chunks to CoreBluetooth, **not** over-the-air
+    completion: `sendOverBle` writes `withoutResponse`, and the mac binding fires the JS write
+    completion immediately after calling `-[CBPeripheral writeValue:...]`. True over-the-air
+    completion is **not observable through that binding at all**, so any future payload growth has
+    to be argued against the theoretical bound (~666 B/s at 20-byte chunks and the 30ms interval
+    macOS negotiates), never against the 1ms figure. The worst-case device→host line is **286
+    bytes** — a typed answer plus the `to=` suffix — which is 15 chunk notifies plus a standalone
+    newline notify, the newline sent on its own so neither chunk loop can clip the byte the host's
+    line splitter keys on.
+  - **`MULTITEST <n>` injects a synthetic second Mac** (`hostId feedfeed`, tag `studio`), which is
+    what makes the merge, the cross-Mac ranking, the row and card tags, the freshest-quota pick and
+    the stale-link drop verifiable — and screenshottable via `SCREENSHOT` — from one Mac. Same
+    precedent as `KBTEST`/`TAB`/`PAGE`, which exist because the glass is otherwise unverifiable.
+    Three details are load-bearing: the tag is `studio`, a full **six** characters, i.e. the real
+    worst case `macTag()` can emit, so the harness tests the width boundary rather than passing on
+    a lucky fit; it carries its own `cxPct`/`cxAgeSec`, or `cxSourceLink` could never pick the
+    synthetic link and the Codex row's own tag lane would go unexercised; and it **saves and
+    restores `activeHost`** around the injected call, because `feedfeed` matches no pairing slot
+    and would otherwise leave the device unable to sign a **real** answer until the next real tick
+    restored it (~5s). It can never answer anything itself, for that same reason — no pairing slot
+    matches, so `authHmac` refuses to sign, which is the safe direction.
+  - **What is NOT verified, stated plainly.** **The two-`conn_id` demux has never run on
+    hardware**, and it is this feature's one untested load-bearing path. Two host processes on ONE
+    Mac cannot substitute for two Macs: they share a single ACL connection to the peripheral (the
+    device logged exactly one `onConnect`), so proving the demux needs a **second radio**. Also
+    unverified by execution: **answering by tapping `Allow` or `SEND` on the glass**, because this
+    codebase deliberately has no remote trigger for either — `KBTEST` can open the keyboard and
+    type but explicitly cannot SEND — so the answer path, including the 286-byte worst-case line
+    above, was checked by inspection only.
+  - **SUSPECTED and uninvestigated: per-reconnect listener accumulation in `host/index.mjs`.**
+    During reconnect-heavy testing the host log showed `MaxListenersExceededWarning` alongside
+    repeated BLE write timeouts, which *suggests* listeners accruing on the `txChar.on("data")`
+    path across reconnects. It is pre-existing, it was not investigated, and nothing here diagnoses
+    it — recorded so the next person to see those two symptoms together starts from a hypothesis
+    instead of from scratch.
 - **Protocol versioning — `HELLO <name> v2`.** The device advertises which pairing protocol it
   speaks. Only for `v2` does the host send the new `PROVISION <hostId> <secret> <label>`; older
   firmware gets the bare `PROVISION <secret>`, which still works because the key sent *is* that
@@ -625,9 +800,14 @@ two things `host/index.mjs` cannot get any other way:
   - **CHAT is the default filter.** Tool calls outnumber conversation about 2:1, so an
     unfiltered view is mostly commands. The chip toggles to ALL.
   - **The reply goes over USB when USB is up, and BLE only as a fallback — never both.**
-    BLE writes go out in 20-byte chunks with a response awaited on each, so at the 30ms
-    connection interval macOS negotiates even a few KB is seconds, with the tick loop
-    blocked behind it. Both transports reach the same device, so USB simply wins.
+    BLE writes go out in 20-byte chunks (`BLE_CHUNK_SIZE`), so at the 30ms connection
+    interval macOS negotiates the theoretical ceiling is ~666 B/s and a few KB is seconds
+    **on the air**. That RATE is the reason USB wins. This note used to say each chunk
+    awaited a response, and that is simply false: `sendOverBle` passes noble's
+    `withoutResponse` flag (`writeAsync(chunk, true)`), so the host is **not** blocked
+    behind the radio — and for the same reason over-the-air completion is not observable
+    through that binding at all (see the two-Mac airtime note). Do not restore the
+    blocking claim; the conclusion never needed it. Both transports reach the same device.
   - The parsed transcript is cached per session (paging 399 screens must not re-read a
     megabyte each time) but the cache is **bounded to the 2 most recently used** — a parsed
     transcript is ~600KB of strings and this process runs for days, so an unbounded cache

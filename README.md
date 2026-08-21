@@ -392,6 +392,35 @@ controls make switching clean:
 Either way, re-pairing always needs a **USB connection once** — Bluetooth alone
 can't provision (that's the security boundary).
 
+**Two Macs at once.** One device can serve **two** Macs simultaneously over
+Bluetooth, with sessions from both in the one urgency-ranked list. Setting up
+the second Mac:
+
+1. Install the host on the second Mac (`cd host && npm install`, then
+   `./deckhand-service.sh install`) exactly as on the first.
+2. **Connect the device to it over USB once, with the host running.** This is
+   the whole pairing step — the Mac generates its own secret and pushes it with
+   `PROVISION`, which is USB-only by design (BLE `PROVISION` is ignored, and
+   that is the security boundary). The device stores it in its own slot, so the
+   first Mac's key is untouched.
+3. Unplug. Both Macs now hold their own key and talk to the device over BLE at
+   the same time — each answers only its own prompts, and each signs with its
+   own key.
+
+The device remembers up to **4** Macs (`MAX_HOSTS`) but talks to **2** at a
+time (`MAX_LINKS`) — the second number is the Bluetooth controller's, not a
+preference. A third Mac trying to connect is refused, not queued.
+
+While two Macs are connected, each session row and the detail screen carry a
+short tag saying which Mac the session lives on (`CLAUDE/air`, `CC/studio`),
+and the USAGE cards name the Mac whose quota reading they are showing. That tag
+is derived from the Mac's hostname — its last segment, lowercased, capped at 6
+characters — so `Yujias-MacBook-Air.local` becomes `air`. Set
+`DECKHAND_MAC_TAG` in the host's environment to name a Mac yourself (it is
+sanitised and capped to the same 6 characters, and is taken whole rather than
+split on separators). With only one Mac connected the tag is omitted entirely,
+since it would disambiguate nothing.
+
 ## Hardware
 
 | | part | what to buy |
