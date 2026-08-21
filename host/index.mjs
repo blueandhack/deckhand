@@ -2988,8 +2988,21 @@ setInterval(async () => {
         console.error(`Icon: EMOJI ignored - "${command.slice(6).trim()}" is not a known icon name.`);
         return;
       }
-      await fs.writeFile(MAC_EMOJI_FILE, want).catch((err) => console.error(`Icon: could not save: ${err.message}`));
-      console.log(`Icon: this Mac is now ${want}${process.env.DECKHAND_MAC_EMOJI ? " (but DECKHAND_MAC_EMOJI overrides it)" : ""}.`);
+      let saved = true;
+      await fs.writeFile(MAC_EMOJI_FILE, want).catch((err) => {
+        saved = false;
+        console.error(`Icon: could not save: ${err.message}`);
+      });
+      if (saved) {
+        // Truthiness of DECKHAND_MAC_EMOJI is NOT the right test here: currentMacEmoji()
+        // only lets the env var override when it resolves to a VALID name. A truthy-but-
+        // invalid env (a typo'd name) does not override anything - the file wins on the
+        // next tick - so claiming an override in that case tells the user their click had
+        // no effect when it did. Route through the same resolver so the message can never
+        // disagree with what actually displays.
+        const envOverrides = !!resolveMacEmoji({ env: process.env.DECKHAND_MAC_EMOJI || "", file: "" });
+        console.log(`Icon: this Mac is now ${want}${envOverrides ? " (but DECKHAND_MAC_EMOJI overrides it)" : ""}.`);
+      }
       return;
     }
     console.log(`Sending command to device: ${command}`);
