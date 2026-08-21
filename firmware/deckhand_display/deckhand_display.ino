@@ -3617,7 +3617,15 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
               "}";
     }
     line += "]}";
+    // "feedfeed" matches no pairing slot, so handleLine's shared activeHost
+    // resolution (above, for real payloads) would overwrite activeHost with
+    // -1 here - leaving the device unable to sign an answer for the REAL
+    // paired Mac until its next tick restores it (~5s). Save/restore around
+    // the synthetic call only, so this test harness stays inert against the
+    // live device's ability to answer a real pending prompt.
+    int savedActiveHost = activeHost;
     handleLine(line);
+    activeHost = savedActiveHost;
   } else {
     *lastRxTimestamp = millis();
     uint32_t h = payloadHash32(buf);
