@@ -131,7 +131,19 @@ struct BleLink {
 };
 BleLink bleLinks[MAX_LINKS];
 bool bleConnected = false;         // still a bool: == (bleLinkCount() > 0)
-unsigned long lastRxBLEMillis = 0; // freshest of the links, for the SETTINGS page
+// Vestigial: nothing currently reads this. It predates the per-link
+// bleLinks[].lastRxMillis and was kept (not deleted) rather than assumed
+// dead - a later task may still want "freshest of any link" for the
+// SETTINGS page, at which point this is where that value would live.
+unsigned long lastRxBLEMillis = 0;
+// A disconnect fires on BTC_TASK, which must never touch bleLinks[].buf (a
+// heap-backed String loopTask may be mid-append into via feedChar) or flip
+// .used out from under a slot loopTask is still draining - same rule as
+// bleRxStream itself. So onDisconnect only queues the conn_id here; loopTask
+// is the sole reaper, at the top of drainBleRx(). Sized MAX_LINKS because
+// that's the most links that can ever be pending release at once.
+volatile bool blePendingReleaseFlag[MAX_LINKS] = { false, false };
+volatile uint16_t blePendingReleaseConn[MAX_LINKS] = { 0, 0 };
 // Hand-off from the Bluetooth stack's task to loopTask. The BLE onWrite
 // callback runs on BTC_TASK, and processing lines there (TFT drawing, LEDC
 // beeps) crashed the scheduler: "assert failed: xTaskPriorityDisinherit"
@@ -2914,12 +2926,22 @@ class BLEServerCallbacksImpl : public BLEServerCallbacks {
     bleConnected = true;
     if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
+  // Only QUEUES the conn_id (bleQueueRelease) - BTC_TASK must never clear
+  // .used or touch .buf itself, the same rule bleRxStream already exists
+  // for. loopTask reaps it at the top of drainBleRx(). Gated the same way
+  // onConnect is: without this, refusing and closing a third central still
+  // fires its OWN onDisconnect, which used to re-advertise unconditionally
+  // even though both real slots were still full - connect, refuse, close,
+  // advertise, repeat, exactly the flapping onConnect's gate exists to avoid.
   void onDisconnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) {
-    bleReleaseConn(param ? param->disconnect.conn_id : 0);
-    BLEDevice::startAdvertising();
+    bleQueueRelease(param ? param->disconnect.conn_id : 0);
+    if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
   void onConnect(BLEServer* server) {}       // superseded by the param forms
-  void onDisconnect(BLEServer* server) { BLEDevice::startAdvertising(); }
+  // No conn_id here, so nothing to queue for release - just the same gate.
+  void onDisconnect(BLEServer* server) {
+    if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
+  }
 };
 
 class BLERxCallbacks : public BLECharacteristicCallbacks {
@@ -2933,15 +2955,21 @@ class BLERxCallbacks : public BLECharacteristicCallbacks {
     String value = characteristic->getValue();
     size_t n = value.length();
     if (!bleRxStream || n == 0 || n > 0xFFFF) return;
-    uint16_t conn = param ? param->write.conn_id : 0;
+    if (!param) return; // no conn_id to attribute this to - see the delegate below
+    uint16_t conn = param->write.conn_id;
     if (xStreamBufferSpacesAvailable(bleRxStream) < n + 4) return;
     uint8_t hdr[4] = { (uint8_t)(conn & 0xFF), (uint8_t)(conn >> 8),
                        (uint8_t)(n & 0xFF), (uint8_t)(n >> 8) };
     xStreamBufferSend(bleRxStream, hdr, 4, 0);
     xStreamBufferSend(bleRxStream, value.c_str(), n, 0);
   }
-  // Keep the one-argument form delegating, so a library version that calls it
-  // instead cannot silently lose every write.
+  // Keep the one-argument form delegating (dead code on today's 3.3.11
+  // library, which always calls the two-argument form - verified in its
+  // BLECharacteristic.cpp - but kept for a library version that might call
+  // this one instead). It has no conn_id, and guessing 0 would silently
+  // misattribute a second central's bytes onto slot 0's accumulator - the
+  // exact corruption this task exists to prevent - so it drops the frame
+  // instead of framing it under a guess.
   void onWrite(BLECharacteristic* characteristic) { onWrite(characteristic, nullptr); }
 };
 
@@ -2965,12 +2993,26 @@ int bleSlotForConn(uint16_t connId, bool create) {
   }
   return -1;
 }
-void bleReleaseConn(uint16_t connId) {
-  int i = bleSlotForConn(connId, false);
-  if (i < 0) return;
-  bleLinks[i].used = false;
-  bleLinks[i].buf = "";
-  bleConnected = bleLinkCount() > 0;
+// Called from BTC_TASK (BLEServerCallbacksImpl::onDisconnect). Must NOT
+// touch bleLinks[].buf or .used directly - loopTask may be mid-append into
+// that slot's String via feedChar() right now, and clearing/reassigning a
+// String out from under an in-progress append is a use-after-free. This
+// only records the conn_id; loopTask reaps it at the top of drainBleRx(),
+// which is the sole place a link's buf/used may be cleared.
+void bleQueueRelease(uint16_t connId) {
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!blePendingReleaseFlag[i]) {
+      blePendingReleaseConn[i] = connId;
+      blePendingReleaseFlag[i] = true;
+      return;
+    }
+  }
+  // Both pending slots already taken: only reachable if MAX_LINKS disconnects
+  // land before loopTask's next drainBleRx() call. Nothing queued here would
+  // be safe to also poke at directly (that's the whole reason this function
+  // exists), so the dropped entry just means that slot stays used=true one
+  // tick longer than it has to - not a correctness problem, since the reap
+  // loop below still drains whatever IS queued every single call.
 }
 // Drains the framed stream buffer into per-link accumulators. Partial reads are
 // normal (the buffer is filled by another task), so the header and the payload
@@ -2980,6 +3022,26 @@ void drainBleRx() {
   static int hdrHave = 0;
   static int frameSlot = -1;
   static uint16_t frameLeft = 0;
+  // Reap disconnects BTC_TASK queued via bleQueueRelease(). This is the only
+  // place an already-used slot's .buf/.used may be mutated - loopTask owns
+  // both, the same way it already owns feedChar()'s appends into that same
+  // String. Clearing frameSlot when it matches the just-released slot is
+  // deliberate: any bytes still in flight for that connection are discarded
+  // rather than fed into a slot that now reads used=false and could be
+  // reclaimed by a brand new central before this frame finishes draining -
+  // which would otherwise hand that new central the old link's leftover tail.
+  bool reapedAny = false;
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!blePendingReleaseFlag[i]) continue;
+    blePendingReleaseFlag[i] = false;
+    int slot = bleSlotForConn(blePendingReleaseConn[i], false);
+    if (slot < 0) continue;
+    bleLinks[slot].used = false;
+    bleLinks[slot].buf = "";
+    if (frameSlot == slot) frameSlot = -1;
+    reapedAny = true;
+  }
+  if (reapedAny) bleConnected = bleLinkCount() > 0;
   if (!bleRxStream) return;
   char chunk[64];
   for (;;) {
@@ -2991,14 +3053,24 @@ void drainBleRx() {
       hdrHave = 0;
       uint16_t conn = (uint16_t) hdr[0] | ((uint16_t) hdr[1] << 8);
       frameLeft = (uint16_t) hdr[2] | ((uint16_t) hdr[3] << 8);
-      frameSlot = bleSlotForConn(conn, true);
+      // Lookup only - NEVER create here. onConnect() always runs before any
+      // of a link's writes can reach this stream (same BTC_TASK, processed
+      // serially), so a genuine central's slot already exists by the time
+      // its bytes get here; an unmatched conn_id means a refused central or
+      // one whose slot was just reaped above. Creating here would race
+      // onConnect for the same free slot (two conn_ids could map onto one
+      // accumulator - the exact bug this task exists to prevent) and could
+      // resurrect a slot for a conn_id that will never disconnect again,
+      // wedging bleLinkCount() at MAX_LINKS and silencing both the onConnect
+      // refusal gate and the 5s advertising watchdog.
+      frameSlot = bleSlotForConn(conn, false);
       continue;
     }
     size_t want = frameLeft < sizeof(chunk) ? frameLeft : sizeof(chunk);
     size_t got = xStreamBufferReceive(bleRxStream, chunk, want, 0);
     if (got == 0) return;
     frameLeft -= got;
-    if (frameSlot < 0) continue;   // a refused central: consume and discard
+    if (frameSlot < 0) continue;   // a refused/reaped central: consume and discard
     bleLinks[frameSlot].lastRxMillis = millis();
     lastRxBLEMillis = millis();
     for (size_t i = 0; i < got; i++)
