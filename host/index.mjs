@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { createWriteStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { createWriteStream, renameSync, statSync, appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from "node:fs";
 import crypto from "node:crypto";
 import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
@@ -32,6 +32,11 @@ import { macTag } from "./host-tag.mjs";
 import { lineTargetsUs, stripAddress } from "./line-address.mjs";
 
 const execFileAsync = promisify(execFile);
+import {
+  shouldRefreshCodex,
+  windowExpired,
+  CODEX_BACKOFF_MS,
+} from "./codex-refresh.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Spawned as `<this node> <script>`, NOT by executing the .bin shebang. That
 // shebang is `#!/usr/bin/env node`, which needs `node` on PATH - and under
@@ -567,6 +572,45 @@ try {
 // The 429 back-off deadline survives host restarts here. The host restarts
 // on every firmware flash during development, and an immediate poll per
 // restart once compounded into an hours-long rate-limit penalty.
+// Codex usage refresh. Codex has no endpoint to poll, so a stale figure can only be
+// refreshed by making Codex CLI actually run - see codex-refresh.mjs for why that is a
+// guarded, quota-spending decision. Both stamps are PERSISTED for the same reason the
+// OAuth poller's are: this host restarts often, and an in-memory guard would let every
+// restart spend another turn.
+const CODEX_ATTEMPT_STATE = path.join(RUNTIME_DIR, "codex-refresh-attempt.json");
+const CODEX_BACKOFF_STATE = path.join(RUNTIME_DIR, "codex-refresh-backoff.json");
+// Absolute, and overridable. NOT a bare "codex": launchd gives this process a minimal
+// PATH, which is exactly how ccusage's `#!/usr/bin/env node` shebang failed invisibly -
+// env: node: No such file or directory every tick, with the device stuck on "waiting
+// for the first update" while everything else looked healthy.
+const CODEX_BIN = process.env.CODEX_BIN || path.join(os.homedir(), ".local", "bin", "codex");
+// The refresh turn runs here so its rollout can be recognised and skipped: it is a real
+// Codex thread, and without this it would appear on the device as a session nobody
+// started, for up to SESSION_STALE_MS.
+const CODEX_REFRESH_CWD = path.join(RUNTIME_DIR, "codex-refresh");
+// Codex records the RESOLVED cwd, and on macOS /tmp is a symlink to /private/tmp - so
+// the rollout says /private/tmp/deckhand-501/codex-refresh while RUNTIME_DIR says
+// /tmp/... and a string compare misses. Found exactly that way: the phantom session row
+// this skip exists to prevent appeared anyway, complete with a typed-message nonce.
+// Resolved lazily and cached, because the directory does not exist until the first
+// refresh creates it (realpath throws on a missing path).
+let codexRefreshCwdReal = null;
+function isCodexRefreshCwd(cwd) {
+  if (!cwd) return false;
+  if (cwd === CODEX_REFRESH_CWD) return true;
+  if (codexRefreshCwdReal === null) {
+    try {
+      codexRefreshCwdReal = realpathSync(CODEX_REFRESH_CWD);
+    } catch {
+      return false; // not created yet: nothing of ours can have produced this rollout
+    }
+  }
+  return cwd === codexRefreshCwdReal;
+}
+const CODEX_REFRESH_ENABLED = (process.env.DECKHAND_CODEX_REFRESH || "on").toLowerCase() !== "off";
+const CODEX_LOGIN_TIMEOUT_MS = 15_000; // `codex login status` makes no model call
+const CODEX_REFRESH_TIMEOUT_MS = 120_000; // one tiny turn; bounded like every child here
+
 const OAUTH_BACKOFF_STATE = path.join(RUNTIME_DIR, "oauth-backoff.json");
 // Last poll ATTEMPT (success OR failure), persisted across restarts. The
 // back-off file only exists after a 429; this bounds every network hit to at
@@ -1042,6 +1086,12 @@ async function readCodexSessions() {
     // Subagent threads are Codex talking to itself (auto-review, guardian). They are
     // not something a person is waiting on, and they would crowd the 6-row list.
     if (roll.threadSource && roll.threadSource !== "user") continue;
+    // Our own usage-refresh turn is a real Codex thread with thread_source "user", so
+    // nothing above excludes it. Left in, it would show on the device as a session
+    // nobody started, for up to SESSION_STALE_MS, and could push a real one off the
+    // 6-row list. Its rate_limits are still harvested above - that is the entire point
+    // of running it; only the session ROW is suppressed.
+    if (isCodexRefreshCwd(roll.cwd)) continue;
     out.push({
       id: f.id.slice(0, 12),
       cwd: roll.cwd || "",
@@ -1057,6 +1107,105 @@ async function readCodexSessions() {
   return out;
 }
 
+// ---------- Refreshing the Codex figure ----------
+// Reading Codex usage is passive: the host scrapes `token_count.rate_limits` out of
+// whatever rollout Codex CLI last wrote. If you only use the ChatGPT app, Codex CLI
+// never runs, nothing is ever written, and the figure freezes - observed here at ~24h
+// stale, showing a percentage for a 7-day window that had already reset.
+//
+// The only way to refresh it is to make Codex CLI take a real turn, which spends a
+// little of the very quota being measured. Every guard below exists to bound that:
+// preconditions are checked cheapest-first and short-circuit, the attempt stamp is
+// written BEFORE the spawn (so a crash mid-turn still counts as an attempt), and a
+// failure backs off for hours rather than retrying on the next 5s tick.
+async function readStamp(file) {
+  try {
+    const { at } = JSON.parse(await fs.readFile(file, "utf8"));
+    return Number.isFinite(at) ? at : 0;
+  } catch {
+    return 0; // absent or corrupt: shouldRefreshCodex() decides what that means
+  }
+}
+
+async function maybeRefreshCodexUsage() {
+  const ageSec = codexRateLimits?.at
+    ? Math.round((Date.now() - codexRateLimits.at) / 1000)
+    : null;
+  const [lastAttemptMs, backoffUntilMs] = await Promise.all([
+    readStamp(CODEX_ATTEMPT_STATE),
+    readStamp(CODEX_BACKOFF_STATE),
+  ]);
+  if (
+    !shouldRefreshCodex({
+      ageSec,
+      lastAttemptMs,
+      backoffUntilMs,
+      now: Date.now(),
+      enabled: CODEX_REFRESH_ENABLED,
+    })
+  ) {
+    return;
+  }
+
+  // Cheapest precondition first: is Codex even here? An absent binary is the common
+  // case (this feature must cost nothing on a machine without Codex), so it is checked
+  // before anything that spawns.
+  try {
+    await fs.access(CODEX_BIN);
+  } catch {
+    await noteCodexAttempt("codex CLI not found");
+    return;
+  }
+
+  // Then: logged in? This makes NO model call, so it costs no quota - which is what
+  // makes it worth doing before the turn rather than discovering it from a failure.
+  try {
+    const { stdout } = await execFileAsync(CODEX_BIN, ["login", "status"], {
+      timeout: CODEX_LOGIN_TIMEOUT_MS,
+    });
+    if (!/logged in/i.test(stdout)) {
+      await noteCodexAttempt(`not logged in (${stdout.trim().slice(0, 60)})`);
+      return;
+    }
+  } catch (err) {
+    await noteCodexAttempt(`login status failed: ${err.message}`);
+    return;
+  }
+
+  // Stamp the attempt BEFORE spending anything. If this process dies mid-turn, the
+  // attempt still counts - otherwise a crash loop would spend a turn per restart.
+  await fs.writeFile(CODEX_ATTEMPT_STATE, JSON.stringify({ at: Date.now() })).catch(() => {});
+  try {
+    await fs.mkdir(CODEX_REFRESH_CWD, { recursive: true });
+    // --sandbox read-only: `codex exec` forces bypassPermissions on APPROVALS (measured,
+    // and documented in CLAUDE.md), so the sandbox policy is the only thing left
+    // constraining a model-generated command. This turn runs unattended, so it gets the
+    // most restrictive policy that still completes.
+    // --skip-git-repo-check: the scratch cwd is deliberately not a repo.
+    // The prompt is chosen to give the model nothing to do but answer.
+    await execFileAsync(
+      CODEX_BIN,
+      ["exec", "--sandbox", "read-only", "--skip-git-repo-check", "reply with the single word: ok"],
+      { cwd: CODEX_REFRESH_CWD, timeout: CODEX_REFRESH_TIMEOUT_MS, maxBuffer: 1024 * 1024 }
+    );
+    console.log(`Codex: refreshed usage (previous reading ${ageSec == null ? "none" : `${ageSec}s old`}).`);
+  } catch (err) {
+    await noteCodexAttempt(`refresh turn failed: ${err.message}`);
+  }
+}
+
+// A failure backs off for hours. Without this a machine that is logged out, rate
+// limited, or offline would spawn a child every 5s forever.
+async function noteCodexAttempt(why) {
+  console.log(`Codex: usage refresh skipped - ${why} (backing off ${Math.round(CODEX_BACKOFF_MS / 3600_000)}h).`);
+  await fs
+    .writeFile(CODEX_ATTEMPT_STATE, JSON.stringify({ at: Date.now() }))
+    .catch(() => {});
+  await fs
+    .writeFile(CODEX_BACKOFF_STATE, JSON.stringify({ at: Date.now() + CODEX_BACKOFF_MS }))
+    .catch(() => {});
+}
+
 // Codex reports ONE window in `primary` (10080 minutes = 7 days on this plan);
 // `secondary` is null here but is passed through if a plan ever populates it.
 function codexUsage() {
@@ -1070,8 +1219,12 @@ function codexUsage() {
           windowMin: w.window_minutes ?? null,
         }
       : null;
-  const primary = win(rl.primary);
-  const secondary = win(rl.secondary);
+  // A window that has already reset describes a period that no longer exists, so its
+  // percentage is not a reading of anything current. The device shows "--" for a figure
+  // it has never measured; this belongs on the same side of that line. Observed live: a
+  // 5% figure whose resets_at had passed ~21h earlier, still drawn as 5%.
+  const primary = windowExpired(rl.primary, Date.now()) ? null : win(rl.primary);
+  const secondary = windowExpired(rl.secondary, Date.now()) ? null : win(rl.secondary);
   return {
     cxPct: primary?.pct ?? null,
     cxResetMin: primary?.resetInMin ?? null,
@@ -2689,6 +2842,12 @@ async function tick(generation = tickGeneration) {
       .catch(() => {});
 
     const usage = await readUsage();
+    // Fired from the tick because readUsage() is what refreshes codexRateLimits, so the
+    // staleness it decides on is current. Deliberately NOT awaited: the guards inside
+    // bound it to at most one turn per 6h, and a turn takes seconds - awaiting it would
+    // put a model call inside the 5s poll loop, which is the stall shape tick() has a
+    // watchdog for. Errors are swallowed by the function itself.
+    maybeRefreshCodexUsage().catch(() => {});
     // hostId rides along so a device paired with several Macs knows which of
     // its stored keys to sign this prompt's answer with. remoteAnswer tells the
     // device whether its option buttons are live or read-only, so it never
