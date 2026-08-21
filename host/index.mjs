@@ -28,6 +28,7 @@ import {
 } from "./voice-answer.mjs";
 import { resolveSessionId } from "./session-lookup.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
+import { macTag } from "./host-tag.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -350,6 +351,8 @@ const PAIR_FILE = path.join(os.homedir(), ".claude", "deckhand-secret");
 const MAX_PAIRED_DEVICES = 8;
 let hostId = "";                 // this Mac, e.g. "9f3c1a20"
 let hostLabel = os.hostname().replace(/\.local$/, "");
+// Short display form for the device's session rows. DECKHAND_MAC_TAG overrides it.
+let hostTag = macTag(hostLabel, process.env.DECKHAND_MAC_TAG || "");
 let pairedDevices = [];          // [{ name, secret, label, lastSeen }]
 let selectedDevice = "";         // "" = auto (talk to any remembered device)
 let usbDeviceName = "";          // device currently on USB (learned from HELLO)
@@ -2665,7 +2668,7 @@ async function tick(generation = tickGeneration) {
     // its stored keys to sign this prompt's answer with. remoteAnswer tells the
     // device whether its option buttons are live or read-only, so it never
     // offers a control that can't do anything.
-    const line = JSON.stringify({ ...usage, hostId, remoteAnswer, voice: lastVoice }) + "\n";
+    const line = JSON.stringify({ ...usage, hostId, hostTag, remoteAnswer, voice: lastVoice }) + "\n";
     if (usbPort) usbPort.write(line);
     if (bleCharacteristic) await sendOverBle(line);
     console.log(
