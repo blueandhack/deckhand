@@ -3074,7 +3074,26 @@ int bleFrameSlot = -1;
 // exactly as safe as calling it from drainBleRx() itself - a disconnect
 // queued mid-recording would otherwise sit unreaped for the whole blocking
 // call, turning a millisecond window into up to two minutes.
-void reapBleLinks() {
+// mayAdvertise exists because a duplicate BLEDevice::startAdvertising() is
+// NOT the "harmless no-op" round 4 assumed - measured, not guessed: calling
+// it twice in quick succession (the immediate call already made by
+// onDisconnect, plus an unconditional one here) moved reconnect-discovery
+// time from a consistent 50-60ms to 323-697ms across 9 trials. So this
+// function must NOT advertise on the path that is already covered twice
+// over - onDisconnect re-advertises immediately on every ordinary
+// disconnect, and the loop() watchdog is the net behind THAT - and must
+// advertise ONLY on the path neither of those two can reach: a blocking
+// call (micStream up to 120s, micMonitor up to 180s, runCalibration waiting
+// on a person, the SCREENSHOT readback) that starves loop() - and therefore
+// the watchdog - for its entire duration, during which a refusal caused by
+// a still-pending slot would otherwise leave BLE un-advertised until the
+// blocking call finally returns.
+// drainBleRx() (the ordinary, loop()-driven path) passes false. Every
+// blocking-loop call site passes true. Either way, freedAny and
+// bleLinkCount() < MAX_LINKS still gate the actual call, so even a
+// mayAdvertise=true caller only touches the radio when there is something
+// to advertise for.
+void reapBleLinks(bool mayAdvertise) {
   bool freedAny = false;
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!bleLinks[i].releasePending) continue;
@@ -3084,32 +3103,16 @@ void reapBleLinks() {
     if (bleFrameSlot == i) bleFrameSlot = -1;
     freedAny = true;
   }
-  // Re-advertise here too, not just from onDisconnect - this is what actually
-  // recovers a refusal that happened during a blocking loop. onDisconnect no
-  // longer advertises on a refusal (round 3), deferring to the loop()
-  // watchdog instead - but the watchdog is IN loop(), which a blocking call
-  // (micStream up to 120s, micMonitor up to 180s, runCalibration waiting on a
-  // person) starves for its entire duration. Putting the recovery here
-  // instead puts it on the same code path that creates the opportunity (a
-  // slot going from pending to actually free), so it fires identically
-  // whether reapBleLinks() was called from drainBleRx() or from one of those
-  // other loops. Gated on freedAny so the common no-op call (nothing
-  // pending) costs nothing beyond the loop above.
-  //
-  // This does mean an ORDINARY disconnect advertises TWICE - once
-  // immediately from onDisconnect (the slot resolves there, so it still
-  // advertises right away, which is what keeps the ~50-60ms reconnect fast),
-  // and again here on the very next reap. That's deliberate, not a bug to
-  // dedupe: BLEDevice::startAdvertising() while already advertising is a
-  // harmless no-op, and removing the "redundant" call here to "clean it up"
-  // would take the blocking-path recovery with it.
-  if (freedAny && bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
+  if (mayAdvertise && freedAny && bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
 }
 void drainBleRx() {
   static uint8_t hdr[4];
   static int hdrHave = 0;
   static uint16_t frameLeft = 0;
-  reapBleLinks();
+  // false: this is the ordinary path, already covered twice over (see
+  // reapBleLinks()'s own comment) - advertising again here is exactly the
+  // redundant call that cost 300-600ms.
+  reapBleLinks(false);
   if (!bleRxStream) return;
   char chunk[64];
   for (;;) {
@@ -3450,10 +3453,12 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     for (int y = 0; y < tft.height(); y++) {
       // No touch poll in this loop to ride alongside, so reap on its own -
       // once per row (~56ms apart over ~18s total) is cheap and frequent.
-      // See reapBleLinks()'s own comment; safe here for the same reason it's
-      // safe everywhere else it's called from a blocking loop - this runs on
-      // loopTask throughout, same as drainBleRx() itself.
-      reapBleLinks();
+      // true: this IS a blocking path loop() can't reach, so it's one of the
+      // two places (alongside the mic loops and calibration) that needs the
+      // reap's own advertise. See reapBleLinks()'s own comment; safe to call
+      // from here for the same reason it's safe everywhere else - this runs
+      // on loopTask throughout, same as drainBleRx() itself.
+      reapBleLinks(true);
       tft.readRect(0, y, tft.width(), 1, rowBuf);
       // readRect returns each pixel BYTE-SWAPPED - measured, not assumed:
       // writing 0xF800 and reading it back gives readPixel=0xF800 but

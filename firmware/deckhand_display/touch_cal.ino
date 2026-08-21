@@ -26,7 +26,7 @@ void waitForStableTouch(int16_t& outX, int16_t& outY) {
   // crosshair, which can run well past a moment. See reapBleLinks()'s own
   // comment; safe here for the same reason it's safe in every other blocking
   // loop it's called from - this runs on loopTask throughout.
-  while (!ts.touched()) { reapBleLinks(); delay(20); }
+  while (!ts.touched()) { reapBleLinks(true); delay(20); }  // true: blocking path
   delay(150);
   long sumX = 0, sumY = 0;
   int samples = 8;
@@ -41,7 +41,7 @@ void waitForStableTouch(int16_t& outX, int16_t& outY) {
   outX = sumX / samples;
   outY = sumY / samples;
   Serial.printf("  cal point averaged: raw=(%d,%d)\n", outX, outY);
-  while (ts.touched()) { reapBleLinks(); delay(20); } // wait for release
+  while (ts.touched()) { reapBleLinks(true); delay(20); } // wait for release; true: blocking path
   delay(200);
 }
 void drawCrosshair(int x, int y) {

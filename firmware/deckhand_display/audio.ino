@@ -505,7 +505,8 @@ void micStream() {
       // capture would otherwise starve a queued disconnect for its whole
       // duration - see reapBleLinks()'s own comment. Safe here for the same
       // reason the touch poll is: this loop runs entirely on loopTask.
-      reapBleLinks();
+      // true: loop()'s watchdog can't reach here, so this IS the recovery.
+      reapBleLinks(true);
       if (millis() - start > 400 && ts.touched()) {
         if (++stopVotes >= 2) { stoppedByUser = true; break; }
       } else {
@@ -684,7 +685,8 @@ void micRecord() {
       // See the identical call in micStream() - same reasoning, smaller
       // window (this path is heap-capped to a few seconds rather than 120s),
       // added anyway since it costs nothing and shares the exact pattern.
-      reapBleLinks();
+      // true: same reason as micStream()'s call - this is a blocking path.
+      reapBleLinks(true);
       if (millis() - recStart > 400 && ts.touched()) {
         if (++stopVotes >= 2) { stoppedByUser = true; break; }
       } else {
@@ -778,7 +780,8 @@ void micMonitor() {
     // Up to 180s blocking loopTask, entirely outside drainBleRx() - see
     // reapBleLinks()'s own comment for why this matters and why it's safe
     // to call from here (this loop runs on loopTask, same as drainBleRx()).
-    reapBleLinks();
+    // true: this loop is exactly the thing the loop() watchdog can't reach.
+    reapBleLinks(true);
     int pp = micWindowPP(80);
     if (pp > peak) peak = pp;
     // Bleed the peak-hold down so it follows you back after a loud moment.
@@ -888,7 +891,8 @@ void micLevelTest() {
     // sample - the per-sample loop above paces to microsecond timing and must
     // stay untouched. See reapBleLinks()'s own comment; safe here for the same
     // reason it's safe in the loops above - this runs on loopTask throughout.
-    reapBleLinks();
+    // true: a blocking path, same as the other mic loops.
+    reapBleLinks(true);
   }
 
   int dc = n ? (int) (sum / n) : 0;
