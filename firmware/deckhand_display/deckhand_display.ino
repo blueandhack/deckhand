@@ -463,7 +463,11 @@ struct HostLink {
   // It MUST be per-link: shared as one high-water mark, two independent
   // counters would trip the "seq went backwards = new host generation" reset
   // on nearly every tick, disabling the voice card continuously rather than
-  // just after a restart.
+  // just after a restart. Read/written in the voice block of handleLine(),
+  // via a reference bound to hostLinks[curLink] when curLink >= 0; curLink < 0
+  // (a legacy host old enough to send no hostId) falls back to the bare
+  // globals voiceSeq/voiceSeqShown declared near line 1082, the same fallback
+  // pattern pairingSlotForRow() uses for answer signing.
   long voiceSeq = 0;
   long voiceSeqShown = 0;
 };
@@ -1079,8 +1083,13 @@ char voiceState[12] = "";
 // A small counter from the host, NOT its millisecond timestamp: `long` here is
 // 32-bit and Date.now() (~1.79e12) overflows it, so comparing timestamps silently
 // never detected a new exchange and the card never appeared.
-int voiceSeq = 0;          // highest seq seen
-int voiceSeqShown = 0;     // highest seq we actually raised the card for
+// These are the FALLBACK for a legacy host that sends no hostId (curLink < 0) -
+// see the per-link hostLinks[].voiceSeq/voiceSeqShown fields above, which is
+// where a normal (hostId-bearing) payload's tracking actually lives now. Kept
+// as `long` so the fallback binds cleanly to the same reference type as the
+// per-link fields in the voice block of handleLine().
+long voiceSeq = 0;          // highest seq seen (legacy/no-hostId fallback)
+long voiceSeqShown = 0;     // highest seq we actually raised the card for (ditto)
 bool voiceCardActive = false;
 
 
@@ -3085,6 +3094,13 @@ void handleLine(const String& line) {
   // result card clears the content area itself, but "heard" and "askheard" raise no
   // card, and without this the bar was left stranded on screen after them.
   bool barNeedsClearing = false;
+  // Per-link seq tracking: curLink is the link this payload arrived on (set above
+  // from hostId), so a normal payload binds to that Mac's own high-water marks in
+  // hostLinks[]; curLink < 0 (no hostId - a legacy host) falls back to the bare
+  // globals. Without this split, two Macs sharing one pair of marks would see each
+  // other's seq as a backwards jump on nearly every tick - see the HostLink comment.
+  long &vSeq = (curLink >= 0) ? hostLinks[curLink].voiceSeq : voiceSeq;
+  long &vSeqShown = (curLink >= 0) ? hostLinks[curLink].voiceSeqShown : voiceSeqShown;
   if (!v.isNull()) {
     int seq = v["seq"] | 0;
     // The host's voiceSeq is HOST-LIFETIME: it restarts at 1 when the host does. Held
@@ -3092,9 +3108,9 @@ void handleLine(const String& line) {
     // until the new host's counter climbed past the old one - so a restart silently
     // disabled the result card and left a processing bar with nothing to end it. A seq
     // going BACKWARDS is that restart, and the only sane reading is a fresh generation.
-    if (seq < voiceSeq) {
-      voiceSeq = 0;
-      voiceSeqShown = 0;
+    if (seq < vSeq) {
+      vSeq = 0;
+      vSeqShown = 0;
     }
     copyField(voiceState, sizeof(voiceState), v["state"] | "");
     copyField(voiceText, sizeof(voiceText), v["text"] | "");
@@ -3109,7 +3125,7 @@ void handleLine(const String& line) {
       if (micProcessing && !micProcConfirmed) {
         micProcConfirmed = true;   // tickMicProcessing repaints on the title change
       }
-    } else if (micProcessing && voiceState[0] && seq > voiceSeq) {
+    } else if (micProcessing && voiceState[0] && seq > vSeq) {
       // Any other state on a NEW exchange is the outcome, so the bar's job is over.
       // Cleared BEFORE the card logic below, so the bar can never sit on top of
       // whatever replaces it.
@@ -3117,8 +3133,8 @@ void handleLine(const String& line) {
       micProcConfirmed = false;
       barNeedsClearing = true;
     }
-    if (seq > voiceSeq) {
-      voiceSeq = seq;
+    if (seq > vSeq) {
+      vSeq = seq;
       // "heard"/"askheard" are transient (the transcript, before dispatch or
       // before the confirm screen takes over); show the card on the states
       // that are worth interrupting for. "askerror"/"asksent" are included so
@@ -3131,12 +3147,12 @@ void handleLine(const String& line) {
       // "COPIED - PASTE IT" label for it the whole time that the raise path could
       // never reach. Same class as the askerror/asksent omission above: a state
       // published by the host and surfaced nowhere.
-      if (!kbActive && seq > voiceSeqShown &&
+      if (!kbActive && seq > vSeqShown &&
           (!strcmp(voiceState, "sent") || !strcmp(voiceState, "done") ||
            !strcmp(voiceState, "memo") || !strcmp(voiceState, "clip") ||
            !strcmp(voiceState, "error") ||
            !strcmp(voiceState, "askerror") || !strcmp(voiceState, "asksent"))) {
-        voiceSeqShown = seq;
+        vSeqShown = seq;
         voiceCardActive = true;
         showingDetail = false;   // the card owns the content area
         drawVoiceCard();
