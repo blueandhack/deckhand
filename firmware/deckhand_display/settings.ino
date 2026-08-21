@@ -141,6 +141,32 @@ void renderStatusPage() {
   }
   drawIfChanged(battRowTextCache, sizeof(battRowTextCache), buf, CARD_X + CARD_W - PAD,
                 DEV_CARD_Y + DROW_BATT + 4, 1, 1, rowCol, COLOR_CARD, TR_DATUM);
+  renderMacLinkRows();
+}
+// Per-Mac, because the footer can only carry ONE "Xs ago" and it shows the
+// freshest link - which would otherwise let a silent second Mac look live.
+// Two fixed row SLOTS (DROW_MAC0/DROW_MAC1), filled by however many links
+// are actually used, compacted to the top - so with only one Mac connected
+// its row always lands in slot 0, never leaving an empty slot 0 above it.
+void renderMacLinkRows() {
+  int used[MAX_LINKS], usedN = 0;
+  for (int i = 0; i < MAX_LINKS; i++) if (hostLinks[i].used) used[usedN++] = i;
+  for (int row = 0; row < MAX_LINKS; row++) {
+    char buf2[32] = "";
+    if (row < usedN) {
+      HostLink& hl = hostLinks[used[row]];
+      unsigned long age = (millis() - hl.lastPayloadMillis) / 1000;
+      const char* who = hl.tag[0] ? hl.tag : hl.hostId;
+      snprintf(buf2, sizeof(buf2), "Mac  %s  %lus ago", who, age);
+    }
+    // Pad even the blank (unused) case to the SAME fixed width - see the
+    // macRowCache comment for why that's what makes a row actually erase
+    // when its Mac drops off, rather than just stop updating.
+    padTo(buf2, sizeof(buf2), MAC_ROW_W);
+    int y = DEV_CARD_Y + (row == 0 ? DROW_MAC0 : DROW_MAC1);
+    drawIfChanged(macRowCache[row], sizeof(macRowCache[row]), buf2, CARD_X + PAD,
+                  y, 1, 1, COLOR_VALUE, COLOR_CARD);
+  }
 }
 // ----- Page 1: CONTROLS -----
 void drawControlsPageStatic() {
@@ -407,6 +433,10 @@ void resetSettingsCaches() {
   battRowColorCache = 0;
   brightPctCache[0] = '\0'; sleepValCache[0] = '\0'; volValCache[0] = '\0';
   for (int i = 0; i < 6; i++) stepGlyphCache[i] = -1;
+  // Without this a page repaint (e.g. PAGE away and back) leaves both Mac
+  // rows BLANK - drawSettingsStatic() clears the chrome they're drawn on but
+  // drawIfChanged sees an unchanged cached string and skips redrawing it.
+  for (int i = 0; i < MAX_LINKS; i++) macRowCache[i][0] = '\0';
 }
 void gotoSettingsPage(int p) {
   settingsPage = (p + SETTINGS_PAGES) % SETTINGS_PAGES;

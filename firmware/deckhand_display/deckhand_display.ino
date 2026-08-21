@@ -2118,8 +2118,16 @@ const int STEP_BTN_SIZE = 44;   // +/- keys: 4px OVER TAP_MIN, not merely at it
 
 // Page 0 - DEVICE card
 const int DEV_CARD_Y = PAGE_TOP + 4;
-const int DEV_CARD_H = 120;
+// 160, not 120: +40 makes room for up to MAX_LINKS per-Mac rows below ID (see
+// DROW_MAC0/DROW_MAC1) at the same 20px gap ID already uses below BATT, plus
+// the same ~7px clearance ID itself leaves above the card's own border.
+const int DEV_CARD_H = 160;
 const int DROW_BT = 24, DROW_USB = 52, DROW_BATT = 80, DROW_ID = 100;
+// Per-Mac link rows (see renderMacLinkRows() in settings.ino). Two fixed row
+// SLOTS, not one per hostLinks[] index - the renderer compacts to however
+// many links are actually used, so a single remaining Mac always draws in
+// the first slot rather than leaving a gap where the other one used to be.
+const int DROW_MAC0 = 120, DROW_MAC1 = 140;
 
 // Page 1 - three steppers + a row of three toggles.
 //
@@ -2188,6 +2196,16 @@ int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
 // silently stops noticing changes - headroom here is cheaper than that bug.
 char battRowTextCache[20] = "";
 uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
+// Per-Mac link rows. "Mac  feedfeed  999s ago" (a bare 11-char hostId with no
+// tag, plus a generously wide age) is 26 chars - MAC_ROW_W pads to 28 and the
+// cache is 32, comfortably over both, so nothing here repeats the too-short-
+// cache bug. Indexed by ROW SLOT (0/1), not by hostLinks[] index - see
+// renderMacLinkRows(). Padding every row to this SAME fixed width, used or
+// not, is what makes a row that goes away actually get erased: drawIfChanged
+// clears a box sized to the NEW text, so an unpadded "" would leave a wide
+// stale row un-erased instead of blanking it.
+const int MAC_ROW_W = 28;
+char macRowCache[MAX_LINKS][32] = {"", ""};
 int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
 int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+
 char brightPctCache[8] = "";
