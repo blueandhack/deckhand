@@ -3075,13 +3075,35 @@ int bleFrameSlot = -1;
 // queued mid-recording would otherwise sit unreaped for the whole blocking
 // call, turning a millisecond window into up to two minutes.
 void reapBleLinks() {
+  bool freedAny = false;
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!bleLinks[i].releasePending) continue;
     bleLinks[i].buf = "";
     bleLinks[i].releasePending = false;
     bleLinks[i].used = false;
     if (bleFrameSlot == i) bleFrameSlot = -1;
+    freedAny = true;
   }
+  // Re-advertise here too, not just from onDisconnect - this is what actually
+  // recovers a refusal that happened during a blocking loop. onDisconnect no
+  // longer advertises on a refusal (round 3), deferring to the loop()
+  // watchdog instead - but the watchdog is IN loop(), which a blocking call
+  // (micStream up to 120s, micMonitor up to 180s, runCalibration waiting on a
+  // person) starves for its entire duration. Putting the recovery here
+  // instead puts it on the same code path that creates the opportunity (a
+  // slot going from pending to actually free), so it fires identically
+  // whether reapBleLinks() was called from drainBleRx() or from one of those
+  // other loops. Gated on freedAny so the common no-op call (nothing
+  // pending) costs nothing beyond the loop above.
+  //
+  // This does mean an ORDINARY disconnect advertises TWICE - once
+  // immediately from onDisconnect (the slot resolves there, so it still
+  // advertises right away, which is what keeps the ~50-60ms reconnect fast),
+  // and again here on the very next reap. That's deliberate, not a bug to
+  // dedupe: BLEDevice::startAdvertising() while already advertising is a
+  // harmless no-op, and removing the "redundant" call here to "clean it up"
+  // would take the blocking-path recovery with it.
+  if (freedAny && bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
 }
 void drainBleRx() {
   static uint8_t hdr[4];
@@ -3498,6 +3520,17 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       handleLine(buf);
     }
   }
+  // When buf is bleLinks[i].buf (a BLE line), this can now race a slot's own
+  // reap-and-reclaim: reapBleLinks() can free this same slot (buf = "") and
+  // onConnect() can immediately reassign it to a new central (another
+  // buf = "") while this call is still unwinding after handleLine() above -
+  // a new interleaving that round 3's mid-transfer reap made possible.
+  // Benign today, and only because both sides are writing an EMPTY string
+  // into a String that's already allocated: no free, no realloc, just two
+  // stores of the same zero-length state landing in either order. Whoever
+  // next adds a field to BleLink - or changes what this line assigns -
+  // needs to re-examine this, because that assumption is exactly what would
+  // stop holding.
   buf = "";
 }
 
