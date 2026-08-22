@@ -34,6 +34,21 @@
 // wake with it held low lands the chip in the serial bootloader and the device
 // looks bricked. So on this board deep sleep is exited by RESET, and every
 // farewell screen says exactly that instead of promising a touch.
+//
+// READ THE NAME PRECISELY: this says nothing about LIGHT sleep, and the
+// distinction is a real one that the first version of this comment blurred.
+// esp_sleep_enable_gpio_wakeup() (esp_sleep.h) is NOT behind
+// SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP and accepts ANY IO, GPIO47 included - so a
+// light-sleep idle WOULD wake on touch here. That matters more than it sounds:
+// the backlight is ~93% of this device's draw and light sleep removes it too, so
+// most of what auto-sleep was for is reachable without deep sleep at all.
+// Auto-sleep is currently gated off this flag (see the loop() call site), which
+// is therefore MORE conservative than the silicon requires - a deliberate
+// stopping point for this port rather than a limit. Restoring an idle sleep on
+// this board means light sleep plus gpio_wakeup_enable(PIN_TOUCH_INT,
+// GPIO_INTR_LOW_LEVEL), and it needs its own pass: light sleep interacts with
+// the USB CDC link the host talks over, with NimBLE's connection timing, and
+// with the millis() the whole UI schedules on, none of which this port measured.
 #define BOARD_HAS_TOUCH_SLEEP_WAKE 0
 
 // The ST77922 takes RGB565 HIGH BYTE FIRST, while the shadow framebuffer holds

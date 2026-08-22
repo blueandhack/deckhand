@@ -212,6 +212,17 @@ static_assert((BOARD_W - 24) / 6 == 36,
 static_assert((HIST_JUMP_Y - 4 - HIST_TOP) / HIST_LINE_H == 16,
               "board 1's reader line count no longer matches HIST_PAGE_LINES in "
               "host/index.mjs - see the note above");
+#else
+// Board 2 SENDS its budget, so it cannot disagree with the host's default - but
+// it can still outgrow the arena, and until now that margin lived only in a
+// comment. Board 1 gets two asserts and board 2 got none, which is backwards:
+// board 2 is the board whose geometry is new. A page is at most
+// (cols + 1) * lines bytes of text including each line's NUL.
+static_assert(((BOARD_W - 24) / 6 + 1) * ((HIST_JUMP_Y - 4 - HIST_TOP) / HIST_LINE_H)
+                  <= HIST_ARENA,
+              "board 2's reader page can no longer fit HIST_ARENA - the tail-drop "
+              "would silently truncate every full page instead of this failing the "
+              "build; either raise HIST_ARENA or reduce the reader's geometry");
 #endif
 void requestHistory(int idx, const char* want) {
   if (idx < 0 || idx >= sessionCount) return;

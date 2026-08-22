@@ -19,7 +19,7 @@ that differs and why; this section is only how to build each.
 | serial | CH340, `/dev/cu.usbserial-*`, 11.5KB/s ceiling | native USB CDC, `/dev/cu.usbmodem*` |
 | mic / beeper | both fitted and working | codec present, **software path not written** |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
-| size today | flash 1382802, RAM 69236 | flash 892134, RAM 57860 |
+| size today | flash 1382802, RAM 69236 | flash 892062, RAM 57860 |
 
 **Board 1's binary is BYTE-IDENTICAL across the whole second-board port, and that is the check
 that kept the port honest** — 1382802 flash / 69236 RAM. It is not ceremony: it caught a real
@@ -105,6 +105,17 @@ dead because an upload failed would be worse than the problem it solves. It hand
 a supervised host and a hand-started one. `./flash.sh --no-compile` skips the ~3min build, and
 `./flash.sh --board 2` flashes board 2 — same stop-host/upload/restore-host dance, a different
 FQBN and port glob. `--board` defaults to 1 so every existing habit keeps working.
+
+**NEVER compile both boards concurrently.** Two boards make "check both at once" the obvious
+move and it corrupts the build: `arduino-cli` derives its sketch build directory from the
+sketch PATH, so two FQBNs of the same sketch share one cache and overwrite each other's
+objects. The first symptom is honest enough - `fatal error: opening dependency file
+.../esp_lcd_panel_io_3wire_spi.c.libsdetect.d: No such file or directory` - but the second is
+not: the next board-2 build linked board 1's world, failing on undefined `TFT_eSprite`,
+`TFT_eSPI::fillRect` and Bluedroid `esp_ble_gatts_cb_param_t` symbols, which reads exactly
+like `board.h` having selected the wrong header. It has not; the cache has. Compile them one
+after the other, and if you see TFT_eSPI or Bluedroid symbols undefined in a board-2 link,
+`rm -rf ~/Library/Caches/arduino/sketches/<hash>` before believing anything else.
 
 The hazard it hides, for when it is not used: KeepAlive re-grabs `/dev/cu.usbserial-*`
 within a second of the process dying, so a bare `arduino-cli upload` fails on a busy port

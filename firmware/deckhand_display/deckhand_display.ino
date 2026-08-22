@@ -3598,6 +3598,19 @@ class BLEServerCallbacksImpl : public BLEServerCallbacks {
   // form as well); this fallback only re-asserts the advertising gate, it does
   // not cover release.
   void onDisconnect(BLEServer* server) {
+    // HONEST ABOUT ONE THING THE REFUSAL PATH'S COMMENT OVERSTATES. Elsewhere
+    // this file says a refused third central does NOTHING further - no
+    // advertise, no state touched - because refuse -> advertise -> onConnect
+    // storms. That is true of the refusal itself, but the refusal calls
+    // server->disconnect(), which lands HERE, and this does advertise. So a
+    // refusal caused by a slot that is still releasePending can resume
+    // advertising after all.
+    // It is bounded rather than benign by luck: reapBleLinks() frees that slot
+    // within one loop() iteration, so at worst one extra advertise happens and
+    // the next connect finds a real slot. Left as-is deliberately - suppressing
+    // it would need this callback to know WHY it was called, which the library
+    // does not tell it, and the 5s advertising watchdog is what actually
+    // guarantees recovery either way.
     if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
 };
