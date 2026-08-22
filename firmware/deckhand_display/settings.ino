@@ -326,11 +326,21 @@ void drawActionsPageStatic() {
   // Four buttons, one component, escalating intent: accent = safe,
   // warn = changes pairing, bad = powers the device down. MIC TEST leads because
   // it is the only one you might run repeatedly (it is how you set the trimmer).
+#if BOARD_HAS_MIC
   uiButton(CARD_X, P2_MIC_Y,  CARD_W, P2_BTN_H, "MIC TEST",        COLOR_ACCENT);
+#endif
   uiButton(CARD_X, P2_CAL_Y,  CARD_W, P2_BTN_H, "CALIBRATE TOUCH", COLOR_ACCENT);
   uiButton(CARD_X, P2_PAIR_Y, CARD_W, P2_BTN_H, "RESET PAIRING",   COLOR_WARN);
   uiButton(CARD_X, P2_PWR_Y,  CARD_W, P2_BTN_H, "POWER OFF",       COLOR_BAD);
+  // The hint has to match what the chip can actually do, the same rule the
+  // farewell screens and the standalone screen already follow: a board that
+  // cannot wake on touch must not promise one, because that reads as broken
+  // firmware where the truth reads as a device that told you.
+#if BOARD_HAS_TOUCH_SLEEP_WAKE
   uiHint("power off = deep sleep, touch to wake", P2_PWR_Y + P2_BTN_H + SP_3);
+#else
+  uiHint("power off = deep sleep, RESET to wake", P2_PWR_Y + P2_BTN_H + SP_3);
+#endif
 }
 // ----- Page 3: paired Macs -----
 // Status is never colour-alone: the chosen
@@ -440,8 +450,15 @@ void drawPendingConfirm() {
                   "every paired Mac is forgotten", "RESET", COLOR_WARN);
       break;
     case CFM_POWER_OFF:
+      // A confirm dialog's entire job is stating the consequence, so this is the
+      // last place that may describe a wake this silicon cannot perform.
+#if BOARD_HAS_TOUCH_SLEEP_WAKE
       drawConfirm("Power off?", nullptr,
                   "deep sleep - touch the screen to wake", "POWER OFF", COLOR_BAD);
+#else
+      drawConfirm("Power off?", nullptr,
+                  "deep sleep - press RESET to wake", "POWER OFF", COLOR_BAD);
+#endif
       break;
     default: break;
   }
@@ -597,6 +614,7 @@ void handleSettingsTouch(int sx, int sy) {
     // and exits on a tap; the dialog is reserved for consequential actions, and
     // putting one here would just be a tap in the way of the thing you are doing
     // repeatedly while turning the trimmer.
+#if BOARD_HAS_MIC
     if (sy >= P2_MIC_Y && sy < P2_MIC_Y + P2_BTN_H) {
       micMonitor();
       // micRestoreUi() falls back to the "waiting for host" screen when no payload
@@ -608,6 +626,13 @@ void handleSettingsTouch(int sx, int sy) {
     // The other three ask first: recalibrating costs 5 taps, resetting pairing
     // wipes every key, and powering off interrupts the display.
     else if (sy >= P2_CAL_Y && sy < P2_CAL_Y + P2_BTN_H) {
+#else
+    // No MIC TEST branch at all on this board, so the chain opens on CALIBRATE.
+    // The button is not drawn and P2_CAL_Y has moved up into the slot it would
+    // have used, so a `sy >= P2_MIC_Y` test here would claim taps belonging to
+    // whatever now sits there.
+    if (sy >= P2_CAL_Y && sy < P2_CAL_Y + P2_BTN_H) {
+#endif
       pendingConfirm = CFM_RECAL;         drawPendingConfirm();
     } else if (sy >= P2_PAIR_Y && sy < P2_PAIR_Y + P2_BTN_H) {
       pendingConfirm = CFM_RESET_PAIRING; drawPendingConfirm();

@@ -2282,8 +2282,19 @@ const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
 // board.h): board 1's button height had to come DOWN to 38 to fit four of them
 // and a hint, where board 2's is H_BTN. Going to five buttons would need a page
 // of its own on either board rather than shrinking these further.
+#if BOARD_HAS_MIC
 const int P2_MIC_Y = PAGE_TOP + P2_TOP;
 const int P2_CAL_Y = P2_MIC_Y + P2_BTN_H + P2_GAP;
+#else
+// No capture path on this board, so no MIC TEST button - and no slot reserved
+// for one either. The three remaining actions move UP rather than leaving a
+// 50px hole at the top of the page, the same reason tabsW() reclaims the record
+// slot when fabVisible() is compiled out. Gating the CHAIN here rather than the
+// four draw sites and four hit tests is what keeps those eight call sites
+// identical on both boards - and keeps the button and its touch zone from ever
+// disagreeing, which is the failure mode a per-site #if invites.
+const int P2_CAL_Y = PAGE_TOP + P2_TOP;
+#endif
 const int P2_PAIR_Y = P2_CAL_Y + P2_BTN_H + P2_GAP;
 const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
 
