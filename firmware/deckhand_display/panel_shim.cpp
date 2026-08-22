@@ -296,7 +296,17 @@ void PanelShim::flush() {
   if (!_fb || !_lcd || !_stripBuf) return;
   if (_dirtyX1 < _dirtyX0) return;   // nothing dirty
 
-  int x0 = _dirtyX0, y0 = _dirtyY0, x1 = _dirtyX1, y1 = _dirtyY1;
+  // SNAP X OUTWARD TO A MULTIPLE OF 4. The ST77922 panel driver wants both
+  // x_start and width 4-aligned and warns per call when they are not - which on
+  // a change-only UI is one warning per field per tick, i.e. a log the real
+  // device lines drown in. Snapping OUT can only ever redraw a few extra pixels
+  // that already hold the correct contents, where snapping in would clip the
+  // edge column of whatever just changed. Y needs no alignment: the driver only
+  // constrains the horizontal axis, which is the one the QSPI transfer packs.
+  int x0 = _dirtyX0 & ~3;
+  int y0 = _dirtyY0, y1 = _dirtyY1;
+  int x1 = (_dirtyX1 | 3);
+  if (x1 >= PANEL_PHYS_W) x1 = PANEL_PHYS_W - 1;   // never past the panel
   int w = x1 - x0 + 1;
 
   for (int y = y0; y <= y1; y += FLUSH_STRIP_LINES) {

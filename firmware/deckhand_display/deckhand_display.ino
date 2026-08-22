@@ -1119,7 +1119,14 @@ static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0
 // chunks to 144 bytes; here a row IS the natural unit, so the host can rebuild
 // the image without tracking offsets.
 void shotDumpBase64(const uint8_t* data, size_t n) {
-  char line[660];                       // 480 bytes -> 640 chars + NUL
+  // SIZED FROM BOARD_W, never a literal. This was `char line[660]` - "480 bytes
+  // -> 640 chars + NUL", correct for a 240px row and a STACK SMASH on a 320px
+  // one: 640 bytes encode to 856 chars, so it overran by 197 bytes and the
+  // SCREENSHOT never returned. It presented as the capture silently never
+  // finishing - "SHOT begin" logged, no rows, no "SHOT end", and not even
+  // finishShot()'s own incomplete warning, because the function it would have
+  // been called from had already destroyed its own frame.
+  char line[(BOARD_W * 2 + 2) / 3 * 4 + 1];
   int o = 0;
   for (size_t i = 0; i < n; i += 3) {
     uint32_t v = (uint32_t) data[i] << 16;
@@ -4138,12 +4145,18 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // 20000000: four known colours read back bit-identical. readRect() pulls a
     // whole row in one transaction, which is what makes this practical.
     //
-    // 240x320x2 = 153600 bytes -> ~205KB of base64 -> ~18s at 115200. It blanks
+    // Board 1: 240x320x2 = 153600 bytes -> ~205KB of base64 -> ~18s at 115200.
+    // Board 2 is 320x480x2 = 307200 -> ~410KB, but over native USB CDC rather
+    // than a CH340 capped at 11.5KB/s, so it is far quicker there. It blanks
     // nothing and draws nothing, so what lands on the Mac is exactly what was on
     // the screen when the command arrived.
     Serial.printf("SHOT begin w=%d h=%d fmt=rgb565\n", tft.width(), tft.height());
-    static uint16_t rowBuf[240];
-    static uint8_t  rowBytes[480];
+    // Both sized from BOARD_W for the same reason shotDumpBase64's line buffer
+    // is: at 240 and 480 these are exactly one board-1 row, and readRect writes
+    // tft.width() pixels regardless - so on a 320px panel they overran by 160
+    // u16 and 160 bytes into whatever .bss sat after them.
+    static uint16_t rowBuf[BOARD_W];
+    static uint8_t  rowBytes[BOARD_W * 2];
     for (int y = 0; y < tft.height(); y++) {
       // No touch poll in this loop to ride alongside, so reap on its own -
       // once per row (~56ms apart over ~18s total) is cheap and frequent.
