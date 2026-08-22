@@ -230,8 +230,10 @@ void renderControlsPage() {
   // Only BRIGHTNESS gets a bar. It is the one continuous 0-100 setting, so the
   // bar says where in the range you are; sleep and volume are discrete presets
   // where the label already says that, and a bar would be decoration.
-  drawBar(&brightBarCache, CARD_X + PAD + STEP_BTN_SIZE + 10, P1_BRIGHT_Y + STEP_BAR_Y,
-          CARD_W - 2 * (PAD + STEP_BTN_SIZE + 10), 6, brightnessPct, COLOR_ACCENT);
+  drawBar(&brightBarCache, CARD_X + PAD + STEP_BTN_SIZE + STEP_BAR_GAP,
+          P1_BRIGHT_Y + STEP_BAR_Y,
+          CARD_W - 2 * (PAD + STEP_BTN_SIZE + STEP_BAR_GAP), STEP_BAR_H,
+          brightnessPct, COLOR_ACCENT);
   drawStepGlyph(0, CARD_X + PAD, stepBtnY(P1_BRIGHT_Y), "-", brightnessPct > BRIGHTNESS_MIN);
   drawStepGlyph(1, rightBtnX, stepBtnY(P1_BRIGHT_Y), "+", brightnessPct < 100);
 

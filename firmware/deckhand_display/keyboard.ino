@@ -6,41 +6,25 @@
 // in its SIGNATURE, which is what would break the auto-generated prototypes.
 //
 // It owns the WHOLE screen - tab bar and footer included - the way the history
-// reader does. That is not cosmetic: it is what makes QWERTY viable on a 240px
-// panel. The drawn key is 22x40 (KB_ROW_H - 4) either way - what going
-// full-screen buys is the TOUCH target, which is the whole 22x44 row (kbTouch
-// tests the full row band, not just the drawn rect): 968px2 against 880 in the
-// content area, where the row itself would have to shrink with it.
+// reader does. That is not cosmetic: it is what makes QWERTY viable on a panel
+// this narrow. The DRAWN key is KB_KEY_W x (KB_ROW_H - 4) - 22x40 on board 1,
+// 30x54 on board 2 - while kbTouch() tests the whole KB_KEY_W x KB_ROW_H row
+// band, not just the drawn rect. THAT is what going full-screen buys: 22x44 =
+// 968px2 against 880 in board 1's ordinary content area, and 30x58 = 1740 here.
+// The two are kept as separate numbers on both boards rather than collapsed.
 
-const int KB_PITCH  = 24;      // 10 * 24 = 240, exactly the panel width
-const int KB_KEY_W  = 22;      // 2px of the pitch is the gap
-const int KB_ROW_H  = 44;      // 4px over TAP_MIN (40), not merely at it
-// Text card layout, fixed round 2: HARD-wrapped at exactly KB_COLS (34) columns,
-// not drawWrappedText's word wrap. Word wrap can leave as few as 18 of 34
-// columns used on a line (a 17-char word pushes the break back past the
-// half-way point), so 150 bytes could need up to 8 lines by that algorithm -
-// more than this screen has room for. Slicing at a fixed column count makes the
-// budget PROVABLE instead: ceil(150/34) = 5 lines, always. Breaking a word
-// mid-character is fine on a field being actively composed (the security
-// property here is "the human typed it and watched it appear", which a hard
-// wrap satisfies exactly) - it would NOT be fine in the reader or the ask
-// detail screen, which is why drawWrappedText itself is untouched and this
-// keyboard gets its own small draw instead.
-// The byte counter and the countdown both used to sit ON a text row (top-right
-// over line 1, bottom-right over line 6 in the since-reverted 6-line design),
-// and each one's opaque drawString box silently erased whatever text shared its
-// row - found twice, fixed once: both now live in a RESERVED meta row that no
-// text line ever reaches, so there is no shared row left to erase.
-// 4 (top) + 88 (text, 4..92) + 4 (gap) + 176 (4 rows * 44, 96..272) + 4 (gap)
-// + 44 (actions, 276..320) = 320 exactly.
-const int KB_TEXT_Y = 4,   KB_TEXT_H = 88;
-const int KB_COLS = 34;                        // (CARD_W - 12) / 6, Cozette's uniform advance
-const int KB_TEXT_LINES = 5;                   // ceil(KB_MAX_BYTES / KB_COLS)
-const int KB_META_Y  = KB_TEXT_Y + 6;          // 10: byte counter left, countdown right
-const int KB_LINE0_Y = KB_TEXT_Y + 22;         // 26: first hard-wrapped line
-const int KB_LINE_PITCH = 13;                  // line 5 at 78, ends ~90 - 2px inside the card
-const int KB_ROWS_Y = 96;                      // 4 rows * 44 = 176, ends at 272
-const int KB_ACT_Y  = 276, KB_ACT_H = 44;      // ends at 320, 0px spare
+// EVERY KB_* GEOMETRY CONSTANT MOVED TO THE BOARD HEADERS (via board.h), because
+// the whole set is derived from the panel: the key grid from the width, the text
+// card's COLUMN count from CARD_W, and its LINE count from that column count.
+// See the long derivation in board_es3c35p.h - board 1 is 34 columns and 5 lines,
+// board 2 is 47 and 4. KB_MAX_BYTES is the one that stays here and stays shared:
+// it is 150 on the HOST too (ANSWER_TEXT_MAX_BYTES in host/voice-answer.mjs), so
+// only the columns and the resulting line count are per-board.
+//
+// The two derived offsets, kept here so the "meta row shares no pixel row with
+// any text line" invariant is visible next to the code that draws them.
+const int KB_META_Y  = KB_TEXT_Y + KB_META_DY;    // byte counter left, countdown right
+const int KB_LINE0_Y = KB_TEXT_Y + KB_LINE0_DY;   // first hard-wrapped line
 const int KB_MAX_BYTES = 150;                  // must equal the host's cap
 
 // Rows 0-2 are the letter/symbol pages; row 3 is fixed. Control characters stand
@@ -123,8 +107,9 @@ const unsigned long KB_REPEAT_EVERY_MS = 120;   // then ~8 deletions a second
 
 // Peek geometry: it covers the KEYS and the action row, never the text card - so
 // the answer you are composing stays on screen while you re-read the question.
-const int KB_PEEK_Y = KB_ROWS_Y, KB_PEEK_H = 320 - KB_ROWS_Y - 4;
-const int KB_PEEK_LINES = 13;                   // 40..212 inside the card at 13px
+// KB_PEEK_LINES moved to the board headers with the rest of the grid; the height
+// is the panel's, which used to be a hardcoded 320.
+const int KB_PEEK_Y = KB_ROWS_Y, KB_PEEK_H = BOARD_H - KB_ROWS_Y - 4;
 
 bool kbIsMessage() { return kbMessageMode; }
 

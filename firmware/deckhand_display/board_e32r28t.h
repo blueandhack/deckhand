@@ -371,3 +371,148 @@ const int OCTO_W = 240;                  // full width: the crab walks across it
 const int OCTO_H = CRAB_H * 3;           // == CRAB_DRAW_H
 const int OCTO_X = 0;
 const int OCTO_Y = 110;
+
+// ---------- Component heights (moved from deckhand_display.ino) -------------
+// These two are the design system's interactive heights and their own comment
+// there always said "derived from TAP_MIN, not chosen per page" - which makes
+// them per-board by definition, since TAP_MIN is. H_BTN is TAP_MIN + 4 and
+// H_ROW is TAP_MIN exactly. VALUES UNCHANGED: 40 + 4 = 44, and 40.
+const int H_BTN = 44;     // buttons and toggles (pages with room)
+const int H_ROW = 40;     // list rows (the tightest page fits 5 of these)
+
+// ---------- SETTINGS: the stepper card ----------
+// EVERY NUMBER BELOW IS THE LITERAL THAT WAS ALREADY IN deckhand_display.ino (or
+// at its call site in settings.ino) - the section grew names, not values.
+//
+// The card is sized by its CONTENTS, and the content that sets the height is the
+// +/- key: 2 (border) + 4 (air) + 44 (key) + 4 (air) + 2 (border) = 56. The label
+// sits in the MIDDLE column, above the value it names, rather than in the same
+// column as the left key - which is what forced the keys down until they ended
+// flush on the bottom border with no padding at all.
+// Layout inside a 56px card (interior +2..+53): keys +6..+49, label centred +15,
+// value centred +32, and for BRIGHTNESS only a bar at +43..+48.
+const int STEPPER_CARD_H = 56;
+const int STEP_LABEL_CY  = 15;   // label centre, from the card top
+const int STEP_VALUE_CY  = 32;   // value centre (T_HEAD, 18px cell)
+const int STEP_BAR_Y     = 43;   // BRIGHTNESS bar
+const int STEP_BTN_TOP   = 6;    // 4px clear of the 2px border
+const int STEP_BTN_SIZE  = 44;   // +/- keys: 4px OVER TAP_MIN, not merely at it
+// The BRIGHTNESS bar's own thickness and its inset from each key. Both were
+// literals at the drawBar() call site; named here because a wider card wants a
+// thicker bar and the inset is what keeps it clear of the two keys.
+const int STEP_BAR_H     = 6;
+const int STEP_BAR_GAP   = 10;   // between a key's edge and the bar
+
+// ---------- SETTINGS: per-page knobs ----------
+// PAGE 1 IS OVER-SUBSCRIBED ON THIS BOARD, which is why its gap is page-local
+// rather than SP_1. The region runs PAGE_TOP(80)..contentBottom(302) = 222px and
+// the content is 3*STEPPER_CARD_H + H_ROW = 208 of it, leaving 14px for five gaps
+// (top, three between rows, and the one under the bottom row). The bottom one is
+// NOT optional: with SP_1 (4) throughout, the toggle row ended at exactly 302 and
+// sat against the footer, which made MUTE/NORMAL/LIGHT read as part of the status
+// line. Budget: 1 top, 3/3/3 between, 4 below.
+const int P1_TOP = 1;
+const int P1_GAP = 3;
+// PAGE 2: four buttons plus a hint. 38px is under H_BTN because four buttons and
+// a hint would not fit at 44; it is still ~8.5mm on this panel.
+const int P2_TOP   = 12;
+const int P2_BTN_H = 38;
+const int P2_GAP   = 8;
+// The confirm dialog's card. CFM_H holds a centred text block (title T_HEAD 18 +
+// emph T_BODY 13 + up to 2 note lines of 13, with SP_2 between) above a button
+// row of H_BTN + SP_3.
+const int CFM_TOP = 24;          // card top, from PAGE_TOP
+const int CFM_H   = 150;
+
+// ---------- KEYBOARD (moved from keyboard.ino) ----------
+// EVERY NUMBER IS THE LITERAL keyboard.ino ALREADY USED. The keyboard owns the
+// whole screen, and what that buys is the TOUCH target rather than the artwork:
+// the drawn key is KB_KEY_W x (KB_ROW_H - 4) = 22x40 while kbTouch() tests the
+// full 22x44 row - 968px2 against 880 in the ordinary content area.
+//
+// 10 * 24 = 240, exactly the panel width; 2px of the pitch is the gap.
+const int KB_PITCH = 24;
+const int KB_KEY_W = 22;
+// 44 = TAP_MIN + 4, so the DRAWN key (KB_ROW_H - 4 = 40) is exactly TAP_MIN.
+const int KB_ROW_H = 44;
+// THE TEXT CARD'S BUDGET IS ARITHMETIC, and it is what stops SEND signing text
+// that scrolled off the bottom. KB_COLS is the card's text lane divided by
+// Cozette's uniform 6px advance - (CARD_W - 12) / 6 = (216 - 12) / 6 = 34 - and
+// the line count is then ceil(KB_MAX_BYTES / KB_COLS) = ceil(150 / 34) = 5. The
+// wrap is a HARD slice at KB_COLS, deliberately not drawWrappedText's word wrap:
+// word wrap can leave as few as 18 of 34 columns used on a line (a 17-character
+// word pushes the break back past halfway), so 150 bytes could need 8 lines by
+// that algorithm - more than this screen has room for. A fixed column count makes
+// the budget provable instead.
+const int KB_COLS = 34;
+const int KB_TEXT_LINES = 5;                   // ceil(KB_MAX_BYTES / KB_COLS)
+// The card, and the RESERVED META ROW inside it. The byte counter and the
+// countdown used to sit ON a text row, and drawString paints an OPAQUE box the
+// full height of a text line, so each silently erased whatever text shared its
+// row - found twice, fixed once. The meta row and the text lines share no pixel
+// row: meta inks +10..+22, lines at 26/39/52/65/78 (the last ending ~90, 2px
+// inside the card).
+// 4 (top) + 88 (text, 4..91) + 4 (gap) + 176 (4 rows * 44, 96..271) + 4 (gap)
+// + 44 (actions, 276..319) = 320 exactly - this board has no spare row at all.
+const int KB_TEXT_Y  = 4;
+const int KB_TEXT_H  = 88;
+const int KB_META_DY = 6;                      // meta row, from the card top
+const int KB_LINE0_DY = 22;                    // first wrapped line, from the card top
+const int KB_LINE_PITCH = 13;                  // Cozette's cell - text-derived
+const int KB_ROWS_Y = 96;
+const int KB_ACT_Y  = 276;
+const int KB_ACT_H  = 44;                      // == KB_ROW_H
+// The peek overlay's line budget: it covers the keys and the action row (never
+// the text card), so its height is BOARD_H - KB_ROWS_Y - 4 = 220, its text starts
+// +40 inside it and stops 8 short of its bottom - (220 - 48) / 13 = 13.2 -> 13.
+const int KB_PEEK_LINES = 13;
+
+// ---------- HISTORY READER / FULL-SCREEN READER ----------
+// Moved from deckhand_display.ino and from literals in reader.ino. Every value
+// is the one already in use.
+//
+// The header: filter chip on the left, session name beside it, position on the
+// right, then a rule. The chip's TAP band is deliberately larger than the chip
+// (24 tall against 17 drawn, 76 wide against 40) - the same drawn-versus-tested
+// split the keyboard's rows use. Both are under this board's TAP_MIN of 40.
+const int HIST_CHIP_X      = 10;
+const int HIST_CHIP_Y      = 4;
+const int HIST_CHIP_H      = 17;
+const int HIST_CHIP_CY     = 13;   // label centre (4 + 17/2, rounded down)
+const int HIST_CHIP_W_CHAT = 40;
+const int HIST_CHIP_W_ALL  = 32;
+const int HIST_CHIP_TAP_W  = 76;
+const int HIST_CHIP_TAP_H  = 24;
+const int HIST_HDR_TEXT_Y  = 8;    // name (left) and position (right), TL/TR
+const int HIST_RULE_Y      = 22;   // the divider under the header
+const int HIST_TOP         = 28;   // first entry row
+const int HIST_EMPTY_CY    = 130;  // "Asking the Mac..." / "Nothing here"
+const int HIST_LINE_H      = 13;   // Cozette
+// THE SCRUBBER, and its band is where the drawn/tested split matters most: the
+// track is 16 tall and so is its tap band on this board, i.e. 2.8mm - well under
+// TAP_MIN and the tightest control in the reader. It cannot be grown here (the
+// list above it and the control bar below it own every other row), which is why
+// HIST_JUMP_TAP_H exists as a separate name rather than being spelled
+// HIST_JUMP_H twice: board 2 has the rows to make the band a real target while
+// keeping the track a track.
+const int HIST_JUMP_Y      = 248;  // TOP OF THE TAP BAND (the track is centred in it)
+const int HIST_JUMP_H      = 16;   // drawn track
+const int HIST_JUMP_TAP_H  = 16;   // tap band == the track here
+// The control bar: PREV / CLOSE / NEXT, and the reader's text region above it.
+const int READER_CTRL_Y  = 272;
+const int READER_BTN_H   = 42;
+const int READER_TEXT_TOP = 30;
+// Three keys, symmetric: 8 + 70 + 8 + 68 + 8 + 70 + 8 = 240, the middle one 2px
+// narrower so the margins and gaps can all be 8.
+const int READER_BTN_L_X = 8,   READER_BTN_L_W = 70;
+const int READER_BTN_M_X = 86,  READER_BTN_M_W = 68;
+const int READER_BTN_R_X = 162, READER_BTN_R_W = 70;
+// The x boundaries the three touch handlers split on. TWO SETS, because this
+// board has always had two: the history list and the full-entry pager split at
+// 78/156 while the ask reader splits at 82/158. Both merely assign the 8px gap
+// between two keys to a different neighbour, so neither is wrong - but they are
+// inconsistent, and that inconsistency is preserved here rather than fixed,
+// because this board's binary is held byte-identical across the two-board port.
+// Board 2 derives ONE pair from its own key geometry.
+const int HIST_TAP_1   = 78,  HIST_TAP_2   = 156;
+const int READER_TAP_1 = 82,  READER_TAP_2 = 158;

@@ -540,9 +540,9 @@ const int BORDER_CTRL = 1;   // buttons, list rows, pills, chips, pager keys
 
 // TOUCH - TAP_MIN moved to board_e32r28t.h (via board.h), with its comment.
 
-// COMPONENT HEIGHTS - derived from TAP_MIN, not chosen per page.
-const int H_BTN = 44;     // buttons and toggles (pages with room)
-const int H_ROW = 40;     // list rows (the tightest page fits 5 of these)
+// COMPONENT HEIGHTS - derived from TAP_MIN, not chosen per page, which is
+// exactly why H_BTN and H_ROW moved to the board headers (via board.h) with
+// TAP_MIN itself: H_BTN is TAP_MIN + 4 and H_ROW is TAP_MIN.
 
 // TYPE ROLES - which numbered font each kind of text uses, named so intent is
 // obvious at the call site and a change lands everywhere at once.
@@ -963,10 +963,8 @@ int histFrom = 0;             // global index of this page's first row
 int histTotal = 0;            // entries in the whole filtered history
 int histRowY[HIST_MAX + 1];   // y bounds of each drawn row, for hit-testing a tap
 
-const int HIST_TOP = 28;
-const int HIST_JUMP_Y = 248;
-const int HIST_JUMP_H = 16;
-const int HIST_LINE_H = 13;   // Cozette
+// HIST_TOP, HIST_JUMP_Y/H/TAP_H, HIST_LINE_H and the header/chip/control-bar
+// geometry moved to the board headers (via board.h), with their derivations.
 
 
 // ---------- Shared state ----------
@@ -2112,7 +2110,8 @@ bool detailLooksLikeCode(const char* kind, const char* detail) {
 // ---------- Full-screen reader ----------
 // Ebook-style view of the ask's full detail text: the whole screen (tab bar
 // and footer suppressed) plus a chunky control bar - PREV / CLOSE / NEXT.
-const int READER_CTRL_Y = 272;
+// READER_CTRL_Y, READER_BTN_*, READER_TEXT_TOP and the tap-split boundaries
+// moved to the board headers (via board.h).
 
 
 
@@ -2165,22 +2164,10 @@ int settingsPage = 0;
 // board.h) - PAGE_TOP moved with them since DEV_CARD_Y (also moved) is
 // derived from it.
 
-// Tall enough for a label band PLUS a full-size key. The card must be sized by
-// its contents; when the key grew to meet TAP_MIN it no longer fitted under the
-// label and the value text collided with it.
-const int STEPPER_CARD_H = 56;
-// The label used to sit top-left, in the SAME COLUMN as the left key, which is
-// what forced the keys down until they ended flush on the bottom border with no
-// padding at all. Moving it into the middle column - above the value it names -
-// frees the whole interior height for the keys, so they get bigger AND gain 4px
-// of air top and bottom. Layout inside a 56px card (2px border, interior
-// +2..+53): keys +6..+49, label centred +15, value centred +32, and for
-// BRIGHTNESS only a bar at +43..+48.
-const int STEP_LABEL_CY  = 15;   // label centre, from the card top
-const int STEP_VALUE_CY  = 32;   // value centre
-const int STEP_BAR_Y     = 43;   // BRIGHTNESS bar
-const int STEP_BTN_TOP   = 6;    // 4px clear of the 2px border
-const int STEP_BTN_SIZE = 44;   // +/- keys: 4px OVER TAP_MIN, not merely at it
+// STEPPER_CARD_H, STEP_LABEL_CY/VALUE_CY/BAR_Y/BAR_H/BAR_GAP/BTN_TOP/BTN_SIZE
+// moved to the board headers (via board.h). The card is sized by its CONTENTS -
+// specifically by the +/- key, which is TAP_MIN + 4 on both boards - and the
+// label sits in the middle column so the keys own the whole interior height.
 
 // Page 0 - DEVICE card
 // DEV_CARD_Y/H, DROW_BT/USB/BATT/ID and DROW_MAC0/MAC1 moved to
@@ -2188,19 +2175,18 @@ const int STEP_BTN_SIZE = 44;   // +/- keys: 4px OVER TAP_MIN, not merely at it
 
 // Page 1 - three steppers + a row of three toggles.
 //
-// THIS PAGE IS OVER-SUBSCRIBED, so its gaps are page-local rather than SP_1.
-// The region runs PAGE_TOP(80)..contentBottom(302) = 222px, and the content is
-// 3*STEPPER_CARD_H + H_ROW = 208 of it. Neither number can give: 40 is TAP_MIN
-// for the toggles, and the steppers are already 1px from being unable to hold a
-// label plus 40px keys (see STEP_BTN_TOP). That leaves 14px to spread across
-// five gaps - top, three between rows, and the one under the bottom row.
-// The bottom one is NOT optional: with SP_1 (4) throughout, the toggle row ended
-// at exactly 302 and sat against the footer with no separation, which is what
-// made MUTE/NORMAL/LIGHT read as part of the status line. Budget is now 1 top,
-// 3/3/3 between, 4 below - the bottom gap matching the USAGE tab's.
-// Anything added to this page has to come out of those 14px.
-const int P1_GAP = 3;
-const int P1_BRIGHT_Y = PAGE_TOP + 1;
+// ITS GAPS ARE PAGE-LOCAL RATHER THAN SP_1, and on board 1 that is because the
+// page is OVER-SUBSCRIBED: the region runs PAGE_TOP(80)..contentBottom(302) =
+// 222px against 3*STEPPER_CARD_H + H_ROW = 208 of content, and neither number can
+// give (40 is TAP_MIN for the toggles, and the steppers are 1px from being unable
+// to hold a label plus 40px keys). That leaves 14px for five gaps - top, three
+// between rows, and the one under the bottom row. The bottom one is NOT optional:
+// with SP_1 (4) throughout, the toggle row ended at exactly 302 and sat against
+// the footer, which made MUTE/NORMAL/LIGHT read as part of the status line.
+// Board 2's region is 358px against 244 of content, i.e. the same page with
+// surplus rather than a shortage - so the two boards want different numbers for
+// opposite reasons, which is why P1_TOP and P1_GAP live in the board headers.
+const int P1_BRIGHT_Y = PAGE_TOP + P1_TOP;
 const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
 const int P1_VOL_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_GAP;
 const int P1_SOUND_Y = P1_VOL_Y + STEPPER_CARD_H + P1_GAP;
@@ -2212,13 +2198,12 @@ const int P1_THIRD_W = (CARD_W - 16) / 3;
 const int P1_FLIP_X  = CARD_X + P1_THIRD_W + 8;
 const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
 
-// Page 2 - three large action buttons (calibrate, reset pairing, power off)
-// Four buttons now, so the height came down from 46 and the gap from 12. 38px is
-// still ~8.5mm on this panel, comfortably above a fingertip; going to five would
-// need a page of its own rather than shrinking these further.
-const int P2_BTN_H = 38;
-const int P2_GAP = 8;
-const int P2_MIC_Y = PAGE_TOP + 12;
+// Page 2 - four large action buttons (mic test, calibrate, reset pairing, power
+// off) plus a hint. P2_TOP, P2_BTN_H and P2_GAP moved to the board headers (via
+// board.h): board 1's button height had to come DOWN to 38 to fit four of them
+// and a hint, where board 2's is H_BTN. Going to five buttons would need a page
+// of its own on either board rather than shrinking these further.
+const int P2_MIC_Y = PAGE_TOP + P2_TOP;
 const int P2_CAL_Y = P2_MIC_Y + P2_BTN_H + P2_GAP;
 const int P2_PAIR_Y = P2_CAL_Y + P2_BTN_H + P2_GAP;
 const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
@@ -2226,9 +2211,11 @@ const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
 // Page 3 - the Macs this device is paired with. One row each: tap the row to
 // restrict answering to just that Mac (tap again for "any"), tap the X to
 // forget it. The ANY row at the top clears the restriction.
-// Rows use the shared H_ROW. This is the tightest page in the UI - ANY plus 4
-// Macs at H_ROW + SP_1 is exactly the height available, which is what set
-// H_ROW's value in the design system rather than the other way round.
+// Rows use the shared H_ROW (per-board, == TAP_MIN). On board 1 this is the
+// tightest page in the UI - ANY plus 4 Macs at H_ROW + SP_1 is EXACTLY the
+// height available, which is what set H_ROW's value rather than the other way
+// round. Board 2 spends 246 of its 358px region on the same five rows, so the
+// page stops being the binding constraint on H_ROW there.
 const int P3_ANY_Y  = PAGE_TOP + SP_1 / 2;
 const int P3_LIST_Y = P3_ANY_Y + H_ROW + SP_1;
 const int P3_X_W    = 40;   // "forget" hit zone at the right edge (>= a fingertip)
@@ -2240,8 +2227,9 @@ const int P3_X_W    = 40;   // "forget" hit zone at the right edge (>= a fingert
 enum ConfirmAction : uint8_t { CFM_NONE, CFM_FORGET_HOST, CFM_RECAL, CFM_RESET_PAIRING, CFM_POWER_OFF };
 ConfirmAction pendingConfirm = CFM_NONE;
 int pendingArg = -1;    // host slot, for CFM_FORGET_HOST
-const int CFM_Y     = PAGE_TOP + 24;
-const int CFM_H     = 150;
+// CFM_TOP (the card's offset from PAGE_TOP) and CFM_H moved to the board
+// headers (via board.h) - the height is sized by the worst text block it holds.
+const int CFM_Y     = PAGE_TOP + CFM_TOP;
 const int CFM_BTN_Y = CFM_Y + CFM_H - H_BTN - SP_3;
 const int CFM_BTN_W = (CARD_W - 3 * SP_3) / 2;
 const int CFM_NO_X  = CARD_X + SP_3;

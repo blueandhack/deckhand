@@ -517,3 +517,342 @@ const int ASK_READ_BTN_H = 46;
 // clears the band at +50 by 4px.
 const int ASK_BADGE_Y = 54;
 const int ASK_TITLE_Y = 75;
+
+// ---------- Component heights ----------
+// The design system's own note on these two is "derived from TAP_MIN, not chosen
+// per page", which makes them per-board by definition. Board 1: H_BTN = TAP_MIN +
+// 4 = 44, H_ROW = TAP_MIN = 40. The same two relationships against TAP_MIN 46:
+const int H_BTN = 50;     // buttons and toggles
+const int H_ROW = 46;     // list rows - exactly the fingertip floor
+// Consequence outside SETTINGS, and a wanted one: the voice-answer confirm screen
+// (sessions.ino, askVoiceSendY()/askVoiceRedoY()) sizes SEND / RE-RECORD / CANCEL
+// from H_BTN, so those three go 44 -> 50 and clear TAP_MIN, where on board 1 they
+// sit 4px under it.
+
+// ============================================================================
+// SETTINGS - THE FOUR PAGES
+// ============================================================================
+// THE PAGER BAND SETS EVERYTHING BELOW IT, so it is derived first.
+//
+// drawPager() draws its prev/next keys at CONTENT_Y + 4 with height PAGER_H - 8,
+// so the DRAWN key is PAGER_H - 8. Board 1's PAGER_H 42 gives a 34px key - 6.0mm,
+// under its own TAP_MIN of 40, and its own comment records that at 26 these were
+// "the most missed control on the device". With 160 more rows the floor is
+// affordable here, so the key is exactly TAP_MIN and PAGER_H = 46 + 8 = 54. The
+// TAP band is wider than the key in both dimensions on both boards
+// (handleSettingsTouch claims everything above PAGE_TOP, split 45%/45% with a 10%
+// dead band around the title) - that split is panel-relative and needs nothing.
+const int PAGER_H = 54;
+// 60, board 1's 52 held PHYSICALLY (52 / 5.624 * 6.489 = 60.0) - the rule Task 7
+// used for MSG_BTN_W and ASK_READ_BTN_W, and the right one for a control rather
+// than for text. Clearance: the two keys span x 8..67 and 252..311, leaving a
+// 184px title lane for a longest title ("DISPLAY & SOUND") of 90px at Cozette's
+// 6px advance, centred at 160 so it runs 115..205.
+const int PAGER_BTN_W  = 60;
+// 8 (SP_2), from board 1's 6. This is the keys' inset from the panel edge, and it
+// deliberately does NOT match CARD_X (12) - the pager keys sit slightly outside
+// the card lane on both boards, which is what makes the band read as chrome above
+// the page rather than as the page's first row.
+const int PAGER_BTN_X0 = 8;
+const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
+
+// THE PAGE REGION IS PAGE_TOP(104)..contentBottom(462) = 358px, against board 1's
+// 222. THE RHYTHM IS SP_3 (12) ON EVERY PAGE, and the cost is stated rather than
+// hidden: every page is TOP-ALIGNED under the pager and leaves real trailing air
+// (147px on STATUS, 66 on DISPLAY & SOUND, 92 on ACTIONS, 110 on PAIRED MACS with
+// four Macs). The alternative - growing the gaps until the last row lands 8px
+// above the footer, the way the USAGE column does - was rejected on arithmetic,
+// not on taste: it needs a 29px gap inside the STATUS card, whose connection rows
+// are 16 rows tall, and a gap wider than the rows it separates stops reading as
+// one list. 12 is under the shortest row on every page (16 on STATUS), so the
+// same number works on all four and no page invents its own.
+// Why 12 and not the 8 the USAGE column and the detail card use: at 8 the four
+// pages are a small block against the top of a 480px panel with a quarter of it
+// blank below, and 8 is the rhythm INSIDE a card rather than between rows of one.
+
+// ---------- SETTINGS page 0: the DEVICE card ----------
+// SIZED BY ITS CONTENTS, like the stepper card and unlike the USAGE column - it
+// carries six rows and no more, so it is 200 tall in a 358px region.
+//
+// CHECK CLEAR BOXES, NOT GLYPHS, the same discipline the USAGE card is built on.
+// The extents below are what each row actually paints:
+//   - a connection row is drawConnRow(): fillRect(xRight-100, y, 100, 16), i.e.
+//     y..y+15, plus a 13px dot centred at y+8 (y+1..y+15)
+//   - the battery row is that dot plus drawIfChanged at y+4 (TR_DATUM, 13px),
+//     clearing y+3..y+17
+//   - ID and the two Mac rows are 13px lines clearing y-1..y+13
+//
+//   +0..+1     border
+//   +2..+5     pad
+//   +6..+18    "DEVICE" label (13px, drawn at +6)
+//   +19..+30   gap 12
+//   +31..+46   Bluetooth      (DROW_BT)
+//   +47..+58   gap 12
+//   +59..+74   USB            (DROW_USB)
+//   +75..+86   gap 12
+//   +87..+104  Battery        (DROW_BATT: dot +88..+102, reading clear +90..+104)
+//   +105..+116 gap 12
+//   +117..+131 device id      (DROW_ID +118, clear from +117)
+//   +132..+143 gap 12
+//   +144..+158 Mac link row 0 (DROW_MAC0 +145)
+//   +159..+170 gap 12
+//   +171..+185 Mac link row 1 (DROW_MAC1 +172)
+//   +186..+197 gap 12
+//   +198..+199 border                                              = 200
+// The 2px border owns +198..+199 so nothing may end past +197; the last clear
+// ends +185, 12 rows clear. Board 1's equivalent card is 160 with 6px of slack.
+const int DEV_CARD_Y = PAGE_TOP + 12;   // 116
+const int DEV_CARD_H = 200;
+const int DROW_BT = 31, DROW_USB = 59, DROW_BATT = 87, DROW_ID = 118;
+// Two fixed row SLOTS, not one per hostLinks[] index - renderMacLinkRows()
+// compacts to however many links are used, so one remaining Mac always draws in
+// slot 0 rather than leaving a hole where the other one was.
+const int DROW_MAC0 = 145, DROW_MAC1 = 172;
+// 28, UNCHANGED, and this is one of the few numbers that is genuinely NOT
+// panel-derived: it is the width of the DATA. "Mac  feedfeed  999s ago" - a bare
+// 11-character hostId with no tag, plus a generously wide age - is 23 characters,
+// and every row is padded to this same fixed width whether used or not, which is
+// what makes a row that goes away actually get ERASED rather than merely stop
+// updating (the erase box is sized to the padded text). macRowCache is shared at
+// [40]: worst case 28 (text) + 1 (\x01 sentinel) + 2 (icon id) + 1 (NUL) = 32.
+// Lane check: the row starts at CARD_X + PAD = 30 and its erase box is
+// 28*6 + 4 + 13 + 2 = 187 wide, ending at 216 inside a card that runs to 308.
+const int MAC_ROW_W = 28;
+
+// ---------- SETTINGS page 1: the stepper cards ----------
+// THE CARD IS SIZED BY THE KEY, which is the property board 1's rework existed to
+// get: the label moved into the MIDDLE column - above the value it names, clear of
+// both key columns - precisely so the keys own the whole interior height.
+// STEP_BTN_SIZE is TAP_MIN + 4 = 50, the same "4px OVER, not merely at it"
+// relationship board 1 has at 40 + 4 = 44, and 6px of air above and below it
+// (board 1: 4) gives 2 + 6 + 50 + 6 + 2 = 66.
+//
+//   +0..+1    border
+//   +2..+7    air 6
+//   +8..+57   the two +/- keys (STEP_BTN_TOP 8, STEP_BTN_SIZE 50)
+//   +58..+63  air 6
+//   +64..+65  border                                                = 66
+//
+// The MIDDLE COLUMN's own stack, centred in the interior (+2..+63, 62 rows) and
+// horizontally clear of both keys, so it is checked against the card and not
+// against the key band:
+//   +9..+21   label   (STEP_LABEL_CY 15, MC_DATUM, 13px cell)
+//   +22..+24  gap 3
+//   +25..+44  value   (STEP_VALUE_CY 35, MC_DATUM, T_HEAD; drawIfChanged clears
+//                      cy-10..cy+9, i.e. 20 rows for an 18px cell)
+//   +45..+48  gap 4
+//   +49..+56  BRIGHTNESS bar only (STEP_BAR_Y 49, STEP_BAR_H 8)
+// 7 rows of air above the label and 7 below the bar. Every band is disjoint - the
+// value's fat clear box is what makes that worth stating.
+const int STEPPER_CARD_H = 66;
+const int STEP_LABEL_CY  = 15;
+const int STEP_VALUE_CY  = 35;
+const int STEP_BAR_Y     = 49;
+const int STEP_BTN_TOP   = 8;
+const int STEP_BTN_SIZE  = 50;
+// 8, from board 1's 6: physically 1.23mm against 1.07mm, i.e. the bar keeps its
+// thickness while getting 75% longer (140px of lane against 80), the same trade
+// BAR_H makes on the USAGE cards.
+const int STEP_BAR_H     = 8;
+// 10, UNCHANGED. It is the clearance between a key's edge and the bar, and the
+// keys grew by 6 while the card grew by 80 - so this inset is not the constraint
+// on either side. Lane: CARD_X + PAD + 50 + 10 = 90 to 229, against keys at
+// 30..79 and 240..289.
+const int STEP_BAR_GAP   = 10;
+// The page: 3 * 66 + H_ROW(46) = 244 of 358, laid out top-aligned on the 12px
+// rhythm - cards at 116 / 194 / 272 and the toggle row at 350..395, 66px clear of
+// the footer. Board 1 has 14px for the same five gaps and its own comment says
+// neither its cards nor its toggles could give another pixel.
+const int P1_TOP = 12;
+const int P1_GAP = 12;
+// ---------- SETTINGS page 2: the action buttons ----------
+// H_BTN, where board 1 had to drop to 38 because four buttons plus a hint would
+// not fit at 44 - so these are the one control on this page that was UNDER the
+// floor on board 1 and is over it here. 4 * 50 + 3 * 12 = 236, from 116 to 352,
+// with the hint at 364 (inking 358..370, MC_DATUM) and 92px clear below it.
+const int P2_TOP   = 12;
+const int P2_BTN_H = 50;
+const int P2_GAP   = 12;
+// ---------- SETTINGS: the confirm dialog ----------
+// 28, board 1's 24 held physically (24 / 5.624 * 6.489 = 27.7). Top-anchored to
+// PAGE_TOP exactly as board 1 is, deliberately not centred in the page region:
+// the dialog is modal and must land in the same place regardless of which page it
+// was raised from, and three of the four pages have different lengths.
+//
+// CFM_H 160, sized by the block it holds rather than scaled. drawConfirm() lays
+// its three text elements out as ONE BLOCK centred in the space above the button
+// row, so what the height has to hold is the WORST block: title (T_HEAD, 18) +
+// SP_2-2 + emph (T_BODY, 13) + SP_2 + 2 note lines (26) = 71, above
+// H_BTN(50) + SP_3(12).  2 + 71 + 50 + 12 + 2 = 137, and 160 leaves the block 25
+// rows to be centred in (board 1: 150 against a 71px block leaves 21).
+// WORTH KNOWING: no shipping note actually needs two lines on this board. The
+// lane is CARD_W - 2*SP_3 = 272px = 45 characters, and the longest of the four
+// ("its key is deleted; re-pairs over USB", 37 characters = 222px) fits on one -
+// where on board 1's 192px lane three of the four wrapped. The height is still
+// derived for two, because countWrappedLines() decides that at runtime and a
+// future note is not bound by today's strings.
+const int CFM_TOP = 28;
+const int CFM_H   = 160;
+
+// ============================================================================
+// THE ON-SCREEN KEYBOARD
+// ============================================================================
+// TWO THINGS ARE DERIVED HERE AND THE SECOND FOLLOWS FROM THE FIRST: the column
+// count comes from the text card's lane, and the LINE BUDGET comes from the column
+// count. That chain is what stops SEND signing text that scrolled off the bottom,
+// so it is re-derived rather than adjusted.
+//
+//   KB_COLS      = (CARD_W - 12) / 6 = (296 - 12) / 6 = 47.33 -> 47
+//   KB_TEXT_LINES = ceil(KB_MAX_BYTES / KB_COLS) = ceil(150 / 47) = 3.19 -> 4
+//
+// So a wider card costs the card a LINE: board 1 is 34 columns and 5 lines, this
+// board is 47 columns and 4. The caret's furthest reachable position moves with
+// it and is still provable rather than clamped: at kbLen = KB_MAX_BYTES the caret
+// is at line 150 / 47 = 3, column 150 % 47 = 9 - inside the 4 lines the card
+// budgets, at x = CARD_X + 6 + 9*6 = 72.
+//
+// KB_MAX_BYTES IS NOT TOUCHED. It is 150 on the HOST too (ANSWER_TEXT_MAX_BYTES
+// in host/voice-answer.mjs, re-exported for the typed form), so only the columns
+// and the resulting line count move.
+//
+// THE OTHER PAIRING THIS COULD HAVE BROKEN, checked explicitly: the voice-answer
+// confirm screen caps its transcript panel at 8 WORD-wrapped lines
+// (askVoiceTooLong() in sessions.ino, measured against CARD_W - 8), and CLAUDE.md
+// records that cap and the 150-byte one as consistent by arithmetic. A wider lane
+// can only make that cap looser: CARD_W - 8 = 288px = 48 columns here against
+// board 1's 34, so 150 bytes cannot exceed 4 word-wrapped lines even at word
+// wrap's worst case, against a cap of 8. The pairing holds with more headroom,
+// not less, and the shared constant 8 is therefore left alone.
+const int KB_COLS = 47;
+const int KB_TEXT_LINES = 4;
+// THE KEY GRID. 10 columns across 320 gives a 32px pitch, 2px of which is the gap
+// (board 1: 24 and 2) - so the key is 30 wide against board 1's 22, which is the
+// one dimension this panel simply hands over.
+const int KB_PITCH = 32;
+const int KB_KEY_W = 30;
+// KB_ROW_H 58, and the DRAWN key is KB_ROW_H - 4 = 54 while kbTouch() tests the
+// full 30x58 row - the drawn/tested split kept rather than collapsed. Target
+// area: 30 * 58 = 1740px2 against board 1's 22 * 44 = 968.
+//
+// 54 IS CAPPED BY ASPECT, NOT BY THE PANEL, and this is the one place on this
+// board where a control is deliberately NOT grown to the space available. The
+// keyboard's width is fixed by its 10 columns, so every spare row makes the keys
+// taller and thinner; board 1's drawn key is 22x40 = 1:1.82, and 30 * 1.82 = 54.5
+// is therefore the tallest key that is no more elongated than the one this device
+// already ships. Spending the remaining rows on height instead would reach
+// KB_ROW_H 70 (a 30x66 key, 1:2.2) - strips rather than keys. For scale, iOS
+// portrait keys are about 1:1.3.
+const int KB_ROW_H = 58;
+// THE TEXT CARD, and the RESERVED META ROW inside it. drawString paints an OPAQUE
+// box the full height of a text line, so a counter sharing a row with wrapped
+// text silently erases that line's tail - board 1 found this twice before landing
+// on a reserved row, and the invariant is preserved here by construction:
+//   card    +0..+89   (KB_TEXT_Y 12 .. 101, KB_TEXT_H 90)
+//   meta    +8..+20   (KB_META_DY 8  -> y 20..32: byte counter left, countdown right)
+//   gap     +21..+28  (8 rows - board 1 has 3)
+//   line 0  +29..+41  (KB_LINE0_DY 29 -> y 41)
+//   line 1            y 54
+//   line 2            y 67
+//   line 3            y 80..92
+//   pad     +81..+89  (9 rows below the last line, inside the card)
+// The meta row occupies y 20..32 and the first text line starts at y 41, so they
+// share no pixel row with 8 to spare.
+const int KB_TEXT_Y  = 12;
+const int KB_TEXT_H  = 90;
+const int KB_META_DY = 8;
+const int KB_LINE0_DY = 29;
+const int KB_LINE_PITCH = 13;                  // Cozette's cell - text-derived
+// THE VERTICAL BUDGET, and where this board's surplus actually goes. The content
+// is a fixed grid plus a provably 4-line card, so there is nothing here to add:
+//
+//   12 (top margin) + 90 (card) + 68 (break) + 232 (4 rows * 58)
+//   + 12 (gap) + 58 (action row) + 8 (bottom margin) = 480
+//
+// The 68px BREAK between the card and the keys is the surplus, and it is there
+// because every alternative is worse: a taller key exceeds the aspect above, a
+// taller card would carry lines the 150-byte cap can never reach, and a bigger
+// BOTTOM margin would spend the most reachable part of a handheld panel on
+// nothing. It also happens to be the one boundary on this screen that means
+// something - what you are composing, above the tool you compose with.
+const int KB_ROWS_Y = 170;                     // 4 rows * 58 = 232, ending 401
+const int KB_ACT_Y  = 414;                     // 414..471, 8px above the panel edge
+const int KB_ACT_H  = 58;                      // == KB_ROW_H, as on board 1
+// The peek overlay covers the keys and the action row but NEVER the text card, so
+// its height is BOARD_H - KB_ROWS_Y - 4 = 306; its text starts +40 inside it and
+// stops 8 short of the bottom, so (306 - 48) / 13 = 19.8 -> 19 lines against board
+// 1's 13.
+const int KB_PEEK_LINES = 19;
+
+// ============================================================================
+// HISTORY READER / FULL-SCREEN READER
+// ============================================================================
+// THE HEADER. The filter chip is a real control and board 1's is 17px tall with a
+// 24px tap band - 2.6mm and 3.7mm, both far under its own TAP_MIN. Here the chip
+// is drawn at TAP_MIN (46) and its tap band is TAP_MIN + 6, so the drawn/tested
+// split is kept and BOTH sides clear the floor:
+//   chip drawn   y 4..49,  x 12..71 (CHAT) / 12..63 (ALL)
+//   chip tapped  y 0..52,  x 0..95 (the test is `sy <= H`, an inclusive bound)
+//   rule         y 54
+// Chip widths are board 1's 40/32 grown by the same 20px of padding the taller
+// chip wants: "CHAT" is 24px and "ALL" 18px at Cozette's 6px advance, so 60 and
+// 52 leave 18 and 17 either side (board 1: 8 and 7). HIST_CHIP_CY is the label's
+// centre, 4 + 46/2 = 27.
+const int HIST_CHIP_X      = 12;
+const int HIST_CHIP_Y      = 4;
+const int HIST_CHIP_H      = 46;
+const int HIST_CHIP_CY     = 27;
+const int HIST_CHIP_W_CHAT = 60;
+const int HIST_CHIP_W_ALL  = 52;
+const int HIST_CHIP_TAP_W  = 96;
+const int HIST_CHIP_TAP_H  = 52;
+// The session name (left of centre) and the position-in-history (right) sit on one
+// row centred against the chip: a 13px line centred on the chip's own centre (27)
+// starts at 21.
+const int HIST_HDR_TEXT_Y  = 21;
+const int HIST_RULE_Y      = 54;
+const int HIST_TOP         = 60;   // first entry row, 6 below the rule
+// Centred between the rule and the control bar: (54 + 422) / 2 = 238. Board 1's
+// 130 is NOT that midpoint (147) - a literal that predates the control bar - so
+// this is derived rather than carried across.
+const int HIST_EMPTY_CY    = 238;
+const int HIST_LINE_H      = 13;   // Cozette - text-derived, unchanged
+// THE SCRUBBER, and this is where the extra rows buy the most. Board 1's track is
+// 16 tall and its tap band is the same 16 - 2.8mm for the primary navigation of a
+// history that pages to 399 screens - because the list above and the control bar
+// below own every other row. Here the band is TAP_MIN (46) while the TRACK stays
+// 20, drawn centred in the band at HIST_JUMP_Y + (46 - 20) / 2 = 377..396: a
+// full-width 46px filled track would read as a box rather than as a slider, and a
+// 16px one is not a target. On board 1 the two constants are equal and the
+// centring term is zero, so its drawing is unchanged.
+//   band    364..409   (HIST_JUMP_Y, HIST_JUMP_TAP_H)
+//   track   377..396   (HIST_JUMP_H 20)
+// The list stops 4px above the band (HIST_JUMP_Y - 4 = 360), so it runs 60..360 =
+// 23 lines of 13 against board 1's 16.
+const int HIST_JUMP_Y      = 364;
+const int HIST_JUMP_H      = 20;
+const int HIST_JUMP_TAP_H  = 46;
+// The control bar: H_BTN tall, 8px above the panel edge (422 + 50 = 472).
+const int READER_CTRL_Y  = 422;
+const int READER_BTN_H   = 50;
+const int READER_TEXT_TOP = 60;    // = HIST_RULE_Y + 6, same 6 HIST_TOP uses
+// Three keys, symmetric on a 12px margin and a 12px gap, the middle one 1px
+// narrower so the arithmetic closes: 12 + 91 + 12 + 90 + 12 + 91 + 12 = 320.
+const int READER_BTN_L_X = 12,  READER_BTN_L_W = 91;
+const int READER_BTN_M_X = 115, READER_BTN_M_W = 90;
+const int READER_BTN_R_X = 217, READER_BTN_R_W = 91;
+// ONE pair of split boundaries, unlike board 1's two, and derived from the keys
+// above rather than picked: the midpoints of the two 12px gaps between them,
+// (102 + 115) / 2 = 108 and (204 + 217) / 2 = 210.
+const int HIST_TAP_1   = 108, HIST_TAP_2   = 210;
+const int READER_TAP_1 = 108, READER_TAP_2 = 210;
+
+// ---------- Easter-egg crab-walk surface ----------
+// The art does not scale, so only its position is derived: OCTO_H is CRAB_H * 3
+// (== CRAB_DRAW_H) on both boards, and the band is centred vertically - board 1's
+// 110 puts its 108px band at 110..217 on a 320px panel, centre 164 against a
+// panel centre of 160, so "centred" is what that number was reaching for. Here
+// (480 - 108) / 2 = 186.
+const int OCTO_W = 320;                  // full width: the crab walks across it
+const int OCTO_H = CRAB_H * 3;           // == CRAB_DRAW_H
+const int OCTO_X = 0;
+const int OCTO_Y = 186;

@@ -35,18 +35,18 @@ void drawHistory() {
   tft.fillScreen(COLOR_BG);
   // Filter chip, tappable: CHAT (conversation only) <-> ALL (plus commands and results).
   const char* chip = histChatOnly ? "CHAT" : "ALL";
-  int chipW = histChatOnly ? 40 : 32;
-  uiFillRound(10, 4, chipW, 17, 3, COLOR_ACCENT, COLOR_BG);
+  int chipW = histChatOnly ? HIST_CHIP_W_CHAT : HIST_CHIP_W_ALL;
+  uiFillRound(HIST_CHIP_X, HIST_CHIP_Y, chipW, HIST_CHIP_H, 3, COLOR_ACCENT, COLOR_BG);
   setUIFont(1);
   tft.setTextColor(COLOR_BG, COLOR_ACCENT);
   tft.setTextDatum(MC_DATUM);
-  tft.drawString(chip, 10 + chipW / 2, 13);
+  tft.drawString(chip, HIST_CHIP_X + chipW / 2, HIST_CHIP_CY);
   tft.setTextDatum(TL_DATUM);
   setUIFont(1);
   tft.setTextColor(COLOR_ACCENT, COLOR_BG);
   char hdr[40];
   snprintf(hdr, sizeof(hdr), "%s", s.name);
-  tft.drawString(hdr, 10 + chipW + 8, 8);
+  tft.drawString(hdr, HIST_CHIP_X + chipW + 8, HIST_HDR_TEXT_Y);
   // Position in the WHOLE history, not just the page number - with hundreds of pages,
   // "412/628 entries" is what tells you where you are.
   char pg[20];
@@ -54,15 +54,15 @@ void drawHistory() {
   else if (histTotal > 0) snprintf(pg, sizeof(pg), "%d/%d", histFrom + 1, histTotal);
   else snprintf(pg, sizeof(pg), "%d/%d", histPage + 1, histPages);
   tft.setTextDatum(TR_DATUM);
-  tft.drawString(pg, tft.width() - 12, 8);
+  tft.drawString(pg, tft.width() - 12, HIST_HDR_TEXT_Y);
   tft.setTextDatum(TL_DATUM);
-  tft.drawFastHLine(0, 22, tft.width(), COLOR_LABEL);
+  tft.drawFastHLine(0, HIST_RULE_Y, tft.width(), COLOR_LABEL);
 
   if (histPending || histCount == 0) {
     setUIFont(2);
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(histPending ? "Asking the Mac..." : "Nothing here", tft.width() / 2, 130);
+    tft.drawString(histPending ? "Asking the Mac..." : "Nothing here", tft.width() / 2, HIST_EMPTY_CY);
     tft.setTextDatum(TL_DATUM);
   } else {
     int y = HIST_TOP;
@@ -87,27 +87,36 @@ void drawHistory() {
   // the history; the knob shows where you are and roughly how much there is.
   if (histPages > 1) {
     int trackX = 12, trackW = tft.width() - 24;
-    tft.fillRect(trackX, HIST_JUMP_Y, trackW, HIST_JUMP_H, COLOR_CARD);
-    tft.drawRect(trackX, HIST_JUMP_Y, trackW, HIST_JUMP_H, COLOR_LABEL);
+    // HIST_JUMP_Y is the top of the TAP band; the drawn track is centred in it.
+    // The two are equal on board 1 (so this term is zero and its drawing is
+    // unchanged) and differ on board 2, where the band is TAP_MIN while the track
+    // stays a track - a full-width 46px filled rect reads as a box, and a 16px
+    // one is not a target. See HIST_JUMP_TAP_H in the board headers.
+    int trackY = HIST_JUMP_Y + (HIST_JUMP_TAP_H - HIST_JUMP_H) / 2;
+    tft.fillRect(trackX, trackY, trackW, HIST_JUMP_H, COLOR_CARD);
+    tft.drawRect(trackX, trackY, trackW, HIST_JUMP_H, COLOR_LABEL);
     int knobW = trackW / histPages;
     if (knobW < 6) knobW = 6;
     int kx = trackX + (long) (trackW - knobW) * histPage / (histPages - 1);
-    tft.fillRect(kx, HIST_JUMP_Y + 1, knobW, HIST_JUMP_H - 2, COLOR_ACCENT);
+    tft.fillRect(kx, trackY + 1, knobW, HIST_JUMP_H - 2, COLOR_ACCENT);
   }
 
   struct { int x, w; const char* label; bool enabled; } btns[3] = {
-    {8, 70, "< PREV", histPage > 0},
-    {86, 68, "CLOSE", true},
-    {162, 70, "NEXT >", histPage < histPages - 1},
+    {READER_BTN_L_X, READER_BTN_L_W, "< PREV", histPage > 0},
+    {READER_BTN_M_X, READER_BTN_M_W, "CLOSE", true},
+    {READER_BTN_R_X, READER_BTN_R_W, "NEXT >", histPage < histPages - 1},
   };
+  // Disabled ends grey out (same affordance as the steppers). The label's y comes
+  // from READER_BTN_H, not a baked-in half of 42, or a taller chip on a bigger
+  // panel would draw its text near the top.
   for (int i = 0; i < 3; i++) {
     uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
-    uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD, COLOR_BG);
-    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, BORDER_CTRL, c, COLOR_BG);
+    uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, READER_BTN_H, R_MD, COLOR_CARD, COLOR_BG);
+    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, READER_BTN_H, R_MD, BORDER_CTRL, c, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(c, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + 21);
+    tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + READER_BTN_H / 2);
     tft.setTextDatum(TL_DATUM);
   }
 #if !BOARD_USES_TFT_ESPI
@@ -119,7 +128,7 @@ void drawHistory() {
 // Full-entry pager. Same shape as the ask reader: page by tapping, PREV/CLOSE/NEXT below.
 void drawHistFull() {
   int maxW = tft.width() - 24;
-  int textTop = 30;
+  int textTop = READER_TEXT_TOP;
   int visLines = (READER_CTRL_Y - 8 - textTop) / HIST_LINE_H;
   setUIFont(FONT_CODE);
   int totalLines = countWrappedLines(histFull, FONT_CODE, maxW);
@@ -132,30 +141,33 @@ void drawHistFull() {
   setUIFont(1);
   tft.setTextColor(histRoleColor(histFullRole), COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(histRoleLabel(histFullRole), 12, 8);
+  tft.drawString(histRoleLabel(histFullRole), 12, HIST_HDR_TEXT_Y);
   char pg[12];
   snprintf(pg, sizeof(pg), "%d/%d", histFullPage + 1, pages);
   tft.setTextDatum(TR_DATUM);
-  tft.drawString(pg, tft.width() - 12, 8);
+  tft.drawString(pg, tft.width() - 12, HIST_HDR_TEXT_Y);
   tft.setTextDatum(TL_DATUM);
-  tft.drawFastHLine(0, 22, tft.width(), COLOR_LABEL);
+  tft.drawFastHLine(0, HIST_RULE_Y, tft.width(), COLOR_LABEL);
 
   drawWrappedText(histFull, 12, textTop, FONT_CODE, HIST_LINE_H, maxW,
                   histFullPage * visLines, visLines, COLOR_VALUE, COLOR_BG);
 
   struct { int x, w; const char* label; bool enabled; } btns[3] = {
-    {8, 70, "< PREV", histFullPage > 0},
-    {86, 68, "BACK", true},
-    {162, 70, "NEXT >", histFullPage < pages - 1},
+    {READER_BTN_L_X, READER_BTN_L_W, "< PREV", histFullPage > 0},
+    {READER_BTN_M_X, READER_BTN_M_W, "BACK", true},
+    {READER_BTN_R_X, READER_BTN_R_W, "NEXT >", histFullPage < pages - 1},
   };
+  // Disabled ends grey out (same affordance as the steppers). The label's y comes
+  // from READER_BTN_H, not a baked-in half of 42, or a taller chip on a bigger
+  // panel would draw its text near the top.
   for (int i = 0; i < 3; i++) {
     uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
-    uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD, COLOR_BG);
-    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, BORDER_CTRL, c, COLOR_BG);
+    uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, READER_BTN_H, R_MD, COLOR_CARD, COLOR_BG);
+    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, READER_BTN_H, R_MD, BORDER_CTRL, c, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(c, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + 21);
+    tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + READER_BTN_H / 2);
     tft.setTextDatum(TL_DATUM);
   }
 #if !BOARD_USES_TFT_ESPI
@@ -210,7 +222,7 @@ void histGoto(int page) {
   drawHistory();   // shows "Asking the Mac..." until the page lands
 }
 bool handleHistoryTouch(int sx, int sy) {
-  if (sy <= 24 && sx < 76) {             // the filter chip
+  if (sy <= HIST_CHIP_TAP_H && sx < HIST_CHIP_TAP_W) {   // the filter chip
     histChatOnly = !histChatOnly;
     histCount = 0;
     requestHistory(detailIndex, "last"); // page counts differ per filter: start at newest
@@ -218,12 +230,13 @@ bool handleHistoryTouch(int sx, int sy) {
     return true;
   }
   if (sy >= READER_CTRL_Y) {
-    if (sx < 78) histGoto(histPage - 1);
-    else if (sx < 156) exitHistory();
+    if (sx < HIST_TAP_1) histGoto(histPage - 1);
+    else if (sx < HIST_TAP_2) exitHistory();
     else histGoto(histPage + 1);
     return true;
   }
-  if (sy >= HIST_JUMP_Y && sy < HIST_JUMP_Y + HIST_JUMP_H && histPages > 1) {
+  // The TAP band, not the drawn track - see HIST_JUMP_TAP_H.
+  if (sy >= HIST_JUMP_Y && sy < HIST_JUMP_Y + HIST_JUMP_TAP_H && histPages > 1) {
     int trackX = 12, trackW = tft.width() - 24;
     long f = (long) (sx - trackX) * (histPages - 1) / (trackW > 1 ? trackW - 1 : 1);
     histGoto((int) f);
@@ -232,7 +245,7 @@ bool handleHistoryTouch(int sx, int sy) {
   // A tap in the body OPENS the row under the finger, in full. Paging is the buttons and
   // the scrubber - which is the right split, because reading a whole message was the thing
   // the list could not do.
-  if (sy > 22 && histCount > 0 && !histPending) {
+  if (sy > HIST_RULE_Y && histCount > 0 && !histPending) {
     for (int i = 0; i < histCount; i++) {
       if (sy >= histRowY[i] && sy < histRowY[i + 1]) {
         char want[24];
@@ -252,12 +265,12 @@ bool handleHistoryTouch(int sx, int sy) {
 }
 bool handleHistFullTouch(int sx, int sy) {
   if (sy >= READER_CTRL_Y) {
-    if (sx < 78) { if (histFullPage > 0) { histFullPage--; drawHistFull(); } }
-    else if (sx < 156) { histFullActive = false; drawHistory(); }
+    if (sx < HIST_TAP_1) { if (histFullPage > 0) { histFullPage--; drawHistFull(); } }
+    else if (sx < HIST_TAP_2) { histFullActive = false; drawHistory(); }
     else { histFullPage++; drawHistFull(); }
     return true;
   }
-  if (sy > 22) { histFullPage++; drawHistFull(); }   // tap to page, like the ask reader
+  if (sy > HIST_RULE_Y) { histFullPage++; drawHistFull(); }   // tap to page, like the ask reader
   return true;
 }
 void drawReader() {
@@ -270,7 +283,7 @@ void drawReader() {
   uint8_t dFont = isCode ? FONT_CODE : 2;
   int lineH = isCode ? 14 : 18;
   int maxW = tft.width() - 24;
-  int textTop = 30;
+  int textTop = READER_TEXT_TOP;
   int visLines = (READER_CTRL_Y - 8 - textTop) / lineH;
   setUIFont(dFont);
   int totalLines = countWrappedLines(s.askDetail, dFont, maxW);
@@ -285,31 +298,34 @@ void drawReader() {
   tft.setTextDatum(TL_DATUM);
   char hdr[44];
   snprintf(hdr, sizeof(hdr), "%s - %s", s.name, isPerm ? "COMMAND" : (isPlan ? "PLAN" : "QUESTION"));
-  tft.drawString(hdr, 12, 8);
+  tft.drawString(hdr, 12, HIST_HDR_TEXT_Y);
   char pg[10];
   snprintf(pg, sizeof(pg), "%d/%d", readerPage + 1, pages);
   tft.setTextDatum(TR_DATUM);
-  tft.drawString(pg, tft.width() - 12, 8);
+  tft.drawString(pg, tft.width() - 12, HIST_HDR_TEXT_Y);
   tft.setTextDatum(TL_DATUM);
-  tft.drawFastHLine(0, 22, tft.width(), COLOR_LABEL);
+  tft.drawFastHLine(0, HIST_RULE_Y, tft.width(), COLOR_LABEL);
 
   drawWrappedText(s.askDetail, 12, textTop, dFont, lineH, maxW,
                   readerPage * visLines, visLines, COLOR_VALUE, COLOR_BG);
 
   // Control bar: disabled ends grey out (same affordance as the steppers).
   struct { int x, w; const char* label; bool enabled; } btns[3] = {
-    {8, 70, "< PREV", readerPage > 0},
-    {86, 68, "CLOSE", true},
-    {162, 70, "NEXT >", readerPage < pages - 1},
+    {READER_BTN_L_X, READER_BTN_L_W, "< PREV", readerPage > 0},
+    {READER_BTN_M_X, READER_BTN_M_W, "CLOSE", true},
+    {READER_BTN_R_X, READER_BTN_R_W, "NEXT >", readerPage < pages - 1},
   };
+  // Disabled ends grey out (same affordance as the steppers). The label's y comes
+  // from READER_BTN_H, not a baked-in half of 42, or a taller chip on a bigger
+  // panel would draw its text near the top.
   for (int i = 0; i < 3; i++) {
     uint16_t c = btns[i].enabled ? COLOR_ACCENT : COLOR_LABEL;
-    uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, COLOR_CARD, COLOR_BG);
-    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, 42, R_MD, BORDER_CTRL, c, COLOR_BG);
+    uiFillRound(btns[i].x, READER_CTRL_Y, btns[i].w, READER_BTN_H, R_MD, COLOR_CARD, COLOR_BG);
+    uiStrokeRound(btns[i].x, READER_CTRL_Y, btns[i].w, READER_BTN_H, R_MD, BORDER_CTRL, c, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(c, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + 21);
+    tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + READER_BTN_H / 2);
     tft.setTextDatum(TL_DATUM);
   }
 #if !BOARD_USES_TFT_ESPI
@@ -342,12 +358,12 @@ void exitReaderToList() {
 }
 void handleReaderTouch(int sx, int sy) {
   if (sy >= READER_CTRL_Y) {
-    if (sx < 82) {
+    if (sx < READER_TAP_1) {
       if (readerPage > 0) {
         readerPage--;
         drawReader();
       }
-    } else if (sx < 158) {
+    } else if (sx < READER_TAP_2) {
       exitReader();
     } else {
       readerPage++;
