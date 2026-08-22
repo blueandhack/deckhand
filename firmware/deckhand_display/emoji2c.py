@@ -34,8 +34,11 @@ Output format, unlike the Claude-spark/Codex-mark 2bpp-alpha-only masks:
   - MAC_EMOJI_NAMES[]: const char* const, same order as the two planes above.
   - macEmojiIndex(name): defined (not just declared) in the header - the Arduino
     build concatenates every .ino into one translation unit, and this header is
-    included exactly once (from deckhand_display.ino), so a definition here is
-    safe and saves a second file only this sketch would ever include.
+    included exactly once (from deckhand_display.ino), so a definition here
+    saves a second file only this sketch would ever include. Emitted `static`
+    so a second #include (this sketch or a future one) can never collide with
+    it at link time - removing the hazard rather than merely documenting that
+    it hasn't happened yet.
 
 13x13 is not an aesthetic choice: a usage card's label row runs y0+6..y0+19, right
 up against the hero number's own clear box starting at y0+20, and 13 is also the
@@ -261,7 +264,11 @@ def emit_header(names, rgb_all, alpha_all):
     out.append("};")
     out.append("")
     out.append("// Linear scan, not a table: called once per payload (16 entries).")
-    out.append("int macEmojiIndex(const char* name) {")
+    out.append("// static: this header is included exactly once today (from")
+    out.append("// deckhand_display.ino), but a definition with external linkage sitting")
+    out.append("// in a header is a multi-TU hazard waiting for a second #include - static")
+    out.append("// removes that possibility outright rather than merely documenting it.")
+    out.append("static int macEmojiIndex(const char* name) {")
     out.append("  for (int i = 0; i < MAC_EMOJI_COUNT; i++) {")
     out.append("    if (strcmp(name, MAC_EMOJI_NAMES[i]) == 0) return i;")
     out.append("  }")

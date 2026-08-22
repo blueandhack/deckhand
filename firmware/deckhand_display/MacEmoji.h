@@ -439,7 +439,11 @@ const uint8_t MAC_EMOJI_ALPHA[MAC_EMOJI_COUNT * 52] PROGMEM = {
 };
 
 // Linear scan, not a table: called once per payload (16 entries).
-int macEmojiIndex(const char* name) {
+// static: this header is included exactly once today (from
+// deckhand_display.ino), but a definition with external linkage sitting
+// in a header is a multi-TU hazard waiting for a second #include - static
+// removes that possibility outright rather than merely documenting it.
+static int macEmojiIndex(const char* name) {
   for (int i = 0; i < MAC_EMOJI_COUNT; i++) {
     if (strcmp(name, MAC_EMOJI_NAMES[i]) == 0) return i;
   }
