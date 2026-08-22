@@ -32,7 +32,7 @@
 //
 //   node settings-geom-check.mjs             check both boards
 //   node settings-geom-check.mjs --selftest  prove the checker has teeth
-import { cacheSizes, consts, lineH, PANEL, preflight, textWidth } from "./geom-common.mjs";
+import { cacheSizes, consts, DIR, lineH, PANEL, preflight, textWidth } from "./geom-common.mjs";
 import fs from "fs";
 preflight();
 
@@ -47,11 +47,17 @@ const MAX_HOSTS = 4;
 
 // KB_MAX_BYTES is shared with the HOST, so read it from there rather than trust a
 // comment claiming the two agree.
-const HOST_CAP = +fs.readFileSync("../../host/voice-answer.mjs", "utf8")
+// EVERY path here goes through DIR (the same anchor geom-common.mjs uses) and NOT
+// through the cwd. These three were relative, so the checker crashed with ENOENT
+// when run from the repo root - which is exactly how every other checker in this
+// repo is documented to be invoked (`node firmware/deckhand_display/...`). A
+// verification tool that only runs from one directory is a tool people stop
+// running.
+const HOST_CAP = +fs.readFileSync(`${DIR}/../../host/voice-answer.mjs`, "utf8")
   .match(/ANSWER_TEXT_MAX_BYTES\s*=\s*(\d+)/)[1];
-const KB_MAX_BYTES = +fs.readFileSync("keyboard.ino", "utf8")
+const KB_MAX_BYTES = +fs.readFileSync(`${DIR}/keyboard.ino`, "utf8")
   .match(/KB_MAX_BYTES\s*=\s*(\d+)/)[1];
-const HIST_ARENA = +fs.readFileSync("deckhand_display.ino", "utf8")
+const HIST_ARENA = +fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8")
   .match(/HIST_ARENA (\d+)/)[1];
 
 // wrapLineLen() / countWrappedLines(), reimplemented. The 60-character ceiling and

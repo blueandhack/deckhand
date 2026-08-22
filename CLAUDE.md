@@ -4,7 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-Compile and flash the firmware (from the repo root; find the serial port with `ls /dev/cu.usbserial-*`):
+**THERE ARE TWO BOARDS.** Which one a build targets is decided by the **FQBN**, never by a switch
+in the source — `board.h` keys off `CONFIG_IDF_TARGET_ESP32S3`, which the toolchain defines for
+the S3 target and not for the plain ESP32. See **Two boards** under Architecture for everything
+that differs and why; this section is only how to build each.
+
+| | board 1 (the default everywhere) | board 2 |
+|---|---|---|
+| `BOARD_NAME` / header | `E32R28T` / `board_e32r28t.h` | `ES3C35P` / `board_es3c35p.h` |
+| SoC + panel | ESP32 + ILI9341 240x320 SPI | ESP32-S3 + ST77922 320x480 QSPI |
+| draws through | real TFT_eSPI | `PanelShim` + a 300KB PSRAM shadow framebuffer |
+| BLE stack | Bluedroid | NimBLE |
+| touch | XPT2046 resistive, 5-point affine calibration | capacitive, inside the display IC, factory-aligned |
+| serial | CH340, `/dev/cu.usbserial-*`, 11.5KB/s ceiling | native USB CDC, `/dev/cu.usbmodem*` |
+| mic / beeper | both fitted and working | codec present, **software path not written** |
+| flash it | `./flash.sh` | `./flash.sh --board 2` |
+| size today | flash 1382802, RAM 69236 | flash 892134, RAM 57860 |
+
+**Board 1's binary is BYTE-IDENTICAL across the whole second-board port, and that is the check
+that kept the port honest** — 1382802 flash / 69236 RAM. It is not ceremony: it caught a real
+latent bug (moving `TOUCH_CS` into a header included before `<TFT_eSPI.h>` silently switched on
+TFT_eSPI's built-in touch extension, which this board cannot use because the touch controller is
+on a separate SPI bus) and it is the reason four otherwise-good refactors were declined mid-port.
+If you change shared code, compile board 1 and compare those two numbers before believing you
+only touched board 2.
+
+Compile and flash the firmware (from the repo root; find the serial port with `ls /dev/cu.usbserial-*`
+on board 1, `ls /dev/cu.usbmodem*` on board 2):
 
 ```
 arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" firmware/deckhand_display
@@ -19,6 +45,43 @@ board — the default QIO flash mode causes upload failures on it. `PartitionSch
 stack alone is ~700KB+, which pushed the default partition close to full. This project doesn't
 use OTA updates or the SPIFFS partition for anything, so trading that space for a bigger app
 partition is free.
+
+Board 2 (ESP32-S3), where **every FQBN option is load-bearing and two of them fail SILENTLY**:
+
+```
+arduino-cli compile --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashMode=dio,USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=huge_app" firmware/deckhand_display
+arduino-cli upload -p /dev/cu.usbmodemXXXX \
+  --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashMode=dio,USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=huge_app" \
+  firmware/deckhand_display
+```
+
+- **`PSRAM=opi`** — the shadow framebuffer is a 307,200-byte
+  `heap_caps_malloc(MALLOC_CAP_SPIRAM)`. Without octal PSRAM enabled in the FQBN that allocation
+  simply fails, and the shim halts. This board has 8,388,608 bytes of PSRAM; the framebuffer is
+  3.7% of it.
+- **`CDCOnBoot=cdc`** — this one is the trap. With `USBMode=hwcdc` but `CDCOnBoot` left at its
+  default, the ROM boot text and the panel driver's own `ESP_LOG` lines **still arrive** (they go
+  out through the USB-Serial/JTAG console directly) while every `Serial.print()` from the sketch
+  itself is **silently swallowed**. Proven side by side with a sketch containing nothing but
+  `Serial.println()` in `setup()`. So the board looks half-alive: boot chatter, no firmware
+  output, and nothing anywhere saying why. It is not in the demo project's own FQBN.
+- **`USBMode=hwcdc` + `FlashMode=dio`** match the verified working build for this board. `dio` is
+  the same reason board 1 needs it.
+- **`esp32:esp32:esp32s3` (the generic S3 target) is what defines `CONFIG_IDF_TARGET_ESP32S3`**,
+  which is the whole board-selection mechanism. Compile board 2's source with the plain `esp32`
+  FQBN and you get board 1's header silently — that is exactly the failure a manual `#define
+  BOARD 2` switch would have made routine, which is why there isn't one.
+
+**Board 2's port does NOT renumber the way board 1's does, but it does disappear.** It enumerates
+as an Espressif "USB JTAG/serial debug unit" (vendor 0x303A) at `/dev/cu.usbmodem*`, and
+**enumeration proves nothing**: it has been seen resetting, enumerating and emitting zero bytes at
+any baud with `esptool` unable to sync — through four `arduino-cli upload` attempts, all three
+`--before` modes on both `cu.` and `tty.`, esptool's own DTR/RTS download sequence by hand, and
+reads with DTR both low and asserted. **What fixed it was a power cycle** (connecting a battery),
+not software. So: if board 2 is mute, power-cycle it or hold BOOT while tapping RESET before
+suspecting the firmware. Note that the same symptom — resets, zero serial at any baud — is also
+what a `Wire`-plus-legacy-I2C boot loop looks like (see the I2C note under Two boards), so the two
+are indistinguishable from the Mac and the cheap test comes first.
 
 Run the host script — **via `DeckhandBLE.app`, not plain `node`, if Bluetooth is wanted**:
 
@@ -39,7 +102,9 @@ looked healthy from the Mac.
 compiles, resolves the port (it renumbers), frees it, uploads, and puts the host back
 the way it found it, including when the upload FAILS or you Ctrl-C - leaving the display
 dead because an upload failed would be worse than the problem it solves. It handles both
-a supervised host and a hand-started one. `./flash.sh --no-compile` skips the ~3min build.
+a supervised host and a hand-started one. `./flash.sh --no-compile` skips the ~3min build, and
+`./flash.sh --board 2` flashes board 2 — same stop-host/upload/restore-host dance, a different
+FQBN and port glob. `--board` defaults to 1 so every existing habit keeps working.
 
 The hazard it hides, for when it is not used: KeepAlive re-grabs `/dev/cu.usbserial-*`
 within a second of the process dying, so a bare `arduino-cli upload` fails on a busy port
@@ -112,7 +177,14 @@ echo "MICTEST" > ~/.claude/deckhand-device-command # 10s mic level report (beeps
 echo "MICMON" > ~/.claude/deckhand-device-command  # live mic meter on the device (tap to exit)
 echo "MICREC" > ~/.claude/deckhand-device-command  # 4s one-shot capture (mu-law, known-good)
 echo "MICSTREAM" > ~/.claude/deckhand-device-command # stream until tapped (ADPCM, up to 120s)
+echo "COLORTEST" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: six labelled colour patches
+echo "TEXTPROBE" > ~/.claude/deckhand-device-command # print the text-width table (both boards)
 ```
+
+`COLORTEST` and `TEXTPROBE` exist for the same reason `TAB`/`PAGE`/`KBTEST`/`EMOJITEST` do: the
+glass is otherwise unverifiable. `COLORTEST` in particular is the **only** instrument that can see
+board 2's panel byte order, because `SCREENSHOT` there reads the framebuffer rather than the panel
+— see the verification trap under Two boards.
 
 The on-screen record button runs the STREAMING path (`micStream`), not `MICREC` - tap to start,
 tap to stop, up to 120s. `MICREC` is the short one-shot fallback. Captures land
@@ -139,7 +211,9 @@ PORT=$(ls /dev/cu.usbserial-* | head -1)
 
 Do **not** open a second/new USB serial connection to send ad-hoc commands (e.g. via a one-off
 `node -e` script) — opening a connection pulses the CH340's reset line and reboots the ESP32
-before anything reaches it. Always go through the trigger-file mechanism above so the command
+before anything reaches it. (Board 2 has no CH340 and so no auto-reset, but go through the trigger
+file there too: the running host owns the port either way, and one mechanism for both boards beats
+an exception you have to remember.) Always go through the trigger-file mechanism above so the command
 rides the connection the running host script already has open. (BLE doesn't have this problem —
 only USB's CH340 auto-reset behaves this way.)
 
@@ -160,8 +234,39 @@ node firmware/deckhand_display/palette-check.mjs
 node firmware/deckhand_display/palette-check.mjs --selftest
 ```
 
+**Check the LAYOUT ARITHMETIC of both boards' screens without a screen.** Three checkers parse the
+constants straight out of `board_e32r28t.h` / `board_es3c35p.h` (shared parsing in
+`geom-common.mjs`) and assert every derivation the headers claim — so a header that drifts from its
+own comment fails loudly instead of passing while the panel is wrong:
+
+```
+node firmware/deckhand_display/usage-geom-check.mjs      # USAGE cards, hero/bar/stats/foot clear boxes, footer's three zones, Codex row
+node firmware/deckhand_display/sessions-geom-check.mjs   # the row-height ladder, tall/sub/compact gates, detail card, ask option chips
+node firmware/deckhand_display/settings-geom-check.mjs   # settings pages, steppers, keyboard, history reader, confirm-screen line cap
+```
+
+Each takes `--selftest`, which injects a fault and **exits 0 only when that fault IS caught** (exit
+1 if the checker is blind to it) — the same teeth-proving convention as `palette-check.mjs
+--selftest`. Two things to know before leaning on them:
+
+- **They self-check their own `textWidth` first.** Each one re-implements TFT_eSPI's width rule and
+  verifies 136/136 against `text-widths-board2.txt`, the widths the real panel measured, before
+  asserting anything downstream of a width. A checker that quietly disagreed with the device about
+  how wide `WORKING` is would be worse than none.
+- **They carry a `known` list of board-1 shortfalls they TOLERATE**, and that list is honest rather
+  than a silencer: the board-2 side of each entry is empty, so board 2 passes on its own merits.
+  Those entries are real pre-existing board-1 defects — see `docs/board-1-known-defects.md`.
+- **Honest weakness, stated because it matters more here than usual:** each `--selftest` breaks ONE
+  of roughly sixty assertions, so it proves the checker is not inert and says nothing about the
+  other fifty-nine. While board 2's visual gate was blocked these checkers were the port's only
+  proof, and one tooth per ~60 claims is thin. A fault-injection sweep — perturb every parsed
+  constant in turn and require at least one assertion to fire for each — is the obvious next
+  hardening and has not been written.
+
 There is no test suite or linter in this repo; verification is "compile, flash, watch the
-Serial Monitor / host log, and check the physical screen."
+Serial Monitor / host log, and check the physical screen." **On board 2, read that last clause
+literally — see the SCREENSHOT trap under Two boards, because a capture there cannot see the
+glass.**
 
 ## Architecture
 
@@ -182,6 +287,454 @@ host/index.mjs  <----------------------------------------------------- +
         |
         --(USB serial AND/OR BLE, JSON lines)-->  deckhand_display.ino
 ```
+
+### Two boards
+
+The firmware runs on two physically different devices from one source tree. Board 1 is the
+original: **ESP32 + a 240x320 ILI9341 SPI panel**, real TFT_eSPI, Bluedroid BLE, an XPT2046
+resistive touch panel behind a 5-point affine calibration, an analog MAX4466 mic into ADC-DMA.
+Board 2 is **ESP32-S3 + a 320x480 ST77922 QSPI panel**, drawing through a shim into a PSRAM
+shadow framebuffer, NimBLE, a capacitive touch controller integrated into the display IC, and an
+ES8311 I2S codec whose capture path **is not written yet**.
+
+**Board selection is derived from the compile target, never declared.** `board.h` is three lines:
+`#if defined(CONFIG_IDF_TARGET_ESP32S3)` → `board_es3c35p.h`, else `board_e32r28t.h`. A
+hand-edited `#define BOARD 2` was rejected because it produces a binary that looks right and is
+wrong the first time someone forgets to flip it — and the failure is a full firmware that boots
+and draws board 1's 240x320 layout onto a 320x480 panel, which reads as a layout bug rather than
+as a build mistake.
+
+**Everything board-specific lives in the two board headers** — pins, capability flags, and **every
+layout constant**. Nothing in a shared `.ino` may hardcode a panel dimension; three separate bugs
+in this port were exactly that (see the `SHOT` buffer note below).
+
+#### The shim: TFT_eSPI cannot drive a QSPI panel
+
+TFT_eSPI has no QSPI path for the ST77922, so board 2 draws through **`PanelShim`**
+(`panel_shim.h` / `panel_shim.cpp` / `panel_text.cpp` / `panel_sprite.h`), a class that
+reimplements the TFT_eSPI methods this sketch actually calls, with the same signatures and the
+same semantics, over a PSRAM framebuffer.
+
+**That was viable because the API surface is small, and the number is the reason this was a port
+rather than a rewrite.** Measured, and re-derivable in one command:
+
+```
+grep -oE '\btft\.[a-zA-Z_]+' firmware/deckhand_display/*.ino | sed 's/.*tft\.//' | sort | uniq -c | sort -rn
+```
+
+**28 distinct methods across 621 call sites** today — and one of those 28 (`flush`, 26 sites) is
+the shim's own addition, so the pre-existing surface was **27 methods**. Four methods account for
+two-thirds of the calls (`setTextDatum` 123, `drawString` 116, `setTextColor` 101, `width` 89).
+Reimplementing 27 methods against 621 unchanged call sites is a bounded job; rewriting the
+renderer is not, and it would have forked every one of this file's flicker-free-redraw
+invariants.
+
+`BOARD_USES_TFT_ESPI` is the guard. It is spelled `#if !BOARD_USES_TFT_ESPI` around every one of
+the 26 `tft.flush()` sites specifically so **board 1 never sees the TEXT of a call it does not
+have** — a runtime no-op method would have been simpler and would have moved board 1's binary,
+which is the constraint that decided it.
+
+#### The shadow framebuffer is not a convenience — it is the only reason SCREENSHOT and sprites exist on board 2
+
+QSPI has **no readback**. Three things this repo already does need to read pixels back:
+`SCREENSHOT` (`readRect`), the crab's off-screen sprite, and the AA primitives, which blend each
+pixel against **the destination** rather than against a `bg` colour passed in. None is possible
+without a buffer the CPU owns. So the shim allocates **307,200 bytes** (320 x 480 x 2) in PSRAM
+(8,388,608 available) and draws into that; the panel only ever sees `flush()`. That readable
+destination is also why board 2's AA is *better* than board 1's — TFT_eSPI cannot read the ILI9341
+back on this wiring, which is why its smooth primitives take a `bg`/`behind` colour to blend
+against instead of the real pixel. `PanelShim` keeps those parameters for interface parity with the
+existing call sites and ignores them where it can do better.
+
+**`flush()` pushes the DIRTY RECTANGLE in ≤32-line strips, and both halves are load-bearing
+findings from the bring-up, not tuning:**
+
+- A single ~300KB full-frame transfer **fails to allocate an internal SPI bounce buffer**. Strips
+  are what make the transfer possible at all.
+- `drawBitmap`'s default `timeout_ms = 0` is **NON-BLOCKING**. Without `timeout_ms = -1` the next
+  strip's `memcpy` races the DMA engine still reading the previous one — a data race whose symptom
+  is intermittently torn or stale bands, not an error.
+
+Measured: **full-screen flush ~41,000µs; a 32x32 dirty rect ~939µs — 44x.** That ratio is why this
+file's change-only redraw discipline matters *more* on board 2 than on board 1, not less: on board
+1 a needless repaint costs some SPI writes, here it costs 41ms of QSPI.
+
+**`flush()` snaps the dirty rect's x OUTWARD to a multiple of 4** (`x0 &= ~3`, `x1 |= 3`). The
+ST77922 driver warns per `drawBitmap` when `x_start` or width is not 4-aligned, and on a
+change-only UI that is **one warning per field per tick** — the host log filled with them and real
+device lines drowned. Snapping *out* can only redraw a few pixels that already hold correct
+contents; snapping *in* would clip the edge column of whatever just changed. Verified exhaustively
+over every in-range `(x0, x1)` pair on both panels: 0 bad cases. Y needs no alignment — the driver
+constrains only the axis the QSPI transfer packs.
+
+#### THE VERIFICATION TRAP: on board 2, `SCREENSHOT` cannot see the glass
+
+**This is the single most important thing on this page about board 2, and it defeated nine tasks of
+verification.**
+
+`SCREENSHOT` calls `readRect`, which on board 2 reads **the shadow framebuffer** — the same buffer
+the renderer just wrote. So a capture is **correct by construction even when the panel is wrong**,
+and every screenshot in this port looked perfect while the display was visibly wrong. The bug it
+hid: **the ST77922 wants RGB565 high byte first, and the framebuffer holds native little-endian**.
+Nobody found it by inspection; the user found it by looking at the device and saying "the colour is
+bad, green?".
+
+The signature is exact and worth memorising, because it identifies the fault and rules out its
+neighbour: **blue `0x001F` byte-swaps to `0x1F00`, a dark GREEN**, and red `0xF800` to `0x00F8`, a
+dark BLUE. A *byte swap* therefore rotates red→blue→green; **BGR element order** would swap red and
+blue only and leave green alone. So the two are distinguishable from a single glance at three
+patches.
+
+**The general form, and it applies to any instrument this repo grows:** *an instrument that reads
+the same buffer the renderer wrote proves the renderer self-consistent, not correct.* Every
+"verified by SCREENSHOT" claim about board 2 carries that caveat. The only claims it does not cover
+are the ones a person looked at.
+
+**`COLORTEST` is the instrument that can see it** (board-2-only, via the command-trigger file). Six
+patches, each **labelled in black with the colour it is supposed to be**, so the check is one glance
+and the answer is one word: if the patch under `RED` is not red, the panel's byte order disagrees
+with `BOARD_PANEL_SWAP_BYTES`. Red/green/blue carry the rotation above; **white and black are the
+control**, invariant under both faults. It is guarded to board 2 because the question cannot arise
+without a framebuffer, `palette-check.mjs` already covers board 1 offline, and compiling it on
+board 1 cost 692 bytes and broke the byte-identity this port held through every task.
+
+**The fix swaps in `flush()`'s strip copy, NOT in storage**, and that placement is the design.
+Native order in the framebuffer is what lets blending, the AA coverage arithmetic and `readRect`
+all work in ordinary RGB565 with no unswapping anywhere — the panel's byte order stays confined to
+one loop. Cost: a per-pixel loop instead of a `memcpy`, on the flush path only.
+`BOARD_PANEL_SWAP_BYTES` is declared in **both** headers so the two boards answer the same
+question, and flipping it is the whole fix if a future panel disagrees.
+
+Postscript: the demo project this port's panel bring-up came from pushes its buffer with the same
+call and the same native-order macro, and its own notes claim only that "bars/ramp/grid **render**"
+— a rendering claim, not a colour one. It very likely had this bug too and nobody looked.
+
+#### `readRect` also byte-swaps, and that cost three rounds of a phantom bug
+
+`readRect()` returns pixels **byte-swapped** and `readPixel()` does not — already documented under
+the screenshot note, and it *still* misled this port: `0x1084` read back against an intended
+`0x8410` was called a mismatch when they are the same value. It was part of a three-round
+investigation into a "REC button that only appears on the USAGE tab", which was **not a bug at
+all**: the device had blanked its backlight (the `SLEEP AFTER` soft state) and `fabVisible()`
+correctly withholds the button while asleep, so the SESSIONS and SETTINGS captures had simply
+caught a blanked device. Board 1 behaves identically. Recorded because the evidence looked like a
+tab-specific rendering fault for three rounds.
+
+#### `textWidth` equivalence is a GATE, and `TEXTPROBE` is how it is proven
+
+Every re-derived layout constant on board 2 rests on the shim measuring text **exactly** as
+TFT_eSPI does. `TEXTPROBE` (both boards) prints one `WIDTH <font> <size> <width> "<string>"` line
+per entry per font; board 1 runs real TFT_eSPI, so **its output is the reference and the check is a
+diff, not a judgement**. The table and the exact procedure live in `text_probe.h`; board 2's half
+is committed as `firmware/deckhand_display/text-widths-board2.txt`, so the comparison is one
+command.
+
+**The diff has NOT been run** — board 1 was physically disconnected for the whole port. What
+substitutes is two independent derivations that agree byte-for-byte across all 136 entries (the
+shim's, and a separate re-derivation from the raw glyph tables against `TFT_eSPI.cpp:3120-3125`).
+For catching an arithmetic error that is stronger than a hardware diff; the residual risk it does
+**not** cover is that TFT_eSPI's *runtime* behaviour differs from its source on this board. Run the
+diff before deriving any new layout number from these widths.
+
+**The rule the gate exists to catch:** TFT_eSPI charges the last character `xOffset + width`, not
+`xAdvance`, and those differ for **20 of Cozette's 95 glyphs** (0 of Terminus's). The original probe
+table's strings all ended on one of the 75 glyphs where the two agree, so every expected width was a clean multiple of 6 and
+**a wrong shim would have passed the very gate that exists to catch it**. Eleven strings ending on
+a divergent glyph were appended for exactly that reason — `textWidth("|") == 4`, `("4") == 7`,
+`("ALL ") == 25`. If you extend that table, end at least one string on a divergent glyph.
+
+#### Four bring-up traps, all inherited from the demo project, all of which fail silently
+
+1. **The panel needs `esp_panel_board_custom_conf.h` AND a vendor init sequence, and without them
+   the screen is simply dead.** The unit shipped with firmware built without that conf file, so
+   `ESP32_Display_Panel`'s `esp_panel_board.cpp:init()` aborted with **"No default board
+   configuration detected"** and neither the panel nor the backlight was ever driven — which is
+   the entire reason the screen appeared broken out of the box. Separately, the library's *default*
+   ST77922 init does not bring this panel up; `st77922_init_cmds.h` is the vendor sequence that
+   does. Get either wrong and you get a **black screen where every call succeeds**, because a QSPI
+   write into a panel that never came up returns fine. Treat both files as **artefacts, not code to
+   tidy**. Touch is deliberately `0` in that conf: the ST77922 has its touch controller inside the
+   display IC (I2C 0x55) and the library has no driver for it, so `st77922_touch.cpp` owns it.
+2. **32-line strips** and **3. `drawBitmap(..., timeout_ms = -1)`** — both covered above; both fail
+   as an allocation failure or a DMA race rather than as anything naming the panel.
+4. **Legacy `driver/i2c.h` ONLY, never `Wire`.** Linking both **aborts in a global constructor
+   before `main()`**, and the board then boot-loops with **zero serial output at any baud** while
+   `esptool` still answers happily — indistinguishable from bricked firmware. `st77922_touch.cpp`
+   is verbatim from the demo *plus* a `CONFIG_IDF_TARGET_ESP32S3` translation-unit guard, without
+   which board 1 links the legacy i2c driver and inherits that same `abort()`ing constructor.
+   Verified with `nm` on both real links: board 2 has legacy i2c symbols and **zero `TwoWire`**;
+   board 1 has no I2C peripheral symbols at all.
+
+#### Touch: one entry point, two very different controllers
+
+`touch_hal.ino` is the seam. Three surfaces, not the one the plan assumed:
+`getTouchPoint(int&, int&)`, **`touchPressed()`**, and a begin shim. Board 1's XPT2046 body and its
+5-point affine calibration are unchanged behind `BOARD_TOUCH_NEEDS_CAL`; board 2's controller is
+capacitive, inside the display IC, factory-aligned, and reports `chip_id=0x84`, `res=320x480`
+(matching `BOARD_W`/`BOARD_H`), `max_points=5`.
+
+**`touchPressed()` is backed by `read() >= 1`, NOT by the INT line, and that was measured because
+guessing it would have re-created a previously-fixed bug.** The debounce sites poll at 10ms and
+require **two consecutive** true reads, so the primitive must stay asserted for the whole contact.
+Across four real taps: `read() >= 1` was true for **8-11 of 92 polls** while INT was low in **2, 0,
+0 and 0** of those same polls — the INT line **pulses** rather than holding, so a two-consecutive
+debounce on it would drop nearly every tap. That is exactly the 120ms-gate bug this repo already
+documents fixing once.
+
+The structural reason `read()` is safe needs no hold test: `REG_TOUCH_INFO` is a **state register
+with no ack/clear and no FIFO anywhere in the driver**, so a held finger reads valid on every poll.
+Cost is **1125µs** per call — acceptable at all five sites, with the numbers: `micStream`'s DMA
+slack is 256ms against a 16ms iteration, and that loop already does a 300KB `flush()` every 120ms,
+which dwarfs it. 30s idle produced zero reports, so no strength filter is needed.
+
+#### There is NO touch wake from deep sleep on board 2, and auto-sleep is therefore DISABLED
+
+A silicon fact, the same class as board 1's "there is no true power-off" — read out of the installed
+SoC headers rather than assumed. `ext0` and `ext1` wake **only** from an RTC GPIO; the S3's RTC set
+is GPIO0..21 (`SOC_RTCIO_PIN_COUNT 22` in `soc_caps.h`, and `rtc_io_channel.h` maps exactly
+`RTCIO_CHANNEL_0..21`). `PIN_TOUCH_INT` is **47**, so neither can take it, and
+`esp_deep_sleep_enable_gpio_wakeup()` **does not exist on this target** —
+`SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP` is not defined in the S3's `soc_caps.h` at all. The one
+RTC-capable pin a person can press is GPIO0, refused for the same reason board 1 refuses it: it is
+the boot strap, so a wake with it held low lands the chip in the serial bootloader and the device
+looks bricked.
+
+So on board 2 deep sleep is exited by **RESET**, encoded as `BOARD_HAS_TOUCH_SLEEP_WAKE 0` with no
+wake source armed, and every farewell screen says exactly that instead of promising a touch.
+
+**The consequence: `AUTO_SLEEP_IDLE_MS` is disabled on board 2.** Auto-sleep's whole documented
+purpose is saving battery on a device you will wake with a touch; remove the touch wake and it
+becomes a device that turns *itself* permanently off after 20 idle minutes, and a status display
+that has silently become a brick until someone walks over and presses RESET is worse than one that
+never sleeps. **Manual POWER OFF stays** — that is an explicit choice behind a confirm dialog whose
+existing job is to state the consequence. The backlight blank (`SLEEP AFTER`) is unaffected and
+still recovers on a touch. If board 2's battery life turns out to matter, re-enabling is then a
+deliberate trade with the RESET cost understood rather than a default nobody chose.
+
+Related, and fixed here because it is board-2-only: **the farewell screens now `flush()` BEFORE
+their `delay()`.** The 1200/1500ms dwell used to run before the flush, so on board 2 the goodbye
+message existed in memory and appeared for zero frames while the *previous* screen sat there. This
+defect exists only because the port introduced the deferred-flush model, which makes it ours rather
+than pre-existing — which is why it was fixed while the eleven board-1 defects below were not.
+
+#### NimBLE versus Bluedroid
+
+Board 2 runs NimBLE (`BOARD_BLE_NIMBLE 1`); board 1 runs Bluedroid. The custom GATT service, the
+Nordic-UART UUIDs, the advertised `Deckhand-XXXX` name, the per-Mac pairing keys and the answer
+HMAC are all unchanged. **The one value that differs is the per-connection peer identity** — the
+handle the RX demux keys each 20-byte chunk on when it frames it into the stream buffer as
+`[conn_id][len16][bytes]`. Everything the multi-Mac section says about that demux still holds; only
+where the handle comes from moved. Byte-identity on board 1 cost six builds here, and the winning
+shape is load-bearing: **passing the callback POINTER into the extracted framing helper** (via a
+`BleCbParam` typedef that also collapses every override to one definition) is what makes it a pure
+move — a value variant costs +8 bytes, `bool` +16, a template +32, two call sites ±44. Those
+numbers are in the code comments so nobody tidies it back.
+
+**Connecting board 2 over BLE needed one OPERATIONAL step, and its absence looks exactly like a
+fault.** `~/.claude/deckhand-secret` had `selected = "Deckhand-0528"` (board 1), so the host was
+pinning its BLE scan to board 1's name and ignoring board 2 advertising right beside it. That is
+the multi-pairing feature working precisely as designed, and it presents as a present, healthy
+device being invisible. `SELECT Deckhand-C114` re-pointed it and the tick line went to
+`via=usb,ble`. **When a board's BLE will not connect, check `selected` before the radio.**
+
+#### Native USB, and what it buys
+
+Board 2 has no CH340. It is native USB-Serial/JTAG, which removes the constraint that shapes half
+of board 1's design:
+
+- **`SCREENSHOT` is 0.4s on board 2 against ~18s on board 1** — 240x320x2 = 153,600 bytes of
+  base64 through a CH340 capped at 11.5KB/s is what made board 1's capture an 18-second affair.
+- There is **no CH340 auto-reset**, so board 2 does not have board 1's "opening a second serial
+  connection reboots the ESP32" hazard. Use the command-trigger file anyway — the running host owns
+  the port, and one mechanism for both boards is worth more than the exception.
+- There is also **no DTR/RTS handshake to lean on**: enumeration proves nothing, and the recovery
+  is a power cycle (see Commands).
+
+#### What board 2 does NOT have: the mic and the beeper — hidden, not disabled
+
+`BOARD_HAS_MIC 0` and `BOARD_HAS_BEEPER 0`. **Those flags describe the SOFTWARE, not the
+hardware** — this is the important distinction, and an earlier reading of it was wrong in both
+directions. The hardware is real and confirmed: an **ES8311 I2S codec at I2C 0x18** (found by the
+demo's own bus scan) with **MCLK 17 / BCLK 18 / DOUT 15 / LRCK 21 / DIN 16**, plus a speaker
+amplifier enable on **GPIO1**. `DIN` is the capture path. So board 2 has a real mic *and* a real
+speaker; what it does not have is a capture path in this firmware.
+
+Until that path exists, both flags stay 0 and `audio.ino`'s whole capture path compiles out, leaving
+four stubs (`micStream`/`micRecord`/`micMonitor`/`micLevelTest`) that print
+`"no microphone on this board"` and draw nothing.
+
+**The RECORD BUTTON is hidden rather than shown dead.** `fabVisible()` returns false on
+`!BOARD_HAS_MIC`, and gating it *there* rather than at the two draw sites is deliberate: it also
+stops `fabHit()` claiming taps in that corner, and **drawn-but-dead and tappable-but-dead are two
+different bugs**. This is the rule the read-only ask path already pays for, where the options are
+drawn as a flat list under "ANSWER ON YOUR MAC" and taps are swallowed **specifically so the device
+never offers a control that cannot work**. With the button hidden the tab bar reclaims its 40px slot
+and the three tabs spread evenly rather than leaving an unexplained hole in the chrome. **Flipping
+one flag turns it back on** when the path lands.
+
+**SETTINGS › ACTIONS › MIC TEST is NOT gated, and that is an open inconsistency rather than a
+decision.** On board 2 that button is drawn, is tappable, and reaches `micMonitor()`'s stub — which
+prints one line to serial and paints nothing, so the screen does not move. That is precisely
+"logging instead of acting is the same failure wearing a diagnostic", against the rule the REC
+button was gated for. It is listed under the outstanding board-2 items below rather than fixed here,
+because `P2_MIC_Y` and its three siblings are a laid-out column and removing a row from it is a
+layout change, not a flag.
+
+Deliberately absent from board 2's header: `AUDIO_OUT_PIN`, `AUDIO_EN_PIN` and `MIC_ADC_PIN`. An
+alias for a peripheral this board does not have is the "looks right and is wrong" failure the header
+refuses — `PIN_AMP_EN` exists, but it gates an I2S codec, so pointing `AUDIO_OUT_PIN` at an I2S data
+line would compile and lie.
+
+**The mic path is the natural next piece of work, and it is a NEW DESIGN rather than a port**, which
+is why it was not bolted onto the end of this one. Board 1's entire audio design is dictated by
+constraints board 2 does not have: an analog MAX4466 into ADC-DMA, mu-law then IMA ADPCM, chunk+ACK
+flow control and 33.3Hz BLE comb cancellation, all forced by a CH340 capped at 11.5KB/s and ~26KB
+of free heap. Board 2 has a 16kHz/16-bit I2S codec, **8MB of PSRAM** and native USB CDC, so it can
+stream **linear PCM with no codec at all** — which is also exactly what Whisper wants. That likely
+removes the mu-law/ADPCM decode *and* the comb cancellation (the comb is BLE transmit current on a
+rail an analog mic amp shares; a digital I2S path does not sample that rail). Everything it would
+replace is under the mic and audio notes below.
+
+#### Layout: re-derived for 320x480, never scaled — and `MAX_SESSIONS` stayed 6
+
+**Board 2 has 2x board 1's pixels but is only ~16% wider and ~30% taller in MILLIMETRES.** Measured:
+board 1 is 2.8" 240x320, so `sqrt(240²+320²)` = 400px over 71.12mm = **5.62 px/mm**; board 2 is 3.5"
+320x480, so 576.9px over 88.9mm = **6.49 px/mm**. A 1.33x scale of board 1's numbers would make
+every element **physically larger than it is on the smaller board** — Cozette 6x13 is
+13/5.62 = **2.31mm** tall on board 1 and 13/6.49 = **2.00mm** here, and a 1.33x scale (17.3px, a
+size Cozette does not have — it ships 6x13 and a mechanical 12x26 and nothing between) would make it
+**2.67mm**. So **the faces stay put and the extra pixels become AIR and ROWS**, not bigger
+everything.
+
+That method reproduces board 1's own commented values as a check rather than asserting itself:
+board 1's `TAP_MIN` 40 is 40/5.62 = **7.11mm**, matching that header's own `// 7.1mm`; the same
+7.11mm at board 2's 6.49 px/mm is 46.1 → **`TAP_MIN` 46**, and `TAB_BAR_H` 46 follows with no
+code change because `drawTabBar` already derives its label centre, underline and REC slot from it.
+
+**One deliberate exception: `CARD_HERO_SIZE` goes x3 → x4.** At x3 the hero percentage would be
+39/6.49 = 6.0mm on board 2 against 39/5.62 = 6.9mm on board 1 — the number whose entire job is being readable across a
+room would *shrink* on the bigger screen. x4 is exact in the font (integer Cozette scaling, no
+resampling). Confirmed legible on the glass.
+
+**The headline win is the sessions ladder**, and `sessions-geom-check.mjs` prints both boards' so
+you never have to take this on trust:
+
+```
+ladder  avail 264: 1:90t  2:90t  3:86t  4:63n  5:50c  6:41c    <- board 1
+ladder  avail 412: 1:106t 2:106t 3:106t 4:100t 5:80s  6:66n    <- board 2
+```
+
+(`t` = the row gets its title, `s` = model/branch sub-line, `n` = name and pill only, `c` =
+compact.) `constrain((avail - SESSION_AIR*(n-1)) / n, SESSION_ROW_H_MIN, cap)` is the whole rule.
+So on board 2 **four sessions keep their titles** where board 1 loses them at four, the fifth keeps
+its model/branch line where board 1 goes compact, and **`c` rows are unreachable at any count** —
+the minimum raw rung across n=1..6 is 63, well clear of the 43 floor.
+
+`SESSION_AIR 3` is an **upper bound forced by the ladder**, not a taste call: at 4, `TITLE_MIN_H`
+becomes 105 against the 4-session row's 100 **and** `SUB_MIN_H` becomes 82 against the 5-session
+row's 80, losing both wins at once. (1-3 all preserve the ladder, so 3 is a bound rather than a
+unique solution.) The identities it produces are real derivations, not curve-fitting:
+`SESSION_TITLE_MIN_H = 85 + 5*AIR` (100), `SESSION_SUB_MIN_H = 70 + 3*AIR` (79),
+`SESSION_LARGE_MIN_H = 56 + 2*AIR` (62). The five gaps behind the 85 are top pad, name→title,
+title→sub, sub→pill and bottom pad, and every derived offset **collapses to board 1's literal at
+`AIR 0`** — which is the check that says this is the same layout with air in it, not a new one.
+
+**`MAX_SESSIONS` stayed 6, and raising it is a PROTOCOL change, not a screen change.** The device's
+6 is matched by the host's own `records.slice(0, 6)` and by `sessionsTotal`/`hiddenAsking`, which
+exist to tell the device what was cut. Raising the device's constant alone changes nothing; raising
+both costs ~2.2KB of DRAM per row on a board where the framebuffer already owns 300KB of PSRAM and
+`SessionInfo`'s `askDetail[1424]` is the thing that shrank `prevSessions` in the first place. It is
+a coordinated host+device change with a RAM budget attached, so it is not something a bigger screen
+gets for free.
+
+**A WIDER CARD COSTS A KEYBOARD LINE, which is the non-obvious result of the whole layout pass.**
+`KB_COLS = floor((CARD_W - 12) / 6)` = 47 on board 2, so `KB_TEXT_LINES = ceil(150 / 47)` = **4**,
+against board 1's 34 columns and 5 lines. 47 is the exact maximum, checked against the real
+last-character ink rule rather than advance-only: `max(xOffset + width)` in Cozette6x13 is 7 (`q`,
+`4`), so 46x6 + 7 = 283 ≤ 284 while 48 would need 289.
+
+**The history reader's budget had to cross the WIRE, and this was a real functional gap the port
+would otherwise have shipped.** `host/index.mjs` hardcoded `HIST_LINE_CHARS = 36` /
+`HIST_PAGE_LINES` to board 1's 216px column, so board 2's re-derived 23-line/49-column reader could
+**never fill** — 16 rows of ≤36 characters into a screen with room for 23 of 49, with nothing on
+either side reporting an error. Fixed by having the **device state its budget** as a `<cols>x<lines>`
+token on the `HISTORY` request, with the host defaulting to 36/16 when the fields are absent. That
+default **is** board 1's existing behaviour, so an un-upgraded device keeps working and no protocol
+version bump was needed — the same backward-compatibility shape as the trailing `to=<hostId>`
+address. Out-of-range values fall back to the default rather than being trusted.
+
+**A `SHOT` stack smash, and the class of bug it represents.** Three buffers in the screenshot path
+were hardcoded to board 1's row — `char line[660]`, `static uint16_t rowBuf[240]`, `static uint8_t
+rowBytes[480]`. A 320px row is 640 bytes = 856 base64 characters, so the stack buffer overran by
+**197 bytes** and the two statics by 320 and 160 bytes into adjacent `.bss`. **The symptom was a
+silent hang**: `SHOT begin` logged, then nothing — no rows, no `SHOT end`, and not even
+`finishShot()`'s own "incomplete" warning, because the frame that would have called it was already
+destroyed. All three are now sized from `BOARD_W`, which is 240 on board 1 so nothing moved there.
+**Any buffer sized to a panel dimension must be sized from `BOARD_W`/`BOARD_H`**, and a smashed
+reporting path is why this one presented as a hang rather than as corruption.
+
+#### Board 2's battery divider is CONFIRMED by measurement
+
+`BOARD_BAT_MV_SCALE 2`. The LCDWIKI table for this board gives no ratio and the vendor self-test
+assumes x2 as well, so this was a documented guess — and a wrong ratio makes every percentage and
+the whole time-remaining estimator wrong while looking perfectly plausible. **Settled by
+measurement, not argument:** the device reported `mv=3910..3929`, `pct=63..66`. A single-cell
+Li-ion at 3.92V really does sit around 60-70%, and a wrong ratio would have read ~1.96V or ~7.8V —
+both obviously absurd. `left=-1 span=0` alongside it is correct behaviour, not a fault: the trend
+estimator needs a 20-minute window before it states anything.
+
+#### Pre-existing BOARD-1 defects this port surfaced, and why none is fixed
+
+Re-deriving a layout from first principles turned out to be an **audit of the original**. **Ten real
+board-1 defects** fell out (across eleven numbered slots — one report turned out to be false), plus
+one board-2-only defect that *was* fixed (the farewell flush, above). None of the ten is fixed here,
+for one reason: **every fix would move board 1's binary inside a diff whose entire claim is
+byte-identity**, hiding a behaviour change where nobody would look for it. They belong on their own
+branch off main.
+
+They are recorded, with arithmetic and a severity order, in
+**`docs/board-1-known-defects.md`** — including the one reported defect that turned out **not** to
+be real, kept as a correction rather than deleted, because a false defect costs a future maintainer
+either the time to disprove it or a no-op "fix" that breaks byte-identity for nothing. The worst live one, for orientation: **the session
+detail screen draws two footer strings at the same `MC_DATUM` y**, so the "answer this one on your
+Mac" notice is painted out by the history hint — a message about where an action must happen,
+silently erased.
+
+#### What is NOT verified on board 2, stated plainly
+
+- **The two-`conn_id` NimBLE demux has never run.** Same reason board 1's Bluedroid demux has never
+  run: two host processes on one Mac share a single ACL connection to the peripheral, so proving it
+  needs a **second radio**. It is this feature's one untested load-bearing path, on both boards.
+- **The `TEXTPROBE` board-1↔board-2 diff has never been run**, because board 1 was physically
+  disconnected throughout. The artifact is committed (`text-widths-board2.txt`) and the comparison
+  is the one command in `text_probe.h`.
+- **Board 1's on-glass touch check after the HAL extraction** was substituted by a binary-level
+  comparison rather than a tap: `getTouchPoint`, `readRawTouch`, `fitAffine`, `waitForStableTouch`,
+  `loadOrRunCalibration`, `applyScreenRotation` and `drawCrosshair` are instruction-and-operand
+  identical, and `runCalibration` is the same size with an identical mnemonic stream. That is strong
+  evidence and not a tap.
+- **The SETTINGS page's ~140px of trailing air below the DEVICE card** is real and confirmed on the
+  glass. It is a layout judgement nobody has made yet, not a bug.
+
+#### Outstanding board-2 items, found by writing this documentation
+
+None of these is fixed, and none is a port regression — they are gaps between what board 2 does and
+what the rules on this page already require. Recorded here rather than in a scratch file because a
+known gap nobody wrote down is indistinguishable from a bug nobody found.
+
+- **SETTINGS › ACTIONS › MIC TEST is offered on board 2 and cannot work** (see above). `fabVisible()`
+  got the gate; this row did not.
+- **TWO strings promise a touch wake board 2 does not have.** `settings.ino:333`'s hint reads
+  `"power off = deep sleep, touch to wake"` and the POWER OFF confirm dialog at `:444` reads
+  `"deep sleep - touch the screen to wake"`. On board 2 the only way back is RESET. The two farewell
+  screens are already correct — they share the `WAKE_HINT` macro in `power.ino`, which is
+  `#if BOARD_HAS_TOUCH_SLEEP_WAKE`-conditional for exactly this reason — so the mechanism exists and
+  these two sites simply never adopted it. **The dialog one is the worse of the two**, because a
+  confirm dialog's entire documented job in this repo is to state the consequence, and here it
+  states the wrong one. Not fixed in this pass: `WAKE_HINT` is `"touch screen to wake"` while these
+  are `"touch to wake"` / `"touch the screen to wake"`, so routing them through it changes board 1's
+  rodata and breaks the byte-identity this port holds. It is a two-line fix on a board-1-inclusive
+  branch.
 
 **USB and BLE are independent, not fallback-of-each-other.** Both are always enabled on the
 device simultaneously, and `host/index.mjs` sends the same computed payload to whichever are
@@ -913,9 +1466,16 @@ two things `host/index.mjs` cannot get any other way:
     carrying 1400-char details.
 - **Session history is PULL, on demand, and PAGED FROM THE MAC.** Opening a session's
   detail screen and tapping the card opens a HISTORY reader. The device sends
-  `HISTORY <id12> <chat|all> <page|last|item:N>` and the host replies with ONE JSON line
+  `HISTORY <id12> <chat|all> <page|last|item:N> [<cols>x<lines>]` and the host replies with ONE JSON line
   whose only key is `hist`, so it can never be confused with a tick payload (the device
   bails out of the parser before any usage field is touched).
+  **The `<cols>x<lines>` token is the DEVICE stating its own budget, and it is optional so an
+  un-upgraded device keeps working.** Absent (or out of range) the host falls back to
+  `HIST_LINE_CHARS = 36` / `HIST_PAGE_LINES = 16`, which *is* board 1's existing behaviour — so no
+  protocol version bump was needed, the same backward-compatibility shape as the trailing
+  `to=<hostId>` address. It exists because those two constants were hardcoded to board 1's 216px
+  column, and a board with a 23-line/49-column reader could therefore never fill a page while
+  nothing on either side reported an error.
   **The device stores only the screen it is showing.** Measured on a real transcript: 2515
   entries / 584KB, of which the conversation alone is 122KB, against ~70KB of free heap
   after the BLE stack — no device-side buffer can ever hold a session's history, so a
@@ -1355,7 +1915,10 @@ in particular — don't carry a model field. It also writes all `console.log` ou
 **The firmware is SEVERAL `.ino` files in one sketch folder, not one file.** The Arduino build
 concatenates every `.ino` in the folder into a single translation unit - the one matching the
 folder name FIRST, then the rest alphabetically - so they still share every global and there are
-no headers, no `extern`s and no build-config changes. `deckhand_display.ino` keeps the includes,
+no `extern`s and no build-config changes. (The headers that DO exist - the board headers and the
+board-2 panel driver - are a separate thing: they are `#include`d, not concatenated, and the panel
+driver's `.cpp` files are deliberately outside this translation unit so a guard can keep board 1
+from linking them. See the second table below.) `deckhand_display.ino` keeps the includes,
 constants, type definitions, globals, `setup()`/`loop()`, the shared components and the touch
 dispatch; the rest is grouped by what it draws:
 
@@ -1368,8 +1931,29 @@ dispatch; the rest is grouped by what it draws:
 | `settings.ino` | the four settings pages, steppers, pager, confirm dialog |
 | `audio.ino` | mic test, MICREC, streaming capture, voice card |
 | `power.ino` | backlight, battery, beeper, volume, sleep |
-| `touch_cal.ino` | raw touch, the 5-point affine calibration, orientation |
+| `keyboard.ino` | the full-screen QWERTY, typed answers and typed messages |
+| `touch_cal.ino` | raw touch, board 1's 5-point affine calibration, orientation |
+| `touch_hal.ino` | the ONE touch entry point both boards go through |
 | `pairing.ino` | per-Mac NVS key slots and the answer HMAC |
+
+**Not every firmware file is a `.ino`, and the exceptions are deliberate.** The board-2 panel
+driver is real C++ in `.cpp`/`.h` files precisely so it does NOT join the concatenated translation
+unit — a translation-unit guard is what keeps board 1 from linking it at all, and that guard is
+load-bearing (see the legacy-I2C trap under Two boards):
+
+| file | what |
+|---|---|
+| `board.h` | three lines: picks the board header from `CONFIG_IDF_TARGET_ESP32S3` |
+| `board_e32r28t.h` | board 1: pins, capability flags, **every layout constant** |
+| `board_es3c35p.h` | board 2: the same, derived natively for 320x480 |
+| `panel_shim.h` / `.cpp` | the TFT_eSPI-compatible class: framebuffer, dirty rect, `flush()`, AA primitives |
+| `panel_text.cpp` | the shim's text path — `textWidth`, datums, `drawString` |
+| `panel_sprite.h` | `PanelSprite`, the `TFT_eSprite` stand-in the crab needs |
+| `text_probe.h` | the `TEXTPROBE` string table, and the exact diff procedure for the gate |
+| `text-widths-board2.txt` | board 2's half of that gate, committed so the diff is one command |
+| `st77922_touch.h` / `.cpp` | board 2's capacitive controller, verbatim from the demo + a TU guard |
+| `st77922_init_cmds.h`, `esp_panel_board_custom_conf.h` | the recovered panel init sequence — artefacts, not code to tidy |
+| `*-geom-check.mjs`, `geom-common.mjs` | the three layout checkers and their shared header parser |
 
 **The one rule that governs what may move:** Arduino inserts its auto-generated prototypes ABOVE
 the first function definition, so a moved function whose SIGNATURE names a type declared after
@@ -1474,6 +2058,12 @@ Other things that aren't obvious from a single file:
   poll's list); test it without real prompts by dropping a fake session file:
   `echo '{"session_id":"t","cwd":"/tmp/x","status":"asking","updated_at":'$(date +%s)'000}' >
   ~/.claude/deckhand-sessions/t.json` (delete it afterwards).
+- **THE WHOLE AUDIO SECTION BELOW IS BOARD 1, and board 2 does not merely lack a mic — it has a
+  BETTER one with no software.** Board 2 carries an ES8311 I2S codec and a speaker amp; every
+  constraint that shapes the design below (analog amp into ADC-DMA, mu-law, IMA ADPCM, chunk+ACK
+  flow control, the 33.3Hz BLE comb cancellation) comes from a CH340 capped at 11.5KB/s and ~26KB
+  of free heap, and board 2 has neither limit. `BOARD_HAS_MIC 0` describes the SOFTWARE. See Two
+  boards for the pins and for what a board-2 audio path would replace.
 - **Microphone (MAX4466 electret amp) — HOW TO WIRE IT, and IO35 is the only pin that can do
   this.** Three wires, to the board's 4-pin **Expand** connector:
 
@@ -1885,10 +2475,21 @@ Other things that aren't obvious from a single file:
     "TOO LONG - ANSWER ON YOUR MAC" and omits SEND (RE-RECORD and CANCEL stay). The touch handler
     tests the same helper, so the button's rectangle is inert too — a hidden control whose hit
     region still fires is worse than a visible one. Belt and braces in practice, not load-bearing:
-    every Cozette 6x13 glyph advances 6px, so `CARD_W - 8` = 208px gives 34 characters a line, and
-    150 bytes wraps to at most exactly 8. The two caps are therefore consistent **by arithmetic**,
-    and any change to either must re-derive the other — a 6-line cap was what let SEND sign text
-    scrolled off the bottom with no indicator that anything was missing.
+    every Cozette 6x13 glyph advances 6px, and this screen's lane is `CARD_W - 8` = 208px on board
+    1, whose worst case is **exactly 8 lines** — measured by searching word lengths rather than
+    assumed (17-character words; 9 lines is unreachable because after 7x18 bytes only 24 remain).
+    The two caps are therefore consistent **by arithmetic**, and any change to either must
+    re-derive the other — a 6-line cap was what let SEND sign text scrolled off the bottom with no
+    indicator that anything was missing. Board 2's wider 288px lane gives a worst case of **6**, so
+    the shared cap of 8 holds looser there and did not have to move.
+    **THE CONFIRM SCREEN AND THE KEYBOARD DO NOT SHARE A LANE, and this file used to say they did.**
+    The confirm screen wraps against `CARD_W - 8` (`sessions.ino`, `askVoiceTooLong`); the keyboard
+    hard-slices against `CARD_W - 12` (`keyboard.ino`, and board 1's own header comment always said
+    `(CARD_W - 12) / 6`). **At board 1's `CARD_W` of 216 both give 34, which is exactly why the
+    error survived** — they diverge at any other width, and board 2 is the first thing in this repo
+    to have another width: at 296 they give **48 versus 47**. The wrong lane was written into the
+    one place this file claims a budget is provable "by arithmetic", which is the worst place for
+    it. If you quote a column count here, quote the file it comes from with it.
   - **20s cap on an answer recording** (`MIC_ANSWER_MAX_MS`) against 120s for a dictation. The hook
     blocks for `REMOTE_WAIT_MS` (90s) and that is the whole budget for record, transfer, transcribe,
     read and confirm. If confirmations start landing late, shorten the cap - do NOT raise
@@ -2053,10 +2654,17 @@ Other things that aren't obvious from a single file:
   - **Cozette is ASCII 0x20-0x7E only** — the same fact that already forces `fitText`'s
     three-ASCII-dot ellipsis — so there's no shift-arrow or backspace glyph to draw; the keys are
     sentinel bytes (`\x01`/`\x02`) labelled `CAP`/`DEL` in plain text instead.
-  - **Going full-screen is what makes QWERTY viable on a 240px-wide panel at all.** The drawn key
-    is 22x40, but the touch band `kbTouch()` tests is the full 22x44 row — 968px² against 880 in
-    the ordinary content area. The win going full-screen buys is in the touch target, not in the
-    artwork.
+  - **Going full-screen is what makes QWERTY viable on a 240px-wide panel at all.** On board 1 the
+    drawn key is `KB_KEY_W` x (`KB_ROW_H` - 4) = 22x40, and the **tested** band is
+    `KB_PITCH` x `KB_ROW_H` = **24x44 = 1056px²** against 880 in the ordinary content area. The win
+    going full-screen buys is in the touch target, not in the artwork. Board 2's are 30x54 drawn and
+    32x58 = 1856 tested; its key height is capped by board 1's own 1:1.82 aspect ratio rather than
+    by the panel, which is the honest constraint.
+    **The tested WIDTH comes from the PITCH, not from `KB_KEY_W`, because `kbTouch()` divides by
+    `KB_PITCH`** — so the 2px gap between two keys belongs to the key on its left and there is no
+    dead lane between keys. This file and board 1's header both said **968** (22x44), i.e. they used
+    the DRAWN width for a band the code tests at the pitch. Understated in the safe direction, but
+    wrong in two files, and corrected in both.
 - **A READY session can be sent a typed MESSAGE, and it is the keyboard half of a path the
   mic already had.** The record button is visible on a plain detail screen so a dictation can be
   aimed at a session; **TYPE** in that screen's header row does the same with the keyboard.
@@ -2231,6 +2839,9 @@ Other things that aren't obvious from a single file:
 - If this mic is ever replaced, an **INMP441** (I2S) is viable and needs no analog tuning:
   `SCK`→IO18, `WS`→IO19, `SD`→IO35. IO18/19/23 are the **microSD** bus and this firmware contains
   no SD code at all, so they're free as long as the card slot is unused.
+- **BOARD 2 goes one step further: it cannot WAKE from deep sleep by touch either**, so auto-sleep
+  is disabled there and only the manual POWER OFF remains. Same class of hardware fact as this
+  bullet, different pin arithmetic — see Two boards.
 - **There is NO true power-off on this board, and it is a hardware fact, not a missing feature.**
   The power path is pure hardware - the TP4054 charger and the Q3 P-FET that switches USB/battery
   have no GPIO control, and no regulator-enable or VBUS-sense line is exposed - so the MCU cannot
@@ -2276,6 +2887,9 @@ Other things that aren't obvious from a single file:
   deliberately **touch, not the BOOT key**: GPIO0 held low across the wake reset straps the
   chip into the serial bootloader and it looks bricked until a manual reset. The manual power-off
   and the automatic battery-idle sleep share `enterDeepSleep()`.
+- **Automatic deep-sleep is DISABLED on board 2**, because that board cannot wake from deep sleep
+  by touch at all — a silicon fact about the S3's RTC GPIO set, spelled out under Two boards. The
+  rest of this bullet is board 1.
 - Automatic deep-sleep (`AUTO_SLEEP_IDLE_MS`, 20 min): fires only when **on battery** with no
   fresh active session for the interval; touch and any fresh session reset `lastNonIdleMillis`.
   "On battery" is `!(lastRxUSBMillis fresh within 60s) && batteryPresent()` — deliberately a
@@ -2590,6 +3204,12 @@ Other things that aren't obvious from a single file:
     scans numbers properly, and converts each later contour's relative `m` into an
     absolute `M` (a `z` returns to the contour's own start, so contour 2 opens relative
     to where contour 1 began, not to the origin).
+- **BOARD 2 FIRST: on that board `SCREENSHOT` reads the SHADOW FRAMEBUFFER, not the panel, so a
+  capture is correct by construction even when the glass is wrong.** Everything in this bullet is
+  about board 1, where `readRect` really does read the panel. Do not use a board-2 capture as
+  evidence about colour — use `COLORTEST`. See the verification trap under Two boards; it cost this
+  repo nine tasks of misplaced confidence. (`SCREENSHOT` is also 0.4s on board 2 against ~18s here,
+  because native USB CDC replaces the CH340.)
 - **The device screenshots ITSELF, and the panel really can be read back.** `SCREENSHOT` (via the
   command-trigger file) reads the framebuffer with `readRect()` and ships it as base64 RGB565;
   `finishShot()` in `host/index.mjs` rebuilds it and writes a PNG straight to `~/Deckhand-shots/`
@@ -2700,6 +3320,9 @@ Other things that aren't obvious from a single file:
   was invisible at first. `drawCrab` is **templated on the target type** so the right overload
   resolves at compile time. The old procedural art only worked because `fillRect`/`drawCircle`
   route through the virtual `drawPixel`.
+- **`firmware/tft_setup/User_Setup.h` is BOARD 1 ONLY.** Board 2 does not link TFT_eSPI at all
+  (`BOARD_USES_TFT_ESPI 0`), so nothing in that file affects it and copying it into the library is
+  not part of a board-2 setup.
 - **TFT_eSPI's pin/driver config now lives in THIS REPO at `firmware/tft_setup/User_Setup.h`**, and
   is copied into the library. TFT_eSPI reads it from a file *inside the library*, so it used to
   exist only there - which meant reinstalling or updating TFT_eSPI silently wiped the board's pin

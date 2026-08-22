@@ -109,15 +109,20 @@
 // map. The FLIP setting's rotation 2 is the only other value either board uses,
 // and PanelShim::mapPoint implements all four.
 #define SCREEN_ROTATION 0
-// UNVERIFIED. The LCDWIKI table for this board says only "battery voltage
-// divider" with no ratio, and the ES3C35P self-test this header's pins came
-// from assumes x2 as well - assumes, not measures: nothing in either place
-// compares the pad reading against a known cell voltage. x2 is the ordinary
-// 100K/100K arrangement and matches board 1, so it is the right guess, but the
-// FIRST thing to check when board 2's battery percentage reads wrong is this
-// number, not pctFromMv()'s curve. Settling it needs a meter on the cell read
-// against the pad's own reported millivolts, i.e. hardware access this port has
-// not had.
+// CONFIRMED BY MEASUREMENT, and this comment used to say UNVERIFIED. It started
+// as a guess: the LCDWIKI table for this board says only "battery voltage
+// divider" with no ratio, and the ES3C35P self-test this header's pins came from
+// assumes x2 as well - assumes, not measures. x2 is the ordinary 100K/100K
+// arrangement and matches board 1, so it was the right guess, but a wrong ratio
+// makes every percentage AND the whole time-remaining estimator wrong while
+// looking perfectly plausible, which is why it was not left as one.
+// The measurement, on a real cell: the device reported mv=3910..3929,
+// pct=63..66. A single-cell Li-ion at 3.92V really does sit around 60-70%, and
+// the two wrong answers are not close - a x1 ratio would have read ~1.96V and a
+// x4 one ~7.8V, both obviously absurd for a 1S cell. So the ratio is settled by
+// the reading it produces rather than by a meter across the divider.
+// If board 2's battery percentage ever reads wrong anyway, this is still the
+// first number to check before pctFromMv()'s curve.
 #define BOARD_BAT_MV_SCALE 2
 
 // ============================================================================
@@ -125,7 +130,7 @@
 // ============================================================================
 // Board 2 has 2x board 1's pixels (80 more columns, 160 more rows) but is only
 // ~16% wider and ~30% taller in MILLIMETRES. Measured: board 1 is a 2.8"
-// 240x320 panel, so sqrt(240^2+320^2) = 400px over 71.12mm = 5.63 px/mm; this
+// 240x320 panel, so sqrt(240^2+320^2) = 400px over 71.12mm = 5.62 px/mm; this
 // is a 3.5" 320x480, so sqrt(320^2+480^2) = 576.9px over 88.9mm = 6.49 px/mm.
 // The panel is 49.3 x 74.0mm against board 1's 42.6 x 56.9mm.
 //
@@ -146,7 +151,7 @@
 
 // ---------- Chrome frame ----------
 // TOUCH FLOOR FIRST, because the tab bar's height is decided by it. Board 1's
-// TAP_MIN is 40px = 7.1mm at 5.63 px/mm; the same physical floor here is
+// TAP_MIN is 40px = 7.1mm at 5.62 px/mm; the same physical floor here is
 // 7.1 * 6.49 = 46.1 -> 46px. This is a case where the pixel number MUST change
 // to keep the physical target the same, the mirror image of the font argument
 // above.

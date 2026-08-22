@@ -470,6 +470,28 @@ if both your Macs are computers, pick two shapes instead.
 
 ## Hardware
 
+**There are two supported boards.** Board 1 is the one everything below defaults to and the one all
+the optional add-ons are for. Board 2 is bigger, faster over USB, and does not have working audio
+yet.
+
+| | board 1 — the default | board 2 |
+|---|---|---|
+| what it is | ELEGOO **E32R28T** / E32N28T — 2.8" ESP32, 240x320 ILI9341 | LCDwiki **ES3C35P** — 3.5" ESP32-S3, 320x480 ST77922 |
+| touch | resistive, one-time 5-point calibration on first boot | capacitive, factory-aligned, no calibration |
+| USB | CH340 serial, `/dev/cu.usbserial-*` | native USB, `/dev/cu.usbmodem*` |
+| flash it | `./flash.sh` | `./flash.sh --board 2` |
+| microphone | fits a MAX4466 module — dictation works | has a real I2S mic on board, **no software for it yet** |
+| beeper | 1W speaker, needs-input beep | speaker present, **not driven yet** |
+| auto-sleep | yes, wakes on a held touch | **no** — the chip cannot wake from deep sleep by touch, so it is disabled |
+| screenshots | ~18s each | ~0.4s each |
+
+Everything else is the same firmware and the same host: the same three tabs, the same session list,
+the same remote answering, the same pairing. Board 2's layout is **re-derived** for 320x480 rather
+than scaled up, so the extra pixels become more rows and more air — four sessions keep their titles
+where board 1 loses them at four, and the keyboard's keys grow from 22x40 to 30x54.
+
+The rest of this section is board 1.
+
 | | part | what to buy |
 |---|---|---|
 | **Required** | Display board | [ELEGOO E32R28T / E32N28T](https://www.amazon.com/dp/B0FJQ6RK39) — 2.8" ESP32, 240x320 ILI9341, USB-C (2-pack) |
@@ -577,8 +599,8 @@ on macOS since it's what nearly all modern accessories use.
 ## Quick start (macOS)
 
 You need: a Mac with [Node.js](https://nodejs.org) (`brew install node`),
-[arduino-cli](https://arduino.github.io/arduino-cli/), Claude Code, and the
-ELEGOO board.
+[arduino-cli](https://arduino.github.io/arduino-cli/), Claude Code, and one of the
+[two supported boards](#hardware).
 
 ```
 git clone git@github.com:blueandhack/deckhand.git && cd deckhand
@@ -665,8 +687,14 @@ the whole install → uninstall → restore cycle against a throwaway `$HOME`.
 ## Project layout
 
 ```
-firmware/deckhand_display/*.ino           Arduino sketch (ESP32), several files, one build
-firmware/tft_setup/User_Setup.h           TFT_eSPI pin config for this board
+firmware/deckhand_display/*.ino           Arduino sketch, several files, one build
+firmware/deckhand_display/board.h         picks the board from the compile target
+firmware/deckhand_display/board_*.h       per-board pins, capabilities and EVERY layout constant
+firmware/deckhand_display/panel_*.{h,cpp} board 2's TFT_eSPI-compatible shim + framebuffer
+firmware/deckhand_display/st77922_*       board 2's panel init sequence and touch controller
+firmware/deckhand_display/*-geom-check.mjs  layout arithmetic checkers, both boards, no hardware
+firmware/tft_setup/User_Setup.h           TFT_eSPI pin config - BOARD 1 ONLY
+docs/board-1-known-defects.md             board-1 bugs the second-board port surfaced
 host/index.mjs                            Node script (runs on your Mac)
 host/typed-answer.mjs, voice-answer.mjs   answer crypto, pure + testable
 host/build-app.sh                         builds DeckhandBLE.app from your node
@@ -720,10 +748,11 @@ host/index.mjs (device tick every 5s)
     <- "ANSWER <id> <prompt> <option>" lines from the device (USB rx or BLE
        notifications) -> ~/.claude/deckhand-answers/<id>.json for the hook
 
-deckhand_display.ino (ESP32)
+deckhand_display.ino (ESP32 or ESP32-S3 - one firmware, two boards)
     - parses each JSON line, redraws only the fields that changed
-    - beeps (max 3x) when a session newly needs input
+    - beeps (max 3x) when a session newly needs input          [board 1 only]
     - touchscreen for tabs/detail/answering; BOOT key for power off
+    - board 2 draws into a PSRAM framebuffer and flushes dirty rectangles
 ```
 
 **Quota numbers** come primarily from the same endpoint Claude Code's own
@@ -752,19 +781,26 @@ detection missed desktop permission prompts entirely.
 `./install.sh` does steps 3–5 for you; they're spelled out here for
 reference and for the firmware, which is always hands-on.
 
-1. **Prepare TFT_eSPI**: copy this board's pin config into the library:
+1. **Prepare TFT_eSPI** — **board 1 only**; board 2 does not use TFT_eSPI at all. Copy this
+   board's pin config into the library:
    ```
    cp firmware/tft_setup/User_Setup.h "$(arduino-cli config get directories.user)/libraries/TFT_eSPI/User_Setup.h"
    ```
    You also need the `esp32:esp32` core and the `TFT_eSPI`, `ArduinoJson`,
    and `XPT2046_Touchscreen` libraries (`Preferences` / `BLEDevice` /
-   `BLEServer` / `BLEUtils` / `BLE2902` ship with the esp32 core).
+   `BLEServer` / `BLEUtils` / `BLE2902` ship with the esp32 core). For **board 2** you need the
+   same core plus `ArduinoJson` and **`ESP32_Display_Panel`** — and no `User_Setup.h`. BLE needs no
+   extra library either way: the esp32 core's own `BLEDevice`/`BLEServer` headers are backed by
+   Bluedroid on board 1 and by NimBLE on the S3, which the firmware handles.
 2. **Flash the firmware** (from this directory):
    ```
-   ./flash.sh                 # compile + upload
+   ./flash.sh                 # compile + upload BOARD 1 (the default)
+   ./flash.sh --board 2       # compile + upload board 2
    ./flash.sh --no-compile    # upload the last build, skipping the ~3min compile
    ```
-   One command on purpose. It resolves the serial port (it renumbers between
+   One command on purpose. **Which board you are building for is decided entirely by that flag** —
+   there is no switch to flip in the source, because a build that looks right and is wrong when
+   someone forgets to flip it is worse than a longer command. It resolves the serial port (it renumbers between
    plug-ins), frees it, uploads, and puts the host back afterwards — including
    when the upload fails or you Ctrl-C, because leaving your display dead
    because a flash went wrong would be worse than the problem it solves. If the
@@ -777,7 +813,16 @@ reference and for the firmware, which is always hands-on.
    this project doesn't use OTA or SPIFFS, so the tradeoff is free. On
    **first boot** the screen prompts for a one-time touch calibration —
    touch the five crosshairs (four corners and the centre); it's saved to
-   flash and survives reflashing.
+   flash and survives reflashing. **Board 2 skips that step**: its touch panel is capacitive and
+   factory-aligned, so there is nothing to calibrate.
+
+   **If board 2 goes mute — resets, enumerates, and emits nothing at any baud while `esptool`
+   cannot sync — power-cycle it before suspecting the firmware.** Unplug it, or plug/unplug a
+   battery, or hold **BOOT** while tapping **RESET** to force download mode. This has happened, and
+   nothing software-side got it back: not four upload attempts, not all three `--before` modes on
+   both `cu.` and `tty.`, not esptool's own DTR/RTS sequence by hand. **Enumeration proves
+   nothing** on this board — it can appear as a healthy "USB JTAG/serial debug unit" and still be
+   unreachable.
 3. **Register the Claude Code hooks** — these feed per-session status (and
    the statusLine quota fallback). Without them the SESSIONS tab stays empty
    and remote answering is off.
@@ -1126,6 +1171,36 @@ to self-register as a login item.
   again after previously working), reset the cached TCC decision with
   `tccutil reset BluetoothAlways com.deckhand.ble-host` and relaunch via
   `open` so it prompts again.
+
+### Board 2 specifically
+
+- **No audio yet.** Board 2 has a real microphone and speaker on board (an ES8311 I2S codec), but
+  the firmware has no capture path for them, so the record button is **hidden** rather than shown as
+  a control that does nothing, and the needs-input beep is silent. Everything text-based works —
+  including answering prompts by **typing** on the device's keyboard. This is the obvious next piece
+  of work, and board 2's mic should end up *better* than board 1's: enough bandwidth and memory to
+  send plain 16-bit PCM, which is what the speech-to-text wants anyway.
+  Two rough edges that follow from it and are not fixed yet: **SETTINGS → ACTIONS → MIC TEST is
+  still offered** and does nothing visible when tapped, and the **POWER OFF** hint and confirm
+  dialog still say "touch to wake" when on this board only RESET wakes it.
+- **No auto-sleep, and that is the chip's fault rather than a missing feature.** Deep sleep on the
+  ESP32-S3 can only be woken by an RTC-capable GPIO (0–21), and board 2's touch interrupt is on
+  GPIO47. So a sleeping board 2 could only be revived by pressing RESET — which would turn a status
+  display into a brick until you walked over to it — and the 20-minute auto-sleep is therefore
+  switched off. The screen still blanks on the `SLEEP AFTER` timer and still comes back on a touch,
+  and the manual **POWER OFF** button still works (its confirm dialog says RESET, not "touch to
+  wake").
+- **BLE won't connect after you swap boards until you pick the new one.** The host pins its BLE
+  scan to the selected device, so a `selected` left pointing at your other board makes a
+  present, healthy device invisible. Fix it from the menu bar's **Device** submenu, or
+  `echo "SELECT Deckhand-XXXX" > ~/.claude/deckhand-device-command`. USB is unaffected.
+- **Screenshots cannot verify colour on board 2.** `SCREENSHOT` there reads the shadow framebuffer
+  rather than the panel, so a capture is right by construction even when the glass is wrong — a real
+  byte-order bug survived the entire port that way. Use `COLORTEST`
+  (`echo "COLORTEST" > ~/.claude/deckhand-device-command`), which draws six patches each labelled
+  with the colour it is supposed to be, and check it with your eyes.
+- **The SETTINGS page has about 140px of empty space** below the DEVICE card. Real, cosmetic, and
+  nobody has decided what belongs there yet.
 
 ---
 

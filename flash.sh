@@ -81,10 +81,12 @@ case "$BOARD" in
     # mute over serial for every future task exactly the way "every call
     # succeeds and the screen stays black" looks like a hardware fault.
     #
-    # The rest of the sketch does not compile yet (Task 6-8's layout
-    # constants and Task 3/4/5's text/AA/touch methods are still missing),
-    # so this FQBN is verified for panel bring-up plus serial output, but not
-    # yet for a full firmware upload.
+    # VERIFIED FOR A FULL FIRMWARE UPLOAD, not just bring-up: the whole sketch
+    # compiles and has been flashed and run with this exact FQBN (892134 bytes
+    # of flash, 57860 of RAM), and the device then reported HELLO/BUILD, stored
+    # a PROVISION, delivered payloads over USB and BLE, and rendered all three
+    # tabs. An earlier version of this comment said the sketch did not compile
+    # yet; it does.
     FQBN_COMPILE="esp32:esp32:esp32s3:PSRAM=opi,FlashMode=dio,USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=huge_app"
     FQBN_UPLOAD="esp32:esp32:esp32s3:PSRAM=opi,FlashMode=dio,USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=huge_app"
     PORT_GLOB="/dev/cu.usbmodem*"
