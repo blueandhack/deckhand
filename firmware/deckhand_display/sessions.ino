@@ -1125,8 +1125,14 @@ void drawSessionDetail(int idx) {
     // Pieces, not one drawColValue() call - that helper only clips a single
     // string, and there's real headroom to spare here without needing to:
     // measured worst case is "CC" (12px) + 4px gap + the 13px icon + 4px gap +
-    // "/" + dispMacTag()'s own 7-char cap (48px) = 81px, against this 90px
-    // column (CARD_W/2 - PAD - 4).
+    // dispMacTag()'s own 7-char cap (42px) = 75px, against this 90px column
+    // (CARD_W/2 - PAD - 4).
+    // NO slash here: "/" is the no-icon form's separator between the agent
+    // tag and the Mac text ("CC/pro"), carried over unchanged below. With an
+    // icon sitting between them, a leading slash on the Mac text read as
+    // something missing ("CC [icon] /pro") rather than the plain "CC [icon]
+    // pro" the brief's own acceptance text calls for - same bare 4px-gap
+    // spacing the SETTINGS row uses between its icon and its tag/age text.
     const char* tag = strcmp(s.agent, "cx") == 0 ? "CX" : "CC";
     setUIFont(2);
     tft.setTextColor(COLOR_VALUE, COLOR_CARD);
@@ -1136,7 +1142,7 @@ void drawSessionDetail(int idx) {
     // y == cy for both: the icon's y is the text's y, because both are 13px -
     // the same vertical rule the SETTINGS row and every other icon site uses.
     drawEmoji(agentEmoji, iconX, cy, COLOR_CARD);
-    snprintf(agentCol, sizeof(agentCol), "/%s", mac);
+    snprintf(agentCol, sizeof(agentCol), "%s", mac);
     tft.drawString(agentCol, iconX + MAC_EMOJI_SIZE + 4, cy);
   } else if (mac[0]) {
     snprintf(agentCol, sizeof(agentCol), "%s/%s",
