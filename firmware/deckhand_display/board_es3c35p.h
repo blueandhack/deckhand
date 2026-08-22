@@ -854,9 +854,19 @@ const int HIST_LINE_H      = 13;   // Cozette - text-derived, unchanged
 //   track   377..396   (HIST_JUMP_H 20)
 // The list stops 4px above the band (HIST_JUMP_Y - 4 = 360), so it runs 60..360 =
 // 23 lines of 13 against board 1's 16.
-// The TRACK is board 1's 16 held physically (16 / 5.624 * 6.489 = 18.5, taken to
-// 20 on the even grid) - i.e. the track did not really change and the TAP BAND is
-// the whole of what this board buys. HIST_JUMP_TAP_H is TAP_MIN.
+// The TRACK is board 1's 16 held physically: 16 / 5.624 * 6.489 = 18.46, which
+// rounds to 18. It is 20, and that last 2px is a JUDGEMENT, not arithmetic -
+// "the even grid" does not choose between them, since 18 is equally even and
+// both centre EXACTLY in a 46px band ((46-18)/2 = 14, (46-20)/2 = 13, no
+// remainder either way). Nothing downstream reads this constant except the track
+// and knob rects, so neither value costs another row.
+// The judgement: board 1's own comment calls this track "the tightest control in
+// the reader" at 2.8mm, and it is the one thing here you have to AIM at. Given a
+// board with rows to spare, biasing the drawn track 1.5px up rather than 0.5px
+// down makes the target slightly easier to see while HIST_JUMP_TAP_H does the
+// real work of catching the tap. If that trade is ever revisited, 18 is the
+// arithmetic answer and this is the reason to have gone past it.
+// HIST_JUMP_TAP_H is TAP_MIN.
 const int HIST_JUMP_Y      = 364;
 const int HIST_JUMP_H      = 20;
 const int HIST_JUMP_TAP_H  = 46;
