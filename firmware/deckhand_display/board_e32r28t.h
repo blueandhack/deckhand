@@ -26,6 +26,10 @@
 // this panel's PENIRQ happens to be on one (IO36). See BOARD_SLEEP_WAKE_GPIO
 // below, and the opposite case in board_es3c35p.h.
 #define BOARD_HAS_TOUCH_SLEEP_WAKE 1
+// No shadow framebuffer on this board - TFT_eSPI writes the panel directly and
+// handles its own byte order - so there is nothing to swap. Named here anyway so
+// the two board headers answer the same questions.
+#define BOARD_PANEL_SWAP_BYTES 0
 
 // If the layout renders sideways/upside down on your unit, try 0/1/2/3 here.
 #define SCREEN_ROTATION 0

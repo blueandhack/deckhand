@@ -312,9 +312,17 @@ void PanelShim::flush() {
   for (int y = y0; y <= y1; y += FLUSH_STRIP_LINES) {
     int lines = min(FLUSH_STRIP_LINES, y1 - y + 1);
     for (int r = 0; r < lines; r++) {
-      memcpy(_stripBuf + (size_t) r * w,
-             _fb + (size_t) (y + r) * PANEL_PHYS_W + x0,
-             (size_t) w * 2);
+      const uint16_t* src = _fb + (size_t) (y + r) * PANEL_PHYS_W + x0;
+      uint16_t* dst = _stripBuf + (size_t) r * w;
+#if BOARD_PANEL_SWAP_BYTES
+      // Byte-swap on the way out, not in storage. Keeping the framebuffer in
+      // native order is what lets every drawing path - blending, readRect, the
+      // AA coverage maths - work in ordinary RGB565 without unswapping first,
+      // and confines the panel's byte order to this one loop.
+      for (int c = 0; c < w; c++) dst[c] = (uint16_t) ((src[c] >> 8) | (src[c] << 8));
+#else
+      memcpy(dst, src, (size_t) w * 2);
+#endif
     }
     if (!_lcd->drawBitmap(x0, y, w, lines, (const uint8_t*) _stripBuf, -1)) {
       Serial.printf("PANEL: drawBitmap failed at y=%d\n", y);

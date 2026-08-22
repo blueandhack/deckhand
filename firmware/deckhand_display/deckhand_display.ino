@@ -4159,6 +4159,49 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // Settings page, for the same reason. No-op unless SETTINGS is showing.
     int pg = buf.substring(5).toInt();
     if (currentTab == TAB_SETTINGS) gotoSettingsPage(pg);
+#if !BOARD_USES_TFT_ESPI
+  // BOARD 2 ONLY, deliberately. The question this answers - does the framebuffer's
+  // byte order match the panel's - cannot arise on a board that has no
+  // framebuffer, and board 1's palette is already checked offline by
+  // palette-check.mjs. Compiling it there would cost 692 bytes to duplicate an
+  // existing check on the board that does not need it, and this port has held
+  // board 1 byte-identical through every task; a diagnostic is not the thing to
+  // break that for.
+  } else if (buf == "COLORTEST") {
+    // THE ONLY INSTRUMENT THAT ANSWERS "are the panel's colours right?", because
+    // SCREENSHOT cannot: readRect reads the FRAMEBUFFER, so a capture is correct
+    // by construction even when the glass is wrong. Six patches, each labelled in
+    // black with the colour it is SUPPOSED to be, so the check is one glance and
+    // the answer is one word - if the patch under "RED" is not red, the panel's
+    // byte order disagrees with BOARD_PANEL_SWAP_BYTES.
+    // The diagnostic pairs are chosen for the failure this exists to catch: a
+    // byte swap sends BLUE (0x001F) to 0x1F00, a dark GREEN, and RED (0xF800) to
+    // 0x00F8, a dark BLUE - so red/green/blue disagreeing in that specific
+    // rotation is the signature, where a red/blue swap alone would mean BGR
+    // element order instead. WHITE and BLACK are invariant under both and are
+    // the control.
+    struct { uint16_t c; const char* name; } pats[] = {
+      { 0xF800, "RED" }, { 0x07E0, "GREEN" }, { 0x001F, "BLUE" },
+      { 0xFFE0, "YELLOW" }, { 0xFFFF, "WHITE" }, { COLOR_ACCENT, "ACCENT" },
+    };
+    tft.fillScreen(TFT_BLACK);
+    const int cols = 2, cellW = tft.width() / cols, cellH = tft.height() / 3;
+    setUIFont(2);
+    tft.setTextDatum(MC_DATUM);
+    for (int i = 0; i < 6; i++) {
+      int cx = (i % cols) * cellW, cy = (i / cols) * cellH;
+      tft.fillRect(cx, cy, cellW, cellH, pats[i].c);
+      tft.setTextColor(TFT_BLACK, pats[i].c);
+      tft.drawString(pats[i].name, cx + cellW / 2, cy + cellH / 2);
+    }
+    tft.setTextDatum(TL_DATUM);
+#if !BOARD_USES_TFT_ESPI
+    tft.flush();
+#endif
+    Serial.printf("COLORTEST drawn (BOARD_PANEL_SWAP_BYTES=%d). Each patch is labelled with the "
+                  "colour it should be; a mismatch means the panel byte order disagrees. "
+                  "Tap or switch tabs to leave.\n", BOARD_PANEL_SWAP_BYTES);
+#endif
   } else if (buf == "SCREENSHOT") {
     // Reads the panel back and ships it as base64 RGB565. Readback was assumed
     // impossible here - the FAB note says so, because per-pixel reads for

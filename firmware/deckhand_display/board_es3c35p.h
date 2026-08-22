@@ -36,6 +36,22 @@
 // farewell screen says exactly that instead of promising a touch.
 #define BOARD_HAS_TOUCH_SLEEP_WAKE 0
 
+// The ST77922 takes RGB565 HIGH BYTE FIRST, while the shadow framebuffer holds
+// native little-endian uint16 - so the strip copy in PanelShim::flush() swaps
+// every pixel on the way out. Getting this wrong is not subtle once you know the
+// signature but is very easy to miss: a byte-swapped blue (0x001F) arrives as
+// 0x1F00, which is a dark GREEN, so the whole UI reads as wrong-but-plausible
+// rather than as obviously broken. It also cannot be caught by SCREENSHOT, and
+// that is the trap - readRect reads the FRAMEBUFFER, not the panel, so a capture
+// looks perfectly correct while the glass does not. Use COLORTEST for this
+// question; it is the only instrument that answers it.
+// The demo project this port is based on pushes its buffer the same way and its
+// notes say only that "bars/ramp/grid render" - a rendering claim, not a colour
+// one - so the demo very likely had this too and nobody looked.
+// The swap costs a per-pixel loop instead of a memcpy on the flush path only.
+// Board 1 writes its panel directly through TFT_eSPI and never sees this.
+#define BOARD_PANEL_SWAP_BYTES 1
+
 // ---- LCD: ST77922, 320x480, QSPI. Panel reset is tied to chip EN (no GPIO). --
 #define PIN_LCD_CS        10
 #define PIN_LCD_SCK       12
