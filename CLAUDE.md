@@ -425,9 +425,10 @@ two things `host/index.mjs` cannot get any other way:
     first; and because `dispMacTag()` returns "" until a second Mac shows up, a `usedLinkCount()`
     flip changes the signature for free. Cache sizes, since `drawIfChanged`-style comparisons only
     look at `cacheSize` bytes and a short cache silently stops noticing changes past that point:
-    `rowSigCache` is **176** against a 122-byte worst case, and `detailSigCache` is **368** against
-    ~350 — **under 20 bytes of headroom, so it must be re-derived on the next field added to that
-    signature**, not assumed to still fit.
+    `rowSigCache` is **176** against a 125-byte worst case, and `detailSigCache` is **384** against
+    a field-by-field-derived **352** — the re-derivation the previous 368-against-~350 note demanded
+    actually happening once the icon id was appended, so do the same again on the next field rather
+    than assuming it still fits.
   - **The Mac tag's separator is an ASCII `/`, not a middle dot** (`CLAUDE/air`, `CC/air`), because
     Cozette is 0x20–0x7E only and U+00B7 draws as a blank box — the same constraint that already
     forces `fitText`'s three-dot ellipsis. The tag is built **once** into `agentTag[]` and both
@@ -453,6 +454,133 @@ two things `host/index.mjs` cannot get any other way:
     on separators, while a hostname is an OS name whose distinguishing part is its **last segment**
     (`air` vs `studio` in Apple's defaults) — and that segment is taken **even when it is one
     character**, since `Mac-Studio-B` really is "b". `host/host-tag-check.mjs` pins all of it.
+  - **A Mac can also carry a 13x13 ICON, and the NAME is what crosses the wire — never the
+    character.** `Cozette6x13` declares `0x20, 0x7E`, the same fact that already forces `fitText`'s
+    three ASCII dots and the tag's ASCII `/` separator, so an emoji cannot be a glyph on this
+    device: an icon is **artwork**. `DECKHAND_MAC_EMOJI` or the menu-bar picker resolves to one of
+    sixteen names on the Mac (`resolveMacEmoji` in `host/mac-emoji.mjs`), the name rides every
+    payload as `hostEmoji`, and the device turns it into a sprite index with `macEmojiIndex()` (a
+    linear scan over 16 entries, run once per payload). Put the CHARACTER on the wire instead and
+    you are feeding multi-byte text into `feedChar`'s line buffer, an ask sanitiser that blanks
+    every control byte, and a struct of fixed `char[]` fields that `copyField` truncates by BYTES —
+    all of it ASCII-oriented end to end. An unknown name is dropped on the Mac (`resolveMacEmoji`
+    returns "") and returns -1 on the device, and **both** fall back to the text tag rather than
+    drawing nothing.
+  - **13x13 is DERIVED, not chosen, and 16px collides with a CLEAR BOX rather than with any
+    glyph.** A usage card's label row is `y0+6`..`y0+19`, because the hero number's box starts at
+    `y0+20` and clears from `y0+19` across the full card interior — so a 16px icon would be rubbed
+    out by the hero's own erase on every tick the digits move, the same clear-box-not-glyphs
+    arithmetic the `+88` stats row already documents. 13 is also **Cozette's cell height**, and
+    that is what removes centring arithmetic from every surface that draws one: an icon's `y` **is**
+    its neighbouring text's `TL_DATUM` y, with a 4px gap, on all five sites (tall session rows, the
+    two usage cards, the Codex row, SETTINGS › STATUS, the detail card). Which is why
+    **`drawEmoji`'s `(x, y)` is the TOP-LEFT corner**, deliberately unlike `blit2bpp`'s centre
+    convention — every caller here is placing an icon beside `TL_DATUM` text, and a centre-based
+    signature would put the same `- MAC_EMOJI_SIZE / 2` at all five.
+  - **Cost: 390 bytes per icon, 6,240 for all sixteen — 338 of colour plus 52 of alpha — and the
+    52 is where the design spec was wrong.** The spec budgeted **43** bytes of alpha, which is
+    13x13 = 169 two-bit samples packed as one continuous bitstream (42.25 bytes). `drawEmoji`
+    unpacks each row independently at `alpha + py * ((n + 3) / 4)`, so the stride must be a whole
+    number of **bytes per row** — 4 for 13 pixels, `MAC_EMOJI_STRIDE`, the identical packing
+    `blit2bpp`'s other art uses. A continuous bitstream would save 9 bytes an icon and cost a
+    bit-offset multiply in the inner loop of a blitter that already works a row at a time.
+  - **Colour and alpha are SEPARATE planes and the backdrop is a draw-time argument.** The same
+    icon has to sit on a card fill, a session row and the page background, in **two** themes;
+    baking one background in is exactly what gives `ClawdCrab.h` its documented fringe under
+    LIGHT. `drawEmoji` blends per pixel against the `bg` the caller names, composing one row into a
+    13-entry buffer pushed with `setSwapBytes(true)` — the same byte-order handling `drawLogo`
+    needs, and for the same reason.
+  - **The icon id had to enter FOUR caches, and the symptom of missing any one is a card or row
+    that keeps a stale icon forever.** An icon change moves no text, no percentage, no source link
+    and no link count, so the change-only redraw discipline correctly skips a field whose pixels
+    are now wrong. The four: the **row signature** (`rowSigCache`, so a row whose Mac's icon
+    changes repaints); the **detail signature** (`detailSigCache`, 368 → **384** against a
+    field-by-field-derived 352 worst case); the **usage chrome bust** (`emojiCache`/`cxEmojiCache`
+    beside `srcCache`/`pinCache`/`linksCache` → `drawUsageStatic()`, because the Codex label's own
+    `drawIfChanged` clears only its own text box and never the icon beside it — watch this on a
+    second Mac's link ageing out); and the **SETTINGS link row's cached string**, where the id
+    rides after a `\x01` sentinel that is never drawn, because that cache compares TEXT and the
+    icon is drawn separately from it. That row's erase box also reserves the icon's slot (4px +
+    13px) whether or not the row currently has one, so an icon that disappears leaves no ghost.
+  - **The pin bar is ABOVE the icon at rows `y0+3`..`y0+5`, and it is a BAR rather than an
+    underline because below the icon is `y0+20` — inside the hero number's box.** Geometry, all of
+    it forced: the 2px card border owns `y0`..`y0+1`, one clear row at `+2`, bar `+3`..`+5`, icon
+    `+6`..`+18`, hero box from `+19`. It exists because pinned-vs-auto used to ride the **tag's
+    colour**, which a colour sprite cannot carry — so PRESENCE became the carrier instead of hue.
+    It is nested inside the icon's own `if`, which makes a stripe with no icon under it
+    structurally impossible rather than merely unlikely.
+  - **Icons are NOT gated on `usedLinkCount() > 1`; the text tag still is.** An icon is
+    personalisation — someone deliberately marked THEIR computer, and it should show with one Mac
+    connected. A redundant six-character word beside a single Mac's card is noise, and a tag that
+    only appears when the second Mac arrives is how you *notice* the second Mac arriving.
+  - **A tall session row now identifies its Mac TWICE — icon in the corner, text tag in the
+    sub-line — and that redundancy is deliberate.** Only the tag changed; the icon was added
+    beside it rather than in place of it. The two cannot disagree, because both read the same
+    `hostLinks` entry inside one synchronous draw, and the pairing is what makes the icon
+    self-teaching on the screen you look at most: you learn which sprite means which Mac from the
+    row that also spells it out.
+  - **The strongest argument for this whole feature was found by accident: the derived text tag
+    COLLIDES between similarly-named Macs.** `macTag()` takes the hostname's **last segment**, so
+    every "…-MacBook-Pro" resolves to `pro` — and this machine's two Macs are both MacBook Pros,
+    so both `used` link slots showed the tag `pro` at once. That is **not** a duplicated row: two
+    slots can only coexist with different `hostId`s (a same-`hostId` payload would have matched the
+    existing slot instead of allocating a second), so it is two genuinely distinct Macs that text
+    alone cannot tell apart. The icon can.
+  - **THREE hand-transcribed copies of the sixteen names exist, and `host/mac-emoji-check.mjs`
+    compares all three** — `firmware/deckhand_display/MacEmoji.h` (generated by `emoji2c.py`, and
+    canonical: the device can only draw what is in it), `host/mac-emoji.mjs` (the only Mac-side
+    validator), and `MAC_ICON_NAMES` in `mac-app/DeckhandMenuBar.swift` (the picker's display
+    order). Divergence is silent in **both** directions, which is why this is a check and not a
+    sentence asking for care: a name valid on the Mac and absent from the header resolves fine,
+    crosses the wire, and shows as **no icon at all** with no error on either side, while a name in
+    the header that Swift omits is simply unpickable. The check parses the file TEXT with regexes
+    (two of the three cannot be imported by node) and names the file and the direction it
+    disagrees in; it also compares its own parse of `mac-emoji.mjs` against the **imported** array,
+    so a regex that has stopped matching fails loudly instead of passing three empty lists against
+    each other. Order-only divergence fails too, and the message says plainly that it is not itself
+    a display bug — the wire carries the name, never an index — only evidence that one list was
+    edited without the others. `emoji2c.py --verify` covers the remaining edge, generator against
+    generated header.
+  - **Known art limits, measured on the panel rather than in a preview.** `laptop` and `desktop`
+    differ only in overall **brightness** (a dark slab versus a lighter grey monitor) at 13px, and
+    they are precisely the two names a MacBook Pro and a Mac Studio would reach for — pick two
+    that differ in SHAPE if the two Macs sit side by side. `anchor`, `laptop` and `desktop` are
+    low-contrast against `COLOR_BG`, and `cloud` is low-contrast against LIGHT's near-white page;
+    every shipping surface passes `COLOR_CARD`, so that only shows on the `EMOJITEST` screen, which
+    deliberately draws both backdrops. And an earlier `robot` icon was replaced by **`apple`**
+    because at 13px it read as a **cupcake** — caught on the glass, not in the 16x preview that had
+    passed it, which is the whole reason the go/no-go was a device screenshot.
+  - **`EMOJITEST [<name>|large]` puts all sixteen on BOTH backdrops**, for the same reason
+    `TAB`/`PAGE`/`KBTEST` exist: `SCREENSHOT` can only record what is currently on the glass, and
+    an alpha blend plus the `setSwapBytes` handling can only be judged where they actually have to
+    work, never on a third colour picked for convenience.
+  - **Env beats the picker, and the MENU SAYS SO rather than showing a checkmark it cannot
+    honour.** With `DECKHAND_MAC_EMOJI` set to a valid name the submenu parent reads **`Mac icon
+    (set by env)`** and every child is disabled — a checkmark a click could never move is a lie.
+    The menu bar learns both facts from the **host's heartbeat** (`icon`, already fully resolved,
+    and `iconFromEnv`), never by reading the plist or launchd's environment, which would be a third
+    source of truth after the env var and `~/.claude/deckhand-mac-emoji`. `iconFromEnv` is computed
+    by re-running the **same resolver** with the file blanked, so a typo'd env name — which
+    overrides nothing, because only a valid name wins — cannot claim an override that isn't
+    happening. The `EMOJI <name>` command is host-side only and never forwarded: the device learns
+    the icon from `hostEmoji` in the payload, the same way `FORGET` is intercepted.
+  - **A dead `macEmojiId` global was removed during this work**: it was written every tick and read
+    nowhere, while its comments described a wiring that did not exist. Declared-but-unwired state
+    whose comments claim it works is a defect class this repo has already paid for, so it is
+    deleted rather than left for the next reader to trust.
+  - **OPEN BUG, in already-merged multi-host code and NOT introduced by the icons.** After a
+    synthetic `MULTITEST` link drops (`LINK_STALE_MS`, 21s), the **two Claude usage cards freeze on
+    a wrong reading** — observed 0% "starts on use" and 4% / 31.93M tok — while the **Codex row
+    recovers correctly** with the real Mac's icon and its genuine value. `host.log` confirms the
+    real host was reporting 26–27% / 33% throughout, so the numbers on screen were never sent.
+    Reproduced across separate sessions, including after two full device reboots. Consistent with
+    `usageSourceLink` and `cxSourceLink` ending up pointing at different links after
+    `pruneStaleLinks()` and the re-merge, i.e. the `mergeUsage()`/`pruneStaleLinks()` area in
+    `deckhand_display.ino` — **not** `usage.ino`'s chrome logic, which only reads those two links.
+    Repro: `MULTITEST 2`, wait past 21s for the synthetic link to age out, `SCREENSHOT` the USAGE
+    tab, compare against the host log's own `5h=`/`7d=`/`codex=` fields for the same minute. Unfixed and
+    undiagnosed: it predates this branch and deserves its own systematic pass rather than a
+    side-quest.
   - **The host drops a device line addressed to another Mac BEFORE logging it.**
     `BLECharacteristic::notify()` iterates `getPeerDevices()` and sends per peer with **zero
     references to the server's `m_connId`** — verified in the installed library source; there is no

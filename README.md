@@ -423,6 +423,51 @@ sanitised and capped to the same 6 characters, and is taken whole rather than
 split on separators). With only one Mac connected the tag is omitted entirely,
 since it would disambiguate nothing.
 
+**Giving a Mac its own icon.** Each Mac can also carry a small 13x13 colour
+icon, which the device draws on tall session rows, both USAGE cards, the Codex
+row, SETTINGS › STATUS and the session detail card. Unlike the text tag, the
+icon shows even with **one** Mac connected — a tag that disambiguates nothing is
+noise, but an icon is yours.
+
+Two ways to set it:
+
+- **The menu-bar app**: Settings › **Mac icon**, and pick one. It takes effect on
+  the device within a tick (~5s).
+- **The environment**, which is the provisioning path — put it in the host's
+  LaunchAgent plist so it survives reinstalls:
+
+  ```xml
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DECKHAND_MAC_EMOJI</key>
+    <string>rocket</string>
+  </dict>
+  ```
+
+  (`launchctl unload`/`load` the job, or `./host/deckhand-service.sh stop` then
+  `start`, for it to be read.)
+
+The sixteen valid names:
+
+```
+rocket  moon     star     bolt
+fire    leaf     wave     anchor
+crab    laptop   desktop  cloud
+sun     cat      apple    gear
+```
+
+**`DECKHAND_MAC_EMOJI` wins over the picker.** With a valid name in the
+environment the menu's submenu reads *Mac icon (set by env)* and its entries are
+disabled, rather than offering a checkmark that a click could not move. Unset it
+if you want to choose from the menu again.
+
+An **unknown name** (a typo, or a name from a newer host than the device's
+firmware) sets no icon at all: the Mac drops it, and the device falls back to the
+text tag described above. Nothing errors, so if an icon simply never appears,
+check the spelling against the list first. `laptop` and `desktop` are the two
+that are hard to tell apart at this size — they differ mainly in brightness — so
+if both your Macs are computers, pick two shapes instead.
+
 ## Hardware
 
 | | part | what to buy |
@@ -889,7 +934,11 @@ dictation, then the controls. The top level is **actions only** — **Start / St
 Deckhand** and a **Device** submenu (which is also where **Forget** lives, since
 it is a destructive per-device action) — while every preference sits behind
 **Settings**: *Answer prompts on device*, *Colourful icon*, *Menu bar shows*,
-*Needs-input sound* and *Launch at login*. Settings stays reachable with the host
+*Needs-input sound*, *Mac icon* and *Launch at login*. *Mac icon* picks this Mac's
+13x13 icon on the device (the sixteen names are listed under *Giving a Mac its
+own icon*, in **Security of the remote**); with `DECKHAND_MAC_EMOJI` set it reads
+*Mac icon (set by env)* and its entries are disabled, since a click could not
+move that choice. Settings stays reachable with the host
 stopped, since launch-at-login and the bar's own contents are still meaningful
 choices then; Device and Answer-prompts dim with it, because neither can do
 anything without the host.
