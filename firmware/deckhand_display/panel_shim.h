@@ -162,12 +162,13 @@ private:
   bool      _swapBytes = false;
 
   // Text state. Names mirror TFT_eSPI's own members so the port reads against
-  // its source side by side. _glyphAb/_glyphBb are the font's largest ascent
-  // and descent, recomputed by setFreeFont - they set the baseline offset the
-  // free-font path adds to y, and the height of the opaque background box
-  // drawString paints.
+  // its source side by side - with one deliberate omission: there is no
+  // `_textfont`, because this surface has a single rendering path and nothing
+  // would ever read it (see setTextFont). _glyphAb/_glyphBb are the font's
+  // largest ascent and descent, recomputed by setFreeFont - they set the
+  // baseline offset the free-font path adds to y, and the height of the
+  // opaque background box drawString paints.
   const GFXfont* _gfxFont = nullptr;
-  uint8_t   _textfont = 1;
   uint16_t  _textcolor = 0xFFFF;
   uint16_t  _textbgcolor = 0x0000;
   uint8_t   _textdatum = TL_DATUM;

@@ -22,8 +22,17 @@
   #include <TFT_eSPI.h>
   TFT_eSPI tft = TFT_eSPI();
 #else
-  #include "panel_shim.h"   // arrives in Task 2
-  PanelShim tft;
+  #include "panel_shim.h"
+  // `tft` is DEFINED in panel_shim.cpp and only declared extern by
+  // panel_shim.h - deliberately not defined here as well. A second definition
+  // is a LINK error, not a compile error, so it would stay invisible until the
+  // last layout constant lands and board 2 links for the first time, and would
+  // then surface as `multiple definition of 'tft'` inside whatever unrelated
+  // change happened to be the one that completed the build. It has to live in
+  // the .cpp rather than here, because panel_shim.cpp's own primitives
+  // reference it and that file is compiled as its own translation unit
+  // regardless of what any .ino includes.
+
   // Most recent once-per-second tick's wall time (render + each render's own
   // flush), measured in loop() and read back by SHIMBENCH - see the note at
   // its measurement site for why this is a real recorded value rather than

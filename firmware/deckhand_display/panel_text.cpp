@@ -73,14 +73,25 @@
 // calls a single render pass makes and drown the log they are meant to stand
 // out in.
 // ---------------------------------------------------------------------------
-static uint16_t warnedDatums = 0;    // bit N = datum N already reported
+// One bit per POSSIBLE datum, not per datum we expect: a datum is a uint8_t,
+// so 256 bits (32 bytes of RAM) covers every value that can reach here with no
+// aliasing at all. A narrower map has to fold the tail onto one shared bit,
+// and then two different wrong datums silence each other - which defeats the
+// entire purpose of a warning whose job is to make a wrong datum announce
+// itself. 32 bytes is cheaper than the ambiguity.
+static uint32_t warnedDatums[8] = { 0 };
+// Separate flags per MESSAGE, not one shared "something was missing" flag.
+// The two no-font paths say different things (one returns a width of 0, the
+// other draws nothing), so sharing a flag means whichever fires first
+// permanently suppresses the other and the log describes only half the fault.
 static bool warnedNumberedFont = false;
-static bool warnedNoFont = false;
+static bool warnedNoFontWidth = false;
+static bool warnedNoFontDraw = false;
 
 static void warnDatumOnce(uint8_t d) {
-  uint16_t bit = (d < 16) ? (uint16_t) (1u << d) : 0x8000u;
-  if (warnedDatums & bit) return;
-  warnedDatums |= bit;
+  uint32_t bit = 1u << (d & 31);
+  if (warnedDatums[d >> 5] & bit) return;
+  warnedDatums[d >> 5] |= bit;
   Serial.printf("PANEL TEXT: datum %u is not implemented - drawing top-left. "
                 "Layout at this call site is WRONG.\n", d);
 }
@@ -124,7 +135,6 @@ static uint16_t decodeUtf8(const uint8_t* buf, uint16_t* index, uint16_t remaini
 void PanelShim::setFreeFont(const GFXfont* f) {
   if (!f) { setTextFont(1); return; }        // upstream's null guard, same fallback
 
-  _textfont = 1;
   _gfxFont = f;
   _glyphAb = 0;
   _glyphBb = 0;
@@ -146,7 +156,14 @@ void PanelShim::setFreeFont(const GFXfont* f) {
 // surface blank: text vanishing with no explanation is the one outcome worse
 // than text in the wrong face.
 void PanelShim::setTextFont(uint8_t f) {
-  _textfont = (f > 0 && f <= 8) ? f : 1;
+  // The requested number is deliberately NOT stored. TFT_eSPI keeps a
+  // `textfont` member because it picks between several rendering paths from
+  // it; here there is exactly one path, and the only state that changes any
+  // behaviour is `_gfxFont` going null. A stored-but-never-read number whose
+  // neighbours' comments imply it is live is the defect class this repo has
+  // already paid for once (the dead `macEmojiId`), so it is left out rather
+  // than kept for symmetry with a library whose reason for having it does not
+  // apply.
   _gfxFont = nullptr;
   if (!warnedNumberedFont) {
     warnedNumberedFont = true;
@@ -174,9 +191,10 @@ void PanelShim::setTextDatum(uint8_t d) {
 // ---------------------------------------------------------------------------
 int PanelShim::textWidth(const char* string) {
   if (!string || !_gfxFont) {
-    if (!_gfxFont && !warnedNoFont) {
-      warnedNoFont = true;
-      Serial.println("PANEL TEXT: textWidth/drawString with no free font set - returning 0.");
+    if (!_gfxFont && !warnedNoFontWidth) {
+      warnedNoFontWidth = true;
+      Serial.println("PANEL TEXT: textWidth with no free font set - measuring 0, so every "
+                     "lane and clear box derived from it will be wrong.");
     }
     return 0;
   }
@@ -259,9 +277,9 @@ int PanelShim::drawGlyph(uint16_t uniCode, int x, int y) {
 void PanelShim::drawString(const char* string, int poX, int poY) {
   if (!string || !*string) return;
   if (!_gfxFont) {
-    if (!warnedNoFont) {
-      warnedNoFont = true;
-      Serial.println("PANEL TEXT: textWidth/drawString with no free font set - drawing nothing.");
+    if (!warnedNoFontDraw) {
+      warnedNoFontDraw = true;
+      Serial.println("PANEL TEXT: drawString with no free font set - drawing nothing.");
     }
     return;
   }
