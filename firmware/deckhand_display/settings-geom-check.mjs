@@ -227,6 +227,12 @@ for (const b of [1, 2]) {
   console.log(`pager ${c.CONTENT_Y}..${c.CONTENT_Y + c.PAGER_H - 1} (key ${c.PAGER_BTN_W}x${pagerKeyH}), page region ${c.PAGE_TOP}..${contentBottom} = ${region}px`);
   chk(c.PAGE_TOP === c.CONTENT_Y + c.PAGER_H + 4, `PAGE_TOP ${c.PAGE_TOP} == CONTENT_Y + PAGER_H + 4`);
   chk(pagerKeyH >= c.TAP_MIN, `pager key ${pagerKeyH}px tall >= TAP_MIN ${c.TAP_MIN}`);
+  // ITS WIDTH TOO. Only the height was checked, which geom-sweep.mjs surfaced as
+  // PAGER_BTN_W being unguarded on both boards - and a tap floor that holds in one
+  // dimension is not a tap floor, as this file's own history with the history chip
+  // (40 wide in one state, 32 in the other) already showed.
+  chk(c.PAGER_BTN_W >= c.TAP_MIN, `pager key ${c.PAGER_BTN_W}px wide >= TAP_MIN ${c.TAP_MIN}`);
+  chk(c.PAGER_BTN_X0 > 0, `pager keys are inset ${c.PAGER_BTN_X0}px from each edge (0 or less draws off the panel)`);
   {
     const cy = c.CONTENT_Y + Math.floor(c.PAGER_H / 2);
     chk(c.CONTENT_Y + 4 + pagerKeyH <= c.PAGE_TOP, `pager key ends ${c.CONTENT_Y + 4 + pagerKeyH} inside the band cleared to ${c.PAGE_TOP}`);
@@ -265,6 +271,10 @@ for (const b of [1, 2]) {
     const devLast = Math.max(...dev.map(x => x[2]));
     chk(devLast <= devCeil, `device card: last band ends +${devLast} <= +${devCeil} (2px border owns +${c.DEV_CARD_H - 2}..+${c.DEV_CARD_H - 1})`);
     chk(c.DEV_CARD_Y + c.DEV_CARD_H <= contentBottom, `device card ends ${c.DEV_CARD_Y + c.DEV_CARD_H} inside the region (${contentBottom})`);
+    // Its TOP, which nothing checked: only the bottom edge was bounded, so the card
+    // could start above PAGE_TOP and be drawn over the pager it is supposed to sit
+    // under.
+    chk(c.DEV_CARD_Y >= c.PAGE_TOP, `device card starts ${c.DEV_CARD_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
     // The battery reading is right-aligned and padded to 15 characters
     // ("100% 4.20V ~99h"); "Battery" sits at CARD_X + PAD + 20.
     const readingW = textWidth("100% 4.20V ~99h", T_BODY);
@@ -324,17 +334,62 @@ for (const b of [1, 2]) {
     const below = region - used;
     console.log(`  page 1: ${rows}px of rows + ${c.P1_TOP} top + 3x${c.P1_GAP} = ${used} of ${region}, ${below} below`);
     chk(below > 0, `page 1: toggle row ends ${c.P1_SOUND_Y + c.P1_SOUND_H}, ${below}px above the footer (must be > 0, or MUTE/NORMAL/LIGHT read as the status line)`);
+    // THE ASSERTION ABOVE TESTS A RE-DERIVED TOTAL, NOT THE ROWS THE DEVICE ACTUALLY
+    // DRAWS AT, and that is exactly the gap geom-sweep.mjs found: P1_BRIGHT_Y,
+    // P1_SLEEP_Y, P1_VOL_Y and P1_SOUND_Y are the four y's every draw site and hit
+    // test uses, and all four could move 16px with nothing failing, because `used`
+    // is computed from P1_TOP/P1_GAP instead. Same shape as the page-2 chain the
+    // preprocessor-blind parser used to mis-read: a sum that agrees with the layout
+    // only as long as nobody breaks the chain. So the chain itself is pinned, and
+    // the last row's own bottom edge - the thing the message claims - is asserted.
+    const p1Y = [c.P1_BRIGHT_Y, c.P1_SLEEP_Y, c.P1_VOL_Y, c.P1_SOUND_Y];
+    const p1H = [c.STEPPER_CARD_H, c.STEPPER_CARD_H, c.STEPPER_CARD_H, c.P1_SOUND_H];
+    const p1N = ["BRIGHTNESS", "SLEEP AFTER", "VOLUME", "SOUND/FLIP/THEME"];
+    chk(p1Y[0] === c.PAGE_TOP + c.P1_TOP, `page 1: ${p1N[0]} at ${p1Y[0]} == PAGE_TOP + P1_TOP (${c.PAGE_TOP + c.P1_TOP})`);
+    for (let i = 1; i < 4; i++)
+      chk(p1Y[i] === p1Y[i - 1] + p1H[i - 1] + c.P1_GAP,
+          `page 1: ${p1N[i]} at ${p1Y[i]} == ${p1N[i - 1]} (${p1Y[i - 1]}) + ${p1H[i - 1]} + gap ${c.P1_GAP}`);
+    chk(p1Y[3] + p1H[3] <= contentBottom,
+        `page 1: the toggle row's own bottom edge ${p1Y[3] + p1H[3]} is inside the region (${contentBottom})`);
     chk(c.P1_GAP <= c.P1_SOUND_H, `page 1 gap ${c.P1_GAP} <= its shortest row ${c.P1_SOUND_H} (a wider gap stops reading as one list)`);
     chk(c.P1_SOUND_H >= c.TAP_MIN, `toggle row ${c.P1_SOUND_H} >= TAP_MIN ${c.TAP_MIN}`);
+    // THE THREE CONTROLS THEMSELVES, measured from the constants the draw sites and
+    // the hit tests actually use (CARD_X / P1_FLIP_X / P1_THEME_X, each P1_THIRD_W
+    // wide - settings.ino lines 263/267/281 and the three touch branches). Only a
+    // locally re-derived `third` was checked before, so all three constants were
+    // unread by any checker: SOUND, FLIPPED and the theme button could have
+    // overlapped each other or run off the card and nothing would have said so.
+    // They are also the touch boundaries - `sx < P1_FLIP_X`, `sx < P1_THEME_X`,
+    // `sx >= P1_THEME_X` - so a control overlapping its neighbour is a tap landing
+    // on the wrong setting, not merely a cosmetic collision.
     const third = Math.floor((c.CARD_W - 16) / 3);
-    for (const t of TOGGLES) chk(textWidth(t, T_BODY) + 8 <= third, `toggle label "${t}" ${textWidth(t, T_BODY)}px inside a ${third}px third`);
+    chk(c.P1_THIRD_W === third, `P1_THIRD_W ${c.P1_THIRD_W} == floor((CARD_W - 16) / 3) = ${third}`);
+    const cols = [["SOUND", c.CARD_X], ["FLIP", c.P1_FLIP_X], ["THEME", c.P1_THEME_X]];
+    for (let i = 1; i < cols.length; i++)
+      chk(cols[i][1] >= cols[i - 1][1] + c.P1_THIRD_W,
+          `toggle row: ${cols[i][0]} starts ${cols[i][1]}, clear of ${cols[i - 1][0]} ending ${cols[i - 1][1] + c.P1_THIRD_W - 1}`);
+    chk(cols[2][1] + c.P1_THIRD_W <= c.CARD_X + c.CARD_W,
+        `toggle row: THEME ends ${cols[2][1] + c.P1_THIRD_W - 1}, inside the card's right edge (${c.CARD_X + c.CARD_W - 1})`);
+    chk(c.P1_THIRD_W >= c.TAP_MIN, `toggle ${c.P1_THIRD_W}px wide >= TAP_MIN ${c.TAP_MIN}`);
+    for (const t of TOGGLES) chk(textWidth(t, T_BODY) + 8 <= c.P1_THIRD_W, `toggle label "${t}" ${textWidth(t, T_BODY)}px inside a ${c.P1_THIRD_W}px third`);
   }
 
   // ================= SETTINGS page 2: actions =================
   {
     const hintY = c.P2_PWR_Y + c.P2_BTN_H + c.SP_3;
     const hintEnd = hintY + Math.floor(lineH(T_META) / 2);
-    console.log(`  page 2: buttons ${c.P2_MIC_Y}..${c.P2_PWR_Y + c.P2_BTN_H - 1} (h ${c.P2_BTN_H}), hint inks ..${hintEnd}`);
+    // FOUR buttons on board 1, THREE on board 2 - which has no capture path, so no
+    // MIC TEST and no slot reserved for one (`#if BOARD_HAS_MIC` in the .ino, which
+    // geom-common.mjs now honours; it used to read the no-mic arm for both boards
+    // and put board 1's last two buttons a whole button too high).
+    const p2 = c.P2_MIC_Y === undefined
+      ? [["CALIBRATE", c.P2_CAL_Y], ["RESET PAIRING", c.P2_PAIR_Y], ["POWER OFF", c.P2_PWR_Y]]
+      : [["MIC TEST", c.P2_MIC_Y], ["CALIBRATE", c.P2_CAL_Y], ["RESET PAIRING", c.P2_PAIR_Y], ["POWER OFF", c.P2_PWR_Y]];
+    console.log(`  page 2: ${p2.length} buttons ${p2[0][1]}..${c.P2_PWR_Y + c.P2_BTN_H - 1} (h ${c.P2_BTN_H}), hint inks ..${hintEnd}`);
+    chk(p2[0][1] === c.PAGE_TOP + c.P2_TOP, `page 2: ${p2[0][0]} at ${p2[0][1]} == PAGE_TOP + P2_TOP (${c.PAGE_TOP + c.P2_TOP})`);
+    for (let i = 1; i < p2.length; i++)
+      chk(p2[i][1] === p2[i - 1][1] + c.P2_BTN_H + c.P2_GAP,
+          `page 2: ${p2[i][0]} at ${p2[i][1]} == ${p2[i - 1][0]} (${p2[i - 1][1]}) + ${c.P2_BTN_H} + gap ${c.P2_GAP}`);
     chk(c.P2_BTN_H >= c.TAP_MIN, `action button ${c.P2_BTN_H}px tall >= TAP_MIN ${c.TAP_MIN}`);
     chk(hintEnd < contentBottom, `page 2 hint ends ${hintEnd} above the footer ${contentBottom}`);
     for (const l of P2_LABELS) chk(textWidth(l, T_BODY) + 2 * c.SP_3 <= c.CARD_W, `action label "${l}" ${textWidth(l, T_BODY)}px inside the ${c.CARD_W}px button`);
@@ -347,6 +402,12 @@ for (const b of [1, 2]) {
     console.log(`  page 3: ANY at ${c.P3_ANY_Y}, ${MAX_HOSTS} Macs end ${last} of ${contentBottom}`);
     chk(last <= contentBottom, `page 3: ANY + ${MAX_HOSTS} Macs end ${last} inside the region (${contentBottom})`);
     chk(c.H_ROW >= c.TAP_MIN, `list row ${c.H_ROW} >= TAP_MIN ${c.TAP_MIN}`);
+    // The ANY MAC row sits above the list and nothing separated the two: only the
+    // list's own end was bounded, so P3_ANY_Y and P3_LIST_Y were both unguarded and
+    // the first Mac row could have been drawn straight over "ANY MAC".
+    chk(c.P3_ANY_Y >= c.PAGE_TOP, `page 3: ANY row at ${c.P3_ANY_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
+    chk(c.P3_LIST_Y >= c.P3_ANY_Y + c.H_ROW + c.SP_1,
+        `page 3: list starts ${c.P3_LIST_Y}, clear of the ANY row (${c.P3_ANY_Y}..${c.P3_ANY_Y + c.H_ROW - 1}) plus SP_1`);
     chk(c.P3_X_W >= 40, `the "forget" x zone is ${c.P3_X_W}px wide`);
   }
 
@@ -371,6 +432,24 @@ for (const b of [1, 2]) {
       chk(textWidth(yes, T_BODY) + 8 <= c.CFM_BTN_W, `dialog action "${yes}" ${textWidth(yes, T_BODY)}px inside the ${c.CFM_BTN_W}px button`);
     }
     chk(textWidth("CANCEL", T_BODY) + 8 <= c.CFM_BTN_W, `dialog "CANCEL" inside the ${c.CFM_BTN_W}px button`);
+    // THE TWO BUTTONS SIDE BY SIDE, which nothing checked in x at all: CFM_NO_X,
+    // CFM_YES_X and CFM_BTN_W were literals at their call site until this port and
+    // then unread by any checker, so the pair could have overlapped in the middle of
+    // a modal - and both are also touch targets, tested by the same three numbers
+    // (handleSettingsTouch). The fit is EXACT by construction (CFM_BTN_W is
+    // (CARD_W - 3*SP_3)/2), so this is a 1px-tight assertion rather than a
+    // formality.
+    chk(c.CFM_NO_X + c.CFM_BTN_W < c.CFM_YES_X,
+        `dialog CANCEL ${c.CFM_NO_X}..${c.CFM_NO_X + c.CFM_BTN_W - 1} clears the action button at ${c.CFM_YES_X}`);
+    chk(c.CFM_YES_X + c.CFM_BTN_W <= c.CARD_X + c.CARD_W - c.SP_3,
+        `dialog action button ends ${c.CFM_YES_X + c.CFM_BTN_W}, inside the card's text lane (${c.CARD_X + c.CARD_W - c.SP_3})`);
+    chk(c.CFM_NO_X >= c.CARD_X + c.SP_3, `dialog CANCEL starts ${c.CFM_NO_X}, inside the card's left pad (${c.CARD_X + c.SP_3})`);
+    chk(c.CFM_BTN_W >= c.TAP_MIN, `dialog button ${c.CFM_BTN_W}px wide >= TAP_MIN ${c.TAP_MIN}`);
+    // H_BTN is the SHARED button height - this dialog, the keyboard's action row and
+    // the voice-confirm SEND all use it - and nothing anywhere asserted it clears
+    // the touch floor.
+    chk(c.H_BTN >= c.TAP_MIN, `H_BTN ${c.H_BTN} (every shared button's height) >= TAP_MIN ${c.TAP_MIN}`);
+    chk(c.CFM_Y >= c.PAGE_TOP, `dialog starts ${c.CFM_Y}, at or below PAGE_TOP ${c.PAGE_TOP} (it must not cover the pager)`);
     // Sized for a two-line note whether or not today's strings need one.
     const twoLineBlock = lineH(T_HEAD) + c.SP_2 - 2 + lineH(T_BODY) + c.SP_2 + 2 * lineH(T_META);
     chk(twoLineBlock <= avail, `dialog holds its worst block (${twoLineBlock}px: title + emph + 2 note lines) in ${avail}px`);
@@ -457,6 +536,12 @@ for (const b of [1, 2]) {
     const listH = (c.HIST_JUMP_Y - 4) - c.HIST_TOP;
     const listLines = Math.floor(listH / c.HIST_LINE_H);
     console.log(`    list ${listH}px = ${listLines} lines of ${c.HIST_LINE_H}`);
+    // The header's own text row, which nothing measured vertically - only the x
+    // separation of the name and the position field was checked. It is TL/TR text
+    // above the rule, so it has to clear it.
+    chk(c.HIST_HDR_TEXT_Y >= 2, `history header text at ${c.HIST_HDR_TEXT_Y}, inside the top of the screen`);
+    chk(c.HIST_HDR_TEXT_Y + lineH(T_META) <= c.HIST_RULE_Y,
+        `history header text inks ${c.HIST_HDR_TEXT_Y}..${c.HIST_HDR_TEXT_Y + lineH(T_META) - 1}, clear of the rule at ${c.HIST_RULE_Y}`);
     chk(c.HIST_TOP > c.HIST_RULE_Y, `list starts ${c.HIST_TOP} below the rule ${c.HIST_RULE_Y}`);
     chk(listLines >= 8, `the list holds ${listLines} lines (an entry is a label plus at least one line, so this bounds entries per page)`);
     const trackY = c.HIST_JUMP_Y + Math.floor((c.HIST_JUMP_TAP_H - c.HIST_JUMP_H) / 2);

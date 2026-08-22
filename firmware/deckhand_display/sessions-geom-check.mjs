@@ -196,6 +196,18 @@ for (const b of [1, 2]) {
       `SESSION_LARGE_MIN_H ${c.SESSION_LARGE_MIN_H} == 56 + 2*AIR(${c.SESSION_AIR})`);
   m = `ladder floor ${c.SESSION_ROW_H_MIN} >= SESSION_SUBC_Y + 15 = ${c.SESSION_SUBC_Y + 15} (least legal compact row)`;
   chk(c.SESSION_ROW_H_MIN >= c.SESSION_SUBC_Y + 15, m, isKnown(b, m));
+  // The compact pill against the LADDER FLOOR rather than only against the rungs
+  // the ladder happens to produce. Added because geom-sweep.mjs found
+  // SESSION_PILLC_Y completely unguarded on board 2: its ladder never emits a row
+  // under SESSION_LARGE_MIN_H, so the per-rung check below never runs there at
+  // all - yet drawSessionRow draws the compact layout at ANY height below that
+  // threshold, and SESSION_ROW_H_MIN is the shortest height it can be handed. A
+  // constant that is only checked on the boards whose ladder reaches it is not
+  // checked.
+  chk(c.SESSION_PILLC_Y + 17 <= c.SESSION_ROW_H_MIN - 3,
+      `compact pill +${c.SESSION_PILLC_Y}..+${c.SESSION_PILLC_Y + 17} clears the border of even the shortest legal row (${c.SESSION_ROW_H_MIN})`);
+  chk(c.SESSION_PILLC_Y >= c.BORDER_CARD,
+      `compact pill starts +${c.SESSION_PILLC_Y} inside the interior (border owns +0..+${c.BORDER_CARD - 1})`);
   chk(c.SESSION_ROW_H_MAX >= c.SESSION_TITLE_MIN_H,
       `ladder cap ${c.SESSION_ROW_H_MAX} >= the title threshold ${c.SESSION_TITLE_MIN_H} (or no row ever gets a title)`);
 
@@ -259,6 +271,16 @@ for (const b of [1, 2]) {
     console.log(`    ${lbl} lane ${lane}px: 22-char name fits at ${rung ? `font ${rung}` : "no rung (truncated at T_BODY)"}` +
                 `; longest whole name T_HEAD ${longest(T_HEAD)} / T_BODY ${longest(T_BODY)} chars`);
   }
+  // THE TAG'S OWN VERTICAL BAND. Nothing measured it before - the name lane above
+  // is an x-wise question, and geom-sweep.mjs reported SESSION_TAG_Y as unguarded
+  // on both boards as a result. It is drawn TL_DATUM inside the name band on a tall
+  // row, so it has to clear the top border and the line below it, which is the
+  // title on a title row and the sub-line on a sub row.
+  chk(c.SESSION_TAG_Y >= c.BORDER_CARD,
+      `tag row +${c.SESSION_TAG_Y} is inside the interior (border owns +0..+${c.BORDER_CARD - 1})`);
+  for (const [n, below] of [["title", c.SESSION_TITLE_Y], ["sub-line", c.SESSION_SUB2_Y]])
+    chk(c.SESSION_TAG_Y + lineH(T_META) <= below,
+        `tag inks +${c.SESSION_TAG_Y}..+${c.SESSION_TAG_Y + lineH(T_META) - 1}, clear of the ${n} at +${below}`);
   // The accent chevron sits at the row's right edge and must not be walked into.
   chk(tagRight + 4 <= c.SESSION_ROW_X + c.SESSION_ROW_W - 8,
       `tag right edge ${tagRight} clears the chevron's ink at ${c.SESSION_ROW_X + c.SESSION_ROW_W - 8}..${c.SESSION_ROW_X + c.SESSION_ROW_W - 2}`);
@@ -280,6 +302,12 @@ for (const b of [1, 2]) {
   const durBoxLeft = c.SESSION_ROW_X + c.SESSION_ROW_W - 16 - textWidth("0000000", T_META) - 1;
   chk(durBoxLeft - nameX - 4 > 0,
       `compact sub-line lane ${durBoxLeft - nameX - 4}px stops 4px short of the duration's clear box at x=${durBoxLeft}`);
+  // The duration on a large row is drawn at rowH - SESSION_DUR_UP through
+  // drawIfChanged, which clears y-1 .. y+13 - so the offset has to leave 16 rows
+  // above the row's own 2px border or that clear box eats it. Nothing checked the y
+  // at all before; only the duration's x lane was measured.
+  chk(c.SESSION_DUR_UP >= lineH(T_META) + 3,
+      `duration clear box ends rowH-${c.SESSION_DUR_UP - lineH(T_META)}, clear of the border at rowH-2 (SESSION_DUR_UP ${c.SESSION_DUR_UP})`);
   chk(c.SESSION_OVERFLOW_H >= lineH(T_META) + 2,
       `"+N more" strip reserves ${c.SESSION_OVERFLOW_H} for a ${lineH(T_META)}px line plus its clear margin`);
 
@@ -296,6 +324,17 @@ for (const b of [1, 2]) {
       `TYPE chip +2..+${2 + c.MSG_BTN_H - 1} in the header row clears the card at +${c.DETAIL_CARD_DY}`);
   chk(c.MSG_BTN_H + 2 <= c.DETAIL_HEAD_H,
       `TYPE chip (${c.MSG_BTN_W}x${c.MSG_BTN_H}) fits the ${c.DETAIL_HEAD_H}px header touch band`);
+  // The header row holds exactly two things and they are anchored to opposite
+  // edges: "< Back" at CARD_X, the TYPE chip right-aligned at CARD_X + CARD_W -
+  // MSG_BTN_W (msgBtnX() in sessions.ino). Nothing checked that they clear each
+  // other - the width was only ever printed - so a chip wide enough to reach the
+  // label would have drawn straight over it.
+  chk(c.CARD_X + c.CARD_W - c.MSG_BTN_W > c.CARD_X + textWidth("< Back", T_BODY),
+      `TYPE chip starts x=${c.CARD_X + c.CARD_W - c.MSG_BTN_W}, "< Back" ends x=${c.CARD_X + textWidth("< Back", T_BODY)}`);
+  chk(textWidth("TYPE", T_BODY) + 8 <= c.MSG_BTN_W,
+      `"TYPE" ${textWidth("TYPE", T_BODY)}px inside the ${c.MSG_BTN_W}px chip`);
+  chk(c.DETAIL_BACK_Y >= c.BORDER_CARD,
+      `"< Back" starts +${c.DETAIL_BACK_Y}, clear of the header row's top`);
   chk(c.DETAIL_BACK_Y + lineH(T_BODY) <= c.DETAIL_HEAD_H,
       `"< Back" at +${c.DETAIL_BACK_Y} inks to +${c.DETAIL_BACK_Y + lineH(T_BODY) - 1}, inside the header band`);
   // The running cursor in drawSessionDetail, worst case: title AND last prompt

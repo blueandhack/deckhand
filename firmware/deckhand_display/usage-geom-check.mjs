@@ -27,11 +27,25 @@
 // The textWidth implementation, the header parser and the panel table are shared
 // with sessions-geom-check.mjs (geom-common.mjs) - one copy of the measurement
 // rule, checked once against the device's own numbers.
-import { consts, PANEL, preflight, textWidth } from "./geom-common.mjs";
+import { consts, DIR, lineH, PANEL, preflight, textWidth } from "./geom-common.mjs";
+import fs from "fs";
 preflight();
 
-// --- board constants, parsed from the headers so this cannot drift ---
-const B = { 1: consts("board_e32r28t.h"), 2: consts("board_es3c35p.h") };
+// LOGO_SIZE is a #define rather than a const int, so it is read from the art
+// header the same way settings-geom-check.mjs reads KB_MAX_BYTES out of the host -
+// from the file that owns it, not from a number copied over here.
+const LOGO_SIZE = +fs.readFileSync(`${DIR}/DeckhandLogo.h`, "utf8").match(/#define\s+LOGO_SIZE\s+(\d+)/)[1];
+
+// --- board constants, parsed from the real source so this cannot drift ---
+// The board header FIRST, then deckhand_display.ino seeded with it - the order the
+// compiler sees, and the same order the two sibling checkers use. This file read the
+// header ALONE until the waiting-screen assertions were added: every USAGE-tab
+// offset is a header constant, but the WAIT_* column is derived in the .ino, and a
+// checker that never parses that file cannot see it. No header constant is
+// redefined there, so nothing this file already asserted moved.
+const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
+const B = {};
+for (const b of [1, 2]) B[b] = consts("deckhand_display.ino", consts(HDR[b]));
 
 // BOARD 1'S CARD IS PACKED WITH NO SLACK AT ALL, and three of its bands' clear
 // boxes therefore overlap their neighbour's. They are harmless in themselves -
@@ -45,12 +59,38 @@ const B = { 1: consts("board_e32r28t.h"), 2: consts("board_es3c35p.h") };
 // every band disjoint by 8px, so this list must stay board-1-only - a board-2
 // entry appearing here means a layout change gave up the clearance rather than
 // keeping it.
+//
+// THE TOLERATED GAP IS THE EXACT DOCUMENTED ONE, NOT "ANY OVERLAP", and it was a
+// list of pair names until geom-sweep.mjs pointed out what that cost: a name-keyed
+// allowance is magnitude-blind, so CARD_BAR_Y could move 16px in either direction
+// on board 1 and the only assertions that noticed were these three, which tolerated
+// whatever number came out. An allowance that absorbs an arbitrary amount of
+// movement is not a documented shortfall, it is a hole with a comment over it.
+// Keyed by the gap itself, a perturbed offset produces a different gap and fails.
 const KNOWN_OVERLAPS = {
-  1: ["hero box -> pace bar clear", "pace bar clear -> stats clear",
-      "stats clear -> foot clear"],
-  2: [],
+  1: {
+    "hero box -> pace bar clear": -2,
+    "pace bar clear -> stats clear": -3,
+    "stats clear -> foot clear": -1,
+  },
+  2: {},
 };
 
+// THIS CHECKER CURRENTLY REPORTS ONE REAL FAILURE, and that is the honest state
+// rather than an oversight. The waiting-screen assertions added below found a
+// 4px collision on board 2 (its logo ends at row 151 and the wordmark's opaque
+// background box starts at 148), which is a genuine layout defect in a surface no
+// checker covered before. It is NOT suppressed into a KNOWN list - those record
+// board-1 compromises accepted on purpose, and writing a board-2 regression into
+// one would be exactly the lie that structure exists to prevent - and it is not
+// fixed here either, because the fix is a board-header constant and this pass is
+// forbidden from touching one. So the checker exits 1 until someone moves
+// WAIT_NAME_Y (see the note at the assertion).
+//
+// The count is stated so the SELFTEST still has teeth: an injected fault has to
+// produce MORE failures than the ones already standing, or a blind checker would
+// pass its own selftest on the back of a pre-existing failure.
+const BASELINE_FAILURES = 1;
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0;
 let known = 0;
@@ -111,7 +151,7 @@ for (const b of [1, 2]) {
     const gap = bands[i][1] - bands[i - 1][2] - 1;
     const pair = `${bands[i - 1][0]} -> ${bands[i][0]}`;
     chk(gap >= 0, `${pair} gap ${gap} (negative = clear box eats its neighbour)`,
-        KNOWN_OVERLAPS[b].includes(pair));
+        KNOWN_OVERLAPS[b][pair] === gap);
   }
   // --- label row x-wise: label text vs the Mac icon ---
   for (const L of ["SESSION - 5 HOUR WINDOW", "WEEK - 7 DAY, ALL MODELS"]) {
@@ -155,10 +195,62 @@ for (const b of [1, 2]) {
   chk(textWidth("SESSIONS", 1) < tabW - 16, `tab label "SESSIONS" ${textWidth("SESSIONS", 1)}px inside a ${tabW}px tab`);
   const grp = 6 + 3 + textWidth("REC", 1);
   chk(grp <= c.TAB_REC_W, `REC group ${grp}px inside the ${c.TAB_REC_W}px slot`);
+
+  // --- the STANDALONE WAITING SCREEN, which lives on this tab ---
+  //
+  // WHY IT IS CHECKED HERE. renderUsageTab bails on !everReceived and
+  // drawWaitingScreen owns the content area instead, so this surface is the USAGE
+  // tab's other half - and it is the FIRST thing anyone sees. Nothing measured it
+  // until geom-sweep.mjs reported all seven WAIT_* offsets as read by no checker
+  // at all.
+  //
+  // Every band is a TC_DATUM top plus a registry cell height, which on this
+  // hardware is exactly what gets painted: board 2's drawString fills ONE opaque
+  // box for the whole string before any glyph, from the y given down by
+  // (ascent + descent) * size - so an overlapping band does not merely crowd its
+  // neighbour, it ERASES it. The logo is 96px on both boards and is drawn FIRST,
+  // so the wordmark below it wins any overlap.
+  const wait = [
+    ["logo", c.WAIT_LOGO_Y, c.WAIT_LOGO_Y + LOGO_SIZE - 1],
+    ["wordmark", c.WAIT_NAME_Y, c.WAIT_NAME_Y + lineH(4) - 1],
+    ["device id", c.WAIT_ID_Y, c.WAIT_ID_Y + lineH(1) - 1],
+    ["message 1", c.WAIT_MSG_Y, c.WAIT_MSG_Y + lineH(2) - 1],
+    ["message 2", c.WAIT_MSG2_Y, c.WAIT_MSG2_Y + lineH(2) - 1],
+    ["command panel", c.WAIT_CMD_Y, c.WAIT_CMD_Y + c.WAIT_CMD_H - 1],
+  ];
+  for (const [n, a, z] of wait) console.log(`    wait ${n.padEnd(14)} ${a}..${z}`);
+  chk(wait[0][1] >= c.CONTENT_Y, `waiting screen starts ${wait[0][1]} at or below CONTENT_Y ${c.CONTENT_Y}`);
+  for (let i = 1; i < wait.length; i++) {
+    const gap = wait[i][1] - wait[i - 1][2] - 1;
+    // BOARD 2 FAILS THE FIRST OF THESE, and it is a real defect rather than a
+    // checker artefact: WAIT_LOGO_Y follows CONTENT_Y (44 -> 56) while every
+    // offset below it - WAIT_NAME_Y, WAIT_ID_Y, WAIT_MSG_Y, WAIT_MSG2_Y,
+    // WAIT_CMD_Y - is still board 1's literal, so the column below the logo was
+    // never re-derived for the taller panel. The logo therefore ends at 151
+    // against a wordmark box starting at 148 and loses its bottom 4 rows, and the
+    // whole column stops at 284 of a 462px content area. The header's own comment
+    // says "the 96px logo sets everything below it", which is the fix:
+    // WAIT_NAME_Y = WAIT_LOGO_Y + LOGO_SIZE + 8 (160 on board 2, unchanged 148 on
+    // board 1) with the rest of the column following it down.
+    chk(gap >= 0, `wait: ${wait[i - 1][0]} -> ${wait[i][0]} gap ${gap} (negative = the later draw erases the earlier)`);
+  }
+  chk(wait[wait.length - 1][2] < contentBottom,
+      `waiting column ends ${wait[wait.length - 1][2]}, inside contentBottom ${contentBottom} (${contentBottom - 1 - wait[wait.length - 1][2]}px spare)`);
+  chk(lineH(1) + 4 <= c.WAIT_CMD_H, `command panel ${c.WAIT_CMD_H}px holds a ${lineH(1)}px line with 2px top and bottom`);
+  // The real strings, from waitingMessage(): the widest of each kind.
+  for (const t of ["open DeckhandBLE.app", "./install.sh"])
+    chk(textWidth(t, 1) <= c.CARD_W - 8, `command "${t}" ${textWidth(t, 1)}px inside the ${c.CARD_W - 8}px panel lane`);
+  for (const t of ["Waiting for the first update", "Connect USB to your Mac", "Start Deckhand on"])
+    chk(textWidth(t, 2) < W - 8, `waiting line "${t}" ${textWidth(t, 2)}px inside the ${W}px panel`);
+  chk(textWidth("DECKHAND", 4) < W - 8, `wordmark ${textWidth("DECKHAND", 4)}px inside the ${W}px panel`);
 }
 console.log(`\n${fail} failures, ${known} known-and-documented board-1 overlaps`);
 if (SELFTEST) {
-  if (fail === 0) { console.log("SELFTEST FAILED: the checker did not notice a moved row"); process.exit(1); }
+  if (fail <= BASELINE_FAILURES) {
+    console.log(`SELFTEST FAILED: the checker did not notice a moved row ` +
+                `(${fail} failure(s), and ${BASELINE_FAILURES} already stand without any fault injected)`);
+    process.exit(1);
+  }
   console.log(`selftest ok - the injected fault produced ${fail} failure(s)`);
   process.exit(0);
 }
