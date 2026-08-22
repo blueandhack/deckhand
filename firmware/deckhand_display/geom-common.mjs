@@ -177,10 +177,24 @@ function evalInt(expr) {
 // `const int` found inside one throws. Defaulting is precisely how a parser reads
 // the wrong arm, and a loud refusal is what stops the next conditional constant
 // repeating the bug this comment exists because of.
+// ART HEADERS whose #defines the sketch's own constants are derived FROM. These
+// are board-independent (the artwork is one size on both panels) but they must be
+// in the constant table, or an expression naming one evaluates to NaN and every
+// assertion downstream of it silently reports NaN instead of failing on a real
+// number. That is not hypothetical: WAIT_NAME_Y is derived from LOGO_SIZE, and
+// before this the whole waiting-screen column came out NaN - which LOOKS like a
+// failure but is a parse gap, and the two are worth telling apart immediately.
+// Add a header here the moment a sketch constant is derived from one of its
+// #defines; parsing it rather than hardcoding the number is what makes a resized
+// asset fail the check instead of passing it.
+const ART_HEADERS = ["DeckhandLogo.h"];
 const DEFS = {};                 // board number -> {NAME: number}
 function defsFor(file) {
   if (!BOARD_OF[file]) return DEFS[curBoard] || {};
   const d = {};
+  for (const h of ART_HEADERS)
+    for (const m of read(h).matchAll(/^#define\s+([A-Za-z_0-9]+)\s+(-?\d+)\s*(?:\/\/.*)?$/gm))
+      d[m[1]] = +m[2];
   for (const m of read(file).matchAll(/^#define\s+([A-Za-z_0-9]+)\s+(-?\d+)\s*(?:\/\/.*)?$/gm))
     d[m[1]] = +m[2];
   return (DEFS[BOARD_OF[file]] = d);
@@ -240,8 +254,15 @@ function preprocess(src, defs) {
 // board headers' inputs reach the derived offsets in deckhand_display.ino.
 export function consts(file, seed = {}) {
   if (BOARD_OF[file]) curBoard = BOARD_OF[file];
-  const src = preprocess(read(file), defsFor(file));
-  const out = { ...seed };
+  const defs = defsFor(file);
+  const src = preprocess(read(file), defs);
+  // The #defines join the SUBSTITUTION SCOPE, not just the #if evaluator. A
+  // `const int` derived from one (WAIT_NAME_Y from LOGO_SIZE) would otherwise
+  // eval to NaN, and NaN propagates into every assertion downstream as a
+  // NaN-vs-number comparison - which fails, so it looks like a layout bug rather
+  // than the parse gap it is. Seed wins over a define on a name collision,
+  // because a caller passing an explicit value means it.
+  const out = { ...defs, ...seed };
   for (const m of src.matchAll(/^const int ([A-Za-z_0-9 ,=\-+*\/()]+);/gm)) {
     for (const part of m[1].split(",")) {
       const kv = part.split("=");

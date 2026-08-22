@@ -313,6 +313,18 @@ void resetPairing() {
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
   tft.drawString("plug into a Mac over USB to re-pair", tft.width() / 2, tft.height() / 2 + 12);
   tft.setTextDatum(TL_DATUM);
+#if !BOARD_USES_TFT_ESPI
+  // FLUSH BEFORE THE DWELL. The comment above claims parity with the
+  // calibrate/power-off flows and this was the one of the three that did not
+  // have it: on a shadow-buffered board the 1600ms was spent displaying the
+  // CONFIRM DIALOG this screen replaced, so "Pairing reset" reached the glass
+  // for zero frames. Nothing could see it either - readRect reads the same
+  // framebuffer, drawBitmap reports success, and the geometry checkers read
+  // constants, so an unflushed region is invisible to every instrument this
+  // repo has. Found by a whole-branch review reading the three flows against
+  // each other, which is the only thing that could have.
+  tft.flush();
+#endif
   delay(1600);
   tft.fillScreen(COLOR_BG);
   drawTabBar();

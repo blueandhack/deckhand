@@ -76,21 +76,26 @@ const KNOWN_OVERLAPS = {
   2: {},
 };
 
-// THIS CHECKER CURRENTLY REPORTS ONE REAL FAILURE, and that is the honest state
-// rather than an oversight. The waiting-screen assertions added below found a
-// 4px collision on board 2 (its logo ends at row 151 and the wordmark's opaque
-// background box starts at 148), which is a genuine layout defect in a surface no
-// checker covered before. It is NOT suppressed into a KNOWN list - those record
-// board-1 compromises accepted on purpose, and writing a board-2 regression into
-// one would be exactly the lie that structure exists to prevent - and it is not
-// fixed here either, because the fix is a board-header constant and this pass is
-// forbidden from touching one. So the checker exits 1 until someone moves
-// WAIT_NAME_Y (see the note at the assertion).
+// ZERO, and it has to be kept that way DELIBERATELY - this is the number the
+// selftest measures its own teeth against. An injected fault must produce MORE
+// failures than already stand, or a blind checker passes its own selftest on the
+// back of a pre-existing one. So a real failure left standing here silently
+// weakens the selftest as well as reporting itself, and raising this number is
+// never the way to make the suite green.
 //
-// The count is stated so the SELFTEST still has teeth: an injected fault has to
-// produce MORE failures than the ones already standing, or a blind checker would
-// pass its own selftest on the back of a pre-existing failure.
-const BASELINE_FAILURES = 1;
+// It was briefly 1. The waiting-screen assertions below were added by
+// geom-sweep.mjs's fault-injection pass - which perturbs every parsed constant
+// and reports the ones no assertion reads - and they immediately found that the
+// seven WAIT_* offsets were read by nothing at all. On board 2 that had let a
+// real defect through: WAIT_LOGO_Y follows CONTENT_Y while the five offsets below
+// it were board 1 literals, so the 96px logo ended at row 151 against a wordmark
+// whose OPAQUE drawString box starts at 148 and the mark lost its bottom 4 rows.
+// The whole column is now derived from its anchor in deckhand_display.ino and
+// board 1's values are reproduced exactly, so this is back to 0.
+// Worth keeping the story: the defect was invisible to every instrument the port
+// had - a screenshot reads the same framebuffer, and no assertion mentioned the
+// constants - which is the argument for the sweep existing at all.
+const BASELINE_FAILURES = 0;
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0;
 let known = 0;

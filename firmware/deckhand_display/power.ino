@@ -284,12 +284,15 @@ void enterDeepSleep() {
 #endif
 
 #if !BOARD_USES_TFT_ESPI
-  // The point of no return: esp_deep_sleep_start() never returns, so the
-  // end-of-loop() flush that would normally push whatever powerOff() or
-  // autoDeepSleep() just drew (the farewell message) NEVER RUNS. Without
-  // this, the caller's fillScreen()+drawString() sit in the shadow
-  // framebuffer forever and the panel goes dark showing whatever was on
-  // screen before - not the farewell it just spent a delay() showing "for".
+  // BELT AND BRACES, and no longer the thing it was written for. Both callers
+  // now flush BEFORE their dwell - they have to, or the delay displays the
+  // previous screen - so by the time control reaches here the dirty rect is
+  // already empty and flush() early-returns. It is also downstream of
+  // digitalWrite(TFT_BL_PIN, LOW) and gpio_hold_en, so it could never have
+  // delivered a farewell to a panel that is already dark.
+  // Kept anyway because esp_deep_sleep_start() genuinely never returns, so this
+  // is the last opportunity for ANY future draw added between a caller's flush
+  // and this line - and the cost of an empty flush is one comparison.
   tft.flush();
 #endif
   esp_deep_sleep_start();

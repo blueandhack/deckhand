@@ -19,7 +19,7 @@ that differs and why; this section is only how to build each.
 | serial | CH340, `/dev/cu.usbserial-*`, 11.5KB/s ceiling | native USB CDC, `/dev/cu.usbmodem*` |
 | mic / beeper | both fitted and working | codec present, **software path not written** |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
-| size today | flash 1382802, RAM 69236 | flash 892062, RAM 57860 |
+| size today | flash 1382802, RAM 69236 | flash 892066, RAM 57860 |
 
 **Board 1's binary is BYTE-IDENTICAL across the whole second-board port, and that is the check
 that kept the port honest** — 1382802 flash / 69236 RAM. It is not ceremony: it caught a real
@@ -2596,11 +2596,18 @@ Other things that aren't obvious from a single file:
     150 bytes to 8-9 lines — more than the screen has room for. A fixed column count makes the
     budget provable instead: `ceil(150/34) = 5`, always. `drawWrappedText` stays untouched because
     the ask detail and history reader genuinely need word wrap.
+    **34 and 5 are BOARD 1's numbers, and the lane is `CARD_W - 12`, not `- 12`'s
+    lookalike `- 8`** — both expressions give 34 at 240px wide, which is exactly why the wrong one
+    survived in this file for so long. Board 2 is 47 columns and `ceil(150/47) = 4`: a wider card
+    costs a line. The per-board values live in `board_*.h`; what generalises is the *method*, that
+    a fixed column count makes the line budget provable where word wrap cannot.
   - **The countdown and byte counter live in a reserved meta row, because `drawString` paints an
     opaque box the full height of a text line.** A counter sharing a row with wrapped text
     silently erases that line's tail. The meta row and the five hard-wrapped text lines are laid
-    out to share no pixel row (meta at y=10, text lines at 26/39/52/65/78) — found as this exact
-    bug twice before landing on a row neither can encroach on.
+    out to share no pixel row — on board 1 meta at y=10 and text at 26/39/52/65/78, on board 2
+    meta at 20 and text at 41/54/67/80 (four lines, not five) — found as this exact bug twice
+    before landing on a row neither can encroach on. The non-overlap is the invariant; the
+    y-values are per-board and derived in `board_*.h`.
   - **`fabVisible()` had to gain a `kbActive` check.** The record/mic button's hit test runs
     before the keyboard branch in `handleTouch`, and its tab-bar slot sits right where the
     keyboard's countdown corner is — a tap there started a mic capture, and on release
@@ -3094,7 +3101,11 @@ Other things that aren't obvious from a single file:
   (`licenses/Terminus-OFL.txt`, `licenses/Cozette-MIT.txt`) are.
   `bdf2gfx.py --verify <bdf> <header>` decodes a header and compares it glyph-for-glyph with its
   source, and `--selftest` corrupts one byte of `A` and fails if that goes unnoticed — the same
-  teeth-proving trick as `palette-check.mjs --selftest`. That check earned its place: the
+  teeth-proving trick as `palette-check.mjs --selftest`. **Both need a BDF, and the BDFs are
+  deliberately uncommitted, so neither is runnable from a fresh checkout** — unlike every other
+  check in this repo, which is why it is the one that exits non-zero if you run the whole list.
+  Fetch the BDF first (`--selftest <bdf> <header>`); bare `--selftest` raises
+  `FileNotFoundError` rather than printing usage. That check earned its place: the
   generator had only ever been run on Cozette, whose glyphs are tightly cropped, and Terminus
   declares a uniform full-cell `BBX` that exercises packing paths which had never run.
 - **The BRIGHTNESS / SLEEP AFTER / VOLUME steppers put the label in the MIDDLE column, and that

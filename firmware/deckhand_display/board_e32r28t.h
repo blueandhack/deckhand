@@ -18,6 +18,7 @@
 #define BOARD_BLE_NIMBLE     0
 #define BOARD_HAS_MIC        1
 #define BOARD_HAS_BEEPER     1
+// Informational only on both boards - see board_es3c35p.h. Neither is read.
 #define BOARD_HAS_SD         0
 #define BOARD_HAS_RGBLED     0
 #define BOARD_TOUCH_NEEDS_CAL 1

@@ -1509,14 +1509,28 @@ void drawAgentSpinner(int cx, int cy, uint16_t bg, bool codex) {
 // which are zero until the host runs - so the cable's state is genuinely
 // unknowable here and is never mentioned. bleConnected and the NVS pairing store
 // are real, and everything below is derived from those.
-// One block, top of the content area down. The 96px logo sets everything below it;
-// the whole column runs 44..284 inside a content area ending at 302.
-const int WAIT_LOGO_Y   = CONTENT_Y + 10;   // 44: logo occupies 44..139
-const int WAIT_NAME_Y   = 148;              // T_HERO, 26 tall
-const int WAIT_ID_Y     = 180;
-const int WAIT_MSG_Y    = 208;
-const int WAIT_MSG2_Y   = 226;
-const int WAIT_CMD_Y    = 250, WAIT_CMD_H = 34;
+// One block, top of the content area down. The 96px logo sets everything below it.
+// EVERY OFFSET IS NOW DERIVED FROM THE ANCHOR, and that is a bug fix rather than
+// tidying. WAIT_LOGO_Y has always followed CONTENT_Y, but the five below it were
+// board 1 literals - so on a board whose CONTENT_Y is 12px lower the logo moved
+// down and the wordmark did not: the logo ended at row 151 against a wordmark
+// whose OPAQUE drawString box starts at 148, and the mark silently lost its
+// bottom 4 rows. Board 1 is unaffected and its values are reproduced exactly
+// (44 / 148 / 180 / 208 / 226 / 250), which is the point of deriving rather than
+// re-picking: the gaps below are the same 8/32/28/18/24 board 1 already had.
+// Nothing had ever measured this screen - it was found by geom-sweep.mjs
+// perturbing constants no assertion read, which is exactly what that sweep is
+// for, and usage-geom-check.mjs now asserts the column.
+// Board 2's column runs 56..296 in a 416px content area, so it is top-weighted
+// with room below. That is the same sparseness the SETTINGS pages have and is
+// left alone deliberately: spreading it is a design call for someone looking at
+// the glass, where this was a correctness one.
+const int WAIT_LOGO_Y   = CONTENT_Y + 10;                    // board 1: 44
+const int WAIT_NAME_Y   = WAIT_LOGO_Y + LOGO_SIZE + 8;       // T_HERO, 26 tall
+const int WAIT_ID_Y     = WAIT_NAME_Y + 32;
+const int WAIT_MSG_Y    = WAIT_ID_Y + 28;
+const int WAIT_MSG2_Y   = WAIT_MSG_Y + 18;
+const int WAIT_CMD_Y    = WAIT_MSG2_Y + 24, WAIT_CMD_H = 34;
 
 uint8_t wheelPhase = 0;
 unsigned long lastWheelMs = 0;

@@ -17,8 +17,15 @@
 #define BOARD_BLE_NIMBLE     1
 #define BOARD_HAS_MIC        0   // I2S codec exists; the mic PATH is a later spec
 #define BOARD_HAS_BEEPER     0   // same - LEDC square wave does not port to I2S
-#define BOARD_HAS_SD         1
-#define BOARD_HAS_RGBLED     1
+// INFORMATIONAL ONLY - these two gate nothing and are read nowhere in the
+// sketch. They record hardware this board has and the firmware does not use, so
+// that a future feature has a name to hang off rather than rediscovering the
+// peripheral. Said explicitly because this repo has already deleted one
+// declared-but-unwired global (macEmojiId) whose comments implied it was live,
+// and an unread flag that does NOT say so is the same trap: the next reader
+// cannot tell "gates nothing yet" from "gates something I have not found".
+#define BOARD_HAS_SD         1   // microSD slot on the SDMMC bus; no SD code exists
+#define BOARD_HAS_RGBLED     1   // WS2812 on GPIO40; nothing drives it
 #define BOARD_TOUCH_NEEDS_CAL 0  // capacitive, factory-aligned
 // NO TOUCH WAKE FROM DEEP SLEEP, and this is a silicon fact rather than a gap
 // in the port. Both ext0 and ext1 wake ONLY from an RTC GPIO, and on the S3 the
@@ -136,6 +143,13 @@
 // the two wrong answers are not close - a x1 ratio would have read ~1.96V and a
 // x4 one ~7.8V, both obviously absurd for a 1S cell. So the ratio is settled by
 // the reading it produces rather than by a meter across the divider.
+// BE PRECISE ABOUT WHAT THAT ARGUMENT CAN SETTLE, because it is weaker than it
+// first looks: plausibility rules out x1 and x4, and it CANNOT distinguish x2
+// from x1.8 or x2.2. At 2.2x a real 3.55V cell reads 3.91V, which this curve
+// shows as ~63% when the truth is nearer 30% - a wrong reading that looks
+// entirely reasonable, and the whole battMinutesLeft() estimator sits on top of
+// it. So this is an instrument certifying itself: the only thing that closes it
+// is a meter across the divider, or a cell at a known voltage.
 // If board 2's battery percentage ever reads wrong anyway, this is still the
 // first number to check before pctFromMv()'s curve.
 #define BOARD_BAT_MV_SCALE 2
@@ -401,12 +415,22 @@ const int SESSION_ROW_W = 296;
 // evenly-spaced stack. Board 1 has 4 above and 3 between, which is not a rhythm,
 // just two numbers.
 const int SESSION_ROW_Y0 = CONTENT_Y + 4;
-// 3, UNCHANGED, and the ladder below DEPENDS on it rather than merely tolerating
-// it. At 4 the five-session row comes out at (412-16)/5 = 79 - ONE PIXEL under
-// the 79 a title-less tall row needs for its model/branch line - so five
-// sessions would silently drop that line to buy a 1px cosmetic gap. The gap's own
-// job (separating two 2px borders on a 10px-radius corner) is unchanged from
-// board 1 because the border and the radius are.
+// 3, UNCHANGED from board 1, and it is a JUDGEMENT rather than a derivation -
+// the previous version of this comment claimed otherwise and the arithmetic was
+// simply wrong. It said that at 4 the five-session row comes out at
+// (412 - 16)/5 = 79, "ONE PIXEL under the 79 a title-less tall row needs". 79 is
+// not under 79, and the gate is `rowH >= SESSION_SUB_MIN_H` (sessions.ino), so at
+// gap 4 the sub-line still draws. Re-derived properly: at gap 4 the ladder is
+// 106/106/106/100/79/65 against gap 3's 106/106/106/100/80/66, and every rung
+// still clears its own threshold (100 >= TITLE 100, 79 >= SUB 79, 65 >= LARGE
+// 62). Nothing is lost at 4.
+// So the reason to keep 3 is not that 4 breaks something - it is that 3 is board
+// 1's value, the gap's job is unchanged (separating two 2px borders on a 10px
+// radius, and both the border and the radius are the same here), and SESSION_AIR
+// already spends this board's surplus on the rows themselves where it is visible.
+// A future change to 4 costs the five- and six-session rungs one pixel each and
+// nothing else. NOTE the contrast with SESSION_AIR = 3, which IS genuinely forced
+// as an upper bound - do not read this comment as covering that one.
 const int SESSION_ROW_GAP = 3;
 // 3px of air at EVERY gap and pad inside a row, which is where this panel's
 // surplus height actually goes (the derived offsets are in deckhand_display.ino,
