@@ -468,7 +468,7 @@ two things `host/index.mjs` cannot get any other way:
     drawing nothing.
   - **13x13 is DERIVED, not chosen, and 16px collides with a CLEAR BOX rather than with any
     glyph.** A usage card's label row is `y0+6`..`y0+19`, because the hero number's box starts at
-    `y0+20` and clears from `y0+19` across the full card interior — so a 16px icon would be rubbed
+    `y0+20` and clears from `y0+20` across the full card interior — so a 16px icon would be rubbed
     out by the hero's own erase on every tick the digits move, the same clear-box-not-glyphs
     arithmetic the `+88` stats row already documents. 13 is also **Cozette's cell height**, and
     that is what removes centring arithmetic from every surface that draws one: an icon's `y` **is**
@@ -491,17 +491,22 @@ two things `host/index.mjs` cannot get any other way:
     13-entry buffer pushed with `setSwapBytes(true)` — the same byte-order handling `drawLogo`
     needs, and for the same reason.
   - **The icon id had to enter FOUR caches, and the symptom of missing any one is a card or row
-    that keeps a stale icon forever.** An icon change moves no text, no percentage, no source link
-    and no link count, so the change-only redraw discipline correctly skips a field whose pixels
-    are now wrong. The four: the **row signature** (`rowSigCache`, so a row whose Mac's icon
-    changes repaints); the **detail signature** (`detailSigCache`, 368 → **384** against a
-    field-by-field-derived 352 worst case); the **usage chrome bust** (`emojiCache`/`cxEmojiCache`
-    beside `srcCache`/`pinCache`/`linksCache` → `drawUsageStatic()`, because the Codex label's own
-    `drawIfChanged` clears only its own text box and never the icon beside it — watch this on a
-    second Mac's link ageing out); and the **SETTINGS link row's cached string**, where the id
-    rides after a `\x01` sentinel that is never drawn, because that cache compares TEXT and the
-    icon is drawn separately from it. That row's erase box also reserves the icon's slot (4px +
+    that keeps a stale icon forever — except on the Codex row, which needs none of this.** An icon
+    change moves no text, no percentage, no source link and no link count, so the change-only
+    redraw discipline correctly skips a field whose pixels are now wrong. The four: the **row
+    signature** (`rowSigCache`, so a row whose Mac's icon changes repaints); the **detail
+    signature** (`detailSigCache`, 368 → **384** against a field-by-field-derived 352 worst case);
+    the **Claude cards' usage chrome bust** (`emojiCache` beside `srcCache`/`pinCache`/`linksCache`
+    → `drawUsageStatic()`, because a Claude card's label is static chrome, repainted only on that
+    bust, and never redraws its icon on its own); and the **SETTINGS link row's cached string**,
+    where the id rides after a `\x01` sentinel that is never drawn, because that cache compares
+    TEXT and the icon is drawn separately from it. That row's erase box also reserves the icon's
+    slot (4px +
     13px) whether or not the row currently has one, so an icon that disappears leaves no ghost.
+    The Codex row is the exception: `renderCodexRow()` draws its icon unconditionally every tick
+    rather than behind a `drawIfChanged` of its own, and the label's clear box (x 25..93) already
+    covers the icon's slot (42..54) on every redraw — so a stale Codex icon self-heals with no
+    cache to bust, and carrying one anyway would only buy an avoidable full-chrome repaint.
   - **The pin bar is ABOVE the icon at rows `y0+3`..`y0+5`, and it is a BAR rather than an
     underline because below the icon is `y0+20` — inside the hero number's box.** Geometry, all of
     it forced: the 2px card border owns `y0`..`y0+1`, one clear row at `+2`, bar `+3`..`+5`, icon
@@ -513,6 +518,10 @@ two things `host/index.mjs` cannot get any other way:
     personalisation — someone deliberately marked THEIR computer, and it should show with one Mac
     connected. A redundant six-character word beside a single Mac's card is noise, and a tag that
     only appears when the second Mac arrives is how you *notice* the second Mac arriving.
+    **The Codex row keeps its window text alongside its icon, too** — an icon is drawn OVER a
+    reserved gap in the same line rather than in place of anything, so setting one no longer makes
+    the row drop the fact of what its percentage measures. It's only the Mac tag that still yields
+    to the icon there, the same trade every other site makes between the two.
   - **A tall session row now identifies its Mac TWICE — icon in the corner, text tag in the
     sub-line — and that redundancy is deliberate.** Only the tag changed; the icon was added
     beside it rather than in place of it. The two cannot disagree, because both read the same
@@ -550,10 +559,16 @@ two things `host/index.mjs` cannot get any other way:
     deliberately draws both backdrops. And an earlier `robot` icon was replaced by **`apple`**
     because at 13px it read as a **cupcake** — caught on the glass, not in the 16x preview that had
     passed it, which is the whole reason the go/no-go was a device screenshot.
-  - **`EMOJITEST [<name>|large]` puts all sixteen on BOTH backdrops**, for the same reason
+  - **`EMOJITEST [<name>]` puts all sixteen on BOTH backdrops**, for the same reason
     `TAB`/`PAGE`/`KBTEST` exist: `SCREENSHOT` can only record what is currently on the glass, and
     an alpha blend plus the `setSwapBytes` handling can only be judged where they actually have to
-    work, never on a third colour picked for convenience.
+    work, never on a third colour picked for convenience. There is no `large` argument or any
+    other second mode — an unrecognised word simply falls through to the same all-sixteen grid,
+    which is also what plain `EMOJITEST` draws. It refuses while the keyboard, reader, history
+    pager or a session detail screen owns the glass, the same guard `fabVisible()` already paid
+    for once: `emojiTestActive` dismisses on any tap ahead of those surfaces in `handleTouch`, and
+    without the refusal a tap on the grid opened over an active keyboard force-repaints the tab
+    underneath while `kbActive` stays true, leaving every further tap typing invisibly.
   - **Env beats the picker, and the MENU SAYS SO rather than showing a checkmark it cannot
     honour.** With `DECKHAND_MAC_EMOJI` set to a valid name the submenu parent reads **`Mac icon
     (set by env)`** and every child is disabled — a checkmark a click could never move is a lie.
