@@ -298,10 +298,15 @@ void renderCodexRow() {
   // Left lane: the agent's name and its window, so this can never be mistaken for
   // one of the Claude figures above.
   //
-  // With two Macs live, the window gives way to the Mac tag instead of sharing
-  // the lane with it: this row has no free line the way a Claude card's +6 row
-  // is (its one line is already busy at +8). The window is fixed and rarely
-  // worth more than the source once there is a source to disambiguate.
+  // With two Macs live and no icon set for this one, the window gives way to the
+  // Mac tag instead of sharing the lane with it: this row has no free line the
+  // way a Claude card's +6 row is (its one line is already busy at +8). The
+  // window is fixed and rarely worth more than the source once there is a
+  // source to disambiguate. An icon is a different trade, though - it's drawn
+  // OVER a reserved gap in the same line rather than replacing anything, so
+  // once one is set the window no longer gives way (see showCxIcon below): the
+  // row keeps its window text and gains the icon, and it's only the tag that
+  // still yields, exactly as the Claude cards' own icon-vs-tag chrome does.
   //
   // "CX " rather than "CODEX  " - the label's usable lane is bounded by ITS
   // NEIGHBOUR, not by anything of its own, and the bound is DERIVED, not a
@@ -329,7 +334,15 @@ void renderCodexRow() {
   int cxEmoji = emojiIdForLink(cxSourceLink);
   bool showCxIcon = cxEmoji >= 0;
   if (showCxIcon) {
-    snprintf(buf, sizeof(buf), "CX");
+    // Same window text as the no-tag branch below, just with "CX" in place of
+    // "CODEX" and 4 spaces (24px in this monospace 6px/char font) reserved
+    // after it instead of 2 - room for the icon (13px) plus its gaps (4px on
+    // each side = 21px) with 3px to spare, so the window text can never
+    // collide with the icon drawn into that gap below.
+    long d = usage.cxWindowMin / 1440;
+    if (usage.cxWindowMin <= 0) snprintf(buf, sizeof(buf), "CX");
+    else if (d >= 1) snprintf(buf, sizeof(buf), "CX    %ldd", d);
+    else snprintf(buf, sizeof(buf), "CX    %ldh", usage.cxWindowMin / 60);
   } else if (showCxTag) {
     snprintf(buf, sizeof(buf), "CX %s", cxTag);
   } else if (usage.cxWindowMin > 0) {
@@ -433,27 +446,34 @@ void renderUsageTab() {
   // arriving after the chrome was last painted left both Claude cards untagged
   // while the Codex row (a different draw call, rendered per tick) showed its
   // tag - observed exactly that way on hardware, with two real Macs connected.
-  // The icon ids join the bust too: an icon change (set, cleared, or the
-  // source Mac swapping to one with a different icon) moves no percentage, no
-  // source link and no link count, so nothing else here would repaint it -
-  // and the label's own drawIfChanged clears only its own text box, never the
-  // icon beside it. Watch this on the second Mac's link ageing out: without
-  // it, a stale icon would sit there after the tag has reverted to text.
+  // The Claude cards' icon id joins the bust too: an icon change (set,
+  // cleared, or the source Mac swapping to one with a different icon) moves
+  // no percentage, no source link and no link count, so nothing else here
+  // would repaint it - and the label's own drawIfChanged clears only its own
+  // text box, never the icon beside it. Watch this on the second Mac's link
+  // ageing out: without it, a stale icon would sit there after the tag has
+  // reverted to text.
+  //
+  // The Codex row's icon does NOT need this: renderCodexRow() draws it
+  // unconditionally every tick (it isn't behind a drawIfChanged of its own),
+  // and the label's drawIfChanged clear box (x 25..93) already covers the
+  // icon's slot (42..54) on every redraw - so a stale Codex icon self-heals
+  // without a bust term, and carrying one here would only cost an avoidable
+  // full-chrome repaint on every icon-only change in a file whose whole
+  // discipline is flicker avoidance.
   static int srcCache = -2, cxSrcCache = -2, pinCache = -1, linksCache = -1,
-             emojiCache = -3, cxEmojiCache = -3;
+             emojiCache = -3;
   int pinNow = usagePinHostId[0] ? 1 : 0;
   int linksNow = usedLinkCount();
   int emojiNow = emojiIdForLink(usageSourceLink);
-  int cxEmojiNow = emojiIdForLink(cxSourceLink);
   if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink ||
       pinCache != pinNow || linksCache != linksNow ||
-      emojiCache != emojiNow || cxEmojiCache != cxEmojiNow) {
+      emojiCache != emojiNow) {
     srcCache = usageSourceLink;
     cxSrcCache = cxSourceLink;
     pinCache = pinNow;
     linksCache = linksNow;
     emojiCache = emojiNow;
-    cxEmojiCache = cxEmojiNow;
     drawUsageStatic();   // repaints chrome; resetUsageCaches() runs inside it
   }
   renderCard(CARD1_Y, usage.fiveHourPct, usage.sessionTokens, usage.fiveHourResetInMin,
