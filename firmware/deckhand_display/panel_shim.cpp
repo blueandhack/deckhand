@@ -302,4 +302,219 @@ void PanelShim::flush() {
   _dirtyX1 = -1;   // mark clean; _dirtyX0 unchanged, harmless since X1<X0 is the only test
 }
 
+// ---------------------------------------------------------------------------
+// Anti-aliased primitives (Task 4).
+//
+// Coverage-based AA: for every pixel in a shape's bounding box, compute a
+// continuous distance to the shape's edge and blend the destination pixel
+// toward the requested colour by that coverage - easy here specifically
+// because the destination is a readable shadow buffer. TFT_eSPI can't read
+// the panel back on board 1's ILI9341 wiring, which is why its versions of
+// these take a `bg`/`behind` colour to blend against instead of the real
+// pixel; every primitive below still accepts that same parameter (for
+// interface parity with uiCard/uiButton/drawStatusDot/... call sites written
+// against TFT_eSPI) but does not need it, because reading the actual
+// destination is a strict superset of "bg matches what's really there" - it
+// stays correct even in a hypothetical case where a caller got that argument
+// wrong.
+//
+// The one convention that DOES have to match TFT_eSPI exactly: `ir`, the
+// inner radius, is INCLUSIVE - ring/stroke thickness is `r - ir + 1` pixels,
+// not `r - ir`. uiStrokeRound/uiRing already compensate for this with their
+// own `r - thickness + 1` before calling in, so this file must not apply a
+// second, different correction on top of it; it just has to render whatever
+// (r, ir) it's given with that thickness.
+// ---------------------------------------------------------------------------
+
+// A deliberate `static` (file-local) duplicate of deckhand_display.ino's
+// blend565 - same formula, same behaviour. This file has to link standalone
+// (the Task 2/4 verification sketches only pull in panel_shim.h/.cpp, never
+// the full .ino), and the eventual full board-2 sketch compiles
+// deckhand_display.ino's own blend565 as a *second*, separate translation
+// unit - a non-static duplicate here would be a multiple-definition link
+// error the moment Task 6+ makes that sketch compile clean.
+static inline uint16_t blend565(uint16_t a, uint16_t b, uint8_t t) {
+  int ar = (a >> 11) & 31, ag = (a >> 5) & 63, ab = a & 31;
+  int br = (b >> 11) & 31, bg = (b >> 5) & 63, bb = b & 31;
+  return (uint16_t) ((((ar + ((br - ar) * t) / 255) & 31) << 11) |
+                     (((ag + ((bg - ag) * t) / 255) & 63) << 5)  |
+                      ((ab + ((bb - ab) * t) / 255) & 31));
+}
+
+static inline float clampf(float v, float lo, float hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// Standard rounded-box signed distance field: negative = inside, 0 = exactly
+// on the boundary, positive = outside, in pixel units. When `r` exceeds the
+// box's own half-width/height this degrades smoothly into a circle - exactly
+// the "w,h < radius draws a circle" case TFT_eSPI's own drawSmoothRoundRect
+// comment documents, so nothing here has to special-case it.
+static inline float roundedBoxSDF(float px, float py, float cx, float cy,
+                                   float halfW, float halfH, float r) {
+  float bw = halfW - r, bh = halfH - r;
+  float qx = fabsf(px - cx) - bw;
+  float qy = fabsf(py - cy) - bh;
+  float ox = qx > 0 ? qx : 0.0f, oy = qy > 0 ? qy : 0.0f;
+  return sqrtf(ox * ox + oy * oy) + fminf(fmaxf(qx, qy), 0.0f) - r;
+}
+
+void PanelShim::blendPixel(int x, int y, uint16_t fg, float coverage) {
+  if (!_fb) return;
+  if (coverage <= 0.001f) return;
+  if (x < 0 || y < 0 || x >= width() || y >= height()) return;
+  int px, py;
+  mapPoint(x, y, px, py);
+  uint16_t* p = _fb + (size_t) py * PANEL_PHYS_W + px;
+  if (coverage >= 0.999f) {
+    *p = fg;
+  } else {
+    uint8_t t = (uint8_t) (coverage * 255.0f + 0.5f);
+    *p = blend565(*p, fg, t);
+  }
+  markDirty(px, py, px, py);
+}
+
+void PanelShim::fillSmoothCircle(int cx, int cy, int r, uint16_t color, uint16_t /*bg*/) {
+  if (!_fb || r <= 0) return;
+  for (int y = cy - r - 1; y <= cy + r + 1; y++) {
+    float dy = (float) (y - cy);
+    for (int x = cx - r - 1; x <= cx + r + 1; x++) {
+      float dx = (float) (x - cx);
+      float dist = sqrtf(dx * dx + dy * dy);
+      float cov = clampf(1.0f - (dist - (float) r), 0.0f, 1.0f);
+      blendPixel(x, y, color, cov);
+    }
+  }
+}
+
+// Ring: outer radius r, inner radius r-1 - the exact (r, r-1) pair TFT_eSPI's
+// own drawSmoothCircle delegates to drawSmoothRoundRect with, which is what
+// gives it a 2px solid core plus the AA fringe on each side ("effectively 3
+// pixels thick", per that function's own comment).
+void PanelShim::drawSmoothCircle(int cx, int cy, int r, uint16_t fgColor, uint16_t bg) {
+  drawSmoothArc(cx, cy, r, r - 1, 0, 360, fgColor, bg);
+}
+
+void PanelShim::drawSmoothArc(int cx, int cy, int r, int ir, int startAngle, int endAngle,
+                               uint16_t fgColor, uint16_t /*bg*/, bool /*roundEnds*/) {
+  if (!_fb || r <= 0) return;
+  if (ir < 0) ir = 0;
+  if (ir > r) { int t = ir; ir = r; r = t; }  // TFT_eSPI requires r > ir; swap defensively
+
+  // Every real call site (uiRing, and therefore drawSmoothCircle above) sweeps
+  // the full circle - a partial sweep is supported below for interface
+  // completeness, but its two ends are a hard angular cutoff rather than
+  // anti-aliased (unlike TFT_eSPI's drawSmoothArc), since nothing in this
+  // sketch exercises that case to verify against.
+  bool full = (startAngle <= 0 && endAngle >= 360) || (startAngle == endAngle);
+  int sa = ((startAngle % 360) + 360) % 360;
+  int ea = ((endAngle % 360) + 360) % 360;
+
+  for (int y = cy - r - 1; y <= cy + r + 1; y++) {
+    float dy = (float) (y - cy);
+    for (int x = cx - r - 1; x <= cx + r + 1; x++) {
+      float dx = (float) (x - cx);
+      float dist = sqrtf(dx * dx + dy * dy);
+      float covOuter = clampf(1.0f - (dist - (float) r), 0.0f, 1.0f);
+      if (covOuter <= 0.0f) continue;
+      float exclude = ir > 0 ? clampf((float) ir - dist, 0.0f, 1.0f) : 0.0f;
+      float cov = covOuter * (1.0f - exclude);
+      if (cov <= 0.0f) continue;
+
+      if (!full) {
+        // Angle of this pixel, clockwise from 12 o'clock, in [0,360).
+        float ang = atan2f(dx, -dy) * (180.0f / (float) M_PI);
+        if (ang < 0) ang += 360.0f;
+        bool inSweep = (sa <= ea) ? (ang >= sa && ang <= ea)
+                                   : (ang >= sa || ang <= ea);
+        if (!inSweep) continue;
+      }
+      blendPixel(x, y, fgColor, cov);
+    }
+  }
+}
+
+void PanelShim::fillSmoothRoundRect(int x, int y, int w, int h, int r, uint16_t color, uint16_t /*bg*/) {
+  if (!_fb || w <= 0 || h <= 0) return;
+  if (r < 0) r = 0;
+  if (r > w / 2) r = w / 2;
+  if (r > h / 2) r = h / 2;
+
+  float cx = x + w / 2.0f, cy = y + h / 2.0f;
+  float halfW = w / 2.0f, halfH = h / 2.0f;
+
+  for (int py = y - 1; py <= y + h; py++) {
+    for (int px = x - 1; px <= x + w; px++) {
+      float d = roundedBoxSDF((float) px, (float) py, cx, cy, halfW, halfH, (float) r);
+      float cov = clampf(1.0f - d, 0.0f, 1.0f);
+      blendPixel(px, py, color, cov);
+    }
+  }
+}
+
+void PanelShim::drawSmoothRoundRect(int x, int y, int r, int ir, int w, int h,
+                                     uint16_t fgColor, uint16_t /*bg*/, uint8_t quadrants) {
+  if (!_fb || w <= 0 || h <= 0) return;
+  if (ir < 0) ir = 0;
+  if (r < ir) { int t = r; r = ir; ir = t; }  // TFT_eSPI requires r > ir; swap defensively
+  if (r <= 0) return;
+
+  float cx = x + w / 2.0f, cy = y + h / 2.0f;
+  float halfW = w / 2.0f, halfH = h / 2.0f;
+  float inset = (float) (r - ir);
+  float halfWi = halfW - inset, halfHi = halfH - inset;
+
+  for (int py = y - 1; py <= y + h; py++) {
+    for (int px = x - 1; px <= x + w; px++) {
+      // Which corner this pixel belongs to, so a quadrant bit that's unset
+      // renders that corner square instead of rounded. Bit layout matches
+      // TFT_eSPI's own: 0x1 top-left, 0x2 top-right, 0x4 bottom-right,
+      // 0x8 bottom-left.
+      uint8_t bit = (px < cx) ? ((py < cy) ? 0x1 : 0x8)
+                               : ((py < cy) ? 0x2 : 0x4);
+      float rq  = (quadrants & bit) ? (float) r  : 0.0f;
+      float irq = (quadrants & bit) ? (float) ir : 0.0f;
+
+      float dOuter = roundedBoxSDF((float) px, (float) py, cx, cy, halfW, halfH, rq);
+      float covOuter = clampf(1.0f - dOuter, 0.0f, 1.0f);
+      if (covOuter <= 0.0f) continue;
+
+      float exclude = 0.0f;
+      if (ir > 0) {
+        float dInner = roundedBoxSDF((float) px, (float) py, cx, cy, halfWi, halfHi, irq);
+        exclude = clampf(-dInner, 0.0f, 1.0f);
+      }
+      float cov = covOuter * (1.0f - exclude);
+      if (cov <= 0.0f) continue;
+      blendPixel(px, py, fgColor, cov);
+    }
+  }
+}
+
+// Hard-edged (no AA) - matches TFT_eSPI's own fillTriangle, which takes a
+// single colour and no background. Standard edge-function half-space test;
+// drawPixel already does the clip+rotation-mapping every other primitive
+// needs, so this reuses it rather than duplicating it.
+void PanelShim::fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color) {
+  if (!_fb) return;
+  int minX = min(x0, min(x1, x2)), maxX = max(x0, max(x1, x2));
+  int minY = min(y0, min(y1, y2)), maxY = max(y0, max(y1, y2));
+
+  long area = (long) (x1 - x0) * (y2 - y0) - (long) (x2 - x0) * (y1 - y0);
+  if (area == 0) return;  // degenerate (collinear) triangle
+  bool cw = area < 0;
+
+  for (int y = minY; y <= maxY; y++) {
+    for (int x = minX; x <= maxX; x++) {
+      long e0 = (long) (x1 - x0) * (y - y0) - (long) (y1 - y0) * (x - x0);
+      long e1 = (long) (x2 - x1) * (y - y1) - (long) (y2 - y1) * (x - x1);
+      long e2 = (long) (x0 - x2) * (y - y2) - (long) (y0 - y2) * (x - x2);
+      bool inside = cw ? (e0 <= 0 && e1 <= 0 && e2 <= 0)
+                        : (e0 >= 0 && e1 >= 0 && e2 >= 0);
+      if (inside) drawPixel(x, y, color);
+    }
+  }
+}
+
 #endif  // CONFIG_IDF_TARGET_ESP32S3
