@@ -25,6 +25,51 @@
 #define PANEL_PHYS_W 320
 #define PANEL_PHYS_H 480
 
+// ---------------------------------------------------------------------------
+// GFX free-font types (Task 3).
+//
+// Cozette6x13.h and Terminus10x18b.h declare their tables as GFXglyph/GFXfont
+// but include only <Arduino.h> - on board 1 those two structs arrive from
+// TFT_eSPI's Fonts/GFXFF/gfxfont.h, and board 2 has neither TFT_eSPI nor
+// Adafruit_GFX installed, so they have to be defined here. This is why
+// deckhand_display.ino's include order matters: panel_shim.h must come before
+// the font headers, which it already does.
+//
+// The field layout is byte-for-byte TFT_eSPI's, because the generated headers
+// emit their initialisers positionally - a reordered member would compile
+// cleanly and mis-read every glyph. The guard NAME is deliberately the same
+// (_GFXFONT_H_) that TFT_eSPI and Adafruit_GFX both use, so if either ever
+// reaches this translation unit the two definitions can't collide.
+// ---------------------------------------------------------------------------
+#ifndef _GFXFONT_H_
+#define _GFXFONT_H_
+typedef struct {                 // per glyph
+  uint32_t bitmapOffset;         // index into GFXfont->bitmap
+  uint8_t  width, height;        // bitmap dimensions, pixels
+  uint8_t  xAdvance;             // cursor advance (x)
+  int8_t   xOffset, yOffset;     // cursor to upper-left corner
+} GFXglyph;
+typedef struct {                 // per font
+  uint8_t  *bitmap;              // glyph bitmaps, concatenated
+  GFXglyph *glyph;               // glyph array
+  uint16_t  first, last;         // ASCII extents
+  uint8_t   yAdvance;            // newline distance (y)
+} GFXfont;
+#endif
+
+// Text datums, with TFT_eSPI's exact numeric values - the UI passes these
+// around as plain uint8_t (drawIfChanged takes a `datum` parameter and
+// switches on it), so the numbers, not just the names, are part of the
+// interface. Only the six the UI actually uses are named here; anything else
+// reaching setTextDatum is reported once and rendered top-left rather than
+// silently mis-placed (see panel_text.cpp).
+#define TL_DATUM 0   // top left (default)
+#define TC_DATUM 1   // top centre
+#define TR_DATUM 2   // top right
+#define ML_DATUM 3   // middle left
+#define MC_DATUM 4   // middle centre
+#define MR_DATUM 5   // middle right
+
 class PanelShim {
 public:
   void init();                       // panel bring-up + framebuffer alloc
@@ -69,6 +114,30 @@ public:
                             uint16_t fgColor, uint16_t bg, uint8_t quadrants = 0xF);
   void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color);
 
+  // ---- Text (Task 3) ----
+  // GFX free fonts only, which is all this UI uses: setUIFont() installs one
+  // of three faces (Cozette 6x13, Terminus 10x18 bold, Cozette at size 2) and
+  // nothing calls a legacy numbered font. textWidth() is the linchpin of the
+  // whole port - every lane width, every drawIfChanged clear box and every
+  // rung of drawSessionRow's fitText ladder is derived from it, so it walks
+  // the SAME advance table drawString does and reproduces TFT_eSPI's
+  // measurement rules (including the last-character one) exactly rather than
+  // approximately. See panel_text.cpp for each rule and why it matters.
+  void setFreeFont(const GFXfont* f);
+  void setTextFont(uint8_t f);              // legacy numbered fonts: unsupported, reported
+  void setTextSize(uint8_t s);
+  void setTextColor(uint16_t fg, uint16_t bg);
+  void setTextDatum(uint8_t d);
+  void drawString(const char* s, int x, int y);
+  void drawString(const String& s, int x, int y);
+  int  textWidth(const char* s);
+  int  textWidth(const String& s);
+
+  // Public because drawIfChanged reads it directly to derive a field's erase
+  // height - the one site, and the reason this is a member rather than an
+  // accessor. Same name and same public-ness as TFT_eSPI's.
+  uint8_t textsize = 1;
+
   // Not part of the TFT_eSPI-compatible surface; used by the SHIMBENCH
   // command and the temporary Step-5 test pattern so they can tell whether
   // bring-up actually succeeded before drawing anything.
@@ -82,11 +151,28 @@ private:
   // logical (x,y) by `coverage` (0..1), reading the destination back from
   // the shadow buffer rather than trusting a caller-supplied `bg`.
   void blendPixel(int x, int y, uint16_t fg, float coverage);
+  // Draws one glyph with its baseline at (x, y) and returns the cursor
+  // advance, mirroring TFT_eSPI's drawChar(uniCode, x, y, font) contract: an
+  // out-of-range codepoint draws nothing AND advances nothing.
+  int  drawGlyph(uint16_t uniCode, int x, int y);
 
   uint16_t* _fb = nullptr;          // PANEL_PHYS_W x PANEL_PHYS_H, native order
   uint16_t* _stripBuf = nullptr;    // scratch for a cropped <=32-line strip
   uint8_t   _rotation = 0;
   bool      _swapBytes = false;
+
+  // Text state. Names mirror TFT_eSPI's own members so the port reads against
+  // its source side by side. _glyphAb/_glyphBb are the font's largest ascent
+  // and descent, recomputed by setFreeFont - they set the baseline offset the
+  // free-font path adds to y, and the height of the opaque background box
+  // drawString paints.
+  const GFXfont* _gfxFont = nullptr;
+  uint8_t   _textfont = 1;
+  uint16_t  _textcolor = 0xFFFF;
+  uint16_t  _textbgcolor = 0x0000;
+  uint8_t   _textdatum = TL_DATUM;
+  uint8_t   _glyphAb = 0;
+  uint8_t   _glyphBb = 0;
 
   // Dirty rect in PHYSICAL coordinates. dirtyX1 < dirtyX0 means "nothing
   // dirty" - checked instead of a separate bool so there's one source of
