@@ -2570,8 +2570,9 @@ async function findUsbPort() {
   const ports = await SerialPort.list();
   const usb = ports.find(
     (p) =>
-      (p.vendorId ?? "").toLowerCase() === "1a86" || // CH340
-      /usbserial|wchusbserial|SLAB_USBtoUART/i.test(p.path)
+      (p.vendorId ?? "").toLowerCase() === "1a86" || // CH340 (board 1)
+      (p.vendorId ?? "").toLowerCase() === "303a" || // Espressif native USB (board 2)
+      /usbserial|wchusbserial|SLAB_USBtoUART|usbmodem/i.test(p.path)
   );
   return usb?.path ?? null;
 }

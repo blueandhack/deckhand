@@ -1,0 +1,213 @@
+// Board 1: ELEGOO E32R28T/E32N28T, ILI9341 240x320 over TFT_eSPI's default
+// VSPI bus (configured in the library's User_Setup.h). The resistive touch
+// controller (XPT2046) is wired to DIFFERENT pins on a separate SPI bus (see
+// LCDWIKI pin table), so it needs its own SPIClass instance and the
+// standalone XPT2046_Touchscreen library rather than TFT_eSPI's built-in
+// touch support.
+//
+// Every pin define and layout constant below MOVED here verbatim from
+// deckhand_display.ino - comments included, since several of them document a
+// derivation (why this number and not some other) rather than a preference.
+#pragma once
+
+#define BOARD_NAME "E32R28T"
+#define BOARD_W 240
+#define BOARD_H 320
+
+#define BOARD_USES_TFT_ESPI  1
+#define BOARD_BLE_NIMBLE     0
+#define BOARD_HAS_MIC        1
+#define BOARD_HAS_BEEPER     1
+#define BOARD_HAS_SD         0
+#define BOARD_HAS_RGBLED     0
+#define BOARD_TOUCH_NEEDS_CAL 1
+
+// If the layout renders sideways/upside down on your unit, try 0/1/2/3 here.
+#define SCREEN_ROTATION 0
+// Flip this (and re-run calibration, see runCalibration) if touches feel
+// transposed - e.g. moving your finger left/right moves the cursor up/down.
+#define TOUCH_SWAP_XY true
+
+#define TFT_BL_PIN 21
+
+// BAT+ -> 100K/100K divider -> IO34 ("Battery level detection circuit" in
+// the LCDWIKI E32R28T user manual), so VBAT = 2x the pin voltage. IO34 is
+// ADC1, which stays usable while WiFi/BT is active (ADC2 does not).
+#define BAT_ADC_PIN 34
+
+// Onboard FM8002E 1W amplifier -> JP1 speaker terminals. IO26 is the
+// amplifier's audio input (AUDIO_IN net); IO4 is its shutdown pin
+// (AUDIO_EN net, 10K pulled high = amp muted; drive LOW to enable). Keeping
+// the amp disabled except while actually beeping avoids idle hiss.
+#define AUDIO_OUT_PIN 26
+#define AUDIO_EN_PIN 4
+
+// Microphone: MAX4466 electret amp on the board's 4-pin "Expand" connector
+// (VCC->3.3V, GND->GND, OUT->IO35). IO35 is the ONLY free ADC1 channel on this
+// board - touch took 32/33/36/39 and the battery divider took 34 - and ADC1 is
+// mandatory here because ADC2 is dead while BT is active. Input-only, which an
+// ADC pin doesn't mind.
+//
+// The module idles at VCC/2 (~1.65V) and swings around that, so a healthy line
+// sits near mid-scale in silence and widens when you speak. That bias is why
+// the pin needs 11dB attenuation (~0-3.1V full scale); at the default range it
+// would sit hard against the ceiling and clip everything.
+#define MIC_ADC_PIN 35
+
+// The BOOT key (10K pulled high, pressed = low). Only a strapping pin at
+// reset; at runtime it's an ordinary button. Held for POWER_OFF_HOLD_MS it
+// powers the device down (deep sleep - see powerOff()).
+#define BOOT_BTN_PIN 0
+
+// Touch controller pins, from the LCDWIKI E32R28T/E32N28T pin table -
+// these are independent of the TFT's SPI pins.
+#define TOUCH_SCK  25
+#define TOUCH_MOSI 32
+#define TOUCH_MISO 39
+// TOUCH_CS's macro NAME is established back in deckhand_display.ino, not
+// here - see the comment there. TFT_eSPI.h gates a chunk of its own built-in
+// touch support (which we do not want; our touch controller is wired to a
+// separate SPI bus, not the TFT's) purely on `#ifdef TOUCH_CS`
+// (TFT_eSPI.h:963), so defining that name this early - before TFT_eSPI.h is
+// included - silently pulls that code in: measured, it grows `tft` and every
+// TFT_eSprite (e.g. octoSprite) by 20 bytes each. BOARD_TOUCH_CS_PIN holds
+// the actual pin number; only the TOUCH_CS name itself is deferred.
+#define BOARD_TOUCH_CS_PIN 33
+#define TOUCH_IRQ  36
+
+// ---------- Layout constants ----------
+const int TAB_BAR_H = 34;
+const int CONTENT_Y = TAB_BAR_H;
+// Persistent footer (clock + last-updated), visible under both tabs. Content
+// clearing/redraw on either tab must stop above this band, not paint over it.
+const int FOOTER_H = 18;
+
+// The two Claude cards were 122 tall and, with the gaps, filled the content area
+// exactly - there was no room for Codex anywhere. They are now 104: only the padding
+// around the hero number tightened, the number itself is the same 39px Cozette, so
+// the figures you actually read did not shrink.
+const int CARD_X = 12, CARD_W = 216, CARD_H = 104;
+// Gaps were tightened 10/8/6 -> 6/4/4 to free the 10px the Codex row needed for a real
+// pace bar, and are now a uniform 4 - see the bottom-gap note on CODEX_H below. The
+// space came from the GAPS, deliberately not from the cards: a card's content ends at
+// y0+102 (label +6, hero +20..60, bar +62..72, stats +74, reset line +89..102) inside
+// CARD_H 104, so shrinking them to 98 would have clipped the reset line by 4px. The
+// hero figures are also the one thing the 122->104 pass explicitly protected.
+const int CARD1_Y = 38, CARD2_Y = 146;
+// Codex gets a single compact row rather than a full card, because it publishes a
+// single percentage - there is no token count and no second window. One text line at
+// +8 plus a full-height BAR_H pace bar at +26, so Codex reads the same way the Claude
+// cards do rather than being the one figure with no bar to judge it against.
+//
+// THE COLUMN MUST NOT END FLUSH ON contentBottom(). It used to: 6+104+4+104+4+46 spent
+// all 268px of the content area, so this row's bottom edge landed exactly on 302 and
+// sat against the footer with no gap, reading as one joined block. The four gaps are
+// now 4/4/4/4 - two px came off the top gap and two off this row - so the column ends
+// at 298 with 4px of air below it, matching the gaps between the cards. The row keeps
+// its slack: content reaches +39 (the pace bar's clear starts 4px above the bar at +26
+// and runs 18 rows) inside CODEX_H 44, leaving the 2px border at +42..+43 clear of it.
+const int CODEX_Y = 254, CODEX_H = 44;
+const int PAD = 14, BAR_H = 10, RADIUS = 10;
+
+// TOUCH - the panel is resistive and fingertips are ~9mm. 320px of height can't
+// give every control 9mm, so this is the floor everything tappable must clear,
+// and the vertical budget is spent to get as close to it as each page allows.
+const int TAP_MIN = 40;   // 7.1mm
+
+// Replaces both the BOOT-key trigger (GPIO0 doubles as the bootloader strap, so
+// the USB adapter's DTR line fired it by itself) and the fixed tab-bar button
+// (which cost the three tabs 42px).
+//
+// IT LIVES IN THE TAB BAR, in a reserved slot at the right end, so it is chrome
+// rather than something floating over content. That costs the three tabs width
+// (80px each -> 66) but buys back everything a floating button was fighting:
+// it can no longer cover a card, a status pill, or the settings pager's "next"
+// key, and it no longer has to appear and disappear per screen to stay safe.
+//
+// It used to float and be draggable - hold 700ms, drag, release to persist the
+// position to NVS - which on a resistive panel needed a 70px spike reject, a 2px
+// deadband, and a CLEARED content area to drag over (with no framebuffer to read
+// back, there is no way to restore what was under a moving object). All of that
+// went with the gesture.
+//
+// The slot is 40px wide against a 34px-tall bar, so the ring is 26px rather than
+// the old 48. Its tap target is the full slot. That is under TAP_MIN (40) in
+// height - unavoidable, and no worse than the three tabs beside it, which have
+// always been 34 tall.
+const int TAB_REC_W = 40;                       // slot reserved at the right end
+
+// ---------- Sessions tab ----------
+const int SESSION_ROW_Y0 = CONTENT_Y + 4;
+// Smallest row that can carry name + title + model/branch + pill without them touching.
+// 85 is not a preference, it is the arithmetic: the sub-line ends at y+60 and the pill
+// top sits at y+rowH-22, so anything under 85 would draw the pill over the text.
+const int SESSION_TITLE_MIN_H = 85;
+const int SESSION_ROW_GAP = 3;
+const int SESSION_ROW_X = 8;
+// Centre of a row's status indicator. ONE definition because two paths draw it -
+// drawSessionRow() on a repaint and tickWorkingSpinner() every 120ms - and when
+// they disagreed the animation kept redrawing at the old x, undoing the fix and
+// painting over the card's rounded corner four times a second.
+// +23 is a constraint, not taste: the spinner is a 32x32 BLIT that paints its own
+// background, so its rect (x 15..46 here) has to clear both the corner curve and
+// the 2px border that follows it, and still leave the name lane at x=48 alone.
+const int SESSION_DOT_CX = SESSION_ROW_X + 23;
+const int SESSION_ROW_W = 224;
+
+const int ASK_OPT_H = 32;
+const int ASK_OPT_GAP = 4;
+// READ ALL sits in the header row, top-right: maximum distance from the
+// decision buttons at the bottom, so reading can't be fat-fingered into an
+// Allow/Deny.
+const int ASK_READ_BTN_X = 150;
+const int ASK_READ_BTN_W = 78;
+
+const int PAGER_BTN_W  = 52;   // prev/next key width
+const int PAGER_BTN_X0 = 6;    // inset from each edge
+const int PAGER_H = 42;                       // pager band under the tab bar. Sized for
+                                              // TOUCH, not for the text: at 26 the prev/next
+                                              // targets were only ~5mm tall, well under the
+                                              // ~9mm fingertip guideline, and were the most
+                                              // missed control on the device.
+// PAGE_TOP moved here alongside PAGER_H rather than staying in the main file:
+// DEV_CARD_Y (below) is defined from it, and both need to be visible at the
+// point board.h is included, before PAGE_TOP's original declaration point.
+const int PAGE_TOP = CONTENT_Y + PAGER_H + 4; // top of each page's content
+
+// Page 0 - DEVICE card
+const int DEV_CARD_Y = PAGE_TOP + 4;
+// 160, not 120: +40 makes room for up to MAX_LINKS per-Mac rows below ID (see
+// DROW_MAC0/DROW_MAC1) at the same 20px gap ID already uses below BATT, plus
+// the same ~7px clearance ID itself leaves above the card's own border.
+const int DEV_CARD_H = 160;
+const int DROW_BT = 24, DROW_USB = 52, DROW_BATT = 80, DROW_ID = 100;
+// Per-Mac link rows (see renderMacLinkRows() in settings.ino). Two fixed row
+// SLOTS, not one per hostLinks[] index - the renderer compacts to however
+// many links are actually used, so a single remaining Mac always draws in
+// the first slot rather than leaving a gap where the other one used to be.
+const int DROW_MAC0 = 120, DROW_MAC1 = 140;
+
+// Per-Mac link rows. "Mac  feedfeed  999s ago" (a bare 11-char hostId with no
+// tag, plus a generously wide age) is 26 chars - MAC_ROW_W pads to 28. Indexed
+// by ROW SLOT (0/1), not by hostLinks[] index - see renderMacLinkRows().
+// Padding every row to this SAME fixed width, used or not, is what makes a row
+// that goes away actually get erased: the erase box is sized to the padded
+// text, so an unpadded "" would leave a wide stale row un-erased instead of
+// blanking it.
+// This cache no longer holds only the padded text: renderMacLinkRows() appends
+// a "\x01" sentinel plus the row's icon id before comparing, because the icon
+// is drawn separately from that text and a changed icon otherwise leaves a
+// stale one on screen (the visible text is unaffected by an icon-only change).
+// Worst case: 28 (padded text) + 1 (sentinel) + 2 (id, "-1".."15") = 31, +1 NUL
+// = 32 - so 40 keeps 8 bytes of headroom, the same margin battRowTextCache
+// keeps over its own worst case. A cache shorter than the string it holds
+// silently stops noticing changes past that length - this file's oldest bug.
+const int MAC_ROW_W = 28;
+
+// Easter-egg crab-walk surface geometry. OCTO_H depends on CRAB_H (from
+// ClawdCrab.h), which is why deckhand_display.ino now includes ClawdCrab.h
+// before board.h - CRAB_H must already be a defined macro at this point.
+const int OCTO_W = 240;                  // full width: the crab walks across it
+const int OCTO_H = CRAB_H * 3;           // == CRAB_DRAW_H
+const int OCTO_X = 0;
+const int OCTO_Y = 110;

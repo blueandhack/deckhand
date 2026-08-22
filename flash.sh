@@ -1,26 +1,75 @@
 #!/bin/bash
 # Compile and flash the firmware, handling the serial port for you.
 #
-#   ./flash.sh              compile + upload
-#   ./flash.sh --no-compile  upload the last build (skips ~3 min)
+#   ./flash.sh                  compile + upload board 1 (the default)
+#   ./flash.sh --board 2        compile + upload board 2
+#   ./flash.sh --no-compile     upload the last build (skips ~3 min)
 #
-# This exists so flashing stays ONE command. The host holds /dev/cu.usbserial-*,
-# and under launchd it re-grabs the port within a second of being killed - so a
-# bare `arduino-cli upload` fails on a busy port, which looks like a hardware
-# fault rather than a supervisor doing its job. Rather than making you remember a
-# stop/start dance, this stops the host the right way, flashes, and puts it back
-# exactly as it found it - INCLUDING when the upload fails, via the trap below.
+# This exists so flashing stays ONE command. The host holds the board's serial
+# port, and under launchd it re-grabs the port within a second of being killed -
+# so a bare `arduino-cli upload` fails on a busy port, which looks like a
+# hardware fault rather than a supervisor doing its job. Rather than making you
+# remember a stop/start dance, this stops the host the right way, flashes, and
+# puts it back exactly as it found it - INCLUDING when the upload fails, via
+# the trap below. That restore logic is board-agnostic and runs the same way
+# regardless of --board.
 #
 # It handles both ways of running the host: supervised by launchd, or started by
 # hand with `open DeckhandBLE.app`.
+#
+# --board defaults to 1 so every existing habit (a bare `./flash.sh`) keeps
+# working unchanged now that a second board exists.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 SKETCH="firmware/deckhand_display"
-FQBN_COMPILE="esp32:esp32:esp32:PartitionScheme=huge_app"
-# FlashMode=dio and 115200 are required for THIS board: the default QIO mode
-# fails to upload on it. See CLAUDE.md.
-FQBN_UPLOAD="esp32:esp32:esp32:UploadSpeed=115200,FlashMode=dio,FlashFreq=80,PartitionScheme=huge_app"
+BOARD="1"
+NO_COMPILE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --board)
+      BOARD="$2"
+      shift 2
+      ;;
+    --board=*)
+      BOARD="${1#*=}"
+      shift
+      ;;
+    --no-compile)
+      NO_COMPILE=1
+      shift
+      ;;
+    *)
+      echo "usage: $0 [--board 1|2] [--no-compile]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "$BOARD" in
+  1)
+    FQBN_COMPILE="esp32:esp32:esp32:PartitionScheme=huge_app"
+    # FlashMode=dio and 115200 are required for THIS board: the default QIO mode
+    # fails to upload on it. See CLAUDE.md.
+    FQBN_UPLOAD="esp32:esp32:esp32:UploadSpeed=115200,FlashMode=dio,FlashFreq=80,PartitionScheme=huge_app"
+    PORT_GLOB="/dev/cu.usbserial-*"
+    ;;
+  2)
+    # ESP32-S3 Dev Module: the generic esp32s3 target is what defines
+    # CONFIG_IDF_TARGET_ESP32S3, which board.h switches on to select
+    # board_es3c35p.h. Board 2 does not compile yet (later tasks add the
+    # panel shim and touch driver) - these FQBNs are provisional plumbing,
+    # not a verified upload configuration.
+    FQBN_COMPILE="esp32:esp32:esp32s3:PartitionScheme=huge_app"
+    FQBN_UPLOAD="esp32:esp32:esp32s3:PartitionScheme=huge_app"
+    PORT_GLOB="/dev/cu.usbmodem*"
+    ;;
+  *)
+    echo "unknown --board '$BOARD' (expected 1 or 2)" >&2
+    exit 1
+    ;;
+esac
+
 LABEL="com.deckhand.host"
 DOMAIN="gui/$(id -u)"
 
@@ -55,16 +104,16 @@ fi
 # "busy port" failure this script exists to avoid.
 for _ in $(seq 1 20); do pgrep -f 'MacOS/Deckhand' >/dev/null || break; sleep 0.5; done
 
-if [ "${1:-}" != "--no-compile" ]; then
-  echo "==> compiling"
+if [ "$NO_COMPILE" != "1" ]; then
+  echo "==> compiling (board $BOARD)"
   arduino-cli compile --fqbn "$FQBN_COMPILE" "$SKETCH" | tail -3 || exit 1
 fi
 
-# The port renumbers between plug-ins (it has been both usbserial-110 and -10), so
-# it is resolved every time rather than hardcoded.
-PORT=$(ls /dev/cu.usbserial-* 2>/dev/null | head -1)
+# The port renumbers between plug-ins (board 1 has been both usbserial-110 and
+# -10), so it is resolved every time rather than hardcoded.
+PORT=$(ls $PORT_GLOB 2>/dev/null | head -1)
 if [ -z "$PORT" ]; then
-  echo "no /dev/cu.usbserial-* found - is the board plugged in?"
+  echo "no $PORT_GLOB found - is board $BOARD plugged in?"
   exit 1
 fi
 
