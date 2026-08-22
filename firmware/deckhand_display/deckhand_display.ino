@@ -1938,8 +1938,41 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
 
 
 // ---------- Sessions tab ----------
-// SESSION_ROW_Y0/GAP/X/W, SESSION_DOT_CX and SESSION_TITLE_MIN_H moved to
-// board_e32r28t.h (via board.h), with their derivation comments.
+// SESSION_ROW_Y0/GAP/X/W, SESSION_DOT_CX, the three layout thresholds and the
+// ladder's floor/ceiling live in the board headers (via board.h), with their
+// derivation comments. What follows is the part both boards SHARE: a row's
+// internal offsets, expressed once as board 1's packed numbers plus SESSION_AIR.
+//
+// WHY THESE ARE DERIVED RATHER THAN PER-BOARD LITERALS. A row's ink height is
+// identical on both panels - Cozette ships 6x13 and a mechanical 12x26 and
+// nothing between, so a wider screen cannot make the text bigger - which means
+// the only thing a taller panel can spend on a row is SPACING. Writing two sets
+// of offsets would be two chances to get the same relationship wrong; writing
+// one set plus a single air knob makes board 1 (SESSION_AIR 0) provably the
+// numbers sessions.ino used to hardcode, and board 2 the same layout breathing.
+const int SESSION_LINE_GAP  = 2 + SESSION_AIR;   // between two stacked text lines
+const int SESSION_NAME_Y_T  = 4 + SESSION_AIR;   // name top, row WITH a title line
+const int SESSION_NAME_Y    = 6 + SESSION_AIR;   // name top, row without one
+const int SESSION_TITLE_Y   = SESSION_NAME_Y_T + 26 + SESSION_LINE_GAP;
+const int SESSION_SUB_Y     = SESSION_TITLE_Y + 13 + SESSION_LINE_GAP;
+const int SESSION_SUB2_Y    = SESSION_NAME_Y + 26 + SESSION_LINE_GAP;
+// Compact rows: the sub-line and the live duration are drawn at the SAME y on
+// purpose (see the note in drawSessionRow about the duration's clear box eating
+// the sub-line's tail), so they must read one constant, not two equal literals.
+const int SESSION_SUBC_Y    = 25 + SESSION_AIR;
+const int SESSION_PILLC_Y   = 4 + SESSION_AIR;   // compact pill, top-right
+const int SESSION_TAG_Y     = 8 + SESSION_AIR;   // CLAUDE/CODEX tag + Mac icon
+// The pill is BOTTOM-anchored (top = rowH - this), which is what lets the ladder
+// hand a row any surplus height without moving anything else.
+const int SESSION_PILL_UP_T = 22 + SESSION_AIR;  // row with a title line
+const int SESSION_PILL_UP   = 24 + SESSION_AIR;  // row without one
+// The duration sits beside the pill, so it is the pill's own offset less the
+// (18 - 13) / 2 needed to centre a 13px line on an 18px pill.
+const int SESSION_DUR_UP    = SESSION_PILL_UP_T - 3;
+// The status indicator's row: the centre of the name band on a title-less row,
+// i.e. its top plus half of T_HERO's 26. The x half of this (SESSION_DOT_CX) is
+// a corner-clearance constraint and lives in the board header; the y is not.
+const int SESSION_DOT_DY    = SESSION_NAME_Y + 13;
 // Rows stretch to fill the screen: this tab is a desk monitor for a few
 // projects, so with 1-3 sessions each row gets tall (big name, roomy status
 // pill) and only compresses when the list actually fills up. Recomputed in
@@ -1978,7 +2011,7 @@ void tickWorkingSpinner() {
     int i = sessionAt(pos);
     if (strcmp(sessions[i].status, "working") != 0) continue;
     int y = SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
-    int dotCy = large ? y + 19 : y + sessionRowH / 2;
+    int dotCy = large ? y + SESSION_DOT_DY : y + sessionRowH / 2;
     drawAgentSpinner(SESSION_DOT_CX, dotCy, COLOR_CARD,
                      strcmp(sessions[i].agent, "cx") == 0);
   }
@@ -1996,7 +2029,7 @@ void tickWorkingSpinner() {
 
 
 
-const int DETAIL_CARD_Y = CONTENT_Y + 26;
+const int DETAIL_CARD_Y = CONTENT_Y + DETAIL_CARD_DY;
 
 // How many characters of text (from pos) fit in maxW pixels with the
 // CURRENT font, measured, not assumed - proportional fonts make per-char
@@ -2110,10 +2143,10 @@ int detailPillY = 0;
 // Redesigned to fit the content instead of stretching three sparse rows over
 // a tall card: big project name, a status pill with the live duration beside
 // it, then compact PATH (wrapped - paths are long) / MODEL / GIT BRANCH rows.
-// 224, up from 196: the card now carries the title, the last prompt and the paired
-// short-field columns. Checked against the screen rather than eyeballed - the card runs
-// y 60..284 and the "tap here for history" hint sits at 292.
-const int DETAIL_CARD_H = 224;
+// DETAIL_CARD_H (and DETAIL_CARD_DY, DETAIL_AIR, DETAIL_PROMPT_LINES,
+// DETAIL_PATH_LINES) moved to the board headers - the card's height is the sum of
+// drawSessionDetail's own cursor advances, and those differ per board because the
+// line caps and the air between blocks do.
 
 
 

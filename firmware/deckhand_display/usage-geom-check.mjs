@@ -24,67 +24,14 @@
 // The --selftest is the same trick palette-check.mjs and bdf2gfx.py use: it
 // nudges one board-2 offset by a single pixel and FAILS if that goes unnoticed.
 // A checker nobody has seen reject anything is decoration.
-import fs from "fs";
-import path from "path";
-const DIR = path.dirname(new URL(import.meta.url).pathname);
-
-function parseFont(file, name) {
-  const src = fs.readFileSync(`${DIR}/${file}`, "utf8");
-  const gl = src.slice(src.indexOf("Glyphs[]"));
-  const rows = [...gl.matchAll(/\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\}/g)];
-  const fontDecl = src.match(/PROGMEM\s*=\s*\{[^}]*?(0x[0-9A-Fa-f]+|\d+)\s*,\s*(0x[0-9A-Fa-f]+|\d+)\s*,\s*(\d+)\s*\}/);
-  const first = 0x20;
-  const glyphs = rows.map(m => ({ w: +m[2], h: +m[3], xa: +m[4], xo: +m[5], yo: +m[6] }));
-  return { name, first, glyphs };
-}
-const COZ = parseFont("Cozette6x13.h", "coz");
-const TER = parseFont("Terminus10x18b.h", "ter");
-// UI_FONTS: 1,2 -> Cozette size1; 3 -> Terminus size1; 4 -> Cozette size2
-const FONTS = { 1: [COZ, 1, 13], 2: [COZ, 1, 13], 3: [TER, 1, 18], 4: [COZ, 2, 26] };
-function textWidth(s, fontId, sizeOverride) {
-  const [f, fsize] = FONTS[fontId];
-  const size = sizeOverride || fsize;
-  let w = 0;
-  for (let i = 0; i < s.length; i++) {
-    const g = f.glyphs[s.charCodeAt(i) - f.first];
-    if (!g) continue;
-    if (i === s.length - 1) w += (g.xo + g.w) * size;
-    else w += g.xa * size;
-  }
-  return w;
-}
-// --- self-check against the device's own measurements ---
-let bad = 0, checked = 0;
-for (const line of fs.readFileSync(`${DIR}/text-widths-board2.txt`, "utf8").split("\n")) {
-  const m = line.match(/^WIDTH (\d+) (\d+) (\d+) "(.*)"$/);
-  if (!m) continue;
-  const [, font, size, want, text] = m;
-  const got = textWidth(text, +font, +size > 1 ? +size : 0);
-  checked++;
-  if (got !== +want) { bad++; if (bad < 6) console.log(`MISMATCH ${font}/${size} want ${want} got ${got} "${text}"`); }
-}
-console.log(`textWidth self-check: ${checked - bad}/${checked} match device measurements`);
-if (bad) { console.log("ABORT: implementation disagrees with the panel"); process.exit(1); }
+// The textWidth implementation, the header parser and the panel table are shared
+// with sessions-geom-check.mjs (geom-common.mjs) - one copy of the measurement
+// rule, checked once against the device's own numbers.
+import { consts, PANEL, preflight, textWidth } from "./geom-common.mjs";
+preflight();
 
 // --- board constants, parsed from the headers so this cannot drift ---
-function consts(file) {
-  const src = fs.readFileSync(`${DIR}/${file}`, "utf8");
-  const out = {};
-  for (const m of src.matchAll(/^const int ([A-Za-z_0-9 ,=\-+*\/()]+);/gm)) {
-    for (const part of m[1].split(",")) {
-      const kv = part.split("=");
-      if (kv.length !== 2) continue;
-      const k = kv[0].trim();
-      let v = kv[1].trim();
-      for (const [kk, vv] of Object.entries(out)) v = v.replace(new RegExp(`\\b${kk}\\b`, "g"), vv);
-      try { out[k] = eval(v); } catch { }
-    }
-  }
-  return out;
-}
 const B = { 1: consts("board_e32r28t.h"), 2: consts("board_es3c35p.h") };
-
-const PANEL = { 1: [240, 320], 2: [320, 480] };
 
 // BOARD 1'S CARD IS PACKED WITH NO SLACK AT ALL, and three of its bands' clear
 // boxes therefore overlap their neighbour's. They are harmless in themselves -

@@ -195,11 +195,40 @@ const int TAP_MIN = 40;   // 7.1mm
 const int TAB_REC_W = 40;                       // slot reserved at the right end
 
 // ---------- Sessions tab ----------
+// EVERY NUMBER IN THIS SECTION IS THE LITERAL THAT WAS ALREADY HERE (or already
+// at its call site in sessions.ino) - the section grew names, not values, so this
+// board's binary is unchanged. SESSION_AIR below is the one new knob, and it is 0
+// here precisely so every derived offset in deckhand_display.ino collapses back
+// to the number sessions.ino used to hardcode.
 const int SESSION_ROW_Y0 = CONTENT_Y + 4;
 // Smallest row that can carry name + title + model/branch + pill without them touching.
 // 85 is not a preference, it is the arithmetic: the sub-line ends at y+60 and the pill
 // top sits at y+rowH-22, so anything under 85 would draw the pill over the text.
+// As a PACKED BAND TABLE, which is the form board 2 re-derives from:
+//   +0..+1 border | +2..+3 pad | +4..+29 name (T_HERO, 26) | +30..+31 gap
+//   | +32..+44 title (13) | +45..+46 gap | +47..+59 sub-line (13) | +60..+62 gap
+//   | +63..+80 pill (18) | +81..+82 pad | +83..+84 border  = 85
 const int SESSION_TITLE_MIN_H = 85;
+// The tall-row layout WITHOUT a title: name, model/branch sub-line, pill. 70 is
+// the height at which the pill's top row lands exactly ON the sub-line's last ink
+// row (sub at y+34..y+46, pill top at y+rowH-24), i.e. the boundary case this
+// gate admits. Below it the sub-line is suppressed and the row shows name + tag
+// + pill only.
+const int SESSION_SUB_MIN_H = 70;
+// Above this a row uses the TALL layout (big name, pill along the bottom); below
+// it the COMPACT one (small name, sub-line, pill top-right). 56 is name (26) +
+// pill (18) + the two 2px borders + the two 4px pads a title-less tall row uses,
+// i.e. the least height in which that layout's two elements do not collide.
+// Consequence, kept deliberately: 56..69 is a band where a tall row has room for
+// its big name but not for its sub-line, so those rows trade model/branch for a
+// 26px name. Board 1's ladder puts four sessions (63) in that band.
+const int SESSION_LARGE_MIN_H = 56;
+// The ladder's floor and ceiling (constrain() in renderSessionsList). 38 never
+// actually binds here - six sessions come out at 41 - it is the guard for a
+// content area that shrinks. 90 is SESSION_TITLE_MIN_H (85) plus 5 of slack,
+// which the layout spends between the sub-line and the bottom-anchored pill.
+const int SESSION_ROW_H_MIN = 38;
+const int SESSION_ROW_H_MAX = 90;
 const int SESSION_ROW_GAP = 3;
 const int SESSION_ROW_X = 8;
 // Centre of a row's status indicator. ONE definition because two paths draw it -
@@ -211,6 +240,55 @@ const int SESSION_ROW_X = 8;
 // the 2px border that follows it, and still leave the name lane at x=48 alone.
 const int SESSION_DOT_CX = SESSION_ROW_X + 23;
 const int SESSION_ROW_W = 224;
+// The text lane's left edge, as an offset from the row. 40 is set by the ART, not
+// by the panel: the spinner blit is 32x32 centred on SESSION_DOT_CX, so it owns
+// x SESSION_ROW_X+7..+38 and the name starts 2px clear of it. Same 32x32 frames
+// on both boards, so this number does not move.
+const int SESSION_NAME_DX = 40;
+// The sub-line's measured lane. 184 rather than the row's own text lane
+// (SESSION_ROW_X + SESSION_ROW_W - 12 - nameX = 172) because that is the literal
+// this board has always used - it over-runs the 12px right inset by 12px, which a
+// 30-character sub-line has never reached. Kept AS IS rather than tightened: this
+// board's binary is held byte-identical across the two-board port, and a silent
+// 12px change to when a sub-line starts truncating is exactly the kind of
+// board-1 behaviour change that must not ride inside a board-2 diff.
+const int SESSION_SUB_LANE_W = 184;
+// The "+N more" strip's reserved band at the bottom of the list. Derived from the
+// TEXT, not the panel: one Cozette 6x13 line plus 3px, so it does not move with
+// the screen.
+const int SESSION_OVERFLOW_H = 16;
+// Vertical air added at every gap and pad inside a row (see the derived offsets
+// in deckhand_display.ino). 0 here: this board's content area cannot afford any -
+// its own band table above is packed with 2px gaps and 2px pads.
+const int SESSION_AIR = 0;
+
+// ---------- Session detail card and the ask screen ----------
+// The header row's TOUCH band ("< Back" on the left; TYPE or READ ALL on the
+// right), used by both handleAskTouch's `sy < CONTENT_Y + DETAIL_HEAD_H` gates.
+// 28 against a card starting at CONTENT_Y+26, i.e. the band's last 2 rows overlap
+// the card's border - harmless (the border is not tappable content) and left
+// alone here for the same byte-identical reason as SESSION_SUB_LANE_W.
+const int DETAIL_HEAD_H = 28;
+const int DETAIL_BACK_Y = 4;      // "< Back" baseline inside that row
+const int DETAIL_CARD_DY = 26;    // card top = CONTENT_Y + this
+// 224. The card runs y 60..283 and the "tap here for history" hint sits at 292.
+// Content ends at cardY+213 in the worst case (title AND last prompt both
+// present), so 8 rows of slack sit above the 2px border at +222..+223.
+const int DETAIL_CARD_H = 224;
+// TYPE, in the header row. 76x22 drawn; the hit zone is the whole right end of
+// the row (100x28), the same trade the tab bar's slots make.
+const int MSG_BTN_W = 76, MSG_BTN_H = 22;
+// Wrapped-text line caps on the detail card. BOTH TRUNCATE ON THIS BOARD, and
+// that is the constraint rather than a choice: prompt[104] holds up to 100
+// characters against a 188px lane = 31 characters a line, so showing all of it
+// needs 4 lines; path[68] holds 64 against the same lane and needs 3. The card
+// has room for neither, so 2 each is what fits. Board 2's wider lane and taller
+// card is what finally makes these caps big enough to show the whole field.
+const int DETAIL_PROMPT_LINES = 2;
+const int DETAIL_PATH_LINES = 2;
+// Air added at every block boundary inside the detail card. 0 here for the same
+// reason SESSION_AIR is: this card already runs to 8px of slack.
+const int DETAIL_AIR = 0;
 
 const int ASK_OPT_H = 32;
 const int ASK_OPT_GAP = 4;
@@ -219,6 +297,11 @@ const int ASK_OPT_GAP = 4;
 // Allow/Deny.
 const int ASK_READ_BTN_X = 150;
 const int ASK_READ_BTN_W = 78;
+const int ASK_READ_BTN_H = 24;
+// The ask screen's own header stack, below "< Back": the kind badge (with the
+// session name right-aligned on the same row) and then the question title.
+const int ASK_BADGE_Y = 27;
+const int ASK_TITLE_Y = 39;
 
 const int PAGER_BTN_W  = 52;   // prev/next key width
 const int PAGER_BTN_X0 = 6;    // inset from each edge

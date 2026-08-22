@@ -2,7 +2,7 @@
 // Split out of deckhand_display.ino - see pairing.ino for how the concatenated
 // build works and what may not move.
 
-bool sessionRowsLarge() { return sessionRowH >= 56; }
+bool sessionRowsLarge() { return sessionRowH >= SESSION_LARGE_MIN_H; }
 void drawChevron(int rightX, int cy, uint16_t color = COLOR_LABEL) {
   tft.fillTriangle(rightX - 8, cy - 5, rightX - 8, cy + 5, rightX - 2, cy, color);
 }
@@ -113,16 +113,15 @@ void drawSessionRow(int pos) {
   // One even 2px ring; two nested outlines leave holes where their arcs collide.
   uiStrokeRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, BORDER_CARD, border, COLOR_BG);
 
-  // +23, not +20. The working spinner is a 32x32 BLIT - it paints a full
-  // rectangle, background pixels included - so its left edge must clear the
-  // row's rounded corner. At +20 the rect started at x=12 while the corner's 2px
-  // border reaches x~12.9 on the spinner's topmost row, so the blit's COLOR_CARD
-  // background erased a bite out of the border. On LIGHT, where COLOR_CARD is
-  // white, that read as a white notch in the card's rounded corner.
-  // At +23 the rect is x 15..46: 2.1px clear of the border, and 2px short of the
-  // name lane at x=48. The dot and square states move with it so the indicator
-  // never jumps sideways when a session changes status.
-  int dotCy = large ? y + 19 : y + rowH / 2;
+  // SESSION_DOT_CX/DY, not literals, and BOTH halves are constraints rather than
+  // taste - the derivations live in the board header (x) and beside the shared
+  // offsets in deckhand_display.ino (y). The working spinner is a 32x32 BLIT: it
+  // paints a full rectangle, background pixels included, so its left edge has to
+  // clear the row's rounded corner. Board 1 shipped it 3px too far left once and
+  // the blit's COLOR_CARD background bit a notch out of the border - white, and
+  // plainly visible, under the LIGHT theme. The dot and square states move with
+  // it so the indicator never jumps sideways when a session changes status.
+  int dotCy = large ? y + SESSION_DOT_DY : y + rowH / 2;
   drawStatusDot(SESSION_DOT_CX, dotCy, large ? 9 : 7, s.status, COLOR_CARD,
                 strcmp(s.agent, "cx") == 0);
 
@@ -137,7 +136,7 @@ void drawSessionRow(int pos) {
   // shifts the name up to make room.
   bool showTitle = large && rowH >= SESSION_TITLE_MIN_H && s.title[0];
 
-  const int nameX = SESSION_ROW_X + 40;
+  const int nameX = SESSION_ROW_X + SESSION_NAME_DX;
   // Built ONCE, then both DRAWN (below) and MEASURED (laneRight, right here) from this
   // same buffer - a tag measured from one string and drawn from another is exactly the
   // 8px overlap the measured lane was written to fix. Mac tag on the same principle as
@@ -194,7 +193,7 @@ void drawSessionRow(int pos) {
   // it doesn't hang off the top of the row with a gap under it. The old hardcoded
   // +6 was exactly this: (26 - 13) / 2. A title row starts 2px higher to buy the
   // third line its space.
-  int nameTop = y + (showTitle ? 4 : 6);
+  int nameTop = y + (showTitle ? SESSION_NAME_Y_T : SESSION_NAME_Y);
   int nameOffset = large ? (uiLineH(T_HERO) - uiLineH(nameFont)) / 2 : 0;
   tft.drawString(nameBuf, nameX, nameTop + nameOffset);
 
@@ -217,43 +216,50 @@ void drawSessionRow(int pos) {
       fitText(titleBuf, sizeof(titleBuf), s.title,
               SESSION_ROW_X + SESSION_ROW_W - 12 - nameX);
       tft.setTextColor(COLOR_VALUE, COLOR_CARD);
-      tft.drawString(titleBuf, nameX, y + 32);
+      tft.drawString(titleBuf, nameX, y + SESSION_TITLE_Y);
       tft.setTextColor(COLOR_LABEL, COLOR_CARD); // restore for the sub-line below
-      // Bound to the sub-line's own lane (x=48 to the row's right edge, 184px = 30
-      // characters at Cozette's 6px advance) - a long branch name plus a Mac tag could
-      // otherwise run past the row.
+      // Bound to SESSION_SUB_LANE_W, the sub-line's own lane from the name's left
+      // edge to the row's right - a long branch name plus a Mac tag could otherwise
+      // run past the row. 184px = 30 characters on board 1, 244 = 40 on board 2,
+      // where buildSessionSubline's 35-character output can never be cut at all.
       if (sub[0]) {
         char subFit[36];
-        fitText(subFit, sizeof(subFit), sub, 184);
-        tft.drawString(subFit, nameX, y + 47);
+        fitText(subFit, sizeof(subFit), sub, SESSION_SUB_LANE_W);
+        tft.drawString(subFit, nameX, y + SESSION_SUB_Y);
       }
-    } else if (rowH >= 70 && sub[0]) {
+    } else if (rowH >= SESSION_SUB_MIN_H && sub[0]) {
       char subFit[36];
-      fitText(subFit, sizeof(subFit), sub, 184);
-      tft.drawString(subFit, SESSION_ROW_X + 40, y + 34);
+      fitText(subFit, sizeof(subFit), sub, SESSION_SUB_LANE_W);
+      tft.drawString(subFit, nameX, y + SESSION_SUB2_Y);
     }
     // Tall rows keep the top-right corner free (their pill sits at the bottom), so
-    // the agent gets its full name there - and it still shows on the 56..69px rows
-    // where the sub-line above is suppressed to clear the pill. Drawn from the SAME
-    // agentTag buffer the name lane was measured against above.
+    // the agent gets its full name there - and it still shows in the
+    // SESSION_LARGE_MIN_H..SESSION_SUB_MIN_H band, where the sub-line above is
+    // suppressed to clear the pill. Drawn from the SAME agentTag buffer the name
+    // lane was measured against above.
     const int tagRight = SESSION_ROW_X + SESSION_ROW_W - 12;
     tft.setTextDatum(TR_DATUM);
     if (rowEmoji >= 0) {
-      // y + 8 for both: the icon's y is the text's y, because both are 13px.
-      drawEmoji(rowEmoji, tagRight - MAC_EMOJI_SIZE, y + 8, COLOR_CARD);
-      tft.drawString(agentTag, tagRight - MAC_EMOJI_SIZE - 4, y + 8);
+      // SESSION_TAG_Y for both: the icon's y is the text's y, because both are 13px.
+      drawEmoji(rowEmoji, tagRight - MAC_EMOJI_SIZE, y + SESSION_TAG_Y, COLOR_CARD);
+      tft.drawString(agentTag, tagRight - MAC_EMOJI_SIZE - 4, y + SESSION_TAG_Y);
     } else {
-      tft.drawString(agentTag, tagRight, y + 8);
+      tft.drawString(agentTag, tagRight, y + SESSION_TAG_Y);
     }
     tft.setTextDatum(TL_DATUM);
     const char* label = working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "NEEDS INPUT" : "READY");
-    // 22 rather than 24 on a title row: the sub-line now ends at y+60, and the extra 2px
-    // is what keeps the pill clear of it at the 86px height three sessions produce.
-    drawStatusPill(SESSION_ROW_X + 40, y + rowH - (showTitle ? 22 : 24), label, s.status, false);
+    // BOTTOM-anchored, which is what lets the ladder hand a row any surplus height
+    // without moving anything above. SESSION_PILL_UP_T is 2px tighter than
+    // SESSION_PILL_UP because a title row has a third line of text to clear: on
+    // board 1 the sub-line ends at y+59 against a pill top of y+rowH-22, which is
+    // what makes 85 the packed minimum.
+    drawStatusPill(nameX, y + rowH - (showTitle ? SESSION_PILL_UP_T : SESSION_PILL_UP),
+                   label, s.status, false);
   } else {
-    // NOT the 184px lane the tall-row sites use: on a compact row the duration
-    // ("10s"/"4m") is drawn at this SAME y (y+25 - see the drawIfChanged call for
-    // rowDurCache below), and drawIfChanged clears a box around it on EVERY tick,
+    // NOT SESSION_SUB_LANE_W, the lane the tall-row sites use: on a compact row the
+    // duration ("10s"/"4m") is drawn at this SAME y (SESSION_SUBC_Y - see the
+    // drawIfChanged call for rowDurCache below, which reads the same constant),
+    // and drawIfChanged clears a box around it on EVERY tick,
     // independent of whether this row is due to repaint. Before the Mac tag, the
     // sub-line ("CC opus-5 (main)") never reached that box; "CC/studio opus-5
     // (multi-host)" does, and the duration's periodic clear was found eating its
@@ -264,13 +270,13 @@ void drawSessionRow(int pos) {
     // case the font or padding ever changes) rather than assumed.
     if (sub[0]) {
       int durBoxLeft = SESSION_ROW_X + SESSION_ROW_W - 16 - tft.textWidth("0000000") - 1;
-      int subMaxW = durBoxLeft - (SESSION_ROW_X + 40) - 4; // 4px so it never kisses that box
+      int subMaxW = durBoxLeft - nameX - 4; // 4px so it never kisses that box
       char subFit[36];
       fitText(subFit, sizeof(subFit), sub, subMaxW);
-      tft.drawString(subFit, SESSION_ROW_X + 40, y + 25);
+      tft.drawString(subFit, nameX, y + SESSION_SUBC_Y);
     }
     const char* label = working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "INPUT" : "READY");
-    drawStatusPill(SESSION_ROW_X + SESSION_ROW_W - 16, y + 4, label, s.status, true);
+    drawStatusPill(SESSION_ROW_X + SESSION_ROW_W - 16, y + SESSION_PILLC_Y, label, s.status, true);
   }
 
   // Accent chevron on asking rows: the tap doesn't just show detail there,
@@ -285,15 +291,16 @@ void renderSessionsList() {
   if (layoutCode != rowCountCache) {
     rowCountCache = layoutCode;
     if (sessionCount > 0) {
-      // The overflow strip ("+N more") takes the bottom 16px when present.
-      int avail = contentBottom() - SESSION_ROW_Y0 - (hiddenCount > 0 ? 16 : 0);
-      // Cap raised 72 -> 90 so a row can carry a THIRD line (the session title) without
-      // pushing the model/branch line out. Measured against the real content area
-      // (avail = 264): 1-2 sessions land on the 90 cap and 3 comes out at 86, all of
-      // which clear SESSION_TITLE_MIN_H; 4+ are unchanged at 63/50/41 and keep today's
-      // two-line layout.
-      sessionRowH = constrain(
-          (avail - SESSION_ROW_GAP * (sessionCount - 1)) / sessionCount, 38, 90);
+      // The overflow strip ("+N more") takes the bottom SESSION_OVERFLOW_H when present.
+      int avail = contentBottom() - SESSION_ROW_Y0 -
+                  (hiddenCount > 0 ? SESSION_OVERFLOW_H : 0);
+      // Rows stretch to fill the list and only compress once it fills up. The floor and
+      // the ceiling are the board's, because the ladder this produces is arithmetic on
+      // its own content area rather than a preference - board 1 (avail 264, cap 90) gives
+      // 1-3 sessions a title line and board 2 (avail 412, cap 106) gives four, with the
+      // full ladder written out in each board header beside SESSION_ROW_H_MAX.
+      sessionRowH = constrain((avail - SESSION_ROW_GAP * (sessionCount - 1)) / sessionCount,
+                              SESSION_ROW_H_MIN, SESSION_ROW_H_MAX);
     }
     tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
     for (int i = 0; i < MAX_SESSIONS; i++) rowSigCache[i][0] = '\0';
@@ -346,7 +353,8 @@ void renderSessionsList() {
     formatDuration(sessions[i].statusSinceMillis, dur, sizeof(dur));
     padLeftTo(dur, sizeof(dur), 7);
     int y = SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
-    int durY = sessionRowsLarge() ? y + sessionRowH - 19 : y + 25;
+    int durY = sessionRowsLarge() ? y + sessionRowH - SESSION_DUR_UP
+                                  : y + SESSION_SUBC_Y;
     drawIfChanged(rowDurCache[pos], sizeof(rowDurCache[pos]), dur,
                   SESSION_ROW_X + SESSION_ROW_W - 16, durY, 1, 1,
                   COLOR_LABEL, COLOR_CARD, TR_DATUM);
@@ -508,9 +516,12 @@ int askInputRows(int idx) {
 // session is waiting, and without one the host refuses the frame - so offering the
 // button would advertise a control that cannot work, which is exactly what the
 // read-only ask path refuses to do when it draws options as a flat list instead.
-const int MSG_BTN_W = 76, MSG_BTN_H = 22;
+// MSG_BTN_W/H live in the board headers: 76x22 on board 1, where the header row
+// is 28px and cannot hold a TAP_MIN control, against 88x46 on board 2, where a
+// 50px row can. Both sit 2px into the row, so the chip's own height is what
+// decides where the card below it can start (DETAIL_CARD_DY).
 int msgBtnX() { return CARD_X + CARD_W - MSG_BTN_W; }
-int msgBtnY() { return CONTENT_Y + 2; }            // 36..58, clear of the card at 60
+int msgBtnY() { return CONTENT_Y + 2; }
 bool msgOffered(int idx) {
   if (idx < 0 || idx >= sessionCount) return false;
   const SessionInfo& s = sessions[idx];
@@ -596,7 +607,7 @@ void drawAskDetail(int idx) {
   setUIFont(2);
   tft.setTextColor(COLOR_ACCENT, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("< Back", CARD_X, CONTENT_Y + 4);
+  tft.drawString("< Back", CARD_X, CONTENT_Y + DETAIL_BACK_Y);
   // (READ ALL button lands top-right of this row, drawn below once the
   // overflow question is settled - far away from the decision buttons.)
 
@@ -604,17 +615,17 @@ void drawAskDetail(int idx) {
   const char* badge = isPerm ? "PERMISSION REQUEST" : (isPlan ? "PLAN APPROVAL" : "QUESTION");
   setUIFont(1);
   tft.setTextColor(COLOR_ACCENT, COLOR_BG);
-  tft.drawString(badge, CARD_X, CONTENT_Y + 27);
+  tft.drawString(badge, CARD_X, CONTENT_Y + ASK_BADGE_Y);
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
   tft.setTextDatum(TR_DATUM);
-  tft.drawString(s.name, tft.width() - CARD_X, CONTENT_Y + 27);
+  tft.drawString(s.name, tft.width() - CARD_X, CONTENT_Y + ASK_BADGE_Y);
   tft.setTextDatum(TL_DATUM);
 
   // Symmetric text margins: CARD_X on both sides.
   int maxW = tft.width() - 2 * CARD_X;
 
   // Title (up to 2 lines, font 2, measured wrap).
-  int y = drawWrappedText(s.askTitle, CARD_X, CONTENT_Y + 39, 2, 17, maxW, 0, 2,
+  int y = drawWrappedText(s.askTitle, CARD_X, CONTENT_Y + ASK_TITLE_Y, 2, 17, maxW, 0, 2,
                           COLOR_VALUE, COLOR_BG);
 
   // Detail text, styled by content: anything with code - a command, or a
@@ -657,12 +668,17 @@ void drawAskDetail(int idx) {
     tft.drawString("...", tft.width() - CARD_X - pad, textTop + pad + (shown - 1) * dLineH);
     tft.setTextDatum(TL_DATUM);
     // ...and the READ ALL button up in the header row.
-    uiFillRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, 24, R_SM, COLOR_CARD, COLOR_BG);
-    uiStrokeRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, 24, R_SM, BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
+    uiFillRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, ASK_READ_BTN_H, R_SM,
+                COLOR_CARD, COLOR_BG);
+    uiStrokeRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, ASK_READ_BTN_H, R_SM,
+                  BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
     setUIFont(2);
     tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("READ ALL", ASK_READ_BTN_X + ASK_READ_BTN_W / 2, CONTENT_Y + 13);
+    // Centred in the chip's own height, not at a fixed +13: board 2's chip is
+    // TAP_MIN tall and the label would otherwise sit up against its top edge.
+    tft.drawString("READ ALL", ASK_READ_BTN_X + ASK_READ_BTN_W / 2,
+                   CONTENT_Y + 1 + ASK_READ_BTN_H / 2);
     tft.setTextDatum(TL_DATUM);
   }
 
@@ -885,9 +901,11 @@ bool handleAskTouch(int sx, int sy) {
     // stop" - ending a dictation also closed the page out from under you. The
     // "< Back" label was already being drawn here, so this simply makes the page
     // behave the way it already looked.
-    if (sy < CONTENT_Y + 28) {
-      // The whole right end of the header row, not only the drawn 76x22 chip -
-      // 100x28 of target, the same trade the tab bar's slots already make.
+    if (sy < CONTENT_Y + DETAIL_HEAD_H) {
+      // The whole right end of the header row, not only the drawn chip - the extra
+      // 24px to its left is the same trade the tab bar's slots already make. On
+      // board 1 that makes a 100x28 target out of a 76x22 chip; on board 2 the chip
+      // is already 88x46, so this is slop rather than the target.
       // Everything else in this row is still back.
       if (msgOffered(detailIndex) && sx >= msgBtnX() - 24) {
         openKeyboardForMessage(detailIndex);
@@ -954,7 +972,7 @@ bool handleAskTouch(int sx, int sy) {
     return true;
   }
   // Header row: READ ALL on the right (when overflowing), back on the left.
-  if (sy < CONTENT_Y + 28) {
+  if (sy < CONTENT_Y + DETAIL_HEAD_H) {
     if (askOverflow && sx >= ASK_READ_BTN_X - 6) {
       readerActive = true;
       readerPage = 0;
@@ -1025,7 +1043,7 @@ void drawSessionDetail(int idx) {
   setUIFont(2);
   tft.setTextColor(COLOR_ACCENT, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("< Back", CARD_X, CONTENT_Y + 4);
+  tft.drawString("< Back", CARD_X, CONTENT_Y + DETAIL_BACK_Y);
   // Outlined, not filled: it opens a screen whose own primary action is SEND, and
   // the filled treatment belongs to that one.
   if (msgOffered(idx))
@@ -1037,7 +1055,12 @@ void drawSessionDetail(int idx) {
   // Laid out with a running cursor rather than the hand-derived offsets this screen used
   // to carry (cardY + 78 / +120 / +158). Those had to be re-derived by hand every time a
   // field moved, which is how the screen ended up sparse in the first place.
-  int cy = cardY + 6;
+  // Every advance below is board 1's own number plus DETAIL_AIR, which is 0 there
+  // and 8 on board 2 - the card's ink is the same height on both panels (Cozette
+  // has no intermediate size), so the only thing a taller card can spend is the
+  // air between blocks. The two label->value pairs are deliberately NOT given air:
+  // a label and the value it names read as one block.
+  int cy = cardY + 6 + DETAIL_AIR;
   const int LX = CARD_X + PAD;              // label/value left edge
   const int RX = CARD_X + CARD_W / 2 + 2;   // right column, for the paired short fields
   const int colW = CARD_W / 2 - PAD - 4;
@@ -1049,7 +1072,7 @@ void drawSessionDetail(int idx) {
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
   while (strlen(nameBuf) > 1 && tft.textWidth(nameBuf) > maxW) nameBuf[strlen(nameBuf) - 1] = '\0';
   tft.drawString(nameBuf, LX, cy);
-  cy += 26;
+  cy += 26 + DETAIL_AIR;
 
   // What the session is about, straight under its name - the same title the list row
   // shows, which was previously nowhere on this screen.
@@ -1059,17 +1082,17 @@ void drawSessionDetail(int idx) {
     fitText(titleBuf, sizeof(titleBuf), s.title, maxW);
     tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
     tft.drawString(titleBuf, LX, cy);
-    cy += 15;
+    cy += 15 + DETAIL_AIR;
   }
 
   // Status pill; renderDetailDuration draws "for 12m - 14:31" to its right.
   detailPillY = cy;
   drawStatusPill(LX, cy, pillLabel(status), status, false);
   detailDurCache[0] = '\0'; // force the duration to redraw after this repaint
-  cy += 24;
+  cy += 24 + DETAIL_AIR;
 
   tft.drawFastHLine(LX, cy, maxW, COLOR_LABEL);
-  cy += 7;
+  cy += 7 + DETAIL_AIR;
 
   // LAST PROMPT - the most useful text on the screen: what you actually asked.
   if (s.prompt[0]) {
@@ -1077,10 +1100,11 @@ void drawSessionDetail(int idx) {
     tft.setTextColor(COLOR_LABEL, COLOR_CARD);
     tft.drawString("LAST PROMPT", LX, cy);
     cy += 13;
-    drawWrappedText(s.prompt, LX, cy, 1, 11, maxW, 0, 2, COLOR_VALUE, COLOR_CARD);
-    cy += 24;
+    drawWrappedText(s.prompt, LX, cy, 1, 11, maxW, 0, DETAIL_PROMPT_LINES,
+                    COLOR_VALUE, COLOR_CARD);
+    cy += DETAIL_PROMPT_LINES * 11 + 2 + DETAIL_AIR;
     tft.drawFastHLine(LX, cy, maxW, COLOR_LABEL);
-    cy += 7;
+    cy += 7 + DETAIL_AIR;
   }
 
   // PATH - wrapped, since paths are long and the tail is the informative end.
@@ -1088,8 +1112,9 @@ void drawSessionDetail(int idx) {
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.drawString("PATH", LX, cy);
   cy += 13;
-  drawWrappedText(s.path[0] ? s.path : "-", LX, cy, 1, 11, maxW, 0, 2, COLOR_VALUE, COLOR_CARD);
-  cy += 24;
+  drawWrappedText(s.path[0] ? s.path : "-", LX, cy, 1, 11, maxW, 0, DETAIL_PATH_LINES,
+                  COLOR_VALUE, COLOR_CARD);
+  cy += DETAIL_PATH_LINES * 11 + 2 + DETAIL_AIR;
 
   // The four short fields pair into two columns instead of a four-row ladder. That is
   // what buys the room for the title and the prompt above without a taller card.
@@ -1100,7 +1125,7 @@ void drawSessionDetail(int idx) {
   cy += 12;
   drawColValue(LX, cy, s.model, colW);
   drawColValue(RX, cy, s.branch, colW);
-  cy += 18;
+  cy += 18 + DETAIL_AIR;
 
   // STARTED pairs with the agent, NOT with "last active" - that already sits beside the
   // pill above as part of "for 12m - 14:31". Repeating it here would both say the same
