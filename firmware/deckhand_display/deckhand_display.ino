@@ -3748,6 +3748,24 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     applyScreenRotation(); // calibration runs unflipped - restore the user's choice
     everReceived = false;
     drawWaitingScreen();
+#if !BOARD_USES_TFT_ESPI
+  } else if (buf == "SHIMBENCH") {
+    // Board 2 only. Times a full-screen flush and a small dirty-rect flush,
+    // in that order, so Task 6 (and the 120ms spinner / 20-frame crab it
+    // gates) has real numbers instead of a guess. Kept behind a command
+    // rather than run once and thrown away, per the brief.
+    tft.fillScreen(0x0000);
+    unsigned long t0 = micros();
+    tft.flush();
+    unsigned long fullUs = micros() - t0;
+
+    tft.fillRect(40, 40, 32, 32, 0xFFFF);
+    unsigned long t1 = micros();
+    tft.flush();
+    unsigned long smallUs = micros() - t1;
+
+    Serial.printf("SHIMBENCH full=%luus small=%luus\n", fullUs, smallUs);
+#endif
   } else if (buf == "SLEEP") {
     // Remote "power off", so the sleep-drain path can be exercised without
     // holding the BOOT key. Wakes on a held touch like any other sleep.
@@ -4143,4 +4161,13 @@ void loop() {
     lastAdvCheck = millis();
     BLEDevice::startAdvertising();
   }
+
+#if !BOARD_USES_TFT_ESPI
+  // PanelShim only: every render call above this point in the same loop()
+  // iteration wrote into the shadow framebuffer, not the panel. One flush
+  // here pushes whatever became dirty this iteration. TFT_eSPI has no
+  // flush() (board 1 writes straight to the panel), so this is guarded
+  // rather than shared - an unguarded call would break board 1's compile.
+  tft.flush();
+#endif
 }
