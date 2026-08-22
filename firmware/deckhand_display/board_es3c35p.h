@@ -489,14 +489,18 @@ const int DETAIL_AIR = 8;
 // proportion board 1 spends on 5 * (32 + 4) = 180 of 268. So the bigger targets
 // cost the detail text nothing in relative terms.
 const int ASK_OPT_H = 46;
-// 8, from board 1's 4, and this gap is worth more here than anywhere else on the
-// device: the two things it separates are Allow and Deny. Everywhere else a 4px
-// gap merely looks tight; between two decision buttons it is the margin for a
-// mis-hit whose cost is running a command that was meant to be denied. It costs 16
-// of the 416px content area in the worst case (4 gaps in a 5-row stack), which is
-// affordable at the same 65% total board 1 already spends - see ASK_OPT_H. Board
-// 1's 4 is not a different judgement, it is the most its packed content area could
-// give: at 8 its worst-case stack would be 5 * 40 = 200 of 268.
+// 8 is DERIVED FROM THE 65% PROPORTION, not from any touch measurement, and it is
+// worth being exact about which - see ASK_OPT_H. The stack is sized to spend the
+// same share of the content area board 1 spends, and 5 * (46 + 8) = 270 of 416 is
+// what lands on it; the gap is the free variable that 65% closes. Board 1's 4 is
+// not a different judgement, it is the most its packed content area could give:
+// at 8 its worst-case stack would be 5 * 40 = 200 of 268.
+// What the extra 4px BUYS is a separate claim, and a real one, but it is a
+// consequence rather than the derivation: the two things this gap separates are
+// Allow and Deny, so unlike every other gap on the device a mis-hit here runs a
+// command that was meant to be denied. Worth having, not what set the number -
+// and if the 65% rule is ever revisited, this gap is not protected by an
+// ergonomics argument that was never made.
 const int ASK_OPT_GAP = 8;
 // READ ALL, right-aligned to the card's own margin exactly as board 1 is
 // (150 + 78 = 228 = 240 - CARD_X): 320 - 12 - 90 = 218. 90 is board 1's 78 held
