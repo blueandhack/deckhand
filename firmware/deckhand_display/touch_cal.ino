@@ -5,10 +5,22 @@
 // and there are no headers. Verified before splitting: no function signature in
 // this sketch names a type declared after the first function definition, which
 // is what would break the auto-generated prototypes.
+//
+// Everything below the shared flip/rotation helpers is BOARD 1 ONLY, and it is
+// board-1-only by definition rather than by convenience: board 2's touch
+// controller is integrated into the ST77922 display IC and is factory-aligned,
+// so there is no raw ADC pair to map and no fit to solve. Board 2 keeps only
+// runCalibration()/loadOrRunCalibration(), which say so rather than drawing
+// crosshairs nobody needs - RECAL is documented as the escape hatch for
+// misaligned touch, and on that panel the honest answer is that there is
+// nothing to calibrate. The one entry point both boards share, getTouchPoint(),
+// moved to touch_hal.ino alongside touchPressed() and touchBegin().
 
 void loadScreenFlip() { screenFlipped = prefs.getBool("flip", false); }
 void saveScreenFlip() { prefs.putBool("flip", screenFlipped); }
 void applyScreenRotation() { tft.setRotation(screenFlipped ? 2 : SCREEN_ROTATION); }
+
+#if BOARD_TOUCH_NEEDS_CAL
 void readRawTouch(int16_t& rx, int16_t& ry) {
   TS_Point p = ts.getPoint();
   if (TOUCH_SWAP_XY) {
@@ -29,6 +41,13 @@ void waitForStableTouch(int16_t& outX, int16_t& outY) {
   while (!ts.touched()) {
     reapBleLinks(true);
 #if !BOARD_USES_TFT_ESPI
+    // UNREACHABLE as things stand, and kept deliberately: this whole function
+    // now sits inside #if BOARD_TOUCH_NEEDS_CAL, and the only board that needs
+    // calibration is also the only one that uses TFT_eSPI, so the two guards
+    // currently exclude each other. It stays because it is the CORRECT thing
+    // for a resistive panel on a shimmed surface - a board 3 with that pairing
+    // would need it - and because deleting it would put the reasoning below
+    // back into someone's head instead of into the file.
     // The crosshair/prompt drawn by the caller (runCalibration) never reaches
     // the glass otherwise: this loop can block for as long as it takes a
     // person to notice and tap, and loop()'s own end-of-iteration flush never
@@ -164,21 +183,46 @@ void loadOrRunCalibration() {
     runCalibration();
   }
 }
-bool getTouchPoint(int& sx, int& sy) {
-  if (!ts.touched()) return false;
-  int16_t rx, ry;
-  readRawTouch(rx, ry);
-  lastRawX = rx;
-  lastRawY = ry;
-  sx = constrain((int) lroundf(calAff[0] * rx + calAff[1] * ry + calAff[2]), 0, tft.width() - 1);
-  sy = constrain((int) lroundf(calAff[3] * rx + calAff[4] * ry + calAff[5]), 0, tft.height() - 1);
-  // The touch panel is glued to the glass and does NOT rotate with the image, so
-  // when the display is flipped the same physical press lands at the mirrored
-  // screen coordinate. Mirroring here keeps ONE calibration valid for both
-  // orientations - flipping never asks the user to recalibrate.
-  if (screenFlipped) {
-    sx = tft.width() - 1 - sx;
-    sy = tft.height() - 1 - sy;
-  }
-  return true;
+#else   // !BOARD_TOUCH_NEEDS_CAL - board 2's capacitive, factory-aligned panel
+
+// Not a silent no-op, and not a stub. RECAL is the documented escape hatch for
+// touch that lands in the wrong place, so someone reaching for it here is owed
+// an answer - and the answer is that this panel has no mapping to fix. It says
+// so on the serial console AND on the glass, because whoever typed RECAL may
+// well be standing in front of the device rather than reading the log.
+//
+// It must also not leave the caller waiting for taps: both call sites
+// (processCompletedLine's RECAL, and SETTINGS -> CALIBRATE TOUCH) repaint
+// immediately after this returns, so the notice needs its own dwell to be
+// readable at all, and is then painted over by that repaint.
+void runCalibration() {
+  Serial.println("CAL: nothing to calibrate - this panel's touch controller is "
+                 "integrated into the ST77922 and is factory-aligned");
+  tft.fillScreen(COLOR_BG);
+  setUIFont(2);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(COLOR_VALUE, COLOR_BG);
+  tft.drawString("Touch is factory-aligned", tft.width() / 2, tft.height() / 2 - 12);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.drawString("nothing to calibrate", tft.width() / 2, tft.height() / 2 + 12);
+  tft.setTextDatum(TL_DATUM);
+#if !BOARD_USES_TFT_ESPI
+  tft.flush();   // nothing else runs before the delay below, so without this the
+                 // notice would only reach the glass after it - i.e. never, for
+                 // a caller that repaints straight afterwards.
+#endif
+  delay(1200);
 }
+// prefs.begin() still has to happen here, and ONLY here: every loader called
+// after this in setup() (theme, brightness, sleep timeout, beep, volume, screen
+// flip) reads that same namespace, and this is where board 1 opens it. Dropping
+// the call along with the calibration would leave all of them reading defaults
+// on board 2 - a whole page of settings that silently forgets itself.
+void loadOrRunCalibration() {
+  prefs.begin("core", false);
+  calValid = true;   // there is nothing to validate, and the affine map is not
+                     // consulted at all on this board (see getTouchPoint) -
+                     // leaving it false would read as "touch is unusable until
+                     // calibrated", which is the opposite of the truth here.
+}
+#endif  // BOARD_TOUCH_NEEDS_CAL

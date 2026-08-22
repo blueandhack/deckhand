@@ -171,7 +171,7 @@ void drawVoiceCard() {
 // stop dictating.
 void micWaitRelease() {
   unsigned long t0 = millis();
-  while (ts.touched() && millis() - t0 < 2000) delay(20);
+  while (touchPressed() && millis() - t0 < 2000) delay(20);
   delay(60); // let the panel settle
 }
 // The fourth stage of the recording bar. Reuses micPillFrame, so the frame, position
@@ -555,7 +555,7 @@ void micStream() {
       // reason the touch poll is: this loop runs entirely on loopTask.
       // true: loop()'s watchdog can't reach here, so this IS the recovery.
       reapBleLinks(true);
-      if (millis() - start > 400 && ts.touched()) {
+      if (millis() - start > 400 && touchPressed()) {
         if (++stopVotes >= 2) { stoppedByUser = true; break; }
       } else {
         stopVotes = 0;
@@ -741,7 +741,7 @@ void micRecord() {
       // added anyway since it costs nothing and shares the exact pattern.
       // true: same reason as micStream()'s call - this is a blocking path.
       reapBleLinks(true);
-      if (millis() - recStart > 400 && ts.touched()) {
+      if (millis() - recStart > 400 && touchPressed()) {
         if (++stopVotes >= 2) { stoppedByUser = true; break; }
       } else {
         stopVotes = 0;
@@ -882,7 +882,7 @@ void micMonitor() {
     // TWO consecutive reads to exit - the same false-positive this panel produced
     // when a single read ended a 99s recording that nobody had touched. Being
     // kicked out mid-adjustment is the whole thing you are trying to avoid here.
-    touchRuns = ts.touched() ? touchRuns + 1 : 0;
+    touchRuns = touchPressed() ? touchRuns + 1 : 0;
     if (touchRuns >= 2) break;
     delay(10);
   }

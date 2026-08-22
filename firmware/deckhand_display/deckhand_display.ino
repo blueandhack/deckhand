@@ -46,10 +46,17 @@
 // TFT's (see the file header comment). Measured: defining it before the
 // include grew both `tft` and every TFT_eSprite by 20 bytes each and changed
 // TFT_eSPI::~TFT_eSPI()'s size, breaking board 1's byte-identical build.
+#if BOARD_TOUCH_NEEDS_CAL
 #define TOUCH_CS BOARD_TOUCH_CS_PIN
+#endif
 #include <ArduinoJson.h>
 #include <SPI.h>
+#if BOARD_TOUCH_NEEDS_CAL
+// Board 1's resistive panel only. Board 2's controller lives inside the
+// ST77922 display IC and speaks I2C - see st77922_touch.h, included from
+// touch_hal.ino, which is where both boards' touch entry points live.
 #include <XPT2046_Touchscreen.h>
+#endif
 #include <Preferences.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -86,7 +93,9 @@
 // AUDIO_OUT_PIN/AUDIO_EN_PIN, MIC_ADC_PIN, BOOT_BTN_PIN, TOUCH_SCK/MOSI/MISO/
 // CS/IRQ) moved to board_e32r28t.h, included above via board.h.
 
-SPIClass touchSPI(HSPI);
+#if BOARD_TOUCH_NEEDS_CAL
+SPIClass touchSPI(HSPI);   // touch is on its OWN bus, not the TFT's
+#endif
 
 // Survives deep sleep (RTC memory). Two jobs: measuring what sleep actually
 // costs, and telling a deliberate wake from a knock.
@@ -99,7 +108,9 @@ RTC_DATA_ATTR int     rtcSleepMv    = -1;   // battery mV when we went to sleep
 RTC_DATA_ATTR int64_t rtcSleepUs    = 0;    // gettimeofday at that moment
 RTC_DATA_ATTR uint32_t rtcSpuriousWakes = 0;
 const unsigned long WAKE_HOLD_MS = 350;     // how long a wake touch must be held
+#if BOARD_TOUCH_NEEDS_CAL
 XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
+#endif
 Preferences prefs;
 
 // Either USB serial or this BLE link can drive the display - whichever the
@@ -3624,17 +3635,16 @@ void setup() {
   // (see the power note in CLAUDE.md), spurious wakes are where the battery
   // actually goes - so the cheapest useful thing is not to have them.
   //
-  // Touch is on its own HSPI bus and costs nothing to bring up, so it is
+  // Touch is on its own bus and costs nothing to bring up, so it is
   // initialised FIRST and the wake is qualified before setupBLE() or tft.init().
   // A wake that is not a held touch goes straight back to sleep having spent a
   // few hundred milliseconds instead of a full screen-on.
-  touchSPI.begin(TOUCH_SCK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
-  ts.begin(touchSPI);
+  touchBegin();
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
     unsigned long t0 = millis();
     bool held = true;
     while (millis() - t0 < WAKE_HOLD_MS) {
-      if (!ts.touched()) { held = false; break; }
+      if (!touchPressed()) { held = false; break; }
       delay(10);
     }
     if (!held) {
@@ -3720,7 +3730,7 @@ void setup() {
 
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP); // board has its own 10K pull-up too
 
-  // touchSPI/ts were brought up at the top of setup() for the wake guard.
+  // touchBegin() ran at the top of setup(), for the wake guard.
   loadOrRunCalibration();
   loadScreenFlip();
   // After prefs.begin() (inside loadOrRunCalibration) and BEFORE the first draw, so the
