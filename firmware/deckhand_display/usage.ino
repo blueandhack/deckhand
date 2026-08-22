@@ -325,11 +325,15 @@ void renderFooter() {
 // out of a rollout file, and a file that stopped being written keeps its last value
 // forever.
 void renderCodexRow() {
-  // Sized by the lane it has to hold, not a literal: padTo() pads to
-  // CODEX_LANE_CHARS and refuses (silently) if width + 1 exceeds the buffer, so
-  // a 23-character lane on board 2 in a char[24] would fit with zero headroom -
-  // the same margin-of-nothing that makes a short change-only cache this file's
-  // oldest silent bug. Same constant the caches use, so the three cannot drift.
+  // Sized by the lane it has to hold, not a literal. padTo() pads to
+  // CODEX_LANE_CHARS but stops at `len + 1 < bufSize`, so a buffer one byte too
+  // small UNDER-PADS instead of failing - the leftover pixels of a
+  // previously-longer value simply survive, which reads as stale text rather
+  // than as a bug. (It is padLeftTo() that refuses outright on an oversized
+  // width; do not attribute its guard to this one.) A 23-character lane on
+  // board 2 in a char[24] would fit with zero headroom - the same
+  // margin-of-nothing that makes a short change-only cache this file's oldest
+  // silent bug. Same constant the caches use, so the three cannot drift.
   char buf[CODEX_LANE_CACHE];
   bool have = usage.cxPct >= 0;
   bool stale = usage.cxAgeSec > 900;

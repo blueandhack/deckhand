@@ -114,8 +114,11 @@ function chk(cond, msg, allow) {
 }
 
 if (SELFTEST) {
-  // One pixel lower and the foot row's clear box lands on the card's 2px border -
-  // the exact defect board 1 shipped once. If this passes, the checker is blind.
+  // 8px lower and the foot row's clear box lands on the card's 2px border - the
+  // exact defect board 1 shipped once. 8 rather than 1 because the real layout
+  // leaves 7 rows of slack below the foot row deliberately, so a 1px nudge is
+  // WITHIN spec and must not fail; 8 is the first offset that actually breaches
+  // the ceiling. If this passes, the checker is blind.
   B[2].CARD_FOOT_Y += 8;
   console.log("--selftest: board 2's CARD_FOOT_Y pushed 8px down; the ceiling assertion MUST fail");
 }
