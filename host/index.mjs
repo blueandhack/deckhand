@@ -2844,6 +2844,16 @@ async function tick(generation = tickGeneration) {
           device: bleDeviceName || usbDeviceName || selectedDevice || null,
           selected: selectedDevice || null,
           devices: pairedDevices.map((d) => d.name),
+          // The menu-bar picker's icon submenu. `icon` is the fully-resolved
+          // value (env beats the picker's file, same as what the device is
+          // shown) so the checkmark is right regardless of source; `iconFromEnv`
+          // is what makes the picker disable itself and say so, rather than
+          // showing a checkmark a click could never move. The menu-bar app
+          // can't read the host's launchd environment or the plist itself
+          // (that would be a third source of truth), so this heartbeat is the
+          // only way it learns either fact.
+          icon: currentMacEmoji(),
+          iconFromEnv: !!resolveMacEmoji({ env: process.env.DECKHAND_MAC_EMOJI || "", file: "" }),
           voice: lastVoice,
           // ageSec is computed on the way out rather than stored, so a stale
           // reading cannot look fresh just because the heartbeat itself is.

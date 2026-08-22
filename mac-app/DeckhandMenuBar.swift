@@ -102,6 +102,14 @@ struct HostStatus {
     var voiceText: String? = nil
     var voiceReply: String? = nil
     var voiceState: String? = nil
+    // This Mac's icon, as the host has ALREADY resolved it (env beats the
+    // picker's file - see host/mac-emoji.mjs's resolveMacEmoji). "" means
+    // neither is set. iconFromEnv says WHY: DECKHAND_MAC_EMOJI in the host's
+    // environment, which this app cannot read directly (it isn't launchd, and
+    // reading the plist would be a third source of truth) - so the host stamps
+    // both into its heartbeat instead.
+    var icon = ""
+    var iconFromEnv = false
 }
 
 func tail(_ path: String, _ maxBytes: Int) -> String? {
@@ -126,6 +134,8 @@ func readStatus() -> HostStatus {
             s.selected = obj["selected"] as? String
             s.devices = (obj["devices"] as? [String]) ?? []
             s.remoteAnswer = (obj["remoteAnswer"] as? Bool) ?? true
+            s.icon = (obj["icon"] as? String) ?? ""
+            s.iconFromEnv = (obj["iconFromEnv"] as? Bool) ?? false
             if let b = obj["batt"] as? [String: Any] {
                 s.battPct = b["pct"] as? Int
                 s.battState = b["state"] as? Int
@@ -446,6 +456,18 @@ var askSoundName: String {
     UserDefaults.standard.object(forKey: "askSound") as? String ?? ASK_SOUND_DEFAULT
 }
 
+/// The sixteen names, for DISPLAY ORDER ONLY - matching
+/// `MAC_EMOJI_NAMES` in host/mac-emoji.mjs, which is the actual source of truth.
+/// Validation and persistence to ~/.claude/deckhand-mac-emoji both already live
+/// on the host side; duplicating either here would be a second place that could
+/// drift from firmware/deckhand_display/MacEmoji.h. ("robot" was replaced by
+/// "apple" there - at 13px robot read as a cupcake - so this list follows the
+/// host's, not the original task brief's.)
+let MAC_ICON_NAMES = [
+    "rocket", "moon", "star", "bolt", "fire", "leaf", "wave", "anchor",
+    "crab", "laptop", "desktop", "cloud", "sun", "cat", "apple", "gear",
+]
+
 /// Plays it, or does nothing if silenced or the name has gone missing. A sound
 /// file that is absent must not throw or log on a 3s timer - macOS ships these,
 /// but a stored name outlives the OS release that had it.
@@ -683,6 +705,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let soundItem = NSMenuItem(title: "Needs-input sound", action: nil, keyEquivalent: "")
     let soundMenu = NSMenu()
     var soundItems: [(String, NSMenuItem)] = []
+    // Title is set per-refresh (rebuildIconMenu) since it changes to "(set by
+    // env)" - it starts at the plain form so --menu-dump has something sane
+    // before the first refresh runs.
+    let iconItem = NSMenuItem(title: "Mac icon", action: nil, keyEquivalent: "")
+    let iconMenu = NSMenu()
+    var iconItems: [(String, NSMenuItem)] = []
     // Diffed every refresh, so it must outlive one - a local would announce
     // every asking session on every 3s tick.
     var askWatcher = AskWatcher()
@@ -735,6 +763,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         barItem.submenu = barMenu
         soundMenu.autoenablesItems = false
         soundItem.submenu = soundMenu
+        iconMenu.autoenablesItems = false
+        iconItem.submenu = iconMenu
         // PREFERENCES behind one door, so the top level is actions only. These
         // four used to sit in the top-level row and it had grown to three
         // consecutive submenus, which pushed Quit down the menu and left nothing
@@ -749,7 +779,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // informational and dim them.
         settingsMenu.autoenablesItems = false
         settingsItem.submenu = settingsMenu
-        for it in [remoteItem, colourItem, barItem, soundItem, loginItem] {
+        for it in [remoteItem, colourItem, barItem, soundItem, iconItem, loginItem] {
             it.target = self
             it.isEnabled = true
             settingsMenu.addItem(it)
@@ -766,6 +796,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             soundMenu.addItem(it)
             soundItems.append((name, it))
             if name.isEmpty { soundMenu.addItem(.separator()) }
+        }
+        // Sixteen fixed rows, checked/enabled per refresh (rebuildIconMenu) -
+        // same "built once, only re-checked" shape as soundItems above, since
+        // the set of names never changes, only which one is checked and
+        // whether they're editable at all.
+        for name in MAC_ICON_NAMES {
+            let it = NSMenuItem(title: name, action: #selector(pickIcon(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = name
+            iconMenu.addItem(it)
+            iconItems.append((name, it))
         }
         // The two device-mirroring badges, then the restriction that governs
         // them, then - past a separator - the one that stands on its own. The
@@ -960,6 +1001,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         remoteItem.isEnabled = s.running
         remoteItem.state = s.remoteAnswer ? .on : .off
         rebuildDeviceMenu(s)
+        rebuildIconMenu(s)
         startStop.title = s.running ? "Stop Deckhand" : "Start Deckhand"
         // Naming the supervisor matters: with launchd in charge, a stop is permanent
         // until Start, whereas unsupervised the app's own watchdog may bring it back.
@@ -1154,6 +1196,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func selectDevice(_ sender: NSMenuItem) {
         let name = (sender.representedObject as? String) ?? ""
         try? "SELECT \(name)".write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
+    }
+
+    // The Mac-icon submenu: sixteen fixed rows, one checkmarked. Rebuilt every
+    // refresh (not just built once, unlike a static preference row) because
+    // BOTH the checkmark and whether the rows are editable at all come from the
+    // host's heartbeat, which can change out from under this app - a picker
+    // showing changeable checkmarks while DECKHAND_MAC_EMOJI is set would be
+    // lying about what a click can do.
+    func rebuildIconMenu(_ s: HostStatus) {
+        iconItem.title = s.iconFromEnv ? "Mac icon (set by env)" : "Mac icon"
+        // The host has already resolved env-vs-file (resolveMacEmoji, env
+        // wins), so s.icon IS the live value regardless of which source it
+        // came from - no separate branch needed for the env case here. That
+        // reading is only fresh while the host is actually running (readStatus
+        // only fills it inside its "running" branch); with the host down,
+        // fall back to what was last picked from this menu, so the checkmark
+        // survives a relaunch instead of going blank.
+        let stored = UserDefaults.standard.string(forKey: "macIcon") ?? ""
+        let current = s.running ? s.icon : stored
+        for (name, item) in iconItems {
+            item.state = (!current.isEmpty && name == current) ? .on : .off
+            // Only the CHILDREN are disabled - the parent stays clickable so
+            // the (now-inert) list can still be opened and read, the same way
+            // Settings itself stays reachable with the host down.
+            item.isEnabled = !s.iconFromEnv
+        }
+    }
+
+    // Writes EMOJI <name> to the trigger file - the same mechanism SELECT and
+    // FORGET already use - and stores it in UserDefaults so the checkmark is
+    // right immediately and survives a relaunch even before the host's own
+    // heartbeat catches up. Validating the name and persisting it to
+    // ~/.claude/deckhand-mac-emoji both already happen on the host
+    // (host/mac-emoji.mjs) and are deliberately NOT repeated here.
+    @objc func pickIcon(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(name, forKey: "macIcon")
+        try? "EMOJI \(name)".write(toFile: commandTriggerPath, atomically: true, encoding: .utf8)
+        refresh()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
     }
 
