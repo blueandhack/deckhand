@@ -319,11 +319,20 @@ void drawKbActions() {
 void drawKeyboard() {
   tft.fillScreen(COLOR_BG);
   drawKbText();
-  if (kbPeekPage >= 0) { drawKbPeek(); return; }   // the peek owns the keys' area
+  if (kbPeekPage >= 0) {
+    drawKbPeek();   // the peek owns the keys' area
+#if !BOARD_USES_TFT_ESPI
+    tft.flush();
+#endif
+    return;
+  }
   for (int r = 0; r < 3; r++)
     for (int c = 0; c < kbRowLen(r); c++) drawKbKey(r, c, false);
   drawKbRow3(-1);
   drawKbActions();
+#if !BOARD_USES_TFT_ESPI
+  tft.flush();
+#endif
 }
 
 void openKeyboard(int idx) {

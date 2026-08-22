@@ -110,6 +110,9 @@ void drawHistory() {
     tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + 21);
     tft.setTextDatum(TL_DATUM);
   }
+#if !BOARD_USES_TFT_ESPI
+  tft.flush();
+#endif
 }
 // `HISTORY <id> <chat|all> <page|last>`. Every page turn is a round trip - instant over
 // USB, and it is what keeps the device from having to hold the whole transcript.
@@ -155,6 +158,9 @@ void drawHistFull() {
     tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + 21);
     tft.setTextDatum(TL_DATUM);
   }
+#if !BOARD_USES_TFT_ESPI
+  tft.flush();
+#endif
 }
 void requestHistory(int idx, const char* want) {
   if (idx < 0 || idx >= sessionCount) return;
@@ -306,6 +312,9 @@ void drawReader() {
     tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + 21);
     tft.setTextDatum(TL_DATUM);
   }
+#if !BOARD_USES_TFT_ESPI
+  tft.flush();
+#endif
 }
 // Back to the ask screen (reader covered the tab bar and footer too).
 void exitReader() {

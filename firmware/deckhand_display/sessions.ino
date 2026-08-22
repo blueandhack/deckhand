@@ -367,6 +367,14 @@ void renderSessionsList() {
                   contentBottom() - 12, 1, 1,
                   hiddenAskingCount > 0 ? COLOR_BAD : COLOR_LABEL, COLOR_BG);
   }
+#if !BOARD_USES_TFT_ESPI
+  // This is the leaf that actually draws session rows, reached from both
+  // renderSessionsTab() (the once-per-second tick) and drawSessionsAll()
+  // (a full repaint) - flushing here, rather than only at the end of
+  // loop(), keeps this call's own dirty rect from being unioned with
+  // whatever renderFooter()/renderSettingsTab() draw in the same tick.
+  tft.flush();
+#endif
 }
 void drawSessionsAll() {
   rowCountCache = -1;
@@ -406,6 +414,12 @@ void renderSessionsTab() {
         drawSessionDetail(detailIndex);
       }
       renderDetailDuration();
+#if !BOARD_USES_TFT_ESPI
+      // drawSessionDetail()/renderDetailDuration() are the only draws on
+      // this path, and closeSessionDetail() (the other branch below)
+      // already flushes on its own via drawSessionsAll() -> renderSessionsList().
+      tft.flush();
+#endif
     } else {
       // The session under the detail view ended - fall back to the list
       // instead of leaving a stale snapshot on screen.

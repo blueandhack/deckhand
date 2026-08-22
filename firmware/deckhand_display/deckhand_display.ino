@@ -24,6 +24,11 @@
 #else
   #include "panel_shim.h"   // arrives in Task 2
   PanelShim tft;
+  // Most recent once-per-second tick's wall time (render + each render's own
+  // flush), measured in loop() and read back by SHIMBENCH - see the note at
+  // its measurement site for why this is a real recorded value rather than
+  // a synthetic replay.
+  unsigned long lastTickFlushUs = 0;
 #endif
 // TOUCH_CS is defined HERE, not in board_e32r28t.h, and must stay AFTER the
 // TFT_eSPI include above: TFT_eSPI.h enables a chunk of its own built-in
@@ -1946,6 +1951,14 @@ void tickWorkingSpinner() {
     drawAgentSpinner(SESSION_DOT_CX, dotCy, COLOR_CARD,
                      strcmp(sessions[i].agent, "cx") == 0);
   }
+#if !BOARD_USES_TFT_ESPI
+  // This runs on its own 120ms cadence near the top of loop(), well before
+  // the once-per-second footer/tab renders later in the same iteration -
+  // flushing here keeps the spinner's own small blit bounded by its own
+  // cost instead of being unioned into whatever else that later render
+  // touches, which is exactly the animation-budget figure Tasks 6-8 need.
+  tft.flush();
+#endif
 }
 
 
@@ -2280,6 +2293,12 @@ void renderOctoFrame() {
     tft.fillRect(OCTO_X, OCTO_Y, OCTO_W, OCTO_H, COLOR_BG);
     drawCrab(tft, crabX, OCTO_Y, crabFrame);
   }
+#if !BOARD_USES_TFT_ESPI
+  // Called on its own 25-40fps cadence from loop(), independent of the
+  // once-per-second tab renders - flushing here bounds each frame's cost to
+  // just this blit rather than whatever else that tick also touched.
+  tft.flush();
+#endif
 }
 
 void startOctopus() {
@@ -2427,6 +2446,12 @@ void closeSessionDetail() {
   // is untouched here - this is belt and braces, kept because closing a detail
   // screen is exactly where the button used to go missing.
   drawFab(0);
+#if !BOARD_USES_TFT_ESPI
+  // drawSessionsAll() -> renderSessionsList() already flushed its own dirty
+  // rect; this covers drawFab()'s tab-bar slot too, which is a different
+  // region and would otherwise wait for loop()'s own end-of-iteration flush.
+  tft.flush();
+#endif
 }
 
 void handleTouch() {
@@ -3753,7 +3778,12 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // Board 2 only. Times a full-screen flush and a small dirty-rect flush,
     // in that order, so Task 6 (and the 120ms spinner / 20-frame crab it
     // gates) has real numbers instead of a guess. Kept behind a command
-    // rather than run once and thrown away, per the brief.
+    // rather than run once and thrown away, per the brief. `tick=` is the
+    // most recently MEASURED (not replayed) once-per-second footer/tab
+    // render, per-render flushes included - see lastTickFlushUs's own
+    // comment for why a synthetic re-call of those renderers here would
+    // under-report (drawIfChanged's caches would skip almost everything on
+    // an immediate second call with nothing changed).
     tft.fillScreen(0x0000);
     unsigned long t0 = micros();
     tft.flush();
@@ -3764,7 +3794,13 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     tft.flush();
     unsigned long smallUs = micros() - t1;
 
-    Serial.printf("SHIMBENCH full=%luus small=%luus\n", fullUs, smallUs);
+    Serial.printf("SHIMBENCH full=%luus small=%luus tick=%luus\n", fullUs, smallUs, lastTickFlushUs);
+    // Leaves the debug pattern drawn above with nothing to repaint it
+    // otherwise - forceFullRepaint() redraws the real current tab (and, via
+    // renderFooter()/renderUsageTab()/renderSessionsTab()/renderSettingsTab(),
+    // flushes it too), so SHIMBENCH doesn't strand a stray black screen and
+    // a white square on the glass.
+    forceFullRepaint();
 #endif
   } else if (buf == "SLEEP") {
     // Remote "power off", so the sleep-drain path can be exercised without
@@ -4145,11 +4181,22 @@ void loop() {
     static unsigned long lastFooterTick = 0;
     if (millis() - lastFooterTick > 1000) {
       lastFooterTick = millis();
+#if !BOARD_USES_TFT_ESPI
+      // Wall time of the REAL once-per-second tick, each render's own flush
+      // included - so SHIMBENCH can report the routine cost this fix
+      // actually produces, from real operation, rather than a synthetic
+      // replay that would under-count (drawIfChanged's caches would skip
+      // nearly everything on an immediate re-call with no data change).
+      unsigned long tickT0 = micros();
+#endif
       renderFooter();
       if (everReceived && currentTab == TAB_SETTINGS) renderSettingsTab();
       // Cheap when nothing changed (per-row/per-field caches); keeps the
       // "in this state for Xm" durations ticking between host polls.
       if (everReceived && currentTab == TAB_SESSIONS) renderSessionsTab();
+#if !BOARD_USES_TFT_ESPI
+      lastTickFlushUs = micros() - tickT0;
+#endif
     }
   }
 

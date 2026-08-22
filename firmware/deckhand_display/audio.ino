@@ -99,6 +99,12 @@ void micDumpBase64(const uint8_t* data, size_t len) {
       char pctTxt[12];
       snprintf(pctTxt, sizeof(pctTxt), "%d%%", (int) (off * 100 / (len ? len : 1)));
       micPillMeter((int) (off * 1000 / (len ? len : 1)), pctTxt, "sending to your Mac");
+#if !BOARD_USES_TFT_ESPI
+      // ~9s of base64 lines with nothing else returning to loop() in between -
+      // without this the progress bar would sit at its first frame the whole
+      // transfer, the exact "nothing is happening" this bar exists to prevent.
+      tft.flush();
+#endif
       delay(1);
     }
   }
@@ -564,6 +570,12 @@ void micStream() {
       unsigned long el = millis() - start;
       snprintf(t, sizeof(t), "%lu:%02lu", el / 60000, (el / 1000) % 60);
       micPillMeter(pp * 1000 / 600, t, "TAP ANYWHERE TO STOP");
+#if !BOARD_USES_TFT_ESPI
+      // This capture can run up to MIC_STREAM_MAX_MS (120s) without ever
+      // returning to loop(), so its own end-of-iteration flush is the only
+      // thing that gets the meter onto the glass at all.
+      tft.flush();
+#endif
     }
   }
 
@@ -743,6 +755,12 @@ void micRecord() {
       unsigned long el = millis() - recStart;
       snprintf(t, sizeof(t), "%lu.%lus / %ds", el / 1000, (el % 1000) / 100, secs);
       micPillMeter(pp * 1000 / 600, t, "TAP ANYWHERE TO STOP");
+#if !BOARD_USES_TFT_ESPI
+      // Same reason as micStream()'s flush: this loop is heap-capped to a
+      // few seconds rather than 120s, but it still never returns to loop()
+      // while recording, so nothing else will ever push this meter update.
+      tft.flush();
+#endif
     }
     for (uint32_t i = 0; i + SOC_ADC_DIGI_RESULT_BYTES <= len && got < nOut;
          i += SOC_ADC_DIGI_RESULT_BYTES) {
@@ -852,6 +870,14 @@ void micMonitor() {
     setUIFont(1);
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.drawString("target: under 120 when silent", 12, BAR_Y + BAR_H + 10);
+
+#if !BOARD_USES_TFT_ESPI
+    // Up to 180s blocking, entirely outside loop() - without this the bar
+    // and readout drawn above would never leave the shadow framebuffer, and
+    // the one thing this screen exists for (watching the floor WHILE turning
+    // the trimmer) would show a frozen first frame instead.
+    tft.flush();
+#endif
 
     // TWO consecutive reads to exit - the same false-positive this panel produced
     // when a single read ended a 99s recording that nobody had touched. Being

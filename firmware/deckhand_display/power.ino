@@ -240,6 +240,16 @@ void enterDeepSleep() {
   rtcSleepUs = (int64_t) tv.tv_sec * 1000000 + tv.tv_usec;
 
   esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0); // PENIRQ: low = touched
+
+#if !BOARD_USES_TFT_ESPI
+  // The point of no return: esp_deep_sleep_start() never returns, so the
+  // end-of-loop() flush that would normally push whatever powerOff() or
+  // autoDeepSleep() just drew (the farewell message) NEVER RUNS. Without
+  // this, the caller's fillScreen()+drawString() sit in the shadow
+  // framebuffer forever and the panel goes dark showing whatever was on
+  // screen before - not the farewell it just spent a delay() showing "for".
+  tft.flush();
+#endif
   esp_deep_sleep_start();
 }
 void powerOff() {

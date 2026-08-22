@@ -302,6 +302,14 @@ void renderFooter() {
   padLeftTo(buf, sizeof(buf), 11);
   drawIfChanged(updatedCache, sizeof(updatedCache), buf, tft.width() - 10, y, 1, 1,
                 fresh ? COLOR_LABEL : COLOR_BAD, COLOR_BG, TR_DATUM);
+#if !BOARD_USES_TFT_ESPI
+  // Flushing here (rather than only at the end of loop()) keeps this footer's
+  // own small dirty rect from being unioned with whatever the tab render
+  // that runs in the same tick just touched - the footer sits at the very
+  // bottom of the panel and a tab body can span the top/middle, so that
+  // union was close to a full-screen flush every second.
+  tft.flush();
+#endif
 }
 // Codex's row. One line, because Codex publishes one number: a percentage of its
 // primary window and when that window resets. No token count, no second window, and
@@ -504,6 +512,9 @@ void renderUsageTab() {
              7 * 24 * 60, pct2Cache, left2Cache, right2Cache, fable2Cache, resetAt2Cache,
              &bar2Cache, &border2Cache, usage.weekFableTokens, usage.weekFablePct);
   renderCodexRow();
+#if !BOARD_USES_TFT_ESPI
+  tft.flush();
+#endif
 }
 void drawUsageStatic() {
   // This chrome is what the change-only fields below are drawn ON, so a

@@ -467,6 +467,9 @@ void renderSettingsTab() {
   if (settingsPage == 0) renderStatusPage();
   else if (settingsPage == 1) renderControlsPage();
   // page 2 is static
+#if !BOARD_USES_TFT_ESPI
+  tft.flush();
+#endif
 }
 void resetSettingsCaches() {
   btDotCache = -1; usbDotCache = -1; battRowCache = -1; battRowTextCache[0] = '\0';

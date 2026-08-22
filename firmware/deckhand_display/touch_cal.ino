@@ -26,7 +26,17 @@ void waitForStableTouch(int16_t& outX, int16_t& outY) {
   // crosshair, which can run well past a moment. See reapBleLinks()'s own
   // comment; safe here for the same reason it's safe in every other blocking
   // loop it's called from - this runs on loopTask throughout.
-  while (!ts.touched()) { reapBleLinks(true); delay(20); }  // true: blocking path
+  while (!ts.touched()) {
+    reapBleLinks(true);
+#if !BOARD_USES_TFT_ESPI
+    // The crosshair/prompt drawn by the caller (runCalibration) never reaches
+    // the glass otherwise: this loop can block for as long as it takes a
+    // person to notice and tap, and loop()'s own end-of-iteration flush never
+    // runs while we're in here.
+    tft.flush();
+#endif
+    delay(20);
+  }  // true: blocking path
   delay(150);
   long sumX = 0, sumY = 0;
   int samples = 8;
