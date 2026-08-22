@@ -70,6 +70,15 @@ typedef struct {                 // per font
 #define MC_DATUM 4   // middle centre
 #define MR_DATUM 5   // middle right
 
+// The two TFT_eSPI colour names this sketch spells literally, with TFT_eSPI's
+// exact values (TFT_eSPI.h:305/320). Only these two: the palette itself is nine
+// COLOR_* globals filled from the THEMES table, and the only place a raw
+// TFT_* name survives is those globals' initialisers, which have to be a
+// constant expression. Adding the rest of TFT_eSPI's ~30 colour names would
+// invite a second palette to grow beside the themed one.
+#define TFT_BLACK 0x0000
+#define TFT_WHITE 0xFFFF
+
 class PanelShim {
 public:
   void init();                       // panel bring-up + framebuffer alloc

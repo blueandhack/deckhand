@@ -264,10 +264,22 @@ void PanelShim::readRect(int x, int y, int w, int h, uint16_t* out) {
 void PanelShim::setSwapBytes(bool s) { _swapBytes = s; }
 bool PanelShim::getSwapBytes() const { return _swapBytes; }
 
-// writecommand has two call sites on board 1: panel sleep-in/out (going
-// straight to TFT_eSPI's own command interface). On this panel that goes
-// through the ESP32_Display_Panel LCD driver's own sleep API instead
-// (Task 9), so there is nothing for a raw command byte to do here.
+// writecommand has two call sites on board 1, both in enterDeepSleep(): DISPOFF
+// (0x28) then SLPIN (0x10), straight to TFT_eSPI's own command interface. This
+// stays a NO-OP, and that is now a finding rather than a placeholder:
+//   - The ESP32_Display_Panel LCD driver exposes setDisplayOnOff(bool)
+//     (esp_lcd_panel_disp_on_off), which IS the DISPOFF half. It exposes no
+//     sleep-in/out at all, so the SLPIN half has no equivalent to call.
+//   - Wiring the DISPOFF half in anyway would land it BEFORE the board-2
+//     tft.flush() at the bottom of enterDeepSleep() - the flush that exists to
+//     push the farewell message out of the shadow framebuffer - so it would
+//     blank the frame that flush is there to deliver. Fixing the pair means
+//     reordering that teardown, which is a change worth making with the panel in
+//     front of you and pointless to guess at.
+// What is actually lost by the no-op is small: the backlight is ~93% of the draw
+// and enterDeepSleep() latches its pad low regardless, which is the part that
+// matters on a board whose residual current is dominated by parts firmware
+// cannot switch at all.
 void PanelShim::writecommand(uint8_t /*c*/) {
   // no-op, deliberately - see the note above.
 }

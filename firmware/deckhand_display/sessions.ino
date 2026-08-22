@@ -770,11 +770,15 @@ void bleNotifyChunks(const uint8_t* data, size_t len) {
 // `link` = the Mac this line is FOR, or -1 to broadcast. Broadcast is right
 // for BATT and HELLO (both menu bars want the battery, and HELLO is how a Mac
 // discovers the device at all) and wrong for everything carrying a decision:
-// BLECharacteristic::notify() has no single-peer form - it walks every
-// connected central and calls esp_ble_gatts_send_indicate per peer, with no
-// reference to which connection asked - so an unaddressed ANSWER reaches the
-// OTHER Mac too, and it logs an authentication failure on every answer. That
-// trains you to ignore the one log line that actually means something.
+// BLECharacteristic::notify() has no single-peer form ON EITHER BACKEND - and
+// that is what the `to=` address rests on, so it was re-checked rather than
+// carried over. Bluedroid walks getPeerDevices() and calls
+// esp_ble_gatts_send_indicate per peer with no reference to the server's
+// m_connId; NimBLE walks its own m_subscribedVec and calls
+// ble_gatts_notify_custom(conn_handle, ...) per subscriber. Same shape, same
+// consequence: an unaddressed ANSWER reaches the OTHER Mac too, and it logs an
+// authentication failure on every answer. That trains you to ignore the one log
+// line that actually means something.
 //
 // Chunks `line` and the `to=` suffix DIRECTLY, each in its own buffer sized
 // only for what it holds, rather than copying both into one fixed local

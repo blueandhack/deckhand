@@ -21,6 +21,11 @@
 #define BOARD_HAS_SD         0
 #define BOARD_HAS_RGBLED     0
 #define BOARD_TOUCH_NEEDS_CAL 1
+// Deep sleep can be ended by TOUCHING THE GLASS on this board, which is a
+// capability and not a preference: ext0/ext1 wake only from an RTC GPIO, and
+// this panel's PENIRQ happens to be on one (IO36). See BOARD_SLEEP_WAKE_GPIO
+// below, and the opposite case in board_es3c35p.h.
+#define BOARD_HAS_TOUCH_SLEEP_WAKE 1
 
 // If the layout renders sideways/upside down on your unit, try 0/1/2/3 here.
 #define SCREEN_ROTATION 0
@@ -34,6 +39,11 @@
 // the LCDWIKI E32R28T user manual), so VBAT = 2x the pin voltage. IO34 is
 // ADC1, which stays usable while WiFi/BT is active (ADC2 does not).
 #define BAT_ADC_PIN 34
+// VBAT = BOARD_BAT_MV_SCALE x the pad voltage. A macro rather than a literal
+// because it is the one number in sampleBattery() that is a property of the
+// BOARD's divider, not of the code - so the shared function can serve two
+// boards without either one's ratio being hidden inside it.
+#define BOARD_BAT_MV_SCALE 2
 
 // Onboard FM8002E 1W amplifier -> JP1 speaker terminals. IO26 is the
 // amplifier's audio input (AUDIO_IN net); IO4 is its shutdown pin
@@ -74,6 +84,11 @@
 // the actual pin number; only the TOUCH_CS name itself is deferred.
 #define BOARD_TOUCH_CS_PIN 33
 #define TOUCH_IRQ  36
+// The deep-sleep wake source: PENIRQ, low while the glass is touched. Named
+// separately from TOUCH_IRQ because what qualifies a pin here is not that it
+// is the touch interrupt but that it is an RTC GPIO - ext0 wakes from nothing
+// else. On this chip the RTC set is 0,2,4,12-15,25-27,32-39, and 36 is in it.
+#define BOARD_SLEEP_WAKE_GPIO TOUCH_IRQ
 
 // ---------- Layout constants ----------
 const int TAB_BAR_H = 34;

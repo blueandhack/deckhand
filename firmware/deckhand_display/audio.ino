@@ -9,6 +9,15 @@
 // those definitions, so such a prototype would not compile. Everything below
 // takes primitives or void.
 
+// ---------- The two ANALOG LEVEL probes: board 1 only ----------
+// Compiled only when BOARD_HAS_MIC, and not because the port skipped them: board
+// 2 has no analog microphone. Its audio is an I2S codec, so there is no ADC1
+// channel to sample, no DC bias to measure and no gain trimmer to tune - and
+// giving MIC_ADC_PIN an alias pointing at an I2S data line would compile and
+// produce confident nonsense, which is the failure mode this port keeps
+// refusing. No stubs are needed for these two: their only callers are
+// micLevelTest() and micMonitor(), which sit inside the same guard below.
+#if BOARD_HAS_MIC
 // Noise floor at three bandwidths: raw, and smoothed over 4 and 16 samples.
 // A moving average is a crude low-pass, so comparing the three says WHERE the
 // noise lives - which decides the fix:
@@ -64,6 +73,7 @@ int micWindowPP(int ms) {
   }
   return wmx - wmn;
 }
+#endif  // BOARD_HAS_MIC - the analog level probes
 uint8_t muLawEncode(int32_t s) {
   const int32_t BIAS = 0x84, CLIP = 32635;
   int32_t sign = s < 0 ? 0x80 : 0;
@@ -361,6 +371,22 @@ int primaryLink() {
   for (int i = 0; i < MAX_LINKS; i++) if (hostLinks[i].used) return i;
   return -1;
 }
+// ---------- THE ANALOG CAPTURE PATH: BOARD 1 ONLY ----------
+// Everything from here to the end of this file needs the analog mic, so it is
+// guarded for the reason given above - plus a mechanical one that would bite even
+// if a mic were wired to board 2: the DMA frame struct differs per chip.
+// adc_digi_output_data_t carries a `type1` member on the ESP32 and ONLY a `type2`
+// on the S3 (checked in the installed hal/adc_types.h, which selects per
+// CONFIG_IDF_TARGET_*), so the sample unpacking below is board-1 shaped down to
+// the field name, as is the hardcoded ADC_CHANNEL_7 for IO35.
+//
+// The four entry points get no-op stubs at the bottom rather than having their
+// callers removed, because those callers are UI: the record slot in the tab bar,
+// SETTINGS > MIC TEST, and the MICTEST/MICMON/MICREC/MICSTREAM commands.
+// Deleting them would move layout Task 8 derived and rewrite the settings page;
+// a stub keeps board 2's screen exactly as designed and puts the whole gap in
+// one place.
+#if BOARD_HAS_MIC
 void micStream() {
   // ADC driver FIRST, before any large allocation - see the allocation-order note
   // in micRecord(): getting this backwards turns an out-of-memory into abort().
@@ -1006,3 +1032,15 @@ void micLevelTest() {
   else
     Serial.println("MIC verdict: noise floor only (flat) - nothing heard");
 }
+#else
+// ---------- No microphone on this board ----------
+// One line each, on the serial link the operator is already reading, because the
+// alternative failure is silence: tap the record slot, watch nothing happen, and
+// nothing distinguishes "no mic" from "the capture broke". micRestoreUi() is
+// deliberately NOT called - none of these ever painted anything, so there is
+// nothing to restore and a repaint would flash the tab for no reason.
+void micStream()    { Serial.println("AUDIO: no microphone on this board"); }
+void micRecord()    { Serial.println("AUDIO: no microphone on this board"); }
+void micMonitor()   { Serial.println("MIC: no microphone on this board"); }
+void micLevelTest() { Serial.println("MIC: no microphone on this board"); }
+#endif  // BOARD_HAS_MIC - the analog capture path

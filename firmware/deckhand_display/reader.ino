@@ -174,12 +174,59 @@ void drawHistFull() {
   tft.flush();
 #endif
 }
+// THE DEVICE TELLS THE HOST HOW BIG ITS READER IS, as a trailing `<cols>x<lines>`
+// token, because the host cannot know it and used to assume. host/index.mjs
+// paginated against a hardcoded 36 chars / 14 lines - board 1's 216px column and
+// 16-row list - so on board 2's 296px column and 23-row list every page would have
+// arrived about half full with NOTHING on either side reporting an error: the
+// bigger reader would simply have looked like it held less history than board 1's.
+//
+// Both numbers come off the SAME expressions the drawing code uses, one screen up
+// in drawHistory(), rather than from new constants that could drift from it:
+//   cols  - the text lane is `tft.width() - 24` and every Cozette 6x13 glyph
+//           advances 6px, the identical arithmetic KB_COLS uses.
+//   lines - the list runs from HIST_TOP to the scrubber's tap band (HIST_JUMP_Y),
+//           stopping 4px clear of it, in HIST_LINE_H rows - the exact bound the
+//           row loop breaks on.
+// The host applies its own slack on top (its estimate is ceil(len/cols), looser
+// than real word wrap), so the slack deliberately does NOT live here.
+//
+// TRAILING, so it is backward-compatible both ways - the same shape the
+// `to=<hostId>` address already uses. An old host destructures three positional
+// tokens and ignores a fourth; a new host defaults to 36x16 when the token is
+// absent.
+//
+// BOARD 1 DELIBERATELY DOES NOT SEND IT, and takes a static_assert instead. The
+// host's default IS board 1's geometry, so sending it would change nothing on the
+// wire - but it WOULD change board 1's binary, which this port has held
+// byte-identical through nine tasks. The assert is the better trade anyway: it
+// pins the two numbers at COMPILE time, so a future change to board 1's reader
+// geometry fails the build instead of silently disagreeing with a default in
+// another repo. BOARD_W rather than tft.width() because only the former is a
+// constant expression; they are equal at SCREEN_ROTATION 0.
+#if BOARD_USES_TFT_ESPI
+static_assert((BOARD_W - 24) / 6 == 36,
+              "board 1's reader column count no longer matches HIST_LINE_CHARS in "
+              "host/index.mjs - either send the budget from this board too, or "
+              "update the host's default");
+static_assert((HIST_JUMP_Y - 4 - HIST_TOP) / HIST_LINE_H == 16,
+              "board 1's reader line count no longer matches HIST_PAGE_LINES in "
+              "host/index.mjs - see the note above");
+#endif
 void requestHistory(int idx, const char* want) {
   if (idx < 0 || idx >= sessionCount) return;
   histPending = true;
+#if BOARD_USES_TFT_ESPI
   char line[48];
   snprintf(line, sizeof(line), "HISTORY %s %s %s", sessions[idx].id,
            histChatOnly ? "chat" : "all", want);
+#else
+  const int cols  = (tft.width() - 24) / 6;
+  const int lines = (HIST_JUMP_Y - 4 - HIST_TOP) / HIST_LINE_H;
+  char line[64];
+  snprintf(line, sizeof(line), "HISTORY %s %s %s %dx%d", sessions[idx].id,
+           histChatOnly ? "chat" : "all", want, cols, lines);
+#endif
   // Addressed to the session's own Mac - only it holds that transcript, and
   // an unaddressed request would also reach the other Mac, which has no such
   // session and would have nothing useful to reply with anyway.

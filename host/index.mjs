@@ -1285,9 +1285,41 @@ function codexUsage() {
 // 600 the list was sparse and long messages were still cut mid-sentence.
 const HIST_PREVIEW_CAP = 300;
 const HIST_FULL_CAP = 4000;   // matches the device's full-entry buffer
-const HIST_LINE_CHARS = 36;   // Cozette 6px across the reader's 216px text column
-const HIST_PAGE_LINES = 14;   // the reader fits 16; 2 lines of slack absorbs the fact that
-                              // real word-wrap differs from this estimate
+// DEFAULTS ONLY. These two used to be the whole answer, and they are board 1's:
+// Cozette 6px across a 216px text column is 36 characters, and its list holds 16
+// rows. A device with a bigger reader (board 2: 296px = 49 columns, 23 rows) would
+// have been paginated to board 1's numbers and arrived about half full, with
+// nothing on either side reporting an error - the bigger reader would just have
+// looked like it held less. So the DEVICE now reports its own budget as a trailing
+// `<cols>x<lines>` token on the HISTORY request and these are the fallback for a
+// request that carries none. Board 1 deliberately sends no token (it would change
+// a binary this port holds byte-identical) and pins these numbers with a
+// static_assert instead - see requestHistory() in firmware/.../reader.ino.
+const HIST_LINE_CHARS = 36;   // Cozette 6px across board 1's 216px text column
+const HIST_PAGE_LINES = 16;   // rows in board 1's list; the device reports its own
+// The device reports the rows it can DRAW; the slack is the host's own, because it
+// is the host's estimate that is loose - `ceil(len / cols)` is a character count,
+// where the device word-wraps, so a page laid out to the exact row count
+// overflows. Applied here rather than shaved off device-side for that reason: it
+// belongs to whoever owns the approximation.
+const HIST_PAGE_SLACK = 2;
+
+// Parses the trailing budget token from a HISTORY request. Defensive on purpose:
+// this is device-authored text, and a malformed value must fall back to board 1's
+// numbers rather than throw inside handleDeviceLine or - worse - produce a 0-line
+// page budget, which would make histPaginate emit one page per entry. Bounds are
+// sanity rails, not policy: 8 columns is narrower than any panel that could draw a
+// word, and 400x200 is far past any panel this firmware runs on.
+function histBudget(token) {
+  const m = /^(\d{1,4})x(\d{1,4})$/.exec(String(token ?? ""));
+  if (!m) return { cols: HIST_LINE_CHARS, lines: HIST_PAGE_LINES };
+  const cols = Number.parseInt(m[1], 10);
+  const lines = Number.parseInt(m[2], 10);
+  if (cols < 8 || cols > 400 || lines < 4 || lines > 200) {
+    return { cols: HIST_LINE_CHARS, lines: HIST_PAGE_LINES };
+  }
+  return { cols, lines };
+}
 
 function histFlatten(v, max = HIST_PREVIEW_CAP) {
   const t = String(v ?? "")
@@ -1384,12 +1416,16 @@ async function histItems(id) {
 // Page boundaries for one filter, computed the way the device lays the screen out: each
 // entry costs a label line plus its wrapped text, and an entry is never split across a page
 // because that makes it unreadable.
-function histPaginate(items) {
+function histPaginate(items, budget = { cols: HIST_LINE_CHARS, lines: HIST_PAGE_LINES }) {
   const pages = [];
+  const cols = budget.cols;
+  // Never below 2: one entry always costs a label row plus at least one text row,
+  // and a budget under that would put every entry on its own page.
+  const perPage = Math.max(2, budget.lines - HIST_PAGE_SLACK);
   let used = 0;
   items.forEach((it, i) => {
-    const lines = 1 + Math.max(1, Math.ceil(it.t.length / HIST_LINE_CHARS));
-    if (used === 0 || used + lines > HIST_PAGE_LINES) {
+    const lines = 1 + Math.max(1, Math.ceil(it.t.length / cols));
+    if (used === 0 || used + lines > perPage) {
       pages.push(i);
       used = lines;
     } else {
@@ -1417,11 +1453,11 @@ async function sendHistoryItem(id, filter, index) {
 
 // `HISTORY <id> <chat|all> <page|last>`. Replies with just that page plus the page count,
 // so the device can show "12/340" and scrub without ever holding the whole thing.
-async function sendHistory(id, filter, want) {
+async function sendHistory(id, filter, want, budget) {
   const all = await histItems(id);
   const chatOnly = filter !== "all";
   const items = chatOnly ? all.filter((x) => x.r === "you" || x.r === "claude") : all;
-  const bounds = histPaginate(items);
+  const bounds = histPaginate(items, budget);
   const pages = bounds.length;
   let page = want === "last" ? pages - 1 : Number.parseInt(want, 10);
   if (!Number.isFinite(page)) page = pages - 1;
@@ -2382,10 +2418,14 @@ async function handleDeviceLine(line, via) {
   // History request from the detail screen. Handled here rather than in the tick so the
   // transcript is only read when someone is actually looking at it.
   if (line.startsWith("HISTORY ")) {
-    const [id, filter = "chat", want = "last"] = line.slice(8).trim().split(/\s+/);
+    // The 4th token is the device's reader budget, `<cols>x<lines>` - absent from
+    // board 1 and from any pre-budget firmware, which is exactly why histBudget()
+    // falls back rather than validating. It matters only to the page layout, so
+    // the item: path (one whole entry, no pagination) ignores it.
+    const [id, filter = "chat", want = "last", budgetTok] = line.slice(8).trim().split(/\s+/);
     console.log(`[device/${via}] ${line}`);
     if (want.startsWith("item:")) await sendHistoryItem(id, filter, Number.parseInt(want.slice(5), 10) || 0);
-    else await sendHistory(id, filter, want);
+    else await sendHistory(id, filter, want, histBudget(budgetTok));
     return;
   }
   // Audio first, and deliberately unlogged - see the note above.

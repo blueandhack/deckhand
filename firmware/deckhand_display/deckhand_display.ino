@@ -23,6 +23,10 @@
   TFT_eSPI tft = TFT_eSPI();
 #else
   #include "panel_shim.h"
+  // The board-2 stand-in for TFT_eSprite. Included here rather than beside the
+  // other generated headers below because it needs PanelShim's declaration
+  // above it, and its own #if already makes it empty on board 1.
+  #include "panel_sprite.h"
   // `tft` is DEFINED in panel_shim.cpp and only declared extern by
   // panel_shim.h - deliberately not defined here as well. A second definition
   // is a LINK error, not a compile error, so it would stay invisible until the
@@ -61,7 +65,35 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#if !BOARD_BLE_NIMBLE
+// Bluedroid only. Under NimBLE the class still EXISTS in the 3.3.11 library, but
+// it is marked [[deprecated]] with the reason spelled out in its own header:
+// "NimBLE does not support manually adding 2902 descriptors as they are
+// automatically added when the characteristic has notifications or indications
+// enabled." So on board 2 the include, the class and the addDescriptor() call
+// all go - not because they fail to compile, but because a hand-added CCCD there
+// is at best redundant and the deprecation warning would be permanent noise.
 #include <BLE2902.h>
+#endif
+// The type a BLE callback hands us to identify its peer. ONE name over two
+// backends, which is what lets every callback override below be written once:
+// the library declares the Bluedroid overloads against
+// esp_ble_gatts_cb_param_t* and the NimBLE ones against ble_gap_conn_desc*, and
+// a typedef IS the same type, so `void onWrite(BLECharacteristic*, BleCbParam*)`
+// correctly overrides whichever virtual this build actually has.
+//
+// DECLARED HERE, up with the includes, and that placement is load-bearing: it
+// appears in bleFrameRxChunk's signature, and the Arduino build inserts its
+// generated prototypes above the sketch's FIRST function definition (line ~224,
+// see the UiFont note there) - so a typedef declared down beside that function
+// would be unknown to its own generated prototype. It is the same rule that
+// keeps HostPairing, Usage, SessionInfo, HostLink and ConfirmAction out of every
+// signature in this sketch.
+#if BOARD_BLE_NIMBLE
+typedef ble_gap_conn_desc BleCbParam;
+#else
+typedef esp_ble_gatts_cb_param_t BleCbParam;
+#endif
 #include <esp_sleep.h>
 #include <sys/time.h>   // gettimeofday: ESP-IDF advances it across deep sleep
 #include <mbedtls/md.h>
@@ -932,10 +964,28 @@ char kbSessionId[16] = "";
 // and serves one screen at a time. History length is therefore unbounded.
 // The host sends one JSON line whose only key is `hist`, so it can't be confused with a
 // tick payload.
-// Sized to what ONE SCREEN can hold, not to the worst case per entry. The reader fits ~14
-// lines of 36 chars, so a page carries ~500 characters of text - or a single long entry the
-// host let through whole. A flat arena costs 2.4KB; 24 fixed 620-char slots cost 15KB and
-// would have come straight out of the heap the audio path needs.
+// Sized to what ONE SCREEN can hold, not to the worst case per entry. A flat arena costs
+// 2.4KB; 24 fixed 620-char slots cost 15KB and would have come straight out of the heap
+// the audio path needs.
+//
+// RE-DERIVED FOR BOTH BOARDS, because board 2's reader is bigger (49 columns x 23 rows
+// against board 1's 36 x 16) and the device now tells the host so - see requestHistory()
+// in reader.ino. The host admits entries while `used + (1 + ceil(len/cols)) <= perPage`,
+// always taking the first one regardless, so for E entries on a page:
+//   sum(len) <= cols * (perPage - E)  <=  cols * (perPage - 1),   plus one NUL per entry
+//   E <= perPage / 2  (every entry costs a label row plus at least one text row)
+// board 1: 36 * 13 = 468 + 7  =  475 characters, E <= 7
+// board 2: 49 * 20 = 980 + 10 =  990 characters, E <= 10
+// The other shape is a SINGLE entry the host let through whole, which its own
+// HIST_PREVIEW_CAP bounds at 300 + 1. So the worst case either board can produce is 990,
+// against HIST_ARENA 2400 - so the arena is UNCHANGED and board 2 costs zero extra DRAM.
+// HIST_MAX 16 likewise still covers E <= 10.
+// Board 2 also has BOARD_HAS_MIC 0, so the capture buffer this arena used to compete with
+// for heap is never allocated there at all - which is a reason not to shrink the arena on
+// that board, not a reason to grow it.
+// The tail-drop below (`histArenaUsed + len + 1 > HIST_ARENA -> break`) is unchanged and
+// still the right guard: with those numbers the host's own pagination cannot reach it, so
+// it now only catches a host whose estimate is looser than the arithmetic above assumes.
 #define HIST_MAX 16          // entries on one screen
 #define HIST_ARENA 2400      // characters of text for the whole page
 char histArena[HIST_ARENA];
@@ -2277,7 +2327,18 @@ char volValCache[8] = "";
 // around until the next tap (or 30s). Frames render into a sprite and push
 // whole, keeping the animation flicker-free; if the sprite allocation fails
 // next to the BLE stack's heap use, it degrades to slower direct drawing.
+// One name, two surfaces. PanelSprite (panel_sprite.h) implements exactly the
+// slice of TFT_eSprite this sketch uses, with the same createSprite() non-null
+// contract startOctopus() tests - and drawCrab() is templated, so it binds to
+// whichever fillRect() belongs to the surface it was handed. That template is
+// load-bearing rather than tidy: TFT_eSPI declares very few methods virtual, so
+// through a base reference pushImage() would bind to the SCREEN version and
+// silently bypass the sprite (which is why the crab was invisible at first).
+#if BOARD_USES_TFT_ESPI
 TFT_eSprite octoSprite = TFT_eSprite(&tft);
+#else
+PanelSprite octoSprite = PanelSprite(&tft);
+#endif
 bool octoActive = false;
 bool octoSpriteOk = false;
 unsigned long octoStartMillis = 0;
@@ -3354,15 +3415,103 @@ void handleLine(const String& line) {
   // switch or a full repaint.
 }
 
+// ---------- The peer identity, one accessor set per backend ----------
+// The two-Mac RX demux keys on exactly ONE value: which central sent this chunk.
+// Board 1 is Bluedroid and reads it out of esp_ble_gatts_cb_param_t; board 2's
+// S3 core is NimBLE and reads ble_gap_conn_desc::conn_handle. Verified, not
+// assumed - the installed esp32s3-libs sdkconfig.h has CONFIG_BT_NIMBLE_ENABLED
+// 1, no CONFIG_BT_BLUEDROID_ENABLED, and CONFIG_BT_NIMBLE_MAX_CONNECTIONS 3, so
+// MAX_LINKS 2 still fits the controller with no build-config change.
+//
+// These six one-liners are the ONLY thing in the BLE path that forks. Everything
+// below them - the framing, the accept/refuse, the slot release, and further
+// down bleSlotForConn, reapBleLinks and drainBleRx - is written once, including
+// the callback overrides themselves, because BleCbParam (declared up with the
+// includes) is one name for whichever type this backend's virtuals use. That
+// matters because the failure mode of a second copy is the worst shape
+// available: two Macs' 20-byte chunks interleave into one accumulator,
+// handleLine returns early on the parse error, and the screen stops updating
+// while both links, both heartbeats and both menu bars look perfectly healthy.
+//
+// THREE accessors rather than one, and the reason is Bluedroid's type. Its
+// callback parameter is a UNION whose live member is chosen by the event -
+// param->connect.conn_id, ->disconnect.conn_id, ->write.conn_id - at offsets
+// nothing guarantees agree, so reading the wrong one is a defect, not a style.
+// NimBLE's parameter is one struct with one field, so its three collapse to the
+// same expression and the asymmetry costs nothing. Folding them into a single
+// name plus an event tag would need a new enum in a function signature, which is
+// the prototype-insertion hazard BleCbParam's own comment describes.
+#if BOARD_BLE_NIMBLE
+static inline uint16_t bleConnHandleConnect(BleCbParam* p) { return p ? p->conn_handle : 0; }
+static inline uint16_t bleConnHandleDisconnect(BleCbParam* p) { return p ? p->conn_handle : 0; }
+static inline uint16_t bleConnHandleWrite(BleCbParam* p) { return p ? p->conn_handle : 0; }
+#else
+static inline uint16_t bleConnHandleConnect(BleCbParam* p) { return p ? p->connect.conn_id : 0; }
+static inline uint16_t bleConnHandleDisconnect(BleCbParam* p) { return p ? p->disconnect.conn_id : 0; }
+static inline uint16_t bleConnHandleWrite(BleCbParam* p) { return p ? p->write.conn_id : 0; }
+#endif
+
+// Frames one RX chunk for loopTask, tagged with the central that sent it:
+// [conn_id][len16][bytes] into the 16KB stream buffer, header and payload
+// ATOMICALLY - a partial write desyncs every frame that follows, where the old
+// unframed buffer merely dropped bytes, so a chunk that does not fit whole is
+// dropped whole. The host resends a full snapshot every 5s.
+//
+// Runs on the Bluetooth stack's own task, so it does exactly this one thing.
+// That rule came from a crash loop on board 1 (a driver mutex locked on
+// loopTask, released from BTC_TASK: assert failed: xTaskPriorityDisinherit, plus
+// task_wdt IDLE0 timeouts), and NimBLE states the same requirement in its own
+// words for its own reason - BLECharacteristic.cpp's comment on the NimBLE path
+// says the write RESPONSE is now sent after this returns, so "implement
+// onWrite() as a fast, non-blocking callback".
+//
+// A NULL param is the library handing us no peer identity, and the frame is then
+// DROPPED rather than filed under a guessed conn id of 0: guessing files a second
+// central's bytes onto slot 0's accumulator, which is exactly the corruption the
+// framing exists to prevent.
+//
+// The statement ORDER here is not incidental. This body was lifted out of board
+// 1's own onWrite() and the null test kept its place, fourth, so the extraction
+// is a pure move - measured, because the alternatives are not free: hoisting the
+// test to the top of the function costs 44 bytes of flash (it deletes a String
+// destructor path board 1 used to have), and passing the id in as a value
+// instead of the pointer costs 8 (signed sentinel) or 16 (bool plus uint16_t)
+// because the read then happens above getValue().
+static void bleFrameRxChunk(BLECharacteristic* characteristic, BleCbParam* param) {
+  String value = characteristic->getValue();
+  size_t n = value.length();
+  if (!bleRxStream || n == 0 || n > 0xFFFF) return;
+  if (!param) return; // no peer identity to attribute this to - see above
+  uint16_t conn = bleConnHandleWrite(param);
+  if (xStreamBufferSpacesAvailable(bleRxStream) < n + 4) return;
+  uint8_t hdr[4] = { (uint8_t)(conn & 0xFF), (uint8_t)(conn >> 8),
+                     (uint8_t)(n & 0xFF), (uint8_t)(n >> 8) };
+  xStreamBufferSend(bleRxStream, hdr, 4, 0);
+  xStreamBufferSend(bleRxStream, value.c_str(), n, 0);
+}
+
 class BLEServerCallbacksImpl : public BLEServerCallbacks {
-  // Bluedroid STOPS advertising on connect, which is why a second Mac could
-  // never attach. Resume while a slot is free; refuse beyond MAX_LINKS rather
-  // than queueing, so a third central fails visibly instead of flapping.
-  void onConnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) {
-    uint16_t conn = param ? param->connect.conn_id : 0;
+  // ADVERTISING STOPS THE INSTANT A CENTRAL CONNECTS, which is why a second Mac
+  // could never attach without resuming it here - and the symptom is not an
+  // error anywhere, it is a second Mac whose scan simply never finds a device
+  // sitting right there, connected and healthy, to the first. That holds on BOTH
+  // backends and for the same reason: legacy connectable advertising is
+  // terminated by the controller when a connection is created, which is spec
+  // behaviour rather than a Bluedroid quirk. NimBLE's own BLEAdvertising::start()
+  // then makes the resume cheap and safe to call from the stack task - it returns
+  // early if ble_gap_adv_active(), it goes straight to ble_gap_adv_start() with
+  // no semaphore to block on, and it refuses on its own past
+  // CONFIG_BT_NIMBLE_MAX_CONNECTIONS (3, which our own MAX_LINKS gate of 2 keeps
+  // us clear of; note NimBLE increments its connected count AFTER this callback,
+  // so the figure it compares is one behind, which only widens that margin).
+  //
+  // Refuse beyond MAX_LINKS rather than queueing, so a third central fails
+  // visibly instead of flapping.
+  void onConnect(BLEServer* server, BleCbParam* param) {
+    uint16_t conn = bleConnHandleConnect(param);
     if (bleSlotForConn(conn, true) < 0) {
-      // Flag only - no Serial here. This runs on BTC_TASK, where this
-      // codebase's rule is "copy bytes and get out"; reapBleLinks() on
+      // Flag only - no Serial here. This runs on the Bluetooth stack's task,
+      // where this codebase's rule is "copy bytes and get out"; reapBleLinks() on
       // loopTask emits the actual log line from this flag.
       bleRefusalPending = true;
       server->disconnect(conn);
@@ -3371,70 +3520,64 @@ class BLEServerCallbacksImpl : public BLEServerCallbacks {
     bleConnected = true;
     if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
-  // Marks the slot pending release - nothing else. BTC_TASK must never clear
-  // .used or touch .buf itself (loopTask may be mid-append into that String
-  // via feedChar right now); loopTask reaps it at the top of drainBleRx().
+  // Marks the slot pending release - nothing else. The Bluetooth stack's task
+  // must never clear .used or touch .buf itself (loopTask may be mid-append into
+  // that String via feedChar right now); loopTask reaps it at the top of
+  // drainBleRx().
   //
-  // If the conn_id doesn't resolve to a slot at all, this connection never
-  // owned one - it's onConnect's own server->disconnect() firing this same
-  // callback for a REFUSAL, whether that refusal was because both slots are
-  // genuinely used, or because bleSlotForConn's allocator skips a slot that
-  // is used-but-releasePending (bleLinkCount() reports that slot as free
-  // room, but the allocator still won't hand it out until the reap runs -
-  // deliberately the same "room reported, nothing available yet" situation
-  // either way, from the radio's point of view). Re-advertising here would
-  // storm: connect -> refuse -> advertise -> connect, over and over, until
-  // whichever condition clears. So a refusal does NOTHING further - no
-  // advertise, no state touched - and just waits: the pending case clears
-  // itself at the next reap, the genuinely-full case waits for a real
-  // disconnect, and either way the existing 5s advertising watchdog
-  // (bleLinkCount() < MAX_LINKS) notices and resumes advertising on its own.
-  // Bounded and quiet beats an immediate but storming retry.
-  void onDisconnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) {
-    uint16_t conn = param ? param->disconnect.conn_id : 0;
+  // If the conn id doesn't resolve to a slot at all, this connection never owned
+  // one - it's onConnect's own server->disconnect() firing this same callback for
+  // a REFUSAL, whether that refusal was because both slots are genuinely used, or
+  // because bleSlotForConn's allocator skips a slot that is
+  // used-but-releasePending (bleLinkCount() reports that slot as free room, but
+  // the allocator still won't hand it out until the reap runs - deliberately the
+  // same "room reported, nothing available yet" situation either way, from the
+  // radio's point of view). Re-advertising here would storm: connect -> refuse ->
+  // advertise -> connect, over and over, until whichever condition clears. So a
+  // refusal does NOTHING further - no advertise, no state touched - and just
+  // waits: the pending case clears itself at the next reap, the genuinely-full
+  // case waits for a real disconnect, and either way the existing 5s advertising
+  // watchdog (bleLinkCount() < MAX_LINKS) notices and resumes advertising on its
+  // own. Bounded and quiet beats an immediate but storming retry.
+  void onDisconnect(BLEServer* server, BleCbParam* param) {
+    uint16_t conn = bleConnHandleDisconnect(param);
     int slot = bleSlotForConn(conn, false);
     if (slot < 0) return;   // a refusal's own disconnect - see comment above
     bleLinks[slot].releasePending = true;
     bleConnected = bleLinkCount() > 0;
     if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
+  // Both backends call the one-argument form AND the parameter form, in that
+  // order, for every connect and every disconnect (BLEServer.cpp: 531/532 and
+  // 569/570 on Bluedroid, 809/810 and 847/848 on NimBLE). So these exist to
+  // absorb that double call, not to be a second implementation of it.
   void onConnect(BLEServer* server) {}       // superseded by the param forms
-  // No conn_id here, so no slot can be marked pending release - a library
-  // that called only this form would leave that slot stuck used=true
-  // forever. That gap is pre-existing and out of scope for this round (the
-  // installed 3.3.11 library always calls the param form); this fallback
-  // only re-asserts the advertising gate, it does not cover release.
+  // No conn id here, so no slot can be marked pending release - a library that
+  // called only this form would leave that slot stuck used=true forever. That gap
+  // is pre-existing and out of scope (both installed backends always call a param
+  // form as well); this fallback only re-asserts the advertising gate, it does
+  // not cover release.
   void onDisconnect(BLEServer* server) {
     if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
 };
 
 class BLERxCallbacks : public BLECharacteristicCallbacks {
-  // Runs on BTC_TASK - copy bytes and get out. Now also records WHICH central
-  // sent them: conn_id goes in a 4-byte header ahead of the payload, and
-  // loop() demuxes. The header and its payload must be written ATOMICALLY -
-  // a partial write desyncs every frame that follows, where the old unframed
-  // buffer merely dropped bytes - so a chunk that does not fit whole is
-  // dropped whole. The host resends a full snapshot every 5s.
-  void onWrite(BLECharacteristic* characteristic, esp_ble_gatts_cb_param_t* param) {
-    String value = characteristic->getValue();
-    size_t n = value.length();
-    if (!bleRxStream || n == 0 || n > 0xFFFF) return;
-    if (!param) return; // no conn_id to attribute this to - see the delegate below
-    uint16_t conn = param->write.conn_id;
-    if (xStreamBufferSpacesAvailable(bleRxStream) < n + 4) return;
-    uint8_t hdr[4] = { (uint8_t)(conn & 0xFF), (uint8_t)(conn >> 8),
-                       (uint8_t)(n & 0xFF), (uint8_t)(n >> 8) };
-    xStreamBufferSend(bleRxStream, hdr, 4, 0);
-    xStreamBufferSend(bleRxStream, value.c_str(), n, 0);
+  // VERIFIED IN THE LIBRARY SOURCE on both backends, because getting it wrong is
+  // silent. Bluedroid's BLECharacteristic.cpp calls
+  // `m_pCallbacks->onWrite(this, param)` from its GATTS write handler; NimBLE's
+  // does `ble_gap_conn_find(conn_handle, &desc); assert(rc == 0);` and then
+  // `pCharacteristic->m_pCallbacks->onWrite(pCharacteristic, &desc)` - i.e. this
+  // same overload, with the descriptor always populated.
+  void onWrite(BLECharacteristic* characteristic, BleCbParam* param) {
+    bleFrameRxChunk(characteristic, param);
   }
-  // Keep the one-argument form delegating (dead code on today's 3.3.11
-  // library, which always calls the two-argument form - verified in its
-  // BLECharacteristic.cpp - but kept for a library version that might call
-  // this one instead). It has no conn_id, and guessing 0 would silently
-  // misattribute a second central's bytes onto slot 0's accumulator - the
-  // exact corruption this task exists to prevent - so it drops the frame
-  // instead of framing it under a guess.
+  // Keep the one-argument form delegating (dead code on today's 3.3.11 library,
+  // which always calls the two-argument form on both backends - verified in its
+  // BLECharacteristic.cpp - but kept for a library version that might call this
+  // one instead). It has no peer identity, and guessing 0 would silently
+  // misattribute a second central's bytes onto slot 0's accumulator, so the null
+  // reaches bleFrameRxChunk's own drop branch instead.
   void onWrite(BLECharacteristic* characteristic) { onWrite(characteristic, nullptr); }
 };
 
@@ -3451,8 +3594,9 @@ int bleLinkCount() {
 // from a central we refused cannot claim a slot.
 //
 // A slot with releasePending set matches in NEITHER search below. Excluding
-// it from the match loop is what stops a recycled conn_id (Bluedroid can and
-// does reuse small conn_id values right after a disconnect) from inheriting
+// it from the match loop is what stops a recycled conn id (both backends
+// reuse small connection ids right after a disconnect - Bluedroid's conn_id
+// and NimBLE's conn_handle alike) from inheriting
 // a slot that's still awaiting the reap - the fastest route back to the
 // exact interleaving bug this file exists to prevent, just through the slot
 // lookup instead of the drain's old create=true. It's already excluded from
@@ -3482,15 +3626,15 @@ int bleSlotForConn(uint16_t connId, bool create) {
 // drainBleRx(), so reapBleLinks() can discard it when called from OUTSIDE
 // drainBleRx() too - see that function's comment for why it needs to be.
 int bleFrameSlot = -1;
-// Reaps slots BTC_TASK marked releasePending (BLEServerCallbacksImpl::
-// onDisconnect - see BleLink's own comment for why the state lives on the
-// slot rather than in a side queue). This is the only place an already-used
+// Reaps slots the Bluetooth stack's task marked releasePending
+// (BLEServerCallbacksImpl::onDisconnect - see BleLink's own comment for why the
+// state lives on the slot rather than in a side queue). This is the only place an already-used
 // slot's .buf/.used may be mutated - loopTask owns both, the same way it
 // already owns feedChar()'s appends into that same String.
 //
 // THE ORDER WITHIN THE LOOP IS THE INVARIANT, not tidiness: buf is cleared
-// FIRST, releasePending SECOND, and used is set false LAST. onConnect() (on
-// BTC_TASK) treats used==false as licence to claim a slot and immediately
+// FIRST, releasePending SECOND, and used is set false LAST. onConnect() (on the
+// Bluetooth stack's task) treats used==false as licence to claim a slot and immediately
 // assign buf="" of its own - so if used went false first, BTC_TASK could
 // claim the slot and start assigning that same String concurrently with
 // this function still clearing it, a two-instruction double-free window.
@@ -3611,7 +3755,18 @@ void setupBLE() {
   BLEService* service = bleServer->createService(BLE_SERVICE_UUID);
 
   bleTxChar = service->createCharacteristic(BLE_CHAR_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+#if !BOARD_BLE_NIMBLE
+  // The CCCD (0x2902), which is what lets the host SUBSCRIBE to notifications.
+  // Bluedroid needs it added by hand. NimBLE adds one itself for any
+  // characteristic declaring NOTIFY or INDICATE, and its BLE2902 class carries a
+  // [[deprecated]] attribute saying exactly that - so adding one on board 2
+  // would be a permanent build warning in exchange for a descriptor that is
+  // already there. NimBLE's notify() is the half that actually depends on this
+  // working: unlike Bluedroid's it refuses outright when m_subscribedVec is
+  // empty (ERROR_NO_SUBSCRIBER), so a device→host line would never leave at all
+  // if the host could not subscribe.
   bleTxChar->addDescriptor(new BLE2902());
+#endif
 
   BLECharacteristic* rxChar = service->createCharacteristic(
       BLE_CHAR_RX_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
@@ -3670,6 +3825,15 @@ void setup() {
   // A wake that is not a held touch goes straight back to sleep having spent a
   // few hundred milliseconds instead of a full screen-on.
   touchBegin();
+  // BOARD 1 ONLY, because there is nothing here for board 2 to do: it arms no
+  // deep-sleep wake source at all (BOARD_HAS_TOUCH_SLEEP_WAKE - the S3's
+  // ext0/ext1 wake only from GPIO0..21 and its touch INT is on 47), so
+  // esp_sleep_get_wakeup_cause() can never report EXT0 there and the whole
+  // block is unreachable. It is compiled out rather than left to fail its own
+  // test, because the SLEEP report below would then be dead code claiming to
+  // measure something - and on that board a RESET is what ends deep sleep, which
+  // clears the RTC memory the report reads from anyway.
+#if BOARD_HAS_TOUCH_SLEEP_WAKE
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
     unsigned long t0 = millis();
     bool held = true;
@@ -3684,7 +3848,7 @@ void setup() {
       // either would only undo what is already correct. rtcSleepMv/Us are left
       // alone too, so elapsed time keeps accumulating across these.
       gpio_deep_sleep_hold_en();
-      esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);
+      esp_sleep_enable_ext0_wakeup((gpio_num_t) BOARD_SLEEP_WAKE_GPIO, 0);
       esp_deep_sleep_start();
     }
     // A real wake: report what the sleep cost. mV/hour is the raw datum -
@@ -3738,6 +3902,7 @@ void setup() {
       rtcSpuriousWakes = 0;
     }
   }
+#endif
 
   setupBLE();
 
@@ -3753,10 +3918,12 @@ void setup() {
   ledcAttach(TFT_BL_PIN, 5000, 8); // 5kHz, 8-bit duty (0-255)
   setBacklight(100); // full brightness until loadBrightness() runs, after prefs.begin()
 
+#if BOARD_HAS_BEEPER
   pinMode(AUDIO_EN_PIN, OUTPUT);
   digitalWrite(AUDIO_EN_PIN, HIGH); // amp muted until a beep plays
   ledcAttach(AUDIO_OUT_PIN, BEEP_FREQ, 8);
   ledcWrite(AUDIO_OUT_PIN, 0);
+#endif
 
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP); // board has its own 10K pull-up too
 

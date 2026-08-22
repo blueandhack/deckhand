@@ -6,6 +6,15 @@
 // this sketch names a type declared after the first function definition, which
 // is what would break the auto-generated prototypes.
 
+// What the two farewell screens tell you to do to bring the device back. One
+// constant because the two screens must never disagree, and because whether a
+// touch can wake this chip at all is a board fact (BOARD_HAS_TOUCH_SLEEP_WAKE).
+#if BOARD_HAS_TOUCH_SLEEP_WAKE
+#define WAKE_HINT "touch screen to wake"
+#else
+#define WAKE_HINT "press RESET to wake"
+#endif
+
 void setBacklight(int pct) {
   brightnessPct = constrain(pct, BRIGHTNESS_MIN, 100);
   ledcWrite(TFT_BL_PIN, brightnessPct * 255 / 100);
@@ -49,7 +58,13 @@ void wakeUp() {
 void sampleBattery() {
   long sum = 0;
   for (int i = 0; i < 4; i++) sum += analogReadMilliVolts(BAT_ADC_PIN);
-  int mv = (int)(sum / 4) * 2; // 100K/100K divider halves VBAT
+  // BOARD_BAT_MV_SCALE, not a literal: the divider ratio is the board's, not this
+  // function's. 2 on both boards today (board 1's 100K/100K halves VBAT; board 2's
+  // ratio is documented as UNVERIFIED in its header, which is where a measurement
+  // lands rather than here). No attenuation call is needed on either: Arduino's
+  // default for an ADC1 pin is already the widest range (~0-3.1V), and a 1S cell
+  // through a x2 divider peaks at ~2.1V inside it.
+  int mv = (int)(sum / 4) * BOARD_BAT_MV_SCALE;
   batteryMv = batteryMv < 0 ? mv : (batteryMv * 7 + mv) / 8;
 }
 // Below this there's clearly no cell attached (R3 pulls the pin to ground).
@@ -195,6 +210,14 @@ void loadVolume() {
   applyVolume();
 }
 void saveVolume() { prefs.putInt("vol", volPresetIdx); }
+// The needs-input double-beep. BOARD_HAS_BEEPER 0 makes both of these no-ops
+// rather than deleting their callers: the SOUND toggle, the volume stepper and
+// the asking-transition diff all stay exactly where they are, so nothing about
+// the UI or the diff logic has to learn that a board is mute. A stub here is
+// also the honest shape of the gap - board 2 HAS a speaker, but it is behind an
+// I2S codec, and an LEDC square wave is not a thing you can send one. Giving
+// AUDIO_OUT_PIN an alias pointing at an I2S data line would compile and lie.
+#if BOARD_HAS_BEEPER
 void startBeep() {
   if (!beepEnabled) return;
   if (beepStep >= 0) return; // pattern already playing
@@ -216,6 +239,10 @@ void updateBeep() {
   }
   ledcWrite(AUDIO_OUT_PIN, beepStep % 2 == 1 ? 0 : beepDuty);
 }
+#else
+void startBeep() {}
+void updateBeep() {}
+#endif
 // The actual teardown into deep sleep, shared by the manual power-off (BOOT
 // hold) and the automatic battery-idle sleep. Assumes a farewell has already
 // been drawn (or not) by the caller.
@@ -239,7 +266,22 @@ void enterDeepSleep() {
   timeval tv; gettimeofday(&tv, nullptr);
   rtcSleepUs = (int64_t) tv.tv_sec * 1000000 + tv.tv_usec;
 
-  esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0); // PENIRQ: low = touched
+#if BOARD_HAS_TOUCH_SLEEP_WAKE
+  esp_sleep_enable_ext0_wakeup((gpio_num_t) BOARD_SLEEP_WAKE_GPIO, 0); // PENIRQ: low = touched
+#else
+  // NO WAKE SOURCE IS ARMED, and that is deliberate rather than unfinished - see
+  // BOARD_HAS_TOUCH_SLEEP_WAKE in this board's header for the header-verified
+  // reason (ext0/ext1 wake only from an RTC GPIO, this chip's RTC set is
+  // GPIO0..21, and the touch INT is on 47). Arming ext0/ext1 on it anyway would
+  // return ESP_ERR_INVALID_ARG into a value nobody reads and leave the device
+  // asleep with a farewell screen that had promised a touch would work.
+  // Everything ABOVE this point still runs, with one board-2 caveat worth
+  // knowing: the backlight pad really does stay latched low - which is ~93% of
+  // the draw - but the two writecommand() calls above are no-ops on that panel,
+  // so its controller is NOT put into DISPOFF/SLPIN. See PanelShim::writecommand
+  // in panel_shim.cpp for what the driver does and does not expose.
+  Serial.println("POWER: no touch wake on this board - press RESET to wake");
+#endif
 
 #if !BOARD_USES_TFT_ESPI
   // The point of no return: esp_deep_sleep_start() never returns, so the
@@ -261,9 +303,14 @@ void powerOff() {
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Powering off", tft.width() / 2, tft.height() / 2 - 12);
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.drawString("touch screen to wake", tft.width() / 2, tft.height() / 2 + 12);
+  // The instruction has to match what the chip can actually do. A board that
+  // cannot wake on touch must not say "touch screen to wake": that reads as
+  // broken firmware, where "press RESET to wake" reads as a device that told you
+  // the truth. Same rule the standalone screen follows about never claiming USB.
+  tft.drawString(WAKE_HINT, tft.width() / 2, tft.height() / 2 + 12);
   tft.setTextDatum(TL_DATUM);
 
+#if BOARD_HAS_BEEPER
   if (beepEnabled) { // single short blip as tactile confirmation
     digitalWrite(AUDIO_EN_PIN, LOW);
     ledcWrite(AUDIO_OUT_PIN, MIC_CUE_DUTY);
@@ -271,6 +318,7 @@ void powerOff() {
     ledcWrite(AUDIO_OUT_PIN, 0);
     digitalWrite(AUDIO_EN_PIN, HIGH);
   }
+#endif
   delay(1200); // let the message be read; we're leaving, blocking is fine
   enterDeepSleep();
 }
@@ -287,7 +335,7 @@ void autoDeepSleep() {
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Sleeping to save battery", tft.width() / 2, tft.height() / 2 - 12);
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.drawString("touch screen to wake", tft.width() / 2, tft.height() / 2 + 12);
+  tft.drawString(WAKE_HINT, tft.width() / 2, tft.height() / 2 + 12);
   tft.setTextDatum(TL_DATUM);
   delay(1500);
   enterDeepSleep();

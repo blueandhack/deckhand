@@ -20,6 +20,21 @@
 #define BOARD_HAS_SD         1
 #define BOARD_HAS_RGBLED     1
 #define BOARD_TOUCH_NEEDS_CAL 0  // capacitive, factory-aligned
+// NO TOUCH WAKE FROM DEEP SLEEP, and this is a silicon fact rather than a gap
+// in the port. Both ext0 and ext1 wake ONLY from an RTC GPIO, and on the S3 the
+// RTC set is GPIO0..21 - read out of the installed headers rather than assumed:
+// soc_caps.h gives SOC_RTCIO_PIN_COUNT 22 and rtc_io_channel.h maps exactly
+// RTCIO_CHANNEL_0..21 onto GPIO0..21. PIN_TOUCH_INT is 47, so neither ext0 nor
+// ext1 can take it (esp_sleep_enable_ext*_wakeup returns ESP_ERR_INVALID_ARG
+// for a non-RTC pin), and the C3/C6-style esp_deep_sleep_enable_gpio_wakeup()
+// escape hatch does not exist here either - SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP
+// is not defined in the S3's soc_caps.h at all.
+// The one RTC-capable pin a person can press is PIN_BOOT_BTN (0), and that is
+// refused for the SAME reason board 1 refuses it: GPIO0 is the boot strap, so a
+// wake with it held low lands the chip in the serial bootloader and the device
+// looks bricked. So on this board deep sleep is exited by RESET, and every
+// farewell screen says exactly that instead of promising a touch.
+#define BOARD_HAS_TOUCH_SLEEP_WAKE 0
 
 // ---- LCD: ST77922, 320x480, QSPI. Panel reset is tied to chip EN (no GPIO). --
 #define PIN_LCD_CS        10
@@ -59,6 +74,35 @@
 #define PIN_BAT_ADC        8    // battery voltage divider
 #define PIN_EXP_IO_A      45
 #define PIN_EXP_IO_B      46
+
+// ---- Names the SHARED sketch code uses, mapped onto the pins above ---------
+// Aliases, not new pins: these are the identifiers board 1's header established
+// and the shared .ino files spell, pointed at this board's numbers. Deliberately
+// only the ones that HAVE an equivalent here - AUDIO_OUT_PIN, AUDIO_EN_PIN and
+// MIC_ADC_PIN are absent on purpose, because BOARD_HAS_BEEPER and BOARD_HAS_MIC
+// are 0 and an alias for a peripheral this board does not have is exactly the
+// "looks right and is wrong" failure this header's opening comment refuses.
+// (PIN_AMP_EN exists, but it gates an I2S codec: an LEDC square wave into it
+// makes no sound, so pointing AUDIO_OUT_PIN at an I2S data line would compile
+// and lie.)
+#define TFT_BL_PIN    PIN_BACKLIGHT
+#define BAT_ADC_PIN   PIN_BAT_ADC
+#define BOOT_BTN_PIN  PIN_BOOT_BTN
+// Portrait native: the panel is physically 320x480 and PanelShim's framebuffer
+// is fixed at that orientation (PANEL_PHYS_W/H), so rotation 0 is the identity
+// map. The FLIP setting's rotation 2 is the only other value either board uses,
+// and PanelShim::mapPoint implements all four.
+#define SCREEN_ROTATION 0
+// UNVERIFIED. The LCDWIKI table for this board says only "battery voltage
+// divider" with no ratio, and the ES3C35P self-test this header's pins came
+// from assumes x2 as well - assumes, not measures: nothing in either place
+// compares the pad reading against a known cell voltage. x2 is the ordinary
+// 100K/100K arrangement and matches board 1, so it is the right guess, but the
+// FIRST thing to check when board 2's battery percentage reads wrong is this
+// number, not pctFromMv()'s curve. Settling it needs a meter on the cell read
+// against the pad's own reported millivolts, i.e. hardware access this port has
+// not had.
+#define BOARD_BAT_MV_SCALE 2
 
 // ============================================================================
 // LAYOUT - DERIVED FOR 320x480, NOT SCALED FROM BOARD 1
