@@ -67,6 +67,14 @@ const KNOWN = {
     // drawString paints an opaque box and the hint is drawn second, the warning is
     // invisible on this board. Board 2's card leaves 27px between them.
     "\"answer on your Mac\" ends 298 above the history hint at 286",
+    // (c) Both under board 1's own TAP_MIN of 40, and its own header comment says
+    // so: at board 2's 46+8 the worst-case option stack would be 270 of a 268px
+    // content area. The proportion carries across even though the pixels cannot.
+    "ask option 32px tall >= TAP_MIN 40",
+    "ask option gap 4 separates two decision buttons",
+    // (d) The ladder floor, 2px under the least legal compact row - the same
+    // arithmetic as (a), stated as the constant rather than as the row it produces.
+    "ladder floor 38 >= SESSION_SUBC_Y + 15 = 40 (least legal compact row)",
   ],
   2: [],
 };
@@ -186,6 +194,8 @@ for (const b of [1, 2]) {
       `SESSION_SUB_MIN_H ${c.SESSION_SUB_MIN_H} == 70 + 3*AIR(${c.SESSION_AIR})`);
   chk(c.SESSION_LARGE_MIN_H === 56 + 2 * c.SESSION_AIR,
       `SESSION_LARGE_MIN_H ${c.SESSION_LARGE_MIN_H} == 56 + 2*AIR(${c.SESSION_AIR})`);
+  m = `ladder floor ${c.SESSION_ROW_H_MIN} >= SESSION_SUBC_Y + 15 = ${c.SESSION_SUBC_Y + 15} (least legal compact row)`;
+  chk(c.SESSION_ROW_H_MIN >= c.SESSION_SUBC_Y + 15, m, isKnown(b, m));
   chk(c.SESSION_ROW_H_MAX >= c.SESSION_TITLE_MIN_H,
       `ladder cap ${c.SESSION_ROW_H_MAX} >= the title threshold ${c.SESSION_TITLE_MIN_H} (or no row ever gets a title)`);
 
@@ -205,8 +215,14 @@ for (const b of [1, 2]) {
       const bands = rowBands(c, rowH, kind);
       for (let i = 1; i < bands.length; i++) {
         const gap = bands[i][1] - bands[i - 1][2] - 1;
+        // STRICTLY >= 0 here, where the threshold band tables above tolerate the
+        // documented -1 boundary. A rung is a height the device actually renders,
+        // and the five-session rung sits on that boundary with a 0px gap: 80
+        // against SESSION_SUB_MIN_H 79. Allowing -1 here too would let a 1px
+        // change to FOOTER_H / TAB_BAR_H / SESSION_ROW_Y0 drop that rung to 79 -
+        // a real 1-row pill-over-text overlap - and pass in silence.
         m = `${strip ? "strip " : ""}${n}x${rowH} (${kind}): ${bands[i - 1][0]} -> ${bands[i][0]} gap ${gap}`;
-        chk(gap >= 0 || (kind === "sub" && gap === -1), m, isKnown(b, m));
+        chk(gap >= 0, m, isKnown(b, m));
       }
       if (kind === "compact")
         chk(c.SESSION_PILLC_Y + 17 <= rowH - 3,
@@ -307,6 +323,19 @@ for (const b of [1, 2]) {
       `history hint ends ${hintTop + lineH(T_META) - 1} inside contentBottom ${contentBottom}`);
   chk(cardY + c.DETAIL_CARD_H <= contentBottom - 8,
       `detail card ends ${cardY + c.DETAIL_CARD_H - 1}, inside contentBottom ${contentBottom}`);
+  // The two-column pairs (MODEL / GIT BRANCH, STARTED / AGENT). drawColValue()
+  // clips to the `w` it is GIVEN - verified in sessions.ino, where both the test and
+  // the ellipsis budget read `w` - so the question is only whether the two columns
+  // fit side by side inside the card's text lane and how much they hold.
+  const colW = Math.floor(c.CARD_W / 2) - c.PAD - 4;
+  const LX = c.CARD_X + c.PAD, RX = c.CARD_X + Math.floor(c.CARD_W / 2) + 2;
+  const dots = textWidth("..", T_BODY);
+  let whole = 0; while (textWidth("M".repeat(whole + 1), T_BODY) <= colW) whole++;
+  let cut = 0; while (textWidth("M".repeat(cut + 1), T_BODY) <= colW - dots) cut++;
+  chk(LX + colW < RX, `left column ${LX}..${LX + colW} clears the right column at ${RX} by ${RX - (LX + colW)}`);
+  chk(RX + colW <= c.CARD_X + c.CARD_W - c.PAD,
+      `right column ends ${RX + colW}, inside the card's text lane at ${c.CARD_X + c.CARD_W - c.PAD}`);
+  console.log(`    column value lane ${colW}px: ${whole} chars whole, ${cut} + ".." when clipped`);
   // The line caps against the FIELD's own byte cap - the derivation that decides
   // whether a field is shown whole or silently cut.
   const perLine = Math.floor(maxW / 6);
@@ -339,7 +368,12 @@ for (const b of [1, 2]) {
   const titleInk = c.CONTENT_Y + c.ASK_TITLE_Y + 2 * 17;
   chk(optTop > titleInk,
       `worst-case option stack (${stack} x ${c.ASK_OPT_H}+${c.ASK_OPT_GAP}) tops at ${optTop}, below the ask title's 2 lines ending ${titleInk}`);
-  chk(c.ASK_OPT_H >= 32, `ask option ${c.ASK_OPT_H}px tall (TAP_MIN here is ${c.TAP_MIN})`);
+  // Against TAP_MIN, not a literal 32 - board 2 does clear 46, but an assertion
+  // that would still pass if it did not is decoration.
+  m = `ask option ${c.ASK_OPT_H}px tall >= TAP_MIN ${c.TAP_MIN}`;
+  chk(c.ASK_OPT_H >= c.TAP_MIN, m, isKnown(b, m));
+  m = `ask option gap ${c.ASK_OPT_GAP} separates two decision buttons`;
+  chk(c.ASK_OPT_GAP >= 8, m, isKnown(b, m));
   // Detail preview lines in the COMMON case (2 options + the input row), code style.
   const optTop2 = contentBottom - 3 * (c.ASK_OPT_H + c.ASK_OPT_GAP);
   const textTop = titleInk + 4;

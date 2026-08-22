@@ -293,15 +293,21 @@ const int FOOTER_BATT_X      = 135;
 const int FOOTER_BATT_TEXT_X = 160;
 
 // ---------- Sessions tab: the row list ----------
-// THE ROW COUNT IS DELIBERATELY UNCHANGED AT 6. MAX_SESSIONS is a HOST-side cap
-// too - host/index.mjs urgency-sorts and truncates to it before sending, and
-// sessionsTotal/hiddenAsking describe what it cut - so raising it is a
-// protocol-wide change that grows every 5s payload on a BLE link already
-// measured as the bottleneck (~666 B/s at 20-byte chunks and the 30ms interval
-// macOS negotiates), plus ~2.2KB of DRAM per SessionInfo against ~26KB of free
-// heap the audio path also comes out of. So the extra rows this panel could hold
-// are spent on TALLER rows instead, and a bigger row count stays a separate
-// decision rather than a side effect of a bigger screen.
+// THE ROW COUNT IS DELIBERATELY UNCHANGED AT 6, on the half of board 1's argument
+// that actually transfers. MAX_SESSIONS is a HOST-side cap too - host/index.mjs
+// urgency-sorts and truncates to it before sending, and sessionsTotal/hiddenAsking
+// describe what it cut - so raising it is a PROTOCOL-WIDE change, touching
+// host/index.mjs and growing every 5s payload on a BLE link already measured as
+// the bottleneck (~666 B/s at 20-byte chunks and the 30ms interval macOS
+// negotiates). That reason is panel-independent and is the load-bearing one here.
+// Board 1's OTHER reason does NOT transfer and must not be repeated as if it did:
+// ~2.2KB of DRAM per SessionInfo against ~26KB of free heap is an ESP32-with-no-
+// PSRAM figure, and this board has PSRAM (PSRAM=opi in the FQBN) plus an S3's
+// larger internal SRAM, so the memory half of that argument would have to be
+// re-measured rather than assumed. It is not measured here, because the protocol
+// reason settles the question on its own. So the extra rows this panel could hold
+// are spent on TALLER rows, and a bigger row count stays a separate decision with
+// its own host-side work rather than a side effect of a bigger screen.
 //
 // Content area = 480 - TAB_BAR_H(46) - FOOTER_H(18) = 416, against board 1's 268.
 const int SESSION_ROW_X = 12;
@@ -342,15 +348,34 @@ const int SESSION_AIR = 3;
 //   +75..+92 pill       18        (top = rowH - SESSION_PILL_UP_T, 25)
 //   +93..+97 pad 5
 //   +98..+99 border               = 100
-// i.e. 85 + 5*AIR, the same five gaps/pads board 1 packs at 2/2/2/3/2. 100 is
-// what picks AIR = 3, because the ladder's four-session row is exactly 100: at
-// AIR 4 the minimum would be 105 against a four-session row that cannot exceed
-// 101 on this panel, and four sessions would lose their title line.
+// i.e. 85 + 5*AIR, over the same five gaps/pads board 1 packs at 2/2/2/3/2 (top
+// pad, name->title, title->sub, sub->pill, bottom pad). 100 is what picks AIR = 3,
+// because the ladder's four-session row is exactly 100: avail is 412 and four rows
+// carry three gaps, so (412 - 3*SESSION_ROW_GAP) / 4 = (412 - 9) / 4 = 100.75 ->
+// 100. At AIR 4 the minimum would be 105 against that same 100, and four sessions
+// would lose their title line.
 const int SESSION_TITLE_MIN_H = 100;
 // The title-less tall row: the height at which the pill's first row lands exactly
 // ON the sub-line's last ink row, which is the boundary this gate admits.
 // Sub-line at +40..+52 (SESSION_SUB2_Y = 6 + AIR + 26 + 2 + AIR), pill top at
 // rowH - SESSION_PILL_UP (27), so 27 + 52 = 79 - board 1's 70 + 3*AIR.
+//
+// THE FIVE-SESSION RUNG SITS ON THIS EDGE WITH NOTHING TO SPARE, and that is the
+// one place in this section a future 1px change is a SILENT regression. The ladder
+// gives five sessions exactly 80, which clears 79 by a single row: the sub-line
+// inks to +52 and the pill starts at 80 - 27 = +53, a 0px gap. And 79 itself is
+// admitted by a `>=` gate, i.e. the boundary case where the pill's first row lands
+// ON the sub-line's last ink row - so at 79 the two overlap by one row (harmless
+// with Cozette, whose bottom row is blank for every glyph without a descender, but
+// not a clearance). Board 1 has the identical property at 70 and never reaches it,
+// because none of its rungs land in 70..84 at all.
+// CONSEQUENCE: anything that moves `avail` by one pixel - FOOTER_H, TAB_BAR_H,
+// SESSION_ROW_Y0 - drops five sessions from 80 to 79 and turns that 0px gap into a
+// 1px overlap, with nothing on screen naming the cause. sessions-geom-check.mjs
+// asserts that gap strictly (>= 0, where the threshold band tables tolerate the
+// documented -1 boundary), so re-run it after touching any of those three -
+// VERIFIED by doing it: FOOTER_H 18 -> 19 produces
+// `FAIL 5x79 (sub): sub-line -> pill gap -1`.
 const int SESSION_SUB_MIN_H = 79;
 // Tall vs compact. 2 (border) + 7 (pad, 4 + AIR) + 26 (name) + 18 (pill) + 7
 // (pad) + 2 (border) = 62 - board 1's 56 + 2*AIR. Board 1's 56..69 band (a tall
@@ -362,11 +387,24 @@ const int SESSION_SUB_MIN_H = 79;
 // row here is a tall row. The compact path still has to be correct - MAX_SESSIONS
 // or the content area could change - but nothing on this panel renders it today.
 const int SESSION_LARGE_MIN_H = 62;
-// Floor and ceiling. 38 never binds (six sessions are 66); it is the guard for a
-// content area that shrinks. The ceiling is SESSION_TITLE_MIN_H (100) plus 6 of
-// slack, which the layout spends between the sub-line and the bottom-anchored
-// pill - board 1's own relationship (85 + 5), with the 5 scaled by the panel
-// ratio: 5 * 6.489/5.624 = 5.77 -> 6.
+// Floor and ceiling.
+//
+// 43, NOT board 1's 38, and this is the one number in the section that is a fix
+// rather than a re-derivation. The floor is the guard for a content area that
+// shrinks, so it has to be the smallest height the COMPACT layout can legally
+// draw: that layout's sub-line inks SESSION_SUBC_Y..+12 (+28..+40 here) and the
+// 2px border owns rowH-2..rowH-1, so a legal row needs rowH >= SESSION_SUBC_Y + 15
+// = 43. Board 1's 38 is 2 SHORT of its own equivalent (25 + 15 = 40), which is not
+// hypothetical: seven or more sessions there put six rows at exactly 38 and the
+// model/branch line is drawn over the row's own outline. That defect is documented
+// in board_e32r28t.h and in sessions-geom-check.mjs and deliberately not fixed
+// (board 1's binary is held byte-identical across this port) - but inheriting the
+// magic number into a new board would be inheriting the bug, so this one is
+// derived. It never binds today either way: six sessions are 66, 63 with the strip.
+//
+// The ceiling is SESSION_TITLE_MIN_H (100) plus 6 of slack, which the layout spends
+// between the sub-line and the bottom-anchored pill - board 1's own relationship
+// (85 + 5), with the 5 scaled by the panel ratio: 5 * 6.489/5.624 = 5.77 -> 6.
 //
 // THE LADDER THIS PRODUCES, avail = 462 - SESSION_ROW_Y0(50) = 412:
 //   1 session  412        -> 106  title   (306px of the list left empty)
@@ -378,7 +416,7 @@ const int SESSION_LARGE_MIN_H = 62;
 // Board 1's ladder for comparison: 90/90/86 title, 63 big name, 50/41 compact.
 // So this panel gives a FOURTH session its title line and a fifth its
 // model/branch line, which is the whole return on the extra height.
-const int SESSION_ROW_H_MIN = 38;
+const int SESSION_ROW_H_MIN = 43;
 const int SESSION_ROW_H_MAX = 106;
 // Centre of the status indicator, and the +23 is NOT scaled - it is the same
 // constraint board 1 documents, against the same art. The working spinner is a
@@ -451,6 +489,14 @@ const int DETAIL_AIR = 8;
 // proportion board 1 spends on 5 * (32 + 4) = 180 of 268. So the bigger targets
 // cost the detail text nothing in relative terms.
 const int ASK_OPT_H = 46;
+// 8, from board 1's 4, and this gap is worth more here than anywhere else on the
+// device: the two things it separates are Allow and Deny. Everywhere else a 4px
+// gap merely looks tight; between two decision buttons it is the margin for a
+// mis-hit whose cost is running a command that was meant to be denied. It costs 16
+// of the 416px content area in the worst case (4 gaps in a 5-row stack), which is
+// affordable at the same 65% total board 1 already spends - see ASK_OPT_H. Board
+// 1's 4 is not a different judgement, it is the most its packed content area could
+// give: at 8 its worst-case stack would be 5 * 40 = 200 of 268.
 const int ASK_OPT_GAP = 8;
 // READ ALL, right-aligned to the card's own margin exactly as board 1 is
 // (150 + 78 = 228 = 240 - CARD_X): 320 - 12 - 90 = 218. 90 is board 1's 78 held

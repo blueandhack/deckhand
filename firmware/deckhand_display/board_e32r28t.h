@@ -223,10 +223,23 @@ const int SESSION_SUB_MIN_H = 70;
 // its big name but not for its sub-line, so those rows trade model/branch for a
 // 26px name. Board 1's ladder puts four sessions (63) in that band.
 const int SESSION_LARGE_MIN_H = 56;
-// The ladder's floor and ceiling (constrain() in renderSessionsList). 38 never
-// actually binds here - six sessions come out at 41 - it is the guard for a
-// content area that shrinks. 90 is SESSION_TITLE_MIN_H (85) plus 5 of slack,
-// which the layout spends between the sub-line and the bottom-anchored pill.
+// The ladder's floor and ceiling (constrain() in renderSessionsList).
+//
+// 38 IS TWO PIXELS TOO SMALL, and it is reachable. The floor's job is to be the
+// least height the COMPACT layout can legally draw, and that layout's sub-line
+// inks SESSION_SUBC_Y..+12 (+25..+37) against a 2px border owning rowH-2..rowH-1,
+// so a legal row needs rowH >= SESSION_SUBC_Y + 15 = 40. At 38 the sub-line's last
+// two rows are drawn over the row's own outline. It is reached whenever the list
+// truncates: seven or more sessions add the 16px "+N more" strip, leaving
+// avail 248, and (248 - 5*3) / 6 = 38 exactly - so nothing clamps it and nothing
+// on screen names the cause. NOT FIXED HERE, because this board's binary is held
+// byte-identical across the two-board port and a board-1 rendering change must not
+// ride inside a board-2 diff; sessions-geom-check.mjs carries it as a known entry
+// with this arithmetic, and board 2 derives its floor (43) instead of inheriting
+// this number.
+//
+// 90 is SESSION_TITLE_MIN_H (85) plus 5 of slack, which the layout spends between
+// the sub-line and the bottom-anchored pill.
 const int SESSION_ROW_H_MIN = 38;
 const int SESSION_ROW_H_MAX = 90;
 const int SESSION_ROW_GAP = 3;
@@ -290,6 +303,12 @@ const int DETAIL_PATH_LINES = 2;
 // reason SESSION_AIR is: this card already runs to 8px of slack.
 const int DETAIL_AIR = 0;
 
+// 32 tall, under this board's own TAP_MIN of 40, and 4 of gap between two buttons
+// that may be Allow and Deny - both are the most the content area can give rather
+// than a judgement about how big a decision button should be: at 46 + 8 (what
+// board 2 uses) the worst-case stack of 4 options plus the SPEAK/TYPE row would be
+// 270 of this board's 268px content area. The proportion is what carries across -
+// 5 * 36 = 180 of 268 is 67%, and board 2 spends the identical 65% on 5 * 54.
 const int ASK_OPT_H = 32;
 const int ASK_OPT_GAP = 4;
 // READ ALL sits in the header row, top-right: maximum distance from the
