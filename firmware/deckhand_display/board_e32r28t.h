@@ -109,6 +109,64 @@ const int CARD1_Y = 38, CARD2_Y = 146;
 const int CODEX_Y = 254, CODEX_H = 44;
 const int PAD = 14, BAR_H = 10, RADIUS = 10;
 
+// ---------- USAGE tab: offsets inside a card, and the Codex row's lanes ------
+// These were literals at their call sites (renderCard() in
+// deckhand_display.ino, renderCodexRow() and renderFooter() in usage.ino) until
+// board 2 needed different ones. THE VALUES ARE UNCHANGED - every number below
+// is the literal that was there, moved and named, so this board's binary is
+// byte-for-byte what it was.
+//
+// CHECK CLEAR BOXES, NOT GLYPHS: drawIfChanged() clears
+// fillRect(fx-1, fy-1, tw+2, th+2) and drawPaceBar() clears
+// fillRect(x-1, y-4, w+2, h+8) for its tick overhang. The two invariants this
+// card is built on, both re-derived per board:
+//   1. The 2px border owns +102..+103, so NOTHING MAY END PAST +101. The foot
+//      row at +88 clears +87..+101 - exactly on the ceiling, which is why it is
+//      at +88 and not +89 (at +89 it cleared +88..+102 and rubbed out the
+//      border's inner row along the width of those two strings).
+//   2. The label row is +6..+18 because the hero box starts at +20 and clears
+//      from there across the full card interior - so a 16px icon in that row
+//      would be erased by the hero's own clear on every tick the digits move.
+//      The Mac icon is 13x13 for exactly this reason.
+// Known and NOT fixed here, because fixing it would move this board's binary:
+// the stats row at +74 clears +73..+87 while the pace bar's clear runs
+// +58..+75, so they overlap by 3 rows and a changing token count shaves the
+// bottom of the pace tick until the bar next repaints. Board 2's derivation
+// leaves every band disjoint.
+const int CARD_PIN_BAR_Y = 3;    // pin bar, +3..+5, above the icon
+const int CARD_LABEL_Y   = 6;    // label / Mac icon row, +6..+18
+const int CARD_HERO_Y    = 20;   // hero box +20..+59
+const int CARD_HERO_H    = 40;   // for a 39px glyph, 1px of slack
+const int CARD_HERO_SIZE = 3;    // Cozette 6x13 at setTextSize(3) = 18x39
+const int CARD_BAR_Y     = 62;   // bar +62..+71, clear +58..+75
+const int CARD_STATS_Y   = 74;   // clear +73..+87
+const int CARD_FOOT_Y    = 88;   // clear +87..+101 - on the ceiling, see above
+
+const int CODEX_TEXT_Y = 8;      // clear +7..+21
+const int CODEX_BAR_Y  = 26;     // bar +26..+35, clear +22..+39
+
+// The Codex label's lane, bounded by ITS NEIGHBOUR rather than by anything of
+// its own - the full derivation is the long comment in renderCodexRow(). Four
+// numbers: the right field draws at CARD_X + CARD_W - PAD = 214 with TR_DATUM
+// padded to CODEX_RIGHT_CHARS (20) = 120px, so it spans 94..214 and
+// drawIfChanged clears from 93; the label starts at CARD_X + PAD = 26; so
+// (93 - 26) / 6 = 11.17 -> 11 characters. EVERY ONE of those numbers changes on
+// a wider card - do not copy 11 forward.
+const int CODEX_LANE_CHARS  = 11;
+const int CODEX_RIGHT_CHARS = 20;
+// The buffer and the change-only cache holding that padded string. 24 here (11
+// chars needs nowhere near it, and this is the size cxPctCache/cxRightCache
+// have always been declared and compared at - see the note on them in
+// deckhand_display.ino, which is emphatic that the declaration and the
+// cacheSize passed at the call site must be the SAME number).
+const int CODEX_LANE_CACHE = 24;
+
+// Footer battery pill. The clock and the freshness field are edge-pinned and
+// need no constant; this group is centred, so a wider panel moves it. 21px
+// glyph + 4px gap + a 4-character reading, at 88..137 on a 240px panel.
+const int FOOTER_BATT_X      = 88;
+const int FOOTER_BATT_TEXT_X = 113;
+
 // TOUCH - the panel is resistive and fingertips are ~9mm. 320px of height can't
 // give every control 9mm, so this is the floor everything tappable must clear,
 // and the vertical budget is spent to get as close to it as each page allows.

@@ -144,7 +144,7 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
   setUIFont(T_META);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(label, CARD_X + PAD, y0 + 6);   // usage cards have their own inset
+  tft.drawString(label, CARD_X + PAD, y0 + CARD_LABEL_Y);  // usage cards have their own inset
   // Which Mac's reading this is. Only drawn with two Macs actually TALKING TO
   // US right now: with one Mac it is noise, and a label that appears and
   // disappears is how you notice the second Mac arriving. Gated on used
@@ -153,8 +153,9 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
   // ways at once: via=usb,ble to one Mac), so bleLinkCount() +
   // (usbLinkActive()?1:0) would read 2 with nothing to disambiguate. Right-
   // aligned in the SAME row as the label, because every other row on this
-  // card is spoken for (the +88 row's clear box already had to move off the
-  // border, and nothing here may end past +101).
+  // card is spoken for (the foot row's clear box already had to move off the
+  // border, and nothing on a card may end past CARD_H - 3 - each board's
+  // header states where every band's clear box lands).
   const int tagRight = CARD_X + CARD_W - PAD;
   int cardEmoji = emojiIdForLink(usageSourceLink);
   if (cardEmoji >= 0) {
@@ -163,7 +164,7 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
     // an icon is personalisation rather than disambiguation - the user asked
     // to tag THEIR computer, and it should show regardless of link count.
     // Same convention the session rows already use.
-    drawEmoji(cardEmoji, tagRight - MAC_EMOJI_SIZE, y0 + 6, COLOR_CARD);
+    drawEmoji(cardEmoji, tagRight - MAC_EMOJI_SIZE, y0 + CARD_LABEL_Y, COLOR_CARD);
     // Pinned-vs-auto, previously carried by the tag's colour, which a colour
     // sprite cannot carry. A bar, not an underline: it sits ABOVE the glyph,
     // inside the interior (the 2px border owns y0..y0+1, the label row starts
@@ -179,7 +180,7 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
     // which only carries information because the tap cycle can return to auto
     // (see usageCyclePin); a bar that can never turn off signals nothing.
     if (usagePinHostId[0]) {
-      tft.fillRect(tagRight - MAC_EMOJI_SIZE, y0 + 3, MAC_EMOJI_SIZE, 3, COLOR_LABEL);
+      tft.fillRect(tagRight - MAC_EMOJI_SIZE, y0 + CARD_PIN_BAR_Y, MAC_EMOJI_SIZE, 3, COLOR_LABEL);
     }
   } else if (tag && *tag && usedLinkCount() > 1) {
     // Accent = PINNED, grey = AUTO (freshest wins), the same convention the
@@ -192,7 +193,7 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
     // is what actually tells you the page moved.
     tft.setTextColor(usagePinHostId[0] ? COLOR_ACCENT : COLOR_LABEL, COLOR_CARD);
     tft.setTextDatum(TR_DATUM);
-    tft.drawString(tag, tagRight, y0 + 6);
+    tft.drawString(tag, tagRight, y0 + CARD_LABEL_Y);
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   }
@@ -244,9 +245,15 @@ void drawBatteryGlyph(int x, int y, int pct, int state) {
   int fill = 14 * pct / 100;
   if (fill > 0) tft.fillRect(x + 2, y + 2, fill, 5, c);
 }
-// Footer layout, all font 1 (6px/char monospace), 240px wide:
-//   clock 10..58 | battery glyph 88..109 + text 113..137 | freshness ..230
-// Each zone is fixed-width padded so none can grow into its neighbor.
+// Footer layout, all font 1 (Cozette 6x13, 6px/char). Three fixed-width padded
+// zones so none can grow into its neighbour:
+//   clock, left-pinned at x=10 | battery glyph + reading, CENTRED |
+//   freshness, right-pinned at tft.width() - 10
+// Only the middle zone needs board constants: the outer two follow tft.width()
+// already. Board 1 (240 wide): clock 10..58, glyph 88..108, text 113..137,
+// freshness 164..230. Board 2 (320 wide): clock 10..58, glyph 135..155, text
+// 160..184, freshness 244..310. See FOOTER_BATT_X in the board header for how
+// the centre is derived.
 void renderFooter() {
   char buf[24];
   int y = contentBottom() + 4;
@@ -267,7 +274,7 @@ void renderFooter() {
   int glyphCode = (pct < 0 ? 0 : pct / 5) * 10 + (int) bst;
   if (glyphCode != battGlyphCache) {
     battGlyphCache = glyphCode;
-    drawBatteryGlyph(88, y, pct, (int) bst);
+    drawBatteryGlyph(FOOTER_BATT_X, y, pct, (int) bst);
   }
   if (bst == BATT_NONE) buf[0] = '\0';
   else if (bst == BATT_CHARGING) snprintf(buf, sizeof(buf), "chg");
@@ -281,7 +288,7 @@ void renderFooter() {
     battTextColorCache = battCol;
     battTextCache[0] = '\0';
   }
-  drawIfChanged(battTextCache, sizeof(battTextCache), buf, 113, y, 1, 1,
+  drawIfChanged(battTextCache, sizeof(battTextCache), buf, FOOTER_BATT_TEXT_X, y, 1, 1,
                 battCol, COLOR_BG);
 
   // Freshness, right-aligned and compact ("12s ago", not "updated 12s ago",
@@ -318,7 +325,12 @@ void renderFooter() {
 // out of a rollout file, and a file that stopped being written keeps its last value
 // forever.
 void renderCodexRow() {
-  char buf[24];
+  // Sized by the lane it has to hold, not a literal: padTo() pads to
+  // CODEX_LANE_CHARS and refuses (silently) if width + 1 exceeds the buffer, so
+  // a 23-character lane on board 2 in a char[24] would fit with zero headroom -
+  // the same margin-of-nothing that makes a short change-only cache this file's
+  // oldest silent bug. Same constant the caches use, so the three cannot drift.
+  char buf[CODEX_LANE_CACHE];
   bool have = usage.cxPct >= 0;
   bool stale = usage.cxAgeSec > 900;
   uint16_t color = have ? colorForPct(usage.cxPct) : COLOR_UNKNOWN;
@@ -338,24 +350,32 @@ void renderCodexRow() {
   // still yields, exactly as the Claude cards' own icon-vs-tag chrome does.
   //
   // "CX " rather than "CODEX  " - the label's usable lane is bounded by ITS
-  // NEIGHBOUR, not by anything of its own, and the bound is DERIVED, not a
-  // magic 11. The right field draws at CARD_X + CARD_W - PAD = 214 with
-  // TR_DATUM, padded to 20 characters = 120px in Cozette 6x13 - so it spans
-  // x 94..214, and drawIfChanged() clears fx-1 (93) before drawing it. That
-  // clear runs EVERY time the right field redraws, which is every tick, so
-  // it always lands after the left field has already drawn in full. Nothing
-  // truncates the label - TFT_eSPI draws every character it's given - the
-  // right field's neighbour simply erases whatever the label left in x
-  // 93..214 a moment later. So the label's safe width is (93 - 26) / 6 =
-  // 11.17 -> 11 characters at x = CARD_X + PAD (26), confirmed on-device
-  // both with a real tag ("CODEX  studio" -> "CODEX  stud" on screen, the
-  // "io" erased) and a plain diagnostic literal with no lowercase or spaces
-  // at all ("ABCDEFGHIJKLM" -> "ABCDEFGHIJK", cut at the identical 11th
-  // character) - proof it's positional, not a content or font issue. THIS
-  // CEILING MOVES if the right field's pad width (currently 20) ever
-  // changes - re-derive it, don't copy 11 forward. "CX " + a 6-char tag
-  // (the macTag() cap) is 9 characters, two clear of today's 11 either way;
-  // "CODEX  " + the same tag would have been 13.
+  // NEIGHBOUR, not by anything of its own, so the bound is DERIVED (it lives in
+  // the board header as CODEX_LANE_CHARS) and is not a magic number. Nothing
+  // truncates the label - the device draws every character it is given - the
+  // right field's clear box simply erases whatever the label left under it, and
+  // that clear runs EVERY tick, always after the left field has drawn in full.
+  // The lane is therefore (the right field's clear-box left edge - the label's
+  // x) / 6, four numbers that ALL move with CARD_W and PAD:
+  //
+  //   board 1 (CARD_W 216, PAD 14): right field at 214, 20 chars = 120px, spans
+  //     94..214, clears from 93; label at 26; (93 - 26) / 6 = 11.17 -> 11
+  //   board 2 (CARD_W 296, PAD 18): right field at 290, spans 170..290, clears
+  //     from 169; label at 30; (169 - 30) / 6 = 23.17 -> 23
+  //
+  // Board 1's ceiling was confirmed on-device both with a real tag
+  // ("CODEX  studio" -> "CODEX  stud" on screen, the "io" erased) and a plain
+  // diagnostic literal with no lowercase or spaces at all ("ABCDEFGHIJKLM" ->
+  // "ABCDEFGHIJK", cut at the identical 11th character) - proof it is
+  // positional, not a content or font issue. IT ALSO MOVES if the right field's
+  // pad width (CODEX_RIGHT_CHARS, 20) ever changes; re-derive, do not copy a
+  // number forward.
+  // What the branches below actually emit: "CX " + a 6-char tag (the macTag()
+  // cap) is 9 characters, comfortably inside 11 and trivially inside 23, while
+  // "CODEX  " + the same tag would be 13 - over board 1's ceiling and under
+  // board 2's. The tag-versus-window trade is therefore load-bearing on board 1
+  // and only a margin on board 2, and is kept IDENTICAL on both: a roomier lane
+  // is not a reason for the two panels to render different text.
   const char* cxTag = linkTag(cxSourceLink);
   bool showCxTag = cxTag && *cxTag && usedLinkCount() > 1;
   // Icon shown whenever one is set, same reasoning as the Claude cards' chrome:
@@ -381,15 +401,15 @@ void renderCodexRow() {
   } else {
     snprintf(buf, sizeof(buf), "CODEX");
   }
-  padTo(buf, sizeof(buf), 11);
-  drawIfChanged(cxPctCache, 24, buf, CARD_X + PAD, CODEX_Y + 8, 2, 1,
+  padTo(buf, sizeof(buf), CODEX_LANE_CHARS);
+  drawIfChanged(cxPctCache, CODEX_LANE_CACHE, buf, CARD_X + PAD, CODEX_Y + CODEX_TEXT_Y, 2, 1,
                 COLOR_LABEL, COLOR_CARD);
   if (showCxIcon) {
-    // CX (12px) + 4px gap + icon (13px) ends at x=55, well clear of the right
-    // field's clear box at x=93 - see the long derivation above for the label
-    // lane's 11-character ceiling.
+    // CX (12px) + 4px gap + icon (13px) = 29px from the label's x, so it ends
+    // at 55 on board 1 and 59 on board 2 - well clear of the right field's clear
+    // box either way (93 and 169). See the long derivation above.
     setUIFont(2);
-    drawEmoji(cxEmoji, CARD_X + PAD + tft.textWidth("CX") + 4, CODEX_Y + 8, COLOR_CARD);
+    drawEmoji(cxEmoji, CARD_X + PAD + tft.textWidth("CX") + 4, CODEX_Y + CODEX_TEXT_Y, COLOR_CARD);
   }
 
   // Right lane: the percentage, the reset countdown, and (usually) the wall-clock time
@@ -424,8 +444,8 @@ void renderCodexRow() {
   } else {
     snprintf(buf, sizeof(buf), "%d%%", usage.cxPct);
   }
-  padLeftTo(buf, sizeof(buf), 20);
-  drawIfChanged(cxRightCache, 24, buf, CARD_X + CARD_W - PAD, CODEX_Y + 8, 2, 1,
+  padLeftTo(buf, sizeof(buf), CODEX_RIGHT_CHARS);
+  drawIfChanged(cxRightCache, CODEX_LANE_CACHE, buf, CARD_X + CARD_W - PAD, CODEX_Y + CODEX_TEXT_Y, 2, 1,
                 stale ? COLOR_LABEL : (have ? COLOR_VALUE : COLOR_LABEL), COLOR_CARD, TR_DATUM);
 
   // Pace bar, with the same tick the Claude cards carry: fill ahead of the marker means
@@ -437,7 +457,7 @@ void renderCodexRow() {
   int tickPct = (have && usage.cxResetInMin >= 0 && usage.cxWindowMin > 0)
                     ? (int) (100 - usage.cxResetInMin * 100 / usage.cxWindowMin)
                     : -1;
-  drawPaceBar(&cxBarCache, CARD_X + PAD, CODEX_Y + 26, CARD_W - 2 * PAD, BAR_H,
+  drawPaceBar(&cxBarCache, CARD_X + PAD, CODEX_Y + CODEX_BAR_Y, CARD_W - 2 * PAD, BAR_H,
               have ? usage.cxPct : 0, tickPct, stale ? COLOR_LABEL : color);
 }
 void renderUsageTab() {

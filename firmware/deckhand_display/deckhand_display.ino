@@ -663,8 +663,9 @@ int bar1Cache = -2, border1Cache = -1;
 char pct2Cache[8] = "", left2Cache[24] = "", right2Cache[20] = "", fable2Cache[24] = "";
 char resetAt2Cache[14] = "";
 int bar2Cache = -2, border2Cache = -1;
-// cxRightCache is 24, matching the cacheSize the drawIfChanged() call in
-// usage.ino::renderCodexRow() passes for it (24), NOT the 20-char pad width
+// cxRightCache is CODEX_LANE_CACHE (24 on board 1, 32 on board 2), matching the
+// cacheSize the drawIfChanged() calls in usage.ino::renderCodexRow() pass for it
+// - which is the SAME constant, deliberately - NOT the 20-char pad width
 // the drawn string happens to use. strncpy() there always writes the full
 // cacheSize bytes (null-padding a shorter string), so a buffer smaller than
 // that call's cacheSize is an unconditional out-of-bounds write on every
@@ -676,7 +677,7 @@ int bar2Cache = -2, border2Cache = -1;
 // tick forever - reintroducing the flicker this file's whole redraw
 // discipline exists to prevent. If a future change grows that call's
 // cacheSize again, grow this declaration to match, not the other way.
-char cxPctCache[24] = "", cxRightCache[24] = "";
+char cxPctCache[CODEX_LANE_CACHE] = "", cxRightCache[CODEX_LANE_CACHE] = "";
 int cxBorderCache = -1, cxBarCache = -1;
 // The Codex row's dim state follows cxAgeSec - Codex's OWN reading age - not the Claude
 // quota's quotaAgeSec. They are independent: the OAuth poller can be fresh while Codex
@@ -1819,7 +1820,13 @@ bool drawBigNumber(char* cache, size_t cacheSize, const char* text, int x, int y
   cache[cacheSize - 1] = '\0';
   tft.fillRect(x, y, w, h, bg);
   setUIFont(4);
-  tft.setTextSize(3);  // Cozette 3x (39px) - the hero number, prominent
+  // CARD_HERO_SIZE, not a literal 3: this is the one element the 320x480 board
+  // scales UP (x3 -> x4), because Cozette at an integer size is exact and at x3
+  // the hero would be physically SMALLER on the bigger panel - see the
+  // derivation in board_es3c35p.h. Cozette 6x13 at x3 is 18x39, at x4 24x52.
+  // Sole caller is renderCard(), so this reads the card's own constant rather
+  // than taking another argument.
+  tft.setTextSize(CARD_HERO_SIZE);
   tft.setTextColor(fg, bg);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(text, x, y);
@@ -1841,18 +1848,18 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
   // frozen value doesn't masquerade as a live reading. The "stale Xh" tag in
   // the bottom-right says exactly how old; this makes it obvious at a glance.
   bool quotaStale = usage.quotaAgeSec > 900;
-  drawBigNumber(pctCache, 8, buf, CARD_X + PAD, y0 + 20, CARD_W - 2 * PAD, 40,
-                quotaStale ? COLOR_LABEL : COLOR_VALUE, COLOR_CARD);
+  drawBigNumber(pctCache, 8, buf, CARD_X + PAD, y0 + CARD_HERO_Y, CARD_W - 2 * PAD,
+                CARD_HERO_H, quotaStale ? COLOR_LABEL : COLOR_VALUE, COLOR_CARD);
 
   // Tick = how far through the quota window we are, time-wise.
   int tickPct = resetInMin >= 0 ? (int)(100 - resetInMin * 100 / windowMin) : -1;
-  drawPaceBar(barCache, CARD_X + PAD, y0 + 62, CARD_W - 2 * PAD, BAR_H, pct, tickPct, color);
+  drawPaceBar(barCache, CARD_X + PAD, y0 + CARD_BAR_Y, CARD_W - 2 * PAD, BAR_H, pct, tickPct, color);
 
   // Two columns instead of one long piped string: each half gets a legible
   // font instead of both being squeezed into the smallest font to fit.
   // (Rows below sit tighter than they read: Cozette is 13px tall vs the old
   // 8px small font, so the bottom row was nudged up to stay inside the card.)
-  int statY = y0 + 74;
+  int statY = y0 + CARD_STATS_Y;
   snprintf(buf, sizeof(buf), "%s", formatTokens(tokens).c_str());
   padTo(buf, sizeof(buf), 12);
   drawIfChanged(leftCache, 24, buf, CARD_X + PAD, statY, 2, 1, COLOR_LABEL, COLOR_CARD);
@@ -1877,15 +1884,17 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
   // field would blank or overwrite its neighbor, which happened once when
   // the right lane grew for the staleness text without shrinking this one.
   //
-  // IT SITS AT +88, AND +89 ATE THE CARD BORDER. drawIfChanged clears its own
-  // box before drawing - fillRect(fx-1, fy-1, tw+2, th+2) - so a 13px line at
-  // +89 clears rows +88..+102, and the card's 2px border owns +102..+103. The
-  // TEXT never overlapped anything; the CLEAR did, rubbing out the border's
-  // inner row along exactly the width of these two strings, which reads as a
-  // gap in the card outline under them. At +88 the clear ends at +101, one row
-  // clear of the border. The row above (stats, +74..+86) is untouched: this
-  // clear starts at +87, which is past the last row of that text.
-  // Anything drawn on this card must therefore END BY +101, not +102.
+  // ITS OFFSET IS A BOARD CONSTANT (CARD_FOOT_Y) BECAUSE ITS CLEAR BOX SITS ON
+  // THE CARD'S BORDER. drawIfChanged clears its own box before drawing -
+  // fillRect(fx-1, fy-1, tw+2, th+2) - so a 13px line clears 15 rows, and the
+  // card's 2px border owns the last two rows of CARD_H. On board 1 this row was
+  // once at +89: that cleared +88..+102 against a border owning +102..+103, and
+  // the TEXT never overlapped anything - the CLEAR did, rubbing out the border's
+  // inner row along exactly the width of these two strings, which reads as a gap
+  // in the card outline under them. At +88 the clear ends at +101, one row clear.
+  // THE INVARIANT, NOT THE NUMBER, IS WHAT TRANSFERS: nothing on a card may end
+  // past CARD_H - 3. Each board's header re-derives the whole band layout and
+  // states where every clear box lands; check it there before moving anything.
   long nowSec = hostNowSec();
   if (quotaStale) {
     long m = usage.quotaAgeSec / 60;
@@ -1898,7 +1907,7 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
     buf[0] = '\0';
   }
   padLeftTo(buf, sizeof(buf), 10);
-  drawIfChanged(resetAtCache, 14, buf, CARD_X + CARD_W - PAD, y0 + 88, 1, 1,
+  drawIfChanged(resetAtCache, 14, buf, CARD_X + CARD_W - PAD, y0 + CARD_FOOT_Y, 1, 1,
                 quotaStale ? COLOR_BAD : COLOR_LABEL, COLOR_CARD, TR_DATUM);
 
   // Fable has its own (scarcer) weekly cap: show its real % when the host
@@ -1916,7 +1925,7 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
   }
   if (buf[0]) {
     padTo(buf, sizeof(buf), 18);
-    drawIfChanged(fableCache, 24, buf, CARD_X + PAD, y0 + 88, 1, 1, COLOR_ACCENT, COLOR_CARD);
+    drawIfChanged(fableCache, 24, buf, CARD_X + PAD, y0 + CARD_FOOT_Y, 1, 1, COLOR_ACCENT, COLOR_CARD);
   }
 }
 
