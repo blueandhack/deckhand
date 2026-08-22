@@ -152,20 +152,61 @@ void renderMacLinkRows() {
   int used[MAX_LINKS], usedN = 0;
   for (int i = 0; i < MAX_LINKS; i++) if (hostLinks[i].used) used[usedN++] = i;
   for (int row = 0; row < MAX_LINKS; row++) {
-    char buf2[32] = "";
-    if (row < usedN) {
+    char who[12] = "";
+    unsigned long age = 0;
+    int rowEmoji = -1;
+    bool present = row < usedN;
+    if (present) {
       HostLink& hl = hostLinks[used[row]];
-      unsigned long age = (millis() - hl.lastPayloadMillis) / 1000;
-      const char* who = hl.tag[0] ? hl.tag : hl.hostId;
-      snprintf(buf2, sizeof(buf2), "Mac  %s  %lus ago", who, age);
+      age = (millis() - hl.lastPayloadMillis) / 1000;
+      snprintf(who, sizeof(who), "%s", hl.tag[0] ? hl.tag : hl.hostId);
+      rowEmoji = emojiIdForLink(used[row]);
     }
+    char buf2[32] = "";
+    if (present) snprintf(buf2, sizeof(buf2), "Mac  %s  %lus ago", who, age);
     // Pad even the blank (unused) case to the SAME fixed width - see the
     // macRowCache comment for why that's what makes a row actually erase
     // when its Mac drops off, rather than just stop updating.
     padTo(buf2, sizeof(buf2), MAC_ROW_W);
+    // The icon id rides after a \x01 sentinel PURELY so a changed icon busts
+    // this row's cache below - it is never drawn (the pieces drawn further
+    // down are "Mac", the icon, and "<who>  <age>s ago", never this string).
+    // Without it, the row would keep showing a stale icon forever, since the
+    // visible text is identical when only the icon changes. This can't go
+    // through drawIfChanged() the way every other field here does, because
+    // that helper draws exactly the string it's given - passing it this
+    // sentinel-and-id-carrying string would print the sentinel and the digit.
+    char sig[40];
+    snprintf(sig, sizeof(sig), "%s\x01%d", buf2, rowEmoji);
     int y = DEV_CARD_Y + (row == 0 ? DROW_MAC0 : DROW_MAC1);
-    drawIfChanged(macRowCache[row], sizeof(macRowCache[row]), buf2, CARD_X + PAD,
-                  y, 1, 1, COLOR_VALUE, COLOR_CARD);
+    int textX = CARD_X + PAD;
+    if (strncmp(macRowCache[row], sig, sizeof(macRowCache[row])) == 0) continue;
+    strncpy(macRowCache[row], sig, sizeof(macRowCache[row]) - 1);
+    macRowCache[row][sizeof(macRowCache[row]) - 1] = '\0';
+    setUIFont(T_META);
+    tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+    tft.setTextDatum(TL_DATUM);
+    int th = uiLineH(T_META);
+    // The erase box always reserves the icon's slot (4px gap + 13px) whether or
+    // not this row currently has one: an icon that disappears must not leave a
+    // ghost, and one that appears must not draw over stale pixels left behind
+    // by the plain-text layout.
+    int eraseW = tft.textWidth(buf2) + 4 + MAC_EMOJI_SIZE + 2;
+    tft.fillRect(textX - 1, y - 1, eraseW, th + 2, COLOR_CARD);
+    if (rowEmoji >= 0) {
+      // "Mac", then the icon 4px later, then the rest of the row shifted right
+      // by the icon's slot - the same 4px gap, and the same y as the text
+      // (both are 13px, so no centring arithmetic is needed), that every other
+      // icon-beside-text surface in this sketch uses.
+      tft.drawString("Mac", textX, y);
+      int iconX = textX + tft.textWidth("Mac") + 4;
+      drawEmoji(rowEmoji, iconX, y, COLOR_CARD);
+      char rest[32];
+      snprintf(rest, sizeof(rest), "%s  %lus ago", who, age);
+      tft.drawString(rest, iconX + MAC_EMOJI_SIZE + 4, y);
+    } else {
+      tft.drawString(buf2, textX, y);
+    }
   }
 }
 // ----- Page 1: CONTROLS -----

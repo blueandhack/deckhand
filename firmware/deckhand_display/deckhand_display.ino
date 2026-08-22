@@ -870,16 +870,26 @@ int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
 bool showingDetail = false;
 int detailIndex = -1;
 char detailId[16] = "";
-// 368: the signature now carries path(68) + title(44) + prompt(104) on top of the rest,
-// worst case ~327, PLUS dispMacTag() (up to 7 chars plus a separator) appended after the
-// existing "|%c" msgOffered flag - worst case ~350, so 368 keeps headroom. drawIfChanged-
-// style comparisons only look at cacheSize bytes, so a cache shorter than the string
-// silently stops noticing changes past that point - here that would mean editing your
-// prompt never repaints the screen. The tag is in this signature for the identical
-// reason it joined the row signature: two sessions can otherwise share every other
-// field while living on different Macs, and a usedLinkCount() flip (second Mac
-// connects/drops) changes nothing else about a session already on screen.
-char detailSigCache[368] = "";
+// 384: re-derived for the icon id appended after dispMacTag(). Field-by-field, in
+// bytes (content only, NUL counted separately at the end): name(23) + status(9) +
+// path(67) + model(23) + branch(23) + askPid(11) + answeredIdx as %d(2, "-1") +
+// title(43) + prompt(103) + startSec as %ld(5, "86399") + askVoiceSha(19) = 328,
+// plus 10 "|" separators between those 11 fields = 338; plus the msgOffered flag
+// "|%c" (2) = 340; plus dispMacTag() "|%s" (up to 7 chars, so 8) = 348; plus the
+// icon id "|%d" (id is -1..15, so up to 2 digits, plus the separator = 3) = 351.
+// +1 for the NUL terminator = 352-byte worst case, so 384 keeps 32 bytes of
+// headroom - re-derive this comment again the next time a field is added, the
+// same way this one had to be. drawIfChanged-style comparisons only look at
+// cacheSize bytes, so a cache shorter than the string silently stops noticing
+// changes past that point - here that would mean editing your prompt (or
+// changing your Mac's icon) never repaints the screen. The tag is in this
+// signature for the identical reason it joined the row signature: two sessions
+// can otherwise share every other field while living on different Macs, and a
+// usedLinkCount() flip (second Mac connects/drops) changes nothing else about a
+// session already on screen. The icon id joins it for the same reason once
+// more: an icon changing (or a link's icon appearing/disappearing) changes
+// nothing else that this signature already tracks.
+char detailSigCache[384] = "";
 // 28, not 16: this now holds "for 12m - 14:31" padded to 22, and drawIfChanged compares
 // only the first cacheSize bytes. At 16 the trailing clock fell outside the comparison
 // entirely, so the time would silently freeze while the duration beside it kept ticking.
@@ -2277,15 +2287,22 @@ int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
 char battRowTextCache[20] = "";
 uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
 // Per-Mac link rows. "Mac  feedfeed  999s ago" (a bare 11-char hostId with no
-// tag, plus a generously wide age) is 26 chars - MAC_ROW_W pads to 28 and the
-// cache is 32, comfortably over both, so nothing here repeats the too-short-
-// cache bug. Indexed by ROW SLOT (0/1), not by hostLinks[] index - see
-// renderMacLinkRows(). Padding every row to this SAME fixed width, used or
-// not, is what makes a row that goes away actually get erased: drawIfChanged
-// clears a box sized to the NEW text, so an unpadded "" would leave a wide
-// stale row un-erased instead of blanking it.
+// tag, plus a generously wide age) is 26 chars - MAC_ROW_W pads to 28. Indexed
+// by ROW SLOT (0/1), not by hostLinks[] index - see renderMacLinkRows().
+// Padding every row to this SAME fixed width, used or not, is what makes a row
+// that goes away actually get erased: the erase box is sized to the padded
+// text, so an unpadded "" would leave a wide stale row un-erased instead of
+// blanking it.
+// This cache no longer holds only the padded text: renderMacLinkRows() appends
+// a "\x01" sentinel plus the row's icon id before comparing, because the icon
+// is drawn separately from that text and a changed icon otherwise leaves a
+// stale one on screen (the visible text is unaffected by an icon-only change).
+// Worst case: 28 (padded text) + 1 (sentinel) + 2 (id, "-1".."15") = 31, +1 NUL
+// = 32 - so 40 keeps 8 bytes of headroom, the same margin battRowTextCache
+// keeps over its own worst case. A cache shorter than the string it holds
+// silently stops noticing changes past that length - this file's oldest bug.
 const int MAC_ROW_W = 28;
-char macRowCache[MAX_LINKS][32] = {"", ""};
+char macRowCache[MAX_LINKS][40] = {"", ""};
 int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
 int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+
 char brightPctCache[8] = "";

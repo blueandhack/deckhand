@@ -448,6 +448,13 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
   used = strlen(out);
   if (used + 9 < outSize)
     snprintf(out + used, outSize - used, "|%s", dispMacTag(sessions[idx].hostSlot));
+  // The icon id, for the identical reason the tag joined this signature: an
+  // icon appearing/disappearing/changing on this session's link changes
+  // nothing else the signature above already tracks, so without this the
+  // card would keep showing a stale (or missing) icon forever.
+  used = strlen(out);
+  if (used + 5 < outSize)
+    snprintf(out + used, outSize - used, "|%d", emojiIdForLink(sessions[idx].hostSlot));
 }
 // Index-based (not SessionInfo&) for the same Arduino auto-prototype reason
 // as buildSessionSubline.
@@ -1107,11 +1114,39 @@ void drawSessionDetail(int idx) {
   // Mac tag itself rather than the agent name. "CC/studio" (9 chars, 54px) fits with
   // room to spare. Unchanged ("Claude Code"/"Codex") when there's nothing to disambiguate.
   char agentCol[24];
-  if (mac[0]) snprintf(agentCol, sizeof(agentCol), "%s/%s",
-                       strcmp(s.agent, "cx") == 0 ? "CX" : "CC", mac);
-  else        snprintf(agentCol, sizeof(agentCol), "%s",
-                       strcmp(s.agent, "cx") == 0 ? "Codex" : "Claude Code");
-  drawColValue(RX, cy, agentCol, colW);
+  // The icon rides between the agent tag and the Mac text - this and SETTINGS
+  // are the two screens that show an icon ALONGSIDE its text, which is what
+  // makes the icon-only treatment safe everywhere else. Gated on mac[0], same
+  // as the label above: with one Mac there's nothing to disambiguate, and an
+  // icon appearing only when a second Mac exists (i.e. it's actually needed)
+  // matches this row's existing rule rather than a new one.
+  int agentEmoji = mac[0] ? emojiIdForLink(s.hostSlot) : -1;
+  if (agentEmoji >= 0) {
+    // Pieces, not one drawColValue() call - that helper only clips a single
+    // string, and there's real headroom to spare here without needing to:
+    // measured worst case is "CC" (12px) + 4px gap + the 13px icon + 4px gap +
+    // "/" + dispMacTag()'s own 7-char cap (48px) = 81px, against this 90px
+    // column (CARD_W/2 - PAD - 4).
+    const char* tag = strcmp(s.agent, "cx") == 0 ? "CX" : "CC";
+    setUIFont(2);
+    tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString(tag, RX, cy);
+    int iconX = RX + tft.textWidth(tag) + 4;
+    // y == cy for both: the icon's y is the text's y, because both are 13px -
+    // the same vertical rule the SETTINGS row and every other icon site uses.
+    drawEmoji(agentEmoji, iconX, cy, COLOR_CARD);
+    snprintf(agentCol, sizeof(agentCol), "/%s", mac);
+    tft.drawString(agentCol, iconX + MAC_EMOJI_SIZE + 4, cy);
+  } else if (mac[0]) {
+    snprintf(agentCol, sizeof(agentCol), "%s/%s",
+             strcmp(s.agent, "cx") == 0 ? "CX" : "CC", mac);
+    drawColValue(RX, cy, agentCol, colW);
+  } else {
+    snprintf(agentCol, sizeof(agentCol), "%s",
+             strcmp(s.agent, "cx") == 0 ? "Codex" : "Claude Code");
+    drawColValue(RX, cy, agentCol, colW);
+  }
 
   // Asking but no answerable prompt attached (fired while disconnected, or the
   // window closed) - say so instead of leaving "needs input" unexplained.
