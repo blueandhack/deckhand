@@ -126,7 +126,7 @@ Identical names on both boards, so no UI code branches on board identity:
 
 Board 2's display config lives in the SKETCH (`esp_panel_board_custom_conf.h`), which
 is strictly better than board 1's `User_Setup.h` having to be copied into the TFT_eSPI
-library - a arrangement this repo documents losing to a library reinstall.
+library - an arrangement this repo documents losing to a library reinstall.
 
 ## Board-specific code paths (not config)
 
@@ -188,7 +188,8 @@ Each ends with something observable on the glass:
 ## Out of scope
 
 - **Audio** - mic capture, dictation, ADPCM streaming, beeps. Its own spec.
-- microSD and the RGB LED. No feature needs them.
+- microSD and the RGB LED. No feature needs them, and nothing is planned - they are
+  listed only so a future reader knows they were considered and left alone, not missed.
 - Any change to board 1's behaviour. If board 1 renders differently after this work,
   that is a regression, and its screenshots are the reference.
 
