@@ -118,13 +118,25 @@ bool usageCyclePin() {
     if (u.fiveHourPct >= 0 || u.sevenDayPct >= 0 || u.cxPct >= 0) live[n++] = i;
   }
   if (n < 2) return false;
-  // Start from where the screen actually is: the pin if set, else whichever
-  // link freshest-wins chose, so the first tap always moves one step from what
-  // you are looking at rather than jumping to slot 0.
-  int cur = usagePinHostId[0] ? linkForHost(usagePinHostId, false) : usageSourceLink;
-  int at = 0;
-  for (int i = 0; i < n; i++) if (live[i] == cur) { at = i; break; }
-  strlcpy(usagePinHostId, hostLinks[live[(at + 1) % n]].hostId, sizeof(usagePinHostId));
+  // N+1 states, not N: each live link, then AUTO (freshest-wins), then round
+  // again. The auto step is not a nicety - without it every tap set a pin and
+  // NOTHING ever cleared one except the pinned Mac disappearing, so after a
+  // single tap you were stuck pinned forever and the indicator was permanently
+  // lit. An indicator that can never turn off distinguishes nothing.
+  //
+  // AUTO is represented as index n (one past the last link), so the whole cycle
+  // is one modular step and there is no special case to forget.
+  int cur = n; // no pin = AUTO = the last slot in the cycle
+  if (usagePinHostId[0]) {
+    int pinned = linkForHost(usagePinHostId, false);
+    for (int i = 0; i < n; i++) if (live[i] == pinned) { cur = i; break; }
+  }
+  int next = (cur + 1) % (n + 1);
+  if (next == n) {
+    usagePinHostId[0] = '\0'; // back to freshest-wins
+  } else {
+    strlcpy(usagePinHostId, hostLinks[live[next]].hostId, sizeof(usagePinHostId));
+  }
   return true;
 }
 void drawCardChrome(int y0, const char* label, const char* tag) {
@@ -156,9 +168,18 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
     // sprite cannot carry. A bar, not an underline: it sits ABOVE the glyph,
     // inside the interior (the 2px border owns y0..y0+1, the label row starts
     // at y0+6) - below the icon lands at y0+20, inside the hero number's box.
-    // Presence is the carrier, not hue.
+    //
+    // COLOR_LABEL, not COLOR_ACCENT, and that was a real complaint rather than
+    // taste: in accent this read as a red-orange stripe over the icon and the
+    // first question it drew from a user was "why is there a red underline?" -
+    // an indicator whose meaning has to be asked about has already failed.
+    // COLOR_LABEL is a palette token, so applyTheme() follows the theme for
+    // free, AND it is the exact colour of the label text in this same row, so
+    // the mark reads as chrome rather than an alarm. PRESENCE is the carrier -
+    // which only carries information because the tap cycle can return to auto
+    // (see usageCyclePin); a bar that can never turn off signals nothing.
     if (usagePinHostId[0]) {
-      tft.fillRect(tagRight - MAC_EMOJI_SIZE, y0 + 3, MAC_EMOJI_SIZE, 3, COLOR_ACCENT);
+      tft.fillRect(tagRight - MAC_EMOJI_SIZE, y0 + 3, MAC_EMOJI_SIZE, 3, COLOR_LABEL);
     }
   } else if (tag && *tag && usedLinkCount() > 1) {
     // Accent = PINNED, grey = AUTO (freshest wins), the same convention the
