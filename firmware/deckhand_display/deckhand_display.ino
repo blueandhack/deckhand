@@ -2468,12 +2468,14 @@ void forceFullRepaint() {
 }
 
 // ---------- EMOJITEST ----------
-// Draws all 16 icons (or just one, named, "large") on the content area, on BOTH
-// backdrops a real icon actually has to sit on: the page background (COLOR_BG) and a
-// card/row fill (COLOR_CARD). The alpha blend and the setSwapBytes handling can only
-// be judged where they actually have to work, not on some third colour picked for
-// convenience - and this is the only way any of the 16 reach the real glass, since the
-// capture path (SCREENSHOT) can only record what is currently displayed.
+// Draws all 16 icons, or just one if named, on the content area, on BOTH backdrops a
+// real icon actually has to sit on: the page background (COLOR_BG) and a card/row
+// fill (COLOR_CARD). There is no other mode - an unrecognised name (macEmojiIndex
+// returns -1) falls through to the same all-16 grid plain EMOJITEST draws. The alpha
+// blend and the setSwapBytes handling can only be judged where they actually have to
+// work, not on some third colour picked for convenience - and this is the only way
+// any of the 16 reach the real glass, since the capture path (SCREENSHOT) can only
+// record what is currently displayed.
 void drawEmojiTestScreen(const char* only) {
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
 
@@ -3933,6 +3935,17 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       }
     }
   } else if (buf.startsWith("EMOJITEST")) {
+    // Refuse while another full-screen surface owns the glass. emojiTestActive
+    // is tested BEFORE kbActive in handleTouch's dismiss chain, so opening the
+    // grid over an open keyboard and then tapping anywhere calls
+    // forceFullRepaint() with kbActive still true underneath - the exact class
+    // of bug fabVisible()'s own kbActive check was already paid for once,
+    // leaving invisible typing into a screen that no longer looks like a
+    // keyboard.
+    if (kbActive || readerActive || histActive || showingDetail) {
+      Serial.println("EMOJITEST refused: another full-screen surface is up");
+      return;
+    }
     // Draws all 16 icons in a grid on the content area, on BOTH backdrops the real
     // surfaces use (page background and card fill), so the alpha blend can be judged
     // where it actually has to work rather than on one convenient colour. Any tap
