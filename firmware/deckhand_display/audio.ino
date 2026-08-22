@@ -9,6 +9,15 @@
 // those definitions, so such a prototype would not compile. Everything below
 // takes primitives or void.
 
+// ---------- The two ANALOG LEVEL probes: board 1 only ----------
+// Compiled only when BOARD_HAS_MIC, and not because the port skipped them: board
+// 2 has no analog microphone. Its audio is an I2S codec, so there is no ADC1
+// channel to sample, no DC bias to measure and no gain trimmer to tune - and
+// giving MIC_ADC_PIN an alias pointing at an I2S data line would compile and
+// produce confident nonsense, which is the failure mode this port keeps
+// refusing. No stubs are needed for these two: their only callers are
+// micLevelTest() and micMonitor(), which sit inside the same guard below.
+#if BOARD_HAS_MIC
 // Noise floor at three bandwidths: raw, and smoothed over 4 and 16 samples.
 // A moving average is a crude low-pass, so comparing the three says WHERE the
 // noise lives - which decides the fix:
@@ -64,6 +73,7 @@ int micWindowPP(int ms) {
   }
   return wmx - wmn;
 }
+#endif  // BOARD_HAS_MIC - the analog level probes
 uint8_t muLawEncode(int32_t s) {
   const int32_t BIAS = 0x84, CLIP = 32635;
   int32_t sign = s < 0 ? 0x80 : 0;
@@ -99,6 +109,12 @@ void micDumpBase64(const uint8_t* data, size_t len) {
       char pctTxt[12];
       snprintf(pctTxt, sizeof(pctTxt), "%d%%", (int) (off * 100 / (len ? len : 1)));
       micPillMeter((int) (off * 1000 / (len ? len : 1)), pctTxt, "sending to your Mac");
+#if !BOARD_USES_TFT_ESPI
+      // ~9s of base64 lines with nothing else returning to loop() in between -
+      // without this the progress bar would sit at its first frame the whole
+      // transfer, the exact "nothing is happening" this bar exists to prevent.
+      tft.flush();
+#endif
       delay(1);
     }
   }
@@ -165,7 +181,7 @@ void drawVoiceCard() {
 // stop dictating.
 void micWaitRelease() {
   unsigned long t0 = millis();
-  while (ts.touched() && millis() - t0 < 2000) delay(20);
+  while (touchPressed() && millis() - t0 < 2000) delay(20);
   delay(60); // let the panel settle
 }
 // The fourth stage of the recording bar. Reuses micPillFrame, so the frame, position
@@ -355,6 +371,22 @@ int primaryLink() {
   for (int i = 0; i < MAX_LINKS; i++) if (hostLinks[i].used) return i;
   return -1;
 }
+// ---------- THE ANALOG CAPTURE PATH: BOARD 1 ONLY ----------
+// Everything from here to the end of this file needs the analog mic, so it is
+// guarded for the reason given above - plus a mechanical one that would bite even
+// if a mic were wired to board 2: the DMA frame struct differs per chip.
+// adc_digi_output_data_t carries a `type1` member on the ESP32 and ONLY a `type2`
+// on the S3 (checked in the installed hal/adc_types.h, which selects per
+// CONFIG_IDF_TARGET_*), so the sample unpacking below is board-1 shaped down to
+// the field name, as is the hardcoded ADC_CHANNEL_7 for IO35.
+//
+// The four entry points get no-op stubs at the bottom rather than having their
+// callers removed, because those callers are UI: the record slot in the tab bar,
+// SETTINGS > MIC TEST, and the MICTEST/MICMON/MICREC/MICSTREAM commands.
+// Deleting them would move layout Task 8 derived and rewrite the settings page;
+// a stub keeps board 2's screen exactly as designed and puts the whole gap in
+// one place.
+#if BOARD_HAS_MIC
 void micStream() {
   // ADC driver FIRST, before any large allocation - see the allocation-order note
   // in micRecord(): getting this backwards turns an out-of-memory into abort().
@@ -549,7 +581,7 @@ void micStream() {
       // reason the touch poll is: this loop runs entirely on loopTask.
       // true: loop()'s watchdog can't reach here, so this IS the recovery.
       reapBleLinks(true);
-      if (millis() - start > 400 && ts.touched()) {
+      if (millis() - start > 400 && touchPressed()) {
         if (++stopVotes >= 2) { stoppedByUser = true; break; }
       } else {
         stopVotes = 0;
@@ -564,6 +596,12 @@ void micStream() {
       unsigned long el = millis() - start;
       snprintf(t, sizeof(t), "%lu:%02lu", el / 60000, (el / 1000) % 60);
       micPillMeter(pp * 1000 / 600, t, "TAP ANYWHERE TO STOP");
+#if !BOARD_USES_TFT_ESPI
+      // This capture can run up to MIC_STREAM_MAX_MS (120s) without ever
+      // returning to loop(), so its own end-of-iteration flush is the only
+      // thing that gets the meter onto the glass at all.
+      tft.flush();
+#endif
     }
   }
 
@@ -729,7 +767,7 @@ void micRecord() {
       // added anyway since it costs nothing and shares the exact pattern.
       // true: same reason as micStream()'s call - this is a blocking path.
       reapBleLinks(true);
-      if (millis() - recStart > 400 && ts.touched()) {
+      if (millis() - recStart > 400 && touchPressed()) {
         if (++stopVotes >= 2) { stoppedByUser = true; break; }
       } else {
         stopVotes = 0;
@@ -743,6 +781,12 @@ void micRecord() {
       unsigned long el = millis() - recStart;
       snprintf(t, sizeof(t), "%lu.%lus / %ds", el / 1000, (el % 1000) / 100, secs);
       micPillMeter(pp * 1000 / 600, t, "TAP ANYWHERE TO STOP");
+#if !BOARD_USES_TFT_ESPI
+      // Same reason as micStream()'s flush: this loop is heap-capped to a
+      // few seconds rather than 120s, but it still never returns to loop()
+      // while recording, so nothing else will ever push this meter update.
+      tft.flush();
+#endif
     }
     for (uint32_t i = 0; i + SOC_ADC_DIGI_RESULT_BYTES <= len && got < nOut;
          i += SOC_ADC_DIGI_RESULT_BYTES) {
@@ -853,10 +897,18 @@ void micMonitor() {
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.drawString("target: under 120 when silent", 12, BAR_Y + BAR_H + 10);
 
+#if !BOARD_USES_TFT_ESPI
+    // Up to 180s blocking, entirely outside loop() - without this the bar
+    // and readout drawn above would never leave the shadow framebuffer, and
+    // the one thing this screen exists for (watching the floor WHILE turning
+    // the trimmer) would show a frozen first frame instead.
+    tft.flush();
+#endif
+
     // TWO consecutive reads to exit - the same false-positive this panel produced
     // when a single read ended a 99s recording that nobody had touched. Being
     // kicked out mid-adjustment is the whole thing you are trying to avoid here.
-    touchRuns = ts.touched() ? touchRuns + 1 : 0;
+    touchRuns = touchPressed() ? touchRuns + 1 : 0;
     if (touchRuns >= 2) break;
     delay(10);
   }
@@ -980,3 +1032,15 @@ void micLevelTest() {
   else
     Serial.println("MIC verdict: noise floor only (flat) - nothing heard");
 }
+#else
+// ---------- No microphone on this board ----------
+// One line each, on the serial link the operator is already reading, because the
+// alternative failure is silence: tap the record slot, watch nothing happen, and
+// nothing distinguishes "no mic" from "the capture broke". micRestoreUi() is
+// deliberately NOT called - none of these ever painted anything, so there is
+// nothing to restore and a repaint would flash the tab for no reason.
+void micStream()    { Serial.println("AUDIO: no microphone on this board"); }
+void micRecord()    { Serial.println("AUDIO: no microphone on this board"); }
+void micMonitor()   { Serial.println("MIC: no microphone on this board"); }
+void micLevelTest() { Serial.println("MIC: no microphone on this board"); }
+#endif  // BOARD_HAS_MIC - the analog capture path

@@ -6,41 +6,28 @@
 // in its SIGNATURE, which is what would break the auto-generated prototypes.
 //
 // It owns the WHOLE screen - tab bar and footer included - the way the history
-// reader does. That is not cosmetic: it is what makes QWERTY viable on a 240px
-// panel. The drawn key is 22x40 (KB_ROW_H - 4) either way - what going
-// full-screen buys is the TOUCH target, which is the whole 22x44 row (kbTouch
-// tests the full row band, not just the drawn rect): 968px2 against 880 in the
-// content area, where the row itself would have to shrink with it.
+// reader does. That is not cosmetic: it is what makes QWERTY viable on a panel
+// this narrow. THAT is what going full-screen buys, and the two numbers differ in
+// BOTH dimensions rather than only in height:
+//   drawn   KB_KEY_W  x (KB_ROW_H - 4)   22x40 on board 1, 30x54 on board 2
+//   tested  KB_PITCH  x  KB_ROW_H        24x44 = 1056, 32x58 = 1856
+// The WIDTH of the tested band comes from the PITCH, not from KB_KEY_W: kbTouch()
+// divides by KB_PITCH, so the 2px gap between two keys belongs to the key on its
+// left and there is no dead column anywhere on the board. Keep the drawn and the
+// tested numbers separate on both boards rather than collapsing them.
 
-const int KB_PITCH  = 24;      // 10 * 24 = 240, exactly the panel width
-const int KB_KEY_W  = 22;      // 2px of the pitch is the gap
-const int KB_ROW_H  = 44;      // 4px over TAP_MIN (40), not merely at it
-// Text card layout, fixed round 2: HARD-wrapped at exactly KB_COLS (34) columns,
-// not drawWrappedText's word wrap. Word wrap can leave as few as 18 of 34
-// columns used on a line (a 17-char word pushes the break back past the
-// half-way point), so 150 bytes could need up to 8 lines by that algorithm -
-// more than this screen has room for. Slicing at a fixed column count makes the
-// budget PROVABLE instead: ceil(150/34) = 5 lines, always. Breaking a word
-// mid-character is fine on a field being actively composed (the security
-// property here is "the human typed it and watched it appear", which a hard
-// wrap satisfies exactly) - it would NOT be fine in the reader or the ask
-// detail screen, which is why drawWrappedText itself is untouched and this
-// keyboard gets its own small draw instead.
-// The byte counter and the countdown both used to sit ON a text row (top-right
-// over line 1, bottom-right over line 6 in the since-reverted 6-line design),
-// and each one's opaque drawString box silently erased whatever text shared its
-// row - found twice, fixed once: both now live in a RESERVED meta row that no
-// text line ever reaches, so there is no shared row left to erase.
-// 4 (top) + 88 (text, 4..92) + 4 (gap) + 176 (4 rows * 44, 96..272) + 4 (gap)
-// + 44 (actions, 276..320) = 320 exactly.
-const int KB_TEXT_Y = 4,   KB_TEXT_H = 88;
-const int KB_COLS = 34;                        // (CARD_W - 12) / 6, Cozette's uniform advance
-const int KB_TEXT_LINES = 5;                   // ceil(KB_MAX_BYTES / KB_COLS)
-const int KB_META_Y  = KB_TEXT_Y + 6;          // 10: byte counter left, countdown right
-const int KB_LINE0_Y = KB_TEXT_Y + 22;         // 26: first hard-wrapped line
-const int KB_LINE_PITCH = 13;                  // line 5 at 78, ends ~90 - 2px inside the card
-const int KB_ROWS_Y = 96;                      // 4 rows * 44 = 176, ends at 272
-const int KB_ACT_Y  = 276, KB_ACT_H = 44;      // ends at 320, 0px spare
+// EVERY KB_* GEOMETRY CONSTANT MOVED TO THE BOARD HEADERS (via board.h), because
+// the whole set is derived from the panel: the key grid from the width, the text
+// card's COLUMN count from CARD_W, and its LINE count from that column count.
+// See the long derivation in board_es3c35p.h - board 1 is 34 columns and 5 lines,
+// board 2 is 47 and 4. KB_MAX_BYTES is the one that stays here and stays shared:
+// it is 150 on the HOST too (ANSWER_TEXT_MAX_BYTES in host/voice-answer.mjs), so
+// only the columns and the resulting line count are per-board.
+//
+// The two derived offsets, kept here so the "meta row shares no pixel row with
+// any text line" invariant is visible next to the code that draws them.
+const int KB_META_Y  = KB_TEXT_Y + KB_META_DY;    // byte counter left, countdown right
+const int KB_LINE0_Y = KB_TEXT_Y + KB_LINE0_DY;   // first hard-wrapped line
 const int KB_MAX_BYTES = 150;                  // must equal the host's cap
 
 // Rows 0-2 are the letter/symbol pages; row 3 is fixed. Control characters stand
@@ -98,11 +85,13 @@ void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
   uiButton(x, y, tft.width() - x, h, ".", COLOR_ACCENT, pressed == 2, COLOR_BG);
 }
 
-// HARD wrap, deliberately unlike drawWrappedText's word wrap - see the header
-// comment on KB_COLS for why. Slices kbText into KB_COLS-column chunks with no
-// regard for word boundaries and draws each on its own fixed line; kbLen is
-// capped at KB_MAX_BYTES (150) elsewhere, so this can never need more than
-// KB_TEXT_LINES (5) iterations - there is no overflow case to handle here.
+// HARD wrap, deliberately unlike drawWrappedText's word wrap - see the KB_COLS
+// derivation in the board headers for why. Slices kbText into KB_COLS-column
+// chunks with no regard for word boundaries and draws each on its own fixed line;
+// kbLen is capped at KB_MAX_BYTES elsewhere and KB_TEXT_LINES is defined as
+// ceil(KB_MAX_BYTES / KB_COLS), so this can never need more than KB_TEXT_LINES
+// iterations - there is no overflow case to handle here. Both numbers are
+// PER-BOARD (34/5 and 47/4) and neither may be written as a literal here.
 void drawKbHardWrapped() {
   setUIFont(FONT_CODE);
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
@@ -123,8 +112,9 @@ const unsigned long KB_REPEAT_EVERY_MS = 120;   // then ~8 deletions a second
 
 // Peek geometry: it covers the KEYS and the action row, never the text card - so
 // the answer you are composing stays on screen while you re-read the question.
-const int KB_PEEK_Y = KB_ROWS_Y, KB_PEEK_H = 320 - KB_ROWS_Y - 4;
-const int KB_PEEK_LINES = 13;                   // 40..212 inside the card at 13px
+// KB_PEEK_LINES moved to the board headers with the rest of the grid; the height
+// is the panel's, which used to be a hardcoded 320.
+const int KB_PEEK_Y = KB_ROWS_Y, KB_PEEK_H = BOARD_H - KB_ROWS_Y - 4;
 
 bool kbIsMessage() { return kbMessageMode; }
 
@@ -266,8 +256,11 @@ void drawKbText() {
     drawKbHardWrapped();
     // Caret: a block at the insertion point, so the card reads as focused and it
     // is obvious where the next character lands. Its position is PROVABLE rather
-    // than clamped - at KB_COLS (34) and KB_MAX_BYTES (150) the furthest it can
-    // reach is line 4, column 14, inside the KB_TEXT_LINES (5) the card budgets.
+    // than clamped: at kbLen == KB_MAX_BYTES the furthest it can reach is line
+    // KB_MAX_BYTES / KB_COLS, column KB_MAX_BYTES % KB_COLS, and KB_TEXT_LINES is
+    // ceil(KB_MAX_BYTES / KB_COLS) - so the line index is always inside the
+    // budget by construction, on any KB_COLS. The two boards land on line 4 col 14
+    // and line 3 col 9; settings-geom-check.mjs asserts it per board.
     int cl = kbLen / KB_COLS, cc = kbLen % KB_COLS;
     if (cl < KB_TEXT_LINES)
       tft.fillRect(CARD_X + 6 + cc * 6, KB_LINE0_Y + cl * KB_LINE_PITCH + 1, 6, 11,
@@ -319,11 +312,20 @@ void drawKbActions() {
 void drawKeyboard() {
   tft.fillScreen(COLOR_BG);
   drawKbText();
-  if (kbPeekPage >= 0) { drawKbPeek(); return; }   // the peek owns the keys' area
+  if (kbPeekPage >= 0) {
+    drawKbPeek();   // the peek owns the keys' area
+#if !BOARD_USES_TFT_ESPI
+    tft.flush();
+#endif
+    return;
+  }
   for (int r = 0; r < 3; r++)
     for (int c = 0; c < kbRowLen(r); c++) drawKbKey(r, c, false);
   drawKbRow3(-1);
   drawKbActions();
+#if !BOARD_USES_TFT_ESPI
+  tft.flush();
+#endif
 }
 
 void openKeyboard(int idx) {

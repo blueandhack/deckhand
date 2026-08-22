@@ -126,9 +126,12 @@ void renderStatusPage() {
     snprintf(buf, sizeof(buf), "%d%% %d.%02dV%s%s", pct, batteryMv / 1000,
              (batteryMv % 1000) / 10, left[0] ? " " : "", left);
   }
-  // 15 = "100% 4.20V ~99h", the widest this can be. In Cozette 6x13 that is 90px
-  // right-aligned to x=214, so it starts at 124 against a "Battery" label ending
-  // at 88 - widening the format past 15 eats that 36px of clearance.
+  // 15 = "100% 4.20V ~99h", the widest this can be, and the only number here that
+  // is not per-board: it is the width of the DATA. In Cozette 6x13 it is 90px,
+  // right-aligned to CARD_X + CARD_W - PAD, against a "Battery" label ending at
+  // CARD_X + PAD + 20 + textWidth("Battery") - which leaves 36px of clearance on
+  // board 1 and 108 on board 2. Widening the format past 15 eats board 1's 36
+  // first; settings-geom-check.mjs asserts both.
   padLeftTo(buf, sizeof(buf), 15);
   // Same level colour as the footer pill - the two show the same reading, so
   // they must not disagree about how healthy it is. Cache-busted on a colour
@@ -230,8 +233,10 @@ void renderControlsPage() {
   // Only BRIGHTNESS gets a bar. It is the one continuous 0-100 setting, so the
   // bar says where in the range you are; sleep and volume are discrete presets
   // where the label already says that, and a bar would be decoration.
-  drawBar(&brightBarCache, CARD_X + PAD + STEP_BTN_SIZE + 10, P1_BRIGHT_Y + STEP_BAR_Y,
-          CARD_W - 2 * (PAD + STEP_BTN_SIZE + 10), 6, brightnessPct, COLOR_ACCENT);
+  drawBar(&brightBarCache, CARD_X + PAD + STEP_BTN_SIZE + STEP_BAR_GAP,
+          P1_BRIGHT_Y + STEP_BAR_Y,
+          CARD_W - 2 * (PAD + STEP_BTN_SIZE + STEP_BAR_GAP), STEP_BAR_H,
+          brightnessPct, COLOR_ACCENT);
   drawStepGlyph(0, CARD_X + PAD, stepBtnY(P1_BRIGHT_Y), "-", brightnessPct > BRIGHTNESS_MIN);
   drawStepGlyph(1, rightBtnX, stepBtnY(P1_BRIGHT_Y), "+", brightnessPct < 100);
 
@@ -308,6 +313,18 @@ void resetPairing() {
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
   tft.drawString("plug into a Mac over USB to re-pair", tft.width() / 2, tft.height() / 2 + 12);
   tft.setTextDatum(TL_DATUM);
+#if !BOARD_USES_TFT_ESPI
+  // FLUSH BEFORE THE DWELL. The comment above claims parity with the
+  // calibrate/power-off flows and this was the one of the three that did not
+  // have it: on a shadow-buffered board the 1600ms was spent displaying the
+  // CONFIRM DIALOG this screen replaced, so "Pairing reset" reached the glass
+  // for zero frames. Nothing could see it either - readRect reads the same
+  // framebuffer, drawBitmap reports success, and the geometry checkers read
+  // constants, so an unflushed region is invisible to every instrument this
+  // repo has. Found by a whole-branch review reading the three flows against
+  // each other, which is the only thing that could have.
+  tft.flush();
+#endif
   delay(1600);
   tft.fillScreen(COLOR_BG);
   drawTabBar();
@@ -321,11 +338,21 @@ void drawActionsPageStatic() {
   // Four buttons, one component, escalating intent: accent = safe,
   // warn = changes pairing, bad = powers the device down. MIC TEST leads because
   // it is the only one you might run repeatedly (it is how you set the trimmer).
+#if BOARD_HAS_MIC
   uiButton(CARD_X, P2_MIC_Y,  CARD_W, P2_BTN_H, "MIC TEST",        COLOR_ACCENT);
+#endif
   uiButton(CARD_X, P2_CAL_Y,  CARD_W, P2_BTN_H, "CALIBRATE TOUCH", COLOR_ACCENT);
   uiButton(CARD_X, P2_PAIR_Y, CARD_W, P2_BTN_H, "RESET PAIRING",   COLOR_WARN);
   uiButton(CARD_X, P2_PWR_Y,  CARD_W, P2_BTN_H, "POWER OFF",       COLOR_BAD);
+  // The hint has to match what the chip can actually do, the same rule the
+  // farewell screens and the standalone screen already follow: a board that
+  // cannot wake on touch must not promise one, because that reads as broken
+  // firmware where the truth reads as a device that told you.
+#if BOARD_HAS_TOUCH_SLEEP_WAKE
   uiHint("power off = deep sleep, touch to wake", P2_PWR_Y + P2_BTN_H + SP_3);
+#else
+  uiHint("power off = deep sleep, RESET to wake", P2_PWR_Y + P2_BTN_H + SP_3);
+#endif
 }
 // ----- Page 3: paired Macs -----
 // Status is never colour-alone: the chosen
@@ -435,8 +462,15 @@ void drawPendingConfirm() {
                   "every paired Mac is forgotten", "RESET", COLOR_WARN);
       break;
     case CFM_POWER_OFF:
+      // A confirm dialog's entire job is stating the consequence, so this is the
+      // last place that may describe a wake this silicon cannot perform.
+#if BOARD_HAS_TOUCH_SLEEP_WAKE
       drawConfirm("Power off?", nullptr,
                   "deep sleep - touch the screen to wake", "POWER OFF", COLOR_BAD);
+#else
+      drawConfirm("Power off?", nullptr,
+                  "deep sleep - press RESET to wake", "POWER OFF", COLOR_BAD);
+#endif
       break;
     default: break;
   }
@@ -467,6 +501,9 @@ void renderSettingsTab() {
   if (settingsPage == 0) renderStatusPage();
   else if (settingsPage == 1) renderControlsPage();
   // page 2 is static
+#if !BOARD_USES_TFT_ESPI
+  tft.flush();
+#endif
 }
 void resetSettingsCaches() {
   btDotCache = -1; usbDotCache = -1; battRowCache = -1; battRowTextCache[0] = '\0';
@@ -589,6 +626,7 @@ void handleSettingsTouch(int sx, int sy) {
     // and exits on a tap; the dialog is reserved for consequential actions, and
     // putting one here would just be a tap in the way of the thing you are doing
     // repeatedly while turning the trimmer.
+#if BOARD_HAS_MIC
     if (sy >= P2_MIC_Y && sy < P2_MIC_Y + P2_BTN_H) {
       micMonitor();
       // micRestoreUi() falls back to the "waiting for host" screen when no payload
@@ -600,6 +638,13 @@ void handleSettingsTouch(int sx, int sy) {
     // The other three ask first: recalibrating costs 5 taps, resetting pairing
     // wipes every key, and powering off interrupts the display.
     else if (sy >= P2_CAL_Y && sy < P2_CAL_Y + P2_BTN_H) {
+#else
+    // No MIC TEST branch at all on this board, so the chain opens on CALIBRATE.
+    // The button is not drawn and P2_CAL_Y has moved up into the slot it would
+    // have used, so a `sy >= P2_MIC_Y` test here would claim taps belonging to
+    // whatever now sits there.
+    if (sy >= P2_CAL_Y && sy < P2_CAL_Y + P2_BTN_H) {
+#endif
       pendingConfirm = CFM_RECAL;         drawPendingConfirm();
     } else if (sy >= P2_PAIR_Y && sy < P2_PAIR_Y + P2_BTN_H) {
       pendingConfirm = CFM_RESET_PAIRING; drawPendingConfirm();
