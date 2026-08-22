@@ -1724,7 +1724,17 @@ void tickWaitingWheel() {
 
 // ---------- Record button ----------
 // TAB_REC_W (and its derivation comment) moved to board_e32r28t.h (via board.h).
-inline int tabsW() { return tft.width() - TAB_REC_W; }   // width the 3 tabs share
+// Width the 3 tabs share. With no capture path there is no record button (see
+// fabVisible()), so the slot it would have occupied goes back to the tabs rather
+// than sitting as a 40px dead gap at the right end - the bar is chrome, and
+// chrome with an unexplained hole in it reads as a rendering fault. fabHit()
+// tests `sx >= tabsW()`, which this makes unsatisfiable, and that is harmless
+// belt-and-braces: fabVisible() already refuses first.
+#if BOARD_HAS_MIC
+inline int tabsW() { return tft.width() - TAB_REC_W; }
+#else
+inline int tabsW() { return tft.width(); }
+#endif
 inline int recCX() { return tabsW() + TAB_REC_W / 2; }
 inline int recCY() { return TAB_BAR_H / 2; }
 bool fabPressed = false;           // the press currently down started on the button
@@ -1747,6 +1757,18 @@ bool fabVisible() {
   // while kbActive stayed true. Same invariant isAsleep/octoActive already
   // rely on: fabVisible() means "actually visible AND tappable", not just drawn.
   if (isAsleep || octoActive || kbActive) return false;
+#if !BOARD_HAS_MIC
+  // No capture path on this board, so no button. BOARD_HAS_MIC describes the
+  // SOFTWARE, not the hardware: board 2 has an ES8311 I2S codec with a real mic
+  // input (and a speaker), but until that capture path exists a REC button is a
+  // control that cannot work - and this file already refuses those elsewhere,
+  // where a read-only ask draws its options as a flat list under "ANSWER ON YOUR
+  // MAC" and swallows taps for exactly this reason. Gating in fabVisible()
+  // rather than at the two draw sites also stops fabHit() claiming taps in that
+  // corner: drawn-but-dead and tappable-but-dead are different bugs and this
+  // closes both. One flag flip turns the button back on when the path lands.
+  return false;
+#endif
   // Shown on the session detail screen too - that is how a dictation is aimed at
   // a specific session. It used to be hidden there whenever an ask was pending,
   // because a control floating over Allow/Deny is a hazard; in the tab bar it is
@@ -4358,9 +4380,25 @@ void loop() {
   // usbLinkActive threshold) AND a battery is actually present. On USB power
   // the device stays up indefinitely regardless of idle time, as requested.
   bool onUsbPower = lastRxUSBMillis > 0 && (millis() - lastRxUSBMillis) < 60000;
+#if BOARD_HAS_TOUCH_SLEEP_WAKE
   if (!onUsbPower && batteryPresent() && millis() - lastNonIdleMillis > AUTO_SLEEP_IDLE_MS) {
     autoDeepSleep();
   }
+#else
+  // NO AUTO-SLEEP ON A BOARD THAT CANNOT WAKE ITSELF. Auto-sleep's whole purpose
+  // is saving battery on a device you will wake with a touch - and this chip has
+  // no touch wake at all, because ext0/ext1 accept only an RTC GPIO and the S3's
+  // RTC set stops at GPIO21 while the touch INT is on 47. Keeping the feature
+  // here would mean the device turns ITSELF off after 20 idle minutes into a
+  // state only the RESET button can leave: a status display that has silently
+  // become a brick until someone walks over, which is strictly worse than one
+  // that never sleeps. The backlight blank (enterSleep(), the SLEEP AFTER
+  // setting) still runs and is still touch-recoverable, so the display still
+  // goes dark when idle - it just stays reachable.
+  // Manual POWER OFF is deliberately still available: that is an explicit choice
+  // behind a confirm dialog, and the dialog states the consequence.
+  (void) onUsbPower;
+#endif
 
   // Sample even while asleep so the reading is already settled on wake, and
   // so a dead battery is visible in the serial log. Rendering stays gated

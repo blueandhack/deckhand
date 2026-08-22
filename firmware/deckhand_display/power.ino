@@ -319,6 +319,14 @@ void powerOff() {
     digitalWrite(AUDIO_EN_PIN, HIGH);
   }
 #endif
+#if !BOARD_USES_TFT_ESPI
+  // FLUSH BEFORE THE DWELL, not after. Board 2 draws into a shadow buffer, so
+  // without this the 1200ms "let the message be read" is spent displaying the
+  // PREVIOUS screen and the farewell appears for zero frames - the message
+  // exists in memory and is never seen. Board 1 writes the panel directly and
+  // needs nothing here.
+  tft.flush();
+#endif
   delay(1200); // let the message be read; we're leaving, blocking is fine
   enterDeepSleep();
 }
@@ -337,6 +345,9 @@ void autoDeepSleep() {
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
   tft.drawString(WAKE_HINT, tft.width() / 2, tft.height() / 2 + 12);
   tft.setTextDatum(TL_DATUM);
+#if !BOARD_USES_TFT_ESPI
+  tft.flush();   // same reason as powerOff()'s: the dwell must show THIS screen
+#endif
   delay(1500);
   enterDeepSleep();
 }
