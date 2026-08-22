@@ -1116,11 +1116,13 @@ void drawSessionDetail(int idx) {
   char agentCol[24];
   // The icon rides between the agent tag and the Mac text - this and SETTINGS
   // are the two screens that show an icon ALONGSIDE its text, which is what
-  // makes the icon-only treatment safe everywhere else. Gated on mac[0], same
-  // as the label above: with one Mac there's nothing to disambiguate, and an
-  // icon appearing only when a second Mac exists (i.e. it's actually needed)
-  // matches this row's existing rule rather than a new one.
-  int agentEmoji = mac[0] ? emojiIdForLink(s.hostSlot) : -1;
+  // makes the icon-only treatment safe everywhere else. UNGATED, per the same
+  // rule every other icon site follows: an icon shows whenever one is set,
+  // regardless of how many Macs are connected - it's personalisation, not
+  // disambiguation. Only the TEXT tag above (`mac`, and "AGENT / MAC" vs
+  // "AGENT") stays gated on mac[0]/usedLinkCount() > 1, since a lone Mac's
+  // own name really is redundant noise the icon isn't.
+  int agentEmoji = emojiIdForLink(s.hostSlot);
   if (agentEmoji >= 0) {
     // Pieces, not one drawColValue() call - that helper only clips a single
     // string, and there's real headroom to spare here without needing to:
