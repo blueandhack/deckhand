@@ -99,20 +99,46 @@ const DIALOGS = [
 // Key row lengths, from KB_ALPHA/KB_SYM (the two control bytes count as cells).
 const KB_ROW_CELLS = [10, 9, 9, 10, 10, 9];
 
-// THE OTHER 150-BYTE PAIRING, checked once across both boards rather than per
-// board, because the claim is comparative. The voice-answer confirm screen caps
-// its transcript panel at 8 WORD-wrapped lines (askVoiceTooLong() in
-// sessions.ino, measured against CARD_W - 8) and CLAUDE.md records that cap and
-// the 150-byte one as "consistent by arithmetic". MEASURED HERE against the worst
-// text word wrap can be given - 17-character words, so every break falls barely
-// past halfway - board 1 lands on EXACTLY 8, i.e. the claim is true and has zero
-// slack. That is why the assertion is comparative rather than absolute: what board
-// 2 has to prove is that its wider lane cannot make the count worse, since a lane
-// that improved the average while worsening the tail would still be a regression
-// nothing else here would catch.
-const VOICE_WORST = "wwwwwwwwwwwwwwwww ".repeat(9).slice(0, KB_MAX_BYTES);
-const voiceLines = {};
-for (const b of [1, 2]) voiceLines[b] = countWrappedLines(VOICE_WORST, T_META, B[b].CARD_W - 8);
+// THE OTHER 150-BYTE PAIRING. The voice-answer confirm screen caps its transcript
+// panel at 8 WORD-wrapped lines (askVoiceTooLong() in sessions.ino, measured
+// against CARD_W - 8) and CLAUDE.md records that cap and the 150-byte one as
+// "consistent by arithmetic".
+//
+// TWO THINGS TO GET RIGHT HERE, and an earlier version of this file got the second
+// one wrong. First, this is NOT the keyboard's lane: the keyboard measures
+// CARD_W - 12 and the confirm screen CARD_W - 8, so the two surfaces do not share
+// a column count and cannot share a worst case. Second, the adversarial string is
+// PER BOARD. Word wrap's worst case is a word length that forces every break back
+// to just past halfway, and which length does that depends on the lane - probing a
+// 288px lane with the string that is adversarial for a 208px one measures nothing
+// about the wider board. So the probe below SEARCHES word lengths per board and
+// takes the worst it finds.
+// Measured: board 1 lands on EXACTLY 8 (17-character words; 9 is unreachable
+// because after 7 lines of 18 bytes the remaining 24 all fit on one more line), so
+// the claim is true with zero slack. Board 2's own worst is 6, on 24-character
+// words - not the 4 a board-1 string reports for it.
+// The assertion stays comparative rather than absolute because what board 2 has to
+// prove is that its wider lane cannot make the count worse: a lane that improved
+// the average while worsening the tail would be a regression nothing else here
+// would catch, and an absolute "<= 8" would pass right up to the moment it broke.
+function worstWrappedLines(lane) {
+  let worst = 0, at = 0;
+  // Every word length that can matter: 1 up to the number of characters the lane
+  // holds. Longer than that and wrapLineLen's "never stall" path takes over, which
+  // is a different (and less bad) case.
+  for (let w = 1; w <= Math.floor(lane / 6); w++) {
+    const word = "w".repeat(w) + " ";
+    const text = word.repeat(Math.ceil(KB_MAX_BYTES / word.length) + 1).slice(0, KB_MAX_BYTES);
+    const n = countWrappedLines(text, T_META, lane);
+    if (n > worst) { worst = n; at = w; }
+  }
+  return { worst, at };
+}
+const voiceLines = {}, voiceWord = {};
+for (const b of [1, 2]) {
+  const r = worstWrappedLines(B[b].CARD_W - 8);
+  voiceLines[b] = r.worst; voiceWord[b] = r.at;
+}
 
 // Documented, deliberately-unfixed board-1 facts. Every one is a place board 1's
 // packed layout gives something up; an entry appearing under 2 would mean a
@@ -125,6 +151,10 @@ const KNOWN = {
     "action button 38px tall >= TAP_MIN 40",
     // The list above the chip and the control bar below own every other row.
     "history filter chip 17px drawn >= TAP_MIN 40",
+    // The ALL state is 32 wide against a 40 floor, so the chip is under the floor in
+    // WIDTH as well as height on this board - and only in one of its two states,
+    // which is the part that would never be noticed by eye.
+    "chip widths 40/32 both clear TAP_MIN 40",
     "history chip tap band 25px >= TAP_MIN 40",
     "history scrubber tap band 16px >= TAP_MIN 40",
     // FOUND BY THIS CHECKER, all pre-existing and all left alone because board 1's
@@ -171,8 +201,10 @@ if (SELFTEST) {
   console.log("--selftest: board 2's keyboard meta row pushed 9px onto the first text line; the meta-row assertion MUST fail");
 }
 
-console.log(`\nvoice-confirm panel, ${KB_MAX_BYTES} bytes of word wrap's worst case: ` +
-            `board 1 ${voiceLines[1]} lines (lane ${B[1].CARD_W - 8}px), board 2 ${voiceLines[2]} (lane ${B[2].CARD_W - 8}px)`);
+console.log(`\nvoice-confirm panel (lane CARD_W - 8, NOT the keyboard's CARD_W - 12), ` +
+            `${KB_MAX_BYTES} bytes at each board's OWN adversarial word length:\n` +
+            `  board 1: ${voiceLines[1]} lines (lane ${B[1].CARD_W - 8}px, worst at ${voiceWord[1]}-char words)\n` +
+            `  board 2: ${voiceLines[2]} lines (lane ${B[2].CARD_W - 8}px, worst at ${voiceWord[2]}-char words)`);
 CUR = 2;
 chk(voiceLines[2] <= voiceLines[1],
     `board 2's wider lane cannot loosen the 8-line voice-confirm cap: ${voiceLines[2]} <= ${voiceLines[1]}`);
@@ -360,9 +392,14 @@ for (const b of [1, 2]) {
     chk(lastLineEnd < c.KB_TEXT_Y + c.KB_TEXT_H, `last text line ends ${lastLineEnd} inside the card (${c.KB_TEXT_Y + c.KB_TEXT_H - 1})`);
     // The grid, and the drawn-versus-tested split.
     const drawnKeyH = c.KB_ROW_H - 4;
-    console.log(`    key drawn ${c.KB_KEY_W}x${drawnKeyH}, tap band ${c.KB_KEY_W}x${c.KB_ROW_H} = ${c.KB_KEY_W * c.KB_ROW_H}px2`);
+    // The TESTED band's width is KB_PITCH, not KB_KEY_W: kbTouch() divides by
+    // KB_PITCH, so the 2px gap belongs to the key on its left and no column is
+    // dead. Board 1's own header used to state 22x44 = 968 here, which mixed the
+    // drawn width with the tested height.
+    console.log(`    key drawn ${c.KB_KEY_W}x${drawnKeyH}, tap band ${c.KB_PITCH}x${c.KB_ROW_H} = ${c.KB_PITCH * c.KB_ROW_H}px2`);
     chk(drawnKeyH >= c.TAP_MIN, `drawn key ${drawnKeyH}px tall >= TAP_MIN ${c.TAP_MIN}`);
-    chk(c.KB_ROW_H > drawnKeyH, `the tap band (${c.KB_ROW_H}) is taller than the drawn key (${drawnKeyH}) - the split is kept, not collapsed`);
+    chk(c.KB_ROW_H > drawnKeyH && c.KB_PITCH > c.KB_KEY_W,
+        `the tap band (${c.KB_PITCH}x${c.KB_ROW_H}) is bigger than the drawn key (${c.KB_KEY_W}x${drawnKeyH}) in BOTH dimensions - the split is kept, not collapsed`);
     chk(drawnKeyH / c.KB_KEY_W <= 40 / 22 + 0.001,
         `key aspect 1:${(drawnKeyH / c.KB_KEY_W).toFixed(2)} no more elongated than board 1's 1:${(40 / 22).toFixed(2)}`);
     chk(10 * c.KB_PITCH <= W, `10 columns x ${c.KB_PITCH} = ${10 * c.KB_PITCH} inside the ${W}px panel`);
@@ -402,6 +439,8 @@ for (const b of [1, 2]) {
     chk(c.HIST_CHIP_TAP_H >= c.HIST_CHIP_H, `chip tap band ${c.HIST_CHIP_TAP_H} >= drawn ${c.HIST_CHIP_H}`);
     chk(c.HIST_CHIP_TAP_H < c.HIST_RULE_Y, `chip tap band ends ${c.HIST_CHIP_TAP_H} above the rule, or it would claim the first list row`);
     chk(c.HIST_CHIP_TAP_W >= c.HIST_CHIP_X + c.HIST_CHIP_W_CHAT, `chip tap band ${c.HIST_CHIP_TAP_W}px wide covers the drawn chip (ends ${c.HIST_CHIP_X + c.HIST_CHIP_W_CHAT})`);
+    chk(c.HIST_CHIP_W_CHAT >= c.TAP_MIN && c.HIST_CHIP_W_ALL >= c.TAP_MIN,
+        `chip widths ${c.HIST_CHIP_W_CHAT}/${c.HIST_CHIP_W_ALL} both clear TAP_MIN ${c.TAP_MIN}`);
     for (const [w, t] of [[c.HIST_CHIP_W_CHAT, "CHAT"], [c.HIST_CHIP_W_ALL, "ALL"]])
       chk(textWidth(t, T_META) + 8 <= w, `chip label "${t}" ${textWidth(t, T_META)}px inside ${w}px`);
     const nameX = c.HIST_CHIP_X + c.HIST_CHIP_W_CHAT + 8;

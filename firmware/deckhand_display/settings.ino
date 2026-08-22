@@ -126,9 +126,12 @@ void renderStatusPage() {
     snprintf(buf, sizeof(buf), "%d%% %d.%02dV%s%s", pct, batteryMv / 1000,
              (batteryMv % 1000) / 10, left[0] ? " " : "", left);
   }
-  // 15 = "100% 4.20V ~99h", the widest this can be. In Cozette 6x13 that is 90px
-  // right-aligned to x=214, so it starts at 124 against a "Battery" label ending
-  // at 88 - widening the format past 15 eats that 36px of clearance.
+  // 15 = "100% 4.20V ~99h", the widest this can be, and the only number here that
+  // is not per-board: it is the width of the DATA. In Cozette 6x13 it is 90px,
+  // right-aligned to CARD_X + CARD_W - PAD, against a "Battery" label ending at
+  // CARD_X + PAD + 20 + textWidth("Battery") - which leaves 36px of clearance on
+  // board 1 and 108 on board 2. Widening the format past 15 eats board 1's 36
+  // first; settings-geom-check.mjs asserts both.
   padLeftTo(buf, sizeof(buf), 15);
   // Same level colour as the footer pill - the two show the same reading, so
   // they must not disagree about how healthy it is. Cache-busted on a colour

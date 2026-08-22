@@ -426,9 +426,13 @@ const int CFM_H   = 150;
 
 // ---------- KEYBOARD (moved from keyboard.ino) ----------
 // EVERY NUMBER IS THE LITERAL keyboard.ino ALREADY USED. The keyboard owns the
-// whole screen, and what that buys is the TOUCH target rather than the artwork:
-// the drawn key is KB_KEY_W x (KB_ROW_H - 4) = 22x40 while kbTouch() tests the
-// full 22x44 row - 968px2 against 880 in the ordinary content area.
+// whole screen, and what that buys is the TOUCH target rather than the artwork.
+// The drawn key is KB_KEY_W x (KB_ROW_H - 4) = 22x40; the TESTED band is
+// KB_PITCH x KB_ROW_H = 24x44 = 1056px2, and the width comes from the PITCH
+// rather than from KB_KEY_W because kbTouch() divides by KB_PITCH - so the 2px
+// gap between two keys belongs to the key on its left and no column is dead.
+// (An earlier version of this comment said 968, i.e. 22x44: it used the DRAWN
+// width against the TESTED height. Understated, but wrong.)
 //
 // 10 * 24 = 240, exactly the panel width; 2px of the pitch is the gap.
 const int KB_PITCH = 24;
@@ -444,6 +448,15 @@ const int KB_ROW_H = 44;
 // word pushes the break back past halfway), so 150 bytes could need 8 lines by
 // that algorithm - more than this screen has room for. A fixed column count makes
 // the budget provable instead.
+//
+// THIS BOARD'S 34 IS ALREADY 1PX HOT AGAINST ITS OWN LANE, which the next person
+// deriving from that lane needs to know. 34 columns of Cozette advance 34*6 = 204
+// and the last character is charged xOffset + width rather than xAdvance, so the
+// widest 34-character line inks 33*6 + 7 = 205px against a 204px lane. Harmless
+// and pre-existing: the card interior reaches x = CARD_X + CARD_W - 3 = 225 and
+// the text starts at CARD_X + 6 = 18, so 205px of ink ends at 222 - 3px inside the
+// card, overrunning only the nominal lane and never the card. Board 2's 47 is
+// exact by the same rule (46*6 + 7 = 283 <= 284; 48 would need 289).
 const int KB_COLS = 34;
 const int KB_TEXT_LINES = 5;                   // ceil(KB_MAX_BYTES / KB_COLS)
 // The card, and the RESERVED META ROW inside it. The byte counter and the
@@ -478,7 +491,12 @@ const int KB_PEEK_LINES = 13;
 const int HIST_CHIP_X      = 10;
 const int HIST_CHIP_Y      = 4;
 const int HIST_CHIP_H      = 17;
-const int HIST_CHIP_CY     = 13;   // label centre (4 + 17/2, rounded down)
+// 13, where the chip's own centre is HIST_CHIP_Y + HIST_CHIP_H / 2 = 4 + 8 = 12 -
+// so the label sits ONE PIXEL LOW. Pre-existing and invisible at this size, and
+// left alone because this board's binary is held byte-identical across the port;
+// stated here rather than papered over with arithmetic that yields 12.
+// settings-geom-check.mjs carries it as a known board-1 entry.
+const int HIST_CHIP_CY     = 13;
 const int HIST_CHIP_W_CHAT = 40;
 const int HIST_CHIP_W_ALL  = 32;
 const int HIST_CHIP_TAP_W  = 76;

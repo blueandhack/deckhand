@@ -7,11 +7,14 @@
 //
 // It owns the WHOLE screen - tab bar and footer included - the way the history
 // reader does. That is not cosmetic: it is what makes QWERTY viable on a panel
-// this narrow. The DRAWN key is KB_KEY_W x (KB_ROW_H - 4) - 22x40 on board 1,
-// 30x54 on board 2 - while kbTouch() tests the whole KB_KEY_W x KB_ROW_H row
-// band, not just the drawn rect. THAT is what going full-screen buys: 22x44 =
-// 968px2 against 880 in board 1's ordinary content area, and 30x58 = 1740 here.
-// The two are kept as separate numbers on both boards rather than collapsed.
+// this narrow. THAT is what going full-screen buys, and the two numbers differ in
+// BOTH dimensions rather than only in height:
+//   drawn   KB_KEY_W  x (KB_ROW_H - 4)   22x40 on board 1, 30x54 on board 2
+//   tested  KB_PITCH  x  KB_ROW_H        24x44 = 1056, 32x58 = 1856
+// The WIDTH of the tested band comes from the PITCH, not from KB_KEY_W: kbTouch()
+// divides by KB_PITCH, so the 2px gap between two keys belongs to the key on its
+// left and there is no dead column anywhere on the board. Keep the drawn and the
+// tested numbers separate on both boards rather than collapsing them.
 
 // EVERY KB_* GEOMETRY CONSTANT MOVED TO THE BOARD HEADERS (via board.h), because
 // the whole set is derived from the panel: the key grid from the width, the text
@@ -82,11 +85,13 @@ void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
   uiButton(x, y, tft.width() - x, h, ".", COLOR_ACCENT, pressed == 2, COLOR_BG);
 }
 
-// HARD wrap, deliberately unlike drawWrappedText's word wrap - see the header
-// comment on KB_COLS for why. Slices kbText into KB_COLS-column chunks with no
-// regard for word boundaries and draws each on its own fixed line; kbLen is
-// capped at KB_MAX_BYTES (150) elsewhere, so this can never need more than
-// KB_TEXT_LINES (5) iterations - there is no overflow case to handle here.
+// HARD wrap, deliberately unlike drawWrappedText's word wrap - see the KB_COLS
+// derivation in the board headers for why. Slices kbText into KB_COLS-column
+// chunks with no regard for word boundaries and draws each on its own fixed line;
+// kbLen is capped at KB_MAX_BYTES elsewhere and KB_TEXT_LINES is defined as
+// ceil(KB_MAX_BYTES / KB_COLS), so this can never need more than KB_TEXT_LINES
+// iterations - there is no overflow case to handle here. Both numbers are
+// PER-BOARD (34/5 and 47/4) and neither may be written as a literal here.
 void drawKbHardWrapped() {
   setUIFont(FONT_CODE);
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
@@ -251,8 +256,11 @@ void drawKbText() {
     drawKbHardWrapped();
     // Caret: a block at the insertion point, so the card reads as focused and it
     // is obvious where the next character lands. Its position is PROVABLE rather
-    // than clamped - at KB_COLS (34) and KB_MAX_BYTES (150) the furthest it can
-    // reach is line 4, column 14, inside the KB_TEXT_LINES (5) the card budgets.
+    // than clamped: at kbLen == KB_MAX_BYTES the furthest it can reach is line
+    // KB_MAX_BYTES / KB_COLS, column KB_MAX_BYTES % KB_COLS, and KB_TEXT_LINES is
+    // ceil(KB_MAX_BYTES / KB_COLS) - so the line index is always inside the
+    // budget by construction, on any KB_COLS. The two boards land on line 4 col 14
+    // and line 3 col 9; settings-geom-check.mjs asserts it per board.
     int cl = kbLen / KB_COLS, cc = kbLen % KB_COLS;
     if (cl < KB_TEXT_LINES)
       tft.fillRect(CARD_X + 6 + cc * 6, KB_LINE0_Y + cl * KB_LINE_PITCH + 1, 6, 11,

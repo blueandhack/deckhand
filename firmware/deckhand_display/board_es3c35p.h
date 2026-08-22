@@ -549,10 +549,12 @@ const int PAGER_H = 54;
 // 184px title lane for a longest title ("DISPLAY & SOUND") of 90px at Cozette's
 // 6px advance, centred at 160 so it runs 115..205.
 const int PAGER_BTN_W  = 60;
-// 8 (SP_2), from board 1's 6. This is the keys' inset from the panel edge, and it
-// deliberately does NOT match CARD_X (12) - the pager keys sit slightly outside
-// the card lane on both boards, which is what makes the band read as chrome above
-// the page rather than as the page's first row.
+// 8, and the arithmetic first: board 1's 6 held physically is 6 / 5.624 * 6.489 =
+// 6.9, taken up to 8 to sit on the 4px spacing scale (SP_2). That it does not match
+// CARD_X (12), so the pager keys sit slightly outside the card lane on both boards,
+// is a CONSEQUENCE of that arithmetic rather than the reason for it - and the claim
+// that this is what makes the band read as chrome above the page rather than as the
+// page's first row is a JUDGEMENT, unmeasured, and not what set the number.
 const int PAGER_BTN_X0 = 8;
 const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 
@@ -730,18 +732,24 @@ const int KB_TEXT_LINES = 4;
 // one dimension this panel simply hands over.
 const int KB_PITCH = 32;
 const int KB_KEY_W = 30;
-// KB_ROW_H 58, and the DRAWN key is KB_ROW_H - 4 = 54 while kbTouch() tests the
-// full 30x58 row - the drawn/tested split kept rather than collapsed. Target
-// area: 30 * 58 = 1740px2 against board 1's 22 * 44 = 968.
+// KB_ROW_H 58, and the DRAWN key is KB_ROW_H - 4 = 54 while the TESTED band is
+// KB_PITCH x KB_ROW_H = 32x58 = 1856px2 against board 1's 24x44 = 1056 - the
+// drawn/tested split kept rather than collapsed, in BOTH dimensions. The tested
+// WIDTH is the pitch, not KB_KEY_W: kbTouch() divides by KB_PITCH, so the 2px gap
+// belongs to the key on its left and no column on the board is dead.
 //
 // 54 IS CAPPED BY ASPECT, NOT BY THE PANEL, and this is the one place on this
 // board where a control is deliberately NOT grown to the space available. The
 // keyboard's width is fixed by its 10 columns, so every spare row makes the keys
-// taller and thinner; board 1's drawn key is 22x40 = 1:1.82, and 30 * 1.82 = 54.5
-// is therefore the tallest key that is no more elongated than the one this device
-// already ships. Spending the remaining rows on height instead would reach
-// KB_ROW_H 70 (a 30x66 key, 1:2.2) - strips rather than keys. For scale, iOS
-// portrait keys are about 1:1.3.
+// taller and thinner; board 1's drawn key is 22x40 = 1:1.818, and 30 * 1.818 =
+// 54.5 -> 54 is therefore the tallest key no more elongated than the one this
+// device already ships. That anchor is measured FROM THIS REPO, which is the only
+// reason it is the one used: spending the remaining rows on height instead would
+// reach KB_ROW_H 70 (a 30x66 key, 1:2.2), and "1:2.2 is strips rather than keys"
+// is a judgement with no measurement behind it, whereas "no worse than the keyboard
+// already shipping" is a fact this file can check. (An earlier draft of this
+// comment cited iOS portrait keys at about 1:1.3 as a scale reference. Nothing here
+// measured that, so it is removed rather than left looking like evidence.)
 const int KB_ROW_H = 58;
 // THE TEXT CARD, and the RESERVED META ROW inside it. drawString paints an OPAQUE
 // box the full height of a text line, so a counter sharing a row with wrapped
@@ -768,12 +776,16 @@ const int KB_LINE_PITCH = 13;                  // Cozette's cell - text-derived
 //   12 (top margin) + 90 (card) + 68 (break) + 232 (4 rows * 58)
 //   + 12 (gap) + 58 (action row) + 8 (bottom margin) = 480
 //
-// The 68px BREAK between the card and the keys is the surplus, and it is there
-// because every alternative is worse: a taller key exceeds the aspect above, a
-// taller card would carry lines the 150-byte cap can never reach, and a bigger
-// BOTTOM margin would spend the most reachable part of a handheld panel on
-// nothing. It also happens to be the one boundary on this screen that means
-// something - what you are composing, above the tool you compose with.
+// The 68px BREAK is a RESIDUAL, not a chosen number: it is what is left once every
+// other term is fixed by something else (the card by its 4 lines, the rows by the
+// aspect cap on KB_ROW_H, the action row by KB_ROW_H, the margins by the 4px
+// scale). What it does NOT do is disappear - the surplus has to land somewhere,
+// and the two places it could go instead are both worse by arithmetic: a taller
+// card carries lines the 150-byte cap can never reach (the 5th line would need
+// 5*47 = 235 bytes), and moving it to the bottom margin pushes the action row off
+// the most reachable part of a handheld panel. Calling this break "the one
+// boundary on the screen that means something" is a judgement about what it looks
+// like once it is there, not a reason for its size.
 const int KB_ROWS_Y = 170;                     // 4 rows * 58 = 232, ending 401
 const int KB_ACT_Y  = 414;                     // 414..471, 8px above the panel edge
 const int KB_ACT_H  = 58;                      // == KB_ROW_H, as on board 1
@@ -791,19 +803,33 @@ const int KB_PEEK_LINES = 19;
 // is drawn at TAP_MIN (46) and its tap band is TAP_MIN + 6, so the drawn/tested
 // split is kept and BOTH sides clear the floor:
 //   chip drawn   y 4..49,  x 12..71 (CHAT) / 12..63 (ALL)
-//   chip tapped  y 0..52,  x 0..95 (the test is `sy <= H`, an inclusive bound)
+//   chip tapped  y 0..52,  x 0..101 (the test is `sy <= H`, an inclusive bound)
 //   rule         y 54
-// Chip widths are board 1's 40/32 grown by the same 20px of padding the taller
-// chip wants: "CHAT" is 24px and "ALL" 18px at Cozette's 6px advance, so 60 and
-// 52 leave 18 and 17 either side (board 1: 8 and 7). HIST_CHIP_CY is the label's
-// centre, 4 + 46/2 = 27.
+// What is DERIVED about the two widths is only the floor: the chip is now a
+// TAP_MIN-tall control, so it has to clear TAP_MIN (46) in width too, and "CHAT"
+// is 24px of ink and "ALL" 18px at Cozette's 6px advance - so anything from 46 up
+// is legal for both. 60 and 52 sit 14 and 6 above that floor, keeping the same
+// 8px difference between the two states that board 1's 40/32 has; THAT much is a
+// judgement about how a filled pill should look beside 46px of height, not an
+// arithmetic result. HIST_CHIP_CY is the label's centre, 4 + 46/2 = 27 - exactly
+// centred, unlike board 1's, which is 1px low.
 const int HIST_CHIP_X      = 12;
 const int HIST_CHIP_Y      = 4;
 const int HIST_CHIP_H      = 46;
 const int HIST_CHIP_CY     = 27;
 const int HIST_CHIP_W_CHAT = 60;
 const int HIST_CHIP_W_ALL  = 52;
-const int HIST_CHIP_TAP_W  = 96;
+// 102, DERIVED FROM THE DRAWN CHIP rather than picked: the CHAT chip ends at
+// HIST_CHIP_X + HIST_CHIP_W_CHAT = 72, and board 1's band carries 76 - 50 = 26px
+// of slop past its own chip, which held physically is 26 / 5.624 * 6.489 = 30.
+// 72 + 30 = 102.
+// CONSEQUENCE INHERITED DELIBERATELY: the band therefore reaches past the session
+// name, which starts at HIST_CHIP_X + HIST_CHIP_W_CHAT + 8 = 80 - so a tap on the
+// name's first 22px toggles the filter. Board 1 does exactly the same (band 76
+// against a name starting at 58, 18px), the name is inert text, and a generous
+// target for the only filter control on the screen is worth more than 22px of
+// nothing. Stated because a band that overlaps its neighbour is normally a bug.
+const int HIST_CHIP_TAP_W  = 102;
 const int HIST_CHIP_TAP_H  = 52;
 // The session name (left of centre) and the position-in-history (right) sit on one
 // row centred against the chip: a 13px line centred on the chip's own centre (27)
@@ -828,6 +854,9 @@ const int HIST_LINE_H      = 13;   // Cozette - text-derived, unchanged
 //   track   377..396   (HIST_JUMP_H 20)
 // The list stops 4px above the band (HIST_JUMP_Y - 4 = 360), so it runs 60..360 =
 // 23 lines of 13 against board 1's 16.
+// The TRACK is board 1's 16 held physically (16 / 5.624 * 6.489 = 18.5, taken to
+// 20 on the even grid) - i.e. the track did not really change and the TAP BAND is
+// the whole of what this board buys. HIST_JUMP_TAP_H is TAP_MIN.
 const int HIST_JUMP_Y      = 364;
 const int HIST_JUMP_H      = 20;
 const int HIST_JUMP_TAP_H  = 46;
