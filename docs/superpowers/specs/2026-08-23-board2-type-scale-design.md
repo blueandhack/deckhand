@@ -31,14 +31,17 @@ draws a 106px row and then 306px of nothing - 64% of the content area. SETTINGS 
 ## Decision 1: Spleen, four native rungs, zero scaling
 
 Spleen (BSD-2-Clause, `github.com/fcambus/spleen`) ships hand-designed **8x16, 12x24, 16x32
-and 32x64**. `bdf2gfx.py` converts all four unmodified - verified before this spec was
+and 32x64**. Note on reading the table below: `T_HERO`'s registry entry is Cozette 6x13 at
+size 2, but the usage card OVERRIDES it with `setTextSize(CARD_HERO_SIZE)` - 3 on board 1 and
+4 on board 2 - so the effective hero today is 18x39 and 24x52 respectively, not 12x26. The
+override is what a native 32x64 rung removes. `bdf2gfx.py` converts all four unmodified - verified before this spec was
 written. Board 2's `UI_FONTS` becomes one family with no `setTextSize` above 1 anywhere:
 
 | rung | board 1 (unchanged) | board 2 | board 2 physical |
 |---|---|---|---|
 | `T_META`, `T_BODY` | Cozette 6x13 | **Spleen 8x16** | 1.23 x 2.47 mm |
 | `T_HEAD` | Terminus 10x18b | **Spleen 12x24** | 1.85 x 3.70 mm |
-| `T_HERO` | Cozette 12x26 @3x | **Spleen 32x64** | 4.93 x 9.86 mm |
+| `T_HERO` | Cozette 6x13 @3x = 18x39 | **Spleen 32x64** | 4.93 x 9.86 mm |
 
 **Why 8x16 and not 12x24 for body.** 8x16 lands at 2.47mm, just above board 1's 2.31mm, and
 leaves a **32-character lane** in the 260px card interior against board 1's 34 - so every
