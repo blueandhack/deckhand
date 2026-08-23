@@ -95,7 +95,12 @@ void drawConnRow(int rowOff, bool connected) {
   int y = DEV_CARD_Y + rowOff;
   drawConnDot(CARD_X + PAD + 6, y + 8, 6, connected, COLOR_CARD);
   int xRight = CARD_X + CARD_W - PAD;
-  tft.fillRect(xRight - 100, y, 100, 16, COLOR_CARD);
+  // CONN_TEXT_W/H, not a literal 100x16: the box has to cover the widest string
+  // this row can draw ("Not connected") AT THIS BOARD'S OWN ADVANCE. At 6px that
+  // is 78 of 100 with room to spare; at 8px it is 104 of 100, so the left edge of
+  // the "N" survived a change to "Connected" as a 4px ghost - too small to read as
+  // a stale value, which is what makes it worth a named constant.
+  tft.fillRect(xRight - CONN_TEXT_W, y, CONN_TEXT_W, CONN_TEXT_H, COLOR_CARD);
   setUIFont(2);
   tft.setTextColor(connected ? COLOR_GOOD : COLOR_LABEL, COLOR_CARD);
   tft.setTextDatum(TR_DATUM);
@@ -127,11 +132,13 @@ void renderStatusPage() {
              (batteryMv % 1000) / 10, left[0] ? " " : "", left);
   }
   // 15 = "100% 4.20V ~99h", the widest this can be, and the only number here that
-  // is not per-board: it is the width of the DATA. In Cozette 6x13 it is 90px,
-  // right-aligned to CARD_X + CARD_W - PAD, against a "Battery" label ending at
-  // CARD_X + PAD + 20 + textWidth("Battery") - which leaves 36px of clearance on
-  // board 1 and 108 on board 2. Widening the format past 15 eats board 1's 36
-  // first; settings-geom-check.mjs asserts both.
+  // is not per-board: it is the width of the DATA. It is 90px in Cozette 6x13 and
+  // 120px in Spleen 8x16, right-aligned to CARD_X + CARD_W - PAD, against a
+  // "Battery" label ending at CARD_X + PAD + 20 + textWidth("Battery") - which
+  // leaves 36px of clearance on board 1 and 64 on board 2 (the 108 an earlier
+  // revision claimed was board 2's lane measured at board 1's advance). Widening
+  // the format past 15 eats board 1's 36 first; settings-geom-check.mjs asserts
+  // both.
   padLeftTo(buf, sizeof(buf), 15);
   // Same level colour as the footer pill - the two show the same reading, so
   // they must not disagree about how healthy it is. Cache-busted on a colour
@@ -142,8 +149,12 @@ void renderStatusPage() {
     battRowColorCache = rowCol;
     battRowTextCache[0] = '\0';
   }
+  // DROW_BATT_VAL_DY, not a literal 4: at board 1's 13px line a 4px stagger
+  // between the "Battery" label and the reading beside it is invisible and ships
+  // unchanged; at 16px it reads as two halves of one row failing to line up, so
+  // board 2 sets it to 0 and draws them on the same baseline.
   drawIfChanged(battRowTextCache, sizeof(battRowTextCache), buf, CARD_X + CARD_W - PAD,
-                DEV_CARD_Y + DROW_BATT + 4, 1, 1, rowCol, COLOR_CARD, TR_DATUM);
+                DEV_CARD_Y + DROW_BATT + DROW_BATT_VAL_DY, 1, 1, rowCol, COLOR_CARD, TR_DATUM);
   renderMacLinkRows();
 }
 // Per-Mac, because the footer can only carry ONE "Xs ago" and it shows the
@@ -255,9 +266,12 @@ void renderControlsPage() {
   drawStepGlyph(5, rightBtnX, stepBtnY(P1_VOL_Y), "+", volPresetIdx < VOL_PRESETS_COUNT - 1);
 
   // Three toggles sharing the bottom row: SOUND, the screen flip, and the theme.
-  // A full-width row for each wouldn't fit (only 32px left under this one), and
-  // all three are booleans so they read naturally side by side. State is shown by
-  // fill AND by the label text, never colour alone.
+  // A full-width row for each wouldn't fit (board 1 has only 32px left under this
+  // one; board 2 has 22), and all three are booleans so they read naturally side
+  // by side. State is shown by fill AND by the label text, never colour alone.
+  // Their WIDTH is measured, not counted: P1_THIRD_W is 66 on board 1 and 93 on
+  // board 2, against a widest label ("FLIPPED") of 42px and 56px respectively -
+  // see each board header's own derivation.
   if ((int) beepEnabled != soundBtnCache) {
     soundBtnCache = (int) beepEnabled;
     uiToggle(CARD_X, P1_SOUND_Y, P1_THIRD_W, P1_SOUND_H, "SOUND", "MUTED", beepEnabled);

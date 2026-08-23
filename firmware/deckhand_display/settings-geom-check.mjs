@@ -32,7 +32,8 @@
 //
 //   node settings-geom-check.mjs             check both boards
 //   node settings-geom-check.mjs --selftest  prove the checker has teeth
-import { cacheSizes, consts, DIR, lineH, PANEL, preflight, textWidth } from "./geom-common.mjs";
+import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, DIR, fieldBox, lineH,
+         lineHB, mcBox, PANEL, preflight, textWidth, tlBox, widthB } from "./geom-common.mjs";
 import fs from "fs";
 preflight();
 
@@ -94,14 +95,27 @@ const PAGER_TITLES = ["STATUS", "DISPLAY & SOUND", "ACTIONS", "PAIRED MACS"];
 const STEP_LABELS = ["BRIGHTNESS", "SLEEP AFTER", "VOLUME"];
 const TOGGLES = ["SOUND", "MUTED", "FLIPPED", "NORMAL", "DARK", "LIGHT", "AUTO"];
 const P2_LABELS = ["MIC TEST", "CALIBRATE TOUCH", "RESET PAIRING", "POWER OFF"];
-const P2_HINT = "power off = deep sleep, touch to wake";
-// drawPendingConfirm()'s four dialogs: [title, emph, note, yesLabel].
+// BOTH ARMS of the #if BOARD_HAS_TOUCH_SLEEP_WAKE pair, on both boards. Only the
+// touch-wake string was checked before, which is the arm board 1 compiles - so the
+// longer no-touch-wake hint board 2 actually draws was measured by nothing. They
+// happen to be the same length; that is a fact worth asserting rather than
+// assuming, because the strings are edited independently.
+const P2_HINTS = ["power off = deep sleep, touch to wake",
+                  "power off = deep sleep, RESET to wake"];
+// drawPendingConfirm()'s four dialogs: [title, emph, note, yesLabel]. POWER OFF
+// has one note per arm of the same #if, and BOTH are checked on both boards for
+// the reason above - the note is the string the dialog exists to show.
+const DIALOG_NOTES_POWER = ["deep sleep - touch the screen to wake",
+                            "deep sleep - press RESET to wake"];
 const DIALOGS = [
   ["Forget this Mac?", "a-long-mac-label", "its key is deleted; re-pairs over USB", "FORGET"],
   ["Recalibrate touch?", null, "5 taps; current setup kept if it fails", "CALIBRATE"],
   ["Reset all pairing?", null, "every paired Mac is forgotten", "RESET"],
-  ["Power off?", null, "deep sleep - touch the screen to wake", "POWER OFF"],
+  ...DIALOG_NOTES_POWER.map(n => ["Power off?", null, n, "POWER OFF"]),
 ];
+// hosts[].label is char[20], and uiListRow draws "\xB7 " + it with no fitText at
+// all - so the widest row the PAIRED MACS page can draw is 21 characters.
+const HOST_LABEL_MAX = 19;
 // Key row lengths, from KB_ALPHA/KB_SYM (the two control bytes count as cells).
 const KB_ROW_CELLS = [10, 9, 9, 10, 10, 9];
 
@@ -183,6 +197,14 @@ const KNOWN = {
     // (d) "Asking the Mac..." is drawn at a literal 130, which is NOT the midpoint
     // of the region it sits in (22..272 -> 147) - it predates the control bar.
     "history empty-state y 130 is the midpoint of 22..272 (147)",
+    // (e) FOUND by the per-board band model added for the 16px pass, and benign.
+    // The stepper label's own glyph box is 10..22 (Cozette, MC_DATUM at 15) and the
+    // value's drawIfChanged ERASE box starts at 22, so the erase covers the label
+    // box's last row. That row is the label's second DESCENDER row, and all three
+    // labels (BRIGHTNESS / SLEEP AFTER / VOLUME) are upper case, so no ink is ever
+    // there. Left alone because board 1's binary is frozen, and listed because a
+    // board-2 layout arriving in this state would be a real defect.
+    "stepper: label -> value gap -1",
   ],
   2: [],
 };
@@ -245,46 +267,83 @@ for (const b of [1, 2]) {
     }
   }
 
-  // ================= SETTINGS page 0: the DEVICE card =================
-  // Bands as CLEARED extents. A connection row is drawConnRow's
-  // fillRect(xRight-100, y, 100, 16) plus a 13px dot at y+8; the battery reading is
-  // drawIfChanged at y+4 (TR_DATUM, 13px cell -> clears y+3..y+17); the id and the
-  // two Mac rows are 13px lines clearing y-1..y+13.
-  const dev = [
-    ["label", 6, 6 + lineH(T_META) - 1],
-    ["bluetooth", c.DROW_BT, c.DROW_BT + 15],
-    ["usb", c.DROW_USB, c.DROW_USB + 15],
-    ["battery", c.DROW_BATT, c.DROW_BATT + 17],
-    ["device id", c.DROW_ID - 1, c.DROW_ID + lineH(T_META)],
-    ["mac row 0", c.DROW_MAC0 - 1, c.DROW_MAC0 + lineH(T_META)],
-    ["mac row 1", c.DROW_MAC1 - 1, c.DROW_MAC1 + lineH(T_META)],
+  // ================= SETTINGS page 0: the DEVICE and LINK cards =================
+  // BANDS ARE WHAT A ROW ACTUALLY PAINTS, at each board's OWN cell height - not at
+  // the 13px this file used to assume for both. Three different rectangles are in
+  // play and they are not interchangeable, which is why they come from named
+  // helpers now (geom-common.mjs) rather than from arithmetic inline here:
+  //   - tlBox: a plain drawString's opaque box, y..y+cellH-1
+  //   - mcBox: the same box under MC_DATUM, which centres on the ASCENT and so
+  //            sits floor(descent/2) rows LOW of a symmetric centre
+  //   - fieldBox: a drawIfChanged field, the UNION of its erase rect (which
+  //            centres on the CELL) and the drawString box inside it
+  // A connection row is drawConnRow(): fillRect(xRight-CONN_TEXT_W, y, CONN_TEXT_W,
+  // CONN_TEXT_H) plus a 13px dot at y+8; the battery reading is a fieldBox at
+  // y+DROW_BATT_VAL_DY; ID is a tlBox; the two Mac rows are fieldBoxes.
+  const devRows = [
+    ["label", tlBox(b, T_META, 6)],
+    ["bluetooth", [c.DROW_BT, c.DROW_BT + c.CONN_TEXT_H - 1]],
+    ["usb", [c.DROW_USB, c.DROW_USB + c.CONN_TEXT_H - 1]],
+    ["battery", (() => {
+      const lbl = tlBox(b, T_BODY, c.DROW_BATT);
+      const val = fieldBox(b, T_META, c.DROW_BATT + c.DROW_BATT_VAL_DY);
+      return [Math.min(lbl[0], val[0], c.DROW_BATT + 1), Math.max(lbl[1], val[1], c.DROW_BATT + 14)];
+    })()],
+    ["device id", tlBox(b, T_META, c.DROW_ID)],
+    ["mac row 0", fieldBox(b, T_META, c.DROW_MAC0)],
+    ["mac row 1", fieldBox(b, T_META, c.DROW_MAC1)],
   ];
-  console.log(`  DEVICE card ${c.DEV_CARD_Y}..${c.DEV_CARD_Y + c.DEV_CARD_H - 1} (h ${c.DEV_CARD_H}):`);
-  for (const [n, a, z] of dev) console.log(`    ${n.padEnd(10)} +${a}..+${z}`);
-  for (let i = 1; i < dev.length; i++) {
-    const gap = dev[i][1] - dev[i - 1][2] - 1;
-    chk(gap >= 0, `device card: ${dev[i - 1][0]} -> ${dev[i][0]} gap ${gap} (negative = a clear box eats its neighbour)`);
+  // A LIST OF CARDS rather than one card inline, because page 0 is a stack: the
+  // walk below has to hold for every card on it, not just the first, and a second
+  // card whose row rhythm drifted from the one above it is the failure "the same
+  // style" has to be able to catch.
+  const cards = [["DEVICE", c.DEV_CARD_Y, c.DEV_CARD_H, devRows]];
+  for (const [cname, cy, ch, rows] of cards) {
+    console.log(`  ${cname} card ${cy}..${cy + ch - 1} (h ${ch}):`);
+    for (const [n, [a, z]] of rows) console.log(`    ${n.padEnd(10)} +${a}..+${z}`);
+    for (let i = 1; i < rows.length; i++) {
+      const gap = rows[i][1][0] - rows[i - 1][1][1] - 1;
+      chk(gap >= 0, `${cname} card: ${rows[i - 1][0]} -> ${rows[i][0]} gap ${gap} (negative = a paint box eats its neighbour)`);
+    }
+    chk(rows[0][1][0] >= 2, `${cname} card: label starts +${rows[0][1][0]} inside the interior (border owns +0..+1)`);
+    const ceil = ch - 3, last = Math.max(...rows.map(x => x[1][1]));
+    chk(last <= ceil, `${cname} card: last band ends +${last} <= +${ceil} (2px border owns +${ch - 2}..+${ch - 1})`);
+    chk(cy + ch <= contentBottom, `${cname} card ends ${cy + ch} inside the region (${contentBottom})`);
+    chk(cy >= c.PAGE_TOP, `${cname} card starts ${cy}, at or below PAGE_TOP ${c.PAGE_TOP}`);
   }
-  chk(dev[0][1] >= 2, `device card: label starts +${dev[0][1]} inside the interior (border owns +0..+1)`);
+  // THE WHOLE PAGE, which is what Task 8's card had to be paid for out of. Both
+  // cards plus their gaps against the region, and trailing air stated rather than
+  // implied: a card ending flush on contentBottom() reads as joined to the footer.
   {
-    const devCeil = c.DEV_CARD_H - 3;
-    const devLast = Math.max(...dev.map(x => x[2]));
-    chk(devLast <= devCeil, `device card: last band ends +${devLast} <= +${devCeil} (2px border owns +${c.DEV_CARD_H - 2}..+${c.DEV_CARD_H - 1})`);
-    chk(c.DEV_CARD_Y + c.DEV_CARD_H <= contentBottom, `device card ends ${c.DEV_CARD_Y + c.DEV_CARD_H} inside the region (${contentBottom})`);
-    // Its TOP, which nothing checked: only the bottom edge was bounded, so the card
-    // could start above PAGE_TOP and be drawn over the pager it is supposed to sit
-    // under.
-    chk(c.DEV_CARD_Y >= c.PAGE_TOP, `device card starts ${c.DEV_CARD_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
+    const lastCard = cards[cards.length - 1];
+    const pageEnd = lastCard[1] + lastCard[2];
+    const air = contentBottom - pageEnd;
+    console.log(`  page 0: ${cards.length} card(s) ${cards[0][1]}..${pageEnd - 1} of ${c.PAGE_TOP}..${contentBottom}, ${air}px trailing air`);
+    chk(air > 0, `page 0: last card ends ${pageEnd}, ${air}px above the footer (must be > 0)`);
+    if (cards.length > 1)
+      chk(cards[1][1] === cards[0][1] + cards[0][2] + c.SP_3,
+          `page 0: LINK card at ${cards[1][1]} == DEVICE (${cards[0][1]}) + ${cards[0][2]} + SP_3 ${c.SP_3}`);
+  }
+  {
     // The battery reading is right-aligned and padded to 15 characters
     // ("100% 4.20V ~99h"); "Battery" sits at CARD_X + PAD + 20.
-    const readingW = textWidth("100% 4.20V ~99h", T_BODY);
+    const readingW = widthB(b, T_META, "100% 4.20V ~99h");
     const xRight = c.CARD_X + c.CARD_W - c.PAD;
-    const labelEnd = c.CARD_X + c.PAD + 20 + textWidth("Battery", T_BODY);
+    const labelEnd = c.CARD_X + c.PAD + 20 + widthB(b, T_BODY, "Battery");
     chk(xRight - readingW > labelEnd, `battery reading ${readingW}px starts ${xRight - readingW}, "Battery" ends ${labelEnd}`);
     chk(+SET_CACHE.battRowTextCache >= 16, `battRowTextCache ${SET_CACHE.battRowTextCache} holds 15 chars + NUL`);
-    chk(textWidth("Not connected", T_BODY) <= 100, `"Not connected" ${textWidth("Not connected", T_BODY)}px inside drawConnRow's 100px erase box`);
-    // A Mac row's erase box always reserves the icon slot, used or not.
-    const macW = c.MAC_ROW_W * 6 + 4 + 13 + 2;
+    // CONN_TEXT_W/H, measured, and this is the assertion whose absence let a 100px
+    // box ship against a 104px string on board 2. The height must cover the CELL,
+    // because the row's own drawString paints a full cell of opaque background.
+    const notConn = widthB(b, T_BODY, "Not connected");
+    chk(notConn <= c.CONN_TEXT_W, `"Not connected" ${notConn}px inside drawConnRow's ${c.CONN_TEXT_W}px erase box`);
+    chk(c.CONN_TEXT_H >= lineHB(b, T_BODY), `CONN_TEXT_H ${c.CONN_TEXT_H} covers uiLineH(T_BODY) ${lineHB(b, T_BODY)}`);
+    const connLabelEnd = c.CARD_X + c.PAD + 20 + widthB(b, T_BODY, "Bluetooth");
+    chk(xRight - c.CONN_TEXT_W > connLabelEnd, `conn erase box starts ${xRight - c.CONN_TEXT_W}, "Bluetooth" ends ${connLabelEnd}`);
+    // A Mac row's erase box always reserves the icon slot, used or not, and
+    // renderMacLinkRows() sizes it from a MEASURED textWidth - so this multiplies
+    // by the BOARD'S advance, not by 6.
+    const macW = c.MAC_ROW_W * advanceB(b, T_META) + 4 + 13 + 2;
     chk(c.CARD_X + c.PAD + macW < c.CARD_X + c.CARD_W - 2,
         `mac row erase box ends ${c.CARD_X + c.PAD + macW} inside the card (${c.CARD_X + c.CARD_W - 2})`);
     const macWorst = c.MAC_ROW_W + 1 + 2 + 1;   // padded text + \x01 + icon id + NUL
@@ -297,21 +356,30 @@ for (const b of [1, 2]) {
   chk(c.STEP_BTN_TOP >= 2 && c.STEP_BTN_TOP + c.STEP_BTN_SIZE <= c.STEPPER_CARD_H - 2,
       `stepper keys +${c.STEP_BTN_TOP}..+${c.STEP_BTN_TOP + c.STEP_BTN_SIZE - 1} inside the interior +2..+${c.STEPPER_CARD_H - 3}`);
   {
-    // The MIDDLE column's bands, as cleared extents. The value goes through
-    // drawIfChanged with MC_DATUM, which clears cy-th/2-1 .. cy-th/2+th.
-    const vh = lineH(T_HEAD);
+    // The MIDDLE column's bands, as PAINTED extents. The label is a plain MC
+    // drawString (mcBox: low-biased by half the descent); the value goes through
+    // drawIfChanged under MC_DATUM, whose erase rect centres on the CELL while its
+    // drawString centres on the ASCENT - so its real extent is the UNION of the
+    // two, which at T_HEAD is 28 rows on board 2 against a 24px cell. Modelling it
+    // as the cell alone is what put the value's own opaque box one row into the bar.
     const mid = [
-      ["label", c.STEP_LABEL_CY - Math.floor(lineH(T_META) / 2), c.STEP_LABEL_CY + Math.floor(lineH(T_META) / 2)],
-      ["value", c.STEP_VALUE_CY - Math.floor(vh / 2) - 1, c.STEP_VALUE_CY - Math.floor(vh / 2) + vh],
-      ["bar", c.STEP_BAR_Y, c.STEP_BAR_Y + c.STEP_BAR_H - 1],
+      ["label", mcBox(b, T_META, c.STEP_LABEL_CY)],
+      ["value", fieldBox(b, T_HEAD, c.STEP_VALUE_CY, "M")],
+      ["bar", [c.STEP_BAR_Y, c.STEP_BAR_Y + c.STEP_BAR_H - 1]],
     ];
-    for (const [n, a, z] of mid) console.log(`    stepper ${n.padEnd(6)} +${a}..+${z}`);
+    for (const [n, [a, z]] of mid) console.log(`    stepper ${n.padEnd(6)} +${a}..+${z}`);
     for (let i = 1; i < mid.length; i++) {
-      const gap = mid[i][1] - mid[i - 1][2] - 1;
+      const gap = mid[i][1][0] - mid[i - 1][1][1] - 1;
       chk(gap >= 0, `stepper: ${mid[i - 1][0]} -> ${mid[i][0]} gap ${gap}`);
     }
-    chk(mid[0][1] >= 2, `stepper label starts +${mid[0][1]} inside the interior`);
-    chk(mid[2][2] <= c.STEPPER_CARD_H - 3, `stepper bar ends +${mid[2][2]} clear of the 2px border at +${c.STEPPER_CARD_H - 2}`);
+    chk(mid[0][1][0] >= 2, `stepper label starts +${mid[0][1][0]} inside the interior`);
+    chk(mid[2][1][1] <= c.STEPPER_CARD_H - 3, `stepper bar ends +${mid[2][1][1]} clear of the 2px border at +${c.STEPPER_CARD_H - 2}`);
+    // THE CARD IS SIZED BY WHICHEVER COLUMN IS TALLER, and on board 2 that stopped
+    // being the key: the middle column needs mid[0].top..mid[2].bottom plus its own
+    // pad, so assert the interior holds BOTH rather than only the key band.
+    const keyBand = c.STEP_BTN_TOP + c.STEP_BTN_SIZE - 1;
+    console.log(`    stepper key band +${c.STEP_BTN_TOP}..+${keyBand}, middle column +${mid[0][1][0]}..+${mid[2][1][1]}`);
+    chk(keyBand <= c.STEPPER_CARD_H - 3, `stepper key ends +${keyBand} clear of the 2px border`);
     // The bar's lane must clear both keys, and the label must clear both hit
     // thirds - a tap meant to read the label must not step the value.
     const barX = c.CARD_X + c.PAD + c.STEP_BTN_SIZE + c.STEP_BAR_GAP;
@@ -319,13 +387,24 @@ for (const b of [1, 2]) {
     chk(barX > c.CARD_X + c.PAD + c.STEP_BTN_SIZE - 1, `bar starts ${barX} right of the left key (ends ${c.CARD_X + c.PAD + c.STEP_BTN_SIZE - 1})`);
     chk(barX + barW <= c.CARD_X + c.CARD_W - c.PAD - c.STEP_BTN_SIZE, `bar ends ${barX + barW - 1} left of the right key`);
     const hitL = c.CARD_X + Math.floor(c.CARD_W / 3), hitR = c.CARD_X + Math.floor(c.CARD_W * 2 / 3);
+    // MEASURED at the board's own advance. The label has to clear BOTH hit thirds,
+    // or a tap meant to read it steps the value it names - and the dead band is
+    // only hitR-hitL wide, so this is the assertion that caps how long a stepper
+    // label may be (12 characters on board 2 at 8px, in a 99px band).
     for (const l of STEP_LABELS) {
-      const w = textWidth(l, T_META), x0 = Math.floor(W / 2 - w / 2);
-      chk(x0 >= hitL && x0 + w < hitR, `stepper label "${l}" spans ${x0}..${x0 + w} inside the dead band ${hitL}..${hitR}`);
+      const w = widthB(b, T_META, l), x0 = Math.floor(W / 2 - w / 2);
+      chk(x0 >= hitL && x0 + w < hitR, `stepper label "${l}" ${w}px spans ${x0}..${x0 + w} inside the dead band ${hitL}..${hitR}`);
     }
+    const labelCap = Math.floor((hitR - hitL) / advanceB(b, T_META));
+    console.log(`    stepper label lane: dead band ${hitR - hitL}px = ${labelCap} chars at ${advanceB(b, T_META)}px`);
+    for (const l of STEP_LABELS) chk(l.length <= labelCap, `stepper label "${l}" is ${l.length} of the ${labelCap} characters the dead band holds`);
+    // The VALUE is padTo(5) and drawn in T_HEAD, so its box is 5 advances wide even
+    // when the text is shorter - which is the width that has to clear the thirds.
     for (const v of ["100%", "never", "LOUD"]) {
-      const w = textWidth(v.padStart(5), T_HEAD);
-      chk(Math.floor(W / 2 - w / 2) >= hitL, `stepper value "${v}" ${w}px clear of the left hit third`);
+      const w = widthB(b, T_HEAD, v.padStart(5));
+      const x0 = Math.floor(W / 2 - w / 2);
+      chk(x0 >= hitL, `stepper value "${v}" ${w}px starts ${x0}, clear of the left hit third (${hitL})`);
+      chk(x0 + w < hitR, `stepper value "${v}" ends ${x0 + w}, clear of the right hit third (${hitR})`);
     }
   }
   {
@@ -371,13 +450,25 @@ for (const b of [1, 2]) {
     chk(cols[2][1] + c.P1_THIRD_W <= c.CARD_X + c.CARD_W,
         `toggle row: THEME ends ${cols[2][1] + c.P1_THIRD_W - 1}, inside the card's right edge (${c.CARD_X + c.CARD_W - 1})`);
     chk(c.P1_THIRD_W >= c.TAP_MIN, `toggle ${c.P1_THIRD_W}px wide >= TAP_MIN ${c.TAP_MIN}`);
-    for (const t of TOGGLES) chk(textWidth(t, T_BODY) + 8 <= c.P1_THIRD_W, `toggle label "${t}" ${textWidth(t, T_BODY)}px inside a ${c.P1_THIRD_W}px third`);
+    // MEASURED at the board's advance, and against T_TITLE - which is the id
+    // uiButton actually sets, not T_BODY. They alias today on both boards; naming
+    // the real one is what makes the T_TITLE -> T_HEAD migration fail here.
+    for (const t of TOGGLES) chk(widthB(b, 2, t) + 8 <= c.P1_THIRD_W, `toggle label "${t}" ${widthB(b, 2, t)}px inside a ${c.P1_THIRD_W}px third`);
+    // uiButton centres its label with MC_DATUM at y + h/2, and MC_DATUM biases the
+    // box LOW - so a label in an exactly-sized control overflows the bottom before
+    // it overflows the top. Both edges, against the row's own height.
+    {
+      const [t0, t1] = mcBox(b, 2, Math.floor(c.P1_SOUND_H / 2));
+      const bias = Math.floor(lineHB(b, 2) / 2) - Math.floor(ascentB(b, 2) / 2);
+      chk(t0 >= 0 && t1 <= c.P1_SOUND_H - 1,
+          `toggle label box +${t0}..+${t1} inside the ${c.P1_SOUND_H}px row (MC_DATUM biases it ${bias}px low)`);
+    }
   }
 
   // ================= SETTINGS page 2: actions =================
   {
     const hintY = c.P2_PWR_Y + c.P2_BTN_H + c.SP_3;
-    const hintEnd = hintY + Math.floor(lineH(T_META) / 2);
+    const hintEnd = mcBox(b, T_META, hintY)[1];
     // FOUR buttons on board 1, THREE on board 2 - which has no capture path, so no
     // MIC TEST and no slot reserved for one (`#if BOARD_HAS_MIC` in the .ino, which
     // geom-common.mjs now honours; it used to read the no-mic arm for both boards
@@ -392,8 +483,17 @@ for (const b of [1, 2]) {
           `page 2: ${p2[i][0]} at ${p2[i][1]} == ${p2[i - 1][0]} (${p2[i - 1][1]}) + ${c.P2_BTN_H} + gap ${c.P2_GAP}`);
     chk(c.P2_BTN_H >= c.TAP_MIN, `action button ${c.P2_BTN_H}px tall >= TAP_MIN ${c.TAP_MIN}`);
     chk(hintEnd < contentBottom, `page 2 hint ends ${hintEnd} above the footer ${contentBottom}`);
-    for (const l of P2_LABELS) chk(textWidth(l, T_BODY) + 2 * c.SP_3 <= c.CARD_W, `action label "${l}" ${textWidth(l, T_BODY)}px inside the ${c.CARD_W}px button`);
-    chk(textWidth(P2_HINT, T_META) <= W - 8, `page 2 hint ${textWidth(P2_HINT, T_META)}px inside the ${W}px panel`);
+    for (const l of P2_LABELS) chk(widthB(b, 2, l) + 2 * c.SP_3 <= c.CARD_W, `action label "${l}" ${widthB(b, 2, l)}px inside the ${c.CARD_W}px button`);
+    // BOTH arms of #if BOARD_HAS_TOUCH_SLEEP_WAKE, on both boards. uiHint centres
+    // with MC_DATUM on the panel, so the box is symmetric in x and the constraint
+    // is the panel width - and the string board 2 draws is the one board 1 does
+    // not compile, so checking only the touch-wake arm measured nothing about it.
+    for (const h of P2_HINTS)
+      chk(widthB(b, T_META, h) <= W - 8, `page 2 hint "...${h.slice(-18)}" ${widthB(b, T_META, h)}px inside the ${W}px panel`);
+    {
+      const [t0, t1] = mcBox(b, T_META, hintY);
+      chk(t1 < contentBottom, `page 2 hint box ${t0}..${t1} above the footer ${contentBottom}`);
+    }
   }
 
   // ================= SETTINGS page 3: paired Macs =================
@@ -409,6 +509,25 @@ for (const b of [1, 2]) {
     chk(c.P3_LIST_Y >= c.P3_ANY_Y + c.H_ROW + c.SP_1,
         `page 3: list starts ${c.P3_LIST_Y}, clear of the ANY row (${c.P3_ANY_Y}..${c.P3_ANY_Y + c.H_ROW - 1}) plus SP_1`);
     chk(c.P3_X_W >= 40, `the "forget" x zone is ${c.P3_X_W}px wide`);
+    // uiListRow's LABEL LANE, which nothing measured: the label is drawn at x+SP_3
+    // with NO fitText, and the "ONLY" tag is right-aligned to x+w-rightInset where
+    // drawHostsPageStatic passes P3_X_W + SP_2. hosts[].label is char[20], and the
+    // row prepends "\xB7 ", so the widest row is 21 characters.
+    const rowStr = "\xB7 " + "M".repeat(HOST_LABEL_MAX);
+    const rowW = widthB(b, 2, rowStr);
+    const tagX = c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2) - widthB(b, T_META, "ONLY");
+    chk(c.CARD_X + c.SP_3 + rowW < tagX,
+        `page 3: widest row (${rowStr.length} chars, ${rowW}px) ends ${c.CARD_X + c.SP_3 + rowW}, clear of the ONLY tag at ${tagX}`);
+    // The tag's own right edge against the "x", which is drawn MC at
+    // CARD_X + CARD_W - P3_X_W/2 - that is the overlap rightInset exists to prevent.
+    const xGlyphL = c.CARD_X + c.CARD_W - Math.floor(c.P3_X_W / 2) - Math.floor(widthB(b, 2, "x") / 2);
+    chk(c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2) < xGlyphL,
+        `page 3: ONLY tag ends ${c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2)}, clear of the "x" at ${xGlyphL}`);
+    // The row's own label box, MC-biased low like every other centred label.
+    {
+      const [t0, t1] = mcBox(b, 2, Math.floor(c.H_ROW / 2));
+      chk(t0 >= 0 && t1 <= c.H_ROW - 1, `page 3: row label box +${t0}..+${t1} inside the ${c.H_ROW}px row`);
+    }
   }
 
   // ================= SETTINGS: the confirm dialog =================
@@ -420,18 +539,28 @@ for (const b of [1, 2]) {
     chk(c.CFM_Y + c.CFM_H <= contentBottom, `dialog ends ${c.CFM_Y + c.CFM_H} inside the region (${contentBottom})`);
     chk(c.CFM_BTN_Y + c.H_BTN <= c.CFM_Y + c.CFM_H - c.BORDER_CARD,
         `dialog buttons end ${c.CFM_BTN_Y + c.H_BTN} clear of the card's 2px border`);
-    chk(lane < 60 * 6, `dialog lane ${lane}px is under wrapLineLen's 60-character ceiling`);
-    let worstBlock = 0;
+    // wrapLineLen()'s 60-character ceiling, at the board's OWN advance - the lane
+    // used to be divided by a literal 6 here, which is 45 characters of a 272px
+    // board-2 lane that actually holds 34.
+    const laneChars = Math.floor(lane / advanceB(b, T_META));
+    console.log(`    lane holds ${laneChars} characters at ${advanceB(b, T_META)}px`);
+    chk(laneChars <= 60, `dialog lane ${lane}px = ${laneChars} chars, under wrapLineLen's 60-character ceiling`);
+    let worstBlock = 0, wrapped = 0;
     for (const [title, emph, note, yes] of DIALOGS) {
-      const nl = countWrappedLines(note, T_META, lane);
-      // drawConfirm draws min(nl, 2) lines - a note needing 3 would be CLIPPED.
+      // WRAPPED PER BOARD. At 6px none of the four notes wrapped; at 8px two of
+      // them do, so the two-line height stopped being hypothetical and became the
+      // case that ships. drawConfirm draws min(nl, 2) - a note needing 3 is CLIPPED.
+      const nl = countWrappedLinesB(b, note, T_META, lane);
+      if (nl > 1) wrapped++;
       chk(nl <= 2, `dialog note "${note.slice(0, 24)}..." wraps to ${nl} line(s) (3+ would be silently clipped)`);
-      const block = lineH(T_HEAD) + (emph ? c.SP_2 - 2 + lineH(T_BODY) : 0) + c.SP_2 + Math.min(nl, 2) * lineH(T_META);
+      const block = lineHB(b, T_HEAD) + (emph ? c.SP_2 - 2 + lineHB(b, T_BODY) : 0)
+                  + c.SP_2 + Math.min(nl, 2) * lineHB(b, T_META);
       worstBlock = Math.max(worstBlock, block);
-      chk(textWidth(title, T_HEAD) <= lane, `dialog title "${title}" ${textWidth(title, T_HEAD)}px inside the ${lane}px lane`);
-      chk(textWidth(yes, T_BODY) + 8 <= c.CFM_BTN_W, `dialog action "${yes}" ${textWidth(yes, T_BODY)}px inside the ${c.CFM_BTN_W}px button`);
+      chk(widthB(b, T_HEAD, title) <= lane, `dialog title "${title}" ${widthB(b, T_HEAD, title)}px inside the ${lane}px lane`);
+      chk(widthB(b, 2, yes) + 8 <= c.CFM_BTN_W, `dialog action "${yes}" ${widthB(b, 2, yes)}px inside the ${c.CFM_BTN_W}px button`);
     }
-    chk(textWidth("CANCEL", T_BODY) + 8 <= c.CFM_BTN_W, `dialog "CANCEL" inside the ${c.CFM_BTN_W}px button`);
+    console.log(`    ${wrapped} of ${DIALOGS.length} shipping notes wrap to 2 lines on this board`);
+    chk(widthB(b, 2, "CANCEL") + 8 <= c.CFM_BTN_W, `dialog "CANCEL" inside the ${c.CFM_BTN_W}px button`);
     // THE TWO BUTTONS SIDE BY SIDE, which nothing checked in x at all: CFM_NO_X,
     // CFM_YES_X and CFM_BTN_W were literals at their call site until this port and
     // then unread by any checker, so the pair could have overlapped in the middle of
@@ -451,9 +580,29 @@ for (const b of [1, 2]) {
     chk(c.H_BTN >= c.TAP_MIN, `H_BTN ${c.H_BTN} (every shared button's height) >= TAP_MIN ${c.TAP_MIN}`);
     chk(c.CFM_Y >= c.PAGE_TOP, `dialog starts ${c.CFM_Y}, at or below PAGE_TOP ${c.PAGE_TOP} (it must not cover the pager)`);
     // Sized for a two-line note whether or not today's strings need one.
-    const twoLineBlock = lineH(T_HEAD) + c.SP_2 - 2 + lineH(T_BODY) + c.SP_2 + 2 * lineH(T_META);
+    const twoLineBlock = lineHB(b, T_HEAD) + c.SP_2 - 2 + lineHB(b, T_BODY) + c.SP_2 + 2 * lineHB(b, T_META);
     chk(twoLineBlock <= avail, `dialog holds its worst block (${twoLineBlock}px: title + emph + 2 note lines) in ${avail}px`);
-    console.log(`    worst block among today's four dialogs: ${worstBlock}px`);
+    console.log(`    worst block among today's dialogs: ${worstBlock}px, worst possible ${twoLineBlock}px in ${avail}px`);
+    // THE BLOCK'S REAL PAINTED EXTENT, walked the way drawConfirm walks it, because
+    // blockH is a sum of CELLS and every centred element inside it paints a
+    // LOW-BIASED box. The title's box reaches 3 rows past its nominal cell on
+    // board 2 - so the check that matters is that no element's box touches the one
+    // below it, and that the last note line clears the button row.
+    {
+      const cy = top + Math.floor((avail - twoLineBlock) / 2);
+      const tBox = mcBox(b, T_HEAD, cy + Math.floor(lineHB(b, T_HEAD) / 2));
+      const eY = cy + lineHB(b, T_HEAD) + c.SP_2 - 2;
+      const eBox = mcBox(b, T_BODY, eY + Math.floor(lineHB(b, T_BODY) / 2));
+      const nY = eY + lineHB(b, T_BODY) + c.SP_2;
+      const n0 = tlBox(b, T_META, nY), n1 = tlBox(b, T_META, nY + lineHB(b, T_META));
+      console.log(`    block at ${cy}: title ${tBox.join("..")} emph ${eBox.join("..")} notes ${n0.join("..")} / ${n1.join("..")}`);
+      chk(tBox[1] < eBox[0], `dialog title box ends ${tBox[1]} above the emphasis line at ${eBox[0]}`);
+      chk(eBox[1] < n0[0], `dialog emphasis box ends ${eBox[1]} above the first note line at ${n0[0]}`);
+      chk(n1[1] < c.CFM_BTN_Y, `dialog last note line ends ${n1[1]} above the button row at ${c.CFM_BTN_Y}`);
+      chk(tBox[0] >= top, `dialog title box starts ${tBox[0]}, inside the card interior (${top})`);
+      // The emphasis is fitText'd to the lane into a char[40] buffer.
+      chk(40 >= laneChars + 1, `emphBuf[40] holds the ${laneChars} characters the lane can show + NUL`);
+    }
   }
 
   // ================= THE KEYBOARD =================

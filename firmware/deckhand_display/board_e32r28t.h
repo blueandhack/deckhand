@@ -419,6 +419,19 @@ const int DROW_BT = 24, DROW_USB = 52, DROW_BATT = 80, DROW_ID = 100;
 // many links are actually used, so a single remaining Mac always draws in
 // the first slot rather than leaving a gap where the other one used to be.
 const int DROW_MAC0 = 120, DROW_MAC1 = 140;
+// The battery READING's vertical offset from the "Battery" label beside it, and
+// board 1's value is the one that already shipped: 4. Named here only so board 2
+// can differ - at a 13px line the stagger is invisible, at 16px it reads as two
+// halves of one row failing to line up. Substituting the literal it replaces,
+// so this binary cannot move.
+const int DROW_BATT_VAL_DY = 4;
+// drawConnRow()'s erase box, likewise the shipping values (100 x 16). The WIDTH
+// has to cover the widest string the row draws, "Not connected", which is 78px in
+// Cozette 6x13 - so 100 has 22px of headroom here and had NONE on board 2 at 8px
+// (104), which is why this became a constant. The HEIGHT must cover
+// uiLineH(T_BODY): 16 against 13 here, i.e. 3 rows of free clearance.
+const int CONN_TEXT_W = 100;
+const int CONN_TEXT_H = 16;
 
 // Per-Mac link rows. "Mac  feedfeed  999s ago" (a bare 11-char hostId with no
 // tag, plus a generously wide age) is 26 chars - MAC_ROW_W pads to 28. Indexed

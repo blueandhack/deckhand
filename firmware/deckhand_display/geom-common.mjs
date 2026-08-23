@@ -298,3 +298,150 @@ export function cacheSizes(file) {
 }
 
 export const PANEL = { 1: [240, 320], 2: [320, 480] };
+
+// ============================================================================
+// PER-BOARD TEXT MEASUREMENT
+// ============================================================================
+// textWidth()/lineH() above know ONE type scale - Cozette plus Terminus, i.e.
+// board 1's - because that was every board's scale when they were written. It is
+// not any more: board 2 draws a native Spleen scale (8x16 body, 12x24 head, 32x64
+// hero), so anything measured through them for board 2 describes a layout the
+// panel does not render. That is the same defect class as a counted character
+// lane, and this branch has already shipped three of those.
+//
+// This is that machinery's HOME, deliberately: sessions-geom-check.mjs grew its
+// own copy first and settings-geom-check.mjs would have been the third, at which
+// point the copies drift and a checker blesses a layout the panel draws
+// differently - the exact failure the checkers exist to prevent. The mapping comes
+// from UI_FONTS[] in deckhand_display.ino rather than a literal table, so a font
+// swap fails a checker instead of drifting past it.
+function parseGfxFontFile(file) {
+  const src = read(file);
+  const gl = src.slice(src.indexOf("Glyphs[]"));
+  const rows = [...gl.matchAll(/\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\}/g)];
+  return rows.map(m => ({ w: +m[2], h: +m[3], xa: +m[4], xo: +m[5], yo: +m[6] }));
+}
+// UI_FONTS[] both arms: index -> { face, size, cellH }. A shape this does not
+// recognise THROWS - a parser that silently falls back to a default is worse than
+// the literal it replaced.
+function parseUiFonts() {
+  const src = read("deckhand_display.ino");
+  const at = src.indexOf("UI_FONTS[] = {");
+  if (at < 0) throw new Error("parseUiFonts(): UI_FONTS[] = { not found");
+  let ifStart = -1, idx = -1;
+  while ((idx = src.indexOf("#if BOARD_USES_TFT_ESPI", idx + 1)) >= 0 && idx < at) ifStart = idx;
+  const ifEnd = src.indexOf("#endif", ifStart);
+  if (ifStart < 0 || ifEnd < at) throw new Error("parseUiFonts(): no #if/#endif pair around UI_FONTS[]");
+  const arms = src.slice(ifStart, ifEnd).split(/\n#else\b/);
+  if (arms.length !== 2) throw new Error(`parseUiFonts(): expected one #else, found ${arms.length - 1}`);
+  const rowsOf = (arm) => {
+    const a = arm.indexOf("UI_FONTS[] = {");
+    if (a < 0) throw new Error("parseUiFonts(): UI_FONTS[] missing from one arm");
+    const rows = [...arm.slice(a, arm.indexOf("};", a))
+      .matchAll(/\{\s*&(\w+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}/g)]
+      .map(m => ({ face: m[1], size: +m[2], cellH: +m[3] }));
+    if (rows.length !== 5) throw new Error(`parseUiFonts(): expected 5 rows, found ${rows.length}`);
+    return rows;
+  };
+  return { 1: rowsOf(arms[0]), 2: rowsOf(arms[1]) };
+}
+export const UI = parseUiFonts();
+const GLYPHS = {};
+function glyphsFor(face) {
+  if (!GLYPHS[face]) GLYPHS[face] = parseGfxFontFile(`${face}.h`);
+  return GLYPHS[face];
+}
+// The board's own cell height for a font id - what uiLineH() returns on it.
+export function lineHB(b, id) { return UI[b][id].cellH; }
+// Full string width, the panel's own rule: every character but the LAST is charged
+// xAdvance, the last xOffset + width. Board 1 goes through textWidth() above, which
+// preflight() checks against 136 widths recorded from the real device.
+export function widthB(b, id, s) {
+  if (b === 1) return textWidth(s, id);
+  const { face, size } = UI[b][id];
+  const g = glyphsFor(face);
+  let w = 0;
+  for (let i = 0; i < s.length; i++) {
+    const q = g[s.charCodeAt(i) - 0x20];
+    if (!q) continue;
+    if (i === s.length - 1) w += (q.xo + q.w) * size;
+    else w += q.xa * size;
+  }
+  return w;
+}
+// One glyph's advance. Board 2's faces are genuinely monospace, which is ASSERTED
+// rather than assumed: a regenerated font that broke it must fail loudly.
+export function advanceB(b, id) {
+  const { face, size } = UI[b][id];
+  if (b === 1) return textWidth("AA", id) - textWidth("A", id);  // cancels the last-char rule
+  const g = glyphsFor(face);
+  for (const q of g)
+    if (q.xo !== 0 || q.w !== q.xa)
+      throw new Error(`advanceB(): ${face} is no longer monospace - this needs the real last-char rule`);
+  return g[0].xa * size;
+}
+// A face's ASCENT (ink rows above the baseline), read from the glyph table - the
+// same source the shim's own _glyphAb is computed from.
+export function ascentB(b, id) {
+  const g = b === 1 ? glyphsFor(UI[1][id].face) : glyphsFor(UI[b][id].face);
+  let a = 0;
+  for (const q of g) a = Math.max(a, -q.yo);
+  return a * UI[b][id].size;
+}
+// THE BOX drawString ACTUALLY PAINTS, which is not the same rectangle as the cell
+// and is the whole reason this helper exists. drawString paints ONE OPAQUE BOX
+// ascent+descent tall before any glyph, and MC_DATUM centres on the ASCENT ONLY
+// (panel_text.cpp:277-327, and TFT_eSPI upstream does the same) - so the box lands
+// at [y - floor(ascent/2), that + cellH - 1], biased LOW by half the descent. On
+// board 2 that is 2px at T_BODY and 3px at T_HEAD, which is what destroyed the
+// status pill; board 1 has the same bias but its 13px box in an 18px pill absorbs
+// it. Returned as [top, bottom] inclusive.
+export function mcBox(b, id, y) {
+  const top = y - Math.floor(ascentB(b, id) / 2);
+  return [top, top + lineHB(b, id) - 1];
+}
+// TL_DATUM/TR_DATUM: the box origin IS y.
+export function tlBox(b, id, y) { return [y, y + lineHB(b, id) - 1]; }
+// drawIfChanged's own ERASE rect, which is a DIFFERENT rectangle again: it clears
+// fillRect(fx-1, fy-1, tw+2, th+2) where th is the cell and fy is y (top datums) or
+// y - th/2 (the M datums) - i.e. it uses the CELL for centring where drawString
+// uses the ascent, so the two disagree by exactly the bias above. A field's real
+// painted extent is the UNION, and that is what has to be disjoint from its
+// neighbours.
+export function ifBox(b, id, y, datum = "T") {
+  const th = lineHB(b, id);
+  const fy = datum === "M" ? y - Math.floor(th / 2) : y;
+  return [fy - 1, fy - 1 + th + 1];
+}
+// The union of the two: what a drawIfChanged field really paints.
+export function fieldBox(b, id, y, datum = "T") {
+  const e = ifBox(b, id, y, datum);
+  const d = datum === "M" ? mcBox(b, id, y) : tlBox(b, id, y);
+  return [Math.min(e[0], d[0]), Math.max(e[1], d[1])];
+}
+// wrapLineLen()/countWrappedLines() from deckhand_display.ino, measured per board.
+// The 60-character ceiling and the "break no further back than half the line" rule
+// are both real: the first caps every lane on the device, the second is why word
+// wrap's worst case can leave a line barely half full.
+export function wrapLineLenB(b, text, pos, maxW, id) {
+  const len = text.length - pos;
+  let n = 0;
+  while (n < len && n < 60) {
+    if (text[pos + n] === "\n") return n;
+    if (widthB(b, id, text.slice(pos, pos + n + 1)) > maxW) break;
+    n++;
+  }
+  if (n >= len) return n;
+  if (n === 0) return 1;
+  for (let k = n; k > Math.floor(n / 2); k--) if (text[pos + k - 1] === " ") return k;
+  return n;
+}
+export function countWrappedLinesB(b, text, id, maxW) {
+  let pos = 0, lines = 0;
+  while (pos < text.length && lines < 80) {
+    pos += wrapLineLenB(b, text, pos, maxW, id);
+    if (pos < text.length && text[pos] === "\n") pos++;
+    lines++;
+  }
+  return lines;
+}

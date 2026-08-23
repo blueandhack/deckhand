@@ -919,58 +919,101 @@ const int PAGER_BTN_W  = 60;
 const int PAGER_BTN_X0 = 8;
 const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 
-// THE PAGE REGION IS PAGE_TOP(104)..contentBottom(462) = 358px, against board 1's
-// 222. THE RHYTHM IS SP_3 (12) ON EVERY PAGE, and the cost is stated rather than
-// hidden: every page is TOP-ALIGNED under the pager and leaves real trailing air
-// (147px on STATUS, 66 on DISPLAY & SOUND, 92 on ACTIONS, 110 on PAIRED MACS with
-// four Macs). The alternative - growing the gaps until the last row lands 8px
-// above the footer, the way the USAGE column does - was rejected on arithmetic,
-// not on taste: it needs a 29px gap inside the STATUS card, whose connection rows
-// are 16 rows tall, and a gap wider than the rows it separates stops reading as
-// one list. 12 is under the shortest row on every page (16 on STATUS), so the
-// same number works on all four and no page invents its own.
-// Why 12 and not the 8 the USAGE column and the detail card use: at 8 the four
-// pages are a small block against the top of a 480px panel with a quarter of it
-// blank below, and 8 is the rhythm INSIDE a card rather than between rows of one.
+// THE PAGE REGION IS PAGE_TOP(104)..contentBottom(460) = 356px, against board 1's
+// 222. (462 in an earlier revision of this comment: FOOTER_H went 18 -> 20 when
+// the footer's line became 16px, which moved contentBottom() with it. Two pixels,
+// but a page region quoted from a stale contentBottom is exactly how a last row
+// gets blessed against a footer it actually touches.)
+//
+// THE RHYTHM IS TWO NUMBERS, NOT ONE, and the split is what the 16px line forced:
+// SP_3 (12) BETWEEN cards and page rows, SP_2 (8) BETWEEN THE ROWS INSIDE a card.
+// The previous revision used 12 everywhere and said so; it also said "8 is the
+// rhythm INSIDE a card rather than between rows of one", which is the rule now
+// actually applied. It had to be, arithmetically: six 16px rows plus a label at a
+// 12px inter-row gap is a 216px STATUS card, where at SP_2 it is 176 - and a card
+// whose own rows are 16px tall separated by 12 is a gap most of a row wide, which
+// is the thing the comment above already says stops reading as one list.
+//
+// Every page is still TOP-ALIGNED under the pager. Trailing air, re-derived at
+// 16px: 168px on STATUS, 22 on DISPLAY & SOUND, 148 on ACTIONS, 108 on PAIRED
+// MACS with four Macs. Growing the gaps until the last row lands 8px above the
+// footer, the way the USAGE column does, is still rejected on the same
+// arithmetic: it needs a gap wider than the 16px rows it separates.
 
-// ---------- SETTINGS page 0: the DEVICE card ----------
-// SIZED BY ITS CONTENTS, like the stepper card and unlike the USAGE column - it
-// carries six rows and no more, so it is 200 tall in a 358px region.
+// ---------- SETTINGS page 0: the DEVICE card, then the LINK card ----------
+// BOTH CARDS ARE SIZED BY THEIR CONTENTS, like the stepper card and unlike the
+// USAGE column, and both are laid out on ONE nominal row pitch: 24 = a 16px line
+// (uiLineH(T_BODY)) plus SP_2. Six rows for DEVICE, four for LINK.
+//
+// WHY 24 AND NOT THE 28 THIS CARD USED TO HAVE. 28 was a 13px line plus 15, and
+// the 13 is gone; keeping 28 would spend 226px on the DEVICE card and leave the
+// page unable to hold the LINK card at all (226 + 12 + 160 = 398 against 356).
+// At 24 the two cards are 176 and 128, which is 328 of the region with 28px of
+// trailing air. The physical cost is stated rather than hidden: board 1's rows are
+// 28px apart at 5.624 px/mm = 2.67mm of gap, and 8px here is 1.23mm, so these two
+// cards are the one place on this board where the rhythm is TIGHTER than board 1
+// rather than looser. The alternative was not having the LINK card.
 //
 // CHECK CLEAR BOXES, NOT GLYPHS, the same discipline the USAGE card is built on.
-// The extents below are what each row actually paints:
-//   - a connection row is drawConnRow(): fillRect(xRight-100, y, 100, 16), i.e.
-//     y..y+15, plus a 13px dot centred at y+8 (y+1..y+15)
-//   - the battery row is that dot plus drawIfChanged at y+4 (TR_DATUM, 13px),
-//     clearing y+3..y+17
-//   - ID and the two Mac rows are 13px lines clearing y-1..y+13
+// A field drawn through drawIfChanged clears y-1..y+cellH, i.e. ONE ROW ABOVE AND
+// ONE BELOW its own 16px box - which is why the printed gaps below run 12/8/7/7/6
+// rather than a flat 12/8/8/8/8. That is the overhang, not a varying rhythm.
+// What each row actually paints:
+//   - a connection row is drawConnRow(): fillRect(xRight-CONN_TEXT_W, y,
+//     CONN_TEXT_W, CONN_TEXT_H), i.e. y..y+15, plus a 13px dot centred at y+8
+//   - the battery row is that dot plus drawIfChanged at y+DROW_BATT_VAL_DY
+//   - ID is a plain 16px line at +DROW_ID, clearing nothing extra
+//   - the Mac rows and every LINK value are 16px lines clearing y-1..y+16
 //
 //   +0..+1     border
-//   +2..+5     pad
-//   +6..+18    "DEVICE" label (13px, drawn at +6)
-//   +19..+30   gap 12
-//   +31..+46   Bluetooth      (DROW_BT)
-//   +47..+58   gap 12
-//   +59..+74   USB            (DROW_USB)
-//   +75..+86   gap 12
-//   +87..+104  Battery        (DROW_BATT: dot +88..+102, reading clear +90..+104)
-//   +105..+116 gap 12
-//   +117..+131 device id      (DROW_ID +118, clear from +117)
-//   +132..+143 gap 12
-//   +144..+158 Mac link row 0 (DROW_MAC0 +145)
-//   +159..+170 gap 12
-//   +171..+185 Mac link row 1 (DROW_MAC1 +172)
-//   +186..+197 gap 12
-//   +198..+199 border                                              = 200
-// The 2px border owns +198..+199 so nothing may end past +197; the last clear
-// ends +185, 12 rows clear. Board 1's equivalent card is 160 with 6px of slack.
+//   +2..+5     pad 4
+//   +6..+21    "DEVICE" label (16px cell, drawn at +6)
+//   +22..+33   gap 12 (SP_3 - a card's own label is not one of its rows)
+//   +34..+49   Bluetooth      (DROW_BT;  dot +35..+48)
+//   +50..+57   gap 8
+//   +58..+73   USB            (DROW_USB)
+//   +74..+80   gap 7
+//   +81..+98   Battery        (DROW_BATT 82: label +82..+97, dot +83..+96,
+//                              reading clears +81..+98)
+//   +99..+105  gap 7
+//   +106..+121 device id      (DROW_ID)
+//   +122..+128 gap 7
+//   +129..+146 Mac link row 0 (DROW_MAC0 130, clears +129..+146)
+//   +147..+152 gap 6
+//   +153..+170 Mac link row 1 (DROW_MAC1 154, clears +153..+170)
+//   +171..+173 pad
+//   +174..+175 border                                              = 176
+// The 2px border owns +174..+175 so nothing may end past +173; the last clear
+// ends +170, 3 rows clear. Board 1's equivalent card is 160 with 6px of slack.
 const int DEV_CARD_Y = PAGE_TOP + 12;   // 116
-const int DEV_CARD_H = 200;
-const int DROW_BT = 31, DROW_USB = 59, DROW_BATT = 87, DROW_ID = 118;
+const int DEV_CARD_H = 176;             // 116..291
+const int DROW_BT = 34, DROW_USB = 58, DROW_BATT = 82, DROW_ID = 106;
 // Two fixed row SLOTS, not one per hostLinks[] index - renderMacLinkRows()
 // compacts to however many links are used, so one remaining Mac always draws in
 // slot 0 rather than leaving a hole where the other one was.
-const int DROW_MAC0 = 145, DROW_MAC1 = 172;
+const int DROW_MAC0 = 130, DROW_MAC1 = 154;
+// 0, WHERE BOARD 1 HAS 4, and this constant exists because that 4 was invisible
+// at 13px and is not at 16. The battery READING is drawn DROW_BATT_VAL_DY below
+// the "Battery" label beside it; on board 1 that is a 4px stagger between two 13px
+// lines, which ships and is left exactly as it is. At 16px the same 4 reads as two
+// halves of one row failing to line up, so this board draws them on the same
+// baseline. It is a board constant rather than a literal for the usual reason:
+// board 1 substitutes its own 4 and its binary cannot move.
+const int DROW_BATT_VAL_DY = 0;
+// THE CONNECTION ROW'S ERASE BOX, and the width is DATA-derived and was WRONG.
+// drawConnRow right-aligns "Connected" or "Not connected" and clears a fixed box
+// first; the box was a literal 100 on both boards, which covers 13 Cozette
+// characters (78px) with room to spare and 13 Spleen characters (104px) NOT AT
+// ALL. The uncovered 4px is the left edge of the "N", so going Not connected ->
+// Connected left a sliver of the old string behind - a ghost small enough to read
+// as a rendering artefact rather than as a stale value. 112 is 14 characters at
+// this board's 8px advance, i.e. the widest string plus one.
+// The HEIGHT is 16 on both boards: it must cover uiLineH(T_BODY), which is exactly
+// 16 here and 13 on board 1 (where the extra 3 rows are free clearance). Named so
+// settings-geom-check.mjs can assert that relationship instead of reading a
+// literal it would have to regex out of the .ino.
+const int CONN_TEXT_W = 112;
+const int CONN_TEXT_H = 16;
 // 28, UNCHANGED, and this is one of the few numbers that is genuinely NOT
 // panel-derived: it is the width of the DATA. "Mac  feedfeed  999s ago" - a bare
 // 11-character hostId with no tag, plus a generously wide age - is 23 characters,
@@ -978,82 +1021,126 @@ const int DROW_MAC0 = 145, DROW_MAC1 = 172;
 // what makes a row that goes away actually get ERASED rather than merely stop
 // updating (the erase box is sized to the padded text). macRowCache is shared at
 // [40]: worst case 28 (text) + 1 (\x01 sentinel) + 2 (icon id) + 1 (NUL) = 32.
-// Lane check: the row starts at CARD_X + PAD = 30 and its erase box is
-// 28*6 + 4 + 13 + 2 = 187 wide, ending at 216 inside a card that runs to 308.
+// Lane check, AT THIS BOARD'S OWN ADVANCE: the row starts at CARD_X + PAD = 30 and
+// renderMacLinkRows() sizes its erase box from a MEASURED tft.textWidth(), which
+// at 8px is 28*8 + 4 + 13 + 2 = 243 wide, ending at 273 inside a card whose
+// interior runs to 305. (The old comment did this multiplication at 6px, which was
+// true of every board when it was written and is now true of one.)
 const int MAC_ROW_W = 28;
 
 // ---------- SETTINGS page 1: the stepper cards ----------
-// THE CARD IS SIZED BY THE KEY, which is the property board 1's rework existed to
-// get: the label moved into the MIDDLE column - above the value it names, clear of
-// both key columns - precisely so the keys own the whole interior height.
-// STEP_BTN_SIZE is TAP_MIN + 4 = 50, the same "4px OVER, not merely at it"
-// relationship board 1 has at 40 + 4 = 44, and 6px of air above and below it
-// (board 1: 4) gives 2 + 6 + 50 + 6 + 2 = 66.
+// THE CARD IS NO LONGER SIZED BY THE KEY, AND SAYING SO IS THE POINT. Board 1's
+// rework moved the label into the MIDDLE column - above the value it names, clear
+// of both key columns - precisely so the keys could own the whole interior height,
+// and this file inherited that sentence. At a 16px label, a 24px value and an 8px
+// bar it is simply no longer true: the middle column needs 16 + 28 + 8 = 52 rows
+// of content, and with SP_2 between its three bands and 4px of pad top and bottom
+// that is a 76-row INTERIOR - where the key needed 50 + 12 = 62. The taller of the
+// two now sets the card, so the middle column does.
+//
+// (The 28 is the VALUE's real painted extent, not its 24px cell: drawIfChanged
+// clears cy-13..cy+12 for a 24px box under MC_DATUM while drawString paints
+// cy-9..cy+14, because MC_DATUM centres on the ASCENT and biases the box low by
+// half the descent. The union is 28 rows. Using 24 here is what put the value's
+// own opaque box one row into the bar - see the previous revision's +35/+49.)
+//
+// STEP_BTN_SIZE IS THEREFORE 64, NOT 50, and it is grown to the interior rather
+// than left floating in it. 50 was TAP_MIN + 4, the same "4px over, not merely at
+// it" relation board 1 has at 40 + 4; a 50px key in a 76px interior would sit in
+// 13px of dead air top and bottom, and a bigger touch target is the only thing
+// that air could buy. 64 = 76 - 2*6, keeping the same 6px of air the 50px key had.
 //
 //   +0..+1    border
-//   +2..+7    air 6
-//   +8..+57   the two +/- keys (STEP_BTN_TOP 8, STEP_BTN_SIZE 50)
-//   +58..+63  air 6
-//   +64..+65  border                                                = 66
+//   +2..+77   interior (76 rows)
+//   +8..+71   the two +/- keys (STEP_BTN_TOP 8, STEP_BTN_SIZE 64)
+//   +78..+79  border                                                = 80
 //
-// The MIDDLE COLUMN's own stack, centred in the interior (+2..+63, 62 rows) and
-// horizontally clear of both keys, so it is checked against the card and not
-// against the key band:
-//   +9..+21   label   (STEP_LABEL_CY 15, MC_DATUM, 13px cell)
-//   +22..+24  gap 3
-//   +25..+44  value   (STEP_VALUE_CY 35, MC_DATUM, T_HEAD; drawIfChanged clears
-//                      cy-10..cy+9, i.e. 20 rows for an 18px cell)
-//   +45..+48  gap 4
-//   +49..+56  BRIGHTNESS bar only (STEP_BAR_Y 49, STEP_BAR_H 8)
-// 7 rows of air above the label and 7 below the bar. Every band is disjoint - the
-// value's fat clear box is what makes that worth stating.
-const int STEPPER_CARD_H = 66;
-const int STEP_LABEL_CY  = 15;
-const int STEP_VALUE_CY  = 35;
-const int STEP_BAR_Y     = 49;
+// The MIDDLE COLUMN's own stack, horizontally clear of both keys, so it is checked
+// against the card and not against the key band:
+//   +2..+5    pad 4
+//   +6..+21   label  (STEP_LABEL_CY 12, MC_DATUM, 16px box +6..+21)
+//   +22..+29  gap 8
+//   +30..+57  value  (STEP_VALUE_CY 43, MC_DATUM, T_HEAD: clears +30..+55,
+//                     paints +34..+57 - the union is what must be disjoint)
+//   +58..+65  gap 8
+//   +66..+73  BRIGHTNESS bar only (STEP_BAR_Y 66, STEP_BAR_H 8)
+//   +74..+77  pad 4
+// Every band is disjoint - the value's fat, LOW-BIASED clear box is what makes
+// that worth stating rather than assuming.
+const int STEPPER_CARD_H = 80;
+const int STEP_LABEL_CY  = 12;
+const int STEP_VALUE_CY  = 43;
+const int STEP_BAR_Y     = 66;
 const int STEP_BTN_TOP   = 8;
-const int STEP_BTN_SIZE  = 50;
+const int STEP_BTN_SIZE  = 64;
 // 8, from board 1's 6: physically 1.23mm against 1.07mm, i.e. the bar keeps its
-// thickness while getting 75% longer (140px of lane against 80), the same trade
-// BAR_H makes on the USAGE cards.
+// thickness while getting longer, the same trade BAR_H makes on the USAGE cards.
 const int STEP_BAR_H     = 8;
-// 10, UNCHANGED. It is the clearance between a key's edge and the bar, and the
-// keys grew by 6 while the card grew by 80 - so this inset is not the constraint
-// on either side. Lane: CARD_X + PAD + 50 + 10 = 90 to 229, against keys at
-// 30..79 and 240..289.
+// 10, UNCHANGED. It is the clearance between a key's edge and the bar, and neither
+// side is the constraint on it. Lane, re-derived for the 64px key:
+// CARD_X + PAD + 64 + 10 = 104 to 215, against keys at 30..93 and 226..289.
 const int STEP_BAR_GAP   = 10;
-// The page: 3 * 66 + H_ROW(46) = 244 of 358, laid out top-aligned on the 12px
-// rhythm - cards at 116 / 194 / 272 and the toggle row at 350..395, 66px clear of
+// The page: 3 * 80 + H_ROW(46) = 286 of 356, laid out top-aligned on the 12px
+// rhythm - cards at 116 / 208 / 300 and the toggle row at 392..437, 22px clear of
 // the footer. Board 1 has 14px for the same five gaps and its own comment says
 // neither its cards nor its toggles could give another pixel.
+//
+// THE THREE TOGGLES, measured at 8px rather than counted: P1_THIRD_W is
+// (CARD_W - 16) / 3 = 93, and the widest of the seven labels the row can show
+// ("FLIPPED", 7 chars = 56px) needs 64 with uiButton's 8px of padding. So the row
+// still fits with 29px to spare per third, and 93 also clears TAP_MIN 46 twice
+// over. uiButton centres its label with MC_DATUM at y + h/2 = y+23, which at a
+// 16px box lands y+17..y+32 inside the 46px row - the 2px low bias is absorbed by
+// 30 rows of slack here, where on the status pill it was fatal.
 const int P1_TOP = 12;
 const int P1_GAP = 12;
 // ---------- SETTINGS page 2: the action buttons ----------
 // H_BTN, where board 1 had to drop to 38 because four buttons plus a hint would
 // not fit at 44 - so these are the one control on this page that was UNDER the
-// floor on board 1 and is over it here. 4 * 50 + 3 * 12 = 236, from 116 to 352,
-// with the hint at 364 (inking 358..370, MC_DATUM) and 92px clear below it.
+// floor on board 1 and is over it here.
+// THREE buttons, not four: BOARD_HAS_MIC is 0 here, so there is no MIC TEST and no
+// slot reserved for one (see the #if in deckhand_display.ino). 3 * 50 + 2 * 12 =
+// 174, from 116 to 289, with the hint at 302 (inking 296..311, MC_DATUM) and 148px
+// clear below it. (An earlier revision of this comment did the four-button
+// arithmetic and put the hint at 364 - it was copied from board 1's chain, which
+// does have the mic button, and the numbers it quoted never described this board.)
+// The 16px pass changes nothing here: these are control heights, and the labels
+// re-measure clear - "CALIBRATE TOUCH" is 15 chars = 120px in a 296px button, and
+// the hint ("power off = deep sleep, RESET to wake", the no-touch-wake arm this
+// board compiles) is 37 chars = 296px centred on a 320px panel, inking 12..307.
 const int P2_TOP   = 12;
 const int P2_BTN_H = 50;
 const int P2_GAP   = 12;
+
 // ---------- SETTINGS: the confirm dialog ----------
 // 28, board 1's 24 held physically (24 / 5.624 * 6.489 = 27.7). Top-anchored to
 // PAGE_TOP exactly as board 1 is, deliberately not centred in the page region:
 // the dialog is modal and must land in the same place regardless of which page it
 // was raised from, and three of the four pages have different lengths.
 //
-// CFM_H 160, sized by the block it holds rather than scaled. drawConfirm() lays
-// its three text elements out as ONE BLOCK centred in the space above the button
-// row, so what the height has to hold is the WORST block: title (T_HEAD, 18) +
-// SP_2-2 + emph (T_BODY, 13) + SP_2 + 2 note lines (26) = 71, above
-// H_BTN(50) + SP_3(12).  2 + 71 + 50 + 12 + 2 = 137, and 160 leaves the block 25
-// rows to be centred in (board 1: 150 against a 71px block leaves 21).
-// WORTH KNOWING: no shipping note actually needs two lines on this board. The
-// lane is CARD_W - 2*SP_3 = 272px = 45 characters, and the longest of the four
-// ("its key is deleted; re-pairs over USB", 37 characters = 222px) fits on one -
-// where on board 1's 192px lane three of the four wrapped. The height is still
-// derived for two, because countWrappedLines() decides that at runtime and a
-// future note is not bound by today's strings.
+// CFM_H 160, sized by the block it holds rather than scaled, and RE-DERIVED at
+// 16px rather than assumed to still fit. drawConfirm() lays its three text
+// elements out as ONE BLOCK centred in the space above the button row, so what the
+// height has to hold is the WORST block: title (T_HEAD, 24) + SP_2-2 + emph
+// (T_BODY, 16) + SP_2 + 2 note lines (32) = 86, against
+// avail = CFM_H - H_BTN - SP_3 - BORDER_CARD = 160 - 50 - 12 - 2 = 96. So the
+// block is centred in 96 rows with 5 above and 5 below, and 160 stands.
+// (Board 1: a 71px block in 86.)
+//
+// THE LANE IS CARD_W - 2*SP_3 = 272px, WHICH IS 34 CHARACTERS AT 8px, and the
+// previous revision's "45 characters" was that same 272 divided by 6. Two of the
+// four shipping notes now wrap where NONE of them did at 6px:
+//   "its key is deleted; re-pairs over USB"   37 chars, 296px -> 2 lines
+//   "5 taps; current setup kept if it fails"  38 chars, 304px -> 2 lines
+//   "every paired Mac is forgotten"           29 chars, 232px -> 1 line
+//   "deep sleep - press RESET to wake"        32 chars, 256px -> 1 line
+// which is why the two-line height was worth deriving for rather than treating as
+// a hypothetical: it is now the case that actually ships. countWrappedLines()
+// still decides at runtime and drawConfirm() draws at most 2, so a future note
+// needing 3 would be CLIPPED - settings-geom-check.mjs asserts against that.
+// The four titles are measured at T_HEAD's 12px advance: the widest
+// ("Recalibrate touch?" and "Reset all pairing?", 18 chars) is 216px in the 272px
+// lane, so none of them can reach the border its opaque box would rub out.
 const int CFM_TOP = 28;
 const int CFM_H   = 160;
 
