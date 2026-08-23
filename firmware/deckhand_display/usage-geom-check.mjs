@@ -31,43 +31,99 @@ import { consts, DIR, lineH, PANEL, preflight, textWidth } from "./geom-common.m
 import fs from "fs";
 preflight();
 
-// BOARD 2's T_BODY/T_META/T_HERO cell heights, from the interface the font-
-// registry task (Task 2) produced and this task consumes verbatim:
-// uiLineH(T_BODY) == 16, uiLineH(T_HERO) == 64. geom-common.mjs's font table
-// predates that swap - it still only knows Cozette/Terminus, one shared table
-// for both boards - so it cannot be asked for board 2's numbers; they are
-// named here instead of re-derived, the same way this file already treats
-// LOGO_SIZE as an external fact to read rather than compute.
-const BODY_H = { 1: 13, 2: 16 };
-
-// BOARD 2's hero, measured (not counted) from Spleen32x64.h directly, because
-// geom-common.mjs's textWidth() has no entry for that font (it was written
-// before board 2 had its own registry and this task's hero is its only
-// caller). Spleen is perfectly monospace - every one of its 95 glyphs
-// declares xAdvance == width and xOffset 0, verified below - so the same
-// "last character is xOffset+width, every other is xAdvance" rule
-// textWidth() applies degenerates to one number per glyph either way; this
-// still parses the real glyph table rather than hardcoding 32, so a
-// regenerated font that broke monospacing would be caught here rather than
-// silently trusted.
-function parseSpleen32x64() {
-  const src = fs.readFileSync(`${DIR}/Spleen32x64.h`, "utf8");
+// A generic GFXfont glyph-table parser and measurer, for the Spleen faces
+// geom-common.mjs's textWidth()/FONTS table has no entry for - that module
+// was written before board 2 had its own registry, and Cozette/Terminus are
+// still its only fonts. Reused for both Spleen8x16 (board 2's T_BODY/T_META)
+// and Spleen32x64 (board 2's T_HERO) rather than one-off copies, so the
+// monospace check below is written and proven once.
+function parseGfxFont(file) {
+  const src = fs.readFileSync(`${DIR}/${file}`, "utf8");
   const gl = src.slice(src.indexOf("Glyphs[]"));
   const rows = [...gl.matchAll(/\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\}/g)];
   return rows.map(m => ({ w: +m[2], h: +m[3], xa: +m[4], xo: +m[5] }));
 }
-const SPLEEN32X64 = parseSpleen32x64();
-for (const g of SPLEEN32X64)
-  if (g.xo !== 0 || g.w !== g.xa) throw new Error("Spleen32x64 is no longer monospace - spleenHeroWidth() needs the real last-char rule");
-function spleenHeroWidth(s) {
+// Every Spleen face declares every glyph's xAdvance == width, xOffset == 0 -
+// genuinely monospace, unlike Cozette (uniform xAdvance 6, but varying ink
+// width/offset - see geom-common.mjs's own last-char rule, which exists
+// because of that). Asserted rather than assumed: a regenerated font that
+// broke monospacing would otherwise be trusted silently, and every Spleen
+// caller below relies on it to skip the last-character special case.
+function spleenWidth(glyphs, s) {
   let w = 0;
   for (let i = 0; i < s.length; i++) {
-    const g = SPLEEN32X64[s.charCodeAt(i) - 0x20];
+    const g = glyphs[s.charCodeAt(i) - 0x20];
     if (!g) continue;
-    w += (i === s.length - 1) ? (g.xo + g.w) : g.xa;
+    if (g.xo !== 0 || g.w !== g.xa)
+      throw new Error(`spleenWidth(): glyph 0x${(s.charCodeAt(i)).toString(16)} is no longer monospace - this needs the real last-char rule`);
+    w += g.xa;
   }
   return w;
 }
+const SPLEEN8X16 = parseGfxFont("Spleen8x16.h");
+const SPLEEN32X64 = parseGfxFont("Spleen32x64.h");
+const spleenBodyWidth = (s) => spleenWidth(SPLEEN8X16, s);   // board 2's T_META/T_BODY
+const spleenHeroWidth = (s) => spleenWidth(SPLEEN32X64, s);  // board 2's T_HERO
+
+// T_META/T_BODY text (font id 1 or 2 - identical face on both boards),
+// measured with whichever font the DEVICE actually draws it in: Cozette via
+// geom-common.mjs's textWidth() on board 1, Spleen8x16 on board 2. This is
+// the fix for the Codex-row lane bug's root cause - every "6px a character"
+// assumption in this file predates board 2 having its own registry, and
+// board 2 draws this face at 8px, not 6.
+function bodyTextWidth(b, s) { return b === 1 ? textWidth(s, 2) : spleenBodyWidth(s); }
+// The real per-board advance, MEASURED rather than named as a bare 6 or 8:
+// textWidth("AA") - textWidth("A") is exactly one glyph's xAdvance, because
+// only the LAST character in a string gets the xOffset+width treatment (see
+// geom-common.mjs's own rule) - so the difference of two same-character
+// strings cancels that out and leaves the plain advance, for either font,
+// without reaching into either parser's internals to read it out directly.
+function bodyAdvance(b) { return bodyTextWidth(b, "AA") - bodyTextWidth(b, "A"); }
+
+// Parse UI_FONTS[] straight out of deckhand_display.ino's #if/#else pair,
+// rather than hand-copying its cell heights into a literal table here - a
+// bare {1:13, 2:16} object drifts silently the moment a font changes and
+// nobody updates this file to match, which is exactly the defect class a
+// checker exists to catch, not commit. LOGO_SIZE (above) is read from its
+// header for the identical reason.
+function parseUiFonts() {
+  const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+  // "#if BOARD_USES_TFT_ESPI" appears four times in this file (the tft
+  // object itself, UI_FONTS[], and two more later on) - so this takes the
+  // LAST such guard at or before UI_FONTS[] = {, not the first one in the
+  // file, which belongs to an unrelated #if/#else a long way upstream.
+  const fontsAt = src.indexOf("UI_FONTS[] = {");
+  if (fontsAt < 0) throw new Error("parseUiFonts(): UI_FONTS[] = { not found at all");
+  let ifStart = -1, idx = -1;
+  while ((idx = src.indexOf("#if BOARD_USES_TFT_ESPI", idx + 1)) >= 0 && idx < fontsAt) ifStart = idx;
+  const ifEnd = src.indexOf("#endif", ifStart);
+  if (ifStart < 0 || ifEnd < 0 || ifEnd < fontsAt) throw new Error("parseUiFonts(): couldn't find the #if BOARD_USES_TFT_ESPI / #endif pair around UI_FONTS[]");
+  const arms = src.slice(ifStart, ifEnd).split(/\n#else\b/);
+  if (arms.length !== 2) throw new Error(`parseUiFonts(): expected exactly one #else inside that block, found ${arms.length - 1}`);
+  const rowsOf = (arm) => {
+    const at = arm.indexOf("UI_FONTS[] = {");
+    if (at < 0) throw new Error("parseUiFonts(): UI_FONTS[] not found in one arm of the #if/#else");
+    const body = arm.slice(at, arm.indexOf("};", at));
+    const rows = [...body.matchAll(/\{\s*&\w+\s*,\s*(\d+)\s*,\s*(\d+)\s*\}/g)].map(m => ({ size: +m[1], cellH: +m[2] }));
+    if (rows.length !== 5) throw new Error(`parseUiFonts(): expected 5 UI_FONTS rows (indices 0..4), found ${rows.length}`);
+    return rows;
+  };
+  return { 1: rowsOf(arms[0]), 2: rowsOf(arms[1]) };
+}
+const UI_FONTS = parseUiFonts();
+// Index 2 is T_BODY (deckhand_display.ino: "const uint8_t T_BODY = 2"), and
+// uiFontIdx() maps a font id straight onto its own array index - both boards'
+// T_META (index 1) and T_BODY (index 2) rows are identical today, so either
+// index would read the same cellH, but 2 is named to match what
+// renderCodexRow() and the stats/foot rows actually pass as their font id.
+const BODY_H = { 1: UI_FONTS[1][2].cellH, 2: UI_FONTS[2][2].cellH };
+// Index 4 is T_HERO. Board 2's hero draws at this native cellH with no
+// override (see drawBigNumber() in deckhand_display.ino) - board 1's does
+// NOT, since its #if BOARD_USES_TFT_ESPI arm overrides tft.setTextSize() up
+// one more mechanical step past its own registry entry (CARD_HERO_SIZE, 3,
+// against the registry's size 2). So only board 2's parsed value is used
+// directly below; board 1 keeps its own heroSize-based figure.
+const HERO_H_NATIVE = { 1: UI_FONTS[1][4].cellH, 2: UI_FONTS[2][4].cellH };
 
 // LOGO_SIZE is a #define rather than a const int, so it is read from the art
 // header the same way settings-geom-check.mjs reads KB_MAX_BYTES out of the host -
@@ -174,7 +230,7 @@ for (const b of [1, 2]) {
   // Native height of the hero glyph itself (not CARD_HERO_H, the box it sits
   // in): board 1 is Cozette pushed to CARD_HERO_SIZE, board 2 is the flat 64
   // Task 2's interface promises (uiLineH(T_HERO) == 64, no size multiplier).
-  const heroGlyphH = b === 1 ? 13 * heroSize : 64;
+  const heroGlyphH = b === 1 ? 13 * heroSize : HERO_H_NATIVE[2];
   const heroWidth = b === 1 ? textWidth("100%", 4, heroSize) : spleenHeroWidth("100%");
   const bands = [
     ["pin bar", c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
@@ -217,8 +273,14 @@ for (const b of [1, 2]) {
         KNOWN_OVERLAPS[b][pair] === gap);
   }
   // --- label row x-wise: label text vs the Mac icon ---
+  // bodyTextWidth(), not textWidth(L, 1): this label is T_META, the same
+  // face the Codex row's lane bug was in, and it was making the identical
+  // Cozette-only assumption for board 2's real Spleen8x16 text. Hand-checked
+  // before this fix: it never actually overflowed (222px real end against a
+  // 277px icon start on board 2), so this was a checker inaccuracy, not
+  // device corruption - fixed anyway since the infrastructure is now here.
   for (const L of ["SESSION - 5 HOUR WINDOW", "WEEK - 7 DAY, ALL MODELS"]) {
-    const end = c.CARD_X + c.PAD + textWidth(L, 1);
+    const end = c.CARD_X + c.PAD + bodyTextWidth(b, L);
     const iconX = c.CARD_X + c.CARD_W - c.PAD - 13;
     chk(end < iconX, `"${L}" ends x=${end}, icon starts x=${iconX}`);
   }
@@ -234,18 +296,47 @@ for (const b of [1, 2]) {
   chk(cb[0][2] < cb[1][1], `codex text clear ends +${cb[0][2]} before bar clear starts +${cb[1][1]}`);
   chk(cb[1][2] <= c.CODEX_H - 3, `codex content ends +${cb[1][2]} <= +${c.CODEX_H - 3} (border owns +${c.CODEX_H - 2}..+${c.CODEX_H - 1})`);
   chk(cb[0][1] >= 2, `codex text clear starts +${cb[0][1]} inside the interior`);
-  // --- the label lane, re-derived exactly as the header claims ---
+  // --- the label lane, re-derived from a MEASURED per-board advance ---
+  // THIS is where the lane overlap lived: both fields draw in font id 2
+  // (T_BODY), Cozette on board 1 (uniform 6px xAdvance) and Spleen8x16 on
+  // board 2 (uniform 8px, genuinely monospace - unlike Cozette, whose ink
+  // widths vary even though its xAdvance doesn't). The header's own /6
+  // formula was carried over unchanged into board 2's derivation, which is
+  // exactly the "counted, not measured" bug this checker exists to catch and
+  // instead blessed - bodyAdvance() below measures it instead of assuming it.
+  const charW = bodyAdvance(b);
   const rightX = c.CARD_X + c.CARD_W - c.PAD;
-  const rightW = c.CODEX_RIGHT_CHARS * 6;
+  const rightW = c.CODEX_RIGHT_CHARS * charW;
   const clearFrom = rightX - rightW - 1;
   const labelX = c.CARD_X + c.PAD;
-  const lane = Math.floor((clearFrom - labelX) / 6);
+  const lane = Math.floor((clearFrom - labelX) / charW);
   chk(lane === c.CODEX_LANE_CHARS,
-      `codex lane: right field at ${rightX} spans ${rightX - rightW}..${rightX}, clears from ${clearFrom}; label at ${labelX}; (${clearFrom}-${labelX})/6 = ${((clearFrom - labelX) / 6).toFixed(2)} -> ${lane}, header says ${c.CODEX_LANE_CHARS}`);
+      `codex lane: right field at ${rightX} spans ${rightX - rightW}..${rightX}, clears from ${clearFrom}; label at ${labelX}; (${clearFrom}-${labelX})/${charW} = ${((clearFrom - labelX) / charW).toFixed(2)} -> ${lane}, header says ${c.CODEX_LANE_CHARS}`);
   chk(c.CODEX_LANE_CACHE >= c.CODEX_LANE_CHARS + 1,
       `lane cache ${c.CODEX_LANE_CACHE} holds ${c.CODEX_LANE_CHARS} chars + NUL`);
+  // The label field is padded to CODEX_LANE_CHARS on every tick (padTo(), so
+  // its own clear box is stable) - so THAT width, measured for real rather
+  // than assumed as charW * CODEX_LANE_CHARS, is what must clear the right
+  // field's own clear-from edge. A space string measures very slightly under
+  // the naive count (the space glyph's last-character ink is narrower than
+  // its advance), which only makes this margin more conservative, not less.
+  const labelPaddedW = bodyTextWidth(b, " ".repeat(c.CODEX_LANE_CHARS));
+  chk(labelX + labelPaddedW <= clearFrom,
+      `codex label's padded width ${labelPaddedW}px (${c.CODEX_LANE_CHARS} chars) ends x=${labelX + labelPaddedW}, right field clears from ${clearFrom}`);
+  // And against the ACTUAL longest strings renderCodexRow() can draw, not the
+  // abstract padded-space case above - padTo() only ADDS trailing spaces, it
+  // never truncates (see its own comment in deckhand_display.ino), so a
+  // content string that is itself longer than CODEX_LANE_CHARS would sail
+  // straight past the check above with nothing to catch it. These are every
+  // snprintf template in renderCodexRow()'s label branches, at their longest
+  // real arguments (a 2-digit hour count, and "studio" - the exact 6-
+  // character worst case MULTITEST injects and macTag() can otherwise emit).
+  for (const s of ["CODEX  23h", "CODEX  7d", "CX studio", "CX    23h"]) {
+    const w = bodyTextWidth(b, s);
+    chk(labelX + w <= clearFrom, `codex label "${s}" (${w}px) ends x=${labelX + w}, right field clears from ${clearFrom}`);
+  }
   // codex icon slot
-  const iconEnd = labelX + textWidth("CX", 2) + 4 + 13;
+  const iconEnd = labelX + bodyTextWidth(b, "CX") + 4 + 13;
   chk(iconEnd < clearFrom, `codex icon ends x=${iconEnd}, right field clears from ${clearFrom}`);
   // --- footer lanes ---
   const y = 0;

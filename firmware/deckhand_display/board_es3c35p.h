@@ -370,33 +370,47 @@ const int CARD_FOOT_Y    = 140;
 const int CODEX_TEXT_Y = 8;
 const int CODEX_BAR_Y  = 37;
 
-// THE LABEL LANE, RE-DERIVED. Board 1's ceiling is 11 characters and every one
-// of the four numbers behind it moves on a wider card, so it is recomputed
-// rather than carried forward. Nothing truncates the label - the device draws
-// every character it is given - the RIGHT-HAND field's clear box simply erases
-// whatever the label left under it, on every tick, a moment later. So the lane
-// is bounded by its neighbour:
+// THE LABEL LANE, RE-DERIVED - AND RE-DERIVED AGAIN, because the first pass
+// through this file (23) carried Cozette's 6px advance over into a formula
+// this board no longer uses. renderCodexRow() draws both fields with font id
+// 2 (T_BODY), which on this board is Spleen8x16 - EVERY glyph declares
+// xAdvance 8 with xOffset 0 (verified: Spleen is genuinely monospace, unlike
+// Cozette, whose ink widths vary but whose xAdvance is uniformly 6 - the fact
+// the original /6 relied on). At the wrong 23 characters x 8px = 184px, the
+// label overlapped the right field's own reserved 20 x 8 = 160px lane by
+// ~84px - and not as a rare worst case: the right field pads to its FULL
+// width on every tick specifically to keep its clear box stable (see
+// renderCodexRow()'s comment on padTo/padLeftTo), so it erased the tail of
+// the label continuously, every ~5s tick, for as long as this board has had
+// its own font registry. Nothing truncates the label - the device draws
+// every character it is given - so the lane is bounded by its neighbour:
 //
 //   right field draws at CARD_X + CARD_W - PAD = 12 + 296 - 18 = 290, TR_DATUM,
-//   padded to CODEX_RIGHT_CHARS (20) = 120px in Cozette's 6px advance
-//     -> it spans x 170..290, and drawIfChanged clears from fx-1 = 169
+//   padded to CODEX_RIGHT_CHARS (20) = 160px in Spleen8x16's 8px advance
+//     -> it spans x 130..290, and drawIfChanged clears from fx-1 = 129
 //   label starts at CARD_X + PAD = 30
-//     -> (169 - 30) / 6 = 23.17 -> 23 characters
+//     -> (129 - 30) / 8 = 12.375 -> 12 characters
 //
-// Board 1's four numbers for comparison: 214, 93, 26, 11. NONE of them survive.
-// Consequence worth knowing: at 23 the tag-versus-window trade in
-// renderCodexRow() is no longer load-bearing here the way it is on board 1
-// ("CODEX  7d studio" is 16), it is only a margin. The logic is kept identical
-// across both boards anyway - a lane that is merely roomier is not a reason for
-// the two panels to render different text.
-const int CODEX_LANE_CHARS  = 23;
+// Board 1 is untouched by any of this - it is still Cozette at 6px, so its
+// own (93 - 26) / 6 = 11.17 -> 11 in board_e32r28t.h is unaffected and stays
+// literal there rather than risking board 1's byte-identical binary on an
+// equivalent-but-different-looking expression. Consequence worth knowing: at
+// 12, the tag-versus-window trade in renderCodexRow() IS load-bearing here
+// too now, the same way it already is on board 1 ("CODEX  7d studio" is 16,
+// over the 12-character ceiling; "CX studio" is 9, comfortably under it) -
+// the roomier-lane assumption in the comment this replaces no longer holds.
+const int CODEX_LANE_CHARS  = 12;
 const int CODEX_RIGHT_CHARS = 20;
-// The buffer AND the change-only cache that hold a CODEX_LANE_CHARS-wide padded
-// string. 32, not 24: a cache exactly as long as its string is this file's
-// oldest silent bug, and 23 + 1 NUL is exactly 24. The declaration and the
-// cacheSize passed at the call site MUST be this same constant - see the long
-// note on cxPctCache/cxRightCache in deckhand_display.ino for what happens when
-// they disagree in either direction.
+// The buffer AND the change-only cache that hold a CODEX_LANE_CHARS-wide
+// padded string. Sized to the RIGHT field's worst case, not the label's -
+// CODEX_LANE_CACHE is shared by both drawIfChanged() calls in
+// renderCodexRow(), and the right field's content ("100%  23h 59m left
+// 23:59", 25 chars) is longer than the label ever is. 32, not 26: a cache
+// exactly as long as its string is this file's oldest silent bug. The
+// declaration and the cacheSize passed at the call site MUST be this same
+// constant - see the long note on cxPctCache/cxRightCache in
+// deckhand_display.ino for what happens when they disagree in either
+// direction.
 const int CODEX_LANE_CACHE = 32;
 
 // ---------- Footer ----------
