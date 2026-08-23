@@ -107,6 +107,19 @@
 // is how its keyboard came to claim 47 columns of a 35-column lane and its reader
 // to report a page budget half again as big as it could draw.
 const int TEXT_ADV = 6;
+// THE BODY/CODE FACE'S CELL HEIGHT - the other half of TEXT_ADV, and named for the
+// same reason: every surface that draws FONT_CODE steps by it, and a literal here
+// describes ONE board's face. == uiLineH(FONT_CODE), which FONT_CODE aliasing
+// T_BODY makes uiLineH(T_BODY) too; the checkers assert that against the parsed
+// UI_FONTS[] table, since uiLineH() is not a constant expression and so cannot be
+// used in a static_assert.
+const int CODE_LINE_H = 13;
+// AND THE HERO CELL, for the same reason and one specific caller: the waiting
+// screen's wordmark is T_HERO with no size override on either board, and the five
+// offsets below it are derived from it. It was a literal 32 gap, which is Cozette's
+// 26 plus 6 - so on this board the 64px wordmark's own opaque box swallowed the
+// device name and the first message line. == uiLineH(T_HERO). (Cozette 6x13 / Cozette 12x26 at size 2.)
+const int HERO_LINE_H = 26;
 const int TAB_BAR_H = 34;
 const int CONTENT_Y = TAB_BAR_H;
 // Persistent footer (clock + last-updated), visible under both tabs. Content
@@ -611,7 +624,7 @@ const int HIST_HDR_TEXT_Y  = 8;    // name (left) and position (right), TL/TR
 const int HIST_RULE_Y      = 22;   // the divider under the header
 const int HIST_TOP         = 28;   // first entry row
 const int HIST_EMPTY_CY    = 130;  // "Asking the Mac..." / "Nothing here"
-const int HIST_LINE_H      = 13;   // Cozette
+const int HIST_LINE_H      = CODE_LINE_H;   // the code cell, Cozette 6x13
 // THE SCRUBBER, and its band is where the drawn/tested split matters most: the
 // track is 16 tall and so is its tap band on this board, i.e. 2.8mm - well under
 // TAP_MIN and the tightest control in the reader. It cannot be grown here (the

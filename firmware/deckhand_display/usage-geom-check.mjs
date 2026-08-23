@@ -79,6 +79,11 @@ function bodyTextWidth(b, s) { return b === 1 ? textWidth(s, 2) : spleenBodyWidt
 // strings cancels that out and leaves the plain advance, for either font,
 // without reaching into either parser's internals to read it out directly.
 function bodyAdvance(b) { return bodyTextWidth(b, "AA") - bodyTextWidth(b, "A"); }
+// The same per-board split for T_HERO, which the WAITING SCREEN's wordmark uses
+// (drawWaitingScreen calls setUIFont(T_HERO) with no CARD_HERO_SIZE override on
+// either board, so this is the registry face at its registry size on both).
+// Board 1: Cozette 12x26. Board 2: Spleen 32x64.
+function heroTextWidth(b, s) { return b === 1 ? textWidth(s, 4) : spleenHeroWidth(s); }
 
 // Parse UI_FONTS[] straight out of deckhand_display.ino's #if/#else pair,
 // rather than hand-copying its cell heights into a literal table here - a
@@ -340,17 +345,30 @@ for (const b of [1, 2]) {
   chk(iconEnd < clearFrom, `codex icon ends x=${iconEnd}, right field clears from ${clearFrom}`);
   // --- footer lanes ---
   const y = 0;
-  const clockEnd = 10 + textWidth("12:34:56", 1);
-  const battEnd = c.FOOTER_BATT_TEXT_X + textWidth("100%", 1);
-  const freshStart = W - 10 - textWidth("stale 999m ", 1);
+  // bodyTextWidth(b, ...), NOT textWidth(s, 1). These three lanes were the last
+  // board-agnostic measurements in this file: the footer draws font 1, which on
+  // board 2 is Spleen 8x16, so every number here was understated by a third - the
+  // clock reported 58px against a real 74. Nothing was actually overlapping (each
+  // longest string was hand-verified), but a checker measuring the wrong face is
+  // the exact drift these files exist to prevent, and the true margins are much
+  // tighter than the old ones claimed: battery-to-freshness is 31px on board 2, not
+  // 53. The same substitution follows for the tab bar and the waiting screen below.
+  const clockEnd = 10 + bodyTextWidth(b, "12:34:56");
+  const battEnd = c.FOOTER_BATT_TEXT_X + bodyTextWidth(b, "100%");
+  const freshStart = W - 10 - bodyTextWidth(b, "stale 999m ");
   chk(clockEnd < c.FOOTER_BATT_X, `footer: clock ends ${clockEnd} < battery glyph ${c.FOOTER_BATT_X}`);
   chk(c.FOOTER_BATT_X + 21 <= c.FOOTER_BATT_TEXT_X, `footer: glyph box ${c.FOOTER_BATT_X}..${c.FOOTER_BATT_X + 20} clears text at ${c.FOOTER_BATT_TEXT_X}`);
   chk(battEnd < freshStart, `footer: battery text ends ${battEnd} < freshness starts ${freshStart}`);
-  chk(4 + 13 <= c.FOOTER_H, `footer band ${c.FOOTER_H} holds a 13px line at +4`);
+  // BODY_H[b], not a literal 13: board 2's cell is 16 in a 20px band, so the band
+  // is EXACTLY full at the +4 the draw uses - zero slack, where the literal
+  // reported 7px of it.
+  chk(4 + BODY_H[b] <= c.FOOTER_H,
+      `footer band ${c.FOOTER_H} holds a ${BODY_H[b]}px line at +4`);
   // --- tab bar ---
   const tabW = Math.floor((W - c.TAB_REC_W) / 3);
-  chk(textWidth("SESSIONS", 1) < tabW - 16, `tab label "SESSIONS" ${textWidth("SESSIONS", 1)}px inside a ${tabW}px tab`);
-  const grp = 6 + 3 + textWidth("REC", 1);
+  chk(bodyTextWidth(b, "SESSIONS") < tabW - 16,
+      `tab label "SESSIONS" ${bodyTextWidth(b, "SESSIONS")}px inside a ${tabW}px tab`);
+  const grp = 6 + 3 + bodyTextWidth(b, "REC");
   chk(grp <= c.TAB_REC_W, `REC group ${grp}px inside the ${c.TAB_REC_W}px slot`);
 
   // --- the STANDALONE WAITING SCREEN, which lives on this tab ---
@@ -367,39 +385,51 @@ for (const b of [1, 2]) {
   // (ascent + descent) * size - so an overlapping band does not merely crowd its
   // neighbour, it ERASES it. The logo is 96px on both boards and is drawn FIRST,
   // so the wordmark below it wins any overlap.
+  // The two named cell heights the column is DERIVED from, pinned against the
+  // parsed UI_FONTS[] table. uiLineH() is not a constant expression, so the board
+  // headers cannot static_assert this themselves - which makes it this checker's
+  // job, and it is what stops a font swap silently moving five offsets.
+  chk(c.HERO_LINE_H === UI_FONTS[b][4].cellH,
+      `HERO_LINE_H ${c.HERO_LINE_H} is uiLineH(T_HERO)`);
+  chk(c.CODE_LINE_H === BODY_H[b], `CODE_LINE_H ${c.CODE_LINE_H} is uiLineH(T_BODY)`);
   const wait = [
     ["logo", c.WAIT_LOGO_Y, c.WAIT_LOGO_Y + LOGO_SIZE - 1],
-    ["wordmark", c.WAIT_NAME_Y, c.WAIT_NAME_Y + lineH(4) - 1],
-    ["device id", c.WAIT_ID_Y, c.WAIT_ID_Y + lineH(1) - 1],
-    ["message 1", c.WAIT_MSG_Y, c.WAIT_MSG_Y + lineH(2) - 1],
-    ["message 2", c.WAIT_MSG2_Y, c.WAIT_MSG2_Y + lineH(2) - 1],
+    ["wordmark", c.WAIT_NAME_Y, c.WAIT_NAME_Y + UI_FONTS[b][4].cellH - 1],
+    ["device id", c.WAIT_ID_Y, c.WAIT_ID_Y + BODY_H[b] - 1],
+    ["message 1", c.WAIT_MSG_Y, c.WAIT_MSG_Y + BODY_H[b] - 1],
+    ["message 2", c.WAIT_MSG2_Y, c.WAIT_MSG2_Y + BODY_H[b] - 1],
     ["command panel", c.WAIT_CMD_Y, c.WAIT_CMD_Y + c.WAIT_CMD_H - 1],
   ];
   for (const [n, a, z] of wait) console.log(`    wait ${n.padEnd(14)} ${a}..${z}`);
   chk(wait[0][1] >= c.CONTENT_Y, `waiting screen starts ${wait[0][1]} at or below CONTENT_Y ${c.CONTENT_Y}`);
   for (let i = 1; i < wait.length; i++) {
     const gap = wait[i][1] - wait[i - 1][2] - 1;
-    // BOARD 2 FAILS THE FIRST OF THESE, and it is a real defect rather than a
-    // checker artefact: WAIT_LOGO_Y follows CONTENT_Y (44 -> 56) while every
-    // offset below it - WAIT_NAME_Y, WAIT_ID_Y, WAIT_MSG_Y, WAIT_MSG2_Y,
-    // WAIT_CMD_Y - is still board 1's literal, so the column below the logo was
-    // never re-derived for the taller panel. The logo therefore ends at 151
-    // against a wordmark box starting at 148 and loses its bottom 4 rows, and the
-    // whole column stops at 284 of a 462px content area. The header's own comment
-    // says "the 96px logo sets everything below it", which is the fix:
-    // WAIT_NAME_Y = WAIT_LOGO_Y + LOGO_SIZE + 8 (160 on board 2, unchanged 148 on
-    // board 1) with the rest of the column following it down.
+    // THIS ASSERTION HAS NOW CAUGHT BOARD 2 TWICE, both times a real defect and
+    // both times invisible to a reading of the source. First: WAIT_LOGO_Y followed
+    // CONTENT_Y (44 -> 56) while the five offsets below it were board 1 literals,
+    // so the logo ended at 151 against a wordmark box starting at 148. Fixed by
+    // deriving them from the anchor. Second, found once this file started measuring
+    // cell heights PER BOARD rather than through geom-common's Cozette-only
+    // lineH(): the gaps between those derived offsets were themselves Cozette cells
+    // plus air (32 = 26 + 6), so board 2's 64px T_HERO wordmark ran 160..223 over a
+    // device name at 192 and a message line at 220. Fixed by deriving each gap from
+    // HERO_LINE_H / CODE_LINE_H. A checker measuring the wrong face agrees with the
+    // defect instead of catching it, which is why the substitution above matters
+    // more than the pixel counts it changed.
     chk(gap >= 0, `wait: ${wait[i - 1][0]} -> ${wait[i][0]} gap ${gap} (negative = the later draw erases the earlier)`);
   }
   chk(wait[wait.length - 1][2] < contentBottom,
       `waiting column ends ${wait[wait.length - 1][2]}, inside contentBottom ${contentBottom} (${contentBottom - 1 - wait[wait.length - 1][2]}px spare)`);
-  chk(lineH(1) + 4 <= c.WAIT_CMD_H, `command panel ${c.WAIT_CMD_H}px holds a ${lineH(1)}px line with 2px top and bottom`);
+  chk(BODY_H[b] + 4 <= c.WAIT_CMD_H,
+      `command panel ${c.WAIT_CMD_H}px holds a ${BODY_H[b]}px line with 2px top and bottom`);
   // The real strings, from waitingMessage(): the widest of each kind.
   for (const t of ["open DeckhandBLE.app", "./install.sh"])
-    chk(textWidth(t, 1) <= c.CARD_W - 8, `command "${t}" ${textWidth(t, 1)}px inside the ${c.CARD_W - 8}px panel lane`);
+    chk(bodyTextWidth(b, t) <= c.CARD_W - 8,
+        `command "${t}" ${bodyTextWidth(b, t)}px inside the ${c.CARD_W - 8}px panel lane`);
   for (const t of ["Waiting for the first update", "Connect USB to your Mac", "Start Deckhand on"])
-    chk(textWidth(t, 2) < W - 8, `waiting line "${t}" ${textWidth(t, 2)}px inside the ${W}px panel`);
-  chk(textWidth("DECKHAND", 4) < W - 8, `wordmark ${textWidth("DECKHAND", 4)}px inside the ${W}px panel`);
+    chk(bodyTextWidth(b, t) < W - 8, `waiting line "${t}" ${bodyTextWidth(b, t)}px inside the ${W}px panel`);
+  chk(heroTextWidth(b, "DECKHAND") < W - 8,
+      `wordmark ${heroTextWidth(b, "DECKHAND")}px inside the ${W}px panel`);
 }
 console.log(`\n${fail} failures, ${known} known-and-documented board-1 overlaps`);
 if (SELFTEST) {

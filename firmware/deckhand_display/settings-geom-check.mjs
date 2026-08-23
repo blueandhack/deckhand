@@ -32,8 +32,8 @@
 //
 //   node settings-geom-check.mjs             check both boards
 //   node settings-geom-check.mjs --selftest  prove the checker has teeth
-import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, DIR, fieldBox, lineH,
-         lineHB, mcBox, PANEL, preflight, textWidth, tlBox, widthB } from "./geom-common.mjs";
+import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, DIR, fieldBox,
+         lineHB, mcBox, PANEL, preflight, tlBox, widthB } from "./geom-common.mjs";
 import fs from "fs";
 preflight();
 
@@ -61,33 +61,12 @@ const KB_MAX_BYTES = +fs.readFileSync(`${DIR}/keyboard.ino`, "utf8")
 const HIST_ARENA = +fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8")
   .match(/HIST_ARENA (\d+)/)[1];
 
-// wrapLineLen() / countWrappedLines(), reimplemented. The 60-character ceiling and
-// the "break no further back than half the line" rule are both real and both
-// matter: the first caps every lane on the device, the second is why word wrap's
-// worst case can leave a line barely half full - which is the whole reason the
-// keyboard hard-wraps instead.
-function wrapLineLen(text, pos, maxW, font) {
-  const len = text.length - pos;
-  let n = 0;
-  while (n < len && n < 60) {
-    if (text[pos + n] === "\n") return n;
-    if (textWidth(text.slice(pos, pos + n + 1), font) > maxW) break;
-    n++;
-  }
-  if (n >= len) return n;
-  if (n === 0) return 1;
-  for (let b = n; b > Math.floor(n / 2); b--) if (text[pos + b - 1] === " ") return b;
-  return n;
-}
-function countWrappedLines(text, font, maxW) {
-  let pos = 0, lines = 0;
-  while (pos < text.length && lines < 80) {
-    pos += wrapLineLen(text, pos, maxW, font);
-    if (pos < text.length && text[pos] === "\n") pos++;
-    lines++;
-  }
-  return lines;
-}
+// wrapLineLen() / countWrappedLines() USED TO BE REIMPLEMENTED HERE, board-1-only,
+// and they are gone rather than fixed: every caller already went through
+// geom-common's countWrappedLinesB(), which measures at the board's own face, so
+// the local pair was dead code measuring Spleen with Cozette's advance. A dead
+// board-agnostic measurer next to a live per-board one is the trap this whole pass
+// is closing - the next person to need a wrap count could reach for either.
 
 // The real strings, so a label that outgrows its lane fails here rather than on
 // the glass. Kept as data next to the assertions that use them.
@@ -310,7 +289,11 @@ for (const b of [1, 2]) {
     chk(cy + 8 + 3 < c.PAGE_TOP, `page dots end ${cy + 11} inside the band cleared to ${c.PAGE_TOP}`);
     const laneL = c.PAGER_BTN_X0 + c.PAGER_BTN_W, laneR = W - c.PAGER_BTN_X0 - c.PAGER_BTN_W;
     for (const t of PAGER_TITLES) {
-      const w = textWidth(t, T_META);
+      // widthB, not textWidth: the pager title lane is the last board-agnostic
+      // measurement in this file. "DISPLAY & SOUND" is 90px at Cozette's 6px
+      // advance and 120px at Spleen's 8 - it still fits board 2's 184px lane, but
+      // the header comment claiming 90px there has been corrected too.
+      const w = widthB(b, T_META, t);
       const x0 = Math.floor(W / 2 - w / 2);
       chk(x0 > laneL && x0 + w < laneR, `pager title "${t}" ${w}px spans ${x0}..${x0 + w} inside the keys' lane ${laneL}..${laneR}`);
     }

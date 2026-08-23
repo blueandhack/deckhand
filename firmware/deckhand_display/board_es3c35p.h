@@ -211,6 +211,20 @@
 // budget to the Mac against a real capacity of 37x18 - which silently under-fills
 // every page the host sends, with nothing on either side erroring.
 const int TEXT_ADV = 8;
+// THE BODY/CODE FACE'S CELL HEIGHT - the other half of TEXT_ADV, and named for the
+// same reason: a literal 13 describes Cozette, and the voice-answer confirm panel
+// went on stepping by it after this board's face became Spleen 8x16, which would
+// have drawn each line's opaque box over the previous line's bottom 3 rows.
+// == uiLineH(FONT_CODE), which FONT_CODE aliasing T_BODY makes uiLineH(T_BODY) too;
+// the checkers assert that against the parsed UI_FONTS[] table, since uiLineH() is
+// not a constant expression and so cannot be used in a static_assert.
+const int CODE_LINE_H = 16;
+// AND THE HERO CELL, for the same reason and one specific caller: the waiting
+// screen's wordmark is T_HERO with no size override on either board, and the five
+// offsets below it are derived from it. It was a literal 32 gap, which is Cozette's
+// 26 plus 6 - so on this board the 64px wordmark's own opaque box swallowed the
+// device name and the first message line. == uiLineH(T_HERO). (Spleen 8x16 / Spleen 32x64, both size 1.)
+const int HERO_LINE_H = 64;
 
 // ---------- Chrome frame ----------
 // TOUCH FLOOR FIRST, because the tab bar's height is decided by it. Board 1's
@@ -925,8 +939,9 @@ const int PAGER_H = 54;
 // 60, board 1's 52 held PHYSICALLY (52 / 5.624 * 6.489 = 60.0) - the rule Task 7
 // used for MSG_BTN_W and ASK_READ_BTN_W, and the right one for a control rather
 // than for text. Clearance: the two keys span x 8..67 and 252..311, leaving a
-// 184px title lane for a longest title ("DISPLAY & SOUND") of 90px at Cozette's
-// 6px advance, centred at 160 so it runs 115..205.
+// 184px title lane for a longest title ("DISPLAY & SOUND") of 120px at THIS board's
+// 8px advance - 15 chars * TEXT_ADV, not the 90px that sentence used to claim, which
+// was Cozette's 6 - centred at 160 so it runs 100..219 inside a lane of 68..251.
 const int PAGER_BTN_W  = 60;
 // 8, and the arithmetic first: board 1's 6 held physically is 6 / 5.624 * 6.489 =
 // 6.9, taken up to 8 to sit on the 4px spacing scale (SP_2). That it does not match
@@ -1326,9 +1341,10 @@ const int KB_ACT_H  = 58;                      // == KB_ROW_H, as on board 1
 // The peek overlay covers the keys and the action row but NEVER the text card, so
 // its height is BOARD_H - KB_ROWS_Y - 4 = 306. Its three stacked rows were the
 // literals 8 / 22 / 40 in drawKbPeek(), and at a 16px cell the middle one was a
-// real defect rather than merely tight: a T_META box at +22 starts INSIDE the
-// "PROMPT" label's own box at +8..+23, and drawString paints that box opaquely, so
-// the label's last row was rubbed out on every draw. Each row now starts a full
+// real defect rather than merely tight: a T_META title box at +22..+37 starts
+// INSIDE the "PROMPT" label's own box at +8..+23, and drawString paints that box
+// opaquely, so the label's last TWO rows - 22 and 23, not one - were rubbed out on
+// every draw. Each row now starts a full
 // cell plus its air below the one above it - label +8..+23, title +25..+40, text
 // from +46 - which reproduces board 1's 8 / 22 / 40 exactly at its 13px cell.
 const int KB_PEEK_LBL_DY   = 8;
@@ -1390,7 +1406,7 @@ const int HIST_EMPTY_CY    = 238;
 // was 13 - Cozette's - which stayed put when the face here became Spleen 8x16, so
 // the list, the full-entry pager AND the budget this board REPORTS to the Mac were
 // all laid out on a 13px grid while the panel drew 16px lines. == uiLineH(FONT_CODE).
-const int HIST_LINE_H      = 16;
+const int HIST_LINE_H      = CODE_LINE_H;
 // THE SCRUBBER, and this is where the extra rows buy the most. Board 1's track is
 // 16 tall and its tap band is the same 16 - 2.8mm for the primary navigation of a
 // history that pages to 399 screens - because the list above and the control bar

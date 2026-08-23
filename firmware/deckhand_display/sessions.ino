@@ -759,8 +759,19 @@ inline int askVoiceSendY() { return askVoiceRedoY() - H_BTN - SP_2; }
 // that must never be the ONLY thing standing between a person and signing
 // text they can't fully see. Shared by the draw and the touch handler so they
 // can never disagree about whether SEND is actually offered.
+//
+// ASK_VOICE_MAX_LINES lives in deckhand_display.ino, not here - see the note there.
+// BOARD_H rather than tft.height() because only the former is a constant
+// expression; they are equal at SCREEN_ROTATION 0, the same substitution the
+// reader's page-budget asserts make.
+static_assert(CONTENT_Y + 22 + ASK_VOICE_MAX_LINES * CODE_LINE_H + 12
+                  < (BOARD_H - FOOTER_H) - H_BTN - H_BTN - SP_2,
+              "the voice-answer confirm panel now overlaps its own SEND button - "
+              "either lower ASK_VOICE_MAX_LINES or the panel will sign text the "
+              "user cannot see");
 bool askVoiceTooLong(int idx) {
-  return countWrappedLines(sessions[idx].askVoiceText, FONT_CODE, CARD_W - 8) > 8;
+  return countWrappedLines(sessions[idx].askVoiceText, FONT_CODE, CARD_W - 8) >
+         ASK_VOICE_MAX_LINES;
 }
 // The answer screen: question title, paged detail text, and one big button
 // per option. Tapping an option sends the answer to the host, which hands
@@ -788,16 +799,28 @@ void drawAskDetail(int idx) {
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.setTextDatum(TL_DATUM);
     tft.drawString("YOU SAID", CARD_X, CONTENT_Y + 6);
-    // Cozette on a panel: this is verbatim quoted text, the same treatment code
-    // and commands already get. Cap raised 6 -> 8: at CARD_W-8=208px, Cozette6x13
-    // (6px/char) fits 34 chars/line, and the host now caps an answer transcript
-    // at 150 UTF-8 bytes (VOICE_ANSWER_TEXT_MAX_BYTES), which needs at most ~5
-    // lines even with word-wrap losses - 8 leaves real headroom, and the panel
-    // (8*13+12=116px tall) still clears askVoiceSendY() by 34px.
+    // The code face on a panel: this is verbatim quoted text, the same treatment
+    // code and commands already get. The host caps an answer transcript at 150
+    // UTF-8 bytes (VOICE_ANSWER_TEXT_MAX_BYTES), which needs at most ~5 lines
+    // even with word-wrap losses, so the cap of 8 is real headroom on both boards.
+    //
+    // THE LINE STEP IS CODE_LINE_H, NOT A LITERAL 13, and the literal was a
+    // live defect rather than dead code. It was left alone as "board 2 has no mic",
+    // but neither this draw nor the ask parse it reads is guarded by BOARD_HAS_MIC:
+    // askVoiceText comes from a transcript the HOST parks and republishes in every
+    // tick, and MAX_LINKS is 2 - so board 1 could speak an answer and board 2 would
+    // draw the reply at a 13px pitch under a 16px cell, each line's opaque box
+    // eating the previous line's bottom 3 rows, with the panel 24px short of its
+    // own text. Unexercised is not unreachable.
+    //   board 1  lane CARD_W-8 = 208px / 6 = 34 cols, panel 8*13+12 = 116 tall,
+    //            56..172 against a SEND at 206  -> 34px clear
+    //   board 2  lane CARD_W-8 = 288px / 8 = 36 cols, panel 8*16+12 = 140 tall,
+    //            68..208 against a SEND at 352  -> 144px clear
     int lines = countWrappedLines(s.askVoiceText, FONT_CODE, CARD_W - 8);
-    if (lines > 8) lines = 8;
-    uiFillRound(CARD_X - 4, CONTENT_Y + 22, CARD_W + 8, lines * 13 + 12, R_SM, COLOR_CARD, COLOR_BG);
-    drawWrappedText(s.askVoiceText, CARD_X, CONTENT_Y + 28, FONT_CODE, 13, CARD_W - 8,
+    if (lines > ASK_VOICE_MAX_LINES) lines = ASK_VOICE_MAX_LINES;
+    uiFillRound(CARD_X - 4, CONTENT_Y + 22, CARD_W + 8, lines * CODE_LINE_H + 12, R_SM,
+                COLOR_CARD, COLOR_BG);
+    drawWrappedText(s.askVoiceText, CARD_X, CONTENT_Y + 28, FONT_CODE, CODE_LINE_H, CARD_W - 8,
                     0, lines, COLOR_VALUE, COLOR_CARD);
     // Belt-and-braces: the host's byte cap is meant to guarantee this always
     // fits, but that guarantee must not be the only gate. If it somehow
@@ -854,7 +877,21 @@ void drawAskDetail(int idx) {
   int textTop = y + 4;
 
   uint8_t dFont = isCode ? FONT_CODE : 2;
-  int dLineH = isCode ? 13 : 17;
+  // CODE_LINE_H, not a literal 13, and this one is not merely unexercised - EVERY
+  // `perm` ask reads as code (detailLooksLikeCode is true for all of them), so on
+  // board 2 the preview was drawing 16px cells at a 13px step: each line's opaque
+  // box erased rows 13..15 of the line above it, which is exactly where Spleen's
+  // descenders live (ascent 12, descent 4). A command containing g/j/p/q/y showed
+  // those letters chopped. Found while fixing the identical literal in the
+  // voice-confirm panel below - same function, same face, same mistake.
+  //
+  // The PROSE step stays a literal 17 on both boards. It is not a cell height: on
+  // board 1 it is Cozette's 13 plus 4 of leading, and on board 2 it is 1px over
+  // Spleen's 16 - tight leading, but a step OVER the cell, so nothing overlaps.
+  // Board 1's binary is held byte-identical, so deriving it (uiLineH(2) + 4 = 20
+  // here) is a change to make with the rest of the ask screen's rhythm rather than
+  // as a side effect of a correctness fix.
+  int dLineH = isCode ? CODE_LINE_H : 17;
   int pad = isCode ? 7 : 0;
   int textW = maxW - 2 * pad;
   uint16_t textBg = isCode ? COLOR_CARD : COLOR_BG;

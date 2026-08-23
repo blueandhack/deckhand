@@ -1566,16 +1566,32 @@ void drawAgentSpinner(int cx, int cy, uint16_t bg, bool codex) {
 // Nothing had ever measured this screen - it was found by geom-sweep.mjs
 // perturbing constants no assertion read, which is exactly what that sweep is
 // for, and usage-geom-check.mjs now asserts the column.
-// Board 2's column runs 56..296 in a 416px content area, so it is top-weighted
-// with room below. That is the same sparseness the SETTINGS pages have and is
-// left alone deliberately: spreading it is a design call for someone looking at
-// the glass, where this was a correctness one.
+// EVERY GAP IS NOW A CELL HEIGHT PLUS AIR, WHICH IS THE SECOND BUG THIS COLUMN
+// HAD. Deriving the offsets from the ANCHOR (above) fixed the logo/wordmark
+// collision but left the four gaps below as the literals 32 / 28 / 18 / 24 - and
+// those are Cozette's cell plus air (26+6, 13+15, 13+5, 13+11), not air. So on
+// board 2 the WORDMARK is the thing that erases its neighbours: T_HERO there is
+// Spleen 32x64, whose opaque drawString box runs 160..223, against a device-name
+// line at 192 and a first message line at 220 - both INSIDE it. The device name
+// and half the mark were rubbed out on the first screen anyone sees.
+// It went unnoticed because usage-geom-check.mjs was measuring these bands with
+// geom-common's board-agnostic lineH(), i.e. Cozette's 26 for a 64px face; that
+// checker now uses the parsed UI_FONTS[] cell per board and fails on it.
+// Board 1's five values are reproduced EXACTLY (44 / 148 / 180 / 208 / 226 / 250)
+// because the air terms are its own leftovers, carried across rather than
+// re-picked - the same trade the anchor fix made.
+// Board 2's column now runs 56..342 in a 414px content area, so it stays
+// top-weighted with room below. That is the same sparseness the SETTINGS pages
+// have and is left alone deliberately: spreading it - and whether a wordmark
+// filling 256 of 320px is what this screen wants at all, where board 1's fills 96
+// of 240 - is a design call for someone looking at the glass, where this was a
+// correctness one.
 const int WAIT_LOGO_Y   = CONTENT_Y + 10;                    // board 1: 44
-const int WAIT_NAME_Y   = WAIT_LOGO_Y + LOGO_SIZE + 8;       // T_HERO, 26 tall
-const int WAIT_ID_Y     = WAIT_NAME_Y + 32;
-const int WAIT_MSG_Y    = WAIT_ID_Y + 28;
-const int WAIT_MSG2_Y   = WAIT_MSG_Y + 18;
-const int WAIT_CMD_Y    = WAIT_MSG2_Y + 24, WAIT_CMD_H = 34;
+const int WAIT_NAME_Y   = WAIT_LOGO_Y + LOGO_SIZE + 8;       // T_HERO
+const int WAIT_ID_Y     = WAIT_NAME_Y + HERO_LINE_H + 6;     // T_META
+const int WAIT_MSG_Y    = WAIT_ID_Y + CODE_LINE_H + 15;      // T_BODY
+const int WAIT_MSG2_Y   = WAIT_MSG_Y + CODE_LINE_H + 5;      // T_BODY
+const int WAIT_CMD_Y    = WAIT_MSG2_Y + CODE_LINE_H + 11, WAIT_CMD_H = 34;
 
 uint8_t wheelPhase = 0;
 unsigned long lastWheelMs = 0;
@@ -2338,6 +2354,22 @@ int detailPillY = 0;
 // DETAIL_PATH_LINES) moved to the board headers - the card's height is the sum of
 // drawSessionDetail's own cursor advances, and those differ per board because the
 // line caps and the air between blocks do.
+
+// The voice-answer confirm screen's transcript panel: how many wrapped lines of the
+// code face it will show, and therefore how much text SEND can be made to sign.
+// Board-agnostic - 8 lines is 116px on board 1 and 140 on board 2, and both clear
+// askVoiceSendY() (the arithmetic is at the draw site in sessions.ino, together with
+// the static_assert that pins it).
+//
+// IT IS DECLARED HERE RATHER THAN BESIDE ITS THREE USES, and the reason is
+// geom-sweep.mjs: a checker's own parse is the sweep's universe of constants, so a
+// constant no checker can see is one the sweep silently never perturbs - and
+// sessions-geom-check.mjs cannot simply add sessions.ino to its parse chain,
+// because geom-common caches each file's TEXT per module instance and the sweep
+// re-imports the checker ~1400 times. Another 82KB a run took that child from
+// ~800MB to a V8 heap OOM, measured. So this is the one file-scope `const int` in
+// the four tab files, and it moved rather than the sweep growing a heap flag.
+const int ASK_VOICE_MAX_LINES = 8;
 
 
 

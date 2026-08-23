@@ -765,14 +765,14 @@ for (const b of [1, 2]) {
   // MSG_BTN_W (msgBtnX() in sessions.ino). Nothing checked that they clear each
   // other - the width was only ever printed - so a chip wide enough to reach the
   // label would have drawn straight over it.
-  chk(c.CARD_X + c.CARD_W - c.MSG_BTN_W > c.CARD_X + textWidth("< Back", T_BODY),
-      `TYPE chip starts x=${c.CARD_X + c.CARD_W - c.MSG_BTN_W}, "< Back" ends x=${c.CARD_X + textWidth("< Back", T_BODY)}`);
-  chk(textWidth("TYPE", T_BODY) + 8 <= c.MSG_BTN_W,
-      `"TYPE" ${textWidth("TYPE", T_BODY)}px inside the ${c.MSG_BTN_W}px chip`);
+  chk(c.CARD_X + c.CARD_W - c.MSG_BTN_W > c.CARD_X + widthB(b, T_BODY, "< Back"),
+      `TYPE chip starts x=${c.CARD_X + c.CARD_W - c.MSG_BTN_W}, "< Back" ends x=${c.CARD_X + widthB(b, T_BODY, "< Back")}`);
+  chk(widthB(b, T_BODY, "TYPE") + 8 <= c.MSG_BTN_W,
+      `"TYPE" ${widthB(b, T_BODY, "TYPE")}px inside the ${c.MSG_BTN_W}px chip`);
   chk(c.DETAIL_BACK_Y >= c.BORDER_CARD,
       `"< Back" starts +${c.DETAIL_BACK_Y}, clear of the header row's top`);
-  chk(c.DETAIL_BACK_Y + lineH(T_BODY) <= c.DETAIL_HEAD_H,
-      `"< Back" at +${c.DETAIL_BACK_Y} inks to +${c.DETAIL_BACK_Y + lineH(T_BODY) - 1}, inside the header band`);
+  chk(c.DETAIL_BACK_Y + lineHB(b, T_BODY) <= c.DETAIL_HEAD_H,
+      `"< Back" at +${c.DETAIL_BACK_Y} inks to +${c.DETAIL_BACK_Y + lineHB(b, T_BODY) - 1}, inside the header band`);
   // ---- THE RUNNING CURSOR AS A BAND WALK, worst case (title AND last prompt) ----
   // The name's band is the FONT'S OWN CELL, not DETAIL_NAME_H, so a name font that
   // disagrees with the ink height it is stepped by is caught by the walk as well as
@@ -852,9 +852,9 @@ for (const b of [1, 2]) {
   // fit side by side inside the card's text lane and how much they hold.
   const colW = Math.floor(c.CARD_W / 2) - c.PAD - 4;
   const LX = c.CARD_X + c.PAD, RX = c.CARD_X + Math.floor(c.CARD_W / 2) + 2;
-  const dots = textWidth("..", T_BODY);
-  let whole = 0; while (textWidth("M".repeat(whole + 1), T_BODY) <= colW) whole++;
-  let cut = 0; while (textWidth("M".repeat(cut + 1), T_BODY) <= colW - dots) cut++;
+  const dots = widthB(b, T_BODY, "..");
+  let whole = 0; while (widthB(b, T_BODY, "M".repeat(whole + 1)) <= colW) whole++;
+  let cut = 0; while (widthB(b, T_BODY, "M".repeat(cut + 1)) <= colW - dots) cut++;
   chk(LX + colW < RX, `left column ${LX}..${LX + colW} clears the right column at ${RX} by ${RX - (LX + colW)}`);
   chk(RX + colW <= c.CARD_X + c.CARD_W - c.PAD,
       `right column ends ${RX + colW}, inside the card's text lane at ${c.CARD_X + c.CARD_W - c.PAD}`);
@@ -882,14 +882,14 @@ for (const b of [1, 2]) {
       `READ ALL chip +1..+${c.ASK_READ_BTN_H} fits the ${c.DETAIL_HEAD_H}px header band`);
   chk(c.ASK_READ_BTN_X + c.ASK_READ_BTN_W === W - c.CARD_X,
       `READ ALL right-aligned to the card margin: ${c.ASK_READ_BTN_X}+${c.ASK_READ_BTN_W} = ${W - c.CARD_X}`);
-  chk(textWidth("READ ALL", T_BODY) < c.ASK_READ_BTN_W - 8,
-      `"READ ALL" ${textWidth("READ ALL", T_BODY)}px inside the ${c.ASK_READ_BTN_W}px chip`);
+  chk(widthB(b, T_BODY, "READ ALL") < c.ASK_READ_BTN_W - 8,
+      `"READ ALL" ${widthB(b, T_BODY, "READ ALL")}px inside the ${c.ASK_READ_BTN_W}px chip`);
   // Board 1's badge inks +27..+39 against a title at +39, i.e. it shares the
   // badge's own last row - harmless with Cozette (whose bottom row is blank for
   // every glyph without a descender) but not a clearance, and not reproduced.
-  m = `ask title at +${c.ASK_TITLE_Y} clears the badge row inking to +${c.ASK_BADGE_Y + lineH(T_META) - 1}`;
-  chk(c.ASK_TITLE_Y >= c.ASK_BADGE_Y + lineH(T_META), m,
-      b === 1 && c.ASK_TITLE_Y === c.ASK_BADGE_Y + lineH(T_META) - 1);
+  m = `ask title at +${c.ASK_TITLE_Y} clears the badge row inking to +${c.ASK_BADGE_Y + lineHB(b, T_META) - 1}`;
+  chk(c.ASK_TITLE_Y >= c.ASK_BADGE_Y + lineHB(b, T_META), m,
+      b === 1 && c.ASK_TITLE_Y === c.ASK_BADGE_Y + lineHB(b, T_META) - 1);
   // The option stack is bottom-anchored, worst case 4 options + the SPEAK/TYPE row.
   const stack = 4 + 1;
   const optTop = contentBottom - stack * (c.ASK_OPT_H + c.ASK_OPT_GAP);
@@ -905,12 +905,25 @@ for (const b of [1, 2]) {
   // Detail preview lines in the COMMON case (2 options + the input row), code style.
   const optTop2 = contentBottom - 3 * (c.ASK_OPT_H + c.ASK_OPT_GAP);
   const textTop = titleInk + 4;
-  const vis = Math.floor((optTop2 - 8 - textTop - 14) / 13);
+  // CODE_LINE_H, not a literal 13 - this assertion measured a 13px step against a
+  // 16px cell too, so it reported 9 lines where the board can draw 7.
+  const vis = Math.floor((optTop2 - 8 - textTop - 14) / c.CODE_LINE_H);
   chk(vis >= 1, `2-option ask shows ${vis} lines of code detail (board 1 shows 4)`);
-  // The voice-confirm panel: 8 wrapped lines plus padding, above SEND.
-  const panelEnd = c.CONTENT_Y + 22 + 8 * 13 + 12;
+  // The voice-confirm panel: ASK_VOICE_MAX_LINES wrapped lines plus padding, above
+  // SEND. THE LINE STEP IS CODE_LINE_H, NOT A LITERAL 13 - this assertion carried
+  // the same Cozette literal the firmware did, so it agreed with the defect rather
+  // than catching it, and measured a panel 24px shorter than board 2 would draw.
+  chk(c.CODE_LINE_H === lineHB(b, T_BODY),
+      `CODE_LINE_H ${c.CODE_LINE_H} is uiLineH(FONT_CODE) - FONT_CODE aliases T_BODY`);
+  const panelEnd = c.CONTENT_Y + 22 + c.ASK_VOICE_MAX_LINES * c.CODE_LINE_H + 12;
   const sendY = contentBottom - c.H_BTN - c.H_BTN - c.SP_2;
-  chk(panelEnd < sendY, `voice transcript panel ends ${panelEnd}, SEND starts ${sendY}`);
+  chk(panelEnd < sendY,
+      `voice transcript panel (${c.ASK_VOICE_MAX_LINES} x ${c.CODE_LINE_H}) ends ${panelEnd}, SEND starts ${sendY}`);
+  // The panel's LANE, for the same reason: the cap of 8 lines is only headroom if a
+  // 150-byte transcript really wraps under it. Columns at this board's own advance.
+  const voiceCols = Math.floor((c.CARD_W - 8) / advanceB(b, T_BODY));
+  chk(Math.ceil(150 / voiceCols) <= c.ASK_VOICE_MAX_LINES,
+      `a 150-byte transcript wraps to ${Math.ceil(150 / voiceCols)} of ${c.ASK_VOICE_MAX_LINES} lines (${voiceCols} cols)`);
 
   // ---- the change-only caches, re-derived ----
   // A signature holds FIELD VALUES, not the truncated text drawn from them, so a
