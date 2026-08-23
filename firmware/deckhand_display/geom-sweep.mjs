@@ -19,7 +19,9 @@
 // constant really has before something on the glass breaks.
 //
 //   node geom-sweep.mjs                     sweep all three checkers, both boards
-//   node geom-sweep.mjs --checker sessions  one checker (also how the children run)
+//   node geom-sweep.mjs --checker sessions             one checker, both boards
+//   node geom-sweep.mjs --checker sessions --board 2    one checker, one board
+//                        (plus --slice i/n is how the children the parent spawns run)
 //   node geom-sweep.mjs --verbose           add the per-constant table
 //
 // IT EXITS 0 EVEN WHEN CONSTANTS ARE UNGUARDED, deliberately. An unguarded
@@ -50,10 +52,27 @@
 // is where the reason it has to be parse-time rather than table-time is written
 // down.
 //
-// One checker per CHILD PROCESS, for memory rather than isolation: every re-import
-// is a module instance the ESM cache can never release (~0.1MB), and ~6500 runs in
-// one process is most of a gigabyte. A child per checker bounds it and costs one
-// JSON line of aggregation.
+// ONE CHILD PROCESS PER (CHECKER, BOARD), and the reason is CODE SPACE rather than
+// the heap. Every re-import is a module instance the ESM cache can never release,
+// and a module instance is COMPILED CODE - on arm64 macOS V8's code range is a
+// separate, much smaller region than the old-space limit, so this fails as
+// `CALL_AND_RETRY_LAST Allocation failed` on a REGEXP CODE OBJECT at ~840MB of heap
+// while `v8.getHeapStatistics().heap_size_limit` says 4.5GB. That is why
+// `--max-old-space-size` does nothing here and was tried and reverted: raising a
+// limit that is not the one being hit changes nothing. Nor is it one pathological
+// injection: instrumented per run, no single run exceeded 222ms and the heap climbed
+// monotonically from the first, so it is RETENTION - measured at ~0.9MB a run, which
+// puts the wall at roughly 950 runs.
+//
+// A child per checker used to be just barely enough. Once this branch grew the
+// sessions checker it stopped being, and the failure mode was the worst kind: ONE
+// BOARD of that checker needs ~1100 runs (238 constants, and an unguarded one costs
+// all six magnitudes), so it completed on an idle machine and died while a compile
+// was running - a diagnostic whose answer depends on the weather. So the split is now
+// per (checker, BOARD, SLICE), with SLICES a real ceiling on retention: ~280 runs a
+// child, roughly 250MB, about a quarter of where it fails. Raise SLICES, not the
+// heap. The union below already merges per (board, constant), so partial results from
+// any number of children combine unchanged.
 import { beginRecord, endRecord, injectHitCount, setInject, DIR } from "./geom-common.mjs";
 import fs from "fs";
 import { spawnSync } from "child_process";
@@ -77,6 +96,9 @@ const MAGNITUDES = (() => {
   return process.argv[i + 1].split(",").map(Number).filter(n => n > 0).sort((a, b) => a - b);
 })();
 const VERBOSE = process.argv.includes("--verbose");
+// How many child processes each (checker, board) is split across - a ceiling on
+// runs-per-process, see the note at the top of this file.
+const SLICES = 4;
 
 // ---- running one checker, once ----
 class Exited extends Error { }
@@ -104,7 +126,7 @@ async function runChecker(file) {
 }
 
 // ---- sweeping one checker ----
-async function sweep(key) {
+async function sweep(key, onlyBoard, slice) {
   const file = CHECKERS[key];
   const src = fs.readFileSync(`${DIR}/${file}`, "utf8");
   // The universe of constants comes from the checker's own parse, recorded as it
@@ -146,12 +168,20 @@ async function sweep(key) {
   let internal = 0;
   for (const tag of seen) {
     const [b, name] = [+tag.slice(0, tag.indexOf(":")), tag.slice(tag.indexOf(":") + 1)];
+    // The BASELINE run still parses both boards - it has to, that is the checker -
+    // so the filter is on which board's constants this child PERTURBS.
+    if (onlyBoard && b !== onlyBoard) continue;
     (boards[b] ||= []).push(name);
   }
   const result = { key, file, boards: {} };
   for (const b of Object.keys(boards).map(Number).sort()) {
     const rows = [];
-    for (const name of boards[b]) {
+    // Sliced by index MODULO n rather than by contiguous range, so every child gets a
+    // mix of guarded (2 runs) and unguarded (6 runs) constants. A contiguous range
+    // would put the whole SESSION_* block - almost all of it unguarded in the usage
+    // and settings checkers - into one child, and defeat the bound this exists for.
+    for (const [i, name] of boards[b].entries()) {
+      if (slice && i % slice.n !== slice.i) continue;
       const row = { name, caught: 0, dirs: "", crash: false, masked: false,
                     // Referenced-by-the-checker is not a verdict, it is a triage
                     // aid: an unguarded constant the checker never even mentions
@@ -224,9 +254,17 @@ const arg = process.argv.indexOf("--checker");
 if (arg >= 0) {
   const key = process.argv[arg + 1];
   if (!CHECKERS[key]) { console.log(`unknown checker "${key}"`); process.exit(1); }
-  const r = await sweep(key);
+  const bArg = process.argv.indexOf("--board");
+  const sArg = process.argv.indexOf("--slice");
+  const slice = sArg >= 0
+    ? { i: +process.argv[sArg + 1].split("/")[0], n: +process.argv[sArg + 1].split("/")[1] }
+    : null;
+  const r = await sweep(key, bArg >= 0 ? +process.argv[bArg + 1] : 0, slice);
   if (!r) process.exit(1);
-  report(r);
+  // A SLICE reports nothing on its own - the parent merges the slices and reports the
+  // whole board, because "guarded 18 of 60" for a quarter of one board is not a fact
+  // about anything. A hand-run --checker (optionally --board) still reports normally.
+  if (!slice) report(r);
   console.log(`SWEEP-JSON ${JSON.stringify(r)}`);
   process.exit(r.internal ? 1 : 0);
 }
@@ -234,17 +272,33 @@ if (arg >= 0) {
 const all = [];
 let bad = 0;
 for (const key of Object.keys(CHECKERS)) {
-  const p = spawnSync(process.execPath, [new URL(import.meta.url).pathname, "--checker", key,
-                                         "--magnitudes", MAGNITUDES.join(","),
-                                         ...(VERBOSE ? ["--verbose"] : [])],
-                      { encoding: "utf8", maxBuffer: 1 << 26 });
-  const lines = (p.stdout || "").split("\n");
-  for (const l of lines) {
-    if (l.startsWith("SWEEP-JSON ")) { all.push(JSON.parse(l.slice(11))); continue; }
-    if (l.length) console.log(l);
+  const merged = { key, file: CHECKERS[key], boards: {}, internal: 0 };
+  for (const board of [1, 2]) for (let i = 0; i < SLICES; i++) {
+    const p = spawnSync(process.execPath, [new URL(import.meta.url).pathname, "--checker", key,
+                                           "--board", String(board),
+                                           "--slice", `${i}/${SLICES}`,
+                                           "--magnitudes", MAGNITUDES.join(","),
+                                           ...(VERBOSE ? ["--verbose"] : [])],
+                        { encoding: "utf8", maxBuffer: 1 << 26 });
+    const lines = (p.stdout || "").split("\n");
+    for (const l of lines) {
+      if (l.startsWith("SWEEP-JSON ")) {
+        const r = JSON.parse(l.slice(11));
+        for (const b of Object.keys(r.boards)) (merged.boards[b] ||= []).push(...r.boards[b]);
+        merged.internal += r.internal;
+        continue;
+      }
+      // A slice prints no report of its own, but it DOES print the baseline's
+      // standing failures and any INTERNAL ERROR - once per slice, since every
+      // slice runs the baseline. Only the first slice's copy is passed through, or
+      // the same real finding is repeated eight times and reads as eight findings.
+      if (l.length && board === 1 && i === 0) console.log(l);
+    }
+    if (p.stderr) process.stderr.write(p.stderr);
+    if (p.status !== 0) bad++;
   }
-  if (p.stderr) process.stderr.write(p.stderr);
-  if (p.status !== 0) bad++;
+  report(merged);
+  all.push(merged);
 }
 
 // The union: one row per (board, constant), merged across every checker that

@@ -252,6 +252,7 @@ function preprocess(src, defs) {
 // from the checker fails instead of being silently ignored. `seed` lets a second
 // file be parsed against constants an earlier one defined - which is how the
 // board headers' inputs reach the derived offsets in deckhand_display.ino.
+const IDENT = /[A-Za-z_][A-Za-z_0-9]*/g;
 export function consts(file, seed = {}) {
   if (BOARD_OF[file]) curBoard = BOARD_OF[file];
   const defs = defsFor(file);
@@ -269,7 +270,21 @@ export function consts(file, seed = {}) {
       if (kv.length !== 2) continue;
       const k = kv[0].trim();
       let v = kv[1].trim();
-      for (const [kk, vv] of Object.entries(out)) v = v.replace(new RegExp(`\\b${kk}\\b`, "g"), vv);
+        // ONE PASS OVER THE IDENTIFIERS IN `v`, not one compiled regexp per known
+      // constant. This used to be
+      //   for (const [kk, vv] of Object.entries(out))
+      //     v = v.replace(new RegExp(`\\b${kk}\\b`, "g"), vv);
+      // which is quadratic in the number of constants AND compiles a fresh RegExp
+      // every time - about 53,000 of them per file, times four file-parses per
+      // checker run, times ~1400 runs under geom-sweep.mjs. V8 keeps compiled regexp
+      // code in CODE SPACE, and that is what killed the sweep's sessions child: it
+      // died at 860MB of heap with a 4.5GB limit and the failing allocation was a
+      // regexp code object, so raising --max-old-space-size did nothing at all. A
+      // word-boundary replace of a name that does not appear in `v` is a no-op, so
+      // scanning `v`'s own identifiers instead is exactly equivalent (values are
+      // numbers, so no substitution can produce a name for a later one to match) and
+      // turns O(constants) compiled regexps into one literal regexp compiled once.
+      v = v.replace(IDENT, (n) => (n in out ? String(out[n]) : n));
       let val;
       try { val = evalInt(v); } catch { continue; }
       out[k] = val;
