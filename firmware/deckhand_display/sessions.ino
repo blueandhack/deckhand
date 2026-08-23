@@ -165,15 +165,27 @@ void drawSessionRow(int pos) {
       : SESSION_ROW_X + SESSION_ROW_W - 16 - (tft.textWidth(pillLbl) + 12); // pill = text + 12
   int laneW = laneRight - nameX - 6; // 6px so the name never kisses the tag/pill
 
-  // Three rungs, largest first: 12x26 -> 10x18 -> 6x13, taking the first whose
+  // Three rungs, largest first - board 1's Cozette 12x26 -> Terminus 10x18 ->
+  // Cozette 6x13, board 2's Spleen 32x64 -> 12x24 -> 8x16 - taking the first whose
   // measured width fits the lane, so a long project name is shown WHOLE rather
-  // than cut short. Before T_HEAD existed this was a single 26->13 cliff.
-  // Compact rows start at the bottom rung, exactly as they always have: 26px
-  // does not fit a 41-63px row.
+  // than cut short. Before T_HEAD existed this was a single hero->body cliff.
+  //
+  // TWO tests, not one, and the height half is why the ladder starts where it
+  // does. A rung whose CELL is taller than the row's name band cannot be drawn
+  // there at all however well it fits the lane - board 2's T_HERO is 64px against
+  // a 24px band - so SESSION_NAME_TOP_RUNG names the tallest admissible rung per
+  // board (0 = T_HERO on board 1, 1 = T_HEAD on board 2) and the width walk starts
+  // from it. Skipping by height at RUNTIME instead would cost board 1 flash it
+  // cannot spend (its binary is held byte-identical), so the invariant - the top
+  // rung fits the band, and is the tallest that does - is asserted in
+  // sessions-geom-check.mjs against the parsed font table instead.
+  // Compact rows start at the bottom rung, exactly as they always have: a hero or
+  // head cell does not fit a row under SESSION_LARGE_MIN_H.
   static const uint8_t NAME_RUNGS[] = { T_HERO, T_HEAD, T_BODY };
+  const int NAME_RUNG_N = (int) (sizeof(NAME_RUNGS) / sizeof(NAME_RUNGS[0]));
   char nameBuf[28]; // host caps the name at 22, plus "..." and a NUL
   uint8_t nameFont = T_BODY;
-  for (int r = large ? 0 : 2; r < 3; r++) {
+  for (int r = large ? SESSION_NAME_TOP_RUNG : NAME_RUNG_N - 1; r < NAME_RUNG_N; r++) {
     nameFont = NAME_RUNGS[r];
     setUIFont(nameFont);
     if (tft.textWidth(s.name) <= laneW) break;
@@ -189,12 +201,14 @@ void drawSessionRow(int pos) {
   }
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
   tft.setTextDatum(TL_DATUM);
-  // A shrunk name is centred in the 26px band the big font would have filled, so
-  // it doesn't hang off the top of the row with a gap under it. The old hardcoded
-  // +6 was exactly this: (26 - 13) / 2. A title row starts 2px higher to buy the
-  // third line its space.
+  // A shrunk name is centred in the band the top rung would have filled, so it
+  // doesn't hang off the top of the row with a gap under it. Board 1's old
+  // hardcoded +6 was exactly this: (26 - 13) / 2. SESSION_NAME_H, not
+  // uiLineH(T_HERO): on board 2 the band is the HEAD rung's 24px and the hero's
+  // 64 would make every offset here negative. A title row starts 2px higher to
+  // buy the third line its space.
   int nameTop = y + (showTitle ? SESSION_NAME_Y_T : SESSION_NAME_Y);
-  int nameOffset = large ? (uiLineH(T_HERO) - uiLineH(nameFont)) / 2 : 0;
+  int nameOffset = large ? (SESSION_NAME_H - uiLineH(nameFont)) / 2 : 0;
   tft.drawString(nameBuf, nameX, nameTop + nameOffset);
 
   // 36, not 26: buildSessionSubline's "who" can now be "CC/studio" (9 chars) instead of
@@ -220,8 +234,10 @@ void drawSessionRow(int pos) {
       tft.setTextColor(COLOR_LABEL, COLOR_CARD); // restore for the sub-line below
       // Bound to SESSION_SUB_LANE_W, the sub-line's own lane from the name's left
       // edge to the row's right - a long branch name plus a Mac tag could otherwise
-      // run past the row. 184px = 30 characters on board 1, 244 = 40 on board 2,
-      // where buildSessionSubline's 35-character output can never be cut at all.
+      // run past the row. 30 characters on BOTH boards, as it happens: 184px at
+      // Cozette's 6px advance and 244px at Spleen's 8px, against a
+      // buildSessionSubline that can emit 35 - so the worst case is trimmed with
+      // "..." on either panel.
       if (sub[0]) {
         char subFit[36];
         fitText(subFit, sizeof(subFit), sub, SESSION_SUB_LANE_W);
@@ -297,7 +313,7 @@ void renderSessionsList() {
       // Rows stretch to fill the list and only compress once it fills up. The floor and
       // the ceiling are the board's, because the ladder this produces is arithmetic on
       // its own content area rather than a preference - board 1 (avail 264, cap 90) gives
-      // 1-3 sessions a title line and board 2 (avail 412, cap 106) gives four, with the
+      // 1-3 sessions a title line and board 2 (avail 410, cap 100) gives four, with the
       // full ladder written out in each board header beside SESSION_ROW_H_MAX.
       sessionRowH = constrain((avail - SESSION_ROW_GAP * (sessionCount - 1)) / sessionCount,
                               SESSION_ROW_H_MIN, SESSION_ROW_H_MAX);
@@ -371,8 +387,14 @@ void renderSessionsList() {
       snprintf(buf, sizeof(buf), "+%d more session%s", hiddenCount, hiddenCount == 1 ? "" : "s");
     }
     padTo(buf, sizeof(buf), 26);
+    // contentBottom() - SESSION_OVERFLOW_H + 4, not a literal -12: the strip's own
+    // reserved band already tracks the face (16px on board 1, 19 on board 2), and
+    // -12 would have put a 16px line plus drawIfChanged's 1px margins into the
+    // footer's first drawn row. Board 1's 16 - 4 = 12 reproduces its own offset
+    // exactly, so both boards keep the same single row of overhang into the
+    // footer's padding.
     drawIfChanged(overflowCache, sizeof(overflowCache), buf, SESSION_ROW_X + 2,
-                  contentBottom() - 12, 1, 1,
+                  contentBottom() - SESSION_OVERFLOW_H + 4, 1, 1,
                   hiddenAskingCount > 0 ? COLOR_BAD : COLOR_LABEL, COLOR_BG);
   }
 #if !BOARD_USES_TFT_ESPI

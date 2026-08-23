@@ -2074,23 +2074,31 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
 // derivation comments. What follows is the part both boards SHARE: a row's
 // internal offsets, expressed once as board 1's packed numbers plus SESSION_AIR.
 //
-// WHY THESE ARE DERIVED RATHER THAN PER-BOARD LITERALS. A row's ink height is
-// identical on both panels - Cozette ships 6x13 and a mechanical 12x26 and
-// nothing between, so a wider screen cannot make the text bigger - which means
-// the only thing a taller panel can spend on a row is SPACING. Writing two sets
-// of offsets would be two chances to get the same relationship wrong; writing
-// one set plus a single air knob makes board 1 (SESSION_AIR 0) provably the
-// numbers sessions.ino used to hardcode, and board 2 the same layout breathing.
+// WHY THESE ARE DERIVED RATHER THAN PER-BOARD LITERALS. Two knobs, not one, and
+// the second had to be added: board 1's row ink height is fixed by Cozette (6x13
+// and a mechanical 12x26, nothing between), so on that board the only thing a
+// taller row can spend is SPACING - but board 2 draws a native Spleen scale
+// (8x16 body, 12x24 head, 32x64 hero), so its ink height differs too. So the
+// offsets are board 1's packed numbers plus SESSION_AIR for the gaps, and
+// SESSION_NAME_H / SESSION_LINE_H for the ink. Writing two sets of offsets would
+// be two chances to get the same relationship wrong; writing one set makes board
+// 1 (AIR 0, 26/13) provably the numbers sessions.ino used to hardcode, and board
+// 2 the same layout at its own type scale. A literal 13 left in here would have
+// laid board 2's 16px lines out on 13px spacing - the same class of bug as the
+// counted character lanes the USAGE tab had to have measured instead.
 const int SESSION_LINE_GAP  = 2 + SESSION_AIR;   // between two stacked text lines
 const int SESSION_NAME_Y_T  = 4 + SESSION_AIR;   // name top, row WITH a title line
 const int SESSION_NAME_Y    = 6 + SESSION_AIR;   // name top, row without one
-const int SESSION_TITLE_Y   = SESSION_NAME_Y_T + 26 + SESSION_LINE_GAP;
-const int SESSION_SUB_Y     = SESSION_TITLE_Y + 13 + SESSION_LINE_GAP;
-const int SESSION_SUB2_Y    = SESSION_NAME_Y + 26 + SESSION_LINE_GAP;
+const int SESSION_TITLE_Y   = SESSION_NAME_Y_T + SESSION_NAME_H + SESSION_LINE_GAP;
+const int SESSION_SUB_Y     = SESSION_TITLE_Y + SESSION_LINE_H + SESSION_LINE_GAP;
+const int SESSION_SUB2_Y    = SESSION_NAME_Y + SESSION_NAME_H + SESSION_LINE_GAP;
 // Compact rows: the sub-line and the live duration are drawn at the SAME y on
 // purpose (see the note in drawSessionRow about the duration's clear box eating
 // the sub-line's tail), so they must read one constant, not two equal literals.
-const int SESSION_SUBC_Y    = 25 + SESSION_AIR;
+// The 6px gap under a compact row's small name is board 1's own (6 + 13 + 6 = its
+// literal 25), now expressed against the line height so board 2's 16px name line
+// does not land underneath its own sub-line.
+const int SESSION_SUBC_Y    = SESSION_NAME_Y + SESSION_LINE_H + 6;
 const int SESSION_PILLC_Y   = 4 + SESSION_AIR;   // compact pill, top-right
 const int SESSION_TAG_Y     = 8 + SESSION_AIR;   // CLAUDE/CODEX tag + Mac icon
 // The pill is BOTTOM-anchored (top = rowH - this), which is what lets the ladder
@@ -2101,9 +2109,15 @@ const int SESSION_PILL_UP   = 24 + SESSION_AIR;  // row without one
 // (18 - 13) / 2 needed to centre a 13px line on an 18px pill.
 const int SESSION_DUR_UP    = SESSION_PILL_UP_T - 3;
 // The status indicator's row: the centre of the name band on a title-less row,
-// i.e. its top plus half of T_HERO's 26. The x half of this (SESSION_DOT_CX) is
-// a corner-clearance constraint and lives in the board header; the y is not.
-const int SESSION_DOT_DY    = SESSION_NAME_Y + 13;
+// i.e. its top plus half the band. The x half of this (SESSION_DOT_CX) is a
+// corner-clearance constraint and lives in the board header; the y is not.
+// NOTE what moving with the band costs: the indicator is a 32x32 BLIT centred
+// here, so a band SHORTER than 32 puts its top row above the band's own top, and
+// the blit's left edge then has to clear the row's rounded corner higher up the
+// arc. Board 1 (band 26, dot +19) clears it by 0.87px; board 2's band is 24 and
+// its dot lands on the same +19, so it inherits the same 0.87px rather than the
+// 3.9px a lower dot bought it. sessions-geom-check.mjs asserts that clearance.
+const int SESSION_DOT_DY    = SESSION_NAME_Y + SESSION_NAME_H / 2;
 // Rows stretch to fill the screen: this tab is a desk monitor for a few
 // projects, so with 1-3 sessions each row gets tall (big name, roomy status
 // pill) and only compresses when the list actually fills up. Recomputed in

@@ -446,7 +446,7 @@ const int FOOTER_BATT_TEXT_X = 160;
 // are spent on TALLER rows, and a bigger row count stays a separate decision with
 // its own host-side work rather than a side effect of a bigger screen.
 //
-// Content area = 480 - TAB_BAR_H(46) - FOOTER_H(18) = 416, against board 1's 268.
+// Content area = 480 - TAB_BAR_H(46) - FOOTER_H(20) = 414, against board 1's 268.
 const int SESSION_ROW_X = 12;
 // 12/296 rather than board 1's 8/224, so the list and the USAGE column share ONE
 // side margin (CARD_X/CARD_W). Board 1's two different margins for the same edge
@@ -475,116 +475,181 @@ const int SESSION_ROW_Y0 = CONTENT_Y + 4;
 // nothing else. NOTE the contrast with SESSION_AIR = 3, which IS genuinely forced
 // as an upper bound - do not read this comment as covering that one.
 const int SESSION_ROW_GAP = 3;
-// 3px of air at EVERY gap and pad inside a row, which is where this panel's
-// surplus height actually goes (the derived offsets are in deckhand_display.ino,
-// shared by both boards and collapsing to board 1's literals at SESSION_AIR 0).
-// Not a font change: Cozette has 6x13 and a mechanical 12x26 and nothing between,
-// so a row's INK is the same height on both boards and only its spacing can grow.
-// 3 is chosen by the LADDER, not by taste - see SESSION_TITLE_MIN_H.
-const int SESSION_AIR = 3;
+// THE TWO INK HEIGHTS THE ROW STACK IS BUILT FROM. Board 1 declares 26/13 (see
+// its own header); these are this board's native Spleen scale, and they are what
+// make every threshold below differ from board 1's by more than SESSION_AIR.
+//
+// SESSION_LINE_H is uiLineH(T_BODY) = 16, three pixels taller than Cozette's 13,
+// and a title row carries TWO of those lines - so the stack grew 6px before any
+// air was added.
+//
+// SESSION_NAME_H IS 24, THE HEAD RUNG, NOT THE 64px HERO - and this is the one
+// judgement in the section, so here is the arithmetic that forced it. The name is
+// drawn into a MEASURED lane (drawSessionRow computes it from the real CLAUDE/mac
+// tag beside it), and that lane is 134px with two Macs connected, 190px with one.
+// At Spleen 32x64's 32px advance that is FOUR characters, or five - so a 64px band
+// would spend 40 more pixels of every row on a face that virtually every real
+// project name shrinks straight out of, and "deck..." at 64px is worse than
+// `deckhand` whole at 24px. It also costs whole LINES: at a 64px band the packed
+// title stack is 129 (AIR 0) and the ladder's four-session rung is 100, so four
+// sessions lose their title, five lose the model/branch line, and rows five and
+// six fall to the compact layout. Priced and rejected.
+// WHAT IT COSTS, stated plainly: 24px here is 3.70mm against board 1's 26px at
+// 4.62mm, so the project name is physically SMALLER on the bigger panel - the one
+// place in this port where that is true. The compensation is real but is not size:
+// Spleen 12x24 is a hand-drawn face at its native size, where board 1's 12x26 is a
+// mechanical 2x upscale of a 6x13 one, so the ink is genuinely sharper. If a future
+// panel wants the hero rung here, it needs a WIDER name lane before a taller row.
+const int SESSION_NAME_H = 24;   // uiLineH(T_HEAD), Spleen 12x24
+const int SESSION_LINE_H = 16;   // uiLineH(T_BODY), Spleen 8x16
+// Where drawSessionRow's name ladder starts, as an index into its NAME_RUNGS[]
+// { T_HERO, T_HEAD, T_BODY }: 1, i.e. T_HEAD, because T_HERO's 64px cell does not
+// fit the 24px band above. This is the height half of the ladder's test - the
+// width half is measured at the call site - and it is a constant rather than a
+// runtime `uiLineH(rung) > SESSION_NAME_H` check because board 1's binary is held
+// byte-identical and a runtime test costs it flash. sessions-geom-check.mjs
+// asserts the invariant instead (the top rung's cell fits the band AND is the
+// tallest that does), against the parsed UI_FONTS[] table, so the constant cannot
+// drift from the fonts without a checker failure.
+const int SESSION_NAME_TOP_RUNG = 1;
+// 1px of air at EVERY gap and pad inside a row (the derived offsets are in
+// deckhand_display.ino, shared by both boards and collapsing to board 1's
+// literals at SESSION_AIR 0).
+//
+// 1, NOT the 3 this board carried while its rows were laid out on 13px lines, and
+// the DERIVATION RULE changed rather than just the number. It used to be "the
+// largest air at which four sessions keep their title", which now gives 2 (a
+// packed stack of 99 against the four-session rung's 100). Air is now picked by
+// the tighter of the TWO gates the ladder lands near, because the 16px line moved
+// the second one into range: at AIR 2 the five-session rung (79) clears
+// SESSION_SUB_MIN_H (77) with a ONE-PIXEL sub-line-to-pill gap, which is the exact
+// hazard the old version of this comment was written to warn about. At AIR 1 that
+// gap is 4px and four sessions still keep their title with 6px of margin instead
+// of 1. The 5px of row height it gives up at the ceiling is not lost: the pill is
+// bottom-anchored, so a row taller than the packed stack spends the surplus in the
+// sub-line-to-pill gap anyway.
+const int SESSION_AIR = 1;
 // THE PACKED TITLE-ROW STACK, re-derived from board 1's band table with every gap
-// and pad grown by SESSION_AIR:
+// and pad grown by SESSION_AIR and the ink from the two heights above:
 //   +0..+1  border
-//   +2..+6  pad 5                 (2 + AIR)
-//   +7..+32 name        T_HERO 26 (SESSION_NAME_Y_T = 4 + AIR)
-//   +33..+37 gap 5                (2 + AIR)
-//   +38..+50 title      13        (SESSION_TITLE_Y)
-//   +51..+55 gap 5                (2 + AIR)
-//   +56..+68 sub-line   13        (SESSION_SUB_Y)
-//   +69..+74 gap 6                (3 + AIR)
-//   +75..+92 pill       18        (top = rowH - SESSION_PILL_UP_T, 25)
-//   +93..+97 pad 5
-//   +98..+99 border               = 100
-// i.e. 85 + 5*AIR, over the same five gaps/pads board 1 packs at 2/2/2/3/2 (top
-// pad, name->title, title->sub, sub->pill, bottom pad). 100 is what picks AIR = 3,
-// because the ladder's four-session row is exactly 100: avail is 412 and four rows
-// carry three gaps, so (412 - 3*SESSION_ROW_GAP) / 4 = (412 - 9) / 4 = 100.75 ->
-// 100. At AIR 4 the minimum would be 105 against that same 100, and four sessions
-// would lose their title line.
-const int SESSION_TITLE_MIN_H = 100;
+//   +2..+4  pad 3                 (2 + AIR)
+//   +5..+28 name        T_HEAD 24 (SESSION_NAME_Y_T = 4 + AIR)
+//   +29..+31 gap 3                (2 + AIR)
+//   +32..+47 title      16        (SESSION_TITLE_Y)
+//   +48..+50 gap 3                (2 + AIR)
+//   +51..+66 sub-line   16        (SESSION_SUB_Y)
+//   +67..+70 gap 4                (3 + AIR)
+//   +71..+88 pill       18        (top = rowH - SESSION_PILL_UP_T, 23)
+//   +89..+91 pad 3
+//   +92..+93 border               = 94
+// i.e. 33 + SESSION_NAME_H + 2*SESSION_LINE_H + 5*AIR, where the 33 is the two
+// borders plus the pill and the five gaps/pads board 1 packs at 2/2/2/3/2 (top
+// pad, name->title, title->sub, sub->pill, bottom pad). THE FIVE GAPS, NAMED,
+// because the identity is only a derivation if each one is real: they are 3/3/3/4/3
+// here, each board 1's own value plus AIR, and nothing else in the stack is a gap.
+// Against board 1's 85 the difference is +5 of air, +6 of line (two lines, 13->16)
+// and -2 of name band (26->24) = 94.
+// The four-session rung is 100, so this clears its gate by 6px - where board 1's
+// three-session rung (86) clears its own by 1.
+const int SESSION_TITLE_MIN_H = 94;
 // The title-less tall row: the height at which the pill's first row lands exactly
 // ON the sub-line's last ink row, which is the boundary this gate admits.
-// Sub-line at +40..+52 (SESSION_SUB2_Y = 6 + AIR + 26 + 2 + AIR), pill top at
-// rowH - SESSION_PILL_UP (27), so 27 + 52 = 79 - board 1's 70 + 3*AIR.
+// Sub-line at +34..+49 (SESSION_SUB2_Y = 6 + AIR + 24 + 2 + AIR), pill top at
+// rowH - SESSION_PILL_UP (25), so 25 + 49 = 74.
 //
-// THE FIVE-SESSION RUNG SITS ON THIS EDGE WITH NOTHING TO SPARE, and that is the
-// one place in this section a future 1px change is a SILENT regression. The ladder
-// gives five sessions exactly 80, which clears 79 by a single row: the sub-line
-// inks to +52 and the pill starts at 80 - 27 = +53, a 0px gap. And 79 itself is
-// admitted by a `>=` gate, i.e. the boundary case where the pill's first row lands
-// ON the sub-line's last ink row - so at 79 the two overlap by one row (harmless
-// with Cozette, whose bottom row is blank for every glyph without a descender, but
-// not a clearance). Board 1 has the identical property at 70 and never reaches it,
-// because none of its rungs land in 70..84 at all.
-// CONSEQUENCE: anything that moves `avail` by one pixel - FOOTER_H, TAB_BAR_H,
-// SESSION_ROW_Y0 - drops five sessions from 80 to 79 and turns that 0px gap into a
-// 1px overlap, with nothing on screen naming the cause. sessions-geom-check.mjs
-// asserts that gap strictly (>= 0, where the threshold band tables tolerate the
-// documented -1 boundary), so re-run it after touching any of those three -
-// VERIFIED by doing it: FOOTER_H 18 -> 19 produces
-// `FAIL 5x79 (sub): sub-line -> pill gap -1`.
-const int SESSION_SUB_MIN_H = 79;
-// Tall vs compact. 2 (border) + 7 (pad, 4 + AIR) + 26 (name) + 18 (pill) + 7
-// (pad) + 2 (border) = 62 - board 1's 56 + 2*AIR. Board 1's 56..69 band (a tall
-// row with room for its big name but not its sub-line) is inherited rather than
-// closed: it is a deliberate trade there, and six sessions (66) land in this
-// board's version of it.
+// This gate is why AIR is 1. The ladder gives five sessions 79, so the sub-line
+// inks to +49 and the pill starts at 79 - 25 = +54: a 4px gap, and `avail` would
+// have to lose 23px before that reaches zero. The previous geometry sat on this
+// edge with a 0px gap and a 1px change to FOOTER_H was enough to make the pill
+// draw over the text - which is exactly what happened when FOOTER_H moved 18 -> 20,
+// and sessions-geom-check.mjs reported it as
+// `FAIL 5x79 (sub): sub-line -> pill gap -1` rather than leaving it to the glass.
+// The gate itself is still a `>=`, i.e. it still admits the touching case; what
+// changed is that no rung the ladder can produce lands anywhere near it.
+const int SESSION_SUB_MIN_H = 74;
+// Tall vs compact. 2 (border) + 5 (pad, 4 + AIR) + 24 (name) + 18 (pill) + 5
+// (pad) + 2 (border) = 56, which is board 1's number exactly - a coincidence worth
+// naming so nobody reads it as a copied literal: this board's band is 2px shorter
+// and its pads 1px taller, and -2 + 2*1 = 0. Board 1's 56..69 band (a tall row
+// with room for its big name but not its sub-line) is inherited rather than closed:
+// it is a deliberate trade there, and six sessions (65) land in this board's
+// version of it, which now runs 56..73.
 // CONSEQUENCE WORTH KNOWING: the COMPACT layout is UNREACHABLE on this board.
-// Six sessions come out at 66 and the strip case at 63, both above 62, so every
+// Six sessions come out at 65 and the strip case at 62, both above 56, so every
 // row here is a tall row. The compact path still has to be correct - MAX_SESSIONS
 // or the content area could change - but nothing on this panel renders it today.
-const int SESSION_LARGE_MIN_H = 62;
+const int SESSION_LARGE_MIN_H = 56;
 // Floor and ceiling.
 //
-// 43, NOT board 1's 38, and this is the one number in the section that is a fix
+// 47, NOT board 1's 38, and this is the one number in the section that is a fix
 // rather than a re-derivation. The floor is the guard for a content area that
 // shrinks, so it has to be the smallest height the COMPACT layout can legally
-// draw: that layout's sub-line inks SESSION_SUBC_Y..+12 (+28..+40 here) and the
-// 2px border owns rowH-2..rowH-1, so a legal row needs rowH >= SESSION_SUBC_Y + 15
-// = 43. Board 1's 38 is 2 SHORT of its own equivalent (25 + 15 = 40), which is not
-// hypothetical: seven or more sessions there put six rows at exactly 38 and the
-// model/branch line is drawn over the row's own outline. That defect is documented
-// in board_e32r28t.h and in sessions-geom-check.mjs and deliberately not fixed
-// (board 1's binary is held byte-identical across this port) - but inheriting the
-// magic number into a new board would be inheriting the bug, so this one is
-// derived. It never binds today either way: six sessions are 66, 63 with the strip.
+// draw: that layout's sub-line inks SESSION_SUBC_Y..+15 (+29..+44 here) and the
+// 2px border owns rowH-2..rowH-1, so a legal row needs
+// rowH >= SESSION_SUBC_Y + SESSION_LINE_H + 2 = 47. Board 1's 38 is 2 SHORT of its
+// own equivalent (25 + 13 + 2 = 40), which is not hypothetical: seven or more
+// sessions there put six rows at exactly 38 and the model/branch line is drawn over
+// the row's own outline. That defect is documented in board_e32r28t.h and in
+// sessions-geom-check.mjs and deliberately not fixed (board 1's binary is held
+// byte-identical across this port) - but inheriting the magic number into a new
+// board would be inheriting the bug, so this one is derived. Note the "+ 15" that
+// used to be written here was itself 13 + 2, i.e. a line height with a literal
+// baked in; at a 16px line it is +18.
+// It never binds today either way: six sessions are 65, 62 with the strip.
 //
-// The ceiling is SESSION_TITLE_MIN_H (100) plus 6 of slack, which the layout spends
+// The ceiling is SESSION_TITLE_MIN_H (94) plus 6 of slack, which the layout spends
 // between the sub-line and the bottom-anchored pill - board 1's own relationship
 // (85 + 5), with the 5 scaled by the panel ratio: 5 * 6.489/5.624 = 5.77 -> 6.
 //
-// THE LADDER THIS PRODUCES, avail = 462 - SESSION_ROW_Y0(50) = 412:
-//   1 session  412        -> 106  title   (306px of the list left empty)
-//   2 sessions 204        -> 106  title   (196 empty)
-//   3 sessions 135        -> 106  title   (88 empty)
-//   4 sessions 100        -> 100  title   (3 empty - the list fills)
-//   5 sessions 80         ->  80  sub-line
-//   6 sessions 66         ->  66  big name, no sub-line
+// THE LADDER THIS PRODUCES, avail = contentBottom(460) - SESSION_ROW_Y0(50) = 410:
+//   1 session  410 -> 100  title     (307px of the list left empty)
+//   2 sessions 203 -> 100  title     (207 empty)
+//   3 sessions 134 -> 100  title     (104 empty)
+//   4 sessions 100 -> 100  title     (1 empty - the list fills)
+//   5 sessions  79 ->  79  sub-line  (clears its gate by 5)
+//   6 sessions  65 ->  65  big name, no sub-line (clears its gate by 9)
 // Board 1's ladder for comparison: 90/90/86 title, 63 big name, 50/41 compact.
-// So this panel gives a FOURTH session its title line and a fifth its
-// model/branch line, which is the whole return on the extra height.
-const int SESSION_ROW_H_MIN = 43;
-const int SESSION_ROW_H_MAX = 106;
+// So this panel still gives a FOURTH session its title line and a fifth its
+// model/branch line - the whole return on the extra height - at a 16px line
+// rather than a 13px one, which is what this re-derivation had to preserve.
+// With the "+N more" strip (avail 391) the rungs are 100/100/100/95/75/62, and
+// only the SIX-row case is reachable: the host caps its list at MAX_SESSIONS, so
+// hiddenCount > 0 implies sessionCount == 6. The others are checked anyway.
+const int SESSION_ROW_H_MIN = 47;
+const int SESSION_ROW_H_MAX = 100;
 // Centre of the status indicator, and the +23 is NOT scaled - it is the same
 // constraint board 1 documents, against the same art. The working spinner is a
 // 32x32 BLIT that paints its own background, so its rect (x 19..50 here) has to
 // clear the row's 10px corner and the 2px border that follows it. Re-derived at
-// this board's dot row (SESSION_DOT_DY 22, so the blit's top row is y+6): the
-// border's inner edge on that row sits at x0 + 10 - sqrt(8^2 - 4^2) = x0 + 3.07,
-// and the blit's left edge is x0 + 7 - clear by 3.9px, where board 1 has 2.1.
+// this board's dot row: SESSION_DOT_DY is now SESSION_NAME_Y + SESSION_NAME_H / 2
+// = 19 (it was 22 while the band was 26 and AIR 3), so the blit's top row is y+3
+// and the border's inner edge there sits at x0 + 10 - sqrt(8^2 - 7^2) = x0 + 6.13
+// against a blit left edge of x0 + 7 - clear by 0.87px, which is board 1's own
+// figure at the same dot row rather than the 3.9px a lower dot used to buy. Tight,
+// asserted, and the same clearance board 1 has shipped with all along.
 const int SESSION_DOT_CX = SESSION_ROW_X + 23;
 // 40, unchanged, and for the same reason: it is set by the 32x32 art, not by the
 // panel. The blit owns x SESSION_ROW_X+7..+38 and the name starts 2px clear.
 const int SESSION_NAME_DX = 40;
 // The sub-line's lane, DERIVED here rather than carried forward: it is the row's
 // own text lane, SESSION_ROW_X + SESSION_ROW_W - 12 - (SESSION_ROW_X +
-// SESSION_NAME_DX) = 12 + 296 - 12 - 52 = 244. At Cozette's 6px advance that is
-// 40 characters against board 1's 30, and buildSessionSubline can only ever emit
-// 35 - so on this board a sub-line is never truncated at all.
+// SESSION_NAME_DX) = 12 + 296 - 12 - 52 = 244. At Spleen 8x16's 8px advance that
+// is 30 characters, and buildSessionSubline can emit 35 - so a sub-line CAN be
+// trimmed here, and the previous version of this note ("40 characters ... never
+// truncated at all") was arithmetic done at Cozette's 6px advance before this
+// board had its own faces. 30 is the same count board 1 gets from its narrower
+// lane, so the worst case is unchanged rather than newly introduced: fitText trims
+// with "..." at the measured lane, which is what the whole "lanes are measured,
+// never counted" rule exists for.
 const int SESSION_SUB_LANE_W = 244;
-// 16, UNCHANGED: one Cozette 6x13 line plus 3px. Derived from the text, like
-// FOOTER_H, so a bigger panel does not move it.
-const int SESSION_OVERFLOW_H = 16;
+// The "+N more" strip's reserved band. Derived from the TEXT, like FOOTER_H, so a
+// bigger panel does not move it - but it moves with the FACE: one SESSION_LINE_H
+// line plus 3px, which is 19 here against board 1's 16. Left at 16 the strip's own
+// 16px line plus drawIfChanged's 1px margins would have cleared into the footer's
+// first drawn row; sessions.ino now places the strip at
+// contentBottom() - SESSION_OVERFLOW_H + 4, board 1's own relationship, so both
+// boards keep the same 1-row overhang into the footer's padding and no more.
+const int SESSION_OVERFLOW_H = 19;
 
 // ---------- Session detail card and the ask screen ----------
 // THE HEADER ROW IS A TOUCH BAND, and this is the one place on this screen where

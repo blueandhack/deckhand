@@ -296,6 +296,26 @@ const int SESSION_OVERFLOW_H = 16;
 // in deckhand_display.ino). 0 here: this board's content area cannot afford any -
 // its own band table above is packed with 2px gaps and 2px pads.
 const int SESSION_AIR = 0;
+// THE TWO INK HEIGHTS THE ROW STACK IS BUILT FROM, named rather than left as the
+// literals 26 and 13 inside deckhand_display.ino's derived offsets. Both are the
+// numbers that were already there, so this board's binary does not move - but a
+// row's ink height is no longer identical on the two panels (board 2 draws a
+// native Spleen scale, 16px body against this board's 13), and a literal 13 in a
+// shared expression would have silently laid board 2's rows out at board 1's
+// text size. Every SESSION_* threshold in this section is arithmetic on these two
+// numbers plus the 18px pill; sessions-geom-check.mjs re-derives each one from
+// them and from the real UI_FONTS[] cell heights, so a font change fails there
+// rather than on the glass.
+const int SESSION_NAME_H = 26;   // the name band: uiLineH(T_HERO), Cozette 12x26
+const int SESSION_LINE_H = 13;   // one body/meta line: uiLineH(T_BODY), Cozette 6x13
+// Where drawSessionRow's name ladder STARTS, as an index into its NAME_RUNGS[]
+// { T_HERO, T_HEAD, T_BODY }. 0 here: T_HERO's 26px cell is exactly this board's
+// name band, so the tallest rung is admissible and the ladder is the full three
+// steps it has always been. It is an index rather than a runtime height test
+// because a test costs flash on a board whose binary is frozen, and because the
+// invariant it encodes - the top rung's cell must FIT the band - is asserted in
+// sessions-geom-check.mjs against the parsed font table, where it costs nothing.
+const int SESSION_NAME_TOP_RUNG = 0;
 
 // ---------- Session detail card and the ask screen ----------
 // The header row's TOUCH band ("< Back" on the left; TYPE or READ ALL on the
