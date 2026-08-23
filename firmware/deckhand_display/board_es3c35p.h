@@ -656,6 +656,83 @@ const int SESSION_SUB_LANE_W = 244;
 // boards keep the same 1-row overhang into the footer's padding and no more.
 const int SESSION_OVERFLOW_H = 19;
 
+// ---------- THE EXPANDED FIRST ROW ----------
+// WHY THIS EXISTS AT ALL, in one number: with ONE session the ladder above draws a
+// 100px row and then 307px of nothing - 75% of the list area - because every rung
+// is capped at SESSION_ROW_H_MAX and there is nothing else on the tab. Board 1 has
+// no such surplus (its one-session rung is 90 of a 264px area, and its cap exists
+// for the same reason), so it never expands: sessionExpandedH() returns 0 there
+// unconditionally and none of the constants below exist on that board.
+//
+// THE RULE, and it is arithmetic on the ladder rather than a second layout:
+//   leftover = avail - (count - 1) * (sessionRowH + SESSION_ROW_GAP)
+//   expanded = leftover < SESSION_EXP_MIN_H ? 0 : min(leftover, SESSION_EXP_MAX_H)
+// i.e. the TOP row of the urgency-sorted list absorbs exactly what the ladder
+// would have left empty, every other row keeps the height the ladder already gave
+// it, and the whole thing collapses to today's uniform list the moment the ladder
+// fills the column. The leftover is derived from the GLOBAL sessionRowH - the
+// ladder's own output - and not from a second copy of the ladder formula, so the
+// two cannot drift.
+//
+// THE SIX HEIGHTS, avail 410 (see the ladder above):
+//   1 session  leftover 410 -> 212 (cap)   prompt 4 lines   198px still empty
+//   2 sessions leftover 307 -> 212 (cap)   prompt 4 lines    95px still empty
+//   3 sessions leftover 204 -> 204         prompt 3 lines     0px - the list fills
+//   4 sessions leftover 101 ->   0         the ladder already fills the column
+//   5 sessions leftover  82 ->   0
+//   6 sessions leftover  70 ->   0
+// With the "+N more" strip (avail 391) only the six-row case is reachable, and it
+// is 66 -> 0. So expansion is a ONE-to-THREE session behaviour by arithmetic, not
+// by a special case at either end.
+//
+// SESSION_EXP_MIN_H IS THE PACKED STACK, exactly the way SESSION_TITLE_MIN_H is,
+// and below it the card cannot draw its content at all - which is why the rule
+// returns 0 rather than a short card:
+//   +0..+1    border
+//   +5..+28   name         SESSION_NAME_Y_T, T_HEAD 24
+//   +32..+63  title        SESSION_TITLE_Y, 2 x SESSION_LINE_H (wrapped)
+//   +67..+82  agent/model/branch                (+3 SESSION_LINE_GAP)
+//   +86..+101 "LAST PROMPT" label               (+3)
+//   +102..+133 prompt      2 x SESSION_LINE_H   (no gap: a label and the value it
+//                                                names read as one block)
+//   +137..+152 path        fitText, one line    (+3)
+//   +157..+174 pill        top = H - SESSION_PILL_UP_T, gap 4 above it (3 + AIR)
+//   +175..+177 pad 3
+//   +178..+179 border                            = 180
+// = path end (152) + 5 + SESSION_PILL_UP_T (23). The checker re-derives it from
+// the offsets rather than trusting this table.
+const int SESSION_EXP_MIN_H = 180;
+// THE CAP IS THE TALLEST CARD THAT IS ALL CONTENT, derived from the prompt's own
+// byte cap and the row's MEASURED lane - not a taste judgement about how much air
+// looks right. prompt[104] carries at most 100 characters (the host's cap) and the
+// row's text lane is SESSION_SUB_LANE_W (244px) = 30 characters at Spleen 8x16's
+// 8px advance, so 4 lines hold 120 and are the most that can ever carry ink; a
+// fifth would be permanently blank. Every 16px above SESSION_EXP_MIN_H therefore
+// buys exactly one more prompt line, and above MIN + 2*LINE there is nothing left
+// to put in the card - so the surplus stays OUTSIDE it, as empty list area, rather
+// than becoming a card of air. That is the honest cost of one session on this
+// panel and it is stated in the table above rather than hidden.
+const int SESSION_EXP_MAX_H = 212;
+// The title is ALWAYS two lines when present: title[44] carries 43 characters =
+// 344px against a 244px lane, so a real title genuinely wraps, and 2 lines hold
+// 60. Absent (Codex rows carry no title), the block is skipped by the cursor
+// rather than left as a hole.
+const int SESSION_EXP_TITLE_LINES = 2;
+// The prompt's floor and ceiling, both derived above. The DRAW picks its count
+// from the row's own height (sessionExpPromptLines()), so the card cannot ask for
+// a line the helper did not budget.
+const int SESSION_EXP_PROMPT_MIN = 2;
+const int SESSION_EXP_PROMPT_MAX = 4;
+// The row signature's buffer, per board because it is 6 copies of RAM and board
+// 1's is held byte-identical. 176 there (a 125-byte worst case: name 23 + status 9
+// + sub 35 + title 43 + tag 6 + icon 3 + 5 separators + NUL). The expanded row
+// also draws the last prompt and the path, so both join the signature for that ONE
+// row - prompt 103 + path 67 + 2 separators = 172 more, i.e. 297 - hence 304.
+// Appending them for every row instead would repaint a COMPACT row whenever its
+// prompt changed, which is a wholesale clear-and-redraw of pixels that did not
+// change: exactly the flicker the change-only discipline exists to prevent.
+const int SESSION_ROW_SIG_LEN = 304;
+
 // ---------- Session detail card and the ask screen ----------
 // THE HEADER ROW IS A TOUCH BAND, and this is the one place on this screen where
 // the pixel number MUST change to hold the physical target: board 1's 28px band
@@ -669,18 +746,21 @@ const int DETAIL_BACK_Y = 17;
 // The card starts exactly where the touch band ends - no overlap, where board 1's
 // card border sits 2px inside its own band.
 const int DETAIL_CARD_DY = 50;
-// 308, and the arithmetic is the running cursor in drawSessionDetail() with
+// 320, and the arithmetic is the running cursor in drawSessionDetail() with
 // DETAIL_AIR at every block boundary and this board's line caps:
 //   cardY +14 pad | name +34 | title +23 | pill +32 | rule +15 | label +13
-//   | prompt 3 lines +43 | rule +15 | label +13 | path 2 lines +32
-//   | col label +12 | col values +26 | col label +12  -> cy = +284
-// the last values row inks +284..+296, so 9 rows of slack sit above the 2px
-// border at +306..+307 (board 1: 8 above +222..+223).
+//   | prompt 4 lines +54 | rule +15 | label +13 | path 2 lines +32
+//   | col label +12 | col values +26 | col label +12  -> cy = +295
+// the last values row inks +295..+310 at the REAL 16px face, so 7 rows of slack
+// sit above the 2px border at +318..+319 (board 1: 8 above +222..+223).
+// 308 -> 320 is the fourth prompt line DETAIL_PROMPT_LINES now budgets (+11 at
+// the cursor's current 11px step); at 308 that line's own ink would have crossed
+// the card's bottom border.
 // It must ALSO leave room below itself, which is what caps it: the "answer this
-// one on your Mac" line draws at cardY + DETAIL_CARD_H + 8 (+412..+424 here) and
-// the "tap here for history" hint inks 446..458 against a contentBottom() of 462.
-// 21px between them. Anything past H = 328 collides.
-const int DETAIL_CARD_H = 308;
+// one on your Mac" line draws at cardY + DETAIL_CARD_H + 8 (MC_DATUM, so it inks
+// 418..433 here) and the "tap here for history" hint inks 444..459 against a
+// contentBottom() of 460. 10px between them. Anything past H = 328 collides.
+const int DETAIL_CARD_H = 320;
 // TYPE. 46 tall = TAP_MIN, where board 1's 22 was half its own floor. 88 wide is
 // board 1's 76 held PHYSICALLY (76 / 5.624 = 13.5mm; 13.5 * 6.489 = 87.7), which
 // is the right rule for a control rather than for text. The hit zone's extra 24px
@@ -689,11 +769,18 @@ const int DETAIL_CARD_H = 308;
 const int MSG_BTN_W = 88, MSG_BTN_H = 46;
 // THE LINE CAPS ARE DERIVED FROM THE FIELD'S OWN BYTE CAP AND THE MEASURED LANE,
 // which is what makes them big enough here to truncate NOTHING - board 1's 2/2
-// truncate both fields. The lane is CARD_W - 2*PAD = 260px = 43 characters at
-// Cozette's 6px advance; prompt[104] carries at most 100 characters (host cap) =
-// 3 lines, and path[68] carries 64 = 2 lines. So 3 and 2, not "more because
-// there is room": a fourth prompt line could never hold anything.
-const int DETAIL_PROMPT_LINES = 3;
+// truncate both fields.
+//
+// 4, NOT 3, and the 3 was arithmetic done at the WRONG ADVANCE: it read "260px =
+// 43 characters at Cozette's 6px advance", but this board draws Spleen 8x16, so
+// the lane is 260 / 8 = 32 characters. prompt[104] carries at most 100 (the host's
+// cap), and 3 x 32 = 96 - four characters SHORT, i.e. the field the card exists to
+// show was being silently cut. 4 x 32 = 128 clears it. That fourth line is what
+// took DETAIL_CARD_H from 308 to 320. The same re-derivation leaves the path at 2
+// (2 x 32 = 64 = path[68]'s 64 exactly, and 64 is also the host's own cap), and
+// the ".."-clipped two-column values below are unchanged: drawColValue clips to
+// the width it is GIVEN, measured, so they were never counted.
+const int DETAIL_PROMPT_LINES = 4;
 const int DETAIL_PATH_LINES = 2;
 // 8px of air at every block boundary inside the card - the same rhythm the USAGE
 // tab settled on, and the same direction Task 6 argued for: given surplus, it

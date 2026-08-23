@@ -895,7 +895,7 @@ int hiddenAskingCount = 0;
 // two sessions with the same name|status|sub|title at the same display position on
 // DIFFERENT Macs would otherwise never repaint, and the row would keep showing whichever
 // Mac's tag was drawn first rather than the one it now actually belongs to.
-char rowSigCache[MAX_SESSIONS][176]; // must match the sig buffer in renderSessionsList
+char rowSigCache[MAX_SESSIONS][SESSION_ROW_SIG_LEN]; // sized per board - see the header
 char rowDurCache[MAX_SESSIONS][8];
 char overflowCache[32] = "";
 int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
@@ -2148,15 +2148,18 @@ void tickWorkingSpinner() {
   if (millis() - lastAnimMs < ANIM_INTERVAL_MS) return;
   lastAnimMs = millis();
   animPhase = (animPhase + 1) % ANIM_STEPS;
-  bool large = sessionRowsLarge();
   // pos is the display row (what the y comes from); the array index it
   // holds today can differ once two Macs are merged and re-ranked, so it is
   // resolved through sessionAt(pos) the same way drawSessionRow does.
   for (int pos = 0; pos < sessionCount; pos++) {
     int i = sessionAt(pos);
     if (strcmp(sessions[i].status, "working") != 0) continue;
-    int y = SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
-    int dotCy = large ? y + SESSION_DOT_DY : y + sessionRowH / 2;
+    // Same two helpers as the draw: the first row's height can differ from the
+    // rest, and an animation redrawing at the old y four times a second is exactly
+    // how the last fix to this indicator's position was undone once.
+    int y = sessionRowYAt(pos);
+    int rowH = sessionRowHAt(pos);
+    int dotCy = rowH >= SESSION_LARGE_MIN_H ? y + SESSION_DOT_DY : y + rowH / 2;
     drawAgentSpinner(SESSION_DOT_CX, dotCy, COLOR_CARD,
                      strcmp(sessions[i].agent, "cx") == 0);
   }
@@ -2841,10 +2844,22 @@ void handleTouch() {
   }
 
   if (currentTab == TAB_SESSIONS && sessionCount > 0 && sy >= SESSION_ROW_Y0) {
+#if BOARD_USES_TFT_ESPI
+    // Every row is the same height on this board, so one division answers it - and
+    // this is deliberately still the arithmetic it always was rather than the walk
+    // below, because this board's binary is held byte-identical across the port.
     int slot = sessionRowH + SESSION_ROW_GAP;
     int row = (sy - SESSION_ROW_Y0) / slot;
     int offsetInSlot = (sy - SESSION_ROW_Y0) % slot;
     if (row >= 0 && row < sessionCount && offsetInSlot < sessionRowH) openSessionDetail(sessionAt(row));
+#else
+    // The first row can be TALLER than the rest, so the uniform-slot division is
+    // wrong here by construction: it must consult the SAME helpers the layout and
+    // the draw use, or a tap lands on a different session from the one under the
+    // finger. A gap between rows returns -1 and is ignored rather than guessed.
+    int row = sessionRowAtY(sy);
+    if (row >= 0) openSessionDetail(sessionAt(row));
+#endif
   }
 
   if (currentTab == TAB_SETTINGS) handleSettingsTouch(sx, sy);

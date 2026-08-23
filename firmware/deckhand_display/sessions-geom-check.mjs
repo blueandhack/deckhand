@@ -40,7 +40,7 @@ function parseGfxFont(file) {
   const src = fs.readFileSync(`${DIR}/${file}`, "utf8");
   const gl = src.slice(src.indexOf("Glyphs[]"));
   const rows = [...gl.matchAll(/\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\}/g)];
-  return rows.map(m => ({ w: +m[2], h: +m[3], xa: +m[4], xo: +m[5] }));
+  return rows.map(m => ({ w: +m[2], h: +m[3], xa: +m[4], xo: +m[5], yo: +m[6] }));
 }
 // UI_FONTS[] both arms: index -> { face, size, cellH }. The #if/#else is walked
 // the same way usage-geom-check.mjs walks it (last "#if BOARD_USES_TFT_ESPI" at or
@@ -68,6 +68,9 @@ function parseUiFonts() {
   return { 1: rowsOf(arms[0]), 2: rowsOf(arms[1]) };
 }
 const UI = parseUiFonts();
+// Board 1's own glyph tables, keyed the same way, so ascentB() has one code path.
+const FONTS_B1 = {};
+for (const id of [1, 2, 3, 4]) FONTS_B1[id] = parseGfxFont(`${UI[1][id].face}.h`);
 const GLYPHS = {};   // face name -> glyph table, loaded on demand
 function glyphsFor(face) {
   if (!GLYPHS[face]) GLYPHS[face] = parseGfxFont(`${face}.h`);
@@ -86,6 +89,17 @@ function advanceB(b, id) {
     if (q.xo !== 0 || q.w !== q.xa)
       throw new Error(`advanceB(): ${face} is no longer monospace - this needs the real last-char rule`);
   return g[0].xa * size;
+}
+// A face's ASCENT (rows of ink above the baseline), which is what a stacked text
+// block's line STEP has to clear: drawString paints an opaque box ascent+descent
+// tall, so a step under the ascent means the next line erases ink that is not a
+// descender. Read from the glyph table, the same source the shim's own _glyphAb is
+// computed from - board 1 keeps geom-common's table, which carries the same yOffset.
+function ascentB(b, id) {
+  const g = b === 1 ? FONTS_B1[id] : glyphsFor(UI[b][id].face);
+  let a = 0;
+  for (const q of g) a = Math.max(a, -q.yo);
+  return a * UI[b][id].size;
 }
 function widthB(b, id, s) {
   if (b === 1) return textWidth(s, id);
@@ -165,6 +179,14 @@ const KNOWN = {
 // two hand-written strings on purpose - changing the ladder deliberately should
 // cost a deliberate edit here, which is the point of asserting it at all.
 const LADDER_SHAPE = { 1: "tttncc", 2: "ttttsn" };
+// THE SIX EXPANDED HEIGHTS, one per session count, asserted for the same reason
+// LADDER_SHAPE is: changing them deliberately should cost a deliberate edit here.
+// Board 1 never expands - it has no surplus height to give and sessionExpandedH()
+// returns 0 there unconditionally - so its row is six zeros and that is the claim,
+// not an absence of one. Board 2: the top row absorbs the leftover up to
+// SESSION_EXP_MAX_H, and 4+ sessions fall back to the uniform ladder because the
+// ladder already fills the column.
+const EXPANDED_H = { 1: [0, 0, 0, 0, 0, 0], 2: [212, 212, 204, 0, 0, 0] };
 
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0, known = 0;
@@ -221,6 +243,57 @@ function rowBands(b, c, rowH, kind) {
     bands.push(["name", c.SESSION_NAME_Y, c.SESSION_NAME_Y + L - 1]);
     bands.push(["sub-line", c.SESSION_SUBC_Y, c.SESSION_SUBC_Y + L - 1]);
   }
+  bands.push(["border bottom", rowH - 2, rowH - 1]);
+  return bands;
+}
+// sessionExpandedH(), replicated: the leftover after the OTHER rows have taken the
+// ladder's height, floored at the packed stack and capped at the all-content
+// height. A board that declares no SESSION_EXP_MIN_H never expands, which is
+// exactly how board 1 is wired (the constant does not exist in its header and the
+// firmware's own arm returns 0 under #if BOARD_USES_TFT_ESPI).
+function expandedH(c, count, avail, rowH) {
+  if (c.SESSION_EXP_MIN_H === undefined) return 0;
+  const leftover = avail - (count - 1) * (rowH + c.SESSION_ROW_GAP);
+  if (leftover < c.SESSION_EXP_MIN_H) return 0;
+  return Math.min(leftover, c.SESSION_EXP_MAX_H);
+}
+// sessionExpPromptLines(), replicated: every SESSION_LINE_H above the packed
+// minimum buys one more prompt line, up to the field's own byte cap.
+function expPromptLines(c, rowH) {
+  const n = c.SESSION_EXP_PROMPT_MIN +
+            Math.trunc((rowH - c.SESSION_EXP_MIN_H) / c.SESSION_LINE_H);
+  return Math.min(Math.max(n, c.SESSION_EXP_PROMPT_MIN), c.SESSION_EXP_PROMPT_MAX);
+}
+// The expanded card's bands, walked by the SAME running cursor the draw uses -
+// which is the point: the blocks are optional (a Codex row has no title, a fresh
+// session has no prompt), so a fixed band table would describe a card the device
+// does not draw. `have` names which blocks are present.
+//
+// These are the WORST CASE within each shape: the draw advances by the y
+// drawWrappedText actually returns, so a title or prompt that does not fill its
+// budgeted lines only ever moves the blocks below it UP, widening the gap to the
+// bottom-anchored pill. Budgeting the full count here is therefore the bound, and
+// the assertion below reads `gap >= 0` against it.
+function expBands(b, c, rowH, have) {
+  const L = lineHB(b, T_BODY), N = c.SESSION_NAME_H, G = c.SESSION_LINE_GAP;
+  const bands = [["border top", 0, 1],
+                 ["name", c.SESSION_NAME_Y_T, c.SESSION_NAME_Y_T + N - 1]];
+  let cy = c.SESSION_TITLE_Y;
+  if (have.title) {
+    bands.push([`title (${c.SESSION_EXP_TITLE_LINES} lines)`, cy,
+                cy + c.SESSION_EXP_TITLE_LINES * L - 1]);
+    cy += c.SESSION_EXP_TITLE_LINES * L + G;
+  }
+  if (have.sub) { bands.push(["sub-line", cy, cy + L - 1]); cy += L + G; }
+  if (have.prompt) {
+    const n = expPromptLines(c, rowH);
+    bands.push(["PROMPT label", cy, cy + L - 1]);
+    cy += L;                                  // label and value are one block
+    bands.push([`prompt (${n} lines)`, cy, cy + n * L - 1]);
+    cy += n * L + G;
+  }
+  if (have.path) bands.push(["path", cy, cy + L - 1]);
+  bands.push(["pill", rowH - c.SESSION_PILL_UP_T, rowH - c.SESSION_PILL_UP_T + 17]);
   bands.push(["border bottom", rowH - 2, rowH - 1]);
   return bands;
 }
@@ -435,6 +508,109 @@ for (const b of [1, 2]) {
     }
   }
 
+  // ---- THE EXPANDED FIRST ROW ----
+  // The most urgent session absorbs the height the ladder leaves empty. Every
+  // number here is re-derived from the offsets rather than read back from the
+  // header's own band table, which is the only way this catches the defect it is
+  // for: a card whose content runs into its own bottom-anchored pill.
+  {
+    const L = lineHB(b, T_BODY), A = c.SESSION_AIR;
+    const EXP = c.SESSION_EXP_MIN_H !== undefined;
+    if (!EXP) {
+      // Board 1's claim is an ABSENCE: no expanded constants, so sessionExpandedH()
+      // can only be its `return 0` arm. Asserted rather than assumed, because a
+      // half-ported header (constants present, firmware arm not) would otherwise
+      // pass in silence.
+      chk(c.SESSION_EXP_MAX_H === undefined && c.SESSION_EXP_PROMPT_MAX === undefined,
+          `no expanded-row constants: this board's list is uniform by construction`);
+      chk(EXPANDED_H[b].every(v => v === 0),
+          `EXPANDED_H says this board never expands a row`);
+    } else {
+      // THE PACKED STACK, as an identity on the offsets. Same shape as
+      // SESSION_TITLE_MIN_H's: title lines, sub-line, label, prompt lines and the
+      // path, then the 3+AIR gap the bottom-anchored pill needs above it.
+      const pathTop = c.SESSION_TITLE_Y +
+                      (c.SESSION_EXP_TITLE_LINES * L + c.SESSION_LINE_GAP) +
+                      (L + c.SESSION_LINE_GAP) + L +
+                      (c.SESSION_EXP_PROMPT_MIN * L + c.SESSION_LINE_GAP);
+      const pathEnd = pathTop + L - 1;
+      chk(c.SESSION_EXP_MIN_H === pathEnd + 4 + A + c.SESSION_PILL_UP_T,
+          `SESSION_EXP_MIN_H ${c.SESSION_EXP_MIN_H} == path end +${pathEnd} + gap ${3 + A} + 1 + pillUp ${c.SESSION_PILL_UP_T}`);
+      chk(c.SESSION_EXP_MAX_H === c.SESSION_EXP_MIN_H +
+            (c.SESSION_EXP_PROMPT_MAX - c.SESSION_EXP_PROMPT_MIN) * L,
+          `SESSION_EXP_MAX_H ${c.SESSION_EXP_MAX_H} == MIN ${c.SESSION_EXP_MIN_H} + ` +
+          `${c.SESSION_EXP_PROMPT_MAX - c.SESSION_EXP_PROMPT_MIN} more prompt lines x ${L}`);
+      chk(c.SESSION_EXP_MIN_H >= c.SESSION_TITLE_MIN_H,
+          `an expanded row (>= ${c.SESSION_EXP_MIN_H}) is always a title row (>= ${c.SESSION_TITLE_MIN_H})`);
+      // THE CAP IS THE FIELD'S BYTE CAP, MEASURED. A prompt line past this could
+      // never carry ink, and one short of it cuts the field the card exists for.
+      const adv = advanceB(b, T_BODY), lane = c.SESSION_SUB_LANE_W;
+      const perLine = Math.floor(lane / adv);
+      chk(c.SESSION_EXP_PROMPT_MAX * perLine >= CAP.prompt - 3,
+          `prompt: ${c.SESSION_EXP_PROMPT_MAX} lines hold ${c.SESSION_EXP_PROMPT_MAX * perLine} of ${CAP.prompt - 3} chars (lane ${lane}px = ${perLine}/line at ${adv}px)`);
+      chk((c.SESSION_EXP_PROMPT_MAX - 1) * perLine < CAP.prompt - 3,
+          `and ${c.SESSION_EXP_PROMPT_MAX - 1} lines would hold only ${(c.SESSION_EXP_PROMPT_MAX - 1) * perLine} - so the cap is the byte cap, not taste`);
+      chk(c.SESSION_EXP_TITLE_LINES * perLine >= CAP.title,
+          `title: ${c.SESSION_EXP_TITLE_LINES} wrapped lines hold ${c.SESSION_EXP_TITLE_LINES * perLine} of ${CAP.title} chars`);
+      chk(perLine <= 63,
+          `the ${lane}px wrapped lane is ${perLine} chars, inside drawWrappedText's 63-char buffer`);
+      // EVERY REACHABLE HEIGHT, with the strip case too - and both content
+      // extremes, because the cursor SKIPS a missing block: a Codex row carries no
+      // title and a session that has not been prompted yet carries no prompt.
+      const HAVE = [
+        ["all blocks", { title: 1, sub: 1, prompt: 1, path: 1 }],
+        ["no title (Codex)", { title: 0, sub: 1, prompt: 1, path: 1 }],
+        ["no prompt yet", { title: 1, sub: 1, prompt: 0, path: 1 }],
+        ["name + pill only", { title: 0, sub: 0, prompt: 0, path: 0 }],
+      ];
+      for (const strip of [false, true]) {
+        const avail = contentBottom - c.SESSION_ROW_Y0 - (strip ? c.SESSION_OVERFLOW_H : 0);
+        const tags = [];
+        for (let n = 1; n <= 6; n++) {
+          const raw = Math.floor((avail - c.SESSION_ROW_GAP * (n - 1)) / n);
+          const rowH = Math.min(Math.max(raw, c.SESSION_ROW_H_MIN), c.SESSION_ROW_H_MAX);
+          const e = expandedH(c, n, avail, rowH);
+          tags.push(e ? `${n}:${e}(${expPromptLines(c, e)}p)` : `${n}:-`);
+          if (!strip)
+            chk(e === EXPANDED_H[b][n - 1],
+                `${n} session(s): expanded first row ${e} == the ${EXPANDED_H[b][n - 1]} this board documents`);
+          if (!e) continue;
+          // THE WHOLE STACK STILL FITS. This is the assertion the feature can
+          // actually break: the first row grew, the others did not shrink, and the
+          // list must still end inside `avail`.
+          const used = e + (n - 1) * (rowH + c.SESSION_ROW_GAP);
+          chk(used <= avail,
+              `${strip ? "strip " : ""}${n} session(s): expanded ${e} + ${n - 1}x${rowH} + ${n - 1} gaps = ${used} <= avail ${avail} (${avail - used} left)`);
+          chk(e >= c.SESSION_EXP_MIN_H && e <= c.SESSION_EXP_MAX_H,
+              `${strip ? "strip " : ""}${n}: expanded ${e} inside [${c.SESSION_EXP_MIN_H}, ${c.SESSION_EXP_MAX_H}]`);
+          // THE ROW STACK IS CONTIGUOUS, which is what the touch hit test walks:
+          // sessionRowYAt(pos) + sessionRowHAt(pos) + GAP == sessionRowYAt(pos+1).
+          let yy = c.SESSION_ROW_Y0;
+          for (let pos = 0; pos < n; pos++) {
+            const h = pos === 0 ? e : rowH;
+            if (pos === n - 1)
+              chk(yy + h <= c.SESSION_ROW_Y0 + avail,
+                  `${strip ? "strip " : ""}${n}: last row ends ${yy + h - 1}, inside the list area ending ${c.SESSION_ROW_Y0 + avail - 1}`);
+            yy += h + c.SESSION_ROW_GAP;
+          }
+          for (const [lbl, have] of HAVE) {
+            const bands = expBands(b, c, e, have);
+            if (!strip && n === 1) {
+              console.log(`  expanded ${e} (${lbl}):`);
+              for (const [nm, a, z] of bands) console.log(`    ${nm.padEnd(18)} +${a}..+${z}`);
+            }
+            for (let i = 1; i < bands.length; i++) {
+              const gap = bands[i][1] - bands[i - 1][2] - 1;
+              chk(gap >= 0,
+                  `${strip ? "strip " : ""}${n}x${e} expanded (${lbl}): ${bands[i - 1][0]} -> ${bands[i][0]} gap ${gap}`);
+            }
+          }
+        }
+        console.log(`  expanded${strip ? " (+N more strip)" : "           "} avail ${avail}: ${tags.join("  ")}`);
+      }
+    }
+  }
+
   // ---- the name lane: MEASURED, never counted ----
   const nameX = c.SESSION_ROW_X + c.SESSION_NAME_DX;
   const tagRight = c.SESSION_ROW_X + c.SESSION_ROW_W - 12;
@@ -558,12 +734,25 @@ for (const b of [1, 2]) {
   // keeps the finding visible without either hiding it or blocking on it. The one
   // that matters is named below.
   const cardY = c.DETAIL_CARD_Y, A = c.DETAIL_AIR, maxW = c.CARD_W - 2 * c.PAD;
-  {
-    const perLineReal = Math.floor(maxW / advanceB(b, T_BODY));
-    for (const [fld, cap, lines] of [["prompt", CAP.prompt - 3, c.DETAIL_PROMPT_LINES],
-                                     ["path", CAP.path - 3, c.DETAIL_PATH_LINES]])
-      console.log(`    [next task] ${fld}: at the REAL ${advanceB(b, T_BODY)}px advance, ${lines} lines hold ` +
-                  `${lines * perLineReal} of ${cap} chars${lines * perLineReal < cap ? "  <-- SHORT" : ""}`);
+  // The counted LANES here are now measured at the board's own advance (see
+  // perLine below, and DETAIL_PROMPT_LINES in board_es3c35p.h, both re-derived).
+  // What is still board-1 scale is the running cursor's own STEPS - `11` for a
+  // text line, `13` for a label, `26` for the name - and that is a LIVE board-2
+  // defect rather than a stale comment, so it is printed with its numbers instead
+  // of being left for someone to rediscover: at a 16px face an 11px step means each
+  // wrapped line's opaque box erases the previous line's descenders, and the name
+  // is drawn at font 4 = Spleen 32x64 into a 34px slot. Fixing it properly is a
+  // re-derivation of this whole card (measured: ~360px at 16px steps and 8px air
+  // against DETAIL_CARD_H's own 328 ceiling, or 326 at DETAIL_AIR 4 with the name
+  // on T_HEAD), which no task in this plan owns - so it is stated, not silently
+  // converted inside a sessions-list diff.
+  for (const [fld, step, id] of [["wrapped text line", 11, T_META],
+                                 ["label -> value", 13, T_META],
+                                 ["name", 26 + A, T_HERO]]) {
+    const need = fld === "name" ? lineHB(b, id) : ascentB(b, id);
+    if (need > step)
+      console.log(`    [not re-derived] detail card's ${fld} step ${step} < the ${need}px it needs ` +
+                  `(${UI[b][id].face}${fld === "name" ? " cell" : " ascent"}) - overdrawn by ${need - step}px`);
   }
   chk(2 + c.MSG_BTN_H <= c.DETAIL_CARD_DY,
       `TYPE chip +2..+${2 + c.MSG_BTN_H - 1} in the header row clears the card at +${c.DETAIL_CARD_DY}`);
@@ -592,19 +781,19 @@ for (const b of [1, 2]) {
     ["col labels", 12], ["col values", 18 + A], ["col labels", 12],
   ];
   for (const [n, d] of steps) { console.log(`    detail +${String(cy).padStart(3)} ${n}`); cy += d; }
-  const inkEnd = cy + lineH(T_BODY) - 1;
+  const inkEnd = cy + lineHB(b, T_BODY) - 1;   // the board's own cell, not board 1's
   console.log(`    detail +${cy} last values row, inking to +${inkEnd}`);
   chk(inkEnd <= c.DETAIL_CARD_H - 3,
       `detail content ends +${inkEnd}, clear of the 2px border at +${c.DETAIL_CARD_H - 2}..+${c.DETAIL_CARD_H - 1} (${c.DETAIL_CARD_H - 2 - inkEnd - 1} rows of slack)`);
   // BOTH of these are MC_DATUM, so the y given is the CENTRE - getting that wrong
   // is what hid board 1's collision here for as long as it has existed.
-  const half = Math.floor(lineH(T_META) / 2);
+  const half = Math.floor(lineHB(b, T_META) / 2);
   const answerInk = cardY + c.DETAIL_CARD_H + 8 + half;
   const hintTop = contentBottom - 10 - half;
   m = `"answer on your Mac" ends ${answerInk} above the history hint at ${hintTop}`;
-  chk(answerInk < hintTop, `${m}..${hintTop + lineH(T_META) - 1}`, isKnown(b, m));
-  chk(hintTop + lineH(T_META) - 1 < contentBottom,
-      `history hint ends ${hintTop + lineH(T_META) - 1} inside contentBottom ${contentBottom}`);
+  chk(answerInk < hintTop, `${m}..${hintTop + lineHB(b, T_META) - 1}`, isKnown(b, m));
+  chk(hintTop + lineHB(b, T_META) - 1 < contentBottom,
+      `history hint ends ${hintTop + lineHB(b, T_META) - 1} inside contentBottom ${contentBottom}`);
   chk(cardY + c.DETAIL_CARD_H <= contentBottom - 8,
       `detail card ends ${cardY + c.DETAIL_CARD_H - 1}, inside contentBottom ${contentBottom}`);
   // The two-column pairs (MODEL / GIT BRANCH, STARTED / AGENT). drawColValue()
@@ -622,7 +811,12 @@ for (const b of [1, 2]) {
   console.log(`    column value lane ${colW}px: ${whole} chars whole, ${cut} + ".." when clipped`);
   // The line caps against the FIELD's own byte cap - the derivation that decides
   // whether a field is shown whole or silently cut.
-  const perLine = Math.floor(maxW / 6);
+  // AT THE BOARD'S OWN ADVANCE, not a hardcoded 6: this was `maxW / 6`, Cozette's,
+  // and on board 2 (Spleen 8x16) it therefore claimed 43 characters a line where
+  // the panel draws 32 - which is exactly how DETAIL_PROMPT_LINES came to be 3
+  // while the field needs 4. advanceB(1, T_META) is 6, so board 1's two KNOWN
+  // messages below are unchanged character for character.
+  const perLine = Math.floor(maxW / advanceB(b, T_META));
   for (const [fld, cap, lines] of [["prompt", CAP.prompt - 3, c.DETAIL_PROMPT_LINES],
                                    ["path", CAP.path - 3, c.DETAIL_PATH_LINES]]) {
     const holds = lines * perLine;
@@ -672,19 +866,35 @@ for (const b of [1, 2]) {
   // A signature holds FIELD VALUES, not the truncated text drawn from them, so a
   // wider row does not lengthen any of these - the worst cases are identical on
   // both boards, which is why nothing here moved for board 2.
-  const rowSig = CAP.name + 1 + CAP.status + 1 + CAP.sub + 1 + CAP.title + 1 +
-                 CAP.macTag + 1 + CAP.emojiId + 1;
-  chk(+CACHE.rowSigCache >= rowSig,
-      `rowSigCache ${CACHE.rowSigCache} holds its ${rowSig}-byte worst case`);
+  // A CACHE'S DECLARED LENGTH MAY NOW BE A NAME, not a number: rowSigCache is
+  // sized per board (SESSION_ROW_SIG_LEN) because board 2's expanded row signs two
+  // more fields and board 1's RAM is held byte-identical. cacheSizes() hands back
+  // the dimension as written, so a symbolic one is resolved against THIS board's
+  // constant table - unresolved would come out NaN, and `NaN >= n` is false, which
+  // reports as a failure rather than passing in silence.
+  const cacheLen = (name) => {
+    const d = CACHE[name];
+    const v = /^\d+$/.test(d) ? +d : c[d];
+    if (v === undefined) throw new Error(`cacheLen(): ${name}'s dimension "${d}" is not a known constant`);
+    return v;
+  };
+  let rowSig = CAP.name + 1 + CAP.status + 1 + CAP.sub + 1 + CAP.title + 1 +
+               CAP.macTag + 1 + CAP.emojiId + 1;
+  // The expanded first row appends the last prompt and the path to its signature -
+  // both are DRAWN on that card, and a field drawn but not signed is the staleness
+  // the title itself shipped once. Only a board that expands pays for them.
+  if (c.SESSION_EXP_MIN_H !== undefined) rowSig += 1 + CAP.prompt + 1 + CAP.path;
+  chk(cacheLen("rowSigCache") >= rowSig,
+      `rowSigCache ${cacheLen("rowSigCache")} (${CACHE.rowSigCache}) holds its ${rowSig}-byte worst case`);
   const detSig = CAP.name + CAP.status + CAP.path + CAP.model + CAP.branch + CAP.askPid +
                  2 /* answeredIdx */ + CAP.title + CAP.prompt + 11 /* startSec */ +
                  CAP.askVoiceSha + 10 /* separators */ + 2 /* |M */ +
                  1 + CAP.macTag + 1 + CAP.emojiId + 1 /* NUL */;
-  chk(+CACHE.detailSigCache >= detSig,
+  chk(cacheLen("detailSigCache") >= detSig,
       `detailSigCache ${CACHE.detailSigCache} holds its ${detSig}-byte worst case`);
-  chk(+CACHE.detailDurCache >= 23,
+  chk(cacheLen("detailDurCache") >= 23,
       `detailDurCache ${CACHE.detailDurCache} holds "for 999h59m - 23:59" padded to 22 + NUL`);
-  chk(+CACHE.rowDurCache >= 8, `rowDurCache ${CACHE.rowDurCache} holds a 7-char padded duration + NUL`);
+  chk(cacheLen("rowDurCache") >= 8, `rowDurCache ${CACHE.rowDurCache} holds a 7-char padded duration + NUL`);
 }
 
 console.log(`\n${fail} failures, ${known} known-and-documented board-1 compromises`);

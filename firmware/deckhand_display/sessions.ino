@@ -3,6 +3,76 @@
 // build works and what may not move.
 
 bool sessionRowsLarge() { return sessionRowH >= SESSION_LARGE_MIN_H; }
+
+// ---------- The expanded first row ----------
+// THE MOST URGENT SESSION ABSORBS THE HEIGHT THE LADDER LEAVES EMPTY. With one
+// session board 2 drew a 100px row and 307px of nothing; the top row of the
+// urgency-sorted list now takes that space and every other row keeps exactly the
+// height the ladder already gave it. The rule, the six heights it produces and the
+// packed stack it is bounded by are all derived in board_es3c35p.h beside
+// SESSION_EXP_MIN_H, and re-derived by sessions-geom-check.mjs.
+//
+// Board 1 has no surplus to give - its one-session rung is 90 of a 264px content
+// area - so it returns 0 unconditionally and none of the code below is compiled
+// into it.
+int sessionExpandedH(int count) {
+#if BOARD_USES_TFT_ESPI
+  (void) count; return 0;
+#else
+  if (count < 1) return 0;
+  // sessionRowH is the LADDER'S OWN OUTPUT for this count (renderSessionsList
+  // computes it before anything here can run), so the leftover is measured
+  // against the very number the compact rows are drawn at rather than against a
+  // second copy of the ladder formula that could drift from it.
+  int hidden = sessionsTotal - count;
+  int avail = contentBottom() - SESSION_ROW_Y0 - (hidden > 0 ? SESSION_OVERFLOW_H : 0);
+  int leftover = avail - (count - 1) * (sessionRowH + SESSION_ROW_GAP);
+  if (leftover < SESSION_EXP_MIN_H) return 0;   // the ladder already fills the column
+  return leftover > SESSION_EXP_MAX_H ? SESSION_EXP_MAX_H : leftover;
+#endif
+}
+#if !BOARD_USES_TFT_ESPI
+// How many prompt lines an expanded row of this height budgets. Every
+// SESSION_LINE_H above the packed minimum buys exactly one more, up to the
+// field's own byte cap (see SESSION_EXP_MAX_H) - and the DRAW asks this rather
+// than deciding for itself, so a card can never draw a line its height did not
+// pay for.
+int sessionExpPromptLines(int rowH) {
+  int n = SESSION_EXP_PROMPT_MIN + (rowH - SESSION_EXP_MIN_H) / SESSION_LINE_H;
+  if (n < SESSION_EXP_PROMPT_MIN) n = SESSION_EXP_PROMPT_MIN;
+  return n > SESSION_EXP_PROMPT_MAX ? SESSION_EXP_PROMPT_MAX : n;
+}
+bool sessionRowExpanded(int pos) { return pos == 0 && sessionExpandedH(sessionCount) > 0; }
+// The row stack, walked in ONE place. Draw, duration, spinner tick and the touch
+// hit test all read these two, which is what stops an expanded first row making
+// the hit test disagree with the layout - the uniform-height assumption those four
+// sites used to share independently.
+int sessionRowHAt(int pos) {
+  int e = sessionExpandedH(sessionCount);
+  return (pos == 0 && e > 0) ? e : sessionRowH;
+}
+int sessionRowYAt(int pos) {
+  int e = sessionExpandedH(sessionCount);
+  if (e <= 0) return SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
+  if (pos == 0) return SESSION_ROW_Y0;
+  return SESSION_ROW_Y0 + e + SESSION_ROW_GAP + (pos - 1) * (sessionRowH + SESSION_ROW_GAP);
+}
+// The display row a y lands in, or -1 for a gap or for anything past the list.
+int sessionRowAtY(int sy) {
+  for (int pos = 0; pos < sessionCount; pos++) {
+    int y = sessionRowYAt(pos);
+    if (sy >= y && sy < y + sessionRowHAt(pos)) return pos;
+  }
+  return -1;
+}
+#else
+// Board 1: the list is uniform, and these expand to exactly the expressions the
+// four call sites carried before the helpers existed - which is what keeps its
+// binary byte-identical.
+static inline bool sessionRowExpanded(int pos) { (void) pos; return false; }
+static inline int sessionRowHAt(int pos) { (void) pos; return sessionRowH; }
+static inline int sessionRowYAt(int pos) { return SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP); }
+#endif
 void drawChevron(int rightX, int cy, uint16_t color = COLOR_LABEL) {
   tft.fillTriangle(rightX - 8, cy - 5, rightX - 8, cy + 5, rightX - 2, cy, color);
 }
@@ -66,6 +136,28 @@ void drawStatusPill(int xEdge, int y, const char* label, const char* status, boo
     uiStrokeRound(x, y, w, 18, 9, BORDER_CTRL, color, COLOR_CARD);
     tft.setTextColor(color, COLOR_CARD);
   }
+#if !BOARD_USES_TFT_ESPI
+  // THE LABEL'S OWN BACKGROUND BOX DESTROYED THIS PILL, and the fix is to stop it
+  // painting one at all. MC_DATUM centres on the ASCENT alone (TFT_eSPI's rule,
+  // which the shim reproduces deliberately), so a face with a descent is biased
+  // low by descent/2: Spleen8x16 (ascent 12, descent 4) puts its 16-row opaque box
+  // at +3..+18 inside an 18px pill occupying +0..+17. That erased the bottom edge
+  // at +17, BOTH bottom corner arcs and most of the top ones - an outlined pill
+  // rendered as roughly "( READY )" with no bottom. Board 1 has the identical 2px
+  // bias and absorbs it, because a 13px box in an 18px pill has the slack; this is
+  // a consequence of a taller face, NOT a shim bug, so the shim's datum handling is
+  // left exactly as upstream's.
+  //
+  // Setting fg == bg is TFT_eSPI's own "transparent" convention (drawString skips
+  // the box when the two are equal, and the shim honours it), so the label draws
+  // GLYPHS ONLY and can erase nothing. Its ink then lands at +3..+14 - the labels
+  // are uppercase and carry no descender - which is exactly centred in 18px. Safe
+  // for every caller because both of them (a session row, the detail card) repaint
+  // their whole surface immediately before drawing the pill, so there is never a
+  // stale label underneath for a transparent one to show through.
+  uint16_t lblFg = asking ? COLOR_BG : (working ? COLOR_LABEL : color);
+  tft.setTextColor(lblFg, lblFg);
+#endif
   tft.setTextDatum(MC_DATUM);
   tft.drawString(label, x + w / 2, y + 9);
   tft.setTextDatum(TL_DATUM);
@@ -98,9 +190,14 @@ void fitText(char* out, size_t outSize, const char* src, int maxW) {
 // reordered - is resolved through sessionAt(pos) and used for every read of
 // session data.
 void drawSessionRow(int pos) {
-  int rowH = sessionRowH;
-  bool large = sessionRowsLarge();
-  int y = SESSION_ROW_Y0 + pos * (rowH + SESSION_ROW_GAP);
+  // Through the row-stack helpers, never from sessionRowH and pos directly: the
+  // first row can be TALLER than the rest, and the duration, the spinner tick and
+  // the touch hit test read the same two functions. On board 1 both inline to the
+  // expressions this function used to carry.
+  const bool expanded = sessionRowExpanded(pos);
+  int rowH = sessionRowHAt(pos);
+  bool large = rowH >= SESSION_LARGE_MIN_H;
+  int y = sessionRowYAt(pos);
   int i = sessionAt(pos);
   const SessionInfo& s = sessions[i];
   bool working = strcmp(s.status, "working") == 0;
@@ -134,7 +231,11 @@ void drawSessionRow(int pos) {
   // about 19 and were throwing half of it away.
   // Does this row carry a title line? Decided BEFORE the name is drawn, because it
   // shifts the name up to make room.
-  bool showTitle = large && rowH >= SESSION_TITLE_MIN_H && s.title[0];
+  // An expanded row is a title row by construction (its packed stack budgets the
+  // name band and the title's two lines), so it takes the same raised name top and
+  // the same tighter pill offset. On board 1 `expanded` is a compile-time false and
+  // this is the expression it always was.
+  bool showTitle = (large && rowH >= SESSION_TITLE_MIN_H && s.title[0]) || expanded;
 
   const int nameX = SESSION_ROW_X + SESSION_NAME_DX;
   // Built ONCE, then both DRAWN (below) and MEASURED (laneRight, right here) from this
@@ -219,6 +320,67 @@ void drawSessionRow(int pos) {
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
 
   if (large) {
+#if !BOARD_USES_TFT_ESPI
+    // ---- THE EXPANDED FIRST ROW ----
+    // A RUNNING CURSOR, not fixed offsets, and for the same reason the detail card
+    // stopped using hand-derived ones: a Codex row carries no title and a session
+    // that has not been prompted yet carries no prompt, so a fixed stack would
+    // leave a 35px hole in the middle of the card. Every block that is present
+    // advances the cursor; whatever is not spent lands as air ABOVE the
+    // bottom-anchored pill, which is the surplus rule the ordinary tall rows
+    // already use. The card still repaints WHOLESALE - no drawIfChanged is
+    // introduced on a row, which is why no clear box here can reach a row border.
+    if (expanded) {
+      const int lane = SESSION_SUB_LANE_W;   // the row's own measured text lane
+      int cy = y + SESSION_TITLE_Y;
+      if (s.title[0]) {
+        // WRAPPED, not fitText: title[44] holds 43 characters = 344px against a
+        // 244px lane, so the one thing this card has room to do properly is show
+        // the whole title. Two lines hold 60.
+        // The RETURNED y, not the budgeted line count: drawWrappedText hands back
+        // the row below its last drawn line, so a title that happens to fit on one
+        // does not leave a 16px hole above the line beneath it. The budget is still
+        // what the HEIGHT is derived from - a card whose height moved with its own
+        // text would move every row below it on every tick - so a short block only
+        // ever moves things UP, and the surplus pools above the bottom-anchored
+        // pill as ordinary card padding. That makes the checker's full-length band
+        // table the worst case rather than the only case.
+        cy = drawWrappedText(s.title, nameX, cy, T_BODY, SESSION_LINE_H, lane, 0,
+                             SESSION_EXP_TITLE_LINES, COLOR_VALUE, COLOR_CARD) +
+             SESSION_LINE_GAP;
+      }
+      if (sub[0]) {
+        setUIFont(T_META);
+        tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+        char subFit[36];
+        fitText(subFit, sizeof(subFit), sub, lane);
+        tft.drawString(subFit, nameX, cy);
+        cy += SESSION_LINE_H + SESSION_LINE_GAP;
+      }
+      if (s.prompt[0]) {
+        setUIFont(T_META);
+        tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+        tft.drawString("LAST PROMPT", nameX, cy);
+        cy += SESSION_LINE_H;   // no gap: a label and the value it names are one block
+        cy = drawWrappedText(s.prompt, nameX, cy, T_BODY, SESSION_LINE_H, lane, 0,
+                             sessionExpPromptLines(rowH), COLOR_VALUE, COLOR_CARD) +
+             SESSION_LINE_GAP;
+      }
+      if (s.path[0]) {
+        // ONE line through fitText rather than wrapped: the path is the least
+        // important thing on the card and a second line would come out of the
+        // prompt's budget. Its tail is trimmed with "..." - the detail screen is
+        // where a long path is wrapped and readable whole.
+        setUIFont(T_META);
+        tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+        char pathFit[72];
+        fitText(pathFit, sizeof(pathFit), s.path, lane);
+        tft.drawString(pathFit, nameX, cy);
+      }
+      setUIFont(T_META);
+      tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+    } else
+#endif
     // Tall row: name line, optional title line, optional model/branch line, then a
     // status line with the pill on the left and the live duration on the right.
     if (showTitle) {
@@ -356,9 +518,23 @@ void renderSessionsList() {
     // whose Mac's icon changes (or appears/disappears) has none of its other fields
     // change, so without this it would keep drawing the old icon (or the old text
     // tag) forever.
-    char sig[176];
+    char sig[SESSION_ROW_SIG_LEN];
     snprintf(sig, sizeof(sig), "%s|%s|%s|%s|%s|%d", sessions[i].name, sessions[i].status, sub,
              sessions[i].title, dispMacTag(sessions[i].hostSlot), emojiIdForLink(sessions[i].hostSlot));
+#if !BOARD_USES_TFT_ESPI
+    // The expanded row draws the LAST PROMPT and the PATH, so both belong in its
+    // signature - a row repaints only when this string changes, and a field drawn
+    // but not signed is exactly the staleness the title itself shipped once.
+    // Appended ONLY for the row that is actually expanded: signing them for every
+    // row would repaint a compact row whenever its prompt changed, and a wholesale
+    // repaint of pixels that did not change is the flicker this discipline exists
+    // to prevent. SESSION_ROW_SIG_LEN is 304 here for exactly these two fields.
+    if (sessionRowExpanded(pos)) {
+      size_t used = strlen(sig);
+      if (used + 2 < sizeof(sig))
+        snprintf(sig + used, sizeof(sig) - used, "|%s|%s", sessions[i].prompt, sessions[i].path);
+    }
+#endif
     if (strncmp(sig, rowSigCache[pos], sizeof(rowSigCache[pos])) != 0) {
       strncpy(rowSigCache[pos], sig, sizeof(rowSigCache[pos]) - 1);
       rowSigCache[pos][sizeof(rowSigCache[pos]) - 1] = '\0';
@@ -368,9 +544,12 @@ void renderSessionsList() {
     char dur[8];
     formatDuration(sessions[i].statusSinceMillis, dur, sizeof(dur));
     padLeftTo(dur, sizeof(dur), 7);
-    int y = SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
-    int durY = sessionRowsLarge() ? y + sessionRowH - SESSION_DUR_UP
-                                  : y + SESSION_SUBC_Y;
+    // Through the same two helpers the draw uses, so the duration cannot land on a
+    // row whose height the layout has moved.
+    int y = sessionRowYAt(pos);
+    int rowH = sessionRowHAt(pos);
+    int durY = rowH >= SESSION_LARGE_MIN_H ? y + rowH - SESSION_DUR_UP
+                                           : y + SESSION_SUBC_Y;
     drawIfChanged(rowDurCache[pos], sizeof(rowDurCache[pos]), dur,
                   SESSION_ROW_X + SESSION_ROW_W - 16, durY, 1, 1,
                   COLOR_LABEL, COLOR_CARD, TR_DATUM);

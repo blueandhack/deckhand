@@ -292,6 +292,13 @@ const int SESSION_SUB_LANE_W = 184;
 // TEXT, not the panel: one Cozette 6x13 line plus 3px, so it does not move with
 // the screen.
 const int SESSION_OVERFLOW_H = 16;
+// The row signature's buffer. 176, UNCHANGED - it is the literal that was in
+// deckhand_display.ino's rowSigCache declaration, moved here because board 2's
+// expanded first row appends the last prompt and the path to its own signature and
+// needs 304. Per board because it is MAX_SESSIONS copies of RAM. This board never
+// expands a row (sessionExpandedH() returns 0 unconditionally on it - there is no
+// surplus height to give), so its worst case is unchanged at 125 bytes.
+const int SESSION_ROW_SIG_LEN = 176;
 // Vertical air added at every gap and pad inside a row (see the derived offsets
 // in deckhand_display.ino). 0 here: this board's content area cannot afford any -
 // its own band table above is packed with 2px gaps and 2px pads.
