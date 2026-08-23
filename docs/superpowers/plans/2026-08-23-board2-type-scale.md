@@ -246,7 +246,7 @@ The 64px hero fits the existing 164-tall card. Derivation, against a ceiling of 
 | stats (16px) | +118 | +117..+134 |
 | foot (16px) | +140 | +139..+156 |
 
-5px spare. This matters because the column has only 8px of clearance (now 6px after Task 3's `FOOTER_H`): `46+8 + 164 + 8 + 164 + 8 + 56 = 454` against `contentBottom()` 460.
+5px spare. This matters because the column has only 8px of clearance (now 6px after Task 2's `FOOTER_H`): `46+8 + 164 + 8 + 164 + 8 + 56 = 454` against `contentBottom()` 460.
 
 - [ ] **Step 2: Set the offsets**
 
