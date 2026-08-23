@@ -557,15 +557,20 @@ const int SESSION_TITLE_MIN_H = 94;
 // Sub-line at +34..+49 (SESSION_SUB2_Y = 6 + AIR + 24 + 2 + AIR), pill top at
 // rowH - SESSION_PILL_UP (25), so 25 + 49 = 74.
 //
-// This gate is why AIR is 1. The ladder gives five sessions 79, so the sub-line
-// inks to +49 and the pill starts at 79 - 25 = +54: a 4px gap, and `avail` would
-// have to lose 23px before that reaches zero. The previous geometry sat on this
-// edge with a 0px gap and a 1px change to FOOTER_H was enough to make the pill
-// draw over the text - which is exactly what happened when FOOTER_H moved 18 -> 20,
-// and sessions-geom-check.mjs reported it as
+// AIR 1 is a MARGIN CHOICE, not something this gate (or the TITLE_MIN_H one
+// above) forces - written out, AIR 2 clears both of them too: the title gate
+// stays 89 + 5*2 = 99 <= 100, and this gate's own five-session sub-line-to-pill
+// gap is 7 - 3*2 = 1, still `>= 0`. What AIR 1 buys over AIR 2 is margin, not
+// passing where AIR 2 would fail: the ladder gives five sessions 79, so the
+// sub-line inks to +49 and the pill starts at 79 - 25 = +54 - a 4px gap, where
+// AIR 2 would leave 1 - and `avail` would have to lose 23px before that reaches
+// zero. The previous geometry sat on a 0px edge and a 1px change to FOOTER_H was
+// enough to make the pill draw over the text - which is exactly what happened
+// when FOOTER_H moved 18 -> 20, and sessions-geom-check.mjs reported it as
 // `FAIL 5x79 (sub): sub-line -> pill gap -1` rather than leaving it to the glass.
-// The gate itself is still a `>=`, i.e. it still admits the touching case; what
-// changed is that no rung the ladder can produce lands anywhere near it.
+// That near-miss is why the extra margin was worth 5px of row height. The gate
+// itself is still a `>=`, i.e. it still admits the touching case; AIR 1 just
+// keeps the ladder's rungs further from that edge than AIR 2 would.
 const int SESSION_SUB_MIN_H = 74;
 // Tall vs compact. 2 (border) + 5 (pad, 4 + AIR) + 24 (name) + 18 (pill) + 5
 // (pad) + 2 (border) = 56, which is board 1's number exactly - a coincidence worth

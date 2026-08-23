@@ -625,16 +625,18 @@ void PanelShim::drawSmoothRoundRect(int x, int y, int r, int ir, int w, int h,
   // surface; it is simply unreachable today, which is why it is not the one that
   // got optimised.
   if (quadrants == 0xF) {
-    const int t = r - ir;                    // border thickness
-    if (t > 0) {
-      if (w - 2 * r > 0) {
-        fillRect(x + r, y, w - 2 * r, t, fgColor);              // top edge
-        fillRect(x + r, y + h - t, w - 2 * r, t, fgColor);      // bottom edge
-      }
-      if (h - 2 * r > 0) {
-        fillRect(x, y + r, t, h - 2 * r, fgColor);              // left edge
-        fillRect(x + w - t, y + r, t, h - 2 * r, fgColor);      // right edge
-      }
+    // +1: TFT_eSPI's inner radius is INCLUSIVE (its own drawSmoothArc comment
+    // says so, and uiStrokeRound passes ir = r - thickness + 1 on that basis),
+    // so the ring is r - ir + 1 pixels thick, not r - ir. r >= ir is enforced
+    // above, so t is always >= 1 - there is no zero-thickness case to guard.
+    const int t = r - ir + 1;                // border thickness
+    if (w - 2 * r > 0) {
+      fillRect(x + r, y, w - 2 * r, t, fgColor);              // top edge
+      fillRect(x + r, y + h - t, w - 2 * r, t, fgColor);      // bottom edge
+    }
+    if (h - 2 * r > 0) {
+      fillRect(x, y + r, t, h - 2 * r, fgColor);              // left edge
+      fillRect(x + w - t, y + r, t, h - 2 * r, fgColor);      // right edge
     }
     const int cxs[2] = { x - 1, x + w - r - 1 };
     const int cys[2] = { y - 1, y + h - r - 1 };
