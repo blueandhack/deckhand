@@ -1054,6 +1054,16 @@ const int MAC_ROW_W = 28;
 //   +123..+125 pad
 //   +126..+127 border                                              = 128
 // Last clear ends +122 against a border at +126, 3 rows clear.
+//
+// THE FLUSH FIELD PARTLY MEASURES ITS OWN REPAINT, and it never settles. Its value
+// goes through drawIfChanged, which dirties a rect, so every settings render while
+// this page is showing guarantees a NON-EMPTY flush - and the duration that flush
+// records is then what the field displays on the next one. So FLUSH ticks forever
+// on this page and reads the cost of a small dirty-rect push rather than of a
+// frame you were interested in; SHIMBENCH is still the instrument for a full-screen
+// flush. Harmless, and the same class as the footer's per-second fields, but a
+// reader watching a number change with nothing happening deserves to find the
+// reason here rather than wonder whether it is broken.
 const int LINK_CARD_Y = DEV_CARD_Y + DEV_CARD_H + 12;   // 304..431
 const int LINK_CARD_H = 128;
 const int LROW_HOST = 34, LROW_PAYLOAD = 58, LROW_FLUSH = 82, LROW_UPTIME = 106;

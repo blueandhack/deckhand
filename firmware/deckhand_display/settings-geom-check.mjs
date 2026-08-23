@@ -197,6 +197,12 @@ const KNOWN = {
     // (d) "Asking the Mac..." is drawn at a literal 130, which is NOT the midpoint
     // of the region it sits in (22..272 -> 147) - it predates the control bar.
     "history empty-state y 130 is the midpoint of 22..272 (147)",
+    // (f) The battery READING is drawn 4px below the "Battery" label beside it, so
+    // the two halves of one row do not share a baseline. Both are 13px here, so the
+    // stagger is invisible and it ships; at 16px it is not, which is why
+    // DROW_BATT_VAL_DY became a board constant (0 on board 2) rather than a literal.
+    // Listed rather than fixed because board 1's binary is frozen.
+    "DROW_BATT_VAL_DY 4 puts the reading on the \"Battery\" label's own baseline (needs 0 = ascent 10 - 10)",
     // (e) FOUND by the per-board band model added for the 16px pass, and benign.
     // The stepper label's own glyph box is 10..22 (Cozette, MC_DATUM at 15) and the
     // value's drawIfChanged ERASE box starts at 22, so the erase covers the label
@@ -343,6 +349,20 @@ for (const b of [1, 2]) {
     const xRight = c.CARD_X + c.CARD_W - c.PAD;
     const labelEnd = c.CARD_X + c.PAD + 20 + widthB(b, T_BODY, "Battery");
     chk(xRight - readingW > labelEnd, `battery reading ${readingW}px starts ${xRight - readingW}, "Battery" ends ${labelEnd}`);
+    // DROW_BATT_VAL_DY, CONSTRAINED - and stated as the SHARED BASELINE rather than
+    // as "the constant is 0", because that is the property a reader can see and it
+    // is the one that survives the edits this is guarding against. The band walk
+    // above cannot catch this on its own: the battery row is asserted as a UNION,
+    // so a stagger merely widens the band and shrinks a legal gap. A pitch re-tune
+    // moves both halves together and this stays quiet; restoring the old literal,
+    // or bumping it "for symmetry with board 1", fires. It also fires if either
+    // half's FONT changes, where a box-top or an is-it-zero test would not: both
+    // are TL_DATUM, so their tops are y and their baselines are y + ascent, and two
+    // faces with different ascents can share a top row while sitting visibly apart.
+    const battDyForBaseline = ascentB(b, T_BODY) - ascentB(b, T_META);
+    chk(c.DROW_BATT_VAL_DY === battDyForBaseline,
+        `DROW_BATT_VAL_DY ${c.DROW_BATT_VAL_DY} puts the reading on the "Battery" label's own baseline ` +
+        `(needs ${battDyForBaseline} = ascent ${ascentB(b, T_BODY)} - ${ascentB(b, T_META)})`);
     chk(+SET_CACHE.battRowTextCache >= 16, `battRowTextCache ${SET_CACHE.battRowTextCache} holds 15 chars + NUL`);
     // CONN_TEXT_W/H, measured, and this is the assertion whose absence let a 100px
     // box ship against a 104px string on board 2. The height must cover the CELL,
