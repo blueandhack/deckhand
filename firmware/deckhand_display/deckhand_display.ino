@@ -253,8 +253,12 @@ static const UiFont UI_FONTS[] = {
 // 15% denser than board 1 (6.489 vs 5.624 px/mm) but has twice the pixels, so
 // identical pixel sizes are physically SMALLER here - 6x13 is 2.00mm against
 // board 1's 2.31mm. Spleen 8x16 restores parity at 2.47mm while leaving a
-// 32-character card lane against board 1's 34, so the existing character-budget
-// arguments carry over instead of needing re-invention. 12x24 would have given 21.
+// detail-card text lane of 32 characters against board 1's 31 (`CARD_W - 2*PAD`:
+// 260/8 here, 188/6 there), so the existing character-budget arguments carry over
+// instead of needing re-invention. 12x24 would have given 21 - a third of every
+// card's text spent on making it bigger than board 1's. There is no single "the card
+// lane" on either board, so quote which one: the keyboard's `CARD_W - 12` is 34 and
+// 35, the voice/confirm `CARD_W - 8` is 34 and 36, the full-width ask lane 36 and 37.
 static const UiFont UI_FONTS[] = {
   { &Spleen8x16,  1, 16 },     // 0 unused - aliases body
   { &Spleen8x16,  1, 16 },     // 1 T_META
@@ -1582,10 +1586,18 @@ void drawAgentSpinner(int cx, int cy, uint16_t bg, bool codex) {
 // re-picked - the same trade the anchor fix made.
 // Board 2's column now runs 56..342 in a 414px content area, so it stays
 // top-weighted with room below. That is the same sparseness the SETTINGS pages
-// have and is left alone deliberately: spreading it - and whether a wordmark
-// filling 256 of 320px is what this screen wants at all, where board 1's fills 96
-// of 240 - is a design call for someone looking at the glass, where this was a
-// correctness one.
+// have and is left alone deliberately: spreading it is a design call for someone
+// looking at the glass, where this was a correctness one.
+//
+// THE WORDMARK STAYS T_HERO. IT WAS ASKED AND ANSWERED - DO NOT REOPEN IT. At Spleen
+// 32x64 "DECKHAND" is 256 of 320px (80%) against board 1's 96 of 240 (40%), which
+// invites dropping it to T_HEAD. That is the wrong direction, and by exactly the
+// arithmetic this whole type-scale change exists to correct: T_HEAD is 12x24, so the
+// mark would be 8*12 = 96px - the SAME PIXEL WIDTH as board 1's on a panel a third
+// wider - and 24/6.489 = 3.70mm tall against board 1's 26/5.624 = 4.62mm. A splash
+// wordmark physically SMALLER on the bigger screen is the identical mistake as body
+// text at 2.00mm against 2.31mm. If 80% reads shouty on the glass, the answer is a
+// fourth face between 12x24 and 32x64, not the rung below.
 const int WAIT_LOGO_Y   = CONTENT_Y + 10;                    // board 1: 44
 const int WAIT_NAME_Y   = WAIT_LOGO_Y + LOGO_SIZE + 8;       // T_HERO
 const int WAIT_ID_Y     = WAIT_NAME_Y + HERO_LINE_H + 6;     // T_META
@@ -2370,6 +2382,24 @@ int detailPillY = 0;
 // ~800MB to a V8 heap OOM, measured. So this is the one file-scope `const int` in
 // the four tab files, and it moved rather than the sweep growing a heap flag.
 const int ASK_VOICE_MAX_LINES = 8;
+
+// The VOICE RESULT CARD's transcript panel: how many wrapped lines of the code face it
+// shows (drawVoiceCard, audio.ino). Board-agnostic at 6, and unchanged - what changed
+// is that the panel's HEIGHT and line step are now CODE_LINE_H rather than a literal
+// 13. Declared here for the same reason ASK_VOICE_MAX_LINES is: a constant no checker
+// parses is one geom-sweep.mjs silently never perturbs.
+//
+// SIX IS EXACT ON BOARD 2 AND ONE SHORT ON BOARD 1, which is worth writing down rather
+// than tidying. The host caps the transcript at VOICE_TEXT_MAX (200 chars), and the
+// panel's lane is `tft.width() - 2*CARD_X - 14`: board 1 gives 202px = 33 columns, so
+// six lines hold 198 of 200 and a full-length transcript loses its last two characters;
+// board 2 gives 282px = 35 columns and holds 210. Word wrap can exceed either (it breaks no
+// further back than half a line), so both boards can still truncate a transcript with
+// long words in it. That is pre-existing and deliberately not changed here: raising the
+// cap costs rows the reply block below it is using, and the transcript is also on the
+// Mac. The number to know is that board 2 is not WORSE off, which is what the checker
+// now asserts.
+const int VOICE_TEXT_LINES = 6;
 
 
 

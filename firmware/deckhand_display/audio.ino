@@ -139,6 +139,25 @@ const char* voiceStateLabel() {
   if (!strcmp(voiceState, "asksent")) return "ANSWER SENT";
   return "VOICE";
 }
+// THE CARD'S WHOLE COLUMN, at compile time. `avail` below clamps to 1 line when the
+// arithmetic says none fit, and a clamp is exactly how this card would overdraw the
+// footer band rather than fail: assert instead that a first reply line genuinely fits.
+// BOARD_H rather than tft.height() because only the former is a constant expression;
+// they are equal at SCREEN_ROTATION 0, the same substitution the reader's page-budget
+// asserts make. Board 1: 34+22+12+90+10+12+13 = 193 of 294. Board 2: 234 of 452.
+static_assert(CONTENT_Y + 22 + VOICE_LBL_STEP
+                  + (VOICE_TEXT_LINES * CODE_LINE_H + 12) + 10
+                  + VOICE_LBL_STEP + CODE_LINE_H
+                <= (BOARD_H - FOOTER_H) - 8,
+              "the voice result card no longer leaves room for one line of reply - "
+              "`avail`'s clamp would draw it into the footer band instead of failing "
+              "here; shrink VOICE_TEXT_LINES or the card's padding");
+// The state label and "tap to dismiss" share the row at CONTENT_Y + 6, and the
+// transcript block starts at CONTENT_Y + 22. Board 2 clears that EXACTLY (6 + 16 = 22),
+// which is worth an assert rather than a comment: one more pixel of cell and the top
+// row would be overdrawn with no other symptom than crowded text.
+static_assert(6 + CODE_LINE_H <= 22,
+              "the voice card's state-label row now runs into its YOU SAID block");
 void drawVoiceCard() {
   const bool bad = !strcmp(voiceState, "error") || !strcmp(voiceState, "askerror");
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
@@ -151,16 +170,52 @@ void drawVoiceCard() {
   tft.drawString("tap to dismiss", tft.width() - CARD_X, CONTENT_Y + 6);
   tft.setTextDatum(TL_DATUM);
 
+  // EVERY STEP HERE IS CODE_LINE_H / VOICE_LBL_STEP, NOT THE LITERAL 13 AND 12 THIS
+  // USED TO CARRY, and this card is the MOST reachable of the three sites that had the
+  // Cozette literal - more reachable than the voice-confirm panel, because it needs no
+  // pending ask at all. drawVoiceCard() sits OUTSIDE both of audio.ino's
+  // `#if BOARD_HAS_MIC` blocks and the raise path in handleLine has no BOARD_HAS_MIC
+  // guard either, so board 1 dictating - or any MICREC memo - has the host publish
+  // `voice{seq,text,reply}` in the tick both boards share, and board 2 draws the card.
+  // At a 13px step under a 16px cell that meant, all at once: a panel ~24px short of
+  // its own text, each transcript line's opaque box eating the previous line's
+  // descenders, the "YOU SAID" label losing its bottom 4 rows to the panel fill, and an
+  // `avail` that over-counts the reply's lines by ~23% so the block runs into the
+  // footer band. Same argument as the confirm panel's - a host-parked exchange is
+  // republished to every link, and MAX_LINKS is 2 - applied to a site that does not even
+  // need the ask.
+  //
+  // The layout, per board (label rows are TL_DATUM, so the box IS the cell):
+  //          board 1 (13/12)                board 2 (16/16)
+  //   YOU SAID   56..68                       68..83
+  //   panel      68..157   (6*13+12 = 90)     84..191  (6*16+12 = 108)
+  //   text       74..151                      90..185
+  //   CLAUDE     168..180                     202..217
+  //   reply      180..283  (8 lines)          218..441 (14 lines)
+  //   bound      302 - 8 = 294                460 - 8 = 452
   int maxW = tft.width() - 2 * CARD_X;
   int y = CONTENT_Y + 22;
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
   tft.drawString("YOU SAID", CARD_X, y);
-  y += 12;
-  // Cozette on a panel: this is quoted text, and the code style reads as "verbatim".
+  y += VOICE_LBL_STEP;
+  // The code face on a panel: this is quoted text, and the code style reads as "verbatim".
   int lines = countWrappedLines(voiceText, FONT_CODE, maxW - 14);
-  int h = (lines > 6 ? 6 : lines) * 13 + 12;
+  // THE TWO 6s ARE DELIBERATELY LITERALS WHERE EVERY OTHER NUMBER HERE IS NAMED, and
+  // that is not an oversight - it is the byte-identical rule winning an argument on
+  // points. Writing VOICE_TEXT_LINES in the clamp costs board 1 EIGHT BYTES of flash
+  // for no behaviour change: GCC compiles `min(lines, <literal>)` with the xtensa `min`
+  // instruction and `min(lines, <named const>)` as `bgei` past a pre-loaded 90, which
+  // is the same computation two bytes shorter (verified by disassembling both:
+  // `movi a9,6; min a10,a10,a9; addx2; addx4; addi` against `movi a6,90; bgei a10,7,+e;
+  // addx2; addx4; addi`). The line STEP and the label step are a different matter - a
+  // literal 13 there is a real defect on board 2, which is why they ARE named - but 6
+  // is board-agnostic and correct on both, so there is nothing to buy here.
+  // sessions-geom-check.mjs parses these two literals out of this file and asserts both
+  // equal VOICE_TEXT_LINES, so they cannot drift from the constant the static_assert
+  // above and the checker's own layout walk are built on.
+  int h = (lines > 6 ? 6 : lines) * CODE_LINE_H + 12;
   uiFillRound(CARD_X - 4, y, maxW + 8, h, R_SM, COLOR_CARD, COLOR_BG);
-  drawWrappedText(voiceText, CARD_X + 3, y + 6, FONT_CODE, 13, maxW - 14, 0, 6,
+  drawWrappedText(voiceText, CARD_X + 3, y + 6, FONT_CODE, CODE_LINE_H, maxW - 14, 0, 6,
                   COLOR_VALUE, COLOR_CARD);
   y += h + 10;
 
@@ -168,10 +223,10 @@ void drawVoiceCard() {
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     setUIFont(1);
     tft.drawString(bad ? "ERROR" : "CLAUDE", CARD_X, y);
-    y += 12;
-    int avail = (contentBottom() - 8 - y) / 13;
+    y += VOICE_LBL_STEP;
+    int avail = (contentBottom() - 8 - y) / CODE_LINE_H;
     if (avail < 1) avail = 1;
-    drawWrappedText(voiceReply, CARD_X, y, FONT_CODE, 13, maxW, 0, avail,
+    drawWrappedText(voiceReply, CARD_X, y, FONT_CODE, CODE_LINE_H, maxW, 0, avail,
                     bad ? COLOR_BAD : COLOR_VALUE, COLOR_BG);
   }
 }

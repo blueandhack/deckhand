@@ -110,6 +110,12 @@ function widthB(b, id, s) {
   return w;
 }
 
+// The transcript cap comes from the file that OWNS it - host/index.mjs - rather than
+// from a number copied here, the same way settings-geom-check.mjs reads KB_MAX_BYTES
+// out of the firmware and ANSWER_TEXT_MAX_BYTES out of the host.
+const VOICE_TEXT_MAX = +fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
+  .match(/VOICE_TEXT_MAX\s*=\s*(\d+)/)[1];
+
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // The board header FIRST, then deckhand_display.ino seeded with it - which is the
 // same order the compiler sees, and the reason the derived offsets
@@ -167,6 +173,15 @@ const KNOWN = {
     // (d) The ladder floor, 2px under the least legal compact row - the same
     // arithmetic as (a), stated as the constant rather than as the row it produces.
     "ladder floor 38 >= SESSION_SUBC_Y + line + 2 = 40 (least legal compact row)",
+    // (e) The VOICE RESULT CARD, both pre-existing and both unreachable on board 2.
+    // The label step is 1px under Cozette's cell, so the transcript panel's fill lands
+    // on the label's last row - blank for every glyph without a descender, the same
+    // allowance (d)'s neighbours take. And six lines of a 33-column lane hold 198 of
+    // the host's 200-character transcript cap, so a full-length transcript loses its
+    // last two characters (word wrap can cost more). Both are left alone because this
+    // board's binary is held byte-identical; board 2 takes the full cell and 210.
+    "voice card label step 12 >= the label's own 13px cell",
+    "voice card: 6 lines hold 198 of 200 transcript chars",
   ],
   2: [],
 };
@@ -924,6 +939,69 @@ for (const b of [1, 2]) {
   const voiceCols = Math.floor((c.CARD_W - 8) / advanceB(b, T_BODY));
   chk(Math.ceil(150 / voiceCols) <= c.ASK_VOICE_MAX_LINES,
       `a 150-byte transcript wraps to ${Math.ceil(150 / voiceCols)} of ${c.ASK_VOICE_MAX_LINES} lines (${voiceCols} cols)`);
+
+  // ---- the VOICE RESULT CARD (drawVoiceCard, audio.ino) ----
+  // Checked HERE rather than in a fourth checker, and the reason is that it is the same
+  // KIND of surface as the ask screen above it: a full-content-area overlay whose text
+  // is host-published and whose geometry is a running cursor down the content area.
+  // It shares this block's helpers and its `known` machinery, and a checker of its own
+  // would duplicate the header parse and the font registry for eight assertions.
+  // Nothing covered it at all before, which is how it kept a 13px step under a 16px
+  // cell through a whole type-scale port.
+  const V_META = lineHB(b, T_META);
+  // The state label / "tap to dismiss" row at +6 against the block at +22. Board 2
+  // clears it exactly.
+  chk(c.CONTENT_Y + 6 + V_META <= c.CONTENT_Y + 22,
+      `voice card: state label inks +6..+${6 + V_META - 1}, YOU SAID starts +22`);
+  // THE LABEL STEP against the label's own cell. Board 1 is 1px short - the block's fill
+  // lands on the label's last row - which its blank glyph bottom row absorbs; the same
+  // encroachment on a 16px face would cost four real rows, so board 2 takes the full
+  // cell. Same shape of allowance as the ask badge/title pair above.
+  let vm = `voice card label step ${c.VOICE_LBL_STEP} >= the label's own ${V_META}px cell`;
+  chk(c.VOICE_LBL_STEP >= V_META, vm, isKnown(b, vm));
+  // The running cursor, laid out rather than echoed - the only way a step that is
+  // right in one place and wrong in another gets caught.
+  const vPanelY = c.CONTENT_Y + 22 + c.VOICE_LBL_STEP;
+  const vPanelH = c.VOICE_TEXT_LINES * c.CODE_LINE_H + 12;
+  const vTextEnd = vPanelY + 6 + c.VOICE_TEXT_LINES * c.CODE_LINE_H - 1;
+  const vReplyLblY = vPanelY + vPanelH + 10;
+  const vReplyY = vReplyLblY + c.VOICE_LBL_STEP;
+  const vBound = contentBottom - 8;
+  const vAvail = Math.floor((vBound - vReplyY) / c.CODE_LINE_H);
+  console.log(`    voice card: panel ${vPanelY}..${vPanelY + vPanelH - 1} (text to ${vTextEnd}), ` +
+              `reply label ${vReplyLblY}, reply ${vReplyY}..${vReplyY + vAvail * c.CODE_LINE_H - 1} of ${vBound}`);
+  chk(vTextEnd < vPanelY + vPanelH,
+      `voice card: ${c.VOICE_TEXT_LINES} text lines end ${vTextEnd} inside a ${vPanelH}px panel`);
+  chk(vReplyLblY >= vPanelY + vPanelH,
+      `voice card: reply label at ${vReplyLblY} clears the panel ending ${vPanelY + vPanelH - 1}`);
+  chk(vAvail >= 1, `voice card: ${vAvail} reply lines fit above the footer bound ${vBound}`);
+  chk(vReplyY + vAvail * c.CODE_LINE_H - 1 <= vBound,
+      `voice card: the reply block ends ${vReplyY + vAvail * c.CODE_LINE_H - 1}, inside ${vBound}`);
+  // THE TWO LITERAL 6s IN drawVoiceCard's CLAMP, parsed out of audio.ino and pinned to
+  // VOICE_TEXT_LINES. They are literals on purpose - naming them costs board 1 eight
+  // bytes for identical codegen, see the note at that call site - which leaves exactly
+  // the drift this checker exists to catch: the panel's HEIGHT would be sized for one
+  // line count while drawWrappedText drew another, and the symptom is a panel that no
+  // longer wraps its own text. Board-independent, so only checked once.
+  if (b === 1) {
+    const audio = fs.readFileSync(`${DIR}/audio.ino`, "utf8");
+    const clamp = audio.match(/int h = \(lines > (\d+) \? (\d+) : lines\) \* CODE_LINE_H/);
+    const maxLines = audio.match(/drawWrappedText\(voiceText,[^;]*?CODE_LINE_H, maxW - 14, 0, (\d+),/s);
+    chk(!!clamp && !!maxLines, "drawVoiceCard's clamp and maxLines literals are still parseable from audio.ino");
+    if (clamp && maxLines) {
+      const got = [+clamp[1], +clamp[2], +maxLines[1]];
+      chk(got.every(n => n === c.VOICE_TEXT_LINES),
+          `voice card: audio.ino's clamp/maxLines literals ${got.join("/")} all equal VOICE_TEXT_LINES ${c.VOICE_TEXT_LINES}`);
+    }
+  }
+  // THE TRANSCRIPT CAP, hard-wrapped at this board's own advance. Board 1 needs 7 lines
+  // for the host's 200 characters and shows 6, which is pre-existing and left alone
+  // because its binary is held byte-identical; the point of asserting it is that board 2
+  // must not be WORSE, and it is exact.
+  const vCols = Math.floor((W - 2 * c.CARD_X - 14) / advanceB(b, T_META));
+  vm = `voice card: ${c.VOICE_TEXT_LINES} lines hold ${c.VOICE_TEXT_LINES * vCols} of ${VOICE_TEXT_MAX} transcript chars`;
+  chk(c.VOICE_TEXT_LINES * vCols >= VOICE_TEXT_MAX, `${vm} (lane ${W - 2 * c.CARD_X - 14}px = ${vCols}/line)`,
+      isKnown(b, vm));
 
   // ---- the change-only caches, re-derived ----
   // A signature holds FIELD VALUES, not the truncated text drawn from them, so a

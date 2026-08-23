@@ -225,6 +225,13 @@ const int CODE_LINE_H = 16;
 // 26 plus 6 - so on this board the 64px wordmark's own opaque box swallowed the
 // device name and the first message line. == uiLineH(T_HERO). (Spleen 8x16 / Spleen 32x64, both size 1.)
 const int HERO_LINE_H = 64;
+// THE VOICE CARD'S LABEL STEP, and this is CODE_LINE_H rather than board 1's
+// CODE_LINE_H - 1. Board 1's step is 1px short of its cell, which its blank glyph
+// bottom row absorbs; the same encroachment against Spleen 8x16's 12-row ascent plus
+// 4-row descent would have the transcript panel's fill start at +12 and rub out rows
+// 12..15 of the label above it - four rows of a label that is only 16 tall. So the
+// full cell, and the card is 4px taller for it.
+const int VOICE_LBL_STEP = 16;
 
 // ---------- Chrome frame ----------
 // TOUCH FLOOR FIRST, because the tab bar's height is decided by it. Board 1's

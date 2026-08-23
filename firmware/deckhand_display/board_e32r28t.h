@@ -120,6 +120,15 @@ const int CODE_LINE_H = 13;
 // 26 plus 6 - so on this board the 64px wordmark's own opaque box swallowed the
 // device name and the first message line. == uiLineH(T_HERO). (Cozette 6x13 / Cozette 12x26 at size 2.)
 const int HERO_LINE_H = 26;
+// THE VOICE CARD'S LABEL STEP - the gap from a "YOU SAID"/"CLAUDE" label to the block
+// it names (drawVoiceCard, audio.ino). It is CODE_LINE_H - 1, i.e. ONE PIXEL SHORT of
+// the cell, so the block's top row lands on the label's last row. Harmless on this
+// board and pre-existing: every Cozette glyph without a descender leaves its bottom
+// row blank, the same allowance the ask badge/title pair already takes and that
+// sessions-geom-check.mjs records as a board-1 `known`. It is a named per-board
+// constant because reproducing that 1px encroachment on a 16px face would eat FOUR
+// rows of a real 12-row ascent, which is not the same trade at all.
+const int VOICE_LBL_STEP = 12;
 const int TAB_BAR_H = 34;
 const int CONTENT_Y = TAB_BAR_H;
 // Persistent footer (clock + last-updated), visible under both tabs. Content

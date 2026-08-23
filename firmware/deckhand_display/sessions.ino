@@ -864,6 +864,20 @@ void drawAskDetail(int idx) {
   int maxW = tft.width() - 2 * CARD_X;
 
   // Title (up to 2 lines, font 2, measured wrap).
+  //
+  // THE 17 IS THE SAME LITERAL AS THE PROSE-DETAIL STEP BELOW, AND THE SAME TRADE - it
+  // is stated here rather than derived, because a derivation would move board 1. It is
+  // not a cell height on either board: on board 1 it is Cozette's 13 plus 4 of leading,
+  // and on board 2 it is 1px OVER Spleen 8x16's 16. A step over the cell cannot
+  // overlap - which is the whole difference from the CODE_LINE_H sites, where a 13px
+  // step under a 16px cell had each line's opaque box eating the line above - so the
+  // cost here is tight leading on a two-line title, not clipped descenders.
+  // The honest derivation is uiLineH(2) + 4, which is 17 on board 1 and 20 on board 2;
+  // that is a change to make with the rest of this screen's vertical rhythm (the title
+  // block feeds `textTop`, which feeds `visLines` and the READ ALL overflow decision),
+  // not as a side effect of a correctness fix, and board 1's binary is held
+  // byte-identical. sessions-geom-check.mjs measures the title block at this literal,
+  // so the clearance below it is checked at what the panel actually draws.
   int y = drawWrappedText(s.askTitle, CARD_X, CONTENT_Y + ASK_TITLE_Y, 2, 17, maxW, 0, 2,
                           COLOR_VALUE, COLOR_BG);
 

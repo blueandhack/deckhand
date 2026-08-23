@@ -20,8 +20,8 @@ that differs and why; this section is only how to build each.
 | mic / beeper | both fitted and working | codec present, **software path not written** |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
-| body text | 6x13 = 2.31mm, 34-col card lane | 8x16 = 2.47mm, 32-col card lane |
-| size today | flash 1382802, RAM 69236 | flash 924078, RAM 58684 |
+| body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
+| size today | flash 1382802, RAM 69236 | flash 924058, RAM 58684 |
 
 **Board 1's binary is BYTE-IDENTICAL across the whole second-board port, and that is the check
 that kept the port honest** — 1382802 flash / 69236 RAM. It is not ceremony: it caught a real
@@ -266,7 +266,7 @@ own comment fails loudly instead of passing while the panel is wrong:
 node firmware/deckhand_display/usage-geom-check.mjs      # USAGE cards, hero/bar/stats/foot clear boxes, footer's three zones, Codex row
 node firmware/deckhand_display/sessions-geom-check.mjs   # the row-height ladder, tall/sub/compact gates, detail card, ask option chips
 node firmware/deckhand_display/settings-geom-check.mjs   # settings pages, steppers, keyboard, history reader, confirm-screen line cap
-node firmware/deckhand_display/geom-sweep.mjs            # fault-injection sweep over all three (~4 min, see below)
+node firmware/deckhand_display/geom-sweep.mjs            # fault-injection sweep over all three (~30s, see below)
 ```
 
 Each takes `--selftest`, which injects a fault and **exits 0 only when that fault IS caught** (exit
@@ -289,13 +289,16 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   frequencies and cosmetic gaps with no geometric constraint, and wiring that to a non-zero exit
   would make it un-runnable until someone had either written 150 assertions or suppressed the list —
   and a suppressed list stops being read. Non-zero is reserved for the sweep's own internal errors.
-  Three things it has actually caught, which is why it is worth the ~4 minutes it takes: the
+  Three things it has actually caught, which is why it is worth the ~30 seconds it takes: the
   waiting screen's seven `WAIT_*` offsets, read by no checker at all and wrong on board 2; the
   pager key's WIDTH, checked in one dimension only; and — the same run, once the checkers started
-  measuring per board — the wordmark's 64px cell erasing the two lines under it. **Take an
+  measuring per board — the wordmark's 64px cell erasing the two lines under it. A fourth was
+  found by *reading* rather than by the sweep and is the reason to keep widening it: the whole
+  VOICE RESULT CARD was covered by nothing at all, which is how it kept a 13px line step under a
+  16px cell right through a type-scale port. **Take an
   unguarded constant that this repo just ADDED or CHANGED as a gap, not as noise.**
-  Where it stands today: **398 of 467 constant-board pairs guarded** (board 1 33/229 unguarded,
-  board 2 36/238), and of the unguarded ones only **7 on board 1 and 10 on board 2 are read by any
+  Where it stands today: **402 of 471 constant-board pairs guarded** (board 1 33/231 unguarded,
+  board 2 36/240), and of the unguarded ones only **7 on board 1 and 10 on board 2 are read by any
   checker at all** — the other 26 a side are mic, beeper, crab and preset-count constants with no
   geometry to violate. Known and accepted, so do not re-litigate them: `MSG_BTN_W`, `H_BTN` and
   `SP_2` are pre-existing; a cache-size assertion is `>=` by nature so `SESSION_ROW_SIG_LEN` /
@@ -306,11 +309,14 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   **The sweep needs its own memory discipline and that is not optional.** It re-imports each
   checker once per injection, ~1400 times, and every instance is compiled code the ESM cache can
   never release, so runs are sliced across four child processes per (checker, board). Before that
-  the sessions child OOM'd — which did not fail the run, it just dropped the checker that covers
-  every `SESSION_*`/`DETAIL_*`/`ASK_*` constant out of the union and reported 88 of them as
-  unguarded. If a future checker grows, raise `SLICES`; do **not** raise the heap, because the
-  limit being hit is V8's CODE space and `--max-old-space-size` provably does nothing (it dies at
-  840MB with a 4.5GB heap limit).
+  the sessions child OOM'd. **It did not fail silently** — the parent already checked the child's
+  exit status, so it printed "1 checker sweep(s) hit an INTERNAL ERROR - the numbers above are
+  incomplete" and exited 1. What it did lose was *coverage*: the checker that constrains every
+  `SESSION_*`/`DETAIL_*`/`ASK_*` constant was absent from the union, so 88 of them appeared under
+  "read by no checker" — loud about the failure, quiet about which numbers it had cost. If a future
+  checker grows, raise `SLICES`; do **not** raise the heap, because the limit being hit is V8's
+  CODE space and `--max-old-space-size` provably does nothing (it dies at 840MB with a 4.5GB heap
+  limit).
 
 There is no test suite or linter in this repo; verification is "compile, flash, watch the
 Serial Monitor / host log, and check the physical screen." **On board 2, read that last clause
@@ -744,8 +750,8 @@ physically bigger than on the smaller board. But it quietly accepted the other h
 2's body text is **2.00mm against board 1's 2.31mm**, i.e. a step SMALLER on the bigger screen, and
 that is the same mistake in the other direction. Board 2 now has its own native type scale — Spleen
 **8x16 / 12x24 / 32x64**, no rung a mechanical upscale of another — which puts body text at 2.47mm,
-close to parity, while keeping a 32-character card lane against board 1's 34 so the existing
-character budgets carry over. The obvious next rung up, 12x24, is 3.70mm and only 21 columns: a
+close to parity, while keeping a 32-character detail-card lane against board 1's 31 so the
+existing character budgets carry over. The obvious next rung up, 12x24, is 3.70mm and only 21 columns: a
 third of every card's text spent on making it bigger than board 1's. Full arithmetic under
 **The type scale is three rungs** below. Everything else about the method is unchanged: air and
 rows still absorb the surplus, the faces just are not board 1's any more.
@@ -3232,13 +3238,19 @@ Other things that aren't obvious from a single file:
   physically SMALLER there** — Cozette 6x13 is 2.31mm tall on board 1 and 2.00mm on board 2, which
   is why "just keep the fonts and spend the pixels on air" left body text a step down from board 1
   rather than equal to it. Spleen 8x16 is **2.47mm**, restoring parity, and it keeps a **32**-character
-  detail-card lane against board 1's 34, so every existing character-budget argument carries over
+detail-card lane against board 1's 31, so every existing character-budget argument carries over
   instead of needing re-invention. 12x24 would have been 3.70mm and **21** columns — a third of the
   card's text gone to make the text bigger than board 1's.
   | | board 1 | board 2 at 6x13 | board 2 at 8x16 | board 2 at 12x24 |
   |---|---|---|---|---|
   | cell height | 2.31mm | 2.00mm | **2.47mm** | 3.70mm |
-  | card lane | 34 cols | 42 | **32** | 21 |
+  | detail-card lane | 31 cols | 43 | **32** | 21 |
+  **The lane row is `CARD_W - 2*PAD`, and it has to name WHICH lane** — an earlier version of this
+  table read `34 | 42 | 32 | 21`, which is reproducible from no lane in the code: it compared board
+  1's *keyboard* lane against board 2's *detail-card* one and the 42 fitted a 256px lane that exists
+  nowhere. There is no single "the card lane" on either board. The four that matter, board 1 then
+  board 2: detail card (`CARD_W - 2*PAD`) **31 / 32**, keyboard (`CARD_W - 12`) **34 / 35**,
+  voice and confirm panels (`CARD_W - 8`) **34 / 36**, full-width ask and reader **36 / 37**.
   **`CARD_HERO_SIZE` NO LONGER EXISTS ON BOARD 2.** Board 1's hero is Cozette 6x13 pushed to
   `setTextSize(3)` — one mechanical step past its own `T_HERO` registry entry, which is already
   size 2 — so that board needs a constant naming the override. Board 2's `T_HERO` is Spleen 32x64
