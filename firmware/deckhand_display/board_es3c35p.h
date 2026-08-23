@@ -209,12 +209,13 @@ const int TAP_MIN = 46;   // 7.1mm, the same fingertip floor board 1 targets
 // every offset in the bar is already derived from this constant.
 const int TAB_BAR_H = 46;
 const int CONTENT_Y = TAB_BAR_H;
-// 18 UNCHANGED, and deliberately so: this number is derived from the TEXT, not
-// from the panel. The footer holds one Cozette 6x13 line drawn at
-// contentBottom() + 4, so 4 (gap) + 13 (cell) + 1 = 18 and a wider panel does
-// not change any of the three. What DID have to move is where the battery pill
-// sits across that band - see FOOTER_BATT_X.
-const int FOOTER_H = 18;
+// 20, up from 18, because T_BODY is now a 16px line and drawIfChanged clears
+// th + 2 = 18 rows - which fits an 18px band EXACTLY, with no room for the 1px
+// margin every other band in this file has. 20 gives the same 2px of slack the
+// 13px line had in 18. Costs 2px of content area (416 -> 414), which the usage
+// column absorbs: it ends at 454 against a contentBottom() that moves 462 -> 460,
+// so its clearance goes 8px -> 6px and it still does not end flush.
+const int FOOTER_H = 20;
 
 // Unchanged at 40. The slot's width is set by what it holds - the dot + "REC"
 // group is 6 + 3 + 18 = 27px in Cozette 6x13 - not by the panel, and the
