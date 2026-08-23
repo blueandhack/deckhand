@@ -935,9 +935,10 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 // is the thing the comment above already says stops reading as one list.
 //
 // Every page is still TOP-ALIGNED under the pager. Trailing air, re-derived at
-// 16px: 168px on STATUS, 22 on DISPLAY & SOUND, 148 on ACTIONS, 108 on PAIRED
-// MACS with four Macs. Growing the gaps until the last row lands 8px above the
-// footer, the way the USAGE column does, is still rejected on the same
+// 16px: 28px on STATUS (two cards now - the 16px pass left 168px there and the
+// LINK card spends 140 of it), 22 on DISPLAY & SOUND, 148 on ACTIONS, 108 on
+// PAIRED MACS with four Macs. Growing the gaps until the last row lands 8px
+// above the footer, the way the USAGE column does, is still rejected on the same
 // arithmetic: it needs a gap wider than the 16px rows it separates.
 
 // ---------- SETTINGS page 0: the DEVICE card, then the LINK card ----------
@@ -1027,6 +1028,35 @@ const int CONN_TEXT_H = 16;
 // interior runs to 305. (The old comment did this multiplication at 6px, which was
 // true of every board when it was written and is now true of one.)
 const int MAC_ROW_W = 28;
+
+// THE LINK CARD - four facts the device already had and could only be read from a
+// Mac's log: host liveness, the last payload's size, the last flush's duration and
+// uptime. It exists because the STATUS page was spending 144 of its 356 rows on
+// nothing, and because on this board those four numbers are the only instrument
+// there is: board 2 has no USB serial console in normal operation, so "is the host
+// still ticking, and how big and how slow is a frame" was unanswerable from the
+// device itself. BOARD 2 ONLY - lastFlushUs() is a PanelShim accessor that does
+// not exist on board 1, and board 1's STATUS page has no 144 spare rows to put a
+// card in even if it did.
+//
+// Same 24 pitch, same label-then-rows shape, one row fewer than DEVICE has two:
+//   +0..+1     border
+//   +2..+5     pad 4
+//   +6..+21    "LINK" label
+//   +22..+32   gap 11 (SP_3 less the value's one-row overhang)
+//   +33..+50   HOST     (LROW_HOST 34;    value clears +33..+50)
+//   +51..+56   gap 6
+//   +57..+74   PAYLOAD  (LROW_PAYLOAD 58)
+//   +75..+80   gap 6
+//   +81..+98   FLUSH    (LROW_FLUSH 82)
+//   +99..+104  gap 6
+//   +105..+122 UPTIME   (LROW_UPTIME 106)
+//   +123..+125 pad
+//   +126..+127 border                                              = 128
+// Last clear ends +122 against a border at +126, 3 rows clear.
+const int LINK_CARD_Y = DEV_CARD_Y + DEV_CARD_H + 12;   // 304..431
+const int LINK_CARD_H = 128;
+const int LROW_HOST = 34, LROW_PAYLOAD = 58, LROW_FLUSH = 82, LROW_UPTIME = 106;
 
 // ---------- SETTINGS page 1: the stepper cards ----------
 // THE CARD IS NO LONGER SIZED BY THE KEY, AND SAYING SO IS THE POINT. Board 1's

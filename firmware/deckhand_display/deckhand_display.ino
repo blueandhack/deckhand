@@ -1054,6 +1054,15 @@ int histRowY[HIST_MAX + 1];   // y bounds of each drawn row, for hit-testing a t
 // ---------- Shared state ----------
 unsigned long lastRxMillis = 0;
 bool everReceived = false;
+#if !BOARD_USES_TFT_ESPI
+// Length of the last completed host payload, for the SETTINGS LINK card. Set in
+// processCompletedLine() where the line is already in hand, so it costs a
+// String::length() per tick and nothing else. BOARD 2 ONLY: board 1 has no LINK
+// card to read it (nor 168 spare rows on its STATUS page to put one in), and a
+// global written every tick and read nowhere is a defect class this repo has
+// already paid for.
+size_t lastPayloadBytes = 0;
+#endif
 String serialBufUSB;
 
 // Which transport most recently delivered a line, and when - shown on the
@@ -2436,6 +2445,21 @@ uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
 // MAC_ROW_W (and its derivation comment) moved to board_e32r28t.h (via
 // board.h) - it also explains macRowCache's sizing below.
 char macRowCache[MAX_LINKS][40] = {"", ""};
+#if !BOARD_USES_TFT_ESPI
+// The LINK card's four values. Sizes are each field's PADDED worst case plus NUL
+// with headroom, because a cache shorter than the string it holds silently stops
+// noticing changes past that point - this file's oldest bug. Worst cases, and
+// settings-geom-check.mjs re-derives every one of them rather than trusting these
+// comments: "9999s ago" (10), "16000 B" (8), "999.9 ms" (9), "99h 59m" (8).
+char linkHostCache[12] = "", linkPayloadCache[12] = "";
+char linkFlushCache[12] = "", linkUptimeCache[12] = "";
+// drawIfChanged compares TEXT only, so the HOST row's colour is cached beside it
+// and busts the text cache on a flip - the same guard battRowColorCache needs,
+// and needed here for the same reason: "never" keeps the same string while the
+// state it describes changes, and a fresh age can flip good -> warn while the
+// digits happen to match.
+uint16_t linkHostColorCache = 0;
+#endif
 int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
 int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+
 char brightPctCache[8] = "";
@@ -4549,6 +4573,12 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     activeHost = savedActiveHost;
   } else {
     *lastRxTimestamp = millis();
+#if !BOARD_USES_TFT_ESPI
+    // Recorded for BOTH the deduped and the handled path below: a duplicate is
+    // still a payload that arrived, and the LINK card reports what the link is
+    // carrying rather than what the renderer chose to act on.
+    lastPayloadBytes = (size_t) buf.length();
+#endif
     uint32_t h = payloadHash32(buf);
     bool dup = h == lastPayloadHash &&
                lastPayloadMillis && millis() - lastPayloadMillis < PAYLOAD_DEDUP_MS &&

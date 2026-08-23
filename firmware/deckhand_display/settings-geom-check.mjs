@@ -298,6 +298,18 @@ for (const b of [1, 2]) {
   // card whose row rhythm drifted from the one above it is the failure "the same
   // style" has to be able to catch.
   const cards = [["DEVICE", c.DEV_CARD_Y, c.DEV_CARD_H, devRows]];
+  // The LINK card is BOARD 2 ONLY (lastFlushUs() is a PanelShim accessor board 1
+  // does not have, and board 1's STATUS page has no room), so its constants exist
+  // in one header only - the same shape as P2_MIC_Y above.
+  if (c.LINK_CARD_H !== undefined) {
+    cards.push(["LINK", c.LINK_CARD_Y, c.LINK_CARD_H, [
+      ["label", tlBox(b, T_META, 6)],
+      ["host", fieldBox(b, T_META, c.LROW_HOST)],
+      ["payload", fieldBox(b, T_META, c.LROW_PAYLOAD)],
+      ["flush", fieldBox(b, T_META, c.LROW_FLUSH)],
+      ["uptime", fieldBox(b, T_META, c.LROW_UPTIME)],
+    ]]);
+  }
   for (const [cname, cy, ch, rows] of cards) {
     console.log(`  ${cname} card ${cy}..${cy + ch - 1} (h ${ch}):`);
     for (const [n, [a, z]] of rows) console.log(`    ${n.padEnd(10)} +${a}..+${z}`);
@@ -348,6 +360,20 @@ for (const b of [1, 2]) {
         `mac row erase box ends ${c.CARD_X + c.PAD + macW} inside the card (${c.CARD_X + c.CARD_W - 2})`);
     const macWorst = c.MAC_ROW_W + 1 + 2 + 1;   // padded text + \x01 + icon id + NUL
     chk(+SET_CACHE.macRowCache >= macWorst, `macRowCache ${SET_CACHE.macRowCache} >= worst signature ${macWorst}`);
+    // THE LINK CARD's four values: each one's PADDED worst case measured against
+    // the label beside it, and its cache re-derived rather than read off the
+    // comment next to the declaration. A cache shorter than its padded string
+    // silently stops noticing changes past that point.
+    if (c.LINK_CARD_H !== undefined) {
+      const LINK = [["HOST", "9999s ago", "linkHostCache"], ["PAYLOAD", "16000 B", "linkPayloadCache"],
+                    ["FLUSH", "999.9 ms", "linkFlushCache"], ["UPTIME", "99h 59m", "linkUptimeCache"]];
+      for (const [label, worst, cache] of LINK) {
+        const vw = widthB(b, T_META, worst);
+        const lw = c.CARD_X + c.PAD + widthB(b, T_BODY, label);
+        chk(xRight - vw > lw, `LINK "${label}": value "${worst}" ${vw}px starts ${xRight - vw}, label ends ${lw}`);
+        chk(+SET_CACHE[cache] >= worst.length + 1, `${cache} ${SET_CACHE[cache]} >= "${worst}" + NUL (${worst.length + 1})`);
+      }
+    }
   }
 
   // ================= SETTINGS page 1: steppers + toggles =================

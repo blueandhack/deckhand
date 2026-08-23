@@ -373,6 +373,9 @@ void PanelShim::perfReport() {
 void PanelShim::flush() {
   if (!_fb || !_lcd || !_stripBuf) return;
   if (_dirtyX1 < _dirtyX0) return;   // nothing dirty
+  // AFTER both early returns, deliberately - see lastFlushUs(). A flush that
+  // pushed nothing must not overwrite the last real measurement with ~0us.
+  const uint32_t flushT0 = micros();
 
   // SNAP X OUTWARD TO A MULTIPLE OF 4. The ST77922 panel driver wants both
   // x_start and width 4-aligned and warns per call when they are not - which on
@@ -424,6 +427,7 @@ void PanelShim::flush() {
       break;
     }
   }
+  _lastFlushUs = (uint32_t) (micros() - flushT0);
   _dirtyX1 = -1;   // mark clean; _dirtyX0 unchanged, harmless since X1<X0 is the only test
 }
 

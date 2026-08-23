@@ -290,9 +290,20 @@ export function consts(file, seed = {}) {
 export function cacheSizes(file) {
   const src = read(file);
   const out = {};
-  for (const m of src.matchAll(/^char ([A-Za-z_0-9]+)((?:\[[A-Za-z_0-9]+\])+)/gm)) {
-    const dims = [...m[2].matchAll(/\[([A-Za-z_0-9]+)\]/g)].map(d => d[1]);
-    out[m[1]] = dims[dims.length - 1];
+  // THE WHOLE DECLARATION, not just its first declarator. This used to anchor on
+  // ^char and take one name, so every cache after a comma - `char a[12] = "",
+  // b[12] = "";`, which is how most of them are written in this sketch - came back
+  // UNDEFINED. An assertion on one then compares NaN and FAILS, which is at least
+  // loud; the trap is a checker that never asserts on it at all and reads as
+  // covering a cache it cannot see. Found by adding the LINK card's four caches in
+  // two comma pairs and having exactly the second of each pair come back missing.
+  for (const m of src.matchAll(/^char\s+([^;]*);/gm)) {
+    for (const decl of m[1].split(",")) {
+      const d = decl.match(/^\s*([A-Za-z_0-9]+)((?:\[[A-Za-z_0-9]+\])+)/);
+      if (!d) continue;
+      const dims = [...d[2].matchAll(/\[([A-Za-z_0-9]+)\]/g)].map(x => x[1]);
+      out[d[1]] = dims[dims.length - 1];
+    }
   }
   return out;
 }

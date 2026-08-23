@@ -195,6 +195,7 @@ private:
   // dirty" - checked instead of a separate bool so there's one source of
   // truth for the rectangle's own emptiness.
   int _dirtyX0 = 0, _dirtyY0 = 0, _dirtyX1 = -1, _dirtyY1 = -1;
+  uint32_t _lastFlushUs = 0;        // see lastFlushUs()
 
   esp_panel::board::Board*      _board = nullptr;
  public:
@@ -205,6 +206,13 @@ private:
   bool invertColor(bool en);
   // Times the flush path and prints the breakdown. Diagnostic only.
   void perfReport();
+  // Last flush in microseconds, for the SETTINGS LINK card. STORED rather than
+  // measured on demand because a flush cannot be triggered without drawing, so
+  // there is nothing to time on request. Set only on a flush that actually
+  // PUSHED: flush()'s empty-dirty-rect early return leaves it alone, because an
+  // empty flush is not a flush and reporting its ~0us would read as an
+  // impossibly fast frame rather than as "nothing changed".
+  uint32_t lastFlushUs() const { return _lastFlushUs; }
  private:
   esp_panel::drivers::LCD*      _lcd = nullptr;
   esp_panel::drivers::Backlight* _backlight = nullptr;

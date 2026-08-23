@@ -89,7 +89,84 @@ void drawStatusPageStatic() {
   setUIFont(1);
   tft.setTextColor(isPaired() ? COLOR_GOOD : COLOR_WARN, COLOR_CARD);
   tft.drawString(buf, CARD_X + PAD, DEV_CARD_Y + DROW_ID);
+#if !BOARD_USES_TFT_ESPI
+  drawLinkCardStatic();
+#endif
 }
+#if !BOARD_USES_TFT_ESPI
+// ----- The LINK card (board 2 only) -----
+// FOUR FACTS THE DEVICE ALREADY HAD AND COULD ONLY BE READ FROM A MAC'S LOG.
+// Nothing new is plumbed for this: host liveness is lastRxMillis, the payload
+// size is the line length processCompletedLine() already has in hand, the flush
+// duration is one uint32_t the shim now keeps, and uptime is millis(). It earns
+// its place on this board specifically because there is no serial console in
+// normal operation here - "is the host still ticking, and how big and how slow is
+// a frame" was unanswerable from the device itself, on the one board whose whole
+// draw path is new.
+// Same component as the DEVICE card above it: a T_META card label, then rows of
+// T_BODY label left and a right-aligned T_META value, on the same 24px pitch.
+void drawLinkCardStatic() {
+  uiCard(CARD_X, LINK_CARD_Y, CARD_W, LINK_CARD_H);
+  setUIFont(1);
+  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("LINK", CARD_X + PAD, LINK_CARD_Y + 6);
+  setUIFont(2);
+  tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+  tft.drawString("HOST",    CARD_X + PAD, LINK_CARD_Y + LROW_HOST);
+  tft.drawString("PAYLOAD", CARD_X + PAD, LINK_CARD_Y + LROW_PAYLOAD);
+  tft.drawString("FLUSH",   CARD_X + PAD, LINK_CARD_Y + LROW_FLUSH);
+  tft.drawString("UPTIME",  CARD_X + PAD, LINK_CARD_Y + LROW_UPTIME);
+}
+void renderLinkCard() {
+  char buf[16];
+  const int xRight = CARD_X + CARD_W - PAD;
+  // HOST: the same fact the footer's "Xs ago" reports, and the same threshold the
+  // footer treats as live. Capped at 9999s so the padded width cannot grow.
+  uint16_t hostCol = COLOR_LABEL;
+  if (!everReceived) {
+    snprintf(buf, sizeof(buf), "never");
+  } else {
+    unsigned long age = (millis() - lastRxMillis) / 1000;
+    if (age > 9999) age = 9999;
+    snprintf(buf, sizeof(buf), "%lus ago", age);
+    hostCol = age <= 15 ? COLOR_GOOD : COLOR_WARN;
+  }
+  padLeftTo(buf, sizeof(buf), 9);
+  if (hostCol != linkHostColorCache) { linkHostColorCache = hostCol; linkHostCache[0] = '\0'; }
+  drawIfChanged(linkHostCache, sizeof(linkHostCache), buf, xRight,
+                LINK_CARD_Y + LROW_HOST, 1, 1, hostCol, COLOR_CARD, TR_DATUM);
+  // PAYLOAD: "--" and not "0 B" before the first line arrives - 0 is a
+  // measurement and "never measured" is not, the same rule the Codex usage row
+  // already follows.
+  if (lastPayloadBytes == 0) snprintf(buf, sizeof(buf), "--");
+  else snprintf(buf, sizeof(buf), "%u B", (unsigned) lastPayloadBytes);
+  padLeftTo(buf, sizeof(buf), 7);
+  drawIfChanged(linkPayloadCache, sizeof(linkPayloadCache), buf, xRight,
+                LINK_CARD_Y + LROW_PAYLOAD, 1, 1, COLOR_VALUE, COLOR_CARD, TR_DATUM);
+  // FLUSH: milliseconds to one decimal. Clamped at 999.9 so the padded width is
+  // fixed - the erase box is sized to the padded text, so a wider string than the
+  // cache was derived for is how a field stops erasing its own tail.
+  {
+    uint32_t us = tft.lastFlushUs();
+    unsigned long ms = us / 1000, tenth = (us % 1000) / 100;
+    if (ms > 999) { ms = 999; tenth = 9; }
+    snprintf(buf, sizeof(buf), "%lu.%lu ms", ms, tenth);
+  }
+  padLeftTo(buf, sizeof(buf), 8);
+  drawIfChanged(linkFlushCache, sizeof(linkFlushCache), buf, xRight,
+                LINK_CARD_Y + LROW_FLUSH, 1, 1, COLOR_VALUE, COLOR_CARD, TR_DATUM);
+  // UPTIME: "4h 12m", clamped at 99h 59m for the same width reason.
+  {
+    unsigned long mins = millis() / 60000UL;
+    if (mins > 99UL * 60 + 59) mins = 99UL * 60 + 59;
+    snprintf(buf, sizeof(buf), "%luh %02lum", mins / 60, mins % 60);
+  }
+  padLeftTo(buf, sizeof(buf), 7);
+  drawIfChanged(linkUptimeCache, sizeof(linkUptimeCache), buf, xRight,
+                LINK_CARD_Y + LROW_UPTIME, 1, 1, COLOR_VALUE, COLOR_CARD, TR_DATUM);
+}
+#endif
 // One connection row: dot left, right-aligned status text.
 void drawConnRow(int rowOff, bool connected) {
   int y = DEV_CARD_Y + rowOff;
@@ -156,6 +233,9 @@ void renderStatusPage() {
   drawIfChanged(battRowTextCache, sizeof(battRowTextCache), buf, CARD_X + CARD_W - PAD,
                 DEV_CARD_Y + DROW_BATT + DROW_BATT_VAL_DY, 1, 1, rowCol, COLOR_CARD, TR_DATUM);
   renderMacLinkRows();
+#if !BOARD_USES_TFT_ESPI
+  renderLinkCard();
+#endif
 }
 // Per-Mac, because the footer can only carry ONE "Xs ago" and it shows the
 // freshest link - which would otherwise let a silent second Mac look live.
@@ -529,6 +609,13 @@ void resetSettingsCaches() {
   // rows BLANK - drawSettingsStatic() clears the chrome they're drawn on but
   // drawIfChanged sees an unchanged cached string and skips redrawing it.
   for (int i = 0; i < MAX_LINKS; i++) macRowCache[i][0] = '\0';
+#if !BOARD_USES_TFT_ESPI
+  // Same rule for the LINK card: drawLinkCardStatic() repaints the card these
+  // four values are drawn ON, so leaving their caches set leaves all four BLANK.
+  linkHostCache[0] = '\0'; linkPayloadCache[0] = '\0';
+  linkFlushCache[0] = '\0'; linkUptimeCache[0] = '\0';
+  linkHostColorCache = 0;
+#endif
 }
 void gotoSettingsPage(int p) {
   settingsPage = (p + SETTINGS_PAGES) % SETTINGS_PAGES;
