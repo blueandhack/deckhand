@@ -2584,6 +2584,12 @@ void drawEmojiTestScreen(const char* only) {
 
 void switchTab(Tab newTab) {
   if (newTab == currentTab) return;
+#if !BOARD_USES_TFT_ESPI
+  // Timed because "switching tabs feels slow" was a real report and the flush is
+  // only part of it - the render has to be measured separately or the wrong half
+  // gets optimised. One line per switch, which is rare enough not to be noise.
+  const uint32_t swT0 = micros();
+#endif
   currentTab = newTab;
   showingDetail = false;
   drawTabBar();
@@ -2594,14 +2600,27 @@ void switchTab(Tab newTab) {
     // on !everReceived - so USAGE is where the standalone screen belongs. SETTINGS
     // stays reachable and useful while waiting: it shows the link and pairing state.
     if (!everReceived) { drawWaitingScreen(); return; }
+#if !BOARD_USES_TFT_ESPI
+    { const uint32_t a = micros(); resetUsageCaches();
+      const uint32_t b = micros(); drawUsageStatic();
+      const uint32_t c = micros(); renderUsageTab();
+      const uint32_t d = micros();
+      Serial.printf("PERF usage: reset %lu  static %lu  render %lu us\n",
+                    (unsigned long)(b-a), (unsigned long)(c-b), (unsigned long)(d-c)); }
+#else
     resetUsageCaches();
     drawUsageStatic();
     renderUsageTab();
+#endif
   } else if (currentTab == TAB_SESSIONS) {
     drawSessionsAll();
   } else {
     drawSettingsTab();
   }
+#if !BOARD_USES_TFT_ESPI
+  Serial.printf("PERF switchTab -> %d took %lu us\n", (int) currentTab,
+                (unsigned long) (micros() - swT0));
+#endif
 }
 
 void openSessionDetail(int idx) {
@@ -4219,6 +4238,14 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     int pg = buf.substring(5).toInt();
     if (currentTab == TAB_SETTINGS) gotoSettingsPage(pg);
 #if !BOARD_USES_TFT_ESPI
+  } else if (buf == "PERF") {
+    // Measures the flush path, because "it feels laggy" is not a number and every
+    // guess about this panel so far has been wrong. Times a FULL-SCREEN flush
+    // (what a tab switch costs, since switchTab clears the whole content area)
+    // separated into the two halves that can be optimised independently: the
+    // CPU-side gather from the PSRAM framebuffer into the strip buffer, and the
+    // blocking drawBitmap that hands it to the panel.
+    tft.perfReport();
   } else if (buf.startsWith("INV ")) {
     // Runtime display-inversion toggle, for the same reason SWAP exists: nothing
     // on the Mac can see the panel, so the only way to settle a display-side

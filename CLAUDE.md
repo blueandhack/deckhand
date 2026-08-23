@@ -19,7 +19,7 @@ that differs and why; this section is only how to build each.
 | serial | CH340, `/dev/cu.usbserial-*`, 11.5KB/s ceiling | native USB CDC, `/dev/cu.usbmodem*` |
 | mic / beeper | both fitted and working | codec present, **software path not written** |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
-| size today | flash 1382802, RAM 69236 | flash 892898, RAM 57860 |
+| size today | flash 1382802, RAM 69236 | flash 894534, RAM 57860 |
 
 **Board 1's binary is BYTE-IDENTICAL across the whole second-board port, and that is the check
 that kept the port honest** — 1382802 flash / 69236 RAM. It is not ceremony: it caught a real
@@ -191,6 +191,7 @@ echo "MICSTREAM" > ~/.claude/deckhand-device-command # stream until tapped (ADPC
 echo "COLORTEST" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: six labelled colour patches
 echo "SWAP 0" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: panel byte order, live
 echo "INV 1"  > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: display inversion, live
+echo "PERF" > ~/.claude/deckhand-device-command     # BOARD 2 ONLY: flush timing breakdown
 echo "TEXTPROBE" > ~/.claude/deckhand-device-command # print the text-width table (both boards)
 ```
 
@@ -386,6 +387,49 @@ device lines drowned. Snapping *out* can only redraw a few pixels that already h
 contents; snapping *in* would clip the edge column of whatever just changed. Verified exhaustively
 over every in-range `(x0, x1)` pair on both panels: 0 bad cases. Y needs no alignment — the driver
 constrains only the axis the QSPI transfer packs.
+
+#### Board 2's draw performance: the AA primitives were the whole problem
+
+**Switching to the USAGE tab took 888ms** and felt exactly as bad as that sounds. The instinct — the
+flush is slow, it's a 300KB framebuffer over QSPI — was wrong, and chasing it wasted a cycle. Use
+`PERF` (board-2-only) before optimising anything here; it reports the flush split into its two
+halves, and `switchTab` logs its own duration.
+
+What the numbers actually said, and what fixed them:
+
+| | before | after |
+|---|---|---|
+| `switchTab` → USAGE | 888 ms | **85 ms** |
+| `switchTab` → SESSIONS | 203 ms | **68 ms** |
+| `switchTab` → SETTINGS | 355 ms | **77 ms** |
+| `drawUsageStatic` | 504 ms | **16 ms** |
+| full-screen flush | 45 ms | **30 ms** |
+
+**`fillSmoothRoundRect` and `drawSmoothRoundRect` were 86x more expensive than they needed to be.**
+Both walked the whole bounding box — 296x164 = 48,544 pixels for one card — evaluating a float SDF
+with a `sqrt` and doing a read-modify-write against a framebuffer in PSRAM. The stroke paid *two*
+SDF evaluations even on the interior hole it then discarded. Three cards of fill plus stroke came to
+~290,000 of those.
+**The geometry is integer, so only the corners have fractional coverage**: at a straight edge the SDF
+distance is 0 (coverage exactly 1) and one pixel out it is 0. So both now decompose into solid
+`fillRect` runs plus four blended corner boxes — **exact, not an approximation**. The general
+`quadrants` path is kept and left unoptimised because it is real API surface that nothing calls.
+
+**The strip buffer was in PSRAM**, and it is the buffer the CPU fills and DMA then reads — paying the
+slow bus twice. It is 20KB against ~269KB of free internal heap, so it is now
+`MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL` with a PSRAM fallback that logs (a slow display beats none).
+That alone took the flush 45ms → 30ms, improving both halves. The framebuffer itself has to stay in
+PSRAM at 300KB; this never did.
+
+**Two optimisations were tried, measured, and REVERTED** — recorded because the numbers are the
+useful part and re-deriving them costs an hour each:
+- **QSPI 40 → 80MHz**: full-screen transfer 21842µs → 21641µs, inside the noise. Whatever bounds this
+  transfer is not the clock. Left at the vendor's 40.
+- **`fillRect` storing two pixels per 32-bit write**: 83,952µs → 84,792µs. PSRAM here is latency- and
+  bandwidth-bound, not store-count-bound.
+
+What remains is `renderUsageTab` at ~59ms, which is dominated by text rendering — the hero numbers at
+`textsize 4`. Not chased further; the gap between 888ms and 85ms was the complaint.
 
 #### THE VERIFICATION TRAP: on board 2, `SCREENSHOT` cannot see the glass
 

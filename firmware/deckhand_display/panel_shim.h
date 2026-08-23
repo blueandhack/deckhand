@@ -203,6 +203,8 @@ private:
   // panel is not up, so the caller can say so rather than reporting a success it
   // did not get.
   bool invertColor(bool en);
+  // Times the flush path and prints the breakdown. Diagnostic only.
+  void perfReport();
  private:
   esp_panel::drivers::LCD*      _lcd = nullptr;
   esp_panel::drivers::Backlight* _backlight = nullptr;

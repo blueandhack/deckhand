@@ -32,6 +32,12 @@
 #define ESP_PANEL_BOARD_LCD_QSPI_IO_DATA3       (9)
 #define ESP_PANEL_BOARD_LCD_QSPI_IO_CS          (10)
 #define ESP_PANEL_BOARD_LCD_QSPI_MODE           (0)
+// 40MHz. 80 was TRIED AND MEASURED and bought nothing: full-screen transfer went
+// 21842us -> 21641us, i.e. inside the noise, so whatever bounds this transfer is
+// not the clock - the bus, the panel or the driver is already the limit. Left at
+// the value the vendor's own config uses rather than running the bus faster for
+// no gain. Do not "optimise" this again without re-measuring; the number above is
+// what a change has to beat.
 #define ESP_PANEL_BOARD_LCD_QSPI_CLK_HZ         (40 * 1000 * 1000)
 #define ESP_PANEL_BOARD_LCD_QSPI_CMD_BITS       (32)
 #define ESP_PANEL_BOARD_LCD_QSPI_PARAM_BITS     (8)

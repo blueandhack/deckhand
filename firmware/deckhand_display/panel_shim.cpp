@@ -36,6 +36,12 @@
 using namespace esp_panel::board;
 using namespace esp_panel::drivers;
 
+// Lines per drawBitmap call. 32 keeps the strip buffer at 20KB of internal RAM
+// (see begin()) while amortising the per-call overhead across a whole band;
+// the flush is transfer-bound, not call-bound, so raising it buys little and
+// costs internal RAM the audio path and the BLE stack also want.
+#define FLUSH_STRIP_LINES 32
+
 PanelShim tft;
 
 // A null framebuffer must never degrade into a quiet no-op: every primitive
@@ -68,7 +74,21 @@ void PanelShim::init() {
   // case is a full-width, 32-line strip. PSRAM is fine as the *source* of a
   // QSPI write; only a single ~300KB transfer is the problem (see the
   // bounce-buffer note in flush()), not PSRAM as such.
-  _stripBuf = (uint16_t*) heap_caps_malloc((size_t) PANEL_PHYS_W * 32 * 2, MALLOC_CAP_SPIRAM);
+  // INTERNAL DMA-CAPABLE RAM, NOT PSRAM, and this is worth 3x on the flush path.
+  // This buffer is written by the CPU (gathering rows out of the PSRAM
+  // framebuffer) and then read by DMA for the QSPI transfer, so putting it in
+  // PSRAM pays the slow bus TWICE - once on every store and again on every DMA
+  // read. Measured on this panel, full-screen: gather 11785us + transfer 33218us
+  // = 45ms (22fps) with the buffer in PSRAM. It is only PANEL_PHYS_W * lines * 2
+  // bytes against ~269KB of free internal heap, so there is no reason for it to
+  // live out there - the FRAMEBUFFER has to (300KB), this does not.
+  // Falls back to PSRAM rather than halting: a slow display beats no display.
+  const size_t stripBytes = (size_t) PANEL_PHYS_W * FLUSH_STRIP_LINES * 2;
+  _stripBuf = (uint16_t*) heap_caps_malloc(stripBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  if (!_stripBuf) {
+    _stripBuf = (uint16_t*) heap_caps_malloc(stripBytes, MALLOC_CAP_SPIRAM);
+    Serial.println("PANEL: strip buffer fell back to PSRAM - flush will be ~3x slower");
+  }
   if (!_stripBuf) fatalHalt("strip scratch buffer allocation failed");
 
   _board = new Board();
@@ -149,6 +169,15 @@ void PanelShim::fillRect(int x, int y, int w, int h, uint16_t c) {
 
   if (_rotation == 0) {
     // Fast path: logical == physical, so each row is a contiguous run.
+    // A 32-bit two-pixels-per-store version of this loop was written and MEASURED
+    // and it bought nothing: the USAGE tab switch went 83,952us -> 84,792us, i.e.
+    // inside the noise. PSRAM here is latency- and bandwidth-bound rather than
+    // store-count-bound, so halving the store count does not help. Reverted rather
+    // than kept, because an optimisation with no measured gain is just more code to
+    // get wrong - and the number is recorded so the next person does not spend the
+    // same hour. The wins that DID land are in fillSmoothRoundRect and
+    // drawSmoothRoundRect (86x fewer blended pixels) and the strip buffer moving
+    // to internal RAM (45ms -> 30ms per full-screen flush).
     for (int row = 0; row < h; row++) {
       uint16_t* p = _fb + (size_t) (y + row) * PANEL_PHYS_W + x;
       for (int col = 0; col < w; col++) p[col] = c;
@@ -291,7 +320,7 @@ void PanelShim::writecommand(uint8_t /*c*/) {
 // to allocate an internal SPI bounce buffer, and drawBitmap's default
 // timeout_ms=0 is NON-BLOCKING, so without timeout_ms=-1 (blocking) the next
 // strip's memcpy could race the DMA engine still reading the previous one.
-#define FLUSH_STRIP_LINES 32
+
 
 // Display-side inversion. Independent of panelSwapBytes: one is what the panel
 // does to the value it decoded, the other is how it decoded the bytes, and this
@@ -300,6 +329,45 @@ void PanelShim::writecommand(uint8_t /*c*/) {
 bool PanelShim::invertColor(bool en) {
   if (!_lcd) return false;
   return _lcd->invertColor(en);
+}
+
+// Where the time actually goes on a full-screen flush. Reports the gather and
+// the transfer separately because they have different fixes: the gather is
+// CPU + memory (which heap the strip buffer lives in, and the byte swap), the
+// transfer is the QSPI clock and the per-drawBitmap overhead.
+void PanelShim::perfReport() {
+  if (!_fb || !_lcd || !_stripBuf) { Serial.println("PERF: panel not up"); return; }
+  const int w = width(), h = height();
+  uint32_t gather = 0, xfer = 0;
+  const int ROUNDS = 5;
+  for (int n = 0; n < ROUNDS; n++) {
+    for (int y = 0; y < h; y += FLUSH_STRIP_LINES) {
+      int lines = min(FLUSH_STRIP_LINES, h - y);
+      uint32_t t0 = micros();
+      for (int r = 0; r < lines; r++) {
+        const uint16_t* src = _fb + (size_t) (y + r) * PANEL_PHYS_W;
+        uint16_t* dst = _stripBuf + (size_t) r * w;
+        if (panelSwapBytes)
+          for (int c = 0; c < w; c++) dst[c] = (uint16_t) ((src[c] >> 8) | (src[c] << 8));
+        else
+          memcpy(dst, src, (size_t) w * 2);
+      }
+      uint32_t t1 = micros();
+      _lcd->drawBitmap(0, y, w, lines, (const uint8_t*) _stripBuf, -1);
+      xfer += micros() - t1;
+      gather += t1 - t0;
+    }
+  }
+  const int strips = (h + FLUSH_STRIP_LINES - 1) / FLUSH_STRIP_LINES;
+  Serial.printf("PERF full-screen %dx%d, %d strips of %d lines, avg of %d rounds:\n"
+                "PERF   gather %lu us   transfer %lu us   TOTAL %lu us  (%.1f fps)\n"
+                "PERF   stripBuf in %s, swap=%d\n",
+                w, h, strips, FLUSH_STRIP_LINES, ROUNDS,
+                (unsigned long) (gather / ROUNDS), (unsigned long) (xfer / ROUNDS),
+                (unsigned long) ((gather + xfer) / ROUNDS),
+                1000000.0f / ((gather + xfer) / ROUNDS),
+                esp_ptr_internal(_stripBuf) ? "INTERNAL RAM" : "PSRAM",
+                (int) panelSwapBytes);
 }
 
 void PanelShim::flush() {
@@ -328,10 +396,28 @@ void PanelShim::flush() {
       // native order is what lets every drawing path - blending, readRect, the
       // AA coverage maths - work in ordinary RGB565 without unswapping first,
       // and confines the panel's byte order to this one loop.
-      if (panelSwapBytes)
-        for (int c = 0; c < w; c++) dst[c] = (uint16_t) ((src[c] >> 8) | (src[c] << 8));
-      else
+      if (!panelSwapBytes) {
         memcpy(dst, src, (size_t) w * 2);
+      } else {
+        // TWO PIXELS PER ITERATION. The masks swap the bytes within each 16-bit
+        // half of a 32-bit word independently, which is exactly a pair of
+        // per-pixel swaps - Xtensa has no 16-bit byte-swap instruction, so the
+        // naive loop compiles to shift/or/store per pixel and this halves the
+        // iteration count. Guarded on both pointers being 4-byte aligned, since a
+        // dirty rect can start on an odd x; the tail handles an odd width.
+        int c = 0;
+        if ((((uintptr_t) src | (uintptr_t) dst) & 3) == 0) {
+          const uint32_t* s32 = (const uint32_t*) src;
+          uint32_t* d32 = (uint32_t*) dst;
+          const int n32 = w >> 1;
+          for (int i = 0; i < n32; i++) {
+            const uint32_t v = s32[i];
+            d32[i] = ((v & 0x00FF00FFu) << 8) | ((v & 0xFF00FF00u) >> 8);
+          }
+          c = n32 << 1;
+        }
+        for (; c < w; c++) dst[c] = (uint16_t) ((src[c] >> 8) | (src[c] << 8));
+      }
     }
     if (!_lcd->drawBitmap(x0, y, w, lines, (const uint8_t*) _stripBuf, -1)) {
       Serial.printf("PANEL: drawBitmap failed at y=%d\n", y);
@@ -483,13 +569,37 @@ void PanelShim::fillSmoothRoundRect(int x, int y, int w, int h, int r, uint16_t 
   float cx = x + w / 2.0f, cy = y + h / 2.0f;
   float halfW = w / 2.0f, halfH = h / 2.0f;
 
-  for (int py = y - 1; py <= y + h; py++) {
-    for (int px = x - 1; px <= x + w; px++) {
-      float d = roundedBoxSDF((float) px, (float) py, cx, cy, halfW, halfH, (float) r);
-      float cov = clampf(1.0f - d, 0.0f, 1.0f);
-      blendPixel(px, py, color, cov);
-    }
+  // ONLY THE CORNERS NEED BLENDING, and that is worth ~120x here. The naive form
+  // of this walked the whole bounding box - 296x164 = 48,544 pixels for one card -
+  // evaluating a float SDF with a sqrt and doing a read-modify-write against a
+  // framebuffer that lives in PSRAM. Three cards of fill plus stroke came to
+  // ~290,000 of those, and MEASURED that was 504ms of drawUsageStatic() alone:
+  // switching to the USAGE tab took 880ms and felt exactly as bad as it sounds.
+  //
+  // The decomposition is EXACT rather than an approximation, because the geometry
+  // is integer: at the straight edges the SDF distance is 0, so coverage is
+  // exactly 1, and one pixel out it is exactly 0. Fractional coverage therefore
+  // occurs only within r of a corner. So three solid fillRects cover everything
+  // but the four corner boxes, and only those are blended. The boxes overlap the
+  // solid bands by a pixel, which is harmless: blending at coverage 1 writes the
+  // same colour.
+  const int midH = h - 2 * r;
+  if (midH > 0) fillRect(x, y + r, w, midH, color);          // full-width middle
+  if (w - 2 * r > 0 && r > 0) {
+    fillRect(x + r, y, w - 2 * r, r, color);                 // top, between corners
+    fillRect(x + r, y + h - r, w - 2 * r, r, color);         // bottom
   }
+  if (r == 0) { fillRect(x, y, w, h, color); return; }       // no corners to blend
+
+  const int cxs[2] = { x - 1, x + w - r - 1 };
+  const int cys[2] = { y - 1, y + h - r - 1 };
+  for (int qi = 0; qi < 2; qi++)
+    for (int qj = 0; qj < 2; qj++)
+      for (int py = cys[qj]; py <= cys[qj] + r + 1; py++)
+        for (int px = cxs[qi]; px <= cxs[qi] + r + 1; px++) {
+          float d = roundedBoxSDF((float) px, (float) py, cx, cy, halfW, halfH, (float) r);
+          blendPixel(px, py, color, clampf(1.0f - d, 0.0f, 1.0f));
+        }
 }
 
 void PanelShim::drawSmoothRoundRect(int x, int y, int r, int ir, int w, int h,
@@ -503,6 +613,48 @@ void PanelShim::drawSmoothRoundRect(int x, int y, int r, int ir, int w, int h,
   float halfW = w / 2.0f, halfH = h / 2.0f;
   float inset = (float) (r - ir);
   float halfWi = halfW - inset, halfHi = halfH - inset;
+
+  // FAST PATH for the only mask any call site uses. Same reasoning as
+  // fillSmoothRoundRect: integer geometry means the straight edges are exactly
+  // coverage 1 and fractional coverage exists only within r of a corner, so the
+  // four edges are solid runs and only the corner boxes need the SDF. The naive
+  // form below walks the whole bounding box and pays TWO sqrt evaluations even on
+  // the interior hole it then discards - for a 2px border on a 296x164 card that
+  // is 49,468 pixels of float maths to draw 1,680 solid ones plus 576 blended.
+  // The general path is kept rather than deleted because `quadrants` is real API
+  // surface; it is simply unreachable today, which is why it is not the one that
+  // got optimised.
+  if (quadrants == 0xF) {
+    const int t = r - ir;                    // border thickness
+    if (t > 0) {
+      if (w - 2 * r > 0) {
+        fillRect(x + r, y, w - 2 * r, t, fgColor);              // top edge
+        fillRect(x + r, y + h - t, w - 2 * r, t, fgColor);      // bottom edge
+      }
+      if (h - 2 * r > 0) {
+        fillRect(x, y + r, t, h - 2 * r, fgColor);              // left edge
+        fillRect(x + w - t, y + r, t, h - 2 * r, fgColor);      // right edge
+      }
+    }
+    const int cxs[2] = { x - 1, x + w - r - 1 };
+    const int cys[2] = { y - 1, y + h - r - 1 };
+    for (int qi = 0; qi < 2; qi++)
+      for (int qj = 0; qj < 2; qj++)
+        for (int py = cys[qj]; py <= cys[qj] + r + 1; py++)
+          for (int px = cxs[qi]; px <= cxs[qi] + r + 1; px++) {
+            float dOuter = roundedBoxSDF((float) px, (float) py, cx, cy, halfW, halfH, (float) r);
+            float covOuter = clampf(1.0f - dOuter, 0.0f, 1.0f);
+            if (covOuter <= 0.0f) continue;
+            float exclude = 0.0f;
+            if (ir > 0) {
+              float dInner = roundedBoxSDF((float) px, (float) py, cx, cy, halfWi, halfHi, (float) ir);
+              exclude = clampf(-dInner, 0.0f, 1.0f);
+            }
+            float cov = covOuter * (1.0f - exclude);
+            if (cov > 0.0f) blendPixel(px, py, fgColor, cov);
+          }
+    return;
+  }
 
   for (int py = y - 1; py <= y + h; py++) {
     for (int px = x - 1; px <= x + w; px++) {

@@ -82,7 +82,7 @@ case "$BOARD" in
     # succeeds and the screen stays black" looks like a hardware fault.
     #
     # VERIFIED FOR A FULL FIRMWARE UPLOAD, not just bring-up: the whole sketch
-    # compiles and has been flashed and run with this exact FQBN (892898 bytes
+    # compiles and has been flashed and run with this exact FQBN (894534 bytes
     # of flash, 57860 of RAM), and the device then reported HELLO/BUILD, stored
     # a PROVISION, delivered payloads over USB and BLE, and rendered all three
     # tabs. An earlier version of this comment said the sketch did not compile
