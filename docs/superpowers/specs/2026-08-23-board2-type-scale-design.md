@@ -53,7 +53,8 @@ today. The goal is parity-plus, not maximalism.
 9.86mm native against 8.01mm scaled, with real glyph shapes. `"100%"` is 128px in a 260px
 lane.
 
-**Cost:** ~39KB flash (2.2 + 5.2 + 6.7 + 25KB), guarded so **board 1 stays byte-identical at
+**Cost:** ~32KB flash (2.2 + 5.2 + 25KB for the three faces actually used - 16x32 is listed
+above as available but no rung needs it), guarded so **board 1 stays byte-identical at
 1382802 / 69236** - the invariant that has held for every commit of this port and is not
 being spent here.
 
@@ -64,9 +65,14 @@ This is the honest scope. A 13->16px line and a 6->8px advance moves every lane 
 - **Session rows:** the ladder's `SESSION_TITLE_MIN_H` / `SUB_MIN_H` / `LARGE_MIN_H` identities
   are all built on 13px lines; the name-fitting ladder (12x26 -> 10x18 -> 6x13) becomes
   Spleen 32x64 -> 12x24 -> 8x16 and every measured lane changes.
-- **Usage cards:** a 64px hero pushes the pace bar and stats down, so `CARD_H` grows 164 ->
-  ~174. Column check: `54 + 174 + 4 + 174 + 4 + 44 = 454` inside `contentBottom()` 462, 8px
-  spare (today it is 434, 28 spare).
+- **Usage cards:** DERIVED AFTER WRITING THIS, and the answer is better than the estimate it
+  replaces: a 64px hero and three 16px rows **fit inside the existing `CARD_H` 164** with 5px
+  spare. Interior, against a ceiling of +161: pin bar +2..+6, label +5..+22, hero +23..+88,
+  pace bar +94..+113, stats +117..+134, foot +139..+156. So the cards do NOT grow and the
+  column does not have to be re-budgeted - which matters, because the column has only **8px
+  of clearance today** (`46+8 + 164 + 8 + 164 + 8 + 56 = 454` against `contentBottom()` 462),
+  not the 28px an earlier draft of this spec claimed. The Codex row's own text also goes to
+  16px and must be re-derived inside `CODEX_H` 56.
 - **The keyboard:** `KB_COLS` goes from 47 to ~32, so `ceil(150/32) = 5` lines rather than 4 -
   and the 150-byte/8-line confirm pairing must be re-derived, not assumed.
 - **The history reader:** ~49 columns -> ~32, and the device already reports its budget to the
