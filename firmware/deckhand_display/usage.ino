@@ -364,8 +364,16 @@ void renderCodexRow() {
   //
   //   board 1 (CARD_W 216, PAD 14): right field at 214, 20 chars = 120px, spans
   //     94..214, clears from 93; label at 26; (93 - 26) / 6 = 11.17 -> 11
-  //   board 2 (CARD_W 296, PAD 18): right field at 290, spans 170..290, clears
-  //     from 169; label at 30; (169 - 30) / 6 = 23.17 -> 23
+  //   board 2 (CARD_W 296, PAD 18): right field at 290, 20 chars at Spleen8x16's
+  //     8px = 160px, spans 130..290, clears from 129; label at 30;
+  //     (129 - 30) / 8 = 12.375 -> 12
+  //
+  // NOTE THE ADVANCE IS PER BOARD - 6px on board 1's Cozette, 8px on board 2's
+  // Spleen8x16 - and this used to divide by 6 on both. That is what made board 2
+  // read 23 when its real ceiling is 12: the label then drew 184px into a lane
+  // that ends at 129 and the right field, which draws AFTER it on every tick,
+  // erased the tail continuously. Counting characters is the bug; the advance is
+  // a property of the face, so derive from the face.
   //
   // Board 1's ceiling was confirmed on-device both with a real tag
   // ("CODEX  studio" -> "CODEX  stud" on screen, the "io" erased) and a plain
@@ -375,11 +383,12 @@ void renderCodexRow() {
   // pad width (CODEX_RIGHT_CHARS, 20) ever changes; re-derive, do not copy a
   // number forward.
   // What the branches below actually emit: "CX " + a 6-char tag (the macTag()
-  // cap) is 9 characters, comfortably inside 11 and trivially inside 23, while
-  // "CODEX  " + the same tag would be 13 - over board 1's ceiling and under
-  // board 2's. The tag-versus-window trade is therefore load-bearing on board 1
-  // and only a margin on board 2, and is kept IDENTICAL on both: a roomier lane
-  // is not a reason for the two panels to render different text.
+  // cap) is 9 characters, inside both boards' ceilings (11 and 12), while
+  // "CODEX  " + the same tag would be 13 - over BOTH. So the tag-versus-window
+  // trade is load-bearing on both panels now, where it used to be load-bearing
+  // on board 1 and a mere margin on board 2. It is kept IDENTICAL on both: a
+  // roomier lane was never a reason for the two panels to render different text,
+  // and board 2's lane turned out not to be roomier anyway.
   const char* cxTag = linkTag(cxSourceLink);
   bool showCxTag = cxTag && *cxTag && usedLinkCount() > 1;
   // Icon shown whenever one is set, same reasoning as the Claude cards' chrome:

@@ -181,3 +181,21 @@ trade. The rest are the items above. Each entry says which it is.
 
 Fixing an item here means **deleting its `KNOWN` entry in the same commit**. Otherwise the checker
 keeps tolerating something that is no longer there, and will not notice it coming back.
+
+## 12. `CODEX_RIGHT_CHARS` can be exceeded by its own content — BOTH boards
+
+`renderCodexRow()` pads its right-hand field to `CODEX_RIGHT_CHARS` (20), but the string it
+formats — `"%d%%  %s  %02ld:%02ld"` with `formatResetIn()`'s multi-day branch, e.g.
+`"0%  6d 23h left  22:55"` — runs to about 23-24 characters. `padLeftTo()` refuses an oversized
+width rather than truncating (deliberately, and documented), so the real string simply draws
+wider than the lane arithmetic assumes.
+
+**Consequence:** when a multi-day Codex reset countdown lands on a two-digit hour — recurring
+roughly an hour a day — and no Mac tag is being shown, the right field's clear box extends left
+of its assumed `clearFrom` and can erase the tail of the `CODEX …` label beside it.
+
+Found while re-deriving board 2's lane for an 8px advance, but it is **not** a consequence of
+that change: the overflow is in the character count against its own content and is present on
+board 1 identically. Not fixed because the fix moves board 1's frozen constant, which the type-
+scale branch holds byte-identical. Severity: cosmetic and intermittent, but it is real corruption
+of a label rather than a margin being tight.
