@@ -1002,18 +1002,20 @@ char kbSessionId[16] = "";
 // 2.4KB; 24 fixed 620-char slots cost 15KB and would have come straight out of the heap
 // the audio path needs.
 //
-// RE-DERIVED FOR BOTH BOARDS, because board 2's reader is bigger (49 columns x 23 rows
+// RE-DERIVED FOR BOTH BOARDS, because board 2's reader is bigger (37 columns x 18 rows
 // against board 1's 36 x 16) and the device now tells the host so - see requestHistory()
-// in reader.ino. The host admits entries while `used + (1 + ceil(len/cols)) <= perPage`,
-// always taking the first one regardless, so for E entries on a page:
-//   sum(len) <= cols * (perPage - E)  <=  cols * (perPage - 1),   plus one NUL per entry
-//   E <= perPage / 2  (every entry costs a label row plus at least one text row)
-// board 1: 36 * 13 = 468 + 7  =  475 characters, E <= 7
-// board 2: 49 * 20 = 980 + 10 =  990 characters, E <= 10
+// in reader.ino. (This note said 49 x 23 while board 2's reader still divided its lane by
+// Cozette's 6px advance and laid its rows out on a 13px cell; the panel draws Spleen
+// 8x16, so those were never numbers the device could reach.) The host admits entries
+// while `used + (1 + ceil(len/cols)) <= perPage`, always taking the first one regardless,
+// and every entry costs a label row plus at least one text row - so with E entries on a
+// page the text is bounded by cols * (perPage - E), worst at E = 1, plus one NUL each:
+// board 1: 36 * 15 + 16 = 556 characters
+// board 2: 37 * 17 + 18 = 647 characters
 // The other shape is a SINGLE entry the host let through whole, which its own
-// HIST_PREVIEW_CAP bounds at 300 + 1. So the worst case either board can produce is 990,
+// HIST_PREVIEW_CAP bounds at 300 + 1. So the worst case either board can produce is 647,
 // against HIST_ARENA 2400 - so the arena is UNCHANGED and board 2 costs zero extra DRAM.
-// HIST_MAX 16 likewise still covers E <= 10.
+// HIST_MAX 16 likewise still covers the at most perPage/2 = 9 entries a page can hold.
 // Board 2 also has BOARD_HAS_MIC 0, so the capture buffer this arena used to compete with
 // for heap is never allocated there at all - which is a reason not to shrink the arena on
 // that board, not a reason to grow it.

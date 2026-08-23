@@ -20,7 +20,11 @@
 // the whole set is derived from the panel: the key grid from the width, the text
 // card's COLUMN count from CARD_W, and its LINE count from that column count.
 // See the long derivation in board_es3c35p.h - board 1 is 34 columns and 5 lines,
-// board 2 is 47 and 4. KB_MAX_BYTES is the one that stays here and stays shared:
+// board 2 is 35 and 5 (it was 47 and 4, from dividing a 284px lane by Cozette's
+// 6px advance after this board's face became Spleen 8x16). KB_COLS is also why
+// TEXT_ADV exists: the caret and the reader both divide by that advance, and a
+// literal there describes one board's font only.
+// KB_MAX_BYTES is the one that stays here and stays shared:
 // it is 150 on the HOST too (ANSWER_TEXT_MAX_BYTES in host/voice-answer.mjs), so
 // only the columns and the resulting line count are per-board.
 //
@@ -91,7 +95,7 @@ void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
 // kbLen is capped at KB_MAX_BYTES elsewhere and KB_TEXT_LINES is defined as
 // ceil(KB_MAX_BYTES / KB_COLS), so this can never need more than KB_TEXT_LINES
 // iterations - there is no overflow case to handle here. Both numbers are
-// PER-BOARD (34/5 and 47/4) and neither may be written as a literal here.
+// PER-BOARD (34/5 and 35/5) and neither may be written as a literal here.
 void drawKbHardWrapped() {
   setUIFont(FONT_CODE);
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
@@ -147,23 +151,28 @@ void drawKbPeek() {
   setUIFont(T_META);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("PROMPT", CARD_X + 6, KB_PEEK_Y + 8);
+  tft.drawString("PROMPT", CARD_X + 6, KB_PEEK_Y + KB_PEEK_LBL_DY);
   char nav[20];
   if (pages > 1) snprintf(nav, sizeof(nav), "%d/%d  tap", kbPeekPage + 1, pages);
   else           snprintf(nav, sizeof(nav), "tap to close");
   tft.setTextDatum(TR_DATUM);
-  tft.drawString(nav, CARD_X + CARD_W - 6, KB_PEEK_Y + 8);
+  tft.drawString(nav, CARD_X + CARD_W - 6, KB_PEEK_Y + KB_PEEK_LBL_DY);
   tft.setTextDatum(TL_DATUM);
 
   char title[KB_COLS + 1];
   fitText(title, sizeof(title), sn.askTitle, CARD_W - 12);
   setUIFont(T_META);
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
-  tft.drawString(title, CARD_X + 6, KB_PEEK_Y + 22);
+  tft.drawString(title, CARD_X + 6, KB_PEEK_Y + KB_PEEK_TITLE_DY);
 
   // Same font choice the ask screen makes, so a command still reads as a command.
   uint8_t font = detailLooksLikeCode(sn.askKind, sn.askDetail) ? FONT_CODE : T_BODY;
-  drawWrappedText(sn.askDetail, CARD_X + 6, KB_PEEK_Y + 40, font, 13, CARD_W - 12,
+  // The three offsets and the line height are BOARD constants, not the literals
+  // 8 / 22 / 40 / 13 they used to be: drawString paints an opaque box one full cell
+  // tall, so at board 2's 16px cell a title at +22 starts inside the "PROMPT"
+  // label's own box and erases its last row. See KB_PEEK_*_DY in the board headers.
+  drawWrappedText(sn.askDetail, CARD_X + 6, KB_PEEK_Y + KB_PEEK_TEXT_DY, font,
+                  KB_LINE_PITCH, CARD_W - 12,
                   kbPeekPage * KB_PEEK_LINES, KB_PEEK_LINES, COLOR_VALUE, COLOR_CARD);
 }
 
@@ -260,11 +269,15 @@ void drawKbText() {
     // KB_MAX_BYTES / KB_COLS, column KB_MAX_BYTES % KB_COLS, and KB_TEXT_LINES is
     // ceil(KB_MAX_BYTES / KB_COLS) - so the line index is always inside the
     // budget by construction, on any KB_COLS. The two boards land on line 4 col 14
-    // and line 3 col 9; settings-geom-check.mjs asserts it per board.
+    // and line 4 col 10; settings-geom-check.mjs asserts it per board.
+    // Its x step and its own size come from TEXT_ADV and KB_LINE_PITCH rather than
+    // the literals 6 and 11 they used to be - a caret 6px wide stepping 6px at a
+    // time under an 8px face lands under the wrong character and is thinner than
+    // the glyph it marks. 6/11 on board 1, 8/14 here.
     int cl = kbLen / KB_COLS, cc = kbLen % KB_COLS;
     if (cl < KB_TEXT_LINES)
-      tft.fillRect(CARD_X + 6 + cc * 6, KB_LINE0_Y + cl * KB_LINE_PITCH + 1, 6, 11,
-                   COLOR_ACCENT);
+      tft.fillRect(CARD_X + 6 + cc * TEXT_ADV, KB_LINE0_Y + cl * KB_LINE_PITCH + 1,
+                   TEXT_ADV, KB_LINE_PITCH - 2, COLOR_ACCENT);
   }
   tft.setTextDatum(TL_DATUM);
 }
@@ -280,13 +293,14 @@ void drawKbActions() {
     // The prompt expired or was answered on the Mac. The text STAYS - throwing
     // away a sentence someone spent a minute on, with no explanation, is the
     // worst outcome available here - but SEND is withheld because it cannot work.
-    // The message is 34 Cozette chars (204px) but its lane - right of CANCEL,
-    // clear of the 8px gap - is only halfW (104px) wide: a single MC_DATUM
+    // The message is 34 characters (204px on board 1, 272 here) but its lane -
+    // right of CANCEL, clear of the 8px gap - is only halfW (104px on board 1,
+    // 144 here) wide: a single MC_DATUM
     // line here used to run off the screen edge AND rub out CANCEL's right
     // half with its own opaque background box. Wrapped to the lane instead,
     // same rule CLAUDE.md states for the confirm dialog's card text. Measured
-    // (see the task report): wraps to exactly 3 lines at this width, well
-    // inside KB_ACT_H's 44px with room to spare.
+    // (see the task report): wraps to exactly 3 lines on BOTH boards - 39px in
+    // board 1's 44px row, 48px in board 2's 58px one - with room to spare.
     int laneX = CARD_X + halfW + 8, laneW = CARD_W - halfW - 8;
     // Clear first: SEND (a full uiButton fill) or an earlier draw of this same
     // message may have left pixels here that the new wrapped text won't cover -
@@ -299,8 +313,9 @@ void drawKbActions() {
     // telling the next person to re-measure when the string changed - exactly the
     // instruction that gets missed, and there are two strings now.
     int lines = countWrappedLines(why, T_META, laneW - 8);
-    int y = KB_ACT_Y + (KB_ACT_H - lines * 13) / 2;
-    drawWrappedText(why, laneX + 4, y, T_META, 13, laneW - 8, 0, lines, COLOR_WARN, COLOR_BG);
+    int y = KB_ACT_Y + (KB_ACT_H - lines * KB_LINE_PITCH) / 2;
+    drawWrappedText(why, laneX + 4, y, T_META, KB_LINE_PITCH, laneW - 8, 0, lines,
+                    COLOR_WARN, COLOR_BG);
   } else {
     // An empty answer would reach Claude as a blank deny message, which reads as
     // a refusal with no reason. Offer SEND only when there is something to send.

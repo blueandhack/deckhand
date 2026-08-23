@@ -135,28 +135,49 @@ const KB_ROW_CELLS = [10, 9, 9, 10, 10, 9];
 // takes the worst it finds.
 // Measured: board 1 lands on EXACTLY 8 (17-character words; 9 is unreachable
 // because after 7 lines of 18 bytes the remaining 24 all fit on one more line), so
-// the claim is true with zero slack. Board 2's own worst is 6, on 24-character
-// words - not the 4 a board-1 string reports for it.
+// the claim is true with zero slack. Board 2's own worst is 7, on 18-character
+// words, measured at ITS OWN face - this file previously said 6 at 24, which was
+// board 2's lane probed with board 1's 6px advance.
 // The assertion stays comparative rather than absolute because what board 2 has to
 // prove is that its wider lane cannot make the count worse: a lane that improved
 // the average while worsening the tail would be a regression nothing else here
 // would catch, and an absolute "<= 8" would pass right up to the moment it broke.
-function worstWrappedLines(lane) {
+// MEASURED PER BOARD, through countWrappedLinesB/advanceB rather than the
+// board-1-only countWrappedLines above: board 2 draws Spleen 8x16, so a wrap
+// counted at Cozette's 6px advance describes a layout that panel never renders.
+// That was live here - it reported board 2's worst as 6 lines at 24-character
+// words, where the real figures are 7 at 18.
+function worstWrappedLines(b, lane) {
   let worst = 0, at = 0;
   // Every word length that can matter: 1 up to the number of characters the lane
   // holds. Longer than that and wrapLineLen's "never stall" path takes over, which
   // is a different (and less bad) case.
-  for (let w = 1; w <= Math.floor(lane / 6); w++) {
+  for (let w = 1; w <= Math.floor(lane / advanceB(b, T_META)); w++) {
     const word = "w".repeat(w) + " ";
     const text = word.repeat(Math.ceil(KB_MAX_BYTES / word.length) + 1).slice(0, KB_MAX_BYTES);
-    const n = countWrappedLines(text, T_META, lane);
+    const n = countWrappedLinesB(b, text, T_META, lane);
     if (n > worst) { worst = n; at = w; }
   }
   return { worst, at };
 }
+// The exact maximum column count for a lane, MEASURED rather than divided: the
+// panel charges the last glyph xOffset + width instead of xAdvance, so a count that
+// divides exactly can still overflow (board 1's 34 does, by 1px, for a line ending
+// in space / '4' / 'q'). The probe walks up from 0 with the widest glyph the face
+// has in that final position, which is what makes the answer content-independent.
+function maxCols(b, id, lane) {
+  let widest = " ";
+  for (let c = 0x20; c <= 0x7e; c++) {
+    const ch = String.fromCharCode(c);
+    if (widthB(b, id, ch) > widthB(b, id, widest)) widest = ch;
+  }
+  let n = 0;
+  while (widthB(b, id, "M".repeat(n) + widest) <= lane) n++;
+  return { cols: n, widest };
+}
 const voiceLines = {}, voiceWord = {};
 for (const b of [1, 2]) {
-  const r = worstWrappedLines(B[b].CARD_W - 8);
+  const r = worstWrappedLines(b, B[b].CARD_W - 8);
   voiceLines[b] = r.worst; voiceWord[b] = r.at;
 }
 
@@ -194,6 +215,24 @@ const KNOWN = {
     // (c) The chip's label is drawn at a literal 13 where the chip runs 4..20, whose
     // centre is 12 - one pixel low, invisible at this size and pre-existing.
     "chip label centre 13 == the chip's own centre 12",
+    // (h) THE LAST-CHARACTER RULE, on both of board 1's counted lanes. Cozette
+    // advances 6px for every glyph but drawString charges the FINAL one xOffset +
+    // width, which is 7 for space, '4' and 'q' - so a lane divided by 6 is 1px hot
+    // whenever a line ends in one of those three. Board 1's own header already
+    // states this for KB_COLS and calls it harmless, and the same holds for the
+    // reader: 34 keyboard columns ink 205px in a 204px lane but end at x=222 inside
+    // a card interior reaching 225, and 36 reader columns ink 217px in a 216px lane
+    // but end at x=228 on a 240px panel. Both are pre-existing and board 1's binary
+    // is frozen; board 2's Spleen has xOffset 0 and width == xAdvance for every
+    // glyph, so its counts are exact for ANY string and it needs no such entry.
+    "KB_COLS 34 == the MEASURED maximum 33 for the 204px lane",
+    "34 columns ending in the widest glyph ink 205px inside the 204px lane",
+    "reader columns 36 == the MEASURED maximum 35 for the 216px lane",
+    // (g) The history header's text row is a literal 8 where a 13px line centred on
+    // the chip's own centre (13) starts at 7 - so the name and the position field
+    // sit 1px low against the chip beside them. Same class as (c), invisible at
+    // this size, and pre-existing; board 2 derives the number instead.
+    "HIST_HDR_TEXT_Y 8 centres a 13px line on the chip's centre 13",
     // (d) "Asking the Mac..." is drawn at a literal 130, which is NOT the midpoint
     // of the region it sits in (22..272 -> 147) - it predates the control bar.
     "history empty-state y 130 is the midpoint of 22..272 (147)",
@@ -248,6 +287,10 @@ for (const b of [1, 2]) {
   const c = B[b], [W, H] = PANEL[b];
   const contentBottom = H - c.FOOTER_H;
   console.log(`\n=== board ${b} (${W}x${H}) ===`);
+  // The BODY/CODE face's advance and cell, measured per board. The keyboard's hard
+  // wrap and the reader's page budget both divide a lane by this, and both divided
+  // by a literal 6 until now - Cozette's, on a board that draws Spleen 8x16.
+  const adv = advanceB(b, T_BODY), cellH = lineHB(b, T_BODY);
 
   // ================= SETTINGS: the pager band =================
   const pagerKeyH = c.PAGER_H - 8;                 // drawPager: by = +4, bh = PAGER_H - 8
@@ -653,20 +696,40 @@ for (const b of [1, 2]) {
 
   // ================= THE KEYBOARD =================
   {
-    const cols = Math.floor((c.CARD_W - 12) / 6);
+    // THE LANE IS CARD_W - 12, and the advance is the BOARD's - not a literal 6.
+    // Both were wrong here: this section divided by 6 (Cozette's) on a board that
+    // draws Spleen 8x16, so it blessed KB_COLS 47 against a lane that holds 35.
+    const lane = c.CARD_W - 12;
+    const cols = Math.floor(lane / adv);
     const lines = Math.ceil(KB_MAX_BYTES / c.KB_COLS);
-    console.log(`  keyboard: KB_COLS ${c.KB_COLS} (lane ${c.CARD_W - 12}px / 6 = ${((c.CARD_W - 12) / 6).toFixed(2)}), ${c.KB_TEXT_LINES} lines (ceil(${KB_MAX_BYTES}/${c.KB_COLS}) = ${(KB_MAX_BYTES / c.KB_COLS).toFixed(2)})`);
+    console.log(`  keyboard: KB_COLS ${c.KB_COLS} (lane ${lane}px / ${adv} = ${(lane / adv).toFixed(2)}), ${c.KB_TEXT_LINES} lines (ceil(${KB_MAX_BYTES}/${c.KB_COLS}) = ${(KB_MAX_BYTES / c.KB_COLS).toFixed(2)})`);
     chk(KB_MAX_BYTES === HOST_CAP, `KB_MAX_BYTES ${KB_MAX_BYTES} == the host's ANSWER_TEXT_MAX_BYTES ${HOST_CAP}`);
-    chk(c.KB_COLS === cols, `KB_COLS ${c.KB_COLS} == floor((CARD_W - 12) / 6) = ${cols}`);
+    chk(c.TEXT_ADV === adv, `TEXT_ADV ${c.TEXT_ADV} == the body face's measured advance ${adv}`);
+    chk(c.KB_COLS === cols, `KB_COLS ${c.KB_COLS} == floor((CARD_W - 12) / TEXT_ADV) = ${cols}`);
     chk(c.KB_TEXT_LINES === lines, `KB_TEXT_LINES ${c.KB_TEXT_LINES} == ceil(KB_MAX_BYTES / KB_COLS) = ${lines}`);
-    chk(c.KB_COLS * 6 <= c.CARD_W - 12, `${c.KB_COLS} columns = ${c.KB_COLS * 6}px inside the ${c.CARD_W - 12}px lane`);
+    // THE LAST-CHARACTER RULE, which dividing cannot see: drawString charges the
+    // final glyph xOffset + width rather than xAdvance. Board 1's 34 columns is 1px
+    // hot against its own 204px lane for a line ending in space / '4' / 'q', which
+    // is documented and frozen; on Spleen every glyph has xOffset 0 and width ==
+    // xAdvance, so the measured maximum equals the division exactly.
+    const mc = maxCols(b, T_BODY, lane);
+    const widestLine = "M".repeat(c.KB_COLS - 1) + mc.widest;
+    console.log(`    widest ${c.KB_COLS}-column line inks ${widthB(b, T_BODY, widestLine)}px in the ${lane}px lane (measured max ${mc.cols} columns)`);
+    chk(c.KB_COLS === mc.cols, `KB_COLS ${c.KB_COLS} == the MEASURED maximum ${mc.cols} for the ${lane}px lane`);
+    chk(widthB(b, T_BODY, widestLine) <= lane,
+        `${c.KB_COLS} columns ending in the widest glyph ink ${widthB(b, T_BODY, widestLine)}px inside the ${lane}px lane`);
     const caretLine = Math.floor(KB_MAX_BYTES / c.KB_COLS), caretCol = KB_MAX_BYTES % c.KB_COLS;
     chk(caretLine < c.KB_TEXT_LINES, `caret's furthest position is line ${caretLine} col ${caretCol}, inside the ${c.KB_TEXT_LINES} lines budgeted`);
+    // ...and it must be inside the LANE too, not merely inside the line budget: the
+    // caret is a TEXT_ADV-wide block at column caretCol.
+    chk((caretCol + 1) * adv <= lane,
+        `caret at column ${caretCol} inks ${caretCol * adv}..${(caretCol + 1) * adv - 1} inside the ${lane}px lane`);
     // THE META ROW must share no pixel row with any text line - drawString paints
     // an opaque box the full height of a line, so a shared row erases text.
     const metaY = c.KB_TEXT_Y + c.KB_META_DY, line0 = c.KB_TEXT_Y + c.KB_LINE0_DY;
-    const metaEnd = metaY + lineH(T_META) - 1;
-    const lastLineEnd = line0 + (c.KB_TEXT_LINES - 1) * c.KB_LINE_PITCH + lineH(T_META) - 1;
+    const metaEnd = metaY + cellH - 1;
+    chk(c.KB_LINE_PITCH === cellH, `KB_LINE_PITCH ${c.KB_LINE_PITCH} == the body cell ${cellH}`);
+    const lastLineEnd = line0 + (c.KB_TEXT_LINES - 1) * c.KB_LINE_PITCH + cellH - 1;
     console.log(`    text card ${c.KB_TEXT_Y}..${c.KB_TEXT_Y + c.KB_TEXT_H - 1}: meta ${metaY}..${metaEnd}, lines ${line0}..${lastLineEnd}`);
     chk(metaEnd < line0, `meta row ends ${metaEnd} before the first text line starts ${line0} (gap ${line0 - metaEnd - 1})`);
     chk(lastLineEnd < c.KB_TEXT_Y + c.KB_TEXT_H, `last text line ends ${lastLineEnd} inside the card (${c.KB_TEXT_Y + c.KB_TEXT_H - 1})`);
@@ -698,16 +761,30 @@ for (const b of [1, 2]) {
     chk(c.KB_ACT_H === c.KB_ROW_H, `action row ${c.KB_ACT_H} == KB_ROW_H ${c.KB_ROW_H}`);
     // The action row's two buttons, and the closed-window message sharing the lane.
     const halfW = Math.floor((W - c.CARD_X * 2 - 8) / 2);
-    for (const l of ["CANCEL", "SEND"]) chk(textWidth(l, T_BODY) + 8 <= halfW, `"${l}" ${textWidth(l, T_BODY)}px inside a ${halfW}px half`);
+    for (const l of ["CANCEL", "SEND"]) chk(widthB(b, T_BODY, l) + 8 <= halfW, `"${l}" ${widthB(b, T_BODY, l)}px inside a ${halfW}px half`);
     const laneW = c.CARD_W - halfW - 8;
     for (const why of ["NO LONGER READY", "WINDOW CLOSED - ANSWER ON YOUR MAC"]) {
-      const n = countWrappedLines(why, T_META, laneW - 8);
-      chk(n * lineH(T_META) <= c.KB_ACT_H, `"${why}" wraps to ${n} line(s) = ${n * lineH(T_META)}px inside the ${c.KB_ACT_H}px action row`);
+      const n = countWrappedLinesB(b, why, T_META, laneW - 8);
+      chk(n * c.KB_LINE_PITCH <= c.KB_ACT_H, `"${why}" wraps to ${n} line(s) = ${n * c.KB_LINE_PITCH}px inside the ${c.KB_ACT_H}px action row`);
     }
-    // The peek overlay.
+    // THE PEEK OVERLAY, and its three STACKED ROWS. The rows are what needed adding:
+    // they were the literals 8 / 22 / 40 in drawKbPeek(), and drawString paints an
+    // opaque box one full cell tall - so at board 2's 16px cell a title at +22 starts
+    // INSIDE the "PROMPT" label's box at +8..+23 and erases its last row. Nothing
+    // measured that, which is the same defect class as the counted lane above.
     const peekH = H - c.KB_ROWS_Y - 4;
-    const peekLines = Math.floor((peekH - 40 - 8) / c.KB_LINE_PITCH);
-    chk(c.KB_PEEK_LINES === peekLines, `KB_PEEK_LINES ${c.KB_PEEK_LINES} == (${peekH} - 48) / 13 = ${((peekH - 48) / 13).toFixed(2)} -> ${peekLines}`);
+    const pRows = [["label", c.KB_PEEK_LBL_DY], ["title", c.KB_PEEK_TITLE_DY]];
+    console.log(`    peek ${peekH}px: label ${c.KB_PEEK_LBL_DY}..${c.KB_PEEK_LBL_DY + cellH - 1}, title ${c.KB_PEEK_TITLE_DY}..${c.KB_PEEK_TITLE_DY + cellH - 1}, text from ${c.KB_PEEK_TEXT_DY}`);
+    for (let i = 1; i < pRows.length; i++)
+      chk(pRows[i - 1][1] + cellH <= pRows[i][1],
+          `peek ${pRows[i - 1][0]} ends ${pRows[i - 1][1] + cellH - 1} before ${pRows[i][0]} starts ${pRows[i][1]}`);
+    chk(c.KB_PEEK_TITLE_DY + cellH <= c.KB_PEEK_TEXT_DY,
+        `peek title ends ${c.KB_PEEK_TITLE_DY + cellH - 1} before the text starts ${c.KB_PEEK_TEXT_DY}`);
+    const peekLines = Math.floor((peekH - c.KB_PEEK_TEXT_DY - 8) / c.KB_LINE_PITCH);
+    chk(c.KB_PEEK_LINES === peekLines,
+        `KB_PEEK_LINES ${c.KB_PEEK_LINES} == (${peekH} - ${c.KB_PEEK_TEXT_DY} - 8) / ${c.KB_LINE_PITCH} = ${((peekH - c.KB_PEEK_TEXT_DY - 8) / c.KB_LINE_PITCH).toFixed(2)} -> ${peekLines}`);
+    chk(c.KB_PEEK_TEXT_DY + peekLines * c.KB_LINE_PITCH <= peekH,
+        `peek's ${peekLines} lines end ${c.KB_PEEK_TEXT_DY + peekLines * c.KB_LINE_PITCH - 1} inside the ${peekH}px overlay`);
   }
 
   // ================= THE READER AND HISTORY PAGER =================
@@ -722,10 +799,10 @@ for (const b of [1, 2]) {
     chk(c.HIST_CHIP_W_CHAT >= c.TAP_MIN && c.HIST_CHIP_W_ALL >= c.TAP_MIN,
         `chip widths ${c.HIST_CHIP_W_CHAT}/${c.HIST_CHIP_W_ALL} both clear TAP_MIN ${c.TAP_MIN}`);
     for (const [w, t] of [[c.HIST_CHIP_W_CHAT, "CHAT"], [c.HIST_CHIP_W_ALL, "ALL"]])
-      chk(textWidth(t, T_META) + 8 <= w, `chip label "${t}" ${textWidth(t, T_META)}px inside ${w}px`);
+      chk(widthB(b, T_META, t) + 8 <= w, `chip label "${t}" ${widthB(b, T_META, t)}px inside ${w}px`);
     const nameX = c.HIST_CHIP_X + c.HIST_CHIP_W_CHAT + 8;
-    const posStart = W - 12 - textWidth("2515/2515", T_META);
-    chk(nameX + textWidth("deckhand", T_META) < posStart, `header: name at ${nameX} clears the position field starting ${posStart}`);
+    const posStart = W - 12 - widthB(b, T_META, "2515/2515");
+    chk(nameX + widthB(b, T_META, "deckhand") < posStart, `header: name at ${nameX} clears the position field starting ${posStart}`);
     chk(c.HIST_CHIP_CY === c.HIST_CHIP_Y + Math.floor(c.HIST_CHIP_H / 2), `chip label centre ${c.HIST_CHIP_CY} == the chip's own centre ${c.HIST_CHIP_Y + Math.floor(c.HIST_CHIP_H / 2)}`);
     // The list, the scrubber and the control bar.
     const listH = (c.HIST_JUMP_Y - 4) - c.HIST_TOP;
@@ -735,8 +812,16 @@ for (const b of [1, 2]) {
     // separation of the name and the position field was checked. It is TL/TR text
     // above the rule, so it has to clear it.
     chk(c.HIST_HDR_TEXT_Y >= 2, `history header text at ${c.HIST_HDR_TEXT_Y}, inside the top of the screen`);
-    chk(c.HIST_HDR_TEXT_Y + lineH(T_META) <= c.HIST_RULE_Y,
-        `history header text inks ${c.HIST_HDR_TEXT_Y}..${c.HIST_HDR_TEXT_Y + lineH(T_META) - 1}, clear of the rule at ${c.HIST_RULE_Y}`);
+    chk(c.HIST_HDR_TEXT_Y + lineHB(b, T_META) <= c.HIST_RULE_Y,
+        `history header text inks ${c.HIST_HDR_TEXT_Y}..${c.HIST_HDR_TEXT_Y + lineHB(b, T_META) - 1}, clear of the rule at ${c.HIST_RULE_Y}`);
+    // It is a TL_DATUM row centred against the chip, so the box IS the cell: the
+    // derivation is HIST_CHIP_CY - cell/2, and it was 21 here (13/2) after the cell
+    // became 16. Board 1's own 21 is exactly that at its 13px cell.
+    chk(c.HIST_HDR_TEXT_Y === c.HIST_CHIP_CY - Math.floor(lineHB(b, T_META) / 2),
+        `HIST_HDR_TEXT_Y ${c.HIST_HDR_TEXT_Y} centres a ${lineHB(b, T_META)}px line on the chip's centre ${c.HIST_CHIP_CY}`);
+    chk(c.HIST_HDR_TEXT_Y >= c.HIST_CHIP_Y && c.HIST_HDR_TEXT_Y + lineHB(b, T_META) <= c.HIST_CHIP_Y + c.HIST_CHIP_H,
+        `chip label row ${c.HIST_HDR_TEXT_Y}..${c.HIST_HDR_TEXT_Y + lineHB(b, T_META) - 1} inside the chip ${c.HIST_CHIP_Y}..${c.HIST_CHIP_Y + c.HIST_CHIP_H - 1}`);
+    chk(c.HIST_LINE_H === lineHB(b, T_BODY), `HIST_LINE_H ${c.HIST_LINE_H} == uiLineH(FONT_CODE) ${lineHB(b, T_BODY)}`);
     chk(c.HIST_TOP > c.HIST_RULE_Y, `list starts ${c.HIST_TOP} below the rule ${c.HIST_RULE_Y}`);
     chk(listLines >= 8, `the list holds ${listLines} lines (an entry is a label plus at least one line, so this bounds entries per page)`);
     const trackY = c.HIST_JUMP_Y + Math.floor((c.HIST_JUMP_TAP_H - c.HIST_JUMP_H) / 2);
@@ -754,7 +839,7 @@ for (const b of [1, 2]) {
     for (let i = 1; i < 3; i++) chk(keys[i][0] > keys[i - 1][0] + keys[i - 1][1], `control keys ${i - 1}->${i} gap ${keys[i][0] - keys[i - 1][0] - keys[i - 1][1]}`);
     for (const [x, w] of keys) chk(w >= c.TAP_MIN, `control key ${w}px wide >= TAP_MIN ${c.TAP_MIN}`);
     for (const l of ["< PREV", "NEXT >", "CLOSE", "BACK"])
-      chk(textWidth(l, T_BODY) + 8 <= keys[1][1], `control label "${l}" ${textWidth(l, T_BODY)}px inside the narrowest key (${keys[1][1]}px)`);
+      chk(widthB(b, T_BODY, l) + 8 <= keys[1][1], `control label "${l}" ${widthB(b, T_BODY, l)}px inside the narrowest key (${keys[1][1]}px)`);
     for (const [n, t1, t2] of [["history", c.HIST_TAP_1, c.HIST_TAP_2], ["reader", c.READER_TAP_1, c.READER_TAP_2]]) {
       chk(t1 > keys[0][0] + keys[0][1] - 1 && t1 <= keys[1][0], `${n} tap split 1 (${t1}) falls in the gap ${keys[0][0] + keys[0][1]}..${keys[1][0]}`);
       chk(t2 > keys[1][0] + keys[1][1] - 1 && t2 <= keys[2][0], `${n} tap split 2 (${t2}) falls in the gap ${keys[1][0] + keys[1][1]}..${keys[2][0]}`);
@@ -763,17 +848,26 @@ for (const b of [1, 2]) {
         `reader tap splits agree across the three control bars (${c.HIST_TAP_1}/${c.HIST_TAP_2} vs ${c.READER_TAP_1}/${c.READER_TAP_2})`);
     // The full-entry pager and the ask reader share the region above the bar.
     const textTop = c.READER_TEXT_TOP;
-    for (const [n, lh] of [["code", c.HIST_LINE_H], ["prose", 18]]) {
+    for (const [n, lh] of [["code", c.HIST_LINE_H], ["prose", lineHB(b, T_HEAD)]]) {
       const vis = Math.floor((c.READER_CTRL_Y - 8 - textTop) / lh);
       console.log(`    reader ${n}: ${vis} visible lines of ${lh}`);
       chk(vis >= 8, `reader shows ${vis} ${n} lines`);
     }
     chk(textTop > c.HIST_RULE_Y, `reader text starts ${textTop} below the rule ${c.HIST_RULE_Y}`);
-    // The page arena holds ONE SCREEN, so what it has to cover is the text a full
-    // screen of entries can carry - not a worst case per entry.
-    const chars = Math.floor((W - 24) / 6);
-    const need = listLines * chars;
-    chk(HIST_ARENA >= need, `HIST_ARENA ${HIST_ARENA} >= one screen's text (${listLines} lines x ${chars} chars = ${need})`);
+    // THE PAGE BUDGET THE DEVICE REPORTS TO THE MAC, and the arena it has to fit.
+    // Both numbers come off the same expressions requestHistory() sends (board 2) or
+    // static_asserts (board 1), so a lane counted at the wrong advance shows up here
+    // rather than as pages that silently arrive half full. It did: board 2 reported
+    // 49x23 against a real 37x18 while this divided by a literal 6 too.
+    const readerLane = W - 24;
+    const chars = Math.floor(readerLane / adv);
+    const rmc = maxCols(b, T_BODY, readerLane);
+    console.log(`    reader page budget ${chars}x${listLines} (lane ${readerLane}px / ${adv}); measured max ${rmc.cols} columns`);
+    chk(chars === rmc.cols, `reader columns ${chars} == the MEASURED maximum ${rmc.cols} for the ${readerLane}px lane`);
+    // A page is at most (cols + 1) * lines bytes - each line plus its NUL - which is
+    // the bound reader.ino's own static_assert carries for board 2.
+    const page = (chars + 1) * listLines;
+    chk(HIST_ARENA >= page, `HIST_ARENA ${HIST_ARENA} >= one page ((${chars} + 1) x ${listLines} = ${page})`);
     chk(chars < 60, `the reader's ${chars}-character lane is under wrapLineLen's 60-character ceiling`);
   }
 }

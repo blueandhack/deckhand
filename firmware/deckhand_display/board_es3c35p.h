@@ -194,6 +194,24 @@
 // it: Spleen's only rung above 12x24 is 32x64, and there is nothing between
 // them to land closer.
 
+// ---------- Text metrics ----------
+// THE BODY/CODE FACE'S X-ADVANCE. Spleen 8x16 is genuinely monospace - every glyph
+// in 0x20..0x7E has xOffset 0, width 8 and xAdvance 8 - and T_META, T_BODY and
+// FONT_CODE all resolve to it (see UI_FONTS in deckhand_display.ino), so any lane's
+// column count is exactly lane / TEXT_ADV and the LAST-CHARACTER RULE costs nothing
+// here. That last part is the difference from board 1 and it is worth stating:
+// drawString charges the final glyph xOffset + width rather than xAdvance, which on
+// Cozette can be 7 rather than 6 (space, '4', 'q'), so board 1's own 34-column lane
+// is 1px hot for those three characters. On Spleen xOffset + width == xAdvance for
+// every glyph, so a column count that divides exactly is exact for ANY string.
+//
+// It exists as a constant because the literal 6 it replaces was Cozette's, and two
+// surfaces went on dividing by it after this board's face changed: the keyboard
+// claimed 47 columns of a 35-column lane, and the reader REPORTED a 49x23 page
+// budget to the Mac against a real capacity of 37x18 - which silently under-fills
+// every page the host sends, with nothing on either side erroring.
+const int TEXT_ADV = 8;
+
 // ---------- Chrome frame ----------
 // TOUCH FLOOR FIRST, because the tab bar's height is decided by it. Board 1's
 // TAP_MIN is 40px = 7.1mm at 5.62 px/mm; the same physical floor here is
@@ -1192,29 +1210,52 @@ const int CFM_H   = 160;
 // count. That chain is what stops SEND signing text that scrolled off the bottom,
 // so it is re-derived rather than adjusted.
 //
-//   KB_COLS      = (CARD_W - 12) / 6 = (296 - 12) / 6 = 47.33 -> 47
-//   KB_TEXT_LINES = ceil(KB_MAX_BYTES / KB_COLS) = ceil(150 / 47) = 3.19 -> 4
+//   KB_COLS       = (CARD_W - 12) / TEXT_ADV = (296 - 12) / 8 = 35.5 -> 35
+//   KB_TEXT_LINES = ceil(KB_MAX_BYTES / KB_COLS) = ceil(150 / 35) = 4.29 -> 5
 //
-// So a wider card costs the card a LINE: board 1 is 34 columns and 5 lines, this
-// board is 47 columns and 4. The caret's furthest reachable position moves with
-// it and is still provable rather than clamped: at kbLen = KB_MAX_BYTES the caret
-// is at line 150 / 47 = 3, column 150 % 47 = 9 - inside the 4 lines the card
-// budgets, at x = CARD_X + 6 + 9*6 = 72.
+// THE LANE IS CARD_W - 12, NOT CARD_W - 8, and the two are worth separating once
+// because they agree at board 1's width and so the wrong one survived in CLAUDE.md
+// for a whole port: the text is drawn at CARD_X + 6 and the card ends at CARD_X +
+// CARD_W - 1, so a symmetric 6px pad leaves CARD_W - 12. At board 1's 216 both
+// expressions floor to 34; at 296 they give 35 and 36.
+//
+// 35 IS THE EXACT MAXIMUM AND IT IS MEASURED, not divided. drawString charges the
+// last glyph xOffset + width rather than xAdvance, so a count that divides exactly
+// can still overflow - board 1's 34 does, by 1px, for a line ending in space, '4'
+// or 'q'. Spleen 8x16 has xOffset 0 and width == xAdvance == 8 for every glyph in
+// 0x20..0x7E, so the widest 35-column line inks 34*8 + 8 = 280px in the 284px lane
+// with 4px to spare, for ANY string, and 36 columns would need 288. See TEXT_ADV.
+//
+// THIS BOARD'S EARLIER 47 CAME FROM DIVIDING BY 6 - Cozette's advance - after the
+// face here became Spleen 8x16. The hard wrap does not measure anything (it slices
+// KB_COLS bytes and draws them), so 47 columns painted 47*8 = 376px of text from
+// x = 18 across a 320px panel: the tail of every long line ran off the screen, and
+// the 4-line budget under it meant a 150-byte answer could put text where the card
+// does not reach at all. Nothing errors on either count.
+//
+// SO THE CARD GAINS A LINE RATHER THAN LOSING ONE: 5 lines here as on board 1, not
+// the 4 the 47-column arithmetic claimed. The caret's furthest reachable position
+// moves with it and stays provable rather than clamped: at kbLen = KB_MAX_BYTES the
+// caret is at line 150 / 35 = 4, column 150 % 35 = 10 - inside the 5 lines the card
+// budgets, at x = CARD_X + 6 + 10*TEXT_ADV = 98.
 //
 // KB_MAX_BYTES IS NOT TOUCHED. It is 150 on the HOST too (ANSWER_TEXT_MAX_BYTES
 // in host/voice-answer.mjs, re-exported for the typed form), so only the columns
 // and the resulting line count move.
 //
-// THE OTHER PAIRING THIS COULD HAVE BROKEN, checked explicitly: the voice-answer
-// confirm screen caps its transcript panel at 8 WORD-wrapped lines
+// THE OTHER PAIRING THIS COULD HAVE BROKEN, re-measured rather than reasoned: the
+// voice-answer confirm screen caps its transcript panel at 8 WORD-wrapped lines
 // (askVoiceTooLong() in sessions.ino, measured against CARD_W - 8), and CLAUDE.md
 // records that cap and the 150-byte one as consistent by arithmetic. A wider lane
-// can only make that cap looser: CARD_W - 8 = 288px = 48 columns here against
-// board 1's 34, so 150 bytes cannot exceed 4 word-wrapped lines even at word
-// wrap's worst case, against a cap of 8. The pairing holds with more headroom,
-// not less, and the shared constant 8 is therefore left alone.
-const int KB_COLS = 47;
-const int KB_TEXT_LINES = 4;
+// does NOT automatically loosen that, because word wrap's worst case depends on the
+// lane: wrapLineLen breaks no further back than halfway, so the adversarial word
+// length is per-board and a board-1 string measures nothing about a 288px lane.
+// Searched per board at each board's own worst word length (settings-geom-check.mjs
+// does the same search): board 1 lands on exactly 8 at 17-character words, board 2
+// on 7 at 18-character words. So the shared cap of 8 still holds, with one line of
+// slack here against board 1's none, and the constant is left alone.
+const int KB_COLS = 35;
+const int KB_TEXT_LINES = 5;
 // THE KEY GRID. 10 columns across 320 gives a 32px pitch, 2px of which is the gap
 // (board 1: 24 and 2) - so the key is 30 wide against board 1's 22, which is the
 // one dimension this panel simply hands over.
@@ -1242,46 +1283,60 @@ const int KB_ROW_H = 58;
 // THE TEXT CARD, and the RESERVED META ROW inside it. drawString paints an OPAQUE
 // box the full height of a text line, so a counter sharing a row with wrapped
 // text silently erases that line's tail - board 1 found this twice before landing
-// on a reserved row, and the invariant is preserved here by construction:
-//   card    +0..+89   (KB_TEXT_Y 12 .. 101, KB_TEXT_H 90)
-//   meta    +8..+20   (KB_META_DY 8  -> y 20..32: byte counter left, countdown right)
-//   gap     +21..+28  (8 rows - board 1 has 3)
-//   line 0  +29..+41  (KB_LINE0_DY 29 -> y 41)
-//   line 1            y 54
-//   line 2            y 67
-//   line 3            y 80..92
-//   pad     +81..+89  (9 rows below the last line, inside the card)
-// The meta row occupies y 20..32 and the first text line starts at y 41, so they
-// share no pixel row with 8 to spare.
+// on a reserved row, and the invariant is preserved here by construction. At a
+// 16px cell and 5 lines the card is 120 rather than 90, which is arithmetic:
+// 8 + 16 + 8 + 5*16 + 8 = 120, every term below.
+//   card    +0..+119  (KB_TEXT_Y 12 .. 131, KB_TEXT_H 120)
+//   meta    +8..+23   (KB_META_DY 8  -> y 20..35: byte counter left, countdown right)
+//   gap     +24..+31  (8 rows - board 1 has 3)
+//   line 0  +32..+47  (KB_LINE0_DY 32 -> y 44)
+//   line 1            y 60
+//   line 2            y 76
+//   line 3            y 92
+//   line 4            y 108..123
+//   pad     +112..+119 (8 rows below the last line, inside the card)
+// The meta row occupies y 20..35 and the first text line starts at y 44, so they
+// share no pixel row with 8 to spare. The two gaps are equal at 8 deliberately:
+// the card's only job is to hold the meta row and the text, so the air above and
+// below the block is the same, and the residual lands in the BREAK below the card
+// rather than inside it.
 const int KB_TEXT_Y  = 12;
-const int KB_TEXT_H  = 90;
+const int KB_TEXT_H  = 120;
 const int KB_META_DY = 8;
-const int KB_LINE0_DY = 29;
-const int KB_LINE_PITCH = 13;                  // Cozette's cell - text-derived
+const int KB_LINE0_DY = 32;
+const int KB_LINE_PITCH = 16;                  // Spleen 8x16's cell - text-derived
 // THE VERTICAL BUDGET, and where this board's surplus actually goes. The content
-// is a fixed grid plus a provably 4-line card, so there is nothing here to add:
+// is a fixed grid plus a provably 5-line card, so there is nothing here to add:
 //
-//   12 (top margin) + 90 (card) + 68 (break) + 232 (4 rows * 58)
+//   12 (top margin) + 120 (card) + 38 (break) + 232 (4 rows * 58)
 //   + 12 (gap) + 58 (action row) + 8 (bottom margin) = 480
 //
-// The 68px BREAK is a RESIDUAL, not a chosen number: it is what is left once every
-// other term is fixed by something else (the card by its 4 lines, the rows by the
-// aspect cap on KB_ROW_H, the action row by KB_ROW_H, the margins by the 4px
-// scale). What it does NOT do is disappear - the surplus has to land somewhere,
-// and the two places it could go instead are both worse by arithmetic: a taller
-// card carries lines the 150-byte cap can never reach (the 5th line would need
-// 5*47 = 235 bytes), and moving it to the bottom margin pushes the action row off
-// the most reachable part of a handheld panel. Calling this break "the one
-// boundary on the screen that means something" is a judgement about what it looks
-// like once it is there, not a reason for its size.
+// The 38px BREAK is a RESIDUAL, not a chosen number: it is what is left once every
+// other term is fixed by something else (the card by its 5 lines at a 16px cell,
+// the rows by the aspect cap on KB_ROW_H, the action row by KB_ROW_H, the margins
+// by the 4px scale). It was 68 while the card was mis-derived at 4 lines of 13, and
+// the 30 rows the card now needs came straight out of it - which is the right
+// direction: the break is the term with no job of its own, and the card's height is
+// the one number that decides whether SEND can sign text that is off screen.
+// KB_ROWS_Y itself does not move, so the key grid, the action row and every touch
+// band below the card are untouched by this.
 const int KB_ROWS_Y = 170;                     // 4 rows * 58 = 232, ending 401
 const int KB_ACT_Y  = 414;                     // 414..471, 8px above the panel edge
 const int KB_ACT_H  = 58;                      // == KB_ROW_H, as on board 1
 // The peek overlay covers the keys and the action row but NEVER the text card, so
-// its height is BOARD_H - KB_ROWS_Y - 4 = 306; its text starts +40 inside it and
-// stops 8 short of the bottom, so (306 - 48) / 13 = 19.8 -> 19 lines against board
-// 1's 13.
-const int KB_PEEK_LINES = 19;
+// its height is BOARD_H - KB_ROWS_Y - 4 = 306. Its three stacked rows were the
+// literals 8 / 22 / 40 in drawKbPeek(), and at a 16px cell the middle one was a
+// real defect rather than merely tight: a T_META box at +22 starts INSIDE the
+// "PROMPT" label's own box at +8..+23, and drawString paints that box opaquely, so
+// the label's last row was rubbed out on every draw. Each row now starts a full
+// cell plus its air below the one above it - label +8..+23, title +25..+40, text
+// from +46 - which reproduces board 1's 8 / 22 / 40 exactly at its 13px cell.
+const int KB_PEEK_LBL_DY   = 8;
+const int KB_PEEK_TITLE_DY = 25;
+const int KB_PEEK_TEXT_DY  = 46;
+// The text stops 8 short of the overlay's bottom, so (306 - 46 - 8) / 16 = 15.75
+// -> 15 lines against board 1's 13. It was 19, which came from dividing by 13.
+const int KB_PEEK_LINES = 15;
 
 // ============================================================================
 // HISTORY READER / FULL-SCREEN READER
@@ -1320,16 +1375,22 @@ const int HIST_CHIP_W_ALL  = 52;
 const int HIST_CHIP_TAP_W  = 102;
 const int HIST_CHIP_TAP_H  = 52;
 // The session name (left of centre) and the position-in-history (right) sit on one
-// row centred against the chip: a 13px line centred on the chip's own centre (27)
-// starts at 21.
-const int HIST_HDR_TEXT_Y  = 21;
+// row centred against the chip: a 16px line (TL_DATUM, so the box IS the cell)
+// centred on the chip's own centre (27) starts at 27 - 16/2 = 19, inking 19..34
+// against a chip drawn 4..49 and a rule at 54. It was 21, which was the same
+// derivation done with Cozette's 13px cell.
+const int HIST_HDR_TEXT_Y  = 19;
 const int HIST_RULE_Y      = 54;
 const int HIST_TOP         = 60;   // first entry row, 6 below the rule
 // Centred between the rule and the control bar: (54 + 422) / 2 = 238. Board 1's
 // 130 is NOT that midpoint (147) - a literal that predates the control bar - so
 // this is derived rather than carried across.
 const int HIST_EMPTY_CY    = 238;
-const int HIST_LINE_H      = 13;   // Cozette - text-derived, unchanged
+// The CODE cell, and the one number the reader's whole page budget hangs off. It
+// was 13 - Cozette's - which stayed put when the face here became Spleen 8x16, so
+// the list, the full-entry pager AND the budget this board REPORTS to the Mac were
+// all laid out on a 13px grid while the panel drew 16px lines. == uiLineH(FONT_CODE).
+const int HIST_LINE_H      = 16;
 // THE SCRUBBER, and this is where the extra rows buy the most. Board 1's track is
 // 16 tall and its tap band is the same 16 - 2.8mm for the primary navigation of a
 // history that pages to 399 screens - because the list above and the control bar
@@ -1341,7 +1402,8 @@ const int HIST_LINE_H      = 13;   // Cozette - text-derived, unchanged
 //   band    364..409   (HIST_JUMP_Y, HIST_JUMP_TAP_H)
 //   track   377..396   (HIST_JUMP_H 20)
 // The list stops 4px above the band (HIST_JUMP_Y - 4 = 360), so it runs 60..360 =
-// 23 lines of 13 against board 1's 16.
+// 18 lines of 16 against board 1's 16. (It read "23 lines of 13" while HIST_LINE_H
+// was Cozette's, which is the number this board was telling the host it could hold.)
 // The TRACK is board 1's 16 held physically: 16 / 5.624 * 6.489 = 18.46, which
 // rounds to 18. It is 20, and that last 2px is a JUDGEMENT, not arithmetic -
 // "the even grid" does not choose between them, since 18 is equally even and

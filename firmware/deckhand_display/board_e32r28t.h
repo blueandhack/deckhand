@@ -98,6 +98,15 @@
 #define BOARD_SLEEP_WAKE_GPIO TOUCH_IRQ
 
 // ---------- Layout constants ----------
+// THE BODY/CODE FACE'S X-ADVANCE, as a constant rather than the literal 6 that
+// used to sit inline in every character-lane division. Cozette 6x13 advances 6px
+// for every one of its 95 glyphs (T_META, T_BODY and FONT_CODE all resolve to it -
+// see UI_FONTS in deckhand_display.ino), so a lane's column count is lane /
+// TEXT_ADV. It is a named per-board constant because board 2's face is not this
+// one: a literal 6 there described Cozette while the panel drew Spleen 8x16, which
+// is how its keyboard came to claim 47 columns of a 35-column lane and its reader
+// to report a page budget half again as big as it could draw.
+const int TEXT_ADV = 6;
 const int TAB_BAR_H = 34;
 const int CONTENT_Y = TAB_BAR_H;
 // Persistent footer (clock + last-updated), visible under both tabs. Content
@@ -541,8 +550,10 @@ const int KB_ROW_H = 44;
 // widest 34-character line inks 33*6 + 7 = 205px against a 204px lane. Harmless
 // and pre-existing: the card interior reaches x = CARD_X + CARD_W - 3 = 225 and
 // the text starts at CARD_X + 6 = 18, so 205px of ink ends at 222 - 3px inside the
-// card, overrunning only the nominal lane and never the card. Board 2's 47 is
-// exact by the same rule (46*6 + 7 = 283 <= 284; 48 would need 289).
+// card, overrunning only the nominal lane and never the card.
+// (This paragraph used to close by calling board 2's 47 "exact by the same rule",
+// measured at a 6px advance. Board 2 draws Spleen 8x16, so its real maximum is 35
+// and 47 was never reachable - see the corrected derivation in board_es3c35p.h.)
 const int KB_COLS = 34;
 const int KB_TEXT_LINES = 5;                   // ceil(KB_MAX_BYTES / KB_COLS)
 // The card, and the RESERVED META ROW inside it. The byte counter and the
@@ -561,9 +572,18 @@ const int KB_LINE_PITCH = 13;                  // Cozette's cell - text-derived
 const int KB_ROWS_Y = 96;
 const int KB_ACT_Y  = 276;
 const int KB_ACT_H  = 44;                      // == KB_ROW_H
-// The peek overlay's line budget: it covers the keys and the action row (never
-// the text card), so its height is BOARD_H - KB_ROWS_Y - 4 = 220, its text starts
-// +40 inside it and stops 8 short of its bottom - (220 - 48) / 13 = 13.2 -> 13.
+// The peek overlay's three stacked rows, and its line budget. These were the
+// literals 8 / 22 / 40 at drawKbPeek()'s call sites; they are constants now because
+// drawString paints an OPAQUE box one full cell tall, so at a 16px cell a title at
+// +22 starts INSIDE a label whose box is +8..+23 and rubs out its last row. Board 1
+// keeps its own numbers exactly: label +8, title +22 (one row of air), text +40
+// (five rows of air).
+const int KB_PEEK_LBL_DY   = 8;
+const int KB_PEEK_TITLE_DY = 22;
+const int KB_PEEK_TEXT_DY  = 40;
+// It covers the keys and the action row (never the text card), so its height is
+// BOARD_H - KB_ROWS_Y - 4 = 220, its text starts KB_PEEK_TEXT_DY inside it and
+// stops 8 short of its bottom - (220 - 40 - 8) / 13 = 13.2 -> 13.
 const int KB_PEEK_LINES = 13;
 
 // ---------- HISTORY READER / FULL-SCREEN READER ----------

@@ -183,8 +183,13 @@ void drawHistFull() {
 //
 // Both numbers come off the SAME expressions the drawing code uses, one screen up
 // in drawHistory(), rather than from new constants that could drift from it:
-//   cols  - the text lane is `tft.width() - 24` and every Cozette 6x13 glyph
-//           advances 6px, the identical arithmetic KB_COLS uses.
+//   cols  - the text lane is `tft.width() - 24` divided by TEXT_ADV, the board's
+//           own body/code advance (6 on board 1, 8 on board 2), the identical
+//           arithmetic KB_COLS uses. It was a literal 6 here, which is Cozette's:
+//           board 2 draws Spleen 8x16, so this REPORTED 49x23 against a real
+//           capacity of 37x18 and the host then sent pages that silently
+//           under-filled - nothing on either side errors, the bigger reader just
+//           looks like it holds less history than board 1's.
 //   lines - the list runs from HIST_TOP to the scrubber's tap band (HIST_JUMP_Y),
 //           stopping 4px clear of it, in HIST_LINE_H rows - the exact bound the
 //           row loop breaks on.
@@ -205,7 +210,7 @@ void drawHistFull() {
 // another repo. BOARD_W rather than tft.width() because only the former is a
 // constant expression; they are equal at SCREEN_ROTATION 0.
 #if BOARD_USES_TFT_ESPI
-static_assert((BOARD_W - 24) / 6 == 36,
+static_assert((BOARD_W - 24) / TEXT_ADV == 36,
               "board 1's reader column count no longer matches HIST_LINE_CHARS in "
               "host/index.mjs - either send the budget from this board too, or "
               "update the host's default");
@@ -218,7 +223,16 @@ static_assert((HIST_JUMP_Y - 4 - HIST_TOP) / HIST_LINE_H == 16,
 // comment. Board 1 gets two asserts and board 2 got none, which is backwards:
 // board 2 is the board whose geometry is new. A page is at most
 // (cols + 1) * lines bytes of text including each line's NUL.
-static_assert(((BOARD_W - 24) / 6 + 1) * ((HIST_JUMP_Y - 4 - HIST_TOP) / HIST_LINE_H)
+// RE-DERIVED for the 16px cell: it reads neither of the two literals that were
+// wrong (a literal 6 where TEXT_ADV is 8, and HIST_LINE_H 13 where the cell is
+// 16), so it never fired -
+// blind rather than reassuring. Both mistakes happened to make the page SMALLER
+// (a bigger advance means fewer columns, a taller cell fewer lines), which is why
+// an assert on the upper bound could not catch either. It is now (37 + 1) * 18 =
+// 684 against HIST_ARENA 2400, where the mis-derived pair computed (49 + 1) * 23
+// = 1150 - so this assert was passing on a page the device cannot draw.
+static_assert(((BOARD_W - 24) / TEXT_ADV + 1)
+                  * ((HIST_JUMP_Y - 4 - HIST_TOP) / HIST_LINE_H)
                   <= HIST_ARENA,
               "board 2's reader page can no longer fit HIST_ARENA - the tail-drop "
               "would silently truncate every full page instead of this failing the "
@@ -232,7 +246,7 @@ void requestHistory(int idx, const char* want) {
   snprintf(line, sizeof(line), "HISTORY %s %s %s", sessions[idx].id,
            histChatOnly ? "chat" : "all", want);
 #else
-  const int cols  = (tft.width() - 24) / 6;
+  const int cols  = (tft.width() - 24) / TEXT_ADV;
   const int lines = (HIST_JUMP_Y - 4 - HIST_TOP) / HIST_LINE_H;
   char line[64];
   snprintf(line, sizeof(line), "HISTORY %s %s %s %dx%d", sessions[idx].id,
