@@ -496,6 +496,23 @@ const int OCTO_Y = 110;
 // H_ROW is TAP_MIN exactly. VALUES UNCHANGED: 40 + 4 = 44, and 40.
 const int H_BTN = 44;     // buttons and toggles (pages with room)
 const int H_ROW = 40;     // list rows (the tightest page fits 5 of these)
+// THE STATUS PILL'S HEIGHT, named because it had FOUR copies and is the constant
+// most likely to be re-tuned next. drawStatusPill() drew an 18 literal twice, the
+// detail card's DETAIL_PILL_STEP added a third, and sessions-geom-check.mjs
+// TRANSCRIBED a fourth - so raising the pill by mutating the draw sites left all
+// three checkers passing while the assertion they exist for ("the pill ends clear
+// of the row's own 2px border") was false. The checker parses this name now, which
+// is what makes that mutation fail by name instead of silently.
+//
+// 18 is not derived from TAP_MIN: a pill is a LABEL, not a control - nothing taps
+// it - and what bounds it is the label's own ink against the row height the ladder
+// hands it. It comes out the same on both boards even though the faces differ, and
+// drawStatusPill's own comment carries that arithmetic (a 13px opaque box has the
+// slack inside 18; a 16px one does not, which is why board 2 draws the label
+// transparently rather than widening the pill). Named per-board anyway, because
+// every other band in the row stack is, and a shared number here would be the one
+// thing in that stack that could not move.
+const int PILL_H = 18;
 
 // ---------- SETTINGS: the stepper card ----------
 // EVERY NUMBER BELOW IS THE LITERAL THAT WAS ALREADY IN deckhand_display.ino (or

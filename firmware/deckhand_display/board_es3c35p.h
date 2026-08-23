@@ -924,6 +924,21 @@ const int ASK_TITLE_Y = 75;
 // 4 = 44, H_ROW = TAP_MIN = 40. The same two relationships against TAP_MIN 46:
 const int H_BTN = 50;     // buttons and toggles
 const int H_ROW = 46;     // list rows - exactly the fingertip floor
+// THE STATUS PILL'S HEIGHT - see board_e32r28t.h for why this is a name rather
+// than the four literals it replaces. 18, UNCHANGED from board 1, and that is the
+// one number in the row stack this board does NOT grow: the pill is sized by its
+// label's ink, and MC_DATUM centres on the ASCENT, so Spleen 8x16's ascent is 12
+// against Cozette's 10 - two rows more, inside an 18px pill that already carried
+// 2px of slack top and bottom. The band table in the sessions section spends this
+// number as 18 on both boards for exactly that reason.
+//
+// THE COST OF NOT GROWING IT is real and recorded: the label's own 16-row opaque
+// box does not fit (it would ink +3..+18 in a pill occupying +0..+17, erasing the
+// bottom edge and both bottom arcs), which is why drawStatusPill draws the label
+// TRANSPARENTLY on this board instead of widening the pill. Raising this to 20
+// would give the box room - and cost every tall row 2px, which the ladder's
+// four-session rung has 6px of margin for and its five-session rung does not.
+const int PILL_H = 18;
 // Consequence outside SETTINGS, and a wanted one: the voice-answer confirm screen
 // (sessions.ino, askVoiceSendY()/askVoiceRedoY()) sizes SEND / RE-RECORD / CANCEL
 // from H_BTN, so those three go 44 -> 50 and clear TAP_MIN, where on board 1 they

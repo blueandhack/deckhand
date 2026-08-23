@@ -143,12 +143,12 @@ void drawStatusPill(int xEdge, int y, const char* label, const char* status, boo
   int x = rightAlign ? xEdge - w : xEdge;
   if (asking) {
     // Pills sit on a row/card surface, never on the page background.
-    uiFillRound(x, y, w, 18, 9, color, COLOR_CARD);
+    uiFillRound(x, y, w, PILL_H, PILL_H / 2, color, COLOR_CARD);
     tft.setTextColor(COLOR_BG, color);
   } else if (working) {
     tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   } else {
-    uiStrokeRound(x, y, w, 18, 9, BORDER_CTRL, color, COLOR_CARD);
+    uiStrokeRound(x, y, w, PILL_H, PILL_H / 2, BORDER_CTRL, color, COLOR_CARD);
     tft.setTextColor(color, COLOR_CARD);
   }
 #if !BOARD_USES_TFT_ESPI
@@ -174,7 +174,7 @@ void drawStatusPill(int xEdge, int y, const char* label, const char* status, boo
   tft.setTextColor(lblFg, lblFg);
 #endif
   tft.setTextDatum(MC_DATUM);
-  tft.drawString(label, x + w / 2, y + 9);
+  tft.drawString(label, x + w / 2, y + PILL_H / 2);
   tft.setTextDatum(TL_DATUM);
 }
 // Fit `src` into maxW pixels at the CURRENTLY SET font/size, trimming with "..." when
@@ -913,6 +913,21 @@ void drawAskDetail(int idx) {
   // Mirror mode adds an "ANSWER ON YOUR MAC" caption above the option list, so
   // the text block has to give up that row - otherwise a detail long enough to
   // fill every visible line runs into it.
+  //
+  // THE 14 IS A LITERAL ON BOTH BOARDS, deliberately, and it is the same trade as
+  // the 17 above: this is a RESERVED BAND, not a cell height, and deriving it would
+  // move a board. The caption is drawn TL_DATUM at `optTop - hintH + 2`, so its ink
+  // runs optTop-12 .. optTop-12+cell-1: optTop-12..optTop on board 1 (13px cell)
+  // and optTop-12..optTop+3 on board 2 (16px). Overshooting optTop is harmless
+  // because a mirror-mode option row draws no chrome at all - just a dim bar and a
+  // label at `by + ASK_OPT_H / 2 - 8` - so the ink it has to clear is the LABEL's,
+  // not the row's top edge. Measured clearance from the caption's last ink row to
+  // the first option's first ink row: 7px on board 1 (label at optTop+8) and 11px
+  // on board 2 (ASK_OPT_H 46, label at optTop+15). The honest derivation is
+  // uiLineH(1) + 1, which is 14 here and 17 there; taking it would shrink board 2's
+  // `visLines` budget and so change which details show READ ALL, which belongs with
+  // the rest of this screen's vertical rhythm rather than inside a correctness fix -
+  // and board 1's binary is held byte-identical besides.
   int hintH = s.askAnswerable ? 0 : 14;
   int visLines = (optTop - 8 - hintH - textTop - 2 * pad) / dLineH;
   if (visLines < 1) visLines = 1;

@@ -280,6 +280,17 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
 - **They carry a `known` list of board-1 shortfalls they TOLERATE**, and that list is honest rather
   than a silencer: the board-2 side of each entry is empty, so board 2 passes on its own merits.
   Those entries are real pre-existing board-1 defects — see `docs/board-1-known-defects.md`.
+- **A checker must PARSE the constant it certifies, never TRANSCRIBE it — and this has now bitten
+  twice.** First as `BODY_H = {1:13, 2:16}` hardcoded in a checker whose whole job was to measure
+  text, fixed by regex-parsing `UI_FONTS[]`. Then as `const PILL_H = 18` copied into
+  `sessions-geom-check.mjs` from `drawStatusPill`: **measured** by mutation, raising the pill to 22
+  at its draw sites left all three checkers exiting 0 while the assertion they exist for ("the pill
+  ends clear of the row's own 2px card border") was false. The height is now one named per-board
+  constant (`PILL_H` in each board header) that the two `uiRound` calls, the label's `MC_DATUM`
+  centre, `DETAIL_PILL_STEP` and the checker all read — four copies down to one — and the same
+  mutation now fails by name on both boards. When you add a checker assertion, the test is not
+  "does it pass" but **"does reverting the constant make it fail, and by name"**; a literal on the
+  checker's side of that line makes the answer no.
 - **The `--selftest`s are one tooth per ~60 claims, so there is a FAULT-INJECTION SWEEP over all of
   them.** `node firmware/deckhand_display/geom-sweep.mjs` perturbs every constant each checker
   parses, at ±1/±4/±16, per board, and re-runs the whole checker: a constant no assertion notices is
@@ -297,14 +308,17 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   VOICE RESULT CARD was covered by nothing at all, which is how it kept a 13px line step under a
   16px cell right through a type-scale port. **Take an
   unguarded constant that this repo just ADDED or CHANGED as a gap, not as noise.**
-  Where it stands today: **402 of 471 constant-board pairs guarded** (board 1 33/231 unguarded,
-  board 2 36/240), and of the unguarded ones only **7 on board 1 and 10 on board 2 are read by any
+  Where it stands today: **405 of 473 constant-board pairs guarded** (board 1 33/232 unguarded,
+  board 2 35/241), and of the unguarded ones only **7 on board 1 and 9 on board 2 are read by any
   checker at all** — the other 26 a side are mic, beeper, crab and preset-count constants with no
   geometry to violate. Known and accepted, so do not re-litigate them: `MSG_BTN_W`, `H_BTN` and
-  `SP_2` are pre-existing; a cache-size assertion is `>=` by nature so `SESSION_ROW_SIG_LEN` /
-  `CODEX_LANE_CACHE` cannot be caught by a small perturbation at all; and `CFM_Y`/`CFM_H`,
+  `SP_2` are pre-existing; a cache-size assertion is `>=` by nature so `SESSION_ROW_SIG_LEN`
+  cannot be caught by a small perturbation at all (`CODEX_LANE_CACHE` *is* now caught on both
+  boards, because ONE buffer serves both Codex fields and it is asserted against the LARGER,
+  `CODEX_RIGHT_CHARS`, as well as the lane); and `CFM_Y`/`CFM_H`,
   `HIST_CHIP_X`/`HIST_CHIP_TAP_W`/`HIST_JUMP_H`, `P1_TOP`/`P2_TOP`/`P2_GAP`, `KB_TEXT_Y` and
-  `WAIT_CMD_H` all sit inside documented slack (board 2's page 2 has 154px of it and its keyboard
+  `WAIT_CMD_H` all sit inside documented slack (board 2's page 2 has 149px of it - the checker
+  reports its hint ending at 311 against a footer at 460 - and its keyboard
   break 38px) — each IS asserted, just not tightly enough for ±16 to trip it.
   **The sweep needs its own memory discipline and that is not optional.** It re-imports each
   checker once per injection, ~1400 times, and every instance is compiled code the ESM cache can
@@ -1189,13 +1203,26 @@ two things `host/index.mjs` cannot get any other way:
     glyph.** A usage card's label row is `y0+6`..`y0+19`, because the hero number's box starts at
     `y0+20` and clears from `y0+20` across the full card interior — so a 16px icon would be rubbed
     out by the hero's own erase on every tick the digits move, the same clear-box-not-glyphs
-    arithmetic the `+88` stats row already documents. 13 is also **Cozette's cell height**, and
-    that is what removes centring arithmetic from every surface that draws one: an icon's `y` **is**
-    its neighbouring text's `TL_DATUM` y, with a 4px gap, on all five sites (tall session rows, the
-    two usage cards, the Codex row, SETTINGS › STATUS, the detail card). Which is why
+    arithmetic the `+88` stats row already documents. 13 was also **board 1's Cozette cell height**,
+    and that is what removed centring arithmetic from every surface that draws one: an icon's `y`
+    **is** its neighbouring text's `TL_DATUM` y, with a 4px gap, on all five sites (tall session
+    rows, the two usage cards, the Codex row, SETTINGS › STATUS, the detail card). Which is why
     **`drawEmoji`'s `(x, y)` is the TOP-LEFT corner**, deliberately unlike `blit2bpp`'s centre
     convention — every caller here is placing an icon beside `TL_DATUM` text, and a centre-based
     signature would put the same `- MAC_EMOJI_SIZE / 2` at all five.
+    **That identity NO LONGER HOLDS on board 2, and the art is why.** Its body face is Spleen 8x16,
+    so the icon is 13px beside a 16px cell and the same `y` puts it ~1.5px optically HIGH at all
+    six sites that draw one (`sessions.ino:437` and `:1466`, `settings.ino:297`, `usage.ino:167`
+    and `:425`). This is a **cosmetic consequence of the type scale**, not a collision — nothing
+    overlaps, no clear box reaches anything, and the 4px gap is unchanged — and it is deliberately
+    NOT chased: `MAC_EMOJI_SIZE` is the dimension the art itself is generated at, so a per-board
+    icon size means regenerating all sixteen sprites by hand at 16x16 through `emoji2c.py` and
+    re-checking them on the glass (the `robot`-reads-as-a-cupcake lesson below), for 1.5 pixels.
+    The cheap alternative — a per-board `MAC_EMOJI_DY` added at the six call sites — buys the same
+    1.5px and adds a sixth thing that has to stay in step with a font change, so it was rejected
+    too. Anyone who does regenerate the art should re-derive the clear-box argument above at 16px:
+    a 16px icon in a usage card's label row runs `y0+6`..`y0+21` against a hero box that clears
+    from `y0+20` on board 1, and board 2's card geometry has to be checked rather than assumed.
   - **Cost: 390 bytes per icon, 6,240 for all sixteen — 338 of colour plus 52 of alpha — and the
     52 is where the design spec was wrong.** The spec budgeted **43** bytes of alpha, which is
     13x13 = 169 two-bit samples packed as one continuous bitstream (42.25 bytes). `drawEmoji`

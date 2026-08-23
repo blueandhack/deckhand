@@ -2227,12 +2227,21 @@ const int DETAIL_CARD_Y = CONTENT_Y + DETAIL_CARD_DY;
 // replaces when DETAIL_AIR is 0 and the ink heights are 26/13, which is what keeps
 // board 1's binary byte-identical.
 //
-// The pill's 18 is drawStatusPill's own shared literal, the same one
-// SESSION_TITLE_MIN_H is built from.
+// PILL_H is drawStatusPill's own height, a per-board named constant in the board
+// header rather than the literal 18 that used to sit here - it had four copies
+// (twice in drawStatusPill, once here, once TRANSCRIBED into
+// sessions-geom-check.mjs), so raising the pill at the draw sites left all three
+// checkers passing while the border-clearance assertion they exist for was false.
+// The checker parses the name now. NOTE that SESSION_PILL_UP_T / SESSION_PILL_UP
+// above are pill-height-dependent too - they are PILL_H plus a bottom pad plus the
+// 2px border - and are deliberately NOT re-expressed against it: raising PILL_H
+// alone grows the pill DOWNWARD into that border, and the checker failing by name
+// on "pill ends +N clear of the border" is how the next person finds out they owe
+// those two an adjustment as well.
 const int DETAIL_PAD_Y       = 6 + DETAIL_AIR;                  // card top -> name
 const int DETAIL_NAME_STEP   = DETAIL_NAME_H + DETAIL_AIR;      // name -> title
 const int DETAIL_TITLE_STEP  = DETAIL_LINE_H + 2 + DETAIL_AIR;  // title -> pill
-const int DETAIL_PILL_STEP   = 18 + 6 + DETAIL_AIR;             // pill -> rule
+const int DETAIL_PILL_STEP   = PILL_H + 6 + DETAIL_AIR;         // pill -> rule
 const int DETAIL_RULE_STEP   = 7 + DETAIL_AIR;                  // rule -> next label
 // A label and the value it names read as ONE block, so this step carries no air -
 // it is exactly one line of the label's own face.

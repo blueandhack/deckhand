@@ -319,6 +319,18 @@ for (const b of [1, 2]) {
       `codex lane: right field at ${rightX} spans ${rightX - rightW}..${rightX}, clears from ${clearFrom}; label at ${labelX}; (${clearFrom}-${labelX})/${charW} = ${((clearFrom - labelX) / charW).toFixed(2)} -> ${lane}, header says ${c.CODEX_LANE_CHARS}`);
   chk(c.CODEX_LANE_CACHE >= c.CODEX_LANE_CHARS + 1,
       `lane cache ${c.CODEX_LANE_CACHE} holds ${c.CODEX_LANE_CHARS} chars + NUL`);
+  // ONE buffer serves BOTH fields, and the larger one was never checked against it.
+  // usage.ino declares `char buf[CODEX_LANE_CACHE]` once and both drawIfChanged
+  // calls pass CODEX_LANE_CACHE as the cacheSize - the left field padded to
+  // CODEX_LANE_CHARS, the RIGHT one padded to CODEX_RIGHT_CHARS, which is nearly
+  // twice as long. Checking only the smaller of the two is exactly the "a cache
+  // shorter than the string it stores silently stops noticing changes" trap this
+  // repo has paid for repeatedly; board 1 passes by 3 (24 against 21), which is
+  // margin nobody had asserted. NOTE this is the BUFFER-SIZE assertion only -
+  // whether CODEX_RIGHT_CHARS is wide enough for its own CONTENT is a separate,
+  // known defect (docs/board-1-known-defects.md #12) and is not what this checks.
+  chk(c.CODEX_LANE_CACHE >= c.CODEX_RIGHT_CHARS + 1,
+      `lane cache ${c.CODEX_LANE_CACHE} also holds the RIGHT field's ${c.CODEX_RIGHT_CHARS} chars + NUL (one buf serves both)`);
   // The label field is padded to CODEX_LANE_CHARS on every tick (padTo(), so
   // its own clear box is stable) - so THAT width, measured for real rather
   // than assumed as charW * CODEX_LANE_CHARS, is what must clear the right

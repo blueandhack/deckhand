@@ -242,14 +242,14 @@ function rowBands(b, c, rowH, kind) {
     bands.push(["name", c.SESSION_NAME_Y_T, c.SESSION_NAME_Y_T + N - 1]);
     bands.push(["title", c.SESSION_TITLE_Y, c.SESSION_TITLE_Y + L - 1]);
     bands.push(["sub-line", c.SESSION_SUB_Y, c.SESSION_SUB_Y + L - 1]);
-    bands.push(["pill", rowH - c.SESSION_PILL_UP_T, rowH - c.SESSION_PILL_UP_T + 17]);
+    bands.push(["pill", rowH - c.SESSION_PILL_UP_T, rowH - c.SESSION_PILL_UP_T + c.PILL_H - 1]);
   } else if (kind === "sub") {
     bands.push(["name", c.SESSION_NAME_Y, c.SESSION_NAME_Y + N - 1]);
     bands.push(["sub-line", c.SESSION_SUB2_Y, c.SESSION_SUB2_Y + L - 1]);
-    bands.push(["pill", rowH - c.SESSION_PILL_UP, rowH - c.SESSION_PILL_UP + 17]);
+    bands.push(["pill", rowH - c.SESSION_PILL_UP, rowH - c.SESSION_PILL_UP + c.PILL_H - 1]);
   } else if (kind === "name") {
     bands.push(["name", c.SESSION_NAME_Y, c.SESSION_NAME_Y + N - 1]);
-    bands.push(["pill", rowH - c.SESSION_PILL_UP, rowH - c.SESSION_PILL_UP + 17]);
+    bands.push(["pill", rowH - c.SESSION_PILL_UP, rowH - c.SESSION_PILL_UP + c.PILL_H - 1]);
   } else {
     // Compact: the pill is TOP-RIGHT, in the lane the name is already measured
     // against (laneRight subtracts its width), so it shares no pixel row question
@@ -318,7 +318,7 @@ function expBands(b, c, rowH, have) {
     cy += n * L + G;
   }
   if (have.path) bands.push(["path", cy, cy + L - 1]);
-  bands.push(["pill", rowH - c.SESSION_PILL_UP_T, rowH - c.SESSION_PILL_UP_T + 17]);
+  bands.push(["pill", rowH - c.SESSION_PILL_UP_T, rowH - c.SESSION_PILL_UP_T + c.PILL_H - 1]);
   bands.push(["border bottom", rowH - 2, rowH - 1]);
   return bands;
 }
@@ -436,7 +436,14 @@ for (const b of [1, 2]) {
   //               pill's offset - i.e. the height at which the pill's first row
   //               lands ON that line's last ink row (the boundary the gate admits)
   //   LARGE_MIN = two borders + two 4+AIR pads + the name band + the pill
-  const PILL_H = 18;   // drawStatusPill's own literal, shared by both boards
+  // PILL_H is PARSED from the board header, not transcribed here. It used to be a
+  // local `const PILL_H = 18` copied from drawStatusPill, and the consequence was
+  // measured: changing the draw sites' 18 to 22 left all three checkers exiting 0
+  // while "the pill ends clear of the row's own 2px border" was false. A checker
+  // that transcribes the constant it certifies cannot see the change it exists to
+  // catch - the same defect as the BODY_H = {1:13, 2:16} hardcode this file already
+  // replaced with a parse of the font registry.
+  const PILL_H = c.PILL_H;
   chk(c.SESSION_TITLE_MIN_H === 15 + PILL_H + NH + 2 * LH + 5 * c.SESSION_AIR,
       `SESSION_TITLE_MIN_H ${c.SESSION_TITLE_MIN_H} == 15 + pill ${PILL_H} + name ${NH} + 2*line ${LH} + 5*AIR(${c.SESSION_AIR})`);
   chk(c.SESSION_SUB_MIN_H === c.SESSION_SUB2_Y + LH - 1 + c.SESSION_PILL_UP,
@@ -456,8 +463,8 @@ for (const b of [1, 2]) {
   // threshold, and SESSION_ROW_H_MIN is the shortest height it can be handed. A
   // constant that is only checked on the boards whose ladder reaches it is not
   // checked.
-  chk(c.SESSION_PILLC_Y + 17 <= c.SESSION_ROW_H_MIN - 3,
-      `compact pill +${c.SESSION_PILLC_Y}..+${c.SESSION_PILLC_Y + 17} clears the border of even the shortest legal row (${c.SESSION_ROW_H_MIN})`);
+  chk(c.SESSION_PILLC_Y + PILL_H - 1 <= c.SESSION_ROW_H_MIN - 3,
+      `compact pill +${c.SESSION_PILLC_Y}..+${c.SESSION_PILLC_Y + PILL_H - 1} clears the border of even the shortest legal row (${c.SESSION_ROW_H_MIN})`);
   chk(c.SESSION_PILLC_Y >= c.BORDER_CARD,
       `compact pill starts +${c.SESSION_PILLC_Y} inside the interior (border owns +0..+${c.BORDER_CARD - 1})`);
   chk(c.SESSION_ROW_H_MAX >= c.SESSION_TITLE_MIN_H,
@@ -509,8 +516,8 @@ for (const b of [1, 2]) {
             `${strip ? "strip " : ""}${n}x${rowH} (${kind}): pill ends +${pill[2]} clear of the border at +${rowH - 2}`);
       }
       if (kind === "compact")
-        chk(c.SESSION_PILLC_Y + 17 <= rowH - 3,
-            `${strip ? "strip " : ""}${n}x${rowH} (compact): top-right pill +${c.SESSION_PILLC_Y}..+${c.SESSION_PILLC_Y + 17} clears the border at +${rowH - 2}`);
+        chk(c.SESSION_PILLC_Y + c.PILL_H - 1 <= rowH - 3,
+            `${strip ? "strip " : ""}${n}x${rowH} (compact): top-right pill +${c.SESSION_PILLC_Y}..+${c.SESSION_PILLC_Y + c.PILL_H - 1} clears the border at +${rowH - 2}`);
     }
     console.log(`  ladder${strip ? " (+N more strip)" : "             "} avail ${avail}: ${tags.join("  ")}`);
     // THE LADDER'S SHAPE IS THE CLAIM EACH BOARD HEADER MAKES, so it is asserted
@@ -822,7 +829,7 @@ for (const b of [1, 2]) {
   const textInk = (t, n) => t + (n - 1) * c.DETAIL_TEXT_LINE_H + LBLH - 1;
   blk.push(["name", cy, cy + lineHB(b, NF) - 1]);            cy += c.DETAIL_NAME_STEP;
   blk.push(["title", cy, cy + BODYH - 1]);                   cy += c.DETAIL_TITLE_STEP;
-  blk.push(["pill", cy, cy + 17]);                           cy += c.DETAIL_PILL_STEP;
+  blk.push(["pill", cy, cy + c.PILL_H - 1]);                 cy += c.DETAIL_PILL_STEP;
   blk.push(["rule", cy, cy]);                                cy += c.DETAIL_RULE_STEP;
   top = cy; cy += c.DETAIL_LBL_STEP;
   blk.push([`LAST PROMPT + ${c.DETAIL_PROMPT_LINES} lines`, top, textInk(cy, c.DETAIL_PROMPT_LINES)]);
