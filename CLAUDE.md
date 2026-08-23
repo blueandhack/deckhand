@@ -19,7 +19,9 @@ that differs and why; this section is only how to build each.
 | serial | CH340, `/dev/cu.usbserial-*`, 11.5KB/s ceiling | native USB CDC, `/dev/cu.usbmodem*` |
 | mic / beeper | both fitted and working | codec present, **software path not written** |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
-| size today | flash 1382802, RAM 69236 | flash 894534, RAM 57860 |
+| type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
+| body text | 6x13 = 2.31mm, 34-col card lane | 8x16 = 2.47mm, 32-col card lane |
+| size today | flash 1382802, RAM 69236 | flash 924078, RAM 58684 |
 
 **Board 1's binary is BYTE-IDENTICAL across the whole second-board port, and that is the check
 that kept the port honest** — 1382802 flash / 69236 RAM. It is not ceremony: it caught a real
@@ -264,6 +266,7 @@ own comment fails loudly instead of passing while the panel is wrong:
 node firmware/deckhand_display/usage-geom-check.mjs      # USAGE cards, hero/bar/stats/foot clear boxes, footer's three zones, Codex row
 node firmware/deckhand_display/sessions-geom-check.mjs   # the row-height ladder, tall/sub/compact gates, detail card, ask option chips
 node firmware/deckhand_display/settings-geom-check.mjs   # settings pages, steppers, keyboard, history reader, confirm-screen line cap
+node firmware/deckhand_display/geom-sweep.mjs            # fault-injection sweep over all three (~4 min, see below)
 ```
 
 Each takes `--selftest`, which injects a fault and **exits 0 only when that fault IS caught** (exit
@@ -277,12 +280,37 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
 - **They carry a `known` list of board-1 shortfalls they TOLERATE**, and that list is honest rather
   than a silencer: the board-2 side of each entry is empty, so board 2 passes on its own merits.
   Those entries are real pre-existing board-1 defects — see `docs/board-1-known-defects.md`.
-- **Honest weakness, stated because it matters more here than usual:** each `--selftest` breaks ONE
-  of roughly sixty assertions, so it proves the checker is not inert and says nothing about the
-  other fifty-nine. While board 2's visual gate was blocked these checkers were the port's only
-  proof, and one tooth per ~60 claims is thin. A fault-injection sweep — perturb every parsed
-  constant in turn and require at least one assertion to fire for each — is the obvious next
-  hardening and has not been written.
+- **The `--selftest`s are one tooth per ~60 claims, so there is a FAULT-INJECTION SWEEP over all of
+  them.** `node firmware/deckhand_display/geom-sweep.mjs` perturbs every constant each checker
+  parses, at ±1/±4/±16, per board, and re-runs the whole checker: a constant no assertion notices is
+  reported as UNGUARDED, and a guarded one is reported with the SMALLEST perturbation that was
+  caught — which is the more useful number, since it says how much real headroom each has.
+  It **exits 0 even with unguarded constants**, deliberately: most of them are colours, beep
+  frequencies and cosmetic gaps with no geometric constraint, and wiring that to a non-zero exit
+  would make it un-runnable until someone had either written 150 assertions or suppressed the list —
+  and a suppressed list stops being read. Non-zero is reserved for the sweep's own internal errors.
+  Three things it has actually caught, which is why it is worth the ~4 minutes it takes: the
+  waiting screen's seven `WAIT_*` offsets, read by no checker at all and wrong on board 2; the
+  pager key's WIDTH, checked in one dimension only; and — the same run, once the checkers started
+  measuring per board — the wordmark's 64px cell erasing the two lines under it. **Take an
+  unguarded constant that this repo just ADDED or CHANGED as a gap, not as noise.**
+  Where it stands today: **398 of 467 constant-board pairs guarded** (board 1 33/229 unguarded,
+  board 2 36/238), and of the unguarded ones only **7 on board 1 and 10 on board 2 are read by any
+  checker at all** — the other 26 a side are mic, beeper, crab and preset-count constants with no
+  geometry to violate. Known and accepted, so do not re-litigate them: `MSG_BTN_W`, `H_BTN` and
+  `SP_2` are pre-existing; a cache-size assertion is `>=` by nature so `SESSION_ROW_SIG_LEN` /
+  `CODEX_LANE_CACHE` cannot be caught by a small perturbation at all; and `CFM_Y`/`CFM_H`,
+  `HIST_CHIP_X`/`HIST_CHIP_TAP_W`/`HIST_JUMP_H`, `P1_TOP`/`P2_TOP`/`P2_GAP`, `KB_TEXT_Y` and
+  `WAIT_CMD_H` all sit inside documented slack (board 2's page 2 has 154px of it and its keyboard
+  break 38px) — each IS asserted, just not tightly enough for ±16 to trip it.
+  **The sweep needs its own memory discipline and that is not optional.** It re-imports each
+  checker once per injection, ~1400 times, and every instance is compiled code the ESM cache can
+  never release, so runs are sliced across four child processes per (checker, board). Before that
+  the sessions child OOM'd — which did not fail the run, it just dropped the checker that covers
+  every `SESSION_*`/`DETAIL_*`/`ASK_*` constant out of the union and reported 88 of them as
+  unguarded. If a future checker grows, raise `SLICES`; do **not** raise the heap, because the
+  limit being hit is V8's CODE space and `--max-old-space-size` provably does nothing (it dies at
+  840MB with a 4.5GB heap limit).
 
 There is no test suite or linter in this repo; verification is "compile, flash, watch the
 Serial Monitor / host log, and check the physical screen." **On board 2, read that last clause
@@ -397,13 +425,24 @@ halves, and `switchTab` logs its own duration.
 
 What the numbers actually said, and what fixed them:
 
-| | before | after |
-|---|---|---|
-| `switchTab` → USAGE | 888 ms | **85 ms** |
-| `switchTab` → SESSIONS | 203 ms | **68 ms** |
-| `switchTab` → SETTINGS | 355 ms | **77 ms** |
-| `drawUsageStatic` | 504 ms | **16 ms** |
-| full-screen flush | 45 ms | **30 ms** |
+| | before | after | after the type scale |
+|---|---|---|---|
+| `switchTab` → USAGE | 888 ms | **85 ms** | 88 ms |
+| `switchTab` → SESSIONS | 203 ms | **68 ms** | 73 ms |
+| `switchTab` → SETTINGS | 355 ms | **77 ms** | 84 ms |
+| `renderUsageTab` | — | 59 ms | 62 ms |
+| `drawUsageStatic` | 504 ms | **16 ms** | 16 ms |
+| full-screen flush | 45 ms | **30 ms** | 30 ms |
+
+**The type scale cost 3-9%, and that is the whole answer to "does a 32x64 hero and a 16px body cost
+too much".** Measured on the glass with `PERF` plus `TAB 0|1|2`, two passes each: USAGE 87.8/88.3,
+SESSIONS 72.8/73.7, SETTINGS 84.1/84.3, `renderUsageTab` 62.1/62.5 (of which `drawUsageStatic` 16.5
+and the cache reset 0.016). The **flush did not move at all** — 30.2ms, gather 8.3 + transfer 21.8 —
+which is the expected shape: a flush ships the whole framebuffer regardless of what is in it, so
+only the *composing* half can get slower, and it did, by the few ms that drawing roughly 2.4x the
+glyph area costs. Nobody will see 5ms on a tab switch that already takes 85, so this is accepted
+rather than tolerated. The SESSIONS figure moves with how many sessions are live and how tall the
+expanded first card is; the other three are fixed layouts.
 
 **`fillSmoothRoundRect` and `drawSmoothRoundRect` were 86x more expensive than they needed to be.**
 Both walked the whole bounding box — 296x164 = 48,544 pixels for one card — evaluating a float SDF
@@ -696,25 +735,41 @@ board 1 is 2.8" 240x320, so `sqrt(240²+320²)` = 400px over 71.12mm = **5.62 px
 every element **physically larger than it is on the smaller board** — Cozette 6x13 is
 13/5.62 = **2.31mm** tall on board 1 and 13/6.49 = **2.00mm** here, and a 1.33x scale (17.3px, a
 size Cozette does not have — it ships 6x13 and a mechanical 12x26 and nothing between) would make it
-**2.67mm**. So **the faces stay put and the extra pixels become AIR and ROWS**, not bigger
-everything.
+**2.67mm**.
+
+**THAT ARGUMENT HELD FOR EIGHT TASKS AND THEN LOST, AND THE REASON IT LOST IS THE INTERESTING
+PART.** "The faces stay put and the extra pixels become AIR and ROWS" was the rule for the whole
+port, and it was correct about SCALING — a 1.33x scale really would have made everything
+physically bigger than on the smaller board. But it quietly accepted the other half: at 6x13 board
+2's body text is **2.00mm against board 1's 2.31mm**, i.e. a step SMALLER on the bigger screen, and
+that is the same mistake in the other direction. Board 2 now has its own native type scale — Spleen
+**8x16 / 12x24 / 32x64**, no rung a mechanical upscale of another — which puts body text at 2.47mm,
+close to parity, while keeping a 32-character card lane against board 1's 34 so the existing
+character budgets carry over. The obvious next rung up, 12x24, is 3.70mm and only 21 columns: a
+third of every card's text spent on making it bigger than board 1's. Full arithmetic under
+**The type scale is three rungs** below. Everything else about the method is unchanged: air and
+rows still absorb the surplus, the faces just are not board 1's any more.
 
 That method reproduces board 1's own commented values as a check rather than asserting itself:
 board 1's `TAP_MIN` 40 is 40/5.62 = **7.11mm**, matching that header's own `// 7.1mm`; the same
 7.11mm at board 2's 6.49 px/mm is 46.1 → **`TAP_MIN` 46**, and `TAB_BAR_H` 46 follows with no
 code change because `drawTabBar` already derives its label centre, underline and REC slot from it.
 
-**One deliberate exception: `CARD_HERO_SIZE` goes x3 → x4.** At x3 the hero percentage would be
-39/6.49 = 6.0mm on board 2 against 39/5.62 = 6.9mm on board 1 — the number whose entire job is being readable across a
-room would *shrink* on the bigger screen. x4 is exact in the font (integer Cozette scaling, no
-resampling). Confirmed legible on the glass.
+**`CARD_HERO_SIZE` USED TO BE THE ONE DECLARED EXCEPTION HERE, AND IT NO LONGER EXISTS ON BOARD
+2.** It went x3 → x4 for exactly the reason above — at x3 the hero percentage would have been
+39/6.49 = 6.0mm against 39/5.62 = 6.9mm on board 1, the one number whose entire job is being
+readable across a room *shrinking* on the bigger screen. With a native registry there is no scale
+factor left to name: board 2's `T_HERO` is Spleen 32x64 at size 1, 9.86mm, and the constant is gone
+from `board_es3c35p.h` rather than set to 1. Board 1 keeps it, because its hero really is a
+mechanical x3 of a 6x13 face. That the exception could be deleted rather than re-tuned is the
+clearest single argument for the native scale.
 
 **The headline win is the sessions ladder**, and `sessions-geom-check.mjs` prints both boards' so
 you never have to take this on trust:
 
 ```
-ladder  avail 264: 1:90t  2:90t  3:86t  4:63n  5:50c  6:41c    <- board 1
-ladder  avail 412: 1:106t 2:106t 3:106t 4:100t 5:80s  6:66n    <- board 2
+ladder  avail 264: 1:90t  2:90t  3:86t  4:63n  5:50c  6:41c     <- board 1
+ladder  avail 410: 1:100t 2:100t 3:100t 4:100t 5:79s  6:65n    <- board 2
 ```
 
 (`t` = the row gets its title, `s` = model/branch sub-line, `n` = name and pill only, `c` =
@@ -740,17 +795,29 @@ both costs ~2.2KB of DRAM per row on a board where the framebuffer already owns 
 a coordinated host+device change with a RAM budget attached, so it is not something a bigger screen
 gets for free.
 
-**A WIDER CARD COSTS A KEYBOARD LINE, which is the non-obvious result of the whole layout pass.**
-`KB_COLS = floor((CARD_W - 12) / 6)` = 47 on board 2, so `KB_TEXT_LINES = ceil(150 / 47)` = **4**,
-against board 1's 34 columns and 5 lines. 47 is the exact maximum, checked against the real
-last-character ink rule rather than advance-only: `max(xOffset + width)` in Cozette6x13 is 7 (`q`,
-`4`), so 46x6 + 7 = 283 ≤ 284 while 48 would need 289.
+**A WIDER CARD DOES NOT COST A KEYBOARD LINE, AND THIS FILE CLAIMED IT DID.** The claim rested on
+`KB_COLS = floor((CARD_W - 12) / 6)` = 47 on board 2 and therefore `ceil(150 / 47)` = 4 lines. The
+6 is **Cozette's** advance, and board 2 draws Spleen 8x16: the real derivation is
+`(CARD_W - 12) / TEXT_ADV` = `(296 - 12) / 8` = 35.5 -> **35 columns**, so `ceil(150 / 35)` = **5
+lines**, the same as board 1's 34 and 5. 35 is the exact maximum and it is *measured*, not divided:
+every Spleen glyph advances 8 with `xOffset + width == xAdvance`, so the widest 35-column line inks
+34x8 + 8 = 280px in the 284px lane with 4px to spare for any string, where 36 would need 288.
+Board 1's own 34 is 1px hot by the same rule (`max(xOffset + width)` in Cozette6x13 is 7 for space,
+`4` and `q`, so 33x6 + 7 = 205 against a 204px lane) - harmless, since the ink still stops 3px
+inside the card.
+**What 47 actually did on the glass, because the hard wrap MEASURES NOTHING:** it slices `KB_COLS`
+bytes and draws them, so 47 columns painted 47x8 = 376px of text from x=18 across a 320px panel -
+the tail of every long line ran off the screen - and the 4-line budget under it meant a 150-byte
+answer could put text where the card does not reach at all. Nothing errored on either count. That
+is the whole case for `TEXT_ADV` being a named per-board constant.
 
 **The history reader's budget had to cross the WIRE, and this was a real functional gap the port
 would otherwise have shipped.** `host/index.mjs` hardcoded `HIST_LINE_CHARS = 36` /
-`HIST_PAGE_LINES` to board 1's 216px column, so board 2's re-derived 23-line/49-column reader could
-**never fill** — 16 rows of ≤36 characters into a screen with room for 23 of 49, with nothing on
-either side reporting an error. Fixed by having the **device state its budget** as a `<cols>x<lines>`
+`HIST_PAGE_LINES` to board 1's 216px column, so board 2's re-derived **18-line/37-column** reader
+could **never fill** — 16 rows of ≤36 characters into a screen with room for 18 of 37, with nothing
+on either side reporting an error. (Those two figures read 23x49 for most of the port, which was the
+same lane divided by Cozette's 6px advance and stepped at its 13px cell; board 2 draws Spleen 8x16,
+and the wrong pair was what the device was *reporting to the Mac*.) Fixed by having the **device state its budget** as a `<cols>x<lines>`
 token on the `HISTORY` request, with the host defaulting to 36/16 when the fields are absent. That
 default **is** board 1's existing behaviour, so an un-upgraded device keeps working and no protocol
 version bump was needed — the same backward-compatibility shape as the trailing `to=<hostId>`
@@ -1567,7 +1634,7 @@ two things `host/index.mjs` cannot get any other way:
   `HIST_LINE_CHARS = 36` / `HIST_PAGE_LINES = 16`, which *is* board 1's existing behaviour — so no
   protocol version bump was needed, the same backward-compatibility shape as the trailing
   `to=<hostId>` address. It exists because those two constants were hardcoded to board 1's 216px
-  column, and a board with a 23-line/49-column reader could therefore never fill a page while
+  column, and a board with an 18-line/37-column reader could therefore never fill a page while
   nothing on either side reported an error.
   **The device stores only the screen it is showing.** Measured on a real transcript: 2515
   entries / 584KB, of which the conversation alone is 122KB, against ~70KB of free heap
@@ -2580,7 +2647,7 @@ Other things that aren't obvious from a single file:
     hard-slices against `CARD_W - 12` (`keyboard.ino`, and board 1's own header comment always said
     `(CARD_W - 12) / 6`). **At board 1's `CARD_W` of 216 both give 34, which is exactly why the
     error survived** — they diverge at any other width, and board 2 is the first thing in this repo
-    to have another width: at 296 they give **48 versus 47**. The wrong lane was written into the
+    to have another width: at 296 they give **36 versus 35**. The wrong lane was written into the
     one place this file claims a budget is provable "by arithmetic", which is the worst place for
     it. If you quote a column count here, quote the file it comes from with it.
   - **20s cap on an answer recording** (`MIC_ANSWER_MAX_MS`) against 120s for a dictation. The hook
@@ -2679,10 +2746,12 @@ Other things that aren't obvious from a single file:
     budget provable instead: `ceil(150/34) = 5`, always. `drawWrappedText` stays untouched because
     the ask detail and history reader genuinely need word wrap.
     **34 and 5 are BOARD 1's numbers, and the lane is `CARD_W - 12`, not `- 12`'s
-    lookalike `- 8`** — both expressions give 34 at 240px wide, which is exactly why the wrong one
-    survived in this file for so long. Board 2 is 47 columns and `ceil(150/47) = 4`: a wider card
-    costs a line. The per-board values live in `board_*.h`; what generalises is the *method*, that
-    a fixed column count makes the line budget provable where word wrap cannot.
+    lookalike `- 8`** — both expressions give 34 at 216px wide, which is exactly why the wrong one
+    survived in this file for so long. Board 2 is `(296 - 12) / 8` = **35** columns and
+    `ceil(150/35) = 5` — the same line count, because the wider card and the wider face cancel.
+    (This paragraph used to say 47 and 4, which came from dividing board 2's lane by Cozette's 6.)
+    The per-board values live in `board_*.h`; what generalises is the *method*, that a fixed column
+    count makes the line budget provable where word wrap cannot.
   - **The countdown and byte counter live in a reserved meta row, because `drawString` paints an
     opaque box the full height of a text line.** A counter sharing a row with wrapped text
     silently erases that line's tail. The meta row and the five hard-wrapped text lines are laid
@@ -3151,11 +3220,45 @@ Other things that aren't obvious from a single file:
   with `TL_DATUM` it adds the ascent so the text top lands at the given `y`. The header is
   regenerated from the upstream BDF by `firmware/deckhand_display/bdf2gfx.py` (see its docstring);
   the 668KB BDF itself is deliberately **not** committed — the ~1KB header is self-contained.
-- **The type scale is three rungs, and two of them are Cozette's only options.** `UI_FONTS[]`
-  maps a font id to `(face, size, cellH)`: `T_META`/`T_BODY` → Cozette 6x13, `T_HEAD` → Terminus
-  10x18 bold, `T_HERO` → Cozette 12x26. The ids are the legacy TFT_eSPI numbers the ~72 existing
-  call sites already pass, so the registry landed **inert** — adding a face cost zero changes at
-  those sites. Two cheaper options were tested and ruled out, not argued about: Cozette's
+- **The type scale is three rungs, and `UI_FONTS[]` IS PER BOARD.** It maps a font id to
+  `(face, size, cellH)`, behind the same `#if BOARD_USES_TFT_ESPI` every other board split uses:
+  board 1 is `T_META`/`T_BODY` → Cozette 6x13, `T_HEAD` → Terminus 10x18 bold, `T_HERO` →
+  Cozette 12x26; board 2 is **Spleen 8x16 / 12x24 / 32x64, every rung NATIVE at size 1** — no
+  entry on that board is a mechanical upscale of another. The ids are the legacy TFT_eSPI numbers
+  the ~72 existing call sites already pass, so the registry landed **inert** — adding a face, or a
+  whole second family for a second board, cost zero changes at those sites.
+  **WHY 8x16 AND NOT 12x24, WHICH IS THE COUNTER-INTUITIVE PART OF THE WHOLE CHANGE.** Board 2 has
+  twice the pixels but is only 15% denser (6.489 vs 5.624 px/mm), so **the same pixel size is
+  physically SMALLER there** — Cozette 6x13 is 2.31mm tall on board 1 and 2.00mm on board 2, which
+  is why "just keep the fonts and spend the pixels on air" left body text a step down from board 1
+  rather than equal to it. Spleen 8x16 is **2.47mm**, restoring parity, and it keeps a **32**-character
+  detail-card lane against board 1's 34, so every existing character-budget argument carries over
+  instead of needing re-invention. 12x24 would have been 3.70mm and **21** columns — a third of the
+  card's text gone to make the text bigger than board 1's.
+  | | board 1 | board 2 at 6x13 | board 2 at 8x16 | board 2 at 12x24 |
+  |---|---|---|---|---|
+  | cell height | 2.31mm | 2.00mm | **2.47mm** | 3.70mm |
+  | card lane | 34 cols | 42 | **32** | 21 |
+  **`CARD_HERO_SIZE` NO LONGER EXISTS ON BOARD 2.** Board 1's hero is Cozette 6x13 pushed to
+  `setTextSize(3)` — one mechanical step past its own `T_HERO` registry entry, which is already
+  size 2 — so that board needs a constant naming the override. Board 2's `T_HERO` is Spleen 32x64
+  at size 1, so there is no scale factor left to name and the constant is gone from
+  `board_es3c35p.h` rather than set to 1. At 64px the hero is 9.86mm against board 1's 6.9mm —
+  *bigger*, not merely matched, because Spleen's only rung above 12x24 is 32x64 and there is
+  nothing between them to land closer.
+  **`TEXT_ADV` and `CODE_LINE_H`/`HERO_LINE_H` exist because literals describe ONE board's face.**
+  Every character-lane division used to be `/ 6` and every code line step a literal `13` — both
+  Cozette's — and after board 2's face changed those literals went on being right-looking and
+  wrong. The named per-board pair is what a lane or a stacked block derives from now, and the
+  geometry checkers assert each against the parsed `UI_FONTS[]` table (`uiLineH()` is not a
+  constant expression, so a board header cannot `static_assert` it itself).
+  **Every Spleen glyph in 0x20..0x7E has `xOffset == 0` and `width == xAdvance == 8`, so
+  `textWidth`'s last-character rule is a NO-OP on board 2** — a column count that divides exactly
+  is exact for *any* string there. Cozette is not like that: its advance is a uniform 6 but
+  `max(xOffset + width)` is **7** (space, `4`, `q`), so board 1's own 34-column lane is 1px hot for
+  a line ending in one of those three (harmless — the ink stops 3px inside the card). The checkers
+  assert the monospace property rather than assuming it, so a regenerated Spleen that broke it
+  fails loudly instead of quietly invalidating every lane derived from `TEXT_ADV`. Two cheaper options were tested and ruled out, not argued about: Cozette's
   `cozette_hidpi.bdf` is a **byte-identical mechanical 2x upscale** (decoded glyph-for-glyph), and
   a 1px synthetic double-strike has nowhere to go because **78 of 95 glyphs already reach or pass
   the 6px advance** (`4` reaches 7). So Cozette offers exactly one size and its double, and a
