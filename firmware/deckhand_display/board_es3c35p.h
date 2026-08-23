@@ -675,8 +675,8 @@ const int SESSION_OVERFLOW_H = 19;
 // two cannot drift.
 //
 // THE SIX HEIGHTS, avail 410 (see the ladder above):
-//   1 session  leftover 410 -> 212 (cap)   prompt 4 lines   198px still empty
-//   2 sessions leftover 307 -> 212 (cap)   prompt 4 lines    95px still empty
+//   1 session  leftover 410 -> 212 (cap)   prompt 4 lines   198px spare
+//   2 sessions leftover 307 -> 212 (cap)   prompt 4 lines    95px spare, below
 //   3 sessions leftover 204 -> 204         prompt 3 lines     0px - the list fills
 //   4 sessions leftover 101 ->   0         the ladder already fills the column
 //   5 sessions leftover  82 ->   0
@@ -684,6 +684,13 @@ const int SESSION_OVERFLOW_H = 19;
 // With the "+N more" strip (avail 391) only the six-row case is reachable, and it
 // is 66 -> 0. So expansion is a ONE-to-THREE session behaviour by arithmetic, not
 // by a special case at either end.
+//
+// AND A LONE CARD IS CENTRED IN THE LIST AREA (sessionRowYAt), which is the other
+// half of the one-session case: 212 of 410 leaves 198px, and all of it sitting
+// BELOW the card reads as "a card, then nothing" no matter how much the card
+// carries. Centred it is 99px above and 99 below. ONLY when the card is alone - in
+// a mixed layout the stack's top alignment is the rhythm, and dropping the first
+// card would open a gap above a list that still ends flush at the bottom.
 //
 // SESSION_EXP_MIN_H IS THE PACKED STACK, exactly the way SESSION_TITLE_MIN_H is,
 // and below it the card cannot draw its content at all - which is why the rule
@@ -746,21 +753,39 @@ const int DETAIL_BACK_Y = 17;
 // The card starts exactly where the touch band ends - no overlap, where board 1's
 // card border sits 2px inside its own band.
 const int DETAIL_CARD_DY = 50;
-// 320, and the arithmetic is the running cursor in drawSessionDetail() with
-// DETAIL_AIR at every block boundary and this board's line caps:
-//   cardY +14 pad | name +34 | title +23 | pill +32 | rule +15 | label +13
-//   | prompt 4 lines +54 | rule +15 | label +13 | path 2 lines +32
-//   | col label +12 | col values +26 | col label +12  -> cy = +295
-// the last values row inks +295..+310 at the REAL 16px face, so 7 rows of slack
-// sit above the 2px border at +318..+319 (board 1: 8 above +222..+223).
-// 308 -> 320 is the fourth prompt line DETAIL_PROMPT_LINES now budgets (+11 at
-// the cursor's current 11px step); at 308 that line's own ink would have crossed
-// the card's bottom border.
-// It must ALSO leave room below itself, which is what caps it: the "answer this
-// one on your Mac" line draws at cardY + DETAIL_CARD_H + 8 (MC_DATUM, so it inks
-// 418..433 here) and the "tap here for history" hint inks 444..459 against a
-// contentBottom() of 460. 10px between them. Anything past H = 328 collides.
-const int DETAIL_CARD_H = 320;
+// 326, and the arithmetic is the running cursor in drawSessionDetail() with every
+// step DERIVED (see DETAIL_NAME_H / DETAIL_LINE_H / DETAIL_TEXT_LINE_H below) from
+// this board's own faces rather than from Cozette's:
+//   +10 pad | name 24 ink +10..+33 | step 28
+//   +38 title 16 | step 22
+//   +60 pill 18 | step 28
+//   +88 rule | step 11
+//   +99 PROMPT label 16 | step 16
+//   +115 prompt 4 lines (16 each, last inks +163..+178) | step 70
+//   +185 rule | step 11
+//   +196 PATH label 16 | step 16
+//   +212 path 2 lines (last inks +228..+243) | step 38
+//   +250 col labels 16 | step 15
+//   +265 col values 16 | step 25
+//   +290 col labels 16 | step 15
+//   +305 col values, inking +305..+320
+// so the content ends at +320 and 3 clear rows sit above the 2px border at
+// +324..+325 (board 1: 8 above its own).
+//
+// THE CEILING IS 331, NOT the 328 this comment used to claim, and the difference
+// is that the "answer this one on your Mac" line's opaque BOX was being measured
+// at its baseline. Both that line and the "tap here for history" hint are MC_DATUM
+// T_META, and drawString centres on the ASCENT (12) while painting a box
+// ascent+descent (16) tall - so a string drawn at y inks rows y-6..y+9. The answer
+// line sits at cardY + H + 8 = H + 104, i.e. rows H+98..H+113; the hint sits at
+// contentBottom() - 10 = 450, i.e. rows 444..459. They collide when
+// H + 113 >= 444, i.e. AT H = 331 - so 330 is the largest legal card and 326
+// leaves 4px between the two lines (answer box 424..439). The checker measures it
+// as a BOX now and PRINTS that largest-legal number for both boards, so the next
+// person to spend this headroom reads it rather than re-deriving it. (Board 1's own
+// figure prints as 211 against its 224: that card is 13px over its ceiling, which
+// is the long-documented case of both footer strings landing on one y.)
+const int DETAIL_CARD_H = 326;
 // TYPE. 46 tall = TAP_MIN, where board 1's 22 was half its own floor. 88 wide is
 // board 1's 76 held PHYSICALLY (76 / 5.624 = 13.5mm; 13.5 * 6.489 = 87.7), which
 // is the right rule for a control rather than for text. The hit zone's extra 24px
@@ -775,17 +800,49 @@ const int MSG_BTN_W = 88, MSG_BTN_H = 46;
 // 43 characters at Cozette's 6px advance", but this board draws Spleen 8x16, so
 // the lane is 260 / 8 = 32 characters. prompt[104] carries at most 100 (the host's
 // cap), and 3 x 32 = 96 - four characters SHORT, i.e. the field the card exists to
-// show was being silently cut. 4 x 32 = 128 clears it. That fourth line is what
-// took DETAIL_CARD_H from 308 to 320. The same re-derivation leaves the path at 2
+// show was being silently cut. 4 x 32 = 128 clears it. That fourth line, at the
+// DERIVED 16px step, is 64px of the card rather than the 44 the old 11px step
+// pretended - which is most of what took DETAIL_CARD_H to 326 and DETAIL_AIR to 4. The same re-derivation leaves the path at 2
 // (2 x 32 = 64 = path[68]'s 64 exactly, and 64 is also the host's own cap), and
 // the ".."-clipped two-column values below are unchanged: drawColValue clips to
 // the width it is GIVEN, measured, so they were never counted.
 const int DETAIL_PROMPT_LINES = 4;
 const int DETAIL_PATH_LINES = 2;
-// 8px of air at every block boundary inside the card - the same rhythm the USAGE
-// tab settled on, and the same direction Task 6 argued for: given surplus, it
-// goes around the content rather than into the gaps between cards.
-const int DETAIL_AIR = 8;
+// 4px of air at every block boundary inside the card, NOT the 8 this board carried
+// while its cursor was stepped in Cozette's numbers. That 8 was affordable only
+// because the steps under it were 3px too short per line: with every step derived
+// from this board's real faces the packed stack is 320 against a 330px ceiling, and
+// 8px of air would need ~360. So the direction Task 6 argued for (given surplus,
+// spend it around the content) is intact - there simply is no surplus left on this
+// card once its own type scale is paid for, which is the honest reading of a 16px
+// line in a card that has to hold twelve blocks.
+const int DETAIL_AIR = 4;
+// THE DETAIL CARD'S INK HEIGHTS - the two numbers its whole cursor is derived from,
+// exactly as SESSION_NAME_H / SESSION_LINE_H do for a row.
+//
+// DETAIL_NAME_H IS 24, THE HEAD RUNG, AND T_HERO WAS MUTILATING THIS CARD. The
+// name was drawn with setUIFont(4), which on this board is Spleen 32x64: its opaque
+// box spanned +14..+77 while the title's own 16-row box landed at +48..+63 and the
+// pill filled +71..+88 - so the headline field of the most-opened secondary screen
+// had the title punched straight through its middle, the letters' bottom two rows
+// re-emerging at +64..+65, and g/p/y tails hanging out beside the status pill.
+// Decoded off the fonts, not eyeballed. T_HEAD also fixes the width: at 32px per
+// character the 260px lane held EIGHT of a 22-character project name, against 21
+// at 12px. Same judgement, same arithmetic, as the session row's name band.
+const int DETAIL_NAME_H = 24;   // uiLineH(T_HEAD), Spleen 12x24
+const int DETAIL_LINE_H = 16;   // uiLineH(T_BODY) == uiLineH(T_META), Spleen 8x16
+// The WRAPPED-text line step (LAST PROMPT and PATH). 16, the full cell, where board
+// 1 uses 11: that 11 clears Cozette's 10px ascent, and Spleen's is 12 - so an
+// 11px step here cost every line but the last its bottom ink row and every
+// descender it had. Which is what a fourth prompt line at an 11px step made
+// marginally worse before this was derived.
+const int DETAIL_TEXT_LINE_H = 16;
+// Which rung the project name is drawn at: 3 = T_HEAD, whose cell IS
+// DETAIL_NAME_H. 4 (T_HERO) is what the mutilation above was. A number rather than
+// the name because the T_* ids are declared after this header is included;
+// sessions-geom-check.mjs asserts uiLineH(DETAIL_NAME_FONT) == DETAIL_NAME_H
+// against the parsed font registry rather than trusting the pair.
+const int DETAIL_NAME_FONT = 3;
 
 // TAP_MIN, where board 1's 32 is under its own floor of 40. Affordable for the
 // same reason TAB_BAR_H is: the worst case is 4 options plus the SPEAK/TYPE row =

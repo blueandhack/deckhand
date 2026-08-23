@@ -351,6 +351,30 @@ const int DETAIL_PATH_LINES = 2;
 // Air added at every block boundary inside the detail card. 0 here for the same
 // reason SESSION_AIR is: this card already runs to 8px of slack.
 const int DETAIL_AIR = 0;
+// THE DETAIL CARD'S INK HEIGHTS, which its whole running cursor is now built from.
+// 26 is uiLineH(T_HERO) and 13 is uiLineH(T_BODY) - which on this board is also
+// uiLineH(T_META), Cozette having exactly one size and its double. Every step in
+// drawSessionDetail (the top pad, the name, the title, the pill, the rules, the
+// labels and the two column rows) is derived from these plus DETAIL_AIR instead of
+// being written as a literal, and EVERY DERIVED STEP EQUALS THE LITERAL IT
+// REPLACES HERE - which is why this board's binary does not move. Board 2's faces
+// are 24 and 16, and a literal 13 left in that cursor is what drew its 16px lines
+// on 13px spacing.
+const int DETAIL_NAME_H = 26;
+const int DETAIL_LINE_H = 13;
+// The WRAPPED-text line step (LAST PROMPT and PATH), and the one number here that
+// is not a cell height: 11, this board's own long-shipping value. It is 2 under
+// Cozette's 13px cell and one OVER its 10px ascent, so the next line's opaque box
+// clips only the previous line's descender rows - which is why it has always
+// looked right here. Its own constant rather than DETAIL_LINE_H - 2, because
+// board 2's ascent is 12 and the relationship is to the ascent, not to the cell.
+const int DETAIL_TEXT_LINE_H = 11;
+// Which rung the project name is drawn at: 4 = T_HERO (Cozette 12x26), whose cell
+// IS DETAIL_NAME_H. A number rather than the name because the T_* ids are declared
+// after this header is included; sessions-geom-check.mjs asserts it against the
+// font registry (uiLineH(DETAIL_NAME_FONT) == DETAIL_NAME_H) rather than trusting
+// the pair to stay in step.
+const int DETAIL_NAME_FONT = 4;
 
 // 32 tall, under this board's own TAP_MIN of 40, and 4 of gap between two buttons
 // that may be Allow and Deny - both are the most the content area can give rather

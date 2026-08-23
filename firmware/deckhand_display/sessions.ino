@@ -24,14 +24,19 @@ int sessionExpandedH(int count) {
   // computes it before anything here can run), so the leftover is measured
   // against the very number the compact rows are drawn at rather than against a
   // second copy of the ladder formula that could drift from it.
-  int hidden = sessionsTotal - count;
-  int avail = contentBottom() - SESSION_ROW_Y0 - (hidden > 0 ? SESSION_OVERFLOW_H : 0);
-  int leftover = avail - (count - 1) * (sessionRowH + SESSION_ROW_GAP);
+  int leftover = sessionListAvail(count) - (count - 1) * (sessionRowH + SESSION_ROW_GAP);
   if (leftover < SESSION_EXP_MIN_H) return 0;   // the ladder already fills the column
   return leftover > SESSION_EXP_MAX_H ? SESSION_EXP_MAX_H : leftover;
 #endif
 }
 #if !BOARD_USES_TFT_ESPI
+// The list area the rows divide up, in ONE expression. renderSessionsList works it
+// out for the ladder and both helpers below need the same number; a second copy
+// here is how the two would come to disagree about where the list ends.
+int sessionListAvail(int count) {
+  int hidden = sessionsTotal - count;
+  return contentBottom() - SESSION_ROW_Y0 - (hidden > 0 ? SESSION_OVERFLOW_H : 0);
+}
 // How many prompt lines an expanded row of this height budgets. Every
 // SESSION_LINE_H above the packed minimum buys exactly one more, up to the
 // field's own byte cap (see SESSION_EXP_MAX_H) - and the DRAW asks this rather
@@ -54,7 +59,17 @@ int sessionRowHAt(int pos) {
 int sessionRowYAt(int pos) {
   int e = sessionExpandedH(sessionCount);
   if (e <= 0) return SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
-  if (pos == 0) return SESSION_ROW_Y0;
+  if (pos == 0) {
+    // ONE expanded card IS the whole list, so it sits in the MIDDLE of the list
+    // area rather than at the top: 212 of 410 leaves 198px - 48% of the tab -
+    // hanging below it, which reads as "a card, then nothing" however much content
+    // the card itself carries. Centring costs no constant and no height.
+    // ONLY when it is alone. In a mixed layout the stack's top alignment IS the
+    // rhythm, and pushing the first card down would open a gap above a list that
+    // still ends flush at the bottom - worse than the surplus it moved.
+    if (sessionCount == 1) return SESSION_ROW_Y0 + (sessionListAvail(1) - e) / 2;
+    return SESSION_ROW_Y0;
+  }
   return SESSION_ROW_Y0 + e + SESSION_ROW_GAP + (pos - 1) * (sessionRowH + SESSION_ROW_GAP);
 }
 // The display row a y lands in, or -1 for a gap or for anything past the list.
@@ -1260,24 +1275,34 @@ void drawSessionDetail(int idx) {
   // Laid out with a running cursor rather than the hand-derived offsets this screen used
   // to carry (cardY + 78 / +120 / +158). Those had to be re-derived by hand every time a
   // field moved, which is how the screen ended up sparse in the first place.
-  // Every advance below is board 1's own number plus DETAIL_AIR, which is 0 there
-  // and 8 on board 2 - the card's ink is the same height on both panels (Cozette
-  // has no intermediate size), so the only thing a taller card can spend is the
-  // air between blocks. The two label->value pairs are deliberately NOT given air:
-  // a label and the value it names read as one block.
-  int cy = cardY + 6 + DETAIL_AIR;
+  //
+  // EVERY ADVANCE BELOW IS A NAMED, DERIVED STEP (DETAIL_*_STEP in
+  // deckhand_display.ino), not a literal - and that is not tidying. The literals
+  // this carried were board 1's: 26 for the name, 13 for a label, 11 for a wrapped
+  // line. Board 2 draws a 24px name band and 16px lines, so those numbers laid its
+  // ink out on Cozette's spacing - the title's box landing inside the name's, the
+  // name itself drawn at a 64px rung that swallowed the pill as well. Each step is
+  // now DETAIL_NAME_H / DETAIL_LINE_H / DETAIL_TEXT_LINE_H plus DETAIL_AIR, and
+  // every one of them equals the literal it replaced on board 1.
+  // The two label->value pairs are deliberately NOT given air: a label and the
+  // value it names read as one block.
+  int cy = cardY + DETAIL_PAD_Y;
   const int LX = CARD_X + PAD;              // label/value left edge
   const int RX = CARD_X + CARD_W / 2 + 2;   // right column, for the paired short fields
   const int colW = CARD_W / 2 - PAD - 4;
 
   // Project name - large, clipped to the card in the big font.
+  // DETAIL_NAME_FONT, not a literal 4: on board 2 rung 4 is Spleen 32x64, whose
+  // 64-row opaque box swallowed the title and the pill below it (the arithmetic is
+  // in board_es3c35p.h beside DETAIL_NAME_H). The step is that rung's own cell,
+  // so the two can never disagree.
   char nameBuf[26];
   snprintf(nameBuf, sizeof(nameBuf), "%s", s.name);
-  setUIFont(4);
+  setUIFont(DETAIL_NAME_FONT);
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
   while (strlen(nameBuf) > 1 && tft.textWidth(nameBuf) > maxW) nameBuf[strlen(nameBuf) - 1] = '\0';
   tft.drawString(nameBuf, LX, cy);
-  cy += 26 + DETAIL_AIR;
+  cy += DETAIL_NAME_STEP;
 
   // What the session is about, straight under its name - the same title the list row
   // shows, which was previously nowhere on this screen.
@@ -1287,39 +1312,39 @@ void drawSessionDetail(int idx) {
     fitText(titleBuf, sizeof(titleBuf), s.title, maxW);
     tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
     tft.drawString(titleBuf, LX, cy);
-    cy += 15 + DETAIL_AIR;
+    cy += DETAIL_TITLE_STEP;
   }
 
   // Status pill; renderDetailDuration draws "for 12m - 14:31" to its right.
   detailPillY = cy;
   drawStatusPill(LX, cy, pillLabel(status), status, false);
   detailDurCache[0] = '\0'; // force the duration to redraw after this repaint
-  cy += 24 + DETAIL_AIR;
+  cy += DETAIL_PILL_STEP;
 
   tft.drawFastHLine(LX, cy, maxW, COLOR_LABEL);
-  cy += 7 + DETAIL_AIR;
+  cy += DETAIL_RULE_STEP;
 
   // LAST PROMPT - the most useful text on the screen: what you actually asked.
   if (s.prompt[0]) {
     setUIFont(1);
     tft.setTextColor(COLOR_LABEL, COLOR_CARD);
     tft.drawString("LAST PROMPT", LX, cy);
-    cy += 13;
-    drawWrappedText(s.prompt, LX, cy, 1, 11, maxW, 0, DETAIL_PROMPT_LINES,
-                    COLOR_VALUE, COLOR_CARD);
-    cy += DETAIL_PROMPT_LINES * 11 + 2 + DETAIL_AIR;
+    cy += DETAIL_LBL_STEP;
+    drawWrappedText(s.prompt, LX, cy, T_META, DETAIL_TEXT_LINE_H, maxW, 0,
+                    DETAIL_PROMPT_LINES, COLOR_VALUE, COLOR_CARD);
+    cy += detailTextStep(DETAIL_PROMPT_LINES);
     tft.drawFastHLine(LX, cy, maxW, COLOR_LABEL);
-    cy += 7 + DETAIL_AIR;
+    cy += DETAIL_RULE_STEP;
   }
 
   // PATH - wrapped, since paths are long and the tail is the informative end.
   setUIFont(1);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.drawString("PATH", LX, cy);
-  cy += 13;
-  drawWrappedText(s.path[0] ? s.path : "-", LX, cy, 1, 11, maxW, 0, DETAIL_PATH_LINES,
-                  COLOR_VALUE, COLOR_CARD);
-  cy += DETAIL_PATH_LINES * 11 + 2 + DETAIL_AIR;
+  cy += DETAIL_LBL_STEP;
+  drawWrappedText(s.path[0] ? s.path : "-", LX, cy, T_META, DETAIL_TEXT_LINE_H, maxW, 0,
+                  DETAIL_PATH_LINES, COLOR_VALUE, COLOR_CARD);
+  cy += detailTextStep(DETAIL_PATH_LINES);
 
   // The four short fields pair into two columns instead of a four-row ladder. That is
   // what buys the room for the title and the prompt above without a taller card.
@@ -1327,10 +1352,10 @@ void drawSessionDetail(int idx) {
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.drawString("MODEL", LX, cy);
   tft.drawString("GIT BRANCH", RX, cy);
-  cy += 12;
+  cy += DETAIL_COL_LBL_STEP;
   drawColValue(LX, cy, s.model, colW);
   drawColValue(RX, cy, s.branch, colW);
-  cy += 18 + DETAIL_AIR;
+  cy += DETAIL_COL_VAL_STEP;
 
   // STARTED pairs with the agent, NOT with "last active" - that already sits beside the
   // pill above as part of "for 12m - 14:31". Repeating it here would both say the same
@@ -1348,7 +1373,7 @@ void drawSessionDetail(int idx) {
   // disambiguating nothing with one Mac.
   const char* mac = dispMacTag(s.hostSlot);
   tft.drawString(mac[0] ? "AGENT / MAC" : "AGENT", RX, cy);
-  cy += 12;
+  cy += DETAIL_COL_LBL_STEP;
   char t1[10];
   formatClock(s.startSec, t1, sizeof(t1));
   drawColValue(LX, cy, t1, colW);

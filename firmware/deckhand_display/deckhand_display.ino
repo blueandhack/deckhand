@@ -2179,6 +2179,37 @@ void tickWorkingSpinner() {
 
 const int DETAIL_CARD_Y = CONTENT_Y + DETAIL_CARD_DY;
 
+// ---------- The detail card's running cursor, DERIVED ----------
+// One set of steps for both boards, expressed as board 1's own numbers plus
+// DETAIL_AIR and the two ink heights the board headers declare - the identical
+// treatment the session row's offsets already get, and for the identical reason: a
+// literal 13 or 26 left in drawSessionDetail laid board 2's 16px lines and 24px
+// name band out on Cozette's spacing. Every value below equals the literal it
+// replaces when DETAIL_AIR is 0 and the ink heights are 26/13, which is what keeps
+// board 1's binary byte-identical.
+//
+// The pill's 18 is drawStatusPill's own shared literal, the same one
+// SESSION_TITLE_MIN_H is built from.
+const int DETAIL_PAD_Y       = 6 + DETAIL_AIR;                  // card top -> name
+const int DETAIL_NAME_STEP   = DETAIL_NAME_H + DETAIL_AIR;      // name -> title
+const int DETAIL_TITLE_STEP  = DETAIL_LINE_H + 2 + DETAIL_AIR;  // title -> pill
+const int DETAIL_PILL_STEP   = 18 + 6 + DETAIL_AIR;             // pill -> rule
+const int DETAIL_RULE_STEP   = 7 + DETAIL_AIR;                  // rule -> next label
+// A label and the value it names read as ONE block, so this step carries no air -
+// it is exactly one line of the label's own face.
+const int DETAIL_LBL_STEP    = DETAIL_LINE_H;
+// The two-column pairs are tighter than a full block: board 1's 12 and 18 are its
+// 13px line less one, and its 13px line plus five. Both keep their relationship.
+const int DETAIL_COL_LBL_STEP = DETAIL_LINE_H - 1;
+const int DETAIL_COL_VAL_STEP = DETAIL_LINE_H + 5 + DETAIL_AIR;
+// A wrapped text block of n lines, plus the 2px that has always separated it from
+// the rule below. DETAIL_TEXT_LINE_H is the line step the block is DRAWN at, which
+// is the board's ascent-or-cell judgement rather than a cell height - see the two
+// board headers.
+inline int detailTextStep(int lines) {
+  return lines * DETAIL_TEXT_LINE_H + 2 + DETAIL_AIR;
+}
+
 // How many characters of text (from pos) fit in maxW pixels with the
 // CURRENT font, measured, not assumed - proportional fonts make per-char
 // column counts wrong, which once let lines run past the right margin.

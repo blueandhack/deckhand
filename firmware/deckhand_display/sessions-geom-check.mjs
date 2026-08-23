@@ -158,7 +158,7 @@ const KNOWN = {
     // 60+224+8 = 292, and the history hint at contentBottom() - 10 = 292. Since
     // drawString paints an opaque box and the hint is drawn second, the warning is
     // invisible on this board. Board 2's card leaves 27px between them.
-    "\"answer on your Mac\" ends 298 above the history hint at 286",
+    "\"answer on your Mac\" ends 299 above the history hint at 287",
     // (c) Both under board 1's own TAP_MIN of 40, and its own header comment says
     // so: at board 2's 46+8 the worst-case option stack would be 270 of a 268px
     // content area. The proportion carries across even though the pixels cannot.
@@ -256,6 +256,16 @@ function expandedH(c, count, avail, rowH) {
   const leftover = avail - (count - 1) * (rowH + c.SESSION_ROW_GAP);
   if (leftover < c.SESSION_EXP_MIN_H) return 0;
   return Math.min(leftover, c.SESSION_EXP_MAX_H);
+}
+// sessionRowYAt(), replicated - INCLUDING the centring. A lone expanded card is
+// the whole list, so it sits in the middle of the list area; a mixed layout keeps
+// its top alignment, because there the stack itself is the rhythm.
+function rowYAt(c, pos, n, e, rowH, avail) {
+  if (e <= 0) return c.SESSION_ROW_Y0 + pos * (rowH + c.SESSION_ROW_GAP);
+  if (pos === 0) return n === 1 ? c.SESSION_ROW_Y0 + Math.trunc((avail - e) / 2)
+                               : c.SESSION_ROW_Y0;
+  return c.SESSION_ROW_Y0 + e + c.SESSION_ROW_GAP +
+         (pos - 1) * (rowH + c.SESSION_ROW_GAP);
 }
 // sessionExpPromptLines(), replicated: every SESSION_LINE_H above the packed
 // minimum buys one more prompt line, up to the field's own byte cap.
@@ -583,15 +593,28 @@ for (const b of [1, 2]) {
               `${strip ? "strip " : ""}${n} session(s): expanded ${e} + ${n - 1}x${rowH} + ${n - 1} gaps = ${used} <= avail ${avail} (${avail - used} left)`);
           chk(e >= c.SESSION_EXP_MIN_H && e <= c.SESSION_EXP_MAX_H,
               `${strip ? "strip " : ""}${n}: expanded ${e} inside [${c.SESSION_EXP_MIN_H}, ${c.SESSION_EXP_MAX_H}]`);
-          // THE ROW STACK IS CONTIGUOUS, which is what the touch hit test walks:
-          // sessionRowYAt(pos) + sessionRowHAt(pos) + GAP == sessionRowYAt(pos+1).
-          let yy = c.SESSION_ROW_Y0;
+          // THE ROW STACK, walked exactly as sessionRowYAt() lays it out - which is
+          // also what the touch hit test walks, so this is the assertion that says a
+          // tap and a card cannot disagree about where a row is.
           for (let pos = 0; pos < n; pos++) {
+            const yy = rowYAt(c, pos, n, e, rowH, avail);
             const h = pos === 0 ? e : rowH;
-            if (pos === n - 1)
-              chk(yy + h <= c.SESSION_ROW_Y0 + avail,
-                  `${strip ? "strip " : ""}${n}: last row ends ${yy + h - 1}, inside the list area ending ${c.SESSION_ROW_Y0 + avail - 1}`);
-            yy += h + c.SESSION_ROW_GAP;
+            chk(yy >= c.SESSION_ROW_Y0 && yy + h <= c.SESSION_ROW_Y0 + avail,
+                `${strip ? "strip " : ""}${n}: row ${pos} ${yy}..${yy + h - 1} inside the list area ${c.SESSION_ROW_Y0}..${c.SESSION_ROW_Y0 + avail - 1}`);
+            if (pos > 0)
+              chk(yy === rowYAt(c, pos - 1, n, e, rowH, avail) +
+                        (pos === 1 ? e : rowH) + c.SESSION_ROW_GAP,
+                  `${strip ? "strip " : ""}${n}: row ${pos} starts exactly one gap below row ${pos - 1}`);
+          }
+          // A LONE expanded card is CENTRED, and the two margins are asserted equal
+          // to within the odd pixel - "card, then 198px of nothing" is what the
+          // centring exists to remove, so the number is checked rather than trusted.
+          if (n === 1) {
+            const yy = rowYAt(c, 0, 1, e, rowH, avail);
+            const above = yy - c.SESSION_ROW_Y0;
+            const below = c.SESSION_ROW_Y0 + avail - (yy + e);
+            chk(Math.abs(above - below) <= 1,
+                `${strip ? "strip " : ""}1 session: the lone card is centred - ${above}px above, ${below}px below`);
           }
           for (const [lbl, have] of HAVE) {
             const bands = expBands(b, c, e, have);
@@ -724,36 +747,15 @@ for (const b of [1, 2]) {
       `widest wrapped lane ${widestLane}px = ${Math.floor(widestLane / 6)} Cozette chars, inside drawWrappedText's 63-char buffer`);
 
   // ---- the detail card ----
-  // EVERYTHING FROM HERE DOWN IS STILL MEASURED AT BOARD 1'S TYPE SCALE, and that
-  // is a deliberate, temporary boundary rather than an oversight. The row list
-  // above was re-derived for board 2's 16px line; the detail card, the ask screen
-  // and the voice panel are the NEXT task's surface, and their offsets are still
-  // Cozette-derived literals in the header (an 11px prompt line, a 13px step).
-  // Converting only the measurement here would report those constants' own staleness
-  // as failures of this task's diff, so the numbers are PRINTED instead - which
-  // keeps the finding visible without either hiding it or blocking on it. The one
-  // that matters is named below.
+  // THE DETAIL CARD, now measured at each board's OWN type scale - the boundary this
+  // file used to draw here (everything below still Cozette-measured, with the
+  // findings printed) is gone, because the card's cursor is no longer stepped in
+  // Cozette literals. Every step comes from DETAIL_NAME_H / DETAIL_LINE_H /
+  // DETAIL_TEXT_LINE_H / DETAIL_AIR, and the band walk below is what proves the
+  // steps are big enough for the ink they carry. It reproduces board 1's own
+  // documented worst case (+213) exactly, which is the evidence that the model is
+  // the device's and not a paraphrase of it.
   const cardY = c.DETAIL_CARD_Y, A = c.DETAIL_AIR, maxW = c.CARD_W - 2 * c.PAD;
-  // The counted LANES here are now measured at the board's own advance (see
-  // perLine below, and DETAIL_PROMPT_LINES in board_es3c35p.h, both re-derived).
-  // What is still board-1 scale is the running cursor's own STEPS - `11` for a
-  // text line, `13` for a label, `26` for the name - and that is a LIVE board-2
-  // defect rather than a stale comment, so it is printed with its numbers instead
-  // of being left for someone to rediscover: at a 16px face an 11px step means each
-  // wrapped line's opaque box erases the previous line's descenders, and the name
-  // is drawn at font 4 = Spleen 32x64 into a 34px slot. Fixing it properly is a
-  // re-derivation of this whole card (measured: ~360px at 16px steps and 8px air
-  // against DETAIL_CARD_H's own 328 ceiling, or 326 at DETAIL_AIR 4 with the name
-  // on T_HEAD), which no task in this plan owns - so it is stated, not silently
-  // converted inside a sessions-list diff.
-  for (const [fld, step, id] of [["wrapped text line", 11, T_META],
-                                 ["label -> value", 13, T_META],
-                                 ["name", 26 + A, T_HERO]]) {
-    const need = fld === "name" ? lineHB(b, id) : ascentB(b, id);
-    if (need > step)
-      console.log(`    [not re-derived] detail card's ${fld} step ${step} < the ${need}px it needs ` +
-                  `(${UI[b][id].face}${fld === "name" ? " cell" : " ascent"}) - overdrawn by ${need - step}px`);
-  }
   chk(2 + c.MSG_BTN_H <= c.DETAIL_CARD_DY,
       `TYPE chip +2..+${2 + c.MSG_BTN_H - 1} in the header row clears the card at +${c.DETAIL_CARD_DY}`);
   chk(c.MSG_BTN_H + 2 <= c.DETAIL_HEAD_H,
@@ -771,29 +773,77 @@ for (const b of [1, 2]) {
       `"< Back" starts +${c.DETAIL_BACK_Y}, clear of the header row's top`);
   chk(c.DETAIL_BACK_Y + lineH(T_BODY) <= c.DETAIL_HEAD_H,
       `"< Back" at +${c.DETAIL_BACK_Y} inks to +${c.DETAIL_BACK_Y + lineH(T_BODY) - 1}, inside the header band`);
-  // The running cursor in drawSessionDetail, worst case: title AND last prompt
-  // both present. Every advance is board 1's own number plus DETAIL_AIR.
-  let cy = 6 + A;
-  const steps = [
-    ["name", 26 + A], ["title", 15 + A], ["pill", 24 + A], ["rule", 7 + A],
-    ["PROMPT label", 13], ["prompt text", c.DETAIL_PROMPT_LINES * 11 + 2 + A], ["rule", 7 + A],
-    ["PATH label", 13], ["path text", c.DETAIL_PATH_LINES * 11 + 2 + A],
-    ["col labels", 12], ["col values", 18 + A], ["col labels", 12],
-  ];
-  for (const [n, d] of steps) { console.log(`    detail +${String(cy).padStart(3)} ${n}`); cy += d; }
-  const inkEnd = cy + lineHB(b, T_BODY) - 1;   // the board's own cell, not board 1's
-  console.log(`    detail +${cy} last values row, inking to +${inkEnd}`);
+  // ---- THE RUNNING CURSOR AS A BAND WALK, worst case (title AND last prompt) ----
+  // The name's band is the FONT'S OWN CELL, not DETAIL_NAME_H, so a name font that
+  // disagrees with the ink height it is stepped by is caught by the walk as well as
+  // by the identity below it - which is exactly what board 2 shipped: rung 4
+  // (Spleen 32x64) stepped by 34, so a 64-row box swallowed the title and the pill.
+  // Range-checked BEFORE it indexes the registry, for the reason
+  // SESSION_NAME_TOP_RUNG already documents: an out-of-range id reaches
+  // UI[b][undefined] and CRASHES this checker, which geom-sweep.mjs scores as
+  // "caught" while reporting it as a crash - and a crash names no assertion.
+  const NFok = c.DETAIL_NAME_FONT >= 1 && c.DETAIL_NAME_FONT <= 4;
+  chk(NFok, `DETAIL_NAME_FONT ${c.DETAIL_NAME_FONT} is a font id the registry has (1..4)`);
+  const NF = NFok ? c.DETAIL_NAME_FONT : T_BODY;
+  const LBLH = lineHB(b, T_META), BODYH = lineHB(b, T_BODY);
+  chk(lineHB(b, NF) === c.DETAIL_NAME_H,
+      `DETAIL_NAME_FONT ${NF} (${UI[b][NF].face}, ${lineHB(b, NF)}px) IS the ${c.DETAIL_NAME_H}px band it is stepped by`);
+  // A label and its value, or two wrapped lines, are drawn one INTERNAL step apart
+  // inside a single block, and drawString paints a box ascent+descent tall - so the
+  // requirement there is the ASCENT (all non-descender ink survives), not the cell.
+  // Board 1's 11px wrapped step against Cozette's 11px ascent is exactly that, and
+  // is why it has always looked right there while 11 would have eaten Spleen's ink.
+  const asc = ascentB(b, T_META);
+  for (const [nm, step] of [["wrapped text line", c.DETAIL_TEXT_LINE_H],
+                            ["label -> its value", c.DETAIL_LBL_STEP],
+                            ["column label -> its value", c.DETAIL_COL_LBL_STEP]])
+    chk(step >= asc,
+        `detail ${nm} step ${step} >= the ${asc}px ascent of ${UI[b][T_META].face} (cell ${LBLH})`);
+  // Blocks, each [name, first ink row, last ink row]. A wrapped block spans its
+  // label through its last line's cell; a column pair spans its labels through its
+  // values' cell. Steps are the DERIVED ones, read from the constant table.
+  const blk = [];
+  let cy = c.DETAIL_PAD_Y, top;
+  const textInk = (t, n) => t + (n - 1) * c.DETAIL_TEXT_LINE_H + LBLH - 1;
+  blk.push(["name", cy, cy + lineHB(b, NF) - 1]);            cy += c.DETAIL_NAME_STEP;
+  blk.push(["title", cy, cy + BODYH - 1]);                   cy += c.DETAIL_TITLE_STEP;
+  blk.push(["pill", cy, cy + 17]);                           cy += c.DETAIL_PILL_STEP;
+  blk.push(["rule", cy, cy]);                                cy += c.DETAIL_RULE_STEP;
+  top = cy; cy += c.DETAIL_LBL_STEP;
+  blk.push([`LAST PROMPT + ${c.DETAIL_PROMPT_LINES} lines`, top, textInk(cy, c.DETAIL_PROMPT_LINES)]);
+  cy += c.DETAIL_PROMPT_LINES * c.DETAIL_TEXT_LINE_H + 2 + A;
+  blk.push(["rule", cy, cy]);                                cy += c.DETAIL_RULE_STEP;
+  top = cy; cy += c.DETAIL_LBL_STEP;
+  blk.push([`PATH + ${c.DETAIL_PATH_LINES} lines`, top, textInk(cy, c.DETAIL_PATH_LINES)]);
+  cy += c.DETAIL_PATH_LINES * c.DETAIL_TEXT_LINE_H + 2 + A;
+  top = cy; cy += c.DETAIL_COL_LBL_STEP;
+  blk.push(["MODEL / GIT BRANCH", top, cy + BODYH - 1]);      cy += c.DETAIL_COL_VAL_STEP;
+  top = cy; cy += c.DETAIL_COL_LBL_STEP;
+  blk.push(["STARTED / AGENT", top, cy + BODYH - 1]);
+  for (const [nm, a, z] of blk) console.log(`    detail +${String(a).padStart(3)}..+${String(z).padStart(3)} ${nm}`);
+  for (let i = 1; i < blk.length; i++)
+    chk(blk[i][1] - blk[i - 1][2] - 1 >= 0,
+        `detail ${blk[i - 1][0]} -> ${blk[i][0]}: gap ${blk[i][1] - blk[i - 1][2] - 1}`);
+  const inkEnd = blk[blk.length - 1][2];
   chk(inkEnd <= c.DETAIL_CARD_H - 3,
       `detail content ends +${inkEnd}, clear of the 2px border at +${c.DETAIL_CARD_H - 2}..+${c.DETAIL_CARD_H - 1} (${c.DETAIL_CARD_H - 2 - inkEnd - 1} rows of slack)`);
-  // BOTH of these are MC_DATUM, so the y given is the CENTRE - getting that wrong
-  // is what hid board 1's collision here for as long as it has existed.
-  const half = Math.floor(lineHB(b, T_META) / 2);
-  const answerInk = cardY + c.DETAIL_CARD_H + 8 + half;
-  const hintTop = contentBottom - 10 - half;
-  m = `"answer on your Mac" ends ${answerInk} above the history hint at ${hintTop}`;
-  chk(answerInk < hintTop, `${m}..${hintTop + lineHB(b, T_META) - 1}`, isKnown(b, m));
-  chk(hintTop + lineHB(b, T_META) - 1 < contentBottom,
-      `history hint ends ${hintTop + lineHB(b, T_META) - 1} inside contentBottom ${contentBottom}`);
+  // ---- THE TWO FOOTER STRINGS, measured as BOXES rather than baselines ----
+  // Both are MC_DATUM T_META. drawString centres on the ASCENT (poY -= ascent/2 on
+  // the baseline it just added) and then paints a box ascent+descent tall, so a
+  // string drawn at y inks rows y - ascent/2 .. y - ascent/2 + cell - 1. Measuring
+  // the baseline instead under-reported the answer line's bottom by 3px on board 2
+  // and put DETAIL_CARD_H's documented ceiling 3px low.
+  const mcBox = (y) => { const t = y - Math.floor(asc / 2); return [t, t + LBLH - 1]; };
+  const [answerTop, answerBot] = mcBox(cardY + c.DETAIL_CARD_H + 8);
+  const [hintTop, hintBot] = mcBox(contentBottom - 10);
+  m = `"answer on your Mac" ends ${answerBot} above the history hint at ${hintTop}`;
+  chk(answerBot < hintTop, `${m}..${hintBot} (box ${answerTop}..${answerBot})`, isKnown(b, m));
+  // The largest card that still clears the hint, printed because it is the number
+  // the header's own comment quotes and it was wrong by 3.
+  console.log(`    largest DETAIL_CARD_H that clears the hint: ${hintTop - 1 - (answerBot - c.DETAIL_CARD_H)}` +
+              ` (this board: ${c.DETAIL_CARD_H})`);
+  chk(hintBot < contentBottom,
+      `history hint ends ${hintBot} inside contentBottom ${contentBottom}`);
   chk(cardY + c.DETAIL_CARD_H <= contentBottom - 8,
       `detail card ends ${cardY + c.DETAIL_CARD_H - 1}, inside contentBottom ${contentBottom}`);
   // The two-column pairs (MODEL / GIT BRANCH, STARTED / AGENT). drawColValue()
