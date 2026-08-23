@@ -3180,7 +3180,11 @@ Other things that aren't obvious from a single file:
   tokens, and comments, plus the ladder code. Regenerate with
   `python3 bdf2gfx.py <bdf> <Name> <yAdvance> > <Name>.h`; the BDFs are **not** committed (Cozette
   667KB, Terminus 235KB) but the generated headers and both licence texts
-  (`licenses/Terminus-OFL.txt`, `licenses/Cozette-MIT.txt`) are.
+  (`licenses/Terminus-OFL.txt`, `licenses/Cozette-MIT.txt`) are. The same recipe vendored the three
+  Spleen faces for board 2's type scale (`Spleen8x16.h`/`Spleen12x24.h`/`Spleen32x64.h`, run with
+  yAdvance 16/24/64) — same rule, BDFs not committed (Spleen 8x16 154KB, 12x24 217KB, 32x64
+  682KB), only the generated headers and `licenses/Spleen-BSD-2-Clause.txt` are, and each was
+  passed through `--verify` against its own BDF before being trusted.
   `bdf2gfx.py --verify <bdf> <header>` decodes a header and compares it glyph-for-glyph with its
   source, and `--selftest` corrupts one byte of `A` and fails if that goes unnoticed — the same
   teeth-proving trick as `palette-check.mjs --selftest`. **Both need a BDF, and the BDFs are
