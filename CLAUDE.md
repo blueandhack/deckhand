@@ -19,7 +19,7 @@ that differs and why; this section is only how to build each.
 | serial | CH340, `/dev/cu.usbserial-*`, 11.5KB/s ceiling | native USB CDC, `/dev/cu.usbmodem*` |
 | mic / beeper | both fitted and working | codec present, **software path not written** |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
-| size today | flash 1382802, RAM 69236 | flash 892066, RAM 57860 |
+| size today | flash 1382802, RAM 69236 | flash 892898, RAM 57860 |
 
 **Board 1's binary is BYTE-IDENTICAL across the whole second-board port, and that is the check
 that kept the port honest** — 1382802 flash / 69236 RAM. It is not ceremony: it caught a real
@@ -189,13 +189,22 @@ echo "MICMON" > ~/.claude/deckhand-device-command  # live mic meter on the devic
 echo "MICREC" > ~/.claude/deckhand-device-command  # 4s one-shot capture (mu-law, known-good)
 echo "MICSTREAM" > ~/.claude/deckhand-device-command # stream until tapped (ADPCM, up to 120s)
 echo "COLORTEST" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: six labelled colour patches
+echo "SWAP 0" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: panel byte order, live
+echo "INV 1"  > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: display inversion, live
 echo "TEXTPROBE" > ~/.claude/deckhand-device-command # print the text-width table (both boards)
 ```
 
 `COLORTEST` and `TEXTPROBE` exist for the same reason `TAB`/`PAGE`/`KBTEST`/`EMOJITEST` do: the
 glass is otherwise unverifiable. `COLORTEST` in particular is the **only** instrument that can see
-board 2's panel byte order, because `SCREENSHOT` there reads the framebuffer rather than the panel
-— see the verification trap under Two boards.
+board 2's panel colour pipeline, because `SCREENSHOT` there reads the framebuffer rather than the
+panel — see the verification trap under Two boards.
+
+**`SWAP` and `INV` are the two runtime toggles that go with it, and using all three together is the
+documented way to diagnose a colour fault** — not reasoning from what the colours look like, which
+cost this repo three wrong fixes. `COLORTEST` names what each patch should be; `SWAP` flips the byte
+order; `INV` flips the display inversion. Four combinations, seconds each, against one build per
+guess otherwise. Neither toggle persists, deliberately: the answer belongs in the board header once
+it has been SEEN.
 
 The on-screen record button runs the STREAMING path (`micStream`), not `MICREC` - tap to start,
 tap to stop, up to 120s. `MICREC` is the short one-shot fallback. Captures land
@@ -385,10 +394,34 @@ verification.**
 
 `SCREENSHOT` calls `readRect`, which on board 2 reads **the shadow framebuffer** — the same buffer
 the renderer just wrote. So a capture is **correct by construction even when the panel is wrong**,
-and every screenshot in this port looked perfect while the display was visibly wrong. The bug it
-hid: **the ST77922 wants RGB565 high byte first, and the framebuffer holds native little-endian**.
-Nobody found it by inspection; the user found it by looking at the device and saying "the colour is
-bad, green?".
+and every screenshot in this port looked perfect while the display was visibly wrong. Nobody found
+it by inspection; the user found it by looking at the device and saying "the colour is bad, green?".
+
+**THREE independent faults were behind that, on three separate axes, and it took four reports to
+resolve because every wrong combination looks identically like "the colours are broken".** Written
+out in full because the debugging method is the transferable part, not the values:
+
+| axis | was | is | why it was hard |
+|---|---|---|---|
+| pixel format | `COLMOD` = `0x01` | `0x55` (16bpp RGB565) | `0x01` is not a format on any ST77xx part; `0x55`/`0x66`/`0x77` are 16/18/24-bit. It was **overwriting** a correct value `esp_panel` had already set from `ESP_PANEL_BOARD_LCD_COLOR_BITS`. |
+| byte order | native little-endian | high byte first (`BOARD_PANEL_SWAP_BYTES 1`) | invisible to every instrument — see above |
+| inversion | `0x21` in the init table | `invertColor(true)` **after** `tft.init()` | the table sends `0x21` **before** `0x11` (SLPOUT), **and sleep-out clears the inversion state** — so the table stated it correctly and never delivered it |
+
+**That third row is the one to remember. An init sequence recovered from a binary preserves the
+vendor's command ORDER as faithfully as its values, and the order can be the bug.** `0x21` sat in
+the repo looking right for the entire port while doing nothing whatsoever, which is why the symptom
+kept getting mis-attributed to the two axes that *were* visible in the diff.
+
+**How it was actually resolved, after three failed guesses:** a labelled test pattern plus a runtime
+toggle on each axis. Guessing from a colour name cost three reflashes; `COLORTEST` with `SWAP 0|1`
+and `INV 0|1` settled it in one. **Reach for those first.** The decisive observation was
+**WHITE rendering as BLACK** — no byte order and no channel permutation can produce it, only
+inversion can, so that single patch separates the inversion axis from the other two. And the
+clincher was the user reporting that *only the runtime* `INV 1` worked: identical setting, different
+delivery, which is what pointed at SLPOUT.
+
+Do **not** "fix" the inversion back to `0x20`/INVOFF. It was tried, on hardware: every colour came
+back as its exact complement. This panel is natively inverted and requires INVON.
 
 The signature is exact and worth memorising, because it identifies the fault and rules out its
 neighbour: **blue `0x001F` byte-swaps to `0x1F00`, a dark GREEN**, and red `0xF800` to `0x00F8`, a
@@ -403,13 +436,18 @@ are the ones a person looked at.
 
 **`COLORTEST` is the instrument that can see it** (board-2-only, via the command-trigger file). Six
 patches, each **labelled in black with the colour it is supposed to be**, so the check is one glance
-and the answer is one word: if the patch under `RED` is not red, the panel's byte order disagrees
-with `BOARD_PANEL_SWAP_BYTES`. Red/green/blue carry the rotation above; **white and black are the
+and the answer is one word: if the patch under `RED` is not red, one of the three axes above
+disagrees with the board header. Pair it with `SWAP 0|1` and `INV 0|1`, which flip the byte order
+and the inversion at runtime — four combinations reachable in seconds, where settling them by
+reflashing costs one build per guess. Neither is persisted on purpose: the answer belongs in the
+board header once someone has SEEN it, not in NVS where it would silently disagree with the header
+the next reader trusts. Red/green/blue carry the rotation above; **white and black are the
 control**, invariant under both faults. It is guarded to board 2 because the question cannot arise
 without a framebuffer, `palette-check.mjs` already covers board 1 offline, and compiling it on
 board 1 cost 692 bytes and broke the byte-identity this port held through every task.
 
-**The fix swaps in `flush()`'s strip copy, NOT in storage**, and that placement is the design.
+**The byte-order half of the fix swaps in `flush()`'s strip copy, NOT in storage**, and that
+placement is the design.
 Native order in the framebuffer is what lets blending, the AA coverage arithmetic and `readRect`
 all work in ordinary RGB565 with no unswapping anywhere — the panel's byte order stays confined to
 one loop. Cost: a per-pixel loop instead of a `memcpy`, on the flush path only.

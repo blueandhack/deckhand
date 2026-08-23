@@ -79,6 +79,13 @@ typedef struct {                 // per font
 #define TFT_BLACK 0x0000
 #define TFT_WHITE 0xFFFF
 
+// RUNTIME-SWITCHABLE, because the panel's byte order cannot be settled by
+// reasoning and a screenshot cannot see it: readRect reads this framebuffer, so a
+// capture is correct whichever order the panel got. Making it a variable rather
+// than only a compile-time flag turns "flash, look, flash again" into one flash
+// and two glances - see the SWAP command. BOARD_PANEL_SWAP_BYTES is the default.
+extern bool panelSwapBytes;
+
 class PanelShim {
 public:
   void init();                       // panel bring-up + framebuffer alloc
@@ -190,6 +197,13 @@ private:
   int _dirtyX0 = 0, _dirtyY0 = 0, _dirtyX1 = -1, _dirtyY1 = -1;
 
   esp_panel::board::Board*      _board = nullptr;
+ public:
+  // Display-side inversion, exposed because the INV command needs it and the LCD
+  // handle is private to this class. Returns false if the driver refuses or the
+  // panel is not up, so the caller can say so rather than reporting a success it
+  // did not get.
+  bool invertColor(bool en);
+ private:
   esp_panel::drivers::LCD*      _lcd = nullptr;
   esp_panel::drivers::Backlight* _backlight = nullptr;
 };

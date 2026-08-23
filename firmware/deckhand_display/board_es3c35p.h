@@ -74,6 +74,20 @@
 // Board 1 writes its panel directly through TFT_eSPI and never sees this.
 #define BOARD_PANEL_SWAP_BYTES 1
 
+// This panel is NATIVELY INVERTED: it needs display-inversion ON to look normal,
+// proved by turning it off - every colour came back as its exact complement
+// (WHITE black, GREEN purple, BLUE yellow) and turning it back on fixed it.
+//
+// It is applied in PanelShim::begin() and NOT left to the init table, because the
+// table cannot deliver it. The recovered vendor sequence sends 0x21 (INVON)
+// BEFORE 0x11 (SLPOUT), and sleep-out resets the inversion state - so the setting
+// is wiped microseconds after being made. That is why the table entry looked
+// correct for the whole port and never did anything, and why a runtime
+// `INV 1` was the only thing that ever fixed the screen. An init table recovered
+// from a binary preserves the vendor's ORDER as faithfully as its values, and the
+// order can be the bug.
+#define BOARD_PANEL_INVERT 1
+
 // ---- LCD: ST77922, 320x480, QSPI. Panel reset is tied to chip EN (no GPIO). --
 #define PIN_LCD_CS        10
 #define PIN_LCD_SCK       12

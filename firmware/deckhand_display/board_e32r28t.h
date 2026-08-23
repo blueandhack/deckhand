@@ -31,6 +31,8 @@
 // handles its own byte order - so there is nothing to swap. Named here anyway so
 // the two board headers answer the same questions.
 #define BOARD_PANEL_SWAP_BYTES 0
+// TFT_eSPI owns this board's inversion via its own init; nothing here applies it.
+#define BOARD_PANEL_INVERT 0
 
 // If the layout renders sideways/upside down on your unit, try 0/1/2/3 here.
 #define SCREEN_ROTATION 0

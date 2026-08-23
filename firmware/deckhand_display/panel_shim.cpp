@@ -81,6 +81,7 @@ void PanelShim::init() {
 
   Serial.printf("PANEL: LCD up, frame %dx%d\n", _lcd->getFrameWidth(), _lcd->getFrameHeight());
 
+
   // Full brightness now, unconditionally - Task 9 is where the UI's own
   // brightness setting (power.ino, LEDC on board 1) gets a board-2 home.
   // Without this the panel would be correctly driven and still look dead,
@@ -292,6 +293,15 @@ void PanelShim::writecommand(uint8_t /*c*/) {
 // strip's memcpy could race the DMA engine still reading the previous one.
 #define FLUSH_STRIP_LINES 32
 
+// Display-side inversion. Independent of panelSwapBytes: one is what the panel
+// does to the value it decoded, the other is how it decoded the bytes, and this
+// panel shipped with BOTH wrong - which is why they are both switchable at
+// runtime rather than only settable in the init table.
+bool PanelShim::invertColor(bool en) {
+  if (!_lcd) return false;
+  return _lcd->invertColor(en);
+}
+
 void PanelShim::flush() {
   if (!_fb || !_lcd || !_stripBuf) return;
   if (_dirtyX1 < _dirtyX0) return;   // nothing dirty
@@ -314,15 +324,14 @@ void PanelShim::flush() {
     for (int r = 0; r < lines; r++) {
       const uint16_t* src = _fb + (size_t) (y + r) * PANEL_PHYS_W + x0;
       uint16_t* dst = _stripBuf + (size_t) r * w;
-#if BOARD_PANEL_SWAP_BYTES
       // Byte-swap on the way out, not in storage. Keeping the framebuffer in
       // native order is what lets every drawing path - blending, readRect, the
       // AA coverage maths - work in ordinary RGB565 without unswapping first,
       // and confines the panel's byte order to this one loop.
-      for (int c = 0; c < w; c++) dst[c] = (uint16_t) ((src[c] >> 8) | (src[c] << 8));
-#else
-      memcpy(dst, src, (size_t) w * 2);
-#endif
+      if (panelSwapBytes)
+        for (int c = 0; c < w; c++) dst[c] = (uint16_t) ((src[c] >> 8) | (src[c] << 8));
+      else
+        memcpy(dst, src, (size_t) w * 2);
     }
     if (!_lcd->drawBitmap(x0, y, w, lines, (const uint8_t*) _stripBuf, -1)) {
       Serial.printf("PANEL: drawBitmap failed at y=%d\n", y);

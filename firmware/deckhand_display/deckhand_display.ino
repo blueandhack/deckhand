@@ -443,6 +443,16 @@ unsigned long lastNonIdleMillis = 0;
 
 
 
+// The panel's byte order, seeded from the board header and switchable at runtime
+// by the SWAP command. DEFINED HERE rather than in panel_shim.cpp because
+// board_es3c35p.h is not self-contained - it derives constants from the art
+// headers (CRAB_H and friends), so it can only be included from the sketch's own
+// include chain, and the shim's TU deliberately knows nothing about which board
+// it serves. Guarded so board 1 does not gain a byte it has no use for.
+#if !BOARD_USES_TFT_ESPI
+bool panelSwapBytes = BOARD_PANEL_SWAP_BYTES;
+#endif
+
 // ---------- Screen orientation ----------
 // 180-degree flip, so the USB-C port can face the other way while charging
 // without the display being upside down. Rotation 0 and 2 are both portrait, so
@@ -3974,6 +3984,17 @@ void setup() {
   setupBLE();
 
   tft.init();
+#if BOARD_PANEL_INVERT
+  // AFTER init, and that ordering is the entire fix. This panel is natively
+  // inverted, and the init table's own 0x21 (INVON) sits BEFORE 0x11 (SLPOUT) -
+  // sleep-out clears the inversion state, so the table states this correctly and
+  // never delivers it. For the whole port the screen showed every colour as its
+  // complement while a register table that looked right sat in the repo. Applying
+  // it here is the same call the INV command makes, which is the call a person
+  // confirmed on the glass.
+  if (!tft.invertColor(true))
+    Serial.println("PANEL: invertColor(true) FAILED - every colour will be complemented");
+#endif
   tft.setRotation(SCREEN_ROTATION);
   tft.fillScreen(COLOR_BG);
 
@@ -4198,6 +4219,43 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     int pg = buf.substring(5).toInt();
     if (currentTab == TAB_SETTINGS) gotoSettingsPage(pg);
 #if !BOARD_USES_TFT_ESPI
+  } else if (buf.startsWith("INV ")) {
+    // Runtime display-inversion toggle, for the same reason SWAP exists: nothing
+    // on the Mac can see the panel, so the only way to settle a display-side
+    // transform is a person looking while it flips. Inversion and byte order are
+    // INDEPENDENT and each one alone makes the screen look simply "wrong", which
+    // is exactly why they were hard to separate - so both need to be switchable
+    // together or you are still guessing on two axes at once.
+    // Not persisted, for the same reason: the answer belongs in the init table
+    // once it has been SEEN, not in NVS where it would silently disagree with the
+    // sequence the next reader trusts.
+    {
+      bool on = (buf.charAt(4) != '0');
+      if (tft.invertColor(on)) {
+        forceFullRepaint();
+        Serial.printf("INV now %d. The init table sends INVON (0x21), which this panel "
+                      "REQUIRES - it is natively inverted, and INV 0 makes every colour its "
+                      "complement. Verified on hardware; see st77922_init_cmds.h.\n", (int) on);
+      } else {
+        Serial.println("INV: no LCD handle, or invertColor() refused");
+      }
+    }
+  } else if (buf.startsWith("SWAP ")) {
+    // Flip the panel byte order at RUNTIME. This exists because the question
+    // "which order does this panel want?" is not answerable from the Mac at all:
+    // readRect reads the shadow framebuffer, so a SCREENSHOT is correct whichever
+    // order the panel actually received, and the only instrument is a person
+    // looking at the glass. Without this, settling it costs one compile-and-flash
+    // per guess; with it, one flash answers both.
+    // Not persisted on purpose - the right answer belongs in
+    // BOARD_PANEL_SWAP_BYTES once someone has SEEN it, not in NVS where it would
+    // silently diverge from the header the next reader trusts.
+    panelSwapBytes = (buf.charAt(5) != '0');
+    forceFullRepaint();
+    Serial.printf("SWAP now %d (%s). Header default is %d - if this is the one that "
+                  "looks right, change BOARD_PANEL_SWAP_BYTES to match.\n",
+                  (int) panelSwapBytes, panelSwapBytes ? "high byte first" : "native LE",
+                  BOARD_PANEL_SWAP_BYTES);
   // BOARD 2 ONLY, deliberately. The question this answers - does the framebuffer's
   // byte order match the panel's - cannot arise on a board that has no
   // framebuffer, and board 1's palette is already checked offline by
@@ -4236,9 +4294,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
 #if !BOARD_USES_TFT_ESPI
     tft.flush();
 #endif
-    Serial.printf("COLORTEST drawn (BOARD_PANEL_SWAP_BYTES=%d). Each patch is labelled with the "
-                  "colour it should be; a mismatch means the panel byte order disagrees. "
-                  "Tap or switch tabs to leave.\n", BOARD_PANEL_SWAP_BYTES);
+    Serial.printf("COLORTEST drawn (swap=%d live, header default %d). Each patch is labelled "
+                  "with the colour it SHOULD be. Try `SWAP 0` and `SWAP 1` and say which one "
+                  "matches - that is the whole measurement. Tap or switch tabs to leave.\n",
+                  (int) panelSwapBytes, BOARD_PANEL_SWAP_BYTES);
 #endif
   } else if (buf == "SCREENSHOT") {
     // Reads the panel back and ships it as base64 RGB565. Readback was assumed

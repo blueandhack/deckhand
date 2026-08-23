@@ -9,6 +9,39 @@
  * CASET 0..0x13F (320) and RASET 0..0x1DF (480).
  *
  * Entries whose data was all zeros lived in .bss and are reconstructed as zeros.
+ *
+ * ONE ENTRY IS DELIBERATELY NOT WHAT THE VENDOR BINARY HELD. COLMOD (0x3A) is
+ * 0x55 here, 16bpp RGB565; the recovered table had 0x01, which is not a pixel
+ * format on any ST77xx part - 0x55/0x66/0x77 are the 16/18/24-bit values. It
+ * matters because this table is applied AFTER esp_panel has already configured
+ * RGB565 from ESP_PANEL_BOARD_LCD_COLOR_BITS, so a wrong value here STOMPS a
+ * correct one, and the symptom was a UI whose colours were wrong in a way no
+ * byte-order change could fix.
+ * 0x21 (INVON) IS CORRECT AND MUST STAY. This panel is natively inverted, so
+ * inversion ON is what makes it display normally - proved by turning it off:
+ * with INVOFF and the byte order already right, every colour came back as its
+ * exact complement (WHITE black, GREEN purple, BLUE yellow), and INVON restored
+ * it. Do not "fix" this to 0x20; it was tried, on hardware, and it is wrong.
+ * That experiment is the reason this paragraph exists rather than a bare value.
+ *
+ * The colour fault here was COLMOD alone, and it was hard to see precisely
+ * BECAUSE INVON is required: a wrong pixel format and a correct inversion
+ * together produce a screen that is merely "wrong", which invites blaming the
+ * inversion. WHITE rendering as BLACK is the one observation that separates them,
+ * since no byte order or channel permutation can produce it - only inversion can,
+ * and if inversion is supposed to be on then seeing it means something else is
+ * cancelling it.
+ * The other half of the fix is not in this file: BOARD_PANEL_SWAP_BYTES 1 in
+ * board_es3c35p.h, because the panel reads our little-endian framebuffer
+ * high-byte-first. COLMOD, byte order and inversion are three independent axes
+ * and two were wrong; SWAP and INV exist as runtime commands so the next person
+ * can separate them in seconds instead of one reflash per guess.
+ *
+ * The general point, for the next person tempted to defer to this table: it was
+ * reverse-engineered out of a binary and some of it was reconstructed from .bss.
+ * Where it disagrees with the datasheet about a register whose meaning is
+ * standard, check it on the glass. Two entries have now turned out wrong (the
+ * CASET/RASET geometry above, and COLMOD) and one that LOOKS wrong is right.
  */
 #pragma once
 
@@ -70,11 +103,11 @@
         {0xD0, (uint8_t []){0x00}, 1, 0},                                                               \
         {0x2A, (uint8_t []){0x00, 0x00, 0x01, 0x3F}, 4, 0},                                             \
         {0x2B, (uint8_t []){0x00, 0x00, 0x01, 0xDF}, 4, 0},                                             \
-        {0x21, (uint8_t []){0x00}, 0, 0},                                                               \
+        {0x21, (uint8_t []){0x00}, 0, 0},  /* INVON - REQUIRED, see header */          \
         {0x11, (uint8_t []){0x00}, 0, 120},                                                             \
         {0x29, (uint8_t []){0x00}, 0, 0},                                                               \
         {0x2C, (uint8_t []){0x00}, 0, 0},                                                               \
-        {0x3A, (uint8_t []){0x01}, 1, 0},                                                               \
+        {0x3A, (uint8_t []){0x55}, 1, 0},  /* COLMOD 16bpp RGB565 - see header */      \
         {0x36, (uint8_t []){0x00}, 1, 0},                                                               \
         {0x35, (uint8_t []){0x01}, 1, 20},                                                              \
     }
