@@ -1945,13 +1945,19 @@ bool drawBigNumber(char* cache, size_t cacheSize, const char* text, int x, int y
   cache[cacheSize - 1] = '\0';
   tft.fillRect(x, y, w, h, bg);
   setUIFont(4);
-  // CARD_HERO_SIZE, not a literal 3: this is the one element the 320x480 board
-  // scales UP (x3 -> x4), because Cozette at an integer size is exact and at x3
-  // the hero would be physically SMALLER on the bigger panel - see the
-  // derivation in board_es3c35p.h. Cozette 6x13 at x3 is 18x39, at x4 24x52.
+#if BOARD_USES_TFT_ESPI
+  // CARD_HERO_SIZE, not a literal 3: board 1's T_HERO registry entry is
+  // Cozette6x13 at size 2 (see UI_FONTS above), and this overrides it up one
+  // more mechanical step to size 3 - the one element board 1 scales beyond
+  // its own registry, because Cozette at an integer size is exact and x2
+  // alone reads small against this card. Cozette 6x13 at x3 is 18x39.
   // Sole caller is renderCard(), so this reads the card's own constant rather
   // than taking another argument.
   tft.setTextSize(CARD_HERO_SIZE);
+#endif
+  // Board 2 has NO override here: its T_HERO registry entry is already
+  // Spleen32x64 at native size 1 (see UI_FONTS above), so setUIFont(4) alone
+  // leaves the hero at its real 64px cell - no further scaling exists to do.
   tft.setTextColor(fg, bg);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(text, x, y);

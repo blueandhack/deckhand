@@ -31,6 +31,44 @@ import { consts, DIR, lineH, PANEL, preflight, textWidth } from "./geom-common.m
 import fs from "fs";
 preflight();
 
+// BOARD 2's T_BODY/T_META/T_HERO cell heights, from the interface the font-
+// registry task (Task 2) produced and this task consumes verbatim:
+// uiLineH(T_BODY) == 16, uiLineH(T_HERO) == 64. geom-common.mjs's font table
+// predates that swap - it still only knows Cozette/Terminus, one shared table
+// for both boards - so it cannot be asked for board 2's numbers; they are
+// named here instead of re-derived, the same way this file already treats
+// LOGO_SIZE as an external fact to read rather than compute.
+const BODY_H = { 1: 13, 2: 16 };
+
+// BOARD 2's hero, measured (not counted) from Spleen32x64.h directly, because
+// geom-common.mjs's textWidth() has no entry for that font (it was written
+// before board 2 had its own registry and this task's hero is its only
+// caller). Spleen is perfectly monospace - every one of its 95 glyphs
+// declares xAdvance == width and xOffset 0, verified below - so the same
+// "last character is xOffset+width, every other is xAdvance" rule
+// textWidth() applies degenerates to one number per glyph either way; this
+// still parses the real glyph table rather than hardcoding 32, so a
+// regenerated font that broke monospacing would be caught here rather than
+// silently trusted.
+function parseSpleen32x64() {
+  const src = fs.readFileSync(`${DIR}/Spleen32x64.h`, "utf8");
+  const gl = src.slice(src.indexOf("Glyphs[]"));
+  const rows = [...gl.matchAll(/\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\}/g)];
+  return rows.map(m => ({ w: +m[2], h: +m[3], xa: +m[4], xo: +m[5] }));
+}
+const SPLEEN32X64 = parseSpleen32x64();
+for (const g of SPLEEN32X64)
+  if (g.xo !== 0 || g.w !== g.xa) throw new Error("Spleen32x64 is no longer monospace - spleenHeroWidth() needs the real last-char rule");
+function spleenHeroWidth(s) {
+  let w = 0;
+  for (let i = 0; i < s.length; i++) {
+    const g = SPLEEN32X64[s.charCodeAt(i) - 0x20];
+    if (!g) continue;
+    w += (i === s.length - 1) ? (g.xo + g.w) : g.xa;
+  }
+  return w;
+}
+
 // LOGO_SIZE is a #define rather than a const int, so it is read from the art
 // header the same way settings-geom-check.mjs reads KB_MAX_BYTES out of the host -
 // from the file that owns it, not from a number copied over here.
@@ -131,26 +169,46 @@ for (const b of [1, 2]) {
   chk(c.CODEX_Y >= c.CARD2_Y + c.CARD_H, `gap card2->codex = ${c.CODEX_Y - (c.CARD2_Y + c.CARD_H)}`);
 
   // --- bands inside a Claude card, as CLEAR boxes ---
-  const heroSize = c.CARD_HERO_SIZE;
+  const heroSize = c.CARD_HERO_SIZE;              // board 1 only - undefined on board 2
+  const bodyH = BODY_H[b];                        // T_BODY/T_META cell height, this board
+  // Native height of the hero glyph itself (not CARD_HERO_H, the box it sits
+  // in): board 1 is Cozette pushed to CARD_HERO_SIZE, board 2 is the flat 64
+  // Task 2's interface promises (uiLineH(T_HERO) == 64, no size multiplier).
+  const heroGlyphH = b === 1 ? 13 * heroSize : 64;
+  const heroWidth = b === 1 ? textWidth("100%", 4, heroSize) : spleenHeroWidth("100%");
   const bands = [
     ["pin bar", c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
-    ["label", c.CARD_LABEL_Y, c.CARD_LABEL_Y + 12],
+    ["label", c.CARD_LABEL_Y, c.CARD_LABEL_Y + bodyH - 1],
     ["hero box", c.CARD_HERO_Y, c.CARD_HERO_Y + c.CARD_HERO_H - 1],
     ["pace bar clear", c.CARD_BAR_Y - 4, c.CARD_BAR_Y + c.BAR_H + 3],
-    ["stats clear", c.CARD_STATS_Y - 1, c.CARD_STATS_Y + 13],
-    ["foot clear", c.CARD_FOOT_Y - 1, c.CARD_FOOT_Y + 13],
+    ["stats clear", c.CARD_STATS_Y - 1, c.CARD_STATS_Y + bodyH],
+    ["foot clear", c.CARD_FOOT_Y - 1, c.CARD_FOOT_Y + bodyH],
   ];
   for (const [n, a, z] of bands) console.log(`    ${n.padEnd(15)} +${a}..+${z}`);
   const ceil = c.CARD_H - 3;
   const last = Math.max(...bands.map(x => x[2]));
+  // Every card field's clear box must end at or before the ceiling - this is
+  // already a whole-list check (bands.map), so it covers the hero, the pace
+  // bar and the stats/foot rows in one assertion rather than one apiece.
   chk(last <= ceil, `nothing on the card ends past +${ceil} (2px border owns +${c.CARD_H - 2}..+${c.CARD_H - 1}); last band ends +${last}`);
-  chk(c.CARD_LABEL_Y + 12 < c.CARD_HERO_Y, `label row +${c.CARD_LABEL_Y}..+${c.CARD_LABEL_Y + 12} clears the hero box starting +${c.CARD_HERO_Y}`);
+  chk(c.CARD_LABEL_Y + bodyH - 1 < c.CARD_HERO_Y, `label row +${c.CARD_LABEL_Y}..+${c.CARD_LABEL_Y + bodyH - 1} clears the hero box starting +${c.CARD_HERO_Y}`);
   chk(c.CARD_PIN_BAR_Y >= 2, `pin bar +${c.CARD_PIN_BAR_Y} is inside the interior (border owns +0..+1)`);
   chk(c.CARD_PIN_BAR_Y + 2 < c.CARD_LABEL_Y, `pin bar clears the icon below it`);
-  // hero glyph height
-  chk(13 * heroSize <= c.CARD_HERO_H, `hero glyph ${13 * heroSize}px fits the ${c.CARD_HERO_H}px box`);
-  chk(textWidth("100%", 4, heroSize) <= c.CARD_W - 2 * c.PAD,
-      `hero "100%" = ${textWidth("100%", 4, heroSize)}px inside the ${c.CARD_W - 2 * c.PAD}px lane`);
+  // hero glyph height, and its box against its two neighbours by name (the
+  // band-overlap loop below also catches this generically, but the hero is
+  // the one board-2 element whose size changed in this task, so it gets its
+  // own named assertions rather than resting entirely on the generic sweep)
+  chk(heroGlyphH <= c.CARD_HERO_H, `hero glyph ${heroGlyphH}px fits the ${c.CARD_HERO_H}px box`);
+  // Board 1 ONLY: the general band-overlap loop below already covers this
+  // pair for both boards, tolerating board 1's documented, pre-existing
+  // "hero box -> pace bar clear" overlap (KNOWN_OVERLAPS[1]) via `allow`. This
+  // is a plain hard assertion, so it is scoped to board 2 - the board this
+  // task's native hero actually changed - rather than re-litigating a board-1
+  // shortfall this task did not touch.
+  if (b === 2) chk(c.CARD_HERO_Y + c.CARD_HERO_H - 1 < c.CARD_BAR_Y - 4,
+      `hero box (ending +${c.CARD_HERO_Y + c.CARD_HERO_H - 1}) clears the pace bar's clear (starting +${c.CARD_BAR_Y - 4})`);
+  chk(heroWidth <= c.CARD_W - 2 * c.PAD,
+      `hero "100%" = ${heroWidth}px inside the ${c.CARD_W - 2 * c.PAD}px lane`);
   // band overlaps
   for (let i = 1; i < bands.length; i++) {
     const gap = bands[i][1] - bands[i - 1][2] - 1;
@@ -166,10 +224,13 @@ for (const b of [1, 2]) {
   }
   // --- Codex row bands ---
   const cb = [
-    ["text clear", c.CODEX_TEXT_Y - 1, c.CODEX_TEXT_Y + 13],
+    ["text clear", c.CODEX_TEXT_Y - 1, c.CODEX_TEXT_Y + bodyH],
     ["bar clear", c.CODEX_BAR_Y - 4, c.CODEX_BAR_Y + c.BAR_H + 3],
   ];
   for (const [n, a, z] of cb) console.log(`    codex ${n.padEnd(11)} +${a}..+${z}`);
+  // text and bar must share no row, and the row must end at or before +53
+  // (CODEX_H 56's 2px border owns +54..+55) - both already asserted, but
+  // named explicitly since this is the pair the brief calls out by number.
   chk(cb[0][2] < cb[1][1], `codex text clear ends +${cb[0][2]} before bar clear starts +${cb[1][1]}`);
   chk(cb[1][2] <= c.CODEX_H - 3, `codex content ends +${cb[1][2]} <= +${c.CODEX_H - 3} (border owns +${c.CODEX_H - 2}..+${c.CODEX_H - 1})`);
   chk(cb[0][1] >= 2, `codex text clear starts +${cb[0][1]} inside the interior`);

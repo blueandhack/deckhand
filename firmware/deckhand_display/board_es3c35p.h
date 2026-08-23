@@ -185,12 +185,14 @@
 // resolution on making text bigger than it needs to be. So the faces stay put
 // and the extra pixels become AIR and ROWS.
 //
-// The ONE exception is the hero percentage, and it is an exception because it
-// has a rung available: it is already Cozette drawn at an integer scale, so
-// going from x3 to x4 is exact rather than resampled. At x3 it would be 39px =
-// 6.0mm here against 6.9mm on board 1 - the tab's biggest number would be
-// PHYSICALLY SMALLER on the bigger screen. At x4 it is 52px = 8.0mm. See
-// CARD_HERO_SIZE.
+// The hero percentage no longer needs an exception here, now that board 2 has
+// its own native font registry (see UI_FONTS in deckhand_display.ino): T_HERO
+// is Spleen32x64 at size 1, so there is no scale factor left for this file to
+// argue about - CARD_HERO_SIZE is gone. At 64px that is 9.86mm, bigger than
+// board 1's 6.9mm hero (Cozette 6x13 pushed to size 3 - one step past its own
+// T_HERO registry entry, itself already size 2) rather than merely matching
+// it: Spleen's only rung above 12x24 is 32x64, and there is nothing between
+// them to land closer.
 
 // ---------- Chrome frame ----------
 // TOUCH FLOOR FIRST, because the tab bar's height is decided by it. Board 1's
@@ -211,10 +213,17 @@ const int TAB_BAR_H = 46;
 const int CONTENT_Y = TAB_BAR_H;
 // 20, up from 18, because T_BODY is now a 16px line and drawIfChanged clears
 // th + 2 = 18 rows - which fits an 18px band EXACTLY, with no room for the 1px
-// margin every other band in this file has. 20 gives the same 2px of slack the
-// 13px line had in 18. Costs 2px of content area (416 -> 414), which the usage
-// column absorbs: it ends at 454 against a contentBottom() that moves 462 -> 460,
-// so its clearance goes 8px -> 6px and it still does not end flush.
+// margin every other band in this file has. THIS DOES NOT GIVE THE BAND 2PX OF
+// SLACK, and an earlier version of this comment claimed it did: renderFooter()
+// draws at y = contentBottom() + 4, and drawIfChanged erases from y - 1, so the
+// clear reaches row contentBottom() + 4 - 1 + 18 - 1 = contentBottom() + 20 =
+// 480 - one row past the last valid pixel on this panel, silently clamped by
+// PanelShim::clipLogicalRect. The real margin is 0, i.e. FLUSH, exactly the old
+// 13px-line-in-an-18px-band case - this value is re-derived for the taller
+// line, not actually more generous than the one it replaces. Costs 2px of
+// content area (416 -> 414), which the usage column absorbs: it ends at 454
+// against a contentBottom() that moves 462 -> 460, so its clearance goes
+// 8px -> 6px and it still does not end flush.
 const int FOOTER_H = 20;
 
 // Unchanged at 40. The slot's width is set by what it holds - the dot + "REC"
@@ -285,76 +294,81 @@ const int CODEX_H = 56;                            // ends at 454, 8px clear
 // and the 2px border owns +102..+103, which read as a gap in the card outline
 // under exactly those two strings.
 //
+// RE-DERIVED FOR A NATIVE 64PX HERO. drawBigNumber() no longer scales its font
+// (the tft.setTextSize(CARD_HERO_SIZE) call in deckhand_display.ino is now
+// guarded to board 1 only): T_HERO on this board is Spleen32x64 at its own
+// native size 1, so the glyph is simply 64px tall with nothing to multiply.
+// T_BODY/T_META also grew under this same font swap - Spleen8x16 (uiLineH()
+// 16) against Cozette's 13 - so the label and stats/foot rows below are each
+// 3 rows taller than the derivation this replaces.
+//
 // THE TWO INVARIANTS, RE-DERIVED FOR CARD_H 164:
 //   1. The 2px border owns +162..+163, so NOTHING ON THIS CARD MAY END PAST
-//      +161. The last thing on it is CARD_FOOT_Y's clear box, ending +154 -
-//      7 rows clear. (Board 1: border +102..+103, ceiling +101, last clear
+//      +161. The last thing on it is CARD_FOOT_Y's clear box, ending +156 -
+//      5 rows clear. (Board 1: border +102..+103, ceiling +101, last clear
 //      ending exactly +101 with nothing to spare.)
-//   2. The label row is +6..+18 because the hero number's box starts at
-//      CARD_HERO_Y (+27) and clears from there across the full interior. The
-//      13px Cozette label and the 13px Mac icon both live in +6..+18, so the
-//      label row has 8 rows of clear air below it here where board 1 had 1.
+//   2. The label row is +6..+21 (Spleen8x16, 16px) and the hero box starts at
+//      +24 (CARD_HERO_Y) - 2 rows clear between them, so the label never
+//      touches the hero it sits above.
 //
 // The interior is +2..+161 = 160 rows. Exclusive content is 1 (the blank row at
-// +2) + 3 (pin bar) + 13 (label) + 54 (hero box) + 20 (bar clear) + 15 (stats
-// clear) + 15 (foot clear) = 121, leaving 39 rows of gap. Spent as a uniform 8
-// between all five bands with the 7 left over going under the last one, where
-// it doubles as the border's clearance:
+// +2) + 3 (pin bar) + 16 (label) + 65 (hero box) + 20 (bar clear) + 18 (stats
+// clear) + 18 (foot clear) = 141, leaving 19 rows of gap - the hero box alone
+// ate 11 of the 39 rows of gap the old, smaller hero left spare:
 //
 //   +0..+1    border
 //   +2        blank
 //   +3..+5    pin bar        (CARD_PIN_BAR_Y, 3 rows)
-//   +6..+18   label / icon   (CARD_LABEL_Y, Cozette 6x13 = 13, icon 13x13)
-//   +19..+26  gap 8
-//   +27..+80  hero box       (CARD_HERO_Y, CARD_HERO_H 54; the glyph is 52)
-//   +81..+88  gap 8
-//   +89..+108 pace bar clear (CARD_BAR_Y +93, BAR_H 12: bar +93..+104,
-//                             clear +89..+108 for the tick overhang)
-//   +109..+116 gap 8
-//   +117..+131 stats clear   (CARD_STATS_Y +118, 13px + the 1px clear margin)
-//   +132..+139 gap 8
-//   +140..+154 foot clear    (CARD_FOOT_Y +141, Fable left / reset-time right)
-//   +155..+161 gap 7
+//   +6..+21   label / icon   (CARD_LABEL_Y, Spleen8x16 = 16, icon 13x13 inside it)
+//   +22..+23  gap 2
+//   +24..+88  hero box       (CARD_HERO_Y, CARD_HERO_H 65; the glyph is 64)
+//   +89..+90  gap 2
+//   +91..+110 pace bar clear (CARD_BAR_Y +95, BAR_H 12: bar +95..+106,
+//                             clear +91..+110 for the tick overhang)
+//   +111..+116 gap 6
+//   +117..+134 stats clear   (CARD_STATS_Y +118, 16px + the drawIfChanged margin)
+//   +135..+138 gap 4
+//   +139..+156 foot clear    (CARD_FOOT_Y +140, Fable left / reset-time right)
+//   +157..+161 gap 5
 //   +162..+163 border
 //
 // One board-1 defect is deliberately NOT inherited here. There, the stats row
 // at +74 clears +73..+87 while the pace bar's clear runs +58..+75, so the two
 // OVERLAP by 3 rows and a token count changing erases the bottom of the tick
-// until the bar next repaints. Every band above is disjoint, with 8 rows to
-// spare, so that cannot happen.
+// until the bar next repaints. Every band above is disjoint - tighter than the
+// old derivation's uniform 8px gaps, but never negative - so that cannot happen.
 const int CARD_PIN_BAR_Y = 3;
 const int CARD_LABEL_Y   = 6;
-const int CARD_HERO_Y    = 27;
-// 54, for a 52px glyph plus 2px of slack (board 1: 40 for 39px plus 1).
-const int CARD_HERO_H    = 54;
-// x4, from board 1's x3. THE ONLY THING ON THIS BOARD THAT GETS BIGGER, and it
-// is exact rather than resampled: Cozette 6x13 at setTextSize(4) is a whole-
-// number 24x52 cell, the same mechanical doubling UI_FONTS already uses for
-// T_HERO (6x13 at size 2 = 12x26). At x3 the hero would be 39px = 6.0mm here
-// against 6.9mm on board 1 - the tab's headline number physically SHRINKING on
-// the larger panel. At x4 it is 8.0mm. Width is no constraint: "100%" is
-// 4 x 24 = 96px inside a CARD_W - 2*PAD = 260px lane.
-const int CARD_HERO_SIZE = 4;
-const int CARD_BAR_Y     = 93;
+const int CARD_HERO_Y    = 24;
+// 65, for a 64px native glyph plus 1px of slack - the same convention board 1
+// uses (40 for a 39px glyph, also plus 1). CARD_HERO_SIZE is gone from this
+// board, so unlike the constant this replaces, no size multiplier is baked
+// into this height: 64 is simply what Spleen32x64 draws.
+const int CARD_HERO_H    = 65;
+const int CARD_BAR_Y     = 95;
 const int CARD_STATS_Y   = 118;
-const int CARD_FOOT_Y    = 141;
+const int CARD_FOOT_Y    = 140;
 
 // ---------- USAGE tab: inside the Codex row ----------
-// Same clear-box arithmetic, for CODEX_H 56. The 2px border owns +54..+55, so
-// nothing may end past +53; the last thing is the pace bar's clear, ending +49.
+// Same clear-box arithmetic, for CODEX_H 56, RE-DERIVED for the 16px text row
+// (Spleen8x16, against Cozette's 13 - the same font swap the cards above went
+// through). The 2px border owns +54..+55, so nothing may end past +53; the
+// last thing is the pace bar's clear, ending +52.
 //
 //   +0..+1    border
-//   +2..+6    gap 5           (board 1 uses the same 5 here, hence the same +8)
-//   +7..+21   text clear      (CODEX_TEXT_Y +8, Cozette 6x13; the Mac icon is
-//                              drawn at the same +8, its 13 rows inside these 15)
-//   +22..+29  gap 8
-//   +30..+49  pace bar clear  (CODEX_BAR_Y +34, BAR_H 12: bar +34..+45)
-//   +50..+53  gap 4
+//   +2..+6    gap 5           (unchanged - a leading gap doesn't care how tall
+//                              the content after it is)
+//   +7..+24   text clear      (CODEX_TEXT_Y +8, Spleen8x16 = 16 -> an 18-row
+//                              drawIfChanged clear; the Mac icon is drawn at
+//                              the same +8, its 13 rows inside these 18)
+//   +25..+32  gap 8
+//   +33..+52  pace bar clear  (CODEX_BAR_Y +37, BAR_H 12: bar +37..+48)
+//   +53       gap 1
 //   +54..+55  border
 //
-// 2 + 5 + 15 + 8 + 20 + 4 + 2 = 56.
+// 2 + 5 + 18 + 8 + 20 + 1 + 2 = 56.
 const int CODEX_TEXT_Y = 8;
-const int CODEX_BAR_Y  = 34;
+const int CODEX_BAR_Y  = 37;
 
 // THE LABEL LANE, RE-DERIVED. Board 1's ceiling is 11 characters and every one
 // of the four numbers behind it moves on a wider card, so it is recomputed
