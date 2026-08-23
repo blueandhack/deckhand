@@ -464,7 +464,9 @@ The label sits in the middle column specifically so the keys can exceed `TAP_MIN
 
 - [ ] **Step 3: Re-derive the confirm dialog**
 
-Every string is measured or wrapped against the card's text lane — `drawString` paints an opaque box, so an overflowing string rubs out the card border it crosses. The lane is `CARD_W - 2*SP_3` = 260px, which at an 8px advance is 32 characters against 43 today. Re-derive `countWrappedLines()` for the four shipping notes and confirm `CFM_H` still holds the WORST block: title (`T_HEAD`, 24) + gap + emphasis (16) + gap + two note lines (32).
+Every string is measured or wrapped against the card's text lane — `drawString` paints an opaque box, so an overflowing string rubs out the card border it crosses. The lane is `CARD_W - 2*SP_3` = **272px**, which at an 8px advance is 34 characters against 45
+today. (An earlier draft of this plan said 260/32 — that is `CARD_W - 2*PAD`, which this surface
+does not use.) Re-derive `countWrappedLines()` for the four shipping notes and confirm `CFM_H` still holds the WORST block: title (`T_HEAD`, 24) + gap + emphasis (16) + gap + two note lines (32).
 
 - [ ] **Step 4: Re-derive page 3's paired-Mac rows**
 
@@ -563,6 +565,10 @@ board 1's string."
 ---
 
 ### Task 8: SETTINGS gains a LINK diagnostics card
+
+**Read "page 1" as the code's `settingsPage == 0` (STATUS)** — that is where the DEVICE card and the
+~145px of waste are. The three toggles are on `settingsPage == 1`. This plan's prose numbers the
+pages from one and the code numbers them from zero.
 
 **Files:**
 - Modify: `firmware/deckhand_display/settings.ino`
