@@ -15,7 +15,22 @@
 
 #define BOARD_USES_TFT_ESPI  0
 #define BOARD_BLE_NIMBLE     1
-#define BOARD_HAS_MIC        0   // I2S codec exists; the mic PATH is a later spec
+#define BOARD_HAS_MIC        1   // via the ES8311's ADC; see the capture note below
+
+// The capsule is MIC1, an LMA2718B381-OA7 ANALOG mic: OUT -> MIC_OUT, VDD from
+// AU_VCC3V3 through L3, two GNDs, and NO CLOCK LINE ANYWHERE. Its output reaches
+// the codec's analog MIC1P/MIC1N pins (U5 18 and 17) through coupling caps. That
+// absence of a clock is what rules out PDM - a digital mic needs one, and MIC1P
+// doubles as DMIC_SDA for exactly that case - so es8311_microphone_config() must
+// be passed digital_mic = FALSE. Read off vendor/schematic.pdf, not guessed. The
+// board pin table names no mic pin because the mic never touches the ESP32: it is
+// entirely on the codec's side of the I2S boundary.
+//
+// Gain: the driver offers 0..42dB in 6dB steps (es8311_mic_gain_t). This is a
+// STARTING POINT, not a measurement - the value to keep is the highest one whose
+// silence floor stays low, which only the on-device meter can find, exactly as
+// board 1's trimmer had to be set by watching MICMON rather than by calculation.
+#define MIC_GAIN  ES8311_MIC_GAIN_30DB
 #define BOARD_HAS_BEEPER     1   // via the ES8311; see the beeper note below
 // INFORMATIONAL ONLY - these two gate nothing and are read nowhere in the
 // sketch. They record hardware this board has and the firmware does not use, so

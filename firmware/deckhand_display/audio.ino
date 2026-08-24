@@ -17,7 +17,10 @@
 // produce confident nonsense, which is the failure mode this port keeps
 // refusing. No stubs are needed for these two: their only callers are
 // micLevelTest() and micMonitor(), which sit inside the same guard below.
-#if BOARD_HAS_MIC
+// BOARD 1 ONLY. These reduce an ADC-DMA buffer, so they are meaningless on a board
+// whose samples arrive from a codec over I2S - and MIC_ADC_PIN, which board 2's
+// header deliberately does not define, would not even compile there.
+#if BOARD_HAS_MIC && BOARD_USES_TFT_ESPI
 // Noise floor at three bandwidths: raw, and smoothed over 4 and 16 samples.
 // A moving average is a crude low-pass, so comparing the three says WHERE the
 // noise lives - which decides the fix:
@@ -73,7 +76,7 @@ int micWindowPP(int ms) {
   }
   return wmx - wmn;
 }
-#endif  // BOARD_HAS_MIC - the analog level probes
+#endif  // BOARD_HAS_MIC && BOARD_USES_TFT_ESPI - the analog level probes
 uint8_t muLawEncode(int32_t s) {
   const int32_t BIAS = 0x84, CLIP = 32635;
   int32_t sign = s < 0 ? 0x80 : 0;
@@ -441,7 +444,7 @@ int primaryLink() {
 // Deleting them would move layout Task 8 derived and rewrite the settings page;
 // a stub keeps board 2's screen exactly as designed and puts the whole gap in
 // one place.
-#if BOARD_HAS_MIC
+#if BOARD_HAS_MIC && BOARD_USES_TFT_ESPI
 void micStream() {
   // ADC driver FIRST, before any large allocation - see the allocation-order note
   // in micRecord(): getting this backwards turns an out-of-memory into abort().
@@ -1087,6 +1090,24 @@ void micLevelTest() {
   else
     Serial.println("MIC verdict: noise floor only (flat) - nothing heard");
 }
+#elif BOARD_HAS_MIC
+// ---------- BOARD 2: capture through the ES8311 ----------
+// THREE cases share these four signatures, not two: board 1's ADC-DMA above, this
+// codec path, and the no-mic stubs below for a board that genuinely has neither.
+// Splitting on BOARD_USES_TFT_ESPI rather than a capture-kind flag is the same
+// question asked once - board 1 has MIC_ADC_PIN and an analog amp, board 2 has an
+// ES8311 - and it is the split startBeep()/updateBeep() already use.
+//
+// NOTHING HERE BRINGS UP I2S. audioOutBegin() already did, and it enabled the RX
+// channel as a side effect worth knowing about: I2SClass::begin() creates both
+// channels when setPins() was given both dout and din, which this board's was
+// (GPIO15 and GPIO16). So capture is readBytes() on a channel that has been live
+// since boot, and a second begin() would FAIL rather than help.
+void micStream()    { Serial.println("AUDIO: board 2 streaming capture not implemented yet"); }
+void micRecord()    { Serial.println("AUDIO: board 2 one-shot capture not implemented yet"); }
+void micMonitor()   { Serial.println("MIC: board 2 live meter not implemented yet"); }
+void micLevelTest() { Serial.println("MIC: board 2 level probe not implemented yet"); }
+
 #else
 // ---------- No microphone on this board ----------
 // One line each, on the serial link the operator is already reading, because the
@@ -1098,7 +1119,7 @@ void micStream()    { Serial.println("AUDIO: no microphone on this board"); }
 void micRecord()    { Serial.println("AUDIO: no microphone on this board"); }
 void micMonitor()   { Serial.println("MIC: no microphone on this board"); }
 void micLevelTest() { Serial.println("MIC: no microphone on this board"); }
-#endif  // BOARD_HAS_MIC - the analog capture path
+#endif  // BOARD_HAS_MIC - the three capture paths
 
 // ---------------------------------------------------------------------------
 // TONETEST: board 2's output path, end to end, as ONE experiment
@@ -1324,6 +1345,19 @@ bool audioOutBegin() {
   }
   es8311_sample_frequency_config(audioCodec, TONE_MCLK_HZ, TONE_SAMPLE_HZ);
   es8311_voice_mute(audioCodec, true);   // the idle state IS muted
+
+#if BOARD_HAS_MIC
+  // CAPTURE, configured here because es8311_init() already set up both directions
+  // and these two calls only select WHICH input and how much gain. digital_mic is
+  // false and that is a schematic reading rather than a default: the capsule is
+  // analog into MIC1P/MIC1N with no clock line - see the note in the board header.
+  // Both return codes are reported, because a mic that was never configured
+  // records digital silence, which is indistinguishable from a dead capsule.
+  const esp_err_t me = es8311_microphone_config(audioCodec, false);
+  const esp_err_t ge = es8311_microphone_gain_set(audioCodec, MIC_GAIN);
+  Serial.printf("AUDIO IN: analog mic configured (%s), gain set (%s).\n",
+                esp_err_to_name(me), esp_err_to_name(ge));
+#endif
 
   // sinf rather than a square wave: a square's harmonics run past the codec's
   // reconstruction filter, and its ringing would be part of every beep.
