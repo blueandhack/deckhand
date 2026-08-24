@@ -765,7 +765,12 @@ pads rather than the USB CDC, so a healthy codec would read as a dead bus, and i
 each read, so it aborts on exactly the failure it exists to report. `TONETEST` prints its own dump
 over `Serial` instead.
 
-**The BEEPER is implemented and the flag is 1.** A beep here is synthesised samples pushed through
+**The BEEPER is implemented, the flag is 1, and it is CONFIRMED AUDIBLE ON HARDWARE** — the SOUND
+toggle and the VOLUME stepper both beep, verified by ear at the LOW preset (codec volume 55,
+~-25dB), which also confirms that rung is a real setting rather than a silent one. Note what the
+verification is worth and what it is not: it proves the shared I2S path, the occupancy model and the
+volume mapping on the glass, and it says nothing about the capture direction, which is still
+unwritten. A beep here is synthesised samples pushed through
 I2S into the ES8311 — board 1's `ledcWrite()` has no counterpart, so `startBeep()`/`updateBeep()`
 have a second implementation rather than a ported one, selected on `BOARD_USES_TFT_ESPI` (the same
 question: an LEDC square wave is not a thing you can send a codec). Three things about it are
