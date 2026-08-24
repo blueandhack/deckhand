@@ -1411,7 +1411,156 @@ static int micReadChunk() {
   return (int) (got / (2 * sizeof(int16_t)));
 }
 
-void micStream()    { Serial.println("AUDIO: board 2 streaming capture not implemented yet"); }
+// Streaming capture: what the REC button and MICSTREAM actually use, and the only
+// path long dictation can take. Board 1 needs IMA ADPCM here because 16kHz mu-law
+// is 16KB/s against a CH340 that tops out at 11.5 - the codec is entirely a
+// consequence of that cable. Board 2 is native USB CDC and this is MONO PCM16 at
+// 16000 * 2 = 32KB/s with no codec at all, which is also exactly what Whisper
+// wants: no mu-law table, no ADPCM predictor, nothing to keep in lockstep.
+//
+// The ring lives in PSRAM and is deliberately generous. Board 1's is 16KB of
+// precious internal heap; here 2 seconds costs 64KB of 8MB, so a host that stalls
+// for a second loses nothing rather than dropping samples the operator will never
+// know were missing.
+#define MIC2_STREAM_RING_BYTES  65536
+#define MIC2_STREAM_CHUNK       MIC_STREAM_CHUNK
+
+void micStream() {
+  if (!audioOutReady) {
+    Serial.println("AUDIO: the shared audio path never came up - see the AUDIO OUT line "
+                   "from boot. Nothing streamed.");
+    return;
+  }
+  uint8_t* ring = (uint8_t*) heap_caps_malloc(MIC2_STREAM_RING_BYTES, MALLOC_CAP_SPIRAM);
+  if (ring == NULL) {
+    Serial.printf("AUDIO error: PSRAM would not give %d bytes for the stream ring. "
+                  "Nothing streamed.\n", MIC2_STREAM_RING_BYTES);
+    return;
+  }
+
+  // Same target resolution as board 1, and re-resolved by id for the same reason:
+  // a 5s tick can compact the sessions array between the button press and here,
+  // so a stale index would aim the dictation at whatever slid into that slot.
+  const char* target = "-";
+  if (showingDetail) {
+    detailIndex = resolveDetailIndex();
+    if (detailIndex >= 0 && detailIndex < sessionCount) target = sessions[detailIndex].id;
+  }
+  // Unaddressed, exactly as board 1's is: this rides Serial and never BLE, so it
+  // reaches exactly one Mac by construction and a to= could only ever cause the
+  // cable Mac to drop its own capture.
+  Serial.printf("AUDIO stream rate=%d codec=pcm16 chunk=%d scale=1 dc=0 target=%s "
+                "answer=%s\n", TONE_SAMPLE_HZ, MIC2_STREAM_CHUNK, target,
+                micAnswerPid[0] ? micAnswerPid : "-");
+
+  int head = 0, tail = 0, ringUsed = 0;
+  uint32_t seqSent = 0, seqAcked = 0, samples = 0, dropped = 0;
+  unsigned long windowBlockedAt = 0, lastMeter = 0, lastTouchPoll = 0;
+  int touchVotes = 0;
+  bool stoppedByUser = false;
+  int lvlMin = 32767, lvlMax = -32768;
+  String inLine = "";
+  const unsigned long t0 = millis();
+  const unsigned long cap = micAnswerPid[0] ? MIC_ANSWER_MAX_MS : MIC_STREAM_MAX_MS;
+
+  micPillFrame(micAnswerPid[0] ? "LISTENING" : "DICTATING");
+
+  while (millis() - t0 < cap) {
+    // 1. Drain the codec. This must never wait on the window, or the I2S DMA
+    //    overflows in hardware and the loss happens upstream of any counter -
+    //    board 1 lost 20% of a take exactly that way and reported dropped=0.
+    const int frames = micReadChunk();
+    for (int i = 0; i < frames; i++) {
+      const int16_t v = micScratch[i * 2];        // LEFT slot; the two are identical
+      if (v < lvlMin) lvlMin = v;
+      if (v > lvlMax) lvlMax = v;
+      if (ringUsed + 2 <= MIC2_STREAM_RING_BYTES) {
+        ring[head] = (uint8_t) (v & 0xFF);        // little-endian, as the WAV wants
+        ring[(head + 1) % MIC2_STREAM_RING_BYTES] = (uint8_t) ((v >> 8) & 0xFF);
+        head = (head + 2) % MIC2_STREAM_RING_BYTES;
+        ringUsed += 2;
+        samples++;
+      } else {
+        dropped++;                               // reported, never silent
+      }
+    }
+
+    // 2. Drain acks. Anything else the host sends is discarded for the duration:
+    //    one missed payload tick is a fair price for not corrupting the stream.
+    while (Serial.available()) {
+      const char ch = (char) Serial.read();
+      if (ch == '\n') {
+        if (inLine.startsWith("AUDIO ack ")) seqAcked = (uint32_t) inLine.substring(10).toInt();
+        inLine = "";
+      } else if (inLine.length() < 40) {
+        inLine += ch;
+      }
+    }
+
+    // 3. The credit window, with board 1's safety valve: a lost ack must cost
+    //    throughput, never wedge the stream, and the host reports any real gap
+    //    by sequence number anyway.
+    if (ringUsed >= MIC2_STREAM_CHUNK && (seqSent - seqAcked) >= (uint32_t) MIC_STREAM_WINDOW) {
+      if (!windowBlockedAt) windowBlockedAt = millis();
+      else if (millis() - windowBlockedAt > 500) { seqAcked++; windowBlockedAt = 0; }
+    } else {
+      windowBlockedAt = 0;
+    }
+    while (ringUsed >= MIC2_STREAM_CHUNK && (seqSent - seqAcked) < (uint32_t) MIC_STREAM_WINDOW) {
+      Serial.printf("AUDIO bin %lu %d\n", (unsigned long) seqSent, MIC2_STREAM_CHUNK);
+      // Bulk writes, and the ring may wrap mid-chunk.
+      int first = MIC2_STREAM_CHUNK;
+      if (tail + first > MIC2_STREAM_RING_BYTES) first = MIC2_STREAM_RING_BYTES - tail;
+      Serial.write(ring + tail, first);
+      if (first < MIC2_STREAM_CHUNK) Serial.write(ring, MIC2_STREAM_CHUNK - first);
+      tail = (tail + MIC2_STREAM_CHUNK) % MIC2_STREAM_RING_BYTES;
+      ringUsed -= MIC2_STREAM_CHUNK;
+      seqSent++;
+    }
+
+    // 4. The stop tap, polled on ITS OWN 10ms timer and NOT inside the meter's.
+    //    Board 1 documents why: sharing the meter's 120ms timer made a normal
+    //    80-150ms tap fail to register at all, which reads as a dead button.
+    if (millis() - lastTouchPoll >= 10) {
+      lastTouchPoll = millis();
+      if (touchPressed()) {
+        if (++touchVotes >= 2) { stoppedByUser = true; break; }
+      } else {
+        touchVotes = 0;
+      }
+    }
+
+    if (millis() - lastMeter >= 120) {
+      lastMeter = millis();
+      const int swing = lvlMax - lvlMin;
+      const int level = swing > 0 ? (swing > 6000 ? 1000 : swing * 1000 / 6000) : 0;
+      micPillMeter(level, String((millis() - t0) / 1000).c_str(), "tap to stop");
+      lvlMin = 32767; lvlMax = -32768;
+    }
+    reapBleLinks(true);
+  }
+
+  // Flush whatever the ring still holds, ignoring the window - the stream is over
+  // and there is nothing left to pace against.
+  while (ringUsed > 0) {
+    const int n = ringUsed < MIC2_STREAM_CHUNK ? ringUsed : MIC2_STREAM_CHUNK;
+    Serial.printf("AUDIO bin %lu %d\n", (unsigned long) seqSent, n);
+    int first = n;
+    if (tail + first > MIC2_STREAM_RING_BYTES) first = MIC2_STREAM_RING_BYTES - tail;
+    Serial.write(ring + tail, first);
+    if (first < n) Serial.write(ring, n - first);
+    tail = (tail + n) % MIC2_STREAM_RING_BYTES;
+    ringUsed -= n;
+    seqSent++;
+  }
+
+  Serial.printf("AUDIO streamend samples=%lu chunks=%lu dropped=%lu secs=%.1f by=%s\n",
+                (unsigned long) samples, (unsigned long) seqSent, (unsigned long) dropped,
+                (millis() - t0) / 1000.0, stoppedByUser ? "tap" : "cap");
+  free(ring);
+  micWaitRelease();
+  micProcessingBegin();
+}
 // One-shot capture. Board 1's equivalent is capped near 3s by internal heap and
 // pays mu-law to get there; here the buffer is PSRAM and the link is native USB,
 // so it is linear PCM16 at a length chosen for usefulness rather than forced by

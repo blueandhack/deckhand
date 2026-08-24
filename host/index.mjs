@@ -2177,11 +2177,26 @@ async function finishAudioStream(tail) {
     for (let i = 0; i < data.length; i += 144)
       lines.push("AUDIO d " + data.subarray(i, i + 144).toString("base64"));
     // Normalise to the SAME "AUDIO begin ..." envelope one-shot captures use, so
-    // mic-wav.mjs needs no new file format - only the ima4 codec branch.
+    // mic-wav.mjs needs no new file format.
     const f = (k, d) => (st.header.match(new RegExp(k + "=(-?\\d+)")) ?? [, d])[1];
+    // THE CODEC MUST COME FROM THE DEVICE, not be assumed. This used to hardcode
+    // `bits=4 codec=ima4` because ADPCM was the only thing that had ever streamed,
+    // and a board 2 pcm16 stream would therefore have been written to disk CLAIMING
+    // TO BE ADPCM - so mic-wav.mjs would have run the IMA decoder over linear PCM
+    // and produced exactly the loud garbage that makes Whisper invent sentences.
+    // The device already announces `codec=` in its stream header; this reads it.
+    const codec = (st.header.match(/codec=(\w+)/) ?? [, "ima4"])[1];
+    // bits, and how many samples a byte carries, per codec. ima4 is 2 samples a
+    // byte (4-bit), ulaw 1, pcm16 half. An unknown codec falls back to the ima4
+    // numbers, which is what every pre-board-2 stream was and keeps those files
+    // byte-identical to what this wrote before.
+    const SHAPE = { ima4: [4, 2], ulaw: [8, 1], pcm16: [16, 0.5], pcm: [16, 0.5] };
+    const [bits, samplesPerByte] = SHAPE[codec] ?? SHAPE.ima4;
     const header =
-      `AUDIO begin rate=${f("rate", 16000)} bits=4 codec=ima4 scale=${f("scale", 8)} ` +
-      `samples=${st.samples ?? data.length * 2} dc=${f("dc", 0)} bytes=${data.length}`;
+      `AUDIO begin rate=${f("rate", 16000)} bits=${bits} codec=${codec} ` +
+      `scale=${f("scale", 8)} ` +
+      `samples=${st.samples ?? Math.floor(data.length * samplesPerByte)} ` +
+      `dc=${f("dc", 0)} bytes=${data.length}`;
     await fs.writeFile(file, [header, ...lines, "AUDIO end"].join("\n") + "\n");
   } catch (err) {
     console.error(`Audio: could not save stream: ${err.message}`);
@@ -2189,7 +2204,12 @@ async function finishAudioStream(tail) {
   }
   console.log(
     `Audio: saved ${file} (${data.length} bytes, ${st.chunks.length} frames, ` +
-      `${(data.length / 8000).toFixed(1)}s at 16kHz ima4, gaps=${st.gaps})  ${tail}`
+      `${(st.samples
+            ? st.samples / 16000
+            : (data.length * (({ ima4: 2, ulaw: 1, pcm16: 0.5, pcm: 0.5 })[
+                 (st.header.match(/codec=(\w+)/) ?? [, "ima4"])[1]] ?? 2)) / 16000
+          ).toFixed(1)}s at 16kHz ` +
+      `${(st.header.match(/codec=(\w+)/) ?? [, "ima4"])[1]}, gaps=${st.gaps})  ${tail}`
   );
   // Fire and forget: transcription plus a dictated task can take a while, and the
   // serial reader must keep draining throughout.
