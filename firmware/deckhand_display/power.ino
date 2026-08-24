@@ -221,13 +221,17 @@ void loadVolume() {
   applyVolume();
 }
 void saveVolume() { prefs.putInt("vol", volPresetIdx); }
-// The needs-input double-beep. BOARD_HAS_BEEPER 0 makes both of these no-ops
-// rather than deleting their callers: the SOUND toggle, the volume stepper and
-// the asking-transition diff all stay exactly where they are, so nothing about
-// the UI or the diff logic has to learn that a board is mute. A stub here is
-// also the honest shape of the gap - board 2 HAS a speaker, but it is behind an
-// I2S codec, and an LEDC square wave is not a thing you can send one. Giving
-// AUDIO_OUT_PIN an alias pointing at an I2S data line would compile and lie.
+// The needs-input double-beep, in THREE variants behind one signature: board 1's
+// LEDC square wave, board 2's I2S samples, and a no-op stub for a board with
+// BOARD_HAS_BEEPER 0. Every caller - the SOUND toggle, the volume stepper, the
+// asking-transition diff - is identical on all three, so nothing in the UI or the
+// diff logic has to learn whether a board can make a sound.
+//
+// The split is on BOARD_USES_TFT_ESPI rather than a beeper-kind flag because it
+// is the same question: board 1 has AUDIO_OUT_PIN and an analogue amp, board 2
+// has an ES8311, and an LEDC square wave is not a thing you can send a codec.
+// Giving AUDIO_OUT_PIN an alias pointing at an I2S data line would compile and
+// lie, which is why board 2's header still declares no such pin.
 #if BOARD_HAS_BEEPER && BOARD_USES_TFT_ESPI
 void startBeep() {
   if (!beepEnabled) return;

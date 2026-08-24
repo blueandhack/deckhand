@@ -17,7 +17,7 @@ that differs and why; this section is only how to build each.
 | BLE stack | Bluedroid | NimBLE |
 | touch | XPT2046 resistive, 5-point affine calibration | capacitive, inside the display IC, factory-aligned |
 | serial | CH340, `/dev/cu.usbserial-*`, 11.5KB/s ceiling | native USB CDC, `/dev/cu.usbmodem*` |
-| mic / beeper | both fitted and working | codec present; **output PROVEN via `TONETEST`, capture path not written** |
+| mic / beeper | both fitted and working | **beeper works via the codec**; mic fitted, capture path not written |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
@@ -715,9 +715,9 @@ of board 1's design:
 - There is also **no DTR/RTS handshake to lean on**: enumeration proves nothing, and the recovery
   is a power cycle (see Commands).
 
-#### What board 2 does NOT have: the mic and the beeper — hidden, not disabled
+#### What board 2 does NOT have: the MIC — and the beeper, which it now has
 
-`BOARD_HAS_MIC 0` and `BOARD_HAS_BEEPER 0`. **Those flags describe the SOFTWARE, not the
+`BOARD_HAS_MIC 0`, **`BOARD_HAS_BEEPER 1`**. **Those flags describe the SOFTWARE, not the
 hardware** — this is the important distinction, and an earlier reading of it was wrong in both
 directions. The hardware is real and confirmed: an **ES8311 I2S codec at I2C 0x18** (found by the
 demo's own bus scan) with **MCLK 17 / BCLK 18 / DOUT 15 / LRCK 21 / DIN 16**, plus a speaker
@@ -765,7 +765,38 @@ pads rather than the USB CDC, so a healthy codec would read as a dead bus, and i
 each read, so it aborts on exactly the failure it exists to report. `TONETEST` prints its own dump
 over `Serial` instead.
 
-Until that path exists, both flags stay 0 and `audio.ino`'s whole capture path compiles out, leaving
+**The BEEPER is implemented and the flag is 1.** A beep here is synthesised samples pushed through
+I2S into the ES8311 — board 1's `ledcWrite()` has no counterpart, so `startBeep()`/`updateBeep()`
+have a second implementation rather than a ported one, selected on `BOARD_USES_TFT_ESPI` (the same
+question: an LEDC square wave is not a thing you can send a codec). Three things about it are
+load-bearing:
+
+- **ONE shared I2S channel and codec, up in `setup()` via `audioOutBegin()` and never torn down.**
+  Three callers need it — the beeper on every asking transition, `TONETEST` on demand, and the
+  capture path a mic would use, which needs the *same* channel since the ES8311 records and plays
+  over one peripheral. Tearing it down saves nothing: the amp cannot be gated, so its idle current
+  is present regardless, and the idle state is `es8311_voice_mute()` — which is where silence
+  actually comes from. `TONETEST` was refactored onto it because a **second `begin()` on the same
+  port FAILS**, which would have made it a diagnostic reporting a fault it caused itself; it also
+  must not delete the shared handle, or the beeper writes through a dangling pointer.
+- **`updateBeep()` stays non-blocking through an OCCUPANCY MODEL.** `I2SClass::write()` blocks once
+  the DMA is full and that class exposes no `availableForWrite()`, so feeding blindly stalls
+  `loop()` for up to the buffer depth — **90ms**, from ESP_I2S's own `dma_desc_num=6` /
+  `dma_frame_num=240`. `beepFedUntil` tracks how far ahead audio is queued and tops up only while
+  that is under `BEEP_QUEUE_MAX_MS` (60), so every write lands in free space. The pattern's GAP step
+  needs no writes at all, because the channel is configured `auto_clear=true`: an underrun emits
+  silence rather than repeating the last buffer.
+- **2100 Hz, where board 1 uses 2093 (C7).** The beep is a LOOPED buffer, so the frequency must fit
+  a whole number of cycles in it or every loop boundary is a click — a 50Hz buzz over the beep. One
+  buffer is 20ms at 16kHz, so any multiple of 50Hz works, and 2100 is the nearest to board 1's pitch
+  at 42 cycles exactly (~6 cents sharp). LEDC needs no such constraint, having nothing to loop.
+
+`VOL_PRESETS` therefore moved into the board headers as `VOL_PRESET_LIST`: board 1's are LEDC duty
+out of 255, board 2's are **ES8311 volume out of 100**, and no literal could be right for both.
+Board 2's `{55, 70, 85}` are ~13dB apart and all inside the range measured audible — **anything
+under ~40 is inaudible on this hardware**, so board 1's "LOW" of 6 would be a silent setting.
+
+Until the CAPTURE path exists, `BOARD_HAS_MIC` stays 0 and `audio.ino`'s capture path compiles out, leaving
 four stubs (`micStream`/`micRecord`/`micMonitor`/`micLevelTest`) that print
 `"no microphone on this board"` and draw nothing.
 
