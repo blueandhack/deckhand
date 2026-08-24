@@ -17,7 +17,7 @@ that differs and why; this section is only how to build each.
 | BLE stack | Bluedroid | NimBLE |
 | touch | XPT2046 resistive, 5-point affine calibration | capacitive, inside the display IC, factory-aligned |
 | serial | CH340, `/dev/cu.usbserial-*`, 11.5KB/s ceiling | native USB CDC, `/dev/cu.usbmodem*` |
-| mic / beeper | both fitted and working | **beeper works via the codec**; mic fitted, capture path not written |
+| mic / beeper | both fitted and working | **both work, via the ES8311** (capture is PCM16, no codec) |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
@@ -717,8 +717,8 @@ of board 1's design:
 
 #### What board 2 does NOT have: the MIC — and the beeper, which it now has
 
-`BOARD_HAS_MIC 0`, **`BOARD_HAS_BEEPER 1`**. **Those flags describe the SOFTWARE, not the
-hardware** — this is the important distinction, and an earlier reading of it was wrong in both
+**`BOARD_HAS_MIC 1` and `BOARD_HAS_BEEPER 1`** — both paths now exist. **Those flags describe the
+SOFTWARE, not the hardware** — this is the important distinction, and an earlier reading of it was wrong in both
 directions. The hardware is real and confirmed: an **ES8311 I2S codec at I2C 0x18** (found by the
 demo's own bus scan) with **MCLK 17 / BCLK 18 / DOUT 15 / LRCK 21 / DIN 16**, plus a speaker
 amplifier enable on **GPIO1**. `DIN` is the capture path. So board 2 has a real mic *and* a real
@@ -801,9 +801,63 @@ out of 255, board 2's are **ES8311 volume out of 100**, and no literal could be 
 Board 2's `{55, 70, 85}` are ~13dB apart and all inside the range measured audible — **anything
 under ~40 is inaudible on this hardware**, so board 1's "LOW" of 6 would be a silent setting.
 
-Until the CAPTURE path exists, `BOARD_HAS_MIC` stays 0 and `audio.ino`'s capture path compiles out, leaving
-four stubs (`micStream`/`micRecord`/`micMonitor`/`micLevelTest`) that print
-`"no microphone on this board"` and draw nothing.
+**THE CAPTURE PATH EXISTS AND IS MEASURED.** The four entry points
+(`micStream`/`micRecord`/`micMonitor`/`micLevelTest`) have THREE implementations behind one
+signature each — board 1's ADC-DMA, board 2's codec path, and the `"no microphone on this board"`
+stubs for a board with neither — split on `BOARD_USES_TFT_ESPI`, the same seam
+`startBeep()`/`updateBeep()` use.
+
+**Nothing here brings up I2S, and that is worth knowing before touching it.** `audioOutBegin()`
+already did, and it enabled the **RX** channel as a side effect: `I2SClass::begin()` creates both
+channels when `setPins()` was given both `dout` and `din`, which this board's was. So capture is
+`readBytes()` on a channel live since boot, and a second `begin()` on that port **fails** rather
+than helps — which is also why `TONETEST` had to move onto the shared context.
+
+Measured on hardware, and these are the numbers a future reader should not have to re-derive:
+
+| what | figure | what it settles |
+|---|---|---|
+| `MICTEST` | `n=180224 timeouts=0` | samples arrive; rules out dead RX / dead ADC |
+| DC offset | `dcL=0` | correct for a digital path — see the verdict note below |
+| slots | **L and R byte-identical** | the mono codec duplicates; capture takes ONE slot |
+| ambient | `floor=69 peak=213..770 clipped=0` | a live floor with headroom |
+| `MICREC` | `160000` samples, **100%** complete, 29.3 dB SNR | decodes to a playable WAV |
+| `MICSTREAM` | **120.0s, 1921024 samples, `dropped=0 gaps=0`** | 3.8MB at 32KB/s, no loss |
+
+- **`dcL=0` is why board 1's first verdict could not be reused.** On an analog ADC a dead signal
+  wire reads as a pinned DC level; on I2S it reads as **perfect digital zero**, which no amount of
+  gain will ever move. So `micLevelTest()`'s first check is "every sample is exactly zero", a
+  condition board 1 has no counterpart for.
+- **No codec at all.** 16000 x 2 bytes = **32KB/s**, comfortable on native USB CDC — where board 1's
+  IMA ADPCM exists solely because 16kHz mu-law is 16KB/s against a CH340 that tops out at 11.5. That
+  also removes the mu-law and ADPCM decode from Whisper's path rather than porting them.
+- **MONO, left slot only**, because the two are byte-identical: half the bytes carry everything.
+- **PSRAM for the buffers** — a 10s one-shot take is 320KB and the stream ring is 64KB, against
+  board 1's ~3s ceiling and 16KB ring in contested internal heap.
+- **`MIC_GAIN` is `ES8311_MIC_GAIN_30DB` and is NOT tuned.** The driver offers 0..42dB in 6dB steps.
+  Ambient peaks at 213-770 of 32767 look low, but ambient is the wrong reference — speech sits far
+  above a quiet room, and 42dB could clip a real voice. Settle it with `MICMON` while speaking, which
+  is what that screen exists for; do not compute it.
+
+**Three HOST defects fell out of running this, all the same shape** — code that was right by
+accident while ADPCM was the only thing that had ever streamed, and all three fail in the direction
+that produces confident nonsense rather than an error:
+
+- **`finishAudioStream()` wrote every stream header as `bits=4 codec=ima4`** regardless of what the
+  device announced, so a pcm16 stream was saved to disk CLAIMING to be ADPCM — `mic-wav.mjs` would
+  then run the IMA predictor over linear PCM. That is exactly the loud-garbage-Whisper-narrates
+  failure the 98% guard exists for, arriving through the file format instead of through truncation.
+  It now reads `codec=` from the device's header; an unknown or absent codec keeps the ima4 numbers,
+  so every pre-board-2 stream file is byte-identical.
+- **The completeness estimate assumed ONE byte per sample**, true for mu-law and tighter for ADPCM.
+  pcm16 is two, so a 10s capture reported **200%** — meaning a capture truncated by HALF would have
+  read as a clean 100% and passed the refusal. It now reads `bits=` from the header.
+- **`mic-wav.mjs` was broken outright**, pre-existing: `path.join` with no `import path`, on the line
+  that runs whenever no outfile argument is given. It could only ever have worked when called with an
+  explicit output path.
+
+**The host needed NO new decode branch**, which the voice spec expected: `mic-wav.mjs`'s final
+`else` already reads int16 little-endian and `bits` already defaults to 16.
 
 **The RECORD BUTTON is hidden rather than shown dead.** `fabVisible()` returns false on
 `!BOARD_HAS_MIC`, and gating it *there* rather than at the two draw sites is deliberate: it also
@@ -992,8 +1046,6 @@ None of these is fixed, and none is a port regression — they are gaps between 
 what the rules on this page already require. Recorded here rather than in a scratch file because a
 known gap nobody wrote down is indistinguishable from a bug nobody found.
 
-- **SETTINGS › ACTIONS › MIC TEST is offered on board 2 and cannot work** (see above). `fabVisible()`
-  got the gate; this row did not.
 - **TWO strings promise a touch wake board 2 does not have.** `settings.ino:333`'s hint reads
   `"power off = deep sleep, touch to wake"` and the POWER OFF confirm dialog at `:444` reads
   `"deep sleep - touch the screen to wake"`. On board 2 the only way back is RESET. The two farewell
@@ -2389,7 +2441,8 @@ Other things that aren't obvious from a single file:
   BETTER one with no software.** Board 2 carries an ES8311 I2S codec and a speaker amp; every
   constraint that shapes the design below (analog amp into ADC-DMA, mu-law, IMA ADPCM, chunk+ACK
   flow control, the 33.3Hz BLE comb cancellation) comes from a CH340 capped at 11.5KB/s and ~26KB
-  of free heap, and board 2 has neither limit. `BOARD_HAS_MIC 0` describes the SOFTWARE. See Two
+  of free heap, and board 2 has neither limit. Board 2's own capture path now EXISTS and sends
+  linear PCM16 with no codec — see Two
   boards for the pins and for what a board-2 audio path would replace.
 - **Microphone (MAX4466 electret amp) — HOW TO WIRE IT, and IO35 is the only pin that can do
   this.** Three wires, to the board's 4-pin **Expand** connector:

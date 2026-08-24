@@ -1,6 +1,8 @@
 # Board 2: voice, on a codec instead of an ADC
 
-**Status:** design, PARTLY IMPLEMENTED. Approved in outline: vendor Espressif's ES8311 driver
+**Status:** IMPLEMENTED except for two measurements that need a person to speak (MIC_GAIN's
+final value, and whether a comb exists). Everything below is kept as the record of why the
+design is what it is; where implementation contradicted it, the correction is inline. Approved in outline: vendor Espressif's ES8311 driver
 rather than hand-writing an init; do capture AND the needs-input beep rather than capture alone.
 
 **What has already landed, so a reader does not plan it twice:** Decision 1 in full (the driver is
@@ -90,8 +92,16 @@ Everything above the capture layer is already written, board-agnostic, and re-de
 by the type-scale work: the `AUDIO stream`/`bin`/`streamend` wire protocol and its credit
 window, `~/Deckhand-audio` capture files, `mic-wav.mjs`, `mic-stt.sh` and whisper, the
 clipboard-or-dispatch delivery, the voice result card and its four-stage progress bar, the
-answer-by-voice HMAC flow, and the menu-bar surfacing. The host needs **one** new decoder
-branch (`codec=pcm16`) because the stream header already carries `codec=`.
+answer-by-voice HMAC flow, and the menu-bar surfacing. ~~The host needs **one** new decoder branch (`codec=pcm16`)~~ - **WRONG, it needs NONE:**
+`mic-wav.mjs`'s final `else` already reads int16 little-endian and `bits` already defaults to 16.
+What the host DID need was three fixes nobody predicted, all in code that was right by accident
+while ADPCM was the only thing that had ever streamed: `finishAudioStream()` hardcoded
+`bits=4 codec=ima4` into every saved stream header (so a pcm16 stream was stored claiming to be
+ADPCM, and would have been decoded with the IMA predictor - the loud-garbage failure arriving
+through the file format rather than truncation); the completeness estimate assumed one byte per
+sample, so pcm16 read 200% and a half-truncated capture would have passed the 98% refusal; and
+`mic-wav.mjs` used `path.join` with no `import path`, which broke it outright for any caller not
+passing an explicit outfile.
 
 Flipping `BOARD_HAS_MIC` to 1 re-enables the REC button, the SETTINGS MIC TEST row and the voice
 card - all three of which this branch already gated and sized correctly.
