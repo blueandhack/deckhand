@@ -444,6 +444,252 @@ int primaryLink() {
 // Deleting them would move layout Task 8 derived and rewrite the settings page;
 // a stub keeps board 2's screen exactly as designed and puts the whole gap in
 // one place.
+// ---------------------------------------------------------------------------
+// THE SHARED AUDIO CONTEXT AND ITS CONSTANTS, board 2 only.
+//
+// Deliberately ABOVE the three capture paths rather than beside the tone test it
+// was written for: board 2's capture reads through this same I2S channel, and C++
+// wants a declaration before its use. It cannot simply be moved next to that
+// capture block either - that block is an #elif branch, and there is nowhere
+// between #if and #elif to put code.
+// ---------------------------------------------------------------------------
+#if !BOARD_USES_TFT_ESPI
+
+// 16 kHz because it is what every later voice feature on this board will use
+// (Whisper's training rate - see the board-1 mic notes), so the clock numbers
+// proved here are the ones that get reused rather than a convenient one-off.
+#define TONE_SAMPLE_HZ   16000
+// TONE_FRAMES must hold a whole number of periods of every tone frequency used,
+// so the loop can repeat the buffer with no phase discontinuity - a click at
+// every buffer boundary is exactly the artefact that would make a working path
+// sound broken. 320 frames is 20ms, which is 20 cycles of 1 kHz and 8 of 400 Hz.
+#define TONE_FRAMES       320
+// About -4 dBFS. This was 6000 (-15 dBFS) at volume 60, which with the codec's
+// own -19 dB put the tone ~34 dB below full scale - a defensible choice for
+// "nobody knows the amp's gain yet" that turned out to be the wrong risk to
+// hedge. The failure this test exists to distinguish is SILENCE, and a quiet
+// tone and a dead path are the same observation. Loud is the diagnostic.
+#define TONE_AMPLITUDE    20000
+// ES8311 volume register, 0..100 - the DEFAULT only; `TONETEST <0-100>` overrides
+// it at runtime. This was 90 on the argument that loud is the diagnostic, since a
+// quiet tone and a dead path are the same observation. That argument is sound for
+// a FIRST run and wrong as a standing default: this command gets run in a house
+// with people asleep in it, and a diagnostic nobody dares trigger is worse than a
+// quiet one. The epistemics moved into the log instead of the amplitude - every
+// run prints the volume it used and says outright that silence at a low volume
+// proves nothing. 30 is audible in a quiet room at arm's length.
+#define TONE_VOLUME       30
+// THE VOLUME SCALE IS LINEAR IN dB, WHICH MAKES IT USELESS TO GUESS ON. The
+// ES8311's register 0x32 is 0.5dB per LSB with 0xBF = 0dB, and
+// es8311_voice_volume_set maps 0..100 onto the full 0..255 range - so volume 15
+// is register 0x26, about -77dB, i.e. ~97dB below the volume-90 tone that was
+// plainly audible. Two runs were spent discovering that by ear. TONELADDER
+// exists so the audible floor is found in ONE run instead: a single pitch at
+// rising volumes, and the listener reports the first step they hear.
+//
+// The steps are 10 apart, which is 25.6 register counts or ~12.8dB - coarse
+// enough that a step is unmistakably louder than the one before rather than
+// arguably so, which is what "the first one I heard" has to mean to be usable.
+#define TONE_LADDER_STEPS  5
+#define TONE_LADDER_FIRST 35
+#define TONE_LADDER_GAP   10
+// Shorter than TONE_BURST_MS because the amp's turn-on ramp is paid ONCE, before
+// the first step - the amp stays enabled across the whole ladder, so no later
+// step is at risk of landing inside it.
+#define TONE_LADDER_MS   1200
+
+// Guard rails for the runtime argument. 100 is the codec's own maximum, and the
+// floor is 1 rather than 0 because `TONETEST 0` would configure the whole chain
+// correctly and then play nothing, which is indistinguishable from the fault this
+// command exists to detect.
+#define TONE_VOLUME_MIN    1
+#define TONE_VOLUME_MAX  100
+
+// THE AMP'S TURN-ON RAMP IS THE REASON THE FIRST RUN OF THIS TEST PROVED
+// NOTHING. U6 is an SC8002B, an LM4871-class part, and its BYPASS pin carries
+// C41 = 1uF: coming out of shutdown, that node has to charge to VDD/2 through
+// the internal divider before the output is anything but a ramp. That is
+// hundreds of milliseconds, not tens. The first version settled 30ms and then
+// played 200ms beeps on the LOW trial, so the entire measurement could have
+// happened inside the ramp. Both numbers below are set from that, and the tone
+// is one continuous burst rather than beeps for the same reason.
+#define TONE_SETTLE_MS     400
+#define TONE_BURST_MS     2000
+
+// The two trials are told apart by PITCH, not by pattern or by the log. Whoever
+// is listening should not have to watch a serial console to know which polarity
+// they just heard, and "one long tone versus two short ones" stopped being
+// available the moment both trials had to be long. Both divide 16 kHz exactly
+// and both fit a whole number of cycles in TONE_FRAMES (20 and 8), so the
+// buffer still loops without a click at the seam.
+#define TONE_HZ_LOW_TRIAL  1000
+#define TONE_HZ_HIGH_TRIAL  400
+
+// MCLK IS ESTABLISHED FROM THE ARDUINO CORE'S OWN SOURCE, NOT ASSUMED, and the
+// codec has to be told the same number or es8311_sample_frequency_config()
+// cannot find a divider set and returns ESP_ERR_INVALID_ARG - a classic silent
+// failure, because every register write around it succeeds.
+// Where the 256 comes from: ESP_I2S.cpp (core 3.3.11) #undefs the IDF's
+// I2S_STD_CLK_DEFAULT_CONFIG for SOC_I2S_HW_VERSION_2 - which the S3 is - and
+// redefines it with `.mclk_multiple = I2S_MCLK_MULTIPLE_256` hardcoded, and
+// I2SClass::begin() offers no way to override it. i2s_types.h documents that
+// enum as literally "MCLK = sample_rate * 256". So 16000 * 256 = 4096000, which
+// IS a row in the driver's coeff_div[] table ({4096000, 16000, ...}).
+// A SUBTLETY WORTH KEEPING: the PLL cannot necessarily hit 4.096 MHz exactly,
+// and it does not need to. The codec is a SLAVE - it derives its internal rates
+// from the RATIO of the clocks it is handed, and that ratio is exactly 256 by
+// construction whatever the PLL rounds to. So this number is right even if a
+// scope reads 4.0959 MHz.
+#define TONE_MCLK_HZ     (TONE_SAMPLE_HZ * 256)
+
+// Bytes in one buffer half: TONE_FRAMES stereo frames of int16.
+#define TONE_HALF_BYTES  ((size_t) TONE_FRAMES * 2 * sizeof(int16_t))
+
+// The codec's register file, read back over the bus we just configured it on.
+// THIS IS THE INSTRUMENT THAT SEPARATES "a register is wrong" FROM "the bus is
+// dead", so it has to be the one measurement in here that cannot itself fail
+// quietly - which is exactly why it does not call the driver's own
+// es8311_register_dump(). That one prints with newlib printf(), and on this board
+// stdio goes to UART0's GPIO43/44 pads: the sdkconfig sets
+// CONFIG_ESP_CONSOLE_UART_DEFAULT and lists USB Serial/JTAG only as the
+// SECONDARY console, which catches ets_printf/ESP_LOG and not stdio. The Mac
+// reads the USB CDC, so every line of it would land nowhere and a perfectly
+// healthy codec would read as a dead bus. It also wraps each read in
+// ESP_ERROR_CHECK(), which abort()s on the single failure a dump exists to
+// report. Serial.printf() is the only output on this board that is known to
+// arrive, so the dump is rewritten around it.
+//
+// Reads go through the same legacy i2c_master_write_read_device() the driver
+// uses, on the port touch already installed - no second master, which is the
+// conflict this board aborts on. A failed read prints "--": all dashes is a dead
+// bus, one dash is one bad register, and the difference is the whole point.
+static void toneDumpCodecRegs() {
+  for (int base = 0; base < 0x4A; base += 8) {
+    char line[64];
+    int n = snprintf(line, sizeof(line), "TONETEST reg %02X:", base);
+    for (int r = base; r < base + 8 && r < 0x4A; r++) {
+      uint8_t reg = (uint8_t) r, val = 0;
+      const bool ok = i2c_master_write_read_device(I2C_NUM_0, ES8311_ADDRESS_0,
+                                                  &reg, 1, &val, 1,
+                                                  pdMS_TO_TICKS(100)) == ESP_OK;
+      n += snprintf(line + n, sizeof(line) - n, ok ? " %02X" : " --", val);
+    }
+    Serial.println(line);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// THE SHARED OUTPUT PATH. One I2S channel and one codec handle, brought up once
+// in setup() and never torn down, because three callers need them and each one
+// paying its own ~74-register init is the wrong shape: the beeper fires on every
+// asking transition (I2C traffic per beep, and tens of ms of it), TONETEST runs
+// on demand, and the capture path in the voice spec needs the SAME I2S channel -
+// the ES8311 does record and play over one peripheral in STD mode.
+//
+// Held permanently rather than reference-counted because there is nothing to
+// save: the SC8002B cannot be shut down from a 3.3V GPIO (see the board header),
+// so its idle current and noise floor are present whether or not this is up.
+// Silence comes from es8311_voice_mute(), which is exactly what the idle state
+// here is.
+//
+// A function-local static, not a file-scope object: this file is concatenated
+// into one translation unit with the rest of the sketch, and a global I2SClass
+// would run its constructor before setup() in an order nothing here controls -
+// the same class of hazard as the legacy-I2C-versus-Wire abort this board has
+// already paid for once.
+static I2SClass& audioI2s() { static I2SClass inst; return inst; }
+static es8311_handle_t audioCodec = NULL;
+static bool audioOutReady = false;
+// One period of the beep tone, looped. int16 stereo, so 2 samples per frame.
+static int16_t beepTone[BEEP_TONE_FRAMES * 2];
+
+// Brought up from setup(). Returns false and LOGS WHY on any failure, leaving
+// audioOutReady false so every caller degrades to silence rather than to a
+// crash - a status display that boots is worth more than one that insists on a
+// beeper. Must run AFTER the I2C bus exists, since the codec shares the port
+// touch installed; asserted rather than assumed, because a silent failure here
+// would present as "the beep does not work" a long way from its cause.
+bool audioOutBegin() {
+  if (audioOutReady) return true;
+
+  // I2S FIRST so MCLK is running before the codec computes its dividers off it -
+  // the order Espressif's own i2s_es8311 example uses.
+  I2SClass& i2s = audioI2s();
+  i2s.setPins(PIN_I2S_BCLK, PIN_I2S_LRCK, PIN_I2S_DOUT, PIN_I2S_DIN, PIN_I2S_MCLK);
+  if (!i2s.begin(I2S_MODE_STD, TONE_SAMPLE_HZ, I2S_DATA_BIT_WIDTH_16BIT,
+                 I2S_SLOT_MODE_STEREO)) {
+    Serial.printf("AUDIO OUT: I2SClass::begin() failed - bclk=%d lrck=%d dout=%d "
+                  "din=%d mclk=%d. No beeper this boot.\n", PIN_I2S_BCLK,
+                  PIN_I2S_LRCK, PIN_I2S_DOUT, PIN_I2S_DIN, PIN_I2S_MCLK);
+    return false;
+  }
+
+  audioCodec = es8311_create(I2C_NUM_0, ES8311_ADDRESS_0);
+  if (audioCodec == NULL) {
+    Serial.println("AUDIO OUT: es8311_create() returned NULL (out of heap). "
+                   "No beeper this boot.");
+    i2s.end();
+    return false;
+  }
+  const es8311_clock_config_t clk = {
+    .mclk_inverted = false, .sclk_inverted = false,
+    .mclk_from_mclk_pin = true, .mclk_frequency = TONE_MCLK_HZ,
+    .sample_frequency = TONE_SAMPLE_HZ,
+  };
+  esp_err_t e = es8311_init(audioCodec, &clk, ES8311_RESOLUTION_16,
+                            ES8311_RESOLUTION_16);
+  if (e != ESP_OK) {
+    Serial.printf("AUDIO OUT: es8311_init() = %s (0x%x). No beeper this boot.\n",
+                  esp_err_to_name(e), e);
+    es8311_delete(audioCodec);
+    audioCodec = NULL;
+    i2s.end();
+    return false;
+  }
+  es8311_sample_frequency_config(audioCodec, TONE_MCLK_HZ, TONE_SAMPLE_HZ);
+  es8311_voice_mute(audioCodec, true);   // the idle state IS muted
+
+#if BOARD_HAS_MIC
+  // CAPTURE, configured here because es8311_init() already set up both directions
+  // and these two calls only select WHICH input and how much gain. digital_mic is
+  // false and that is a schematic reading rather than a default: the capsule is
+  // analog into MIC1P/MIC1N with no clock line - see the note in the board header.
+  // Both return codes are reported, because a mic that was never configured
+  // records digital silence, which is indistinguishable from a dead capsule.
+  const esp_err_t me = es8311_microphone_config(audioCodec, false);
+  const esp_err_t ge = es8311_microphone_gain_set(audioCodec, MIC_GAIN);
+  Serial.printf("AUDIO IN: analog mic configured (%s), gain set (%s).\n",
+                esp_err_to_name(me), esp_err_to_name(ge));
+#endif
+
+  // sinf rather than a square wave: a square's harmonics run past the codec's
+  // reconstruction filter, and its ringing would be part of every beep.
+  for (int i = 0; i < BEEP_TONE_FRAMES; i++) {
+    const int16_t v = (int16_t) (TONE_AMPLITUDE *
+                                 sinf(2.0f * PI * BEEP_TONE_HZ * i / TONE_SAMPLE_HZ));
+    beepTone[i * 2]     = v;
+    beepTone[i * 2 + 1] = v;
+  }
+
+  // The amp cannot be gated, so this is set once and left - see the board header.
+  pinMode(PIN_AMP_EN, OUTPUT);
+  digitalWrite(PIN_AMP_EN, AMP_EN_ENABLE_LEVEL);
+
+  audioOutReady = true;
+  Serial.printf("AUDIO OUT: ES8311 up at %d Hz, MCLK %d Hz, beep tone %d Hz "
+                "(%d frames = %dms), muted until something plays.\n",
+                TONE_SAMPLE_HZ, TONE_MCLK_HZ, BEEP_TONE_HZ, BEEP_TONE_FRAMES,
+                BEEP_TONE_FRAMES * 1000 / TONE_SAMPLE_HZ);
+  return true;
+}
+
+// One 20ms buffer of tone into the DMA. Callers keep their own model of how much
+// is queued (see startBeep/updateBeep) because I2SClass offers no way to ask.
+static void audioFeedBeepChunk() {
+  audioI2s().write((const uint8_t*) beepTone, sizeof(beepTone));
+}
+#endif  // !BOARD_USES_TFT_ESPI - the shared audio context and its constants
+
 #if BOARD_HAS_MIC && BOARD_USES_TFT_ESPI
 void micStream() {
   // ADC driver FIRST, before any large allocation - see the allocation-order note
@@ -1103,10 +1349,186 @@ void micLevelTest() {
 // channels when setPins() was given both dout and din, which this board's was
 // (GPIO15 and GPIO16). So capture is readBytes() on a channel that has been live
 // since boot, and a second begin() would FAIL rather than help.
+// One read granularity for every capture path here: 512 stereo frames = 2048
+// bytes = 32ms at 16kHz. Static rather than a local because three functions want
+// it and 2KB is a lot of the 8KB loopTask stack to spend on a scratch buffer.
+#define MIC_CHUNK_FRAMES  512
+static int16_t micScratch[MIC_CHUNK_FRAMES * 2];
+
+// Reduce one chunk. Left and right are tracked SEPARATELY and that is a
+// measurement, not fussiness: the ES8311 is a MONO codec being read in stereo
+// slot mode, so whether the mic lands in both slots, one, or is duplicated is a
+// property of the part nobody here has established. Guessing it wrong halves the
+// sample rate or records silence, so the probe reports both and the answer gets
+// written down.
+// THREE accumulators, indexed rather than passed as a struct, and that is forced
+// rather than stylistic: Arduino inserts its auto-generated prototypes ABOVE the
+// first function of the whole concatenated sketch, so a signature naming a type
+// declared here in audio.ino does not compile - the type does not exist yet at
+// the point the prototype lands. CLAUDE.md states this rule for SessionInfo and
+// friends; this is the same rule, met by keeping every signature to int and
+// int16_t* instead of hoisting a mic-only type into the main file.
+#define MIC_ACC_ALL    0
+#define MIC_ACC_WIN    1
+#define MIC_ACC_FIRST  2
+#define MIC_ACC_COUNT  3
+static int32_t  micAccMn[MIC_ACC_COUNT][2], micAccMx[MIC_ACC_COUNT][2];
+static int64_t  micAccSum[MIC_ACC_COUNT][2];
+static uint32_t micAccN[MIC_ACC_COUNT], micAccClip[MIC_ACC_COUNT];
+static uint32_t micAccZero[MIC_ACC_COUNT][2];
+
+static void micAccReset(int a) {
+  micAccMn[a][0] = micAccMn[a][1] = 32767;
+  micAccMx[a][0] = micAccMx[a][1] = -32768;
+  micAccSum[a][0] = micAccSum[a][1] = 0;
+  micAccN[a] = micAccClip[a] = 0;
+  micAccZero[a][0] = micAccZero[a][1] = 0;
+}
+
+// Left and right are tracked SEPARATELY and that is a measurement, not fussiness:
+// the ES8311 is a MONO codec being read in stereo slot mode, so whether the mic
+// lands in both slots, one, or neither is a property of the part that nobody here
+// has established. Guessing wrong halves the effective rate or records silence.
+static void micAccAdd(int a, const int16_t* buf, int frames) {
+  for (int i = 0; i < frames; i++) {
+    for (int c = 0; c < 2; c++) {
+      const int32_t v = buf[i * 2 + c];
+      if (v < micAccMn[a][c]) micAccMn[a][c] = v;
+      if (v > micAccMx[a][c]) micAccMx[a][c] = v;
+      micAccSum[a][c] += v;
+      if (v == 0) micAccZero[a][c]++;
+    }
+    if (buf[i * 2] >= 32000 || buf[i * 2] <= -32000) micAccClip[a]++;
+    micAccN[a]++;
+  }
+}
+
+// Read one chunk. Returns FRAMES read, or 0 on timeout - readBytes() inherits
+// Stream's 1000ms timeout and returns 0 rather than blocking forever, which is
+// what makes "no samples at all" a reportable condition instead of a hang.
+static int micReadChunk() {
+  const size_t got = audioI2s().readBytes((char*) micScratch, sizeof(micScratch));
+  return (int) (got / (2 * sizeof(int16_t)));
+}
+
 void micStream()    { Serial.println("AUDIO: board 2 streaming capture not implemented yet"); }
 void micRecord()    { Serial.println("AUDIO: board 2 one-shot capture not implemented yet"); }
 void micMonitor()   { Serial.println("MIC: board 2 live meter not implemented yet"); }
-void micLevelTest() { Serial.println("MIC: board 2 level probe not implemented yet"); }
+
+// The probe the spec's Decision 3 step 2 asks for, and the one thing that has to
+// exist before any recording is believed. Its job is to separate three faults a
+// single "it did not work" cannot: no samples arriving at all, samples arriving
+// as constant zero, and a genuinely quiet mic.
+void micLevelTest() {
+  if (!audioOutReady) {
+    Serial.println("MIC: the shared audio path never came up - see the AUDIO OUT line "
+                   "from boot. No probe run.");
+    return;
+  }
+
+  // A cue, so the operator knows when the window opens. Board 1 learned this the
+  // expensive way: the command file is polled, so it lands up to a second after
+  // you hit enter, and several runs recorded nothing but room tone because the
+  // talking happened too early. Bypasses beepEnabled deliberately - here the cue
+  // IS the test rather than a notification - and finishes well before sampling,
+  // or the beep itself lands in the floor measurement.
+  es8311_voice_mute(audioCodec, false);
+  for (int i = 0; i < 7; i++) audioFeedBeepChunk();   // ~140ms
+  delay(300);
+  es8311_voice_mute(audioCodec, true);
+  delay(350);
+
+  const int windows = MIC_TEST_MS / MIC_WIN_MS;
+  Serial.printf("MIC test: %d windows of %dms at %d Hz/16-bit stereo through the "
+                "ES8311 - SPEAK NOW\n", windows, MIC_WIN_MS, TONE_SAMPLE_HZ);
+
+  micAccReset(MIC_ACC_ALL);
+  micAccReset(MIC_ACC_FIRST);
+  int winPP[MIC_TEST_MS / MIC_WIN_MS];
+  uint32_t timeouts = 0;
+  String pps = "";
+
+  for (int w = 0; w < windows; w++) {
+    micAccReset(MIC_ACC_WIN);
+    const unsigned long t0 = millis();
+    while (millis() - t0 < (unsigned long) MIC_WIN_MS) {
+      const int frames = micReadChunk();
+      if (frames == 0) { timeouts++; break; }
+      micAccAdd(MIC_ACC_WIN, micScratch, frames);
+      micAccAdd(MIC_ACC_ALL, micScratch, frames);
+      if (w == 0) micAccAdd(MIC_ACC_FIRST, micScratch, frames);
+    }
+    winPP[w] = (int) (micAccMx[MIC_ACC_WIN][0] - micAccMn[MIC_ACC_WIN][0]);
+    if (winPP[w] < 0) winPP[w] = 0;      // no samples this window
+    pps += String(winPP[w]); pps += ' ';
+    // Same reason every other blocking loop here does it: loop() cannot run, so
+    // nothing else would reap a pending BLE slot for the duration.
+    reapBleLinks(true);
+  }
+
+  if (micAccN[MIC_ACC_ALL] == 0) {
+    Serial.printf("MIC verdict: NO SAMPLES AT ALL - readBytes() timed out %lu times and "
+                  "returned nothing. This is the I2S RX channel or the codec's ADC, NOT a "
+                  "quiet mic. Check that begin() was given a din pin and that "
+                  "es8311_microphone_config() returned ESP_OK above.\n",
+                  (unsigned long) timeouts);
+    return;
+  }
+
+  // WHICH SLOT CARRIES THE MIC - reported from the first window, and the reason
+  // this probe exists before the recorder rather than after it.
+  Serial.printf("MIC slots (first window): L min=%ld max=%ld mean=%ld zeros=%lu/%lu | "
+                "R min=%ld max=%ld mean=%ld zeros=%lu/%lu\n",
+                (long) micAccMn[MIC_ACC_FIRST][0], (long) micAccMx[MIC_ACC_FIRST][0],
+                (long) (micAccN[MIC_ACC_FIRST] ? micAccSum[MIC_ACC_FIRST][0] /
+                        (int64_t) micAccN[MIC_ACC_FIRST] : 0),
+                (unsigned long) micAccZero[MIC_ACC_FIRST][0],
+                (unsigned long) micAccN[MIC_ACC_FIRST],
+                (long) micAccMn[MIC_ACC_FIRST][1], (long) micAccMx[MIC_ACC_FIRST][1],
+                (long) (micAccN[MIC_ACC_FIRST] ? micAccSum[MIC_ACC_FIRST][1] /
+                        (int64_t) micAccN[MIC_ACC_FIRST] : 0),
+                (unsigned long) micAccZero[MIC_ACC_FIRST][1],
+                (unsigned long) micAccN[MIC_ACC_FIRST]);
+
+  int floorPP = 65535, peakPP = 0, elevated = 0;
+  for (int w = 0; w < windows; w++) {
+    if (winPP[w] < floorPP) floorPP = winPP[w];
+    if (winPP[w] > peakPP) peakPP = winPP[w];
+  }
+  for (int w = 0; w < windows; w++) if (winPP[w] > floorPP + floorPP / 2) elevated++;
+  const int ratioX10 = floorPP > 0 ? (peakPP * 10) / floorPP : 0;
+
+  Serial.printf("MIC pp/window: %s\n", pps.c_str());
+  Serial.printf("MIC done n=%lu dcL=%ld min=%ld max=%ld floor=%d peak=%d ratio=%d.%dx "
+                "loud=%d/%d clipped=%lu timeouts=%lu\n",
+                (unsigned long) micAccN[MIC_ACC_ALL],
+                (long) (micAccSum[MIC_ACC_ALL][0] / (int64_t) micAccN[MIC_ACC_ALL]),
+                (long) micAccMn[MIC_ACC_ALL][0], (long) micAccMx[MIC_ACC_ALL][0],
+                floorPP, peakPP, ratioX10 / 10, ratioX10 % 10, elevated, windows,
+                (unsigned long) micAccClip[MIC_ACC_ALL], (unsigned long) timeouts);
+
+  // The verdicts. Note the FIRST one has no board 1 counterpart and is the whole
+  // point: on an analog ADC a dead wire reads as a pinned DC level, but on I2S it
+  // reads as perfect digital zero, which no amount of gain will ever move.
+  if (micAccZero[MIC_ACC_ALL][0] == micAccN[MIC_ACC_ALL])
+    Serial.println("MIC verdict: every sample is EXACTLY ZERO - the channel is live but the "
+                   "codec's ADC is producing nothing. Suspect es8311_microphone_config() or "
+                   "the capsule's supply, NOT the gain.");
+  else if (peakPP < 40)
+    Serial.printf("MIC verdict: samples arriving but dead quiet (peak pp=%d) - raise MIC_GAIN "
+                  "(now %d of 8 steps, 6dB each).\n", peakPP, (int) MIC_GAIN);
+  else if (micAccClip[MIC_ACC_ALL] > micAccN[MIC_ACC_ALL] / 200)
+    Serial.printf("MIC verdict: HEARD YOU, but clipping (%lu samples at the rails) - lower "
+                  "MIC_GAIN.\n", (unsigned long) micAccClip[MIC_ACC_ALL]);
+  else if (elevated >= 3 && ratioX10 >= 20)
+    Serial.printf("MIC verdict: HEARD YOU - %d of %d windows well above the floor (sustained "
+                  "sound).\n", elevated, windows);
+  else if (elevated >= 1)
+    Serial.printf("MIC verdict: ONE transient only (%d window) - a knock, not a voice.\n",
+                  elevated);
+  else
+    Serial.println("MIC verdict: noise floor only (flat) - nothing heard.");
+}
 
 #else
 // ---------- No microphone on this board ----------
@@ -1150,241 +1572,11 @@ void micLevelTest() { Serial.println("MIC: no microphone on this board"); }
 // in the needs-input path calls this. It is a diagnostic that proves the output
 // path exists; turning that into a beeper is later work with its own concerns
 // (latency, a persistent I2S channel, the volume setting).
+// The rest of the codec diagnostics. Reopened here because the constants and the
+// shared context that used to head this section moved ABOVE the capture chain -
+// they are needed by board 2's capture path, and #if/#elif branches cannot have
+// code inserted between them.
 #if !BOARD_USES_TFT_ESPI
-
-// 16 kHz because it is what every later voice feature on this board will use
-// (Whisper's training rate - see the board-1 mic notes), so the clock numbers
-// proved here are the ones that get reused rather than a convenient one-off.
-#define TONE_SAMPLE_HZ   16000
-// TONE_FRAMES must hold a whole number of periods of every tone frequency used,
-// so the loop can repeat the buffer with no phase discontinuity - a click at
-// every buffer boundary is exactly the artefact that would make a working path
-// sound broken. 320 frames is 20ms, which is 20 cycles of 1 kHz and 8 of 400 Hz.
-#define TONE_FRAMES       320
-// About -4 dBFS. This was 6000 (-15 dBFS) at volume 60, which with the codec's
-// own -19 dB put the tone ~34 dB below full scale - a defensible choice for
-// "nobody knows the amp's gain yet" that turned out to be the wrong risk to
-// hedge. The failure this test exists to distinguish is SILENCE, and a quiet
-// tone and a dead path are the same observation. Loud is the diagnostic.
-#define TONE_AMPLITUDE    20000
-// ES8311 volume register, 0..100 - the DEFAULT only; `TONETEST <0-100>` overrides
-// it at runtime. This was 90 on the argument that loud is the diagnostic, since a
-// quiet tone and a dead path are the same observation. That argument is sound for
-// a FIRST run and wrong as a standing default: this command gets run in a house
-// with people asleep in it, and a diagnostic nobody dares trigger is worse than a
-// quiet one. The epistemics moved into the log instead of the amplitude - every
-// run prints the volume it used and says outright that silence at a low volume
-// proves nothing. 30 is audible in a quiet room at arm's length.
-#define TONE_VOLUME       30
-// THE VOLUME SCALE IS LINEAR IN dB, WHICH MAKES IT USELESS TO GUESS ON. The
-// ES8311's register 0x32 is 0.5dB per LSB with 0xBF = 0dB, and
-// es8311_voice_volume_set maps 0..100 onto the full 0..255 range - so volume 15
-// is register 0x26, about -77dB, i.e. ~97dB below the volume-90 tone that was
-// plainly audible. Two runs were spent discovering that by ear. TONELADDER
-// exists so the audible floor is found in ONE run instead: a single pitch at
-// rising volumes, and the listener reports the first step they hear.
-//
-// The steps are 10 apart, which is 25.6 register counts or ~12.8dB - coarse
-// enough that a step is unmistakably louder than the one before rather than
-// arguably so, which is what "the first one I heard" has to mean to be usable.
-#define TONE_LADDER_STEPS  5
-#define TONE_LADDER_FIRST 35
-#define TONE_LADDER_GAP   10
-// Shorter than TONE_BURST_MS because the amp's turn-on ramp is paid ONCE, before
-// the first step - the amp stays enabled across the whole ladder, so no later
-// step is at risk of landing inside it.
-#define TONE_LADDER_MS   1200
-
-// Guard rails for the runtime argument. 100 is the codec's own maximum, and the
-// floor is 1 rather than 0 because `TONETEST 0` would configure the whole chain
-// correctly and then play nothing, which is indistinguishable from the fault this
-// command exists to detect.
-#define TONE_VOLUME_MIN    1
-#define TONE_VOLUME_MAX  100
-
-// THE AMP'S TURN-ON RAMP IS THE REASON THE FIRST RUN OF THIS TEST PROVED
-// NOTHING. U6 is an SC8002B, an LM4871-class part, and its BYPASS pin carries
-// C41 = 1uF: coming out of shutdown, that node has to charge to VDD/2 through
-// the internal divider before the output is anything but a ramp. That is
-// hundreds of milliseconds, not tens. The first version settled 30ms and then
-// played 200ms beeps on the LOW trial, so the entire measurement could have
-// happened inside the ramp. Both numbers below are set from that, and the tone
-// is one continuous burst rather than beeps for the same reason.
-#define TONE_SETTLE_MS     400
-#define TONE_BURST_MS     2000
-
-// The two trials are told apart by PITCH, not by pattern or by the log. Whoever
-// is listening should not have to watch a serial console to know which polarity
-// they just heard, and "one long tone versus two short ones" stopped being
-// available the moment both trials had to be long. Both divide 16 kHz exactly
-// and both fit a whole number of cycles in TONE_FRAMES (20 and 8), so the
-// buffer still loops without a click at the seam.
-#define TONE_HZ_LOW_TRIAL  1000
-#define TONE_HZ_HIGH_TRIAL  400
-
-// MCLK IS ESTABLISHED FROM THE ARDUINO CORE'S OWN SOURCE, NOT ASSUMED, and the
-// codec has to be told the same number or es8311_sample_frequency_config()
-// cannot find a divider set and returns ESP_ERR_INVALID_ARG - a classic silent
-// failure, because every register write around it succeeds.
-// Where the 256 comes from: ESP_I2S.cpp (core 3.3.11) #undefs the IDF's
-// I2S_STD_CLK_DEFAULT_CONFIG for SOC_I2S_HW_VERSION_2 - which the S3 is - and
-// redefines it with `.mclk_multiple = I2S_MCLK_MULTIPLE_256` hardcoded, and
-// I2SClass::begin() offers no way to override it. i2s_types.h documents that
-// enum as literally "MCLK = sample_rate * 256". So 16000 * 256 = 4096000, which
-// IS a row in the driver's coeff_div[] table ({4096000, 16000, ...}).
-// A SUBTLETY WORTH KEEPING: the PLL cannot necessarily hit 4.096 MHz exactly,
-// and it does not need to. The codec is a SLAVE - it derives its internal rates
-// from the RATIO of the clocks it is handed, and that ratio is exactly 256 by
-// construction whatever the PLL rounds to. So this number is right even if a
-// scope reads 4.0959 MHz.
-#define TONE_MCLK_HZ     (TONE_SAMPLE_HZ * 256)
-
-// Bytes in one buffer half: TONE_FRAMES stereo frames of int16.
-#define TONE_HALF_BYTES  ((size_t) TONE_FRAMES * 2 * sizeof(int16_t))
-
-// The codec's register file, read back over the bus we just configured it on.
-// THIS IS THE INSTRUMENT THAT SEPARATES "a register is wrong" FROM "the bus is
-// dead", so it has to be the one measurement in here that cannot itself fail
-// quietly - which is exactly why it does not call the driver's own
-// es8311_register_dump(). That one prints with newlib printf(), and on this board
-// stdio goes to UART0's GPIO43/44 pads: the sdkconfig sets
-// CONFIG_ESP_CONSOLE_UART_DEFAULT and lists USB Serial/JTAG only as the
-// SECONDARY console, which catches ets_printf/ESP_LOG and not stdio. The Mac
-// reads the USB CDC, so every line of it would land nowhere and a perfectly
-// healthy codec would read as a dead bus. It also wraps each read in
-// ESP_ERROR_CHECK(), which abort()s on the single failure a dump exists to
-// report. Serial.printf() is the only output on this board that is known to
-// arrive, so the dump is rewritten around it.
-//
-// Reads go through the same legacy i2c_master_write_read_device() the driver
-// uses, on the port touch already installed - no second master, which is the
-// conflict this board aborts on. A failed read prints "--": all dashes is a dead
-// bus, one dash is one bad register, and the difference is the whole point.
-static void toneDumpCodecRegs() {
-  for (int base = 0; base < 0x4A; base += 8) {
-    char line[64];
-    int n = snprintf(line, sizeof(line), "TONETEST reg %02X:", base);
-    for (int r = base; r < base + 8 && r < 0x4A; r++) {
-      uint8_t reg = (uint8_t) r, val = 0;
-      const bool ok = i2c_master_write_read_device(I2C_NUM_0, ES8311_ADDRESS_0,
-                                                  &reg, 1, &val, 1,
-                                                  pdMS_TO_TICKS(100)) == ESP_OK;
-      n += snprintf(line + n, sizeof(line) - n, ok ? " %02X" : " --", val);
-    }
-    Serial.println(line);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// THE SHARED OUTPUT PATH. One I2S channel and one codec handle, brought up once
-// in setup() and never torn down, because three callers need them and each one
-// paying its own ~74-register init is the wrong shape: the beeper fires on every
-// asking transition (I2C traffic per beep, and tens of ms of it), TONETEST runs
-// on demand, and the capture path in the voice spec needs the SAME I2S channel -
-// the ES8311 does record and play over one peripheral in STD mode.
-//
-// Held permanently rather than reference-counted because there is nothing to
-// save: the SC8002B cannot be shut down from a 3.3V GPIO (see the board header),
-// so its idle current and noise floor are present whether or not this is up.
-// Silence comes from es8311_voice_mute(), which is exactly what the idle state
-// here is.
-//
-// A function-local static, not a file-scope object: this file is concatenated
-// into one translation unit with the rest of the sketch, and a global I2SClass
-// would run its constructor before setup() in an order nothing here controls -
-// the same class of hazard as the legacy-I2C-versus-Wire abort this board has
-// already paid for once.
-static I2SClass& audioI2s() { static I2SClass inst; return inst; }
-static es8311_handle_t audioCodec = NULL;
-static bool audioOutReady = false;
-// One period of the beep tone, looped. int16 stereo, so 2 samples per frame.
-static int16_t beepTone[BEEP_TONE_FRAMES * 2];
-
-// Brought up from setup(). Returns false and LOGS WHY on any failure, leaving
-// audioOutReady false so every caller degrades to silence rather than to a
-// crash - a status display that boots is worth more than one that insists on a
-// beeper. Must run AFTER the I2C bus exists, since the codec shares the port
-// touch installed; asserted rather than assumed, because a silent failure here
-// would present as "the beep does not work" a long way from its cause.
-bool audioOutBegin() {
-  if (audioOutReady) return true;
-
-  // I2S FIRST so MCLK is running before the codec computes its dividers off it -
-  // the order Espressif's own i2s_es8311 example uses.
-  I2SClass& i2s = audioI2s();
-  i2s.setPins(PIN_I2S_BCLK, PIN_I2S_LRCK, PIN_I2S_DOUT, PIN_I2S_DIN, PIN_I2S_MCLK);
-  if (!i2s.begin(I2S_MODE_STD, TONE_SAMPLE_HZ, I2S_DATA_BIT_WIDTH_16BIT,
-                 I2S_SLOT_MODE_STEREO)) {
-    Serial.printf("AUDIO OUT: I2SClass::begin() failed - bclk=%d lrck=%d dout=%d "
-                  "din=%d mclk=%d. No beeper this boot.\n", PIN_I2S_BCLK,
-                  PIN_I2S_LRCK, PIN_I2S_DOUT, PIN_I2S_DIN, PIN_I2S_MCLK);
-    return false;
-  }
-
-  audioCodec = es8311_create(I2C_NUM_0, ES8311_ADDRESS_0);
-  if (audioCodec == NULL) {
-    Serial.println("AUDIO OUT: es8311_create() returned NULL (out of heap). "
-                   "No beeper this boot.");
-    i2s.end();
-    return false;
-  }
-  const es8311_clock_config_t clk = {
-    .mclk_inverted = false, .sclk_inverted = false,
-    .mclk_from_mclk_pin = true, .mclk_frequency = TONE_MCLK_HZ,
-    .sample_frequency = TONE_SAMPLE_HZ,
-  };
-  esp_err_t e = es8311_init(audioCodec, &clk, ES8311_RESOLUTION_16,
-                            ES8311_RESOLUTION_16);
-  if (e != ESP_OK) {
-    Serial.printf("AUDIO OUT: es8311_init() = %s (0x%x). No beeper this boot.\n",
-                  esp_err_to_name(e), e);
-    es8311_delete(audioCodec);
-    audioCodec = NULL;
-    i2s.end();
-    return false;
-  }
-  es8311_sample_frequency_config(audioCodec, TONE_MCLK_HZ, TONE_SAMPLE_HZ);
-  es8311_voice_mute(audioCodec, true);   // the idle state IS muted
-
-#if BOARD_HAS_MIC
-  // CAPTURE, configured here because es8311_init() already set up both directions
-  // and these two calls only select WHICH input and how much gain. digital_mic is
-  // false and that is a schematic reading rather than a default: the capsule is
-  // analog into MIC1P/MIC1N with no clock line - see the note in the board header.
-  // Both return codes are reported, because a mic that was never configured
-  // records digital silence, which is indistinguishable from a dead capsule.
-  const esp_err_t me = es8311_microphone_config(audioCodec, false);
-  const esp_err_t ge = es8311_microphone_gain_set(audioCodec, MIC_GAIN);
-  Serial.printf("AUDIO IN: analog mic configured (%s), gain set (%s).\n",
-                esp_err_to_name(me), esp_err_to_name(ge));
-#endif
-
-  // sinf rather than a square wave: a square's harmonics run past the codec's
-  // reconstruction filter, and its ringing would be part of every beep.
-  for (int i = 0; i < BEEP_TONE_FRAMES; i++) {
-    const int16_t v = (int16_t) (TONE_AMPLITUDE *
-                                 sinf(2.0f * PI * BEEP_TONE_HZ * i / TONE_SAMPLE_HZ));
-    beepTone[i * 2]     = v;
-    beepTone[i * 2 + 1] = v;
-  }
-
-  // The amp cannot be gated, so this is set once and left - see the board header.
-  pinMode(PIN_AMP_EN, OUTPUT);
-  digitalWrite(PIN_AMP_EN, AMP_EN_ENABLE_LEVEL);
-
-  audioOutReady = true;
-  Serial.printf("AUDIO OUT: ES8311 up at %d Hz, MCLK %d Hz, beep tone %d Hz "
-                "(%d frames = %dms), muted until something plays.\n",
-                TONE_SAMPLE_HZ, TONE_MCLK_HZ, BEEP_TONE_HZ, BEEP_TONE_FRAMES,
-                BEEP_TONE_FRAMES * 1000 / TONE_SAMPLE_HZ);
-  return true;
-}
-
-// One 20ms buffer of tone into the DMA. Callers keep their own model of how much
-// is queued (see startBeep/updateBeep) because I2SClass offers no way to ask.
-static void audioFeedBeepChunk() {
-  audioI2s().write((const uint8_t*) beepTone, sizeof(beepTone));
-}
 
 // One register, for callers that need to state what a write actually landed.
 // Returns -1 on a failed read so the caller can print "??" rather than a zero
