@@ -1135,18 +1135,39 @@ void micLevelTest() { Serial.println("MIC: no microphone on this board"); }
 // (Whisper's training rate - see the board-1 mic notes), so the clock numbers
 // proved here are the ones that get reused rather than a convenient one-off.
 #define TONE_SAMPLE_HZ   16000
-// 1 kHz divides 16 kHz exactly (16 samples a cycle), so the table below holds a
-// whole number of periods and the loop can repeat it with no phase discontinuity
-// - a click at every buffer boundary is exactly the artefact that would make a
-// working path sound broken.
-#define TONE_HZ           1000
-#define TONE_FRAMES       320    // 20 complete cycles
-// About -15 dBFS. Modest on purpose: this is the first sound this hardware has
-// ever made and nobody knows the amp's gain, so full scale risks a shriek from a
-// device someone is holding next to their ear waiting for anything at all.
-#define TONE_AMPLITUDE    6000
-// ES8311 volume register, 0..100. 60 pairs with the amplitude above.
-#define TONE_VOLUME       60
+// TONE_FRAMES must hold a whole number of periods of every tone frequency used,
+// so the loop can repeat the buffer with no phase discontinuity - a click at
+// every buffer boundary is exactly the artefact that would make a working path
+// sound broken. 320 frames is 20ms, which is 20 cycles of 1 kHz and 8 of 400 Hz.
+#define TONE_FRAMES       320
+// About -4 dBFS. This was 6000 (-15 dBFS) at volume 60, which with the codec's
+// own -19 dB put the tone ~34 dB below full scale - a defensible choice for
+// "nobody knows the amp's gain yet" that turned out to be the wrong risk to
+// hedge. The failure this test exists to distinguish is SILENCE, and a quiet
+// tone and a dead path are the same observation. Loud is the diagnostic.
+#define TONE_AMPLITUDE    20000
+// ES8311 volume register, 0..100.
+#define TONE_VOLUME       90
+
+// THE AMP'S TURN-ON RAMP IS THE REASON THE FIRST RUN OF THIS TEST PROVED
+// NOTHING. U6 is an SC8002B, an LM4871-class part, and its BYPASS pin carries
+// C41 = 1uF: coming out of shutdown, that node has to charge to VDD/2 through
+// the internal divider before the output is anything but a ramp. That is
+// hundreds of milliseconds, not tens. The first version settled 30ms and then
+// played 200ms beeps on the LOW trial, so the entire measurement could have
+// happened inside the ramp. Both numbers below are set from that, and the tone
+// is one continuous burst rather than beeps for the same reason.
+#define TONE_SETTLE_MS     400
+#define TONE_BURST_MS     2000
+
+// The two trials are told apart by PITCH, not by pattern or by the log. Whoever
+// is listening should not have to watch a serial console to know which polarity
+// they just heard, and "one long tone versus two short ones" stopped being
+// available the moment both trials had to be long. Both divide 16 kHz exactly
+// and both fit a whole number of cycles in TONE_FRAMES (20 and 8), so the
+// buffer still loops without a click at the seam.
+#define TONE_HZ_LOW_TRIAL  1000
+#define TONE_HZ_HIGH_TRIAL  400
 
 // MCLK IS ESTABLISHED FROM THE ARDUINO CORE'S OWN SOURCE, NOT ASSUMED, and the
 // codec has to be told the same number or es8311_sample_frequency_config()
@@ -1210,9 +1231,13 @@ static void toneDumpCodecRegs() {
 // trial B's polarity - corrupting the one measurement this whole function exists
 // to make. Five zero-buffers (~100ms) push the tone through the DMA, and the
 // delay lets the last of it actually leave.
-static void tonePlayBurst(I2SClass& i2s, const int16_t* buf, int ms) {
+static size_t tonePlayBurst(I2SClass& i2s, const int16_t* buf, int ms) {
   const int16_t* quiet = buf + TONE_FRAMES * 2;
   const int reps = (ms * TONE_SAMPLE_HZ / 1000) / TONE_FRAMES;
+  // Accumulated and returned because a write() that accepts FEWER bytes than it
+  // was given - or none - is otherwise indistinguishable from a working path
+  // feeding a dead speaker, which is the exact ambiguity this run has to end.
+  size_t wrote = 0;
   for (int i = 0; i < reps; i++) {
     // Same reason the mic loops, calibration and the SCREENSHOT readback do it:
     // this is a blocking path loop() cannot reach, so nothing else would reap a
@@ -1224,18 +1249,21 @@ static void tonePlayBurst(I2SClass& i2s, const int16_t* buf, int ms) {
     // two minutes micStream() risks - the call is here for CONSISTENCY with a
     // rule this codebase states without exception, not because 3.6s is alarming.
     reapBleLinks(true);
-    i2s.write((const uint8_t*) buf, TONE_HALF_BYTES);
+    wrote += i2s.write((const uint8_t*) buf, TONE_HALF_BYTES);
   }
   for (int i = 0; i < 5; i++) i2s.write((const uint8_t*) quiet, TONE_HALF_BYTES);
   delay(80);
+  return wrote;
 }
 
 void toneTest() {
   Serial.println("TONETEST ---------------------------------------------------------");
-  Serial.printf("TONETEST driving %d Hz at %d Hz/16-bit stereo, MCLK %d Hz "
-                "(ESP_I2S hardcodes mclk_multiple=256; see the note in audio.ino), "
-                "codec volume %d/100, amplitude %d/32767.\n",
-                TONE_HZ, TONE_SAMPLE_HZ, TONE_MCLK_HZ, TONE_VOLUME, TONE_AMPLITUDE);
+  Serial.printf("TONETEST driving %d Hz then %d Hz at %d Hz/16-bit stereo, MCLK "
+                "%d Hz (ESP_I2S hardcodes mclk_multiple=256; see the note in "
+                "audio.ino), codec volume %d/100, amplitude %d/32767, %dms settle, "
+                "%dms per tone.\n",
+                TONE_HZ_LOW_TRIAL, TONE_HZ_HIGH_TRIAL, TONE_SAMPLE_HZ, TONE_MCLK_HZ,
+                TONE_VOLUME, TONE_AMPLITUDE, TONE_SETTLE_MS, TONE_BURST_MS);
 
   // I2S FIRST, so MCLK is already running when the codec configures its
   // dividers off it - the order Espressif's own i2s_es8311 example uses. The
@@ -1317,53 +1345,73 @@ void toneTest() {
     es8311_delete(codec);
     return;
   }
-  // sinf rather than a square wave: a square's harmonics reach past the codec's
-  // reconstruction filter, so filter ringing could pass for a working tone.
-  for (int i = 0; i < TONE_FRAMES; i++) {
-    const int16_t v = (int16_t) (TONE_AMPLITUDE *
-                                 sinf(2.0f * PI * TONE_HZ * i / TONE_SAMPLE_HZ));
-    buf[i * 2]     = v;   // left
-    buf[i * 2 + 1] = v;   // right
-  }
-  // The second half stays as calloc left it: silence.
+  // The second half stays as calloc left it: silence. The first half is filled
+  // per trial, because each trial now carries its own pitch.
 
   pinMode(PIN_AMP_EN, OUTPUT);
 
-  const int levels[2]  = { HIGH, LOW };
-  const char* names[2] = { "HIGH", "LOW" };
+  // LOW FIRST, because it is the likelier of the two to be the working one and a
+  // listener's attention is at its best on the first sound. R26 is a 10K pull-up
+  // from VCC3V3 to U6's SHUTDOWN pin, so the board's resting state is whatever
+  // HIGH means - and on an LM4871-class part, which the SC8002B is, SHUTDOWN is
+  // ACTIVE HIGH. That makes the resting state "shut down" and LOW the enabled
+  // one. The demo project's selftest drives it HIGH with the comment "enable the
+  // amplifier", which is the opposite; nothing in that project ever verified a
+  // sound, so its comment is an assumption and this ordering is a prediction.
+  // Both are still tried - the prediction picks the ORDER, never the coverage.
+  const int levels[2]  = { LOW, HIGH };
+  const char* names[2] = { "LOW", "HIGH" };
+  const int freqs[2]   = { TONE_HZ_LOW_TRIAL, TONE_HZ_HIGH_TRIAL };
   for (int t = 0; t < 2; t++) {
-    Serial.printf("TONETEST trial %c of 2 >>> amp enable GPIO%d = %s <<< "
-                  "%s. LISTEN NOW.\n", 'A' + t, PIN_AMP_EN, names[t],
-                  t == 0 ? "ONE LONG 600ms tone" : "TWO SHORT 200ms beeps");
-    digitalWrite(PIN_AMP_EN, levels[t]);
-    delay(30);                       // let the amp settle out of shutdown
-    es8311_voice_mute(codec, false);
-    if (t == 0) {
-      tonePlayBurst(i2s, buf, 600);
-    } else {
-      tonePlayBurst(i2s, buf, 200);
-      delay(150);
-      tonePlayBurst(i2s, buf, 200);
+    // sinf rather than a square wave: a square's harmonics reach past the
+    // codec's reconstruction filter, so filter ringing could pass for a tone.
+    for (int i = 0; i < TONE_FRAMES; i++) {
+      const int16_t v = (int16_t) (TONE_AMPLITUDE *
+                                   sinf(2.0f * PI * freqs[t] * i / TONE_SAMPLE_HZ));
+      buf[i * 2]     = v;   // left
+      buf[i * 2 + 1] = v;   // right
     }
+    Serial.printf("TONETEST trial %c of 2 >>> amp enable GPIO%d = %s <<< "
+                  "ONE CONTINUOUS %dms TONE AT %d Hz (%s pitch). LISTEN NOW.\n",
+                  'A' + t, PIN_AMP_EN, names[t], TONE_BURST_MS, freqs[t],
+                  t == 0 ? "the HIGHER" : "the LOWER");
+    digitalWrite(PIN_AMP_EN, levels[t]);
+    es8311_voice_mute(codec, false);
+    delay(TONE_SETTLE_MS);           // the amp's turn-on ramp, not a formality
+    const size_t wrote = tonePlayBurst(i2s, buf, TONE_BURST_MS);
     es8311_voice_mute(codec, true);
-    Serial.printf("TONETEST trial %c done (amp enable was %s).\n", 'A' + t, names[t]);
-    if (t == 0) delay(1200);         // an unmistakable gap between the two
+    // The expected figure is printed beside the actual one so a short write is
+    // read off the line rather than worked out from the sample rate.
+    const size_t want = (size_t) (TONE_BURST_MS * TONE_SAMPLE_HZ / 1000)
+                        / TONE_FRAMES * TONE_HALF_BYTES;
+    Serial.printf("TONETEST trial %c done (amp enable was %s). I2S accepted "
+                  "%u of %u bytes%s.\n", 'A' + t, names[t], (unsigned) wrote,
+                  (unsigned) want,
+                  wrote == want ? "" : "  <<< SHORT WRITE - the tone never "
+                                       "fully reached the codec");
+    if (t == 0) delay(1500);          // an unmistakable gap between the two
   }
 
   // Teardown. The codec is muted, and i2s's destructor stops the clocks on
-  // return. PIN_AMP_EN goes back to INPUT rather than to either level, because
-  // WHICH level disables this amp is precisely what is not known yet - and INPUT
-  // is the state the board booted in and was silent in, so it is the only choice
-  // that is provably quiet. Once the polarity is known, this becomes an explicit
-  // drive to the disabled level.
-  pinMode(PIN_AMP_EN, INPUT);
+  // return. THE QUIET COMES FROM THAT MUTE, not from the pin: this used to
+  // restore INPUT on the grounds that it was "the state the board booted in and
+  // was silent in", which this test then disproved - both levels are audible, so
+  // no level of this pin is quiet and the boot state was only silent because
+  // nothing was driving the codec. The pin is left at the level that means
+  // enabled, which is what every other caller will want.
+  digitalWrite(PIN_AMP_EN, AMP_EN_ENABLE_LEVEL);
   free(buf);
   es8311_delete(codec);
   Serial.println("TONETEST done. Amp enable returned to INPUT (its boot state), codec "
                  "muted, I2S stopped.");
-  Serial.println("TONETEST >>> WHICH DID YOU HEAR? 'one long tone' = amp enable is "
-                 "ACTIVE HIGH. 'two short beeps' = ACTIVE LOW. Both = the pin gates "
-                 "nothing. Neither = the fault is upstream of the amp; check the "
+  // Phrased as the question the listener can actually answer. The trials are
+  // told apart by PITCH, so this line must be too - it described "one long tone"
+  // versus "two short beeps" for one run after the trials stopped differing that
+  // way, which is a diagnostic instructing you to look for the wrong evidence.
+  Serial.println("TONETEST >>> WHICH DID YOU HEAR? The HIGHER 1000 Hz tone (first) = "
+                 "amp enable is ACTIVE LOW, i.e. LOW enables. The LOWER 400 Hz tone "
+                 "(second) = ACTIVE HIGH. Both = the pin gates nothing and the amp is "
+                 "always on. Neither = the fault is upstream of the amp; check the "
                  "register dump above.");
   Serial.println("TONETEST ---------------------------------------------------------");
 }

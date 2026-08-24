@@ -137,12 +137,59 @@ const int BORDER_CTRL = 1;
 #define PIN_SD_D3          3
 
 // ---- Audio: I2S codec + amplifier ------------------------------------------
+// Read off vendor/schematic.pdf's audio block, not copied on trust from the demo
+// project - and the one assignment that looks wrong is right. The schematic's
+// net names are from the CODEC's point of view, so they read backwards from the
+// MCU's: I2S_DI is U5 pin 9 DSDIN (the codec's INPUT, which the ESP32 must
+// drive, i.e. our DOUT) on GPIO15, and I2S_DO is U5 pin 7 ASDOUT (the codec's
+// mic OUTPUT, i.e. our DIN) on GPIO16. Anyone "fixing" DOUT/DIN to match the net
+// names will silently send playback to a pin the codec never reads.
 #define PIN_AMP_EN         1
 #define PIN_I2S_MCLK      17
 #define PIN_I2S_BCLK      18
 #define PIN_I2S_DOUT      15
 #define PIN_I2S_LRCK      21
 #define PIN_I2S_DIN       16
+
+// THE SPEAKER IS NOT ON A GPIO, and looking for one is how an afternoon goes
+// missing. The chain is U5 (ES8311, I2C 0x18) -> OUTP/OUTN -> R21/R22 4.7K ->
+// U6 (SC8002B class-D BTL amp, VDD from +5) -> VO2/VO1 = SP+/SP- -> JP3, a
+// 2-pin header (pin 2 = SP+, pin 1 = SP-). Board 1's wiring has no counterpart
+// here: its amp input IO26 is this module's SPICS1 (flash/PSRAM bus) and its
+// shutdown IO4 is this board's SD_CMD. JP1 is the BATTERY header, also 2-pin -
+// the two are easy to confuse and only one of them makes a sound.
+//
+// PIN_AMP_EN GATES NOTHING, and that is MEASURED, not inferred. It reaches U6's
+// SHUTDOWN pin (with R26, a 10K pull-up to VCC3V3), so both the demo project's
+// comment ("digitalWrite(PIN_AMP_EN, HIGH); // enable the amplifier") and the
+// opposite LM4871 reading predict that one level is silent. TONETEST played a
+// 2s tone at each level and BOTH were audible. The likely reason is a rail
+// mismatch rather than a wiring fault: U6's VDD is +5, so its shutdown
+// threshold sits near that rail, and a 3.3V GPIO high cannot reach it. The amp
+// is therefore permanently enabled.
+//
+// Two consequences, both load-bearing for anything that plays audio here:
+//   - SILENCE MUST COME FROM THE CODEC, never from this pin. es8311_voice_mute()
+//     is the only working mute. Anything written to gate sound with PIN_AMP_EN
+//     will appear to work while the amp stays live underneath it.
+//   - The amp draws its idle current continuously and its own noise floor is
+//     always present, which board 1's FM8002E avoids by being genuinely muted
+//     between beeps. Watch for idle hiss here; it cannot be switched off.
+// The pin is still DRIVEN rather than left floating - see AMP_EN_ENABLE_LEVEL.
+//
+// Independently of the enable, U6's BYPASS pin carries C41 = 1uF, so coming out
+// of shutdown is a HUNDREDS-of-milliseconds ramp. That is not moot just because
+// the pin gates nothing today: it is why the first TONETEST run was silent at
+// BOTH levels, since a 30ms settle followed by 200ms beeps can land entirely
+// inside the ramp. Any future short burst has to clear it.
+
+// The level that MEANS enabled, under the most likely datasheet reading
+// (SHUTDOWN active high). It changes nothing on this board revision - the pin
+// gates nothing - and is driven anyway so that a revision which fixes the
+// threshold, or a unit whose R26 is a different value, plays sound instead of
+// silence. Costs one digitalWrite; the alternative is a board that regresses to
+// this same afternoon's bug with no code change to blame.
+#define AMP_EN_ENABLE_LEVEL  LOW
 
 // ---- Misc ------------------------------------------------------------------
 #define PIN_RGB_LED       40    // addressable (WS2812-style) RGB LED

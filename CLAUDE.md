@@ -17,7 +17,7 @@ that differs and why; this section is only how to build each.
 | BLE stack | Bluedroid | NimBLE |
 | touch | XPT2046 resistive, 5-point affine calibration | capacitive, inside the display IC, factory-aligned |
 | serial | CH340, `/dev/cu.usbserial-*`, 11.5KB/s ceiling | native USB CDC, `/dev/cu.usbmodem*` |
-| mic / beeper | both fitted and working | codec present, **software path not written** |
+| mic / beeper | both fitted and working | codec present; **output PROVEN via `TONETEST`, capture path not written** |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
@@ -710,6 +710,47 @@ directions. The hardware is real and confirmed: an **ES8311 I2S codec at I2C 0x1
 demo's own bus scan) with **MCLK 17 / BCLK 18 / DOUT 15 / LRCK 21 / DIN 16**, plus a speaker
 amplifier enable on **GPIO1**. `DIN` is the capture path. So board 2 has a real mic *and* a real
 speaker; what it does not have is a capture path in this firmware.
+
+**The speaker is PROVEN to make sound, and `TONETEST` is what proves it** — it configures the
+codec, dumps all 74 registers, and plays a tone at each level of the amp enable. Read the chain off
+`vendor/schematic.pdf` before touching any of it, because none of it is GPIO-driven the way board
+1's is: **U5 (ES8311) → `OUTP`/`OUTN` → R21/R22 4.7K → U6 (SC8002B class-D BTL amp, VDD from
++5) → `VO2`/`VO1` = `SP+`/`SP-` → JP3**, a 2-pin header (pin 2 = `SP+`, pin 1 = `SP-`). Board 1's
+wiring has no counterpart here — its amp input IO26 is this module's `SPICS1` (the flash/PSRAM
+bus) and its shutdown IO4 is this board's `SD_CMD` — so a speaker moved across from board 1 is on
+pins that can never drive it. **JP1 is the BATTERY header and is also 2-pin**; only one of the two
+makes a sound.
+
+Four things this cost an afternoon to establish, all of which fail silently:
+
+- **`DOUT 15`/`DIN 16` looks swapped against the schematic and is CORRECT.** The net names are from
+  the CODEC's point of view: `I2S_DI` is U5 pin 9 `DSDIN`, the codec's *input*, which the ESP32 must
+  drive — our DOUT — and it is on GPIO15. `I2S_DO` is U5 pin 7 `ASDOUT`, the codec's mic *output*,
+  our DIN, on GPIO16. "Fixing" these to match the net names sends playback to a pin the codec never
+  reads, with every register still perfect.
+- **`PIN_AMP_EN` GATES NOTHING, measured rather than inferred.** A 2s tone at *each* level was
+  audible. U6's `VDD` is +5 so its shutdown threshold sits near that rail, and a 3.3V GPIO high
+  cannot reach it — the amp is permanently enabled. So **silence must come from
+  `es8311_voice_mute()`, never from this pin**, and the amp's idle current and noise floor are
+  always present (board 1's FM8002E is genuinely muted between beeps; this one cannot be). The pin
+  is still driven to `AMP_EN_ENABLE_LEVEL` (LOW) so a revision that fixes the threshold plays sound
+  instead of silence. Both prior claims were wrong: the demo's selftest comment
+  (`digitalWrite(PIN_AMP_EN, HIGH); // enable the amplifier`) and the opposite LM4871 reading each
+  predict one silent level, and neither is.
+- **U6's `BYPASS` pin carries C41 = 1uF, so leaving shutdown is a HUNDREDS-of-ms ramp.** This is why
+  the first `TONETEST` run was silent at both levels: a 30ms settle followed by 200ms beeps can land
+  entirely inside the ramp. `TONE_SETTLE_MS` is 400 and the burst is one continuous 2000ms tone
+  because of it — any future short burst has to clear the same ramp.
+- **The demo project proves less about audio than it appears to.** Its selftest records
+  `I2S audio | PASS | 76800/76800 bytes clocked out`, but it never configures the ES8311 at all —
+  it just clocks bytes with the codec in its powered-down reset state — and its own `FINDINGS.md`
+  says plainly that audibility "was not verified... The electrical path is proven; the transducer
+  is not." Treat its audio PASS as an ESP32-side result only.
+
+Espressif's `es8311_register_dump()` is vendored but deliberately **unused**: it writes to UART0's
+pads rather than the USB CDC, so a healthy codec would read as a dead bus, and it `ESP_ERROR_CHECK`s
+each read, so it aborts on exactly the failure it exists to report. `TONETEST` prints its own dump
+over `Serial` instead.
 
 Until that path exists, both flags stay 0 and `audio.ino`'s whole capture path compiles out, leaving
 four stubs (`micStream`/`micRecord`/`micMonitor`/`micLevelTest`) that print
