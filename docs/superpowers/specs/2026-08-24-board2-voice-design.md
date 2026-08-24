@@ -1,7 +1,19 @@
 # Board 2: voice, on a codec instead of an ADC
 
-**Status:** design. Approved in outline: vendor Espressif's ES8311 driver rather than
-hand-writing an init; do capture AND the needs-input beep rather than capture alone.
+**Status:** design, PARTLY IMPLEMENTED. Approved in outline: vendor Espressif's ES8311 driver
+rather than hand-writing an init; do capture AND the needs-input beep rather than capture alone.
+
+**What has already landed, so a reader does not plan it twice:** Decision 1 in full (the driver is
+vendored and in use), the BEEP half of Decision 2 (`BOARD_HAS_BEEPER` is 1 and confirmed audible),
+and step 1 of Decision 3 (the register dump, as `TONETEST`). The output path is proven end to end -
+codec to amp to speaker. **What remains is the CAPTURE direction and its probes**, plus the host's
+`codec=pcm16` branch.
+
+Implementation also produced something this spec did not anticipate and which the capture work
+should build on rather than duplicate: **one shared I2S channel and codec handle**
+(`audioOutBegin()` in `audio.ino`), up at boot and never torn down. Capture needs the SAME
+peripheral - the ES8311 records and plays over one I2S channel - and a second `begin()` on that
+port FAILS, which is what forced `TONETEST` onto the shared context too.
 
 ## Goal
 
@@ -61,9 +73,16 @@ capture layer.
 
 The beep: board 1's is an LEDC square wave on a piezo and **does not port** - board 2 has an
 ES8311 DAC into an amplifier whose enable is GPIO1. So the tone becomes generated I2S samples,
-and `BOARD_HAS_BEEPER` flips to 1. The amp enable must be driven only while a tone plays, the
-same discipline board 1 documents for its own amp (`10K pulled high = muted`), or the speaker
-hisses.
+and `BOARD_HAS_BEEPER` flips to 1. **DONE, and confirmed audible.**
+
+**This spec's original instruction here was WRONG and is corrected rather than deleted, because an
+implementer would have followed it.** It said the amp enable "must be driven only while a tone
+plays... or the speaker hisses", by analogy with board 1's FM8002E. Measured: a 2s tone at EACH
+level of GPIO1 was audible, so **the pin gates nothing**. U6's VDD is +5, so its shutdown threshold
+sits near that rail and a 3.3V GPIO high cannot reach it. Consequences for the capture work:
+silence comes from `es8311_voice_mute()` and never from that pin, and the amp's idle noise floor is
+always present - unlike board 1, there is nothing to gate it with. If a hiss turns out to sit in
+recordings, it is acoustic or supply-borne, not a mute that was forgotten.
 
 ## What is reused unchanged, and it is most of the feature
 
@@ -82,6 +101,11 @@ card - all three of which this branch already gated and sized correctly.
 Board 1's bring-up earned this and board 2 gets the same shape:
 
 1. **`es8311_register_dump()` after init** - proves the I2C path and that the registers took.
+   **DONE**, but NOT with the driver's own function: `es8311_register_dump()` writes to UART0's pads
+   rather than the USB CDC, so a healthy codec reads as a dead bus, and it `ESP_ERROR_CHECK`s each
+   read, so it aborts on exactly the failure it exists to report. `TONETEST` prints all 74 registers
+   over `Serial` instead, with `--` per failed read: all dashes is a dead bus, one dash is one bad
+   register.
 2. **A DC/level probe before any capture** - board 1's `MICTEST` prints a DC bias that proves
    power AND the signal wire in one number. The codec's equivalent is a silence floor and a
    peak-to-peak under a known sound; a floor pinned at zero means no samples are arriving at all,
@@ -97,13 +121,21 @@ guard covers pcm16 for free.
 - **Is there a comb?** Measure with BLE connected and disconnected, as board 1's investigation
   did, and use the spectrum rather than broadband RMS - board 1's own notes record that RMS said
   BLE was innocent while a per-tone analysis found a 33Hz series at +30dB.
-- **Where is the microphone physically, and is it analog or digital?**
-  `es8311_microphone_config(dev, digital_mic)` needs that answered. The demo's I2C scan found the
-  codec but never mentions a capsule, and the board's pin table names no mic pin - so this is a
-  hardware fact to establish, not a parameter to guess.
-- **MCLK ratio.** Pin 17 is wired; the ES8311 wants a standard multiple of the sample rate
-  (256x fs is typical). `es8311_sample_frequency_config()` takes both, so the value must match
-  what I2S is actually generating.
+- ~~**Where is the microphone physically, and is it analog or digital?**~~ **ANSWERED from
+  `vendor/schematic.pdf`, by reading it rather than guessing.** MIC1 is an **`LMA2718B381-OA7`**, a
+  4-pin capsule: `OUT` -> net `MIC_OUT`, `VDD` -> `MIC_VDD` (from AU_VCC3V3 through L3, decoupled
+  by C33 10uF + C32 100nF), and two GNDs. Its output reaches the codec's **analog `MIC1P`/`MIC1N`**
+  inputs (U5 pins 18 and 17) through coupling caps with RF filtering (C34-C40, 10-33pF). **There is
+  no clock line to the capsule at all**, which is what rules out PDM - a digital mic would need one,
+  and `MIC1P` doubles as `DMIC_SDA` precisely for that case. So
+  **`es8311_microphone_config(dev, false)`**. The board pin table names no mic pin because the mic
+  does not touch the ESP32: it is entirely on the codec's side of the I2C/I2S boundary.
+- ~~**MCLK ratio.**~~ **ANSWERED, and verified on hardware.** `ESP_I2S` hardcodes
+  `mclk_multiple = 256`, so at 16kHz MCLK is **4,096,000 Hz** - established by reading
+  `ESP_I2S.cpp` rather than assuming, then confirmed by
+  `es8311_sample_frequency_config(4096000, 16000)` returning `ESP_OK`, which is the call that fails
+  when the two numbers have no `coeff_div[]` row. Capture must pass the same pair; it now comes from
+  `TONE_MCLK_HZ`/`TONE_SAMPLE_HZ` in `audio.ino`.
 
 ## Out of scope
 
