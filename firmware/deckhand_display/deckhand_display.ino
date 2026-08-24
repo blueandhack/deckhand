@@ -595,8 +595,18 @@ bool curLineFromUsb = false;
 const int SP_1 = 4, SP_2 = 8, SP_3 = 12, SP_4 = 16;
 
 // RADII - two only. Anything bigger reads as a blob at this size.
-const int R_SM = 6;    // chips, pills, small controls
-const int R_MD = 10;   // cards, buttons, rows  (== RADIUS)
+// MOVED TO THE BOARD HEADERS, and that is a fix rather than tidying. These were
+// shared globals through the whole type-scale conversion, so board 2 drew board
+// 1's 10px radius on cards 37% wider (296 against 216) and on a panel 15%
+// denser - 1.54mm of corner where board 1 has 1.78mm. The outline was
+// geometrically perfect (the arc tracks the true circle within a pixel and the
+// anti-aliasing runs to ten levels) and still read as ANGULAR, because roundness
+// is judged against the size of the thing it is rounding, and a card that grew
+// kept a corner that did not. Reported from the glass as "the card's border does
+// not look smooth", which is the same complaint the body text drew and has the
+// same cause: a pixel value carried across a board change without being
+// re-derived.
+// See BORDER_CARD/BORDER_CTRL below for why the WEIGHTS did not move with them.
 
 // BORDER WEIGHTS - two, and which one a surface gets is decided by WHAT IT IS,
 // not by where it was written. A CARD is a surface you read content off; a
@@ -605,8 +615,12 @@ const int R_MD = 10;   // cards, buttons, rows  (== RADIUS)
 // session detail card were all 2px, so the same kind of object had two
 // different outlines depending on the tab you were looking at. Use these
 // constants rather than a literal, so that can't drift apart again.
-const int BORDER_CARD = 2;   // usage cards, session rows, settings cards, dialogs
-const int BORDER_CTRL = 1;   // buttons, list rows, pills, chips, pager keys
+// ALSO PER-BOARD NOW, for symmetry with the radii - but the VALUES are unchanged
+// on both, and that is derived rather than lazy: physical parity asks board 2 for
+// 2 * 6.489/5.624 = 2.31px and 1 * 1.154 = 1.15px, which round to the 2 and 1 it
+// already had. So the weights genuinely did not need to move; only the radii did.
+// Naming them per-board anyway means the next person changing one board's outline
+// does not have to discover that these two were the exception.
 
 // TOUCH - TAP_MIN moved to board_e32r28t.h (via board.h), with its comment.
 

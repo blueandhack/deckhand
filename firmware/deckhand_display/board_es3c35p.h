@@ -88,6 +88,30 @@
 // order can be the bug.
 #define BOARD_PANEL_INVERT 1
 
+// ---- Radii and border weights ----------------------------------------------
+// THE RADII ARE RE-DERIVED, THE WEIGHTS ARE NOT, and both halves of that are
+// arithmetic rather than taste.
+// Radii, by physical parity - the same rule that chose Spleen 8x16 over 6x13:
+//   R_SM  6 * 6.489/5.624 = 6.92 -> 7   (1.08mm here against board 1's 1.07mm)
+//   R_MD 10 * 6.489/5.624 = 11.5 -> 12  (1.85mm here against board 1's 1.78mm)
+// Weights, by the same rule, do NOT move:
+//   BORDER_CARD 2 * 1.154 = 2.31 -> 2
+//   BORDER_CTRL 1 * 1.154 = 1.15 -> 1
+// Why this was missed until someone looked at the glass: these four lived as
+// SHARED globals in deckhand_display.ino rather than in a board header, so the
+// nine-task conversion that re-derived every vertical rhythm never saw them. The
+// outline was never geometrically wrong - the arc tracks a true circle within a
+// pixel and the AA runs to ten levels - it was simply a board-1 corner on a
+// board-2 card, and roundness is judged relative to the thing being rounded.
+// A card-PROPORTIONAL rule would ask for 10 * 296/216 = 13.7 instead. Physical
+// parity wins because it is the rule the rest of this header already follows, and
+// because a corner's job is to look soft at a viewing distance, not to stay a
+// fixed fraction of a card that changed width for unrelated reasons.
+const int R_SM = 7;
+const int R_MD = 12;
+const int BORDER_CARD = 2;
+const int BORDER_CTRL = 1;
+
 // ---- LCD: ST77922, 320x480, QSPI. Panel reset is tied to chip EN (no GPIO). --
 #define PIN_LCD_CS        10
 #define PIN_LCD_SCK       12
@@ -283,20 +307,32 @@ const int CARD_X = 12, CARD_W = 296;
 // (14/216 = 6.5%) gives 19.2, taken to 18 to stay on the even grid the 2px
 // border and the pin bar sit on. Physically 2.78mm against board 1's 2.49mm.
 // The rounded corner is no constraint on it: at the label row (y0+6) a
-// RADIUS-10 corner's border reaches only x0+1.7, so 18 is clear by 16px.
+// RADIUS-12 corner's border reaches only x0+1.6 (dx = sqrt(144-36) = 10.39, so
+// x0 + 12 - 10.39), so 18 is clear by 16px. It was x0+2.0 at RADIUS 10, i.e. the
+// bigger radius pulls the corner further OUT of the text lane, not into it.
 const int PAD = 18;
 // 12, from 10. Physically 1.85mm against board 1's 1.78mm - i.e. the bar keeps
 // its thickness while getting 40% longer (260px of usable lane against 188),
 // which is what keeps the pace tick readable rather than hairline.
 const int BAR_H = 12;
-// 10, UNCHANGED, and it must stay equal to R_MD in deckhand_display.ino. Only
-// drawCardBorder() uses RADIUS; the card's FILL underneath it comes from
-// uiCard(), which uses R_MD - so a RADIUS that disagrees with R_MD draws a
-// stroke on a differently-curved fill and the corners fringe. The design
-// system's own note ("two radii only - anything bigger reads as a blob at this
-// size") is about absolute visual weight, not a proportion of the card, so
-// there is nothing here to re-derive.
-const int RADIUS = 10;
+// DEFINED FROM R_MD, so the two can no longer disagree. This used to be a
+// separate literal 10 with a comment saying it "must stay equal to R_MD" - and
+// the moment R_MD was re-derived to 12, it wasn't. Only drawCardBorder(), the
+// detail card and the pager buttons use RADIUS while the card FILL under them
+// comes from uiCard()'s R_MD, so a mismatch strokes a 10px curve onto a 12px
+// fill and the corners fringe. An invariant stated in a comment is an invariant
+// waiting to break; one expressed in code cannot.
+//
+// The old comment also argued there was "nothing here to re-derive", because the
+// design system's note about radii is "about absolute visual weight, not a
+// proportion of the card". That reasoning was right and its unit was wrong:
+// absolute visual weight is PHYSICAL, and 10px is 1.54mm here against board 1's
+// 1.78mm. Holding the weight is exactly what asks for 12. It is the same
+// pixels-versus-millimetres slip the body text made - board 2 has twice the
+// pixels but only 15% more density, so a carried-over pixel count always shrinks
+// in the hand. Reported from the glass as a card border that "does not look
+// smooth", which is what a board-1 corner on a 37%-wider card looks like.
+const int RADIUS = R_MD;
 
 // THE COLUMN. Content area = BOARD_H - TAB_BAR_H - FOOTER_H = 480 - 46 - 18 =
 // 416, against board 1's 320 - 34 - 18 = 268. Board 1 spends its 268 as
@@ -667,11 +703,20 @@ const int SESSION_ROW_H_MAX = 100;
 // clear the row's 10px corner and the 2px border that follows it. Re-derived at
 // this board's dot row: SESSION_DOT_DY is now SESSION_NAME_Y + SESSION_NAME_H / 2
 // = 19 (it was 22 while the band was 26 and AIR 3), so the blit's top row is y+3
-// and the border's inner edge there sits at x0 + 10 - sqrt(8^2 - 7^2) = x0 + 6.13
-// against a blit left edge of x0 + 7 - clear by 0.87px, which is board 1's own
-// figure at the same dot row rather than the 3.9px a lower dot used to buy. Tight,
-// asserted, and the same clearance board 1 has shipped with all along.
-const int SESSION_DOT_CX = SESSION_ROW_X + 23;
+// and the border's inner edge there sits further right than it used to, because
+// RADIUS went 10 -> 12: at x0 + 7.64 rather than x0 + 6.13. So the blit moved with
+// it, +23 -> +24, putting its left edge at x0 + 8 and clear by 0.36px.
+// THE ASSERTION IS WHY THIS IS RIGHT RATHER THAN LUCKY. Raising the radius made
+// the spinner clip the corner by 0.64px, and the checker said so by name the first
+// time it ran - "spinner blit left x=19 clears the corner border's inner edge
+// x=19.64 ... by -0.64px". It matters because the spinner is a BLIT: it paints
+// background pixels across its whole 32x32 rectangle, so overlapping the corner
+// bites a notch out of the border rather than drawing over it harmlessly. Board 1
+// shipped exactly that once - a white nick in a rounded corner under the LIGHT
+// theme - which is the reason SESSION_DOT_CX exists as a named constant at all.
+// 0.36px of clearance is tighter than board 1's 0.87px and is genuinely all there
+// is: +25 would push the 32px blit into the name lane at x0+48.
+const int SESSION_DOT_CX = SESSION_ROW_X + 24;
 // 40, unchanged, and for the same reason: it is set by the 32x32 art, not by the
 // panel. The blit owns x SESSION_ROW_X+7..+38 and the name starts 2px clear.
 const int SESSION_NAME_DX = 40;

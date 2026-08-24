@@ -31,6 +31,14 @@
 // handles its own byte order - so there is nothing to swap. Named here anyway so
 // the two board headers answer the same questions.
 #define BOARD_PANEL_SWAP_BYTES 0
+
+// ---- Radii and border weights ----------------------------------------------
+// Unchanged from when they were shared globals; board 1 is the board they were
+// chosen on. 10px is 1.78mm here and 6px is 1.07mm.
+const int R_SM = 6;          // chips, pills, small controls
+const int R_MD = 10;         // cards, buttons, rows
+const int BORDER_CARD = 2;   // usage cards, session rows, settings cards, dialogs
+const int BORDER_CTRL = 1;   // buttons, list rows, pills, chips, pager keys
 // TFT_eSPI owns this board's inversion via its own init; nothing here applies it.
 #define BOARD_PANEL_INVERT 0
 
@@ -160,7 +168,10 @@ const int CARD1_Y = 38, CARD2_Y = 146;
 // its slack: content reaches +39 (the pace bar's clear starts 4px above the bar at +26
 // and runs 18 rows) inside CODEX_H 44, leaving the 2px border at +42..+43 clear of it.
 const int CODEX_Y = 254, CODEX_H = 44;
-const int PAD = 14, BAR_H = 10, RADIUS = 10;
+// RADIUS is defined FROM R_MD rather than repeated, so the two cannot drift -
+// drawCardBorder() strokes with RADIUS over a fill uiCard() drew with R_MD, and
+// a mismatch fringes every card corner. Same value as before on this board.
+const int PAD = 14, BAR_H = 10, RADIUS = R_MD;
 
 // ---------- USAGE tab: offsets inside a card, and the Codex row's lanes ------
 // These were literals at their call sites (renderCard() in
