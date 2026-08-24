@@ -1648,7 +1648,116 @@ void micRecord() {
   free(pcm);
   micProcessingBegin();
 }
-void micMonitor()   { Serial.println("MIC: board 2 live meter not implemented yet"); }
+// The live meter. Board 1 needs this to set an analog trimmer by hand; here the
+// gain is a register, but the question is identical and still cannot be computed:
+// the setting worth keeping is the HIGHEST gain whose silence floor stays low,
+// and only watching the floor while changing it finds that. One-shot tests cost a
+// round trip per step and cannot show the floor moving.
+//
+// Scale: peak-to-peak in int16 counts, so full scale is 65535. FULL is 8000 -
+// about -18 dBFS - because this bar is for judging a FLOOR, not a peak, and a bar
+// scaled to full scale would leave every interesting reading in its first 2%.
+// Ambient at 30dB gain measured pp 69..770, so a quiet room sits near the left.
+#define MIC2_MON_FULL      8000
+#define MIC2_MON_GOOD       400
+#define MIC2_MON_WARN      1500
+
+void micMonitor() {
+  if (!audioOutReady) {
+    Serial.println("MIC: the shared audio path never came up - see the AUDIO OUT line "
+                   "from boot. No meter.");
+    return;
+  }
+
+  tft.fillScreen(COLOR_BG);
+  setUIFont(T_HEAD);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.drawString("MIC LEVEL", CARD_X, SP_3);
+  setUIFont(T_BODY);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  // Positions run off a cursor from the board's own metrics rather than the
+  // literals board 1's copy uses - this screen has to work on a 320x480 panel
+  // and nothing in shared code may hardcode a panel dimension.
+  int cy = SP_3 + uiLineH(T_HEAD) + SP_2;
+  tft.drawString("gain is a register, not a trimmer", CARD_X, cy);
+  cy += uiLineH(T_BODY);
+  tft.drawString("QUIET is good. tap screen to exit", CARD_X, cy);
+  cy += uiLineH(T_BODY) + SP_2;
+  char gainLine[40];
+  snprintf(gainLine, sizeof(gainLine), "MIC_GAIN step %d of 8 (6dB each)", (int) MIC_GAIN);
+  tft.drawString(gainLine, CARD_X, cy);
+
+  // The tap that STARTED this is usually still down, and the loop exits on a
+  // touch, so without this it returns instantly. Harmless from the MICMON
+  // command path: nothing is touching, so it returns at once.
+  micWaitRelease();
+
+  const int BAR_X = CARD_X, BAR_W = CARD_W;
+  const int BAR_Y = tft.height() / 2, BAR_H = 40;
+  int peak = 0, touchRuns = 0;
+  unsigned long start = millis(), lastPeakDrop = millis();
+  char last[16] = "";
+
+  while (millis() - start < 180000UL) {
+    reapBleLinks(true);   // up to 180s where loop() cannot run
+
+    // One chunk is 32ms; reduce it to a peak-to-peak on the left slot.
+    const int frames = micReadChunk();
+    int mn = 32767, mx = -32768;
+    for (int i = 0; i < frames; i++) {
+      const int16_t v = micScratch[i * 2];
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+    const int pp = frames > 0 ? (mx - mn) : 0;
+    if (pp > peak) peak = pp;
+    // Bleed the peak-hold so it follows you back down after a loud moment.
+    if (millis() - lastPeakDrop > 400) { peak = peak * 4 / 5; lastPeakDrop = millis(); }
+
+    const uint16_t c = pp < MIC2_MON_GOOD ? COLOR_GOOD
+                     : (pp < MIC2_MON_WARN ? COLOR_WARN : COLOR_BAD);
+    const int w  = pp   >= MIC2_MON_FULL ? BAR_W : pp   * BAR_W / MIC2_MON_FULL;
+    const int pw = peak >= MIC2_MON_FULL ? BAR_W : peak * BAR_W / MIC2_MON_FULL;
+
+    tft.fillRect(BAR_X, BAR_Y, w, BAR_H, c);
+    tft.fillRect(BAR_X + w, BAR_Y, BAR_W - w, BAR_H, COLOR_CARD);
+    if (pw > w) tft.fillRect(BAR_X + pw, BAR_Y, 2, BAR_H, COLOR_VALUE);  // peak hold
+    tft.drawRect(BAR_X - 1, BAR_Y - 1, BAR_W + 2, BAR_H + 2, COLOR_LABEL);
+
+    // Numeric readout, redrawn only when it changes - the flicker-free rule holds
+    // here too, and this is the one field that updates several times a second.
+    char now[16];
+    snprintf(now, sizeof(now), "%5d  ", pp);
+    if (strcmp(now, last) != 0) {
+      setUIFont(T_HERO);
+      tft.setTextColor(c, COLOR_BG);
+      tft.setTextDatum(TL_DATUM);
+      tft.drawString(now, CARD_X, BAR_Y - uiLineH(T_HERO) - SP_3);
+      strncpy(last, now, sizeof(last));
+    }
+    setUIFont(T_BODY);
+    tft.setTextColor(COLOR_LABEL, COLOR_BG);
+    char target[44];
+    snprintf(target, sizeof(target), "target: under %d when silent", MIC2_MON_GOOD);
+    tft.drawString(target, CARD_X, BAR_Y + BAR_H + SP_3);
+
+    // Without this the bar and readout never leave the shadow framebuffer, and the
+    // one thing this screen exists for - watching the floor WHILE changing the
+    // gain - would show a frozen first frame.
+    tft.flush();
+
+    // TWO consecutive reads to exit, the same false positive that once ended a
+    // 99s recording nobody touched. Being kicked out mid-adjustment is exactly
+    // what this screen must not do.
+    touchRuns = touchPressed() ? touchRuns + 1 : 0;
+    if (touchRuns >= 2) break;
+    delay(10);
+  }
+
+  micWaitRelease();
+  micRestoreUi();
+}
 
 // The probe the spec's Decision 3 step 2 asks for, and the one thing that has to
 // exist before any recording is believed. Its job is to separate three faults a
