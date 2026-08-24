@@ -174,12 +174,14 @@ assert len(ICONS) == 16
 #            Mac Studio reach for - so the one case the icons exist for (two Macs side
 #            by side) was the one they could not serve. Measured as mean per-pixel dE
 #            BETWEEN the two icons on the same backdrop, U+1F5A5 was the least
-#            distinct candidate tried, on every backdrop (20.3-22.0). A television is
-#            a different OBJECT rather than a differently-lit screen - brown body,
-#            boxy outline with feet - and reads on all four backdrops (86-96% of ink
-#            clearing dE 20, against 53% for the monitor on a DARK card, whose black
-#            screen simply disappears there). The name is not what the picker draws:
-#            mac-app's picker lists NAMES only, so nothing on the Mac disagrees.
+#            distinct candidate tried, on every backdrop (20.3-22.0). A television
+#            was tried in its place and REVERTED: it measured far better (86-96% of
+#            ink clearing dE 20 on all four backdrops, against 53% for the monitor
+#            on a DARK card) and still left laptop and desktop reading as two dark
+#            rectangles, so the number improved and the distinguishability did not.
+#            Kept as a record because the measurement is real and the next person
+#            will find the same candidate; what it shows is that this particular
+#            problem is not a contrast problem.
 #
 # NOT CHANGED, and this contradicts the older note that grouped it with the two above:
 # `anchor` is not a contrast failure at 16px. It measures dE90 65.0 with 93% of its ink
@@ -187,10 +189,19 @@ assert len(ICONS) == 16
 # STROKE WIDTH in thin line art, which 51% more pixels resolved rather than a colour
 # that needed replacing. `laptop` keeps U+1F4BB: it is the unambiguous picture for its
 # own name, and the collision is fixed by moving the icon that had an alternative.
+# `desktop` REVERTED to U+1F5A5 after looking at the 16px grid on the panel. The
+# television measured better and did not solve the actual problem: laptop and
+# desktop still both read as dark rectangles, so two Macs side by side are no
+# easier to tell apart, and "television" for a desktop Mac is its own small
+# confusion. The contrast number improved while the thing it was bought for did
+# not - which is the same shape as the keyboard glyph that beat every candidate on
+# measurement and drew as a featureless grey bar.
+# The honest position is the one the docs already take: the emoji vocabulary has
+# no second computer-shaped glyph that reads distinctly at this size, so if two
+# Macs sit side by side, pick two of the other fourteen that differ in SHAPE.
 SIZE_OVERRIDES = {
     16: {
         "cloud":   "\U0001F326️",
-        "desktop": "\U0001F4FA️",
     },
 }
 
