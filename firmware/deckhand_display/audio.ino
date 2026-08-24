@@ -1155,6 +1155,25 @@ void micLevelTest() { Serial.println("MIC: no microphone on this board"); }
 // run prints the volume it used and says outright that silence at a low volume
 // proves nothing. 30 is audible in a quiet room at arm's length.
 #define TONE_VOLUME       30
+// THE VOLUME SCALE IS LINEAR IN dB, WHICH MAKES IT USELESS TO GUESS ON. The
+// ES8311's register 0x32 is 0.5dB per LSB with 0xBF = 0dB, and
+// es8311_voice_volume_set maps 0..100 onto the full 0..255 range - so volume 15
+// is register 0x26, about -77dB, i.e. ~97dB below the volume-90 tone that was
+// plainly audible. Two runs were spent discovering that by ear. TONELADDER
+// exists so the audible floor is found in ONE run instead: a single pitch at
+// rising volumes, and the listener reports the first step they hear.
+//
+// The steps are 10 apart, which is 25.6 register counts or ~12.8dB - coarse
+// enough that a step is unmistakably louder than the one before rather than
+// arguably so, which is what "the first one I heard" has to mean to be usable.
+#define TONE_LADDER_STEPS  5
+#define TONE_LADDER_FIRST 35
+#define TONE_LADDER_GAP   10
+// Shorter than TONE_BURST_MS because the amp's turn-on ramp is paid ONCE, before
+// the first step - the amp stays enabled across the whole ladder, so no later
+// step is at risk of landing inside it.
+#define TONE_LADDER_MS   1200
+
 // Guard rails for the runtime argument. 100 is the codec's own maximum, and the
 // floor is 1 rather than 0 because `TONETEST 0` would configure the whole chain
 // correctly and then play nothing, which is indistinguishable from the fault this
@@ -1235,6 +1254,16 @@ static void toneDumpCodecRegs() {
   }
 }
 
+// One register, for callers that need to state what a write actually landed.
+// Returns -1 on a failed read so the caller can print "??" rather than a zero
+// that would read as a real value.
+static int toneReadCodecReg(uint8_t reg) {
+  uint8_t val = 0;
+  if (i2c_master_write_read_device(I2C_NUM_0, ES8311_ADDRESS_0, &reg, 1, &val, 1,
+                                   pdMS_TO_TICKS(100)) != ESP_OK) return -1;
+  return val;
+}
+
 // One burst. `buf` is the two-half allocation from toneTest(): the period table
 // then an equal run of zeros.
 //
@@ -1269,7 +1298,7 @@ static size_t tonePlayBurst(I2SClass& i2s, const int16_t* buf, int ms) {
   return wrote;
 }
 
-void toneTest(int volume) {
+void toneTest(int volume, bool ladder) {
   // The command dispatch cannot do this itself - it is compiled BEFORE this file
   // (deckhand_display.ino first, then the rest alphabetically), so none of these
   // constants is in scope there. Negative means "caller had no opinion", which is
@@ -1278,6 +1307,9 @@ void toneTest(int volume) {
   if (volume < 0) volume = TONE_VOLUME;
   if (volume < TONE_VOLUME_MIN) volume = TONE_VOLUME_MIN;
   if (volume > TONE_VOLUME_MAX) volume = TONE_VOLUME_MAX;
+  // In ladder mode the volume argument is meaningless - the ladder sets its own
+  // per step - so it is reported as such rather than printed as if it applied.
+  if (ladder) volume = TONE_LADDER_FIRST;
   Serial.println("TONETEST ---------------------------------------------------------");
   Serial.printf("TONETEST driving %d Hz then %d Hz at %d Hz/16-bit stereo, MCLK "
                 "%d Hz (ESP_I2S hardcodes mclk_multiple=256; see the note in "
@@ -1380,6 +1412,57 @@ void toneTest(int volume) {
   // amplifier", which is the opposite; nothing in that project ever verified a
   // sound, so its comment is an assumption and this ordering is a prediction.
   // Both are still tried - the prediction picks the ORDER, never the coverage.
+  if (ladder) {
+    // ONE pitch, rising volume, amp enabled once. The steps are told apart by
+    // COUNT rather than by pitch: they are meant to be compared against each
+    // other, and changing two variables at once would make "the third one" mean
+    // nothing. Counting five beeps is something a listener can do without
+    // watching a log, which is the whole point of the exercise.
+    for (int i = 0; i < TONE_FRAMES; i++) {
+      const int16_t v = (int16_t) (TONE_AMPLITUDE *
+                                   sinf(2.0f * PI * TONE_HZ_LOW_TRIAL * i / TONE_SAMPLE_HZ));
+      buf[i * 2]     = v;
+      buf[i * 2 + 1] = v;
+    }
+    digitalWrite(PIN_AMP_EN, AMP_EN_ENABLE_LEVEL);
+    es8311_voice_mute(codec, false);
+    delay(TONE_SETTLE_MS);            // the ramp, paid once for the whole ladder
+    Serial.printf("TONETEST ladder: %d steps of %dms at %d Hz, volume %d then +%d "
+                  "each. COUNT THE BEEPS and report the FIRST one you hear.\n",
+                  TONE_LADDER_STEPS, TONE_LADDER_MS, TONE_HZ_LOW_TRIAL,
+                  TONE_LADDER_FIRST, TONE_LADDER_GAP);
+    for (int step = 0; step < TONE_LADDER_STEPS; step++) {
+      const int vol = TONE_LADDER_FIRST + step * TONE_LADDER_GAP;
+      int volSetBack = -1;
+      const esp_err_t ve = es8311_voice_volume_set(codec, vol, &volSetBack);
+      // READ REGISTER 0x32 BACK rather than believing the out-parameter. That
+      // parameter is NOT the register - es8311.h says "Volume that was set. Same
+      // as volume, unless volume is outside of <0, 100>" - and printing it as one
+      // put "register 0x4B (~-58.0 dB)" in the log for a step that was actually
+      // at register 0xBF, about 0dB. A diagnostic that misreports the quantity it
+      // exists to report is worse than one that prints nothing, because the wrong
+      // number gets used to pick the next guess. dB stays approximate: 0.5dB/LSB
+      // with 0xBF = 0dB is a reading of the datasheet, not a measurement here.
+      const int reg = toneReadCodecReg(0x32);
+      if (reg < 0) {
+        Serial.printf("TONETEST ladder step %d of %d >>> volume %d/100, register "
+                      "read FAILED. LISTEN NOW.\n", step + 1, TONE_LADDER_STEPS, vol);
+      } else {
+        Serial.printf("TONETEST ladder step %d of %d >>> volume %d/100 -> register "
+                      "0x%02X (~%+.1f dB)%s. LISTEN NOW.\n",
+                      step + 1, TONE_LADDER_STEPS, vol, reg, (reg - 0xBF) * 0.5f,
+                      ve == ESP_OK ? "" : "  <<< VOLUME SET FAILED");
+      }
+      tonePlayBurst(i2s, buf, TONE_LADDER_MS);
+      delay(700);                     // a clear gap so the steps stay countable
+    }
+    es8311_voice_mute(codec, true);
+    Serial.printf("TONETEST ladder done. >>> WHICH STEP DID YOU FIRST HEAR? Step N "
+                  "means the floor is volume %d + (N-1)*%d. Nothing at all means "
+                  "even 0 dB is inaudible, which points at the transducer or the "
+                  "JP3 connection rather than at the codec - every register above "
+                  "read back correct.\n", TONE_LADDER_FIRST, TONE_LADDER_GAP);
+  } else {
   const int levels[2]  = { LOW, HIGH };
   const char* names[2] = { "LOW", "HIGH" };
   const int freqs[2]   = { TONE_HZ_LOW_TRIAL, TONE_HZ_HIGH_TRIAL };
@@ -1411,6 +1494,7 @@ void toneTest(int volume) {
                   wrote == want ? "" : "  <<< SHORT WRITE - the tone never "
                                        "fully reached the codec");
     if (t == 0) delay(1500);          // an unmistakable gap between the two
+  }
   }
 
   // Teardown. The codec is muted, and i2s's destructor stops the clocks on

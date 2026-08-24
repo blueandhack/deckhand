@@ -4540,7 +4540,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // audio.ino. Deliberately a command rather than a UI control: it takes ~3s,
     // it needs a person listening, and it is scaffolding for one question rather
     // than a feature.
-    toneTest(-1);   // -1 = "use the default volume"; see toneTest()
+    toneTest(-1, false);   // -1 = "use the default volume"; see toneTest()
   } else if (buf.startsWith("TONETEST ")) {
     // `TONETEST <0-100>` sets the codec volume for one run. This exists because
     // the useful loudness is a property of the ROOM, not of the board: the same
@@ -4556,7 +4556,15 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // this line. One place knowing the codec's valid range is the right shape
     // regardless. `toInt()` yields 0 for junk, which the clamp lifts to the floor
     // rather than playing silence.
-    toneTest(buf.substring(9).toInt());
+    toneTest(buf.substring(9).toInt(), false);
+  } else if (buf == "TONELADDER") {
+    // One run, five rising volumes, one pitch - because the codec's volume scale
+    // is linear in dB and therefore hopeless to guess at: volume 15 is ~-77dB and
+    // volume 90 is ~+20dB, so two reflashes went by establishing that "quiet" and
+    // "inaudible" are a handful of scale points apart. The listener reports the
+    // first step they hear and the floor is known exactly. Same reason TAB/PAGE/
+    // COLORTEST exist: the answer lives outside the Mac and only a person has it.
+    toneTest(0, true);   // volume ignored in ladder mode - the ladder sets its own
   } else if (buf.startsWith("SWAP ")) {
     // Flip the panel byte order at RUNTIME. This exists because the question
     // "which order does this panel want?" is not answerable from the Mac at all:
