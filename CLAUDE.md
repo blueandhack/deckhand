@@ -195,7 +195,20 @@ echo "SWAP 0" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: panel byte o
 echo "INV 1"  > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: display inversion, live
 echo "PERF" > ~/.claude/deckhand-device-command     # BOARD 2 ONLY: flush timing breakdown
 echo "TEXTPROBE" > ~/.claude/deckhand-device-command # print the text-width table (both boards)
+echo "AUDIOPROBE" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: is the codec on the bus? configures nothing
+echo "TONETEST" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: configure the codec and PLAY a tone
+echo "TONETEST 90" > ~/.claude/deckhand-device-command # ... at a given volume, 1-100 (default 30)
+echo "TONELADDER" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: five rising volumes, find the audible floor
 ```
+
+**The three audio commands are a LADDER OF CLAIMS, and running them out of order debugs two
+questions at once.** `AUDIOPROBE` answers "is the ES8311 on the bus?" and configures nothing, so it
+can never be blamed for silence. `TONETEST` configures the whole chain and plays, so silence after
+it IS a fault — it dumps all 74 registers first, which is what makes "the codec is fine, look
+downstream" a statement rather than a hope. `TONELADDER` exists because the volume scale is linear
+in dB and therefore hopeless to guess at: volume 15 is about -77dB and volume 90 about +20dB, so it
+plays five rising steps and the listener names the first one they hear. Prefer it to re-running
+`TONETEST` at a guessed volume — that costs one run per guess and this costs one run total.
 
 `COLORTEST` and `TEXTPROBE` exist for the same reason `TAB`/`PAGE`/`KBTEST`/`EMOJITEST` do: the
 glass is otherwise unverifiable. `COLORTEST` in particular is the **only** instrument that can see
