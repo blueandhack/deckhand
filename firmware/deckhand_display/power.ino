@@ -204,7 +204,18 @@ void battLeftLabel(char* out, size_t n, int mins) {
 
 void loadBeepEnabled() { beepEnabled = prefs.getBool("beepOn", true); }
 void saveBeepEnabled() { prefs.putBool("beepOn", beepEnabled); }
-void applyVolume() { beepDuty = VOL_PRESETS[volPresetIdx]; }
+// beepDuty holds the chosen preset on both boards; what it MEANS differs. On
+// board 1 it is an LEDC duty consumed at each tone step, so storing it is the
+// whole job. On board 2 it is an ES8311 volume that has to be written to the
+// codec, because the sample buffer's amplitude is fixed - loudness lives in the
+// codec, not in the samples. Pushed here rather than at each beep so the VOLUME
+// stepper's own confirmation beep is already at the new level.
+void applyVolume() {
+  beepDuty = VOL_PRESETS[volPresetIdx];
+#if BOARD_HAS_BEEPER && !BOARD_USES_TFT_ESPI
+  if (audioOutReady) es8311_voice_volume_set(audioCodec, beepDuty, NULL);
+#endif
+}
 void loadVolume() {
   volPresetIdx = constrain(prefs.getInt("vol", 1), 0, VOL_PRESETS_COUNT - 1);
   applyVolume();
@@ -217,7 +228,7 @@ void saveVolume() { prefs.putInt("vol", volPresetIdx); }
 // also the honest shape of the gap - board 2 HAS a speaker, but it is behind an
 // I2S codec, and an LEDC square wave is not a thing you can send one. Giving
 // AUDIO_OUT_PIN an alias pointing at an I2S data line would compile and lie.
-#if BOARD_HAS_BEEPER
+#if BOARD_HAS_BEEPER && BOARD_USES_TFT_ESPI
 void startBeep() {
   if (!beepEnabled) return;
   if (beepStep >= 0) return; // pattern already playing
@@ -238,6 +249,73 @@ void updateBeep() {
     return;
   }
   ledcWrite(AUDIO_OUT_PIN, beepStep % 2 == 1 ? 0 : beepDuty);
+}
+#elif BOARD_HAS_BEEPER
+// BOARD 2. Same pattern, same state variables, same non-blocking contract - but
+// a beep here is SAMPLES pushed into an I2S DMA rather than a duty written to a
+// hardware square-wave generator, and that changes what "keep the tone going"
+// costs. LEDC needs one write per step and then runs by itself; this has to be
+// fed.
+//
+// THE OCCUPANCY MODEL IS THE WHOLE TRICK. I2SClass::write() blocks once the DMA
+// is full and the class exposes no availableForWrite(), so feeding blindly would
+// stall loop() for up to the buffer depth - 90ms - which is exactly the kind of
+// pause this codebase's redraw discipline exists to avoid. Instead the queue
+// depth is TRACKED: beepFedUntil is the millis() timestamp audio has been queued
+// up to, and a chunk is only written while that is less than BEEP_QUEUE_MAX_MS
+// ahead of now. Every write therefore lands in free space and returns at once.
+//
+// The gap step needs no writes at all: ESP_I2S configures the channel with
+// auto_clear = true, so an underrun emits silence rather than repeating the last
+// buffer. That is why the pattern's {120, 90, 120} works with tone steps fed and
+// the gap simply not fed.
+static unsigned long beepFedUntil = 0;
+
+// Even steps are tone, odd are silence - the same convention board 1's
+// `beepStep % 2` uses, kept identical so the shared BEEP_PATTERN_MS means the
+// same thing on both boards.
+static inline bool beepStepIsTone(int step) { return step % 2 == 0; }
+
+void startBeep() {
+  if (!beepEnabled) return;
+  if (beepStep >= 0) return; // pattern already playing
+  if (!audioOutReady) return; // codec never came up; stay silent, never crash
+  beepStep = 0;
+  beepStepStart = millis();
+  beepFedUntil = beepStepStart;
+  // Unmuting is the "amp on" of this board. The amp itself cannot be gated.
+  es8311_voice_mute(audioCodec, false);
+  updateBeep();               // prime the DMA now rather than a loop() later
+}
+
+void updateBeep() {
+  if (beepStep < 0) return;
+  const unsigned long now = millis();
+
+  // Advance the pattern first, so a step boundary is never fed with the previous
+  // step's material.
+  if (now - beepStepStart >= BEEP_PATTERN_MS[beepStep]) {
+    beepStep++;
+    beepStepStart = now;
+    if (beepStep >= BEEP_STEPS) {
+      beepStep = -1;
+      es8311_voice_mute(audioCodec, true);
+      // Deliberately NOT waiting for the DMA to drain: what is still queued is
+      // at most BEEP_QUEUE_MAX_MS of tone, and the mute lands on the codec's
+      // analogue side, so it silences that tail rather than letting it play out
+      // after the pattern is over.
+      return;
+    }
+  }
+
+  if (!beepStepIsTone(beepStep)) return;   // auto_clear gives the gap for free
+  // Catch up to the queue ceiling. A loop() iteration that ran long can leave
+  // more than one chunk owed, and writing only one per call would let the tone
+  // underrun into a gap it never asked for.
+  while ((long) (beepFedUntil - now) < (long) BEEP_QUEUE_MAX_MS) {
+    audioFeedBeepChunk();
+    beepFedUntil += BEEP_TONE_FRAMES * 1000UL / TONE_SAMPLE_HZ;
+  }
 }
 #else
 void startBeep() {}
@@ -313,13 +391,28 @@ void powerOff() {
   tft.drawString(WAKE_HINT, tft.width() / 2, tft.height() / 2 + 12);
   tft.setTextDatum(TL_DATUM);
 
-#if BOARD_HAS_BEEPER
+#if BOARD_HAS_BEEPER && BOARD_USES_TFT_ESPI
   if (beepEnabled) { // single short blip as tactile confirmation
     digitalWrite(AUDIO_EN_PIN, LOW);
     ledcWrite(AUDIO_OUT_PIN, MIC_CUE_DUTY);
     delay(90);
     ledcWrite(AUDIO_OUT_PIN, 0);
     digitalWrite(AUDIO_EN_PIN, HIGH);
+  }
+#elif BOARD_HAS_BEEPER
+  // The same farewell blip, and this one is allowed to BLOCK where updateBeep()
+  // may not: the device is on its way into deep sleep, so there is no loop() left
+  // to be responsive for. Feeding the DMA and then waiting is therefore simpler
+  // and more honest than driving the state machine for one 90ms tone - and the
+  // wait has to be slightly longer than the audio, because write() returns when
+  // the DMA has ACCEPTED the bytes, not when the codec has clocked them out.
+  // Muting before they finish playing would cut the blip off mid-note.
+  if (beepEnabled && audioOutReady) {
+    es8311_voice_mute(audioCodec, false);
+    const int chunks = 90 / (BEEP_TONE_FRAMES * 1000 / TONE_SAMPLE_HZ);
+    for (int i = 0; i < chunks; i++) audioFeedBeepChunk();
+    delay(90 + 40);
+    es8311_voice_mute(audioCodec, true);
   }
 #endif
 #if !BOARD_USES_TFT_ESPI

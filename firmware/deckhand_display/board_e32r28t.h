@@ -65,6 +65,12 @@ const int BORDER_CTRL = 1;   // buttons, list rows, pills, chips, pager keys
 // (AUDIO_EN net, 10K pulled high = amp muted; drive LOW to enable). Keeping
 // the amp disabled except while actually beeping avoids idle hiss.
 #define AUDIO_OUT_PIN 26
+// Beeper volume presets. A LIST MACRO rather than an array because the array has
+// to be defined once in the sketch (where VOL_PRESETS is declared) while the
+// VALUES are board-specific: here they are LEDC duty out of 255, and on board 2
+// they are ES8311 volume out of 100 - same three rungs, different units and
+// therefore no shared literal that could be right for both.
+#define VOL_PRESET_LIST {6, 18, 45}
 #define AUDIO_EN_PIN 4
 
 // Microphone: MAX4466 electret amp on the board's 4-pin "Expand" connector

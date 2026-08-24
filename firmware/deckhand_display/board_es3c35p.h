@@ -16,7 +16,7 @@
 #define BOARD_USES_TFT_ESPI  0
 #define BOARD_BLE_NIMBLE     1
 #define BOARD_HAS_MIC        0   // I2S codec exists; the mic PATH is a later spec
-#define BOARD_HAS_BEEPER     0   // same - LEDC square wave does not port to I2S
+#define BOARD_HAS_BEEPER     1   // via the ES8311; see the beeper note below
 // INFORMATIONAL ONLY - these two gate nothing and are read nowhere in the
 // sketch. They record hardware this board has and the firmware does not use, so
 // that a future feature has a name to hang off rather than rediscovering the
@@ -190,6 +190,34 @@ const int BORDER_CTRL = 1;
 // silence. Costs one digitalWrite; the alternative is a board that regresses to
 // this same afternoon's bug with no code change to blame.
 #define AMP_EN_ENABLE_LEVEL  LOW
+
+// ---- Beeper, through the codec rather than a GPIO ---------------------------
+// Volume presets are ES8311 volume 0..100, NOT a duty. The scale is linear in dB
+// (register 0x32 is 0.5dB/LSB with 0xBF = 0dB, and the driver maps 0..100 across
+// 0..255), so these are ~13dB apart rather than evenly spaced in the numbers:
+// 55 is about -25dB, 70 about -6dB, 85 about +13dB. All three sit inside the
+// range measured audible on this hardware - anything below ~40 is inaudible, so
+// a "LOW" of single digits like board 1's would be a silent setting.
+#define VOL_PRESET_LIST {55, 70, 85}
+
+// 2100 Hz, where board 1 uses 2093 (C7). The 7 Hz is not a taste change: the
+// beep is a LOOPED sample buffer of BEEP_TONE_FRAMES frames, so the frequency
+// must fit a whole number of cycles in it or every loop boundary is a click -
+// a 50 Hz buzz on top of the beep. One buffer is 20ms at 16 kHz, so any multiple
+// of 50 Hz works and 2100 is the nearest to board 1's pitch (42 cycles exactly,
+// ~6 cents sharp, which nobody can hear). Board 1 needs no such constraint
+// because LEDC generates its square wave in hardware with nothing to loop.
+#define BEEP_TONE_HZ      2100
+// 320 frames = 20ms at 16 kHz, and 20ms is the feed granularity the beep state
+// machine works in. It is also exactly TONE_FRAMES, so the diagnostic and the
+// beeper agree on a buffer size by construction rather than by coincidence.
+#define BEEP_TONE_FRAMES   320
+// The DMA holds 6 * 240 frames = 90ms (ESP_I2S's own dma_desc_num/dma_frame_num),
+// and I2SClass::write() BLOCKS when it is full - there is no availableForWrite()
+// on that class. So the beep never queues past this, keeping every write into
+// free space and updateBeep() non-blocking. 60 leaves a 30ms cushion against a
+// loop() iteration that runs long.
+#define BEEP_QUEUE_MAX_MS   60
 
 // ---- Misc ------------------------------------------------------------------
 #define PIN_RGB_LED       40    // addressable (WS2812-style) RGB LED

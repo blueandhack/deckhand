@@ -1354,11 +1354,14 @@ const int BEEP_FREQ = 2093; // C7 - small cavity speakers are loudest ~2kHz
 // Square-wave duty out of 255 - the volume knob (128 = max, painful on a 1W
 // amp at desk distance; single digits = soft). Set from the VOLUME stepper
 // on the SETTINGS tab; presets chosen for an audible LOW..HIGH spread.
-const int VOL_PRESETS[] = {6, 18, 45};
+// Values live in the board header (VOL_PRESET_LIST): board 1's are LEDC duty out
+// of 255, board 2's are ES8311 volume out of 100. Same three rungs, different
+// units - a shared literal could not be correct for both.
+const int VOL_PRESETS[] = VOL_PRESET_LIST;
 const char* VOL_LABELS[] = {"LOW", "MED", "HIGH"};
 const int VOL_PRESETS_COUNT = 3;
 int volPresetIdx = 1;     // default MED
-int beepDuty = 18;        // = VOL_PRESETS[volPresetIdx]
+int beepDuty = VOL_PRESETS[1];  // MED; applyVolume() owns it after boot
 // on, gap, on (milliseconds)
 const unsigned long BEEP_PATTERN_MS[] = {120, 90, 120};
 const int BEEP_STEPS = 3;
@@ -4254,11 +4257,18 @@ void setup() {
   ledcAttach(TFT_BL_PIN, 5000, 8); // 5kHz, 8-bit duty (0-255)
   setBacklight(100); // full brightness until loadBrightness() runs, after prefs.begin()
 
-#if BOARD_HAS_BEEPER
+#if BOARD_HAS_BEEPER && BOARD_USES_TFT_ESPI
   pinMode(AUDIO_EN_PIN, OUTPUT);
   digitalWrite(AUDIO_EN_PIN, HIGH); // amp muted until a beep plays
   ledcAttach(AUDIO_OUT_PIN, BEEP_FREQ, 8);
   ledcWrite(AUDIO_OUT_PIN, 0);
+#elif BOARD_HAS_BEEPER
+  // Board 2's equivalent, and it must come AFTER touchBegin() - the codec shares
+  // the I2C port touch installs, and a second master on this bus is the conflict
+  // this board aborts on in a global constructor. touchBegin() runs at the top of
+  // setup() for the wake guard, so that ordering is already satisfied here.
+  // A failure logs and leaves the device silent rather than stopping the boot.
+  audioOutBegin();
 #endif
 
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP); // board has its own 10K pull-up too
