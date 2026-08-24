@@ -3220,6 +3220,34 @@ void handleLine(const String& line) {
     const char* hid = hist["id"] | "";
     strncpy(histId, hid, sizeof(histId) - 1);
     histId[sizeof(histId) - 1] = '\0';
+    // ONE ENTRY IN FULL, handled BEFORE the page state is touched - and that
+    // ordering is the whole fix for a real bug. An `item:<n>` reply carries a
+    // `full` object and NO `items` array at all (host/index.mjs's
+    // sendHistoryItem sends exactly `{hist:{id, full}}`), so clearing histCount
+    // up here wiped the list's rows and nothing refilled them: going back from
+    // the full entry drew the list chrome with zero rows, i.e. a blank screen.
+    // It then "fixed itself" on PREV or NEXT, because paging re-requests a page
+    // and that reply does carry items - which is exactly what made it look like
+    // a redraw bug rather than state being destroyed.
+    JsonObject full = hist["full"];
+    if (!full.isNull()) {
+      const char* t = full["t"] | "";
+      const char* r = full["r"] | "out";
+      histFullRole = strcmp(r, "you") == 0      ? 0
+                     : strcmp(r, "claude") == 0 ? 1
+                     : strcmp(r, "ran") == 0    ? 2
+                     : strcmp(r, "no") == 0     ? 4
+                                                : 3;
+      int n = 0;
+      for (; t[n] && n < HIST_FULL_MAX - 1; n++)
+        histFull[n] = ((uint8_t) t[n] < 0x20) ? ' ' : t[n];
+      histFull[n] = '\0';
+      histPending = false;
+      histFullPage = 0;
+      if (histFullActive) drawHistFull();
+      return;
+    }
+
     histCount = 0;
     histArenaUsed = 0;
     JsonArray items = hist["items"].as<JsonArray>();
@@ -3246,26 +3274,6 @@ void handleLine(const String& line) {
         histCount++;
       }
     }
-    // One entry, in full: the second level of the reader.
-    JsonObject full = hist["full"];
-    if (!full.isNull()) {
-      const char* t = full["t"] | "";
-      const char* r = full["r"] | "out";
-      histFullRole = strcmp(r, "you") == 0      ? 0
-                     : strcmp(r, "claude") == 0 ? 1
-                     : strcmp(r, "ran") == 0    ? 2
-                     : strcmp(r, "no") == 0     ? 4
-                                                : 3;
-      int n = 0;
-      for (; t[n] && n < HIST_FULL_MAX - 1; n++)
-        histFull[n] = ((uint8_t) t[n] < 0x20) ? ' ' : t[n];
-      histFull[n] = '\0';
-      histPending = false;
-      histFullPage = 0;
-      if (histFullActive) drawHistFull();
-      return;
-    }
-
     histPage = hist["page"] | 0;
     histPages = hist["pages"] | 1;
     if (histPages < 1) histPages = 1;
