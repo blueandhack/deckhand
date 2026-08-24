@@ -474,9 +474,41 @@ void drawHostsPageStatic() {
     int y = P3_LIST_Y + i * (H_ROW + SP_1);
     bool only = allowedHost[0] && strcmp(hosts[i].id, allowedHost) == 0;
     bool live = (i == activeHost);
+    // TWO MACS WITH THE SAME HOSTNAME ARE THE ORDINARY CASE, not a corner: a pair
+    // of MacBook Pros both report "...-MacBook-Pro", the same collision that makes
+    // macTag() render both as `pro` and the reason the Mac icons exist. Two
+    // identical rows here are worse than cosmetic, because this page's controls
+    // are destructive and per-row - which `x` forgets which Mac, and which one
+    // ONLY pins, becomes a guess. So when a label is shared, the row carries the
+    // first 4 hex of the hostId: unique by construction (a random 32-bit value)
+    // and needing nothing new on the wire.
+    bool dupLabel = false;
+    for (int j = 0; j < hostCount && !dupLabel; j++)
+      if (j != i && hosts[i].label[0] && hosts[j].label[0] &&
+          strcmp(hosts[j].label, hosts[i].label) == 0) dupLabel = true;
+    char idtag[8] = "";
+    if (dupLabel) snprintf(idtag, sizeof(idtag), " #%.4s", hosts[i].id);
+
+    // "* " marks the Mac currently talking, and it is ASCII for the reason this
+    // codebase keeps re-learning: it used to be a MIDDLE DOT, and both fonts
+    // declare 0x20..0x7E - so the one affordance distinguishing the live Mac drew
+    // as NOTHING on either board. Same trap as the tag separator and fitText's
+    // three-dot ellipsis. Both branches are 2 characters and both faces are
+    // monospace, so the labels stay column-aligned either way.
+    const char* mark = live ? "* " : "  ";
+    // THE LABEL IS WHAT GETS TRIMMED, NEVER THE SUFFIX. The suffix is the only
+    // thing telling two same-named Macs apart, so appending it and letting either
+    // snprintf clip the tail or the row overflow would drop exactly the
+    // disambiguator. Measured rather than counted, because uiListRow draws with
+    // NO width bound and drawString paints an opaque box - an over-long row would
+    // rub out the card border it crossed.
+    setUIFont(T_BODY);   // the font uiListRow measures and draws this in
+    const int lane = CARD_W - SP_3 - (P3_X_W + SP_2)
+                     - tft.textWidth(mark) - tft.textWidth(idtag);
+    char name[24];
+    fitText(name, sizeof(name), hosts[i].label[0] ? hosts[i].label : hosts[i].id, lane);
     char row[40];
-    snprintf(row, sizeof(row), "%s%s", live ? "\xB7 " : "  ",
-             hosts[i].label[0] ? hosts[i].label : hosts[i].id);
+    snprintf(row, sizeof(row), "%s%s%s", mark, name, idtag);
     // reserve the "x" zone so the ONLY tag sits clear of it
     uiListRow(CARD_X, y, CARD_W, H_ROW, row, only, only ? "ONLY" : nullptr, P3_X_W + SP_2);
     // Trailing destructive affordance, inside the row's own surface.
