@@ -23,8 +23,41 @@ that differs and why; this section is only how to build each.
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
 | size today | flash 1382802, RAM 69236 | flash 924058, RAM 58684 |
 
-**Board 1's binary is BYTE-IDENTICAL across the whole second-board port, and that is the check
-that kept the port honest** — 1382802 flash / 69236 RAM. It is not ceremony: it caught a real
+**Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
+RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
+history list going blank after reading one entry, and the PAIRED MACS row), so the constant is
+gone and `firmware/board-baseline.mjs` takes its place:
+
+```
+arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
+  --output-dir /tmp/b1 firmware/deckhand_display
+node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
+```
+
+It is **stronger** than what it replaces, in two ways the old check could not be:
+
+- **It compares BYTES, not sizes.** "Byte-identical" was always implemented as "compare those two
+  numbers", and two different binaries of the same length pass that.
+- **It lives in a command rather than in prose**, so running it is not a thing to remember.
+
+**A plain hash cannot do this, because the build is NOT reproducible — measured, not assumed:** two
+compiles of identical source differ in **68 of 1,383,200 bytes**. Every differing byte is derived
+metadata rather than code, in three ranges — `esp_app_desc_t.app_elf_sha256` (0xB0..0xCF), a 5-byte
+cluster at 0x13BC that is masked as a **stated blind spot rather than dressed up as understood**,
+and the trailing 33-byte image SHA-256 plus checksum. Masking those 70 bytes (0.005%) makes the hash
+stable across rebuilds and sensitive to any real change.
+
+`--selftest <binA> <binB>` is what keeps that honest, on the same teeth-proving convention as
+`palette-check.mjs`: given two builds of identical source it **must** show the raw hashes differing
+and the masked hashes agreeing, and it FAILS if the mask no longer covers what the toolchain varies.
+**Re-run it after an arduino-cli or ESP32 core upgrade** — a core that starts stamping something new
+would otherwise make every check fail and look like a real change. (Note `time[16]`/`date[16]` at
+0x70..0x8F did NOT vary between builds minutes apart, so this core does not stamp them; if a future
+one does, the selftest is what says so.)
+
+**Re-baselining is deliberate and cheap: `--update 1` and say in the commit message WHY the binary
+was expected to move.** The point was never that board 1 must never change — it is that a change to
+board 1 must never be a SURPRISE. It is not ceremony: it caught a real
 latent bug (moving `TOUCH_CS` into a header included before `<TFT_eSPI.h>` silently switched on
 TFT_eSPI's built-in touch extension, which this board cannot use because the touch controller is
 on a separate SPI bus) and it is the reason four otherwise-good refactors were declined mid-port.
