@@ -47,9 +47,16 @@ cluster at 0x13BC that is masked as a **stated blind spot rather than dressed up
 and the trailing 33-byte image SHA-256 plus checksum. Masking those 70 bytes (0.005%) makes the hash
 stable across rebuilds and sensitive to any real change.
 
-`--selftest <binA> <binB>` is what keeps that honest, on the same teeth-proving convention as
+**Part of the mask is BOARD-SPECIFIC, so every invocation takes a board number.** The 5-byte
+cluster sits at `0x13BC` on board 1 and `0x1D9C` on board 2 — and that was found the hard way: the
+mask was derived from board-1 binaries and applied to board 2 untested, whereupon board 2 reported
+`CHANGED` at **+0 bytes**, which is precisely the case the old size check could never have seen.
+
+`--selftest <binA> <binB> <board>` is what keeps that honest, on the same teeth-proving convention as
 `palette-check.mjs`: given two builds of identical source it **must** show the raw hashes differing
-and the masked hashes agreeing, and it FAILS if the mask no longer covers what the toolchain varies.
+and the masked hashes agreeing, and it FAILS if the mask no longer covers what the toolchain varies —
+printing the uncovered runs, because re-deriving them by hand with `cmp` is exactly the step this
+already failed once.
 **Re-run it after an arduino-cli or ESP32 core upgrade** — a core that starts stamping something new
 would otherwise make every check fail and look like a real change. (Note `time[16]`/`date[16]` at
 0x70..0x8F did NOT vary between builds minutes apart, so this core does not stamp them; if a future

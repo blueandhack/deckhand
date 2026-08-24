@@ -16,10 +16,13 @@
 // and confined to three ranges (below), so masking them yields a hash that is
 // stable across rebuilds and sensitive to any real change.
 //
-//   node firmware/board-baseline.mjs <path-to.ino.bin>            # print the hash
-//   node firmware/board-baseline.mjs <bin> --check 1              # compare to baseline
-//   node firmware/board-baseline.mjs <bin> --update 1             # re-baseline, deliberately
-//   node firmware/board-baseline.mjs --selftest <binA> <binB>     # prove the mask works
+//   node firmware/board-baseline.mjs <bin> <board>                  # print the hash
+//   node firmware/board-baseline.mjs <bin> --check 1                # compare to baseline
+//   node firmware/board-baseline.mjs <bin> --update 1               # re-baseline, deliberately
+//   node firmware/board-baseline.mjs --selftest <binA> <binB> <board>
+//
+// The board number is required everywhere, because PART OF THE MASK IS
+// BOARD-SPECIFIC - see MASK_BOARD.
 //
 // Compiling is left OUT of this script on purpose: a board build is ~5 minutes and
 // the two boards must never compile concurrently (one sketch build directory - see
@@ -37,26 +40,41 @@ import crypto from "node:crypto";
 //
 //   0xB0..0xCF   esp_app_desc_t.app_elf_sha256 - the ELF's own digest, which moves
 //                whenever anything does, including its own timestamp inputs.
-//   0x13BC..0x13C0  a 5-byte cluster this script does NOT explain. Masked because
-//                it demonstrably is not source-determined; recorded as a known
-//                blind spot rather than dressed up as understood.
+//   a 5-byte cluster this script does NOT explain, at a BOARD-SPECIFIC offset
+//                (MASK_BOARD). Masked because it demonstrably is not
+//                source-determined; recorded as a known blind spot rather than
+//                dressed up as understood.
 //   last 33      the appended image SHA-256 plus its checksum byte.
 //
 // Note what is NOT here: esp_app_desc_t's time[16]/date[16] at 0x70..0x8F did not
 // vary between builds minutes apart, so this core does not stamp them. If a future
 // core does, --selftest will say so.
-const MASK_HEAD = [
-  { from: 0xb0, to: 0xcf, why: "app_elf_sha256" },
-  { from: 0x13bc, to: 0x13c0, why: "unexplained, measured" },
-];
+const MASK_COMMON = [{ from: 0xb0, to: 0xcf, why: "app_elf_sha256" }];
 const MASK_TAIL_BYTES = 33; // image SHA-256 + checksum
+
+// THE 5-BYTE CLUSTER IS AT A BOARD-SPECIFIC OFFSET, and finding that out is the
+// reason --selftest exists. The mask was first derived from board-1 binaries and
+// applied to board 2 untested; board 2 then reported CHANGED at +0 bytes, and the
+// selftest showed why - the cluster sits at 0x13BC on board 1 and 0x1D9C on board
+// 2, so a board-1 mask leaves it exposed on board 2. Both are 5 bytes with one
+// byte matching by chance in the middle, i.e. a ~4-byte value whose position
+// tracks image layout. Still unexplained; masked per board BY MEASUREMENT and
+// labelled as such rather than guessed at structurally.
+//
+// A new board, or a toolchain that moves this, needs its own entry: run
+// --selftest, which prints the differing runs when the mask does not cover them.
+const MASK_BOARD = {
+  1: [{ from: 0x13bc, to: 0x13c0, why: "unexplained, measured on board 1" }],
+  2: [{ from: 0x1d9c, to: 0x1da0, why: "unexplained, measured on board 2" }],
+};
 
 const BASELINE = path.join(import.meta.dirname, "board-baseline.json");
 
-function maskedHash(file) {
+function maskedHash(file, board) {
   const buf = Buffer.from(fs.readFileSync(file)); // a copy: this is mutated below
   let masked = 0;
-  for (const { from, to } of MASK_HEAD) {
+  const ranges = [...MASK_COMMON, ...(MASK_BOARD[board] ?? [])];
+  for (const { from, to } of ranges) {
     if (to >= buf.length) continue;
     buf.fill(0, from, to + 1);
     masked += to - from + 1;
@@ -87,11 +105,13 @@ const args = process.argv.slice(2);
 // stale mask is loud rather than invisible.
 if (args[0] === "--selftest") {
   const [a, b] = [args[1], args[2]];
-  if (!a || !b) {
-    console.error("usage: --selftest <binA> <binB>   (two builds of IDENTICAL source)");
+  const sboard = args[3] ?? "";
+  if (!a || !b || !/^[12]$/.test(sboard)) {
+    console.error("usage: --selftest <binA> <binB> <board>   (two builds of IDENTICAL source)");
+    console.error("The board matters: part of the mask is board-specific - see MASK_BOARD.");
     process.exit(2);
   }
-  const ra = maskedHash(a), rb = maskedHash(b);
+  const ra = maskedHash(a, sboard), rb = maskedHash(b, sboard);
   const rawA = crypto.createHash("sha256").update(fs.readFileSync(a)).digest("hex");
   const rawB = crypto.createHash("sha256").update(fs.readFileSync(b)).digest("hex");
   console.log(`raw    A ${rawA.slice(0, 16)}  B ${rawB.slice(0, 16)}  ${rawA === rawB ? "SAME" : "differ"}`);
@@ -109,7 +129,24 @@ if (args[0] === "--selftest") {
   }
   if (ra.hash !== rb.hash) {
     console.error("\nFAIL: the mask does NOT cover everything this toolchain varies.");
-    console.error("Re-derive it:  cmp -l <binA> <binB>   and widen MASK_HEAD/MASK_TAIL_BYTES.");
+    // The runs are PRINTED rather than left as an exercise: re-deriving them by
+    // hand with cmp and awk is exactly the step this failed on the first time.
+    const A = fs.readFileSync(a), B = fs.readFileSync(b);
+    const runs = [];
+    for (let i = 0; i < Math.min(A.length, B.length); i++) {
+      if (A[i] === B[i]) continue;
+      if (runs.length && i === runs[runs.length - 1][1] + 1) runs[runs.length - 1][1] = i;
+      else runs.push([i, i]);
+    }
+    const covered = [...MASK_COMMON, ...(MASK_BOARD[sboard] ?? [])];
+    const tailFrom = A.length - MASK_TAIL_BYTES;
+    console.error("\nRaw differing runs (0-based), and whether the mask covers each:");
+    for (const [from, to] of runs) {
+      const ok = from >= tailFrom || covered.some((c) => from >= c.from && to <= c.to);
+      console.error(`  0x${from.toString(16).toUpperCase()}..0x${to.toString(16).toUpperCase()}` +
+                    `  (${to - from + 1} bytes)  ${ok ? "covered" : "*** NOT COVERED ***"}`);
+    }
+    console.error(`\nAdd the uncovered runs to MASK_BOARD[${sboard}] and re-run.`);
     process.exit(1);
   }
   console.log("\nPASS: raw hashes differ, masked hashes agree - the mask covers exactly");
@@ -123,17 +160,19 @@ if (!bin) {
   console.error("       board-baseline.mjs --selftest <binA> <binB>");
   process.exit(2);
 }
-const r = maskedHash(bin);
 const flag = args.find((a) => a === "--check" || a === "--update");
-const board = args[args.indexOf(flag) + 1];
+const board = flag ? args[args.indexOf(flag) + 1] : args[args.indexOf(bin) + 1];
+if (!board || !/^[12]$/.test(board)) {
+  console.error("a board number (1 or 2) is required - part of the mask is board-specific.");
+  console.error("  board-baseline.mjs <bin> <board>            # print the hash");
+  console.error("  board-baseline.mjs <bin> --check|--update <board>");
+  process.exit(2);
+}
+const r = maskedHash(bin, board);
 
 if (!flag) {
-  console.log(`${r.hash}  size=${r.size}  (masked ${r.masked} bytes)`);
+  console.log(`${r.hash}  size=${r.size}  (masked ${r.masked} bytes, board ${board})`);
   process.exit(0);
-}
-if (!board || !/^[12]$/.test(board)) {
-  console.error(`${flag} needs a board number: 1 or 2`);
-  process.exit(2);
 }
 
 const base = readBaseline();
