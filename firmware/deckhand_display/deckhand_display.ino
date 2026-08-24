@@ -4540,7 +4540,23 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // audio.ino. Deliberately a command rather than a UI control: it takes ~3s,
     // it needs a person listening, and it is scaffolding for one question rather
     // than a feature.
-    toneTest();
+    toneTest(-1);   // -1 = "use the default volume"; see toneTest()
+  } else if (buf.startsWith("TONETEST ")) {
+    // `TONETEST <0-100>` sets the codec volume for one run. This exists because
+    // the useful loudness is a property of the ROOM, not of the board: the same
+    // command has to serve "prove this thing can make a sound at all" and "check
+    // it without waking the house", and settling that by editing a constant costs
+    // a ~3min compile and a reflash each way. An out-of-range or unparseable
+    // argument is CLAMPED rather than refused - the run still happens and the log
+    // states the volume actually used, so a typo costs a known-wrong loudness
+    // instead of a command that silently did nothing.
+    // The clamping happens inside toneTest(), not here, and that is forced as
+    // well as tidier: the Arduino build concatenates deckhand_display.ino FIRST
+    // and audio.ino after it, so that file's volume constants are not in scope at
+    // this line. One place knowing the codec's valid range is the right shape
+    // regardless. `toInt()` yields 0 for junk, which the clamp lifts to the floor
+    // rather than playing silence.
+    toneTest(buf.substring(9).toInt());
   } else if (buf.startsWith("SWAP ")) {
     // Flip the panel byte order at RUNTIME. This exists because the question
     // "which order does this panel want?" is not answerable from the Mac at all:

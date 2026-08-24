@@ -1146,8 +1146,21 @@ void micLevelTest() { Serial.println("MIC: no microphone on this board"); }
 // hedge. The failure this test exists to distinguish is SILENCE, and a quiet
 // tone and a dead path are the same observation. Loud is the diagnostic.
 #define TONE_AMPLITUDE    20000
-// ES8311 volume register, 0..100.
-#define TONE_VOLUME       90
+// ES8311 volume register, 0..100 - the DEFAULT only; `TONETEST <0-100>` overrides
+// it at runtime. This was 90 on the argument that loud is the diagnostic, since a
+// quiet tone and a dead path are the same observation. That argument is sound for
+// a FIRST run and wrong as a standing default: this command gets run in a house
+// with people asleep in it, and a diagnostic nobody dares trigger is worse than a
+// quiet one. The epistemics moved into the log instead of the amplitude - every
+// run prints the volume it used and says outright that silence at a low volume
+// proves nothing. 30 is audible in a quiet room at arm's length.
+#define TONE_VOLUME       30
+// Guard rails for the runtime argument. 100 is the codec's own maximum, and the
+// floor is 1 rather than 0 because `TONETEST 0` would configure the whole chain
+// correctly and then play nothing, which is indistinguishable from the fault this
+// command exists to detect.
+#define TONE_VOLUME_MIN    1
+#define TONE_VOLUME_MAX  100
 
 // THE AMP'S TURN-ON RAMP IS THE REASON THE FIRST RUN OF THIS TEST PROVED
 // NOTHING. U6 is an SC8002B, an LM4871-class part, and its BYPASS pin carries
@@ -1256,14 +1269,22 @@ static size_t tonePlayBurst(I2SClass& i2s, const int16_t* buf, int ms) {
   return wrote;
 }
 
-void toneTest() {
+void toneTest(int volume) {
+  // The command dispatch cannot do this itself - it is compiled BEFORE this file
+  // (deckhand_display.ino first, then the rest alphabetically), so none of these
+  // constants is in scope there. Negative means "caller had no opinion", which is
+  // how a plain TONETEST asks for the default; anything else is clamped into the
+  // codec's real range so a typo yields a known loudness rather than silence.
+  if (volume < 0) volume = TONE_VOLUME;
+  if (volume < TONE_VOLUME_MIN) volume = TONE_VOLUME_MIN;
+  if (volume > TONE_VOLUME_MAX) volume = TONE_VOLUME_MAX;
   Serial.println("TONETEST ---------------------------------------------------------");
   Serial.printf("TONETEST driving %d Hz then %d Hz at %d Hz/16-bit stereo, MCLK "
                 "%d Hz (ESP_I2S hardcodes mclk_multiple=256; see the note in "
                 "audio.ino), codec volume %d/100, amplitude %d/32767, %dms settle, "
                 "%dms per tone.\n",
                 TONE_HZ_LOW_TRIAL, TONE_HZ_HIGH_TRIAL, TONE_SAMPLE_HZ, TONE_MCLK_HZ,
-                TONE_VOLUME, TONE_AMPLITUDE, TONE_SETTLE_MS, TONE_BURST_MS);
+                volume, TONE_AMPLITUDE, TONE_SETTLE_MS, TONE_BURST_MS);
 
   // I2S FIRST, so MCLK is already running when the codec configures its
   // dividers off it - the order Espressif's own i2s_es8311 example uses. The
@@ -1318,7 +1339,7 @@ void toneTest() {
     return;
   }
   int volSet = -1;
-  e = es8311_voice_volume_set(codec, TONE_VOLUME, &volSet);
+  e = es8311_voice_volume_set(codec, volume, &volSet);
   Serial.printf("TONETEST codec configured. volume_set=%d (%s)\n", volSet,
                 esp_err_to_name(e));
   // All dashes means nothing read back at all, so the fault is the bus; a
@@ -1402,8 +1423,10 @@ void toneTest() {
   digitalWrite(PIN_AMP_EN, AMP_EN_ENABLE_LEVEL);
   free(buf);
   es8311_delete(codec);
-  Serial.println("TONETEST done. Amp enable returned to INPUT (its boot state), codec "
-                 "muted, I2S stopped.");
+  Serial.printf("TONETEST done. Amp enable left DRIVEN %s (the level that means "
+                "enabled), codec muted, I2S stopped. The quiet comes from the codec "
+                "mute - no level of this pin is silent on this board revision.\n",
+                AMP_EN_ENABLE_LEVEL == LOW ? "LOW" : "HIGH");
   // Phrased as the question the listener can actually answer. The trials are
   // told apart by PITCH, so this line must be too - it described "one long tone"
   // versus "two short beeps" for one run after the trials stopped differing that
@@ -1413,6 +1436,14 @@ void toneTest() {
                  "(second) = ACTIVE HIGH. Both = the pin gates nothing and the amp is "
                  "always on. Neither = the fault is upstream of the amp; check the "
                  "register dump above.");
+  // The default volume is deliberately quiet, so NEITHER is no longer strong
+  // evidence on its own - which has to be said here rather than assumed, because
+  // this is the line someone reads before concluding the hardware is broken.
+  if (volume < 60) {
+    Serial.printf("TONETEST note: volume was %d/100, which is QUIET ON PURPOSE. Hearing "
+                  "nothing at this level is NOT evidence of a fault - re-run as "
+                  "'TONETEST 90' before concluding anything from silence.\n", volume);
+  }
   Serial.println("TONETEST ---------------------------------------------------------");
 }
 
