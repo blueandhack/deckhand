@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Generate MacEmoji.h - 13x13 per-Mac icon sprites - from the system emoji font.
+"""Generate the per-Mac icon sprites - one header per board - from the system emoji font.
 
-    python3 emoji2c.py > MacEmoji.h
+    python3 emoji2c.py            > MacEmoji.h     # board 1, 13x13 (the default)
+    python3 emoji2c.py --size 16  > MacEmoji16.h   # board 2, 16x16
     python3 emoji2c.py --verify MacEmoji.h
-    python3 emoji2c.py --selftest
+    python3 emoji2c.py --verify MacEmoji16.h
+    python3 emoji2c.py --selftest [MacEmoji.h]
     python3 emoji2c.py --preview out.png [MacEmoji.h]
 
 Why this exists: the device's UI font, Cozette6x13, declares its glyph range as
@@ -40,16 +42,35 @@ Output format, unlike the Claude-spark/Codex-mark 2bpp-alpha-only masks:
     it at link time - removing the hazard rather than merely documenting that
     it hasn't happened yet.
 
-13x13 is not an aesthetic choice: a usage card's label row runs y0+6..y0+19, right
-up against the hero number's own clear box starting at y0+20, and 13 is also the
-UI font's cell height - which is what lets a later surface place an icon at the
-same y as neighbouring text with no per-surface centring arithmetic.
+THE SIZE IS THE UI BODY FONT'S CELL HEIGHT, and that identity - not an aesthetic
+judgement - is what the whole design rests on: an icon's y IS its neighbouring
+text's TL_DATUM y, at every draw site, with no centring arithmetic anywhere. So it
+is PER-BOARD, because the two boards do not share a font: board 1 draws Cozette
+6x13 and gets 13, board 2 draws Spleen 8x16 and gets 16. A single 13 shipped on
+board 2 leaves 3px of slack inside every 16px line and sits visibly high.
+The tightest site is unchanged in kind by the split - a usage card's label row
+starts at y0+CARD_LABEL_Y (6) and must clear the hero number's own box at
+y0+CARD_HERO_Y (20 on board 1, 24 on board 2) - so 13 clears board 1's by one row
+and 16 clears board 2's by two.
 
-Rendering size: emoji are rasterised at 104px (not the 128px a first draft might
-reach for) specifically so the box filter down to 13px is an exact, unweighted 8x8
-average (104 = 13*8) - 128 does not divide 13 evenly, and a fractional box would
-make the "re-render and compare" verifier fragile to rounding rather than a real
-correctness check.
+Which header a build gets is decided by the COMPILE TARGET, exactly as board.h
+does it: deckhand_display.ino includes MacEmoji.h or MacEmoji16.h behind
+BOARD_USES_TFT_ESPI. The two CANNOT both be included - they define the same
+MAC_EMOJI_SIZE/STRIDE/COUNT/NAMES - and that is deliberate rather than an
+oversight to work around: exactly one size is correct for a given panel.
+
+THE SIXTEEN NAMES ARE THE WIRE FORMAT AND MUST NOT CHANGE. The payload carries a
+name, never an index, and host/mac-emoji-check.mjs compares three hand-maintained
+copies of the list (the generated header, host/mac-emoji.mjs, and MAC_ICON_NAMES in
+mac-app/DeckhandMenuBar.swift). A renamed icon breaks an already-configured Mac
+silently on both sides - so a broken icon is fixed by choosing a different
+CHARACTER for the same name, which is what SIZE_OVERRIDES below does.
+
+Rendering size: emoji are rasterised at SIZE*8 (104px at 13, 128px at 16)
+specifically so the box filter down is an exact, unweighted 8x8 average at any
+size - a fixed 104 or 128 would only have that property for one of them, and a
+fractional box would make the "re-render and compare" verifier fragile to rounding
+rather than a real correctness check.
 """
 import pathlib
 import re
@@ -59,10 +80,42 @@ import sys
 import tempfile
 import zlib
 
-SIZE = 13                    # MAC_EMOJI_SIZE - see the module docstring.
-STRIDE = (SIZE + 3) // 4      # bytes per row of packed 2bpp alpha = 4.
-RENDER = SIZE * 8             # 104px - see "Rendering size" above.
-BOX = RENDER // SIZE          # 8 - the box-filter factor, exact by construction.
+# The icon's edge in pixels. PER-BOARD, not a constant, and set by --size:
+# MAC_EMOJI_SIZE has to equal the UI body font's CELL HEIGHT, because that identity
+# is what lets every draw site place an icon at its neighbouring text's own
+# TL_DATUM y with no centring arithmetic. Board 1 draws Cozette 6x13 (13), board 2
+# draws Spleen 8x16 (16), so one number cannot serve both - at 13 on board 2 the
+# icon leaves 3px of slack in a 16px line and sits optically high at every site.
+#
+# The default is 13 so an argument-less invocation still emits board 1's header
+# byte for byte, which is what keeps that board's binary unchanged by this split.
+#
+# STRIDE/RENDER/BOX are derived, and set_size() is the ONLY thing that may write
+# them: --verify reads MAC_EMOJI_SIZE back out of the header it was handed and
+# re-renders at THAT size, so a header can never be checked against the wrong
+# geometry (which would fail as thousands of pixel diffs and read like broken art).
+SIZE = 13
+STRIDE = 4
+RENDER = 104
+BOX = 8
+
+
+def set_size(n):
+    """Set SIZE and re-derive STRIDE/RENDER/BOX from it.
+
+    RENDER = SIZE * 8 keeps the box filter an exact, unweighted 8x8 average for ANY
+    size - the property a fixed 104 or 128 would only have for one - so the
+    "re-render and compare" verifier stays a real correctness check rather than a
+    test of rounding. Both shipping sizes (13, 16) are exact by construction here.
+    """
+    global SIZE, STRIDE, RENDER, BOX
+    if n < 4 or n > 64:
+        sys.exit(f"--size {n} is out of range (4..64)")
+    SIZE = n
+    STRIDE = (SIZE + 3) // 4   # bytes per row of packed 2bpp alpha
+    RENDER = SIZE * 8          # see the docstring above
+    BOX = RENDER // SIZE       # 8, the box-filter factor, exact by construction
+    assert RENDER == BOX * SIZE, "box filter must be exact"
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 EMOJI_FONT = "Apple Color Emoji"
 
@@ -89,6 +142,57 @@ ICONS = [
 ]
 assert [n for n, _ in ICONS] == "rocket moon star bolt fire leaf wave anchor crab laptop desktop cloud sun cat apple gear".split()
 assert len(ICONS) == 16
+
+# A DIFFERENT CHARACTER FOR THE SAME NAME, per size. The names above are the wire
+# format and cannot change (see the docstring), so this is the only lever there is
+# for an icon that does not read on the panel - and it is per-size because board 1's
+# 13px header is FROZEN: its binary is unchanged by the per-board split, and
+# respinning its art would spend that for a judgement that can only be made on a
+# board 2 screen. Applied by render_all(); --verify picks the same set up, because it
+# re-derives SIZE from the header it was handed before rendering anything.
+#
+# WHY EACH ONE MOVED. Measured on all four real backdrops (DARK/LIGHT x BG/CARD),
+# as CIE Lab dE of the composited ink against the backdrop - not WCAG contrast, which
+# is a luminance ratio and therefore calls a perfectly legible yellow star on white a
+# failure at 1.9:1. Then looked at on the glass, which is the authority: a keyboard
+# glyph beat both of these on every number and was rejected because at 16px it draws
+# as a featureless grey bar with no keys - the same way an earlier `robot` read as a
+# cupcake in art that had passed its own preview.
+#
+#   cloud    U+2601 -> U+1F326 (sun behind rain cloud). A white cloud on LIGHT is the
+#            one genuine INVISIBILITY in the set: dE90 15.6 with 5% of its ink
+#            clearing dE 20 on a LIGHT card, and LIGHT's COLOR_CARD is pure white, so
+#            this is every shipping surface rather than only the EMOJITEST screen the
+#            old note blamed. Apple's whole cloud family is white, so no cloud glyph
+#            fixes it by being darker; 1F326 fixes it by carrying a yellow sun and
+#            blue rain, which is HUE the white body does not have. dE90 goes 15.6 ->
+#            53.8 on a LIGHT card and 12.2 -> 51.0 on the LIGHT page, and the cloud is
+#            still the dominant mass, so the name still describes the picture.
+#
+#   desktop  U+1F5A5 -> U+1F4FA (television). laptop and desktop are BOTH a black
+#            screen over a light base, and they are exactly the two a MacBook and a
+#            Mac Studio reach for - so the one case the icons exist for (two Macs side
+#            by side) was the one they could not serve. Measured as mean per-pixel dE
+#            BETWEEN the two icons on the same backdrop, U+1F5A5 was the least
+#            distinct candidate tried, on every backdrop (20.3-22.0). A television is
+#            a different OBJECT rather than a differently-lit screen - brown body,
+#            boxy outline with feet - and reads on all four backdrops (86-96% of ink
+#            clearing dE 20, against 53% for the monitor on a DARK card, whose black
+#            screen simply disappears there). The name is not what the picker draws:
+#            mac-app's picker lists NAMES only, so nothing on the Mac disagrees.
+#
+# NOT CHANGED, and this contradicts the older note that grouped it with the two above:
+# `anchor` is not a contrast failure at 16px. It measures dE90 65.0 with 93% of its ink
+# clearing dE 20 on the DARK page and 90% on a LIGHT card - its problem at 13px was
+# STROKE WIDTH in thin line art, which 51% more pixels resolved rather than a colour
+# that needed replacing. `laptop` keeps U+1F4BB: it is the unambiguous picture for its
+# own name, and the collision is fixed by moving the icon that had an alternative.
+SIZE_OVERRIDES = {
+    16: {
+        "cloud":   "\U0001F326️",
+        "desktop": "\U0001F4FA️",
+    },
+}
 
 
 def render_char(ch, out_png, tmp):
@@ -220,9 +324,14 @@ def render_icon(ch, tmp):
 def render_all():
     """-> (names, [rgb565 per pixel]*COUNT concatenated, [alpha bytes]*COUNT concatenated)."""
     names, rgb_all, alpha_all = [], [], []
+    over = SIZE_OVERRIDES.get(SIZE, {})
+    unknown = set(over) - {n for n, _ in ICONS}
+    if unknown:
+        sys.exit(f"SIZE_OVERRIDES[{SIZE}] names an icon that does not exist: {sorted(unknown)}")
     with tempfile.TemporaryDirectory() as td:
         tmp = pathlib.Path(td)
         for name, ch in ICONS:
+            ch = over.get(name, ch)
             rgb, alpha = render_icon(ch, tmp)
             names.append(name)
             rgb_all.extend(rgb)
@@ -236,7 +345,7 @@ def emit_header(names, rgb_all, alpha_all):
     assert len(alpha_all) == count * SIZE * STRIDE
     out = []
     out.append("// Generated by emoji2c.py - do not edit by hand.")
-    out.append("// 13x13 per-Mac icon sprites, rasterised from the system emoji font")
+    out.append(f"// {SIZE}x{SIZE} per-Mac icon sprites, rasterised from the system emoji font")
     out.append("// (Apple Color Emoji) via headless Chrome - see emoji2c.py's docstring")
     out.append("// for why: the device's UI font is ASCII-only, so an icon here is")
     out.append("// artwork, not a character. Colour (RGB565) and alpha (2bpp, packed")
@@ -254,8 +363,8 @@ def emit_header(names, rgb_all, alpha_all):
     out.append("};")
     out.append("")
     out.append(f"const uint16_t MAC_EMOJI_RGB[MAC_EMOJI_COUNT * {SIZE * SIZE}] PROGMEM = {{")
-    for i in range(0, len(rgb_all), 13):
-        out.append("  " + ",".join(str(v) for v in rgb_all[i:i + 13]) + ",")
+    for i in range(0, len(rgb_all), SIZE):
+        out.append("  " + ",".join(str(v) for v in rgb_all[i:i + SIZE]) + ",")
     out.append("};")
     out.append("")
     out.append(f"const uint8_t MAC_EMOJI_ALPHA[MAC_EMOJI_COUNT * {SIZE * STRIDE}] PROGMEM = {{")
@@ -296,8 +405,25 @@ def _parse_names(src):
     return re.findall(r'"([^"]*)"', m.group(1))
 
 
+def _parse_size(src):
+    """The size the header was generated at, read from its own MAC_EMOJI_SIZE.
+
+    --verify must re-render at the size the header actually uses, not at whatever
+    the default happens to be: checking a 16px header against a 13px render fails
+    as thousands of pixel diffs, which reads like broken art rather than like the
+    two numbers disagreeing. Reading it out of the file means the caller cannot get
+    it wrong, and it also catches a header whose SIZE and array LENGTHS disagree -
+    the length checks below are done against the re-render.
+    """
+    m = re.search(r'#define\s+MAC_EMOJI_SIZE\s+(\d+)', src)
+    if not m:
+        sys.exit("could not find #define MAC_EMOJI_SIZE in header")
+    return int(m.group(1))
+
+
 def decode_header(header_path):
     src = pathlib.Path(header_path).read_text()
+    set_size(_parse_size(src))
     names = _parse_names(src)
     rgb = _parse_ints(src, "MAC_EMOJI_RGB")
     alpha = _parse_ints(src, "MAC_EMOJI_ALPHA")
@@ -332,15 +458,17 @@ def verify(header_path):
     return problems
 
 
-def selftest():
+def selftest(header_path=None):
     """Prove --verify has teeth: a one-byte corruption in icon 0's alpha MUST be caught.
 
     Mirrors bdf2gfx.py --selftest and palette-check.mjs --selftest: a checker that
-    cannot fail is not a check.
+    cannot fail is not a check. Takes a header so either board's can be used as the
+    subject - the tampering is size-agnostic (it flips the first alpha byte, which
+    exists at every size) and verify() re-derives the geometry from the file.
     """
-    header_path = pathlib.Path(__file__).with_name("MacEmoji.h")
+    header_path = pathlib.Path(header_path or pathlib.Path(__file__).with_name("MacEmoji.h"))
     if not header_path.exists():
-        return ["MacEmoji.h does not exist yet - generate it first"]
+        return [f"{header_path.name} does not exist yet - generate it first"]
     clean = verify(header_path)
     if clean:
         return ["header does not verify before tampering: " + "; ".join(clean[:3])]
@@ -369,7 +497,7 @@ def selftest():
 
 
 def _run_check(kind, header_path=None):
-    problems = verify(header_path) if kind == "--verify" else selftest()
+    problems = verify(header_path) if kind == "--verify" else selftest(header_path)
     label = "MacEmoji.h" if header_path is None else pathlib.Path(header_path).name
     if problems:
         print(f"FAIL {label}: {len(problems)} problem(s)")
@@ -469,18 +597,24 @@ def main():
         header = args[1] if len(args) > 1 else str(pathlib.Path(__file__).with_name("MacEmoji.h"))
         sys.exit(_run_check("--verify", header))
     if args[:1] == ["--selftest"]:
-        sys.exit(_run_check("--selftest"))
+        sys.exit(_run_check("--selftest", args[1] if len(args) > 1 else None))
     if args[:1] == ["--preview"]:
         if len(args) < 2:
             sys.exit(__doc__)
         header = args[2] if len(args) > 2 else str(pathlib.Path(__file__).with_name("MacEmoji.h"))
         preview(args[1], header)
         return
+    if args[:1] == ["--size"]:
+        if len(args) < 2 or not args[1].isdigit():
+            sys.exit(__doc__)
+        set_size(int(args[1]))
+        args = args[2:]
     if args:
         sys.exit(__doc__)
     names, rgb_all, alpha_all = render_all()
     sys.stdout.write(emit_header(names, rgb_all, alpha_all))
-    sys.stderr.write(f"icons={len(names)} rgb_bytes={len(rgb_all) * 2} alpha_bytes={len(alpha_all)}\n")
+    sys.stderr.write(f"size={SIZE} icons={len(names)} "
+                     f"rgb_bytes={len(rgb_all) * 2} alpha_bytes={len(alpha_all)}\n")
 
 
 if __name__ == "__main__":

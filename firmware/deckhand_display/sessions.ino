@@ -433,7 +433,12 @@ void drawSessionRow(int pos) {
     const int tagRight = SESSION_ROW_X + SESSION_ROW_W - 12;
     tft.setTextDatum(TR_DATUM);
     if (rowEmoji >= 0) {
-      // SESSION_TAG_Y for both: the icon's y is the text's y, because both are 13px.
+      // SESSION_TAG_Y for both: the icon's y IS the text's y, because MAC_EMOJI_SIZE
+      // is the body cell height on either board (13 / 16). Board 2: icon rows +9..+24
+      // against a tag line inking the same rows, and the pill below starts no higher
+      // than +31 on the shortest tall row (SESSION_LARGE_MIN_H 56 - SESSION_PILL_UP
+      // 25) - 6 rows clear. Horizontally the icon owns x 280..295 and the tag is
+      // right-aligned at 276; the name lane already subtracts tagExtra for both.
       drawEmoji(rowEmoji, tagRight - MAC_EMOJI_SIZE, y + SESSION_TAG_Y, COLOR_CARD);
       tft.drawString(agentTag, tagRight - MAC_EMOJI_SIZE - 4, y + SESSION_TAG_Y);
     } else {
@@ -1461,9 +1466,10 @@ void drawSessionDetail(int idx) {
   if (agentEmoji >= 0) {
     // Pieces, not one drawColValue() call - that helper only clips a single
     // string, and there's real headroom to spare here without needing to:
-    // measured worst case is "CC" (12px) + 4px gap + the 13px icon + 4px gap +
-    // dispMacTag()'s own 7-char cap (42px) = 75px, against this 90px column
-    // (CARD_W/2 - PAD - 4).
+    // measured worst case is "CC" + 4px gap + the icon + 4px gap + dispMacTag()'s
+    // own 7-char cap, at each board's own advance: 12 + 4 + 13 + 4 + 42 = 75px
+    // against board 1's 90px column, and 16 + 4 + 16 + 4 + 56 = 96px against board
+    // 2's 126px one (CARD_W/2 - PAD - 4).
     // NO slash here: "/" is the no-icon form's separator between the agent
     // tag and the Mac text ("CC/pro"), carried over unchanged below. With an
     // icon sitting between them, a leading slash on the Mac text read as
@@ -1476,8 +1482,9 @@ void drawSessionDetail(int idx) {
     tft.setTextDatum(TL_DATUM);
     tft.drawString(tag, RX, cy);
     int iconX = RX + tft.textWidth(tag) + 4;
-    // y == cy for both: the icon's y is the text's y, because both are 13px -
-    // the same vertical rule the SETTINGS row and every other icon site uses.
+    // y == cy for both: the icon's y IS the text's y, because MAC_EMOJI_SIZE is the
+    // board's body cell height - the same vertical rule the SETTINGS row and every
+    // other icon site uses, and the reason nothing here centres anything.
     drawEmoji(agentEmoji, iconX, cy, COLOR_CARD);
     snprintf(agentCol, sizeof(agentCol), "%s", mac);
     tft.drawString(agentCol, iconX + MAC_EMOJI_SIZE + 4, cy);

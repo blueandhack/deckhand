@@ -1199,37 +1199,44 @@ two things `host/index.mjs` cannot get any other way:
     all of it ASCII-oriented end to end. An unknown name is dropped on the Mac (`resolveMacEmoji`
     returns "") and returns -1 on the device, and **both** fall back to the text tag rather than
     drawing nothing.
-  - **13x13 is DERIVED, not chosen, and 16px collides with a CLEAR BOX rather than with any
-    glyph.** A usage card's label row is `y0+6`..`y0+19`, because the hero number's box starts at
-    `y0+20` and clears from `y0+20` across the full card interior — so a 16px icon would be rubbed
-    out by the hero's own erase on every tick the digits move, the same clear-box-not-glyphs
-    arithmetic the `+88` stats row already documents. 13 was also **board 1's Cozette cell height**,
-    and that is what removed centring arithmetic from every surface that draws one: an icon's `y`
-    **is** its neighbouring text's `TL_DATUM` y, with a 4px gap, on all five sites (tall session
-    rows, the two usage cards, the Codex row, SETTINGS › STATUS, the detail card). Which is why
-    **`drawEmoji`'s `(x, y)` is the TOP-LEFT corner**, deliberately unlike `blit2bpp`'s centre
-    convention — every caller here is placing an icon beside `TL_DATUM` text, and a centre-based
-    signature would put the same `- MAC_EMOJI_SIZE / 2` at all five.
-    **That identity NO LONGER HOLDS on board 2, and the art is why.** Its body face is Spleen 8x16,
-    so the icon is 13px beside a 16px cell and the same `y` puts it ~1.5px optically HIGH at all
-    six sites that draw one (`sessions.ino:437` and `:1466`, `settings.ino:297`, `usage.ino:167`
-    and `:425`). This is a **cosmetic consequence of the type scale**, not a collision — nothing
-    overlaps, no clear box reaches anything, and the 4px gap is unchanged — and it is deliberately
-    NOT chased: `MAC_EMOJI_SIZE` is the dimension the art itself is generated at, so a per-board
-    icon size means regenerating all sixteen sprites by hand at 16x16 through `emoji2c.py` and
-    re-checking them on the glass (the `robot`-reads-as-a-cupcake lesson below), for 1.5 pixels.
-    The cheap alternative — a per-board `MAC_EMOJI_DY` added at the six call sites — buys the same
-    1.5px and adds a sixth thing that has to stay in step with a font change, so it was rejected
-    too. Anyone who does regenerate the art should re-derive the clear-box argument above at 16px:
-    a 16px icon in a usage card's label row runs `y0+6`..`y0+21` against a hero box that clears
-    from `y0+20` on board 1, and board 2's card geometry has to be checked rather than assumed.
-  - **Cost: 390 bytes per icon, 6,240 for all sixteen — 338 of colour plus 52 of alpha — and the
-    52 is where the design spec was wrong.** The spec budgeted **43** bytes of alpha, which is
-    13x13 = 169 two-bit samples packed as one continuous bitstream (42.25 bytes). `drawEmoji`
-    unpacks each row independently at `alpha + py * ((n + 3) / 4)`, so the stride must be a whole
-    number of **bytes per row** — 4 for 13 pixels, `MAC_EMOJI_STRIDE`, the identical packing
-    `blit2bpp`'s other art uses. A continuous bitstream would save 9 bytes an icon and cost a
-    bit-offset multiply in the inner loop of a blitter that already works a row at a time.
+  - **THE ICON SIZE IS THE BODY FONT'S CELL HEIGHT, and it is therefore PER BOARD: 13 on board 1
+    (Cozette 6x13), 16 on board 2 (Spleen 8x16).** That identity is the whole design: an icon's `y`
+    **is** its neighbouring text's `TL_DATUM` y, with a 4px gap, at all six sites that draw one
+    (tall session rows, the two usage cards, the Codex row, SETTINGS › STATUS, the detail card), so
+    no site carries a centring term. Which is why **`drawEmoji`'s `(x, y)` is the TOP-LEFT corner**,
+    deliberately unlike `blit2bpp`'s centre convention — a centre-based signature would put the same
+    `- MAC_EMOJI_SIZE / 2` at all six.
+    `emoji2c.py` takes `--size` (default 13, so an argument-less run still emits board 1's header
+    byte for byte) and the sketch picks `MacEmoji.h` or `MacEmoji16.h` behind `BOARD_USES_TFT_ESPI`.
+    **The two headers cannot both be included** — they define the same
+    `MAC_EMOJI_SIZE`/`STRIDE`/`COUNT`/`NAMES` — which is correct rather than awkward: exactly one
+    size is right for a given panel. `--verify` reads `MAC_EMOJI_SIZE` back out of the header it is
+    handed and re-renders at THAT size, so a header can never be checked against the wrong geometry.
+  - **16px COLLIDES WITH A CLEAR BOX ON BOARD 1 AND NOT ON BOARD 2, which is the reason the number
+    could not simply be raised everywhere.** A usage card's label row is the tightest site on both:
+    the icon spans `CARD_LABEL_Y`..`CARD_LABEL_Y + MAC_EMOJI_SIZE - 1` against a hero box that
+    clears from `CARD_HERO_Y` across the full card interior. Board 1's hero starts at `y0+20`, so a
+    16px icon (`+6`..`+21`) would be rubbed out by the hero's own erase on every tick the digits
+    move — the same clear-box-not-glyphs arithmetic the `+88` stats row documents. Board 2's hero
+    starts at `y0+24`, so 16px (`+6`..`+21`) clears it by **2 rows**. Clearance at the other five,
+    all re-derived at 16px rather than assumed: `sessions.ino` tall-row tag `+9`..`+24` against a
+    pill no higher than `+31` on the shortest tall row (**6 rows**); `settings.ino` Mac rows clear
+    `+129`..`+146` and `+153`..`+170`, the icon inside the first (**7 rows** to the next);
+    `usage.ino`'s Codex row `+8`..`+23` inside a text clear of `+7`..`+24` against a border at
+    `+54` (**30 rows**); the detail card's AGENT column is the last block in a stack packed to 320
+    of 326. Horizontally the icon is 3px wider, absorbed everywhere: the Codex lane already reserves
+    four monospace spaces (32px on board 2 against `4+16+4` = 24 needed), the SETTINGS erase box
+    grows to 246px from x=30 inside an interior of 305, the session row's name lane already
+    subtracts `tagExtra`, and the detail column needs 96px of 126.
+  - **Cost: 390 bytes per icon on board 1 (338 colour + 52 alpha), 576 on board 2 (512 + 64) —
+    6,240 and 9,216 for all sixteen, and the measured board-2 flash delta was +2,944 with RAM
+    unchanged** (the art is `PROGMEM`). The alpha figure is where the original design spec was
+    wrong: it budgeted **43** bytes, which is 13x13 = 169 two-bit samples packed as one continuous
+    bitstream (42.25 bytes). `drawEmoji` unpacks each row independently at
+    `alpha + py * ((n + 3) / 4)`, so the stride must be a whole number of **bytes per row** —
+    `MAC_EMOJI_STRIDE`, which is 4 at both 13 and 16 pixels, the identical packing `blit2bpp`'s
+    other art uses. A continuous bitstream would save 9 bytes an icon and cost a bit-offset
+    multiply in the inner loop of a blitter that already works a row at a time.
   - **Colour and alpha are SEPARATE planes and the backdrop is a draw-time argument.** The same
     icon has to sit on a card fill, a session row and the page background, in **two** themes;
     baking one background in is exactly what gives `ClawdCrab.h` its documented fringe under
@@ -1283,7 +1290,8 @@ two things `host/index.mjs` cannot get any other way:
     alone cannot tell apart. The icon can.
   - **THREE hand-transcribed copies of the sixteen names exist, and `host/mac-emoji-check.mjs`
     compares all three** — `firmware/deckhand_display/MacEmoji.h` (generated by `emoji2c.py`, and
-    canonical: the device can only draw what is in it), `host/mac-emoji.mjs` (the only Mac-side
+    canonical: the device can only draw what is in it; `MacEmoji16.h` carries the same sixteen
+    names, since only the CHARACTERS may differ per size), `host/mac-emoji.mjs` (the only Mac-side
     validator), and `MAC_ICON_NAMES` in `mac-app/DeckhandMenuBar.swift` (the picker's display
     order). Divergence is silent in **both** directions, which is why this is a check and not a
     sentence asking for care: a name valid on the Mac and absent from the header resolves fine,
@@ -1296,21 +1304,57 @@ two things `host/index.mjs` cannot get any other way:
     a display bug — the wire carries the name, never an index — only evidence that one list was
     edited without the others. `emoji2c.py --verify` covers the remaining edge, generator against
     generated header.
-  - **Known art limits, measured on the panel rather than in a preview.** `laptop` and `desktop`
-    differ only in overall **brightness** (a dark slab versus a lighter grey monitor) at 13px, and
-    they are precisely the two names a MacBook Pro and a Mac Studio would reach for — pick two
-    that differ in SHAPE if the two Macs sit side by side. `anchor`, `laptop` and `desktop` are
-    low-contrast against `COLOR_BG`, and `cloud` is low-contrast against LIGHT's near-white page;
-    every shipping surface passes `COLOR_CARD`, so that only shows on the `EMOJITEST` screen, which
-    deliberately draws both backdrops. And an earlier `robot` icon was replaced by **`apple`**
-    because at 13px it read as a **cupcake** — caught on the glass, not in the 16x preview that had
-    passed it, which is the whole reason the go/no-go was a device screenshot.
+  - **A broken icon is fixed by giving the same NAME a different CHARACTER, and at 16px two were.**
+    The names are the wire format, so they can never move; `SIZE_OVERRIDES` in `emoji2c.py` is the
+    only lever, and it is keyed by SIZE because **board 1's 13px set is frozen** — its binary is
+    unchanged by the per-board split and respinning its art would spend that for a judgement only a
+    board 2 screen can make. Both changes were measured on all four real backdrops
+    (DARK/LIGHT x BG/CARD) as **CIE Lab ΔE of the composited ink against the backdrop**, not WCAG
+    contrast: contrast is a luminance ratio, and it calls a perfectly legible yellow `star` on white
+    a failure at 1.9:1 while saying nothing about hue. Then looked at on the glass, which is the
+    authority — a `keyboard` glyph beat both winners on every number and was rejected because at
+    16px it draws as a featureless grey bar with no keys, the same way `robot` read as a cupcake.
+    - `cloud` **U+2601 → U+1F326** (sun behind rain cloud). A white cloud on LIGHT is the one
+      genuine INVISIBILITY in the set: ΔE90 **15.6** with **5%** of its ink clearing ΔE 20 on a
+      LIGHT card. Note LIGHT's `COLOR_CARD` is pure white, so this is **every shipping surface**,
+      not just the `EMOJITEST` screen the older note blamed. Apple's whole cloud family is white,
+      so no cloud glyph fixes it by being darker — U+1F326 fixes it by carrying a yellow sun and
+      blue rain, i.e. HUE the white body does not have. ΔE90 goes **15.6 → 53.8** on a LIGHT card
+      and **12.2 → 51.0** on the LIGHT page, and the cloud is still the dominant mass.
+    - `desktop` **U+1F5A5 → U+1F4FA** (television). `laptop` and `desktop` were BOTH a black screen
+      over a light base — and they are exactly the two a MacBook and a Mac Studio reach for, so the
+      one case the icons exist for was the one they could not serve. Measured as mean per-pixel ΔE
+      **between** the two icons on the same backdrop, U+1F5A5 was the least distinct candidate
+      tried on every backdrop (**20.3–22.0**, against 25.2–25.8 for the television and 29.5–36.8
+      for the rejected keyboard). A television is a different OBJECT rather than a differently-lit
+      screen, and it reads on all four backdrops (**86–96%** of ink clearing ΔE 20, against
+      **53%** for the monitor on a DARK card, whose black screen simply disappears there). The
+      picker lists NAMES only, so nothing on the Mac disagrees with the new picture.
+    - **`anchor` was NOT changed, and the older note grouping it with those two is wrong at 16px.**
+      It measures ΔE90 65.0 with **93%** of its ink clearing ΔE 20 on the DARK page and 90% on a
+      LIGHT card. Its 13px problem was **stroke width** in thin line art, which 51% more pixels
+      resolved — not a colour that needed replacing. `laptop` keeps U+1F4BB: it is the unambiguous
+      picture for its own name, and the collision is fixed by moving the icon that had an
+      alternative.
+    - **What is NOT verified on the panel: the DARK theme at 16px.** The device was pinned to
+      LIGHT, and there is **no host command that changes the theme** (nor one that dismisses
+      `EMOJITEST` — see below), so the go/no-go screenshots are LIGHT-only. LIGHT is the harder
+      case for `cloud` and was captured; `desktop`'s 53% → 86% gain is on DARK and rests on the
+      measurement plus `--preview`, not on the glass. Tap the theme button and re-run
+      `EMOJITEST` + `SCREENSHOT` to close it.
   - **`EMOJITEST [<name>]` puts all sixteen on BOTH backdrops**, for the same reason
     `TAB`/`PAGE`/`KBTEST` exist: `SCREENSHOT` can only record what is currently on the glass, and
     an alpha blend plus the `setSwapBytes` handling can only be judged where they actually have to
     work, never on a third colour picked for convenience. There is no `large` argument or any
     other second mode — an unrecognised word simply falls through to the same all-sixteen grid,
-    which is also what plain `EMOJITEST` draws. It refuses while the keyboard, reader, history
+    which is also what plain `EMOJITEST` draws. **NOTHING DISMISSES IT REMOTELY, and that bites a
+    headless capture session.** `emojiTestActive` is cleared only by a TAP (in `handleTouch`), while
+    `switchTab` returns early with it set — so `TAB`/`PAGE` are refused, every later `SCREENSHOT`
+    returns the same frozen frame (identical footer clock is the tell), and the only remote escape
+    is a re-flash, which reboots the device. Verify `EMOJITEST` LAST in a capture run, or budget an
+    upload to get out. Not fixed here because `handleTouch`/`switchTab` are shared code and board 1's
+    binary is being held byte-identical; a `TAB` that also clears the flag would be the fix.
+    It refuses while the keyboard, reader, history
     pager or a session detail screen owns the glass, the same guard `fabVisible()` already paid
     for once: `emojiTestActive` dismisses on any tap ahead of those surfaces in `handleTouch`, and
     without the refusal a tap on the grid opened over an active keyboard force-repaints the tab

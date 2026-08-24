@@ -394,7 +394,10 @@ const int CODEX_H = 56;                            // ends at 454, 8px clear
 //   +0..+1    border
 //   +2        blank
 //   +3..+5    pin bar        (CARD_PIN_BAR_Y, 3 rows)
-//   +6..+21   label / icon   (CARD_LABEL_Y, Spleen8x16 = 16, icon 13x13 inside it)
+//   +6..+21   label / icon   (CARD_LABEL_Y, Spleen8x16 = 16, and the Mac icon is
+//                              16x16 here - MAC_EMOJI_SIZE is the body cell height,
+//                              so the icon fills this row exactly rather than
+//                              leaving board 1's 13px sitting 3px high in it)
 //   +22..+23  gap 2
 //   +24..+88  hero box       (CARD_HERO_Y, CARD_HERO_H 65; the glyph is 64)
 //   +89..+90  gap 2
@@ -1124,9 +1127,10 @@ const int CONN_TEXT_H = 16;
 // [40]: worst case 28 (text) + 1 (\x01 sentinel) + 2 (icon id) + 1 (NUL) = 32.
 // Lane check, AT THIS BOARD'S OWN ADVANCE: the row starts at CARD_X + PAD = 30 and
 // renderMacLinkRows() sizes its erase box from a MEASURED tft.textWidth(), which
-// at 8px is 28*8 + 4 + 13 + 2 = 243 wide, ending at 273 inside a card whose
-// interior runs to 305. (The old comment did this multiplication at 6px, which was
-// true of every board when it was written and is now true of one.)
+// at 8px is 28*8 + 4 + 16 + 2 = 246 wide, ending at 276 inside a card whose
+// interior runs to 305. (The old comment did this multiplication at 6px AND with
+// board 1's 13px icon, both of which were true of every board when it was written
+// and are now true of one.)
 const int MAC_ROW_W = 28;
 
 // THE LINK CARD - four facts the device already had and could only be read from a

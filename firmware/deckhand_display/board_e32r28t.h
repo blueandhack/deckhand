@@ -191,7 +191,10 @@ const int PAD = 14, BAR_H = 10, RADIUS = R_MD;
 //   2. The label row is +6..+18 because the hero box starts at +20 and clears
 //      from there across the full card interior - so a 16px icon in that row
 //      would be erased by the hero's own clear on every tick the digits move.
-//      The Mac icon is 13x13 for exactly this reason.
+//      The Mac icon is 13x13 for exactly this reason - and this is why
+//      MAC_EMOJI_SIZE is PER BOARD rather than one number: board 2's hero box
+//      starts at +24, so 16 fits there with 2 rows to spare, while raising this
+//      board to 16 would put the icon under the hero's own erase.
 // Known and NOT fixed here, because fixing it would move this board's binary:
 // the stats row at +74 clears +73..+87 while the pace bar's clear runs
 // +58..+75, so they overlap by 3 rows and a changing token count shaves the

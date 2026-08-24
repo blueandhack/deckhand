@@ -281,17 +281,22 @@ void renderMacLinkRows() {
     tft.setTextColor(COLOR_VALUE, COLOR_CARD);
     tft.setTextDatum(TL_DATUM);
     int th = uiLineH(T_META);
-    // The erase box always reserves the icon's slot (4px gap + 13px) whether or
-    // not this row currently has one: an icon that disappears must not leave a
+    // The erase box always reserves the icon's slot (4px gap + MAC_EMOJI_SIZE)
+    // whether or not this row currently has one: an icon that disappears must not leave a
     // ghost, and one that appears must not draw over stale pixels left behind
     // by the plain-text layout.
     int eraseW = tft.textWidth(buf2) + 4 + MAC_EMOJI_SIZE + 2;
     tft.fillRect(textX - 1, y - 1, eraseW, th + 2, COLOR_CARD);
     if (rowEmoji >= 0) {
       // "Mac", then the icon 4px later, then the rest of the row shifted right
-      // by the icon's slot - the same 4px gap, and the same y as the text
-      // (both are 13px, so no centring arithmetic is needed), that every other
-      // icon-beside-text surface in this sketch uses.
+      // by the icon's slot - the same 4px gap, and the same y as the text (the
+      // icon IS the body cell height on either board, so no centring arithmetic
+      // is needed), that every other icon-beside-text surface in this sketch uses.
+      // Width, at each board's own advance: MAC_ROW_W (28) chars + 4 + the icon +
+      // 2 is 187px from x=26 on board 1 (interior to 226) and 246px from x=30 on
+      // board 2 (interior to 305). Height: the row's clear box is uiLineH(T_META)
+      // + 2, which the icon sits inside by construction - board 2's rows clear
+      // +129..+146 and +153..+170, so the icon's 16 rows leave 7 rows between them.
       tft.drawString("Mac", textX, y);
       int iconX = textX + tft.textWidth("Mac") + 4;
       drawEmoji(rowEmoji, iconX, y, COLOR_CARD);

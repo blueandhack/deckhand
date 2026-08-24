@@ -168,7 +168,12 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
     // Pinned-vs-auto, previously carried by the tag's colour, which a colour
     // sprite cannot carry. A bar, not an underline: it sits ABOVE the glyph,
     // inside the interior (the 2px border owns y0..y0+1, the label row starts
-    // at y0+6) - below the icon lands at y0+20, inside the hero number's box.
+    // at y0+CARD_LABEL_Y) - below the icon lands inside the hero number's own
+    // clear box at y0+CARD_HERO_Y. THE TIGHTEST SITE FOR THE ICON, on both
+    // boards: it spans CARD_LABEL_Y .. CARD_LABEL_Y + MAC_EMOJI_SIZE - 1, i.e.
+    // +6..+18 against board 1's hero at +20 (1 row clear) and +6..+21 against
+    // board 2's at +24 (2 rows clear). The bar is MAC_EMOJI_SIZE wide so it
+    // tracks the glyph it marks.
     //
     // COLOR_LABEL, not COLOR_ACCENT, and that was a real complaint rather than
     // taste: in accent this read as a red-orange stripe over the icon and the
@@ -397,10 +402,11 @@ void renderCodexRow() {
   bool showCxIcon = cxEmoji >= 0;
   if (showCxIcon) {
     // Same window text as the no-tag branch below, just with "CX" in place of
-    // "CODEX" and 4 spaces (24px in this monospace 6px/char font) reserved
-    // after it instead of 2 - room for the icon (13px) plus its gaps (4px on
-    // each side = 21px) with 3px to spare, so the window text can never
-    // collide with the icon drawn into that gap below.
+    // "CODEX" and 4 spaces reserved after it instead of 2 - room for the icon
+    // plus its gaps (4px on each side), measured at each board's own monospace
+    // advance: 24px of gap against 4+13+4 = 21 needed on board 1 (3px spare),
+    // and 32px against 4+16+4 = 24 on board 2 (8px spare). So the window text
+    // can never collide with the icon drawn into that gap below.
     long d = usage.cxWindowMin / 1440;
     if (usage.cxWindowMin <= 0) snprintf(buf, sizeof(buf), "CX");
     else if (d >= 1) snprintf(buf, sizeof(buf), "CX    %ldd", d);
@@ -418,9 +424,12 @@ void renderCodexRow() {
   drawIfChanged(cxPctCache, CODEX_LANE_CACHE, buf, CARD_X + PAD, CODEX_Y + CODEX_TEXT_Y, 2, 1,
                 COLOR_LABEL, COLOR_CARD);
   if (showCxIcon) {
-    // CX (12px) + 4px gap + icon (13px) = 29px from the label's x, so it ends
-    // at 55 on board 1 and 59 on board 2 - well clear of the right field's clear
-    // box either way (93 and 169). See the long derivation above.
+    // "CX" + 4px gap + the icon, from the label's x, at each board's own
+    // advance: 12+4+13 = 29px ending at 55 on board 1, and 16+4+16 = 36px
+    // ending at 66 on board 2 - well clear of the right field's clear box
+    // either way (93 and 169). Vertically the icon shares CODEX_TEXT_Y with
+    // the row's text, whose own clear box is 2 rows taller than the icon on
+    // both boards. See the long derivation above.
     setUIFont(2);
     drawEmoji(cxEmoji, CARD_X + PAD + tft.textWidth("CX") + 4, CODEX_Y + CODEX_TEXT_Y, COLOR_CARD);
   }
