@@ -2,12 +2,26 @@
 
 Re-deriving board 1's layout from first principles in order to derive board 2's turned out to be an
 **audit of the original**, and defects fell out of it. None was introduced by the port, and **none
-is fixed**, for one reason:
+of the eleven below is fixed**, for one reason:
 
 > Every fix would move board 1's binary inside a diff whose entire claim is byte-identity
 > (1382802 flash / 69236 RAM, held through all nine tasks of the port). Hiding a board-1 behaviour
 > change inside a board-2 diff is exactly the class of mistake the byte-identity check exists to
 > catch, so four otherwise-good changes were declined mid-port for the same reason.
+
+> **THAT REASON HAS EXPIRED, AND THIS FILE'S PREMISE WITH IT.** Byte-identity was retired when two
+> shared-code bugs were fixed deliberately — the history list going blank after reading one entry,
+> and the PAIRED MACS row (an invisible live marker, plus two same-named Macs rendering identically).
+> Neither was in the eleven below; both were found later and both affected board 1. Board 1's binary
+> moved twice on purpose, 1382802 → 1382770 → 1382938.
+>
+> So the argument for leaving these eleven alone is no longer "it would break byte-identity" — that
+> check is now `firmware/board-baseline.mjs`, which expects deliberate movement and asks only that it
+> be re-baselined with a stated reason. What remains is the weaker and more honest argument: **none
+> of these has been seen on a screen**, because board 1 was physically disconnected throughout, and
+> every one is arithmetic rather than an observation. Fixing them unverified would trade a defect
+> nobody has hit for a change nobody has looked at. **Connect board 1 first**; then they are ordinary
+> work, and the baseline tool is how you show the diff did what you meant.
 
 They belong on their own branch off `main`, with their own screenshots. This file exists so they are
 not lost: the ledger they were found in is gitignored, and a defect that lives only in a scratch

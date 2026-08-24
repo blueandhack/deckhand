@@ -973,6 +973,16 @@ mac-app/build.sh
 open mac-app/DeckhandMenuBar.app
 ```
 
+Two things that look like faults and are not. **It is `LSUIElement`** — menu-bar
+only, no dock icon and no window — so "I can't see it" almost always means it is
+simply not running; `pgrep -x DeckhandMenuBar` settles that in one command. And it
+is **not a login item** until you switch on `Settings › Launch at login` in its own
+menu, so it stays gone after a reboot until you do.
+
+**The built `.app` is deliberately not committed**, because `build.sh` bakes this
+repo's absolute path into `Info.plist` as `DeckhandHostDir`. **Re-run `build.sh`
+after moving the repo**, or it will point at a directory that no longer exists.
+
 It puts an origami paper-boat icon in the menu bar. The dropdown is grouped:
 where the host stands, what quota is left, who is waiting on you, the last
 dictation, then the controls. The top level is **actions only** — **Start / Stop

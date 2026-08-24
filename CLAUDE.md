@@ -1091,6 +1091,38 @@ known gap nobody wrote down is indistinguishable from a bug nobody found.
   rodata and breaks the byte-identity this port holds. It is a two-line fix on a board-1-inclusive
   branch.
 
+**TWO SHARED-CODE BUGS WERE FIXED DELIBERATELY, and both are the same lesson in different
+clothes.** Board 1's binary moved for each, which is why the byte-identity check is now
+`board-baseline.mjs` (see Commands).
+
+- **The history list went BLANK after reading one entry in full**, recovering only if you paged.
+  State was destroyed, not a redraw missed, and the recovery is what proves which: the `hist` reply
+  handler cleared `histCount`/`histArenaUsed` **before** knowing what kind of reply had arrived. An
+  `item:<n>` reply carries a `full` object and **no `items` array at all** (`sendHistoryItem` sends
+  exactly `{hist:{id, full}}`), so the page's rows were wiped and the items loop had nothing to
+  refill them with. PREV/NEXT re-REQUESTS a page, and that reply does carry items — which is
+  precisely why it presented as a repaint bug. The fix is ordering: handle the single-entry reply and
+  return before touching any page state. **A parser that mutates shared state before it has
+  identified the message is the bug class**, not this one instance.
+- **PAIRED MACS: the live-Mac marker was INVISIBLE and two same-named Macs were indistinguishable.**
+  The marker was a middle dot and both faces declare `0x20..0x7E`, so it drew as nothing on both
+  boards — the third instance of the trap already documented for the `CLAUDE/air` tag separator and
+  `fitText`'s three ASCII dots. And two MacBook Pros both report `...-MacBook-Pro`, the same
+  collision that makes `macTag()` emit `pro` twice, which matters far more here than on a session row
+  because **this page's controls are destructive and per-row**: which `x` forgets which Mac was a
+  guess. A shared label now appends the first 4 hex of `hostId` — unique by construction, nothing new
+  on the wire — and the **label** is what gets trimmed, never the suffix, measured with `fitText`
+  because `uiListRow` draws with no width bound and `drawString` paints an opaque box that would rub
+  out the card border.
+
+**Identity is `hostId`, and it is NOT derived from a MAC address** — `crypto.randomBytes(4)`,
+persisted. Two Macs with identical hostnames have different hostIds, so pairing, key selection and
+answer addressing were never ambiguous; only the *display* collided. A MAC address would be strictly
+worse: CoreBluetooth never exposes the local BT address and BLE uses rotating private addresses (the
+same opacity that leaves `BLE_CHUNK_SIZE` hard-coded at 20 because noble reports no MTU), macOS uses
+private per-network Wi-Fi addresses, six bytes of hex cannot be read in a 6-character tag lane, and
+it is needless PII on the wire.
+
 **USB and BLE are independent, not fallback-of-each-other.** Both are always enabled on the
 device simultaneously, and `host/index.mjs` sends the same computed payload to whichever are
 currently connected each tick — it's normal for both to be live at once (`via=usb,ble` in the
