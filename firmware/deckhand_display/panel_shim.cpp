@@ -570,8 +570,20 @@ void PanelShim::fillSmoothRoundRect(int x, int y, int w, int h, int r, uint16_t 
   if (r > w / 2) r = w / 2;
   if (r > h / 2) r = h / 2;
 
-  float cx = x + w / 2.0f, cy = y + h / 2.0f;
-  float halfW = w / 2.0f, halfH = h / 2.0f;
+  // HALF-EXTENTS ARE (w-1)/2, NOT w/2, and that one-pixel difference was visible
+  // on the glass. The SDF is evaluated AT integer pixel coordinates, so a shape
+  // occupying pixels x .. x+w-1 has its boundary passing through those two
+  // columns - half-extent (w-1)/2 about a centre of x+(w-1)/2. Using w/2 puts the
+  // boundary at x and x+w, i.e. it describes a shape one pixel wider and one
+  // taller than the one being drawn.
+  // Because the centre is derived from the same wrong extent, the top-left corner
+  // still lands correctly and the whole error accumulates at the RIGHT and BOTTOM
+  // - so the straight edges (separate fillRects, which were always right) stayed
+  // symmetric while the bottom corners came out 2px FULLER than the top ones.
+  // Reported as the border looking shifted by a pixel; measured as a top corner
+  // inset 8px at its extreme row against a bottom corner inset 6px.
+  float cx = x + (w - 1) / 2.0f, cy = y + (h - 1) / 2.0f;
+  float halfW = (w - 1) / 2.0f, halfH = (h - 1) / 2.0f;
 
   // ONLY THE CORNERS NEED BLENDING, and that is worth ~120x here. The naive form
   // of this walked the whole bounding box - 296x164 = 48,544 pixels for one card -
@@ -613,8 +625,8 @@ void PanelShim::drawSmoothRoundRect(int x, int y, int r, int ir, int w, int h,
   if (r < ir) { int t = r; r = ir; ir = t; }  // TFT_eSPI requires r > ir; swap defensively
   if (r <= 0) return;
 
-  float cx = x + w / 2.0f, cy = y + h / 2.0f;
-  float halfW = w / 2.0f, halfH = h / 2.0f;
+  float cx = x + (w - 1) / 2.0f, cy = y + (h - 1) / 2.0f;
+  float halfW = (w - 1) / 2.0f, halfH = (h - 1) / 2.0f;   // (w-1)/2: see fillSmoothRoundRect
   float inset = (float) (r - ir);
   float halfWi = halfW - inset, halfHi = halfH - inset;
 
