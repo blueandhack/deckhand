@@ -7,6 +7,11 @@
 //
 //   node mic-wav.mjs [logfile] [outfile]
 import fs from "node:fs";
+// PRE-EXISTING BUG, fixed here because this decoder cannot run without it: the
+// DECKHAND_TMP paths below use path.join and this import was never added when
+// they arrived, so `node mic-wav.mjs` with no explicit outfile - the ordinary
+// invocation - died with "path is not defined" before reading a single byte.
+import path from "node:path";
 
 // Default to the newest capture file the host wrote, falling back to the host log
 // (older builds logged the base64 inline). A capture file is authoritative: the

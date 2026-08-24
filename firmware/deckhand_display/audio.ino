@@ -1412,7 +1412,93 @@ static int micReadChunk() {
 }
 
 void micStream()    { Serial.println("AUDIO: board 2 streaming capture not implemented yet"); }
-void micRecord()    { Serial.println("AUDIO: board 2 one-shot capture not implemented yet"); }
+// One-shot capture. Board 1's equivalent is capped near 3s by internal heap and
+// pays mu-law to get there; here the buffer is PSRAM and the link is native USB,
+// so it is linear PCM16 at a length chosen for usefulness rather than forced by
+// the budget. MONO: MICTEST measured left and right byte-identical, because the
+// ES8311 is a mono codec duplicating into both slots, so keeping one halves
+// everything downstream for no loss at all.
+#define MIC2_REC_SECONDS  10
+#define MIC2_REC_FRAMES   ((size_t) MIC2_REC_SECONDS * TONE_SAMPLE_HZ)
+
+void micRecord() {
+  if (!audioOutReady) {
+    Serial.println("AUDIO: the shared audio path never came up - see the AUDIO OUT line "
+                   "from boot. Nothing recorded.");
+    return;
+  }
+  const size_t bytes = MIC2_REC_FRAMES * sizeof(int16_t);
+  // PSRAM, not the internal heap: 320KB is far past anything the internal heap
+  // would give up, and this is exactly what the 8MB is for. The framebuffer's
+  // 300KB already lives there, so this is the second-largest allocation on the
+  // board and still under 8% of it.
+  int16_t* pcm = (int16_t*) heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+  if (pcm == NULL) {
+    Serial.printf("AUDIO error: PSRAM would not give %u bytes for a %ds take. "
+                  "Nothing recorded.\n", (unsigned) bytes, MIC2_REC_SECONDS);
+    return;
+  }
+
+  // A cue, then a settle, for the reason board 1's notes give at length: the
+  // command file is polled, so the command lands up to a second after you press
+  // enter, and a capture that opens before the speaker is ready records room tone
+  // and looks exactly like a deaf mic.
+  es8311_voice_mute(audioCodec, false);
+  for (int i = 0; i < 7; i++) audioFeedBeepChunk();
+  delay(300);
+  es8311_voice_mute(audioCodec, true);
+  delay(350);
+  Serial.printf("AUDIO recording %ds at %d Hz mono PCM16 - SPEAK NOW\n",
+                MIC2_REC_SECONDS, TONE_SAMPLE_HZ);
+  micPillFrame("LISTENING");
+
+  size_t got = 0;
+  int32_t mn = 32767, mx = -32768;
+  int64_t sum = 0;
+  unsigned long lastMeter = 0;
+  while (got < MIC2_REC_FRAMES) {
+    const int frames = micReadChunk();
+    if (frames == 0) break;                 // timeout - reported below
+    for (int i = 0; i < frames && got < MIC2_REC_FRAMES; i++) {
+      const int16_t v = micScratch[i * 2];  // LEFT slot only; see above
+      pcm[got++] = v;
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+      sum += v;
+    }
+    // Metering between reads, never inside the sample loop - the same discipline
+    // board 1 documents, and here the chunk is 32ms of slack against ~2ms to draw.
+    if (millis() - lastMeter >= 120) {
+      lastMeter = millis();
+      const int32_t swing = mx - mn;
+      const int level = swing > 0 ? (int) ((swing > 6000 ? 6000 : swing) * 1000 / 6000) : 0;
+      micPillMeter(level, String((int) ((got * 100) / MIC2_REC_FRAMES)).c_str(), "recording");
+      mn = 32767; mx = -32768;              // per-meter-window, not per-take
+    }
+    reapBleLinks(true);
+  }
+
+  if (got == 0) {
+    Serial.println("AUDIO error: no samples captured - readBytes() timed out. This is the "
+                   "I2S RX channel, not a quiet mic.");
+    free(pcm);
+    micRestoreUi();
+    return;
+  }
+
+  // bits=16 codec=pcm16 scale=1, and the HOST NEEDS NO NEW BRANCH for it: its
+  // final else already reads int16 little-endian and `bits` already defaults to
+  // 16, so this envelope decodes on an unmodified mic-wav.mjs. The spec expected
+  // to add a pcm16 branch; it does not need one.
+  const int dc = (int) (sum / (int64_t) got);
+  Serial.printf("AUDIO begin rate=%d bits=16 codec=pcm16 scale=1 samples=%u dc=%d "
+                "min=%d max=%d\n", TONE_SAMPLE_HZ, (unsigned) got, dc, (int) mn, (int) mx);
+  micPillFrame("SENDING");
+  micDumpBase64((const uint8_t*) pcm, got * sizeof(int16_t));
+  Serial.println("AUDIO end");
+  free(pcm);
+  micProcessingBegin();
+}
 void micMonitor()   { Serial.println("MIC: board 2 live meter not implemented yet"); }
 
 // The probe the spec's Decision 3 step 2 asks for, and the one thing that has to

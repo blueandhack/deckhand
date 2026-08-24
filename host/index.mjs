@@ -2082,7 +2082,16 @@ async function finishAudioCapture(complete) {
   audioCapture = null;
   const claimed = Number((cap.header.match(/samples=(\d+)/) ?? [, 0])[1]);
   const bytes = cap.lines.reduce((n, l) => n + l.length, 0);
-  const got = Math.floor((bytes * 3) / 4);
+  // BYTES PER SAMPLE, from the header, because this estimate feeds a completeness
+  // guard and being wrong here is dangerous in the LENIENT direction. Every codec
+  // before board 2 was one byte per sample (mu-law) or packed tighter (ADPCM), so
+  // dividing base64 bytes by 1 was right by accident. pcm16 is TWO, and without
+  // this a 10s capture reported "200%" - which means a capture truncated by half
+  // would have read as a clean 100% and sailed through the 98% refusal that exists
+  // precisely to stop Whisper inventing words over misaligned audio.
+  const bits = Number((cap.header.match(/bits=(\d+)/) ?? [, 8])[1]);
+  const bytesPerSample = bits >= 16 ? 2 : 1;
+  const got = Math.floor((bytes * 3) / 4 / bytesPerSample);
   const file = path.join(AUDIO_DIR, `capture-${cap.started}.txt`);
   try {
     await fs.mkdir(AUDIO_DIR, { recursive: true });
