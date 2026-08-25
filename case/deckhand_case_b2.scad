@@ -168,7 +168,12 @@ boot_dx  =  13.5;   // MEASURED
 // negative gave the wrong wall"). Here the two holes are symmetric about the
 // centreline, so a mirror error swaps only WHICH HOLE IS WHICH - not where any
 // hole is. It would make a printed label wrong, and nothing else.
-btn_in = 8.0;
+// MEASURED as ~2 mm from the bottom edge to the button, converted to a CENTRE
+// like every other offset here: the buttons are ~6 x 4, so 2 mm of gap plus half
+// the 4 mm body puts the centre at 4. If your 2 was already to the centre, this
+// is 2 mm too far in - it is the same edge-versus-centre ambiguity the 6 mm USB
+// gap had, and the coupon shows it immediately.
+btn_in = 4.0;
 // TWO diameters, not one, and the asymmetry is the RESET argument made physical.
 // The buttons measure ~6 x 4, so their actuators are ~3 - but the cover sits
 // cavity_d BEHIND the board (18.5 with a battery fitted), so neither hole is
@@ -177,8 +182,17 @@ btn_in = 8.0;
 // SLEEP on this board, so it gets the biggest hole that still leaves a sane
 // cover - enough for a pen tip, a nail at the rim, or a printed plunger later.
 // See README-board2.md: this is the one place the design is knowingly awkward.
-reset_d = 9.0;      // RESET: pen-tip / nail reachable
-boot_d  = 5.5;      // BOOT: tool hole, deliberately smaller
+// SIZED BY WHAT THE EDGE CAN CARRY, not by finger access - because at btn_in 4
+// there is no room for the latter and, with a 20 mm cell, no point either. The
+// cavity is 25.5 mm deep, so BOTH holes are ~25 mm from the button whatever
+// their diameter: a finger was never reaching either, and Ø9 versus Ø6 changes
+// nothing for a tool. What Ø9 DID change was the plate: centred 4 mm from the
+// board edge it left 0.1 mm of material at the rim - a knife edge that prints
+// badly and breaks. Ø6.0 leaves 1.7 mm, Ø4.5 leaves 2.5 mm.
+// So RESET is still the larger of the two, for the same reason as before, but
+// the ceiling is now structural rather than ergonomic.
+reset_d = 6.0;      // RESET: the biggest the rim will carry
+boot_d  = 4.5;      // BOOT: smaller again
 btn_d   = reset_d;  // kept for any board-1 expression that still reads it
 // RESET IS THE ONLY WAY BACK FROM DEEP SLEEP ON THIS BOARD (the S3's RTC GPIO
 // set does not reach PIN_TOUCH_INT, so no touch wake exists - CLAUDE.md). Board
@@ -257,7 +271,10 @@ mic_chan_top = 4.0; // ...and the same above the mic channel. This closes the la
 
 // Battery is pushed toward the USB-C end, leaving a clear strip at the far end
 // for the speaker (both sit BEHIND the board; the columns are in FRONT of it).
-batt_w = 36.0; batt_h = 68.0; batt_t = 10.0; batt_dy = 14.0;
+// MEASURED: 37 x 68.5 x 20. The 20 is the number that decides this case's
+// thickness - see README-board2.md. Plan fit is easy (37 x 68.5 in a 54.5 x
+// 102.5 cavity); the thickness is not.
+batt_w = 37.0; batt_h = 68.5; batt_t = 20.0; batt_dy = 14.0;
 // Shift the pack AWAY from the high-X wall to clear the microphone, which now
 // lives against that wall beside its Expand-pin connector. 36 mm of pack in 51 mm
 // of cavity leaves 15 mm of slack; this spends 10 of it on the mic side.
@@ -525,7 +542,15 @@ snap_win_extra = 0.4;
 snap_skin = 0.8;
 
 // snap positions: two barbs on each long side
-function snaps() = [ [out_w*0.30, wall/2], [out_w*0.70, wall/2],
+// THE SERVICE-EDGE SNAPS MOVED INBOARD, 0.30/0.70 -> 0.42/0.58, because the
+// button holes landed on top of them. At btn_in 4 the Ø9 RESET hole spans x
+// 11.4..20.4 and the barb at 0.30 spans 14.2..21.2 - the hole would have eaten
+// most of a snap, on the end that also just lost lip material to those same
+// holes. 0.42/0.58 puts them at 24.7 and 34.2, inside the clear 20.4..38.5 gap
+// between the two holes, barbs spanning 21.2..28.2 and 30.7..37.7.
+// The MIC-end pair stays at 0.30/0.70: nothing is cut there, and spreading them
+// wide is better retention where it is free.
+function snaps() = [ [out_w*0.42, wall/2], [out_w*0.58, wall/2],
                      [out_w*0.30, out_h-wall/2], [out_w*0.70, out_h-wall/2] ];
 
 // ============================================================================
@@ -842,9 +867,17 @@ module cover(){
     // ---- RESET and BOOT, through the cover ----
     // Referenced to the BOARD (bx0/bcx, btn_y), not to the shell, so they track
     // the board if any clearance changes. z spans the whole plate plus slack.
+    // CUT THROUGH THE LIP AS WELL AS THE PLATE, and that is forced by the 4 mm
+    // offset rather than chosen. At btn_in 8 the holes sat well inboard; at 4
+    // they land under the cover's lip ring, and a hole through the plate alone
+    // would be BLOCKED by the lip standing over it - a hole you can see through
+    // from outside and cannot push anything into. Height therefore spans plate +
+    // lip. The cost is real: the lip's bottom run loses material at two places,
+    // so that end holds slightly less. It is bought back by moving the snaps
+    // (see snaps()), which is where the retention actually lives.
     for (b = [[reset_dx, reset_d], [boot_dx, boot_d]])
       translate([bcx + b[0], btn_y, -0.01]) {
-        cylinder(d = b[1], h = cover_th + 0.02);
+        cylinder(d = b[1], h = cover_th + lip_h + 0.02);
         cylinder(d1 = b[1] + 2*btn_cham, d2 = b[1], h = btn_cham + 0.01);
       }
     // pilot hole in each boss — the M3 screw threads straight into the plastic

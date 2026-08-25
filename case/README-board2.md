@@ -115,9 +115,50 @@ millimetre: the drawing dimensions 9.82 / 3.94, hand measurement gave 9 / 3. Bot
 credible for a ~1 mm port, but a Ø2.2 hole placed on one and wrong by 1 mm would be
 half-blocked. Ø3.0 covers the disagreement and is still a pressure port, not a horn.
 
+## The battery is 58% of the thickness
+
+Measured: **37 × 68.5 × 20 mm**. The plan fit is easy — 37 × 68.5 in a 54.5 × 102.5
+cavity. The **20** is the problem:
+
+| | |
+|---|---|
+| front stack (recess + glass + PCB) | 6.9 |
+| cavity (`batt_seat` 3.0 + cell 20 + swell headroom 2.5) | **25.5** |
+| cover | 2.0 |
+| **total** | **34.4 mm** |
+
+**Case structure is 14.4 mm of that; the cell is 20.** Every case parameter has already
+been trimmed as far as it safely goes — that work bought 4 mm. The cell is worth five
+times more:
+
+| cell thickness | case |
+|---|---|
+| 20 mm (yours) | 34.4 |
+| 10 mm | 24.4 |
+| 6 mm | 20.4 |
+| 5 mm | 19.4 |
+
+So "as thin as possible" is a **battery** decision, not a case decision. Below ~4.5 mm
+nothing improves anyway: `comp_back` (the mated JST plugs) takes over as the floor.
+
 ## Two things the measurements forced
 
-**RESET and BOOT get different diameters — Ø9 and Ø5.5.** The buttons measure ~6 × 4, so
+**RESET and BOOT are Ø6.0 and Ø4.5, sized by the RIM rather than by a finger.**
+At `btn_in = 4` — 2 mm of gap plus half a 4 mm button — a Ø9 hole leaves **0.1 mm** of
+plate at its outer edge: a knife edge that prints badly and breaks. Ø6.0 leaves 1.6 mm,
+Ø4.5 leaves 2.3 mm. Nothing is lost by shrinking them, because with a 25.5 mm cavity
+both holes are ~25 mm from the button whatever their diameter — a finger was never
+reaching either, and for a tool Ø6 is as good as Ø9.
+
+**The holes cut the cover's LIP as well as its plate, and the snaps moved because of
+it.** At `btn_in = 8` the holes sat well inboard; at 4 they land under the lip ring, and
+a hole through the plate alone would be *blocked by the lip standing over it* — visible
+from outside, useless from inside. They now span plate + lip. That costs lip material at
+the service end, and the two snaps there moved from 0.30/0.70 to **0.42/0.58** so their
+barbs (21.2–28.2, 30.7–37.7) sit in the clear gap between the holes instead of under
+them. The mic-end pair stays wide at 0.30/0.70, where spreading them is free.
+
+**Superseded, kept because the reasoning is the point — Ø9 and Ø5.5.** The buttons measure ~6 × 4, so
 their actuators are ~3, but the cover sits `cavity_d` **behind** the board — 18.5 mm with
 a battery fitted. Neither hole is finger-reachable at any sane diameter; they are *tool*
 holes. BOOT is a rare recovery action and a toothpick is fine. RESET is the only way back
