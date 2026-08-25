@@ -182,18 +182,20 @@ btn_in = 4.0;
 // SLEEP on this board, so it gets the biggest hole that still leaves a sane
 // cover - enough for a pen tip, a nail at the rim, or a printed plunger later.
 // See README-board2.md: this is the one place the design is knowingly awkward.
-// SIZED BY WHAT THE EDGE CAN CARRY, not by finger access - because at btn_in 4
-// there is no room for the latter and, with a 20 mm cell, no point either. The
-// cavity is 25.5 mm deep, so BOTH holes are ~25 mm from the button whatever
-// their diameter: a finger was never reaching either, and Ø9 versus Ø6 changes
-// nothing for a tool. What Ø9 DID change was the plate: centred 4 mm from the
-// board edge it left 0.1 mm of material at the rim - a knife edge that prints
-// badly and breaks. Ø6.0 leaves 1.7 mm, Ø4.5 leaves 2.5 mm.
-// So RESET is still the larger of the two, for the same reason as before, but
-// the ceiling is now structural rather than ergonomic.
-reset_d = 6.0;      // RESET: the biggest the rim will carry
-boot_d  = 4.5;      // BOOT: smaller again
-btn_d   = reset_d;  // kept for any board-1 expression that still reads it
+// ONE DIAMETER FOR BOTH, because the two buttons are physically identical and a
+// case that treats them differently reads as a mistake rather than a decision.
+//
+// This replaced an asymmetry that was mine, not the hardware's: RESET was Ø9 and
+// BOOT Ø5.5 on the argument that RESET is the only way back from deep sleep and
+// so deserves the easier target. That does not survive the cavity being 15.5 mm
+// deep - BOTH holes are ~15 mm from their button, so both are tool holes whatever
+// their diameter, and 1.5 mm of extra hole buys nothing a pen tip notices. What
+// it did buy was two different holes under two identical buttons.
+//
+// The ceiling is structural, not ergonomic: centred 4 mm from the board edge, a
+// Ø9 hole leaves 0.1 mm of plate at its outer rim - a knife edge that prints
+// badly and breaks. Ø6.0 leaves 1.6 mm, which is the biggest the rim will carry.
+btn_d = 6.0;        // RESET and BOOT alike
 // RESET IS THE ONLY WAY BACK FROM DEEP SLEEP ON THIS BOARD (the S3's RTC GPIO
 // set does not reach PIN_TOUCH_INT, so no touch wake exists - CLAUDE.md). Board
 // 1 could treat a stiff reset as a nuisance; here a case that makes it awkward
@@ -877,10 +879,10 @@ module cover(){
     // lip. The cost is real: the lip's bottom run loses material at two places,
     // so that end holds slightly less. It is bought back by moving the snaps
     // (see snaps()), which is where the retention actually lives.
-    for (b = [[reset_dx, reset_d], [boot_dx, boot_d]])
-      translate([bcx + b[0], btn_y, -0.01]) {
-        cylinder(d = b[1], h = cover_th + lip_h + 0.02);
-        cylinder(d1 = b[1] + 2*btn_cham, d2 = b[1], h = btn_cham + 0.01);
+    for (dx = [reset_dx, boot_dx])
+      translate([bcx + dx, btn_y, -0.01]) {
+        cylinder(d = btn_d, h = cover_th + lip_h + 0.02);
+        cylinder(d1 = btn_d + 2*btn_cham, d2 = btn_d, h = btn_cham + 0.01);
       }
     // pilot hole in each boss — the M3 screw threads straight into the plastic
     for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, ks_axle_z])

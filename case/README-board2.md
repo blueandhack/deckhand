@@ -143,30 +143,18 @@ plugging anything in.
 
 ## Two things the measurements forced
 
-**RESET and BOOT are Ø6.0 and Ø4.5, sized by the RIM rather than by a finger.**
-At `btn_in = 4` — 2 mm of gap plus half a 4 mm button — a Ø9 hole leaves **0.1 mm** of
-plate at its outer edge: a knife edge that prints badly and breaks. Ø6.0 leaves 1.6 mm,
-Ø4.5 leaves 2.3 mm. Nothing is lost by shrinking them, because with a 25.5 mm cavity
-both holes are ~25 mm from the button whatever their diameter — a finger was never
-reaching either, and for a tool Ø6 is as good as Ø9.
+**Both button holes are Ø6.0 — the same, because the buttons are the same.** An earlier
+pass made RESET Ø9 and BOOT Ø5.5, on the argument that RESET is the only way back from
+deep sleep and deserves the easier target. That was my asymmetry, not the hardware's, and
+it does not survive the cavity being 15.5 mm deep: **both** holes are ~15 mm from their
+button, so both are tool holes whatever their diameter, and 1.5 mm of extra hole buys
+nothing a pen tip notices. What it did buy was two different holes under two identical
+buttons — which reads as a mistake rather than a decision, and would invite someone later
+to "fix" it or wonder what they had missed.
 
-**The holes cut the cover's LIP as well as its plate, and the snaps moved because of
-it.** At `btn_in = 8` the holes sat well inboard; at 4 they land under the lip ring, and
-a hole through the plate alone would be *blocked by the lip standing over it* — visible
-from outside, useless from inside. They now span plate + lip. That costs lip material at
-the service end, and the two snaps there moved from 0.30/0.70 to **0.42/0.58** so their
-barbs (21.2–28.2, 30.7–37.7) sit in the clear gap between the holes instead of under
-them. The mic-end pair stays wide at 0.30/0.70, where spreading them is free.
-
-**Superseded, kept because the reasoning is the point — Ø9 and Ø5.5.** The buttons measure ~6 × 4, so
-their actuators are ~3, but the cover sits `cavity_d` **behind** the board — 18.5 mm with
-a battery fitted. Neither hole is finger-reachable at any sane diameter; they are *tool*
-holes. BOOT is a rare recovery action and a toothpick is fine. RESET is the only way back
-from deep sleep, so it gets the largest hole that still leaves a sane cover: a pen tip, a
-nail at the rim, or a printed plunger later. **This is the one place the design is
-knowingly awkward**, and it is a consequence of the battery depth rather than of anything
-board 2 did.
-
+The ceiling on Ø6.0 is structural, not ergonomic: centred 4 mm from the board edge, a Ø9
+hole leaves **0.1 mm** of plate at its outer rim — a knife edge that prints badly and
+breaks. Ø6.0 leaves 1.6 mm, which is the most the rim will carry.
 **The kickstand hinge is at the MIC end, which is the reverse of board 1's rule.** It
 is set by how the device *stands*: mic end up, service edge (USB, RESET, BOOT) down on
 the desk. So the pivot is at the **top** and the blade swings down and back to prop it,
