@@ -56,6 +56,13 @@
 // ============================================================================
 
 part = "all";
+
+// THE RETAINER IS OPTIONAL ON BOARD 2, and turning it off buys NOTHING in size -
+// which is the point of saying so here rather than letting it look like a win.
+// It is an open corral that LOCATES the battery and speaker inside the cavity;
+// it sits within cavity_d, so it costs a print, never a millimetre. Off means
+// the pack is held by tape instead of walls. The case is exactly as thick.
+use_retainer = false;
 $fn = 72;
 
 // ---------- Board (mm) — MEASURE YOURS AND EDIT ----------
@@ -78,7 +85,7 @@ glass_up  = 3.7;    // EXACT: CTP 1.00 + LCD 2.20 + glue 0.50. This sets how far
                     // pushes the PCB deeper while leaving the glass at the same
                     // glass_recess, so the window + touch chamfer stay correct.
 usb_up    = 3.4;    // USB-C connector height above the PCB back
-glass_recess = 2.6; // display sits this far below the outer front face. This also
+glass_recess = 1.6; // SLIMMED from board 1's 2.6 (-1.0 mm). Display sits this far below the outer front face. This also
                     // sets the board's SUPPORT SHOULDER height (= glass_recess +
                     // glass_up - front_th): with glass_up 4.2 that's a 4.6 mm shoulder.
 
@@ -255,7 +262,12 @@ batt_w = 36.0; batt_h = 68.0; batt_t = 10.0; batt_dy = 14.0;
 // lives against that wall beside its Expand-pin connector. 36 mm of pack in 51 mm
 // of cavity leaves 15 mm of slack; this spends 10 of it on the mic side.
 batt_dx = 5.0;
-batt_extra = 5.5;   // headroom above the pack (it bulges + sits on components); also margin so
+// SLIMMED 5.5 -> 2.5 (-3.0 mm), and deliberately NOT to the ~1.0 that would save
+// another 1.5. This is headroom above a LITHIUM POUCH, which swells in service -
+// a cover pressed against a swelling cell is a hazard, not a tight fit. 2.5 is
+// the thinnest number that still leaves the pack somewhere to go. If you want
+// the last 1.5 mm, get it from a thinner CELL, not from this.
+batt_extra = 2.5;   // headroom above the pack (it bulges + sits on components); also margin so
                     // the cover closes. This is the knob that sets TOTAL THICKNESS: raising the
                     // support shoulder pushes the board deeper, so trim the same amount here to
                     // keep the case the same depth (shoulder 4.1 -> 4.6 was paid for out of this).
@@ -379,21 +391,11 @@ wire_w = 3.4; wire_h = 2.8;
 // bulk. Dropping it halves the barrel.
 ks_open    = 0;    // preview deploy angle (0 = folded flat)
 ks_gap     = 34;   // pivot spacing (centre-to-centre)
-// 26, NOT board 1's 15, because the button holes now exist - the one knock-on
-// from wiring up reset_dx/boot_dx, which board 1 declared and never cut. The
-// lug's footprint is a hull whose base block is ks_barrel deep in Y, so it spans
-// ks_lug_y +/- 4.1, and the Ø9 RESET hole spans y 92.1..101.1:
-//   ks_lug_from=15 -> lug 88.6..96.8  OVERLAPS by 4.7 mm   (board 1's value)
-//   ks_lug_from=20 -> lug 83.6..91.8  clears by 0.3 mm     (a wall too thin to print)
-//   ks_lug_from=26 -> lug 77.6..85.8  clears by 6.3 mm     <-- this
-// 20 was tried first and is the instructive one: "technically clear" at 0.3 mm
-// renders as a touching blob and would print as a weld. Hence arithmetic in a
-// comment rather than a number nudged until the preview looked acceptable.
-//
-// Moving the pivot AWAY from the service edge is also the right direction on a
-// case 15.5 mm longer than board 1's; widening ks_gap instead would push the
-// lugs to +/-22.5 and crowd the side walls.
-ks_lug_from = 26;  // pivot distance in from the USB-C (top) end
+// Back to 15, near the edge - the collision that pushed this to 26 is gone now
+// that the hinge is at the other END. A stand wants its pivot close to the edge
+// it leans from; 26 was 11 mm of leverage given up to avoid a hole that is no
+// longer anywhere near it.
+ks_lug_from = 15;  // pivot distance in from the MIC (top) end
 ks_barrel  = 8.2;  // barrel diameter — shared by the cover bosses AND the blade nose.
                    // Sized so the screw head can be BURIED in the blade's outer face
                    // with a 1.2 mm rim; at 7.0 the rim was 0.6 mm and would crack.
@@ -415,7 +417,9 @@ clr_w    = 0.0;     // board-to-wall clearance on the LEFT/RIGHT (X). Snug: the
                     // board measured 51 wide in a 52 cavity (1 mm loose), so
                     // this drops the sides to a zero-nominal fit. Bump to
                     // 0.1–0.15 if the board won't drop in on your printer.
-wall     = 2.6;
+wall     = 2.2;     // SLIMMED from 2.6: -0.8 mm on BOTH footprint axes. Not lower -
+                    // the snap barbs and the cover lip are cut into this wall, and
+                    // below ~2 they stop holding.
 front_th = 2.2;     // front face thickness
 cover_th = 2.0;     // back cover plate
 lip_h    = 4.0;     // cover lip depth — shared by cover() and the retainer risers
@@ -469,8 +473,23 @@ usb_outer_y = usb_at_top ? out_h : 0;      // outer face of the USB-C end wall
 usb_in      = usb_at_top ? -1 : 1;         // direction pointing into the case
 
 // kickstand: pivot near the USB-C (top) end so the leaf swings down the back
-ks_lug_y   = usb_at_top ? out_h - ks_lug_from : ks_lug_from;
-ks_dir     = usb_at_top ? -1 : 1;          // leaf extends toward the far end
+// THE HINGE GOES AT THE END OPPOSITE THE USB, which is the reverse of board 1's
+// rule and is set by how the device STANDS: mic end up, service edge (USB, RESET,
+// BOOT) down on the desk. So the pivot is at the TOP and the blade swings down
+// and back to prop it, while the buttons and the cable stay at the bottom where
+// a hand reaches them.
+//
+// This also DISSOLVES the lug/button collision rather than dodging it. An earlier
+// pass here moved ks_lug_from 15 -> 26 to slide the lugs off the RESET hole, with
+// arithmetic to prove the clearance - correct arithmetic solving the wrong
+// problem, because both features were at the same end only because the hinge was
+// at the wrong one. With the hinge at the top there is nothing to clear: the
+// pivot returns to 15 (near the edge, where a stand wants its leverage) and the
+// blade's tip lands at y 79.1 against buttons at 94.4 - 15 mm clear.
+ks_lug_y   = usb_at_top ? ks_lug_from : out_h - ks_lug_from;
+// Inverted with ks_lug_y above: the leaf now extends from the top pivot toward
+// the USB end. Flipping one without the other points the blade off the case.
+ks_dir     = usb_at_top ? 1 : -1;          // leaf extends toward the service edge
 // Axis height = half the barrel, so the nose is TANGENT to the cover: the blade
 // folds flush and clears the cover through the whole swing. Both sides derive
 // from this one value, so the bores cannot drift apart (they did once, when the
@@ -943,7 +962,7 @@ module section(){
 if      (part=="body")     body();
 else if (part=="cover")    translate([0,0,cover_th]) rotate([180,0,0]) cover();
 else if (part=="stand")    stand();
-else if (part=="retainer") retainer();
+else if (part=="retainer") { if (use_retainer) retainer(); }
 else if (part=="coupon")   coupon();
 else if (part=="section")  section();
 // A deliberate no-op, for `include`-based clearance probes: `include` re-runs this

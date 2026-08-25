@@ -126,25 +126,24 @@ nail at the rim, or a printed plunger later. **This is the one place the design 
 knowingly awkward**, and it is a consequence of the battery depth rather than of anything
 board 2 did.
 
-**The kickstand pivot moved, 15 → 26.** Wiring up the buttons collided with the hinge
-lugs, which board 1 never met because it cut no button holes at all. The lug footprint is
-a hull whose base block is `ks_barrel` deep, spanning `ks_lug_y ± 4.1`, against a RESET
-hole at y 92.1..101.1:
+**The kickstand hinge is at the MIC end, which is the reverse of board 1's rule.** It
+is set by how the device *stands*: mic end up, service edge (USB, RESET, BOOT) down on
+the desk. So the pivot is at the **top** and the blade swings down and back to prop it,
+while the cable and both buttons stay at the **bottom** where a hand reaches them. The
+blade's tip lands at y 79.1 against buttons at 94.4 — 15 mm clear.
 
-| `ks_lug_from` | lug spans | result |
-|---|---|---|
-| 15 (board 1) | 88.6..96.8 | **overlaps by 4.7 mm** |
-| 20 | 83.6..91.8 | clears by 0.3 mm — a wall too thin to print |
-| **26** | 77.6..85.8 | clears by 6.3 mm |
+**This replaced a fix that was solving the wrong problem, and the mistake is worth
+recording.** Wiring up the buttons collided with the hinge lugs, so an earlier pass moved
+`ks_lug_from` 15 → 26 to slide the lugs off the RESET hole, complete with a clearance
+table proving 6.3 mm. The arithmetic was right and the change was wrong: both features
+were at the same end *only because the hinge was at the wrong one*. Moving it to the
+correct end dissolves the collision entirely and hands back the 11 mm of leverage that
+pushing the pivot inboard had given up — a stand wants its pivot near the edge it leans
+from. Correct arithmetic is not the same as the correct problem.
 
-20 was tried first and is the instructive one: "technically clear" at 0.3 mm renders as a
-touching blob and would print as a weld. Moving the pivot *away* from the service edge is
-also the right direction on a case 15.5 mm longer than board 1's; widening `ks_gap`
-instead would push the lugs to ±22.5 and crowd the side walls.
-
-Also unresolved by choice: **the microSD slot is not opened**. This firmware contains no
-SD code at all, so a slot opening is a dust path for a feature nothing uses. Open it when
-something reads a card.
+`ks_lug_y` and `ks_dir` must flip **together**: the first puts the pivot at the top, the
+second points the blade at the service edge. Flipping one alone aims the blade off the
+case.
 
 ## What is NOT verified
 
