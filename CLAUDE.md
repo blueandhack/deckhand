@@ -424,6 +424,37 @@ node firmware/deckhand_display/palette-check.mjs
 node firmware/deckhand_display/palette-check.mjs --selftest
 ```
 
+**Check the MENU-BAR APP, which cannot be clicked from a script and cannot be screenshotted** —
+`screencapture` needs a TCC grant this process does not have. So every claim about that surface is
+made through one of these, and they are commands rather than prose for the reason the board
+baseline is: running them must not be a thing to remember.
+
+```
+mac-app/build.sh                                          # swiftc + ad-hoc codesign; the .app is not committed
+B=mac-app/DeckhandMenuBar.app/Contents/MacOS/DeckhandMenuBar
+$B --pace-check                # the pace arithmetic: 30 assertions, no host, no device
+$B --sound-check [play]        # every needs-input sound resolves, and the asking-edge script
+$B --menu-dump                 # the composed bar label, tooltips, every row, checkmarks, tips
+$B --menu-preview out.png      # the bar label AND the menu, rendered light and dark
+$B --icon-preview out.png      # the boat at every size and style, 6x nearest-neighbour
+$B --open-session [<id>] [go]  # what a click on each session row would do (prints; acts only on `go`)
+node host/mac-emoji-check.mjs  # the four hand-transcribed icon tables agree
+DECKHAND_TMP=<dir> $B --menu-dump   # drive the REAL parser with a synthetic host-alive + host.log
+```
+
+**`DECKHAND_TMP` is the seam that makes the interesting states reachable at all**, and it is how
+the stale/critical/window-extreme cases were actually exercised: write a fresh `host-alive` (its
+`at` must be within 12s or `readStatus` reports the host down) plus one crafted tick line into a
+throwaway directory, and every parser downstream runs for real. It is the same test seam
+`uninstall.sh` uses, and pointing it anywhere but a scratch directory would have the test eat the
+live host's runtime state — which has happened once already, so use a scratch path.
+
+**A rebuilt bundle is NOT the running one.** The app must be relaunched to pick it up, and the kill
+has to name the menu bar rather than "Deckhand": `pkill -f 'MacOS/Deckhand'` also matches the HOST
+(`DeckhandBLE.app/Contents/MacOS/Deckhand`), which is the exact collision that once had
+`deckhand-service.sh status` reporting the menu bar's pid as the host's. Kill by pid, or match
+`MacOS/DeckhandMenuBar`.
+
 **Check the LAYOUT ARITHMETIC of both boards' screens without a screen.** Three checkers parse the
 constants straight out of `board_e32r28t.h` / `board_es3c35p.h` (shared parsing in
 `geom-common.mjs`) and assert every derivation the headers claim — so a header that drifts from its
@@ -1632,6 +1663,28 @@ two things `host/index.mjs` cannot get any other way:
     a display bug — the wire carries the name, never an index — only evidence that one list was
     edited without the others. `emoji2c.py --verify` covers the remaining edge, generator against
     generated header.
+  - **The PICKER SHOWS THE PICTURE, and that adds a FOURTH table — of characters, not names.**
+    A submenu of sixteen bare words is the same problem `--sound-check play` already fixed for
+    sounds: `wave`, `bolt` and `anchor` are a guess until you see them, so each row now reads
+    `🌊  wave` and the `Mac icon` parent carries the current pick's glyph, which is also the only
+    way an env-set value's *picture* is visible on a row whose children are deliberately disabled.
+    `MAC_ICON_GLYPHS` in `mac-app/DeckhandMenuBar.swift` is **display-only** — `pickIcon` still
+    writes `EMOJI <name>`, and the device still draws baked artwork because Cozette cannot render
+    an emoji glyph at all — so a wrong entry is a wrong picture in one menu, never a broken icon
+    on the device. What it *can* do is offer a picture the device no longer draws, silently and
+    forever, since the names are frozen and choosing a different CHARACTER is the only lever a bad
+    icon has; so `mac-emoji-check.mjs` compares it against **`ICONS` in `emoji2c.py`** — the
+    generator, the only place recording which character the art was rendered FROM, where
+    `MacEmoji.h` holds pixels and has forgotten. Both fault injections were run: a swapped glyph
+    and a dropped row each fail by name. Two details: the entries are written as `\u{...}` escapes
+    because every one ends in an **invisible** U+FE0F (the variation selector that stops `gear`,
+    `desktop`, `sun` and `star` rendering as flat text glyphs, and exactly the character an editor
+    silently eats), and mismatches print CODEPOINTS rather than characters, or the failure reads as
+    two identical emoji side by side. `SIZE_OVERRIDES` is deliberately **not** reflected here — the
+    Mac cannot know which board it is talking to and may be talking to both, so the menu shows the
+    base character each override was chosen to keep describing. The parser also had to anchor its
+    opening bracket PAST the marker, because Swift's `[String: String]` type annotation opens one
+    first and `namesFrom`'s anchoring reads the table as empty.
   - **A broken icon is fixed by giving the same NAME a different CHARACTER, and at 16px two were.**
     The names are the wire format, so they can never move; `SIZE_OVERRIDES` in `emoji2c.py` is the
     only lever, and it is keyed by SIZE because **board 1's 13px set is frozen** — its binary is
@@ -1689,7 +1742,9 @@ two things `host/index.mjs` cannot get any other way:
     underneath while `kbActive` stays true, leaving every further tap typing invisibly.
   - **Env beats the picker, and the MENU SAYS SO rather than showing a checkmark it cannot
     honour.** With `DECKHAND_MAC_EMOJI` set to a valid name the submenu parent reads **`Mac icon
-    (set by env)`** and every child is disabled — a checkmark a click could never move is a lie.
+    (set by env)`**, followed by the resolved glyph, and every child is disabled — a checkmark a
+    click could never move is a lie, while the glyph on the parent is the one thing that can still
+    say WHICH icon won without implying a click could change it.
     The menu bar learns both facts from the **host's heartbeat** (`icon`, already fully resolved,
     and `iconFromEnv`), never by reading the plist or launchd's environment, which would be a third
     source of truth after the env var and `~/.claude/deckhand-mac-emoji`. `iconFromEnv` is computed
@@ -2415,6 +2470,62 @@ Four things are load-bearing:
   ITS OWN source - hanging the Codex row off the Claude quota's age was a real device-side
   bug and is not repeated here. Deriving the age Mac-side from a file mtime was rejected:
   it would put the "which reading is authoritative" decision in two places.
+- **THE PACE TICK CROSSED TO THE MAC, on both surfaces, because a percentage alone cannot say
+  whether you are burning it faster than the clock.** That is the whole reason the device draws
+  `drawPaceBar`, and it was just as true of a menu showing the same number. `pacePct` is the
+  device's own arithmetic (`100 - resetInMin * 100 / windowMin`, integer division and all, so the
+  two surfaces cannot round differently), and it is ONE function feeding three renderings — the
+  bar label's glyph, the menu row's tick, and the tooltip's sentence — because a pace that
+  disagreed with itself between two rows of one menu would be worse than no pace.
+  The windows: 5h = 300 and 7d = 10080 are fixed by the plan and hardcoded, since the tick line
+  publishes only how much is LEFT; **Codex's is parsed off the line** (`codex=44%/7d`, which the
+  host already prints), and when it is absent that row draws its fill with **no tick** rather than
+  assuming seven days — a mark at a position nothing measured is the one thing this must not do.
+  - **A STALE reading keeps its digits and loses its pace, on both surfaces.** The comparison is
+    against a clock that has kept running while the percentage has not, so the tick and the glyph
+    are suppressed rather than corrected. The reading's own age is otherwise NOT subtracted from
+    `reset`, and the bound is what makes that a decision: the OAuth poller runs every 5 minutes, so
+    the error is at most 1.7 points on the 5h window and 0.05 on the 7d — both inside the deadband,
+    i.e. too small to change anything drawn.
+  - **`PACE_DEADBAND_PCT` (5) is not a fudge factor.** With an exact comparison, a percentage
+    sitting perfectly still (nobody working) still gets overtaken by the clock, so the glyph would
+    flip from ▲ to ▼ on a timer with nothing happening — in a menu bar, refreshed every 5s. 5
+    points is 15 minutes of the 5h window.
+  - **THE TICK IS INSERTED BETWEEN CELLS, NEVER WRITTEN OVER ONE, and the live host caught the
+    first version inside a minute.** At 1% used the fill is a single cell and the pace was 3%, so
+    the mark landed on cell 0 and replaced the only ink in the bar — `▕░░░░░░░░░`, which reads as
+    *nothing used*, exactly the claim the "1% must always show a cell" rule exists to prevent. The
+    arithmetic was right and only the LOOK was wrong, which is why it would have survived review.
+    Inserting costs one character of width and loses no fill at any percentage; a bar with a pace
+    is 11 cells and one without is 10, deliberately, because padding the pace-less case with a
+    blank would put a blank exactly where a 0% tick goes.
+  - **The tick is drawn in its own colour, which is why `quotaBarParts` returns THREE pieces.**
+    Inheriting the fill's colour made it a red line among red blocks, findable only as the notch
+    its own cell's background happened to make. It means "now", which is not a status, so it takes
+    a neutral secondary grey against a fill that may be red or orange. Splitting the string is the
+    only way an attributed run can colour them apart.
+- **THE BAR LABEL IS NOW COLOURED, and that does NOT contradict the "no tint, ever" rule above
+  it.** The rule is about the TEMPLATE IMAGE, whose colour macOS overrides with the menu bar's own
+  — which is why the boat gave up on colour. An attributed string's `foregroundColor` is honoured,
+  so each usage figure takes the same threshold `quotaColour` the menu rows use (factored out of
+  `quotaTitle`, because two copies of a threshold is how a menu ends up calling 95% critical while
+  the bar an inch above it looks fine). They are SEMANTIC colours, so they follow a light bar and a
+  dark one. **The two session counts stay monochrome on purpose**: ■ ○ ● are already separated by
+  shape, and hue on top of that is decoration — where a percentage has no shape to spare, so
+  colour there is an accent on a figure that already states the fact in digits.
+- **Two of the three defects in that work were caught by LOOKING, not by reading**, which is why
+  `--menu-preview` now renders the bar label as its own band above the menu: `--menu-dump` prints
+  `.string` and drops every colour, and `screencapture` needs a TCC grant this process does not
+  have. What the render caught: the overwritten cell above; the row note WRAPPING onto a third
+  line with no indent (the indent is a literal `\n      `, and a soft wrap gets none), which is why
+  the verdict reads `ahead of pace` and not `ahead of the clock` — 53 characters wrapped, 41 fits;
+  and an unspaced separator sitting hard against the glyph before it (`96%▲·50%`), which reads as
+  one number that has come apart rather than two figures.
+  `--pace-check` is the repeatable half — a glance is not — and it **names the regressions rather
+  than merely covering them**: reverting the tick to overwrite a cell fails three assertions
+  including "1% used keeps a filled cell even with the tick on top of it". It also caught a wrong
+  expectation of mine (176m of 300 is 42% elapsed, not 41 — the division truncates), which is the
+  cheapest possible place to find out that the Mac and the device round differently.
 - **Session titles are clipped at 39, ONE LESS than the host's own 40-character slice, and
   that off-by-one is the point.** A title arriving at exactly 40 cannot be told apart from
   one cut there, so clipping at 40 saw no overflow and left a hard mid-word cut on screen

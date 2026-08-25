@@ -71,6 +71,11 @@ struct HostStatus {
     var pct5h: Int? = nil, reset5h: Int? = nil
     var pct7d: Int? = nil, reset7d: Int? = nil
     var cxPct: Int? = nil, cxReset: Int? = nil
+    // Codex's window LENGTH in minutes, which the two Claude windows do not need
+    // (300 and 10080 are fixed by the plan) and this one does: it is whatever
+    // Codex's own rate_limits reported, 7d on a Plus plan and not guaranteed
+    // elsewhere. Absent costs the pace tick on that row and nothing else.
+    var cxWinMin: Int? = nil
     // How old the two quota readings are. The transport being fresh says nothing
     // about the NUMBERS: the OAuth poller backs off 15 minutes on a 429 and can
     // sit there for hours, so a percentage can be stale while every tick arrives
@@ -158,6 +163,7 @@ func readStatus() -> HostStatus {
             if let (pct, reset) = pctReset(line, "5h=") { s.pct5h = pct; s.reset5h = reset }
             if let (pct, reset) = pctReset(line, "7d=") { s.pct7d = pct; s.reset7d = reset }
             if let (pct, reset) = pctReset(line, "codex=") { s.cxPct = pct; s.cxReset = reset }
+            s.cxWinMin = codexWindowMin(line)
             s.quotaAgeSec = field(line, "qage=").flatMap { Int($0) }
             s.cxAgeSec = field(line, "cxage=").flatMap { Int($0) }
             s.via = field(line, "via=")
@@ -195,6 +201,27 @@ func pctReset(_ line: Substring, _ key: String) -> (Int, Int?)? {
         reset = Int(after[rr.upperBound..<close].dropLast())   // "176m" -> 176
     }
     return (pct, reset)
+}
+
+/// Codex's window length in MINUTES, out of the `/7d` the host appends to its
+/// percentage (`codex=44%/7d (resets 8021m)`). Days, because that is the unit the
+/// host rounds to on the way out (`Math.round(usage.cxWin / 1440)`), so nothing
+/// finer than a day is recoverable here - which is fine for placing a tick in a
+/// ten-cell bar.
+///
+/// Absent whenever the field is: the host omits it when Codex has published no
+/// rate_limits at all, and the row must then draw its fill with NO tick rather
+/// than assume seven days. Guessing the window would put a mark at a position
+/// nothing measured, which is the one thing this whole feature must not do.
+func codexWindowMin(_ line: Substring) -> Int? {
+    guard let r = line.range(of: "codex=") else { return nil }
+    let rest = line[r.upperBound...]
+    guard let pctEnd = rest.firstIndex(of: "%") else { return nil }
+    let after = rest[rest.index(after: pctEnd)...]
+    guard after.hasPrefix("/"), let dEnd = after.firstIndex(of: "d"),
+          let days = Int(after[after.index(after: after.startIndex)..<dEnd]), days > 0
+    else { return nil }
+    return days * 1440
 }
 
 /// The sessions array out of `sessions(N)=[{...}]` in a tick line.
@@ -279,7 +306,140 @@ func clip(_ t: String, _ n: Int) -> String {
 // The host caps its session list at 6, so a deeper pool could never fill.
 let MAX_SESSION_ROWS = 6
 let BAR_CELLS = 10
-func quotaBar(_ pct: Int) -> String {
+
+/// The two Claude windows in MINUTES. Fixed by the plan and published nowhere:
+/// the tick line carries only how much is LEFT (`5h=44% (resets 176m)`), and a
+/// window length is what turns that into a POSITION. Codex's is deliberately not
+/// here - it is per-plan, and the host already prints it as `codex=44%/7d`.
+let WINDOW_5H_MIN = 300
+let WINDOW_7D_MIN = 10080
+
+/// HOW FAR THROUGH THE WINDOW WE ARE, as a percentage - the device's pace tick,
+/// and the same arithmetic `drawPaceBar` does (`100 - resetInMin * 100 /
+/// windowMin`). One function because three things now render it (the bar's arrow,
+/// the menu rows' tick, the tooltip's sentence), and a pace that disagreed with
+/// itself between two rows of one menu would be worse than no pace at all.
+///
+/// nil when it cannot be known - a missing reset (the host prints `resets ?m`
+/// when its poller has never succeeded) or an unknown window - and nil has to
+/// render as NOTHING rather than as "level with the clock", which is a claim.
+///
+/// THE READING'S AGE IS DELIBERATELY NOT SUBTRACTED, and the bound is what makes
+/// that a decision rather than an oversight: `reset` was computed when the quota
+/// was READ, so it is `quotaAgeSec` too large by now. The OAuth poller runs every
+/// 5 minutes, so in normal operation the error is at most 5/300 = 1.7 points on
+/// the 5h window and 0.05 on the 7d - both inside `PACE_DEADBAND_PCT`, i.e. too
+/// small to change anything drawn. Past that the reading is STALE, and a stale
+/// reading's pace is SUPPRESSED rather than corrected, because the percentage it
+/// would be compared against is frozen while the clock it is compared to is not.
+func pacePct(resetInMin: Int?, windowMin: Int?) -> Int? {
+    guard let reset = resetInMin, let win = windowMin, win > 0 else { return nil }
+    return max(0, min(100, 100 - reset * 100 / win))
+}
+
+/// AHEAD of the clock, level with it, or behind - carried by SHAPE, so nothing
+/// here rests on the colour beside it.
+///
+/// The deadband is not a fudge factor. With an exact comparison, a percentage
+/// that is sitting perfectly still (nobody working) still gets overtaken by the
+/// clock, so the glyph would flip from up to down on a timer while nothing
+/// whatsoever happened - in a menu bar, refreshed every 5 seconds. 5 points is
+/// 15 minutes of the 5h window: wide enough to stop that, narrow enough that a
+/// real burn crosses it in minutes.
+///
+/// Escapes, not literal characters, for every glyph this file added: a geometric
+/// mark is confusable with an ASCII lookalike in source (U+2502 against a plain
+/// `|`, U+2595 against U+258F) and a reviewer cannot tell them apart by eye. The
+/// pre-existing full-block/light-shade pair below stays literal - it is already
+/// there, and no ASCII character resembles either.
+let PACE_DEADBAND_PCT = 5
+func paceGlyph(pct: Int, pace: Int?) -> String {
+    guard let pace else { return "" }
+    if pct > pace + PACE_DEADBAND_PCT { return "\u{25B2}" }
+    if pct < pace - PACE_DEADBAND_PCT { return "\u{25BC}" }
+    // Neither "" nor a triangle: level with the clock is a real answer, and it
+    // has to look different from "there is no pace to state", which is "" above.
+    return "\u{2248}"
+}
+
+/// What that glyph MEANS, in three words - the teaching half, since a triangle
+/// beside a percentage is only obvious once somebody has said which way is which.
+/// One function, two framings below, so the menu row and the tooltip can differ
+/// in how much CONTEXT they repeat without ever differing on the verdict.
+func paceVerdict(pct: Int, pace: Int?) -> String {
+    guard let pace else { return "" }
+    let g = paceGlyph(pct: pct, pace: pace)
+    // SHORT, and that was measured rather than chosen: "level with the clock"
+    // took the 7d row's second line to 53 characters, which wrapped in the render
+    // - and it wrapped onto a third line with no indent, since the indent is a
+    // literal "\n      " and a soft wrap gets none. So the row read as broken
+    // rather than as long. 41 characters fits the 302pt lane with room to spare.
+    if g == "\u{25B2}" { return "ahead of pace" }
+    if g == "\u{25BC}" { return "behind pace" }
+    return "on pace"
+}
+
+/// For the STATUS ITEM's tooltip, which has no other context on screen: both
+/// numbers and the verdict, because the bar beside it shows a percentage and a
+/// glyph and nothing that says what either is measured against.
+func paceWords(pct: Int, pace: Int?) -> String {
+    guard let pace else { return "no reset time, so no pace" }
+    return "\(pct)% used, \(pace)% of the window elapsed - \(paceVerdict(pct: pct, pace: pace))"
+}
+
+/// For a MENU ROW, which already prints "44% used" an inch to the left. Repeating
+/// it in the line below is how a two-line row starts reading as filler, so this
+/// carries only what the row does not already have: where the clock is, and the
+/// verdict.
+func paceNote(pct: Int, pace: Int?) -> String {
+    guard let pace else { return "" }
+    return "\(pace)% elapsed, \(paceVerdict(pct: pct, pace: pace))"
+}
+
+/// The colour a usage figure takes, on BOTH surfaces. Factored out of
+/// `quotaTitle` when the bar started colouring its percentages, because two
+/// copies of a threshold is how a menu ends up calling 95% critical while the
+/// bar an inch above it still looks fine.
+///
+/// Staleness OUTRANKS the usage threshold - "97% used" from an hour ago is not a
+/// crisis to colour red, it is a number we cannot vouch for - and these are
+/// SEMANTIC system colours, which is what lets one call serve a menu row and a
+/// status item that may be sitting on a light bar or a dark one.
+func quotaColour(pct: Int, stale: Bool) -> NSColor {
+    if stale { return .tertiaryLabelColor }
+    return pct >= 95 ? .systemRed : (pct >= 80 ? .systemOrange : .labelColor)
+}
+
+/// The ten-cell fill, now with the pace tick in it.
+///
+/// THE TICK IS INSERTED BETWEEN CELLS, NEVER WRITTEN OVER ONE, and the first
+/// attempt did the opposite - which the live host caught within a minute. At 1%
+/// used the fill is a single cell and the pace was 3%, so the mark landed on cell
+/// 0 and replaced the only ink in the bar: `▕░░░░░░░░░`, a bar that reads as
+/// nothing used. That is precisely the claim the `filled == 0` rule below exists
+/// to prevent, defeated by a mark drawn on top of it - and it would have been
+/// invisible in review, because the arithmetic is right and only the LOOK is
+/// wrong. Inserting costs one character of width and loses no fill information at
+/// any percentage.
+///
+/// So a bar with a pace is 11 cells and one without is 10. That asymmetry is
+/// deliberate: the alternative is padding the pace-less case with a blank to keep
+/// the columns flush, and a blank in the tick's own position is exactly what a
+/// tick at 0% would look like.
+///
+/// One marker, not two. U+2502 is a thin vertical in an otherwise empty cell, so
+/// it reads as a LINE between two light-shade cells and as a NOTCH cut into a run
+/// of full blocks - visible in both, without needing a second glyph to say which
+/// side of the fill it fell on. That is a claim about a render, so it was looked
+/// at: `--menu-preview`, light and dark.
+/// SPLIT AT THE TICK, so the mark can be drawn in a different colour from the
+/// fill it sits in. Returned as three pieces rather than one string because that
+/// is the only way an attributed run can colour them apart - and it has to: in
+/// the render, a tick inheriting the fill's colour was a red line among red
+/// blocks, i.e. findable only as the notch its own cell's background makes.
+/// The mark means "now", which is not a status, so it takes a neutral secondary
+/// grey against a fill that may be red or orange.
+func quotaBarParts(_ pct: Int, pace: Int? = nil) -> (pre: String, tick: String, post: String) {
     var filled = Int((Double(pct) / 100 * Double(BAR_CELLS)).rounded())
     // Any usage at all must show a cell: 1% rounding to an empty bar would read
     // as "none used", which is a different claim than "barely any".
@@ -288,7 +448,13 @@ func quotaBar(_ pct: Int) -> String {
     // FULL BLOCK against LIGHT SHADE, not ▰/▱. The geometric pair renders at 11pt
     // as a faint dashed line where filled and empty are barely distinguishable -
     // checked against a render, not assumed. These two differ in ink, not shape.
-    return String(repeating: "█", count: filled) + String(repeating: "░", count: BAR_CELLS - filled)
+    let cells = Array(repeating: "█", count: filled)
+        + Array(repeating: "░", count: BAR_CELLS - filled)
+    guard let pace else { return (cells.joined(), "", "") }
+    // A BOUNDARY, not a cell: 0% goes before the first and 100% after the last,
+    // which is what makes the two ends of the window reachable at all.
+    let at = max(0, min(BAR_CELLS, (pace * BAR_CELLS + 50) / 100))
+    return (cells[..<at].joined(), "\u{2502}", cells[at...].joined())
 }
 
 // Menu text styling.
@@ -401,23 +567,86 @@ func barBoatStyle(_ s: HostStatus) -> BoatStyle { s.deviceConnected ? .solid : .
 /// percentages that is always there is chrome, not a signal. Same reasoning as
 /// `barCountLabel`, applied to the other thing the device would have shown.
 ///
-/// 5h first, then 7d, in the order the menu and the device both list them. A
-/// STALE figure cannot reach the bar: `readStatus` only reads the log while the
-/// heartbeat is fresh, so a stopped host leaves both nil and this empty. They
-/// come off one tick line, so in practice they are both present or both absent -
-/// a lone percentage is possible only if the usage source omits a window, and it
-/// is shown rather than suppressed, since one real number beats none.
-func barUsageLabel(_ s: HostStatus) -> String {
+/// 5h first, then 7d, in the order the menu and the device both list them. Each
+/// figure carries its own PACE GLYPH and its own COLOUR, which is what makes this
+/// the USAGE tab standing in for a missing screen rather than two bare numbers:
+/// the device draws a pace bar because a percentage alone cannot say whether you
+/// are burning it faster than the clock, and that is just as true here.
+///
+/// Both are per-FIGURE and never shared: the 5h window can be ahead of its clock
+/// while the 7d window is far behind its own, which is the normal state of
+/// affairs on a busy afternoon, and one glyph for the pair would have to pick a
+/// side.
+///
+/// A stale reading keeps its DIGITS and loses its GLYPH. The digits still say the
+/// last thing we know; the pace does not survive, because it is a comparison
+/// against a clock that has kept running while the percentage has not - see
+/// `pacePct`. The dimming says so without a word, which the bar has no room for,
+/// and the menu row directly below spells out "stale 3h".
+///
+/// A dropped figure leaves no gap: the separator only appears between two figures
+/// that both exist, since a leading or trailing "·" reads as something missing
+/// rather than as something absent.
+func barUsageParts(_ s: HostStatus) -> [(String, NSFont, NSColor)] {
+    guard barMirrorAllowed(.usage, s) else { return [] }
+    let stale = (s.quotaAgeSec ?? 0) > QUOTA_STALE_SEC
+    var out: [(String, NSFont, NSColor)] = []
+    for (pct, reset, win) in [(s.pct5h, s.reset5h, WINDOW_5H_MIN), (s.pct7d, s.reset7d, WINDOW_7D_MIN)] {
+        guard let pct else { continue }
+        let pace = stale ? nil : pacePct(resetInMin: reset, windowMin: win)
+        // The separator is SPACED, and secondary rather than tertiary. Both came
+        // out of looking at it: a tertiary dot was effectively gone at menu-bar
+        // size, and an unspaced one sat hard against the pace glyph before it
+        // ("96%▲·50%"), which reads as one number that has come apart rather than
+        // as two figures. Three characters against nine is a real cost in a bar
+        // shared with every other app's icons, and it buys the only thing keeping
+        // two independent windows legible as two.
+        out.append((out.isEmpty ? " " : "  \u{00B7}  ", F_BAR, .secondaryLabelColor))
+        out.append(("\(pct)%" + paceGlyph(pct: pct, pace: pace), F_BAR, quotaColour(pct: pct, stale: stale)))
+    }
+    return out
+}
+
+/// What the bar's own figures MEAN, on hovering the status item - the only place
+/// the arrows can be explained, since the bar has room for a glyph and not for a
+/// sentence. Empty when the bar is showing no usage, so there is no tooltip
+/// promising to explain something that is not on screen.
+func barTooltip(_ s: HostStatus) -> String {
     guard barMirrorAllowed(.usage, s) else { return "" }
-    let parts = [s.pct5h, s.pct7d].compactMap { $0 }.map { "\($0)%" }
-    return parts.isEmpty ? "" : " " + parts.joined(separator: "\u{00B7}")
+    let stale = (s.quotaAgeSec ?? 0) > QUOTA_STALE_SEC
+    var lines: [String] = []
+    for (name, pct, reset, win) in [("5h", s.pct5h, s.reset5h, WINDOW_5H_MIN),
+                                    ("7d", s.pct7d, s.reset7d, WINDOW_7D_MIN)] {
+        guard let pct else { continue }
+        // WHY there is no pace has to be the real reason, and this got it wrong
+        // first time round: `paceWords(pace: nil)` says "no reset time, so no
+        // pace", which is true for a window the poller has never resolved and
+        // FALSE for a stale one - the reset time is right there on the row, and
+        // the actual reason is that it is two hours old. A diagnostic that
+        // misattributes a suppression sends the next reader to the wrong file, so
+        // staleness is stated once, below, and these lines just drop the pace.
+        lines.append(stale ? "\(name): \(pct)% used"
+                           : "\(name): " + paceWords(pct: pct, pace: pacePct(resetInMin: reset, windowMin: win)))
+    }
+    if lines.isEmpty { return "" }
+    if stale { lines.append("No pace: these readings are \(humanMinutes((s.quotaAgeSec ?? 0) / 60)) old, so the clock has moved and they have not.") }
+    return lines.joined(separator: "\n")
 }
 
 /// Everything to the right of the boat, left to right: usage, then what needs
 /// you, then what is merely live. Urgency ahead of ambience, so the number that
 /// might make you get up is never the one you have to hunt for.
-func barTitle(_ s: HostStatus) -> String {
-    barUsageLabel(s) + barCountLabel(s) + barSessionLabel(s)
+///
+/// ATTRIBUTED, where this returned a plain String until the usage figures started
+/// carrying a threshold colour. The two counts stay monochrome deliberately: ■ ○ ●
+/// are already separated by SHAPE, and hue on top of that would be decoration -
+/// while a percentage has no shape to spare, so colour there is the accent on a
+/// figure that already states the fact in digits.
+func barTitle(_ s: HostStatus) -> NSAttributedString {
+    menuTitle(barUsageParts(s) + [
+        (barCountLabel(s), F_BAR, .labelColor),
+        (barSessionLabel(s), F_BAR, .labelColor),
+    ])
 }
 
 /// A sound when a session STARTS needing input, and the edge is the whole point.
@@ -468,6 +697,67 @@ let MAC_ICON_NAMES = [
     "crab", "laptop", "desktop", "cloud", "sun", "cat", "apple", "gear",
 ]
 
+/// The CHARACTER each of those names stands for, so the picker can show the
+/// picture instead of only the word. Same argument `--sound-check play` already
+/// makes about sounds: a name tells you nothing about what you are choosing, and
+/// "wave" or "bolt" or "anchor" is a guess until you see it.
+///
+/// DISPLAY ONLY, and that is the whole safety story: the wire carries the NAME
+/// (see `pickIcon`, which writes `EMOJI <name>`), the device draws baked ARTWORK
+/// from MacEmoji.h because Cozette cannot render an emoji glyph at all, and
+/// nothing here is ever sent, stored, or compared. So a wrong character in this
+/// table is a wrong PICTURE in one menu - never a broken icon on the device, and
+/// never a name that fails to resolve.
+///
+/// It is a FOURTH hand transcription of the sixteen (after MacEmoji.h,
+/// host/mac-emoji.mjs and MAC_ICON_NAMES above), so `host/mac-emoji-check.mjs`
+/// compares it against `ICONS` in firmware/deckhand_display/emoji2c.py - the
+/// generator, i.e. the only place that says which character the art was rendered
+/// FROM. Without that, a future character change (the lever emoji2c.py's
+/// SIZE_OVERRIDES documents, since the names can never move) would leave this
+/// menu confidently offering a picture the device no longer draws.
+///
+/// Escapes rather than literal characters, deliberately: every entry carries
+/// U+FE0F, an INVISIBLE variation selector that forces emoji presentation - it is
+/// what stops `gear`, `desktop`, `sun` and `star` rendering as flat text glyphs -
+/// and an invisible character pasted into source is the kind of thing an editor
+/// silently eats. Spelled out, it is reviewable and the checker can compare it.
+///
+/// The per-SIZE substitutions in emoji2c.py's SIZE_OVERRIDES are deliberately
+/// NOT reflected here (board 2 draws `cloud` as sun-behind-rain-cloud at 16px).
+/// This Mac cannot know which board it is talking to - and may be talking to
+/// both - so the menu shows the character the name is named for, which is what
+/// each override was chosen to keep describing.
+let MAC_ICON_GLYPHS: [String: String] = [
+    "rocket":  "\u{1F680}\u{FE0F}",
+    "moon":    "\u{1F319}\u{FE0F}",
+    "star":    "\u{2B50}\u{FE0F}",
+    "bolt":    "\u{26A1}\u{FE0F}",
+    "fire":    "\u{1F525}\u{FE0F}",
+    "leaf":    "\u{1F343}\u{FE0F}",
+    "wave":    "\u{1F30A}\u{FE0F}",
+    "anchor":  "\u{2693}\u{FE0F}",
+    "crab":    "\u{1F980}\u{FE0F}",
+    "laptop":  "\u{1F4BB}\u{FE0F}",
+    "desktop": "\u{1F5A5}\u{FE0F}",
+    "cloud":   "\u{2601}\u{FE0F}",
+    "sun":     "\u{2600}\u{FE0F}",
+    "cat":     "\u{1F431}\u{FE0F}",
+    "apple":   "\u{1F34E}\u{FE0F}",
+    "gear":    "\u{2699}\u{FE0F}",
+]
+
+/// One picker row's title: the glyph, then the name it travels as. Both, never
+/// one or the other - the picture is what you recognise, and the name is what
+/// `DECKHAND_MAC_EMOJI` and the device's own logs speak, so hiding it would make
+/// the env override and this menu look like two unrelated settings. A name with
+/// no glyph in the table falls back to the bare name rather than an empty
+/// column, so a missed entry reads as plain instead of as a blank row.
+func iconRowTitle(_ name: String) -> String {
+    guard let g = MAC_ICON_GLYPHS[name] else { return name }
+    return "\(g)  \(name)"
+}
+
 /// Plays it, or does nothing if silenced or the name has gone missing. A sound
 /// file that is absent must not throw or log on a 3s timer - macOS ships these,
 /// but a stored name outlives the OS release that had it.
@@ -496,26 +786,41 @@ func menuTitle(_ parts: [(String, NSFont, NSColor)]) -> NSAttributedString {
 /// so the two surfaces cannot disagree about whether a reading is live.
 let QUOTA_STALE_SEC = 900
 
-func quotaTitle(_ label: String, _ pct: Int, _ reset: Int?, _ ageSec: Int? = nil) -> NSAttributedString {
+func quotaTitle(_ label: String, _ pct: Int, _ reset: Int?, _ ageSec: Int? = nil,
+                windowMin: Int? = nil) -> NSAttributedString {
     // A STALE reading is dimmed and says so in WORDS, both - the device dims its
     // hero % for the same reason, and the word is what carries the meaning here
     // for anyone who cannot see the dimming. Staleness outranks the usage
     // threshold: "97% used" from an hour ago is not a crisis to colour red, it is
-    // a number we cannot vouch for.
+    // a number we cannot vouch for. The threshold itself lives in `quotaColour`
+    // now, because the bar's figures take the same one.
     let stale = (ageSec ?? 0) > QUOTA_STALE_SEC
-    let colour: NSColor = stale ? .tertiaryLabelColor
-        : (pct >= 95 ? .systemRed : (pct >= 80 ? .systemOrange : .labelColor))
+    let colour = quotaColour(pct: pct, stale: stale)
     let note = stale ? "" : (pct >= 95 ? "  critical" : (pct >= 80 ? "  high" : ""))
     let staleNote = stale ? "  \u{00B7} stale \(humanMinutes((ageSec ?? 0) / 60))" : ""
+    // The pace tick, suppressed for a stale reading exactly as the bar's arrow is
+    // (see `pacePct`) - a mark showing where the clock has got to, drawn into a
+    // fill that stopped being updated hours ago, invents a comparison.
+    let pace = stale ? nil : pacePct(resetInMin: reset, windowMin: windowMin)
+    let bar = quotaBarParts(pct, pace: pace)
     return menuTitle([
         (label.padding(toLength: 6, withPad: " ", startingAt: 0), F_MONO, .secondaryLabelColor),
-        (quotaBar(pct), F_MONO, colour),
+        (bar.pre, F_MONO, colour),
+        (bar.tick, F_MONO, .secondaryLabelColor),
+        (bar.post, F_MONO, colour),
         (String(format: "  %3d%% used%@", pct, note), F_MONO, colour),
+        // Two spaces, because "4% used▼" reads as a typo - the glyph is a
+        // separate statement about a different quantity, not a suffix on this one.
+        (pace == nil ? "" : "  " + paceGlyph(pct: pct, pace: pace), F_MONO, colour),
         (staleNote, F_MONO, .systemOrange),
         // Indented with monospaced spaces so it sits under the bar. Padding a
         // proportional font gave a third of the intended indent.
         (reset.map { _ in "\n      " } ?? "", F_MONO, .secondaryLabelColor),
         (reset.map { "resets in \(humanMinutes($0))" } ?? "", F_SMALL, .secondaryLabelColor),
+        // What the tick is, spelled out, on the row that has room for it. The
+        // menu bar can only afford the glyph, so this is where the vocabulary the
+        // two surfaces share actually gets taught.
+        (pace == nil ? "" : "  \u{00B7}  \(paceNote(pct: pct, pace: pace))", F_SMALL, .tertiaryLabelColor),
     ])
 }
 
@@ -802,7 +1107,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // the set of names never changes, only which one is checked and
         // whether they're editable at all.
         for name in MAC_ICON_NAMES {
-            let it = NSMenuItem(title: name, action: #selector(pickIcon(_:)), keyEquivalent: "")
+            let it = NSMenuItem(title: iconRowTitle(name), action: #selector(pickIcon(_:)), keyEquivalent: "")
             it.target = self
             it.representedObject = name
             iconMenu.addItem(it)
@@ -879,14 +1184,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.contentTintColor = nil
             // Beside the boat: usage and the live-session count while no device
             // is connected, and a needs-input count whenever there is one -
-            // NOTHING otherwise, because a
-            // badge that is always present stops being a signal. The number is
-            // the signal, not its colour, so this is plain label colour and the
-            // menu carries the thresholds.
+            // NOTHING otherwise, because a badge that is always present stops
+            // being a signal.
+            //
+            // The usage figures now carry a pace glyph and the menu's own
+            // threshold colour (see `barUsageParts`), where this was one flat
+            // `labelColor` for the whole label. That is NOT the tint the comment
+            // above refuses: an attributed string's foregroundColor is honoured,
+            // it is the TEMPLATE IMAGE whose colour macOS overrides with its own -
+            // which is why the boat gives up on colour and the text does not. The
+            // colours are semantic (`systemRed`/`systemOrange`/`tertiaryLabel`),
+            // so they follow a light bar and a dark one; and the digits and the
+            // glyph both still state the fact without them.
             let label = barTitle(s)
-            button.attributedTitle = NSAttributedString(
-                string: label, attributes: [.font: F_BAR, .foregroundColor: NSColor.labelColor])
-            button.imagePosition = label.isEmpty ? .imageOnly : .imageLeading
+            button.attributedTitle = label
+            button.imagePosition = label.length == 0 ? .imageOnly : .imageLeading
+            // The arrows are the one thing in the bar that needs a word, and this
+            // is the only surface that can give them one.
+            button.toolTip = barTooltip(s).isEmpty ? nil : barTooltip(s)
         }
         if !s.running {
             statusLine.attributedTitle = menuTitle([("◦  ", F_BODY, .secondaryLabelColor),
@@ -939,9 +1254,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // the OAuth poller. Hanging the Codex row off quotaAgeSec was a real bug
         // on the device (see the Codex row note in CLAUDE.md) and there is no
         // reason to repeat it here.
-        if let pct = s.pct5h { q5.attributedTitle = quotaTitle("5h", pct, s.reset5h, s.quotaAgeSec) }
-        if let pct = s.pct7d { q7.attributedTitle = quotaTitle("7d", pct, s.reset7d, s.quotaAgeSec) }
-        if let pct = s.cxPct { cxLine.attributedTitle = quotaTitle("Codex", pct, s.cxReset, s.cxAgeSec) }
+        // The window each percentage belongs to, which is what turns "resets in
+        // 176m" into a POSITION. Codex's comes off the tick line (`codex=44%/7d`)
+        // because it is per-plan; a missing one costs the tick and nothing else.
+        if let pct = s.pct5h { q5.attributedTitle = quotaTitle("5h", pct, s.reset5h, s.quotaAgeSec, windowMin: WINDOW_5H_MIN) }
+        if let pct = s.pct7d { q7.attributedTitle = quotaTitle("7d", pct, s.reset7d, s.quotaAgeSec, windowMin: WINDOW_7D_MIN) }
+        if let pct = s.cxPct { cxLine.attributedTitle = quotaTitle("Codex", pct, s.cxReset, s.cxAgeSec, windowMin: s.cxWinMin) }
         q5.isHidden = s.pct5h == nil
         q7.isHidden = s.pct7d == nil
         cxLine.isHidden = s.cxPct == nil
@@ -1199,6 +1517,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
     }
 
+    // WHICH of the sixteen is live. One function because two things now render
+    // it - the checkmark and the parent row's glyph - and a picker whose tick
+    // and whose picture disagreed would be worse than either alone.
+    //
+    // The host has already resolved env-vs-file (resolveMacEmoji, env wins), so
+    // s.icon IS the live value regardless of which source it came from - no
+    // separate branch needed for the env case here. That reading is only fresh
+    // while the host is actually running (readStatus only fills it inside its
+    // "running" branch); with the host down, fall back to what was last picked
+    // from this menu, so the checkmark survives a relaunch instead of going
+    // blank.
+    func iconRowCurrent(_ s: HostStatus) -> String {
+        s.running ? s.icon : (UserDefaults.standard.string(forKey: "macIcon") ?? "")
+    }
+
     // The Mac-icon submenu: sixteen fixed rows, one checkmarked. Rebuilt every
     // refresh (not just built once, unlike a static preference row) because
     // BOTH the checkmark and whether the rows are editable at all come from the
@@ -1206,16 +1539,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // showing changeable checkmarks while DECKHAND_MAC_EMOJI is set would be
     // lying about what a click can do.
     func rebuildIconMenu(_ s: HostStatus) {
-        iconItem.title = s.iconFromEnv ? "Mac icon (set by env)" : "Mac icon"
-        // The host has already resolved env-vs-file (resolveMacEmoji, env
-        // wins), so s.icon IS the live value regardless of which source it
-        // came from - no separate branch needed for the env case here. That
-        // reading is only fresh while the host is actually running (readStatus
-        // only fills it inside its "running" branch); with the host down,
-        // fall back to what was last picked from this menu, so the checkmark
-        // survives a relaunch instead of going blank.
-        let stored = UserDefaults.standard.string(forKey: "macIcon") ?? ""
-        let current = s.running ? s.icon : stored
+        let current = iconRowCurrent(s)
+        // The parent carries the CURRENT glyph, so the setting is legible without
+        // opening the submenu at all - and it is the one row that can show which
+        // of the sixteen an env-set value resolved to without implying a click
+        // could change it. Nothing when none is set, rather than a placeholder:
+        // no icon is a real state (the device falls back to the text tag).
+        let glyph = MAC_ICON_GLYPHS[current].map { "  \($0)" } ?? ""
+        iconItem.title = (s.iconFromEnv ? "Mac icon (set by env)" : "Mac icon") + glyph
         for (name, item) in iconItems {
             item.state = (!current.isEmpty && name == current) ? .on : .off
             // Only the CHILDREN are disabled - the parent stays clickable so
@@ -1435,9 +1766,20 @@ func dumpMenu(_ m: NSMenu, indent: String = "") -> String {
 /// render, in BOTH appearances side by side. Every colour here is semantic
 /// (labelColor, secondaryLabelColor) and resolves at draw time, so light-only
 /// verification would prove nothing about the dark case.
-func writeMenuPreview(to path: String, _ m: NSMenu) {
+func writeMenuPreview(to path: String, _ m: NSMenu, bar: NSAttributedString? = nil) {
     let W: CGFloat = 330, pad: CGFloat = 14
     var rows: [(NSAttributedString?, CGFloat)] = []
+    // THE BAR LABEL GOES IN FIRST, because it is now the one surface whose
+    // colours cannot be checked any other way: `--menu-dump` prints `.string`
+    // and drops them, and `screencapture` needs a TCC grant this process does
+    // not have (the same wall `--icon-preview` was written around). Its figures
+    // carry a threshold colour and a pace glyph, and "is systemOrange legible on
+    // a dark bar" is a question to LOOK at. Drawn on the same two bands as the
+    // menu, which approximate a light and a dark bar closely enough to answer it.
+    if let bar, bar.length > 0 {
+        rows.append((bar, 24))
+        rows.append((nil, 11))
+    }
     for it in m.items where !it.isHidden {
         if it.isSeparatorItem { rows.append((nil, 11)); continue }
         let a = it.attributedTitle ?? NSAttributedString(
@@ -1546,13 +1888,19 @@ if CommandLine.arguments.contains("--menu-dump") || CommandLine.arguments.contai
     d.refresh()
     if CommandLine.arguments.contains("--menu-dump") {
         let st = readStatus()
-        let label = barTitle(st)
+        // `.string` drops the colours, which is what a text dump can carry. The
+        // pace GLYPHS survive, and they are the half that changes meaning - a
+        // dump that showed neither could not tell a live 96%▲ from a stale one,
+        // so the tooltip's own sentence is printed under it.
+        let label = barTitle(st).string
         print("menu bar: boat (\(barBoatStyle(st)))"
-              + (label.isEmpty ? " (no label)" : " + label\"\(label)\"") + "\n")
+              + (label.isEmpty ? " (no label)" : " + label\"\(label)\""))
+        let tip = barTooltip(st)
+        print(tip.isEmpty ? "" : tip.split(separator: "\n").map { "  tooltip: \($0)" }.joined(separator: "\n") + "\n")
         print(dumpMenu(m))
     }
     if let i = CommandLine.arguments.firstIndex(of: "--menu-preview"), CommandLine.arguments.count > i + 1 {
-        writeMenuPreview(to: CommandLine.arguments[i + 1], m)
+        writeMenuPreview(to: CommandLine.arguments[i + 1], m, bar: barTitle(readStatus()))
     }
     exit(0)
 }
@@ -1605,6 +1953,95 @@ if CommandLine.arguments.contains("--sound-check") {
         print(String(format: "  %-28s -> %d sound(s)", (what as NSString).utf8String!, w.step(ids)))
     }
     exit(0)
+}
+
+/// `--pace-check`: the pace arithmetic, without a host, a device or a render.
+///
+/// It exists because two of the three defects in this feature were in ARITHMETIC
+/// that looked right - a tick written over the only filled cell of a 1% bar, and
+/// a boundary that would have indexed off the end of the array at 96% - and both
+/// were caught by looking at real output rather than by reading the code. A
+/// glance is not repeatable; this is.
+///
+/// The regression cases are named, not just covered, so a later edit that
+/// reintroduces one fails with the reason attached rather than with a number.
+if CommandLine.arguments.contains("--pace-check") {
+    var failed = 0
+    func eq<T: Equatable>(_ got: T, _ want: T, _ what: String) {
+        if got == want { return }
+        print("FAIL \(what): got \(got) want \(want)")
+        failed += 1
+    }
+
+    // Where the clock is. Missing inputs must yield nil - NOT 0, which would draw
+    // a tick at the start of the window and claim it had just begun.
+    eq(pacePct(resetInMin: nil, windowMin: WINDOW_5H_MIN), nil, "no reset means no pace")
+    eq(pacePct(resetInMin: 30, windowMin: nil), nil, "no window means no pace")
+    eq(pacePct(resetInMin: 30, windowMin: 0), nil, "a zero window cannot be divided by")
+    eq(pacePct(resetInMin: 0, windowMin: WINDOW_5H_MIN), 100, "a window with 0m left is fully elapsed")
+    eq(pacePct(resetInMin: WINDOW_5H_MIN, windowMin: WINDOW_5H_MIN), 0, "a full window has not started")
+    // 42, not 41: the division truncates (17600/300 = 58 remaining), which is the
+    // device's own integer arithmetic and therefore the number to match. Written
+    // as 41 first time round and this check is what said so.
+    eq(pacePct(resetInMin: 176, windowMin: WINDOW_5H_MIN), 42, "176m of 300 left is 42% elapsed")
+    eq(pacePct(resetInMin: 5040, windowMin: WINDOW_7D_MIN), 50, "half the 7d window")
+    // A reset LONGER than its window is nonsense the host could still print; it
+    // must clamp rather than produce a negative position.
+    eq(pacePct(resetInMin: 99999, windowMin: WINDOW_5H_MIN), 0, "an over-long reset clamps to 0")
+
+    // The verdict, and the deadband's two edges - which are where a flapping
+    // glyph would come from.
+    eq(paceGlyph(pct: 50, pace: nil), "", "no pace draws NOTHING, never a verdict")
+    eq(paceGlyph(pct: 50, pace: 50), "\u{2248}", "equal is level")
+    eq(paceGlyph(pct: 55, pace: 50), "\u{2248}", "exactly at the deadband is still level")
+    eq(paceGlyph(pct: 45, pace: 50), "\u{2248}", "and on the other side too")
+    eq(paceGlyph(pct: 56, pace: 50), "\u{25B2}", "one past the deadband is ahead")
+    eq(paceGlyph(pct: 44, pace: 50), "\u{25BC}", "one under is behind")
+
+    // The bar. Cell COUNT first: a tick is inserted, so it costs a character and
+    // never a cell of fill.
+    let plain = quotaBarParts(44)
+    eq(plain.pre.count + plain.tick.count + plain.post.count, BAR_CELLS, "no pace, ten cells")
+    eq(plain.tick, "", "no pace, no tick")
+    let ticked = quotaBarParts(44, pace: 41)
+    eq(ticked.pre.count + ticked.tick.count + ticked.post.count, BAR_CELLS + 1, "a tick adds a cell, never replaces one")
+    // THE REGRESSION, by name: the tick used to overwrite the cell it landed on,
+    // so a 1%-used bar whose clock had barely started lost its only ink and read
+    // as nothing used - the exact claim the filled-at-least-one rule exists to
+    // stop. Assert the INK, not the arithmetic that produced it.
+    let barely = quotaBarParts(1, pace: 4)
+    eq((barely.pre + barely.post).contains("\u{2588}"), true,
+       "1% used keeps a filled cell even with the tick on top of it")
+    // And the other one: a boundary at 100% is BAR_CELLS, one past the last
+    // index, which an array write would have trapped on.
+    let full = quotaBarParts(100, pace: 100)
+    eq(full.post, "", "a fully elapsed window puts the tick after the last cell")
+    eq(full.pre.count, BAR_CELLS, "and leaves all ten cells before it")
+    let fresh = quotaBarParts(0, pace: 0)
+    eq(fresh.pre, "", "an unstarted window puts the tick before the first cell")
+    eq(quotaBarParts(96, pace: 90).pre.count, 9, "90% of ten cells is the ninth boundary")
+
+    // Codex's window, off the host's own tick line. A missing one must be nil, so
+    // the row draws no tick rather than assuming seven days.
+    let withWin: Substring = "5h=1% (resets 1m) codex=44%/7d (resets 8021m) via=usb"
+    let noWin: Substring = "5h=1% (resets 1m) codex=44% (resets 8021m) via=usb"
+    let unknown: Substring = "5h=1% (resets 1m) codex=?% via=usb"
+    eq(codexWindowMin(withWin), 10080, "codex=44%/7d is seven days of minutes")
+    eq(codexWindowMin(noWin), nil, "no /Nd means no window")
+    eq(codexWindowMin(unknown), nil, "an unmeasured codex has no window")
+
+    // Staleness suppresses the pace on BOTH surfaces, because the percentage has
+    // stopped moving while the clock has not.
+    var st = HostStatus()
+    st.running = true; st.pct5h = 96; st.reset5h = 30; st.quotaAgeSec = 1
+    eq(barUsageParts(st).map(\.0).joined().contains("\u{25B2}"), true, "a fresh reading gets its glyph")
+    st.quotaAgeSec = QUOTA_STALE_SEC + 1
+    eq(barUsageParts(st).map(\.0).joined().contains("\u{25B2}"), false, "a stale reading loses it")
+    eq(quotaBarParts(96, pace: pacePct(resetInMin: 30, windowMin: WINDOW_5H_MIN)).tick, "\u{2502}",
+       "and the tick is what the row loses with it")
+
+    print(failed == 0 ? "pace: all checks passed" : "pace: \(failed) FAILED")
+    exit(failed == 0 ? 0 : 1)
 }
 
 if let i = CommandLine.arguments.firstIndex(of: "--icon-preview") {

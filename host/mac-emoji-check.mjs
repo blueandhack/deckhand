@@ -115,5 +115,76 @@ if (!canonical.err) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The menu bar's PICKER GLYPHS, against the generator that rendered the art.
+//
+// mac-app/DeckhandMenuBar.swift's MAC_ICON_GLYPHS exists so the picker can show
+// the picture next to the name, and it is display-only - the wire carries the
+// name, so a wrong character here cannot break an icon on the device. What it
+// CAN do is offer a picture the device does not draw, silently, forever: the
+// names are frozen wire format, so the only lever for a bad icon is choosing a
+// different CHARACTER (emoji2c.py's SIZE_OVERRIDES), and that is exactly the
+// change nothing would otherwise carry into this menu.
+//
+// Compared against ICONS in emoji2c.py rather than against MacEmoji.h, because
+// the header stores rendered PIXELS - the character it came from survives only
+// in the generator, which is therefore the only thing that can be disagreed
+// with. Per-size overrides are deliberately out of scope: the Mac cannot know
+// which board it is talking to, and may be talking to both, so the menu shows
+// the base character each override was chosen to keep describing.
+function decodeEscapes(raw) {
+  // Python's \UXXXXXXXX / \uXXXX and Swift's \u{XXXX}, so one comparison can
+  // span both languages. Literal characters (both files have some) pass through.
+  return raw
+    .replace(/\\u\{([0-9A-Fa-f]{1,6})\}/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/\\U([0-9A-Fa-f]{8})|\\u([0-9A-Fa-f]{4})/g, (_, a, b) => String.fromCodePoint(parseInt(a || b, 16)));
+}
+
+// Pairs of quoted tokens inside the bracketed initialiser after `marker`: the
+// same anchoring `namesFrom` uses, for the same reason (a comment above either
+// table quotes names, and a laxer regex would read them as entries).
+//
+// The opening bracket is searched from PAST the marker, not from its start -
+// Swift's `let MAC_ICON_GLYPHS: [String: String] = [` opens a bracket in its own
+// TYPE, and anchoring the way namesFrom does lands on `[String: String]`, which
+// holds no pairs and reports the table as empty. That is why the marker here
+// stops before the `=`.
+function pairsFrom(rel, marker, open, close, sep) {
+  const text = readFileSync(path.join(REPO, rel), "utf8");
+  const at = text.indexOf(marker);
+  if (at < 0) return { rel, err: `could not find ${marker}` };
+  const start = text.indexOf(open, at + marker.length);
+  const end = text.indexOf(close, start);
+  if (start < 0 || end < 0) return { rel, err: `could not find the ${open}...${close} list after ${marker}` };
+  const re = new RegExp(`"([^"]*)"\\s*${sep}\\s*"([^"]*)"`, "g");
+  const pairs = [...text.slice(start, end).matchAll(re)].map((m) => [m[1], decodeEscapes(m[2])]);
+  if (!pairs.length) return { rel, err: `found ${marker} but no "name", "char" pairs in it` };
+  return { rel, pairs };
+}
+
+const gen = pairsFrom("firmware/deckhand_display/emoji2c.py", "\nICONS =", "[", "]", ",");
+const swift = pairsFrom("mac-app/DeckhandMenuBar.swift", "let MAC_ICON_GLYPHS: [String: String] =", "[", "]", ":");
+for (const t of [gen, swift]) {
+  if (!t.err) continue;
+  console.error(`FAIL ${t.rel}: ${t.err} - the parser, not the table, may be what broke`);
+  failed++;
+}
+if (!gen.err && !swift.err) {
+  // Codepoints, not the raw strings, in the failure text: every entry ends in an
+  // INVISIBLE U+FE0F, so a mismatch printed as characters can read as two
+  // identical emoji sitting side by side.
+  const cps = (s) => [...s].map((c) => "U+" + c.codePointAt(0).toString(16).toUpperCase()).join(" ");
+  eq(gen.pairs.length, 16, "emoji2c.py ICONS lists sixteen characters");
+  eq(swift.pairs.map(([n]) => n).join(","), gen.pairs.map(([n]) => n).join(","),
+     "MAC_ICON_GLYPHS covers the same sixteen names in the same order as emoji2c.py's ICONS");
+  const byName = new Map(gen.pairs);
+  for (const [name, ch] of swift.pairs) {
+    const want = byName.get(name);
+    if (want === undefined || want === ch) continue;
+    console.error(`FAIL mac-app/DeckhandMenuBar.swift MAC_ICON_GLYPHS["${name}"] is ${cps(ch)}, but emoji2c.py rendered the art from ${cps(want)} - the picker would offer a picture the device does not draw`);
+    failed++;
+  }
+}
+
 console.log(failed ? `mac-emoji: ${failed} FAILED` : "mac-emoji: all checks passed");
 process.exit(failed ? 1 : 0);
