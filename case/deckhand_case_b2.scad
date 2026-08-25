@@ -63,6 +63,31 @@ part = "all";
 // it sits within cavity_d, so it costs a print, never a millimetre. Off means
 // the pack is held by tape instead of walls. The case is exactly as thick.
 use_retainer = false;
+
+// WITH THE RETAINER OFF, SOMETHING STILL HAS TO HOLD THE PACK. These are four
+// short ribs on the COVER's inner face, at the middle of each side of the
+// battery's footprint - a corral that costs filament and nothing else: no extra
+// part to print, and no thickness, because they occupy the batt_extra headroom
+// that already exists above the pack.
+//
+// They work on the pack's UPPER edge rather than its whole side. The cell sits
+// 9.9..19.9 above the front face and the cover's inner face is at 22.4, so a rib
+// standing batt_rib_h off the cover reaches down to 22.4 - batt_rib_h; at 6 that
+// is 16.4, running alongside the pack's top 3.5 mm. Anything under 2.5 would
+// merely graze its top face and locate nothing.
+//
+// THEY DO NOT HOLD IT DOWN, only in plane. The 2.5 mm of swell headroom is also
+// 2.5 mm the pack can rattle in, and a rib cannot fix that without clamping a
+// lithium pouch, which is the one thing not to do. Use a ~3 mm foam pad on the
+// cover's inner face instead: it takes up the slack, compresses if the cell ever
+// swells, and damps shock. Tape alone is worse than either - it resists sliding,
+// which is what the ribs already do, and peels under the vibration it is meant
+// to stop.
+batt_ribs   = true;
+batt_rib_h  = 6.0;   // how far a rib stands off the cover's inner face
+batt_rib_t  = 2.0;   // rib thickness
+batt_rib_l  = 14.0;  // rib length along the edge it guards
+batt_rib_gap = 0.6;  // clearance to the pack, per side
 $fn = 72;
 
 // ---------- Board (mm) — MEASURE YOURS AND EDIT ----------
@@ -840,7 +865,23 @@ module cover(){
     union(){
       // plate
       translate([wall-0.1,wall-0.1,0]) soft_box(in_w+0.2,in_h+0.2,cover_th,max(oc_r-wall,2),soft_r*0.5);
-      // (nothing added here - the button holes are subtracted below)
+      // Battery corral - see batt_ribs. Positioned off the SAME expression the
+      // preview ghost and the retainer use, so all three agree by construction
+      // rather than by three transcriptions of the same arithmetic.
+      if (batt_ribs) {
+        bxr = wall + (in_w - batt_w)/2 - batt_dx;   // pack's low-X edge
+        byr = batt_y0;                              // pack's low-Y edge
+        cxr = bxr + batt_w/2;  cyr = byr + batt_h/2;
+        for (r = [
+              // [x, y, sizeX, sizeY] - one rib at the middle of each side
+              [bxr - batt_rib_gap - batt_rib_t, cyr - batt_rib_l/2, batt_rib_t, batt_rib_l],
+              [bxr + batt_w + batt_rib_gap,     cyr - batt_rib_l/2, batt_rib_t, batt_rib_l],
+              [cxr - batt_rib_l/2, byr - batt_rib_gap - batt_rib_t, batt_rib_l, batt_rib_t],
+              [cxr - batt_rib_l/2, byr + batt_h + batt_rib_gap,     batt_rib_l, batt_rib_t],
+            ])
+          translate([r[0], r[1], cover_th - 0.01])
+            cube([r[2], r[3], batt_rib_h + 0.01]);
+      }
       // inner lip (straight wall; looser in the length direction via gy)
       translate([wall+g,wall+gy,cover_th-0.01])
         linear_extrude(lip_h) difference(){ rrect(in_w-2*g,in_h-2*gy,3);

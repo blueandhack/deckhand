@@ -141,6 +141,31 @@ Below ~4.5 mm nothing improves: `comp_back` — the mated JST plugs standing off
 of the board — becomes the floor at **14.1 mm**, and going under *that* means not
 plugging anything in.
 
+## Holding the battery without the retainer
+
+The pack sits 9.9–19.9 above the front face and the cover's inner face is at 22.4, so it
+has **~0.6 mm of slop around it and 2.5 mm above it**. Tape alone is the obvious answer
+and the weakest one: it resists sliding, then peels under exactly the vibration it was
+meant to stop.
+
+Instead the corral moved **onto the cover** — four short ribs at the middle of each side
+of the battery's footprint (`batt_ribs`, on by default). They cost filament and nothing
+else: no extra part to print, and no thickness, because they stand in the `batt_extra`
+headroom that already exists. They engage the pack's **upper edge**, not its whole side:
+a rib standing 6 mm off the cover reaches down to 16.4, running alongside the pack's top
+3.5 mm. Anything under 2.5 mm would merely graze its top face and locate nothing.
+
+They're positioned off the same expression the preview ghost and the retainer use, so all
+three agree by construction rather than by three transcriptions of the same arithmetic.
+
+**They hold it in plane only — use a ~3 mm foam pad for the rest.** The 2.5 mm of swell
+headroom is also 2.5 mm the pack can rattle in, and no rib fixes that without clamping a
+lithium pouch, which is the one thing not to do. Foam on the cover's inner face takes up
+the slack, still compresses if the cell ever swells, and damps shock. That combination —
+ribs for sliding, foam for rattle — is what the retainer was doing, minus the part.
+
+`use_retainer = true` still brings the original corral back if you'd rather print it.
+
 ## Two things the measurements forced
 
 **Both button holes are Ø6.0 — the same, because the buttons are the same.** An earlier
