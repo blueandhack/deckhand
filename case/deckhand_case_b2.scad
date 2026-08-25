@@ -303,11 +303,23 @@ mic_chan_top = 4.0; // ...and the same above the mic channel. This closes the la
 // 41% of 24.4), so if this case ever needs to be thinner, that is the number to
 // change: see the table in README-board2.md. It is a coincidence, and a
 // convenient one, that this matches board 1's pack exactly.
-batt_w = 37.0; batt_h = 68.5; batt_t = 10.0; batt_dy = 14.0;
-// Shift the pack AWAY from the high-X wall to clear the microphone, which now
-// lives against that wall beside its Expand-pin connector. 36 mm of pack in 51 mm
-// of cavity leaves 15 mm of slack; this spends 10 of it on the mic side.
-batt_dx = 5.0;
+batt_w = 37.0; batt_h = 68.5; batt_t = 10.0;
+// DERIVED so the pack stays centred if it ever changes, rather than a literal
+// that would quietly go off-centre the next time batt_h moves. (board_h - batt_h)
+// / 2 puts it on the board's own centreline, and the board is centred in the
+// cavity, so this centres it in both.
+batt_dy = (board_h - batt_h) / 2;
+// CENTRED, because the reason it was not is gone. Board 1 shifts the pack 5 mm
+// off-centre "to clear the microphone, which now lives against that wall beside
+// its Expand-pin connector" - that is the external MAX4466 module, and board 2
+// has no such module (mic_ext = false), so there is nothing on that wall to
+// clear. Another board-1 inheritance whose justification evaporated with the
+// mic subsystem, like the retainer and the hinge end before it.
+//
+// Centring also spreads the margin evenly: 37 mm of pack in a 54.5 cavity leaves
+// 8.75 each side, where the inherited offset left 3.75 on one and 13.75 on the
+// other. The tight side was the one nearer the long-edge JSTs.
+batt_dx = 0.0;
 // SLIMMED 5.5 -> 2.5 (-3.0 mm), and deliberately NOT to the ~1.0 that would save
 // another 1.5. This is headroom above a LITHIUM POUCH, which swells in service -
 // a cover pressed against a swelling cell is a hazard, not a tight fit. 2.5 is

@@ -158,6 +158,16 @@ a rib standing 6 mm off the cover reaches down to 16.4, running alongside the pa
 They're positioned off the same expression the preview ghost and the retainer use, so all
 three agree by construction rather than by three transcriptions of the same arithmetic.
 
+**The pack is now centred, because the reason it wasn't is gone.** Board 1 shifts it 5 mm
+off-centre — its own comment says *"to clear the microphone, which now lives against that
+wall beside its Expand-pin connector"*, meaning the external MAX4466 module. Board 2 has
+no such module, so nothing is on that wall to clear: another board-1 inheritance whose
+justification evaporated with the mic subsystem, like the retainer and the hinge end
+before it. Centring also evens the margin — 8.75 mm each side, where the inherited offset
+left 3.75 on one and 13.75 on the other, and the tight side was the one nearer the
+long-edge JSTs. `batt_dy` is now **derived** (`(board_h - batt_h) / 2`) rather than a
+literal, so the pack stays centred if the cell ever changes.
+
 **They hold it in plane only — use a ~3 mm foam pad for the rest.** The 2.5 mm of swell
 headroom is also 2.5 mm the pack can rattle in, and no rib fixes that without clamping a
 lithium pouch, which is the one thing not to do. Foam on the cover's inner face takes up
