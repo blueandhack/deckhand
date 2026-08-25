@@ -271,10 +271,12 @@ mic_chan_top = 4.0; // ...and the same above the mic channel. This closes the la
 
 // Battery is pushed toward the USB-C end, leaving a clear strip at the far end
 // for the speaker (both sit BEHIND the board; the columns are in FRONT of it).
-// MEASURED: 37 x 68.5 x 20. The 20 is the number that decides this case's
-// thickness - see README-board2.md. Plan fit is easy (37 x 68.5 in a 54.5 x
-// 102.5 cavity); the thickness is not.
-batt_w = 37.0; batt_h = 68.5; batt_t = 20.0; batt_dy = 14.0;
+// MEASURED: 37 x 68.5 x 10. Plan fit is easy - 37 x 68.5 in a 54.5 x 102.5
+// cavity. The 10 is still the single biggest term in the case's thickness (it is
+// 41% of 24.4), so if this case ever needs to be thinner, that is the number to
+// change: see the table in README-board2.md. It is a coincidence, and a
+// convenient one, that this matches board 1's pack exactly.
+batt_w = 37.0; batt_h = 68.5; batt_t = 10.0; batt_dy = 14.0;
 // Shift the pack AWAY from the high-X wall to clear the microphone, which now
 // lives against that wall beside its Expand-pin connector. 36 mm of pack in 51 mm
 // of cavity leaves 15 mm of slack; this spends 10 of it on the mic side.

@@ -115,31 +115,31 @@ millimetre: the drawing dimensions 9.82 / 3.94, hand measurement gave 9 / 3. Bot
 credible for a ~1 mm port, but a Ø2.2 hole placed on one and wrong by 1 mm would be
 half-blocked. Ø3.0 covers the disagreement and is still a pressure port, not a horn.
 
-## The battery is 58% of the thickness
+## The battery is 41% of the thickness
 
-Measured: **37 × 68.5 × 20 mm**. The plan fit is easy — 37 × 68.5 in a 54.5 × 102.5
-cavity. The **20** is the problem:
+Measured: **37 × 68.5 × 10 mm**. Plan fit is easy — 37 × 68.5 in a 54.5 × 102.5 cavity.
 
 | | |
 |---|---|
 | front stack (recess + glass + PCB) | 6.9 |
-| cavity (`batt_seat` 3.0 + cell 20 + swell headroom 2.5) | **25.5** |
+| cavity (`batt_seat` 3.0 + cell 10 + swell headroom 2.5) | 15.5 |
 | cover | 2.0 |
-| **total** | **34.4 mm** |
+| **total** | **24.4 mm** |
 
-**Case structure is 14.4 mm of that; the cell is 20.** Every case parameter has already
-been trimmed as far as it safely goes — that work bought 4 mm. The cell is worth five
-times more:
+Case structure is 14.4 mm of that. Every case parameter has already been trimmed as far
+as it safely goes, and that work bought 4 mm — so **if this ever needs to be thinner, the
+cell is the lever**, not the case:
 
 | cell thickness | case |
 |---|---|
-| 20 mm (yours) | 34.4 |
-| 10 mm | 24.4 |
+| 10 mm (yours) | 24.4 |
 | 6 mm | 20.4 |
 | 5 mm | 19.4 |
+| 4 mm | 18.4 |
 
-So "as thin as possible" is a **battery** decision, not a case decision. Below ~4.5 mm
-nothing improves anyway: `comp_back` (the mated JST plugs) takes over as the floor.
+Below ~4.5 mm nothing improves: `comp_back` — the mated JST plugs standing off the back
+of the board — becomes the floor at **14.1 mm**, and going under *that* means not
+plugging anything in.
 
 ## Two things the measurements forced
 
