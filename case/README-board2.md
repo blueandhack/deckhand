@@ -18,9 +18,9 @@ openscad -o stl/deckhand_b2_coupon.stl -D 'part="coupon"' deckhand_case_b2.scad
 
 A 26 mm slice of the service edge — a few grams, a few minutes — carrying only the
 things that can be wrong: two mounting columns, the board outline, the window edge,
-and the USB-C cutout. **Four values in this design are not measured** (below), and all
-four are checkable on this one part. Printing a 60 g body to discover the USB plug is
-2 mm off-centre is the mistake it exists to prevent.
+and the USB-C cutout. Every service-edge value is now **measured** (below) rather than
+guessed, but measured is not the same as fitted: printing a 60 g body to discover the
+USB plug fouls the shell is the mistake this exists to prevent.
 
 What to check, in the order that matters:
 
@@ -28,7 +28,8 @@ What to check, in the order that matters:
    `clr`/`clr_w` are wrong — not the column diameter.
 2. **Does a USB-C plug seat squarely, with even gaps?** An off-centre gap is `usb_dx`;
    a plug that fouls the shell is `usb_w`/`usb_h`.
-3. **Can a fingernail reach RESET and BOOT?** `reset_dx` / `boot_dx`.
+3. **Can a pen tip reach RESET, and a toothpick BOOT?** `reset_dx` / `boot_dx`, and the
+   Ø9 / Ø5.5 split. Neither is finger-reachable — see below for why that is deliberate.
 4. **Is the mic port over the capsule?** That checks `mic_front_x`/`mic_front_side` and
    the `win_shift` datum assumption at once, since both reference the mic end.
 
@@ -82,25 +83,64 @@ build with no battery.
    comments claim it works is a defect class this repo has paid for before. Here they are
    wired, in `cover()`.
 
-## The four unmeasured values
+## The service edge — now measured, not guessed
 
-No drawing in the vendor pack dimensions where things sit **along** the service edge, so
-these are the only numbers here that are not from the outline. Defaults are deliberately
-**conservative**: each opening is oversized rather than centred on a guess, so a wrong
-offset shows as an off-centre gap instead of a part that will not assemble.
+All four are measured off the board. What they changed:
 
-| parameter | default | what it is |
+| parameter | was (guess) | now | from |
+|---|---|---|---|
+| `usb_dx` | 0.0 | **0.0** | confirmed: USB-C is centred on the edge |
+| `reset_dx` | −12.0 | **−13.5** | derived, below |
+| `boot_dx` | +12.0 | **+13.5** | derived, below |
+| `mic_front_side` | +1 | **+1** | confirmed: front face, top right |
+
+**The 6 mm is edge-to-edge, not centre-to-centre**, and it has to be: half the USB is
+4.5 and half a button is 3, so a 6 mm centre spacing would have them overlapping. So
+`4.5 + 6 + 3 = 13.5` from the centreline.
+
+**Which button is on which side does not affect the geometry.** The board was described
+from one viewpoint and this model is referenced to the front — the same mirror board 1's
+file records getting wrong (*"reasoning from `reset_dx` being negative gave the wrong
+wall"*). Here the two holes are symmetric about the centreline, so a mirror error swaps
+only *which hole is which*, never where a hole is. It would make a printed label wrong,
+and nothing else.
+
+**The USB opening went back to board 1's 13 × 7** from the widened 14 × 7.5 it carried
+while the offset was a guess. The receptacle measures ~9 × 4; the extra 2 mm of slop
+existed only to hide an offset error that turned out not to exist. 13 × 7 is not sloppy —
+the margin is for the cable's moulded boot, which is far bigger than the plug tongue.
+
+**The mic port grew from Ø2.2 to Ø3.0**, because the two sources disagree by about a
+millimetre: the drawing dimensions 9.82 / 3.94, hand measurement gave 9 / 3. Both are
+credible for a ~1 mm port, but a Ø2.2 hole placed on one and wrong by 1 mm would be
+half-blocked. Ø3.0 covers the disagreement and is still a pressure port, not a horn.
+
+## Two things the measurements forced
+
+**RESET and BOOT get different diameters — Ø9 and Ø5.5.** The buttons measure ~6 × 4, so
+their actuators are ~3, but the cover sits `cavity_d` **behind** the board — 18.5 mm with
+a battery fitted. Neither hole is finger-reachable at any sane diameter; they are *tool*
+holes. BOOT is a rare recovery action and a toothpick is fine. RESET is the only way back
+from deep sleep, so it gets the largest hole that still leaves a sane cover: a pen tip, a
+nail at the rim, or a printed plunger later. **This is the one place the design is
+knowingly awkward**, and it is a consequence of the battery depth rather than of anything
+board 2 did.
+
+**The kickstand pivot moved, 15 → 26.** Wiring up the buttons collided with the hinge
+lugs, which board 1 never met because it cut no button holes at all. The lug footprint is
+a hull whose base block is `ks_barrel` deep, spanning `ks_lug_y ± 4.1`, against a RESET
+hole at y 92.1..101.1:
+
+| `ks_lug_from` | lug spans | result |
 |---|---|---|
-| `usb_dx` | 0.0 | USB-C centre, from the edge's centreline |
-| `reset_dx` | −12.0 | RESET centre, same datum |
-| `boot_dx` | +12.0 | BOOT centre, same datum |
-| `mic_front_side` | +1 | which long edge the mic's 9.82 is measured from |
+| 15 (board 1) | 88.6..96.8 | **overlaps by 4.7 mm** |
+| 20 | 83.6..91.8 | clears by 0.3 mm — a wall too thin to print |
+| **26** | 77.6..85.8 | clears by 6.3 mm |
 
-`mic_front_side` is a **sign, not a baked assumption**, for a reason board 1's file
-records in its own words: the vendor's back-face photo *mirrors* left/right against this
-model's X, which is referenced to the front — *"reasoning from `reset_dx` being negative
-gave the wrong wall"*. The front cover photo puts the mic top-right, so `+1` is the
-better guess; it is still a guess.
+20 was tried first and is the instructive one: "technically clear" at 0.3 mm renders as a
+touching blob and would print as a weld. Moving the pivot *away* from the service edge is
+also the right direction on a case 15.5 mm longer than board 1's; widening `ks_gap`
+instead would push the lugs to ±22.5 and crowd the side walls.
 
 Also unresolved by choice: **the microSD slot is not opened**. This firmware contains no
 SD code at all, so a slot opening is a dust path for a feature nothing uses. Open it when

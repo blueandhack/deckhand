@@ -123,10 +123,14 @@ win_shift = 2.63;   // + = toward the mic end (away from the service edge)
 win_cham = 2.0;   // chamfer: the window's top edge flares this much wider all
                   // round (over the glass recess) so a finger can reach the edge
 
-usb_w = 14.0; usb_h = 7.5; usb_dx = 0.0;   // UNMEASURED offset; opening widened from
-                                           // board 1's 13.0 x 7.0 so a wrong usb_dx
-                                           // shows as an off-centre gap rather than a
-                                           // plug that fouls the shell
+// MEASURED on the board: the USB-C sits at the MIDDLE of the service edge, and
+// the receptacle is ~9 wide x ~4 tall. usb_dx = 0 is therefore CONFIRMED rather
+// than assumed, which is why the opening goes back to board 1's proven 13 x 7
+// instead of the widened 14 x 7.5 it carried while the offset was a guess: the
+// extra 2 mm of slop existed only to hide an offset error that does not exist.
+// 13 x 7 around a 9 x 4 receptacle is not sloppy - the margin is for the CABLE's
+// moulded boot, which is much bigger than the plug tongue.
+usb_w = 13.0; usb_h = 7.0; usb_dx = 0.0;   // MEASURED: centred
 usb_z_off = 0.0;                 // shift the USB-C cutout toward the back (cover side).
                                  // 0 = cutout centred on the connector. It was 1.6, which
                                  // pushed the opening 1.6 mm deeper than the port, pinning
@@ -143,9 +147,32 @@ usb_cham_d = 1.2;                //   at the OUTER face, over this depth (funnel
 // CONSERVATIVE: each opening is oversized rather than centred on a guess, so a
 // wrong offset shows as an off-centre gap instead of a plug that will not fit.
 // part="coupon" prints just this edge - check it before the body.
-reset_dx = -12.0;   // UNMEASURED
-boot_dx  = 12.0;    // UNMEASURED
-btn_in = 8.0; btn_d = 5.5;   // 5.5, up from board 1's 4.5: see mic_ext / RESET note
+// MEASURED: RESET one side of the USB, BOOT the other, each with about a 6 mm
+// GAP from the port. Converted to a centreline offset rather than used raw -
+// 6 mm centre-to-centre is geometrically impossible here (half the USB is 4.5
+// and half a button is 3, so they would overlap), so the 6 is edge-to-edge:
+//   4.5 (half USB) + 6 (gap) + 3 (half button) = 13.5
+reset_dx = -13.5;   // MEASURED
+boot_dx  =  13.5;   // MEASURED
+// WHICH ONE IS ON WHICH SIDE DOES NOT AFFECT THE GEOMETRY, and that is worth
+// stating because the answer is otherwise a coin flip: the board was described
+// from one viewpoint and this model is referenced to the front, the same mirror
+// that board 1's file records getting wrong ("reasoning from reset_dx being
+// negative gave the wrong wall"). Here the two holes are symmetric about the
+// centreline, so a mirror error swaps only WHICH HOLE IS WHICH - not where any
+// hole is. It would make a printed label wrong, and nothing else.
+btn_in = 8.0;
+// TWO diameters, not one, and the asymmetry is the RESET argument made physical.
+// The buttons measure ~6 x 4, so their actuators are ~3 - but the cover sits
+// cavity_d BEHIND the board (18.5 with a battery fitted), so neither hole is
+// finger-reachable at any sane diameter: they are tool holes. BOOT is a rare
+// recovery action and a toothpick is fine. RESET is THE ONLY WAY BACK FROM DEEP
+// SLEEP on this board, so it gets the biggest hole that still leaves a sane
+// cover - enough for a pen tip, a nail at the rim, or a printed plunger later.
+// See README-board2.md: this is the one place the design is knowingly awkward.
+reset_d = 9.0;      // RESET: pen-tip / nail reachable
+boot_d  = 5.5;      // BOOT: tool hole, deliberately smaller
+btn_d   = reset_d;  // kept for any board-1 expression that still reads it
 // RESET IS THE ONLY WAY BACK FROM DEEP SLEEP ON THIS BOARD (the S3's RTC GPIO
 // set does not reach PIN_TOUCH_INT, so no touch wake exists - CLAUDE.md). Board
 // 1 could treat a stiff reset as a nuisance; here a case that makes it awkward
@@ -176,9 +203,14 @@ mic_front_y = 3.94;     // from the mic-end short edge (vendor)
 // mirrors left/right against this model's X, which is referenced to the FRONT.
 // The cover photo (a FRONT view) puts the mic top-right, so +1 is the better
 // guess - but it is a guess, and the coupon settles it in one print.
-mic_front_side = 1;     // +1 = high-X long edge, -1 = low-X
-mic_front_d = 2.2;      // port diameter. Small on purpose: it is a pressure port, not
-                        // a horn, and a 5 mm hole in a 2.2 mm face is a dust trap.
+mic_front_side = 1;     // MEASURED: front face, TOP RIGHT -> +1 (high-X, mic end)
+// THE TWO SOURCES DISAGREE BY ABOUT A MILLIMETRE, so the port is sized to cover
+// both rather than to pick a winner. The vendor drawing dimensions 9.82 / 3.94;
+// measuring by hand to a ~1 mm capsule gave 9 / 3. Both are credible - that gap
+// is ordinary for eyeballing a tiny port - but a 2.2 port placed on one and
+// wrong by 1 would be half-blocked. 3.0 covers the disagreement and is still a
+// pressure port rather than a horn.
+mic_front_d = 3.0;      // widened from 2.2 to absorb the two sources' ~1mm spread
 mic_front_cham = 1.0;   // slight outward flare so it does not read as a pinhole
 
 // ---------- Relief for the Expand-pin cable (the microphone lead) ----------
@@ -347,7 +379,21 @@ wire_w = 3.4; wire_h = 2.8;
 // bulk. Dropping it halves the barrel.
 ks_open    = 0;    // preview deploy angle (0 = folded flat)
 ks_gap     = 34;   // pivot spacing (centre-to-centre)
-ks_lug_from = 15;  // pivot distance in from the USB-C (top) end
+// 26, NOT board 1's 15, because the button holes now exist - the one knock-on
+// from wiring up reset_dx/boot_dx, which board 1 declared and never cut. The
+// lug's footprint is a hull whose base block is ks_barrel deep in Y, so it spans
+// ks_lug_y +/- 4.1, and the Ø9 RESET hole spans y 92.1..101.1:
+//   ks_lug_from=15 -> lug 88.6..96.8  OVERLAPS by 4.7 mm   (board 1's value)
+//   ks_lug_from=20 -> lug 83.6..91.8  clears by 0.3 mm     (a wall too thin to print)
+//   ks_lug_from=26 -> lug 77.6..85.8  clears by 6.3 mm     <-- this
+// 20 was tried first and is the instructive one: "technically clear" at 0.3 mm
+// renders as a touching blob and would print as a weld. Hence arithmetic in a
+// comment rather than a number nudged until the preview looked acceptable.
+//
+// Moving the pivot AWAY from the service edge is also the right direction on a
+// case 15.5 mm longer than board 1's; widening ks_gap instead would push the
+// lugs to +/-22.5 and crowd the side walls.
+ks_lug_from = 26;  // pivot distance in from the USB-C (top) end
 ks_barrel  = 8.2;  // barrel diameter — shared by the cover bosses AND the blade nose.
                    // Sized so the screw head can be BURIED in the blade's outer face
                    // with a 1.2 mm rim; at 7.0 the rim was 0.6 mm and would crack.
@@ -777,10 +823,10 @@ module cover(){
     // ---- RESET and BOOT, through the cover ----
     // Referenced to the BOARD (bx0/bcx, btn_y), not to the shell, so they track
     // the board if any clearance changes. z spans the whole plate plus slack.
-    for (dx = [reset_dx, boot_dx])
-      translate([bcx + dx, btn_y, -0.01]) {
-        cylinder(d = btn_d, h = cover_th + 0.02);
-        cylinder(d1 = btn_d + 2*btn_cham, d2 = btn_d, h = btn_cham + 0.01);
+    for (b = [[reset_dx, reset_d], [boot_dx, boot_d]])
+      translate([bcx + b[0], btn_y, -0.01]) {
+        cylinder(d = b[1], h = cover_th + 0.02);
+        cylinder(d1 = b[1] + 2*btn_cham, d2 = b[1], h = btn_cham + 0.01);
       }
     // pilot hole in each boss — the M3 screw threads straight into the plastic
     for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, ks_axle_z])
