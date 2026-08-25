@@ -98,7 +98,8 @@ PLIST_EOF
     else
       echo "  not loaded"
     fi
-    pgrep -f 'MacOS/Deckhand' >/dev/null && echo "  process: running (pid $(pgrep -f 'MacOS/Deckhand' | head -1))" \
+    HOST_PAT='DeckhandBLE.app/Contents/MacOS/Deckhand'
+    pgrep -f "$HOST_PAT" >/dev/null && echo "  process: running (pid $(pgrep -f "$HOST_PAT" | head -1))" \
                                          || echo "  process: NOT running"
     # The point of the ledger: whether the supervisor is actually catching
     # anything. "0 restarts, longest run 7d" means it is unproven AND unneeded;
@@ -132,6 +133,17 @@ if runs:
 stalled = [l for l in lines if "STALLED" in l]
 if stalled:
     print(f"    runs that HUNG before dying: {len(stalled)}  <- the failure the watchdog targets")
+# A run whose heartbeat was gone by the next start tells us nothing about its
+# ticks - /tmp is cleared at boot, so this is the NORMAL reading after a reboot.
+# It is counted separately and never as a hang: folding it in is exactly the bug
+# that made all four historical "hangs" false. See host/run-ledger.mjs.
+unknown = [l for l in lines if "last tick unknown" in l]
+if unknown:
+    print(f"    runs whose last tick is unknown: {len(unknown)}  <- heartbeat gone (usually a reboot), NOT a hang")
+legacy = [l for l in lines if "STALLED" in l and "previous run 0s" in l]
+if legacy:
+    print(f"    of those hangs, {len(legacy)} predate the run-ledger.mjs fix and are UNRELIABLE")
+    print(f"      (before it, a cleared /tmp was reported as a full-length stall)")
 if lines:
     print(f"    last: {lines[-1].strip()}")
 PYEOF

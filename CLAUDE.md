@@ -178,6 +178,120 @@ tick was 4h before it ended did not die, it HUNG, and the ledger flags that as `
 It costs no per-tick I/O - the previous run's final tick is read back from the heartbeat
 file, which is already written every 5s.
 
+**BUT THE TWO COLUMNS HAVE DIFFERENT LIFETIMES, AND CONFLATING THEM MADE THE LEDGER LIE
+FOR ITS FIRST 182 ENTRIES.** The duration comes from `~/.claude/deckhand-run-state.json`,
+which survives everything; the last tick comes from the heartbeat in the runtime dir under
+**`/tmp`, which macOS clears at boot**. The arithmetic was
+`lastTick = beat?.at || prev.startedAt`, so a missing heartbeat silently became "ticked
+once at startup, then hung for its entire life" - and since a reboot guarantees a missing
+heartbeat, **the ledger reported a full-length hang after every reboot**. All four stalls
+it ever recorded were this fallback, two of them on confirmed reboots (Aug 18 21:39 and
+Aug 24 06:06, the latter reported as `previous run 0s, STALLED 6.8h` for a run that was
+fine). The single metric the ledger exists to produce was the one that was wrong, and the
+tell was visible in the data: a genuine progressive hang reads `previous run 3h, STALLED
+20m`, so `previous run 0s` **four times out of four** was the fallback firing, not a
+coincidence.
+Fixed by splitting the three cases in `host/run-ledger.mjs` - a heartbeat inside the run's
+life gives both numbers; a heartbeat OLDER than the run's start is positive evidence that
+it never completed a tick, which IS a hang; an absent or malformed heartbeat reports the
+lifetime and says `last tick unknown`, claiming no stall and counting no hang. **A
+measurement that cannot say "I don't know" will always answer with the scarier option**,
+which is the transferable part. Malformed reads as absent rather than coerced, deliberately:
+`at: 0` would date the last tick to 1970 and report a **56-year** stall.
+The arithmetic lives in its own module with no fs and no clock - the same reason `capUtf8`
+does - so it can be tested:
+
+```
+node host/run-ledger-check.mjs              # 31 assertions
+node host/run-ledger-check.mjs --selftest   # re-runs them against the OLD arithmetic
+```
+
+`--selftest` is the same teeth-proving convention as `palette-check.mjs`: it re-injects the
+shipped-for-182-entries arithmetic and **exits 0 only when all 9 missing-heartbeat checks
+FAIL against it**. That matters more than usual here, because this bug survived precisely
+by being unobservable - the wrong number looked like a real measurement.
+`status` now counts `last tick unknown` runs separately, and **flags any historical
+`STALLED` entry that also says `previous run 0s` as UNRELIABLE** rather than rewriting the
+log: the old entries are indistinguishable from genuine never-ticked hangs, and deleting
+evidence to make a metric look better is worse than labelling it.
+
+**THE WATCHDOG HAD THE SAME DISEASE, AND ITS COUNT WAS MEASURING MACOS SLEEP.** The ledger
+also reports "watchdog fires", and that number reached 236 while every fire logged
+`an await never settled`. It was never an await. `Date.now() - lastTickCompleted` cannot
+tell **a stuck promise** from **a suspended machine** - both are wall-clock jumping forward
+with no completed tick - so the watchdog answered with the alarming one.
+**Measured: of the 14 stalls in the one run whose log survives, 14 matched a macOS sleep
+window to within 6 seconds.** Zero were hangs. Method, because the log carries no
+timestamps: tick lines' `cxage` field advances with wall-clock, so it reconstructs when
+each gap happened, and `pmset -g log` supplies the sleep windows to match against. The
+three ~901s stalls are macOS's scheduled maintenance sleep, which its own log names -
+`Entering Sleep state due to 'Idle Sleep' ... 900 secs` - and the five inside one 66-minute
+gap matched five consecutive sleep cycles to within 5s each.
+The discriminator in `host/watchdog.mjs` needs **no monotonic clock**: ask whether the
+watchdog's OWN interval kept running. A stuck promise leaves the event loop alive, so the
+interval still fires every 5s; a suspend freezes the interval too, for as long as the
+stall. That is 5s against 900s, a ~6x margin over the threshold, which is what keeps an
+interval merely running late under load reading as a hang - treating lateness as sleep
+would silently disable the watchdog on a busy machine, the one failure here that would
+actually cost something. **Known limitation, stated rather than papered over:** a
+synchronously blocked event loop also freezes the interval and reads as a suspend; nothing
+in this host does that, since every heavy path is a child process.
+Sleeps are counted as `suspendResumes` and reported separately (`N sleep resumes`), so
+`watchdog fires` finally means hangs. Both are omitted at zero and absent from older
+records, so every existing entry reads unchanged.
+
+```
+node host/watchdog-check.mjs              # 27 assertions
+node host/watchdog-check.mjs --selftest   # re-runs the sleep cases against the OLD logic
+```
+
+**Two findings from that investigation that are NOT the watchdog**, recorded because each
+looks like the other from the menu bar:
+
+- **`ccusage` failed 18 times in one run** (clustered after wakes and when load average hit
+  24), and **one failure used to cost the WHOLE TICK** - `readUsage()` gathered its four
+  sources with `Promise.all`, so a single 20s child-process timeout rejected the lot. ccusage
+  supplies only **three fields, all token counts**; the 5h/7d hero percentages, the reset
+  countdowns, the Codex row, the session list and the clock come from the OAuth snapshot, the
+  statusLine cache and the sessions directory, and were all fine. The tick threw them away,
+  sent the device nothing and **wrote no tick line** - and since the menu bar reads the most
+  recent tick line while the heartbeat (written EARLIER in the same tick) stayed fresh, the
+  numbers **froze rather than vanished**, which is the documented "healthy process doing no
+  useful work" class wearing a new hat.
+  Fixed in `host/ccusage.mjs`: `tryCcusage` cannot reject, and `pickTokens` merges the
+  reading with the last known good one **field by field** - the two ccusage calls fail
+  INDEPENDENTLY, so discarding the half that worked would be the same all-or-nothing mistake
+  one level down. A measured **0 is kept as a measurement** (the Codex row's `--`-not-`0%`
+  rule, in the other direction), and `everMeasured` distinguishes "carried forward" from
+  "never read", which is the only case where the zeros are not a carried-over value.
+  Staleness is logged on the **edge**, not per tick, or a 5s loop buries the tick lines it
+  sits between. **Proven by breaking it on the live host**: moving `ccusage/src/cli.js` aside
+  for 22s produced `ccusage blocks --active: exited 1` (the failure MODE named, where the old
+  line was a truncated argv dump with empty stderr), `Token counts are STALE - carrying the
+  last reading forward.`, **5 tick lines that would previously have been 0**, percentages
+  still updating, token counts held at their last values, then `Token counts are live again.`
+
+```
+node host/ccusage-check.mjs              # 22 assertions
+node host/ccusage-check.mjs --selftest   # re-runs the fallback cases against the OLD path
+```
+
+- **`deckhand-service.sh status` reported the MENU BAR's pid as the host's.** Its check was
+  `pgrep -f 'MacOS/Deckhand'`, which also matches `mac-app/.../MacOS/DeckhandMenuBar`, and
+  `pgrep` lists the lower pid first - so the login-started menu bar shadowed the host
+  entirely: `status` said `process: running (pid 1107)` while the host was **stopped**. It
+  matches `DeckhandBLE.app/Contents/MacOS/Deckhand` now, a path only the host has. Same
+  family as the other two defects on this page: a check that cannot tell two things apart
+  reports the reassuring one.
+- **What actually blanks the menu bar is the heartbeat**, not the numbers:
+  `readStatus` requires it under **12 seconds** old, so sleep and restarts empty the whole
+  label while a `ccusage` failure does not. Measured wake-to-first-tick: **1-2s usually,
+  17s twice** - which is the brief blank you see on waking the Mac.
+- **The BLE `poweredOff` hang in the notes below is real history but did NOT recur**: the
+  3s `withTimeout` race added for it is in place, and the 16 `poweredOff` transitions in
+  that run are a *consequence* of sleep (bluetoothd powers down), not a cause. Do not
+  re-diagnose it from the adapter lines alone; that cost a full round of this investigation.
+
 **The LaunchAgent runs the bundle's binary DIRECTLY, not through `open`, and that is
 verified rather than assumed.** The warning below - that launching must go through
 `open` - is about OBTAINING the Bluetooth permission prompt. Once TCC has granted it,

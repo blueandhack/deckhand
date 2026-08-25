@@ -31,6 +31,9 @@ import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
 import { resolveMacEmoji } from "./mac-emoji.mjs";
 import { lineTargetsUs, stripAddress } from "./line-address.mjs";
+import { formatRunStartLine } from "./run-ledger.mjs";
+import { classifyStall, stallMessage } from "./watchdog.mjs";
+import { pickTokens, describeChildError, CCUSAGE_TIMEOUT_MS } from "./ccusage.mjs";
 
 const execFileAsync = promisify(execFile);
 import {
@@ -113,10 +116,18 @@ function rotateLogIfNeeded() {
 // exact failure that started all this, and the pair of numbers tells them apart.
 // It costs no per-tick I/O: the tick heartbeat is already written every 5s, so
 // the previous run's final tick is simply read back from it at startup.
+//
+// BUT THE TWO COLUMNS HAVE DIFFERENT LIFETIMES, and conflating them is what made
+// this ledger lie for its first 182 entries. The duration comes from this file,
+// under ~/.claude, which survives everything; the last tick comes from the
+// heartbeat in the runtime dir under /tmp, WHICH MACOS CLEARS AT BOOT. So a
+// missing heartbeat is the ordinary state after a reboot and means "unknown",
+// never "hung". run-ledger.mjs keeps the two apart and is the tested half.
 const RUN_STATE = path.join(os.homedir(), ".claude", "deckhand-run-state.json");
 const RESTART_LOG = path.join(os.homedir(), ".claude", "deckhand-restarts.log");
 let runStartedAt = Date.now();
 let watchdogFires = 0;
+let suspendResumes = 0;   // machine sleeps, kept apart from real hangs
 
 function readJsonSync(file) {
   try {
@@ -132,27 +143,19 @@ function recordRunStart() {
   let n = 1;
   if (prev) {
     n = (prev.startNumber || 0) + 1;
-    const lastTick = beat?.at || prev.startedAt;
-    const ranMs = Math.max(0, lastTick - prev.startedAt);
-    // No endReason means the previous run never got to record one: it was
-    // SIGKILLed, or the machine went down under it.
-    const ended = prev.endReason || "died without recording a reason";
-    const stalledMs = prev.endedAt ? Math.max(0, prev.endedAt - lastTick) : 0;
-    const h = (ms) => (ms >= 3600_000 ? `${(ms / 3600_000).toFixed(1)}h`
-                     : ms >= 60_000 ? `${(ms / 60_000).toFixed(0)}m`
-                     : `${(ms / 1000).toFixed(0)}s`);
-    const line =
-      `${new Date().toISOString()} start #${n} | previous run ${h(ranMs)}` +
-      `${stalledMs > 30_000 ? `, STALLED ${h(stalledMs)} before it ended` : ""}` +
-      `, watchdog fires ${prev.watchdogFires || 0}, ended: ${ended}\n`;
+    // The arithmetic lives in run-ledger.mjs so run-ledger-check.mjs can test
+    // it. A missing endReason means the previous run never got to record one
+    // (SIGKILL, or the machine went down under it), and a missing heartbeat
+    // means /tmp was cleared - which is NOT a hang, and used to be reported as
+    // the longest possible one. See that file's header.
     try {
-      appendFileSync(RESTART_LOG, line);
+      appendFileSync(RESTART_LOG, formatRunStartLine({ n, prev, beat, at: Date.now() }));
     } catch {}
   }
   try {
     writeFileSync(
       RUN_STATE,
-      JSON.stringify({ startNumber: n, startedAt: runStartedAt, pid: process.pid, watchdogFires: 0 })
+      JSON.stringify({ startNumber: n, startedAt: runStartedAt, pid: process.pid, watchdogFires: 0, suspendResumes: 0 })
     );
   } catch {}
 }
@@ -165,7 +168,7 @@ function recordRunEnd(reason) {
   try {
     writeFileSync(
       RUN_STATE,
-      JSON.stringify({ ...cur, watchdogFires, endReason: reason, endedAt: Date.now() })
+      JSON.stringify({ ...cur, watchdogFires, suspendResumes, endReason: reason, endedAt: Date.now() })
     );
   } catch {}
 }
@@ -552,7 +555,7 @@ async function runCcusage(args) {
     // loop - the same failure class as the BLE write, just with a child process
     // instead of a callback. execFile's timeout also kills the child, so a slow
     // ccusage cannot accumulate orphans one per tick.
-    timeout: 20_000,
+    timeout: CCUSAGE_TIMEOUT_MS,
   });
   return JSON.parse(stdout);
 }
@@ -1631,21 +1634,64 @@ function sumModelTokens(mb) {
   );
 }
 
+// Last good token counts, so a ccusage failure costs the COUNT and not the
+// tick - see host/ccusage.mjs for why Promise.all was the wrong combinator.
+let lastTokens = null;
+let tokensStaleLogged = false;
+
+// Never rejects: a failed read yields null and the tick carries on without it.
+async function tryCcusage(args) {
+  try {
+    return await runCcusage(args);
+  } catch (err) {
+    console.error(`ccusage ${args.join(" ")}: ${describeChildError(err)}`);
+    return null;
+  }
+}
+
 async function readUsage() {
+  // Still Promise.all, but the ccusage calls CANNOT REJECT any more - the
+  // resilience is in tryCcusage rather than in the combinator, which keeps the
+  // destructuring readable. These four are INDEPENDENT sources and ccusage
+  // supplies only the three token counts, so rejecting as a unit is what let
+  // one 20s timeout throw away the hero percentages, the session list and the
+  // clock, publish nothing, and freeze the menu bar on the previous reading.
   const [blocksResp, weeklyResp, rateLimits, sessions] = await Promise.all([
-    runCcusage(["blocks", "--active"]),
-    runCcusage(["weekly"]),
+    tryCcusage(["blocks", "--active"]),
+    tryCcusage(["weekly"]),
     readRateLimits(),
     readSessions(),
   ]);
 
-  const activeBlock = blocksResp.blocks.find((b) => b.isActive);
-  const currentWeek = weeklyResp.weekly.at(-1) ?? { totalTokens: 0, modelBreakdowns: [] };
+  const activeBlock = blocksResp?.blocks?.find((b) => b.isActive);
+  const currentWeek = weeklyResp?.weekly?.at(-1) ?? null;
   const fiveHour = rateLimits.five_hour;
   const sevenDay = rateLimits.seven_day;
-  const fableBreakdown = (currentWeek.modelBreakdowns ?? []).find((mb) =>
+  const fableBreakdown = (currentWeek?.modelBreakdowns ?? []).find((mb) =>
     /fable/i.test(mb.modelName)
   );
+
+  // A missing reading must not read as a measured zero, so each field is null
+  // when its call failed and pickTokens decides between fresh and last-known.
+  const tokens = pickTokens(
+    {
+      sessionTokens: blocksResp ? (activeBlock?.totalTokens ?? 0) : null,
+      weekAllTokens: weeklyResp ? (currentWeek?.totalTokens ?? 0) : null,
+      weekFableTokens: weeklyResp ? (fableBreakdown ? sumModelTokens(fableBreakdown) : 0) : null,
+    },
+    lastTokens
+  );
+  if (!tokens.stale) lastTokens = { ...tokens };
+  // Logged on the EDGE, not per tick: these run every 5s and a stale-token
+  // line each time would bury the tick lines it sits between.
+  if (tokens.stale !== tokensStaleLogged) {
+    console.error(
+      tokens.stale
+        ? `Token counts are STALE - carrying the last reading forward${tokens.everMeasured ? "" : " (nothing measured yet)"}.`
+        : "Token counts are live again."
+    );
+    tokensStaleLogged = tokens.stale;
+  }
 
   // Use whichever quota source is genuinely NEWER. An OAuth snapshot from 30
   // minutes ago (endpoint in a rate-limit back-off) still beats a statusLine
@@ -1663,13 +1709,13 @@ async function readUsage() {
     fiveHourResetInMin: useOauth
       ? minutesUntilMs(oauthUsage.fiveHourResetsAtMs)
       : minutesUntil(fiveHour?.resets_at),
-    sessionTokens: activeBlock?.totalTokens ?? 0,
+    sessionTokens: tokens.sessionTokens,
     sevenDayPct: useOauth ? oauthUsage.sevenDayPct : (sevenDay?.used_percentage ?? null),
     sevenDayResetInMin: useOauth
       ? minutesUntilMs(oauthUsage.sevenDayResetsAtMs)
       : minutesUntil(sevenDay?.resets_at),
-    weekAllTokens: currentWeek.totalTokens ?? 0,
-    weekFableTokens: fableBreakdown ? sumModelTokens(fableBreakdown) : 0,
+    weekAllTokens: tokens.weekAllTokens,
+    weekFableTokens: tokens.weekFableTokens,
     weekFablePct: useOauth ? oauthUsage.weekFablePct : null,
     quotaSource: useOauth ? "oauth" : "cache",
     // How old the quota numbers actually are, so the device can flag stale
@@ -2981,14 +3027,33 @@ async function tick(generation = tickGeneration) {
   }
 }
 
+// `lastWatchdogRun` is what tells a hung promise from a sleeping Mac: a stuck
+// await leaves this interval running every 5s, while a suspend freezes it for
+// as long as the stall. All 14 stalls in the run this was written from were
+// sleeps - see watchdog.mjs for the measurement and the one known limitation.
+let lastWatchdogRun = null;
 setInterval(() => {
-  const stalled = Date.now() - lastTickCompleted;
-  if (stalled < TICK_WATCHDOG_MS) return;
-  console.error(
-    `Poll loop stalled for ${Math.round(stalled / 1000)}s (an await never settled) - restarting it.`
-  );
+  const now = Date.now();
+  const verdict = classifyStall({
+    now,
+    lastTickCompleted,
+    lastWatchdogRun,
+    thresholdMs: TICK_WATCHDOG_MS,
+    intervalMs: POLL_INTERVAL_MS,
+  });
+  lastWatchdogRun = now;
+  if (verdict.verdict === "ok") return;
+
+  console.error(stallMessage(verdict));
   lastTickCompleted = Date.now();   // don't re-fire every interval while it recovers
-  watchdogFires++;                  // surfaces in the restart ledger
+  // Counted apart so the ledger's "watchdog fires" means HANGS. Folding sleeps
+  // in is what made 236 fires look like 236 near-misses.
+  if (verdict.hung) watchdogFires++;
+  else suspendResumes++;
+  // Restart the chain either way. After a suspend the pending setTimeout would
+  // fire on its own, but kicking it here closes the window where the heartbeat
+  // is stale and the menu bar shows nothing; the orphaned generation cannot
+  // reschedule, so at worst this costs one duplicate tick.
   tick(++tickGeneration);           // orphans the stuck chain: its generation is now stale
 }, POLL_INTERVAL_MS);
 
