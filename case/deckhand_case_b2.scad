@@ -471,10 +471,20 @@ ks_leaf_th = 3.0;  // blade thickness at the tip (it tapers from ks_barrel at th
 
 // ---------- Fit / structure ----------
 clr      = 0.5;     // board-to-wall clearance along the LENGTH (Y, USB↔far end)
-clr_w    = 0.0;     // board-to-wall clearance on the LEFT/RIGHT (X). Snug: the
-                    // board measured 51 wide in a 52 cavity (1 mm loose), so
-                    // this drops the sides to a zero-nominal fit. Bump to
-                    // 0.1–0.15 if the board won't drop in on your printer.
+// FROM A PRINTED COUPON, which is the only reason this number is trustworthy:
+// the board did not seat, short by about 0.5 mm across the width. clr_w is
+// PER SIDE (in_w = board_w + 2*clr_w), so 0.25 widens the cavity by the 0.5 that
+// was missing. If the 0.5 meant 0.5 PER SIDE, this is the one character to
+// change - but 0.25 is the reading that matches "0.5 mm of error" measured
+// across the whole board.
+//
+// Board 1 sets this to 0.0 and suggests "0.1-0.15 if the board won't drop in on
+// your printer". 0.25 is past that, which is worth a second thought rather than
+// a shrug: 0.5 mm over 54.5 is ~0.9% and large for FDM. See README-board2.md -
+// if the printed cavity itself measures 54.0 rather than 54.5, the fix belongs
+// in the slicer's XY compensation, where it corrects every part, not here where
+// it corrects one.
+clr_w    = 0.25;    // board-to-wall clearance on the LEFT/RIGHT (X), per side
 wall     = 2.2;     // SLIMMED from 2.6: -0.8 mm on BOTH footprint axes. Not lower -
                     // the snap barbs and the cover lip are cut into this wall, and
                     // below ~2 they stop holding.

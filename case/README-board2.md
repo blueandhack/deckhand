@@ -33,6 +33,26 @@ What to check, in the order that matters:
 4. **Is the mic port over the capsule?** That checks `mic_front_x`/`mic_front_side` and
    the `win_shift` datum assumption at once, since both reference the mic end.
 
+## What the printed coupon changed
+
+**`clr_w` 0.0 → 0.25.** The board did not seat — short by about 0.5 mm across the width.
+`clr_w` is **per side** (`in_w = board_w + 2*clr_w`), so 0.25 widens the cavity by the
+0.5 that was missing: 54.50 → 55.00, and the case with it, 58.9 → 59.4 wide.
+
+**Worth a second thought rather than a shrug, though.** Board 1 sets this to 0.0 and
+suggests *"0.1–0.15 if the board won't drop in on your printer"*. 0.25 is past that, and
+0.5 mm over 54.5 is **~0.9%** — large for FDM. There are two different faults that both
+present as "the board doesn't fit", and they want different fixes:
+
+| measure the printed coupon's cavity | meaning | fix |
+|---|---|---|
+| ~54.0 (undersized) | the printer, not the model | slicer **XY size compensation** — corrects every part you print, not just this one |
+| ~54.5 (correct) but still tight | the board is wider than the drawing says | change `board_w`, and re-check `hole_ins_x` against your own board |
+
+`clr_w = 0.25` is applied because it is what was asked for and it will fit. But if the
+cavity measures 54.0, the number is compensating for the printer inside the model, where
+it will silently mis-size the next design too.
+
 ## Every board number is from the vendor drawing
 
 Board 1's file says *"MEASURE YOURS AND EDIT"*, because nobody had a drawing. Board 2
