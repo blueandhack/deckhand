@@ -133,6 +133,44 @@ which is correct for forming in plastic.
 **Set `board_screws = false` to get the locating pins back**, which is board 1's
 behaviour: they fix the board laterally and hold it against nothing.
 
+## Printed buttons instead of open holes
+
+`cover_buttons = true` (default). The cover's holes shrink to a **sliding fit** on a stem
+and a separate printed plunger rides in each, so nothing is open to dust and RESET/BOOT
+stay pressable with the cover closed.
+
+```
+openscad -o stl/deckhand_b2_buttons.stl -D 'part="buttons"' deckhand_case_b2.scad
+```
+
+**A guided plunger, not a flexure pad in the cover — the span decides that.** The cover's
+inner face sits 15.5 mm above the board's back, so even a short tactile leaves ~13 mm to
+cross. A thin membrane carrying a 13 mm post is a long lever on a small hinge: it would
+wobble sideways and fatigue. A stem in a sleeve is stiff at any length.
+
+Shape is one cylinder through a disc. The **flange sits inside** the cover and is wider
+than the hole, so the button cannot fall out; the board underneath stops it falling in.
+A **guide sleeve** on the cover's inner face triples the bearing length — 2.0 mm of plate
+alone would let a 4 mm stem cock over.
+
+**To fit:** drop each button in **from the inside**, stem first through its guide hole,
+before the cover goes on. Nothing to glue, nothing to align.
+
+**To print:** stand it on the button top. The flange's underside is a 45° cone so the
+whole part self-supports — no supports needed, though a brim helps, since it's ~22 mm tall
+on a 4 mm footprint.
+
+### `btn_switch_h` is the one number still guessed — and it errs short on purpose
+
+Everything else here is geometry; this is the board. **Too short and the button doesn't
+reach** — annoying, obvious, one number to fix. **Too long and the plunger rests *on* the
+switch and holds it down**: the device sits in permanent reset and looks bricked, on the
+one board where RESET is the only way out of deep sleep.
+
+So the default assumes **2.5 mm**, taller than a typical SMD tactile (1.5–1.9), because a
+taller assumption makes a *shorter* stem. Measure the switch's height above the board's
+back face and set it; the stem follows.
+
 ## Every board number is from the vendor drawing
 
 Board 1's file says *"MEASURE YOURS AND EDIT"*, because nobody had a drawing. Board 2

@@ -319,6 +319,41 @@ btn_d = 6.0;        // RESET and BOOT alike
 // near it and press toward the cover.
 btn_cham = 0.8;     // outward flare at the cover's outer face, so a nail can find it
 
+// ---------- Printed plungers instead of open holes ----------
+// With cover_buttons on, the cover gets a GUIDE hole and a separate printed
+// button rides in it, so nothing is open to dust and RESET/BOOT stay pressable
+// with the cover closed. part="buttons" prints the pair.
+//
+// A GUIDED PLUNGER, not a flexure pad in the cover, and the span decides that:
+// the cover's inner face is 15.5 mm above the board's back, so even a short
+// tactile leaves ~13 mm to cross. A thin membrane carrying a 13 mm post is a long
+// lever on a small hinge - it would wobble sideways and fatigue. A stem in a
+// sleeve is stiff at any length.
+//
+// Shape: one cylinder through a disc. The disc (flange) sits INSIDE the cover and
+// is wider than the hole, so the button cannot fall out; the stem passes through
+// the hole, stands btn_proud above the outer face to press, and reaches down to
+// just short of the switch.
+cover_buttons = true;
+btn_stem_d   = 4.0;                    // the shaft
+btn_guide_d  = btn_stem_d + 0.4;       // hole in the cover: a sliding fit
+btn_flange_d = btn_guide_d + 3.0;      // wider than the hole = captive
+btn_flange_t = 1.2;
+btn_proud    = 1.5;                    // how far the button stands above the cover
+btn_sleeve_h = 3.0;                    // guide sleeve inside, so the stem cannot tilt
+btn_rest_gap = 0.6;                    // tip sits this far above the switch AT REST
+
+// UNMEASURED, and the one number that matters: how tall the tactile stands above
+// the board's BACK face. Everything else here is geometry; this is the board.
+//
+// ERRING SHORT IS MANDATORY, NOT CAUTIOUS. Too short and the button does not
+// reach - annoying, obvious, fixed by one number. Too long and the plunger rests
+// ON the switch and holds it down: the device sits in permanent reset and looks
+// bricked, on the one board where RESET is the only way out of deep sleep. So the
+// default assumes a TALLER switch than typical SMD tactiles (1.5-1.9), because a
+// taller switch means a shorter stem.
+btn_switch_h = 2.5;
+
 // ---------- Front-face microphone port (board 2 only) ----------
 // The mic is ON THE BOARD, facing FORWARD, at 3.94 from the mic-end edge and
 // 9.82 from a long edge (vendor drawing). It is inside the 9.25 bezel, so the
@@ -619,6 +654,19 @@ assert(screw_skin >= screw_skin_min,
 Use a shorter screw, or lower screw_skin_min deliberately if you know what you are doing.");
 cavity_d   = max(comp_back, batt_seat + batt_t + batt_extra);
 z_floor    = z_pcb_b + cavity_d;            // inner face of the back cover
+// Plunger stem, derived: the clear span from the cover's inner face down to the
+// top of the switch, less the rest gap.
+//
+// PLACED AFTER z_floor, AND THAT COST A BUILD. It first sat next to z_pcb_b -
+// above z_floor's own definition - so it read undef and every part failed the
+// assert below. OpenSCAD does not hoist, and this file already carries two notes
+// saying so (mic_pcb_x0, screw_skin); writing a third one directly above the
+// mistake did not prevent it. The assert did.
+btn_span     = z_floor - z_pcb_b - btn_switch_h;
+btn_stem_len = btn_span - btn_rest_gap;
+assert(btn_stem_len > 0, "btn_switch_h is taller than the cavity: no room for a plunger.");
+assert(btn_proud > btn_rest_gap + 0.4,
+       "btn_proud is too small: pressing the button flush would not reach the switch.");
 body_d     = z_floor;                        // body runs front face .. back opening
 total_th   = body_d + cover_th;
 
@@ -1004,6 +1052,17 @@ module cover(){
     union(){
       // plate
       translate([wall-0.1,wall-0.1,0]) soft_box(in_w+0.2,in_h+0.2,cover_th,max(oc_r-wall,2),soft_r*0.5);
+      // Guide sleeves for the printed buttons. The plate alone is 2.0 mm of
+      // bearing for a 4 mm stem, which would let the button cock over; the
+      // sleeve triples that. Inboard of the lip, so it does not foul it.
+      if (cover_buttons)
+        for (dx = [reset_dx, boot_dx])
+          translate([bcx + dx, btn_y, cover_th - 0.01])
+            difference(){
+              cylinder(d = btn_guide_d + 2.0, h = btn_sleeve_h + 0.01);
+              translate([0,0,-0.1]) cylinder(d = btn_guide_d, h = btn_sleeve_h + 0.3);
+            }
+
       // Battery corral - see batt_ribs. Positioned off the SAME expression the
       // preview ghost and the retainer use, so all three agree by construction
       // rather than by three transcriptions of the same arithmetic.
@@ -1059,10 +1118,13 @@ module cover(){
     // lip. The cost is real: the lip's bottom run loses material at two places,
     // so that end holds slightly less. It is bought back by moving the snaps
     // (see snaps()), which is where the retention actually lives.
+    // With cover_buttons the hole shrinks to a SLIDING FIT on the stem and a
+    // printed plunger fills it; without, it stays the open Ø6 tool hole.
     for (dx = [reset_dx, boot_dx])
       translate([bcx + dx, btn_y, -0.01]) {
-        cylinder(d = btn_d, h = cover_th + lip_h + 0.02);
-        cylinder(d1 = btn_d + 2*btn_cham, d2 = btn_d, h = btn_cham + 0.01);
+        d = cover_buttons ? btn_guide_d : btn_d;
+        cylinder(d = d, h = cover_th + lip_h + btn_sleeve_h + 0.02);
+        cylinder(d1 = d + 2*btn_cham, d2 = d, h = btn_cham + 0.01);
       }
     // pilot hole in each boss — the M3 screw threads straight into the plastic
     for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, ks_axle_z])
@@ -1157,6 +1219,33 @@ module body(){
 }
 
 // ============================================================================
+// PRINTED BUTTONS — part="buttons"
+// ============================================================================
+// One cylinder through a disc, x2. Printed STANDING ON THE BUTTON TOP, which is
+// why the flange's underside is chamfered: at 45 degrees it self-supports, so the
+// whole part prints with no supports at all. A brim helps - it is 18 mm tall on a
+// 4 mm footprint.
+//
+// TO FIT: drop each button into the cover FROM THE INSIDE, stem first through its
+// guide hole, before the cover goes on. The flange is wider than the hole, so it
+// cannot fall out; the board underneath stops it falling in. Nothing to glue and
+// nothing to align.
+module button(){
+  cham = (btn_flange_d - btn_stem_d) / 2;   // 45 degrees, so it self-supports
+  rotate([180,0,0]) {                        // button top on the bed
+    cylinder(d = btn_stem_d, h = btn_proud + cover_th + btn_sleeve_h);
+    translate([0, 0, btn_proud + cover_th + btn_sleeve_h]) {
+      cylinder(d1 = btn_stem_d, d2 = btn_flange_d, h = cham);      // self-supporting cone
+      translate([0,0,cham]) cylinder(d = btn_flange_d, h = btn_flange_t);
+      translate([0,0,cham + btn_flange_t]) cylinder(d = btn_stem_d, h = btn_stem_len);
+    }
+  }
+}
+module buttons(){
+  for (i = [0,1]) translate([i * (btn_flange_d + 4), 0, 0]) button();
+}
+
+// ============================================================================
 // FIT-TEST COUPON — print this BEFORE the body.
 // ============================================================================
 // It carries only the things that can be wrong: the four column positions (the
@@ -1204,6 +1293,7 @@ if      (part=="body")     body();
 else if (part=="cover")    translate([0,0,cover_th]) rotate([180,0,0]) cover();
 else if (part=="stand")    stand();
 else if (part=="retainer") { if (use_retainer) retainer(); }
+else if (part=="buttons")  buttons();
 else if (part=="coupon")   coupon();
 else if (part=="section")  section();
 // A deliberate no-op, for `include`-based clearance probes: `include` re-runs this
