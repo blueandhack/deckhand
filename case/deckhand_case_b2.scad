@@ -146,6 +146,35 @@ col_d    = 7.0;     // mounting column diameter (the shoulder the board rests on
 pin_d    = 1.3;
 pin_lead = 0.3;     // conical lead-in at the tip so the board drops on easily
 
+// ---------- This printer's dimensional error, measured ----------
+// TWO SYMPTOMS, ONE CAUSE, so it is one named number rather than a fudge factor
+// hidden in each feature. From printed coupons:
+//   - the board would not seat: the cavity came out ~0.5 small on a 55.0 opening
+//   - a Ø2.6 screw pilot would not take a 3 mm self-tapper wanting ~2.4
+// Both are internal features, and both shrink because the extruded bead sits
+// INSIDE the modelled boundary. 0.5 on an opening is 0.25 per surface, and the
+// same 0.25 per side turns a modelled Ø2.6 bore into ~2.1 - which is exactly the
+// interference that stopped the screws. One constant explains both.
+//
+// THE RIGHT PLACE TO FIX THIS IS THE SLICER, not here. Every slicer has an XY
+// size compensation (Cura "Horizontal Expansion", PrusaSlicer/Orca "XY size
+// compensation"): set it to +0.25 and EVERY part you print comes out right,
+// including other people's. Compensating in the model corrects this one design
+// and silently mis-sizes the next. It lives here because it is what makes the
+// case fit today - so if you set the slicer, put this back to 0.
+// DEFINED HERE, ABOVE ITS FIRST USE, AND THAT IS NOT COSMETIC. It lived in the
+// "Fit / structure" block 400 lines below screw_pilot, which reads it - so
+// screw_pilot evaluated to UNDEFINED and the four pilots were never cut. The STLs
+// built and looked right; the holes simply were not there. OpenSCAD warns
+// ("Ignoring unknown variable") but does not error, and a build filter grepping
+// only for ERROR: sees nothing.
+//
+// That is the THIRD forward-reference in this file - after mic_pcb_x0's note and
+// btn_span's - and the first one to reach exported geometry. The lesson is not
+// "be careful": grep the build for WARNING as well as ERROR, which is what caught
+// it, and put derived values immediately after what they depend on.
+print_shrink = 0.5;   // measured, on a DIAMETER or an opening
+
 // ---------- Screwing the board down (board 2) ----------
 // The pins locate the board but do not HOLD it: lift the case and the board is
 // resting on four shoulders with nothing above it but the cover. With screws it
@@ -605,24 +634,6 @@ ks_pilot   = 2.5;  // pilot hole in the boss — the M3 screw cuts its own threa
                    // If it drives too hard, open it to 2.6 with a drill bit.
 ks_leaf_th = 3.0;  // blade thickness at the tip (it tapers from ks_barrel at the nose)
 
-// ---------- This printer's dimensional error, measured ----------
-// TWO SYMPTOMS, ONE CAUSE, so it is one named number rather than a fudge factor
-// hidden in each feature. From printed coupons:
-//   - the board would not seat: the cavity came out ~0.5 small on a 55.0 opening
-//   - a Ø2.6 screw pilot would not take a 3 mm self-tapper wanting ~2.4
-// Both are internal features, and both shrink because the extruded bead sits
-// INSIDE the modelled boundary. 0.5 on an opening is 0.25 per surface, and the
-// same 0.25 per side turns a modelled Ø2.6 bore into ~2.1 - which is exactly the
-// interference that stopped the screws. One constant explains both.
-//
-// THE RIGHT PLACE TO FIX THIS IS THE SLICER, not here. Every slicer has an XY
-// size compensation (Cura "Horizontal Expansion", PrusaSlicer/Orca "XY size
-// compensation"): set it to +0.25 and EVERY part you print comes out right,
-// including other people's. Compensating in the model corrects this one design
-// and silently mis-sizes the next. It lives here because it is what makes the
-// case fit today - so if you set the slicer, put this back to 0.
-print_shrink = 0.5;   // measured, on a DIAMETER or an opening
-
 // ---------- Fit / structure ----------
 clr      = 0.5;     // board-to-wall clearance along the LENGTH (Y, USB↔far end)
 // FROM A PRINTED COUPON, which is the only reason this number is trustworthy:
@@ -668,8 +679,8 @@ screw_skin = z_pcb_b - screw_len - screw_tip_margin;
 // bezel. That must be loud rather than discovered on the glass, so it is an
 // assert: at screw_len 6.0 the skin is 0.7, and 7.6 would reach zero.
 assert(screw_skin >= screw_skin_min,
-       "screw_len is too long: the pilot would leave too little front-face material. \
-Use a shorter screw, or lower screw_skin_min deliberately if you know what you are doing.");
+       str("screw_len is too long: the pilot would leave too little front-face ",
+           "material. Use a shorter screw, or lower screw_skin_min deliberately."));
 cavity_d   = max(comp_back, batt_seat + batt_t + batt_extra);
 z_floor    = z_pcb_b + cavity_d;            // inner face of the back cover
 // Plunger stem, derived: the clear span from the cover's inner face down to the

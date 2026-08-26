@@ -193,6 +193,22 @@ So the default assumes **2.5 mm**, taller than a typical SMD tactile (1.5–1.9)
 taller assumption makes a *shorter* stem. Measure the switch's height above the board's
 back face and set it; the stem follows.
 
+## A build that succeeded and lost the screw holes
+
+Worth knowing, because it will happen again to whoever edits this file. `print_shrink`
+was defined 400 lines *below* `screw_pilot`, which reads it. **OpenSCAD does not hoist**,
+so `screw_pilot` evaluated to `undefined` and **the four pilots were never cut** — the
+STLs built, rendered, and looked entirely right.
+
+OpenSCAD reports this as a `WARNING` ("Ignoring unknown variable"), not an error, so a
+build check grepping only for `ERROR:` sees a clean run. **Grep for `WARNING` too** — that
+is what caught it, and the confirmation was crude but decisive: the body STL went
+1156 KB → 1230 KB once the holes were actually being subtracted.
+
+It is the third forward-reference in this file, after `mic_pcb_x0` and `btn_span`, and the
+first to reach exported geometry. Derived values now sit immediately after what they
+depend on.
+
 ## Every board number is from the vendor drawing
 
 Board 1's file says *"MEASURE YOURS AND EDIT"*, because nobody had a drawing. Board 2
