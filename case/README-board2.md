@@ -100,9 +100,23 @@ slicer, put `print_shrink` back to 0.**
 
 ### The screws — use M3 × 5, self-tapping
 
-**Length first.** Usable thread is 4.3 mm and the board adds 1.6, so **5.9 mm is the
-longest screw that will not bottom out**. An M3 × 8 stops 2.1 mm early and cannot be
-driven home *whatever the pilot is*.
+**The depth follows the screw, not the other way round.** `screw_len = 6.0` is the screw
+actually in hand; `screw_skin` is derived from it (`z_pcb_b − screw_len − screw_tip_margin`),
+giving **4.6 mm of thread and 0.70 mm of front-face material**. Change `screw_len` and the
+pilot follows.
+
+A screw that bottoms out looks exactly like a hole that is too small — it stops dead
+partway and no force helps. That symptom already cost one print, from advice of "M3 × 6 or
+8" against 5.9 mm of usable space.
+
+**A longer screw eats the front face**, and past ~7.6 mm it comes through the bezel. That
+is an `assert`, not a comment — verified by running it:
+
+```
+$ openscad -D 'screw_len=7.0' deckhand_case_b2.scad
+ERROR: Assertion '(screw_skin >= screw_skin_min)' failed: "screw_len is too long: the
+pilot would leave too little front-face material..."
+```
 
 **Pilot: Ø2.9 modelled → ~2.4 printed.** 2.4 is the ~0.8 × major that thread-forming into
 thermoplastic wants for M3.

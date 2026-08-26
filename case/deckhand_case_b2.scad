@@ -203,15 +203,22 @@ screw_pilot  = screw_pilot_target + print_shrink; // 2.9 modelled on this printe
 // beyond its own weight. What it must never do is break through: screw_skin is
 // the material left between the pilot's bottom and the outside of the front
 // face, and at 1.0 that skin is under the screen bezel where a dimple would show.
-screw_skin   = 1.0;
 screw_lead   = 0.6;  // conical lead-in at the column top, so the screw centres itself
 
-// SCREW LENGTH IS CONSTRAINED, and getting it wrong looks exactly like a hole
-// that is too small - the screw stops dead partway and no amount of force helps.
-// Usable thread is z_pcb_f - screw_skin = 4.3 mm, and the board adds 1.6, so the
-// longest screw that will not bottom out is 5.9 mm.
-//   USE M3 x 5.  M3 x 6 is 0.1 over and may just touch; M3 x 8 bottoms out 2.1 mm
-//   early and cannot be driven home whatever the pilot is.
+// THE PILOT'S DEPTH FOLLOWS THE SCREW, rather than the screw having to suit a
+// hardcoded depth - which is the way round that keeps being wrong. State the
+// screw you actually have and the geometry adapts; screw_skin is DERIVED from it
+// further down, next to z_pcb_b, because OpenSCAD does not hoist and this needs
+// the board's back plane.
+//
+// The screw head lands on the board's back face at z_pcb_b, so the tip reaches
+// z_pcb_b - screw_len and the pilot must go at least that deep. A screw that
+// bottoms out looks exactly like a hole that is too small: it stops dead partway
+// and no force helps. That symptom cost one print already, when the advice given
+// was "M3 x 6 or 8" against 5.9 mm of usable space.
+screw_len        = 6.0;  // the screw you HAVE. Measured: 6 mm, M3 self-tapping.
+screw_tip_margin = 0.2;  // clear air past the tip, so it clamps rather than bottoms
+screw_skin_min   = 0.6;  // least front-face material to leave; see the assert
                     // (kept small — a big taper on a thin pin leaves a point)
 
 // Window = the ACTIVE display area plus a hair, not the full 54.50 x 83.00
@@ -600,6 +607,16 @@ m3_clear = 3.4; m3_nut_af = 5.6; m3_nut_th = 2.6;
 z_glass    = glass_recess;
 z_pcb_f    = z_glass + glass_up;
 z_pcb_b    = z_pcb_f + board_t;             // column tops / board back
+// Derived HERE and not with the other screw parameters, because it needs z_pcb_b
+// and OpenSCAD does not hoist - a forward reference yields a silent undef, which
+// this file has been bitten by before (see mic_pcb_x0's note).
+screw_skin = z_pcb_b - screw_len - screw_tip_margin;
+// A LONGER SCREW EATS THE FRONT FACE, and past a point it comes through the
+// bezel. That must be loud rather than discovered on the glass, so it is an
+// assert: at screw_len 6.0 the skin is 0.7, and 7.6 would reach zero.
+assert(screw_skin >= screw_skin_min,
+       "screw_len is too long: the pilot would leave too little front-face material. \
+Use a shorter screw, or lower screw_skin_min deliberately if you know what you are doing.");
 cavity_d   = max(comp_back, batt_seat + batt_t + batt_extra);
 z_floor    = z_pcb_b + cavity_d;            // inner face of the back cover
 body_d     = z_floor;                        // body runs front face .. back opening
