@@ -160,6 +160,28 @@ before the cover goes on. Nothing to glue, nothing to align.
 whole part self-supports — no supports needed, though a brim helps, since it's ~22 mm tall
 on a 4 mm footprint.
 
+### Stopping the buttons rattling
+
+A plunger has two motions, and they need different answers.
+
+| motion | before | now |
+|---|---|---|
+| lateral slop / tilt | 0.20 mm per side, 4.6° | **0.10 mm per side, 2.3°** (`btn_guide_d` clearance 0.4 → 0.2) |
+| axial free play | 0.6 mm | **0.3 mm** (`btn_rest_gap` 0.6 → 0.3) |
+
+**The play is shrunk, never clamped, and that is a safety choice rather than a printing
+one.** What returns this button is the tactile switch's own dome pushing it back out —
+roughly 1 N — so friction in the guide must stay well under that. A stem tight enough
+never to rattle is a stem that can **stay pressed**, and a stuck RESET on this board is a
+device that looks bricked: it is the only way out of deep sleep.
+
+`btn_rest_gap` can't go to zero either — that rests the stem on the switch, and the
+tolerance stack (print, `btn_switch_h`, board seating) would sometimes press it.
+
+**If a trace of rattle still annoys you, put a thin foam or silicone washer under the
+flange.** It kills the play without adding friction to the sliding surface, and there's
+already a foam sheet in this build for the battery.
+
 ### `btn_switch_h` is the one number still guessed — and it errs short on purpose
 
 Everything else here is geometry; this is the board. **Too short and the button doesn't

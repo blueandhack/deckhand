@@ -336,12 +336,30 @@ btn_cham = 0.8;     // outward flare at the cover's outer face, so a nail can fi
 // just short of the switch.
 cover_buttons = true;
 btn_stem_d   = 4.0;                    // the shaft
-btn_guide_d  = btn_stem_d + 0.4;       // hole in the cover: a sliding fit
+// 0.2 of clearance, halved from 0.4, which halves both motions a plunger has:
+// lateral slop drops to 0.10/side and tilt from 4.6 to 2.3 degrees over the
+// 5.0 mm of bearing (plate 2.0 + sleeve 3.0).
+//
+// NOT TIGHTER, AND THE REASON IS A SAFETY ONE RATHER THAN A PRINTING ONE. What
+// returns this button is the tactile switch's own dome pushing it back out -
+// roughly 1 N - so any friction in the guide has to stay well under that. A stem
+// tight enough never to rattle is a stem that can STAY PRESSED, and a stuck RESET
+// on this board is a device that looks bricked: it is the only way out of deep
+// sleep. So the play is SHRUNK, never clamped. If a trace of rattle still annoys,
+// a thin foam or silicone washer under the flange kills it without adding
+// friction to the sliding surface - and there is already a foam sheet in this
+// build for the battery.
+btn_guide_d  = btn_stem_d + 0.2;       // hole in the cover: a sliding fit
 btn_flange_d = btn_guide_d + 3.0;      // wider than the hole = captive
 btn_flange_t = 1.2;
 btn_proud    = 1.5;                    // how far the button stands above the cover
 btn_sleeve_h = 3.0;                    // guide sleeve inside, so the stem cannot tilt
-btn_rest_gap = 0.6;                    // tip sits this far above the switch AT REST
+// 0.3, halved from 0.6: this IS the axial free play, so halving it halves the
+// rattle. It cannot go to zero - that would rest the stem on the switch, and the
+// tolerance stack (print, btn_switch_h, board seating) would sometimes make it
+// press. Press travel needed is 0.3 + the switch's own ~0.25, against 1.5 of
+// btn_proud available.
+btn_rest_gap = 0.3;                    // tip sits this far above the switch AT REST
 
 // UNMEASURED, and the one number that matters: how tall the tactile stands above
 // the board's BACK face. Everything else here is geometry; this is the board.
