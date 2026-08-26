@@ -406,9 +406,20 @@ func paceNote(pct: Int, pace: Int?) -> String {
 /// SEMANTIC system colours, which is what lets one call serve a menu row and a
 /// status item that may be sitting on a light bar or a dark one.
 func quotaColour(pct: Int, stale: Bool) -> NSColor {
-    if stale { return .tertiaryLabelColor }
+    // SECONDARY for stale, where this was tertiary. Dimmer than a live reading is
+    // the whole point - 0.498 against `.labelColor`'s 0.847 - but tertiary's 0.259
+    // made the figure itself hard to read, and "we cannot vouch for this number"
+    // is not the same claim as "you may not read this number". The word `stale`
+    // beside it is what carries the meaning; the dimming only supports it.
+    if stale { return .secondaryLabelColor }
     return pct >= 95 ? .systemRed : (pct >= 80 ? .systemOrange : .labelColor)
 }
+
+/// What a cell of the bar IS, which is what decides its colour. Three cases, not
+/// two: the fill and the track are the quantity, and the tick is a mark about a
+/// different quantity entirely (where the clock has got to), so it must be able
+/// to differ from BOTH rather than borrowing whichever it happens to sit in.
+enum BarRole { case fill, track, tick }
 
 /// The ten-cell fill, now with the pace tick in it.
 ///
@@ -432,29 +443,51 @@ func quotaColour(pct: Int, stale: Bool) -> NSColor {
 /// of full blocks - visible in both, without needing a second glyph to say which
 /// side of the fill it fell on. That is a claim about a render, so it was looked
 /// at: `--menu-preview`, light and dark.
-/// SPLIT AT THE TICK, so the mark can be drawn in a different colour from the
-/// fill it sits in. Returned as three pieces rather than one string because that
-/// is the only way an attributed run can colour them apart - and it has to: in
-/// the render, a tick inheriting the fill's colour was a red line among red
-/// blocks, i.e. findable only as the notch its own cell's background makes.
-/// The mark means "now", which is not a status, so it takes a neutral secondary
-/// grey against a fill that may be red or orange.
-func quotaBarParts(_ pct: Int, pace: Int? = nil) -> (pre: String, tick: String, post: String) {
+/// SPLIT AT EVERY COLOUR CHANGE, so fill, track and tick can each be drawn in
+/// their own colour. Returned as RUNS rather than one string because that is the
+/// only way an attributed run can colour them apart - and all three need it, for
+/// two separate reasons found the same way, by looking at a render:
+///
+/// The TICK, first: a mark inheriting the fill's colour was a red line among red
+/// blocks, findable only as the notch its own cell's background makes. It means
+/// "now", which is not a status, so it takes a neutral secondary grey against a
+/// fill that may be red or orange.
+///
+/// The TRACK, second, and this one shipped: an earlier version split at the tick
+/// ALONE and handed back three pieces, each of which could carry both `█` and
+/// `░`. `quotaTitle` therefore drew every cell in the usage colour, which put the
+/// empty track in that colour at 25% coverage immediately beside the fill at
+/// 100%. Same hue, adjacent, no boundary - the bar read as one grey smear whose
+/// end could not be located, and the tick was invisible inside it. Fill and track
+/// differ in INK, not in shape (that is why `▰`/`▱` were rejected), and ink alone
+/// is not enough separation when both are the same colour. `--pace-check` now
+/// asserts by name that no run carries both.
+func quotaBarRuns(_ pct: Int, pace: Int? = nil) -> [(text: String, role: BarRole)] {
     var filled = Int((Double(pct) / 100 * Double(BAR_CELLS)).rounded())
     // Any usage at all must show a cell: 1% rounding to an empty bar would read
     // as "none used", which is a different claim than "barely any".
     if pct > 0 && filled == 0 { filled = 1 }
     filled = max(0, min(BAR_CELLS, filled))
+
     // FULL BLOCK against LIGHT SHADE, not ▰/▱. The geometric pair renders at 11pt
     // as a faint dashed line where filled and empty are barely distinguishable -
-    // checked against a render, not assumed. These two differ in ink, not shape.
-    let cells = Array(repeating: "█", count: filled)
-        + Array(repeating: "░", count: BAR_CELLS - filled)
-    guard let pace else { return (cells.joined(), "", "") }
+    // checked against a render, not assumed. These two differ in ink, not shape,
+    // which is why the colours above are load-bearing rather than decorative.
+    func run(_ n: Int, _ role: BarRole) -> [(text: String, role: BarRole)] {
+        n > 0 ? [(String(repeating: role == .fill ? "\u{2588}" : "\u{2591}", count: n), role)] : []
+    }
+    guard let pace else { return run(filled, .fill) + run(BAR_CELLS - filled, .track) }
+
     // A BOUNDARY, not a cell: 0% goes before the first and 100% after the last,
     // which is what makes the two ends of the window reachable at all.
     let at = max(0, min(BAR_CELLS, (pace * BAR_CELLS + 50) / 100))
-    return (cells[..<at].joined(), "\u{2502}", cells[at...].joined())
+    let tick = [(text: "\u{2502}", role: BarRole.tick)]
+    // The tick can land inside the fill or inside the track, so each side is
+    // emitted as up-to-two runs and the empty ones drop out. Splitting this way
+    // rather than slicing a pre-joined string is what keeps a run from spanning
+    // the fill boundary at all, instead of relying on nobody re-joining them.
+    return run(min(at, filled), .fill) + run(max(0, at - filled), .track) + tick
+         + run(max(0, filled - at), .fill) + run(BAR_CELLS - max(at, filled), .track)
 }
 
 // Menu text styling.
@@ -468,6 +501,15 @@ let F_BODY = NSFont.menuFont(ofSize: 0)
 let F_BOLD = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
 let F_SMALL = NSFont.menuFont(ofSize: 11)
 let F_MONO = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+/// The same face and size as `F_MONO`, heavier. Used for the one figure on a
+/// quota row that the row exists to report, so it wins against the label naming
+/// it and the bar giving it context - where before it was the same weight as
+/// both and sat downstream of the bar, so the eye crossed the noise to reach it.
+///
+/// SF Mono holds one advance across weights, so this cannot break the column
+/// alignment the `%3d` padding buys. That is a claim about a font rather than
+/// about this code, so `--pace-check` measures it instead of trusting it.
+let F_MONO_BOLD = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
 
 /// WHAT the bar is allowed to show, as user choices rather than as this file's
 /// opinion. Every one defaults to ON and `object(forKey:) as? Bool ?? true` is
@@ -802,17 +844,58 @@ func quotaTitle(_ label: String, _ pct: Int, _ reset: Int?, _ ageSec: Int? = nil
     // (see `pacePct`) - a mark showing where the clock has got to, drawn into a
     // fill that stopped being updated hours ago, invents a comparison.
     let pace = stale ? nil : pacePct(resetInMin: reset, windowMin: windowMin)
-    let bar = quotaBarParts(pct, pace: pace)
-    return menuTitle([
+    // THE NUMBER LEADS, and the bar follows it. The row used to read label, bar,
+    // number - so the one figure being reported sat downstream of eleven
+    // characters of texture, and the pace glyph, which is a statement ABOUT that
+    // figure, ended up detached at the right margin with the bar between them.
+    // Number first puts the payload where the eye lands and puts its qualifiers
+    // next to it; the bar is context and reads perfectly well as the thing after.
+    var parts: [(String, NSFont, NSColor)] = [
         (label.padding(toLength: 6, withPad: " ", startingAt: 0), F_MONO, .secondaryLabelColor),
-        (bar.pre, F_MONO, colour),
-        (bar.tick, F_MONO, .secondaryLabelColor),
-        (bar.post, F_MONO, colour),
-        (String(format: "  %3d%% used%@", pct, note), F_MONO, colour),
+        (String(format: "%3d%% used", pct), F_MONO_BOLD, colour),
+        (note, F_MONO, colour),
         // Two spaces, because "4% used▼" reads as a typo - the glyph is a
         // separate statement about a different quantity, not a suffix on this one.
-        (pace == nil ? "" : "  " + paceGlyph(pct: pct, pace: pace), F_MONO, colour),
-        (staleNote, F_MONO, .systemOrange),
+        //
+        // NEUTRAL, not the usage colour, for the same reason the tick is: it
+        // reports a COMPARISON, not a level. In the usage colour a red ▼ sat
+        // beside a red 96% and read as part of the alarm, when ▼ is the
+        // reassuring half of the pair - it says the percentage is climbing slower
+        // than the clock. A colour that inverts the meaning of the glyph it
+        // paints is worse than no colour on it.
+        (pace == nil ? "" : "  " + paceGlyph(pct: pct, pace: pace), F_MONO, .secondaryLabelColor),
+        ("   ", F_MONO, .secondaryLabelColor),
+    ]
+    // THREE ROLES, THREE VALUES, and the ordering between them is the whole point:
+    // fill at full strength, tick a step down, track a step below that. That is
+    // what makes the tick OUTRANK the track it sits in - at the same value as the
+    // track it goes back to being findable only as the notch its own cell makes,
+    // which is the defect the tick's own split was introduced to fix.
+    //
+    // The track has to be dimmer THAN THE FILL, which is not the same as being a
+    // fixed colour: a stale reading dims its fill to tertiary, so a fixed tertiary
+    // track would match it exactly and reproduce the smear on precisely the rows
+    // whose numbers are least trustworthy. So it steps down with it.
+    let trackColour: NSColor = stale ? .quaternaryLabelColor : .tertiaryLabelColor
+    for (text, role) in quotaBarRuns(pct, pace: pace) {
+        parts.append((text, F_MONO, role == .fill ? colour
+                                 : role == .track ? trackColour
+                                 : .secondaryLabelColor))
+    }
+    return menuTitle(parts + [
+        // NOT systemOrange, which is also the 80%-high colour - so a stale row was
+        // the loudest ink in the whole block AND wearing the warning colour, i.e.
+        // it looked like an alarm about usage on the one row whose numbers we
+        // explicitly cannot vouch for. Staleness is an absence of information, and
+        // it is already said in words and by the dimmed figure beside it.
+        (staleNote, F_MONO, .secondaryLabelColor),
+        // THE RESET STAYS DOWN HERE, and that was measured rather than preferred.
+        // With the number leading, the main row now ends around 232px of a 316px
+        // lane (`--menu-preview`), so promoting `resets in` up to it looks free -
+        // but the widest real case is "  resets in 5d 8h", 17 monospaced cells
+        // ≈ 112px against 84px spare. It would wrap, and a wrapped row note gets
+        // no indent, which is a defect this menu has already been through once.
+        //
         // Indented with monospaced spaces so it sits under the bar. Padding a
         // proportional font gave a third of the intended indent.
         (reset.map { _ in "\n      " } ?? "", F_MONO, .secondaryLabelColor),
@@ -820,7 +903,11 @@ func quotaTitle(_ label: String, _ pct: Int, _ reset: Int?, _ ageSec: Int? = nil
         // What the tick is, spelled out, on the row that has room for it. The
         // menu bar can only afford the glyph, so this is where the vocabulary the
         // two surfaces share actually gets taught.
-        (pace == nil ? "" : "  \u{00B7}  \(paceNote(pct: pct, pace: pace))", F_SMALL, .tertiaryLabelColor),
+        // SECONDARY, not tertiary. This clause is the only place the ▲/▼/≈
+        // vocabulary is ever spelled out - the bar label has room for the glyph
+        // and nothing else - so it is the row's teaching text, and at 0.259 it
+        // was the faintest thing on a row it is supposed to explain.
+        (pace == nil ? "" : "  \u{00B7}  \(paceNote(pct: pct, pace: pace))", F_SMALL, .secondaryLabelColor),
     ])
 }
 
@@ -1157,6 +1244,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             it.isEnabled = it.action != nil
             menu.addItem(it)
         }
+        // EXCEPT THE ROWS THAT CARRY A READING, and this is the one place the rule
+        // above had to give way. AppKit composites a DISABLED item's attributed
+        // title at ~0.317 of full strength (measured off a real captured menu -
+        // see `--legibility-check`), so `.labelColor` lands at 0.27, which IS
+        // tertiary grey. A percentage nobody can read defeats the whole row, and
+        // no colour fixes it: `.labelColor` is already the strongest text colour
+        // macOS has, so the ceiling while disabled is grey by arithmetic.
+        //
+        // The cost is that these rows now highlight under the cursor and a click
+        // dismisses the menu, which is the "silently dead item" the rule was
+        // guarding against - accepted deliberately, because an unreadable reading
+        // is a worse failure than a row that does nothing when clicked. The
+        // SESSIONS header is deliberately NOT in this list: it is chrome, it
+        // carries no reading, and dim is what says so.
+        for it in [q5, q7, cxLine, battLine, statusLine, deviceLine] { it.isEnabled = true }
         return menu
     }
 
@@ -1762,6 +1864,33 @@ func dumpMenu(_ m: NSMenu, indent: String = "") -> String {
     return out
 }
 
+/// What AppKit does to a DISABLED menu item's attributed title, so the preview can
+/// do it too.
+///
+/// MEASURED, not assumed, and by two independent routes that agree: capturing a
+/// real popped-up menu holding two byte-identical attributed titles that differ
+/// only in `isEnabled` gave a peak-ink ratio of **0.317** over the menu backdrop,
+/// and `disabledControlTextColor.alphaComponent / labelColor.alphaComponent`
+/// (0.247 / 0.847) predicts **0.292**. The captured figure is the one used, being
+/// the behaviour rather than a proxy for it.
+///
+/// The multiplier is applied to each run's ALPHA rather than blended toward a grey,
+/// because that is what a composite at reduced opacity does, and because these are
+/// semantic colours whose resolved value differs between the two appearances this
+/// preview draws side by side.
+let DISABLED_INK_RATIO: CGFloat = 0.317
+
+func dimmedForDisabled(_ a: NSAttributedString) -> NSAttributedString {
+    let out = NSMutableAttributedString(attributedString: a)
+    out.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: out.length)) { v, r, _ in
+        guard let c = (v as? NSColor)?.usingColorSpace(.sRGB) else { return }
+        out.addAttribute(.foregroundColor,
+                         value: c.withAlphaComponent(c.alphaComponent * DISABLED_INK_RATIO),
+                         range: r)
+    }
+    return out
+}
+
 /// `--menu-preview <out.png>`: the menu's own attributed titles drawn as they will
 /// render, in BOTH appearances side by side. Every colour here is semantic
 /// (labelColor, secondaryLabelColor) and resolves at draw time, so light-only
@@ -1782,8 +1911,15 @@ func writeMenuPreview(to path: String, _ m: NSMenu, bar: NSAttributedString? = n
     }
     for it in m.items where !it.isHidden {
         if it.isSeparatorItem { rows.append((nil, 11)); continue }
-        let a = it.attributedTitle ?? NSAttributedString(
+        var a = it.attributedTitle ?? NSAttributedString(
             string: it.title, attributes: [.font: F_BODY, .foregroundColor: NSColor.labelColor])
+        // DISABLED ROWS ARE DIMMED HERE, because AppKit dims them on the glass and
+        // this preview did not - which is exactly how a shipped defect stayed
+        // invisible to the only instrument that can see this surface. A bar track
+        // was tuned against a full-strength render and landed at 0.076 effective
+        // alpha in the real menu, fainter than the value that had been rejected
+        // for being too faint. An instrument that flatters is worse than none.
+        if !it.isEnabled { a = dimmedForDisabled(a) }
         let h = a.boundingRect(with: CGSize(width: W - pad * 2, height: 400),
                                options: [.usesLineFragmentOrigin]).height
         rows.append((a, max(22, h + 8)))
@@ -1881,6 +2017,141 @@ app.setActivationPolicy(.accessory)
 // host, so what they show is what the bar would show - but dryRun keeps refresh
 // from touching the watchdog, because a diagnostic must never start or stop
 // anything.
+/// `--legibility-check`: every row that carries a READING renders at full strength.
+///
+/// This exists because a real defect shipped and NEITHER instrument could see it.
+/// AppKit composites a DISABLED menu item's attributed title at a fraction of
+/// full strength - MEASURED at 0.317 by capturing a real menu containing two
+/// byte-identical attributed titles differing only in `isEnabled`, and predicted
+/// independently by `disabledControlTextColor.alpha / labelColor.alpha` = 0.292.
+/// So a disabled row's `.labelColor` percentage lands at 0.847 x 0.317 = 0.27,
+/// which IS `.tertiaryLabelColor`: grey, and no colour choice can beat it, since
+/// `.labelColor` is already the strongest text colour there is.
+///
+/// `--menu-dump` prints `.string` and drops colour entirely, and `--menu-preview`
+/// drew every row at full strength regardless of `isEnabled` - so the menu looked
+/// correct in both while the glass showed grey. The preview now applies the same
+/// multiplier, and this check names the invariant so it cannot regress quietly.
+///
+/// The rows are named by REFERENCE, not matched by their text: a row's job is a
+/// property of what the code put in it, not of whether a percent sign survived
+/// into the string.
+/// `--menu-shot <out.png>`: THE REAL MENU, captured off the glass.
+///
+/// CLAUDE.md said for a long time that this surface "cannot be screenshotted -
+/// `screencapture` needs a TCC grant this process does not have", and every other
+/// instrument here was built around that wall. The grant exists now, so the wall
+/// is gone, and the two defects that hid behind it (a disabled row's dimming, and
+/// a bar track tuned against a full-strength render) are exactly the kind only a
+/// real capture settles.
+///
+/// The trick is that `popUp` is MODAL and blocks this process, so it cannot
+/// capture itself: a child `screencapture` is spawned FIRST and fires while the
+/// parent sits in menu tracking. Menu tracking still runs the run loop, so the
+/// timer that dismisses the menu afterwards does fire - without it the process
+/// would hang holding a menu open over the user's screen.
+if let i = CommandLine.arguments.firstIndex(of: "--menu-shot"),
+   CommandLine.arguments.count > i + 1 {
+    let path = CommandLine.arguments[i + 1]
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    // POPPED FROM applicationDidFinishLaunching, not inline before `run()`. Called
+    // inline the menu silently never appears - the capture comes back showing
+    // whatever was behind it, which reads as "the capture is broken" rather than
+    // "the menu was never shown". AppKit needs its loop up first.
+    final class Shot: NSObject, NSApplicationDelegate {
+        let path: String
+        init(_ p: String) { path = p }
+        func applicationDidFinishLaunching(_ n: Notification) {
+            let d = AppDelegate()
+            d.dryRun = true
+            let m = d.buildMenu()
+            d.refresh()
+            // CAPTURED BY WINDOW ID, NOT BY SCREEN REGION, and that is not a
+            // refinement - a region capture CANNOT TELL whether the menu was
+            // actually there. The first version guessed coordinates, the menu
+            // failed to appear once, and it cheerfully wrote a PNG of the editor
+            // behind it. An instrument that silently captures the wrong thing is
+            // the same failure as the preview that drew disabled rows at full
+            // strength: it answers confidently about something it never saw.
+            //
+            // So: find the window this process owns, capture THAT, and if there
+            // isn't one, fail loudly instead of writing a file. It also means only
+            // the menu is ever in the image - this runs on someone's desktop, and
+            // a screen grab would sweep in every other window they have open.
+            //
+            // The lookup runs on a BACKGROUND queue because `popUp` blocks the main
+            // thread for the whole life of the menu, which is exactly when the
+            // window exists.
+            DispatchQueue.global().async {
+                Thread.sleep(forTimeInterval: 1.2)
+                let mine = (CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
+                            as? [[String: Any]] ?? []).filter {
+                    ($0[kCGWindowOwnerPID as String] as? pid_t) == getpid()
+                }
+                // The menu is the largest window we own; there is no other
+                // candidate, but sorting by area beats trusting the list's order.
+                let best = mine.max { l, r in
+                    func area(_ w: [String: Any]) -> CGFloat {
+                        guard let b = w[kCGWindowBounds as String] as? [String: CGFloat] else { return 0 }
+                        return (b["Width"] ?? 0) * (b["Height"] ?? 0)
+                    }
+                    return area(l) < area(r)
+                }
+                guard let id = best?[kCGWindowNumber as String] as? Int else {
+                    print("menu-shot FAILED: this process owns no on-screen window, so the menu never appeared - NOT writing \(self.path)")
+                    exit(1)
+                }
+                let cap = Process()
+                cap.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                cap.arguments = ["-x", "-o", "-l", String(id), "-t", "png", self.path]
+                try? cap.run()
+                cap.waitUntilExit()
+                let ok = FileManager.default.fileExists(atPath: self.path)
+                print(ok ? "wrote \(self.path)  (the real menu window, off the glass)"
+                         : "menu-shot FAILED: screencapture wrote nothing for window \(id)")
+                // Back to the main thread to dismiss, because the menu must not be
+                // left sitting open over the user's screen if anything above threw.
+                DispatchQueue.main.async { m.cancelTracking(); exit(ok ? 0 : 1) }
+            }
+            // A BACKSTOP, in case the capture path never reaches its own exit: the
+            // failure mode without it is a menu held open on someone's desktop
+            // forever, which is worse than a missing screenshot.
+            Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { _ in
+                print("menu-shot FAILED: timed out with the menu still up")
+                m.cancelTracking()
+                exit(1)
+            }
+            // MODAL - this blocks until something above cancels tracking, which is
+            // the whole reason the capture had to be dispatched before it. Menu
+            // tracking still runs the run loop, so the timer and the async hop back
+            // both fire.
+            let h = NSScreen.main?.frame.height ?? 900
+            m.popUp(positioning: nil, at: NSPoint(x: 40, y: h - 30), in: nil)
+        }
+    }
+    let shot = Shot(path)
+    app.delegate = shot
+    app.run()
+}
+
+if CommandLine.arguments.contains("--legibility-check") {
+    let d = AppDelegate()
+    d.dryRun = true
+    _ = d.buildMenu()
+    d.refresh()
+    var failed = 0
+    for (name, it) in [("5h", d.q5), ("7d", d.q7), ("Codex", d.cxLine), ("battery", d.battLine)] {
+        guard !it.isHidden else { continue }
+        if it.isEnabled { print("  \(name): full strength"); continue }
+        print("FAIL \(name) is DISABLED, so AppKit draws its reading at ~31% - grey, unreadable")
+        failed += 1
+    }
+    print(failed == 0 ? "legibility: every reading renders at full strength"
+                      : "legibility: \(failed) row(s) FAILED")
+    exit(failed == 0 ? 0 : 1)
+}
+
 if CommandLine.arguments.contains("--menu-dump") || CommandLine.arguments.contains("--menu-preview") {
     let d = AppDelegate()
     d.dryRun = true
@@ -1967,7 +2238,13 @@ if CommandLine.arguments.contains("--sound-check") {
 /// reintroduces one fails with the reason attached rather than with a number.
 if CommandLine.arguments.contains("--pace-check") {
     var failed = 0
+    // COUNTED AND PRINTED, because CLAUDE.md used to hand-transcribe the total and
+    // a transcribed number drifts the moment anyone adds a case - the same reason
+    // the geometry checkers parse the constants they certify instead of copying
+    // them. Two of these loops sweep, so the figure is not countable by eye.
+    var ran = 0
     func eq<T: Equatable>(_ got: T, _ want: T, _ what: String) {
+        ran += 1
         if got == want { return }
         print("FAIL \(what): got \(got) want \(want)")
         failed += 1
@@ -1998,28 +2275,136 @@ if CommandLine.arguments.contains("--pace-check") {
     eq(paceGlyph(pct: 56, pace: 50), "\u{25B2}", "one past the deadband is ahead")
     eq(paceGlyph(pct: 44, pace: 50), "\u{25BC}", "one under is behind")
 
-    // The bar. Cell COUNT first: a tick is inserted, so it costs a character and
-    // never a cell of fill.
-    let plain = quotaBarParts(44)
-    eq(plain.pre.count + plain.tick.count + plain.post.count, BAR_CELLS, "no pace, ten cells")
-    eq(plain.tick, "", "no pace, no tick")
-    let ticked = quotaBarParts(44, pace: 41)
-    eq(ticked.pre.count + ticked.tick.count + ticked.post.count, BAR_CELLS + 1, "a tick adds a cell, never replaces one")
+    // The bar. These read the RUNS now rather than a (pre, tick, post) triple, so
+    // each one says which side of the tick it means via these three helpers -
+    // every claim the triple made is still made, and the fill/track colouring the
+    // triple could not express is now assertable too.
+    func width(_ runs: [(text: String, role: BarRole)]) -> Int {
+        runs.reduce(0) { $0 + $1.text.count }
+    }
+    func before(_ runs: [(text: String, role: BarRole)]) -> String {
+        runs.prefix(while: { $0.role != .tick }).map(\.text).joined()
+    }
+    func after(_ runs: [(text: String, role: BarRole)]) -> String {
+        runs.drop(while: { $0.role != .tick }).dropFirst().map(\.text).joined()
+    }
+
+    // Cell COUNT first: a tick is inserted, so it costs a character and never a
+    // cell of fill.
+    let plain = quotaBarRuns(44)
+    eq(width(plain), BAR_CELLS, "no pace, ten cells")
+    eq(plain.contains { $0.role == .tick }, false, "no pace, no tick")
+    let ticked = quotaBarRuns(44, pace: 41)
+    eq(width(ticked), BAR_CELLS + 1, "a tick adds a cell, never replaces one")
     // THE REGRESSION, by name: the tick used to overwrite the cell it landed on,
     // so a 1%-used bar whose clock had barely started lost its only ink and read
     // as nothing used - the exact claim the filled-at-least-one rule exists to
     // stop. Assert the INK, not the arithmetic that produced it.
-    let barely = quotaBarParts(1, pace: 4)
-    eq((barely.pre + barely.post).contains("\u{2588}"), true,
+    let barely = quotaBarRuns(1, pace: 4)
+    eq(barely.filter { $0.role == .fill }.map(\.text).joined().contains("\u{2588}"), true,
        "1% used keeps a filled cell even with the tick on top of it")
     // And the other one: a boundary at 100% is BAR_CELLS, one past the last
     // index, which an array write would have trapped on.
-    let full = quotaBarParts(100, pace: 100)
-    eq(full.post, "", "a fully elapsed window puts the tick after the last cell")
-    eq(full.pre.count, BAR_CELLS, "and leaves all ten cells before it")
-    let fresh = quotaBarParts(0, pace: 0)
-    eq(fresh.pre, "", "an unstarted window puts the tick before the first cell")
-    eq(quotaBarParts(96, pace: 90).pre.count, 9, "90% of ten cells is the ninth boundary")
+    let full = quotaBarRuns(100, pace: 100)
+    eq(after(full), "", "a fully elapsed window puts the tick after the last cell")
+    eq(before(full).count, BAR_CELLS, "and leaves all ten cells before it")
+    let fresh = quotaBarRuns(0, pace: 0)
+    eq(before(fresh), "", "an unstarted window puts the tick before the first cell")
+    eq(before(quotaBarRuns(96, pace: 90)).count, 9, "90% of ten cells is the ninth boundary")
+    // Every run is one kind of ink, at every fill/pace combination there is - the
+    // property `quotaTitle`'s colouring rests on. Checked exhaustively rather than
+    // at a few points, because the fill boundary and the tick move independently
+    // and it is their ORDER that decides how many runs there are.
+    // ONE assertion for the whole sweep, not one per pair: 10,201 passing `eq`
+    // calls would drown the count this check now prints, and the CLAIM really is
+    // singular - every run is one kind of ink, everywhere. The first offending
+    // pair is named, because "somewhere in 10,201" is not a bug report.
+    var mixedAt = ""
+    for pct in 0...100 {
+        for pace in 0...100 {
+            for r in quotaBarRuns(pct, pace: pace) where r.role != .tick {
+                let want = r.role == .fill ? "\u{2588}" : "\u{2591}"
+                if r.text.contains(where: { String($0) != want }), mixedAt.isEmpty {
+                    mixedAt = "pct \(pct) pace \(pace) run \"\(r.text)\" as \(r.role)"
+                }
+            }
+        }
+    }
+    eq(mixedAt, "", "every run is one kind of ink, over all 101x101 (pct, pace) pairs")
+
+    // THE ORDER AND THE WEIGHT, which the colour assertions above do not touch -
+    // proven by reverting each and watching all 49 still pass. Both are the actual
+    // point of the row's layout, so both get a named claim: the figure the row
+    // exists to report comes BEFORE the texture that gives it context, and it is
+    // the heaviest thing on the line so the eye lands on it rather than on the
+    // label naming it or the bar beside it.
+    let row = quotaTitle("5h", 44, 30, 1, windowMin: WINDOW_5H_MIN)
+    let rowStr = row.string as NSString
+    let pctAt = rowStr.range(of: "44%").location
+    let barAt = rowStr.range(of: "\u{2588}").location
+    eq(pctAt != NSNotFound && barAt != NSNotFound, true, "the row has both a percentage and a bar")
+    eq(pctAt < barAt, true, "the percentage comes BEFORE the bar, not downstream of it")
+    var pctFont: NSFont? = nil
+    row.enumerateAttribute(.font, in: NSRange(location: pctAt, length: 3)) { f, _, _ in
+        pctFont = f as? NSFont
+    }
+    eq(pctFont?.fontName, F_MONO_BOLD.fontName, "the percentage is drawn in the bold face")
+    eq(pctFont?.fontDescriptor.symbolicTraits.contains(.bold), true,
+       "and that face is actually bold, not merely a different name for the regular one")
+
+    // NOT about this code: SF Mono is claimed to hold one advance across weights,
+    // which is what lets the bold percentage sit in a column padded by `%3d`
+    // without shifting the bar beside it. A font that stopped doing so would
+    // misalign every quota row, so it is measured here rather than assumed.
+    eq(F_MONO_BOLD.pointSize, F_MONO.pointSize, "the bold figure is the same size as the row around it")
+    eq(("0123456789% used" as NSString).size(withAttributes: [.font: F_MONO_BOLD]).width.rounded(),
+       ("0123456789% used" as NSString).size(withAttributes: [.font: F_MONO]).width.rounded(),
+       "bold and regular mono advance identically, or the columns break")
+
+    // THE SMEAR, by name. Fill and track differ only in INK, not in shape, so
+    // they are legible against each other only if they are drawn in different
+    // COLOURS - and the version that shipped split at the pace tick, which is not the
+    // fill boundary, so a single run could carry both. It did: `quotaTitle` drew
+    // every cell in the usage colour, making the empty track that colour at 25%
+    // coverage immediately beside the fill at 100%, and the bar read as one grey
+    // smear with no readable end. Assert the ATTRIBUTED OUTPUT rather than the
+    // strings, because the defect was never in the arithmetic - the cells were
+    // always right and only their colouring was wrong, which is exactly the shape
+    // of bug that survives a reading of the code.
+    //
+    // Asserted TWICE, because "can be coloured apart" and "is coloured apart" are
+    // different claims and only the second one is what you see: first that no run
+    // carries both inks (the structural half - a run is one colour by definition,
+    // so a mixed run makes the rest impossible), then that the two inks actually
+    // came out different colours (the visual half).
+    //
+    // The STALE case is in this list on purpose. It is the one that nearly
+    // shipped: staleness dims the fill to tertiary, and a track fixed at tertiary
+    // would have matched it exactly - the same smear, reappearing on exactly the
+    // rows whose numbers we already cannot vouch for.
+    for (name, pct, age) in [("mid", 44, 1), ("barely", 1, 1), ("nearly", 96, 1),
+                             ("high", 85, 1), ("critical", 97, 1),
+                             ("stale", 44, QUOTA_STALE_SEC + 1)] {
+        let t = quotaTitle(name, pct, 30, age, windowMin: WINDOW_5H_MIN)
+        let str = t.string as NSString
+        var inkColour: [String: Set<String>] = ["\u{2588}": [], "\u{2591}": []]
+        t.enumerateAttributes(in: NSRange(location: 0, length: t.length)) { attrs, r, _ in
+            let run = str.substring(with: r)
+            let c = (attrs[.foregroundColor] as? NSColor).map { "\($0)" } ?? "none"
+            for ink in ["\u{2588}", "\u{2591}"] where run.contains(ink) {
+                inkColour[ink]?.insert(c)
+                eq(run.contains(ink == "\u{2588}" ? "\u{2591}" : "\u{2588}"), false,
+                   "\(name): no run carries both fill and track ink, or they cannot be coloured apart")
+            }
+        }
+        // Only meaningful where the bar actually has both - a 100% bar has no
+        // track and a 0% one no fill, and asserting over an empty set would pass
+        // for the wrong reason.
+        if let f = inkColour["\u{2588}"], let k = inkColour["\u{2591}"], !f.isEmpty, !k.isEmpty {
+            eq(f.isDisjoint(with: k), true,
+               "\(name): the track is drawn in a DIFFERENT colour from the fill, or the bar is one smear")
+        }
+    }
 
     // Codex's window, off the host's own tick line. A missing one must be nil, so
     // the row draws no tick rather than assuming seven days.
@@ -2037,10 +2422,11 @@ if CommandLine.arguments.contains("--pace-check") {
     eq(barUsageParts(st).map(\.0).joined().contains("\u{25B2}"), true, "a fresh reading gets its glyph")
     st.quotaAgeSec = QUOTA_STALE_SEC + 1
     eq(barUsageParts(st).map(\.0).joined().contains("\u{25B2}"), false, "a stale reading loses it")
-    eq(quotaBarParts(96, pace: pacePct(resetInMin: 30, windowMin: WINDOW_5H_MIN)).tick, "\u{2502}",
+    eq(quotaBarRuns(96, pace: pacePct(resetInMin: 30, windowMin: WINDOW_5H_MIN))
+        .contains { $0.role == .tick }, true,
        "and the tick is what the row loses with it")
 
-    print(failed == 0 ? "pace: all checks passed" : "pace: \(failed) FAILED")
+    print(failed == 0 ? "pace: all \(ran) checks passed" : "pace: \(failed) of \(ran) FAILED")
     exit(failed == 0 ? 0 : 1)
 }
 

@@ -424,17 +424,22 @@ node firmware/deckhand_display/palette-check.mjs
 node firmware/deckhand_display/palette-check.mjs --selftest
 ```
 
-**Check the MENU-BAR APP, which cannot be clicked from a script and cannot be screenshotted** —
-`screencapture` needs a TCC grant this process does not have. So every claim about that surface is
-made through one of these, and they are commands rather than prose for the reason the board
-baseline is: running them must not be a thing to remember.
+**Check the MENU-BAR APP, which cannot be clicked from a script — but CAN now be screenshotted,
+and that claim was wrong for a long time.** This file said `screencapture` needs a TCC grant this
+process does not have, and every instrument here was built around that wall. **The grant exists
+now: measured, by running it.** So `--menu-shot` captures the real menu off the glass, and the
+indirect instruments below stop being the only evidence. Every claim about this surface is still
+made through one of these, as commands rather than prose for the reason the board baseline is:
+running them must not be a thing to remember.
 
 ```
 mac-app/build.sh                                          # swiftc + ad-hoc codesign; the .app is not committed
 B=mac-app/DeckhandMenuBar.app/Contents/MacOS/DeckhandMenuBar
-$B --pace-check                # the pace arithmetic: 30 assertions, no host, no device
+$B --pace-check                # the pace arithmetic and the bar's colouring; prints its own count
 $B --sound-check [play]        # every needs-input sound resolves, and the asking-edge script
 $B --menu-dump                 # the composed bar label, tooltips, every row, checkmarks, tips
+$B --legibility-check          # every row carrying a READING renders at full strength
+$B --menu-shot out.png         # THE REAL MENU, off the glass - captured by window id
 $B --menu-preview out.png      # the bar label AND the menu, rendered light and dark
 $B --icon-preview out.png      # the boat at every size and style, 6x nearest-neighbour
 $B --open-session [<id>] [go]  # what a click on each session row would do (prints; acts only on `go`)
@@ -2499,11 +2504,129 @@ Four things are load-bearing:
     Inserting costs one character of width and loses no fill at any percentage; a bar with a pace
     is 11 cells and one without is 10, deliberately, because padding the pace-less case with a
     blank would put a blank exactly where a 0% tick goes.
-  - **The tick is drawn in its own colour, which is why `quotaBarParts` returns THREE pieces.**
-    Inheriting the fill's colour made it a red line among red blocks, findable only as the notch
-    its own cell's background happened to make. It means "now", which is not a status, so it takes
-    a neutral secondary grey against a fill that may be red or orange. Splitting the string is the
-    only way an attributed run can colour them apart.
+  - **A DISABLED MENU ROW IS DRAWN AT ~31% OF FULL STRENGTH, WHICH MADE EVERY READING GREY — AND
+    BOTH INSTRUMENTS SAID IT WAS FINE.** This is the most important entry on this page about the
+    menu, because the defect was reported by a person looking at the glass after two instruments
+    had passed it.
+    - **The mechanism.** `buildMenu`'s rule is `it.isEnabled = it.action != nil` — an item with no
+      action is information — so the quota rows were disabled. AppKit composites a disabled item's
+      **attributed** title at reduced opacity, so `.labelColor` (α 0.847) lands at **0.27**, which
+      *is* `.tertiaryLabelColor`. Grey. **No colour can fix it while the row is disabled**, because
+      `.labelColor` is already the strongest text colour macOS has — the ceiling is grey by
+      arithmetic.
+    - **MEASURED TWO WAYS THAT AGREE, rather than inferred.** A throwaway probe popped a real menu
+      holding two **byte-identical** attributed titles differing only in `isEnabled`; captured, the
+      peak-ink ratio over the menu backdrop was **0.317**. Independently,
+      `disabledControlTextColor.alpha / labelColor.alpha` = 0.247/0.847 = **0.292**. The captured
+      figure is the one used, being the behaviour rather than a proxy for it.
+    - **What it did to colours chosen against the preview:** the percentage 0.847 → 0.27, the `5h`
+      label 0.498 → 0.145, and **the bar track 0.259 → 0.076 — fainter than the
+      `.quaternaryLabelColor` (0.098) that had just been rejected for being too faint.** Every
+      value in the block was crushed by 3.2x.
+    - **THE ROOT CAUSE WAS THE INSTRUMENT, not the colours.** `--menu-preview` drew every row at
+      full strength regardless of `isEnabled`, and `--menu-dump` prints `.string` and drops colour
+      entirely — so a track was tuned on a render that could not show the thing being tuned. The
+      preview now applies `DISABLED_INK_RATIO` to each run's alpha. **An instrument that flatters
+      is worse than none**, and this is the second time that exact sentence has been earned here.
+    - **The fix is to ENABLE the rows that carry a reading** (`q5`, `q7`, `cxLine`, `battLine`,
+      `statusLine`, `deviceLine`), which is a deliberate exception to the action-implies-control
+      rule. **Cost, accepted:** those rows now highlight under the cursor — **measured, not assumed**
+      (a probe popped a menu of enabled nil-action rows, warped the cursor onto one and captured it
+      highlighted blue; note a `CGWarpMouseCursorPosition` alone is NOT enough, since menu tracking
+      updates its highlight from mouse-moved EVENTS, so one has to be posted). A click dismissing
+      the menu and arrow-key navigation stopping on these rows follow from their being enabled and
+      are **expected rather than measured**. That is exactly the "silently dead item" the rule
+      guarded against; an unreadable reading is the worse failure. The `SESSIONS` header is
+      deliberately NOT in that list: it carries no reading, and dim is what says so.
+    - **`--legibility-check` names the invariant** and identifies the rows **by reference, not by
+      matching their text**: a row's job is a property of what the code put in it, not of whether a
+      percent sign survived into the string. Reverting the fix fails it by name, three rows at once.
+    - **`--menu-shot` captures BY WINDOW ID, never by screen region**, and that is not a
+      refinement. The first version guessed coordinates; the menu failed to appear once and it
+      cheerfully wrote a PNG of the editor behind it — the same class of lie as the flattering
+      preview. It now finds the window this process owns and **fails loudly rather than writing a
+      file** if there isn't one. It also means only the menu is in the image, which matters because
+      this runs on someone's desktop. Two ordering facts are load-bearing: `popUp` must be called
+      from `applicationDidFinishLaunching` (called inline before `run()` the menu silently never
+      appears), and the capture must be dispatched BEFORE it, because `popUp` is modal and blocks
+      the main thread for exactly as long as the window exists. An 8s timer is the backstop, since
+      the failure without it is a menu left open on someone's screen forever.
+  - **Stale readings are `.secondaryLabelColor`, not `.tertiaryLabelColor`.** Dimmer than a live
+    reading is the point (0.498 against 0.847), but tertiary's 0.259 made the figure itself hard to
+    read, and "we cannot vouch for this number" is not the same claim as "you may not read this
+    number". The word `stale` beside it carries the meaning; the dimming only supports it.
+  - **The sub-line's pace clause is `.secondary` too.** It is the only place the ▲/▼/≈ vocabulary
+    is ever spelled out — the bar label has room for the glyph and nothing else — so it is the
+    row's teaching text, and at tertiary it was the faintest thing on a row it exists to explain.
+  - **THE BAR IS SPLIT INTO COLOURED RUNS — `quotaBarRuns` returns `[(String, BarRole)]` — because
+    FILL, TRACK AND TICK ARE THREE ROLES, AND EACH NEEDING ITS OWN COLOUR WAS LEARNED TWICE.**
+    An attributed run is one colour by definition, so a run that spans two roles makes colouring
+    them apart impossible; splitting is the whole mechanism.
+    - **The TICK, first.** Inheriting the fill's colour made it a red line among red blocks,
+      findable only as the notch its own cell's background happened to make. It means "now", which
+      is not a status, so it takes a neutral secondary grey against a fill that may be red or
+      orange.
+    - **The TRACK, second, and this one SHIPPED for months.** The function split at the tick
+      ALONE and returned `(pre, tick, post)`, each of which could carry both `█` and `░` — so
+      `quotaTitle` drew every cell in the usage colour, putting the empty track in that colour at
+      25% coverage immediately beside the fill at 100%. Same hue, adjacent, no boundary: the bar
+      read as **one grey smear whose end could not be located**, and the tick added for the bullet
+      above was invisible inside it. Fill and track differ in INK, not in shape (which is why
+      `▰`/`▱` were rejected), and **ink alone is not separation when both are the same colour** —
+      that is the transferable half.
+    - **Three roles, three VALUES, and the ordering is load-bearing:** fill at full strength, tick
+      a step down (`.secondaryLabelColor`), track a step below that (`.tertiaryLabelColor`). The
+      tick must OUTRANK the track it sits in; at the track's own value it goes straight back to
+      being findable only as a notch, i.e. the first bullet's defect returning through the fix for
+      the second. Tried at `.secondaryLabelColor` and rejected on the render for exactly that.
+    - **`.quaternaryLabelColor` was the first attempt at the track and is TOO FAINT**, because it
+      compounds: a 25%-ink glyph in a ~25%-alpha colour is ~6% effective, and the bar became a
+      block floating in blank space — boundary crisp, SCALE gone, and the Codex row at 0% simply
+      empty. Menu rows are also disabled, which AppKit may dim further.
+    - **THE TRACK STEPS DOWN WITH THE FILL RATHER THAN BEING A FIXED COLOUR**, and this one was
+      caught by fault injection before it shipped: a stale reading dims its fill to
+      `.tertiaryLabelColor`, so a track fixed there matches it EXACTLY and reproduces the smear on
+      precisely the rows whose numbers are least trustworthy. Stale rows take a quaternary track.
+  - **THE NUMBER LEADS AND THE BAR FOLLOWS IT.** The row read label → bar → number, so the one
+    figure being reported sat downstream of eleven characters of texture, and the pace glyph — a
+    statement ABOUT that figure — ended up detached at the right margin with the bar between them.
+    It is now label → bold percentage → glyph → bar. `F_MONO_BOLD` is SF Mono semibold at
+    `F_MONO`'s size; SF Mono holds one advance across weights, so the `%3d` column padding still
+    aligns, and `--pace-check` MEASURES that rather than trusting it.
+  - **The pace glyph is NEUTRAL on the menu row, not the usage colour**, for the same reason the
+    tick is: it reports a COMPARISON, not a level. In the usage colour a red `▼` sat beside a red
+    96% and read as part of the alarm, when `▼` is the *reassuring* half of the pair — the
+    percentage is climbing slower than the clock. A colour that inverts the meaning of the glyph it
+    paints is worse than no colour on it. The BAR LABEL still fuses glyph to figure in one colour,
+    deliberately: it has no room for the words that carry the meaning here.
+  - **Staleness is `.secondaryLabelColor`, NOT `.systemOrange`.** Orange is also the 80%-high
+    colour, so a stale row was both the loudest ink in the block and wearing the warning colour —
+    it looked like an alarm about usage on the one row whose numbers we explicitly cannot vouch
+    for. Staleness is an absence of information; it is already said in words and by the dimmed
+    figure beside it.
+  - **The reset stays on the SUB-LINE, and that is measured rather than preferred.** With the
+    number leading, the main row ends around 232px of a 316px lane, so promoting `resets in` up to
+    it looks free — but the widest real case, `  resets in 5d 8h`, is 17 monospaced cells ≈ 112px
+    against 84px spare. It would wrap, and a wrapped row note gets no indent, which is a defect
+    this menu has already been through once.
+  - **`--pace-check` asserts the colouring TWICE, because "can be coloured apart" and "IS coloured
+    apart" are different claims and only the second is what you see:** that no run carries both
+    inks (structural), and that the two inks came out different colours (visual). It runs over
+    fresh/high/critical/stale rows, plus an exhaustive sweep of all 101x101 (pct, pace) pairs
+    asserting every run is one kind of ink. Both regressions were fault-injected and each fails by
+    name — a fixed-tertiary track fails on `stale`, a usage-coloured track fails on four rows.
+    **The ORDER and the WEIGHT are asserted separately, and that gap was found by fault injection
+    rather than by reading:** reverting the bold face and reverting the number back to sitting after
+    the bar BOTH passed all the colour assertions, i.e. the two changes at the heart of the layout
+    were uncovered. There are now named claims for each ("the percentage comes BEFORE the bar, not
+    downstream of it"; "the percentage is drawn in the bold face", plus a second one checking the
+    face is genuinely bold rather than just differently named), and each fails by name when
+    reverted.
+    It **prints how many assertions it ran** (53 today) rather than having the figure transcribed
+    here, for the same reason the geometry checkers parse the constants they certify: a hand-copied
+    total drifts the moment anyone adds a case. The sweep counts as ONE assertion — 10,201 passing
+    calls would drown the figure, and the claim really is singular — but it names the first
+    offending pair, because "somewhere in 10,201" is not a bug report.
 - **THE BAR LABEL IS NOW COLOURED, and that does NOT contradict the "no tint, ever" rule above
   it.** The rule is about the TEMPLATE IMAGE, whose colour macOS overrides with the menu bar's own
   — which is why the boat gave up on colour. An attributed string's `foregroundColor` is honoured,
@@ -2515,8 +2638,9 @@ Four things are load-bearing:
   colour there is an accent on a figure that already states the fact in digits.
 - **Two of the three defects in that work were caught by LOOKING, not by reading**, which is why
   `--menu-preview` now renders the bar label as its own band above the menu: `--menu-dump` prints
-  `.string` and drops every colour, and `screencapture` needs a TCC grant this process does not
-  have. What the render caught: the overwritten cell above; the row note WRAPPING onto a third
+  `.string` and drops every colour. (`screencapture` was believed unavailable to this process for
+  a long time and is NOT — see `--menu-shot` above; the render still earns its place, because it
+  shows both appearances side by side where a capture shows only the one the Mac is set to.) What the render caught: the overwritten cell above; the row note WRAPPING onto a third
   line with no indent (the indent is a literal `\n      `, and a soft wrap gets none), which is why
   the verdict reads `ahead of pace` and not `ahead of the clock` — 53 characters wrapped, 41 fits;
   and an unspaced separator sitting hard against the glyph before it (`96%▲·50%`), which reads as
