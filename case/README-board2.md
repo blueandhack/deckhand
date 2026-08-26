@@ -53,6 +53,33 @@ present as "the board doesn't fit", and they want different fixes:
 cavity measures 54.0, the number is compensating for the printer inside the model, where
 it will silently mis-size the next design too.
 
+## Screwing the board down
+
+`board_screws = true` puts an **M3 pilot in each of the four columns** instead of a
+locating pin — they need the same axis, so it is one or the other. The screw passes
+through the board's Ø3.2 hole (M3's 3.0 major clears it) and threads straight into the
+plastic.
+
+**No captive nuts, and that is this design's existing pattern rather than a shortcut.**
+The stand hinge already threads M3 into plastic, and its comment says why: *"a nut is
+6.5 mm across corners, which is what forced the old 9 mm knuckle and all the bulk."*
+
+| | |
+|---|---|
+| pilot | Ø2.5 — the M3 tap drill, ~92% engagement, same as `ks_pilot` |
+| depth | 4.3 mm ≈ 1.4 × M3 diameter |
+| column wall around it | 2.25 mm |
+| front skin left | **1.0 mm** |
+
+**The depth is limited by the front face, not by preference.** The column alone is only
+3.1 mm tall — one screw diameter, which is marginal — so the pilot continues down into
+the front slab for another 1.2. What it must never do is break through: those four points
+sit under the bezel, where a dimple would be visible from the front. `screw_skin = 1.0`
+is the material left, and the render confirms an unbroken front face.
+
+**Set `board_screws = false` to get the locating pins back**, which is board 1's
+behaviour: they fix the board laterally and hold it against nothing.
+
 ## Every board number is from the vendor drawing
 
 Board 1's file says *"MEASURE YOURS AND EDIT"*, because nobody had a drawing. Board 2

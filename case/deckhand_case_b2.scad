@@ -41,11 +41,20 @@
 // few grams and it checks exactly these.
 //
 // Mounting (the standard way, per the weather-station example):
-//   * The BODY (front) carries 4 COLUMNS that rise to the board's back plane.
-//     The board drops in screen-first, sits on the 4 column tops (aligned to
-//     its 4 corner mounting holes) and is bolted down with 4 M3 screws — the
-//     screws pass through the board holes and thread into nuts trapped at the
-//     base of each column. The screen shows through the front window.
+//   * The BODY (front) carries 4 COLUMNS. The board drops in screen-first and
+//     sits on the 4 column tops, aligned to its 4 corner mounting holes, then
+//     4 M3 screws pass through those holes and thread STRAIGHT INTO THE PLASTIC
+//     (board_screws / screw_pilot). The screen shows through the front window.
+//
+//     THIS TEXT WAS INHERITED AND WAS WRONG IN BOTH DIRECTIONS. It described
+//     "nuts trapped at the base of each column" - there are no nut traps here or
+//     in board 1's file, and the hinge's own comment explains why nobody wants
+//     them ("a nut is 6.5 mm across corners, which is what forced the old 9 mm
+//     knuckle and all the bulk"). Meanwhile the geometry it sat above said the
+//     opposite: "The pins fix the board laterally, so no screws or nut traps are
+//     needed" - locating pins, no screws at all. A header claiming a fastening
+//     the model does not have is the third instance of this exact defect in this
+//     file, after the RESET/BOOT holes and the stand's own description.
 //   * The battery lies on the back of the board in the cavity behind it.
 //   * The BACK cover SNAPS on (barbed lip) — no screws through the back.
 //
@@ -136,6 +145,30 @@ col_d    = 7.0;     // mounting column diameter (the shoulder the board rests on
 // if you'd rather the pins do the locating and your printer is well calibrated.
 pin_d    = 1.3;
 pin_lead = 0.3;     // conical lead-in at the tip so the board drops on easily
+
+// ---------- Screwing the board down (board 2) ----------
+// The pins locate the board but do not HOLD it: lift the case and the board is
+// resting on four shoulders with nothing above it but the cover. With screws it
+// is fixed to the body and the cover becomes a lid rather than a retainer.
+//
+// M3 THREADING STRAIGHT INTO THE PLASTIC, no captive nut - which is this design's
+// established pattern rather than a new idea: the stand hinge already does it,
+// and its comment explains why ("a nut is 6.5 mm across corners, which is what
+// forced the old 9 mm knuckle and all the bulk"). ks_pilot is 2.5 for the same
+// M3, so this matches it. M3's 3.0 major clears the board's Ø3.2 holes.
+//
+// A screw REPLACES the pin - they want the same axis - so board_screws picks one
+// or the other rather than adding to it.
+board_screws = true;
+screw_pilot  = 2.5;  // M3 tap drill: ~92% thread engagement, same as ks_pilot
+// HOW DEEP, and the constraint is the FRONT FACE. The column is only
+// z_pcb_f - front_th = 3.1 mm tall, which is one M3 diameter of engagement -
+// marginal. Continuing the pilot down INTO the front slab buys another 1.2,
+// giving 4.3 (~1.4 diameters), which is enough for a board that sees no load
+// beyond its own weight. What it must never do is break through: screw_skin is
+// the material left between the pilot's bottom and the outside of the front
+// face, and at 1.0 that skin is under the screen bezel where a dimple would show.
+screw_skin   = 1.0;
                     // (kept small — a big taper on a thin pin leaves a point)
 
 // Window = the ACTIVE display area plus a hair, not the full 54.50 x 83.00
@@ -607,7 +640,7 @@ function snaps() = [ [out_w*0.42, wall/2], [out_w*0.58, wall/2],
 // ============================================================================
 // BODY (front) — window, walls, 4 columns, snap catches
 // ============================================================================
-module body(){
+module body_core(){
   difference(){
     // outer shell, open at the back
     soft_box(out_w,out_h,body_d,oc_r,soft_r);
@@ -730,7 +763,8 @@ module body(){
   // of the model assumed (which also ate cavity depth).
   for(c=holes()){
     translate([c[0],c[1],front_th-0.01]) cylinder(d=col_d, h=z_pcb_f-front_th+0.01);
-    translate([c[0],c[1],z_pcb_f-0.01]){
+    // The locating pin, ONLY when not screwing: a screw needs this same axis.
+    if (!board_screws) translate([c[0],c[1],z_pcb_f-0.01]){
       cylinder(d=pin_d, h=board_t-pin_lead+0.01);                                  // locating land
       translate([0,0,board_t-pin_lead])
         cylinder(d1=pin_d, d2=pin_d-2*pin_lead, h=pin_lead+0.01);                  // lead-in taper
@@ -1013,6 +1047,22 @@ module mic_module(){
   translate([x0 - mic_under, wall + mic_y0, z0]) cube([mic_under, mic_pad_len - 1.0, 4.0]); // pins/solder
   translate([x0 + mic_t, wall + mic_y0 + mic_l - mic_can_from_end, z0 + mic_w/2])
     rotate([0,90,0]) cylinder(d = mic_can_d, h = mic_can_h);
+}
+
+// The screw pilots are subtracted from the WHOLE body, not from the columns, and
+// that is why body_core exists. body() adds its mounting posts AFTER its own
+// difference() block, as siblings - so a pilot cut inside that block would miss
+// the columns, and one cut against a column alone would leave the front slab
+// beneath it solid. Wrapping is the smaller change: the geometry above is
+// untouched and this adds one subtraction over all of it.
+module body(){
+  difference(){
+    body_core();
+    if (board_screws)
+      for (c = holes())
+        translate([c[0], c[1], screw_skin])
+          cylinder(d = screw_pilot, h = z_pcb_f - screw_skin + 0.01);
+  }
 }
 
 // ============================================================================
