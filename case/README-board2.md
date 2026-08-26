@@ -77,33 +77,44 @@ the front slab for another 1.2. What it must never do is break through: those fo
 sit under the bezel, where a dimple would be visible from the front. `screw_skin = 1.0`
 is the material left, and the render confirms an unbroken front face.
 
-### The screws would not drive — two causes, and the length is the bigger one
+### Two symptoms, one printer
 
-**Use M3 × 5.** Usable thread is 4.3 mm and the board adds 1.6, so **5.9 mm is the
+The board not seating and the screws not driving turned out to be **the same fault**, and
+they are now corrected by one named constant rather than two fudges:
+
+```
+print_shrink = 0.5;   // measured on a DIAMETER or an opening; 0.25 per surface
+```
+
+Internal features print undersize because the extruded bead sits *inside* the modelled
+boundary. The coupon showed 0.5 mm missing across a 55 mm cavity opening — 0.25 per
+surface — and the same 0.25 per side turns a modelled Ø2.6 bore into ~2.1, which is
+exactly the interference that stopped the screws. `clr_w` is now `print_shrink / 2` and
+the pilot is `screw_pilot_target + print_shrink`, so both follow the one measurement.
+
+**The right place to fix this is your slicer, not this file.** Every slicer has an XY size
+compensation (Cura *Horizontal Expansion*, PrusaSlicer/Orca *XY size compensation*): set
+it to **+0.25** and every part you print comes out right, including other people's designs.
+Compensating here fixes this one model and silently mis-sizes the next. **If you set the
+slicer, put `print_shrink` back to 0.**
+
+### The screws — use M3 × 5, self-tapping
+
+**Length first.** Usable thread is 4.3 mm and the board adds 1.6, so **5.9 mm is the
 longest screw that will not bottom out**. An M3 × 8 stops 2.1 mm early and cannot be
-driven home *whatever the pilot is* — and it feels exactly like a hole that is too small,
-which is what makes it worth naming first.
+driven home *whatever the pilot is*.
 
-**The pilot went 2.5 → 2.6, and the small step is deliberate.** 2.9 was tried first and
-is wrong: engagement is `(major − hole) / (major − minor)`, so Ø2.9 leaves ~18% of thread
-— board 1's file warns that even 2.7 was *"far too loose — the threads would strip"*.
-That trades a screw that won't go in for one that goes in and holds nothing, which is the
-worse failure because it looks like success.
+**Pilot: Ø2.9 modelled → ~2.4 printed.** 2.4 is the ~0.8 × major that thread-forming into
+thermoplastic wants for M3.
 
-The right target isn't the tap-drill table at all. **A tap drill assumes a cutting tap and
-a hole the size you asked for**; this is a thread-*forming* screw in thermoplastic, where
-the usual pilot is ~0.8 × major = **2.4 for M3**. FDM bores print undersize by roughly
-0.2, so:
-
-| modelled | prints ≈ | engagement |
-|---|---|---|
-| 2.5 | 2.3 | 129% — has to displace far too much, and won't drive |
-| **2.6** | **2.4** | **111% — right for forming in plastic** |
-| 2.9 | 2.7 | 55% — strips |
-
-A **conical lead-in** was also added at each column top: the screw is started blind,
-through a board hole 1.6 mm above the plastic, and a thread-forming tip wants to walk
-before it bites.
+This was got wrong twice, and how is worth recording. First **2.5**, from an M3 tap-drill
+table — the wrong reference entirely, since a tap drill assumes a *cutting* tap and a hole
+the size you asked for. Then **2.9 was tried and talked back down to 2.6** using an
+engagement calculation that assumed the printed hole equals the modelled hole — ignoring
+the very shrinkage the same paragraph had just invoked. 2.9 was right; the reasoning
+offered for it was wrong, and the reasoning against it was worse. Engagement is now
+computed on the **printed** size, where it means something: 2.9 → 2.4 → ~111% of thread,
+which is correct for forming in plastic.
 
 **Set `board_screws = false` to get the locating pins back**, which is board 1's
 behaviour: they fix the board laterally and hold it against nothing.

@@ -179,8 +179,23 @@ board_screws = true;
 // with a drill bit" - the same fix, applied by hand after every print instead of
 // once in the model.
 //
-// Column wall at 2.6 is (7.0 - 2.6)/2 = 2.2 mm, thick enough not to split.
-screw_pilot  = 2.6;  // M3 thread-forming into a BLIND hole, printed on FDM
+// So the pilot is stated as the size the bore must MEASURE, with the printer's
+// shrink added on - rather than as a modelled number someone has to keep
+// re-guessing. 2.4 is the ~0.8 x major that thread-forming into thermoplastic
+// wants for M3; + print_shrink lands the printed bore there.
+//
+// A NOTE ON HOW THIS WAS GOT WRONG TWICE. First 2.5, from an M3 tap-drill table -
+// wrong reference entirely, since a tap drill assumes a CUTTING tap and a hole
+// the size you asked for. Then 2.9 was tried and talked back down to 2.6 using an
+// engagement calculation - which assumed the printed hole equals the modelled
+// hole, ignoring the very shrinkage the same paragraph had just invoked. 2.9 was
+// right; the reasoning offered for it was not, and the reasoning against it was
+// worse. Engagement is now computed on the PRINTED size, where it means something:
+// 2.9 modelled -> 2.4 printed -> ~111% of thread, correct for forming in plastic.
+//
+// Column wall at 2.9 is (7.0 - 2.9)/2 = 2.05 mm, still thick enough not to split.
+screw_pilot_target = 2.4;                        // what the bore must MEASURE
+screw_pilot  = screw_pilot_target + print_shrink; // 2.9 modelled on this printer
 // HOW DEEP, and the constraint is the FRONT FACE. The column is only
 // z_pcb_f - front_th = 3.1 mm tall, which is one M3 diameter of engagement -
 // marginal. Continuing the pilot down INTO the front slab buys another 1.2,
@@ -530,6 +545,24 @@ ks_pilot   = 2.5;  // pilot hole in the boss — the M3 screw cuts its own threa
                    // If it drives too hard, open it to 2.6 with a drill bit.
 ks_leaf_th = 3.0;  // blade thickness at the tip (it tapers from ks_barrel at the nose)
 
+// ---------- This printer's dimensional error, measured ----------
+// TWO SYMPTOMS, ONE CAUSE, so it is one named number rather than a fudge factor
+// hidden in each feature. From printed coupons:
+//   - the board would not seat: the cavity came out ~0.5 small on a 55.0 opening
+//   - a Ø2.6 screw pilot would not take a 3 mm self-tapper wanting ~2.4
+// Both are internal features, and both shrink because the extruded bead sits
+// INSIDE the modelled boundary. 0.5 on an opening is 0.25 per surface, and the
+// same 0.25 per side turns a modelled Ø2.6 bore into ~2.1 - which is exactly the
+// interference that stopped the screws. One constant explains both.
+//
+// THE RIGHT PLACE TO FIX THIS IS THE SLICER, not here. Every slicer has an XY
+// size compensation (Cura "Horizontal Expansion", PrusaSlicer/Orca "XY size
+// compensation"): set it to +0.25 and EVERY part you print comes out right,
+// including other people's. Compensating in the model corrects this one design
+// and silently mis-sizes the next. It lives here because it is what makes the
+// case fit today - so if you set the slicer, put this back to 0.
+print_shrink = 0.5;   // measured, on a DIAMETER or an opening
+
 // ---------- Fit / structure ----------
 clr      = 0.5;     // board-to-wall clearance along the LENGTH (Y, USB↔far end)
 // FROM A PRINTED COUPON, which is the only reason this number is trustworthy:
@@ -545,7 +578,12 @@ clr      = 0.5;     // board-to-wall clearance along the LENGTH (Y, USB↔far en
 // if the printed cavity itself measures 54.0 rather than 54.5, the fix belongs
 // in the slicer's XY compensation, where it corrects every part, not here where
 // it corrects one.
-clr_w    = 0.25;    // board-to-wall clearance on the LEFT/RIGHT (X), per side
+// Board 1 runs a zero-nominal fit here and it is the right nominal: the board
+// should sit against the walls. The 0.25 is not clearance, it is HALF of
+// print_shrink - the compensation that makes the printed cavity land on nominal.
+// Derived rather than typed, so it follows if print_shrink is ever re-measured
+// or zeroed after setting slicer compensation.
+clr_w    = print_shrink / 2;   // compensation, not clearance: see print_shrink
 wall     = 2.2;     // SLIMMED from 2.6: -0.8 mm on BOTH footprint axes. Not lower -
                     // the snap barbs and the cover lip are cut into this wall, and
                     // below ~2 they stop holding.
