@@ -66,7 +66,7 @@ The stand hinge already threads M3 into plastic, and its comment says why: *"a n
 
 | | |
 |---|---|
-| pilot | Ø2.5 — the M3 tap drill, ~92% engagement, same as `ks_pilot` |
+| pilot | **Ø2.6** — see below; not the Ø2.5 tap-drill figure |
 | depth | 4.3 mm ≈ 1.4 × M3 diameter |
 | column wall around it | 2.25 mm |
 | front skin left | **1.0 mm** |
@@ -76,6 +76,34 @@ The stand hinge already threads M3 into plastic, and its comment says why: *"a n
 the front slab for another 1.2. What it must never do is break through: those four points
 sit under the bezel, where a dimple would be visible from the front. `screw_skin = 1.0`
 is the material left, and the render confirms an unbroken front face.
+
+### The screws would not drive — two causes, and the length is the bigger one
+
+**Use M3 × 5.** Usable thread is 4.3 mm and the board adds 1.6, so **5.9 mm is the
+longest screw that will not bottom out**. An M3 × 8 stops 2.1 mm early and cannot be
+driven home *whatever the pilot is* — and it feels exactly like a hole that is too small,
+which is what makes it worth naming first.
+
+**The pilot went 2.5 → 2.6, and the small step is deliberate.** 2.9 was tried first and
+is wrong: engagement is `(major − hole) / (major − minor)`, so Ø2.9 leaves ~18% of thread
+— board 1's file warns that even 2.7 was *"far too loose — the threads would strip"*.
+That trades a screw that won't go in for one that goes in and holds nothing, which is the
+worse failure because it looks like success.
+
+The right target isn't the tap-drill table at all. **A tap drill assumes a cutting tap and
+a hole the size you asked for**; this is a thread-*forming* screw in thermoplastic, where
+the usual pilot is ~0.8 × major = **2.4 for M3**. FDM bores print undersize by roughly
+0.2, so:
+
+| modelled | prints ≈ | engagement |
+|---|---|---|
+| 2.5 | 2.3 | 129% — has to displace far too much, and won't drive |
+| **2.6** | **2.4** | **111% — right for forming in plastic** |
+| 2.9 | 2.7 | 55% — strips |
+
+A **conical lead-in** was also added at each column top: the screw is started blind,
+through a board hole 1.6 mm above the plastic, and a thread-forming tip wants to walk
+before it bites.
 
 **Set `board_screws = false` to get the locating pins back**, which is board 1's
 behaviour: they fix the board laterally and hold it against nothing.

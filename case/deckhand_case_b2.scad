@@ -160,7 +160,27 @@ pin_lead = 0.3;     // conical lead-in at the tip so the board drops on easily
 // A screw REPLACES the pin - they want the same axis - so board_screws picks one
 // or the other rather than adding to it.
 board_screws = true;
-screw_pilot  = 2.5;  // M3 tap drill: ~92% thread engagement, same as ks_pilot
+// 2.6, opened from 2.5 after a print where the screws would not drive - and the
+// small step is the point. 2.9 was tried first and is WRONG: engagement is
+// (major - hole) / (major - minor), so Ø2.9 in M3 leaves ~18% of thread, which is
+// why board 1's file warns that even 2.7 was "far too loose - the threads would
+// strip". That trades a screw that will not go in for one that goes in and holds
+// nothing, which is the worse failure because it looks like success.
+//
+// The right target is not the tap-drill table at all. A TAP DRILL ASSUMES A HOLE
+// THE SIZE YOU ASKED FOR AND A CUTTING TAP; this is a thread-FORMING screw in
+// thermoplastic, where the usual pilot is ~0.8 x major = 2.4 for M3. FDM bores
+// print undersize by roughly 0.2 (the extruder path lies inside the circle and
+// the melt pulls in), so a modelled 2.6 lands near 2.4 - the number actually
+// wanted. Modelling 2.4 would print ~2.2 and be the interference fit that
+// stopped the screws.
+//
+// Board 1's file already half-knew this: "If it drives too hard, open it to 2.6
+// with a drill bit" - the same fix, applied by hand after every print instead of
+// once in the model.
+//
+// Column wall at 2.6 is (7.0 - 2.6)/2 = 2.2 mm, thick enough not to split.
+screw_pilot  = 2.6;  // M3 thread-forming into a BLIND hole, printed on FDM
 // HOW DEEP, and the constraint is the FRONT FACE. The column is only
 // z_pcb_f - front_th = 3.1 mm tall, which is one M3 diameter of engagement -
 // marginal. Continuing the pilot down INTO the front slab buys another 1.2,
@@ -169,6 +189,14 @@ screw_pilot  = 2.5;  // M3 tap drill: ~92% thread engagement, same as ks_pilot
 // the material left between the pilot's bottom and the outside of the front
 // face, and at 1.0 that skin is under the screen bezel where a dimple would show.
 screw_skin   = 1.0;
+screw_lead   = 0.6;  // conical lead-in at the column top, so the screw centres itself
+
+// SCREW LENGTH IS CONSTRAINED, and getting it wrong looks exactly like a hole
+// that is too small - the screw stops dead partway and no amount of force helps.
+// Usable thread is z_pcb_f - screw_skin = 4.3 mm, and the board adds 1.6, so the
+// longest screw that will not bottom out is 5.9 mm.
+//   USE M3 x 5.  M3 x 6 is 0.1 over and may just touch; M3 x 8 bottoms out 2.1 mm
+//   early and cannot be driven home whatever the pilot is.
                     // (kept small — a big taper on a thin pin leaves a point)
 
 // Window = the ACTIVE display area plus a hair, not the full 54.50 x 83.00
@@ -1059,9 +1087,17 @@ module body(){
   difference(){
     body_core();
     if (board_screws)
-      for (c = holes())
+      for (c = holes()) {
         translate([c[0], c[1], screw_skin])
           cylinder(d = screw_pilot, h = z_pcb_f - screw_skin + 0.01);
+        // Lead-in at the column top. A thread-forming screw entering a blind hole
+        // wants to walk before it bites, and it is being started through a board
+        // hole 1.6 mm above, i.e. blind to the operator. The cone gives the tip
+        // somewhere to centre itself.
+        translate([c[0], c[1], z_pcb_f - screw_lead])
+          cylinder(d1 = screw_pilot, d2 = screw_pilot + 2*screw_lead,
+                   h = screw_lead + 0.01);
+      }
   }
 }
 
