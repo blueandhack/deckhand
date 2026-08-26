@@ -10,6 +10,36 @@ openscad -o stl/deckhand_b2_body.stl -D 'part="body"' deckhand_case_b2.scad
 # parts: body | cover | retainer | stand | coupon | section | all
 ```
 
+## The board is 102.0 long, not the drawing's 101.5
+
+Measured with calipers on the actual board. The width was measured at the same time
+and **does** match the drawing at 54.5, which is what makes this useful rather than
+just a correction: the two together separate the board from the printer.
+
+- The **width** fit error was the printer. The board is the size the drawing says, so
+  a cavity that came out 0.5 small was the cavity shrinking. `print_shrink = 0.5`
+  is right, and so is the Ø2.9 screw pilot derived from it (which prints ~2.4, about
+  111% thread engagement for M3 — at 2.9 as printed it would be 18% and would strip).
+- The **length** was the drawing being wrong about this unit. 102.0 against a stated
+  101.50(PCB), i.e. outside any plausible ±0.2.
+
+Had the width also measured 55.0, the opposite conclusion would have followed —
+board oversize in both axes, printer innocent, and every shrink compensation
+including the screw pilot would have had to come out. One caliper reading decided
+between two models that differ by whether the screws hold.
+
+`hole_ins_y` went to 3.40 with it: 1.8 mm from the board edge to the hole's edge,
+plus the hole's own 1.6 radius. That agrees with the drawing's implied 3.50 to
+within 0.1, so the two independent measurements corroborate each other.
+
+The length change also uncovered a live defect. `in_h` was `board_h + 2*clr`, with no
+`print_shrink` term, so the printed cavity ran at **half** the clearance `clr`
+claimed — and against the real 102.0 board that came to **zero**. It read as correct
+because `clr` was right there in the expression; the shrink was eating it one step
+downstream. Both axes now carry the compensation explicitly, so setting slicer XY
+compensation and zeroing `print_shrink` leaves each on its own nominal.
+
+
 ## Print the coupon first
 
 ```

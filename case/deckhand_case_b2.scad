@@ -104,7 +104,11 @@ $fn = 72;
 // had play and the 4 columns sat ~0.5 mm off each mounting hole. EVERYTHING
 // downstream (cavity, columns, window, USB-C wall, battery, retainer, cover)
 // derives from these, so they all track automatically.
-board_w = 54.5;  board_h = 101.5;  board_t = 1.6;   // vendor drawing, exact
+// MEASURED 102.0 on the actual board, against the drawing's 101.50(PCB) - so the
+// drawing is not describing this unit, or not to better than ~0.5. The width is
+// still the drawing's 54.5 because nobody has put calipers on it: what was
+// measured there was a FIT error, which is a different thing (see print_shrink).
+board_w = 54.5;  board_h = 102.0;  board_t = 1.6;   // length MEASURED, width from the drawing
 // The drawing specifies SMD 4.70 for the bare components, and that is NOT the
 // number to build to: the 1.25 mm JST plugs on the battery/UART/I2C/Expand
 // headers stand proud of their sockets once MATED, which the outline does not
@@ -131,7 +135,13 @@ usb_at_top = true;
 // every column 0.2 mm off in one axis here - inside the Ø3.2 hole's slop, but
 // wrong, and it compounds with pin_d if anyone raises that toward a real fit.
 hole_ins_x = 3.30;  // from the LONG edges (across the width)
-hole_ins_y = 3.50;  // from the SHORT edges (along the length)
+// 3.4, from the measured 1.8 mm edge-of-board to edge-of-hole plus the hole's own
+// 1.6 radius. The drawing implies 3.50 on a 101.5 board; this is 3.40 on a
+// measured 102.0, so the two agree to 0.1 and the hole SPAN comes out 95.2 rather
+// than the drawing's 94.50. Well inside the slack between a Ø3.2 board hole and a
+// Ø2.9 pilot, but taken from the board rather than the paper since the board is
+// what the screws go through.
+hole_ins_y = 3.40;  // from the SHORT edges (along the length)
 hole_ins = hole_ins_x;  // kept so any board-1 expression still reads
 col_d    = 7.0;     // mounting column diameter (the shoulder the board rests on)
 // PIN into the board's ~3.2 mm mounting hole (as in example/weather_station_*.stl).
@@ -700,7 +710,21 @@ body_d     = z_floor;                        // body runs front face .. back ope
 total_th   = body_d + cover_th;
 
 // ---------- Plan geometry ----------
-in_w = board_w + 2*clr_w;  in_h = board_h + 2*clr;
+// The LENGTH takes print_shrink as a whole, where the width takes it halved -
+// and that asymmetry is not a mistake, it is the two axes wanting different
+// NOMINALS. The width's nominal is zero (board 1's fit: the board sits against
+// the walls), so clr_w is pure compensation and is print_shrink/2 PER SIDE. The
+// length's nominal is a real 0.5 per side, so it needs clr AND the compensation
+// on top - print_shrink added once, because print_shrink is a whole-opening
+// figure, not a per-side one.
+//
+// Without this the length quietly ran at HALF its stated clearance: modelled
+// 103.0 printed as 102.5 against a 102.0 board, i.e. 0.25 a side while clr said
+// 0.5. It read as correct because clr was in the expression - the shrink was
+// eating it downstream. Zeroing print_shrink after setting slicer XY
+// compensation now leaves BOTH axes on their nominal, which is the whole point
+// of routing the compensation through one named constant.
+in_w = board_w + 2*clr_w;  in_h = board_h + 2*clr + print_shrink;
 
 // The ONE definition of where the mic module sits across the case: retainer-local X of
 // the PCB's inner face. Both the slot and the preview ghost derive from it - they were
