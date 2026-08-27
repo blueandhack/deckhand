@@ -752,6 +752,33 @@ batt_y0    = usb_at_top ? by0 + batt_dy : by0 + board_h - batt_dy - batt_h;
 // speaker centre, at the end OPPOSITE the USB-C edge
 spk_px     = bcx + spk_cx;
 spk_py     = usb_at_top ? by0 + spk_cy : by0 + board_h - spk_cy;
+// ---------- Speaker grille (BACK COVER, service end) ----------
+// The back cover is not a preference, it is the only place a speaker FITS: there
+// is 3.1 mm between the front slab and the board's front face and 15.5 mm behind
+// the board, against a ~4 mm speaker - and the board would block a front port
+// anyway. Service end rather than the far end because the far end carries the
+// stand hinge, and on the stand that end points at the desk.
+//
+// SMALL HOLES, NOT AN OPENING. spk_grille_d is the MODELLED diameter and carries
+// print_shrink, which is the trap that turns printed grilles into a solid patch:
+// model the 1.5 you want and it prints at 1.0; model 1.2 and it prints at 0.7 and
+// closes. Modelling 2.0 is what yields 1.5.
+//
+// THE PITCH IS SET BY WHAT THE SLICER SEES, NOT BY OPEN AREA. At pitch 2.8 the
+// wall between two modelled Ø2.0 holes is 0.8 - exactly 2 extrusion lines, which
+// is the same knife-edge that made snap_skin print open (see snap_skin). 3.0
+// leaves 1.0 (2.5 lines), so the wall is over the threshold rather than on it.
+// Cost: 18 holes and ~21% open instead of 22 and 26%. Being sure the holes stay
+// separate is worth more than 5 points of open area.
+spk_grille    = true;
+spk_grille_w  = 15.0;   // patch, X - the speaker's own footprint, so the tape seals
+spk_grille_h  = 10.0;   // patch, Y   around it and no hole shorts front to back
+spk_grille_d  = 1.5 + print_shrink;   // 2.0 modelled -> 1.5 printed
+spk_grille_p  = 3.0;    // hex pitch; see above before lowering it
+spk_grille_cx = bcx;    // centred between the two button sleeves
+spk_grille_inset = 10.6;   // centre, in from the SERVICE-edge end of the cover
+spk_grille_cy = usb_at_top ? out_h - spk_grille_inset : spk_grille_inset;
+
 // USB-C cutout centre in Z (the connector sits toward the back of the board)
 usb_z      = z_pcb_b + usb_up/2 + usb_z_off;
 usb_outer_y = usb_at_top ? out_h : 0;      // outer face of the USB-C end wall
@@ -807,7 +834,24 @@ snap_win_extra = 0.4;
 // into the wall's thickness, so it still hooks the pocket's bottom edge exactly as
 // before - only the daylight is gone. The pocket's top edge is the same short bridge it
 // always was, now with a skin above it. Set this to 0 to go back to open windows.
-snap_skin = 0.8;
+//
+// 0.8 -> 1.1 BECAUSE 0.8 PRINTED AS A HOLE. Reported from a real print: the
+// pocket by the microphone (the mic-end barb at out_w*0.30) came out open. It is
+// the failure this skin exists to prevent, arriving through the skin being too
+// thin to emit rather than through the pocket being cut through.
+//
+// 0.8 is EXACTLY 2 extrusion lines at a 0.4 nozzle - the threshold where a slicer
+// either lays two perimeters or discards the feature as thinner than it can print,
+// and which way it goes depends on the line width, not on this file. 1.1 is 2.75
+// lines, so it is over the threshold rather than sitting on it, and it does not
+// rely on the slicer rounding in our favour.
+//
+// The ceiling is the BARB, not printability: the catch shelf reaches 0.9 into the
+// wall, so skin + 0.9 must stay under wall (2.2). 1.1 leaves a 1.1 pocket for a
+// 0.9 barb - 0.2 of clearance, down from 0.5. If the cover no longer clicks home,
+// raise snap_win_extra rather than thinning this back down: that opens the pocket
+// without returning to a skin the printer will not lay.
+snap_skin = 1.1;
 
 // snap positions: two barbs on each long side
 // THE SERVICE-EDGE SNAPS MOVED INBOARD, 0.30/0.70 -> 0.42/0.58, because the
@@ -1096,6 +1140,39 @@ module retainer(){
 // ============================================================================
 // COVER (back) — snaps on, retains the battery
 // ============================================================================
+// Hex field, clipped to the patch by construction rather than by an intersection:
+// odd rows carry one column FEWER and are centred on the same axis, which places
+// them exactly half a pitch off - the hex offset falls out of the count instead of
+// being a separate term that could disagree with it.
+module speaker_grille(){
+  ry = spk_grille_p * sin(60);
+  nx = floor((spk_grille_w - spk_grille_d) / spk_grille_p) + 1;
+  ny = floor((spk_grille_h - spk_grille_d) / ry) + 1;
+  for (j = [0 : ny-1]) {
+    n = (j % 2 == 1) ? nx - 1 : nx;
+    for (i = [0 : n-1])
+      translate([spk_grille_cx + (i - (n-1)/2) * spk_grille_p,
+                 spk_grille_cy + (j - (ny-1)/2) * ry, -0.01])
+        cylinder(d = spk_grille_d, h = cover_th + 0.02);
+  }
+}
+
+// The patch has to clear three things at once, so they are ASSERTED rather than
+// eyeballed off a render: the button guide sleeves either side, the battery rib
+// inboard of it, and the cover's own lip ring outboard. Each was measured on the
+// built cover (sleeves x 13.1..19.3 and 40.1..46.3, rib top y 90.55, lip inner
+// y 104.1) and each is re-derived here from the same constants the cover uses.
+assert(!spk_grille ||
+       spk_grille_w/2 + 1.0 <= abs(reset_dx) - (btn_guide_d + 2.0)/2,
+       "speaker grille is too wide - it runs into a button guide sleeve");
+assert(!spk_grille ||
+       spk_grille_inset - spk_grille_h/2 >= 2*wall + 0.4 - 1.0 + 1.0,
+       "speaker grille runs under the cover lip - raise spk_grille_inset");
+assert(!spk_grille ||
+       out_h - spk_grille_inset - spk_grille_h/2
+         >= batt_y0 + batt_h + batt_rib_gap + batt_rib_t + 1.0,
+       "speaker grille overlaps the battery retaining rib");
+
 module cover(){
   lip_in = wall - 1.0;                 // lip that slides into the body opening (lip_h is global)
   g  = 0.3;                            // lip clearance on the SIDES (width) — kept snug
@@ -1179,6 +1256,7 @@ module cover(){
         cylinder(d = d, h = cover_th + lip_h + btn_sleeve_h + 0.02);
         cylinder(d1 = d + 2*btn_cham, d2 = d, h = btn_cham + 0.01);
       }
+    if (spk_grille) speaker_grille();
     // pilot hole in each boss — the M3 screw threads straight into the plastic
     for(s=[-1,1]) translate([out_w/2+s*ks_gap/2, ks_lug_y, ks_axle_z])
       rotate([0,90,0]) cylinder(d=ks_pilot, h=ks_boss_w+2, center=true);

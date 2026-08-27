@@ -10,6 +10,41 @@ openscad -o stl/deckhand_b2_body.stl -D 'part="body"' deckhand_case_b2.scad
 # parts: body | cover | retainer | stand | coupon | section | all
 ```
 
+## The speaker grille, and the snap pockets that printed open
+
+**The rectangular hole by the microphone was never a speaker port.** It is one of
+four snap-catch pockets that the cover's barbs hook into, and they are meant to be
+BLIND — `snap_skin` leaves wall on the outside so nothing shows. It printed open
+because 0.8 mm is *exactly two extrusion lines* at a 0.4 nozzle, the width at which
+a slicer either lays two perimeters or discards the feature; this one discarded it.
+Now 1.1 (2.75 lines), which is over the threshold rather than sitting on it. The
+ceiling is the barb, not printability: the catch shelf reaches 0.9 into a 2.2 wall,
+so 1.1 leaves a 1.1 pocket — 0.2 of clearance, down from 0.5. If the cover stops
+clicking home, raise `snap_win_extra`, never thin the skin back down.
+
+**The real port is a hex grille in the back cover**, and the cover is not a
+preference — it is the only place the speaker fits. There is 3.1 mm between the
+front slab and the board's front face against a ~4 mm speaker, 15.5 mm behind the
+board, and the board would block a front port regardless.
+
+Two numbers carry the whole design:
+
+- **`spk_grille_d` is MODELLED, and carries `print_shrink`.** Model the Ø1.5 you
+  want and it prints at Ø1.0; model Ø1.2 and it prints at Ø0.7 and closes into a
+  solid patch. Modelling Ø2.0 is what yields 1.5. This is the trap that ruins most
+  printed grilles.
+- **The pitch is set by what the SLICER sees, not by open area.** At pitch 2.8 the
+  wall between two modelled Ø2.0 holes is 0.8 — the identical two-line knife-edge
+  that had just opened the snap pockets. 3.0 leaves 1.0 (2.5 lines). It costs 18
+  holes and ~21% open instead of 22 and 26%, and being certain the holes stay
+  separate is worth more than five points of open area.
+
+The patch is the speaker's own 15 × 10 footprint, so double-sided tape seals right
+around it and no hole shorts the front of the cone to the back. Its three
+clearances — button guide sleeves either side, battery rib inboard, cover lip
+outboard — are `assert`ed from the same constants the cover draws with, not
+eyeballed off a render.
+
 ## The board is 102.0 long, not the drawing's 101.5
 
 Measured with calipers on the actual board. The width was measured at the same time
