@@ -10,6 +10,27 @@ openscad -o stl/deckhand_b2_body.stl -D 'part="body"' deckhand_case_b2.scad
 # parts: body | cover | retainer | stand | coupon | section | all
 ```
 
+## The cover is a touch long — twice now
+
+Reported once as "the cover felt a touch long" (which set `gy = g + 0.1`) and again
+as "a little bit tight, reduce a little for the long edge". Now `gy = g + 0.25`:
+0.55 per end, 0.15 more a side, 0.30 shorter overall. Lip 102.4 in a 103.5 cavity.
+
+**The length gets more clearance than the width on purpose.** The lip is 103 mm on
+its long axis and 55 on its short one, and an FDM part bows along its LONG axis —
+so whatever warp exists accumulates over nearly twice the span before it has to
+enter the cavity. The end clearance is absorbing bow; the side clearance only has
+to absorb tolerance.
+
+**`print_shrink` does not enter this number**, which is what makes it a pure fit
+figure: the lip is an OUTER feature and the cavity an INNER one, so both lose the
+same 0.5 and the modelled clearance is what the printed pair actually has. Compare
+`clr_w`, where the compensation is the whole point.
+
+If it turns out the long SIDES bind rather than the ends — cover too wide, not too
+long — `g` is the one to raise; the comment in `cover()` says so, so the next
+reader does not have to work out which of the two it is.
+
 ## The pit in the wall by the mic: a board-1 feature nobody gated
 
 Two faults stacked, and the second is the more instructive.

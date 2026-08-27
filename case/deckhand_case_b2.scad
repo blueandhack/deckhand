@@ -1202,8 +1202,24 @@ assert(!spk_grille ||
 module cover(){
   lip_in = wall - 1.0;                 // lip that slides into the body opening (lip_h is global)
   g  = 0.3;                            // lip clearance on the SIDES (width) — kept snug
-  gy = g + 0.1;                        // lip clearance on the ENDS (length): 0.1/end extra
-                                       // = 0.2 mm shorter, since the cover felt a touch long
+  // Lip clearance on the ENDS (length). SECOND report of the same thing - it was
+  // g + 0.1 because "the cover felt a touch long", and it is still tight. Now
+  // g + 0.25, i.e. 0.55/end: +0.15 a side, 0.3 mm shorter overall.
+  //
+  // The length gets more than the width DELIBERATELY, and the asymmetry is not
+  // taste. This lip is 103 mm on its long axis and 55 on its short one, and an FDM
+  // part bows along its LONG axis - so whatever warp there is accumulates over
+  // nearly twice the span before it has to enter the cavity. The end clearance is
+  // absorbing bow; the side clearance only has to absorb tolerance.
+  //
+  // print_shrink does NOT enter here, which is why this is a pure fit number: the
+  // lip is an OUTER feature and the cavity an INNER one, so both lose the same
+  // 0.5 and the modelled clearance is what the printed parts actually have.
+  //
+  // If it is the LONG SIDES that bind rather than the ends - i.e. the cover is too
+  // WIDE rather than too long - raise g instead; that is the one to change and
+  // this comment is here so the next reader does not have to guess which.
+  gy = g + 0.25;
   difference(){
     union(){
       // plate
