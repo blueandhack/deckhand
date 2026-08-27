@@ -204,6 +204,7 @@ private:
   // panel is not up, so the caller can say so rather than reporting a success it
   // did not get.
   bool invertColor(bool en);
+  bool sleepPanel(bool sleep);       // SLPIN/SLPOUT; re-applies inversion on wake
   // Times the flush path and prints the breakdown. Diagnostic only.
   void perfReport();
   // Last flush in microseconds, for the SETTINGS LINK card. STORED rather than
@@ -215,6 +216,11 @@ private:
   uint32_t lastFlushUs() const { return _lastFlushUs; }
  private:
   esp_panel::drivers::LCD*      _lcd = nullptr;
+  // Last inversion state actually applied, so sleepPanel() can RESTORE it after
+  // SLPOUT (which resets it). Tracked rather than assumed: INV 0|1 is a runtime
+  // command, so the right value on wake is whatever was in effect, not a
+  // compile-time constant - and this file cannot read the board headers anyway.
+  bool                          _inverted = false;
   esp_panel::drivers::Backlight* _backlight = nullptr;
 };
 

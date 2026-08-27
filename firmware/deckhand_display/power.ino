@@ -46,13 +46,163 @@ void formatSleepValue(char* buf, size_t n) {
     snprintf(buf, n, "%lum", sleepTimeoutMs / 60000);
   }
 }
+#if !BOARD_USES_TFT_ESPI
+// THE THREE BLANKED-STATE SAVINGS, EACH A RUNTIME TOGGLE THAT DEFAULTS OFF.
+//
+// Measured first, which is why they exist at all: board 2 draws ~142 mV/h awake
+// at 90% brightness and ~60 mV/h with the backlight at its 10% floor, so the
+// backlight is ~56% of it and roughly 50 mV/h SURVIVES with the screen dark.
+// That 50 is what these three compete for - the panel controller still fully
+// active, the S3 at 240MHz, and a 30ms BLE connection interval.
+//
+// THEY ARE TOGGLES RATHER THAN PLAIN BEHAVIOUR FOR THE SAME REASON SWAP/INV
+// ARE: measuring one needs the cable out and ~10 minutes on battery, so three
+// separate build-and-measure cycles costs a reflash per guess where one build
+// plus POWERPROBE settles all of them in a single session. Nothing is
+// persisted, deliberately - the answer belongs in this board's header once
+// someone has SEEN it, not in NVS where it would quietly disagree with the
+// header the next reader trusts.
+//
+// Board 1 is excluded on purpose. It has a different SoC, a different panel
+// driver, and auto-deep-sleep as a backstop - and no way for me to measure any
+// of it, so shipping it an untested behaviour change would be asserting a
+// saving nobody has weighed.
+// The three flags and CPU_MHZ_* live in deckhand_display.ino, not here: that
+// file is concatenated FIRST and its command dispatch needs them in scope.
+// Connection interval is negotiated in 1.25ms units. macOS settles on 30ms;
+// asking for ~180-210ms while blanked cuts the radio's duty cycle roughly
+// proportionally. The peer may REFUSE, which is why nothing downstream assumes
+// it took effect - the measurement is what says whether it did.
+void bleSetSlowInterval(bool slow) {
+  uint16_t minItvl = slow ? 144 : 12;   // 180ms vs 15ms
+  uint16_t maxItvl = slow ? 168 : 24;   // 210ms vs 30ms
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!bleLinks[i].used || bleLinks[i].releasePending) continue;
+    struct ble_gap_upd_params p = {};
+    p.itvl_min = minItvl;
+    p.itvl_max = maxItvl;
+    p.latency = 0;
+    p.supervision_timeout = 400;        // 4s, comfortably over the slow interval
+    ble_gap_update_params(bleLinks[i].connId, &p);
+  }
+}
+#endif
+
+// Reconciles the three APPLIED states against what is wanted right now, which
+// is `isAsleep && <flag>`. One function for every transition - entering sleep,
+// waking, and a toggle flipped at any moment - because the bug this replaces
+// came from apply and restore being two separate conditions that could disagree.
+//
+// Idempotent by construction: each branch checks the applied state, so calling
+// it twice does nothing the second time and a toggle flipped mid-blank takes
+// effect immediately instead of waiting for a tap.
+//
+// ORDER IS LOAD-BEARING IN BOTH DIRECTIONS. Restores run first and lead with the
+// CPU, so the panel's two 120ms sleep-out delays and the repaint after them do
+// not also run at a third speed - that is the path a person is waiting on.
+// Applies run in the reverse order and leave the CPU for last, since everything
+// ahead of it talks to peripherals and the saving is the time spent afterwards.
+void savingsSync() {
+#if !BOARD_USES_TFT_ESPI
+  const bool wantPanel = isAsleep && savePanelSleep;
+  const bool wantBle   = isAsleep && saveBleSlow;
+  const bool wantCpu   = isAsleep && saveCpuSlow;
+
+  if (cpuSlowApplied && !wantCpu)   { setCpuFrequencyMhz(CPU_MHZ_AWAKE); cpuSlowApplied = false; }
+  if (bleSlowApplied && !wantBle)   { bleSetSlowInterval(false); bleSlowApplied = false; }
+  if (panelSleptApplied && !wantPanel) {
+    tft.sleepPanel(false);
+    // The panel's own RAM survives SLPIN, but the shim's dirty rect describes
+    // nothing after a sleep cycle, so without this nothing repaints a screen
+    // that may have lost content.
+    forceFullRepaint();
+    panelSleptApplied = false;
+  }
+
+  if (wantPanel && !panelSleptApplied) { tft.sleepPanel(true); panelSleptApplied = true; }
+  if (wantBle && !bleSlowApplied)      { bleSetSlowInterval(true); bleSlowApplied = true; }
+  if (wantCpu && !cpuSlowApplied)      { setCpuFrequencyMhz(CPU_MHZ_BLANKED); cpuSlowApplied = true; }
+#endif
+}
+
+// Percent of the SET brightness the dim stage uses. Relative, not absolute, and
+// that is forced: brightness can be as low as BRIGHTNESS_MIN (10), where a fixed
+// "dim to 15%" would be BRIGHTER than lit. Floored at BRIGHTNESS_MIN because
+// that constant exists precisely because below it the screen reads as broken -
+// so at brightness 10 the dim stage is a deliberate no-op rather than a black
+// screen pretending to be dim.
+const int SCREEN_DIM_PCT = 30;
+// A reading older than this does not count as activity. Without it a vanished
+// host would pin the screen lit forever on sessions that may have finished hours
+// ago - the same distinction lastNonIdleMillis already makes for deep sleep.
+const unsigned long SCREEN_ATTENTION_STALE_MS = 30000;
+
+int screenDimDutyPct() {
+  int p = brightnessPct * SCREEN_DIM_PCT / 100;
+  if (p < BRIGHTNESS_MIN) p = BRIGHTNESS_MIN;
+  if (p > brightnessPct) p = brightnessPct;   // never dim UP
+  return p;
+}
+
+// Does anything actually want the user right now? sessionCount == 0 is false, so
+// an empty list lets the ladder run - which is the "no session active" half of
+// the requirement.
+bool attentionNeeded() {
+  if (!everReceived || (millis() - lastRxMillis) >= SCREEN_ATTENTION_STALE_MS) return false;
+  for (int i = 0; i < sessionCount; i++) {
+    if (strcmp(sessions[i].status, "working") == 0) return true;
+    if (strcmp(sessions[i].status, "asking") == 0) return true;
+  }
+  return false;
+}
+
+// 0 = lit, 1 = dim, 2 = blank. Pure arithmetic so batt-trend-check.py can mirror
+// it: the boundaries are exactly where a hand-rolled inequality gets them wrong.
+int screenIdleStage(unsigned long idleMs, unsigned long dimMs) {
+  if (dimMs == 0) return 0;              // the OFF preset: never dim, never blank
+  if (idleMs >= dimMs * 2) return 2;
+  if (idleMs >= dimMs) return 1;
+  return 0;
+}
+
+// Drives the ladder from loop(). Only a TOUCH leaves the blank stage (verified:
+// wakeUp has exactly one call site), so this never un-blanks.
+void tickScreenIdle() {
+  if (attentionNeeded()) lastAttentionMillis = millis();
+  unsigned long base = lastActivityMillis > lastAttentionMillis
+                       ? lastActivityMillis : lastAttentionMillis;
+  int stage = screenIdleStage(millis() - base, sleepTimeoutMs);
+  if (stage == 2) {
+    if (!isAsleep) { isDimmed = false; enterSleep(); }
+    return;
+  }
+  if (isAsleep) return;
+  bool wantDim = (stage == 1);
+  if (wantDim != isDimmed) {
+    isDimmed = wantDim;
+    // Un-dimming without a touch is reachable and wanted: a session going
+    // `working` moves the clock forward, so the screen brightens by itself when
+    // something starts needing you. (Un-BLANKING never happens that way - only
+    // a touch leaves the blank stage.)
+    ledcWrite(TFT_BL_PIN, (wantDim ? screenDimDutyPct() : brightnessPct) * 255 / 100);
+  }
+}
+
 void enterSleep() {
   isAsleep = true;
+  // Backlight FIRST. It is the dominant load and it is instant, so the screen
+  // goes dark at once rather than blanking in stages - and the slower panel
+  // teardown then happens behind a dark screen where none of it is visible.
   ledcWrite(TFT_BL_PIN, 0);
+  savingsSync();
 }
 void wakeUp() {
   isAsleep = false;
+  isDimmed = false;          // a wake is always full brightness
   lastActivityMillis = millis();
+  savingsSync();
+  // Backlight LAST, over a panel that has finished waking - otherwise the first
+  // thing lit is whatever the panel held mid-sequence.
   ledcWrite(TFT_BL_PIN, brightnessPct * 255 / 100);
 }
 void sampleBattery() {
@@ -192,6 +342,193 @@ int battMinutesLeft() {
   // arithmetic reaches hundreds of hours, which would read as broken.
   if (mins > 99L * 60L) mins = 99L * 60L;
   return (int) mins;
+}
+
+// ---------------------------------------------------------------------------
+// POWERPROBE: a passive, labelled discharge measurement in mV/h.
+//
+// It exists so a proposed battery saving can be RANKED rather than argued
+// about. It measures whatever state the device is already in and reports a
+// rate against a label you supply, so an A/B is "set it up, probe, change one
+// thing, probe again" - and it composes with changes that do not exist yet,
+// including a different build.
+//
+// THREE THINGS ARE DELIBERATE AND NONE IS A STYLE CHOICE:
+//
+//  - IT TAKES ITS OWN RAW ADC READS instead of reusing the trend ring above.
+//    That ring stores one snapshot a minute of batteryMv, which is an EMA of 8
+//    - and averaging a signal that has ALREADY been low-passed does not buy the
+//    sqrt(N) that averaging independent samples does, because consecutive
+//    values are correlated. Reading the ADC directly is what makes the noise
+//    fall with the sample count. It also keeps the probe from reshaping the
+//    estimator that draws the "~5h" label, which would be an instrument
+//    perturbing the thing it measures.
+//
+//  - IT REPORTS mV/h, NOT %/h. Millivolts per hour is the raw datum; percent
+//    routes through pctFromMv's curve, which is a MODEL of a cell we did not
+//    characterise. Comparing two builds in %/h would attribute that curve's
+//    shape to the hardware. (Same reason the sleep report prints mV/h.)
+//
+//  - IT STATES ITS OWN CONFIDENCE rather than inheriting the estimator's fixed
+//    20-minute / 25mV gate. It fits a line and computes the STANDARD ERROR of
+//    the slope, and says nothing until |slope|/SE clears POWERPROBE_MIN_SNR_X10.
+//    That self-shortens when the drain is large - which is exactly the case
+//    worth measuring - and stays silent when the fall really is noise. A fixed
+//    span cannot do both.
+//
+// It can only run ON BATTERY: batteryState() reads DISCHARGING only while
+// usbLinkActive() is false, so the cable must be out and the report goes back
+// over BLE. That is a property of the measurement, not a limitation to work
+// around - a probe that "worked" on USB would be measuring the charger.
+const unsigned long POWERPROBE_BUCKET_MS = 60000UL;  // one bucket a minute
+const int POWERPROBE_MAX_BUCKETS = 60;               // ring: one hour
+const int POWERPROBE_MIN_BUCKETS = 5;                // n-2 dof needs elbow room
+const int POWERPROBE_MIN_SNR_X10 = 100;              // report at |slope|/SE >= 10
+const int POWERPROBE_RISE_ABORT_MV = 40;             // as the trend ring: a gain is a charge
+const int POWERPROBE_READS = 16;                     // raw ADC reads per second
+
+bool probeActive = false;
+char probeLabel[24] = {0};
+float probeBucketMv[POWERPROBE_MAX_BUCKETS];
+unsigned long probeBucketAt[POWERPROBE_MAX_BUCKETS];
+int probeBucketCount = 0;
+unsigned long probeBucketStart = 0;
+double probeSum = 0;          // raw mV accumulated in the open bucket
+long probeSamples = 0;
+int probeFirstMv = 0;
+
+// Fit the closed buckets. Returns false while there is nothing honest to say;
+// on true, slope is mV/h (negative while draining) and se is its standard error.
+bool powerProbeFit(double* slopeOut, double* seOut) {
+  int n = probeBucketCount;
+  if (n < POWERPROBE_MIN_BUCKETS || n < 3) return false;
+  double sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (int i = 0; i < n; i++) {
+    double x = (double) (probeBucketAt[i] - probeBucketAt[0]) / 3600000.0;  // hours
+    double y = (double) probeBucketMv[i];
+    sx += x; sy += y; sxx += x * x; sxy += x * y;
+  }
+  double den = (double) n * sxx - sx * sx;
+  if (den <= 0) return false;
+  double slope = ((double) n * sxy - sx * sy) / den;
+  double icept = (sy - slope * sx) / n;
+  double sse = 0;
+  for (int i = 0; i < n; i++) {
+    double x = (double) (probeBucketAt[i] - probeBucketAt[0]) / 3600000.0;
+    double r = (double) probeBucketMv[i] - (icept + slope * x);
+    sse += r * r;
+  }
+  double cxx = sxx - sx * sx / n;   // centred Sxx
+  if (cxx <= 0) return false;
+  *slopeOut = slope;
+  *seOut = sqrt(sse / (n - 2) / cxx);
+  return true;
+}
+
+// One line per closed bucket, so a run is watchable rather than a silent wait -
+// and so a probe abandoned early still leaves its partial evidence in the log.
+void powerProbeReport(const char* why) {
+  char line[160];
+  double slope = 0, se = 0;
+  int spanMin = probeBucketCount < 2 ? 0
+      : (int) ((probeBucketAt[probeBucketCount - 1] - probeBucketAt[0]) / 60000UL);
+  if (!powerProbeFit(&slope, &se)) {
+    snprintf(line, sizeof(line), "POWERPROBE %s %s: measuring (span %dm, n=%d)",
+             probeLabel, why, spanMin, probeBucketCount);
+  } else if (slope >= 0) {
+    snprintf(line, sizeof(line),
+             "POWERPROBE %s %s: NOT DRAINING (+%.1f mV/h, span %dm, n=%d)",
+             probeLabel, why, slope, spanMin, probeBucketCount);
+  } else if (se > 0 && (-slope / se) < POWERPROBE_MIN_SNR_X10 / 10.0) {
+    // Named rather than hidden: "not yet significant" is a RESULT, and the
+    // numbers behind it are what tell you whether to keep waiting.
+    snprintf(line, sizeof(line),
+             "POWERPROBE %s %s: not yet significant (%.1f +/- %.1f mV/h, "
+             "SNR %.1f, span %dm, n=%d)",
+             probeLabel, why, slope, se, se > 0 ? -slope / se : 0.0,
+             spanMin, probeBucketCount);
+  } else {
+    snprintf(line, sizeof(line),
+             "POWERPROBE %s %s: %.1f +/- %.1f mV/h (span %dm, n=%d)",
+             probeLabel, why, slope, se, spanMin, probeBucketCount);
+  }
+  sendLineToHost(line);
+}
+
+void powerProbeStop(const char* why) {
+  if (!probeActive) return;
+  powerProbeReport(why);
+  probeActive = false;
+}
+
+void powerProbeStart(const char* label) {
+  char line[128];
+  if (batteryState() != BATT_DISCHARGING) {
+    // Naming the cause, because "no output" and "impossible here" look identical
+    // from the Mac - and on USB this is impossible by construction.
+    snprintf(line, sizeof(line),
+             "POWERPROBE refused: not on battery (unplug USB; state=%d mv=%d)",
+             (int) batteryState(), batteryMv);
+    sendLineToHost(line);
+    return;
+  }
+  const char* want = label && *label ? label : "unlabelled";
+  if (probeActive && strcmp(probeLabel, want) == 0) {
+    // RE-ISSUING THE SAME LABEL REPORTS PROGRESS, IT DOES NOT RESTART. Checking
+    // on a running probe by re-sending the command is the obvious thing to do,
+    // and a restart would silently discard the minutes already collected -
+    // leaving a measurement that reads as merely slow rather than as thrown
+    // away. It also makes the probe immune to the host delivering one command
+    // over BOTH transports, which is what every other command already gets.
+    powerProbeReport("progress");
+    return;
+  }
+  if (probeActive) powerProbeStop("superseded");
+  snprintf(probeLabel, sizeof(probeLabel), "%s", want);
+  probeBucketCount = 0;
+  probeBucketStart = millis();
+  probeSum = 0;
+  probeSamples = 0;
+  probeFirstMv = batteryMv;
+  probeActive = true;
+  snprintf(line, sizeof(line),
+           "POWERPROBE %s: started at %dmV, one bucket per %lus, reporting from %d buckets",
+           probeLabel, batteryMv, POWERPROBE_BUCKET_MS / 1000UL, POWERPROBE_MIN_BUCKETS);
+  sendLineToHost(line);
+}
+
+// Called from the same 1s battery tick that drives sampleBattery(). Reads the
+// ADC itself - see the note above on why it does not reuse batteryMv.
+void powerProbeTick() {
+  if (!probeActive) return;
+  if (batteryState() != BATT_DISCHARGING) { powerProbeStop("aborted: charger attached"); return; }
+  if (probeFirstMv > 0 && batteryMv > probeFirstMv + POWERPROBE_RISE_ABORT_MV) {
+    powerProbeStop("aborted: cell gained charge");
+    return;
+  }
+  for (int i = 0; i < POWERPROBE_READS; i++)
+    probeSum += (double) analogReadMilliVolts(BAT_ADC_PIN) * BOARD_BAT_MV_SCALE;
+  probeSamples += POWERPROBE_READS;
+
+  unsigned long now = millis();
+  if (now - probeBucketStart < POWERPROBE_BUCKET_MS) return;
+  if (probeSamples <= 0) return;
+  if (probeBucketCount == POWERPROBE_MAX_BUCKETS) {
+    // Slide: the newest hour is the interesting one, and a probe left running
+    // must not start reporting a rate averaged over a state that has ended.
+    for (int i = 1; i < POWERPROBE_MAX_BUCKETS; i++) {
+      probeBucketMv[i - 1] = probeBucketMv[i];
+      probeBucketAt[i - 1] = probeBucketAt[i];
+    }
+    probeBucketCount--;
+  }
+  probeBucketMv[probeBucketCount] = (float) (probeSum / (double) probeSamples);
+  probeBucketAt[probeBucketCount] = now;
+  probeBucketCount++;
+  probeBucketStart = now;
+  probeSum = 0;
+  probeSamples = 0;
+  powerProbeReport("tick");
 }
 
 // "~5h" / "~95m", or empty when unknown - compact because it shares a row with

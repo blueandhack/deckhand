@@ -328,7 +328,52 @@ void PanelShim::writecommand(uint8_t /*c*/) {
 // runtime rather than only settable in the init table.
 bool PanelShim::invertColor(bool en) {
   if (!_lcd) return false;
-  return _lcd->invertColor(en);
+  if (!_lcd->invertColor(en)) return false;
+  _inverted = en;   // remembered for sleepPanel()'s post-SLPOUT restore
+  return true;
+}
+
+// Panel SLPIN/SLPOUT, for the blanked state. The backlight going dark leaves
+// the ST77922 itself FULLY ACTIVE - source drivers, gamma, charge pumps - which
+// is measurable drain behind a screen nobody is looking at.
+//
+// The LCD class exposes setDisplayOnOff (DISPOFF) but no sleep-in/out, which is
+// what the writecommand() note above records as a dead end. It is not one: the
+// BUS exposes getControlPanelHandle(), and esp_lcd_panel_io_tx_param on that
+// handle reaches any command the panel takes.
+//
+// THE INVERSION RE-APPLY IS THE WHOLE REASON THIS IS ONE FUNCTION AND NOT TWO
+// CALLS AT THE CALL SITE. Sleep-out RESETS the display's inversion state, and
+// this panel is natively inverted - so a wake that forgets it brings every
+// colour back as its complement. That exact ordering fact (0x21 before 0x11 in
+// the vendor table, silently undone by SLPOUT) cost this port an entire
+// debugging cycle once already; putting the re-apply inside the wake branch
+// makes forgetting it structurally impossible rather than merely unlikely.
+bool PanelShim::sleepPanel(bool sleep) {
+  if (!_lcd) return false;
+  auto* bus = _lcd->getBus();
+  if (!bus) return false;
+  esp_lcd_panel_io_handle_t io = bus->getControlPanelHandle();
+  if (!io) return false;
+  if (sleep) {
+    if (esp_lcd_panel_io_tx_param(io, 0x28, NULL, 0) != ESP_OK) return false;  // DISPOFF
+    if (esp_lcd_panel_io_tx_param(io, 0x10, NULL, 0) != ESP_OK) return false;  // SLPIN
+    delay(120);   // datasheet minimum before the rails are allowed to settle
+    return true;
+  }
+  if (esp_lcd_panel_io_tx_param(io, 0x11, NULL, 0) != ESP_OK) return false;    // SLPOUT
+  delay(120);     // and again on the way out, before anything is drawn
+  // NO #if HERE, AND THAT IS THE POINT. This was written as
+  // `#if BOARD_PANEL_INVERT` and that macro is UNDEFINED in this translation
+  // unit - see the file header: panel_shim.cpp deliberately does not include
+  // the board headers. `#if` on an undefined macro is silently zero, so the
+  // re-apply compiled away completely and every wake would have returned the
+  // panel with its colours complemented: the exact bug this line exists to
+  // prevent, reintroduced by the guard meant to scope it.
+  if (!invertColor(_inverted))
+    Serial.println("PANEL: invertColor FAILED after SLPOUT - colours will be complemented");
+  if (esp_lcd_panel_io_tx_param(io, 0x29, NULL, 0) != ESP_OK) return false;    // DISPON
+  return true;
 }
 
 // Where the time actually goes on a full-screen flush. Reports the gather and

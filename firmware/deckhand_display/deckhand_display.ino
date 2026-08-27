@@ -480,6 +480,43 @@ int sleepPresetIdx = 1; // default 30s
 unsigned long sleepTimeoutMs = 30000;
 unsigned long lastActivityMillis = 0;
 bool isAsleep = false;
+// Third display state, between lit and blank. A SEPARATE bool rather than
+// turning isAsleep into an enum, deliberately: dimming affects the backlight
+// duty and NOTHING else - every field still renders and the screen stays
+// readable - so the dozen places that test isAsleep must not have to learn
+// about it. Mutually exclusive with isAsleep: blanking clears it.
+bool isDimmed = false;
+// When something last WANTED you. The ladder's clock is the later of this and
+// lastActivityMillis, so a working session holds the screen lit without anyone
+// touching it, and a touch holds it lit with nothing running.
+unsigned long lastAttentionMillis = 0;
+
+#if !BOARD_USES_TFT_ESPI
+// The three blanked-state power savings, as runtime toggles that default OFF.
+// See the block above enterSleep() in power.ino for what each one does, why
+// they are toggles rather than plain behaviour, and the measurements that
+// motivated them.
+//
+// DECLARED HERE RATHER THAN IN power.ino BECAUSE THE BUILD REQUIRES IT: the
+// Arduino build concatenates the folder's .ino files with THIS one first, so a
+// global defined in power.ino is not in scope for the command dispatch below.
+// (Auto-generated prototypes cover functions; they do nothing for variables.)
+bool savePanelSleep = false;
+bool saveCpuSlow = false;
+bool saveBleSlow = false;
+// WHAT IS CURRENTLY APPLIED, which is NOT the same thing as what is requested
+// above - and conflating the two stranded a saving on real hardware. Clearing a
+// toggle while the device was still blanked skipped the restore on the next
+// wake, leaving the panel in SLPIN behind a lit backlight and the CPU at 80MHz
+// with nothing that would ever put them back. savingsSync() reconciles these
+// three against the request flags plus isAsleep, so every transition is
+// idempotent and no state can leak.
+bool panelSleptApplied = false;
+bool cpuSlowApplied = false;
+bool bleSlowApplied = false;
+const uint32_t CPU_MHZ_AWAKE = 240;
+const uint32_t CPU_MHZ_BLANKED = 80;   // the floor BLE still runs at
+#endif
 
 // Automatic full deep-sleep (not just backlight-off) to protect the battery:
 // when running on battery with no fresh active session for this long, the
@@ -2901,6 +2938,15 @@ void handleTouch() {
   lastActivityMillis = millis();
   lastNonIdleMillis = millis(); // interacting = not idle, postpone auto deep-sleep
 
+  // A tap while DIMMED restores full brightness and then FALLS THROUGH, so the
+  // tap still does whatever it was aimed at. Deliberately unlike the blanked
+  // case below: a dim screen is still readable, so you can see what you are
+  // pressing, and eating that tap would be gratuitous.
+  if (isDimmed) {
+    isDimmed = false;
+    ledcWrite(TFT_BL_PIN, brightnessPct * 255 / 100);
+  }
+
   // First tap after sleep only wakes the screen - it doesn't also register
   // as a tab switch or button press on whatever happens to be underneath.
   if (isAsleep) {
@@ -4484,7 +4530,47 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // Settings page, for the same reason. No-op unless SETTINGS is showing.
     int pg = buf.substring(5).toInt();
     if (currentTab == TAB_SETTINGS) gotoSettingsPage(pg);
+  } else if (buf == "POWERPROBE" || buf.startsWith("POWERPROBE ")) {
+    // Passive mV/h measurement of whatever state the device is in, labelled so
+    // two runs can be compared. Both boards: the question "what is this costing"
+    // arises on each, and this only reads the battery ADC.
+    //
+    // It is PASSIVE on purpose - it drives no backlight, no clock, nothing. You
+    // set the device up (brightness, blanked or not, or a whole different build),
+    // then probe. That keeps the instrument from ever being the thing that made
+    // the number, and it composes with savings that do not exist yet.
+    String arg = buf.length() > 11 ? buf.substring(11) : String("");
+    arg.trim();
+    if (arg == "off") powerProbeStop("stopped");
+    else powerProbeStart(arg.c_str());
 #if !BOARD_USES_TFT_ESPI
+  } else if (buf.startsWith("PANELSLEEP ") || buf.startsWith("CPUSLOW ") || buf.startsWith("BLESLOW ")) {
+    // The three blanked-state savings, as runtime toggles measured with
+    // POWERPROBE. Same convention as SWAP/INV: reachable in seconds so all
+    // combinations can be settled in ONE battery session, and persisted
+    // nowhere, because the answer belongs in board_es3c35p.h once it has been
+    // measured rather than in NVS disagreeing with the header.
+    //
+    // They take effect at the next blank/wake rather than immediately: applying
+    // a blanked-state saving while the screen is lit would measure a state the
+    // device never actually sits in.
+    int sp = buf.indexOf(' ');
+    bool on = buf.substring(sp + 1).toInt() != 0;
+    if (buf.startsWith("PANELSLEEP")) savePanelSleep = on;
+    else if (buf.startsWith("CPUSLOW")) saveCpuSlow = on;
+    else saveBleSlow = on;
+    // Re-sync NOW rather than at the next blank. Without this a toggle flipped
+    // while the device is already blanked does nothing until a physical tap
+    // wakes and re-blanks it - which is exactly the friction that led to
+    // clearing flags mid-blank and stranding what they had applied.
+    savingsSync();
+    char line[128];
+    snprintf(line, sizeof(line),
+             "SAVINGS panelSleep=%d cpuSlow=%d bleSlow=%d (applied=%d/%d/%d asleep=%d)",
+             savePanelSleep ? 1 : 0, saveCpuSlow ? 1 : 0, saveBleSlow ? 1 : 0,
+             panelSleptApplied ? 1 : 0, cpuSlowApplied ? 1 : 0, bleSlowApplied ? 1 : 0,
+             isAsleep ? 1 : 0);
+    sendLineToHost(line);
   } else if (buf == "PERF") {
     // Measures the flush path, because "it feels laggy" is not a number and every
     // guess about this panel so far has been wrong. Times a FULL-SCREEN flush
@@ -4856,7 +4942,10 @@ void loop() {
   tickWaitingWheel();   // no-op unless the standalone screen is on the glass
   tickAutoTheme();      // no-op unless the theme is set to AUTO
 
-  if (sleepTimeoutMs > 0 && !isAsleep && millis() - lastActivityMillis > sleepTimeoutMs) enterSleep();
+  // The session-gated lit -> dim -> blank ladder. Replaces a bare
+  // "blank after sleepTimeoutMs of no touch": that ignored whether anything was
+  // actually happening, so a working session went dark while you watched it.
+  tickScreenIdle();
 
   // A fresh, active session means the device is doing its job - not idle.
   // Stale data (host gone) does NOT count, so a disconnected device on
@@ -4897,6 +4986,7 @@ void loop() {
     lastBattSample = millis();
     sampleBattery();
     battTrendSample();
+    powerProbeTick();   // no-op unless a POWERPROBE is running
     static unsigned long lastBattLog = 0;
     if (millis() - lastBattLog > 60000) {
       lastBattLog = millis();

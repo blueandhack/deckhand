@@ -52,28 +52,77 @@ import crypto from "node:crypto";
 const MASK_COMMON = [{ from: 0xb0, to: 0xcf, why: "app_elf_sha256" }];
 const MASK_TAIL_BYTES = 33; // image SHA-256 + checksum
 
-// THE 5-BYTE CLUSTER IS AT A BOARD-SPECIFIC OFFSET, and finding that out is the
-// reason --selftest exists. The mask was first derived from board-1 binaries and
-// applied to board 2 untested; board 2 then reported CHANGED at +0 bytes, and the
-// selftest showed why - the cluster sits at 0x13BC on board 1 and 0x1D9C on board
-// 2, so a board-1 mask leaves it exposed on board 2. Both are 5 bytes with one
-// byte matching by chance in the middle, i.e. a ~4-byte value whose position
-// tracks image layout. Still unexplained; masked per board BY MEASUREMENT and
-// labelled as such rather than guessed at structurally.
+// THE "UNEXPLAINED 5-BYTE CLUSTER" IS EXPLAINED, AND IT IS THE SKETCH'S OWN
+// BUILD TIMESTAMP. It was masked for a long time as a board-specific blind spot
+// at a FIXED offset - 0x13BC on board 1, 0x1D9C on board 2 - honestly labelled
+// as measured-but-not-understood. Both descriptions were right about the bytes
+// and wrong about the cause, and the fixed offsets were a latent trap.
 //
-// A new board, or a toolchain that moves this, needs its own entry: run
-// --selftest, which prints the differing runs when the mask does not cover them.
-const MASK_BOARD = {
-  1: [{ from: 0x13bc, to: 0x13c0, why: "unexplained, measured on board 1" }],
-  2: [{ from: 0x1d9c, to: 0x1da0, why: "unexplained, measured on board 2" }],
-};
+// What it is: deckhand_display.ino prints `BUILD %s %s` with __DATE__ and
+// __TIME__, so every image embeds "hh:mm:ss\0Mmm dd yyyy\0". Two compiles
+// minutes apart differ only in the DIGITS that changed - which is exactly the
+// "5 bytes with one matching by chance in the middle" the old note described:
+// the middle byte was a colon. Measured, on two builds of identical source:
+// `23:00:18` against `23:03:23`.
+//
+// Why it had to stop being an offset: the offset MOVES whenever the image
+// layout does. Adding POWERPROBE grew the binary and shifted this string from
+// 0x13BC to ~0x159A, so `--check 1` reported board 1 CHANGED at +0 bytes on a
+// change that was entirely #if'd out for board 1. That is the same false
+// positive board 2 once produced, from the same cause, and a fixed offset
+// guarantees it recurs on the next size change.
+//
+// So it is LOCATED BY CONTENT now, per image, and the date is masked too: the
+// old mask covered only part of the time string, so two builds on different
+// DAYS would have diverged as well. Requiring exactly one match is deliberate -
+// a pattern that matched nothing (or twice) would otherwise mask the wrong
+// bytes silently, which is worse than failing.
+// ANCHORED ON THE TRAILING "BUILD " FORMAT STRING, AND THAT IS NOT COSMETIC.
+// An image contains THREE time\0date\0 pairs and only one of them varies -
+// measured, on two builds of identical source:
+//   0x1596   23:00:18 / 23:03:23   VARIES   the sketch's own, followed by "BUILD %s"
+//   0x2D97   00:11:05 Aug 16 2026  fixed    prebuilt LittleFS "Software Info" stamp
+//   0x11C0A  19:41:21 May 18 2026  fixed    prebuilt BTDM controller version stamp
+// The last two are stamped when those LIBRARIES were built, so they are constant
+// across our compiles; masking them would spend real sensitivity for nothing.
+// Anchoring on "BUILD " selects exactly the one deckhand_display.ino creates, and
+// ties the mask to the line responsible for it - so editing that line makes this
+// fail loudly rather than quietly masking the wrong 20 bytes.
+const BUILD_STAMP_RE = /[0-2]\d:[0-5]\d:[0-5]\d\x00[A-Z][a-z]{2} [ \d]\d \d{4}\x00BUILD /g;
+
+function buildStampRange(buf) {
+  const text = buf.toString("latin1");
+  const hits = [...text.matchAll(BUILD_STAMP_RE)];
+  if (hits.length !== 1) return { range: null, count: hits.length };
+  // The anchor is matched but NOT masked: "BUILD " is an ordinary string literal
+  // and a change to it must still be detected. Only the timestamp ahead of it is
+  // toolchain-varying, so the mask stops at the date's NUL.
+  const ANCHOR = "BUILD ";
+  const from = hits[0].index;
+  const to = from + hits[0][0].length - 1 - ANCHOR.length;
+  return { range: { from, to, why: "__DATE__/__TIME__" }, count: 1 };
+}
+
+// Nothing board-specific remains: the one board-specific entry was this stamp,
+// and it is found per image now. Kept as a hook because --selftest's whole job
+// is telling you when a board needs one.
+const MASK_BOARD = { 1: [], 2: [] };
 
 const BASELINE = path.join(import.meta.dirname, "board-baseline.json");
 
 function maskedHash(file, board) {
   const buf = Buffer.from(fs.readFileSync(file)); // a copy: this is mutated below
   let masked = 0;
-  const ranges = [...MASK_COMMON, ...(MASK_BOARD[board] ?? [])];
+  const stamp = buildStampRange(buf);
+  if (!stamp.range) {
+    console.error(
+      `FAIL: expected exactly one BUILD __DATE__/__TIME__ stamp in ${path.basename(file)}, found ${stamp.count}.\n` +
+      "That stamp is masked by CONTENT, so it has to be locatable. If the sketch\n" +
+      "stopped printing it, drop the mask; if the format changed, fix BUILD_STAMP_RE.",
+    );
+    process.exit(1);
+  }
+  const ranges = [...MASK_COMMON, ...(MASK_BOARD[board] ?? []), stamp.range];
   for (const { from, to } of ranges) {
     if (to >= buf.length) continue;
     buf.fill(0, from, to + 1);
@@ -138,7 +187,12 @@ if (args[0] === "--selftest") {
       if (runs.length && i === runs[runs.length - 1][1] + 1) runs[runs.length - 1][1] = i;
       else runs.push([i, i]);
     }
+    // The build stamp is located per image, so it has to be added here too -
+    // otherwise the coverage report calls the one range it definitely DOES mask
+    // "NOT COVERED" and sends the next reader chasing a mask that is fine.
+    const stampA = buildStampRange(Buffer.from(A)).range;
     const covered = [...MASK_COMMON, ...(MASK_BOARD[sboard] ?? [])];
+    if (stampA) covered.push(stampA);
     const tailFrom = A.length - MASK_TAIL_BYTES;
     console.error("\nRaw differing runs (0-based), and whether the mask covers each:");
     for (const [from, to] of runs) {

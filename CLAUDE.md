@@ -349,6 +349,11 @@ echo "SWAP 0" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: panel byte o
 echo "INV 1"  > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: display inversion, live
 echo "PERF" > ~/.claude/deckhand-device-command     # BOARD 2 ONLY: flush timing breakdown
 echo "TEXTPROBE" > ~/.claude/deckhand-device-command # print the text-width table (both boards)
+echo "POWERPROBE bl90-awake" > ~/.claude/deckhand-device-command # measure mV/h in the CURRENT state, labelled
+echo "POWERPROBE off" > ~/.claude/deckhand-device-command       # stop early and report what it has
+echo "PANELSLEEP 1" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: SLPIN the panel while blanked
+echo "CPUSLOW 1" > ~/.claude/deckhand-device-command    # BOARD 2 ONLY: 240 -> 80MHz while blanked
+echo "BLESLOW 1" > ~/.claude/deckhand-device-command    # BOARD 2 ONLY: ~200ms conn interval while blanked
 echo "AUDIOPROBE" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: is the codec on the bus? configures nothing
 echo "TONETEST" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: configure the codec and PLAY a tone
 echo "TONETEST 90" > ~/.claude/deckhand-device-command # ... at a given volume, 1-100 (default 30)
@@ -415,6 +420,180 @@ verified by tampering with one: exit 1):
 ```
 python3 firmware/deckhand_display/batt-trend-check.py
 ```
+
+That same file now also covers **`POWERPROBE`**, the passive mV/h instrument, which exists so a
+proposed battery saving can be RANKED instead of argued about. It measures whatever state the
+device is already in and reports against a label you supply, so an A/B is "set it up, probe,
+change one thing, probe again" — and it composes with savings that do not exist yet, including a
+different build. Three properties are deliberate:
+
+- **It takes its own raw ADC reads** rather than reusing the trend ring. That ring stores one
+  snapshot a minute of `batteryMv`, which is an **EMA of 8** — and averaging an already low-passed
+  signal does *not* buy the `sqrt(N)` that averaging independent samples does, because consecutive
+  values are correlated. Reading the ADC directly is what makes the noise fall with the sample
+  count, and it keeps the probe from reshaping the estimator that draws the `~5h` label.
+- **It reports mV/h, not %/h.** Millivolts per hour is the raw datum; percent routes through
+  `pctFromMv`'s curve, which is a MODEL of a cell nobody characterised, so comparing two builds in
+  %/h would attribute that curve's shape to the hardware. Same reason the sleep report prints mV/h.
+- **It states its own confidence** — the standard error of the slope — instead of inheriting the
+  estimator's fixed 20-minute/25mV gate, and says `not yet significant` until `|slope|/SE` clears
+  `POWERPROBE_MIN_SNR_X10`. That self-shortens when the drain is large, which is exactly the case
+  worth measuring: a −88 mV/h fall at realistic bucket noise is significant in **7 minutes** (SNR
+  25) where the fixed rule cannot speak for 20. A fixed span cannot do both.
+
+**It can only run ON BATTERY, and that is a property of the measurement rather than a limitation.**
+`batteryState()` returns `DISCHARGING` only while `usbLinkActive()` is false, so the cable must be
+out and the report comes back over BLE — a probe that "worked" on USB would be measuring the
+charger. It refuses with the cause named (`not on battery (unplug USB; state=2 mv=3866)`), because
+"no output" and "impossible here" look identical from the Mac.
+
+**Re-issuing the SAME label reports progress instead of restarting.** Checking on a running probe
+by re-sending the command is the obvious thing to do, and a restart would silently discard the
+minutes already collected — a measurement that reads as merely slow rather than as thrown away. It
+also makes the probe immune to the host delivering one command over BOTH transports, which is what
+every other command already gets (observed: one `POWERPROBE` produced four refusal lines).
+
+**DO NOT COMPARE mV/h ACROSS SESSIONS — MEASURED, AND IT COST A WRONG CLAIM IN THIS FILE.** The
+first version of this note said board 2's awake baseline was **−88 mV/h** (from 62 one-a-minute
+`BATT` lines fitted offline: max residual 5.5 mV, RMS 1.8 mV, a dead straight line) and that
+`POWERPROBE` disagreeing with it would mean the instrument was wrong. `POWERPROBE` then measured
+**−143 ± 5.5 mV/h** (SNR 26, 13 buckets) in the nominally same state, and cross-checking the raw
+per-minute `BATT` deltas over the same window gave ~−147 — so **the two independent readings of the
+run agreed with each other and disagreed with the historical figure**. The instrument was not wrong;
+the states were not the same. They differ in at least state-of-charge (**44% / 3794 mV** now against
+**59–73% / 3887–3974 mV** then), in thermal history (this run began minutes after a charge), and
+possibly in brightness, which was only ever *observed* at 90% — never known for the logged window.
+
+**THE FIRST REAL A/B, AND IT SETTLES WHAT TO OPTIMISE ON BOARD 2.** Both legs measured minutes
+apart in one session at ~44% SoC, on battery over BLE, USAGE tab, nothing else changed but the
+BRIGHTNESS stepper — and each cross-checked against the raw per-minute `BATT` deltas, which is what
+makes it two independent views rather than one:
+
+| state | `POWERPROBE` | raw `BATT` deltas |
+|---|---|---|
+| `bl90-awake` (brightness 90, never blanks) | **−142 ± 4 mV/h** (SNR 34, n=15) | −147 mV/h |
+| `bl-min` (brightness at minimum) | **−60 ± 4 mV/h** (SNR 16, n=7) | −60 mV/h |
+
+So the backlight at 90% is **~80 mV/h, about 56% of the whole awake drain** — the dominant single
+load, which is what promotes `SLEEP AFTER` and the brightness default from "probably worth it" to
+measured. **The other ~60 mV/h survives with the backlight essentially off**, and that is the budget
+the panel-`SLPIN` and light-sleep ideas are competing for: the panel controller is still fully
+active behind a dark backlight (`enterSleep()` only zeroes the PWM), the S3 is at 240MHz, and the
+ES8311 plus its ungateable amp are powered. Measure those individually before building any of them.
+
+**A related fact found the hard way: `SCREENSHOT` is USB-ONLY IN PRACTICE.** `SHOT begin` and the
+base64 rows go out through `Serial.printf`, so with the cable out the entire capture goes nowhere and
+logs nothing — it does not fall back to BLE. (Which is just as well: 410KB at BLE's ~666 B/s would be
+~10 minutes of radio, wrecking any power measurement it was called during.) To verify a *setting*
+during an on-battery run, read the physical consequence instead — dropping the brightness rebounded
+the cell **+10 mV**, which is better evidence that the load fell than a number rendered on screen.
+
+**THE THREE BLANKED-STATE SAVINGS ARE RUNTIME TOGGLES, DEFAULTING OFF** —
+`PANELSLEEP`/`CPUSLOW`/`BLESLOW`, board 2 only, applied at the next blank rather than
+immediately (applying a blanked-state saving to a lit screen would measure a state the device
+never sits in). They are toggles for exactly the reason `SWAP`/`INV` are: one measurement needs the
+cable out and ~10 minutes on battery, so three build-and-measure cycles costs a reflash per guess
+where one build plus `POWERPROBE` settles every combination in a single session. Nothing is
+persisted — the answer belongs in `board_es3c35p.h` once it has been SEEN. Board 1 is excluded
+deliberately: different SoC, different panel driver, auto-deep-sleep as a backstop, and no way to
+measure any of it here.
+
+**A REQUEST FLAG IS NOT A RECORD OF WHAT THE DEVICE DID, AND CONFLATING THEM STRANDED A SAVING ON
+HARDWARE.** The first version gated each restore on the same flag that enables it —
+`if (savePanelSleep) { tft.sleepPanel(false); ... }`. Clearing a toggle **while the device was still
+blanked with that saving applied** therefore skipped the restore on the next wake: the panel stayed
+in `SLPIN` behind a lit backlight and the CPU stayed at 80MHz, with nothing that would ever put
+either back. Found by doing it — a toggle was cleared mid-blank to set up an A/B, and the next tap
+produced a dark screen.
+Fixed with three `*Applied` variables recording what is actually in force, reconciled by one
+idempotent **`savingsSync()`** against `isAsleep && <flag>`. That single function serves entering
+sleep, waking, AND a toggle flipped at any moment, which is the point: apply and restore being two
+separate conditions that could disagree is what allowed the leak.
+It also **re-syncs immediately**, so a toggle flipped while blanked takes effect at once instead of
+waiting for a tap — removing the very friction that caused the bug, since an A/B otherwise needs a
+physical tap between every leg. `enterSleep()` still kills the backlight FIRST and `wakeUp()` raises
+it LAST over an already-woken panel; inside `savingsSync()` restores lead with the CPU (so the
+panel's two 120ms sleep-out delays and the repaint are not also run at a third speed) and applies
+leave it for last. Every one of those orderings is asserted in `batt-trend-check.py`, and the
+`SAVINGS` line reports `applied=n/n/n asleep=n` so the state is observable rather than inferred.
+Proven on the glass in the exact failing scenario: `applied=1/0/0 asleep=1` then, after clearing it
+with no tap, `applied=0/0/0 asleep=1`.
+
+**Only a TOUCH can wake this device — verified, and it matters for every measurement.** `wakeUp()`
+has exactly one call site (`handleTouch` when `isAsleep`), and `autoDeepSleep()` is compiled out on
+board 2, so nothing wakes it spontaneously. A blanked device stays blanked until a finger arrives,
+which is what makes an unattended `POWERPROBE` run trustworthy — and it is why an unexplained
+`asleep=0` mid-run means somebody touched it, not that a hidden wake path exists.
+
+**WHAT `esp_pm` CANNOT DO HERE, MEASURED AT THE INSTRUCTION LEVEL.** Automatic light sleep and DFS
+are **compiled out of the stock Arduino core**: `CONFIG_PM_ENABLE is not set`, and
+`esp_pm_configure` is a three-instruction stub — `entry` / `movi a2, 0x106` / `retw.n`, i.e. it
+returns `ESP_ERR_NOT_SUPPORTED` and does nothing. It LINKS, so calling it compiles cleanly, changes
+nothing, and measures nothing — which would read as the idea being wrong rather than absent. Manual
+`esp_light_sleep_start()`, `esp_sleep_enable_gpio_wakeup()` and `gpio_wakeup_enable()` *are* all
+present (in the `dio_opi` variant board 2 links), and light sleep wakes from ANY GPIO, so the
+RTC-pin constraint that blocks deep sleep on `PIN_TOUCH_INT` (47) does not apply. The open question
+is `CONFIG_BT_CTRL_MODEM_SLEEP is not set`: with no controller modem sleep, stopping the CPU while a
+link is live will probably drop it. That is a SPIKE, not a design — and it is why light sleep is not
+in this pass.
+**When checking whether an IDF feature exists, search ALL the variant archives.** A search of only
+`lib/*.a` reported `esp_deep_sleep_start` as undefined — a function this firmware demonstrably
+calls — because the per-flash-mode copies live in `dio_opi/`, `opi_opi/` and so on. The tell was
+running the same search against a symbol known to work; without that control the conclusion would
+have been confidently backwards.
+
+**`#if` ON A MACRO THE TRANSLATION UNIT CANNOT SEE IS SILENTLY FALSE, AND IT REINTRODUCED THE VERY
+BUG IT WAS SCOPING.** `panel_shim.cpp` deliberately includes no board header (see its own file
+comment). The panel-wake path was first written as `#if BOARD_PANEL_INVERT` around the
+post-`SLPOUT` `invertColor()` re-apply — and that macro is undefined there, so the re-apply
+compiled away entirely and every wake would have returned the panel with **every colour
+complemented**: precisely the fault the line exists to prevent. It now restores a `_inverted` state
+the shim TRACKS, which is better than a constant anyway, because `INV 0|1` is a runtime command and
+the right value on wake is whatever was in effect. Two lessons, both asserted in the checker:
+`panel_shim.cpp` must branch on **no** board macro at all, and **a text-matching test cannot watch
+the preprocessor delete the line it just found** — the original assertion ("the wake path mentions
+`invertColor`") passed the whole time the call was being compiled out.
+
+**THE "UNEXPLAINED 5-BYTE CLUSTER" IN THE BASELINE MASK IS EXPLAINED: IT IS THE SKETCH'S OWN BUILD
+TIMESTAMP.** `deckhand_display.ino` prints `BUILD %s %s` with `__DATE__`/`__TIME__`, so every image
+embeds `hh:mm:ss\0Mmm dd yyyy\0` and two compiles minutes apart differ only in the digits that
+changed — which is exactly the "5 bytes with one matching by chance in the middle" the old note
+described; the middle byte was a colon. Measured: `23:00:18` against `23:03:23`.
+**It is now located BY CONTENT rather than at a fixed offset, and that was a live bug, not a
+tidy-up.** The offset moves whenever the image layout does: adding `POWERPROBE` grew the binary and
+shifted the string from `0x13BC` to `0x1596`, so `--check 1` reported **board 1 CHANGED at +0
+bytes** for a change that was entirely `#if`'d out of board 1 — the same false positive board 2
+once produced, from the same cause, and guaranteed to recur on the next size change. `--selftest` is
+what caught it, and only once it was run on two *genuinely independent* compiles: run back to back
+the build is incremental and reproducible, so the mask is never exercised and the selftest says so
+rather than passing vacuously.
+**The match is ANCHORED on the trailing `BUILD ` string, because an image holds THREE
+`time\0date\0` pairs and only one varies** — the other two are prebuilt-library stamps
+(`00:11:05 Aug 16 2026` from LittleFS, `19:41:21 May 18 2026` from the BTDM controller) fixed when
+those libraries were built, so masking them would spend real sensitivity for nothing. The anchor is
+matched but NOT masked, since `BUILD ` is an ordinary literal whose change must still be caught, and
+the date is masked alongside the time so a build on a different DAY does not diverge either. Mask is
+now 86 bytes; both boards' masks are verified by `--selftest`, and `MASK_BOARD` is empty because the
+one board-specific entry was this stamp.
+
+So an absolute mV/h is only meaningful **within one run**. Two consequences:
+
+- **A/B by DIFFERENCE, back to back, in one session.** A common offset from SoC region or thermal
+  drift cancels; a cross-session absolute carries it in full.
+- **Let the cell settle, and expect the first fit to lie.** The minute after unplugging fell
+  **−21 mV** on its own, and the fit walked −135.9 → −119.9 → −113.2 before turning round and
+  converging up to −143. Discard anything reported inside the first few minutes: the SNR gate
+  cannot catch this, because a relaxation curve is smooth and fits a line perfectly well.
+
+**What the −88 mV/h turned out to BE, since it is the first thing anyone will re-derive:**
+`SLEEP AFTER` was set to **OFF** with brightness at 90%, so the backlight never blanked — and the
+straight-line fit is the evidence, because a blank at 30s idle would leave an obvious knee and a
+voltage rebound. **On board 1 that setting is survivable; on board 2 it is not**, because
+`AUTO_SLEEP_IDLE_MS` is compiled out there (`BOARD_HAS_TOUCH_SLEEP_WAKE 0`) so the backlight blank
+is the *only* power saving left, and nothing stops it being switched off. The reasoning that
+disabled auto-sleep on board 2 explicitly leans on that blank still being there. **This is an open
+design gap, not a misconfigured device** — a candidate fix is to drop the OFF rung from
+`SLEEP_PRESETS_MS` when `BOARD_HAS_TOUCH_SLEEP_WAKE` is 0.
 
 Validate the DARK/LIGHT palettes (contrast plus colour-blind/greyscale separability) and prove
 the checker itself has teeth:
