@@ -453,7 +453,22 @@ mic_front_cham = 1.0;   // slight outward flare so it does not read as a pinhole
 exp_side  = 1;     // -1 = low-X wall, +1 = high-X wall
 exp_from_far = 18.1; // connector centre, in from the non-USB end
 exp_w     = 12.0;  // pocket width along the case length (generous for the cable)
-exp_relief = 1.8;  // depth into the 2.6 mm wall, leaving 0.8 mm of material
+// DEPTH IS DERIVED FROM wall, AND IT USED TO BE TRANSCRIBED - which is how it went
+// wrong. The old line read `exp_relief = 1.8; // depth into the 2.6 mm wall,
+// leaving 0.8 mm of material`, and it was right when it was written. Then wall was
+// SLIMMED 2.6 -> 2.2 (see wall) and this 1.8 did not follow, so the skin silently
+// halved to 0.4 - ONE extrusion line at a 0.4 nozzle, half of what had already
+// failed at snap_skin - and the pocket printed straight through the wall. The
+// comment stating 2.6 and 0.8 next to a case whose wall was 2.2 is the whole
+// evidence trail. A depth into a wall is a function OF that wall; writing it as a
+// literal is what let the two drift apart.
+exp_skin  = 1.1;   // material left on the OUTER face - same threshold as snap_skin
+exp_plug_proud = 1.5;   // how far the mated Expand plug stands past the board edge
+// exp_relief itself is DERIVED and lives immediately after `wall`, ~200 lines down,
+// because `wall` is not defined yet here. Writing `exp_relief = wall - exp_skin` at
+// this point yields undef and the pocket vanishes - the FOURTH forward-reference in
+// this file, and it was caught the same way as the third: by grepping the build for
+// WARNING as well as ERROR. See print_shrink's note.
 exp_z_pad = 0.5;   // start just below the board's back plane so the edge is clear too
 exp_top   = 4.0;   // wall left above the relief, so it doesn't notch the top rim
 // Both wall channels get a SLOPED roof instead of a flat one. Two reasons, and the
@@ -668,6 +683,11 @@ clr_w    = print_shrink / 2;   // compensation, not clearance: see print_shrink
 wall     = 2.2;     // SLIMMED from 2.6: -0.8 mm on BOTH footprint axes. Not lower -
                     // the snap barbs and the cover lip are cut into this wall, and
                     // below ~2 they stop holding.
+// Derived HERE rather than beside the other exp_* constants, because it depends on
+// `wall` immediately above - see the note up there. See also the assert below.
+exp_relief = wall - exp_skin;
+assert(!mic_ext || exp_relief >= exp_plug_proud,
+       "Expand relief cannot clear the plug AND keep a printable skin at this wall - raise wall to 2.6");
 front_th = 2.2;     // front face thickness
 cover_th = 2.0;     // back cover plate
 lip_h    = 4.0;     // cover lip depth — shared by cover() and the retainer risers
@@ -954,6 +974,12 @@ module body_core(){
         translate([out_w - wall + mic_relief - 0.01, cy, cz]) rotate([0, 90, 0])
           cylinder(d = mic_port_d, h = wall - mic_relief + 0.02);
       }
+    // BOARD 1 ONLY, gated exactly like the mic channel above it - and NOT gating it
+    // was a real defect, not an oversight to tidy. This pocket exists to clear the
+    // plug on the EXTERNAL mic module's Expand lead. Board 2's mic is on the board,
+    // nothing is plugged in, and the pocket therefore cleared nothing while cutting
+    // 12 x 12 out of the inner face of the wall beside the microphone.
+    if (mic_ext)
     // Expand-pin cable relief - see exp_* above. Cut from just under the board's back
     // plane, but it STOPS exp_top below the rim rather than running out through it. It
     // used to break the rim, which left a visible notch in the top edge of the wall.

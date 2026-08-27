@@ -10,6 +10,39 @@ openscad -o stl/deckhand_b2_body.stl -D 'part="body"' deckhand_case_b2.scad
 # parts: body | cover | retainer | stand | coupon | section | all
 ```
 
+## The pit in the wall by the mic: a board-1 feature nobody gated
+
+Two faults stacked, and the second is the more instructive.
+
+**It is board 1's, and it was never gated.** The pocket exists to clear the plug on
+the EXTERNAL mic module's 4-pin Expand lead. Board 2's mic is on the board
+(`mic_ext = false`), nothing is plugged in, so the pocket cleared nothing while
+cutting 12 x 12 out of the inner face of the wall beside the microphone. The mic
+channel immediately above it in the same `difference()` *is* gated on `mic_ext`;
+this one was missed.
+
+**And its depth was stale — its own comment is the evidence.** The line read
+`exp_relief = 1.8; // depth into the 2.6 mm wall, leaving 0.8 mm of material`, and
+that was true when written. `wall` was later slimmed 2.6 -> 2.2 and the hardcoded
+1.8 did not follow, so the skin silently halved to **0.4 mm — one extrusion line**,
+half of what had already failed at `snap_skin`. A comment claiming a 2.6 wall
+sitting in a case whose wall is 2.2 is the whole trail. A depth *into* a wall is a
+function of that wall; writing it as a literal is what let the two drift apart.
+`exp_relief` is now `wall - exp_skin`, with an assert that fires if a future wall
+cannot give both plug clearance and a printable skin.
+
+Deriving it also produced **the fourth forward-reference in this file**: `wall` is
+defined ~200 lines below the other `exp_*` constants, so `exp_relief = wall -
+exp_skin` written beside them evaluated to `undef` and the pocket vanished for the
+wrong reason. Caught by grepping the build for `WARNING` as well as `ERROR` — the
+same habit that caught the third. The derivation now sits immediately after `wall`.
+
+Verified by fault injection rather than by looking: a probe counting mesh vertices
+inside the pocket's volume finds **64 with the gate removed and 0 with it in
+place**. The first number is what makes the second mean anything — an earlier
+version of that probe returned 0 for both, i.e. it was blind, and its "pocket is
+gone" was worth nothing.
+
 ## The speaker grille, and the snap pockets that printed open
 
 **The rectangular hole by the microphone was never a speaker port.** It is one of
