@@ -1854,6 +1854,13 @@ void drawStatusDot(int cx, int cy, int r, const char* status, uint16_t bg = COLO
   // against READY - a luminance-and-shape code that survives greyscale, checked on
   // the glass rather than argued. The indicator was never the only carrier.
   //
+  // THAT PILL IS NOW THE ONLY NON-HUE CARRIER LEFT between those two statuses, so
+  // its FORM is guarded in sessions-geom-check.mjs and not merely its presence -
+  // restyling asking to uiStrokeRound used to pass every assertion. The margin is
+  // 11.93:1 under LIGHT and 5.78:1 under DARK, so DARK is the HARDER case; the
+  // full arithmetic and the marginal element (waiting's stroke, 3.37:1 on DARK)
+  // are recorded beside that assertion.
+  //
   // AT REST THE MARK IS FRAME 0 AT LABEL STRENGTH. Neither table has an idle frame
   // - both are 8 MOTION frames - so a held motion frame can read as accidental.
   // Dimming it is the spec's own stated fallback and needs no new art; a real rest

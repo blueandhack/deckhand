@@ -1033,6 +1033,50 @@ for (const b of [1, 2]) {
           "the TALL row still draws its status pill - the spine is a second carrier, never the only one");
       chk(/drawStatusPill\(SESSION_ROW_X \+ SESSION_ROW_W - 16, y \+ SESSION_PILLC_Y, label, s\.status, true\);/.test(src),
           "the COMPACT row still draws its status pill - the spine is a second carrier, never the only one");
+      // HOW MUCH MARGIN THE CARRIER HAS, IN BOTH THEMES, because the obvious
+      // guess is backwards and a palette edit judged against the wrong one is how
+      // this becomes a real defect. WCAG relative luminance on the decoded RGB565,
+      // asking's filled body (COLOR_BAD) against waiting's body (COLOR_CARD, since
+      // an outlined pill's interior IS the card):
+      //
+      //     LIGHT  0x6887 on 0xFFFF  =  11.93:1
+      //     DARK   0xCBD4 on 0x18C4  =   5.78:1   <- THE HARDER CASE, about half
+      //
+      // DARK is the tighter of the two, not the looser. It still clears the 3:1
+      // non-text threshold comfortably, and the carrier is topological anyway - an
+      // unbroken field of ink against ink only at the edges, which is invariant
+      // under inversion - so no palette change is owed. But anyone darkening these
+      // must check DARK, not LIGHT.
+      //
+      // MARGINAL ELEMENT, worth knowing before COLOR_GOOD is touched: waiting's 2px
+      // STROKE on its card is 3.37:1 under DARK against 6.71:1 under LIGHT. That
+      // stroke is the thinnest ink in the scheme and has the least room in it.
+      //
+      // ...AND THE PILL'S FORM, WHICH THE TWO ABOVE DO NOT COVER. They assert the
+      // call sites exist. They say nothing about what drawStatusPill DRAWS, so
+      // changing asking's uiFillRound to uiStrokeRound - which destroys the last
+      // non-hue carrier between asking and waiting outright - passed all of this
+      // green. Presence was guarded; FORM was not, and form is the half that
+      // carries the meaning.
+      //
+      // Branches are SLICED, not matched with a lazy regex across the function. A
+      // /if \(asking\)[\s\S]*?uiFillRound\(/ would happily run past the asking
+      // branch and find the uiStrokeRound branch's neighbour further down, which
+      // is the vacuous-check trap this file has already paid for once.
+      const pill = src.slice(src.indexOf("void drawStatusPill("));
+      const pbody = pill.slice(0, pill.indexOf("\n}\n"));
+      const iA = pbody.indexOf("if (asking) {");
+      const iW = pbody.indexOf("} else if (working) {");
+      const iE = pbody.indexOf("} else {", iW);
+      chk(iA > 0 && iW > iA && iE > iW,
+          "drawStatusPill branches three ways: asking / working / else");
+      const askB = pbody.slice(iA, iW), workB = pbody.slice(iW, iE), elseB = pbody.slice(iE);
+      chk(/uiFillRound\(/.test(askB) && !/uiStrokeRound\(/.test(askB),
+          "asking draws a FILLED pill (uiFillRound) - the solid half of the fill/outline code");
+      chk(/uiStrokeRound\(/.test(elseB) && !/uiFillRound\(/.test(elseB),
+          "waiting draws an OUTLINED pill (uiStrokeRound) - the hollow half of the fill/outline code");
+      chk(!/uiFillRound\(|uiStrokeRound\(/.test(workB),
+          "working draws NO box at all - three states, three forms, so none is told by hue alone");
     }
     // ---- the agent mark is the indicator at EVERY status, not only working ----
     // drawStatusDot used to fall through to an anonymous square or ring for
