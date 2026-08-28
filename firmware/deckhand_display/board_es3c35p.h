@@ -878,17 +878,26 @@ const int SESSION_BAND_DUR_CHARS = 3;
 // same rule that makes the status pill a filled/outlined/boxless SHAPE, not a hue.
 const int SESSION_SPINE_W = 6;
 //
-// IT IS A CURVED BAND, NOT A RECT, AND THAT IS THE BAND'S HAZARD AT TWO CORNERS
-// INSTEAD OF ONE. The spine runs the row's whole left edge, so it meets BOTH
-// rounded corners - and on the interior's top row the card's own fill has not
-// reached x + BORDER_CARD at all: the corner arc is still R_MD - BORDER_CARD to
-// the right of it. A plain fillRect there paints status-coloured nubs OUTSIDE the
-// card's outline, which is exactly why drawSessionBand's fill is top-rounded. The
-// draw takes the band BETWEEN TWO CAPSULES of the card's interior radius, set
-// SESSION_SPINE_W apart: its left edge IS the interior's arc and its right edge is
-// that arc moved over, so the band is a constant width that follows the corner
-// rather than cutting across it. No literal radius anywhere - R_MD - BORDER_CARD,
-// the same expression drawSessionBand already uses.
+// ITS LEFT EDGE IS CURVED AND ITS RIGHT EDGE IS NOT, AND BOTH HALVES OF THAT WERE
+// PAID FOR. The spine runs the row's whole left edge, so it meets BOTH rounded
+// corners - and on the interior's top row the card's own fill has not reached
+// x + BORDER_CARD at all: the corner arc is still R_MD - BORDER_CARD to the right
+// of it. A plain fillRect there paints status-coloured nubs OUTSIDE the card's
+// outline, which is exactly why drawSessionBand's fill is top-rounded. So the fill
+// is a capsule at the card's INTERIOR radius, whose left edge IS that arc - no
+// literal radius anywhere, R_MD - BORDER_CARD, the same expression the band uses.
+//
+// THE RIGHT EDGE IS CARVED STRAIGHT, AND IT WAS A SECOND CAPSULE FIRST. Carving
+// with a mirrored capsule gives a band of constant width that follows the corner,
+// which looks like the tidier answer and is not: the band then MOVES RIGHT with
+// the arc, reaching x=26 near the top of the row, and the working spinner's 32x32
+// blit paints its own COLOR_CARD background over everything from x=20 for rows
+// +3..+34. Measured against the shim's own SDF: 17 status-coloured pixels erased,
+// on every working row, four times a second. No border bite and nothing outside
+// the outline - purely cosmetic - but a spine whose top simply stops. Carving with
+// a RECT instead bounds the ink at x = spine + SESSION_SPINE_W - 1 by construction,
+// which is also the shape "6px down the left edge" actually describes: a straight
+// bar whose ends are rounded by the card's own corner.
 //
 // CLAUDE SOLID, CODEX SEGMENTED (§5's second carrier), as a FILL PATTERN rather
 // than art: no blits, no new tables, and it survives greyscale - which is the
@@ -899,16 +908,47 @@ const int SESSION_SPINE_W = 6;
 //   ON 7 is one more than SESSION_SPINE_W, so a run reads as a SEGMENT of a band
 //     rather than as a square dot - a dotted line would be a third status
 //     vocabulary beside the pill's shapes and the band's fill.
-//   Their SUM is the bound that actually constrains them. The pattern is knocked
-//     out of the spine's STRAIGHT section only - the arcs at each end stay solid,
-//     because a knockout rect up there would paint outside the card for the same
-//     reason a fill rect would - and that section is
-//     SESSION_ROW_H_MIN - 2*BORDER_CARD - 2*(R_MD - BORDER_CARD) = 23px at the
-//     shortest row this board's ladder can produce. TWO gaps are what makes a
-//     spine read as segmented rather than as one broken in the middle, so the
-//     period must be <= 23/2 = 11. It is exactly 11, and that is the ceiling.
+//   Their SUM is the bound that actually constrains them, and it comes from the
+//     LOOP rather than from a rule of thumb. The pattern is knocked out of the
+//     spine's STRAIGHT section only - the arcs at each end stay solid, because a
+//     knockout rect up there would paint outside the card for the same reason a
+//     fill rect would. The loop starts at r + ON and draws while
+//     yy + OFF <= h - r, so a SECOND gap needs r + ON + P + OFF <= h - r, i.e.
+//     exactly 2P <= straight. Two gaps are what makes a spine read as segmented
+//     rather than as one broken in the middle, so P <= straight/2.
+//     The shortest spine the ladder can actually produce is a 62px row (six
+//     sessions under the "+N more" strip), whose straight section is
+//     62 - 2*BORDER_CARD - 2*SESSION_SPINE_INSET - 2*(R_MD - BORDER_CARD) = 36,
+//     so P <= 18 and 11 clears it three times over.
+//     Note SESSION_ROW_H_MIN (47) would give 21 and hold only ONE gap - it is the
+//     constrain() floor for a smaller panel and is unreachable on this board's
+//     ladder, which sessions-geom-check.mjs establishes by ENUMERATING the
+//     reachable heights rather than by asserting against the floor. Stated here
+//     rather than left as a silent 1px of luck.
 const int SESSION_SPINE_ON = 7;
 const int SESSION_SPINE_OFF = 4;
+// ONE PIXEL DOWN AND UP, NEVER SIDEWAYS, AND THE 1 IS MEASURED RATHER THAN CHOSEN.
+// VERTICAL ONLY is not a detail: applying it in x as well moves the capsule's arc
+// off the card interior's own centre AND slides the spine's six columns one right,
+// putting its LAST column on the working spinner blit's FIRST. That was built,
+// flashed and read back off the panel - x=20 white for rows +14..+33 and coloured
+// below, i.e. 20 pixels a row erased - which is the very defect this constant was
+// added to help fix, reintroduced by its own fix. The checker now derives the
+// spine's left edge from the DRAW's own x expression for exactly that reason.
+// The
+// carving rect's own left edge lands at x = spine + SESSION_SPINE_W = 20, and at
+// the interior's top row (+2) that pixel is still 77% BORDER ink - the card's 2px
+// ring is anti-aliased, so its last trace at x=20 is row +2, and a rect starting
+// there rubs out three quarters of a border pixel at both left corners. That is
+// the white-nick-in-a-rounded-corner defect SESSION_DOT_CX exists for, arriving
+// through the carve instead of through a blit.
+// Replicating PanelShim's fillSmoothRoundRect and drawSmoothRoundRect exactly and
+// reading the border's coverage at x=20 off the result: +0 0.351, +1 1.000,
+// +2 0.770, +3 0.000 - clean from +3 down. So the spine's box is inset one further
+// pixel on all four sides, which costs 24 of 548 ink pixels on a 100px row and
+// takes the border damage to ZERO. Asserted, with the injected fault, in
+// sessions-geom-check.mjs.
+const int SESSION_SPINE_INSET = 1;
 
 // ---------- The band card's block stack ----------
 // SESSION_EXP_MAX_H is the SUM of these, not a chosen number - the same way the

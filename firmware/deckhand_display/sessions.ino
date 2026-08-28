@@ -307,27 +307,45 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
 // edge paints status-coloured nubs OUTSIDE the card's rounded outline. This one
 // meets BOTH corners rather than one, so it cannot be squared off at either end.
 //
-// TWO CAPSULES, NOT A RECT AND NOT SIX COLUMNS OF ARITHMETIC. The first is a
-// rounded rect exactly 2r wide at the card's INTERIOR radius, so its left edge IS
-// the interior's corner arc - same centre (SESSION_ROW_X + R_MD, y + r), same
-// radius. The second is the identical shape shifted right by SESSION_SPINE_W and
-// filled with the card colour, which carves the first back down to a band of
-// constant width that follows the corner. What it paints past the first shape's
-// right edge is COLOR_CARD onto COLOR_CARD - a no-op, never a bite out of the
-// border, because the two shapes share their top and bottom arcs. Both edges stay
-// anti-aliased, which six integer columns would not be.
+// A CAPSULE CARVED STRAIGHT, not a rect and not six columns of arithmetic. The
+// capsule is exactly 2r wide at the card's INTERIOR radius, so its left edge IS
+// the interior's corner arc - same centre, same radius, by construction rather
+// than by transcription. A plain COLOR_CARD rect then takes back everything from
+// SESSION_SPINE_W rightwards, which bounds the ink at x + SESSION_SPINE_W - 1 on
+// every row and leaves the ends shaped by the card's own corner.
+//
+// CARVING WITH A SECOND CAPSULE IS THE OBVIOUS MOVE AND IT IS WRONG. It gives a
+// band of constant width that follows the corner - prettier on paper - but the
+// band then travels RIGHT with the arc, and the working spinner's 32x32 blit
+// paints its own COLOR_CARD background from x = SESSION_DOT_CX - SPARK_SIZE/2
+// across every row it covers. Measured against the shim's own SDF: 17 spine
+// pixels erased on every working row, four times a second. Cosmetic - no border
+// bite, nothing outside the outline - and invisible to any assertion that models
+// the spine as a rect, which is exactly how it survived a review.
+//
+// SESSION_SPINE_INSET is the other half of that fix, and it is VERTICAL ONLY.
+// The carving rect's own left edge lands on a pixel the card's anti-aliased border
+// still owns at the interior's TOP ROW, so the box starts one row further down and
+// ends one row earlier. It must NOT move in x, for two independent reasons:
+// the capsule's arc would stop sharing the card interior's centre, and 6px
+// starting one pixel right puts the spine's LAST column on the spinner blit's
+// FIRST - measured off the panel as 20 erased pixels a row, which is the same
+// defect as the arc overlap, reintroduced by its own fix.
 //
 // CODEX IS SEGMENTED, and the gaps are knocked out of the STRAIGHT section only -
-// the run between the two arcs, where the band's left edge really is at x. Up in
-// the arc the band has moved right, so a knockout at x would paint outside the
-// card: the same hazard as the fill, arriving through the pattern. The two ends
-// therefore stay solid, which is also what keeps the pattern from reading as a
-// half-segment cut off by the corner.
-void drawSessionSpine(int x, int y, int h, const char* status, bool codex) {
+// the run between the two arcs, where the fill's left edge really is at x. Up in
+// the arc it has moved right, so a knockout at x would paint outside the card: the
+// same hazard as the fill, arriving through the pattern. The two ends therefore
+// stay solid, which is also what stops the pattern reading as a half-segment cut
+// off by the corner.
+void drawSessionSpine(int x0, int y0, int h0, const char* status, bool codex) {
   const uint16_t col = colorForStatus(status);
   const int r = R_MD - BORDER_CARD;   // the card's interior corner radius
+  const int x = x0;                              // no x inset - see above
+  const int y = y0 + SESSION_SPINE_INSET;
+  const int h = h0 - 2 * SESSION_SPINE_INSET;
   uiFillRound(x, y, 2 * r, h, r, col, COLOR_CARD);
-  uiFillRound(x + SESSION_SPINE_W, y, 2 * r, h, r, COLOR_CARD, col);
+  tft.fillRect(x + SESSION_SPINE_W, y, 2 * r - SESSION_SPINE_W, h, COLOR_CARD);
   if (!codex) return;
   // Starts one ON run below the top arc and draws only a gap that fits WHOLE
   // inside the straight section, so no knockout is ever clipped by an arc.

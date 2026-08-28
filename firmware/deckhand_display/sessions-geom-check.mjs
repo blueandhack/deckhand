@@ -347,12 +347,34 @@ function expBands(b, c, rowH, have) {
   bands.push(["border bottom", rowH - 2, rowH - 1]);
   return bands;
 }
+// The spinner art's own size, PARSED. It was transcribed as a literal 16
+// (SPARK_SIZE / 2) at three sites, and it is the constant the spine's clearance
+// turns on - a regenerated 40px mark would move the blit's left edge under every
+// one of those literals without any of them noticing.
+function sparkSize() {
+  const m = fs.readFileSync(`${DIR}/ClaudeSpark.h`, "utf8").match(/#define\s+SPARK_SIZE\s+(\d+)/);
+  if (!m) throw new Error("SPARK_SIZE not found in ClaudeSpark.h");
+  return Number(m[1]);
+}
+// THE SPINE IS NOT A RECT, so `spineL + SESSION_SPINE_W - 1` is NOT its rightmost
+// ink and must never be used as one - that model is what let a real overlap ship.
+// This returns the rightmost x the spine's CAPSULE alone would ink at a given
+// row-relative y, i.e. what the shape does before the carve bounds it. The arc is
+// the card interior's own: centre (SESSION_ROW_X + R_MD, R_MD), radius
+// R_MD - BORDER_CARD, which is what the fill is drawn at.
+function spineArcRight(c, dy) {
+  const r = c.R_MD - c.BORDER_CARD;
+  const d = Math.abs(dy - c.R_MD);
+  if (d >= r) return null;                       // above/below the capsule's arc
+  const left = c.SESSION_ROW_X + c.R_MD - Math.sqrt(r * r - d * d);
+  return left + c.SESSION_SPINE_W - 1;           // if the carve followed the arc too
+}
 // drawSessionSpine()'s Codex knockout loop, replicated. The spine's own box is
 // the card's INTERIOR, and the gaps may only be cut from the STRAIGHT section
 // between the two corner arcs - the loop draws a gap only where a whole one fits,
 // so nothing is ever clipped by an arc.
 function spineGaps(c, rowH) {
-  const h = rowH - 2 * c.BORDER_CARD;
+  const h = rowH - 2 * c.BORDER_CARD - 2 * c.SESSION_SPINE_INSET;
   const r = c.R_MD - c.BORDER_CARD;
   const gaps = [];
   for (let yy = r + c.SESSION_SPINE_ON; yy + c.SESSION_SPINE_OFF <= h - r;
@@ -849,7 +871,18 @@ for (const b of [1, 2]) {
         `the spine is narrower than the card border radius allows to be lost`);
 
     // ---- §4 THE SPINE ----
-    const spineL = c.SESSION_ROW_X + c.BORDER_CARD;
+    // THE SPINE'S LEFT EDGE IS READ OUT OF THE DRAW, not assumed. Transcribing it
+    // as ROW_X + BORDER_CARD is what let an x inset ship: the constant said 14, the
+    // firmware drew at 15, and every clearance assertion below went on describing
+    // the shape the checker imagined. `x0` is the interior the call site passes;
+    // anything the function adds to it has to move these numbers with it.
+    const spineSrc = (() => {
+      const s = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const fn = s.slice(s.indexOf("void drawSessionSpine("));
+      return fn.slice(0, fn.indexOf("\n}\n") + 2);
+    })();
+    const xShift = /const int x = x0 \+ SESSION_SPINE_INSET/.test(spineSrc) ? c.SESSION_SPINE_INSET : 0;
+    const spineL = c.SESSION_ROW_X + c.BORDER_CARD + xShift;
     const spineR = spineL + c.SESSION_SPINE_W - 1;
     const sr = c.R_MD - c.BORDER_CARD;                 // the card's interior radius
     // IT CANNOT BE A RECT, and this is the assertion that says so rather than the
@@ -860,9 +893,9 @@ for (const b of [1, 2]) {
         `a plain rect spine would paint outside the card: at the interior's top row ` +
         `the fill starts at x=${borderInnerX(c.SESSION_ROW_X, 0, c.RADIUS, c.BORDER_CARD)}, ` +
         `the spine's left edge is x=${spineL}`);
-    // ... so the draw takes the band between two capsules at the INTERIOR radius,
-    // whose left edge IS that arc. Parsed, because none of the geometry above can
-    // see which shape the firmware actually fills.
+    // ... so the fill is a capsule at the INTERIOR radius, whose left edge IS that
+    // arc. Parsed, because none of the geometry above can see which shape the
+    // firmware actually fills.
     {
       const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
       const fn = src.slice(src.indexOf("void drawSessionSpine("));
@@ -871,8 +904,25 @@ for (const b of [1, 2]) {
           "drawSessionSpine() rounds at the card's INTERIOR radius (R_MD - BORDER_CARD), not a literal");
       chk(/uiFillRound\(x, y, 2 \* r, h, r, col, COLOR_CARD\);/.test(body),
           "drawSessionSpine() fills a capsule 2r wide, so its left edge is the interior's own arc");
-      chk(/uiFillRound\(x \+ SESSION_SPINE_W, y, 2 \* r, h, r, COLOR_CARD, col\);/.test(body),
-          "... and carves it back with the same capsule SESSION_SPINE_W to the right - a constant-width band that follows the corner");
+      // THE CARVE MUST BE A STRAIGHT RECT, and this is the assertion the overlap
+      // below exists to justify: a second capsule here carries the ink right with
+      // the arc, into the spinner blit.
+      chk(/tft\.fillRect\(x \+ SESSION_SPINE_W, y, 2 \* r - SESSION_SPINE_W, h, COLOR_CARD\);/.test(body),
+          "... and carves it back with a STRAIGHT rect, which bounds the ink at x + SESSION_SPINE_W - 1 on every row");
+      chk(!/uiFillRound\(x \+ SESSION_SPINE_W,/.test(body),
+          "the carve is NOT a second capsule - that shape follows the arc and walks the ink into the spinner blit");
+      chk(/const int y = y0 \+ SESSION_SPINE_INSET;/.test(body) &&
+          /const int h = h0 - 2 \* SESSION_SPINE_INSET;/.test(body),
+          "drawSessionSpine() insets its own box by SESSION_SPINE_INSET, clear of the border's last anti-aliased row");
+      // AND THE INSET IS VERTICAL ONLY. This is not tidiness: an x inset moves the
+      // capsule's arc off the card interior's own centre, and it slides the spine's
+      // six columns one to the right, which puts its LAST column on the spinner
+      // blit's FIRST. That shipped for one build and was read back off the panel
+      // as 20 erased pixels a row. spineL below is derived from THIS expression,
+      // so the geometric assertions move with the draw instead of describing a
+      // shape it has stopped having.
+      chk(/const int x = x0;/.test(body),
+          "the spine's inset is VERTICAL ONLY - an x inset puts its last column on the spinner blit's first");
     }
     // THE PATTERN'S TWO NUMBERS, both bounded rather than chosen.
     chk(c.SESSION_SPINE_ON > c.SESSION_SPINE_W,
@@ -880,17 +930,30 @@ for (const b of [1, 2]) {
     chk(c.SESSION_SPINE_OFF * 3 >= c.SESSION_SPINE_W * 2,
         `a gap (${c.SESSION_SPINE_OFF}) is at least 2/3 of the spine's width (${c.SESSION_SPINE_W}) - a gap, not a seam`);
     // The straight section is all the pattern may touch (the arcs stay solid, or a
-    // knockout paints outside the card for the same reason a fill would), and at
-    // the SHORTEST row the ladder's floor allows it must still hold two gaps -
+    // knockout paints outside the card for the same reason a fill would), and the
+    // SHORTEST spine the ladder can actually produce must still hold two gaps -
     // one break reads as a defect, two read as a texture.
-    const straightMin = c.SESSION_ROW_H_MIN - 2 * c.BORDER_CARD - 2 * sr;
+    //
+    // THE BOUND IS THE LOOP'S OWN, not a rule of thumb: the loop starts at r + ON
+    // and runs while yy + OFF <= h - r, so a second gap needs
+    // r + ON + P + OFF <= h - r, i.e. exactly 2P <= straight.
+    //
+    // AGAINST THE SHORTEST REACHABLE HEIGHT, NOT SESSION_ROW_H_MIN. That floor is
+    // constrain()'s, for a panel smaller than this one, and the ladder never
+    // reaches it here - spineHeights() establishes that by ENUMERATION rather than
+    // by assertion. At the floor the straight section would hold only one gap; it
+    // is stated in the header rather than left as a silent pixel of luck.
+    const rows = spineHeights(c, contentBottom, MAX_SESSIONS);
+    const shortest = rows[0];
+    const straightMin = shortest - 2 * c.BORDER_CARD - 2 * c.SESSION_SPINE_INSET - 2 * sr;
     chk((c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF) * 2 <= straightMin,
         `the pattern's period ${c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF} fits twice in the shortest ` +
-        `spine's straight section (${straightMin}px at SESSION_ROW_H_MIN ${c.SESSION_ROW_H_MIN})`);
+        `REACHABLE spine's straight section (${straightMin}px on a ${shortest}px row; the ladder never ` +
+        `reaches SESSION_ROW_H_MIN ${c.SESSION_ROW_H_MIN} on this board)`);
     // EVERY REACHABLE SPINE HEIGHT, walked the way the loop in drawSessionSpine
     // walks it: no knockout may start above the top arc or end below the bottom
     // one, and every row that can carry a spine must show at least two gaps.
-    for (const rowH of spineHeights(c, contentBottom, MAX_SESSIONS)) {
+    for (const rowH of rows) {
       const g = spineGaps(c, rowH);
       chk(g.gaps.length >= 2,
           `spine on a ${rowH}px row: ${g.gaps.length} Codex gaps ` +
@@ -901,12 +964,48 @@ for (const b of [1, 2]) {
     }
     // IT CLEARS EVERYTHING THE ROW ALREADY DRAWS, which is what makes this a
     // second carrier rather than a replacement. The spinner is a 32x32 BLIT that
-    // paints its own background, so an overlap would be a bite out of the spine
-    // four times a second - the same class of defect SESSION_DOT_CX exists for.
-    chk(spineR < c.SESSION_DOT_CX - 16,
-        `spine x=${spineL}..${spineR} clears the spinner blit's left edge x=${c.SESSION_DOT_CX - 16} by ${c.SESSION_DOT_CX - 16 - spineR - 1}px`);
+    // paints its own COLOR_CARD background across its whole rect, so any spine ink
+    // inside it is erased four times a second - the same class of defect
+    // SESSION_DOT_CX exists for, and the reason that constant is named at all.
+    //
+    // MODELLED FROM THE CAPSULE, NOT FROM A RECT. `spineL + SESSION_SPINE_W - 1`
+    // is the rect model, and it is the wrong one: it reports 19 while a band that
+    // followed the arc on BOTH edges reaches x=26 near the top of the row. That
+    // model passed this assertion while 17 pixels were being erased on every
+    // working row. The arc is asserted first so the hazard is on the record, then
+    // the carve is asserted to bound it.
+    const SPARK = sparkSize();                 // parsed, not the transcribed 16
+    const blitL = c.SESSION_DOT_CX - SPARK / 2;
+    const blitTop = c.SESSION_DOT_DY - SPARK / 2, blitBot = c.SESSION_DOT_DY + SPARK / 2 - 1;
+    let arcWorst = -1, arcWorstRow = -1;
+    for (let dy = c.BORDER_CARD; dy < 2 * c.R_MD; dy++) {
+      const rt = spineArcRight(c, dy);
+      if (rt !== null && rt > arcWorst && dy >= blitTop && dy <= blitBot) { arcWorst = rt; arcWorstRow = dy; }
+    }
+    chk(arcWorst >= blitL,
+        `an arc-following right edge WOULD reach x=${arcWorst.toFixed(2)} at row +${arcWorstRow}, ` +
+        `inside the spinner blit from x=${blitL} - which is why the carve is a straight rect`);
+    // ... and with the straight carve the ink is bounded at spineL + SPINE_W - 1 on
+    // every row, so the blit never touches it. This is the same number the rect
+    // model reported; what changed is that it is now a CONSEQUENCE of the carve
+    // rather than an assumption about the shape.
+    chk(spineR < blitL,
+        `the carve bounds the spine's ink at x=${spineR} on every row, clear of the spinner blit at x=${blitL}`);
     chk(spineR < c.SESSION_ROW_X + c.SESSION_NAME_DX,
         `spine x=${spineL}..${spineR} clears the name lane at x=${c.SESSION_ROW_X + c.SESSION_NAME_DX} - SESSION_NAME_DX needs no widening`);
+    // THE CARVE'S OWN LEFT EDGE MUST CLEAR THE BORDER, which is what
+    // SESSION_SPINE_INSET buys. borderInnerX is this file's conservative model of
+    // the interior's left boundary; at the spine's topmost row the carve starts to
+    // its right, so the rect can never rub out a border pixel.
+    const carveX = spineL + c.SESSION_SPINE_W;
+    const carveTop = c.BORDER_CARD + c.SESSION_SPINE_INSET;
+    const innerAtCarve = borderInnerX(c.SESSION_ROW_X, carveTop, c.RADIUS, c.BORDER_CARD);
+    chk(carveX >= innerAtCarve,
+        `the carve's left edge x=${carveX} is inside the interior at its top row (+${carveTop}), ` +
+        `where the border's inner edge is x=${innerAtCarve.toFixed(2)} - so it cannot nick the corner`);
+    chk(borderInnerX(c.SESSION_ROW_X, c.BORDER_CARD, c.RADIUS, c.BORDER_CARD) > carveX,
+        `and WITHOUT the inset it would not: at +${c.BORDER_CARD} the interior only starts at ` +
+        `x=${borderInnerX(c.SESSION_ROW_X, c.BORDER_CARD, c.RADIUS, c.BORDER_CARD).toFixed(2)}`);
     // COLOUR IS NEVER THE ONLY CARRIER: a spine row still draws its text pill, and
     // a band row draws no spine. Both are properties of the call site, not of the
     // geometry, so both are parsed.
@@ -916,8 +1015,17 @@ for (const b of [1, 2]) {
           "the spine is the band's ELSE - a row gets one head or the other, never both");
       chk(/drawSessionSpine\(SESSION_ROW_X \+ BORDER_CARD, y \+ BORDER_CARD,\s*\n\s*rowH - 2 \* BORDER_CARD,/.test(src),
           "the spine is drawn on the card's INTERIOR (inset by BORDER_CARD on all four sides)");
-      chk((src.match(/drawStatusPill\(/g) || []).length >= 2,
-          "the tall and compact branches both still draw their status pill - the spine never carries status alone");
+      // COLOUR IS NEVER THE ONLY CARRIER, and this is the assertion that says so.
+      // It has to name the TWO ROW call sites specifically. Counting
+      // `drawStatusPill(` occurrences does NOT: the file also holds the function's
+      // own definition and the detail screen's call, so a count of >= 2 stays true
+      // with both row pills deleted - which is the rule the spine exists to satisfy
+      // passing green with the thing it guards removed. Anchored on each site's own
+      // arguments, the way the band/spine `else` assertion already is.
+      chk(/drawStatusPill\(nameX, y \+ rowH - \(showTitle \? SESSION_PILL_UP_T : SESSION_PILL_UP\),\s*\n\s*label, s\.status, false\);/.test(src),
+          "the TALL row still draws its status pill - the spine is a second carrier, never the only one");
+      chk(/drawStatusPill\(SESSION_ROW_X \+ SESSION_ROW_W - 16, y \+ SESSION_PILLC_Y, label, s\.status, true\);/.test(src),
+          "the COMPACT row still draws its status pill - the spine is a second carrier, never the only one");
     }
   }
 
@@ -984,12 +1092,12 @@ for (const b of [1, 2]) {
       `tag right edge ${tagRight} clears the chevron's ink at ${c.SESSION_ROW_X + c.SESSION_ROW_W - 8}..${c.SESSION_ROW_X + c.SESSION_ROW_W - 2}`);
 
   // ---- the spinner blit vs the row's rounded corner ----
-  const blitL = c.SESSION_DOT_CX - 16, blitTopRow = c.SESSION_DOT_DY - 16;
+  const blitL = c.SESSION_DOT_CX - sparkSize() / 2, blitTopRow = c.SESSION_DOT_DY - sparkSize() / 2;
   const inner = borderInnerX(c.SESSION_ROW_X, blitTopRow, c.RADIUS, c.BORDER_CARD);
   chk(blitL >= inner,
       `spinner blit left x=${blitL} clears the corner border's inner edge x=${inner.toFixed(2)} on its top row (y+${blitTopRow}) by ${(blitL - inner).toFixed(2)}px`);
-  chk(c.SESSION_DOT_CX + 15 < nameX,
-      `spinner blit right x=${c.SESSION_DOT_CX + 15} clears the name lane at x=${nameX}`);
+  chk((c.SESSION_DOT_CX + sparkSize() / 2 - 1) < nameX,
+      `spinner blit right x=${(c.SESSION_DOT_CX + sparkSize() / 2 - 1)} clears the name lane at x=${nameX}`);
   chk(c.SESSION_DOT_DY === c.SESSION_NAME_Y + Math.trunc(NH / 2),
       `dot row +${c.SESSION_DOT_DY} centres on the title-less name band (+${c.SESSION_NAME_Y}..+${c.SESSION_NAME_Y + NH - 1})`);
 
