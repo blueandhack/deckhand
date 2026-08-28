@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Exercises reorderSessions()'s ordering without a device. Run with no arguments to
-// check the shipped comparator; --selftest (see below) proves the checks can fail.
+// check the shipped comparator. NOTE: --selftest is NOT handled yet — the flag is
+// added in a later task, and until then this file ignores every argument.
 //
 // WHAT THIS PROVES, AND WHAT IT DOES NOT. This runs a JS MIRROR of the comparator,
 // so it proves the ALGORITHM - including the millis() wrap case, which is otherwise
@@ -41,7 +42,8 @@ const U32 = 0x100000000;
 // Unsigned-wrap-safe elapsed, exactly what (now - since) does in C with unsigned long.
 const elapsed = (now, since) => ((now - since) % U32 + U32) % U32;
 
-// legacy=true reproduces the comparator this change replaces, for --selftest.
+// legacy=true reproduces the comparator this change replaces, for --selftest
+// (which is not yet wired up - nothing currently passes legacy=true).
 function sortsBefore(b, a, now, legacy) {
   const ra = rankOf(a.status), rb = rankOf(b.status);
   if (rb !== ra) return rb < ra;
