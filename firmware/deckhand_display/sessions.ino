@@ -638,7 +638,8 @@ void tickSessionAnim() {
   // compose and flush each, on the one animation whose cost is being weighed
   // against a battery. Sampling at SESSION_PULSE_INTERVAL_MS and painting only on
   // a change costs 30 repaints a breath at worst and 10 at best, and PERF reports
-  // the count so that claim is READ rather than believed.
+  // the count so that claim is READ rather than believed - as a rate, from two
+  // reads, since `n` is cumulative since boot.
   //
   // THE COMPARISON IS AGAINST bandFillShown, WHICH drawSessionBand WRITES. That is
   // the difference between a record and a request, and this repo has already paid
@@ -671,10 +672,24 @@ void tickSessionAnim() {
       if (sessionXfadeT(sessions[i].id) < 0) {
         const uint16_t want = sessionBandFill(col, -1, sessionPulseA(sessions[i].status));
         if (want != bandFillShown) {
-          // Its own rectangle, exactly as the crossfade flushes its own - and the
-          // LEADING flush for the same two reasons: the band's dirty rect must not
-          // union with whatever else was pending, and the number PERF reports has
-          // to be this band's cost rather than the backlog's.
+          // Its own rectangle, exactly as the crossfade flushes its own, and for
+          // the first of the same two reasons: the band's dirty rect must not
+          // union with the spine column, which would take the flush to nearly the
+          // whole content area.
+          //
+          // THE SECOND REASON DOES NOT SURVIVE HERE, AND SAYING SO IS THE POINT.
+          // The crossfade's leading flush also makes its PERF number its own cost
+          // rather than the backlog's. This block runs AFTER the shimmer's, so
+          // with any row working this flush pushes the spine strips the shimmer
+          // has just painted, and pulseFlushUs is a CEILING on the pulse's flush
+          // rather than the pulse's flush. Two consequences, both recorded in the
+          // A/B procedure: the shimmer stops riding the spinner's frame alone
+          // while the pulse is on - real cost, which the drain measurement
+          // attributes correctly because turning the pulse on genuinely causes
+          // it - and the A/B must hold the number of WORKING rows identical
+          // across its two legs, or the difference it measures is that instead.
+          // Reordering the two blocks would not fix it, only move it onto the
+          // shimmer, whose whole design is that it flushes nothing at all.
           tft.flush();
           const uint32_t t0 = micros();
           drawSessionBand(SESSION_ROW_X + BORDER_CARD, sessionRowYAt(pos) + BORDER_CARD,
@@ -1112,6 +1127,20 @@ void renderSessionsList() {
                     COLOR_CARD,
                     sessionBandFill(colorForStatus(sessions[i].status),
                                     sessionXfadeT(sessions[i].id),
+                                    // ASKS THE RAMP AGAIN rather than reading
+                                    // bandFillShown, so this opaque box can sit up
+                                    // to ONE ramp step from the band under it - the
+                                    // same mismatch class sessionBandFill was
+                                    // introduced to prevent for the crossfade, at a
+                                    // scale that does not matter. It is bounded by
+                                    // one step of a ramp whose whole travel is a
+                                    // highlight, it lasts until the pulse's next
+                                    // reconcile (at most SESSION_PULSE_INTERVAL_MS),
+                                    // and it self-heals because that reconcile
+                                    // repaints the band and this field with it.
+                                    // Reading bandFillShown instead would be wrong
+                                    // in the other direction: it is what was painted
+                                    // LAST, which during a crossfade is a frame old.
                                     sessionPulseA(sessions[i].status)), TR_DATUM);
       continue;
     }

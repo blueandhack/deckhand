@@ -2392,6 +2392,13 @@ uint16_t xfadeStartCount = 0;
 //      sessions, or the ladder gives no band at all - see sessionExpandedH).
 //      Set SLEEP AFTER to OFF and note the brightness; the backlight is the
 //      dominant load and it must not blank differently between the two legs.
+//      WRITE DOWN HOW MANY ROWS ARE `working`, AND KEEP THAT IDENTICAL ACROSS
+//      BOTH LEGS. Each working row runs the spinner and the shimmer, so two legs
+//      that differ in how many rows animate are measuring that difference and
+//      calling it the pulse - the same class of error as comparing mV/h across
+//      sessions, arriving from inside one. The easiest way to hold it still is
+//      to have NO working row at all: then the only animation running is the one
+//      under test. If sessions come and go mid-leg, the leg is void; re-run it.
 //   1. UNPLUG USB. The report comes back over BLE.
 //   2. Let the cell settle. The minute after unplugging fell -21 mV on its own
 //      when this was last measured, and a relaxation curve fits a straight line
@@ -2405,11 +2412,39 @@ uint16_t xfadeStartCount = 0;
 //      Same session, minutes apart, nothing else changed.
 //   5. Cross-check each leg against the raw per-minute BATT deltas in host.log.
 //      Two independent views of one run is what makes it a measurement.
-//   6. `PERF` reports this animation's own compose/flush and its FRAME COUNT,
-//      which is the number that says whether the change-only repaint below is
-//      doing its job: a breath should cost 10 repaints under LIGHT and 30 under
-//      DARK, never the 72 samples it takes. A count near 72 means the reconcile
-//      has been broken and the mV/h figure is measuring the wrong thing.
+//   6. `PERF pulse n=` IS CUMULATIVE SINCE BOOT, so ONE reading says nothing.
+//      Take TWO, T seconds apart, and divide:
+//
+//        repaints per breath = (n2 - n1) * SESSION_PULSE_MS / (T * 1000)
+//
+//      With the cable out that is two `PERF` lines over BLE; note the wall clock
+//      against each, because nothing on the line timestamps it. Expect 10 per
+//      breath under LIGHT and 30 under DARK - a result near 72 (the sample count)
+//      means the change-only reconcile is broken and the mV/h figure is measuring
+//      something other than the animation as designed. A rate of 0 means no band
+//      was breathing at all, i.e. step 0 was not actually set up: the commonest
+//      way to get a delta of zero and believe it.
+//
+//      `PERF pulse compose` is honest. `PERF pulse flush` IS A CEILING, NOT THE
+//      PULSE'S OWN FLUSH, and the reason is worth knowing before it is quoted:
+//      the pulse block runs AFTER the shimmer block in tickSessionAnim, so its
+//      LEADING flush pushes whatever spine strips the shimmer has just painted.
+//      With any row working, `pulseFlushUs` therefore includes the shimmer's
+//      transfer - and the shimmer stops riding the spinner's frame alone while
+//      the pulse is on, which is real cost the DRAIN measurement attributes
+//      correctly (turning the pulse on genuinely causes that flush) but which
+//      this one field cannot separate. With no working row on screen - which
+//      step 0 already asks for - the two are the same number.
+//
+// THE PROCEDURE'S OWN ARITHMETIC HAS BEEN EXERCISED ON HARDWARE, EVEN THOUGH THE
+// DRAIN A/B HAS NOT - so what is left for the next person is the battery, not the
+// method. On the glass, LIGHT theme, one asking session holding the band card and
+// one working row beside it: two `PERF` reads 35s apart gave n 320 -> 450, i.e.
+// 130 * 2400 / 35000 = 8.9 repaints a breath against the 72 samples it took, and
+// against 10 predicted for LIGHT. `compose` was 3.2-3.5ms and `flush` 3.6-4.1ms -
+// the latter a ceiling, with a working row present, for the reason in step 6.
+// Clearing the toggle froze n permanently at its next value, which is the
+// "no restore path is needed" claim observed rather than argued.
 //
 // DO NOT COMPARE AGAINST ANY mV/h FIGURE FROM ANOTHER DAY. This repo published a
 // wrong claim that way once - an "-88 mV/h baseline" that turned out to be a
@@ -4906,10 +4941,19 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
                   (unsigned long) shimWorstUs);
     // The pulse reports `on` beside `n` for the same reason the crossfade reports
     // `started`: this animation SHIPS OFF, so n=0 is the expected reading and is
-    // not evidence of anything until the toggle says it was enabled. `n` is also
-    // the number the A/B wants - repaints per breath, which is what says whether
-    // the change-only reconcile is earning its place (expect 10 per 2.4s breath
-    // under LIGHT and 30 under DARK, never the 72 samples it took).
+    // not evidence of anything until the toggle says it was enabled.
+    //
+    // `n` IS CUMULATIVE SINCE BOOT, so one reading cannot be compared against
+    // anything. Repaints per breath needs TWO reads T seconds apart:
+    // (n2 - n1) * SESSION_PULSE_MS / (T * 1000), expected 10 under LIGHT and 30
+    // under DARK against the 72 samples a breath takes. The A/B procedure beside
+    // sessionPulse spells this out; it is written here too because this line is
+    // where somebody will read the number and try to use it.
+    //
+    // `flush` IS A CEILING, NOT THE PULSE'S OWN FLUSH, whenever a row is working:
+    // this block runs after the shimmer's, so its leading flush also pushes the
+    // spine strips the shimmer just painted. Real cost, correctly attributed by
+    // the DRAIN measurement, not separable by this field. `compose` is honest.
     Serial.printf("PERF pulse   on=%d n=%u compose %luus flush %luus worst %luus\n",
                   sessionPulse ? 1 : 0, (unsigned) pulseFrameCount,
                   (unsigned long) pulseComposeUs,

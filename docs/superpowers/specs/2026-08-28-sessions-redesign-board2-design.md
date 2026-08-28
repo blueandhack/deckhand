@@ -187,8 +187,19 @@ Adopted **only after measurement**:
   **colour** its ramp produces changes, not once per sample. Computed from the
   shipped palette, the asking colour's ramp holds 16 distinct RGB565 colours on
   DARK and 6 on LIGHT, so a 2.4s breath costs **30 band repaints at worst and 10
-  at best** against its 72 samples. `PERF` reports that count, so a broken
-  reconcile is visible rather than silently inflating the reading.
+  at best** against its 72 samples. `PERF` reports that count — as a *rate*, from
+  two reads and a division, since `n` is cumulative since boot.
+
+  **Seen on the glass, and the arithmetic exercised, on 2026-08-28** (LIGHT, one
+  asking session holding the band card): the band's fill moved between the flat
+  status colour and a blend towards `COLOR_VALUE` — captured at two phases, pixel
+  values `(107,16,57)` and `(82,16,49)`, both exactly on the computed ramp, whose
+  six distinct rendered colours match the checker's computed six. Two `PERF` reads
+  35 s apart gave **8.9 repaints a breath** against 10 predicted and 72 samples.
+  `compose` 3.2–3.5 ms, `flush` 3.6–4.1 ms (a ceiling — a working row was present).
+  Clearing the toggle froze the counter permanently. **Still unmeasured: the
+  drain.** And a still capture cannot judge *motion*, which is the thing the pulse
+  is actually for.
 
 Rejected:
 

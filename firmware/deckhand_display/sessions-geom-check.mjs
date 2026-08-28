@@ -1341,6 +1341,14 @@ for (const b of [1, 2]) {
       // THE STANDARD JND, from outside this repo and not tuned to anything in it.
       // A peak under it is an animation nobody can see: at 16/255 the ramp's dE is
       // 0.00 outright, because blend565 quantises straight back onto the base.
+      //
+      // THE RATIO BOUND IS NOT MONOTONE, AND THE SWEEP'S "+16 IS CAUGHT" MUST NOT
+      // BE READ AS HEADROOM. Swept 90..170, the ratio fails at 124 and 126 (1.081)
+      // and again from 132 up, but 128 and 130 PASS at 0.987 - an RGB565
+      // quantisation dip, not a smooth curve. So the constraint is real and the
+      // shipped 110 clears it, but a perturbation of +18 would land in the dip and
+      // pass where +16 fails. If either MAX moves, re-sweep the neighbourhood
+      // rather than assuming the margin scales.
       const JND = 2.3;
       // The three status colours are the ones colorForStatus can return; taken by
       // NAME from the parsed palette rather than transcribed as hex.
