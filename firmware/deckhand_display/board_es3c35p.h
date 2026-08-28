@@ -877,6 +877,38 @@ const int SESSION_BAND_DUR_CHARS = 3;
 // THE SPINE NEVER CARRIES STATUS ALONE: every spine row keeps its text pill, the
 // same rule that makes the status pill a filled/outlined/boxless SHAPE, not a hue.
 const int SESSION_SPINE_W = 6;
+//
+// IT IS A CURVED BAND, NOT A RECT, AND THAT IS THE BAND'S HAZARD AT TWO CORNERS
+// INSTEAD OF ONE. The spine runs the row's whole left edge, so it meets BOTH
+// rounded corners - and on the interior's top row the card's own fill has not
+// reached x + BORDER_CARD at all: the corner arc is still R_MD - BORDER_CARD to
+// the right of it. A plain fillRect there paints status-coloured nubs OUTSIDE the
+// card's outline, which is exactly why drawSessionBand's fill is top-rounded. The
+// draw takes the band BETWEEN TWO CAPSULES of the card's interior radius, set
+// SESSION_SPINE_W apart: its left edge IS the interior's arc and its right edge is
+// that arc moved over, so the band is a constant width that follows the corner
+// rather than cutting across it. No literal radius anywhere - R_MD - BORDER_CARD,
+// the same expression drawSessionBand already uses.
+//
+// CLAUDE SOLID, CODEX SEGMENTED (§5's second carrier), as a FILL PATTERN rather
+// than art: no blits, no new tables, and it survives greyscale - which is the
+// whole point of giving the agent a texture, since status already owns the colour.
+// Neither number is a taste call:
+//   OFF 4 is 2/3 of the spine's width, so a gap reads as a gap rather than as the
+//     anti-aliased seam between two runs.
+//   ON 7 is one more than SESSION_SPINE_W, so a run reads as a SEGMENT of a band
+//     rather than as a square dot - a dotted line would be a third status
+//     vocabulary beside the pill's shapes and the band's fill.
+//   Their SUM is the bound that actually constrains them. The pattern is knocked
+//     out of the spine's STRAIGHT section only - the arcs at each end stay solid,
+//     because a knockout rect up there would paint outside the card for the same
+//     reason a fill rect would - and that section is
+//     SESSION_ROW_H_MIN - 2*BORDER_CARD - 2*(R_MD - BORDER_CARD) = 23px at the
+//     shortest row this board's ladder can produce. TWO gaps are what makes a
+//     spine read as segmented rather than as one broken in the middle, so the
+//     period must be <= 23/2 = 11. It is exactly 11, and that is the ceiling.
+const int SESSION_SPINE_ON = 7;
+const int SESSION_SPINE_OFF = 4;
 
 // ---------- The band card's block stack ----------
 // SESSION_EXP_MAX_H is the SUM of these, not a chosen number - the same way the
@@ -920,9 +952,9 @@ const int SESSION_BAND_BOTTOM_PAD = 6;
 // two cannot drift.
 //
 // THE SIX HEIGHTS, avail 410 (see the ladder above):
-//   1 session  leftover 410 -> 212 (cap)   prompt 4 lines   198px spare
-//   2 sessions leftover 307 -> 212 (cap)   prompt 4 lines    95px spare, below
-//   3 sessions leftover 204 -> 204         prompt 3 lines     0px - the list fills
+//   1 session  leftover 410 -> 336 (cap)   prompt 4 lines    74px spare
+//   2 sessions leftover 307 -> 307         prompt 4 lines     0px - the list fills
+//   3 sessions leftover 204 -> 204         prompt 2 lines     0px - the list fills
 //   4 sessions leftover 101 ->   0         the ladder already fills the column
 //   5 sessions leftover  82 ->   0
 //   6 sessions leftover  70 ->   0
@@ -931,29 +963,52 @@ const int SESSION_BAND_BOTTOM_PAD = 6;
 // by a special case at either end.
 //
 // AND A LONE CARD IS CENTRED IN THE LIST AREA (sessionRowYAt), which is the other
-// half of the one-session case: 212 of 410 leaves 198px, and all of it sitting
+// half of the one-session case: 336 of 410 leaves 74px, and all of it sitting
 // BELOW the card reads as "a card, then nothing" no matter how much the card
-// carries. Centred it is 99px above and 99 below. ONLY when the card is alone - in
+// carries. Centred it is 37px above and 37 below. ONLY when the card is alone - in
 // a mixed layout the stack's top alignment is the rhythm, and dropping the first
 // card would open a gap above a list that still ends flush at the bottom.
 //
-// SESSION_EXP_MIN_H IS THE PACKED STACK, exactly the way SESSION_TITLE_MIN_H is,
-// and below it the card cannot draw its content at all - which is why the rule
-// returns 0 rather than a short card:
+// SESSION_EXP_MIN_H IS THE BAND CARD'S PACKED STACK, exactly the way
+// SESSION_TITLE_MIN_H is, and below it the card cannot draw its content at all -
+// which is why the rule returns 0 rather than a short card:
 //   +0..+1    border
-//   +5..+28   name         SESSION_NAME_Y_T, T_HEAD 24
-//   +32..+63  title        SESSION_TITLE_Y, 2 x SESSION_LINE_H (wrapped)
-//   +67..+82  agent/model/branch                (+3 SESSION_LINE_GAP)
-//   +86..+101 "LAST PROMPT" label               (+3)
-//   +102..+133 prompt      2 x SESSION_LINE_H   (no gap: a label and the value it
+//   +2..+43   band         SESSION_BAND_H, which owns the card's whole head
+//   +49..+72  name         BAND + SESSION_NAME_Y_T, T_HEAD 24
+//   +76..+107 title        BAND + SESSION_TITLE_Y, 2 x SESSION_LINE_H (wrapped)
+//   +111..+126 agent/model/branch               (+3 SESSION_LINE_GAP)
+//   +130..+145 "LAST PROMPT" label              (+3)
+//   +146..+177 prompt      2 x SESSION_LINE_H   (no gap: a label and the value it
 //                                                names read as one block)
-//   +137..+152 path        fitText, one line    (+3)
-//   +157..+174 pill        top = H - SESSION_PILL_UP_T, gap 4 above it (3 + AIR)
-//   +175..+177 pad 3
-//   +178..+179 border                            = 180
-// = path end (152) + 5 + SESSION_PILL_UP_T (23). The checker re-derives it from
-// the offsets rather than trusting this table.
-const int SESSION_EXP_MIN_H = 180;
+//   +181..+196 path        fitText, one line    (+3)
+//   +197..+198 border                            = 199
+// = SESSION_BAND_H (44) + path end (152) + 1 + BORDER_CARD (2). The checker
+// re-derives it from the offsets rather than trusting this table, and separately
+// asserts that ONE PIXEL SHORTER overdraws - so this is the floor, not a bound
+// chosen with room to spare.
+//
+// IT WAS 180 AND THAT WAS TWO STALE CLAIMS AT ONCE, BOTH INTRODUCED BY THE BAND.
+// 180 is the PRE-band stack: no band at the top (-44) and a bottom-anchored status
+// PILL (+25) the band card no longer draws. Both roles this constant serves were
+// wrong by the same 19px:
+//   the GATE ("is there room for a band card at all") admitted 180..198, where the
+//     path row is drawn THROUGH the bottom border - not merely tight, overdrawn;
+//   the BASELINE in sessionExpPromptLines() counted a card's extra prompt lines
+//     from a stack the card does not have.
+// They do NOT need two constants. The baseline differs from the gate by exactly
+// SESSION_BAND_H, because the caller passes rowH LESS the band - so
+// sessionExpPromptLines() measures against SESSION_EXP_MIN_H - SESSION_BAND_H and
+// there is one number here, not two that can drift.
+//
+// FIXING IT CHANGES NOTHING REACHABLE, which is why it could be deferred this far:
+// the three heights the rule produces (336 / 307 / 204) all clear 199, and the
+// prompt-line counts are 4 / 4 / 2 either way. What it does change is the one
+// configuration that was BROKEN and unreachable - the "+N more" strip at three
+// sessions, 185 - which now correctly refuses to expand instead of drawing a card
+// 14px short of its own content. Note the gate cannot be raised past 204 without
+// taking the three-session card with it: 199 is the floor AND there are 5px of
+// headroom above it, all of them spoken for.
+const int SESSION_EXP_MIN_H = 199;
 // THE CAP IS THE TALLEST CARD THAT IS ALL CONTENT, derived from the prompt's own
 // byte cap and the row's MEASURED lane - not a taste judgement about how much air
 // looks right. prompt[104] carries at most 100 characters (the host's cap) and the

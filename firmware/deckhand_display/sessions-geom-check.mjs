@@ -293,9 +293,14 @@ function rowYAt(c, pos, n, e, rowH, avail) {
 }
 // sessionExpPromptLines(), replicated: every SESSION_LINE_H above the packed
 // minimum buys one more prompt line, up to the field's own byte cap.
-function expPromptLines(c, rowH) {
+// THE ARGUMENT IS THE BODY'S HEIGHT - the card LESS the band - and so is the
+// baseline it is measured against, because SESSION_EXP_MIN_H is the whole card's
+// floor and the caller has already taken the band off. Modelling it with the
+// card's own floor here is how the checker's own summary line came to report a
+// three-line prompt for the 204 card its band table draws with two.
+function expPromptLines(c, bodyH) {
   const n = c.SESSION_EXP_PROMPT_MIN +
-            Math.trunc((rowH - c.SESSION_EXP_MIN_H) / c.SESSION_LINE_H);
+            Math.trunc((bodyH - (c.SESSION_EXP_MIN_H - c.SESSION_BAND_H)) / c.SESSION_LINE_H);
   return Math.min(Math.max(n, c.SESSION_EXP_PROMPT_MIN), c.SESSION_EXP_PROMPT_MAX);
 }
 // The expanded card's bands, walked by the SAME running cursor the draw uses -
@@ -341,6 +346,37 @@ function expBands(b, c, rowH, have) {
   if (have.path) bands.push(["path", cy, cy + L - 1]);
   bands.push(["border bottom", rowH - 2, rowH - 1]);
   return bands;
+}
+// drawSessionSpine()'s Codex knockout loop, replicated. The spine's own box is
+// the card's INTERIOR, and the gaps may only be cut from the STRAIGHT section
+// between the two corner arcs - the loop draws a gap only where a whole one fits,
+// so nothing is ever clipped by an arc.
+function spineGaps(c, rowH) {
+  const h = rowH - 2 * c.BORDER_CARD;
+  const r = c.R_MD - c.BORDER_CARD;
+  const gaps = [];
+  for (let yy = r + c.SESSION_SPINE_ON; yy + c.SESSION_SPINE_OFF <= h - r;
+       yy += c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF)
+    gaps.push([yy, yy + c.SESSION_SPINE_OFF - 1]);
+  return { h, r, gaps };
+}
+// Every row height a spine can actually be drawn at: the ladder's own output for
+// each session count, with and without the "+N more" strip, skipping the one case
+// that has no ordinary row at all (a lone session, whose only row is the band
+// card). Derived from the ladder rather than listed, so a change to the floor, the
+// cap or the content area moves this set with it.
+function spineHeights(c, contentBottom, maxSessions) {
+  const out = new Set();
+  for (const strip of [false, true]) {
+    const avail = contentBottom - c.SESSION_ROW_Y0 - (strip ? c.SESSION_OVERFLOW_H : 0);
+    for (let n = 1; n <= maxSessions; n++) {
+      const raw = Math.floor((avail - c.SESSION_ROW_GAP * (n - 1)) / n);
+      const rowH = Math.min(Math.max(raw, c.SESSION_ROW_H_MIN), c.SESSION_ROW_H_MAX);
+      if (n === 1 && expandedH(c, 1, avail, rowH) > 0) continue;   // no ordinary row
+      out.add(rowH);
+    }
+  }
+  return [...out].sort((a, z) => a - z);
 }
 // Which layout drawSessionRow picks for a given height - the SAME three tests it
 // makes, so the checker cannot describe a row the device does not draw.
@@ -580,14 +616,53 @@ for (const b of [1, 2]) {
     } else {
       // THE PACKED STACK, as an identity on the offsets. Same shape as
       // SESSION_TITLE_MIN_H's: title lines, sub-line, label, prompt lines and the
-      // path, then the 3+AIR gap the bottom-anchored pill needs above it.
+      // path - and then, on THIS card, straight into the bottom border, because
+      // the band at the top has taken over the status pill's job and the pill is
+      // no longer drawn.
+      //
+      // IT USED TO END `+ 4 + A + SESSION_PILL_UP_T` AND THAT WAS THE PRE-BAND
+      // CARD. The identity held for a card with no band and a bottom-anchored
+      // pill; the band task gave the card a 44px head and took the pill away, and
+      // this constant kept describing the old one - 19px short, in the direction
+      // that lets the gate admit a card whose path row is drawn THROUGH its own
+      // border. The two roles SESSION_EXP_MIN_H serves (the gate, and the baseline
+      // sessionExpPromptLines() counts from) differ by exactly SESSION_BAND_H, so
+      // one corrected number still serves both - see the header.
       const pathTop = c.SESSION_TITLE_Y +
                       (c.SESSION_EXP_TITLE_LINES * L + c.SESSION_LINE_GAP) +
                       (L + c.SESSION_LINE_GAP) + L +
                       (c.SESSION_EXP_PROMPT_MIN * L + c.SESSION_LINE_GAP);
       const pathEnd = pathTop + L - 1;
-      chk(c.SESSION_EXP_MIN_H === pathEnd + 4 + A + c.SESSION_PILL_UP_T,
-          `SESSION_EXP_MIN_H ${c.SESSION_EXP_MIN_H} == path end +${pathEnd} + gap ${3 + A} + 1 + pillUp ${c.SESSION_PILL_UP_T}`);
+      chk(c.SESSION_EXP_MIN_H === c.SESSION_BAND_H + pathEnd + 1 + c.BORDER_CARD,
+          `SESSION_EXP_MIN_H ${c.SESSION_EXP_MIN_H} == band ${c.SESSION_BAND_H} + path end +${pathEnd} + 1 + border ${c.BORDER_CARD}`);
+      // ... AND ONE PIXEL SHORTER OVERDRAWS. This is what makes it the FLOOR
+      // rather than a bound with room in it: the same running cursor the draw
+      // walks, laid out at MIN_H and at MIN_H - 1, must clear the bottom border in
+      // the first case and not in the second. Without the second half, raising the
+      // constant to any comfortable-looking number would pass.
+      {
+        const full = { title: 1, sub: 1, prompt: 1, path: 1 };
+        const lastGap = (H) => {
+          const bands = expBands(b, c, H, full);
+          return bands[bands.length - 1][1] - bands[bands.length - 2][2] - 1;
+        };
+        chk(lastGap(c.SESSION_EXP_MIN_H) >= 0,
+            `at SESSION_EXP_MIN_H (${c.SESSION_EXP_MIN_H}) the packed band card clears its bottom border by ${lastGap(c.SESSION_EXP_MIN_H)}px`);
+        chk(lastGap(c.SESSION_EXP_MIN_H - 1) < 0,
+            `and at ${c.SESSION_EXP_MIN_H - 1} it does NOT (${lastGap(c.SESSION_EXP_MIN_H - 1)}px) - so the gate is the floor, not a guess`);
+      }
+      // THE BASELINE IS THE GATE LESS THE BAND, PARSED OUT OF THE DRAW. The model
+      // above cannot see which number the firmware counts prompt lines from, and
+      // the two have to be the same one: a baseline that is not
+      // SESSION_EXP_MIN_H - SESSION_BAND_H hands the smallest card the rule can
+      // produce a prompt line its height never paid for, and the band tables would
+      // stay green because they model the baseline rather than read it.
+      {
+        const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+        chk(/\(bodyH - \(SESSION_EXP_MIN_H - SESSION_BAND_H\)\) \/ SESSION_LINE_H/.test(src),
+            "sessionExpPromptLines() counts from SESSION_EXP_MIN_H - SESSION_BAND_H " +
+            "(the gate's own floor, less the band the caller already subtracted)");
+      }
       // SESSION_EXP_MAX_H no longer holds this relationship to MIN_H. It used to -
       // MAX was exactly MIN plus the prompt lines a taller card could add - because
       // that packed stack was the only content model a card had. The band card
@@ -630,7 +705,7 @@ for (const b of [1, 2]) {
           const raw = Math.floor((avail - c.SESSION_ROW_GAP * (n - 1)) / n);
           const rowH = Math.min(Math.max(raw, c.SESSION_ROW_H_MIN), c.SESSION_ROW_H_MAX);
           const e = expandedH(c, n, avail, rowH);
-          tags.push(e ? `${n}:${e}(${expPromptLines(c, e)}p)` : `${n}:-`);
+          tags.push(e ? `${n}:${e}(${expPromptLines(c, e - c.SESSION_BAND_H)}p)` : `${n}:-`);
           if (!strip)
             chk(e === EXPANDED_H[b][n - 1],
                 `${n} session(s): expanded first row ${e} == the ${EXPANDED_H[b][n - 1]} this board documents`);
@@ -666,22 +741,20 @@ for (const b of [1, 2]) {
             chk(Math.abs(above - below) <= 1,
                 `${strip ? "strip " : ""}1 session: the lone card is centred - ${above}px above, ${below}px below`);
           }
-          // THE STRIP CASES BELOW SIX SESSIONS ARE UNREACHABLE, and the band card is
-          // where that stops being a free extra check. hiddenCount > 0 implies
-          // sessionCount == MAX_SESSIONS - the host caps its list at 6 and only then
-          // reports more - and at six the ladder already fills the column, so the
-          // strip and a band card cannot coexist. The heights the strip produces
-          // below six (185 at three sessions) are shorter than the band plus the
-          // packed body, so laying the band's stack out against them reports an
-          // overdraw in a card the device cannot be asked to draw. Skipped LOUDLY
-          // rather than silently, because that shortfall is real in one respect: it
-          // is the SESSION_EXP_MIN_H question - the gate is still the PRE-band packed
-          // stack (180) where a band card needs 44 more - and it belongs to the task
-          // that changes `avail`, where it can actually be reached and tested.
-          if (strip && n < MAX_SESSIONS) {
-            console.log(`  skip  strip ${n}x${e}: unreachable (a strip implies ${MAX_SESSIONS} sessions, which never expands)`);
-            continue;
-          }
+          // THE STRIP CASES BELOW SIX SESSIONS USED TO BE SKIPPED HERE, and the
+          // skip is GONE because the thing it was standing in front of is fixed.
+          // It was legitimate at the time - hiddenCount > 0 implies
+          // sessionCount == MAX_SESSIONS (the host caps its list at 6 and only then
+          // reports more), so a strip and a band card cannot coexist, and the 185
+          // the strip produces at three sessions was 14px shorter than the band
+          // plus its packed body. But the shortfall was real: it was the
+          // SESSION_EXP_MIN_H question, the gate still being the PRE-band packed
+          // stack (180) where a band card needs 199. With the gate corrected, 185
+          // no longer expands at all - expandedH returns 0 and the `if (!e)
+          // continue` above takes it - so there is nothing left to skip, and the
+          // two strip heights that DO expand (336 and 288) now get their band
+          // tables checked like any other. An unreachable configuration is a fine
+          // reason to skip a check and a bad reason to leave one broken.
           for (const [lbl, have] of HAVE) {
             const bands = expBands(b, c, e, have);
             if (!strip && n === 1) {
@@ -774,6 +847,78 @@ for (const b of [1, 2]) {
 
     chk(c.SESSION_SPINE_W >= 4 && c.SESSION_SPINE_W <= 8,
         `the spine is narrower than the card border radius allows to be lost`);
+
+    // ---- §4 THE SPINE ----
+    const spineL = c.SESSION_ROW_X + c.BORDER_CARD;
+    const spineR = spineL + c.SESSION_SPINE_W - 1;
+    const sr = c.R_MD - c.BORDER_CARD;                 // the card's interior radius
+    // IT CANNOT BE A RECT, and this is the assertion that says so rather than the
+    // comment. On the interior's TOP row the card's fill has not reached the
+    // spine's own x at all - the corner arc is still `sr` to the right of it - so a
+    // fillRect there paints outside the outline. borderInnerX at dy 0 is that edge.
+    chk(borderInnerX(c.SESSION_ROW_X, 0, c.RADIUS, c.BORDER_CARD) > spineL,
+        `a plain rect spine would paint outside the card: at the interior's top row ` +
+        `the fill starts at x=${borderInnerX(c.SESSION_ROW_X, 0, c.RADIUS, c.BORDER_CARD)}, ` +
+        `the spine's left edge is x=${spineL}`);
+    // ... so the draw takes the band between two capsules at the INTERIOR radius,
+    // whose left edge IS that arc. Parsed, because none of the geometry above can
+    // see which shape the firmware actually fills.
+    {
+      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const fn = src.slice(src.indexOf("void drawSessionSpine("));
+      const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
+      chk(/const int r = R_MD - BORDER_CARD;/.test(body),
+          "drawSessionSpine() rounds at the card's INTERIOR radius (R_MD - BORDER_CARD), not a literal");
+      chk(/uiFillRound\(x, y, 2 \* r, h, r, col, COLOR_CARD\);/.test(body),
+          "drawSessionSpine() fills a capsule 2r wide, so its left edge is the interior's own arc");
+      chk(/uiFillRound\(x \+ SESSION_SPINE_W, y, 2 \* r, h, r, COLOR_CARD, col\);/.test(body),
+          "... and carves it back with the same capsule SESSION_SPINE_W to the right - a constant-width band that follows the corner");
+    }
+    // THE PATTERN'S TWO NUMBERS, both bounded rather than chosen.
+    chk(c.SESSION_SPINE_ON > c.SESSION_SPINE_W,
+        `a Codex run (${c.SESSION_SPINE_ON}) is longer than the spine is wide (${c.SESSION_SPINE_W}) - a segment, not a square dot`);
+    chk(c.SESSION_SPINE_OFF * 3 >= c.SESSION_SPINE_W * 2,
+        `a gap (${c.SESSION_SPINE_OFF}) is at least 2/3 of the spine's width (${c.SESSION_SPINE_W}) - a gap, not a seam`);
+    // The straight section is all the pattern may touch (the arcs stay solid, or a
+    // knockout paints outside the card for the same reason a fill would), and at
+    // the SHORTEST row the ladder's floor allows it must still hold two gaps -
+    // one break reads as a defect, two read as a texture.
+    const straightMin = c.SESSION_ROW_H_MIN - 2 * c.BORDER_CARD - 2 * sr;
+    chk((c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF) * 2 <= straightMin,
+        `the pattern's period ${c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF} fits twice in the shortest ` +
+        `spine's straight section (${straightMin}px at SESSION_ROW_H_MIN ${c.SESSION_ROW_H_MIN})`);
+    // EVERY REACHABLE SPINE HEIGHT, walked the way the loop in drawSessionSpine
+    // walks it: no knockout may start above the top arc or end below the bottom
+    // one, and every row that can carry a spine must show at least two gaps.
+    for (const rowH of spineHeights(c, contentBottom, MAX_SESSIONS)) {
+      const g = spineGaps(c, rowH);
+      chk(g.gaps.length >= 2,
+          `spine on a ${rowH}px row: ${g.gaps.length} Codex gaps ` +
+          `(${g.gaps.map(([a, z]) => `+${a}..+${z}`).join(" ")})`);
+      for (const [a, z] of g.gaps)
+        chk(a >= g.r && z <= g.h - g.r - 1,
+            `spine on a ${rowH}px row: gap +${a}..+${z} is inside the straight section +${g.r}..+${g.h - g.r - 1}`);
+    }
+    // IT CLEARS EVERYTHING THE ROW ALREADY DRAWS, which is what makes this a
+    // second carrier rather than a replacement. The spinner is a 32x32 BLIT that
+    // paints its own background, so an overlap would be a bite out of the spine
+    // four times a second - the same class of defect SESSION_DOT_CX exists for.
+    chk(spineR < c.SESSION_DOT_CX - 16,
+        `spine x=${spineL}..${spineR} clears the spinner blit's left edge x=${c.SESSION_DOT_CX - 16} by ${c.SESSION_DOT_CX - 16 - spineR - 1}px`);
+    chk(spineR < c.SESSION_ROW_X + c.SESSION_NAME_DX,
+        `spine x=${spineL}..${spineR} clears the name lane at x=${c.SESSION_ROW_X + c.SESSION_NAME_DX} - SESSION_NAME_DX needs no widening`);
+    // COLOUR IS NEVER THE ONLY CARRIER: a spine row still draws its text pill, and
+    // a band row draws no spine. Both are properties of the call site, not of the
+    // geometry, so both are parsed.
+    {
+      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      chk(/if \(expanded\)\s*\n\s*drawSessionBand\([\s\S]*?\n\s*else\b[\s\S]*?drawSessionSpine\(/.test(src),
+          "the spine is the band's ELSE - a row gets one head or the other, never both");
+      chk(/drawSessionSpine\(SESSION_ROW_X \+ BORDER_CARD, y \+ BORDER_CARD,\s*\n\s*rowH - 2 \* BORDER_CARD,/.test(src),
+          "the spine is drawn on the card's INTERIOR (inset by BORDER_CARD on all four sides)");
+      chk((src.match(/drawStatusPill\(/g) || []).length >= 2,
+          "the tall and compact branches both still draw their status pill - the spine never carries status alone");
+    }
   }
 
   // ---- the name lane: MEASURED, never counted ----

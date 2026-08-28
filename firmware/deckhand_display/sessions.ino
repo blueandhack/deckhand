@@ -42,8 +42,16 @@ int sessionListAvail(int count) {
 // field's own byte cap (see SESSION_EXP_MAX_H) - and the DRAW asks this rather
 // than deciding for itself, so a card can never draw a line its height did not
 // pay for.
-int sessionExpPromptLines(int rowH) {
-  int n = SESSION_EXP_PROMPT_MIN + (rowH - SESSION_EXP_MIN_H) / SESSION_LINE_H;
+//
+// THE ARGUMENT IS THE BODY'S HEIGHT, NOT THE CARD'S - the caller passes
+// rowH LESS the band - so the packed minimum it is measured against has to have
+// the band taken off it too. SESSION_EXP_MIN_H is the whole card's floor; the two
+// roles that constant serves differ by exactly SESSION_BAND_H, which is why this
+// is a subtraction here rather than a second constant in the header that could
+// drift from the gate it has to agree with.
+int sessionExpPromptLines(int bodyH) {
+  int n = SESSION_EXP_PROMPT_MIN +
+          (bodyH - (SESSION_EXP_MIN_H - SESSION_BAND_H)) / SESSION_LINE_H;
   if (n < SESSION_EXP_PROMPT_MIN) n = SESSION_EXP_PROMPT_MIN;
   return n > SESSION_EXP_PROMPT_MAX ? SESSION_EXP_PROMPT_MAX : n;
 }
@@ -288,6 +296,45 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   tft.setTextDatum(TL_DATUM);
   tft.drawString(wordFit, wordX, y + (h - uiLineH(T_HEAD)) / 2);
 }
+// ---------- The spine (the band's compact form) ----------
+// SESSION_SPINE_W of status colour down the row's left edge, for every row the
+// band card is not. Same vocabulary, a fraction of the cost, and it scales to any
+// row height - which a 44px band cannot, since a 65px six-session row would spend
+// two thirds of itself on one word.
+//
+// (x, y, h) is the card's INTERIOR - inset by the 2px border - exactly as
+// drawSessionBand's is, and for the same reason: a plain fillRect down the left
+// edge paints status-coloured nubs OUTSIDE the card's rounded outline. This one
+// meets BOTH corners rather than one, so it cannot be squared off at either end.
+//
+// TWO CAPSULES, NOT A RECT AND NOT SIX COLUMNS OF ARITHMETIC. The first is a
+// rounded rect exactly 2r wide at the card's INTERIOR radius, so its left edge IS
+// the interior's corner arc - same centre (SESSION_ROW_X + R_MD, y + r), same
+// radius. The second is the identical shape shifted right by SESSION_SPINE_W and
+// filled with the card colour, which carves the first back down to a band of
+// constant width that follows the corner. What it paints past the first shape's
+// right edge is COLOR_CARD onto COLOR_CARD - a no-op, never a bite out of the
+// border, because the two shapes share their top and bottom arcs. Both edges stay
+// anti-aliased, which six integer columns would not be.
+//
+// CODEX IS SEGMENTED, and the gaps are knocked out of the STRAIGHT section only -
+// the run between the two arcs, where the band's left edge really is at x. Up in
+// the arc the band has moved right, so a knockout at x would paint outside the
+// card: the same hazard as the fill, arriving through the pattern. The two ends
+// therefore stay solid, which is also what keeps the pattern from reading as a
+// half-segment cut off by the corner.
+void drawSessionSpine(int x, int y, int h, const char* status, bool codex) {
+  const uint16_t col = colorForStatus(status);
+  const int r = R_MD - BORDER_CARD;   // the card's interior corner radius
+  uiFillRound(x, y, 2 * r, h, r, col, COLOR_CARD);
+  uiFillRound(x + SESSION_SPINE_W, y, 2 * r, h, r, COLOR_CARD, col);
+  if (!codex) return;
+  // Starts one ON run below the top arc and draws only a gap that fits WHOLE
+  // inside the straight section, so no knockout is ever clipped by an arc.
+  for (int yy = r + SESSION_SPINE_ON; yy + SESSION_SPINE_OFF <= h - r;
+       yy += SESSION_SPINE_ON + SESSION_SPINE_OFF)
+    tft.fillRect(x, y + yy, SESSION_SPINE_W, SESSION_SPINE_OFF, COLOR_CARD);
+}
 #endif
 // pos is the DISPLAY POSITION (what the row's on-screen y comes from); the
 // underlying array index - which may differ once two Macs are merged and
@@ -325,6 +372,16 @@ void drawSessionRow(int pos) {
   if (expanded)
     drawSessionBand(SESSION_ROW_X + BORDER_CARD, y + BORDER_CARD,
                     SESSION_ROW_W - 2 * BORDER_CARD, i, color);
+  else
+    // ---- THE SPINE (every other row) ----
+    // The same status colour in the compact vocabulary, drawn on the card's
+    // interior so it meets the border rather than crossing it. Everything else on
+    // the row is UNCHANGED: the indicator, the tag and the pill all still draw,
+    // because the spine is a second carrier and never the only one. It clears the
+    // 32x32 spinner blit's left edge (SESSION_DOT_CX - 16) by a pixel, so the name
+    // lane needs no widening.
+    drawSessionSpine(SESSION_ROW_X + BORDER_CARD, y + BORDER_CARD,
+                     rowH - 2 * BORDER_CARD, s.status, strcmp(s.agent, "cx") == 0);
 #endif
 
   // SESSION_DOT_CX/DY, not literals, and BOTH halves are constraints rather than
