@@ -201,7 +201,16 @@ const LADDER_SHAPE = { 1: "tttncc", 2: "ttttsn" };
 // not an absence of one. Board 2: the top row absorbs the leftover up to
 // SESSION_EXP_MAX_H, and 4+ sessions fall back to the uniform ladder because the
 // ladder already fills the column.
-const EXPANDED_H = { 1: [0, 0, 0, 0, 0, 0], 2: [212, 212, 204, 0, 0, 0] };
+//
+// 1 and 2 sessions moved with SESSION_EXP_MAX_H's 212 -> 336 (the band card task):
+// leftover at n=1 is the full avail (410, uncapped by the old 212) -> 336; at n=2
+// leftover is 307, now UNDER the new cap so it is no longer capped at all. n=3's
+// 204 is untouched - it was already below 212 and stays below 336. sessionExpandedH()
+// itself is unchanged this task, so these are real numbers the unmodified firmware
+// now produces with the new constant - not yet the band layout (that lands in a
+// later task), so the extra height above the old packed stack is dead space until
+// the drawing is rewired to spend it.
+const EXPANDED_H = { 1: [0, 0, 0, 0, 0, 0], 2: [336, 307, 204, 0, 0, 0] };
 
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0, known = 0;
@@ -568,10 +577,18 @@ for (const b of [1, 2]) {
       const pathEnd = pathTop + L - 1;
       chk(c.SESSION_EXP_MIN_H === pathEnd + 4 + A + c.SESSION_PILL_UP_T,
           `SESSION_EXP_MIN_H ${c.SESSION_EXP_MIN_H} == path end +${pathEnd} + gap ${3 + A} + 1 + pillUp ${c.SESSION_PILL_UP_T}`);
-      chk(c.SESSION_EXP_MAX_H === c.SESSION_EXP_MIN_H +
-            (c.SESSION_EXP_PROMPT_MAX - c.SESSION_EXP_PROMPT_MIN) * L,
-          `SESSION_EXP_MAX_H ${c.SESSION_EXP_MAX_H} == MIN ${c.SESSION_EXP_MIN_H} + ` +
-          `${c.SESSION_EXP_PROMPT_MAX - c.SESSION_EXP_PROMPT_MIN} more prompt lines x ${L}`);
+      // SESSION_EXP_MAX_H no longer holds this relationship to MIN_H. It used to -
+      // MAX was exactly MIN plus the prompt lines a taller card could add - because
+      // that packed stack was the only content model a card had. The band card
+      // task replaces the CAP's own derivation with a fixed sum of the band's
+      // blocks (§3/§4, asserted below as SESSION_EXP_MAX_H against that sum), which
+      // is a taller, differently-shaped card than this packed stack describes. The
+      // packed stack itself - MIN_H and the byte caps just below - is still real:
+      // it is what the CURRENT firmware draws inside an expanded row, unchanged
+      // until a later task wires the row up to the band layout. Until then a card
+      // taller than MIN_H's packed content (up to MAX_H) simply carries dead space
+      // below its content, which is the expected shape of an in-progress port, not
+      // a defect this checker should paper over by keeping a now-false identity.
       chk(c.SESSION_EXP_MIN_H >= c.SESSION_TITLE_MIN_H,
           `an expanded row (>= ${c.SESSION_EXP_MIN_H}) is always a title row (>= ${c.SESSION_TITLE_MIN_H})`);
       // THE CAP IS THE FIELD'S BYTE CAP, MEASURED. A prompt line past this could
@@ -654,6 +671,64 @@ for (const b of [1, 2]) {
         console.log(`  expanded${strip ? " (+N more strip)" : "           "} avail ${avail}: ${tags.join("  ")}`);
       }
     }
+  }
+
+  // ---- §3/§4 band card: the cap is DERIVED, so assert it against its own blocks ----
+  // The spec's rule: "the sum of the blocks that can actually carry ink". A future
+  // field that adds a line must move this sum, not slip past it.
+  if (b === 2) {
+    const B2 = (n) => c[`SESSION_BAND_${n}`];
+    const blocks = [
+      ["band", c.SESSION_BAND_H],
+      ["name", B2("NAME_H")],
+      ["sub", B2("SUB_H")],
+      ["title", B2("TITLE_STEP") * c.SESSION_EXP_TITLE_LINES],
+      ["rule", B2("RULE_H")],
+      ["lastprompt", B2("LABEL_H")],
+      ["prompt", B2("PROMPT_STEP") * c.SESSION_EXP_PROMPT_MAX],
+      ["rule2", B2("RULE_H")],
+      ["path", B2("PATH_H")],
+      ["pad", B2("BOTTOM_PAD")],
+    ];
+    const sum = blocks.reduce((a, [, v]) => a + v, 0);
+    chk(c.SESSION_EXP_MAX_H === sum,
+        `SESSION_EXP_MAX_H ${c.SESSION_EXP_MAX_H} is the sum of the band card blocks ` +
+        `(${blocks.map(([n, v]) => `${n} ${v}`).join(" + ")} = ${sum})`);
+
+    // The two byte caps that bound the line counts. These are the reason the sum is
+    // what it is: a 5th prompt line and a 3rd title line can never carry ink.
+    const lane = Math.floor((c.SESSION_ROW_W - 2 * B2("PAD")) / c.TEXT_ADV);
+    chk(lane * c.SESSION_EXP_PROMPT_MAX >= 100,
+        `a 5th prompt line is unreachable: prompt[104] holds 100 chars, ` +
+        `${c.SESSION_EXP_PROMPT_MAX} lines x ${lane} cols = ${lane * c.SESSION_EXP_PROMPT_MAX}`);
+    chk(lane * c.SESSION_EXP_TITLE_LINES >= 43,
+        `a 3rd title line is unreachable: title[44] holds 43 chars, ` +
+        `${c.SESSION_EXP_TITLE_LINES} lines x ${lane} cols = ${lane * c.SESSION_EXP_TITLE_LINES}`);
+    // ... and that one FEWER line would NOT hold the data, which is what makes the
+    // counts derived rather than generous.
+    chk(lane * (c.SESSION_EXP_PROMPT_MAX - 1) < 100,
+        `4 prompt lines is the MINIMUM that holds prompt[104]`);
+    chk(lane * (c.SESSION_EXP_TITLE_LINES - 1) < 43,
+        `2 title lines is the MINIMUM that holds title[44]`);
+
+    // The card must fit the column it is drawn in.
+    chk(c.SESSION_EXP_MAX_H <= 410,
+        `the band card cap (${c.SESSION_EXP_MAX_H}) fits the 1-session list area`);
+    // The band's own contents must fit ACROSS. This is the arithmetic that fails on
+    // the detail screen (FINDING 1) and passes here - assert it so the two stay apart.
+    const bandRoom = c.SESSION_ROW_W - 4 - B2("PAD") - 32 - B2("MARK_GAP")
+                     - B2("PAD") - 2 * c.TEXT_ADV;   // 32 = mark, "4m" = 2 chars
+    // T_HEAD's advance, parsed rather than transcribed - see UI[b][T_HEAD] above.
+    // The literal 12 in the plan mirrors board_es3c35p.h's own comment
+    // ("16 chars at T_HEAD's 12px advance = 192"); parsed here instead so a face
+    // swap fails this checker rather than drifting past it.
+    const headAdv = advanceB(b, T_HEAD);
+    const longestWord = "NEEDS YOUR INPUT".length * headAdv;
+    chk(longestWord <= bandRoom,
+        `the band's longest status word (${longestWord}px) clears the duration (room ${bandRoom}px)`);
+
+    chk(c.SESSION_SPINE_W >= 4 && c.SESSION_SPINE_W <= 8,
+        `the spine is narrower than the card border radius allows to be lost`);
   }
 
   // ---- the name lane: MEASURED, never counted ----

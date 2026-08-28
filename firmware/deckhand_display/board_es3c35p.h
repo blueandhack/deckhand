@@ -833,6 +833,59 @@ const int SESSION_SUB_LANE_W = 244;
 // boards keep the same 1-row overhang into the footer's padding and no more.
 const int SESSION_OVERFLOW_H = 19;
 
+// ---------- §3 THE STATUS BAND ----------
+// The card head becomes a FILLED BAND in the status colour. Filled bands are new
+// vocabulary for this UI - nothing else here fills a region with a status colour -
+// and that is accepted rather than overlooked: the band is the reason the card
+// reads at a distance without spending 64px of height on a single word.
+//
+// 44 is TAP_MIN(46) minus the card's own 2px border: the band is the full width of
+// the card's interior, so it is not a tap target itself, but sizing it to the same
+// rung keeps it from reading as a thin stripe against a 46px tab bar.
+const int SESSION_BAND_H = 44;
+const int SESSION_BAND_PAD = 14;        // side pad, band and body share it
+const int SESSION_BAND_MARK_GAP = 8;    // agent mark -> status word
+//
+// THE BAND'S CONTENTS FIT ACROSS, and this is the arithmetic the detail screen
+// FAILS (see the spec's §7 and this plan's FINDING 1). Inner width is
+// SESSION_ROW_W - 4 = 292. The word starts at PAD(14) + mark(32) + GAP(8) = 54;
+// a bare duration "4m" is 2 * TEXT_ADV = 16 and sits PAD from the right, so the
+// word has 292 - 54 - 14 - 16 = 208px. The longest label is "NEEDS YOUR INPUT",
+// 16 chars at T_HEAD's 12px advance = 192. Clears by 16.
+// Add a wall-clock here and it does NOT clear - that is why §7 is a separate piece.
+
+// ---------- §4 THE SPINE ----------
+// The band's compact form: a 6px status-coloured spine down the row's left edge.
+// Same vocabulary, ~1.2ms against the band's 3.3ms, and it scales to any row
+// height - which a 44px band cannot, since at four sessions a row is 100px and a
+// band would spend 44% of it on one word.
+// THE SPINE NEVER CARRIES STATUS ALONE: every spine row keeps its text pill, the
+// same rule that makes the status pill a filled/outlined/boxless SHAPE, not a hue.
+const int SESSION_SPINE_W = 6;
+
+// ---------- The band card's block stack ----------
+// SESSION_EXP_MAX_H is the SUM of these, not a chosen number - the same way the
+// 212 it replaces was derived. sessions-geom-check.mjs asserts the sum, so a future
+// field cannot silently push a line past what its data can fill.
+const int SESSION_BAND_NAME_H = 34;      // T_HEAD 24 + 10 leading
+const int SESSION_BAND_SUB_H = 32;       // T_BODY 16 + 16, the agent/model/branch line
+const int SESSION_BAND_TITLE_STEP = 20;  // T_BODY 16 + 4
+const int SESSION_BAND_RULE_H = 18;      // 1px rule + air either side
+const int SESSION_BAND_LABEL_H = 28;     // the "LAST PROMPT" caption
+const int SESSION_BAND_PROMPT_STEP = 24; // T_BODY 16 + 8; prompt gets the most air
+const int SESSION_BAND_PATH_H = 20;
+const int SESSION_BAND_BOTTOM_PAD = 6;
+//
+// TWO HARD CAPS ON THE LINE COUNTS, both inherited from the existing derivation and
+// both asserted: the lane is (296 - 2*14) / 8 = 33 columns, so prompt[104]'s 100
+// characters need 4 lines (3 x 33 = 99 is one short) and a 5th is permanently
+// blank; title[44]'s 43 characters need 2 (1 x 33 = 33 is short) and a 3rd is
+// permanently blank. SESSION_EXP_PROMPT_MAX and SESSION_EXP_TITLE_LINES are those
+// counts and must not be raised without new byte caps to justify them.
+//
+//   band 44 + name 34 + sub 32 + title 2x20 + rule 18
+//        + LAST PROMPT 28 + prompt 4x24 + rule 18 + path 20 + pad 6 = 336
+
 // ---------- THE EXPANDED FIRST ROW ----------
 // WHY THIS EXISTS AT ALL, in one number: with ONE session the ladder above draws a
 // 100px row and then 307px of nothing - 75% of the list area - because every rung
@@ -896,7 +949,7 @@ const int SESSION_EXP_MIN_H = 180;
 // to put in the card - so the surplus stays OUTSIDE it, as empty list area, rather
 // than becoming a card of air. That is the honest cost of one session on this
 // panel and it is stated in the table above rather than hidden.
-const int SESSION_EXP_MAX_H = 212;
+const int SESSION_EXP_MAX_H = 336;
 // The title is ALWAYS two lines when present: title[44] carries 43 characters =
 // 344px against a 244px lane, so a real title genuinely wraps, and 2 lines hold
 // 60. Absent (Codex rows carry no title), the block is skipped by the cursor
