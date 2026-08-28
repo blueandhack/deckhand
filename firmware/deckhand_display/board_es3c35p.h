@@ -845,6 +845,21 @@ const int SESSION_OVERFLOW_H = 19;
 const int SESSION_BAND_H = 44;
 const int SESSION_BAND_PAD = 14;        // side pad, band and body share it
 const int SESSION_BAND_MARK_GAP = 8;    // agent mark -> status word
+// THE DURATION'S LANE IS FIXED, AND 3 IS WHAT THE WORD LEAVES IT. The duration is
+// a change-only field like every other on this device, so its clear box has to be
+// a CONSTANT width - a box measured from the current value is a box that grows
+// into the status word beside it, which is the defect the compact row's duration
+// already caused once. The width is then not a preference: the band's inner 292px
+// carries PAD(14) + mark(32) + GAP(8) + the longest word (192, see below) + PAD(14),
+// which leaves 32px, i.e. 4 characters at TEXT_ADV - and one of those is spent on
+// drawIfChanged's 1px margin plus the clearance the word needs from the box. So 3.
+//
+// It is also all the format needs. formatDurationShort() drops to one unit (s / m /
+// h / d) for this field, and `statusSinceMillis` is a millis() value, which WRAPS at
+// 49.7 days - so "49d" is the widest string reachable and 3 characters is a bound,
+// not a hope. The rows below the card keep the full "12h34m" form: they have a whole
+// line for it, and this one has 24 pixels.
+const int SESSION_BAND_DUR_CHARS = 3;
 //
 // THE BAND'S CONTENTS FIT ACROSS, and this is the arithmetic the detail screen
 // FAILS (see the spec's §7 and this plan's FINDING 1). Inner width is

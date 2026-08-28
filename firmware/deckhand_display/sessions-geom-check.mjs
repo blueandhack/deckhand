@@ -303,16 +303,28 @@ function expPromptLines(c, rowH) {
 // session has no prompt), so a fixed band table would describe a card the device
 // does not draw. `have` names which blocks are present.
 //
+// THE CARD IS HEADED BY THE STATUS BAND (§3), AND EVERY NUMBER BELOW IS SHIFTED BY
+// IT. Two halves, and the second is the one with teeth: the body starts at
+// SESSION_BAND_H, and the prompt's line budget is taken against `rowH - BAND`,
+// because sessionExpPromptLines() derives it from SESSION_EXP_MIN_H - the PRE-band
+// packed stack - and the band spends 44px of exactly that height. Model it at rowH
+// and the checker stays green while the smallest card the rule can produce (204, at
+// three sessions) draws its path row through its own bottom border.
+// The band card has NO bottom pill - the band replaces it - so the last content
+// block is measured against the border instead.
+//
 // These are the WORST CASE within each shape: the draw advances by the y
 // drawWrappedText actually returns, so a title or prompt that does not fill its
 // budgeted lines only ever moves the blocks below it UP, widening the gap to the
-// bottom-anchored pill. Budgeting the full count here is therefore the bound, and
-// the assertion below reads `gap >= 0` against it.
+// bottom border. Budgeting the full count here is therefore the bound, and the
+// assertion below reads `gap >= 0` against it.
 function expBands(b, c, rowH, have) {
   const L = lineHB(b, T_BODY), N = c.SESSION_NAME_H, G = c.SESSION_LINE_GAP;
+  const BAND = c.SESSION_BAND_H;
   const bands = [["border top", 0, 1],
-                 ["name", c.SESSION_NAME_Y_T, c.SESSION_NAME_Y_T + N - 1]];
-  let cy = c.SESSION_TITLE_Y;
+                 ["band", c.BORDER_CARD, BAND - 1],
+                 ["name", BAND + c.SESSION_NAME_Y_T, BAND + c.SESSION_NAME_Y_T + N - 1]];
+  let cy = BAND + c.SESSION_TITLE_Y;
   if (have.title) {
     bands.push([`title (${c.SESSION_EXP_TITLE_LINES} lines)`, cy,
                 cy + c.SESSION_EXP_TITLE_LINES * L - 1]);
@@ -320,14 +332,13 @@ function expBands(b, c, rowH, have) {
   }
   if (have.sub) { bands.push(["sub-line", cy, cy + L - 1]); cy += L + G; }
   if (have.prompt) {
-    const n = expPromptLines(c, rowH);
+    const n = expPromptLines(c, rowH - BAND);
     bands.push(["PROMPT label", cy, cy + L - 1]);
     cy += L;                                  // label and value are one block
     bands.push([`prompt (${n} lines)`, cy, cy + n * L - 1]);
     cy += n * L + G;
   }
   if (have.path) bands.push(["path", cy, cy + L - 1]);
-  bands.push(["pill", rowH - c.SESSION_PILL_UP_T, rowH - c.SESSION_PILL_UP_T + c.PILL_H - 1]);
   bands.push(["border bottom", rowH - 2, rowH - 1]);
   return bands;
 }
@@ -655,6 +666,22 @@ for (const b of [1, 2]) {
             chk(Math.abs(above - below) <= 1,
                 `${strip ? "strip " : ""}1 session: the lone card is centred - ${above}px above, ${below}px below`);
           }
+          // THE STRIP CASES BELOW SIX SESSIONS ARE UNREACHABLE, and the band card is
+          // where that stops being a free extra check. hiddenCount > 0 implies
+          // sessionCount == MAX_SESSIONS - the host caps its list at 6 and only then
+          // reports more - and at six the ladder already fills the column, so the
+          // strip and a band card cannot coexist. The heights the strip produces
+          // below six (185 at three sessions) are shorter than the band plus the
+          // packed body, so laying the band's stack out against them reports an
+          // overdraw in a card the device cannot be asked to draw. Skipped LOUDLY
+          // rather than silently, because that shortfall is real in one respect: it
+          // is the SESSION_EXP_MIN_H question - the gate is still the PRE-band packed
+          // stack (180) where a band card needs 44 more - and it belongs to the task
+          // that changes `avail`, where it can actually be reached and tested.
+          if (strip && n < MAX_SESSIONS) {
+            console.log(`  skip  strip ${n}x${e}: unreachable (a strip implies ${MAX_SESSIONS} sessions, which never expands)`);
+            continue;
+          }
           for (const [lbl, have] of HAVE) {
             const bands = expBands(b, c, e, have);
             if (!strip && n === 1) {
@@ -711,13 +738,31 @@ for (const b of [1, 2]) {
     chk(lane * (c.SESSION_EXP_TITLE_LINES - 1) < 43,
         `2 title lines is the MINIMUM that holds title[44]`);
 
+    // THE DRAW MUST SUBTRACT THE BAND FROM ITS PROMPT BUDGET, and this is the only
+    // assertion here that can see whether it does. Everything above models the
+    // LAYOUT; none of it reads the code, so reverting sessions.ino's
+    // `sessionExpPromptLines(rowH - bandOff)` to `(rowH)` leaves every band table
+    // green while the smallest card the rule can produce (204) draws its path row
+    // 11px through its own bottom border - the exact overdraw the model asserts
+    // against. Parsed out of the draw, not transcribed beside it.
+    // Its known limit is the one this repo already documents for text-matching
+    // tests: it sees the line, not whether the preprocessor kept it. The band
+    // tables above are what constrain the geometry; this is what ties them to the
+    // one call site that has to agree with them.
+    const drawSrc = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+    chk(/sessionExpPromptLines\(rowH - bandOff\)/.test(drawSrc),
+        "the expanded draw budgets its prompt against rowH LESS the band " +
+        "(sessions.ino: sessionExpPromptLines(rowH - bandOff))");
+
     // The card must fit the column it is drawn in.
     chk(c.SESSION_EXP_MAX_H <= 410,
         `the band card cap (${c.SESSION_EXP_MAX_H}) fits the 1-session list area`);
     // The band's own contents must fit ACROSS. This is the arithmetic that fails on
     // the detail screen (FINDING 1) and passes here - assert it so the two stay apart.
     const bandRoom = c.SESSION_ROW_W - 4 - B2("PAD") - 32 - B2("MARK_GAP")
-                     - B2("PAD") - 2 * c.TEXT_ADV;   // 32 = mark, "4m" = 2 chars
+                     - B2("PAD") - B2("DUR_CHARS") * c.TEXT_ADV;   // 32 = mark
+    // DUR_CHARS, not a "4m" a reader can imagine: the duration is a change-only
+    // field, so the lane it clears is a CONSTANT and the word gets the rest.
     // T_HEAD's advance, parsed rather than transcribed - see UI[b][T_HEAD] above.
     // The literal 12 in the plan mirrors board_es3c35p.h's own comment
     // ("16 chars at T_HEAD's 12px advance = 192"); parsed here instead so a face

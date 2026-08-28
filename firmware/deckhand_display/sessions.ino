@@ -201,13 +201,39 @@ void fitText(char* out, size_t outSize, const char* src, int maxW) {
   out[0] = '\0'; // nothing fits at all
 }
 #if !BOARD_USES_TFT_ESPI
+// ---------- The band's duration: ONE lane, ONE format, THREE readers ----------
+// The band draws this field, the per-tick change-only update redraws it, and the
+// word's lane is measured against it - so all three read these three helpers rather
+// than each deriving the same number. A drift between the draw and the update is
+// exactly how a clear box ends up somewhere the ink is not.
+//
+// The left edge is where drawIfChanged's clear box STARTS (its fx - 1), not where
+// the text does, because that box is the thing the word has to stay clear of.
+int bandDurLeft(int x, int w) {
+  return x + w - SESSION_BAND_PAD - SESSION_BAND_DUR_CHARS * TEXT_ADV - 1;
+}
+int bandDurDY() { return (SESSION_BAND_H - BORDER_CARD - uiLineH(T_BODY)) / 2; }
+// ONE unit, so the field is bounded at SESSION_BAND_DUR_CHARS: "59s", "59m", "23h",
+// "49d" - and 49 days is the ceiling by construction, since statusSinceMillis is a
+// millis() value and that wraps at 49.7. The rows below keep formatDuration's fuller
+// "12h34m", which has a line to itself; this field has 24 pixels beside the word.
+void bandDurText(int i, char* buf, size_t n) {
+  unsigned long sec = (millis() - sessions[i].statusSinceMillis) / 1000;
+  if (sec < 60) snprintf(buf, n, "%lus", sec);
+  else if (sec < 3600) snprintf(buf, n, "%lum", sec / 60);
+  else if (sec < 86400) snprintf(buf, n, "%luh", sec / 3600);
+  else snprintf(buf, n, "%lud", sec / 86400);
+  padLeftTo(buf, n, SESSION_BAND_DUR_CHARS);
+}
 // ---------- The status band (the expanded card's head) ----------
 // A filled rect in the status colour carrying the agent mark, the status WORD and
-// the duration. Drawn as ONE unit and repainted as one: the duration's own tick
-// re-runs this whole function rather than clearing a box inside it, which is the
-// only way the clear can never eat the word's tail - the exact failure the compact
-// row's duration already caused once (see the SESSION_SUBC_Y note below). It is
-// also what Task 5's crossfade needs: one rectangle, one call.
+// the duration. Drawn as ONE unit - one rectangle, one call, which is what the
+// crossfade needs - but NOT repainted as one for the duration: that field ticks
+// once a second for the first minute of every status, and a full band repaint per
+// tick would be a clear-then-redraw of a 292x42 region, the flicker discipline's
+// one prohibition. It stays a change-only field with a FIXED lane instead
+// (SESSION_BAND_DUR_CHARS), which is what keeps its clear box off the word beside
+// it - the failure the compact row's duration caused once with a variable one.
 //
 // The word is T_HEAD (Spleen 12x24) because presence is the band's whole job; the
 // duration stays T_BODY so it reads as a subordinate fact. Both are COLOR_CARD ON
@@ -233,18 +259,19 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   drawAgentMark(x + SESSION_BAND_PAD, y + (h - SPARK_SIZE) / 2,
                 strcmp(s.agent, "cx") == 0, COLOR_CARD, col, /*animate=*/false);
 
-  // THE DURATION IS MEASURED FIRST AND THE WORD TAKES WHAT IS LEFT. The header's
-  // arithmetic ("NEEDS YOUR INPUT" clears a bare "4m" by 16px) holds for the short
-  // durations it names, and a session that has been asking for "12h34m" spends
-  // 32 more pixels than that - so the lane is measured, never counted, and the word
-  // trims with "..." in the case the band genuinely cannot hold both.
+  // THE DURATION'S LANE IS A CONSTANT, NOT A MEASUREMENT, and that is the whole
+  // reason it can be a change-only field: bandDurLeft() is the same number whatever
+  // the value says, so the clear box it repaints on every change is fixed and
+  // provably clear of the word's ink beside it (7px with the longest label - see
+  // SESSION_BAND_DUR_CHARS). Measuring the current value instead would let a wide
+  // duration's box grow into the word, which is the defect the compact row's
+  // duration caused once, on the one card whose whole job is that word.
   char dur[8];
-  formatDuration(s.statusSinceMillis, dur, sizeof(dur));
-  setUIFont(T_BODY);
-  const int durW = tft.textWidth(dur);
+  bandDurText(i, dur, sizeof(dur));
   tft.setTextColor(COLOR_CARD, col);
   tft.setTextDatum(TR_DATUM);
-  tft.drawString(dur, x + w - SESSION_BAND_PAD, y + (h - uiLineH(T_BODY)) / 2);
+  setUIFont(T_BODY);
+  tft.drawString(dur, x + w - SESSION_BAND_PAD, y + bandDurDY());
 
   // labelForStatus is lower case; drawStatusPill's labels are upper. One
   // convention on this tab, so the band matches the pill rather than inventing a
@@ -254,7 +281,7 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   snprintf(word, sizeof(word), "%s", labelForStatus(s.status));
   for (char* p = word; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
   const int wordX = x + SESSION_BAND_PAD + SPARK_SIZE + SESSION_BAND_MARK_GAP;
-  const int lane = (x + w - SESSION_BAND_PAD - durW - SESSION_BAND_MARK_GAP) - wordX;
+  const int lane = bandDurLeft(x, w) - wordX;
   setUIFont(T_HEAD);
   char wordFit[24];
   fitText(wordFit, sizeof(wordFit), word, lane);
@@ -657,22 +684,20 @@ void renderSessionsList() {
     char dur[8];
     formatDuration(sessions[i].statusSinceMillis, dur, sizeof(dur));
 #if !BOARD_USES_TFT_ESPI
-    // THE BAND OWNS THE BAND CARD'S DURATION, and a change repaints the WHOLE
-    // band rather than clearing a box inside it. A drawIfChanged here would clear
-    // textWidth(dur) + 2 pixels of the band on every tick, and a duration wide
-    // enough ("12h34m") would clear straight through the tail of the status word
-    // beside it - the identical defect the compact row's duration caused once, in
-    // a place where the word is the whole point of the card. Repainting the band
-    // is ~3.3ms, at most once a second, and cannot overlap anything by
-    // construction because one function lays both fields out together.
+    // The band card's duration lives IN THE BAND, and it is an ordinary change-only
+    // field there: same padded fixed-width string, same per-field cache, same one
+    // small clear box - only the lane, the face and the colours differ, because it
+    // sits on the status colour rather than on the card. Repainting the whole band
+    // for it would be a clear-then-redraw of a 292x42 region once a SECOND for the
+    // first minute of every status (formatDuration counts seconds under a minute),
+    // which is what this file's redraw discipline exists to prevent.
     if (sessionRowExpanded(pos)) {
-      if (strncmp(rowDurCache[pos], dur, sizeof(rowDurCache[pos])) != 0) {
-        strncpy(rowDurCache[pos], dur, sizeof(rowDurCache[pos]) - 1);
-        rowDurCache[pos][sizeof(rowDurCache[pos]) - 1] = '\0';
-        drawSessionBand(SESSION_ROW_X + BORDER_CARD, sessionRowYAt(pos) + BORDER_CARD,
-                        SESSION_ROW_W - 2 * BORDER_CARD, i,
-                        colorForStatus(sessions[i].status));
-      }
+      char bdur[8];
+      bandDurText(i, bdur, sizeof(bdur));
+      drawIfChanged(rowDurCache[pos], sizeof(rowDurCache[pos]), bdur,
+                    SESSION_ROW_X + SESSION_ROW_W - BORDER_CARD - SESSION_BAND_PAD,
+                    sessionRowYAt(pos) + BORDER_CARD + bandDurDY(), T_BODY, 1,
+                    COLOR_CARD, colorForStatus(sessions[i].status), TR_DATUM);
       continue;
     }
 #endif
