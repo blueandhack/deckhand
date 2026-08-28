@@ -2344,6 +2344,17 @@ const unsigned long SESSION_XFADE_MS = 300;
 // comparison. The shimmer keeps ANIM_INTERVAL_MS, so nothing new runs
 // continuously; see tickSessionAnim().
 const unsigned long SESSION_XFADE_INTERVAL_MS = 33;
+// ONE SLOT, AND THE LOSER OF A DOUBLE CHANGE SIMPLY DOES NOT FADE. Two sessions
+// can change status inside a single payload; the diff calls startSessionXfade for
+// each, and the second overwrites the first. Traced rather than assumed to be
+// harmless, and it is the one one-slot decision on this tab that had no note:
+// every reader asks by ID (sessionXfadeT), so the overwritten session is simply
+// not the one fading and reads t < 0 - it cannot inherit the winner's `from`
+// colour or its clock. Its band, if it even has one, settles at the flat target
+// colour on the row repaint the same payload already causes. So the cost is a
+// skipped 300ms animation, never a wrong colour, and a second slot would buy a
+// fade for a session that in the overwhelming case has no band to fade: only
+// display position 0 has one at all.
 char          xfadeId[16]   = "";   // the session that is fading, "" = idle
 char          xfadeFrom[16] = "";   // the status it is leaving
 unsigned long xfadeStart    = 0;
@@ -2520,9 +2531,15 @@ void tickWorkingSpinner() {
     // how the last fix to this indicator's position was undone once.
 #if !BOARD_USES_TFT_ESPI
     // The band card carries its agent mark IN THE BAND, so this row has no
-    // indicator of its own to advance - animating one here would blit a second
-    // spark into the card's name band, 44px below the mark it duplicates.
-    if (sessionRowExpanded(pos)) continue;
+    // indicator of its own to advance - blitting one here would put a second
+    // spark in the card's name band, 44px below the mark it duplicates. The
+    // BAND's mark is advanced instead, and this is the whole of the fix for a
+    // real regression: the band shipped with animate=false, so a single working
+    // session - the most common screen on this tab - was fully static where the
+    // plain row it replaced had a turning spark. Here rather than in
+    // tickSessionAnim so it lands on the SAME animPhase as every other row and
+    // rides the trailing flush below.
+    if (sessionRowExpanded(pos)) { drawBandMark(pos); continue; }
 #endif
     int y = sessionRowYAt(pos);
     int rowH = sessionRowHAt(pos);

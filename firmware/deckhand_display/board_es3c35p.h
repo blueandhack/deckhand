@@ -792,7 +792,7 @@ const int SESSION_ROW_H_MIN = 47;
 const int SESSION_ROW_H_MAX = 100;
 // Centre of the status indicator, and the +23 is NOT scaled - it is the same
 // constraint board 1 documents, against the same art. The working spinner is a
-// 32x32 BLIT that paints its own background, so its rect (x 19..50 here) has to
+// 32x32 BLIT that paints its own background, so its rect (x 20..51 here) has to
 // clear the row's 10px corner and the 2px border that follows it. Re-derived at
 // this board's dot row: SESSION_DOT_DY is now SESSION_NAME_Y + SESSION_NAME_H / 2
 // = 19 (it was 22 while the band was 26 and AIR 3), so the blit's top row is y+3
@@ -1057,13 +1057,13 @@ const int SESSION_BAND_BOTTOM_PAD = 6;
 //
 // THE SIX HEIGHTS, avail 410 (see the ladder above):
 //   1 session  leftover 410 -> 336 (cap)   prompt 4 lines    74px spare
-//   2 sessions leftover 307 -> 307         prompt 4 lines     0px - the list fills
-//   3 sessions leftover 204 -> 204         prompt 2 lines     0px - the list fills
+//   2 sessions leftover 307 -> 307         prompt 2 lines    19px of body air
+//   3 sessions leftover 204 ->   0         under the floor - see SESSION_EXP_MIN_H
 //   4 sessions leftover 101 ->   0         the ladder already fills the column
 //   5 sessions leftover  82 ->   0
 //   6 sessions leftover  70 ->   0
 // With the "+N more" strip (avail 391) only the six-row case is reachable, and it
-// is 66 -> 0. So expansion is a ONE-to-THREE session behaviour by arithmetic, not
+// is 66 -> 0. So expansion is a ONE-to-TWO session behaviour by arithmetic, not
 // by a special case at either end.
 //
 // AND A LONE CARD IS CENTRED IN THE LIST AREA (sessionRowYAt), which is the other
@@ -1073,56 +1073,45 @@ const int SESSION_BAND_BOTTOM_PAD = 6;
 // a mixed layout the stack's top alignment is the rhythm, and dropping the first
 // card would open a gap above a list that still ends flush at the bottom.
 //
-// SESSION_EXP_MIN_H IS THE BAND CARD'S PACKED STACK, exactly the way
-// SESSION_TITLE_MIN_H is, and below it the card cannot draw its content at all -
-// which is why the rule returns 0 rather than a short card:
-//   +0..+1    border
-//   +2..+43   band         SESSION_BAND_H, which owns the card's whole head
-//   +49..+72  name         BAND + SESSION_NAME_Y_T, T_HEAD 24
-//   +76..+107 title        BAND + SESSION_TITLE_Y, 2 x SESSION_LINE_H (wrapped)
-//   +111..+126 agent/model/branch               (+3 SESSION_LINE_GAP)
-//   +130..+145 "LAST PROMPT" label              (+3)
-//   +146..+177 prompt      2 x SESSION_LINE_H   (no gap: a label and the value it
-//                                                names read as one block)
-//   +181..+196 path        fitText, one line    (+3)
-//   +197..+198 border                            = 199
-// = SESSION_BAND_H (44) + path end (152) + 1 + BORDER_CARD (2). The checker
-// re-derives it from the offsets rather than trusting this table, and separately
-// asserts that ONE PIXEL SHORTER overdraws - so this is the floor, not a bound
-// chosen with room to spare.
+// SESSION_EXP_MIN_H IS THE SAME BLOCK STACK AS THE CAP WITH THE PROMPT AT ITS
+// MINIMUM, which is what makes the two ends of the range ONE derivation instead
+// of two that can drift:
+//   MIN = band 44 + name 34 + sub 32 + title 2x20 + rule 18 + LAST PROMPT 28
+//         + prompt 2x24 + rule 18 + path 20 + pad 6                       = 288
+//   MAX = MIN + (PROMPT_MAX - PROMPT_MIN) * SESSION_BAND_PROMPT_STEP      = 336
+// So every SESSION_BAND_PROMPT_STEP above the floor buys exactly one more prompt
+// line, and sessionExpPromptLines() is that same arithmetic run backwards. Below
+// the floor the card cannot draw the body at all, which is why the rule returns 0
+// rather than a short card - the same thing SESSION_TITLE_MIN_H does a rung down.
 //
-// IT WAS 180 AND THAT WAS TWO STALE CLAIMS AT ONCE, BOTH INTRODUCED BY THE BAND.
-// 180 is the PRE-band stack: no band at the top (-44) and a bottom-anchored status
-// PILL (+25) the band card no longer draws. Both roles this constant serves were
-// wrong by the same 19px:
-//   the GATE ("is there room for a band card at all") admitted 180..198, where the
-//     path row is drawn THROUGH the bottom border - not merely tight, overdrawn;
-//   the BASELINE in sessionExpPromptLines() counted a card's extra prompt lines
-//     from a stack the card does not have.
-// They do NOT need two constants. The baseline differs from the gate by exactly
-// SESSION_BAND_H, because the caller passes rowH LESS the band - so
-// sessionExpPromptLines() measures against SESSION_EXP_MIN_H - SESSION_BAND_H and
-// there is one number here, not two that can drift.
+// IT WAS 199, AND THAT NUMBER DESCRIBED A BODY NOBODY DRAWS ANY MORE. 199 is the
+// OLD row layout pushed down by the band: a 16px line step, 3px gaps, no rules,
+// no leading. It fits 204, so the gate admitted a three-session band card - which
+// then drew 77px of nothing below its own content, exactly the "card of air" the
+// design forbids. The body drawn today is 244px of blocks before the band, so the
+// floor is 288 and THREE SESSIONS NO LONGER GET A BAND CARD.
 //
-// FIXING IT CHANGES NOTHING REACHABLE, which is why it could be deferred this far:
-// the three heights the rule produces (336 / 307 / 204) all clear 199, and the
-// prompt-line counts are 4 / 4 / 2 either way. What it does change is the one
-// configuration that was BROKEN and unreachable - the "+N more" strip at three
-// sessions, 185 - which now correctly refuses to expand instead of drawing a card
-// 14px short of its own content. Note the gate cannot be raised past 204 without
-// taking the three-session card with it: 199 is the floor AND there are 5px of
-// headroom above it, all of them spoken for.
-const int SESSION_EXP_MIN_H = 199;
-// THE CAP IS THE TALLEST CARD THAT IS ALL CONTENT, derived from the prompt's own
-// byte cap and the row's MEASURED lane - not a taste judgement about how much air
-// looks right. prompt[104] carries at most 100 characters (the host's cap) and the
-// row's text lane is SESSION_SUB_LANE_W (244px) = 30 characters at Spleen 8x16's
-// 8px advance, so 4 lines hold 120 and are the most that can ever carry ink; a
-// fifth would be permanently blank. Every 16px above SESSION_EXP_MIN_H therefore
-// buys exactly one more prompt line, and above MIN + 2*LINE there is nothing left
-// to put in the card - so the surplus stays OUTSIDE it, as empty list area, rather
-// than becoming a card of air. That is the honest cost of one session on this
-// panel and it is stated in the table above rather than hidden.
+// THAT IS A DELIBERATE CONSEQUENCE AND IT HAS A PRICE: 3.9% of ticks (365 of
+// 9,452 measured). It is not a tuning choice that could have gone the other way.
+// A 204 card has 160px of body and the body is NINE blocks - name, sub, title,
+// rule, caption, two prompt lines, rule, path - which is 17.8px each against a
+// 16px cell, i.e. zero leading and no rules. So the choice was never "a shorter
+// card or a taller one"; it was "a card that draws its content or one that does
+// not", and the design's own rule for the second case is that it stops being a
+// card. The four-piece spec's table listing 3 -> band card predates the body it
+// is now measured against.
+//
+// The checker re-derives this from the PARSED blocks rather than trusting the sum
+// written above, and separately asserts that ONE PIXEL SHORTER overdraws - so
+// this is the floor, not a bound chosen with room to spare.
+const int SESSION_EXP_MIN_H = 288;
+// THE CAP IS THAT SAME BLOCK STACK AT ITS FULL PROMPT, and every block in it is
+// DRAWN - which is the whole difference between this number and the 212 it
+// replaced. prompt[104] carries at most 100 characters against the card's lane,
+// so 4 lines are the most that can ever hold ink and a fifth would be permanently
+// blank; title[44] is 2 by the same argument. Above this there is nothing left to
+// put in the card, so the surplus stays OUTSIDE it as list area - 74px at one
+// session, spent on centring the lone card - rather than becoming a card of air.
 const int SESSION_EXP_MAX_H = 336;
 // The title is ALWAYS two lines when present: title[44] carries 43 characters =
 // 344px against a 244px lane, so a real title genuinely wraps, and 2 lines hold

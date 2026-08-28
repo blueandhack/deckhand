@@ -202,15 +202,16 @@ const LADDER_SHAPE = { 1: "tttncc", 2: "ttttsn" };
 // SESSION_EXP_MAX_H, and 4+ sessions fall back to the uniform ladder because the
 // ladder already fills the column.
 //
-// 1 and 2 sessions moved with SESSION_EXP_MAX_H's 212 -> 336 (the band card task):
-// leftover at n=1 is the full avail (410, uncapped by the old 212) -> 336; at n=2
-// leftover is 307, now UNDER the new cap so it is no longer capped at all. n=3's
-// 204 is untouched - it was already below 212 and stays below 336. sessionExpandedH()
-// itself is unchanged this task, so these are real numbers the unmodified firmware
-// now produces with the new constant - not yet the band layout (that lands in a
-// later task), so the extra height above the old packed stack is dead space until
-// the drawing is rewired to spend it.
-const EXPANDED_H = { 1: [0, 0, 0, 0, 0, 0], 2: [336, 307, 204, 0, 0, 0] };
+// n=1 is the full avail (410) capped at 336; n=2's leftover is 307, under the cap
+// and over the floor, so it is neither capped nor refused.
+//
+// THREE SESSIONS IS A ZERO AND THAT IS THE BODY RESTYLE'S ONE VISIBLE COST. 204
+// used to expand, against a floor (199) derived from a body nobody draws any more
+// - the old row layout shifted down by the band - and it drew 77px of nothing
+// under its own content. The body is now the block stack the cap is summed from,
+// which needs 288, so 204 is refused and three sessions get three ordinary spine
+// rows. Deliberate, and asserted here so it cannot happen by accident.
+const EXPANDED_H = { 1: [0, 0, 0, 0, 0, 0], 2: [336, 307, 0, 0, 0, 0] };
 
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0, known = 0;
@@ -291,8 +292,11 @@ function rowYAt(c, pos, n, e, rowH, avail) {
   return c.SESSION_ROW_Y0 + e + c.SESSION_ROW_GAP +
          (pos - 1) * (rowH + c.SESSION_ROW_GAP);
 }
-// sessionExpPromptLines(), replicated: every SESSION_LINE_H above the packed
-// minimum buys one more prompt line, up to the field's own byte cap.
+// sessionExpPromptLines(), replicated: every SESSION_BAND_PROMPT_STEP above the
+// floor buys one more prompt line, up to the field's own byte cap. The STEP is
+// the prompt's own block, not SESSION_LINE_H - the body lays its prompt lines out
+// at 24px, so a budget counted in 16px cells grants a line the card has not paid
+// for and the bottom-anchored path is overdrawn from above.
 // THE ARGUMENT IS THE BODY'S HEIGHT - the card LESS the band - and so is the
 // baseline it is measured against, because SESSION_EXP_MIN_H is the whole card's
 // floor and the caller has already taken the band off. Modelling it with the
@@ -300,7 +304,8 @@ function rowYAt(c, pos, n, e, rowH, avail) {
 // three-line prompt for the 204 card its band table draws with two.
 function expPromptLines(c, bodyH) {
   const n = c.SESSION_EXP_PROMPT_MIN +
-            Math.trunc((bodyH - (c.SESSION_EXP_MIN_H - c.SESSION_BAND_H)) / c.SESSION_LINE_H);
+            Math.trunc((bodyH - (c.SESSION_EXP_MIN_H - c.SESSION_BAND_H)) /
+                       c.SESSION_BAND_PROMPT_STEP);
   return Math.min(Math.max(n, c.SESSION_EXP_PROMPT_MIN), c.SESSION_EXP_PROMPT_MAX);
 }
 // The expanded card's bands, walked by the SAME running cursor the draw uses -
@@ -308,44 +313,81 @@ function expPromptLines(c, bodyH) {
 // session has no prompt), so a fixed band table would describe a card the device
 // does not draw. `have` names which blocks are present.
 //
-// THE CARD IS HEADED BY THE STATUS BAND (§3), AND EVERY NUMBER BELOW IS SHIFTED BY
-// IT. Two halves, and the second is the one with teeth: the body starts at
-// SESSION_BAND_H, and the prompt's line budget is taken against `rowH - BAND`,
-// because sessionExpPromptLines() derives it from SESSION_EXP_MIN_H - the PRE-band
-// packed stack - and the band spends 44px of exactly that height. Model it at rowH
-// and the checker stays green while the smallest card the rule can produce (204, at
-// three sessions) draws its path row through its own bottom border.
-// The band card has NO bottom pill - the band replaces it - so the last content
-// block is measured against the border instead.
+// EVERY STEP IS ONE OF THE EIGHT SESSION_BAND_* BLOCKS SESSION_EXP_MAX_H IS
+// SUMMED FROM. That is the whole content of the body: name, agent/model/branch,
+// title, a rule, LAST PROMPT + prompt, a rule, path. Modelling it as the ordinary
+// row's layout pushed down by the band - which is what the firmware did, and what
+// this function used to describe - is how a 336px card came to draw 231px of
+// content and 105px of nothing while every assertion here stayed green.
 //
-// These are the WORST CASE within each shape: the draw advances by the y
-// drawWrappedText actually returns, so a title or prompt that does not fill its
-// budgeted lines only ever moves the blocks below it UP, widening the gap to the
-// bottom border. Budgeting the full count here is therefore the bound, and the
-// assertion below reads `gap >= 0` against it.
+// THE PATH AND ITS RULE ARE BOTTOM-ANCHORED, exactly as the draw anchors them, so
+// a card whose content stops early pools its surplus as air ABOVE that group
+// rather than as a blank tail below it.
+//
+// The bands are INK extents, which is what makes `gap >= 0` an overdraw guard:
+// the last line of a block inks lineH of its step and the rest of the step is
+// leading. The FLOOR is derived from the blocks instead - see expCursorEnd().
 function expBands(b, c, rowH, have) {
-  const L = lineHB(b, T_BODY), N = c.SESSION_NAME_H, G = c.SESSION_LINE_GAP;
-  const BAND = c.SESSION_BAND_H;
+  const NL = lineHB(b, T_HEAD);          // the name's tallest admissible rung
+  const L = lineHB(b, T_BODY);
+  const BAND = c.SESSION_BAND_H, RULE = c.SESSION_BAND_RULE_H;
+  const ruleDY = Math.trunc((RULE - 1) / 2);
   const bands = [["border top", 0, 1],
-                 ["band", c.BORDER_CARD, BAND - 1],
-                 ["name", BAND + c.SESSION_NAME_Y_T, BAND + c.SESSION_NAME_Y_T + N - 1]];
-  let cy = BAND + c.SESSION_TITLE_Y;
+                 ["band", c.BORDER_CARD, BAND - 1]];
+  // Centred in its own block, exactly as the draw centres it - the name rung can
+  // fall to T_BODY, and the taller T_HEAD is the case that has to clear the band.
+  const nameOff = Math.trunc((c.SESSION_BAND_NAME_H - NL) / 2);
+  bands.push(["name", BAND + nameOff, BAND + nameOff + NL - 1]);
+  let cy = BAND + c.SESSION_BAND_NAME_H;
+  if (have.sub) { bands.push(["sub-line", cy, cy + L - 1]); cy += c.SESSION_BAND_SUB_H; }
   if (have.title) {
-    bands.push([`title (${c.SESSION_EXP_TITLE_LINES} lines)`, cy,
-                cy + c.SESSION_EXP_TITLE_LINES * L - 1]);
-    cy += c.SESSION_EXP_TITLE_LINES * L + G;
+    const n = c.SESSION_EXP_TITLE_LINES, st = c.SESSION_BAND_TITLE_STEP;
+    bands.push([`title (${n} lines)`, cy, cy + (n - 1) * st + L - 1]);
+    cy += n * st;
   }
-  if (have.sub) { bands.push(["sub-line", cy, cy + L - 1]); cy += L + G; }
   if (have.prompt) {
-    const n = expPromptLines(c, rowH - BAND);
+    bands.push(["rule", cy + ruleDY, cy + ruleDY]);
+    cy += RULE;
     bands.push(["PROMPT label", cy, cy + L - 1]);
-    cy += L;                                  // label and value are one block
-    bands.push([`prompt (${n} lines)`, cy, cy + n * L - 1]);
-    cy += n * L + G;
+    cy += c.SESSION_BAND_LABEL_H;
+    const n = expPromptLines(c, rowH - BAND), st = c.SESSION_BAND_PROMPT_STEP;
+    bands.push([`prompt (${n} lines)`, cy, cy + (n - 1) * st + L - 1]);
+    cy += n * st;
   }
-  if (have.path) bands.push(["path", cy, cy + L - 1]);
+  if (have.path) {
+    const top = expAnchorTop(c, rowH) + RULE;
+    bands.push(["rule2", top - RULE + ruleDY, top - RULE + ruleDY]);
+    bands.push(["path", top, top + L - 1]);
+  }
   bands.push(["border bottom", rowH - 2, rowH - 1]);
   return bands;
+}
+// The body cursor's END and the bottom-anchored group's TOP, in BLOCK terms. This
+// is what SESSION_EXP_MIN_H is derived from and what the "one pixel shorter
+// overdraws" assertion is made against: the ink bands above stop at the last
+// LINE's ink and therefore carry the final prompt step's trailing leading as
+// slack, so an ink comparison would call an 8px-short card fine.
+function expCursorEnd(c, rowH, have) {
+  let cy = c.SESSION_BAND_H + c.SESSION_BAND_NAME_H;
+  if (have.sub) cy += c.SESSION_BAND_SUB_H;
+  if (have.title) cy += c.SESSION_EXP_TITLE_LINES * c.SESSION_BAND_TITLE_STEP;
+  if (have.prompt)
+    cy += c.SESSION_BAND_RULE_H + c.SESSION_BAND_LABEL_H +
+          expPromptLines(c, rowH - c.SESSION_BAND_H) * c.SESSION_BAND_PROMPT_STEP;
+  return cy;
+}
+function expAnchorTop(c, rowH) {
+  return rowH - c.SESSION_BAND_BOTTOM_PAD - c.SESSION_BAND_PATH_H - c.SESSION_BAND_RULE_H;
+}
+// labelForStatus()'s three words, PARSED. The expanded card draws no status pill
+// and no shape-distinct indicator - the band replaces both - so on that card this
+// word is the ONLY carrier of status that is not hue. Collapsing two of these arms
+// left this checker at zero failures before the assertion below existed.
+function statusLabels() {
+  const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+  const m = src.match(/const char\* labelForStatus\(const char\* status\) \{([\s\S]*?)\n\}/);
+  if (!m) throw new Error("labelForStatus() not found in deckhand_display.ino");
+  return [...m[1].matchAll(/return\s+"([^"]*)"/g)].map((x) => x[1]);
 }
 // The spinner art's own size, PARSED. It was transcribed as a literal 16
 // (SPARK_SIZE / 2) at three sites, and it is the constant the spine's clearance
@@ -637,42 +679,57 @@ for (const b of [1, 2]) {
       chk(EXPANDED_H[b].every(v => v === 0),
           `EXPANDED_H says this board never expands a row`);
     } else {
-      // THE PACKED STACK, as an identity on the offsets. Same shape as
-      // SESSION_TITLE_MIN_H's: title lines, sub-line, label, prompt lines and the
-      // path - and then, on THIS card, straight into the bottom border, because
-      // the band at the top has taken over the status pill's job and the pill is
-      // no longer drawn.
+      // THE FLOOR IS THE CAP'S OWN BLOCK STACK WITH THE PROMPT AT ITS MINIMUM.
+      // Same eight blocks, same order, one term different - which is what makes
+      // the two ends of the range ONE derivation instead of two that can drift,
+      // and it is asserted from the PARSED blocks rather than from the sum the
+      // header writes out beside it.
       //
-      // IT USED TO END `+ 4 + A + SESSION_PILL_UP_T` AND THAT WAS THE PRE-BAND
-      // CARD. The identity held for a card with no band and a bottom-anchored
-      // pill; the band task gave the card a 44px head and took the pill away, and
-      // this constant kept describing the old one - 19px short, in the direction
-      // that lets the gate admit a card whose path row is drawn THROUGH its own
-      // border. The two roles SESSION_EXP_MIN_H serves (the gate, and the baseline
-      // sessionExpPromptLines() counts from) differ by exactly SESSION_BAND_H, so
-      // one corrected number still serves both - see the header.
-      const pathTop = c.SESSION_TITLE_Y +
-                      (c.SESSION_EXP_TITLE_LINES * L + c.SESSION_LINE_GAP) +
-                      (L + c.SESSION_LINE_GAP) + L +
-                      (c.SESSION_EXP_PROMPT_MIN * L + c.SESSION_LINE_GAP);
-      const pathEnd = pathTop + L - 1;
-      chk(c.SESSION_EXP_MIN_H === c.SESSION_BAND_H + pathEnd + 1 + c.BORDER_CARD,
-          `SESSION_EXP_MIN_H ${c.SESSION_EXP_MIN_H} == band ${c.SESSION_BAND_H} + path end +${pathEnd} + 1 + border ${c.BORDER_CARD}`);
+      // IT USED TO BE THE PRE-BODY PACKED STACK (199): the ordinary row's 16px
+      // line step and 3px gaps, shifted down by the band, with no rules and no
+      // leading. That is not the body this card draws, and the gap was 89px -
+      // enough to admit a three-session card that then drew 77px of nothing.
+      const FLOOR_BLOCKS = [
+        ["band", c.SESSION_BAND_H],
+        ["name", c.SESSION_BAND_NAME_H],
+        ["sub", c.SESSION_BAND_SUB_H],
+        ["title", c.SESSION_BAND_TITLE_STEP * c.SESSION_EXP_TITLE_LINES],
+        ["rule", c.SESSION_BAND_RULE_H],
+        ["lastprompt", c.SESSION_BAND_LABEL_H],
+        ["prompt", c.SESSION_BAND_PROMPT_STEP * c.SESSION_EXP_PROMPT_MIN],
+        ["rule2", c.SESSION_BAND_RULE_H],
+        ["path", c.SESSION_BAND_PATH_H],
+        ["pad", c.SESSION_BAND_BOTTOM_PAD],
+      ];
+      const floorSum = FLOOR_BLOCKS.reduce((a, [, v]) => a + v, 0);
+      chk(c.SESSION_EXP_MIN_H === floorSum,
+          `SESSION_EXP_MIN_H ${c.SESSION_EXP_MIN_H} is the band card's blocks at ` +
+          `PROMPT_MIN (${FLOOR_BLOCKS.map(([n, v]) => `${n} ${v}`).join(" + ")} = ${floorSum})`);
+      // ... and the CAP is the same stack at PROMPT_MAX, so the range is exactly
+      // the prompt lines the extra height buys. This identity was lost when the
+      // cap moved to a block sum the floor did not share; restoring it is what
+      // makes sessionExpPromptLines() the same arithmetic run backwards.
+      chk(c.SESSION_EXP_MAX_H === c.SESSION_EXP_MIN_H +
+            (c.SESSION_EXP_PROMPT_MAX - c.SESSION_EXP_PROMPT_MIN) * c.SESSION_BAND_PROMPT_STEP,
+          `SESSION_EXP_MAX_H ${c.SESSION_EXP_MAX_H} == MIN ${c.SESSION_EXP_MIN_H} + ` +
+          `${c.SESSION_EXP_PROMPT_MAX - c.SESSION_EXP_PROMPT_MIN} x ` +
+          `SESSION_BAND_PROMPT_STEP ${c.SESSION_BAND_PROMPT_STEP}`);
       // ... AND ONE PIXEL SHORTER OVERDRAWS. This is what makes it the FLOOR
-      // rather than a bound with room in it: the same running cursor the draw
-      // walks, laid out at MIN_H and at MIN_H - 1, must clear the bottom border in
-      // the first case and not in the second. Without the second half, raising the
-      // constant to any comfortable-looking number would pass.
+      // rather than a bound with room in it: at MIN_H the body cursor ends
+      // EXACTLY on the bottom-anchored group's top, and at MIN_H - 1 it runs
+      // past it. Measured in BLOCKS, not ink - an ink comparison carries the last
+      // prompt step's 8px of trailing leading as slack and would pass an 8px-short
+      // card. Without the second half, raising the constant to any
+      // comfortable-looking number would pass.
       {
         const full = { title: 1, sub: 1, prompt: 1, path: 1 };
-        const lastGap = (H) => {
-          const bands = expBands(b, c, H, full);
-          return bands[bands.length - 1][1] - bands[bands.length - 2][2] - 1;
-        };
-        chk(lastGap(c.SESSION_EXP_MIN_H) >= 0,
-            `at SESSION_EXP_MIN_H (${c.SESSION_EXP_MIN_H}) the packed band card clears its bottom border by ${lastGap(c.SESSION_EXP_MIN_H)}px`);
-        chk(lastGap(c.SESSION_EXP_MIN_H - 1) < 0,
-            `and at ${c.SESSION_EXP_MIN_H - 1} it does NOT (${lastGap(c.SESSION_EXP_MIN_H - 1)}px) - so the gate is the floor, not a guess`);
+        const slack = (H) => expAnchorTop(c, H) - expCursorEnd(c, H, full);
+        chk(slack(c.SESSION_EXP_MIN_H) === 0,
+            `at SESSION_EXP_MIN_H (${c.SESSION_EXP_MIN_H}) the body's cursor ends exactly on the ` +
+            `bottom-anchored rule+path group (${slack(c.SESSION_EXP_MIN_H)}px of slack)`);
+        chk(slack(c.SESSION_EXP_MIN_H - 1) < 0,
+            `and at ${c.SESSION_EXP_MIN_H - 1} it OVERRUNS it by ${-slack(c.SESSION_EXP_MIN_H - 1)}px ` +
+            `- so the gate is the floor, not a guess`);
       }
       // THE BASELINE IS THE GATE LESS THE BAND, PARSED OUT OF THE DRAW. The model
       // above cannot see which number the firmware counts prompt lines from, and
@@ -682,22 +739,11 @@ for (const b of [1, 2]) {
       // stay green because they model the baseline rather than read it.
       {
         const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
-        chk(/\(bodyH - \(SESSION_EXP_MIN_H - SESSION_BAND_H\)\) \/ SESSION_LINE_H/.test(src),
+        chk(/\(bodyH - \(SESSION_EXP_MIN_H - SESSION_BAND_H\)\) \/\s*\n?\s*SESSION_BAND_PROMPT_STEP/.test(src),
             "sessionExpPromptLines() counts from SESSION_EXP_MIN_H - SESSION_BAND_H " +
-            "(the gate's own floor, less the band the caller already subtracted)");
+            "(the gate's own floor, less the band the caller already subtracted) " +
+            "in steps of SESSION_BAND_PROMPT_STEP (the block the body lays a prompt line out at)");
       }
-      // SESSION_EXP_MAX_H no longer holds this relationship to MIN_H. It used to -
-      // MAX was exactly MIN plus the prompt lines a taller card could add - because
-      // that packed stack was the only content model a card had. The band card
-      // task replaces the CAP's own derivation with a fixed sum of the band's
-      // blocks (§3/§4, asserted below as SESSION_EXP_MAX_H against that sum), which
-      // is a taller, differently-shaped card than this packed stack describes. The
-      // packed stack itself - MIN_H and the byte caps just below - is still real:
-      // it is what the CURRENT firmware draws inside an expanded row, unchanged
-      // until a later task wires the row up to the band layout. Until then a card
-      // taller than MIN_H's packed content (up to MAX_H) simply carries dead space
-      // below its content, which is the expected shape of an in-progress port, not
-      // a defect this checker should paper over by keeping a now-false identity.
       chk(c.SESSION_EXP_MIN_H >= c.SESSION_TITLE_MIN_H,
           `an expanded row (>= ${c.SESSION_EXP_MIN_H}) is always a title row (>= ${c.SESSION_TITLE_MIN_H})`);
       // THE CAP IS THE FIELD'S BYTE CAP, MEASURED. A prompt line past this could
@@ -834,29 +880,97 @@ for (const b of [1, 2]) {
     chk(lane * (c.SESSION_EXP_TITLE_LINES - 1) < 43,
         `2 title lines is the MINIMUM that holds title[44]`);
 
-    // THE DRAW MUST SUBTRACT THE BAND FROM ITS PROMPT BUDGET, and this is the only
-    // assertion here that can see whether it does. Everything above models the
-    // LAYOUT; none of it reads the code, so reverting sessions.ino's
-    // `sessionExpPromptLines(rowH - bandOff)` to `(rowH)` leaves every band table
-    // green while the smallest card the rule can produce (204) draws its path row
-    // 11px through its own bottom border - the exact overdraw the model asserts
-    // against. Parsed out of the draw, not transcribed beside it.
-    // Its known limit is the one this repo already documents for text-matching
-    // tests: it sees the line, not whether the preprocessor kept it. The band
-    // tables above are what constrain the geometry; this is what ties them to the
-    // one call site that has to agree with them.
-    const drawSrc = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
-    chk(/sessionExpPromptLines\(rowH - bandOff\)/.test(drawSrc),
-        "the expanded draw budgets its prompt against rowH LESS the band " +
-        "(sessions.ino: sessionExpPromptLines(rowH - bandOff))");
+    // ---- THE BODY'S DRAW SITES, PARSED - not modelled ----
+    // EVERYTHING ABOVE MODELS THE LAYOUT AND NONE OF IT READS THE CODE, which is
+    // exactly how the body came to be the ordinary row's stack shifted down by
+    // the band while every band table stayed green. The reviewer proved it: it
+    // commented out the body's shift and reverted the cursor's origin - drawing
+    // the name and title ON TOP of the 44px band, opaque boxes rubbing holes in
+    // it - and this checker reported zero failures.
+    //
+    // So each of the eight blocks is tied to the line that spends it. The known
+    // limit is the one this repo already documents for text-matching tests: it
+    // sees the line, not whether the preprocessor kept it. The band tables above
+    // are what constrain the geometry; these are what tie them to the code.
+    const drawSrc = (() => {
+      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const a = src.indexOf("void drawSessionRow(int pos) {");
+      const z = src.indexOf("\nvoid renderSessionsList()", a);
+      if (a < 0 || z < 0) throw new Error("drawSessionRow() not found in sessions.ino");
+      // COMMENTS STRIPPED FIRST. A text-matching test cannot see the preprocessor
+      // delete a line, which this repo already documents - but it CAN be made to
+      // see a line commented out, and that is the likeliest way one of these
+      // blocks gets disabled by hand. Measured: without this, commenting out the
+      // second rule's draw left all twelve assertions green.
+      return src.slice(a, z).replace(/^[ \t]*\/\/.*$/gm, "");
+    })();
+    const DRAW_SITES = [
+      ["the body starts where the band ends",
+       /nameTop = y \+ SESSION_BAND_H;/],
+      ["the name is centred in SESSION_BAND_NAME_H",
+       /nameOffset = \(SESSION_BAND_NAME_H - uiLineH\(nameFont\)\) \/ 2;/],
+      ["the body cursor opens below the name block",
+       /int cy = nameTop \+ SESSION_BAND_NAME_H;/],
+      ["the sub-line advances by SESSION_BAND_SUB_H",
+       /cy \+= SESSION_BAND_SUB_H;/],
+      ["the title is wrapped at SESSION_BAND_TITLE_STEP",
+       /drawWrappedText\(s\.title[\s\S]{0,200}?SESSION_BAND_TITLE_STEP/],
+      ["the rule above LAST PROMPT advances by SESSION_BAND_RULE_H",
+       /drawBandRule\(nameX, cy \+ \(SESSION_BAND_RULE_H - 1\) \/ 2, lane\);[\s\S]{0,40}?cy \+= SESSION_BAND_RULE_H;/],
+      ["the LAST PROMPT caption advances by SESSION_BAND_LABEL_H",
+       /drawString\("LAST PROMPT", nameX, cy\);[\s\S]{0,40}?cy \+= SESSION_BAND_LABEL_H;/],
+      ["the prompt is wrapped at SESSION_BAND_PROMPT_STEP",
+       /drawWrappedText\(s\.prompt[\s\S]{0,200}?SESSION_BAND_PROMPT_STEP/],
+      ["the prompt's budget subtracts the band from the row",
+       /sessionExpPromptLines\(rowH - SESSION_BAND_H\)/],
+      ["the path is BOTTOM-ANCHORED off SESSION_BAND_BOTTOM_PAD + SESSION_BAND_PATH_H",
+       /pathTop = y \+ rowH - SESSION_BAND_BOTTOM_PAD - SESSION_BAND_PATH_H;/],
+      ["the second rule sits one SESSION_BAND_RULE_H above the path",
+       /drawBandRule\(nameX, pathTop - SESSION_BAND_RULE_H \+/],
+    ];
+    for (const [what, re] of DRAW_SITES)
+      chk(re.test(drawSrc), `the expanded draw reads its own block: ${what}`);
+    // Both rules are drawn, and through the one helper - a rule inlined as a
+    // fillRect at a second site is how the two would come to differ in colour or
+    // in lane, and the lane is what makes the three left edges line up.
+    chk((drawSrc.match(/drawBandRule\(/g) || []).length === 2,
+        `the body draws exactly two rules, both through drawBandRule()`);
+
+    // ---- §5 THE BAND CARD'S ONLY NON-HUE STATUS CARRIER ----
+    // The expanded card draws NO pill and no shape-distinct indicator - the band
+    // replaces both, and its border is hue - so labelForStatus()'s word is the
+    // only thing separating asking from waiting there that a colourblind reader
+    // or a greyscale capture can see. MUTATED and it went unnoticed: collapsing
+    // the asking and waiting arms to one string left this checker at zero
+    // failures, on the card this whole feature is built around.
+    const LBL = statusLabels();
+    chk(LBL.length === 3,
+        `labelForStatus() returns three status words (${LBL.join(" / ")})`);
+    chk(new Set(LBL).size === LBL.length && LBL.every((w) => w.trim().length > 0),
+        `the band's three status words are DISTINCT, non-empty strings ` +
+        `(${LBL.join(" / ")}) - the band card has no pill and no shape, so this ` +
+        `word is its only carrier that is not hue`);
+    // ... and the band really does draw THAT string, rather than a fourth copy of
+    // the vocabulary that could drift from it.
+    chk(/labelForStatus\(status\)/.test(fs.readFileSync(`${DIR}/sessions.ino`, "utf8")
+          .slice(fs.readFileSync(`${DIR}/sessions.ino`, "utf8").indexOf("void bandStatusWord("))),
+        `the band's word comes from labelForStatus(), not a second table`);
 
     // The card must fit the column it is drawn in.
     chk(c.SESSION_EXP_MAX_H <= 410,
         `the band card cap (${c.SESSION_EXP_MAX_H}) fits the 1-session list area`);
     // The band's own contents must fit ACROSS. This is the arithmetic that fails on
     // the detail screen (FINDING 1) and passes here - assert it so the two stay apart.
-    const bandRoom = c.SESSION_ROW_W - 4 - B2("PAD") - 32 - B2("MARK_GAP")
-                     - B2("PAD") - B2("DUR_CHARS") * c.TEXT_ADV;   // 32 = mark
+    // DERIVED FROM THE TWO HELPERS, term for term, rather than written out:
+    //   lane = bandDurLeft(x, w) - wordX
+    //        = (x + w - PAD - DUR_CHARS*ADV - 1) - (x + PAD + SPARK_SIZE + MARK_GAP)
+    // with w the card INTERIOR (ROW_W - 2*BORDER_CARD). The trailing -1 is
+    // bandDurLeft's own - it names where drawIfChanged's clear box STARTS, not
+    // where the digits do - and transcribing this sum without it reported 200px
+    // of room where the code gives 199. The mark's size is PARSED for the same
+    // reason the spine's clearance parses it: a regenerated 40px mark moves this.
+    const bandRoom = c.SESSION_ROW_W - 2 * c.BORDER_CARD - 2 * B2("PAD")
+                     - sparkSize() - B2("MARK_GAP") - B2("DUR_CHARS") * c.TEXT_ADV - 1;
     // DUR_CHARS, not a "4m" a reader can imagine: the duration is a change-only
     // field, so the lane it clears is a CONSTANT and the word gets the rest.
     // T_HEAD's advance, parsed rather than transcribed - see UI[b][T_HEAD] above.

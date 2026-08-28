@@ -38,20 +38,28 @@ int sessionListAvail(int count) {
   return contentBottom() - SESSION_ROW_Y0 - (hidden > 0 ? SESSION_OVERFLOW_H : 0);
 }
 // How many prompt lines an expanded row of this height budgets. Every
-// SESSION_LINE_H above the packed minimum buys exactly one more, up to the
+// SESSION_BAND_PROMPT_STEP above the floor buys exactly one more, up to the
 // field's own byte cap (see SESSION_EXP_MAX_H) - and the DRAW asks this rather
 // than deciding for itself, so a card can never draw a line its height did not
 // pay for.
 //
+// THE STEP IS THE PROMPT BLOCK, NOT SESSION_LINE_H, and that is forced rather
+// than tidier: the body's prompt lines are laid out at SESSION_BAND_PROMPT_STEP
+// (24), so a budget counted in 16px cells would grant a line the card has only
+// 16px left for and the path row would be pushed through its own bottom border.
+// It is the same arithmetic SESSION_EXP_MAX_H is derived by, run backwards -
+// MAX == MIN + (PROMPT_MAX - PROMPT_MIN) * STEP - which is why the floor and the
+// cap cannot drift apart.
+//
 // THE ARGUMENT IS THE BODY'S HEIGHT, NOT THE CARD'S - the caller passes
-// rowH LESS the band - so the packed minimum it is measured against has to have
-// the band taken off it too. SESSION_EXP_MIN_H is the whole card's floor; the two
-// roles that constant serves differ by exactly SESSION_BAND_H, which is why this
+// rowH LESS the band - so the floor it is measured against has to have the band
+// taken off it too. SESSION_EXP_MIN_H is the whole card's floor; the two roles
+// that constant serves differ by exactly SESSION_BAND_H, which is why this
 // is a subtraction here rather than a second constant in the header that could
 // drift from the gate it has to agree with.
 int sessionExpPromptLines(int bodyH) {
   int n = SESSION_EXP_PROMPT_MIN +
-          (bodyH - (SESSION_EXP_MIN_H - SESSION_BAND_H)) / SESSION_LINE_H;
+          (bodyH - (SESSION_EXP_MIN_H - SESSION_BAND_H)) / SESSION_BAND_PROMPT_STEP;
   if (n < SESSION_EXP_PROMPT_MIN) n = SESSION_EXP_PROMPT_MIN;
   return n > SESSION_EXP_PROMPT_MAX ? SESSION_EXP_PROMPT_MAX : n;
 }
@@ -221,6 +229,19 @@ int bandDurLeft(int x, int w) {
   return x + w - SESSION_BAND_PAD - SESSION_BAND_DUR_CHARS * TEXT_ADV - 1;
 }
 int bandDurDY() { return (SESSION_BAND_H - BORDER_CARD - uiLineH(T_BODY)) / 2; }
+// The agent mark's ORIGIN inside the band, as two helpers rather than an
+// expression copied into its two readers - the band's own draw, and the 120ms
+// tick that advances the mark in place. An animation redrawing at an origin the
+// draw has since moved is exactly how the last fix to this device's row indicator
+// was undone once, and that was a literal in two places too.
+int bandMarkX(int x) { return x + SESSION_BAND_PAD; }
+int bandMarkY(int y) { return y + (SESSION_BAND_H - BORDER_CARD - SPARK_SIZE) / 2; }
+// The body's hairline rule. A 1px fillRect, never a drawString or a drawFastHLine
+// on a cleared box: it sits inside a card that repaints WHOLESALE, so it owns no
+// clear box of its own and cannot reach the border it runs parallel to. Bounded
+// to the same text lane every block above and below it uses, so the three left
+// edges line up by construction.
+void drawBandRule(int x, int y, int w) { tft.fillRect(x, y, w, 1, COLOR_LABEL); }
 // ONE unit, so the field is bounded at SESSION_BAND_DUR_CHARS: "59s", "59m", "23h",
 // "49d" - and 49 days is the ceiling by construction, since statusSinceMillis is a
 // millis() value and that wraps at 49.7. The rows below keep formatDuration's fuller
@@ -335,6 +356,12 @@ void bandStatusWord(const char* status, char* out, size_t n, int lane) {
 // status-coloured nubs outside the card's rounded outline.
 void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   const SessionInfo& s = sessions[i];
+  // The mark ANIMATES while this session is working, at rest otherwise. It was
+  // hardcoded false while the band was being built and before the mark had a
+  // resting pose to fall back on, which left the ONE-session working case - the
+  // most common screen on this tab - completely static, where the plain row it
+  // replaced had a turning spark. tickWorkingSpinner advances it in place.
+  const bool working = strcmp(s.status, "working") == 0;
   const int h = SESSION_BAND_H - BORDER_CARD;   // the card's top border owns the rest
   const int r = R_MD - BORDER_CARD;
   // §6: `col` is the status colour this band is arriving AT; `fill` is what it
@@ -352,8 +379,8 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   uiFillRound(x, y, w, h, r, fill, COLOR_CARD);
   tft.fillRect(x, y + r, w, h - r, fill);
 
-  drawAgentMark(x + SESSION_BAND_PAD, y + (h - SPARK_SIZE) / 2,
-                strcmp(s.agent, "cx") == 0, COLOR_CARD, fill, /*animate=*/false);
+  drawAgentMark(bandMarkX(x), bandMarkY(y),
+                strcmp(s.agent, "cx") == 0, COLOR_CARD, fill, /*animate=*/working);
 
   // THE DURATION'S LANE IS A CONSTANT, NOT A MEASUREMENT, and that is the whole
   // reason it can be a change-only field: bandDurLeft() is the same number whatever
@@ -401,6 +428,25 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   const uint16_t ink = t < 0 ? COLOR_CARD : blend565(fill, COLOR_CARD, (uint8_t) t);
   tft.setTextColor(ink, t < 0 ? fill : ink);
   tft.drawString(wordFit, wordX, wordY);
+}
+// The band card's mark, ADVANCED IN PLACE - one 32x32 blit, not a band repaint.
+// A repaint would be a clear-then-redraw of a 292x42 region eight times a second,
+// which is the flicker discipline's one prohibition and ~10ms of compose+flush
+// against a 33ms frame. It is called from tickWorkingSpinner rather than from
+// tickSessionAnim on purpose: that is where animPhase is advanced and where the
+// trailing flush already goes out, so the band's mark and every row indicator are
+// the SAME frame of the same art rather than one 120ms step apart.
+//
+// The background is bandFillShown - the RECORD of what the band was last painted
+// in, which drawSessionBand writes - not colorForStatus(). A crossfade frame or a
+// pulse breath leaves the band a blended colour, and blitting the mark over the
+// flat status colour would punch a 32x32 patch of the wrong shade into it.
+void drawBandMark(int pos) {
+  const int i = sessionAt(pos);
+  drawAgentMark(bandMarkX(SESSION_ROW_X + BORDER_CARD),
+                bandMarkY(sessionRowYAt(pos) + BORDER_CARD),
+                strcmp(sessions[i].agent, "cx") == 0,
+                COLOR_CARD, bandFillShown, /*animate=*/true);
 }
 // The Codex knockout, EXTRACTED so the shimmer can re-apply it after repainting
 // the column. One copy of the loop rather than a second that could drift from
@@ -732,13 +778,18 @@ void drawSessionRow(int pos) {
   uiStrokeRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, BORDER_CARD, border, COLOR_BG);
 #if !BOARD_USES_TFT_ESPI
   // ---- THE STATUS BAND (band card only) ----
-  // Drawn FIRST, so everything below is simply the body shifted down by its
-  // height: one offset, applied at the two sites that place the card's head, and
-  // no second layout. The band is the card's whole status vocabulary - it carries
-  // the mark, the word and the duration - which is why the row's own indicator,
-  // its corner agent tag and its bottom pill are all skipped below rather than
-  // drawn a second time 44px away.
-  const int bandOff = expanded ? SESSION_BAND_H : 0;
+  // Drawn FIRST, because the body below starts where it ends: the name block's
+  // top IS SESSION_BAND_H, and every block after it is a cursor step. The band is
+  // the card's whole status vocabulary - it carries the mark, the word and the
+  // duration - which is why the row's own indicator, its corner agent tag and its
+  // bottom pill are all skipped below rather than drawn a second time 44px away.
+  //
+  // IT USED TO BE A SHIFT (`bandOff`) APPLIED TO THE ORDINARY ROW'S BODY, and
+  // that is what made this card two thirds air: the row layout it shifted is
+  // sized for a 100px rung, so a 336px card drew 231px of content and 105px of
+  // nothing. The body is now the block stack SESSION_EXP_MAX_H is summed FROM,
+  // which is what makes that sum a description of the card rather than of a
+  // number in the header.
   if (expanded)
     drawSessionBand(SESSION_ROW_X + BORDER_CARD, y + BORDER_CARD,
                     SESSION_ROW_W - 2 * BORDER_CARD, i, color);
@@ -764,7 +815,7 @@ void drawSessionRow(int pos) {
   // it so the indicator never jumps sideways when a session changes status.
   int dotCy = large ? y + SESSION_DOT_DY : y + rowH / 2;
 #if !BOARD_USES_TFT_ESPI
-  if (!expanded)   // the band carries this card's mark; see the bandOff note above
+  if (!expanded)   // the band carries this card's mark; see the band note above
 #endif
   drawStatusDot(SESSION_DOT_CX, dotCy, large ? 9 : 7, s.status, COLOR_CARD,
                 strcmp(s.agent, "cx") == 0);
@@ -811,6 +862,13 @@ void drawSessionRow(int pos) {
   int laneRight = large
       ? SESSION_ROW_X + SESSION_ROW_W - 12 - tft.textWidth(agentTag) - tagExtra
       : SESSION_ROW_X + SESSION_ROW_W - 16 - (tft.textWidth(pillLbl) + 12); // pill = text + 12
+#if !BOARD_USES_TFT_ESPI
+  // Nothing shares the band card's name row - the corner tag and the Mac icon are
+  // skipped there, because the band carries the agent mark and the sub-line
+  // spells the Mac out - so reserving their width would shrink a name lane
+  // against a blocker that is not drawn.
+  if (expanded) laneRight = SESSION_ROW_X + SESSION_ROW_W - 12;
+#endif
   int laneW = laneRight - nameX - 6; // 6px so the name never kisses the tag/pill
 
   // Three rungs, largest first - board 1's Cozette 12x26 -> Terminus 10x18 ->
@@ -856,10 +914,16 @@ void drawSessionRow(int pos) {
   // 64 would make every offset here negative. A title row starts 2px higher to
   // buy the third line its space.
   int nameTop = y + (showTitle ? SESSION_NAME_Y_T : SESSION_NAME_Y);
-#if !BOARD_USES_TFT_ESPI
-  nameTop += bandOff;
-#endif
   int nameOffset = large ? (SESSION_NAME_H - uiLineH(nameFont)) / 2 : 0;
+#if !BOARD_USES_TFT_ESPI
+  // The band card's name is the FIRST block of the body stack, not the ordinary
+  // row's name offset pushed down: it sits directly under the band and is centred
+  // in SESSION_BAND_NAME_H, the block SESSION_EXP_MAX_H counts.
+  if (expanded) {
+    nameTop = y + SESSION_BAND_H;
+    nameOffset = (SESSION_BAND_NAME_H - uiLineH(nameFont)) / 2;
+  }
+#endif
   tft.drawString(nameBuf, nameX, nameTop + nameOffset);
 
   // 36, not 26: buildSessionSubline's "who" can now be "CC/studio" (9 chars) instead of
@@ -872,64 +936,80 @@ void drawSessionRow(int pos) {
   if (large) {
 #if !BOARD_USES_TFT_ESPI
     // ---- THE EXPANDED FIRST ROW ----
-    // A RUNNING CURSOR, not fixed offsets, and for the same reason the detail card
-    // stopped using hand-derived ones: a Codex row carries no title and a session
-    // that has not been prompted yet carries no prompt, so a fixed stack would
-    // leave a 35px hole in the middle of the card. Every block that is present
-    // advances the cursor; whatever is not spent lands as air ABOVE the
-    // bottom-anchored pill, which is the surplus rule the ordinary tall rows
-    // already use. The card still repaints WHOLESALE - no drawIfChanged is
-    // introduced on a row, which is why no clear box here can reach a row border.
+    // A RUNNING CURSOR OVER THE BLOCK STACK SESSION_EXP_MAX_H IS SUMMED FROM:
+    // name, agent/model/branch, title, a rule, LAST PROMPT + prompt, a rule,
+    // path. Every step below is one of the eight SESSION_BAND_* constants, which
+    // is what makes the cap a description of this card rather than a number that
+    // merely sits beside it - and it is why the checker PARSES these steps.
+    //
+    // A CURSOR, not fixed offsets, for the same reason the detail card stopped
+    // using them: a Codex row carries no title and a fresh session no prompt, so
+    // a fixed stack would leave a hole in the middle of the card. Whatever a
+    // missing block does not spend moves the blocks below it UP.
+    //
+    // THE PATH AND ITS RULE ARE BOTTOM-ANCHORED, which is the other half of the
+    // same argument. Run off the cursor they would end wherever the content
+    // happened to stop, and a Codex card - 40px lighter, having no title - would
+    // put all 40 of them below the last thing on the card: a blank tail, which is
+    // exactly the shape this pass exists to remove. Anchored, the card ALWAYS
+    // ends on its path, and any surplus pools as air around the prompt block
+    // where it reads as padding. At the cap with full content the two meet
+    // exactly - cursor 292, anchor 292 - so this is one layout, not two.
+    //
+    // The card still repaints WHOLESALE - no drawIfChanged is introduced on a row
+    // - which is why no clear box here can reach a row border.
     if (expanded) {
       const int lane = SESSION_SUB_LANE_W;   // the row's own measured text lane
-      int cy = y + bandOff + SESSION_TITLE_Y;
-      if (s.title[0]) {
-        // WRAPPED, not fitText: title[44] holds 43 characters = 344px against a
-        // 244px lane, so the one thing this card has room to do properly is show
-        // the whole title. Two lines hold 60.
-        // The RETURNED y, not the budgeted line count: drawWrappedText hands back
-        // the row below its last drawn line, so a title that happens to fit on one
-        // does not leave a 16px hole above the line beneath it. The budget is still
-        // what the HEIGHT is derived from - a card whose height moved with its own
-        // text would move every row below it on every tick - so a short block only
-        // ever moves things UP, and the surplus pools above the bottom-anchored
-        // pill as ordinary card padding. That makes the checker's full-length band
-        // table the worst case rather than the only case.
-        cy = drawWrappedText(s.title, nameX, cy, T_BODY, SESSION_LINE_H, lane, 0,
-                             SESSION_EXP_TITLE_LINES, COLOR_VALUE, COLOR_CARD) +
-             SESSION_LINE_GAP;
-      }
+      int cy = nameTop + SESSION_BAND_NAME_H;
       if (sub[0]) {
         setUIFont(T_META);
         tft.setTextColor(COLOR_LABEL, COLOR_CARD);
         char subFit[36];
         fitText(subFit, sizeof(subFit), sub, lane);
         tft.drawString(subFit, nameX, cy);
-        cy += SESSION_LINE_H + SESSION_LINE_GAP;
+        cy += SESSION_BAND_SUB_H;
+      }
+      if (s.title[0]) {
+        // WRAPPED, not fitText: title[44] holds 43 characters = 344px against a
+        // 244px lane, so the one thing this card has room to do properly is show
+        // the whole title. Two lines hold 60.
+        // The RETURNED y, not the budgeted line count: drawWrappedText hands back
+        // the row below its last drawn line at SESSION_BAND_TITLE_STEP, so a
+        // title that happens to fit on one line does not leave a 20px hole above
+        // the block beneath it. The BUDGET is still what the cap is derived from,
+        // so the checker's full-length table remains the worst case.
+        cy = drawWrappedText(s.title, nameX, cy, T_BODY, SESSION_BAND_TITLE_STEP,
+                             lane, 0, SESSION_EXP_TITLE_LINES, COLOR_VALUE, COLOR_CARD);
       }
       if (s.prompt[0]) {
+        // The rule INTRODUCES the prompt block, so it is drawn with it: a rule
+        // under a card that then says nothing is a line to nowhere.
+        drawBandRule(nameX, cy + (SESSION_BAND_RULE_H - 1) / 2, lane);
+        cy += SESSION_BAND_RULE_H;
         setUIFont(T_META);
         tft.setTextColor(COLOR_LABEL, COLOR_CARD);
         tft.drawString("LAST PROMPT", nameX, cy);
-        cy += SESSION_LINE_H;   // no gap: a label and the value it names are one block
+        cy += SESSION_BAND_LABEL_H;
         // rowH LESS THE BAND, because the band spends 44px of exactly the height
-        // this budget is derived from. Left at rowH the smallest card the rule can
-        // produce (204, at three sessions) would be granted a third prompt line and
-        // draw its path row 10px THROUGH its own bottom border.
-        cy = drawWrappedText(s.prompt, nameX, cy, T_BODY, SESSION_LINE_H, lane, 0,
-                             sessionExpPromptLines(rowH - bandOff), COLOR_VALUE, COLOR_CARD) +
-             SESSION_LINE_GAP;
+        // this budget is derived from. Left at rowH the smallest card the rule
+        // can produce would be granted prompt lines it never paid for and the
+        // bottom-anchored path would be overdrawn from above.
+        drawWrappedText(s.prompt, nameX, cy, T_BODY, SESSION_BAND_PROMPT_STEP, lane, 0,
+                        sessionExpPromptLines(rowH - SESSION_BAND_H), COLOR_VALUE, COLOR_CARD);
       }
       if (s.path[0]) {
         // ONE line through fitText rather than wrapped: the path is the least
         // important thing on the card and a second line would come out of the
         // prompt's budget. Its tail is trimmed with "..." - the detail screen is
         // where a long path is wrapped and readable whole.
+        const int pathTop = y + rowH - SESSION_BAND_BOTTOM_PAD - SESSION_BAND_PATH_H;
+        drawBandRule(nameX, pathTop - SESSION_BAND_RULE_H + (SESSION_BAND_RULE_H - 1) / 2,
+                     lane);
         setUIFont(T_META);
         tft.setTextColor(COLOR_LABEL, COLOR_CARD);
         char pathFit[72];
         fitText(pathFit, sizeof(pathFit), s.path, lane);
-        tft.drawString(pathFit, nameX, cy);
+        tft.drawString(pathFit, nameX, pathTop);
       }
       setUIFont(T_META);
       tft.setTextColor(COLOR_LABEL, COLOR_CARD);
