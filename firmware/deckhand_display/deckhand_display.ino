@@ -961,6 +961,9 @@ struct PrevSession {
   char askVoiceCancelSha[20];
   bool hadVoiceText;   // askVoiceText is only ever tested for non-empty
 };
+// Declared here explicitly rather than leaning on Arduino's generated prototypes -
+// those land above SessionInfo's own declaration, and a function naming it in its
+// signature won't compile there (same reason hostNowSec() is forward-declared above).
 bool sessionSortsBefore(const SessionInfo& b, const SessionInfo& a, unsigned long now);
 SessionInfo sessions[MAX_SESSIONS];
 int sessionCount = 0;
@@ -3201,9 +3204,18 @@ int sessionAt(int displayPos) {
 // exercised off-device, which is the only way the millis() wrap case is ever tested.
 // Same reason run-ledger.mjs and capUtf8 are their own units.
 bool sessionSortsBefore(const SessionInfo& b, const SessionInfo& a, unsigned long now) {
-  (void) now;  // used by the asking tie-break, added next
   int ra = urgencyRank(a.status), rb = urgencyRank(b.status);
   if (rb != ra) return rb < ra;
+  // ASKING ranks by how LONG it has waited, not by which arrived last. A prompt
+  // unanswered for 20 minutes must outrank one that started 5 seconds ago, or the
+  // most prominent row on the device is given to the least urgent thing in it.
+  // Only rank 0 changes: for a WORKING row "most recent" means alive, and the
+  // oldest is the stale one, so recency stays right for the other two.
+  //
+  // ELAPSED, not the raw stamp. millis() wraps at ~49.7 days, and (now - since) is
+  // wrap-safe under unsigned arithmetic where (a.since > b.since) silently inverts
+  // across the wrap. The same idiom formatDuration() already uses.
+  if (ra == 0) return (now - b.statusSinceMillis) > (now - a.statusSinceMillis);
   return b.actSec > a.actSec;
 }
 void reorderSessions() {
