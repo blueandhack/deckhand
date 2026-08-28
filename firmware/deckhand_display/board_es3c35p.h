@@ -950,6 +950,36 @@ const int SESSION_SPINE_OFF = 4;
 // sessions-geom-check.mjs.
 const int SESSION_SPINE_INSET = 1;
 
+// ---------- §6 THE SPINE SHIMMER: a light travelling a working row ----------
+// The cheapest animation §6 considered, and it touches only the spine's SIX
+// COLUMNS - the same bound the straight carve gives the fill, which is what
+// keeps it off the card's rounded outline and off the working spinner's blit at
+// x=20. It repaints only the STRAIGHT SECTION between the two arcs, for exactly
+// the reason the Codex knockout does: up in the arc the fill's left edge has
+// moved right, so a rect at x there would paint outside the card.
+//
+// LEN is the falloff either side of the travelling head, in rows. It has to fit
+// WHOLE inside the shortest straight section the ladder can produce (36px on a
+// 62px row - see SESSION_SPINE_ON above), or the light is clipped at both ends
+// on the very rows the spine exists for; 2*LEN = 20 against 36 clears it.
+// STEPS is one full traverse, at ANIM_INTERVAL_MS: 24 * 120ms = ~2.9s, slow
+// enough to read as a travelling light rather than as a flicker.
+const int SESSION_SHIMMER_LEN = 10;
+const int SESSION_SHIMMER_STEPS = 24;
+// PEAK STRENGTH, TOWARDS COLOR_VALUE - the theme's INK, not white and not
+// COLOR_CARD, and that is the one choice here with a real argument behind it.
+// A literal white reads as a light under DARK and, under LIGHT, blends the
+// spine towards the colour of the card it sits on: at full strength the spine
+// would briefly VANISH, a hole travelling down it rather than a light. Blending
+// towards COLOR_VALUE can never do that, because COLOR_VALUE is by construction
+// the token furthest from the surface in whichever palette is live - so the
+// mark is always visible against the status colour and never against nothing.
+// 110/255 keeps it a highlight rather than a second colour.
+// `const int` rather than uint8_t so geom-common.mjs PARSES it: that parser reads
+// `const int` declarations only, and a constant it cannot see is one no assertion
+// can certify - which is this repo's rule, arriving from the type system.
+const int SESSION_SHIMMER_MAX = 110;
+
 // ---------- The band card's block stack ----------
 // SESSION_EXP_MAX_H is the SUM of these, not a chosen number - the same way the
 // 212 it replaces was derived. sessions-geom-check.mjs asserts the sum, so a future

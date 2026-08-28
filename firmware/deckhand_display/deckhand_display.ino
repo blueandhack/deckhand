@@ -2322,6 +2322,53 @@ int sessionRowH = 40;
 
 
 
+#if !BOARD_USES_TFT_ESPI
+// ---------- §6 THE STATE CROSSFADE: the band's own animation state ----------
+// A status change used to be a silent instant swap - the one event on this tab
+// worth noticing, and the only one with no motion at all. The band now travels
+// from the old status colour to the new one over SESSION_XFADE_MS, one-shot.
+//
+// THE LABEL CROSSFADES TOO, and that is the spec as written rather than an
+// oversight: at t = 0.5 both words are at half strength and briefly illegible.
+// It was put to the user with both renderings - a true crossfade and a midpoint
+// swap - and the crossfade was chosen. Do NOT "fix" this to a swap, and do not
+// add a toggle for it.
+//
+// KEYED BY SESSION ID, NEVER BY A ROW INDEX, for two independent reasons. Two
+// sessions on one project share a NAME, which is the collision the beep budget
+// already documents; and a status change is precisely what re-ranks the list, so
+// the row a fade started on is the row most likely to have moved by its next
+// frame. The tick resolves the id back to a display position every frame.
+const unsigned long SESSION_XFADE_MS = 300;
+// ~30fps, and it only runs WHILE a fade does - at rest this tick costs a
+// comparison. The shimmer keeps ANIM_INTERVAL_MS, so nothing new runs
+// continuously; see tickSessionAnim().
+const unsigned long SESSION_XFADE_INTERVAL_MS = 33;
+char          xfadeId[16]   = "";   // the session that is fading, "" = idle
+char          xfadeFrom[16] = "";   // the status it is leaving
+unsigned long xfadeStart    = 0;
+unsigned long lastXfadeMs   = 0;
+// The shimmer's own phase. Separate from animPhase, which indexes 8 frames of
+// sprite art rather than a travel position - but driven off the SAME lastAnimMs
+// timer, which is what keeps it in step with the spinner's flush.
+uint8_t       shimmerPhase  = 0;
+// What Step 5 asks for: the band repaint MEASURED, not §2's two-point estimate.
+// Reported by PERF, in the two halves a flush already separates - the compose
+// into the framebuffer, and the transfer of the dirty rect it left behind.
+uint32_t xfadeComposeUs = 0, xfadeFlushUs = 0, xfadeWorstUs = 0;
+// The shimmer has NO flush of its own - it rides tickWorkingSpinner's, which was
+// already pushing the same strips. See the note in tickSessionAnim().
+uint32_t shimComposeUs = 0, shimWorstUs = 0;
+uint16_t xfadeFrameCount = 0, shimFrameCount = 0;
+// STARTS as well as FRAMES, because those are two different things and the frame
+// count alone cannot tell them apart: `started=0 n=0` is a trigger that never
+// fired, and `started=1 n=0` is a fade with no band to paint - which is ORDINARY
+// (see the note on the crossfade block in tickSessionAnim), not a fault. This
+// pair was added because a real debugging session spent two builds on exactly
+// that ambiguity before the answer turned out to be four sessions on screen.
+uint16_t xfadeStartCount = 0;
+#endif
+
 // Kept as the "force a full repaint" entry point (tab switch, closing the
 // detail screen): invalidating the count cache makes renderSessionsList
 // clear the area and rebuild every row.
@@ -3611,6 +3658,19 @@ void handleLine(const String& line) {
             info.beepsLeft = prevSessions[j].beepsLeft;
             info.nextBeepMillis = prevSessions[j].nextBeepMillis;
           }
+#if !BOARD_USES_TFT_ESPI
+          // §6: the status CHANGED, so start the band's crossfade. This is the
+          // one place on the device that knows a transition happened rather
+          // than merely that a value differs from a cache - the same diff the
+          // newly-asking beep fires from, and matched the same way, by
+          // (hostSlot, id). Matching by name would restart the fade every tick
+          // for two sessions that share a project.
+          //
+          // The #if sits between the brace and the `else` so board 1's token
+          // stream is EXACTLY what it was: the preprocessor deletes three lines
+          // and leaves the `if` with no else, which is what it had.
+          else startSessionXfade(info.id, prevSessions[j].status);
+#endif
           // Carry the voice-cancel suppression forward, but ONLY while this
           // is still the SAME prompt (askPid unchanged) - a different askPid
           // is a later question, and a stale cancelled-hash must never be
@@ -4724,6 +4784,21 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // CPU-side gather from the PSRAM framebuffer into the strip buffer, and the
     // blocking drawBitmap that hands it to the panel.
     tft.perfReport();
+    // ... and the two SESSION ANIMATIONS, measured rather than modelled. §2's
+    // 3.3ms/1.2ms figures are a two-point fit the spec itself calls "not a
+    // characterisation", so this reports what the band and the spine column
+    // actually cost on the glass: the compose into the framebuffer, and the
+    // flush of the dirty rect it left. Zero frames means the animation has not
+    // run since boot - a fade is one-shot on a status change, and the shimmer
+    // needs a working row on a visible list - which is a different statement
+    // from "it costs nothing", so it is reported as n=0 rather than as 0us.
+    Serial.printf("PERF xfade   started=%u n=%u compose %luus flush %luus worst %luus\n",
+                  (unsigned) xfadeStartCount, (unsigned) xfadeFrameCount,
+                  (unsigned long) xfadeComposeUs,
+                  (unsigned long) xfadeFlushUs, (unsigned long) xfadeWorstUs);
+    Serial.printf("PERF shimmer n=%u compose %luus worst %luus (flush rides the spinner's)\n",
+                  (unsigned) shimFrameCount, (unsigned long) shimComposeUs,
+                  (unsigned long) shimWorstUs);
   } else if (buf.startsWith("INV ")) {
     // Runtime display-inversion toggle, for the same reason SWAP exists: nothing
     // on the Mac can see the panel, so the only way to settle a display-side
@@ -5082,6 +5157,13 @@ void loop() {
   handleTouch();
   updateBeep();
   checkPowerButton();
+#if !BOARD_USES_TFT_ESPI
+  // BEFORE tickWorkingSpinner, so the band's crossfade lands on the glass ahead
+  // of the spark frame drawn into the same rows - and spelled as an #if rather
+  // than a runtime no-op so board 1 never sees the TEXT of a call it does not
+  // have, the same rule the 26 tft.flush() sites follow.
+  tickSessionAnim();
+#endif
   tickWorkingSpinner();
   tickMicProcessing();  // no-op unless a capture is being processed
   tickWaitingWheel();   // no-op unless the standalone screen is on the glass

@@ -1116,6 +1116,135 @@ for (const b of [1, 2]) {
       chk(/working \? colorForStatus\(status\) : COLOR_LABEL, bg, working\);/.test(b2),
           "at rest the mark is COLOR_LABEL and unanimated; while working it is the status colour and animated");
     }
+
+    // ---- §6 THE TWO ADOPTED ANIMATIONS ----
+    // Both are PARSED out of the draw and the tick, because none of the geometry
+    // above can see an animation at all: a crossfade and an instant swap produce
+    // the same final frame, and a shimmer that painted the arcs would look right
+    // in every screenshot taken between two frames.
+    {
+      const dsrc = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+      const ssrc = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      // Body of a function, sliced to its own closing brace at column 0 - the
+      // same anchoring drawStatusPill's branch check uses, and for the same
+      // reason: a lazy regex across a whole file finds a neighbour's line.
+      const cut = (src, sig) => {
+        const i = src.indexOf(sig);
+        if (i < 0) throw new Error(`${sig} not found`);
+        const f = src.slice(i);
+        return f.slice(0, f.indexOf("\n}\n"));
+      };
+
+      // THE GATE IS COMPARED, NOT TRANSCRIBED. tickWorkingSpinner's guard list is
+      // the one this repo already trusts; a second list kept in step by hand is
+      // how a new animation ends up painting over the history reader. So the
+      // spinner's own guard is parsed and every identifier in it must appear in
+      // tickSessionAnim's - miss one and this fails by naming it.
+      const spin = cut(dsrc, "void tickWorkingSpinner(");
+      const anim = cut(ssrc, "void tickSessionAnim(");
+      const ids = (t) => new Set(t.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []);
+      const spinGuard = spin.slice(spin.indexOf("\n"), spin.indexOf("if (millis() - lastAnimMs"));
+      const animGuard = anim.slice(anim.indexOf("\n"), anim.indexOf("// ---- the state crossfade"));
+      const seen = ids(animGuard);
+      const missing = [...ids(spinGuard)].filter((k) => !seen.has(k));
+      chk(missing.length === 0,
+          `tickSessionAnim()'s gate is at least as tight as tickWorkingSpinner()'s` +
+          (missing.length ? ` - MISSING ${missing.join(", ")}` : ""));
+      // NEITHER TICK MAY TOUCH lastNonIdleMillis. An animation that did would read
+      // as activity to the sleep timer and hold the backlight on - which on this
+      // board is the ONLY power saving left, ~80 of ~142 mV/h.
+      chk(!/lastNonIdleMillis/.test(anim) && !/lastNonIdleMillis/.test(spin),
+          "neither session tick touches lastNonIdleMillis - an animation must not read as activity");
+
+      // THE LABEL CROSSFADES; IT DOES NOT SWAP AT THE MIDPOINT. Both words are on
+      // the glass at the SAME position, at complementary strengths, so at t = 0.5
+      // both sit at half and are briefly illegible. That is §6 as written and was
+      // asked and answered - this assertion exists so "fixing" it to a swap fails
+      // here rather than passing as a tidy-up.
+      const band = cut(ssrc, "void drawSessionBand(");
+      chk(/bandStatusWord\(xfadeFrom, fromFit, sizeof\(fromFit\), lane\);/.test(band) &&
+          /tft\.drawString\(fromFit, wordX, wordY\);/.test(band) &&
+          /tft\.drawString\(wordFit, wordX, wordY\);/.test(band),
+          "§6: the band draws BOTH status words at the SAME position while a fade runs - a crossfade, not a swap");
+      chk(/blend565\(fill, COLOR_CARD, \(uint8_t\) \(255 - t\)\)/.test(band) &&
+          /blend565\(fill, COLOR_CARD, \(uint8_t\) t\)/.test(band),
+          "... at COMPLEMENTARY strengths (255 - t and t), which is what makes both half at the midpoint");
+      // Opaque-then-transparent is the mechanism: drawString skips its background
+      // box when fg == bg, so the arriving word inks only its glyph runs and the
+      // leaving word survives underneath. Two opaque draws would leave only one.
+      chk(/tft\.setTextColor\(ink, t < 0 \? fill : ink\);/.test(band),
+          "... and the arriving word draws TRANSPARENT (fg == bg) over the leaving one");
+      // The fade has to have frames. Parsed from the two constants rather than
+      // transcribed, so shortening either fails here instead of quietly turning
+      // the crossfade into a two-step swap wearing its name.
+      const num = (src, n) => {
+        const m = src.match(new RegExp(`\\b${n}\\s*=\\s*(\\d+)`));
+        if (!m) throw new Error(`${n} not found`);
+        return Number(m[1]);
+      };
+      const xms = num(dsrc, "SESSION_XFADE_MS"), xiv = num(dsrc, "SESSION_XFADE_INTERVAL_MS");
+      chk(Math.floor(xms / xiv) >= 8,
+          `the crossfade runs ${Math.floor(xms / xiv)} frames (${xms}ms at ${xiv}ms) - motion, not a two-step swap`);
+
+      // ---- the shimmer stays inside the six columns, and off the arcs ----
+      // Same two hazards the spine's own fill and knockout carry, arriving through
+      // the animation: an x inset puts its last column on the spinner blit's
+      // first, and painting up in an arc paints OUTSIDE the card, because there
+      // the fill's left edge has moved right and this rect's has not.
+      const shim = cut(ssrc, "void drawSpineShimmer(");
+      chk(/const int x = x0;/.test(shim),
+          "the shimmer's inset is VERTICAL ONLY, exactly as the spine's is");
+      chk(/tft\.fillRect\(x, y \+ r \+ yy, SESSION_SPINE_W, 1,/.test(shim),
+          "the shimmer paints SESSION_SPINE_W columns at the spine's own x - the bound the straight carve gives the fill");
+      chk(/const int span = h - 2 \* r;/.test(shim) && /for \(int yy = 0; yy < span; yy\+\+\)/.test(shim),
+          "... and only the STRAIGHT section between the arcs, where the fill's left edge really is at x");
+      // ONE COPY OF THE KNOCKOUT. The shimmer repaints the column solid, so a
+      // Codex row owes its gaps back - through the same helper the spine draws
+      // them with, or the two loops drift and one of them paints into an arc.
+      chk(/if \(codex\) drawSpineGaps\(x, y, r, h\);/.test(shim) &&
+          /if \(codex\) drawSpineGaps\(x, y, r, h\);/.test(cut(ssrc, "void drawSessionSpine(")),
+          "the shimmer and the spine cut their Codex gaps with the SAME helper");
+
+      // ---- THE SHIMMER RIDES THE SPINNER'S FLUSH, and all three halves of that
+      // are load-bearing. MEASURED on the panel: a flush's transfer is fixed
+      // per-STRIP, not per-pixel (1453us for a 320x32 strip, 792us for an 8x32
+      // one), so the spine's six columns spanning the whole list are 8 strips and
+      // ~6.3ms - four times a second, for 2,424 pixels. The spinner already
+      // pushes those strips, so the shimmer's marginal transfer is nothing.
+      //
+      // (1) tickSessionAnim must be called BEFORE tickWorkingSpinner, or the
+      //     paint waits a frame for a flush. (2) the shimmer must READ lastAnimMs
+      //     and not write it, or it consumes the spinner's own timer and the
+      //     spark stops animating outright. (3) the spinner must still end in a
+      //     flush, or nothing carries either of them.
+      const loopFn = cut(dsrc, "void loop() {");
+      const iAnim = loopFn.indexOf("tickSessionAnim();");
+      const iSpin = loopFn.indexOf("tickWorkingSpinner();");
+      chk(iAnim > 0 && iSpin > iAnim,
+          "loop() calls tickSessionAnim() BEFORE tickWorkingSpinner(), so the shimmer's paint is in the frame the spinner flushes");
+      const shimBlock = anim.slice(anim.indexOf("// ---- the spine shimmer"));
+      chk(/if \(millis\(\) - lastAnimMs >= ANIM_INTERVAL_MS\)/.test(shimBlock) &&
+          !/lastAnimMs\s*=[^=]/.test(shimBlock),
+          "the shimmer READS lastAnimMs and never writes it - consuming the spinner's timer would stop the spark animating");
+      chk(!/tft\.flush\(\)/.test(shimBlock),
+          "the shimmer flushes NOTHING of its own - a tall narrow dirty rect is the worst shape this flush path has");
+      chk(/tft\.flush\(\);\n#endif\s*$/.test(spin),
+          "... and tickWorkingSpinner still ends in the flush that carries it");
+    }
+    // The shimmer's own two numbers, bounded rather than chosen. The head plus its
+    // falloff has to fit WHOLE inside the shortest straight section the ladder can
+    // produce, or the light is clipped at both ends on the very rows the spine
+    // exists for; and the peak must stay under half, or the spine stops reading as
+    // its status colour at the moment it is most visible.
+    chk(2 * c.SESSION_SHIMMER_LEN <= straightMin,
+        `the shimmer's head and falloff (${2 * c.SESSION_SHIMMER_LEN}px) fit inside the shortest ` +
+        `reachable straight section (${straightMin}px on a ${shortest}px row)`);
+    chk(c.SESSION_SHIMMER_MAX > 0 && c.SESSION_SHIMMER_MAX < 128,
+        `the shimmer peaks at ${c.SESSION_SHIMMER_MAX}/255 towards COLOR_VALUE - visible, and under half, ` +
+        `so the spine never stops reading as its status colour`);
+    chk(c.SESSION_SHIMMER_STEPS * 2 >= straightMin,
+        `one traverse is ${c.SESSION_SHIMMER_STEPS} frames over ${straightMin}px - the head moves at most ` +
+        `2px a frame, so it travels rather than jumps`);
   }
 
   // ---- the name lane: MEASURED, never counted ----

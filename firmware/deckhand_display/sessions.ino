@@ -233,6 +233,52 @@ void bandDurText(int i, char* buf, size_t n) {
   else snprintf(buf, n, "%lud", sec / 86400);
   padLeftTo(buf, n, SESSION_BAND_DUR_CHARS);
 }
+// ---------- §6 The crossfade's two readers ----------
+// Progress through the fade for THIS session, 0..255, or -1 when it is not the
+// one fading (or nothing is). Every caller asks by id rather than by row, so a
+// re-rank mid-fade moves the animation with the session instead of leaving it on
+// whatever now sits at that display position.
+int sessionXfadeT(const char* id) {
+  if (!xfadeId[0] || !id || !id[0] || strcmp(xfadeId, id) != 0) return -1;
+  const unsigned long e = millis() - xfadeStart;
+  if (e >= SESSION_XFADE_MS) return -1;
+  return (int) ((e * 255UL) / SESSION_XFADE_MS);
+}
+// The band's fill RIGHT NOW: the status colour, or the crossfade's blend while
+// one is running. TWO readers, and the second is the reason this is a function.
+// The band's duration is a change-only field whose drawIfChanged paints an
+// OPAQUE box in this colour, and that field's cache is cleared by the very row
+// repaint a status change causes - so without this it would paint a
+// three-character patch of the TARGET colour onto a band still travelling
+// towards it, on the first tick of every fade.
+// TAKES `t` RATHER THAN READING THE CLOCK, so the band's fill and its two words
+// are guaranteed to be the same instant of the fade: computing sessionXfadeT
+// twice inside one draw lets millis() tick between them, and the colour would
+// then be one step of 255 ahead of the ink on top of it.
+uint16_t sessionBandFill(uint16_t col, int t) {
+  return t < 0 ? col : blend565(colorForStatus(xfadeFrom), col, (uint8_t) t);
+}
+// Start a fade. Called from the prevSessions diff, which is the only place that
+// knows a TRANSITION happened rather than that a value differs from a cache.
+void startSessionXfade(const char* id, const char* from) {
+  if (!id || !id[0]) return;      // a host that predates ids cannot be tracked
+  copyField(xfadeId, sizeof(xfadeId), id);
+  copyField(xfadeFrom, sizeof(xfadeFrom), from);
+  xfadeStart = millis();
+  lastXfadeMs = 0;                // paint the first frame on the next tick
+  xfadeStartCount++;
+}
+// The band's status word, uppercased and fitted to the lane. ONE copy, because
+// the crossfade needs the SAME treatment for the word it is leaving as for the
+// one it is arriving at - a second, subtly different fit would show as the two
+// words disagreeing about where they start.
+// Requires T_HEAD to be the live font: fitText measures.
+void bandStatusWord(const char* status, char* out, size_t n, int lane) {
+  char word[24];
+  snprintf(word, sizeof(word), "%s", labelForStatus(status));
+  for (char* p = word; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
+  fitText(out, n, word, lane);
+}
 // ---------- The status band (the expanded card's head) ----------
 // A filled rect in the status colour carrying the agent mark, the status WORD and
 // the duration. Drawn as ONE unit - one rectangle, one call, which is what the
@@ -261,11 +307,17 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   const SessionInfo& s = sessions[i];
   const int h = SESSION_BAND_H - BORDER_CARD;   // the card's top border owns the rest
   const int r = R_MD - BORDER_CARD;
-  uiFillRound(x, y, w, h, r, col, COLOR_CARD);
-  tft.fillRect(x, y + r, w, h - r, col);
+  // §6: `col` is the status colour this band is arriving AT; `fill` is what it
+  // shows right now, which differs only while a crossfade is running. Every
+  // colour below reads `fill`, so an ordinary repaint landing mid-fade draws the
+  // frame the animation is on rather than fighting it back to the target.
+  const int t = sessionXfadeT(s.id);
+  const uint16_t fill = sessionBandFill(col, t);
+  uiFillRound(x, y, w, h, r, fill, COLOR_CARD);
+  tft.fillRect(x, y + r, w, h - r, fill);
 
   drawAgentMark(x + SESSION_BAND_PAD, y + (h - SPARK_SIZE) / 2,
-                strcmp(s.agent, "cx") == 0, COLOR_CARD, col, /*animate=*/false);
+                strcmp(s.agent, "cx") == 0, COLOR_CARD, fill, /*animate=*/false);
 
   // THE DURATION'S LANE IS A CONSTANT, NOT A MEASUREMENT, and that is the whole
   // reason it can be a change-only field: bandDurLeft() is the same number whatever
@@ -276,7 +328,7 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   // duration caused once, on the one card whose whole job is that word.
   char dur[8];
   bandDurText(i, dur, sizeof(dur));
-  tft.setTextColor(COLOR_CARD, col);
+  tft.setTextColor(COLOR_CARD, fill);
   tft.setTextDatum(TR_DATUM);
   setUIFont(T_BODY);
   tft.drawString(dur, x + w - SESSION_BAND_PAD, y + bandDurDY());
@@ -285,16 +337,46 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   // convention on this tab, so the band matches the pill rather than inventing a
   // second one - and it is the SAME string labelForStatus already owns, so a new
   // status cannot reach the band with no word.
-  char word[24];
-  snprintf(word, sizeof(word), "%s", labelForStatus(s.status));
-  for (char* p = word; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
   const int wordX = x + SESSION_BAND_PAD + SPARK_SIZE + SESSION_BAND_MARK_GAP;
   const int lane = bandDurLeft(x, w) - wordX;
   setUIFont(T_HEAD);
-  char wordFit[24];
-  fitText(wordFit, sizeof(wordFit), word, lane);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(wordFit, wordX, y + (h - uiLineH(T_HEAD)) / 2);
+  const int wordY = y + (h - uiLineH(T_HEAD)) / 2;
+
+  // §6: BOTH WORDS ARE ON THE GLASS AT ONCE while a fade runs, each at its own
+  // strength - at t = 0.5 both sit at half and are briefly illegible. That is
+  // the spec as written and it was asked and answered; a midpoint swap is not
+  // what this is, and "fixing" it to one is the change to not make.
+  //
+  // The LEAVING word draws first and OPAQUE, so it lays a clean box of the
+  // band's current fill under itself; the ARRIVING word draws on top with
+  // fg == bg, which is drawString's transparent form (it skips the box and inks
+  // only the glyph runs). Opaque-then-transparent is what puts two overlapping
+  // words on one lane at all - drawing both opaque would leave only the second.
+  if (t >= 0) {
+    char fromFit[24];
+    bandStatusWord(xfadeFrom, fromFit, sizeof(fromFit), lane);
+    const uint16_t fromInk = blend565(fill, COLOR_CARD, (uint8_t) (255 - t));
+    tft.setTextColor(fromInk, fill);
+    tft.drawString(fromFit, wordX, wordY);
+  }
+  char wordFit[24];
+  bandStatusWord(s.status, wordFit, sizeof(wordFit), lane);
+  const uint16_t ink = t < 0 ? COLOR_CARD : blend565(fill, COLOR_CARD, (uint8_t) t);
+  tft.setTextColor(ink, t < 0 ? fill : ink);
+  tft.drawString(wordFit, wordX, wordY);
+}
+// The Codex knockout, EXTRACTED so the shimmer can re-apply it after repainting
+// the column. One copy of the loop rather than a second that could drift from
+// the shape sessions-geom-check.mjs models - and drift is not hypothetical here:
+// the gaps may only be cut from the straight section, and a copy that forgot
+// that would paint outside the card exactly as a naive fill would.
+void drawSpineGaps(int x, int y, int r, int h) {
+  // Starts one ON run below the top arc and draws only a gap that fits WHOLE
+  // inside the straight section, so no knockout is ever clipped by an arc.
+  for (int yy = r + SESSION_SPINE_ON; yy + SESSION_SPINE_OFF <= h - r;
+       yy += SESSION_SPINE_ON + SESSION_SPINE_OFF)
+    tft.fillRect(x, y + yy, SESSION_SPINE_W, SESSION_SPINE_OFF, COLOR_CARD);
 }
 // ---------- The spine (the band's compact form) ----------
 // SESSION_SPINE_W of status colour down the row's left edge, for every row the
@@ -346,12 +428,157 @@ void drawSessionSpine(int x0, int y0, int h0, const char* status, bool codex) {
   const int h = h0 - 2 * SESSION_SPINE_INSET;
   uiFillRound(x, y, 2 * r, h, r, col, COLOR_CARD);
   tft.fillRect(x + SESSION_SPINE_W, y, 2 * r - SESSION_SPINE_W, h, COLOR_CARD);
-  if (!codex) return;
-  // Starts one ON run below the top arc and draws only a gap that fits WHOLE
-  // inside the straight section, so no knockout is ever clipped by an arc.
-  for (int yy = r + SESSION_SPINE_ON; yy + SESSION_SPINE_OFF <= h - r;
-       yy += SESSION_SPINE_ON + SESSION_SPINE_OFF)
-    tft.fillRect(x, y + yy, SESSION_SPINE_W, SESSION_SPINE_OFF, COLOR_CARD);
+  if (codex) drawSpineGaps(x, y, r, h);
+}
+// ---------- §6 The spine shimmer: a light travelling a working row ----------
+// It repaints the spine's SIX COLUMNS and nothing else. Not the capsule, not the
+// carve, not the arcs: `x` here is the same x the fill uses and the width is
+// SESSION_SPINE_W, which is exactly the bound the straight carve gives the fill
+// on every row - so this cannot reach the card's rounded outline, and it cannot
+// reach the working spinner's 32x32 blit at x=20 either.
+//
+// THE ARCS ARE LEFT ALONE, and that is the same constraint the Codex knockout
+// carries rather than a simplification: between y+r and y+h-r the fill's left
+// edge really is at x, but up in the arc it has moved right, so a rect at x
+// there would paint outside the card. The light therefore travels the straight
+// section only, which is also what stops it appearing to leak out of the ends.
+//
+// One fillRect PER ROW rather than a blit: at 6px wide the run is a handful of
+// pixels and there is no scratch buffer, no byte-order flag and no readback -
+// the same argument blit2bpp's run-length inner loop already makes.
+void drawSpineShimmer(int x0, int y0, int h0, const char* status, bool codex,
+                      int phase) {
+  const uint16_t col = colorForStatus(status);
+  const int r = R_MD - BORDER_CARD;
+  const int x = x0;                              // no x inset - see drawSessionSpine
+  const int y = y0 + SESSION_SPINE_INSET;
+  const int h = h0 - 2 * SESSION_SPINE_INSET;
+  const int span = h - 2 * r;                    // the straight section
+  if (span <= 0) return;
+  // The head travels a LEN-row overhang past each end, so the light enters and
+  // leaves rather than being born and dying mid-spine.
+  const int travel = span + 2 * SESSION_SHIMMER_LEN;
+  const int head = -SESSION_SHIMMER_LEN + (travel * phase) / SESSION_SHIMMER_STEPS;
+  for (int yy = 0; yy < span; yy++) {
+    const int d = yy - head < 0 ? head - yy : yy - head;
+    const uint8_t a = d >= SESSION_SHIMMER_LEN ? 0
+                    : (uint8_t) (SESSION_SHIMMER_MAX *
+                                 (SESSION_SHIMMER_LEN - d) / SESSION_SHIMMER_LEN);
+    tft.fillRect(x, y + r + yy, SESSION_SPINE_W, 1,
+                 a ? blend565(col, COLOR_VALUE, a) : col);
+  }
+  // The column was repainted solid, so a Codex row owes its gaps back. Through
+  // the same helper the spine itself uses, which is the whole reason it exists.
+  if (codex) drawSpineGaps(x, y, r, h);
+}
+// ---------- §6 The tick that drives both ----------
+// GATED EXACTLY AS tickWorkingSpinner IS, and for the same reasons: an animation
+// that paints while a full-screen surface is up wipes something somebody is
+// reading, and one that runs on a tab nobody is looking at spends battery for
+// nothing. sessions-geom-check.mjs parses BOTH gates and asserts this one is at
+// least as tight, rather than trusting the two lists to be kept in step by hand.
+//
+// IT MUST NEVER TOUCH lastNonIdleMillis. An animation that did would read as
+// activity to the sleep timer and hold the backlight on - and on board 2 the
+// backlight blank is the ONLY power saving left, since auto-deep-sleep is
+// compiled out here. That is ~80 of ~142 mV/h, measured.
+//
+// SMALL FLUSHES, NEVER ONE BIG ONE. flush() pushes the UNION of everything
+// dirty, and the band (x 14..306, up top) and the spine column (x 14..19, down
+// the whole list) union to nearly the entire content area - 30ms, the whole
+// budget at 30fps. So the crossfade flushes its own rectangle, and the shimmer
+// flushes nothing at all: it rides the working spinner's frame, which was
+// already pushing the same strips. See the two blocks below.
+//
+// The crossfade's LEADING flush is what makes its measurement honest as well: it
+// starts from a clean dirty rect, so the number PERF reports is the band's own
+// cost and not whatever else happened to be pending. It early-returns for free
+// when nothing is dirty, and deliberately does not overwrite lastFlushUs then.
+void tickSessionAnim() {
+  if (isAsleep || octoActive || showingDetail || readerActive || histActive
+      || kbActive || emojiTestActive) { xfadeId[0] = '\0'; return; }
+  if (currentTab != TAB_SESSIONS || sessionCount == 0) { xfadeId[0] = '\0'; return; }
+
+  // ---- the state crossfade: one-shot, band only ----
+  // A FADE OFTEN HAS NOTHING TO PAINT, AND THAT IS ORDINARY. §6 fades the BAND,
+  // and only display position 0 has one - and only while the ladder is short
+  // enough to give it one at all (sessionExpandedH is 0 from four sessions up).
+  // So a status change on any other row draws no frames: its spine and its pill
+  // switch at once, which is what §6 asks for. PERF reports `started` beside `n`
+  // for exactly this reason - two builds were spent reading `n=0` as a broken
+  // trigger when the real cause was a fourth session arriving on the glass and
+  // taking the band card away.
+  if (xfadeId[0] && millis() - lastXfadeMs >= SESSION_XFADE_INTERVAL_MS) {
+    lastXfadeMs = millis();
+    // Resolved by ID every frame, never cached as a row: a status change is
+    // exactly what re-ranks this list, so the row a fade started on is the one
+    // most likely to have moved by its next frame.
+    int pos = -1;
+    for (int p = 0; p < sessionCount; p++)
+      if (strcmp(sessions[sessionAt(p)].id, xfadeId) == 0) { pos = p; break; }
+    // Cleared BEFORE the draw when the clock has run out, which is what makes
+    // the last frame SETTLE the band at the target rather than leaving it one
+    // step short of it forever - drawSessionBand asks sessionXfadeT again.
+    const bool done = sessionXfadeT(xfadeId) < 0;
+    if (done) xfadeId[0] = '\0';
+    if (pos >= 0 && sessionRowExpanded(pos)) {
+      const int i = sessionAt(pos);
+      tft.flush();
+      const uint32_t t0 = micros();
+      drawSessionBand(SESSION_ROW_X + BORDER_CARD, sessionRowYAt(pos) + BORDER_CARD,
+                      SESSION_ROW_W - 2 * BORDER_CARD, i,
+                      colorForStatus(sessions[i].status));
+      xfadeComposeUs = (uint32_t) (micros() - t0);
+      tft.flush();
+      xfadeFlushUs = tft.lastFlushUs();
+      if (xfadeComposeUs + xfadeFlushUs > xfadeWorstUs)
+        xfadeWorstUs = xfadeComposeUs + xfadeFlushUs;
+      xfadeFrameCount++;
+    }
+  }
+
+  // ---- the spine shimmer: continuous, but only on working rows ----
+  // IT RIDES tickWorkingSpinner's OWN FRAME, and that is the difference between
+  // an animation that costs 208us and one that costs 6.5ms. MEASURED, on this
+  // panel: a flush's transfer is dominated by FIXED PER-STRIP OVERHEAD, not by
+  // pixels - 1453us for a 320x32 strip, 792us for an 8x32 one - so the spine's
+  // dirty rect is the worst shape this path has. It is six columns tall enough
+  // to span the whole list: 8 strips, ~6.3ms, four times a second, for 2,424
+  // pixels. §2's model priced it at 1.2ms because it counted pixels.
+  //
+  // The spinner already pushes those very strips every ANIM_INTERVAL_MS - its
+  // 32x32 blits sit at x 20..46, immediately right of the spine's 14..19, on the
+  // same rows - so the shimmer's strips are going out regardless and its
+  // marginal transfer cost is nothing. So: paint here, do NOT flush, and let the
+  // spinner's own trailing flush carry it.
+  //
+  // READS lastAnimMs AND DOES NOT WRITE IT. That is what makes the two exactly
+  // in phase rather than merely near it: tickWorkingSpinner runs immediately
+  // after this in loop(), sees the same timer still due, and flushes in the same
+  // iteration. Consuming the timer here would leave the shimmer's paint waiting
+  // for the NEXT frame's flush, and would stop the spinner animating at all.
+  // Both properties are asserted in sessions-geom-check.mjs.
+  if (millis() - lastAnimMs >= ANIM_INTERVAL_MS) {
+    shimmerPhase = (uint8_t) ((shimmerPhase + 1) % SESSION_SHIMMER_STEPS);
+    const uint32_t t0 = micros();
+    int painted = 0;
+    for (int pos = 0; pos < sessionCount; pos++) {
+      // The band card has no spine - its status vocabulary is the band - and the
+      // same skip tickWorkingSpinner makes, for the same reason.
+      if (sessionRowExpanded(pos)) continue;
+      const int i = sessionAt(pos);
+      if (strcmp(sessions[i].status, "working") != 0) continue;
+      drawSpineShimmer(SESSION_ROW_X + BORDER_CARD, sessionRowYAt(pos) + BORDER_CARD,
+                       sessionRowHAt(pos) - 2 * BORDER_CARD, sessions[i].status,
+                       strcmp(sessions[i].agent, "cx") == 0, shimmerPhase);
+      painted++;
+    }
+    if (painted) {
+      shimComposeUs = (uint32_t) (micros() - t0);
+      if (shimComposeUs > shimWorstUs) shimWorstUs = shimComposeUs;
+      shimFrameCount++;
+    }
+  }
 }
 #endif
 // pos is the DISPLAY POSITION (what the row's on-screen y comes from); the
@@ -772,7 +999,9 @@ void renderSessionsList() {
       drawIfChanged(rowDurCache[pos], sizeof(rowDurCache[pos]), bdur,
                     SESSION_ROW_X + SESSION_ROW_W - BORDER_CARD - SESSION_BAND_PAD,
                     sessionRowYAt(pos) + BORDER_CARD + bandDurDY(), T_BODY, 1,
-                    COLOR_CARD, colorForStatus(sessions[i].status), TR_DATUM);
+                    COLOR_CARD,
+                    sessionBandFill(colorForStatus(sessions[i].status),
+                                    sessionXfadeT(sessions[i].id)), TR_DATUM);
       continue;
     }
 #endif
