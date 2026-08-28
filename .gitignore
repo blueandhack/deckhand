@@ -38,3 +38,6 @@ deckhand-secret*
 # 8-byte question) and cost 19.7MB of diff, so it is named here rather than
 # left to the next person to notice. ---
 firmware/deckhand_display/build/
+
+# brainstorming visual companion
+.superpowers/
