@@ -1047,7 +1047,8 @@ const int SESSION_BAND_BOTTOM_PAD = 6;
 //
 // THE RULE, and it is arithmetic on the ladder rather than a second layout:
 //   leftover = avail - (count - 1) * (sessionRowH + SESSION_ROW_GAP)
-//   expanded = leftover < SESSION_EXP_MIN_H ? 0 : min(leftover, SESSION_EXP_MAX_H)
+//   grant    = leftover < SESSION_EXP_MIN_H ? 0 : min(leftover, SESSION_EXP_MAX_H)
+//   expanded = min(grant, the block stack this session's own content fills)
 // i.e. the TOP row of the urgency-sorted list absorbs exactly what the ladder
 // would have left empty, every other row keeps the height the ladder already gave
 // it, and the whole thing collapses to today's uniform list the moment the ladder
@@ -1055,9 +1056,11 @@ const int SESSION_BAND_BOTTOM_PAD = 6;
 // ladder's own output - and not from a second copy of the ladder formula, so the
 // two cannot drift.
 //
-// THE SIX HEIGHTS, avail 410 (see the ladder above):
-//   1 session  leftover 410 -> 336 (cap)   prompt 4 lines    74px spare
-//   2 sessions leftover 307 -> 307         prompt 2 lines    19px of body air
+// THE SIX GRANTS, avail 410 (see the ladder above). These are the CEILINGS, not
+// the heights: what the card actually takes is the block stack its own session
+// fills, and the rest stays outside it as list area (see the paragraph below).
+//   1 session  leftover 410 -> 336 (cap)   prompt <= 4 lines  74px spare at the cap
+//   2 sessions leftover 307 -> 307         prompt <= 2 lines
 //   3 sessions leftover 204 ->   0         under the floor - see SESSION_EXP_MIN_H
 //   4 sessions leftover 101 ->   0         the ladder already fills the column
 //   5 sessions leftover  82 ->   0
@@ -1066,8 +1069,25 @@ const int SESSION_BAND_BOTTOM_PAD = 6;
 // is 66 -> 0. So expansion is a ONE-to-TWO session behaviour by arithmetic, not
 // by a special case at either end.
 //
+// THE CARD IS AS TALL AS WHAT IT DRAWS, AND THE SURPLUS STAYS OUTSIDE IT. The
+// grant above only bounds it: sessionExpMeasure() walks the same block stack the
+// draw's cursor walks, with the REAL wrapped line counts, and sessionExpandedH()
+// returns the smaller of the two. §4: "if the derived total lands below 410, the
+// remainder stays OUTSIDE the card as list area, as it does today, rather than
+// becoming a card of air."
+//
+// THE DEFECT THAT FORCED IT, measured off the glass. The prompt block is BUDGETED
+// its full line count and a real prompt often wraps to fewer, so the unused lines
+// pooled between the prompt and the bottom-anchored path rule: 36px against a
+// normal inter-block leading of 9-19px, which reads as a rendering fault rather
+// than as padding. A session with no prompt yet - the just-started case, i.e.
+// exactly the one-session screen this card exists for - pooled 142px with a title
+// and 182 without. Flowing the path up with the cursor instead would only move the
+// hole to the card's bottom edge, which is the trailing air the 288 floor below
+// was raised to remove.
+//
 // AND A LONE CARD IS CENTRED IN THE LIST AREA (sessionRowYAt), which is the other
-// half of the one-session case: 336 of 410 leaves 74px, and all of it sitting
+// half of the one-session case: a full 336 of 410 leaves 74px, and all of it sitting
 // BELOW the card reads as "a card, then nothing" no matter how much the card
 // carries. Centred it is 37px above and 37 below. ONLY when the card is alone - in
 // a mixed layout the stack's top alignment is the rhythm, and dropping the first
@@ -1112,6 +1132,9 @@ const int SESSION_EXP_MIN_H = 288;
 // blank; title[44] is 2 by the same argument. Above this there is nothing left to
 // put in the card, so the surplus stays OUTSIDE it as list area - 74px at one
 // session, spent on centring the lone card - rather than becoming a card of air.
+// The same rule applies BELOW the cap, per card rather than per board: a card
+// whose content is shorter than its grant takes the content's height, and the
+// difference is list area too. See sessionExpMeasure().
 const int SESSION_EXP_MAX_H = 336;
 // The title is ALWAYS two lines when present: title[44] carries 43 characters =
 // 344px against a 244px lane, so a real title genuinely wraps, and 2 lines hold

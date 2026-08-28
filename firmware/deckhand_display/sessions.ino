@@ -19,14 +19,27 @@ int sessionExpandedH(int count) {
 #if BOARD_USES_TFT_ESPI
   (void) count; return 0;
 #else
-  if (count < 1) return 0;
-  // sessionRowH is the LADDER'S OWN OUTPUT for this count (renderSessionsList
-  // computes it before anything here can run), so the leftover is measured
-  // against the very number the compact rows are drawn at rather than against a
-  // second copy of the ladder formula that could drift from it.
-  int leftover = sessionListAvail(count) - (count - 1) * (sessionRowH + SESSION_ROW_GAP);
-  if (leftover < SESSION_EXP_MIN_H) return 0;   // the ladder already fills the column
-  return leftover > SESSION_EXP_MAX_H ? SESSION_EXP_MAX_H : leftover;
+  const int cand = sessionExpCandidateH(count);
+  // THE LADDER'S LEFTOVER IS THE CEILING, NOT THE HEIGHT. §4: "if the derived
+  // total lands below 410, the remainder stays OUTSIDE the card as list area
+  // rather than becoming a card of air." So the card takes the smaller of what
+  // the ladder can spare and what its own session actually fills, and the surplus
+  // is list area - which is where it reads as the gap between cards rather than
+  // as a rendering fault inside one.
+  //
+  // MEASURED, AND THIS IS THE DEFECT IT FIXES: the prompt block is BUDGETED four
+  // lines at the cap and a real prompt often wraps to two, so 48px pooled between
+  // the prompt and the bottom-anchored path rule - against a normal inter-block
+  // leading of 9-19px, which reads as a hole. A session with no prompt yet - the
+  // just-started case, i.e. exactly the one-session screen this card exists for -
+  // pooled 142px with a title and 182 without.
+  //
+  // FLOWING THE PATH UP WITH THE CURSOR IS NOT THE FIX: it moves the hole to the
+  // card's bottom edge and re-creates the trailing air inside the card that the
+  // 288 floor was raised to remove. The anchor STAYS, and it lands on the cursor
+  // by construction now that the height is the cursor's own end.
+  if (cand <= 0) return 0;
+  return (expCardH > 0 && expCardH < cand) ? expCardH : cand;
 #endif
 }
 #if !BOARD_USES_TFT_ESPI
@@ -62,6 +75,81 @@ int sessionExpPromptLines(int bodyH) {
           (bodyH - (SESSION_EXP_MIN_H - SESSION_BAND_H)) / SESSION_BAND_PROMPT_STEP;
   if (n < SESSION_EXP_PROMPT_MIN) n = SESSION_EXP_PROMPT_MIN;
   return n > SESSION_EXP_PROMPT_MAX ? SESSION_EXP_PROMPT_MAX : n;
+}
+// The ladder's own grant: what the leftover allows, before the card's content caps
+// it. Split out of sessionExpandedH so the two questions stay separable - "is
+// there room for a band card at all", which is the SESSION_EXP_MIN_H gate and
+// unchanged, and "how much of that room does this card need", which is the
+// measurement below. The prompt BUDGET is taken from this number rather than from
+// the final height, because it is the budget the height is then derived from.
+//
+// sessionRowH is the LADDER'S OWN OUTPUT for this count (renderSessionsList
+// computes it before anything here can run), so the leftover is measured
+// against the very number the compact rows are drawn at rather than against a
+// second copy of the ladder formula that could drift from it.
+int sessionExpCandidateH(int count) {
+  if (count < 1) return 0;
+  int leftover = sessionListAvail(count) - (count - 1) * (sessionRowH + SESSION_ROW_GAP);
+  if (leftover < SESSION_EXP_MIN_H) return 0;   // the ladder already fills the column
+  return leftover > SESSION_EXP_MAX_H ? SESSION_EXP_MAX_H : leftover;
+}
+// THE BAND CARD'S HEIGHT, MEASURED FROM WHAT IT WILL DRAW. Walks exactly the block
+// stack drawSessionRow's cursor walks - name, agent/model/branch, title, a rule,
+// LAST PROMPT + prompt, a rule, path, pad - taking the REAL wrapped line counts
+// where the cap's derivation takes the worst case. A block the card does not draw
+// costs nothing, which is the whole point: a Codex row has no title and a
+// just-started session has no prompt.
+//
+// countWrappedLines, not a column count: it is the same helper drawWrappedText
+// wraps with, so the two cannot disagree about where a line breaks. A model that
+// divided the lane by TEXT_ADV would be right about Spleen's advance and wrong
+// about the word-friendly break wrapLineLen prefers.
+//
+// CALLED ONCE PER RENDER PASS, from the top of renderSessionsList. It measures
+// text, and measuring means setUIFont() - see the note on expCardH for why that
+// must not happen inside an animation tick or mid-draw.
+void sessionExpMeasure() {
+  expCardH = 0;
+  expCardPrompt = 0;
+  const int cand = sessionExpCandidateH(sessionCount);
+  if (cand <= 0) return;
+  const int i = sessionAt(0);
+  if (i < 0 || i >= sessionCount) return;
+  const SessionInfo& s = sessions[i];
+  const int lane = SESSION_SUB_LANE_W;   // the row's own measured text lane
+  char sub[36];
+  buildSessionSubline(i, sub, sizeof(sub));
+  int h = SESSION_BAND_H + SESSION_BAND_NAME_H;
+  if (sub[0]) h += SESSION_BAND_SUB_H;
+  if (s.title[0]) {
+    // The BUDGET is still SESSION_EXP_TITLE_LINES - a longer title is trimmed by
+    // drawWrappedText's own maxLines - but a title that fits on one line costs one
+    // line, which is the same thing the draw already does by taking the returned y.
+    int n = countWrappedLines(s.title, T_BODY, lane);
+    if (n > SESSION_EXP_TITLE_LINES) n = SESSION_EXP_TITLE_LINES;
+    h += n * SESSION_BAND_TITLE_STEP;
+  }
+  if (s.prompt[0]) {
+    // THE BUDGET STILL COMES FROM sessionExpPromptLines(), and it is still the
+    // guard it always was: the card can never draw more prompt lines than the
+    // ladder's grant paid for. What changed is that a SHORTER wrap now shortens
+    // the CARD instead of leaving the difference as air inside it.
+    // The argument is the CANDIDATE less the band, not the final height - the
+    // final height is derived from this number, so reading it back off that would
+    // be circular.
+    int n = countWrappedLines(s.prompt, T_BODY, lane);
+    const int budget = sessionExpPromptLines(cand - SESSION_BAND_H);
+    if (n > budget) n = budget;
+    if (n < 1) n = 1;      // a non-empty prompt always inks at least one line
+    expCardPrompt = n;
+    h += SESSION_BAND_RULE_H + SESSION_BAND_LABEL_H + n * SESSION_BAND_PROMPT_STEP;
+  }
+  if (s.path[0]) h += SESSION_BAND_RULE_H + SESSION_BAND_PATH_H;
+  h += SESSION_BAND_BOTTOM_PAD;
+  // Cannot exceed the grant - every block above is one the cap is summed from and
+  // the prompt is capped by the grant's own budget - but clamped rather than
+  // asserted, because a card taller than its slot would overdraw the row below it.
+  expCardH = h > cand ? cand : h;
 }
 bool sessionRowExpanded(int pos) { return pos == 0 && sessionExpandedH(sessionCount) > 0; }
 // The row stack, walked in ONE place. Draw, duration, spinner tick and the touch
@@ -990,12 +1078,16 @@ void drawSessionRow(int pos) {
         tft.setTextColor(COLOR_LABEL, COLOR_CARD);
         tft.drawString("LAST PROMPT", nameX, cy);
         cy += SESSION_BAND_LABEL_H;
-        // rowH LESS THE BAND, because the band spends 44px of exactly the height
-        // this budget is derived from. Left at rowH the smallest card the rule
-        // can produce would be granted prompt lines it never paid for and the
-        // bottom-anchored path would be overdrawn from above.
+        // THE COUNT THIS CARD'S HEIGHT WAS DERIVED FROM, not one re-derived here.
+        // sessionExpMeasure() takes sessionExpPromptLines()'s budget - the same
+        // guard, against the ladder's grant - and caps it by what the prompt
+        // really wraps to, then makes the card exactly that tall. Re-deriving it
+        // from rowH would be circular now that rowH IS the content's height: a
+        // card missing its title is shorter, so the budget read back off it comes
+        // out SMALLER than the lines the height already paid for, and the card
+        // opens a hole where it had already spent the pixels.
         drawWrappedText(s.prompt, nameX, cy, T_BODY, SESSION_BAND_PROMPT_STEP, lane, 0,
-                        sessionExpPromptLines(rowH - SESSION_BAND_H), COLOR_VALUE, COLOR_CARD);
+                        expCardPrompt, COLOR_VALUE, COLOR_CARD);
       }
       if (s.path[0]) {
         // ONE line through fitText rather than wrapped: the path is the least
@@ -1140,6 +1232,34 @@ void renderSessionsList() {
       tft.setTextDatum(TL_DATUM);
     }
   }
+#if !BOARD_USES_TFT_ESPI
+  // THE BAND CARD'S HEIGHT IS ITS CONTENT'S, SO IT MOVES WITHOUT THE COUNT MOVING,
+  // and that makes it a LAYOUT change the row signatures alone cannot carry: a new
+  // prompt wrapping to one line instead of two shortens the card by 24px and slides
+  // every row below it up. Row 0's signature does change (the prompt is in it), so
+  // it would repaint at its new height - but the rows under it would not, leaving
+  // them drawn at their old y with the tail of the old card still on the glass.
+  // So the height gets the same wholesale rebuild the session COUNT gets, keyed the
+  // same way, one cache each.
+  //
+  // MEASURED HERE, once, before anything reads the geometry: sessionRowH is final
+  // by this point (the block above sets it, and it is unchanged when the count is),
+  // and measuring text leaves the global font wherever countWrappedLines left it -
+  // harmless at the top of a render, wrong inside a 120ms animation tick.
+  //
+  // On a count change this can clear a second time in the same pass. That is two
+  // fillRects into the shadow framebuffer before any row is drawn, not two visible
+  // paints - the flush is deferred - and the alternative is a flag threaded through
+  // the shared block above, which board 1's binary cannot afford.
+  sessionExpMeasure();
+  const int expNow = sessionExpandedH(sessionCount);
+  if (expNow != expHCache) {
+    expHCache = expNow;
+    tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
+    for (int i = 0; i < MAX_SESSIONS; i++) rowSigCache[i][0] = '\0';
+    overflowCache[0] = '\0';
+  }
+#endif
   for (int pos = 0; pos < sessionCount; pos++) {
     int i = sessionAt(pos);
     // rowSigCache is keyed by DISPLAY POSITION, which is what it has always

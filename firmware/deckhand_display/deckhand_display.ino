@@ -2501,6 +2501,28 @@ unsigned long lastPulseMs = 0;
 uint16_t bandFillShown = 0;
 uint32_t pulseComposeUs = 0, pulseFlushUs = 0, pulseWorstUs = 0;
 uint16_t pulseFrameCount = 0;
+// ---------- The band card's MEASURED height ----------
+// THE CARD IS AS TALL AS WHAT IT DRAWS, and these two are the measurement that
+// makes that true. The ladder's leftover is only the card's CEILING; the height
+// it actually takes is the block stack its own session fills, so whatever the
+// content does not spend stays OUTSIDE the card as list area rather than pooling
+// as a hole above the bottom-anchored path.
+//
+// WHY THEY ARE GLOBALS AND NOT RECOMPUTED PER CALL. sessionExpandedH() is read by
+// the draw, the row stack, the duration field, the shimmer, the pulse, the mark's
+// 120ms tick and the touch hit test - and measuring text means setUIFont(), which
+// would leave the global font wherever countWrappedLines left it, in the middle of
+// somebody else's draw. sessionExpMeasure() writes them ONCE at the top of
+// renderSessionsList, before anything reads the geometry.
+//
+// expCardPrompt IS THE COUNT THE HEIGHT WAS DERIVED FROM, which is why the draw
+// reads it rather than re-deriving one from rowH: rowH is now the content's own
+// height, so a card missing its title is shorter, and a budget read back off it
+// would be SMALLER than the lines the height already paid for - a hole opened by
+// the very guard that exists to prevent one.
+int expCardH = 0;        // 0 = no card, or not measured yet
+int expCardPrompt = 0;   // prompt lines this card's height paid for
+int expHCache = 0;       // the height the list was last laid out at
 #endif
 
 // Kept as the "force a full repaint" entry point (tab switch, closing the

@@ -276,11 +276,50 @@ function rowBands(b, c, rowH, kind) {
 // height. A board that declares no SESSION_EXP_MIN_H never expands, which is
 // exactly how board 1 is wired (the constant does not exist in its header and the
 // firmware's own arm returns 0 under #if BOARD_USES_TFT_ESPI).
-function expandedH(c, count, avail, rowH) {
+function expCandidateH(c, count, avail, rowH) {
   if (c.SESSION_EXP_MIN_H === undefined) return 0;
   const leftover = avail - (count - 1) * (rowH + c.SESSION_ROW_GAP);
   if (leftover < c.SESSION_EXP_MIN_H) return 0;
   return Math.min(leftover, c.SESSION_EXP_MAX_H);
+}
+// sessionExpandedH(), replicated: the grant above, CAPPED BY THE CARD'S OWN
+// CONTENT. The grant is only a ceiling - what the card takes is the block stack
+// its session actually fills, and the remainder stays outside it as list area.
+// Modelling the grant alone is how a 336px card carrying a two-line prompt kept
+// 36px of nothing above its own path rule while every assertion here stayed green:
+// expBands' `gap >= 0` is an OVERDRAW guard and says nothing about a hole.
+function expandedH(c, count, avail, rowH, have) {
+  const cand = expCandidateH(c, count, avail, rowH);
+  if (cand <= 0) return 0;
+  return Math.min(cand, expCardH(c, cand, have));
+}
+// How many lines of each optional block the card DRAWS. `have.title`/`have.prompt`
+// are line counts (a truthy 1 therefore means one line); `titleLines`/`promptLines`
+// name a shorter wrap than the field's worst case, which is the case the hole was
+// measured in. The prompt is capped by sessionExpPromptLines()'s budget against the
+// GRANT - the same guard the firmware keeps, and taken against the grant rather
+// than the final height because the final height is derived from it.
+function expTitleLines(c, have) {
+  return have.title ? Math.min(have.titleLines ?? c.SESSION_EXP_TITLE_LINES,
+                               c.SESSION_EXP_TITLE_LINES) : 0;
+}
+function expPromptDrawn(c, cand, have) {
+  if (!have.prompt) return 0;
+  return Math.max(1, Math.min(have.promptLines ?? c.SESSION_EXP_PROMPT_MAX,
+                              expPromptLines(c, cand - c.SESSION_BAND_H)));
+}
+// sessionExpMeasure(), replicated: the card's height IS its block stack. Every
+// term is one of the eight SESSION_BAND_* blocks SESSION_EXP_MAX_H is summed from,
+// so a card that drops a block gets shorter by exactly that block.
+function expCardH(c, cand, have) {
+  let h = c.SESSION_BAND_H + c.SESSION_BAND_NAME_H;
+  if (have.sub) h += c.SESSION_BAND_SUB_H;
+  h += expTitleLines(c, have) * c.SESSION_BAND_TITLE_STEP;
+  if (have.prompt)
+    h += c.SESSION_BAND_RULE_H + c.SESSION_BAND_LABEL_H +
+         expPromptDrawn(c, cand, have) * c.SESSION_BAND_PROMPT_STEP;
+  if (have.path) h += c.SESSION_BAND_RULE_H + c.SESSION_BAND_PATH_H;
+  return h + c.SESSION_BAND_BOTTOM_PAD;
 }
 // sessionRowYAt(), replicated - INCLUDING the centring. A lone expanded card is
 // the whole list, so it sits in the middle of the list area; a mixed layout keeps
@@ -327,7 +366,7 @@ function expPromptLines(c, bodyH) {
 // The bands are INK extents, which is what makes `gap >= 0` an overdraw guard:
 // the last line of a block inks lineH of its step and the rest of the step is
 // leading. The FLOOR is derived from the blocks instead - see expCursorEnd().
-function expBands(b, c, rowH, have) {
+function expBands(b, c, rowH, have, cand) {
   const NL = lineHB(b, T_HEAD);          // the name's tallest admissible rung
   const L = lineHB(b, T_BODY);
   const BAND = c.SESSION_BAND_H, RULE = c.SESSION_BAND_RULE_H;
@@ -341,7 +380,7 @@ function expBands(b, c, rowH, have) {
   let cy = BAND + c.SESSION_BAND_NAME_H;
   if (have.sub) { bands.push(["sub-line", cy, cy + L - 1]); cy += c.SESSION_BAND_SUB_H; }
   if (have.title) {
-    const n = c.SESSION_EXP_TITLE_LINES, st = c.SESSION_BAND_TITLE_STEP;
+    const n = expTitleLines(c, have), st = c.SESSION_BAND_TITLE_STEP;
     bands.push([`title (${n} lines)`, cy, cy + (n - 1) * st + L - 1]);
     cy += n * st;
   }
@@ -350,7 +389,11 @@ function expBands(b, c, rowH, have) {
     cy += RULE;
     bands.push(["PROMPT label", cy, cy + L - 1]);
     cy += c.SESSION_BAND_LABEL_H;
-    const n = expPromptLines(c, rowH - BAND), st = c.SESSION_BAND_PROMPT_STEP;
+    // THE GRANT, NOT rowH. rowH is now the CONTENT's height, so a card missing its
+    // title is shorter and a budget read back off it would come out under the
+    // lines the height paid for - the firmware makes the same distinction, and for
+    // the same reason (see the draw's own note).
+    const n = expPromptDrawn(c, cand, have), st = c.SESSION_BAND_PROMPT_STEP;
     bands.push([`prompt (${n} lines)`, cy, cy + (n - 1) * st + L - 1]);
     cy += n * st;
   }
@@ -367,13 +410,13 @@ function expBands(b, c, rowH, have) {
 // overdraws" assertion is made against: the ink bands above stop at the last
 // LINE's ink and therefore carry the final prompt step's trailing leading as
 // slack, so an ink comparison would call an 8px-short card fine.
-function expCursorEnd(c, rowH, have) {
+function expCursorEnd(c, cand, have) {
   let cy = c.SESSION_BAND_H + c.SESSION_BAND_NAME_H;
   if (have.sub) cy += c.SESSION_BAND_SUB_H;
-  if (have.title) cy += c.SESSION_EXP_TITLE_LINES * c.SESSION_BAND_TITLE_STEP;
+  cy += expTitleLines(c, have) * c.SESSION_BAND_TITLE_STEP;
   if (have.prompt)
     cy += c.SESSION_BAND_RULE_H + c.SESSION_BAND_LABEL_H +
-          expPromptLines(c, rowH - c.SESSION_BAND_H) * c.SESSION_BAND_PROMPT_STEP;
+          expPromptDrawn(c, cand, have) * c.SESSION_BAND_PROMPT_STEP;
   return cy;
 }
 function expAnchorTop(c, rowH) {
@@ -437,7 +480,10 @@ function spineHeights(c, contentBottom, maxSessions) {
     for (let n = 1; n <= maxSessions; n++) {
       const raw = Math.floor((avail - c.SESSION_ROW_GAP * (n - 1)) / n);
       const rowH = Math.min(Math.max(raw, c.SESSION_ROW_H_MIN), c.SESSION_ROW_H_MAX);
-      if (n === 1 && expandedH(c, 1, avail, rowH) > 0) continue;   // no ordinary row
+      // The GRANT, not the measured height: whether a lone session has an ordinary
+      // row at all is the gate's question, and it does not depend on how much of
+      // its grant that card's content ends up taking.
+      if (n === 1 && expCandidateH(c, 1, avail, rowH) > 0) continue;   // no ordinary row
       out.add(rowH);
     }
   }
@@ -761,11 +807,39 @@ for (const b of [1, 2]) {
       // EVERY REACHABLE HEIGHT, with the strip case too - and both content
       // extremes, because the cursor SKIPS a missing block: a Codex row carries no
       // title and a session that has not been prompted yet carries no prompt.
+      // THE WIDEST LEADING ANY BLOCK CARRIES, derived from the parsed blocks. It is
+      // the bound on a legitimate gap between two blocks' ink: each block's step is
+      // one line of ink plus its own leading, and a rule contributes the air either
+      // side of its single row. A gap wider than the widest of those is space no
+      // block paid for - which is precisely what a prompt block BUDGETED four lines
+      // and drawing two pooled above the path rule. Measured off the glass at 36px
+      // against a normal 9-19px, and 142/182px on a session with no prompt yet.
+      // A block's leading is its step less the one line of ink in it, and a RULE may
+      // follow any of them - the rule's own row sits RDY below the block above, so
+      // the widest legitimate gap is the widest leading plus that. The rule's
+      // trailing air and the path's tail are both smaller and therefore covered.
+      const RDY = Math.trunc((c.SESSION_BAND_RULE_H - 1) / 2);
+      const MAX_LEAD = Math.max(
+        c.SESSION_BAND_NAME_H - lineHB(b, T_HEAD),
+        c.SESSION_BAND_SUB_H - L,
+        c.SESSION_BAND_TITLE_STEP - L,
+        c.SESSION_BAND_LABEL_H - L,
+        c.SESSION_BAND_PROMPT_STEP - L) + RDY;
+      // THE SHORT-CONTENT CASES ARE THE ONES THE HOLE LIVED IN, and they were
+      // absent: every entry here used to describe a card whose blocks are all at
+      // their WORST CASE, which is the one shape where a budgeted prompt and a
+      // drawn prompt agree. A real two-line prompt in a card granted four is what
+      // the 36px hole was measured on.
       const HAVE = [
         ["all blocks", { title: 1, sub: 1, prompt: 1, path: 1 }],
         ["no title (Codex)", { title: 0, sub: 1, prompt: 1, path: 1 }],
         ["no prompt yet", { title: 1, sub: 1, prompt: 0, path: 1 }],
         ["name + pill only", { title: 0, sub: 0, prompt: 0, path: 0 }],
+        ["2-line prompt", { title: 1, sub: 1, prompt: 1, promptLines: 2, path: 1 }],
+        ["1-line prompt", { title: 1, sub: 1, prompt: 1, promptLines: 1, path: 1 }],
+        ["1-line title", { title: 1, titleLines: 1, sub: 1, prompt: 1, path: 1 }],
+        ["1-line title, 1-line prompt",
+         { title: 1, titleLines: 1, sub: 1, prompt: 1, promptLines: 1, path: 1 }],
       ];
       for (const strip of [false, true]) {
         const avail = contentBottom - c.SESSION_ROW_Y0 - (strip ? c.SESSION_OVERFLOW_H : 0);
@@ -773,67 +847,115 @@ for (const b of [1, 2]) {
         for (let n = 1; n <= 6; n++) {
           const raw = Math.floor((avail - c.SESSION_ROW_GAP * (n - 1)) / n);
           const rowH = Math.min(Math.max(raw, c.SESSION_ROW_H_MIN), c.SESSION_ROW_H_MAX);
-          const e = expandedH(c, n, avail, rowH);
-          tags.push(e ? `${n}:${e}(${expPromptLines(c, e - c.SESSION_BAND_H)}p)` : `${n}:-`);
+          // THE GRANT is what the ladder can spare and what the header documents;
+          // the HEIGHT is per content case, below. Keeping the two names apart here
+          // is the whole change: the documented table is a table of ceilings.
+          const cand = expCandidateH(c, n, avail, rowH);
+          tags.push(cand ? `${n}:<=${cand}(<=${expPromptLines(c, cand - c.SESSION_BAND_H)}p)`
+                         : `${n}:-`);
           if (!strip)
-            chk(e === EXPANDED_H[b][n - 1],
-                `${n} session(s): expanded first row ${e} == the ${EXPANDED_H[b][n - 1]} this board documents`);
-          if (!e) continue;
-          // THE WHOLE STACK STILL FITS. This is the assertion the feature can
-          // actually break: the first row grew, the others did not shrink, and the
-          // list must still end inside `avail`.
-          const used = e + (n - 1) * (rowH + c.SESSION_ROW_GAP);
-          chk(used <= avail,
-              `${strip ? "strip " : ""}${n} session(s): expanded ${e} + ${n - 1}x${rowH} + ${n - 1} gaps = ${used} <= avail ${avail} (${avail - used} left)`);
-          chk(e >= c.SESSION_EXP_MIN_H && e <= c.SESSION_EXP_MAX_H,
-              `${strip ? "strip " : ""}${n}: expanded ${e} inside [${c.SESSION_EXP_MIN_H}, ${c.SESSION_EXP_MAX_H}]`);
-          // THE ROW STACK, walked exactly as sessionRowYAt() lays it out - which is
-          // also what the touch hit test walks, so this is the assertion that says a
-          // tap and a card cannot disagree about where a row is.
-          for (let pos = 0; pos < n; pos++) {
-            const yy = rowYAt(c, pos, n, e, rowH, avail);
-            const h = pos === 0 ? e : rowH;
-            chk(yy >= c.SESSION_ROW_Y0 && yy + h <= c.SESSION_ROW_Y0 + avail,
-                `${strip ? "strip " : ""}${n}: row ${pos} ${yy}..${yy + h - 1} inside the list area ${c.SESSION_ROW_Y0}..${c.SESSION_ROW_Y0 + avail - 1}`);
-            if (pos > 0)
-              chk(yy === rowYAt(c, pos - 1, n, e, rowH, avail) +
-                        (pos === 1 ? e : rowH) + c.SESSION_ROW_GAP,
-                  `${strip ? "strip " : ""}${n}: row ${pos} starts exactly one gap below row ${pos - 1}`);
-          }
-          // A LONE expanded card is CENTRED, and the two margins are asserted equal
-          // to within the odd pixel - "card, then 198px of nothing" is what the
-          // centring exists to remove, so the number is checked rather than trusted.
-          if (n === 1) {
-            const yy = rowYAt(c, 0, 1, e, rowH, avail);
-            const above = yy - c.SESSION_ROW_Y0;
-            const below = c.SESSION_ROW_Y0 + avail - (yy + e);
-            chk(Math.abs(above - below) <= 1,
-                `${strip ? "strip " : ""}1 session: the lone card is centred - ${above}px above, ${below}px below`);
-          }
-          // THE STRIP CASES BELOW SIX SESSIONS USED TO BE SKIPPED HERE, and the
-          // skip is GONE because the thing it was standing in front of is fixed.
-          // It was legitimate at the time - hiddenCount > 0 implies
-          // sessionCount == MAX_SESSIONS (the host caps its list at 6 and only then
-          // reports more), so a strip and a band card cannot coexist, and the 185
-          // the strip produces at three sessions was 14px shorter than the band
-          // plus its packed body. But the shortfall was real: it was the
-          // SESSION_EXP_MIN_H question, the gate still being the PRE-band packed
-          // stack (180) where a band card needs 199. With the gate corrected, 185
-          // no longer expands at all - expandedH returns 0 and the `if (!e)
-          // continue` above takes it - so there is nothing left to skip, and the
-          // two strip heights that DO expand (336 and 288) now get their band
-          // tables checked like any other. An unreachable configuration is a fine
-          // reason to skip a check and a bad reason to leave one broken.
+            chk(cand === EXPANDED_H[b][n - 1],
+                `${n} session(s): the ladder's grant ${cand} == the ${EXPANDED_H[b][n - 1]} this board documents`);
+          if (!cand) continue;
+          chk(cand >= c.SESSION_EXP_MIN_H && cand <= c.SESSION_EXP_MAX_H,
+              `${strip ? "strip " : ""}${n}: grant ${cand} inside [${c.SESSION_EXP_MIN_H}, ${c.SESSION_EXP_MAX_H}]`);
+          // EVERY CONTENT CASE IS A LAYOUT OF ITS OWN, because the card's height is
+          // its content's. A case that was only ever checked at the worst-case
+          // wrap is a case whose real shape nobody looked at.
           for (const [lbl, have] of HAVE) {
-            const bands = expBands(b, c, e, have);
+            const e = expandedH(c, n, avail, rowH, have);
+            const tag = `${strip ? "strip " : ""}${n}x${e} expanded (${lbl})`;
+            // ---- THE CARD IS EXACTLY ITS CONTENT ----
+            // The assertion this defect existed for, and the one `gap >= 0` can
+            // never make: that guard is an OVERDRAW guard - it fires when a block
+            // runs INTO the one below it and says nothing at all about a block
+            // sitting 142px above it. The card's height is the body cursor's own
+            // end plus the bottom-anchored group, so there is no pixel inside the
+            // card that no block paid for.
+            const bodyEnd = expCursorEnd(c, cand, have);
+            const want = bodyEnd + (have.path ? c.SESSION_BAND_RULE_H + c.SESSION_BAND_PATH_H : 0) +
+                         c.SESSION_BAND_BOTTOM_PAD;
+            chk(e === want,
+                `${tag}: the card is ${e} = its content exactly ` +
+                `(cursor ${bodyEnd}${have.path ? ` + rule ${c.SESSION_BAND_RULE_H} + path ${c.SESSION_BAND_PATH_H}` : ""} ` +
+                `+ pad ${c.SESSION_BAND_BOTTOM_PAD} = ${want}) - no air inside it`);
+            // ... AND THE SURPLUS IS OUTSIDE IT. §4: the remainder stays as list
+            // area rather than becoming a card of air.
+            chk(e <= cand,
+                `${tag}: ${cand - e}px of the ${cand} grant stays OUTSIDE the card as list area`);
+            // THE BOTTOM ANCHOR NOW LANDS ON THE CURSOR. It is kept - flowing the
+            // path up would put the surplus at the card's bottom edge instead, which
+            // is the trailing air the 288 floor was raised to remove - so what has
+            // to be true is that the two meet, for EVERY content case and not only
+            // at the cap.
+            if (have.path)
+              chk(expAnchorTop(c, e) === bodyEnd,
+                  `${tag}: the bottom-anchored rule+path starts at ${expAnchorTop(c, e)}, exactly where the body cursor ends`);
+            // THE WHOLE STACK STILL FITS. This is the assertion the feature can
+            // actually break: the first row grew, the others did not shrink, and the
+            // list must still end inside `avail`.
+            const used = e + (n - 1) * (rowH + c.SESSION_ROW_GAP);
+            chk(used <= avail,
+                `${tag}: expanded ${e} + ${n - 1}x${rowH} + ${n - 1} gaps = ${used} <= avail ${avail} (${avail - used} left)`);
+            // A CONTENT-SHRUNK CARD MAY SIT BELOW SESSION_EXP_MIN_H - that gate is
+            // on the GRANT, i.e. on whether there is room for a card at all, not on
+            // how much of that room this one needs. What it may never do is fall
+            // under the blocks that are always drawn.
+            chk(e >= c.SESSION_BAND_H + c.SESSION_BAND_NAME_H + c.SESSION_BAND_BOTTOM_PAD,
+                `${tag}: at least the band, the name and the bottom pad`);
+            // THE ROW STACK, walked exactly as sessionRowYAt() lays it out - which is
+            // also what the touch hit test walks, so this is the assertion that says a
+            // tap and a card cannot disagree about where a row is.
+            for (let pos = 0; pos < n; pos++) {
+              const yy = rowYAt(c, pos, n, e, rowH, avail);
+              const h = pos === 0 ? e : rowH;
+              chk(yy >= c.SESSION_ROW_Y0 && yy + h <= c.SESSION_ROW_Y0 + avail,
+                  `${tag}: row ${pos} ${yy}..${yy + h - 1} inside the list area ${c.SESSION_ROW_Y0}..${c.SESSION_ROW_Y0 + avail - 1}`);
+              if (pos > 0)
+                chk(yy === rowYAt(c, pos - 1, n, e, rowH, avail) +
+                          (pos === 1 ? e : rowH) + c.SESSION_ROW_GAP,
+                    `${tag}: row ${pos} starts exactly one gap below row ${pos - 1}`);
+            }
+            // A LONE expanded card is CENTRED, and the two margins are asserted equal
+            // to within the odd pixel - "card, then 198px of nothing" is what the
+            // centring exists to remove, so the number is checked rather than trusted.
+            // It matters MORE now: a short card leaves more to centre.
+            if (n === 1) {
+              const yy = rowYAt(c, 0, 1, e, rowH, avail);
+              const above = yy - c.SESSION_ROW_Y0;
+              const below = c.SESSION_ROW_Y0 + avail - (yy + e);
+              chk(Math.abs(above - below) <= 1,
+                  `${tag}: the lone card is centred - ${above}px above, ${below}px below`);
+            }
+            // THE STRIP CASES BELOW SIX SESSIONS USED TO BE SKIPPED HERE, and the
+            // skip is GONE because the thing it was standing in front of is fixed.
+            // It was legitimate at the time - hiddenCount > 0 implies
+            // sessionCount == MAX_SESSIONS (the host caps its list at 6 and only then
+            // reports more), so a strip and a band card cannot coexist, and the 185
+            // the strip produces at three sessions was 14px shorter than the band
+            // plus its packed body. But the shortfall was real: it was the
+            // SESSION_EXP_MIN_H question, the gate still being the PRE-band packed
+            // stack (180) where a band card needs 199. With the gate corrected, 185
+            // no longer expands at all - the grant is 0 and the `if (!cand)
+            // continue` above takes it - so there is nothing left to skip, and the
+            // two strip heights that DO expand now get their band tables checked
+            // like any other. An unreachable configuration is a fine reason to skip
+            // a check and a bad reason to leave one broken.
+            const bands = expBands(b, c, e, have, cand);
             if (!strip && n === 1) {
-              console.log(`  expanded ${e} (${lbl}):`);
+              console.log(`  expanded ${e} of ${cand} (${lbl}):`);
               for (const [nm, a, z] of bands) console.log(`    ${nm.padEnd(18)} +${a}..+${z}`);
             }
             for (let i = 1; i < bands.length; i++) {
               const gap = bands[i][1] - bands[i - 1][2] - 1;
-              chk(gap >= 0,
-                  `${strip ? "strip " : ""}${n}x${e} expanded (${lbl}): ${bands[i - 1][0]} -> ${bands[i][0]} gap ${gap}`);
+              chk(gap >= 0, `${tag}: ${bands[i - 1][0]} -> ${bands[i][0]} gap ${gap}`);
+              // ... AND NO GAP IS A HOLE. The largest legitimate space between two
+              // blocks' ink is one block's own leading; anything past that is space
+              // the layout did not intend, which is exactly what a budgeted-but-
+              // unwrapped prompt line pooled. Derived from the parsed blocks, not
+              // transcribed: the widest leading any block carries.
+              chk(gap <= MAX_LEAD,
+                  `${tag}: ${bands[i - 1][0]} -> ${bands[i][0]} gap ${gap} <= the widest block leading ${MAX_LEAD}`);
             }
           }
         }
@@ -921,8 +1043,15 @@ for (const b of [1, 2]) {
        /drawString\("LAST PROMPT", nameX, cy\);[\s\S]{0,40}?cy \+= SESSION_BAND_LABEL_H;/],
       ["the prompt is wrapped at SESSION_BAND_PROMPT_STEP",
        /drawWrappedText\(s\.prompt[\s\S]{0,200}?SESSION_BAND_PROMPT_STEP/],
-      ["the prompt's budget subtracts the band from the row",
-       /sessionExpPromptLines\(rowH - SESSION_BAND_H\)/],
+      // THE DRAW READS THE COUNT ITS CARD'S HEIGHT WAS DERIVED FROM. It used to
+      // re-derive one from rowH, which was right while rowH was the ladder's grant
+      // and is circular now that rowH IS the content's height: a card missing a
+      // block is shorter, so the budget read back off it comes out UNDER the lines
+      // the height already paid for, and the card opens a hole in the space it
+      // had already spent. The budget itself has not gone anywhere - see the
+      // sessionExpMeasure() assertions below.
+      ["the prompt line count is the MEASURED one, not one re-derived from rowH",
+       /drawWrappedText\(s\.prompt[\s\S]{0,300}?expCardPrompt/],
       ["the path is BOTTOM-ANCHORED off SESSION_BAND_BOTTOM_PAD + SESSION_BAND_PATH_H",
        /pathTop = y \+ rowH - SESSION_BAND_BOTTOM_PAD - SESSION_BAND_PATH_H;/],
       ["the second rule sits one SESSION_BAND_RULE_H above the path",
@@ -930,6 +1059,64 @@ for (const b of [1, 2]) {
     ];
     for (const [what, re] of DRAW_SITES)
       chk(re.test(drawSrc), `the expanded draw reads its own block: ${what}`);
+    chk(!/sessionExpPromptLines\(rowH/.test(drawSrc),
+        `... and does NOT re-derive the budget from rowH, which is now the content's own height`);
+
+    // ---- sessionExpMeasure(): THE HEIGHT IS THE SAME BLOCK STACK THE DRAW WALKS ----
+    // The card is as tall as what it draws, so the measurement and the draw are two
+    // readings of ONE stack and a term present in either and missing from the other
+    // is a hole or an overdraw. Parsed, for the reason every other site here is: a
+    // model of this arithmetic would go on agreeing with itself after the firmware
+    // stopped agreeing with it.
+    {
+      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const a = src.indexOf("void sessionExpMeasure(");
+      if (a < 0) throw new Error("sessionExpMeasure() not found in sessions.ino");
+      const m = src.slice(a, src.indexOf("\n}\n", a)).replace(/^[ \t]*\/\/.*$/gm, "");
+      const MEASURE_SITES = [
+        ["opens with the band and the name, the two blocks every card draws",
+         /int h = SESSION_BAND_H \+ SESSION_BAND_NAME_H;/],
+        ["adds SESSION_BAND_SUB_H only when there is a sub-line",
+         /if \(sub\[0\]\) h \+= SESSION_BAND_SUB_H;/],
+        ["counts the title's REAL wrapped lines, capped at SESSION_EXP_TITLE_LINES",
+         /countWrappedLines\(s\.title, T_BODY, lane\)[\s\S]{0,160}?SESSION_EXP_TITLE_LINES[\s\S]{0,120}?h \+= n \* SESSION_BAND_TITLE_STEP;/],
+        ["counts the prompt's REAL wrapped lines",
+         /countWrappedLines\(s\.prompt, T_BODY, lane\)/],
+        ["... capped by sessionExpPromptLines() against the GRANT less the band",
+         /sessionExpPromptLines\(cand - SESSION_BAND_H\)/],
+        ["the prompt block is its rule, its caption and its lines",
+         /h \+= SESSION_BAND_RULE_H \+ SESSION_BAND_LABEL_H \+ n \* SESSION_BAND_PROMPT_STEP;/],
+        ["the path block is its own rule plus SESSION_BAND_PATH_H",
+         /if \(s\.path\[0\]\) h \+= SESSION_BAND_RULE_H \+ SESSION_BAND_PATH_H;/],
+        ["and it closes on SESSION_BAND_BOTTOM_PAD",
+         /h \+= SESSION_BAND_BOTTOM_PAD;/],
+        ["the grant is the ceiling, never exceeded",
+         /expCardH = h > cand \? cand : h;/],
+        ["the count the draw reads is the count the height was derived from",
+         /expCardPrompt = n;/],
+      ];
+      for (const [what, re] of MEASURE_SITES)
+        chk(re.test(m), `sessionExpMeasure() ${what}`);
+      // AND sessionExpandedH() TAKES THE SMALLER OF THE TWO. Without this the
+      // measurement above could be computed, stored, and never applied - which is
+      // exactly the shape of the defect it exists to fix.
+      const eh = src.slice(src.indexOf("int sessionExpandedH("));
+      chk(/expCardH > 0 && expCardH < cand[\s\S]{0,40}?expCardH : cand/.test(eh.slice(0, eh.indexOf("\n}\n"))),
+          `sessionExpandedH() returns the CONTENT's height when it is under the ladder's grant`);
+      // ---- A HEIGHT CHANGE IS A LAYOUT CHANGE ----
+      // The card's height now moves without the session COUNT moving, and the row
+      // signatures cannot carry that: row 0 repaints (its prompt is in its
+      // signature) at its new height, and every row BELOW it keeps the y it was
+      // drawn at, with the tail of the old card still on the glass. So the height
+      // gets its own cache and the same wholesale rebuild the count gets. Parsed,
+      // because nothing geometric here can see a stale row.
+      const rl = src.slice(src.indexOf("void renderSessionsList("));
+      const rlBody = rl.slice(0, rl.indexOf("\nvoid "));
+      chk(/sessionExpMeasure\(\);/.test(rlBody),
+          `renderSessionsList() measures the band card ONCE per pass, before anything reads the geometry`);
+      chk(/expNow != expHCache[\s\S]{0,120}?fillRect\(0, CONTENT_Y[\s\S]{0,200}?rowSigCache\[i\]\[0\] = '\\0'/.test(rlBody),
+          `... and a CHANGE of that height clears the list and drops every row signature, the same rebuild a count change gets`);
+    }
     // Both rules are drawn, and through the one helper - a rule inlined as a
     // fillRect at a second site is how the two would come to differ in colour or
     // in lane, and the lane is what makes the three left edges line up.
