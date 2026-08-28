@@ -1828,6 +1828,7 @@ void drawWaitingScreen() {
 
 void drawStatusDot(int cx, int cy, int r, const char* status, uint16_t bg = COLOR_BG,
                    bool codex = false) {
+#if BOARD_USES_TFT_ESPI
   uint16_t color = colorForStatus(status);
   if (strcmp(status, "working") == 0) { drawAgentSpinner(cx, cy, bg, codex); return; }
   tft.fillRect(cx - r - 1, cy - r - 1, r * 2 + 2, r * 2 + 2, bg);
@@ -1836,6 +1837,37 @@ void drawStatusDot(int cx, int cy, int r, const char* status, uint16_t bg = COLO
   } else {
     uiRing(cx, cy, r, 2, color, bg);
   }
+#else
+  // BOARD 2: THE AGENT MARK IS THE INDICATOR AT EVERY STATUS, not only while
+  // working. It used to be a spark for `working` and an anonymous square or ring
+  // otherwise, so the one thing the row could say about WHICH AGENT is running
+  // vanished at exactly the two statuses a person acts on.
+  //
+  // Colour is unavailable to the agent - status owns it, at the band, the spine
+  // and the pill, all of them colorForStatus - so the agent is carried by SHAPE
+  // (spark vs Codex mark), by the spine's texture, and by the CC/CX tag. Three
+  // carriers, none of them hue, redundant on purpose.
+  //
+  // WHAT THIS SPENDS, stated rather than discovered later: `asking` and `waiting`
+  // no longer differ by shape AT THE INDICATOR. They still differ by the pill,
+  // which is a FILLED capsule against an OUTLINED one plus the words NEEDS INPUT
+  // against READY - a luminance-and-shape code that survives greyscale, checked on
+  // the glass rather than argued. The indicator was never the only carrier.
+  //
+  // AT REST THE MARK IS FRAME 0 AT LABEL STRENGTH. Neither table has an idle frame
+  // - both are 8 MOTION frames - so a held motion frame can read as accidental.
+  // Dimming it is the spec's own stated fallback and needs no new art; a real rest
+  // pose is a separate change requiring a generator run (Codex's needs headless
+  // Chrome, which this toolchain has no substitute for).
+  //
+  // SPARK_SIZE / 2, never a literal 16: the same centre drawAgentSpinner drew on,
+  // so the indicator does not jump sideways when a session changes status, and so
+  // the checker's blit-clearance model still describes what is drawn.
+  const bool working = strcmp(status, "working") == 0;
+  drawAgentMark(cx - SPARK_SIZE / 2, cy - SPARK_SIZE / 2, codex,
+                working ? colorForStatus(status) : COLOR_LABEL, bg, working);
+  (void) r;   // the shape vocabulary's radius; board 2 draws a fixed-size mark
+#endif
 }
 
 void drawBar(int* cache, int x, int y, int w, int h, int pct, uint16_t fg) {

@@ -963,10 +963,17 @@ for (const b of [1, 2]) {
             `spine on a ${rowH}px row: gap +${a}..+${z} is inside the straight section +${g.r}..+${g.h - g.r - 1}`);
     }
     // IT CLEARS EVERYTHING THE ROW ALREADY DRAWS, which is what makes this a
-    // second carrier rather than a replacement. The spinner is a 32x32 BLIT that
+    // second carrier rather than a replacement. The mark is a 32x32 BLIT that
     // paints its own COLOR_CARD background across its whole rect, so any spine ink
-    // inside it is erased four times a second - the same class of defect
-    // SESSION_DOT_CX exists for, and the reason that constant is named at all.
+    // inside it is erased - the same class of defect SESSION_DOT_CX exists for,
+    // and the reason that constant is named at all.
+    //
+    // THIS ASSERTION USED TO BE PRECAUTIONARY AND IS NOW LOAD-BEARING. The blit
+    // was once a WORKING-row thing, so a spine on a waiting or asking row met no
+    // blit at all and the clearance was slack nobody was spending. drawStatusDot
+    // now draws the mark at every status on this board, so every spine on the tab
+    // sits beside a live 32x32 blit and this is the only thing standing between
+    // the two.
     //
     // MODELLED FROM THE CAPSULE, NOT FROM A RECT. `spineL + SESSION_SPINE_W - 1`
     // is the rect model, and it is the wrong one: it reports 19 while a band that
@@ -1026,6 +1033,44 @@ for (const b of [1, 2]) {
           "the TALL row still draws its status pill - the spine is a second carrier, never the only one");
       chk(/drawStatusPill\(SESSION_ROW_X \+ SESSION_ROW_W - 16, y \+ SESSION_PILLC_Y, label, s\.status, true\);/.test(src),
           "the COMPACT row still draws its status pill - the spine is a second carrier, never the only one");
+    }
+    // ---- the agent mark is the indicator at EVERY status, not only working ----
+    // drawStatusDot used to fall through to an anonymous square or ring for
+    // `asking` and `waiting`, so the row said WHICH AGENT only while it happened
+    // to be busy. The board-2 branch now draws the mark unconditionally.
+    //
+    // WHAT THIS SPENDS is asserted a few lines up rather than here: with the mark
+    // at every status, `asking` and `waiting` no longer differ by shape AT THE
+    // INDICATOR, and the two drawStatusPill assertions above are what say the
+    // filled-vs-outlined carrier survives. Deleting either of them now costs the
+    // distinction outright, where before it only cost a duplicate.
+    {
+      const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+      const fn = src.slice(src.indexOf("void drawStatusDot("));
+      const body = fn.slice(0, fn.indexOf("\n}\n"));
+      const i2 = body.indexOf("#else"), i3 = body.indexOf("#endif");
+      chk(i2 > 0 && i3 > i2, "drawStatusDot splits on BOARD_USES_TFT_ESPI");
+      const b1 = body.slice(0, i2), b2 = body.slice(i2, i3);
+      // Board 1's half is held byte-identical by board-baseline.mjs; this only
+      // says the shape vocabulary is still THERE, so a future tidy-up that
+      // collapsed both boards onto the mark would fail here and not merely move
+      // a binary somebody might re-baseline.
+      chk(/uiRing\(cx, cy, r, 2, color, bg\);/.test(b1) && /drawAgentSpinner\(cx, cy, bg, codex\)/.test(b1),
+          "board 1 keeps its square/ring/spinner vocabulary untouched");
+      chk(/drawAgentMark\(/.test(b2),
+          "board 2 draws the agent mark from drawStatusDot");
+      // The point of the change: NO status-conditional shape is left on board 2.
+      chk(!/uiRing\(|fillRect\(/.test(b2),
+          "board 2's branch has NO square and NO ring left - the mark is the indicator at every status");
+      // SPARK_SIZE / 2, never the literal 16. That literal was already dug out of
+      // three sites once; a fourth would put the indicator's origin out of step
+      // with the blit-clearance model above the moment the art changed size.
+      chk(/drawAgentMark\(cx - SPARK_SIZE \/ 2, cy - SPARK_SIZE \/ 2,/.test(b2),
+          "the mark's origin is derived from SPARK_SIZE, not a transcribed 16");
+      // The rest pose, which is the part a reader will be tempted to simplify:
+      // dim and unanimated, full status colour and animated only while working.
+      chk(/working \? colorForStatus\(status\) : COLOR_LABEL, bg, working\);/.test(b2),
+          "at rest the mark is COLOR_LABEL and unanimated; while working it is the status colour and animated");
     }
   }
 
