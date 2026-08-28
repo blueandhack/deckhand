@@ -961,6 +961,7 @@ struct PrevSession {
   char askVoiceCancelSha[20];
   bool hadVoiceText;   // askVoiceText is only ever tested for non-empty
 };
+bool sessionSortsBefore(const SessionInfo& b, const SessionInfo& a, unsigned long now);
 SessionInfo sessions[MAX_SESSIONS];
 int sessionCount = 0;
 // The host sends at most MAX_SESSIONS (urgency-sorted: asking > waiting >
@@ -3193,15 +3194,24 @@ int sessionAt(int displayPos) {
   if (displayPos < 0 || displayPos >= sessionCount) return -1;
   return sessionOrder[displayPos];
 }
+// Does b sort BEFORE a? Pure by construction - no globals, and the clock arrives as
+// an argument rather than being read inside. Two reasons, both load-bearing: one
+// sort must see ONE instant (a clock advancing between comparisons makes the
+// comparator inconsistent with itself), and a comparator with no clock in it can be
+// exercised off-device, which is the only way the millis() wrap case is ever tested.
+// Same reason run-ledger.mjs and capUtf8 are their own units.
+bool sessionSortsBefore(const SessionInfo& b, const SessionInfo& a, unsigned long now) {
+  (void) now;  // used by the asking tie-break, added next
+  int ra = urgencyRank(a.status), rb = urgencyRank(b.status);
+  if (rb != ra) return rb < ra;
+  return b.actSec > a.actSec;
+}
 void reorderSessions() {
+  const unsigned long now = millis();  // ONCE per sort, never per comparison
   for (int i = 0; i < sessionCount; i++) sessionOrder[i] = i;
   for (int i = 1; i < sessionCount; i++) {
     for (int j = i; j > 0; j--) {
-      const SessionInfo& a = sessions[sessionOrder[j - 1]];
-      const SessionInfo& b = sessions[sessionOrder[j]];
-      int ra = urgencyRank(a.status), rb = urgencyRank(b.status);
-      bool swap = (rb < ra) || (rb == ra && b.actSec > a.actSec);
-      if (!swap) break;
+      if (!sessionSortsBefore(sessions[sessionOrder[j]], sessions[sessionOrder[j - 1]], now)) break;
       uint8_t t = sessionOrder[j - 1]; sessionOrder[j - 1] = sessionOrder[j]; sessionOrder[j] = t;
     }
   }
