@@ -116,7 +116,11 @@ void sessionExpMeasure() {
   const int i = sessionAt(0);
   if (i < 0 || i >= sessionCount) return;
   const SessionInfo& s = sessions[i];
-  const int lane = SESSION_SUB_LANE_W;   // the row's own measured text lane
+  // THE LANE THE DRAW WRAPS AT, not the ordinary row's. The two must be the same
+  // number or this measurement and drawSessionRow disagree about where a line
+  // breaks - and since the card's HEIGHT is this sum, a disagreement changes the
+  // card's SIZE, not merely its text.
+  const int lane = SESSION_BAND_BODY_LANE;
   char sub[36];
   buildSessionSubline(i, sub, sizeof(sub));
   int h = SESSION_BAND_H + SESSION_BAND_NAME_H;
@@ -923,7 +927,15 @@ void drawSessionRow(int pos) {
   // this is the expression it always was.
   bool showTitle = (large && rowH >= SESSION_TITLE_MIN_H && s.title[0]) || expanded;
 
-  const int nameX = SESSION_ROW_X + SESSION_NAME_DX;
+  int nameX = SESSION_ROW_X + SESSION_NAME_DX;
+#if !BOARD_USES_TFT_ESPI
+  // SESSION_NAME_DX's 40px are the 32x32 row-indicator blit's clearance, and the
+  // band card draws no indicator - its mark is up in the band - so on that card
+  // they reserve space for nothing and push every body line 24px right of the
+  // band it hangs under. The body starts at the band's own content left edge
+  // instead; see SESSION_BAND_BODY_X. Board 1's expression is untouched.
+  if (expanded) nameX = SESSION_BAND_BODY_X;
+#endif
   // Built ONCE, then both DRAWN (below) and MEASURED (laneRight, right here) from this
   // same buffer - a tag measured from one string and drawn from another is exactly the
   // 8px overlap the measured lane was written to fix. Mac tag on the same principle as
@@ -955,7 +967,9 @@ void drawSessionRow(int pos) {
   // skipped there, because the band carries the agent mark and the sub-line
   // spells the Mac out - so reserving their width would shrink a name lane
   // against a blocker that is not drawn.
-  if (expanded) laneRight = SESSION_ROW_X + SESSION_ROW_W - 12;
+  // The right edge is the band's too, so the name's lane is exactly the band's
+  // content box - one inset, SESSION_BAND_PAD, on both sides of both.
+  if (expanded) laneRight = SESSION_BAND_BODY_X + SESSION_BAND_BODY_LANE;
 #endif
   int laneW = laneRight - nameX - 6; // 6px so the name never kisses the tag/pill
 
@@ -1047,7 +1061,9 @@ void drawSessionRow(int pos) {
     // The card still repaints WHOLESALE - no drawIfChanged is introduced on a row
     // - which is why no clear box here can reach a row border.
     if (expanded) {
-      const int lane = SESSION_SUB_LANE_W;   // the row's own measured text lane
+      // The band's own content lane, shared with sessionExpMeasure(); every block
+      // below starts at nameX, which is that lane's left edge.
+      const int lane = SESSION_BAND_BODY_LANE;
       int cy = nameTop + SESSION_BAND_NAME_H;
       if (sub[0]) {
         setUIFont(T_META);
@@ -1059,8 +1075,8 @@ void drawSessionRow(int pos) {
       }
       if (s.title[0]) {
         // WRAPPED, not fitText: title[44] holds 43 characters = 344px against a
-        // 244px lane, so the one thing this card has room to do properly is show
-        // the whole title. Two lines hold 60.
+        // 264px lane, so the one thing this card has room to do properly is show
+        // the whole title. Two lines hold 66.
         // The RETURNED y, not the budgeted line count: drawWrappedText hands back
         // the row below its last drawn line at SESSION_BAND_TITLE_STEP, so a
         // title that happens to fit on one line does not leave a 20px hole above

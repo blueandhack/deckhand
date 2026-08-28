@@ -845,6 +845,20 @@ const int SESSION_OVERFLOW_H = 19;
 const int SESSION_BAND_H = 44;
 const int SESSION_BAND_PAD = 14;        // side pad, band and body share it
 const int SESSION_BAND_MARK_GAP = 8;    // agent mark -> status word
+// THE BODY'S OWN LEFT EDGE AND LANE - "band and body share it", made true.
+// The body used to be drawn at SESSION_ROW_X + SESSION_NAME_DX (52), which is the
+// ORDINARY row's name origin: 40px of clearance for the 32x32 row indicator blit.
+// The band card does not draw that indicator - the band carries the mark - so
+// those 40px were reserved for nothing, and the body hung 24px right of the band
+// above it. Visible on the glass, and every body line lost 24px = 3 characters at
+// TEXT_ADV on the one card whose entire job is showing text.
+// Derived from the band's own box rather than restated: the band is drawn on the
+// card INTERIOR (x + BORDER_CARD, w - 2*BORDER_CARD) and pads SESSION_BAND_PAD
+// inside that, so the body's left edge IS bandMarkX()'s and its lane IS the band's
+// content width. 12 + 2 + 14 = 28, and 296 - 4 - 28 = 264 = 33 characters at
+// TEXT_ADV 8, against the 30 the old 244px lane gave.
+const int SESSION_BAND_BODY_X = SESSION_ROW_X + BORDER_CARD + SESSION_BAND_PAD;
+const int SESSION_BAND_BODY_LANE = SESSION_ROW_W - 2 * BORDER_CARD - 2 * SESSION_BAND_PAD;
 // THE DURATION'S LANE IS FIXED, AND 3 IS WHAT THE WORD LEAVES IT. The duration is
 // a change-only field like every other on this device, so its clear box has to be
 // a CONSTANT width - a box measured from the current value is a box that grows

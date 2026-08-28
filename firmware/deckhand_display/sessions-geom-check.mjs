@@ -794,7 +794,12 @@ for (const b of [1, 2]) {
           `an expanded row (>= ${c.SESSION_EXP_MIN_H}) is always a title row (>= ${c.SESSION_TITLE_MIN_H})`);
       // THE CAP IS THE FIELD'S BYTE CAP, MEASURED. A prompt line past this could
       // never carry ink, and one short of it cuts the field the card exists for.
-      const adv = advanceB(b, T_BODY), lane = c.SESSION_SUB_LANE_W;
+      // THE BAND CARD'S OWN LANE, NOT THE ORDINARY ROW'S. This read
+      // SESSION_SUB_LANE_W (the compact row's name-origin lane, 244) while the
+      // body is inset by the BAND's pad on both sides - so it modelled a lane
+      // 20px narrower than the one drawWrappedText wraps at, and every character
+      // budget below was measured against a card that is not this one.
+      const adv = advanceB(b, T_BODY), lane = c.SESSION_BAND_BODY_LANE;
       const perLine = Math.floor(lane / adv);
       chk(c.SESSION_EXP_PROMPT_MAX * perLine >= CAP.prompt - 3,
           `prompt: ${c.SESSION_EXP_PROMPT_MAX} lines hold ${c.SESSION_EXP_PROMPT_MAX * perLine} of ${CAP.prompt - 3} chars (lane ${lane}px = ${perLine}/line at ${adv}px)`);
@@ -988,7 +993,11 @@ for (const b of [1, 2]) {
 
     // The two byte caps that bound the line counts. These are the reason the sum is
     // what it is: a 5th prompt line and a 3rd title line can never carry ink.
-    const lane = Math.floor((c.SESSION_ROW_W - 2 * B2("PAD")) / c.TEXT_ADV);
+    // SESSION_BAND_BODY_LANE, not ROW_W - 2*PAD: that approximation forgot the
+    // card's own 2px border, which the band is drawn INSIDE. Same column count
+    // here (33 either way), which is exactly why it survived - a model that is
+    // right by 4px of luck is one field change from being wrong.
+    const lane = Math.floor(c.SESSION_BAND_BODY_LANE / c.TEXT_ADV);
     chk(lane * c.SESSION_EXP_PROMPT_MAX >= 100,
         `a 5th prompt line is unreachable: prompt[104] holds 100 chars, ` +
         `${c.SESSION_EXP_PROMPT_MAX} lines x ${lane} cols = ${lane * c.SESSION_EXP_PROMPT_MAX}`);
@@ -1001,6 +1010,51 @@ for (const b of [1, 2]) {
         `4 prompt lines is the MINIMUM that holds prompt[104]`);
     chk(lane * (c.SESSION_EXP_TITLE_LINES - 1) < 43,
         `2 title lines is the MINIMUM that holds title[44]`);
+
+    // ---- THE BODY HANGS UNDER THE BAND, so it starts where the band's ink does ----
+    // THE DEFECT THIS EXISTS FOR, reported off the glass: the body was drawn at
+    // SESSION_ROW_X + SESSION_NAME_DX - the ORDINARY row's name origin, whose 40px
+    // are clearance for the 32x32 row-indicator blit. The band card draws no
+    // indicator (its mark is in the band), so those pixels were reserved for
+    // nothing and every body line sat 24px right of the band above it, losing 3
+    // characters a line on the card whose whole job is text.
+    //
+    // The band's own two edges are PARSED rather than restated, because that is
+    // the pair this has to agree with: the mark's origin comes from bandMarkX()
+    // applied to the x drawSessionRow passes, and the right edge from the
+    // duration's own right-aligned datum. A model of "14 from the interior" would
+    // go on agreeing with itself after either moved.
+    {
+      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      chk(/drawSessionBand\(SESSION_ROW_X \+ BORDER_CARD, y \+ BORDER_CARD,\s*\n?\s*SESSION_ROW_W - 2 \* BORDER_CARD/.test(src),
+          "the band is drawn on the card INTERIOR (SESSION_ROW_X + BORDER_CARD, " +
+          "SESSION_ROW_W - 2*BORDER_CARD) - which is what the body's edges are measured from");
+      chk(/int bandMarkX\(int x\) \{ return x \+ SESSION_BAND_PAD; \}/.test(src),
+          "the band's mark sits SESSION_BAND_PAD inside that interior (bandMarkX)");
+      chk(/drawString\(dur, x \+ w - SESSION_BAND_PAD, y \+ bandDurDY\(\)\);/.test(src),
+          "and the band's duration is right-aligned SESSION_BAND_PAD inside it");
+      const interiorL = c.SESSION_ROW_X + c.BORDER_CARD;
+      const interiorR = c.SESSION_ROW_X + c.SESSION_ROW_W - c.BORDER_CARD;
+      const markX = interiorL + c.SESSION_BAND_PAD;
+      const durR = interiorR - c.SESSION_BAND_PAD;
+      chk(c.SESSION_BAND_BODY_X === markX,
+          `the body's left edge x=${c.SESSION_BAND_BODY_X} IS the band's own content left edge ` +
+          `(bandMarkX = ${interiorL} + ${c.SESSION_BAND_PAD} = ${markX})`);
+      chk(c.SESSION_BAND_BODY_X + c.SESSION_BAND_BODY_LANE === durR,
+          `and its lane ends x=${c.SESSION_BAND_BODY_X + c.SESSION_BAND_BODY_LANE} on the band's own ` +
+          `right pad edge (${interiorR} - ${c.SESSION_BAND_PAD} = ${durR}) - one inset, both sides, both halves of the card`);
+      // The old origin, named so a revert cannot pass quietly.
+      chk(c.SESSION_BAND_BODY_X < c.SESSION_ROW_X + c.SESSION_NAME_DX,
+          `the body does NOT reserve the row indicator's ${c.SESSION_NAME_DX}px: it starts ` +
+          `${c.SESSION_ROW_X + c.SESSION_NAME_DX - c.SESSION_BAND_BODY_X}px left of the ordinary row's name origin, ` +
+          `which is ${Math.floor((c.SESSION_ROW_X + c.SESSION_NAME_DX - c.SESSION_BAND_BODY_X) / c.TEXT_ADV)} characters a line`);
+      chk(c.SESSION_BAND_BODY_X >= interiorL,
+          `and it still clears the card's own border (x=${c.SESSION_BAND_BODY_X} >= interior ${interiorL})`);
+      console.log(`    band card body: x=${c.SESSION_BAND_BODY_X} lane=${c.SESSION_BAND_BODY_LANE}px = ` +
+                  `${Math.floor(c.SESSION_BAND_BODY_LANE / c.TEXT_ADV)} chars ` +
+                  `(was x=${c.SESSION_ROW_X + c.SESSION_NAME_DX} lane=${c.SESSION_SUB_LANE_W}px = ` +
+                  `${Math.floor(c.SESSION_SUB_LANE_W / c.TEXT_ADV)})`);
+    }
 
     // ---- THE BODY'S DRAW SITES, PARSED - not modelled ----
     // EVERYTHING ABOVE MODELS THE LAYOUT AND NONE OF IT READS THE CODE, which is
@@ -1029,6 +1083,14 @@ for (const b of [1, 2]) {
     const DRAW_SITES = [
       ["the body starts where the band ends",
        /nameTop = y \+ SESSION_BAND_H;/],
+      // THE LEFT EDGE, and it is the whole point of the block above: the body
+      // takes the band's origin, not the ordinary row's name origin.
+      ["the body's left edge is the band's, not SESSION_NAME_DX",
+       /if \(expanded\) nameX = SESSION_BAND_BODY_X;/],
+      ["the name's lane runs to the band's right edge too",
+       /if \(expanded\) laneRight = SESSION_BAND_BODY_X \+ SESSION_BAND_BODY_LANE;/],
+      ["every block below wraps at SESSION_BAND_BODY_LANE",
+       /const int lane = SESSION_BAND_BODY_LANE;/],
       ["the name is centred in SESSION_BAND_NAME_H",
        /nameOffset = \(SESSION_BAND_NAME_H - uiLineH\(nameFont\)\) \/ 2;/],
       ["the body cursor opens below the name block",
@@ -1074,6 +1136,11 @@ for (const b of [1, 2]) {
       if (a < 0) throw new Error("sessionExpMeasure() not found in sessions.ino");
       const m = src.slice(a, src.indexOf("\n}\n", a)).replace(/^[ \t]*\/\/.*$/gm, "");
       const MEASURE_SITES = [
+        // THE SAME LANE THE DRAW WRAPS AT. Not a matching number - the same
+        // identifier: the card's HEIGHT is this sum, so a lane that differs from
+        // the draw's changes the card's SIZE, not merely where its text breaks.
+        ["wraps at SESSION_BAND_BODY_LANE, the lane the draw uses",
+         /const int lane = SESSION_BAND_BODY_LANE;/],
         ["opens with the band and the name, the two blocks every card draws",
          /int h = SESSION_BAND_H \+ SESSION_BAND_NAME_H;/],
         ["adds SESSION_BAND_SUB_H only when there is a sub-line",
