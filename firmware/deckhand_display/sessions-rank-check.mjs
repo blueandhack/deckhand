@@ -115,6 +115,12 @@ eq("equal keys keep arrival order (stable sort)",
    order([S("first", "working", { actSec: 500 }), S("second", "working", { actSec: 500 })], NOW),
    ["first", "second"]);
 
+// Everything above this line runs a JS MIRROR of the comparator: it proves the
+// algorithm, not the sketch. Only the structural assertions below read the real
+// source text, so the count is split in the final report rather than lumped
+// together as one undifferentiated "N assertions pass".
+const MIRROR_COUNT = count;
+
 // ---------- selftest ----------
 // The same teeth-proving convention as palette-check.mjs --selftest: re-run the
 // ordering scenarios against the comparator this change REPLACED, and exit 0 only
@@ -126,6 +132,9 @@ if (process.argv.includes("--selftest")) {
       () => order([S("fresh", "asking", { since: NOW - 5_000 }),
                    S("stale", "asking", { since: NOW - 1_200_000 })], NOW, true),
       ["stale", "fresh"]],
+    // actSec differs here (100/900) even though the main-scenario case of the same
+    // name does not: the legacy comparator's tie-break reads actSec, so with no
+    // difference in actSec this case would pass under BOTH rules and prove nothing.
     ["two asking: order of arrival does not decide it",
       () => order([S("stale", "asking", { since: NOW - 1_200_000, actSec: 100 }),
                    S("fresh", "asking", { since: NOW - 5_000, actSec: 900 })], NOW, true),
@@ -153,19 +162,67 @@ if (process.argv.includes("--selftest")) {
 // repo documents, none of these lines sits behind an #if, so nothing can delete the
 // line the regex just found.
 function structural(label, ok) { count++; if (!ok) fails.push(label); }
-structural("sessionSortsBefore() exists and takes `now` as an argument (no clock inside)",
-  /bool\s+sessionSortsBefore\s*\(\s*const\s+SessionInfo&\s*\w+\s*,\s*const\s+SessionInfo&\s*\w+\s*,\s*unsigned\s+long\s+now\s*\)/.test(SRC));
-structural("reorderSessions() samples millis() exactly ONCE (a clock that advances mid-sort makes the comparator inconsistent)",
-  (SRC.slice(SRC.indexOf("void reorderSessions("),
-             SRC.indexOf("\n}", SRC.indexOf("void reorderSessions("))).match(/millis\(\)/g) || []).length === 1);
-structural("the asking tie-break compares ELAPSED, not raw stamps (millis() wraps at ~49.7 days)",
-  /now\s*-\s*\w+\.statusSinceMillis\s*\)\s*>\s*\(\s*now\s*-\s*\w+\.statusSinceMillis/.test(SRC));
+// Strip `//` line comments before scanning a body for a real call - sessionSortsBefore's
+// own body TALKS ABOUT millis() in a comment ("millis() wraps at ~49.7 days") without
+// calling it, and a naive substring/regex test over the raw body would count that
+// prose as a clock read.
+const stripLineComments = (s) => s.replace(/\/\/[^\n]*/g, "");
+
+// The parameter names `b` and `a` are pinned here deliberately, not left as `\w+`.
+// Assertion 3 below assumes "b" is the earlier-declared parameter and reads the
+// tie-break's operand order off THOSE NAMES, so this signature match is what makes
+// that assumption true rather than merely convenient. With `\w+` in both slots this
+// assertion (and assertion 3) passed just as happily for a signature with the
+// parameters swapped or renamed - it proved nothing about which one is "b".
+// Strengthened per F4: also reads no clock of its own in its BODY, not merely in
+// its signature - a stray `now = millis();` inside the function would otherwise
+// pass unnoticed, since the original label claimed that without checking it.
+{
+  const sigOk = /bool\s+sessionSortsBefore\s*\(\s*const\s+SessionInfo&\s*b\s*,\s*const\s+SessionInfo&\s*a\s*,\s*unsigned\s+long\s+now\s*\)/.test(SRC);
+  const defAt = SRC.indexOf("bool sessionSortsBefore(const SessionInfo& b, const SessionInfo& a, unsigned long now) {");
+  const endAt = defAt >= 0 ? SRC.indexOf("\n}", defAt) : -1;
+  const bodyOk = defAt >= 0 && endAt > defAt && !/millis\(\)/.test(stripLineComments(SRC.slice(defAt, endAt)));
+  structural("sessionSortsBefore(b, a, now) takes `now` as an argument and reads no clock of its own in its body",
+    sigOk && bodyOk);
+}
+
+// Anchored on the DEFINITION ("... reorderSessions() {"), not merely on the name.
+// `SRC.indexOf("void reorderSessions(")` also matches a plain forward DECLARATION
+// (this file already has one for sessionSortsBefore, at deckhand_display.ino:967,
+// the documented Arduino-prototype remedy) - and if reorderSessions() ever grows
+// one too, that indexOf finds the declaration first and slices ~200 unrelated
+// lines after it instead of the real function body. Those happen to contain
+// exactly one millis() today, so the assertion would pass BY COINCIDENCE while
+// checking nothing - and a millis() deleted from the real function would go
+// unnoticed. The sliced region is also asserted to contain `sessionOrder`, so a
+// mis-anchored slice fails LOUDLY (wrong body) rather than passing by luck.
+{
+  const defAt = SRC.indexOf("void reorderSessions() {");
+  const endAt = defAt >= 0 ? SRC.indexOf("\n}", defAt) : -1;
+  const body = defAt >= 0 && endAt > defAt ? SRC.slice(defAt, endAt) : "";
+  const anchoredRight = defAt >= 0 && endAt > defAt && body.includes("sessionOrder");
+  const millisOnce = (stripLineComments(body).match(/millis\(\)/g) || []).length === 1;
+  structural("reorderSessions() samples millis() exactly ONCE (a clock that advances mid-sort makes the comparator inconsistent)",
+    anchoredRight && millisOnce);
+}
+
+// Operands are pinned to `b` then `a`, not `\w+` then `\w+`. The inverted
+// comparison `(now - a.statusSinceMillis) > (now - b.statusSinceMillis)` -
+// shortest-waiting-first, exactly backwards, the very regression this whole
+// change exists to prevent - matched the old `\w+`/`\w+` pattern just as well as
+// the correct order, so inverting the two operands in deckhand_display.ino left
+// this assertion (and the whole checker) reporting green. See the checker's
+// --selftest-adjacent proof in the commit history / final-fix-report.md for the
+// before/after run that demonstrates this assertion now catches it.
+structural("the asking tie-break compares ELAPSED(b) > ELAPSED(a), not the reverse (b sorts before a when b has waited LONGER)",
+  /now\s*-\s*b\.statusSinceMillis\s*\)\s*>\s*\(\s*now\s*-\s*a\.statusSinceMillis/.test(SRC));
 
 // ---------- report ----------
+const STRUCTURAL_COUNT = count - MIRROR_COUNT;
 if (fails.length) {
   console.error("");
   for (const f of fails) console.error("  FAIL " + f);
-  console.error(`\n${fails.length} of ${count} assertions FAILED`);
+  console.error(`\n${fails.length} of ${count} assertions FAILED (${MIRROR_COUNT} mirror + ${STRUCTURAL_COUNT} source)`);
   process.exit(1);
 }
-console.log(`all ${count} session-ranking assertions pass`);
+console.log(`${MIRROR_COUNT} mirror + ${STRUCTURAL_COUNT} source assertions pass (mirror proves the algorithm only; source binds the sketch)`);
