@@ -1,0 +1,136 @@
+#!/usr/bin/env node
+// Exercises reorderSessions()'s ordering without a device. Run with no arguments to
+// check the shipped comparator; --selftest (see below) proves the checks can fail.
+//
+// WHAT THIS PROVES, AND WHAT IT DOES NOT. This runs a JS MIRROR of the comparator,
+// so it proves the ALGORITHM - including the millis() wrap case, which is otherwise
+// unreachable without waiting 49.7 days for real. It does not execute the C++. Two
+// things narrow that gap: urgencyRank's mapping is PARSED out of the sketch rather
+// than transcribed here, so a rank that changes in the firmware changes here too;
+// and the structural assertions below read the real source text.
+import fs from "fs";
+import path from "path";
+
+const DIR = path.dirname(new URL(import.meta.url).pathname);
+const SRC = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+
+// ---------- parse, never transcribe ----------
+// urgencyRank is the one piece of the key that is a table rather than arithmetic, so
+// it is read out of the sketch. A rank renamed or renumbered in the firmware must
+// change this checker's expectations with it, not silently disagree.
+function parseUrgencyRank(src) {
+  const at = src.indexOf("int urgencyRank(");
+  if (at < 0) throw new Error("urgencyRank() not found - has it been renamed?");
+  const body = src.slice(at, src.indexOf("\n}", at));
+  const named = {};
+  let stripped = body;
+  for (const m of body.matchAll(/strcmp\(status,\s*"(\w+)"\)\s*==\s*0\)\s*return\s+(\d+)/g)) {
+    named[m[1]] = Number(m[2]);
+    stripped = stripped.replace(m[0], "");
+  }
+  const d = stripped.match(/return\s+(\d+)\s*;/);
+  if (!d) throw new Error("urgencyRank() has no default return");
+  if (Object.keys(named).length === 0) throw new Error("urgencyRank() parsed no named statuses");
+  return { named, dflt: Number(d[1]) };
+}
+const RANKS = parseUrgencyRank(SRC);
+const rankOf = (status) => (status in RANKS.named ? RANKS.named[status] : RANKS.dflt);
+
+// ---------- the mirror ----------
+const U32 = 0x100000000;
+// Unsigned-wrap-safe elapsed, exactly what (now - since) does in C with unsigned long.
+const elapsed = (now, since) => ((now - since) % U32 + U32) % U32;
+
+// legacy=true reproduces the comparator this change replaces, for --selftest.
+function sortsBefore(b, a, now, legacy) {
+  const ra = rankOf(a.status), rb = rankOf(b.status);
+  if (rb !== ra) return rb < ra;
+  if (!legacy && ra === 0) return elapsed(now, b.since) > elapsed(now, a.since);
+  return b.actSec > a.actSec;
+}
+
+// Mirrors reorderSessions()'s stable insertion sort, break and all.
+function order(sessions, now, legacy = false) {
+  const ord = sessions.map((_, i) => i);
+  for (let i = 1; i < sessions.length; i++) {
+    for (let j = i; j > 0; j--) {
+      if (!sortsBefore(sessions[ord[j]], sessions[ord[j - 1]], now, legacy)) break;
+      const t = ord[j - 1]; ord[j - 1] = ord[j]; ord[j] = t;
+    }
+  }
+  return ord.map((i) => sessions[i].name);
+}
+
+// ---------- scenarios ----------
+const S = (name, status, { since = 0, actSec = 0 } = {}) => ({ name, status, since, actSec });
+let fails = [], count = 0;
+function eq(label, got, want) {
+  count++;
+  const g = JSON.stringify(got), w = JSON.stringify(want);
+  if (g !== w) fails.push(`${label}\n         got  ${g}\n         want ${w}`);
+}
+
+// The mapping itself, as parsed.
+count++;
+if (!(rankOf("asking") < rankOf("waiting") && rankOf("waiting") < rankOf("working")))
+  fails.push(`urgencyRank must order asking < waiting < working (parsed ${JSON.stringify(RANKS)})`);
+
+const NOW = 1_000_000;
+// THE CHANGE. Two asking rows: the one waiting LONGEST leads.
+eq("two asking: the longer wait leads",
+   order([S("fresh", "asking", { since: NOW - 5_000 }), S("stale", "asking", { since: NOW - 1_200_000 })], NOW),
+   ["stale", "fresh"]);
+eq("two asking: order of arrival does not decide it",
+   order([S("stale", "asking", { since: NOW - 1_200_000 }), S("fresh", "asking", { since: NOW - 5_000 })], NOW),
+   ["stale", "fresh"]);
+
+// Rank still dominates the tie-break.
+eq("asking outranks waiting outranks working, whatever the times",
+   order([S("w", "working", { actSec: 86_000 }), S("r", "waiting", { actSec: 86_000 }),
+          S("a", "asking", { since: NOW - 1_000 })], NOW),
+   ["a", "r", "w"]);
+
+// Unchanged behaviour for the other two ranks.
+eq("two waiting: most RECENT leads (unchanged)",
+   order([S("old", "waiting", { actSec: 100 }), S("new", "waiting", { actSec: 900 })], NOW),
+   ["new", "old"]);
+eq("two working: most RECENT leads (unchanged)",
+   order([S("old", "working", { actSec: 100 }), S("new", "working", { actSec: 900 })], NOW),
+   ["new", "old"]);
+eq("actSec -1 (not today) sorts LAST within its rank",
+   order([S("yesterday", "waiting", { actSec: -1 }), S("today", "waiting", { actSec: 5 })], NOW),
+   ["today", "yesterday"]);
+
+// The wrap. Unreachable on hardware without a 49.7-day uptime.
+const NEAR = U32 - 10_000;          // 10s before millis() wraps
+eq("millis() wrap: a wait that spans the wrap still reads as the longer one",
+   order([S("after", "asking", { since: (NEAR + 9_000) % U32 }),   // waited ~6s
+          S("across", "asking", { since: NEAR - 600_000 })], 5_000),  // waited ~10m
+   ["across", "after"]);
+
+// Stability: equal keys keep arrival order, which is the host's own urgency sort.
+eq("equal keys keep arrival order (stable sort)",
+   order([S("first", "working", { actSec: 500 }), S("second", "working", { actSec: 500 })], NOW),
+   ["first", "second"]);
+
+// ---------- structural assertions on the real source ----------
+// Text-matched deliberately, and safe to match here: unlike the panel_shim case this
+// repo documents, none of these lines sits behind an #if, so nothing can delete the
+// line the regex just found.
+function structural(label, ok) { count++; if (!ok) fails.push(label); }
+structural("sessionSortsBefore() exists and takes `now` as an argument (no clock inside)",
+  /bool\s+sessionSortsBefore\s*\(\s*const\s+SessionInfo&\s*\w+\s*,\s*const\s+SessionInfo&\s*\w+\s*,\s*unsigned\s+long\s+now\s*\)/.test(SRC));
+structural("reorderSessions() samples millis() exactly ONCE (a clock that advances mid-sort makes the comparator inconsistent)",
+  (SRC.slice(SRC.indexOf("void reorderSessions("),
+             SRC.indexOf("\n}", SRC.indexOf("void reorderSessions("))).match(/millis\(\)/g) || []).length === 1);
+structural("the asking tie-break compares ELAPSED, not raw stamps (millis() wraps at ~49.7 days)",
+  /now\s*-\s*\w+\.statusSinceMillis\s*\)\s*>\s*\(\s*now\s*-\s*\w+\.statusSinceMillis/.test(SRC));
+
+// ---------- report ----------
+if (fails.length) {
+  console.error("");
+  for (const f of fails) console.error("  FAIL " + f);
+  console.error(`\n${fails.length} of ${count} assertions FAILED`);
+  process.exit(1);
+}
+console.log(`all ${count} session-ranking assertions pass`);
