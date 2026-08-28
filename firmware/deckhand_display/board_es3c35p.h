@@ -854,7 +854,7 @@ const int SESSION_BAND_MARK_GAP = 8;    // agent mark -> status word
 // which leaves 32px, i.e. 4 characters at TEXT_ADV - and one of those is spent on
 // drawIfChanged's 1px margin plus the clearance the word needs from the box. So 3.
 //
-// It is also all the format needs. formatDurationShort() drops to one unit (s / m /
+// It is also all the format needs. bandDurText() drops to one unit (s / m /
 // h / d) for this field, and `statusSinceMillis` is a millis() value, which WRAPS at
 // 49.7 days - so "49d" is the widest string reachable and 3 characters is a bound,
 // not a hope. The rows below the card keep the full "12h34m" form: they have a whole
@@ -979,6 +979,40 @@ const int SESSION_SHIMMER_STEPS = 24;
 // `const int` declarations only, and a constant it cannot see is one no assertion
 // can certify - which is this repo's rule, arriving from the type system.
 const int SESSION_SHIMMER_MAX = 110;
+// BOTH PEAKS NOW CARRY A PERCEPTUAL BOUND, and the "< 128" that used to stand
+// alone here is a blend WEIGHT, which is not a distance: 126/255 is under half by
+// arithmetic and yet lands the peak NEARER COLOR_VALUE than the status colour it
+// is supposed to still read as. sessions-geom-check.mjs now parses THEMES[] out of
+// deckhand_display.ino and states the claim in CIE Lab, where "nearer" means
+// something - visible at all (>= the standard dE*ab JND of 2.3, which a peak that
+// quantises back onto the base colour fails outright: at 16/255 the ramp's dE is
+// 0.00 and nothing moves) and still its own colour (dE to the base below dE to
+// COLOR_VALUE). 110 measures dE 14.3..32.2 from base against 30.1..53.9 to
+// COLOR_VALUE, worst ratio 0.85; 126 is 1.08 and fails.
+
+// ---------- §6 THE ATTENTION PULSE: the band breathes while a prompt waits -----
+// SHIPS DISABLED AND UNMEASURED, behind the runtime `PULSE 0|1` toggle. §6 gates
+// this one animation on a POWERPROBE A/B because it is the only candidate that
+// costs current INDEFINITELY - the crossfade is one-shot and the shimmer rides a
+// flush that was happening anyway - on a board where the backlight is already ~80
+// of ~142 mV/h. The exact procedure is committed beside the toggle in
+// deckhand_display.ino; it needs the cable physically out, which is why it is not
+// something the implementation could run for itself.
+//
+// PEAK STRENGTH, TOWARDS COLOR_VALUE, exactly as the shimmer's is, and here the
+// direction has a second argument the spine does not need: the band carries INK,
+// in COLOR_CARD, and COLOR_CARD is the surface COLOR_VALUE is furthest from. So
+// breathing towards COLOR_VALUE moves the fill AWAY from its own ink and the
+// word's contrast can only IMPROVE at the peak. Breathing towards COLOR_CARD -
+// the obvious reading of "brighten" under LIGHT - would collapse the status word
+// to nothing at the top of every breath.
+//
+// A SEPARATE CONSTANT FROM SESSION_SHIMMER_MAX EVEN THOUGH THE TWO AGREE TODAY:
+// the roles differ by three orders of magnitude in area (a travelling head on 6
+// columns against a whole 292x42 field), so a strength that reads as a highlight
+// on one is not automatically right on the other. They are held to the SAME
+// perceptual bound, which is the part that should be shared.
+const int SESSION_PULSE_MAX = 110;
 
 // ---------- The band card's block stack ----------
 // SESSION_EXP_MAX_H is the SUM of these, not a chosen number - the same way the

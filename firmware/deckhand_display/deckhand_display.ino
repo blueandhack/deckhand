@@ -2367,6 +2367,94 @@ uint16_t xfadeFrameCount = 0, shimFrameCount = 0;
 // pair was added because a real debugging session spent two builds on exactly
 // that ambiguity before the answer turned out to be four sessions on screen.
 uint16_t xfadeStartCount = 0;
+
+// ---------- §6 THE ATTENTION PULSE: shipped DISABLED and UNMEASURED ----------
+// The band breathes while a prompt waits. §6 adopts the crossfade and the shimmer
+// outright and adopts this one "only after measurement", because it is the only
+// candidate that costs current INDEFINITELY: the crossfade is one-shot, the
+// shimmer rides a flush tickWorkingSpinner was already doing, and this runs for as
+// long as somebody leaves a prompt unanswered - on a board whose backlight is
+// already ~80 of ~142 mV/h and whose only other saving is the backlight blank.
+//
+// A RUNTIME TOGGLE, NOT A BUILD FLAG, and DEFAULT OFF - the same reason
+// SWAP/INV/PANELSLEEP/CPUSLOW/BLESLOW are: one leg of the A/B needs the cable out
+// and 7-15 minutes on battery, so a build per leg costs a reflash per guess where
+// one build settles both. Nothing is persisted, also deliberately: the answer
+// belongs in this file once it has been SEEN, not in NVS silently disagreeing with
+// the source the next reader trusts.
+//
+// ================= THE MEASUREMENT, EXACTLY =================
+// It has NOT been run. POWERPROBE refuses on USB - a probe that "worked" on the
+// charger would be measuring the charger - so this needs a person at the device.
+//
+//   0. Flash this build. Put the device on the SESSIONS tab with a session in
+//      `asking` holding the band card (display position 0, and fewer than four
+//      sessions, or the ladder gives no band at all - see sessionExpandedH).
+//      Set SLEEP AFTER to OFF and note the brightness; the backlight is the
+//      dominant load and it must not blank differently between the two legs.
+//   1. UNPLUG USB. The report comes back over BLE.
+//   2. Let the cell settle. The minute after unplugging fell -21 mV on its own
+//      when this was last measured, and a relaxation curve fits a straight line
+//      perfectly well - the SNR gate cannot catch it. Wait ~3 minutes.
+//   3. echo "PULSE 0" > ~/.claude/deckhand-device-command
+//      echo "POWERPROBE pulse-off" > ~/.claude/deckhand-device-command
+//      Wait for the report (7-15 min; it self-shortens as SNR clears). Re-sending
+//      the SAME label reports progress rather than restarting.
+//   4. echo "PULSE 1" > ~/.claude/deckhand-device-command
+//      echo "POWERPROBE pulse-on" > ~/.claude/deckhand-device-command
+//      Same session, minutes apart, nothing else changed.
+//   5. Cross-check each leg against the raw per-minute BATT deltas in host.log.
+//      Two independent views of one run is what makes it a measurement.
+//   6. `PERF` reports this animation's own compose/flush and its FRAME COUNT,
+//      which is the number that says whether the change-only repaint below is
+//      doing its job: a breath should cost 10 repaints under LIGHT and 30 under
+//      DARK, never the 72 samples it takes. A count near 72 means the reconcile
+//      has been broken and the mV/h figure is measuring the wrong thing.
+//
+// DO NOT COMPARE AGAINST ANY mV/h FIGURE FROM ANOTHER DAY. This repo published a
+// wrong claim that way once - an "-88 mV/h baseline" that turned out to be a
+// different state entirely (different SoC, different thermal history, and a
+// backlight nobody had recorded). Both legs, one session, or it is not an A/B.
+//
+// THEN: if the delta is small, delete this toggle and make the pulse ordinary
+// behaviour. If it is not, delete the pulse - and COMMIT THE NUMBER either way,
+// because an unrecorded negative result gets re-proposed within the month.
+// ============================================================
+bool sessionPulse = false;
+// ONE FULL BREATH, and the SAMPLE RATE, which is not the same thing as a frame
+// rate here. The ramp is evaluated every SESSION_PULSE_INTERVAL_MS and the band is
+// repainted only when the COLOUR it produces changes - see tickSessionAnim. That
+// distinction is the whole design, and RGB565 is why: measured off the shipped
+// palette, the asking colour's ramp holds 16 distinct colours on DARK and 6 on
+// LIGHT, so a breath is 30 band repaints at worst and 10 at best against 72
+// samples. Painting per sample would push an IDENTICAL 292x42 region for the other
+// 42 to 62 of them, at ~10ms of compose and flush each.
+//
+// The bound on the SAMPLE rate is therefore not "smooth enough" - that is
+// unreachable, because one LSB of green on DARK is already dE 5.5, so no rate
+// makes the steps sub-JND - but "fine enough to skip no distinct colour": frames
+// per HALF breath >= the ramp's distinct-colour count. 2400/33 = 72 frames, 36 a
+// half, against the coarsest status ramp's 31. Taken over EVERY status colour
+// rather than only the asking one, because the sample is nearly free and the
+// constant should stay right if the pulse is ever extended. Both figures are
+// computed from the parsed THEMES[] in sessions-geom-check.mjs.
+//
+// 2400ms has NO derived bound and is not presented as one. It is a breath at the
+// slow end of a resting human's, which is what "breathes" means; anything from
+// ~1.5s to ~4s would read the same way. Stated rather than dressed up.
+const unsigned long SESSION_PULSE_MS = 2400;
+const unsigned long SESSION_PULSE_INTERVAL_MS = 33;
+unsigned long lastPulseMs = 0;
+// WHAT IS ON THE GLASS, written where the glass is written. The pulse repaints on
+// a CHANGE of fill rather than on a timer, so it needs a record of the fill it
+// last painted - and that record is set inside drawSessionBand rather than by each
+// caller, because a request flag and a record of what the device actually did are
+// two different things and conflating them has already stranded a saving on this
+// board once (see savingsSync). Every path that paints a band goes through that
+// one function, so the record cannot drift from the panel.
+uint16_t bandFillShown = 0;
+uint32_t pulseComposeUs = 0, pulseFlushUs = 0, pulseWorstUs = 0;
+uint16_t pulseFrameCount = 0;
 #endif
 
 // Kept as the "force a full repaint" entry point (tab switch, closing the
@@ -4751,6 +4839,23 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
              panelSleptApplied ? 1 : 0, cpuSlowApplied ? 1 : 0, bleSlowApplied ? 1 : 0,
              isAsleep ? 1 : 0);
     sendLineToHost(line);
+  } else if (buf.startsWith("PULSE ")) {
+    // §6's attention pulse, the one animation gated on a measurement. Same
+    // convention as the three savings above and as SWAP/INV: reachable in seconds
+    // so both legs of a POWERPROBE A/B fit in ONE battery session, and persisted
+    // nowhere. The full procedure is in the comment beside `sessionPulse`.
+    //
+    // It takes effect IMMEDIATELY, unlike the blanked-state savings, and that is
+    // the correct difference rather than an inconsistency: those apply to a state
+    // the device is not currently in, while this one is a property of the screen
+    // in front of you. Turning it OFF settles the band back to its flat status
+    // colour on the next tick through the same change-only reconcile that drives
+    // it, so there is no "applied" flag to leak.
+    sessionPulse = buf.substring(6).toInt() != 0;
+    char line[96];
+    snprintf(line, sizeof(line), "PULSE on=%d (band breathes while a prompt waits)",
+             sessionPulse ? 1 : 0);
+    sendLineToHost(line);
   } else if (buf == "TEMP") {
     // BOARD 2 ONLY (this whole else-if chain is inside the board-2 guard): reports
     // the S3 DIE temperature, and says so in the line rather than calling it "the
@@ -4799,6 +4904,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     Serial.printf("PERF shimmer n=%u compose %luus worst %luus (flush rides the spinner's)\n",
                   (unsigned) shimFrameCount, (unsigned long) shimComposeUs,
                   (unsigned long) shimWorstUs);
+    // The pulse reports `on` beside `n` for the same reason the crossfade reports
+    // `started`: this animation SHIPS OFF, so n=0 is the expected reading and is
+    // not evidence of anything until the toggle says it was enabled. `n` is also
+    // the number the A/B wants - repaints per breath, which is what says whether
+    // the change-only reconcile is earning its place (expect 10 per 2.4s breath
+    // under LIGHT and 30 under DARK, never the 72 samples it took).
+    Serial.printf("PERF pulse   on=%d n=%u compose %luus flush %luus worst %luus\n",
+                  sessionPulse ? 1 : 0, (unsigned) pulseFrameCount,
+                  (unsigned long) pulseComposeUs,
+                  (unsigned long) pulseFlushUs, (unsigned long) pulseWorstUs);
   } else if (buf.startsWith("INV ")) {
     // Runtime display-inversion toggle, for the same reason SWAP exists: nothing
     // on the Mac can see the panel, so the only way to settle a display-side

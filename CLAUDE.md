@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386614, RAM 69780 | flash 986266, RAM 63172 |
+| size today | flash 1386614, RAM 69780 | flash 989426, RAM 63268 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -355,6 +355,7 @@ echo "POWERPROBE off" > ~/.claude/deckhand-device-command       # stop early and
 echo "PANELSLEEP 1" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: SLPIN the panel while blanked
 echo "CPUSLOW 1" > ~/.claude/deckhand-device-command    # BOARD 2 ONLY: 240 -> 80MHz while blanked
 echo "BLESLOW 1" > ~/.claude/deckhand-device-command    # BOARD 2 ONLY: ~200ms conn interval while blanked
+echo "PULSE 1" > ~/.claude/deckhand-device-command      # BOARD 2 ONLY: the band breathes while a prompt waits - DEFAULT OFF, UNMEASURED
 echo "AUDIOPROBE" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: is the codec on the bus? configures nothing
 echo "TONETEST" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: configure the codec and PLAY a tone
 echo "TONETEST 90" > ~/.claude/deckhand-device-command # ... at a given volume, 1-100 (default 30)
@@ -697,8 +698,8 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   VOICE RESULT CARD was covered by nothing at all, which is how it kept a 13px line step under a
   16px cell right through a type-scale port. **Take an
   unguarded constant that this repo just ADDED or CHANGED as a gap, not as noise.**
-  Where it stands today: **413 of 479 constant-board pairs guarded** (board 1 32/234 unguarded,
-  board 2 34/245), and of the unguarded ones only **7 on board 1 and 9 on board 2 are read by any
+  Where it stands today: **433 of 499 constant-board pairs guarded** (board 1 32/234 unguarded,
+  board 2 34/265), and of the unguarded ones only **7 on board 1 and 9 on board 2 are read by any
   checker at all** — the other 26 a side are mic, beeper, crab and preset-count constants with no
   geometry to violate. Known and accepted, so do not re-litigate them: `MSG_BTN_W`, `H_BTN` and
   `SP_2` are pre-existing; a cache-size assertion is `>=` by nature so `SESSION_ROW_SIG_LEN`

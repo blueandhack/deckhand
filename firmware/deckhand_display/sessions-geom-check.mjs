@@ -369,7 +369,8 @@ function spineArcRight(c, dy) {
   const left = c.SESSION_ROW_X + c.R_MD - Math.sqrt(r * r - d * d);
   return left + c.SESSION_SPINE_W - 1;           // if the carve followed the arc too
 }
-// drawSessionSpine()'s Codex knockout loop, replicated. The spine's own box is
+// drawSpineGaps()'s Codex knockout loop, replicated - the helper drawSessionSpine
+// and drawSpineShimmer both cut their gaps with. The spine's own box is
 // the card's INTERIOR, and the gaps may only be cut from the STRAIGHT section
 // between the two corner arcs - the loop draws a gap only where a whole one fits,
 // so nothing is ever clipped by an arc.
@@ -1143,8 +1144,22 @@ for (const b of [1, 2]) {
       const spin = cut(dsrc, "void tickWorkingSpinner(");
       const anim = cut(ssrc, "void tickSessionAnim(");
       const ids = (t) => new Set(t.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []);
-      const spinGuard = spin.slice(spin.indexOf("\n"), spin.indexOf("if (millis() - lastAnimMs"));
-      const animGuard = anim.slice(anim.indexOf("\n"), anim.indexOf("// ---- the state crossfade"));
+      // EVERY COMMENT ANCHOR IS CHECKED BEFORE IT IS SLICED ON, because indexOf
+      // returns -1 rather than throwing: rename one of these comments and the
+      // slice silently WIDENS to nearly the whole function body, at which point
+      // the gate assertion below finds every identifier it is looking for and
+      // passes vacuously. That is the same defect class as a pill count that
+      // counted nothing and a transcribed spine edge - it has come up three times
+      // in this feature's reviews, so the anchors are now assertions themselves.
+      const anchor = (t, s, why) => {
+        const i = t.indexOf(s);
+        chk(i > 0, `anchor "${s}" is present - ${why}`);
+        return i;
+      };
+      const spinGuard = spin.slice(spin.indexOf("\n"),
+        anchor(spin, "if (millis() - lastAnimMs", "tickWorkingSpinner's guard list must end where its timer begins"));
+      const animGuard = anim.slice(anim.indexOf("\n"),
+        anchor(anim, "// ---- the state crossfade", "tickSessionAnim's guard list must end where its first animation begins"));
       const seen = ids(animGuard);
       const missing = [...ids(spinGuard)].filter((k) => !seen.has(k));
       chk(missing.length === 0,
@@ -1222,7 +1237,15 @@ for (const b of [1, 2]) {
       const iSpin = loopFn.indexOf("tickWorkingSpinner();");
       chk(iAnim > 0 && iSpin > iAnim,
           "loop() calls tickSessionAnim() BEFORE tickWorkingSpinner(), so the shimmer's paint is in the frame the spinner flushes");
-      const shimBlock = anim.slice(anim.indexOf("// ---- the spine shimmer"));
+      // BOUNDED AT THE PULSE BLOCK, not run to the end of the function. This slice
+      // used to be open-ended, which was only correct while the shimmer was the
+      // last thing in tickSessionAnim - the attention pulse flushes its own
+      // rectangle, so an unbounded slice would read the pulse's flush as the
+      // shimmer's and fail the very assertion that keeps the shimmer free.
+      const iPulse = anchor(anim, "// ---- §6 the attention pulse",
+        "the shimmer's slice must END at the pulse, whose own flush would otherwise read as the shimmer's");
+      const shimBlock = anim.slice(
+        anchor(anim, "// ---- the spine shimmer", "the shimmer's block must be findable to be checked"), iPulse);
       chk(/if \(millis\(\) - lastAnimMs >= ANIM_INTERVAL_MS\)/.test(shimBlock) &&
           !/lastAnimMs\s*=[^=]/.test(shimBlock),
           "the shimmer READS lastAnimMs and never writes it - consuming the spinner's timer would stop the spark animating");
@@ -1230,6 +1253,155 @@ for (const b of [1, 2]) {
           "the shimmer flushes NOTHING of its own - a tall narrow dirty rect is the worst shape this flush path has");
       chk(/tft\.flush\(\);\n#endif\s*$/.test(spin),
           "... and tickWorkingSpinner still ends in the flush that carries it");
+
+      // ---- §6 THE ATTENTION PULSE, which ships DISABLED and UNMEASURED ----
+      // It is the one animation §6 adopts "only after measurement", because it is
+      // the only one that costs current indefinitely. Nothing here judges whether
+      // it should ship - that is a POWERPROBE A/B nobody has run - but everything
+      // here holds the shape that makes the A/B possible and its default safe.
+      const pulseBlock = anim.slice(iPulse);
+      chk(/\bbool sessionPulse = false;/.test(dsrc),
+          "§6: the attention pulse ships DISABLED - its A/B is unrun, and an unmeasured continuous animation must not default on");
+      chk(/buf\.startsWith\("PULSE "\)/.test(dsrc) && /sessionPulse = buf\.substring\(6\)\.toInt\(\) != 0;/.test(dsrc),
+          "... behind a RUNTIME toggle (PULSE 0|1), so both legs of the A/B fit one battery session instead of costing a reflash each");
+      // The gate on WHICH session breathes. "While a prompt waits" is `asking`, and
+      // it is read from the status rather than from a row index, exactly as the
+      // crossfade keys on an id: a status change is what re-ranks this list.
+      const pa = cut(ssrc, "uint8_t sessionPulseA(");
+      chk(/if \(!sessionPulse \|\| strcmp\(status, "asking"\) != 0\) return 0;/.test(pa),
+          "the pulse's ramp is zero unless the toggle is on AND the session is `asking` - §6's \"while a prompt waits\"");
+      // Composition order, which is what makes a fade INTO asking seamless: the
+      // pulse rides ON TOP of the crossfade's blend rather than replacing it.
+      const bf = cut(ssrc, "uint16_t sessionBandFill(");
+      chk(/return pulseA \? blend565\(base, COLOR_VALUE, pulseA\) : base;/.test(bf),
+          "the pulse composes ON TOP of the crossfade's blend, and towards COLOR_VALUE - away from the band's own COLOR_CARD ink, so the word's contrast can only improve at the peak");
+      // THE CHANGE-ONLY REPAINT. This is the design, not a tuning: the ramp has
+      // only a handful of distinct RGB565 colours (asserted below), so a band
+      // repainted every sample pushes an identical 292x42 region most of the time.
+      chk(/if \(want != bandFillShown\)/.test(pulseBlock),
+          "the pulse repaints on a CHANGE OF FILL, not on a timer - the change-only discipline applied to an animation");
+      // A RECORD, NOT A REQUEST, and written where the painting happens. Counted
+      // rather than merely found: a second writer anywhere is how the record and
+      // the panel drift apart, which is the failure savingsSync was rewritten for.
+      const writes = [...(ssrc + dsrc).matchAll(/\bbandFillShown\s*=[^=]/g)].length;
+      chk(writes === 2 && /bandFillShown = fill;/.test(band),
+          `bandFillShown is written in exactly two places - its declaration and drawSessionBand (found ${writes}) - so the record of what is on the glass cannot drift from it`);
+      chk(/if \(sessionXfadeT\(sessions\[i\]\.id\) < 0\) \{/.test(pulseBlock),
+          "the crossfade OWNS the band while it runs - it already paints at the pulse's own alpha, so a second repaint in the same frame would double its cost to change nothing");
+      // Its own rectangle, leading and trailing, exactly as the crossfade's - and
+      // NOT the shimmer's ride-along, which only works because something else was
+      // pushing those strips anyway. Nothing else pushes the band.
+      chk((pulseBlock.match(/tft\.flush\(\);/g) || []).length === 2,
+          "the pulse flushes its OWN rectangle, leading and trailing, as the crossfade does - nothing else is pushing the band's strips");
+
+      // ---- THE PALETTE, PARSED - and the peaks bounded in a space where
+      // "nearer" means something. The old bound on SESSION_SHIMMER_MAX was
+      // `< 128`, a blend WEIGHT: 126/255 is under half by arithmetic and still
+      // lands the peak NEARER COLOR_VALUE than the status colour it is supposed to
+      // read as. Parsed from THEMES[] and its own struct, so neither the values nor
+      // the COLUMN ORDER is transcribed here.
+      const tstruct = dsrc.match(/struct Theme \{[^}]*?uint16_t ([^;]+);/);
+      if (!tstruct) throw new Error("struct Theme not found");
+      const tf = tstruct[1].split(",").map((s) => s.trim());
+      const trows = dsrc.match(/const Theme THEMES\[\] = \{([\s\S]*?)\n\};/);
+      if (!trows) throw new Error("THEMES[] not found");
+      const themes = [...trows[1].matchAll(/\{\s*"([A-Z]+)"\s*,\s*([^}]+)\}/g)].map((m) => {
+        const v = m[2].split(",").map((s) => parseInt(s.trim(), 16));
+        const o = { name: m[1] };
+        tf.forEach((k, j) => { o[k] = v[j]; });
+        return o;
+      });
+      chk(themes.length >= 2 && themes.every((t) => Number.isFinite(t.value) && Number.isFinite(t.bad)),
+          `parsed ${themes.length} palettes out of THEMES[] with ${tf.length} colour columns`);
+      // blend565, byte for byte from deckhand_display.ino - integer truncation and
+      // all, because the quantisation is exactly what the bounds are about.
+      const blend565 = (a, bb, t) => {
+        const ar = (a >> 11) & 31, ag = (a >> 5) & 63, ab = a & 31;
+        const br = (bb >> 11) & 31, bg = (bb >> 5) & 63, bl = bb & 31;
+        return (((ar + Math.trunc((br - ar) * t / 255)) & 31) << 11) |
+               (((ag + Math.trunc((bg - ag) * t / 255)) & 63) << 5) |
+                ((ab + Math.trunc((bl - ab) * t / 255)) & 31);
+      };
+      // CIE Lab and dE*ab - the same method palette-check.mjs uses to judge colour,
+      // rather than the WCAG luminance ratio, which cannot see hue at all.
+      const srgb = (v) => { v /= 255; return v > 0.04045 ? ((v + 0.055) / 1.055) ** 2.4 : v / 12.92; };
+      const lab = (c565) => {
+        const r = srgb(((c565 >> 11) & 31) * 255 / 31), g = srgb(((c565 >> 5) & 63) * 255 / 63),
+              bl = srgb((c565 & 31) * 255 / 31);
+        const fx = (t) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
+        const X = fx((0.4124 * r + 0.3576 * g + 0.1805 * bl) / 0.95047),
+              Y = fx(0.2126 * r + 0.7152 * g + 0.0722 * bl),
+              Z = fx((0.0193 * r + 0.1192 * g + 0.9505 * bl) / 1.08883);
+        return [116 * Y - 16, 500 * (X - Y), 200 * (Y - Z)];
+      };
+      const dE = (a, bb) => {
+        const A = lab(a), B = lab(bb);
+        return Math.hypot(A[0] - B[0], A[1] - B[1], A[2] - B[2]);
+      };
+      // THE STANDARD JND, from outside this repo and not tuned to anything in it.
+      // A peak under it is an animation nobody can see: at 16/255 the ramp's dE is
+      // 0.00 outright, because blend565 quantises straight back onto the base.
+      const JND = 2.3;
+      // The three status colours are the ones colorForStatus can return; taken by
+      // NAME from the parsed palette rather than transcribed as hex.
+      const STATUS = ["good", "warn", "bad"];
+      const peakCheck = (name, max) => {
+        let worstVis = Infinity, worstVisAt = "", worstRatio = 0, worstRatioAt = "";
+        for (const t of themes) for (const k of STATUS) {
+          const peak = blend565(t[k], t.value, max);
+          const d = dE(t[k], peak), dv = dE(peak, t.value);
+          if (d < worstVis) { worstVis = d; worstVisAt = `${t.name} ${k}`; }
+          if (d / dv > worstRatio) { worstRatio = d / dv; worstRatioAt = `${t.name} ${k}`; }
+        }
+        chk(worstVis >= JND,
+            `${name} = ${max} is VISIBLE in every palette: worst peak dE ${worstVis.toFixed(1)} ` +
+            `(${worstVisAt}) against the ${JND} JND`);
+        chk(worstRatio < 1,
+            `... and still reads as its STATUS colour: the peak is nearer the base than COLOR_VALUE ` +
+            `in every palette (worst ratio ${worstRatio.toFixed(2)}, ${worstRatioAt})`);
+      };
+      peakCheck("SESSION_SHIMMER_MAX", c.SESSION_SHIMMER_MAX);
+      peakCheck("SESSION_PULSE_MAX", c.SESSION_PULSE_MAX);
+
+      // THE SAMPLE RATE'S BOUND IS THE RAMP'S OWN RESOLUTION, and the number it
+      // produces is the reason the pulse repaints on a change rather than a timer.
+      // A "smooth enough" bound does not exist here: one LSB of green on DARK is
+      // already dE 5.5, so NO frame rate makes the steps sub-JND. What the sample
+      // rate must do is skip no distinct colour - frames per HALF breath >= the
+      // ramp's distinct-colour count.
+      const pms = num(dsrc, "SESSION_PULSE_MS"), piv = num(dsrc, "SESSION_PULSE_INTERVAL_MS");
+      const ramp = (base, val, max) => {
+        const s = new Set();
+        for (let a = 0; a <= max; a++) s.add(blend565(base, val, a));
+        return s.size;
+      };
+      // The no-skip bound is taken over EVERY status colour, not just the one the
+      // pulse uses today: the sample is nearly free (the repaint is what costs, and
+      // that is gated on a change), so sampling fine enough for the whole
+      // vocabulary keeps the constant right if the pulse is ever extended.
+      let steps = 0;
+      for (const t of themes) for (const k of STATUS)
+        steps = Math.max(steps, ramp(t[k], t.value, c.SESSION_PULSE_MAX));
+      chk(Math.floor(pms / piv) / 2 >= steps,
+          `the pulse samples ${Math.floor(pms / piv)} times a breath (${pms}ms at ${piv}ms), ` +
+          `${Math.floor(pms / piv) / 2} per half, against the ${steps} distinct colours of the coarsest ` +
+          `status ramp - so no step is skipped in ANY palette`);
+      // WHAT THE CHANGE-ONLY RECONCILE ACTUALLY BUYS, on the colour the pulse
+      // really ramps - which is derived by parsing colorForStatus and the ramp's own
+      // strcmp rather than by transcribing "asking is COLOR_BAD" into this file.
+      const gate = pa.match(/strcmp\(status, "([a-z]+)"\) != 0\) return 0;/);
+      if (!gate) throw new Error("the pulse's status gate could not be parsed");
+      const cfs = cut(dsrc, "uint16_t colorForStatus(");
+      const tok = cfs.match(new RegExp(`strcmp\\(status, "${gate[1]}"\\) == 0\\) return COLOR_([A-Z]+);`));
+      if (!tok) throw new Error(`colorForStatus has no branch for "${gate[1]}"`);
+      const key = tok[1].toLowerCase();
+      let paints = 0;
+      for (const t of themes)
+        paints = Math.max(paints, 2 * (ramp(t[key], t.value, c.SESSION_PULSE_MAX) - 1));
+      chk(paints < Math.floor(pms / piv),
+          `a whole breath of the "${gate[1]}" colour (COLOR_${tok[1]}) costs at most ${paints} band repaints ` +
+          `against ${Math.floor(pms / piv)} samples - what painting only on a CHANGE buys on the one ` +
+          `animation whose cost is being weighed against a battery`);
     }
     // The shimmer's own two numbers, bounded rather than chosen. The head plus its
     // falloff has to fit WHOLE inside the shortest straight section the ladder can
@@ -1239,9 +1411,14 @@ for (const b of [1, 2]) {
     chk(2 * c.SESSION_SHIMMER_LEN <= straightMin,
         `the shimmer's head and falloff (${2 * c.SESSION_SHIMMER_LEN}px) fit inside the shortest ` +
         `reachable straight section (${straightMin}px on a ${shortest}px row)`);
+    // The ARITHMETIC half only. "Under half the blend weight" is NOT the same claim
+    // as "still reads as its status colour" - 126/255 satisfies this and fails the
+    // perceptual bound in the animation block above, which is the one that means
+    // it. Kept because it is a cheap sanity floor on the raw value, not because it
+    // is sufficient.
     chk(c.SESSION_SHIMMER_MAX > 0 && c.SESSION_SHIMMER_MAX < 128,
-        `the shimmer peaks at ${c.SESSION_SHIMMER_MAX}/255 towards COLOR_VALUE - visible, and under half, ` +
-        `so the spine never stops reading as its status colour`);
+        `the shimmer's peak ${c.SESSION_SHIMMER_MAX}/255 is a sane blend weight (the claim that it still ` +
+        `reads as its status colour is the perceptual bound, not this)`);
     chk(c.SESSION_SHIMMER_STEPS * 2 >= straightMin,
         `one traverse is ${c.SESSION_SHIMMER_STEPS} frames over ${straightMin}px - the head moves at most ` +
         `2px a frame, so it travels rather than jumps`);

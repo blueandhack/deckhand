@@ -173,6 +173,23 @@ Adopted **only after measurement**:
   probe the idle state, enable the pulse, probe again. Ship it if the delta is
   small; drop it if it is not. Not an argument.
 
+  **STATUS: BUILT, SHIPPED DISABLED, AND STILL UNMEASURED.** The pulse exists
+  behind the runtime toggle `PULSE 0|1`, defaulting **off**. The A/B has **not**
+  been run, and no mV/h figure for it exists — `POWERPROBE` refuses on USB by
+  design (a probe that "worked" on the charger would be measuring the charger), so
+  the measurement needs a person to unplug the cable and give it 7–15 minutes a
+  leg on battery. The exact procedure is committed beside `sessionPulse` in
+  `deckhand_display.ino`; run it, then either delete the toggle and make the pulse
+  ordinary behaviour, or delete the pulse — **and record the number either way**,
+  because an unrecorded negative result gets re-proposed within the month.
+  What the implementation already settles, so the A/B measures the cheapest
+  honest version rather than a strawman: the band is repainted only when the
+  **colour** its ramp produces changes, not once per sample. Computed from the
+  shipped palette, the asking colour's ramp holds 16 distinct RGB565 colours on
+  DARK and 6 on LIGHT, so a 2.4s breath costs **30 band repaints at worst and 10
+  at best** against its 72 samples. `PERF` reports that count, so a broken
+  reconcile is visible rather than silently inflating the reading.
+
 Rejected:
 
 - **Row enter/leave.** Rows move only when the ladder re-flows, and a re-flow

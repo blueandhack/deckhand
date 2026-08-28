@@ -244,6 +244,28 @@ int sessionXfadeT(const char* id) {
   if (e >= SESSION_XFADE_MS) return -1;
   return (int) ((e * 255UL) / SESSION_XFADE_MS);
 }
+// ---------- §6 The attention pulse's ramp ----------
+// The breath's strength RIGHT NOW, 0 when the pulse is off or this session is not
+// the one waiting on a person. A free-running triangle over SESSION_PULSE_MS
+// rather than a phase started on the asking edge: there is only ever ONE band, so
+// there is nothing for a per-session phase to keep apart, and a free-running ramp
+// means a crossfade INTO asking lands on a breath already in progress instead of
+// jumping to zero the instant the fade ends.
+//
+// A TRIANGLE, NOT A SINE. Integer, no table, no float - and the eased shape would
+// be invisible anyway: RGB565 gives this ramp six distinct colours (see
+// SESSION_PULSE_INTERVAL_MS), so the easing has nowhere to show.
+//
+// millis() wraps at 49.7 days and the modulo wraps the phase with it, which puts
+// one discontinuous step in the breath every 49.7 days. Recorded rather than
+// guarded: the same wrap is already what bounds SESSION_BAND_DUR_CHARS at 3.
+uint8_t sessionPulseA(const char* status) {
+  if (!sessionPulse || strcmp(status, "asking") != 0) return 0;
+  const unsigned long half = SESSION_PULSE_MS / 2;
+  const unsigned long e = millis() % SESSION_PULSE_MS;
+  const unsigned long up = e < half ? e : SESSION_PULSE_MS - e;
+  return (uint8_t) ((unsigned long) SESSION_PULSE_MAX * up / half);
+}
 // The band's fill RIGHT NOW: the status colour, or the crossfade's blend while
 // one is running. TWO readers, and the second is the reason this is a function.
 // The band's duration is a change-only field whose drawIfChanged paints an
@@ -255,8 +277,16 @@ int sessionXfadeT(const char* id) {
 // are guaranteed to be the same instant of the fade: computing sessionXfadeT
 // twice inside one draw lets millis() tick between them, and the colour would
 // then be one step of 255 ahead of the ink on top of it.
-uint16_t sessionBandFill(uint16_t col, int t) {
-  return t < 0 ? col : blend565(colorForStatus(xfadeFrom), col, (uint8_t) t);
+// TAKES THE PULSE'S ALPHA RATHER THAN READING THE CLOCK AGAIN, for exactly the
+// reason it takes `t`: the band's fill and the two words drawn on it must be one
+// instant of the animation, and a second millis() read inside this call would let
+// the ramp move between them.
+// THE PULSE COMPOSES ON TOP OF THE CROSSFADE, never beside it - so a fade INTO
+// asking arrives at a band that is already breathing, with no seam at the moment
+// the fade ends.
+uint16_t sessionBandFill(uint16_t col, int t, uint8_t pulseA) {
+  const uint16_t base = t < 0 ? col : blend565(colorForStatus(xfadeFrom), col, (uint8_t) t);
+  return pulseA ? blend565(base, COLOR_VALUE, pulseA) : base;
 }
 // Start a fade. Called from the prevSessions diff, which is the only place that
 // knows a TRANSITION happened rather than that a value differs from a cache.
@@ -312,7 +342,13 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
   // colour below reads `fill`, so an ordinary repaint landing mid-fade draws the
   // frame the animation is on rather than fighting it back to the target.
   const int t = sessionXfadeT(s.id);
-  const uint16_t fill = sessionBandFill(col, t);
+  const uint16_t fill = sessionBandFill(col, t, sessionPulseA(s.status));
+  // §6: THE RECORD OF WHAT IS ON THE GLASS, written HERE because this is the only
+  // place a band is ever painted. The pulse repaints on a change of fill, so it
+  // needs to know what the last paint left behind - and a record kept by the
+  // animation alone would go stale the moment an ordinary row repaint, a
+  // crossfade frame or a full list rebuild painted the band instead.
+  bandFillShown = fill;
   uiFillRound(x, y, w, h, r, fill, COLOR_CARD);
   tft.fillRect(x, y + r, w, h - r, fill);
 
@@ -486,9 +522,17 @@ void drawSpineShimmer(int x0, int y0, int h0, const char* status, bool codex,
 // SMALL FLUSHES, NEVER ONE BIG ONE. flush() pushes the UNION of everything
 // dirty, and the band (x 14..306, up top) and the spine column (x 14..19, down
 // the whole list) union to nearly the entire content area - 30ms, the whole
-// budget at 30fps. So the crossfade flushes its own rectangle, and the shimmer
-// flushes nothing at all: it rides the working spinner's frame, which was
-// already pushing the same strips. See the two blocks below.
+// budget at 30fps. So the crossfade flushes its own rectangle, the pulse flushes
+// that same rectangle, and the shimmer flushes nothing at all: it rides the
+// working spinner's frame, which was already pushing the same strips. See the
+// three blocks below.
+//
+// THREE ANIMATIONS, THREE DIFFERENT COST SHAPES, and the third is the reason §6
+// gated it: the crossfade is ONE-SHOT (300ms per status change), the shimmer is
+// continuous but MARGINALLY FREE (it rides a flush that was happening anyway),
+// and the attention pulse costs a band repaint for as long as a prompt goes
+// unanswered. It therefore ships behind `PULSE 0|1`, DEFAULT OFF and UNMEASURED,
+// until the A/B beside `sessionPulse` in deckhand_display.ino has been run.
 //
 // The crossfade's LEADING flush is what makes its measurement honest as well: it
 // starts from a clean dirty rect, so the number PERF reports is the band's own
@@ -577,6 +621,72 @@ void tickSessionAnim() {
       shimComposeUs = (uint32_t) (micros() - t0);
       if (shimComposeUs > shimWorstUs) shimWorstUs = shimComposeUs;
       shimFrameCount++;
+    }
+  }
+
+  // ---- §6 the attention pulse: continuous while a prompt waits, DEFAULT OFF ----
+  // THE ONLY ANIMATION HERE THAT COSTS CURRENT INDEFINITELY, which is why §6 gates
+  // it on a POWERPROBE A/B and why it ships behind `PULSE 0|1` with the toggle off.
+  // The procedure is committed beside `sessionPulse` in deckhand_display.ino.
+  //
+  // IT REPAINTS ON A CHANGE OF COLOUR, NOT ON A TIMER - this file's change-only
+  // redraw discipline applied to an animation, and it is not a micro-optimisation.
+  // RGB565 gives the asking colour's ramp 16 distinct colours on DARK and 6 on
+  // LIGHT at SESSION_PULSE_MAX (computed from the parsed palette in
+  // sessions-geom-check.mjs), so a band repainted every sample would push an
+  // IDENTICAL 292x42 region for 42 to 62 of the breath's 72 samples - at ~10ms of
+  // compose and flush each, on the one animation whose cost is being weighed
+  // against a battery. Sampling at SESSION_PULSE_INTERVAL_MS and painting only on
+  // a change costs 30 repaints a breath at worst and 10 at best, and PERF reports
+  // the count so that claim is READ rather than believed.
+  //
+  // THE COMPARISON IS AGAINST bandFillShown, WHICH drawSessionBand WRITES. That is
+  // the difference between a record and a request, and this repo has already paid
+  // for conflating the two once (savingsSync). A crossfade frame, an ordinary row
+  // repaint and a full list rebuild all paint the band too, all at the pulse's
+  // current alpha, and all through that one function - so the record cannot drift
+  // from the panel and this needs no invalidation hook anywhere.
+  //
+  // THE CROSSFADE OWNS THE BAND WHILE IT RUNS. It repaints at ~30fps at the
+  // pulse's own alpha already, so a second repaint in the same frame would double
+  // its measured cost to change nothing. One owner at a time; the pulse resumes on
+  // the frame after the fade settles.
+  //
+  // TURNING THE TOGGLE OFF NEEDS NO RESTORE PATH, and that is structural rather
+  // than lucky: sessionPulseA returns 0, the computed fill becomes the flat status
+  // colour, that differs from what is on the glass, and the same reconcile paints
+  // it. Apply and restore being ONE condition is exactly what savingsSync had to
+  // be rewritten into after they were two.
+  if (millis() - lastPulseMs >= SESSION_PULSE_INTERVAL_MS) {
+    lastPulseMs = millis();
+    int pos = -1;
+    for (int p = 0; p < sessionCount; p++)
+      if (sessionRowExpanded(p)) { pos = p; break; }
+    // With no band on screen there is nothing to settle and bandFillShown is left
+    // alone: the ladder change that took the band away repainted the whole list,
+    // and the one that brings it back will paint it through drawSessionBand.
+    if (pos >= 0) {
+      const int i = sessionAt(pos);
+      const uint16_t col = colorForStatus(sessions[i].status);
+      if (sessionXfadeT(sessions[i].id) < 0) {
+        const uint16_t want = sessionBandFill(col, -1, sessionPulseA(sessions[i].status));
+        if (want != bandFillShown) {
+          // Its own rectangle, exactly as the crossfade flushes its own - and the
+          // LEADING flush for the same two reasons: the band's dirty rect must not
+          // union with whatever else was pending, and the number PERF reports has
+          // to be this band's cost rather than the backlog's.
+          tft.flush();
+          const uint32_t t0 = micros();
+          drawSessionBand(SESSION_ROW_X + BORDER_CARD, sessionRowYAt(pos) + BORDER_CARD,
+                          SESSION_ROW_W - 2 * BORDER_CARD, i, col);
+          pulseComposeUs = (uint32_t) (micros() - t0);
+          tft.flush();
+          pulseFlushUs = tft.lastFlushUs();
+          if (pulseComposeUs + pulseFlushUs > pulseWorstUs)
+            pulseWorstUs = pulseComposeUs + pulseFlushUs;
+          pulseFrameCount++;
+        }
+      }
     }
   }
 }
@@ -1001,7 +1111,8 @@ void renderSessionsList() {
                     sessionRowYAt(pos) + BORDER_CARD + bandDurDY(), T_BODY, 1,
                     COLOR_CARD,
                     sessionBandFill(colorForStatus(sessions[i].status),
-                                    sessionXfadeT(sessions[i].id)), TR_DATUM);
+                                    sessionXfadeT(sessions[i].id),
+                                    sessionPulseA(sessions[i].status)), TR_DATUM);
       continue;
     }
 #endif
