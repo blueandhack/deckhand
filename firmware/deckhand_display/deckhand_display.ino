@@ -1630,6 +1630,30 @@ void drawAgentSpinner(int cx, int cy, uint16_t bg, bool codex) {
   blit2bpp(codex ? CODEX_BITS[animPhase % CODEX_FRAMES] : SPARK_BITS[animPhase % SPARK_FRAMES],
            SPARK_SIZE, SPARK_STRIDE, cx, cy, bg, colorForStatus("working"));
 }
+#if !BOARD_USES_TFT_ESPI
+// The SAME art as drawAgentSpinner, with the two things the status band needs and
+// that function cannot give it: an arbitrary TINT (the band draws the mark
+// card-coloured ON the status colour, the inverse of every other site) and a
+// TOP-LEFT origin, the convention drawEmoji already uses and deliberately unlike
+// blit2bpp's centre - a caller placing a mark beside a text line knows that line's
+// top, not its middle, so no site here carries a centring term.
+//
+// A SECOND three-line wrapper over blit2bpp rather than a refactor of the first,
+// and that is bought deliberately: drawAgentSpinner and its two call sites are
+// compiled into BOARD 1, whose binary is held byte-identical, so touching them
+// risks moving it for no functional gain. Two wrappers over one blitter is cheap
+// duplication against that. Guarded to board 2 for the same reason - an unused
+// non-static function can still be emitted into the image.
+//
+// `animate` false is the rest pose (frame 0); true follows the shared animPhase,
+// so a band and a row indicator cycling at once stay in step by construction.
+void drawAgentMark(int x, int y, bool codex, uint16_t fg, uint16_t bg, bool animate) {
+  const uint8_t* art = codex ? CODEX_BITS[animate ? animPhase % CODEX_FRAMES : 0]
+                             : SPARK_BITS[animate ? animPhase % SPARK_FRAMES : 0];
+  blit2bpp(art, SPARK_SIZE, SPARK_STRIDE,
+           x + SPARK_SIZE / 2, y + SPARK_SIZE / 2, bg, fg);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // The standalone screen: what the device shows before the host has ever spoken.
@@ -2285,6 +2309,12 @@ void tickWorkingSpinner() {
     // Same two helpers as the draw: the first row's height can differ from the
     // rest, and an animation redrawing at the old y four times a second is exactly
     // how the last fix to this indicator's position was undone once.
+#if !BOARD_USES_TFT_ESPI
+    // The band card carries its agent mark IN THE BAND, so this row has no
+    // indicator of its own to advance - animating one here would blit a second
+    // spark into the card's name band, 44px below the mark it duplicates.
+    if (sessionRowExpanded(pos)) continue;
+#endif
     int y = sessionRowYAt(pos);
     int rowH = sessionRowHAt(pos);
     int dotCy = rowH >= SESSION_LARGE_MIN_H ? y + SESSION_DOT_DY : y + rowH / 2;

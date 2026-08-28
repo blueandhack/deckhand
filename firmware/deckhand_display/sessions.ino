@@ -200,6 +200,68 @@ void fitText(char* out, size_t outSize, const char* src, int maxW) {
   }
   out[0] = '\0'; // nothing fits at all
 }
+#if !BOARD_USES_TFT_ESPI
+// ---------- The status band (the expanded card's head) ----------
+// A filled rect in the status colour carrying the agent mark, the status WORD and
+// the duration. Drawn as ONE unit and repainted as one: the duration's own tick
+// re-runs this whole function rather than clearing a box inside it, which is the
+// only way the clear can never eat the word's tail - the exact failure the compact
+// row's duration already caused once (see the SESSION_SUBC_Y note below). It is
+// also what Task 5's crossfade needs: one rectangle, one call.
+//
+// The word is T_HEAD (Spleen 12x24) because presence is the band's whole job; the
+// duration stays T_BODY so it reads as a subordinate fact. Both are COLOR_CARD ON
+// the status colour, and the mark is tinted the same way round - the inverse of
+// every other site, which is why drawAgentMark takes fg/bg at all.
+//
+// TAKES AN INDEX, NOT A SessionInfo&, and that is forced rather than preferred:
+// Arduino hoists its generated prototypes ABOVE the struct's definition, so a
+// signature naming SessionInfo does not compile in this sketch. buildSessionSubline
+// carries the same note for the same reason.
+//
+// (x, y, w) is the card's INTERIOR - inset by the 2px border - so the fill can be
+// rounded at the top with the card's own corners (radius less the border) and
+// square at the bottom, where the body begins. A plain fillRect here would paint
+// status-coloured nubs outside the card's rounded outline.
+void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
+  const SessionInfo& s = sessions[i];
+  const int h = SESSION_BAND_H - BORDER_CARD;   // the card's top border owns the rest
+  const int r = R_MD - BORDER_CARD;
+  uiFillRound(x, y, w, h, r, col, COLOR_CARD);
+  tft.fillRect(x, y + r, w, h - r, col);
+
+  drawAgentMark(x + SESSION_BAND_PAD, y + (h - SPARK_SIZE) / 2,
+                strcmp(s.agent, "cx") == 0, COLOR_CARD, col, /*animate=*/false);
+
+  // THE DURATION IS MEASURED FIRST AND THE WORD TAKES WHAT IS LEFT. The header's
+  // arithmetic ("NEEDS YOUR INPUT" clears a bare "4m" by 16px) holds for the short
+  // durations it names, and a session that has been asking for "12h34m" spends
+  // 32 more pixels than that - so the lane is measured, never counted, and the word
+  // trims with "..." in the case the band genuinely cannot hold both.
+  char dur[8];
+  formatDuration(s.statusSinceMillis, dur, sizeof(dur));
+  setUIFont(T_BODY);
+  const int durW = tft.textWidth(dur);
+  tft.setTextColor(COLOR_CARD, col);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString(dur, x + w - SESSION_BAND_PAD, y + (h - uiLineH(T_BODY)) / 2);
+
+  // labelForStatus is lower case; drawStatusPill's labels are upper. One
+  // convention on this tab, so the band matches the pill rather than inventing a
+  // second one - and it is the SAME string labelForStatus already owns, so a new
+  // status cannot reach the band with no word.
+  char word[24];
+  snprintf(word, sizeof(word), "%s", labelForStatus(s.status));
+  for (char* p = word; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
+  const int wordX = x + SESSION_BAND_PAD + SPARK_SIZE + SESSION_BAND_MARK_GAP;
+  const int lane = (x + w - SESSION_BAND_PAD - durW - SESSION_BAND_MARK_GAP) - wordX;
+  setUIFont(T_HEAD);
+  char wordFit[24];
+  fitText(wordFit, sizeof(wordFit), word, lane);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(wordFit, wordX, y + (h - uiLineH(T_HEAD)) / 2);
+}
+#endif
 // pos is the DISPLAY POSITION (what the row's on-screen y comes from); the
 // underlying array index - which may differ once two Macs are merged and
 // reordered - is resolved through sessionAt(pos) and used for every read of
@@ -224,6 +286,19 @@ void drawSessionRow(int pos) {
   uint16_t border = working ? COLOR_LABEL : color;
   // One even 2px ring; two nested outlines leave holes where their arcs collide.
   uiStrokeRound(SESSION_ROW_X, y, SESSION_ROW_W, rowH, R_MD, BORDER_CARD, border, COLOR_BG);
+#if !BOARD_USES_TFT_ESPI
+  // ---- THE STATUS BAND (band card only) ----
+  // Drawn FIRST, so everything below is simply the body shifted down by its
+  // height: one offset, applied at the two sites that place the card's head, and
+  // no second layout. The band is the card's whole status vocabulary - it carries
+  // the mark, the word and the duration - which is why the row's own indicator,
+  // its corner agent tag and its bottom pill are all skipped below rather than
+  // drawn a second time 44px away.
+  const int bandOff = expanded ? SESSION_BAND_H : 0;
+  if (expanded)
+    drawSessionBand(SESSION_ROW_X + BORDER_CARD, y + BORDER_CARD,
+                    SESSION_ROW_W - 2 * BORDER_CARD, i, color);
+#endif
 
   // SESSION_DOT_CX/DY, not literals, and BOTH halves are constraints rather than
   // taste - the derivations live in the board header (x) and beside the shared
@@ -234,6 +309,9 @@ void drawSessionRow(int pos) {
   // plainly visible, under the LIGHT theme. The dot and square states move with
   // it so the indicator never jumps sideways when a session changes status.
   int dotCy = large ? y + SESSION_DOT_DY : y + rowH / 2;
+#if !BOARD_USES_TFT_ESPI
+  if (!expanded)   // the band carries this card's mark; see the bandOff note above
+#endif
   drawStatusDot(SESSION_DOT_CX, dotCy, large ? 9 : 7, s.status, COLOR_CARD,
                 strcmp(s.agent, "cx") == 0);
 
@@ -324,6 +402,9 @@ void drawSessionRow(int pos) {
   // 64 would make every offset here negative. A title row starts 2px higher to
   // buy the third line its space.
   int nameTop = y + (showTitle ? SESSION_NAME_Y_T : SESSION_NAME_Y);
+#if !BOARD_USES_TFT_ESPI
+  nameTop += bandOff;
+#endif
   int nameOffset = large ? (SESSION_NAME_H - uiLineH(nameFont)) / 2 : 0;
   tft.drawString(nameBuf, nameX, nameTop + nameOffset);
 
@@ -347,7 +428,7 @@ void drawSessionRow(int pos) {
     // introduced on a row, which is why no clear box here can reach a row border.
     if (expanded) {
       const int lane = SESSION_SUB_LANE_W;   // the row's own measured text lane
-      int cy = y + SESSION_TITLE_Y;
+      int cy = y + bandOff + SESSION_TITLE_Y;
       if (s.title[0]) {
         // WRAPPED, not fitText: title[44] holds 43 characters = 344px against a
         // 244px lane, so the one thing this card has room to do properly is show
@@ -377,8 +458,12 @@ void drawSessionRow(int pos) {
         tft.setTextColor(COLOR_LABEL, COLOR_CARD);
         tft.drawString("LAST PROMPT", nameX, cy);
         cy += SESSION_LINE_H;   // no gap: a label and the value it names are one block
+        // rowH LESS THE BAND, because the band spends 44px of exactly the height
+        // this budget is derived from. Left at rowH the smallest card the rule can
+        // produce (204, at three sessions) would be granted a third prompt line and
+        // draw its path row 10px THROUGH its own bottom border.
         cy = drawWrappedText(s.prompt, nameX, cy, T_BODY, SESSION_LINE_H, lane, 0,
-                             sessionExpPromptLines(rowH), COLOR_VALUE, COLOR_CARD) +
+                             sessionExpPromptLines(rowH - bandOff), COLOR_VALUE, COLOR_CARD) +
              SESSION_LINE_GAP;
       }
       if (s.path[0]) {
@@ -430,6 +515,11 @@ void drawSessionRow(int pos) {
     // SESSION_LARGE_MIN_H..SESSION_SUB_MIN_H band, where the sub-line above is
     // suppressed to clear the pill. Drawn from the SAME agentTag buffer the name
     // lane was measured against above.
+#if !BOARD_USES_TFT_ESPI
+    // Not indented, deliberately: board 1's source text is then unchanged by this
+    // guard, and its binary cannot move. Same idiom as the `} else` above.
+    if (!expanded) {
+#endif
     const int tagRight = SESSION_ROW_X + SESSION_ROW_W - 12;
     tft.setTextDatum(TR_DATUM);
     if (rowEmoji >= 0) {
@@ -453,6 +543,9 @@ void drawSessionRow(int pos) {
     // what makes 85 the packed minimum.
     drawStatusPill(nameX, y + rowH - (showTitle ? SESSION_PILL_UP_T : SESSION_PILL_UP),
                    label, s.status, false);
+#if !BOARD_USES_TFT_ESPI
+    }
+#endif
   } else {
     // NOT SESSION_SUB_LANE_W, the lane the tall-row sites use: on a compact row the
     // duration ("10s"/"4m") is drawn at this SAME y (SESSION_SUBC_Y - see the
@@ -563,6 +656,26 @@ void renderSessionsList() {
     }
     char dur[8];
     formatDuration(sessions[i].statusSinceMillis, dur, sizeof(dur));
+#if !BOARD_USES_TFT_ESPI
+    // THE BAND OWNS THE BAND CARD'S DURATION, and a change repaints the WHOLE
+    // band rather than clearing a box inside it. A drawIfChanged here would clear
+    // textWidth(dur) + 2 pixels of the band on every tick, and a duration wide
+    // enough ("12h34m") would clear straight through the tail of the status word
+    // beside it - the identical defect the compact row's duration caused once, in
+    // a place where the word is the whole point of the card. Repainting the band
+    // is ~3.3ms, at most once a second, and cannot overlap anything by
+    // construction because one function lays both fields out together.
+    if (sessionRowExpanded(pos)) {
+      if (strncmp(rowDurCache[pos], dur, sizeof(rowDurCache[pos])) != 0) {
+        strncpy(rowDurCache[pos], dur, sizeof(rowDurCache[pos]) - 1);
+        rowDurCache[pos][sizeof(rowDurCache[pos]) - 1] = '\0';
+        drawSessionBand(SESSION_ROW_X + BORDER_CARD, sessionRowYAt(pos) + BORDER_CARD,
+                        SESSION_ROW_W - 2 * BORDER_CARD, i,
+                        colorForStatus(sessions[i].status));
+      }
+      continue;
+    }
+#endif
     padLeftTo(dur, sizeof(dur), 7);
     // Through the same two helpers the draw uses, so the duration cannot land on a
     // row whose height the layout has moved.
