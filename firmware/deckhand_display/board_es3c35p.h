@@ -1169,23 +1169,48 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 //   +74..+80   gap 7
 //   +81..+98   Battery        (DROW_BATT 82: label +82..+97, dot +83..+96,
 //                              reading clears +81..+98)
-//   +99..+105  gap 7
-//   +106..+121 device id      (DROW_ID)
-//   +122..+128 gap 7
-//   +129..+146 Mac link row 0 (DROW_MAC0 130, clears +129..+146)
-//   +147..+152 gap 6
-//   +153..+170 Mac link row 1 (DROW_MAC1 154, clears +153..+170)
-//   +171..+173 pad
-//   +174..+175 border                                              = 176
-// The 2px border owns +174..+175 so nothing may end past +173; the last clear
-// ends +170, 3 rows clear. Board 1's equivalent card is 160 with 6px of slack.
+//   +99..+104  gap 6
+//   +105..+122 SoC temp       (DROW_TEMP 106: label +106..+121, reading clears
+//                              +105..+122)
+//   +123..+129 gap 7
+//   +130..+145 device id      (DROW_ID)
+//   +146..+152 gap 7
+//   +153..+170 Mac link row 0 (DROW_MAC0 154, clears +153..+170)
+//   +171..+176 gap 6
+//   +177..+194 Mac link row 1 (DROW_MAC1 178, clears +177..+194)
+//   +195..+197 pad
+//   +198..+199 border                                              = 200
+// The 2px border owns +198..+199 so nothing may end past +197; the last clear
+// ends +194, 3 rows clear. Board 1's equivalent card is 160 with 6px of slack.
+//
+// THE CARD GREW 176 -> 200 FOR THE SoC TEMP ROW, and the 24px comes out of this
+// page's TRAILING AIR, not out of another row. LINK_CARD_Y is derived from
+// DEV_CARD_H below, so the LINK card slides 304 -> 328 on its own and the page's
+// air goes 28px -> 4px - the same margin the USAGE tab settled on, and
+// settings-geom-check.mjs asserts it stays above zero (a card ending flush on
+// contentBottom() reads as joined to the footer, which board 1 shipped once).
+// There is no room left on page 0: a further row has to come from somewhere else.
 const int DEV_CARD_Y = PAGE_TOP + 12;   // 116
-const int DEV_CARD_H = 176;             // 116..291
-const int DROW_BT = 34, DROW_USB = 58, DROW_BATT = 82, DROW_ID = 106;
+const int DEV_CARD_H = 200;             // 116..315
+const int DROW_BT = 34, DROW_USB = 58, DROW_BATT = 82, DROW_ID = 130;
+// BOARD 2 ONLY, and it is a capability rather than a preference: the ESP32-S3 has
+// an internal temperature sensor whose driver is real here (measured: a 522-byte
+// temperature_sensor_install, not one of the three-instruction stubs esp_pm ships
+// on this core), and the plain ESP32 has no usable equivalent. So this constant
+// exists in ONE header, the same shape as P2_MIC_Y and the LINK card, and board 1
+// never sees the row.
+//
+// It sits directly under Battery because the two are read together, and it mirrors
+// that row's geometry exactly - T_BODY label indented past the dot column,
+// T_META reading right-aligned on the same DROW_BATT_VAL_DY baseline - rather than
+// introducing a second row rhythm inside one card. It carries no health dot: the
+// reading is a NUMBER and its colour is an accent on it, so the dot column stays
+// empty here and colour is never the only carrier.
+const int DROW_TEMP = 106;
 // Two fixed row SLOTS, not one per hostLinks[] index - renderMacLinkRows()
 // compacts to however many links are used, so one remaining Mac always draws in
 // slot 0 rather than leaving a hole where the other one was.
-const int DROW_MAC0 = 130, DROW_MAC1 = 154;
+const int DROW_MAC0 = 154, DROW_MAC1 = 178;
 // 0, WHERE BOARD 1 HAS 4, and this constant exists because that 4 was invisible
 // at 13px and is not at 16. The battery READING is drawn DROW_BATT_VAL_DY below
 // the "Battery" label beside it; on board 1 that is a 4px stagger between two 13px
@@ -1194,6 +1219,16 @@ const int DROW_MAC0 = 130, DROW_MAC1 = 154;
 // baseline. It is a board constant rather than a literal for the usual reason:
 // board 1 substitutes its own 4 and its binary cannot move.
 const int DROW_BATT_VAL_DY = 0;
+// 24, WHERE BOARD 1 HAS 20, because this board also draws the CHARGING estimate and
+// its widest label is longer than the discharge one: "90% 4.10V topping up" is 20
+// characters, so board 1's 20 bytes truncated it by exactly one. Derived rather
+// than guessed - "topping up" only appears at or above BATT_CHG_KNEE_MV (4100) and
+// BATT_CHARGING only holds below BATT_FULL_MV (4180), so the percentage in that
+// band is 90..97. settings-geom-check.mjs re-derives the same bound and asserts it.
+const int BATT_ROW_CACHE = 24;
+// 12, WHERE BOARD 1 HAS 8: this board's charging label "topping up" is 10 chars +
+// NUL, and 8 would truncate it to "topping". See BATT_ROW_CACHE above.
+const int BATT_LEFT_BYTES = 12;
 // THE CONNECTION ROW'S ERASE BOX, and the width is DATA-derived and was WRONG.
 // drawConnRow right-aligns "Connected" or "Not connected" and clears a fixed box
 // first; the box was a literal 100 on both boards, which covers 13 Cozette
@@ -1258,7 +1293,7 @@ const int MAC_ROW_W = 28;
 // flush. Harmless, and the same class as the footer's per-second fields, but a
 // reader watching a number change with nothing happening deserves to find the
 // reason here rather than wonder whether it is broken.
-const int LINK_CARD_Y = DEV_CARD_Y + DEV_CARD_H + 12;   // 304..431
+const int LINK_CARD_Y = DEV_CARD_Y + DEV_CARD_H + 12;   // 328..455
 const int LINK_CARD_H = 128;
 const int LROW_HOST = 34, LROW_PAYLOAD = 58, LROW_FLUSH = 82, LROW_UPTIME = 106;
 

@@ -113,6 +113,9 @@ typedef esp_ble_gatts_cb_param_t BleCbParam;
 // own include, because Arduino concatenates the folder-named .ino FIRST and the
 // rest alphabetically - so anything touch_hal.ino includes is not in scope here.
 #include "st77922_touch.h"
+// The S3 die temperature sensor. Board 2 only, for the same reason the Spleen
+// faces above are: board 1 has no usable internal sensor and never sees this path.
+#include <driver/temperature_sensor.h>
 // Board 2's audio output path: Espressif's ES8311 codec driver (a C file, and its
 // header carries its own extern "C") plus Arduino's I2S wrapper. Both are inside
 // this guard rather than at the top of the file for the reason es8311.c's own
@@ -2595,7 +2598,26 @@ int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
 // 20, not 16: the padded string is now 15 chars + NUL, which fitted 16 EXACTLY.
 // drawIfChanged compares cacheSize bytes, so a cache shorter than its string
 // silently stops noticing changes - headroom here is cheaper than that bug.
-char battRowTextCache[20] = "";
+#if !BOARD_USES_TFT_ESPI
+// BOARD 2 ONLY - the SoC die temp row. Sized from the widest string it can draw,
+// "-10.0 C" (7 chars + NUL) over the sensor's configured -10..80C range, and
+// settings-geom-check.mjs asserts that rather than trusting this comment: a cache
+// shorter than its string silently stops noticing changes past that point.
+char tempRowTextCache[8] = "";
+// The colour is cached BESIDE the text for the reason battRowColorCache documents:
+// drawIfChanged compares text only, so crossing a threshold while the digits stay
+// identical would never reach the panel.
+uint16_t tempRowColorCache = 0;
+#endif
+// PER BOARD, because board 2's row can carry a LONGER string than board 1's and a
+// cache shorter than its string silently stops noticing changes past that point.
+// Board 1's widest is the discharge case, "100% 4.20V ~99h" (15 + NUL). Board 2 can
+// also draw the CHARGING label, whose widest is "90% 4.10V topping up" - 20 chars,
+// so 20 bytes truncated it by exactly one. Derived, not guessed: "topping up" only
+// appears at or above BATT_CHG_KNEE_MV (4100) and BATT_CHARGING only holds below
+// BATT_FULL_MV (4180), so the percentage in that band is 90..97 and the string is
+// at most 20 characters. settings-geom-check.mjs asserts both sizes.
+char battRowTextCache[BATT_ROW_CACHE] = "";
 uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
 // MAC_ROW_W (and its derivation comment) moved to board_e32r28t.h (via
 // board.h) - it also explains macRowCache's sizing below.
@@ -4325,6 +4347,13 @@ void setup() {
   audioOutBegin();
 #endif
 
+#if !BOARD_USES_TFT_ESPI
+  // The S3 die temperature sensor. Order-independent - it shares no bus with
+  // anything above, being inside the SoC - and a failure logs and leaves the row
+  // reading "--" rather than stopping the boot.
+  dieTempBegin();
+#endif
+
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP); // board has its own 10K pull-up too
 
   // touchBegin() ran at the top of setup(), for the wake guard.
@@ -4570,6 +4599,31 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
              savePanelSleep ? 1 : 0, saveCpuSlow ? 1 : 0, saveBleSlow ? 1 : 0,
              panelSleptApplied ? 1 : 0, cpuSlowApplied ? 1 : 0, bleSlowApplied ? 1 : 0,
              isAsleep ? 1 : 0);
+    sendLineToHost(line);
+  } else if (buf == "TEMP") {
+    // BOARD 2 ONLY (this whole else-if chain is inside the board-2 guard): reports
+    // the S3 DIE temperature, and says so in the line rather than calling it "the
+    // temperature". It cannot see the charger IC or the cell, which are what a hand
+    // feels while charging - so a comfortable number here is not evidence the
+    // device is cool, only that the SoC is, and the reader must not have to know
+    // that to read the line correctly.
+    //
+    // Via sendLineToHost, NOT Serial.printf, for the same reason BATT is: Serial
+    // reaches the Mac only over USB, and a temperature reading is most wanted with
+    // the cable OUT - exactly when a Serial.printf would go nowhere and log nothing.
+    float c = 0;
+    char line[96];
+    if (dieTempRead(&c)) {
+      // The charge state rides along because it is the single most useful piece of
+      // context for a warm device, and asking for it separately is a second round
+      // trip. mV, not percent: percent routes through pctFromMv()'s model.
+      snprintf(line, sizeof(line), "TEMP die=%.1fC state=%d mv=%d",
+               c, (int) batteryState(), batteryMv);
+    } else {
+      // Named cause, not silence: "no output" and "the sensor never came up" look
+      // identical from the Mac otherwise.
+      snprintf(line, sizeof(line), "TEMP unavailable (die sensor did not initialise)");
+    }
     sendLineToHost(line);
   } else if (buf == "PERF") {
     // Measures the flush path, because "it feels laggy" is not a number and every
@@ -4986,6 +5040,12 @@ void loop() {
     lastBattSample = millis();
     sampleBattery();
     battTrendSample();
+#if !BOARD_USES_TFT_ESPI
+    // The charging counterpart, BOARD 2 ONLY. Each returns immediately unless the
+    // battery is in ITS state, so the two rings can never both be accumulating -
+    // see battChargeSample(). Guarded so board 1 never links the estimator at all.
+    battChargeSample();
+#endif
     powerProbeTick();   // no-op unless a POWERPROBE is running
     static unsigned long lastBattLog = 0;
     if (millis() - lastBattLog > 60000) {
@@ -4998,10 +5058,28 @@ void loop() {
       // pcth and span travel with it so the estimate has provenance in the host log:
       // left=-1 span=6 means still measuring, while left=-1 span=25 means the trend
       // was too flat or rising to state.
+      // 96 unchanged: the widest line this can produce is ~62 characters even with
+      // board 2's " chg=" appended, and GROWING this buffer moved board 1's binary
+      // for nothing - board-baseline.mjs caught that too.
       char bl[96];
-      snprintf(bl, sizeof(bl), "BATT mv=%d pct=%d state=%d left=%d pcth=%d span=%d",
+      int bln = snprintf(bl, sizeof(bl), "BATT mv=%d pct=%d state=%d left=%d pcth=%d span=%d",
                batteryMv, batteryPct(), (int) batteryState(), battMinutesLeft(),
                battPctPerHourX10(), battTrendSpanMin());
+#if !BOARD_USES_TFT_ESPI
+      // The CHARGING estimate's provenance, board 2 only, and it exists for the same
+      // reason left=/span= do - plus one this board makes sharper: the STATUS row is
+      // the only other place this number appears, the backlight blanks on idle, and
+      // ONLY A TOUCH can wake this board. So without a field here the charge estimate
+      // is unobservable from the Mac on an unattended device, which also makes it
+      // unverifiable. chg=-1 is "not yet" and chg=-2 is "above the CV knee, topping
+      // up" - the two refusals kept distinct on the wire exactly as in the firmware.
+      // Appended rather than inserted so an older host parsing positionally is
+      // unaffected, the same shape as the trailing to=<hostId> address.
+      if (bln > 0 && bln < (int) sizeof(bl))
+        snprintf(bl + bln, sizeof(bl) - bln, " chg=%d", battChargeMinutesToFull());
+#else
+      (void) bln;
+#endif
       // Deliberately the one-argument (broadcast) form: there is one battery,
       // both Macs' menu bars want it, and neither is "wrong" to receive it -
       // unlike an ANSWER, there is no decision here for the other Mac to act

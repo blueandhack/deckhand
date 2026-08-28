@@ -94,6 +94,205 @@ fails += 0 if ok else 1
 print(f"  {'PASS' if ok else 'FAIL'}  sagged window gives the same rate as a clean one "
       f"({clean / 10}%/h vs {sagged / 10}%/h)")
 
+
+# --------------------------------------------------------------------------
+# TIME TO FULL WHILE CHARGING, and the CV knee is the whole design problem.
+#
+# Same mirror discipline as the discharge estimator above: every threshold is
+# PARSED out of power.ino, so a mirror that drifts fails loudly instead of
+# passing while the firmware is wrong.
+#
+# WHY THIS CANNOT SIMPLY EXTRAPOLATE. A Li-ion cell charges CC then CV: below the
+# knee the voltage climbs steadily, and above it the charger HOLDS the voltage and
+# tapers the current instead. This board has no current sense, so in the CV phase
+# there is no observable that predicts completion at all - the one quantity that is
+# still moving is the one thing we cannot measure. Measured on real hardware for
+# reference: 76 minutes of a genuine charge ran 3893 -> 4018 mV at +90 mV/h on a
+# dead-straight line (RMS residual 3.5 mV, max 8.5), i.e. the CC phase really is
+# linear and the fit is sound THERE.
+#
+# Two consequences, both asserted below:
+#   - above BATT_CHG_KNEE_MV the estimator refuses with a distinct code (-2,
+#     "topping up") rather than a number, and the knee outranks the span/rise gate
+#     because being above it is a structural refusal, not a not-yet-enough-data one
+#   - below the knee the extrapolation still CROSSES the knee, so the answer is a
+#     FLOOR and is rendered ">=", never "~". The discharge row's "~" means "about";
+#     these are different claims and must not share a glyph.
+CHG_MIN_SPAN_MS = firmware_const("BATT_CHG_MIN_SPAN_MS")
+CHG_MIN_RISE_MV = firmware_const("BATT_CHG_MIN_RISE_MV")
+CHG_KNEE_MV     = firmware_const("BATT_CHG_KNEE_MV")
+CHG_TARGET_MV   = firmware_const("BATT_CHG_TARGET_MV")
+CHG_FULL_MV     = firmware_const("BATT_FULL_MV")
+print(f"  charge thresholds read from power.ino: span={CHG_MIN_SPAN_MS // 60000}min "
+      f"rise={CHG_MIN_RISE_MV}mV knee={CHG_KNEE_MV}mV target={CHG_TARGET_MV}mV")
+
+CHG_SETTLE_MS = firmware_const("BATT_CHG_SETTLE_MS")
+CHG_NOT_YET, CHG_TOPPING = -1, -2
+
+# THE SETTLE GUARD, and it exists because the FIRST FIT LIES - measured on hardware,
+# not anticipated. Plugging in makes the cell voltage snap up +64 mV in SECONDS
+# (3925 -> 3989 observed): that is the charger's terminal voltage appearing across
+# the divider, not charge going in. One such sample in the ring inflated the slope
+# 143 -> 183 mV/h and turned a true ~65 min into a reported 54.
+#
+# THAT IS A VIOLATED CONTRACT, NOT A ROUNDING ERROR. The label is rendered ">=",
+# which promises AT LEAST that long, so an optimistic estimate breaks the one
+# guarantee the notation exists to make - and it breaks it in the direction a reader
+# cannot detect. The discharge side documents the same trap in reverse (-21 mV of
+# relaxation after unplugging); this transient is three times larger.
+#
+# A rate gate cannot catch it: the rebound is smooth and fits a line perfectly well.
+# Only TIME can, so samples inside BATT_CHG_SETTLE_MS of entering CHARGING are not
+# admitted to the ring at all.
+def chgRing(series, start_ms=0):
+    """Mirror of battChargeSample()'s admission rule: [(ms, mv)] -> the ring."""
+    return [(ms, mv) for ms, mv in series if ms - start_ms >= CHG_SETTLE_MS]
+
+def chgMinsToFull(samples, mvNow):        # [(ms, mv)] oldest first
+    # The knee is checked FIRST: above it the refusal is structural, so more data
+    # cannot change the answer and reporting "not yet" would invite waiting for it.
+    if mvNow >= CHG_KNEE_MV: return CHG_TOPPING
+    if len(samples) < 3: return CHG_NOT_YET
+    if samples[-1][0] - samples[0][0] < CHG_MIN_SPAN_MS: return CHG_NOT_YET
+    if samples[-1][1] - samples[0][1] < CHG_MIN_RISE_MV: return CHG_NOT_YET
+    n = sx = sy = sxy = sxx = 0.0
+    for ms, mv in samples:
+        x = (ms - samples[0][0]) / 3600000.0; y = float(mv)
+        n += 1; sx += x; sy += y; sxy += x * y; sxx += x * x
+    den = n * sxx - sx * sx
+    if den <= 0: return CHG_NOT_YET
+    slope = (n * sxy - sx * sy) / den          # mV/h, positive while filling
+    if slope <= 0: return CHG_NOT_YET
+    if mvNow >= CHG_TARGET_MV: return 0
+    mins = int((CHG_TARGET_MV - mvNow) * 60.0 / slope + 0.5)
+    return min(mins, 99 * 60)
+
+def chgRamp(mins, riseMv, start=3900):
+    return [(i * 60000, start + riseMv * i // mins) for i in range(mins + 1)]
+
+# --- the target and the knee must sit where the rest of the firmware puts them ---
+for name, cond in [
+    ("BATT_CHG_TARGET_MV is the mv at which pctFromMv() actually reads 100%",
+     pctFromMv(CHG_TARGET_MV) == 100 and pctFromMv(CHG_TARGET_MV - 1) < 100),
+    ("the knee sits below the target, so the refusal band is non-empty",
+     CHG_KNEE_MV < CHG_TARGET_MV),
+    ("the target is at or above the FULL threshold, so the estimate cannot read 0 "
+     "while the state is still CHARGING", CHG_TARGET_MV >= CHG_FULL_MV),
+    ("the knee sits below the FULL threshold, so 'topping up' is reached before full",
+     CHG_KNEE_MV < CHG_FULL_MV),
+]:
+    fails += 0 if cond else 1
+    print(f"  {'PASS' if cond else 'FAIL'}  {name}")
+
+# --- the refusals, which are the point ---
+for name, ss, now, want in [
+    ("a normal CC-phase charge reports a floor", chgRamp(30, 60), 3960, "num"),
+    ("one minute short of the span is refused", chgRamp(19, 60), 3960, CHG_NOT_YET),
+    ("a rise inside the ADC's noise is refused", chgRamp(30, 12), 3912, CHG_NOT_YET),
+    ("above the CV knee it says topping up, not a number",
+     chgRamp(30, 60, start=4070), CHG_KNEE_MV + 20, CHG_TOPPING),
+    ("the knee outranks the gate: too little data ABOVE it still reads topping up",
+     chgRamp(5, 5, start=4110), CHG_KNEE_MV + 20, CHG_TOPPING),
+    ("a FALLING window while nominally charging is refused, never negative time",
+     [(i * 60000, 3960 - 2 * i) for i in range(31)], 3900, CHG_NOT_YET),
+]:
+    got = chgMinsToFull(ss, now)
+    ok = (got > 0) if want == "num" else (got == want)
+    fails += 0 if ok else 1
+    print(f"  {'PASS' if ok else 'FAIL'}  {name}"
+          + ("" if ok else f"  (got {got})"))
+
+# --- the real 76-minute hardware run, so this is not only synthetic ---
+real = chgMinsToFull(chgRamp(76, 125, start=3893), 4018)
+ok = real == CHG_TOPPING or real > 60
+fails += 0 if ok else 1
+print(f"  {'PASS' if ok else 'FAIL'}  the measured 3893->4018 mV run over 76 min "
+      f"yields a floor of {real} min at +90 mV/h (linear, and therefore optimistic)")
+
+# THE 99h CLAMP IS A BACKSTOP AND IS PROVABLY UNREACHABLE TODAY, which is worth
+# asserting rather than assuming: the first version of this check tried to TRIGGER
+# the clamp and failed, because the gate makes it impossible. The rise gate admits
+# nothing slower than BATT_CHG_MIN_RISE_MV over the longest window the ring can
+# hold (SLOTS-1 minutes), and the largest gap to the target is from a nearly-flat
+# cell, so the worst estimate the arithmetic can ever return is ~17h against a 99h
+# clamp. Asserted as a SWEEP over the admissible space rather than one case, so a
+# future change to the ring size or either threshold that made the clamp live
+# fails here instead of silently starting to truncate a real reading.
+slowest = CHG_MIN_RISE_MV / ((SLOTS - 1) / 60.0)          # mV/h
+worst = 0
+for mvNow in range(3300, CHG_KNEE_MV):
+    worst = max(worst, (CHG_TARGET_MV - mvNow) * 60.0 / slowest)
+ok = worst < 99 * 60
+fails += 0 if ok else 1
+print(f"  {'PASS' if ok else 'FAIL'}  the 99h clamp is an unreachable backstop: the gate admits "
+      f"no slope under {slowest:.1f} mV/h, so the worst estimate is {worst / 60:.1f}h "
+      f"({99 * 60 / worst:.1f}x inside the clamp)")
+# ...and the clamp is still PRESENT, since the sweep above only proves it is not
+# currently load-bearing. A guard that has been deleted cannot catch the change
+# that would make it necessary.
+m_clamp = re.search(r"int battChargeMinutesToFull\(.*?\n\}", POWER, re.S)
+ok = m_clamp is not None and "99L * 60L" in m_clamp.group(0)
+fails += 0 if ok else 1
+print(f"  {'PASS' if ok else 'FAIL'}  battChargeMinutesToFull() still carries the 99h clamp "
+      f"as a backstop for a future change to the gate")
+
+# --- the settle guard, including the REAL hardware case it was found by ---
+for name, cond in [
+    ("the settle window is long enough to clear a plug-in rebound (>=2 min)",
+     CHG_SETTLE_MS >= 120000),
+    ("the settle window is short enough not to dominate the span gate",
+     CHG_SETTLE_MS < CHG_MIN_SPAN_MS),
+]:
+    fails += 0 if cond else 1
+    print(f"  {'PASS' if cond else 'FAIL'}  {name}")
+
+# Samples inside the settle window must not reach the ring at all.
+raw = [(i * 60000, 3925 if i == 0 else 3989 + 2 * (i - 1)) for i in range(30)]
+ring = chgRing(raw)
+ok = all(mv != 3925 for _, mv in ring) and len(ring) < len(raw)
+fails += 0 if ok else 1
+print(f"  {'PASS' if ok else 'FAIL'}  the plug-in rebound sample is not admitted to the ring "
+      f"({len(raw)} raw -> {len(ring)} admitted)")
+
+# THE REGRESSION, from the real run: with the rebound the device said 54 min when the
+# truth was ~65. Rebuilt here from the measured series, the settled ring must land
+# near 65 and must NOT reproduce the optimistic 54.
+real_mv = [3989, 3994, 3999, 4003, 4007, 4007, 4010, 4011, 4013, 4016, 4016, 4019, 4024,
+           4026, 4028, 4031, 4034, 4035, 4039, 4041, 4039, 4042, 4044, 4046, 4047]
+contaminated = [(0, 3925)] + [((i + 1) * 60000, mv) for i, mv in enumerate(real_mv)]
+bad = chgMinsToFull(contaminated, 4047)                 # what shipped
+good = chgMinsToFull(chgRing(contaminated), 4047)       # what the guard gives
+# The truth, computed independently: a least-squares fit over the settled samples
+# only. 65 min was the figure derived by hand from this same series during the
+# investigation; the tolerance covers the few samples added since.
+ok = good > bad and abs(good - 65) <= 15
+fails += 0 if ok else 1
+print(f"  {'PASS' if ok else 'FAIL'}  the measured rebound case: contaminated={bad} min "
+      f"(optimistic, breaks the >= floor), settled={good} min (true ~65)")
+
+# The direction is the whole point: the guard must never make the estimate SHORTER.
+ok = good >= bad
+fails += 0 if ok else 1
+print(f"  {'PASS' if ok else 'FAIL'}  the settle guard moves the estimate in the SAFE direction "
+      f"(longer, never shorter): {bad} -> {good}")
+
+# --- the RENDERING claim: a floor must not borrow the discharge row's "~" ---
+m = re.search(r"void battChargeLabel\(.*?\n\}", POWER, re.S)
+if not m:
+    fails += 1
+    print("  FAIL  battChargeLabel() not found in power.ino")
+else:
+    body = m.group(0)
+    for name, cond in [
+        ('battChargeLabel() renders the floor with ">=", not the discharge row\'s "~"',
+         ">=" in body and '"~' not in body),
+        ('battChargeLabel() says "topping up" above the knee rather than a number',
+         "topping" in body),
+        ("battChargeLabel() renders a not-yet-measurable estimate as NOTHING, never 0m",
+         re.search(r"out\[0\]\s*=\s*'\\0'", body) is not None),
+    ]:
+        fails += 0 if cond else 1
+        print(f"  {'PASS' if cond else 'FAIL'}  {name}")
 # --------------------------------------------------------------------------
 # POWERPROBE: the passive mV/h instrument.
 #

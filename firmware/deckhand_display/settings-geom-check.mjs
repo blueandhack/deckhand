@@ -43,6 +43,27 @@ const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 const B = {};
 for (const b of [1, 2]) B[b] = consts("deckhand_display.ino", consts(HDR[b]));
 const SET_CACHE = cacheSizes("deckhand_display.ino");   // the settings caches live in the main file
+// Charge-estimator thresholds, PARSED out of power.ino rather than transcribed -
+// the same drift discipline batt-trend-check.py uses, and for the same reason: the
+// widest string the battery row can draw is a function of these two.
+const POWER_SRC = fs.readFileSync(`${DIR}/power.ino`, "utf8");
+const POWER_CONST = Object.fromEntries(["BATT_CHG_KNEE_MV", "BATT_FULL_MV"].map(n => {
+  const m = POWER_SRC.match(new RegExp(`${n}\\s*=\\s*(\\d+)`));
+  if (!m) throw new Error(`${n} not found in power.ino - was it renamed?`);
+  return [n, +m[1]];
+}));
+// pctFromMv()'s table, mirrored to derive that string's length. Integer division,
+// matching the firmware.
+const PCT_MV = [3300, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200];
+const PCT_PC = [0, 8, 15, 28, 45, 62, 78, 90, 100];
+function pctFromMvJs(mv) {
+  if (mv <= PCT_MV[0]) return 0;
+  if (mv >= PCT_MV[8]) return 100;
+  for (let i = 1; i < 9; i++)
+    if (mv < PCT_MV[i])
+      return PCT_PC[i - 1] + Math.floor((PCT_PC[i] - PCT_PC[i - 1]) * (mv - PCT_MV[i - 1]) / (PCT_MV[i] - PCT_MV[i - 1]));
+  return 100;
+}
 const T_META = 1, T_BODY = 2, T_HEAD = 3;
 const MAX_HOSTS = 4;
 
@@ -321,6 +342,17 @@ for (const b of [1, 2]) {
       const val = fieldBox(b, T_META, c.DROW_BATT + c.DROW_BATT_VAL_DY);
       return [Math.min(lbl[0], val[0], c.DROW_BATT + 1), Math.max(lbl[1], val[1], c.DROW_BATT + 14)];
     })()],
+    // THE DIE-TEMP ROW IS BOARD 2 ONLY - the ESP32-S3 has an internal temperature
+    // sensor and the plain ESP32 has no usable one, so DROW_TEMP exists in one
+    // header, the same shape as P2_MIC_Y and the LINK card. It mirrors the battery
+    // row's geometry exactly (T_BODY label indented past the dot column, T_META
+    // reading right-aligned at the same DROW_BATT_VAL_DY baseline offset) rather
+    // than inventing a second rhythm inside one card.
+    ...(c.DROW_TEMP === undefined ? [] : [["soc temp", (() => {
+      const lbl = tlBox(b, T_BODY, c.DROW_TEMP);
+      const val = fieldBox(b, T_META, c.DROW_TEMP + c.DROW_BATT_VAL_DY);
+      return [Math.min(lbl[0], val[0]), Math.max(lbl[1], val[1])];
+    })()]]),
     ["device id", tlBox(b, T_META, c.DROW_ID)],
     ["mac row 0", fieldBox(b, T_META, c.DROW_MAC0)],
     ["mac row 1", fieldBox(b, T_META, c.DROW_MAC1)],
@@ -389,7 +421,49 @@ for (const b of [1, 2]) {
     chk(c.DROW_BATT_VAL_DY === battDyForBaseline,
         `DROW_BATT_VAL_DY ${c.DROW_BATT_VAL_DY} puts the reading on the "Battery" label's own baseline ` +
         `(needs ${battDyForBaseline} = ascent ${ascentB(b, T_BODY)} - ${ascentB(b, T_META)})`);
-    chk(+SET_CACHE.battRowTextCache >= 16, `battRowTextCache ${SET_CACHE.battRowTextCache} holds 15 chars + NUL`);
+    // BATT_ROW_CACHE, the BOARD's constant - not the parsed array size, which now
+    // reads through a per-board name and would report one board's value for both.
+    chk(c.BATT_ROW_CACHE >= 16, `BATT_ROW_CACHE ${c.BATT_ROW_CACHE} holds 15 chars + NUL`);
+    // The trailing-label buffer, on BOTH boards: board 1 needs only the discharge
+    // label, whose widest is "~119m".
+    chk(c.BATT_LEFT_BYTES >= 6, `BATT_LEFT_BYTES ${c.BATT_LEFT_BYTES} holds "~119m" + NUL (6)`);
+    // BOARD 2 ALSO DRAWS THE CHARGING LABEL, whose widest is longer than the
+    // discharge one - and 20 bytes truncated it by exactly one character, which is
+    // the silent-cache failure this repo has now paid for several times. The bound
+    // is DERIVED here rather than transcribed: "topping up" only appears at or above
+    // BATT_CHG_KNEE_MV, and BATT_CHARGING only holds below BATT_FULL_MV, so the
+    // percentage in that band is what sets the length.
+    if (b === 2) {
+      let worstChg = "";
+      for (let mv = POWER_CONST.BATT_CHG_KNEE_MV; mv < POWER_CONST.BATT_FULL_MV; mv++) {
+        const s2 = `${pctFromMvJs(mv)}% ${Math.floor(mv / 1000)}.${String(Math.floor((mv % 1000) / 10)).padStart(2, "0")}V topping up`;
+        if (s2.length > worstChg.length) worstChg = s2;
+      }
+      chk(c.BATT_LEFT_BYTES >= "topping up".length + 1,
+          `BATT_LEFT_BYTES ${c.BATT_LEFT_BYTES} holds "topping up" + NUL (11)`);
+      chk(c.BATT_ROW_CACHE >= worstChg.length + 1,
+          `BATT_ROW_CACHE ${c.BATT_ROW_CACHE} holds the widest CHARGING row "${worstChg}" (${worstChg.length} chars) + NUL`);
+      const chgW = widthB(b, T_META, worstChg);
+      chk(xRight - chgW > labelEnd,
+          `charging row "${worstChg}" ${chgW}px starts ${xRight - chgW}, "Battery" ends ${labelEnd}`);
+    }
+    // THE DIE-TEMP ROW. Asserted as PRESENT on board 2 rather than merely tolerated
+    // if absent: an #if that silently drops the row is exactly the failure this
+    // repo already paid for once with `#if BOARD_PANEL_INVERT` in panel_shim.cpp,
+    // where a text-matching test happily found a line the preprocessor was
+    // deleting. "-10.0 C" is the widest the reading can be over the sensor's
+    // configured range, and it is the DATA's width, so it is measured per board.
+    if (b === 2)
+      chk(c.DROW_TEMP !== undefined,
+          "board 2 declares DROW_TEMP - the S3 has a die sensor and the plain ESP32 has no usable one");
+    if (c.DROW_TEMP !== undefined) {
+      const tempW = widthB(b, T_META, "-10.0 C");
+      const tempLabelEnd = c.CARD_X + c.PAD + 20 + widthB(b, T_BODY, "SoC temp");
+      chk(xRight - tempW > tempLabelEnd,
+          `SoC temp reading ${tempW}px starts ${xRight - tempW}, "SoC temp" ends ${tempLabelEnd}`);
+      chk(+SET_CACHE.tempRowTextCache >= 8,
+          `tempRowTextCache ${SET_CACHE.tempRowTextCache} holds "-10.0 C" + NUL (8)`);
+    }
     // CONN_TEXT_W/H, measured, and this is the assertion whose absence let a 100px
     // box ship against a 104px string on board 2. The height must cover the CELL,
     // because the row's own drawString paints a full cell of opaque background.

@@ -476,6 +476,19 @@ const int DROW_MAC0 = 120, DROW_MAC1 = 140;
 // halves of one row failing to line up. Substituting the literal it replaces,
 // so this binary cannot move.
 const int DROW_BATT_VAL_DY = 4;
+// The battery row's change-only cache, in BYTES. Board 1's widest string is the
+// discharge case, "100% 4.20V ~99h" - 15 chars + NUL. It is a named per-board
+// constant rather than a literal at the declaration because board 2's row can draw
+// a LONGER string (its charging label), and a cache shorter than its string
+// silently stops noticing changes past that point. One name that the declaration
+// and settings-geom-check.mjs both read, so the two cannot drift.
+const int BATT_ROW_CACHE = 20;
+// The battery row's TRAILING LABEL buffer, in bytes. Board 1 only ever draws the
+// discharge estimate, whose widest is "~119m" (5 + NUL). Named per board because
+// board 2 also draws a charging label that does not fit in 8 - and because leaving
+// this as a shared literal 12 changed board 1's binary at +0 BYTES, which is exactly
+// the case a size comparison cannot see and board-baseline.mjs can.
+const int BATT_LEFT_BYTES = 8;
 // drawConnRow()'s erase box, likewise the shipping values (100 x 16). The WIDTH
 // has to cover the widest string the row draws, "Not connected", which is 78px in
 // Cozette 6x13 - so 100 has 22px of headroom here and had NONE on board 2 at 8px

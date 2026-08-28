@@ -83,6 +83,13 @@ void drawStatusPageStatic() {
   tft.drawString("Bluetooth", CARD_X + PAD + 20, DEV_CARD_Y + DROW_BT);
   tft.drawString("USB", CARD_X + PAD + 20, DEV_CARD_Y + DROW_USB);
   tft.drawString("Battery", CARD_X + PAD + 20, DEV_CARD_Y + DROW_BATT);
+#if !BOARD_USES_TFT_ESPI
+  // BOARD 2 ONLY. Indented to +20 to sit under "Battery" rather than at +PAD with
+  // the device id: the two are read together. It says SoC, never "Temp", because
+  // the sensor is inside the package and cannot see the charger or the cell - the
+  // label is the only place a reader learns which temperature this is.
+  tft.drawString("SoC temp", CARD_X + PAD + 20, DEV_CARD_Y + DROW_TEMP);
+#endif
   if (hostCount == 0) snprintf(buf, sizeof(buf), "%s  unpaired", deviceName);
   else if (hostCount == 1) snprintf(buf, sizeof(buf), "%s  paired", deviceName);
   else snprintf(buf, sizeof(buf), "%s  paired x%d", deviceName, hostCount);
@@ -203,8 +210,20 @@ void renderStatusPage() {
     // battMinutesLeft(). While charging there is nothing to state, and for the
     // first ~20 minutes off USB the trend is still inside the ADC's noise, so the
     // row reads exactly as it always did rather than showing a placeholder.
-    char left[8] = "";
+    // BATT_LEFT_BYTES, per board: 8 on board 1, whose widest is the discharge
+    // "~119m", and 12 on board 2, which also draws "topping up" (10 + NUL). A shared
+    // literal 12 here moved board 1's binary at +0 bytes - caught by
+    // board-baseline.mjs, invisible to any size check.
+    char left[BATT_LEFT_BYTES] = "";
     if (bst == BATT_DISCHARGING) battLeftLabel(left, sizeof(left), battMinutesLeft());
+#if !BOARD_USES_TFT_ESPI
+    // BOARD 2 ONLY, and it is the same lane: the two states are mutually exclusive,
+    // so charging borrows the slot the discharge estimate leaves empty rather than
+    // costing a column. ">=" not "~" - the fit is taken below the CV knee and
+    // extrapolates THROUGH it, so the figure is a floor, not an estimate. See
+    // battChargeMinutesToFull().
+    else if (bst == BATT_CHARGING) battChargeLabel(left, sizeof(left), battChargeMinutesToFull());
+#endif
     snprintf(buf, sizeof(buf), "%d%% %d.%02dV%s%s", pct, batteryMv / 1000,
              (batteryMv % 1000) / 10, left[0] ? " " : "", left);
   }
@@ -232,6 +251,34 @@ void renderStatusPage() {
   // board 2 sets it to 0 and draws them on the same baseline.
   drawIfChanged(battRowTextCache, sizeof(battRowTextCache), buf, CARD_X + CARD_W - PAD,
                 DEV_CARD_Y + DROW_BATT + DROW_BATT_VAL_DY, 1, 1, rowCol, COLOR_CARD, TR_DATUM);
+#if !BOARD_USES_TFT_ESPI
+  // THE SoC DIE TEMP ROW. "--" when the sensor never came up, never a plausible
+  // 0.0 - the same rule the Codex percentage follows, because a measurement and a
+  // failure must not render identically.
+  {
+    float dieC = 0;
+    char tbuf[8];
+    uint16_t tcol;
+    if (dieTempRead(&dieC)) {
+      snprintf(tbuf, sizeof(tbuf), "%.1f C", dieC);
+      tcol = colorForDieTemp(dieC);
+    } else {
+      snprintf(tbuf, sizeof(tbuf), "--");
+      tcol = COLOR_LABEL;
+    }
+    // Right-aligned like the battery reading, and padded so a shrinking string
+    // cannot leave the tail of a longer one behind ("100.0 C" -> "48.3 C").
+    padLeftTo(tbuf, sizeof(tbuf), 7);
+    // Colour cached beside the text, the guard battRowColorCache documents: crossing
+    // a band while the digits stay identical would otherwise never repaint.
+    if (tcol != tempRowColorCache) {
+      tempRowColorCache = tcol;
+      tempRowTextCache[0] = '\0';
+    }
+    drawIfChanged(tempRowTextCache, sizeof(tempRowTextCache), tbuf, CARD_X + CARD_W - PAD,
+                  DEV_CARD_Y + DROW_TEMP + DROW_BATT_VAL_DY, 1, 1, tcol, COLOR_CARD, TR_DATUM);
+  }
+#endif
   renderMacLinkRows();
 #if !BOARD_USES_TFT_ESPI
   renderLinkCard();
@@ -640,6 +687,15 @@ void resetSettingsCaches() {
   btDotCache = -1; usbDotCache = -1; battRowCache = -1; battRowTextCache[0] = '\0';
   soundBtnCache = -1; flipBtnCache = -1; themeBtnCache = -1; brightBarCache = -1;
   battRowColorCache = 0;
+#if !BOARD_USES_TFT_ESPI
+  // The SoC temp row's pair. Resetting these HERE rather than at the call sites is
+  // what makes the invariant impossible to forget: drawStatusPageStatic() repaints
+  // the chrome these are drawn on, so they are stale by definition afterwards, and
+  // a caller that forgot left the row BLANK - the value had not "changed", so
+  // drawIfChanged skipped a field whose pixels had just been erased.
+  tempRowTextCache[0] = '\0';
+  tempRowColorCache = 0;
+#endif
   brightPctCache[0] = '\0'; sleepValCache[0] = '\0'; volValCache[0] = '\0';
   for (int i = 0; i < 6; i++) stepGlyphCache[i] = -1;
   // Without this a page repaint (e.g. PAGE away and back) leaves both Mac

@@ -253,6 +253,12 @@ const unsigned long BATT_TREND_INTERVAL_MS = 60000UL;  // -> a 30 minute window
 const unsigned long BATT_TREND_MIN_SPAN_MS = 1200000UL;  // 20 min before reporting
 const int BATT_TREND_MIN_DROP_MV = 25;                 // clear of the ADC's own noise
 const int BATT_TREND_MIN_PCT_PER_H_X10 = 2;            // 0.2%/h; flatter reads as unknown
+// The mv at which batteryState() calls the cell FULL. Named rather than left as a
+// literal so batt-trend-check.py can parse it and assert the charge estimator's
+// target sits at or above it - see BATT_CHG_TARGET_MV. Note it is 98% on
+// pctFromMv()'s curve, so the pill reads "full" a couple of points before the
+// percentage would reach 100; that predates this and is left exactly as it was.
+const int BATT_FULL_MV = 4180;
 
 int battTrendMv[BATT_TREND_SLOTS];
 unsigned long battTrendAt[BATT_TREND_SLOTS];
@@ -270,7 +276,7 @@ BattState batteryState() {
   if (!batteryPresent()) return BATT_NONE;
   // While the TP4054 is charging, BAT_ADC reads the charge voltage, which
   // settles at ~4.2V as the cell fills.
-  if (usbLinkActive()) return batteryMv >= 4180 ? BATT_FULL : BATT_CHARGING;
+  if (usbLinkActive()) return batteryMv >= BATT_FULL_MV ? BATT_FULL : BATT_CHARGING;
   return BATT_DISCHARGING;
 }
 // Called from the 1s battery tick. Only accumulates while actually on battery:
@@ -343,6 +349,253 @@ int battMinutesLeft() {
   if (mins > 99L * 60L) mins = 99L * 60L;
   return (int) mins;
 }
+
+// ---------------------------------------------------------------------------
+// SoC DIE TEMPERATURE - BOARD 2 ONLY, and it measures the DIE, not the case.
+//
+// State that plainly wherever this number is shown. The S3's sensor is inside the
+// package, so it reports how hot the SoC is; it cannot see the charger IC or the
+// cell, which are what a hand actually feels while the device is charging. An
+// instrument that reads the same thing the renderer wrote proves the renderer
+// self-consistent rather than correct - this is the same shape of caution, one
+// layer down: a comfortable die temperature is not evidence that the device is
+// cool, only that the S3 is.
+//
+// It is board 2 only because the capability is. The plain ESP32 has no usable
+// internal sensor (its one undocumented ROM entry point is famously unreliable and
+// is not what this driver is), so the whole path lives behind the same
+// BOARD_USES_TFT_ESPI seam every other board split uses, and board 1 never sees it.
+//
+// The driver here is REAL, not one of the stubs this core ships elsewhere -
+// measured with nm on the archive board 2 actually links:
+// temperature_sensor_install is 522 bytes, _get_celsius 322, _enable 119, against
+// esp_pm_configure's three instructions. Checking that first is the lesson the
+// esp_pm note already paid for: a function that links, compiles and does nothing
+// reads as the idea being wrong rather than absent.
+#if !BOARD_USES_TFT_ESPI
+temperature_sensor_handle_t dieTempHandle = nullptr;
+// Cached, because the STATUS page re-renders on every host tick and the TEMP
+// command can arrive on both transports at once. One second is far finer than
+// anything thermal.
+const unsigned long DIE_TEMP_CACHE_MS = 1000;
+float dieTempLastC = 0;
+bool dieTempLastOk = false;
+unsigned long dieTempLastAt = 0;
+
+void dieTempBegin() {
+  // -10..80C is the range the sensor is configured for, and it is what sizes the
+  // widest string the row can draw ("-10.0 C"). A reading outside it is clamped by
+  // the driver rather than reported as an error, which is the right trade for a
+  // display: this device cannot legitimately reach either end indoors.
+  temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+  esp_err_t err = temperature_sensor_install(&cfg, &dieTempHandle);
+  if (err != ESP_OK) {
+    dieTempHandle = nullptr;
+    Serial.printf("TEMP: sensor install failed (%s) - the SoC temp row will read --\n",
+                  esp_err_to_name(err));
+    return;
+  }
+  err = temperature_sensor_enable(dieTempHandle);
+  if (err != ESP_OK) {
+    temperature_sensor_uninstall(dieTempHandle);
+    dieTempHandle = nullptr;
+    Serial.printf("TEMP: sensor enable failed (%s) - the SoC temp row will read --\n",
+                  esp_err_to_name(err));
+    return;
+  }
+  Serial.println("TEMP: SoC die sensor ready (-10..80C).");
+}
+
+// true plus a reading, or false. A FAILURE MUST STAY DISTINGUISHABLE FROM A
+// MEASUREMENT - the row draws "--" rather than a plausible 0.0, the same rule the
+// Codex percentage follows.
+bool dieTempRead(float* out) {
+  if (dieTempHandle == nullptr) return false;
+  unsigned long now = millis();
+  if (dieTempLastAt != 0 && now - dieTempLastAt < DIE_TEMP_CACHE_MS) {
+    if (!dieTempLastOk) return false;
+    *out = dieTempLastC;
+    return true;
+  }
+  float c = 0;
+  esp_err_t err = temperature_sensor_get_celsius(dieTempHandle, &c);
+  dieTempLastAt = now;
+  dieTempLastOk = (err == ESP_OK);
+  if (!dieTempLastOk) return false;
+  dieTempLastC = c;
+  *out = c;
+  return true;
+}
+
+// The row's colour. Bands are INVERTED against the battery's, where a high
+// percentage is the good one - here a high number is the bad one. Thresholds are
+// generous: the S3's own maximum is 85C and it throttles long before a hand would
+// call the case hot, so WARN is not an alarm about damage, it is "this is running
+// hotter than idle".
+uint16_t colorForDieTemp(float c) {
+  if (c >= 70) return COLOR_BAD;
+  if (c >= 55) return COLOR_WARN;
+  return COLOR_GOOD;
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// TIME TO FULL WHILE CHARGING, and the CV knee is why this is not just
+// battMinutesLeft() with the sign flipped.
+//
+// A Li-ion cell charges in two phases. Below the knee the charger holds CURRENT
+// and the voltage climbs steadily - measured on this hardware, 76 minutes of a
+// real charge ran 3893 -> 4018 mV at +90 mV/h on a dead-straight line (RMS
+// residual 3.5 mV, max 8.5), so a least-squares fit is sound THERE. Above the
+// knee it holds VOLTAGE and tapers the current instead, and this board has no
+// current sense: the one quantity still moving is the one thing we cannot
+// measure. So in that phase there is no honest number to report, at any window
+// length, and more data cannot change that.
+//
+// Hence two DIFFERENT refusals, because "not yet" and "not ever, here" are
+// different claims and collapsing them would invite waiting for a number that is
+// never coming:
+//   BATT_CHG_NOT_YET (-1)  the window is too short or too flat - keep watching
+//   BATT_CHG_TOPPING (-2)  above the knee - structurally unmeasurable, say so
+//
+// And below the knee the extrapolation still CROSSES the knee, so what comes back
+// is a FLOOR rather than an estimate. battChargeLabel() renders it ">=", never the
+// discharge row's "~": "~" means about, ">=" means at least, and a reader who
+// cannot tell those apart has been told the charge will finish sooner than it will.
+// BOARD 2 ONLY, and the guard is here rather than at the call sites because this is
+// where the CODE is: leaving it unguarded put 288 bytes of a board-2-only estimator
+// into board 1's binary, which board-baseline.mjs --check 1 caught and nothing else
+// would have. The estimator is board-agnostic ARITHMETIC, so nothing here needs the
+// S3 - it is scoped this way because board 1 is being held byte-identical and cannot
+// be verified on hardware from here, not because it could not work there.
+#if !BOARD_USES_TFT_ESPI
+const unsigned long BATT_CHG_MIN_SPAN_MS = 1200000UL;  // 20 min, as discharge
+const int BATT_CHG_MIN_RISE_MV = 25;                   // clear of the ADC's noise
+// The knee is where CC hands over to CV. 4100 is also a node in pctFromMv()'s own
+// table (90%), so the refusal band lines up with a number the display already has.
+const int BATT_CHG_KNEE_MV = 4100;
+// The TARGET is the mv at which pctFromMv() actually returns 100, not a guess at
+// where the cell is "full" - the row says 100% and this is what makes that literal.
+// It sits ABOVE BATT_FULL_MV deliberately, so batteryState() flips to BATT_FULL and
+// the label disappears before the estimate could ever count down to zero.
+const int BATT_CHG_TARGET_MV = 4200;
+// THE SETTLE GUARD, AND IT IS A CORRECTNESS FIX RATHER THAN A TUNING ONE.
+// Plugging in makes the cell voltage snap up **+64 mV in SECONDS** - measured on
+// hardware, 3925 -> 3989 - because what the divider sees is the charger's terminal
+// voltage arriving, not charge going into the cell. One such sample in the ring
+// inflated the fitted slope from 143 to 183 mV/h and turned a true ~65 minutes into
+// a reported 54.
+//
+// That BREAKS THE >= CONTRACT. The label promises "at least this long", so an
+// optimistic estimate violates the one guarantee the notation exists to make - and
+// it fails in the direction a reader cannot detect, which is the worst available
+// shape. The discharge estimator documents the same trap in reverse (a -21 mV
+// relaxation after unplugging, "expect the first fit to lie"); this transient is
+// THREE TIMES LARGER and arrives on the charging side, where nothing was guarding it.
+//
+// No rate or SNR gate can catch it, because the rebound is smooth and fits a line
+// perfectly well - exactly the property that makes a relaxation curve dangerous.
+// Only TIME distinguishes it, so samples inside this window are not admitted at all.
+// 3 minutes against a 20-minute span gate: long enough to clear the transient
+// (per-minute deltas were still +5 mV at t=1 and had settled to +2..3 by t=6),
+// short enough that it does not dominate the wait.
+const unsigned long BATT_CHG_SETTLE_MS = 180000UL;
+const int BATT_CHG_NOT_YET = -1;
+const int BATT_CHG_TOPPING = -2;
+
+int battChgMv[BATT_TREND_SLOTS];
+unsigned long battChgAt[BATT_TREND_SLOTS];
+int battChgCount = 0;
+int battChgHead = 0;
+unsigned long battChgLast = 0;
+// When CHARGING was first observed, 0 while not charging. The settle window is
+// measured from HERE rather than from the first sample, so the transient is skipped
+// even though nothing is in the ring yet to compare against.
+unsigned long battChgSince = 0;
+
+void battChargeReset() {
+  battChgCount = 0;
+  battChgHead = 0;
+  battChgLast = 0;
+  battChgSince = 0;
+}
+
+// Called from the same 1s battery tick as battTrendSample(). The two rings are
+// mutually exclusive by construction - this one accumulates only while CHARGING
+// and that one only while DISCHARGING, and each resets itself on leaving its own
+// state - so neither can ever average across a window that changed sign.
+void battChargeSample() {
+  if (batteryState() != BATT_CHARGING) { battChargeReset(); return; }
+  unsigned long now = millis();
+  if (battChgSince == 0) battChgSince = now;
+  // Nothing enters the ring until the plug-in transient is past - see
+  // BATT_CHG_SETTLE_MS. Checked before the interval gate so the settle period cannot
+  // be shortened by an unlucky sample phase.
+  if (now - battChgSince < BATT_CHG_SETTLE_MS) return;
+  if (battChgLast != 0 && now - battChgLast < BATT_TREND_INTERVAL_MS) return;
+  if (battChgCount > 0) {
+    int prev = battChgMv[(battChgHead + BATT_TREND_SLOTS - 1) % BATT_TREND_SLOTS];
+    // A real FALL while nominally charging means the charger stopped supplying (or
+    // the load briefly won), and averaging across it would overstate the fill rate.
+    // Same 40mV threshold and same reasoning as battTrendSample()'s rise guard,
+    // mirrored.
+    // A real fall means the supply changed. Re-settle rather than resuming: whatever
+    // comes back may bring its own transient, and battChargeReset() has just zeroed
+    // battChgSince, so stamping it here restarts the settle window.
+    if (batteryMv < prev - 40) { battChargeReset(); battChgSince = now; return; }
+  }
+  battChgLast = now;
+  battChgMv[battChgHead] = batteryMv;
+  battChgAt[battChgHead] = now;
+  battChgHead = (battChgHead + 1) % BATT_TREND_SLOTS;
+  if (battChgCount < BATT_TREND_SLOTS) battChgCount++;
+}
+
+// Minutes until pctFromMv() would read 100%, as a FLOOR; or one of the two
+// refusal codes above. Fits mV rather than percent on purpose: the target is a
+// VOLTAGE, and routing the slope through pctFromMv()'s curve would attribute that
+// model's shape to the charger - the same reason POWERPROBE reports mV/h.
+int battChargeMinutesToFull() {
+  // The knee is tested FIRST, ahead of the data gates: above it the refusal is
+  // structural, so reporting "not yet" would be a promise that a longer window
+  // will eventually produce an answer.
+  if (batteryMv >= BATT_CHG_KNEE_MV) return BATT_CHG_TOPPING;
+  if (battChgCount < 3) return BATT_CHG_NOT_YET;
+  int oldest = (battChgHead + BATT_TREND_SLOTS - battChgCount) % BATT_TREND_SLOTS;
+  int newest = (battChgHead + BATT_TREND_SLOTS - 1) % BATT_TREND_SLOTS;
+  if (battChgAt[newest] - battChgAt[oldest] < BATT_CHG_MIN_SPAN_MS) return BATT_CHG_NOT_YET;
+  if (battChgMv[newest] - battChgMv[oldest] < BATT_CHG_MIN_RISE_MV) return BATT_CHG_NOT_YET;
+  double n = 0, sx = 0, sy = 0, sxy = 0, sxx = 0;
+  for (int i = 0; i < battChgCount; i++) {
+    int idx = (oldest + i) % BATT_TREND_SLOTS;
+    double x = (double) (battChgAt[idx] - battChgAt[oldest]) / 3600000.0;  // hours
+    double y = (double) battChgMv[idx];
+    n++; sx += x; sy += y; sxy += x * y; sxx += x * x;
+  }
+  double denom = n * sxx - sx * sx;
+  if (denom <= 0) return BATT_CHG_NOT_YET;
+  double slope = (n * sxy - sx * sy) / denom;   // mV/h, positive while filling
+  if (slope <= 0) return BATT_CHG_NOT_YET;
+  if (batteryMv >= BATT_CHG_TARGET_MV) return 0;
+  long mins = (long) ((BATT_CHG_TARGET_MV - batteryMv) * 60.0 / slope + 0.5);
+  // Clamped for the same reason battMinutesLeft() clamps: this is a display, not
+  // a claim, and at the minimum reportable rise the arithmetic reaches hundreds
+  // of hours, which reads as broken rather than as cautious.
+  if (mins > 99L * 60L) mins = 99L * 60L;
+  return (int) mins;
+}
+
+// The charging counterpart of battLeftLabel(). NOT-YET renders as NOTHING, never
+// "0m" - the same rule the discharge row follows, because "not measured" and "no
+// time left" are different claims.
+void battChargeLabel(char* out, size_t n, int mins) {
+  if (mins == BATT_CHG_TOPPING) { snprintf(out, n, "topping up"); return; }
+  if (mins < 0) { out[0] = '\0'; return; }
+  if (mins < 120) snprintf(out, n, ">=%dm", mins);
+  else snprintf(out, n, ">=%dh", (mins + 30) / 60);
+}
+#endif  // !BOARD_USES_TFT_ESPI - the charge estimator
+
 
 // ---------------------------------------------------------------------------
 // POWERPROBE: a passive, labelled discharge measurement in mV/h.
