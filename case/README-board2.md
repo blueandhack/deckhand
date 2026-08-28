@@ -78,7 +78,7 @@ clicking home, raise `snap_win_extra`, never thin the skin back down.
 
 **The real port is a hex grille in the back cover**, and the cover is not a
 preference — it is the only place the speaker fits. There is 3.1 mm between the
-front slab and the board's front face against a ~4 mm speaker, 15.5 mm behind the
+front slab and the board's front face against a ~4 mm speaker, 13.0 mm behind the
 board, and the board would block a front port regardless.
 
 Two numbers carry the whole design:
@@ -263,9 +263,10 @@ openscad -o stl/deckhand_b2_buttons.stl -D 'part="buttons"' deckhand_case_b2.sca
 ```
 
 **A guided plunger, not a flexure pad in the cover — the span decides that.** The cover's
-inner face sits 15.5 mm above the board's back, so even a short tactile leaves ~13 mm to
-cross. A thin membrane carrying a 13 mm post is a long lever on a small hinge: it would
-wobble sideways and fatigue. A stem in a sleeve is stiff at any length.
+inner face sits 13.0 mm above the board's back, so even a short tactile leaves ~10.5 mm
+to cross. A thin membrane carrying a 10 mm post is a long lever on a small hinge: it would
+wobble sideways and fatigue. A stem in a sleeve is stiff at any length. (It was 15.5/13
+before `batt_extra` went to 0 — a shorter span only makes the plunger the easier call.)
 
 Shape is one cylinder through a disc. The **flange sits inside** the cover and is wider
 than the hole, so the button cannot fall out; the board underneath stops it falling in.
@@ -410,45 +411,59 @@ millimetre: the drawing dimensions 9.82 / 3.94, hand measurement gave 9 / 3. Bot
 credible for a ~1 mm port, but a Ø2.2 hole placed on one and wrong by 1 mm would be
 half-blocked. Ø3.0 covers the disagreement and is still a pressure port, not a horn.
 
-## The battery is 41% of the thickness
+## The battery is 46% of the thickness
 
-Measured: **37 × 68.5 × 10 mm**. Plan fit is easy — 37 × 68.5 in a 54.5 × 102.5 cavity.
+**RE-MEASURED on the actual pack: 36 × 66 × 10 mm.** This file said 37 × 68.5 × 10 for
+the whole port — inherited from board 1's pack, which it was assumed to match and does
+not. Reported from a printed case as *"it can not hold battery, loose"*, and the pocket
+being 1.0 mm wide and 2.5 mm long bigger than the cell is the reason: `batt_rib_gap`'s
+0.6 mm per side was sitting on top of 1.25 mm per side of pack that was not there.
+Fixing the nominal is what takes the slack out — the gap is untouched, and is still the
+next knob if it needs more. Plan fit is still easy: 36 × 66 in a 55 × 103 cavity.
+
+**`batt_extra` also went 2.5 → 0**, which is the other half of the same rattle and a
+deliberate trade — see *Holding the battery without the retainer* below. It is what
+takes the case from 24.4 mm to 21.9.
 
 | | |
 |---|---|
 | front stack (recess + glass + PCB) | 6.9 |
-| cavity (`batt_seat` 3.0 + cell 10 + swell headroom 2.5) | 15.5 |
+| cavity (`batt_seat` 3.0 + cell 10 + swell headroom 0) | 13.0 |
 | cover | 2.0 |
-| **total** | **24.4 mm** |
+| **total** | **21.9 mm** |
 
-Case structure is 14.4 mm of that. Every case parameter has already been trimmed as far
-as it safely goes, and that work bought 4 mm — so **if this ever needs to be thinner, the
-cell is the lever**, not the case:
+Case structure is 11.9 mm of that. Every case parameter has already been trimmed as far
+as it safely goes, and that work plus the swell headroom bought 6.5 mm — so **if this
+ever needs to be thinner, the cell is the lever**, not the case:
 
 | cell thickness | case |
 |---|---|
-| 10 mm (yours) | 24.4 |
-| 6 mm | 20.4 |
-| 5 mm | 19.4 |
-| 4 mm | 18.4 |
+| 10 mm (yours) | 21.9 |
+| 6 mm | 17.9 |
+| 5 mm | 16.9 |
+| 4 mm | 15.9 |
 
-Below ~4.5 mm nothing improves: `comp_back` — the mated JST plugs standing off the back
-of the board — becomes the floor at **14.1 mm**, and going under *that* means not
-plugging anything in.
+Below 3 mm nothing improves: `comp_back` — the mated JST plugs standing off the back of
+the board — becomes the floor at **14.9 mm**, and going under *that* means not plugging
+anything in. (That crossover used to sit at ~4.5 mm and 14.1; with the swell headroom
+gone the cell has to get thinner before `comp_back` takes over, and the floor itself is
+unchanged plastic — it just no longer has 2.5 mm of air stacked on it.)
 
 ## Holding the battery without the retainer
 
-The pack sits 9.9–19.9 above the front face and the cover's inner face is at 22.4, so it
-has **~0.6 mm of slop around it and 2.5 mm above it**. Tape alone is the obvious answer
-and the weakest one: it resists sliding, then peels under exactly the vibration it was
-meant to stop.
+The pack sits 9.9–19.9 above the front face and, since `batt_extra` went to 0, the
+cover's inner face is at 19.9 too — flush with the pack's top — so it has **~0.6 mm of
+slop around it and none above it**. Tape alone is the obvious answer and the weakest one:
+it resists sliding, then peels under exactly the vibration it was meant to stop.
 
 Instead the corral moved **onto the cover** — four short ribs at the middle of each side
 of the battery's footprint (`batt_ribs`, on by default). They cost filament and nothing
-else: no extra part to print, and no thickness, because they stand in the `batt_extra`
-headroom that already exists. They engage the pack's **upper edge**, not its whole side:
-a rib standing 6 mm off the cover reaches down to 16.4, running alongside the pack's top
-3.5 mm. Anything under 2.5 mm would merely graze its top face and locate nothing.
+else: no extra part to print, and no thickness, because they stand alongside the pack
+rather than under it. They engage the pack's **upper edge**, not its whole side: a rib
+standing 6 mm off the cover reaches down to 13.9, running alongside the pack's top
+6.0 mm. That is up from 3.5 mm at the old 22.4 floor — closing the swell gap lengthened
+the engagement for free, because the ribs are measured off the cover and the cover moved
+toward the pack.
 
 They're positioned off the same expression the preview ghost and the retainer use, so all
 three agree by construction rather than by three transcriptions of the same arithmetic.
@@ -463,11 +478,18 @@ left 3.75 on one and 13.75 on the other, and the tight side was the one nearer t
 long-edge JSTs. `batt_dy` is now **derived** (`(board_h - batt_h) / 2`) rather than a
 literal, so the pack stays centred if the cell ever changes.
 
-**They hold it in plane only — use a ~3 mm foam pad for the rest.** The 2.5 mm of swell
-headroom is also 2.5 mm the pack can rattle in, and no rib fixes that without clamping a
-lithium pouch, which is the one thing not to do. Foam on the cover's inner face takes up
-the slack, still compresses if the cell ever swells, and damps shock. That combination —
-ribs for sliding, foam for rattle — is what the retainer was doing, minus the part.
+**They hold it in plane only — the cover now does the rest, and THAT IS WHY THE FOAM PAD
+IS NO LONGER OPTIONAL.** At `batt_extra` 2.5 the pack had 2.5 mm to move toward the cover
+and nothing stopping it, and the answer was already "fit a ~3 mm foam pad", i.e. fill the
+gap with something compressible. At 0 the cover's inner face *is* the pack's top face, so
+that pad has become the swell allowance rather than an anti-rattle nicety: a lithium
+pouch swells in service, and a rigid cover bearing on a swelling cell is a hazard, not a
+tight fit. Foam takes up the slack, compresses if the cell ever swells, and damps shock.
+Ribs for sliding, foam for rattle and swell — what the retainer was doing, minus the part.
+
+**If you fit no pad, put `batt_extra` back to 2.5.** That is the whole undo; every
+downstream number (`cavity_d`, `z_floor`, `total_th`, the plunger stem) re-derives, and
+the case returns to 24.4 mm.
 
 `use_retainer = true` still brings the original corral back if you'd rather print it.
 
@@ -476,7 +498,7 @@ ribs for sliding, foam for rattle — is what the retainer was doing, minus the 
 **Both button holes are Ø6.0 — the same, because the buttons are the same.** An earlier
 pass made RESET Ø9 and BOOT Ø5.5, on the argument that RESET is the only way back from
 deep sleep and deserves the easier target. That was my asymmetry, not the hardware's, and
-it does not survive the cavity being 15.5 mm deep: **both** holes are ~15 mm from their
+it does not survive the cavity being 13.0 mm deep: **both** holes are ~12.5 mm from their
 button, so both are tool holes whatever their diameter, and 1.5 mm of extra hole buys
 nothing a pen tip notices. What it did buy was two different holes under two identical
 buttons — which reads as a mistake rather than a decision, and would invite someone later

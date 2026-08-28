@@ -59,7 +59,8 @@
 //   * The BACK cover SNAPS on (barbed lip) — no screws through the back.
 //
 // USB-C, RESET and BOOT all exit the SAME short edge - the "service edge".
-// ~60.5 x 108.5 x 21 mm (board 54.5 x 101.5).
+// 59.4 x 107.9 x 21.9 mm (board 54.5 x 102.0) - measured off the rendered STLs, not
+// approximated: the header said "~60.5 x 108.5 x 21" while the case was 24.4 thick.
 //
 // Render:  openscad -D part="body|cover|retainer|stand|coupon|section|all" ...
 // ============================================================================
@@ -80,18 +81,20 @@ use_retainer = false;
 // that already exists above the pack.
 //
 // They work on the pack's UPPER edge rather than its whole side. The cell sits
-// 9.9..19.9 above the front face and the cover's inner face is at 22.4, so a rib
-// standing batt_rib_h off the cover reaches down to 22.4 - batt_rib_h; at 6 that
-// is 16.4, running alongside the pack's top 3.5 mm. Anything under 2.5 would
-// merely graze its top face and locate nothing.
+// 9.9..19.9 above the front face and, since batt_extra went to 0, the cover's
+// inner face is at 19.9 too - flush with the pack's top - so a rib standing
+// batt_rib_h off the cover reaches down to 19.9 - batt_rib_h; at 6 that is 13.9,
+// running alongside the pack's top 6.0 mm. That is up from 3.5 mm at the old
+// 22.4 floor: closing the swell gap lengthened the engagement for free, because
+// the ribs are measured off the cover and the cover moved toward the pack.
 //
-// THEY DO NOT HOLD IT DOWN, only in plane. The 2.5 mm of swell headroom is also
-// 2.5 mm the pack can rattle in, and a rib cannot fix that without clamping a
-// lithium pouch, which is the one thing not to do. Use a ~3 mm foam pad on the
-// cover's inner face instead: it takes up the slack, compresses if the cell ever
-// swells, and damps shock. Tape alone is worse than either - it resists sliding,
-// which is what the ribs already do, and peels under the vibration it is meant
-// to stop.
+// THEY DO NOT HOLD IT DOWN, only in plane - the cover does that now, which is
+// exactly why batt_extra's note insists on a compressible pad. A rib cannot hold
+// a pack down without clamping a lithium pouch, which is the one thing not to
+// do. A ~3 mm foam pad on the cover's inner face takes up the slack, compresses
+// if the cell ever swells, and damps shock. Tape alone is worse than either - it
+// resists sliding, which is what the ribs already do, and peels under the
+// vibration it is meant to stop.
 batt_ribs   = true;
 batt_rib_h  = 6.0;   // how far a rib stands off the cover's inner face
 batt_rib_t  = 2.0;   // rib thickness
@@ -334,8 +337,8 @@ btn_in = 4.0;
 //
 // This replaced an asymmetry that was mine, not the hardware's: RESET was Ø9 and
 // BOOT Ø5.5 on the argument that RESET is the only way back from deep sleep and
-// so deserves the easier target. That does not survive the cavity being 15.5 mm
-// deep - BOTH holes are ~15 mm from their button, so both are tool holes whatever
+// so deserves the easier target. That does not survive the cavity being 13.0 mm
+// deep - BOTH holes are ~12.5 mm from their button, so both are tool holes whatever
 // their diameter, and 1.5 mm of extra hole buys nothing a pen tip notices. What
 // it did buy was two different holes under two identical buttons.
 //
@@ -364,10 +367,11 @@ btn_cham = 0.8;     // outward flare at the cover's outer face, so a nail can fi
 // with the cover closed. part="buttons" prints the pair.
 //
 // A GUIDED PLUNGER, not a flexure pad in the cover, and the span decides that:
-// the cover's inner face is 15.5 mm above the board's back, so even a short
-// tactile leaves ~13 mm to cross. A thin membrane carrying a 13 mm post is a long
+// the cover's inner face is 13.0 mm above the board's back, so even a short
+// tactile leaves ~10.5 mm to cross. A thin membrane carrying a 10 mm post is a long
 // lever on a small hinge - it would wobble sideways and fatigue. A stem in a
-// sleeve is stiff at any length.
+// sleeve is stiff at any length. (It was 15.5/13 before batt_extra went to 0; the
+// span got shorter, which only makes the plunger the easier call.)
 //
 // Shape: one cylinder through a disc. The disc (flange) sits INSIDE the cover and
 // is wider than the hole, so the button cannot fall out; the stem passes through
@@ -488,12 +492,20 @@ mic_chan_top = 4.0; // ...and the same above the mic channel. This closes the la
 
 // Battery is pushed toward the USB-C end, leaving a clear strip at the far end
 // for the speaker (both sit BEHIND the board; the columns are in FRONT of it).
-// MEASURED: 37 x 68.5 x 10. Plan fit is easy - 37 x 68.5 in a 54.5 x 102.5
-// cavity. The 10 is still the single biggest term in the case's thickness (it is
-// 41% of 24.4), so if this case ever needs to be thinner, that is the number to
-// change: see the table in README-board2.md. It is a coincidence, and a
-// convenient one, that this matches board 1's pack exactly.
-batt_w = 37.0; batt_h = 68.5; batt_t = 10.0;
+// RE-MEASURED on the actual pack: 36 x 66 x 10, against the 37 x 68.5 x 10 this
+// file carried before (inherited from board 1's pack, which it was assumed to
+// match - it does not). REPORTED FROM A PRINTED CASE: the pack was loose, and
+// the reason is here rather than in the corral's clearance - the pocket was
+// modelled 1.0 mm wide and 2.5 mm long BIGGER than the cell, so batt_rib_gap's
+// 0.6 per side was sitting on top of 1.25 per side of phantom pack. Fixing the
+// nominal is what takes the slack out; the gap is unchanged and is still the
+// next knob if it needs more.
+//
+// Plan fit is still easy - 36 x 66 in a 55 x 103 cavity. The 10 is the single
+// biggest term in the case's thickness (10 of 21.9, 46%), so if this case ever
+// needs to be thinner, that is the number to change: see the table in
+// README-board2.md.
+batt_w = 36.0; batt_h = 66.0; batt_t = 10.0;
 // DERIVED so the pack stays centred if it ever changes, rather than a literal
 // that would quietly go off-centre the next time batt_h moves. (board_h - batt_h)
 // / 2 puts it on the board's own centreline, and the board is centred in the
@@ -510,15 +522,27 @@ batt_dy = (board_h - batt_h) / 2;
 // 8.75 each side, where the inherited offset left 3.75 on one and 13.75 on the
 // other. The tight side was the one nearer the long-edge JSTs.
 batt_dx = 0.0;
-// SLIMMED 5.5 -> 2.5 (-3.0 mm), and deliberately NOT to the ~1.0 that would save
-// another 1.5. This is headroom above a LITHIUM POUCH, which swells in service -
-// a cover pressed against a swelling cell is a hazard, not a tight fit. 2.5 is
-// the thinnest number that still leaves the pack somewhere to go. If you want
-// the last 1.5 mm, get it from a thinner CELL, not from this.
-batt_extra = 2.5;   // headroom above the pack (it bulges + sits on components); also margin so
-                    // the cover closes. This is the knob that sets TOTAL THICKNESS: raising the
-                    // support shoulder pushes the board deeper, so trim the same amount here to
-                    // keep the case the same depth (shoulder 4.1 -> 4.6 was paid for out of this).
+// 5.5 -> 2.5 -> 0, and THE LAST STEP IS A DELIBERATE TRADE THAT THIS COMMENT
+// USED TO ARGUE AGAINST. It is recorded rather than rewritten, because the
+// reasoning is still true and a future reader needs to see what was spent:
+// this is headroom above a LITHIUM POUCH, which swells in service, and a cover
+// pressed against a swelling cell is a hazard rather than a tight fit.
+//
+// What buys it back is the OTHER half of the same rattle. At 2.5 the pack had
+// 2.5 mm to move toward the cover and nothing to stop it - the ribs locate it in
+// plane only, and the documented answer was "put a ~3 mm foam pad on the cover's
+// inner face", i.e. fill this gap with something compressible. At 0 the cover's
+// inner face IS the pack's top face, so the pad is no longer optional: it is the
+// swell allowance, and it compresses where rigid plastic would not. Print the
+// cover, fit the pad, and the cell has somewhere to go without the case being
+// 2.5 mm thicker to hold air.
+//
+// IF YOU FIT NO PAD, PUT THIS BACK TO 2.5. That is the whole undo, and every
+// downstream number (cavity_d, z_floor, total_th, the plunger stem) re-derives.
+batt_extra = 0.0;   // headroom above the pack; 0 means the cover bears on the cell, so a
+                    // compressible pad is REQUIRED - see above. This is the knob that sets
+                    // TOTAL THICKNESS: raising the support shoulder pushes the board deeper,
+                    // so trim the same amount here to keep the case the same depth.
 // Speaker pocket: in the strip at the end opposite USB-C, centred. It's on an
 // 85 mm lead so it can go anywhere that's clear on YOUR board — tweak spk_cx/cy.
 spk_w = 17.0; spk_h = 10.0; spk_t = 4.0;
@@ -774,7 +798,7 @@ spk_px     = bcx + spk_cx;
 spk_py     = usb_at_top ? by0 + spk_cy : by0 + board_h - spk_cy;
 // ---------- Speaker grille (BACK COVER, service end) ----------
 // The back cover is not a preference, it is the only place a speaker FITS: there
-// is 3.1 mm between the front slab and the board's front face and 15.5 mm behind
+// is 3.1 mm between the front slab and the board's front face and 13.0 mm behind
 // the board, against a ~4 mm speaker - and the board would block a front port
 // anyway. Service end rather than the far end because the far end carries the
 // stand hinge, and on the stand that end points at the desk.
