@@ -211,9 +211,9 @@ const stripLineComments = (s) => s.replace(/\/\/[^\n]*/g, "");
 // shortest-waiting-first, exactly backwards, the very regression this whole
 // change exists to prevent - matched the old `\w+`/`\w+` pattern just as well as
 // the correct order, so inverting the two operands in deckhand_display.ino left
-// this assertion (and the whole checker) reporting green. See the checker's
-// --selftest-adjacent proof in the commit history / final-fix-report.md for the
-// before/after run that demonstrates this assertion now catches it.
+// this assertion (and the whole checker) reporting green. To see it work,
+// swap the two operands in deckhand_display.ino's tie-break (the
+// statusSinceMillis comparison) and re-run—it must fail by name, then revert.
 structural("the asking tie-break compares ELAPSED(b) > ELAPSED(a), not the reverse (b sorts before a when b has waited LONGER)",
   /now\s*-\s*b\.statusSinceMillis\s*\)\s*>\s*\(\s*now\s*-\s*a\.statusSinceMillis/.test(SRC));
 
