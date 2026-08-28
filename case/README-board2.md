@@ -76,6 +76,36 @@ ceiling is the barb, not printability: the catch shelf reaches 0.9 into a 2.2 wa
 so 1.1 leaves a 1.1 pocket — 0.2 of clearance, down from 0.5. If the cover stops
 clicking home, raise `snap_win_extra`, never thin the skin back down.
 
+**The same threshold caught a second feature, on the mic end — and finding it exposed a
+fix applied to the wrong edge.** The four snaps sit two to each SHORT edge, and the mic
+end's pair was at 0.30/0.70 → 0.42/0.58 to dodge a Ø9 RESET hole. The diagnosis was
+right and the edit was on the opposite end: `wall/2` is the **mic** end, because the
+device stands mic-end up and model +y therefore runs toward the physical bottom, so the
+service edge is `out_h - wall/2` and never moved. The same commit also took RESET from
+Ø9 to Ø6.0, which cleared the lip by 1.15 mm and made the whole thing moot — which is
+why nothing ever failed and the asymmetry survived unnoticed.
+
+It cost two things on the end that did not need it. **Retention:** barbs 9.5 mm apart in
+the middle of a 59.4 mm edge, leaving that edge's corners least held — and it is the end
+you grip to pop the cover and the end the kickstand levers against. **Printability:** the
+body pocket is 8.8 mm wide against a 7.0 mm barb, so the pits sit *closer* than the barbs
+do, and at 0.42/0.58 they left a **0.704 mm** rib between them — under the same 0.8 mm
+that had already been discarded once. Merged, the catch shelf still runs unbroken and
+both barbs still hook, so that half was cosmetic; the retention half was not.
+
+Both ends are 0.30/0.70 again, and now measure identically off the STLs:
+
+| | pits (body) | wall between pits | clips (cover) | clip spacing |
+|---|---|---|---|---|
+| mic end | 13.42–22.22, 37.18–45.98 | 14.96 mm | 14.32–21.32, 38.08–45.08 | 23.76 mm |
+| service end | 13.42–22.22, 37.18–45.98 | 14.96 mm | 14.32–21.32, 38.08–45.08 | 23.76 mm |
+
+**Nothing constrains these positions on either edge**, and the near miss worth recording
+is that the USB-C cutout looks like it should: it spans x 23.2–36.2 on the service wall,
+straddling any inboard pair — but it sits at **z 5.1–12.1** while the pockets are at
+**z 16.3–18.7**, so the two never meet. Reasoning about that edge in plan view alone says
+the opposite. Check z before believing it.
+
 **The real port is a hex grille in the back cover**, and the cover is not a
 preference — it is the only place the speaker fits. There is 3.1 mm between the
 front slab and the board's front face against a ~4 mm speaker, 13.0 mm behind the

@@ -897,16 +897,55 @@ snap_win_extra = 0.4;
 // without returning to a skin the printer will not lay.
 snap_skin = 1.1;
 
-// snap positions: two barbs on each long side
-// THE SERVICE-EDGE SNAPS MOVED INBOARD, 0.30/0.70 -> 0.42/0.58, because the
-// button holes landed on top of them. At btn_in 4 the Ø9 RESET hole spans x
-// 11.4..20.4 and the barb at 0.30 spans 14.2..21.2 - the hole would have eaten
-// most of a snap, on the end that also just lost lip material to those same
-// holes. 0.42/0.58 puts them at 24.7 and 34.2, inside the clear 20.4..38.5 gap
-// between the two holes, barbs spanning 21.2..28.2 and 30.7..37.7.
-// The MIC-end pair stays at 0.30/0.70: nothing is cut there, and spreading them
-// wide is better retention where it is free.
-function snaps() = [ [out_w*0.42, wall/2], [out_w*0.58, wall/2],
+// snap positions: two barbs on each SHORT EDGE - i.e. one pair at each END, the
+// mic end (y = wall/2) and the service end (y = out_h - wall/2). This line used
+// to say "each long side", which is wrong: the positions vary across out_w, the
+// 59.4 dimension.
+//
+// BOTH PAIRS ARE 0.30/0.70 AGAIN, AND THE REASON THEY WERE NOT IS A FIX APPLIED
+// TO THE WRONG EDGE. The mic-end pair carried 0.42/0.58 with this note:
+//
+//   "THE SERVICE-EDGE SNAPS MOVED INBOARD, 0.30/0.70 -> 0.42/0.58, because the
+//    button holes landed on top of them. At btn_in 4 the O9 RESET hole spans x
+//    11.4..20.4 and the barb at 0.30 spans 14.2..21.2 - the hole would have
+//    eaten most of a snap [...] The MIC-end pair stays at 0.30/0.70."
+//
+// The DIAGNOSIS was right and specific: a O9 RESET hole at btn_y spans y
+// 96.2..105.2, which swallows the cover lip's whole 103.95..105.15 band, and in
+// x it overlaps the barb at 0.30 - so the hole really would have removed the lip
+// that barb roots into. But the line it edited was [out_w*0.30, wall/2], and
+// wall/2 is the MIC end, not the service edge. The device stands mic-end up
+// (see the kickstand note), so model +y runs toward the physical BOTTOM: low y
+// is the mic end, out_h - wall/2 is the service edge. The intended edge and the
+// edited edge were opposites.
+//
+// It was moot in the same commit anyway, which is why nothing ever failed: that
+// commit also took RESET from O9 to O6.0, and a O6 hole stops at y 103.7,
+// clearing the lip by 1.15. There has been nothing to dodge on either end since.
+//
+// WHAT IT COST, on the end that got the move it did not need. Two things, and
+// the second is why this is being changed rather than just re-commented:
+//   * Retention. Barbs 9.5 apart, centred, on a 59.4 edge - so that edge's two
+//     CORNERS are its least-held points, and it is the end you grip to pop the
+//     cover and the end the kickstand levers against. This file's own rule:
+//     "spreading them wide is better retention where it is free".
+//   * Printability. The BODY pocket is 8.8 wide against a 7.0 barb, so the pits
+//     sit closer than the barbs do: at 0.42/0.58 they left a 0.704 rib between
+//     them. snap_skin's own note measured 0.8 as the width "where a slicer
+//     either lays two perimeters or discards the feature as unprintable", and
+//     discarded it - so 0.704 is under a threshold this file has already been
+//     bitten by once, and the two pits would most likely print as one. Merged,
+//     the catch shelf still runs unbroken and both barbs still hook, so it is
+//     cosmetic - but it is the same trap wearing a different hat.
+// At 0.30/0.70 both ends are identical: pits 13.42..22.22 and 37.18..45.98,
+// 14.96 of wall between them.
+//
+// NOTHING CONSTRAINS THESE POSITIONS ON EITHER EDGE, and the near miss worth
+// recording is that the USB-C cutout looks like it should. It spans x 23.2..36.2
+// on the service wall, straddling any inboard pair - but it sits at z 5.1..12.1
+// while the pockets are at z 16.3..18.7, so the two never meet. Reasoning about
+// this edge in plan view alone says the opposite; check z before believing it.
+function snaps() = [ [out_w*0.30, wall/2], [out_w*0.70, wall/2],
                      [out_w*0.30, out_h-wall/2], [out_w*0.70, out_h-wall/2] ];
 
 // ============================================================================
