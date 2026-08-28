@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Exercises reorderSessions()'s ordering without a device. Run with no arguments to
-// check the shipped comparator. NOTE: --selftest is NOT handled yet — the flag is
-// added in a later task, and until then this file ignores every argument.
+// check the shipped comparator. Run with --selftest to prove the checker has teeth:
+// re-runs the longest-waiting cases against the recency comparator this change replaced.
 //
 // WHAT THIS PROVES, AND WHAT IT DOES NOT. This runs a JS MIRROR of the comparator,
 // so it proves the ALGORITHM - including the millis() wrap case, which is otherwise
@@ -42,8 +42,8 @@ const U32 = 0x100000000;
 // Unsigned-wrap-safe elapsed, exactly what (now - since) does in C with unsigned long.
 const elapsed = (now, since) => ((now - since) % U32 + U32) % U32;
 
-// legacy=true reproduces the comparator this change replaces, for --selftest
-// (which is not yet wired up - nothing currently passes legacy=true).
+// legacy=true reproduces the comparator this change replaces (recency-ranked asking ties).
+// Used by --selftest to verify the new longest-waiting rule is actually provable.
 function sortsBefore(b, a, now, legacy) {
   const ra = rankOf(a.status), rb = rankOf(b.status);
   if (rb !== ra) return rb < ra;
@@ -114,6 +114,39 @@ eq("millis() wrap: a wait that spans the wrap still reads as the longer one",
 eq("equal keys keep arrival order (stable sort)",
    order([S("first", "working", { actSec: 500 }), S("second", "working", { actSec: 500 })], NOW),
    ["first", "second"]);
+
+// ---------- selftest ----------
+// The same teeth-proving convention as palette-check.mjs --selftest: re-run the
+// ordering scenarios against the comparator this change REPLACED, and exit 0 only
+// when the longest-waiting cases FAIL against it. A checker that passes against
+// both the old and the new rule is not testing the rule.
+if (process.argv.includes("--selftest")) {
+  const legacyCases = [
+    ["two asking: the longer wait leads",
+      () => order([S("fresh", "asking", { since: NOW - 5_000 }),
+                   S("stale", "asking", { since: NOW - 1_200_000 })], NOW, true),
+      ["stale", "fresh"]],
+    ["two asking: order of arrival does not decide it",
+      () => order([S("stale", "asking", { since: NOW - 1_200_000, actSec: 100 }),
+                   S("fresh", "asking", { since: NOW - 5_000, actSec: 900 })], NOW, true),
+      ["stale", "fresh"]],
+    ["millis() wrap: a wait that spans the wrap still reads as the longer one",
+      () => order([S("after", "asking", { since: (NEAR + 9_000) % U32 }),
+                   S("across", "asking", { since: NEAR - 600_000 })], 5_000, true),
+      ["across", "after"]],
+  ];
+  const blind = legacyCases.filter(([, run, want]) =>
+    JSON.stringify(run()) === JSON.stringify(want));
+  if (blind.length) {
+    console.error("");
+    for (const [label] of blind)
+      console.error("  SELFTEST FAILED: this case passes against the OLD comparator too - " + label);
+    console.error(`\n${blind.length} of ${legacyCases.length} cases cannot tell the two rules apart.`);
+    process.exit(1);
+  }
+  console.log(`selftest ok - all ${legacyCases.length} cases reject the old recency-ranked comparator`);
+  process.exit(0);
+}
 
 // ---------- structural assertions on the real source ----------
 // Text-matched deliberately, and safe to match here: unlike the panel_shim case this
