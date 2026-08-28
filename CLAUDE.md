@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386518, RAM 69780 | flash 986130, RAM 63172 |
+| size today | flash 1386614, RAM 69780 | flash 986266, RAM 63172 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -720,6 +720,27 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   checker grows, raise `SLICES`; do **not** raise the heap, because the limit being hit is V8's
   CODE space and `--max-old-space-size` provably does nothing (it dies at 840MB with a 4.5GB heap
   limit).
+
+**Check the asking-session tie-break — longest-waiting-first, not most-recent-first — without a
+device:**
+
+```
+node firmware/deckhand_display/sessions-rank-check.mjs             # 9 mirror + 3 source assertions
+node firmware/deckhand_display/sessions-rank-check.mjs --selftest   # proves the checker rejects the OLD (recency) rule
+```
+
+**Be honest about what this proves and what it does not.** Most of its assertions run a JS MIRROR
+of `sessionSortsBefore()` — same convention as the geometry checkers' shared-parser trick, but
+weaker: it proves the ALGORITHM (including the millis()-wrap case, unreachable on hardware without
+a 49.7-day uptime) and would keep passing even if the real comparator were deleted, since nothing
+in it executes the sketch. Only the three STRUCTURAL assertions at the bottom — which read the
+real source text rather than a mirror of it — actually bind the sketch: that
+`sessionSortsBefore(b, a, now)` takes no clock of its own, that `reorderSessions()` samples
+`millis()` exactly once, and that the tie-break compares `ELAPSED(b) > ELAPSED(a)` rather than the
+reverse (an inverted comparison is the exact regression this whole change exists to prevent, and it
+is what the operand names in that last assertion are pinned against — an unpinned `\w+`/`\w+`
+version of it let an inverted comparator pass clean). This split is why the pass line reports
+`9 mirror + 3 source assertions pass` rather than one undifferentiated total.
 
 There is no test suite or linter in this repo; verification is "compile, flash, watch the
 Serial Monitor / host log, and check the physical screen." **On board 2, read that last clause
@@ -3056,7 +3077,8 @@ load-bearing (see the legacy-I2C trap under Two boards):
 | `text-widths-board2.txt` | board 2's half of that gate, committed so the diff is one command |
 | `st77922_touch.h` / `.cpp` | board 2's capacitive controller, verbatim from the demo + a TU guard |
 | `st77922_init_cmds.h`, `esp_panel_board_custom_conf.h` | the recovered panel init sequence — artefacts, not code to tidy |
-| `*-geom-check.mjs`, `geom-common.mjs` | the three layout checkers and their shared header parser |
+| `*-geom-check.mjs`, `geom-common.mjs` | the three LAYOUT checkers (usage/sessions/settings geometry) and their shared header parser |
+| `sessions-rank-check.mjs` | checks the asking tie-break (longest-waiting-first); a JS mirror of the sort plus structural assertions on the real source — not a layout checker, so it is not one of the three above |
 
 **The one rule that governs what may move:** Arduino inserts its auto-generated prototypes ABOVE
 the first function definition, so a moved function whose SIGNATURE names a type declared after
