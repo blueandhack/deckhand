@@ -4529,9 +4529,18 @@ detail-card lane against board 1's 31, so every existing character-budget argume
   `User_Setup.h` by default, which is what makes the drop-in work.
 - Colors deliberately avoid a green/yellow/red scheme (the `COLOR_GOOD`/`WARN`/`BAD` constants
   use a blue/orange/reddish-purple palette instead) because a green/yellow/red scheme collapses
-  under the most common colour-vision deficiency, and
-  status is also conveyed by shape (`drawStatusDot`: filled circle / filled square / hollow
-  ring), never by color alone.
+  under the most common colour-vision deficiency, and status is never conveyed by color alone.
+  **WHAT THE SECOND CARRIER IS DIFFERS PER BOARD, and this sentence named only board 1's.**
+  On **board 1** it is `drawStatusDot`'s shape: filled circle = working, filled square = asking,
+  hollow ring = waiting. On **board 2** that same function draws the **agent mark at every
+  status** — §5 of the sessions redesign spent the indicator's shape on saying WHICH AGENT,
+  because status already owns the colour — so the shape there separates Claude from Codex and no
+  longer separates one status from another. The carrier is the **status pill's FORM** (filled /
+  outlined / boxless dim text) on every ordinary row, and on the **expanded band card**, which
+  draws no pill and no indicator at all, it is the **status WORD** from `labelForStatus`. Both
+  substitutes are asserted in `sessions-geom-check.mjs` — the pill's form, and the three words
+  being distinct — because each is now the only thing standing between two states. The longer
+  note under the "working" spinner further down says the same thing from the animation's side.
 - **The theme control has THREE modes - DARK, LIGHT and AUTO - and AUTO is a CLOCK, not a
   sensor.** This board has no light to measure: every ADC1 channel is spoken for (touch on
   32/33/36/39, battery 34, mic 35) and ADC2 is unusable while BT is up, so an LDR would need

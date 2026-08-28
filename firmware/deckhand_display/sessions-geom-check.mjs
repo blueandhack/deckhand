@@ -1232,6 +1232,47 @@ for (const b of [1, 2]) {
           "at rest the mark is COLOR_LABEL and unanimated; while working it is the status colour and animated");
     }
 
+    // ---- THE BAND CARD'S MARK MUST ACTUALLY MOVE ----
+    // NOTHING ELSE IN THIS FILE CAN SEE THIS, and it shipped broken once.
+    // drawSessionBand was written with a literal /*animate=*/false - chosen before
+    // the mark and the shimmer existed and never rejoined to them - while
+    // tickWorkingSpinner SKIPPED the expanded row and the shimmer skips it too. So
+    // a single working session, the most common screen on this tab, was completely
+    // static: a regression from the plain row it replaced, at zero failures here.
+    //
+    // THE REST-POSE ASSERTION ABOVE LOOKS LIKE IT COVERS THIS AND DOES NOT. It
+    // parses drawStatusDot's board-2 branch, which is the ORDINARY row's
+    // indicator; the band card draws no indicator at all and never calls it.
+    //
+    // TWO SITES, because reverting EITHER ONE ALONE reproduces the regression in
+    // full - the band's own draw decides the pose, and the tick is the only thing
+    // that advances it. Both reverts were performed by hand and each fails by
+    // name. Comments are stripped first, for the reason the body's draw sites
+    // are: a commented-out call is the likeliest way one of these gets disabled.
+    {
+      const strip = (f) =>
+        fs.readFileSync(`${DIR}/${f}`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+      const fnBody = (src, sig, where) => {
+        const a = src.indexOf(sig);
+        const z = src.indexOf("\n}\n", a);
+        if (a < 0 || z < 0) throw new Error(`${sig} not found in ${where}`);
+        return src.slice(a, z);
+      };
+      const band = fnBody(strip("sessions.ino"), "void drawSessionBand(", "sessions.ino");
+      chk(/const bool working = strcmp\(s\.status, "working"\) == 0;/.test(band),
+          "the band binds `working` to the row's OWN status");
+      chk(/drawAgentMark\([\s\S]{0,160}?\/\*animate=\*\/working\);/.test(band),
+          "the band's mark ANIMATES on that working state - reverting the argument to " +
+          "a literal false is a fully static one-session working card");
+      chk(!/\/\*animate=\*\/false/.test(band),
+          "... and no literal false is left in the band's mark call");
+      const tick = fnBody(strip("deckhand_display.ino"), "void tickWorkingSpinner()",
+                          "deckhand_display.ino");
+      chk(/if \(sessionRowExpanded\(pos\)\) \{ drawBandMark\(pos\); continue; \}/.test(tick),
+          "tickWorkingSpinner ADVANCES the band card's mark rather than skipping the row - " +
+          "deleting drawBandMark(pos) is the same static card by the other route");
+    }
+
     // ---- §6 THE TWO ADOPTED ANIMATIONS ----
     // Both are PARSED out of the draw and the tick, because none of the geometry
     // above can see an animation at all: a crossfade and an instant swap produce
