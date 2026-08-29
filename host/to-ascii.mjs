@@ -38,7 +38,7 @@
 // ~/.claude and it can therefore only ever import node builtins - an import from
 // this repo would resolve here and fail on the machine that actually runs the
 // hook. Same reason capBytes() there duplicates capUtf8() from voice-answer.mjs.
-// host/ask-optdescs-check.mjs extracts the hook's copy and runs it side by side
+// host/wire-bytes-check.mjs extracts the hook's copy and runs it side by side
 // with this one over a corpus, so the two cannot drift silently.
 
 // Characters that DO have an obvious ASCII equivalent. Transliterating what

@@ -43,6 +43,8 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK_SRC = path.join(REPO, "claude-hooks", "deckhand-session-hook.mjs");
 const HOST_SRC = path.join(REPO, "host", "index.mjs");
 const MOD_SRC = path.join(REPO, "host", "to-ascii.mjs");
+const FIT_SRC = path.join(REPO, "host", "wire-fit.mjs");
+const VOICE_SRC = path.join(REPO, "host", "voice-answer.mjs");
 const FW_SRC = path.join(REPO, "firmware", "deckhand_display", "deckhand_display.ino");
 
 // The most UTF-8 bytes ONE UTF-16 code unit can become, i.e. what a character cap
@@ -64,7 +66,8 @@ function grab(src, label, re, cast = Number) {
   return m ? cast(m[1]) : NaN;
 }
 
-function readCaps(hookSrc, hostSrc, fwSrc) {
+function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc) {
+  const _voice = voiceSrc;
   const c = {};
   // hook: the ask fields
   c.titleChars = grab(hookSrc, "the ask TITLE cap (hook)", /clean\(q\.header \?\? "Question", (\d+)\)/);
@@ -83,9 +86,24 @@ function readCaps(hookSrc, hostSrc, fwSrc) {
   c.voiceReplyChars = grab(hostSrc, "VOICE_REPLY_MAX (host)", /const VOICE_REPLY_MAX = (\d+);/);
   c.tagChars = grab(hostSrc, "the host TAG cap (host-tag)", /hostTag = macTag\(/, () => 6);
   c.maxSessionsHost = grab(hostSrc, "the session-list slice (host)", /const top = records\.slice\(0, (\d+)\);/);
+  // THE CONFIRM SCREEN'S TEXT, and the two halves of getting its fix in the right
+  // place. It must be transliterated at the PARK SITE, before voiceSha() runs, and
+  // it must NOT be transliterated in the payload builder - doing it there would
+  // desync the text the device displays and signs against from the text this host
+  // still holds and re-hashes, so every valid answer would be REJECTED.
+  c.voiceParkXlate = /text = capUtf8\(toAscii\(text\), VOICE_ANSWER_TEXT_MAX_BYTES\);/.test(hostSrc);
+  c.voiceParkBeforeHash =
+    hostSrc.indexOf("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);") >= 0 &&
+    hostSrc.indexOf("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);") <
+      hostSrc.indexOf("pendingVoiceAnswers.set(pid, { text, sha: voiceSha(text)");
+  c.voiceBuilderRaw = /item\.ask\.voiceText = pend\.text;/.test(hostSrc);
   // firmware: the guard the whole budget is measured against
   c.maxSessionsFw = grab(fwSrc, "MAX_SESSIONS (firmware)", /#define MAX_SESSIONS (\d+)/);
   c.lineGuard = grab(fwSrc, "feedChar's line guard (firmware)", /if \(buf\.length\(\) > (\d+)\) buf = "";/);
+  // The cap itself lives in host/voice-answer.mjs as ANSWER_TEXT_MAX_BYTES and is
+  // re-exported into index.mjs under the VOICE_ prefix; parse the DEFINITION.
+  c.voiceAnswerMaxBytes = grab(_voice, "ANSWER_TEXT_MAX_BYTES (host/voice-answer.mjs)",
+                               /export const ANSWER_TEXT_MAX_BYTES = (\d+);/);
   return c;
 }
 
@@ -123,6 +141,11 @@ const HOST_SITES = [
   ["histFlatten (the history reader's previews and full entries)", /const t = toAscii\(v\)/],
   ["histFlatten's truncation marker is three ASCII dots, not U+2026, which draws as NOTHING",
    /t\.slice\(0, max - 3\) \+ "\.\.\."/],
+  ["ask.voiceText, at the PARK SITE (Whisper output is the densest non-ASCII source there is)",
+   /text = capUtf8\(toAscii\(text\), VOICE_ANSWER_TEXT_MAX_BYTES\);/],
+  ["the tick line is measured against the device's guard before it is written",
+   /const fitted = fitPayload\(\{/],
+  ["and what it sheds is LOGGED", /Wire: payload was \$\{fitted\.was\} bytes/],
 ];
 
 // ---------------------------------------------------------------------------
@@ -147,12 +170,44 @@ const CORPUS = [
   "a中文b中文c",
 ];
 
+// A DETERMINISTIC FUZZ CORPUS, because a fixed 15-entry list can only prove the
+// two copies agree on those 15 entries - a divergence anywhere else slips through,
+// and the whole reason the hook's copy exists is that nothing can import it.
+// Seeded, so a failure is reproducible rather than a one-in-N ghost. The pools are
+// chosen to hit what breaks string handling: the surrogate range on BOTH sides,
+// LONE surrogates (which `for..of` yields as-is and normalize() must survive),
+// astral code points, combining marks, and the mapped characters themselves.
+function fuzzCorpus(n = 5000) {
+  let seed = 0x2f76b8;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const pick = (a) => a[Math.floor(rnd() * a.length)];
+  const mapped = ["—", "–", "…", "“", "”", "‘", "’", "→", "≤", "×", "•", " ", "\u200b", "ß", "æ", "©"];
+  const pools = [
+    () => String.fromCodePoint(0x20 + Math.floor(rnd() * 95)),                    // ASCII
+    () => String.fromCodePoint(0xa0 + Math.floor(rnd() * (0xd800 - 0xa0))),       // BMP under surrogates
+    () => String.fromCodePoint(0xe000 + Math.floor(rnd() * (0x10000 - 0xe000))),  // BMP over surrogates
+    () => String.fromCodePoint(0x10000 + Math.floor(rnd() * 0x100000)),           // astral
+    () => String.fromCharCode(0xd800 + Math.floor(rnd() * 0x400)),                // LONE high surrogate
+    () => String.fromCharCode(0xdc00 + Math.floor(rnd() * 0x400)),                // LONE low surrogate
+    () => pick(["\u0301", "\u0308", "\u0327"]),                                  // combining marks
+    () => pick(mapped),
+  ];
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    let s = "";
+    const len = 1 + Math.floor(rnd() * 14);
+    for (let j = 0; j < len; j++) s += pick(pools)();
+    out.push(s);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // The saturated tick line, in BYTES, built to the shape host/index.mjs serialises.
 // `fill` is what the char-capped fields are made of; `xlate` says whether the
 // transliteration runs, which is the difference between BEFORE and AFTER.
 // ---------------------------------------------------------------------------
-function tickBytes(caps, toAscii, { descCap = null, parkedVoice = false, sessions = null, fill = "ascii", wideSessions = null, xlate = true } = {}) {
+function tickBytes(caps, toAscii, capUtf8, { descCap = null, parkedVoice = false, sessions = null, fill = "ascii", wideSessions = null, xlate = true } = {}) {
   // The em-dash is the TIGHTEST wide case, not the loudest: it is 3 bytes in and
   // 1 byte out, so it preserves LENGTH through the transliteration where CJK
   // collapses to a single '?' and would flatter the result enormously.
@@ -167,13 +222,24 @@ function tickBytes(caps, toAscii, { descCap = null, parkedVoice = false, session
   // of them if fill is wide". The MIXED case is the one actually reported: an
   // otherwise ordinary tick line with ONE question containing CJK.
   const nWide = wideSessions ?? (fill === "wide" ? n : 0);
+  // The confirm-screen transcript, built the way handleVoiceAnswer builds it:
+  // (optionally) transliterated, then capped in BYTES by capUtf8.
+  const parkedVoiceText = capUtf8(
+    caps.voiceParkXlate ? toAscii("—".repeat(caps.voiceAnswerMaxBytes)) : "—".repeat(caps.voiceAnswerMaxBytes),
+    caps.voiceAnswerMaxBytes,
+  );
   const ask = (S) => ({
     pid: "x".repeat(8), kind: "question",
     title: S(caps.titleChars), detail: S(caps.detailChars),
     options: Array.from({ length: caps.maxOptions }, () => S(caps.labelChars)),
     ...(descCap != null ? { optDescs: Array.from({ length: caps.maxOptions }, () => "x".repeat(descCap)) } : {}),
     nonce: "x".repeat(32), voice: true,
-    ...(parkedVoice ? { voiceText: S(150), voiceSha: "x".repeat(16) } : {}),
+    // NOT S(): this field does not take the caps above. It is parked by
+    // handleVoiceAnswer under a BYTE cap, so the model has to follow the real
+    // path - whether the park site transliterates is PARSED, not assumed. Model
+    // it as fixed and a reverted fix is invisible here, which is exactly how this
+    // bypass survived the first round.
+    ...(parkedVoice ? { voiceText: parkedVoiceText, voiceSha: "x".repeat(16) } : {}),
   });
   const session = (wide) => {
     const F = (units) => S(units, wide);
@@ -313,12 +379,15 @@ function runBehaviour(hookPath, caps) {
 }
 
 // ---------------------------------------------------------------------------
-async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, quiet = false } = {}) {
+async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC, hostPath = HOST_SRC, quiet = false } = {}) {
   const hookSrc = fs.readFileSync(hookPath, "utf8");
-  const hostSrc = fs.readFileSync(HOST_SRC, "utf8");
+  const hostSrc = fs.readFileSync(hostPath, "utf8");
   const fwSrc = fs.readFileSync(FW_SRC, "utf8");
-  const c = readCaps(hookSrc, hostSrc, fwSrc);
-  const { toAscii, deviceText } = await import(`${pathToFileURL(modPath).href}?v=${Date.now()}${Math.random()}`);
+  const c = readCaps(hookSrc, hostSrc, fwSrc, fs.readFileSync(VOICE_SRC, "utf8"));
+  const bust = `?v=${Date.now()}${Math.random()}`;
+  const { toAscii, deviceText } = await import(`${pathToFileURL(modPath).href}${bust}`);
+  const { capUtf8 } = await import(`${pathToFileURL(VOICE_SRC).href}${bust}`);
+  const { fitPayload, DEVICE_LINE_GUARD_BYTES } = await import(`${pathToFileURL(fitPath).href}${bust}`);
 
   // ---- STRUCTURE: no bypass -----------------------------------------------
   for (const [name, re] of HOOK_SITES) ok(re.test(hookSrc), `STRUCTURE (hook): ${name}`);
@@ -338,6 +407,26 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, quiet = false } = 
       ok(Buffer.compare(Buffer.from(s, "utf8"), Buffer.from(a, "utf8")) === 0,
          `FIDELITY: pure-ASCII input must be byte-identical, not merely equal-looking: ${JSON.stringify(s)}`);
     }
+  }
+  // THE FUZZ SWEEP, counted as one assertion per PROPERTY rather than per string:
+  // 5000 passing calls would drown every other number, and the claim really is
+  // singular. It names the first offender, because "somewhere in 5000" is not a
+  // bug report. Pools deliberately include lone surrogates on both sides, which
+  // `for..of` yields as-is and normalize() has to survive.
+  {
+    const fuzz = fuzzCorpus();
+    let badAscii = null, badUnit = null, badIdem = null, badNoop = null;
+    for (const str of fuzz) {
+      const a = toAscii(str);
+      if (badAscii === null && /[^\x00-\x7f]/.test(a)) badAscii = str;
+      if (badUnit === null && Buffer.byteLength(a, "utf8") !== a.length) badUnit = str;
+      if (badIdem === null && toAscii(a) !== a) badIdem = str;
+      if (badNoop === null && !/[^\x00-\x7f]/.test(str) && a !== str) badNoop = str;
+    }
+    ok(badAscii === null, `FIDELITY (fuzz, ${fuzz.length} strings): non-ASCII survived for ${JSON.stringify(badAscii)}`);
+    ok(badUnit === null, `UNITS (fuzz, ${fuzz.length} strings): byteLength !== length for ${JSON.stringify(badUnit)}`);
+    ok(badIdem === null, `FIDELITY (fuzz, ${fuzz.length} strings): not idempotent for ${JSON.stringify(badIdem)}`);
+    ok(badNoop === null, `FIDELITY (fuzz, ${fuzz.length} strings): pure-ASCII input was altered: ${JSON.stringify(badNoop)}`);
   }
   // The named transliterations, because "replaced with '?'" would satisfy every
   // assertion above while destroying ordinary English prose.
@@ -371,19 +460,37 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, quiet = false } = 
   ok(deviceText("abc") === "abc", "UNITS: deviceText with no cap just transliterates");
 
   // ---- COPIES: the hook's inline toAscii === the module's ------------------
+  // A FIXED CORPUS CAN ONLY PROVE AGREEMENT ON ITS OWN ENTRIES, so this runs the
+  // hand-written one AND the fuzz sweep. The duplication is forced (the hook can
+  // import nothing from this repo), which makes this the only thing standing
+  // between the two copies and a silent divergence.
   const hookFn = hookToAscii(hookSrc);
   if (hookFn) {
-    let drift = 0;
-    for (const s of CORPUS) if (hookFn(s) !== toAscii(s)) {
-      if (drift++ === 0) ok(false, `COPIES: the hook's inline toAscii disagrees with host/to-ascii.mjs on ${JSON.stringify(s)}: ` +
-                                   `${JSON.stringify(hookFn(s))} vs ${JSON.stringify(toAscii(s))}`);
-    }
-    ok(drift === 0 || false, drift ? `COPIES: ${drift} of ${CORPUS.length} corpus entries disagree between the two copies` : "");
-    if (drift === 0) pass++; // the "no drift" claim itself
+    // EXHAUSTIVE where it is cheap. The fuzz sweep is random, so a divergence on a
+    // single rare character - say one entry of the map typo'd - is a coin flip it
+    // may not see: measured, a mutated "\u00d8" was MISSED by 5000 fuzz strings
+    // alone. So the drift corpus also carries every key of the map (PARSED out of
+    // the module, never transcribed), every BMP code point, and a stride through
+    // the astral planes. ~70k comparisons, well under a second.
+    const mapKeys = [...fs.readFileSync(modPath, "utf8")
+      .matchAll(/"((?:\\u[0-9a-fA-F]{4}|[^"\\])+)":\s*"[^"]*"/g)].map((m) => m[1]);
+    ok(mapKeys.length > 60,
+       `COPIES: parsed only ${mapKeys.length} map keys out of the module - the regex has stopped matching, so the exhaustive half is unproven`);
+    const bmp = [];
+    for (let cp = 0; cp <= 0xffff; cp++) bmp.push(String.fromCodePoint(cp));
+    const astral = [];
+    for (let cp = 0x10000; cp <= 0x10ffff; cp += 977) astral.push(String.fromCodePoint(cp));
+    const all = [...CORPUS, ...fuzzCorpus(), ...mapKeys, ...bmp, ...astral];
+    let drift = 0, first = null;
+    for (const s of all) if (hookFn(s) !== toAscii(s)) { if (drift++ === 0) first = s; }
+    ok(drift === 0,
+       `COPIES: the hook's inline toAscii disagrees with host/to-ascii.mjs on ${drift} of ${all.length} strings, ` +
+       `first ${JSON.stringify(first)}: ${JSON.stringify(first == null ? "" : hookFn(first))} vs ` +
+       `${JSON.stringify(first == null ? "" : toAscii(first))}`);
   }
 
   // ---- BUDGET --------------------------------------------------------------
-  const B = (o) => tickBytes(c, toAscii, o);
+  const B = (o) => tickBytes(c, toAscii, capUtf8, o);
   const before = {
     asciiNoDesc: B({ xlate: false }),
     wideNoDesc: B({ fill: "wide", xlate: false }),
@@ -420,17 +527,140 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, quiet = false } = 
   ok(after.asciiNoDesc === before.asciiNoDesc,
      `BUDGET: an all-ASCII payload must measure the same before and after (${before.asciiNoDesc} vs ${after.asciiNoDesc})`);
 
-  // TRIPWIRE, deliberately asserting that something is STILL WRONG. With optDescs
-  // at its cap on all four options of all six sessions, the saturated line is over
-  // the guard even in pure ASCII - so that residue is a CAP decision, not a unit
-  // one, and no amount of transliteration reaches it. It is far outside realistic
-  // traffic (one asking session at the cap is a fraction of the guard), and fixing
-  // it means shortening a cap, which changes what the device is shown. If this
-  // ever stops holding, the note above has to be re-derived rather than deleted.
+  // TRIPWIRE, deliberately asserting that something is STILL over the guard. With
+  // optDescs at its cap on all four options of all six sessions the saturated line
+  // exceeds it even in pure ASCII - a CAP question, not a unit one, which no
+  // amount of transliteration reaches (it is linear in the detail cap: 1400 gives
+  // 17861, 1089 breaks even).
+  //
+  // THE DEVICE IS NO LONGER AT RISK FROM IT: host/wire-fit.mjs measures every line
+  // before it is written and sheds until it fits, so this residue now costs a
+  // dropped detail and a log line rather than a silent persistent freeze. What
+  // this assertion still buys is a future developer knowing the ceiling is real
+  // before they add a field to it. If it ever stops holding, re-derive the note
+  // rather than deleting it.
   ok(after.wideDescVoice > c.lineGuard,
      `BUDGET: the saturated case WITH optDescs and a parked transcript is expected to remain over the guard ` +
      `(${after.wideDescVoice} vs ${c.lineGuard}) - it is now a pure-ASCII overrun, i.e. a cap question. ` +
      `If it now fits, this tripwire and its reasoning must be re-derived`);
+
+  // ---- VOICETEXT: the confirm screen, and the order its fix has to be in ---
+  // This field BYPASSED the transliteration in the first round, and the budget
+  // could not see it: capUtf8 caps in BYTES, so 150 bytes is 150 bytes either way.
+  // What changed is what the device DRAWS - "Yes - let's go ahead..." arrived as
+  // "Yes  lets go ahead", holes exactly where the punctuation was, on the one
+  // screen whose entire purpose is proving a human read THESE EXACT WORDS before
+  // signing them.
+  ok(c.voiceParkXlate,
+     "VOICETEXT: the parked transcript must be transliterated at the PARK SITE (handleVoiceAnswer), " +
+     "or the confirm screen renders gaps where Whisper's punctuation was");
+  ok(c.voiceParkBeforeHash,
+     "VOICETEXT: it must happen BEFORE voiceSha() - hashing first would sign text the device never shows");
+  ok(c.voiceBuilderRaw,
+     "VOICETEXT: the payload builder must assign `item.ask.voiceText = pend.text` UNCHANGED. " +
+     "Transliterating there desyncs the signed text from the text this host re-hashes, and every valid answer is then REJECTED");
+  {
+    const parked = capUtf8(toAscii("Yes — let's go ahead… but don't touch the cache"), c.voiceAnswerMaxBytes);
+    ok(!/[^\x00-\x7f]/.test(parked), `VOICETEXT: a real transcript reaches the wire as pure ASCII, got ${JSON.stringify(parked)}`);
+    ok(Buffer.byteLength(parked, "utf8") === parked.length,
+       "VOICETEXT: and its character count IS its byte count, so the char[204] on the device cannot be overrun");
+    ok(parked === "Yes - let's go ahead... but don't touch the cache",
+       `VOICETEXT: the punctuation is TRANSLITERATED, not dropped - got ${JSON.stringify(parked)}`);
+    // The same string modelled through the wire, which is what the budget uses.
+    const wide = capUtf8(c.voiceParkXlate ? toAscii("—".repeat(c.voiceAnswerMaxBytes)) : "—".repeat(c.voiceAnswerMaxBytes),
+                         c.voiceAnswerMaxBytes);
+    ok(Buffer.byteLength(wide, "utf8") === wide.length,
+       `UNITS: ask.voiceText's characters must equal its bytes on the real path (${wide.length} chars, ` +
+       `${Buffer.byteLength(wide, "utf8")} bytes) - a byte cap alone leaves the device drawing gaps`);
+    ok(wide.length === c.voiceAnswerMaxBytes,
+       `UNITS: and the byte cap now yields its full ${c.voiceAnswerMaxBytes} characters, not a third of them`);
+  }
+
+  // ---- REFUSAL: the host will not write a line the device cannot receive ---
+  // A checker assertion protects a future developer; this protects the DEVICE,
+  // including against the stale hook still installed in ~/.claude.
+  {
+    const fitSrc = fs.readFileSync(fitPath, "utf8");
+    ok((fitSrc.match(/for \(let k = 0; k <= sessions\(\)\.length; k\+\+\) \{/g) ?? []).length === 2,
+       "REFUSAL: both shedding tiers must be BOUNDED by the session count - this runs inside the 5s tick, " +
+       "and a spin here would be worse than the freeze it prevents");
+  }
+  ok(DEVICE_LINE_GUARD_BYTES === c.lineGuard,
+     `REFUSAL: wire-fit.mjs's DEVICE_LINE_GUARD_BYTES (${DEVICE_LINE_GUARD_BYTES}) must equal feedChar's own guard ` +
+     `parsed from the firmware (${c.lineGuard})`);
+  {
+    const mk = (n, opts = {}) => ({
+      hostId: "x".repeat(8), hiddenAsking: 0,
+      sessions: Array.from({ length: n }, (_, i) => ({
+        id: `s${i}`, status: opts.status ?? "asking",
+        name: "N".repeat(opts.name ?? 10),
+        ...(opts.noAsk ? {} : { ask: {
+          pid: `p${i}`, detail: "D".repeat(opts.detail ?? 10),
+          ...(opts.descs ? { optDescs: ["z".repeat(opts.descs)] } : {}),
+        } }),
+      })),
+    });
+    const small = fitPayload(mk(6, { detail: 1400 }));
+    ok(small.dropped.length === 0, "REFUSAL: an ordinary payload is untouched and nothing is logged");
+    ok(small.line.endsWith("\n"), "REFUSAL: the line it returns still ends in the newline the device splits on");
+    ok(small.bytes === small.was, "REFUSAL: and its size is unchanged");
+    ok(JSON.stringify(JSON.parse(small.line)) === JSON.stringify(JSON.parse(JSON.stringify(mk(6, { detail: 1400 })))),
+       "REFUSAL: an under-guard payload comes back byte-for-byte identical - the common path must not rewrite anything");
+    // Tier 1: the detail is the field that can be 1400 characters.
+    const t1 = fitPayload(mk(6, { detail: 4000 }));
+    ok(t1.bytes <= c.lineGuard, `REFUSAL (tier 1): oversized details are shed until the line fits, got ${t1.bytes}`);
+    ok(t1.dropped.length > 0 && t1.dropped.every((d) => d.startsWith("ask.detail")),
+       `REFUSAL (tier 1): and it says exactly what it dropped, got ${JSON.stringify(t1.dropped)}`);
+    ok(JSON.parse(t1.line).sessions.every((s) => s.ask.pid),
+       "REFUSAL (tier 1): the prompts SURVIVE - only the body they could not fit is gone, so they stay answerable");
+    ok(!/[^\x00-\x7f]/.test(t1.line), "REFUSAL: the replacement marker is ASCII, like everything else on this wire");
+    // Tier 2: descriptions explain options; the options remain.
+    const t2 = fitPayload(mk(6, { detail: 1, descs: 4000 }));
+    ok(t2.bytes <= c.lineGuard, `REFUSAL (tier 2): optDescs are shed next, got ${t2.bytes}`);
+    ok(t2.dropped.some((d) => d.startsWith("ask.optDescs")), `REFUSAL (tier 2): named in the log, got ${JSON.stringify(t2.dropped)}`);
+    // Tier 3 is what makes it TOTAL: nothing droppable but whole sessions.
+    const t3 = fitPayload(mk(6, { name: 5000, noAsk: true }));
+    ok(t3.bytes <= c.lineGuard, `REFUSAL (tier 3): sessions come off the TAIL until it fits, got ${t3.bytes}`);
+    ok(JSON.parse(t3.line).sessions.length < 6, "REFUSAL (tier 3): and the list really did shrink");
+    ok(JSON.parse(t3.line).hiddenAsking === 6 - JSON.parse(t3.line).sessions.length,
+       "REFUSAL (tier 3): an `asking` row shed this way is counted into hiddenAsking - the field that exists to say what was cut");
+    // TOTALITY. One absurd session must still produce a sendable line, or the
+    // refusal is merely likely rather than guaranteed.
+    const huge = fitPayload({ hiddenAsking: 0, sessions: [{ id: "x", status: "asking", name: "N".repeat(200_000) }] });
+    ok(huge.bytes <= c.lineGuard, `REFUSAL: TOTAL - even a 200KB single session yields a sendable line, got ${huge.bytes}`);
+    // A detail SHORTER than the replacement marker is never touched: replacing it
+    // grows the line, which is the opposite of the job, and logs "dropped 1 bytes"
+    // - a line that reads as nonsense. Asserted directly, because the monotonic
+    // sweep below cannot see it once a later tier sheds enough to mask the growth.
+    {
+      const r = fitPayload({ hiddenAsking: 0, sessions: [
+        { id: "a", status: "asking", ask: { detail: "d" } },
+        { id: "b", status: "asking", name: "N".repeat(20_000) }] });
+      ok(!r.dropped.some((d) => d.startsWith("ask.detail")),
+         `REFUSAL: a 1-byte detail must never be "dropped" for a 47-byte marker, got ${JSON.stringify(r.dropped)}`);
+    }
+    // MONOTONIC. Replacing a short detail with the marker would GROW the line,
+    // which is the opposite of the job - and would log "dropped 1 bytes".
+    for (const d of [0, 1, 10, 46, 47, 48, 100, 1400, 4000]) {
+      const r = fitPayload({ hiddenAsking: 0, sessions: [
+        { id: "a", status: "asking", ask: { detail: "D".repeat(d) } },
+        { id: "b", status: "asking", name: "N".repeat(20_000) }] });
+      ok(r.bytes <= r.was, `REFUSAL: fitting must never GROW the line (detail=${d}: ${r.was} -> ${r.bytes})`);
+      ok(r.bytes <= c.lineGuard, `REFUSAL: and must always end under the guard (detail=${d}: ${r.bytes})`);
+    }
+    // The guard is `> 16000`, so exactly 16000 is FINE and must not be touched.
+    const pad = (n) => ({ hiddenAsking: 0, sessions: [{ id: "a", status: "asking", ask: { detail: "D".repeat(n) } }] });
+    let n = 0;
+    while (Buffer.byteLength(JSON.stringify(pad(n)), "utf8") < c.lineGuard) n++;
+    const exact = fitPayload(pad(n - (Buffer.byteLength(JSON.stringify(pad(n)), "utf8") - c.lineGuard)));
+    ok(exact.dropped.length === 0 && exact.bytes === c.lineGuard,
+       `REFUSAL: a line of EXACTLY ${c.lineGuard} bytes is fine - feedChar clears at > guard, not at >= - got ${exact.bytes}, ${exact.dropped.length} drops`);
+    // ...and ONE byte over is not. The two together pin the boundary from both
+    // sides; either alone is satisfied by an off-by-one in the other direction.
+    const over = fitPayload(pad(n - (Buffer.byteLength(JSON.stringify(pad(n)), "utf8") - c.lineGuard) + 1));
+    ok(over.was === c.lineGuard + 1 && over.dropped.length > 0 && over.bytes <= c.lineGuard,
+       `REFUSAL: ${c.lineGuard + 1} bytes must be shed - was ${over.was}, sent ${over.bytes}, ${over.dropped.length} drops`);
+  }
 
   runBehaviour(hookPath, c);
 
@@ -465,8 +695,14 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, quiet = false } = 
 // ---------------------------------------------------------------------------
 async function selftest() {
   const box = fs.mkdtempSync(path.join(os.tmpdir(), "deckhand-wirebytes-selftest-"));
-  const hookOrig = fs.readFileSync(HOOK_SRC, "utf8");
-  const modOrig = fs.readFileSync(MOD_SRC, "utf8");
+  // Every fault goes into a COPY in a temp dir - never a repo file. Four sources
+  // can be mutated because the defect this checker exists for has now been found
+  // in three of them: the hook, the module, the host's own cap sites, and the
+  // refusal. A mutation of the MODULE is mirrored into the hook's inline copy, or
+  // the drift guard catches the fault for the wrong reason and everything else
+  // passes.
+  const SRC = { hook: HOOK_SRC, mod: MOD_SRC, host: HOST_SRC, fit: FIT_SRC };
+  const orig = Object.fromEntries(Object.entries(SRC).map(([k, v]) => [k, fs.readFileSync(v, "utf8")]));
   const faults = [
     ["clean() no longer transliterates (the ask title and option labels go back to characters)",
      { hook: (s) => s.replace(/function clean\(s, max\) \{([\s\S]*?)return toAscii\(s\)/, 'function clean(s, max) {$1return String(s ?? "")') }],
@@ -479,65 +715,70 @@ async function selftest() {
     ["the module alters pure-ASCII input",
      { mod: (s) => s.replace("if (!NON_ASCII.test(str)) return str;", 'if (!NON_ASCII.test(str)) return str.replace(/-/g, "_");') }],
     ["the module is no longer idempotent (an ASCII-only violation, so only the idempotence claim can see it)",
-     { mod: (s) => s.replace("  if (pending) out += \"?\";\n  return out;", "  if (pending) out += \"?\";\n  return out + \"!\";") }],
-    ["the ask DETAIL cap raised past what the guard can hold - the budget half, which no fidelity assertion can see",
-     { hook: (s) => s.replace('cleanMultiline(q.question ?? "", 1400)', 'cleanMultiline(q.question ?? "", 1800)') }],
+     { mod: (s) => s.replace('  if (pending) out += "?";\n  return out;', '  if (pending) out += "?";\n  return out + "!";') }],
     ["the module leaves a non-ASCII byte through",
      { mod: (s) => s.replace("    pending = true;", "    out += ch;") }],
-    ["the hook's inline copy drifts from the module",
-     { hook: (s) => s.replace('"—": "-",', '"—": "~",') }],
+    ["the hook's inline copy drifts from the module - OUTSIDE the hand-written corpus, so only the fuzz sweep can see it",
+     { hook: (s) => s.replace('"Ø": "O",', '"Ø": "0",') }],
     ["deviceText caps BEFORE transliterating, so expansion re-exceeds the cap",
      { mod: (s) => s.replace("  const a = toAscii(s);\n  return max == null ? a : a.slice(0, max);",
                              "  return max == null ? toAscii(s) : toAscii(String(s ?? '').slice(0, max));") }],
-    ["a host cap site bypasses the transliteration",
-     { host: true, hook: (s) => s }],  // handled specially below
+    ["the ask DETAIL cap raised past what the guard can hold - the budget half, which no fidelity assertion can see",
+     { hook: (s) => s.replace('cleanMultiline(q.question ?? "", 1400)', 'cleanMultiline(q.question ?? "", 1800)') }],
     ["a line written to stdout, which on a PermissionRequest can auto-answer a real dialog",
      { hook: (s) => s.replace(/^function buildAsk\(data\) \{$/m, 'function buildAsk(data) {\n  console.log("");') }],
+    ["a host cap site bypasses the transliteration",
+     { host: (s) => s.replace(/name: deviceText\(await projectName\(record\.cwd \|\| ""\), (\d+)\)/,
+                              'name: (await projectName(record.cwd || "")).slice(0, $1)') }],
+    ["ask.voiceText bypasses it at the PARK SITE - the confirm screen draws gaps where the punctuation was",
+     { host: (s) => s.replace("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);",
+                              "text = capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES);") }],
+    ["ask.voiceText transliterated in the PAYLOAD BUILDER instead - the plausible wrong fix, which desyncs voiceSha and rejects every valid answer",
+     { host: (s) => s.replace("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);", "text = capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES);")
+                     .replace("item.ask.voiceText = pend.text;", "item.ask.voiceText = toAscii(pend.text);") }],
+    ["the tick line is no longer measured before it is written",
+     { host: (s) => s.replace("const fitted = fitPayload({", "const fitted = ((p) => ({ line: JSON.stringify(p) + \"\\n\", bytes: 0, was: 0, dropped: [] }))({") }],
+    ["the refusal's guard constant drifts from the firmware's",
+     { fit: (s) => s.replace("export const DEVICE_LINE_GUARD_BYTES = 16000;", "export const DEVICE_LINE_GUARD_BYTES = 32000;") }],
+    ["the refusal loses its last tier, so it is merely likely rather than TOTAL",
+     { fit: (s) => s.replace("  while (sessions().length) {", "  while (false) {") }],
+    ["the refusal replaces SHORT details too, so fitting can GROW the line",
+     { fit: (s) => s.replace("bytes(d) > DROPPED_BYTES ?", "bytes(d) > 0 ?") }],
+    ["the refusal is off by one and lets a guard+1 line through - the exact size at which feedChar clears its buffer",
+     { fit: (s) => s.replace("  if (was <= guard) return", "  if (was <= guard + 1) return") }],
   ];
   let caught = 0, injected = 0;
   for (const [name, f] of faults) {
-    if (f.host) {
-      // The host file is read by path from the repo, so this fault is proved by
-      // temporarily checking a MUTATED COPY of the source text through the same
-      // regexes rather than by rewriting index.mjs.
-      const mutated = fs.readFileSync(HOST_SRC, "utf8").replace(/name: deviceText\(await projectName\(record\.cwd \|\| ""\), (\d+)\)/,
-        'name: (await projectName(record.cwd || "")).slice(0, $1)');
-      const bypassed = !HOST_SITES.find(([n]) => n === "session.name")[1].test(mutated);
-      console.log(`  ${bypassed ? "caught  " : "MISSED  "} ${name}`);
-      injected++; if (bypassed) caught++;
-      continue;
+    const src = {};
+    let bad = false;
+    for (const k of Object.keys(SRC)) {
+      src[k] = f[k] ? f[k](orig[k]) : orig[k];
+      if (f[k] && src[k] === orig[k]) bad = true;
     }
-    const hookPath = path.join(box, `hook-${injected}.mjs`);
-    const modPath = path.join(box, `mod-${injected}.mjs`);
-    const hookSrc = f.hook ? f.hook(hookOrig) : hookOrig;
-    let modSrc = f.mod ? f.mod(modOrig) : modOrig;
-    if ((f.hook && hookSrc === hookOrig) || (f.mod && modSrc === modOrig)) {
-      console.log(`  NOT INJECTED (pattern no longer matches): ${name}`);
-      injected++;
-      continue;
-    }
-    // The hook carries its own copy of the map, so a MODULE fault must be mirrored
-    // into it or the "copies agree" assertion catches the fault for the wrong
-    // reason and every other assertion passes.
-    let hookOut = hookSrc;
+    if (bad) { console.log(`  NOT INJECTED (pattern no longer matches): ${name}`); injected++; continue; }
+    // Mirror a MODULE fault into the hook's inline copy.
     if (f.mod) {
-      const mStart = modOrig.indexOf("// Characters that DO have"), mEnd = modOrig.indexOf("// Transliterate THEN cap");
-      const before = modOrig.slice(mStart, mEnd).replace("export function toAscii", "function toAscii").trimEnd();
-      const afterM = modSrc.slice(modSrc.indexOf("// Characters that DO have"), modSrc.indexOf("// Transliterate THEN cap"))
+      const cut = (t) => t.slice(t.indexOf("// Characters that DO have"), t.indexOf("// Transliterate THEN cap"))
         .replace("export function toAscii", "function toAscii").trimEnd();
-      if (hookOut.includes(before)) hookOut = hookOut.replace(before, afterM);
+      const before = cut(orig.mod), after = cut(src.mod);
+      if (src.hook.includes(before)) src.hook = src.hook.replace(before, after);
     }
-    fs.writeFileSync(hookPath, hookOut);
-    fs.writeFileSync(modPath, modSrc);
+    const paths = {};
+    for (const k of Object.keys(SRC)) {
+      paths[k] = path.join(box, `${k}-${injected}.mjs`);
+      fs.writeFileSync(paths[k], src[k]);
+    }
     const mark = failures.length;
     pass = 0;
-    try { await main({ hookPath, modPath, quiet: true }); } catch { /* a crash is also a catch */ }
+    try {
+      await main({ hookPath: paths.hook, modPath: paths.mod, hostPath: paths.host, fitPath: paths.fit, quiet: true });
+    } catch { /* a crash is also a catch */ }
     const found = failures.length > mark;
-    // Print WHICH assertion caught it. "caught" alone cannot tell a fault caught
-    // by the assertion that exists for it from one caught by an unrelated crash,
-    // and that difference is the whole point of a teeth-proving run.
+    // Print WHICH assertion caught it. "caught" alone cannot tell the assertion
+    // that exists for a fault from an unrelated crash, and that difference is the
+    // whole point of a teeth-proving run.
     console.log(`  ${found ? "caught  " : "MISSED  "} ${name}`);
-    if (found) console.log(`             by: ${failures[mark].slice(0, 110)}`);
+    if (found) console.log(`             by: ${failures[mark].slice(0, 118)}`);
     injected++; if (found) caught++;
     failures.length = mark;
   }

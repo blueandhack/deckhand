@@ -211,9 +211,9 @@ function dlog(text) {
 //
 // DUPLICATED from host/to-ascii.mjs rather than imported, for the same reason
 // capBytes() below duplicates capUtf8(): install.sh copies THIS FILE ALONE into
-// ~/.claude, so it can only ever import node builtins. host/ask-optdescs-check.mjs
-// extracts this copy and runs it beside the module over a corpus, so the two
-// cannot drift silently. If you change one, change the other.
+// ~/.claude, so it can only ever import node builtins. host/wire-bytes-check.mjs
+// extracts this copy and runs it beside the module over a large fuzz corpus, so
+// the two cannot drift silently. If you change one, change the other.
 // ---------------------------------------------------------------------------
 // Characters that DO have an obvious ASCII equivalent. Transliterating what
 // actually appears matters more than it sounds: Claude's own output is full of

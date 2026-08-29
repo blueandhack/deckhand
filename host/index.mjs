@@ -30,6 +30,7 @@ import { resolveSessionId } from "./session-lookup.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
 import { toAscii, deviceText } from "./to-ascii.mjs";
+import { fitPayload } from "./wire-fit.mjs";
 import { resolveMacEmoji } from "./mac-emoji.mjs";
 import { lineTargetsUs, stripAddress } from "./line-address.mjs";
 import { formatRunStartLine } from "./run-ledger.mjs";
@@ -2124,12 +2125,27 @@ async function transcribeForAnswer(captureFile, pid) {
     setVoice("askerror", { reply: "nothing recognised - record again" });
     return;
   }
-  // Cap FIRST, then hash: the device displays the capped string, so that is the
-  // string that must be signed. Hashing before capping would sign text the human
-  // never saw. This cap is BYTES, not characters (see VOICE_ANSWER_TEXT_MAX_BYTES) -
-  // the device stores this in a fixed char[204] and a character cap can silently
-  // overflow it with Whisper's multi-byte punctuation.
-  text = capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES);
+  // TRANSLITERATE HERE, AT THE PARK SITE, AND NOWHERE ELSE. Whisper is the
+  // highest non-ASCII-density source in the system - em-dashes, curly quotes and
+  // ellipses in almost every sentence - and this string ends up on the CONFIRM
+  // SCREEN, whose entire purpose is proving a human read THESE EXACT WORDS before
+  // signing them. Untransliterated it reached the wire intact and the device drew
+  // holes exactly where the punctuation was: "Yes - let's go ahead..." rendered as
+  // "Yes  lets go ahead". Both fonts are 0x20..0x7E, so an out-of-range byte draws
+  // nothing and advances nothing.
+  //
+  // THE OBVIOUS FIX IS THE WRONG ONE: doing this in the payload builder, where
+  // `item.ask.voiceText = pend.text` is assigned, would desync the text the device
+  // displays and signs against from the text this host still holds and re-hashes -
+  // so every valid answer would then be REJECTED. It has to happen before
+  // voiceSha() below, which is why it is on this line and not that one.
+  //
+  // Cap AFTER, and cap in BYTES: the device displays the capped string, so that is
+  // the string that must be signed, and hashing before capping would sign text the
+  // human never saw. capUtf8 stays even though its input is now ASCII - it is the
+  // last line of defence and costs nothing on ASCII (see VOICE_ANSWER_TEXT_MAX_BYTES;
+  // the device stores this in a fixed char[204]).
+  text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);
   pendingVoiceAnswers.set(pid, { text, sha: voiceSha(text), at: Date.now() });
   console.log(`Voice answer: pid=${pid} transcript = "${text}"`);
   setVoice("askheard", { text });
@@ -3007,9 +3023,23 @@ async function tick(generation = tickGeneration) {
     // device whether its option buttons are live or read-only, so it never
     // offers a control that can't do anything.
     const hostEmoji = currentMacEmoji();
-    const line = JSON.stringify({
+    // MEASURED, NOT ASSUMED. feedChar() clears its whole buffer past 16000 bytes
+    // and the remainder of the line lands in the emptied one, so an over-guard
+    // line does not merely fail to arrive - it freezes the screen for as long as
+    // the prompt causing it is pending, silently. host/to-ascii.mjs removes the
+    // char/byte multiplier that made this reachable with ordinary text; this is
+    // the backstop that does not depend on being right about every future field,
+    // and it is the only thing that covers a STALE HOOK in ~/.claude still
+    // emitting untransliterated text. What it sheds is LOGGED - a silent
+    // truncation would be the same class of defect as the freeze.
+    const fitted = fitPayload({
       ...usage, hostId, hostTag, ...(hostEmoji ? { hostEmoji } : {}), remoteAnswer, voice: lastVoice,
-    }) + "\n";
+    });
+    const line = fitted.line;
+    if (fitted.dropped.length) {
+      console.log(`Wire: payload was ${fitted.was} bytes against the device's 16000-byte line ` +
+                  `buffer - sent ${fitted.bytes} after dropping ${fitted.dropped.join("; ")}`);
+    }
     if (usbPort) usbPort.write(line);
     if (bleCharacteristic) await sendOverBle(line);
     console.log(
