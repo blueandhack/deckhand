@@ -1995,7 +1995,12 @@ for (const b of [1, 2]) {
   // pre-existing case this pattern generalises from, and it is a documented
   // byte-identical board this task does not touch.
   if (b === 2) {
-    const hm = SESSIONS_INO.match(/sx\s*>=\s*msgBtnX\(\)\s*-\s*(\d+)/);
+    // Anchored on the REAL statement (`msgOffered(detailIndex) && sx >= ...`),
+    // not merely "sx >= msgBtnX() - N" - that laxer pattern's first match in this
+    // file is the explanatory COMMENT two screens above the real code (`// ...see
+    // the sx >= msgBtnX() - 24 test below...`), so it silently parsed prose
+    // instead of the compiled statement. Proven with the two mutations below.
+    const hm = SESSIONS_INO.match(/msgOffered\(detailIndex\)\s*&&\s*sx\s*>=\s*msgBtnX\(\)\s*-\s*(\d+)/);
     chk(!!hm, "the TYPE chip's hit test is anchored on msgBtnX() with a slack term");
     const slack = hm ? +hm[1] : 0;
     // msgBtnX() = CARD_X + CARD_W - MSG_BTN_W, and the zone runs from there to the
@@ -2004,6 +2009,18 @@ for (const b of [1, 2]) {
     const zoneW = c.MSG_BTN_W + slack;
     chk(zoneW >= c.TAP_MIN,
         `TYPE tap zone ${zoneW}px wide (chip ${c.MSG_BTN_W} + ${slack} slack) >= TAP_MIN ${c.TAP_MIN}`);
+    // THE ABOVE HAS NO BITE ON ITS OWN: MSG_BTN_W (76) already clears TAP_MIN (46)
+    // with slack = 0, so it cannot tell a real slack term from a vanished one. This
+    // one depends on the slack SPECIFICALLY - it fails if the slack shrinks toward
+    // zero regardless of how wide the chip is. The bound (a quarter of the chip's
+    // own drawn width) is not curve-fit to today's 24: it is comfortably BELOW the
+    // 31.6% (24/76) this exact code already runs at, so it has real headroom before
+    // the chip's current proportions, yet it still catches a materially eroded
+    // slack - a value under 19 is no longer "a margin wider than the chip", it's
+    // noise next to it.
+    const minSlack = c.MSG_BTN_W / 4;
+    chk(slack >= minSlack,
+        `TYPE zone's slack (${slack}px) is a meaningful margin beyond the chip - at least a quarter of its ${c.MSG_BTN_W}px width (${minSlack})`);
     chk(c.DETAIL_HEAD_H >= c.TAP_MIN,
         `TYPE tap zone ${c.DETAIL_HEAD_H}px tall (the whole header row) >= TAP_MIN ${c.TAP_MIN}`);
     chk(c.MSG_BTN_H < c.DETAIL_HEAD_H,
