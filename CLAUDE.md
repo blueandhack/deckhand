@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386614, RAM 69780 | flash 989678, RAM 63276 |
+| size today | flash 1386614, RAM 69780 | flash 990398, RAM 63276 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -647,6 +647,30 @@ has to name the menu bar rather than "Deckhand": `pkill -f 'MacOS/Deckhand'` als
 `deckhand-service.sh status` reporting the menu bar's pid as the host's. Kill by pid, or match
 `MacOS/DeckhandMenuBar`.
 
+**Check what the HOST puts on the WIRE — the byte budget and the ask's option descriptions.** Both
+parse every cap out of the hook, the host and the firmware rather than transcribing one, so a cap
+that moves fails by name instead of taking the numbers with it:
+
+```
+node host/wire-bytes-check.mjs               # 255 assertions: every device-bound cap is exact in BYTES,
+                                             #   the hook's inline toAscii matches host/to-ascii.mjs over
+                                             #   71,738 strings, and the saturated tick line is measured
+                                             #   against feedChar's guard (incl. the still-over tripwire)
+node host/wire-bytes-check.mjs --selftest    # 19/19 injected faults, each printing WHICH assertion caught it
+node host/ask-optdescs-check.mjs             # 47 assertions: optDescs is capped in bytes on a codepoint
+                                             #   boundary, parallel to options, absent when nothing
+                                             #   is described
+node host/ask-optdescs-check.mjs --selftest  # 5/5 injected faults
+```
+
+Two properties are worth knowing before leaning on them. `wire-bytes-check.mjs`'s selftest names the
+assertion that caught each fault, because **"caught" alone cannot tell the assertion that exists for
+a fault from an unrelated crash** — and two of its faults exist only because nothing else could see
+them: an ASCII-only idempotence break, and a raised `detail` cap that only the budget half catches.
+And `ask-optdescs-check.mjs` keeps its budget model **untransliterated on purpose**: it is now the
+BEFORE picture and the record of how big the character/byte defect was, so do not "fix" it to agree
+with the other checker.
+
 **Check the LAYOUT ARITHMETIC of both boards' screens without a screen.** Three checkers parse the
 constants straight out of `board_e32r28t.h` / `board_es3c35p.h` (shared parsing in
 `geom-common.mjs`) and assert every derivation the headers claim — so a header that drifts from its
@@ -708,8 +732,10 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   opaque box paints `COLOR_CARD` over the chip's own stroke, the clear-box-not-glyphs hazard the
   usage cards already pay for. Asserting that box clears the stroke at both ends is a bound taken
   from the geometry rather than fitted to today's 26, and it catches the chip at 20.
-  Where it stands today: **433 of 502 constant-board pairs guarded** (board 1 32/234 unguarded,
-  board 2 37/268), and of the unguarded ones only **8 on board 1 and 13 on board 2 are read by any
+  Where it stands today: **437 of 506 constant-board pairs guarded** (board 1 32/236 unguarded,
+  board 2 37/270) — the two new pairs are `READER_CODE_LINE_H`, added on both boards by the reader
+  line-step fix, and **both are guarded**, which is the standard this file sets for a constant the
+  repo just added. Of the unguarded ones only **8 on board 1 and 13 on board 2 are read by any
   checker at all** — the other 24 a side are mic, beeper, crab and preset-count constants with no
   geometry to violate. **Four of board 2's thirteen are unguarded BY CONSTRUCTION and are not a
   gap**: `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`, `DETAIL_COL_LBL_STEP` and `DETAIL_COL_VAL_STEP` are
@@ -1390,6 +1416,23 @@ unique solution.) The identities it produces are real derivations, not curve-fit
 title→sub, sub→pill and bottom pad, and every derived offset **collapses to board 1's literal at
 `AIR 0`** — which is the check that says this is the same layout with air in it, not a new one.
 
+**THE LONE EXPANDED CARD IS TOP-ALIGNED, AND THAT REVERSES A DELIBERATE DECISION RECORDED HERE.**
+`sessionRowYAt()` used to special-case `sessionCount == 1` and centre the card in the list area.
+The argument for centring was real and is kept so nobody re-derives it as if it were new: one 212px
+card in a 410px list leaves **198px — 48% of the tab — hanging below it**, which reads as "a card,
+then nothing" however much content the card itself carries, and centring cost no constant and no
+height. **The user looked at the device and asked for top alignment instead**, so the special case
+is deleted rather than special-cased back — `SESSION_ROW_Y0` is what every other row count already
+falls through to. Verified on board 2's glass: the card's border sits at y=50 = `SESSION_ROW_Y0`,
+4px under the tab bar. (`SCREENSHOT` reads board 2's shadow framebuffer, so that capture vouches for
+the GEOMETRY the renderer computed, not for the panel — see the verification trap under Two boards.
+Position is exactly the kind of claim a framebuffer read can settle; colour is not.)
+**The trailing gap is the accepted cost, and it is now BIGGER than the 198px the old comment
+named**, because the card's height is content-derived (`sessionExpandedH`): a session with no title
+and no prompt leaves roughly 140 rows blank *inside* the card as well as whatever is left below it.
+If this is ever re-centred, it should be because someone looked again and chose that — not because
+the centring argument was rediscovered without noticing it had already been overridden once.
+
 **`MAX_SESSIONS` stayed 6, and raising it is a PROTOCOL change, not a screen change.** The device's
 6 is matched by the host's own `records.slice(0, 6)` and by `sessionsTotal`/`hiddenAsking`, which
 exist to tell the device what was cut. Raising the device's constant alone changes nothing; raising
@@ -1700,8 +1743,11 @@ two things `host/index.mjs` cannot get any other way:
   `PostToolUseFailure` maps to `working` so a *denied* permission clears `asking`.
 - **Remote answering — WHICH EVENT WE BLOCK ON IS THE WHOLE TRICK, and it was measured, not
   reasoned.** For answerable prompts the hook publishes an `ask` object (pid, single-line-flattened
-  ≤34-char title, ≤1400-char detail, ≤4 option labels of ≤32 chars) in the session file so the
-  device can display it. Whether it then **waits** depends entirely on the event:
+  ≤34-char title, ≤1400-char detail, ≤4 option labels of ≤32 chars, and — only when something is
+  actually described — a parallel `optDescs` array capped at 96 BYTES each) in the session file so
+  the device can display it. **Every one of those text fields is ASCII by the time it is written**;
+  the caps were characters against a byte guard until that was reconciled, which is the byte-budget
+  note under the device line buffers. Whether it then **waits** depends entirely on the event:
   - **`PermissionRequest` → WAIT.** Claude Code shows its dialog *while this hook runs*, so waiting
     costs the Mac nothing: the Mac dialog and the device's buttons are both live and the first
     answer wins. The hook blocks up to 90s (settings.json hook `timeout` is 100s to match) polling
@@ -4183,8 +4229,13 @@ Other things that aren't obvious from a single file:
     gate on the other two, and that is the safety argument rather than a preference: those
     two paint at the sessions LIST's coordinates — a band at `sessionRowYAt(0)`, a shimmer
     down every row — so letting them through here would paint the list's geometry on top of
-    a full-screen card. Measured on the glass afterwards: **219–235 of the mark's 1024
-    pixels differ between captures**, where before it was frozen.
+    a full-screen card. Measured afterwards: **219–235 of the mark's 1024 pixels differ
+    between captures**, where before it was frozen. **That is FRAMEBUFFER evidence, not the
+    panel** — board 2's `SCREENSHOT` reads the shadow buffer (see the verification trap under
+    Two boards) — which is the right instrument for this particular question: what was frozen
+    was the renderer's own `animPhase`, so "the composed frame now changes" IS the claim. It
+    says nothing about how the mark looks on the glass, and the original report came from a
+    person watching the device.
   - **`showingDetail` IS ALSO TRUE ON THE ASK SCREEN, which has no band at all.** It is set
     in one place and the ask screen is drawn through the same entry point
     (`drawSessionDetail` hands off to `drawAskDetail` on `askPid`), so a tick that trusted
@@ -4319,17 +4370,130 @@ Other things that aren't obvious from a single file:
   polls). Sessions are matched across polls **by id, never by name** — two sessions on the
   same project share a name, and name-matching once made an asking session look newly-asking
   every poll (endless beeping).
-- The device line buffers (`feedChar`'s 16000-char guard, the 16384-byte BLE stream buffer) are
+- The device line buffers (`feedChar`'s 16000-**BYTE** guard, the 16384-byte BLE stream buffer) are
   sized for payloads carrying `ask` objects; shrinking them silently drops whole updates. They
   were bumped from 8000/8192 when the ask caps grew (title 34, detail 1400, options 4×32,
   `askDetail[1424]`/`askTitle[36]`/`askOpts[4][34]`) so up to 6 simultaneous asks with full
   1400-char details can't overflow one JSON line. ArduinoJson v7's `JsonDocument` is elastic, so
   the parse side has no fixed capacity - the line guard and RAM (`SessionInfo`×6 plus a
   `prevSessions`×6 diff copy) are the real ceilings.
+  **THAT GUARD COUNTS BYTES AND EVERY CAP ABOVE IT COUNTED CHARACTERS, AND THIS FILE CALLED IT A
+  "16000-char guard" FOR AS LONG AS THE MISMATCH EXISTED.** `buf.length()` on an Arduino String is
+  bytes; `title` 34, `detail` 1400 and `options` 32 were all JS `.slice()`, i.e. UTF-16 code units,
+  and `clean()`/`cleanMultiline()` stripped control bytes only — so everything from U+0080 up
+  crossed at up to **3 bytes each**. The two units were never reconciled, and the device's own
+  `askDetail[1424]`/`askOpts[4][34]` have the same disease, since `copyField` truncates by BYTE.
+  **Measured, not modelled from the caps:** six asking sessions of all-wide text with **no new
+  fields at all** is **37,425 bytes against a 16,000 guard — 2.3x over**. And it does not take six:
+  **ONE session carrying a multi-byte question at the 1400-char cap is 17,893 bytes.** A single
+  question asked in CJK does it.
+  **THE FAILURE MODE IS THE IMPORTANT PART, AND IT IS NOT A DROPPED LINE.** The guard **CLEARS THE
+  BUFFER MID-LINE**, so the remainder of that same line accumulates into the emptied buffer,
+  `processCompletedLine()` gets a JSON fragment, `handleLine()` returns early on the parse error,
+  and **every tick carrying that prompt is lost**. The screen freezes at its last good state for as
+  long as the prompt is pending, while both links, both heartbeats and both menu bars look perfectly
+  healthy and nothing anywhere logs why — the "healthy process doing no useful work" shape this file
+  already documents three times over (the stalled tick, the `ccusage` all-or-nothing tick, the
+  nvm-PATH `readUsage()` throw).
+  **FIX, LAYER 1: device-bound text is ASCII on the host, so characters and bytes are ONE UNIT BY
+  CONSTRUCTION.** Not a bigger guard — `askDetail[1424]` and friends are fixed too, so raising it
+  only moves the truncation. The justification is that the bytes were never worth anything:
+  **both fonts declare `0x20..0x7E`, and an out-of-range byte draws nothing and advances nothing**,
+  so every non-ASCII byte was budget spent on an invisible glyph. Stripping them costs no
+  information the device could ever have shown, and it makes every character cap exact in bytes at
+  once rather than patching one and leaving the next wrong. `toAscii()` transliterates what actually
+  appears — em-dashes, curly quotes, ellipses, arrows, accented Latin via NFD — and marks anything
+  else with a single `?`, **collapsing a RUN to one** so a CJK sentence does not become a wall of
+  them. In the hook it goes inside `clean()`/`cleanMultiline()`, the single funnel every ask field
+  already takes; in the host at each device-bound cap site. **Transliterate THEN cap, never the
+  reverse**: the ellipsis is one character in and three out, so capping first lets a field grow back
+  past its own cap. Result: WIDE **37,425 → 14,237**, and the ASCII floor is **unchanged at
+  14,237** — the two are now the same number, and that identity IS the reconciliation. **Every
+  payload that was already fine is byte-identical**, verified against 267 real captured payloads.
+  **FIX, LAYER 2: `host/wire-fit.mjs` — the host REFUSES to emit a line the device cannot receive.**
+  It measures every tick line against `feedChar`'s own 16,000-byte guard before writing it and sheds
+  until it fits: largest `ask.detail` first (the prompt survives and stays answerable, with a marker
+  saying where to read it), then `optDescs`, then whole sessions off the urgency-sorted **TAIL**,
+  with any `asking` row it drops counted into `hiddenAsking`. Tier 3 is what makes this **TOTAL**
+  where the transliteration is merely thorough: a 200KB session still yields a sendable line, and it
+  covers any future field, any hook version, and — the case no checker can reach — **a STALE hook
+  still installed in `~/.claude`, emitting untransliterated text until someone runs `install.sh`**.
+  Everything shed is LOGGED, because a silent truncation would be the same class of defect as the
+  freeze. Both shedding loops are bounded by the session count: this runs inside the 5s tick and a
+  spin there would be worse than the freeze it prevents, which a fault-injection run proved by
+  hanging on an unbounded one.
+  **`ask.voiceText` BYPASSED layer 1, and the obvious fix was WRONG.** It is parked by
+  `handleVoiceAnswer` under `capUtf8`'s byte cap and assigned straight into the payload, so it never
+  met `clean()` — and Whisper is the densest non-ASCII source in the system. The budget never
+  noticed, because 150 bytes is 150 bytes either way; what it cost was the GLASS. *"Yes - let's go
+  ahead... but don't touch the cache"* reached the wire at 47 chars / 55 bytes and drew as
+  `Yes  lets go ahead but dont touch the cache` — **holes exactly where the punctuation was**, on
+  the one screen whose entire purpose is proving a human read THESE EXACT WORDS before signing them.
+  Now 49 chars / 49 bytes and drawn in full. **The fix had to be at the PARK SITE, before
+  `voiceSha()`.** Transliterating in the payload builder — where `item.ask.voiceText` is assigned,
+  which is the obvious place — would desync the text the device signs from the text this host
+  re-hashes, so the host would then reject **valid** answers. That ordering is asserted, and the
+  plausible wrong fix is one of the injected faults: moving it fails 6 assertions by name.
+  **Found en route:** `histFlatten`'s truncation marker was **U+2026**, outside both fonts, so a
+  truncated history preview showed no sign whatsoever of having been cut. Three ASCII dots now — the
+  fourth instance of the trap this file already records for `fitText`'s ellipsis, the `CLAUDE/air`
+  tag separator and the PAIRED MACS middle dot.
+  **Worth recording as METHOD: on a finite domain, EXHAUSTIVE beats fuzz and costs under a second.**
+  The drift guard between `host/to-ascii.mjs` and the hook's forced inline copy runs over **71,738
+  strings** — a hand-written corpus, a seeded fuzz sweep including lone surrogates on both sides,
+  every map key PARSED out of the module, every BMP code point, and an astral stride. A mutated
+  `"Ø": "O"` → `"0"` was caught by the exhaustive half and **missed entirely by 5,000 fuzz
+  strings**. The copy is duplicated rather than imported for the reason `capBytes()` duplicates
+  `capUtf8()`: `install.sh` copies that hook alone into `~/.claude`, so it can only ever import node
+  builtins.
+  **A TRIPWIRE deliberately asserts that something is STILL WRONG.** With `optDescs` at its cap on
+  all four options of all six sessions, the line is over the guard **even in pure ASCII** — a
+  residue no transliteration can reach, because it is a CAP decision. It is far outside real traffic
+  (one asking session at the cap is 3,741 bytes) and `wire-fit.mjs` now handles it at send time, but
+  the assertion stays: **if it ever fits, the reasoning behind these caps must be re-derived.**
 - The ask/answer screen: tapping an asking session's row opens option buttons wired to
   `sendAnswerToHost()` (which transmits on USB **and** BLE TX notify, in ≤20-byte chunks).
   Long detail text pages by tapping the text block — deliberate: drag-scrolling flickers and
   misfires on this resistive panel, discrete pages don't.
+- **AN ASK'S OPTIONS NOW CARRY THEIR DESCRIPTIONS ACROSS THE WIRE — and NOTHING ON THE DEVICE
+  CONSUMES THEM YET.** `AskUserQuestion` puts "what this option means, or what happens if you pick
+  it" in each option's `description`, and `buildAsk()` discarded it on the very line that took
+  `label` — so a four-way question reached the device as four bare labels and **the information you
+  need in order to CHOOSE never left the Mac**. `ask.optDescs` is now emitted parallel to
+  `ask.options`, and **only when at least one description is non-empty**, so an Allow/Deny prompt's
+  payload does not grow by a byte and absence is byte-identical to the old record (asserted against
+  `git show HEAD:` of the hook itself). A device that does not know the field ignores it — the same
+  backward-compatible shape as the trailing `to=<hostId>` address, so no protocol version bump.
+  `host/index.mjs` needed no functional change: the pass-through is the existing
+  `{ ...record.ask, nonce }` spread, and a comment pins that as the invariant, since turning it into
+  a named field list is the one edit that breaks this silently.
+  **THE 96-BYTE CAP IS A STATED CONVENTION, MECHANICALLY ENFORCED — NOT A DERIVATION FROM THE WIRE
+  BUDGET.** The convention: *a description may not cost more bytes than the LABEL it explains*, and
+  a label is capped at 32 characters, so its byte ceiling is 32 x 3 = **96**. Both numbers are
+  parsed out of the hook, so 97 fails by name. It is capped in BYTES on a codepoint boundary, not
+  characters, because the device stores each in a fixed `char[]` and truncates by BYTE — and real
+  descriptions are full of em-dashes and curly quotes at 3 bytes each (measured on a real captured
+  payload, where all four options carried at least one).
+  **Say plainly why it is a convention and not arithmetic: the first attempt DERIVED 64 from the
+  wire budget and the derivation was wrong.** It read "64 lands at 15,923 with 77 to spare", which
+  was computed off the *no-parked-voice* baseline while the row above it presented the parked-voice
+  case as the worst one — at 64 with a parked transcript it is 17,093, i.e. **1,093 OVER**, not 77
+  under. That number then went into a 20-line source comment. And the model was in the wrong unit
+  anyway (see the byte-budget note under the line buffers): the saturated case is over the guard
+  with this field **absent**, so **no value survives it, including zero** — which is exactly why the
+  worst case cannot set this cap. Cutting to 64 bought nothing against the case it was cut for and
+  cost real information on every question: it truncated `trade-off` to `trade-of`.
+  `host/ask-optdescs-check.mjs` is the point of the fix — 47 assertions, `--selftest` catching 5/5
+  injected faults — and it exists because **the first attempt's arithmetic lived in a scratchpad
+  that ceased to exist, so nobody could re-run it.** A number nobody can re-derive is not a
+  measurement.
+  **WHAT IS STILL OPEN: the descriptions cross the wire and the device does not draw them.** The
+  option button and the reader mode that would show them are Tasks 2-3 of
+  `docs/superpowers/plans/2026-08-29-ask-option-descriptions.md`, which is **paused**. That plan's
+  own open question is also unresolved: **the ask header has ONE top-right slot and `READ ALL`
+  already owns it**, so there is nowhere yet to put the affordance that reveals a description. Until
+  those land, this is a host-side change that costs a few bytes on question payloads and shows
+  nothing.
 - **Code-friendly detail rendering.** The detail can be a code block, so `\n` is preserved
   end-to-end: the hook's `cleanMultiline()` (in `deckhand-session-hook.mjs`, used for the
   `detail` field only — `title`/`options` still use single-line `clean()`) keeps newlines while
@@ -4390,6 +4554,37 @@ detail-card lane against board 1's 31, so every existing character-budget argume
   wrong. The named per-board pair is what a lane or a stacked block derives from now, and the
   geometry checkers assert each against the parsed `UI_FONTS[]` table (`uiLineH()` is not a
   constant expression, so a board header cannot `static_assert` it itself).
+  **THE FULL-SCREEN READER WAS STILL DOING IT, AND IT IS THE SAME DEFECT THIS FILE ALREADY RECORDS
+  ONCE — the 13px step under a 16px cell.** `drawReader()` hardcoded `lineH = isCode ? 14 : 18`;
+  the 14 is Cozette 6x13's cell plus a row of leading, i.e. **board 1's face**. Board 2 draws Spleen
+  8x16, so `drawString`'s opaque box erased rows 14..15 of every code line — 2 of that face's 4
+  descender rows — and since **every `perm` ask reads as code**, this clipped g/j/p/q/y in whole
+  commands. The identical literal had already been fixed at the ask PREVIEW and the voice-confirm
+  panel; **this site was missed, and it is the one that renders the command in full.** That is the
+  transferable part: a literal fixed at two of its three sites is not fixed.
+  Measured on the glass before and after by decoding the `SCREENSHOT` PNG and counting inked rows —
+  an all-`g` line inked y135..143 with **144..145 BLANK**, against **145..154** after, where row 154
+  is the `g`'s closing bar: **210px of ink per line that was being erased outright**. Pitch measured
+  14 then 16 straight from the ink periodicity. (Board-2 framebuffer evidence, as above: it proves
+  what the renderer composed, which is exactly the question here.)
+  **The fix is per-board and the naive one is wrong.** `CODE_LINE_H` unconditionally would take
+  board 1 from 14 to **13** — tighter than it ships, and it moves that board's binary. So
+  `READER_CODE_LINE_H` is board 1 `CODE_LINE_H + 1` (14, unchanged) and board 2 `CODE_LINE_H` (16,
+  the bare cell, matching the `HIST_LINE_H` the history list and full-entry pager either side of it
+  already use). The prose 18 is judged and KEPT on both boards — `T_BODY`'s cell is 13 and 16, so 18
+  is leading rather than a defect — and named only so the whole ternary is derived rather than half
+  of it. Board 2's reader pagination goes 25 → 22 code lines, which is the correct consequence;
+  nothing stated the old count, and the page budget `requestHistory()` sends the Mac is
+  `HIST_LINE_H`-based and untouched.
+  **The checker assertion that should have caught it was TRANSCRIBED, and was wrong in BOTH arms.**
+  `settings-geom-check.mjs` modelled the two steps as `HIST_LINE_H` and `uiLineH(T_HEAD)` against a
+  real 14/18 — board 1's prose arm agreed only because Terminus's cell **happens** to be 18. It now
+  PARSES `drawReader()`'s own ternary and resolves each token against the board's constant table
+  (a literal resolves to itself, so a revert is still measured; an unknown token throws rather than
+  passing), then asserts both steps `>=` the code face's cell height taken from the parsed
+  `UI_FONTS[]`. Four fault injections fail by name. Same rule as everywhere else here: **a checker
+  must PARSE the constant it certifies, never TRANSCRIBE it** — this is the third time that has
+  bitten.
   **Every Spleen glyph in 0x20..0x7E has `xOffset == 0` and `width == xAdvance == 8`, so
   `textWidth`'s last-character rule is a NO-OP on board 2** — a column count that divides exactly
   is exact for *any* string there. Cozette is not like that: its advance is a uniform 6 but
