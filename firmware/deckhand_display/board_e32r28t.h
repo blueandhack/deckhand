@@ -694,6 +694,26 @@ const int HIST_LINE_H      = CODE_LINE_H;   // the code cell, Cozette 6x13
 const int HIST_JUMP_Y      = 248;  // TOP OF THE TAP BAND (the track is centred in it)
 const int HIST_JUMP_H      = 16;   // drawn track
 const int HIST_JUMP_TAP_H  = 16;   // tap band == the track here
+// THE ASK READER'S TWO LINE STEPS (drawReader, reader.ino). Both draw the SAME
+// face - dFont is FONT_CODE or 2, and FONT_CODE aliases T_BODY - so the only
+// difference between them is leading, and BOTH must be >= that face's cell
+// height (uiLineH(T_BODY), CODE_LINE_H). drawString paints an OPAQUE box the full
+// cell tall, so a step UNDER the cell has each line's box eat the bottom rows of
+// the line above it: descenders in g/j/p/q/y are chopped. That is not
+// hypothetical - it was a literal `isCode ? 14 : 18` here, and 14 under board 2's
+// 16px Spleen cell cost 2 of that face's 4 descender rows on every code line.
+// They are PER-BOARD constants rather than one shared derivation because
+// CODE_LINE_H alone would take this board from 14 to 13, tighter than it ships,
+// and move its binary. So this board keeps the one row of leading it has always
+// drawn, spelled as the cell plus that row rather than as a literal that
+// describes only Cozette.
+const int READER_CODE_LINE_H  = CODE_LINE_H + 1;   // 14: Cozette 6x13 + 1 leading
+// The prose step, drawn at font 2 (T_BODY) - the same 13px cell, with 5 rows of
+// leading because prose is read in paragraphs rather than scanned. It is a stated
+// value, not a derivation, for the same reason the ask preview's 17 is: any
+// derivation would move this board's binary. What the checker enforces is the
+// invariant that matters (>= the cell), not the leading.
+const int READER_PROSE_LINE_H = 18;
 // The control bar: PREV / CLOSE / NEXT, and the reader's text region above it.
 const int READER_CTRL_Y  = 272;
 const int READER_BTN_H   = 42;

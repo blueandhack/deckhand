@@ -353,7 +353,18 @@ void drawReader() {
   bool isCode = detailLooksLikeCode(s.askKind, s.askDetail);
 
   uint8_t dFont = isCode ? FONT_CODE : 2;
-  int lineH = isCode ? 14 : 18;
+  // THE STEPS ARE NAMED PER-BOARD CONSTANTS, NOT THE LITERAL `14 : 18` THIS WAS.
+  // 14 is Cozette's 13 plus a row of leading, i.e. it describes ONE board's face -
+  // and board 2 draws Spleen 8x16, so a 14px step ran 16px cells under each other
+  // and drawString's opaque box erased rows 14..15 of every line, taking 2 of that
+  // face's 4 descender rows with them. A command full of g/j/p/q/y - and every
+  // `perm` ask reads as code - came out with its tails clipped. Exactly the defect
+  // already fixed in the ask PREVIEW and the voice-confirm panel (sessions.ino);
+  // this site was missed, and it is the one that renders a WHOLE command.
+  // Not CODE_LINE_H unconditionally: that would take board 1 from 14 to 13, which
+  // is tighter than it ships AND moves its binary. See the board headers, where
+  // each value is derived from that board's own cell.
+  int lineH = isCode ? READER_CODE_LINE_H : READER_PROSE_LINE_H;
   int maxW = tft.width() - 24;
   int textTop = READER_TEXT_TOP;
   int visLines = (READER_CTRL_Y - 8 - textTop) / lineH;

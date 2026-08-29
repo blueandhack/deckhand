@@ -1915,6 +1915,26 @@ const int HIST_LINE_H      = CODE_LINE_H;
 const int HIST_JUMP_Y      = 364;
 const int HIST_JUMP_H      = 20;
 const int HIST_JUMP_TAP_H  = 46;
+// THE ASK READER'S TWO LINE STEPS (drawReader, reader.ino) - see the twin block
+// in board_e32r28t.h for the full derivation. Both steps draw the same face
+// (FONT_CODE aliases T_BODY), and both must be >= that face's cell height or
+// drawString's opaque box eats the bottom rows of the line above.
+// This board is why the constants exist: the step was a literal 14 - Cozette's 13
+// plus a row - while the panel draws Spleen 8x16, so every code line's box erased
+// rows 14..15 of the line above, which is where 2 of Spleen's 4 descender rows
+// live. MEASURED on the glass before the fix: an all-`g` line inked rows 135..143
+// with 144..145 blank, i.e. half the descender gone.
+// The code step is the CELL, with no leading, which is exactly what HIST_LINE_H
+// gives the history list and the full-entry pager - the surfaces either side of
+// this one, drawing the same face in the same region. Reproducing board 1's stray
+// +1 here would buy nothing and cost a row of the page.
+const int READER_CODE_LINE_H  = CODE_LINE_H;       // 16: Spleen 8x16, no leading
+// The prose step is board 1's 18 unchanged: 2 rows of leading over this board's
+// 16px cell, so it already clears the cell and needed no correction. It is named
+// rather than left a literal so the whole expression in drawReader() is derived -
+// a half-derived `isCode ? READER_CODE_LINE_H : 18` invites the next reader to
+// take the 18 for a number that is board-agnostic by design rather than by luck.
+const int READER_PROSE_LINE_H = 18;
 // The control bar: H_BTN tall, 8px above the panel edge (422 + 50 = 472).
 const int READER_CTRL_Y  = 422;
 const int READER_BTN_H   = 50;

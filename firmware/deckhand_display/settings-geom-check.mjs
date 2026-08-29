@@ -65,6 +65,29 @@ function pctFromMvJs(mv) {
   return 100;
 }
 const T_META = 1, T_BODY = 2, T_HEAD = 3;
+
+// THE ASK READER'S TWO LINE STEPS, READ OUT OF drawReader() rather than restated
+// here. A checker that transcribes the constant it certifies certifies nothing -
+// this file already had that exact defect on these two numbers - so the ternary's
+// own tokens are parsed and then resolved against each board's constant table.
+// A literal resolves to itself, so reverting the fix is still MEASURED (and fails
+// the cell assertion below on board 2), and a token the table does not know
+// THROWS rather than defaulting to a number that would quietly pass.
+const READER_SRC = fs.readFileSync(`${DIR}/reader.ino`, "utf8");
+const READER_STEP = (() => {
+  const m = READER_SRC.match(/int lineH\s*=\s*isCode\s*\?\s*([A-Za-z_0-9]+)\s*:\s*([A-Za-z_0-9]+)\s*;/);
+  if (!m) throw new Error("settings-geom-check: drawReader()'s `int lineH = isCode ? .. : ..;` " +
+                          "no longer parses - if the reader's line step moved, move this with it " +
+                          "rather than leaving the assertion looking at nothing");
+  return { code: m[1], prose: m[2] };
+})();
+function readerStep(c, which) {
+  const tok = READER_STEP[which];
+  if (/^\d+$/.test(tok)) return +tok;
+  if (!(tok in c)) throw new Error(`settings-geom-check: drawReader()'s ${which} line step is ` +
+                                   `"${tok}", which is not a const int either board header declares`);
+  return c[tok];
+}
 const MAX_HOSTS = 4;
 
 // KB_MAX_BYTES is shared with the HOST, so read it from there rather than trust a
@@ -905,10 +928,39 @@ for (const b of [1, 2]) {
         `reader tap splits agree across the three control bars (${c.HIST_TAP_1}/${c.HIST_TAP_2} vs ${c.READER_TAP_1}/${c.READER_TAP_2})`);
     // The full-entry pager and the ask reader share the region above the bar.
     const textTop = c.READER_TEXT_TOP;
-    for (const [n, lh] of [["code", c.HIST_LINE_H], ["prose", lineHB(b, T_HEAD)]]) {
+    // THE FULL-ENTRY PAGER steps at HIST_LINE_H; THE ASK READER has its own two
+    // steps, and this used to model them as HIST_LINE_H and uiLineH(T_HEAD) - a
+    // TRANSCRIPTION, and a wrong one in both arms. drawReader() drew a literal
+    // `isCode ? 14 : 18`, so on board 1 the prose arm agreed with the real 18 only
+    // because Terminus's cell happens to be 18, and the code arm was checked at 13
+    // against a real 14; on board 2 the pair modelled 16/24 against a real 14/18.
+    // A model that is not the source cannot catch the source being wrong, and it
+    // did not: board 2 shipped 16px cells at a 14px step. So both steps are now
+    // READ OUT OF drawReader() ITSELF and resolved against the board's constant
+    // table, which means a revert to literals is still measured rather than
+    // silently un-checked.
+    for (const [n, lh] of [["pager", c.HIST_LINE_H],
+                           ["ask code", readerStep(c, "code")],
+                           ["ask prose", readerStep(c, "prose")]]) {
       const vis = Math.floor((c.READER_CTRL_Y - 8 - textTop) / lh);
       console.log(`    reader ${n}: ${vis} visible lines of ${lh}`);
       chk(vis >= 8, `reader shows ${vis} ${n} lines`);
+    }
+    // THE ASSERTION THIS FILE EXISTS FOR, and the one that generalises past this
+    // bug: drawString paints an OPAQUE box the full CELL tall, so any line step
+    // under the face's cell has each line's box erase the bottom rows of the line
+    // above it - descenders in g/j/p/q/y chopped. Both of the reader's steps draw
+    // the SAME face (dFont is FONT_CODE or 2, and FONT_CODE aliases T_BODY), so
+    // both are measured against that one cell, taken from the parsed UI_FONTS[]
+    // rather than transcribed - which is what makes this survive a face change.
+    // MEASURED on board 2 before the fix: an all-`g` line inked y 135..143 with
+    // 144..145 blank, 2 of Spleen 8x16's 4 descender rows gone.
+    const codeCell = lineHB(b, T_BODY);
+    for (const n of ["code", "prose"]) {
+      const lh = readerStep(c, n);
+      chk(lh >= codeCell,
+          `the reader's ${n} line step (${READER_STEP[n]} = ${lh}) is >= the ${codeCell}px cell ` +
+          `it draws - a shorter step has drawString's opaque box eat the line above`);
     }
     chk(textTop > c.HIST_RULE_Y, `reader text starts ${textTop} below the rule ${c.HIST_RULE_Y}`);
     // THE PAGE BUDGET THE DEVICE REPORTS TO THE MAC, and the arena it has to fit.
