@@ -2221,10 +2221,21 @@ void drawSessionDetail(int idx) {
   // which is the entire property that makes this the SAME band rather than a
   // lookalike; changing this card's PAD would move every wrap point in the body,
   // and the meta line has only 8px of slack. 2px is cosmetic at this scale. What
-  // would not be cosmetic is the gap widening unnoticed, so
-  // sessions-geom-check.mjs pins the relationship - the two insets are measured
+  // would not be cosmetic is the gap WIDENING unnoticed, so
+  // sessions-geom-check.mjs pins the relationship: the two insets are measured
   // from frames of reference that differ by exactly the card's own stroke, and
-  // must agree to within it - and a change to EITHER pad fails there by name.
+  // must agree to within it.
+  //
+  // BE PRECISE ABOUT WHAT THAT GUARD IS. The overhang itself is DERIVED - it is
+  // PAD - (BORDER_CARD + SESSION_BAND_PAD) and can be nothing else - but the
+  // tolerance it is tested against is a CHOSEN window, not a derived one: the
+  // stroke is a defensible size for it, and no geometry breaks at 3px. And the
+  // window is one-sided in effect, because today's +2 sits at its edge: widening
+  // trips it at once (SESSION_BAND_PAD 14 -> 13 and PAD 18 -> 19 each fail there
+  // by name), while NARROWING does not - MEASURED, SESSION_BAND_PAD 14 -> 16
+  // reports a 0px overhang and passes everything. No narrowing bound was added on
+  // purpose: a band pad inset FURTHER than the body's is a divergence from the
+  // sessions tab, which is a design question rather than a geometry violation.
   drawSessionBand(CARD_X + BORDER_CARD, cardY + BORDER_CARD,
                   CARD_W - 2 * BORDER_CARD, idx, color);
   // The band drew the duration once; renderDetailDuration owns it from here, and a

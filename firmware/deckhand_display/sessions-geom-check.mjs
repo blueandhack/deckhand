@@ -2333,12 +2333,35 @@ for (const b of [1, 2]) {
     // band's contents away from the sessions tab's, which is the whole property
     // that makes it the same band; changing this card's PAD would move every wrap
     // point in the body, and the meta line has only 8px of slack. The overhang is
-    // cosmetic at this size. What must not happen is it widening in silence, so
-    // the relationship is pinned rather than the number: the two insets are
-    // measured from frames of reference that differ by exactly the card's own
-    // stroke (the band from the interior, the body from the card's edge), so they
-    // must agree to within that stroke. A change to EITHER pad in EITHER direction
-    // leaves that band and fails here by name.
+    // cosmetic at this size. What must not happen is it WIDENING in silence, so
+    // the relationship is pinned rather than the number.
+    //
+    // WHAT THIS GUARD DOES AND DOES NOT CATCH, BECAUSE THE TWO HALVES OF IT ARE
+    // NOT THE SAME KIND OF THING - and this comment claimed more than it delivers
+    // until a re-reviewer measured it:
+    //
+    //   `over` IS DERIVED. It is the arithmetic of the two pads themselves - the
+    //   band is measured from the card INTERIOR and the body from the card's EDGE,
+    //   so their difference is PAD - (BORDER_CARD + SESSION_BAND_PAD) and nothing
+    //   else. That half needs no justification.
+    //
+    //   `<= BORDER_CARD` IS A CHOSEN WINDOW, NOT A DERIVED ONE. The card's stroke
+    //   is the difference between the two frames of reference, which makes it a
+    //   defensible tolerance, but nothing forces it: no geometry breaks at 3px.
+    //   Do not read it as a proof. It is a tripwire.
+    //
+    //   IT GUARDS WIDENING ONLY. Today's overhang is +2 and the window is +-2, so
+    //   it sits at one edge of it: anything that widens the divergence trips
+    //   immediately (SESSION_BAND_PAD 14 -> 13 and PAD 18 -> 19 both fail here by
+    //   name, both run), while NARROWING has 4px of room before it does.
+    //   MEASURED: SESSION_BAND_PAD 14 -> 16 gives `overhangs by 0px` and 0
+    //   failures, here and everywhere else in this file.
+    //
+    // That asymmetry is deliberate and no narrowing bound was added. A narrowed
+    // band pad insets the band's contents FURTHER and diverges from the sessions
+    // tab's row body, which is a design question rather than a geometry
+    // violation - guarding it would mean asserting an equality nobody has argued
+    // for.
     const bandInset = c.BORDER_CARD + c.SESSION_BAND_PAD;   // band content, from CARD_X
     const over = c.PAD - bandInset;                          // + = band wider than the body
     chk(Math.abs(over) <= c.BORDER_CARD,
