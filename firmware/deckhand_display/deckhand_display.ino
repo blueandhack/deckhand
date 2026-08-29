@@ -4908,9 +4908,17 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // It cannot invent a prompt - with nothing pending it does nothing.
     String arg = buf.substring(8);
     arg.trim();
+    //
+    // EVERY REFUSAL SAYS WHY, the same rule POWERPROBE's "not on battery (unplug
+    // USB; state=2 mv=3866)" exists for and the same line EMOJITEST already
+    // prints: from the Mac, "no output" and "impossible here" look identical, and
+    // a silent refusal reads as the command being broken.
     if (arg == "off") {
       if (readerActive) exitReader();
-    } else if (!kbActive && !histActive && !emojiTestActive) {
+    } else if (kbActive || histActive || emojiTestActive) {
+      Serial.println("READTEST refused: another full-screen surface is up");
+    } else {
+      bool opened = false;
       for (int i = 0; i < sessionCount; i++) {
         if (!sessions[i].askTitle[0]) continue;
         switchTab(TAB_SESSIONS);
@@ -4918,8 +4926,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
         readerActive = true;
         readerPage = arg.length() ? arg.toInt() : 0;
         drawReader();   // clamps the page itself
+        opened = true;
         break;
       }
+      if (!opened) Serial.println("READTEST refused: no ask is pending");
     }
 #endif
   } else if (buf.startsWith("EMOJITEST")) {

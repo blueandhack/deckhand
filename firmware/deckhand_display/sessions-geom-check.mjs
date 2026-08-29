@@ -688,6 +688,54 @@ function evalConst(expr, c) {
   if (!/^[-+*/()0-9\s]+$/.test(sub)) throw new Error(`evalConst(): "${expr}" is not an integer expression`);
   return Math.trunc(Function(`"use strict"; return (${sub});`)());
 }
+// ---- A C INTEGER EXPRESSION, EVALUATED WITH C's TRUNCATING DIVISION ----
+// evalConst() above resolves identifiers out of a board's constant table; this one
+// takes the values it is handed, because the expressions it evaluates are over
+// LOCALS of a draw function (detailLines, visLines, readerPage). The truncation is
+// the whole point: `detailLines / visLines` is integer division on the device, and
+// evaluating it in JS's floating point would make the check agree with a formula
+// the panel does not compute - the same class of error as measuring a 16px cell at
+// a 13px step. Recursive descent over + - * / ( ) and nothing else; an unknown
+// token THROWS, for the reason armFor() throws on an unknown directive.
+function evalIntExpr(expr, vars) {
+  const toks = expr.match(/[A-Za-z_][A-Za-z0-9_]*|\d+|[-+*/()]/g) || [];
+  if (toks.join("").replace(/\s/g, "") !== expr.replace(/\s/g, ""))
+    throw new Error(`evalIntExpr(): "${expr}" holds a token this evaluator does not understand`);
+  let i = 0;
+  const peek = () => toks[i];
+  const primary = () => {
+    const t = toks[i++];
+    if (t === "(") { const v = sum(); if (toks[i++] !== ")") throw new Error(`evalIntExpr(): unbalanced ( in "${expr}"`); return v; }
+    if (t === "-") return -primary();
+    if (/^\d+$/.test(t)) return +t;
+    if (t in vars) return vars[t];
+    throw new Error(`evalIntExpr(): "${t}" is not a value this call supplies (in "${expr}")`);
+  };
+  const prod = () => {
+    let v = primary();
+    while (peek() === "*" || peek() === "/") {
+      const op = toks[i++], r = primary();
+      if (op === "/" && r === 0) throw new Error(`evalIntExpr(): division by zero in "${expr}"`);
+      v = op === "*" ? v * r : Math.trunc(v / r);
+    }
+    return v;
+  };
+  const sum = () => {
+    let v = prod();
+    while (peek() === "+" || peek() === "-") { const op = toks[i++]; v = op === "+" ? v + prod() : v - prod(); }
+    return v;
+  };
+  const out = sum();
+  if (i !== toks.length) throw new Error(`evalIntExpr(): trailing "${toks.slice(i).join(" ")}" in "${expr}"`);
+  return out;
+}
+// The nth call to `name` in `body`, as argument expressions. drawReader has three
+// snprintf()s and this file needs two DIFFERENT ones, so callArgs' "the first call"
+// is not enough on its own.
+function callArgsAfter(body, marker, name) {
+  const at = body.indexOf(marker);
+  return at < 0 ? null : callArgs(body.slice(at), name);
+}
 // THE SPINE IS NOT A RECT, so `spineL + SESSION_SPINE_W - 1` is NOT its rightmost
 // ink and must never be used as one - that model is what let a real overlap ship.
 // This returns the rightmost x the spine's CAPSULE alone would ink at a given
@@ -935,13 +983,85 @@ function askReaderChip(b, c, W) {
   const hintW = widthB(b, T_BODY, `${LBL} - PAGE 9`);
   chk(hintW <= maxW, `the signpost "${LBL} - PAGE 9" is ${hintW}px in the ${maxW}px lane`);
   chk(widthB(b, T_BODY, LBL) <= maxW, `the section heading "${LBL}" is ${widthB(b, T_BODY, LBL)}px in the same lane`);
+  // visLines is PARSED and evaluated, not restated: the row budget feeds both the
+  // clearance below and the page number in section 10, and a transcribed copy of
+  // `(READER_CTRL_Y - 8 - textTop) / lineH` here would leave both certifying a
+  // layout the reader does not use.
+  const visExpr  = (readerArm.match(/int visLines = ([^;]+);/) || [])[1];
+  const topExpr  = (readerArm.match(/int textTop = ([^;]+);/) || [])[1];
+  chk(!!visExpr && !!topExpr,
+      `the reader's body budget is parseable (visLines = ${visExpr || "?"}, textTop = ${topExpr || "?"})`);
+  const visFor = (stepId) => evalIntExpr(visExpr, {
+    READER_CTRL_Y: c.READER_CTRL_Y, textTop: c[topExpr.trim()], lineH: c[stepId],
+  }) - 1;                                    // -1 = the row `visLines--` reserves
   for (const id of steps) {
-    const step = c[id];
-    const vis = Math.floor((c.READER_CTRL_Y - 8 - c.READER_TEXT_TOP) / step) - 1;
-    const inkEnd = c.READER_TEXT_TOP + vis * step + cell - 1;
+    const vis = visFor(id);
+    const inkEnd = c.READER_TEXT_TOP + vis * c[id] + cell - 1;
     chk(inkEnd < c.READER_CTRL_Y,
         `at ${id} the signpost row inks to ${inkEnd}, clear of the control bar at ${c.READER_CTRL_Y}` +
         ` by ${c.READER_CTRL_Y - inkEnd}px (${vis} body lines)`);
+  }
+
+  // ---- 10. THE SIGNPOST'S PAGE NUMBER ----
+  // THE ONLY THING ON THIS SCREEN THAT ACTIVELY MISLEADS WHEN IT IS WRONG. A blank
+  // row says nothing; a row pointing at the wrong page sends a reader to a page
+  // with no options on it, from which the honest conclusion is that the options do
+  // not exist. Everything else here degrades to "less helpful"; this degrades to
+  // "confidently false", which is why it gets its own section.
+  //
+  // It is checked by WALKING THE PAGER, never by restating the division. The page
+  // bounds come from drawReader's own `pageLo`/`pageHi`, the 1-based display
+  // number from the SAME expression the header's "n/m" counter uses, and the
+  // signpost's expression is parsed and evaluated against that walk over every
+  // reachable detail length. So a checker that agreed with a wrong formula would
+  // have to be wrong about the header's counter too.
+  const pageDecl = readerArm.match(/const int pageLo = ([^,]+), pageHi = ([^;]+);/);
+  chk(!!pageDecl, `the reader's page bounds are parseable (${pageDecl ? pageDecl[1] + " / " + pageDecl[2] : "not found"})`);
+  const hdrArgs  = callArgsAfter(readerArm, "snprintf(pg,", "snprintf");
+  const hintArgs = callArgsAfter(readerArm, "snprintf(hint,", "snprintf");
+  // The FORMAT is asserted too, so the argument positions below cannot silently
+  // become the wrong expressions - snprintf takes (buf, size, fmt, ...), so the
+  // header's page number is arg 3 and the signpost's is arg 4 only while the two
+  // format strings are what they are.
+  chk(!!hdrArgs && hdrArgs.length === 5 && hdrArgs[2] === '"%d/%d"',
+      `the header's page counter is "%d/%d" of (${hdrArgs ? hdrArgs.slice(3).join(", ") : "?"})`);
+  chk(!!hintArgs && hintArgs.length === 5 && /^"%s - PAGE %d"$/.test(hintArgs[2]),
+      `the signpost is "%s - PAGE %d" of (${hintArgs ? hintArgs.slice(3).join(", ") : "not found"})`);
+  if (pageDecl && hdrArgs && hdrArgs.length === 5 && hintArgs && hintArgs.length === 5) {
+    const shownFor  = (p) => evalIntExpr(hdrArgs[3], { readerPage: p });      // "readerPage + 1"
+    const hintPage  = (detailLines, visLines) => evalIntExpr(hintArgs[4], { detailLines, visLines });
+    let bad = null, checked = 0;
+    for (const id of steps) {
+      const visLines = visFor(id);
+      // Every detail length that can reach the arena, plus the exact multiples of
+      // a page - the boundary where an off-by-one is invisible everywhere else.
+      for (let detailLines = 0; detailLines <= 6 * visLines + 2; detailLines++) {
+        // Walk the pager's OWN bounds for the page the section's first line is on.
+        let p = 0;
+        for (; p < 64; p++) {
+          const lo = evalIntExpr(pageDecl[1], { readerPage: p, visLines });
+          const hi = evalIntExpr(pageDecl[2], { pageLo: lo, visLines });
+          if (detailLines >= lo && detailLines < hi) break;
+        }
+        const want = shownFor(p), got = hintPage(detailLines, visLines);
+        checked++;
+        // Count them all and name a REAL one: an empty detail is a legal but
+        // degenerate case, and a report that only ever cited detailLines = 0
+        // would read as an edge-case artefact rather than as a broken formula.
+        if (want !== got) {
+          if (!bad || (bad.detailLines === 0 && detailLines > 0))
+            bad = { id, detailLines, visLines, want, got, n: bad ? bad.n : 0 };
+          bad.n = (bad.n || 0) + 1;
+        }
+      }
+    }
+    chk(!bad,
+        `the signpost names the page the options ACTUALLY start on, over ${checked} detail lengths` +
+        ` (\`${hintArgs[4]}\` walked against the pager's own pageLo/pageHi and the header's` +
+        ` \`${hdrArgs[3]}\`)` +
+        (bad ? ` - WRONG on ${bad.n} of them, e.g. at ${bad.detailLines} detail lines of` +
+               ` ${bad.visLines}/page it says ${bad.got} and the options are on ${bad.want}:` +
+               ` a reader who follows it finds no options and concludes there are none` : ""));
   }
 }
 for (const b of [1, 2]) {
