@@ -29,11 +29,13 @@
 // have the same disease one layer down: askDetail[1424] is sized for "1400
 // chars" and copyField truncates by byte.
 //
-// NONE OF THAT IS FIXED HERE, deliberately. Re-unitising the caps or the guard
-// changes what the device is sent and is its own change with its own testing.
-// What this file does is stop the number being lost again, and it is the reason
-// optDescs' own cap is NOT derived from that worst case: no cap survives it,
-// including zero, so it cannot be the thing that sets one.
+// THAT MISMATCH IS NOW FIXED, host-side, by making every device-bound field ASCII
+// so the two units coincide - see host/to-ascii.mjs and host/wire-bytes-check.mjs.
+// The model in THIS file is deliberately left as the BEFORE picture: it fills its
+// fields with raw em-dashes and never transliterates, so its WIDE rows are what
+// the wire used to carry. That is what keeps the defect's size on the record.
+// It is also still the reason optDescs' own cap is NOT derived from that worst
+// case: no cap survives it, including zero, so it cannot be the thing that sets one.
 //
 // Run:  node host/ask-optdescs-check.mjs
 //       node host/ask-optdescs-check.mjs --selftest    # proves it can fail
@@ -207,11 +209,19 @@ function runBehaviour(hookPath) {
     ok(stdout === "", "BEHAVIOUR: stdout empty (boundary case)");
     ok(bytes <= caps.descMaxBytes, `BEHAVIOUR: description is <= the cap in BYTES (got ${bytes} vs ${caps.descMaxBytes})`);
     ok(!d.includes("�"), "BEHAVIOUR: no replacement char - the cap never splits a codepoint");
-    ok(d === "—".repeat(Math.floor(caps.descMaxBytes / 3)),
-       `BEHAVIOUR: the boundary walk keeps whole em-dashes only, got ${d.length} of them`);
-    // And what the CHARACTER cap used for labels would have done with the same input.
+    // WHAT CHANGED, AND WHY THIS TEST NO LONGER SEES WHAT IT USED TO. clean() now
+    // transliterates to ASCII before its slice (see host/to-ascii.mjs), so those
+    // 200 em-dashes arrive here as 200 hyphens and the byte walk below can never
+    // be reached by this input: bytes and characters are the same unit now.
+    // capBytes() is KEPT anyway - it is the last line of defence if a future field
+    // reaches it un-transliterated, and it costs nothing on ASCII.
+    ok(d === "-".repeat(caps.descMaxBytes),
+       `BEHAVIOUR: 200 em-dashes arrive as exactly ${caps.descMaxBytes} ASCII hyphens, got ${JSON.stringify(d.slice(0, 12))} x ${d.length}`);
+    ok(d.length === bytes, "BEHAVIOUR: the description's character count IS its byte count - the whole point of the ASCII fix");
+    // capBytes still walks codepoints when it IS handed multi-byte input, proved
+    // directly rather than through a path that can no longer deliver any.
     ok(Buffer.byteLength("—".repeat(200).slice(0, caps.descMaxBytes), "utf8") === caps.descMaxBytes * 3,
-       "BEHAVIOUR: a character cap really would emit 3x the budget here - which is why this one is in bytes");
+       "BEHAVIOUR: a character cap on untransliterated input really would emit 3x the budget - which is what the ASCII fix removes");
   }
   // 6. A pending ask survives an event that defines no ask of its own.
   {
@@ -279,13 +289,15 @@ function main({ hookPath = HOOK_SRC, quiet = false } = {}) {
      `BUDGET: optDescs costs ${marginal} bytes where the caps predict exactly ` +
      `${c.maxSessionsHost} x ${perSession} = ${c.maxSessionsHost * perSession} - something is emitting more than the cap allows`);
 
-  // THE FINDING, asserted so it cannot quietly stop being true: the saturated
-  // case is over the guard in BYTES with this field ABSENT. That is what says
-  // the worst case cannot set this cap - and if it ever stops holding, the
-  // comment above (and the choice of bound) needs revisiting, so failing is right.
+  // THE FINDING THIS FILE RECORDED, NOW FIXED - and the model above is the BEFORE
+  // picture, kept deliberately. `tickBytes` fills its fields with raw em-dashes
+  // and never transliterates, so `wideNoDesc` is what the wire used to carry; the
+  // AFTER figure, and the whole char/byte reconciliation, live in
+  // host/wire-bytes-check.mjs. This assertion stays as the record of the defect:
+  // it must keep describing the unfixed model, or that model has drifted.
   ok(wideNoDesc > c.lineGuard,
-     `BUDGET: the saturated case is expected to exceed the ${c.lineGuard}-byte guard WITHOUT optDescs (got ${wideNoDesc}). ` +
-     `If this now passes, the char/byte mismatch has been addressed and this file's reasoning must be re-derived`);
+     `BUDGET: the PRE-FIX model must still exceed the ${c.lineGuard}-byte guard WITHOUT optDescs (got ${wideNoDesc}). ` +
+     `This models the wire BEFORE host/to-ascii.mjs; the fixed figures are in host/wire-bytes-check.mjs`);
   // And the dominant term is the detail, not this field, by a wide margin.
   const detailBytes = c.maxSessionsHost * c.detailChars * BYTES_PER_UNIT;
   ok(detailBytes > marginal * 5,
