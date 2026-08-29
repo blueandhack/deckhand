@@ -29,6 +29,7 @@ import {
 import { resolveSessionId } from "./session-lookup.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
+import { toAscii, deviceText } from "./to-ascii.mjs";
 import { resolveMacEmoji } from "./mac-emoji.mjs";
 import { lineTargetsUs, stripAddress } from "./line-address.mjs";
 import { formatRunStartLine } from "./run-ledger.mjs";
@@ -1325,11 +1326,16 @@ function histBudget(token) {
 }
 
 function histFlatten(v, max = HIST_PREVIEW_CAP) {
-  const t = String(v ?? "")
+  // toAscii first: this is transcript text, the most non-ASCII source in the
+  // system, and the reader's page budget is char-counted while the device's line
+  // guard counts bytes. It also fixes the marker below - it used to be U+2026,
+  // which is outside both fonts' 0x20..0x7E range and so drew as NOTHING, giving
+  // a truncated preview no visible sign that anything was missing.
+  const t = toAscii(v)
     .replace(/[\u0000-\u001f]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return t.length > max ? t.slice(0, max - 1) + "\u2026" : t;
+  return t.length > max ? t.slice(0, max - 3) + "..." : t;
 }
 
 // One line that says what a tool call actually did. The interesting field differs per tool,
@@ -1550,31 +1556,34 @@ async function readSessions() {
         // 22, matching what the device can actually draw: a tall row's name lane fits 22
         // characters once it drops to the small font, and SessionInfo.name is char[24].
         // Sending more would only be trimmed to "..." on arrival.
-        name: (await projectName(record.cwd || "")).slice(0, 22),
+        name: deviceText(await projectName(record.cwd || ""), 22),
         status: record.status,
         // 64, not 48: the detail screen gives the path two lines of ~31 characters, and
         // the old cap threw away the middle of any deep worktree path.
-        path: truncatePath(record.cwd || "", 64),
-        model: (record.agent === "codex"
-          ? record.model || ""
-          : tx.model || record.model || ""
-        ).slice(0, 20),
-        branch: (await gitBranch(record.cwd || "")).slice(0, 20),
+        path: truncatePath(toAscii(record.cwd || ""), 64),
+        model: deviceText(
+          record.agent === "codex" ? record.model || "" : tx.model || record.model || "",
+          20,
+        ),
+        branch: deviceText(await gitBranch(record.cwd || ""), 20),
         // Only sent when there IS one, so a titleless session costs no payload bytes.
         // 40 chars: the device's title lane fits ~28 and trims the rest with "...", and
         // this rides in every tick alongside asks that can claim 1400 chars.
-        ...(tx.title ? { title: tx.title.slice(0, 40) } : {}),
+        ...(tx.title ? { title: deviceText(tx.title, 40) } : {}),
         // WHICH APP owns this session, stamped by the hook from the environment it
         // inherits (see owningApp() there). Passed through for the MENU-BAR app,
         // which uses the bundle id to jump to that app rather than only revealing
         // the folder; the device ignores it. Only-when-present for the same reason
         // as `title`, and absent for a Codex thread read off a rollout, where no
         // hook ran to observe an environment.
-        ...(record.app?.id ? { app: record.app.id } : {}),
-        ...(record.app?.entry ? { appEntry: record.app.entry } : {}),
+        // Transliterated but NOT capped: the menu bar resolves this bundle id to
+        // jump to the owning app, so a truncated one would break that, while a
+        // multi-byte one would still be spending the device's line budget.
+        ...(record.app?.id ? { app: toAscii(record.app.id) } : {}),
+        ...(record.app?.entry ? { appEntry: toAscii(record.app.entry) } : {}),
         // Detail-screen extras. Short keys and only-when-present, because these ride in
         // EVERY tick: the prompt is the expensive one at ~100 chars x 6 sessions.
-        ...(tx.prompt ? { prompt: tx.prompt.slice(0, 100) } : {}),
+        ...(tx.prompt ? { prompt: deviceText(tx.prompt, 100) } : {}),
         // Wall-clock times as seconds-since-local-midnight (see secondsSinceMidnight):
         // when the session began, and when it last did anything.
         startSec: secondsSinceMidnight(tx.startedMs),
@@ -2196,8 +2205,8 @@ function setVoice(state, fields = {}) {
     seq: ++voiceSeq,
     at: Date.now(),
     state,
-    text: (fields.text ?? lastVoice?.text ?? "").slice(0, VOICE_TEXT_MAX),
-    reply: (fields.reply ?? "").slice(0, VOICE_REPLY_MAX),
+    text: deviceText(fields.text ?? lastVoice?.text ?? "", VOICE_TEXT_MAX),
+    reply: deviceText(fields.reply ?? "", VOICE_REPLY_MAX),
     session: fields.session ?? lastVoice?.session ?? "",
   };
 }

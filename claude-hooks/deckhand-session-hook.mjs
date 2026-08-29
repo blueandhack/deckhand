@@ -194,11 +194,117 @@ function dlog(text) {
 // `remoteAnswer` (default ON) is just an off switch: with it off we never block,
 // and the device becomes a read-only mirror.
 
+// ---------------------------------------------------------------------------
+// ASCII, so that CHARACTERS and BYTES are the same unit on this wire.
+//
+// feedChar() in the firmware guards `buf.length() > 16000` on an Arduino String,
+// which counts BYTES, while every cap below is a JS `.slice(n)` counting UTF-16
+// CODE UNITS - up to THREE bytes each. Measured: six asking sessions of all-wide
+// text came to 36,173 bytes against that 16,000 guard, and ONE session carrying a
+// multi-byte question at the 1400-char detail cap already blew it at 17,893. The
+// guard CLEARS THE BUFFER MID-LINE, so the remainder accumulates into the emptied
+// buffer, the JSON fails to parse, handleLine() returns early, and the screen
+// FREEZES for as long as that prompt is pending with everything else looking
+// healthy. Both device fonts declare 0x20..0x7E and an out-of-range byte draws
+// nothing and advances nothing, so those bytes were budget spent on an invisible
+// gap. Full reasoning, and the identical map, in host/to-ascii.mjs.
+//
+// DUPLICATED from host/to-ascii.mjs rather than imported, for the same reason
+// capBytes() below duplicates capUtf8(): install.sh copies THIS FILE ALONE into
+// ~/.claude, so it can only ever import node builtins. host/ask-optdescs-check.mjs
+// extracts this copy and runs it beside the module over a corpus, so the two
+// cannot drift silently. If you change one, change the other.
+// ---------------------------------------------------------------------------
+// Characters that DO have an obvious ASCII equivalent. Transliterating what
+// actually appears matters more than it sounds: Claude's own output is full of
+// em-dashes, curly quotes, ellipses and arrows, and blanking them all would turn
+// ordinary English prose into question marks. This repo already prefers the ASCII
+// forms elsewhere for the same font reason - fitText's three ASCII dots, the Mac
+// tag's ASCII '/' separator.
+const MAP = new Map(Object.entries({
+  // quotes
+  "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'",
+  "“": '"', "”": '"', "„": '"', "‟": '"', "″": '"',
+  "«": '"', "»": '"', "‹": "'", "›": "'",
+  // dashes and the minus sign
+  "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-",
+  "―": "-", "−": "-", "­": "",
+  // ellipsis: three ASCII dots, exactly what fitText already draws
+  "…": "...",
+  // spaces of every width, plus the zero-width ones which vanish entirely
+  " ": " ", " ": " ", " ": " ", " ": " ", " ": " ",
+  " ": " ", " ": " ", " ": " ", " ": " ", " ": " ",
+  " ": " ", " ": " ", " ": " ", " ": " ", " ": " ",
+  "　": " ", " ": " ", " ": " ",
+  "​": "", "‌": "", "‍": "", "﻿": "",
+  // bullets and separators
+  "•": "*", "‣": "*", "●": "*", "▪": "*", "◦": "*",
+  "·": "-", "‧": "-", "⁃": "-",
+  // arrows: the ones a plan or a diff actually uses
+  "←": "<-", "→": "->", "↔": "<->",
+  "⇐": "<=", "⇒": "=>", "⇔": "<=>",
+  "↑": "^", "↓": "v",
+  // maths and comparison
+  "×": "x", "÷": "/", "≤": "<=", "≥": ">=", "≠": "!=",
+  "≈": "~", "±": "+/-", "∞": "inf",
+  // marks that read as words
+  "©": "(c)", "®": "(R)", "™": "(TM)", "°": "deg",
+  "¼": "1/4", "½": "1/2", "¾": "3/4",
+  "€": "EUR", "£": "GBP", "¥": "JPY", "¢": "c",
+  // Latin letters NFD cannot decompose
+  "ß": "ss", "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE",
+  "ø": "o", "Ø": "O", "đ": "d", "Đ": "D",
+  "ł": "l", "Ł": "L", "ð": "d", "Ð": "D",
+  "þ": "th", "Þ": "Th",
+  // checks and crosses, common in Claude's own status lines
+  "✓": "v", "✔": "v", "✗": "x", "✘": "x", "✅": "v",
+  "❌": "x", "⭐": "*", "⚠": "!",
+}));
+
+const NON_ASCII = /[^\x00-\x7f]/;
+const COMBINING = /\p{M}/u;
+
+// Everything else - CJK, emoji, anything with no sensible ASCII form - becomes a
+// single '?', and a RUN of them collapses to ONE. A vanished sentence is worse
+// than a marked one (today it vanishes), but one '?' per character turns a CJK
+// sentence into a wall of question marks that is itself unreadable.
+function toAscii(s) {
+  const str = String(s ?? "");
+  // Pure ASCII in, the SAME string out - not a copy, not one byte changed. This is
+  // what makes the fix invisible to every payload that was already fine.
+  if (!NON_ASCII.test(str)) return str;
+  let out = "";
+  let pending = false;                       // an unmappable run is open
+  for (const ch of str.normalize("NFD")) {   // NFD first: accented Latin loses its
+    if (ch.codePointAt(0) < 0x80) {          // marks rather than becoming '?'
+      if (pending) { out += "?"; pending = false; }
+      out += ch;
+      continue;
+    }
+    // A combining mark is dropped silently: its base was already emitted (or
+    // already '?'-ed), and marking it would put a '?' beside every accent.
+    if (COMBINING.test(ch)) continue;
+    const mapped = MAP.get(ch);
+    if (mapped !== undefined) {
+      if (pending) { out += "?"; pending = false; }
+      out += mapped;                         // may be "" for a zero-width char,
+      continue;                              // which must not break a run either
+    }
+    pending = true;
+  }
+  if (pending) out += "?";
+  return out;
+}
+
 // The device font can't render control bytes (newlines, tabs) - they show as
 // garbage glyphs - so flatten them to spaces. Commands lose their line breaks
 // but read cleanly; nothing renders as mojibake.
 function clean(s, max) {
-  return String(s ?? "")
+  // toAscii FIRST, then the cap: a few mappings expand (the ellipsis is one
+  // character in and three out), so capping first would let a field grow back past
+  // its cap. After this, the .slice(0, max) below is a BYTE slice as well as a
+  // character one - which is the whole reconciliation.
+  return toAscii(s)
     .replace(/[\u0000-\u001f\u007f]/g, " ") // control bytes (newlines/tabs) -> space
     .replace(/ {2,}/g, " ")                    // collapse runs
     .trim()
@@ -255,7 +361,9 @@ function capBytes(s, maxBytes) {
 // blank-line runs collapse so a snippet stays compact on the small screen.
 // Per-line leading whitespace is preserved (indentation reads as code).
 function cleanMultiline(s, max) {
-  return String(s ?? "")
+  // toAscii first, for the same reason clean() does it: the trailing
+  // .slice(0, max) is then a byte slice too.
+  return toAscii(s)
     .replace(/\r\n?/g, "\n")                    // normalize newlines
     .replace(/\t/g, "  ")                         // tabs -> 2 spaces
     .replace(/^\`\`\`.*$/gm, "")             // drop \`\`\` fence lines
