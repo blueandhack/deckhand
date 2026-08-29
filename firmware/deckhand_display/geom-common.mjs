@@ -8,8 +8,21 @@
 // charged xAdvance; the last is charged xOffset + width. Those differ for 20 of
 // Cozette's 95 glyphs, so counting 6px a character is wrong by a few pixels in
 // exactly the places a lane is tightest. preflight() checks this implementation
-// against the 136 widths text-widths-board2.txt records from the real panel, so a
-// wrong measurement fails loudly instead of quietly approving a wrong layout.
+// against 136 widths captured from a real panel, so a wrong measurement fails
+// loudly instead of quietly approving a wrong layout.
+//
+// IT CHECKS AGAINST text-widths-BOARD1.txt, AND THE FILE IT USED TO READ WAS THE
+// WRONG ONE. FONTS below is board 1's registry - Cozette and Terminus, no Spleen -
+// so this measurer only ever describes board 1. (That is not a gap: the callers
+// route board 2 through their own Spleen-aware path, e.g. advanceB()'s `b === 1`
+// test in sessions-geom-check.mjs.) It nonetheless validated itself against
+// text-widths-board2.txt, and passed 136/136 - because until the type scale landed
+// board 2 ALSO drew Cozette, so the two files held the same numbers. The check was
+// comparing a board-1 measurer to a board-2 file and matching by historical
+// accident. Refreshing board 2's half to its real Spleen widths made it fail, which
+// is how this was found. It now reads board 1's own capture, which is real TFT_eSPI
+// runtime output - see textwidth-check.mjs, which uses the same file to close the
+// shim's equivalence gate.
 import fs from "fs";
 import path from "path";
 export const DIR = path.dirname(new URL(import.meta.url).pathname);
@@ -54,7 +67,7 @@ export function lineH(fontId) { return FONTS[fontId][2]; }
 // Refuse to run at all unless the measurement matches the device's own numbers.
 export function preflight() {
   let bad = 0, checked = 0;
-  for (const line of read("text-widths-board2.txt").split("\n")) {
+  for (const line of read("text-widths-board1.txt").split("\n")) {
     const m = line.match(/^WIDTH (\d+) (\d+) (\d+) "(.*)"$/);
     if (!m) continue;
     const [, font, size, want, text] = m;
