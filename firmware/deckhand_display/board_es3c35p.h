@@ -1216,12 +1216,13 @@ const int DETAIL_CARD_DY = 50;
 // figure prints as 211 against its 224: that card is 13px over its ceiling, which
 // is the long-documented case of both footer strings landing on one y.)
 const int DETAIL_CARD_H = 326;
-// TYPE. 46 tall = TAP_MIN, where board 1's 22 was half its own floor. 88 wide is
-// board 1's 76 held PHYSICALLY (76 / 5.624 = 13.5mm; 13.5 * 6.489 = 87.7), which
-// is the right rule for a control rather than for text. The hit zone's extra 24px
-// of slop to the left is unchanged in sessions.ino - it is slop on a chip that
-// now clears the floor in both dimensions, not part of the target.
-const int MSG_BTN_W = 88, MSG_BTN_H = 46;
+// 76x26, board 1's own proportions at board 2's scale. It WAS 88x46 because 46 is
+// TAP_MIN - but the chip is not what gets tapped: handleDetailTouch tests
+// `sx >= msgBtnX() - 24` over the whole DETAIL_HEAD_H, so the live zone is 124x50
+// whatever is drawn, already 2.7x TAP_MIN in width. The 46 bought nothing and cost
+// the header row all its air. Same draw-small/hit-big split board 1's chip
+// (76x22 in a 100x28 zone) and the settings steppers (44px keys in 72x56) use.
+const int MSG_BTN_W = 76, MSG_BTN_H = 26;
 // THE LINE CAPS ARE DERIVED FROM THE FIELD'S OWN BYTE CAP AND THE MEASURED LANE,
 // which is what makes them big enough here to truncate NOTHING - board 1's 2/2
 // truncate both fields.

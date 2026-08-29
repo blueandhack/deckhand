@@ -1535,12 +1535,23 @@ int askInputRows(int idx) {
 // session is waiting, and without one the host refuses the frame - so offering the
 // button would advertise a control that cannot work, which is exactly what the
 // read-only ask path refuses to do when it draws options as a flat list instead.
-// MSG_BTN_W/H live in the board headers: 76x22 on board 1, where the header row
-// is 28px and cannot hold a TAP_MIN control, against 88x46 on board 2, where a
-// 50px row can. Both sit 2px into the row, so the chip's own height is what
-// decides where the card below it can start (DETAIL_CARD_DY).
+// MSG_BTN_W/H live in the board headers: 76x22 on board 1, 76x26 on board 2 -
+// board 1's own proportions held at board 2's scale, not TAP_MIN. Neither board
+// sizes the chip to the touch floor, because the LIVE tap zone doesn't come from
+// it - see the `sx >= msgBtnX() - 24` test below, over the whole header row. So
+// the chip's height no longer has to fill the row; on board 2, where it just
+// shrank, msgBtnY() centres it in DETAIL_HEAD_H instead of sitting a fixed 2px
+// into it. Board 1 keeps the literal `+ 2` behind its own #if - (28-22)/2 is 3,
+// not 2, so the "centre" formula is not this board's existing position and
+// switching it over would move a binary this port holds byte-identical.
 int msgBtnX() { return CARD_X + CARD_W - MSG_BTN_W; }
-int msgBtnY() { return CONTENT_Y + 2; }
+int msgBtnY() {
+#if BOARD_USES_TFT_ESPI
+  return CONTENT_Y + 2;
+#else
+  return CONTENT_Y + (DETAIL_HEAD_H - MSG_BTN_H) / 2;
+#endif
+}
 bool msgOffered(int idx) {
   if (idx < 0 || idx >= sessionCount) return false;
   const SessionInfo& s = sessions[idx];

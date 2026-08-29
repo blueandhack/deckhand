@@ -116,6 +116,11 @@ function widthB(b, id, s) {
 const VOICE_TEXT_MAX = +fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
   .match(/VOICE_TEXT_MAX\s*=\s*(\d+)/)[1];
 
+// The TYPE chip's own source, so the hit test's slack term is PARSED rather than
+// restated - the whole point of the assertion below is that it can see a future
+// change that couples the chip's drawn size back to the tap zone.
+const SESSIONS_INO = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // The board header FIRST, then deckhand_display.ino seeded with it - which is the
 // same order the compiler sees, and the reason the derived offsets
@@ -1980,6 +1985,30 @@ for (const b of [1, 2]) {
       `"< Back" starts +${c.DETAIL_BACK_Y}, clear of the header row's top`);
   chk(c.DETAIL_BACK_Y + lineHB(b, T_BODY) <= c.DETAIL_HEAD_H,
       `"< Back" at +${c.DETAIL_BACK_Y} inks to +${c.DETAIL_BACK_Y + lineHB(b, T_BODY) - 1}, inside the header band`);
+  // ---- the TYPE chip's draw-small/hit-big split (board 2 only) ----
+  // The chip may shrink ONLY because the live tap zone does not come from its
+  // drawn size - handleDetailTouch tests a fixed slack term off msgBtnX() over the
+  // whole header row, independent of MSG_BTN_W/H. Parsed out of sessions.ino
+  // rather than restated, so a future change that re-couples the two (making the
+  // zone track the chip again) is what this fails on, not a hand-copied 24.
+  // Board 1 is not asserted here: its 76x22 chip in a 28px row was already the
+  // pre-existing case this pattern generalises from, and it is a documented
+  // byte-identical board this task does not touch.
+  if (b === 2) {
+    const hm = SESSIONS_INO.match(/sx\s*>=\s*msgBtnX\(\)\s*-\s*(\d+)/);
+    chk(!!hm, "the TYPE chip's hit test is anchored on msgBtnX() with a slack term");
+    const slack = hm ? +hm[1] : 0;
+    // msgBtnX() = CARD_X + CARD_W - MSG_BTN_W, and the zone runs from there to the
+    // card's own right edge - so its width is the chip's width PLUS the slack, not
+    // the chip's width alone.
+    const zoneW = c.MSG_BTN_W + slack;
+    chk(zoneW >= c.TAP_MIN,
+        `TYPE tap zone ${zoneW}px wide (chip ${c.MSG_BTN_W} + ${slack} slack) >= TAP_MIN ${c.TAP_MIN}`);
+    chk(c.DETAIL_HEAD_H >= c.TAP_MIN,
+        `TYPE tap zone ${c.DETAIL_HEAD_H}px tall (the whole header row) >= TAP_MIN ${c.TAP_MIN}`);
+    chk(c.MSG_BTN_H < c.DETAIL_HEAD_H,
+        `the drawn chip (${c.MSG_BTN_H}px) fits inside the ${c.DETAIL_HEAD_H}px header row with air`);
+  }
   // ---- THE RUNNING CURSOR AS A BAND WALK, worst case (title AND last prompt) ----
   // The name's band is the FONT'S OWN CELL, not DETAIL_NAME_H, so a name font that
   // disagrees with the ink height it is stepped by is caught by the walk as well as
