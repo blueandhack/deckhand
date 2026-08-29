@@ -168,14 +168,19 @@ int sessionRowYAt(int pos) {
   int e = sessionExpandedH(sessionCount);
   if (e <= 0) return SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
   if (pos == 0) {
-    // ONE expanded card IS the whole list, so it sits in the MIDDLE of the list
-    // area rather than at the top: 212 of 410 leaves 198px - 48% of the tab -
-    // hanging below it, which reads as "a card, then nothing" however much content
-    // the card itself carries. Centring costs no constant and no height.
-    // ONLY when it is alone. In a mixed layout the stack's top alignment IS the
-    // rhythm, and pushing the first card down would open a gap above a list that
-    // still ends flush at the bottom - worse than the surplus it moved.
-    if (sessionCount == 1) return SESSION_ROW_Y0 + (sessionListAvail(1) - e) / 2;
+    // A lone expanded card USED TO be centred in the list area rather than sitting
+    // at the top: 212 of 410 leaves 198px - 48% of the tab - hanging below it,
+    // which reads as "a card, then nothing" however much content the card itself
+    // carries. That was a deliberate choice, not an oversight - but the user,
+    // looking at the actual device, asked for it top-aligned instead, so it now
+    // falls through to the same SESSION_ROW_Y0 every other row count uses. The
+    // surplus below is the accepted cost of that call, not a regression to fix -
+    // and it is BIGGER than the 198px above, not smaller: the card's height is
+    // content-derived (sessionExpandedH), so a session with no title and no
+    // prompt leaves roughly 140 rows blank INSIDE the card as well, on top of
+    // whatever is left below it. If this gets re-centred later, it should be
+    // because someone looked again and chose that - not because this reasoning
+    // was rediscovered without noticing it had already been overridden once.
     return SESSION_ROW_Y0;
   }
   return SESSION_ROW_Y0 + e + SESSION_ROW_GAP + (pos - 1) * (sessionRowH + SESSION_ROW_GAP);

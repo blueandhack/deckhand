@@ -341,13 +341,12 @@ function expCardH(c, cand, have) {
   if (have.path) h += c.SESSION_BAND_RULE_H + c.SESSION_BAND_PATH_H;
   return h + c.SESSION_BAND_BOTTOM_PAD;
 }
-// sessionRowYAt(), replicated - INCLUDING the centring. A lone expanded card is
-// the whole list, so it sits in the middle of the list area; a mixed layout keeps
-// its top alignment, because there the stack itself is the rhythm.
+// sessionRowYAt(), replicated. A lone expanded card USED to be centred in the
+// list area; the user asked for it top-aligned on the glass instead, so pos 0
+// now always lands on SESSION_ROW_Y0 like every other row count.
 function rowYAt(c, pos, n, e, rowH, avail) {
   if (e <= 0) return c.SESSION_ROW_Y0 + pos * (rowH + c.SESSION_ROW_GAP);
-  if (pos === 0) return n === 1 ? c.SESSION_ROW_Y0 + Math.trunc((avail - e) / 2)
-                               : c.SESSION_ROW_Y0;
+  if (pos === 0) return c.SESSION_ROW_Y0;
   return c.SESSION_ROW_Y0 + e + c.SESSION_ROW_GAP +
          (pos - 1) * (rowH + c.SESSION_ROW_GAP);
 }
@@ -1092,16 +1091,17 @@ for (const b of [1, 2]) {
                           (pos === 1 ? e : rowH) + c.SESSION_ROW_GAP,
                     `${tag}: row ${pos} starts exactly one gap below row ${pos - 1}`);
             }
-            // A LONE expanded card is CENTRED, and the two margins are asserted equal
-            // to within the odd pixel - "card, then 198px of nothing" is what the
-            // centring exists to remove, so the number is checked rather than trusted.
-            // It matters MORE now: a short card leaves more to centre.
+            // A LONE expanded card is TOP-ALIGNED, not centred - reversed from the
+            // original centring at the user's request after looking at the device.
+            // The trailing gap below it is the accepted cost of that call (and can be
+            // large - a content-shrunk card leaves more of it), so it is only
+            // reported here, never asserted against.
             if (n === 1) {
               const yy = rowYAt(c, 0, 1, e, rowH, avail);
               const above = yy - c.SESSION_ROW_Y0;
               const below = c.SESSION_ROW_Y0 + avail - (yy + e);
-              chk(Math.abs(above - below) <= 1,
-                  `${tag}: the lone card is centred - ${above}px above, ${below}px below`);
+              chk(above === 0,
+                  `${tag}: the lone card is top-aligned - ${above}px above, ${below}px trailing below`);
             }
             // THE STRIP CASES BELOW SIX SESSIONS USED TO BE SKIPPED HERE, and the
             // skip is GONE because the thing it was standing in front of is fixed.
