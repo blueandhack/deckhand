@@ -1183,39 +1183,52 @@ const int DETAIL_BACK_Y = 17;
 // The card starts exactly where the touch band ends - no overlap, where board 1's
 // card border sits 2px inside its own band.
 const int DETAIL_CARD_DY = 50;
-// 326, and the arithmetic is the running cursor in drawSessionDetail() with every
-// step DERIVED (see DETAIL_NAME_H / DETAIL_LINE_H / DETAIL_TEXT_LINE_H below) from
-// this board's own faces rather than from Cozette's:
-//   +10 pad | name 24 ink +10..+33 | step 28
-//   +38 title 16 | step 22
-//   +60 pill 18 | step 28
-//   +88 rule | step 11
-//   +99 PROMPT label 16 | step 16
-//   +115 prompt 4 lines (16 each, last inks +163..+178) | step 70
-//   +185 rule | step 11
-//   +196 PATH label 16 | step 16
-//   +212 path 2 lines (last inks +228..+243) | step 38
-//   +250 col labels 16 | step 15
-//   +265 col values 16 | step 25
-//   +290 col labels 16 | step 15
-//   +305 col values, inking +305..+320
-// so the content ends at +320 and 3 clear rows sit above the 2px border at
-// +324..+325 (board 1: 8 above its own).
+// 330, AND IT IS THE CEILING RATHER THAN A CHOICE - the card is now as tall as
+// this screen can make it. The arithmetic is the running cursor in
+// drawSessionDetail() with every step DERIVED (see DETAIL_NAME_H / DETAIL_LINE_H /
+// DETAIL_TEXT_LINE_H below) from this board's own faces rather than from Cozette's,
+// and §7's band is what took it up:
+//   +0  BAND 44 (SESSION_BAND_H) - mark, status WORD, duration. NO top pad: the
+//       band REPLACES DETAIL_PAD_Y, exactly as the sessions tab's band card starts
+//       its body at `y + SESSION_BAND_H`.
+//   +44 name 24 ink +44..+67 | step 28
+//   +72 title 16 | step 22
+//   (NO PILL. It was 18px of ink and 28 of step, and the band 44px above says the
+//    same word at T_HEAD instead of T_META - the whole point of the band. The
+//    "for 12m - 14:31" line beside it goes with it; the band carries the duration.)
+//   +94 rule | step 11
+//   +105 PROMPT label 16 | step 16
+//   +121 prompt 4 lines (16 each, last inks +169..+184) | step 70
+//   +191 rule | step 11
+//   +202 PATH label 16 | step 16
+//   +218 path 2 lines (last inks +234..+249) | step 38
+//   +256 col labels 16 | step 15
+//   +271 col values 16 | step 25
+//   +296 col labels 16 | step 15
+//   +311 col values, inking +311..+326
+// so the content ends at +326 and ONE clear row sits above the 2px border at
+// +328..+329. Net against the old 326-tall card: +44 band, -10 pad, -28 pill = +6
+// of ink, against +4 of card. That is the honest reading - the band costs more than
+// the pill it replaces, and this card had 4px of slack to give.
 //
-// THE CEILING IS 331, NOT the 328 this comment used to claim, and the difference
-// is that the "answer this one on your Mac" line's opaque BOX was being measured
-// at its baseline. Both that line and the "tap here for history" hint are MC_DATUM
-// T_META, and drawString centres on the ASCENT (12) while painting a box
-// ascent+descent (16) tall - so a string drawn at y inks rows y-6..y+9. The answer
-// line sits at cardY + H + 8 = H + 104, i.e. rows H+98..H+113; the hint sits at
-// contentBottom() - 10 = 450, i.e. rows 444..459. They collide when
-// H + 113 >= 444, i.e. AT H = 331 - so 330 is the largest legal card and 326
-// leaves 4px between the two lines (answer box 424..439). The checker measures it
-// as a BOX now and PRINTS that largest-legal number for both boards, so the next
-// person to spend this headroom reads it rather than re-deriving it. (Board 1's own
-// figure prints as 211 against its 224: that card is 13px over its ceiling, which
-// is the long-documented case of both footer strings landing on one y.)
-const int DETAIL_CARD_H = 326;
+// THE CEILING IS 331, so 330 is the largest legal card, and the two footer strings
+// are what set it. Both the "answer this one on your Mac" line and the "tap here
+// for history" hint are MC_DATUM T_META, and drawString centres on the ASCENT (12)
+// while painting a box ascent+descent (16) tall - so a string drawn at y inks rows
+// y-6..y+9, and measuring the BASELINE instead is what once put this figure 3px
+// low. The answer line sits at cardY + H + 8 = H + 104, i.e. rows H+98..H+113; the
+// hint sits at contentBottom() - 10 = 450, i.e. rows 444..459. They collide when
+// H + 113 >= 444, i.e. AT H = 331. sessions-geom-check.mjs derives that number from
+// the hint and asserts DETAIL_CARD_H against it - never against a literal - and
+// PRINTS it, so the next person to spend this headroom reads it rather than
+// re-deriving it. (Board 1's own figure prints as 211 against its 224: that card is
+// 13px over its ceiling, which is the long-documented case of both footer strings
+// landing on one y.)
+//
+// THERE IS NO SLACK LEFT ON THIS CARD. A further block has to come out of another
+// one - which is what §7's meta line does next, replacing the two label+value
+// column pairs (+256..+326, 71px) with a single line.
+const int DETAIL_CARD_H = 330;
 // 76x26, board 1's own proportions at board 2's scale. It WAS 88x46 because 46 is
 // TAP_MIN - but the chip is not what gets tapped: handleDetailTouch tests
 // `sx >= msgBtnX() - 24` over the whole DETAIL_HEAD_H, so the live zone is 124x50

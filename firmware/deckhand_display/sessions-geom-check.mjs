@@ -168,8 +168,14 @@ const KNOWN = {
     // MC_DATUM: "answer this one on your Mac" at cardY + DETAIL_CARD_H + 8 =
     // 60+224+8 = 292, and the history hint at contentBottom() - 10 = 292. Since
     // drawString paints an opaque box and the hint is drawn second, the warning is
-    // invisible on this board. Board 2's card leaves 27px between them.
+    // invisible on this board - i.e. board 1's card is 13px OVER the ceiling the
+    // hint sets (224 against 211), which is why the same defect shows up twice
+    // below: once as the two strings colliding, and once as the constant itself.
+    // Board 2's card is AT its own ceiling (330 of 330) and the two boxes are
+    // adjacent rather than overlapping: §7's band costs 6px of ink on a card that
+    // had 4px of slack, so this is the whole of that headroom being spent.
     "\"answer on your Mac\" ends 299 above the history hint at 287",
+    "DETAIL_CARD_H 224 is within the 211px ceiling the history hint sets",
     // (c) Both under board 1's own TAP_MIN of 40, and its own header comment says
     // so: at board 2's 46+8 the worst-case option stack would be 270 of a 268px
     // content area. The proportion carries across even though the pixels cannot.
@@ -446,6 +452,54 @@ function sparkSize() {
   if (!m) throw new Error("SPARK_SIZE not found in ClaudeSpark.h");
   return Number(m[1]);
 }
+// ---- ONE FUNCTION, TWO CARDS: `#if BOARD_USES_TFT_ESPI` RESOLVED PER BOARD ----
+// §7 makes the two boards draw different detail cards out of ONE shared function,
+// and a checker that greps the raw file sees BOTH arms - so it could never say
+// "the status pill is gone from board 2", because the pill call is still in the
+// file under board 1's #if. armFor() returns only the lines the given board
+// actually compiles.
+//
+// IT UNDERSTANDS EXACTLY THE TWO FORMS THIS SKETCH USES ON THIS MACRO AND THROWS
+// ON ANYTHING ELSE. Passing an unrecognised directive through would hand every
+// assertion below a body that is NEITHER board's - both arms at once - at which
+// point "the pill is absent" and "the band is present" can both come out true for
+// both boards and the whole block passes vacuously. That is the same
+// vacuous-assertion shape this file has already paid for three times (a pill count
+// that counted nothing, a transcribed spine edge, and a regex that matched a
+// comment), so an unknown #if is a hard error rather than a fallback.
+function armFor(src, b) {
+  const ON = b === 1;                 // BOARD_USES_TFT_ESPI is 1 on board 1 only
+  const out = [], stack = [];
+  for (const line of src.split("\n")) {
+    const t = line.trim();
+    if (t.startsWith("#if")) {
+      if (/^#if\s+!\s*BOARD_USES_TFT_ESPI$/.test(t))     stack.push(!ON);
+      else if (/^#if\s+BOARD_USES_TFT_ESPI$/.test(t))     stack.push(ON);
+      else throw new Error(`armFor(): unresolvable directive "${t}"`);
+      continue;
+    }
+    if (t === "#else")  { stack.push(!stack.pop()); continue; }
+    if (t === "#endif") { if (!stack.length) throw new Error("armFor(): stray #endif"); stack.pop(); continue; }
+    if (stack.every(Boolean)) out.push(line);
+  }
+  if (stack.length) throw new Error("armFor(): unbalanced #if");
+  return out.join("\n");
+}
+// A function body out of sessions.ino, comments stripped and sliced to its own
+// closing brace at column 0 - the same anchoring the band's animation checks use,
+// and for the same two reasons: a lazy regex across a whole file finds a
+// neighbour's line, and a commented-out call is the likeliest way a draw site gets
+// disabled.
+function fnSrc(sig) {
+  const s = SESSIONS_INO.replace(/^[ \t]*\/\/.*$/gm, "");
+  const i = s.indexOf(sig);
+  if (i < 0) throw new Error(`${sig} not found in sessions.ino`);
+  const f = s.slice(i);
+  const z = f.indexOf("\n}\n");
+  if (z < 0) throw new Error(`${sig}: no closing brace at column 0`);
+  return f.slice(0, z);
+}
+function detailArm(b) { return armFor(fnSrc("void drawSessionDetail(int idx) {"), b); }
 // THE SPINE IS NOT A RECT, so `spineL + SESSION_SPINE_W - 1` is NOT its rightmost
 // ink and must never be used as one - that model is what let a real overlap ship.
 // This returns the rightmost x the spine's CAPSULE alone would ink at a given
@@ -2052,15 +2106,81 @@ for (const b of [1, 2]) {
                             ["column label -> its value", c.DETAIL_COL_LBL_STEP]])
     chk(step >= asc,
         `detail ${nm} step ${step} >= the ${asc}px ascent of ${UI[b][T_META].face} (cell ${LBLH})`);
+  // ---- §7: WHAT HEADS THE CARD, RESOLVED OUT OF THE SOURCE PER BOARD ----
+  // The two boards no longer draw the same card, so the block walk below cannot be
+  // one hardcoded stack any more. Three facts decide it - is there a band, where
+  // does the body cursor start, is there still a pill - and all three are read out
+  // of drawSessionDetail()'s own body with this board's #if arms RESOLVED. Nothing
+  // here is transcribed: revert any one of them and the named assertion under it
+  // fails, and the walk then reports the geometry that actually ships rather than
+  // the geometry this checker imagined.
+  //
+  // COMMENTS ARE STRIPPED FIRST. A commented-out call is the likeliest way one of
+  // these gets disabled, and this file has already shipped a regex that matched a
+  // comment MENTIONING an expression instead of the statement itself.
+  const detailBody = detailArm(b);
+  const banded  = /drawSessionBand\(/.test(detailBody);
+  const hasPill = /drawStatusPill\(LX, cy,/.test(detailBody);
+  const startM  = detailBody.match(/int cy = cardY \+ ([A-Za-z_][A-Za-z0-9_]*);/);
+  chk(!!startM, "drawSessionDetail's body cursor starts at `cardY + <named constant>`");
+  const startId = startM ? startM[1] : "DETAIL_PAD_Y";
+  chk(startId in c, `the detail body cursor's start (${startId}) is a constant this board declares`);
+  const cyStart = startId in c ? c[startId] : 0;
+  if (b === 2) {
+    // §7's three halves, each its own assertion so a partial revert names itself.
+    chk(banded,
+        "§7: the detail card is HEADED BY drawSessionBand() - the same component, on the " +
+        "same card interior, as the sessions tab's first row");
+    chk(startId === "SESSION_BAND_H",
+        `§7: the detail body cursor starts at the BAND's bottom (cardY + ${startId}), not at a top pad - ` +
+        "the band replaces DETAIL_PAD_Y rather than sitting above it");
+    chk(!hasPill,
+        "§7: the status pill is GONE from the detail card - the band carries the word, and " +
+        "drawing it twice on one card is the duplication STARTED/AGENT was paired to avoid");
+    // The duration moved WITH the pill, and the two are separable: leaving the old
+    // "for 12m - 14:31" behind would draw it at a detailPillY nothing sets any
+    // more, i.e. over the prompt block, and no geometry above can see that.
+    const durBody = armFor(fnSrc("void renderDetailDuration()"), b);
+    chk(/bandDurText\(detailIndex,/.test(durBody),
+        "§7: renderDetailDuration ticks the BAND's duration through bandDurText()");
+    chk(!/for %s - %s/.test(durBody),
+        "... and board 1's \"for 12m - 14:31\" line is not also drawn, at a detailPillY nothing sets");
+    // §6's crossfade is advanced ONLY by tickSessionAnim, which early-returns
+    // (clearing xfadeId) the moment a full-screen surface owns the glass - and this
+    // card is one. handleLine() starts a fade and repaints this card in the SAME
+    // tick, before loop() reaches that clear, so the band gets painted at frame 0
+    // of a fade nothing will ever advance and FREEZES with both status words
+    // superimposed at half strength. Caught on the glass, not by reading; there is
+    // no geometry above that can see it, and no cache that would ever repaint it.
+    // The clear must come BEFORE the band's draw, or it settles nothing.
+    const iClr = detailBody.indexOf("xfadeId[0] = '\\0';");
+    const iBand = detailBody.indexOf("drawSessionBand(");
+    chk(iClr > 0 && iClr < iBand,
+        "§6: the detail card CLEARS xfadeId before painting its band - nothing on this " +
+        "screen advances a crossfade, so a fade left running freezes both words on it");
+  } else {
+    // Board 1 is held byte-identical, so its arm of this function must still be the
+    // card it always was. Asserted rather than assumed: these three facts are
+    // exactly what a careless unconditional edit would change.
+    chk(!banded && hasPill && startId === "DETAIL_PAD_Y",
+        "board 1's detail card is unchanged: no band, a status pill, body cursor at cardY + DETAIL_PAD_Y");
+  }
+
   // Blocks, each [name, first ink row, last ink row]. A wrapped block spans its
   // label through its last line's cell; a column pair spans its labels through its
   // values' cell. Steps are the DERIVED ones, read from the constant table.
   const blk = [];
-  let cy = c.DETAIL_PAD_Y, top;
+  let cy = cyStart, top;
   const textInk = (t, n) => t + (n - 1) * c.DETAIL_TEXT_LINE_H + LBLH - 1;
+  // The band is the card's first block and starts at its very top - it is drawn on
+  // the interior, so its ink runs +BORDER_CARD..+SESSION_BAND_H-1, and the row
+  // above it is the card's own border rather than a gap.
+  if (banded) blk.push(["BAND", c.BORDER_CARD, c.SESSION_BAND_H - 1]);
   blk.push(["name", cy, cy + lineHB(b, NF) - 1]);            cy += c.DETAIL_NAME_STEP;
   blk.push(["title", cy, cy + BODYH - 1]);                   cy += c.DETAIL_TITLE_STEP;
-  blk.push(["pill", cy, cy + c.PILL_H - 1]);                 cy += c.DETAIL_PILL_STEP;
+  if (hasPill) {
+    blk.push(["pill", cy, cy + c.PILL_H - 1]);               cy += c.DETAIL_PILL_STEP;
+  }
   blk.push(["rule", cy, cy]);                                cy += c.DETAIL_RULE_STEP;
   top = cy; cy += c.DETAIL_LBL_STEP;
   blk.push([`LAST PROMPT + ${c.DETAIL_PROMPT_LINES} lines`, top, textInk(cy, c.DETAIL_PROMPT_LINES)]);
@@ -2093,8 +2213,55 @@ for (const b of [1, 2]) {
   chk(answerBot < hintTop, `${m}..${hintBot} (box ${answerTop}..${answerBot})`, isKnown(b, m));
   // The largest card that still clears the hint, printed because it is the number
   // the header's own comment quotes and it was wrong by 3.
-  console.log(`    largest DETAIL_CARD_H that clears the hint: ${hintTop - 1 - (answerBot - c.DETAIL_CARD_H)}` +
+  const cardCeil = hintTop - 1 - (answerBot - c.DETAIL_CARD_H);
+  console.log(`    largest DETAIL_CARD_H that clears the hint: ${cardCeil}` +
               ` (this board: ${c.DETAIL_CARD_H})`);
+  // ... AND THE CONSTANT IS ASSERTED AGAINST THAT DERIVATION, never against a
+  // literal. §7 grew this card to head it with the band, and the number it grew to
+  // is not a taste call - it is the ceiling the history hint sets, worked out
+  // above from the hint's own y and both strings' BOXES. The assertion one line up
+  // has the same bite but names the two footer strings; this one names the
+  // constant, which is what a reader who has just retyped it will grep for.
+  m = `DETAIL_CARD_H ${c.DETAIL_CARD_H} is within the ${cardCeil}px ceiling the history hint sets`;
+  chk(c.DETAIL_CARD_H <= cardCeil, m, isKnown(b, m));
+  // ---- §7 THE BAND'S CONTENTS FIT ACROSS ON *THIS* SURFACE TOO ----
+  // This file already asserts it for the sessions tab, and the detail card happens
+  // to be the same width - so the arithmetic carries. Asserted HERE anyway rather
+  // than inherited, because this is the surface §7 asked for a THIRD field on:
+  // `4m - 09:34` is 10 characters at TEXT_ADV = 80px, which leaves the word 144
+  // against a "NEEDS YOUR INPUT" that inks 192. It collides by 48. The decision to
+  // carry word + duration and NOT the wall-clock was taken from three mockups at
+  // true geometry; this assertion is what stops it being quietly undone by a future
+  // edit that only LOOKS cramped.
+  //
+  // DERIVED FROM THE TWO HELPERS, term for term, exactly as the sessions tab's copy
+  // is - never a transcribed sum:
+  //   lane = bandDurLeft(x, w) - wordX
+  //        = (x + w - PAD - DUR_CHARS*ADV - 1) - (x + PAD + SPARK_SIZE + MARK_GAP)
+  // with w the card INTERIOR (CARD_W - 2*BORDER_CARD). The trailing -1 is
+  // bandDurLeft's own: it names where drawIfChanged's clear box STARTS, not where
+  // the digits do. The mark's size is PARSED out of ClaudeSpark.h and T_HEAD's
+  // advance out of the font registry, so a regenerated mark or a face swap fails
+  // here rather than drifting past it.
+  if (b === 2) {
+    const detailBandRoom = c.CARD_W - 2 * c.BORDER_CARD - 2 * c.SESSION_BAND_PAD
+                           - sparkSize() - c.SESSION_BAND_MARK_GAP
+                           - c.SESSION_BAND_DUR_CHARS * c.TEXT_ADV - 1;
+    const detailLongest = "NEEDS YOUR INPUT".length * advanceB(b, T_HEAD);
+    const clockCost = "4m - 09:34".length * c.TEXT_ADV;
+    chk(detailLongest <= detailBandRoom,
+        `§7: the DETAIL card's band holds its longest status word (${detailLongest}px) ` +
+        `clear of the duration (room ${detailBandRoom}px) - and would NOT hold the ` +
+        `wall-clock §7 asked for, which needs ${clockCost}px where a bare duration needs ` +
+        `${c.SESSION_BAND_DUR_CHARS * c.TEXT_ADV}`);
+    // ... and the card the band is drawn on really is the width that room was
+    // computed against. Two constants that happen to be equal today is exactly the
+    // coincidence this repo has already been bitten by (CARD_W - 12 and CARD_W - 8
+    // both giving 34 at board 1's width), so it is asserted, not assumed.
+    chk(c.CARD_W === c.SESSION_ROW_W,
+        `the detail card (${c.CARD_W}px) is the same width as the session row the band was ` +
+        `sized on (${c.SESSION_ROW_W}px), so the tab's lane arithmetic carries to it`);
+  }
   chk(hintBot < contentBottom,
       `history hint ends ${hintBot} inside contentBottom ${contentBottom}`);
   chk(cardY + c.DETAIL_CARD_H <= contentBottom - 8,

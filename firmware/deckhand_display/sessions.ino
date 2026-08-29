@@ -2152,6 +2152,47 @@ void drawSessionDetail(int idx) {
   uiFillRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, COLOR_CARD, COLOR_BG);
   uiStrokeRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, BORDER_CARD, color, COLOR_BG);
 
+#if !BOARD_USES_TFT_ESPI
+  // ---- §7 THE BAND HEADS THE CARD ----
+  // The same component the sessions tab's first row wears, on the same card
+  // interior, carrying the same three things: the agent mark, the status WORD and
+  // the duration. So the status pill and the "for 12m - 14:31" line below it are
+  // both GONE from board 2's arm - the band says both, 44px higher and at T_HEAD
+  // instead of a 18px pill, and drawing them twice on one card is exactly the
+  // "says the same thing twice" the STARTED/AGENT pairing was written to avoid.
+  //
+  // IT DOES NOT CARRY THE WALL-CLOCK, and §7's prose asks for it. Measured at this
+  // board's true geometry: "4m - 09:34" is 10 characters at TEXT_ADV = 80px, which
+  // leaves the word 144px against a "NEEDS YOUR INPUT" that inks 192. It collides
+  // by 48. Three resolutions were rendered side by side and this is the one that
+  // was chosen; the band's fixed 3-character duration lane is the other half of it
+  // (SESSION_BAND_DUR_CHARS). Adding the clock back here is the change to not make,
+  // and sessions-geom-check.mjs asserts the lane on THIS surface so it fails rather
+  // than merely looking cramped.
+  //
+  // §6'S CROSSFADE BELONGS TO THE LIST, AND WITHOUT THIS LINE IT FREEZES HERE.
+  // tickSessionAnim() clears xfadeId the moment any full-screen surface takes the
+  // glass - this card is one of them - and it is the ONLY thing that advances a
+  // fade. But handleLine() starts the fade and repaints this card in the SAME
+  // tick, before loop() reaches that clear: the band was therefore painted at
+  // frame 0 of a fade nothing would ever advance, and STAYED there, with the
+  // leaving and arriving words overlapping at half strength each. Seen on the
+  // glass - "WAITING FOR YOU" and "WORKING" superimposed and both illegible, on a
+  // card already wearing the new status colour in its border. Cleared here with
+  // exactly the meaning tickSessionAnim's own guard gives it: there is no fade on
+  // this screen, so the band paints the settled colour.
+  xfadeId[0] = '\0';
+  // The card INTERIOR, inset by its own 2px border, is what drawSessionBand takes -
+  // identical to the sessions tab's call site, so the band's top corners are the
+  // card's own and its fill never paints outside the outline.
+  drawSessionBand(CARD_X + BORDER_CARD, cardY + BORDER_CARD,
+                  CARD_W - 2 * BORDER_CARD, idx, color);
+  // The band drew the duration once; renderDetailDuration owns it from here, and a
+  // wholesale card repaint is exactly when its per-field cache is stale by
+  // definition. Same clear board 1 does beside its pill, for the same reason.
+  detailDurCache[0] = '\0';
+#endif
+
   // Laid out with a running cursor rather than the hand-derived offsets this screen used
   // to carry (cardY + 78 / +120 / +158). Those had to be re-derived by hand every time a
   // field moved, which is how the screen ended up sparse in the first place.
@@ -2166,7 +2207,17 @@ void drawSessionDetail(int idx) {
   // every one of them equals the literal it replaced on board 1.
   // The two label->value pairs are deliberately NOT given air: a label and the
   // value it names read as one block.
+#if BOARD_USES_TFT_ESPI
   int cy = cardY + DETAIL_PAD_Y;
+#else
+  // The body starts where the band ENDS, exactly as the sessions tab's band card
+  // does (`nameTop = y + SESSION_BAND_H`) - the band replaces the card's own top
+  // pad rather than sitting above it. No air is added here and none is available:
+  // DETAIL_CARD_H is at its ceiling (see the derivation in board_es3c35p.h), and
+  // the name's opaque box is COLOR_CARD, so the ~4 blank rows at the top of a
+  // Spleen 12x24 cell are the visual gap under the band.
+  int cy = cardY + SESSION_BAND_H;
+#endif
   const int LX = CARD_X + PAD;              // label/value left edge
   const int RX = CARD_X + CARD_W / 2 + 2;   // right column, for the paired short fields
   const int colW = CARD_W / 2 - PAD - 4;
@@ -2195,11 +2246,13 @@ void drawSessionDetail(int idx) {
     cy += DETAIL_TITLE_STEP;
   }
 
+#if BOARD_USES_TFT_ESPI
   // Status pill; renderDetailDuration draws "for 12m - 14:31" to its right.
   detailPillY = cy;
   drawStatusPill(LX, cy, pillLabel(status), status, false);
   detailDurCache[0] = '\0'; // force the duration to redraw after this repaint
   cy += DETAIL_PILL_STEP;
+#endif
 
   tft.drawFastHLine(LX, cy, maxW, COLOR_LABEL);
   cy += DETAIL_RULE_STEP;
@@ -2327,11 +2380,38 @@ void drawSessionDetail(int idx) {
                  contentBottom() - 10);
   tft.setTextDatum(TL_DATUM);
 }
-// The "for Xm" duration ticks on its own cache (right of the status pill) so
-// it can update every second without repainting the whole card.
+// The duration ticks on its own cache so it can update every second without
+// repainting the whole card. WHERE it lands is per board and it is two different
+// fields: board 1 draws "for 12m - 14:31" right of the status pill; board 2 has
+// neither, and updates the band's own 3-character duration lane instead.
 void renderDetailDuration() {
   if (detailIndex < 0 || detailIndex >= sessionCount) return;
   if (sessions[detailIndex].askPid[0]) return; // ask screen has its own layout
+#if !BOARD_USES_TFT_ESPI
+  // §7: the duration lives IN THE BAND on this board, and it is the SAME
+  // change-only field the sessions tab's band card ticks - same bandDurText(),
+  // same fixed SESSION_BAND_DUR_CHARS lane, same TR_DATUM origin, only the card's
+  // x/y differ. Repainting the band for it would be a clear-then-redraw of a
+  // 292x42 region once a second for the first minute of every status, which is
+  // what this file's redraw discipline exists to prevent.
+  //
+  // THE BACKGROUND IS bandFillShown - THE RECORD OF WHAT WAS PAINTED - where the
+  // sessions tab deliberately re-asks sessionBandFill() instead. The difference is
+  // real rather than stylistic: on the tab a crossfade or a pulse repaints the band
+  // between ticks, so the record is a frame old; HERE nothing repaints it at all
+  // (tickSessionAnim and tickWorkingSpinner both early-return on showingDetail), so
+  // the record is exact and re-asking a free-running ramp would paint an opaque box
+  // in a colour the band underneath it has never been.
+  {
+    char bdur[8];
+    bandDurText(detailIndex, bdur, sizeof(bdur));
+    drawIfChanged(detailDurCache, sizeof(detailDurCache), bdur,
+                  CARD_X + CARD_W - BORDER_CARD - SESSION_BAND_PAD,
+                  DETAIL_CARD_Y + BORDER_CARD + bandDurDY(), T_BODY, 1,
+                  COLOR_CARD, bandFillShown, TR_DATUM);
+  }
+  return;
+#else
   const SessionInfo& s = sessions[detailIndex];
   char dur[10], clk[10], buf[26];
   formatDuration(s.statusSinceMillis, dur, sizeof(dur));
@@ -2344,4 +2424,5 @@ void renderDetailDuration() {
   // Follows the pill's actual y, which the variable layout decides.
   drawIfChanged(detailDurCache, sizeof(detailDurCache), buf, CARD_X + CARD_W - PAD,
                 detailPillY + 4, 1, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
+#endif
 }
