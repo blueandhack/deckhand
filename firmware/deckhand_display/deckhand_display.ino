@@ -4892,6 +4892,36 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
         break;
       }
     }
+#if !BOARD_USES_TFT_ESPI
+  } else if (buf.startsWith("READTEST")) {
+    // THE ASK READER IS OTHERWISE UNCAPTURABLE, and that is the same argument
+    // TAB/PAGE/KBTEST/EMOJITEST/MULTITEST already won: SCREENSHOT can only record
+    // what is on the glass, and reaching this screen needs a finger on the chip in
+    // the ask header. Board 2 only - it is this board that gained a second section
+    // to look at, and board 1's binary is held byte-identical.
+    //
+    // Through the detail screen, the way a person reaches it, for the reason
+    // KBTEST records: opening straight from whatever tab was showing leaves the
+    // sessions list painted under the wrong tab bar when the reader closes.
+    // "READTEST off" closes it; "READTEST <n>" opens it at a page, which is how
+    // the second section gets captured when a long detail pushes it past page 1.
+    // It cannot invent a prompt - with nothing pending it does nothing.
+    String arg = buf.substring(8);
+    arg.trim();
+    if (arg == "off") {
+      if (readerActive) exitReader();
+    } else if (!kbActive && !histActive && !emojiTestActive) {
+      for (int i = 0; i < sessionCount; i++) {
+        if (!sessions[i].askTitle[0]) continue;
+        switchTab(TAB_SESSIONS);
+        openSessionDetail(i);
+        readerActive = true;
+        readerPage = arg.length() ? arg.toInt() : 0;
+        drawReader();   // clamps the page itself
+        break;
+      }
+    }
+#endif
   } else if (buf.startsWith("EMOJITEST")) {
     // Refuse while another full-screen surface owns the glass. emojiTestActive
     // is tested BEFORE kbActive in handleTouch's dismiss chain, so opening the

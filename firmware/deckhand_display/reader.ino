@@ -345,6 +345,90 @@ bool handleHistFullTouch(int sx, int sy) {
   if (sy > HIST_RULE_Y) { histFullPage++; drawHistFull(); }   // tap to page, like the ask reader
   return true;
 }
+#if !BOARD_USES_TFT_ESPI
+// ---- THE READER'S SECOND SECTION: the options, with what each one MEANS ----
+// The ask screen has one top-right slot, so there is one chip and one reader, and
+// the reader is TWO SECTIONS of one document: the question's own detail first,
+// then every option with its description. See askReadOffered() in sessions.ino
+// for the alternatives that were rejected and why.
+//
+// The label the section opens with. A #define rather than a literal at the draw
+// site because the SIGNPOST below has to name the very same words - a reader told
+// to look for one heading and shown another is worse than no signpost - and
+// sessions-geom-check.mjs parses it from here to measure it against the lane.
+#define ASK_OPT_SECTION_LABEL "WHAT THE OPTIONS MEAN"
+// ONE WALK, TWO MODES. `draw == false` only sums the lines this section occupies;
+// `draw == true` paints the slice of it that lands on the current page. Counting
+// in one place and drawing in another is exactly how a pager comes to disagree
+// with itself about how many pages it has, and the disagreement is invisible -
+// it presents as a last page that is short, or a NEXT that does nothing.
+//
+// It composes BLOCKS against a global line cursor rather than building one text
+// buffer, for two reasons. countWrappedLines() and drawWrappedText() BOTH stop at
+// 80 lines, so a long detail concatenated with the options would silently lose
+// the tail - the same silent-truncation shape this repo keeps paying for. And a
+// buffer big enough for four ASK_OPT_DESC_BYTES descriptions plus their labels is
+// ~600 bytes of RAM on the board whose prevSessions was slimmed to reclaim heap.
+//
+// It takes an INDEX, not a `const SessionInfo&`: the Arduino build inserts its
+// generated prototypes above the first function definition in the concatenated
+// unit, which is above SessionInfo's declaration, so a signature naming that type
+// would not compile. See the note in pairing.ino.
+//
+// BOARD 2 ONLY. Board 1's ASK_OPT_DESC_BYTES is a 1-byte placeholder, every slot
+// is permanently empty, and its binary is held byte-identical.
+int askOptSection(int idx, bool draw, uint8_t font, int lineH, int maxW,
+                  int textTop, int pageLo, int visLines, int startLine) {
+  const SessionInfo& s = sessions[idx];
+  const int pageHi = pageLo + visLines;
+  const int indent = 3 * TEXT_ADV;   // the width of the "N. " gutter, measured not guessed
+  int cursor = startLine;
+
+  // One block of wrapped text at the global line cursor: draws only the slice on
+  // this page, and consumes its whole height either way. An empty string is a
+  // BLANK ROW rather than nothing - countWrappedLines("") is 0, which would make
+  // the air between options free and then wrong.
+  auto block = [&](const char* text, int bx, int bw, uint16_t col) {
+    int n = text[0] ? countWrappedLines(text, font, bw) : 1;
+    if (n < 1) n = 1;
+    if (draw && text[0]) {
+      int lo = cursor > pageLo ? cursor : pageLo;
+      int hi = cursor + n < pageHi ? cursor + n : pageHi;
+      if (hi > lo)
+        drawWrappedText(text, bx, textTop + (lo - pageLo) * lineH, font, lineH, bw,
+                        lo - cursor, hi - lo, col, COLOR_BG);
+    }
+    cursor += n;
+  };
+
+  // A blank row with a full-width rule through its middle. The same separator the
+  // reader's own header already uses (HIST_RULE_Y) - so the two sections read as
+  // two, rather than as one long column that happens to change subject. Through
+  // the MIDDLE of the row, not at its top: at the top of the first row of a page
+  // it would land 2px under the header's rule and read as a double line.
+  if (draw && cursor >= pageLo && cursor < pageHi)
+    tft.drawFastHLine(0, textTop + (cursor - pageLo) * lineH + lineH / 2,
+                      tft.width(), COLOR_LABEL);
+  cursor++;
+  block(ASK_OPT_SECTION_LABEL, 12, maxW, COLOR_ACCENT);
+
+  for (int k = 0; k < s.askOptCount; k++) {
+    // Sized from the array it copies, not from a literal - askOpts' own second
+    // dimension plus "NN. " and the NUL.
+    char lbl[sizeof(s.askOpts[0]) + 8];
+    snprintf(lbl, sizeof(lbl), "%d. %s", k + 1, s.askOpts[k]);
+    block(lbl, 12, maxW, COLOR_VALUE);
+    // EVERY option gets an entry, described or not. The host sends optDescs
+    // DENSE - an option with nothing to say holds "" - so skipping the empty ones
+    // would silently renumber the list, and the numbers here are the only thing
+    // tying it to the buttons on the screen behind.
+    block(s.askOptDesc[k][0] ? s.askOptDesc[k] : "(no description given)",
+          12 + indent, maxW - indent, COLOR_LABEL);
+    if (k + 1 < s.askOptCount) block("", 12, maxW, COLOR_LABEL);   // air between options
+  }
+  return cursor - startLine;
+}
+#endif
 void drawReader() {
   if (detailIndex < 0 || detailIndex >= sessionCount) return;
   SessionInfo& s = sessions[detailIndex];
@@ -370,6 +454,25 @@ void drawReader() {
   int visLines = (READER_CTRL_Y - 8 - textTop) / lineH;
   setUIFont(dFont);
   int totalLines = countWrappedLines(s.askDetail, dFont, maxW);
+#if !BOARD_USES_TFT_ESPI
+  // ---- SECTION TWO, AND THE ROW THAT POINTS AT IT ----
+  // The detail and the options are ONE document on ONE line grid, so a detail
+  // ending mid-page is followed by the section rule on the next row rather than
+  // by a page break. The consequence the user signed off on is that a long detail
+  // can push the options onto page 2 - which is acceptable only because the
+  // reader SAYS SO: one body row is given up to a signpost naming the page the
+  // options start on. An enabled NEXT and a page counter are something to infer;
+  // this is something to read.
+  //
+  // The row is reserved only when there is a second section at all, so a board-2
+  // reader with no descriptions paginates exactly as it did before this task.
+  const int detailLines = totalLines;
+  const int optLines = askOptDescsPresent(detailIndex)
+                         ? askOptSection(detailIndex, false, dFont, lineH, maxW, 0, 0, 0, 0)
+                         : 0;
+  if (optLines > 0) { visLines--; totalLines += optLines; }
+  if (visLines < 1) visLines = 1;
+#endif
   int pages = (totalLines + visLines - 1) / visLines;
   if (pages < 1) pages = 1;
   if (readerPage >= pages) readerPage = pages - 1;
@@ -389,8 +492,37 @@ void drawReader() {
   tft.setTextDatum(TL_DATUM);
   tft.drawFastHLine(0, HIST_RULE_Y, tft.width(), COLOR_LABEL);
 
+#if BOARD_USES_TFT_ESPI
   drawWrappedText(s.askDetail, 12, textTop, dFont, lineH, maxW,
                   readerPage * visLines, visLines, COLOR_VALUE, COLOR_BG);
+#else
+  // SECTION ONE, on the same global line grid the options use. With no options
+  // this is the identical call board 1 makes (the detail starts at line 0, so
+  // `lo` is the page's own first line and the slice is the whole page).
+  const int pageLo = readerPage * visLines, pageHi = pageLo + visLines;
+  {
+    int hi = detailLines < pageHi ? detailLines : pageHi;
+    if (hi > pageLo)
+      drawWrappedText(s.askDetail, 12, textTop, dFont, lineH, maxW,
+                      pageLo, hi - pageLo, COLOR_VALUE, COLOR_BG);
+  }
+  if (optLines > 0) {
+    askOptSection(detailIndex, true, dFont, lineH, maxW, textTop, pageLo, visLines, detailLines);
+    // THE SIGNPOST. It names the SAME heading the section opens with - a reader
+    // told to look for one thing and shown another is worse than no signpost -
+    // and it is drawn only while the options are still ahead, in the row
+    // `visLines` gave up for it, so it can never land on body text.
+    if (detailLines >= pageHi) {
+      char hint[sizeof(ASK_OPT_SECTION_LABEL) + 16];
+      snprintf(hint, sizeof(hint), "%s - PAGE %d", ASK_OPT_SECTION_LABEL,
+               detailLines / visLines + 1);
+      setUIFont(dFont);
+      tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+      tft.setTextDatum(TL_DATUM);
+      tft.drawString(hint, 12, textTop + visLines * lineH);
+    }
+  }
+#endif
 
   // Control bar: disabled ends grey out (same affordance as the steppers).
   struct { int x, w; const char* label; bool enabled; } btns[3] = {

@@ -129,6 +129,11 @@ const OPT_DESC_MAX_BYTES = +fs.readFileSync(
 // change that couples the chip's drawn size back to the tap zone.
 const SESSIONS_INO = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
 const DISPLAY_INO  = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+// The reader is a fourth file this checker has to read: the ask screen's chip and
+// the screen it opens are one feature, and the assertions that matter are about
+// the seam between them (which predicate opens it, and on which line grid the
+// second section is drawn).
+const READER_INO   = fs.readFileSync(`${DIR}/reader.ino`, "utf8");
 
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // The board header FIRST, then deckhand_display.ino seeded with it - which is the
@@ -216,6 +221,12 @@ const KNOWN = {
     // board's binary is held byte-identical; board 2 takes the full cell and 210.
     "voice card label step 12 >= the label's own 13px cell",
     "voice card: 6 lines hold 198 of 200 transcript chars",
+    // (f) The reader chip's tap zone is the full HEADER BAND, and board 1's band
+    // is 28px against its own TAP_MIN of 40 - the same shortfall its own header
+    // comment already records for DETAIL_HEAD_H, and the same one every other
+    // control in that row shares (the TYPE chip's zone is 100x28 there). Its
+    // WIDTH is fine at 96. Board 2's band is TAP_MIN + 4 and clears it.
+    "chip tap zone 28px tall >= TAP_MIN 40",
   ],
   2: [],
 };
@@ -574,14 +585,66 @@ function armFor(src, b) {
 // and for the same two reasons: a lazy regex across a whole file finds a
 // neighbour's line, and a commented-out call is the likeliest way a draw site gets
 // disabled.
-function fnSrc(sig) {
-  const s = SESSIONS_INO.replace(/^[ \t]*\/\/.*$/gm, "");
+function fnSrcIn(src, sig, where) {
+  const s = src.replace(/^[ \t]*\/\/.*$/gm, "");
   const i = s.indexOf(sig);
-  if (i < 0) throw new Error(`${sig} not found in sessions.ino`);
+  if (i < 0) throw new Error(`${sig} not found in ${where}`);
   const f = s.slice(i);
   const z = f.indexOf("\n}\n");
   if (z < 0) throw new Error(`${sig}: no closing brace at column 0`);
   return f.slice(0, z);
+}
+function fnSrc(sig) { return fnSrcIn(SESSIONS_INO, sig, "sessions.ino"); }
+// ---- THE CONDITION GUARDING A CALL, PARSED RATHER THAN MATCHED ----
+// Returns the source text of the innermost `if (...)` that encloses the first
+// occurrence of `needle` - i.e. the last `if (` opened before it. Brace-balanced
+// so a `(` inside the condition cannot end it early. This is how the "drawn and
+// tappable agree" assertion below can compare two predicates instead of merely
+// noticing that both sites mention a constant.
+function gateBefore(body, needle) {
+  const at = body.indexOf(needle);
+  if (at < 0) return null;
+  const head = body.slice(0, at);
+  const open = head.lastIndexOf("if (");
+  if (open < 0) return null;
+  let i = open + 4, depth = 1, cur = "";
+  for (; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") { depth--; if (!depth) break; }
+    cur += ch;
+  }
+  if (depth !== 0) throw new Error(`gateBefore(): unbalanced parens before ${needle}`);
+  return cur.replace(/\s+/g, " ").trim();
+}
+// Board 1 spells askReadOffered as a function-like MACRO so its binary stays
+// byte-identical (see the note at the definition). PARSE that macro and expand it,
+// or the comparison below is between two SPELLINGS rather than between what the
+// two boards' compilers actually see - which is exactly the vacuous shape this
+// file has been caught in before.
+const READ_MACRO = SESSIONS_INO.match(/#define\s+askReadOffered\(\s*idx\s*\)\s*(.+)/);
+function normGate(b, expr) {
+  if (expr == null) return null;
+  const repl = b === 1 && READ_MACRO ? READ_MACRO[1] : "askReadOffered()";
+  return expr.replace(/askReadOffered\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)/g, repl)
+             .replace(/\s+/g, "")
+             .replace(/^\((.*)\)$/, "$1");
+}
+// The chip's LABEL is a per-board #define, because the two boards' chips no longer
+// offer the same thing. Parsed from the header that owns it, never transcribed.
+function chipLabel(b) {
+  const m = fs.readFileSync(`${DIR}/${HDR[b]}`, "utf8")
+              .match(/#define\s+ASK_READ_BTN_LABEL\s+"([^"]*)"/);
+  if (!m) throw new Error(`ASK_READ_BTN_LABEL not found in ${HDR[b]}`);
+  return m[1];
+}
+// The section heading the reader's second section opens with, and that the
+// signpost on an earlier page has to NAME. One #define in reader.ino; read from
+// there so a checker measuring "the label fits" is measuring the real one.
+function optSectionLabel() {
+  const m = READER_INO.match(/#define\s+ASK_OPT_SECTION_LABEL\s+"([^"]*)"/);
+  if (!m) throw new Error("ASK_OPT_SECTION_LABEL not found in reader.ino");
+  return m[1];
 }
 function detailArm(b) { return armFor(fnSrc("void drawSessionDetail(int idx) {"), b); }
 // ---- A CALL'S ARGUMENTS, PARSED - NOT ITS TEXT, MATCHED ----
@@ -691,6 +754,196 @@ function borderInnerX(x0, dy, radius, border) {
   return x0 + radius - Math.sqrt(r * r - d * d);
 }
 
+// ============ THE READER CHIP AND THE READER'S SECOND SECTION ============
+// The ask header has ONE top-right slot. It now opens a reader carrying TWO
+// sections - the question's own detail, then every option with its description -
+// so the chip appears when EITHER the detail overflowed or any description
+// exists. Everything below is about the seams that decision creates, and every
+// one of them is PARSED out of the draw site or the header that owns it.
+function askReaderChip(b, c, W) {
+  const drawArm  = armFor(fnSrc("void drawAskDetail(int idx) {"), b);
+  const touchArm = armFor(fnSrc("bool handleAskTouch(int sx, int sy) {"), b);
+  const CHIP = chipLabel(b);
+
+  // ---- 1. THE CHIP IS GATED, AND THE TAP TESTS THE SAME GATE ----
+  // Drawn-but-dead and tappable-but-dead are two different bugs, and this repo
+  // has paid for the second one. Both predicates are parsed and board 1's macro
+  // is EXPANDED, so this compares what the compiler sees rather than two
+  // spellings that merely look alike.
+  const drawGate  = gateBefore(drawArm, "uiFillRound(ASK_READ_BTN_X");
+  const touchCond = gateBefore(touchArm, "ASK_READ_BTN_X - ");
+  chk(!!drawGate, `the ${CHIP} chip's draw is GATED at all (found: ${drawGate || "no enclosing if"})`);
+  const touchGate = touchCond ? touchCond.split(/&&/)[0].trim() : null;
+  chk(!!touchGate, "the chip's tap test is guarded by a predicate, not by the x range alone");
+  chk(drawGate && touchGate && normGate(b, drawGate) === normGate(b, touchGate),
+      `the chip is drawn and tapped on ONE predicate: draw \`${drawGate}\` vs tap \`${touchGate}\`` +
+      (b === 1 ? " (askReadOffered expands to the macro this board defines)" : ""));
+
+  // ---- 2. WHAT THAT PREDICATE ACTUALLY TESTS ----
+  // A gate that is always true would pass everything above. So the definition is
+  // parsed too: board 2's must name BOTH the overflow and the descriptions, and
+  // board 1's must name only the overflow (its slots are permanently empty).
+  const defArm = armFor(SESSIONS_INO.replace(/^[ \t]*\/\/.*$/gm, ""), b);
+  const def = b === 1
+    ? (READ_MACRO ? READ_MACRO[1] : null)
+    : (defArm.match(/inline bool askReadOffered\(int[^)]*\)\s*\{[^}]*?return ([^;]*);/) || [])[1];
+  chk(!!def, `askReadOffered is defined on this board (got: ${def || "nothing parseable"})`);
+  chk(!!def && /askOverflow/.test(def),
+      `askReadOffered still opens on an overflowing detail: \`${def}\``);
+  chk(!!def && /askOptDescsPresent/.test(def) === (b === 2),
+      b === 2
+        ? `askReadOffered ALSO opens on a description with no overflow: \`${def}\` - a` +
+          ` chip that only tracked the overflow would leave the descriptions reachable` +
+          ` and never found`
+        : `askReadOffered is the overflow alone here: \`${def}\` - this board draws no` +
+          ` descriptions and its binary is held byte-identical`);
+  if (b === 2) {
+    // ...and the description test is a real one: dense slots (an option with
+    // nothing to say holds ""), bounded by askOptCount.
+    const present = fnSrc("bool askOptDescsPresent(int idx) {");
+    chk(/askOptDesc\[k\]\[0\]/.test(present),
+        "askOptDescsPresent tests a slot's first BYTE - the host sends optDescs dense, so" +
+        " a count of slots would call four empty strings four descriptions");
+    chk(/k < s\.askOptCount/.test(present),
+        "askOptDescsPresent walks only the options this ask actually has");
+  }
+
+  // ---- 3. THE TAP ZONE CLEARS TAP_MIN IN BOTH AXES ----
+  // The slack term is parsed off the hit test, not restated: the chip is DRAWN
+  // small and HIT big, and the whole point is that the zone can be checked
+  // independently of the chip.
+  const slack = touchCond ? +(touchCond.match(/ASK_READ_BTN_X\s*-\s*(\d+)/) || [])[1] : NaN;
+  chk(Number.isFinite(slack), `the chip's tap slack is parseable off the hit test (${slack})`);
+  const zoneW = W - (c.ASK_READ_BTN_X - slack);
+  chk(zoneW >= c.TAP_MIN,
+      `chip tap zone ${zoneW}px wide (chip ${c.ASK_READ_BTN_W} + ${slack} slack) >= TAP_MIN ${c.TAP_MIN}`);
+  let m = `chip tap zone ${c.DETAIL_HEAD_H}px tall >= TAP_MIN ${c.TAP_MIN}`;
+  chk(c.DETAIL_HEAD_H >= c.TAP_MIN, m, isKnown(b, m));
+
+  // ---- 4. THE TWO COPIES OF THE CHIP'S DRAW AGREE ----
+  // It is written once per board arm, which is what keeps board 1 byte-identical
+  // (see the note at the site). Duplication is guarded rather than trusted.
+  const chipDraw = (src) => {
+    const a = src.indexOf("uiFillRound(ASK_READ_BTN_X");
+    if (a < 0) return null;
+    const z = src.indexOf("tft.setTextDatum(TL_DATUM);", src.indexOf("ASK_READ_BTN_LABEL", a));
+    return z < 0 ? null : src.slice(a, z).replace(/\s+/g, " ");
+  };
+  const raw = SESSIONS_INO.replace(/^[ \t]*\/\/.*$/gm, "");
+  const arm1 = chipDraw(armFor(fnSrcIn(raw, "void drawAskDetail(int idx) {", "sessions.ino"), 1));
+  const arm2 = chipDraw(armFor(fnSrcIn(raw, "void drawAskDetail(int idx) {", "sessions.ino"), 2));
+  if (b === 1) {   // a claim about BOTH arms, so it is made once rather than per board
+    chk(!!arm1 && !!arm2 && arm1 === arm2,
+        "both boards' arms draw the SAME chip - same rect, same radius, same ASK_READ_BTN_LABEL");
+    chk(!!arm1 && arm1.includes("ASK_READ_BTN_LABEL"),
+        "the chip's label comes from the per-board ASK_READ_BTN_LABEL, not a literal at the draw site");
+  }
+
+  // ---- 5. THE READER'S SECOND SECTION ----
+  const readerArm = armFor(fnSrcIn(READER_INO, "void drawReader() {", "reader.ino"), b);
+  const hasSection = /askOptSection\(/.test(readerArm);
+  chk(hasSection === (b === 2),
+      b === 2
+        ? "drawReader composes a second section from the options"
+        : "board 1's reader is the detail alone - it draws no descriptions, and its binary" +
+          " is held byte-identical");
+  if (b !== 2) return;
+
+  // ONE WALK, TWO MODES. A separate counting function is how a pager comes to
+  // disagree with itself about how many pages it has, and the disagreement is
+  // invisible: it presents as a short last page or a NEXT that does nothing.
+  const calls = [...readerArm.matchAll(/askOptSection\(([^;]*?)\)[,;\n]/g)]
+    .map(x => callArgs("askOptSection(" + x[1] + ")", "askOptSection"));
+  chk(calls.length === 2, `askOptSection is called twice - once to count, once to draw (got ${calls.length})`);
+  if (calls.length === 2) {
+    chk(calls[0][1] === "false" && calls[1][1] === "true",
+        "the same function counts the section and draws it - one walk, two modes");
+    chk(calls[0][0] === calls[1][0],
+        `both calls describe the same ask (\`${calls[0][0]}\` / \`${calls[1][0]}\`)`);
+    // THE SECTION DRAWS ON THE DETAIL'S OWN LINE GRID. A literal here - or a
+    // second lineH - is the bug this screen just had one level up, and it is
+    // invisible because the text still appears.
+    chk(calls[1][2] === "dFont" && calls[1][3] === "lineH",
+        `the options are drawn in the reader's own face and step (\`${calls[1][2]}\`, \`${calls[1][3]}\`)` +
+        " - a literal step here is the descender-chopping bug this reader was just fixed for");
+    // SECTION ORDER: the options begin where the DETAIL ends, on one shared line
+    // numbering. That is the ordering claim - textual order alone would still
+    // pass with the options starting at line 0 and painting over the detail.
+    chk(calls[1][8] === "detailLines",
+        `the options section starts at the detail's last line (\`${calls[1][8]}\`), so the` +
+        " reader is detail-then-options and not two documents on one page");
+    chk(/const int detailLines = totalLines;/.test(readerArm) &&
+        /int totalLines = countWrappedLines\(s\.askDetail,/.test(readerArm),
+        "detailLines IS the detail's own wrapped line count, taken before the section is added");
+    const iDetail = readerArm.indexOf("drawWrappedText(s.askDetail");
+    const iOpts   = readerArm.indexOf("askOptSection(detailIndex, true");
+    chk(iDetail >= 0 && iOpts > iDetail,
+        "the detail is painted before the options section, in that order");
+  }
+
+  // ---- 6. THE LINE STEP AGAINST THE FACE'S OWN CELL ----
+  // Parsed from the reader's own `lineH` expression, so a third step added later
+  // is checked too rather than silently unmeasured.
+  const steps = (readerArm.match(/int lineH = isCode \? (\w+) : (\w+);/) || []).slice(1);
+  chk(steps.length === 2, `the reader's two line steps are parseable (${steps.join(" / ") || "none"})`);
+  const cell = lineHB(b, T_BODY);
+  for (const id of steps)
+    chk(c[id] >= cell,
+        `options section line step ${id} = ${c[id]} >= the ${cell}px cell it draws` +
+        " - a step under the cell has each line's opaque box eat the line above");
+
+  // ---- 7. EVERY OPTION GETS A LINE, DESCRIBED OR NOT ----
+  const sect = fnSrcIn(READER_INO,
+    "int askOptSection(int idx, bool draw, uint8_t font, int lineH, int maxW,", "reader.ino");
+  const fallback = (sect.match(/s\.askOptDesc\[k\]\[0\] \? s\.askOptDesc\[k\] : "([^"]*)"/) || [])[1];
+  chk(!!fallback,
+      `an option with no description still gets a line ("${fallback || "MISSING"}") - the host` +
+      " sends optDescs DENSE, so skipping the empty ones silently renumbers the list against" +
+      " the buttons on the screen behind it");
+  chk(/snprintf\(lbl, sizeof\(lbl\), "%d\. %s"/.test(sect),
+      "each option is numbered, which is the only thing tying this list to those buttons");
+  chk(/tft\.drawFastHLine\(/.test(sect),
+      "the two sections are separated by the same full-width rule the header uses");
+
+  // ---- 8. THE LANES THE SECTION DRAWS INTO ----
+  const maxW = W - 24;                       // the reader's own text lane
+  const indent = 3 * c.TEXT_ADV;             // parsed as `3 * TEXT_ADV` at the site
+  chk(new RegExp(`const int indent = 3 \\* TEXT_ADV;`).test(sect),
+      `the description gutter is 3 * TEXT_ADV = ${indent}px - the width of the "N. " it hangs under`);
+  const optCap = +OPT_DECL[2] - 1;           // askOpts' own second dimension
+  const labelW = widthB(b, T_BODY, "9. " + "M".repeat(optCap));
+  chk(labelW <= maxW,
+      `a numbered option label (${optCap} chars + "N. ") is ${labelW}px in the ${maxW}px lane - one line,` +
+      " so the numbering can never wrap away from its description");
+  const descCols = Math.floor((maxW - indent) / c.TEXT_ADV);
+  chk(descCols * 3 >= OPT_DESC_MAX_BYTES,
+      `the indented lane holds ${descCols} chars/line, so the hook's ${OPT_DESC_MAX_BYTES}-byte cap` +
+      ` needs ${Math.ceil(OPT_DESC_MAX_BYTES / descCols)} lines - well inside drawWrappedText's 80-line stop`);
+
+  // ---- 9. THE SIGNPOST ROW ----
+  // A long detail can push the options onto page 2. That is acceptable only
+  // because the reader SAYS SO, in a row visLines gave up for it - so the row has
+  // to exist, has to be reserved, and has to name the SAME heading the section
+  // opens with.
+  const LBL = optSectionLabel();
+  chk(/visLines--;/.test(readerArm),
+      "one body row is RESERVED for the signpost when there is a second section - drawn into" +
+      " an unreserved row it would land on body text");
+  chk(readerArm.includes("ASK_OPT_SECTION_LABEL") && sect.includes("ASK_OPT_SECTION_LABEL"),
+      `the signpost and the section heading are one string ("${LBL}") - a reader told to look` +
+      " for one heading and shown another is worse than no signpost");
+  const hintW = widthB(b, T_BODY, `${LBL} - PAGE 9`);
+  chk(hintW <= maxW, `the signpost "${LBL} - PAGE 9" is ${hintW}px in the ${maxW}px lane`);
+  chk(widthB(b, T_BODY, LBL) <= maxW, `the section heading "${LBL}" is ${widthB(b, T_BODY, LBL)}px in the same lane`);
+  for (const id of steps) {
+    const step = c[id];
+    const vis = Math.floor((c.READER_CTRL_Y - 8 - c.READER_TEXT_TOP) / step) - 1;
+    const inkEnd = c.READER_TEXT_TOP + vis * step + cell - 1;
+    chk(inkEnd < c.READER_CTRL_Y,
+        `at ${id} the signpost row inks to ${inkEnd}, clear of the control bar at ${c.READER_CTRL_Y}` +
+        ` by ${c.READER_CTRL_Y - inkEnd}px (${vis} body lines)`);
+  }
+}
 for (const b of [1, 2]) {
   const c = B[b], [W, H] = PANEL[b];
   const contentBottom = H - c.FOOTER_H;
@@ -2928,12 +3181,14 @@ for (const b of [1, 2]) {
   m = `ask badge row starts at +${c.ASK_BADGE_Y}, inside the +${c.DETAIL_HEAD_H} header touch band`;
   chk(c.ASK_BADGE_Y >= c.DETAIL_HEAD_H,
       `ask badge at +${c.ASK_BADGE_Y} clears the ${c.DETAIL_HEAD_H}px header touch band`, isKnown(b, m));
+  const CHIP = chipLabel(b);
   chk(1 + c.ASK_READ_BTN_H <= c.DETAIL_HEAD_H,
-      `READ ALL chip +1..+${c.ASK_READ_BTN_H} fits the ${c.DETAIL_HEAD_H}px header band`);
+      `"${CHIP}" chip +1..+${c.ASK_READ_BTN_H} fits the ${c.DETAIL_HEAD_H}px header band`);
   chk(c.ASK_READ_BTN_X + c.ASK_READ_BTN_W === W - c.CARD_X,
-      `READ ALL right-aligned to the card margin: ${c.ASK_READ_BTN_X}+${c.ASK_READ_BTN_W} = ${W - c.CARD_X}`);
-  chk(widthB(b, T_BODY, "READ ALL") < c.ASK_READ_BTN_W - 8,
-      `"READ ALL" ${widthB(b, T_BODY, "READ ALL")}px inside the ${c.ASK_READ_BTN_W}px chip`);
+      `"${CHIP}" right-aligned to the card margin: ${c.ASK_READ_BTN_X}+${c.ASK_READ_BTN_W} = ${W - c.CARD_X}`);
+  chk(widthB(b, T_BODY, CHIP) < c.ASK_READ_BTN_W - 8,
+      `"${CHIP}" ${widthB(b, T_BODY, CHIP)}px inside the ${c.ASK_READ_BTN_W}px chip`);
+  askReaderChip(b, c, W);
   // Board 1's badge inks +27..+39 against a title at +39, i.e. it shares the
   // badge's own last row - harmless with Cozette (whose bottom row is blank for
   // every glyph without a descender) but not a clearance, and not reproduced.

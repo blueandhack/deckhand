@@ -1331,6 +1331,26 @@ const int ASK_OPT_GAP = 8;
 const int ASK_READ_BTN_X = 218;
 const int ASK_READ_BTN_W = 90;
 const int ASK_READ_BTN_H = 46;
+// THE LABEL IS NOT "READ ALL" ON THIS BOARD, and the change is the whole cost of
+// making one chip serve two things. The ask header has exactly ONE top-right
+// slot; this board's chip now opens a reader carrying the question's detail AND
+// every option's description, so it appears when EITHER the detail overflowed or
+// any description exists.
+//
+// "READ ALL" was a promise about the DETAIL, and in the new case it is a lie in
+// the direction that costs information: a detail that already fits, beside a chip
+// saying READ ALL, tells a reader there is nothing behind it - so the
+// descriptions would be reachable and never found. "READ MORE" is true in all
+// three states (detail cut / descriptions present / both) and claims only the
+// one thing they share. 9 characters at TEXT_ADV 8 is 72px in a 90px chip, so it
+// stays one line and the label's derived centre is unchanged.
+//
+// A MACRO, not a `const char*`: it has to be a literal at the drawString site to
+// cost nothing, and the same shape WAKE_HINT already uses in power.ino for a
+// per-board string. sessions-geom-check.mjs PARSES it out of this header and
+// measures it against ASK_READ_BTN_W, so a longer label fails rather than
+// overflowing the chip.
+#define ASK_READ_BTN_LABEL "READ MORE"
 // The ask screen's header stack, below a 46px READ ALL chip ending at +46:
 // the badge row at +54 (8px of air, the DETAIL_AIR rhythm) inking +54..+66, and
 // the title at +75 (another 8) taking up to 2 lines of 17 to +108. Board 1's

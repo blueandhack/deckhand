@@ -441,6 +441,13 @@ const int ASK_OPT_GAP = 4;
 const int ASK_READ_BTN_X = 150;
 const int ASK_READ_BTN_W = 78;
 const int ASK_READ_BTN_H = 24;
+// THE CHIP'S LABEL IS PER BOARD because the two boards' chips offer different
+// things. This board draws no option descriptions (ASK_OPT_DESC_BYTES is a
+// 1-byte placeholder here), so the chip means exactly what it always meant:
+// the whole of a detail that did not fit. A MACRO rather than a `const char*`
+// so it costs this board nothing at all - the same shape WAKE_HINT uses in
+// power.ino, and this board's binary is held byte-identical.
+#define ASK_READ_BTN_LABEL "READ ALL"
 // The ask screen's own header stack, below "< Back": the kind badge (with the
 // session name right-aligned on the same row) and then the question title.
 const int ASK_BADGE_Y = 27;

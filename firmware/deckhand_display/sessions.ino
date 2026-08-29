@@ -1814,6 +1814,54 @@ bool askVoiceTooLong(int idx) {
   return countWrappedLines(sessions[idx].askVoiceText, FONT_CODE, CARD_W - 8) >
          ASK_VOICE_MAX_LINES;
 }
+// ---- WHAT THE HEADER CHIP OFFERS - ONE CHIP, ONE READER, TWO SECTIONS ----
+// The ask header has exactly ONE top-right slot and READ ALL already owned it.
+// Three other resolutions were considered and rejected, and the reasons are the
+// useful part:
+//   * give the new button the slot whenever descriptions exist - a long detail
+//     becomes unreachable exactly when the question is most complex. This repo's
+//     rule is never to offer a control that cannot work; removing a working one
+//     is worse.
+//   * two half-width chips - 45px each on this board, under TAP_MIN (46), and
+//     each label shrinks to ~5 characters.
+//   * move the detail into the reader always - it costs the at-a-glance command
+//     preview that makes a permission prompt answerable in one tap.
+// So the chip opens ONE reader showing the detail FIRST and then the options with
+// their descriptions, paged as a single document - see drawReader().
+//
+// SHARED BY THE DRAW AND THE TOUCH HANDLER so they cannot disagree about whether
+// the chip is there: drawn-but-dead and tappable-but-dead are two different bugs,
+// and this repo has paid for the second one already (the record button, gated in
+// fabVisible() rather than at its draw sites).
+#if BOARD_USES_TFT_ESPI
+// Board 1's ASK_OPT_DESC_BYTES is a 1-byte placeholder - every slot is
+// permanently empty - so there is nothing a description could add here.
+//
+// A FUNCTION-LIKE MACRO RATHER THAN AN `inline`, and that is a measured decision
+// rather than a style one. `inline bool askReadOffered(int)` returning askOverflow
+// is semantically identical to the bare global it replaces, and it still moved
+// board 1's binary: same 1386934 bytes, different CONTENT - GCC allocated
+// different registers throughout handleAskTouch for the argument it then
+// discarded. Exactly the case `--check 1` exists to see and a size comparison
+// cannot. The macro discards the index TEXTUALLY, so board 1 compiles the
+// identical expression it always did, and both call sites still read as one
+// shared predicate on both boards - which is the property that matters.
+#define askReadOffered(idx) (askOverflow)
+#else
+// Any option carrying a description is something to read, whether or not the
+// detail preview was cut. Bounded by askOptCount AND by the array itself: the
+// parse never fills a slot past askOptCount, and a count that somehow exceeded
+// the array would otherwise read off the end of the struct.
+bool askOptDescsPresent(int idx) {
+  if (idx < 0 || idx >= sessionCount) return false;
+  const SessionInfo& s = sessions[idx];
+  const int slots = (int) (sizeof(s.askOptDesc) / sizeof(s.askOptDesc[0]));
+  for (int k = 0; k < s.askOptCount && k < slots; k++)
+    if (s.askOptDesc[k][0]) return true;
+  return false;
+}
+inline bool askReadOffered(int idx) { return askOverflow || askOptDescsPresent(idx); }
+#endif
 // The answer screen: question title, paged detail text, and one big button
 // per option. Tapping an option sends the answer to the host, which hands
 // it to the (waiting) session hook to decide the real prompt.
@@ -1888,8 +1936,9 @@ void drawAskDetail(int idx) {
   tft.setTextColor(COLOR_ACCENT, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("< Back", CARD_X, CONTENT_Y + DETAIL_BACK_Y);
-  // (READ ALL button lands top-right of this row, drawn below once the
-  // overflow question is settled - far away from the decision buttons.)
+  // (The reader chip lands top-right of this row, drawn below once the overflow
+  // and description questions are both settled - far away from the decision
+  // buttons, so reading cannot be fat-fingered into an Allow/Deny.)
 
   // What kind of decision this is, at a glance; session name on the right.
   const char* badge = isPerm ? "PERMISSION REQUEST" : (isPlan ? "PLAN APPROVAL" : "QUESTION");
@@ -1983,6 +2032,22 @@ void drawAskDetail(int idx) {
   drawWrappedText(s.askDetail, CARD_X + pad, textTop + pad, dFont, dLineH, textW,
                   0, visLines, COLOR_VALUE, textBg);
 
+  // THE CHIP'S DRAW IS WRITTEN TWICE, ONE COPY PER BOARD, AND THAT IS THE PRICE OF
+  // BOARD 1'S BYTE-IDENTITY. On board 1 the cut marker and the chip are ONE
+  // condition and always have been; on board 2 they are two, because the chip now
+  // also opens on descriptions with no overflow at all. Three cheaper shapes were
+  // tried and MEASURED against `board-baseline.mjs --check 1`, which is the only
+  // instrument that can see any of them:
+  //   * two sibling `if`s sharing one chip block   -> +8 bytes of board-1 flash
+  //   * chip nested inside `if (askReadOffered)`   -> +0 bytes, DIFFERENT content
+  //     (one `mul16s` with its operands swapped, from the cut marker moving a
+  //     scope deeper) - exactly the case a size comparison cannot see
+  //   * the chip factored into drawAskReadChip()   -> +60 bytes; it is not
+  //     `static` (the Arduino build gives every .ino function external linkage
+  //     through its generated prototype) so it was emitted and called
+  // So board 1's arm below is character-for-character what it has always been.
+  // The duplication is guarded instead of trusted: sessions-geom-check.mjs parses
+  // BOTH arms and fails if they stop drawing the same chip.
   if (askOverflow) {
     // Cut marker at the preview's edge...
     setUIFont(1);
@@ -1990,7 +2055,8 @@ void drawAskDetail(int idx) {
     tft.setTextDatum(TR_DATUM);
     tft.drawString("...", tft.width() - CARD_X - pad, textTop + pad + (shown - 1) * dLineH);
     tft.setTextDatum(TL_DATUM);
-    // ...and the READ ALL button up in the header row.
+#if BOARD_USES_TFT_ESPI
+    // ...and the READ ALL chip up in the header row.
     uiFillRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, ASK_READ_BTN_H, R_SM,
                 COLOR_CARD, COLOR_BG);
     uiStrokeRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, ASK_READ_BTN_H, R_SM,
@@ -2000,10 +2066,34 @@ void drawAskDetail(int idx) {
     tft.setTextDatum(MC_DATUM);
     // Centred in the chip's own height, not at a fixed +13: board 2's chip is
     // TAP_MIN tall and the label would otherwise sit up against its top edge.
-    tft.drawString("READ ALL", ASK_READ_BTN_X + ASK_READ_BTN_W / 2,
+    // The LABEL is per-board - see ASK_READ_BTN_LABEL in the board headers.
+    tft.drawString(ASK_READ_BTN_LABEL, ASK_READ_BTN_X + ASK_READ_BTN_W / 2,
+                   CONTENT_Y + 1 + ASK_READ_BTN_H / 2);
+    tft.setTextDatum(TL_DATUM);
+#endif
+  }
+#if !BOARD_USES_TFT_ESPI
+  // The cut marker above belongs to the PREVIEW - it says text was dropped HERE.
+  // The chip is a different question: it says there is a reader worth opening,
+  // which is also true when the detail fits whole and the options carry
+  // descriptions. handleAskTouch tests the SAME predicate, so the chip is never
+  // drawn dead and never tappable when absent.
+  if (askReadOffered(idx)) {
+    uiFillRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, ASK_READ_BTN_H, R_SM,
+                COLOR_CARD, COLOR_BG);
+    uiStrokeRound(ASK_READ_BTN_X, CONTENT_Y + 1, ASK_READ_BTN_W, ASK_READ_BTN_H, R_SM,
+                  BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
+    setUIFont(2);
+    tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
+    tft.setTextDatum(MC_DATUM);
+    // Centred in the chip's own height, not at a fixed +13: board 2's chip is
+    // TAP_MIN tall and the label would otherwise sit up against its top edge.
+    // The LABEL is per-board - see ASK_READ_BTN_LABEL in the board headers.
+    tft.drawString(ASK_READ_BTN_LABEL, ASK_READ_BTN_X + ASK_READ_BTN_W / 2,
                    CONTENT_Y + 1 + ASK_READ_BTN_H / 2);
     tft.setTextDatum(TL_DATUM);
   }
+#endif
 
   // MIRROR mode: the Mac owns this decision, so the options are shown as a
   // read-only list - flat rows, no button chrome, no fill - and the row above
@@ -2301,9 +2391,11 @@ bool handleAskTouch(int sx, int sy) {
     }
     return true;
   }
-  // Header row: READ ALL on the right (when overflowing), back on the left.
+  // Header row: the reader chip on the right, back on the left. The SAME
+  // predicate the draw used, so a chip that is not there can never claim a tap -
+  // the whole right end of the row is its zone, which is why that matters.
   if (sy < CONTENT_Y + DETAIL_HEAD_H) {
-    if (askOverflow && sx >= ASK_READ_BTN_X - 6) {
+    if (askReadOffered(detailIndex) && sx >= ASK_READ_BTN_X - 6) {
       readerActive = true;
       readerPage = 0;
       drawReader();
