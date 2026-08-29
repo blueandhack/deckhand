@@ -540,6 +540,14 @@ function armFor(src, b) {
       else throw new Error(`armFor(): unresolvable directive "${t}"`);
       continue;
     }
+    // #elif IS A DIRECTIVE THIS FUNCTION CANNOT RESOLVE, AND IT USED TO FALL
+    // THROUGH AS AN ORDINARY CONTENT LINE. That is precisely the failure the
+    // comment above declares impossible: injecting `#elif 0` into
+    // drawSessionDetail's guard emitted the directive itself as content AND left
+    // both arms mis-resolved (the #elif's own arm joined whichever arm was open),
+    // and every assertion below passed - 0 failures - on a body that is neither
+    // board's. Same hard error as an unknown #if, for the same reason.
+    if (t.startsWith("#elif")) throw new Error(`armFor(): unresolvable directive "${t}"`);
     if (t === "#else")  { stack.push(!stack.pop()); continue; }
     if (t === "#endif") { if (!stack.length) throw new Error("armFor(): stray #endif"); stack.pop(); continue; }
     if (stack.every(Boolean)) out.push(line);
@@ -562,6 +570,47 @@ function fnSrc(sig) {
   return f.slice(0, z);
 }
 function detailArm(b) { return armFor(fnSrc("void drawSessionDetail(int idx) {"), b); }
+// ---- A CALL'S ARGUMENTS, PARSED - NOT ITS TEXT, MATCHED ----
+// Every "is this draw site still here" test in this file used to be a regex over
+// the call's ARGUMENT SHAPE (`drawStatusPill(LX, cy,`), and the reviewer dodged
+// two of them by perturbing an argument: re-adding a pill as
+// `drawStatusPill(LX, cy + 0, ...)` escaped `!hasPill` AND dropped the pill from
+// the ink walk, so a card whose content really ended at +341 in a 300px card was
+// reported as ending at +295. An assertion that exists to catch an overflowing
+// card actively UNDER-REPORTED it. The presence tests below therefore match the
+// CALL and nothing else, and where an argument's VALUE matters it is parsed and
+// evaluated here rather than pattern-matched.
+//
+// Returns the top-level comma-separated argument expressions of the first call to
+// `name` in `body`, or null if there is none.
+function callArgs(body, name) {
+  const at = body.indexOf(name + "(");
+  if (at < 0) return null;
+  let i = at + name.length + 1, depth = 1, cur = "";
+  const out = [];
+  for (; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") { depth--; if (!depth) break; }
+    if (depth === 1 && ch === ",") { out.push(cur.trim()); cur = ""; continue; }
+    cur += ch;
+  }
+  if (depth !== 0) throw new Error(`callArgs(): unbalanced parens on ${name}(`);
+  out.push(cur.trim());
+  return out.map(a => a.replace(/\s+/g, " "));
+}
+// An integer C expression over this board's own constant table. An identifier the
+// table does not declare is a hard error, for the same reason armFor() throws on
+// an unknown directive: a silent fallback would let the assertions below describe
+// a geometry nothing draws.
+function evalConst(expr, c) {
+  const sub = expr.replace(/[A-Za-z_][A-Za-z0-9_]*/g, (id) => {
+    if (!(id in c)) throw new Error(`evalConst(): "${id}" is not a constant this board declares (in "${expr}")`);
+    return String(c[id]);
+  });
+  if (!/^[-+*/()0-9\s]+$/.test(sub)) throw new Error(`evalConst(): "${expr}" is not an integer expression`);
+  return Math.trunc(Function(`"use strict"; return (${sub});`)());
+}
 // THE SPINE IS NOT A RECT, so `spineL + SESSION_SPINE_W - 1` is NOT its rightmost
 // ink and must never be used as one - that model is what let a real overlap ship.
 // This returns the rightmost x the spine's CAPSULE alone would ink at a given
@@ -2084,8 +2133,19 @@ for (const b of [1, 2]) {
   // documented worst case (+213) exactly, which is the evidence that the model is
   // the device's and not a paraphrase of it.
   const cardY = c.DETAIL_CARD_Y, A = c.DETAIL_AIR, maxW = c.CARD_W - 2 * c.PAD;
-  chk(2 + c.MSG_BTN_H <= c.DETAIL_CARD_DY,
-      `TYPE chip +2..+${2 + c.MSG_BTN_H - 1} in the header row clears the card at +${c.DETAIL_CARD_DY}`);
+  // WHERE THE CHIP ACTUALLY SITS, READ FROM msgBtnY() - THIS MODELLED IT AT +2.
+  // +2 is board 1's literal and board 1's only: board 2's chip shrank to 26 in a
+  // 50px header row and msgBtnY() now CENTRES it there, at +12. The bound below
+  // is conservative enough that the wrong model still passed, so nothing was
+  // reported wrong - but the message printed a position the panel never draws,
+  // which is the same defect as an assertion describing a layout that is not
+  // rendered. Parsed off the function's own arm for this board, so the two cannot
+  // drift again.
+  const byM = armFor(fnSrc("int msgBtnY() {"), b).match(/return CONTENT_Y \+ ([^;]+);/);
+  chk(!!byM, "msgBtnY() places the TYPE chip at CONTENT_Y + <expression>");
+  const chipY = byM ? evalConst(byM[1], c) : 2;
+  chk(chipY + c.MSG_BTN_H <= c.DETAIL_CARD_DY,
+      `TYPE chip +${chipY}..+${chipY + c.MSG_BTN_H - 1} in the header row clears the card at +${c.DETAIL_CARD_DY}`);
   chk(c.MSG_BTN_H + 2 <= c.DETAIL_HEAD_H,
       `TYPE chip (${c.MSG_BTN_W}x${c.MSG_BTN_H}) fits the ${c.DETAIL_HEAD_H}px header touch band`);
   // The header row holds exactly two things and they are anchored to opposite
@@ -2197,20 +2257,95 @@ for (const b of [1, 2]) {
   // comment MENTIONING an expression instead of the statement itself.
   const detailBody = detailArm(b);
   const banded  = /drawSessionBand\(/.test(detailBody);
-  const hasPill = /drawStatusPill\(LX, cy,/.test(detailBody);
+  // MATCHED ON THE CALL, NEVER ON ITS ARGUMENTS. This read
+  // `/drawStatusPill\(LX, cy,/` and was dodged by re-adding the pill as
+  // `drawStatusPill(LX, cy + 0, ...)`: !hasPill passed, the pill left the ink
+  // walk, and a card whose content ended at +341 in a 300px card reported +295.
+  // An argument list is the one part of a draw site that can change while the
+  // draw still happens, so it is the one part a presence test must not read.
+  const hasPill = /drawStatusPill\(/.test(detailBody);
   // §7's meta line against the two column pairs it replaces. Both anchors are on
   // the DRAW STATEMENT and on nothing else: `tft.drawString("MODEL", LX, cy)` and
   // `tft.drawString(metaFit, LX, cy)`. A looser "MODEL" or "meta" match would hit
   // the prose around them - this file has already shipped a regex that parsed a
   // comment mentioning an expression instead of the statement itself, and the
   // comments here are longer than the code.
-  const hasCols = /tft\.drawString\("MODEL", LX, cy\);/.test(detailBody);
-  const hasMeta = /tft\.drawString\(metaFit, LX, cy\);/.test(detailBody);
+  // Same rule as hasPill: the CALL and the thing it draws, not where it draws it.
+  // `"MODEL"` is the column pair's own label and `metaFit` the meta line's own
+  // buffer, so neither can be satisfied by anything but the block it names -
+  // while `, LX, cy);` was an argument list, and dodgeable by adding `+ 0`.
+  const hasCols = /tft\.drawString\("MODEL"/.test(detailBody);
+  const hasMeta = /tft\.drawString\(metaFit\b/.test(detailBody);
   const startM  = detailBody.match(/int cy = cardY \+ ([A-Za-z_][A-Za-z0-9_]*);/);
   chk(!!startM, "drawSessionDetail's body cursor starts at `cardY + <named constant>`");
   const startId = startM ? startM[1] : "DETAIL_PAD_Y";
   chk(startId in c, `the detail body cursor's start (${startId}) is a constant this board declares`);
   const cyStart = startId in c ? c[startId] : 0;
+  // ---- THE BAND'S ORIGIN, PARSED OFF ITS CALL - IT USED TO BE TRANSCRIBED ----
+  // `banded` above says only that drawSessionBand() is CALLED; the ink walk below
+  // then transcribed where it lands, as +BORDER_CARD..+SESSION_BAND_H-1. The
+  // reviewer changed the call to `drawSessionBand(CARD_X, cardY, CARD_W, idx,
+  // color)` - which paints the status-coloured band OUTSIDE the card's rounded
+  // outline, the exact failure drawSessionBand's own comment names - and got 0
+  // failures, because the walk went on describing an inset the source no longer
+  // had. The three arguments that PLACE it are therefore parsed and evaluated
+  // against this board's own constants, the same way startM parses the body
+  // cursor, and the walk is fed the parsed origin rather than a restated one.
+  //
+  // What they must be is the card INTERIOR: inset by the card's own stroke on
+  // both sides. That is what makes the band's top corners the card's own corners
+  // and keeps its fill off the outline.
+  let bandDY = c.BORDER_CARD, bandH = c.SESSION_BAND_H - c.BORDER_CARD;
+  if (banded) {
+    const a = callArgs(detailBody, "drawSessionBand");
+    chk(!!a && a.length >= 3, "drawSessionBand's call site has an x, y and width to read");
+    const env = { ...c, cardY: c.DETAIL_CARD_Y };
+    const bx = a ? evalConst(a[0], env) : 0;
+    const by = a ? evalConst(a[1], env) : 0;
+    const bw = a ? evalConst(a[2], env) : 0;
+    bandDY = by - c.DETAIL_CARD_Y;
+    // The band's DRAWN height is not SESSION_BAND_H - drawSessionBand takes the
+    // interior and subtracts the card's top border itself, because SESSION_BAND_H
+    // is measured from the card's OUTER top (the sessions tab starts its body at
+    // `y + SESSION_BAND_H`). That subtraction is read out of the function rather
+    // than repeated here, so the walk's ink end moves with it.
+    const hm = fnSrc("void drawSessionBand(int x, int y, int w, int i, uint16_t col) {")
+                 .match(/int h = ([^;]+);/);
+    chk(!!hm, "drawSessionBand derives its drawn height into a local `h`");
+    bandH = hm ? evalConst(hm[1], c) : bandH;
+    chk(bx === c.CARD_X + c.BORDER_CARD && bw === c.CARD_W - 2 * c.BORDER_CARD,
+        `the detail band takes the card INTERIOR: x=${bx} w=${bw} against the interior's ` +
+        `x=${c.CARD_X + c.BORDER_CARD} w=${c.CARD_W - 2 * c.BORDER_CARD} - a band on the card's ` +
+        `own box paints its fill outside the rounded outline`);
+    chk(bandDY === c.BORDER_CARD,
+        `the detail band starts at cardY + ${bandDY}, i.e. on the interior's own top row ` +
+        `(+${c.BORDER_CARD}) - not over the card's ${c.BORDER_CARD}px stroke`);
+    // ---- THE BAND OVERHANGS THE BODY'S TEXT LANE, AND NEITHER PAD WAS MOVED ----
+    // SESSION_BAND_PAD is measured from the card INTERIOR, so the band's mark
+    // starts at CARD_X + BORDER_CARD + SESSION_BAND_PAD and its duration ends the
+    // same distance in from the other side. The body's LX is CARD_X + PAD. On the
+    // sessions tab those two are the SAME number by construction - SESSION_BAND_PAD's
+    // own comment says "band and body share it" - and this card is the first place
+    // in the sketch where the band meets a different pad, so it overhangs the body
+    // by PAD - (BORDER_CARD + SESSION_BAND_PAD) at each end.
+    //
+    // NEITHER WAS ALIGNED, DELIBERATELY. Changing SESSION_BAND_PAD would move the
+    // band's contents away from the sessions tab's, which is the whole property
+    // that makes it the same band; changing this card's PAD would move every wrap
+    // point in the body, and the meta line has only 8px of slack. The overhang is
+    // cosmetic at this size. What must not happen is it widening in silence, so
+    // the relationship is pinned rather than the number: the two insets are
+    // measured from frames of reference that differ by exactly the card's own
+    // stroke (the band from the interior, the body from the card's edge), so they
+    // must agree to within that stroke. A change to EITHER pad in EITHER direction
+    // leaves that band and fails here by name.
+    const bandInset = c.BORDER_CARD + c.SESSION_BAND_PAD;   // band content, from CARD_X
+    const over = c.PAD - bandInset;                          // + = band wider than the body
+    chk(Math.abs(over) <= c.BORDER_CARD,
+        `band lane inset ${bandInset} (BORDER_CARD ${c.BORDER_CARD} + SESSION_BAND_PAD ` +
+        `${c.SESSION_BAND_PAD}) against the body's PAD ${c.PAD}: the band overhangs by ${over}px ` +
+        `at each end, within the ${c.BORDER_CARD}px stroke the two frames of reference differ by`);
+  }
   // ---- EVERY LITERAL ON THIS CARD IS INSIDE THE FACE'S OWN CODEPOINT RANGE ----
   // ASSERTED AS AN ABSENCE, AND ASSERTED FOR THE RANGE RATHER THAN FOR ONE
   // SEPARATOR. The rule is "this face cannot draw it", not "use a hyphen": a middle
@@ -2319,7 +2454,7 @@ for (const b of [1, 2]) {
   // The band is the card's first block and starts at its very top - it is drawn on
   // the interior, so its ink runs +BORDER_CARD..+SESSION_BAND_H-1, and the row
   // above it is the card's own border rather than a gap.
-  if (banded) blk.push(["BAND", c.BORDER_CARD, c.SESSION_BAND_H - 1]);
+  if (banded) blk.push(["BAND", bandDY, bandDY + bandH - 1]);
   blk.push(["name", cy, cy + lineHB(b, NF) - 1]);            cy += c.DETAIL_NAME_STEP;
   blk.push(["title", cy, cy + BODYH - 1]);                   cy += c.DETAIL_TITLE_STEP;
   if (hasPill) {
