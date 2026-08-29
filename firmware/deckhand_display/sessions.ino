@@ -2411,10 +2411,13 @@ void drawSessionDetail(int idx) {
   // whole card every tick, which is the flicker the discipline exists to prevent.
   // Board 1 escapes that by ticking "for 12m - 14:31" out of renderDetailDuration;
   // here the band already owns the ticking half. The status-since instant is
-  // hostNowSec() minus the elapsed time, and BOTH advance from millis() at the
-  // same rate - so their difference is exactly constant between repaints, and
-  // `status` is already in the signature, so a status change repaints and
-  // recomputes it.
+  // hostNowSec() minus the elapsed time, and both advance from millis() at the same
+  // rate - so it is STABLE to within the +-1s the two independent floor(ms/1000)
+  // terms can disagree by, not exactly constant. That residual jitter costs nothing
+  // here and it is worth being precise about why: this value is computed only
+  // inside a full-card repaint and is compared against no cache, so a 1s wobble can
+  // never produce the repaint-per-tick that drawing s.actSec would. `status` is
+  // already in the signature, so a status change repaints and recomputes it.
   long nowSec = hostNowSec();
   long elapsed = (long)((millis() - s.statusSinceMillis) / 1000);
   // No clock yet, or a status older than a day, reads "earlier" rather than a time

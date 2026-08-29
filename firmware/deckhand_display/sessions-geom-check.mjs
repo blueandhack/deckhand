@@ -138,7 +138,14 @@ const CAP = {
   name: 23, status: 9, title: 43, path: 67, prompt: 103, model: 23, branch: 23,
   askPid: 11, askVoiceSha: 19, sub: 35 /* char sub[36] in drawSessionRow */,
   agent: 3 /* char agent[4] - "cc" | "cx" */,
-  macTag: 6 /* macTag() caps at 6 on the Mac */, emojiId: 3 /* "-1".."15" */,
+  // THE DEVICE'S BUFFER IS AUTHORITATIVE, NOT THE HOST'S CAP. This was 6 - macTag()'s
+  // cap on the Mac side - while the width arithmetic further down read 7 off
+  // HostLink's own `char tag[8]`, so one field had two bounds in one file and the
+  // signature sums understated by a byte. dispMacTag() returns that buffer, and a
+  // payload from any host is truncated into it, so 7 is what the device can actually
+  // hold and draw however the Mac side's cap moves. Parsed, for the same reason
+  // everything else here is.
+  macTag: macTagMax(), emojiId: 3 /* "-1".."15" */,
 };
 const T_HERO = 4, T_HEAD = 3, T_BODY = 2, T_META = 1;
 // drawSessionRow's NAME_RUNGS[], largest first. Kept in the same order as the
@@ -469,6 +476,38 @@ function macEmojiSize(b) {
 // than from the host's macTag() 6-character cap. The device is what draws it, and
 // `char tag[8]` is what any host's payload is truncated into - so it is the bound a
 // lane has to survive even if the Mac side's cap ever moves.
+// THE FACE'S OWN DECLARED CODEPOINT RANGE, off the GFXfont struct's `first`/`last`
+// fields rather than transcribed as 0x20..0x7E. That range is the reason a middle
+// dot, an em-dash or a curly quote draws as a BLANK BOX on this device - a fact this
+// repo has now met four times (the Mac tag's ASCII "/", fitText's three dots, the
+// PAIRED MACS marker, and §7's own mockup) - so the checker must read it from the
+// font it is judging, not from memory. A future face with a wider range would then
+// relax this on its own instead of failing.
+function fontRange(face) {
+  const src = fs.readFileSync(`${DIR}/${face}.h`, "utf8");
+  const m = src.match(new RegExp(`const GFXfont ${face} PROGMEM = \\{[\\s\\S]*?(0x[0-9A-Fa-f]+),\\s*(0x[0-9A-Fa-f]+),\\s*\\d+\\s*\\}`));
+  if (!m) throw new Error(`${face}: no GFXfont first/last range found`);
+  return [parseInt(m[1], 16), parseInt(m[2], 16)];
+}
+// Every double-quoted literal in a body, with comments and char literals skipped by
+// a real scan rather than by a regex - a `//` comment can legally contain a quote,
+// and stripping comments with a pattern is how a checker ends up parsing prose.
+function stringLiterals(src) {
+  const out = [];
+  for (let i = 0; i < src.length; ) {
+    const c = src[i], n = src[i + 1];
+    if (c === "/" && n === "/") { while (i < src.length && src[i] !== "\n") i++; continue; }
+    if (c === "/" && n === "*") { i += 2; while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++; i += 2; continue; }
+    if (c === "'") { i++; while (i < src.length && src[i] !== "'") i += src[i] === "\\" ? 2 : 1; i++; continue; }
+    if (c === '"') {
+      i++; let lit = "";
+      while (i < src.length && src[i] !== '"') { if (src[i] === "\\") { lit += src[i]; i++; } lit += src[i]; i++; }
+      out.push(lit); i++; continue;
+    }
+    i++;
+  }
+  return out;
+}
 function macTagMax() {
   const m = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8")
               .match(/struct HostLink\s*\{[\s\S]*?\bchar\s+tag\[(\d+)\]/);
@@ -2152,6 +2191,28 @@ for (const b of [1, 2]) {
   const startId = startM ? startM[1] : "DETAIL_PAD_Y";
   chk(startId in c, `the detail body cursor's start (${startId}) is a constant this board declares`);
   const cyStart = startId in c ? c[startId] : 0;
+  // ---- EVERY LITERAL ON THIS CARD IS INSIDE THE FACE'S OWN CODEPOINT RANGE ----
+  // ASSERTED AS AN ABSENCE, AND ASSERTED FOR THE RANGE RATHER THAN FOR ONE
+  // SEPARATOR. The rule is "this face cannot draw it", not "use a hyphen": a middle
+  // dot, an em-dash, a curly quote and a real ellipsis all fail the same way and all
+  // fail SILENTLY, as a blank box that no capture and no geometry can see. This repo
+  // has met that fact four times - the Mac tag's ASCII "/", fitText's three ASCII
+  // dots, the PAIRED MACS live-Mac marker, and §7's own mockup, which reached for
+  // U+00B7 and would have shipped blank boxes.
+  //
+  // The bound is PARSED off the GFXfont struct of the face this board draws body
+  // text in, so a future face with a wider range relaxes this on its own. Both
+  // boards are checked, on the arm each actually compiles - Cozette declares the
+  // same range, so the rule was never board 2's alone.
+  {
+    const [lo, hi] = fontRange(UI[b][T_META].face);
+    const bad = stringLiterals(detailBody)
+      .filter(t => [...t].some(ch => ch.codePointAt(0) < lo || ch.codePointAt(0) > hi));
+    chk(bad.length === 0,
+        `every string literal on the detail card is inside ${UI[b][T_META].face}'s declared ` +
+        `0x${lo.toString(16)}..0x${hi.toString(16)} - anything outside it draws as a BLANK BOX` +
+        (bad.length ? `; offending: ${bad.map(t => JSON.stringify(t)).join(", ")}` : ""));
+  }
   if (b === 2) {
     // §7's three halves, each its own assertion so a partial revert names itself.
     chk(banded,
@@ -2274,8 +2335,30 @@ for (const b of [1, 2]) {
     chk(blk[i][1] - blk[i - 1][2] - 1 >= 0,
         `detail ${blk[i - 1][0]} -> ${blk[i][0]}: gap ${blk[i][1] - blk[i - 1][2] - 1}`);
   const inkEnd = blk[blk.length - 1][2];
+  const slack = c.DETAIL_CARD_H - c.BORDER_CARD - 1 - inkEnd;
   chk(inkEnd <= c.DETAIL_CARD_H - 3,
-      `detail content ends +${inkEnd}, clear of the 2px border at +${c.DETAIL_CARD_H - 2}..+${c.DETAIL_CARD_H - 1} (${c.DETAIL_CARD_H - 2 - inkEnd - 1} rows of slack)`);
+      `detail content ends +${inkEnd}, clear of the 2px border at +${c.DETAIL_CARD_H - 2}..+${c.DETAIL_CARD_H - 1} (${slack} rows of slack)`);
+  // ---- AND AN UPPER BOUND ON THAT SLACK, WHICH THIS CARD DID NOT HAVE ----
+  // The lower bound above only says the content FITS. Nothing said the card is not
+  // holding room it never draws - so §7's meta line, which returned 55px, could have
+  // been banked as blank card and no assertion would have noticed. Worse, a card
+  // carrying surplus quietly LOOSENS its neighbours: with 30px of new slack,
+  // DETAIL_CARD_DY and DETAIL_CARD_Y both fell out of the sweep's guarded set,
+  // because "the card still ends inside contentBottom" stops being a tight
+  // constraint once the card is nowhere near the bottom.
+  //
+  // THE BOUND IS ONE TEXT LINE, and it is derived rather than fitted to 300: a
+  // trailing gap as tall as a whole line is room for content the card does not
+  // draw, which is precisely the sparseness the running cursor replaced the
+  // hand-derived offsets to fix. It admits a BAND of sensible heights rather than
+  // one - anything from inkEnd+3 up to inkEnd+2+DETAIL_LINE_H passes - so it
+  // constrains the judgement without dictating the number. Board 1's 224-tall card
+  // carries 8 rows against a 13px line and passes on its own merits, which is the
+  // check that this is a real rule and not board 2's arithmetic wearing one.
+  chk(slack < c.DETAIL_LINE_H,
+      `detail card holds ${slack} rows of trailing slack, under the ${c.DETAIL_LINE_H}px line it ` +
+      `would otherwise be reserving for content it never draws (largest legal H here: ` +
+      `${inkEnd + c.BORDER_CARD + c.DETAIL_LINE_H})`);
   // ---- THE TWO FOOTER STRINGS, measured as BOXES rather than baselines ----
   // Both are MC_DATUM T_META. drawString centres on the ASCENT (poY -= ascent/2 on
   // the baseline it just added) and then paints a box ascent+descent tall, so a
@@ -2342,6 +2425,27 @@ for (const b of [1, 2]) {
       `history hint ends ${hintBot} inside contentBottom ${contentBottom}`);
   chk(cardY + c.DETAIL_CARD_H <= contentBottom - 8,
       `detail card ends ${cardY + c.DETAIL_CARD_H - 1}, inside contentBottom ${contentBottom}`);
+  // ---- WHERE THE CARD STARTS, which only the card's own height used to constrain ----
+  // `cardY + DETAIL_CARD_H <= contentBottom - 8` was the only thing holding
+  // DETAIL_CARD_DY, and it holds it only while the card is nearly as tall as the
+  // area - so shrinking the card released it. These two bound the ANCHOR directly
+  // and are independent of how tall the card is.
+  //
+  // DETAIL_CARD_Y is declared as CONTENT_Y + DETAIL_CARD_DY in deckhand_display.ino,
+  // and the checker parses the three as independent constants - so asserting the
+  // identity is not a tautology, it is what catches either of them moving alone.
+  chk(c.DETAIL_CARD_Y === c.CONTENT_Y + c.DETAIL_CARD_DY,
+      `DETAIL_CARD_Y ${c.DETAIL_CARD_Y} IS CONTENT_Y ${c.CONTENT_Y} + DETAIL_CARD_DY ${c.DETAIL_CARD_DY}`);
+  // The card meets the header's touch band: it may overlap it by at most its own
+  // border (board 1 does, by exactly BORDER_CARD) and may never start BELOW it,
+  // which would leave an unexplained gap between the "< Back" row and the card.
+  // Both board headers state this in prose - "the card starts exactly where the
+  // touch band ends" on board 2, "2px inside its own band" on board 1 - and nothing
+  // checked it. It is tight on both: +-1 on either constant fails.
+  const overlap = c.DETAIL_HEAD_H - c.DETAIL_CARD_DY;
+  chk(overlap >= 0 && overlap <= c.BORDER_CARD,
+      `the detail card starts at +${c.DETAIL_CARD_DY} against a +${c.DETAIL_HEAD_H} header band - ` +
+      `overlapping it by ${overlap}, at most its own ${c.BORDER_CARD}px border and never leaving a gap`);
   // The two-column pairs (MODEL / GIT BRANCH, STARTED / AGENT). drawColValue()
   // clips to the `w` it is GIVEN - verified in sessions.ino, where both the test and
   // the ellipsis budget read `w` - so the question is only whether the two columns
@@ -2420,7 +2524,41 @@ for (const b of [1, 2]) {
     chk(macEmojiSize(b) === lineHB(b, T_META),
         `the Mac icon (${macEmojiSize(b)}px) IS the ${UI[b][T_META].face} cell it shares a row ` +
         `with, so the meta block costs one line and needs no centring term`);
-    console.log(`    meta line lane ${lane}px: text ${meta} + Mac ${mac} = ${meta + mac}` +
+    // ---- THE GATING ASYMMETRY, WHICH NOTHING USED TO ASSERT ----
+    // The icon is UNGATED and the text tag is GATED, and until now both were held
+    // in place by nothing but care. Each is one condition in the source, so each
+    // gets one assertion: the rule and its guard, together.
+    //
+    // (a) THE ICON. It shows whenever one is SET, because it is personalisation -
+    // someone deliberately marked their computer - and every icon site in this
+    // sketch follows that rule. Two conditions decide it: the width term that
+    // reserves its lane, and the branch that draws it. Gating EITHER on the tag
+    // hides the icon with one Mac connected, so both are checked for any mention
+    // of the tag rather than matched against one expected spelling - a mutation
+    // can gate it as `mac[0]`, as `dispMacTag(...)[0]`, or as `*mac`.
+    const wSeed = detailBody.match(/int macW = ([^;]+);/);
+    chk(!!wSeed, "the meta line reserves the Mac cluster's width in one named expression");
+    const drawIf = detailBody.match(/if \(([^)]*)\)\s*\{[^{}]*drawEmoji\(/);
+    chk(!!drawIf, "the meta line's icon is drawn under one named condition");
+    const tagRef = /mac\[0\]|dispMacTag|\*mac\b/;
+    chk(!!wSeed && !tagRef.test(wSeed[1]),
+        `the Mac ICON is UNGATED: its width term (\`${wSeed ? wSeed[1] : "?"}\`) turns on whether an ` +
+        "icon is SET and never on the tag - an icon is personalisation, and it must show with one Mac");
+    chk(!!drawIf && !tagRef.test(drawIf[1]),
+        `the Mac ICON is UNGATED: it is drawn under \`${drawIf ? drawIf[1] : "?"}\` alone, not under ` +
+        "the tag's gate - gating it there hides it in the single-Mac case it exists for");
+    // (b) THE TAG. The opposite rule, and the opposite failure: dispMacTag()
+    // returns "" until a SECOND Mac is connected, so a tag drawn unconditionally
+    // is either blank ink or - if the gate is removed by pointing at linkTag()
+    // instead - a permanent label that disambiguates nothing. It is the presence
+    // of a guard that is asserted, not its exact text.
+    const tagDraw = detailBody.match(/(?:if \(([^)]*)\)\s*)?tft\.drawString\(mac, /);
+    chk(!!tagDraw && !!tagDraw[1] && tagRef.test(tagDraw[1]),
+        "the Mac TAG is GATED on dispMacTag() being non-empty" +
+        (tagDraw && tagDraw[1] ? ` (\`${tagDraw[1]}\`)` : " - it is drawn unconditionally") +
+        " - with one Mac its own name disambiguates nothing, and a label that appears is how " +
+        "you notice the second Mac arriving");
+      console.log(`    meta line lane ${lane}px: text ${meta} + Mac ${mac} = ${meta + mac}` +
                 ` (${lane - meta - mac} spare); with \`started\` ${withStarted + mac}`);
   }
   // The line caps against the FIELD's own byte cap - the derivation that decides

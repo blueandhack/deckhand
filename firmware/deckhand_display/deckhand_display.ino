@@ -1000,10 +1000,18 @@ char detailId[16] = "";
 // title(43) + prompt(103) + startSec as %ld(5, "86399") + askVoiceSha(19) = 328,
 // plus 10 "|" separators between those 11 fields = 338; plus the msgOffered flag
 // "|%c" (2) = 340; plus dispMacTag() "|%s" (up to 7 chars, so 8) = 348; plus the
-// icon id "|%d" (id is -1..15, so up to 2 digits, plus the separator = 3) = 351.
-// +1 for the NUL terminator = 352-byte worst case, so 384 keeps 32 bytes of
-// headroom - re-derive this comment again the next time a field is added, the
-// same way this one had to be. drawIfChanged-style comparisons only look at
+// icon id "|%d" (id is -1..15, so up to 2 digits, plus the separator = 3) = 351;
+// plus, ON BOARD 2 ONLY, the agent "|%s" (agent[4] holds 3, so 4) = 355. +1 for the
+// NUL terminator = 356-byte worst case, so 384 keeps 28 bytes of headroom - re-derive
+// this comment again the next time a field is added, the same way this one had to be.
+// (sessions-geom-check.mjs derives the same sum independently and reports 363,
+// because it budgets startSec as a full %ld rather than the 5 digits a
+// seconds-since-midnight value can actually reach - deliberately the more
+// conservative of the two.) The agent joined for board 2 because §7's band draws
+// the agent's MARK and the AGENT column that used to spell it out in text is gone;
+// board 1 still draws that column and is held byte-identical, so it does not sign it.
+//
+// drawIfChanged-style comparisons only look at
 // cacheSize bytes, so a cache shorter than the string silently stops noticing
 // changes past that point - here that would mean editing your prompt (or
 // changing your Mac's icon) never repaints the screen. The tag is in this
