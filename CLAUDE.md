@@ -4171,14 +4171,52 @@ Other things that aren't obvious from a single file:
     independent `floor(ms/1000)` terms can disagree by, and `status` is already in the
     signature. `s.agent` had to JOIN the signature, board 2 only: the band's mark is drawn
     from it and nothing else on that card carries the agent any more.
-  - **The crossfade freezes on this card unless the card clears `xfadeId` FIRST.**
-    `tickSessionAnim()` is the only thing that advances a fade and it clears `xfadeId` the
-    moment a full-screen surface takes the glass — but `handleLine()` starts the fade and
-    repaints this card in the SAME tick, before `loop()` gets there. The band was therefore
-    painted at frame 0 of a fade nothing would ever advance and STAYED there: "WAITING FOR
-    YOU" and "WORKING" superimposed at half strength each, both illegible, on a card already
-    wearing the new status colour in its border. **Found on the glass, not by reading**, and
-    the ordering is asserted.
+  - **THE BAND ON THIS CARD WAS COMPLETELY STATIC, AND THE FIX IS A THIRD TICK.** Both
+    existing ticks early-return on `showingDetail`, so on this screen nothing repainted the
+    band AND `animPhase` never advanced — which is why it was fully dead rather than merely
+    slow: the ~5s host tick does repaint the card, but the phase it draws was frozen too.
+    The mark sat still two taps from an identical band that turns, so the screen read as
+    broken rather than as a deliberate difference. **Found on the glass**, like everything
+    else on this card. `tickDetailBandAnim()` (sessions.ino, board 2 only, called from
+    `loop()` between the two existing ticks) now advances the mark, the crossfade and the
+    pulse at the DETAIL card's own coordinates. It is a third tick rather than a relaxed
+    gate on the other two, and that is the safety argument rather than a preference: those
+    two paint at the sessions LIST's coordinates — a band at `sessionRowYAt(0)`, a shimmer
+    down every row — so letting them through here would paint the list's geometry on top of
+    a full-screen card. Measured on the glass afterwards: **219–235 of the mark's 1024
+    pixels differ between captures**, where before it was frozen.
+  - **`showingDetail` IS ALSO TRUE ON THE ASK SCREEN, which has no band at all.** It is set
+    in one place and the ask screen is drawn through the same entry point
+    (`drawSessionDetail` hands off to `drawAskDetail` on `askPid`), so a tick that trusted
+    `showingDetail` would blit a 32x32 spark into the middle of an Allow/Deny screen.
+    `detailBandVisible()` asks `askPid` the same way `drawSessionDetail` and
+    `renderDetailDuration` already do, and refuses every other full-screen surface too —
+    **the keyboard in particular runs with `showingDetail` still true**, which
+    `closeKeyboard()`'s own note records. Verified: 0 differing pixels in the band's mark
+    box across 25s of a live ask screen, while 71 changed elsewhere on the same frame.
+  - **The card used to CLEAR `xfadeId` before painting its band, and that line is now GONE —
+    the same defect wearing its own fix.** It was correct for as long as nothing advanced a
+    fade here: `handleLine()` starts a fade and repaints this card in the SAME tick, before
+    `loop()` reaches `tickSessionAnim()`'s clear, so the band was painted at frame 0 of a
+    fade nothing would ever advance and STAYED there — "WAITING FOR YOU" and "WORKING"
+    superimposed at half strength each, on a card already wearing the new status colour in
+    its border. With `tickDetailBandAnim()` advancing it, clearing on every card repaint
+    would abort every fade on its FIRST frame instead. `tickSessionAnim()` still clears for
+    every other reason it is gated out; only the detail card is exempt. **The old
+    assertion's inverse is asserted now**, and it depends on `fnSrc` stripping comments,
+    because the forbidden line is quoted verbatim in the comment that replaced it.
+  - **The band's duration had to stop reading `bandFillShown` and re-ask `sessionBandFill()`,
+    for a reason its own comment stated.** That comment justified the record with "HERE
+    nothing repaints it at all (`tickSessionAnim` and `tickWorkingSpinner` both early-return
+    on `showingDetail`), so the record is exact" — which stopped being true the moment
+    something did. With the band animating under it, the record is a frame old mid-fade and
+    that field paints an OPAQUE box in it. It now takes the sessions tab's own trade,
+    spelled out at that call site: bounded by one step of the ramp, self-healing at the next
+    reconcile.
+  - **The pulse is reachable on this card only for an `asking` session with NO ask object**,
+    since one with an `askPid` is drawn as the ask screen, which has no band. It is written
+    anyway rather than left out: the alternative is a band that breathes on one surface and
+    not on the other for a state that can reach both.
   **The four §7 defects the mockup round found, recorded as FOUND-AND-RESOLVED rather than
   quietly rewritten.** §7 was the one surface never visually reviewed before its spec was
   written, and it says so; mocking it at the real geometry is what turned that caveat into
