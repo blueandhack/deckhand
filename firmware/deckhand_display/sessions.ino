@@ -2205,6 +2205,26 @@ void drawSessionDetail(int idx) {
   // The card INTERIOR, inset by its own 2px border, is what drawSessionBand takes -
   // identical to the sessions tab's call site, so the band's top corners are the
   // card's own and its fill never paints outside the outline.
+  //
+  // THE BAND OVERHANGS THIS CARD'S TEXT LANE BY 2px AT EACH END, AND THAT IS
+  // RECORDED RATHER THAN CORRECTED. SESSION_BAND_PAD (14) is measured from the
+  // INTERIOR this call passes in, so the band's mark starts at CARD_X +
+  // BORDER_CARD + SESSION_BAND_PAD = 28 and its duration ends 28 in from the far
+  // side, at 292. The body below is measured from the card's OUTER edge with PAD
+  // (18), so LX = 30 and its lane ends at 290. On the sessions tab the two are the
+  // same number by construction - SESSION_BAND_PAD's own comment says "band and
+  // body share it" - and this is the first place in the sketch where the band
+  // meets a different pad.
+  //
+  // Neither pad was moved, and both directions were considered: changing
+  // SESSION_BAND_PAD would shift the band's contents away from the sessions tab's,
+  // which is the entire property that makes this the SAME band rather than a
+  // lookalike; changing this card's PAD would move every wrap point in the body,
+  // and the meta line has only 8px of slack. 2px is cosmetic at this scale. What
+  // would not be cosmetic is the gap widening unnoticed, so
+  // sessions-geom-check.mjs pins the relationship - the two insets are measured
+  // from frames of reference that differ by exactly the card's own stroke, and
+  // must agree to within it - and a change to EITHER pad fails there by name.
   drawSessionBand(CARD_X + BORDER_CARD, cardY + BORDER_CARD,
                   CARD_W - 2 * BORDER_CARD, idx, color);
   // The band drew the duration once; renderDetailDuration owns it from here, and a
@@ -2232,10 +2252,15 @@ void drawSessionDetail(int idx) {
 #else
   // The body starts where the band ENDS, exactly as the sessions tab's band card
   // does (`nameTop = y + SESSION_BAND_H`) - the band replaces the card's own top
-  // pad rather than sitting above it. No air is added here and none is available:
-  // DETAIL_CARD_H is at its ceiling (see the derivation in board_es3c35p.h), and
-  // the name's opaque box is COLOR_CARD, so the ~4 blank rows at the top of a
-  // Spleen 12x24 cell are the visual gap under the band.
+  // pad rather than sitting above it. No air is added here, and the reason is the
+  // NAME rather than the card's height: its opaque box is COLOR_CARD, so the ~4
+  // blank rows at the top of a Spleen 12x24 cell already read as the gap under the
+  // band, and a step on top of them would be a second one.
+  //
+  // (This comment used to say the air was unavailable because DETAIL_CARD_H is at
+  // its ceiling. It is NOT: the meta line took the card to 300 against a ceiling
+  // of 330, so there are 30px in hand - see the derivation in board_es3c35p.h,
+  // which also says why that surplus is deliberately not held as blank card.)
   int cy = cardY + SESSION_BAND_H;
 #endif
   const int LX = CARD_X + PAD;              // label/value left edge
