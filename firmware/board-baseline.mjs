@@ -129,15 +129,29 @@ function buildStampRange(buf) {
 // the pooling is also worth knowing for a reason no mask can address: it makes the
 // image 16 bytes SMALLER, so a board's SIZE depends on whether its core archive
 // happens to carry today's date. See the task-2 report.
+// THE DATE GROUP IS CAPTURING SO THE POOLING STATE CAN BE REPORTED, AND THAT
+// REPORT IS THE POINT OF IT. Pooled and un-pooled builds of IDENTICAL SOURCE
+// differ by 16 bytes and by hash, so the first build after midnight following a
+// core rebuild reports CHANGED (+16) with nothing changed - a check that cries
+// wolf, which this repo already says elsewhere stops being read. Masking cannot
+// fix it (the 16 bytes are a literal that exists or does not), so the script
+// SAYS WHICH STATE IT IS IN instead, and --check compares against the state the
+// baseline was taken in.
 const CORE_STAMP_RE =
-  /[0-2]\d:[0-5]\d:[0-5]\d\x00(?:[A-Z][a-z]{2} [ \d]\d \d{4}\x00)?  Compile Date\/Time : /g;
+  /[0-2]\d:[0-5]\d:[0-5]\d\x00([A-Z][a-z]{2} [ \d]\d \d{4}\x00)?  Compile Date\/Time : /g;
 
 function coreStampRange(buf) {
   const hits = [...buf.toString("latin1").matchAll(CORE_STAMP_RE)];
   if (hits.length !== 1) return { range: null, count: hits.length };
   const ANCHOR = "  Compile Date/Time : ";
   const from = hits[0].index;
-  return { range: { from, to: from + hits[0][0].length - 1 - ANCHOR.length, why: "core __DATE__/__TIME__" }, count: 1 };
+  return {
+    range: { from, to: from + hits[0][0].length - 1 - ANCHOR.length, why: "core __DATE__/__TIME__" },
+    count: 1,
+    // No date ahead of this anchor means the core's __DATE__ literal is the SAME
+    // string as the sketch's and the linker pooled them: same calendar day.
+    pooled: hits[0][1] === undefined,
+  };
 }
 
 // Nothing board-specific remains: the one board-specific entry was the sketch's
@@ -181,6 +195,7 @@ function maskedHash(file, board) {
     hash: crypto.createHash("sha256").update(buf).digest("hex"),
     size: buf.length,
     masked,
+    pooled: core.pooled,
   };
 }
 
@@ -212,8 +227,17 @@ if (args[0] === "--selftest") {
   console.log(`raw    A ${rawA.slice(0, 16)}  B ${rawB.slice(0, 16)}  ${rawA === rawB ? "SAME" : "differ"}`);
   console.log(`masked A ${ra.hash.slice(0, 16)}  B ${rb.hash.slice(0, 16)}  ${ra.hash === rb.hash ? "SAME" : "DIFFER"}`);
   console.log(`sizes  A ${ra.size}  B ${rb.size}   masked ${ra.masked} bytes (${(ra.masked / ra.size * 100).toFixed(4)}%)`);
+  console.log(`core stamp A ${ra.pooled ? "pooled" : "not pooled"}  B ${rb.pooled ? "pooled" : "not pooled"}`);
   if (ra.size !== rb.size) {
     console.error("\nFAIL: sizes differ, so these are not two builds of identical source.");
+    // ... unless they are, and this is the one case where that conclusion is
+    // wrong. A pooling flip changes the SIZE by 16 on unchanged source, so the
+    // line above would send the reader looking for a diff that does not exist.
+    if (ra.pooled !== rb.pooled) {
+      console.error("Except: the core's date stamp is pooled in one and not the other, which is");
+      console.error(`worth exactly 16 bytes on identical source (these differ by ${Math.abs(ra.size - rb.size)}). Rebuild`);
+      console.error("both against the same core so the comparison is like for like.");
+    }
     process.exit(1);
   }
   if (rawA === rawB) {
@@ -272,16 +296,19 @@ if (!board || !/^[12]$/.test(board)) {
 }
 const r = maskedHash(bin, board);
 
+const poolWord = (p) => (p === undefined ? "unrecorded" : p ? "pooled" : "not pooled");
+
 if (!flag) {
-  console.log(`${r.hash}  size=${r.size}  (masked ${r.masked} bytes, board ${board})`);
+  console.log(`${r.hash}  size=${r.size}  (masked ${r.masked} bytes, board ${board}, core stamp ${poolWord(r.pooled)})`);
   process.exit(0);
 }
 
 const base = readBaseline();
 if (flag === "--update") {
-  base[`board${board}`] = { hash: r.hash, size: r.size, updated: new Date().toISOString() };
+  base[`board${board}`] = { hash: r.hash, size: r.size, pooled: r.pooled, updated: new Date().toISOString() };
   fs.writeFileSync(BASELINE, JSON.stringify(base, null, 2) + "\n");
   console.log(`baseline for board ${board} set to ${r.hash.slice(0, 16)}... size=${r.size}`);
+  console.log(`core stamp ${poolWord(r.pooled)} - recorded, so a later pooling flip explains itself.`);
   console.log("Commit this, and say in the message WHY the binary was expected to move.");
   process.exit(0);
 }
@@ -292,12 +319,27 @@ if (!want) {
   process.exit(2);
 }
 if (want.hash === r.hash) {
-  console.log(`board ${board} UNCHANGED  ${r.hash.slice(0, 16)}...  size=${r.size}`);
+  console.log(`board ${board} UNCHANGED  ${r.hash.slice(0, 16)}...  size=${r.size}  (core stamp ${poolWord(r.pooled)})`);
   process.exit(0);
 }
 console.error(`board ${board} CHANGED`);
-console.error(`  baseline ${want.hash.slice(0, 16)}...  size=${want.size}`);
-console.error(`  built    ${r.hash.slice(0, 16)}...  size=${r.size}  (${r.size - want.size >= 0 ? "+" : ""}${r.size - want.size} bytes)`);
+console.error(`  baseline ${want.hash.slice(0, 16)}...  size=${want.size}  (core stamp ${poolWord(want.pooled)})`);
+console.error(`  built    ${r.hash.slice(0, 16)}...  size=${r.size}  (${r.size - want.size >= 0 ? "+" : ""}${r.size - want.size} bytes, core stamp ${poolWord(r.pooled)})`);
+// THE ONE FALSE POSITIVE THIS SCRIPT CAN NAME OUTRIGHT. A pooling flip is 16
+// bytes and a different hash on IDENTICAL SOURCE, so without this line the first
+// build after midnight following a core rebuild reads as a real change, and the
+// obvious response - re-baseline and move on - buries whatever the next real one
+// would have been.
+if (want.pooled !== undefined && want.pooled !== r.pooled) {
+  console.error("");
+  console.error(`  ^ the core's build-date stamp went ${poolWord(want.pooled)} -> ${poolWord(r.pooled)}.`);
+  console.error("    That alone is worth 16 bytes and a different hash with NO source change:");
+  console.error("    the core's __DATE__ and the sketch's are one pooled literal when both were");
+  console.error("    built on the same calendar day, and two literals when they were not. If the");
+  console.error("    delta above is exactly 16, suspect this before your own diff - rebuild the");
+  console.error("    core (arduino-cli compile --clean) so both stamps carry today's date, and");
+  console.error("    re-check before re-baselining.");
+}
 console.error("");
 console.error("If that was intended, re-baseline with --update and say why in the commit.");
 console.error("If it was not, the change you thought was board-specific was not.");

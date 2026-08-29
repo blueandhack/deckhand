@@ -139,105 +139,112 @@ function tickBytes(caps, { descCap = null, parkedVoice = false, sessions = null,
 // ---------------------------------------------------------------------------
 // BEHAVIOUR: the real hook, in a sandbox. Never ~/.claude, never /tmp/deckhand-<uid>.
 // ---------------------------------------------------------------------------
-function runBehaviour(hookPath) {
+// The caps are PASSED IN rather than re-parsed here. Parsing them twice was
+// harmless for the assertions and dishonest in the report: a broken regex would
+// be counted once per parse, so a single defect read as ~4 findings.
+// The body is wrapped in try/finally because every `ok()` here can throw - and a
+// run that fails is exactly the run whose sandbox must not be left behind.
+function runBehaviour(hookPath, caps) {
   const box = fs.mkdtempSync(path.join(os.tmpdir(), "deckhand-optdescs-"));
-  const HOME = path.join(box, "home");
-  const TMP = path.join(box, "runtime");
-  fs.mkdirSync(path.join(HOME, ".claude", "deckhand-sessions"), { recursive: true });
-  fs.mkdirSync(TMP, { recursive: true });
-  // connected so an ask is published; remoteAnswer OFF so the hook never blocks
-  // waiting for a device and emitDecision() is never reached.
-  fs.writeFileSync(path.join(TMP, "host-alive"), JSON.stringify({ connected: true, remoteAnswer: false }));
+  try {
+    const HOME = path.join(box, "home");
+    const TMP = path.join(box, "runtime");
+    fs.mkdirSync(path.join(HOME, ".claude", "deckhand-sessions"), { recursive: true });
+    fs.mkdirSync(TMP, { recursive: true });
+    // connected so an ask is published; remoteAnswer OFF so the hook never blocks
+    // waiting for a device and emitDecision() is never reached.
+    fs.writeFileSync(path.join(TMP, "host-alive"), JSON.stringify({ connected: true, remoteAnswer: false }));
 
-  const fire = (payload) => {
-    const stdout = execFileSync(process.execPath, [hookPath], {
-      input: JSON.stringify(payload),
-      env: { ...process.env, HOME, DECKHAND_TMP: TMP },
-      encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+    const fire = (payload) => {
+      const stdout = execFileSync(process.execPath, [hookPath], {
+        input: JSON.stringify(payload),
+        env: { ...process.env, HOME, DECKHAND_TMP: TMP },
+        encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+      });
+      const f = path.join(HOME, ".claude", "deckhand-sessions", `${payload.session_id}.json`);
+      const rec = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : null;
+      return { stdout, rec, file: f };
+    };
+    const ask = (sid, options) => ({
+      session_id: sid, transcript_path: path.join(box, `${sid}.jsonl`), cwd: box,
+      hook_event_name: "PermissionRequest", tool_name: "AskUserQuestion",
+      tool_input: { questions: [{ header: "Pick one", question: "Which?", options }] },
     });
-    const f = path.join(HOME, ".claude", "deckhand-sessions", `${payload.session_id}.json`);
-    const rec = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : null;
-    return { stdout, rec, file: f };
-  };
-  const ask = (sid, options) => ({
-    session_id: sid, transcript_path: path.join(box, `${sid}.jsonl`), cwd: box,
-    hook_event_name: "PermissionRequest", tool_name: "AskUserQuestion",
-    tool_input: { questions: [{ header: "Pick one", question: "Which?", options }] },
-  });
 
-  // 1. Descriptions cross the wire, parallel to the labels.
-  {
-    const { stdout, rec } = fire(ask("b1", [
-      { label: "Alpha", description: "The first one, and what happens if you take it." },
-      { label: "Beta", description: "The second one." },
-    ]));
-    ok(stdout === "", `BEHAVIOUR: stdout must be EMPTY on a non-decision path, got ${JSON.stringify(stdout)}`);
-    ok(rec?.ask?.optDescs?.length === rec?.ask?.options?.length,
-       "BEHAVIOUR: optDescs is parallel to options");
-    ok(rec?.ask?.optDescs?.[0]?.startsWith("The first one"), "BEHAVIOUR: the description reaches the record");
+    // 1. Descriptions cross the wire, parallel to the labels.
+    {
+      const { stdout, rec } = fire(ask("b1", [
+        { label: "Alpha", description: "The first one, and what happens if you take it." },
+        { label: "Beta", description: "The second one." },
+      ]));
+      ok(stdout === "", `BEHAVIOUR: stdout must be EMPTY on a non-decision path, got ${JSON.stringify(stdout)}`);
+      ok(rec?.ask?.optDescs?.length === rec?.ask?.options?.length,
+         "BEHAVIOUR: optDescs is parallel to options");
+      ok(rec?.ask?.optDescs?.[0]?.startsWith("The first one"), "BEHAVIOUR: the description reaches the record");
+    }
+    // 2. A described option and an undescribed one: the array stays DENSE, with an
+    //    empty placeholder, or index i would stop meaning option i on the device.
+    {
+      const { stdout, rec } = fire(ask("b2", [{ label: "A" }, { label: "B", description: "why B" }]));
+      ok(stdout === "", "BEHAVIOUR: stdout empty (mixed case)");
+      ok(rec?.ask?.optDescs?.length === 2 && rec.ask.optDescs[0] === "" && rec.ask.optDescs[1] === "why B",
+         `BEHAVIOUR: a partly-described question keeps a DENSE parallel array, got ${JSON.stringify(rec?.ask?.optDescs)}`);
+    }
+    // 3. No descriptions anywhere -> the key is absent, so the payload does not grow.
+    {
+      const { stdout, rec } = fire(ask("b3", [{ label: "A" }, { label: "B" }]));
+      ok(stdout === "", "BEHAVIOUR: stdout empty (no-description case)");
+      ok(rec?.ask && !("optDescs" in rec.ask), "BEHAVIOUR: no optDescs key when nothing is described");
+    }
+    // 4. An Allow/Deny permission prompt is untouched.
+    {
+      const { stdout, rec } = fire({
+        session_id: "b4", transcript_path: path.join(box, "b4.jsonl"), cwd: box,
+        hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "ls -la" },
+      });
+      ok(stdout === "", "BEHAVIOUR: stdout empty (perm prompt)");
+      ok(rec?.ask?.kind === "perm" && !("optDescs" in rec.ask), "BEHAVIOUR: a perm prompt carries no optDescs");
+    }
+    // 5. THE CODEPOINT BOUNDARY. 200 em-dashes is 600 bytes; the cap lands inside
+    //    one of them, and a naive byte slice would emit half a character.
+    {
+      const { stdout, rec } = fire(ask("b5", [{ label: "A", description: "—".repeat(200) }]));
+      const d = rec?.ask?.optDescs?.[0] ?? "";
+      const bytes = Buffer.byteLength(d, "utf8");
+      ok(stdout === "", "BEHAVIOUR: stdout empty (boundary case)");
+      ok(bytes <= caps.descMaxBytes, `BEHAVIOUR: description is <= the cap in BYTES (got ${bytes} vs ${caps.descMaxBytes})`);
+      ok(!d.includes("�"), "BEHAVIOUR: no replacement char - the cap never splits a codepoint");
+      // WHAT CHANGED, AND WHY THIS TEST NO LONGER SEES WHAT IT USED TO. clean() now
+      // transliterates to ASCII before its slice (see host/to-ascii.mjs), so those
+      // 200 em-dashes arrive here as 200 hyphens and the byte walk below can never
+      // be reached by this input: bytes and characters are the same unit now.
+      // capBytes() is KEPT anyway - it is the last line of defence if a future field
+      // reaches it un-transliterated, and it costs nothing on ASCII.
+      ok(d === "-".repeat(caps.descMaxBytes),
+         `BEHAVIOUR: 200 em-dashes arrive as exactly ${caps.descMaxBytes} ASCII hyphens, got ${JSON.stringify(d.slice(0, 12))} x ${d.length}`);
+      ok(d.length === bytes, "BEHAVIOUR: the description's character count IS its byte count - the whole point of the ASCII fix");
+      // capBytes still walks codepoints when it IS handed multi-byte input, proved
+      // directly rather than through a path that can no longer deliver any.
+      ok(Buffer.byteLength("—".repeat(200).slice(0, caps.descMaxBytes), "utf8") === caps.descMaxBytes * 3,
+         "BEHAVIOUR: a character cap on untransliterated input really would emit 3x the budget - which is what the ASCII fix removes");
+    }
+    // 6. A pending ask survives an event that defines no ask of its own.
+    {
+      fire(ask("b6", [{ label: "A", description: "carried" }]));
+      const { stdout } = fire({
+        session_id: "b6", transcript_path: path.join(box, "b6.jsonl"), cwd: box,
+        hook_event_name: "Notification", notification_type: "idle",
+      });
+      const rec = JSON.parse(fs.readFileSync(path.join(HOME, ".claude", "deckhand-sessions", "b6.json"), "utf8"));
+      ok(stdout === "", "BEHAVIOUR: stdout empty (carried ask)");
+      ok(rec.ask?.optDescs?.[0] === "carried", "BEHAVIOUR: optDescs survives being carried across a Notification");
+    }
+    // 7. The sandbox really was a sandbox.
+    ok(TMP.startsWith(os.tmpdir()) && !TMP.includes(`deckhand-${process.getuid()}`),
+       "BEHAVIOUR: DECKHAND_TMP was a scratch path, not the live runtime dir");
+  } finally {
+    fs.rmSync(box, { recursive: true, force: true });
   }
-  // 2. A described option and an undescribed one: the array stays DENSE, with an
-  //    empty placeholder, or index i would stop meaning option i on the device.
-  {
-    const { stdout, rec } = fire(ask("b2", [{ label: "A" }, { label: "B", description: "why B" }]));
-    ok(stdout === "", "BEHAVIOUR: stdout empty (mixed case)");
-    ok(rec?.ask?.optDescs?.length === 2 && rec.ask.optDescs[0] === "" && rec.ask.optDescs[1] === "why B",
-       `BEHAVIOUR: a partly-described question keeps a DENSE parallel array, got ${JSON.stringify(rec?.ask?.optDescs)}`);
-  }
-  // 3. No descriptions anywhere -> the key is absent, so the payload does not grow.
-  {
-    const { stdout, rec } = fire(ask("b3", [{ label: "A" }, { label: "B" }]));
-    ok(stdout === "", "BEHAVIOUR: stdout empty (no-description case)");
-    ok(rec?.ask && !("optDescs" in rec.ask), "BEHAVIOUR: no optDescs key when nothing is described");
-  }
-  // 4. An Allow/Deny permission prompt is untouched.
-  {
-    const { stdout, rec } = fire({
-      session_id: "b4", transcript_path: path.join(box, "b4.jsonl"), cwd: box,
-      hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "ls -la" },
-    });
-    ok(stdout === "", "BEHAVIOUR: stdout empty (perm prompt)");
-    ok(rec?.ask?.kind === "perm" && !("optDescs" in rec.ask), "BEHAVIOUR: a perm prompt carries no optDescs");
-  }
-  // 5. THE CODEPOINT BOUNDARY. 200 em-dashes is 600 bytes; the cap lands inside
-  //    one of them, and a naive byte slice would emit half a character.
-  {
-    const caps = readCaps(fs.readFileSync(hookPath, "utf8"), fs.readFileSync(HOST_SRC, "utf8"), fs.readFileSync(FW_SRC, "utf8"));
-    const { stdout, rec } = fire(ask("b5", [{ label: "A", description: "—".repeat(200) }]));
-    const d = rec?.ask?.optDescs?.[0] ?? "";
-    const bytes = Buffer.byteLength(d, "utf8");
-    ok(stdout === "", "BEHAVIOUR: stdout empty (boundary case)");
-    ok(bytes <= caps.descMaxBytes, `BEHAVIOUR: description is <= the cap in BYTES (got ${bytes} vs ${caps.descMaxBytes})`);
-    ok(!d.includes("�"), "BEHAVIOUR: no replacement char - the cap never splits a codepoint");
-    // WHAT CHANGED, AND WHY THIS TEST NO LONGER SEES WHAT IT USED TO. clean() now
-    // transliterates to ASCII before its slice (see host/to-ascii.mjs), so those
-    // 200 em-dashes arrive here as 200 hyphens and the byte walk below can never
-    // be reached by this input: bytes and characters are the same unit now.
-    // capBytes() is KEPT anyway - it is the last line of defence if a future field
-    // reaches it un-transliterated, and it costs nothing on ASCII.
-    ok(d === "-".repeat(caps.descMaxBytes),
-       `BEHAVIOUR: 200 em-dashes arrive as exactly ${caps.descMaxBytes} ASCII hyphens, got ${JSON.stringify(d.slice(0, 12))} x ${d.length}`);
-    ok(d.length === bytes, "BEHAVIOUR: the description's character count IS its byte count - the whole point of the ASCII fix");
-    // capBytes still walks codepoints when it IS handed multi-byte input, proved
-    // directly rather than through a path that can no longer deliver any.
-    ok(Buffer.byteLength("—".repeat(200).slice(0, caps.descMaxBytes), "utf8") === caps.descMaxBytes * 3,
-       "BEHAVIOUR: a character cap on untransliterated input really would emit 3x the budget - which is what the ASCII fix removes");
-  }
-  // 6. A pending ask survives an event that defines no ask of its own.
-  {
-    fire(ask("b6", [{ label: "A", description: "carried" }]));
-    const { stdout } = fire({
-      session_id: "b6", transcript_path: path.join(box, "b6.jsonl"), cwd: box,
-      hook_event_name: "Notification", notification_type: "idle",
-    });
-    const rec = JSON.parse(fs.readFileSync(path.join(HOME, ".claude", "deckhand-sessions", "b6.json"), "utf8"));
-    ok(stdout === "", "BEHAVIOUR: stdout empty (carried ask)");
-    ok(rec.ask?.optDescs?.[0] === "carried", "BEHAVIOUR: optDescs survives being carried across a Notification");
-  }
-  // 7. The sandbox really was a sandbox.
-  ok(TMP.startsWith(os.tmpdir()) && !TMP.includes(`deckhand-${process.getuid()}`),
-     "BEHAVIOUR: DECKHAND_TMP was a scratch path, not the live runtime dir");
-  fs.rmSync(box, { recursive: true, force: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -308,7 +315,7 @@ function main({ hookPath = HOOK_SRC, quiet = false } = {}) {
   ok(c.askDetailBuf >= c.detailChars + 1,
      `FIRMWARE: askDetail[${c.askDetailBuf}] must hold the hook's ${c.detailChars}-char cap plus a NUL (in CHARACTERS - it is byte-truncated in practice, see the header)`);
 
-  runBehaviour(hookPath);
+  runBehaviour(hookPath, c);
 
   if (!quiet) {
     const row = (l, v, over) => console.log(`  ${l.padEnd(52)} ${String(v).padStart(6)} ${over ? "OVER" : "ok  "}`);

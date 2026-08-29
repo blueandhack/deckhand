@@ -324,10 +324,16 @@ function clean(s, max) {
 // can be up to 3x its stated number in bytes. That is pre-existing, and
 // host/ask-optdescs-check.mjs records the arithmetic rather than papering over it.
 //
-// 96 IS DERIVED, NOT PICKED: it is LABEL_MAX_CHARS (32) x 3, the most bytes one
-// option LABEL can already cost on this wire. So a description may never cost
-// more than the label it explains - a bound the checker asserts by parsing both
-// numbers out of this file, and one that fails the moment either moves.
+// 96 IS A STATED CONVENTION, MECHANICALLY ENFORCED - not a derivation from
+// anything physical. The convention: A DESCRIPTION MAY NOT COST MORE BYTES THAN
+// THE LABEL IT EXPLAINS. A label is capped at LABEL_MAX_CHARS (32) and its byte
+// ceiling is 3 per character, so the number is 32 x 3 = 96, and the checker
+// asserts the bound by parsing BOTH numbers out of this file, failing the moment
+// either moves. What the convention is NOT is a causal claim: nothing says an
+// explanation needs no more room than the caption it explains, and in practice
+// this truncates every real description (190-326 bytes measured) to about a
+// third, mid-word. It is a defensible line drawn on purpose rather than a
+// quantity computed - and the wire budget cannot draw it, for the reason below.
 //
 // It is deliberately NOT set from the saturated worst case (6 simultaneously
 // asking sessions, each a 1400-char AskUserQuestion with four maximal options
@@ -415,6 +421,12 @@ function buildAsk(data) {
     // slice, same order, so index i describes option i.
     const descs = (q.options ?? [])
       .slice(0, 4)
+      // The inner cap handed to clean() is a CHARACTER max and the outer one is a
+      // BYTE max - the same number in two units, deliberately. A 96-character cap
+      // can never bind before a 96-byte one (bytes >= characters, always), so
+      // capBytes() is the cap that decides and clean()'s is only a cheap bound on
+      // the work. Naming the byte constant twice is the honest spelling of that;
+      // a second constant would imply the two could be set apart, and they cannot.
       .map((o) => capBytes(clean(o?.description ?? "", ASK_OPT_DESC_MAX_BYTES), ASK_OPT_DESC_MAX_BYTES));
     return {
       pid,

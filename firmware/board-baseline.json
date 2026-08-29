@@ -2,11 +2,13 @@
   "board1": {
     "hash": "0cc2e77b66fb694797c01467bd45a5f27d3073873bfe2322ecc82854989b5127",
     "size": 1387200,
+    "pooled": true,
     "updated": "2026-08-29T08:11:54.327Z"
   },
   "board2": {
     "hash": "4be0c84caa546f1c79b273d42651ebf6d705ef0ee1b6056dc079070bc42c4634",
     "size": 992384,
+    "pooled": true,
     "updated": "2026-08-29T20:37:07.407Z"
   }
 }

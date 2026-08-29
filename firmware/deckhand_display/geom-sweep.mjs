@@ -20,6 +20,10 @@
 //
 //   node geom-sweep.mjs                     sweep all three checkers, both boards
 //   node geom-sweep.mjs --checker sessions             one checker, both boards
+//        ^ UNSLICED, AND ON `sessions` IT OOMs - see the memory note below. The
+//          slicing lives in the PARENT, so the plain sweep is fine and this
+//          hand-run form runs a whole board's ~1100 injections in one process.
+//          Add --board <n> --slice <i>/4 (what the parent passes) to run it by hand.
 //   node geom-sweep.mjs --checker sessions --board 2    one checker, one board
 //                        (plus --slice i/n is how the children the parent spawns run)
 //   node geom-sweep.mjs --verbose           add the per-constant table

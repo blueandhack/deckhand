@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386614, RAM 69780 | flash 990398, RAM 63276 |
+| size today | flash 1386934, RAM 69804 | flash 992122, RAM 65604 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -42,15 +42,18 @@ It is **stronger** than what it replaces, in two ways the old check could not be
 
 **A plain hash cannot do this, because the build is NOT reproducible — measured, not assumed:** two
 compiles of identical source differ in **68 of 1,383,200 bytes**. Every differing byte is derived
-metadata rather than code, in three ranges — `esp_app_desc_t.app_elf_sha256` (0xB0..0xCF), a 5-byte
-cluster at 0x13BC that is masked as a **stated blind spot rather than dressed up as understood**,
-and the trailing 33-byte image SHA-256 plus checksum. Masking those 70 bytes (0.005%) makes the hash
-stable across rebuilds and sensitive to any real change.
+metadata rather than code, and the mask is **95 bytes (0.0068%)** in four ranges:
+`esp_app_desc_t.app_elf_sha256` (0xB0..0xCF, 32); the **sketch's** own `BUILD %s %s` timestamp (21);
+the **ESP32 core's** `Compile Date/Time` timestamp (9, or 21 — see the pooling note below); and the
+trailing 33-byte image SHA-256 plus checksum. Two of those four are located **by content**, not by
+offset, because an offset moves whenever the image layout does.
 
-**Part of the mask is BOARD-SPECIFIC, so every invocation takes a board number.** The 5-byte
-cluster sits at `0x13BC` on board 1 and `0x1D9C` on board 2 — and that was found the hard way: the
-mask was derived from board-1 binaries and applied to board 2 untested, whereupon board 2 reported
-`CHANGED` at **+0 bytes**, which is precisely the case the old size check could never have seen.
+**A board number is still required everywhere, even though `MASK_BOARD` is now EMPTY.** It used to
+hold the sketch's build stamp at a fixed per-board offset (`0x13BC` on board 1, `0x1D9C` on board
+2) — found the hard way, when a mask derived from board-1 binaries was applied to board 2 untested
+and board 2 reported `CHANGED` at **+0 bytes**, precisely the case the old size check could never
+have seen. Both stamps are found per image now, so nothing board-specific remains; the argument is
+kept because `--selftest`'s whole job is telling you when a board needs one again.
 
 `--selftest <binA> <binB> <board>` is what keeps that honest, on the same teeth-proving convention as
 `palette-check.mjs`: given two builds of identical source it **must** show the raw hashes differing
@@ -61,6 +64,47 @@ already failed once.
 would otherwise make every check fail and look like a real change. (Note `time[16]`/`date[16]` at
 0x70..0x8F did NOT vary between builds minutes apart, so this core does not stamp them; if a future
 one does, the selftest is what says so.)
+
+**THE SECOND `time\0date\0` PAIR IS THE ESP32 CORE'S, NOT A PREBUILT LIBRARY'S — AND THIS FILE
+ASSERTED THE OPPOSITE FOR AS LONG AS THE HOLE EXISTED.** The claim below under *THE "UNEXPLAINED
+5-BYTE CLUSTER"* used to say the pair at ~`0x2DA4` was a LittleFS "Software Info" stamp, **fixed**
+when that library was built, and therefore not worth masking. It is
+`cores/esp32/chip-debug-report.cpp:215` — `chip_report_printf("  Compile Date/Time : %s %s\n",
+__DATE__, __TIME__)` — so it is fixed only for as long as `core.a` is **cached**, and it moves on
+every core rebuild. Found by running the pre-fix script across one: **FAIL, uncovered runs at
+`0x2DA4` and `0x2DA6..7`**, where the same script passes on any same-core pair — which is exactly
+why a wrong explanation survived. It is masked now, anchored on its own trailing literal, and the
+mask went **86 → 95 bytes**. Re-verified here across a real `--clean` core rebuild: raw hashes
+differ, masked hashes agree, board 1 `UNCHANGED` either way.
+
+**THE BASELINE HAS A ONE-DAY SHELF LIFE, AND IT IS NOT MASKABLE.** The core's `__DATE__` and the
+sketch's are the SAME string literal whenever both were built on the same calendar day, so the
+linker **pools** them — one copy, and only the time sits ahead of the core's anchor. Built on
+different days there are two literals and the date sits there as well. Measured on identical source:
+pooled → **1386864 / `05fb733c`**; un-pooled → **1386880 / `dbcd7ed6`**. So the first build after
+midnight following a core rebuild is un-pooled against a pooled baseline and `--check` reports
+**CHANGED (+16) on BOTH boards with no source change**, and it recurs at every such midnight. No
+mask fixes it: the 16 bytes are a literal that either exists or does not.
+**So the script SAYS WHICH STATE IT IS IN.** Every line it prints carries `core stamp pooled` or
+`not pooled`, `--update` records that state in `board-baseline.json`, and a `CHANGED` whose pooling
+flipped prints the explanation and tells you to rebuild the core (`arduino-cli compile --clean`)
+before believing your own diff. The alternative is a check that cries wolf once a day, and this repo
+already says elsewhere what happens to a check nobody reads. Both current baselines are recorded
+`pooled: true` — not assumed: a pooling flip changes the hash, so today's pooled builds matching
+them IS the proof. (The teeth were proven by injection: a baseline doctored to
+`pooled: false, size -16` produces the `+16 bytes` line and the explanation under it.)
+The same fact is why the **`size today` row above can never be reconciled to the byte** across
+sessions — two honest measurements of one commit differ by 16 depending on the core's cache.
+
+**BOTH BOARDS GET CHECKED, AND A STALE BASELINE IS INDISTINGUISHABLE FROM A REAL CHANGE.** Board
+2's baseline was allowed to fall **4,112 bytes stale across 42 commits**, so `--check 2` reported
+`CHANGED` through an entire task for reasons that had nothing to do with that task's code. Nothing
+in the code caused it: re-baselining board 2 was in nobody's routine, and the plans of the day named
+board 1 only — board 1 is the one held byte-identical, so it is the one everybody remembers. That is
+the danger rather than the untidiness: a `CHANGED` you have learned to expect is a `CHANGED` you
+stop reading, and the next one will be real. **Compile board 2, `--check 2`, then compile board 1,
+`--check 1` — never concurrently** (one sketch build directory; see below), and re-baseline whichever
+moved with the reason in the commit message.
 
 **Re-baselining is deliberate and cheap: `--update 1` and say in the commit message WHY the binary
 was expected to move.** The point was never that board 1 must never change — it is that a change to
@@ -158,6 +202,16 @@ not: the next board-2 build linked board 1's world, failing on undefined `TFT_eS
 like `board.h` having selected the wrong header. It has not; the cache has. Compile them one
 after the other, and if you see TFT_eSPI or Bluedroid symbols undefined in a board-2 link,
 `rm -rf ~/Library/Caches/arduino/sketches/<hash>` before believing anything else.
+
+**THE OTHER FACE OF THAT ONE CACHE: `./flash.sh --board 2 --no-compile` UPLOADED A BOARD-1 IMAGE.**
+`--no-compile` skips the build and flashes whatever is in the shared sketch build directory — which
+is whichever board was compiled LAST, not the board named on the command line. Board 1 had been
+compiled last, so board 2 got board 1's binary and `esptool` refused it: `Unexpected chip ID in
+image. Expected 9 but value was 0` (9 is the ESP32-S3, 0 the plain ESP32). That refusal is the good
+case, and it is good only by luck of the two boards having different SoCs — the flag's contract
+("skip the ~3min build") says nothing about which board's objects are sitting there, and it will do
+the same thing every time the boards are alternated. **`--no-compile` is only safe when the LAST
+compile was for the same board**; otherwise drop the flag.
 
 The hazard it hides, for when it is not used: KeepAlive re-grabs `/dev/cu.usbserial-*`
 within a second of the process dying, so a bare `arduino-cli upload` fails on a busy port
@@ -350,6 +404,7 @@ echo "INV 1"  > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: display inve
 echo "PERF" > ~/.claude/deckhand-device-command     # BOARD 2 ONLY: flush timing breakdown
 echo "TEMP" > ~/.claude/deckhand-device-command     # BOARD 2 ONLY: SoC DIE temperature (not the case)
 echo "TEXTPROBE" > ~/.claude/deckhand-device-command # print the text-width table (both boards)
+echo "READTEST" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: open the ask reader on the first pending ask
 echo "POWERPROBE bl90-awake" > ~/.claude/deckhand-device-command # measure mV/h in the CURRENT state, labelled
 echo "POWERPROBE off" > ~/.claude/deckhand-device-command       # stop early and report what it has
 echo "PANELSLEEP 1" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: SLPIN the panel while blanked
@@ -576,13 +631,18 @@ what caught it, and only once it was run on two *genuinely independent* compiles
 the build is incremental and reproducible, so the mask is never exercised and the selftest says so
 rather than passing vacuously.
 **The match is ANCHORED on the trailing `BUILD ` string, because an image holds THREE
-`time\0date\0` pairs and only one varies** — the other two are prebuilt-library stamps
-(`00:11:05 Aug 16 2026` from LittleFS, `19:41:21 May 18 2026` from the BTDM controller) fixed when
-those libraries were built, so masking them would spend real sensitivity for nothing. The anchor is
-matched but NOT masked, since `BUILD ` is an ordinary literal whose change must still be caught, and
-the date is masked alongside the time so a build on a different DAY does not diverge either. Mask is
-now 86 bytes; both boards' masks are verified by `--selftest`, and `MASK_BOARD` is empty because the
-one board-specific entry was this stamp.
+`time\0date\0` pairs and only ONE OF THEM IS THE SKETCH'S**. The anchor is matched but NOT masked,
+since `BUILD ` is an ordinary literal whose change must still be caught, and the date is masked
+alongside the time so a build on a different DAY does not diverge either. `MASK_BOARD` is empty
+because the one board-specific entry was this stamp.
+**THE ACCOUNT OF THE OTHER TWO WAS WRONG, AND THE ERROR WAS LOAD-BEARING.** This paragraph said both
+were prebuilt-library stamps — `00:11:05 Aug 16 2026` "from LittleFS" and `19:41:21 May 18 2026` from
+the BTDM controller — **fixed** when those libraries were built, so that masking them "would spend
+real sensitivity for nothing". The BTDM one is genuinely fixed. The other is the **ESP32 core's own**
+`Compile Date/Time` stamp, which varies on every core rebuild, so the sensitivity that was being
+protected did not exist and the hole did. It is masked now and the mask is **95 bytes**, not 86 — see
+**THE SECOND `time\0date\0` PAIR** under Commands for how it was found and for the pooling
+consequence that comes with it.
 
 So an absolute mV/h is only meaningful **within one run**. Two consequences:
 
@@ -657,7 +717,7 @@ node host/wire-bytes-check.mjs               # 255 assertions: every device-boun
                                              #   71,738 strings, and the saturated tick line is measured
                                              #   against feedChar's guard (incl. the still-over tripwire)
 node host/wire-bytes-check.mjs --selftest    # 19/19 injected faults, each printing WHICH assertion caught it
-node host/ask-optdescs-check.mjs             # 47 assertions: optDescs is capped in bytes on a codepoint
+node host/ask-optdescs-check.mjs             # 38 assertions: optDescs is capped in bytes on a codepoint
                                              #   boundary, parallel to options, absent when nothing
                                              #   is described
 node host/ask-optdescs-check.mjs --selftest  # 5/5 injected faults
@@ -670,6 +730,12 @@ them: an ASCII-only idempotence break, and a raised `detail` cap that only the b
 And `ask-optdescs-check.mjs` keeps its budget model **untransliterated on purpose**: it is now the
 BEFORE picture and the record of how big the character/byte defect was, so do not "fix" it to agree
 with the other checker.
+**Its count went 47 → 38 and NOTHING was removed.** `readCaps()` asserts each of its own regexes,
+and it was being called twice — once at the top and again inside the behaviour suite — so nine
+claims were counted twice. That is not only a vanity number: a regex that stopped matching would
+have been reported as nine findings rather than one, which is the "an instrument that flatters" rule
+pointing the other way. The caps are passed in now, and the behaviour suite's sandbox is torn down
+in a `finally`, since the run that fails is exactly the one whose scratch directory must not survive.
 
 **Check the LAYOUT ARITHMETIC of both boards' screens without a screen.** Three checkers parse the
 constants straight out of `board_e32r28t.h` / `board_es3c35p.h` (shared parsing in
@@ -732,10 +798,11 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   opaque box paints `COLOR_CARD` over the chip's own stroke, the clear-box-not-glyphs hazard the
   usage cards already pay for. Asserting that box clears the stroke at both ends is a bound taken
   from the geometry rather than fitted to today's 26, and it catches the chip at 20.
-  Where it stands today: **437 of 506 constant-board pairs guarded** (board 1 32/236 unguarded,
-  board 2 37/270) — the two new pairs are `READER_CODE_LINE_H`, added on both boards by the reader
-  line-step fix, and **both are guarded**, which is the standard this file sets for a constant the
-  repo just added. Of the unguarded ones only **8 on board 1 and 13 on board 2 are read by any
+  Where it stands today: **439 of 508 constant-board pairs guarded** (board 1 32/237 unguarded,
+  board 2 37/271) — the two newest pairs are `ASK_OPT_DESC_BYTES`, added on both boards by the
+  option-descriptions work, and **both are guarded at ±1 in BOTH directions**, which is the standard
+  this file sets for a constant the repo just added. (`READER_CODE_LINE_H` before it, from the
+  reader line-step fix, likewise.) Of the unguarded ones only **8 on board 1 and 13 on board 2 are read by any
   checker at all** — the other 24 a side are mic, beeper, crab and preset-count constants with no
   geometry to violate. **Four of board 2's thirteen are unguarded BY CONSTRUCTION and are not a
   gap**: `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`, `DETAIL_COL_LBL_STEP` and `DETAIL_COL_VAL_STEP` are
@@ -764,6 +831,16 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   checker grows, raise `SLICES`; do **not** raise the heap, because the limit being hit is V8's
   CODE space and `--max-old-space-size` provably does nothing (it dies at 840MB with a 4.5GB heap
   limit).
+  **THE HAND-RUN `--checker <name>` FORM IS UNSLICED, AND ON `sessions` IT STILL OOMs.** That is the
+  usage line the script's own header advertises, and it dies with a V8 heap trace — because the
+  slicing lives in the PARENT: a plain `geom-sweep.mjs` spawns four children per (checker, board)
+  and stays well inside the bound, while `--checker sessions` runs that board's ~1100 injections in
+  one process. Measured today, on both invocations, at this commit. So the coverage is **present**,
+  not absent — a report that the sessions checker's constants are unswept is a report about which
+  command was typed. **Run the plain sweep**; to look at one checker by hand, add
+  `--board <n> --slice <i>/4` (that is exactly what the parent does) and read the four slices, or
+  raise `SLICES`. This is recorded rather than fixed: it is pre-existing, and the working
+  invocation is the documented one.
 
 **Check the asking-session tie-break — longest-waiting-first, not most-recent-first — without a
 device:**
@@ -4455,8 +4532,8 @@ Other things that aren't obvious from a single file:
   `sendAnswerToHost()` (which transmits on USB **and** BLE TX notify, in ≤20-byte chunks).
   Long detail text pages by tapping the text block — deliberate: drag-scrolling flickers and
   misfires on this resistive panel, discrete pages don't.
-- **AN ASK'S OPTIONS NOW CARRY THEIR DESCRIPTIONS ACROSS THE WIRE — and NOTHING ON THE DEVICE
-  CONSUMES THEM YET.** `AskUserQuestion` puts "what this option means, or what happens if you pick
+- **AN ASK'S OPTIONS CARRY THEIR DESCRIPTIONS ACROSS THE WIRE, AND BOARD 2 DRAWS THEM.**
+  `AskUserQuestion` puts "what this option means, or what happens if you pick
   it" in each option's `description`, and `buildAsk()` discarded it on the very line that took
   `label` — so a four-way question reached the device as four bare labels and **the information you
   need in order to CHOOSE never left the Mac**. `ask.optDescs` is now emitted parallel to
@@ -4487,13 +4564,81 @@ Other things that aren't obvious from a single file:
   injected faults — and it exists because **the first attempt's arithmetic lived in a scratchpad
   that ceased to exist, so nobody could re-run it.** A number nobody can re-derive is not a
   measurement.
-  **WHAT IS STILL OPEN: the descriptions cross the wire and the device does not draw them.** The
-  option button and the reader mode that would show them are Tasks 2-3 of
-  `docs/superpowers/plans/2026-08-29-ask-option-descriptions.md`, which is **paused**. That plan's
-  own open question is also unresolved: **the ask header has ONE top-right slot and `READ ALL`
-  already owns it**, so there is nowhere yet to put the affordance that reveals a description. Until
-  those land, this is a host-side change that costs a few bytes on question payloads and shows
-  nothing.
+  **THE DEVICE NOW STORES AND DRAWS THEM, on board 2 only, and the storage is per board for a
+  reason the header spells out.** `SessionInfo` is SHARED, so the member is compiled into both
+  boards whether or not a pixel of it is ever drawn — what is not shared is the COST.
+  `ASK_OPT_DESC_BYTES` is **97** on board 2 (the hook's 96 plus the NUL) and **1** on board 1, the
+  smallest legal array size, so every slot there can only ever hold `""`. Sizing board 1 to the real
+  cap would spend `4 x 97 x MAX_SESSIONS` = **2,328 bytes of DRAM** on the board whose ~26KB of free
+  heap is the binding constraint on the audio path, for text its panel does not render. It is a
+  per-board CONSTANT rather than an `#if` at the declaration, and that was forced rather than
+  chosen: behind an `#if` the checkers parse ONE arm and report it for BOTH boards, which is exactly
+  the false reading `BATT_LEFT_BYTES` was fixed for.
+  **THE DETAIL SIGNATURE TAKES A 32-BIT FNV-1a HASH OF THE DESCRIPTIONS, because verbatim is not
+  tight — it is IMPOSSIBLE.** Four descriptions plus their separators are `4 x (1 + 96)` = **388
+  bytes** on their own against a **384-byte** `detailSigCache`, and the rest of the signature needs
+  the room too; hashing brings the worst case to **372/384**. **It is not a birthday problem**, and
+  that distinction is the whole argument: `buildDetailSignature` compares against the ONE
+  immediately-previous cached value, never against a population, so a missed repaint needs a
+  collision with that single value — p ≈ 2⁻³² per event, not `sqrt`. The obvious cheaper shape,
+  a per-slot prefix, is **strictly worse**: 12 bytes of headroom buys 3 characters a slot, and real
+  descriptions SHARE prefixes (`Allow this…` / `Deny…`), so prefix-N collides at rates that are
+  actually reachable.
+  **ONE chip, ONE reader, TWO sections.** The ask header has exactly one top-right slot and
+  `READ ALL` owned it, so the question was never where the new button goes but what the one button
+  means. It now opens a reader carrying the question's own detail FIRST and then every option with
+  its description, paged as a single document, and it appears when EITHER the detail overflowed or
+  any description exists. The label moved with it — board 2's chip says **`READ MORE`**, because
+  `READ ALL` is a promise about the DETAIL and in the new case it is a lie in the direction that
+  costs information: a detail that already fits, beside a chip saying READ ALL, tells a reader there
+  is nothing behind it, so the descriptions would be reachable and never found. `READ MORE` is true
+  in all three states. `ASK_READ_BTN_LABEL` is a per-board macro (the shape `WAKE_HINT` already
+  uses); board 1 keeps `READ ALL`.
+  **Three alternatives were considered and each lost for a nameable reason**, recorded so they are
+  not re-proposed: giving the new button the slot whenever descriptions exist — a long detail
+  becomes unreachable exactly when the question is most complex, against this repo's rule never to
+  offer a control that cannot work; **two half-width chips** — 43-45px, under `TAP_MIN` 46, with
+  labels shrinking to about four characters; and moving the detail into the reader always — it costs
+  the at-a-glance command preview that makes a permission prompt answerable in one tap.
+  **The accepted cost is that a long detail can push the options to a later page, and the screen
+  SIGNPOSTS it** rather than leaving an enabled NEXT to be inferred: one body row is reserved on
+  page 1 for `WHAT THE OPTIONS MEAN - PAGE n`, naming the same heading the section opens with. That
+  page number is the only new arithmetic here that actively MISLEADS when wrong — a row naming the
+  wrong page sends a reader somewhere with no options on it, from which the honest conclusion is
+  that there are none — so it is asserted by **WALKING THE PAGER**, not by restating the division:
+  the bounds come from `drawReader`'s own parsed `pageLo`/`pageHi` and the 1-based number from the
+  same expression the header's `n/m` counter uses, evaluated with C's TRUNCATING division over every
+  reachable detail length at both line steps. `+1 → +2` and `+1 → +0` each fail by name.
+  **BOARD 1 HELD BYTE-IDENTICAL THROUGH ALL OF IT, and the three natural shapes all moved it** —
+  measured against `board-baseline.mjs --check 1`, not reasoned about: two sibling `if`s sharing one
+  chip block cost **+8 bytes**; the chip factored into a function cost **+60** (not inlined); and
+  nesting it inside `if (askReadOffered)` came out at **+0 bytes with DIFFERENT CONTENT** — one
+  `mul16s` with its operands swapped. **That third one is the strongest evidence this repo has for
+  why the retired size check had to be replaced**, because a size comparison passes it. What ships
+  instead is the chip's draw written once per `#if` arm (duplication guarded by a checker assertion
+  rather than trusted) and `askReadOffered` spelled as a function-like MACRO on board 1 so its
+  argument cannot perturb register allocation in `handleAskTouch`.
+  **The dissent is recorded rather than settled:** the reviewer would have re-baselined board 1 and
+  written the natural shape, on the argument that holding byte-identity is letting a check reach
+  into the shape of the source. The counter-argument is the `+0`-bytes case above — the cost of
+  finding it was three builds, and it is the sort of thing that is only ever found by looking.
+  **Costs, measured:** board 1 **+336 bytes of flash, +24 RAM** (the 1-byte-per-slot placeholder,
+  re-baselined deliberately with the deltas in the commit message); board 2 **+384 / +2,328** for
+  the storage, then **+1,248** for the section, signpost, second chip copy and `READTEST`, then
+  **+112** for `READTEST`'s two refusal lines.
+  **`READTEST` (board 2 only) exists for the reason `TAB`/`PAGE`/`KBTEST`/`EMOJITEST` do:** the
+  reader needs a finger on the chip and `SCREENSHOT` can only record what is already on the glass.
+  Both its refusals PRINT their cause (`no ask is pending`, `another full-screen surface is up`) —
+  the rule `POWERPROBE`'s `not on battery (unplug USB; state=2 mv=3866)` exists for, since from the
+  Mac silence and impossibility look identical.
+  **WHAT IS STILL OPEN.** Board 1 draws no descriptions at all — it stores a placeholder and its
+  chip still says `READ ALL`, which is honest there because there is nothing else behind it. The
+  96-byte cap truncates every real description to about a third, mid-word, which is a convention's
+  cost and not a bug. And the wire's own unit mismatch, above, is untouched: a question in CJK can
+  still overflow `feedChar`'s guard **with this field absent entirely**. **No screenshot in this
+  work vouches for the panel's colours** — board 2's `SCREENSHOT` reads the shadow framebuffer, so
+  it proves the renderer self-consistent and nothing about the glass (see the verification trap
+  under Two boards).
 - **Code-friendly detail rendering.** The detail can be a code block, so `\n` is preserved
   end-to-end: the hook's `cleanMultiline()` (in `deckhand-session-hook.mjs`, used for the
   `detail` field only — `title`/`options` still use single-line `clean()`) keeps newlines while
