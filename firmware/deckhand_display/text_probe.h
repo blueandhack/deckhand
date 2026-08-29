@@ -28,23 +28,50 @@
 // glyph where the two disagree: `4`/`q`/space measure one pixel MORE than
 // their advance, `!"'(),.:;>I[]`jl|` measure one or two LESS.
 //
-// HOW THE GATE IS RUN, AND WHAT IS STILL OUTSTANDING. `TEXTPROBE` (see
-// deckhand_display.ino) prints one `WIDTH <font> <size> <width> "<string>"`
-// line per entry per font, on BOTH boards. Board 1 runs real TFT_eSPI, so its
-// output is the reference and the check is a diff, not a judgement:
+// HOW THE GATE IS RUN. `TEXTPROBE` (see deckhand_display.ino) prints one
+// `WIDTH <font> <size> <width> "<string>"` line per entry per font, on BOTH
+// boards:
 //
 //   echo "TEXTPROBE" > ~/.claude/deckhand-device-command
-//   sleep 4
+//   sleep 20                       # 4s is NOT enough - 136 lines, and the
+//                                  # device sends on USB and BLE, so 272 arrive
 //   grep -a "^\[device/usb\] WIDTH" /tmp/deckhand-$(id -u)/host.log \
-//     | sed 's/.*WIDTH/WIDTH/' | sort -u > /tmp/width-board1.txt
-//   diff /tmp/width-board1.txt firmware/deckhand_display/text-widths-board2.txt
+//     | sed 's/.*WIDTH/WIDTH/' | sort -u > /tmp/width.txt
 //
-// text-widths-board2.txt is board 2's half, captured in exactly that format so
-// the comparison is that one command. Board 1 was physically disconnected when
-// it was taken, so THE DIFF HAS NOT BEEN RUN: board 2's numbers were checked
-// against an independent transcription of TFT_eSPI's textWidth() instead, which
-// is evidence but not the gate. Run the diff before deriving any layout number
-// from these widths.
+// *** THE CROSS-BOARD DIFF IS NO LONGER THE GATE, AND HAS NOT BEEN SINCE THE
+// *** TYPE SCALE. Nobody chose this; the fonts moved out from under it.
+//
+// The diff was a valid equivalence test only while BOTH boards drew the same
+// faces. They no longer do - `UI_FONTS[]` is per board: board 1 is Cozette 6x13
+// and Terminus 10x18b, board 2 is Spleen 8x16/12x24/32x64. Different faces
+// produce different widths BY DESIGN, so diffing them now yields 136 differences
+// that say nothing about whether the shim's algorithm is right. Measured: font 1
+// on "Mac  studio  120s ago" is 126 on board 1 (6px/char) and 168 on board 2
+// (8px/char).
+//
+// It is broken a SECOND way, and this one is worse because it is silent. The
+// whole point of the second string block below is the last-character rule -
+// TFT_eSPI charges the final glyph `xOffset + width`, not `xAdvance`. In Cozette
+// those differ for 20 of 95 glyphs, which is what gives the rule teeth. In
+// SPLEEN every glyph in 0x20..0x7E has `xOffset == 0` and `width == xAdvance ==
+// 8`, so the rule is a NO-OP on board 2 and those strings discriminate nothing
+// there. Verified: all 136 captured widths equal a pure `advance * length`.
+// A shim that got the last-character rule wrong would pass board 2's half
+// unnoticed - the exact failure this table was extended to prevent.
+//
+// WHAT WOULD ACTUALLY CLOSE IT: build board 2 against COZETTE temporarily (the
+// header is already vendored for board 1), run TEXTPROBE on both boards, and
+// diff. Same face on both sides makes the comparison meaningful again, and
+// Cozette's 20 divergent glyphs make the last-character rule bite. That needs
+// board 1 physically attached and one throwaway board-2 build; it has not been
+// done.
+//
+// text-widths-board2.txt is board 2's half, REFRESHED against the shipped Spleen
+// registry. The copy it replaces was captured 2026-08-22, one day before Spleen
+// landed on board 2, so it described a font the device had already stopped
+// drawing - and it sat that way for six days while this comment claimed the
+// comparison was "one command". It is still a useful record of what board 2
+// measures today; it is not, on its own, the gate.
 #pragma once
 
 static const char* const TEXT_PROBE[] = {

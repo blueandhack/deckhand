@@ -992,12 +992,36 @@ diff, not a judgement**. The table and the exact procedure live in `text_probe.h
 is committed as `firmware/deckhand_display/text-widths-board2.txt`, so the comparison is one
 command.
 
-**The diff has NOT been run** — board 1 was physically disconnected for the whole port. What
-substitutes is two independent derivations that agree byte-for-byte across all 136 entries (the
-shim's, and a separate re-derivation from the raw glyph tables against `TFT_eSPI.cpp:3120-3125`).
-For catching an arithmetic error that is stronger than a hardware diff; the residual risk it does
-**not** cover is that TFT_eSPI's *runtime* behaviour differs from its source on this board. Run the
-diff before deriving any new layout number from these widths.
+**THE CROSS-BOARD DIFF STOPPED BEING A VALID GATE WHEN THE TYPE SCALE LANDED, AND NOBODY
+NOTICED FOR SIX DAYS.** The paragraph above describes the gate as designed; it has not been
+runnable since 2026-08-23. Two independent breakages, the second silent:
+
+- **The two boards no longer draw the same faces.** `UI_FONTS[]` is per board — board 1 is
+  Cozette 6x13 / Terminus 10x18b, board 2 is Spleen 8x16/12x24/32x64 — so different widths are
+  the CORRECT output and a diff yields 136 meaningless differences. Measured: font 1 on
+  `"Mac  studio  120s ago"` is **126 on board 1 (6px/char) and 168 on board 2 (8px/char)**.
+- **On Spleen the last-character rule is a NO-OP**, so the eleven strings appended specifically
+  to give the gate teeth discriminate nothing on board 2. Every Spleen glyph in `0x20..0x7E` has
+  `xOffset == 0` and `width == xAdvance == 8`; verified by capture — all 136 widths equal a pure
+  `advance * length`. **A shim with the last-character rule wrong would pass board 2's half
+  unnoticed**, which is the precise failure those strings were added to prevent.
+
+**`text-widths-board2.txt` was also STALE, and that is the smaller half of the problem.** It was
+committed 2026-08-22, one day before Spleen landed on board 2, so it recorded Cozette widths for a
+board that had stopped drawing Cozette. It has been refreshed against the shipped registry; the
+capture needs **~20s**, not the 4 the old procedure said, because 136 entries go out over both
+transports.
+
+**What still substitutes**, and it is unchanged: two independent derivations agreeing byte-for-byte
+across all 136 entries (the shim's, and a re-derivation from the raw glyph tables against
+`TFT_eSPI.cpp:3120-3125`). That is stronger than a hardware diff for catching an arithmetic error;
+the residual risk it does not cover is that TFT_eSPI's *runtime* behaviour differs from its source.
+
+**What would actually close the gate:** build board 2 against **Cozette** temporarily — the header
+is already vendored for board 1 — then run `TEXTPROBE` on both boards and diff. Same face on both
+sides makes the comparison mean something again, and Cozette's 20 divergent glyphs make the
+last-character rule bite. Needs board 1 physically attached plus one throwaway board-2 build. Not
+done.
 
 **The rule the gate exists to catch:** TFT_eSPI charges the last character `xOffset + width`, not
 `xAdvance`, and those differ for **20 of Cozette's 95 glyphs** (0 of Terminus's). The original probe
