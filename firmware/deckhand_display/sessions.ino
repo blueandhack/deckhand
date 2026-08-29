@@ -1613,6 +1613,44 @@ void renderSessionsTab() {
   renderSessionsList();
 }
 // ---------- Session detail screen ----------
+#if !BOARD_USES_TFT_ESPI
+// THE OPTION DESCRIPTIONS CANNOT GO INTO THE SIGNATURE VERBATIM, and the arithmetic
+// is the whole reason this helper exists rather than a twelfth "%s".
+//
+// detailSigCache is 384 bytes and the fields below already spend 363 of them on
+// this board (359 plus the agent term). Four descriptions at ASK_OPT_DESC_BYTES - 1
+// = 96 characters, with a separator each, is 388 bytes ON ITS OWN - more than the
+// entire cache - so there is no version of "just append them" that is not a silent
+// truncation, and a signature cache shorter than what it stores stops noticing
+// changes past that point. That is this codebase's oldest bug, not a new risk.
+//
+// So: a 32-bit FNV-1a over all four slots, printed as 8 hex characters. Nine bytes
+// with its separator, and it changes if and only if some description does. It is
+// the same trade askVoiceSha already makes one field up - a 19-char hash standing
+// in for up to 204 characters of transcript - and the only difference is that the
+// host computes that one while nothing on the wire carries this one.
+//
+// WHAT A COLLISION COSTS, stated rather than waved at: two different description
+// sets hashing equal means one missed repaint of a card whose every other field is
+// also identical. Nothing is authenticated with this - the answer HMAC is over the
+// option INDEX and does not touch these bytes - so it is a change detector and
+// 2^-32 is the right price for the 379 bytes of cache it saves.
+//
+// The 0xFF terminator per slot is not decoration: without it {"ab", ""} and
+// {"a", "b"} hash identically, and those are two genuinely different cards.
+unsigned long askOptDescHash(int idx) {
+  unsigned long h = 2166136261UL;
+  for (int k = 0; k < 4; k++) {
+    for (const char* p = sessions[idx].askOptDesc[k]; *p; p++) {
+      h ^= (unsigned char) *p;
+      h *= 16777619UL;
+    }
+    h ^= 0xFF;
+    h *= 16777619UL;
+  }
+  return h;
+}
+#endif
 void buildDetailSignature(int idx, char* out, size_t outSize) {
   // title and prompt MUST be here: they are drawn on the static card, so leaving them out
   // means sending a new prompt never repaints the screen you are looking at.
@@ -1668,6 +1706,22 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
   used = strlen(out);
   if (used + 6 < outSize)
     snprintf(out + used, outSize - used, "|%s", sessions[idx].agent);
+  // THE OPTION DESCRIPTIONS, as the hash derived above rather than as text. They are
+  // drawn on this card's ask screen and nothing else in this signature moves when
+  // they arrive: the host omits `optDescs` entirely until at least one is non-empty,
+  // so a prompt can gain its descriptions mid-life - a host restarting or being
+  // upgraded under a pending ask, with askPid unchanged throughout - and without
+  // this term that card would never repaint to show them. Identical reasoning to
+  // askVoiceSha's, which is in this signature for exactly that shape of event.
+  //
+  // BOARD 1 IS DELIBERATELY EXCLUDED, and unlike the agent term above the reason is
+  // no longer byte-identity: this task moves board 1's binary on purpose. It is that
+  // board's ASK_OPT_DESC_BYTES is 1, so every slot there is permanently "" and the
+  // hash is a constant - a term that can never change is cache pressure with no
+  // signal in it, on the board whose RAM is the binding constraint.
+  used = strlen(out);
+  if (used + 10 < outSize)
+    snprintf(out + used, outSize - used, "|%08lx", askOptDescHash(idx));
 #endif
 }
 // Index-based (not SessionInfo&) for the same Arduino auto-prototype reason

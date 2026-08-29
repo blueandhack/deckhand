@@ -116,6 +116,14 @@ function widthB(b, id, s) {
 const VOICE_TEXT_MAX = +fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
   .match(/VOICE_TEXT_MAX\s*=\s*(\d+)/)[1];
 
+// The per-option description cap, from the file that OWNS it - the hook - for the
+// identical reason VOICE_TEXT_MAX comes from host/index.mjs. Nothing in a
+// translation unit can see a JS constant, so this read IS the link between the
+// host's cap and the device's buffer, and it fails if either moves alone.
+const OPT_DESC_MAX_BYTES = +fs.readFileSync(
+  `${DIR}/../../claude-hooks/deckhand-session-hook.mjs`, "utf8")
+  .match(/ASK_OPT_DESC_MAX_BYTES = (\d+);/)[1];
+
 // The TYPE chip's own source, so the hit test's slack term is PARSED rather than
 // restated - the whole point of the assertion below is that it can see a future
 // change that couples the chip's drawn size back to the tap zone.
@@ -129,6 +137,12 @@ const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 const B = {};
 for (const b of [1, 2]) B[b] = consts("deckhand_display.ino", consts(HDR[b]));
 const CACHE = cacheSizes("deckhand_display.ino");
+// SessionInfo's two parallel option arrays, PARSED. cacheSizes() only sees
+// top-level `char` declarations, never struct members, so these are read straight
+// out of the struct - which is also the only way the second dimension can be
+// checked for being a NAME rather than a literal.
+const OPT_DECL = DISPLAY_INO.match(/char askOpts\[(\d+)\]\[(\d+)\];/);
+const OPT_DESC_DECL = DISPLAY_INO.match(/char askOptDesc\[(\d+)\]\[([A-Za-z_0-9]+)\];/);
 
 // Field caps, straight off SessionInfo in deckhand_display.ino (a char[N] holds
 // N-1 characters). These are DATA widths, identical on both boards - which is
@@ -3071,6 +3085,46 @@ for (const b of [1, 2]) {
         : "board 1 does not sign s.agent: its AGENT column still spells the agent out, and " +
           "its binary is held byte-identical");
   if (signsAgent) detSig += 1 + CAP.agent;
+  // ---- the per-option descriptions, and why they are a HASH in that signature ----
+  // The buffer first. Its second dimension must be the per-board NAME: a literal
+  // there would leave ASK_OPT_DESC_BYTES certifying nothing at all, which is what an
+  // #if at the declaration did to BATT_LEFT_BYTES - one arm parsed, both boards
+  // reported, and board 1 carrying a false reading.
+  chk(!!OPT_DESC_DECL && !!OPT_DECL, "SessionInfo declares askOpts[n][m] and askOptDesc[n][NAME]");
+  chk(!!OPT_DESC_DECL && OPT_DESC_DECL[2] === "ASK_OPT_DESC_BYTES",
+      `askOptDesc is sized by the per-board constant ASK_OPT_DESC_BYTES, not a literal` +
+      ` (got "${OPT_DESC_DECL ? OPT_DESC_DECL[2] : "no declaration"}")`);
+  chk(!!OPT_DESC_DECL && !!OPT_DECL && +OPT_DESC_DECL[1] === +OPT_DECL[1],
+      `askOptDesc has one slot per askOpts slot (${OPT_DECL ? OPT_DECL[1] : "?"}) - they are` +
+      ` index-parallel, and a shorter description array would silently describe the wrong option`);
+  const descBytes = c.ASK_OPT_DESC_BYTES;
+  chk(descBytes === (b === 2 ? OPT_DESC_MAX_BYTES + 1 : 1),
+      b === 2
+        ? `ASK_OPT_DESC_BYTES ${descBytes} holds the hook's own ${OPT_DESC_MAX_BYTES}-byte cap + NUL`
+        : `ASK_OPT_DESC_BYTES ${descBytes} is this board's 1-byte placeholder - it draws no` +
+          ` descriptions, and SessionInfo is shared so the member exists here regardless`);
+  // Now the signature term, parsed from the arm exactly as the agent one is.
+  const signsDescs = /askOptDescHash\(/.test(sigArm);
+  chk(signsDescs === (b === 2),
+      b === 2
+        ? "the option descriptions are in the detail signature - the host omits optDescs " +
+          "until one is non-empty, so a prompt can gain them mid-life with askPid unchanged " +
+          "and nothing else on the card moving"
+        : "board 1 does not sign the option descriptions: its slots are permanently empty, " +
+          "so the term could never change");
+  if (signsDescs) {
+    const w = sigArm.match(/"\|%0(\d+)lx",\s*askOptDescHash/);
+    chk(!!w, "the description hash's printed width is parseable out of the signature itself");
+    const hw = w ? +w[1] : NaN;
+    detSig += 1 + hw;
+    // THE ARITHMETIC THAT FORCES THE HASH, asserted rather than left in a comment:
+    // appending the four descriptions verbatim needs more than the whole cache, so
+    // "just add them as another %s" is a silent truncation and not a close call.
+    const verbatim = detSig - (1 + hw) + (+OPT_DESC_DECL[1]) * (1 + descBytes - 1);
+    chk(verbatim > cacheLen("detailSigCache"),
+        `the four descriptions verbatim would need ${verbatim} bytes of a` +
+        ` ${cacheLen("detailSigCache")}-byte detailSigCache - hence the ${hw}-hex hash`);
+  }
   chk(cacheLen("detailSigCache") >= detSig,
       `detailSigCache ${CACHE.detailSigCache} holds its ${detSig}-byte worst case` +
       ` (${cacheLen("detailSigCache") - detSig} bytes of headroom)`);

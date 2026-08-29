@@ -1338,6 +1338,22 @@ const int ASK_READ_BTN_H = 46;
 // clears the band at +50 by 4px.
 const int ASK_BADGE_Y = 54;
 const int ASK_TITLE_Y = 75;
+// THE PER-OPTION DESCRIPTION BUFFER, one slot per option in SessionInfo.
+// 97 = the hook's own ASK_OPT_DESC_MAX_BYTES (96) plus the NUL, and that 96 is
+// itself DERIVED in claude-hooks/deckhand-session-hook.mjs as LABEL_MAX_CHARS (32)
+// x 3 - the most bytes one option LABEL can already cost on this wire - so a
+// description can never cost more than the label it explains. Nothing in a
+// translation unit can see a JS constant, so the LINK between the two numbers lives
+// in sessions-geom-check.mjs, which parses BOTH and fails if either moves alone -
+// the same route that checker already takes to VOICE_TEXT_MAX in host/index.mjs.
+// Since host/to-ascii.mjs landed, bytes and characters are one unit on this wire,
+// so 96 bytes is also 96 characters.
+// A CONSTANT rather than an #if at the declaration: with the size behind an #if,
+// the checkers' parse takes ONE arm and reports it for BOTH boards, which is how
+// BATT_LEFT_BYTES once gave board 1 a false reading. Cost here is
+// 4 x 97 x MAX_SESSIONS = 2,328 bytes of DRAM, against 8MB of PSRAM and a board
+// whose framebuffer already owns 300KB of it.
+const int ASK_OPT_DESC_BYTES = 97;
 
 // ---------- Component heights ----------
 // The design system's own note on these two is "derived from TAP_MIN, not chosen

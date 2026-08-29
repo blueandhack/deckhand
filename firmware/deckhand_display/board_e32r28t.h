@@ -445,6 +445,21 @@ const int ASK_READ_BTN_H = 24;
 // session name right-aligned on the same row) and then the question title.
 const int ASK_BADGE_Y = 27;
 const int ASK_TITLE_Y = 39;
+// THE PER-OPTION DESCRIPTION BUFFER - A PLACEHOLDER ON THIS BOARD, which does not
+// draw option descriptions at all. 1 is the smallest legal size (a zero-length
+// array is not legal C++), so every slot can only ever hold "", and anything that
+// would show one falls back to "no description".
+// It has to exist at all because SessionInfo is SHARED: the member is compiled into
+// this board whether or not a single pixel of it is ever drawn. What is NOT shared
+// is the cost - sizing it to the host's real 96-byte cap would spend
+// 4 x 97 x MAX_SESSIONS = 2,328 bytes of DRAM here for text this panel can never
+// render, on the board whose free heap (~26KB after the BLE stack) is the binding
+// constraint on the audio path. At 1 it costs 4 x 1 x 6 = 24.
+// A CONSTANT rather than an #if at the declaration, and that is not style: with the
+// size behind an #if, cacheSizes()/consts() parse ONE arm and report it for BOTH
+// boards, so this board would carry board 2's number as a false reading. That is
+// exactly what BATT_LEFT_BYTES was fixed for.
+const int ASK_OPT_DESC_BYTES = 1;
 
 const int PAGER_BTN_W  = 52;   // prev/next key width
 const int PAGER_BTN_X0 = 6;    // inset from each edge

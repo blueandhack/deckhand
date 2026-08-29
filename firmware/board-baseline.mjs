@@ -103,9 +103,46 @@ function buildStampRange(buf) {
   return { range: { from, to, why: "__DATE__/__TIME__" }, count: 1 };
 }
 
-// Nothing board-specific remains: the one board-specific entry was this stamp,
-// and it is found per image now. Kept as a hook because --selftest's whole job
-// is telling you when a board needs one.
+// THE ESP32 CORE STAMPS THE IMAGE TOO, AND THE NOTE ABOVE WAS WRONG ABOUT IT.
+// The line above attributes the second time\0date\0 pair to "prebuilt LittleFS"
+// and calls it FIXED. Both halves are wrong, and it took a --clean build to see:
+// it is the ESP32 CORE's own, from cores/esp32/chip-debug-report.cpp -
+//
+//   chip_report_printf("  Compile Date/Time : %s %s\n", __DATE__, __TIME__);
+//
+// - and it is fixed only for as long as core.a is CACHED. Rebuild the core (a
+// `--clean` compile, or an arduino-cli / ESP32 core upgrade - exactly the case the
+// header above tells you to re-run --selftest for) and it moves, at which point
+// every --check fails and looks like a real change. Measured on two board-1 builds
+// straddling a core rebuild: 01:05:12 against 01:06:34, uncovered, selftest FAIL.
+//
+// Anchored on the trailing "  Compile Date/Time : " literal for the same reason
+// the sketch's stamp anchors on "BUILD ": it names the line responsible, and the
+// anchor itself is matched but NOT masked, so a change to it is still detected.
+//
+// THE DATE IS OPTIONAL IN THE MATCH, AND THAT IS NOT DEFENSIVENESS. __DATE__ here
+// and __DATE__ in deckhand_display.ino are the same literal whenever the core and
+// the sketch were built on the same CALENDAR DAY, so the linker POOLS them and
+// only the time remains ahead of this anchor; built on different days there are two
+// literals and the date sits here as well. Both were observed in one session -
+// board 1's core rebuilt today (pooled), board 2's cached from Aug 21 (not) - and
+// the pooling is also worth knowing for a reason no mask can address: it makes the
+// image 16 bytes SMALLER, so a board's SIZE depends on whether its core archive
+// happens to carry today's date. See the task-2 report.
+const CORE_STAMP_RE =
+  /[0-2]\d:[0-5]\d:[0-5]\d\x00(?:[A-Z][a-z]{2} [ \d]\d \d{4}\x00)?  Compile Date\/Time : /g;
+
+function coreStampRange(buf) {
+  const hits = [...buf.toString("latin1").matchAll(CORE_STAMP_RE)];
+  if (hits.length !== 1) return { range: null, count: hits.length };
+  const ANCHOR = "  Compile Date/Time : ";
+  const from = hits[0].index;
+  return { range: { from, to: from + hits[0][0].length - 1 - ANCHOR.length, why: "core __DATE__/__TIME__" }, count: 1 };
+}
+
+// Nothing board-specific remains: the one board-specific entry was the sketch's
+// build stamp, and both stamps are found per image now. Kept as a hook because
+// --selftest's whole job is telling you when a board needs one.
 const MASK_BOARD = { 1: [], 2: [] };
 
 const BASELINE = path.join(import.meta.dirname, "board-baseline.json");
@@ -122,7 +159,16 @@ function maskedHash(file, board) {
     );
     process.exit(1);
   }
-  const ranges = [...MASK_COMMON, ...(MASK_BOARD[board] ?? []), stamp.range];
+  const core = coreStampRange(buf);
+  if (!core.range) {
+    console.error(
+      `FAIL: expected exactly one core "Compile Date/Time" stamp in ${path.basename(file)}, found ${core.count}.\n` +
+      "That stamp is masked by CONTENT too. If a core upgrade changed the wording,\n" +
+      "fix CORE_STAMP_RE; if the core stopped printing it, drop this mask.",
+    );
+    process.exit(1);
+  }
+  const ranges = [...MASK_COMMON, ...(MASK_BOARD[board] ?? []), stamp.range, core.range];
   for (const { from, to } of ranges) {
     if (to >= buf.length) continue;
     buf.fill(0, from, to + 1);
@@ -191,8 +237,10 @@ if (args[0] === "--selftest") {
     // otherwise the coverage report calls the one range it definitely DOES mask
     // "NOT COVERED" and sends the next reader chasing a mask that is fine.
     const stampA = buildStampRange(Buffer.from(A)).range;
+    const coreA = coreStampRange(Buffer.from(A)).range;
     const covered = [...MASK_COMMON, ...(MASK_BOARD[sboard] ?? [])];
     if (stampA) covered.push(stampA);
+    if (coreA) covered.push(coreA);
     const tailFrom = A.length - MASK_TAIL_BYTES;
     console.error("\nRaw differing runs (0-based), and whether the mask covers each:");
     for (const [from, to] of runs) {

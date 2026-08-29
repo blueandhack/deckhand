@@ -913,6 +913,16 @@ struct SessionInfo {
   char askTitle[36];  // hook caps title at 34 chars
   char askDetail[1424]; // hook caps detail at 1400 chars (~3 reader pages of code)
   char askOpts[4][34]; // hook caps each option label at 32 chars
+  // One description per option, INDEX-PARALLEL to askOpts and DENSE: the host
+  // sends "" for an option that has none rather than a hole, so slot k always
+  // describes option k. Empty is the ordinary case and must read as "no
+  // description" wherever it is shown - a host too old to send the field at all
+  // leaves every slot empty and this board then behaves exactly as it did before.
+  // ASK_OPT_DESC_BYTES is per board (board_*.h): board 2 holds the host's full
+  // 96-byte cap plus a NUL, board 1 is a 1-byte placeholder because it draws none
+  // of this and SessionInfo is shared - the member exists there regardless, only
+  // the RAM is opted out of.
+  char askOptDesc[4][ASK_OPT_DESC_BYTES];
   uint8_t askOptCount;
   // May WE decide this prompt? Per-prompt, not global: it records whether the
   // hook actually blocked waiting for us when the prompt was raised. Flipping
@@ -3764,6 +3774,7 @@ void handleLine(const String& line) {
         copyField(info.promptNonce, sizeof(info.promptNonce), s["pnonce"]);
       info.askTitle[0] = '\0';
       info.askDetail[0] = '\0';
+      for (int k = 0; k < 4; k++) info.askOptDesc[k][0] = '\0';
       info.askOptCount = 0;
       info.askAnswerable = remoteAnswerEnabled;
       info.askVoice = false;
@@ -3805,6 +3816,30 @@ void handleLine(const String& line) {
             if (info.askOptCount >= 4) break;
             copyField(info.askOpts[info.askOptCount], sizeof(info.askOpts[0]), o | "");
             info.askOptCount++;
+          }
+        }
+        // The descriptions, walked BY INDEX rather than beside the loop above,
+        // because the two arrays are parallel but not the same array: the hook
+        // omits optDescs entirely when every description is empty (so an
+        // Allow/Deny payload is byte-identical to what it always was), and a host
+        // that predates the field never sends it. Either way the slots stay empty,
+        // which is the "no description" case and not an error to report.
+        // It is DENSE on the wire - an option with no description gets "", never a
+        // hole - so index k here really is option k. Bounded by 4 and not by
+        // askOptCount so a longer array cannot walk past the buffer, and no slot
+        // past askOptCount is ever read.
+        JsonArray descs = ask["optDescs"].as<JsonArray>();
+        if (!descs.isNull()) {
+          int k = 0;
+          for (JsonVariant d : descs) {
+            if (k >= 4) break;
+            copyField(info.askOptDesc[k], sizeof(info.askOptDesc[0]), d | "");
+            // Defence in depth, exactly as the title and detail get above: the host
+            // flattens control bytes and transliterates to ASCII now, but one that
+            // slipped through would render as garbage glyphs on this font. These are
+            // single-line, so unlike askDetail there is no '\n' to preserve.
+            for (char* p = info.askOptDesc[k]; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
+            k++;
           }
         }
       }
