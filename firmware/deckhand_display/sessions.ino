@@ -533,12 +533,21 @@ void drawSessionBand(int x, int y, int w, int i, uint16_t col) {
 // in, which drawSessionBand writes - not colorForStatus(). A crossfade frame or a
 // pulse breath leaves the band a blended colour, and blitting the mark over the
 // flat status colour would punch a 32x32 patch of the wrong shade into it.
-void drawBandMark(int pos) {
-  const int i = sessionAt(pos);
-  drawAgentMark(bandMarkX(SESSION_ROW_X + BORDER_CARD),
-                bandMarkY(sessionRowYAt(pos) + BORDER_CARD),
+//
+// ONE COPY OF THE BLIT, SPLIT AT THE ORIGIN, because TWO surfaces wear this band:
+// the sessions tab's expanded row and the session DETAIL card, which is the same
+// component at a different x/y. Extracted rather than copied, the way
+// drawSpineGaps was, and for the same reason - the background above is the single
+// property a second copy would be free to get wrong, and getting it wrong is a
+// 32x32 patch of flat status colour punched into a breathing band.
+void drawBandMarkAt(int x, int y, int i) {
+  drawAgentMark(bandMarkX(x), bandMarkY(y),
                 strcmp(sessions[i].agent, "cx") == 0,
                 COLOR_CARD, bandFillShown, /*animate=*/true);
+}
+void drawBandMark(int pos) {
+  drawBandMarkAt(SESSION_ROW_X + BORDER_CARD, sessionRowYAt(pos) + BORDER_CARD,
+                 sessionAt(pos));
 }
 // The Codex knockout, EXTRACTED so the shimmer can re-apply it after repainting
 // the column. One copy of the loop rather than a second that could drift from
@@ -678,7 +687,15 @@ void drawSpineShimmer(int x0, int y0, int h0, const char* status, bool codex,
 // when nothing is dirty, and deliberately does not overwrite lastFlushUs then.
 void tickSessionAnim() {
   if (isAsleep || octoActive || showingDetail || readerActive || histActive
-      || kbActive || emojiTestActive) { xfadeId[0] = '\0'; return; }
+      || kbActive || emojiTestActive) {
+    // STILL GATED OUT - this function paints at the LIST's coordinates and must
+    // not run over a full-screen surface. What changed is the CLEAR: the detail
+    // card wears the same band and tickDetailBandAnim() advances the fade there,
+    // so clearing here would abort, on its first frame, a fade the other surface
+    // is in the middle of drawing. Every other reason to be here still clears.
+    if (!detailBandVisible()) xfadeId[0] = '\0';
+    return;
+  }
   if (currentTab != TAB_SESSIONS || sessionCount == 0) { xfadeId[0] = '\0'; return; }
 
   // ---- the state crossfade: one-shot, band only ----
@@ -839,6 +856,140 @@ void tickSessionAnim() {
             pulseWorstUs = pulseComposeUs + pulseFlushUs;
           pulseFrameCount++;
         }
+      }
+    }
+  }
+}
+// ---------- §7 The DETAIL card's band, which animates for the same reasons ----------
+// THE DETAIL CARD WEARS THE SAME BAND AND EVERY ONE OF ITS ANIMATIONS WAS DEAD
+// THERE. Both ticks above early-return on showingDetail, so on that screen
+// animPhase never advanced AND nothing repainted the band: a working session
+// showed a FROZEN mark where the identical component two taps away turns. Found
+// by looking at the device. The two-part shape is why it was fully dead rather
+// than merely slow - the ~5s host tick does repaint the card, but the phase it
+// draws is frozen too, so even a repaint changes nothing.
+//
+// A THIRD TICK RATHER THAN A RELAXED GATE ON THE OTHER TWO, and that is the whole
+// safety argument. Those two paint at the sessions LIST's coordinates - a band at
+// sessionRowYAt(0), a shimmer down every row, a spark in every row's dot - so
+// letting them through here would paint the list's geometry on top of a
+// full-screen card. This one knows only the detail card's own x/y, so the worst
+// it can do is repaint the band it owns.
+//
+// IT MUST NEVER TOUCH lastNonIdleMillis, for the reason the other two carry: an
+// animation that read as activity would hold the backlight on, and on this board
+// that blank is the only power saving left.
+
+// THE GATE, AND THE HAZARD IT EXISTS FOR: showingDetail is ALSO TRUE ON THE ASK
+// SCREEN. It is set in exactly one place and the ask screen is drawn through the
+// same entry point (drawSessionDetail hands off to drawAskDetail on askPid), and
+// that screen has NO band at all - a badge, a title, Allow/Deny. Blitting a spark
+// into the middle of an Allow/Deny screen is the failure this predicate prevents,
+// so it asks the same question drawSessionDetail and renderDetailDuration already
+// ask rather than trusting showingDetail alone.
+//
+// AND IT REFUSES EVERY OTHER FULL-SCREEN SURFACE, not because showingDetail is
+// wrong about them but because it does not always go false underneath them: the
+// keyboard in particular runs with showingDetail still true (see
+// closeKeyboard()'s own note), which would put a spark on the key rows.
+bool detailBandVisible() {
+  if (isAsleep || octoActive || readerActive || histActive || kbActive || emojiTestActive)
+    return false;
+  if (!showingDetail || currentTab != TAB_SESSIONS) return false;
+  if (detailIndex < 0 || detailIndex >= sessionCount) return false;
+  return !sessions[detailIndex].askPid[0];   // the ask screen has no band to animate
+}
+// The mark at the DETAIL card's origin - the same interior drawSessionBand is
+// handed there, so the two can never disagree about where the mark sits.
+void drawDetailBandMark() {
+  drawBandMarkAt(CARD_X + BORDER_CARD, DETAIL_CARD_Y + BORDER_CARD, detailIndex);
+}
+// ONE band FRAME on the detail card, measured exactly as the list's two are:
+// a LEADING flush so the figure PERF reports is this paint's own cost rather than
+// whatever was already pending, and a trailing one because nothing else on this
+// screen is pushing the card's strips. (The shimmer's ride-along trick is not
+// available here and must not be imitated: there is no second animation on this
+// surface whose flush could carry it.)
+uint32_t paintDetailBandFrame() {
+  const int i = detailIndex;
+  tft.flush();
+  const uint32_t t0 = micros();
+  drawSessionBand(CARD_X + BORDER_CARD, DETAIL_CARD_Y + BORDER_CARD,
+                  CARD_W - 2 * BORDER_CARD, i, colorForStatus(sessions[i].status));
+  const uint32_t compose = (uint32_t) (micros() - t0);
+  tft.flush();
+  return compose;
+}
+void tickDetailBandAnim() {
+  if (!detailBandVisible()) return;
+  const int i = detailIndex;
+
+  // ---- the mark: the SAME animPhase, on the same ANIM_INTERVAL_MS cadence ----
+  // ADVANCED HERE BECAUSE NOTHING ELSE CAN. tickWorkingSpinner owns animPhase and
+  // returns on showingDetail before touching it, which is the half of the bug that
+  // made a host-tick repaint useless. The two can never both advance it in one
+  // frame: that early return is unconditional on showingDetail and this function
+  // requires it, so they are mutually exclusive by construction rather than by
+  // timing.
+  bool markDue = false;
+  if (millis() - lastAnimMs >= ANIM_INTERVAL_MS) {
+    lastAnimMs = millis();
+    animPhase = (animPhase + 1) % ANIM_STEPS;
+    markDue = strcmp(sessions[i].status, "working") == 0;
+  }
+
+  // ---- the state crossfade ----
+  // THE CLOCK IS RUN WHATEVER IS ON SCREEN, and only a fade belonging to the
+  // session this card shows is PAINTED. A fade started on some other row would
+  // otherwise be pinned, unadvanced, for as long as this card is open - and the
+  // one thing worse than a fade that does not run is one that resumes minutes
+  // later against a status it no longer describes.
+  bool faded = false;
+  if (xfadeId[0] && millis() - lastXfadeMs >= SESSION_XFADE_INTERVAL_MS) {
+    lastXfadeMs = millis();
+    const bool mine = strcmp(sessions[i].id, xfadeId) == 0;
+    // Cleared BEFORE the draw when the clock has run out, exactly as the list's
+    // block does it: that is what makes the last frame SETTLE the band at the
+    // target rather than leaving it one step short of it forever.
+    if (sessionXfadeT(xfadeId) < 0) xfadeId[0] = '\0';
+    if (mine) {
+      xfadeComposeUs = paintDetailBandFrame();
+      xfadeFlushUs = tft.lastFlushUs();
+      if (xfadeComposeUs + xfadeFlushUs > xfadeWorstUs)
+        xfadeWorstUs = xfadeComposeUs + xfadeFlushUs;
+      xfadeFrameCount++;
+      faded = true;
+    }
+  }
+
+  // ---- the mark's own blit, ONLY when no band repaint has already carried it ----
+  // A band repaint draws the mark at the current phase itself, so blitting again
+  // in the same frame would be a second push of the same 32x32 region for no
+  // change - the flicker discipline's own arithmetic, applied to an animation.
+  if (markDue && !faded) {
+    drawDetailBandMark();
+    tft.flush();
+  }
+
+  // ---- the attention pulse ----
+  // REACHABLE HERE ONLY FOR AN `asking` SESSION WITH NO ASK OBJECT, because one
+  // with an askPid is drawn as the ASK screen and that screen has no band. So this
+  // is the rare arm rather than the common one, and it is written anyway because
+  // the alternative is a band that breathes on one surface and not on the other
+  // for a state that can reach both. Same change-only reconcile against
+  // bandFillShown as the list's, and the same deference to a running crossfade,
+  // which already repaints at the pulse's own alpha.
+  if (millis() - lastPulseMs >= SESSION_PULSE_INTERVAL_MS) {
+    lastPulseMs = millis();
+    if (sessionXfadeT(sessions[i].id) < 0) {
+      const uint16_t want = sessionBandFill(colorForStatus(sessions[i].status), -1,
+                                            sessionPulseA(sessions[i].status));
+      if (want != bandFillShown) {
+        pulseComposeUs = paintDetailBandFrame();
+        pulseFlushUs = tft.lastFlushUs();
+        if (pulseComposeUs + pulseFlushUs > pulseWorstUs)
+          pulseWorstUs = pulseComposeUs + pulseFlushUs;
+        pulseFrameCount++;
       }
     }
   }
@@ -2190,18 +2341,15 @@ void drawSessionDetail(int idx) {
   // and sessions-geom-check.mjs asserts the lane on THIS surface so it fails rather
   // than merely looking cramped.
   //
-  // §6'S CROSSFADE BELONGS TO THE LIST, AND WITHOUT THIS LINE IT FREEZES HERE.
-  // tickSessionAnim() clears xfadeId the moment any full-screen surface takes the
-  // glass - this card is one of them - and it is the ONLY thing that advances a
-  // fade. But handleLine() starts the fade and repaints this card in the SAME
-  // tick, before loop() reaches that clear: the band was therefore painted at
-  // frame 0 of a fade nothing would ever advance, and STAYED there, with the
-  // leaving and arriving words overlapping at half strength each. Seen on the
-  // glass - "WAITING FOR YOU" and "WORKING" superimposed and both illegible, on a
-  // card already wearing the new status colour in its border. Cleared here with
-  // exactly the meaning tickSessionAnim's own guard gives it: there is no fade on
-  // this screen, so the band paints the settled colour.
-  xfadeId[0] = '\0';
+  // §7: THE FADE RUNS ON THIS CARD NOW, AND THAT IS WHY NOTHING IS CLEARED HERE.
+  // This line used to read `xfadeId[0] = '\0';`, and it was correct for as long as
+  // nothing advanced a fade on this screen: handleLine() starts the fade and
+  // repaints this card in the SAME tick, so the band was painted at frame 0 of a
+  // fade that would never move and STAYED there - seen on the glass, "WAITING FOR
+  // YOU" and "WORKING" superimposed at half strength each, on a card already
+  // wearing the new status colour in its border. tickDetailBandAnim() advances it
+  // now, so the fade SETTLES instead of freezing, and clearing it here would abort
+  // every fade on its first frame - the same defect wearing the old fix.
   // The card INTERIOR, inset by its own 2px border, is what drawSessionBand takes -
   // identical to the sessions tab's call site, so the band's top corners are the
   // card's own and its fill never paints outside the outline.
@@ -2546,20 +2694,26 @@ void renderDetailDuration() {
   // 292x42 region once a second for the first minute of every status, which is
   // what this file's redraw discipline exists to prevent.
   //
-  // THE BACKGROUND IS bandFillShown - THE RECORD OF WHAT WAS PAINTED - where the
-  // sessions tab deliberately re-asks sessionBandFill() instead. The difference is
-  // real rather than stylistic: on the tab a crossfade or a pulse repaints the band
-  // between ticks, so the record is a frame old; HERE nothing repaints it at all
-  // (tickSessionAnim and tickWorkingSpinner both early-return on showingDetail), so
-  // the record is exact and re-asking a free-running ramp would paint an opaque box
-  // in a colour the band underneath it has never been.
+  // THE BACKGROUND RE-ASKS sessionBandFill(), EXACTLY AS THE SESSIONS TAB'S COPY
+  // OF THIS FIELD DOES - and it used to read bandFillShown here, which was right
+  // only while this surface was frozen. The comment that justified it said so in
+  // as many words: "HERE nothing repaints it at all (tickSessionAnim and
+  // tickWorkingSpinner both early-return on showingDetail), so the record is
+  // exact". tickDetailBandAnim() repaints it now, so the record is a frame old
+  // during a fade or a breath, and an opaque box painted in it would sit in a
+  // colour the band underneath has already left. The trade is the tab's own,
+  // spelled out at that call site: bounded by ONE step of the ramp, self-healing
+  // at the next reconcile.
   {
     char bdur[8];
     bandDurText(detailIndex, bdur, sizeof(bdur));
+    const SessionInfo& bs = sessions[detailIndex];
     drawIfChanged(detailDurCache, sizeof(detailDurCache), bdur,
                   CARD_X + CARD_W - BORDER_CARD - SESSION_BAND_PAD,
                   DETAIL_CARD_Y + BORDER_CARD + bandDurDY(), T_BODY, 1,
-                  COLOR_CARD, bandFillShown, TR_DATUM);
+                  COLOR_CARD,
+                  sessionBandFill(colorForStatus(bs.status), sessionXfadeT(bs.id),
+                                  sessionPulseA(bs.status)), TR_DATUM);
   }
   return;
 #else

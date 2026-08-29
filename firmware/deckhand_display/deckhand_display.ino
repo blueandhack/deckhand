@@ -5369,6 +5369,12 @@ void loop() {
   // than a runtime no-op so board 1 never sees the TEXT of a call it does not
   // have, the same rule the 26 tft.flush() sites follow.
   tickSessionAnim();
+  // The SESSION DETAIL card's own band, which neither tick above can reach: both
+  // return on showingDetail, so its mark, its crossfade and its pulse were all
+  // dead there while the identical band on the list animated. Its own function
+  // rather than a relaxed gate on those two, because they paint at the LIST's
+  // coordinates - see the block above tickDetailBandAnim() in sessions.ino.
+  tickDetailBandAnim();
 #endif
   tickWorkingSpinner();
   tickMicProcessing();  // no-op unless a capture is being processed

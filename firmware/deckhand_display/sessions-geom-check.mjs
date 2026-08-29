@@ -120,6 +120,7 @@ const VOICE_TEXT_MAX = +fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
 // restated - the whole point of the assertion below is that it can see a future
 // change that couples the chip's drawn size back to the tap zone.
 const SESSIONS_INO = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+const DISPLAY_INO  = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
 
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // The board header FIRST, then deckhand_display.ino seeded with it - which is the
@@ -2410,19 +2411,174 @@ for (const b of [1, 2]) {
         "§7: renderDetailDuration ticks the BAND's duration through bandDurText()");
     chk(!/for %s - %s/.test(durBody),
         "... and board 1's \"for 12m - 14:31\" line is not also drawn, at a detailPillY nothing sets");
-    // §6's crossfade is advanced ONLY by tickSessionAnim, which early-returns
-    // (clearing xfadeId) the moment a full-screen surface owns the glass - and this
-    // card is one. handleLine() starts a fade and repaints this card in the SAME
-    // tick, before loop() reaches that clear, so the band gets painted at frame 0
-    // of a fade nothing will ever advance and FREEZES with both status words
-    // superimposed at half strength. Caught on the glass, not by reading; there is
-    // no geometry above that can see it, and no cache that would ever repaint it.
-    // The clear must come BEFORE the band's draw, or it settles nothing.
-    const iClr = detailBody.indexOf("xfadeId[0] = '\\0';");
-    const iBand = detailBody.indexOf("drawSessionBand(");
-    chk(iClr > 0 && iClr < iBand,
-        "§6: the detail card CLEARS xfadeId before painting its band - nothing on this " +
-        "screen advances a crossfade, so a fade left running freezes both words on it");
+    // ---- §7 THE DETAIL BAND ANIMATES, AND THE ASK SCREEN MUST NEVER SEE IT ----
+    // THE INVERSE OF WHAT STOOD HERE, AND THE OLD ASSERTION IS WORTH READING BEFORE
+    // THE NEW ONE. It required drawSessionDetail to CLEAR xfadeId before painting
+    // the band, because tickSessionAnim - the only thing that advanced a fade -
+    // early-returns on showingDetail, so a fade left running froze both status
+    // words superimposed at half strength. That was the right fix for a screen
+    // where nothing animated. It is the wrong one now: tickDetailBandAnim()
+    // advances the fade here, so clearing it on every card repaint would abort
+    // every fade on its first frame - the same defect wearing the old fix.
+    //
+    // COMMENTS ARE ALREADY STRIPPED by fnSrc, which this assertion DEPENDS ON: the
+    // line it forbids is quoted verbatim in the comment that replaced it, and an
+    // unstripped body would find it there and pass while the code did the opposite.
+    // That is this file's own documented trap - a regex that matched a comment.
+    chk(!detailBody.includes("xfadeId[0] = '\\0';"),
+        "§7: the detail card does NOT clear xfadeId - tickDetailBandAnim() advances the " +
+        "fade on this screen, so clearing it here aborts every fade on its first frame");
+
+    {
+      const anim = fnSrc("void tickDetailBandAnim() {");
+      const vis  = fnSrc("bool detailBandVisible() {");
+      const mark = fnSrc("void drawDetailBandMark() {");
+      const at   = fnSrc("void drawBandMarkAt(int x, int y, int i) {");
+
+      // (1) SOMETHING ADVANCES THE PHASE ON THIS SCREEN. The bug was two-part and
+      // this is the half no repaint could paper over: tickWorkingSpinner owns
+      // animPhase and returns on showingDetail, so the phase was frozen too and the
+      // ~5s card repaint drew the same frame every time. Deleting this line leaves
+      // a mark that is redrawn on a timer and never changes.
+      chk(/animPhase = \(animPhase \+ 1\) % ANIM_STEPS;/.test(anim),
+          "§7: the detail tick ADVANCES animPhase - nothing else does while showingDetail, " +
+          "so without it the mark is redrawn forever at one frame");
+      // (2) ... and something PAINTS it. Either half alone reproduces the frozen
+      // mark in full, which is why they are two assertions.
+      chk(/drawDetailBandMark\(\);/.test(anim),
+          "§7: ... and blits the mark, on the working state only");
+      chk(/markDue = strcmp\(sessions\[i\]\.status, "working"\) == 0;/.test(anim),
+          "§7: the detail mark animates on the card's OWN working state, as the band's " +
+          "own /*animate=*/working argument does");
+      chk(/if \(markDue && !faded\)/.test(anim),
+          "§7: the mark's blit is SKIPPED when a band repaint has already carried it - a " +
+          "second push of the same 32x32 region in one frame changes nothing");
+
+      // (3) THE GATE, AND THE HAZARD IT EXISTS FOR. showingDetail is true on the ASK
+      // screen too - same entry point, no band, just a badge and Allow/Deny - so a
+      // predicate that trusted it would blit a spark into the middle of a decision.
+      // Deleting the askPid line fails HERE, by name, and it was deleted to check.
+      chk(/return !sessions\[detailIndex\]\.askPid\[0\];/.test(vis),
+          "§7: detailBandVisible() REFUSES the ask screen (askPid) - showingDetail is true " +
+          "there too, and that screen has no band to animate");
+      // THE FIRST STATEMENT, not merely present somewhere: a gate that anything runs
+      // ahead of is a gate for that statement's neighbours only. Matched as the
+      // first non-blank line of the body (comments are already stripped), because a
+      // /^...$/m regex passes wherever the line sits - measured, by moving it down
+      // one and watching the regex form pass.
+      const firstStmt = anim.split("\n").slice(1).map((l) => l.trim()).find((l) => l.length);
+      chk(firstStmt === "if (!detailBandVisible()) return;",
+          "§7: the detail tick's FIRST act is that gate - anything ahead of it runs on the " +
+          `ask screen as well (found: ${JSON.stringify(firstStmt)})`);
+      // THE SURFACE LIST IS COMPARED, NOT TRANSCRIBED, exactly as tickSessionAnim's
+      // gate is compared against tickWorkingSpinner's above: every identifier the
+      // spinner refuses must appear here, so a new full-screen surface added there
+      // and forgotten here fails by naming itself.
+      const spinG = (() => {
+        const f = DISPLAY_INO.replace(/^[ \t]*\/\/.*$/gm, "");
+        const i = f.indexOf("void tickWorkingSpinner(");
+        const b2 = f.slice(i, i + f.slice(i).indexOf("\n}\n"));
+        const j = b2.indexOf("if (millis() - lastAnimMs");
+        if (j < 0) throw new Error("tickWorkingSpinner's guard anchor is gone");
+        return b2.slice(b2.indexOf("\n"), j);
+      })();
+      const ids = (t) => new Set(t.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []);
+      const seen = ids(vis);
+      const missing = [...ids(spinG)].filter((k) => !seen.has(k));
+      chk(missing.length === 0,
+          "§7: detailBandVisible() refuses every surface tickWorkingSpinner() does" +
+          (missing.length ? ` - MISSING ${missing.join(", ")}` : ""));
+
+      // (4) ONE COPY OF THE BLIT. Two surfaces wear this band and the background is
+      // the one property a second copy would be free to get wrong - bandFillShown
+      // is the RECORD of what the band was last painted in, and colorForStatus()
+      // there punches a 32x32 patch of flat status colour into a fading or
+      // breathing band. So both call sites must go through drawBandMarkAt.
+      chk(/bandFillShown, \/\*animate=\*\/true\);/.test(at),
+          "§7: the shared band-mark blit draws over bandFillShown - the record of what is " +
+          "on the glass, never colorForStatus()");
+      chk(/drawBandMarkAt\(/.test(mark) && !/drawAgentMark\(/.test(mark),
+          "§7: the detail mark DELEGATES to drawBandMarkAt rather than carrying a second " +
+          "copy of the blit, the way drawSpineGaps was extracted rather than copied");
+      const marks = [...SESSIONS_INO.replace(/^[ \t]*\/\/.*$/gm, "")
+        .matchAll(/\bdrawAgentMark\(/g)].length;
+      chk(marks === 2,
+          `§7: drawAgentMark is called in exactly two places (found ${marks}) - the band's ` +
+          "own draw and the one shared advance-in-place blit");
+
+      // (5) NEITHER lastNonIdleMillis NOR A SECOND WRITER OF THE RECORD. The first
+      // is the sleep-timer rule both other ticks carry; the second is why the
+      // pulse's reconcile can be trusted at all.
+      chk(!/lastNonIdleMillis/.test(anim),
+          "§7: the detail tick never touches lastNonIdleMillis - an animation must not " +
+          "read as activity to the sleep timer");
+      // (6) THE FADE'S CLOCK RUNS EVEN WHEN THE FADE IS NOT OURS. A fade started on
+      // another row would otherwise be pinned, unadvanced, for as long as this card
+      // is open - and then resume against a status it no longer describes.
+      chk(/if \(sessionXfadeT\(xfadeId\) < 0\) xfadeId\[0\] = '\\0';/.test(anim) &&
+          /const bool mine = strcmp\(sessions\[i\]\.id, xfadeId\) == 0;/.test(anim),
+          "§7: the detail tick expires ANY fade's clock but paints only its own session's");
+      // (7) tickSessionAnim still clears on every other reason to be gated out.
+      const sa = fnSrc("void tickSessionAnim() {");
+      chk(/if \(!detailBandVisible\(\)\) xfadeId\[0\] = '\\0';/.test(sa),
+          "§7: tickSessionAnim clears a fade for every gate reason EXCEPT the detail card, " +
+          "which is now running one");
+      // (8) IT IS ACTUALLY CALLED, on board 2 only, between the two ticks whose
+      // flush coupling must not move. An uncalled tick is the same frozen mark with
+      // more code, and a call OUTSIDE the guard moves board 1's binary.
+      //
+      // THE GUARD IS FOUND BY WALKING THE DIRECTIVE STACK, not by matching text
+      // near the call: armFor() cannot be used on loop(), which carries #ifs it
+      // deliberately refuses to resolve, and "there is a #if somewhere above this
+      // line" is exactly the kind of nearby-neighbour match this file has been
+      // burned by.
+      const loopBody = (() => {
+        const f = DISPLAY_INO.replace(/^[ \t]*\/\/.*$/gm, "");
+        const i = f.indexOf("void loop() {");
+        if (i < 0) throw new Error("loop() not found in deckhand_display.ino");
+        const z = f.slice(i).indexOf("\n}\n");
+        if (z < 0) throw new Error("loop(): no closing brace at column 0");
+        return f.slice(i, i + z);
+      })();
+      const guardAt = (body, needle) => {
+        const stack = [];
+        for (const line of body.split("\n")) {
+          const t = line.trim();
+          if (t.startsWith("#if")) stack.push({ d: t, els: false });
+          else if (t === "#else") {
+            if (!stack.length) throw new Error("guardAt(): stray #else");
+            stack[stack.length - 1].els = true;
+          } else if (t === "#endif") {
+            if (!stack.length) throw new Error("guardAt(): stray #endif");
+            stack.pop();
+          } else if (line.includes(needle)) return stack.slice();
+        }
+        return null;
+      };
+      const g = guardAt(loopBody, "tickDetailBandAnim();");
+      chk(g !== null,
+          "§7: loop() calls tickDetailBandAnim() - an uncalled tick is the same frozen " +
+          "mark with more code");
+      chk(g && g.length && g[g.length - 1].d === "#if !BOARD_USES_TFT_ESPI" &&
+          !g[g.length - 1].els,
+          "§7: ... inside #if !BOARD_USES_TFT_ESPI, so board 1 never sees the TEXT of a " +
+          "call it does not have - the rule the 26 tft.flush() sites follow" +
+          (g && g.length ? ` (innermost guard: ${g[g.length - 1].d})` : " (no guard at all)"));
+      chk(loopBody.indexOf("tickSessionAnim();") < loopBody.indexOf("tickDetailBandAnim();") &&
+          loopBody.indexOf("tickDetailBandAnim();") < loopBody.indexOf("tickWorkingSpinner();"),
+          "§7: it runs BETWEEN the two existing ticks, so neither the shimmer's ride-along " +
+          "nor the spinner's trailing flush is separated from its own paint");
+
+      // (9) THE DURATION'S BACKGROUND FOLLOWED THE ANIMATION. It read bandFillShown
+      // - correct only while this surface was frozen, and its own comment said so.
+      // With the band repainting under it, the record is a frame old during a fade,
+      // so this field re-asks the ramp exactly as the sessions tab's copy does.
+      const dur = armFor(fnSrc("void renderDetailDuration() {"), 2);
+      chk(/sessionBandFill\(colorForStatus\(bs\.status\), sessionXfadeT\(bs\.id\),/.test(dur) &&
+          !/COLOR_CARD, bandFillShown, TR_DATUM/.test(dur),
+          "§7: the detail duration's opaque box RE-ASKS sessionBandFill() now that the band " +
+          "animates under it - bandFillShown there is a frame old mid-fade");
+    }
     // §7's meta line: the two label+value column pairs are GONE and one dim line
     // stands where they were. Two assertions rather than one, so a half-done revert
     // (columns back AND the line kept, or the line dropped with nothing in its
