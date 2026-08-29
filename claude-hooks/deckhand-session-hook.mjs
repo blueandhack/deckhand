@@ -205,6 +205,45 @@ function clean(s, max) {
     .slice(0, max);
 }
 
+// The byte budget for one option DESCRIPTION.
+//
+// BYTES, not characters, because the device stores each one in a fixed char[]
+// and truncates by BYTE - and real descriptions are full of em-dashes, curly
+// quotes and arrows at 3 bytes each (measured on a real captured payload: all
+// four descriptions carried at least one). A character cap therefore overflows
+// the device's buffer, which is a defect this repo has already paid for once on
+// the voice-answer path.
+//
+// 64 AND NOT THE 96 THIS STARTED AT, and the number came from measuring the
+// wire rather than from the screen. The device's feedChar() guard DROPS a line
+// over 16000 chars outright - the whole tick, silently, leaving a frozen screen
+// - and the saturated worst case (6 simultaneously-asking sessions, each an
+// AskUserQuestion with a 1400-char detail and 4 labels) already spends 14237 of
+// those 16000 with no descriptions at all. Adding four 96-byte descriptions to
+// each of the six puts it at 16691: 691 OVER. Measured ceiling is 67 bytes
+// (15995, five chars of margin), which is far too tight to ship - the next
+// field anyone adds to an ask would silently blow it. 64 lands at 15923 with 77
+// chars of margin.
+//
+// So if Task 2 finds 64 too short to be useful on the glass, the honest lever is
+// the 1400-char detail cap - 6 x 1400 = 8400 chars is over half the budget and
+// is the dominant term by a wide margin - or a per-tick aggregate. NOT the
+// guard, and not this cap on its own.
+const ASK_OPT_DESC_MAX_BYTES = 64;
+
+// The same boundary walk as capUtf8() in host/voice-answer.mjs, DUPLICATED
+// rather than imported: install.sh copies this file alone into ~/.claude, so it
+// can only ever import node builtins - an import from the repo would resolve
+// here and fail on the machine that actually runs the hook. If you change one,
+// change the other; the original carries the reasoning.
+function capBytes(s, maxBytes) {
+  const buf = Buffer.from(s, "utf8");
+  if (buf.length <= maxBytes) return s;
+  let end = maxBytes;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--; // never split a codepoint
+  return buf.subarray(0, end).toString("utf8");
+}
+
 // Like clean(), but for the detail field, which the device now renders as a
 // code block when it contains newlines - so KEEP '\n' as a hard line break.
 // Tabs become spaces; other control bytes and code-fence lines are stripped;
@@ -254,12 +293,29 @@ function buildAsk(data) {
   if (data.tool_name === "AskUserQuestion") {
     const q = data.tool_input?.questions?.[0] ?? {};
     const opts = (q.options ?? []).slice(0, 4).map((o) => clean(o?.label ?? o, 32));
+    // AskUserQuestion puts "what this option means, or what happens if you pick
+    // it" in `description`, and it used to be thrown away right here - so a
+    // four-way question reached the device as four bare labels and the
+    // information needed to CHOOSE never crossed the wire. Cleaned exactly like
+    // the labels (the device font can't render control bytes), then capped in
+    // bytes. Parallel to `options` by construction: same source array, same
+    // slice, same order, so index i describes option i.
+    const descs = (q.options ?? [])
+      .slice(0, 4)
+      .map((o) => capBytes(clean(o?.description ?? "", ASK_OPT_DESC_MAX_BYTES), ASK_OPT_DESC_MAX_BYTES));
     return {
       pid,
       kind: "question",
       title: clean(q.header ?? "Question", 34),
       detail: cleanMultiline(q.question ?? "", 1400),
       options: opts.length ? opts : ["OK"],
+      // ONLY when something is actually described, so an Allow/Deny prompt -
+      // and any question whose options carry no descriptions - sends not one
+      // extra byte. Absence is indistinguishable from the old behaviour, which
+      // is what makes an un-upgraded device ignoring this field free: same
+      // backward-compatible shape as the trailing `to=<hostId>` address and the
+      // history reader's `<cols>x<lines>` budget. No protocol version bump.
+      ...(descs.some((d) => d) ? { optDescs: descs } : {}),
     };
   }
   if (data.tool_name === "ExitPlanMode") {

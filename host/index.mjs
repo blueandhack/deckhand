@@ -1595,6 +1595,12 @@ async function readSessions() {
       // stamped per prompt rather than read from a live global.
       if (record.status === "waiting" && record.id) item.pnonce = nonceForSession(record.id);
       if (record.ask) {
+        // A SPREAD, not a field list, and that is what carries the hook's newer
+        // fields through untouched - `optDescs` (the per-option descriptions,
+        // parallel to `options`) rides here with no code of its own. Do not
+        // turn this into an allow-list of named fields: every future field the
+        // hook learns to publish would then have to be added in two places, and
+        // forgetting the second one is silent - the device simply never sees it.
         item.ask = { ...record.ask, nonce: nonceForPid(record.ask.pid) };
         // Only questions can be answered by voice: emitDecision carries free
         // text for a question and discards it for a plan, and a spoken answer to
