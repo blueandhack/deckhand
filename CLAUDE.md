@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386614, RAM 69780 | flash 990174, RAM 63276 |
+| size today | flash 1386614, RAM 69780 | flash 989678, RAM 63276 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -698,11 +698,28 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   VOICE RESULT CARD was covered by nothing at all, which is how it kept a 13px line step under a
   16px cell right through a type-scale port. **Take an
   unguarded constant that this repo just ADDED or CHANGED as a gap, not as noise.**
-  Where it stands today: **433 of 499 constant-board pairs guarded** (board 1 32/234 unguarded,
-  board 2 34/265), and of the unguarded ones only **7 on board 1 and 9 on board 2 are read by any
-  checker at all** — the other 26 a side are mic, beeper, crab and preset-count constants with no
-  geometry to violate. Known and accepted, so do not re-litigate them: `MSG_BTN_W`, `H_BTN` and
-  `SP_2` are pre-existing; a cache-size assertion is `>=` by nature so `SESSION_ROW_SIG_LEN`
+  **SHRINKING a constant can UNGUARD it, and that is the fifth thing the sweep caught.** Board 2's
+  `MSG_BTN_H` was guarded at 46 — `2 + H <= DETAIL_CARD_DY` tripped at ±4 — and taking the TYPE
+  chip to 26 opened 22px of headroom under the same bound, so the sweep reported it unguarded with
+  nothing about the code having got worse. The three bounds on it were all one-sided CEILINGS, so
+  the chip could have been driven to 8 with every one still passing. The close is the pager key's
+  own lesson in the other axis: the chip's label was checked for WIDTH and never for HEIGHT, and
+  `uiButton` draws it `MC_DATUM`, so an undersized chip does not merely crop its glyphs — the
+  opaque box paints `COLOR_CARD` over the chip's own stroke, the clear-box-not-glyphs hazard the
+  usage cards already pay for. Asserting that box clears the stroke at both ends is a bound taken
+  from the geometry rather than fitted to today's 26, and it catches the chip at 20.
+  Where it stands today: **433 of 502 constant-board pairs guarded** (board 1 32/234 unguarded,
+  board 2 37/268), and of the unguarded ones only **8 on board 1 and 13 on board 2 are read by any
+  checker at all** — the other 24 a side are mic, beeper, crab and preset-count constants with no
+  geometry to violate. **Four of board 2's thirteen are unguarded BY CONSTRUCTION and are not a
+  gap**: `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`, `DETAIL_COL_LBL_STEP` and `DETAIL_COL_VAL_STEP` are
+  board 1's arm only since §7 replaced the pill and the two column pairs with the band and one
+  meta line, so nothing on board 2 reads them and no perturbation can move a board-2 number. They
+  are still swept because the sweep perturbs every constant the checkers PARSE, and the parse is
+  shared. (`BORDER_CTRL` appearing under board 1's "read by a checker" is the same kind of
+  artefact from the other end: `referenced` is a regex over the checker's source text, and the
+  assertion naming it is inside an `if (b === 2)` block.) Known and accepted, so do not
+  re-litigate them: `MSG_BTN_W`, `H_BTN` and `SP_2` are pre-existing; a cache-size assertion is `>=` by nature so `SESSION_ROW_SIG_LEN`
   cannot be caught by a small perturbation at all (`CODEX_LANE_CACHE` *is* now caught on both
   boards, because ONE buffer serves both Codex fields and it is asserted against the LARGER,
   `CODEX_RIGHT_CHARS`, as well as the lane); and `CFM_Y`/`CFM_H`,
@@ -1936,11 +1953,16 @@ two things `host/index.mjs` cannot get any other way:
     pill no higher than `+31` on the shortest tall row (**6 rows**); `settings.ino` Mac rows clear
     `+129`..`+146` and `+153`..`+170`, the icon inside the first (**7 rows** to the next);
     `usage.ino`'s Codex row `+8`..`+23` inside a text clear of `+7`..`+24` against a border at
-    `+54` (**30 rows**); the detail card's AGENT column is the last block in a stack packed to 320
-    of 326. Horizontally the icon is 3px wider, absorbed everywhere: the Codex lane already reserves
+    `+54` (**30 rows**); the detail card's AGENT column was the last block in a stack packed to 320
+    of 326 (**board 2's detail card no longer has that column at all** — §7 put the Mac on the
+    single meta line instead, where the icon's `y` IS the line's `y` by the same rule, and the
+    card ends at 300 with the meta ink at `+280..+295`; board 1 keeps the column). Horizontally
+    the icon is 3px wider, absorbed everywhere: the Codex lane already reserves
     four monospace spaces (32px on board 2 against `4+16+4` = 24 needed), the SETTINGS erase box
     grows to 246px from x=30 inside an interior of 305, the session row's name lane already
-    subtracts `tagExtra`, and the detail column needs 96px of 126.
+    subtracts `tagExtra`, and the detail column needs 96px of 126 (on board 2 the meta line
+    measures the Mac cluster FIRST and `fitText`s the facts into whatever lane is left, so no
+    width can collide there however long a model or branch name is).
   - **Cost: 390 bytes per icon on board 1 (338 colour + 52 alpha), 576 on board 2 (512 + 64) —
     6,240 and 9,216 for all sixteen, and the measured board-2 flash delta was +2,944 with RAM
     unchanged** (the art is `PROGMEM`). The alpha figure is where the original design spec was
@@ -3861,7 +3883,16 @@ Other things that aren't obvious from a single file:
     both present), and the "< Back up top - tap here for history" hint owns 285..299 against a
     `contentBottom()` of 302. A 32px control below the card would cover the card's own text or
     replace the only thing telling you the card is tappable. Its hit zone is the whole right end
-    of that row - 100x28 for a 76x22 chip.
+    of that row - 100x28 for a 76x22 chip on board 1, 100x50 for a 76x26 one on board 2.
+    **THE CHIP IS DRAWN SMALL AND HIT BIG, and sizing it to `TAP_MIN` instead was a real mistake
+    board 2 shipped for a task.** It was 88x46 there - 46 because that is `TAP_MIN` - on the
+    reading that the chip is the target. It is not: `handleDetailTouch` tests
+    `sx >= msgBtnX() - 24` over the whole `DETAIL_HEAD_H`, so the live zone is 100x50 whatever is
+    drawn, already over twice `TAP_MIN` in both dimensions. The 46 bought nothing and spent the
+    header row's air on it. Same split the settings steppers already use (44px keys in a 72x56
+    zone), and `sessions-geom-check.mjs` now parses the hit test's slack term out of
+    `sessions.ino` rather than restating it, so a future change that RE-COUPLES the zone to the
+    drawn size is what fails.
   - **Prompt mode differs from answer mode in exactly the ways the situation does:** no countdown
     (nothing is waiting, and a timer would be a lie), no peek and so no "tap here to read it"
     hint (there is no ask, and the detail screen it opened from already shows the context), a
@@ -4093,6 +4124,78 @@ Other things that aren't obvious from a single file:
     ACTIVE column pair, which both said the same thing twice and created a field that
     could only update by repainting the whole card. The column pairs with AGENT instead,
     and both of those never change for a session.
+  **EVERYTHING ABOVE IS BOARD 1'S ARM NOW. On board 2 the pill, the `for 12m - 14:31`
+  line and BOTH column pairs are gone — §7 of the sessions redesign heads that card
+  with the same 44px status band the sessions tab's first row wears, and closes it with
+  ONE dim `T_META` line.** The band carries the agent MARK, the status WORD at `T_HEAD`
+  and the duration; the meta line carries `model - branch - <status-since HH:MM>` on the
+  left with the Mac's icon (and, with a second Mac up, its tag) right-anchored to the
+  card's text edge. `DETAIL_CARD_H` went 326 → 330 → **300** across the two tasks and
+  `DETAIL_AIR` 4 → **8**. Six things about it are load-bearing:
+  - **THE CARD'S CEILING IS 331 AND IT IS DERIVED, SO 350 WAS NEVER AVAILABLE.** §7 asked
+    for ~350. Both the "answer this one on your Mac" line and the history hint are
+    `MC_DATUM` `T_META`, and `drawString` centres on the ASCENT while painting a box
+    ascent+descent tall — so the answer line at `cardY + H + 8` inks `H+98..H+113` and the
+    hint at `contentBottom() - 10` inks `444..459`. They collide **at H = 331**, so 330 is
+    the largest legal card. `sessions-geom-check.mjs` derives that number from the hint,
+    asserts `DETAIL_CARD_H` against it rather than against a literal, and PRINTS it.
+    Measuring the BASELINE instead of the box is what once put the header's own comment 3px
+    low.
+  - **The band costs MORE than the pill it replaces, and the meta line is what paid for
+    it.** Band 44, minus the 10px top pad it replaces, minus the 28px pill block = **+6px of
+    ink**, on a card that had 4px of slack — which is why task 2 could only reach 330 and
+    sat exactly at the ceiling. Task 3's meta line then returned **55px** (four labels and
+    four values became one line), and that surplus went where `DETAIL_AIR`'s own note has
+    always said surplus should go: around the content (air 4 → 8, six boundaries widened),
+    with the rest GIVEN BACK rather than held as blank card. Content ends at `+295`, two
+    clear rows above the border, 30px inside the ceiling. A fixed-height card whose blocks
+    are optional already looks sparse when a session has no title and no prompt, so holding
+    the surplus would have shown as an empty third of the card in the common case.
+  - **The band does NOT carry the wall-clock, and §7's prose asks for it.** Measured at this
+    board's real geometry: `4m - 09:34` is 10 characters at `TEXT_ADV` = 80px, which leaves
+    the word 144px against a `NEEDS YOUR INPUT` that inks **192** — a collision of 48. The
+    band's duration lane is a fixed 3 characters (`SESSION_BAND_DUR_CHARS`) for the same
+    reason, and the checker asserts that lane on THIS surface so re-adding the clock fails
+    rather than merely looking cramped.
+  - **`started` IS DROPPED, and that is what buys room for the Mac.** In the 260px lane at
+    `TEXT_ADV` 8, `model - branch - HH:MM` is 21 characters = 168px and the Mac cluster is
+    84, fitting with 8px to spare; restore `started` and the same line is 29 characters =
+    232, i.e. **316 against 260**. Both halves are asserted, the second deliberately — it
+    encodes WHY the field is absent, so a future reader who re-adds it fails there instead
+    of shipping a clipped line.
+  - **The clock is the STATUS-SINCE instant, NOT `s.actSec`, and that is the only reason it
+    can be a static field.** `actSec` advances on every event while nothing else on the card
+    does, so drawing it here would freeze silently between repaints, and putting it in the
+    signature would repaint a 296x300 card every 5s — the two failures this screen's rules
+    already name. `hostNowSec()` minus the elapsed time is stable to within the ±1s two
+    independent `floor(ms/1000)` terms can disagree by, and `status` is already in the
+    signature. `s.agent` had to JOIN the signature, board 2 only: the band's mark is drawn
+    from it and nothing else on that card carries the agent any more.
+  - **The crossfade freezes on this card unless the card clears `xfadeId` FIRST.**
+    `tickSessionAnim()` is the only thing that advances a fade and it clears `xfadeId` the
+    moment a full-screen surface takes the glass — but `handleLine()` starts the fade and
+    repaints this card in the SAME tick, before `loop()` gets there. The band was therefore
+    painted at frame 0 of a fade nothing would ever advance and STAYED there: "WAITING FOR
+    YOU" and "WORKING" superimposed at half strength each, both illegible, on a card already
+    wearing the new status colour in its border. **Found on the glass, not by reading**, and
+    the ordering is asserted.
+  **The four §7 defects the mockup round found, recorded as FOUND-AND-RESOLVED rather than
+  quietly rewritten.** §7 was the one surface never visually reviewed before its spec was
+  written, and it says so; mocking it at the real geometry is what turned that caveat into
+  four measured numbers. (1) The band cannot hold word + duration + wall-clock — the word
+  lane is 144px against a 192px `NEEDS YOUR INPUT`, over by 48. (2) The same defect seen
+  from the other end: the meta line cannot hold `started` either once the Mac is on it — the
+  mockup measured 312px in a 268px lane, and the shipped assertion, taken at the card's real
+  `CARD_W - 2*PAD`, is **316 in 260**. The two disagree by the 8px the mockup gave the lane, which
+  is worth knowing rather than smoothing over: the mockup was right about the collision and 8px
+  optimistic about its size, and the number to trust is the one the checker derives. (3) §7 absorbs the AGENT column into the band and never
+  says where the MAC goes — and it cannot go in the band, where even the icon alone leaves
+  the word 4px short. (4) The TYPE chip was sized to `TAP_MIN` against a tap zone it never
+  provided. All four were shown measured AND rendered, and the resolutions chosen were: band
+  = word + duration, meta line drops `started`, Mac on the meta line, chip 76x26. **A spec
+  that reads as though it were right all along teaches nothing** — the transferable part is
+  that a layout described in prose at one board's geometry produced four collisions at
+  another's, and that rendering it is what found them.
 - **The session TITLE is a third row line, and it comes from the transcript, not a hook.**
   Claude Code writes `{"type":"ai-title","aiTitle":...}` records into the session
   transcript (and `custom-title` if you named the session yourself) — no hook event

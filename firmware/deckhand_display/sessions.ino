@@ -2021,8 +2021,11 @@ bool handleAskTouch(int sx, int sy) {
     if (sy < CONTENT_Y + DETAIL_HEAD_H) {
       // The whole right end of the header row, not only the drawn chip - the extra
       // 24px to its left is the same trade the tab bar's slots already make. On
-      // board 1 that makes a 100x28 target out of a 76x22 chip; on board 2 the chip
-      // is already 88x46, so this is slop rather than the target.
+      // board 1 that makes a 100x28 target out of a 76x22 chip; on board 2 it makes
+      // a 100x50 target out of a 76x26 one. The chip is DRAWN small and HIT big on
+      // both boards - it was briefly 88x46 on board 2, sized to TAP_MIN as though
+      // the chip were the target, which bought nothing this zone did not already
+      // give and cost the header row all its air.
       // Everything else in this row is still back.
       if (msgOffered(detailIndex) && sx >= msgBtnX() - 24) {
         openKeyboardForMessage(detailIndex);

@@ -239,6 +239,60 @@ reach its border — the hazard that applies to the usage cards does not apply h
 `detailSigCache` (384, against a derived 358 worst case) must be re-derived if any
 field is added; removing fields only loosens it.
 
+### WHAT SHIPPED, AND THE FOUR DEFECTS IN THE ABOVE THAT THE MOCKUP ROUND FOUND
+
+The paragraph at the top of this section says this is the one surface nobody looked
+at before it was specified, and asks for it to be mocked first. It was, and the
+mockups found **four** things wrong with the description above. They are recorded
+here rather than edited away, because a spec that reads as though it were right all
+along teaches nothing — and the transferable lesson is that a layout written in prose
+at one board's geometry produced four collisions at another's.
+
+1. **The band cannot hold status word + duration + wall-clock.** `4m - 09:34` is 10
+   characters at `TEXT_ADV` 8 = 80px, leaving the word 144px against a
+   `NEEDS YOUR INPUT` that inks **192**. Over by 48.
+2. **The same defect from the other end: the meta line cannot carry `started`.** With
+   the Mac on that line, `model - branch - started - HH:MM` plus the Mac cluster is 316px
+   in the card's 260px lane (`CARD_W - 2*PAD`) — over by 56. (The mockup measured this as
+   312 in 268; it was right about the collision and 8px optimistic about the lane. The
+   shipped assertion uses the derived 260.)
+3. **§7 absorbs the AGENT column into the band and never says where the MAC goes** — and
+   it cannot go in the band, where even the icon alone leaves the status word 4px short.
+4. **The TYPE chip was sized against a tap zone it never provided.** It was 88x46 because
+   46 is `TAP_MIN`, on the reading that the chip is the target; `handleDetailTouch` tests
+   `sx >= msgBtnX() - 24` over the whole `DETAIL_HEAD_H`, so the live zone is 100x50
+   whatever is drawn. (Not in §7 at all — an improvement found while mocking, which is
+   why it shipped as its own separable task.)
+
+All four were shown to the user measured AND rendered. The resolutions chosen:
+
+- **band = status word + duration**, no wall-clock; the duration lane is a fixed 3
+  characters (`SESSION_BAND_DUR_CHARS`);
+- **the meta line drops `started`**, carrying `model - branch - <status-since HH:MM>`;
+- **the Mac lives on the meta line**, icon ungated and text tag gated on a second Mac,
+  measured and right-anchored FIRST so the facts are `fitText`-clipped into what is left;
+- **the chip is 76x26**, drawn small and hit big, centred in the header row by
+  `msgBtnY()` — which is shared code and therefore `#if`-guarded, since board 1's
+  `(28 - 22) / 2 = 3` against its shipped literal 2 would have moved its binary.
+
+Two more deviations from the description above, both deliberate and measured:
+
+- **`DETAIL_CARD_H` is 300, not ~350.** 350 is unreachable: the "answer this one on your
+  Mac" line and the history hint are both `MC_DATUM` `T_META`, and measured as BOXES they
+  collide at H = 331, so **330** is the largest legal card. The card reached 330 with the
+  band on it and then came back to **300** when the meta line returned 55px, with
+  `DETAIL_AIR` going 4 → **8** — surplus spent around the content and the rest given back
+  rather than held as blank card. The checker derives the ceiling from the hint and asserts
+  the constant against it, never against a literal.
+- **`s.agent` joined `buildDetailSignature`** (board 2 only): the band's mark is drawn from
+  it and nothing else on that card carries the agent any more. `detailSigCache` re-derives
+  to 359 (board 1) / 363 (board 2) against its 384 declaration.
+
+**One defect was found on the GLASS rather than in a mockup or a checker**: the band froze
+mid-crossfade on this card, because `handleLine()` starts a fade and repaints the card in
+the same tick, before `tickSessionAnim()` — the only thing that advances OR clears a fade —
+runs. The card clears `xfadeId` before painting its band, and that ordering is asserted.
+
 ## 8. Ranking: longest-waiting asking first (shared code)
 
 The band card goes to display position 0, so **what lands there is now a visual

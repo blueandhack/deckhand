@@ -2141,6 +2141,26 @@ for (const b of [1, 2]) {
         `TYPE tap zone ${c.DETAIL_HEAD_H}px tall (the whole header row) >= TAP_MIN ${c.TAP_MIN}`);
     chk(c.MSG_BTN_H < c.DETAIL_HEAD_H,
         `the drawn chip (${c.MSG_BTN_H}px) fits inside the ${c.DETAIL_HEAD_H}px header row with air`);
+    // ---- THE CHIP'S LABEL, IN THE DIMENSION IT WAS NEVER CHECKED IN ----
+    // Its WIDTH is asserted above ("TYPE" 32px inside the 76px chip); nothing
+    // asserted its HEIGHT, and the three bounds on MSG_BTN_H above are all
+    // one-sided ceilings (`2+H <= DETAIL_CARD_DY`, `H+2 <= DETAIL_HEAD_H`,
+    // `H < DETAIL_HEAD_H`) - so the chip could be driven DOWN to 16, 8 or 0 with
+    // every one of them still passing. That is the pager key's "checked in one
+    // dimension only" finding wearing the other axis.
+    // uiButton draws the label MC_DATUM, and drawString paints an OPAQUE box
+    // ascent+descent tall centred on the ASCENT - the same arithmetic the card
+    // ceiling below is derived from - so an undersized chip does not merely crop
+    // its glyphs: the box paints COLOR_CARD over the chip's own BORDER_CTRL
+    // stroke, which is the clear-box-not-glyphs hazard the usage cards already
+    // pay for. The bound is that box clearing the stroke at both ends. It is not
+    // fitted to today's 26: it is the geometry of the two things themselves, and
+    // T_BODY is the face because T_TITLE (what uiButton sets) resolves to body.
+    const chipCell = lineHB(b, T_BODY);
+    const chipTop = Math.floor(c.MSG_BTN_H / 2) - Math.floor(ascentB(b, T_BODY) / 2);
+    chk(chipTop >= c.BORDER_CTRL && chipTop + chipCell - 1 <= c.MSG_BTN_H - 1 - c.BORDER_CTRL,
+        `"TYPE"'s opaque box inks ${chipTop}..${chipTop + chipCell - 1} inside the ` +
+        `${c.MSG_BTN_H}px chip, clear of its own ${c.BORDER_CTRL}px stroke at both ends`);
   }
   // ---- THE RUNNING CURSOR AS A BAND WALK, worst case (title AND last prompt) ----
   // The name's band is the FONT'S OWN CELL, not DETAIL_NAME_H, so a name font that
