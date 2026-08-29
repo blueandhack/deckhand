@@ -1496,6 +1496,23 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
   used = strlen(out);
   if (used + 5 < outSize)
     snprintf(out + used, outSize - used, "|%d", emojiIdForLink(sessions[idx].hostSlot));
+#if !BOARD_USES_TFT_ESPI
+  // §7: THE AGENT, board 2 only - and it is here because the BAND is. That card is
+  // headed by drawSessionBand(), whose MARK (the Claude spark or the Codex mark) is
+  // chosen from s.agent and is nothing else on this screen; the AGENT column that
+  // used to spell it out in text is gone. So agent is now the only input to a
+  // prominent element of this card that the signature could not see.
+  //
+  // BOARD 1 IS DELIBERATELY EXCLUDED, not overlooked. Its card still draws the agent
+  // as text in its AGENT column and has the identical latent gap - but the gap has
+  // never been a live bug on either board (a session's agent is fixed for the life of
+  // its id, and detailIndex is re-anchored from detailId every render), and this
+  // branch is held byte-identical. It is board 2's band that promotes the field from
+  // "cannot change" to "drives the loudest thing on the card".
+  used = strlen(out);
+  if (used + 6 < outSize)
+    snprintf(out + used, outSize - used, "|%s", sessions[idx].agent);
+#endif
 }
 // Index-based (not SessionInfo&) for the same Arduino auto-prototype reason
 // as buildSessionSubline.
@@ -2219,8 +2236,10 @@ void drawSessionDetail(int idx) {
   int cy = cardY + SESSION_BAND_H;
 #endif
   const int LX = CARD_X + PAD;              // label/value left edge
+#if BOARD_USES_TFT_ESPI
   const int RX = CARD_X + CARD_W / 2 + 2;   // right column, for the paired short fields
   const int colW = CARD_W / 2 - PAD - 4;
+#endif
 
   // Project name - large, clipped to the card in the big font.
   // DETAIL_NAME_FONT, not a literal 4: on board 2 rung 4 is Spleen 32x64, whose
@@ -2279,6 +2298,7 @@ void drawSessionDetail(int idx) {
                   DETAIL_PATH_LINES, COLOR_VALUE, COLOR_CARD);
   cy += detailTextStep(DETAIL_PATH_LINES);
 
+#if BOARD_USES_TFT_ESPI
   // The four short fields pair into two columns instead of a four-row ladder. That is
   // what buys the room for the title and the prompt above without a taller card.
   setUIFont(1);
@@ -2359,6 +2379,95 @@ void drawSessionDetail(int idx) {
              strcmp(s.agent, "cx") == 0 ? "Codex" : "Claude Code");
     drawColValue(RX, cy, agentCol, colW);
   }
+#else
+  // ---- §7 THE META LINE, AND WHERE THE MAC LIVES ----
+  // The two label+value column pairs are GONE. MODEL / GIT BRANCH and
+  // STARTED / AGENT spent four labels, four values and 71px of card on three
+  // short facts and a Mac tag. One dim T_META line carries the facts that are
+  // still worth carrying, and the Mac rides at the right end of it. The AGENT
+  // half needs no text at all here: the band at the top of this card draws the
+  // agent's MARK, which is what that column existed to say.
+  //
+  // `started` IS DROPPED, AND THAT IS WHAT BUYS ROOM FOR THE MAC. Measured at
+  // this board's real lane (CARD_W - 2*PAD = 260) and advance (TEXT_ADV = 8): a
+  // representative "model - branch - HH:MM" is 21 characters = 168px, and the Mac
+  // cluster is DETAIL_META_GAP + MAC_EMOJI_SIZE + 4 + a 7-character tag = 84, so
+  // the pair fits with 8px to spare. Restore `started` and the same line is 29
+  // characters = 232px, i.e. 316 against 260 - over by 56, with nowhere for the
+  // Mac to go. sessions-geom-check.mjs asserts BOTH halves, and the second one
+  // deliberately: it encodes WHY the field is absent, so a future reader who
+  // re-adds it fails there rather than shipping a clipped line.
+  //
+  // NO MIDDLE DOT. Spleen declares 0x20..0x7E exactly as Cozette does, so U+00B7
+  // draws as a blank box - the same fact that already forces the Mac tag's ASCII
+  // "/" separator and fitText's three ASCII dots. " - " is the separator this UI
+  // already uses to put two facts on one line ("for 12m - 14:31").
+  //
+  // THE CLOCK IS THE STATUS-SINCE INSTANT, NOT s.actSec, AND THAT IS WHAT LETS IT
+  // BE A STATIC FIELD. actSec advances on every event while nothing else on this
+  // card changes, so drawing it here would freeze at whatever it read when the
+  // card last repainted - the silent-staleness class every cache on this screen
+  // exists for - while putting actSec in the signature instead would repaint the
+  // whole card every tick, which is the flicker the discipline exists to prevent.
+  // Board 1 escapes that by ticking "for 12m - 14:31" out of renderDetailDuration;
+  // here the band already owns the ticking half. The status-since instant is
+  // hostNowSec() minus the elapsed time, and BOTH advance from millis() at the
+  // same rate - so their difference is exactly constant between repaints, and
+  // `status` is already in the signature, so a status change repaints and
+  // recomputes it.
+  long nowSec = hostNowSec();
+  long elapsed = (long)((millis() - s.statusSinceMillis) / 1000);
+  // No clock yet, or a status older than a day, reads "earlier" rather than a time
+  // from another day masquerading as this one - formatClock's own -1 convention.
+  long sinceSec = -1;
+  if (nowSec >= 0 && elapsed < 86400L) {
+    sinceSec = (nowSec - elapsed) % 86400L;
+    if (sinceSec < 0) sinceSec += 86400L;
+  }
+  char clk[10];
+  formatClock(sinceSec, clk, sizeof(clk));
+  // The redundant "claude-" prefix stripped, exactly as buildSessionSubline does -
+  // one fact spelled the same way on both surfaces.
+  const char* metaModel = s.model[0] ? s.model : "-";
+  if (strncmp(metaModel, "claude-", 7) == 0) metaModel += 7;
+  char metaBuf[80];
+  if (s.branch[0]) snprintf(metaBuf, sizeof(metaBuf), "%s - %s - %s", metaModel, s.branch, clk);
+  else             snprintf(metaBuf, sizeof(metaBuf), "%s - %s", metaModel, clk);
+  // THE MAC CLUSTER IS MEASURED AND RIGHT-ANCHORED FIRST, and the meta text is then
+  // clipped to whatever lane is left - so the two can never collide however long a
+  // model or branch name is (model[24] and branch[24] together already overflow the
+  // lane on their own). fitText, not a character count: the clip has to be measured.
+  //
+  // THE ICON IS UNGATED AND THE TEXT TAG IS NOT, and that asymmetry is the rule
+  // every icon site in this sketch follows. An icon shows whenever one is set,
+  // because it is personalisation; dispMacTag() returns "" until a second Mac is
+  // actually connected, because a lone Mac's own name disambiguates nothing. Same
+  // split the AGENT / MAC column this replaces already carried, including the
+  // absence of a "/" when an icon sits between the two - here there is no agent
+  // text for it to separate at all.
+  const char* mac = dispMacTag(s.hostSlot);
+  int macEmoji = emojiIdForLink(s.hostSlot);
+  setUIFont(1);
+  int macW = macEmoji >= 0 ? MAC_EMOJI_SIZE : 0;
+  if (mac[0]) macW += (macW ? 4 : 0) + tft.textWidth(mac);
+  int metaLane = maxW - (macW ? macW + DETAIL_META_GAP : 0);
+  char metaFit[80];
+  fitText(metaFit, sizeof(metaFit), metaBuf, metaLane);
+  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(metaFit, LX, cy);
+  if (macW) {
+    int mx = CARD_X + CARD_W - PAD - macW;
+    if (macEmoji >= 0) {
+      // y == cy for both: the icon's y IS the text's y, because MAC_EMOJI_SIZE is
+      // this board's body cell height - the same vertical rule the SETTINGS row and
+      // every other icon site uses, and the reason nothing here centres anything.
+      drawEmoji(macEmoji, mx, cy, COLOR_CARD);
+      mx += MAC_EMOJI_SIZE + 4;
+    }
+    if (mac[0]) tft.drawString(mac, mx, cy);
+  }
+#endif
 
   // Asking but no answerable prompt attached (fired while disconnected, or the
   // window closed) - say so instead of leaving "needs input" unexplained.

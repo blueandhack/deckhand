@@ -137,6 +137,7 @@ const CACHE = cacheSizes("deckhand_display.ino");
 const CAP = {
   name: 23, status: 9, title: 43, path: 67, prompt: 103, model: 23, branch: 23,
   askPid: 11, askVoiceSha: 19, sub: 35 /* char sub[36] in drawSessionRow */,
+  agent: 3 /* char agent[4] - "cc" | "cx" */,
   macTag: 6 /* macTag() caps at 6 on the Mac */, emojiId: 3 /* "-1".."15" */,
 };
 const T_HERO = 4, T_HEAD = 3, T_BODY = 2, T_META = 1;
@@ -451,6 +452,28 @@ function sparkSize() {
   const m = fs.readFileSync(`${DIR}/ClaudeSpark.h`, "utf8").match(/#define\s+SPARK_SIZE\s+(\d+)/);
   if (!m) throw new Error("SPARK_SIZE not found in ClaudeSpark.h");
   return Number(m[1]);
+}
+// MAC_EMOJI_SIZE, PARSED, AND PER BOARD - the two art headers declare the same
+// macro at two sizes (13 for Cozette's cell, 16 for Spleen's) and exactly one of
+// them is ever included. It is the icon's WIDTH as much as its height, so the
+// detail card's meta line reserves its lane against this number; a regenerated art
+// set at a different size has to fail here rather than silently overrun the text
+// beside it. Same reason sparkSize() is parsed and not the literal 16 it was.
+function macEmojiSize(b) {
+  const f = b === 1 ? "MacEmoji.h" : "MacEmoji16.h";
+  const m = fs.readFileSync(`${DIR}/${f}`, "utf8").match(/#define\s+MAC_EMOJI_SIZE\s+(\d+)/);
+  if (!m) throw new Error(`MAC_EMOJI_SIZE not found in ${f}`);
+  return Number(m[1]);
+}
+// The longest Mac tag the DEVICE can draw, taken from HostLink's own buffer rather
+// than from the host's macTag() 6-character cap. The device is what draws it, and
+// `char tag[8]` is what any host's payload is truncated into - so it is the bound a
+// lane has to survive even if the Mac side's cap ever moves.
+function macTagMax() {
+  const m = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8")
+              .match(/struct HostLink\s*\{[\s\S]*?\bchar\s+tag\[(\d+)\]/);
+  if (!m) throw new Error("HostLink's tag[] not found in deckhand_display.ino");
+  return Number(m[1]) - 1;
 }
 // ---- ONE FUNCTION, TWO CARDS: `#if BOARD_USES_TFT_ESPI` RESOLVED PER BOARD ----
 // §7 makes the two boards draw different detail cards out of ONE shared function,
@@ -2101,11 +2124,6 @@ for (const b of [1, 2]) {
   // Board 1's 11px wrapped step against Cozette's 11px ascent is exactly that, and
   // is why it has always looked right there while 11 would have eaten Spleen's ink.
   const asc = ascentB(b, T_META);
-  for (const [nm, step] of [["wrapped text line", c.DETAIL_TEXT_LINE_H],
-                            ["label -> its value", c.DETAIL_LBL_STEP],
-                            ["column label -> its value", c.DETAIL_COL_LBL_STEP]])
-    chk(step >= asc,
-        `detail ${nm} step ${step} >= the ${asc}px ascent of ${UI[b][T_META].face} (cell ${LBLH})`);
   // ---- §7: WHAT HEADS THE CARD, RESOLVED OUT OF THE SOURCE PER BOARD ----
   // The two boards no longer draw the same card, so the block walk below cannot be
   // one hardcoded stack any more. Three facts decide it - is there a band, where
@@ -2121,6 +2139,14 @@ for (const b of [1, 2]) {
   const detailBody = detailArm(b);
   const banded  = /drawSessionBand\(/.test(detailBody);
   const hasPill = /drawStatusPill\(LX, cy,/.test(detailBody);
+  // §7's meta line against the two column pairs it replaces. Both anchors are on
+  // the DRAW STATEMENT and on nothing else: `tft.drawString("MODEL", LX, cy)` and
+  // `tft.drawString(metaFit, LX, cy)`. A looser "MODEL" or "meta" match would hit
+  // the prose around them - this file has already shipped a regex that parsed a
+  // comment mentioning an expression instead of the statement itself, and the
+  // comments here are longer than the code.
+  const hasCols = /tft\.drawString\("MODEL", LX, cy\);/.test(detailBody);
+  const hasMeta = /tft\.drawString\(metaFit, LX, cy\);/.test(detailBody);
   const startM  = detailBody.match(/int cy = cardY \+ ([A-Za-z_][A-Za-z0-9_]*);/);
   chk(!!startM, "drawSessionDetail's body cursor starts at `cardY + <named constant>`");
   const startId = startM ? startM[1] : "DETAIL_PAD_Y";
@@ -2158,14 +2184,51 @@ for (const b of [1, 2]) {
     chk(iClr > 0 && iClr < iBand,
         "§6: the detail card CLEARS xfadeId before painting its band - nothing on this " +
         "screen advances a crossfade, so a fade left running freezes both words on it");
+    // §7's meta line: the two label+value column pairs are GONE and one dim line
+    // stands where they were. Two assertions rather than one, so a half-done revert
+    // (columns back AND the line kept, or the line dropped with nothing in its
+    // place) names which half it is.
+    chk(!hasCols,
+        "§7: the MODEL / GIT BRANCH and STARTED / AGENT column pairs are GONE from the " +
+        "detail card - four labels and four values for three short facts and a Mac tag");
+    chk(hasMeta,
+        "§7: one dim meta line stands where they were - `model - branch - HH:MM` with " +
+        "the Mac's icon and tag right-anchored on the same row");
+    // WHICH CLOCK, and it is not a detail. s.actSec advances on every event while
+    // nothing else on this card changes, so a meta line drawing it would freeze
+    // silently between repaints - and adding actSec to the signature instead
+    // repaints the whole card every tick. The status-since instant is derived from
+    // hostNowSec() minus the elapsed time and is CONSTANT between repaints, and
+    // `status` is already signed, so a status change repaints and recomputes it.
+    chk(/hostNowSec\(\)/.test(detailBody) && !/formatClock\(s\.actSec/.test(detailBody),
+        "§7: the meta line's clock is the STATUS-SINCE instant (hostNowSec() - elapsed), " +
+        "not s.actSec - actSec moves with no signature field beside it and would freeze");
+    // `started` is the field this line dropped, and s.startSec is the only thing
+    // that could put it back. Asserted as an ABSENCE so re-adding it fails here as
+    // well as on the width assertion further down.
+    chk(!/s\.startSec/.test(detailBody),
+        "§7: `started` is not drawn on this card - it is what the Mac's cluster cost, " +
+        "and the width assertion below is why it cannot come back");
   } else {
     // Board 1 is held byte-identical, so its arm of this function must still be the
     // card it always was. Asserted rather than assumed: these three facts are
     // exactly what a careless unconditional edit would change.
     chk(!banded && hasPill && startId === "DETAIL_PAD_Y",
         "board 1's detail card is unchanged: no band, a status pill, body cursor at cardY + DETAIL_PAD_Y");
+    chk(hasCols && !hasMeta,
+        "board 1 keeps its two column pairs and takes no meta line - §7 is a board-2 " +
+        "layout and this branch is held byte-identical");
   }
 
+  const detailSteps = [["wrapped text line", c.DETAIL_TEXT_LINE_H],
+                       ["label -> its value", c.DETAIL_LBL_STEP]];
+  // The column pair's own internal step is asserted only on the board that still
+  // draws one - on board 2 it constrains nothing, and an assertion about ink that
+  // is never laid down is the vacuous kind this file has already paid for.
+  if (hasCols) detailSteps.push(["column label -> its value", c.DETAIL_COL_LBL_STEP]);
+  for (const [nm, step] of detailSteps)
+    chk(step >= asc,
+        `detail ${nm} step ${step} >= the ${asc}px ascent of ${UI[b][T_META].face} (cell ${LBLH})`);
   // Blocks, each [name, first ink row, last ink row]. A wrapped block spans its
   // label through its last line's cell; a column pair spans its labels through its
   // values' cell. Steps are the DERIVED ones, read from the constant table.
@@ -2189,10 +2252,23 @@ for (const b of [1, 2]) {
   top = cy; cy += c.DETAIL_LBL_STEP;
   blk.push([`PATH + ${c.DETAIL_PATH_LINES} lines`, top, textInk(cy, c.DETAIL_PATH_LINES)]);
   cy += c.DETAIL_PATH_LINES * c.DETAIL_TEXT_LINE_H + 2 + A;
-  top = cy; cy += c.DETAIL_COL_LBL_STEP;
-  blk.push(["MODEL / GIT BRANCH", top, cy + BODYH - 1]);      cy += c.DETAIL_COL_VAL_STEP;
-  top = cy; cy += c.DETAIL_COL_LBL_STEP;
-  blk.push(["STARTED / AGENT", top, cy + BODYH - 1]);
+  // The card's last block, and the two boards no longer agree on what it is. Read
+  // from the arm rather than branched on the board number, the same way the band
+  // and the pill above are: a revert that puts the columns back on board 2 must
+  // move this walk with it, or the walk reports geometry that is not drawn.
+  if (hasCols) {
+    top = cy; cy += c.DETAIL_COL_LBL_STEP;
+    blk.push(["MODEL / GIT BRANCH", top, cy + BODYH - 1]);      cy += c.DETAIL_COL_VAL_STEP;
+    top = cy; cy += c.DETAIL_COL_LBL_STEP;
+    blk.push(["STARTED / AGENT", top, cy + BODYH - 1]);
+  } else {
+    // ONE line at T_META, so its ink is that face's cell and nothing else - no
+    // label row above it and no second row under it. The Mac's icon shares the
+    // row rather than adding to it: MAC_EMOJI_SIZE is this board's body cell
+    // height, which is the identity every icon site in this sketch rests on and
+    // is asserted just below.
+    blk.push(["meta line + Mac", cy, cy + LBLH - 1]);
+  }
   for (const [nm, a, z] of blk) console.log(`    detail +${String(a).padStart(3)}..+${String(z).padStart(3)} ${nm}`);
   for (let i = 1; i < blk.length; i++)
     chk(blk[i][1] - blk[i - 1][2] - 1 >= 0,
@@ -2270,15 +2346,83 @@ for (const b of [1, 2]) {
   // clips to the `w` it is GIVEN - verified in sessions.ino, where both the test and
   // the ellipsis budget read `w` - so the question is only whether the two columns
   // fit side by side inside the card's text lane and how much they hold.
-  const colW = Math.floor(c.CARD_W / 2) - c.PAD - 4;
-  const LX = c.CARD_X + c.PAD, RX = c.CARD_X + Math.floor(c.CARD_W / 2) + 2;
-  const dots = widthB(b, T_BODY, "..");
-  let whole = 0; while (widthB(b, T_BODY, "M".repeat(whole + 1)) <= colW) whole++;
-  let cut = 0; while (widthB(b, T_BODY, "M".repeat(cut + 1)) <= colW - dots) cut++;
-  chk(LX + colW < RX, `left column ${LX}..${LX + colW} clears the right column at ${RX} by ${RX - (LX + colW)}`);
-  chk(RX + colW <= c.CARD_X + c.CARD_W - c.PAD,
-      `right column ends ${RX + colW}, inside the card's text lane at ${c.CARD_X + c.CARD_W - c.PAD}`);
-  console.log(`    column value lane ${colW}px: ${whole} chars whole, ${cut} + ".." when clipped`);
+  if (hasCols) {
+    const colW = Math.floor(c.CARD_W / 2) - c.PAD - 4;
+    const LX = c.CARD_X + c.PAD, RX = c.CARD_X + Math.floor(c.CARD_W / 2) + 2;
+    const dots = widthB(b, T_BODY, "..");
+    let whole = 0; while (widthB(b, T_BODY, "M".repeat(whole + 1)) <= colW) whole++;
+    let cut = 0; while (widthB(b, T_BODY, "M".repeat(cut + 1)) <= colW - dots) cut++;
+    chk(LX + colW < RX, `left column ${LX}..${LX + colW} clears the right column at ${RX} by ${RX - (LX + colW)}`);
+    chk(RX + colW <= c.CARD_X + c.CARD_W - c.PAD,
+        `right column ends ${RX + colW}, inside the card's text lane at ${c.CARD_X + c.CARD_W - c.PAD}`);
+    console.log(`    column value lane ${colW}px: ${whole} chars whole, ${cut} + ".." when clipped`);
+  } else {
+    // ---- §7 THE META LINE PLUS THE MAC, AND WHY `started` IS NOT ON IT ----
+    // This line is the ONLY place the Mac can live on this card. The band above it
+    // cannot take even the icon alone (that arithmetic is asserted a few lines up:
+    // the longest status word already runs to within 4px of the duration lane), and
+    // the column pair that used to carry it is what this line replaced. So the
+    // cluster's cost has to be paid out of the same 260px lane the facts use, and
+    // that is what makes `started` unaffordable rather than merely unwanted.
+    //
+    // EVERY TERM IS PARSED. TEXT_ADV and PAD and CARD_W out of the board header,
+    // MAC_EMOJI_SIZE out of the art header this board includes, the tag's own cap
+    // out of HostLink's buffer, and the gap out of DETAIL_META_GAP - so a wider
+    // icon, a longer tag or a smaller gap each fail here instead of quietly
+    // shortening the text beside them.
+    const lane = c.CARD_W - 2 * c.PAD;
+    const adv = advanceB(b, T_META);
+    // The icon-to-tag gap is a literal in drawSessionDetail (the bare 4 the SETTINGS
+    // row uses between an icon and the text beside it), so it is PARSED off the
+    // advance statement rather than transcribed here - it is a term of the width sum
+    // below and of the grouping bound, and a checker that transcribed it could not
+    // see it move.
+    const im = detailBody.match(/mx \+= MAC_EMOJI_SIZE \+ (\d+);/);
+    chk(!!im, "the meta line advances past the Mac icon by a named-in-source gap");
+    const iconGap = im ? +im[1] : 0;
+    const mac = c.DETAIL_META_GAP + macEmojiSize(b) + iconGap + macTagMax() * adv;
+    // THE GAP IS NOT DECORATION AND THE WIDTH SUM ALONE CANNOT SEE THAT. Shrink
+    // DETAIL_META_GAP and the line still fits - it just stops reading as two things.
+    // Two bounds, both derived rather than fitted to today's 8:
+    //   - it must exceed the gap INSIDE the cluster, or the icon binds to the text on
+    //     its left as strongly as to the tag on its right and the grouping inverts;
+    //   - it must be at least one character advance, or the Mac sits closer to the
+    //     facts than two words of the facts sit to each other, i.e. it reads as one
+    //     more word in the sentence rather than as a separate identity.
+    chk(c.DETAIL_META_GAP > iconGap,
+        `§7: the meta line's group gap (${c.DETAIL_META_GAP}px) exceeds the ${iconGap}px gap ` +
+        `inside the Mac cluster, so icon and tag group with each other and not with the facts`);
+    chk(c.DETAIL_META_GAP >= adv,
+        `§7: the group gap (${c.DETAIL_META_GAP}px) is at least one ${adv}px advance - the Mac ` +
+        `sits further from the facts than two words of the facts sit from each other`);
+    // A REPRESENTATIVE line, not the field caps: model[24] and branch[24] together
+    // overflow this lane on their own, which is exactly why the firmware clips with
+    // fitText against the lane the cluster leaves. What is being asserted is that
+    // the ORDINARY line is not clipped, and that one more field would be.
+    const meta = "opus-5 - main - 09:34".length * adv;
+    chk(meta + mac <= lane,
+        `§7: the meta line (${meta}px) plus the Mac (${mac}px = ${c.DETAIL_META_GAP} gap + ` +
+        `${macEmojiSize(b)}px icon + 4 + a ${macTagMax()}-char tag) fits its ${lane}px lane`);
+    // ... AND THAT RESTORING `started` WOULD NOT. This is the unusual assertion and
+    // it is the point of the pair: it encodes WHY the field is absent, so a future
+    // reader who re-adds it fails here rather than shipping a line clipped at its
+    // tail with nothing saying so. §7 asked for `model · branch · started`; the Mac
+    // is what took its place, and this is the receipt.
+    const withStarted = "opus-5 - main - started 09:07".length * adv;
+    chk(withStarted + mac > lane,
+        `§7: restoring \`started\` would need ${withStarted + mac}px of the same ${lane}px lane - ` +
+        `over by ${withStarted + mac - lane} - which is why it was dropped for the Mac`);
+    // The icon rides ON the meta line rather than under it, and that only works
+    // because MAC_EMOJI_SIZE IS the body cell height on this board. It is the same
+    // identity the SETTINGS row and the session row's tag rest on, and the reason no
+    // site anywhere centres an icon against its text; asserted here because the walk
+    // above budgets the meta block exactly one T_META cell.
+    chk(macEmojiSize(b) === lineHB(b, T_META),
+        `the Mac icon (${macEmojiSize(b)}px) IS the ${UI[b][T_META].face} cell it shares a row ` +
+        `with, so the meta block costs one line and needs no centring term`);
+    console.log(`    meta line lane ${lane}px: text ${meta} + Mac ${mac} = ${meta + mac}` +
+                ` (${lane - meta - mac} spare); with \`started\` ${withStarted + mac}`);
+  }
   // The line caps against the FIELD's own byte cap - the derivation that decides
   // whether a field is shown whole or silently cut.
   // AT THE BOARD'S OWN ADVANCE, not a hardcoded 6: this was `maxW / 6`, Cozette's,
@@ -2432,12 +2576,32 @@ for (const b of [1, 2]) {
   if (c.SESSION_EXP_MIN_H !== undefined) rowSig += 1 + CAP.prompt + 1 + CAP.path;
   chk(cacheLen("rowSigCache") >= rowSig,
       `rowSigCache ${cacheLen("rowSigCache")} (${CACHE.rowSigCache}) holds its ${rowSig}-byte worst case`);
-  const detSig = CAP.name + CAP.status + CAP.path + CAP.model + CAP.branch + CAP.askPid +
-                 2 /* answeredIdx */ + CAP.title + CAP.prompt + 11 /* startSec */ +
-                 CAP.askVoiceSha + 10 /* separators */ + 2 /* |M */ +
-                 1 + CAP.macTag + 1 + CAP.emojiId + 1 /* NUL */;
+  // RE-DERIVED FOR §7, FIELD BY FIELD, and this task is the case the previous
+  // derivation's own note warned about: it removed fields from the CARD (the two
+  // column pairs) and added one to the SIGNATURE (the agent), so "removing only
+  // loosens it" does not apply and the sum had to be walked again rather than
+  // assumed still true.
+  let detSig = CAP.name + CAP.status + CAP.path + CAP.model + CAP.branch + CAP.askPid +
+               2 /* answeredIdx */ + CAP.title + CAP.prompt + 11 /* startSec */ +
+               CAP.askVoiceSha + 10 /* separators */ + 2 /* |M */ +
+               1 + CAP.macTag + 1 + CAP.emojiId + 1 /* NUL */;
+  // THE AGENT IS BOARD 2'S TERM ONLY, and it is parsed from the arm rather than
+  // branched on the board number for the same reason the walk above is. It joined
+  // the signature because §7's band draws the agent's MARK and nothing else on that
+  // card says which agent it is - the AGENT column that used to spell it out in
+  // text is gone. Board 1's arm is held byte-identical and does not sign it.
+  const sigArm = armFor(fnSrc("void buildDetailSignature(int idx, char* out, size_t outSize) {"), b);
+  const signsAgent = /sessions\[idx\]\.agent/.test(sigArm);
+  chk(signsAgent === (b === 2),
+      b === 2
+        ? "§7: s.agent is in the detail signature - the band's MARK is drawn from it and " +
+          "nothing else on that card carries the agent any more"
+        : "board 1 does not sign s.agent: its AGENT column still spells the agent out, and " +
+          "its binary is held byte-identical");
+  if (signsAgent) detSig += 1 + CAP.agent;
   chk(cacheLen("detailSigCache") >= detSig,
-      `detailSigCache ${CACHE.detailSigCache} holds its ${detSig}-byte worst case`);
+      `detailSigCache ${CACHE.detailSigCache} holds its ${detSig}-byte worst case` +
+      ` (${cacheLen("detailSigCache") - detSig} bytes of headroom)`);
   chk(cacheLen("detailDurCache") >= 23,
       `detailDurCache ${CACHE.detailDurCache} holds "for 999h59m - 23:59" padded to 22 + NUL`);
   chk(cacheLen("rowDurCache") >= 8, `rowDurCache ${CACHE.rowDurCache} holds a 7-char padded duration + NUL`);

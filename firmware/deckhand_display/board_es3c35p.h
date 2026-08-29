@@ -1183,52 +1183,55 @@ const int DETAIL_BACK_Y = 17;
 // The card starts exactly where the touch band ends - no overlap, where board 1's
 // card border sits 2px inside its own band.
 const int DETAIL_CARD_DY = 50;
-// 330, AND IT IS THE CEILING RATHER THAN A CHOICE - the card is now as tall as
-// this screen can make it. The arithmetic is the running cursor in
-// drawSessionDetail() with every step DERIVED (see DETAIL_NAME_H / DETAIL_LINE_H /
-// DETAIL_TEXT_LINE_H below) from this board's own faces rather than from Cozette's,
-// and §7's band is what took it up:
+// 300, AND IT IS SIZED TO ITS CONTENT AGAIN - the card was at its 331px ceiling
+// with one clear row while §7's meta line was still two label+value column pairs.
+// Replacing them (MODEL / GIT BRANCH and STARTED / AGENT, 71px, four labels and
+// four values) with ONE dim T_META line returned 55px, and the surplus is spent
+// the way DETAIL_AIR's own note says surplus should be: around the content (air
+// 4 -> 8, the rhythm this board carried before its type scale was paid for), with
+// what is left given back rather than held as blank card. The arithmetic is the
+// running cursor in drawSessionDetail() with every step DERIVED from
+// DETAIL_NAME_H / DETAIL_LINE_H / DETAIL_TEXT_LINE_H / DETAIL_AIR:
 //   +0  BAND 44 (SESSION_BAND_H) - mark, status WORD, duration. NO top pad: the
 //       band REPLACES DETAIL_PAD_Y, exactly as the sessions tab's band card starts
 //       its body at `y + SESSION_BAND_H`.
-//   +44 name 24 ink +44..+67 | step 28
-//   +72 title 16 | step 22
+//   +44 name 24 ink +44..+67 | step 32
+//   +76 title 16 ink +76..+91 | step 26
 //   (NO PILL. It was 18px of ink and 28 of step, and the band 44px above says the
 //    same word at T_HEAD instead of T_META - the whole point of the band. The
 //    "for 12m - 14:31" line beside it goes with it; the band carries the duration.)
-//   +94 rule | step 11
-//   +105 PROMPT label 16 | step 16
-//   +121 prompt 4 lines (16 each, last inks +169..+184) | step 70
-//   +191 rule | step 11
-//   +202 PATH label 16 | step 16
-//   +218 path 2 lines (last inks +234..+249) | step 38
-//   +256 col labels 16 | step 15
-//   +271 col values 16 | step 25
-//   +296 col labels 16 | step 15
-//   +311 col values, inking +311..+326
-// so the content ends at +326 and ONE clear row sits above the 2px border at
-// +328..+329. Net against the old 326-tall card: +44 band, -10 pad, -28 pill = +6
-// of ink, against +4 of card. That is the honest reading - the band costs more than
-// the pill it replaces, and this card had 4px of slack to give.
+//   +102 rule | step 15
+//   +117 PROMPT label 16 | step 16
+//   +133 prompt 4 lines (16 each, last inks +181..+196) | step 74
+//   +207 rule | step 15
+//   +222 PATH label 16 | step 16
+//   +238 path 2 lines (last inks +254..+269) | step 42
+//   +280 THE META LINE, inking +280..+295 - `model - branch - HH:MM` on the left,
+//        the Mac's icon and (with a second Mac up) its tag right-anchored. One
+//        line where the two column pairs were four.
+// so the content ends at +295 and TWO clear rows sit above the 2px border at
+// +298..+299.
 //
-// THE CEILING IS 331, so 330 is the largest legal card, and the two footer strings
-// are what set it. Both the "answer this one on your Mac" line and the "tap here
-// for history" hint are MC_DATUM T_META, and drawString centres on the ASCENT (12)
-// while painting a box ascent+descent (16) tall - so a string drawn at y inks rows
-// y-6..y+9, and measuring the BASELINE instead is what once put this figure 3px
-// low. The answer line sits at cardY + H + 8 = H + 104, i.e. rows H+98..H+113; the
-// hint sits at contentBottom() - 10 = 450, i.e. rows 444..459. They collide when
-// H + 113 >= 444, i.e. AT H = 331. sessions-geom-check.mjs derives that number from
-// the hint and asserts DETAIL_CARD_H against it - never against a literal - and
-// PRINTS it, so the next person to spend this headroom reads it rather than
-// re-deriving it. (Board 1's own figure prints as 211 against its 224: that card is
-// 13px over its ceiling, which is the long-documented case of both footer strings
-// landing on one y.)
+// THE CEILING IS STILL 330 AND THIS CARD IS NOW 30px INSIDE IT - which is the one
+// number to weigh before spending any of it again. Both the "answer this one on
+// your Mac" line and the "tap here for history" hint are MC_DATUM T_META, and
+// drawString centres on the ASCENT (12) while painting a box ascent+descent (16)
+// tall - so a string drawn at y inks rows y-6..y+9, and measuring the BASELINE
+// instead is what once put this figure 3px low. The answer line sits at
+// cardY + H + 8 = H + 104, i.e. rows H+98..H+113; the hint sits at
+// contentBottom() - 10 = 450, i.e. rows 444..459. They collide when H + 113 >= 444,
+// i.e. AT H = 331, so 330 is the largest legal card. sessions-geom-check.mjs
+// derives that number from the hint and asserts DETAIL_CARD_H against it - never
+// against a literal - and PRINTS it, so the next person to spend this headroom
+// reads it rather than re-deriving it. (Board 1's own figure prints as 211 against
+// its 224: that card is 13px over its ceiling, which is the long-documented case of
+// both footer strings landing on one y.)
 //
-// THERE IS NO SLACK LEFT ON THIS CARD. A further block has to come out of another
-// one - which is what §7's meta line does next, replacing the two label+value
-// column pairs (+256..+326, 71px) with a single line.
-const int DETAIL_CARD_H = 330;
+// THE 30px IS DELIBERATELY NOT HELD AS BLANK CARD. A fixed-height card whose blocks
+// are optional already looks sparse when a session has no title and no prompt; the
+// walk above is the WORST case, so holding the surplus would have shown as an empty
+// third of the card in the common one.
+const int DETAIL_CARD_H = 300;
 // 76x26, board 1's own proportions at board 2's scale. It WAS 88x46 because 46 is
 // TAP_MIN - but the chip is not what gets tapped: handleDetailTouch tests
 // `sx >= msgBtnX() - 24` over the whole DETAIL_HEAD_H, so the live zone is 124x50
@@ -1252,15 +1255,28 @@ const int MSG_BTN_W = 76, MSG_BTN_H = 26;
 // the width it is GIVEN, measured, so they were never counted.
 const int DETAIL_PROMPT_LINES = 4;
 const int DETAIL_PATH_LINES = 2;
-// 4px of air at every block boundary inside the card, NOT the 8 this board carried
-// while its cursor was stepped in Cozette's numbers. That 8 was affordable only
-// because the steps under it were 3px too short per line: with every step derived
-// from this board's real faces the packed stack is 320 against a 330px ceiling, and
-// 8px of air would need ~360. So the direction Task 6 argued for (given surplus,
-// spend it around the content) is intact - there simply is no surplus left on this
-// card once its own type scale is paid for, which is the honest reading of a 16px
-// line in a card that has to hold twelve blocks.
-const int DETAIL_AIR = 4;
+// 8px of air at every block boundary inside the card. It was 4 for exactly one
+// task: with every step derived from this board's real faces (rather than stepped
+// in Cozette's numbers, which is what let 8 look affordable while quietly costing
+// each line 3px of its own ink) the packed stack came to 320 against a 331px
+// ceiling, and 8 would have needed ~360. §7's meta line is what paid for it back -
+// two label+value column pairs became one line, returning 55px - so the direction
+// that note has always argued for (given surplus, spend it around the content) is
+// no longer merely intact but actually exercised. The six boundaries it widens are
+// name->title, title->rule, both rule->label steps and both wrapped blocks' tails;
+// DETAIL_PAD_Y and DETAIL_PILL_STEP also carry it but are board 1's arm only.
+// The whole walk is in DETAIL_CARD_H's derivation above, and sessions-geom-check.mjs
+// re-runs it from these constants rather than from the comment.
+const int DETAIL_AIR = 8;
+// The gap between the meta line's text and the Mac cluster right-anchored at the
+// card's text edge. It is the ONE horizontal separation on that line that is not a
+// glyph: the icon-to-tag gap inside the cluster is the same bare 4 the SETTINGS row
+// uses, and " - " separates the facts on the left. 8 rather than 4 because this gap
+// divides two DIFFERENT things (a sentence of facts from an identity) where the 4
+// binds an icon to the name beside it - and it is what fitText clips the left half
+// against, so it can never be merely decorative: shrink it and the meta text is
+// allowed to grow toward the icon.
+const int DETAIL_META_GAP = 8;
 // THE DETAIL CARD'S INK HEIGHTS - the two numbers its whole cursor is derived from,
 // exactly as SESSION_NAME_H / SESSION_LINE_H do for a row.
 //
