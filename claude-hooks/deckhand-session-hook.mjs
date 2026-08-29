@@ -212,24 +212,29 @@ function clean(s, max) {
 // quotes and arrows at 3 bytes each (measured on a real captured payload: all
 // four descriptions carried at least one). A character cap therefore overflows
 // the device's buffer, which is a defect this repo has already paid for once on
-// the voice-answer path.
+// the voice-answer path. This is the ONLY per-ask field on the wire that is
+// capped in the same unit the device and the line guard actually count in;
+// `title`, `detail` and the option LABELS are all capped in characters, so each
+// can be up to 3x its stated number in bytes. That is pre-existing, and
+// host/ask-optdescs-check.mjs records the arithmetic rather than papering over it.
 //
-// 64 AND NOT THE 96 THIS STARTED AT, and the number came from measuring the
-// wire rather than from the screen. The device's feedChar() guard DROPS a line
-// over 16000 chars outright - the whole tick, silently, leaving a frozen screen
-// - and the saturated worst case (6 simultaneously-asking sessions, each an
-// AskUserQuestion with a 1400-char detail and 4 labels) already spends 14237 of
-// those 16000 with no descriptions at all. Adding four 96-byte descriptions to
-// each of the six puts it at 16691: 691 OVER. Measured ceiling is 67 bytes
-// (15995, five chars of margin), which is far too tight to ship - the next
-// field anyone adds to an ask would silently blow it. 64 lands at 15923 with 77
-// chars of margin.
+// 96 IS DERIVED, NOT PICKED: it is LABEL_MAX_CHARS (32) x 3, the most bytes one
+// option LABEL can already cost on this wire. So a description may never cost
+// more than the label it explains - a bound the checker asserts by parsing both
+// numbers out of this file, and one that fails the moment either moves.
 //
-// So if Task 2 finds 64 too short to be useful on the glass, the honest lever is
-// the 1400-char detail cap - 6 x 1400 = 8400 chars is over half the budget and
-// is the dominant term by a wide margin - or a per-tick aggregate. NOT the
-// guard, and not this cap on its own.
-const ASK_OPT_DESC_MAX_BYTES = 64;
+// It is deliberately NOT set from the saturated worst case (6 simultaneously
+// asking sessions, each a 1400-char AskUserQuestion with four maximal options
+// and a parked voice transcript). Measured in BYTES that case is ~34,000
+// against feedChar()'s 16000-char guard - more than 2x over WITH THIS FIELD
+// ABSENT ENTIRELY - so it cannot set this cap, because no value including zero
+// survives it. An earlier version of this comment cut the cap to 64 on that
+// argument; the arithmetic was wrong (it took the descriptions off a baseline
+// that excluded the parked transcript it called the worst case) and the model
+// was in characters where the guard counts bytes. The real exposure there is
+// the 1400-char detail, 6 x 1400 x 3 = 25,200 bytes on its own, and it is the
+// guard's problem rather than this field's.
+const ASK_OPT_DESC_MAX_BYTES = 96;
 
 // The same boundary walk as capUtf8() in host/voice-answer.mjs, DUPLICATED
 // rather than imported: install.sh copies this file alone into ~/.claude, so it
