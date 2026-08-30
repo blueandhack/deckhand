@@ -38,6 +38,8 @@ const PAIRING_INO = path.join(REPO, "firmware", "deckhand_display", "pairing.ino
 // hole the constant-time assertion below already fell into once.
 const MAIN_INO = path.join(REPO, "firmware", "deckhand_display", "deckhand_display.ino");
 const POWER_INO = path.join(REPO, "firmware", "deckhand_display", "power.ino");
+// sessions.ino owns the fifth full-screen-surface refusal list (detailBandVisible).
+const SESSIONS_INO = path.join(REPO, "firmware", "deckhand_display", "sessions.ino");
 
 // ---------------------------------------------------------------------------
 // THE PINNED VECTOR
@@ -251,6 +253,7 @@ function sourceSuite(ok, over) {
   const strip = (t) => t.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
   const mainCode = strip(o.main != null ? o.main : fs.readFileSync(MAIN_INO, "utf8"));
   const powerCode = strip(o.power != null ? o.power : fs.readFileSync(POWER_INO, "utf8"));
+  const sessionsCode = strip(o.sessions != null ? o.sessions : fs.readFileSync(SESSIONS_INO, "utf8"));
   // Comments are stripped so a derivation QUOTED in a comment cannot satisfy an
   // assertion about the code - the trap panel_shim.cpp's invertColor note
   // records, where a text match passed while the line was compiled out.
@@ -706,6 +709,69 @@ function sourceSuite(ok, over) {
     (mainCode.match(/#if BOARD_HAS_WIRELESS_PAIR/g) || []).length >= 3 &&
     (powerCode.match(/#if BOARD_HAS_WIRELESS_PAIR/g) || []).length >= 2);
 
+  // =========================================================================
+  // THE TAP IS BOUND TO THE PAINT, NOT ONLY TO THE PREDICATE.
+  //
+  // pairConfirmable() being ONE predicate (asserted above) makes the draw site and
+  // the hit test agree about WHETHER there is anything to confirm. It says nothing
+  // about WHEN the glass caught up - and that is the binding the whole design rests
+  // on, because the user is confirming THE CODE THEY COMPARED. handlePairReq sets
+  // pairPending, which makes CONFIRM live at once; PAIRREQ arrives through
+  // processCompletedLine(), never handleLine(), so the panel's absorb does not fire
+  // and nothing repainted until tickPairPanel()'s 500ms tick. For up to half a
+  // second CONFIRM was tappable while the screen still read "waiting for a Mac".
+  //
+  // A text checker cannot watch a pixel, so what is asserted is the ORDER, as
+  // ADJACENCY: the paint is the statement IMMEDIATELY after the flag, with nothing -
+  // least of all a return - able to come between. Shortening the tick would not
+  // satisfy this, deliberately: "usually fast enough" is not the guarantee.
+  const reqStmts = reqBody
+    .split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const iFlag = reqStmts.indexOf("pairPending = true;");
+  ok("CONFIRM: handlePairReq raises pairPending, which is what makes CONFIRM live",
+    iFlag >= 0);
+  ok("CONFIRM: the panel is repainted in the SAME statement immediately after it, so the " +
+     "code is on the glass before CONFIRM can be tapped",
+    iFlag >= 0 && /^renderPairPanel\s*\(\s*\)\s*;/.test(reqStmts[iFlag + 1] || ""));
+  ok("CONFIRM: ... and handlePairReq cannot return between the two",
+    iFlag >= 0 && !/\breturn\b/.test(reqStmts[iFlag + 1] || ""));
+
+  // =========================================================================
+  // THE PANEL IS A FULL-SCREEN SURFACE, AND EVERY REFUSAL LIST HAS TO KNOW IT.
+  //
+  // It was in NONE of the five. Two of those lists gate commands reachable from an
+  // UNAUTHENTICATED radio (EMOJITEST, READTEST), so either one painted over the
+  // panel WITHOUT calling pairClose(): the window stays open and CONFIRM stays
+  // tappable under a screen that shows neither. The lists live in shared functions,
+  // so each term sits inside its own #if BOARD_HAS_WIRELESS_PAIR - which is also
+  // why they cannot be asserted as one condition and are named one at a time.
+  const guards = [
+    ["tickAutoTheme", fnBody(mainCode, "tickAutoTheme"), "a palette switch would repaint over the code"],
+    ["tickWorkingSpinner", fnBody(mainCode, "tickWorkingSpinner"), "a spark would blit onto the panel"],
+    ["tickSessionAnim", fnBody(sessionsCode, "tickSessionAnim"), "a shimmer would run down the rows under it"],
+    ["detailBandVisible", fnBody(sessionsCode, "detailBandVisible"), "the band would animate over it"],
+  ];
+  for (const [name, body, why] of guards)
+    ok(`SURFACE: ${name} refuses while the pairing panel owns the glass (${why})`,
+      body != null && /\bpairPanelActive\b/.test(body));
+  // The two radio-reachable ones are in processCompletedLine's dispatch rather than
+  // in a function of their own, so they are read as the refusal each one prints.
+  // SCOPED TO EACH COMMAND'S OWN BRANCH, never a fixed look-back: with a 900-char
+  // window READTEST's term sat inside EMOJITEST's, so deleting EMOJITEST's guard
+  // left its assertion satisfied by its neighbour's - a rule that can be met by a
+  // nearby line is not a rule, which is the hole the pairCtEq assertion already
+  // taught this file once.
+  for (const cmd of ["READTEST", "EMOJITEST"]) {
+    const from = mainCode.indexOf(`buf.startsWith("${cmd}")`);
+    const to = mainCode.indexOf(`"${cmd} refused: another full-screen surface is up"`);
+    ok(`SURFACE: ${cmd} refuses while the pairing panel owns the glass`,
+      from > 0 && to > from && /\bpairPanelActive\b/.test(mainCode.slice(from, to)));
+  }
+  // A window closed while the panel is left up is the two disagreeing: the new tab
+  // is painted over it, while handleTouch still routes every tap to pairPanelTouch.
+  ok("SURFACE: switchTab takes the PANEL down with the window, not just the window",
+    /pairPanelActive\s*=\s*false/.test(fnBody(mainCode, "switchTab") || ""));
+
   ok("SOURCE: the whole path is behind BOARD_HAS_WIRELESS_PAIR",
     /#if\s+BOARD_HAS_WIRELESS_PAIR/.test(code));
 
@@ -815,6 +881,7 @@ function selftest() {
   const realSrc = fs.readFileSync(PAIRING_INO, "utf8");
   const realMain = fs.readFileSync(MAIN_INO, "utf8");
   const realPower = fs.readFileSync(POWER_INO, "utf8");
+  const realSessions = fs.readFileSync(SESSIONS_INO, "utf8");
   const inject = (fn) => ({ pairing: realSrc.replace(CT_ANCHOR, `${fn}\n${CT_ANCHOR}`) });
   const P = (from, to) => ({ pairing: realSrc.replace(from, to) });
   const sourceFaults = [
@@ -904,6 +971,40 @@ function selftest() {
         "  pairRadioCommit = false;",
         "  mbedtls_platform_zeroize((void*) secret.c_str(), secret.length());",
       ].join("\n"), "  upsertHost(id, String(pairKeyHex), label);")],
+    // ---- this fix round: the tap was bound to the PREDICATE, not to the PAINT ----
+    // THE ONE THAT MATTERS HERE. Reverting the reconcile leaves CONFIRM tappable for
+    // up to tickPairPanel()'s 500ms while the glass still reads "waiting for a Mac" -
+    // a tap that commits a code nobody could have compared, which is the whole
+    // property the CONFIRM button exists to carry.
+    ["the panel is no longer repainted when PAIRREQ makes CONFIRM live (the 500ms hole)",
+      P("  renderPairPanel();   // no-op unless the pairing panel owns the glass\n", "")],
+    // The plausible WRONG fix, named so it fails too: making the tick quicker shrinks
+    // the window instead of removing it, and the guarantee is the order.
+    ["the reconcile is moved AFTER the PAIRPUB reply instead of beside the flag",
+      P("  renderPairPanel();   // no-op unless the pairing panel owns the glass\n\n  char hexbuf[65], line[80];",
+        "  char hexbuf[65], line[80];")
+        .pairing.replace("  sendLineToHost(line);",
+                         "  sendLineToHost(line);\n  renderPairPanel();")],
+    // ---- and the panel as a full-screen surface ----
+    ["EMOJITEST paints over the pairing panel and leaves CONFIRM live underneath",
+      { main: realMain.replace(
+          "    if (pairPanelActive) {\n      Serial.println(\"EMOJITEST refused: another full-screen surface is up\");\n      return;\n    }\n#endif\n", "") }],
+    ["READTEST does the same",
+      { main: realMain.replace(
+          "    if (pairPanelActive) {\n      Serial.println(\"READTEST refused: another full-screen surface is up\");\n      return;\n    }\n#endif\n", "") }],
+    ["a tab switch shuts the window but leaves the panel up, so taps still reach CONFIRM",
+      { main: realMain.replace("  pairPanelActive = false;\n#endif\n#if !BOARD_USES_TFT_ESPI", "#endif\n#if !BOARD_USES_TFT_ESPI") }],
+    ["the session shimmer runs down the rows underneath the pairing panel",
+      { sessions: realSessions.replace("  if (pairPanelActive) { xfadeId[0] = '\\0'; return; }\n#endif\n", "") }],
+    ["the working spinner blits over the pairing panel",
+      { main: realMain.replace("  if (pairPanelActive) return;\n#endif\n  if (isAsleep || octoActive || showingDetail", "  if (isAsleep || octoActive || showingDetail") }],
+    ["AUTO theme repaints the whole screen over a code being compared",
+      { main: realMain.replace(
+          "  if (pairPanelActive) return;\n#endif\n  if (isAsleep || octoActive || readerActive",
+          "  if (isAsleep || octoActive || readerActive") }],
+    ["the detail band animates over the pairing panel",
+      { sessions: realSessions.replace("  if (pairPanelActive) return false;\n#endif\n", "") }],
+
     ["a radio pairing logs PROVISION:, forging the cable's own audit marker",
       P('Serial.printf("WIRELESS PAIR: pairing stored for %s (%s), slot %d of %d"',
         'Serial.printf("PROVISION: pairing stored for %s (%s), slot %d of %d"')],
@@ -929,7 +1030,8 @@ function selftest() {
     const unchanged =
       (over.pairing == null || over.pairing === realSrc) &&
       (over.main == null || over.main === realMain) &&
-      (over.power == null || over.power === realPower);
+      (over.power == null || over.power === realPower) &&
+      (over.sessions == null || over.sessions === realSessions);
     if (unchanged) {
       console.log(`  MISSED  ${name}  <- the injection did not apply (anchor moved)`);
       continue;

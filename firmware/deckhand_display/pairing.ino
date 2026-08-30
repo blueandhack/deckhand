@@ -950,6 +950,23 @@ void handlePairReq(const String& rest) {
   strlcpy(pairHostId, id.c_str(), sizeof(pairHostId));
   pairSanitiseLabel(rawLabel.c_str(), pairLabel, sizeof(pairLabel));
   pairPending = true;
+  // THE PAINT IS BOUND TO THE FLAG, ONE STATEMENT APART, and that adjacency is the
+  // security property rather than tidiness. pairPending is what makes
+  // pairConfirmable() - and therefore the CONFIRM button, at both its draw site and
+  // its hit test - live, so from the line above onwards a tap inside that button's
+  // rectangle commits THIS peer's key. The tap was bound to the PREDICATE and not to
+  // the PAINT: PAIRREQ arrives through processCompletedLine(), never handleLine(), so
+  // the panel's own absorb never fires for it and nothing repainted until
+  // tickPairPanel()'s 500ms tick - up to half a second in which CONFIRM was tappable
+  // while the glass still read "waiting for a Mac", i.e. a tap that commits a code
+  // nobody could have compared. That is the whole thing the code exists to prevent.
+  //
+  // ORDER, not speed: both this and handleTouch() run on loopTask, and loop() ends
+  // with tft.flush(), so a paint made here is on the panel before the next
+  // handleTouch() can read a finger. Shortening the tick would only have made the
+  // window smaller. host/pair-crypto-check.mjs asserts this call is the statement
+  // IMMEDIATELY after pairPending = true, so no early return can be inserted between.
+  renderPairPanel();   // no-op unless the pairing panel owns the glass
 
   char hexbuf[65], line[80];
   pairHexInto(pubB, 32, hexbuf);

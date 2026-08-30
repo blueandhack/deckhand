@@ -1055,9 +1055,6 @@ for (const b of [1, 2]) {
       ["the countdown", c.PAIR_LEFT_Y, c.PAIR_LABEL_Y, c.CODE_LINE_H, c.PAIR_AIR_LABEL],
     ]) chk(y === prev + cell + air,
         `pairing panel: ${name} is at ${prev} + ${cell} + ${air} = ${prev + cell + air} (${y})`);
-    chk(c.PAIR_BTN_Y + c.H_BTN + c.PAIR_BTN_BOTTOM === contentBottom,
-        `pairing panel: the button row plus its air lands exactly on contentBottom ` +
-        `(${c.PAIR_BTN_Y} + ${c.H_BTN} + ${c.PAIR_BTN_BOTTOM} == ${contentBottom})`);
     // AND THE CLOSING TERM, which is the one that gives every gap above teeth.
     // Without it the chain is a derivation asserted against its own term: perturb
     // PAIR_TOP_AIR and every block below moves with it, so each step's identity
@@ -1068,6 +1065,42 @@ for (const b of [1, 2]) {
     chk(c.PAIR_LEFT_Y + c.CODE_LINE_H + c.PAIR_AIR_LEFT === c.PAIR_BTN_Y,
         `pairing panel: the stack lands exactly on the button row ` +
         `(${c.PAIR_LEFT_Y} + ${c.CODE_LINE_H} + ${c.PAIR_AIR_LEFT} == ${c.PAIR_BTN_Y})`);
+    // ---- AND THE COVERAGE DOES NOT REST ON THAT ONE LINE ----
+    // The closing term above constrains the SUM of the seven gaps, which is exactly
+    // what geom-sweep.mjs (one constant at a time) exercises - so it looked like
+    // full coverage while all six air constants failed through a single assertion,
+    // and deleting that line unguarded every one of them at once. Two bindings from
+    // different directions follow, each catching a class the other cannot.
+    //
+    // (1) A REDISTRIBUTION PRESERVES THE SUM. Move 24 out of the countdown's gap
+    // and into PAIR_AIR_STATE and the identity above still holds while the ink
+    // stack walks down the screen. The header names PAIR_AIR_LEFT as where this
+    // panel's surplus lives, so that is asserted rather than described: the gap
+    // that carries no ink must be strictly the largest, which a swap breaks.
+    {
+      const gaps = ["PAIR_TOP_AIR", "PAIR_AIR_TITLE", "PAIR_AIR_STATE", "PAIR_AIR_CODE",
+                    "PAIR_AIR_LABEL", "PAIR_BTN_BOTTOM"];
+      const worst = gaps.reduce((a, n) => (c[n] > c[a] ? n : a), gaps[0]);
+      chk(c.PAIR_AIR_LEFT > c[worst],
+          `pairing panel: the SURPLUS lives in PAIR_AIR_LEFT ${c.PAIR_AIR_LEFT}, strictly the ` +
+          `largest gap (next is ${worst} ${c[worst]}) - a sum-preserving swap passes the ` +
+          `landing identity above and fails here`);
+    }
+    // (2) THE BUTTON ROW IS BOUND TO THE ROW THAT OPENS THE PANEL, which anchors
+    // PAIR_BTN_BOTTOM to something outside the chain entirely. PAIR NEW MAC is
+    // drawn at p3RowY(hostCount), and at the last reachable slot that row OVERLAPPED
+    // CONFIRM's rect - so the finger that opened the panel was resting on the button
+    // that stores a key, and an impatient second tap committed a code nobody had
+    // compared. (The assertion that used to sit near here -
+    // PAIR_BTN_Y + H_BTN + PAIR_BTN_BOTTOM == contentBottom - is PAIR_BTN_Y's own
+    // definition rearranged, so it holds by construction and binds nothing.)
+    {
+      const lastSlotY = c.P3_LIST_Y + (MAX_HOSTS - 1) * c.P3_ROW_STEP;
+      chk(c.PAIR_BTN_Y + c.H_BTN <= lastSlotY,
+          `pairing panel: the button row ends ${c.PAIR_BTN_Y + c.H_BTN - 1}, clear of PAIR NEW ` +
+          `MAC's own last slot at ${lastSlotY}..${lastSlotY + c.H_ROW - 1} - so a second tap ` +
+          `where the first one opened this panel can never land on CONFIRM`);
+    }
     chk(c.PAIR_RESULT_Y === c.PAIR_CODE_Y + Math.floor((c.HERO_LINE_H - c.PAIR_HEAD_H) / 2),
         `pairing result: the verdict is centred in the band the code occupied ` +
         `(${c.PAIR_RESULT_Y})`);
@@ -1102,7 +1135,28 @@ for (const b of [1, 2]) {
         ["CONFIRM / CANCEL", [c.PAIR_BTN_Y, c.PAIR_BTN_Y + c.H_BTN - 1]],
       ];
       console.log("    " + blocks.map(([n, [t, bo]]) => `${n} ${t}..${bo}`).join(", "));
-      chk(blocks[0][1][0] >= 0, `pairing panel: the title starts ${blocks[0][1][0]}, on the panel`);
+      // THE TOP END, BOUND TO THE CLEAR drawPairPanelStatic ACTUALLY MAKES rather
+      // than to the literal 0. `blocks[0][1][0] >= 0` stood here and could not fail:
+      // PAIR_TITLE_Y is PAIR_TOP_AIR, a positive constant, so no perturbation the
+      // sweep can make drives it negative - the ninth unfalsifiable assertion this
+      // branch has now paid for. What it was standing in for is that every block
+      // lands inside the region the panel CLEARS, and that rectangle is parsed out
+      // of the draw site's own fillRect: the panel deliberately covers the tab bar
+      // ("chrome drawn but dead is the bug fabVisible() is gated to avoid"), and
+      // nothing asserted that until now. Narrow the clear to CONTENT_Y - the
+      // plausible edit, since every other surface here starts there - and the title
+      // at 40..63 is painted onto live tab-bar chrome, which this now names.
+      {
+        const call = /tft\.fillRect\(([^;]*?)\);/.exec(fnSrc(SETTINGS_INO, "drawPairPanelStatic"));
+        const args = call ? call[1].split(",").map((a) => a.trim()) : [];
+        const clearTop = args.length === 5 ? evalInt(args[1], c) : null;
+        chk(clearTop === 0,
+            `pairing panel: drawPairPanelStatic clears from y=${clearTop} - the panel covers ` +
+            `the tab bar, so a tap can never reach chrome it has painted over`);
+        chk(clearTop != null && blocks[0][1][0] >= clearTop,
+            `pairing panel: the title starts ${blocks[0][1][0]}, inside the cleared region ` +
+            `from ${clearTop}`);
+      }
       for (let i = 1; i < blocks.length; i++)
         chk(blocks[i - 1][1][1] < blocks[i][1][0],
             `pairing panel: ${blocks[i - 1][0]} ends ${blocks[i - 1][1][1]}, clear of ` +

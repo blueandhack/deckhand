@@ -2143,6 +2143,15 @@ void drawFab(int state) {
 // come back to a tab.
 void tickAutoTheme() {
   if (themeMode != THEME_MODE_AUTO) return;
+#if BOARD_HAS_WIRELESS_PAIR
+  // THE PAIRING PANEL OWNS THE GLASS TOO, and it was in none of the five refusal
+  // lists. Its own #if is what keeps board 1's arm character-identical - these are
+  // shared functions, so a term added to the condition itself would move that
+  // board's binary for a flag it does not have.
+  // A palette switch calls forceFullRepaint(), which would wipe the six digits
+  // someone is in the middle of comparing against their Mac.
+  if (pairPanelActive) return;
+#endif
   if (isAsleep || octoActive || readerActive || histActive || showingDetail || voiceCardActive || kbActive || emojiTestActive) return;
   static unsigned long lastCheck = 0;
   if (lastCheck && millis() - lastCheck < 30000) return;
@@ -2589,6 +2598,15 @@ int expHCache = 0;       // the height the list was last laid out at
 // never look like activity to the auto-sleep timer.
 extern bool octoActive;   // defined with the Clawd easter egg, further down
 void tickWorkingSpinner() {
+#if BOARD_HAS_WIRELESS_PAIR
+  // THE PAIRING PANEL OWNS THE GLASS TOO, and it was in none of the five refusal
+  // lists. Its own #if is what keeps board 1's arm character-identical - these are
+  // shared functions, so a term added to the condition itself would move that
+  // board's binary for a flag it does not have.
+  // The panel covers the sessions list, so a spinner advanced here blits a spark
+  // onto the pairing code at the list's own coordinates.
+  if (pairPanelActive) return;
+#endif
   if (isAsleep || octoActive || showingDetail || readerActive || histActive || kbActive || emojiTestActive) return;
   if (currentTab != TAB_SESSIONS || sessionCount == 0) return;
   if (millis() - lastAnimMs < ANIM_INTERVAL_MS) return;
@@ -3320,6 +3338,13 @@ void switchTab(Tab newTab) {
   // taps away on the USAGE tab is precisely the state that makes this weaker
   // than the cable it replaces.
   pairClose("tab switch");
+  // AND THE PANEL GOES WITH IT. Closing the window while leaving pairPanelActive
+  // set left the two disagreeing: the new tab is painted over the panel, while
+  // handleTouch still routes every tap to pairPanelTouch and the ~5s absorb still
+  // hands the tick to renderPairPanel - which would then play the result screen's
+  // 1.5s takeover over a tab the user had already moved to. TAB is a radio command,
+  // so this is reachable without touching the device at all.
+  pairPanelActive = false;
 #endif
 #if !BOARD_USES_TFT_ESPI
   // Timed because "switching tabs feels slow" was a real report and the flush is
@@ -5117,6 +5142,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // USB; state=2 mv=3866)" exists for and the same line EMOJITEST already
     // prints: from the Mac, "no output" and "impossible here" look identical, and
     // a silent refusal reads as the command being broken.
+#if BOARD_HAS_WIRELESS_PAIR
+    // Same rule and the same shape as EMOJITEST's: an unauthenticated radio command
+    // must not paint over the pairing panel, because the panel disappears while
+    // pairPanelActive stays true - the window armed and CONFIRM tappable under
+    // someone else's screen.
+    if (pairPanelActive) {
+      Serial.println("READTEST refused: another full-screen surface is up");
+      return;
+    }
+#endif
     if (arg == "off") {
       if (readerActive) exitReader();
     } else if (kbActive || histActive || emojiTestActive) {
@@ -5144,6 +5179,19 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // of bug fabVisible()'s own kbActive check was already paid for once,
     // leaving invisible typing into a screen that no longer looks like a
     // keyboard.
+#if BOARD_HAS_WIRELESS_PAIR
+    // THE PAIRING PANEL IS A FULL-SCREEN SURFACE TOO, and this grid is reachable
+    // from the radio with no authentication at all: painting it over the panel
+    // leaves the 120s window OPEN and CONFIRM live underneath a screen that shows
+    // neither. A SEPARATE guarded refusal rather than a term in the condition
+    // below - measured, not preferred: folding it in as a local (`bool surfaceUp =
+    // ...`) reads identically on board 1 and cost that board +16 bytes, so its arm
+    // is left character-for-character as it was.
+    if (pairPanelActive) {
+      Serial.println("EMOJITEST refused: another full-screen surface is up");
+      return;
+    }
+#endif
     if (kbActive || readerActive || histActive || showingDetail) {
       Serial.println("EMOJITEST refused: another full-screen surface is up");
       return;

@@ -1858,8 +1858,8 @@ const int P3_EMPTY_HINT_Y = P3_LIST_Y + P3_ROW_STEP + P3_ROW_H / 2;   // MC cent
 //   140..203   the six digits          PAIR_CODE_Y,  T_HERO  (32x64)
 //   224..239   the requesting Mac      PAIR_LABEL_Y, T_BODY
 //   264..279   "118s left"             PAIR_LEFT_Y,  T_BODY  - the one change-only field
-//   386..435   CONFIRM / CANCEL        PAIR_BTN_Y,   H_BTN
-//   436..459   clear to contentBottom()
+//   348..397   CONFIRM / CANCEL        PAIR_BTN_Y,   H_BTN
+//   398..459   clear to contentBottom()
 //
 // and the result screen, which replaces the five blocks above the buttons:
 //   160..183   the verdict             PAIR_RESULT_Y,     T_HEAD
@@ -1879,8 +1879,24 @@ const int PAIR_AIR_TITLE  = 16;   // title -> the state line
 const int PAIR_AIR_STATE  = 44;   // state line -> the code, which gets the most air on the screen it is the point of
 const int PAIR_AIR_CODE   = 20;   // the code -> the requesting Mac's label
 const int PAIR_AIR_LABEL  = 24;   // label -> the countdown
-const int PAIR_AIR_LEFT   = 106;  // countdown -> the button row: where this panel's SURPLUS lives
-const int PAIR_BTN_BOTTOM = 24;   // the button row -> the footer
+const int PAIR_AIR_LEFT   = 68;   // countdown -> the button row: where this panel's SURPLUS lives
+// THE BUTTON ROW IS HELD OFF THE ROW THAT OPENED THE PANEL, and that is the whole
+// reason this is 62 rather than the 24 every other bottom margin here would suggest.
+// PAIR NEW MAC is drawn at p3RowY(hostCount) on the Pairing page, and at the last
+// reachable slot (hostCount == MAX_HOSTS - 1 == 3) that row is 398..443 - which
+// OVERLAPPED CONFIRM's old 386..435 rect at the same x. So the finger that opened
+// this panel was resting exactly on the button that stores a key, and an impatient
+// second tap - the ordinary human double-tap, ~200ms later - landed on CONFIRM. An
+// attacker who spams PAIRREQ at a connected link has a code painted well inside
+// that window (see handlePairReq's own note on the paint), so the second tap
+// commits a code nobody compared: the one failure this whole design exists to stop.
+// Closing it in SPACE rather than in TIME is deliberate - an arming delay would be
+// a second spelling of "is there anything to confirm", and pairConfirmable() being
+// ONE predicate is itself an asserted rule. The 38px comes out of PAIR_AIR_LEFT,
+// which is the surplus and is declared to be exactly that.
+//   PAIR_BTN_Y + H_BTN <= p3RowY(MAX_HOSTS - 1)    (348 + 50 == 398)
+// settings-geom-check.mjs asserts that bound, so a -1 here fails by name.
+const int PAIR_BTN_BOTTOM = 62;   // the button row -> the footer; see above, NOT taste
 const int PAIR_TITLE_Y = PAIR_TOP_AIR;
 const int PAIR_STATE_Y = PAIR_TITLE_Y + PAIR_HEAD_H + PAIR_AIR_TITLE;
 const int PAIR_CODE_Y  = PAIR_STATE_Y + CODE_LINE_H + PAIR_AIR_STATE;
@@ -1905,7 +1921,16 @@ const int PAIR_LEFT_Y  = PAIR_LABEL_Y + CODE_LINE_H + PAIR_AIR_LABEL;
 // asserting that the stack lands ON the button row closes it: a +-1 on ANY gap now
 // breaks that one identity. Same shape as HOME_Y0_BOT, which exists for exactly
 // this reason and is likewise read by no draw site:
-//   PAIR_LEFT_Y + CODE_LINE_H + PAIR_AIR_LEFT == PAIR_BTN_Y  (264 + 16 + 106 = 386)
+//   PAIR_LEFT_Y + CODE_LINE_H + PAIR_AIR_LEFT == PAIR_BTN_Y  (264 + 16 + 68 = 348)
+//
+// AND THAT ONE IDENTITY IS NOT ENOUGH ON ITS OWN, which the fix round measured
+// rather than argued: it constrains the SUM of the gaps, so a REDISTRIBUTION -
+// move 24 out of PAIR_AIR_LEFT and into PAIR_AIR_STATE - preserves the sum, passes
+// it, and drives the ink stack down the screen. geom-sweep.mjs cannot see that
+// either, because it perturbs one constant at a time. So the surplus is asserted
+// to LIVE where this file says it lives (PAIR_AIR_LEFT strictly the largest gap),
+// and PAIR_BTN_BOTTOM carries the independent bound above - two lines, so deleting
+// either still leaves the other catching a class of faults.
 const int PAIR_BTN_Y = BOARD_H - FOOTER_H - PAIR_BTN_BOTTOM - H_BTN;
 const int PAIR_BTN_GAP = 12;
 const int PAIR_BTN_W = (CARD_W - PAIR_BTN_GAP) / 2;

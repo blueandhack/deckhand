@@ -691,6 +691,16 @@ void drawSpineShimmer(int x0, int y0, int h0, const char* status, bool codex,
 // cost and not whatever else happened to be pending. It early-returns for free
 // when nothing is dirty, and deliberately does not overwrite lastFlushUs then.
 void tickSessionAnim() {
+#if BOARD_HAS_WIRELESS_PAIR
+  // THE PAIRING PANEL OWNS THE GLASS TOO, and it was in none of the five refusal
+  // lists. Its own #if is what keeps board 1's arm character-identical - these are
+  // shared functions, so a term added to the condition itself would move that
+  // board's binary for a flag it does not have.
+  // The panel covers the sessions list, so a shimmer advanced here paints down the
+  // rows underneath the pairing code. The xfade record is cleared the way every
+  // other gated-out reason clears it: the detail card is not on screen either.
+  if (pairPanelActive) { xfadeId[0] = '\0'; return; }
+#endif
   if (isAsleep || octoActive || showingDetail || readerActive || histActive
       || kbActive || emojiTestActive) {
     // STILL GATED OUT - this function paints at the LIST's coordinates and must
@@ -898,6 +908,14 @@ void tickSessionAnim() {
 // keyboard in particular runs with showingDetail still true (see
 // closeKeyboard()'s own note), which would put a spark on the key rows.
 bool detailBandVisible() {
+#if BOARD_HAS_WIRELESS_PAIR
+  // AND THE PAIRING PANEL, which owns the glass the same way. Its own #if keeps
+  // board 1's arm of this shared function character-identical; the term could not
+  // go in the condition above for that reason. showingDetail does not go false
+  // underneath it either - the panel is opened from SETTINGS, so this predicate
+  // would be answering about a card that is not on the screen.
+  if (pairPanelActive) return false;
+#endif
   if (isAsleep || octoActive || readerActive || histActive || kbActive || emojiTestActive)
     return false;
   if (!showingDetail || currentTab != TAB_SESSIONS) return false;

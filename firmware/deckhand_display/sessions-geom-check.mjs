@@ -557,12 +557,18 @@ function macTagMax() {
 // comment), so an unknown #if is a hard error rather than a fallback.
 function armFor(src, b) {
   const ON = b === 1;                 // BOARD_USES_TFT_ESPI is 1 on board 1 only
+  // BOARD_HAS_WIRELESS_PAIR follows the same split the other way round, and it is
+  // RESOLVED rather than tolerated for the reason the header comment gives: passing
+  // it through would hand these assertions a body that is neither board's. It
+  // reaches this file through detailBandVisible's own pairPanelActive refusal.
+  const WP = b === 2;
   const out = [], stack = [];
   for (const line of src.split("\n")) {
     const t = line.trim();
     if (t.startsWith("#if")) {
       if (/^#if\s+!\s*BOARD_USES_TFT_ESPI$/.test(t))     stack.push(!ON);
       else if (/^#if\s+BOARD_USES_TFT_ESPI$/.test(t))     stack.push(ON);
+      else if (/^#if\s+BOARD_HAS_WIRELESS_PAIR$/.test(t)) stack.push(WP);
       else throw new Error(`armFor(): unresolvable directive "${t}"`);
       continue;
     }
@@ -2111,7 +2117,16 @@ for (const b of [1, 2]) {
       // tickSessionAnim's - miss one and this fails by naming it.
       const spin = cut(dsrc, "void tickWorkingSpinner(");
       const anim = cut(ssrc, "void tickSessionAnim(");
-      const ids = (t) => new Set(t.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []);
+      // COMMENTS STRIPPED BEFORE TOKENISING, the rule the rest of this repo already
+      // follows: with them in, a word appearing only in tickWorkingSpinner's PROSE
+      // was a word tickSessionAnim's prose had to repeat, so the two guards were
+      // being kept in step by their COMMENTS rather than by their code - and the
+      // failure named English words, not identifiers. It only ever loosens what is
+      // REQUIRED (a spinner identifier that lived only in a comment stops being
+      // demanded) and never lets a comment satisfy a demand, which is the direction
+      // that matters here.
+      const ids = (t) => new Set(
+        t.replace(/\/\/[^\n]*/g, "").match(/[A-Za-z_][A-Za-z0-9_]*/g) || []);
       // EVERY COMMENT ANCHOR IS CHECKED BEFORE IT IS SLICED ON, because indexOf
       // returns -1 rather than throwing: rename one of these comments and the
       // slice silently WIDENS to nearly the whole function body, at which point
