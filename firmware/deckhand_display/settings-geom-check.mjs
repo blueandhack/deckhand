@@ -117,6 +117,24 @@ const HIST_ARENA = +fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8")
 const PAGER_TITLES = ["STATUS", "DISPLAY & SOUND", "ACTIONS", "PAIRED MACS"];
 const STEP_LABELS = ["BRIGHTNESS", "SLEEP AFTER", "VOLUME"];
 const TOGGLES = ["SOUND", "MUTED", "FLIPPED", "NORMAL", "DARK", "LIGHT", "AUTO"];
+// BOARD 2's settings tree: the five group names (one table serving both the back
+// band's title and HOME's row name - they must be the same word or the screen you
+// tapped into is not the one you tapped on), the labels its split Display and Sound
+// groups draw, and the WORST CASE of each of HOME's five composed summaries.
+const GROUP_TITLES = ["Status", "Display", "Sound", "Pairing", "Actions"];
+const THEME_SEGS = ["DARK", "LIGHT", "AUTO"];
+const SOUND_LABELS = ["SOUND ON", "SOUND OFF", "TEST BEEP", "MIC TEST", "FLIPPED", "NORMAL"];
+const SET_CAPTIONS = ["THEME", "ALERTS", "MICROPHONE"];
+// Each is the longest string settingsHomeSummary() can build for that group:
+// every link down / full battery / a two-digit-below-zero die temperature; 100%
+// brightness with sleep OFF and the longest theme name; sound off at the loudest
+// preset; four Macs restricted to one; and the Actions line, which is fixed.
+const HOME_SUMMARIES = ["Both links up   100%   -10 C", "100%   sleep OFF   LIGHT",
+                        "OFF   volume HIGH   mic", "4 Macs   one may answer",
+                        "calibrate, pairing, power"];
+// uiHint centres on the PANEL, not on the card, so these two are measured against
+// the panel width the way page 2's hints are.
+const SET_HINTS = ["AUTO = light 07:00 to 19:00", "beeps when a session needs input"];
 const P2_LABELS = ["MIC TEST", "CALIBRATE TOUCH", "RESET PAIRING", "POWER OFF"];
 // BOTH ARMS of the #if BOARD_HAS_TOUCH_SLEEP_WAKE pair, on both boards. Only the
 // touch-wake string was checked before, which is the arm board 1 compiles - so the
@@ -330,16 +348,22 @@ for (const b of [1, 2]) {
   {
     const cy = c.CONTENT_Y + Math.floor(c.PAGER_H / 2);
     chk(c.CONTENT_Y + 4 + pagerKeyH <= c.PAGE_TOP, `pager key ends ${c.CONTENT_Y + 4 + pagerKeyH} inside the band cleared to ${c.PAGE_TOP}`);
-    chk(cy + 8 + 3 < c.PAGE_TOP, `page dots end ${cy + 11} inside the band cleared to ${c.PAGE_TOP}`);
-    const laneL = c.PAGER_BTN_X0 + c.PAGER_BTN_W, laneR = W - c.PAGER_BTN_X0 - c.PAGER_BTN_W;
-    for (const t of PAGER_TITLES) {
-      // widthB, not textWidth: the pager title lane is the last board-agnostic
-      // measurement in this file. "DISPLAY & SOUND" is 90px at Cozette's 6px
-      // advance and 120px at Spleen's 8 - it still fits board 2's 184px lane, but
-      // the header comment claiming 90px there has been corrected too.
-      const w = widthB(b, T_META, t);
-      const x0 = Math.floor(W / 2 - w / 2);
-      chk(x0 > laneL && x0 + w < laneR, `pager title "${t}" ${w}px spans ${x0}..${x0 + w} inside the keys' lane ${laneL}..${laneR}`);
+    // THE DOTS AND THE CENTRED TITLE ARE drawPager()'S, AND BOARD 2 NO LONGER
+    // COMPILES drawPager(). Checking them there measured a band that is not drawn:
+    // its back band has ONE key and a LEFT-ALIGNED title, so the constraint is a
+    // different one and it is asserted separately below.
+    if (b === 1) {
+      chk(cy + 8 + 3 < c.PAGE_TOP, `page dots end ${cy + 11} inside the band cleared to ${c.PAGE_TOP}`);
+      const laneL = c.PAGER_BTN_X0 + c.PAGER_BTN_W, laneR = W - c.PAGER_BTN_X0 - c.PAGER_BTN_W;
+      for (const t of PAGER_TITLES) {
+        // widthB, not textWidth: the pager title lane is the last board-agnostic
+        // measurement in this file. "DISPLAY & SOUND" is 90px at Cozette's 6px
+        // advance and 120px at Spleen's 8 - it still fits board 2's 184px lane, but
+        // the header comment claiming 90px there has been corrected too.
+        const w = widthB(b, T_META, t);
+        const x0 = Math.floor(W / 2 - w / 2);
+        chk(x0 > laneL && x0 + w < laneR, `pager title "${t}" ${w}px spans ${x0}..${x0 + w} inside the keys' lane ${laneL}..${laneR}`);
+      }
     }
   }
 
@@ -365,6 +389,53 @@ for (const b of [1, 2]) {
     // The back band must be the pager band's height, or every group body moves.
     chk(c.BACK_BTN_W === c.PAGER_BTN_W,
         `the back key is the pager key's width: ${c.BACK_BTN_W} == ${c.PAGER_BTN_W}`);
+    // THE BACK BAND'S TITLE IS ML_DATUM at BACK_BTN_X0 + BACK_BTN_W + BACK_TITLE_DX
+    // and drawn at T_HEAD, so it is measured against the panel's right edge rather
+    // than centred between two keys the way the pager's is. It is also the same
+    // string HOME's row name uses, so one table has to fit two lanes.
+    {
+      const tx = c.PAGER_BTN_X0 + c.BACK_BTN_W + c.BACK_TITLE_DX;
+      chk(c.BACK_TITLE_DX >= c.SP_3,
+          `back band: the title is ${c.BACK_TITLE_DX}px clear of the key, at least SP_3 ${c.SP_3}`);
+      // LEFT-ANCHORED, unlike the pager's centred title: the band's one key and its
+      // title are a pair, and a title drifting toward the middle stops reading as
+      // the label ON that key and starts reading as a heading of its own.
+      chk(tx < Math.floor(W / 2),
+          `back band: the title starts ${tx}, left of the panel's midpoint ${Math.floor(W / 2)}`);
+      for (const t of GROUP_TITLES) {
+        const w = widthB(b, T_HEAD, t);
+        chk(tx + w <= W - c.PAGER_BTN_X0,
+            `back band title "${t}" ${w}px ends ${tx + w - 1} inside the panel (${W - c.PAGER_BTN_X0 - 1})`);
+      }
+    }
+    // HOME's row: name at T_HEAD and summary at T_META share the row's text column,
+    // which ends where the chevron begins. The chevron is MR_DATUM at
+    // CARD_X + CARD_W - PAD, so its ink starts one T_HEAD advance left of that -
+    // and the summary is drawn PADDED to HOME_SUB_CHARS, so the width that has to
+    // fit is the pad, not whichever string happens to be longest today.
+    {
+      const lane = (c.CARD_X + c.CARD_W - c.PAD - advanceB(b, T_HEAD)) - (c.CARD_X + c.PAD);
+      const subW = c.HOME_SUB_CHARS * advanceB(b, T_META);
+      console.log(`  HOME row: text lane ${lane}px, padded summary ${c.HOME_SUB_CHARS} chars = ${subW}px`);
+      chk(subW <= lane,
+          `HOME's padded summary ${subW}px fits the lane left of the chevron (${lane}px)`);
+      for (const t of GROUP_TITLES)
+        chk(widthB(b, T_HEAD, t) <= lane, `HOME row name "${t}" ${widthB(b, T_HEAD, t)}px fits the ${lane}px lane`);
+      // The cache is what drawIfChanged COMPARES, so it has to hold the padded
+      // string plus its NUL - a cache shorter than its string silently stops
+      // noticing changes past its end. Parsed from the declaration, not restated:
+      // homeSubCache[][] must be declared with HOME_SUB_BYTES itself.
+      chk(SET_CACHE.homeSubCache === "HOME_SUB_BYTES",
+          `homeSubCache is declared [${SET_CACHE.homeSubCache}], i.e. the header's own HOME_SUB_BYTES`);
+      chk(c.HOME_SUB_BYTES >= c.HOME_SUB_CHARS + 1,
+          `HOME_SUB_BYTES ${c.HOME_SUB_BYTES} holds ${c.HOME_SUB_CHARS} chars + NUL`);
+      // Every summary this device can COMPOSE, at its own worst case, measured
+      // against the pad it is truncated to. A summary longer than the pad is not a
+      // spill - it is a silent truncation mid-word, which reads as a wrong reading.
+      for (const t of HOME_SUMMARIES)
+        chk(t.length <= c.HOME_SUB_CHARS,
+            `HOME summary "${t}" is ${t.length} of the ${c.HOME_SUB_CHARS} characters the row pads to`);
+    }
   }
 
   // ================= SETTINGS page 0: the DEVICE and LINK cards =================
@@ -600,62 +671,168 @@ for (const b of [1, 2]) {
       chk(x0 + w < hitR, `stepper value "${v}" ends ${x0 + w}, clear of the right hit third (${hitR})`);
     }
   }
-  {
-    const rows = 3 * c.STEPPER_CARD_H + c.P1_SOUND_H;
-    const used = c.P1_TOP + rows + 3 * c.P1_GAP;
-    const below = region - used;
-    console.log(`  page 1: ${rows}px of rows + ${c.P1_TOP} top + 3x${c.P1_GAP} = ${used} of ${region}, ${below} below`);
-    chk(below > 0, `page 1: toggle row ends ${c.P1_SOUND_Y + c.P1_SOUND_H}, ${below}px above the footer (must be > 0, or MUTE/NORMAL/LIGHT read as the status line)`);
-    // THE ASSERTION ABOVE TESTS A RE-DERIVED TOTAL, NOT THE ROWS THE DEVICE ACTUALLY
-    // DRAWS AT, and that is exactly the gap geom-sweep.mjs found: P1_BRIGHT_Y,
-    // P1_SLEEP_Y, P1_VOL_Y and P1_SOUND_Y are the four y's every draw site and hit
-    // test uses, and all four could move 16px with nothing failing, because `used`
-    // is computed from P1_TOP/P1_GAP instead. Same shape as the page-2 chain the
-    // preprocessor-blind parser used to mis-read: a sum that agrees with the layout
-    // only as long as nobody breaks the chain. So the chain itself is pinned, and
-    // the last row's own bottom edge - the thing the message claims - is asserted.
-    const p1Y = [c.P1_BRIGHT_Y, c.P1_SLEEP_Y, c.P1_VOL_Y, c.P1_SOUND_Y];
-    const p1H = [c.STEPPER_CARD_H, c.STEPPER_CARD_H, c.STEPPER_CARD_H, c.P1_SOUND_H];
-    const p1N = ["BRIGHTNESS", "SLEEP AFTER", "VOLUME", "SOUND/FLIP/THEME"];
-    chk(p1Y[0] === c.PAGE_TOP + c.P1_TOP, `page 1: ${p1N[0]} at ${p1Y[0]} == PAGE_TOP + P1_TOP (${c.PAGE_TOP + c.P1_TOP})`);
-    for (let i = 1; i < 4; i++)
-      chk(p1Y[i] === p1Y[i - 1] + p1H[i - 1] + c.P1_GAP,
-          `page 1: ${p1N[i]} at ${p1Y[i]} == ${p1N[i - 1]} (${p1Y[i - 1]}) + ${p1H[i - 1]} + gap ${c.P1_GAP}`);
-    chk(p1Y[3] + p1H[3] <= contentBottom,
-        `page 1: the toggle row's own bottom edge ${p1Y[3] + p1H[3]} is inside the region (${contentBottom})`);
-    chk(c.P1_GAP <= c.P1_SOUND_H, `page 1 gap ${c.P1_GAP} <= its shortest row ${c.P1_SOUND_H} (a wider gap stops reading as one list)`);
-    chk(c.P1_SOUND_H >= c.TAP_MIN, `toggle row ${c.P1_SOUND_H} >= TAP_MIN ${c.TAP_MIN}`);
-    // THE THREE CONTROLS THEMSELVES, measured from the constants the draw sites and
-    // the hit tests actually use (CARD_X / P1_FLIP_X / P1_THEME_X, each P1_THIRD_W
-    // wide - settings.ino lines 263/267/281 and the three touch branches). Only a
-    // locally re-derived `third` was checked before, so all three constants were
-    // unread by any checker: SOUND, FLIPPED and the theme button could have
-    // overlapped each other or run off the card and nothing would have said so.
-    // They are also the touch boundaries - `sx < P1_FLIP_X`, `sx < P1_THEME_X`,
-    // `sx >= P1_THEME_X` - so a control overlapping its neighbour is a tap landing
-    // on the wrong setting, not merely a cosmetic collision.
-    const third = Math.floor((c.CARD_W - 16) / 3);
-    chk(c.P1_THIRD_W === third, `P1_THIRD_W ${c.P1_THIRD_W} == floor((CARD_W - 16) / 3) = ${third}`);
-    const cols = [["SOUND", c.CARD_X], ["FLIP", c.P1_FLIP_X], ["THEME", c.P1_THEME_X]];
-    for (let i = 1; i < cols.length; i++)
-      chk(cols[i][1] >= cols[i - 1][1] + c.P1_THIRD_W,
-          `toggle row: ${cols[i][0]} starts ${cols[i][1]}, clear of ${cols[i - 1][0]} ending ${cols[i - 1][1] + c.P1_THIRD_W - 1}`);
-    chk(cols[2][1] + c.P1_THIRD_W <= c.CARD_X + c.CARD_W,
-        `toggle row: THEME ends ${cols[2][1] + c.P1_THIRD_W - 1}, inside the card's right edge (${c.CARD_X + c.CARD_W - 1})`);
-    chk(c.P1_THIRD_W >= c.TAP_MIN, `toggle ${c.P1_THIRD_W}px wide >= TAP_MIN ${c.TAP_MIN}`);
-    // MEASURED at the board's advance, and against T_TITLE - which is the id
-    // uiButton actually sets, not T_BODY. They alias today on both boards; naming
-    // the real one is what makes the T_TITLE -> T_HEAD migration fail here.
-    for (const t of TOGGLES) chk(widthB(b, 2, t) + 8 <= c.P1_THIRD_W, `toggle label "${t}" ${widthB(b, 2, t)}px inside a ${c.P1_THIRD_W}px third`);
-    // uiButton centres its label with MC_DATUM at y + h/2, and MC_DATUM biases the
-    // box LOW - so a label in an exactly-sized control overflows the bottom before
-    // it overflows the top. Both edges, against the row's own height.
+  // ================= SETTINGS page 1: the stepper page and what board 2 split it into ===
+  // BOARD 1 KEEPS THE FOUR-ROW PAGE: three steppers and a row of three third-width
+  // toggles. Board 2 no longer declares P1_VOL_Y, P1_SOUND_Y, P1_SOUND_H, P1_THIRD_W,
+  // P1_FLIP_X or P1_THEME_X at all - VOLUME and SOUND moved to their own group - so
+  // running this arm there would compare against undefined and report NaN, which
+  // LOOKS like a failure and is a parse gap. The two arms are separate assertions,
+  // not one loop with holes in it.
+  if (b === 1) {
     {
-      const [t0, t1] = mcBox(b, 2, Math.floor(c.P1_SOUND_H / 2));
-      const bias = Math.floor(lineHB(b, 2) / 2) - Math.floor(ascentB(b, 2) / 2);
-      chk(t0 >= 0 && t1 <= c.P1_SOUND_H - 1,
-          `toggle label box +${t0}..+${t1} inside the ${c.P1_SOUND_H}px row (MC_DATUM biases it ${bias}px low)`);
+      const rows = 3 * c.STEPPER_CARD_H + c.P1_SOUND_H;
+      const used = c.P1_TOP + rows + 3 * c.P1_GAP;
+      const below = region - used;
+      console.log(`  page 1: ${rows}px of rows + ${c.P1_TOP} top + 3x${c.P1_GAP} = ${used} of ${region}, ${below} below`);
+      chk(below > 0, `page 1: toggle row ends ${c.P1_SOUND_Y + c.P1_SOUND_H}, ${below}px above the footer (must be > 0, or MUTE/NORMAL/LIGHT read as the status line)`);
+      // THE ASSERTION ABOVE TESTS A RE-DERIVED TOTAL, NOT THE ROWS THE DEVICE ACTUALLY
+      // DRAWS AT, and that is exactly the gap geom-sweep.mjs found: P1_BRIGHT_Y,
+      // P1_SLEEP_Y, P1_VOL_Y and P1_SOUND_Y are the four y's every draw site and hit
+      // test uses, and all four could move 16px with nothing failing, because `used`
+      // is computed from P1_TOP/P1_GAP instead. Same shape as the page-2 chain the
+      // preprocessor-blind parser used to mis-read: a sum that agrees with the layout
+      // only as long as nobody breaks the chain. So the chain itself is pinned, and
+      // the last row's own bottom edge - the thing the message claims - is asserted.
+      const p1Y = [c.P1_BRIGHT_Y, c.P1_SLEEP_Y, c.P1_VOL_Y, c.P1_SOUND_Y];
+      const p1H = [c.STEPPER_CARD_H, c.STEPPER_CARD_H, c.STEPPER_CARD_H, c.P1_SOUND_H];
+      const p1N = ["BRIGHTNESS", "SLEEP AFTER", "VOLUME", "SOUND/FLIP/THEME"];
+      chk(p1Y[0] === c.PAGE_TOP + c.P1_TOP, `page 1: ${p1N[0]} at ${p1Y[0]} == PAGE_TOP + P1_TOP (${c.PAGE_TOP + c.P1_TOP})`);
+      for (let i = 1; i < 4; i++)
+        chk(p1Y[i] === p1Y[i - 1] + p1H[i - 1] + c.P1_GAP,
+            `page 1: ${p1N[i]} at ${p1Y[i]} == ${p1N[i - 1]} (${p1Y[i - 1]}) + ${p1H[i - 1]} + gap ${c.P1_GAP}`);
+      chk(p1Y[3] + p1H[3] <= contentBottom,
+          `page 1: the toggle row's own bottom edge ${p1Y[3] + p1H[3]} is inside the region (${contentBottom})`);
+      chk(c.P1_GAP <= c.P1_SOUND_H, `page 1 gap ${c.P1_GAP} <= its shortest row ${c.P1_SOUND_H} (a wider gap stops reading as one list)`);
+      chk(c.P1_SOUND_H >= c.TAP_MIN, `toggle row ${c.P1_SOUND_H} >= TAP_MIN ${c.TAP_MIN}`);
+      // THE THREE CONTROLS THEMSELVES, measured from the constants the draw sites and
+      // the hit tests actually use (CARD_X / P1_FLIP_X / P1_THEME_X, each P1_THIRD_W
+      // wide - settings.ino lines 263/267/281 and the three touch branches). Only a
+      // locally re-derived `third` was checked before, so all three constants were
+      // unread by any checker: SOUND, FLIPPED and the theme button could have
+      // overlapped each other or run off the card and nothing would have said so.
+      // They are also the touch boundaries - `sx < P1_FLIP_X`, `sx < P1_THEME_X`,
+      // `sx >= P1_THEME_X` - so a control overlapping its neighbour is a tap landing
+      // on the wrong setting, not merely a cosmetic collision.
+      const third = Math.floor((c.CARD_W - 16) / 3);
+      chk(c.P1_THIRD_W === third, `P1_THIRD_W ${c.P1_THIRD_W} == floor((CARD_W - 16) / 3) = ${third}`);
+      const cols = [["SOUND", c.CARD_X], ["FLIP", c.P1_FLIP_X], ["THEME", c.P1_THEME_X]];
+      for (let i = 1; i < cols.length; i++)
+        chk(cols[i][1] >= cols[i - 1][1] + c.P1_THIRD_W,
+            `toggle row: ${cols[i][0]} starts ${cols[i][1]}, clear of ${cols[i - 1][0]} ending ${cols[i - 1][1] + c.P1_THIRD_W - 1}`);
+      chk(cols[2][1] + c.P1_THIRD_W <= c.CARD_X + c.CARD_W,
+          `toggle row: THEME ends ${cols[2][1] + c.P1_THIRD_W - 1}, inside the card's right edge (${c.CARD_X + c.CARD_W - 1})`);
+      chk(c.P1_THIRD_W >= c.TAP_MIN, `toggle ${c.P1_THIRD_W}px wide >= TAP_MIN ${c.TAP_MIN}`);
+      // MEASURED at the board's advance, and against T_TITLE - which is the id
+      // uiButton actually sets, not T_BODY. They alias today on both boards; naming
+      // the real one is what makes the T_TITLE -> T_HEAD migration fail here.
+      for (const t of TOGGLES) chk(widthB(b, 2, t) + 8 <= c.P1_THIRD_W, `toggle label "${t}" ${widthB(b, 2, t)}px inside a ${c.P1_THIRD_W}px third`);
+      // uiButton centres its label with MC_DATUM at y + h/2, and MC_DATUM biases the
+      // box LOW - so a label in an exactly-sized control overflows the bottom before
+      // it overflows the top. Both edges, against the row's own height.
+      {
+        const [t0, t1] = mcBox(b, 2, Math.floor(c.P1_SOUND_H / 2));
+        const bias = Math.floor(lineHB(b, 2) / 2) - Math.floor(ascentB(b, 2) / 2);
+        chk(t0 >= 0 && t1 <= c.P1_SOUND_H - 1,
+            `toggle label box +${t0}..+${t1} inside the ${c.P1_SOUND_H}px row (MC_DATUM biases it ${bias}px low)`);
+      }
     }
+  } else {
+    // ---------------- board 2: the DISPLAY group ----------------
+    // Two steppers, a caption, three theme segments, the AUTO hint, the flip toggle.
+    // THE BLOCKS ARE LAID OUT AND WALKED, not summed: a re-derived total agrees with
+    // the layout only for as long as nobody breaks the chain, which is the gap
+    // geom-sweep.mjs found in the arm above. Every band here is what the control
+    // actually PAINTS - mcBox for the hint, because uiHint centres on the ASCENT and
+    // so sits low of a symmetric centre by half the descent.
+    const disp = [
+      ["BRIGHTNESS", c.P1_BRIGHT_Y, c.P1_BRIGHT_Y + c.STEPPER_CARD_H - 1],
+      ["SLEEP AFTER", c.P1_SLEEP_Y, c.P1_SLEEP_Y + c.STEPPER_CARD_H - 1],
+      ["THEME caption", ...tlBox(b, T_META, c.P1_THEME_CAP_Y)],
+      ["theme segments", c.P1_THEME_Y, c.P1_THEME_Y + c.H_ROW - 1],
+      ["AUTO hint", ...mcBox(b, T_META, c.P1_AUTO_HINT_Y)],
+      ["flip toggle", c.P1_FLIP_Y, c.P1_FLIP_Y + c.H_ROW - 1],
+    ];
+    for (const [n, a, z] of disp) console.log(`    Display ${n.padEnd(15)} ${a}..${z}`);
+    chk(disp[0][1] === c.PAGE_TOP + c.P1_TOP,
+        `Display: BRIGHTNESS at ${disp[0][1]} == PAGE_TOP + P1_TOP (${c.PAGE_TOP + c.P1_TOP})`);
+    for (let i = 1; i < disp.length; i++)
+      chk(disp[i][1] > disp[i - 1][2],
+          `Display: ${disp[i][0]} starts ${disp[i][1]}, clear of ${disp[i - 1][0]} ending ${disp[i - 1][2]}`);
+    // The Display group's last control must clear the footer.
+    const dispEnd = c.P1_FLIP_Y + c.H_ROW - 1;
+    chk(dispEnd < contentBottom, `Display's flip toggle clears the footer: ${dispEnd} < ${contentBottom}`);
+    // The three theme segments fit the card with their gaps, and each is still a
+    // touch target - they are also the touch boundaries (the hit test divides by
+    // the PITCH), so a segment wider than its share is a tap landing on the wrong
+    // theme, not merely a cosmetic overlap.
+    const segTotal = 3 * c.P1_THEME_SEG_W + 2 * c.P1_THEME_GAP;
+    chk(segTotal <= c.CARD_W, `three theme segments fit the card: ${segTotal} <= ${c.CARD_W}`);
+    chk(c.P1_THEME_SEG_W >= c.TAP_MIN, `a theme segment is tappable: ${c.P1_THEME_SEG_W} >= ${c.TAP_MIN}`);
+    // THE FIT ASSERTION ABOVE CANNOT SEE A CHANGE TO THE GAP, and geom-sweep.mjs
+    // said so: P1_THEME_SEG_W is DERIVED from P1_THEME_GAP, so widening the gap
+    // narrows the segments by exactly as much and the sum stays under the card.
+    // What the gap actually decides is whether the row lands FLUSH on the card -
+    // and it has to, because the flip toggle directly under it is CARD_W wide and a
+    // theme row a few pixels short would read as a different, narrower control.
+    chk(segTotal === c.CARD_W,
+        `the theme row is flush with the card: 3x${c.P1_THEME_SEG_W} + 2x${c.P1_THEME_GAP} = ${segTotal} == ${c.CARD_W}`);
+    // And that the gap exists at all: a filled segment abutting an outlined one
+    // with no air between them reads as one control, which is the whole thing three
+    // segments are for.
+    chk(c.P1_THEME_GAP >= c.SP_1,
+        `theme segments are separated: gap ${c.P1_THEME_GAP} >= SP_1 ${c.SP_1}`);
+    for (const t of THEME_SEGS)
+      chk(widthB(b, 2, t) + 8 <= c.P1_THEME_SEG_W,
+          `theme segment label "${t}" ${widthB(b, 2, t)}px inside a ${c.P1_THEME_SEG_W}px segment`);
+    // uiButton centres its label MC_DATUM and MC_DATUM biases the box LOW, so a
+    // label overflows the bottom before the top. Both edges, on the full-width
+    // flip toggle and on a segment - they share H_ROW, so one check covers both.
+    {
+      const [t0, t1] = mcBox(b, 2, Math.floor(c.H_ROW / 2));
+      chk(t0 >= 0 && t1 <= c.H_ROW - 1,
+          `theme/flip label box +${t0}..+${t1} inside the ${c.H_ROW}px row`);
+    }
+
+    // ---------------- board 2: the SOUND group ----------------
+    const snd = [
+      ["ALERTS caption", ...tlBox(b, T_META, c.PS_ALERTS_Y)],
+      ["SOUND toggle", c.PS_SOUND_Y, c.PS_SOUND_Y + c.H_ROW - 1],
+      ["what hint", ...mcBox(b, T_META, c.PS_WHAT_HINT_Y)],
+      ["VOLUME stepper", c.PS_VOL_Y, c.PS_VOL_Y + c.STEPPER_CARD_H - 1],
+      ["TEST BEEP", c.PS_BEEP_Y, c.PS_BEEP_Y + c.PS_BTN_H - 1],
+      ["MIC caption", ...tlBox(b, T_META, c.PS_MIC_CAP_Y)],
+      ["MIC TEST", c.PS_MIC_Y, c.PS_MIC_Y + c.PS_BTN_H - 1],
+    ];
+    for (const [n, a, z] of snd) console.log(`    Sound   ${n.padEnd(15)} ${a}..${z}`);
+    chk(snd[0][1] === c.PAGE_TOP + c.PS_TOP,
+        `Sound: the ALERTS caption at ${snd[0][1]} == PAGE_TOP + PS_TOP (${c.PAGE_TOP + c.PS_TOP})`);
+    for (let i = 1; i < snd.length; i++)
+      chk(snd[i][1] > snd[i - 1][2],
+          `Sound: ${snd[i][0]} starts ${snd[i][1]}, clear of ${snd[i - 1][0]} ending ${snd[i - 1][2]}`);
+    // The Sound group's last control must clear the footer.
+    const soundEnd = c.PS_MIC_Y + c.PS_BTN_H - 1;
+    chk(soundEnd < contentBottom, `Sound's last button clears the footer: ${soundEnd} < ${contentBottom}`);
+    chk(c.PS_BTN_H >= c.TAP_MIN, `Sound's action buttons ${c.PS_BTN_H}px tall >= TAP_MIN ${c.TAP_MIN}`);
+    // BOTH captions sit one SET_CAP_STEP above the control they name, and that is
+    // the relation rather than the number: a caption closer than its own cell
+    // height would sit ON the control.
+    chk(c.PS_SOUND_Y - c.PS_ALERTS_Y === c.SET_CAP_STEP && c.PS_MIC_Y - c.PS_MIC_CAP_Y === c.SET_CAP_STEP,
+        `Sound's two captions both sit SET_CAP_STEP (${c.SET_CAP_STEP}) above their control`);
+    chk(c.SET_CAP_STEP > lineHB(b, T_META),
+        `SET_CAP_STEP ${c.SET_CAP_STEP} clears the caption's own ${lineHB(b, T_META)}px cell`);
+    chk(c.P1_THEME_CAP_STEP > lineHB(b, T_META),
+        `P1_THEME_CAP_STEP ${c.P1_THEME_CAP_STEP} clears the caption's own ${lineHB(b, T_META)}px cell`);
+    // Captions are TL_DATUM at CARD_X + PAD; the labels go through uiButton.
+    for (const t of SET_CAPTIONS)
+      chk(c.CARD_X + c.PAD + widthB(b, T_META, t) <= c.CARD_X + c.CARD_W - c.PAD,
+          `caption "${t}" ${widthB(b, T_META, t)}px inside the card's text lane`);
+    for (const t of SOUND_LABELS)
+      chk(widthB(b, 2, t) + 2 * c.SP_3 <= c.CARD_W,
+          `full-width label "${t}" ${widthB(b, 2, t)}px inside the ${c.CARD_W}px control`);
+    // Every hint is centred on the PANEL, so its lane is the panel, not the card.
+    for (const t of SET_HINTS)
+      chk(widthB(b, T_META, t) <= W - 8,
+          `hint "${t}" ${widthB(b, T_META, t)}px inside the ${W}px panel`);
   }
 
   // ================= SETTINGS page 2: actions =================

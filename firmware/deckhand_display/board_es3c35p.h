@@ -1480,6 +1480,16 @@ const int HOME_Y0_BOT = 8;
 //   +68..+69  border                                   = 70
 const int HOME_NAME_DY = 14;
 const int HOME_SUB_DY  = 44;
+// The summary is COMPOSED each tick from live globals and drawn through
+// drawIfChanged, so it carries fixed-width padded text and its opaque box is a
+// constant 30 * TEXT_ADV = 240px. The lane it has to fit is the row's own text
+// column minus the chevron: from CARD_X + PAD (30) to the chevron's left edge
+// (CARD_X + CARD_W - PAD - one T_HEAD advance = 278) is 248px = 31 characters, so
+// 30 leaves 8px of air between the longest summary and the ">".
+// HOME_SUB_BYTES is what homeSubCache[] is declared with; a cache shorter than the
+// string it holds silently stops noticing changes past its end.
+const int HOME_SUB_CHARS = 30;
+const int HOME_SUB_BYTES = HOME_SUB_CHARS + 1;
 
 // The back band replaces the pager band at the SAME height, which is the whole
 // reason the group bodies need no new arithmetic: PAGE_TOP is unchanged at 104.
@@ -1704,20 +1714,75 @@ const int STEP_BAR_H     = 8;
 // side is the constraint on it. Lane, re-derived for the 64px key:
 // CARD_X + PAD + 64 + 10 = 104 to 215, against keys at 30..93 and 226..289.
 const int STEP_BAR_GAP   = 10;
-// The page: 3 * 80 + H_ROW(46) = 286 of 356, laid out top-aligned on the 12px
-// rhythm - cards at 116 / 208 / 300 and the toggle row at 392..437, 22px clear of
-// the footer. Board 1 has 14px for the same five gaps and its own comment says
-// neither its cards nor its toggles could give another pixel.
-//
-// THE THREE TOGGLES, measured at 8px rather than counted: P1_THIRD_W is
-// (CARD_W - 16) / 3 = 93, and the widest of the seven labels the row can show
-// ("FLIPPED", 7 chars = 56px) needs 64 with uiButton's 8px of padding. So the row
-// still fits with 29px to spare per third, and 93 also clears TAP_MIN 46 twice
-// over. uiButton centres its label with MC_DATUM at y + h/2 = y+23, which at a
-// 16px box lands y+17..y+32 inside the 46px row - the 2px low bias is absorbed by
-// 30 rows of slack here, where on the status pill it was fatal.
+// THE PARAGRAPH THAT USED TO SIT HERE DESCRIBED A PAGE THIS BOARD NO LONGER HAS.
+// It read "3 * 80 + H_ROW(46) = 286 of 356 ... cards at 116 / 208 / 300 and the
+// toggle row at 392..437", i.e. three steppers and a row of three third-width
+// toggles - which is board 1's DISPLAY & SOUND page, and it is kept there
+// unchanged. On this board that page is split in two (see BOARD_SETTINGS_HOME),
+// so VOLUME and SOUND move to their own group and what is left is DISPLAY.
 const int P1_TOP = 12;
 const int P1_GAP = 12;
+
+// A page CAPTION ("ALERTS", "MICROPHONE", "THEME") is T_META at CARD_X + PAD,
+// TL_DATUM, on the page background rather than on a card - the same treatment the
+// DEVICE and LINK cards give their own headings, one level up. SET_CAP_STEP is the
+// caption's top to the top of the control it names: its own 16px cell plus SP_2.
+const int SET_CAP_STEP = 24;
+
+// ---------- SETTINGS: the DISPLAY group ----------
+// Geometry is docs/design/settings-redesign/settings.js `bDisplay`, reproduced
+// pixel for pixel. VOLUME left for the SOUND group, which freed 92px - and it is
+// NOT spent on air: THEME stops being a cramped third-width CYCLE button that
+// shows one state and hides the other two, and becomes a 3-segment selector
+// showing the whole choice, with room under it for AUTO to say what it means.
+//
+//   116..195  BRIGHTNESS stepper        P1_BRIGHT_Y, STEPPER_CARD_H
+//   208..287  SLEEP AFTER stepper       P1_SLEEP_Y
+//   298..313  "THEME"                   P1_THEME_CAP_Y, T_META, TL_DATUM
+//   318..363  DARK | LIGHT | AUTO       P1_THEME_Y, H_ROW
+//   371..386  the AUTO hint             P1_AUTO_HINT_Y = 377, MC_DATUM ink
+//   396..441  NORMAL / FLIPPED          P1_FLIP_Y, H_ROW
+//   442..459  18 rows clear to contentBottom()
+//
+// P1_THEME_CAP_STEP is SP_1 tighter than SET_CAP_STEP, and deliberately: caption,
+// segments and hint are ONE block of three parts here, and it has to read as one
+// thing against the two stepper cards above it rather than as three loose rows.
+const int P1_THEME_CAP_GAP  = 10;   // the SLEEP card's bottom border -> the caption
+const int P1_THEME_CAP_STEP = 20;   // caption top -> the segments it names
+const int P1_THEME_GAP      = 4;    // between two segments; it belongs to the LEFT
+                                    // one for touch, the pitch rule the keyboard uses
+// 96, and it lands EXACTLY on the card: 3*96 + 2*4 = 296 = CARD_W. Twice TAP_MIN,
+// against a widest label ("LIGHT", 5 chars = 40px) needing 48 with uiButton's 8px
+// of padding - so the constraint here is the card's width, not the text.
+const int P1_THEME_SEG_W    = (CARD_W - 2 * P1_THEME_GAP) / 3;
+const int P1_AUTO_HINT_GAP  = 13;   // segments' bottom -> the hint's MC_DATUM CENTRE
+                                    // (7 rows of air above its ink, 9 below)
+const int P1_FLIP_GAP       = 19;   // hint centre -> the flip toggle's top
+
+// ---------- SETTINGS: the SOUND group ----------
+// Geometry is settings.js `bSound`. Output and input together, because a mic test
+// IS a sound test - and it is the one action you run repeatedly, since MICMON is
+// how MIC_GAIN gets settled. (Moving MIC TEST here is what takes ACTIONS down to
+// three buttons; that half lands with the ACTIONS group, so for now the button is
+// on both pages.)
+//
+//   116..131  "ALERTS"                  PS_ALERTS_Y, T_META, TL_DATUM
+//   140..185  SOUND ON / SOUND OFF      PS_SOUND_Y, H_ROW
+//   191..206  "beeps when a session..." PS_WHAT_HINT_Y = 197, MC_DATUM ink
+//   218..297  VOLUME stepper            PS_VOL_Y, STEPPER_CARD_H
+//   310..359  TEST BEEP                 PS_BEEP_Y, PS_BTN_H
+//   374..389  "MICROPHONE"              PS_MIC_CAP_Y
+//   398..447  MIC TEST                  PS_MIC_Y, PS_BTN_H
+//   448..459  12 rows clear to contentBottom()
+//
+// No bar under VOLUME, deliberately: only BRIGHTNESS gets one, because it is the
+// single continuous 0-100 setting and a bar under three named presets would be
+// decoration. (Same rule, stated one section up under STEP_BAR_H.)
+const int PS_TOP         = 12;   // PAGE_TOP -> the first caption
+const int PS_HINT_GAP    = 11;   // the SOUND toggle's bottom -> the hint's centre
+const int PS_VOL_GAP     = 21;   // hint centre -> the VOLUME card
+const int PS_BTN_H       = H_BTN;   // the two actions; H_BTN is TAP_MIN + 4
+const int PS_MIC_CAP_GAP = 14;   // TEST BEEP's bottom -> the MICROPHONE caption
 // ---------- SETTINGS page 2: the action buttons ----------
 // H_BTN, where board 1 had to drop to 38 because four buttons plus a hint would
 // not fit at 44 - so these are the one control on this page that was UNDER the

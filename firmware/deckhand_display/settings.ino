@@ -41,6 +41,7 @@ void drawStepGlyph(int cacheIdx, int x, int btnY, const char* glyph, bool enable
   tft.drawString(glyph, x + STEP_BTN_SIZE / 2, btnY + STEP_BTN_SIZE / 2);
   tft.setTextDatum(TL_DATUM);
 }
+#if !BOARD_SETTINGS_HOME
 // The pager band: < chevron, page title + dots, > chevron.
 void drawPager() {
   tft.fillRect(0, CONTENT_Y, tft.width(), PAGER_H + 4, COLOR_BG);
@@ -70,6 +71,120 @@ void drawPager() {
   }
   tft.setTextDatum(TL_DATUM);
 }
+#else
+// ----- The back band, and HOME (board 2) -----
+// The pager band becomes a BACK band of exactly the same height, which is the
+// whole reason every group body below needs no new arithmetic: PAGE_TOP is
+// unchanged. There is only one key in it, so unlike drawPager() there is no
+// 45/55 split to make - the WHOLE band is the back target (handleSettingsTouch).
+void drawBackBand(const char* title) {
+  int by = CONTENT_Y + 4, bh = PAGER_H - 8;
+  uiFillRound(PAGER_BTN_X0, by, BACK_BTN_W, bh, RADIUS, COLOR_CARD, COLOR_BG);
+  uiStrokeRound(PAGER_BTN_X0, by, BACK_BTN_W, bh, RADIUS, BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
+  // T_HEAD, like the stepper keys' -/+ glyphs and for the same reason: a 16px
+  // glyph on a 46px key is a speck.
+  setUIFont(T_HEAD);
+  tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("<", PAGER_BTN_X0 + BACK_BTN_W / 2, by + bh / 2);
+  tft.setTextColor(COLOR_VALUE, COLOR_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString(title, PAGER_BTN_X0 + BACK_BTN_W + BACK_TITLE_DX, CONTENT_Y + PAGER_H / 2);
+  tft.setTextDatum(TL_DATUM);
+}
+// ONE table, two uses: the back band's title and HOME's row name. They must be the
+// same word or the screen you tapped into is not the one you tapped on.
+const char* settingsGroupTitle(int g) {
+  switch (g) {
+    case SET_STATUS:  return "Status";
+    case SET_DISPLAY: return "Display";
+    case SET_SOUND:   return "Sound";
+    case SET_PAIRING: return "Pairing";
+    default:          return "Actions";
+  }
+}
+int settingsHomeRowY(int i) { return HOME_Y0 + i * (HOME_ROW_H + HOME_GAP); }
+// HOME owns the whole content area - no band above it, because the tab bar already
+// says SETTINGS and a second title would be chrome repeating itself. The five cards,
+// their names and the chevrons are static; the summaries are live and go through
+// renderSettingsHome().
+void drawSettingsHomeStatic() {
+  for (int i = 0; i < SET_GROUP_COUNT; i++) {
+    int y = settingsHomeRowY(i);
+    uiCard(CARD_X, y, CARD_W, HOME_ROW_H);
+    setUIFont(T_HEAD);
+    tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString(settingsGroupTitle(SET_STATUS + i), CARD_X + PAD, y + HOME_NAME_DY);
+    // A plain ASCII ">", because Spleen declares 0x20..0x7E and a chevron glyph
+    // would draw as nothing at all - the trap this repo has now paid for four
+    // times. It is the affordance that says the row OPENS something; without it a
+    // HOME row reads as a status line.
+    tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
+    tft.setTextDatum(MR_DATUM);
+    tft.drawString(">", CARD_X + CARD_W - PAD, y + HOME_ROW_H / 2);
+    tft.setTextDatum(TL_DATUM);
+  }
+}
+// The five summaries, composed from the same globals each group's own page draws
+// from - nothing is stored, so they cannot disagree with the page you open.
+void settingsHomeSummary(int g, char* buf, size_t n, uint16_t* col) {
+  *col = COLOR_LABEL;
+  switch (g) {
+    case SET_STATUS: {
+      bool bt = bleConnected, usb = usbLinkActive();
+      const char* links = (bt && usb) ? "Both links up" : (bt || usb) ? "One link up" : "No link";
+      // Colour SUPPORTS the words, it never carries the meaning: the phrase says
+      // which state this is on its own, in greyscale and to a colour-blind eye.
+      *col = (bt && usb) ? COLOR_GOOD : COLOR_WARN;
+      char pctS[8] = "--";
+      if (batteryPresent()) snprintf(pctS, sizeof(pctS), "%d%%", batteryPct());
+      char tempS[8] = "--";
+      float dieC = 0;
+      if (dieTempRead(&dieC)) snprintf(tempS, sizeof(tempS), "%d C", (int) dieC);
+      snprintf(buf, n, "%s   %s   %s", links, pctS, tempS);
+      break;
+    }
+    case SET_DISPLAY: {
+      char sleepS[16];
+      formatSleepValue(sleepS, sizeof(sleepS));
+      const char* th = themeMode == THEME_MODE_DARK  ? "DARK"
+                     : themeMode == THEME_MODE_LIGHT ? "LIGHT" : "AUTO";
+      snprintf(buf, n, "%d%%   sleep %s   %s", brightnessPct, sleepS, th);
+      break;
+    }
+    case SET_SOUND:
+      snprintf(buf, n, "%s   volume %s   mic", beepEnabled ? "ON" : "OFF", VOL_LABELS[volPresetIdx]);
+      break;
+    case SET_PAIRING:
+      snprintf(buf, n, "%d Mac%s   %s", hostCount, hostCount == 1 ? "" : "s",
+               allowedHost[0] ? "one may answer" : "any may answer");
+      break;
+    default:
+      snprintf(buf, n, "calibrate, pairing, power");
+      break;
+  }
+}
+void renderSettingsHome() {
+  for (int i = 0; i < SET_GROUP_COUNT; i++) {
+    char buf[HOME_SUB_BYTES + 16];
+    uint16_t col;
+    settingsHomeSummary(SET_STATUS + i, buf, sizeof(buf), &col);
+    // Padded so the opaque box is a constant width and a shrinking summary cannot
+    // leave the tail of a longer one behind; truncated to the cache, which is what
+    // drawIfChanged compares.
+    padTo(buf, sizeof(buf), HOME_SUB_CHARS);
+    buf[HOME_SUB_CHARS] = '\0';
+    // Only the Status row's colour ever moves; the other four are COLOR_LABEL.
+    if (SET_STATUS + i == SET_STATUS && col != homeStatusColorCache) {
+      homeStatusColorCache = col;
+      homeSubCache[i][0] = '\0';
+    }
+    drawIfChanged(homeSubCache[i], HOME_SUB_BYTES, buf, CARD_X + PAD,
+                  settingsHomeRowY(i) + HOME_SUB_DY, T_META, 1, col, COLOR_CARD);
+  }
+}
+#endif
 // ----- Page 0: STATUS -----
 void drawStatusPageStatic() {
   char buf[36];
@@ -356,6 +471,7 @@ void renderMacLinkRows() {
   }
 }
 // ----- Page 1: CONTROLS -----
+#if !BOARD_SETTINGS_HOME
 void drawControlsPageStatic() {
   drawStepperCard(P1_BRIGHT_Y, "BRIGHTNESS");
   drawStepperCard(P1_SLEEP_Y, "SLEEP AFTER");
@@ -429,6 +545,103 @@ void renderControlsPage() {
              themeMode != THEME_MODE_DARK);
   }
 }
+#else
+// ----- The DISPLAY group (board 2) -----
+// Two steppers, then the THEME block: a caption, three segments, and the hint that
+// says what AUTO actually means. A cycle button shows one state and hides the other
+// two, and THEME has three - so it was never a uiToggle and it is not one here.
+void drawDisplayPageStatic() {
+  drawStepperCard(P1_BRIGHT_Y, "BRIGHTNESS");
+  drawStepperCard(P1_SLEEP_Y, "SLEEP AFTER");
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("THEME", CARD_X + PAD, P1_THEME_CAP_Y);
+  // AUTO is a CLOCK, not a sensor - every ADC1 channel on this board is spoken for,
+  // so there is no light to measure. Saying so is the same rule that stops the
+  // farewell screen promising a touch wake this board does not have.
+  uiHint("AUTO = light 07:00 to 19:00", P1_AUTO_HINT_Y);
+  // The segments and the flip toggle are drawn by renderDisplayPage - their look
+  // changes with state, so they belong on the change-only side.
+}
+void renderDisplayPage() {
+  char buf[16];
+  const int rightBtnX = CARD_X + CARD_W - PAD - STEP_BTN_SIZE;
+  const int cx = tft.width() / 2;
+  snprintf(buf, sizeof(buf), "%d%%", brightnessPct);
+  padTo(buf, sizeof(buf), 5);
+  drawIfChanged(brightPctCache, sizeof(brightPctCache), buf, cx, P1_BRIGHT_Y + STEP_VALUE_CY,
+                T_HEAD, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
+  // Only BRIGHTNESS gets a bar - it is the one continuous 0-100 setting, so the bar
+  // says where in the range you are. VOLUME is three named presets and now lives on
+  // the SOUND group, where it correctly has none.
+  drawBar(&brightBarCache, CARD_X + PAD + STEP_BTN_SIZE + STEP_BAR_GAP,
+          P1_BRIGHT_Y + STEP_BAR_Y,
+          CARD_W - 2 * (PAD + STEP_BTN_SIZE + STEP_BAR_GAP), STEP_BAR_H,
+          brightnessPct, COLOR_ACCENT);
+  drawStepGlyph(0, CARD_X + PAD, stepBtnY(P1_BRIGHT_Y), "-", brightnessPct > BRIGHTNESS_MIN);
+  drawStepGlyph(1, rightBtnX, stepBtnY(P1_BRIGHT_Y), "+", brightnessPct < 100);
+
+  formatSleepValue(buf, sizeof(buf));
+  padTo(buf, sizeof(buf), 5);
+  drawIfChanged(sleepValCache, sizeof(sleepValCache), buf, cx, P1_SLEEP_Y + STEP_VALUE_CY,
+                T_HEAD, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
+  drawStepGlyph(2, CARD_X + PAD, stepBtnY(P1_SLEEP_Y), "-", sleepPresetIdx > 0);
+  drawStepGlyph(3, rightBtnX, stepBtnY(P1_SLEEP_Y), "+", sleepPresetIdx < SLEEP_PRESETS_COUNT - 1);
+
+  // Three segments, one filled. Selection is fill AND position, never colour alone,
+  // and all three options are on screen at once - which is the whole reason this is
+  // not the cycle button board 1 still uses.
+  if ((int) themeMode != themeBtnCache) {
+    themeBtnCache = (int) themeMode;
+    static const char* THEME_SEG[THEME_MODE_COUNT] = {"DARK", "LIGHT", "AUTO"};
+    for (int i = 0; i < THEME_MODE_COUNT; i++) {
+      bool on = (i == themeMode);
+      uiButton(CARD_X + i * (P1_THEME_SEG_W + P1_THEME_GAP), P1_THEME_Y,
+               P1_THEME_SEG_W, H_ROW, THEME_SEG[i],
+               on ? COLOR_ACCENT : COLOR_LABEL, on);
+    }
+  }
+  if ((int) screenFlipped != flipBtnCache) {
+    flipBtnCache = (int) screenFlipped;
+    uiToggle(CARD_X, P1_FLIP_Y, CARD_W, H_ROW, "FLIPPED", "NORMAL", screenFlipped);
+  }
+}
+// ----- The SOUND group (board 2) -----
+// Output and input together, because a mic test IS a sound test - and it is the one
+// action you run repeatedly, since MICMON is how MIC_GAIN gets settled.
+void drawSoundPageStatic() {
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("ALERTS", CARD_X + PAD, PS_ALERTS_Y);
+  uiHint("beeps when a session needs input", PS_WHAT_HINT_Y);
+  drawStepperCard(PS_VOL_Y, "VOLUME");
+  uiButton(CARD_X, PS_BEEP_Y, CARD_W, PS_BTN_H, "TEST BEEP", COLOR_ACCENT);
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("MICROPHONE", CARD_X + PAD, PS_MIC_CAP_Y);
+  uiButton(CARD_X, PS_MIC_Y, CARD_W, PS_BTN_H, "MIC TEST", COLOR_ACCENT);
+  // The SOUND toggle is drawn by renderSoundPage - its look changes with state.
+}
+void renderSoundPage() {
+  char buf[16];
+  const int rightBtnX = CARD_X + CARD_W - PAD - STEP_BTN_SIZE;
+  if ((int) beepEnabled != soundBtnCache) {
+    soundBtnCache = (int) beepEnabled;
+    uiToggle(CARD_X, PS_SOUND_Y, CARD_W, H_ROW, "SOUND ON", "SOUND OFF", beepEnabled);
+  }
+  snprintf(buf, sizeof(buf), "%s", VOL_LABELS[volPresetIdx]);
+  padTo(buf, sizeof(buf), 5);
+  drawIfChanged(volValCache, sizeof(volValCache), buf, tft.width() / 2, PS_VOL_Y + STEP_VALUE_CY,
+                T_HEAD, 1, COLOR_VALUE, COLOR_CARD, MC_DATUM);
+  // Glyph cache slots 4/5 are still VOLUME's - the six slots are per CONTROL, and
+  // the volume stepper only changed which page it is drawn on.
+  drawStepGlyph(4, CARD_X + PAD, stepBtnY(PS_VOL_Y), "-", volPresetIdx > 0);
+  drawStepGlyph(5, rightBtnX, stepBtnY(PS_VOL_Y), "+", volPresetIdx < VOL_PRESETS_COUNT - 1);
+}
+#endif
 // Wipe EVERY remembered Mac so the device is fully unpaired and ready to bond
 // fresh. The next Mac it's plugged into over USB will PROVISION a new key (see
 // the HELLO/PROVISION handshake). Deliberately does NOT re-announce HELLO here -
@@ -667,18 +880,42 @@ void drawSettingsStatic() {
   // there, so after a confirm dialog its card survived in every gap between
   // them (three visible bands on the ACTIONS page). Callers that already clear
   // just do it twice - harmless - and no caller can forget any more.
+#if BOARD_SETTINGS_HOME
+  // FROM CONTENT_Y, not PAGE_TOP: HOME occupies the band's own rows, so a clear
+  // that started at PAGE_TOP would leave the group you came from wearing its back
+  // band. Every entry path (openSettingsGroup, settingsBack, drawSettingsTab,
+  // forceFullRepaint) comes through here, so this is the one clear and the two
+  // navigation helpers deliberately do not repeat it.
+  tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
+  if (settingsPage == SET_HOME) { drawSettingsHomeStatic(); return; }
+  drawBackBand(settingsGroupTitle(settingsPage));
+  if      (settingsPage == SET_STATUS)  drawStatusPageStatic();
+  else if (settingsPage == SET_DISPLAY) drawDisplayPageStatic();
+  else if (settingsPage == SET_SOUND)   drawSoundPageStatic();
+  else if (settingsPage == SET_PAIRING) drawHostsPageStatic();
+  else                                  drawActionsPageStatic();
+#else
   tft.fillRect(0, PAGE_TOP, tft.width(), contentBottom() - PAGE_TOP, COLOR_BG);
   drawPager();
   if (settingsPage == 0) drawStatusPageStatic();
   else if (settingsPage == 1) drawControlsPageStatic();
   else if (settingsPage == 2) drawActionsPageStatic();
   else drawHostsPageStatic();
+#endif
 }
 void renderSettingsTab() {
   if (pendingConfirm != CFM_NONE) return;  // a modal owns the page area
+#if BOARD_SETTINGS_HOME
+  if      (settingsPage == SET_HOME)    renderSettingsHome();
+  else if (settingsPage == SET_STATUS)  renderStatusPage();
+  else if (settingsPage == SET_DISPLAY) renderDisplayPage();
+  else if (settingsPage == SET_SOUND)   renderSoundPage();
+  // Pairing and Actions are static
+#else
   if (settingsPage == 0) renderStatusPage();
   else if (settingsPage == 1) renderControlsPage();
   // page 2 is static
+#endif
 #if !BOARD_USES_TFT_ESPI
   tft.flush();
 #endif
@@ -709,7 +946,30 @@ void resetSettingsCaches() {
   linkFlushCache[0] = '\0'; linkUptimeCache[0] = '\0';
   linkHostColorCache = 0;
 #endif
+#if BOARD_SETTINGS_HOME
+  // HOME's five summaries, and the Status row's colour beside them. Same rule as
+  // every cache above: drawSettingsHomeStatic() repaints the cards these are drawn
+  // ON, so leaving them set leaves all five rows BLANK.
+  for (int i = 0; i < SET_GROUP_COUNT; i++) homeSubCache[i][0] = '\0';
+  homeStatusColorCache = 0;
+#endif
 }
+#if BOARD_SETTINGS_HOME
+// HOME -> a group, and back. Both go through drawSettingsStatic(), which clears
+// from CONTENT_Y and resets every cache, so neither repeats that work here.
+void openSettingsGroup(int g) {
+  settingsPage = constrain(g, SET_STATUS, SET_ACTIONS);
+  resetSettingsCaches();
+  drawSettingsStatic();
+  renderSettingsTab();
+}
+void settingsBack() {
+  settingsPage = SET_HOME;
+  resetSettingsCaches();
+  drawSettingsStatic();
+  renderSettingsTab();
+}
+#else
 void gotoSettingsPage(int p) {
   settingsPage = (p + SETTINGS_PAGES) % SETTINGS_PAGES;
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
@@ -717,6 +977,7 @@ void gotoSettingsPage(int p) {
   drawSettingsStatic();
   renderSettingsTab();
 }
+#endif
 // Left/right third of a stepper card counts as -/+ (resistive touch is
 // imprecise; nothing else on the card to mis-trigger).
 bool stepperHit(int sx, int sy, int cardY, int* dir) {
@@ -761,6 +1022,20 @@ void handleSettingsTouch(int sx, int sy) {
     return;
   }
 
+#if BOARD_SETTINGS_HOME
+  // HOME first: its rows own the whole content area, band rows included, so this
+  // has to run BEFORE the band branch below or the top row would read as a back tap.
+  if (settingsPage == SET_HOME) {
+    for (int i = 0; i < SET_GROUP_COUNT; i++) {
+      int y = settingsHomeRowY(i);
+      if (sy >= y && sy < y + HOME_ROW_H) { openSettingsGroup(SET_STATUS + i); return; }
+    }
+    return;   // the gaps between rows are inert, not a guess at the nearest row
+  }
+  // The WHOLE band is the back target. Unlike the pager there is nothing else in
+  // it, so there is no split to make and no dead zone to leave.
+  if (sy < PAGE_TOP) { settingsBack(); return; }
+#else
   // Pager band. The hit zones are deliberately much wider than the drawn keys
   // (left/right 45% each, with a 10% dead band around the title) so a tap that
   // lands near a key still counts - on a resistive panel, aiming at a 52px key
@@ -770,6 +1045,118 @@ void handleSettingsTouch(int sx, int sy) {
     else if (sx > tft.width() * 55 / 100) gotoSettingsPage(settingsPage + 1);
     return;
   }
+#endif
+#if BOARD_SETTINGS_HOME
+  if (settingsPage == SET_DISPLAY) {
+    int dir;
+    if (stepperHit(sx, sy, P1_BRIGHT_Y, &dir)) {
+      setBacklight(brightnessPct + dir * BRIGHTNESS_STEP);
+      saveBrightness();
+      renderDisplayPage();
+    } else if (stepperHit(sx, sy, P1_SLEEP_Y, &dir)) {
+      int idx = constrain(sleepPresetIdx + dir, 0, SLEEP_PRESETS_COUNT - 1);
+      if (idx != sleepPresetIdx) { sleepPresetIdx = idx; applySleepPreset(); saveSleepTimeout(); renderDisplayPage(); }
+    } else if (sy >= P1_THEME_Y && sy < P1_THEME_Y + H_ROW && sx >= CARD_X) {
+      // The 4px gap between two segments belongs to the one on its LEFT, the same
+      // pitch rule the keyboard uses - so there is no dead lane between them.
+      int seg = (sx - CARD_X) / (P1_THEME_SEG_W + P1_THEME_GAP);
+      if (seg >= 0 && seg < THEME_MODE_COUNT && seg != themeMode) {
+        themeMode = seg;
+        prefs.putUChar("theme", themeMode);
+        applyTheme(themeIndexForMode(themeMode));
+        // Mandatory, not cosmetic: every change-only cache in this sketch keys on
+        // content, so without a full repaint the screen keeps the old palette until
+        // something else happens to change a value.
+        forceFullRepaint();
+      }
+    } else if (sy >= P1_FLIP_Y && sy < P1_FLIP_Y + H_ROW) {
+      // Flip 180 so the USB-C port can face the other way while charging.
+      screenFlipped = !screenFlipped;
+      saveScreenFlip();
+      applyScreenRotation();
+      // Everything on screen was drawn for the old orientation, so repaint the
+      // whole frame - and drop every cache first, or the change-only redraw
+      // discipline would skip fields whose text happens to be unchanged.
+      everReceived = false;
+      tft.fillScreen(COLOR_BG);
+      drawTabBar();
+      drawFooterChrome();   // also clears the footer caches
+      resetSettingsCaches();
+      resetUsageCaches();   // the other tabs repaint via switchTab()
+      drawSettingsStatic();
+      renderSettingsTab();
+    }
+  } else if (settingsPage == SET_SOUND) {
+    int dir;
+    if (sy >= PS_SOUND_Y && sy < PS_SOUND_Y + H_ROW) {
+      beepEnabled = !beepEnabled;
+      saveBeepEnabled();
+      if (beepEnabled) startBeep(); // confirmation doubles as a speaker test
+      renderSoundPage();
+    } else if (stepperHit(sx, sy, PS_VOL_Y, &dir)) {
+      int idx = constrain(volPresetIdx + dir, 0, VOL_PRESETS_COUNT - 1);
+      if (idx != volPresetIdx) {
+        volPresetIdx = idx; applyVolume(); saveVolume(); renderSoundPage();
+        if (beepEnabled) startBeep(); // test the new level
+      }
+    } else if (sy >= PS_BEEP_Y && sy < PS_BEEP_Y + PS_BTN_H) {
+      // UNCONDITIONAL, and deliberately not gated on beepEnabled: it is a TEST, so
+      // it has to sound with SOUND off - the same reasoning that keeps MIC_CUE_DUTY
+      // independent of the SOUND setting. A test button that silently does nothing
+      // is indistinguishable from a dead speaker, which is the fault it exists to
+      // rule out.
+      startBeep();
+    } else if (sy >= PS_MIC_Y && sy < PS_MIC_Y + PS_BTN_H) {
+      // MIC TEST runs straight away - NO confirm dialog. The meter changes nothing
+      // and exits on a tap; the dialog is reserved for consequential actions, and
+      // putting one here would just be a tap in the way of the thing you are doing
+      // repeatedly while turning the trimmer.
+      micMonitor();
+      // micRestoreUi() falls back to the "waiting for host" screen when no payload
+      // has ever arrived - which is exactly the standalone case you would be running
+      // a mic test in, so put SETTINGS back explicitly.
+      if (!everReceived) forceFullRepaint();
+    }
+  } else if (settingsPage == SET_ACTIONS) {
+    // MIC TEST is still here too until the ACTIONS group is rebuilt - see the
+    // SOUND group's note in board_es3c35p.h. Everything else asks first:
+    // recalibrating costs 5 taps, resetting pairing wipes every key, and powering
+    // off interrupts the display.
+    if (sy >= P2_MIC_Y && sy < P2_MIC_Y + P2_BTN_H) {
+      micMonitor();
+      if (!everReceived) forceFullRepaint();
+    } else if (sy >= P2_CAL_Y && sy < P2_CAL_Y + P2_BTN_H) {
+      pendingConfirm = CFM_RECAL;         drawPendingConfirm();
+    } else if (sy >= P2_PAIR_Y && sy < P2_PAIR_Y + P2_BTN_H) {
+      pendingConfirm = CFM_RESET_PAIRING; drawPendingConfirm();
+    } else if (sy >= P2_PWR_Y && sy < P2_PWR_Y + P2_BTN_H) {
+      pendingConfirm = CFM_POWER_OFF;     drawPendingConfirm();
+    }
+  } else if (settingsPage == SET_PAIRING) {
+    // ANY row: drop the restriction so every remembered Mac may answer
+    if (sy >= P3_ANY_Y && sy < P3_ANY_Y + H_ROW) {
+      if (allowedHost[0]) { allowedHost[0] = 0; saveAllowedHost(); drawHostsPageStatic(); }
+      return;
+    }
+    for (int i = 0; i < hostCount; i++) {
+      int y = P3_LIST_Y + i * (H_ROW + SP_1);
+      if (sy < y || sy >= y + H_ROW) continue;
+      if (sx >= CARD_X + CARD_W - P3_X_W) {
+        pendingConfirm = CFM_FORGET_HOST; // the x zone: ask before destroying the key
+        pendingArg = i;
+        drawPendingConfirm();
+        return;
+      } else if (allowedHost[0] && strcmp(hosts[i].id, allowedHost) == 0) {
+        allowedHost[0] = 0; saveAllowedHost();          // tap again = back to ANY
+      } else {
+        strlcpy(allowedHost, hosts[i].id, sizeof(allowedHost));
+        saveAllowedHost();                              // only this Mac may answer
+      }
+      drawHostsPageStatic();
+      return;
+    }
+  }
+#else
   if (settingsPage == 1) {
     int dir;
     if (stepperHit(sx, sy, P1_BRIGHT_Y, &dir)) {
@@ -869,10 +1256,15 @@ void handleSettingsTouch(int sx, int sy) {
       return;
     }
   }
+#endif
   // page 0 is read-only
 }
 void drawSettingsTab() {
+#if BOARD_SETTINGS_HOME
+  settingsPage = SET_HOME;   // always enter at HOME, never a group you last left
+#else
   settingsPage = 0; // always enter on the STATUS page
+#endif
   resetSettingsCaches();
   drawSettingsStatic();
   renderSettingsTab();

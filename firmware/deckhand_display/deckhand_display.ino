@@ -2805,7 +2805,13 @@ const int VOICE_TEXT_LINES = 6;
 //   0 STATUS   - device connections, battery, pairing (read-only)
 //   1 CONTROLS - brightness, sleep-after, volume steppers + sound toggle
 //   2 ACTIONS  - calibrate touch, power off
+#if !BOARD_SETTINGS_HOME
 const int SETTINGS_PAGES = 4;
+#endif
+// On board 2 this carries SET_HOME plus five group ids instead (board_es3c35p.h),
+// and nothing outside settings.ino assumes the 0..3 range - SETTINGS_PAGES itself
+// is read only by drawPager() and gotoSettingsPage(), both of which board 2 does
+// not compile.
 int settingsPage = 0;
 
 // PAGER_BTN_W/X0, PAGER_H and PAGE_TOP moved to board_e32r28t.h (via
@@ -2834,6 +2840,29 @@ int settingsPage = 0;
 // Board 2's region is 358px against 244 of content, i.e. the same page with
 // surplus rather than a shortage - so the two boards want different numbers for
 // opposite reasons, which is why P1_TOP and P1_GAP live in the board headers.
+//
+// BOARD 2 SPLITS THIS PAGE IN TWO and therefore does not derive the volume card,
+// the toggle row or the three thirds at all - VOLUME and SOUND live in their own
+// group there, and THEME becomes a full-width 3-segment selector rather than a
+// third-width cycle button. Its own chain is below; the offsets both arms read
+// come from the board headers, as they already did.
+#if BOARD_SETTINGS_HOME
+// ---- board 2: the DISPLAY group ----
+const int P1_BRIGHT_Y = PAGE_TOP + P1_TOP;
+const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
+const int P1_THEME_CAP_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_THEME_CAP_GAP;
+const int P1_THEME_Y = P1_THEME_CAP_Y + P1_THEME_CAP_STEP;
+const int P1_AUTO_HINT_Y = P1_THEME_Y + H_ROW + P1_AUTO_HINT_GAP;
+const int P1_FLIP_Y = P1_AUTO_HINT_Y + P1_FLIP_GAP;
+// ---- board 2: the SOUND group ----
+const int PS_ALERTS_Y = PAGE_TOP + PS_TOP;
+const int PS_SOUND_Y = PS_ALERTS_Y + SET_CAP_STEP;
+const int PS_WHAT_HINT_Y = PS_SOUND_Y + H_ROW + PS_HINT_GAP;
+const int PS_VOL_Y = PS_WHAT_HINT_Y + PS_VOL_GAP;
+const int PS_BEEP_Y = PS_VOL_Y + STEPPER_CARD_H + SP_3;
+const int PS_MIC_CAP_Y = PS_BEEP_Y + PS_BTN_H + PS_MIC_CAP_GAP;
+const int PS_MIC_Y = PS_MIC_CAP_Y + SET_CAP_STEP;
+#else
 const int P1_BRIGHT_Y = PAGE_TOP + P1_TOP;
 const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
 const int P1_VOL_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_GAP;
@@ -2845,6 +2874,7 @@ const int P1_SOUND_H = H_ROW;   // toggles; H_ROW is TAP_MIN and cannot shrink
 const int P1_THIRD_W = (CARD_W - 16) / 3;
 const int P1_FLIP_X  = CARD_X + P1_THIRD_W + 8;
 const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
+#endif
 
 // Page 2 - four large action buttons (mic test, calibrate, reset pairing, power
 // off) plus a hint. P2_TOP, P2_BTN_H and P2_GAP moved to the board headers (via
@@ -2943,6 +2973,22 @@ char brightPctCache[8] = "";
 int brightBarCache = -1;
 char sleepValCache[8] = "";
 char volValCache[8] = "";
+#if BOARD_SETTINGS_HOME
+// HOME's five summaries. They are COMPOSED from live globals every tick and drawn
+// through drawIfChanged, so they need a cache each - without one the row would be
+// repainted on every 5s tick, which is the flicker this file's whole redraw
+// discipline exists to prevent. HOME_SUB_BYTES is HOME_SUB_CHARS + NUL, and the
+// text is padded to HOME_SUB_CHARS so the opaque box is a constant width and a
+// shrinking summary cannot leave the tail of a longer one behind.
+char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", ""};
+// The Status summary's colour is cached beside its text and busts it, the guard
+// battRowColorCache documents. Today the two cannot disagree - the colour keys off
+// the same link count the row's leading phrase spells out, so a flip always
+// changes the string too - but "the text happens to change as well" is precisely
+// what made battRowTextCache correct by accident until it wasn't, and the cost of
+// not relying on it is two bytes.
+uint16_t homeStatusColorCache = 0;
+#endif
 
 
 
@@ -4954,7 +5000,13 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
   } else if (buf.startsWith("PAGE ")) {
     // Settings page, for the same reason. No-op unless SETTINGS is showing.
     int pg = buf.substring(5).toInt();
+#if BOARD_SETTINGS_HOME
+    // PAGE 0 is HOME here, 1..5 the five groups - the same numbering settingsPage
+    // uses, so a capture script names a group rather than counting chevron taps.
+    if (currentTab == TAB_SETTINGS) { if (pg <= SET_HOME) settingsBack(); else openSettingsGroup(pg); }
+#else
     if (currentTab == TAB_SETTINGS) gotoSettingsPage(pg);
+#endif
   } else if (buf == "POWERPROBE" || buf.startsWith("POWERPROBE ")) {
     // Passive mV/h measurement of whatever state the device is in, labelled so
     // two runs can be compared. Both boards: the question "what is this costing"
