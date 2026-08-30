@@ -2895,9 +2895,9 @@ const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
 // ink mass, hue), so the destructive pair must not read as a continuation of the
 // column CALIBRATE TOUCH sits in.
 const int P2_SETUP_CAP_Y = PAGE_TOP + P2_TOP;
-const int P2_CAL_Y = P2_SETUP_CAP_Y + P2_CAP_STEP;
+const int P2_CAL_Y = P2_SETUP_CAP_Y + SET_CAP_STEP;
 const int P2_DANGER_CAP_Y = P2_CAL_Y + P2_BTN_H + P2_SECTION_GAP;
-const int P2_PAIR_Y = P2_DANGER_CAP_Y + P2_CAP_STEP;
+const int P2_PAIR_Y = P2_DANGER_CAP_Y + SET_CAP_STEP;
 const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
 const int P2_HINT_Y = P2_PWR_Y + P2_BTN_H + P2_HINT_GAP;
 #else

@@ -305,21 +305,27 @@ function bStatus(p,withBack){
 function bActions(p,withBack){
   tabBar(p); withBack?backBand(p,"Actions"):pagerBand(p,2);
   const X=K.CARD_X,W=K.CARD_W,H=56;   // 3 buttons, not 4 - MIC TEST lives on Sound
+  // LEVEL WITH THE OTHER FOUR GROUPS: the caption starts at 116 like bStatus,
+  // bDisplay, bSound and bPairing, and the caption step is 24 like bSound's. This
+  // group used to start at 120 with a 26px step, which was this file's own
+  // inconsistency rather than a decision - a 4px jog as you move between groups.
+  // board_es3c35p.h's P2_TOP/SET_CAP_STEP match, and settings-geom-check.mjs
+  // asserts the five groups' tops are EQUAL rather than asserting any one value.
   const cap=(y,s)=>p.text(s,X+K.PAD,y,{f:1,c:p.t.label});
-  cap(120,"SETUP");
-  button(p,X,146,W,H,"CALIBRATE TOUCH",p.t.accent,false);
+  cap(116,"SETUP");
+  button(p,X,140,W,H,"CALIBRATE TOUCH",p.t.accent,false);
   // Destructive actions are SEPARATED, captioned, and carry a solid severity
   // spine - so severity survives greyscale and colour-blindness, which an
   // outline hue alone does not.
-  cap(228,"CANNOT BE UNDONE");
+  cap(222,"CANNOT BE UNDONE");
   const sev=(y,label,col)=>{
     button(p,X,y,W,H,label,col,false);
     p.rect(X+2,y+K.R,4,H-2*K.R,col);
     p.dot(X+4,y+K.R,2,col); p.dot(X+4,y+H-K.R-1,2,col);
   };
-  sev(254,"RESET PAIRING",p.t.warn);
-  sev(322,"POWER OFF",p.t.bad);
-  p.text("power off = deep sleep, RESET to wake",K.W/2,402,{f:1,c:p.t.label,datum:"MC"});
+  sev(246,"RESET PAIRING",p.t.warn);
+  sev(314,"POWER OFF",p.t.bad);
+  p.text("power off = deep sleep, RESET to wake",K.W/2,394,{f:1,c:p.t.label,datum:"MC"});
   footer(p);
 }
 // --- Sound: the group HOME promised and nothing drew ---------------------

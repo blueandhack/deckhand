@@ -1798,13 +1798,13 @@ const int P3_SUB_BYTES = P3_SUB_CHARS + 1;
 // out. Board 1 still draws all four and keeps its own chain in
 // deckhand_display.ino.
 //
-//   120..135  "SETUP"                          P2_SETUP_CAP_Y, T_META, TL_DATUM
-//   146..201  CALIBRATE TOUCH                  P2_CAL_Y, P2_BTN_H
-//   228..243  "CANNOT BE UNDONE"               P2_DANGER_CAP_Y
-//   254..309  RESET PAIRING  + warn spine      P2_PAIR_Y
-//   322..377  POWER OFF      + bad spine       P2_PWR_Y
-//   396..411  "power off = ... RESET to wake"  P2_HINT_Y = 402, MC_DATUM ink
-//   412..459  48 rows clear to contentBottom()
+//   116..131  "SETUP"                          P2_SETUP_CAP_Y, T_META, TL_DATUM
+//   140..195  CALIBRATE TOUCH                  P2_CAL_Y, P2_BTN_H
+//   222..237  "CANNOT BE UNDONE"               P2_DANGER_CAP_Y
+//   246..301  RESET PAIRING  + warn spine      P2_PAIR_Y
+//   314..369  POWER OFF      + bad spine       P2_PWR_Y
+//   388..403  "power off = ... RESET to wake"  P2_HINT_Y = 394, MC_DATUM ink
+//   404..459  56 rows clear to contentBottom()
 //
 // THE SPINE IS THE POINT OF THIS PAGE, not decoration. Every one of these buttons
 // is uiButton with `filled` false, so before this they were identically shaped
@@ -1817,22 +1817,36 @@ const int P3_SUB_BYTES = P3_SUB_CHARS + 1;
 // gap that separates the sections carry it as POSITION. Colour is then the third
 // cue rather than the only one.
 //
-// P2_SPINE_W is 4, and BOTH bounds on it are real: it sits BORDER_CTRL inside the
-// button's own left edge, so P2_SPINE_W + BORDER_CTRL must clear R_MD (5 <= 12) or
-// the bar paints over the very stroke it reinforces where the corner curves in;
-// and it runs from R_MD to P2_BTN_H - R_MD for the same reason at both ends.
+// P2_SPINE_W is 4, and what keeps the bar off the corner arcs is the Y-INSET, not
+// its width: it runs from R_MD to P2_BTN_H - R_MD, so it sits entirely in the
+// button's straight left edge and NO width could reach an arc. (This comment used to
+// claim P2_SPINE_W + BORDER_CTRL <= R_MD was the corner bound. It is not; that bound
+// is real but says something else - the spine stays a MARK on the left edge rather
+// than a slab, no wider inset-and-all than the button's own corner treatment.)
+// settings-geom-check.mjs asserts the insets by PARSING drawSeverityAction()'s own
+// uiFillRound(...) arguments, because the four assertions it used to make were about
+// these CONSTANTS and passed a draw call rewritten to span the whole button.
 //
 // P2_BTN_H is 56 rather than H_BTN's 50: three buttons on a 356px page leave the
 // room, and these are the most consequential controls on the device - two of them
 // destroy state. TAP_MIN is 46, so this is 10 over the fingertip floor.
 //
-// P2_CAP_STEP is 26 where the SOUND group's caption step is SET_CAP_STEP (24).
-// That difference is settings.js's, kept rather than harmonised: the buttons' own
-// y's are what the rest of this page is bounded by and they are on the spec to the
-// pixel, so the two extra rows land on the caption instead. Both clear the
-// caption's own 16px cell, which is what the checker asserts.
-const int P2_TOP         = 16;   // PAGE_TOP -> the SETUP caption
-const int P2_CAP_STEP    = 26;   // a caption's top -> the button it heads
+// P2_TOP IS 12, THE SAME AS P1_TOP AND PS_TOP, AND THAT IS THE POINT. It was 16,
+// reproducing settings.js's own inconsistency: every other group starts its first
+// content at PAGE_TOP + 12 = 116 and this one started at 120, so moving between
+// groups jogged everything 4px. Nobody chose that. All five groups' first content
+// now starts level, and settings-geom-check.mjs asserts the equality across the
+// five rather than the value of any one - so a perturbation of any single group's
+// top breaks it. It cost nothing: Actions had 48 rows of trailing air and now has
+// 56, and the hint moved FURTHER from the footer it must not read as part of.
+//
+// The caption step is SET_CAP_STEP, shared with the SOUND group, rather than a
+// P2_CAP_STEP of its own. That constant was 26 against SET_CAP_STEP's 24, defended
+// as "the buttons are on the mock to the pixel, so the 2px lands on the caption" -
+// an argument that died with the levelling above, which moves every button 4px off
+// the mock anyway. Two names for one concept (a caption's top -> the control it
+// heads) inside one redesign is a drift waiting to happen.
+const int P2_TOP         = 12;   // PAGE_TOP -> the SETUP caption, level with P1/PS
 const int P2_BTN_H       = 56;   // TAP_MIN + 10; these are the destructive ones
 const int P2_GAP         = 12;   // between two buttons inside one section
 const int P2_SECTION_GAP = 26;   // a button's bottom -> the NEXT section's caption

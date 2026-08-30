@@ -32,7 +32,7 @@
 //
 //   node settings-geom-check.mjs             check both boards
 //   node settings-geom-check.mjs --selftest  prove the checker has teeth
-import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, DIR, fieldBox,
+import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, DIR, evalInt, fieldBox,
          lineHB, mcBox, PANEL, preflight, tlBox, widthB } from "./geom-common.mjs";
 import fs from "fs";
 preflight();
@@ -89,6 +89,66 @@ function readerStep(c, which) {
   return c[tok];
 }
 const MAX_HOSTS = 4;
+
+// THE SEVERITY SPINE'S DRAW GEOMETRY, READ OUT OF drawSeverityAction() rather than
+// restated. The four assertions this replaced constrained CONSTANTS only, under a
+// comment at the draw site claiming they bounded the draw CALL - and they did not:
+// rewriting it to uiFillRound(CARD_X, y, P2_SPINE_W, P2_BTN_H, ...), i.e. the spine
+// flush to the card's edge and running its full height across BOTH corner arcs and
+// over the stroke it exists to reinforce, passed all four with 0 failures. Same rule
+// as everywhere else in this repo, arriving from a new direction: a checker must
+// PARSE THE SITE IT CERTIFIES, the way sessions-geom-check.mjs parses the TYPE chip's
+// hit-test slack term out of sessions.ino instead of restating a 24.
+const SETTINGS_INO = fs.readFileSync(`${DIR}/settings.ino`, "utf8");
+const SPINE_ARGS = (() => {
+  const src = SETTINGS_INO.replace(/^[ \t]*\/\/.*$/gm, "");   // a commented-out call is not a call
+  const i = src.indexOf("void drawSeverityAction(");
+  if (i < 0) throw new Error("settings-geom-check: drawSeverityAction() not found in settings.ino - " +
+                             "if the spine's draw site moved, move this parse with it rather than " +
+                             "leaving the assertions looking at nothing");
+  const z = src.indexOf("\n}\n", i);
+  const body = src.slice(i, z < 0 ? undefined : z);
+  const a = body.indexOf("uiFillRound(");
+  if (a < 0) throw new Error("settings-geom-check: drawSeverityAction() no longer calls uiFillRound() - " +
+                             "the spine is what that function exists to draw");
+  // Brace-balanced rather than "up to the first )", so a parenthesised term or a
+  // nested call inside an argument cannot end the list early.
+  let depth = 0, j = a + "uiFillRound".length;
+  for (; j < body.length; j++) {
+    if (body[j] === "(") depth++;
+    else if (body[j] === ")" && --depth === 0) break;
+  }
+  if (depth !== 0) throw new Error("settings-geom-check: the spine's uiFillRound(...) has unbalanced parentheses");
+  const inner = body.slice(a + "uiFillRound(".length, j);
+  const args = [];
+  let d = 0, cur = "";
+  for (const ch of inner) {
+    if (ch === "(") d++;
+    else if (ch === ")") d--;
+    if (ch === "," && d === 0) { args.push(cur.trim()); cur = ""; } else cur += ch;
+  }
+  args.push(cur.trim());
+  if (args.length !== 7) throw new Error(`settings-geom-check: uiFillRound() takes 7 arguments, ` +
+                                         `the spine's call parses to ${args.length}`);
+  return args;
+})();
+// One parsed argument, resolved against the BOARD's own constant table. A literal
+// resolves to itself, so reverting a named constant back to a number is still
+// MEASURED; the button's own `y` parameter resolves to 0, since what is being
+// certified is the spine's offsets INSIDE the button; and a token that is neither
+// THROWS rather than defaulting to a number that would quietly pass. evalInt is the
+// same truncating-division parser consts() uses, so `P2_SPINE_W / 2` comes out the
+// way the compiler computes it.
+function spineArg(c, n) {
+  const e = SPINE_ARGS[n].replace(/[A-Za-z_][A-Za-z_0-9]*/g, (t) => {
+    if (t === "y") return "0";
+    if (t in c) return String(c[t]);
+    throw new Error(`settings-geom-check: the spine's argument ${n} ("${SPINE_ARGS[n]}") names ` +
+                    `"${t}", which is neither a const int either board header declares nor the ` +
+                    `button's own y`);
+  });
+  return evalInt(e);
+}
 
 // KB_MAX_BYTES is shared with the HOST, so read it from there rather than trust a
 // comment claiming the two agree.
@@ -408,6 +468,28 @@ for (const b of [1, 2]) {
     // The back band must be the pager band's height, or every group body moves.
     chk(c.BACK_BTN_W === c.PAGER_BTN_W,
         `the back key is the pager key's width: ${c.BACK_BTN_W} == ${c.PAGER_BTN_W}`);
+    // ---- ALL FIVE GROUPS START LEVEL UNDER THE BACK BAND ----
+    // Actions used to start 4px lower than the other four (P2_TOP 16 against
+    // P1_TOP/PS_TOP 12), reproducing settings.js's own inconsistency rather than a
+    // decision anybody made - so moving between groups jogged everything down and
+    // back up again. The rule is asserted as an EQUALITY across the five parsed
+    // tops, never against a literal 116: what matters is that they agree, and this
+    // way a perturbation of ANY one of them breaks it. That also closes the gap the
+    // note in the Actions block used to describe, where P2_TOP and P2_SETUP_CAP_Y
+    // were pure page translations no relative bound could see.
+    // Status and Pairing are absolute y's rather than PAGE_TOP + <top> offsets, so
+    // they enter as themselves; the equality is over what the draw sites use.
+    {
+      const firsts = [["Status", c.ST_CONN_Y], ["Display", c.PAGE_TOP + c.P1_TOP],
+                      ["Sound", c.PAGE_TOP + c.PS_TOP], ["Pairing", c.P3_ANY_CAP_Y],
+                      ["Actions", c.PAGE_TOP + c.P2_TOP]];
+      const y0 = firsts[0][1];
+      chk(firsts.every(([, y]) => y === y0),
+          `all five groups' first content starts level at ${y0}: ` +
+          firsts.map(([n, y]) => `${n} ${y}`).join(", "));
+      chk(y0 > c.PAGE_TOP,
+          `the groups' first content starts below the back band: ${y0} > PAGE_TOP ${c.PAGE_TOP}`);
+    }
     // THE BACK BAND'S TITLE IS ML_DATUM at BACK_BTN_X0 + BACK_BTN_W + BACK_TITLE_DX
     // and drawn at T_HEAD, so it is measured against the panel's right edge rather
     // than centred between two keys the way the pager's is. It is also the same
@@ -1039,15 +1121,14 @@ for (const b of [1, 2]) {
     // (Spleen 8x16 - see UI_FONTS), so the two measure identically here. T_META is
     // what the draw site passes, and a checker certifies what is drawn.
     //
-    // WHAT IS STILL UNGUARDED, stated rather than left for the sweep to report as
-    // noise: P2_TOP and P2_SETUP_CAP_Y are PURE TRANSLATIONS of the whole page, so
-    // no relative bound can see them. Downward they stop at PAGE_TOP (asserted
-    // below, and -16 lands exactly on it); upward they have the page's 48 rows of
-    // trailing air to spend before the hint reaches the footer. Note also that this
-    // group's P2_TOP is 16 where Display's P1_TOP and Sound's PS_TOP are 12 -
-    // settings.js's own inconsistency, kept because the BUTTONS are on the spec to
-    // the pixel. An assertion that the five groups start level would be a real rule
-    // and would fail today, so it is flagged here rather than encoded.
+    // P2_TOP AND P2_SETUP_CAP_Y ARE NO LONGER UNGUARDED. They are pure TRANSLATIONS
+    // of the whole page, so no bound relative to this page can see them - which is
+    // exactly why the "all five groups start level" assertion up in the HOME block
+    // is where they are caught: any perturbation of P2_TOP breaks that equality,
+    // in both directions, without needing a bound this page could supply.
+    // (This note used to say the levelling rule "would fail today, so it is flagged
+    // here rather than encoded" - correct at the time, and the reason the rule was
+    // adopted was that a 4px jog between groups was nobody's decision.)
     // THREE buttons. MIC TEST moved to Sound, and P2_MIC_Y is GONE rather than
     // left unread - a constant a draw site no longer uses but a hit test still
     // does is exactly how a page comes to claim taps for a button it does not
@@ -1088,8 +1169,8 @@ for (const b of [1, 2]) {
         `the SETUP caption's own text box ends ${c.P2_SETUP_CAP_Y + lineHB(b, T_META) - 1}, clear of CALIBRATE at ${c.P2_CAL_Y}`);
     chk(c.P2_DANGER_CAP_Y + lineHB(b, T_META) - 1 < c.P2_PAIR_Y,
         `the danger caption's own text box ends ${c.P2_DANGER_CAP_Y + lineHB(b, T_META) - 1}, clear of RESET PAIRING at ${c.P2_PAIR_Y}`);
-    chk(c.P2_CAP_STEP > lineHB(b, T_META),
-        `P2_CAP_STEP ${c.P2_CAP_STEP} clears the caption's own ${lineHB(b, T_META)}px cell`);
+    chk(c.SET_CAP_STEP > lineHB(b, T_META),
+        `SET_CAP_STEP ${c.SET_CAP_STEP} clears the caption's own ${lineHB(b, T_META)}px cell`);
     // THE DESTRUCTIVE PAIR MUST BE SEPARATED FROM THE SAFE ONE BY MORE THAN THE
     // GAP INSIDE A SECTION, or position stops being one of the three carriers of
     // severity and the page is back to four identical slabs in one column.
@@ -1102,24 +1183,53 @@ for (const b of [1, 2]) {
       chk(sectionAir > c.P2_GAP,
           `the sections are separated: ${sectionAir}px between CALIBRATE and the danger caption > P2_GAP ${c.P2_GAP}`);
     }
-    // ---- the severity spine ----
-    // It is drawn at x = CARD_X + BORDER_CTRL, width P2_SPINE_W, from y + R_MD to
-    // y + P2_BTN_H - R_MD. Both ends and the left edge have to stay inside the
-    // button's own stroke, or the bar paints over the outline it reinforces where
-    // the corner curves in.
-    chk(c.P2_SPINE_W + c.BORDER_CTRL <= c.R_MD,
-        `the severity spine clears the button's corner radius: ${c.P2_SPINE_W} + ${c.BORDER_CTRL} <= R_MD ${c.R_MD}`);
-    chk(c.P2_SPINE_W >= c.BORDER_CTRL * 2,
-        `the spine outweighs the stroke it reinforces: ${c.P2_SPINE_W} >= 2 x BORDER_CTRL ${c.BORDER_CTRL}`);
-    chk(c.P2_BTN_H - 2 * c.R_MD >= c.P2_SPINE_W,
-        `the spine is taller than it is wide: ${c.P2_BTN_H - 2 * c.R_MD} >= ${c.P2_SPINE_W}`);
-    // uiFillRound rounds the ends at P2_SPINE_W / 2, which fillSmoothRoundRect can
-    // only draw if the radius fits both dimensions of the bar.
-    chk(Math.floor(c.P2_SPINE_W / 2) * 2 <= Math.min(c.P2_SPINE_W, c.P2_BTN_H - 2 * c.R_MD),
-        `the spine's end radius fits it: 2 x ${Math.floor(c.P2_SPINE_W / 2)} <= ${Math.min(c.P2_SPINE_W, c.P2_BTN_H - 2 * c.R_MD)}`);
+    // ---- the severity spine, MEASURED AT ITS DRAW SITE ----
+    // Every number below comes from drawSeverityAction()'s own uiFillRound(...)
+    // arguments (SPINE_ARGS, parsed above), NOT from restating what the constants
+    // would allow. The four assertions this replaced were all of the second kind and
+    // the reviewer's mutation - uiFillRound(CARD_X, y, P2_SPINE_W, P2_BTN_H, ...) -
+    // passed every one of them.
+    {
+      const sx = spineArg(c, 0), sy = spineArg(c, 1);
+      const sw = spineArg(c, 2), sh = spineArg(c, 3), sr = spineArg(c, 4);
+      // ANCHORING FIRST: an offset means nothing unless it is taken from the button's
+      // own origin. Drawn at absolute coordinates the arithmetic below would still
+      // pass on the first button and be wrong on the second.
+      chk(/\bCARD_X\b/.test(SPINE_ARGS[0]) && /\by\b/.test(SPINE_ARGS[1]),
+          `the spine is anchored on the button's own CARD_X and y ("${SPINE_ARGS[0]}", "${SPINE_ARGS[1]}")`);
+      chk(sx - c.CARD_X >= c.BORDER_CTRL,
+          `the spine is DRAWN ${sx - c.CARD_X}px inside the button's left edge, clear of its ${c.BORDER_CTRL}px stroke`);
+      // The two ends are what the corner arcs threaten: inside R_MD of either end the
+      // button's outline is curving in, so a bar drawn there paints over the very
+      // stroke it exists to reinforce.
+      chk(sy >= c.R_MD,
+          `the spine is DRAWN starting +${sy}, below the top corner arc at R_MD ${c.R_MD}`);
+      chk(sy + sh <= c.P2_BTN_H - c.R_MD,
+          `the spine is DRAWN ending +${sy + sh}, above the bottom corner arc at ${c.P2_BTN_H - c.R_MD}`);
+      chk(sw === c.P2_SPINE_W,
+          `the spine is DRAWN P2_SPINE_W (${c.P2_SPINE_W}) wide, not a literal (${sw})`);
+      // uiFillRound rounds the ends, and fillSmoothRoundRect can only draw a radius
+      // that fits BOTH dimensions of the bar it is given - so this is the bound taken
+      // against the DRAWN width and height rather than against what the constants
+      // would have allowed. (The assertion this replaced compared floor(w/2)*2 with w,
+      // which is true for every non-negative integer and could not fail.)
+      chk(2 * sr <= sw && 2 * sr <= sh,
+          `the spine's DRAWN end radius ${sr} fits its ${sw}x${sh} bar`);
+      // NOT the corner bound - the y-inset above is what keeps the spine off the arcs,
+      // and with it in place no WIDTH can reach one. What this constrains is that the
+      // spine stays a MARK on the left edge rather than becoming a slab: no wider,
+      // inset and all, than the button's own corner treatment.
+      chk(c.P2_SPINE_W + c.BORDER_CTRL <= c.R_MD,
+          `the spine stays a left-edge MARK rather than a slab: ${c.P2_SPINE_W} + ${c.BORDER_CTRL} inset <= R_MD ${c.R_MD}`);
+      chk(c.P2_SPINE_W >= c.BORDER_CTRL * 2,
+          `the spine outweighs the stroke it reinforces: ${c.P2_SPINE_W} >= 2 x BORDER_CTRL ${c.BORDER_CTRL}`);
+      chk(sh >= sw, `the spine is taller than it is wide: ${sh} >= ${sw}`);
+    }
     // The hint is centred on the PANEL, so its lane is the panel and not the card.
-    const hintW = widthB(b, T_META, "power off = deep sleep, RESET to wake");
-    chk(hintW <= W, `the power-off hint fits the panel: ${hintW} <= ${W}`);
+    // (A `<= W` assertion on one transcribed hint string used to sit here. It was
+    // dead: the P2_HINTS loop below measures BOTH arms of the #if against the
+    // stricter W - 8, so it can never have failed first, and its inline literal could
+    // drift from the draw site with nothing noticing.)
     chk(hintEnd < contentBottom, `Actions' hint inks to ${hintEnd}, above the footer ${contentBottom}`);
     // THE HINT BELONGS TO POWER OFF, so it has to sit nearer the button it explains
     // than the footer it is not part of - proximity is what says which thing a note

@@ -134,7 +134,11 @@ export function endRecord() { const s = SEEN; SEEN = null; return s; }
 // and it stops feeding file text to eval() as a bonus. An unparseable expression
 // THROWS, and consts() skips that declaration exactly as it skipped an eval()
 // failure before.
-function evalInt(expr) {
+// EXPORTED because a second site needs it: settings-geom-check.mjs parses the
+// severity spine's uiFillRound() arguments out of settings.ino and has to resolve
+// them the way the compiler would. A second copy of a truncating-division parser
+// is exactly the transcription this repo keeps paying for.
+export function evalInt(expr) {
   let i = 0;
   const ws = () => { while (i < expr.length && expr[i] === " ") i++; };
   const peek = () => { ws(); return expr[i]; };
