@@ -93,7 +93,10 @@ function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc) {
   // place. It must be transliterated at the PARK SITE, before voiceSha() runs, and
   // it must NOT be transliterated in the payload builder - doing it there would
   // desync the text the device displays and signs against from the text this host
-  // still holds and re-hashes, so every valid answer would be REJECTED.
+  // still holds and re-hashes. That does NOT reject the answer - the host re-hashes
+  // its own parked copy, which still matches the sha the device was sent, so it is
+  // ACCEPTED and the human has authorised words they never read. A silent
+  // divergence, which is why the boundary guard SUPPRESSES this field.
   c.voiceParkXlate = /text = capUtf8\(toAscii\(text\), VOICE_ANSWER_TEXT_MAX_BYTES\);/.test(hostSrc);
   c.voiceParkBeforeHash =
     hostSrc.indexOf("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);") >= 0 &&
@@ -154,6 +157,8 @@ const HOST_SITES = [
   ["and what it sheds is LOGGED", /Wire: payload was \$\{fitted\.was\} bytes/],
   ["an invariant violation is LOGGED, and the log line NAMES THE FIELD - `something was wrong` is a message nobody can act on",
    /Wire: NON-ASCII device-bound text[\s\S]{0,300}?\$\{describeOffenders\(wire\.offenders\)\}/],
+  ["and the log says a signed field is SUPPRESSED rather than repaired, so the line does not claim a repair that did not happen",
+   /which is suppressed instead - see host\/wire-ascii\.mjs\./],
   ["and it is logged on the EDGE, not per tick - a permanently-broken field would otherwise write a line every 5s and bury the tick lines between them",
    /if \(sig !== lastWireAsciiSig\) \{/],
   ["with an all-clear line, so a fixed field is visible as fixed", /Wire: device-bound text is ASCII again\./],
@@ -570,7 +575,9 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
      "VOICETEXT: it must happen BEFORE voiceSha() - hashing first would sign text the device never shows");
   ok(c.voiceBuilderRaw,
      "VOICETEXT: the payload builder must assign `item.ask.voiceText = pend.text` UNCHANGED. " +
-     "Transliterating there desyncs the signed text from the text this host re-hashes, and every valid answer is then REJECTED");
+     "Transliterating there desyncs the text the device DISPLAYS from the text that gets signed. It does not REJECT the answer - " +
+     "sessions.ino:2259 signs the sha the host SENT and this host re-hashes its own parked copy, so it is ACCEPTED and the human " +
+     "authorised words they never read. That silent divergence is why host/wire-ascii.mjs suppresses this field rather than repairing it");
   {
     const parked = capUtf8(toAscii("Yes — let's go ahead… but don't touch the cache"), c.voiceAnswerMaxBytes);
     ok(!/[^\x00-\x7f]/.test(parked), `VOICETEXT: a real transcript reaches the wire as pure ASCII, got ${JSON.stringify(parked)}`);
@@ -735,8 +742,13 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
     // NAMED assertion fails, so a TypeError would read as a MISS.
     ok(r.payload != null,
        "INVARIANT: the guard always hands back a sendable payload - repair or log, never reject");
+    // The offender text carries a DISPOSITION for a suppressed field, so compare
+    // the paths and assert the disposition separately - a path-only comparison
+    // would pass whether the field was repaired or suppressed, which is exactly
+    // the distinction this section now exists for.
+    const paths = r.offenders.map((o) => o.replace(/ \[.*\]$/, ""));
     const want = ["sessions[0].ask.voiceText", `sessions[0].ask.${INVENTED}`];
-    ok(JSON.stringify(r.offenders.slice().sort()) === JSON.stringify(want.slice().sort()),
+    ok(JSON.stringify(paths.slice().sort()) === JSON.stringify(want.slice().sort()),
        `INVARIANT: both offenders are named by their exact PATH, and nothing else is - want ${JSON.stringify(want)}, got ${JSON.stringify(r.offenders)}`);
     ok(r.offenders.includes(`sessions[0].ask.${INVENTED}`),
        `INVARIANT: A FIELD NAME THIS REPO HAS NEVER SEEN is still caught - the walk is structural, not a list of names`);
@@ -745,14 +757,50 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
        "INVARIANT: the input is never mutated - some of these objects are live state the next tick reuses");
     ok(r.payload !== tick && r.payload?.sessions?.[1] === tick.sessions[1],
        "INVARIANT: cloning is LAZY and per level - the clean session is shared, not deep-copied");
-    ok(r.payload?.sessions?.[0]?.ask?.voiceText === "Yes - let's go ahead... but don't touch the cache",
-       `INVARIANT: repair TRANSLITERATES rather than blanking, got ${JSON.stringify(r.payload?.sessions?.[0]?.ask?.voiceText)}`);
+    ok(r.payload?.sessions?.[0]?.ask?.[INVENTED] === "cafe -> naive",
+       `INVARIANT: repair TRANSLITERATES rather than blanking, got ${JSON.stringify(r.payload?.sessions?.[0]?.ask?.[INVENTED])}`);
     ok(r.payload?.fiveHourPct === 42 && r.payload?.remoteAnswer === true && r.payload?.voice?.seq === 3,
        "INVARIANT: non-string values cross untouched");
     ok(describeOffenders(r.offenders).includes(INVENTED),
        "INVARIANT: the one-line description NAMES the fields - a message that cannot be acted on is close to no message");
     ok(describeOffenders(["a", "b", "c"], 2) === "a, b (and 1 more)",
        `INVARIANT: and it is capped, with a count for what it elided, got ${JSON.stringify(describeOffenders(["a", "b", "c"], 2))}`);
+
+    // ---- FAIL SAFE on the one field the device SIGNS ---------------------
+    //
+    // Repair is right where the device DRAWS the text and wrong where it SIGNS
+    // it. sessions.ino:2259 builds "nonce:pid:TEXT:<sha16>" from the voiceSha the
+    // HOST SENT - it does not re-hash what it displays - so a repaired voiceText
+    // would be DISPLAYED while the sha of the unrepaired text is what gets
+    // signed, and the host's own re-hash of its parked copy would then ACCEPT it.
+    // The human reads one string and authorises another, with a valid signature
+    // and nothing logged: the confirm screen's entire guarantee, silently gone.
+    // So it is suppressed - both fields dropped, device back to the option
+    // buttons (sessions.ino:2308's own words), SPEAK and TYPE still offered.
+    {
+      const ask0 = r.payload?.sessions?.[0]?.ask;
+      ok(ask0 != null && !("voiceText" in ask0),
+         `INVARIANT (fail safe): a non-ASCII ask.voiceText must NOT reach the device REPAIRED - ` +
+         `the device would display it and sign the sha of the text it was NOT shown. ` +
+         `got ${JSON.stringify(ask0 && ask0.voiceText)}`);
+      ok(ask0 != null && !("voiceSha" in ask0),
+         "INVARIANT (fail safe): voiceSha goes with it - leaving it behind hands the device a hash for text it no longer has");
+      ok(r.offenders.some((o) => o.startsWith("sessions[0].ask.voiceText") && /SUPPRESS/i.test(o)),
+         `INVARIANT (fail safe): and it is still LOGGED by name, as the upstream bug it is, saying it was suppressed rather than repaired - got ${JSON.stringify(r.offenders)}`);
+      ok(ask0 != null && ask0.pid === "p0" && JSON.stringify(ask0.options) === JSON.stringify(["Yes", "No"]),
+         "INVARIANT (fail safe): suppression is NARROW - the prompt survives and stays answerable, only the voice confirm is withdrawn");
+      ok(ask0 != null && ask0[INVENTED] === "cafe -> naive",
+         "INVARIANT (fail safe): a sibling violation on the SAME ask is still REPAIRED - the default is repair, and the exception is one field");
+      // NORMAL OPERATION MUST NOT LOSE THE CONFIRM SCREEN. The suppression
+      // condition is the same invariant as everywhere else, so an ASCII
+      // transcript - which is what a working park site produces - is untouched.
+      const okAsk = { sessions: [{ ask: { pid: "p", voiceText: "Yes - go ahead", voiceSha: "0123456789abcdef" } }] };
+      const ro = asciiFit(okAsk);
+      ok(ro.payload === okAsk && ro.offenders.length === 0,
+         "INVARIANT (fail safe): an ASCII voiceText is left completely alone - suppression must never fire in normal operation");
+      ok(ro.payload.sessions[0].ask.voiceText === "Yes - go ahead" && ro.payload.sessions[0].ask.voiceSha === "0123456789abcdef",
+         "INVARIANT (fail safe): both fields survive, so a working park site still gets its confirm screen");
+    }
 
     // Every shape JSON.stringify can reach: the root, arrays, keys, and toJSON.
     ok(asciiFit("—").offenders[0] === "<root>", "INVARIANT: a bare string root is named rather than reported with an empty path");
@@ -919,7 +967,7 @@ async function selftest() {
     ["ask.voiceText bypasses it at the PARK SITE - the confirm screen draws gaps where the punctuation was",
      { host: (s) => s.replace("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);",
                               "text = capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES);") }],
-    ["ask.voiceText transliterated in the PAYLOAD BUILDER instead - the plausible wrong fix, which desyncs voiceSha and rejects every valid answer",
+    ["ask.voiceText transliterated in the PAYLOAD BUILDER instead - the plausible wrong fix. It does NOT reject the answer: the device displays the repaired text and signs the sha it was sent, the host re-hashes its parked copy and ACCEPTS, and the human has authorised words they never read",
      { host: (s) => s.replace("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);", "text = capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES);")
                      .replace("item.ask.voiceText = pend.text;", "item.ask.voiceText = toAscii(pend.text);") }],
     ["the tick line is no longer measured before it is written",
@@ -951,6 +999,15 @@ async function selftest() {
     ["the guard REJECTS a bad payload instead of repairing it - inside the 5s tick, refusing to send is the worse failure",
      { ascii: (s) => s.replace('    return { payload: walk(payload, "", offenders, 0), offenders };',
                                '    const fixed = walk(payload, "", offenders, 0);\n    return { payload: offenders.length ? null : fixed, offenders };') }],
+    ["a non-ASCII ask.voiceText is REPAIRED instead of suppressed - the device would then DISPLAY text it is not signing",
+     { ascii: (s) => s.replace('  field: "voiceText",', '  field: "__no_such_field__",') }],
+    ["suppression drops voiceText but leaves voiceSha, handing the device a hash for text it no longer has",
+     { ascii: (s) => s.replace('  drop: ["voiceText", "voiceSha"],', '  drop: ["voiceText"],') }],
+    ["suppression fires on an ASCII voiceText too, so normal operation silently loses its confirm screen",
+     { ascii: (s) => s.replace('    if (rule && typeof node[k] === "string" && !isAscii(node[k])) {',
+                               '    if (rule && typeof node[k] === "string") {') }],
+    ["the log line claims a repair on a field that was suppressed",
+     { host: (s) => s.replace("which is suppressed instead - see host/wire-ascii.mjs.", "which is also repaired.") }],
     ["the host stops asserting the invariant at the point of send",
      { host: (s) => s.replace("const wire = asciiFit({", "const wire = ((p) => ({ payload: p, offenders: [] }))({") }],
     ["the host fits the RAW payload rather than the repaired one, so the line it measures is not the line it writes",

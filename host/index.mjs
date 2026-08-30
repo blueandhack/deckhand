@@ -2137,8 +2137,11 @@ async function transcribeForAnswer(captureFile, pid) {
   //
   // THE OBVIOUS FIX IS THE WRONG ONE: doing this in the payload builder, where
   // `item.ask.voiceText = pend.text` is assigned, would desync the text the device
-  // displays and signs against from the text this host still holds and re-hashes -
-  // so every valid answer would then be REJECTED. It has to happen before
+  // DISPLAYS from the text that gets signed. It does NOT produce a rejection -
+  // sessions.ino:2259 builds "nonce:pid:TEXT:<sha16>" from the voiceSha the host
+  // SENT rather than re-hashing what it draws, and this host verifies against its
+  // own parked copy, which still matches - so the answer is ACCEPTED and the human
+  // has authorised words they never read, silently. It has to happen before
   // voiceSha() below, which is why it is on this line and not that one.
   //
   // Cap AFTER, and cap in BYTES: the device displays the capped string, so that is
@@ -3048,7 +3051,10 @@ async function tick(generation = tickGeneration) {
     // the one being written. asciiFit walks the payload STRUCTURALLY rather than
     // checking a list of field names, because the field nobody remembered to add
     // to the list is precisely the field that skipped the transliteration - which
-    // is how ask.voiceText got past every cap assertion in the repo.
+    // is how ask.voiceText got past every cap assertion in the repo. A violation
+    // is REPAIRED so the device can draw and budget for it, except on a field the
+    // device SIGNS (ask.voiceText), where repair would let the confirm screen
+    // display text that is not what gets signed - that one is SUPPRESSED instead.
     const wire = asciiFit({
       ...usage, hostId, hostTag, ...(hostEmoji ? { hostEmoji } : {}), remoteAnswer, voice: lastVoice,
     });
@@ -3056,9 +3062,11 @@ async function tick(generation = tickGeneration) {
       const sig = wire.offenders.join("|");
       if (sig !== lastWireAsciiSig) {
         lastWireAsciiSig = sig;
-        console.log(`Wire: NON-ASCII device-bound text, repaired at the boundary - ` +
+        console.log(`Wire: NON-ASCII device-bound text at the boundary - ` +
                     `${describeOffenders(wire.offenders)}. Whatever produces that field is ` +
-                    `skipping deviceText()/toAscii(), so its character cap is not a byte cap.`);
+                    `skipping deviceText()/toAscii(), so its character cap is not a byte cap. ` +
+                    `Repaired so the device can draw it, EXCEPT any field the device signs, ` +
+                    `which is suppressed instead - see host/wire-ascii.mjs.`);
       }
     } else if (lastWireAsciiSig) {
       lastWireAsciiSig = "";

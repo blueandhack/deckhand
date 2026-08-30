@@ -4508,9 +4508,18 @@ Other things that aren't obvious from a single file:
   the one screen whose entire purpose is proving a human read THESE EXACT WORDS before signing them.
   Now 49 chars / 49 bytes and drawn in full. **The fix had to be at the PARK SITE, before
   `voiceSha()`.** Transliterating in the payload builder — where `item.ask.voiceText` is assigned,
-  which is the obvious place — would desync the text the device signs from the text this host
-  re-hashes, so the host would then reject **valid** answers. That ordering is asserted, and the
-  plausible wrong fix is one of the injected faults: moving it fails 6 assertions by name.
+  which is the obvious place — desyncs the text the device DISPLAYS from the text that gets signed.
+  **This file used to say the host would then REJECT valid answers. It would not, and the correction
+  matters more than the original claim did.** `sessions.ino:2259` builds `nonce:pid:TEXT:<sha16>`
+  from the `voiceSha` the host SENT — the device does not re-hash what it draws — and the host
+  verifies by re-hashing its own PARKED copy, which still matches. So the answer is **ACCEPTED**:
+  the human reads one string and authorises another, with a valid signature and nothing logged.
+  A rejection would have been loud and self-limiting; this is a silent divergence on the one screen
+  whose entire purpose is binding what was read to what was signed. That is why the send-time guard
+  (`host/wire-ascii.mjs`) **suppresses** `voiceText`/`voiceSha` rather than repairing them when the
+  park site has failed — a missing confirm screen is a visible, safe failure. That ordering is
+  asserted, and the plausible wrong fix is one of the injected faults: moving it fails 6 assertions
+  by name.
   **Found en route:** `histFlatten`'s truncation marker was **U+2026**, outside both fonts, so a
   truncated history preview showed no sign whatsoever of having been cut. Three ASCII dots now — the
   fourth instance of the trap this file already records for `fitText`'s ellipsis, the `CLAUDE/air`

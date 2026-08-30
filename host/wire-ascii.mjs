@@ -44,19 +44,40 @@
 //   is the "healthy process doing no useful work" shape this repo has documented
 //   repeatedly.
 //
-// WHAT REPAIRING COSTS, stated rather than glossed. There is exactly one field
-// where a boundary repair is not free: `ask.voiceText`. The device signs
-// HMAC(secret, "nonce:pid:TEXT:<sha16>") using the `voiceSha` the host SENT
-// (sessions.ino builds that string from s.askVoiceSha verbatim - it does not
-// re-hash what it displays), and the host verifies by re-hashing the transcript
-// it still holds. So repairing here does not reject the answer: it delivers the
-// PARKED text while the human read the repaired one. That divergence is exactly
-// the transliteration - same words, ASCII punctuation - and it can only arise once
-// the park site is ALREADY broken. The alternative, shipping it unrepaired, puts
-// holes where every mark was on the one screen whose entire job is proving a human
-// read those exact words, and truncates by BYTE into the device's char[204],
-// possibly mid-codepoint. Repair is the lesser failure, and the log line names the
-// field so the real bug is fixed rather than lived with.
+// ONE FIELD MUST FAIL SAFE INSTEAD, AND IT IS `ask.voiceText`.
+//
+// Repair is right everywhere the device merely DRAWS the text. It is wrong where
+// the device SIGNS it. The voice confirm screen exists to prove a person read
+// THESE EXACT WORDS before authorising them, and the device signs
+// HMAC(secret, "nonce:pid:TEXT:<sha16>") using the `voiceSha` the host SENT -
+// sessions.ino:2259 builds that string from s.askVoiceSha verbatim, it does NOT
+// re-hash what it displays. So repairing here produces:
+//
+//   host parks T, computes sha(T) -> boundary repairs T to T' -> device DISPLAYS
+//   T', signs sha(T) -> host re-hashes its parked T, matches, ACCEPTS
+//
+// The human read T' and authorised T. The signature is valid, the host logs
+// nothing, and the one screen whose entire job is binding what was read to what
+// was signed has quietly stopped doing it. That is strictly worse than the bug it
+// would be covering: an obvious break turned into a silent divergence.
+//
+// So a non-ASCII voiceText is NOT repaired. It is SUPPRESSED - voiceText and
+// voiceSha are both dropped - and the device falls back to its ordinary ask
+// screen, which sessions.ino:2308 already calls "back to the option buttons".
+// Nothing is stranded by that: with voiceText absent the device re-offers SPEAK
+// (sessions.ino:1747) and TYPE (:1737), and the Mac's own dialog is up throughout.
+// A missing confirm screen is a visible, safe failure; a confirm screen showing
+// text that does not match the signature is not.
+//
+// WHY THIS EXCEPTION IS NOT THE ENUMERATION THIS FILE EXISTS TO AVOID. The two
+// lists point in opposite directions, and that asymmetry is the whole argument. A
+// list of fields to CHECK fails open: the field nobody added is shipped unchecked,
+// silently, which is the bug. This list only chooses the DISPOSITION of a
+// violation the structural walk has already caught, and its default is repair - so
+// a field missing from it is still detected, still logged by name, and still made
+// safe to draw. Forgetting to add a field here costs the confirm-screen guarantee
+// on a field that has one; forgetting to add a field to a check list costs
+// everything.
 //
 // NOT A REPLACEMENT FOR THE CAP SITES. deviceText() still transliterates before it
 // caps, because capping first lets an expansion ("..." from one ellipsis) grow back
@@ -74,6 +95,17 @@ import { toAscii } from "./to-ascii.mjs";
 // terminate on its own rather than trust its input. A depth cap does that without
 // a visited set. The real payload is 4 deep (sessions[i].ask.options[j]).
 const MAX_DEPTH = 24;
+
+// Fields where a violation must SUPPRESS rather than repair, because the device
+// SIGNS the text rather than merely drawing it. See the header for why this list
+// failing open is safe and a check-list failing open is not. `drop` names every
+// key that has to go with it: leaving `voiceSha` behind would hand the device a
+// hash for text it no longer has.
+const UNSAFE_TO_REPAIR = [{
+  field: "voiceText",
+  drop: ["voiceText", "voiceSha"],
+  why: "voice confirm SUPPRESSED - the device signs the sha the host sent, so a repaired string would be read but not signed",
+}];
 
 // The invariant, spelled the way feedChar's guard is: BYTES.
 const isAscii = (s) => Buffer.byteLength(s, "utf8") === s.length;
@@ -120,8 +152,19 @@ function walk(node, path, offenders, depth) {
     return out;
   }
   let out = node;
+  let drops = null;
   for (const k of Object.keys(node)) {
     const kp = path ? `${path}.${k}` : k;
+    // FAIL SAFE, not repair, for the fields the device signs. Note the condition
+    // is the SAME invariant as everywhere else - an ASCII voiceText is left
+    // completely alone, so normal operation never loses its confirm screen.
+    const rule = UNSAFE_TO_REPAIR.find((r) => r.field === k);
+    if (rule && typeof node[k] === "string" && !isAscii(node[k])) {
+      offenders.push(`${kp} [${rule.why}]`);
+      (drops = drops ?? new Set());
+      for (const d of rule.drop) drops.add(d);
+      continue;
+    }
     const v = walk(node[k], kp, offenders, depth + 1);
     // KEYS ARE ON THE WIRE TOO and count against the same 16000 bytes. A
     // non-ASCII key is already useless to the device - ArduinoJson looks up
@@ -141,10 +184,17 @@ function walk(node, path, offenders, depth) {
       out[k2] = v;
     }
   }
+  // Last, so a suppressed field is dropped even if a sibling walked clean and no
+  // clone had been made yet.
+  if (drops) {
+    if (out === node) out = { ...node };
+    for (const d of drops) delete out[d];
+  }
   return out;
 }
 
-// Assert the invariant over `payload`, repairing what violates it.
+// Assert the invariant over `payload`, repairing what violates it - except the
+// fields the device SIGNS, which are suppressed instead (see UNSAFE_TO_REPAIR).
 //
 // Returns { payload, offenders }: `payload` is the original object when nothing
 // was wrong (identical reference, not a copy) and a repaired copy otherwise;
