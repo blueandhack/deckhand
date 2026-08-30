@@ -690,6 +690,8 @@ $B --legibility-check          # every row carrying a READING renders at full st
 $B --menu-shot out.png         # THE REAL MENU, off the glass - captured by window id
 $B --menu-preview out.png      # the bar label AND the menu, rendered light and dark
 $B --icon-preview out.png      # the boat at every size and style, 6x nearest-neighbour
+$B --pair-check                # the wireless-pairing menu and its dialog; prints its own count
+$B --pair-shot out.png [code] [device] [light|dark]   # THE REAL compare dialog, off the glass
 $B --open-session [<id>] [go]  # what a click on each session row would do (prints; acts only on `go`)
 node host/mac-emoji-check.mjs  # the four hand-transcribed icon tables agree
 DECKHAND_TMP=<dir> $B --menu-dump   # drive the REAL parser with a synthetic host-alive + host.log
@@ -987,6 +989,49 @@ build inserts its generated prototypes above the sketch's first function definit
 naming `mbedtls_ecp_group` is unknown to its own prototype and the build fails at the definition
 with "does not name a type". Measured - that is the error this first produced - and it is the same
 rule the `BleCbParam` typedef already records.
+
+**THE MAC'S HALF OF WIRELESS PAIRING IS A MENU AND A DIALOG, AND NEITHER CAN BE CLICKED FROM A
+SCRIPT.** `Settings > Pair new device...` writes `PAIRSCAN`, lists the heartbeat's `pairing.devices`
+as rows, and `PAIRSTART <name>` on a pick; when the host publishes a derived code the app raises an
+`NSAlert` showing **this Mac's own six digits** and asking whether the device shows the same, with
+Match -> `PAIRCONFIRM` and Don't match -> `PAIRCANCEL`. Five things are load-bearing:
+
+- **THERE IS NO TEXT FIELD, AND THERE MUST NEVER BE ONE.** The typed-code design was broken (see the
+  spec): the proof derives from the shared secret, so any peer that completes the ECDH computes a
+  valid one without ever seeing the code. `--pair-check` asserts the accessory view is
+  **not editable**, and putting an editable field back fails by name.
+- **THE COMPARISON IS THE SECURITY PROPERTY, so legibility is a security cost.** The digits are
+  drawn at `PAIR_CODE_FONT_PT` (44) in SF Mono, and **ungrouped** - exactly as `settings.ino` draws
+  `pairCodeDigits` in one `T_HERO` `drawString`. Rendering `482 913` against a device showing
+  `482913` is two shapes for one number, i.e. two things to compare wrongly; the checker asserts the
+  field's string IS the code. `--pair-shot` captures the real dialog (by window id, and it can
+  FORCE an appearance, since a capture otherwise shows only the one the Mac is set to).
+- **`awaiting-code` IS NOT ENOUGH TO SHOW A CODE.** `pairStart()` sets that state the moment it
+  begins connecting - `code` stays `""` until the device answers - so the dialog waits for six
+  actual digits. Asserted with a SEEDED prior code, because from an empty `seen` the guard is masked
+  by the empty code equalling the empty token it is compared against: the assertion passed under the
+  fault until it was seeded, which is the vacuous-assertion trap this file keeps paying for.
+- **The code token is spent when the state leaves `awaiting-code`, and the outcome token when it
+  passes through `awaiting-code`.** Six digits collide once in a million, so a second exchange
+  deriving the last one's code would otherwise raise nothing at all; and `PAIRSTART` is accepted
+  straight out of `failed`, so retrying a device whose window is shut fails twice with a
+  byte-identical cause and the second report is the one that would go missing.
+- **A host predating this feature publishes no `pairing` block, and the row DIMS rather than
+  writing a `PAIRSCAN` that host forwards to the device as an unknown line.** Same rule as the
+  device's read-only ask path: never offer a control that cannot work.
+
+**And `--legibility-check` had to learn what "reachable" means.** MEASURED: `NSMenuItem.isEnabled`'s
+GETTER reflects the parent chain, so every row inside a submenu whose parent is disabled reports
+`false` whatever was set on it - which made the check FAIL, with the host down, for a row nobody can
+open. An instrument that fails for the wrong reason is worse than none, so that row is skipped when
+its parent is dimmed and checked whenever it is not (proven both ways: disabling it with the host up
+fails by name).
+
+**What is NOT verified: no real exchange has run through this menu.** The supervised host is the
+main checkout's, where pairing does not exist (`grep -c PAIRSCAN` is 0), so every state was driven
+through `DECKHAND_TMP` with a synthetic `host-alive` - the documented seam - and the dialog was
+captured but never answered against a device. The click paths (`PAIRSCAN`/`PAIRSTART`/`PAIRCONFIRM`/
+`PAIRCANCEL` reaching the host) are structural, not executed.
 
 **Check the LAYOUT ARITHMETIC of both boards' screens without a screen.** Three checkers parse the
 constants straight out of `board_e32r28t.h` / `board_es3c35p.h` (shared parsing in
