@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386934, RAM 69804 | flash 993978, RAM 65900 |
+| size today | flash 1386934, RAM 69804 | flash 993814, RAM 65900 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -798,8 +798,8 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   opaque box paints `COLOR_CARD` over the chip's own stroke, the clear-box-not-glyphs hazard the
   usage cards already pay for. Asserting that box clears the stroke at both ends is a bound taken
   from the geometry rather than fitted to today's 26, and it catches the chip at 20.
-  Where it stands today: **493 of 558 constant-board pairs guarded** (board 1 32/237 unguarded,
-  board 2 33/321) — board 2 gained **50 constants** in the settings redesign and its unguarded count
+  Where it stands today: **492 of 557 constant-board pairs guarded** (board 1 32/237 unguarded,
+  board 2 33/320) — board 2 gained **50 constants** in the settings redesign and its unguarded count
   went DOWN, which is the standard this file sets for constants the repo just added: every one of
   them is caught at **±1 in both directions**. (`ASK_OPT_DESC_BYTES` from the option-descriptions
   work, and `READER_CODE_LINE_H` from the reader line-step fix, likewise.) Board 1's numbers are
@@ -1767,7 +1767,7 @@ escape the bind. Proven by injection: `SET_CAP_STEP` 24 → 25 in the header fai
 name, all the way down the derivation chain.
 
 **COST, MEASURED.** Board 2 **+1,696 bytes of flash and +296 RAM** across the whole branch
-(992,122 / 65,604 → 993,818 / 65,900) — the final fix round gave 160 bytes back, mostly by routing
+(992,122 / 65,604 → 993,814 / 65,900) — the final fix round gave 160 bytes back, mostly by routing
 all seven group captions through one `drawGroupCaption()` instead of six inline copies of the same
 four lines. **Board 1 is `UNCHANGED` at every commit** —
 `0cc2e77b66fb6947...`, size 1,387,200 — which is the only reason the scoping is what it is: every
