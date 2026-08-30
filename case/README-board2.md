@@ -490,6 +490,105 @@ millimetre: the drawing dimensions 9.82 / 3.94, hand measurement gave 9 / 3. Bot
 credible for a ~1 mm port, but a Ø2.2 hole placed on one and wrong by 1 mm would be
 half-blocked. Ø3.0 covers the disagreement and is still a pressure port, not a horn.
 
+## The cover carries a plateau, and the rim is 7 mm thinner for it
+
+**The cell needs 13 mm of cavity and nothing else needs more than 6**, so a case built
+to one uniform depth spends 7 mm on air everywhere the cell is not. `cover_rise = 7.0`
+drops the body wall to **12.9** and puts a raised plateau on the cover instead — which
+leaves the cell standing 7 mm proud of the body, so the plateau is not decoration, it is
+what encloses it.
+
+| | mm |
+|---|---|
+| rim (front stack 6.9 + `comp_back` 6.0 + cover 2.0) | **14.9** |
+| over the cell (unchanged) | 21.9 |
+
+**Where the 6.0 comes from.** The vendor outline drawing, page 12, spells the module out
+in its side view: `CTP 1.00 + LCD 2.20 + GLUE 0.50 + PCB 1.60 + SMD 4.70 = Total 10.00`.
+So **4.70 is the tallest thing on the back**, and `comp_back` adds the mated JST plugs the
+outline does not show. That allowance is inherited from board 1 and has **never been
+measured here** — it is the floor as modelled, not as proven.
+
+**`cover_rise = 0` restores the flat cover exactly**, which is why the profile is spelled
+as a rise rather than as two independent depths: `body_d`, `total_th`, the plunger and the
+plateau all derive from it. Verified rather than asserted — at 0, four of the five parts
+come out **byte-identical** to the previous build and the cover differs by **0.3 mm³ of
+13,928** (0.002%, triangulation noise from longer cutting cylinders) with an identical
+bounding box.
+
+`cover_taper` picks the side profile: **true** slopes from the rim edge to the plateau
+(37.6° on the sides, ~21° at the ends, both rising away from the bed so it still prints
+without support); **false** gives a vertical wall with a `cover_cham` chamfer.
+
+**The plateau is derived from the cell, not chosen** — `batt_w/h` plus `plat_gap` 0.6 plus
+`plat_wall` 2.0, giving 41.2 × 71.2 at x 9.1–50.3, y 18.1–89.3. A different pack moves the
+plateau, the taper angles and the stand together.
+
+### Four things it forced
+
+**`batt_ribs` is redundant.** The plateau's cavity walls stand 0.6 off the pack on all four
+sides — the ribs' job, over the pack's full height instead of its top 6 mm. Gated off
+whenever `cover_rise > 0`.
+
+**A button on a slope is not a button.** At the service end the taper drops **2.26 mm
+across the 6 mm hole**, so against `btn_proud` 1.5 the head would be buried on the uphill
+side and 3.76 proud on the downhill one. Each button gets a flat landing cut square to the
+board, deep enough that the whole hole is level (`btn_pad_z` 5.65, leaving `btn_plate`
+3.35 of material). The plunger builds to `btn_plate`, **not** `cover_th` — at `cover_th` it
+would finish 1.35 short of proud and simply not press, which you would only discover with
+the case shut. The grille needs no such help: its holes go from 2.0 to 2.14 long on the
+slope.
+
+**The stand's pivot has to move, and its leaf has to narrow.** Both are in
+*Sizing the stand to the plateau* below.
+
+**The Expand relief lost height, and no constant recovers it.** It topped out at
+`z_floor - exp_top` = 15.9 against a wall that is now 12.9, so it ran out through the rim —
+the exact notch `exp_top` exists to prevent. Now derived from `body_d`, with `exp_top`
+4.0 → 2.0; full-depth reach still goes **13.5 → 8.5** against a mated plug occupying
+roughly 6.9–9.9, because a 7 mm shorter wall cannot hold the same pocket. Proven closed by
+slab-testing the wall top at z 12.75: **0 gap points, ring continuous**. On this board it
+may be moot — the relief exists for the external mic module's cable, which board 2 does not
+have, but unlike the mic *channel* beside it this pocket was never gated on `mic_ext`.
+Gating it is deliberately **not** done here: it is a behaviour change unrelated to the
+cover profile and wants its own decision.
+
+**`use_retainer` now refuses to combine with a plateau**, as an assert rather than a
+comment: its walls stand to the pack's height against a body topping out at 12.9, so they
+would foul the cover's rim underside. A silent collision is the failure being prevented.
+
+## Sizing the stand to the plateau
+
+**A 50.8 leaf on a 41.2 plateau cantilevers 4.8 mm a side over the thin rim**, hiding the
+very thing the rim exists to show. `ks_nose_hw` already derives the leaf's width *from* the
+pivot spacing, so inverting that relation is the whole fix: pick the leaf to fit, and
+`ks_gap` follows. It is now derived from `plat_x1 - plat_x0`, so a different pack resizes
+the stand automatically.
+
+| | before | now |
+|---|---|---|
+| leaf | 50.8 | **40.0** |
+| `ks_gap` | 34.0 | **23.2** (68%) |
+| foot on the desk | 38.8 (65% of width) | **28.0** (47%) |
+| side rim it uncovers | — | **9.1 each side** |
+
+The cost is real and is not hidden: the device rests on its **full-width bottom edge at the
+front** and the leaf tip at the rear, so this narrows the *rear* of the stance; the larger
+effect is racking resistance at the hinge, which scales with the pivot spacing.
+`ks_ear_w` is not an alternative lever — its M3 counterbore is 3.2 deep in a 5.5 ear,
+leaving 2.3.
+
+**The pivot moves 15 → 24, and that reverses a decision.** At 15 the folded leaf lands on
+the rim and meets the plateau's wall 3.1 mm later — a hard collision, it cannot close. It
+has to pivot on the plateau, which needs `ks_lug_y >= plat_y0 + ks_bz` = 22.2; 24 leaves
+1.8 of margin and still lands the tip at 88.7 inside a plateau ending at 89.3. **This hands
+back 8 of the 11 mm of leverage commit 62a0fc2 deliberately reclaimed** (*"a stand wants
+its pivot near the edge it leans from"*). That is the price of the raised plateau.
+
+**The stand still sets the closed thickness.** Its nose stands 8.2 proud of whatever it
+folds onto, so the device shut is **30.1 mm** — unchanged by any of this. The profile
+changes the rim you hold, not the number on the spec sheet.
+
 ## The battery is 46% of the thickness
 
 **RE-MEASURED on the actual pack: 36 × 66 × 10 mm.** This file said 37 × 68.5 × 10 for

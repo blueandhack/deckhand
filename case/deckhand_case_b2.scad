@@ -474,7 +474,22 @@ exp_plug_proud = 1.5;   // how far the mated Expand plug stands past the board e
 // this file, and it was caught the same way as the third: by grepping the build for
 // WARNING as well as ERROR. See print_shrink's note.
 exp_z_pad = 0.5;   // start just below the board's back plane so the edge is clear too
-exp_top   = 4.0;   // wall left above the relief, so it doesn't notch the top rim
+// 4.0 -> 2.0, FORCED BY THE LOWERED WALL RATHER THAN CHOSEN. This is the wall
+// left above the relief so it does not notch the top rim, and it was measured
+// against a 19.9 mm wall. The plateau profile drops that wall to 12.9, and at
+// 4.0 the relief's own top (body_d - exp_top) lands BELOW where it starts - the
+// pocket inverts and the rim breaks anyway. Two things are worth being straight
+// about:
+//   * THE RELIEF IS SHALLOWER THAN IT WAS, and no value of exp_top changes that.
+//     Full-depth reach goes 13.5 -> 8.5, against a mated plug occupying roughly
+//     6.9..9.9. A 7 mm shorter wall cannot hold the same pocket.
+//   * ON THIS BOARD IT MAY BE MOOT. The relief exists for the external mic
+//     module's cable (mic_ext), which board 2 does not have - but unlike the mic
+//     CHANNEL beside it, this pocket was never gated on that flag. Gating it is
+//     the obvious answer and is deliberately NOT done here: it is a behaviour
+//     change that has nothing to do with the cover profile, and it wants its own
+//     decision about whether anything is ever plugged into Expand.
+exp_top   = 2.0;   // wall left above the relief, so it doesn't notch the top rim
 // Both wall channels get a SLOPED roof instead of a flat one. Two reasons, and the
 // geometry is the same for both: closing their tops turned each ceiling into a flat
 // 12 mm bridge printed face-down, which sags; and a ramp gives the mic capsule a
@@ -662,12 +677,27 @@ wire_w = 3.4; wire_h = 2.8;
 // 6.5 mm across corners, which is what forced the old 9 mm knuckle and all the
 // bulk. Dropping it halves the barrel.
 ks_open    = 0;    // preview deploy angle (0 = folded flat)
-ks_gap     = 34;   // pivot spacing (centre-to-centre)
+// ks_gap IS DERIVED, and it lives with the plateau constants ~150 lines down
+// because it needs plat_x0/plat_x1, which need in_w and batt_y0. Writing it here
+// yields undef - the same forward reference exp_relief and mic_pcb_x0 carry
+// notes about, and that body_d hit again in this very change.
+//   see: "ks_gap - sized to the plateau the leaf folds onto"
 // Back to 15, near the edge - the collision that pushed this to 26 is gone now
 // that the hinge is at the other END. A stand wants its pivot close to the edge
 // it leans from; 26 was 11 mm of leverage given up to avoid a hole that is no
 // longer anywhere near it.
-ks_lug_from = 15;  // pivot distance in from the MIC (top) end
+// THE PIVOT SITS ON THE PLATEAU, NOT ON THE RIM, and that is forced rather than
+// preferred: at 15 the leaf folds onto the rim and meets the plateau's wall
+// 3.1 mm later - a hard collision, the leaf simply cannot close. It has to pivot
+// on the plateau top, which needs ks_lug_y >= plat_y0 + ks_bz = 22.2; 24 leaves
+// 1.8 of margin and still lands the leaf's tip at 88.7 inside a plateau ending
+// at 89.3.
+// THIS GIVES BACK 8 OF THE 11 mm OF LEVERAGE commit 62a0fc2 deliberately
+// reclaimed (ks_lug_from 26 -> 15, "a stand wants its pivot near the edge it
+// leans from"). That is the price of the raised plateau, and it is recorded here
+// rather than rediscovered.
+// ks_lug_from is DERIVED beside ks_gap, ~130 lines down: it reads cover_rise,
+// which is declared with the shell thicknesses BELOW this block. Same trap.
 ks_barrel  = 8.2;  // barrel diameter — shared by the cover bosses AND the blade nose.
                    // Sized so the screw head can be BURIED in the blade's outer face
                    // with a 1.2 mm rim; at 7.0 the rim was 0.6 mm and would crack.
@@ -714,6 +744,31 @@ assert(!mic_ext || exp_relief >= exp_plug_proud,
        "Expand relief cannot clear the plug AND keep a printable skin at this wall - raise wall to 2.6");
 front_th = 2.2;     // front face thickness
 cover_th = 2.0;     // back cover plate
+
+// ---------- THE BACK COVER'S PROFILE ----------
+// THE CELL NEEDS 13 mm OF CAVITY AND NOTHING ELSE NEEDS MORE THAN 6, so a case
+// built to one uniform depth spends 7 mm on air everywhere the cell is not. The
+// cover carries a raised PLATEAU over the cell instead, and the body wall drops
+// by the same 7 - which leaves the cell standing proud of the body, so the
+// plateau is not decoration, it is what encloses it.
+//
+// 6.0 is comp_back: the vendor drawing gives SMD 4.70 for the bare components
+// (page 12, side view: CTP 1.00 + LCD 2.20 + GLUE 0.50 + PCB 1.60 + SMD 4.70 =
+// 10.00) and 6.0 adds the mated JST plugs the outline does not show. That
+// allowance is inherited from board 1 and has never been measured HERE, so it is
+// the floor as modelled rather than as proven - measure a mated plug before
+// trying to go below it.
+//
+// cover_rise = 0 RESTORES THE FLAT COVER EXACTLY, and that is the point of
+// spelling it as a rise rather than as two separate depths: body_d, total_th,
+// the plunger and the plateau all derive from it, so there is one number to put
+// back and no second code path to rot.
+cover_rise  = 7.0;    // plateau height above the rim = cavity_d - comp_back
+cover_taper = true;   // true  = slope from the rim edge up to the plateau (option B)
+                      // false = vertical wall plus a chamfered top edge (option A)
+cover_cham  = 1.5;    // that chamfer, when cover_taper is false
+plat_gap    = 0.6;    // clearance from the cell to the plateau's inner wall
+plat_wall   = 2.0;    // and the thickness of that wall
 lip_h    = 4.0;     // cover lip depth — shared by cover() and the retainer risers
 oc_r     = 7.0;
 soft_r   = 1.6;
@@ -737,6 +792,25 @@ assert(screw_skin >= screw_skin_min,
            "material. Use a shorter screw, or lower screw_skin_min deliberately."));
 cavity_d   = max(comp_back, batt_seat + batt_t + batt_extra);
 z_floor    = z_pcb_b + cavity_d;            // inner face of the back cover
+// z_floor is the cover's inner face OVER THE CELL. The body wall stops
+// cover_rise short of it, so the cell stands proud of the body and the cover's
+// plateau encloses it; total_th is still measured to the plateau's outer face.
+body_d     = z_floor - cover_rise;           // body runs front face .. back opening
+// THE RETAINER HAS NOT BEEN RE-DERIVED FOR A RAISED PLATEAU, and this is an
+// assert rather than a comment because the failure is a silent collision: its
+// ring of walls stands to the pack's height (18.6) against a body that now tops
+// out at 12.9, so its long walls at x 2.8 / 56.6 sit OUTSIDE the plateau's
+// cavity and would foul the cover's rim underside. It is off by default and the
+// plateau's own cavity walls do its job, so this refuses the combination instead
+// of quietly printing a part that cannot close.
+assert(!(use_retainer && cover_rise > 0),
+       str("use_retainer does not work with cover_rise > 0 - the retainer's walls ",
+           "stand above the shortened body and foul the cover. Set cover_rise = 0, ",
+           "or leave the retainer off: the plateau's cavity walls corral the pack."));
+total_th   = z_floor + cover_th;
+// DEFINED HERE, ABOVE btn_span, BECAUSE btn_span READS body_d - the FIFTH
+// forward-reference this file has been bitten by, and it failed exactly the way
+// the other four did: an assert, not a wrong number.
 // Plunger stem, derived: the clear span from the cover's inner face down to the
 // top of the switch, less the rest gap.
 //
@@ -745,13 +819,11 @@ z_floor    = z_pcb_b + cavity_d;            // inner face of the back cover
 // assert below. OpenSCAD does not hoist, and this file already carries two notes
 // saying so (mic_pcb_x0, screw_skin); writing a third one directly above the
 // mistake did not prevent it. The assert did.
-btn_span     = z_floor - z_pcb_b - btn_switch_h;
+btn_span     = body_d - z_pcb_b - btn_switch_h;   // the rim, not the plateau
 btn_stem_len = btn_span - btn_rest_gap;
 assert(btn_stem_len > 0, "btn_switch_h is taller than the cavity: no room for a plunger.");
 assert(btn_proud > btn_rest_gap + 0.4,
        "btn_proud is too small: pressing the button flush would not reach the switch.");
-body_d     = z_floor;                        // body runs front face .. back opening
-total_th   = body_d + cover_th;
 
 // ---------- Plan geometry ----------
 // The LENGTH takes print_shrink as a whole, where the width takes it halved -
@@ -793,6 +865,59 @@ usb_wall_y = usb_at_top ? out_h - wall/2 : wall/2;
 btn_y      = usb_at_top ? by0 + board_h - btn_in : by0 + btn_in;
 win_dy     = usb_at_top ? -win_shift : win_shift;   // + win_shift => away from the USB-C end
 batt_y0    = usb_at_top ? by0 + batt_dy : by0 + board_h - batt_dy - batt_h;
+
+// ---------- The cover's plateau, derived from the CELL it exists to enclose ----------
+// Not a chosen rectangle: the cell plus its clearance plus the wall that holds
+// it. Everything about the profile follows from these four numbers, so a
+// different pack moves the plateau, the taper angles and the stand together.
+plat_x0 = wall + (in_w - batt_w)/2 - batt_dx - plat_gap - plat_wall;
+plat_x1 = plat_x0 + batt_w + 2*(plat_gap + plat_wall);
+plat_y0 = batt_y0 - plat_gap - plat_wall;
+plat_y1 = batt_y0 + batt_h + plat_gap + plat_wall;
+// The hollow under it. Its walls ARE the cell's corral, which is why batt_ribs
+// is redundant once cover_rise > 0 - see the rib note.
+plat_cx0 = plat_x0 + plat_wall;  plat_cx1 = plat_x1 - plat_wall;
+plat_cy0 = plat_y0 + plat_wall;  plat_cy1 = plat_y1 - plat_wall;
+
+// ks_gap - sized to the plateau the leaf folds onto.
+// A 50.8 leaf on a 41.2 plateau cantilevers 4.8 a side over the thin rim, which
+// hides the very thing the rim exists to show. The leaf's width is already
+// derived FROM this spacing (ks_nose_hw), so inverting that relation is the
+// whole fix: pick the leaf to fit, and the pivot spacing follows.
+// The cost is real and is not hidden: spacing 34 -> 23.2 is 68%, and the foot on
+// the desk goes 38.8 -> 28.0, i.e. 65% -> 47% of the case width. The device's
+// own bottom edge is the full 59.4 either way, so this narrows the REAR of the
+// stance, not the front.
+ks_leaf_margin = 0.6;   // leaf inset from the plateau edge, per side
+ks_gap = cover_rise > 0
+  ? 2*((plat_x1 - plat_x0)/2 - ks_leaf_margin - ks_boss_w/2 - ks_hgap - ks_ear_w)
+  : 34;                 // the flat cover's original spacing, so cover_rise 0 restores it
+
+// Pivot distance in from the MIC end. Must clear plat_y0 by the barrel's radius
+// or the folded leaf fouls the plateau wall; 24 leaves 1.8 of margin and still
+// lands the tip at 88.7 inside a plateau ending at 89.3.
+ks_lug_from = cover_rise > 0 ? 24 : 15;
+
+// Outer-face depth (measured DOWN from the plateau, cover-local) at a point on
+// the end slopes. Only the y axis is needed: everything that has to sit flat is
+// well inside the plateau's x range, and on the sides the slope is steeper and
+// nothing sits on it.
+function taper_y(y) =
+    cover_rise == 0 ? 0
+  : !cover_taper    ? ((y >= plat_y0 && y <= plat_y1) ? 0 : cover_rise)
+  : y < plat_y0     ? cover_rise * (plat_y0 - y) / plat_y0
+  : y > plat_y1     ? cover_rise * (y - plat_y1) / (out_h - plat_y1)
+  : 0;
+
+// A BUTTON ON A SLOPE IS NOT A BUTTON. At the service end the taper drops 2.26
+// across the 6 mm hole, so against btn_proud of 1.5 the head would be buried on
+// the uphill side and 3.76 proud on the downhill one. Each button therefore gets
+// a flat landing cut square to the board, deep enough that the WHOLE hole is on
+// level ground - which is the pad's far edge, since that is where the slope has
+// fallen furthest.
+btn_pad_d = btn_guide_d + 3.0;
+btn_pad_z = min(cover_rise, taper_y(btn_y + btn_pad_d/2));
+btn_plate = (cover_rise - btn_pad_z) + cover_th;   // material left under the pad
 // speaker centre, at the end OPPOSITE the USB-C edge
 spk_px     = bcx + spk_cx;
 spk_py     = usb_at_top ? by0 + spk_cy : by0 + board_h - spk_cy;
@@ -959,7 +1084,7 @@ snap_skin = 1.1;
 // The two sides are SYMMETRIC in y so the cover cannot rack going in.
 //
 // THE ONE OBSTRUCTION ON EITHER LONG WALL IS THE EXPAND RELIEF, on the high-X
-// wall at y 14.8..26.8. It tops out at z_floor - exp_top = 15.9 while these
+// wall at y 14.8..26.8. It tops out at body_d - exp_top = 10.9 while these
 // pockets sit at z 16.3..18.7, so a pocket placed over it would have 0.4 mm of
 // material between the two - HALF the 0.8 mm that snap_skin's own note measured
 // a slicer discarding. At out_h/3 the nearer pocket starts at y 31.6, clear by
@@ -1065,7 +1190,7 @@ module body_core(){
     let (cy  = wall + mic_y0 + mic_l - mic_can_from_end,
          cz  = z_pcb_b + mic_floor + mic_w/2)
       union(){
-        let (ch_top = z_floor + 0.01 - mic_chan_top,
+        let (ch_top = body_d + 0.01 - mic_chan_top,
              ch_y0  = cy - mic_can_d/2 - 1.0,
              ch_w   = mic_can_d + 2.0){
           translate([out_w - wall, ch_y0, z_pcb_b - 0.5])
@@ -1093,7 +1218,7 @@ module body_core(){
     // The mic channel below is the one that genuinely cannot be closed.
     let (exp_y = usb_at_top ? by0 + exp_from_far : by0 + board_h - exp_from_far,
          exp_x = exp_side < 0 ? wall - exp_relief : out_w - wall)
-      let (ex_top = z_floor - exp_top, ex_y0 = exp_y - exp_w/2){
+      let (ex_top = body_d - exp_top, ex_y0 = exp_y - exp_w/2){
         translate([exp_x, ex_y0, z_pcb_b - exp_z_pad])
           cube([exp_relief, exp_w, (ex_top - chan_slope) - (z_pcb_b - exp_z_pad)]);
         // The taper always runs to zero at the wall's INNER face, which is the high-X
@@ -1284,7 +1409,7 @@ module speaker_grille(){
     for (i = [0 : n-1])
       translate([spk_grille_cx + (i - (n-1)/2) * spk_grille_p,
                  spk_grille_cy + (j - (ny-1)/2) * ry, -0.01])
-        cylinder(d = spk_grille_d, h = cover_th + 0.02);
+        cylinder(d = spk_grille_d, h = cover_rise + cover_th + 0.02);   // the face it pierces sits on the taper
   }
 }
 
@@ -1325,16 +1450,45 @@ module cover(){
   // WIDE rather than too long - raise g instead; that is the one to change and
   // this comment is here so the next reader does not have to guess which.
   gy = g + 0.25;
+  // THE COVER HAS TWO REFERENCE PLANES NOW. rim0 is the thin rim's outer face and
+  // rimI its inner face - the one that lands on the body wall. The PLATEAU's
+  // outer face is still cover-local z 0, so total_th is unchanged and every
+  // feature that lives on the rim (lip, barbs, button sleeves) moves together by
+  // cover_rise instead of each carrying its own offset.
+  rim0 = cover_rise;
+  rimI = cover_rise + cover_th;
+  pw = plat_x1 - plat_x0;  ph = plat_y1 - plat_y0;
   difference(){
     union(){
-      // plate
-      translate([wall-0.1,wall-0.1,0]) soft_box(in_w+0.2,in_h+0.2,cover_th,max(oc_r-wall,2),soft_r*0.5);
+      // the thin rim
+      translate([wall-0.1,wall-0.1,rim0]) soft_box(in_w+0.2,in_h+0.2,cover_th,max(oc_r-wall,2),soft_r*0.5);
+      // ...and the plateau over the cell, plus how it meets that rim
+      if (cover_rise > 0) {
+        if (cover_taper)
+          // ONE HULL from the plateau outline down to the full rim outline. The
+          // slopes come out planar at 37.6 deg on the sides and ~21 at the ends,
+          // and both rise AWAY from the bed, so it still prints without support.
+          hull(){
+            translate([plat_x0+pw/2, plat_y0+ph/2, 0])
+              linear_extrude(0.01) rrect_c(pw, ph, 3);
+            translate([wall-0.1+(in_w+0.2)/2, wall-0.1+(in_h+0.2)/2, rim0])
+              linear_extrude(0.01) rrect_c(in_w+0.2, in_h+0.2, max(oc_r-wall,2));
+          }
+        else
+          // straight wall, chamfered where it turns onto the top
+          hull(){
+            translate([plat_x0+pw/2, plat_y0+ph/2, cover_cham])
+              linear_extrude(rim0 + cover_th - cover_cham) rrect_c(pw, ph, 3);
+            translate([plat_x0+pw/2, plat_y0+ph/2, 0])
+              linear_extrude(0.01) rrect_c(pw - 2*cover_cham, ph - 2*cover_cham, 3);
+          }
+      }
       // Guide sleeves for the printed buttons. The plate alone is 2.0 mm of
       // bearing for a 4 mm stem, which would let the button cock over; the
       // sleeve triples that. Inboard of the lip, so it does not foul it.
       if (cover_buttons)
         for (dx = [reset_dx, boot_dx])
-          translate([bcx + dx, btn_y, cover_th - 0.01])
+          translate([bcx + dx, btn_y, rimI - 0.01])
             difference(){
               cylinder(d = btn_guide_d + 2.0, h = btn_sleeve_h + 0.01);
               translate([0,0,-0.1]) cylinder(d = btn_guide_d, h = btn_sleeve_h + 0.3);
@@ -1343,7 +1497,10 @@ module cover(){
       // Battery corral - see batt_ribs. Positioned off the SAME expression the
       // preview ghost and the retainer use, so all three agree by construction
       // rather than by three transcriptions of the same arithmetic.
-      if (batt_ribs) {
+      // REDUNDANT ONCE THERE IS A PLATEAU: its cavity walls stand plat_gap off
+      // the pack on all four sides, which is exactly the job the ribs did - and
+      // they do it over the pack's full height rather than its top 6 mm.
+      if (batt_ribs && cover_rise == 0) {
         bxr = wall + (in_w - batt_w)/2 - batt_dx;   // pack's low-X edge
         byr = batt_y0;                              // pack's low-Y edge
         cxr = bxr + batt_w/2;  cyr = byr + batt_h/2;
@@ -1358,7 +1515,7 @@ module cover(){
             cube([r[2], r[3], batt_rib_h + 0.01]);
       }
       // inner lip (straight wall; looser in the length direction via gy)
-      translate([wall+g,wall+gy,cover_th-0.01])
+      translate([wall+g,wall+gy,rimI-0.01])
         linear_extrude(lip_h) difference(){ rrect(in_w-2*g,in_h-2*gy,3);
                                             offset(-lip_in) rrect(in_w-2*g,in_h-2*gy,3); }
       // snap barbs — a wedge ROOTED into the lip's outer face (not floating): a
@@ -1370,7 +1527,7 @@ module cover(){
       // sides run g (0.3) and the ends gy (0.55), so a single constant here
       // would put every side barb 0.25 mm off its lip. Reproduces the ends
       // exactly (1.1 + 1.65 = 2.75 = wall + gy) rather than approximating them.
-      for(s=snaps()) translate([s[0], s[1], cover_th+lip_h])
+      for(s=snaps()) translate([s[0], s[1], rimI+lip_h])
         rotate([0,0,s[2]])
           translate([0, wall/2 + ((s[2] == 90 || s[2] == 270) ? g : gy), 0])
           translate([-3.5,0,0]) hull(){
@@ -1404,11 +1561,24 @@ module cover(){
     // (see snaps()), which is where the retention actually lives.
     // With cover_buttons the hole shrinks to a SLIDING FIT on the stem and a
     // printed plunger fills it; without, it stays the open Ø6 tool hole.
+    // the hollow under the plateau - open to the body, 2 mm of skin over the cell
+    if (cover_rise > 0)
+      translate([plat_cx0, plat_cy0, cover_th])
+        cube([plat_cx1 - plat_cx0, plat_cy1 - plat_cy0, rimI + lip_h + 2 - cover_th]);
+    // A FLAT LANDING FOR EACH BUTTON - see btn_pad_z. Cut square to the board and
+    // deep enough that the whole hole is level, so btn_proud means the same thing
+    // all the way round the head instead of varying across the slope.
+    if (cover_buttons && cover_rise > 0 && btn_pad_z > 0.05)
+      for (dx = [reset_dx, boot_dx])
+        translate([bcx + dx, btn_y, -1]) cylinder(d = btn_pad_d, h = btn_pad_z + 1);
+    // The hole starts ABOVE the outer surface wherever that surface has got to,
+    // rather than at a fixed z: on a taper there is no single outer plane.
     for (dx = [reset_dx, boot_dx])
-      translate([bcx + dx, btn_y, -0.01]) {
+      translate([bcx + dx, btn_y, -1]) {
         d = cover_buttons ? btn_guide_d : btn_d;
-        cylinder(d = d, h = cover_th + lip_h + btn_sleeve_h + 0.02);
-        cylinder(d1 = d + 2*btn_cham, d2 = d, h = btn_cham + 0.01);
+        cylinder(d = d, h = rimI + lip_h + btn_sleeve_h + 2);
+        translate([0,0,1 + btn_pad_z])
+          cylinder(d1 = d + 2*btn_cham, d2 = d, h = btn_cham + 0.01);
       }
     if (spk_grille) speaker_grille();
     // pilot hole in each boss — the M3 screw threads straight into the plastic
@@ -1517,9 +1687,14 @@ module body(){
 // nothing to align.
 module button(){
   cham = (btn_flange_d - btn_stem_d) / 2;   // 45 degrees, so it self-supports
+  // THE MATERIAL OVER THE FLANGE IS btn_plate, NOT cover_th. On a tapered cover
+  // the button sits in a landing cut into the slope, so the plate above its
+  // flange is (cover_rise - btn_pad_z) + cover_th - 3.35 here against 2.0 flat.
+  // Building to cover_th leaves the head 1.35 short of proud and the button
+  // unpressable, which is a failure you only find with the case shut.
   rotate([180,0,0]) {                        // button top on the bed
-    cylinder(d = btn_stem_d, h = btn_proud + cover_th + btn_sleeve_h);
-    translate([0, 0, btn_proud + cover_th + btn_sleeve_h]) {
+    cylinder(d = btn_stem_d, h = btn_proud + btn_plate + btn_sleeve_h);
+    translate([0, 0, btn_proud + btn_plate + btn_sleeve_h]) {
       cylinder(d1 = btn_stem_d, d2 = btn_flange_d, h = cham);      // self-supporting cone
       translate([0,0,cham]) cylinder(d = btn_flange_d, h = btn_flange_t);
       translate([0,0,cham + btn_flange_t]) cylinder(d = btn_stem_d, h = btn_stem_len);
