@@ -107,8 +107,11 @@ already uses, so the other paired Mac drops them instead of logging an auth fail
 - [ ] **Step 4:** the window closes on tab switch, on sleep, and on timeout — a device left pairing
 because someone wandered off is the one state that weakens the presence guarantee.
 - [ ] **Step 5:** `MAX_HOSTS` is 4 and full is full. When there is no free slot, `PAIRREQ` is refused
-with `PAIRFAIL full` **before** any key is generated, and the device says so on its own screen —
-silently evicting a remembered Mac to make room would destroy a key the user still wanted.
+with `PAIRFAIL full` **before** any key is generated — silently evicting a remembered Mac to make
+room would destroy a key the user still wanted. Note Task 3 makes this path unreachable from the UI
+(the button cannot be drawn when the slots are full), so this is defence in depth for the case where
+a fourth Mac pairs over USB while a window is already open. Keep it anyway; do not rely on the UI to
+enforce a storage limit.
 - [ ] **Step 6:** verify, both baselines, commit.
 
 ---
@@ -117,9 +120,18 @@ silently evicting a remembered Mac to make room would destroy a key the user sti
 
 **Files:** `firmware/deckhand_display/settings.ino`, `board_es3c35p.h`, `settings-geom-check.mjs`
 
-- [ ] **Step 1:** a `PAIR NEW MAC` button on the Pairing group, above `ANSWER PROMPTS FROM`. It is
-`uiButton` in `COLOR_ACCENT`; it does **not** need a confirm dialog (it destroys nothing) but it
-must be refused with an on-screen reason when all `MAX_HOSTS` slots are full.
+- [ ] **Step 1: `PAIR NEW MAC` goes in the NEXT FREE ROW SLOT, not above the list.**
+
+Measured, because the obvious placement does not fit: the Pairing group's four Mac rows run
+`P3_LIST_Y + i * P3_ROW_STEP` = 218/278/338/398 and end at **449** against a footer at 460 — **10px
+of slack**, where a button above the list needs `H_ROW + gap` = 58.
+
+So it is drawn at `P3_LIST_Y + hostCount * P3_ROW_STEP`, `H_ROW` tall, in `COLOR_ACCENT`. That fits
+for 0..3 Macs (218..263 through 398..443) and at 4 Macs there is no room — **and at 4 Macs there is
+also no free NVS slot**, so the button's absence encodes "full" exactly, with no separate state, no
+extra string and no refusal path to get wrong. The two limits are the same limit.
+
+It needs no confirm dialog: it destroys nothing and it is reversible by walking away.
 - [ ] **Step 2:** a full-screen pairing panel, owning the glass the way the reader does: the code in
 `T_HERO` (Spleen 32x64, so 6 digits is 192px in a 320px panel — centre it and assert the fit), the
 requesting Mac's label under it once a `PAIRREQ` arrives, a `Ns left` countdown, and CANCEL. Before
@@ -132,8 +144,11 @@ second. The code never changes within one exchange, so it is drawn once per `PAI
 (`code did not match`, `no free slots`, `timed out`, `cancelled`), each dwelling ~1500ms and
 **flushing BEFORE the delay** (on a shadow-buffered board the message otherwise exists for zero
 frames — a defect this repo has already fixed once in the farewell screens).
-- [ ] **Step 6:** assertions — the code's width at `T_HERO` fits the panel; the panel's blocks share
-no pixel row; the countdown's cache is at least as long as its longest string plus NUL. Prove teeth.
+- [ ] **Step 6:** assertions — the code's width at `T_HERO` fits the panel (6 digits x 32px = 192 of
+320); the panel's blocks share no pixel row; the countdown's cache is at least as long as its
+longest string plus NUL; and **the button's slot for every `hostCount` 0..3 clears the footer while
+the slot for 4 does not** — that last one is what pins the "absence encodes full" argument to the
+geometry instead of leaving it in a comment. Prove teeth on each.
 - [ ] **Step 7:** verify, both baselines, commit.
 
 ---
