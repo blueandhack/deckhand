@@ -100,11 +100,60 @@ Both ends are 0.30/0.70 again, and now measure identically off the STLs:
 | mic end | 13.42–22.22, 37.18–45.98 | 14.96 mm | 14.32–21.32, 38.08–45.08 | 23.76 mm |
 | service end | 13.42–22.22, 37.18–45.98 | 14.96 mm | 14.32–21.32, 38.08–45.08 | 23.76 mm |
 
-**Nothing constrains these positions on either edge**, and the near miss worth recording
-is that the USB-C cutout looks like it should: it spans x 23.2–36.2 on the service wall,
-straddling any inboard pair — but it sits at **z 5.1–12.1** while the pockets are at
-**z 16.3–18.7**, so the two never meet. Reasoning about that edge in plan view alone says
-the opposite. Check z before believing it.
+**Nothing constrains these positions on either short edge**, and the near miss worth
+recording is that the USB-C cutout looks like it should: it spans x 23.2–36.2 on the
+service wall, straddling any inboard pair — but it sits at **z 5.1–12.1** while the
+pockets are at **z 16.3–18.7**, so the two never meet. Reasoning about that edge in plan
+view alone says the opposite. Check z before believing it.
+
+## Eight snaps: the long edges had nothing holding them
+
+The four corner snaps hold the two ENDS. The two SIDES run **103 mm between them**, and
+nothing pulled their mid-span down — which is exactly where a long snap lid gaps, and the
+one place no end clip can reach. There are now two more on each long edge.
+
+**At the third-points, not at 0.30/0.70.** The side is a beam already held at both ends,
+so the third-points are the standard four-support spacing. It also buys clearance: at
+`out_h/3` the lower pocket starts at y 31.6, and **the one obstruction on either long wall
+is the Expand relief** at y 14.8–26.8 on the high-X wall. That relief tops out at z 15.9
+against pockets at z 16.3 — 0.4 mm apart, *half* the 0.8 mm `snap_skin` already watched a
+slicer discard — so a pocket over it would be the same defect a third time. Thirds clear
+it by **4.8 mm**; 0.30/0.70 would have left 1.2. Both sides use the same y so the cover
+cannot rack going in. (The mic channel and side port are on that wall too, but both are
+`if (mic_ext)` and board 2 is false. The low-X wall is clear end to end.)
+
+Measured off the STLs, all eight, each barb centred in its pocket with 0.9 mm a side:
+
+| edge | pockets | barbs |
+|---|---|---|
+| mic end | x 13.42–22.22, 37.18–45.98 | 14.32–21.32, 38.08–45.08 |
+| service end | x 13.42–22.22, 37.18–45.98 | 14.32–21.32, 38.08–45.08 |
+| low-X side | y 31.57–40.37, 67.53–76.33 | 32.47–39.47, 68.43–75.43 |
+| high-X side | y 31.57–40.37, 67.53–76.33 | 32.47–39.47, 68.43–75.43 |
+
+The side pockets cut inward to x 5.5 / 53.9, clearing the battery (11.7–47.7) by 6.2 mm.
+
+**THE SIDE BARBS ENGAGE DEEPER THAN THE END ONES, AND THAT IS A CONSEQUENCE OF THE LIP
+CLEARANCE RATHER THAN A CHOICE.** The side lip runs `g` = 0.30 and the ends `gy` = 0.55,
+so the side lip sits 0.25 mm closer to the wall and its barb reaches 0.25 mm further into
+the pocket: **1.00 mm into a 1.10 mm pocket, 0.10 mm spare**, against 0.75/0.35 at the
+ends. Positive, and deeper engagement is *wanted* on the edge that was gapping — but it is
+thinner than the 0.2 mm the `snap_skin` note called comfortable, so if the sides bind
+before the cover seats, raise `g` (which also loosens the side fit) or shorten the barb's
+1.3 mm catch shelf. Do not thin `snap_skin`.
+
+**Costs, accepted rather than overlooked.** Insertion force roughly doubles; the cover must
+now be pressed **straight down** rather than hooked at one end and rotated in; and it is
+harder to open. If it stops clicking home the knob is `snap_win_extra`, never `snap_skin`.
+
+**`snaps()` carries an ANGLE now**, which is what made this a two-line change rather than a
+second copy of the barb. Both loops used to derive rotation from `s[1] < out_h/2 ? 0 : 180`
+— which cannot express an edge running along Y at all — and the cover went further,
+*recomputing* its y from that same test and ignoring the one in the list. Now `(x, y)` is a
+point on the wall centreline and the angle rotates into the barb's own frame, where local
+−Y always points out of the case; everything downstream was already written in that frame.
+The cover then steps inward by `wall/2 +` the lip clearance **for that axis** — a single
+constant there would put every side barb 0.25 mm off its lip.
 
 **The real port is a hex grille in the back cover**, and the cover is not a
 preference — it is the only place the speaker fits. There is 3.1 mm between the

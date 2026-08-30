@@ -940,13 +940,55 @@ snap_skin = 1.1;
 // At 0.30/0.70 both ends are identical: pits 13.42..22.22 and 37.18..45.98,
 // 14.96 of wall between them.
 //
-// NOTHING CONSTRAINS THESE POSITIONS ON EITHER EDGE, and the near miss worth
-// recording is that the USB-C cutout looks like it should. It spans x 23.2..36.2
-// on the service wall, straddling any inboard pair - but it sits at z 5.1..12.1
-// while the pockets are at z 16.3..18.7, so the two never meet. Reasoning about
-// this edge in plan view alone says the opposite; check z before believing it.
-function snaps() = [ [out_w*0.30, wall/2], [out_w*0.70, wall/2],
-                     [out_w*0.30, out_h-wall/2], [out_w*0.70, out_h-wall/2] ];
+// NOTHING CONSTRAINS THESE POSITIONS ON EITHER SHORT EDGE, and the near miss
+// worth recording is that the USB-C cutout looks like it should. It spans x
+// 23.2..36.2 on the service wall, straddling any inboard pair - but it sits at
+// z 5.1..12.1 while the pockets are at z 16.3..18.7, so the two never meet.
+// Reasoning about that edge in plan view alone says the opposite; check z first.
+//
+// ---------------------------------------------------------------------------
+// EIGHT SNAPS: the four above, PLUS two on each LONG edge.
+// ---------------------------------------------------------------------------
+// The four corner snaps hold the two ENDS. Nothing held the SIDES, which run
+// 103 mm between them - the mid-span of a long snap lid is exactly where it
+// gaps, and no end clip can reach it. Two per side at the THIRD-POINTS of that
+// span is the standard four-support spacing for a beam already held at both
+// ends; 0.30/0.70 (the ends' own rule) would sit slightly wider AND would leave
+// only 1.2 mm to the Expand relief, against 4.8 mm at thirds.
+//
+// The two sides are SYMMETRIC in y so the cover cannot rack going in.
+//
+// THE ONE OBSTRUCTION ON EITHER LONG WALL IS THE EXPAND RELIEF, on the high-X
+// wall at y 14.8..26.8. It tops out at z_floor - exp_top = 15.9 while these
+// pockets sit at z 16.3..18.7, so a pocket placed over it would have 0.4 mm of
+// material between the two - HALF the 0.8 mm that snap_skin's own note measured
+// a slicer discarding. At out_h/3 the nearer pocket starts at y 31.6, clear by
+// 4.8. (The mic channel and side port are on that wall too, but both are
+// `if (mic_ext)` and board 2 is false; the low-X wall is clear end to end.)
+//
+// COSTS, accepted rather than overlooked: insertion force roughly doubles, the
+// cover must now be pressed STRAIGHT DOWN rather than hooked at one end and
+// rotated in, and it is harder to open. If it stops clicking home the knob is
+// snap_win_extra, never thinning snap_skin.
+//
+// THE THIRD ELEMENT IS AN ANGLE, and it is what made this a two-line change
+// instead of a second copy of the barb. Both loops used to derive their rotation
+// from `s[1] < out_h/2 ? 0 : 180`, which cannot express an edge running along Y
+// at all - and the cover went further, RECOMPUTING its y from that same test and
+// ignoring the one in the list. Now (x, y) is the point on the WALL CENTRELINE
+// and the angle rotates into the barb's own frame, in which local -Y always
+// points OUT of the case. Everything downstream of the rotate was already
+// written in that frame, so it needed no change for either new orientation.
+//   0 = mic end (low y)     180 = service end (high y)
+// 270 = low-X side          90 = high-X side
+function snaps() = [
+  // the two SHORT edges - barb runs along X
+  [out_w*0.30, wall/2,         0], [out_w*0.70, wall/2,           0],
+  [out_w*0.30, out_h - wall/2, 180], [out_w*0.70, out_h - wall/2, 180],
+  // the two LONG edges - barb runs along Y, at the third-points
+  [wall/2,         out_h/3, 270], [wall/2,         out_h*2/3, 270],
+  [out_w - wall/2, out_h/3,  90], [out_w - wall/2, out_h*2/3,  90],
+];
 
 // ============================================================================
 // BODY (front) — window, walls, 4 columns, snap catches
@@ -1066,7 +1108,7 @@ module body_core(){
     // (and therefore how the cover seats) is unchanged — only the opening grows
     // Cut from just inside the OUTER face (leaving snap_skin) inward past the wall,
     // rather than straight through it.
-    for(s=snaps()) translate([s[0],s[1],body_d-3.2]) rotate([0,0, s[1]<out_h/2?0:180])
+    for(s=snaps()) translate([s[0],s[1],body_d-3.2]) rotate([0,0, s[2]])
       translate([-4-snap_win_extra, -wall/2 + snap_skin, -snap_win_extra])
         cube([8+2*snap_win_extra, wall*2, 1.6+2*snap_win_extra]);
   }
@@ -1322,8 +1364,15 @@ module cover(){
       // snap barbs — a wedge ROOTED into the lip's outer face (not floating): a
       // catch shelf that protrudes into the wall window, ramping up to flush at
       // the tip so it cams in with light thumb pressure on insertion
-      for(s=snaps()) translate([s[0], s[1]<out_h/2 ? wall+gy : out_h-wall-gy, cover_th+lip_h])
-        rotate([0,0,s[1]<out_h/2?0:180])
+      // The barb starts from the SAME wall-centreline point the body's pocket
+      // uses, then steps inward along its own local +Y to the lip line. That is
+      // wall/2 + the lip clearance for THIS axis - and the axis matters: the
+      // sides run g (0.3) and the ends gy (0.55), so a single constant here
+      // would put every side barb 0.25 mm off its lip. Reproduces the ends
+      // exactly (1.1 + 1.65 = 2.75 = wall + gy) rather than approximating them.
+      for(s=snaps()) translate([s[0], s[1], cover_th+lip_h])
+        rotate([0,0,s[2]])
+          translate([0, wall/2 + ((s[2] == 90 || s[2] == 270) ? g : gy), 0])
           translate([-3.5,0,0]) hull(){
             translate([0, -1.3, -1.6]) cube([7, 0.7, 0.9]);   // catch shelf: protrudes 1.3 mm into the
                                                               // wall window (was 1.0 — it let go too easily)
