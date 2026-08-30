@@ -1365,6 +1365,34 @@ for (const b of [1, 2]) {
       // budget below was measured against a card that is not this one.
       const adv = advanceB(b, T_BODY), lane = c.SESSION_BAND_BODY_LANE;
       const perLine = Math.floor(lane / adv);
+      // ---- THE MAC'S ICON ON THE EXPANDED CARD'S SUB-LINE ----
+      // Three claims, and the FIRST is the one a constants-only assertion cannot
+      // make: the draw site must measure the icon BEFORE fitting the text, or a
+      // long model/branch runs straight under it. So the fitText call's own third
+      // argument is PARSED out of sessions.ino and required to be the REDUCED
+      // lane - reverting it to a bare `lane` fails here by name, which is exactly
+      // the shape the severity spine's assertions had to be rebuilt into.
+      {
+        const drawSrc = fnSrc("void drawSessionRow(int pos) {");
+        const ICON = 16;                      // MAC_EMOJI_SIZE, board 2's body cell
+        const subLane = lane - ICON - c.SESSION_SUB_ICON_GAP;
+        chk(/subLane\s*=\s*rowEmoji\s*>=\s*0[\s\S]{0,120}?lane\s*-\s*MAC_EMOJI_SIZE\s*-\s*SESSION_SUB_ICON_GAP/.test(drawSrc),
+            `the sub-line's lane is REDUCED by the icon before anything is fitted into it`);
+        chk(/fitText\(subFit,\s*sizeof\(subFit\),\s*sub,\s*subLane\)/.test(drawSrc),
+            `and fitText measures the facts against that reduced lane, not the full one`);
+        chk(/drawEmoji\(rowEmoji,\s*nameX\s*\+\s*lane\s*-\s*MAC_EMOJI_SIZE,\s*cy,/.test(drawSrc),
+            `the icon is right-anchored to the card's own text lane`);
+        // The lane has to leave a usable amount of text, or the icon has eaten the
+        // line it rides on. "CC/studio" - the tag at its widest, which is the case
+        // this exists for - is 9 characters and must survive with the icon present.
+        const worstTag = widthB(b, T_BODY, "CC/studio");
+        chk(subLane >= worstTag,
+            `the reduced lane ${subLane}px still holds "CC/studio" (${worstTag}px), the two-Mac case this is for`);
+        // And the icon's own rows must clear the blocks either side of it: the band
+        // above ends at the sub-line's top, and the next block starts one step down.
+        chk(ICON <= c.SESSION_BAND_SUB_H,
+            `the icon's ${ICON} rows fit the sub-line's ${c.SESSION_BAND_SUB_H}px step, clear of the block below`);
+      }
       chk(c.SESSION_EXP_PROMPT_MAX * perLine >= CAP.prompt - 3,
           `prompt: ${c.SESSION_EXP_PROMPT_MAX} lines hold ${c.SESSION_EXP_PROMPT_MAX * perLine} of ${CAP.prompt - 3} chars (lane ${lane}px = ${perLine}/line at ${adv}px)`);
       chk((c.SESSION_EXP_PROMPT_MAX - 1) * perLine < CAP.prompt - 3,

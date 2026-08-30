@@ -1052,6 +1052,21 @@ const int SESSION_PULSE_MAX = 110;
 // field cannot silently push a line past what its data can fill.
 const int SESSION_BAND_NAME_H = 34;      // T_HEAD 24 + 10 leading
 const int SESSION_BAND_SUB_H = 32;       // T_BODY 16 + 16, the agent/model/branch line
+// THE MAC'S ICON RIDES THE SUB-LINE, RIGHT-ANCHORED, and this gap is the 4px every
+// icon-beside-text site on this device already uses. It is a named constant rather
+// than the literal 4 its neighbours carry because the checker asserts the LANE
+// arithmetic against it: the facts are fitText'd into `lane - MAC_EMOJI_SIZE -
+// SESSION_SUB_ICON_GAP`, measuring the icon FIRST, so no model or branch name -
+// however long - can collide with it. That is the detail card's meta-line order,
+// and it is the reason a 304px "CX/studio gpt-5.6-sol (feature-branch)" trims
+// instead of running under the icon.
+//
+// The expanded card was the ONLY row on this tab showing neither icon nor tag: the
+// tag+icon block one screen down is gated `if (!expanded)`, because that block draws
+// into the top-right corner the BAND now owns. So the icon had nowhere to go until
+// the sub-line took it, and the visible consequence was an icon that appeared the
+// moment a second session arrived and the card collapsed to an ordinary row.
+const int SESSION_SUB_ICON_GAP = 4;
 const int SESSION_BAND_TITLE_STEP = 20;  // T_BODY 16 + 4
 const int SESSION_BAND_RULE_H = 18;      // 1px rule + air either side
 const int SESSION_BAND_LABEL_H = 28;     // the "LAST PROMPT" caption

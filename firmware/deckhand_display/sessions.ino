@@ -1242,9 +1242,31 @@ void drawSessionRow(int pos) {
       if (sub[0]) {
         setUIFont(T_META);
         tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+        // THE MAC'S ICON IS RIGHT-ANCHORED HERE, and the facts are fitted into
+        // whatever lane is left - the detail card's meta-line ORDER, measuring the
+        // icon first, so no model or branch name can collide with it however long
+        // it is. This card is the only row on the tab that shows neither icon nor
+        // tag otherwise: the block that draws them is gated `if (!expanded)`,
+        // because it paints into the top-right corner the BAND now owns. The
+        // visible consequence was an icon that appeared only when a SECOND session
+        // arrived and this card collapsed into an ordinary row.
+        //
+        // NOT gated on usedLinkCount() > 1, matching every other icon site: an
+        // icon is personalisation - someone deliberately marked THEIR computer -
+        // where the TEXT tag is disambiguation and stays gated, which is why
+        // dispMacTag() already returns "" with one Mac and `sub` collapses to a
+        // plain "CC". So one Mac gets the icon and no tag; two get both.
+        const int subLane = rowEmoji >= 0
+                              ? lane - MAC_EMOJI_SIZE - SESSION_SUB_ICON_GAP
+                              : lane;
         char subFit[36];
-        fitText(subFit, sizeof(subFit), sub, lane);
+        fitText(subFit, sizeof(subFit), sub, subLane);
         tft.drawString(subFit, nameX, cy);
+        // The icon's y IS the text's y, no centring term - MAC_EMOJI_SIZE is the
+        // body cell height on this board (16), the identity every icon site relies
+        // on and the reason drawEmoji takes a TOP-LEFT corner.
+        if (rowEmoji >= 0)
+          drawEmoji(rowEmoji, nameX + lane - MAC_EMOJI_SIZE, cy, COLOR_CARD);
         cy += SESSION_BAND_SUB_H;
       }
       if (s.title[0]) {
