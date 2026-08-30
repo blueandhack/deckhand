@@ -92,6 +92,54 @@ function readerStep(c, which) {
   return c[tok];
 }
 const MAX_HOSTS = 4;
+const T_HERO = 4;
+
+// ---- THE WIRELESS-PAIRING PANEL (board 2) ----
+// The code's digit count is a CRYPTO constant and lives in pairing.ino, not in a
+// board header, so it is parsed from there: 6 digits at T_HERO is the one width on
+// that screen that cannot be trimmed, and a checker that transcribed the 6 would
+// certify nothing.
+const PAIRING_INO = fs.readFileSync(`${DIR}/pairing.ino`, "utf8");
+const PAIR_CODE_DIGITS = (() => {
+  const m = PAIRING_INO.match(/#define\s+PAIR_CODE_DIGITS\s+(\d+)/);
+  if (!m) throw new Error("settings-geom-check: PAIR_CODE_DIGITS not found in pairing.ino - " +
+                          "if the code's length moved, move this parse with it rather than " +
+                          "leaving the panel's one un-trimmable width asserted against nothing");
+  return +m[1];
+})();
+// settings.ino's own caches (the panel's two live there, beside the code that can
+// see pairing.ino's #defines, rather than with the other settings caches).
+const SETTINGS_CACHE = cacheSizes("settings.ino");
+// A function's SOURCE, comments stripped, brace-balanced. The "one predicate read by
+// the draw site AND the hit test" rule is a claim about what those two functions SAY,
+// not about a number, so it can only be asserted over their text - and a commented-out
+// call is not a call, which is the trap panel_shim.cpp's invertColor note records.
+// The SPAN of a function whose body straddles a #if/#else, which brace-balancing
+// cannot do: handleSettingsTouch has one arm per board and the UNION of the two is
+// unbalanced as plain text, so a balancer runs off the end of the file and returns
+// nothing - which reads exactly like an assertion that passed. It stops at the next
+// definition that starts in column 0 instead.
+function fnSpan(src, name) {
+  const clean = src.replace(/^[ \t]*\/\/.*$/gm, "");
+  const i = clean.indexOf(`${name}(`);
+  if (i < 0) return "";
+  const after = clean.slice(i + name.length);
+  const m = after.match(/\n([A-Za-z_]\w[\w \t*&]*\w\s*\([^);]*\)\s*\{)/);
+  return m ? after.slice(0, m.index) : after;
+}
+function fnSrc(src, name) {
+  const clean = src.replace(/^[ \t]*\/\/.*$/gm, "");
+  const i = clean.indexOf(`${name}(`);
+  if (i < 0) return "";
+  const open = clean.indexOf("{", i);
+  if (open < 0) return "";
+  let depth = 0;
+  for (let j = open; j < clean.length; j++) {
+    if (clean[j] === "{") depth++;
+    else if (clean[j] === "}" && --depth === 0) return clean.slice(i, j + 1);
+  }
+  return "";
+}
 
 // THE SEVERITY SPINE'S DRAW GEOMETRY, READ OUT OF drawSeverityAction() rather than
 // restated. The four assertions this replaced constrained CONSTANTS only, under a
@@ -414,6 +462,34 @@ if (SELFTEST) {
   // measuring one row can see it.
   B[2].HOME_ROW_H += 1;
   console.log("--selftest: board 2's HOME row height raised by 1; the pitch identity MUST fail");
+  // AND THREE FROM THE WIRELESS-PAIRING PANEL, whose CONFIRM button is the thing
+  // that commits a pairing key - so its geometry is not cosmetic.
+  //
+  // The countdown lifted 30px onto the Mac's label. Both are drawn with an OPAQUE
+  // box, so a shared pixel row means the once-a-second counter erases the tail of
+  // the name the code is being compared against - and nothing measuring either
+  // block on its own can see it.
+  B[2].PAIR_LEFT_Y -= 30;
+  console.log("--selftest: board 2's pairing countdown pulled 30px onto the Mac's label; " +
+              "the panel's block-disjointness MUST fail");
+  // One pixel on the button width, which is the smallest change there is: the two
+  // buttons plus SP_3 stop filling the card lane exactly, so CANCEL's right edge
+  // leaves the margin every other card on this device sits on.
+  B[2].PAIR_BTN_W += 1;
+  console.log("--selftest: board 2's pairing button widened by 1; the card-lane identity MUST fail");
+  // The row step widened by 6, which pushes the LAST free slot (3 Macs paired)
+  // 1px under the footer. The button would still be drawn and still be a touch
+  // target - only its bottom row would be gone - so this is only visible to an
+  // assertion that walks every reachable slot.
+  B[2].P3_ROW_STEP += 6;
+  console.log("--selftest: board 2's pairing row step widened by 6; the free-slot walk MUST fail");
+  // And ONE PIXEL on the panel's surplus, the term that closes its stack onto the
+  // button row. It is the smallest change there is and it is the assertion that
+  // gives every other gap on this screen teeth - the sweep measured five of them
+  // UNGUARDED at +-16 before it existed - so the tooth has to be proven on the
+  // closing term itself rather than only on the chain it pins.
+  B[2].PAIR_AIR_LEFT += 1;
+  console.log("--selftest: board 2's pairing surplus widened by 1; the stack no longer lands on the button row and that identity MUST fail");
 }
 
 console.log(`\nvoice-confirm panel (lane CARD_W - 8, NOT the keyboard's CARD_W - 12), ` +
@@ -913,6 +989,306 @@ for (const b of [1, 2]) {
       const [xt, xb] = mcBox(b, T_HEAD, Math.floor(c.P3_ROW_H / 2));
       chk(xt >= c.BORDER_CARD && xb <= c.P3_ROW_H - c.BORDER_CARD - 1,
           `pairing row: the "x" ink +${xt}..+${xb} inside the card's border`);
+    }
+
+    // ============ the WIRELESS-PAIRING panel and its way in ============
+    //
+    // CONFIRM ON THIS GLASS IS THE SECURITY PROPERTY. The pairing key is committed
+    // by a person comparing two codes and tapping here, not by the Mac's proof -
+    // any peer that completes the ECDH can compute that proof without ever seeing
+    // the code. So these are not cosmetic bounds: a code that does not fit is a
+    // code nobody can compare, and a CONFIRM tappable while invisible commits a key
+    // nobody approved.
+
+    // ---- the way in: PAIR NEW MAC in the list's next free row slot ----
+    // THE PAIR IS THE POINT. Every slot a button can take must clear the footer AND
+    // the slot for a full store must not - that second half is what pins the
+    // "absence encodes full" argument to the geometry instead of leaving it in a
+    // comment, and without it the button could quietly be given a home that also
+    // exists at MAX_HOSTS, where there is no NVS slot to pair into.
+    const slotFits = (n) => c.P3_LIST_Y + n * c.P3_ROW_STEP + c.H_ROW - 1 < contentBottom;
+    console.log(`  PAIR NEW MAC: slot n ends ${[0, 1, 2, 3, 4].map(n =>
+      c.P3_LIST_Y + n * c.P3_ROW_STEP + c.H_ROW - 1).join("/")} of ${contentBottom}`);
+    for (let n = 0; n < MAX_HOSTS; n++)
+      chk(slotFits(n), `PAIR NEW MAC fits the free slot at ${n} Mac(s): ends ` +
+          `${c.P3_LIST_Y + n * c.P3_ROW_STEP + c.H_ROW - 1}, inside the region (${contentBottom})`);
+    chk(!slotFits(MAX_HOSTS),
+        `... and does NOT fit at ${MAX_HOSTS} Macs (ends ` +
+        `${c.P3_LIST_Y + MAX_HOSTS * c.P3_ROW_STEP + c.H_ROW - 1}), which is how its ABSENCE ` +
+        `encodes a full store - the same limit twice`);
+    chk(c.H_ROW >= c.TAP_MIN, `PAIR NEW MAC is a touch target: H_ROW ${c.H_ROW} >= TAP_MIN ${c.TAP_MIN}`);
+    chk(widthB(b, T_BODY, "PAIR NEW MAC") < c.CARD_W - 2 * c.PAD,
+        `"PAIR NEW MAC" is ${widthB(b, T_BODY, "PAIR NEW MAC")}px inside the button's ` +
+        `${c.CARD_W - 2 * c.PAD}px lane`);
+    // The empty-list hint moved DOWN a slot, because the button is standing where it
+    // used to be drawn.
+    {
+      const [ht, hb] = mcBox(b, T_META, c.P3_EMPTY_HINT_Y);
+      chk(ht > c.P3_LIST_Y + c.H_ROW - 1,
+          `the empty-list hint's ink starts ${ht}, clear of PAIR NEW MAC in slot 0 ` +
+          `(ends ${c.P3_LIST_Y + c.H_ROW - 1})`);
+      chk(hb < contentBottom, `... and ends ${hb}, inside the region (${contentBottom})`);
+    }
+
+    // ---- the panel: the code has to FIT, and it cannot be trimmed ----
+    const codeW = widthB(b, T_HERO, "8".repeat(PAIR_CODE_DIGITS));
+    console.log(`  pairing panel: ${PAIR_CODE_DIGITS} digits at T_HERO = ${codeW}px of ${W}`);
+    chk(codeW <= W, `the ${PAIR_CODE_DIGITS}-digit code is ${codeW}px in a ${W}px panel - ` +
+        `the one width on this screen that cannot be trimmed, since a code nobody can ` +
+        `read is a code nobody can compare`);
+    chk(codeW <= c.CARD_W, `... and inside the card lane too (${codeW} <= ${c.CARD_W}), so it ` +
+        `sits on the same margins as everything else`);
+
+    // ---- the panel's rhythm is a CHAIN, not six literals ----
+    // A stack of independent offsets is a stack of constants no perturbation can
+    // catch: the gaps here are wide enough that geom-sweep.mjs reported +-16 on
+    // every one of them as harmless, and "harmless" is only true until someone
+    // moves two at once. Each block is derived from the one above it, so a single
+    // +-1 on ANY of them fails an identity - which is the standard this file sets
+    // for a constant the repo has just added.
+    chk(c.PAIR_HEAD_H === lineHB(b, T_HEAD),
+        `pairing panel: PAIR_HEAD_H ${c.PAIR_HEAD_H} IS uiLineH(T_HEAD) ${lineHB(b, T_HEAD)}`);
+    for (const [name, y, prev, cell, air] of [
+      ["the state line", c.PAIR_STATE_Y, c.PAIR_TITLE_Y, c.PAIR_HEAD_H, c.PAIR_AIR_TITLE],
+      ["the code", c.PAIR_CODE_Y, c.PAIR_STATE_Y, c.CODE_LINE_H, c.PAIR_AIR_STATE],
+      ["the Mac's label", c.PAIR_LABEL_Y, c.PAIR_CODE_Y, c.HERO_LINE_H, c.PAIR_AIR_CODE],
+      ["the countdown", c.PAIR_LEFT_Y, c.PAIR_LABEL_Y, c.CODE_LINE_H, c.PAIR_AIR_LABEL],
+    ]) chk(y === prev + cell + air,
+        `pairing panel: ${name} is at ${prev} + ${cell} + ${air} = ${prev + cell + air} (${y})`);
+    // AND THE CLOSING TERM, which is the one that gives every gap above teeth.
+    // Without it the chain is a derivation asserted against its own term: perturb
+    // PAIR_TOP_AIR and every block below moves with it, so each step's identity
+    // still holds. MEASURED - geom-sweep.mjs called PAIR_TOP_AIR, PAIR_AIR_STATE,
+    // PAIR_AIR_CODE, PAIR_AIR_LABEL and PAIR_BTN_BOTTOM unguarded at +-16 with the
+    // chain alone. The stack is pitched to LAND on a button row anchored from the
+    // other end, so naming the surplus makes a +-1 on any one gap break this.
+    chk(c.PAIR_LEFT_Y + c.CODE_LINE_H + c.PAIR_AIR_LEFT === c.PAIR_BTN_Y,
+        `pairing panel: the stack lands exactly on the button row ` +
+        `(${c.PAIR_LEFT_Y} + ${c.CODE_LINE_H} + ${c.PAIR_AIR_LEFT} == ${c.PAIR_BTN_Y})`);
+    // ---- AND THE COVERAGE DOES NOT REST ON THAT ONE LINE ----
+    // The closing term above constrains the SUM of the seven gaps, which is exactly
+    // what geom-sweep.mjs (one constant at a time) exercises - so it looked like
+    // full coverage while all six air constants failed through a single assertion,
+    // and deleting that line unguarded every one of them at once. Two bindings from
+    // different directions follow, each catching a class the other cannot.
+    //
+    // (1) A REDISTRIBUTION PRESERVES THE SUM. Move 24 out of the countdown's gap
+    // and into PAIR_AIR_STATE and the identity above still holds while the ink
+    // stack walks down the screen. The header names PAIR_AIR_LEFT as where this
+    // panel's surplus lives, so that is asserted rather than described: the gap
+    // that carries no ink must be strictly the largest, which a swap breaks.
+    {
+      const gaps = ["PAIR_TOP_AIR", "PAIR_AIR_TITLE", "PAIR_AIR_STATE", "PAIR_AIR_CODE",
+                    "PAIR_AIR_LABEL", "PAIR_BTN_BOTTOM"];
+      const worst = gaps.reduce((a, n) => (c[n] > c[a] ? n : a), gaps[0]);
+      chk(c.PAIR_AIR_LEFT > c[worst],
+          `pairing panel: the SURPLUS lives in PAIR_AIR_LEFT ${c.PAIR_AIR_LEFT}, strictly the ` +
+          `largest gap (next is ${worst} ${c[worst]}) - a sum-preserving swap passes the ` +
+          `landing identity above and fails here`);
+    }
+    // (2) THE BUTTON ROW IS BOUND TO THE ROW THAT OPENS THE PANEL, which anchors
+    // PAIR_BTN_BOTTOM to something outside the chain entirely. PAIR NEW MAC is
+    // drawn at p3RowY(hostCount), and at the last reachable slot that row OVERLAPPED
+    // CONFIRM's rect - so the finger that opened the panel was resting on the button
+    // that stores a key, and an impatient second tap committed a code nobody had
+    // compared. (The assertion that used to sit near here -
+    // PAIR_BTN_Y + H_BTN + PAIR_BTN_BOTTOM == contentBottom - is PAIR_BTN_Y's own
+    // definition rearranged, so it holds by construction and binds nothing.)
+    {
+      const lastSlotY = c.P3_LIST_Y + (MAX_HOSTS - 1) * c.P3_ROW_STEP;
+      chk(c.PAIR_BTN_Y + c.H_BTN <= lastSlotY,
+          `pairing panel: the button row ends ${c.PAIR_BTN_Y + c.H_BTN - 1}, clear of PAIR NEW ` +
+          `MAC's own last slot at ${lastSlotY}..${lastSlotY + c.H_ROW - 1} - so a second tap ` +
+          `where the first one opened this panel can never land on CONFIRM`);
+    }
+    chk(c.PAIR_RESULT_Y === c.PAIR_CODE_Y + Math.floor((c.HERO_LINE_H - c.PAIR_HEAD_H) / 2),
+        `pairing result: the verdict is centred in the band the code occupied ` +
+        `(${c.PAIR_RESULT_Y})`);
+    chk(c.PAIR_RESULT_SUB_Y === c.PAIR_RESULT_Y + c.PAIR_HEAD_H + c.PAIR_AIR_TITLE,
+        `pairing result: its reason takes the panel's own title->state step ` +
+        `(${c.PAIR_RESULT_SUB_Y})`);
+    // The label buffer that every one of those blocks is sized against is the SAME
+    // one HostPairing stores, parsed rather than transcribed: a label the panel can
+    // hold but the store cannot (or the reverse) is a name truncated on one screen
+    // and not the other.
+    {
+      const m = SRC_MAIN.match(/char label\[(\d+)\];/);
+      chk(m != null && c.PAIR_LABEL_BYTES === +m[1],
+          `PAIR_LABEL_BYTES ${c.PAIR_LABEL_BYTES} IS HostPairing::label's own ` +
+          `char[${m ? m[1] : "?"}]`);
+    }
+    chk(c.P3_EMPTY_HINT_Y === c.P3_LIST_Y + c.P3_ROW_STEP + Math.floor(c.P3_ROW_H / 2),
+        `the empty-list hint is centred in slot 1, one below PAIR NEW MAC ` +
+        `(${c.P3_EMPTY_HINT_Y})`);
+
+    // ---- the panel's blocks share no pixel row ----
+    // As PAINTED extents, never as glyphs: drawString paints an opaque box, so two
+    // blocks that merely look apart still erase each other. TC_DATUM is a TOP datum,
+    // so fieldBox's default is the right rectangle for all five.
+    {
+      const blocks = [
+        ["title", fieldBox(b, T_HEAD, c.PAIR_TITLE_Y)],
+        ["state line", fieldBox(b, T_BODY, c.PAIR_STATE_Y)],
+        ["the code", fieldBox(b, T_HERO, c.PAIR_CODE_Y)],
+        ["the Mac's label", fieldBox(b, T_BODY, c.PAIR_LABEL_Y)],
+        ["the countdown", fieldBox(b, T_BODY, c.PAIR_LEFT_Y)],
+        ["CONFIRM / CANCEL", [c.PAIR_BTN_Y, c.PAIR_BTN_Y + c.H_BTN - 1]],
+      ];
+      console.log("    " + blocks.map(([n, [t, bo]]) => `${n} ${t}..${bo}`).join(", "));
+      // THE TOP END, BOUND TO THE CLEAR drawPairPanelStatic ACTUALLY MAKES rather
+      // than to the literal 0. `blocks[0][1][0] >= 0` stood here and could not fail:
+      // PAIR_TITLE_Y is PAIR_TOP_AIR, a positive constant, so no perturbation the
+      // sweep can make drives it negative - the ninth unfalsifiable assertion this
+      // branch has now paid for. What it was standing in for is that every block
+      // lands inside the region the panel CLEARS, and that rectangle is parsed out
+      // of the draw site's own fillRect: the panel deliberately covers the tab bar
+      // ("chrome drawn but dead is the bug fabVisible() is gated to avoid"), and
+      // nothing asserted that until now. Narrow the clear to CONTENT_Y - the
+      // plausible edit, since every other surface here starts there - and the title
+      // at 40..63 is painted onto live tab-bar chrome, which this now names.
+      {
+        const call = /tft\.fillRect\(([^;]*?)\);/.exec(fnSrc(SETTINGS_INO, "drawPairPanelStatic"));
+        const args = call ? call[1].split(",").map((a) => a.trim()) : [];
+        const clearTop = args.length === 5 ? evalInt(args[1], c) : null;
+        chk(clearTop === 0,
+            `pairing panel: drawPairPanelStatic clears from y=${clearTop} - the panel covers ` +
+            `the tab bar, so a tap can never reach chrome it has painted over`);
+        chk(clearTop != null && blocks[0][1][0] >= clearTop,
+            `pairing panel: the title starts ${blocks[0][1][0]}, inside the cleared region ` +
+            `from ${clearTop}`);
+      }
+      for (let i = 1; i < blocks.length; i++)
+        chk(blocks[i - 1][1][1] < blocks[i][1][0],
+            `pairing panel: ${blocks[i - 1][0]} ends ${blocks[i - 1][1][1]}, clear of ` +
+            `${blocks[i][0]} at ${blocks[i][1][0]}`);
+      chk(blocks[blocks.length - 1][1][1] < contentBottom,
+          `pairing panel: the button row ends ${blocks[blocks.length - 1][1][1]}, above the ` +
+          `footer at ${contentBottom} - the panel stops there so the clock, the battery and ` +
+          `the freshness stay live through a 120s window`);
+    }
+
+    // ---- the two buttons ----
+    chk(c.PAIR_BTN_GAP === c.SP_3,
+        `pairing panel: PAIR_BTN_GAP ${c.PAIR_BTN_GAP} IS SP_3 ${c.SP_3} - a header cannot ` +
+        `name a constant from the file that includes it, so the restatement is bound here`);
+    chk(2 * c.PAIR_BTN_W + c.PAIR_BTN_GAP === c.CARD_W,
+        `pairing panel: two ${c.PAIR_BTN_W}px buttons plus ${c.PAIR_BTN_GAP} fill the card lane ` +
+        `exactly (${2 * c.PAIR_BTN_W + c.PAIR_BTN_GAP} == ${c.CARD_W})`);
+    chk(c.PAIR_BTN_W >= c.TAP_MIN && c.H_BTN >= c.TAP_MIN,
+        `pairing panel: each button is ${c.PAIR_BTN_W}x${c.H_BTN}, over TAP_MIN ${c.TAP_MIN} both ways`);
+    // CONFIRM sits at CARD_X and CANCEL at CARD_X + CARD_W - PAIR_BTN_W. Their hit
+    // zones must not touch: a tap that lands on the wrong one either throws away an
+    // exchange or commits a key.
+    chk(c.CARD_X + c.PAIR_BTN_W <= c.CARD_X + c.CARD_W - c.PAIR_BTN_W,
+        `pairing panel: CONFIRM's zone ends ${c.CARD_X + c.PAIR_BTN_W}, at or before CANCEL's ` +
+        `starts ${c.CARD_X + c.CARD_W - c.PAIR_BTN_W}`);
+    for (const lab of ["CONFIRM", "CANCEL"])
+      chk(widthB(b, T_BODY, lab) < c.PAIR_BTN_W,
+          `pairing panel: "${lab}" is ${widthB(b, T_BODY, lab)}px inside its ${c.PAIR_BTN_W}px button`);
+
+    // ---- the countdown is the ONE change-only field, and its cache holds it ----
+    // The widest string is the WINDOW's own length, derived from PAIR_WINDOW_MS
+    // rather than transcribed: a longer window would otherwise outgrow the cache
+    // silently, and a cache shorter than its string stops noticing changes at all.
+    {
+      const secs = Math.ceil(c.PAIR_WINDOW_MS / 1000);
+      const longest = `${secs}s left`;
+      chk(c.PAIR_LEFT_CHARS === longest.length,
+          `pairing panel: PAIR_LEFT_CHARS ${c.PAIR_LEFT_CHARS} == "${longest}" (${longest.length}), ` +
+          `derived from PAIR_WINDOW_MS ${c.PAIR_WINDOW_MS}`);
+      chk(c.PAIR_LEFT_BYTES >= c.PAIR_LEFT_CHARS + 1,
+          `PAIR_LEFT_BYTES ${c.PAIR_LEFT_BYTES} holds ${c.PAIR_LEFT_CHARS} chars + NUL`);
+      chk(SETTINGS_CACHE.pairLeftCache === "PAIR_LEFT_BYTES",
+          `pairLeftCache is declared [${SETTINGS_CACHE.pairLeftCache}], i.e. the header's own ` +
+          `PAIR_LEFT_BYTES`);
+      chk(widthB(b, T_BODY, longest) <= W,
+          `pairing panel: "${longest}" is ${widthB(b, T_BODY, longest)}px in a ${W}px panel`);
+      // The repaint signature: "<code>|<label>". Its buffer has to hold the worst
+      // case or the panel stops repainting on a REPLACEMENT PAIRREQ - which derives
+      // a NEW code, and showing the old one is the one failure this screen must not
+      // have.
+      // cacheSizes() only parses a single-token dimension, and this one is an
+      // EXPRESSION, so the declaration is read here and evaluated against the same
+      // two constants the firmware uses.
+      const sigDecl = SETTINGS_INO.match(/char pairPanelSig\[([^\]]+)\]/);
+      // evalInt() takes NUMBERS, so the two names are resolved first - from the
+      // board header and from pairing.ino, never transcribed.
+      const sigSize = sigDecl ? evalInt(sigDecl[1]
+        .replace(/PAIR_CODE_DIGITS/g, String(PAIR_CODE_DIGITS))
+        .replace(/PAIR_LABEL_BYTES/g, String(c.PAIR_LABEL_BYTES))) : NaN;
+      const sigWorst = PAIR_CODE_DIGITS + 1 + (c.PAIR_LABEL_BYTES - 1) + 1;
+      chk(sigDecl != null && sigSize >= sigWorst,
+          `pairPanelSig is declared [${sigDecl ? sigDecl[1] : "?"}] = ${sigSize}, holding ` +
+          `"<${PAIR_CODE_DIGITS} digits>|<label>" + NUL (${sigWorst}) - a signature cache too ` +
+          `short stops noticing a REPLACEMENT PAIRREQ, and showing the old code is the one ` +
+          `failure this screen must not have`);
+    }
+
+    // ---- the result screen ----
+    {
+      const rh = fieldBox(b, T_HEAD, c.PAIR_RESULT_Y);
+      const rs = fieldBox(b, T_BODY, c.PAIR_RESULT_SUB_Y);
+      console.log(`    result screen: verdict ${rh[0]}..${rh[1]}, reason ${rs[0]}..${rs[1]}`);
+      chk(rh[0] >= 0 && rh[1] < rs[0] && rs[1] < contentBottom,
+          `pairing result: verdict ${rh[0]}..${rh[1]} clear of the reason ${rs[0]}..${rs[1]}, ` +
+          `both inside the panel (${contentBottom})`);
+      for (const t of ["PAIRED WITH", "PAIRING FAILED"])
+        chk(widthB(b, T_HEAD, t) <= W, `pairing result: "${t}" is ${widthB(b, T_HEAD, t)}px of ${W}`);
+      for (const t of ["code did not match", "no free slots", "timed out", "cancelled"])
+        chk(widthB(b, T_BODY, t) <= W, `pairing result: "${t}" is ${widthB(b, T_BODY, t)}px of ${W}`);
+      chk(c.PAIR_RESULT_MS >= 1000,
+          `pairing result: it dwells ${c.PAIR_RESULT_MS}ms, long enough to read`);
+    }
+
+    // ---- SOURCE: one predicate, read by the draw site AND the hit test ----
+    // This codebase's classic defect is a control drawn under one condition and
+    // hit-tested under another. Here that defect stores a pairing key nobody
+    // approved, so a SECOND SPELLING of the condition is what is forbidden - not
+    // merely avoided. Same shape as pair-crypto-check.mjs's own rule on
+    // pairConfirmable().
+    {
+      const draw = fnSrc(SETTINGS_INO, "void drawPairPanelStatic");
+      const hit = fnSrc(SETTINGS_INO, "void pairPanelTouch");
+      const pred = fnSrc(SETTINGS_INO, "bool pairConfirmVisible");
+      chk(draw.length > 100 && hit.length > 50 && pred.length > 10,
+          `pairing panel: drawPairPanelStatic, pairPanelTouch and pairConfirmVisible are all found`);
+      chk(/pairConfirmable\s*\(\s*\)/.test(pred) && !/pairPending|pairWindowOpen|pairProofOk/.test(pred),
+          `pairing panel: pairConfirmVisible IS pairing.ino's own pairConfirmable(), not a second ` +
+          `spelling of it`);
+      for (const [n, body] of [["the draw site", draw], ["the hit test", hit]]) {
+        chk(/pairConfirmVisible\s*\(\s*\)/.test(body),
+            `pairing panel: ${n} gates CONFIRM on pairConfirmVisible()`);
+        chk(!/pairPending|pairWindowOpen|pairProofOk|pairConfirmed/.test(body),
+            `pairing panel: ${n} spells that condition NO OTHER WAY - a CONFIRM tappable while ` +
+            `invisible commits a key nobody approved`);
+      }
+      // The verdict has to reach the GLASS before the dwell. On a shadow-buffered
+      // board a message drawn and then slept on exists for zero frames while the
+      // previous screen sits there - the farewell screens fixed this once already.
+      const res = fnSrc(SETTINGS_INO, "void drawPairResult");
+      chk(/tft\.flush\s*\(\s*\)/.test(res) && /delay\s*\(/.test(res) &&
+          res.indexOf("tft.flush") < res.indexOf("delay("),
+          `pairing result: it FLUSHES before it delays, not after`);
+      // The panel absorbs both periodic repaints, the way the confirm dialog and the
+      // reader do - without either, the settings page is painted over a code someone
+      // is in the middle of comparing.
+      chk(/if\s*\(\s*pairPanelActive\s*\)\s*return;/.test(fnSrc(SETTINGS_INO, "void renderSettingsTab")),
+          `pairing panel: renderSettingsTab() absorbs the 1s settings repaint`);
+      chk(/if\s*\(\s*pairPanelActive\s*\)\s*\{[^}]*renderFooter\s*\(\s*\)[^}]*return;\s*\}/
+            .test(SRC_MAIN.replace(/^[ \t]*\/\/.*$/gm, "")),
+          `pairing panel: handleLine() absorbs the ~5s host tick and keeps the footer live`);
+      // The button and its hit test come from the SAME expression and the SAME
+      // condition, which is what makes "absence encodes full" true of the tap zone
+      // as well as of the pixels.
+      const stat = fnSrc(SETTINGS_INO, "void drawHostsPageStatic");
+      const touch = fnSpan(SETTINGS_INO, "void handleSettingsTouch");
+      for (const [n, body] of [["drawn", stat], ["hit-tested", touch]]) {
+        chk(/p3RowY\s*\(\s*hostCount\s*\)/.test(body),
+            `PAIR NEW MAC is ${n} at p3RowY(hostCount), the list's own row expression`);
+        chk(/hostCount\s*<\s*MAX_HOSTS/.test(body),
+            `... and ${n} only while hostCount < MAX_HOSTS, so a full store offers no button ` +
+            `AND claims no taps`);
+      }
     }
   }
 
@@ -1708,6 +2084,14 @@ if (SELFTEST) {
   const WANT = [
     ["the moved keyboard meta row", /^meta row ends \d+ before the first text line/],
     ["the raised HOME row height", /^HOME's \d+ rows land exactly on contentBottom/],
+    ["the pairing countdown moved onto the label",
+     /^pairing panel: the Mac's label ends \d+, clear of the countdown/],
+    ["the widened pairing button",
+     /^pairing panel: two \d+px buttons plus \d+ fill the card lane exactly/],
+    ["the widened pairing row step",
+     /^PAIR NEW MAC fits the free slot at 3 Mac\(s\)/],
+    ["the widened pairing surplus",
+     /^pairing panel: the stack lands exactly on the button row/],
   ];
   let missed = 0;
   for (const [what, re] of WANT) {

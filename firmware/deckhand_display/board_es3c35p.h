@@ -43,6 +43,23 @@
 #define BOARD_HAS_RGBLED     1   // WS2812 on GPIO40; nothing drives it
 #define BOARD_TOUCH_NEEDS_CAL 0  // capacitive, factory-aligned
 #define BOARD_SETTINGS_HOME  1   // a HOME screen plus five drill-down groups
+// Pairing a Mac without the cable: an ephemeral X25519 exchange plus a 6-digit
+// code derived from the shared secret, so the 128-bit pairing key is NEVER
+// transmitted - both ends derive it. This is an ADDITION: PROVISION over USB is
+// unchanged, BLE PROVISION is still ignored, and the rule that a raw secret may
+// never arrive over the radio is untouched, because the new path never sends
+// one. Board 1 is 0, where the cable remains the only path. See
+// docs/superpowers/specs/2026-08-30-wireless-pairing.md, and pairing.ino for
+// the derivations - which must agree with host/pair-crypto.mjs byte for byte.
+#define BOARD_HAS_WIRELESS_PAIR 1
+// The three constants that pairing window needs, here rather than in
+// pairing.ino for the reason every other per-board number is: a board header is
+// what a checker PARSES, and a literal buried in a handler is what drifts. They
+// are declared ONLY here - board 1 compiles none of the code that reads them,
+// so an alias in its header would be a name that looks right and means nothing.
+const int PAIR_WINDOW_MS = 120000;   // one window, 120s - see the spec's presence argument
+const int PAIR_LABEL_BYTES = 20;     // the requesting Mac's label incl NUL; matches HostPairing::label
+const int PAIR_HOSTID_CHARS = 8;     // a hostId is EXACTLY 8 hex characters (the Mac's crypto.randomBytes(4))
 // NO TOUCH WAKE FROM DEEP SLEEP, and this is a silicon fact rather than a gap
 // in the port. Both ext0 and ext1 wake ONLY from an RTC GPIO, and on the S3 the
 // RTC set is GPIO0..21 - read out of the installed headers rather than assumed:
@@ -1808,6 +1825,135 @@ const int P3_X_W         = 46;   // "forget" hit zone at the right edge (>= TAP_
 // Codex row draw "--" and never "0%".
 const int P3_SUB_CHARS = 20;
 const int P3_SUB_BYTES = P3_SUB_CHARS + 1;
+
+// PAIR NEW MAC sits in the LIST'S NEXT FREE ROW SLOT, at p3RowY(hostCount), and
+// that placement is measured rather than preferred. Above the list it needs
+// H_ROW + a gap = 58px, and the four Mac cards already end at
+// P3_LIST_Y + 3*P3_ROW_STEP + P3_ROW_H = 449 against a contentBottom() of 460 -
+// 10px of slack, so there is nowhere to put it. In the free slot it fits for 0..3
+// Macs and at 4 there is no room AND no free NVS slot, so the button's ABSENCE
+// encodes "full" exactly: no separate state, no extra string, and no refusal path
+// to get wrong. settings-geom-check.mjs asserts both halves of that - every slot
+// 0..3 clears the footer and the slot for 4 does not - so the argument is pinned
+// to the geometry instead of living in this comment.
+//
+// With no Macs at all the button takes slot 0, so the empty-list hint moves DOWN
+// to slot 1 rather than being drawn under it.
+const int P3_EMPTY_HINT_Y = P3_LIST_Y + P3_ROW_STEP + P3_ROW_H / 2;   // MC centre, one slot below the button
+
+// ---------- The WIRELESS PAIRING panel (board 2 only) ----------
+// A full-screen surface, the way the reader is - except that it stops at
+// contentBottom() and leaves the FOOTER alone, so the clock, the battery and the
+// "Xs ago" freshness stay live through a 120s window (whether the Mac is still
+// talking is exactly what you want to know while waiting for its request). The
+// tab bar IS covered: the panel eats every tap, and chrome that is drawn but dead
+// is the defect fabVisible() is gated in one place to avoid.
+//
+// Every block is TC_DATUM - a TOP datum, so its ink box is y..y+uiLineH-1 and the
+// vertical arithmetic is exact, with the horizontal centring done by the datum
+// rather than by a measured x. The blocks, at this board's faces:
+//
+//    40..63    "PAIR NEW MAC"          PAIR_TITLE_Y, T_HEAD  (12x24)
+//    80..95    what it is waiting for  PAIR_STATE_Y, T_BODY  (8x16)
+//   140..203   the six digits          PAIR_CODE_Y,  T_HERO  (32x64)
+//   224..239   the requesting Mac      PAIR_LABEL_Y, T_BODY
+//   264..279   "118s left"             PAIR_LEFT_Y,  T_BODY  - the one change-only field
+//   348..397   CONFIRM / CANCEL        PAIR_BTN_Y,   H_BTN
+//   398..459   clear to contentBottom()
+//
+// and the result screen, which replaces the five blocks above the buttons:
+//   160..183   the verdict             PAIR_RESULT_Y,     T_HEAD
+//   200..215   the label or the reason PAIR_RESULT_SUB_Y, T_BODY
+//
+// THE CODE IS SIX DIGITS OF T_HERO = 6 * 32 = 192px in a 320px panel, which is the
+// one width on this screen that cannot be trimmed - it is the whole point of the
+// surface. Asserted rather than eyeballed.
+// EVERY BLOCK IS DERIVED FROM THE ONE ABOVE IT, cell height plus a named gap, and
+// the button row is anchored from the FOOTER rather than from the top. That is not
+// tidiness: a chain of six literals is six constants no perturbation can catch,
+// where an identity fails at +-1 in both directions - which is the standard this
+// repo sets for a constant it has just added, and what geom-sweep.mjs measures.
+const int PAIR_HEAD_H     = 24;   // uiLineH(T_HEAD), Spleen 12x24 - the same shape SESSION_NAME_H has
+const int PAIR_TOP_AIR    = 40;   // the panel's top edge -> the title
+const int PAIR_AIR_TITLE  = 16;   // title -> the state line
+const int PAIR_AIR_STATE  = 44;   // state line -> the code, which gets the most air on the screen it is the point of
+const int PAIR_AIR_CODE   = 20;   // the code -> the requesting Mac's label
+const int PAIR_AIR_LABEL  = 24;   // label -> the countdown
+const int PAIR_AIR_LEFT   = 68;   // countdown -> the button row: where this panel's SURPLUS lives
+// THE BUTTON ROW IS HELD OFF THE ROW THAT OPENED THE PANEL, and that is the whole
+// reason this is 62 rather than the 24 every other bottom margin here would suggest.
+// PAIR NEW MAC is drawn at p3RowY(hostCount) on the Pairing page, and at the last
+// reachable slot (hostCount == MAX_HOSTS - 1 == 3) that row is 398..443 - which
+// OVERLAPPED CONFIRM's old 386..435 rect at the same x. So the finger that opened
+// this panel was resting exactly on the button that stores a key, and an impatient
+// second tap - the ordinary human double-tap, ~200ms later - landed on CONFIRM. An
+// attacker who spams PAIRREQ at a connected link has a code painted well inside
+// that window (see handlePairReq's own note on the paint), so the second tap
+// commits a code nobody compared: the one failure this whole design exists to stop.
+// Closing it in SPACE rather than in TIME is deliberate - an arming delay would be
+// a second spelling of "is there anything to confirm", and pairConfirmable() being
+// ONE predicate is itself an asserted rule. The 38px comes out of PAIR_AIR_LEFT,
+// which is the surplus and is declared to be exactly that.
+//   PAIR_BTN_Y + H_BTN <= p3RowY(MAX_HOSTS - 1)    (348 + 50 == 398)
+// settings-geom-check.mjs asserts that bound, so a -1 here fails by name.
+const int PAIR_BTN_BOTTOM = 62;   // the button row -> the footer; see above, NOT taste
+const int PAIR_TITLE_Y = PAIR_TOP_AIR;
+const int PAIR_STATE_Y = PAIR_TITLE_Y + PAIR_HEAD_H + PAIR_AIR_TITLE;
+const int PAIR_CODE_Y  = PAIR_STATE_Y + CODE_LINE_H + PAIR_AIR_STATE;
+const int PAIR_LABEL_Y = PAIR_CODE_Y + HERO_LINE_H + PAIR_AIR_CODE;
+const int PAIR_LEFT_Y  = PAIR_LABEL_Y + CODE_LINE_H + PAIR_AIR_LABEL;
+// The two buttons share the card lane: two of PAIR_BTN_W with the gap between them
+// is exactly CARD_W, so CANCEL's right edge lands on the same margin every card
+// uses. The gap IS SP_3, and it is restated here rather than named because SP_3 is
+// declared in deckhand_display.ino, which includes this header - a header cannot
+// see a constant from the file that includes it. settings-geom-check.mjs asserts
+// PAIR_BTN_GAP == SP_3, so the restatement is bound rather than trusted.
+// ANCHORED FROM THE FOOTER, so the row sits a fixed distance off the bottom edge
+// whatever happens above it.
+//
+// AND THE STACK ABOVE IT MEETS IT EXACTLY, which is what makes every gap on this
+// screen catchable. A chain alone does not: perturb PAIR_TOP_AIR and every block
+// below it moves with it, so each `y == prev + cell + air` identity still holds -
+// the "a derivation asserted against its own term" trap this file has already paid
+// for twice. MEASURED, not reasoned: geom-sweep.mjs reported PAIR_TOP_AIR,
+// PAIR_AIR_STATE, PAIR_AIR_CODE, PAIR_AIR_LABEL and PAIR_BTN_BOTTOM all UNGUARDED
+// at +-16 with the chain in place and no closing term. Naming the surplus and
+// asserting that the stack lands ON the button row closes it: a +-1 on ANY gap now
+// breaks that one identity. Same shape as HOME_Y0_BOT, which exists for exactly
+// this reason and is likewise read by no draw site:
+//   PAIR_LEFT_Y + CODE_LINE_H + PAIR_AIR_LEFT == PAIR_BTN_Y  (264 + 16 + 68 = 348)
+//
+// AND THAT ONE IDENTITY IS NOT ENOUGH ON ITS OWN, which the fix round measured
+// rather than argued: it constrains the SUM of the gaps, so a REDISTRIBUTION -
+// move 24 out of PAIR_AIR_LEFT and into PAIR_AIR_STATE - preserves the sum, passes
+// it, and drives the ink stack down the screen. geom-sweep.mjs cannot see that
+// either, because it perturbs one constant at a time. So the surplus is asserted
+// to LIVE where this file says it lives (PAIR_AIR_LEFT strictly the largest gap),
+// and PAIR_BTN_BOTTOM carries the independent bound above - two lines, so deleting
+// either still leaves the other catching a class of faults.
+const int PAIR_BTN_Y = BOARD_H - FOOTER_H - PAIR_BTN_BOTTOM - H_BTN;
+const int PAIR_BTN_GAP = 12;
+const int PAIR_BTN_W = (CARD_W - PAIR_BTN_GAP) / 2;
+// The countdown's widest string is the window's own length: "120s left" at
+// PAIR_WINDOW_MS = 120000, i.e. 3 digits plus "s left". The number is stated here
+// and DERIVED IN settings-geom-check.mjs from PAIR_WINDOW_MS, so a longer window
+// fails there rather than silently outgrowing the cache - which is the failure
+// this repo has paid for repeatedly (a cache shorter than its string stops
+// noticing changes at all).
+const int PAIR_LEFT_CHARS = 9;
+const int PAIR_LEFT_BYTES = PAIR_LEFT_CHARS + 1;
+// The result screen, which replaces the panel's own blocks for PAIR_RESULT_MS and
+// FLUSHES BEFORE THE DELAY - on a shadow-buffered board the message otherwise
+// exists for zero frames, the defect the farewell screens already fixed once.
+// THE VERDICT SITS WHERE THE CODE WAS, centred in the band the six digits
+// occupied, so the screen you were reading does not jump under you; its reason
+// line then takes the same title->state step the panel above uses.
+// PAIR_RESULT_MS is a DWELL and has no geometry to violate, so geom-sweep.mjs
+// reports it unguarded and that is correct rather than a gap - the assertion on it
+// is only that it is long enough to read.
+const int PAIR_RESULT_Y     = PAIR_CODE_Y + (HERO_LINE_H - PAIR_HEAD_H) / 2;
+const int PAIR_RESULT_SUB_Y = PAIR_RESULT_Y + PAIR_HEAD_H + PAIR_AIR_TITLE;
+const int PAIR_RESULT_MS    = 1500;
 
 // ---------- SETTINGS group: Actions ----------
 // Geometry is settings.js `bActions`.

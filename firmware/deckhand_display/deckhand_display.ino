@@ -98,6 +98,23 @@ typedef esp_ble_gatts_cb_param_t BleCbParam;
 #include <sys/time.h>   // gettimeofday: ESP-IDF advances it across deep sleep
 #include <mbedtls/md.h>
 #include <mbedtls/sha256.h>
+#if BOARD_HAS_WIRELESS_PAIR
+// Board 2 only, and up HERE with the includes rather than beside the code in
+// pairing.ino for exactly the reason the BleCbParam typedef above is: the
+// Arduino build inserts its generated prototypes above the sketch's FIRST
+// function definition, so a signature naming mbedtls_ecp_group would be unknown
+// to its own prototype and the build fails at the definition with "does not
+// name a type". Measured, not anticipated - that is the error this file first
+// produced. Board 1 has the flag at 0 and sees none of it.
+#include <mbedtls/ecp.h>
+#include <mbedtls/hkdf.h>
+// mbedtls_platform_zeroize, for wiping key material off the stack. It is used
+// rather than memset because a memset whose result is never read again is
+// exactly what a compiler is allowed to delete - and a dying stack frame is
+// that case by definition.
+#include <mbedtls/platform_util.h>
+#include <esp_random.h>
+#endif
 #include <driver/gpio.h>
 #include <esp_adc/adc_continuous.h>
 #include "Cozette6x13.h"
@@ -1058,6 +1075,23 @@ int readerPage = 0;
 // PAGE exist. A full-screen surface, so it joins octoActive/readerActive/kbActive
 // in the touch dispatch and the periodic-repaint guards.
 bool emojiTestActive = false;
+
+#if BOARD_HAS_WIRELESS_PAIR
+// The wireless-pairing panel (settings.ino). Declared HERE rather than beside its
+// own code because the Arduino build concatenates these files in one order and a
+// global used above its own declaration does not compile - handleTouch, handleLine
+// and loop() all sit in this file and all three have to know the panel owns the
+// glass. It joins octoActive/readerActive/kbActive in exactly those three guards.
+//
+// The panel and the WINDOW are one lifetime, enforced from THIS side: whatever
+// shuts the window - the 120s timeout, a commit, a bad proof, the Mac cancelling,
+// or the three safety closes - renderPairPanel() sees pairWindowOpen() go false on
+// its next tick and ends the panel through its result screen. Doing it here rather
+// than inside pairClose() is what lets a SUCCESSFUL commit still say so: that path
+// closes the window itself, and a close that also tore the screen down would show
+// the verdict for zero frames.
+bool pairPanelActive = false;
+#endif
 
 // ---- Keyboard state ----
 // One keyboard at a time, so this is global rather than per-session: it is a
@@ -2109,6 +2143,15 @@ void drawFab(int state) {
 // come back to a tab.
 void tickAutoTheme() {
   if (themeMode != THEME_MODE_AUTO) return;
+#if BOARD_HAS_WIRELESS_PAIR
+  // THE PAIRING PANEL OWNS THE GLASS TOO, and it was in none of the five refusal
+  // lists. Its own #if is what keeps board 1's arm character-identical - these are
+  // shared functions, so a term added to the condition itself would move that
+  // board's binary for a flag it does not have.
+  // A palette switch calls forceFullRepaint(), which would wipe the six digits
+  // someone is in the middle of comparing against their Mac.
+  if (pairPanelActive) return;
+#endif
   if (isAsleep || octoActive || readerActive || histActive || showingDetail || voiceCardActive || kbActive || emojiTestActive) return;
   static unsigned long lastCheck = 0;
   if (lastCheck && millis() - lastCheck < 30000) return;
@@ -2555,6 +2598,15 @@ int expHCache = 0;       // the height the list was last laid out at
 // never look like activity to the auto-sleep timer.
 extern bool octoActive;   // defined with the Clawd easter egg, further down
 void tickWorkingSpinner() {
+#if BOARD_HAS_WIRELESS_PAIR
+  // THE PAIRING PANEL OWNS THE GLASS TOO, and it was in none of the five refusal
+  // lists. Its own #if is what keeps board 1's arm character-identical - these are
+  // shared functions, so a term added to the condition itself would move that
+  // board's binary for a flag it does not have.
+  // The panel covers the sessions list, so a spinner advanced here blits a spark
+  // onto the pairing code at the list's own coordinates.
+  if (pairPanelActive) return;
+#endif
   if (isAsleep || octoActive || showingDetail || readerActive || histActive || kbActive || emojiTestActive) return;
   if (currentTab != TAB_SESSIONS || sessionCount == 0) return;
   if (millis() - lastAnimMs < ANIM_INTERVAL_MS) return;
@@ -3280,6 +3332,20 @@ void drawEmojiTestScreen(const char* only) {
 
 void switchTab(Tab newTab) {
   if (newTab == currentTab) return;
+#if BOARD_HAS_WIRELESS_PAIR
+  // The presence guarantee is the window, so it must not outlive the screen
+  // that shows the code. Leaving pairing mode armed while the user is three
+  // taps away on the USAGE tab is precisely the state that makes this weaker
+  // than the cable it replaces.
+  pairClose("tab switch");
+  // AND THE PANEL GOES WITH IT. Closing the window while leaving pairPanelActive
+  // set left the two disagreeing: the new tab is painted over the panel, while
+  // handleTouch still routes every tap to pairPanelTouch and the ~5s absorb still
+  // hands the tick to renderPairPanel - which would then play the result screen's
+  // 1.5s takeover over a tab the user had already moved to. TAB is a radio command,
+  // so this is reachable without touching the device at all.
+  pairPanelActive = false;
+#endif
 #if !BOARD_USES_TFT_ESPI
   // Timed because "switching tabs feels slow" was a real report and the flush is
   // only part of it - the render has to be measured separately or the wrong half
@@ -3414,6 +3480,15 @@ void handleTouch() {
   // own) paint over an in-progress typed answer and then have every further
   // tap silently type into whatever the voice-card dismissal repainted.
   if (kbActive) { kbTouch(sx, sy); lastActivityMillis = millis(); return; }
+
+#if BOARD_HAS_WIRELESS_PAIR
+  // The pairing panel is a full-screen surface, so it is tested here with the rest
+  // of them and CONSUMES every tap: the tab bar under it is covered, and a tap that
+  // fell through would act on chrome the user cannot see. It is ahead of fabHit()
+  // for the same reason - that button's slot is in the tab bar this panel paints
+  // over.
+  if (pairPanelActive) { pairPanelTouch(sx, sy); lastActivityMillis = millis(); return; }
+#endif
 
   if (micProcessing) {   // any tap dismisses the processing bar
     micProcessingDone();
@@ -4224,6 +4299,15 @@ void handleLine(const String& line) {
   // paints the current tab straight over it, the same trap every other full-screen
   // surface here already guards against.
   if (emojiTestActive) return;
+#if BOARD_HAS_WIRELESS_PAIR
+  // The pairing panel owns everything above the footer, so the ~5s host tick is
+  // absorbed the way the confirm dialog and the reader absorb it: parse, keep the
+  // footer live, return. Without this the periodic repaint paints the settings page
+  // straight over a code someone is in the middle of comparing. renderPairPanel()
+  // is change-only, so calling it from here as well as from loop() costs nothing
+  // and keeps the countdown honest on a tick that arrives between ticks.
+  if (pairPanelActive) { renderPairPanel(); renderFooter(); return; }
+#endif
   // The history reader owns the whole screen. Absorb the tick - without this the
   // periodic repaint paints the detail screen straight over it, the same way it once
   // painted over the settings confirm dialog.
@@ -5010,6 +5094,34 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       }
     }
 #if !BOARD_USES_TFT_ESPI
+#if BOARD_HAS_WIRELESS_PAIR
+  } else if (buf == "PAIRVECTOR") {
+    // THE INTEROP CHECK, AS A MEASUREMENT RATHER THAN AN ARGUMENT. Board 2 only.
+    // The device derives with mbedtls and the Mac with node's crypto, and a
+    // disagreement between them - a byte order, a salt order, an HKDF info
+    // string - errors NOWHERE: both ends stay self-consistent, the six digits on
+    // the glass simply are not the six the Mac computed, and it presents as a UI
+    // bug several screens away from the cause. So a FIXED private key is run
+    // against a FIXED peer public key and every derived value is printed, which
+    // makes the comparison against host/pair-crypto-check.mjs a diff.
+    //
+    // Same argument TEXTPROBE, AUDIOPROBE and COLORTEST already won: without the
+    // instrument, the first real attempt is the test. See pairVectorReport().
+    pairVectorReport();
+  } else if (buf.startsWith("PAIRREQ ")) {
+    // The three wireless-pairing verbs. Accepted over EITHER transport, unlike
+    // PROVISION, and that is the whole point rather than an oversight: nothing
+    // secret crosses this wire, so there is nothing for a listener to copy -
+    // what gates pairing is the 120s window a person opened by tapping the
+    // glass. Every handler refuses with a LOGGED reason when that window is
+    // shut, because from the Mac "not in pairing mode" and "not there" look
+    // identical - the rule POWERPROBE's "not on battery" refusal exists for.
+    handlePairReq(buf.substring(8));
+  } else if (buf.startsWith("PAIROK ")) {
+    handlePairOk(buf.substring(7));
+  } else if (buf == "PAIRCANCEL") {
+    handlePairCancel();
+#endif
   } else if (buf.startsWith("READTEST")) {
     // THE ASK READER IS OTHERWISE UNCAPTURABLE, and that is the same argument
     // TAB/PAGE/KBTEST/EMOJITEST/MULTITEST already won: SCREENSHOT can only record
@@ -5030,6 +5142,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // USB; state=2 mv=3866)" exists for and the same line EMOJITEST already
     // prints: from the Mac, "no output" and "impossible here" look identical, and
     // a silent refusal reads as the command being broken.
+#if BOARD_HAS_WIRELESS_PAIR
+    // Same rule and the same shape as EMOJITEST's: an unauthenticated radio command
+    // must not paint over the pairing panel, because the panel disappears while
+    // pairPanelActive stays true - the window armed and CONFIRM tappable under
+    // someone else's screen.
+    if (pairPanelActive) {
+      Serial.println("READTEST refused: another full-screen surface is up");
+      return;
+    }
+#endif
     if (arg == "off") {
       if (readerActive) exitReader();
     } else if (kbActive || histActive || emojiTestActive) {
@@ -5057,6 +5179,19 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // of bug fabVisible()'s own kbActive check was already paid for once,
     // leaving invisible typing into a screen that no longer looks like a
     // keyboard.
+#if BOARD_HAS_WIRELESS_PAIR
+    // THE PAIRING PANEL IS A FULL-SCREEN SURFACE TOO, and this grid is reachable
+    // from the radio with no authentication at all: painting it over the panel
+    // leaves the 120s window OPEN and CONFIRM live underneath a screen that shows
+    // neither. A SEPARATE guarded refusal rather than a term in the condition
+    // below - measured, not preferred: folding it in as a local (`bool surfaceUp =
+    // ...`) reads identically on board 1 and cost that board +16 bytes, so its arm
+    // is left character-for-character as it was.
+    if (pairPanelActive) {
+      Serial.println("EMOJITEST refused: another full-screen surface is up");
+      return;
+    }
+#endif
     if (kbActive || readerActive || histActive || showingDetail) {
       Serial.println("EMOJITEST refused: another full-screen surface is up");
       return;
@@ -5578,6 +5713,10 @@ void loop() {
   tickMicProcessing();  // no-op unless a capture is being processed
   tickWaitingWheel();   // no-op unless the standalone screen is on the glass
   tickAutoTheme();      // no-op unless the theme is set to AUTO
+#if BOARD_HAS_WIRELESS_PAIR
+  pairTick();           // no-op unless a pairing window is open; closes it at 120s
+  tickPairPanel();      // no-op unless the pairing panel is on the glass
+#endif
 
   // The session-gated lit -> dim -> blank ladder. Replaces a bare
   // "blank after sleepTimeoutMs of no touch": that ignored whether anything was
@@ -5702,6 +5841,13 @@ void loop() {
   // 90s answer budget, so without this the backlight could blank mid-answer in
   // ordinary use, and the waking tap would be swallowed rather than typed.
   if (readerActive || histActive || kbActive) lastActivityMillis = millis();
+#if BOARD_HAS_WIRELESS_PAIR
+  // The pairing panel joins them, and here it is load-bearing rather than merely
+  // tidy: the default backlight timeout is 30s against a 120s window, so without
+  // this the screen would blank mid-exchange - and enterSleep() CLOSES the window,
+  // so the code the user walked over to read would be gone by the time they looked.
+  if (pairPanelActive) lastActivityMillis = millis();
+#endif
 
   // Hold-to-repeat for the keyboard's DEL. Runs from here rather than handleTouch
   // because that dispatches on PRESS and ignores a held finger - which is right

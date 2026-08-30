@@ -37,6 +37,16 @@ import { lineTargetsUs, stripAddress } from "./line-address.mjs";
 import { formatRunStartLine } from "./run-ledger.mjs";
 import { classifyStall, stallMessage } from "./watchdog.mjs";
 import { pickTokens, describeChildError, CCUSAGE_TIMEOUT_MS } from "./ccusage.mjs";
+// The wireless-pairing derivations. Pure functions with no I/O and no clock,
+// pinned byte for byte against pairing.ino by pair-crypto-check.mjs - do not
+// reimplement any of them here.
+import {
+  generateKeypair,
+  deriveShared,
+  deriveCode,
+  deriveKey,
+  pairProof,
+} from "./pair-crypto.mjs";
 
 const execFileAsync = promisify(execFile);
 import {
@@ -406,8 +416,27 @@ const isValidDeviceName = (n) => typeof n === "string" && VALID_DEVICE_NAME.test
 // not have it, and fall back to the device we believe is selected. That's safe:
 // if the guess is wrong the HMAC simply fails and the answer is rejected.
 function deviceNameFor(via) {
+  // A PAIRING LINK HAS NO PAIRED DEVICE, BY CONSTRUCTION. It is opened to
+  // create a key, so until PAIRDONE there is none - and falling through to the
+  // usb/selected branch would attribute an ANSWER or PROMPT arriving there to
+  // whichever Mac-side pairing happened to be current. It fails CLOSED either
+  // way (the HMAC is checked against that other device's key, which this peer
+  // does not have), but the refusal would then name the wrong subject, and a
+  // log line that misnames its subject is the class this repo keeps paying
+  // for. "" means "no paired device", which is exactly true here.
+  if (via === "pair") return "";
   if (via === "ble") return bleDeviceName;
   return usbDeviceName || selectedDevice;
+}
+
+// How a refusal names where the line came from. The pairing link is named as
+// such rather than left to read as an unknown ble/usb device, because those are
+// different facts: one is a device we could not identify, the other is a link
+// that cannot have an identity yet.
+function senderDescription(via, from) {
+  if (via === "pair")
+    return "over the PAIRING link, which is unauthenticated by construction (no key exists until PAIRDONE)";
+  return `via ${via}${from ? ` from ${from}` : " (unknown device)"}`;
 }
 
 async function loadPairing() {
@@ -468,10 +497,14 @@ async function savePairing() {
 // Find this device's pairing, minting a fresh per-pair key the first time we
 // meet it. Only ever called for a device seen over USB, which is the trusted
 // link - a BLE peer can't talk us into creating a pairing for itself.
-async function rememberDevice(name) {
+// A `secret` is supplied ONLY by the wireless-pairing path, where both ends
+// derived the same key from the exchange rather than the Mac minting one. It
+// routes through here rather than pushing its own entry so the MAX_PAIRED_DEVICES
+// eviction stays in one place.
+async function rememberDevice(name, secret = "") {
   let entry = deviceEntry(name);
   if (!entry) {
-    entry = { name, secret: crypto.randomBytes(16).toString("hex"), label: "", lastSeen: 0 };
+    entry = { name, secret: secret || crypto.randomBytes(16).toString("hex"), label: "", lastSeen: 0 };
     pairedDevices.push(entry);
     // Oldest-seen entries fall off the end rather than growing without bound.
     if (pairedDevices.length > MAX_PAIRED_DEVICES) {
@@ -479,7 +512,14 @@ async function rememberDevice(name) {
       const dropped = pairedDevices.splice(MAX_PAIRED_DEVICES);
       for (const d of dropped) console.log(`Auth: forgot ${d.name} (pairing list full).`);
     }
-    console.log(`Auth: new pairing with ${name} (its own key).`);
+    console.log(
+      secret
+        ? `Auth: new pairing with ${name} (key derived on both sides, never transmitted).`
+        : `Auth: new pairing with ${name} (its own key).`
+    );
+  } else if (secret && entry.secret !== secret) {
+    entry.secret = secret;
+    console.log(`Auth: replaced ${name}'s key with the one just derived wirelessly.`);
   }
   entry.lastSeen = Date.now();
   await savePairing();
@@ -2325,8 +2365,8 @@ async function handleVoiceAnswer(parts, via) {
     // Loud on purpose: "text does not match the signed hash" is the tamper case
     // and must not look like an ordinary rejection.
     console.error(
-      `Voice answer REJECTED (${v.why}) for prompt ${pid} via ${via}` +
-        `${from ? ` from ${from}` : " (unknown device)"} - ignoring.`
+      `Voice answer REJECTED (${v.why}) for prompt ${pid} ` +
+        `${senderDescription(via, from)} - ignoring.`
     );
     return;
   }
@@ -2425,8 +2465,8 @@ async function handleTypedPrompt(line, via) {
   const v = verifyPrompt({ secret: dev?.secret, nonce, id12, b64, mac });
   if (!v.ok) {
     console.error(
-      `Prompt REJECTED for session ${id12} via ${via}` +
-        `${from ? ` from ${from}` : " (unknown device)"} - ${v.why}.`
+      `Prompt REJECTED for session ${id12} ` +
+        `${senderDescription(via, from)} - ${v.why}.`
     );
     return;
   }
@@ -2446,8 +2486,8 @@ async function handleTypedAnswer(parts, via) {
     // Loud on purpose: "text is empty, over the cap, or not printable ASCII" and
     // "bad hmac" are a foreign peer, not an ordinary rejection.
     console.error(
-      `Typed answer REJECTED (${v.why}) for prompt ${pid} via ${via}` +
-        `${from ? ` from ${from}` : " (unknown device)"} - ignoring.`
+      `Typed answer REJECTED (${v.why}) for prompt ${pid} ` +
+        `${senderDescription(via, from)} - ignoring.`
     );
     return;
   }
@@ -2488,7 +2528,10 @@ async function handleTypedAnswer(parts, via) {
   }
 }
 
-async function handleDeviceLine(line, via) {
+// `pairGen` is set ONLY by a pairing link's own reader, which stamps every
+// line with the exchange whose connection it belongs to. Every other caller
+// leaves it 0, and 0 matches no exchange - see pairReplyIsOurs().
+async function handleDeviceLine(line, via, pairGen = 0) {
   // Before ANY logging: a line addressed to the other Mac is not ours to log,
   // authenticate, or act on.
   if (!lineTargetsUs(line, hostId)) return;
@@ -2599,6 +2642,26 @@ async function handleDeviceLine(line, via) {
   }
   console.log(`[device/${via}] ${line}`);
 
+  // ---- wireless pairing, on whichever transport it arrives ----
+  // These are handled here rather than on the pairing link alone because the
+  // device answers on EVERY live transport: a cabled device sends PAIRPUB over
+  // USB as well, and the state machine takes the first and ignores the rest.
+  // `via`/`pairGen` are passed on rather than dropped: they are the ONLY
+  // evidence of which exchange a reply belongs to, because nothing in the wire
+  // format says so.
+  if (line.startsWith("PAIRPUB ")) {
+    await handlePairPub(line.slice(8).trim(), via, pairGen);
+    return;
+  }
+  if (line === "PAIRDONE" || line.startsWith("PAIRDONE ")) {
+    await handlePairDone(line.slice(8).trim(), via, pairGen);
+    return;
+  }
+  if (line === "PAIRFAIL" || line.startsWith("PAIRFAIL ")) {
+    await handlePairFail(line.slice(8).trim(), via, pairGen);
+    return;
+  }
+
   // Device announces its unique BLE name over USB (trusted): pin BLE to it,
   // and push it the shared secret so it can authenticate answers. HELLO is
   // only honored over USB - a BLE peer must not be able to steer us.
@@ -2679,8 +2742,8 @@ async function handleDeviceLine(line, via) {
     crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want));
   if (!good) {
     console.error(
-      `Remote answer REJECTED (bad/missing auth) for prompt ${pid} via ${via}` +
-        `${from ? ` from ${from}` : " (unknown device)"} - ignoring.`
+      `Remote answer REJECTED (bad/missing auth) for prompt ${pid} ` +
+        `${senderDescription(via, from)} - ignoring.`
     );
     return;
   }
@@ -2825,6 +2888,26 @@ function startBle() {
 
   noble.on("discover", async (peripheral) => {
     const name = peripheral.advertisement.localName || "";
+    // A PAIRING SCAN LISTS, IT DOES NOT CONNECT. For its 5 seconds the normal
+    // auto-connect is suppressed outright: the user is choosing from the list,
+    // and grabbing one of them mid-scan would both shorten the list and connect
+    // to a device they had not picked. pairScanFinish() puts the normal scan back.
+    if (pairScanning) {
+      if (name === "Deckhand" || name.startsWith("Deckhand-")) {
+        // STAMPED, because this Map holds a live noble peripheral handle and it
+        // is what PAIRSTART later hands to connectAsync. Entries used to live
+        // until the next scan, so a handle an hour old - from a device since
+        // moved, slept or re-advertised under a new address - was connected to
+        // as if it were fresh. pairScanPrune() ages them out; the stamp is what
+        // lets it, and what lets PAIRSTART say WHY it refused.
+        pairScanSeen.set(name, { name, rssi: peripheral.rssi ?? -127, peripheral, at: Date.now() });
+      }
+      return;
+    }
+    // Never race an exchange for its own peripheral: the pairing link owns that
+    // connection and its TX listener, and a second connect would re-subscribe
+    // underneath it.
+    if (pairExchange && pairExchange.ownLink && peripheral.id === pairExchange.peripheralId) return;
     // Connect only to OUR device, so we never grab a neighbour's unit in a
     // shared room: the one that's been chosen, else any device we're already
     // paired with, else any "Deckhand[-XXXX]" as a first-run bootstrap.
@@ -2959,6 +3042,622 @@ async function sendOverBle(text) {
   }
 }
 
+// ---------- Wireless pairing: the Mac's half ----------
+//
+// The cable's security value was never the wire - it was proof that a person
+// was HOLDING the device. This replaces that proof with a code shown on BOTH
+// screens and a CONFIRM tap on the glass, and it never puts the 128-bit pairing
+// key on the air: both ends DERIVE it from an ephemeral X25519 exchange. See
+// docs/superpowers/specs/2026-08-30-wireless-pairing.md, and pair-crypto.mjs
+// for the derivations, which must agree byte for byte with pairing.ino.
+//
+// THE USER TYPES NOTHING. An earlier design had the code typed into the Mac,
+// and it was broken: the proof derives from the shared secret alone, so ANY
+// peer that completes the ECDH computes a valid one without ever seeing the
+// code. What commits is the tap on the device, bound to the peer that did the
+// exchange. The Mac's job here is to derive its own code, PUBLISH it in the
+// heartbeat for the menu bar to draw, and send the proof when the user says the
+// two agree.
+//
+// NOTHING SECRET IS WRITTEN OR LOGGED. The private key and the shared secret
+// live in `pairExchange` and are zeroed by pairEnd() on every exit path -
+// success, refusal, timeout and teardown alike. The derived key reaches disk
+// only through savePairing(), which is where every pairing key has always
+// lived. The six digits are deliberately kept out of host.log too: the log
+// rotates and persists, and the heartbeat (mode-0700 runtime dir) is the one
+// channel the menu bar reads.
+const PAIR_SCAN_MS = 5000;
+const PAIR_CONNECT_TIMEOUT_MS = 15_000;
+const PAIR_PUB_TIMEOUT_MS = 15_000;    // the device answers a PAIRREQ immediately
+const PAIR_EXCHANGE_MS = 120_000;      // matches the device's own PAIR_WINDOW_MS
+// The device sanitises and truncates this itself (PAIR_LABEL_BYTES), so this cap
+// only keeps the line short; it is not the display budget.
+const PAIR_LABEL_MAX = 32;
+// How long a SIGHTING is good for. The scan list holds live noble peripheral
+// handles and PAIRSTART hands the chosen one straight to connectAsync, so an
+// old handle is a connect to whatever that object still believes it points at.
+// 120s is the human timescale this whole feature already runs on - the device's
+// own pairing window - so anything older means the user has wandered off and
+// should look again rather than have us guess.
+const PAIR_SCAN_FRESH_MS = 120_000;
+
+let pairState = "idle";      // idle | scanning | awaiting-code | verifying | done | failed
+let pairError = "";
+let pairScanning = false;
+let pairScanTimer = null;
+const pairScanSeen = new Map();  // name -> { name, rssi, peripheral, at }
+let pairExchange = null;
+let pairTimer = null;
+let pairDeadline = 0;
+// Monotonic, one per exchange, never reused. It is what a reply arriving on an
+// exchange's OWN link is matched against - see pairReplyIsOurs().
+let pairGeneration = 0;
+// pairEnd() nulls pairExchange FIRST (so nothing can act on a half-wiped one)
+// and only then closes the link, which is bounded at 15s. Without this flag
+// pairBusy() was false for that whole window, so a PAIRCANCEL->PAIRSTART inside
+// it sailed past the guard and the OLD teardown's startBleScan() then fired
+// underneath the new connect. "Busy" has to mean "not ready for a new exchange",
+// which includes still putting the last one away.
+let pairTearingDown = false;
+
+const pairBusy = () => pairExchange !== null || pairTearingDown;
+
+function pairSecsLeft() {
+  if (!pairDeadline) return 0;
+  return Math.max(0, Math.round((pairDeadline - Date.now()) / 1000));
+}
+
+// Drops sightings whose handles have gone stale, which both keeps the menu's
+// list to what PAIRSTART would actually accept and lets noble's peripheral
+// objects go. Called from pairStatus(), i.e. every tick, and from PAIRSTART.
+function pairScanPrune(now = Date.now()) {
+  for (const [name, d] of pairScanSeen) {
+    if (now - (d.at ?? 0) > PAIR_SCAN_FRESH_MS) pairScanSeen.delete(name);
+  }
+}
+
+// WHICH EXCHANGE A REPLY BELONGS TO IS NOT ON THE WIRE, so it is derived from
+// where the reply ARRIVED. Every pairing reply used to bind to whatever
+// `pairExchange` happened to be current, and that is reachable with no attacker
+// at all: an exchange that times out at 15s, a retry, and the FIRST device's
+// slow PAIRPUB lands in the second exchange - setting `code` from a peer that
+// never did this ECDH, after which `if (ex.code) return;` swallows the real
+// reply. The codes then disagree and nothing is stored, so it fails safe, but
+// the user gets a dead exchange under a log line saying it was answered.
+//
+//   "pair" - the exchange's own link, whose reader stamps the generation it
+//            was opened for. A reader left over from an abandoned exchange
+//            therefore stamps a generation that no longer matches, and 0 (every
+//            other caller's default) matches nothing.
+//   "ble"/"usb" - a shared transport, so the test is that the transport is
+//            actually connected to the device THIS exchange is with.
+function pairReplyIsOurs(ex, via, gen) {
+  if (via === "pair") return gen !== 0 && gen === ex.gen;
+  if (via === "ble") return !!bleDeviceName && bleDeviceName === ex.name;
+  if (via === "usb") return !!usbDeviceName && usbDeviceName === ex.name;
+  return false;
+}
+
+// Logged rather than dropped in silence: a swallowed reply presents as pairing
+// simply not working, which is the whole complaint above.
+function pairReplyAccepted(ex, kind, via, gen) {
+  if (pairReplyIsOurs(ex, via, gen)) return true;
+  const where = via === "pair" ? `the pairing link of exchange #${gen}` : `the ${via} link`;
+  console.log(
+    `Pair: ${kind} DROPPED - it arrived on ${where}, which is not the exchange with ` +
+      `${ex.name} (#${ex.gen}). A late reply from an abandoned exchange must never be ` +
+      `taken for this one's.`
+  );
+  return false;
+}
+
+// What the menu bar renders from. `code` is OUR derived code - it is not a
+// secret from the local user (they are about to read the same six digits off
+// the device), and publishing it here is the whole point: nothing is typed and
+// nothing is compared host-side.
+function pairStatus() {
+  pairScanPrune();
+  return {
+    state: pairState,
+    devices: [...pairScanSeen.values()]
+      .map((d) => ({ name: d.name, rssi: d.rssi }))
+      .sort((a, b) => b.rssi - a.rssi),
+    name: pairExchange ? pairExchange.name : "",
+    label: pairExchange ? pairExchange.label : "",
+    code: pairExchange ? pairExchange.code : "",
+    error: pairError,
+    sec: pairSecsLeft(),
+  };
+}
+
+// Every await inside a pairing path is bounded, because an await that never
+// settles is this repo's documented worst failure: tick()'s setTimeout sits
+// after every await, so one unsettled promise stops the host sending forever
+// while it still looks perfectly healthy.
+async function pairWrite(characteristic, text) {
+  if (!characteristic) throw new Error("no write characteristic");
+  const buf = Buffer.from(text, "utf8");
+  for (let i = 0; i < buf.length; i += BLE_CHUNK_SIZE) {
+    await withTimeout(
+      characteristic.writeAsync(buf.subarray(i, i + BLE_CHUNK_SIZE), true),
+      BLE_WRITE_TIMEOUT_MS,
+      "pairing write"
+    );
+  }
+}
+
+function pairArm(ms, why) {
+  if (pairTimer) clearTimeout(pairTimer);
+  pairTimer = setTimeout(() => {
+    pairTimer = null;
+    pairEnd("failed", why, `timed out - ${why}`).catch((err) =>
+      console.error("Pair: teardown after timeout failed:", err.message)
+    );
+  }, Math.max(1000, ms));
+}
+
+// ONE exit for every ending, so the wipe cannot be forgotten on a path added
+// later - the same reason pairDeriveAll() on the device is single-exit.
+async function pairEnd(nextState, error, note) {
+  const ex = pairExchange;
+  pairExchange = null;
+  // Held across the awaits below, so pairBusy() keeps meaning "not ready for a
+  // new exchange" while the old link is still coming down. Only the call that
+  // actually HAS the exchange owns the flag; a concurrent pairEnd() with
+  // nothing to tear down must not clear it underneath this one.
+  if (ex) pairTearingDown = true;
+  pairState = nextState;
+  pairError = error || "";
+  pairDeadline = 0;
+  if (pairTimer) {
+    clearTimeout(pairTimer);
+    pairTimer = null;
+  }
+  try {
+    if (ex) {
+      for (const b of [ex.priv, ex.shared, ex.key]) if (Buffer.isBuffer(b)) b.fill(0);
+      ex.priv = null;
+      ex.shared = null;
+      ex.key = null;
+      ex.proof = "";
+      ex.code = "";
+      // Only a link WE opened is ours to take down. Pairing with the device that
+      // is already the live link must leave that link exactly as it found it -
+      // losing a working connection because someone opened a pairing menu would
+      // be worse than the feature is worth.
+      if (ex.ownLink) {
+        // Ours to remove BEFORE we disconnect, or our own disconnect calls it -
+        // and, worse, noble caches peripherals, so a handler left behind would
+        // ride that object into whatever the next connection uses it for.
+        if (ex.onDisconnect) {
+          try {
+            ex.peripheral.removeListener("disconnect", ex.onDisconnect);
+          } catch {
+            // the peripheral may already be gone
+          }
+          ex.onDisconnect = null;
+        }
+        try {
+          ex.txChar?.removeAllListeners("data");
+        } catch {
+          // the characteristic may already be gone with the link
+        }
+        // Skipped when the link is ALREADY gone - which is exactly the case the
+        // disconnect handler above arrives in. noble's disconnectAsync() waits
+        // for a 'disconnect' event that has already been emitted, so it would
+        // sit out the full 15s timeout and hold pairTearingDown with it.
+        if (ex.peripheral.state !== "disconnected") {
+          try {
+            await withTimeout(ex.peripheral.disconnectAsync(), PAIR_CONNECT_TIMEOUT_MS, "pairing disconnect");
+          } catch (err) {
+            console.error(`Pair: could not close the pairing link cleanly: ${err.message}`);
+          }
+        }
+        // We stopped the scan to connect; put it back if nothing else is up.
+        if (!bleCharacteristic) startBleScan();
+      }
+    }
+  } finally {
+    if (ex) pairTearingDown = false;
+  }
+  if (note) console.log(`Pair: ${note}`);
+}
+
+async function pairScanStart() {
+  if (pairScanning) {
+    console.log("Pair: a scan is already running.");
+    return;
+  }
+  if (pairBusy()) {
+    console.log(
+      pairExchange
+        ? "Pair: PAIRSCAN ignored - an exchange is in progress (PAIRCANCEL first)."
+        : "Pair: PAIRSCAN ignored - the last exchange is still closing its link; try again in a moment."
+    );
+    return;
+  }
+  if (noble.state !== "poweredOn") {
+    pairState = "failed";
+    pairError = `bluetooth is ${noble.state}`;
+    console.error(`Pair: cannot scan - bluetooth adapter is ${noble.state}.`);
+    return;
+  }
+  pairScanning = true;          // set BEFORE any await: the discover handler reads it
+  pairScanSeen.clear();
+  pairError = "";
+  pairState = "scanning";
+  try {
+    await withTimeout(noble.stopScanningAsync(), PAIR_CONNECT_TIMEOUT_MS, "stop scan");
+    // allowDuplicates: a 5s list wants every advertiser's freshest RSSI, not one
+    // sighting each.
+    await withTimeout(noble.startScanningAsync([], true), PAIR_CONNECT_TIMEOUT_MS, "pairing scan");
+  } catch (err) {
+    pairScanning = false;
+    pairState = "failed";
+    pairError = `scan failed: ${err.message}`;
+    console.error(`Pair: scan failed to start: ${err.message}`);
+    if (!bleCharacteristic) startBleScan();
+    return;
+  }
+  console.log(`Pair: scanning ${PAIR_SCAN_MS / 1000}s for nearby Deckhand devices...`);
+  pairScanTimer = setTimeout(() => {
+    pairScanFinish().catch((err) => console.error("Pair: scan teardown failed:", err.message));
+  }, PAIR_SCAN_MS);
+}
+
+// RESTORES THE HOST'S NORMAL INVARIANT rather than a remembered flag: this code
+// scans while disconnected and does not while connected, so that is what gets
+// put back - on the happy path, on a failed start, and on the timeout alike.
+async function pairScanFinish() {
+  pairScanTimer = null;
+  pairScanning = false;
+  try {
+    await withTimeout(noble.stopScanningAsync(), PAIR_CONNECT_TIMEOUT_MS, "stop scan");
+  } catch (err) {
+    console.error(`Pair: could not stop the pairing scan: ${err.message}`);
+  }
+  if (!bleCharacteristic) startBleScan();
+  const list = [...pairScanSeen.values()].sort((a, b) => b.rssi - a.rssi);
+  console.log(
+    list.length
+      ? `Pair: scan found ${list.length} device(s): ${list.map((d) => `${d.name} (${d.rssi} dBm)`).join(", ")}.`
+      : "Pair: scan found no Deckhand devices - is one advertising?"
+  );
+  if (pairState === "scanning") pairState = "idle";
+}
+
+async function pairStart(name) {
+  if (pairBusy()) {
+    console.log(
+      pairExchange
+        ? "Pair: PAIRSTART ignored - an exchange is already running (PAIRCANCEL first)."
+        : "Pair: PAIRSTART ignored - the last exchange is still closing its link; try again in a moment."
+    );
+    return;
+  }
+  if (pairScanning) {
+    console.log("Pair: PAIRSTART ignored - a scan is still running.");
+    return;
+  }
+  if (!isValidDeviceName(name)) {
+    pairState = "failed";
+    pairError = `${name || "(no name)"} is not a Deckhand-XXXX device name`;
+    console.error(`Pair: PAIRSTART ignored - ${pairError}.`);
+    return;
+  }
+  // The scan list is the normal route. The device already on the live link is
+  // accepted too, so re-pairing the connected one does not need a scan first.
+  //
+  // A STALE SIGHTING IS REFUSED BY NAME rather than connected to. The Map holds
+  // the noble peripheral object itself, and that handle is only as good as the
+  // advertisement it came from; the live link is exempt because it is not a
+  // remembered handle at all - it is the connection we are using right now.
+  const hit = pairScanSeen.get(name);
+  const hitAgeMs = hit ? Date.now() - (hit.at ?? 0) : 0;
+  if (hit && hitAgeMs > PAIR_SCAN_FRESH_MS) {
+    pairScanSeen.delete(name);
+    pairState = "failed";
+    pairError = `${name} was last seen ${Math.round(hitAgeMs / 1000)}s ago - that sighting is stale`;
+    console.error(`Pair: ${pairError}; run PAIRSCAN again rather than connecting to a stale handle.`);
+    return;
+  }
+  pairScanPrune();
+  const peripheral =
+    (hit && hit.peripheral) || (blePeripheral && bleDeviceName === name ? blePeripheral : null);
+  if (!peripheral) {
+    pairState = "failed";
+    pairError = `${name} was not in the last scan`;
+    console.error(`Pair: ${pairError} - run PAIRSCAN first.`);
+    return;
+  }
+
+  const { priv, pub } = generateKeypair();
+  // ASCII only and capped: this crosses a wire whose every other text field is
+  // ASCII by construction, and the device blanks anything else anyway.
+  const label = toAscii(hostLabel).replace(/[^\x20-\x7E]/g, "").slice(0, PAIR_LABEL_MAX).trim();
+  pairExchange = {
+    name,
+    gen: ++pairGeneration,
+    peripheral,
+    peripheralId: peripheral.id,
+    ownLink: peripheral !== blePeripheral,
+    priv,
+    pub,
+    shared: null,
+    key: null,
+    code: "",
+    proof: "",
+    label,
+    rxChar: null,
+    txChar: null,
+    onDisconnect: null,
+  };
+  const ex = pairExchange;
+  pairError = "";
+  // "awaiting-code" from here: the user's job is already to watch for the two
+  // codes, and `code` stays "" until the device answers, which is what the menu
+  // bar shows a spinner for.
+  pairState = "awaiting-code";
+  pairDeadline = Date.now() + PAIR_EXCHANGE_MS;
+  pairArm(PAIR_PUB_TIMEOUT_MS, "the device never answered with its public key (is its pairing window open?)");
+
+  try {
+    if (pairExchange.ownLink) {
+      // Connecting takes the radio; the background scan has to yield for it and
+      // is restored by pairEnd().
+      await withTimeout(noble.stopScanningAsync(), PAIR_CONNECT_TIMEOUT_MS, "stop scan");
+    }
+    if (peripheral.state !== "connected") {
+      await withTimeout(peripheral.connectAsync(), PAIR_CONNECT_TIMEOUT_MS, "pairing connect");
+    }
+    if (pairExchange !== ex) return;   // cancelled while we were connecting
+    // THE LINK DROPPING WAS THE ONE FAILURE THIS PATH COULD NOT SEE. The main
+    // BLE path has watched for it since the start; this one had nothing, so a
+    // peripheral that went away after PAIRPUB left `pairExchange` non-null with
+    // priv/shared/key UN-ZEROED and the heartbeat publishing awaiting-code, the
+    // six digits and a counting `sec` for the rest of the 120s - a dead
+    // exchange the menu bar draws as a live pairing. It was bounded by the
+    // timer, but "every failure closes the exchange" should be satisfied by
+    // NOTICING the failure, not by outliving it.
+    //
+    // Registered only after the ownership check above, so a pairEnd() that has
+    // already run cannot leave a handler behind on a noble-cached peripheral.
+    if (ex.ownLink) {
+      ex.onDisconnect = () => {
+        if (pairExchange !== ex) return;   // pairEnd() already took it down
+        pairEnd(
+          "failed",
+          "the pairing link dropped",
+          `the link to ${name} dropped before the exchange finished`
+        ).catch((err) => console.error("Pair: teardown after a dropped link failed:", err.message));
+      };
+      peripheral.once("disconnect", ex.onDisconnect);
+    }
+    const { characteristics } = await withTimeout(
+      peripheral.discoverSomeServicesAndCharacteristicsAsync(
+        [BLE_SERVICE_UUID],
+        [BLE_RX_CHAR_UUID, BLE_TX_CHAR_UUID]
+      ),
+      PAIR_CONNECT_TIMEOUT_MS,
+      "pairing discover"
+    );
+    const rx = characteristics.find((c) => c.uuid === BLE_RX_CHAR_UUID) ?? null;
+    const tx = characteristics.find((c) => c.uuid === BLE_TX_CHAR_UUID) ?? null;
+    if (!rx) throw new Error("the device exposes no RX characteristic");
+    if (pairExchange !== ex) return;   // cancelled while we were connecting
+    pairExchange.rxChar = rx;
+    // On the LIVE link the existing subscription already funnels every device
+    // line into handleDeviceLine, so a second listener would double-handle
+    // everything - the exact defect the main path's removeAllListeners exists
+    // for. Only a link we opened gets a reader of its own.
+    if (pairExchange.ownLink) {
+      if (!tx) throw new Error("the device exposes no TX characteristic");
+      pairExchange.txChar = tx;
+      tx.removeAllListeners("data");
+      let buf = "";
+      // Stamped with THIS exchange's generation. noble caches the characteristic
+      // per peripheral, so a re-pair of the same device attaches a new listener
+      // to the same object and a notify still in flight from the previous
+      // attempt would otherwise arrive looking exactly like this one's reply.
+      const gen = ex.gen;
+      tx.on("data", (chunk) => {
+        buf += chunk.toString("utf8");
+        let i;
+        while ((i = buf.indexOf("\n")) !== -1) {
+          const l = buf.slice(0, i).trim();
+          buf = buf.slice(i + 1);
+          if (l) handleDeviceLine(l, "pair", gen);
+        }
+      });
+      await withTimeout(tx.subscribeAsync(), PAIR_CONNECT_TIMEOUT_MS, "pairing subscribe");
+    }
+    if (pairExchange !== ex) return;   // cancelled while we were subscribing
+    await pairWrite(rx, `PAIRREQ ${hostId} ${pub.toString("hex")} ${label}\n`);
+    console.log(`Pair: PAIRREQ sent to ${name} as "${label}"; waiting for its public key.`);
+  } catch (err) {
+    if (pairExchange === ex) {
+      await pairEnd("failed", err.message, `could not start the exchange with ${name}: ${err.message}`);
+      return;
+    }
+    // Cancelled or timed out underneath us: pairEnd() has already wiped the
+    // keys, but a connect that completed AFTER it would leave a link nobody
+    // owns, so close it here rather than hoping.
+    console.error(`Pair: exchange with ${name} failed after it ended: ${err.message}`);
+    if (ex.ownLink) {
+      await withTimeout(peripheral.disconnectAsync(), PAIR_CONNECT_TIMEOUT_MS, "pairing disconnect").catch(() => {});
+    }
+  }
+}
+
+// PAIRPUB <pubB:64hex>
+async function handlePairPub(hex, via, gen) {
+  const ex = pairExchange;
+  if (!ex) {
+    console.log("Pair: PAIRPUB ignored - no exchange is running.");
+    return;
+  }
+  // BOUND TO ITS EXCHANGE FIRST. A public key is the one reply that CHANGES
+  // state irreversibly for this exchange (it sets `code`, after which the real
+  // reply is swallowed by the dedup below), so the source test comes before
+  // anything else touches `ex`.
+  if (!pairReplyAccepted(ex, "PAIRPUB", via, gen)) return;
+  // The device sends on every live transport at once, so a cabled device
+  // delivers this twice. The first one wins; a second is not an error.
+  if (ex.code) return;
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    await pairEnd("failed", "the device's public key was malformed", "the device's public key was malformed");
+    return;
+  }
+  const pubB = Buffer.from(hex, "hex");
+  let shared;
+  try {
+    shared = deriveShared(ex.priv, pubB);
+  } catch (err) {
+    // MEASURED IN TASK 1: node THROWS on all four classic low-order X25519
+    // points (all-zero, one, and both order-8 points) rather than returning an
+    // attacker-known shared secret. That is the Mac failing CLOSED against a
+    // contributory-behaviour attack - but an uncaught rejection here would kill
+    // the poll loop, so the throw is caught, named, and ends the exchange.
+    await pairEnd(
+      "failed",
+      "the device's public key was rejected",
+      `the device's public key was rejected by X25519 (${err.message}) - a low-order point or a corrupt line`
+    );
+    return;
+  }
+  ex.shared = shared;
+  ex.code = deriveCode(shared, ex.pub, pubB);
+  ex.key = deriveKey(shared, ex.pub, pubB);
+  ex.proof = pairProof(ex.key);
+  pairState = "awaiting-code";
+  pairArm(
+    Math.max(1000, pairDeadline - Date.now()),
+    "nobody said whether the codes matched"
+  );
+  // The CODE IS NOT LOGGED, deliberately: it belongs on the two screens and in
+  // the heartbeat the menu bar reads, not in a rotating file on disk.
+  console.log(`Pair: ${ex.name} answered - compare the six digits on its screen with the ones in the menu.`);
+}
+
+// The user clicked Match. Nothing is compared here: the proof says only that we
+// did the same ECDH, and the device commits on ITS OWN tap.
+async function pairConfirm() {
+  const ex = pairExchange;
+  if (!ex) {
+    console.log("Pair: PAIRCONFIRM ignored - no exchange is running.");
+    return;
+  }
+  if (!ex.proof) {
+    console.log("Pair: PAIRCONFIRM ignored - the device has not answered yet.");
+    return;
+  }
+  pairState = "verifying";
+  try {
+    await pairWrite(ex.rxChar, `PAIROK ${ex.proof}\n`);
+  } catch (err) {
+    await pairEnd("failed", err.message, `could not send the proof: ${err.message}`);
+    return;
+  }
+  console.log("Pair: proof sent - now tap CONFIRM on the device to store the key.");
+  pairArm(
+    Math.max(1000, pairDeadline - Date.now()),
+    "the device never confirmed - its CONFIRM button has to be tapped inside the 120s window"
+  );
+}
+
+// PAIRDONE <hostId> - sent ONLY after the tap on the glass, and it is the only
+// thing that makes the derived key a stored pairing on this side too.
+async function handlePairDone(id, via, gen) {
+  const ex = pairExchange;
+  if (!ex) {
+    console.log("Pair: PAIRDONE ignored - no exchange is running.");
+    return;
+  }
+  if (!pairReplyAccepted(ex, "PAIRDONE", via, gen)) return;
+  if (id && id.toLowerCase() !== hostId.toLowerCase()) {
+    console.log(`Pair: PAIRDONE ignored - it names ${id}, not this Mac (${hostId}).`);
+    return;
+  }
+  if (!ex.key) {
+    await pairEnd("failed", "PAIRDONE arrived before a key was derived", "PAIRDONE arrived before a key was derived");
+    return;
+  }
+  const name = ex.name;
+  // hex, lowercase - the same form PROVISION has always stored, so a wirelessly
+  // paired Mac answers prompts through exactly the existing code path.
+  const secret = ex.key.toString("hex");
+  await rememberDevice(name, secret);
+  await pairEnd("done", "", `paired with ${name}. Its key was DERIVED on both sides and never transmitted.`);
+}
+
+// PAIRFAIL <reason>
+//
+// IT CARRIES NO hostId, so the address check handlePairDone makes on its own
+// argument has no counterpart here; what CAN be checked is where the line
+// arrived, which is the same binding every other reply now gets. That is
+// weaker than an address and it is the strongest thing available on this side.
+//
+// NOTED, NOT FIXED (it is a firmware change): the "the device has no hostId to
+// address it with" rationale below is true only of `closed`, which is refused
+// before any PAIRREQ is read. Once a PAIRREQ has been ACCEPTED the device knows
+// the requesting hostId, so every later failure - a malformed key, a bad proof,
+// a CANCEL tap, the window expiring - could carry the trailing `to=<hostId>`
+// address that every other device->host line already uses, and would then be
+// filtered by lineTargetsUs() before it ever reached here.
+async function handlePairFail(reason, via, gen) {
+  const ex = pairExchange;
+  if (!ex) {
+    // `PAIRFAIL closed` is broadcast (the device has no hostId to address it
+    // with yet), so one can arrive for somebody else's attempt. Logged, not acted on.
+    console.log(`Pair: PAIRFAIL ${reason} ignored - no exchange is running.`);
+    return;
+  }
+  if (!pairReplyAccepted(ex, `PAIRFAIL ${reason || "(no reason)"}`, via, gen)) return;
+  await pairEnd("failed", reason || "refused", `the device refused: ${reason || "(no reason given)"}`);
+}
+
+// Nothing a pairing handler throws may escape into the command loop's
+// "no trigger file" catch, and nothing it throws may leave an exchange open.
+async function pairCommand(name, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`Pair: ${name} failed: ${err.message}`);
+    if (pairExchange) {
+      await pairEnd("failed", err.message, `exchange abandoned after ${name} threw`).catch(() => {});
+    } else {
+      pairState = "failed";
+      pairError = err.message;
+    }
+  }
+}
+
+async function pairCancel() {
+  if (pairScanTimer) {
+    clearTimeout(pairScanTimer);
+    await pairScanFinish();
+  }
+  const ex = pairExchange;
+  if (!ex) {
+    if (pairTearingDown) {
+      console.log("Pair: nothing to cancel - the last exchange is already closing.");
+      return;
+    }
+    pairState = "idle";
+    pairError = "";
+    console.log("Pair: nothing to cancel.");
+    return;
+  }
+  // Told, not merely dropped: the device would otherwise hold its window open
+  // showing a code for a Mac that has gone away.
+  try {
+    await pairWrite(ex.rxChar, "PAIRCANCEL\n");
+  } catch (err) {
+    console.error(`Pair: could not tell the device we cancelled: ${err.message}`);
+  }
+  await pairEnd("idle", "", "cancelled.");
+}
+
 // ---------- Shared tick: compute usage once, send to whichever transports are live ----------
 // Belt and braces over the BLE write timeout above. That fix bounds the ONE await
 // known to hang; this bounds the whole function, because any future await added
@@ -3014,6 +3713,11 @@ async function tick(generation = tickGeneration) {
           icon: currentMacEmoji(),
           iconFromEnv: !!resolveMacEmoji({ env: process.env.DECKHAND_MAC_EMOJI || "", file: "" }),
           voice: lastVoice,
+          // The pairing dialog's whole state, INCLUDING the code this Mac
+          // derived - the menu bar draws it for the user to compare against the
+          // device's screen, and never reads the secrets file. It is not secret
+          // from the local user, and this file lives in a mode-0700 runtime dir.
+          pairing: pairStatus(),
           // ageSec is computed on the way out rather than stored, so a stale
           // reading cannot look fresh just because the heartbeat itself is.
           batt: lastBatt
@@ -3169,6 +3873,21 @@ setInterval(async () => {
       );
       return;
     }
+    // ---- wireless pairing, host-side only and never forwarded ----
+    // PAIRSCAN lists nearby devices; PAIRSTART <name> runs the exchange;
+    // PAIRCONFIRM is the user clicking Match (the device still needs its own
+    // CONFIRM tap); PAIRCANCEL abandons it. Each awaits nothing unbounded and
+    // each failure path names its cause - a pairing that silently stops is the
+    // worst outcome available here.
+    // Each is run through pairCommand(), because THIS loop's outer catch is a
+    // bare `catch {}` meaning "no trigger file waiting" - anything a pairing
+    // handler threw would vanish into it, and a pairing that silently stops is
+    // exactly the outcome this feature must not have.
+    if (command === "PAIRSCAN") return pairCommand("PAIRSCAN", () => pairScanStart());
+    if (command === "PAIRSTART" || command.startsWith("PAIRSTART "))
+      return pairCommand("PAIRSTART", () => pairStart(command.slice(9).trim()));
+    if (command === "PAIRCONFIRM") return pairCommand("PAIRCONFIRM", () => pairConfirm());
+    if (command === "PAIRCANCEL") return pairCommand("PAIRCANCEL", () => pairCancel());
     if (command === "SELECT" || command.startsWith("SELECT ")) {
       const want = command.slice(6).trim();
       if (!want || want.toLowerCase() === "auto") {

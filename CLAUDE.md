@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386934, RAM 69804 | flash 993814, RAM 65900 |
+| size today | flash 1386934, RAM 69804 | flash 1022918, RAM 66228 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -415,6 +415,7 @@ echo "AUDIOPROBE" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: is the cod
 echo "TONETEST" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: configure the codec and PLAY a tone
 echo "TONETEST 90" > ~/.claude/deckhand-device-command # ... at a given volume, 1-100 (default 30)
 echo "TONELADDER" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: five rising volumes, find the audible floor
+echo "PAIRVECTOR" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: the pairing crypto against a pinned RFC 7748 vector
 ```
 
 **The three audio commands are a LADDER OF CLAIMS, and running them out of order debugs two
@@ -689,6 +690,8 @@ $B --legibility-check          # every row carrying a READING renders at full st
 $B --menu-shot out.png         # THE REAL MENU, off the glass - captured by window id
 $B --menu-preview out.png      # the bar label AND the menu, rendered light and dark
 $B --icon-preview out.png      # the boat at every size and style, 6x nearest-neighbour
+$B --pair-check                # the wireless-pairing menu and its dialog; prints its own count
+$B --pair-shot out.png [code] [device] [light|dark]   # THE REAL compare dialog, off the glass
 $B --open-session [<id>] [go]  # what a click on each session row would do (prints; acts only on `go`)
 node host/mac-emoji-check.mjs  # the four hand-transcribed icon tables agree
 DECKHAND_TMP=<dir> $B --menu-dump   # drive the REAL parser with a synthetic host-alive + host.log
@@ -737,6 +740,477 @@ have been reported as nine findings rather than one, which is the "an instrument
 pointing the other way. The caps are passed in now, and the behaviour suite's sandbox is torn down
 in a `finally`, since the run that fails is exactly the one whose scratch directory must not survive.
 
+**Check the WIRELESS-PAIRING CRYPTO, and know which half a checker can prove.** Board 2 can pair a
+Mac without the cable (`BOARD_HAS_WIRELESS_PAIR`, 1 there and **0 on board 1**, where `PROVISION`
+over USB stays the only path): an ephemeral X25519 exchange plus a 6-digit code derived from the
+shared secret, so the 128-bit pairing key is **never transmitted** - both ends derive it. See
+`docs/superpowers/specs/2026-08-30-wireless-pairing.md`.
+
+```
+node host/pair-crypto-check.mjs              # the Mac's module, then pairing.ino read as TEXT
+node host/pair-crypto-check.mjs --selftest   # module + SOURCE fault injections, each naming its assertion
+node host/pair-exchange-check.mjs            # the HOST's state machine, sliced out of index.mjs and driven
+node host/pair-exchange-check.mjs --selftest # the two faults a whole-branch review injected, each named
+echo "PAIRVECTOR" > ~/.claude/deckhand-device-command   # the DEVICE's half, on hardware
+```
+
+**THE STATE MACHINE HAD ZERO COVERAGE AND A REVIEW PROVED IT BY INJECTION, WHICH IS THE ONLY WAY
+THAT GAP WAS EVER GOING TO BE VISIBLE.** `pair-crypto-check.mjs` reads only the FIRMWARE sources and
+`--pair-check` drives Swift against synthetic JSON, so nothing exercised the Mac's exchange at all —
+and two deletions in `host/index.mjs` left **all 18 checkers and every selftest green**:
+`pairReplyIsOurs -> return true` (the per-exchange stamping that stops a late reply from an
+abandoned exchange poisoning the next one) and `pairEnd`'s `b.fill(0)` loop (priv/shared/key left
+live). Those are precisely the two defects the fix rounds of this branch were written to close, so
+they are the two `--selftest` re-injects.
+`pair-exchange-check.mjs` **SLICES the pairing region out of `index.mjs` by source text** and drives
+the real functions with noble-shaped stubs; a JS mirror would keep passing with the state machine
+deleted, which is the weakness this file already records in `sessions-rank-check.mjs`'s mirror half.
+The simulated device runs the SAME pinned derivations, so "the two codes agree" is an agreement
+rather than an echo. It prints its own assertion count — do not transcribe it here.
+**THE VACUITY TRAP IS WHAT ITS FIRST NINE ASSERTIONS ARE FOR.** The throwaway harness this grew from
+reported a clean pass while starting no exchange at all: its prelude was missing the BLE UUID
+constants, so discovery quietly found no characteristics. They are PARSED out of `index.mjs` now,
+every slice asserts it still contains a token only the real code has, and the suite proves an
+exchange opened, sent a real `PAIRREQ` and derived a code the device independently agrees with
+before anything downstream is worth reading. Timers are owned by the test — `pairArm`'s shortest
+fuse is 15s against a 120s window, so a real clock makes the timeout and scan-finish paths
+untestable.
+**`deviceNameFor(via)` HAD NO `"pair"` CASE**, so an `ANSWER`/`PROMPT` arriving on the
+unauthenticated pairing link was attributed to `usbDeviceName || selectedDevice`. It fails CLOSED
+either way — the HMAC is checked against that other Mac's key, which the peer does not have — but
+the refusal named the wrong subject, and a log line that misnames its subject is the class this repo
+keeps paying for. It returns `""` now (no paired device, which is exactly true until `PAIRDONE`) and
+`senderDescription()` gives the four refusal sites a clause that tells the two facts apart: a device
+we could not identify, against a link that cannot have an identity yet.
+
+**A MISMATCH BETWEEN THE TWO SIDES ERRORS NOWHERE, which is the entire reason `PAIRVECTOR`
+exists.** The device derives with mbedtls and the Mac with node's `crypto`; if they disagree about a
+byte order, a salt order or an HKDF info string, both ends stay perfectly self-consistent - the six
+digits on the glass are simply not the six the Mac computed, and it presents as a UI bug several
+screens from the cause. So the device runs a FIXED private key against a FIXED peer public key and
+prints every derived value, which makes the comparison a **diff** rather than a judgement. Same
+argument `TEXTPROBE`, `AUDIOPROBE` and `COLORTEST` already won.
+
+**The vector is RFC 7748 section 6.1's own Alice and Bob**, so the shared secret it prints is a
+value published by the IETF rather than one this repo invented - a match proves the X25519 itself,
+not merely that two of our own implementations agree with each other. Both private keys are stored
+**clamped**, and that is forced rather than tidy: node's X25519 clamps internally and accepts any 32
+bytes, while `mbedtls_ecp_check_privkey` **refuses** an unclamped Montgomery scalar outright. Since
+clamping is part of X25519 and is idempotent, pinning the clamped form cannot change the answer -
+and the published public keys and shared secret coming back unchanged is the proof that it did not.
+
+**THE mbedtls BYTE-ORDER HAZARD IS SETTLED BY MEASUREMENT, AND THE ANSWER IS "NO REVERSAL".** An
+mbedtls EC point is an MPI, whose natural serialisation is BIG-endian, so it was an open question
+whether `mbedtls_ecp_point_read_binary`/`_write_binary` hand back the raw little-endian 32 bytes RFC
+7748 and node use. Run on a real board 2 at mbedtls 3.6.6, every value matched the host first time -
+`shared=4a5d9d5b...161742`, i.e. the RFC's own - so that library **special-cases Montgomery curves
+and does the little-endian conversion itself**, at all three boundaries (peer public in, own public
+out, shared secret out). Nothing in `pairing.ino` reverses anything. If a future mbedtls changes
+that, `PAIRVECTOR`'s shared secret stops matching the RFC's published value and the fix is one
+reversal - which is what the command is for.
+
+**A SECOND VECTOR EXISTS ONLY FOR LEADING ZEROS** (`001472`). The code is four HKDF bytes read
+big-endian, `% 1000000`, zero-padded to six - and the padding is not cosmetic: an unpadded `1472` in
+a six-character box reads as a bug, and a comparison against the unpadded string would reject a code
+the user typed correctly. One pinned example that happened to start with a non-zero digit would
+never notice, so the checker also sweeps 400 random exchanges for six digits every time.
+
+**Be honest about what each half proves.** The crypto assertions run the Mac's real module (the
+checker prints its own split - run it for today's two numbers rather than reading one here). The
+SOURCE assertions read `pairing.ino` as **text** (comments stripped, the `panel_shim.cpp`
+`invertColor` trap) and check the device still SAYS the same thing - the info strings, the salt
+order, the modulus parsed from its own macro, the big-endian read, the constant-time compare. They
+cannot execute the sketch, so they catch an EDIT and never a toolchain; only the hardware run
+catches the toolchain. **The salt order is the one that fails silently in both directions**:
+`salt = pubA || pubB` with A **always** the Mac's key, so the Mac concatenates its own key first and
+the device concatenates the PEER's first. Swap it on one side and each end derives a good key - they
+just differ.
+
+**Constant-time comparison, not `memcmp`, for the proof and the code.** `memcmp`/`strcmp` return on
+the first differing byte, which leaks how many leading bytes were right and turns forging a 128-bit
+proof into sixteen one-byte searches. `pairCtEq` accumulates with `|=` and always runs to the end;
+the host uses `crypto.timingSafeEqual`. Length is compared in the clear on purpose - both values
+have a fixed, public length, so it carries nothing.
+
+**AND THE ASSERTION THAT SAID SO WAS SATISFIED BY A FUNCTION NOTHING CALLED.** The sentence above
+was stated here as fact for a whole task while the checker's proof of it was
+`/pairCtEq\s*\(/.test(code) && !/memcmp\([^)]*proof/i.test(code)` - and **`pairCtEq` had ZERO call
+sites**, so the first half was satisfied by its own DEFINITION and nothing on the device was being
+compared in constant time at all. The negative half looked for one literal spelling beside one
+literal identifier, so it caught neither `strcmp`, nor `==`, nor any buffer not named `proof`.
+**Measured by a reviewer, not argued**: adding `bool pairVerifyProof(const char* got, const char*
+want){ return strcmp(got, want) == 0; }`, and separately a `memcmp` twin, both left the checker
+reporting a clean pass. This is the one assertion guarding the exact mistake the answering path can
+make, so it was the worst place in the repo for a vacuous one.
+Three assertions replace it and they need each other: `pairCtEq` must have a **call site** (counted
+as total matches minus its one definition); **no byte-compare function may appear anywhere in the
+`#if BOARD_HAS_WIRELESS_PAIR` block** - scoped to the block, because `strcmp` is legitimate
+elsewhere in `pairing.ino` for public hostIds, and a file-wide ban would have to be weakened until
+it caught nothing; and **no `==`/`!=` against a secret-bearing identifier**, matched on the OPERAND
+(`/(proof|code|key|secret|shared|sas|hmac|digest|nonce|salt)/i`) rather than a spelling, because a
+whole-line match would fire on `mbedtls_md_hmac_starts(&ctx, key, ...) == 0`, which is a return
+code. The call site is real rather than manufactured: `pairVectorReport`'s fresh round trip compares
+two shared secrets and was itself doing it with `memcmp`, seventy lines under the comment forbidding
+exactly that.
+**Both of the reviewer's injections are now permanent selftest faults**, along with the call site
+being deleted, a dropped zeroize, an `==` on a key, and the two info macros collapsing - because a
+source assertion that has never been shown to fail is the thing this whole entry is about.
+
+**EVERY SECRET BUFFER IS ZEROIZED ON EVERY EXIT PATH, AND THAT IS WHY `pairDeriveAll` IS
+SINGLE-EXIT.** It was five bare `return false`s leaving the shared secret, the salt and the 128-bit
+key live in a stack frame the UI reuses microseconds later. Survivable while the only caller is
+`PAIRVECTOR` with a published test vector; **not** survivable once it is called with the real key,
+which is the next task. One `goto done:` is what makes the wipe unmissable - an early return added
+later has to walk past it - and `mbedtls_platform_zeroize` is used rather than `memset` because a
+`memset` whose result is never read again is exactly what a compiler may delete, and a dying stack
+frame is that case by definition. `pubB` is deliberately NOT wiped: it is the device's public key.
+The checker PARSES the buffer list out of the declaration rather than transcribing it, so anything
+added later that is not named `pub*` fails until it is wiped too.
+
+**CARRY-FORWARD, MEASURED HERE AND NOT IMPLEMENTED HERE: node THROWS on all four classic low-order
+X25519 points** (all-zero, one, and both order-8 points) with `ERR_OSSL_FAILED_DURING_DERIVATION`,
+so the Mac fails closed against a contributory-behaviour attack and never derives an attacker-known
+shared secret. **The task that first passes a radio-supplied public key must CATCH that throw**: an
+uncaught rejection inside the poll loop is this file's documented "an await that never settles kills
+the poll loop forever" class arriving by a different door - the host looks alive, the serial reader
+keeps logging, and nothing ticks. The DEVICE side is unverified: whether `mbedtls_ecp_mul` refuses a
+low-order Montgomery point or returns the all-zero secret has not been measured. Recorded at
+`pairX25519` so it is read by whoever calls it next.
+
+**THE WINDOW IS THE PRESENCE GUARANTEE, NOT THE CRYPTO, WHICH IS WHY IT DIES IN FOUR PLACES.**
+The cable's security value was proof that a person was HOLDING the device; here that proof is a tap
+that opens a **120s** window (`PAIR_WINDOW_MS` in `board_es3c35p.h`), and every handler refuses with
+a **logged, named** reason while it is shut - the rule `POWERPROBE`'s `not on battery` refusal
+exists for, since from the Mac "not in pairing mode" and "not there" look identical. So a window
+left open by someone who wandered off is the one state that would make this weaker than the cable,
+and `pairClose()` is called from a **tab switch**, from the **backlight blank**, from **deep sleep**
+and from the **timeout in `loop()`**. It WIPES rather than marking the window shut: the ephemeral
+private key, the derived 128-bit key, the proof and the six digits all go through
+`mbedtls_platform_zeroize`, and the field list a checker asserts against is PARSED out of the
+declarations, so a field added later is covered by default.
+
+**THE LENGTH CHECK HAD TO LAND IN THE HEX PARSER, and that is the finding the task-1 security
+review deferred rather than a tidy-up.** `pairX25519`/`pairDeriveAll` take `uint8_t[32]`
+parameters, which decay to pointers and can enforce nothing, so a short `pubA` would leave the tail
+of the destination holding whatever the stack held before. `pairHexToBytes(s, nBytes, out)` refuses
+the whole string unless `strlen(s) == nBytes * 2` and every character is hex - and `PAIRREQ`
+validates BOTH the hostId (exactly 8 hex) and the key **before either is used**, which is asserted
+as an ORDER (`pairHostIdOk` and `pairHexToBytes` before `pairDeriveAll`) rather than as presence.
+
+**A VALID PROOF ALONE USED TO STORE A KEY, AND THAT WAS THE WHOLE DESIGN BEING BROKEN RATHER THAN A
+HARDENING OPPORTUNITY.** `handlePairOk` committed on a verified proof - and the proof is
+`HMAC(key, "deckhand-pairok/1")` where the key derives from the **ECDH shared secret and nothing
+else**, so ANY peer that completes the exchange computes it **without ever seeing the displayed
+code**. A racing attacker answers the window the instant the user taps PAIR NEW MAC, sends a valid
+proof, and is stored in milliseconds. The six digits defended the user's *Mac* against a
+man-in-the-middle and gave the *device* nothing: it never received evidence that a human had read
+anything. "The device is never sent a guess at the code" was true and irrelevant.
+
+**What commits now is Bluetooth's Numeric Comparison: BOTH a valid proof AND a CONFIRM on this
+glass, in either order.** `handlePairOk` sets `pairProofOk` and waits - no store, no `PAIRDONE`;
+`pairConfirm()` (Task 3's button, deliberately with no call site yet) sets `pairConfirmed`; and
+`pairCommitIfReady()` is the **only** thing in the block that reaches `upsertHost`, which the
+checker asserts by counting rather than by reading. The proof is kept as defence in depth - it says
+the peer that sent it is the peer that did the ECDH, which the human comparison alone cannot
+establish - never as sufficient. A bad proof still fails and closes the window, unchanged.
+**`pairConfirmable()` is ONE predicate** (`pairWindowOpen() && pairPending`) read by the commit path
+and, next task, by the button's draw site AND its hit test: this codebase's classic defect is a
+control drawn under one condition and hit-tested under another, so the checker forbids a second
+spelling of the condition inside either function rather than merely avoiding one.
+**The gate is bound by an assertion that PARSES the guard's operands**, and reverting it to
+`if (!pairProofOk) return;` fails by name - which is the point, because the previous round shipped
+three assertions that could not fail at all.
+
+**AND THE ASSERTION ON THE WINDOW ITSELF WAS ONE OF THEM.** `pairWindowOpen()`'s BODY is the
+presence guarantee, and the signed-difference assertion ran over the whole block - where `pairTick`
+carries a copy of the same expression - so **replacing that body with `return true;`, deleting the
+guarantee outright, passed all 70 assertions**. It is bound to the function's own body now (the
+`fnBody` helper the zeroize assertions already used), with `pairTick`'s copy asserted separately,
+and that exact injection is a permanent selftest fault. Same shape as the `pairCtEq`-defined-but-
+never-called hole: **a rule that can be satisfied by a neighbouring line is not a rule.**
+
+**THE HEX PARSER'S LENGTH WAS ENFORCED AND ITS CALL SITE WAS NOT.**
+`pairHexToBytes(pubHex.c_str(), 31, pubA)` satisfies every assertion about the parser - the string
+really is 62 characters and every one of them really is hex - and leaves `pubA[31]` holding stack
+garbage that flows into the derivation, which is precisely the "wrong length by one" the parser
+exists to prevent. Every call site's requested length is now asserted against the **declared size of
+the buffer it writes into**, both RESOLVED (through the sketch's `#define`s and board 2's `const
+int`s) rather than transcribed; the same rule pins the proof compare to `pairProofWant`'s size less
+its NUL, and pins the length refused before that compare to the same number.
+
+**`PROVISION:` IS THE ONLY MARKER IN THIS REPO THAT A KEY ARRIVED OVER THE CABLE**, i.e. that a
+person was holding the device with a lead in it - and `upsertHost()` printed it on the radio path
+too, forging the audit trail for the exact property this feature rests on. The wireless commit says
+`WIRELESS PAIR:` instead. **The previous round's stated reason for leaving it - that fixing it would
+move board 1's binary - was false, and verifying that took one build**: the `#if
+BOARD_HAS_WIRELESS_PAIR` arm emits nothing on board 1, so its `PROVISION` line is textually
+identical after preprocessing and `--check 1` reports `UNCHANGED`.
+
+**Three smaller rules over attacker-supplied text, all now asserted:** the hostId is **lowercased at
+parse** (`pairHostIdOk` accepts `A-F`, `findHost` compares with `strcmp`, so `C532AB01` and
+`c532ab01` would take two of the four slots for one Mac and both would answer); the derived key's
+`String(pairKeyHex)` **temporary is named and zeroized before it is freed** (`free()` does not
+clear, so a 128-bit key sat in reusable heap with nothing left pointing at it); and the label
+writer's `w + 1 < outSize` - **correct, and one character from `w < outSize`, which puts the NUL one
+past the end** - is now a named `cap = outSize - 1` the checker binds, since correct-but-unasserted
+is what this file keeps paying for.
+
+**`MAX_HOSTS` IS 4 AND FULL IS FULL - CHECKED TWICE, AND THE SECOND CHECK IS THE INTERESTING ONE.**
+`PAIRREQ` answers `PAIRFAIL full` **before `esp_fill_random` runs**, so no key material exists for a
+Mac that cannot be stored. It is re-checked at COMMIT (in `pairCommitIfReady`), because
+`upsertHost()`'s own
+full-behaviour is to **RECYCLE SLOT 0** - correct for a deliberate USB `PROVISION`, and a silent
+destruction of a key the user still wanted if a USB `PROVISION` fills the last slot while a radio
+window is open. Task 3 makes the first path unreachable from the UI; never rely on a UI to enforce
+a storage limit.
+
+**The derived key is stored as its 32-character lowercase HEX**, which is the form the USB
+`PROVISION` path already stores and the form `authHmacFor()` keys the answer HMAC with (it hashes
+the ASCII of the secret, not 16 raw bytes) - so a wirelessly paired Mac answers prompts through
+exactly the same code path, with no second format anywhere. `upsertHost()` performs `saveHostSlot()`
+and `saveHostCount()` itself; calling them again would be a second NVS write of identical bytes.
+
+**`PAIRDONE`/`PAIRFAIL` carry the trailing `to=<hostId>`, built HERE rather than by
+`sendLineToHost(line, link)`** - that overload addresses by LINK index, and a Mac that is pairing
+has not necessarily sent a tick payload yet, so it may own no `hostLinks` slot and would silently
+come out as a broadcast. The hostId is the thing we actually know. `PAIRPUB` is deliberately
+unaddressed, per the spec's own wire table.
+
+**A second `PAIRREQ` REPLACES the pending one** (a lost first attempt must be recoverable without
+walking back to the device) and **the displayed code changes with it**, which the person standing in
+front of the glass sees.
+
+**THE SECRET REACHES NO `Serial.print` AND NO `sendLineToHost`, AND THAT IS A RULE OVER THE SOURCE
+RATHER THAN A PROMISE.** `pair-crypto-check.mjs` scans every line of the pairing block and fails if
+one naming `pairKeyHex`, `pairProofWant`, `pairPriv` or `pairCodeDigits` also names an outbound
+call - one debugging printf would put the 128-bit key on the very link this design exists to keep it
+off. The six digits are on the GLASS for the same reason: a copy on the wire is a copy a Mac could
+use to skip the human, which is the whole thing that makes this equal to the cable.
+
+**THE PANEL, AND WHY `PAIR NEW MAC` SITS IN THE LIST'S NEXT FREE ROW SLOT.** The obvious placement -
+a button above the Macs on SETTINGS > Pairing - does not fit, and the arithmetic said so before
+anyone drew it: that group's four rows run 218/278/338/398 and end at 449 against a footer at 460,
+i.e. **10px of slack**, where a button above the list needs `H_ROW` + a gap = **58**. So it is drawn
+at `p3RowY(hostCount)`, the next free row. It fits for 0..3 Macs, and at `MAX_HOSTS` there is no
+room on the screen **and** no free NVS slot - so **its ABSENCE encodes "full" exactly**, with no
+second state, no extra string and no refusal path to get wrong. The two limits turn out to be the
+same limit, and the checker walks every slot 0..3 clearing the footer and slot 4 not clearing it, so
+that argument is pinned to the geometry rather than left in a comment. (`PAIRREQ`'s own
+`PAIRFAIL full` is KEPT as defence in depth - a fourth Mac can still arrive over USB while a window
+is open - and never relied on: never let a UI enforce a storage limit.)
+
+**The panel owns everything above the footer, the tab bar included** - chrome drawn but dead is the
+bug `fabVisible()` is gated in one place to avoid - and leaves the footer LIVE, so the clock, the
+battery and the "Xs ago" freshness keep running through a 120s wait: whether the Mac is still
+talking is exactly what you want to know while waiting for its request. It reads `PAIR NEW MAC` /
+`waiting for a Mac` / `pick this device on your Mac` until a request lands, then
+`does your Mac show this?` over the six digits at `T_HERO` with the requesting Mac's label under
+them. That label is **attacker-controlled text**: sanitised and capped at parse, and `fitText`'d
+again here, because `drawString` paints an opaque box and a name wider than the panel would rub out
+its neighbours. The countdown is the one change-only field, ticked by `tickPairPanel()` from
+`loop()` at 500ms rather than by `renderSettingsTab()`, which returns early while the panel is up
+for the same reason the confirm dialog does.
+**CANCEL is the FILLED button and CONFIRM only outlined**, the hierarchy every confirm dialog here
+uses: the tap that stores a 128-bit key must not also be the easiest thing to hit. And **CANCEL
+keeps a FIXED slot rather than centring itself while it is alone** - a button that moves when a
+request arrives is a button you tap by accident at the exact moment the screen changed under your
+finger.
+
+**THE TAP WAS BOUND TO THE PREDICATE AND NOT TO THE PAINT, WHICH IS THE TRANSFERABLE FORM OF THIS
+BUG.** `pairConfirmVisible()` really was `pairConfirmable()` and nothing else, read by the draw site
+AND the hit test, so the structural rule this codebase keeps paying for was met. What lagged was the
+REPAINT: `handlePairReq()` set `pairPending` and repainted nothing, and `PAIRREQ` arrives through
+`processCompletedLine` rather than `handleLine`, so the panel only caught up on the 500ms tick - and
+inside that window a person could tap CONFIRM against a screen not yet showing the code they
+compared, which is the whole property. It is reconciled inside `handlePairReq()` in the same
+statement now, asserted, and the selftest also catches the **plausible wrong fix** of moving the
+reconcile after `PAIRPUB`. Two doors closed with it: `pairPanelActive` joined all five full-screen
+refusal lists, so an unauthenticated radio `EMOJITEST`/`READTEST` can no longer paint over an open
+pairing window, and `switchTab` clears it.
+**The overlap was closed IN SPACE, not in time.** At `hostCount == 3` the PAIR NEW MAC row
+(398..443) overlapped CONFIRM's old rect (386..435) at the same x, so the ordinary human
+double-tap - the second tap ~200ms after the one that opened the panel - landed exactly on CONFIRM.
+`PAIR_BTN_BOTTOM` 24 -> 62 lifts the button row clear, spending 38px the header already declares
+surplus. **An arming DELAY was considered and rejected**: it would be a second spelling of "is there
+anything to confirm", and `pairConfirmable()` being ONE predicate is itself an asserted rule - the
+fix that adds a second source of truth is the one this codebase keeps paying for.
+
+**A CHAIN OF RELATIVE IDENTITIES IS INVISIBLE TO THIS SWEEP, AND THAT IS A FACT ABOUT THE SWEEP
+RATHER THAN THE ASSERTIONS.** The panel's six offsets were first written as `y == prev + cell + air`
+throughout, which looks exactly like the standard this file sets - and `geom-sweep.mjs` injects at
+PARSE time, so perturbing a gap moves every block below it and every identity still holds.
+MEASURED, not reasoned: `PAIR_TOP_AIR`, `PAIR_AIR_STATE`, `PAIR_AIR_CODE`, `PAIR_AIR_LABEL` and
+`PAIR_BTN_BOTTOM` were ALL unguarded at ±16, the last of them under an assertion written for it, and
+`PAIR_TITLE_Y === PAIR_TOP_AIR` was vacuous outright. Closed with a **CLOSING TERM**: `PAIR_AIR_LEFT`
+names the surplus and the stack is asserted to land exactly on a button row anchored from the OTHER
+end (`BOARD_H - FOOTER_H - PAIR_BTN_BOTTOM - H_BTN`), which is the `HOME_Y0_BOT` shape - non-circular
+because `PAIR_BTN_Y` derives from an independent path and `PAIR_AIR_LEFT` is read by no draw site. A
+second binding asserts the surplus stays IN `PAIR_AIR_LEFT`, which catches a sum-preserving
+redistribution the landing identity provably cannot see. After it, every pairing coordinate is
+caught at **±1 in both directions**. `drawPairResult()` also **flushes before it delays**, the
+defect the farewell screens already fixed once on this shadow-buffered board.
+
+**BOARD 2'S WHOLE-BRANCH COST: +29,104 bytes of flash and +328 RAM** (993,814 / 65,900 ->
+**1,022,918 / 66,228**), of which **+23,380 flash / +112 RAM is mbedtls arriving in the link** and
+everything the feature itself adds is the remaining **+5,724 / +216**. Broken out, in the order it
+landed: the crypto and the pinned vectors +23,380 / +112; the window and the wire handlers +3,080 /
++144; the commit gate +560 / +8; the panel and the button +2,084 / +64. The Mac's half costs board 2
+nothing - it is `host/index.mjs` and `DeckhandMenuBar.swift`. **Board 1 is `UNCHANGED`** at
+**1,386,934 / 69,804**, `0cc2e77b66fb6947...`, verified with `board-baseline.mjs --check 1` at every
+commit: every line of this sits behind `#if BOARD_HAS_WIRELESS_PAIR`, including the three close
+sites in shared code, and board 1's header gains exactly one line that emits no code.
+The breakdown was RECONCILED rather than transcribed - two contemporaneous records of the
+commit-gate figure disagreed by 270 bytes, so `1d2f170` was rebuilt into a scratch sketch path and
+came back **1,020,834 / 66,164**, which settles the panel's share at +2,084 / +64 and makes the four
+lines sum exactly to the measured total. Compile an OLD commit somewhere other than
+`firmware/deckhand_display`: `arduino-cli` keys its cache on the sketch PATH, so a rebuild in place
+would evict the objects the current baseline was just taken from.
+
+**THE CRYPTO COMMIT'S +112 RAM IS NOT THE PINNED VECTORS, WHICH IS WHAT THE FIRST REPORT OF IT
+SAID.** Those are
+file-scope `const uint8_t[32]` arrays: they land in `.flash.rodata`/DROM, and `.dram0.data` did not
+move by a single byte across the change - which is the positive evidence, not an argument. The whole
++112 is `.dram0.bss`, and every byte of it is named, read out of the map file rather than guessed:
+**92 + 4** for `op_sem_buf$1` and `op_complete_sem` in `esp_bignum.c.obj` (the static FreeRTOS
+semaphore the S3's hardware bignum accelerator completes its operations on), **4** for
+`s_crypto_mpi_lock` in `esp_crypto_lock.c.obj` (the mutex serialising that peripheral), and **12**
+for `mul_count`/`dbl_count`/`add_count` in `ecp.c.obj` (mbedtls's own ECP operation counters). None
+of it is ours; all of it arrives because `ecp.c` links at all. Measured by building the parent commit
+into a second output directory and diffing `size -A` and the `.bss` symbols - the two 32-byte vectors
+would have been 64 bytes and the number is 112, so the arithmetic never worked either. **Board 1 is
+`UNCHANGED`** - its header gains exactly one line, `#define BOARD_HAS_WIRELESS_PAIR 0`, which emits
+no code, and everything else sits behind `#if BOARD_HAS_WIRELESS_PAIR`. **The mbedtls includes had
+to go at the TOP of `deckhand_display.ino` under that same flag, not beside the code**: the Arduino
+build inserts its generated prototypes above the sketch's first function definition, so a signature
+naming `mbedtls_ecp_group` is unknown to its own prototype and the build fails at the definition
+with "does not name a type". Measured - that is the error this first produced - and it is the same
+rule the `BleCbParam` typedef already records.
+
+**THE MAC'S HALF OF WIRELESS PAIRING IS A MENU AND A DIALOG, AND NEITHER CAN BE CLICKED FROM A
+SCRIPT.** `Settings > Pair new device...` writes `PAIRSCAN`, lists the heartbeat's `pairing.devices`
+as rows, and `PAIRSTART <name>` on a pick; when the host publishes a derived code the app raises an
+`NSAlert` showing **this Mac's own six digits** and asking whether the device shows the same, with
+Match -> `PAIRCONFIRM` and Don't match -> `PAIRCANCEL`. Five things are load-bearing:
+
+- **THERE IS NO TEXT FIELD, AND THERE MUST NEVER BE ONE.** The typed-code design was broken (see the
+  spec): the proof derives from the shared secret, so any peer that completes the ECDH computes a
+  valid one without ever seeing the code. `--pair-check` asserts the accessory view is
+  **not editable**, and putting an editable field back fails by name.
+- **THE COMPARISON IS THE SECURITY PROPERTY, so legibility is a security cost.** The digits are
+  drawn at `PAIR_CODE_FONT_PT` (44) in SF Mono, and **ungrouped** - exactly as `settings.ino` draws
+  `pairCodeDigits` in one `T_HERO` `drawString`. Rendering `482 913` against a device showing
+  `482913` is two shapes for one number, i.e. two things to compare wrongly; the checker asserts the
+  field's string IS the code. `--pair-shot` captures the real dialog (by window id, and it can
+  FORCE an appearance, since a capture otherwise shows only the one the Mac is set to).
+- **`awaiting-code` IS NOT ENOUGH TO SHOW A CODE.** `pairStart()` sets that state the moment it
+  begins connecting - `code` stays `""` until the device answers - so the dialog waits for six
+  actual digits. Asserted with a SEEDED prior code, because from an empty `seen` the guard is masked
+  by the empty code equalling the empty token it is compared against: the assertion passed under the
+  fault until it was seeded, which is the vacuous-assertion trap this file keeps paying for.
+- **The code token is spent when the state leaves `awaiting-code`, and the outcome token when it
+  passes through `awaiting-code`.** Six digits collide once in a million, so a second exchange
+  deriving the last one's code would otherwise raise nothing at all; and `PAIRSTART` is accepted
+  straight out of `failed`, so retrying a device whose window is shut fails twice with a
+  byte-identical cause and the second report is the one that would go missing.
+- **A host predating this feature publishes no `pairing` block, and the row DIMS rather than
+  writing a `PAIRSCAN` that host forwards to the device as an unknown line.** Same rule as the
+  device's read-only ask path: never offer a control that cannot work.
+
+**And `--legibility-check` had to learn what "reachable" means.** MEASURED: `NSMenuItem.isEnabled`'s
+GETTER reflects the parent chain, so every row inside a submenu whose parent is disabled reports
+`false` whatever was set on it - which made the check FAIL, with the host down, for a row nobody can
+open. An instrument that fails for the wrong reason is worse than none, so that row is skipped when
+its parent is dimmed and checked whenever it is not (proven both ways: disabling it with the host up
+fails by name).
+
+**What is NOT verified: no real exchange has run through this menu.** The supervised host is the
+main checkout's, where pairing does not exist (`grep -c PAIRSCAN` is 0), so every state was driven
+through `DECKHAND_TMP` with a synthetic `host-alive` - the documented seam - and the dialog was
+captured but never answered against a device. The click paths (`PAIRSCAN`/`PAIRSTART`/`PAIRCONFIRM`/
+`PAIRCANCEL` reaching the host) are structural, not executed.
+
+**THE HOST'S SCAN HOLDS NOBLE'S OWN PERIPHERAL HANDLE, WHICH IS ONLY AS GOOD AS THE ADVERTISEMENT IT
+CAME FROM.** `PAIRSCAN` runs a 5s scan into a `name -> {rssi, peripheral, at}` map; `PAIRSTART`
+takes the handle straight to `connectAsync`, so a **stale sighting is REFUSED BY NAME** past
+`PAIR_SCAN_FRESH_MS` rather than connected to, and the reason names the age. The device already on
+the live link is exempt, because that is not a remembered handle at all - it is the connection in
+use. **Scanning must not disturb the live link**, and that was tested rather than asserted: against
+both real boards, `PAIRSCAN` listed `Deckhand-0528` at -44 dBm and `Deckhand-C114` at -63 with the
+live link surviving, and a `PAIRSTART` aimed at board 1 - a second peripheral that cannot answer -
+opened its own link, timed out at 15s naming the cause, disconnected itself, and left C114 at
+`via=usb,ble`.
+
+**A LATE REPLY FROM AN ABANDONED EXCHANGE POISONED THE NEXT ONE, WITH NO ATTACKER INVOLVED, AND IT
+WAS REACHABLE FROM THIS FEATURE'S OWN HARDWARE TEST.** `handlePairPub` bound to whatever
+`pairExchange` happened to be current - no peripheral id, no generation token, and `via` dropped at
+the call site. So: exchange 1 times out at 15s, the user retries, and the first device's slow reply
+lands in exchange 2, sets `ex.code` from the WRONG peer, after which `if (ex.code) return;` swallows
+the real reply. A dead exchange while the log says "answered - compare the six digits", failing safe
+and giving the user no hint which is which. Every reply is stamped with the exchange's generation
+and peripheral id now and dropped by name.
+**And the PAIRING link had no `disconnect` listener** where the main BLE path has had one since the
+start: a peripheral that went away after `PAIRPUB` left `pairExchange` non-null with `priv`/`shared`
+/`key` **un-zeroed** and the heartbeat publishing `awaiting-code`, the six digits and a counting
+`sec` for the rest of the 120s - a dead exchange the menu bar draws as a live pairing. Bounded by
+the timer, so not this file's "await that never settles" class, but "every failure closes the
+exchange" ought to be satisfied by NOTICING the failure rather than by outliving it.
+**Known and watched, not fixed:** `PAIRFAIL` is BROADCAST by the device, so a neighbouring Mac's
+refusal could in principle end our exchange. It fails safe - nothing is stored - and is named here
+rather than papered over; worth re-checking once two Macs are really paired.
+
+**HOW TO PAIR A SECOND MAC WIRELESSLY - THE TWO TAPS, AND WHAT EACH SCREEN SHOWS.** Board 2 only.
+Nothing is stored until step 5, and the device tap there is the whole presence proof.
+
+1. **On the DEVICE, tap `PAIR NEW MAC`** (SETTINGS > Pairing, the row directly under the Macs
+   already paired). If it is not there, all four slots are full - forget one first. This is the
+   first of the two taps and it opens a **120-second** window; the panel takes the screen and reads
+   `waiting for a Mac` / `pick this device on your Mac`, with CANCEL on the right and a countdown.
+2. **On the MAC: menu bar > Settings > `Pair new device...`.** It writes `PAIRSCAN`; ~5s later the
+   submenu lists what it heard, strongest first, as `Deckhand-XXXX (-44 dBm)`. Pick the one whose
+   name matches the device - it is on SETTINGS > Status and on the boot waiting screen.
+3. **The exchange runs on its own.** The Mac sends `PAIRREQ`, the device answers `PAIRPUB`, and both
+   ends derive the same key and the same six digits. The device's panel changes to
+   `does your Mac show this?` with the digits at 32x64 and the requesting Mac's name under them; the
+   Mac raises a dialog with ITS own six digits at 44pt SF Mono. Neither code was transmitted.
+4. **COMPARE THE TWO SIX-DIGIT CODES.** This is the security property, not a formality. They are
+   drawn UNGROUPED on both sides on purpose, so `482913` is one shape in both places.
+5. **If they match: click `They match` on the Mac, then tap `CONFIRM` on the device.** Either order
+   works and BOTH are required - the Mac's click only sends the proof, and the device stores nothing
+   until a finger on its glass says so. The Mac then tells you so as well
+   (`Now tap CONFIRM on ...`). The device shows `PAIRED WITH <name>` and drops back to the Pairing
+   list with the new Mac in it; the key is in NVS in the same 32-hex form `PROVISION` writes, so
+   that Mac answers prompts through the identical path with no second format anywhere.
+6. **If they DIFFER, tap `CANCEL` on the device** (or `They don't match` on the Mac) and start
+   again. A mismatch is the one signal that something other than your Mac answered the window.
+
+**WHAT IS NOT VERIFIED IN THIS FEATURE, STATED PLAINLY - AND IT INCLUDES THE MAIN EVENT.**
+
+- **NO COMPLETE END-TO-END PAIRING HAS EVER RUN.** The refusing half is verified on hardware over
+  BOTH transports with the cause named (`PAIRFAIL closed` on the wire, `PAIR: -> PAIRFAIL closed` in
+  the log), and `PAIRVECTOR` matches RFC 7748 on the shipped firmware. The **accepting** half -
+  `PAIRPUB` -> derive -> a code on both screens -> `PAIROK` -> CONFIRM -> `PAIRDONE` -> a key in NVS
+  - has not. It needs **two physical taps** (PAIR NEW MAC, then CONFIRM) and **this codebase
+  deliberately provides no remote trigger for either**: a `PAIROPEN` command would make the device
+  something a Mac can put into pairing mode, which is the exact property the feature exists to
+  refuse, and a remote CONFIRM would delete the presence proof outright. That is the right trade and
+  its cost is that the accepting paths - including `badproof`, `badhost`, `badkey`, `full` and the
+  120s expiry - are covered structurally, not by execution.
+- **The supervised host runs the MAIN checkout's `host/index.mjs`, where `PAIRSCAN` does not exist**
+  (`grep -c PAIRSCAN` is 0 in the running file). So the menu bar's click paths cannot reach a host
+  that knows the verb until this branch merges, and every menu state was driven through
+  `DECKHAND_TMP`. Task 4's own hardware results ARE real - that run stopped the supervised host and
+  ran the worktree's host through `DeckhandBLE.app` - but nothing since has, and end-to-end testing
+  needs either that or a merge.
+- **The device's behaviour on a LOW-ORDER X25519 point is unmeasured.** Node THROWS on all four
+  classic ones, so the Mac fails closed; whether `mbedtls_ecp_mul` refuses them or hands back the
+  all-zero shared secret **has not been checked**. It is recorded at `pairX25519` rather than
+  assumed either way.
+- **No screenshot here vouches for COLOUR.** Board 2's `SCREENSHOT` reads the shadow framebuffer, so
+  the on-glass evidence for the PAIR NEW MAC button (its accent stroke measured off the PNG at rows
+  278 and 323 = exactly `p3RowY(1)` and `+H_ROW-1`) is a claim about the geometry the renderer
+  composed. **The pairing PANEL itself has never been on the glass at all** - it opens from one
+  thing only, and that is the point.
+
 **Check the LAYOUT ARITHMETIC of both boards' screens without a screen.** Three checkers parse the
 constants straight out of `board_e32r28t.h` / `board_es3c35p.h` (shared parsing in
 `geom-common.mjs`) and assert every derivation the headers claim — so a header that drifts from its
@@ -746,7 +1220,7 @@ own comment fails loudly instead of passing while the panel is wrong:
 node firmware/deckhand_display/usage-geom-check.mjs      # USAGE cards, hero/bar/stats/foot clear boxes, footer's three zones, Codex row
 node firmware/deckhand_display/sessions-geom-check.mjs   # the row-height ladder, tall/sub/compact gates, detail card, ask option chips
 node firmware/deckhand_display/settings-geom-check.mjs   # settings pages, steppers, keyboard, history reader, confirm-screen line cap
-node firmware/deckhand_display/geom-sweep.mjs            # fault-injection sweep over all three (~30s, see below)
+node firmware/deckhand_display/geom-sweep.mjs            # fault-injection sweep over all three (~110s, see below)
 ```
 
 Each takes `--selftest`, which injects a fault and **exits 0 only when that fault IS caught** (exit
@@ -780,7 +1254,22 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   frequencies and cosmetic gaps with no geometric constraint, and wiring that to a non-zero exit
   would make it un-runnable until someone had either written 150 assertions or suppressed the list —
   and a suppressed list stops being read. Non-zero is reserved for the sweep's own internal errors.
-  Three things it has actually caught, which is why it is worth the ~30 seconds it takes: the
+  **IT TAKES ~110 SECONDS, NOT ~30 — AND A 33-MINUTE RUN WAS REPORTED ONCE AND DOES NOT
+  REPRODUCE.** Measured on the wireless-pairing branch with nothing else running: `real 111.84 /
+  user 128.44 / sys 13.61`, exit 0, all three checkers, both boards, 582 constant-board pairs. The
+  ~30s figure predates the sessions checker reaching 1444 assertions and the settings checker 617,
+  so it is stale in the honest direction and is corrected here. It is recorded because a task on
+  this same branch **killed the sweep at 33 minutes** on its sessions child and carried that
+  forward as a suspected 66x regression in a repo-level instrument. **It is not one**: re-run alone
+  it is under two minutes at the same commit range. What that run actually hit was NOT established
+  — the run was killed rather than diagnosed, so there is no evidence to point at, and the only
+  honest statement is that the sweep is affordable today and the earlier figure is unexplained
+  rather than explained away. The plausible candidate, offered as a hypothesis and not a
+  measurement, is contention: the sweep is four children per checker-board, so anything else heavy
+  on the machine (an `arduino-cli` build takes minutes) multiplies straight through it. **Time it
+  when you run it**, and treat a wildly different number as a question about the machine before it
+  is a question about the sweep.
+  Three things it has actually caught, which is why it is worth the ~110 seconds it takes: the
   waiting screen's seven `WAIT_*` offsets, read by no checker at all and wrong on board 2; the
   pager key's WIDTH, checked in one dimension only; and — the same run, once the checkers started
   measuring per board — the wordmark's 64px cell erasing the two lines under it. A fourth was
@@ -798,16 +1287,25 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   opaque box paints `COLOR_CARD` over the chip's own stroke, the clear-box-not-glyphs hazard the
   usage cards already pay for. Asserting that box clears the stroke at both ends is a bound taken
   from the geometry rather than fitted to today's 26, and it catches the chip at 20.
-  Where it stands today: **492 of 557 constant-board pairs guarded** (board 1 32/237 unguarded,
-  board 2 33/320) — board 2 gained **50 constants** in the settings redesign and its unguarded count
+  Where it stands today: **514 of 582 constant-board pairs guarded** (board 1 32/237 unguarded,
+  board 2 36/345) — board 2 gained **50 constants** in the settings redesign and its unguarded count
   went DOWN, which is the standard this file sets for constants the repo just added: every one of
   them is caught at **±1 in both directions**. (`ASK_OPT_DESC_BYTES` from the option-descriptions
   work, and `READER_CODE_LINE_H` from the reader line-step fix, likewise.) Board 1's numbers are
   unchanged, which is the sweep agreeing with `board-baseline.mjs` that nothing there moved.
-  Of the unguarded ones only **8 on board 1 and 10 on board 2 are read by any
-  checker at all** — the other 24 and 23 are mic, beeper, crab and preset-count constants with no
-  geometry to violate. **Four of board 2's ten are unguarded BY CONSTRUCTION and are not a
-  gap**: `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`, `DETAIL_COL_LBL_STEP` and `DETAIL_COL_VAL_STEP` are
+  **Wireless pairing then added 25 more to board 2 and only THREE of them are unguarded, all
+  three because they measure TIME or FORMAT rather than pixels**: `PAIR_WINDOW_MS` (120000) and
+  `PAIR_RESULT_MS` are durations, where ±16 milliseconds has no geometric consequence a checker
+  could notice, and `PAIR_HOSTID_CHARS` (8) is a wire format read by no geometry assertion. Every
+  PAIR_* constant that IS a coordinate or a gap is caught at **±1 in both directions** — which it
+  was not when the panel first landed, and the story of how it got there is under **the pairing
+  panel** below: a chain of relative identities is invisible to an injector that perturbs one term
+  and lets the rest follow.
+  Of the unguarded ones only **8 on board 1 and 12 on board 2 are read by any
+  checker at all** — the other 24 and 24 are mic, beeper, crab, pairing-duration and
+  preset-count constants with no geometry to violate. **Four of board 2's entries in THAT list are unguarded BY CONSTRUCTION
+  and are not a gap** (as are the two `PAIR_*_MS` durations above): `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`,
+  `DETAIL_COL_LBL_STEP` and `DETAIL_COL_VAL_STEP` are
   board 1's arm only since §7 replaced the pill and the two column pairs with the band and one
   meta line, so nothing on board 2 reads them and no perturbation can move a board-2 number. They
   are still swept because the sweep perturbs every constant the checkers PARSE, and the parse is

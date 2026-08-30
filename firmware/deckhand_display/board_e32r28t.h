@@ -23,6 +23,7 @@
 #define BOARD_HAS_RGBLED     0
 #define BOARD_TOUCH_NEEDS_CAL 1
 #define BOARD_SETTINGS_HOME  0   // four pages behind a chevron pager; see settings.ino
+#define BOARD_HAS_WIRELESS_PAIR 0  // PROVISION over USB is the only pairing path here; see board_es3c35p.h
 // Deep sleep can be ended by TOUCHING THE GLASS on this board, which is a
 // capability and not a preference: ext0/ext1 wake only from an RTC GPIO, and
 // this panel's PENIRQ happens to be on one (IO36). See BOARD_SLEEP_WAKE_GPIO

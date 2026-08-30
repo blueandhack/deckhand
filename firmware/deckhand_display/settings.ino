@@ -858,6 +858,230 @@ int hostLinkSlotFor(const char* id) {
   return -1;
 }
 int p3RowY(int i) { return P3_LIST_Y + i * P3_ROW_STEP; }
+#if BOARD_HAS_WIRELESS_PAIR
+// ============================================================================
+// THE WIRELESS-PAIRING PANEL. BOARD 2 ONLY.
+//
+// CONFIRM ON THIS GLASS IS THE SECURITY PROPERTY, not a nicety. The first design
+// committed on the Mac's HMAC proof alone, and that was broken: the proof derives
+// from the ECDH shared secret and nothing else, so any peer that completes the
+// exchange computes it WITHOUT EVER SEEING THE CODE - a racing attacker was stored
+// in milliseconds. What commits now is Bluetooth's Numeric Comparison: the same
+// six digits on two screens, a person comparing them, and a tap HERE naming this
+// peer. So this button is the presence proof the cable used to be, and every rule
+// below follows from that rather than from taste.
+//
+// See docs/superpowers/specs/2026-08-30-wireless-pairing.md and the block at the
+// bottom of pairing.ino.
+// ============================================================================
+// The panel's own caches live here rather than beside the other settings caches in
+// deckhand_display.ino, because PAIR_CODE_DIGITS is a #define in pairing.ino and
+// this file is the first one concatenated after it that can see it. They are still
+// reset by resetSettingsCaches(), like every other cache on this tab.
+char pairLeftCache[PAIR_LEFT_BYTES] = "";
+// The signature the panel repaints wholesale on: the six digits and the label. The
+// CODE never changes within one exchange - a new PAIRREQ derives a new one, and the
+// person in front of the glass is meant to SEE that - so the code is drawn once per
+// request and the countdown beside it is the only change-only field. Repainting a
+// 64px hero number once a second would be the flicker this file's whole redraw
+// discipline exists to prevent.
+char pairPanelSig[PAIR_CODE_DIGITS + PAIR_LABEL_BYTES + 2] = "";
+// THE PANEL'S OWN SNAPSHOT OF THE LABEL, taken as it draws it. pairClose() wipes
+// pairLabel with the rest of the exchange - correctly, that is what pairWipe() is
+// for - so the result screen would otherwise have nothing to name. Taking it from
+// what was DRAWN also means "PAIRED WITH <label>" is exactly the label the person
+// was looking at when they compared the code, rather than a re-read of state that
+// has since moved.
+char pairPanelLabel[PAIR_LABEL_BYTES] = "";
+
+// Is the panel showing a code that could be confirmed? ONE PREDICATE, pairing.ino's
+// own, read by the draw site AND by the hit test - never two conditions that could
+// disagree. This codebase's classic defect is a control drawn under one condition
+// and hit-tested under another, and here that defect would commit a pairing key
+// nobody approved: a CONFIRM tappable while invisible is the one bug on this screen
+// that cannot be seen.
+bool pairConfirmVisible() { return pairConfirmable(); }
+
+// CANCEL always; CONFIRM only beside it, in the left half, once there is something
+// to confirm. CANCEL keeps a FIXED slot rather than centring itself when it is
+// alone: a button that moves when a request arrives is a button you can tap by
+// accident at the exact moment the screen changed under your finger.
+int pairCancelX() { return CARD_X + CARD_W - PAIR_BTN_W; }
+int pairConfirmX() { return CARD_X; }
+
+// The panel owns everything ABOVE the footer - the tab bar included, since chrome
+// drawn but dead is the bug fabVisible() is gated in one place to avoid - and
+// leaves the footer itself live, so the clock, the battery and the "Xs ago"
+// freshness keep running through a 120s wait. Whether the Mac is still talking is
+// exactly what you want to know while waiting for its request.
+void drawPairPanelStatic() {
+  tft.fillRect(0, 0, tft.width(), contentBottom(), COLOR_BG);
+  const int cx = tft.width() / 2;
+  setUIFont(T_HEAD);
+  tft.setTextColor(COLOR_VALUE, COLOR_BG);
+  tft.setTextDatum(TC_DATUM);
+  tft.drawString("PAIR NEW MAC", cx, PAIR_TITLE_Y);
+
+  const bool haveCode = pairConfirmVisible();
+  setUIFont(T_BODY);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.drawString(haveCode ? "does your Mac show this?" : "waiting for a Mac", cx, PAIR_STATE_Y);
+
+  if (haveCode) {
+    // THE CODE IS ON THE GLASS AND NOWHERE ELSE. It is never sent, never logged and
+    // never on the wire: a copy the Mac could read is a copy that skips the human,
+    // and the human is what makes this equal to the cable.
+    setUIFont(T_HERO);
+    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+    tft.drawString(pairCodeDigits, cx, PAIR_CODE_Y);
+    // Attacker-controlled text, already ASCII-sanitised and capped by
+    // pairSanitiseLabel - and fitText'd here as well, because drawString paints an
+    // opaque box and a name wider than the panel would rub out its neighbours.
+    strlcpy(pairPanelLabel, pairLabel, sizeof(pairPanelLabel));
+    char shown[PAIR_LABEL_BYTES];
+    fitText(shown, sizeof(shown), pairPanelLabel, CARD_W);
+    setUIFont(T_BODY);
+    tft.setTextColor(COLOR_VALUE, COLOR_BG);
+    tft.drawString(shown, cx, PAIR_LABEL_Y);
+  } else {
+    setUIFont(T_BODY);
+    tft.setTextColor(COLOR_LABEL, COLOR_BG);
+    tft.drawString("pick this device on your Mac", cx, PAIR_LABEL_Y);
+  }
+  tft.setTextDatum(TL_DATUM);
+
+  // CANCEL is the FILLED button and CONFIRM only outlined, the same hierarchy every
+  // confirm dialog on this device uses: the safe option is the prominent one, and
+  // the consequential one - here, the tap that stores a 128-bit key - must not also
+  // be the easiest thing to hit.
+  uiButton(pairCancelX(), PAIR_BTN_Y, PAIR_BTN_W, H_BTN, "CANCEL", COLOR_ACCENT, true);
+  if (haveCode)
+    uiButton(pairConfirmX(), PAIR_BTN_Y, PAIR_BTN_W, H_BTN, "CONFIRM", COLOR_GOOD, false);
+
+  // The countdown's cache belongs to the panel that was just painted, so it is
+  // dropped HERE rather than by the caller - the rule drawSettingsStatic() already
+  // follows: this function repaints the pixels that field is drawn on, so its cache
+  // is stale by definition afterwards, and a caller that forgot would leave the
+  // countdown blank until the second it happened to change.
+  pairLeftCache[0] = '\0';
+  snprintf(pairPanelSig, sizeof(pairPanelSig), "%s|%s", pairCodeDigits, pairLabel);
+}
+
+// The verdict, and it FLUSHES BEFORE IT DELAYS. On a shadow-buffered board the
+// message otherwise exists in memory for zero frames while the previous screen sits
+// on the glass - the defect the farewell screens already fixed once.
+void drawPairResult() {
+  const char* head = "PAIRING FAILED";
+  const char* sub  = "cancelled";
+  uint16_t tint = COLOR_BAD;
+  switch (pairResult) {
+    case PAIR_RES_OK:        head = "PAIRED WITH";  sub = pairPanelLabel; tint = COLOR_GOOD; break;
+    case PAIR_RES_BADPROOF:  sub = "code did not match"; break;
+    case PAIR_RES_FULL:      sub = "no free slots";      break;
+    case PAIR_RES_TIMEOUT:   sub = "timed out";          break;
+    // PAIR_RES_CANCELLED and PAIR_RES_NONE both read "cancelled": NONE is what a
+    // close from somewhere else looks like (the CANCEL button itself, or one of the
+    // three safety closes), and inventing a cause for it would be worse than naming
+    // the one thing that is certainly true - nothing was stored.
+    default: break;
+  }
+  tft.fillRect(0, 0, tft.width(), contentBottom(), COLOR_BG);
+  const int cx = tft.width() / 2;
+  setUIFont(T_HEAD);
+  tft.setTextColor(tint, COLOR_BG);
+  tft.setTextDatum(TC_DATUM);
+  tft.drawString(head, cx, PAIR_RESULT_Y);
+  char shown[PAIR_LABEL_BYTES + 4];
+  fitText(shown, sizeof(shown), sub, CARD_W);
+  setUIFont(T_BODY);
+  tft.setTextColor(COLOR_VALUE, COLOR_BG);
+  tft.drawString(shown, cx, PAIR_RESULT_SUB_Y);
+  tft.setTextDatum(TL_DATUM);
+  tft.flush();          // BEFORE the dwell, never after it
+  delay(PAIR_RESULT_MS);
+}
+
+// Leaves the panel and lands back on the Pairing group. It shuts the window as
+// well: walking away from this screen must not leave the device armed, which is the
+// one state that would make this weaker than the cable it replaces.
+void closePairPanel() {
+  pairPanelActive = false;
+  pairClose("pairing panel closed");
+  drawSettingsTab();
+}
+
+void openPairPanel() {
+  pairOpen();
+  pairPanelActive = true;
+  pairPanelSig[0] = '\0';
+  pairPanelLabel[0] = '\0';
+  drawPairPanelStatic();
+}
+
+// The panel's whole tick: called from loop() twice a second and from handleLine()'s
+// absorb, and change-only in both, so calling it more often costs nothing.
+void renderPairPanel() {
+  if (!pairPanelActive) return;
+  // WHATEVER SHUT THE WINDOW, the panel ends here - a commit, a bad proof, the
+  // Mac's own cancel, the 120s timeout, or one of the three safety closes. It is
+  // done from this side rather than inside pairClose() because a successful commit
+  // closes the window ITSELF, and a close that also tore the screen down would show
+  // the verdict for zero frames.
+  if (!pairWindowOpen()) {
+    drawPairResult();
+    closePairPanel();
+    return;
+  }
+  // A new PAIRREQ replaces the pending one and derives a NEW code, so the whole
+  // panel repaints rather than the digits being edited under the label.
+  char sig[sizeof(pairPanelSig)];
+  snprintf(sig, sizeof(sig), "%s|%s", pairCodeDigits, pairLabel);
+  if (strncmp(sig, pairPanelSig, sizeof(sig)) != 0) { drawPairPanelStatic(); return; }
+
+  char buf[PAIR_LEFT_BYTES + 4];
+  long ms = (long) (pairWindowUntil - millis());
+  if (ms < 0) ms = 0;
+  // %3ld, NOT padTo(): this field is CENTRED, so trailing spaces would slide the
+  // ink half a character left every time the count dropped below 100 and again
+  // below 10. A leading-space numeric field keeps the string 9 characters wide AND
+  // the "s left" in the same place, which is what makes a once-a-second update look
+  // like a counter rather than a twitch.
+  snprintf(buf, sizeof(buf), "%3lds left", (long) ((ms + 999) / 1000));
+  drawIfChanged(pairLeftCache, sizeof(pairLeftCache), buf,
+                tft.width() / 2, PAIR_LEFT_Y, T_BODY, 1, COLOR_LABEL, COLOR_BG, TC_DATUM);
+}
+
+// The panel's own clock, from loop(). It is NOT hung off the settings tab's 1s
+// tick: that one is gated on everReceived, and the device most likely to be sitting
+// on this screen is a fresh one no Mac has ever ticked. 500ms rather than 1000 so a
+// once-a-second counter cannot appear to skip a second on a slow loop, and the
+// field is change-only, so the extra call paints nothing.
+void tickPairPanel() {
+  if (!pairPanelActive) return;
+  static unsigned long last = 0;
+  if (millis() - last < 500) return;
+  last = millis();
+  renderPairPanel();
+}
+
+// Every tap on this surface is consumed, the way the reader's is: the tab bar under
+// it is covered, so a tap that fell through would act on chrome the user cannot see.
+void pairPanelTouch(int sx, int sy) {
+  if (sy < PAIR_BTN_Y || sy >= PAIR_BTN_Y + H_BTN) return;
+  if (sx >= pairCancelX() && sx < pairCancelX() + PAIR_BTN_W) { closePairPanel(); return; }
+  // THE SAME PREDICATE THE DRAW SITE READ. Gating the hit test on anything else -
+  // even on something that happens to agree today - is how a control becomes
+  // tappable while invisible, and the thing this one does is store a pairing key.
+  if (pairConfirmVisible() &&
+      sx >= pairConfirmX() && sx < pairConfirmX() + PAIR_BTN_W) {
+    pairConfirm();
+    // pairConfirm() commits when the proof has already landed, which closes the
+    // window - so ask the panel to reconcile immediately rather than waiting up to
+    // half a second for the next tick to notice.
+    renderPairPanel();
+  }
+}
+#endif  // BOARD_HAS_WIRELESS_PAIR
 void drawHostsPageStatic() {
   tft.fillRect(0, PAGE_TOP, tft.width(), contentBottom() - PAGE_TOP, COLOR_BG);
   drawGroupCaption("ANSWER PROMPTS FROM", P3_ANY_CAP_Y);
@@ -881,10 +1105,26 @@ void drawHostsPageStatic() {
   // made wherever the chrome is actually drawn. Above the early return, so the
   // no-Macs hint counts as a paint too.
   p3CountCache = hostCount;
+#if BOARD_HAS_WIRELESS_PAIR
+  // PAIR NEW MAC TAKES THE LIST'S NEXT FREE SLOT, and its ABSENCE at MAX_HOSTS is
+  // how this page says "full" - the same limit twice over, since the slot with no
+  // room on the screen is also the slot with no room in NVS. No confirm dialog: it
+  // destroys nothing and it is undone by walking away.
+  if (hostCount < MAX_HOSTS)
+    uiButton(CARD_X, p3RowY(hostCount), CARD_W, H_ROW, "PAIR NEW MAC", COLOR_ACCENT, false);
+  if (hostCount == 0) {
+    // One slot LOWER than board 1's hint, because the button is standing where that
+    // hint used to be - and the sentence changed with it, since the cable is no
+    // longer the only way in.
+    uiHint("or connect one over USB", P3_EMPTY_HINT_Y);
+    return;
+  }
+#else
   if (hostCount == 0) {
     uiHint("No Mac paired yet - connect one over USB", P3_LIST_Y + P3_ROW_H / 2);
     return;
   }
+#endif
   for (int i = 0; i < hostCount; i++) {
     int y = p3RowY(i);
     bool only = allowedHost[0] && strcmp(hosts[i].id, allowedHost) == 0;
@@ -1209,6 +1449,15 @@ void drawSettingsStatic() {
 #endif
 }
 void renderSettingsTab() {
+#if BOARD_HAS_WIRELESS_PAIR
+  // The pairing panel owns everything above the footer, so this periodic repaint
+  // must not run - the same absorb the confirm dialog gets one line down, and the
+  // one the reader and the history pager get in handleLine(). The panel's own
+  // countdown is driven by tickPairPanel() from loop() rather than from here: this
+  // call is gated on everReceived, and a device that has never had a payload is
+  // exactly the fresh, unpaired one most likely to be sitting on this screen.
+  if (pairPanelActive) return;
+#endif
   if (pendingConfirm != CFM_NONE) return;  // a modal owns the page area
 #if BOARD_SETTINGS_HOME
   if      (settingsPage == SET_HOME)    renderSettingsHome();
@@ -1274,6 +1523,13 @@ void resetSettingsCaches() {
   // way the two caches above are. drawHostsPageStatic() records the real count on
   // the way past.
   p3CountCache = -1;
+#if BOARD_HAS_WIRELESS_PAIR
+  // The pairing panel's two, for the same reason - drawPairPanelStatic() drops the
+  // countdown's cache itself as well, since it is also reached from openPairPanel()
+  // where there is no drawSettingsStatic() upstream to have run this.
+  pairLeftCache[0] = '\0';
+  pairPanelSig[0] = '\0';
+#endif
   // HOME's five summaries, and the Status row's colour beside them. Same rule as
   // every cache above: drawSettingsHomeStatic() repaints the cards these are drawn
   // ON, so leaving them set leaves all five rows BLANK.
@@ -1476,6 +1732,16 @@ void handleSettingsTouch(int sx, int sy) {
     // inert rather than being claimed by either - the same rule HOME's gaps follow,
     // and it matters more here because the row it would guess at owns a destructive
     // control.
+#if BOARD_HAS_WIRELESS_PAIR
+    // The free slot, hit-tested from the SAME expression that draws it and under the
+    // same hostCount < MAX_HOSTS condition - at MAX_HOSTS there is no button and no
+    // band claiming taps, which is the whole "absence encodes full" argument.
+    if (hostCount < MAX_HOSTS &&
+        sy >= p3RowY(hostCount) && sy < p3RowY(hostCount) + H_ROW) {
+      openPairPanel();
+      return;
+    }
+#endif
     for (int i = 0; i < hostCount; i++) {
       int y = p3RowY(i);
       if (sy < y || sy >= y + P3_ROW_H) continue;
