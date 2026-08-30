@@ -3011,6 +3011,16 @@ uint16_t stVerdictColorCache = 0;
 // made battRowTextCache correct by accident until it wasn't.
 char p3SubCache[MAX_HOSTS][P3_SUB_BYTES] = {"", "", "", ""};
 int p3LiveCache[MAX_HOSTS] = {-1, -1, -1, -1};
+// THE ROW COUNT IS A CACHE TOO, and it is the only one on this page whose absence
+// draws a control that is not there. hostCount changes from upsertHost(), which
+// repaints nothing - so a Mac pairing while the Pairing group is OPEN adds a row
+// that renderHostsPage() would happily paint a dot and a state line into, on bare
+// page background, with no card, no name and no "x" behind them; and the touch
+// loop walks the same hostCount, so the right end of that invisible row raises
+// CFM_FORGET_HOST. Chrome the live fields are drawn ON has to exist before they
+// render into it, which is the same invariant drawSettingsStatic() enforces by
+// resetting caches inside itself rather than at its call sites.
+int p3CountCache = -1;
 #endif
 int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
 int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+

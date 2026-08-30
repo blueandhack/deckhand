@@ -869,6 +869,12 @@ void drawHostsPageStatic() {
   // forgetting the LAST Mac cannot leave a row's state behind for the next one to
   // inherit.
   for (int i = 0; i < MAX_HOSTS; i++) { p3SubCache[i][0] = '\0'; p3LiveCache[i] = -1; }
+  // THE COUNT THIS PAINT IS FOR, recorded here rather than by the caller for the
+  // same reason the two caches above are: renderHostsPage() compares against it
+  // every tick and repaints this chrome when it moves, so the record has to be
+  // made wherever the chrome is actually drawn. Above the early return, so the
+  // no-Macs hint counts as a paint too.
+  p3CountCache = hostCount;
   if (hostCount == 0) {
     uiHint("No Mac paired yet - connect one over USB", P3_LIST_Y + P3_ROW_H / 2);
     return;
@@ -935,6 +941,15 @@ void drawHostsPageStatic() {
 // and how long ago it last did. Runs on the same ~5s tick as every other group.
 void renderHostsPage() {
   char buf[32];
+  // A MAC CAN PAIR WHILE THIS GROUP IS OPEN, and nothing on that path repaints:
+  // upsertHost() writes NVS and returns. Without this the loop below would draw a
+  // dot and a state line at p3RowY(hostCount - 1) onto bare page background - no
+  // card, no name, no "x" - while handleSettingsTouch's own `i < hostCount` walk
+  // already claims that band, so its right end raises CFM_FORGET_HOST. A row you
+  // cannot see that forgets a Mac when tapped. drawHostsPageStatic() sets
+  // p3CountCache itself and then calls back here, so this recurses exactly once
+  // and the nested call falls straight through to the fields.
+  if (hostCount != p3CountCache) { drawHostsPageStatic(); return; }
   for (int i = 0; i < hostCount; i++) {
     int y = p3RowY(i);
     int slot = hostLinkSlotFor(hosts[i].id);
@@ -1112,8 +1127,25 @@ void drawPendingConfirm() {
                   "its key is deleted; re-pairs over USB", "FORGET", COLOR_BAD);
       break;
     case CFM_RECAL:
+      // THE SAME RULE AS CFM_POWER_OFF BELOW, and for the same reason: a confirm
+      // dialog's entire job is stating the consequence, so it is the last place
+      // that may describe behaviour this silicon does not have. On a board whose
+      // touch controller lives inside the display IC, runCalibration() is a stub
+      // that prints and returns - there is no 5-tap run and no previous mapping to
+      // keep, so both halves of board 1's note are false here.
+      //
+      // THE BUTTON ITSELF IS DELIBERATELY LEFT IN PLACE. Whether this board should
+      // offer CALIBRATE TOUCH at all is a real question under this repo's own
+      // "never offer a control that cannot work" rule - but the mock the user
+      // approved carries it, so that call is theirs. What is fixed here is only
+      // the dialog telling them something untrue about it.
+#if BOARD_TOUCH_NEEDS_CAL
       drawConfirm("Recalibrate touch?", nullptr,
                   "5 taps; current setup kept if it fails", "CALIBRATE", COLOR_ACCENT);
+#else
+      drawConfirm("Recalibrate touch?", nullptr,
+                  "factory-aligned; there is nothing to do", "CALIBRATE", COLOR_ACCENT);
+#endif
       break;
     case CFM_RESET_PAIRING:
       drawConfirm("Reset all pairing?", nullptr,
@@ -1222,6 +1254,11 @@ void resetSettingsCaches() {
   stPayloadCache[0] = '\0'; stFlushCache[0] = '\0';
   stUptimeCache[0] = '\0'; stMacsCache[0] = '\0';
   for (int i = 0; i < MAX_HOSTS; i++) { p3SubCache[i][0] = '\0'; p3LiveCache[i] = -1; }
+  // The row COUNT joins them: this runs from drawSettingsStatic() before the page
+  // chrome is repainted, so "how many rows are drawn" is stale here in exactly the
+  // way the two caches above are. drawHostsPageStatic() records the real count on
+  // the way past.
+  p3CountCache = -1;
   // HOME's five summaries, and the Status row's colour beside them. Same rule as
   // every cache above: drawSettingsHomeStatic() repaints the cards these are drawn
   // ON, so leaving them set leaves all five rows BLANK.
