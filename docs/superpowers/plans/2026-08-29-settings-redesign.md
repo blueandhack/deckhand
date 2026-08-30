@@ -28,6 +28,15 @@
 - **Change-only redraw discipline.** Any new cached field must be reset in `resetSettingsCaches()`, and any
   new cache array must be at least as long as the longest string it can hold plus its NUL. A cache shorter
   than its string silently stops noticing changes.
+- **EVERY INTERMEDIATE STATE MUST COMPILE ON BOTH BOARDS.** This is not a style point: a constant
+  lives in the task that USES it, never in an earlier task that merely anticipates it. The first
+  draft of this plan had Task 1 define board 2's page constants and delete the old ones, which would
+  have removed `P1_VOL_Y`, `P1_SOUND_Y`, `P1_SOUND_H`, `P1_THIRD_W`, `P1_FLIP_X`, `P1_THEME_X` and
+  `P2_MIC_Y` out from under **29 call sites in `settings.ino` that still reference them on board 2** —
+  a build break at Task 1 that every later task would have inherited. So: Task 1 adds only what
+  nothing yet uses (the flag, the page ids, HOME, the back band); Task 2 owns the `P1_*`/`PS_*`
+  family because Task 2 is what splits Display from Sound; Task 3 owns `ST_*`/`P3_*`; Task 4 owns
+  `P2_*` and is the only task that may remove `P2_MIC_Y`.
 - Board 2 flash/RAM today: **992122 / 65604**. Report the delta each task.
 
 ---
@@ -37,8 +46,11 @@
 **Files:**
 - Modify: `firmware/deckhand_display/board_es3c35p.h`
 - Modify: `firmware/deckhand_display/board_e32r28t.h` (ONE line)
-- Modify: `firmware/deckhand_display/deckhand_display.ino:2837-2880` (wrap, do not edit, board 1's derivations)
 - Modify: `firmware/deckhand_display/settings-geom-check.mjs`
+
+**Task 1 ADDS ONLY. It removes nothing and moves no existing derivation** — see the intermediate-state
+rule in Global Constraints. `deckhand_display.ino`'s `P1_*`/`P2_*`/`P3_*` block is **not touched by
+this task**; Tasks 2 and 4 split it when they replace the code that reads it.
 
 **Interfaces:**
 - Produces: `BOARD_SETTINGS_HOME`; `SET_HOME`/`SET_STATUS`/`SET_DISPLAY`/`SET_SOUND`/`SET_PAIRING`/`SET_ACTIONS`;
@@ -104,108 +116,13 @@ const int BACK_BTN_W    = PAGER_BTN_W;
 const int BACK_TITLE_DX = 16;
 ```
 
-- [ ] **Step 3: move board 2's page derivations into its own header**
+- [ ] **Step 3: (none — see the intermediate-state rule)**
 
-Board 2's group pages are laid out from scratch, so their constants belong in the header rather than
-being derived in shared code. Append to `board_es3c35p.h`:
+Board 2's page constants are added by the tasks that consume them: `P1_*` and `PS_*` in Task 2,
+`ST_*` and `P3_*` in Task 3, `P2_*` in Task 4. Adding them here would delete constants that 29
+call sites still reference and break the board-2 build for every task after this one.
 
-```c
-// ---------- SETTINGS group: Status ----------
-// Three cards instead of eleven flat rows. The two facts you actually came for -
-// is the host talking to me, and how is the battery - lead as T_HEAD lines with
-// their detail dimmed under them; the eight diagnostics collapse into one
-// two-column card. The per-Mac rows MOVED to the Pairing group, where the Macs
-// already are; carrying them on both pages was the duplication that made this
-// page the only one with no slack.
-//   116..227  CONNECTION   240..351  POWER   364..455  HOST
-const int ST_CONN_Y = 116, ST_CONN_H = 112;
-const int ST_PWR_Y  = 240, ST_PWR_H  = 112;
-const int ST_HOST_Y = 364, ST_HOST_H = 92;
-const int ST_CAP_DY = 8, ST_BIG_DY = 34, ST_L1_DY = 66, ST_L2_DY = 86;
-const int ST_HOST_R1_DY = 34, ST_HOST_R2_DY = 56;
-
-// ---------- SETTINGS group: Display ----------
-// VOLUME left for the Sound group, which freed 92px. That is NOT spent on air:
-// THEME stops being a cramped third-width CYCLE button - which shows one state
-// and hides the other two - and becomes a 3-segment selector showing all three.
-// It was never a uiToggle anyway, having three states.
-const int P1_BRIGHT_Y = PAGE_TOP + 12;                      // 116..195
-const int P1_SLEEP_Y  = P1_BRIGHT_Y + STEPPER_CARD_H + 12;  // 208..287
-const int P1_THEME_CAP_Y = 298;
-const int P1_THEME_Y     = 318;                             // 318..363
-const int P1_THEME_GAP   = 4;
-const int P1_THEME_SEG_W = (CARD_W - 2 * P1_THEME_GAP) / 3; // 96, clears TAP_MIN twice over
-// AUTO is a CLOCK, not a sensor: every ADC1 channel here is spoken for (touch,
-// battery, mic) and ADC2 is unusable while BT is up, so there is no light to
-// measure and never will be. A bare "AUTO" implies hardware that does not exist,
-// which is the rule that stops the farewell screen promising a touch wake.
-const int P1_AUTO_HINT_Y = 377;
-const int P1_FLIP_Y      = 396;                             // 396..441
-
-// ---------- SETTINGS group: Sound ----------
-// Output AND input, because a mic test IS a sound test - and it is the one action
-// run repeatedly, since MIC_GAIN is settled by watching MICMON while speaking
-// rather than computed. Moving MIC TEST here is what takes the Actions group down
-// to three, so Actions becomes purely things that change or end state.
-const int PS_ALERT_CAP_Y = 116;
-const int PS_SOUND_Y     = 140;                             // 140..185, H_ROW
-const int PS_WHAT_HINT_Y = 197;
-const int PS_VOL_Y       = 218;                             // 218..297
-const int PS_TEST_Y      = 310;                             // 310..359
-const int PS_MIC_CAP_Y   = 374;
-const int PS_MIC_Y       = 398;                             // 398..447
-const int PS_BTN_H       = 50;
-// No bar under VOLUME, deliberately - see STEP_BAR_Y: only BRIGHTNESS gets one,
-// being the single continuous 0-100 setting. Three named presets with a bar under
-// them would be decoration.
-
-// ---------- SETTINGS group: Pairing ----------
-// The live Mac rows land here. A row is two lines - name, then whether that Mac
-// is connected RIGHT NOW - which is the one thing the pairing list never had.
-const int P3_ANY_CAP_Y  = 116;
-const int P3_ANY_Y      = 138;                              // 138..183, H_ROW
-const int P3_LIST_CAP_Y = 196;
-const int P3_LIST_Y     = 218;
-const int P3_ROW_H      = 52;
-const int P3_ROW_STEP   = 60;                               // 4 Macs -> 218..449
-const int P3_ROW_NAME_DY = 10, P3_ROW_SUB_DY = 30;
-const int P3_X_W        = 40;   // "forget" hit zone at the right edge
-
-// ---------- SETTINGS group: Actions ----------
-// THREE buttons, because MIC TEST moved to Sound - so these are drawn at 56
-// rather than H_BTN's 50 and given room to separate.
-// SEVERITY IS NOT CARRIED BY OUTLINE HUE ALONE, which is what shipped: all four
-// of the old buttons were identically shaped outlined slabs differing only in
-// stroke colour, against this repo's own rule that status is never colour alone.
-// The two destructive ones are captioned and carry a solid spine - the same
-// visual language the session rows already use - so severity survives greyscale.
-const int P2_SETUP_CAP_Y = 120;
-const int P2_CAL_Y       = 146;                             // 146..201
-const int P2_DANGER_CAP_Y = 228;
-const int P2_PAIR_Y      = 254;                             // 254..309
-const int P2_PWR_Y       = 322;                             // 322..377
-const int P2_BTN_H       = 56;
-const int P2_HINT_Y      = 402;
-const int P2_SPINE_W     = 4;
-```
-
-- [ ] **Step 4: wrap board 1's shared derivations, do not edit them**
-
-In `deckhand_display.ino`, the block currently at ~2837-2880 defines `P1_BRIGHT_Y` … `P3_X_W`.
-Board 2 now defines its own, so wrap that whole block. **The text inside the `#else` must be
-character-for-character what is there today** — an `#if` emits no code, so board 1 cannot move:
-
-```c
-#if BOARD_SETTINGS_HOME
-// Board 2 derives every settings page constant in board_es3c35p.h, because its
-// pages are laid out from scratch rather than shared. See the SETTINGS regions there.
-#else
-... the existing block, UNCHANGED ...
-#endif
-```
-
-Also wrap `P1_SOUND_H`, `P1_THIRD_W`, `P1_FLIP_X`, `P1_THEME_X` into the `#else` — board 2's Display
-group has no three-across toggle row.
+- [ ] **Step 4: (none)**
 
 - [ ] **Step 5: fix the stale comment, which describes a page that does not compile**
 
@@ -279,7 +196,10 @@ git commit -m "Settings: board-2 page constants, and the comment that described 
 
 **Interfaces:**
 - Consumes: everything Task 1 produced.
-- Produces: `drawSettingsHomeStatic()`, `drawBackBand(const char*)`, `openSettingsGroup(int)`,
+- Produces: **board 2's `P1_*` and `PS_*` page constants** (this task owns them, because it is what
+  splits Display from Sound), the `#if BOARD_SETTINGS_HOME` split of `deckhand_display.ino`'s `P1_*`
+  derivations with board 1's arm character-identical, and
+  `drawSettingsHomeStatic()`, `drawBackBand(const char*)`, `openSettingsGroup(int)`,
   `settingsBack()`, `drawDisplayPageStatic()`, `renderDisplayPage()`, `drawSoundPageStatic()`,
   `renderSoundPage()`, `settingsGroupTitle(int)`.
 
@@ -433,7 +353,9 @@ git commit -m "Settings: a HOME screen and five groups, replacing the chevron pa
 - Modify: `firmware/deckhand_display/settings-geom-check.mjs`
 
 **Interfaces:**
-- Consumes: Task 1's `ST_*` and `P3_*` constants, Task 2's dispatch.
+- Consumes: Task 2's dispatch.
+- Produces: **board 2's `ST_*` and `P3_*` constants** (this task owns them), plus the `#if` split of
+  `deckhand_display.ino`'s `P3_*` derivations with board 1's arm character-identical.
 - Produces: board-2 arms of `drawStatusPageStatic()`/`renderStatusPage()` and
   `drawHostsPageStatic()`/`renderMacLinkRows()`.
 
@@ -497,6 +419,11 @@ worst case from the format, the way the checker already derives the battery row'
 **Files:**
 - Modify: `firmware/deckhand_display/settings.ino`
 - Modify: `firmware/deckhand_display/settings-geom-check.mjs`
+
+**Interfaces:**
+- Produces: **board 2's `P2_*` constants** (this task owns them). It is the ONLY task that may remove
+  `P2_MIC_Y`, and it must remove the `#if BOARD_HAS_MIC` draw site and touch branch in the same
+  commit — a constant deleted while a call site still reads it does not compile.
 
 - [ ] **Step 1: three buttons, two captions, one spine**
 
