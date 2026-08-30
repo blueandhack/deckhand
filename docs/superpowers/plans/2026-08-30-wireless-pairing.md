@@ -99,8 +99,12 @@ zeroing them, not merely marking the window shut.
     store as pending, reply `PAIRPUB <pubB:64hex>`. A second `PAIRREQ` while one is pending REPLACES
     it (a lost first attempt must be recoverable) and the displayed code changes with it.
   - `PAIROK <hmac:32hex>` — recompute the proof from the pending key and compare in **constant
-    time**. On match: `upsertHost(hostId, key, label)`, `saveHostSlot`, `saveHostCount`, reply
-    `PAIRDONE <hostId>`, close the window. On mismatch: reply `PAIRFAIL badproof`, close the window.
+    time**. On match set `proofOk` and **wait**; on mismatch reply `PAIRFAIL badproof` and close.
+  - **COMMIT REQUIRES BOTH `proofOk` AND an on-glass CONFIRM, in either order.** A valid proof alone
+    must never store a key: the proof derives from the ECDH shared secret, so ANY peer that completes
+    the exchange can compute it, and a racing attacker would otherwise be stored in milliseconds
+    without the code ever being read. The CONFIRM tap is what binds the human act to *this* peer.
+    Only when both hold: `upsertHost(hostId, key, label)`, reply `PAIRDONE <hostId>`, close.
   - `PAIRCANCEL` — close, reply `PAIRFAIL cancelled`.
 - [ ] **Step 3: `PAIRDONE`/`PAIRFAIL` carry the trailing `to=<hostId>`** every device→host line
 already uses, so the other paired Mac drops them instead of logging an auth failure.
@@ -134,8 +138,11 @@ extra string and no refusal path to get wrong. The two limits are the same limit
 It needs no confirm dialog: it destroys nothing and it is reversible by walking away.
 - [ ] **Step 2:** a full-screen pairing panel, owning the glass the way the reader does: the code in
 `T_HERO` (Spleen 32x64, so 6 digits is 192px in a 320px panel — centre it and assert the fit), the
-requesting Mac's label under it once a `PAIRREQ` arrives, a `Ns left` countdown, and CANCEL. Before
-any request arrives it reads `waiting for a Mac` with no code, because there is nothing to show yet.
+requesting Mac's label under it once a `PAIRREQ` arrives, a `Ns left` countdown, and **CONFIRM / CANCEL**. Before
+any request arrives it reads `waiting for a Mac` with no code, and **CONFIRM is inert** — there is
+nothing to confirm yet. CONFIRM is the act that commits the key, so it must be impossible to tap it
+before a code is on screen; gate it in `pairConfirmVisible()`-style, one predicate read by both the
+draw site and the hit test, never two conditions that could disagree.
 - [ ] **Step 3:** it must absorb the ~5s host tick the way the confirm dialog and reader do — parse,
 `renderFooter()`, return — or the periodic repaint paints the settings page over it.
 - [ ] **Step 4:** the countdown is a change-only field on its own cache, not a full repaint per
@@ -159,7 +166,7 @@ geometry instead of leaving it in a comment. Prove teeth on each.
 
 - [ ] **Step 1: commands** (intercepted host-side, like `SELECT`/`FORGET`, never forwarded):
 `PAIRSCAN` (5s scan, collect every `Deckhand-XXXX` advertiser with RSSI), `PAIRSTART <name>`,
-`PAIRCODE <6 digits>`, `PAIRCANCEL`.
+`PAIRCONFIRM` (the user clicked Match), `PAIRCANCEL`.
 - [ ] **Step 2: scanning must not disturb the live link.** The host normally pins its scan to
 `selectedDevice`. A pairing scan lists everything, so it must not leave the scan filter or the
 current connection changed when it finishes — restore whatever was there, including on failure and
@@ -169,9 +176,10 @@ feature is worth.
 fresh ephemeral keypair, await `PAIRPUB`, derive. Hold the pending exchange in memory only — **the
 private key and shared secret are never written to disk**, and both are zeroed when the exchange
 ends however it ends.
-- [ ] **Step 4: `PAIRCODE`.** Compare the typed digits against the host's own derived code, in
-constant time. Mismatch → report `code did not match` to the menu bar and **do not touch the
-device**; the user may retype. Match → send `PAIROK <proof>`, await `PAIRDONE`, then write the new
+- [ ] **Step 4: `PAIRCONFIRM`.** The host publishes its OWN derived code in the heartbeat so the menu
+bar can display it for comparison; nothing is typed and nothing is compared host-side. On
+`PAIRCONFIRM` → send `PAIROK <proof>`, await `PAIRDONE` (which the device sends only after its own
+CONFIRM tap), then write the new
 entry to `deckhand-secret` via the existing `savePairing()` (which `chmod`s every write, because
 `writeFile`'s `mode` only applies on creation).
 - [ ] **Step 5: state in the heartbeat** — `pairing: {state, devices[], name, label, error, sec}`
@@ -191,10 +199,12 @@ that silently stops is the worst outcome here.
 cannot do anything otherwise, and this menu already dims `Device` for that reason).
 - [ ] **Step 2:** it writes `PAIRSCAN`, then renders the heartbeat's `pairing.devices` as a submenu
 of `Deckhand-XXXX` entries. Picking one writes `PAIRSTART <name>`.
-- [ ] **Step 3:** when the heartbeat reports `awaiting-code`, show an `NSAlert` with an accessory
-`NSTextField` for six digits, the device's name in the message, and Pair / Cancel. Pair writes
-`PAIRCODE <digits>`; Cancel writes `PAIRCANCEL`. Reject non-digits and wrong lengths in the dialog
-rather than round-tripping them.
+- [ ] **Step 3:** when the heartbeat reports `awaiting-code`, show an `NSAlert` displaying **the
+host's own derived code** and asking whether the device shows the same, with Match / Don't match.
+Match writes `PAIRCONFIRM`; Don't match writes `PAIRCANCEL`. The code is shown in a monospaced face
+at a size that can be read across a desk — the whole security property is a person comparing two
+six-digit numbers, so anything that makes that comparison harder is a security cost, not a cosmetic
+one.
 - [ ] **Step 4:** report `done` and `failed` states, the failure naming its cause.
 - [ ] **Step 5: `--pair-check`**, in the same family as `--pace-check`/`--sound-check`: drive the
 state machine through idle → scanning → awaiting-code → done, and through each failure, printing

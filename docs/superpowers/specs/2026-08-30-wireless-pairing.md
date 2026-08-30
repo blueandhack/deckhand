@@ -25,55 +25,66 @@ Two properties must survive:
 1. **The secret is never transmitted.** Not encrypted-in-transit, not obfuscated — never sent.
 2. **A person must physically act on the device** before it will pair with anything.
 
-## The design: ephemeral X25519, with a code derived from the shared secret
+## The design: ephemeral X25519, with the code COMPARED on both screens
 
-This is Bluetooth's own Numeric Comparison / Passkey Entry association model and Matter's
-commissioning flow, not an invention.
+This is Bluetooth's Numeric Comparison association model, not an invention.
+
+**A FIRST VERSION OF THIS SPEC WAS BROKEN AND IS RECORDED HERE RATHER THAN QUIETLY REPLACED**, because
+the mistake is the instructive part. It had the device display a code, the user type it into the Mac,
+and the Mac prove agreement with an HMAC. The flaw: **that proof is computable by any peer that
+completes the ECDH**, since it derives from the shared secret alone. So an attacker in range could
+answer the open window, compute a valid proof **without ever seeing the code**, and be stored — in
+milliseconds, before the user could look at the screen. The displayed code defended the user's *Mac*
+against a man-in-the-middle, and gave the *device* nothing: it never received evidence that any human
+had read the code at all. The claim "the device never receives a guess at the code" was true and
+irrelevant.
+
+The fix is that **a human act on the glass, bound to this specific peer, is what commits the key.**
 
 ```
 DEVICE                                             MAC
   |                                                 |
   |  user taps SETTINGS > Pairing > PAIR NEW MAC    |
   |  -> pairing window opens, 120s                  |
-  |                                                 |  user picks the device
-  |                                                 |  from a scan list
+  |                                                 |  user picks the device from a scan list
   |         <---- PAIRREQ <hostId> <pubA> <label>   |
   |  generate keypair (b, B)                        |
   |  shared = X25519(b, A)                          |
-  |  code   = HKDF(shared, "deckhand-sas") -> 6 dig |
-  |  key    = HKDF(shared, "deckhand-key") -> 16 B  |
-  |  DISPLAY code + the requesting Mac's label      |
+  |  code   = HKDF(shared, "deckhand-sas/1") 6 dig  |
+  |  key    = HKDF(shared, "deckhand-key/1") 16 B   |
+  |  DISPLAY code + label + CONFIRM / CANCEL        |
   |         PAIRPUB <pubB> ---->                    |
-  |                                                 |  shared = X25519(a, B)
-  |                                                 |  code', key' derived identically
+  |                                                 |  shared, code', key' derived identically
+  |                                                 |  DISPLAY code' + Match / Don't match
   |                                                 |
-  |     user reads the code off the device and types it into the Mac
+  |   the user reads BOTH screens and compares the two codes
   |                                                 |
-  |                                                 |  typed == code' ?
-  |                                                 |    no  -> local retry, device untouched
-  |                                                 |    yes -> send proof
-  |         <---- PAIROK <HMAC(key', "pairok")>     |
-  |  verify HMAC with its own key                   |
+  |         <---- PAIROK <HMAC(key', "pairok")>     |  (user clicked Match)
+  |  verify proof with pairCtEq -> proofOk = true   |
+  |                                                 |
+  |  user taps CONFIRM on the glass -> confirmed    |
+  |                                                 |
+  |  COMMIT only when proofOk AND confirmed         |
   |  store key in the NVS slot for hostId           |
   |         PAIRDONE ---->                          |  store key in deckhand-secret
 ```
 
-Both sides derive the same 128-bit secret from the exchange. **It is never on the wire.**
+The two conditions may arrive in either order; neither alone commits anything.
 
 ### Why this is sound
 
-- **Passive eavesdropper** sees two public keys and six digits. Computing the shared secret from
-  the public keys is the ECDH problem. They get nothing.
-- **Active man-in-the-middle** must run two separate exchanges, one with each side. Those produce
-  two *different* shared secrets and therefore two different codes. The device shows its code; the
-  user types it into the real Mac, which computed a different one; **the Mac rejects it locally**.
-  The mismatch is the detection.
-- **The device never receives a guess at the code.** The Mac verifies the typed code against its
-  own derivation before sending anything, so retyping a typo costs no device interaction and there
-  is no online guessing attack against the device at all. What the device does receive is an HMAC
-  under the derived key — forging that is a 128-bit problem, not a 10^6 one.
-- **Nothing pairs unless a person tapped PAIR NEW MAC on the glass.** That is the presence proof,
-  and it is what makes this equal to the cable rather than weaker.
+- **Passive eavesdropper** sees two public keys and nothing else. The code is on two screens, never on
+  the wire. Recovering the shared secret from the public keys is the ECDH problem.
+- **A racing attacker** — the attack that killed the first design — now fails. It can complete the
+  exchange and send a valid proof, but the device displays **its** code, the user's Mac displays a
+  different one, the codes do not match, and the user taps CANCEL. Nothing is stored.
+- **Active man-in-the-middle** must run two exchanges, which produce two different shared secrets and
+  therefore two different codes. Same outcome: the screens disagree and the user cancels.
+- **Nothing commits without a tap on the glass** naming the peer it commits. That is the presence
+  proof, and unlike the first design it is bound to *which* peer rather than merely to *some* pairing
+  having happened.
+- The HMAC proof is kept as defence in depth: it tells the device that the peer which sent it is the
+  same peer that did the ECDH, which the human comparison alone does not establish.
 
 ### Deliberate properties
 
@@ -127,8 +138,8 @@ as 64 hex characters.
 ```
 PAIRREQ <hostId:8hex> <pubA:64hex> <label...>     Mac -> device   (~90 + label)
 PAIRPUB <pubB:64hex>                              device -> Mac   (72)
-PAIROK  <hmac:32hex>                              Mac -> device   (40)
-PAIRDONE <hostId:8hex>                            device -> Mac   (18)
+PAIROK  <hmac:32hex>                              Mac -> device   (40)   "the user clicked Match"
+PAIRDONE <hostId:8hex>                            device -> Mac   (18)   sent only after CONFIRM
 PAIRFAIL <reason>                                 device -> Mac
 ```
 
@@ -140,10 +151,12 @@ Mac, silence and impossibility look identical.
 ## User-visible flow
 
 **Device:** SETTINGS → Pairing → `PAIR NEW MAC` → a full-screen pairing panel showing the 6-digit
-code in `T_HERO`, the requesting Mac's label once one arrives, a countdown, and CANCEL.
+code in `T_HERO`, the requesting Mac's label once one arrives, a countdown, and **CONFIRM / CANCEL**.
+CONFIRM is inert until a request has actually arrived — there is nothing to confirm before that.
 
 **Mac:** menu bar → `Pair new device…` → a scan list of nearby `Deckhand-XXXX` → pick one → a dialog
-that takes the six digits → success or a named failure.
+showing **its own derived code** and asking whether the device shows the same, with Match / Don't
+match → success or a named failure. The user compares; nothing is typed.
 
 ## What this does not do
 
