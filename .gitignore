@@ -41,3 +41,6 @@ firmware/deckhand_display/build/
 
 # brainstorming visual companion
 .superpowers/
+
+# Superpowers worktrees (scratch; never committed)
+.worktrees/
