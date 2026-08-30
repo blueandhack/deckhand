@@ -132,6 +132,25 @@ const SET_CAPTIONS = ["THEME", "ALERTS", "MICROPHONE"];
 const HOME_SUMMARIES = ["Both links up   100%   -10 C", "100%   sleep OFF   LIGHT",
                         "OFF   volume HIGH   mic", "4 Macs   one may answer",
                         "calibrate, pairing, power"];
+// THE STATUS GROUP'S OWN STRINGS (board 2), hand-transcribed the way
+// HOME_SUMMARIES and P2_LABELS are, and each measured against the character count
+// its field is PADDED to rather than against a lane: a string longer than its pad
+// is a silent truncation mid-word, which reads as a wrong reading rather than as a
+// spill. Every one is the worst case its branch can produce.
+const ST_VERDICTS = ["Both links up", "Bluetooth only", "USB only", "No host"];
+const ST_BIGS = ["100%  4.20V", "no battery"];
+const ST_DETAILS = ["USB and Bluetooth, 9999s ago", "USB and Bluetooth, waiting",
+                    "nothing connected", "Deckhand-C114, 4 paired",
+                    "~119m left on battery", "charging, >=119m to full",
+                    "charging, topping up", "no battery fitted", "battery full",
+                    "on battery", "SoC -10.0 C", "SoC --"];
+const ST_HOST_LEFT = ["16000 B per tick", "no payload yet", "flush 999.9 ms"];
+const ST_HOST_RIGHT = ["up 99h 59m", "no Macs", "2 Macs"];
+// The PAIRING group's state line, all three branches. "not seen since boot" is the
+// one drawn when no hostLinks[] slot matches at all - there is no persisted
+// lastSeen on this device, so a Mac that has not been here THIS BOOT cannot be
+// dated and the row says so rather than inventing an age.
+const P3_SUBS = ["connected, 9999s ago", "last seen 999m ago", "not seen since boot"];
 // uiHint centres on the PANEL, not on the card, so these two are measured against
 // the panel width the way page 2's hints are.
 const SET_HINTS = ["AUTO = light 07:00 to 19:00", "beeps when a session needs input"];
@@ -448,179 +467,314 @@ for (const b of [1, 2]) {
     }
   }
 
-  // ================= SETTINGS page 0: the DEVICE and LINK cards =================
-  // BANDS ARE WHAT A ROW ACTUALLY PAINTS, at each board's OWN cell height - not at
-  // the 13px this file used to assume for both. Three different rectangles are in
-  // play and they are not interchangeable, which is why they come from named
-  // helpers now (geom-common.mjs) rather than from arithmetic inline here:
-  //   - tlBox: a plain drawString's opaque box, y..y+cellH-1
-  //   - mcBox: the same box under MC_DATUM, which centres on the ASCENT and so
-  //            sits floor(descent/2) rows LOW of a symmetric centre
-  //   - fieldBox: a drawIfChanged field, the UNION of its erase rect (which
-  //            centres on the CELL) and the drawString box inside it
-  // A connection row is drawConnRow(): fillRect(xRight-CONN_TEXT_W, y, CONN_TEXT_W,
-  // CONN_TEXT_H) plus a 13px dot at y+8; the battery reading is a fieldBox at
-  // y+DROW_BATT_VAL_DY; ID is a tlBox; the two Mac rows are fieldBoxes.
-  const devRows = [
-    ["label", tlBox(b, T_META, 6)],
-    ["bluetooth", [c.DROW_BT, c.DROW_BT + c.CONN_TEXT_H - 1]],
-    ["usb", [c.DROW_USB, c.DROW_USB + c.CONN_TEXT_H - 1]],
-    ["battery", (() => {
-      const lbl = tlBox(b, T_BODY, c.DROW_BATT);
-      const val = fieldBox(b, T_META, c.DROW_BATT + c.DROW_BATT_VAL_DY);
-      return [Math.min(lbl[0], val[0], c.DROW_BATT + 1), Math.max(lbl[1], val[1], c.DROW_BATT + 14)];
-    })()],
-    // THE DIE-TEMP ROW IS BOARD 2 ONLY - the ESP32-S3 has an internal temperature
-    // sensor and the plain ESP32 has no usable one, so DROW_TEMP exists in one
-    // header, the same shape as P2_MIC_Y and the LINK card. It mirrors the battery
-    // row's geometry exactly (T_BODY label indented past the dot column, T_META
-    // reading right-aligned at the same DROW_BATT_VAL_DY baseline offset) rather
-    // than inventing a second rhythm inside one card.
-    ...(c.DROW_TEMP === undefined ? [] : [["soc temp", (() => {
-      const lbl = tlBox(b, T_BODY, c.DROW_TEMP);
-      const val = fieldBox(b, T_META, c.DROW_TEMP + c.DROW_BATT_VAL_DY);
-      return [Math.min(lbl[0], val[0]), Math.max(lbl[1], val[1])];
-    })()]]),
-    ["device id", tlBox(b, T_META, c.DROW_ID)],
-    ["mac row 0", fieldBox(b, T_META, c.DROW_MAC0)],
-    ["mac row 1", fieldBox(b, T_META, c.DROW_MAC1)],
-  ];
-  // A LIST OF CARDS rather than one card inline, because page 0 is a stack: the
-  // walk below has to hold for every card on it, not just the first, and a second
-  // card whose row rhythm drifted from the one above it is the failure "the same
-  // style" has to be able to catch.
-  const cards = [["DEVICE", c.DEV_CARD_Y, c.DEV_CARD_H, devRows]];
-  // The LINK card is BOARD 2 ONLY (lastFlushUs() is a PanelShim accessor board 1
-  // does not have, and board 1's STATUS page has no room), so its constants exist
-  // in one header only - the same shape as P2_MIC_Y above.
-  if (c.LINK_CARD_H !== undefined) {
-    cards.push(["LINK", c.LINK_CARD_Y, c.LINK_CARD_H, [
+  // ================= SETTINGS page 0: the DEVICE card (board 1) =================
+  // BOARD 1 KEEPS THIS PAGE. Board 2's STATUS group replaced the DEVICE and LINK
+  // cards with three of its own and moved the per-Mac rows to Pairing, so it
+  // declares none of DEV_CARD_*, DROW_*, CONN_TEXT_* or MAC_ROW_W any more -
+  // running this arm there would compare against undefined and report NaN, which
+  // LOOKS like a layout failure and is a parse gap. The two arms are separate
+  // assertions, not one loop with holes in it, the same split page 1 already makes.
+  if (b === 1) {
+    // BANDS ARE WHAT A ROW ACTUALLY PAINTS, at each board's OWN cell height - not at
+    // the 13px this file used to assume for both. Three different rectangles are in
+    // play and they are not interchangeable, which is why they come from named
+    // helpers now (geom-common.mjs) rather than from arithmetic inline here:
+    //   - tlBox: a plain drawString's opaque box, y..y+cellH-1
+    //   - mcBox: the same box under MC_DATUM, which centres on the ASCENT and so
+    //            sits floor(descent/2) rows LOW of a symmetric centre
+    //   - fieldBox: a drawIfChanged field, the UNION of its erase rect (which
+    //            centres on the CELL) and the drawString box inside it
+    // A connection row is drawConnRow(): fillRect(xRight-CONN_TEXT_W, y, CONN_TEXT_W,
+    // CONN_TEXT_H) plus a 13px dot at y+8; the battery reading is a fieldBox at
+    // y+DROW_BATT_VAL_DY; ID is a tlBox; the two Mac rows are fieldBoxes.
+    const devRows = [
       ["label", tlBox(b, T_META, 6)],
-      ["host", fieldBox(b, T_META, c.LROW_HOST)],
-      ["payload", fieldBox(b, T_META, c.LROW_PAYLOAD)],
-      ["flush", fieldBox(b, T_META, c.LROW_FLUSH)],
-      ["uptime", fieldBox(b, T_META, c.LROW_UPTIME)],
-    ]]);
-  }
-  for (const [cname, cy, ch, rows] of cards) {
-    console.log(`  ${cname} card ${cy}..${cy + ch - 1} (h ${ch}):`);
-    for (const [n, [a, z]] of rows) console.log(`    ${n.padEnd(10)} +${a}..+${z}`);
-    for (let i = 1; i < rows.length; i++) {
-      const gap = rows[i][1][0] - rows[i - 1][1][1] - 1;
-      chk(gap >= 0, `${cname} card: ${rows[i - 1][0]} -> ${rows[i][0]} gap ${gap} (negative = a paint box eats its neighbour)`);
-    }
-    chk(rows[0][1][0] >= 2, `${cname} card: label starts +${rows[0][1][0]} inside the interior (border owns +0..+1)`);
-    const ceil = ch - 3, last = Math.max(...rows.map(x => x[1][1]));
-    chk(last <= ceil, `${cname} card: last band ends +${last} <= +${ceil} (2px border owns +${ch - 2}..+${ch - 1})`);
-    chk(cy + ch <= contentBottom, `${cname} card ends ${cy + ch} inside the region (${contentBottom})`);
-    chk(cy >= c.PAGE_TOP, `${cname} card starts ${cy}, at or below PAGE_TOP ${c.PAGE_TOP}`);
-  }
-  // THE WHOLE PAGE, which is what Task 8's card had to be paid for out of. Both
-  // cards plus their gaps against the region, and trailing air stated rather than
-  // implied: a card ending flush on contentBottom() reads as joined to the footer.
-  {
-    const lastCard = cards[cards.length - 1];
-    const pageEnd = lastCard[1] + lastCard[2];
-    const air = contentBottom - pageEnd;
-    console.log(`  page 0: ${cards.length} card(s) ${cards[0][1]}..${pageEnd - 1} of ${c.PAGE_TOP}..${contentBottom}, ${air}px trailing air`);
-    chk(air > 0, `page 0: last card ends ${pageEnd}, ${air}px above the footer (must be > 0)`);
-    if (cards.length > 1)
-      chk(cards[1][1] === cards[0][1] + cards[0][2] + c.SP_3,
-          `page 0: LINK card at ${cards[1][1]} == DEVICE (${cards[0][1]}) + ${cards[0][2]} + SP_3 ${c.SP_3}`);
-  }
-  {
-    // The battery reading is right-aligned and padded to 15 characters
-    // ("100% 4.20V ~99h"); "Battery" sits at CARD_X + PAD + 20.
-    const readingW = widthB(b, T_META, "100% 4.20V ~99h");
-    const xRight = c.CARD_X + c.CARD_W - c.PAD;
-    const labelEnd = c.CARD_X + c.PAD + 20 + widthB(b, T_BODY, "Battery");
-    chk(xRight - readingW > labelEnd, `battery reading ${readingW}px starts ${xRight - readingW}, "Battery" ends ${labelEnd}`);
-    // DROW_BATT_VAL_DY, CONSTRAINED - and stated as the SHARED BASELINE rather than
-    // as "the constant is 0", because that is the property a reader can see and it
-    // is the one that survives the edits this is guarding against. The band walk
-    // above cannot catch this on its own: the battery row is asserted as a UNION,
-    // so a stagger merely widens the band and shrinks a legal gap. A pitch re-tune
-    // moves both halves together and this stays quiet; restoring the old literal,
-    // or bumping it "for symmetry with board 1", fires. It also fires if either
-    // half's FONT changes, where a box-top or an is-it-zero test would not: both
-    // are TL_DATUM, so their tops are y and their baselines are y + ascent, and two
-    // faces with different ascents can share a top row while sitting visibly apart.
-    const battDyForBaseline = ascentB(b, T_BODY) - ascentB(b, T_META);
-    chk(c.DROW_BATT_VAL_DY === battDyForBaseline,
-        `DROW_BATT_VAL_DY ${c.DROW_BATT_VAL_DY} puts the reading on the "Battery" label's own baseline ` +
-        `(needs ${battDyForBaseline} = ascent ${ascentB(b, T_BODY)} - ${ascentB(b, T_META)})`);
-    // BATT_ROW_CACHE, the BOARD's constant - not the parsed array size, which now
-    // reads through a per-board name and would report one board's value for both.
-    chk(c.BATT_ROW_CACHE >= 16, `BATT_ROW_CACHE ${c.BATT_ROW_CACHE} holds 15 chars + NUL`);
-    // The trailing-label buffer, on BOTH boards: board 1 needs only the discharge
-    // label, whose widest is "~119m".
-    chk(c.BATT_LEFT_BYTES >= 6, `BATT_LEFT_BYTES ${c.BATT_LEFT_BYTES} holds "~119m" + NUL (6)`);
-    // BOARD 2 ALSO DRAWS THE CHARGING LABEL, whose widest is longer than the
-    // discharge one - and 20 bytes truncated it by exactly one character, which is
-    // the silent-cache failure this repo has now paid for several times. The bound
-    // is DERIVED here rather than transcribed: "topping up" only appears at or above
-    // BATT_CHG_KNEE_MV, and BATT_CHARGING only holds below BATT_FULL_MV, so the
-    // percentage in that band is what sets the length.
-    if (b === 2) {
-      let worstChg = "";
-      for (let mv = POWER_CONST.BATT_CHG_KNEE_MV; mv < POWER_CONST.BATT_FULL_MV; mv++) {
-        const s2 = `${pctFromMvJs(mv)}% ${Math.floor(mv / 1000)}.${String(Math.floor((mv % 1000) / 10)).padStart(2, "0")}V topping up`;
-        if (s2.length > worstChg.length) worstChg = s2;
+      ["bluetooth", [c.DROW_BT, c.DROW_BT + c.CONN_TEXT_H - 1]],
+      ["usb", [c.DROW_USB, c.DROW_USB + c.CONN_TEXT_H - 1]],
+      ["battery", (() => {
+        const lbl = tlBox(b, T_BODY, c.DROW_BATT);
+        const val = fieldBox(b, T_META, c.DROW_BATT + c.DROW_BATT_VAL_DY);
+        return [Math.min(lbl[0], val[0], c.DROW_BATT + 1), Math.max(lbl[1], val[1], c.DROW_BATT + 14)];
+      })()],
+      ["device id", tlBox(b, T_META, c.DROW_ID)],
+      ["mac row 0", fieldBox(b, T_META, c.DROW_MAC0)],
+      ["mac row 1", fieldBox(b, T_META, c.DROW_MAC1)],
+    ];
+    // A LIST OF CARDS rather than one card inline, because page 0 is a stack: the
+    // walk below has to hold for every card on it, not just the first, and a second
+    // card whose row rhythm drifted from the one above it is the failure "the same
+    // style" has to be able to catch.
+    const cards = [["DEVICE", c.DEV_CARD_Y, c.DEV_CARD_H, devRows]];
+    for (const [cname, cy, ch, rows] of cards) {
+      console.log(`  ${cname} card ${cy}..${cy + ch - 1} (h ${ch}):`);
+      for (const [n, [a, z]] of rows) console.log(`    ${n.padEnd(10)} +${a}..+${z}`);
+      for (let i = 1; i < rows.length; i++) {
+        const gap = rows[i][1][0] - rows[i - 1][1][1] - 1;
+        chk(gap >= 0, `${cname} card: ${rows[i - 1][0]} -> ${rows[i][0]} gap ${gap} (negative = a paint box eats its neighbour)`);
       }
-      chk(c.BATT_LEFT_BYTES >= "topping up".length + 1,
-          `BATT_LEFT_BYTES ${c.BATT_LEFT_BYTES} holds "topping up" + NUL (11)`);
-      chk(c.BATT_ROW_CACHE >= worstChg.length + 1,
-          `BATT_ROW_CACHE ${c.BATT_ROW_CACHE} holds the widest CHARGING row "${worstChg}" (${worstChg.length} chars) + NUL`);
-      const chgW = widthB(b, T_META, worstChg);
-      chk(xRight - chgW > labelEnd,
-          `charging row "${worstChg}" ${chgW}px starts ${xRight - chgW}, "Battery" ends ${labelEnd}`);
+      chk(rows[0][1][0] >= 2, `${cname} card: label starts +${rows[0][1][0]} inside the interior (border owns +0..+1)`);
+      const ceil = ch - 3, last = Math.max(...rows.map(x => x[1][1]));
+      chk(last <= ceil, `${cname} card: last band ends +${last} <= +${ceil} (2px border owns +${ch - 2}..+${ch - 1})`);
+      chk(cy + ch <= contentBottom, `${cname} card ends ${cy + ch} inside the region (${contentBottom})`);
+      chk(cy >= c.PAGE_TOP, `${cname} card starts ${cy}, at or below PAGE_TOP ${c.PAGE_TOP}`);
     }
-    // THE DIE-TEMP ROW. Asserted as PRESENT on board 2 rather than merely tolerated
-    // if absent: an #if that silently drops the row is exactly the failure this
-    // repo already paid for once with `#if BOARD_PANEL_INVERT` in panel_shim.cpp,
-    // where a text-matching test happily found a line the preprocessor was
-    // deleting. "-10.0 C" is the widest the reading can be over the sensor's
-    // configured range, and it is the DATA's width, so it is measured per board.
-    if (b === 2)
-      chk(c.DROW_TEMP !== undefined,
-          "board 2 declares DROW_TEMP - the S3 has a die sensor and the plain ESP32 has no usable one");
-    if (c.DROW_TEMP !== undefined) {
-      const tempW = widthB(b, T_META, "-10.0 C");
-      const tempLabelEnd = c.CARD_X + c.PAD + 20 + widthB(b, T_BODY, "SoC temp");
-      chk(xRight - tempW > tempLabelEnd,
-          `SoC temp reading ${tempW}px starts ${xRight - tempW}, "SoC temp" ends ${tempLabelEnd}`);
-      chk(+SET_CACHE.tempRowTextCache >= 8,
-          `tempRowTextCache ${SET_CACHE.tempRowTextCache} holds "-10.0 C" + NUL (8)`);
+    // THE WHOLE PAGE, which is what Task 8's card had to be paid for out of. Both
+    // cards plus their gaps against the region, and trailing air stated rather than
+    // implied: a card ending flush on contentBottom() reads as joined to the footer.
+    {
+      const lastCard = cards[cards.length - 1];
+      const pageEnd = lastCard[1] + lastCard[2];
+      const air = contentBottom - pageEnd;
+      console.log(`  page 0: ${cards.length} card(s) ${cards[0][1]}..${pageEnd - 1} of ${c.PAGE_TOP}..${contentBottom}, ${air}px trailing air`);
+      chk(air > 0, `page 0: last card ends ${pageEnd}, ${air}px above the footer (must be > 0)`);
     }
-    // CONN_TEXT_W/H, measured, and this is the assertion whose absence let a 100px
-    // box ship against a 104px string on board 2. The height must cover the CELL,
-    // because the row's own drawString paints a full cell of opaque background.
-    const notConn = widthB(b, T_BODY, "Not connected");
-    chk(notConn <= c.CONN_TEXT_W, `"Not connected" ${notConn}px inside drawConnRow's ${c.CONN_TEXT_W}px erase box`);
-    chk(c.CONN_TEXT_H >= lineHB(b, T_BODY), `CONN_TEXT_H ${c.CONN_TEXT_H} covers uiLineH(T_BODY) ${lineHB(b, T_BODY)}`);
-    const connLabelEnd = c.CARD_X + c.PAD + 20 + widthB(b, T_BODY, "Bluetooth");
-    chk(xRight - c.CONN_TEXT_W > connLabelEnd, `conn erase box starts ${xRight - c.CONN_TEXT_W}, "Bluetooth" ends ${connLabelEnd}`);
-    // A Mac row's erase box always reserves the icon slot, used or not, and
-    // renderMacLinkRows() sizes it from a MEASURED textWidth - so this multiplies
-    // by the BOARD'S advance, not by 6.
-    const macW = c.MAC_ROW_W * advanceB(b, T_META) + 4 + 13 + 2;
-    chk(c.CARD_X + c.PAD + macW < c.CARD_X + c.CARD_W - 2,
-        `mac row erase box ends ${c.CARD_X + c.PAD + macW} inside the card (${c.CARD_X + c.CARD_W - 2})`);
-    const macWorst = c.MAC_ROW_W + 1 + 2 + 1;   // padded text + \x01 + icon id + NUL
-    chk(+SET_CACHE.macRowCache >= macWorst, `macRowCache ${SET_CACHE.macRowCache} >= worst signature ${macWorst}`);
-    // THE LINK CARD's four values: each one's PADDED worst case measured against
-    // the label beside it, and its cache re-derived rather than read off the
-    // comment next to the declaration. A cache shorter than its padded string
-    // silently stops noticing changes past that point.
-    if (c.LINK_CARD_H !== undefined) {
-      const LINK = [["HOST", "9999s ago", "linkHostCache"], ["PAYLOAD", "16000 B", "linkPayloadCache"],
-                    ["FLUSH", "999.9 ms", "linkFlushCache"], ["UPTIME", "99h 59m", "linkUptimeCache"]];
-      for (const [label, worst, cache] of LINK) {
-        const vw = widthB(b, T_META, worst);
-        const lw = c.CARD_X + c.PAD + widthB(b, T_BODY, label);
-        chk(xRight - vw > lw, `LINK "${label}": value "${worst}" ${vw}px starts ${xRight - vw}, label ends ${lw}`);
-        chk(+SET_CACHE[cache] >= worst.length + 1, `${cache} ${SET_CACHE[cache]} >= "${worst}" + NUL (${worst.length + 1})`);
+    {
+      // The battery reading is right-aligned and padded to 15 characters
+      // ("100% 4.20V ~99h"); "Battery" sits at CARD_X + PAD + 20.
+      const readingW = widthB(b, T_META, "100% 4.20V ~99h");
+      const xRight = c.CARD_X + c.CARD_W - c.PAD;
+      const labelEnd = c.CARD_X + c.PAD + 20 + widthB(b, T_BODY, "Battery");
+      chk(xRight - readingW > labelEnd, `battery reading ${readingW}px starts ${xRight - readingW}, "Battery" ends ${labelEnd}`);
+      // DROW_BATT_VAL_DY, CONSTRAINED - and stated as the SHARED BASELINE rather than
+      // as "the constant is 0", because that is the property a reader can see and it
+      // is the one that survives the edits this is guarding against. The band walk
+      // above cannot catch this on its own: the battery row is asserted as a UNION,
+      // so a stagger merely widens the band and shrinks a legal gap. A pitch re-tune
+      // moves both halves together and this stays quiet; restoring the old literal,
+      // or bumping it "for symmetry with board 1", fires. It also fires if either
+      // half's FONT changes, where a box-top or an is-it-zero test would not: both
+      // are TL_DATUM, so their tops are y and their baselines are y + ascent, and two
+      // faces with different ascents can share a top row while sitting visibly apart.
+      const battDyForBaseline = ascentB(b, T_BODY) - ascentB(b, T_META);
+      chk(c.DROW_BATT_VAL_DY === battDyForBaseline,
+          `DROW_BATT_VAL_DY ${c.DROW_BATT_VAL_DY} puts the reading on the "Battery" label's own baseline ` +
+          `(needs ${battDyForBaseline} = ascent ${ascentB(b, T_BODY)} - ${ascentB(b, T_META)})`);
+      // BATT_ROW_CACHE, the BOARD's constant - not the parsed array size, which now
+      // reads through a per-board name and would report one board's value for both.
+      chk(c.BATT_ROW_CACHE >= 16, `BATT_ROW_CACHE ${c.BATT_ROW_CACHE} holds 15 chars + NUL`);
+      // The trailing-label buffer, on BOTH boards: board 1 needs only the discharge
+      // label, whose widest is "~119m".
+      chk(c.BATT_LEFT_BYTES >= 6, `BATT_LEFT_BYTES ${c.BATT_LEFT_BYTES} holds "~119m" + NUL (6)`);
+      // CONN_TEXT_W/H, measured, and this is the assertion whose absence let a 100px
+      // box ship against a 104px string on board 2. The height must cover the CELL,
+      // because the row's own drawString paints a full cell of opaque background.
+      const notConn = widthB(b, T_BODY, "Not connected");
+      chk(notConn <= c.CONN_TEXT_W, `"Not connected" ${notConn}px inside drawConnRow's ${c.CONN_TEXT_W}px erase box`);
+      chk(c.CONN_TEXT_H >= lineHB(b, T_BODY), `CONN_TEXT_H ${c.CONN_TEXT_H} covers uiLineH(T_BODY) ${lineHB(b, T_BODY)}`);
+      const connLabelEnd = c.CARD_X + c.PAD + 20 + widthB(b, T_BODY, "Bluetooth");
+      chk(xRight - c.CONN_TEXT_W > connLabelEnd, `conn erase box starts ${xRight - c.CONN_TEXT_W}, "Bluetooth" ends ${connLabelEnd}`);
+      // A Mac row's erase box always reserves the icon slot, used or not, and
+      // renderMacLinkRows() sizes it from a MEASURED textWidth - so this multiplies
+      // by the BOARD'S advance, not by 6.
+      const macW = c.MAC_ROW_W * advanceB(b, T_META) + 4 + 13 + 2;
+      chk(c.CARD_X + c.PAD + macW < c.CARD_X + c.CARD_W - 2,
+          `mac row erase box ends ${c.CARD_X + c.PAD + macW} inside the card (${c.CARD_X + c.CARD_W - 2})`);
+      const macWorst = c.MAC_ROW_W + 1 + 2 + 1;   // padded text + \x01 + icon id + NUL
+      chk(+SET_CACHE.macRowCache >= macWorst, `macRowCache ${SET_CACHE.macRowCache} >= worst signature ${macWorst}`);
+    }
+  }
+
+  // ================= SETTINGS: the STATUS group (board 2) =================
+  // THREE CARDS, and they are asserted the same way page 0's stack is: as CLEAR
+  // BOXES rather than glyphs. Every value here goes through drawIfChanged, whose
+  // erase rect is one row taller than the cell at each end - which is why the
+  // printed gaps are not the differences between the ST_*_DY constants.
+  if (b === 2) {
+    const stCards = [["CONNECTION", c.ST_CONN_Y, c.ST_CONN_H],
+                     ["POWER", c.ST_PWR_Y, c.ST_PWR_H],
+                     ["HOST", c.ST_HOST_Y, c.ST_HOST_H]];
+    const stEnd = stCards[2][1] + stCards[2][2];
+    console.log(`  Status: ${stCards.map(x => `${x[0]} ${x[1]}..${x[1] + x[2] - 1}`).join(", ")}, ` +
+                `${contentBottom - stEnd}px trailing air`);
+    chk(stCards[0][1] >= c.PAGE_TOP,
+        `Status: the first card starts ${stCards[0][1]}, at or below PAGE_TOP ${c.PAGE_TOP}`);
+    for (let i = 1; i < stCards.length; i++)
+      chk(stCards[i][1] >= stCards[i - 1][1] + stCards[i - 1][2],
+          `Status card ${stCards[i][0]} starts ${stCards[i][1]}, clear of ${stCards[i - 1][0]} ` +
+          `(ends ${stCards[i - 1][1] + stCards[i - 1][2] - 1})`);
+    // Trailing air stated rather than implied: a card ending flush on
+    // contentBottom() reads as joined to the footer, which board 1 shipped once.
+    chk(contentBottom - stEnd > 0,
+        `Status: the last card ends ${stEnd}, ${contentBottom - stEnd}px above the footer (must be > 0)`);
+    // CONNECTION and POWER share ONE stack, so it is asserted once against BOTH
+    // heights - that is what makes them the same component rather than two layouts
+    // that happen to agree today.
+    const stStack = [["caption", tlBox(b, T_META, c.ST_CAP_DY)],
+                     ["headline", fieldBox(b, T_HEAD, c.ST_BIG_DY)],
+                     ["detail 1", fieldBox(b, T_BODY, c.ST_L1_DY)],
+                     ["detail 2", fieldBox(b, T_BODY, c.ST_L2_DY)]];
+    const hostStack = [["caption", tlBox(b, T_META, c.ST_CAP_DY)],
+                       ["row 1", fieldBox(b, T_BODY, c.ST_HOST_R1_DY)],
+                       ["row 2", fieldBox(b, T_BODY, c.ST_HOST_R2_DY)]];
+    for (const [cname, ch, rows] of [["CONNECTION", c.ST_CONN_H, stStack], ["POWER", c.ST_PWR_H, stStack],
+                                     ["HOST", c.ST_HOST_H, hostStack]]) {
+      for (const [n, [a, z]] of rows) console.log(`    ${cname} ${n.padEnd(9)} +${a}..+${z}`);
+      for (let i = 1; i < rows.length; i++)
+        chk(rows[i][1][0] > rows[i - 1][1][1],
+            `${cname} card: ${rows[i - 1][0]} (+${rows[i - 1][1][1]}) and ${rows[i][0]} (+${rows[i][1][0]}) share no pixel row`);
+      chk(rows[0][1][0] >= c.BORDER_CARD,
+          `${cname} card: the caption starts +${rows[0][1][0]}, clear of the ${c.BORDER_CARD}px top border`);
+      const last = Math.max(...rows.map(x => x[1][1]));
+      chk(last <= ch - c.BORDER_CARD - 1,
+          `${cname} card: the last line's clear box ends +${last} <= +${ch - c.BORDER_CARD - 1} ` +
+          `(the border owns +${ch - c.BORDER_CARD}..+${ch - 1})`);
+    }
+    // EVERY FIELD IS PADDED, so what has to fit is the PAD - not whichever string
+    // happens to be longest today. Ink must stop inside the card's own 2px border,
+    // because drawString paints an opaque box and would rub the border out.
+    {
+      const inkR = c.CARD_X + c.CARD_W - c.BORDER_CARD - 1;
+      const x0 = c.CARD_X + c.PAD;
+      for (const [n, chars, id] of [["verdict", c.ST_VERDICT_CHARS, T_HEAD],
+                                    ["headline", c.ST_BIG_CHARS, T_HEAD],
+                                    ["detail", c.ST_LINE_CHARS, T_BODY]]) {
+        const w = chars * advanceB(b, id);
+        chk(x0 + w - 1 <= inkR,
+            `Status ${n}: ${chars} padded chars = ${w}px ends ${x0 + w - 1}, inside the card's border at ${inkR + 1}`);
       }
+      // The HOST card's two columns, left-aligned and right-aligned into one row.
+      const hostL = x0 + c.ST_HOST_L_CHARS * advanceB(b, T_BODY);
+      const hostR = c.CARD_X + c.CARD_W - c.PAD - c.ST_HOST_R_CHARS * advanceB(b, T_BODY);
+      console.log(`    HOST columns: left ends ${hostL - 1}, right starts ${hostR}`);
+      chk(hostL <= hostR,
+          `HOST card: the left column ends ${hostL - 1}, clear of the right column at ${hostR}`);
+    }
+    // Every string this page can COMPOSE, at its own worst case, measured against
+    // the pad it is truncated to - a string longer than its pad is not a spill, it
+    // is a silent truncation mid-word, which reads as a wrong reading.
+    for (const s of ST_VERDICTS)
+      chk(s.length <= c.ST_VERDICT_CHARS,
+          `Status verdict "${s}" is ${s.length} of the ${c.ST_VERDICT_CHARS} characters it pads to`);
+    for (const s of ST_BIGS)
+      chk(s.length <= c.ST_BIG_CHARS,
+          `POWER headline "${s}" is ${s.length} of the ${c.ST_BIG_CHARS} characters it pads to`);
+    for (const s of ST_DETAILS)
+      chk(s.length <= c.ST_LINE_CHARS,
+          `Status detail "${s}" is ${s.length} of the ${c.ST_LINE_CHARS} characters it pads to`);
+    for (const s of ST_HOST_LEFT)
+      chk(s.length <= c.ST_HOST_L_CHARS,
+          `HOST left "${s}" is ${s.length} of the ${c.ST_HOST_L_CHARS} characters it pads to`);
+    for (const s of ST_HOST_RIGHT)
+      chk(s.length <= c.ST_HOST_R_CHARS,
+          `HOST right "${s}" is ${s.length} of the ${c.ST_HOST_R_CHARS} characters it pads to`);
+    // THE ESTIMATE LINE'S WORST CASE IS DERIVED FROM THE LABELS, not transcribed:
+    // the sentence is built AROUND battLeftLabel()/battChargeLabel()'s own output
+    // precisely so "~" (about) and ">=" (at least - a FLOOR, because the charge fit
+    // extrapolates through the CV knee) are never rendered as one another, so the
+    // labels are what set the width.
+    {
+      const dis = ["~119m", "~99h"], chg = ["topping up", ">=119m", ">=99h"];
+      const estWorst = Math.max(...dis.map(l => `${l} left on battery`.length),
+                                ...chg.map(l => l[0] === ">" ? `charging, ${l} to full`.length
+                                                             : `charging, ${l}`.length));
+      chk(c.ST_LINE_CHARS >= estWorst,
+          `ST_LINE_CHARS ${c.ST_LINE_CHARS} holds the widest runtime estimate (${estWorst} chars)`);
+      const labelWorst = [...dis, ...chg].reduce((a, l) => l.length > a.length ? l : a, "");
+      chk(c.BATT_LEFT_BYTES >= labelWorst.length + 1,
+          `BATT_LEFT_BYTES ${c.BATT_LEFT_BYTES} holds "${labelWorst}" + NUL (${labelWorst.length + 1})`);
+    }
+    // THE CACHES ARE PARSED FROM THEIR DECLARATIONS, not restated: each must be the
+    // header's own *_BYTES for the field it holds, and that constant must hold the
+    // pad plus its NUL. A cache shorter than its padded string silently stops
+    // noticing changes past its end.
+    {
+      const CACHES = [["stVerdictCache", "ST_VERDICT_BYTES", c.ST_VERDICT_BYTES, c.ST_VERDICT_CHARS],
+                      ["stLinksCache", "ST_LINE_BYTES", c.ST_LINE_BYTES, c.ST_LINE_CHARS],
+                      ["stIdCache", "ST_LINE_BYTES", c.ST_LINE_BYTES, c.ST_LINE_CHARS],
+                      ["stLeftCache", "ST_LINE_BYTES", c.ST_LINE_BYTES, c.ST_LINE_CHARS],
+                      // The die-temp line is one of the POWER card's details now, so
+                      // it pads and caches like the others rather than carrying a
+                      // size of its own.
+                      ["tempRowTextCache", "ST_LINE_BYTES", c.ST_LINE_BYTES, c.ST_LINE_CHARS],
+                      ["stPayloadCache", "ST_HOST_L_BYTES", c.ST_HOST_L_BYTES, c.ST_HOST_L_CHARS],
+                      ["stFlushCache", "ST_HOST_L_BYTES", c.ST_HOST_L_BYTES, c.ST_HOST_L_CHARS],
+                      ["stUptimeCache", "ST_HOST_R_BYTES", c.ST_HOST_R_BYTES, c.ST_HOST_R_CHARS],
+                      ["stMacsCache", "ST_HOST_R_BYTES", c.ST_HOST_R_BYTES, c.ST_HOST_R_CHARS]];
+      for (const [cache, token, bytes, chars] of CACHES) {
+        chk(SET_CACHE[cache] === token, `${cache} is declared [${SET_CACHE[cache]}], i.e. the header's own ${token}`);
+        chk(bytes >= chars + 1, `${token} ${bytes} holds ${chars} chars + NUL`);
+      }
+      // battRowTextCache is SHARED with board 1 and sized per board, because the two
+      // draw different strings: board 1's row carries the estimate on the same line,
+      // board 2's POWER card gives it a line of its own.
+      chk(c.BATT_ROW_CACHE >= c.ST_BIG_CHARS + 1,
+          `BATT_ROW_CACHE ${c.BATT_ROW_CACHE} holds the POWER headline's ${c.ST_BIG_CHARS} chars + NUL`);
+    }
+  }
+
+  // ================= SETTINGS: the PAIRING group (board 2) =================
+  if (b === 2) {
+    const pairEnd = c.P3_LIST_Y + (MAX_HOSTS - 1) * c.P3_ROW_STEP + c.P3_ROW_H - 1;
+    console.log(`  Pairing: ANY at ${c.P3_ANY_Y}, ${MAX_HOSTS} Mac cards ${c.P3_LIST_Y}..${pairEnd} of ${contentBottom}`);
+    chk(c.P3_ANY_CAP_Y >= c.PAGE_TOP,
+        `Pairing: the first caption is at ${c.P3_ANY_CAP_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
+    // A caption's own text box must clear the control it heads - the same
+    // constraint the DISPLAY and SOUND groups' captions answer to.
+    chk(c.P3_ANY_CAP_Y + lineHB(b, T_META) - 1 < c.P3_ANY_Y,
+        `Pairing: "ANSWER PROMPTS FROM" ends ${c.P3_ANY_CAP_Y + lineHB(b, T_META) - 1}, clear of the ANY row at ${c.P3_ANY_Y}`);
+    chk(c.P3_LIST_CAP_Y >= c.P3_ANY_Y + c.H_ROW,
+        `Pairing: "PAIRED MACS" at ${c.P3_LIST_CAP_Y}, clear of the ANY row (ends ${c.P3_ANY_Y + c.H_ROW - 1})`);
+    chk(c.P3_LIST_CAP_Y + lineHB(b, T_META) - 1 < c.P3_LIST_Y,
+        `Pairing: "PAIRED MACS" ends ${c.P3_LIST_CAP_Y + lineHB(b, T_META) - 1}, clear of the first card at ${c.P3_LIST_Y}`);
+    chk(pairEnd < contentBottom, `Pairing: ${MAX_HOSTS} Macs end ${pairEnd}, inside the region (${contentBottom})`);
+    chk(c.P3_ROW_STEP >= c.P3_ROW_H, `Pairing: rows do not overlap (step ${c.P3_ROW_STEP} >= height ${c.P3_ROW_H})`);
+    chk(c.P3_ROW_H >= c.TAP_MIN, `a pairing row is a touch target: ${c.P3_ROW_H} >= TAP_MIN ${c.TAP_MIN}`);
+    chk(c.P3_X_W >= 40, `the "forget" x zone is ${c.P3_X_W}px wide`);
+    // THE ROW'S OWN STACK. The name is a plain drawString (tlBox); the state line
+    // goes through drawIfChanged (fieldBox, a row taller at each end).
+    {
+      const nameBox = tlBox(b, T_BODY, c.P3_ROW_NAME_DY);
+      const subBox = fieldBox(b, T_BODY, c.P3_ROW_SUB_DY);
+      console.log(`    pairing row: name +${nameBox[0]}..+${nameBox[1]}, state +${subBox[0]}..+${subBox[1]} of ${c.P3_ROW_H}`);
+      chk(nameBox[0] >= c.BORDER_CARD,
+          `pairing row: the name starts +${nameBox[0]}, clear of the ${c.BORDER_CARD}px top border`);
+      chk(nameBox[1] < subBox[0],
+          `pairing row: the name (+${nameBox[1]}) and the state line (+${subBox[0]}) share no pixel row`);
+      chk(subBox[1] <= c.P3_ROW_H - c.BORDER_CARD - 1,
+          `pairing row: the state line's clear box ends +${subBox[1]} <= +${c.P3_ROW_H - c.BORDER_CARD - 1}`);
+      // THE DOT TAKES NO y OF ITS OWN - it is centred on the name line, the same
+      // "the icon's y IS its neighbouring text's y" rule every icon-beside-text
+      // surface here uses - so this measures where that puts drawConnDot's own
+      // fillRect (cy-r-1 .. cy+r+1).
+      const dotCy = c.P3_ROW_NAME_DY + Math.floor(lineHB(b, T_BODY) / 2);
+      chk(dotCy - c.P3_ROW_DOT_R - 1 >= c.BORDER_CARD && dotCy + c.P3_ROW_DOT_R + 1 <= c.P3_ROW_H - c.BORDER_CARD - 1,
+          `pairing row: the live dot's box +${dotCy - c.P3_ROW_DOT_R - 1}..+${dotCy + c.P3_ROW_DOT_R + 1} inside the card's border`);
+      chk(c.P3_ROW_TEXT_DX > 2 * c.P3_ROW_DOT_R + 1,
+          `pairing row: the text column at +${c.P3_ROW_TEXT_DX} clears the dot's box (ends +${2 * c.P3_ROW_DOT_R + 1})`);
+    }
+    // WIDTHS. The state line is padded, so what has to fit is the pad; the "x" zone
+    // is what it must stop short of, since a drawString's opaque box would
+    // otherwise erase the glyph that forgets this Mac.
+    {
+      const textX = c.CARD_X + c.PAD + c.P3_ROW_TEXT_DX;
+      const subW = c.P3_SUB_CHARS * advanceB(b, T_BODY);
+      const xZoneL = c.CARD_X + c.CARD_W - c.P3_X_W;
+      console.log(`    pairing state line ${c.P3_SUB_CHARS} chars = ${subW}px, ${textX}..${textX + subW - 1} against the x zone at ${xZoneL}`);
+      chk(textX + subW - 1 < xZoneL,
+          `pairing row: the state line ends ${textX + subW - 1}, clear of the "x" zone at ${xZoneL}`);
+      for (const s of P3_SUBS)
+        chk(s.length <= c.P3_SUB_CHARS,
+            `pairing state "${s}" is ${s.length} of the ${c.P3_SUB_CHARS} characters it pads to`);
+      chk(SET_CACHE.p3SubCache === "P3_SUB_BYTES",
+          `p3SubCache is declared [${SET_CACHE.p3SubCache}], i.e. the header's own P3_SUB_BYTES`);
+      chk(c.P3_SUB_BYTES >= c.P3_SUB_CHARS + 1,
+          `P3_SUB_BYTES ${c.P3_SUB_BYTES} holds ${c.P3_SUB_CHARS} chars + NUL`);
+      // THE "ONLY" TAG KEEPS ITS rightInset, which is the whole reason that
+      // parameter exists: both it and the "x" are right-anchored, and without the
+      // inset they were drawn on top of each other.
+      const tagX = c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2);
+      const xGlyphL = c.CARD_X + c.CARD_W - Math.floor(c.P3_X_W / 2) - Math.floor(widthB(b, T_HEAD, "x") / 2);
+      chk(tagX < xGlyphL, `pairing row: the ONLY tag ends ${tagX}, clear of the "x" at ${xGlyphL}`);
+      // The name is fitText'd into whatever is left, so what has to be asserted is
+      // that anything is left: a lane too short for a useful name would show every
+      // Mac as "..." with the disambiguating suffix still attached.
+      const nameLane = tagX - widthB(b, T_META, "ONLY") - c.SP_2 - textX;
+      chk(nameLane >= 8 * advanceB(b, T_BODY),
+          `pairing row: the name lane is ${nameLane}px beside an ONLY tag, at least 8 characters`);
+      // The forget glyph's own ink, MC_DATUM at the row's middle.
+      const [xt, xb] = mcBox(b, T_HEAD, Math.floor(c.P3_ROW_H / 2));
+      chk(xt >= c.BORDER_CARD && xb <= c.P3_ROW_H - c.BORDER_CARD - 1,
+          `pairing row: the "x" ink +${xt}..+${xb} inside the card's border`);
     }
   }
 
@@ -887,38 +1041,44 @@ for (const b of [1, 2]) {
     }
   }
 
-  // ================= SETTINGS page 3: paired Macs =================
-  {
-    const last = c.P3_LIST_Y + (MAX_HOSTS - 1) * (c.H_ROW + c.SP_1) + c.H_ROW;
-    console.log(`  page 3: ANY at ${c.P3_ANY_Y}, ${MAX_HOSTS} Macs end ${last} of ${contentBottom}`);
-    chk(last <= contentBottom, `page 3: ANY + ${MAX_HOSTS} Macs end ${last} inside the region (${contentBottom})`);
-    chk(c.H_ROW >= c.TAP_MIN, `list row ${c.H_ROW} >= TAP_MIN ${c.TAP_MIN}`);
-    // The ANY MAC row sits above the list and nothing separated the two: only the
-    // list's own end was bounded, so P3_ANY_Y and P3_LIST_Y were both unguarded and
-    // the first Mac row could have been drawn straight over "ANY MAC".
-    chk(c.P3_ANY_Y >= c.PAGE_TOP, `page 3: ANY row at ${c.P3_ANY_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
-    chk(c.P3_LIST_Y >= c.P3_ANY_Y + c.H_ROW + c.SP_1,
-        `page 3: list starts ${c.P3_LIST_Y}, clear of the ANY row (${c.P3_ANY_Y}..${c.P3_ANY_Y + c.H_ROW - 1}) plus SP_1`);
-    chk(c.P3_X_W >= 40, `the "forget" x zone is ${c.P3_X_W}px wide`);
-    // uiListRow's LABEL LANE, which nothing measured: the label is drawn at x+SP_3
-    // with NO fitText, and the "ONLY" tag is right-aligned to x+w-rightInset where
-    // drawHostsPageStatic passes P3_X_W + SP_2. hosts[].label is char[20], and the
-    // row prepends "\xB7 ", so the widest row is 21 characters.
-    const rowStr = "\xB7 " + "M".repeat(HOST_LABEL_MAX);
-    const rowW = widthB(b, 2, rowStr);
-    const tagX = c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2) - widthB(b, T_META, "ONLY");
-    chk(c.CARD_X + c.SP_3 + rowW < tagX,
-        `page 3: widest row (${rowStr.length} chars, ${rowW}px) ends ${c.CARD_X + c.SP_3 + rowW}, clear of the ONLY tag at ${tagX}`);
-    // The tag's own right edge against the "x", which is drawn MC at
-    // CARD_X + CARD_W - P3_X_W/2 - that is the overlap rightInset exists to prevent.
-    const xGlyphL = c.CARD_X + c.CARD_W - Math.floor(c.P3_X_W / 2) - Math.floor(widthB(b, 2, "x") / 2);
-    chk(c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2) < xGlyphL,
-        `page 3: ONLY tag ends ${c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2)}, clear of the "x" at ${xGlyphL}`);
-    // The row's own label box, MC-biased low like every other centred label.
-    {
-      const [t0, t1] = mcBox(b, 2, Math.floor(c.H_ROW / 2));
-      chk(t0 >= 0 && t1 <= c.H_ROW - 1, `page 3: row label box +${t0}..+${t1} inside the ${c.H_ROW}px row`);
-    }
+  // ================= SETTINGS page 3: paired Macs (board 1) =================
+  // BOARD 1 ONLY. Board 2's Pairing group is two captions and a list of two-line
+  // CARDS at P3_ROW_STEP, so nothing here derives from H_ROW + SP_1 any more - and
+  // an assertion that still RESOLVES on the other board is worse than one that
+  // fails there: at board 2's own P3_LIST_Y the row walk below passes while
+  // measuring a layout that board no longer draws. Board 2's arm is under the
+  // STATUS group above.
+  if (b === 1) {
+      const last = c.P3_LIST_Y + (MAX_HOSTS - 1) * (c.H_ROW + c.SP_1) + c.H_ROW;
+      console.log(`  page 3: ANY at ${c.P3_ANY_Y}, ${MAX_HOSTS} Macs end ${last} of ${contentBottom}`);
+      chk(last <= contentBottom, `page 3: ANY + ${MAX_HOSTS} Macs end ${last} inside the region (${contentBottom})`);
+      chk(c.H_ROW >= c.TAP_MIN, `list row ${c.H_ROW} >= TAP_MIN ${c.TAP_MIN}`);
+      // The ANY MAC row sits above the list and nothing separated the two: only the
+      // list's own end was bounded, so P3_ANY_Y and P3_LIST_Y were both unguarded and
+      // the first Mac row could have been drawn straight over "ANY MAC".
+      chk(c.P3_ANY_Y >= c.PAGE_TOP, `page 3: ANY row at ${c.P3_ANY_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
+      chk(c.P3_LIST_Y >= c.P3_ANY_Y + c.H_ROW + c.SP_1,
+          `page 3: list starts ${c.P3_LIST_Y}, clear of the ANY row (${c.P3_ANY_Y}..${c.P3_ANY_Y + c.H_ROW - 1}) plus SP_1`);
+      chk(c.P3_X_W >= 40, `the "forget" x zone is ${c.P3_X_W}px wide`);
+      // uiListRow's LABEL LANE, which nothing measured: the label is drawn at x+SP_3
+      // with NO fitText, and the "ONLY" tag is right-aligned to x+w-rightInset where
+      // drawHostsPageStatic passes P3_X_W + SP_2. hosts[].label is char[20], and the
+      // row prepends "\xB7 ", so the widest row is 21 characters.
+      const rowStr = "\xB7 " + "M".repeat(HOST_LABEL_MAX);
+      const rowW = widthB(b, 2, rowStr);
+      const tagX = c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2) - widthB(b, T_META, "ONLY");
+      chk(c.CARD_X + c.SP_3 + rowW < tagX,
+          `page 3: widest row (${rowStr.length} chars, ${rowW}px) ends ${c.CARD_X + c.SP_3 + rowW}, clear of the ONLY tag at ${tagX}`);
+      // The tag's own right edge against the "x", which is drawn MC at
+      // CARD_X + CARD_W - P3_X_W/2 - that is the overlap rightInset exists to prevent.
+      const xGlyphL = c.CARD_X + c.CARD_W - Math.floor(c.P3_X_W / 2) - Math.floor(widthB(b, 2, "x") / 2);
+      chk(c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2) < xGlyphL,
+          `page 3: ONLY tag ends ${c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2)}, clear of the "x" at ${xGlyphL}`);
+      // The row's own label box, MC-biased low like every other centred label.
+      {
+        const [t0, t1] = mcBox(b, 2, Math.floor(c.H_ROW / 2));
+        chk(t0 >= 0 && t1 <= c.H_ROW - 1, `page 3: row label box +${t0}..+${t1} inside the ${c.H_ROW}px row`);
+      }
   }
 
   // ================= SETTINGS: the confirm dialog =================

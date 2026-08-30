@@ -185,7 +185,192 @@ void renderSettingsHome() {
   }
 }
 #endif
-// ----- Page 0: STATUS -----
+// ----- Page 0 / the STATUS group -----
+#if BOARD_SETTINGS_HOME
+// THREE CARDS (board 2). board_es3c35p.h's ST_* section carries the geometry and
+// the reasoning; what matters here is the split of labour. The two facts you came
+// for - is the host talking to me, and how is the battery - LEAD their card as a
+// T_HEAD line with their detail dimmed under them, and the four diagnostics that
+// used to be a card of their own collapse into two columns at the foot. The
+// per-Mac rows are not here at all any more: they are on the Pairing group, where
+// the Macs already are.
+//
+// Only the cards and their captions are static; every value below is live and
+// goes through renderStatusPage()'s change-only fields.
+void drawStatusPageStatic() {
+  uiCard(CARD_X, ST_CONN_Y, CARD_W, ST_CONN_H);
+  uiCard(CARD_X, ST_PWR_Y,  CARD_W, ST_PWR_H);
+  uiCard(CARD_X, ST_HOST_Y, CARD_W, ST_HOST_H);
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("CONNECTION", CARD_X + PAD, ST_CONN_Y + ST_CAP_DY);
+  tft.drawString("POWER",      CARD_X + PAD, ST_PWR_Y  + ST_CAP_DY);
+  tft.drawString("HOST",       CARD_X + PAD, ST_HOST_Y + ST_CAP_DY);
+}
+void renderStatusPage() {
+  char buf[40];
+  const int xLeft  = CARD_X + PAD;
+  const int xRight = CARD_X + CARD_W - PAD;
+
+  // ---- CONNECTION: the verdict, then which transports and how stale ----
+  bool bt = bleConnected, usb = usbLinkActive();
+  // The PHRASE names the state on its own - in greyscale, and to a colour-blind
+  // eye - and the colour is an accent on it. Same rule as HOME's Status summary,
+  // which this line is the long form of.
+  const char* verdict = (bt && usb) ? "Both links up"
+                      : bt          ? "Bluetooth only"
+                      : usb         ? "USB only"
+                                    : "No host";
+  uint16_t vcol = (bt && usb) ? COLOR_GOOD : COLOR_WARN;
+  snprintf(buf, sizeof(buf), "%s", verdict);
+  padTo(buf, sizeof(buf), ST_VERDICT_CHARS);
+  // THE COLOUR IS CACHED BESIDE THE TEXT AND BUSTS IT, and here that is not a
+  // theoretical guard: the verdict describes the LINKS while the colour describes
+  // whether both are up, so "Bluetooth only" holds its string across every flip it
+  // can make - and drawIfChanged compares text only.
+  if (vcol != stVerdictColorCache) { stVerdictColorCache = vcol; stVerdictCache[0] = '\0'; }
+  drawIfChanged(stVerdictCache, sizeof(stVerdictCache), buf, xLeft,
+                ST_CONN_Y + ST_BIG_DY, T_HEAD, 1, vcol, COLOR_CARD);
+  {
+    const char* links = (bt && usb) ? "USB and Bluetooth"
+                      : bt          ? "Bluetooth"
+                      : usb         ? "USB"
+                                    : "nothing connected";
+    // The age is the same fact the footer's "Xs ago" reports, capped at 9999s so
+    // the padded width cannot grow past what ST_LINE_CHARS was derived for. Before
+    // the first line arrives it says "waiting" rather than "0s ago": 0 is a
+    // measurement and "never measured" is not, the rule the Codex row follows.
+    // With NEITHER link up there is no age worth stating, so the phrase stands
+    // alone - "nothing connected, 12s ago" would read as a claim about 12s ago.
+    if (!bt && !usb) snprintf(buf, sizeof(buf), "%s", links);
+    else if (!everReceived) snprintf(buf, sizeof(buf), "%s, waiting", links);
+    else {
+      unsigned long age = (millis() - lastRxMillis) / 1000;
+      if (age > 9999) age = 9999;
+      snprintf(buf, sizeof(buf), "%s, %lus ago", links, age);
+    }
+    padTo(buf, sizeof(buf), ST_LINE_CHARS);
+    drawIfChanged(stLinksCache, sizeof(stLinksCache), buf, xLeft,
+                  ST_CONN_Y + ST_L1_DY, T_BODY, 1, COLOR_LABEL, COLOR_CARD);
+  }
+  // Who this device IS, and how many Macs it will answer. Both change only on a
+  // pairing event, but they are drawn through the same change-only field as
+  // everything else here rather than being painted with the card: a value on the
+  // static side is a value that goes stale silently.
+  if (hostCount == 0)      snprintf(buf, sizeof(buf), "%s, unpaired", deviceName);
+  else if (hostCount == 1) snprintf(buf, sizeof(buf), "%s, 1 paired", deviceName);
+  else                     snprintf(buf, sizeof(buf), "%s, %d paired", deviceName, hostCount);
+  padTo(buf, sizeof(buf), ST_LINE_CHARS);
+  drawIfChanged(stIdCache, sizeof(stIdCache), buf, xLeft,
+                ST_CONN_Y + ST_L2_DY, T_BODY, 1, COLOR_LABEL, COLOR_CARD);
+
+  // ---- POWER: the reading, the estimate, the die temp ----
+  BattState bst = batteryState();
+  int pct = batteryPresent() ? batteryPct() : -1;
+  if (bst == BATT_NONE) snprintf(buf, sizeof(buf), "no battery");
+  else snprintf(buf, sizeof(buf), "%d%%  %d.%02dV", pct, batteryMv / 1000, (batteryMv % 1000) / 10);
+  padTo(buf, sizeof(buf), ST_BIG_CHARS);
+  // Same level colour as the footer pill - the two show the same reading, so they
+  // must not disagree about how healthy it is - and cache-busted on a flip,
+  // because plugging in changes the colour while "42%  3.85V" stays identical.
+  uint16_t rowCol = (bst == BATT_NONE) ? COLOR_LABEL : colorForBatteryState(pct, bst);
+  if (rowCol != battRowColorCache) { battRowColorCache = rowCol; battRowTextCache[0] = '\0'; }
+  drawIfChanged(battRowTextCache, sizeof(battRowTextCache), buf, xLeft,
+                ST_PWR_Y + ST_BIG_DY, T_HEAD, 1, rowCol, COLOR_CARD);
+  {
+    // THE LABEL IS DRAWN VERBATIM, and the sentence is built AROUND it rather than
+    // translating it. battLeftLabel() renders "~" (about) and battChargeLabel()
+    // ">=" (at LEAST - the fit is taken below the CV knee and extrapolates through
+    // it, so the figure is a floor). Rendering either as the other, or as prose
+    // that flattens the two into one word, tells the reader the charge will finish
+    // sooner than it will. An empty label means "not measurable yet", which is a
+    // different claim from a number and gets a different sentence, never a
+    // placeholder duration.
+    char left[BATT_LEFT_BYTES] = "";
+    if (bst == BATT_DISCHARGING) battLeftLabel(left, sizeof(left), battMinutesLeft());
+    else if (bst == BATT_CHARGING) battChargeLabel(left, sizeof(left), battChargeMinutesToFull());
+    if (bst == BATT_NONE)                 snprintf(buf, sizeof(buf), "no battery fitted");
+    else if (bst == BATT_FULL)            snprintf(buf, sizeof(buf), "battery full");
+    else if (bst == BATT_CHARGING) {
+      // "topping up" is battChargeLabel()'s refusal above the knee, not a
+      // duration, so it cannot take the "to full" tail a ">=" figure does.
+      if (left[0] == '>')      snprintf(buf, sizeof(buf), "charging, %s to full", left);
+      else if (left[0])        snprintf(buf, sizeof(buf), "charging, %s", left);
+      else                     snprintf(buf, sizeof(buf), "charging");
+    }
+    else if (left[0])                     snprintf(buf, sizeof(buf), "%s left on battery", left);
+    else                                  snprintf(buf, sizeof(buf), "on battery");
+    padTo(buf, sizeof(buf), ST_LINE_CHARS);
+    drawIfChanged(stLeftCache, sizeof(stLeftCache), buf, xLeft,
+                  ST_PWR_Y + ST_L1_DY, T_BODY, 1, COLOR_LABEL, COLOR_CARD);
+  }
+  {
+    // "--" when the sensor never came up, never a plausible 0.0 - a measurement and
+    // a failure must not render identically. It says SoC, never "Temp", because the
+    // sensor is inside the package and cannot see the charger or the cell: the
+    // label is the only place a reader learns which temperature this is.
+    float dieC = 0;
+    uint16_t tcol;
+    if (dieTempRead(&dieC)) {
+      snprintf(buf, sizeof(buf), "SoC %.1f C", dieC);
+      tcol = colorForDieTemp(dieC);
+    } else {
+      snprintf(buf, sizeof(buf), "SoC --");
+      tcol = COLOR_LABEL;
+    }
+    padTo(buf, sizeof(buf), ST_LINE_CHARS);
+    // Cached colour beside the text, the guard battRowColorCache documents:
+    // crossing a band while the digits stay identical would never repaint.
+    if (tcol != tempRowColorCache) { tempRowColorCache = tcol; tempRowTextCache[0] = '\0'; }
+    drawIfChanged(tempRowTextCache, sizeof(tempRowTextCache), buf, xLeft,
+                  ST_PWR_Y + ST_L2_DY, T_BODY, 1, tcol, COLOR_CARD);
+  }
+
+  // ---- HOST: four diagnostics, two columns ----
+  // They earn their place on this board specifically because there is no serial
+  // console in normal operation here: "how big and how slow is a frame, how long
+  // has this been up, and how many Macs are on it" was otherwise unanswerable from
+  // the device itself. Host LIVENESS is not among them - it leads the CONNECTION
+  // card above, which is where it belongs and where it stopped being a fifth
+  // diagnostic among equals.
+  if (lastPayloadBytes == 0) snprintf(buf, sizeof(buf), "no payload yet");
+  else snprintf(buf, sizeof(buf), "%u B per tick", (unsigned) lastPayloadBytes);
+  padTo(buf, sizeof(buf), ST_HOST_L_CHARS);
+  drawIfChanged(stPayloadCache, sizeof(stPayloadCache), buf, xLeft,
+                ST_HOST_Y + ST_HOST_R1_DY, T_BODY, 1, COLOR_VALUE, COLOR_CARD);
+  {
+    // Milliseconds to one decimal, clamped at 999.9 so the padded width is fixed.
+    uint32_t us = tft.lastFlushUs();
+    unsigned long ms = us / 1000, tenth = (us % 1000) / 100;
+    if (ms > 999) { ms = 999; tenth = 9; }
+    snprintf(buf, sizeof(buf), "flush %lu.%lu ms", ms, tenth);
+  }
+  padTo(buf, sizeof(buf), ST_HOST_L_CHARS);
+  drawIfChanged(stFlushCache, sizeof(stFlushCache), buf, xLeft,
+                ST_HOST_Y + ST_HOST_R2_DY, T_BODY, 1, COLOR_VALUE, COLOR_CARD);
+  {
+    unsigned long mins = millis() / 60000UL;
+    if (mins > 99UL * 60 + 59) mins = 99UL * 60 + 59;
+    snprintf(buf, sizeof(buf), "up %luh %02lum", mins / 60, mins % 60);
+  }
+  padLeftTo(buf, sizeof(buf), ST_HOST_R_CHARS);
+  drawIfChanged(stUptimeCache, sizeof(stUptimeCache), buf, xRight,
+                ST_HOST_Y + ST_HOST_R1_DY, T_BODY, 1, COLOR_VALUE, COLOR_CARD, TR_DATUM);
+  {
+    int live = usedLinkCount();
+    if (live == 0) snprintf(buf, sizeof(buf), "no Macs");
+    else snprintf(buf, sizeof(buf), "%d Mac%s", live, live == 1 ? "" : "s");
+  }
+  padLeftTo(buf, sizeof(buf), ST_HOST_R_CHARS);
+  drawIfChanged(stMacsCache, sizeof(stMacsCache), buf, xRight,
+                ST_HOST_Y + ST_HOST_R2_DY, T_BODY, 1, COLOR_VALUE, COLOR_CARD, TR_DATUM);
+}
+#else
+// BOARD 1's STATUS page, unchanged: the DEVICE card, its connection rows and the
+// two per-Mac link rows. Everything below this line is the text that was always
+// here, so a comment inside it that mentions board 2 is describing the constant it
+// names rather than this page - board 2 does not compile any of it.
 void drawStatusPageStatic() {
   char buf[36];
   uiCard(CARD_X, DEV_CARD_Y, CARD_W, DEV_CARD_H);
@@ -198,97 +383,13 @@ void drawStatusPageStatic() {
   tft.drawString("Bluetooth", CARD_X + PAD + 20, DEV_CARD_Y + DROW_BT);
   tft.drawString("USB", CARD_X + PAD + 20, DEV_CARD_Y + DROW_USB);
   tft.drawString("Battery", CARD_X + PAD + 20, DEV_CARD_Y + DROW_BATT);
-#if !BOARD_USES_TFT_ESPI
-  // BOARD 2 ONLY. Indented to +20 to sit under "Battery" rather than at +PAD with
-  // the device id: the two are read together. It says SoC, never "Temp", because
-  // the sensor is inside the package and cannot see the charger or the cell - the
-  // label is the only place a reader learns which temperature this is.
-  tft.drawString("SoC temp", CARD_X + PAD + 20, DEV_CARD_Y + DROW_TEMP);
-#endif
   if (hostCount == 0) snprintf(buf, sizeof(buf), "%s  unpaired", deviceName);
   else if (hostCount == 1) snprintf(buf, sizeof(buf), "%s  paired", deviceName);
   else snprintf(buf, sizeof(buf), "%s  paired x%d", deviceName, hostCount);
   setUIFont(1);
   tft.setTextColor(isPaired() ? COLOR_GOOD : COLOR_WARN, COLOR_CARD);
   tft.drawString(buf, CARD_X + PAD, DEV_CARD_Y + DROW_ID);
-#if !BOARD_USES_TFT_ESPI
-  drawLinkCardStatic();
-#endif
 }
-#if !BOARD_USES_TFT_ESPI
-// ----- The LINK card (board 2 only) -----
-// FOUR FACTS THE DEVICE ALREADY HAD AND COULD ONLY BE READ FROM A MAC'S LOG.
-// Nothing new is plumbed for this: host liveness is lastRxMillis, the payload
-// size is the line length processCompletedLine() already has in hand, the flush
-// duration is one uint32_t the shim now keeps, and uptime is millis(). It earns
-// its place on this board specifically because there is no serial console in
-// normal operation here - "is the host still ticking, and how big and how slow is
-// a frame" was unanswerable from the device itself, on the one board whose whole
-// draw path is new.
-// Same component as the DEVICE card above it: a T_META card label, then rows of
-// T_BODY label left and a right-aligned T_META value, on the same 24px pitch.
-void drawLinkCardStatic() {
-  uiCard(CARD_X, LINK_CARD_Y, CARD_W, LINK_CARD_H);
-  setUIFont(1);
-  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("LINK", CARD_X + PAD, LINK_CARD_Y + 6);
-  setUIFont(2);
-  tft.setTextColor(COLOR_VALUE, COLOR_CARD);
-  tft.drawString("HOST",    CARD_X + PAD, LINK_CARD_Y + LROW_HOST);
-  tft.drawString("PAYLOAD", CARD_X + PAD, LINK_CARD_Y + LROW_PAYLOAD);
-  tft.drawString("FLUSH",   CARD_X + PAD, LINK_CARD_Y + LROW_FLUSH);
-  tft.drawString("UPTIME",  CARD_X + PAD, LINK_CARD_Y + LROW_UPTIME);
-}
-void renderLinkCard() {
-  char buf[16];
-  const int xRight = CARD_X + CARD_W - PAD;
-  // HOST: the same fact the footer's "Xs ago" reports, and the same threshold the
-  // footer treats as live. Capped at 9999s so the padded width cannot grow.
-  uint16_t hostCol = COLOR_LABEL;
-  if (!everReceived) {
-    snprintf(buf, sizeof(buf), "never");
-  } else {
-    unsigned long age = (millis() - lastRxMillis) / 1000;
-    if (age > 9999) age = 9999;
-    snprintf(buf, sizeof(buf), "%lus ago", age);
-    hostCol = age <= 15 ? COLOR_GOOD : COLOR_WARN;
-  }
-  padLeftTo(buf, sizeof(buf), 9);
-  if (hostCol != linkHostColorCache) { linkHostColorCache = hostCol; linkHostCache[0] = '\0'; }
-  drawIfChanged(linkHostCache, sizeof(linkHostCache), buf, xRight,
-                LINK_CARD_Y + LROW_HOST, 1, 1, hostCol, COLOR_CARD, TR_DATUM);
-  // PAYLOAD: "--" and not "0 B" before the first line arrives - 0 is a
-  // measurement and "never measured" is not, the same rule the Codex usage row
-  // already follows.
-  if (lastPayloadBytes == 0) snprintf(buf, sizeof(buf), "--");
-  else snprintf(buf, sizeof(buf), "%u B", (unsigned) lastPayloadBytes);
-  padLeftTo(buf, sizeof(buf), 7);
-  drawIfChanged(linkPayloadCache, sizeof(linkPayloadCache), buf, xRight,
-                LINK_CARD_Y + LROW_PAYLOAD, 1, 1, COLOR_VALUE, COLOR_CARD, TR_DATUM);
-  // FLUSH: milliseconds to one decimal. Clamped at 999.9 so the padded width is
-  // fixed - the erase box is sized to the padded text, so a wider string than the
-  // cache was derived for is how a field stops erasing its own tail.
-  {
-    uint32_t us = tft.lastFlushUs();
-    unsigned long ms = us / 1000, tenth = (us % 1000) / 100;
-    if (ms > 999) { ms = 999; tenth = 9; }
-    snprintf(buf, sizeof(buf), "%lu.%lu ms", ms, tenth);
-  }
-  padLeftTo(buf, sizeof(buf), 8);
-  drawIfChanged(linkFlushCache, sizeof(linkFlushCache), buf, xRight,
-                LINK_CARD_Y + LROW_FLUSH, 1, 1, COLOR_VALUE, COLOR_CARD, TR_DATUM);
-  // UPTIME: "4h 12m", clamped at 99h 59m for the same width reason.
-  {
-    unsigned long mins = millis() / 60000UL;
-    if (mins > 99UL * 60 + 59) mins = 99UL * 60 + 59;
-    snprintf(buf, sizeof(buf), "%luh %02lum", mins / 60, mins % 60);
-  }
-  padLeftTo(buf, sizeof(buf), 7);
-  drawIfChanged(linkUptimeCache, sizeof(linkUptimeCache), buf, xRight,
-                LINK_CARD_Y + LROW_UPTIME, 1, 1, COLOR_VALUE, COLOR_CARD, TR_DATUM);
-}
-#endif
 // One connection row: dot left, right-aligned status text.
 void drawConnRow(int rowOff, bool connected) {
   int y = DEV_CARD_Y + rowOff;
@@ -331,14 +432,6 @@ void renderStatusPage() {
     // board-baseline.mjs, invisible to any size check.
     char left[BATT_LEFT_BYTES] = "";
     if (bst == BATT_DISCHARGING) battLeftLabel(left, sizeof(left), battMinutesLeft());
-#if !BOARD_USES_TFT_ESPI
-    // BOARD 2 ONLY, and it is the same lane: the two states are mutually exclusive,
-    // so charging borrows the slot the discharge estimate leaves empty rather than
-    // costing a column. ">=" not "~" - the fit is taken below the CV knee and
-    // extrapolates THROUGH it, so the figure is a floor, not an estimate. See
-    // battChargeMinutesToFull().
-    else if (bst == BATT_CHARGING) battChargeLabel(left, sizeof(left), battChargeMinutesToFull());
-#endif
     snprintf(buf, sizeof(buf), "%d%% %d.%02dV%s%s", pct, batteryMv / 1000,
              (batteryMv % 1000) / 10, left[0] ? " " : "", left);
   }
@@ -366,38 +459,7 @@ void renderStatusPage() {
   // board 2 sets it to 0 and draws them on the same baseline.
   drawIfChanged(battRowTextCache, sizeof(battRowTextCache), buf, CARD_X + CARD_W - PAD,
                 DEV_CARD_Y + DROW_BATT + DROW_BATT_VAL_DY, 1, 1, rowCol, COLOR_CARD, TR_DATUM);
-#if !BOARD_USES_TFT_ESPI
-  // THE SoC DIE TEMP ROW. "--" when the sensor never came up, never a plausible
-  // 0.0 - the same rule the Codex percentage follows, because a measurement and a
-  // failure must not render identically.
-  {
-    float dieC = 0;
-    char tbuf[8];
-    uint16_t tcol;
-    if (dieTempRead(&dieC)) {
-      snprintf(tbuf, sizeof(tbuf), "%.1f C", dieC);
-      tcol = colorForDieTemp(dieC);
-    } else {
-      snprintf(tbuf, sizeof(tbuf), "--");
-      tcol = COLOR_LABEL;
-    }
-    // Right-aligned like the battery reading, and padded so a shrinking string
-    // cannot leave the tail of a longer one behind ("100.0 C" -> "48.3 C").
-    padLeftTo(tbuf, sizeof(tbuf), 7);
-    // Colour cached beside the text, the guard battRowColorCache documents: crossing
-    // a band while the digits stay identical would otherwise never repaint.
-    if (tcol != tempRowColorCache) {
-      tempRowColorCache = tcol;
-      tempRowTextCache[0] = '\0';
-    }
-    drawIfChanged(tempRowTextCache, sizeof(tempRowTextCache), tbuf, CARD_X + CARD_W - PAD,
-                  DEV_CARD_Y + DROW_TEMP + DROW_BATT_VAL_DY, 1, 1, tcol, COLOR_CARD, TR_DATUM);
-  }
-#endif
   renderMacLinkRows();
-#if !BOARD_USES_TFT_ESPI
-  renderLinkCard();
-#endif
 }
 // Per-Mac, because the footer can only carry ONE "Xs ago" and it shows the
 // freshest link - which would otherwise let a silent second Mac look live.
@@ -470,6 +532,7 @@ void renderMacLinkRows() {
     }
   }
 }
+#endif
 // ----- Page 1: CONTROLS -----
 #if !BOARD_SETTINGS_HOME
 void drawControlsPageStatic() {
@@ -713,7 +776,158 @@ void drawActionsPageStatic() {
   uiHint("power off = deep sleep, RESET to wake", P2_PWR_Y + P2_BTN_H + SP_3);
 #endif
 }
-// ----- Page 3: paired Macs -----
+// ----- Page 3 / the PAIRING group -----
+#if BOARD_SETTINGS_HOME
+// THE LIVE MAC ROWS LAND HERE (board 2). They used to be on the STATUS page too,
+// in a second format keyed off hostLinks[] rather than off hosts[] - so the list
+// that owns the destructive controls was the one list that could not say whether
+// a Mac was connected, while the page with no slack carried a duplicate of it.
+//
+// Liveness costs NO new state and nothing new on the wire: it is the same
+// hostLinks[] lookup renderMacLinkRows() has always done, matched against the
+// row's own hosts[i].id.
+//
+// The slot is returned whether or not it is `used`, because pruneStaleLinks()
+// clears the FLAG and leaves the slot - so a Mac that has gone quiet this boot can
+// still be dated. One that has no slot at all cannot be, and the row says so
+// rather than inventing an age: there is no persisted lastSeen anywhere (a
+// HostPairing is id, label and secret), and a fabricated "2d ago" would be the
+// same failure as a Codex row printing 0% for "never measured".
+int hostLinkSlotFor(const char* id) {
+  for (int i = 0; i < MAX_LINKS; i++)
+    if (hostLinks[i].hostId[0] && strcmp(hostLinks[i].hostId, id) == 0) return i;
+  return -1;
+}
+int p3RowY(int i) { return P3_LIST_Y + i * P3_ROW_STEP; }
+void drawHostsPageStatic() {
+  tft.fillRect(0, PAGE_TOP, tft.width(), contentBottom() - PAGE_TOP, COLOR_BG);
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("ANSWER PROMPTS FROM", CARD_X + PAD, P3_ANY_CAP_Y);
+  // The ANY row keeps the component and the height it always had: it is a choice,
+  // not a Mac, so it stays a uiListRow where the rows under it are cards.
+  bool any = (allowedHost[0] == 0);
+  uiListRow(CARD_X, P3_ANY_Y, CARD_W, H_ROW, "ANY MAC", any, any ? "SELECTED" : nullptr);
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("PAIRED MACS", CARD_X + PAD, P3_LIST_CAP_Y);
+  // THE LIVE CACHES ARE DROPPED HERE, before the early return rather than after the
+  // loop, for the reason drawSettingsStatic() resets caches inside itself: this
+  // function repaints the cards those fields are drawn ON, so they are stale by
+  // definition afterwards - and unlike every other page here it is also called
+  // DIRECTLY from handleSettingsTouch (three sites), where there is no
+  // drawSettingsStatic() upstream to have reset them. Above the return, so
+  // forgetting the LAST Mac cannot leave a row's state behind for the next one to
+  // inherit.
+  for (int i = 0; i < MAX_HOSTS; i++) { p3SubCache[i][0] = '\0'; p3LiveCache[i] = -1; }
+  if (hostCount == 0) {
+    uiHint("No Mac paired yet - connect one over USB", P3_LIST_Y + P3_ROW_H / 2);
+    return;
+  }
+  for (int i = 0; i < hostCount; i++) {
+    int y = p3RowY(i);
+    bool only = allowedHost[0] && strcmp(hosts[i].id, allowedHost) == 0;
+    // Selection is the card's BORDER plus the "ONLY" tag - two carriers, never hue
+    // alone. The card keeps its own COLOR_CARD surface rather than filling with the
+    // accent the way uiListRow does, because the row carries a second line and a
+    // live dot whose colours were chosen against that surface.
+    uiCard(CARD_X, y, CARD_W, P3_ROW_H, only ? COLOR_ACCENT : COLOR_LABEL);
+    // TWO MACS WITH THE SAME HOSTNAME ARE THE ORDINARY CASE, not a corner: a pair
+    // of MacBook Pros both report "...-MacBook-Pro", the same collision that makes
+    // macTag() render both as `pro`. Two identical rows here are worse than
+    // cosmetic, because this page's controls are destructive and per-row - which
+    // `x` forgets which Mac, and which one ONLY pins, becomes a guess. So when a
+    // label is shared, the row carries the first 4 hex of the hostId: unique by
+    // construction and needing nothing new on the wire.
+    bool dupLabel = false;
+    for (int j = 0; j < hostCount && !dupLabel; j++)
+      if (j != i && hosts[i].label[0] && hosts[j].label[0] &&
+          strcmp(hosts[j].label, hosts[i].label) == 0) dupLabel = true;
+    char idtag[8] = "";
+    if (dupLabel) snprintf(idtag, sizeof(idtag), " #%.4s", hosts[i].id);
+    // THE LABEL IS WHAT GETS TRIMMED, NEVER THE SUFFIX - it is the only thing
+    // telling two same-named Macs apart. Measured rather than counted, because
+    // drawString paints an opaque box: an over-long name would rub out the ONLY
+    // tag beside it and then the card border past that.
+    setUIFont(T_BODY);
+    const int nameX = CARD_X + PAD + P3_ROW_TEXT_DX;
+    const int tagX  = CARD_X + CARD_W - (P3_X_W + SP_2);
+    const int lane  = tagX - nameX - tft.textWidth(idtag)
+                      - (only ? tft.textWidth("ONLY") + SP_2 : 0);
+    char name[24];
+    fitText(name, sizeof(name), hosts[i].label[0] ? hosts[i].label : hosts[i].id, lane);
+    char row[40];
+    snprintf(row, sizeof(row), "%s%s", name, idtag);
+    tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString(row, nameX, y + P3_ROW_NAME_DY);
+    if (only) {
+      // Right-anchored to the same inset uiListRow's rightInset reserved, so the
+      // tag still cannot land on top of the "x".
+      setUIFont(T_META);
+      tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
+      tft.setTextDatum(TR_DATUM);
+      tft.drawString("ONLY", tagX, y + P3_ROW_NAME_DY);
+    }
+    // Trailing destructive affordance, inside the row's own surface and centred in
+    // the P3_X_W zone that hit-tests it - drawn from the same constant, so the
+    // glyph and its tap target cannot drift apart.
+    setUIFont(T_HEAD);
+    tft.setTextColor(COLOR_BAD, COLOR_CARD);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("x", CARD_X + CARD_W - P3_X_W / 2, y + P3_ROW_H / 2);
+    tft.setTextDatum(TL_DATUM);
+  }
+  // Painted here rather than left to the next tick: a caller that forgot would show
+  // every state line and dot blank until that Mac's state happened to change.
+  renderHostsPage();
+}
+// The one live part of the page: whether each remembered Mac is talking right now,
+// and how long ago it last did. Runs on the same ~5s tick as every other group.
+void renderHostsPage() {
+  char buf[32];
+  for (int i = 0; i < hostCount; i++) {
+    int y = p3RowY(i);
+    int slot = hostLinkSlotFor(hosts[i].id);
+    int live = (slot >= 0 && hostLinks[slot].used) ? 1 : 0;
+    if (live != p3LiveCache[i]) {
+      p3LiveCache[i] = live;
+      // Filled dot when connected, hollow ring when not - the same shape pair the
+      // DEVICE card's connection rows use, so liveness never rests on hue.
+      drawConnDot(CARD_X + PAD + P3_ROW_DOT_R,
+                  y + P3_ROW_NAME_DY + uiLineH(T_BODY) / 2,
+                  P3_ROW_DOT_R, live, COLOR_CARD);
+      // The state line's COLOUR is a function of `live`, and drawIfChanged compares
+      // text only - so the flag busts the text cache rather than merely redrawing
+      // the dot. Today the two cannot disagree (a live row's line starts
+      // "connected," and an idle one's does not), but relying on "the text happens
+      // to change as well" is what made battRowTextCache correct by accident.
+      p3SubCache[i][0] = '\0';
+    }
+    if (slot < 0) {
+      // No link slot at all: nothing on this device knows when this Mac was last
+      // here. Say that, rather than dating it from something else.
+      snprintf(buf, sizeof(buf), "not seen since boot");
+    } else {
+      unsigned long secs = (millis() - hostLinks[slot].lastPayloadMillis) / 1000;
+      if (live) {
+        if (secs > 9999) secs = 9999;      // capped so the padded width cannot grow
+        snprintf(buf, sizeof(buf), "connected, %lus ago", secs);
+      } else {
+        unsigned long mins = secs / 60;
+        if (mins > 999) mins = 999;
+        snprintf(buf, sizeof(buf), "last seen %lum ago", mins);
+      }
+    }
+    padTo(buf, sizeof(buf), P3_SUB_CHARS);
+    drawIfChanged(p3SubCache[i], sizeof(p3SubCache[i]), buf,
+                  CARD_X + PAD + P3_ROW_TEXT_DX, y + P3_ROW_SUB_DY,
+                  T_BODY, 1, live ? COLOR_GOOD : COLOR_LABEL, COLOR_CARD);
+  }
+}
+#else
 // Status is never colour-alone: the chosen
 // Mac gets a filled pill and an "ONLY" tag, the connected one a bullet.
 void drawHostsPageStatic() {
@@ -779,6 +993,7 @@ void drawHostsPageStatic() {
     tft.setTextDatum(TL_DATUM);
   }
 }
+#endif
 // One dialog for every confirmable action. `emph` is the thing being acted on
 // (drawn in the accent colour), `note` says what will actually happen - the
 // point of the dialog is that the consequence is stated, not just re-asked.
@@ -910,7 +1125,11 @@ void renderSettingsTab() {
   else if (settingsPage == SET_STATUS)  renderStatusPage();
   else if (settingsPage == SET_DISPLAY) renderDisplayPage();
   else if (settingsPage == SET_SOUND)   renderSoundPage();
-  // Pairing and Actions are static
+  // Pairing's rows carry a LIVE state line now ("connected, 3s ago"), so the page
+  // is no longer static: left on the static side it would freeze at whatever age
+  // was true when it was last painted, which is worse than no age at all.
+  else if (settingsPage == SET_PAIRING) renderHostsPage();
+  // Actions is static
 #else
   if (settingsPage == 0) renderStatusPage();
   else if (settingsPage == 1) renderControlsPage();
@@ -935,18 +1154,22 @@ void resetSettingsCaches() {
 #endif
   brightPctCache[0] = '\0'; sleepValCache[0] = '\0'; volValCache[0] = '\0';
   for (int i = 0; i < 6; i++) stepGlyphCache[i] = -1;
+#if !BOARD_SETTINGS_HOME
   // Without this a page repaint (e.g. PAGE away and back) leaves both Mac
   // rows BLANK - drawSettingsStatic() clears the chrome they're drawn on but
   // drawIfChanged sees an unchanged cached string and skips redrawing it.
   for (int i = 0; i < MAX_LINKS; i++) macRowCache[i][0] = '\0';
-#if !BOARD_USES_TFT_ESPI
-  // Same rule for the LINK card: drawLinkCardStatic() repaints the card these
-  // four values are drawn ON, so leaving their caches set leaves all four BLANK.
-  linkHostCache[0] = '\0'; linkPayloadCache[0] = '\0';
-  linkFlushCache[0] = '\0'; linkUptimeCache[0] = '\0';
-  linkHostColorCache = 0;
 #endif
 #if BOARD_SETTINGS_HOME
+  // Same rule for the STATUS group's three cards and the Pairing group's live
+  // rows: the static half repaints the surface all of these are drawn ON, so
+  // leaving a cache set leaves that field BLANK - the value has not "changed", so
+  // drawIfChanged skips a field whose pixels were just erased.
+  stVerdictCache[0] = '\0'; stVerdictColorCache = 0;
+  stLinksCache[0] = '\0'; stIdCache[0] = '\0'; stLeftCache[0] = '\0';
+  stPayloadCache[0] = '\0'; stFlushCache[0] = '\0';
+  stUptimeCache[0] = '\0'; stMacsCache[0] = '\0';
+  for (int i = 0; i < MAX_HOSTS; i++) { p3SubCache[i][0] = '\0'; p3LiveCache[i] = -1; }
   // HOME's five summaries, and the Status row's colour beside them. Same rule as
   // every cache above: drawSettingsHomeStatic() repaints the cards these are drawn
   // ON, so leaving them set leaves all five rows BLANK.
@@ -1140,9 +1363,13 @@ void handleSettingsTouch(int sx, int sy) {
       if (allowedHost[0]) { allowedHost[0] = 0; saveAllowedHost(); drawHostsPageStatic(); }
       return;
     }
+    // The rows are cards at P3_ROW_STEP now, and the 8px between two of them is
+    // inert rather than being claimed by either - the same rule HOME's gaps follow,
+    // and it matters more here because the row it would guess at owns a destructive
+    // control.
     for (int i = 0; i < hostCount; i++) {
-      int y = P3_LIST_Y + i * (H_ROW + SP_1);
-      if (sy < y || sy >= y + H_ROW) continue;
+      int y = p3RowY(i);
+      if (sy < y || sy >= y + P3_ROW_H) continue;
       if (sx >= CARD_X + CARD_W - P3_X_W) {
         pendingConfirm = CFM_FORGET_HOST; // the x zone: ask before destroying the key
         pendingArg = i;

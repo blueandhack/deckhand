@@ -2900,6 +2900,12 @@ const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
 // Page 3 - the Macs this device is paired with. One row each: tap the row to
 // restrict answering to just that Mac (tap again for "any"), tap the X to
 // forget it. The ANY row at the top clears the restriction.
+//
+// BOARD 2 DERIVES ITS OWN P3_* IN board_es3c35p.h and does not compile the arm
+// below at all: its Pairing group is two captions plus a list of two-line CARDS,
+// so nothing about it derives from H_ROW + SP_1 any more. The #if emits no code,
+// so board 1's arm is the text that was always here.
+#if !BOARD_SETTINGS_HOME
 // Rows use the shared H_ROW (per-board, == TAP_MIN). On board 1 this is the
 // tightest page in the UI - ANY plus 4 Macs at H_ROW + SP_1 is EXACTLY the
 // height available, which is what set H_ROW's value rather than the other way
@@ -2908,6 +2914,7 @@ const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
 const int P3_ANY_Y  = PAGE_TOP + SP_1 / 2;
 const int P3_LIST_Y = P3_ANY_Y + H_ROW + SP_1;
 const int P3_X_W    = 40;   // "forget" hit zone at the right edge (>= a fingertip)
+#endif
 
 // Every consequential action confirms first. They all reach the same modal, so
 // the dialog is one component rather than one per action: it lives above the
@@ -2925,47 +2932,64 @@ const int CFM_NO_X  = CARD_X + SP_3;
 const int CFM_YES_X = CFM_NO_X + CFM_BTN_W + SP_3;
 
 int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
-// 20, not 16: the padded string is now 15 chars + NUL, which fitted 16 EXACTLY.
-// drawIfChanged compares cacheSize bytes, so a cache shorter than its string
-// silently stops noticing changes - headroom here is cheaper than that bug.
 #if !BOARD_USES_TFT_ESPI
-// BOARD 2 ONLY - the SoC die temp row. Sized from the widest string it can draw,
-// "-10.0 C" (7 chars + NUL) over the sensor's configured -10..80C range, and
-// settings-geom-check.mjs asserts that rather than trusting this comment: a cache
-// shorter than its string silently stops noticing changes past that point.
-char tempRowTextCache[8] = "";
+// BOARD 2 ONLY - the SoC die temp line, which is now the POWER card's second
+// detail line ("SoC 46.6 C") rather than a right-aligned reading in a row of its
+// own. It is padded to ST_LINE_CHARS like every other detail line on that page,
+// so its cache is the same ST_LINE_BYTES they use - a cache shorter than its own
+// padded string silently stops noticing changes past that point, and
+// settings-geom-check.mjs asserts the size against the header's constant rather
+// than trusting this comment.
+char tempRowTextCache[ST_LINE_BYTES] = "";
 // The colour is cached BESIDE the text for the reason battRowColorCache documents:
 // drawIfChanged compares text only, so crossing a threshold while the digits stay
 // identical would never reach the panel.
 uint16_t tempRowColorCache = 0;
 #endif
-// PER BOARD, because board 2's row can carry a LONGER string than board 1's and a
+// PER BOARD, because the two boards genuinely draw different strings here and a
 // cache shorter than its string silently stops noticing changes past that point.
-// Board 1's widest is the discharge case, "100% 4.20V ~99h" (15 + NUL). Board 2 can
-// also draw the CHARGING label, whose widest is "90% 4.10V topping up" - 20 chars,
-// so 20 bytes truncated it by exactly one. Derived, not guessed: "topping up" only
-// appears at or above BATT_CHG_KNEE_MV (4100) and BATT_CHARGING only holds below
-// BATT_FULL_MV (4180), so the percentage in that band is 90..97 and the string is
-// at most 20 characters. settings-geom-check.mjs asserts both sizes.
+// Board 1's row is one line carrying percentage, volts AND the runtime estimate,
+// whose widest is the discharge case "100% 4.20V ~99h" (15 + NUL) - 20, not 16,
+// because 16 fitted that EXACTLY. Board 2's POWER card gives the estimate a line
+// of its own, so this cache holds only "100%  4.20V" there (ST_BIG_CHARS + NUL).
+// settings-geom-check.mjs derives both bounds rather than trusting this comment.
 char battRowTextCache[BATT_ROW_CACHE] = "";
 uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
 // MAC_ROW_W (and its derivation comment) moved to board_e32r28t.h (via
-// board.h) - it also explains macRowCache's sizing below.
+// board.h) - it also explains macRowCache's sizing below. BOARD 1 ONLY, because
+// renderMacLinkRows() is: board 2's per-Mac rows moved to the Pairing group,
+// where a row is a two-line card keyed off hosts[] rather than a padded line
+// keyed off hostLinks[].
+#if !BOARD_SETTINGS_HOME
 char macRowCache[MAX_LINKS][40] = {"", ""};
-#if !BOARD_USES_TFT_ESPI
-// The LINK card's four values. Sizes are each field's PADDED worst case plus NUL
-// with headroom, because a cache shorter than the string it holds silently stops
-// noticing changes past that point - this file's oldest bug. Worst cases, and
-// settings-geom-check.mjs re-derives every one of them rather than trusting these
-// comments: "9999s ago" (10), "16000 B" (8), "999.9 ms" (9), "99h 59m" (8).
-char linkHostCache[12] = "", linkPayloadCache[12] = "";
-char linkFlushCache[12] = "", linkUptimeCache[12] = "";
-// drawIfChanged compares TEXT only, so the HOST row's colour is cached beside it
-// and busts the text cache on a flip - the same guard battRowColorCache needs,
-// and needed here for the same reason: "never" keeps the same string while the
-// state it describes changes, and a fresh age can flip good -> warn while the
-// digits happen to match.
-uint16_t linkHostColorCache = 0;
+#endif
+#if BOARD_SETTINGS_HOME
+// THE STATUS GROUP'S FIELDS (board 2). Every size is its field's PADDED width plus
+// NUL, taken from the board header rather than restated here, because a cache
+// shorter than the string it holds silently stops noticing changes past that
+// point - this file's oldest bug, and the reason settings-geom-check.mjs asserts
+// each declaration against the header's own constant.
+char stVerdictCache[ST_VERDICT_BYTES] = "";
+char stLinksCache[ST_LINE_BYTES] = "", stIdCache[ST_LINE_BYTES] = "";
+char stLeftCache[ST_LINE_BYTES] = "";
+char stPayloadCache[ST_HOST_L_BYTES] = "", stFlushCache[ST_HOST_L_BYTES] = "";
+char stUptimeCache[ST_HOST_R_BYTES] = "", stMacsCache[ST_HOST_R_BYTES] = "";
+// THE VERDICT LINE'S COLOUR, cached beside its text and busting it on a flip -
+// the guard battRowColorCache documents, and needed here for a reason that is not
+// hypothetical: "Both links up" is ONE string across a COLOR_GOOD -> COLOR_WARN
+// flip, because the phrase describes the links while the colour describes whether
+// the host is still ticking. drawIfChanged compares text only, so without this the
+// colour change would never reach the panel.
+uint16_t stVerdictColorCache = 0;
+// THE PAIRING GROUP'S LIVE ROWS (board 2). One state line per remembered Mac, and
+// one cache per row saying whether that Mac was live when the row was last drawn.
+// The live flag busts the text cache rather than merely redrawing the dot: the
+// line's COLOUR is a function of it, and drawIfChanged compares text only. Today
+// the two cannot disagree (a live row's text starts "connected," and an idle one's
+// does not), but relying on "the text happens to change as well" is exactly what
+// made battRowTextCache correct by accident until it wasn't.
+char p3SubCache[MAX_HOSTS][P3_SUB_BYTES] = {"", "", "", ""};
+int p3LiveCache[MAX_HOSTS] = {-1, -1, -1, -1};
 #endif
 int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
 int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+

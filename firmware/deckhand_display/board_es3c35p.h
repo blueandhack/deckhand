@@ -1499,156 +1499,104 @@ const int HOME_SUB_BYTES = HOME_SUB_CHARS + 1;
 const int BACK_BTN_W    = PAGER_BTN_W;
 const int BACK_TITLE_DX = 16;
 
-// ---------- SETTINGS page 0: the DEVICE card, then the LINK card ----------
-// BOTH CARDS ARE SIZED BY THEIR CONTENTS, like the stepper card and unlike the
-// USAGE column, and both are laid out on ONE nominal row pitch: 24 = a 16px line
-// (uiLineH(T_BODY)) plus SP_2. Six rows for DEVICE, four for LINK.
+// ---------- SETTINGS group: Status ----------
+// Geometry is docs/design/settings-redesign/settings.js `bStatus`, reproduced
+// pixel for pixel.
 //
-// WHY 24 AND NOT THE 28 THIS CARD USED TO HAVE. 28 was a 13px line plus 15, and
-// the 13 is gone; keeping 28 would spend 226px on the DEVICE card and leave the
-// page unable to hold the LINK card at all (226 + 12 + 160 = 398 against 356).
-// At 24 the two cards are 176 and 128, which is 328 of the region with 28px of
-// trailing air. The physical cost is stated rather than hidden: board 1's rows are
-// 28px apart at 5.624 px/mm = 2.67mm of gap, and 8px here is 1.23mm, so these two
-// cards are the one place on this board where the rhythm is TIGHTER than board 1
-// rather than looser. The alternative was not having the LINK card.
+// THREE CARDS, NOT ELEVEN FLAT ROWS, and the count is the point rather than the
+// styling. The old page was a six-row DEVICE card (Bluetooth, USB, Battery, SoC
+// temp, device id, two Mac rows) stacked on a four-row LINK card - eleven values
+// at one weight, in one rhythm, with the two you actually came for (is the host
+// talking to me, and how is the battery) indistinguishable from the eight
+// diagnostics around them. Here each of those two leads its own card as a T_HEAD
+// line with its detail dimmed under it, and the diagnostics collapse into one
+// two-column card at the foot.
 //
-// CHECK CLEAR BOXES, NOT GLYPHS, the same discipline the USAGE card is built on.
-// A field drawn through drawIfChanged clears y-1..y+cellH, i.e. ONE ROW ABOVE AND
-// ONE BELOW its own 16px box - which is why the printed gaps below run 12/8/7/7/6
-// rather than a flat 12/8/8/8/8. That is the overhang, not a varying rhythm.
-// What each row actually paints:
-//   - a connection row is drawConnRow(): fillRect(xRight-CONN_TEXT_W, y,
-//     CONN_TEXT_W, CONN_TEXT_H), i.e. y..y+15, plus a 13px dot centred at y+8
-//   - the battery row is that dot plus drawIfChanged at y+DROW_BATT_VAL_DY
-//   - ID is a plain 16px line at +DROW_ID, clearing nothing extra
-//   - the Mac rows and every LINK value are 16px lines clearing y-1..y+16
+// THE PER-MAC ROWS ARE GONE FROM THIS PAGE - they moved to the Pairing group,
+// where the Macs already are. They were on BOTH pages, and that duplication is
+// what made this the only settings page with no slack: DROW_MAC0/MAC1 spent 48 of
+// the DEVICE card's 200 rows re-stating, in a different format, a list the
+// Pairing page draws in full. renderMacLinkRows() is board 1's alone now.
 //
+//   116..227  CONNECTION   ST_CONN_Y, ST_CONN_H
+//   240..351  POWER        ST_PWR_Y,  ST_PWR_H
+//   364..455  HOST         ST_HOST_Y, ST_HOST_H
+//   456..459  4 rows clear to contentBottom()
+//
+// The 12 between cards is SP_3, the page rhythm every other group uses. The 4px
+// of trailing air is the same margin the USAGE column settled on, and
+// settings-geom-check.mjs asserts it stays above zero: a card ending flush on
+// contentBottom() reads as joined to the footer, which board 1 shipped once.
+const int ST_CONN_Y = 116, ST_CONN_H = 112;
+const int ST_PWR_Y  = 240, ST_PWR_H  = 112;
+const int ST_HOST_Y = 364, ST_HOST_H = 92;
+// ONE stack, shared by CONNECTION and POWER, so the two read as the same
+// component with different content rather than as two layouts that happen to sit
+// above each other. Offsets are from the card's own y, and what each one PAINTS is
+// its clear box, not its glyphs - drawIfChanged clears y-1..y+cellH, one row above
+// and one below the cell, which is why the printed gaps are not the differences
+// between these numbers:
 //   +0..+1     border
-//   +2..+5     pad 4
-//   +6..+21    "DEVICE" label (16px cell, drawn at +6)
-//   +22..+33   gap 12 (SP_3 - a card's own label is not one of its rows)
-//   +34..+49   Bluetooth      (DROW_BT;  dot +35..+48)
-//   +50..+57   gap 8
-//   +58..+73   USB            (DROW_USB)
-//   +74..+80   gap 7
-//   +81..+98   Battery        (DROW_BATT 82: label +82..+97, dot +83..+96,
-//                              reading clears +81..+98)
-//   +99..+104  gap 6
-//   +105..+122 SoC temp       (DROW_TEMP 106: label +106..+121, reading clears
-//                              +105..+122)
-//   +123..+129 gap 7
-//   +130..+145 device id      (DROW_ID)
-//   +146..+152 gap 7
-//   +153..+170 Mac link row 0 (DROW_MAC0 154, clears +153..+170)
-//   +171..+176 gap 6
-//   +177..+194 Mac link row 1 (DROW_MAC1 178, clears +177..+194)
-//   +195..+197 pad
-//   +198..+199 border                                              = 200
-// The 2px border owns +198..+199 so nothing may end past +197; the last clear
-// ends +194, 3 rows clear. Board 1's equivalent card is 160 with 6px of slack.
+//   +8..+23    caption      ST_CAP_DY, T_META, a plain drawString
+//   +33..+58   the headline ST_BIG_DY, T_HEAD 24 (clears +33..+58)
+//   +65..+82   detail 1     ST_L1_DY,  T_BODY 16
+//   +85..+102  detail 2     ST_L2_DY,  T_BODY 16
+//   +103..+109 pad
+//   +110..+111 border                                            = 112
+// Last clear ends +102 against a border at +110, 7 rows clear.
+const int ST_CAP_DY = 8, ST_BIG_DY = 34, ST_L1_DY = 66, ST_L2_DY = 86;
+// The HOST card is the same card one row shorter, with its two rows carrying a
+// LEFT and a RIGHT value each - four diagnostics in the height two stacked rows
+// would have cost:
+//   +8..+23    "HOST"
+//   +33..+50   payload (left) / uptime (right)     ST_HOST_R1_DY
+//   +55..+72   flush   (left) / Macs   (right)     ST_HOST_R2_DY
+//   +89..+91 is the border; last clear ends +72, 17 rows clear.
+const int ST_HOST_R1_DY = 34, ST_HOST_R2_DY = 56;
+// EVERY FIELD IS PADDED TO A FIXED CHARACTER COUNT, because drawIfChanged sizes
+// its erase box from the text it is GIVEN - so a value that shrinks ("Bluetooth
+// only" -> "USB only") would otherwise leave the tail of the longer one on the
+// glass. These are the widths of the DATA, so they are character counts rather
+// than pixels, and each *_BYTES is what the matching cache is declared with: a
+// cache shorter than its own padded string silently stops noticing changes past
+// its end, this file's oldest bug.
 //
-// THE CARD GREW 176 -> 200 FOR THE SoC TEMP ROW, and the 24px comes out of this
-// page's TRAILING AIR, not out of another row. LINK_CARD_Y is derived from
-// DEV_CARD_H below, so the LINK card slides 304 -> 328 on its own and the page's
-// air goes 28px -> 4px - the same margin the USAGE tab settled on, and
-// settings-geom-check.mjs asserts it stays above zero (a card ending flush on
-// contentBottom() reads as joined to the footer, which board 1 shipped once).
-// There is no room left on page 0: a further row has to come from somewhere else.
-const int DEV_CARD_Y = PAGE_TOP + 12;   // 116
-const int DEV_CARD_H = 200;             // 116..315
-const int DROW_BT = 34, DROW_USB = 58, DROW_BATT = 82, DROW_ID = 130;
-// BOARD 2 ONLY, and it is a capability rather than a preference: the ESP32-S3 has
-// an internal temperature sensor whose driver is real here (measured: a 522-byte
-// temperature_sensor_install, not one of the three-instruction stubs esp_pm ships
-// on this core), and the plain ESP32 has no usable equivalent. So this constant
-// exists in ONE header, the same shape as P2_MIC_Y and the LINK card, and board 1
-// never sees the row.
-//
-// It sits directly under Battery because the two are read together, and it mirrors
-// that row's geometry exactly - T_BODY label indented past the dot column,
-// T_META reading right-aligned on the same DROW_BATT_VAL_DY baseline - rather than
-// introducing a second row rhythm inside one card. It carries no health dot: the
-// reading is a NUMBER and its colour is an accent on it, so the dot column stays
-// empty here and colour is never the only carrier.
-const int DROW_TEMP = 106;
-// Two fixed row SLOTS, not one per hostLinks[] index - renderMacLinkRows()
-// compacts to however many links are used, so one remaining Mac always draws in
-// slot 0 rather than leaving a hole where the other one was.
-const int DROW_MAC0 = 154, DROW_MAC1 = 178;
-// 0, WHERE BOARD 1 HAS 4, and this constant exists because that 4 was invisible
-// at 13px and is not at 16. The battery READING is drawn DROW_BATT_VAL_DY below
-// the "Battery" label beside it; on board 1 that is a 4px stagger between two 13px
-// lines, which ships and is left exactly as it is. At 16px the same 4 reads as two
-// halves of one row failing to line up, so this board draws them on the same
-// baseline. It is a board constant rather than a literal for the usual reason:
-// board 1 substitutes its own 4 and its binary cannot move.
-const int DROW_BATT_VAL_DY = 0;
-// 24, WHERE BOARD 1 HAS 20, because this board also draws the CHARGING estimate and
-// its widest label is longer than the discharge one: "90% 4.10V topping up" is 20
-// characters, so board 1's 20 bytes truncated it by exactly one. Derived rather
-// than guessed - "topping up" only appears at or above BATT_CHG_KNEE_MV (4100) and
-// BATT_CHARGING only holds below BATT_FULL_MV (4180), so the percentage in that
-// band is 90..97. settings-geom-check.mjs re-derives the same bound and asserts it.
-const int BATT_ROW_CACHE = 24;
-// 12, WHERE BOARD 1 HAS 8: this board's charging label "topping up" is 10 chars +
-// NUL, and 8 would truncate it to "topping". See BATT_ROW_CACHE above.
+// Lane check, at this board's own 8px (T_BODY) and 12px (T_HEAD) advances, from
+// CARD_X + PAD (30) against a card interior ending at CARD_X + CARD_W - 2 (306):
+//   verdict  14 * 12 = 168 -> ends 198     ("Bluetooth only")
+//   headline 11 * 12 = 132 -> ends 162     ("100%  4.20V")
+//   detail   28 *  8 = 224 -> ends 254     ("USB and Bluetooth, 9999s ago")
+// and the HOST card's two columns, the left from 30 and the right right-aligned
+// to CARD_X + CARD_W - PAD (290):
+//   left     16 *  8 = 128 -> ends 158     ("16000 B per tick")
+//   right    10 *  8 =  80 -> starts 210   ("up 99h 59m")
+// so the columns clear each other by 52px. All five are asserted rather than
+// trusted to this comment.
+const int ST_VERDICT_CHARS = 14;
+const int ST_VERDICT_BYTES = ST_VERDICT_CHARS + 1;
+const int ST_BIG_CHARS     = 11;
+const int ST_LINE_CHARS    = 28;
+const int ST_LINE_BYTES    = ST_LINE_CHARS + 1;
+const int ST_HOST_L_CHARS  = 16;
+const int ST_HOST_L_BYTES  = ST_HOST_L_CHARS + 1;
+const int ST_HOST_R_CHARS  = 10;
+const int ST_HOST_R_BYTES  = ST_HOST_R_CHARS + 1;
+// battRowTextCache holds the POWER card's headline, which on this board is the
+// percentage and the voltage and nothing else - the runtime estimate that used to
+// share that row with them has a line of its own now, so the 24 this was (sized
+// for "90% 4.10V topping up") is no longer what the field can draw. Board 1 keeps
+// its own 20; the two boards genuinely draw different strings here, which is why
+// this is a per-board constant rather than a literal at the declaration - a
+// literal moved board 1's binary at +0 bytes once, which board-baseline.mjs caught
+// and no size check could have.
+const int BATT_ROW_CACHE = ST_BIG_CHARS + 1;
+// 12, WHERE BOARD 1 HAS 8: this board also draws the CHARGING estimate, whose
+// widest label "topping up" is 10 chars + NUL, and 8 would truncate it to
+// "topping". battLeftLabel() renders "~" (about) and battChargeLabel() ">=" (at
+// least, because the fit is taken below the CV knee and extrapolates through it) -
+// neither may ever be rendered as the other, so both are drawn VERBATIM into the
+// estimate line rather than translated into prose.
 const int BATT_LEFT_BYTES = 12;
-// THE CONNECTION ROW'S ERASE BOX, and the width is DATA-derived and was WRONG.
-// drawConnRow right-aligns "Connected" or "Not connected" and clears a fixed box
-// first; the box was a literal 100 on both boards, which covers 13 Cozette
-// characters (78px) with room to spare and 13 Spleen characters (104px) NOT AT
-// ALL. The uncovered 4px is the left edge of the "N", so going Not connected ->
-// Connected left a sliver of the old string behind - a ghost small enough to read
-// as a rendering artefact rather than as a stale value. 112 is 14 characters at
-// this board's 8px advance, i.e. the widest string plus one.
-// The HEIGHT is 16 on both boards: it must cover uiLineH(T_BODY), which is exactly
-// 16 here and 13 on board 1 (where the extra 3 rows are free clearance). Named so
-// settings-geom-check.mjs can assert that relationship instead of reading a
-// literal it would have to regex out of the .ino.
-const int CONN_TEXT_W = 112;
-const int CONN_TEXT_H = 16;
-// 28, UNCHANGED, and this is one of the few numbers that is genuinely NOT
-// panel-derived: it is the width of the DATA. "Mac  feedfeed  999s ago" - a bare
-// 11-character hostId with no tag, plus a generously wide age - is 23 characters,
-// and every row is padded to this same fixed width whether used or not, which is
-// what makes a row that goes away actually get ERASED rather than merely stop
-// updating (the erase box is sized to the padded text). macRowCache is shared at
-// [40]: worst case 28 (text) + 1 (\x01 sentinel) + 2 (icon id) + 1 (NUL) = 32.
-// Lane check, AT THIS BOARD'S OWN ADVANCE: the row starts at CARD_X + PAD = 30 and
-// renderMacLinkRows() sizes its erase box from a MEASURED tft.textWidth(), which
-// at 8px is 28*8 + 4 + 16 + 2 = 246 wide, ending at 276 inside a card whose
-// interior runs to 305. (The old comment did this multiplication at 6px AND with
-// board 1's 13px icon, both of which were true of every board when it was written
-// and are now true of one.)
-const int MAC_ROW_W = 28;
-
-// THE LINK CARD - four facts the device already had and could only be read from a
-// Mac's log: host liveness, the last payload's size, the last flush's duration and
-// uptime. It exists because the STATUS page was spending 144 of its 356 rows on
-// nothing, and because on this board those four numbers are the only instrument
-// there is: board 2 has no USB serial console in normal operation, so "is the host
-// still ticking, and how big and how slow is a frame" was unanswerable from the
-// device itself. BOARD 2 ONLY - lastFlushUs() is a PanelShim accessor that does
-// not exist on board 1, and board 1's STATUS page has no 144 spare rows to put a
-// card in even if it did.
-//
-// Same 24 pitch, same label-then-rows shape, one row fewer than DEVICE has two:
-//   +0..+1     border
-//   +2..+5     pad 4
-//   +6..+21    "LINK" label
-//   +22..+32   gap 11 (SP_3 less the value's one-row overhang)
-//   +33..+50   HOST     (LROW_HOST 34;    value clears +33..+50)
-//   +51..+56   gap 6
-//   +57..+74   PAYLOAD  (LROW_PAYLOAD 58)
-//   +75..+80   gap 6
-//   +81..+98   FLUSH    (LROW_FLUSH 82)
-//   +99..+104  gap 6
-//   +105..+122 UPTIME   (LROW_UPTIME 106)
-//   +123..+125 pad
-//   +126..+127 border                                              = 128
-// Last clear ends +122 against a border at +126, 3 rows clear.
-//
 // THE FLUSH FIELD PARTLY MEASURES ITS OWN REPAINT, and it never settles. Its value
 // goes through drawIfChanged, which dirties a rect, so every settings render while
 // this page is showing guarantees a NON-EMPTY flush - and the duration that flush
@@ -1658,9 +1606,6 @@ const int MAC_ROW_W = 28;
 // flush. Harmless, and the same class as the footer's per-second fields, but a
 // reader watching a number change with nothing happening deserves to find the
 // reason here rather than wonder whether it is broken.
-const int LINK_CARD_Y = DEV_CARD_Y + DEV_CARD_H + 12;   // 328..455
-const int LINK_CARD_H = 128;
-const int LROW_HOST = 34, LROW_PAYLOAD = 58, LROW_FLUSH = 82, LROW_UPTIME = 106;
 
 // ---------- SETTINGS page 1: the stepper cards ----------
 // THE CARD IS NO LONGER SIZED BY THE KEY, AND SAYING SO IS THE POINT. Board 1's
@@ -1783,6 +1728,65 @@ const int PS_HINT_GAP    = 11;   // the SOUND toggle's bottom -> the hint's cent
 const int PS_VOL_GAP     = 21;   // hint centre -> the VOLUME card
 const int PS_BTN_H       = H_BTN;   // the two actions; H_BTN is TAP_MIN + 4
 const int PS_MIC_CAP_GAP = 14;   // TEST BEEP's bottom -> the MICROPHONE caption
+
+// ---------- SETTINGS group: Pairing ----------
+// Geometry is settings.js `bPairing`. The live Mac rows land HERE, where the Macs
+// already are - they used to be on the STATUS page as well, in a second format,
+// which is the duplication that left STATUS with no room and left this page
+// unable to say the one thing a pairing list is asked: is that Mac connected
+// right now.
+//
+//   116..131  "ANSWER PROMPTS FROM"   P3_ANY_CAP_Y, T_META, TL_DATUM
+//   138..183  ANY MAC / SELECTED      P3_ANY_Y, H_ROW - one uiListRow, unchanged
+//   196..211  "PAIRED MACS"           P3_LIST_CAP_Y
+//   218..449  up to MAX_HOSTS rows    P3_LIST_Y, P3_ROW_H at P3_ROW_STEP
+//   450..459  10 rows clear to contentBottom()
+//
+// A ROW IS A CARD, NOT A LIST ROW, because it carries two lines and uiListRow
+// draws one centred label. 52 is what the two lines cost (see P3_ROW_NAME_DY) and
+// it is over TAP_MIN on its own; the 8px of the 60px step is the gap between
+// cards, SP_2 rather than SP_3 because these are one list rather than separate
+// blocks. Four Macs (MAX_HOSTS) end at 449, which is what P3_ROW_STEP is bounded
+// by - settings-geom-check.mjs asserts the whole list against contentBottom()
+// rather than this comment.
+const int P3_ANY_CAP_Y  = 116;
+const int P3_ANY_Y      = 138;
+const int P3_LIST_CAP_Y = 196;
+const int P3_LIST_Y     = 218;
+const int P3_ROW_H      = 52;
+const int P3_ROW_STEP   = 60;
+// Inside a row, from its own y - clear boxes again, not glyphs:
+//   +0..+1     border
+//   +9..+26    name       P3_ROW_NAME_DY, T_BODY (the live dot shares this line)
+//   +29..+46   state      P3_ROW_SUB_DY,  T_BODY
+//   +47..+49   pad
+//   +50..+51   border                                              = 52
+// The dot is NOT given a y of its own: it is centred on the name line
+// (P3_ROW_NAME_DY + uiLineH(T_BODY) / 2 = 18), the same "the icon's y IS its
+// neighbouring text's y" rule every icon-beside-text surface in this sketch uses,
+// so a font change moves both together.
+const int P3_ROW_NAME_DY = 10, P3_ROW_SUB_DY = 30;
+// The dot's radius, and the text column that clears it. drawConnDot fills
+// cx-r-1..cx+r+1, so at cx = CARD_X + PAD + P3_ROW_DOT_R the dot's own box starts
+// one pixel left of CARD_X + PAD and ends at 39, against text at 30 + 18 = 48.
+const int P3_ROW_DOT_R   = 4;
+const int P3_ROW_TEXT_DX = 18;
+const int P3_X_W         = 40;   // "forget" hit zone at the right edge (>= a fingertip)
+// The state line's padded width, and its cache. "connected, 9999s ago" is the
+// widest the row can draw - the age is capped at 9999s for exactly that reason -
+// and 20 * 8 = 160px from x=48 ends at 208, clear of the "x" zone which starts at
+// CARD_X + CARD_W - P3_X_W = 268.
+//
+// "LAST SEEN" IS BOOT-SCOPED AND THE ROW SAYS SO. There is no persisted lastSeen
+// anywhere: HostPairing carries id, label and secret and nothing else, so the only
+// timestamp that exists is hostLinks[].lastPayloadMillis, which survives a link
+// going stale (pruneStaleLinks clears `used`, not the slot) but not a reboot and
+// not that slot being reused for another Mac. So a Mac with no slot reads "not
+// seen since boot" rather than inventing an age - the same rule that makes the
+// Codex row draw "--" and never "0%".
+const int P3_SUB_CHARS = 20;
+const int P3_SUB_BYTES = P3_SUB_CHARS + 1;
+
 // ---------- SETTINGS page 2: the action buttons ----------
 // H_BTN, where board 1 had to drop to 38 because four buttons plus a hint would
 // not fit at 44 - so these are the one control on this page that was UNDER the
