@@ -43,6 +43,9 @@ const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 const B = {};
 for (const b of [1, 2]) B[b] = consts("deckhand_display.ino", consts(HDR[b]));
 const SET_CACHE = cacheSizes("deckhand_display.ino");   // the settings caches live in the main file
+// The main file's own TEXT, for a claim that is about a DECLARATION rather than
+// about a constant's value.
+const SRC_MAIN = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
 // Charge-estimator thresholds, PARSED out of power.ino rather than transcribed -
 // the same drift discipline batt-trend-check.py uses, and for the same reason: the
 // widest string the battery row can draw is a function of these two.
@@ -375,11 +378,17 @@ const KNOWN = {
 };
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0, known = 0;
+// THE MESSAGES, not just the count. With two faults injected at once a bare total
+// cannot say that BOTH were caught - one fault firing twice looks identical to two
+// faults firing once - and "caught" alone cannot tell the assertion that exists for
+// a fault from an unrelated crash. Same reason wire-bytes-check.mjs's selftest names
+// which assertion caught each of its injected faults.
+const FAILED = [];
 let CUR = 1;
 function chk(cond, msg) {
   if (!cond && KNOWN[CUR].includes(msg)) { known++; console.log(` known  ${msg}`); return; }
   console.log(`${cond ? "  ok  " : " FAIL "} ${msg}`);
-  if (!cond) fail++;
+  if (!cond) { fail++; FAILED.push(msg); }
 }
 
 if (SELFTEST) {
@@ -392,6 +401,17 @@ if (SELFTEST) {
   // that merely echoed the header's own arithmetic back would pass.
   B[2].KB_META_DY += 9;
   console.log("--selftest: board 2's keyboard meta row pushed 9px onto the first text line; the meta-row assertion MUST fail");
+  // AND ONE FAULT FROM THE SETTINGS REDESIGN, because the injection above predates
+  // it and a selftest that only exercises the keyboard says nothing about HOME.
+  // +1 on the row height, which is the smallest change there is: HOME's five rows
+  // and four gaps are pitched to land EXACTLY on contentBottom(), so one extra row
+  // of height per card puts the fifth row 5px past the bottom of the content area
+  // and under the footer. It is caught by the pitch IDENTITY rather than by a
+  // clearance, which is the point of asserting the identity: a +1 leaves every
+  // individual row still inside its own card and still a touch target, so nothing
+  // measuring one row can see it.
+  B[2].HOME_ROW_H += 1;
+  console.log("--selftest: board 2's HOME row height raised by 1; the pitch identity MUST fail");
 }
 
 console.log(`\nvoice-confirm panel (lane CARD_W - 8, NOT the keyboard's CARD_W - 12), ` +
@@ -448,12 +468,46 @@ for (const b of [1, 2]) {
 
   // ================= SETTINGS: HOME and the back band (board 2 only) =================
   if (b === 2) {
+    // ---- the six page ids, which are an ORDINAL RANGE and not just names ----
+    // Nothing here is geometry, and that is exactly why it was uncovered: the sweep
+    // reported all seven of these as constants the branch ADDED and no assertion
+    // reads. They are load-bearing anyway, in three separate places that all fail
+    // SILENTLY:
+    //   - `int settingsPage = 0;` is SHARED with board 1, so board 2 boots into
+    //     whichever id is 0. The initialiser is PARSED below rather than restated,
+    //     because a checker that transcribed the 0 would still pass if someone
+    //     changed the declaration.
+    //   - drawSettingsHomeStatic() and the HOME hit test both walk
+    //     `SET_STATUS + i` for i in [0, SET_GROUP_COUNT), so the ids have to be
+    //     consecutive in the order the rows are drawn AND the last one has to land
+    //     on SET_ACTIONS - which is also what openSettingsGroup()'s
+    //     `constrain(g, SET_STATUS, SET_ACTIONS)` clamps against.
+    //   - settingsGroupTitle() names four cases and RETURNS "Actions" from its
+    //     default, so an id that has drifted out of the run does not error: it
+    //     draws a row labelled Actions that opens something else.
+    {
+      const m = SRC_MAIN.match(/^int settingsPage = (-?\d+);/m);
+      if (!m) throw new Error("settingsPage's declaration not found in deckhand_display.ino");
+      chk(c.SET_HOME === +m[1],
+          `SET_HOME ${c.SET_HOME} == the shared \`int settingsPage = ${+m[1]};\` the device boots with`);
+      const ids = [["SET_STATUS", c.SET_STATUS], ["SET_DISPLAY", c.SET_DISPLAY],
+                   ["SET_SOUND", c.SET_SOUND], ["SET_PAIRING", c.SET_PAIRING],
+                   ["SET_ACTIONS", c.SET_ACTIONS]];
+      for (let i = 0; i < ids.length; i++)
+        chk(ids[i][1] === c.SET_HOME + 1 + i,
+            `${ids[i][0]} is HOME + ${1 + i} (${ids[i][1]} == ${c.SET_HOME + 1 + i}): HOME's row ${i} draws SET_STATUS + ${i}`);
+      chk(c.SET_GROUP_COUNT === c.SET_ACTIONS - c.SET_STATUS + 1,
+          `SET_GROUP_COUNT ${c.SET_GROUP_COUNT} == SET_ACTIONS - SET_STATUS + 1 (${c.SET_ACTIONS - c.SET_STATUS + 1}): the last HOME row lands on SET_ACTIONS`);
+    }
     // HOME's pitch is derived to land exactly on contentBottom(). Asserting the
     // IDENTITY rather than the number is what makes a row-height change fail here
-    // instead of silently eating the bottom row.
-    const homeEnd = c.HOME_Y0 + 5 * c.HOME_ROW_H + 4 * c.HOME_GAP + c.HOME_Y0_BOT;
+    // instead of silently eating the bottom row. The row COUNT is SET_GROUP_COUNT,
+    // not a literal 5 - the loop that draws them counts with it, and transcribing
+    // the 5 here left that constant unswept.
+    const homeRows = c.SET_GROUP_COUNT;
+    const homeEnd = c.HOME_Y0 + homeRows * c.HOME_ROW_H + (homeRows - 1) * c.HOME_GAP + c.HOME_Y0_BOT;
     chk(homeEnd === contentBottom,
-        `HOME's five rows land exactly on contentBottom: ${homeEnd} == ${contentBottom}`);
+        `HOME's ${homeRows} rows land exactly on contentBottom: ${homeEnd} == ${contentBottom}`);
     chk(c.HOME_ROW_H >= c.TAP_MIN,
         `a HOME row is a touch target: ${c.HOME_ROW_H} >= TAP_MIN ${c.TAP_MIN}`);
     // The row's own stack must clear its 2px card border at both ends.
@@ -1243,6 +1297,35 @@ for (const b of [1, 2]) {
       const below = contentBottom - 1 - hi1;
       chk(above < below,
           `the hint is attached to POWER OFF, not to the footer: ${above} above < ${below} below`);
+      // AND IT IS PINNED, not merely nearer. P2_HINT_Y is the LAST thing on this
+      // page, which is exactly why it lost its guard: every other block on every
+      // group is bounded from both sides by the walk above - clear of the thing
+      // before it, cleared by the thing after it - and this one has nothing after
+      // it but trailing air. The levelling that took P2_TOP 16 -> 12 gave the page
+      // 8 more rows of that air and widened the `above < below` slack from 32 to
+      // 40, at which point geom-sweep.mjs reported P2_HINT_Y unguarded at +-16 in
+      // BOTH directions: a constant this branch had just moved.
+      //
+      // What pins it is the STEP a T_META label takes from the control it is bound
+      // to. SET_CAP_STEP is that step everywhere else in this redesign - a
+      // caption's own datum to the top of the control it heads - and the hint takes
+      // the same step in the other direction, from POWER OFF's bottom to its own
+      // MC_DATUM centre. Two things about that are stated rather than left to be
+      // rediscovered:
+      //   - THE DATUMS DIFFER, so this is a step-for-step equality and NOT an equal
+      //     air gap. The danger caption's ink stops 8 rows above the button it
+      //     heads; the hint's ink starts 18 rows below the button it explains. What
+      //     the two share is the named offset, not the white space. Anyone who
+      //     wants the INK equal instead has to move P2_HINT_GAP and re-derive this.
+      //   - It is asserted against SET_CAP_STEP and deliberately NOT against
+      //     P2_HINT_GAP, which is how P2_HINT_Y is DERIVED one file over. A
+      //     derivation compared with its own term cannot fail - this branch shipped
+      //     that shape twice and caught it twice - and routing through SET_CAP_STEP
+      //     is also what makes P2_HINT_GAP guarded, since perturbing it moves the
+      //     left side alone.
+      const step = c.P2_HINT_Y - (c.P2_PWR_Y + c.P2_BTN_H);
+      chk(step === c.SET_CAP_STEP,
+          `the hint takes a caption's step from POWER OFF's bottom: ${step} == SET_CAP_STEP ${c.SET_CAP_STEP}`);
     }
     for (const l of ["CALIBRATE TOUCH", "RESET PAIRING", "POWER OFF"])
       chk(widthB(b, 2, l) + 2 * c.SP_3 + c.P2_SPINE_W <= c.CARD_W,
@@ -1581,8 +1664,22 @@ for (const b of [1, 2]) {
 }
 console.log(`\n${fail} failures, ${known} known-and-documented board-1 shortfalls`);
 if (SELFTEST) {
-  if (fail === 0) { console.log("SELFTEST FAILED: the checker did not notice the moved meta row"); process.exit(1); }
-  console.log(`selftest ok - the injected fault produced ${fail} failure(s)`);
+  // EXIT 0 ONLY WHEN EVERY INJECTED FAULT IS CAUGHT BY THE ASSERTION THAT EXISTS
+  // FOR IT. Matching the message rather than counting is what makes that a claim
+  // per fault: a checker blind to one of the two would otherwise still print a
+  // non-zero total and pass.
+  const WANT = [
+    ["the moved keyboard meta row", /^meta row ends \d+ before the first text line/],
+    ["the raised HOME row height", /^HOME's \d+ rows land exactly on contentBottom/],
+  ];
+  let missed = 0;
+  for (const [what, re] of WANT) {
+    const hit = FAILED.find(m => re.test(m));
+    if (hit) console.log(`selftest: ${what} was caught by - ${hit}`);
+    else { console.log(`SELFTEST FAILED: the checker did not notice ${what}`); missed++; }
+  }
+  if (missed) process.exit(1);
+  console.log(`selftest ok - ${WANT.length} injected faults, ${WANT.length} caught by name (${fail} failure(s) in total)`);
   process.exit(0);
 }
 if (fail) process.exit(1);
