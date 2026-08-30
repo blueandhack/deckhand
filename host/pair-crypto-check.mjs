@@ -31,6 +31,13 @@ import * as real from "./pair-crypto.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PAIRING_INO = path.join(REPO, "firmware", "deckhand_display", "pairing.ino");
+// Task 2 put the pairing WINDOW in pairing.ino but its close sites in the two
+// files that own the events - a tab switch and the two sleeps. An assertion
+// that only read pairing.ino could not tell "closes on sleep" from "has a
+// function that would close on sleep if anyone called it", which is the same
+// hole the constant-time assertion below already fell into once.
+const MAIN_INO = path.join(REPO, "firmware", "deckhand_display", "deckhand_display.ino");
+const POWER_INO = path.join(REPO, "firmware", "deckhand_display", "power.ino");
 
 // ---------------------------------------------------------------------------
 // THE PINNED VECTOR
@@ -236,10 +243,14 @@ function fnBody(text, name) {
   return null;
 }
 
-// srcText lets --selftest run this suite against a MUTATED copy of pairing.ino
-// without writing to the tree; unset, it reads the real file.
-function sourceSuite(ok, srcText) {
-  const src = srcText != null ? srcText : fs.readFileSync(PAIRING_INO, "utf8");
+// `over` lets --selftest run this suite against MUTATED copies of the three
+// files without writing to the tree; an absent key reads the real file.
+function sourceSuite(ok, over) {
+  const o = over || {};
+  const src = o.pairing != null ? o.pairing : fs.readFileSync(PAIRING_INO, "utf8");
+  const strip = (t) => t.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  const mainCode = strip(o.main != null ? o.main : fs.readFileSync(MAIN_INO, "utf8"));
+  const powerCode = strip(o.power != null ? o.power : fs.readFileSync(POWER_INO, "utf8"));
   // Comments are stripped so a derivation QUOTED in a comment cannot satisfy an
   // assertion about the code - the trap panel_shim.cpp's invertColor note
   // records, where a text match passed while the line was compiled out.
@@ -383,6 +394,127 @@ function sourceSuite(ok, srcText) {
       new RegExp(`mbedtls_platform_zeroize\\(\\s*${n}\\b`).test(vrBody || ""));
   }
 
+
+  // =========================================================================
+  // TASK 2: THE WINDOW, THE HANDLERS AND THE STORAGE.
+  //
+  // Everything above this point guards ARITHMETIC. These guard the code that is
+  // reached by bytes off the radio, so the properties they pin are the ones a
+  // reviewer would otherwise have to re-derive by reading: that both fields are
+  // validated before either is used, that a full store is refused before any key
+  // exists, that the proof is compared in constant time, that the window really
+  // does die on a tab switch and on sleep, and that no secret ever reaches a
+  // Serial.print or the wire.
+  // =========================================================================
+  const reqBody = fnBody(block, "handlePairReq") || "";
+  const okBody = fnBody(block, "handlePairOk") || "";
+  const cancelBody = fnBody(block, "handlePairCancel") || "";
+  const wipeBody = fnBody(block, "pairWipe") || "";
+  const closeBody = fnBody(block, "pairClose") || "";
+  const hexBody = fnBody(block, "pairHexToBytes") || "";
+  const replyBody = fnBody(block, "pairReply") || "";
+  ok("WINDOW: all three handlers plus pairWipe/pairClose/pairReply are found",
+    [reqBody, okBody, cancelBody, wipeBody, closeBody, hexBody, replyBody]
+      .every((b) => b.length > 40));
+
+  // The length check the security review deferred here: every device-side entry
+  // point takes uint8_t[32], which decays to a pointer and can check nothing, so
+  // the hex parser is the only place a short string can be refused.
+  ok("WINDOW: pairHexToBytes refuses a string of the wrong length before parsing",
+    /if\s*\(\s*strlen\([^)]*\)\s*!=[^)]*\)\s*return false;/.test(hexBody));
+  ok("WINDOW: it also refuses a non-hex character rather than parsing a prefix",
+    /pairHexNibble/.test(hexBody) && /return false/.test(hexBody));
+
+  // Order, not mere presence: a validation that runs after the derivation has
+  // already spent the attacker's bytes.
+  const before = (body, a, b) => {
+    const ia = body.indexOf(a), ib = body.indexOf(b);
+    return ia >= 0 && ib >= 0 && ia < ib;
+  };
+  ok("WINDOW: PAIRREQ validates the hostId BEFORE it derives anything",
+    before(reqBody, "pairHostIdOk", "pairDeriveAll"));
+  ok("WINDOW: PAIRREQ validates the peer public key BEFORE it derives anything",
+    before(reqBody, "pairHexToBytes", "pairDeriveAll"));
+  // "before generating any key" is the brief's own wording, and esp_fill_random
+  // is the first byte of key material that exists.
+  ok("WINDOW: a FULL pairing store is refused before any key material exists",
+    before(reqBody, "pairHasRoomFor", "esp_fill_random") && /"full"/.test(reqBody));
+  ok("WINDOW: the store is re-checked at COMMIT too, so upsertHost can never recycle a slot",
+    /pairHasRoomFor/.test(okBody) && /"full"/.test(okBody));
+  ok("WINDOW: the label is sanitised rather than stored as it arrived",
+    /pairSanitiseLabel/.test(reqBody));
+  ok("WINDOW: a second PAIRREQ wipes the pending exchange before storing a new one",
+    before(reqBody, "pairWipe", "esp_fill_random"));
+
+  // The one comparison in this whole task that a timing attack can reach.
+  ok("WINDOW: PAIROK compares the proof with pairCtEq", /pairCtEq\s*\(/.test(okBody));
+
+  // Refusing with a LOGGED, NAMED reason: from the Mac, "not in pairing mode"
+  // and "not there" look identical, which is the rule POWERPROBE's refusal
+  // exists for.
+  for (const [n, b] of [["PAIRREQ", reqBody], ["PAIROK", okBody], ["PAIRCANCEL", cancelBody]]) {
+    ok(`WINDOW: ${n} refuses when the window is closed, and says so`,
+      /pairWindowOpen\s*\(\s*\)/.test(b) && /pairFail\s*\(/.test(b));
+  }
+
+  // PARSED, not transcribed: the fields are read out of their own declarations,
+  // so a field added later is covered by default rather than by memory.
+  const pairFields = [];
+  for (const m of block.matchAll(/^\s*(?:char|uint8_t)\s+(pair[A-Za-z0-9_]*)\s*\[/gm)) {
+    if (!pairFields.includes(m[1])) pairFields.push(m[1]);
+  }
+  ok(`WINDOW: the pending exchange's fields are found [${pairFields.join(", ")}]`,
+    pairFields.length >= 6);
+  for (const f of pairFields) {
+    ok(`WINDOW: pairWipe zeroizes ${f}`,
+      new RegExp(`mbedtls_platform_zeroize\\(\\s*${f}\\b`).test(wipeBody));
+  }
+  ok("WINDOW: pairClose WIPES rather than merely marking the window shut",
+    /pairWipe\s*\(\s*\)/.test(closeBody) && /pairWindowUntil\s*=\s*0/.test(closeBody));
+  ok("WINDOW: pairClose names the reason in the log",
+    /Serial\.printf/.test(closeBody) && /why/.test(closeBody));
+  ok("WINDOW: the deadline is compared as a SIGNED difference, so millis() wrap is safe",
+    /\(long\)\s*\(\s*millis\(\)\s*-\s*pairWindowUntil\s*\)/.test(block));
+
+  // The trailing address every device->host line already uses, so the OTHER
+  // paired Mac drops these instead of logging a failure it had no part in.
+  ok("WINDOW: pairReply appends the trailing to=<hostId> address",
+    /\bto=%s/.test(replyBody) && /snprintf/.test(replyBody));
+  ok("WINDOW: PAIRDONE goes out addressed", /"PAIRDONE %s"/.test(okBody) && /pairReply/.test(okBody));
+  ok("WINDOW: every PAIRFAIL goes out addressed through the same helper",
+    /"PAIRFAIL %s"/.test(fnBody(block, "pairFail") || "") &&
+    /pairReply/.test(fnBody(block, "pairFail") || ""));
+
+  // THE SECRET IS NEVER TRANSMITTED - the Critical constraint, as a rule over
+  // the source rather than a promise. One debugging printf would put the
+  // 128-bit key on the very link this design exists to keep it off, and the six
+  // digits on the wire would let a Mac skip the human the window exists for.
+  const SECRET_FIELDS = ["pairKeyHex", "pairProofWant", "pairPriv", "pairCodeDigits"];
+  const OUTBOUND = /Serial\.print|sendLineToHost|snprintf|sprintf/;
+  const leaks = [];
+  for (const line of block.split("\n")) {
+    if (SECRET_FIELDS.some((f) => line.includes(f)) && OUTBOUND.test(line)) leaks.push(line.trim());
+  }
+  ok(`WINDOW: no secret-bearing field reaches Serial or the wire ${leaks.length ? "[" + leaks.join(" | ") + "]" : ""}`,
+    leaks.length === 0);
+
+  // The close SITES, in the files that own the events. A window that outlives
+  // the screen showing its code is the one state that weakens the presence
+  // guarantee the whole design rests on.
+  ok("WINDOW: switchTab closes the window",
+    /pairClose\s*\(/.test(fnBody(mainCode, "switchTab") || ""));
+  ok("WINDOW: loop() ticks the timeout",
+    /pairTick\s*\(\s*\)/.test(fnBody(mainCode, "loop") || ""));
+  ok("WINDOW: the backlight blank closes the window",
+    /pairClose\s*\(/.test(fnBody(powerCode, "enterSleep") || ""));
+  ok("WINDOW: deep sleep closes the window",
+    /pairClose\s*\(/.test(fnBody(powerCode, "enterDeepSleep") || ""));
+  ok("WINDOW: the three wire verbs are dispatched",
+    /"PAIRREQ /.test(mainCode) && /"PAIROK /.test(mainCode) && /"PAIRCANCEL"/.test(mainCode));
+  ok("WINDOW: every close site and the dispatch sit behind BOARD_HAS_WIRELESS_PAIR",
+    (mainCode.match(/#if BOARD_HAS_WIRELESS_PAIR/g) || []).length >= 3 &&
+    (powerCode.match(/#if BOARD_HAS_WIRELESS_PAIR/g) || []).length >= 2);
+
   ok("SOURCE: the whole path is behind BOARD_HAS_WIRELESS_PAIR",
     /#if\s+BOARD_HAS_WIRELESS_PAIR/.test(code));
 
@@ -393,6 +525,15 @@ function sourceSuite(ok, srcText) {
     /^#define BOARD_HAS_WIRELESS_PAIR\s+0\b/m.test(b1));
   ok("SOURCE: board 2 declares BOARD_HAS_WIRELESS_PAIR 1",
     /^#define BOARD_HAS_WIRELESS_PAIR\s+1\b/m.test(b2));
+  // PARSED out of the board header rather than transcribed here, the rule the
+  // geometry checkers pay for repeatedly. Board 1 must NOT declare it: an alias
+  // for a window that board never opens is a name that looks right and means
+  // nothing, which is exactly what board_es3c35p.h's own comment refuses.
+  const winM = b2.match(/^const int PAIR_WINDOW_MS\s*=\s*(\d+);/m);
+  ok("WINDOW: board 2 declares PAIR_WINDOW_MS and it is 120s",
+    winM != null && Number(winM[1]) === 120000);
+  ok("WINDOW: board 1 declares none of the pairing-window constants",
+    !/PAIR_WINDOW_MS|PAIR_LABEL_BYTES|PAIR_HOSTID_CHARS/.test(b1));
 }
 
 // ---------------------------------------------------------------------------
@@ -483,7 +624,10 @@ function selftest() {
   // -------------------------------------------------------------------------
   const CT_ANCHOR = "bool pairCtEq(const char* a";
   const realSrc = fs.readFileSync(PAIRING_INO, "utf8");
-  const inject = (fn) => realSrc.replace(CT_ANCHOR, `${fn}\n${CT_ANCHOR}`);
+  const realMain = fs.readFileSync(MAIN_INO, "utf8");
+  const realPower = fs.readFileSync(POWER_INO, "utf8");
+  const inject = (fn) => ({ pairing: realSrc.replace(CT_ANCHOR, `${fn}\n${CT_ANCHOR}`) });
+  const P = (from, to) => ({ pairing: realSrc.replace(from, to) });
   const sourceFaults = [
     ["a proof compare using strcmp is added beside pairCtEq (reviewer's injection 1)",
       inject("bool pairVerifyProof(const char* got, const char* want) { return strcmp(got, want) == 0; }")],
@@ -491,13 +635,49 @@ function selftest() {
       inject("bool pairVerifyProof(const uint8_t* got, const uint8_t* want) { return memcmp(got, want, 16) == 0; }")],
     ["a key compare using == is added (no compare FUNCTION, so only the operand rule sees it)",
       inject("bool pairKeyEq(const uint8_t* key, const uint8_t* want) { return key == want; }")],
-    ["pairCtEq's only call site is removed, leaving the definition standing",
-      realSrc.replace("pairCtEq((const char*) s1, (const char*) s2, 32)", "true")],
+    // BOTH call sites, because task 2 added one: with only the PAIRVECTOR site
+    // removed the "pairCtEq is CALLED" assertion would still pass, and a fault
+    // a checker no longer notices is worse than a fault it never covered.
+    ["every pairCtEq call site is removed, leaving the definition standing",
+      P("pairCtEq((const char*) s1, (const char*) s2, 32)", "true").pairing
+        .replace("!pairCtEq(got.c_str(), pairProofWant, 32)", "false")],
     ["one zeroize is dropped from pairDeriveAll",
-      realSrc.replace("  mbedtls_platform_zeroize(key, sizeof(key));\n", "")],
+      P("  mbedtls_platform_zeroize(key, sizeof(key));\n", "")],
     ["the device's two HKDF info strings collapse to one",
-      realSrc.replace('#define PAIR_KEY_INFO   "deckhand-key/1"',
-                      '#define PAIR_KEY_INFO   "deckhand-sas/1"')],
+      P('#define PAIR_KEY_INFO   "deckhand-key/1"',
+        '#define PAIR_KEY_INFO   "deckhand-sas/1"')],
+
+    // ---- Task 2: the window, the handlers and the storage ----
+    ["the hex parser stops enforcing the length (the uint8_t[32] hole)",
+      P("  if (strlen(s) != nBytes * 2) return false;\n", "")],
+    ["PAIRREQ stops validating the hostId before using it",
+      P('  if (!pairHostIdOk(id.c_str())) { pairFail("badhost", NULL); return; }\n', "")],
+    ["a FULL pairing store is only noticed AFTER the keypair is generated",
+      P('  if (!pairHasRoomFor(id.c_str())) { pairFail("full", id.c_str()); return; }\n\n  pairWipe();',
+        "  pairWipe();")],
+    ["PAIROK compares the proof with strcmp instead of pairCtEq",
+      P("!pairCtEq(got.c_str(), pairProofWant, 32)", "strcmp(got.c_str(), pairProofWant) != 0")],
+    ["one field is dropped from pairWipe",
+      P("  mbedtls_platform_zeroize(pairKeyHex, sizeof(pairKeyHex));\n", "")],
+    ["pairClose marks the window shut without wiping the exchange",
+      P("  pairWipe();\n  if (wasOpen) Serial.printf", "  if (wasOpen) Serial.printf")],
+    ["PAIRDONE/PAIRFAIL stop carrying the to=<hostId> address",
+      P('snprintf(out, sizeof(out), "%s to=%s", line, hostId);',
+        "strlcpy(out, line, sizeof(out));")],
+    ["a debugging printf puts the derived 128-bit key on the wire",
+      P('  Serial.printf("PAIR: -> PAIRFAIL %s\\n", reason);',
+        '  Serial.printf("PAIR: -> PAIRFAIL %s key=%s\\n", reason, pairKeyHex);')],
+    ["PAIROK stops refusing a closed window",
+      P('  if (!pairWindowOpen()) { pairFail("closed", NULL); return; }\n  if (!pairPending)',
+        "  if (!pairPending)")],
+    ["a tab switch no longer closes the window",
+      { main: realMain.replace('  pairClose("tab switch");\n', "") }],
+    ["loop() stops ticking the 120s timeout",
+      { main: realMain.replace("  pairTick();", "  //pairTick();") }],
+    ["the backlight blank no longer closes the window",
+      { power: realPower.replace('  pairClose("screen blanked");\n', "") }],
+    ["deep sleep no longer closes the window",
+      { power: realPower.replace('  pairClose("powering off");\n', "") }],
   ];
 
   let caught = 0;
@@ -512,14 +692,22 @@ function selftest() {
     }
   }
   let srcCaught = 0;
-  for (const [name, text] of sourceFaults) {
-    if (text === realSrc) {
+  for (const [name, mut] of sourceFaults) {
+    // A fault whose anchor has MOVED applies nothing and would then be reported
+    // as caught by whatever else happens to fail - so an unapplied injection is
+    // named as a miss rather than counted.
+    const over = typeof mut === "string" ? { pairing: mut } : mut;
+    const unchanged =
+      (over.pairing == null || over.pairing === realSrc) &&
+      (over.main == null || over.main === realMain) &&
+      (over.power == null || over.power === realPower);
+    if (unchanged) {
       console.log(`  MISSED  ${name}  <- the injection did not apply (anchor moved)`);
       continue;
     }
     const fails = [];
     const okf = (n, cond) => { if (!cond) fails.push(n); };
-    try { sourceSuite(okf, text); } catch (e) { fails.push(`THREW: ${e.message}`); }
+    try { sourceSuite(okf, over); } catch (e) { fails.push(`THREW: ${e.message}`); }
     if (fails.length) {
       srcCaught++;
       console.log(`  caught  ${name}`);

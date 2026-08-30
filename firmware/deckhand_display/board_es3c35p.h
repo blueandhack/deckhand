@@ -52,6 +52,14 @@
 // docs/superpowers/specs/2026-08-30-wireless-pairing.md, and pairing.ino for
 // the derivations - which must agree with host/pair-crypto.mjs byte for byte.
 #define BOARD_HAS_WIRELESS_PAIR 1
+// The three constants that pairing window needs, here rather than in
+// pairing.ino for the reason every other per-board number is: a board header is
+// what a checker PARSES, and a literal buried in a handler is what drifts. They
+// are declared ONLY here - board 1 compiles none of the code that reads them,
+// so an alias in its header would be a name that looks right and means nothing.
+const int PAIR_WINDOW_MS = 120000;   // one window, 120s - see the spec's presence argument
+const int PAIR_LABEL_BYTES = 20;     // the requesting Mac's label incl NUL; matches HostPairing::label
+const int PAIR_HOSTID_CHARS = 8;     // a hostId is EXACTLY 8 hex characters (the Mac's crypto.randomBytes(4))
 // NO TOUCH WAKE FROM DEEP SLEEP, and this is a silicon fact rather than a gap
 // in the port. Both ext0 and ext1 wake ONLY from an RTC GPIO, and on the S3 the
 // RTC set is GPIO0..21 - read out of the installed headers rather than assumed:

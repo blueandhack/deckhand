@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386934, RAM 69804 | flash 1017194, RAM 66012 |
+| size today | flash 1386934, RAM 69804 | flash 1020274, RAM 66156 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -745,8 +745,8 @@ shared secret, so the 128-bit pairing key is **never transmitted** - both ends d
 `docs/superpowers/specs/2026-08-30-wireless-pairing.md`.
 
 ```
-node host/pair-crypto-check.mjs              # 41 crypto + 35 source assertions
-node host/pair-crypto-check.mjs --selftest   # 13/13 module + 6/6 SOURCE faults, each naming its assertion
+node host/pair-crypto-check.mjs              # 41 crypto + 70 source assertions
+node host/pair-crypto-check.mjs --selftest   # 13/13 module + 19/19 SOURCE faults, each naming its assertion
 echo "PAIRVECTOR" > ~/.claude/deckhand-device-command   # the DEVICE's half, on hardware
 ```
 
@@ -842,6 +842,69 @@ the poll loop forever" class arriving by a different door - the host looks alive
 keeps logging, and nothing ticks. The DEVICE side is unverified: whether `mbedtls_ecp_mul` refuses a
 low-order Montgomery point or returns the all-zero secret has not been measured. Recorded at
 `pairX25519` so it is read by whoever calls it next.
+
+**THE WINDOW IS THE PRESENCE GUARANTEE, NOT THE CRYPTO, WHICH IS WHY IT DIES IN FOUR PLACES.**
+The cable's security value was proof that a person was HOLDING the device; here that proof is a tap
+that opens a **120s** window (`PAIR_WINDOW_MS` in `board_es3c35p.h`), and every handler refuses with
+a **logged, named** reason while it is shut - the rule `POWERPROBE`'s `not on battery` refusal
+exists for, since from the Mac "not in pairing mode" and "not there" look identical. So a window
+left open by someone who wandered off is the one state that would make this weaker than the cable,
+and `pairClose()` is called from a **tab switch**, from the **backlight blank**, from **deep sleep**
+and from the **timeout in `loop()`**. It WIPES rather than marking the window shut: the ephemeral
+private key, the derived 128-bit key, the proof and the six digits all go through
+`mbedtls_platform_zeroize`, and the field list a checker asserts against is PARSED out of the
+declarations, so a field added later is covered by default.
+
+**THE LENGTH CHECK HAD TO LAND IN THE HEX PARSER, and that is the finding the task-1 security
+review deferred rather than a tidy-up.** `pairX25519`/`pairDeriveAll` take `uint8_t[32]`
+parameters, which decay to pointers and can enforce nothing, so a short `pubA` would leave the tail
+of the destination holding whatever the stack held before. `pairHexToBytes(s, nBytes, out)` refuses
+the whole string unless `strlen(s) == nBytes * 2` and every character is hex - and `PAIRREQ`
+validates BOTH the hostId (exactly 8 hex) and the key **before either is used**, which is asserted
+as an ORDER (`pairHostIdOk` and `pairHexToBytes` before `pairDeriveAll`) rather than as presence.
+
+**`MAX_HOSTS` IS 4 AND FULL IS FULL - CHECKED TWICE, AND THE SECOND CHECK IS THE INTERESTING ONE.**
+`PAIRREQ` answers `PAIRFAIL full` **before `esp_fill_random` runs**, so no key material exists for a
+Mac that cannot be stored. It is re-checked at COMMIT inside `PAIROK`, because `upsertHost()`'s own
+full-behaviour is to **RECYCLE SLOT 0** - correct for a deliberate USB `PROVISION`, and a silent
+destruction of a key the user still wanted if a USB `PROVISION` fills the last slot while a radio
+window is open. Task 3 makes the first path unreachable from the UI; never rely on a UI to enforce
+a storage limit.
+
+**The derived key is stored as its 32-character lowercase HEX**, which is the form the USB
+`PROVISION` path already stores and the form `authHmacFor()` keys the answer HMAC with (it hashes
+the ASCII of the secret, not 16 raw bytes) - so a wirelessly paired Mac answers prompts through
+exactly the same code path, with no second format anywhere. `upsertHost()` performs `saveHostSlot()`
+and `saveHostCount()` itself; calling them again would be a second NVS write of identical bytes.
+
+**`PAIRDONE`/`PAIRFAIL` carry the trailing `to=<hostId>`, built HERE rather than by
+`sendLineToHost(line, link)`** - that overload addresses by LINK index, and a Mac that is pairing
+has not necessarily sent a tick payload yet, so it may own no `hostLinks` slot and would silently
+come out as a broadcast. The hostId is the thing we actually know. `PAIRPUB` is deliberately
+unaddressed, per the spec's own wire table.
+
+**A second `PAIRREQ` REPLACES the pending one** (a lost first attempt must be recoverable without
+walking back to the device) and **the displayed code changes with it**, which the person standing in
+front of the glass sees.
+
+**THE SECRET REACHES NO `Serial.print` AND NO `sendLineToHost`, AND THAT IS A RULE OVER THE SOURCE
+RATHER THAN A PROMISE.** `pair-crypto-check.mjs` scans every line of the pairing block and fails if
+one naming `pairKeyHex`, `pairProofWant`, `pairPriv` or `pairCodeDigits` also names an outbound
+call - one debugging printf would put the 128-bit key on the very link this design exists to keep it
+off. The six digits are on the GLASS for the same reason: a copy on the wire is a copy a Mac could
+use to skip the human, which is the whole thing that makes this equal to the cable.
+
+**VERIFIED ON HARDWARE, AND WHAT WAS NOT.** All three verbs dispatch and refuse a shut window over
+BOTH transports with the cause named (`PAIRFAIL closed` on the wire, `PAIR: -> PAIRFAIL closed` in
+the log), and `PAIRVECTOR` still prints RFC 7748's own values unchanged. **The accepting paths -
+`PAIRPUB`, `PAIRDONE`, `badproof`, `badhost`, `badkey`, `full` and the 120s expiry - have NOT run on
+hardware**, because nothing calls `pairOpen()` until Task 3 draws the button, and inventing a
+`PAIROPEN` command to reach them would be exactly the "a device you can put into pairing mode from
+the Mac" the presence argument forbids. They are covered structurally, not by execution.
+
+**Board 2 cost: +3,080 bytes of flash and +144 RAM** (1,017,194 / 66,012 -> 1,020,274 / 66,156),
+re-baselined deliberately. **Board 1 is `UNCHANGED`** at 1,386,934 / 69,804 - every line of this
+sits behind `#if BOARD_HAS_WIRELESS_PAIR`, including the three close sites in shared code.
 
 **Board 2 cost: +23,380 bytes of flash and +112 RAM** (993,814 / 65,900 -> 1,017,194 / 66,012),
 nearly all of it mbedtls's `ecp`/`hkdf` arriving in the link for the first time.

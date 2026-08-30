@@ -190,6 +190,12 @@ void tickScreenIdle() {
 
 void enterSleep() {
   isAsleep = true;
+#if BOARD_HAS_WIRELESS_PAIR
+  // A blanked screen cannot be showing a pairing code, and a window that
+  // outlives the screen is the "someone wandered off" state the whole presence
+  // argument rests on not existing.
+  pairClose("screen blanked");
+#endif
   // Backlight FIRST. It is the dominant load and it is instant, so the screen
   // goes dark at once rather than blanking in stages - and the slower panel
   // teardown then happens behind a dark screen where none of it is visible.
@@ -919,6 +925,9 @@ void updateBeep() {}
 // hold) and the automatic battery-idle sleep. Assumes a farewell has already
 // been drawn (or not) by the caller.
 void enterDeepSleep() {
+#if BOARD_HAS_WIRELESS_PAIR
+  pairClose("powering off");
+#endif
   tft.writecommand(0x28); // DISPOFF
   tft.writecommand(0x10); // SLPIN
   delay(120);             // ILI9341 datasheet minimum after SLPIN

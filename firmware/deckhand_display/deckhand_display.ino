@@ -3297,6 +3297,13 @@ void drawEmojiTestScreen(const char* only) {
 
 void switchTab(Tab newTab) {
   if (newTab == currentTab) return;
+#if BOARD_HAS_WIRELESS_PAIR
+  // The presence guarantee is the window, so it must not outlive the screen
+  // that shows the code. Leaving pairing mode armed while the user is three
+  // taps away on the USAGE tab is precisely the state that makes this weaker
+  // than the cable it replaces.
+  pairClose("tab switch");
+#endif
 #if !BOARD_USES_TFT_ESPI
   // Timed because "switching tabs feels slow" was a real report and the flush is
   // only part of it - the render has to be measured separately or the wrong half
@@ -5041,6 +5048,19 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // Same argument TEXTPROBE, AUDIOPROBE and COLORTEST already won: without the
     // instrument, the first real attempt is the test. See pairVectorReport().
     pairVectorReport();
+  } else if (buf.startsWith("PAIRREQ ")) {
+    // The three wireless-pairing verbs. Accepted over EITHER transport, unlike
+    // PROVISION, and that is the whole point rather than an oversight: nothing
+    // secret crosses this wire, so there is nothing for a listener to copy -
+    // what gates pairing is the 120s window a person opened by tapping the
+    // glass. Every handler refuses with a LOGGED reason when that window is
+    // shut, because from the Mac "not in pairing mode" and "not there" look
+    // identical - the rule POWERPROBE's "not on battery" refusal exists for.
+    handlePairReq(buf.substring(8));
+  } else if (buf.startsWith("PAIROK ")) {
+    handlePairOk(buf.substring(7));
+  } else if (buf == "PAIRCANCEL") {
+    handlePairCancel();
 #endif
   } else if (buf.startsWith("READTEST")) {
     // THE ASK READER IS OTHERWISE UNCAPTURABLE, and that is the same argument
@@ -5610,6 +5630,9 @@ void loop() {
   tickMicProcessing();  // no-op unless a capture is being processed
   tickWaitingWheel();   // no-op unless the standalone screen is on the glass
   tickAutoTheme();      // no-op unless the theme is set to AUTO
+#if BOARD_HAS_WIRELESS_PAIR
+  pairTick();           // no-op unless a pairing window is open; closes it at 120s
+#endif
 
   // The session-gated lit -> dim -> blank ladder. Replaces a bare
   // "blank after sleepTimeoutMs of no touch": that ignored whether anything was

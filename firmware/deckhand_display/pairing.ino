@@ -540,4 +540,303 @@ void pairVectorReport() {
   mbedtls_platform_zeroize(hexbuf, sizeof(hexbuf));
   mbedtls_platform_zeroize(line, sizeof(line));
 }
+
+// ===========================================================================
+// THE PAIRING WINDOW, THE WIRE HANDLERS AND THE STORAGE. BOARD 2 ONLY.
+//
+// Everything above this line is arithmetic that could be run against a pinned
+// test vector. Everything below it is reached by BYTES OFF THE RADIO, and the
+// difference is the whole reason the validation sits where it does.
+//
+// THE PRESENCE GUARANTEE IS THE WINDOW, NOT THE CRYPTO. The cable's security
+// value was proof that a person was HOLDING the device; here that proof is a
+// tap on the glass which opens a 120s window, and NOTHING below will pair while
+// that window is shut. So a window left open by someone who wandered off is the
+// one state that weakens the whole design - which is why pairClose() is called
+// from a tab switch, from the screen blanking, from deep sleep and from the
+// timeout, and why it WIPES rather than merely marking the window shut.
+//
+// THE SECRET IS NEVER TRANSMITTED. Only two public keys and a proof cross the
+// wire. pairKeyHex, pairProofWant, pairPriv and pairCodeDigits appear in no
+// Serial.print and no sendLineToHost anywhere below - host/pair-crypto-check.mjs
+// asserts that as a rule over the source text rather than as a promise, because
+// a single debugging printf would put the 128-bit key on the very link the
+// design exists to keep it off. The six digits are on the GLASS deliberately:
+// putting them on the wire would let a Mac skip the human, which is the one
+// thing that makes this equal to the cable.
+// ===========================================================================
+
+// The pending exchange, as plain globals rather than a struct: the Arduino build
+// inserts its generated prototypes ABOVE the sketch's first function definition,
+// so a type declared here could never appear in a signature anyway (the rule
+// HostPairing/SessionInfo already live under), and a struct nothing may name
+// buys nothing over named fields.
+unsigned long pairWindowUntil = 0;                 // millis deadline; 0 = closed
+bool pairPending = false;                          // a PAIRREQ was answered; awaiting PAIROK
+char pairHostId[12] = "";                          // the requesting Mac's hostId, 8 hex
+char pairLabel[PAIR_LABEL_BYTES] = "";             // its label, ASCII-sanitised and capped
+char pairCodeDigits[PAIR_CODE_DIGITS + 1] = "";    // the six digits Task 3 draws - GLASS ONLY
+uint8_t pairPriv[32];                              // our ephemeral private key - SECRET
+char pairKeyHex[PAIR_KEY_BYTES * 2 + 1] = "";      // the derived 128-bit key, hex - SECRET
+char pairProofWant[33] = "";                       // the proof we expect back - SECRET-DERIVED
+
+// millis() wraps, so the deadline is compared as a SIGNED difference rather than
+// with `millis() < pairWindowUntil` - which is wrong for the ~49.7 days after a
+// wrap and right for the 49.7 days before it, i.e. a bug that cannot be found by
+// testing. 0 means closed, and pairOpen() refuses to leave it at 0.
+bool pairWindowOpen() {
+  return pairWindowUntil != 0 && (long) (millis() - pairWindowUntil) < 0;
+}
+
+// EVERY FIELD, key material zeroized rather than assigned. mbedtls_platform_zeroize
+// and not memset for the reason pairDeriveAll already records: a memset whose
+// result is never read again is exactly what a compiler may delete. The hostId
+// and the label are not secret and are wiped anyway, because "clears every
+// field" is a rule that survives someone adding a field and "clears the secret
+// ones" is a rule that needs re-deciding each time.
+void pairWipe() {
+  mbedtls_platform_zeroize(pairPriv, sizeof(pairPriv));
+  mbedtls_platform_zeroize(pairKeyHex, sizeof(pairKeyHex));
+  mbedtls_platform_zeroize(pairProofWant, sizeof(pairProofWant));
+  mbedtls_platform_zeroize(pairCodeDigits, sizeof(pairCodeDigits));
+  mbedtls_platform_zeroize(pairHostId, sizeof(pairHostId));
+  mbedtls_platform_zeroize(pairLabel, sizeof(pairLabel));
+  pairPending = false;
+}
+
+// Shuts the window AND destroys the exchange. It sends nothing: a caller that
+// owes the Mac a PAIRFAIL sends it BEFORE closing, while the hostId is still
+// here to address it to. Logging the reason is not decoration - from the Mac,
+// a window that timed out and a device that stopped answering look identical.
+void pairClose(const char* why) {
+  bool wasOpen = pairWindowUntil != 0 || pairPending;
+  pairWindowUntil = 0;
+  pairWipe();
+  if (wasOpen) Serial.printf("PAIR: window closed (%s)\n", why ? why : "no reason given");
+}
+
+// TASK 3's ENTRY POINT, deliberately with no call site yet - the same shape
+// activeSecret() and primaryLink() already have in this repo, and said out loud
+// rather than left for a reader to wonder about. Nothing can pair until the
+// PAIR NEW MAC button exists, which is exactly the intended state.
+void pairOpen() {
+  pairWipe();
+  pairWindowUntil = millis() + (unsigned long) PAIR_WINDOW_MS;
+  if (pairWindowUntil == 0) pairWindowUntil = 1;   // 0 is the CLOSED sentinel
+  Serial.printf("PAIR: window open for %lds\n", (long) (PAIR_WINDOW_MS / 1000));
+}
+
+// PAIRDONE and PAIRFAIL carry the trailing to=<hostId> every device->host line
+// already uses, so the OTHER paired Mac drops them before logging instead of
+// recording a failure it had no part in - the noise that trains you to ignore
+// the one log line that means something.
+//
+// The suffix is built here rather than by sendLineToHost(line, link), which
+// addresses by LINK index: a Mac that is pairing has not necessarily sent a tick
+// payload yet, so it may own no hostLinks slot at all and would silently come
+// out as a broadcast. The hostId is the thing we actually know.
+void pairReply(const char* line, const char* hostId) {
+  char out[96];
+  if (hostId && *hostId) snprintf(out, sizeof(out), "%s to=%s", line, hostId);
+  else strlcpy(out, line, sizeof(out));
+  sendLineToHost(out);
+}
+
+void pairFail(const char* reason, const char* hostId) {
+  char line[64];
+  snprintf(line, sizeof(line), "PAIRFAIL %s", reason);
+  pairReply(line, hostId);
+  Serial.printf("PAIR: -> PAIRFAIL %s\n", reason);
+}
+
+// The timeout, from loop(). It says so on the WIRE as well as in the log when an
+// exchange was actually pending: the Mac is sitting on a dialog waiting for a
+// proof to be accepted, and silence there is indistinguishable from a device
+// that has gone away.
+void pairTick() {
+  if (pairWindowUntil == 0) return;
+  if ((long) (millis() - pairWindowUntil) < 0) return;
+  if (pairPending) pairFail("timeout", pairHostId);
+  pairClose("timed out");
+}
+
+int pairHexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// THE LENGTH CHECK LIVES HERE, AND THAT PLACEMENT IS THE FINDING THE SECURITY
+// REVIEW DEFERRED TO THIS TASK. Every device-side entry point above takes
+// uint8_t[32] parameters, which decay to pointers: they CANNOT check a length,
+// and a short hex string would leave the tail of the destination buffer holding
+// whatever the stack held before. So the one place that turns attacker-supplied
+// text into those 32 bytes is the one place that can enforce it, and it refuses
+// the whole string rather than parsing a prefix.
+bool pairHexToBytes(const char* s, unsigned int nBytes, uint8_t* out) {
+  if (!s || !out) return false;
+  if (strlen(s) != nBytes * 2) return false;
+  for (unsigned int i = 0; i < nBytes; i++) {
+    int hi = pairHexNibble(s[i * 2]);
+    int lo = pairHexNibble(s[i * 2 + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out[i] = (uint8_t) ((hi << 4) | lo);
+  }
+  return true;
+}
+
+// EXACTLY 8 hex characters. isHexHostId() alone accepts any length, which is
+// right where it is used (a link's id, already length-capped by copyField) and
+// wrong here, where this string becomes the NVS key a pairing is stored under.
+bool pairHostIdOk(const char* id) {
+  return id && strlen(id) == (unsigned int) PAIR_HOSTID_CHARS && isHexHostId(id);
+}
+
+// ASCII 0x20..0x7E and capped, because both faces on this device declare exactly
+// that range and an out-of-range byte draws nothing while still costing budget -
+// the rule the whole wire already follows. It is attacker-controlled text shown
+// beside the code, and it is DISPLAY-ONLY: nothing keys off it.
+void pairSanitiseLabel(const char* in, char* out, unsigned int outSize) {
+  unsigned int w = 0;
+  if (outSize == 0) return;
+  for (const char* p = in; in && *p && w + 1 < outSize; p++) {
+    char c = *p;
+    if (c >= 0x20 && c <= 0x7E) out[w++] = c;
+  }
+  out[w] = 0;
+  if (w == 0) strlcpy(out, "Mac", outSize);
+}
+
+// A free slot, or the slot this Mac already occupies (re-pairing a known Mac
+// replaces its key in place and is never "full").
+//
+// FULL IS FULL, and it is checked BEFORE any key is generated. upsertHost()'s
+// own behaviour when the store is full is to RECYCLE SLOT 0 - correct for a
+// deliberate USB PROVISION, and a silent destruction of a key the user still
+// wanted if a radio peer could reach it.
+bool pairHasRoomFor(const char* hostId) {
+  return findHost(hostId) >= 0 || hostCount < MAX_HOSTS;
+}
+
+// PAIRREQ <hostId:8hex> <pubA:64hex> <label...>
+//
+// A SECOND PAIRREQ WHILE ONE IS PENDING REPLACES IT. A first attempt whose
+// PAIRPUB was lost must be recoverable without the user walking back to the
+// device, and the displayed code CHANGES with the replacement - which the person
+// standing in front of it sees, and which is what stops a replacement being a
+// way to have someone read out a code for an exchange they are not looking at.
+void handlePairReq(const String& rest) {
+  if (!pairWindowOpen()) { pairFail("closed", NULL); return; }
+
+  String body = rest;
+  body.trim();
+  int sp1 = body.indexOf(' ');
+  if (sp1 < 0) { pairFail("badreq", NULL); return; }
+  String id = body.substring(0, sp1);
+  String tail = body.substring(sp1 + 1);
+  tail.trim();
+  int sp2 = tail.indexOf(' ');
+  String pubHex = sp2 < 0 ? tail : tail.substring(0, sp2);
+  String rawLabel = sp2 < 0 ? String("") : tail.substring(sp2 + 1);
+
+  // BOTH VALIDATED BEFORE EITHER IS USED - see pairHexToBytes.
+  if (!pairHostIdOk(id.c_str())) { pairFail("badhost", NULL); return; }
+  uint8_t pubA[32];
+  if (!pairHexToBytes(pubHex.c_str(), 32, pubA)) { pairFail("badkey", id.c_str()); return; }
+
+  // Before a single byte of key material exists.
+  if (!pairHasRoomFor(id.c_str())) { pairFail("full", id.c_str()); return; }
+
+  pairWipe();   // whatever was pending is gone before anything new is stored
+
+  uint8_t pubB[32], derivedKey[PAIR_KEY_BYTES];
+  esp_fill_random(pairPriv, sizeof(pairPriv));
+  pairClamp(pairPriv);
+  bool derived = pairDeriveAll(pairPriv, pubA, pubB, NULL,
+                               pairCodeDigits, derivedKey, pairProofWant);
+  if (derived) pairHexInto(derivedKey, PAIR_KEY_BYTES, pairKeyHex);
+  mbedtls_platform_zeroize(derivedKey, sizeof(derivedKey));
+  if (!derived) {
+    pairWipe();
+    pairFail("derive", id.c_str());
+    return;
+  }
+
+  strlcpy(pairHostId, id.c_str(), sizeof(pairHostId));
+  pairSanitiseLabel(rawLabel.c_str(), pairLabel, sizeof(pairLabel));
+  pairPending = true;
+
+  char hexbuf[65], line[80];
+  pairHexInto(pubB, 32, hexbuf);
+  snprintf(line, sizeof(line), "PAIRPUB %s", hexbuf);
+  sendLineToHost(line);
+  // The hostId and the label, never the code: the code's whole job is to be
+  // read off the GLASS by a person, and a copy on the wire is a copy a Mac
+  // could use to skip them.
+  Serial.printf("PAIR: request from %s (%s); code is on the glass\n", pairHostId, pairLabel);
+}
+
+// PAIROK <hmac:32hex>
+//
+// The proof is HMAC-SHA256(key, "deckhand-pairok/1")[:16] - what the Mac sends
+// to show it derived the same key WITHOUT sending the key. Forging it is a
+// 128-bit problem where guessing the six digits would be a 10^6 one, which is
+// why the device is never sent a guess at the code.
+void handlePairOk(const String& rest) {
+  if (!pairWindowOpen()) { pairFail("closed", NULL); return; }
+  if (!pairPending) { pairFail("noreq", NULL); return; }
+
+  String got = rest;
+  got.trim();
+  // Length in the clear, deliberately: it is fixed and public, so it carries
+  // nothing. The COMPARE below is the part that must not return early.
+  if (got.length() != 32) {
+    pairFail("badproof", pairHostId);
+    pairClose("the proof was the wrong length");
+    return;
+  }
+  // pairCtEq, never strcmp/memcmp/==: those return on the first differing byte,
+  // which leaks how many leading bytes were right and turns a 128-bit forgery
+  // into sixteen one-byte searches.
+  if (!pairCtEq(got.c_str(), pairProofWant, 32)) {
+    pairFail("badproof", pairHostId);
+    pairClose("the proof did not match");
+    return;
+  }
+  // Re-checked at COMMIT, not only at PAIRREQ: a USB PROVISION can fill the last
+  // slot while this window is open, and upsertHost() would then recycle slot 0.
+  if (!pairHasRoomFor(pairHostId)) {
+    pairFail("full", pairHostId);
+    pairClose("no free slot at commit");
+    return;
+  }
+
+  char id[12], label[PAIR_LABEL_BYTES];
+  strlcpy(id, pairHostId, sizeof(id));
+  strlcpy(label, pairLabel, sizeof(label));
+  // The key is stored as its 32-character lowercase hex, which is the form the
+  // USB PROVISION path already stores and the form authHmacFor() keys the answer
+  // HMAC with (it hashes the ASCII of the secret, not 16 raw bytes) - so a
+  // wirelessly paired Mac answers prompts through exactly the same code path.
+  // upsertHost() performs saveHostSlot() and saveHostCount() itself; calling
+  // them again here would be a second NVS write of identical bytes.
+  upsertHost(id, String(pairKeyHex), label);
+  pairClose("paired");
+
+  char line[48];
+  snprintf(line, sizeof(line), "PAIRDONE %s", id);
+  pairReply(line, id);
+  Serial.printf("PAIR: %s paired over the radio; the key was never transmitted\n", id);
+}
+
+// PAIRCANCEL - the Mac's dialog was dismissed.
+void handlePairCancel() {
+  if (!pairWindowOpen()) { pairFail("closed", NULL); return; }
+  char id[12];
+  strlcpy(id, pairHostId, sizeof(id));
+  pairClose("cancelled by the Mac");
+  pairFail("cancelled", id[0] ? id : NULL);
+}
+
 #endif  // BOARD_HAS_WIRELESS_PAIR
