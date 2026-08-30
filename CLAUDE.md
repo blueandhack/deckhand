@@ -749,8 +749,39 @@ shared secret, so the 128-bit pairing key is **never transmitted** - both ends d
 ```
 node host/pair-crypto-check.mjs              # the Mac's module, then pairing.ino read as TEXT
 node host/pair-crypto-check.mjs --selftest   # module + SOURCE fault injections, each naming its assertion
+node host/pair-exchange-check.mjs            # the HOST's state machine, sliced out of index.mjs and driven
+node host/pair-exchange-check.mjs --selftest # the two faults a whole-branch review injected, each named
 echo "PAIRVECTOR" > ~/.claude/deckhand-device-command   # the DEVICE's half, on hardware
 ```
+
+**THE STATE MACHINE HAD ZERO COVERAGE AND A REVIEW PROVED IT BY INJECTION, WHICH IS THE ONLY WAY
+THAT GAP WAS EVER GOING TO BE VISIBLE.** `pair-crypto-check.mjs` reads only the FIRMWARE sources and
+`--pair-check` drives Swift against synthetic JSON, so nothing exercised the Mac's exchange at all —
+and two deletions in `host/index.mjs` left **all 18 checkers and every selftest green**:
+`pairReplyIsOurs -> return true` (the per-exchange stamping that stops a late reply from an
+abandoned exchange poisoning the next one) and `pairEnd`'s `b.fill(0)` loop (priv/shared/key left
+live). Those are precisely the two defects the fix rounds of this branch were written to close, so
+they are the two `--selftest` re-injects.
+`pair-exchange-check.mjs` **SLICES the pairing region out of `index.mjs` by source text** and drives
+the real functions with noble-shaped stubs; a JS mirror would keep passing with the state machine
+deleted, which is the weakness this file already records in `sessions-rank-check.mjs`'s mirror half.
+The simulated device runs the SAME pinned derivations, so "the two codes agree" is an agreement
+rather than an echo. It prints its own assertion count — do not transcribe it here.
+**THE VACUITY TRAP IS WHAT ITS FIRST NINE ASSERTIONS ARE FOR.** The throwaway harness this grew from
+reported a clean pass while starting no exchange at all: its prelude was missing the BLE UUID
+constants, so discovery quietly found no characteristics. They are PARSED out of `index.mjs` now,
+every slice asserts it still contains a token only the real code has, and the suite proves an
+exchange opened, sent a real `PAIRREQ` and derived a code the device independently agrees with
+before anything downstream is worth reading. Timers are owned by the test — `pairArm`'s shortest
+fuse is 15s against a 120s window, so a real clock makes the timeout and scan-finish paths
+untestable.
+**`deviceNameFor(via)` HAD NO `"pair"` CASE**, so an `ANSWER`/`PROMPT` arriving on the
+unauthenticated pairing link was attributed to `usbDeviceName || selectedDevice`. It fails CLOSED
+either way — the HMAC is checked against that other Mac's key, which the peer does not have — but
+the refusal named the wrong subject, and a log line that misnames its subject is the class this repo
+keeps paying for. It returns `""` now (no paired device, which is exactly true until `PAIRDONE`) and
+`senderDescription()` gives the four refusal sites a clause that tells the two facts apart: a device
+we could not identify, against a link that cannot have an identity yet.
 
 **A MISMATCH BETWEEN THE TWO SIDES ERRORS NOWHERE, which is the entire reason `PAIRVECTOR`
 exists.** The device derives with mbedtls and the Mac with node's `crypto`; if they disagree about a
@@ -1035,10 +1066,8 @@ lines sum exactly to the measured total. Compile an OLD commit somewhere other t
 `firmware/deckhand_display`: `arduino-cli` keys its cache on the sketch PATH, so a rebuild in place
 would evict the objects the current baseline was just taken from.
 
-**Board 2 cost: +23,380 bytes of flash and +112 RAM** (993,814 / 65,900 -> 1,017,194 / 66,012),
-nearly all of it mbedtls's `ecp`/`hkdf` arriving in the link for the first time.
-
-**THE +112 RAM IS NOT THE PINNED VECTORS, WHICH IS WHAT THE FIRST REPORT OF IT SAID.** Those are
+**THE CRYPTO COMMIT'S +112 RAM IS NOT THE PINNED VECTORS, WHICH IS WHAT THE FIRST REPORT OF IT
+SAID.** Those are
 file-scope `const uint8_t[32]` arrays: they land in `.flash.rodata`/DROM, and `.dram0.data` did not
 move by a single byte across the change - which is the positive evidence, not an argument. The whole
 +112 is `.dram0.bss`, and every byte of it is named, read out of the map file rather than guessed:
@@ -1274,8 +1303,8 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   and lets the rest follow.
   Of the unguarded ones only **8 on board 1 and 12 on board 2 are read by any
   checker at all** — the other 24 and 24 are mic, beeper, crab, pairing-duration and
-  preset-count constants with no geometry to violate. **Four of board 2's ten are unguarded BY CONSTRUCTION and are not a
-  gap** (as are the two `PAIR_*_MS` durations above): `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`,
+  preset-count constants with no geometry to violate. **Four of board 2's entries in THAT list are unguarded BY CONSTRUCTION
+  and are not a gap** (as are the two `PAIR_*_MS` durations above): `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`,
   `DETAIL_COL_LBL_STEP` and `DETAIL_COL_VAL_STEP` are
   board 1's arm only since §7 replaced the pill and the two column pairs with the band and one
   meta line, so nothing on board 2 reads them and no perturbation can move a board-2 number. They

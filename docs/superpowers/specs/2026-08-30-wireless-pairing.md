@@ -141,7 +141,15 @@ PAIRPUB <pubB:64hex>                              device -> Mac   (72)
 PAIROK  <hmac:32hex>                              Mac -> device   (40)   "the user clicked Match"
 PAIRDONE <hostId:8hex>                            device -> Mac   (18)   sent only after CONFIRM
 PAIRFAIL <reason>                                 device -> Mac
+PAIRCANCEL                                        Mac -> device   (11)   the Mac walked away
 ```
+
+`PAIRCANCEL` ships on both sides and is the Mac's half of the same courtesy `PAIRFAIL` is the
+device's: without it a Mac that cancels leaves the device holding its window open, showing six
+digits for a Mac that has gone away, until the 120s expires. It carries no argument and no address
+(`buf == "PAIRCANCEL"`) — there is nothing to say beyond the fact — and outside an open window the
+device answers `PAIRFAIL closed` rather than acting on it, the same refusal-with-a-reason shape
+`PAIRREQ` gets. The 11 bytes are the line and its newline.
 
 `PAIRDONE`/`PAIRFAIL` carry the trailing `to=<hostId>` address every device->host line already uses.
 `PAIRREQ` is accepted **only** over BLE-or-USB while the window is open; at every other moment it is
