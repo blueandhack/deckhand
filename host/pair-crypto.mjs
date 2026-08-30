@@ -116,11 +116,17 @@ function hkdf(shared, salt, info, len) {
   return Buffer.from(crypto.hkdfSync("sha256", asBuf(shared, SHARED_BYTES, "shared"), salt, info, len));
 }
 
-// The six digits the user reads off the device's screen and types into the Mac.
+// The six digits shown on BOTH screens for the user to COMPARE. Nothing is
+// typed anywhere: an earlier design had the code typed into the Mac and it was
+// broken, because the proof derives from the shared secret alone, so any peer
+// that completes the ECDH computes a valid one without ever seeing the code.
+// What commits is the tap on the device, bound to the peer that did the
+// exchange - see the spec's "the code must be COMPARED, not typed".
 // Read BIG-endian and taken modulo 10^6: the modulo is what makes it six
 // digits, and the zero padding is what stops a value under 100000 rendering as
-// five - a five-character code beside a six-character box reads as a bug, and
-// a comparison against an unpadded string would reject a valid code.
+// five - a five-character code on one screen beside a six-character code on
+// the other reads as a MISMATCH, which is the one thing this display must
+// never fake.
 export function deriveCode(shared, pubA, pubB) {
   const out = hkdf(shared, pairSalt(pubA, pubB), SAS_INFO, 4);
   return String(out.readUInt32BE(0) % CODE_MODULUS).padStart(CODE_DIGITS, "0");
@@ -134,8 +140,10 @@ export function deriveKey(shared, pubA, pubB) {
 }
 
 // What the Mac sends to prove it derived the same key, without sending the key.
-// Forging it is a 128-bit problem; guessing the code is a 10^6 one, which is
-// why the device is never sent a guess at the code.
+// Forging it is a 128-bit problem. It is HALF of a commit and never all of it:
+// any peer that completes the ECDH can compute a valid proof, so the device
+// stores nothing until a finger has also confirmed on the glass that the two
+// six-digit codes agree.
 export function pairProof(key) {
   return crypto
     .createHmac("sha256", asBuf(key, KEY_BYTES, "key"))
@@ -157,13 +165,20 @@ function ctEqualStrings(a, b) {
   return crypto.timingSafeEqual(ba, bb);
 }
 
+// NO RUNTIME CALLER, AND THAT IS DELIBERATE: the proof is verified by the
+// DEVICE (pairing.ino's pairCtEq), never by the Mac, which only ever sends one.
+// This is the Mac-side statement of the comparison that side has to make, kept
+// so pair-crypto-check.mjs can prove the constant-time property against a
+// module it can import - the firmware's own copy is only readable as text.
+// It is checker-only by design; do not wire it into the exchange.
 export function proofMatches(got, want) {
   return ctEqualStrings(got, want);
 }
 
-// The typed code against the one the Mac derived. This comparison happens
-// ENTIRELY on the Mac - the device never receives a guess - so a typo costs no
-// device interaction and there is no online guessing attack against the device.
-export function codeMatches(typed, want) {
-  return ctEqualStrings(typed, want);
-}
+// `codeMatches` USED TO LIVE HERE and is deleted rather than left dead. It
+// compared a code TYPED into the Mac against the one this module derived - the
+// discarded flow above, which no part of the shipping design performs: the two
+// codes are compared by a person, on two screens, and the commit is the tap.
+// A predicate for a step that does not exist, with four assertions certifying
+// it, is an instrument that flatters; this repo already deleted `macEmojiId`
+// for the same reason. `ctEqualStrings` stays - `proofMatches` still uses it.

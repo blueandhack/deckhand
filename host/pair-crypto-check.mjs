@@ -70,9 +70,9 @@ const V = {
 };
 
 // A SECOND vector whose only job is the leading zeros. 001472 has two of them,
-// so a code that is not zero-padded renders as "1472" - four characters in a
-// six-character box - and a comparison against the unpadded string would
-// reject a code the user typed correctly. privB here is
+// so a code that is not zero-padded renders as "1472" on one screen against
+// "001472" on the other - and the user is asked to COMPARE those two, so an
+// unpadded code reads as a mismatch on a perfectly good exchange. privB here is
 // clamp(SHA-256("deckhand-pair-zero-303")), found by search; it is pinned
 // rather than re-searched so the checker has no clock and no loop that could
 // silently stop finding one.
@@ -212,15 +212,6 @@ function suite(m, ok) {
     ok("PROOF: it is 32 lowercase hex characters", /^[0-9a-f]{32}$/.test(proof));
     ok("PROOF: a key of the wrong length is refused, not silently padded",
       (() => { try { m.pairProof(Buffer.alloc(8)); return false; } catch { return true; } })());
-  }
-
-  // ---- the typed code is compared the same way ----
-  {
-    ok("CODE: the right code matches", m.codeMatches(V.code, V.code));
-    ok("CODE: a one-digit-different code is rejected", !m.codeMatches("602174", V.code));
-    ok("CODE: an unpadded code is rejected rather than accidentally accepted",
-      !m.codeMatches("1472", Z.code));
-    ok("CODE: an empty entry is rejected", !m.codeMatches("", V.code));
   }
 }
 
@@ -850,8 +841,6 @@ function selftest() {
       wrap({ pairProof: (k) => crypto.createHmac("sha256", k).update("pairok").digest("hex").slice(0, 32) })],
     ["proofMatches accepts anything",
       wrap({ proofMatches: () => true })],
-    ["codeMatches compares only the first digit",
-      wrap({ codeMatches: (a, b) => a[0] === b[0] })],
     ["the code modulus is 10^5, so five-digit codes escape",
       wrap({ deriveCode: (s, a, b) => {
         const out = Buffer.from(crypto.hkdfSync("sha256", s, real.pairSalt(a, b), real.SAS_INFO, 4));
