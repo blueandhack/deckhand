@@ -756,6 +756,52 @@ void resetPairing() {
   renderSettingsTab();
 }
 // ----- Page 2: ACTIONS -----
+#if BOARD_SETTINGS_HOME
+// ----- The ACTIONS group (board 2) -----
+// THREE buttons, in TWO captioned sections. MIC TEST is not here - it lives on the
+// SOUND group, where a mic test belongs and where it is the one action you run
+// repeatedly. What that buys is the room to say WHICH of these is safe.
+//
+// Before this the four were uiButton with `filled` false, i.e. four identically
+// shaped outlined slabs differing only in stroke HUE - and this repo's rule is
+// that meaning never rests on colour alone. Severity now has three carriers:
+// POSITION (a captioned section of its own, separated by P2_SECTION_GAP), INK
+// MASS (a solid spine, which survives greyscale and every colour-vision
+// deficiency), and hue last.
+void drawActionCaption(const char* text, int y) {
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(text, CARD_X + PAD, y);
+}
+// The spine sits BORDER_CTRL inside the button's own left edge and runs from R_MD
+// to P2_BTN_H - R_MD, so it can never cross the rounded corner and paint over the
+// stroke it exists to reinforce - settings-geom-check.mjs asserts both bounds. Its
+// ends are rounded at P2_SPINE_W / 2 so it reads as a deliberate mark rather than
+// as a clipped edge, and its backdrop is COLOR_CARD because it is drawn ON the
+// button's interior fill, not on the page.
+void drawSeverityAction(int y, const char* label, uint16_t tint) {
+  uiButton(CARD_X, y, CARD_W, P2_BTN_H, label, tint);
+  uiFillRound(CARD_X + BORDER_CTRL, y + R_MD, P2_SPINE_W, P2_BTN_H - 2 * R_MD,
+              P2_SPINE_W / 2, tint, COLOR_CARD);
+}
+void drawActionsPageStatic() {
+  drawActionCaption("SETUP", P2_SETUP_CAP_Y);
+  uiButton(CARD_X, P2_CAL_Y, CARD_W, P2_BTN_H, "CALIBRATE TOUCH", COLOR_ACCENT);
+  drawActionCaption("CANNOT BE UNDONE", P2_DANGER_CAP_Y);
+  drawSeverityAction(P2_PAIR_Y, "RESET PAIRING", COLOR_WARN);
+  drawSeverityAction(P2_PWR_Y,  "POWER OFF",     COLOR_BAD);
+  // The hint has to match what the chip can actually do, the same rule the
+  // farewell screens and the standalone screen already follow: a board that
+  // cannot wake on touch must not promise one, because that reads as broken
+  // firmware where the truth reads as a device that told you.
+#if BOARD_HAS_TOUCH_SLEEP_WAKE
+  uiHint("power off = deep sleep, touch to wake", P2_HINT_Y);
+#else
+  uiHint("power off = deep sleep, RESET to wake", P2_HINT_Y);
+#endif
+}
+#else
 void drawActionsPageStatic() {
   // Four buttons, one component, escalating intent: accent = safe,
   // warn = changes pairing, bad = powers the device down. MIC TEST leads because
@@ -776,6 +822,7 @@ void drawActionsPageStatic() {
   uiHint("power off = deep sleep, RESET to wake", P2_PWR_Y + P2_BTN_H + SP_3);
 #endif
 }
+#endif
 // ----- Page 3 / the PAIRING group -----
 #if BOARD_SETTINGS_HOME
 // THE LIVE MAC ROWS LAND HERE (board 2). They used to be on the STATUS page too,
@@ -1348,14 +1395,19 @@ void handleSettingsTouch(int sx, int sy) {
       if (!everReceived) forceFullRepaint();
     }
   } else if (settingsPage == SET_ACTIONS) {
-    // MIC TEST is still here too until the ACTIONS group is rebuilt - see the
-    // SOUND group's note in board_es3c35p.h. Everything else asks first:
-    // recalibrating costs 5 taps, resetting pairing wipes every key, and powering
-    // off interrupts the display.
-    if (sy >= P2_MIC_Y && sy < P2_MIC_Y + P2_BTN_H) {
-      micMonitor();
-      if (!everReceived) forceFullRepaint();
-    } else if (sy >= P2_CAL_Y && sy < P2_CAL_Y + P2_BTN_H) {
+    // NO MIC TEST BRANCH: the button is drawn on the SOUND group now, and this
+    // page reserves no slot for it. A `sy >= P2_MIC_Y` test left behind here would
+    // not merely be dead - P2_MIC_Y does not exist on this board at all, and had
+    // it survived as a stale constant it would claim taps belonging to whatever
+    // now sits in that band. Removing the constant and the branch in one change is
+    // what makes the two unable to disagree.
+    //
+    // All three ask first: recalibrating costs 5 taps, resetting pairing wipes
+    // every key, and powering off interrupts the display. The gap between
+    // CALIBRATE and the destructive pair is inert rather than claimed by either -
+    // the same rule HOME's gaps and the Pairing cards follow, and it matters most
+    // here because the two rows below it destroy state.
+    if (sy >= P2_CAL_Y && sy < P2_CAL_Y + P2_BTN_H) {
       pendingConfirm = CFM_RECAL;         drawPendingConfirm();
     } else if (sy >= P2_PAIR_Y && sy < P2_PAIR_Y + P2_BTN_H) {
       pendingConfirm = CFM_RESET_PAIRING; drawPendingConfirm();

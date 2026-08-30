@@ -124,7 +124,7 @@ const TOGGLES = ["SOUND", "MUTED", "FLIPPED", "NORMAL", "DARK", "LIGHT", "AUTO"]
 const GROUP_TITLES = ["Status", "Display", "Sound", "Pairing", "Actions"];
 const THEME_SEGS = ["DARK", "LIGHT", "AUTO"];
 const SOUND_LABELS = ["SOUND ON", "SOUND OFF", "TEST BEEP", "MIC TEST", "FLIPPED", "NORMAL"];
-const SET_CAPTIONS = ["THEME", "ALERTS", "MICROPHONE"];
+const SET_CAPTIONS = ["THEME", "ALERTS", "MICROPHONE", "SETUP", "CANNOT BE UNDONE"];
 // Each is the longest string settingsHomeSummary() can build for that group:
 // every link down / full battery / a two-digit-below-zero die temperature; 100%
 // brightness with sleep OFF and the longest theme name; sound off at the loudest
@@ -1011,35 +1011,142 @@ for (const b of [1, 2]) {
   }
 
   // ================= SETTINGS page 2: actions =================
-  {
+  // BOARD 1 is a single evenly-gapped column of FOUR buttons; BOARD 2's Actions
+  // group is two CAPTIONED sections of three, so the two are checked apart. An
+  // assertion that still RESOLVES on the other board is worse than one that fails
+  // there: the old chain walk (`P2_PAIR_Y === P2_CAL_Y + P2_BTN_H + P2_GAP`) holds
+  // by construction on board 1 and would simply be FALSE on board 2 for a page
+  // that is correct, which is the wrong kind of failure - it measures the formula
+  // rather than the geometry.
+  if (b === 1) {
     const hintY = c.P2_PWR_Y + c.P2_BTN_H + c.SP_3;
     const hintEnd = mcBox(b, T_META, hintY)[1];
-    // FOUR buttons on board 1, THREE on board 2 - which has no capture path, so no
-    // MIC TEST and no slot reserved for one (`#if BOARD_HAS_MIC` in the .ino, which
-    // geom-common.mjs now honours; it used to read the no-mic arm for both boards
-    // and put board 1's last two buttons a whole button too high).
-    const p2 = c.P2_MIC_Y === undefined
-      ? [["CALIBRATE", c.P2_CAL_Y], ["RESET PAIRING", c.P2_PAIR_Y], ["POWER OFF", c.P2_PWR_Y]]
-      : [["MIC TEST", c.P2_MIC_Y], ["CALIBRATE", c.P2_CAL_Y], ["RESET PAIRING", c.P2_PAIR_Y], ["POWER OFF", c.P2_PWR_Y]];
+    const p2 = [["MIC TEST", c.P2_MIC_Y], ["CALIBRATE", c.P2_CAL_Y],
+                ["RESET PAIRING", c.P2_PAIR_Y], ["POWER OFF", c.P2_PWR_Y]];
     console.log(`  page 2: ${p2.length} buttons ${p2[0][1]}..${c.P2_PWR_Y + c.P2_BTN_H - 1} (h ${c.P2_BTN_H}), hint inks ..${hintEnd}`);
     chk(p2[0][1] === c.PAGE_TOP + c.P2_TOP, `page 2: ${p2[0][0]} at ${p2[0][1]} == PAGE_TOP + P2_TOP (${c.PAGE_TOP + c.P2_TOP})`);
     for (let i = 1; i < p2.length; i++)
       chk(p2[i][1] === p2[i - 1][1] + c.P2_BTN_H + c.P2_GAP,
           `page 2: ${p2[i][0]} at ${p2[i][1]} == ${p2[i - 1][0]} (${p2[i - 1][1]}) + ${c.P2_BTN_H} + gap ${c.P2_GAP}`);
-    chk(c.P2_BTN_H >= c.TAP_MIN, `action button ${c.P2_BTN_H}px tall >= TAP_MIN ${c.TAP_MIN}`);
     chk(hintEnd < contentBottom, `page 2 hint ends ${hintEnd} above the footer ${contentBottom}`);
-    for (const l of P2_LABELS) chk(widthB(b, 2, l) + 2 * c.SP_3 <= c.CARD_W, `action label "${l}" ${widthB(b, 2, l)}px inside the ${c.CARD_W}px button`);
-    // BOTH arms of #if BOARD_HAS_TOUCH_SLEEP_WAKE, on both boards. uiHint centres
-    // with MC_DATUM on the panel, so the box is symmetric in x and the constraint
-    // is the panel width - and the string board 2 draws is the one board 1 does
-    // not compile, so checking only the touch-wake arm measured nothing about it.
-    for (const h of P2_HINTS)
-      chk(widthB(b, T_META, h) <= W - 8, `page 2 hint "...${h.slice(-18)}" ${widthB(b, T_META, h)}px inside the ${W}px panel`);
     {
       const [t0, t1] = mcBox(b, T_META, hintY);
       chk(t1 < contentBottom, `page 2 hint box ${t0}..${t1} above the footer ${contentBottom}`);
     }
+  } else {
+    // ---------------- board 2: the ACTIONS group ----------------
+    // Captions are drawn in T_META, which on this board is the SAME face as T_BODY
+    // (Spleen 8x16 - see UI_FONTS), so the two measure identically here. T_META is
+    // what the draw site passes, and a checker certifies what is drawn.
+    //
+    // WHAT IS STILL UNGUARDED, stated rather than left for the sweep to report as
+    // noise: P2_TOP and P2_SETUP_CAP_Y are PURE TRANSLATIONS of the whole page, so
+    // no relative bound can see them. Downward they stop at PAGE_TOP (asserted
+    // below, and -16 lands exactly on it); upward they have the page's 48 rows of
+    // trailing air to spend before the hint reaches the footer. Note also that this
+    // group's P2_TOP is 16 where Display's P1_TOP and Sound's PS_TOP are 12 -
+    // settings.js's own inconsistency, kept because the BUTTONS are on the spec to
+    // the pixel. An assertion that the five groups start level would be a real rule
+    // and would fail today, so it is flagged here rather than encoded.
+    // THREE buttons. MIC TEST moved to Sound, and P2_MIC_Y is GONE rather than
+    // left unread - a constant a draw site no longer uses but a hit test still
+    // does is exactly how a page comes to claim taps for a button it does not
+    // draw, so its absence is asserted here and not merely described.
+    chk(c.P2_MIC_Y === undefined,
+        `board 2 has no P2_MIC_Y: MIC TEST lives on the Sound group (got ${c.P2_MIC_Y})`);
+    const hintEnd = mcBox(b, T_META, c.P2_HINT_Y)[1];
+    const act = [
+      ["SETUP caption", ...tlBox(b, T_META, c.P2_SETUP_CAP_Y)],
+      ["CALIBRATE TOUCH", c.P2_CAL_Y, c.P2_CAL_Y + c.P2_BTN_H - 1],
+      ["danger caption", ...tlBox(b, T_META, c.P2_DANGER_CAP_Y)],
+      ["RESET PAIRING", c.P2_PAIR_Y, c.P2_PAIR_Y + c.P2_BTN_H - 1],
+      ["POWER OFF", c.P2_PWR_Y, c.P2_PWR_Y + c.P2_BTN_H - 1],
+      ["hint", ...mcBox(b, T_META, c.P2_HINT_Y)],
+    ];
+    for (const [n, a, z] of act) console.log(`    Actions ${n.padEnd(16)} ${a}..${z}`);
+    // NOT `=== PAGE_TOP + P2_TOP`, which is how the constant is DERIVED and so
+    // could never fail. What bounds P2_TOP downward is the back band above it: the
+    // page region opens at PAGE_TOP and a caption above that is drawn over the
+    // band's own title.
+    chk(c.P2_SETUP_CAP_Y >= c.PAGE_TOP,
+        `Actions: the SETUP caption at ${c.P2_SETUP_CAP_Y} is at or below PAGE_TOP ${c.PAGE_TOP}`);
+    // EVERY block clears the one above it, in the order they are drawn - the same
+    // walk the Sound group uses, and the only one that can see a caption's own ink
+    // running into the control it heads.
+    for (let i = 1; i < act.length; i++)
+      chk(act[i][1] > act[i - 1][2],
+          `Actions: ${act[i][0]} starts ${act[i][1]}, clear of ${act[i - 1][0]} ending ${act[i - 1][2]}`);
+    // The brief's own three bounds, stated against this board's constants rather
+    // than against board 1's literals.
+    const btns = [c.P2_CAL_Y, c.P2_PAIR_Y, c.P2_PWR_Y];
+    for (let i = 1; i < btns.length; i++)
+      chk(btns[i] >= btns[i - 1] + c.P2_BTN_H,
+          `Actions button ${i} at ${btns[i]} clears button ${i - 1} ending ${btns[i - 1] + c.P2_BTN_H - 1}`);
+    chk(c.P2_BTN_H >= c.TAP_MIN,
+        `an action button is a touch target: ${c.P2_BTN_H} >= TAP_MIN ${c.TAP_MIN}`);
+    chk(c.P2_SETUP_CAP_Y + lineHB(b, T_META) - 1 < c.P2_CAL_Y,
+        `the SETUP caption's own text box ends ${c.P2_SETUP_CAP_Y + lineHB(b, T_META) - 1}, clear of CALIBRATE at ${c.P2_CAL_Y}`);
+    chk(c.P2_DANGER_CAP_Y + lineHB(b, T_META) - 1 < c.P2_PAIR_Y,
+        `the danger caption's own text box ends ${c.P2_DANGER_CAP_Y + lineHB(b, T_META) - 1}, clear of RESET PAIRING at ${c.P2_PAIR_Y}`);
+    chk(c.P2_CAP_STEP > lineHB(b, T_META),
+        `P2_CAP_STEP ${c.P2_CAP_STEP} clears the caption's own ${lineHB(b, T_META)}px cell`);
+    // THE DESTRUCTIVE PAIR MUST BE SEPARATED FROM THE SAFE ONE BY MORE THAN THE
+    // GAP INSIDE A SECTION, or position stops being one of the three carriers of
+    // severity and the page is back to four identical slabs in one column.
+    // Measured on the DRAWN gap rather than by comparing the two constants, so it
+    // also catches a caption moved on its own: what has to be true is that the air
+    // between the safe section and the destructive one is wider than the air
+    // between two buttons INSIDE a section, whatever placed it.
+    {
+      const sectionAir = c.P2_DANGER_CAP_Y - (c.P2_CAL_Y + c.P2_BTN_H);
+      chk(sectionAir > c.P2_GAP,
+          `the sections are separated: ${sectionAir}px between CALIBRATE and the danger caption > P2_GAP ${c.P2_GAP}`);
+    }
+    // ---- the severity spine ----
+    // It is drawn at x = CARD_X + BORDER_CTRL, width P2_SPINE_W, from y + R_MD to
+    // y + P2_BTN_H - R_MD. Both ends and the left edge have to stay inside the
+    // button's own stroke, or the bar paints over the outline it reinforces where
+    // the corner curves in.
+    chk(c.P2_SPINE_W + c.BORDER_CTRL <= c.R_MD,
+        `the severity spine clears the button's corner radius: ${c.P2_SPINE_W} + ${c.BORDER_CTRL} <= R_MD ${c.R_MD}`);
+    chk(c.P2_SPINE_W >= c.BORDER_CTRL * 2,
+        `the spine outweighs the stroke it reinforces: ${c.P2_SPINE_W} >= 2 x BORDER_CTRL ${c.BORDER_CTRL}`);
+    chk(c.P2_BTN_H - 2 * c.R_MD >= c.P2_SPINE_W,
+        `the spine is taller than it is wide: ${c.P2_BTN_H - 2 * c.R_MD} >= ${c.P2_SPINE_W}`);
+    // uiFillRound rounds the ends at P2_SPINE_W / 2, which fillSmoothRoundRect can
+    // only draw if the radius fits both dimensions of the bar.
+    chk(Math.floor(c.P2_SPINE_W / 2) * 2 <= Math.min(c.P2_SPINE_W, c.P2_BTN_H - 2 * c.R_MD),
+        `the spine's end radius fits it: 2 x ${Math.floor(c.P2_SPINE_W / 2)} <= ${Math.min(c.P2_SPINE_W, c.P2_BTN_H - 2 * c.R_MD)}`);
+    // The hint is centred on the PANEL, so its lane is the panel and not the card.
+    const hintW = widthB(b, T_META, "power off = deep sleep, RESET to wake");
+    chk(hintW <= W, `the power-off hint fits the panel: ${hintW} <= ${W}`);
+    chk(hintEnd < contentBottom, `Actions' hint inks to ${hintEnd}, above the footer ${contentBottom}`);
+    // THE HINT BELONGS TO POWER OFF, so it has to sit nearer the button it explains
+    // than the footer it is not part of - proximity is what says which thing a note
+    // is about, and this page has 48 rows of trailing air for it to drift into.
+    // Bounding it only against contentBottom() would let it float to the bottom of
+    // the page and read as page furniture. Measured on the INK at both ends, not on
+    // the MC_DATUM centre, because the two disagree by half the descent.
+    {
+      const [hi0, hi1] = mcBox(b, T_META, c.P2_HINT_Y);
+      const above = hi0 - (c.P2_PWR_Y + c.P2_BTN_H);
+      const below = contentBottom - 1 - hi1;
+      chk(above < below,
+          `the hint is attached to POWER OFF, not to the footer: ${above} above < ${below} below`);
+    }
+    for (const l of ["CALIBRATE TOUCH", "RESET PAIRING", "POWER OFF"])
+      chk(widthB(b, 2, l) + 2 * c.SP_3 + c.P2_SPINE_W <= c.CARD_W,
+          `action label "${l}" ${widthB(b, 2, l)}px inside the ${c.CARD_W}px button beside its spine`);
   }
+  // BOTH ARMS of #if BOARD_HAS_TOUCH_SLEEP_WAKE, on both boards. uiHint centres
+  // with MC_DATUM on the panel, so the box is symmetric in x and the constraint is
+  // the panel width - and the string board 2 draws is the one board 1 does not
+  // compile, so checking only the touch-wake arm measured nothing about it.
+  for (const h of P2_HINTS)
+    chk(widthB(b, T_META, h) <= W - 8, `page 2 hint "...${h.slice(-18)}" ${widthB(b, T_META, h)}px inside the ${W}px panel`);
+  for (const l of P2_LABELS)
+    if (b === 1 || l !== "MIC TEST")
+      chk(widthB(b, 2, l) + 2 * c.SP_3 <= c.CARD_W, `action label "${l}" ${widthB(b, 2, l)}px inside the ${c.CARD_W}px button`);
 
   // ================= SETTINGS page 3: paired Macs (board 1) =================
   // BOARD 1 ONLY. Board 2's Pairing group is two captions and a list of two-line

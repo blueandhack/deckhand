@@ -1787,31 +1787,57 @@ const int P3_X_W         = 46;   // "forget" hit zone at the right edge (>= TAP_
 const int P3_SUB_CHARS = 20;
 const int P3_SUB_BYTES = P3_SUB_CHARS + 1;
 
-// ---------- SETTINGS page 2: the action buttons ----------
-// H_BTN, where board 1 had to drop to 38 because four buttons plus a hint would
-// not fit at 44 - so these are the one control on this page that was UNDER the
-// floor on board 1 and is over it here.
-// FOUR buttons, not three: BOARD_HAS_MIC is 1 here (the ES8311 capture path
-// landed after this paragraph was written, and nothing here re-checked it - see
-// below), so MIC TEST is drawn and a slot is reserved for it (see the #if in
-// deckhand_display.ino). 4 * 50 + 3 * 12 = 236, from 116 to 352, with the hint at
-// P2_PWR_Y + P2_BTN_H + SP_3 = 364 (inking 358..373, MC_DATUM) and 86px clear
-// below it to contentBottom() (460) - not the "3 buttons / hint at 302 / 148px
-// clear" this paragraph claimed for as long as the flag disagreed with it.
-// THE FLAG FLIPPED UNDER THIS COMMENT AND NO CHECKER CAUGHT IT, because the
-// comment is prose and BOARD_HAS_MIC is a macro - nothing here parses one
-// against the other. (A prior revision of this paragraph already corrected a
-// four-button chain wrongly copied from board 1; this was the opposite drift; a
-// three-button chain that quietly stopped matching the header once
-// BOARD_HAS_MIC flipped to 1, and it sat wrong until this pass read it against
-// the header instead of trusting it.)
-// The 16px pass changes nothing here: these are control heights, and the labels
-// re-measure clear - "CALIBRATE TOUCH" is 15 chars = 120px in a 296px button, and
-// the hint ("power off = deep sleep, RESET to wake", the no-touch-wake arm this
-// board compiles) is 37 chars = 296px centred on a 320px panel, inking 12..307.
-const int P2_TOP   = 12;
-const int P2_BTN_H = 50;
-const int P2_GAP   = 12;
+// ---------- SETTINGS group: Actions ----------
+// Geometry is settings.js `bActions`.
+//
+// THREE buttons, not four: MIC TEST moved to the SOUND group (a mic test IS a
+// sound test, and it is the one action you run repeatedly), which is what leaves
+// room for the two captions and the air between the safe action and the two
+// destructive ones. So P2_MIC_Y does not exist on this board and no slot is
+// reserved for it - the same rule tabsW() follows when fabVisible() is compiled
+// out. Board 1 still draws all four and keeps its own chain in
+// deckhand_display.ino.
+//
+//   120..135  "SETUP"                          P2_SETUP_CAP_Y, T_META, TL_DATUM
+//   146..201  CALIBRATE TOUCH                  P2_CAL_Y, P2_BTN_H
+//   228..243  "CANNOT BE UNDONE"               P2_DANGER_CAP_Y
+//   254..309  RESET PAIRING  + warn spine      P2_PAIR_Y
+//   322..377  POWER OFF      + bad spine       P2_PWR_Y
+//   396..411  "power off = ... RESET to wake"  P2_HINT_Y = 402, MC_DATUM ink
+//   412..459  48 rows clear to contentBottom()
+//
+// THE SPINE IS THE POINT OF THIS PAGE, not decoration. Every one of these buttons
+// is uiButton with `filled` false, so before this they were identically shaped
+// outlined slabs differing only in STROKE HUE - and this repo's rule is that
+// meaning is never carried by colour alone (session status gets a filled circle /
+// filled square / hollow ring, and palette-check.mjs tests the palette for
+// greyscale and colour-blind separability). The action buttons never got that
+// treatment. A solid P2_SPINE_W bar down the left edge of each destructive button
+// carries severity as INK MASS, which survives greyscale; the two captions and the
+// gap that separates the sections carry it as POSITION. Colour is then the third
+// cue rather than the only one.
+//
+// P2_SPINE_W is 4, and BOTH bounds on it are real: it sits BORDER_CTRL inside the
+// button's own left edge, so P2_SPINE_W + BORDER_CTRL must clear R_MD (5 <= 12) or
+// the bar paints over the very stroke it reinforces where the corner curves in;
+// and it runs from R_MD to P2_BTN_H - R_MD for the same reason at both ends.
+//
+// P2_BTN_H is 56 rather than H_BTN's 50: three buttons on a 356px page leave the
+// room, and these are the most consequential controls on the device - two of them
+// destroy state. TAP_MIN is 46, so this is 10 over the fingertip floor.
+//
+// P2_CAP_STEP is 26 where the SOUND group's caption step is SET_CAP_STEP (24).
+// That difference is settings.js's, kept rather than harmonised: the buttons' own
+// y's are what the rest of this page is bounded by and they are on the spec to the
+// pixel, so the two extra rows land on the caption instead. Both clear the
+// caption's own 16px cell, which is what the checker asserts.
+const int P2_TOP         = 16;   // PAGE_TOP -> the SETUP caption
+const int P2_CAP_STEP    = 26;   // a caption's top -> the button it heads
+const int P2_BTN_H       = 56;   // TAP_MIN + 10; these are the destructive ones
+const int P2_GAP         = 12;   // between two buttons inside one section
+const int P2_SECTION_GAP = 26;   // a button's bottom -> the NEXT section's caption
+const int P2_HINT_GAP    = 24;   // POWER OFF's bottom -> the hint's MC_DATUM centre
+const int P2_SPINE_W     = 4;    // the severity bar's width
 
 // ---------- SETTINGS: the confirm dialog ----------
 // 28, board 1's 24 held physically (24 / 5.624 * 6.489 = 27.7). Top-anchored to

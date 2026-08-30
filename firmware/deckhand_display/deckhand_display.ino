@@ -2876,11 +2876,31 @@ const int P1_FLIP_X  = CARD_X + P1_THIRD_W + 8;
 const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
 #endif
 
-// Page 2 - four large action buttons (mic test, calibrate, reset pairing, power
-// off) plus a hint. P2_TOP, P2_BTN_H and P2_GAP moved to the board headers (via
-// board.h): board 1's button height had to come DOWN to 38 to fit four of them
-// and a hint, where board 2's is H_BTN. Going to five buttons would need a page
-// of its own on either board rather than shrinking these further.
+// Page 2 - the ACTION buttons plus a hint. P2_TOP, P2_BTN_H and P2_GAP moved to
+// the board headers (via board.h): board 1's button height had to come DOWN to 38
+// to fit four of them and a hint. Going to five buttons would need a page of its
+// own on either board rather than shrinking these further.
+//
+// BOARD 2 DERIVES ITS OWN CHAIN and does not compile the arm below at all: its
+// Actions group is a captioned SAFE section and a captioned DESTRUCTIVE one, so
+// nothing about it is a single evenly-gapped column any more. MIC TEST lives on
+// its SOUND group there, so P2_MIC_Y does not exist on that board - which is why
+// the #if below is on BOARD_SETTINGS_HOME and not on BOARD_HAS_MIC, a flag that
+// is 1 on both boards and therefore cannot tell them apart. Board 1's arm is the
+// text that was always here.
+#if BOARD_SETTINGS_HOME
+// ---- board 2: the ACTIONS group ----
+// Two captioned sections. The gap between them is P2_SECTION_GAP rather than
+// P2_GAP: separation is one of the three carriers of severity here (position,
+// ink mass, hue), so the destructive pair must not read as a continuation of the
+// column CALIBRATE TOUCH sits in.
+const int P2_SETUP_CAP_Y = PAGE_TOP + P2_TOP;
+const int P2_CAL_Y = P2_SETUP_CAP_Y + P2_CAP_STEP;
+const int P2_DANGER_CAP_Y = P2_CAL_Y + P2_BTN_H + P2_SECTION_GAP;
+const int P2_PAIR_Y = P2_DANGER_CAP_Y + P2_CAP_STEP;
+const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
+const int P2_HINT_Y = P2_PWR_Y + P2_BTN_H + P2_HINT_GAP;
+#else
 #if BOARD_HAS_MIC
 const int P2_MIC_Y = PAGE_TOP + P2_TOP;
 const int P2_CAL_Y = P2_MIC_Y + P2_BTN_H + P2_GAP;
@@ -2896,6 +2916,7 @@ const int P2_CAL_Y = PAGE_TOP + P2_TOP;
 #endif
 const int P2_PAIR_Y = P2_CAL_Y + P2_BTN_H + P2_GAP;
 const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
+#endif
 
 // Page 3 - the Macs this device is paired with. One row each: tap the row to
 // restrict answering to just that Mac (tap again for "any"), tap the X to
