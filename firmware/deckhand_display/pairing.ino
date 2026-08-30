@@ -622,6 +622,30 @@ uint8_t pairPriv[32];                              // our ephemeral private key 
 char pairKeyHex[PAIR_KEY_BYTES * 2 + 1] = "";      // the derived 128-bit key, hex - SECRET
 char pairProofWant[33] = "";                       // the proof we expect back - SECRET-DERIVED
 
+// HOW THE LAST EXCHANGE ENDED, for the screen that was watching it. The panel
+// cannot work this out from outside: pairClose() wipes the exchange, so by the
+// time the UI notices the window has shut, the hostId, the label and the reason
+// are all gone - and "it stopped" is exactly the shape this file already refuses
+// on the wire, where a timeout and a device that went away look identical.
+//
+// It is a plain uint8_t rather than one of the fields above BECAUSE it must
+// SURVIVE pairWipe(): every one of those is destroyed with the exchange, which is
+// the whole point of them, and a verdict destroyed with the exchange is a verdict
+// nobody can read. pairOpen() clears it instead - a new window is the one moment
+// the previous verdict stops being the answer.
+//
+// FIRST WRITER WINS (pairSetResult). A commit ends with pairClose("paired"), and a
+// close that overwrote the verdict would report every success as whatever the
+// close was for.
+#define PAIR_RES_NONE      0
+#define PAIR_RES_OK        1
+#define PAIR_RES_BADPROOF  2
+#define PAIR_RES_FULL      3
+#define PAIR_RES_TIMEOUT   4
+#define PAIR_RES_CANCELLED 5
+uint8_t pairResult = PAIR_RES_NONE;
+void pairSetResult(uint8_t r) { if (pairResult == PAIR_RES_NONE) pairResult = r; }
+
 // millis() wraps, so the deadline is compared as a SIGNED difference rather than
 // with `millis() < pairWindowUntil` - which is wrong for the ~49.7 days after a
 // wrap and right for the 49.7 days before it, i.e. a bug that cannot be found by
@@ -669,6 +693,8 @@ void pairClose(const char* why) {
 // PAIR NEW MAC button exists, which is exactly the intended state.
 void pairOpen() {
   pairWipe();
+  // The one moment the previous verdict stops being the answer - see pairResult.
+  pairResult = PAIR_RES_NONE;
   pairWindowUntil = millis() + (unsigned long) PAIR_WINDOW_MS;
   if (pairWindowUntil == 0) pairWindowUntil = 1;   // 0 is the CLOSED sentinel
   Serial.printf("PAIR: window open for %lds\n", (long) (PAIR_WINDOW_MS / 1000));
@@ -705,6 +731,7 @@ void pairTick() {
   if (pairWindowUntil == 0) return;
   if ((long) (millis() - pairWindowUntil) < 0) return;
   if (pairPending) pairFail("timeout", pairHostId);
+  pairSetResult(PAIR_RES_TIMEOUT);
   pairClose("timed out");
 }
 
@@ -806,6 +833,7 @@ void pairCommitIfReady() {
   // silently destroying a key the user still wanted.
   if (!pairHasRoomFor(pairHostId)) {
     pairFail("full", pairHostId);
+    pairSetResult(PAIR_RES_FULL);
     pairClose("no free slot at commit");
     return;
   }
@@ -832,6 +860,7 @@ void pairCommitIfReady() {
   pairRadioCommit = false;
   mbedtls_platform_zeroize((void*) secret.c_str(), secret.length());
 
+  pairSetResult(PAIR_RES_OK);
   pairClose("paired");
 
   char line[48];
@@ -947,6 +976,7 @@ void handlePairOk(const String& rest) {
   // nothing. The COMPARE below is the part that must not return early.
   if (got.length() != 32) {
     pairFail("badproof", pairHostId);
+    pairSetResult(PAIR_RES_BADPROOF);
     pairClose("the proof was the wrong length");
     return;
   }
@@ -955,6 +985,7 @@ void handlePairOk(const String& rest) {
   // into sixteen one-byte searches.
   if (!pairCtEq(got.c_str(), pairProofWant, 32)) {
     pairFail("badproof", pairHostId);
+    pairSetResult(PAIR_RES_BADPROOF);
     pairClose("the proof did not match");
     return;
   }
@@ -971,6 +1002,7 @@ void handlePairCancel() {
   if (!pairWindowOpen()) { pairFail("closed", NULL); return; }
   char id[12];
   strlcpy(id, pairHostId, sizeof(id));
+  pairSetResult(PAIR_RES_CANCELLED);
   pairClose("cancelled by the Mac");
   pairFail("cancelled", id[0] ? id : NULL);
 }

@@ -1826,6 +1826,73 @@ const int P3_X_W         = 46;   // "forget" hit zone at the right edge (>= TAP_
 const int P3_SUB_CHARS = 20;
 const int P3_SUB_BYTES = P3_SUB_CHARS + 1;
 
+// PAIR NEW MAC sits in the LIST'S NEXT FREE ROW SLOT, at p3RowY(hostCount), and
+// that placement is measured rather than preferred. Above the list it needs
+// H_ROW + a gap = 58px, and the four Mac cards already end at
+// P3_LIST_Y + 3*P3_ROW_STEP + P3_ROW_H = 449 against a contentBottom() of 460 -
+// 10px of slack, so there is nowhere to put it. In the free slot it fits for 0..3
+// Macs and at 4 there is no room AND no free NVS slot, so the button's ABSENCE
+// encodes "full" exactly: no separate state, no extra string, and no refusal path
+// to get wrong. settings-geom-check.mjs asserts both halves of that - every slot
+// 0..3 clears the footer and the slot for 4 does not - so the argument is pinned
+// to the geometry instead of living in this comment.
+//
+// With no Macs at all the button takes slot 0, so the empty-list hint moves DOWN
+// to slot 1 rather than being drawn under it.
+const int P3_EMPTY_HINT_Y = P3_LIST_Y + P3_ROW_STEP + P3_ROW_H / 2;   // MC centre, one slot below the button
+
+// ---------- The WIRELESS PAIRING panel (board 2 only) ----------
+// A full-screen surface, the way the reader is - except that it stops at
+// contentBottom() and leaves the FOOTER alone, so the clock, the battery and the
+// "Xs ago" freshness stay live through a 120s window (whether the Mac is still
+// talking is exactly what you want to know while waiting for its request). The
+// tab bar IS covered: the panel eats every tap, and chrome that is drawn but dead
+// is the defect fabVisible() is gated in one place to avoid.
+//
+// Every block is TC_DATUM - a TOP datum, so its ink box is y..y+uiLineH-1 and the
+// vertical arithmetic is exact, with the horizontal centring done by the datum
+// rather than by a measured x. The blocks, at this board's faces:
+//
+//    40..63    "PAIR NEW MAC"          PAIR_TITLE_Y, T_HEAD  (12x24)
+//    80..95    what it is waiting for  PAIR_STATE_Y, T_BODY  (8x16)
+//   140..203   the six digits          PAIR_CODE_Y,  T_HERO  (32x64)
+//   224..239   the requesting Mac      PAIR_LABEL_Y, T_BODY
+//   264..279   "118s left"             PAIR_LEFT_Y,  T_BODY  - the one change-only field
+//   386..435   CONFIRM / CANCEL        PAIR_BTN_Y,   H_BTN
+//   436..459   clear to contentBottom()
+//
+// THE CODE IS SIX DIGITS OF T_HERO = 6 * 32 = 192px in a 320px panel, which is the
+// one width on this screen that cannot be trimmed - it is the whole point of the
+// surface. Asserted rather than eyeballed.
+const int PAIR_TITLE_Y = 40;
+const int PAIR_STATE_Y = 80;
+const int PAIR_CODE_Y  = 140;
+const int PAIR_LABEL_Y = 224;
+const int PAIR_LEFT_Y  = 264;
+// The two buttons share the card lane: two of PAIR_BTN_W with the gap between them
+// is exactly CARD_W, so CANCEL's right edge lands on the same margin every card
+// uses. The gap IS SP_3, and it is restated here rather than named because SP_3 is
+// declared in deckhand_display.ino, which includes this header - a header cannot
+// see a constant from the file that includes it. settings-geom-check.mjs asserts
+// PAIR_BTN_GAP == SP_3, so the restatement is bound rather than trusted.
+const int PAIR_BTN_Y = 386;
+const int PAIR_BTN_GAP = 12;
+const int PAIR_BTN_W = (CARD_W - PAIR_BTN_GAP) / 2;
+// The countdown's widest string is the window's own length: "120s left" at
+// PAIR_WINDOW_MS = 120000, i.e. 3 digits plus "s left". The number is stated here
+// and DERIVED IN settings-geom-check.mjs from PAIR_WINDOW_MS, so a longer window
+// fails there rather than silently outgrowing the cache - which is the failure
+// this repo has paid for repeatedly (a cache shorter than its string stops
+// noticing changes at all).
+const int PAIR_LEFT_CHARS = 9;
+const int PAIR_LEFT_BYTES = PAIR_LEFT_CHARS + 1;
+// The result screen, which replaces the panel's own blocks for PAIR_RESULT_MS and
+// FLUSHES BEFORE THE DELAY - on a shadow-buffered board the message otherwise
+// exists for zero frames, the defect the farewell screens already fixed once.
+const int PAIR_RESULT_Y     = 196;
+const int PAIR_RESULT_SUB_Y = 236;
+const int PAIR_RESULT_MS    = 1500;
+
 // ---------- SETTINGS group: Actions ----------
 // Geometry is settings.js `bActions`.
 //
