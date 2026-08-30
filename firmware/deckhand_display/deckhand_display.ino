@@ -2851,7 +2851,7 @@ int settingsPage = 0;
 const int P1_BRIGHT_Y = PAGE_TOP + P1_TOP;
 const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
 const int P1_THEME_CAP_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_THEME_CAP_GAP;
-const int P1_THEME_Y = P1_THEME_CAP_Y + P1_THEME_CAP_STEP;
+const int P1_THEME_Y = P1_THEME_CAP_Y + SET_CAP_STEP;
 const int P1_AUTO_HINT_Y = P1_THEME_Y + H_ROW + P1_AUTO_HINT_GAP;
 const int P1_FLIP_Y = P1_AUTO_HINT_Y + P1_FLIP_GAP;
 // ---- board 2: the SOUND group ----
@@ -2952,8 +2952,24 @@ const int CFM_BTN_W = (CARD_W - 3 * SP_3) / 2;
 const int CFM_NO_X  = CARD_X + SP_3;
 const int CFM_YES_X = CFM_NO_X + CFM_BTN_W + SP_3;
 
+// BOARD 1 ONLY, the same treatment macRowCache below already has: these three are
+// read by board 1's renderStatusPage() and by nothing else. On board 2 the DEVICE
+// card's connection rows and its one-line battery reading are gone - the CONNECTION
+// and POWER cards draw a verdict, two detail lines and a temperature through their
+// own caches - so declaring and resetting these there is state nothing can ever
+// read, which is the "declared-but-unwired, with comments claiming it works"
+// defect class this file already deleted a dead macEmojiId for.
+#if !BOARD_SETTINGS_HOME
 int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
-#if !BOARD_USES_TFT_ESPI
+#endif
+// THE GUARD IS BOARD_SETTINGS_HOME, NOT !BOARD_USES_TFT_ESPI, and the difference is
+// not cosmetic: the size below is ST_LINE_BYTES, which only the BOARD_SETTINGS_HOME
+// arm of the board headers defines. The two flags agree on both boards that exist
+// today, so the mismatched guard compiled - but it says this row belongs to "the
+// board that draws through the shim" when it actually belongs to "the board whose
+// STATUS group has a POWER card", and the first board to have one and not the other
+// would fail to compile on a line whose comment blames the wrong flag.
+#if BOARD_SETTINGS_HOME
 // BOARD 2 ONLY - the SoC die temp line, which is now the POWER card's second
 // detail line ("SoC 46.6 C") rather than a right-aligned reading in a row of its
 // own. It is padded to ST_LINE_CHARS like every other detail line on that page,

@@ -92,6 +92,22 @@ void drawBackBand(const char* title) {
   tft.drawString(title, PAGER_BTN_X0 + BACK_BTN_W + BACK_TITLE_DX, CONTENT_Y + PAGER_H / 2);
   tft.setTextDatum(TL_DATUM);
 }
+// A GROUP CAPTION: T_META in COLOR_LABEL at CARD_X + PAD, TL_DATUM, on the page
+// background rather than on a card - the treatment board_es3c35p.h describes once
+// for every one of them, and the step from its datum to the control it heads is
+// SET_CAP_STEP. All seven live sites go through here (Display's THEME, Sound's
+// ALERTS and MICROPHONE, Pairing's ANSWER PROMPTS FROM and PAIRED MACS, Actions'
+// SETUP and CANNOT BE UNDONE); six of them were four inline lines each, and four
+// identical lines repeated seven times is how one page comes to draw its caption
+// in a different colour or off a different datum with nothing saying which is
+// right. It is named for what it DRAWS rather than for the page that first needed
+// it - this was drawActionCaption(), on the group that happened to add it last.
+void drawGroupCaption(const char* text, int y) {
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(text, CARD_X + PAD, y);
+}
 // ONE table, two uses: the back band's title and HOME's row name. They must be the
 // same word or the screen you tapped into is not the one you tapped on.
 const char* settingsGroupTitle(int g) {
@@ -616,10 +632,7 @@ void renderControlsPage() {
 void drawDisplayPageStatic() {
   drawStepperCard(P1_BRIGHT_Y, "BRIGHTNESS");
   drawStepperCard(P1_SLEEP_Y, "SLEEP AFTER");
-  setUIFont(T_META);
-  tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("THEME", CARD_X + PAD, P1_THEME_CAP_Y);
+  drawGroupCaption("THEME", P1_THEME_CAP_Y);
   // AUTO is a CLOCK, not a sensor - every ADC1 channel on this board is spoken for,
   // so there is no light to measure. Saying so is the same rule that stops the
   // farewell screen promising a touch wake this board does not have.
@@ -665,26 +678,28 @@ void renderDisplayPage() {
                on ? COLOR_ACCENT : COLOR_LABEL, on);
     }
   }
+  // THE LABEL NAMES ITS SUBJECT, because this control has no caption over it and
+  // nothing else on the group says what is being flipped. Every other control here
+  // is introduced by something: the two steppers carry their own card labels, the
+  // segments sit under "THEME", and the SOUND group's toggle next door already
+  // reads "SOUND ON"/"SOUND OFF". A bare "NORMAL" under an unrelated hint about
+  // AUTO was the one board-2 settings control that named neither itself nor its
+  // subject. Naming it in the LABEL rather than adding a caption is what makes it
+  // free: 13-14 characters is 104-112px in a 296px control, and no offset moves.
   if ((int) screenFlipped != flipBtnCache) {
     flipBtnCache = (int) screenFlipped;
-    uiToggle(CARD_X, P1_FLIP_Y, CARD_W, H_ROW, "FLIPPED", "NORMAL", screenFlipped);
+    uiToggle(CARD_X, P1_FLIP_Y, CARD_W, H_ROW, "SCREEN FLIPPED", "SCREEN NORMAL", screenFlipped);
   }
 }
 // ----- The SOUND group (board 2) -----
 // Output and input together, because a mic test IS a sound test - and it is the one
 // action you run repeatedly, since MICMON is how MIC_GAIN gets settled.
 void drawSoundPageStatic() {
-  setUIFont(T_META);
-  tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("ALERTS", CARD_X + PAD, PS_ALERTS_Y);
+  drawGroupCaption("ALERTS", PS_ALERTS_Y);
   uiHint("beeps when a session needs input", PS_WHAT_HINT_Y);
   drawStepperCard(PS_VOL_Y, "VOLUME");
   uiButton(CARD_X, PS_BEEP_Y, CARD_W, PS_BTN_H, "TEST BEEP", COLOR_ACCENT);
-  setUIFont(T_META);
-  tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("MICROPHONE", CARD_X + PAD, PS_MIC_CAP_Y);
+  drawGroupCaption("MICROPHONE", PS_MIC_CAP_Y);
   uiButton(CARD_X, PS_MIC_Y, CARD_W, PS_BTN_H, "MIC TEST", COLOR_ACCENT);
   // The SOUND toggle is drawn by renderSoundPage - its look changes with state.
 }
@@ -724,8 +739,11 @@ void resetPairing() {
   prefs.remove("blesecret"); // legacy key, so a migration can't resurrect it
   deviceNameReported = false;
   Serial.println("PAIRING: reset by user (device is now unpaired)");
-  // Brief confirmation, then rebuild the settings tab (STATUS now reads
-  // "unpaired"). delay() is fine here - matches the calibrate/power-off flows.
+  // Brief confirmation, then rebuild whatever settings surface raised this. NOT
+  // "then STATUS now reads unpaired": the rebuild draws settingsPage, which is the
+  // ACTIONS page (board 1) or the Actions group (board 2) that this was tapped
+  // from - the page whose text changes is one the user has to navigate back to.
+  // delay() is fine here - matches the calibrate/power-off flows.
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
   setUIFont(2);
   tft.setTextColor(COLOR_VALUE, COLOR_BG);
@@ -768,12 +786,6 @@ void resetPairing() {
 // POSITION (a captioned section of its own, separated by P2_SECTION_GAP), INK
 // MASS (a solid spine, which survives greyscale and every colour-vision
 // deficiency), and hue last.
-void drawActionCaption(const char* text, int y) {
-  setUIFont(T_META);
-  tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString(text, CARD_X + PAD, y);
-}
 // The spine sits BORDER_CTRL inside the button's own left edge and runs from R_MD
 // to P2_BTN_H - R_MD, so it can never cross the rounded corner and paint over the
 // stroke it exists to reinforce - settings-geom-check.mjs asserts both bounds. Its
@@ -786,9 +798,9 @@ void drawSeverityAction(int y, const char* label, uint16_t tint) {
               P2_SPINE_W / 2, tint, COLOR_CARD);
 }
 void drawActionsPageStatic() {
-  drawActionCaption("SETUP", P2_SETUP_CAP_Y);
+  drawGroupCaption("SETUP", P2_SETUP_CAP_Y);
   uiButton(CARD_X, P2_CAL_Y, CARD_W, P2_BTN_H, "CALIBRATE TOUCH", COLOR_ACCENT);
-  drawActionCaption("CANNOT BE UNDONE", P2_DANGER_CAP_Y);
+  drawGroupCaption("CANNOT BE UNDONE", P2_DANGER_CAP_Y);
   drawSeverityAction(P2_PAIR_Y, "RESET PAIRING", COLOR_WARN);
   drawSeverityAction(P2_PWR_Y,  "POWER OFF",     COLOR_BAD);
   // The hint has to match what the chip can actually do, the same rule the
@@ -848,18 +860,12 @@ int hostLinkSlotFor(const char* id) {
 int p3RowY(int i) { return P3_LIST_Y + i * P3_ROW_STEP; }
 void drawHostsPageStatic() {
   tft.fillRect(0, PAGE_TOP, tft.width(), contentBottom() - PAGE_TOP, COLOR_BG);
-  setUIFont(T_META);
-  tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("ANSWER PROMPTS FROM", CARD_X + PAD, P3_ANY_CAP_Y);
+  drawGroupCaption("ANSWER PROMPTS FROM", P3_ANY_CAP_Y);
   // The ANY row keeps the component and the height it always had: it is a choice,
   // not a Mac, so it stays a uiListRow where the rows under it are cards.
   bool any = (allowedHost[0] == 0);
   uiListRow(CARD_X, P3_ANY_Y, CARD_W, H_ROW, "ANY MAC", any, any ? "SELECTED" : nullptr);
-  setUIFont(T_META);
-  tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("PAIRED MACS", CARD_X + PAD, P3_LIST_CAP_Y);
+  drawGroupCaption("PAIRED MACS", P3_LIST_CAP_Y);
   // THE LIVE CACHES ARE DROPPED HERE, before the early return rather than after the
   // loop, for the reason drawSettingsStatic() resets caches inside itself: this
   // function repaints the cards those fields are drawn ON, so they are stale by
@@ -1224,10 +1230,19 @@ void renderSettingsTab() {
 #endif
 }
 void resetSettingsCaches() {
+#if !BOARD_SETTINGS_HOME
+  // BOARD 1's DEVICE card only - its two connection dots and its one-line battery
+  // reading. Board 2's STATUS group has neither, so declaring and resetting them
+  // there was state nothing can ever read; same treatment macRowCache below has.
+  // The line is left WHOLE rather than split around the one cache both boards keep,
+  // so board 1's resolved view of this file is character-identical to what it was.
   btDotCache = -1; usbDotCache = -1; battRowCache = -1; battRowTextCache[0] = '\0';
+#else
+  battRowTextCache[0] = '\0';
+#endif
   soundBtnCache = -1; flipBtnCache = -1; themeBtnCache = -1; brightBarCache = -1;
   battRowColorCache = 0;
-#if !BOARD_USES_TFT_ESPI
+#if BOARD_SETTINGS_HOME
   // The SoC temp row's pair. Resetting these HERE rather than at the call sites is
   // what makes the invariant impossible to forget: drawStatusPageStatic() repaints
   // the chrome these are drawn on, so they are stale by definition afterwards, and
@@ -1580,7 +1595,9 @@ void handleSettingsTouch(int sx, int sy) {
     }
   }
 #endif
-  // page 0 is read-only
+  // Anything not claimed above is inert. That is BOTH boards' STATUS surface -
+  // board 1's page 0 and board 2's Status group are read-only, and neither has a
+  // control on it - so this is not the board-1-only statement it used to be.
 }
 void drawSettingsTab() {
 #if BOARD_SETTINGS_HOME

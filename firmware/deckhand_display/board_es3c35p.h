@@ -1447,12 +1447,26 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 // whose own rows are 16px tall separated by 12 is a gap most of a row wide, which
 // is the thing the comment above already says stops reading as one list.
 //
-// Every page is still TOP-ALIGNED under the pager. Trailing air, re-derived at
-// 16px: 28px on STATUS (two cards now - the 16px pass left 168px there and the
-// LINK card spends 140 of it), 22 on DISPLAY & SOUND, 148 on ACTIONS, 108 on
-// PAIRED MACS with four Macs. Growing the gaps until the last row lands 8px
-// above the footer, the way the USAGE column does, is still rejected on the same
-// arithmetic: it needs a gap wider than the 16px rows it separates.
+// Every group is still TOP-ALIGNED under the band. THIS PARAGRAPH USED TO COST OUT
+// A PAGE THAT NO LONGER EXISTS - "28px on STATUS (two cards now ... the LINK card
+// spends 140 of it), 22 on DISPLAY & SOUND, 148 on ACTIONS, 108 on PAIRED MACS",
+// i.e. the four pager pages, a DEVICE card and a LINK card, none of which this
+// board has since the SETTINGS redesign split them into HOME plus five groups.
+// A comment is not parsed, so nothing could have caught it; it is the same defect
+// the BOARD_HAS_MIC paragraph further down records, which is why the numbers below
+// name the constant each is measured from rather than standing on their own.
+// Trailing air today, from the last thing each group draws to contentBottom():
+//   HOME     0   the five rows land EXACTLY on 460, by construction
+//   STATUS   4   ST_HOST_Y + ST_HOST_H = 456
+//   DISPLAY 14   P1_FLIP_Y + H_ROW = 446
+//   SOUND   12   PS_MIC_Y + PS_BTN_H = 448
+//   PAIRING 10   P3_LIST_Y + 3*P3_ROW_STEP + P3_ROW_H = 450, with four Macs
+//   ACTIONS 56   the hint's ink ends 403; it is bound to POWER OFF, not the footer
+// Growing the gaps until every group's last row lands 8px above the footer, the
+// way the USAGE column does, is still rejected on the same arithmetic: it needs a
+// gap wider than the 16px rows it separates. ACTIONS keeps its 56 deliberately -
+// the hint takes SET_CAP_STEP from the button it explains, and floating it down to
+// the footer would make it read as page furniture.
 
 // ---------- SETTINGS: HOME and the five groups ----------
 // settingsPage carries HOME plus five group ids rather than a second state
@@ -1684,16 +1698,24 @@ const int SET_CAP_STEP = 24;
 //   116..195  BRIGHTNESS stepper        P1_BRIGHT_Y, STEPPER_CARD_H
 //   208..287  SLEEP AFTER stepper       P1_SLEEP_Y
 //   298..313  "THEME"                   P1_THEME_CAP_Y, T_META, TL_DATUM
-//   318..363  DARK | LIGHT | AUTO       P1_THEME_Y, H_ROW
-//   371..386  the AUTO hint             P1_AUTO_HINT_Y = 377, MC_DATUM ink
-//   396..441  NORMAL / FLIPPED          P1_FLIP_Y, H_ROW
-//   442..459  18 rows clear to contentBottom()
+//   322..367  DARK | LIGHT | AUTO       P1_THEME_Y, H_ROW
+//   375..390  the AUTO hint             P1_AUTO_HINT_Y = 381, MC_DATUM ink
+//   400..445  SCREEN NORMAL / FLIPPED   P1_FLIP_Y, H_ROW
+//   446..459  14 rows clear to contentBottom()
 //
-// P1_THEME_CAP_STEP is SP_1 tighter than SET_CAP_STEP, and deliberately: caption,
-// segments and hint are ONE block of three parts here, and it has to read as one
-// thing against the two stepper cards above it rather than as three loose rows.
+// THE CAPTION STEP IS SET_CAP_STEP, shared with the SOUND and ACTIONS groups,
+// rather than a P1_THEME_CAP_STEP of its own. That constant was 20 against
+// SET_CAP_STEP's 24, defended as "caption, segments and hint are ONE block of
+// three parts here, so it has to read as one thing against the two stepper cards
+// above it" - which is the same shape as the argument that once defended a
+// P2_CAP_STEP of 26 on the ACTIONS group, and that one was collapsed on the
+// grounds that you cannot spend pixel fidelity to buy consistency in one axis and
+// then cite pixel fidelity to refuse it in the other. The ruling is applied here
+// too: two names for one concept - a caption's own datum to the top of the control
+// it heads - inside one redesign is a drift waiting to happen, and the block still
+// reads as a block because P1_THEME_CAP_GAP (10, against P1_GAP's 12) is what
+// separates it from the steppers.
 const int P1_THEME_CAP_GAP  = 10;   // the SLEEP card's bottom border -> the caption
-const int P1_THEME_CAP_STEP = 20;   // caption top -> the segments it names
 const int P1_THEME_GAP      = 4;    // between two segments; it belongs to the LEFT
                                     // one for touch, the pitch rule the keyboard uses
 // 96, and it lands EXACTLY on the card: 3*96 + 2*4 = 296 = CARD_W. Twice TAP_MIN,
