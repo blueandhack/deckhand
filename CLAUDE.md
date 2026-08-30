@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386934, RAM 69804 | flash 1020834, RAM 66164 |
+| size today | flash 1386934, RAM 69804 | flash 1022918, RAM 66228 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -747,8 +747,8 @@ shared secret, so the 128-bit pairing key is **never transmitted** - both ends d
 `docs/superpowers/specs/2026-08-30-wireless-pairing.md`.
 
 ```
-node host/pair-crypto-check.mjs              # 41 crypto + 97 source assertions
-node host/pair-crypto-check.mjs --selftest   # 13/13 module + 30/30 SOURCE faults, each naming its assertion
+node host/pair-crypto-check.mjs              # the Mac's module, then pairing.ino read as TEXT
+node host/pair-crypto-check.mjs --selftest   # module + SOURCE fault injections, each naming its assertion
 echo "PAIRVECTOR" > ~/.claude/deckhand-device-command   # the DEVICE's half, on hardware
 ```
 
@@ -784,7 +784,8 @@ a six-character box reads as a bug, and a comparison against the unpadded string
 the user typed correctly. One pinned example that happened to start with a non-zero digit would
 never notice, so the checker also sweeps 400 random exchanges for six digits every time.
 
-**Be honest about what each half proves.** The 41 crypto assertions run the Mac's real module. The
+**Be honest about what each half proves.** The crypto assertions run the Mac's real module (the
+checker prints its own split - run it for today's two numbers rather than reading one here). The
 SOURCE assertions read `pairing.ino` as **text** (comments stripped, the `panel_shim.cpp`
 `invertColor` trap) and check the device still SAYS the same thing - the info strings, the salt
 order, the modulus parsed from its own macro, the big-endian read, the constant-time compare. They
@@ -955,18 +956,84 @@ call - one debugging printf would put the 128-bit key on the very link this desi
 off. The six digits are on the GLASS for the same reason: a copy on the wire is a copy a Mac could
 use to skip the human, which is the whole thing that makes this equal to the cable.
 
-**VERIFIED ON HARDWARE, AND WHAT WAS NOT.** All three verbs dispatch and refuse a shut window over
-BOTH transports with the cause named (`PAIRFAIL closed` on the wire, `PAIR: -> PAIRFAIL closed` in
-the log), and `PAIRVECTOR` still prints RFC 7748's own values unchanged - re-run after the commit-
-gate redesign, not carried over. **The accepting paths - `PAIRPUB`, `PAIRDONE`, the CONFIRM half,
-`badproof`, `badhost`, `badkey`, `full` and the 120s expiry - have NOT run on hardware**, because nothing calls `pairOpen()` until Task 3 draws the button, and inventing a
-`PAIROPEN` command to reach them would be exactly the "a device you can put into pairing mode from
-the Mac" the presence argument forbids. They are covered structurally, not by execution.
+**THE PANEL, AND WHY `PAIR NEW MAC` SITS IN THE LIST'S NEXT FREE ROW SLOT.** The obvious placement -
+a button above the Macs on SETTINGS > Pairing - does not fit, and the arithmetic said so before
+anyone drew it: that group's four rows run 218/278/338/398 and end at 449 against a footer at 460,
+i.e. **10px of slack**, where a button above the list needs `H_ROW` + a gap = **58**. So it is drawn
+at `p3RowY(hostCount)`, the next free row. It fits for 0..3 Macs, and at `MAX_HOSTS` there is no
+room on the screen **and** no free NVS slot - so **its ABSENCE encodes "full" exactly**, with no
+second state, no extra string and no refusal path to get wrong. The two limits turn out to be the
+same limit, and the checker walks every slot 0..3 clearing the footer and slot 4 not clearing it, so
+that argument is pinned to the geometry rather than left in a comment. (`PAIRREQ`'s own
+`PAIRFAIL full` is KEPT as defence in depth - a fourth Mac can still arrive over USB while a window
+is open - and never relied on: never let a UI enforce a storage limit.)
 
-**Board 2 cost: +560 bytes of flash and +8 RAM for the commit-gate fix round**
-(1,020,274 / 66,156 -> 1,020,834 / 66,164), re-baselined deliberately, and before it
-**+3,080 / +144** for the window and handlers (1,017,194 / 66,012 -> 1,020,274 / 66,156). **Board 1 is `UNCHANGED`** at 1,386,934 / 69,804 - every line of this
-sits behind `#if BOARD_HAS_WIRELESS_PAIR`, including the three close sites in shared code.
+**The panel owns everything above the footer, the tab bar included** - chrome drawn but dead is the
+bug `fabVisible()` is gated in one place to avoid - and leaves the footer LIVE, so the clock, the
+battery and the "Xs ago" freshness keep running through a 120s wait: whether the Mac is still
+talking is exactly what you want to know while waiting for its request. It reads `PAIR NEW MAC` /
+`waiting for a Mac` / `pick this device on your Mac` until a request lands, then
+`does your Mac show this?` over the six digits at `T_HERO` with the requesting Mac's label under
+them. That label is **attacker-controlled text**: sanitised and capped at parse, and `fitText`'d
+again here, because `drawString` paints an opaque box and a name wider than the panel would rub out
+its neighbours. The countdown is the one change-only field, ticked by `tickPairPanel()` from
+`loop()` at 500ms rather than by `renderSettingsTab()`, which returns early while the panel is up
+for the same reason the confirm dialog does.
+**CANCEL is the FILLED button and CONFIRM only outlined**, the hierarchy every confirm dialog here
+uses: the tap that stores a 128-bit key must not also be the easiest thing to hit. And **CANCEL
+keeps a FIXED slot rather than centring itself while it is alone** - a button that moves when a
+request arrives is a button you tap by accident at the exact moment the screen changed under your
+finger.
+
+**THE TAP WAS BOUND TO THE PREDICATE AND NOT TO THE PAINT, WHICH IS THE TRANSFERABLE FORM OF THIS
+BUG.** `pairConfirmVisible()` really was `pairConfirmable()` and nothing else, read by the draw site
+AND the hit test, so the structural rule this codebase keeps paying for was met. What lagged was the
+REPAINT: `handlePairReq()` set `pairPending` and repainted nothing, and `PAIRREQ` arrives through
+`processCompletedLine` rather than `handleLine`, so the panel only caught up on the 500ms tick - and
+inside that window a person could tap CONFIRM against a screen not yet showing the code they
+compared, which is the whole property. It is reconciled inside `handlePairReq()` in the same
+statement now, asserted, and the selftest also catches the **plausible wrong fix** of moving the
+reconcile after `PAIRPUB`. Two doors closed with it: `pairPanelActive` joined all five full-screen
+refusal lists, so an unauthenticated radio `EMOJITEST`/`READTEST` can no longer paint over an open
+pairing window, and `switchTab` clears it.
+**The overlap was closed IN SPACE, not in time.** At `hostCount == 3` the PAIR NEW MAC row
+(398..443) overlapped CONFIRM's old rect (386..435) at the same x, so the ordinary human
+double-tap - the second tap ~200ms after the one that opened the panel - landed exactly on CONFIRM.
+`PAIR_BTN_BOTTOM` 24 -> 62 lifts the button row clear, spending 38px the header already declares
+surplus. **An arming DELAY was considered and rejected**: it would be a second spelling of "is there
+anything to confirm", and `pairConfirmable()` being ONE predicate is itself an asserted rule - the
+fix that adds a second source of truth is the one this codebase keeps paying for.
+
+**A CHAIN OF RELATIVE IDENTITIES IS INVISIBLE TO THIS SWEEP, AND THAT IS A FACT ABOUT THE SWEEP
+RATHER THAN THE ASSERTIONS.** The panel's six offsets were first written as `y == prev + cell + air`
+throughout, which looks exactly like the standard this file sets - and `geom-sweep.mjs` injects at
+PARSE time, so perturbing a gap moves every block below it and every identity still holds.
+MEASURED, not reasoned: `PAIR_TOP_AIR`, `PAIR_AIR_STATE`, `PAIR_AIR_CODE`, `PAIR_AIR_LABEL` and
+`PAIR_BTN_BOTTOM` were ALL unguarded at ±16, the last of them under an assertion written for it, and
+`PAIR_TITLE_Y === PAIR_TOP_AIR` was vacuous outright. Closed with a **CLOSING TERM**: `PAIR_AIR_LEFT`
+names the surplus and the stack is asserted to land exactly on a button row anchored from the OTHER
+end (`BOARD_H - FOOTER_H - PAIR_BTN_BOTTOM - H_BTN`), which is the `HOME_Y0_BOT` shape - non-circular
+because `PAIR_BTN_Y` derives from an independent path and `PAIR_AIR_LEFT` is read by no draw site. A
+second binding asserts the surplus stays IN `PAIR_AIR_LEFT`, which catches a sum-preserving
+redistribution the landing identity provably cannot see. After it, every pairing coordinate is
+caught at **±1 in both directions**. `drawPairResult()` also **flushes before it delays**, the
+defect the farewell screens already fixed once on this shadow-buffered board.
+
+**BOARD 2'S WHOLE-BRANCH COST: +29,104 bytes of flash and +328 RAM** (993,814 / 65,900 ->
+**1,022,918 / 66,228**), of which **+23,380 flash / +112 RAM is mbedtls arriving in the link** and
+everything the feature itself adds is the remaining **+5,724 / +216**. Broken out, in the order it
+landed: the crypto and the pinned vectors +23,380 / +112; the window and the wire handlers +3,080 /
++144; the commit gate +560 / +8; the panel and the button +2,084 / +64. The Mac's half costs board 2
+nothing - it is `host/index.mjs` and `DeckhandMenuBar.swift`. **Board 1 is `UNCHANGED`** at
+**1,386,934 / 69,804**, `0cc2e77b66fb6947...`, verified with `board-baseline.mjs --check 1` at every
+commit: every line of this sits behind `#if BOARD_HAS_WIRELESS_PAIR`, including the three close
+sites in shared code, and board 1's header gains exactly one line that emits no code.
+The breakdown was RECONCILED rather than transcribed - two contemporaneous records of the
+commit-gate figure disagreed by 270 bytes, so `1d2f170` was rebuilt into a scratch sketch path and
+came back **1,020,834 / 66,164**, which settles the panel's share at +2,084 / +64 and makes the four
+lines sum exactly to the measured total. Compile an OLD commit somewhere other than
+`firmware/deckhand_display`: `arduino-cli` keys its cache on the sketch PATH, so a rebuild in place
+would evict the objects the current baseline was just taken from.
 
 **Board 2 cost: +23,380 bytes of flash and +112 RAM** (993,814 / 65,900 -> 1,017,194 / 66,012),
 nearly all of it mbedtls's `ecp`/`hkdf` arriving in the link for the first time.
@@ -1033,6 +1100,88 @@ through `DECKHAND_TMP` with a synthetic `host-alive` - the documented seam - and
 captured but never answered against a device. The click paths (`PAIRSCAN`/`PAIRSTART`/`PAIRCONFIRM`/
 `PAIRCANCEL` reaching the host) are structural, not executed.
 
+**THE HOST'S SCAN HOLDS NOBLE'S OWN PERIPHERAL HANDLE, WHICH IS ONLY AS GOOD AS THE ADVERTISEMENT IT
+CAME FROM.** `PAIRSCAN` runs a 5s scan into a `name -> {rssi, peripheral, at}` map; `PAIRSTART`
+takes the handle straight to `connectAsync`, so a **stale sighting is REFUSED BY NAME** past
+`PAIR_SCAN_FRESH_MS` rather than connected to, and the reason names the age. The device already on
+the live link is exempt, because that is not a remembered handle at all - it is the connection in
+use. **Scanning must not disturb the live link**, and that was tested rather than asserted: against
+both real boards, `PAIRSCAN` listed `Deckhand-0528` at -44 dBm and `Deckhand-C114` at -63 with the
+live link surviving, and a `PAIRSTART` aimed at board 1 - a second peripheral that cannot answer -
+opened its own link, timed out at 15s naming the cause, disconnected itself, and left C114 at
+`via=usb,ble`.
+
+**A LATE REPLY FROM AN ABANDONED EXCHANGE POISONED THE NEXT ONE, WITH NO ATTACKER INVOLVED, AND IT
+WAS REACHABLE FROM THIS FEATURE'S OWN HARDWARE TEST.** `handlePairPub` bound to whatever
+`pairExchange` happened to be current - no peripheral id, no generation token, and `via` dropped at
+the call site. So: exchange 1 times out at 15s, the user retries, and the first device's slow reply
+lands in exchange 2, sets `ex.code` from the WRONG peer, after which `if (ex.code) return;` swallows
+the real reply. A dead exchange while the log says "answered - compare the six digits", failing safe
+and giving the user no hint which is which. Every reply is stamped with the exchange's generation
+and peripheral id now and dropped by name.
+**And the PAIRING link had no `disconnect` listener** where the main BLE path has had one since the
+start: a peripheral that went away after `PAIRPUB` left `pairExchange` non-null with `priv`/`shared`
+/`key` **un-zeroed** and the heartbeat publishing `awaiting-code`, the six digits and a counting
+`sec` for the rest of the 120s - a dead exchange the menu bar draws as a live pairing. Bounded by
+the timer, so not this file's "await that never settles" class, but "every failure closes the
+exchange" ought to be satisfied by NOTICING the failure rather than by outliving it.
+**Known and watched, not fixed:** `PAIRFAIL` is BROADCAST by the device, so a neighbouring Mac's
+refusal could in principle end our exchange. It fails safe - nothing is stored - and is named here
+rather than papered over; worth re-checking once two Macs are really paired.
+
+**HOW TO PAIR A SECOND MAC WIRELESSLY - THE TWO TAPS, AND WHAT EACH SCREEN SHOWS.** Board 2 only.
+Nothing is stored until step 5, and the device tap there is the whole presence proof.
+
+1. **On the DEVICE, tap `PAIR NEW MAC`** (SETTINGS > Pairing, the row directly under the Macs
+   already paired). If it is not there, all four slots are full - forget one first. This is the
+   first of the two taps and it opens a **120-second** window; the panel takes the screen and reads
+   `waiting for a Mac` / `pick this device on your Mac`, with CANCEL on the right and a countdown.
+2. **On the MAC: menu bar > Settings > `Pair new device...`.** It writes `PAIRSCAN`; ~5s later the
+   submenu lists what it heard, strongest first, as `Deckhand-XXXX (-44 dBm)`. Pick the one whose
+   name matches the device - it is on SETTINGS > Status and on the boot waiting screen.
+3. **The exchange runs on its own.** The Mac sends `PAIRREQ`, the device answers `PAIRPUB`, and both
+   ends derive the same key and the same six digits. The device's panel changes to
+   `does your Mac show this?` with the digits at 32x64 and the requesting Mac's name under them; the
+   Mac raises a dialog with ITS own six digits at 44pt SF Mono. Neither code was transmitted.
+4. **COMPARE THE TWO SIX-DIGIT CODES.** This is the security property, not a formality. They are
+   drawn UNGROUPED on both sides on purpose, so `482913` is one shape in both places.
+5. **If they match: click `They match` on the Mac, then tap `CONFIRM` on the device.** Either order
+   works and BOTH are required - the Mac's click only sends the proof, and the device stores nothing
+   until a finger on its glass says so. The Mac then tells you so as well
+   (`Now tap CONFIRM on ...`). The device shows `PAIRED WITH <name>` and drops back to the Pairing
+   list with the new Mac in it; the key is in NVS in the same 32-hex form `PROVISION` writes, so
+   that Mac answers prompts through the identical path with no second format anywhere.
+6. **If they DIFFER, tap `CANCEL` on the device** (or `They don't match` on the Mac) and start
+   again. A mismatch is the one signal that something other than your Mac answered the window.
+
+**WHAT IS NOT VERIFIED IN THIS FEATURE, STATED PLAINLY - AND IT INCLUDES THE MAIN EVENT.**
+
+- **NO COMPLETE END-TO-END PAIRING HAS EVER RUN.** The refusing half is verified on hardware over
+  BOTH transports with the cause named (`PAIRFAIL closed` on the wire, `PAIR: -> PAIRFAIL closed` in
+  the log), and `PAIRVECTOR` matches RFC 7748 on the shipped firmware. The **accepting** half -
+  `PAIRPUB` -> derive -> a code on both screens -> `PAIROK` -> CONFIRM -> `PAIRDONE` -> a key in NVS
+  - has not. It needs **two physical taps** (PAIR NEW MAC, then CONFIRM) and **this codebase
+  deliberately provides no remote trigger for either**: a `PAIROPEN` command would make the device
+  something a Mac can put into pairing mode, which is the exact property the feature exists to
+  refuse, and a remote CONFIRM would delete the presence proof outright. That is the right trade and
+  its cost is that the accepting paths - including `badproof`, `badhost`, `badkey`, `full` and the
+  120s expiry - are covered structurally, not by execution.
+- **The supervised host runs the MAIN checkout's `host/index.mjs`, where `PAIRSCAN` does not exist**
+  (`grep -c PAIRSCAN` is 0 in the running file). So the menu bar's click paths cannot reach a host
+  that knows the verb until this branch merges, and every menu state was driven through
+  `DECKHAND_TMP`. Task 4's own hardware results ARE real - that run stopped the supervised host and
+  ran the worktree's host through `DeckhandBLE.app` - but nothing since has, and end-to-end testing
+  needs either that or a merge.
+- **The device's behaviour on a LOW-ORDER X25519 point is unmeasured.** Node THROWS on all four
+  classic ones, so the Mac fails closed; whether `mbedtls_ecp_mul` refuses them or hands back the
+  all-zero shared secret **has not been checked**. It is recorded at `pairX25519` rather than
+  assumed either way.
+- **No screenshot here vouches for COLOUR.** Board 2's `SCREENSHOT` reads the shadow framebuffer, so
+  the on-glass evidence for the PAIR NEW MAC button (its accent stroke measured off the PNG at rows
+  278 and 323 = exactly `p3RowY(1)` and `+H_ROW-1`) is a claim about the geometry the renderer
+  composed. **The pairing PANEL itself has never been on the glass at all** - it opens from one
+  thing only, and that is the point.
+
 **Check the LAYOUT ARITHMETIC of both boards' screens without a screen.** Three checkers parse the
 constants straight out of `board_e32r28t.h` / `board_es3c35p.h` (shared parsing in
 `geom-common.mjs`) and assert every derivation the headers claim — so a header that drifts from its
@@ -1042,7 +1191,7 @@ own comment fails loudly instead of passing while the panel is wrong:
 node firmware/deckhand_display/usage-geom-check.mjs      # USAGE cards, hero/bar/stats/foot clear boxes, footer's three zones, Codex row
 node firmware/deckhand_display/sessions-geom-check.mjs   # the row-height ladder, tall/sub/compact gates, detail card, ask option chips
 node firmware/deckhand_display/settings-geom-check.mjs   # settings pages, steppers, keyboard, history reader, confirm-screen line cap
-node firmware/deckhand_display/geom-sweep.mjs            # fault-injection sweep over all three (~30s, see below)
+node firmware/deckhand_display/geom-sweep.mjs            # fault-injection sweep over all three (~110s, see below)
 ```
 
 Each takes `--selftest`, which injects a fault and **exits 0 only when that fault IS caught** (exit
@@ -1076,7 +1225,22 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   frequencies and cosmetic gaps with no geometric constraint, and wiring that to a non-zero exit
   would make it un-runnable until someone had either written 150 assertions or suppressed the list —
   and a suppressed list stops being read. Non-zero is reserved for the sweep's own internal errors.
-  Three things it has actually caught, which is why it is worth the ~30 seconds it takes: the
+  **IT TAKES ~110 SECONDS, NOT ~30 — AND A 33-MINUTE RUN WAS REPORTED ONCE AND DOES NOT
+  REPRODUCE.** Measured on the wireless-pairing branch with nothing else running: `real 111.84 /
+  user 128.44 / sys 13.61`, exit 0, all three checkers, both boards, 582 constant-board pairs. The
+  ~30s figure predates the sessions checker reaching 1444 assertions and the settings checker 617,
+  so it is stale in the honest direction and is corrected here. It is recorded because a task on
+  this same branch **killed the sweep at 33 minutes** on its sessions child and carried that
+  forward as a suspected 66x regression in a repo-level instrument. **It is not one**: re-run alone
+  it is under two minutes at the same commit range. What that run actually hit was NOT established
+  — the run was killed rather than diagnosed, so there is no evidence to point at, and the only
+  honest statement is that the sweep is affordable today and the earlier figure is unexplained
+  rather than explained away. The plausible candidate, offered as a hypothesis and not a
+  measurement, is contention: the sweep is four children per checker-board, so anything else heavy
+  on the machine (an `arduino-cli` build takes minutes) multiplies straight through it. **Time it
+  when you run it**, and treat a wildly different number as a question about the machine before it
+  is a question about the sweep.
+  Three things it has actually caught, which is why it is worth the ~110 seconds it takes: the
   waiting screen's seven `WAIT_*` offsets, read by no checker at all and wrong on board 2; the
   pager key's WIDTH, checked in one dimension only; and — the same run, once the checkers started
   measuring per board — the wordmark's 64px cell erasing the two lines under it. A fourth was
@@ -1094,16 +1258,25 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   opaque box paints `COLOR_CARD` over the chip's own stroke, the clear-box-not-glyphs hazard the
   usage cards already pay for. Asserting that box clears the stroke at both ends is a bound taken
   from the geometry rather than fitted to today's 26, and it catches the chip at 20.
-  Where it stands today: **492 of 557 constant-board pairs guarded** (board 1 32/237 unguarded,
-  board 2 33/320) — board 2 gained **50 constants** in the settings redesign and its unguarded count
+  Where it stands today: **514 of 582 constant-board pairs guarded** (board 1 32/237 unguarded,
+  board 2 36/345) — board 2 gained **50 constants** in the settings redesign and its unguarded count
   went DOWN, which is the standard this file sets for constants the repo just added: every one of
   them is caught at **±1 in both directions**. (`ASK_OPT_DESC_BYTES` from the option-descriptions
   work, and `READER_CODE_LINE_H` from the reader line-step fix, likewise.) Board 1's numbers are
   unchanged, which is the sweep agreeing with `board-baseline.mjs` that nothing there moved.
-  Of the unguarded ones only **8 on board 1 and 10 on board 2 are read by any
-  checker at all** — the other 24 and 23 are mic, beeper, crab and preset-count constants with no
-  geometry to violate. **Four of board 2's ten are unguarded BY CONSTRUCTION and are not a
-  gap**: `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`, `DETAIL_COL_LBL_STEP` and `DETAIL_COL_VAL_STEP` are
+  **Wireless pairing then added 25 more to board 2 and only THREE of them are unguarded, all
+  three because they measure TIME or FORMAT rather than pixels**: `PAIR_WINDOW_MS` (120000) and
+  `PAIR_RESULT_MS` are durations, where ±16 milliseconds has no geometric consequence a checker
+  could notice, and `PAIR_HOSTID_CHARS` (8) is a wire format read by no geometry assertion. Every
+  PAIR_* constant that IS a coordinate or a gap is caught at **±1 in both directions** — which it
+  was not when the panel first landed, and the story of how it got there is under **the pairing
+  panel** below: a chain of relative identities is invisible to an injector that perturbs one term
+  and lets the rest follow.
+  Of the unguarded ones only **8 on board 1 and 12 on board 2 are read by any
+  checker at all** — the other 24 and 24 are mic, beeper, crab, pairing-duration and
+  preset-count constants with no geometry to violate. **Four of board 2's ten are unguarded BY CONSTRUCTION and are not a
+  gap** (as are the two `PAIR_*_MS` durations above): `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`,
+  `DETAIL_COL_LBL_STEP` and `DETAIL_COL_VAL_STEP` are
   board 1's arm only since §7 replaced the pill and the two column pairs with the band and one
   meta line, so nothing on board 2 reads them and no perturbation can move a board-2 number. They
   are still swept because the sweep perturbs every constant the checkers PARSE, and the parse is
