@@ -176,7 +176,7 @@ void renderSettingsHome() {
     padTo(buf, sizeof(buf), HOME_SUB_CHARS);
     buf[HOME_SUB_CHARS] = '\0';
     // Only the Status row's colour ever moves; the other four are COLOR_LABEL.
-    if (SET_STATUS + i == SET_STATUS && col != homeStatusColorCache) {
+    if (i == 0 && col != homeStatusColorCache) {
       homeStatusColorCache = col;
       homeSubCache[i][0] = '\0';
     }
@@ -956,16 +956,18 @@ void resetSettingsCaches() {
 }
 #if BOARD_SETTINGS_HOME
 // HOME -> a group, and back. Both go through drawSettingsStatic(), which clears
-// from CONTENT_Y and resets every cache, so neither repeats that work here.
+// from CONTENT_Y and resets every cache itself, so neither calls
+// resetSettingsCaches() here - that used to be duplicated at both call sites,
+// harmlessly (drawSettingsStatic() would just reset an already-reset cache),
+// but a caller that repeats work drawSettingsStatic() already does on its own
+// invites a reader to trust the comment over the code.
 void openSettingsGroup(int g) {
   settingsPage = constrain(g, SET_STATUS, SET_ACTIONS);
-  resetSettingsCaches();
   drawSettingsStatic();
   renderSettingsTab();
 }
 void settingsBack() {
   settingsPage = SET_HOME;
-  resetSettingsCaches();
   drawSettingsStatic();
   renderSettingsTab();
 }

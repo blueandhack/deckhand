@@ -407,6 +407,16 @@ for (const b of [1, 2]) {
         chk(tx + w <= W - c.PAGER_BTN_X0,
             `back band title "${t}" ${w}px ends ${tx + w - 1} inside the panel (${W - c.PAGER_BTN_X0 - 1})`);
       }
+      // VERTICAL bound, absent until now (the retired page-dot assertion carried
+      // one; the three above are all horizontal). ML_DATUM shares MC_DATUM's
+      // vertical bias - only the horizontal alignment differs between the two -
+      // so mcBox gives the real ink box the title paints, centred in the band at
+      // CONTENT_Y + PAGER_H/2. It must land inside the band itself, or the title
+      // clips against the tab bar above or the group body below.
+      const titleY = c.CONTENT_Y + Math.floor(c.PAGER_H / 2);
+      const [vTop, vBot] = mcBox(b, T_HEAD, titleY);
+      chk(vTop >= c.CONTENT_Y && vBot <= c.CONTENT_Y + c.PAGER_H - 1,
+          `back band title ink ${vTop}..${vBot} inside the band ${c.CONTENT_Y}..${c.CONTENT_Y + c.PAGER_H - 1}`);
     }
     // HOME's row: name at T_HEAD and summary at T_META share the row's text column,
     // which ends where the chevron begins. The chevron is MR_DATUM at
@@ -813,11 +823,22 @@ for (const b of [1, 2]) {
     const soundEnd = c.PS_MIC_Y + c.PS_BTN_H - 1;
     chk(soundEnd < contentBottom, `Sound's last button clears the footer: ${soundEnd} < ${contentBottom}`);
     chk(c.PS_BTN_H >= c.TAP_MIN, `Sound's action buttons ${c.PS_BTN_H}px tall >= TAP_MIN ${c.TAP_MIN}`);
-    // BOTH captions sit one SET_CAP_STEP above the control they name, and that is
-    // the relation rather than the number: a caption closer than its own cell
-    // height would sit ON the control.
-    chk(c.PS_SOUND_Y - c.PS_ALERTS_Y === c.SET_CAP_STEP && c.PS_MIC_Y - c.PS_MIC_CAP_Y === c.SET_CAP_STEP,
-        `Sound's two captions both sit SET_CAP_STEP (${c.SET_CAP_STEP}) above their control`);
+    // EACH CAPTION'S OWN TEXT BOX MUST CLEAR THE CONTROL IT HEADS. The equality
+    // this replaced (`PS_SOUND_Y - PS_ALERTS_Y === SET_CAP_STEP`) was vacuous:
+    // both sides are DERIVED in deckhand_display.ino as `<caption> + SET_CAP_STEP`,
+    // so it holds by construction and cannot fail - proven by injection, shrinking
+    // SET_CAP_STEP from 24 to 26 (or below the caption's own cell height) still
+    // gave 0 failures. This binds the real geometry instead: the caption's ink,
+    // not the formula that placed it, must end before its control begins.
+    const capPairs = [
+      ["ALERTS", c.PS_ALERTS_Y, c.PS_SOUND_Y],
+      ["MICROPHONE", c.PS_MIC_CAP_Y, c.PS_MIC_Y],
+    ];
+    for (const [name, capY, controlY] of capPairs) {
+      const capBottom = capY + lineHB(b, T_BODY) - 1;
+      chk(capBottom < controlY,
+          `"${name}" caption's own text box ends ${capBottom}, clear of its control starting ${controlY}`);
+    }
     chk(c.SET_CAP_STEP > lineHB(b, T_META),
         `SET_CAP_STEP ${c.SET_CAP_STEP} clears the caption's own ${lineHB(b, T_META)}px cell`);
     chk(c.P1_THEME_CAP_STEP > lineHB(b, T_META),
