@@ -98,6 +98,18 @@ typedef esp_ble_gatts_cb_param_t BleCbParam;
 #include <sys/time.h>   // gettimeofday: ESP-IDF advances it across deep sleep
 #include <mbedtls/md.h>
 #include <mbedtls/sha256.h>
+#if BOARD_HAS_WIRELESS_PAIR
+// Board 2 only, and up HERE with the includes rather than beside the code in
+// pairing.ino for exactly the reason the BleCbParam typedef above is: the
+// Arduino build inserts its generated prototypes above the sketch's FIRST
+// function definition, so a signature naming mbedtls_ecp_group would be unknown
+// to its own prototype and the build fails at the definition with "does not
+// name a type". Measured, not anticipated - that is the error this file first
+// produced. Board 1 has the flag at 0 and sees none of it.
+#include <mbedtls/ecp.h>
+#include <mbedtls/hkdf.h>
+#include <esp_random.h>
+#endif
 #include <driver/gpio.h>
 #include <esp_adc/adc_continuous.h>
 #include "Cozette6x13.h"
@@ -5010,6 +5022,21 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       }
     }
 #if !BOARD_USES_TFT_ESPI
+#if BOARD_HAS_WIRELESS_PAIR
+  } else if (buf == "PAIRVECTOR") {
+    // THE INTEROP CHECK, AS A MEASUREMENT RATHER THAN AN ARGUMENT. Board 2 only.
+    // The device derives with mbedtls and the Mac with node's crypto, and a
+    // disagreement between them - a byte order, a salt order, an HKDF info
+    // string - errors NOWHERE: both ends stay self-consistent, the six digits on
+    // the glass simply are not the six the Mac computed, and it presents as a UI
+    // bug several screens away from the cause. So a FIXED private key is run
+    // against a FIXED peer public key and every derived value is printed, which
+    // makes the comparison against host/pair-crypto-check.mjs a diff.
+    //
+    // Same argument TEXTPROBE, AUDIOPROBE and COLORTEST already won: without the
+    // instrument, the first real attempt is the test. See pairVectorReport().
+    pairVectorReport();
+#endif
   } else if (buf.startsWith("READTEST")) {
     // THE ASK READER IS OTHERWISE UNCAPTURABLE, and that is the same argument
     // TAB/PAGE/KBTEST/EMOJITEST/MULTITEST already won: SCREENSHOT can only record

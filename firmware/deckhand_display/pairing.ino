@@ -180,3 +180,294 @@ void forgetHost(int i) {
   if (wasAllowed) { allowedHost[0] = 0; saveAllowedHost(); }
   activeHost = -1;
 }
+
+// ============================================================================
+// WIRELESS PAIRING: the derivations. BOARD 2 ONLY.
+//
+// Board 1 compiles none of this - BOARD_HAS_WIRELESS_PAIR is 0 there and the
+// flag alone emits no code, which is what keeps that board's binary where it
+// is. PROVISION over USB is unchanged on both boards and remains the ONLY
+// pairing path on board 1.
+//
+// What this replaces and why it is not a relaxation: the cable's security value
+// is proof that a person was HOLDING the device, not the wire itself. Here that
+// proof is a tap on the glass, and the 128-bit pairing secret is NEVER
+// transmitted - both ends derive it from an ephemeral X25519 exchange. See
+// docs/superpowers/specs/2026-08-30-wireless-pairing.md.
+//
+// EVERY VALUE BELOW MUST MATCH host/pair-crypto.mjs BYTE FOR BYTE. A mismatch
+// errors nowhere: both ends stay self-consistent, the code on the screen simply
+// is not the code the Mac derived, and it presents as a UI bug. PAIRVECTOR is
+// the instrument that turns that into a measurement.
+// ============================================================================
+#if BOARD_HAS_WIRELESS_PAIR
+// The mbedtls and esp_random includes this block needs live at the top of
+// deckhand_display.ino, under the same flag - see the note there for why.
+
+// The two HKDF info strings and the proof message. The trailing "/1" is a
+// VERSION MARKER, not decoration: a future change to any derivation bumps it,
+// so an old device and a new Mac fail cleanly at the code-compare step instead
+// of silently deriving different keys and blaming the user. The two info
+// strings must differ, or the code and the key are the same bytes.
+#define PAIR_SAS_INFO   "deckhand-sas/1"
+#define PAIR_KEY_INFO   "deckhand-key/1"
+#define PAIR_PROOF_MSG  "deckhand-pairok/1"
+#define PAIR_CODE_MODULUS 1000000UL   // 10^PAIR_CODE_DIGITS
+#define PAIR_CODE_DIGITS  6
+#define PAIR_KEY_BYTES    16          // 128-bit pairing secret
+
+// mbedtls wants an RNG for the scalar-multiplication blinding. esp_fill_random
+// is the hardware RNG the rest of this firmware already trusts.
+int pairRng(void* ctx, unsigned char* out, size_t len) {
+  (void) ctx;
+  esp_fill_random(out, len);
+  return 0;
+}
+
+// RFC 7748's clamping, applied to the private scalar BEFORE it is used.
+// It is not optional here the way it is on the Mac: node's X25519 clamps
+// internally and accepts any 32 bytes, while mbedtls_ecp_check_privkey REFUSES
+// an unclamped Montgomery scalar outright - so an unclamped key is not a
+// different answer here, it is an error. Clamping is idempotent and is part of
+// X25519 itself, so clamping first cannot change what either side computes;
+// pinning the CLAMPED form is what lets both sides load the same 32 bytes.
+void pairClamp(uint8_t d[32]) {
+  d[0] &= 248;
+  d[31] &= 127;
+  d[31] |= 64;
+}
+
+// X25519. Both buffers are RAW LITTLE-ENDIAN 32 bytes - RFC 7748's encoding,
+// which is what node's crypto produces and consumes natively.
+//
+// BYTE ORDER, MEASURED ON HARDWARE RATHER THAN ASSUMED. mbedtls stores a
+// Curve25519 point's coordinate as an MPI, whose natural serialisation is
+// BIG-endian, so it was an open question whether these two calls hand back the
+// bytes node expects or their reverse. Settled by running PAIRVECTOR on a real
+// board 2 against host/pair-crypto-check.mjs's pinned RFC 7748 vector:
+// mbedtls 3.6.6's mbedtls_ecp_point_read_binary and _write_binary SPECIAL-CASE
+// Montgomery curves and do the little-endian conversion THEMSELVES, so no
+// reversal is needed at any of the three boundaries (peer public in, own public
+// out, shared secret out) and none is done. If a future mbedtls changes that,
+// PAIRVECTOR's shared secret stops matching RFC 7748's published value and the
+// fix is to reverse here - which is the whole reason that command exists.
+bool pairMul(const uint8_t scalar[32], const mbedtls_ecp_point* P, uint8_t out[32],
+             mbedtls_ecp_group* grp) {
+  mbedtls_mpi d;
+  mbedtls_ecp_point R;
+  mbedtls_mpi_init(&d);
+  mbedtls_ecp_point_init(&R);
+  bool ok = false;
+  size_t olen = 0;
+  // The scalar is little-endian on the wire; the MPI is a number.
+  if (mbedtls_mpi_read_binary_le(&d, scalar, 32) == 0 &&
+      mbedtls_ecp_mul(grp, &R, &d, P, pairRng, NULL) == 0 &&
+      mbedtls_ecp_point_write_binary(grp, &R, MBEDTLS_ECP_PF_UNCOMPRESSED,
+                                     &olen, out, 32) == 0 &&
+      olen == 32) {
+    ok = true;
+  }
+  mbedtls_ecp_point_free(&R);
+  mbedtls_mpi_free(&d);
+  return ok;
+}
+
+// out = X25519(priv, peerPub)
+bool pairX25519(const uint8_t priv[32], const uint8_t peerPub[32], uint8_t out[32]) {
+  mbedtls_ecp_group grp;
+  mbedtls_ecp_point Q;
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_ecp_point_init(&Q);
+  bool ok = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) == 0 &&
+            mbedtls_ecp_point_read_binary(&grp, &Q, peerPub, 32) == 0 &&
+            pairMul(priv, &Q, out, &grp);
+  mbedtls_ecp_point_free(&Q);
+  mbedtls_ecp_group_free(&grp);
+  return ok;
+}
+
+// out = X25519(priv, basepoint) - this device's public key for one exchange.
+bool pairPublicFromPrivate(const uint8_t priv[32], uint8_t out[32]) {
+  mbedtls_ecp_group grp;
+  mbedtls_ecp_group_init(&grp);
+  bool ok = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) == 0 &&
+            pairMul(priv, &grp.G, out, &grp);
+  mbedtls_ecp_group_free(&grp);
+  return ok;
+}
+
+// A fresh EPHEMERAL keypair. Ephemeral is the point: it exists for the length
+// of one pairing window and is discarded, so there is no long-lived private key
+// on this device to steal.
+bool pairGenKeypair(uint8_t priv[32], uint8_t pub[32]) {
+  esp_fill_random(priv, 32);
+  pairClamp(priv);
+  return pairPublicFromPrivate(priv, pub);
+}
+
+// salt = pubA || pubB, where A is ALWAYS the Mac's (the initiator's) key.
+//
+// THE ORDER IS FIXED BY ROLE, NOT BY "mine then theirs", AND THAT ASYMMETRY IS
+// THE WHOLE POINT. The Mac concatenates its own key first; this device, which
+// is always B, concatenates the PEER's key first. Swap it on one side and
+// nothing errors - each end derives a perfectly good code and key, they simply
+// differ - so the symptom is a code the user types that is never accepted.
+void pairSalt(const uint8_t pubA[32], const uint8_t pubB[32], uint8_t salt[64]) {
+  memcpy(salt, pubA, 32);
+  memcpy(salt + 32, pubB, 32);
+}
+
+bool pairHkdf(const uint8_t* shared, const uint8_t* salt, const char* info,
+              uint8_t* out, unsigned int outLen) {
+  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md) return false;
+  return mbedtls_hkdf(md, salt, 64, shared, 32,
+                      (const unsigned char*) info, strlen(info), out, outLen) == 0;
+}
+
+// Everything one side of an exchange needs, from its own private key and the
+// Mac's public key. THE DEVICE IS ALWAYS B: privB is ours, pubA is theirs.
+//
+// outCode is 7 bytes (6 digits and a NUL), outProof 33 (32 hex and a NUL).
+// Any output pointer may be NULL if that value is not wanted.
+bool pairDeriveAll(const uint8_t privB[32], const uint8_t pubA[32],
+                   uint8_t outPubB[32], uint8_t outShared[32],
+                   char* outCode, uint8_t* outKey, char* outProof) {
+  uint8_t pubB[32], shared[32], salt[64], key[PAIR_KEY_BYTES];
+  if (!pairPublicFromPrivate(privB, pubB)) return false;
+  if (!pairX25519(privB, pubA, shared)) return false;
+  pairSalt(pubA, pubB, salt);
+
+  // The six digits the user reads off the glass. Four bytes read BIG-endian,
+  // taken modulo 10^6, and ZERO-PADDED to six characters - the padding is not
+  // cosmetic: an unpadded 1472 in a six-character box reads as a bug, and a
+  // comparison against the unpadded string would reject a code typed correctly.
+  uint8_t c[4];
+  if (!pairHkdf(shared, salt, PAIR_SAS_INFO, c, sizeof(c))) return false;
+  uint32_t n = ((uint32_t) c[0] << 24) | ((uint32_t) c[1] << 16) |
+               ((uint32_t) c[2] << 8) | (uint32_t) c[3];
+  if (outCode) snprintf(outCode, PAIR_CODE_DIGITS + 1, "%06lu",
+                        (unsigned long) (n % PAIR_CODE_MODULUS));
+
+  // The 128-bit pairing secret. NEVER transmitted by either side.
+  if (!pairHkdf(shared, salt, PAIR_KEY_INFO, key, sizeof(key))) return false;
+
+  if (outPubB) memcpy(outPubB, pubB, 32);
+  if (outShared) memcpy(outShared, shared, 32);
+  if (outKey) memcpy(outKey, key, sizeof(key));
+  if (outProof && !pairProofHex(key, outProof)) return false;
+  return true;
+}
+
+// proof = HMAC-SHA256(key, "deckhand-pairok/1"), first 16 bytes, lower hex.
+// It is what the Mac sends to prove it derived the same key WITHOUT sending the
+// key. Forging it is a 128-bit problem, where guessing the six digits would be
+// a 10^6 one - which is why the device is never sent a guess at the code.
+// outProof must have room for 33 bytes.
+bool pairProofHex(const uint8_t* key, char* outProof) {
+  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md) return false;
+  uint8_t out[32];
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  bool ok = mbedtls_md_setup(&ctx, md, 1) == 0 &&   // 1 = HMAC mode
+            mbedtls_md_hmac_starts(&ctx, key, PAIR_KEY_BYTES) == 0 &&
+            mbedtls_md_hmac_update(&ctx, (const unsigned char*) PAIR_PROOF_MSG,
+                                   strlen(PAIR_PROOF_MSG)) == 0 &&
+            mbedtls_md_hmac_finish(&ctx, out) == 0;
+  mbedtls_md_free(&ctx);
+  if (!ok) return false;
+  for (int i = 0; i < 16; i++) sprintf(outProof + i * 2, "%02x", out[i]);
+  outProof[32] = 0;
+  return true;
+}
+
+// Constant-time string compare, for anything derived from a secret.
+// strcmp/memcmp return on the first differing byte, which leaks HOW MANY
+// leading bytes were right - and that turns forging a 128-bit proof into
+// sixteen one-byte searches. The loop accumulates every difference with |= and
+// always runs to the end. The LENGTH is compared in the clear on purpose: both
+// of the things this compares have a fixed, public length, so it carries
+// nothing.
+bool pairCtEq(const char* a, const char* b, unsigned int len) {
+  if (!a || !b) return false;
+  uint8_t diff = 0;
+  for (unsigned int i = 0; i < len; i++) diff |= (uint8_t) a[i] ^ (uint8_t) b[i];
+  return diff == 0;
+}
+
+// ---------------------------------------------------------------------------
+// PAIRVECTOR - the instrument that makes interop a MEASUREMENT.
+//
+// It exists for the reason TEXTPROBE, AUDIOPROBE and COLORTEST do: without it
+// the first real pairing attempt is the test, and a byte-order disagreement
+// between mbedtls and node is indistinguishable from a UI bug. It runs a FIXED
+// private key against a FIXED peer public key and prints every derived value,
+// so the comparison against host/pair-crypto-check.mjs is a diff rather than a
+// judgement.
+//
+// The vector is RFC 7748 section 6.1's own Alice and Bob, stored CLAMPED (see
+// pairClamp). That means the shared secret it prints is a value published by
+// the IETF, not one this repo invented - so a match proves the X25519 itself,
+// not merely that two of our own implementations agree with each other.
+// ---------------------------------------------------------------------------
+const uint8_t PAIR_VEC_PRIV_B[32] = {
+  0x58, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b, 0x79, 0xe1, 0x7f, 0x8b, 0x83, 0x80, 0x0e, 0xe6,
+  0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18, 0xb6, 0xfd, 0x1c, 0x2f, 0x8b, 0x27, 0xff, 0x88, 0xe0, 0x6b };
+const uint8_t PAIR_VEC_PUB_A[32] = {
+  0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e, 0xf7, 0x5a,
+  0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e, 0xaa, 0x9b, 0x4e, 0x6a };
+// The SECOND vector's private key, whose only job is a code with LEADING ZEROS
+// (001472). A code that is not zero-padded renders as four characters in a
+// six-character box, and one pinned example that happens to start with a
+// non-zero digit would never notice.
+const uint8_t PAIR_VEC_ZERO_PRIV_B[32] = {
+  0x10, 0x77, 0x03, 0x3d, 0xa8, 0xd6, 0xdb, 0x6d, 0x9b, 0xbc, 0x46, 0xc1, 0xa3, 0xe4, 0xf1, 0xb9,
+  0x6d, 0xb0, 0xc2, 0x23, 0xea, 0xb9, 0x8c, 0x75, 0x29, 0x53, 0xea, 0x87, 0xe1, 0xbe, 0xae, 0x55 };
+
+void pairHexInto(const uint8_t* b, unsigned int n, char* out) {
+  for (unsigned int i = 0; i < n; i++) sprintf(out + i * 2, "%02x", b[i]);
+  out[n * 2] = 0;
+}
+
+void pairVectorReport() {
+  uint8_t pubB[32], shared[32], key[PAIR_KEY_BYTES];
+  char code[PAIR_CODE_DIGITS + 1], proof[33];
+  char line[160], hexbuf[65];
+
+  if (!pairDeriveAll(PAIR_VEC_PRIV_B, PAIR_VEC_PUB_A, pubB, shared, code, key, proof)) {
+    // Named cause rather than silence: from the Mac, "no output" and
+    // "the curve is not compiled in" look identical.
+    sendLineToHost("PAIRVECTOR FAILED: the X25519/HKDF path returned an error");
+    return;
+  }
+  pairHexInto(pubB, 32, hexbuf);
+  snprintf(line, sizeof(line), "PAIRVECTOR pubB=%s", hexbuf);   sendLineToHost(line);
+  pairHexInto(shared, 32, hexbuf);
+  snprintf(line, sizeof(line), "PAIRVECTOR shared=%s", hexbuf); sendLineToHost(line);
+  pairHexInto(key, PAIR_KEY_BYTES, hexbuf);
+  snprintf(line, sizeof(line), "PAIRVECTOR code=%s key=%s", code, hexbuf); sendLineToHost(line);
+  snprintf(line, sizeof(line), "PAIRVECTOR proof=%s", proof);   sendLineToHost(line);
+
+  // The leading-zero vector: only its code and key are interesting.
+  if (pairDeriveAll(PAIR_VEC_ZERO_PRIV_B, PAIR_VEC_PUB_A, NULL, NULL, code, key, NULL)) {
+    pairHexInto(key, PAIR_KEY_BYTES, hexbuf);
+    snprintf(line, sizeof(line), "PAIRVECTOR zero code=%s key=%s", code, hexbuf);
+    sendLineToHost(line);
+  } else {
+    sendLineToHost("PAIRVECTOR zero FAILED");
+  }
+
+  // A live round trip on top of the pinned one. It exercises esp_fill_random
+  // and the public-key path, and it proves the ECDH is symmetric ON THIS CHIP -
+  // which the fixed vector alone cannot say, since it only ever multiplies in
+  // one direction.
+  uint8_t p1[32], q1[32], p2[32], q2[32], s1[32], s2[32];
+  bool fresh = pairGenKeypair(p1, q1) && pairGenKeypair(p2, q2) &&
+               pairX25519(p1, q2, s1) && pairX25519(p2, q1, s2) &&
+               memcmp(s1, s2, 32) == 0;
+  snprintf(line, sizeof(line), "PAIRVECTOR fresh=%s (a generated keypair agrees both ways)",
+           fresh ? "ok" : "FAIL");
+  sendLineToHost(line);
+}
+#endif  // BOARD_HAS_WIRELESS_PAIR

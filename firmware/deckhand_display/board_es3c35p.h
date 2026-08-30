@@ -43,6 +43,15 @@
 #define BOARD_HAS_RGBLED     1   // WS2812 on GPIO40; nothing drives it
 #define BOARD_TOUCH_NEEDS_CAL 0  // capacitive, factory-aligned
 #define BOARD_SETTINGS_HOME  1   // a HOME screen plus five drill-down groups
+// Pairing a Mac without the cable: an ephemeral X25519 exchange plus a 6-digit
+// code derived from the shared secret, so the 128-bit pairing key is NEVER
+// transmitted - both ends derive it. This is an ADDITION: PROVISION over USB is
+// unchanged, BLE PROVISION is still ignored, and the rule that a raw secret may
+// never arrive over the radio is untouched, because the new path never sends
+// one. Board 1 is 0, where the cable remains the only path. See
+// docs/superpowers/specs/2026-08-30-wireless-pairing.md, and pairing.ino for
+// the derivations - which must agree with host/pair-crypto.mjs byte for byte.
+#define BOARD_HAS_WIRELESS_PAIR 1
 // NO TOUCH WAKE FROM DEEP SLEEP, and this is a silicon fact rather than a gap
 // in the port. Both ext0 and ext1 wake ONLY from an RTC GPIO, and on the S3 the
 // RTC set is GPIO0..21 - read out of the installed headers rather than assumed:

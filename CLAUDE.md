@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386934, RAM 69804 | flash 993814, RAM 65900 |
+| size today | flash 1386934, RAM 69804 | flash 1017046, RAM 66012 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -415,6 +415,7 @@ echo "AUDIOPROBE" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: is the cod
 echo "TONETEST" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: configure the codec and PLAY a tone
 echo "TONETEST 90" > ~/.claude/deckhand-device-command # ... at a given volume, 1-100 (default 30)
 echo "TONELADDER" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: five rising volumes, find the audible floor
+echo "PAIRVECTOR" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: the pairing crypto against a pinned RFC 7748 vector
 ```
 
 **The three audio commands are a LADDER OF CLAIMS, and running them out of order debugs two
@@ -736,6 +737,76 @@ claims were counted twice. That is not only a vanity number: a regex that stoppe
 have been reported as nine findings rather than one, which is the "an instrument that flatters" rule
 pointing the other way. The caps are passed in now, and the behaviour suite's sandbox is torn down
 in a `finally`, since the run that fails is exactly the one whose scratch directory must not survive.
+
+**Check the WIRELESS-PAIRING CRYPTO, and know which half a checker can prove.** Board 2 can pair a
+Mac without the cable (`BOARD_HAS_WIRELESS_PAIR`, 1 there and **0 on board 1**, where `PROVISION`
+over USB stays the only path): an ephemeral X25519 exchange plus a 6-digit code derived from the
+shared secret, so the 128-bit pairing key is **never transmitted** - both ends derive it. See
+`docs/superpowers/specs/2026-08-30-wireless-pairing.md`.
+
+```
+node host/pair-crypto-check.mjs              # 41 crypto + 18 source assertions
+node host/pair-crypto-check.mjs --selftest   # 13/13 injected faults, each naming its assertion
+echo "PAIRVECTOR" > ~/.claude/deckhand-device-command   # the DEVICE's half, on hardware
+```
+
+**A MISMATCH BETWEEN THE TWO SIDES ERRORS NOWHERE, which is the entire reason `PAIRVECTOR`
+exists.** The device derives with mbedtls and the Mac with node's `crypto`; if they disagree about a
+byte order, a salt order or an HKDF info string, both ends stay perfectly self-consistent - the six
+digits on the glass are simply not the six the Mac computed, and it presents as a UI bug several
+screens from the cause. So the device runs a FIXED private key against a FIXED peer public key and
+prints every derived value, which makes the comparison a **diff** rather than a judgement. Same
+argument `TEXTPROBE`, `AUDIOPROBE` and `COLORTEST` already won.
+
+**The vector is RFC 7748 section 6.1's own Alice and Bob**, so the shared secret it prints is a
+value published by the IETF rather than one this repo invented - a match proves the X25519 itself,
+not merely that two of our own implementations agree with each other. Both private keys are stored
+**clamped**, and that is forced rather than tidy: node's X25519 clamps internally and accepts any 32
+bytes, while `mbedtls_ecp_check_privkey` **refuses** an unclamped Montgomery scalar outright. Since
+clamping is part of X25519 and is idempotent, pinning the clamped form cannot change the answer -
+and the published public keys and shared secret coming back unchanged is the proof that it did not.
+
+**THE mbedtls BYTE-ORDER HAZARD IS SETTLED BY MEASUREMENT, AND THE ANSWER IS "NO REVERSAL".** An
+mbedtls EC point is an MPI, whose natural serialisation is BIG-endian, so it was an open question
+whether `mbedtls_ecp_point_read_binary`/`_write_binary` hand back the raw little-endian 32 bytes RFC
+7748 and node use. Run on a real board 2 at mbedtls 3.6.6, every value matched the host first time -
+`shared=4a5d9d5b...161742`, i.e. the RFC's own - so that library **special-cases Montgomery curves
+and does the little-endian conversion itself**, at all three boundaries (peer public in, own public
+out, shared secret out). Nothing in `pairing.ino` reverses anything. If a future mbedtls changes
+that, `PAIRVECTOR`'s shared secret stops matching the RFC's published value and the fix is one
+reversal - which is what the command is for.
+
+**A SECOND VECTOR EXISTS ONLY FOR LEADING ZEROS** (`001472`). The code is four HKDF bytes read
+big-endian, `% 1000000`, zero-padded to six - and the padding is not cosmetic: an unpadded `1472` in
+a six-character box reads as a bug, and a comparison against the unpadded string would reject a code
+the user typed correctly. One pinned example that happened to start with a non-zero digit would
+never notice, so the checker also sweeps 400 random exchanges for six digits every time.
+
+**Be honest about what each half proves.** The 41 crypto assertions run the Mac's real module. The
+18 SOURCE assertions read `pairing.ino` as **text** (comments stripped, the `panel_shim.cpp`
+`invertColor` trap) and check the device still SAYS the same thing - the info strings, the salt
+order, the modulus parsed from its own macro, the big-endian read, the constant-time compare. They
+cannot execute the sketch, so they catch an EDIT and never a toolchain; only the hardware run
+catches the toolchain. **The salt order is the one that fails silently in both directions**:
+`salt = pubA || pubB` with A **always** the Mac's key, so the Mac concatenates its own key first and
+the device concatenates the PEER's first. Swap it on one side and each end derives a good key - they
+just differ.
+
+**Constant-time comparison, not `memcmp`, for the proof and the code.** `memcmp`/`strcmp` return on
+the first differing byte, which leaks how many leading bytes were right and turns forging a 128-bit
+proof into sixteen one-byte searches. `pairCtEq` accumulates with `|=` and always runs to the end;
+the host uses `crypto.timingSafeEqual`. Length is compared in the clear on purpose - both values
+have a fixed, public length, so it carries nothing.
+
+**Board 2 cost: +23,232 bytes of flash and +112 RAM** (993,814 / 65,900 -> 1,017,046 / 66,012),
+nearly all of it mbedtls's `ecp`/`hkdf` arriving in the link for the first time. **Board 1 is
+`UNCHANGED`** - its header gains exactly one line, `#define BOARD_HAS_WIRELESS_PAIR 0`, which emits
+no code, and everything else sits behind `#if BOARD_HAS_WIRELESS_PAIR`. **The mbedtls includes had
+to go at the TOP of `deckhand_display.ino` under that same flag, not beside the code**: the Arduino
+build inserts its generated prototypes above the sketch's first function definition, so a signature
+naming `mbedtls_ecp_group` is unknown to its own prototype and the build fails at the definition
+with "does not name a type". Measured - that is the error this first produced - and it is the same
+rule the `BleCbParam` typedef already records.
 
 **Check the LAYOUT ARITHMETIC of both boards' screens without a screen.** Three checkers parse the
 constants straight out of `board_e32r28t.h` / `board_es3c35p.h` (shared parsing in
