@@ -42,6 +42,7 @@
 #define BOARD_HAS_SD         1   // microSD slot on the SDMMC bus; no SD code exists
 #define BOARD_HAS_RGBLED     1   // WS2812 on GPIO40; nothing drives it
 #define BOARD_TOUCH_NEEDS_CAL 0  // capacitive, factory-aligned
+#define BOARD_SETTINGS_HOME  1   // a HOME screen plus five drill-down groups
 // NO TOUCH WAKE FROM DEEP SLEEP, and this is a silicon fact rather than a gap
 // in the port. Both ext0 and ext1 wake ONLY from an RTC GPIO, and on the S3 the
 // RTC set is GPIO0..21 - read out of the installed headers rather than assumed:
@@ -1453,6 +1454,41 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 // above the footer, the way the USAGE column does, is still rejected on the same
 // arithmetic: it needs a gap wider than the 16px rows it separates.
 
+// ---------- SETTINGS: HOME and the five groups ----------
+// settingsPage carries HOME plus five group ids rather than a second state
+// variable, because two variables tracking one screen is how a UI ends up
+// drawing one page while hit-testing another.
+const int SET_HOME = 0, SET_STATUS = 1, SET_DISPLAY = 2, SET_SOUND = 3, SET_PAIRING = 4, SET_ACTIONS = 5;
+const int SET_GROUP_COUNT = 5;   // SET_STATUS..SET_ACTIONS, contiguous by design
+
+// HOME owns the WHOLE content area - there is no band above it, because the tab
+// bar already says SETTINGS and a second title would be chrome repeating itself.
+// The pitch is derived to land exactly on contentBottom():
+//   HOME_Y0 + 5*HOME_ROW_H + 4*HOME_GAP + HOME_Y0_BOT = 54 + 350 + 48 + 8 = 460
+// so a row height change must be paid for out of the gap or the pads, and
+// settings-geom-check.mjs asserts the identity rather than the value.
+const int HOME_Y0     = 54;
+const int HOME_ROW_H  = 70;
+const int HOME_GAP    = 12;
+const int HOME_Y0_BOT = 8;
+// Inside a row: name at T_HEAD, summary at T_BODY under it, chevron right.
+//   +0..+1    border
+//   +14..+37  name    (T_HEAD 24)
+//   +38..+43  gap 6
+//   +44..+59  summary (T_BODY 16)
+//   +60..+67  pad
+//   +68..+69  border                                   = 70
+const int HOME_NAME_DY = 14;
+const int HOME_SUB_DY  = 44;
+
+// The back band replaces the pager band at the SAME height, which is the whole
+// reason the group bodies need no new arithmetic: PAGE_TOP is unchanged at 104.
+// The key is the pager's own PAGER_BTN_W so the two boards' chrome stays one
+// size, and the WHOLE band is the back target - there is nothing else in it, so
+// the 45/55 split the pager needs to separate two keys is not needed here.
+const int BACK_BTN_W    = PAGER_BTN_W;
+const int BACK_TITLE_DX = 16;
+
 // ---------- SETTINGS page 0: the DEVICE card, then the LINK card ----------
 // BOTH CARDS ARE SIZED BY THEIR CONTENTS, like the stepper card and unlike the
 // USAGE column, and both are laid out on ONE nominal row pitch: 24 = a 16px line
@@ -1686,12 +1722,20 @@ const int P1_GAP = 12;
 // H_BTN, where board 1 had to drop to 38 because four buttons plus a hint would
 // not fit at 44 - so these are the one control on this page that was UNDER the
 // floor on board 1 and is over it here.
-// THREE buttons, not four: BOARD_HAS_MIC is 0 here, so there is no MIC TEST and no
-// slot reserved for one (see the #if in deckhand_display.ino). 3 * 50 + 2 * 12 =
-// 174, from 116 to 289, with the hint at 302 (inking 296..311, MC_DATUM) and 148px
-// clear below it. (An earlier revision of this comment did the four-button
-// arithmetic and put the hint at 364 - it was copied from board 1's chain, which
-// does have the mic button, and the numbers it quoted never described this board.)
+// FOUR buttons, not three: BOARD_HAS_MIC is 1 here (the ES8311 capture path
+// landed after this paragraph was written, and nothing here re-checked it - see
+// below), so MIC TEST is drawn and a slot is reserved for it (see the #if in
+// deckhand_display.ino). 4 * 50 + 3 * 12 = 236, from 116 to 352, with the hint at
+// P2_PWR_Y + P2_BTN_H + SP_3 = 364 (inking 358..373, MC_DATUM) and 86px clear
+// below it to contentBottom() (460) - not the "3 buttons / hint at 302 / 148px
+// clear" this paragraph claimed for as long as the flag disagreed with it.
+// THE FLAG FLIPPED UNDER THIS COMMENT AND NO CHECKER CAUGHT IT, because the
+// comment is prose and BOARD_HAS_MIC is a macro - nothing here parses one
+// against the other. (A prior revision of this paragraph already corrected a
+// four-button chain wrongly copied from board 1; this was the opposite drift; a
+// three-button chain that quietly stopped matching the header once
+// BOARD_HAS_MIC flipped to 1, and it sat wrong until this pass read it against
+// the header instead of trusting it.)
 // The 16px pass changes nothing here: these are control heights, and the labels
 // re-measure clear - "CALIBRATE TOUCH" is 15 chars = 120px in a 296px button, and
 // the hint ("power off = deep sleep, RESET to wake", the no-touch-wake arm this

@@ -343,6 +343,30 @@ for (const b of [1, 2]) {
     }
   }
 
+  // ================= SETTINGS: HOME and the back band (board 2 only) =================
+  if (b === 2) {
+    // HOME's pitch is derived to land exactly on contentBottom(). Asserting the
+    // IDENTITY rather than the number is what makes a row-height change fail here
+    // instead of silently eating the bottom row.
+    const homeEnd = c.HOME_Y0 + 5 * c.HOME_ROW_H + 4 * c.HOME_GAP + c.HOME_Y0_BOT;
+    chk(homeEnd === contentBottom,
+        `HOME's five rows land exactly on contentBottom: ${homeEnd} == ${contentBottom}`);
+    chk(c.HOME_ROW_H >= c.TAP_MIN,
+        `a HOME row is a touch target: ${c.HOME_ROW_H} >= TAP_MIN ${c.TAP_MIN}`);
+    // The row's own stack must clear its 2px card border at both ends.
+    const subEnd = c.HOME_SUB_DY + lineHB(b, T_BODY) - 1;
+    chk(c.HOME_NAME_DY >= c.BORDER_CARD,
+        `HOME's name clears the card's top border: ${c.HOME_NAME_DY} >= ${c.BORDER_CARD}`);
+    chk(subEnd <= c.HOME_ROW_H - c.BORDER_CARD - 1,
+        `HOME's summary clears the bottom border: ${subEnd} <= ${c.HOME_ROW_H - c.BORDER_CARD - 1}`);
+    const nameEnd = c.HOME_NAME_DY + lineHB(b, T_HEAD) - 1;
+    chk(nameEnd < c.HOME_SUB_DY,
+        `HOME's name and summary share no pixel row: ${nameEnd} < ${c.HOME_SUB_DY}`);
+    // The back band must be the pager band's height, or every group body moves.
+    chk(c.BACK_BTN_W === c.PAGER_BTN_W,
+        `the back key is the pager key's width: ${c.BACK_BTN_W} == ${c.PAGER_BTN_W}`);
+  }
+
   // ================= SETTINGS page 0: the DEVICE and LINK cards =================
   // BANDS ARE WHAT A ROW ACTUALLY PAINTS, at each board's OWN cell height - not at
   // the 13px this file used to assume for both. Three different rectangles are in
