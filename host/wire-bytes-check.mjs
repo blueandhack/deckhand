@@ -29,6 +29,8 @@
 //   COPIES     the hook's inline toAscii and host/to-ascii.mjs agree over a corpus
 //   STRUCTURE  every device-bound cap site actually routes through it
 //   BUDGET     the saturated tick line, before and after, in BYTES
+//   INVARIANT  byteLength === length for EVERY string in the payload, asserted
+//              structurally at the point of send - no field-name list
 //   BEHAVIOUR  the REAL hook, in a throwaway $HOME, on a wide-character payload
 //
 // Run:  node host/wire-bytes-check.mjs
@@ -44,6 +46,7 @@ const HOOK_SRC = path.join(REPO, "claude-hooks", "deckhand-session-hook.mjs");
 const HOST_SRC = path.join(REPO, "host", "index.mjs");
 const MOD_SRC = path.join(REPO, "host", "to-ascii.mjs");
 const FIT_SRC = path.join(REPO, "host", "wire-fit.mjs");
+const ASCII_SRC = path.join(REPO, "host", "wire-ascii.mjs");
 const VOICE_SRC = path.join(REPO, "host", "voice-answer.mjs");
 const FW_SRC = path.join(REPO, "firmware", "deckhand_display", "deckhand_display.ino");
 
@@ -143,9 +146,17 @@ const HOST_SITES = [
    /t\.slice\(0, max - 3\) \+ "\.\.\."/],
   ["ask.voiceText, at the PARK SITE (Whisper output is the densest non-ASCII source there is)",
    /text = capUtf8\(toAscii\(text\), VOICE_ANSWER_TEXT_MAX_BYTES\);/],
+  ["the char/byte invariant is asserted at the point of send", /const wire = asciiFit\(\{/],
+  ["and the transliteration runs BEFORE the size fit, or the line measured is not the line written",
+   /const wire = asciiFit\(\{[\s\S]{0,1200}?const fitted = fitPayload\(wire\.payload\);/],
   ["the tick line is measured against the device's guard before it is written",
-   /const fitted = fitPayload\(\{/],
+   /const fitted = fitPayload\(wire\.payload\);/],
   ["and what it sheds is LOGGED", /Wire: payload was \$\{fitted\.was\} bytes/],
+  ["an invariant violation is LOGGED, and the log line NAMES THE FIELD - `something was wrong` is a message nobody can act on",
+   /Wire: NON-ASCII device-bound text[\s\S]{0,300}?\$\{describeOffenders\(wire\.offenders\)\}/],
+  ["and it is logged on the EDGE, not per tick - a permanently-broken field would otherwise write a line every 5s and bury the tick lines between them",
+   /if \(sig !== lastWireAsciiSig\) \{/],
+  ["with an all-clear line, so a fixed field is visible as fixed", /Wire: device-bound text is ASCII again\./],
 ];
 
 // ---------------------------------------------------------------------------
@@ -379,7 +390,7 @@ function runBehaviour(hookPath, caps) {
 }
 
 // ---------------------------------------------------------------------------
-async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC, hostPath = HOST_SRC, quiet = false } = {}) {
+async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC, hostPath = HOST_SRC, asciiPath = ASCII_SRC, quiet = false } = {}) {
   const hookSrc = fs.readFileSync(hookPath, "utf8");
   const hostSrc = fs.readFileSync(hostPath, "utf8");
   const fwSrc = fs.readFileSync(FW_SRC, "utf8");
@@ -388,6 +399,7 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
   const { toAscii, deviceText } = await import(`${pathToFileURL(modPath).href}${bust}`);
   const { capUtf8 } = await import(`${pathToFileURL(VOICE_SRC).href}${bust}`);
   const { fitPayload, DEVICE_LINE_GUARD_BYTES } = await import(`${pathToFileURL(fitPath).href}${bust}`);
+  const { asciiFit, describeOffenders } = await import(`${pathToFileURL(asciiPath).href}${bust}`);
 
   // ---- STRUCTURE: no bypass -----------------------------------------------
   for (const [name, re] of HOOK_SITES) ok(re.test(hookSrc), `STRUCTURE (hook): ${name}`);
@@ -662,6 +674,180 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
        `REFUSAL: ${c.lineGuard + 1} bytes must be shed - was ${over.was}, sent ${over.bytes}, ${over.dropped.length} drops`);
   }
 
+
+  // ---- INVARIANT: byteLength === length, asserted STRUCTURALLY at the send ----
+  //
+  // Everything above proves the units coincide for the fields it knows about.
+  // This proves the host NOTICES when they stop coinciding for a field nobody
+  // thought of - which is the actual failure that happened (ask.voiceText was
+  // parked under a BYTE cap, so every size assertion here was satisfied while the
+  // text was still full of Whisper's punctuation). A checker that enumerates field
+  // names cannot catch the next one: THAT ENUMERATION IS THE BUG.
+  {
+    const strings = (node, at = "", out = []) => {
+      if (typeof node === "string") out.push([at, node]);
+      else if (Array.isArray(node)) node.forEach((v, i) => strings(v, `${at}[${i}]`, out));
+      else if (node && typeof node === "object")
+        for (const k of Object.keys(node)) strings(node[k], at ? `${at}.${k}` : k, out);
+      return out;
+    };
+    const allAscii = (o) => strings(o).every(([, v]) => Buffer.byteLength(v, "utf8") === v.length);
+
+    // The common path must cost nothing and rewrite nothing.
+    const clean = { hostId: "abc", n: 7, ok: true, z: null,
+                    sessions: [{ id: "s1", ask: { detail: "rg -n 'foo' -- .", options: ["Allow", "Deny"] } }] };
+    const cr = asciiFit(clean);
+    ok(cr.offenders.length === 0, `INVARIANT: an all-ASCII payload has no offenders, got ${JSON.stringify(cr.offenders)}`);
+    ok(cr.payload === clean,
+       "INVARIANT: and it comes back as the SAME OBJECT - the clean tick must not pay for a copy, and must not be rewritten");
+
+    // THE REGRESSION TEST OF THE REAL BUG. `ask.voiceText` reached the wire
+    // untransliterated because it takes a BYTE cap rather than deviceText(), and
+    // nothing downstream looked at it. Here it is again, plus a field whose name
+    // appears NOWHERE in this repo - if the guard were a list of names, the second
+    // one could not possibly be caught, and that is the whole claim being tested.
+    const INVENTED = "wireUnitGuardProbeField";
+    for (const [label, src] of [["host/index.mjs", hostSrc], ["the hook", hookSrc],
+                                ["host/wire-ascii.mjs", fs.readFileSync(asciiPath, "utf8")]]) {
+      ok(!src.includes(INVENTED),
+         `INVARIANT: the invented field name must appear nowhere in ${label}, or the "structural, not enumerated" claim is vacuous`);
+    }
+    const tick = {
+      hostId: "x".repeat(8), hostTag: "air", remoteAnswer: true, fiveHourPct: 42,
+      voice: { seq: 3, state: "done", text: "plain", reply: "also plain" },
+      sessions: [
+        { id: "s0", name: "deckhand", status: "asking",
+          ask: { pid: "p0", detail: "ascii detail", options: ["Yes", "No"],
+                 // the field that actually did this, verbatim in shape:
+                 voiceText: "Yes — let's go ahead… but don't touch the cache",
+                 voiceSha: "0123456789abcdef",
+                 // and one that has never existed:
+                 [INVENTED]: "café → naïve" } },
+        { id: "s1", name: "other", status: "working" },
+      ],
+    };
+    const before = JSON.parse(JSON.stringify(tick));
+    const r = asciiFit(tick);
+    // FIRST, before anything below dereferences it. A guard that refuses a bad
+    // payload would starve the device inside the 5s tick, which is worse than the
+    // bytes it objected to - and asserting it here rather than letting a later
+    // line crash is deliberate: the selftest counts a fault as caught only when a
+    // NAMED assertion fails, so a TypeError would read as a MISS.
+    ok(r.payload != null,
+       "INVARIANT: the guard always hands back a sendable payload - repair or log, never reject");
+    const want = ["sessions[0].ask.voiceText", `sessions[0].ask.${INVENTED}`];
+    ok(JSON.stringify(r.offenders.slice().sort()) === JSON.stringify(want.slice().sort()),
+       `INVARIANT: both offenders are named by their exact PATH, and nothing else is - want ${JSON.stringify(want)}, got ${JSON.stringify(r.offenders)}`);
+    ok(r.offenders.includes(`sessions[0].ask.${INVENTED}`),
+       `INVARIANT: A FIELD NAME THIS REPO HAS NEVER SEEN is still caught - the walk is structural, not a list of names`);
+    ok(allAscii(r.payload), "INVARIANT: and the payload is REPAIRED, so the device gets drawable, budgetable text rather than invisible gaps");
+    ok(JSON.stringify(tick) === JSON.stringify(before),
+       "INVARIANT: the input is never mutated - some of these objects are live state the next tick reuses");
+    ok(r.payload !== tick && r.payload?.sessions?.[1] === tick.sessions[1],
+       "INVARIANT: cloning is LAZY and per level - the clean session is shared, not deep-copied");
+    ok(r.payload?.sessions?.[0]?.ask?.voiceText === "Yes - let's go ahead... but don't touch the cache",
+       `INVARIANT: repair TRANSLITERATES rather than blanking, got ${JSON.stringify(r.payload?.sessions?.[0]?.ask?.voiceText)}`);
+    ok(r.payload?.fiveHourPct === 42 && r.payload?.remoteAnswer === true && r.payload?.voice?.seq === 3,
+       "INVARIANT: non-string values cross untouched");
+    ok(describeOffenders(r.offenders).includes(INVENTED),
+       "INVARIANT: the one-line description NAMES the fields - a message that cannot be acted on is close to no message");
+    ok(describeOffenders(["a", "b", "c"], 2) === "a, b (and 1 more)",
+       `INVARIANT: and it is capped, with a count for what it elided, got ${JSON.stringify(describeOffenders(["a", "b", "c"], 2))}`);
+
+    // Every shape JSON.stringify can reach: the root, arrays, keys, and toJSON.
+    ok(asciiFit("—").offenders[0] === "<root>", "INVARIANT: a bare string root is named rather than reported with an empty path");
+    ok(asciiFit({ a: ["ok", "—"] }).offenders[0] === "a[1]", "INVARIANT: array elements are named by index");
+    {
+      const k = asciiFit({ "café": "v" });
+      ok(k.offenders.some((o) => o.includes("[key]")),
+         `INVARIANT: a non-ASCII KEY is caught too - keys are on the wire and count against the same 16000 bytes, got ${JSON.stringify(k.offenders)}`);
+      ok(allAscii(k.payload) && Object.keys(k.payload).every((kk) => Buffer.byteLength(kk, "utf8") === kk.length),
+         "INVARIANT: and the key is repaired");
+      const collide = asciiFit({ cafe: "1", "café": "2" });
+      ok(Object.keys(collide.payload).length === 2 && collide.offenders.length === 1,
+         "INVARIANT: a rename that would COLLIDE is declined - silently dropping a field to tidy a key is worse than the key");
+    }
+    {
+      const j = asciiFit({ w: { toJSON: () => "—dash" } });
+      ok(j.offenders.length === 1 && allAscii(JSON.parse(JSON.stringify(j.payload))),
+         `INVARIANT: a value hiding behind toJSON() is walked - JSON.stringify would have serialised it, so not walking it is a silent pass, got ${JSON.stringify(j.offenders)}`);
+      const jc = { w: { toJSON: () => "plain" } };
+      ok(asciiFit(jc).payload === jc, "INVARIANT: a CLEAN toJSON value is left alone, so stringify still does its own thing");
+    }
+
+    // TOTALITY. This runs in the 5s poll loop, where this repo has a documented
+    // class of "an await that never settled killed the loop forever". A bug in
+    // here must cost a log line, never a payload - so it may not throw, may not
+    // spin, and must always hand back something sendable.
+    {
+      const cyc = { a: { b: "ok" } };
+      cyc.a.self = cyc;
+      const t0 = Date.now();
+      const c = asciiFit(cyc);
+      ok(Date.now() - t0 < 2000, "INVARIANT: a cyclic payload terminates rather than spinning inside the tick");
+      ok(c.offenders.some((o) => o.includes("not checked")),
+         `INVARIANT: and the unchecked subtree is NAMED rather than silently passed, got ${JSON.stringify(c.offenders)}`);
+      ok(c.payload != null, "INVARIANT: it still hands back a sendable payload - repair or log, never reject");
+      for (const weird of [undefined, null, 0, false, [], {}, [[["—"]]]]) {
+        let threw = null;
+        try { asciiFit(weird); } catch (e) { threw = e; }
+        ok(threw === null, `INVARIANT: asciiFit must never throw, ${JSON.stringify(weird)} threw ${threw && threw.message}`);
+      }
+      ok(asciiFit([[["—"]]]).offenders[0] === "[0][0][0]", "INVARIANT: nested arrays are named by their full index path");
+    }
+
+    // The invariant IS "pure ASCII": run the fuzz corpus through a payload and
+    // check the two agree, so nobody has to take the equality on trust.
+    {
+      const fuzz = fuzzCorpus(1500);
+      const p = { sessions: fuzz.map((v, i) => ({ id: `f${i}`, name: v })) };
+      const rr = asciiFit(p);
+      const want = fuzz.map((v, i) => [i, v]).filter(([, v]) => /[^\x00-\x7f]/.test(v)).map(([i]) => `sessions[${i}].name`);
+      ok(JSON.stringify(rr.offenders) === JSON.stringify(want),
+         `INVARIANT (fuzz, ${fuzz.length} strings): the byteLength===length test flags EXACTLY the non-ASCII strings, ` +
+         `${rr.offenders.length} flagged against ${want.length} expected`);
+      ok(allAscii(rr.payload), "INVARIANT (fuzz): and every one of them is repaired");
+      ok(!/[^\x00-\x7f]/.test(JSON.stringify(rr.payload)),
+         "INVARIANT (fuzz): the SERIALISED line is pure ASCII - which is the form the device's byte guard actually counts");
+    }
+
+    // PLANTED-PATH SWEEP. A fixed example proves the walk reaches the places the
+    // example happens to have. This builds random trees, plants non-ASCII at
+    // random leaves, and demands the offender set equal the planted set exactly -
+    // no misses (a silent pass) and no extras (a false alarm every 5s).
+    {
+      let seed = 0x5eed, planted = 0, bad = null;
+      const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+      const build = (depth) => {
+        if (depth > 3 || rnd() < 0.3) return "ascii leaf";
+        if (rnd() < 0.4) return Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => build(depth + 1));
+        const o = {};
+        for (let i = 0; i < 1 + Math.floor(rnd() * 4); i++) o[`k${i}`] = build(depth + 1);
+        return o;
+      };
+      for (let t = 0; t < 300 && bad === null; t++) {
+        const tree = build(0);
+        const leaves = strings(tree);
+        const want = [];
+        const plant = (node, at) => {
+          if (typeof node === "string") return rnd() < 0.35 ? (want.push(at || "<root>"), "wide — 中") : node;
+          if (Array.isArray(node)) return node.map((v, i) => plant(v, `${at}[${i}]`));
+          const o = {};
+          for (const k of Object.keys(node)) o[k] = plant(node[k], at ? `${at}.${k}` : k);
+          return o;
+        };
+        const seeded = plant(tree, "");
+        planted += want.length;
+        const g = asciiFit(seeded);
+        if (JSON.stringify(g.offenders.slice().sort()) !== JSON.stringify(want.slice().sort()) || !allAscii(g.payload))
+          bad = { want, got: g.offenders, leaves: leaves.length };
+      }
+      ok(bad === null,
+         `INVARIANT (planted sweep, ${planted} plants over 300 random trees): the offender set must EQUAL the planted set - ` +
+         `first mismatch want ${JSON.stringify(bad && bad.want)} got ${JSON.stringify(bad && bad.got)}`);
+    }
+  }
+
   runBehaviour(hookPath, c);
 
   if (!quiet) {
@@ -701,7 +887,7 @@ async function selftest() {
   // refusal. A mutation of the MODULE is mirrored into the hook's inline copy, or
   // the drift guard catches the fault for the wrong reason and everything else
   // passes.
-  const SRC = { hook: HOOK_SRC, mod: MOD_SRC, host: HOST_SRC, fit: FIT_SRC };
+  const SRC = { hook: HOOK_SRC, mod: MOD_SRC, host: HOST_SRC, fit: FIT_SRC, ascii: ASCII_SRC };
   const orig = Object.fromEntries(Object.entries(SRC).map(([k, v]) => [k, fs.readFileSync(v, "utf8")]));
   const faults = [
     ["clean() no longer transliterates (the ask title and option labels go back to characters)",
@@ -737,7 +923,7 @@ async function selftest() {
      { host: (s) => s.replace("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);", "text = capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES);")
                      .replace("item.ask.voiceText = pend.text;", "item.ask.voiceText = toAscii(pend.text);") }],
     ["the tick line is no longer measured before it is written",
-     { host: (s) => s.replace("const fitted = fitPayload({", "const fitted = ((p) => ({ line: JSON.stringify(p) + \"\\n\", bytes: 0, was: 0, dropped: [] }))({") }],
+     { host: (s) => s.replace("const fitted = fitPayload(wire.payload);", "const fitted = ((p) => ({ line: JSON.stringify(p) + \"\\n\", bytes: 0, was: 0, dropped: [] }))(wire.payload);") }],
     ["the refusal's guard constant drifts from the firmware's",
      { fit: (s) => s.replace("export const DEVICE_LINE_GUARD_BYTES = 16000;", "export const DEVICE_LINE_GUARD_BYTES = 32000;") }],
     ["the refusal loses its last tier, so it is merely likely rather than TOTAL",
@@ -746,6 +932,35 @@ async function selftest() {
      { fit: (s) => s.replace("bytes(d) > DROPPED_BYTES ?", "bytes(d) > 0 ?") }],
     ["the refusal is off by one and lets a guard+1 line through - the exact size at which feedChar clears its buffer",
      { fit: (s) => s.replace("  if (was <= guard) return", "  if (was <= guard + 1) return") }],
+    ["the send-time guard checks a LIST OF FIELD NAMES instead of walking - the exact shape of the bug it exists for",
+     { ascii: (s) => s.replace('  if (typeof node === "string") {\n    if (isAscii(node)) return node;',
+                               '  if (typeof node === "string") {\n    const KNOWN = ["title", "detail", "name", "path", "model", "branch", "prompt", "text", "reply"];\n    if (isAscii(node) || !KNOWN.some((n) => path.endsWith(n))) return node;') }],
+    ["the guard LOGS but does not REPAIR, so the device still gets bytes it cannot draw or budget for",
+     { ascii: (s) => s.replace('    offenders.push(path || "<root>");\n    return toAscii(node);',
+                               '    offenders.push(path || "<root>");\n    return node;') }],
+    ["the guard reports that something was wrong but not WHICH FIELD - a message nobody can act on",
+     { ascii: (s) => s.replace('offenders.push(path || "<root>");', 'offenders.push("a device-bound field");') }],
+    ["the guard does not descend into arrays, so nothing under sessions[] is ever checked",
+     { ascii: (s) => s.replace("  if (Array.isArray(node)) {", "  if (Array.isArray(node)) {\n    return node;") }],
+    ["the guard ignores toJSON(), so a value JSON.stringify WOULD serialise goes unwalked",
+     { ascii: (s) => s.replace('  if (typeof node.toJSON === "function") {', "  if (false) {") }],
+    ["the guard mutates the caller's payload in place - some of those objects are live state the next tick reuses",
+     { ascii: (s) => s.replace("      if (out === node) out = { ...node };", "      if (out === node) out = node;") }],
+    ["the guard loses its depth cap, so a cyclic payload blows the stack instead of naming the subtree it could not check",
+     { ascii: (s) => s.replace("const MAX_DEPTH = 24;", "const MAX_DEPTH = Infinity;") }],
+    ["the guard REJECTS a bad payload instead of repairing it - inside the 5s tick, refusing to send is the worse failure",
+     { ascii: (s) => s.replace('    return { payload: walk(payload, "", offenders, 0), offenders };',
+                               '    const fixed = walk(payload, "", offenders, 0);\n    return { payload: offenders.length ? null : fixed, offenders };') }],
+    ["the host stops asserting the invariant at the point of send",
+     { host: (s) => s.replace("const wire = asciiFit({", "const wire = ((p) => ({ payload: p, offenders: [] }))({") }],
+    ["the host fits the RAW payload rather than the repaired one, so the line it measures is not the line it writes",
+     { host: (s) => s.replace("const fitted = fitPayload(wire.payload);", "const fitted = fitPayload(rawPayload);") }],
+    ["the violation is logged without naming the field",
+     { host: (s) => s.replace("${describeOffenders(wire.offenders)}", "${wire.offenders.length} field(s)") }],
+    ["the edge gate is gone, so a permanently-broken field writes a log line every 5 seconds",
+     { host: (s) => s.replace("if (sig !== lastWireAsciiSig) {", "if (true) {") }],
+    ["the all-clear line is gone, so a fixed field is never visible as fixed",
+     { host: (s) => s.replace("Wire: device-bound text is ASCII again.", "Wire: ok.") }],
   ];
   let caught = 0, injected = 0;
   for (const [name, f] of faults) {
@@ -766,12 +981,19 @@ async function selftest() {
     const paths = {};
     for (const k of Object.keys(SRC)) {
       paths[k] = path.join(box, `${k}-${injected}.mjs`);
-      fs.writeFileSync(paths[k], src[k]);
+      // wire-ascii.mjs imports ./to-ascii.mjs, so its copy has to point at the
+      // COPY of the module in this box - otherwise a mod fault would be mutated
+      // and then not used, and every ascii assertion would run against the real
+      // transliteration while claiming to test the broken one.
+      const body = k === "ascii"
+        ? src[k].replace('from "./to-ascii.mjs"', `from "./mod-${injected}.mjs"`)
+        : src[k];
+      fs.writeFileSync(paths[k], body);
     }
     const mark = failures.length;
     pass = 0;
     try {
-      await main({ hookPath: paths.hook, modPath: paths.mod, hostPath: paths.host, fitPath: paths.fit, quiet: true });
+      await main({ hookPath: paths.hook, modPath: paths.mod, hostPath: paths.host, fitPath: paths.fit, asciiPath: paths.ascii, quiet: true });
     } catch { /* a crash is also a catch */ }
     const found = failures.length > mark;
     // Print WHICH assertion caught it. "caught" alone cannot tell the assertion

@@ -31,6 +31,7 @@ import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
 import { toAscii, deviceText } from "./to-ascii.mjs";
 import { fitPayload } from "./wire-fit.mjs";
+import { asciiFit, describeOffenders } from "./wire-ascii.mjs";
 import { resolveMacEmoji } from "./mac-emoji.mjs";
 import { lineTargetsUs, stripAddress } from "./line-address.mjs";
 import { formatRunStartLine } from "./run-ledger.mjs";
@@ -2971,6 +2972,14 @@ const TICK_WATCHDOG_MS = 30_000;      // 6 missed ticks at POLL_INTERVAL_MS
 let tickGeneration = 0;
 let lastTickCompleted = Date.now();
 
+// The char/byte invariant is asserted at the point of send (host/wire-ascii.mjs),
+// and what it finds is logged on the EDGE rather than per tick: an upstream field
+// that skips the transliteration is wrong on EVERY tick, and a line every 5s would
+// bury the tick lines it sits between - the same rule ccusage's staleness follows.
+// The signature is the offender LIST, so a NEW field appearing says so even while
+// an old one is still broken, and the all-clear is worth a line of its own.
+let lastWireAsciiSig = "";
+
 async function tick(generation = tickGeneration) {
   try {
     pruneNonces();
@@ -3032,9 +3041,30 @@ async function tick(generation = tickGeneration) {
     // and it is the only thing that covers a STALE HOOK in ~/.claude still
     // emitting untransliterated text. What it sheds is LOGGED - a silent
     // truncation would be the same class of defect as the freeze.
-    const fitted = fitPayload({
+    //
+    // ASCII FIRST, THEN FIT, and that order is load-bearing: transliteration
+    // changes the SIZE of the line (a CJK run collapses to one '?', an ellipsis
+    // grows to three dots), so fitting before it would measure a line that is not
+    // the one being written. asciiFit walks the payload STRUCTURALLY rather than
+    // checking a list of field names, because the field nobody remembered to add
+    // to the list is precisely the field that skipped the transliteration - which
+    // is how ask.voiceText got past every cap assertion in the repo.
+    const wire = asciiFit({
       ...usage, hostId, hostTag, ...(hostEmoji ? { hostEmoji } : {}), remoteAnswer, voice: lastVoice,
     });
+    if (wire.offenders.length) {
+      const sig = wire.offenders.join("|");
+      if (sig !== lastWireAsciiSig) {
+        lastWireAsciiSig = sig;
+        console.log(`Wire: NON-ASCII device-bound text, repaired at the boundary - ` +
+                    `${describeOffenders(wire.offenders)}. Whatever produces that field is ` +
+                    `skipping deviceText()/toAscii(), so its character cap is not a byte cap.`);
+      }
+    } else if (lastWireAsciiSig) {
+      lastWireAsciiSig = "";
+      console.log("Wire: device-bound text is ASCII again.");
+    }
+    const fitted = fitPayload(wire.payload);
     const line = fitted.line;
     if (fitted.dropped.length) {
       console.log(`Wire: payload was ${fitted.was} bytes against the device's 16000-byte line ` +
