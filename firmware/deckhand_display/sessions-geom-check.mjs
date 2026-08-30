@@ -259,8 +259,9 @@ const LADDER_SHAPE = { 1: "tttncc", 2: "ttttsn" };
 const EXPANDED_H = { 1: [0, 0, 0, 0, 0, 0], 2: [336, 307, 0, 0, 0, 0] };
 
 const SELFTEST = process.argv.includes("--selftest");
-let fail = 0, known = 0;
+let fail = 0, known = 0, total = 0;
 function chk(cond, msg, allow) {
+  total++;
   if (!cond && allow) { known++; console.log(` known  ${msg}`); return; }
   console.log(`${cond ? "  ok  " : " FAIL "} ${msg}`);
   if (!cond) fail++;
@@ -3508,7 +3509,7 @@ for (const b of [1, 2]) {
   chk(cacheLen("rowDurCache") >= 8, `rowDurCache ${CACHE.rowDurCache} holds a 7-char padded duration + NUL`);
 }
 
-console.log(`\n${fail} failures, ${known} known-and-documented board-1 compromises`);
+console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 compromises`);
 if (SELFTEST) {
   if (fail === 0) { console.log("SELFTEST FAILED: the checker did not notice a 1px threshold change"); process.exit(1); }
   console.log(`selftest ok - the injected fault produced ${fail} failure(s)`);

@@ -186,7 +186,8 @@ const TOGGLES = ["SOUND", "MUTED", "FLIPPED", "NORMAL", "DARK", "LIGHT", "AUTO"]
 // groups draw, and the WORST CASE of each of HOME's five composed summaries.
 const GROUP_TITLES = ["Status", "Display", "Sound", "Pairing", "Actions"];
 const THEME_SEGS = ["DARK", "LIGHT", "AUTO"];
-const SOUND_LABELS = ["SOUND ON", "SOUND OFF", "TEST BEEP", "MIC TEST", "FLIPPED", "NORMAL"];
+const SOUND_LABELS = ["SOUND ON", "SOUND OFF", "TEST BEEP", "MIC TEST",
+                      "SCREEN FLIPPED", "SCREEN NORMAL"];
 const SET_CAPTIONS = ["THEME", "ALERTS", "MICROPHONE", "SETUP", "CANNOT BE UNDONE"];
 // Each is the longest string settingsHomeSummary() can build for that group:
 // every link down / full battery / a two-digit-below-zero die temperature; 100%
@@ -377,7 +378,7 @@ const KNOWN = {
   2: [],
 };
 const SELFTEST = process.argv.includes("--selftest");
-let fail = 0, known = 0;
+let fail = 0, known = 0, total = 0;
 // THE MESSAGES, not just the count. With two faults injected at once a bare total
 // cannot say that BOTH were caught - one fault firing twice looks identical to two
 // faults firing once - and "caught" alone cannot tell the assertion that exists for
@@ -386,6 +387,7 @@ let fail = 0, known = 0;
 const FAILED = [];
 let CUR = 1;
 function chk(cond, msg) {
+  total++;
   if (!cond && KNOWN[CUR].includes(msg)) { known++; console.log(` known  ${msg}`); return; }
   console.log(`${cond ? "  ok  " : " FAIL "} ${msg}`);
   if (!cond) { fail++; FAILED.push(msg); }
@@ -1120,6 +1122,9 @@ for (const b of [1, 2]) {
     // SET_CAP_STEP from 24 to 26 (or below the caption's own cell height) still
     // gave 0 failures. This binds the real geometry instead: the caption's ink,
     // not the formula that placed it, must end before its control begins.
+    // THEME is deliberately NOT here: the Display walk above already asserts its
+    // caption's own tlBox clears the segments, and a second copy of one constraint
+    // is how a checker's count grows without its coverage doing the same.
     const capPairs = [
       ["ALERTS", c.PS_ALERTS_Y, c.PS_SOUND_Y],
       ["MICROPHONE", c.PS_MIC_CAP_Y, c.PS_MIC_Y],
@@ -1131,8 +1136,17 @@ for (const b of [1, 2]) {
     }
     chk(c.SET_CAP_STEP > lineHB(b, T_META),
         `SET_CAP_STEP ${c.SET_CAP_STEP} clears the caption's own ${lineHB(b, T_META)}px cell`);
-    chk(c.P1_THEME_CAP_STEP > lineHB(b, T_META),
-        `P1_THEME_CAP_STEP ${c.P1_THEME_CAP_STEP} clears the caption's own ${lineHB(b, T_META)}px cell`);
+    // ONE STEP FOR ALL FOUR CAPTIONED CONTROLS ON THIS BOARD. P1_THEME_CAP_STEP was
+    // a second name for the same concept and is gone; asserting the identity is
+    // what makes re-introducing it fail here rather than merely look inconsistent.
+    for (const [name, capY, controlY] of
+         [["THEME", c.P1_THEME_CAP_Y, c.P1_THEME_Y],
+          ["ALERTS", c.PS_ALERTS_Y, c.PS_SOUND_Y],
+          ["MICROPHONE", c.PS_MIC_CAP_Y, c.PS_MIC_Y],
+          ["SETUP", c.P2_SETUP_CAP_Y, c.P2_CAL_Y],
+          ["CANNOT BE UNDONE", c.P2_DANGER_CAP_Y, c.P2_PAIR_Y]])
+      chk(controlY - capY === c.SET_CAP_STEP,
+          `"${name}" takes the one caption step: ${controlY - capY} == SET_CAP_STEP ${c.SET_CAP_STEP}`);
     // Captions are TL_DATUM at CARD_X + PAD; the labels go through uiButton.
     for (const t of SET_CAPTIONS)
       chk(c.CARD_X + c.PAD + widthB(b, T_META, t) <= c.CARD_X + c.CARD_W - c.PAD,
@@ -1267,8 +1281,31 @@ for (const b of [1, 2]) {
       // against the DRAWN width and height rather than against what the constants
       // would have allowed. (The assertion this replaced compared floor(w/2)*2 with w,
       // which is true for every non-negative integer and could not fail.)
-      chk(2 * sr <= sw && 2 * sr <= sh,
-          `the spine's DRAWN end radius ${sr} fits its ${sw}x${sh} bar`);
+      chk(2 * sr <= sh, `the spine's DRAWN end radius ${sr} fits its ${sh}px height`);
+      // THE TWO BOUNDS THAT PIN THE WIDTH AT +-1, and they are why they exist rather
+      // than a range fitted to today's 4. geom-sweep.mjs reported P2_SPINE_W guarded
+      // only at +-16: the pair below it allowed 2..11, so 3, 5 and 8 all passed while
+      // the spine's ENTIRE justification is ink mass - it is the one control on this
+      // device whose width IS its meaning. This repo's standard for a constant a
+      // branch has just added is +-1 in both directions.
+      //
+      // Both are taken from the draw site's own claim: "its ends are rounded at
+      // P2_SPINE_W / 2 so it reads as a deliberate mark rather than as a clipped
+      // edge". That claim is only true of a STADIUM - two full semicircular caps -
+      // and a stadium needs both:
+      //   - a radius of at least BORDER_CARD, the heaviest structural stroke on the
+      //     device. At r = 1 the "rounding" is a single anti-aliased pixel per
+      //     corner, which is a clipped edge with an apology; this is what stops the
+      //     bar being thinned to 3 or 2.
+      //   - caps that MEET in the middle - 2r == w. An odd width leaves a flat
+      //     between the two arcs, so the ends are not "rounded at P2_SPINE_W / 2" at
+      //     all; this is what stops it being widened to 5.
+      // Measured on the DRAWN radius and width, like every other number in this
+      // block, so a draw site that hardcoded a radius fails here too.
+      chk(sr >= c.BORDER_CARD,
+          `the spine's DRAWN end radius ${sr} is a real arc, >= BORDER_CARD ${c.BORDER_CARD}`);
+      chk(2 * sr === sw,
+          `the spine's DRAWN caps are full semicircles that meet: 2 x ${sr} == ${sw}`);
       // NOT the corner bound - the y-inset above is what keeps the spine off the arcs,
       // and with it in place no WIDTH can reach one. What this constrains is that the
       // spine stays a MARK on the left edge rather than becoming a slab: no wider,
@@ -1662,7 +1699,7 @@ for (const b of [1, 2]) {
     chk(chars < 60, `the reader's ${chars}-character lane is under wrapLineLen's 60-character ceiling`);
   }
 }
-console.log(`\n${fail} failures, ${known} known-and-documented board-1 shortfalls`);
+console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 shortfalls`);
 if (SELFTEST) {
   // EXIT 0 ONLY WHEN EVERY INJECTED FAULT IS CAUGHT BY THE ASSERTION THAT EXISTS
   // FOR IT. Matching the message rather than counting is what makes that a claim

@@ -197,8 +197,9 @@ const KNOWN_OVERLAPS = {
 const BASELINE_FAILURES = 0;
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0;
-let known = 0;
+let known = 0, total = 0;
 function chk(cond, msg, allow) {
+  total++;
   if (!cond && allow) { known++; console.log(` known  ${msg}`); return; }
   console.log(`${cond ? "  ok  " : " FAIL "} ${msg}`);
   if (!cond) fail++;
@@ -443,7 +444,7 @@ for (const b of [1, 2]) {
   chk(heroTextWidth(b, "DECKHAND") < W - 8,
       `wordmark ${heroTextWidth(b, "DECKHAND")}px inside the ${W}px panel`);
 }
-console.log(`\n${fail} failures, ${known} known-and-documented board-1 overlaps`);
+console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 overlaps`);
 if (SELFTEST) {
   if (fail <= BASELINE_FAILURES) {
     console.log(`SELFTEST FAILED: the checker did not notice a moved row ` +
