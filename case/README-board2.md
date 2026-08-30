@@ -492,32 +492,43 @@ half-blocked. Ø3.0 covers the disagreement and is still a pressure port, not a 
 
 ## The cover carries a plateau, and the rim is 7 mm thinner for it
 
-**The cell needs 13 mm of cavity and nothing else needs more than 6**, so a case built
-to one uniform depth spends 7 mm on air everywhere the cell is not. `cover_rise = 7.0`
-drops the body wall to **12.9** and puts a raised plateau on the cover instead — which
-leaves the cell standing 7 mm proud of the body, so the plateau is not decoration, it is
-what encloses it.
+**The cell needs 13 mm of cavity and nothing else needs 8**, so a case built to one
+uniform depth spends 5 mm on air everywhere the cell is not. The body wall drops to
+**14.9** and the cover carries a raised plateau instead — which leaves the cell standing
+5 mm proud of the body, so the plateau is not decoration, it is what encloses it.
 
 | | mm |
 |---|---|
-| rim (front stack 6.9 + `comp_back` 6.0 + cover 2.0) | **14.9** |
+| rim (front stack 6.9 + `rim_clear` 8.0 + cover 2.0) | **16.9** |
 | over the cell (unchanged) | 21.9 |
 
-**Where the 6.0 comes from.** The vendor outline drawing, page 12, spells the module out
-in its side view: `CTP 1.00 + LCD 2.20 + GLUE 0.50 + PCB 1.60 + SMD 4.70 = Total 10.00`.
-So **4.70 is the tallest thing on the back**, and `comp_back` adds the mated JST plugs the
-outline does not show. That allowance is inherited from board 1 and has **never been
-measured here** — it is the floor as modelled, not as proven.
+**`rim_clear` is `comp_back` + `cable_exit`, and the second term is the one people
+forget.** `comp_back` 6.0 stops at the mated plug's own body; the speaker's lead then has
+to *leave* that plug and turn along the board, and a cover pressing on a cable is how a
+connector gets levered out of its socket. `cable_exit` 2.0 is that routing room. The two
+are kept separate rather than folded into one number because they are different
+measurements with different evidence — one is a component height, the other is routing.
 
-**`cover_rise = 0` restores the flat cover exactly**, which is why the profile is spelled
-as a rise rather than as two independent depths: `body_d`, `total_th`, the plunger and the
-plateau all derive from it. Verified rather than asserted — at 0, four of the five parts
-come out **byte-identical** to the previous build and the cover differs by **0.3 mm³ of
-13,928** (0.002%, triangulation noise from longer cutting cylinders) with an identical
-bounding box.
+**Where `comp_back` comes from.** The vendor outline drawing, page 12, spells the module
+out in its side view: `CTP 1.00 + LCD 2.20 + GLUE 0.50 + PCB 1.60 + SMD 4.70 = Total
+10.00`. So **4.70 is the tallest thing on the back**, and `comp_back` adds the mated JST
+plugs the outline does not show. That allowance is inherited from board 1 and has **never
+been measured here** — it is the floor as modelled, not as proven.
+
+**The rise is DERIVED — `cover_rise = cavity_d - rim_clear` — and that is not tidiness.**
+It was a literal 7.0, which was exactly that difference at the time. Adding 2 mm for the
+speaker's cable proved why a transcribed difference rots: the rise has to come **down** by
+the same 2, and a literal would have left the rim 2 mm too shallow with the cover pressing
+on the very cable the clearance was added for. It is clamped at 0, so a build whose plugs
+out-reach the cell degenerates to a flat cover rather than an inverted one.
+
+**`cover_plateau = false` restores the flat cover exactly.** Verified rather than
+asserted: four of the five parts come out **byte-identical** to the flat build and the
+cover differs by **0.3 mm³ of 13,928** (0.002%, triangulation noise from longer cutting
+cylinders) with an identical bounding box.
 
 `cover_taper` picks the side profile: **true** slopes from the rim edge to the plateau
-(37.6° on the sides, ~21° at the ends, both rising away from the bed so it still prints
+(28.8° on the sides, ~15° at the ends, both rising away from the bed so it still prints
 without support); **false** gives a vertical wall with a `cover_cham` chamfer.
 
 **The plateau is derived from the cell, not chosen** — `batt_w/h` plus `plat_gap` 0.6 plus
@@ -530,31 +541,33 @@ plateau, the taper angles and the stand together.
 sides — the ribs' job, over the pack's full height instead of its top 6 mm. Gated off
 whenever `cover_rise > 0`.
 
-**A button on a slope is not a button.** At the service end the taper drops **2.26 mm
+**A button on a slope is not a button.** At the service end the taper drops **1.61 mm
 across the 6 mm hole**, so against `btn_proud` 1.5 the head would be buried on the uphill
-side and 3.76 proud on the downhill one. Each button gets a flat landing cut square to the
-board, deep enough that the whole hole is level (`btn_pad_z` 5.65, leaving `btn_plate`
-3.35 of material). The plunger builds to `btn_plate`, **not** `cover_th` — at `cover_th` it
-would finish 1.35 short of proud and simply not press, which you would only discover with
-the case shut. The grille needs no such help: its holes go from 2.0 to 2.14 long on the
+side and 3.11 proud on the downhill one. Each button gets a flat landing cut square to the
+board, deep enough that the whole hole is level (`btn_pad_z` 4.03, leaving `btn_plate`
+2.97 of material). The plunger builds to `btn_plate`, **not** `cover_th` — at `cover_th` it
+would finish 0.97 short of proud and simply not press, which you would only discover with
+the case shut. The grille needs no such help: its holes are barely lengthened on the
 slope.
 
 **The stand's pivot has to move, and its leaf has to narrow.** Both are in
 *Sizing the stand to the plateau* below.
 
 **The Expand relief lost height, and no constant recovers it.** It topped out at
-`z_floor - exp_top` = 15.9 against a wall that is now 12.9, so it ran out through the rim —
+`z_floor - exp_top` = 15.9 against a wall that is now 14.9, so it ran out through the rim —
 the exact notch `exp_top` exists to prevent. Now derived from `body_d`, with `exp_top`
-4.0 → 2.0; full-depth reach still goes **13.5 → 8.5** against a mated plug occupying
-roughly 6.9–9.9, because a 7 mm shorter wall cannot hold the same pocket. Proven closed by
-slab-testing the wall top at z 12.75: **0 gap points, ring continuous**. On this board it
+4.0 → 2.0; full-depth reach still goes **13.5 → 10.5** against a mated plug occupying
+roughly 6.9–9.9, because a shorter wall cannot hold the same pocket. (It was 8.5 before
+`cable_exit` raised the rim — the 2 mm the speaker's lead needed came back here too, which
+is the derivation doing its job.) Proven closed by slab-testing the wall top at z 14.75:
+**0 gap points, ring continuous**. On this board it
 may be moot — the relief exists for the external mic module's cable, which board 2 does not
 have, but unlike the mic *channel* beside it this pocket was never gated on `mic_ext`.
 Gating it is deliberately **not** done here: it is a behaviour change unrelated to the
 cover profile and wants its own decision.
 
 **`use_retainer` now refuses to combine with a plateau**, as an assert rather than a
-comment: its walls stand to the pack's height against a body topping out at 12.9, so they
+comment: its walls stand to the pack's height (18.6) against a body topping out at 14.9, so they
 would foul the cover's rim underside. A silent collision is the failure being prevented.
 
 ## Sizing the stand to the plateau

@@ -119,6 +119,20 @@ board_w = 54.5;  board_h = 102.0;  board_t = 1.6;   // length MEASURED, width fr
 // the binding term - cavity_d takes the max against the battery stack, which is
 // 18.5 - so this matters only for a build with no battery.
 comp_back = 6.0;    // mated JST plugs, not the 4.70 bare-component spec
+// A PLUG IS NOT THE TALLEST THING ON ITS SOCKET - ITS CABLE IS. comp_back stops
+// at the mated plug's own body, and the speaker's lead has to leave that plug
+// and turn to run along the board. Reported from looking at a real one: it wants
+// about 2 mm above the plug before the cover presses on it, and a cover pressing
+// on a cable is how a connector gets levered out of its socket.
+// Kept SEPARATE from comp_back rather than folded into it, because the two are
+// different measurements with different evidence: comp_back is a component
+// height (and is itself still unmeasured on this board - see the note above),
+// while this is routing room. Folding them together would bury the one number
+// somebody can check with calipers inside the one they cannot.
+cable_exit = 2.0;   // room above a mated plug for its cable to leave and turn
+// What the rim actually has to clear, and therefore how deep the cavity is
+// anywhere the cell is not.
+rim_clear = comp_back + cable_exit;
 batt_seat = 3.0;    // component height directly under the battery (ESP32 can)
 glass_up  = 3.7;    // EXACT: CTP 1.00 + LCD 2.20 + glue 0.50. This sets how far
                     // the board sits below the front face: the 4 support shoulders are
@@ -476,13 +490,15 @@ exp_plug_proud = 1.5;   // how far the mated Expand plug stands past the board e
 exp_z_pad = 0.5;   // start just below the board's back plane so the edge is clear too
 // 4.0 -> 2.0, FORCED BY THE LOWERED WALL RATHER THAN CHOSEN. This is the wall
 // left above the relief so it does not notch the top rim, and it was measured
-// against a 19.9 mm wall. The plateau profile drops that wall to 12.9, and at
-// 4.0 the relief's own top (body_d - exp_top) lands BELOW where it starts - the
-// pocket inverts and the rim breaks anyway. Two things are worth being straight
-// about:
+// against a 19.9 mm wall. The plateau profile drops that wall to 14.9, and this
+// relief is derived from body_d - at 4.0 it topped out where the wall no longer
+// reached and ran straight out through the rim, the exact notch this constant
+// exists to prevent. Two things are worth being straight about:
 //   * THE RELIEF IS SHALLOWER THAN IT WAS, and no value of exp_top changes that.
-//     Full-depth reach goes 13.5 -> 8.5, against a mated plug occupying roughly
-//     6.9..9.9. A 7 mm shorter wall cannot hold the same pocket.
+//     Full-depth reach goes 13.5 -> 10.5, against a mated plug occupying roughly
+//     6.9..9.9. A shorter wall cannot hold the same pocket. (It was 8.5 before
+//     cable_exit raised the rim; the 2 mm the speaker's lead needed came back
+//     here too, which is the derivation doing its job.)
 //   * ON THIS BOARD IT MAY BE MOOT. The relief exists for the external mic
 //     module's cable (mic_ext), which board 2 does not have - but unlike the mic
 //     CHANNEL beside it, this pocket was never gated on that flag. Gating it is
@@ -752,18 +768,26 @@ cover_th = 2.0;     // back cover plate
 // by the same 7 - which leaves the cell standing proud of the body, so the
 // plateau is not decoration, it is what encloses it.
 //
-// 6.0 is comp_back: the vendor drawing gives SMD 4.70 for the bare components
+// The rim is built to rim_clear, not to comp_back: a plug's CABLE has to leave
+// it, which is what cable_exit is for. comp_back alone is where the numbers
+// below come from - the vendor drawing gives SMD 4.70 for the bare components
 // (page 12, side view: CTP 1.00 + LCD 2.20 + GLUE 0.50 + PCB 1.60 + SMD 4.70 =
 // 10.00) and 6.0 adds the mated JST plugs the outline does not show. That
 // allowance is inherited from board 1 and has never been measured HERE, so it is
 // the floor as modelled rather than as proven - measure a mated plug before
 // trying to go below it.
 //
-// cover_rise = 0 RESTORES THE FLAT COVER EXACTLY, and that is the point of
-// spelling it as a rise rather than as two separate depths: body_d, total_th,
-// the plunger and the plateau all derive from it, so there is one number to put
-// back and no second code path to rot.
-cover_rise  = 7.0;    // plateau height above the rim = cavity_d - comp_back
+// cover_plateau = false RESTORES THE FLAT COVER EXACTLY, and that is the point
+// of deriving a RISE rather than declaring two separate depths: body_d,
+// total_th, the plunger and the plateau all follow from it, so there is one flag
+// to clear and no second code path to rot.
+// THE RISE IS DERIVED, not typed - see below cavity_d. It was 7.0, which is
+// exactly cavity_d - comp_back, and a transcription of a difference is a number
+// that stops being true the moment either side moves. Raising the rim clearance
+// by 2 mm for the speaker's cable proved that: the rise has to come DOWN by the
+// same 2, and a literal would have left the rim 2 mm too shallow with the cover
+// pressing on the very cable the clearance was added for.
+cover_plateau = true; // false = the flat cover this file shipped with
 cover_taper = true;   // true  = slope from the rim edge up to the plateau (option B)
                       // false = vertical wall plus a chamfered top edge (option A)
 cover_cham  = 1.5;    // that chamfer, when cover_taper is false
@@ -790,7 +814,12 @@ screw_skin = z_pcb_b - screw_len - screw_tip_margin;
 assert(screw_skin >= screw_skin_min,
        str("screw_len is too long: the pilot would leave too little front-face ",
            "material. Use a shorter screw, or lower screw_skin_min deliberately."));
-cavity_d   = max(comp_back, batt_seat + batt_t + batt_extra);
+cavity_d   = max(rim_clear, batt_seat + batt_t + batt_extra);
+// How far the plateau stands above the rim: the whole difference between what the
+// CELL needs and what everything else needs. Clamped at 0 so a build whose plugs
+// out-reach the cell (rim_clear > the cell stack) degenerates to a flat cover
+// rather than an inverted one.
+cover_rise = cover_plateau ? max(0, cavity_d - rim_clear) : 0;
 z_floor    = z_pcb_b + cavity_d;            // inner face of the back cover
 // z_floor is the cover's inner face OVER THE CELL. The body wall stops
 // cover_rise short of it, so the cell stands proud of the body and the cover's
@@ -799,13 +828,13 @@ body_d     = z_floor - cover_rise;           // body runs front face .. back ope
 // THE RETAINER HAS NOT BEEN RE-DERIVED FOR A RAISED PLATEAU, and this is an
 // assert rather than a comment because the failure is a silent collision: its
 // ring of walls stands to the pack's height (18.6) against a body that now tops
-// out at 12.9, so its long walls at x 2.8 / 56.6 sit OUTSIDE the plateau's
+// out at 14.9, so its long walls at x 2.8 / 56.6 sit OUTSIDE the plateau's
 // cavity and would foul the cover's rim underside. It is off by default and the
 // plateau's own cavity walls do its job, so this refuses the combination instead
 // of quietly printing a part that cannot close.
 assert(!(use_retainer && cover_rise > 0),
        str("use_retainer does not work with cover_rise > 0 - the retainer's walls ",
-           "stand above the shortened body and foul the cover. Set cover_rise = 0, ",
+           "stand above the shortened body and foul the cover. Set cover_plateau = false, ",
            "or leave the retainer off: the plateau's cavity walls corral the pack."));
 total_th   = z_floor + cover_th;
 // DEFINED HERE, ABOVE btn_span, BECAUSE btn_span READS body_d - the FIFTH
@@ -909,9 +938,9 @@ function taper_y(y) =
   : y > plat_y1     ? cover_rise * (y - plat_y1) / (out_h - plat_y1)
   : 0;
 
-// A BUTTON ON A SLOPE IS NOT A BUTTON. At the service end the taper drops 2.26
+// A BUTTON ON A SLOPE IS NOT A BUTTON. At the service end the taper drops 1.61
 // across the 6 mm hole, so against btn_proud of 1.5 the head would be buried on
-// the uphill side and 3.76 proud on the downhill one. Each button therefore gets
+// the uphill side and 3.11 proud on the downhill one. Each button therefore gets
 // a flat landing cut square to the board, deep enough that the WHOLE hole is on
 // level ground - which is the pad's far edge, since that is where the slope has
 // fallen furthest.
@@ -1084,7 +1113,7 @@ snap_skin = 1.1;
 // The two sides are SYMMETRIC in y so the cover cannot rack going in.
 //
 // THE ONE OBSTRUCTION ON EITHER LONG WALL IS THE EXPAND RELIEF, on the high-X
-// wall at y 14.8..26.8. It tops out at body_d - exp_top = 10.9 while these
+// wall at y 14.8..26.8. It tops out at body_d - exp_top = 12.9 while these
 // pockets sit at z 16.3..18.7, so a pocket placed over it would have 0.4 mm of
 // material between the two - HALF the 0.8 mm that snap_skin's own note measured
 // a slicer discarding. At out_h/3 the nearer pocket starts at y 31.6, clear by
@@ -1689,8 +1718,8 @@ module button(){
   cham = (btn_flange_d - btn_stem_d) / 2;   // 45 degrees, so it self-supports
   // THE MATERIAL OVER THE FLANGE IS btn_plate, NOT cover_th. On a tapered cover
   // the button sits in a landing cut into the slope, so the plate above its
-  // flange is (cover_rise - btn_pad_z) + cover_th - 3.35 here against 2.0 flat.
-  // Building to cover_th leaves the head 1.35 short of proud and the button
+  // flange is (cover_rise - btn_pad_z) + cover_th - 2.97 here against 2.0 flat.
+  // Building to cover_th leaves the head 0.97 short of proud and the button
   // unpressable, which is a failure you only find with the case shut.
   rotate([180,0,0]) {                        // button top on the bed
     cylinder(d = btn_stem_d, h = btn_proud + btn_plate + btn_sleeve_h);
