@@ -1068,6 +1068,25 @@ the same buffer the renderer wrote proves the renderer self-consistent, not corr
 "verified by SCREENSHOT" claim about board 2 carries that caveat. The only claims it does not cover
 are the ones a person looked at.
 
+**AND ON 2026-08-29 A PERSON LOOKED. `COLORTEST` was run on board 2 and all six patches matched
+their labels** — the first time the caveat above has actually been discharged rather than restated.
+That is not a small thing: this page's three-fault table was resolved by argument and by the
+`SWAP`/`INV` toggles, and every capture taken since has been framebuffer evidence, so the panel's
+colour pipeline had never been confirmed by eye end to end.
+
+What the six patches certify, and therefore what is now known rather than believed: `COLMOD` is
+`0x55` (16bpp RGB565), `BOARD_PANEL_SWAP_BYTES 1` is the right byte order, and the post-`SLPOUT`
+`invertColor(true)` really is reaching the panel — that last one being the fault that sat in the
+init table looking correct for the entire port while doing nothing, because sleep-out clears the
+inversion state. WHITE and BLACK matching rules out inversion, which nothing else can produce; RED,
+GREEN and BLUE all matching rules out both a byte swap (which rotates red->blue->green) and a BGR
+element order (which trades red and blue and leaves green alone).
+
+**This does not make every board-2 screenshot in this file trustworthy about colour.** It certifies
+the PIPELINE at one moment, with the header's settings as they are today. A future change to any of
+those three axes re-opens the question, and the answer is the same one command — which is the whole
+reason `COLORTEST` exists rather than a reasoning chain.
+
 **`COLORTEST` is the instrument that can see it** (board-2-only, via the command-trigger file). Six
 patches, each **labelled in black with the colour it is supposed to be**, so the check is one glance
 and the answer is one word: if the patch under `RED` is not red, one of the three axes above
