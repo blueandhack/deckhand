@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386934, RAM 69804 | flash 1017046, RAM 66012 |
+| size today | flash 1386934, RAM 69804 | flash 1017194, RAM 66012 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -745,8 +745,8 @@ shared secret, so the 128-bit pairing key is **never transmitted** - both ends d
 `docs/superpowers/specs/2026-08-30-wireless-pairing.md`.
 
 ```
-node host/pair-crypto-check.mjs              # 41 crypto + 18 source assertions
-node host/pair-crypto-check.mjs --selftest   # 13/13 injected faults, each naming its assertion
+node host/pair-crypto-check.mjs              # 41 crypto + 35 source assertions
+node host/pair-crypto-check.mjs --selftest   # 13/13 module + 6/6 SOURCE faults, each naming its assertion
 echo "PAIRVECTOR" > ~/.claude/deckhand-device-command   # the DEVICE's half, on hardware
 ```
 
@@ -783,7 +783,7 @@ the user typed correctly. One pinned example that happened to start with a non-z
 never notice, so the checker also sweeps 400 random exchanges for six digits every time.
 
 **Be honest about what each half proves.** The 41 crypto assertions run the Mac's real module. The
-18 SOURCE assertions read `pairing.ino` as **text** (comments stripped, the `panel_shim.cpp`
+35 SOURCE assertions read `pairing.ino` as **text** (comments stripped, the `panel_shim.cpp`
 `invertColor` trap) and check the device still SAYS the same thing - the info strings, the salt
 order, the modulus parsed from its own macro, the big-endian read, the constant-time compare. They
 cannot execute the sketch, so they catch an EDIT and never a toolchain; only the hardware run
@@ -798,8 +798,65 @@ proof into sixteen one-byte searches. `pairCtEq` accumulates with `|=` and alway
 the host uses `crypto.timingSafeEqual`. Length is compared in the clear on purpose - both values
 have a fixed, public length, so it carries nothing.
 
-**Board 2 cost: +23,232 bytes of flash and +112 RAM** (993,814 / 65,900 -> 1,017,046 / 66,012),
-nearly all of it mbedtls's `ecp`/`hkdf` arriving in the link for the first time. **Board 1 is
+**AND THE ASSERTION THAT SAID SO WAS SATISFIED BY A FUNCTION NOTHING CALLED.** The sentence above
+was stated here as fact for a whole task while the checker's proof of it was
+`/pairCtEq\s*\(/.test(code) && !/memcmp\([^)]*proof/i.test(code)` - and **`pairCtEq` had ZERO call
+sites**, so the first half was satisfied by its own DEFINITION and nothing on the device was being
+compared in constant time at all. The negative half looked for one literal spelling beside one
+literal identifier, so it caught neither `strcmp`, nor `==`, nor any buffer not named `proof`.
+**Measured by a reviewer, not argued**: adding `bool pairVerifyProof(const char* got, const char*
+want){ return strcmp(got, want) == 0; }`, and separately a `memcmp` twin, both left the checker
+reporting a clean pass. This is the one assertion guarding the exact mistake the answering path can
+make, so it was the worst place in the repo for a vacuous one.
+Three assertions replace it and they need each other: `pairCtEq` must have a **call site** (counted
+as total matches minus its one definition); **no byte-compare function may appear anywhere in the
+`#if BOARD_HAS_WIRELESS_PAIR` block** - scoped to the block, because `strcmp` is legitimate
+elsewhere in `pairing.ino` for public hostIds, and a file-wide ban would have to be weakened until
+it caught nothing; and **no `==`/`!=` against a secret-bearing identifier**, matched on the OPERAND
+(`/(proof|code|key|secret|shared|sas|hmac|digest|nonce|salt)/i`) rather than a spelling, because a
+whole-line match would fire on `mbedtls_md_hmac_starts(&ctx, key, ...) == 0`, which is a return
+code. The call site is real rather than manufactured: `pairVectorReport`'s fresh round trip compares
+two shared secrets and was itself doing it with `memcmp`, seventy lines under the comment forbidding
+exactly that.
+**Both of the reviewer's injections are now permanent selftest faults**, along with the call site
+being deleted, a dropped zeroize, an `==` on a key, and the two info macros collapsing - because a
+source assertion that has never been shown to fail is the thing this whole entry is about.
+
+**EVERY SECRET BUFFER IS ZEROIZED ON EVERY EXIT PATH, AND THAT IS WHY `pairDeriveAll` IS
+SINGLE-EXIT.** It was five bare `return false`s leaving the shared secret, the salt and the 128-bit
+key live in a stack frame the UI reuses microseconds later. Survivable while the only caller is
+`PAIRVECTOR` with a published test vector; **not** survivable once it is called with the real key,
+which is the next task. One `goto done:` is what makes the wipe unmissable - an early return added
+later has to walk past it - and `mbedtls_platform_zeroize` is used rather than `memset` because a
+`memset` whose result is never read again is exactly what a compiler may delete, and a dying stack
+frame is that case by definition. `pubB` is deliberately NOT wiped: it is the device's public key.
+The checker PARSES the buffer list out of the declaration rather than transcribing it, so anything
+added later that is not named `pub*` fails until it is wiped too.
+
+**CARRY-FORWARD, MEASURED HERE AND NOT IMPLEMENTED HERE: node THROWS on all four classic low-order
+X25519 points** (all-zero, one, and both order-8 points) with `ERR_OSSL_FAILED_DURING_DERIVATION`,
+so the Mac fails closed against a contributory-behaviour attack and never derives an attacker-known
+shared secret. **The task that first passes a radio-supplied public key must CATCH that throw**: an
+uncaught rejection inside the poll loop is this file's documented "an await that never settles kills
+the poll loop forever" class arriving by a different door - the host looks alive, the serial reader
+keeps logging, and nothing ticks. The DEVICE side is unverified: whether `mbedtls_ecp_mul` refuses a
+low-order Montgomery point or returns the all-zero secret has not been measured. Recorded at
+`pairX25519` so it is read by whoever calls it next.
+
+**Board 2 cost: +23,380 bytes of flash and +112 RAM** (993,814 / 65,900 -> 1,017,194 / 66,012),
+nearly all of it mbedtls's `ecp`/`hkdf` arriving in the link for the first time.
+
+**THE +112 RAM IS NOT THE PINNED VECTORS, WHICH IS WHAT THE FIRST REPORT OF IT SAID.** Those are
+file-scope `const uint8_t[32]` arrays: they land in `.flash.rodata`/DROM, and `.dram0.data` did not
+move by a single byte across the change - which is the positive evidence, not an argument. The whole
++112 is `.dram0.bss`, and every byte of it is named, read out of the map file rather than guessed:
+**92 + 4** for `op_sem_buf$1` and `op_complete_sem` in `esp_bignum.c.obj` (the static FreeRTOS
+semaphore the S3's hardware bignum accelerator completes its operations on), **4** for
+`s_crypto_mpi_lock` in `esp_crypto_lock.c.obj` (the mutex serialising that peripheral), and **12**
+for `mul_count`/`dbl_count`/`add_count` in `ecp.c.obj` (mbedtls's own ECP operation counters). None
+of it is ours; all of it arrives because `ecp.c` links at all. Measured by building the parent commit
+into a second output directory and diffing `size -A` and the `.bss` symbols - the two 32-byte vectors
+would have been 64 bytes and the number is 112, so the arithmetic never worked either. **Board 1 is
 `UNCHANGED`** - its header gains exactly one line, `#define BOARD_HAS_WIRELESS_PAIR 0`, which emits
 no code, and everything else sits behind `#if BOARD_HAS_WIRELESS_PAIR`. **The mbedtls includes had
 to go at the TOP of `deckhand_display.ino` under that same flag, not beside the code**: the Arduino

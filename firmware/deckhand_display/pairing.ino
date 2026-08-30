@@ -273,6 +273,28 @@ bool pairMul(const uint8_t scalar[32], const mbedtls_ecp_point* P, uint8_t out[3
 }
 
 // out = X25519(priv, peerPub)
+//
+// CARRY-FORWARD FOR TASK 2, NOT IMPLEMENTED HERE: a peer public key is
+// ATTACKER-SUPPLIED the moment this is called with anything but the pinned
+// vector, and the classic contributory-behaviour attack sends a LOW-ORDER
+// point (all-zero, one, or either of the two order-8 points) so the shared
+// secret is forced to a value the attacker knows.
+//
+// The MAC FAILS CLOSED, measured rather than assumed: node's
+// crypto.diffieHellman THROWS on all four of them
+// (ERR_OSSL_FAILED_DURING_DERIVATION), so no all-zero secret is ever derived
+// on that side. WHAT THAT MEANS FOR TASK 2 IS THAT IT MUST CATCH THE THROW.
+// An uncaught one inside the poll loop is this repo's documented "an await
+// that never settles kills the poll loop forever" class arriving through a
+// rejection instead of a hang - the host looks alive, the serial reader keeps
+// logging, and nothing ticks.
+//
+// THE DEVICE SIDE IS UNVERIFIED. Whether mbedtls_ecp_mul refuses a low-order
+// Montgomery point or happily returns the all-zero secret has not been
+// measured here, and a device that accepts one while the Mac refuses is a
+// pairing that simply never completes rather than one that is broken open -
+// but it should be settled, not guessed, before this function is called with
+// a key that came off the radio.
 bool pairX25519(const uint8_t priv[32], const uint8_t peerPub[32], uint8_t out[32]) {
   mbedtls_ecp_group grp;
   mbedtls_ecp_point Q;
@@ -330,33 +352,58 @@ bool pairHkdf(const uint8_t* shared, const uint8_t* salt, const char* info,
 //
 // outCode is 7 bytes (6 digits and a NUL), outProof 33 (32 hex and a NUL).
 // Any output pointer may be NULL if that value is not wanted.
+//
+// EVERY SECRET BUFFER IS ZEROIZED ON EVERY EXIT PATH, WHICH IS WHY THIS IS
+// SINGLE-EXIT. It was five bare `return false`s, each leaving the shared
+// secret, the salt and the 128-bit key live in a stack frame the UI reuses
+// microseconds later - survivable today, where the only caller is PAIRVECTOR
+// with a published test vector, and NOT survivable once this is the function
+// the real pairing calls with the real key. A goto to one `done:` is what makes
+// the wipe unmissable: an early return added later has to walk past it.
+//
+// mbedtls_platform_zeroize, never memset: a memset whose result is never read
+// again is precisely what a compiler may delete, and a dying stack frame is
+// that case by definition. pubB is NOT wiped - it is this device's PUBLIC key
+// and is about to be handed to the caller.
 bool pairDeriveAll(const uint8_t privB[32], const uint8_t pubA[32],
                    uint8_t outPubB[32], uint8_t outShared[32],
                    char* outCode, uint8_t* outKey, char* outProof) {
-  uint8_t pubB[32], shared[32], salt[64], key[PAIR_KEY_BYTES];
-  if (!pairPublicFromPrivate(privB, pubB)) return false;
-  if (!pairX25519(privB, pubA, shared)) return false;
+  uint8_t pubB[32], shared[32], salt[64], key[PAIR_KEY_BYTES], c[4];
+  uint32_t n;
+  bool ok = false;
+
+  if (!pairPublicFromPrivate(privB, pubB)) goto done;
+  if (!pairX25519(privB, pubA, shared)) goto done;
   pairSalt(pubA, pubB, salt);
 
   // The six digits the user reads off the glass. Four bytes read BIG-endian,
   // taken modulo 10^6, and ZERO-PADDED to six characters - the padding is not
   // cosmetic: an unpadded 1472 in a six-character box reads as a bug, and a
   // comparison against the unpadded string would reject a code typed correctly.
-  uint8_t c[4];
-  if (!pairHkdf(shared, salt, PAIR_SAS_INFO, c, sizeof(c))) return false;
-  uint32_t n = ((uint32_t) c[0] << 24) | ((uint32_t) c[1] << 16) |
-               ((uint32_t) c[2] << 8) | (uint32_t) c[3];
+  if (!pairHkdf(shared, salt, PAIR_SAS_INFO, c, sizeof(c))) goto done;
+  n = ((uint32_t) c[0] << 24) | ((uint32_t) c[1] << 16) |
+      ((uint32_t) c[2] << 8) | (uint32_t) c[3];
   if (outCode) snprintf(outCode, PAIR_CODE_DIGITS + 1, "%06lu",
                         (unsigned long) (n % PAIR_CODE_MODULUS));
 
   // The 128-bit pairing secret. NEVER transmitted by either side.
-  if (!pairHkdf(shared, salt, PAIR_KEY_INFO, key, sizeof(key))) return false;
+  if (!pairHkdf(shared, salt, PAIR_KEY_INFO, key, sizeof(key))) goto done;
 
   if (outPubB) memcpy(outPubB, pubB, 32);
   if (outShared) memcpy(outShared, shared, 32);
   if (outKey) memcpy(outKey, key, sizeof(key));
-  if (outProof && !pairProofHex(key, outProof)) return false;
-  return true;
+  if (outProof && !pairProofHex(key, outProof)) goto done;
+  ok = true;
+
+done:
+  mbedtls_platform_zeroize(shared, sizeof(shared));
+  mbedtls_platform_zeroize(salt, sizeof(salt));
+  mbedtls_platform_zeroize(key, sizeof(key));
+  // c is four bytes of HKDF output over the shared secret - the code's own
+  // material, so it is a secret even though the six digits it becomes are
+  // shown on the glass.
+  mbedtls_platform_zeroize(c, sizeof(c));
+  return ok;
 }
 
 // proof = HMAC-SHA256(key, "deckhand-pairok/1"), first 16 bytes, lower hex.
@@ -437,7 +484,11 @@ void pairVectorReport() {
 
   if (!pairDeriveAll(PAIR_VEC_PRIV_B, PAIR_VEC_PUB_A, pubB, shared, code, key, proof)) {
     // Named cause rather than silence: from the Mac, "no output" and
-    // "the curve is not compiled in" look identical.
+    // "the curve is not compiled in" look identical. The wipe happens on this
+    // path too: a failed derivation can still have left half a shared secret
+    // in the buffer, and "it errored" is not "it wrote nothing".
+    mbedtls_platform_zeroize(shared, sizeof(shared));
+    mbedtls_platform_zeroize(key, sizeof(key));
     sendLineToHost("PAIRVECTOR FAILED: the X25519/HKDF path returned an error");
     return;
   }
@@ -463,11 +514,30 @@ void pairVectorReport() {
   // which the fixed vector alone cannot say, since it only ever multiplies in
   // one direction.
   uint8_t p1[32], q1[32], p2[32], q2[32], s1[32], s2[32];
+  // pairCtEq, not memcmp, and it is not ceremony here: these are two shared
+  // secrets, and the rule seventy lines above forbids exactly the compare this
+  // line used to be. It is also the ONE call site that stops the checker's
+  // "compared in constant time" assertion being satisfied by a function that
+  // nothing calls - which is what it was.
   bool fresh = pairGenKeypair(p1, q1) && pairGenKeypair(p2, q2) &&
                pairX25519(p1, q2, s1) && pairX25519(p2, q1, s2) &&
-               memcmp(s1, s2, 32) == 0;
+               pairCtEq((const char*) s1, (const char*) s2, 32);
   snprintf(line, sizeof(line), "PAIRVECTOR fresh=%s (a generated keypair agrees both ways)",
            fresh ? "ok" : "FAIL");
   sendLineToHost(line);
+
+  // Everything secret this frame touched, gone before the UI reuses the stack:
+  // the pinned vector's shared secret and key, both ephemeral PRIVATE keys, and
+  // the two shared secrets from the live round trip. hexbuf and line held the
+  // key in hex - published here, since this vector is the RFC's, but the
+  // habit is the point and the next caller's key will not be.
+  mbedtls_platform_zeroize(shared, sizeof(shared));
+  mbedtls_platform_zeroize(key, sizeof(key));
+  mbedtls_platform_zeroize(p1, sizeof(p1));
+  mbedtls_platform_zeroize(p2, sizeof(p2));
+  mbedtls_platform_zeroize(s1, sizeof(s1));
+  mbedtls_platform_zeroize(s2, sizeof(s2));
+  mbedtls_platform_zeroize(hexbuf, sizeof(hexbuf));
+  mbedtls_platform_zeroize(line, sizeof(line));
 }
 #endif  // BOARD_HAS_WIRELESS_PAIR

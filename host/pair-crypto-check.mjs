@@ -223,8 +223,23 @@ function suite(m, ok) {
 // can catch is the toolchain disagreeing (the byte order the whole PAIRVECTOR
 // command exists for). Both are needed, and saying which is which is the point.
 // ---------------------------------------------------------------------------
-function sourceSuite(ok) {
-  const src = fs.readFileSync(PAIRING_INO, "utf8");
+// Brace-matched body of a function, so an assertion about "what pairDeriveAll
+// wipes" cannot be satisfied by a zeroize call sitting in a different function.
+function fnBody(text, name) {
+  const m = new RegExp(`\\b${name}\\s*\\([^;{]*\\)\\s*\\{`).exec(text);
+  if (!m) return null;
+  let i = m.index + m[0].length - 1, depth = 0;
+  for (let j = i; j < text.length; j++) {
+    if (text[j] === "{") depth++;
+    else if (text[j] === "}" && --depth === 0) return text.slice(i, j + 1);
+  }
+  return null;
+}
+
+// srcText lets --selftest run this suite against a MUTATED copy of pairing.ino
+// without writing to the tree; unset, it reads the real file.
+function sourceSuite(ok, srcText) {
+  const src = srcText != null ? srcText : fs.readFileSync(PAIRING_INO, "utf8");
   // Comments are stripped so a derivation QUOTED in a comment cannot satisfy an
   // assertion about the code - the trap panel_shim.cpp's invertColor note
   // records, where a text match passed while the line was compiled out.
@@ -236,10 +251,21 @@ function sourceSuite(ok) {
     code.includes(`"${real.KEY_INFO}"`));
   ok("SOURCE: the device uses the same proof message",
     code.includes(`"${real.PROOF_MSG}"`));
-  ok("SOURCE: the two info strings are DIFFERENT on the device too",
-    real.SAS_INFO !== real.KEY_INFO);
-  ok("SOURCE: every info string carries the /1 version marker",
-    [real.SAS_INFO, real.KEY_INFO, real.PROOF_MSG].every((s) => s.endsWith("/1")));
+  // These two used to read real.SAS_INFO etc - HOST constants - while being
+  // named "on the device too". They asserted nothing about the device and the
+  // suite's claim about which half proves what was false for both. They parse
+  // the device's own macros now, so the name and the evidence agree.
+  const devStr = (name) => {
+    const m = code.match(new RegExp(`#define\\s+${name}\\s+"([^"]*)"`));
+    return m ? m[1] : null;
+  };
+  const devSas = devStr("PAIR_SAS_INFO");
+  const devKey = devStr("PAIR_KEY_INFO");
+  const devProof = devStr("PAIR_PROOF_MSG");
+  ok("SOURCE: the DEVICE's two info strings are different macros",
+    devSas != null && devKey != null && devSas !== devKey);
+  ok("SOURCE: every info string carries the /1 version marker in pairing.ino",
+    [devSas, devKey, devProof].every((v) => typeof v === "string" && v.endsWith("/1")));
 
   // The salt, on the device, is peerPub (the Mac's, A) then ownPub (B). Written
   // out as the two memcpys so the ORDER is what is asserted, not the fact that
@@ -266,10 +292,96 @@ function sourceSuite(ok) {
   ok("SOURCE: the code's four bytes are read BIG-endian",
     /\(\(uint32_t\)\s*c\[0\]\s*<<\s*24\)/.test(code));
 
-  ok("SOURCE: the proof is compared in constant time, never with memcmp",
-    /pairCtEq\s*\(/.test(code) && !/memcmp\([^)]*proof/i.test(code));
+  // -------------------------------------------------------------------------
+  // CONSTANT TIME. THE ASSERTION THAT USED TO STAND HERE WAS VACUOUS, AND
+  // REPLACING IT IS THE WHOLE POINT OF THIS SECTION.
+  //
+  // It read: /pairCtEq\s*\(/.test(code) && !/memcmp\([^)]*proof/i.test(code).
+  // The first half was satisfied by the function's own DEFINITION - pairCtEq
+  // had zero call sites, so nothing was being compared in constant time at
+  // all - and the second half looked for one literal spelling next to one
+  // literal identifier, so it caught neither strcmp, nor ==, nor any buffer
+  // not named "proof". Both of the reviewer's injections (a pairVerifyProof
+  // using strcmp, and one using memcmp) passed it clean.
+  //
+  // Three assertions replace it, and they need each other: a CALL SITE (so
+  // the function is used, not merely present), a BAN on every byte-compare
+  // function inside the pairing block (so a second, unsafe path cannot be
+  // added beside the safe one), and a ban on == / != against any
+  // secret-bearing identifier. The call-site assertion alone would be
+  // satisfiable by any one caller while a later verification path used strcmp;
+  // the ban is what closes that.
+  // -------------------------------------------------------------------------
+  // The block ALONE, never the file: strcmp is legitimate elsewhere in
+  // pairing.ino (the host-slot lookup compares public hostIds), so a
+  // file-wide rule would have to be weakened until it caught nothing.
+  const blockStart = code.indexOf("#if BOARD_HAS_WIRELESS_PAIR");
+  const block = blockStart < 0 ? "" : code.slice(blockStart, code.lastIndexOf("#endif"));
+  ok("SOURCE: the wireless-pairing block is found and non-empty", block.length > 500);
+
+  const ctDefs = (block.match(/\bbool\s+pairCtEq\s*\(/g) || []).length;
+  const ctAll = (block.match(/(^|[^\w])pairCtEq\s*\(/g) || []).length;
+  ok("SOURCE: pairCtEq is CALLED, not merely defined (the old assertion's hole)",
+    ctDefs === 1 && ctAll - ctDefs >= 1);
+
+  const CMP_FNS = /\b(memcmp|bcmp|strcmp|strncmp|strcasecmp|strncasecmp|strcoll)\s*\(/g;
+  const cmpHits = block.match(CMP_FNS) || [];
+  ok("SOURCE: no byte-compare function appears anywhere in the pairing block",
+    cmpHits.length === 0);
+
+  // Matched by IDENTIFIER rather than by one spelling, so it binds whatever a
+  // future secret is called. Operand-level on purpose: a whole-line match
+  // would fire on mbedtls_md_hmac_starts(&ctx, key, ...) == 0, which is a
+  // return code.
+  const SECRET = /(proof|code|key|secret|shared|sas|hmac|digest|nonce|salt)/i;
+  const eqHits = [];
+  for (const m of block.matchAll(/([A-Za-z_]\w*)\s*(?:==|!=)|(?:==|!=)\s*([A-Za-z_]\w*)/g)) {
+    const id = m[1] || m[2];
+    if (id && SECRET.test(id)) eqHits.push(m[0].trim());
+  }
+  ok(`SOURCE: nothing secret-bearing is compared with == or != ${eqHits.length ? "[" + eqHits.join(", ") + "]" : ""}`,
+    eqHits.length === 0);
   ok("SOURCE: the constant-time compare accumulates with OR rather than returning early",
     /diff\s*\|=/.test(code));
+
+  // -------------------------------------------------------------------------
+  // ZEROIZATION. pairDeriveAll is the function the real 128-bit pairing secret
+  // will be derived in, into a stack frame the UI reuses immediately, so every
+  // secret buffer it declares must be wiped on EVERY exit path - which is why
+  // it is single-exit. The list is PARSED from the declaration rather than
+  // transcribed, so a buffer added later is covered by default: anything not
+  // named pub* has to be zeroized or this fails.
+  // -------------------------------------------------------------------------
+  const dvBody = fnBody(block, "pairDeriveAll");
+  ok("SOURCE: pairDeriveAll's body is found", dvBody != null && dvBody.length > 200);
+  const declared = [];
+  for (const m of (dvBody || "").matchAll(/\buint8_t\s+([^;]+);/g)) {
+    for (const part of m[1].split(",")) {
+      const id = part.trim().match(/^([A-Za-z_]\w*)\s*\[/);
+      if (id) declared.push(id[1]);
+    }
+  }
+  const secretBufs = declared.filter((n) => !/^pub/i.test(n));
+  ok(`SOURCE: pairDeriveAll declares secret buffers to wipe [${secretBufs.join(", ")}]`,
+    secretBufs.length >= 4);
+  for (const n of secretBufs) {
+    ok(`SOURCE: pairDeriveAll zeroizes ${n}`,
+      new RegExp(`mbedtls_platform_zeroize\\(\\s*${n}\\b`).test(dvBody || ""));
+  }
+  ok("SOURCE: it is mbedtls_platform_zeroize, not a memset a compiler may delete",
+    !/memset\s*\(\s*(shared|salt|key)\b/.test(dvBody || ""));
+  ok("SOURCE: pairDeriveAll is single-exit, so a later early return cannot skip the wipe",
+    (dvBody || "").includes("goto done") && /\bdone:/.test(dvBody || "") &&
+    ((dvBody || "").match(/\breturn\s+/g) || []).length === 1);
+
+  // pairVectorReport's own secrets, named because they are not all buffers of
+  // one declaration: the vector's shared secret and key, both EPHEMERAL
+  // PRIVATE keys, and the two shared secrets of the live round trip.
+  const vrBody = fnBody(block, "pairVectorReport");
+  for (const n of ["shared", "key", "p1", "p2", "s1", "s2"]) {
+    ok(`SOURCE: pairVectorReport zeroizes ${n}`,
+      new RegExp(`mbedtls_platform_zeroize\\(\\s*${n}\\b`).test(vrBody || ""));
+  }
 
   ok("SOURCE: the whole path is behind BOARD_HAS_WIRELESS_PAIR",
     /#if\s+BOARD_HAS_WIRELESS_PAIR/.test(code));
@@ -362,6 +474,32 @@ function selftest() {
     process.exit(1);
   }
 
+  // -------------------------------------------------------------------------
+  // SOURCE FAULTS. The module faults above mutate the Mac's half; these mutate
+  // a COPY of pairing.ino in memory and re-run the source suite against it, so
+  // the assertions that guard the device are proven the same way. The first
+  // two are verbatim the injections a reviewer used to show that the old
+  // "compared in constant time" assertion caught nothing.
+  // -------------------------------------------------------------------------
+  const CT_ANCHOR = "bool pairCtEq(const char* a";
+  const realSrc = fs.readFileSync(PAIRING_INO, "utf8");
+  const inject = (fn) => realSrc.replace(CT_ANCHOR, `${fn}\n${CT_ANCHOR}`);
+  const sourceFaults = [
+    ["a proof compare using strcmp is added beside pairCtEq (reviewer's injection 1)",
+      inject("bool pairVerifyProof(const char* got, const char* want) { return strcmp(got, want) == 0; }")],
+    ["a proof compare using memcmp is added beside pairCtEq (reviewer's injection 2)",
+      inject("bool pairVerifyProof(const uint8_t* got, const uint8_t* want) { return memcmp(got, want, 16) == 0; }")],
+    ["a key compare using == is added (no compare FUNCTION, so only the operand rule sees it)",
+      inject("bool pairKeyEq(const uint8_t* key, const uint8_t* want) { return key == want; }")],
+    ["pairCtEq's only call site is removed, leaving the definition standing",
+      realSrc.replace("pairCtEq((const char*) s1, (const char*) s2, 32)", "true")],
+    ["one zeroize is dropped from pairDeriveAll",
+      realSrc.replace("  mbedtls_platform_zeroize(key, sizeof(key));\n", "")],
+    ["the device's two HKDF info strings collapse to one",
+      realSrc.replace('#define PAIR_KEY_INFO   "deckhand-key/1"',
+                      '#define PAIR_KEY_INFO   "deckhand-sas/1"')],
+  ];
+
   let caught = 0;
   for (const [name, impl] of faults) {
     const r = run(impl, true);
@@ -373,8 +511,28 @@ function selftest() {
       console.log(`  MISSED  ${name}  <- no assertion notices this`);
     }
   }
-  console.log(`\nselftest: ${caught}/${faults.length} injected faults caught`);
-  process.exit(caught === faults.length ? 0 : 1);
+  let srcCaught = 0;
+  for (const [name, text] of sourceFaults) {
+    if (text === realSrc) {
+      console.log(`  MISSED  ${name}  <- the injection did not apply (anchor moved)`);
+      continue;
+    }
+    const fails = [];
+    const okf = (n, cond) => { if (!cond) fails.push(n); };
+    try { sourceSuite(okf, text); } catch (e) { fails.push(`THREW: ${e.message}`); }
+    if (fails.length) {
+      srcCaught++;
+      console.log(`  caught  ${name}`);
+      console.log(`            by: ${fails[0]}${fails.length > 1 ? ` (+${fails.length - 1} more)` : ""}`);
+    } else {
+      console.log(`  MISSED  ${name}  <- no assertion notices this`);
+    }
+  }
+
+  const all = caught === faults.length && srcCaught === sourceFaults.length;
+  console.log(`\nselftest: ${caught}/${faults.length} module faults caught, ` +
+              `${srcCaught}/${sourceFaults.length} source faults caught`);
+  process.exit(all ? 0 : 1);
 }
 
 if (process.argv.includes("--selftest")) {

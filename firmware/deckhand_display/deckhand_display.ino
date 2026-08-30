@@ -108,6 +108,11 @@ typedef esp_ble_gatts_cb_param_t BleCbParam;
 // produced. Board 1 has the flag at 0 and sees none of it.
 #include <mbedtls/ecp.h>
 #include <mbedtls/hkdf.h>
+// mbedtls_platform_zeroize, for wiping key material off the stack. It is used
+// rather than memset because a memset whose result is never read again is
+// exactly what a compiler is allowed to delete - and a dying stack frame is
+// that case by definition.
+#include <mbedtls/platform_util.h>
 #include <esp_random.h>
 #endif
 #include <driver/gpio.h>
