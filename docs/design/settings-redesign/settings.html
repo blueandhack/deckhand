@@ -1,0 +1,178 @@
+<meta charset="utf-8">
+<title>Settings redesign — board 2</title>
+<style>
+:root{--ink:#1a1a1a;--muted:#666;--line:#ddd;--page:#f6f5f3;--panel:#fff;--bad:#b42318;--ok:#1a7f37;--warn:#c9822a}
+@media (prefers-color-scheme:dark){:root{--ink:#e8e8e8;--muted:#999;--line:#333;--page:#131313;--panel:#1c1c1c;--bad:#f85149;--ok:#3fb950;--warn:#d29922}}
+*{box-sizing:border-box}
+body{margin:0;padding:26px 22px 70px;background:var(--page);color:var(--ink);
+font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font-size:23px;margin:0 0 6px} h2{font-size:16px;margin:38px 0 6px}
+h2 span{color:var(--muted);font-weight:400}
+p{max-width:86ch} p.sub{color:var(--muted);margin:0 0 18px}
+.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--warn);
+border-radius:8px;padding:13px 15px;margin:14px 0 20px;max-width:88ch;font-size:14px}
+.note b{color:var(--warn)} .note.grey{border-left-color:#888}.note.grey b{color:var(--ink)}
+.note.red{border-left-color:var(--bad)}.note.red b{color:var(--bad)}
+.note.good{border-left-color:var(--ok)}.note.good b{color:var(--ok)}
+.bar{display:flex;gap:18px;align-items:center;flex-wrap:wrap;padding:11px 13px;background:var(--panel);
+border:1px solid var(--line);border-radius:10px;margin:18px 0;position:sticky;top:0;z-index:9}
+label{display:flex;gap:6px;align-items:center;font-size:13px}
+.row{display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start}
+figure{margin:0} figcaption{font-size:12px;color:var(--muted);margin-top:7px;text-align:center}
+canvas{border-radius:4px;box-shadow:0 2px 14px rgba(0,0,0,.28);display:block}
+code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;background:rgba(128,128,128,.14);padding:1px 5px;border-radius:4px}
+table{border-collapse:collapse;font-size:13.5px;margin:10px 0;max-width:88ch}
+th,td{border:1px solid var(--line);padding:5px 10px;text-align:left}
+th{background:rgba(128,128,128,.1)}
+td.no{color:var(--bad);font-weight:600} td.yes{color:var(--ok);font-weight:600}
+#asciicheck{font-size:13.5px;padding:9px 13px;border-radius:7px;margin:14px 0;max-width:88ch}
+#asciicheck.ok{background:rgba(26,127,55,.12);color:var(--ok)}
+#asciicheck.bad{background:rgba(180,35,24,.14);color:var(--bad)}
+</style>
+<body>
+<h1>Settings, redesigned</h1>
+<p class="sub">Board 2, 320&times;480. Every glyph below is the <b>real Spleen bitmap</b> read out of
+<code>Spleen8x16.h</code> and <code>Spleen12x24.h</code>; every position is a constant parsed from
+<code>board_es3c35p.h</code>. No Mac font is used anywhere — the last mockup that reached for Menlo
+flattered the design by about 30% more ink than the device can put on the glass.</p>
+
+<div id="asciicheck"></div>
+
+<div class="bar">
+  <label><input type="radio" name="th" value="DARK" checked> DARK</label>
+  <label><input type="radio" name="th" value="LIGHT"> LIGHT</label>
+  <label>scale <select id="scale"><option value="1">1x</option><option value="1.5" selected>1.5x</option><option value="2">2x</option></select></label>
+  <label><input type="checkbox" id="boxes"> show text clear boxes</label>
+</div>
+
+<h2>The design <span>&mdash; A + B, all six screens</span></h2>
+<p>HOME plus five groups. The pager band becomes a <b>back band of exactly the same height</b>, so
+every group keeps <code>PAGE_TOP</code> 104 and the existing page code drops in under it. Each HOME
+row carries its group's current value, so the common question &mdash; what brightness, how many Macs,
+is the host talking to me &mdash; is answered with <b>no tap at all</b>.</p>
+<div class="row" id="s-ab"></div>
+
+<div class="note good">
+<b>Every page now lands between 16 and 48px of slack</b>, against 10&ndash;121 today. Measured by the
+headless checker that renders all ten screens:
+<table>
+<tr><th></th><th>HOME</th><th>Status</th><th>Display</th><th>Sound</th><th>Pairing</th><th>Actions</th></tr>
+<tr><td>slack above the footer</td><td>18</td><td>24</td><td>31</td><td>27</td><td>16</td><td>48</td></tr>
+</table>
+Actions is the loosest at 48 and that is honest rather than padded &mdash; it holds three buttons,
+so they are drawn at 56px instead of 50 and given room to separate.
+</div>
+
+<div class="note">
+<b>SOUND is a real group, not a leftover.</b> It carries output <i>and</i> input, because a mic test
+is a sound test &mdash; and it is the one action you run repeatedly, since <code>MIC_GAIN</code> is
+settled by watching <code>MICMON</code> while speaking rather than computed. Moving MIC TEST here is
+what takes ACTIONS down to three, so ACTIONS becomes purely <b>things that change or end state</b>.
+<ul style="margin:8px 0 0;padding-left:20px">
+<li><b>TEST BEEP</b> earns its place: the ES8311's volume scale is linear in dB, so LOW/MED/HIGH are
+<code>{55, 70, 85}</code> out of 100 and roughly 13dB apart, with everything under ~40 inaudible on
+this hardware. A word cannot tell you what a volume sounds like &mdash; the same reason the menu
+bar's sound picker plays on select, and the reason <code>TONELADDER</code> exists at all.</li>
+<li><b>No bar under VOLUME</b>, deliberately. <code>board_es3c35p.h</code> records that only
+BRIGHTNESS gets one, being the single continuous 0&ndash;100 setting; three named presets with a bar
+under them would be decoration. I kept that decision rather than quietly overriding it.</li>
+<li>The line under the toggle says <b>what actually beeps</b> &mdash; a needs-input transition, which
+is the beeper's only job. 32 characters at 8px is 256px centred on 320.</li>
+</ul>
+</div>
+
+<div class="note">
+<b>DISPLAY did not just lose VOLUME &mdash; it spent the 92px.</b> My first pass moved volume out and
+left the page with 127px of dead space, which is the exact defect this redesign exists to fix. So
+THEME stops being a cramped third-width <b>cycle</b> button and becomes a 3-segment selector that
+shows all three options at once. It was never a <code>uiToggle</code> anyway &mdash; it has three
+states, and a cycle button shows one while hiding the other two.
+<br><br>
+And AUTO finally says what it means: <code>AUTO = light 07:00 to 19:00</code>. <b>AUTO is a clock,
+not a sensor</b> &mdash; every ADC1 channel on this board is spoken for (touch, battery, mic) and
+ADC2 is unusable while BT is up, so there is no light to measure and never will be. Labelling it
+AUTO with nothing beside it implies hardware that does not exist, which is the same rule that stops
+the farewell screen promising a touch wake this board cannot do.
+</div>
+
+<div class="note">
+<b>What else moved, and why.</b>
+<ul style="margin:8px 0 0;padding-left:20px">
+<li><b>STATUS leads with the two facts you came for</b> &mdash; is the host talking to me, and how is
+the battery &mdash; each a 12x24 line with its detail dimmed underneath. The eight diagnostic values
+collapse into one two-column card instead of eight full-width rows.</li>
+<li><b>The live Mac rows move to PAIRING.</b> Today they are on page 0 <i>and</i> page 3.
+Consolidating frees two rows on the busiest page and gives the pairing list the one thing it lacked:
+whether each remembered Mac is connected right now.</li>
+<li><b>ACTIONS gets captions and a severity spine.</b> The two destructive buttons sit under
+<code>CANNOT BE UNDONE</code> and carry a solid 4px bar &mdash; the same visual language the session
+rows already use &mdash; so severity survives greyscale and colour-blindness.</li>
+</ul>
+</div>
+
+<h2>What ships today <span>&mdash; for comparison</span></h2>
+<div class="row" id="s-cur"></div>
+
+<div class="note">
+<b>The pager costs 58px of every page and gives no overview.</b> <code>CONTENT_Y</code> 46 to
+<code>contentBottom()</code> 460 is 414px; <code>PAGER_H</code> 54 plus its 4px gap is
+<b>14% of it</b>, spent identically on all four pages purely to say where you are. There is no
+screen that shows what is set, the dots are not tappable, and STATUS to PAIRED MACS is three taps.
+</div>
+
+<div class="note">
+<b>And the space it buys is distributed almost at random.</b>
+<table>
+<tr><th>page</th><th>lowest ink</th><th>dead space above the footer (460)</th></tr>
+<tr><td>0 STATUS</td><td>449</td><td>10px</td></tr>
+<tr><td>1 DISPLAY &amp; SOUND</td><td>424</td><td>35px</td></tr>
+<tr><td>2 ACTIONS</td><td>373</td><td class="no">86px</td></tr>
+<tr><td>3 PAIRED MACS</td><td>338</td><td class="no">121px</td></tr>
+</table>
+Page 0 is packed while page 3 &mdash; shown above with all four pairing slots filled &mdash; wastes
+121px, nearly a third of the content area. Page 0 also carries <b>eleven identical label:value
+rows</b> across two cards, so <code>Bluetooth Connected</code> weighs exactly as much as
+<code>UPTIME 4h 12m</code>.
+</div>
+
+<div class="note red">
+<b>Two real defects found while measuring this, neither cosmetic.</b>
+<br><br>
+<b>1. <code>board_es3c35p.h:1689</code> describes a page that no longer compiles.</b> Its comment
+opens <i>"THREE buttons, not four: BOARD_HAS_MIC is 0 here"</i> &mdash; but line 18 of that same
+header is <code>#define BOARD_HAS_MIC 1</code>, set when the ES8311 capture path landed. So ACTIONS
+really has <b>four</b> buttons today, and the comment's arithmetic goes with it: it puts the hint at
+y=302 with 148px clear, where the real values are <b>364 and 86px</b>. It even scolds an earlier
+revision for copying board 1's four-button chain, and is now wrong in the opposite direction. Prose
+is not parsed, so no checker caught it.
+<br><br>
+<b>2. CLAUDE.md still calls MIC TEST an "open inconsistency"</b> that "reaches
+<code>micMonitor()</code>'s stub" and paints nothing. That was true before the capture path existed;
+the same file now documents that path as measured and working. The button is fine &mdash; the note
+about it is stale.
+</div>
+
+<div class="note grey">
+<b>Severity on the ACTIONS page is carried by outline hue alone.</b>
+<code>uiButton</code>'s signature is <code>(..., uint16_t tint = COLOR_ACCENT, bool filled = false, ...)</code>
+and page 2's four calls all omit <code>filled</code> &mdash; so MIC TEST, CALIBRATE TOUCH, RESET
+PAIRING and POWER OFF are four <b>identically shaped outlined slabs</b> differing only in stroke
+colour. That is the one thing this repo's own rule forbids: status is never carried by colour alone,
+which is why session state gets a filled circle / filled square / hollow ring and the palette is
+checked for greyscale separability. The buttons never got that treatment.
+</div>
+
+<div class="note grey">
+<b>Not verified, and the honest list.</b> None of this is on the glass. The geometry is arithmetic
+from the header and the type is the real bitmap, but three things need checking before any of it is
+built: the <b>repaint cost</b> of a HOME&rarr;group transition (a full flush is ~30ms on this board,
+the same as today's page switch &mdash; no regression, but not free); whether
+<code>drawSettingsStatic()</code>'s cache-reset discipline extends cleanly to a screen enum rather
+than a page index; and the <b>RAM</b> for HOME's summary strings, which should be zero if they are
+composed into an existing scratch buffer rather than stored. The severity spine and HOME's 70px
+pitch also need <code>settings-geom-check.mjs</code> assertions, or they are constants no checker
+parses &mdash; which is exactly how the stale comment above happened.
+</div>
+
+<script src="spleenfonts.js"></script>
+<script src="settings.js"></script>
