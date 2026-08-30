@@ -1861,21 +1861,52 @@ const int P3_EMPTY_HINT_Y = P3_LIST_Y + P3_ROW_STEP + P3_ROW_H / 2;   // MC cent
 //   386..435   CONFIRM / CANCEL        PAIR_BTN_Y,   H_BTN
 //   436..459   clear to contentBottom()
 //
+// and the result screen, which replaces the five blocks above the buttons:
+//   160..183   the verdict             PAIR_RESULT_Y,     T_HEAD
+//   200..215   the label or the reason PAIR_RESULT_SUB_Y, T_BODY
+//
 // THE CODE IS SIX DIGITS OF T_HERO = 6 * 32 = 192px in a 320px panel, which is the
 // one width on this screen that cannot be trimmed - it is the whole point of the
 // surface. Asserted rather than eyeballed.
-const int PAIR_TITLE_Y = 40;
-const int PAIR_STATE_Y = 80;
-const int PAIR_CODE_Y  = 140;
-const int PAIR_LABEL_Y = 224;
-const int PAIR_LEFT_Y  = 264;
+// EVERY BLOCK IS DERIVED FROM THE ONE ABOVE IT, cell height plus a named gap, and
+// the button row is anchored from the FOOTER rather than from the top. That is not
+// tidiness: a chain of six literals is six constants no perturbation can catch,
+// where an identity fails at +-1 in both directions - which is the standard this
+// repo sets for a constant it has just added, and what geom-sweep.mjs measures.
+const int PAIR_HEAD_H     = 24;   // uiLineH(T_HEAD), Spleen 12x24 - the same shape SESSION_NAME_H has
+const int PAIR_TOP_AIR    = 40;   // the panel's top edge -> the title
+const int PAIR_AIR_TITLE  = 16;   // title -> the state line
+const int PAIR_AIR_STATE  = 44;   // state line -> the code, which gets the most air on the screen it is the point of
+const int PAIR_AIR_CODE   = 20;   // the code -> the requesting Mac's label
+const int PAIR_AIR_LABEL  = 24;   // label -> the countdown
+const int PAIR_AIR_LEFT   = 106;  // countdown -> the button row: where this panel's SURPLUS lives
+const int PAIR_BTN_BOTTOM = 24;   // the button row -> the footer
+const int PAIR_TITLE_Y = PAIR_TOP_AIR;
+const int PAIR_STATE_Y = PAIR_TITLE_Y + PAIR_HEAD_H + PAIR_AIR_TITLE;
+const int PAIR_CODE_Y  = PAIR_STATE_Y + CODE_LINE_H + PAIR_AIR_STATE;
+const int PAIR_LABEL_Y = PAIR_CODE_Y + HERO_LINE_H + PAIR_AIR_CODE;
+const int PAIR_LEFT_Y  = PAIR_LABEL_Y + CODE_LINE_H + PAIR_AIR_LABEL;
 // The two buttons share the card lane: two of PAIR_BTN_W with the gap between them
 // is exactly CARD_W, so CANCEL's right edge lands on the same margin every card
 // uses. The gap IS SP_3, and it is restated here rather than named because SP_3 is
 // declared in deckhand_display.ino, which includes this header - a header cannot
 // see a constant from the file that includes it. settings-geom-check.mjs asserts
 // PAIR_BTN_GAP == SP_3, so the restatement is bound rather than trusted.
-const int PAIR_BTN_Y = 386;
+// ANCHORED FROM THE FOOTER, so the row sits a fixed distance off the bottom edge
+// whatever happens above it.
+//
+// AND THE STACK ABOVE IT MEETS IT EXACTLY, which is what makes every gap on this
+// screen catchable. A chain alone does not: perturb PAIR_TOP_AIR and every block
+// below it moves with it, so each `y == prev + cell + air` identity still holds -
+// the "a derivation asserted against its own term" trap this file has already paid
+// for twice. MEASURED, not reasoned: geom-sweep.mjs reported PAIR_TOP_AIR,
+// PAIR_AIR_STATE, PAIR_AIR_CODE, PAIR_AIR_LABEL and PAIR_BTN_BOTTOM all UNGUARDED
+// at +-16 with the chain in place and no closing term. Naming the surplus and
+// asserting that the stack lands ON the button row closes it: a +-1 on ANY gap now
+// breaks that one identity. Same shape as HOME_Y0_BOT, which exists for exactly
+// this reason and is likewise read by no draw site:
+//   PAIR_LEFT_Y + CODE_LINE_H + PAIR_AIR_LEFT == PAIR_BTN_Y  (264 + 16 + 106 = 386)
+const int PAIR_BTN_Y = BOARD_H - FOOTER_H - PAIR_BTN_BOTTOM - H_BTN;
 const int PAIR_BTN_GAP = 12;
 const int PAIR_BTN_W = (CARD_W - PAIR_BTN_GAP) / 2;
 // The countdown's widest string is the window's own length: "120s left" at
@@ -1889,8 +1920,14 @@ const int PAIR_LEFT_BYTES = PAIR_LEFT_CHARS + 1;
 // The result screen, which replaces the panel's own blocks for PAIR_RESULT_MS and
 // FLUSHES BEFORE THE DELAY - on a shadow-buffered board the message otherwise
 // exists for zero frames, the defect the farewell screens already fixed once.
-const int PAIR_RESULT_Y     = 196;
-const int PAIR_RESULT_SUB_Y = 236;
+// THE VERDICT SITS WHERE THE CODE WAS, centred in the band the six digits
+// occupied, so the screen you were reading does not jump under you; its reason
+// line then takes the same title->state step the panel above uses.
+// PAIR_RESULT_MS is a DWELL and has no geometry to violate, so geom-sweep.mjs
+// reports it unguarded and that is correct rather than a gap - the assertion on it
+// is only that it is long enough to read.
+const int PAIR_RESULT_Y     = PAIR_CODE_Y + (HERO_LINE_H - PAIR_HEAD_H) / 2;
+const int PAIR_RESULT_SUB_Y = PAIR_RESULT_Y + PAIR_HEAD_H + PAIR_AIR_TITLE;
 const int PAIR_RESULT_MS    = 1500;
 
 // ---------- SETTINGS group: Actions ----------

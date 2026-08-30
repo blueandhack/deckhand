@@ -617,7 +617,7 @@ bool pairProofOk = false;                          // a valid PAIROK arrived
 bool pairConfirmed = false;                        // CONFIRM was tapped on the glass
 char pairHostId[12] = "";                          // the requesting Mac's hostId, 8 hex
 char pairLabel[PAIR_LABEL_BYTES] = "";             // its label, ASCII-sanitised and capped
-char pairCodeDigits[PAIR_CODE_DIGITS + 1] = "";    // the six digits Task 3 draws - GLASS ONLY
+char pairCodeDigits[PAIR_CODE_DIGITS + 1] = "";    // the six digits the panel draws - GLASS ONLY
 uint8_t pairPriv[32];                              // our ephemeral private key - SECRET
 char pairKeyHex[PAIR_KEY_BYTES * 2 + 1] = "";      // the derived 128-bit key, hex - SECRET
 char pairProofWant[33] = "";                       // the proof we expect back - SECRET-DERIVED
@@ -687,10 +687,15 @@ void pairClose(const char* why) {
   if (wasOpen) Serial.printf("PAIR: window closed (%s)\n", why ? why : "no reason given");
 }
 
-// TASK 3's ENTRY POINT, deliberately with no call site yet - the same shape
-// activeSecret() and primaryLink() already have in this repo, and said out loud
-// rather than left for a reader to wonder about. Nothing can pair until the
-// PAIR NEW MAC button exists, which is exactly the intended state.
+// THE ENTRY POINT, and its ONE call site is SETTINGS > Pairing > PAIR NEW MAC
+// (openPairPanel(), settings.ino). That is the presence proof: a finger on this
+// glass is the only thing in the system that can arm a pairing window, and there
+// is deliberately no host command that opens one - a device the Mac could put
+// into pairing mode would be weaker than the cable this replaces.
+// (This comment read "deliberately with no call site yet" until the button
+// existed. It is corrected here rather than left, for the reason this repo keeps
+// re-learning: nothing parses a comment, so prose that has stopped being true
+// costs the next reader either the time to disprove it or a no-op "fix".)
 void pairOpen() {
   pairWipe();
   // The one moment the previous verdict stops being the answer - see pairResult.
@@ -805,9 +810,10 @@ bool pairHasRoomFor(const char* hostId) {
 
 // ONE PREDICATE, READ BY EVERYTHING THAT NEEDS THE ANSWER.
 //
-// "Is there anything to confirm?" is asked by the commit path here, and will be
-// asked again by Task 3's CONFIRM button - once to decide whether to DRAW it and
-// once to decide whether a tap on it does anything. This codebase's classic
+// "Is there anything to confirm?" is asked by the commit path here, and twice
+// more by the CONFIRM button through settings.ino's pairConfirmVisible(), which
+// is this function and nothing else - once to decide whether to DRAW it and once
+// to decide whether a tap on it does anything. This codebase's classic
 // defect is a control drawn under one condition and hit-tested under another
 // (fabVisible() is gated in one place for exactly that reason: drawn-but-dead
 // and tappable-but-dead are two different bugs), so there is one function and
@@ -869,10 +875,11 @@ void pairCommitIfReady() {
   Serial.printf("PAIR: %s paired over the radio; the key was never transmitted\n", id);
 }
 
-// TASK 3's CONFIRM BUTTON CALLS THIS, and it has no call site yet - the same
-// shape pairOpen() has, and said out loud rather than left for a reader to
-// wonder about. Nothing can pair until that button exists, which is the
-// intended state.
+// THE CONFIRM BUTTON CALLS THIS, from pairPanelTouch() in settings.ino, and that
+// tap IS the security property rather than an acknowledgement of one: the HMAC
+// proof alone is computable by any peer that completes the ECDH, so a human
+// comparing the two screens and tapping HERE is the only evidence the device ever
+// gets that the peer it is about to store is the one the user is looking at.
 //
 // INERT WITHOUT A PENDING REQUEST: there is nothing to confirm before a PAIRREQ
 // has arrived and a code is on the screen, and a flag set early would be a flag

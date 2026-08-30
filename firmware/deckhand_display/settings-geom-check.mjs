@@ -483,6 +483,13 @@ if (SELFTEST) {
   // assertion that walks every reachable slot.
   B[2].P3_ROW_STEP += 6;
   console.log("--selftest: board 2's pairing row step widened by 6; the free-slot walk MUST fail");
+  // And ONE PIXEL on the panel's surplus, the term that closes its stack onto the
+  // button row. It is the smallest change there is and it is the assertion that
+  // gives every other gap on this screen teeth - the sweep measured five of them
+  // UNGUARDED at +-16 before it existed - so the tooth has to be proven on the
+  // closing term itself rather than only on the chain it pins.
+  B[2].PAIR_AIR_LEFT += 1;
+  console.log("--selftest: board 2's pairing surplus widened by 1; the stack no longer lands on the button row and that identity MUST fail");
 }
 
 console.log(`\nvoice-confirm panel (lane CARD_W - 8, NOT the keyboard's CARD_W - 12), ` +
@@ -1031,6 +1038,55 @@ for (const b of [1, 2]) {
         `read is a code nobody can compare`);
     chk(codeW <= c.CARD_W, `... and inside the card lane too (${codeW} <= ${c.CARD_W}), so it ` +
         `sits on the same margins as everything else`);
+
+    // ---- the panel's rhythm is a CHAIN, not six literals ----
+    // A stack of independent offsets is a stack of constants no perturbation can
+    // catch: the gaps here are wide enough that geom-sweep.mjs reported +-16 on
+    // every one of them as harmless, and "harmless" is only true until someone
+    // moves two at once. Each block is derived from the one above it, so a single
+    // +-1 on ANY of them fails an identity - which is the standard this file sets
+    // for a constant the repo has just added.
+    chk(c.PAIR_HEAD_H === lineHB(b, T_HEAD),
+        `pairing panel: PAIR_HEAD_H ${c.PAIR_HEAD_H} IS uiLineH(T_HEAD) ${lineHB(b, T_HEAD)}`);
+    for (const [name, y, prev, cell, air] of [
+      ["the state line", c.PAIR_STATE_Y, c.PAIR_TITLE_Y, c.PAIR_HEAD_H, c.PAIR_AIR_TITLE],
+      ["the code", c.PAIR_CODE_Y, c.PAIR_STATE_Y, c.CODE_LINE_H, c.PAIR_AIR_STATE],
+      ["the Mac's label", c.PAIR_LABEL_Y, c.PAIR_CODE_Y, c.HERO_LINE_H, c.PAIR_AIR_CODE],
+      ["the countdown", c.PAIR_LEFT_Y, c.PAIR_LABEL_Y, c.CODE_LINE_H, c.PAIR_AIR_LABEL],
+    ]) chk(y === prev + cell + air,
+        `pairing panel: ${name} is at ${prev} + ${cell} + ${air} = ${prev + cell + air} (${y})`);
+    chk(c.PAIR_BTN_Y + c.H_BTN + c.PAIR_BTN_BOTTOM === contentBottom,
+        `pairing panel: the button row plus its air lands exactly on contentBottom ` +
+        `(${c.PAIR_BTN_Y} + ${c.H_BTN} + ${c.PAIR_BTN_BOTTOM} == ${contentBottom})`);
+    // AND THE CLOSING TERM, which is the one that gives every gap above teeth.
+    // Without it the chain is a derivation asserted against its own term: perturb
+    // PAIR_TOP_AIR and every block below moves with it, so each step's identity
+    // still holds. MEASURED - geom-sweep.mjs called PAIR_TOP_AIR, PAIR_AIR_STATE,
+    // PAIR_AIR_CODE, PAIR_AIR_LABEL and PAIR_BTN_BOTTOM unguarded at +-16 with the
+    // chain alone. The stack is pitched to LAND on a button row anchored from the
+    // other end, so naming the surplus makes a +-1 on any one gap break this.
+    chk(c.PAIR_LEFT_Y + c.CODE_LINE_H + c.PAIR_AIR_LEFT === c.PAIR_BTN_Y,
+        `pairing panel: the stack lands exactly on the button row ` +
+        `(${c.PAIR_LEFT_Y} + ${c.CODE_LINE_H} + ${c.PAIR_AIR_LEFT} == ${c.PAIR_BTN_Y})`);
+    chk(c.PAIR_RESULT_Y === c.PAIR_CODE_Y + Math.floor((c.HERO_LINE_H - c.PAIR_HEAD_H) / 2),
+        `pairing result: the verdict is centred in the band the code occupied ` +
+        `(${c.PAIR_RESULT_Y})`);
+    chk(c.PAIR_RESULT_SUB_Y === c.PAIR_RESULT_Y + c.PAIR_HEAD_H + c.PAIR_AIR_TITLE,
+        `pairing result: its reason takes the panel's own title->state step ` +
+        `(${c.PAIR_RESULT_SUB_Y})`);
+    // The label buffer that every one of those blocks is sized against is the SAME
+    // one HostPairing stores, parsed rather than transcribed: a label the panel can
+    // hold but the store cannot (or the reverse) is a name truncated on one screen
+    // and not the other.
+    {
+      const m = SRC_MAIN.match(/char label\[(\d+)\];/);
+      chk(m != null && c.PAIR_LABEL_BYTES === +m[1],
+          `PAIR_LABEL_BYTES ${c.PAIR_LABEL_BYTES} IS HostPairing::label's own ` +
+          `char[${m ? m[1] : "?"}]`);
+    }
+    chk(c.P3_EMPTY_HINT_Y === c.P3_LIST_Y + c.P3_ROW_STEP + Math.floor(c.P3_ROW_H / 2),
+        `the empty-list hint is centred in slot 1, one below PAIR NEW MAC ` +
+        `(${c.P3_EMPTY_HINT_Y})`);
 
     // ---- the panel's blocks share no pixel row ----
     // As PAINTED extents, never as glyphs: drawString paints an opaque box, so two
@@ -1980,6 +2036,8 @@ if (SELFTEST) {
      /^pairing panel: two \d+px buttons plus \d+ fill the card lane exactly/],
     ["the widened pairing row step",
      /^PAIR NEW MAC fits the free slot at 3 Mac\(s\)/],
+    ["the widened pairing surplus",
+     /^pairing panel: the stack lands exactly on the button row/],
   ];
   let missed = 0;
   for (const [what, re] of WANT) {
