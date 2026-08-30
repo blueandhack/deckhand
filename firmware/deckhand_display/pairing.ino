@@ -144,8 +144,18 @@ void loadHostPairings() {
   // first payload that carries one.
   activeHost = hostCount ? 0 : -1;
 }
-// Store (or refresh) the pairing for one Mac. Called only from the USB
-// PROVISION path - a BLE peer must never be able to add itself.
+#if BOARD_HAS_WIRELESS_PAIR
+// True only while pairCommitIfReady() is inside upsertHost(). It exists so the
+// log line below can NAME which path stored the key, and it is declared here
+// rather than beside the rest of the pairing state because the Arduino build
+// concatenates these files into one translation unit in file order - a global
+// used above its own declaration would not compile.
+bool pairRadioCommit = false;
+#endif
+// Store (or refresh) the pairing for one Mac. Two callers now: the USB
+// PROVISION path, and - on board 2 only - pairCommitIfReady() once a proof AND
+// a CONFIRM on the glass have both arrived. A BLE peer still cannot add itself:
+// what it can do is ask, and a person on the glass is what stores anything.
 void upsertHost(const char* id, const String& secret, const char* label) {
   int i = findHost(id);
   if (i < 0) {
@@ -163,6 +173,19 @@ void upsertHost(const char* id, const String& secret, const char* label) {
   saveHostSlot(i);
   saveHostCount();
   activeHost = i;
+  // "PROVISION:" IS THIS REPO'S ONLY MARKER THAT A KEY ARRIVED OVER THE CABLE -
+  // i.e. that a person was holding the device with a USB lead in it - so a radio
+  // pairing printing it would forge the audit trail for the exact property this
+  // whole feature rests on. The wireless path says WIRELESS PAIR. Board 1 sees
+  // only the PROVISION line below: the guard emits no code there, so this is
+  // textually identical after preprocessing and its binary does not move.
+#if BOARD_HAS_WIRELESS_PAIR
+  if (pairRadioCommit)
+    Serial.printf("WIRELESS PAIR: pairing stored for %s (%s), slot %d of %d"
+                  " - no cable, and the key was never transmitted\n",
+                  hosts[i].id, hosts[i].label, i + 1, hostCount);
+  else
+#endif
   Serial.printf("PROVISION: pairing stored for %s (%s), slot %d of %d\n",
                 hosts[i].id, hosts[i].label, i + 1, hostCount);
 }
@@ -551,7 +574,9 @@ void pairVectorReport() {
 // THE PRESENCE GUARANTEE IS THE WINDOW, NOT THE CRYPTO. The cable's security
 // value was proof that a person was HOLDING the device; here that proof is a
 // tap on the glass which opens a 120s window, and NOTHING below will pair while
-// that window is shut. So a window left open by someone who wandered off is the
+// that window is shut - nor while it is open, until a SECOND tap confirms that
+// the six digits on this screen match the six on the Mac's. A valid proof is
+// half of a commit and never all of it: see pairProofOk. So a window left open by someone who wandered off is the
 // one state that weakens the whole design - which is why pairClose() is called
 // from a tab switch, from the screen blanking, from deep sleep and from the
 // timeout, and why it WIPES rather than merely marking the window shut.
@@ -573,6 +598,23 @@ void pairVectorReport() {
 // buys nothing over named fields.
 unsigned long pairWindowUntil = 0;                 // millis deadline; 0 = closed
 bool pairPending = false;                          // a PAIRREQ was answered; awaiting PAIROK
+// THE TWO HALVES OF A COMMIT, AND NEITHER ALONE STORES ANYTHING.
+//
+// The first design committed on a valid proof alone, and that was BROKEN: the
+// proof is HMAC(key, "deckhand-pairok/1") where the key derives from the ECDH
+// shared secret and nothing else, so ANY peer that completes the exchange can
+// compute it WITHOUT EVER SEEING THE DISPLAYED CODE. An attacker in range
+// answers the window the instant the user taps PAIR NEW MAC, sends a valid
+// proof, and is stored in milliseconds. The code defended the user's MAC
+// against a man-in-the-middle and gave this device nothing.
+//
+// What commits now is Numeric Comparison: both screens show the code, the user
+// compares them, and a tap on THIS glass - bound to this pending peer - is the
+// second half. The proof is kept as defence in depth (it says the peer that
+// sent it is the peer that did the ECDH, which the human comparison alone
+// cannot establish), never as sufficient on its own.
+bool pairProofOk = false;                          // a valid PAIROK arrived
+bool pairConfirmed = false;                        // CONFIRM was tapped on the glass
 char pairHostId[12] = "";                          // the requesting Mac's hostId, 8 hex
 char pairLabel[PAIR_LABEL_BYTES] = "";             // its label, ASCII-sanitised and capped
 char pairCodeDigits[PAIR_CODE_DIGITS + 1] = "";    // the six digits Task 3 draws - GLASS ONLY
@@ -602,6 +644,12 @@ void pairWipe() {
   mbedtls_platform_zeroize(pairHostId, sizeof(pairHostId));
   mbedtls_platform_zeroize(pairLabel, sizeof(pairLabel));
   pairPending = false;
+  // Both commit halves die with the exchange they belonged to. A confirm that
+  // outlived its own PAIRREQ would commit the NEXT peer's key on a tap the user
+  // aimed at the previous one - which is the whole class this redesign exists
+  // to close, arriving through stale state instead of through a missing check.
+  pairProofOk = false;
+  pairConfirmed = false;
 }
 
 // Shuts the window AND destroys the exchange. It sends nothing: a caller that
@@ -697,10 +745,19 @@ bool pairHostIdOk(const char* id) {
 // that range and an out-of-range byte draws nothing while still costing budget -
 // the rule the whole wire already follows. It is attacker-controlled text shown
 // beside the code, and it is DISPLAY-ONLY: nothing keys off it.
+//
+// THE TERMINATOR'S BYTE IS RESERVED ONCE, BY NAME. The bound was written inline
+// as `w + 1 < outSize`, which is correct - and correct is not the same as
+// GUARDED: it is one character from `w < outSize`, which puts the closing NUL at
+// out[outSize], one past the end of an attacker-sized string's destination, and
+// no assertion anywhere would have noticed. `cap` states the reservation once,
+// where the checker can bind it, and the outSize == 0 return above is what makes
+// outSize - 1 safe.
 void pairSanitiseLabel(const char* in, char* out, unsigned int outSize) {
+  if (!out || outSize == 0) return;
+  const unsigned int cap = outSize - 1;   // room for out[w] = 0, always
   unsigned int w = 0;
-  if (outSize == 0) return;
-  for (const char* p = in; in && *p && w + 1 < outSize; p++) {
+  for (const char* p = in; in && *p && w < cap; p++) {
     char c = *p;
     if (c >= 0x20 && c <= 0x7E) out[w++] = c;
   }
@@ -717,6 +774,88 @@ void pairSanitiseLabel(const char* in, char* out, unsigned int outSize) {
 // wanted if a radio peer could reach it.
 bool pairHasRoomFor(const char* hostId) {
   return findHost(hostId) >= 0 || hostCount < MAX_HOSTS;
+}
+
+// ONE PREDICATE, READ BY EVERYTHING THAT NEEDS THE ANSWER.
+//
+// "Is there anything to confirm?" is asked by the commit path here, and will be
+// asked again by Task 3's CONFIRM button - once to decide whether to DRAW it and
+// once to decide whether a tap on it does anything. This codebase's classic
+// defect is a control drawn under one condition and hit-tested under another
+// (fabVisible() is gated in one place for exactly that reason: drawn-but-dead
+// and tappable-but-dead are two different bugs), so there is one function and
+// no second spelling of the condition anywhere.
+bool pairConfirmable() {
+  return pairWindowOpen() && pairPending;
+}
+
+// THE COMMIT, AND IT NEEDS BOTH HALVES IN EITHER ORDER.
+//
+// Called from handlePairOk() when the proof lands and from pairConfirm() when
+// the glass is tapped, so whichever arrives SECOND is the one that stores. A
+// valid proof alone must never reach upsertHost() - see the note on pairProofOk
+// for why that was the flaw rather than a hardening opportunity - and this is
+// the ONLY place in the block that calls upsertHost, which the checker asserts
+// rather than trusts.
+void pairCommitIfReady() {
+  if (!pairConfirmable()) return;
+  if (!pairProofOk || !pairConfirmed) return;
+
+  // Re-checked at COMMIT, not only at PAIRREQ: a USB PROVISION can fill the last
+  // slot while this window is open, and upsertHost() would then recycle slot 0 -
+  // silently destroying a key the user still wanted.
+  if (!pairHasRoomFor(pairHostId)) {
+    pairFail("full", pairHostId);
+    pairClose("no free slot at commit");
+    return;
+  }
+
+  char id[12], label[PAIR_LABEL_BYTES];
+  strlcpy(id, pairHostId, sizeof(id));
+  strlcpy(label, pairLabel, sizeof(label));
+  // The key is stored as its 32-character lowercase hex, which is the form the
+  // USB PROVISION path already stores and the form authHmacFor() keys the answer
+  // HMAC with (it hashes the ASCII of the secret, not 16 raw bytes) - so a
+  // wirelessly paired Mac answers prompts through exactly the same code path.
+  // upsertHost() performs saveHostSlot() and saveHostCount() itself; calling
+  // them again here would be a second NVS write of identical bytes.
+  //
+  // THE TEMPORARY String IS WIPED BEFORE IT IS FREED. `upsertHost(id,
+  // String(pairKeyHex), label)` builds a heap copy of the 128-bit key and drops
+  // it on the floor at the end of the statement - free() does not clear, so the
+  // key sat in reusable heap with nothing left pointing at it to wipe. Named,
+  // then zeroized while the pointer is still ours. (hosts[i].secret keeps its
+  // own copy, deliberately: that IS the stored pairing.)
+  String secret(pairKeyHex);
+  pairRadioCommit = true;
+  upsertHost(id, secret, label);
+  pairRadioCommit = false;
+  mbedtls_platform_zeroize((void*) secret.c_str(), secret.length());
+
+  pairClose("paired");
+
+  char line[48];
+  snprintf(line, sizeof(line), "PAIRDONE %s", id);
+  pairReply(line, id);
+  Serial.printf("PAIR: %s paired over the radio; the key was never transmitted\n", id);
+}
+
+// TASK 3's CONFIRM BUTTON CALLS THIS, and it has no call site yet - the same
+// shape pairOpen() has, and said out loud rather than left for a reader to
+// wonder about. Nothing can pair until that button exists, which is the
+// intended state.
+//
+// INERT WITHOUT A PENDING REQUEST: there is nothing to confirm before a PAIRREQ
+// has arrived and a code is on the screen, and a flag set early would be a flag
+// still set when the NEXT peer's request lands.
+void pairConfirm() {
+  if (!pairConfirmable()) {
+    Serial.println("PAIR: CONFIRM ignored - no request is pending");
+    return;
+  }
+  pairConfirmed = true;
+  Serial.println("PAIR: confirmed on the glass");
+  pairCommitIfReady();
 }
 
 // PAIRREQ <hostId:8hex> <pubA:64hex> <label...>
@@ -742,6 +881,15 @@ void handlePairReq(const String& rest) {
 
   // BOTH VALIDATED BEFORE EITHER IS USED - see pairHexToBytes.
   if (!pairHostIdOk(id.c_str())) { pairFail("badhost", NULL); return; }
+  // NORMALISED TO LOWERCASE THE MOMENT IT PARSES, because this string becomes
+  // the NVS key a pairing is stored under and findHost() compares it with
+  // strcmp. pairHostIdOk accepts A-F as well as a-f (isHexHostId does), so
+  // "C532AB01" and "c532ab01" are the same Mac and would take TWO of the four
+  // slots - and the second would answer prompts the first was allowed to,
+  // while the PAIRED MACS page showed one Mac twice. The Mac itself sends
+  // lowercase, so nothing here changes in practice; what changes is that
+  // nothing else has to.
+  id.toLowerCase();
   uint8_t pubA[32];
   if (!pairHexToBytes(pubHex.c_str(), 32, pubA)) { pairFail("badkey", id.c_str()); return; }
 
@@ -780,9 +928,15 @@ void handlePairReq(const String& rest) {
 // PAIROK <hmac:32hex>
 //
 // The proof is HMAC-SHA256(key, "deckhand-pairok/1")[:16] - what the Mac sends
-// to show it derived the same key WITHOUT sending the key. Forging it is a
-// 128-bit problem where guessing the six digits would be a 10^6 one, which is
-// why the device is never sent a guess at the code.
+// to show it derived the same key WITHOUT sending the key.
+//
+// IT DOES NOT STORE ANYTHING, AND THAT IS THE CORRECTION AT THE HEART OF THIS
+// DESIGN. A valid proof proves only that the sender completed the ECDH, which
+// EVERY peer that answers the open window can do - the key derives from the
+// shared secret and nothing else, so the proof is computable without ever
+// having seen the six digits. A racing attacker therefore had a valid proof in
+// milliseconds. So this sets a flag and waits: the code on the two screens, and
+// a CONFIRM on this glass, are what commit.
 void handlePairOk(const String& rest) {
   if (!pairWindowOpen()) { pairFail("closed", NULL); return; }
   if (!pairPending) { pairFail("noreq", NULL); return; }
@@ -804,30 +958,12 @@ void handlePairOk(const String& rest) {
     pairClose("the proof did not match");
     return;
   }
-  // Re-checked at COMMIT, not only at PAIRREQ: a USB PROVISION can fill the last
-  // slot while this window is open, and upsertHost() would then recycle slot 0.
-  if (!pairHasRoomFor(pairHostId)) {
-    pairFail("full", pairHostId);
-    pairClose("no free slot at commit");
-    return;
-  }
-
-  char id[12], label[PAIR_LABEL_BYTES];
-  strlcpy(id, pairHostId, sizeof(id));
-  strlcpy(label, pairLabel, sizeof(label));
-  // The key is stored as its 32-character lowercase hex, which is the form the
-  // USB PROVISION path already stores and the form authHmacFor() keys the answer
-  // HMAC with (it hashes the ASCII of the secret, not 16 raw bytes) - so a
-  // wirelessly paired Mac answers prompts through exactly the same code path.
-  // upsertHost() performs saveHostSlot() and saveHostCount() itself; calling
-  // them again here would be a second NVS write of identical bytes.
-  upsertHost(id, String(pairKeyHex), label);
-  pairClose("paired");
-
-  char line[48];
-  snprintf(line, sizeof(line), "PAIRDONE %s", id);
-  pairReply(line, id);
-  Serial.printf("PAIR: %s paired over the radio; the key was never transmitted\n", id);
+  pairProofOk = true;
+  // No reply yet: PAIRDONE means STORED, and nothing is stored until a person
+  // has compared the two codes and tapped CONFIRM. Saying so in the log is what
+  // stops "the Mac sent a good proof and nothing happened" reading as a fault.
+  Serial.println("PAIR: proof accepted - waiting for CONFIRM on the glass");
+  pairCommitIfReady();   // commits only if the tap already happened
 }
 
 // PAIRCANCEL - the Mac's dialog was dismissed.

@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386934, RAM 69804 | flash 1020274, RAM 66156 |
+| size today | flash 1386934, RAM 69804 | flash 1020834, RAM 66164 |
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -745,8 +745,8 @@ shared secret, so the 128-bit pairing key is **never transmitted** - both ends d
 `docs/superpowers/specs/2026-08-30-wireless-pairing.md`.
 
 ```
-node host/pair-crypto-check.mjs              # 41 crypto + 70 source assertions
-node host/pair-crypto-check.mjs --selftest   # 13/13 module + 19/19 SOURCE faults, each naming its assertion
+node host/pair-crypto-check.mjs              # 41 crypto + 97 source assertions
+node host/pair-crypto-check.mjs --selftest   # 13/13 module + 30/30 SOURCE faults, each naming its assertion
 echo "PAIRVECTOR" > ~/.claude/deckhand-device-command   # the DEVICE's half, on hardware
 ```
 
@@ -783,7 +783,7 @@ the user typed correctly. One pinned example that happened to start with a non-z
 never notice, so the checker also sweeps 400 random exchanges for six digits every time.
 
 **Be honest about what each half proves.** The 41 crypto assertions run the Mac's real module. The
-35 SOURCE assertions read `pairing.ino` as **text** (comments stripped, the `panel_shim.cpp`
+SOURCE assertions read `pairing.ino` as **text** (comments stripped, the `panel_shim.cpp`
 `invertColor` trap) and check the device still SAYS the same thing - the info strings, the salt
 order, the modulus parsed from its own macro, the big-endian read, the constant-time compare. They
 cannot execute the sketch, so they catch an EDIT and never a toolchain; only the hardware run
@@ -863,9 +863,68 @@ the whole string unless `strlen(s) == nBytes * 2` and every character is hex - a
 validates BOTH the hostId (exactly 8 hex) and the key **before either is used**, which is asserted
 as an ORDER (`pairHostIdOk` and `pairHexToBytes` before `pairDeriveAll`) rather than as presence.
 
+**A VALID PROOF ALONE USED TO STORE A KEY, AND THAT WAS THE WHOLE DESIGN BEING BROKEN RATHER THAN A
+HARDENING OPPORTUNITY.** `handlePairOk` committed on a verified proof - and the proof is
+`HMAC(key, "deckhand-pairok/1")` where the key derives from the **ECDH shared secret and nothing
+else**, so ANY peer that completes the exchange computes it **without ever seeing the displayed
+code**. A racing attacker answers the window the instant the user taps PAIR NEW MAC, sends a valid
+proof, and is stored in milliseconds. The six digits defended the user's *Mac* against a
+man-in-the-middle and gave the *device* nothing: it never received evidence that a human had read
+anything. "The device is never sent a guess at the code" was true and irrelevant.
+
+**What commits now is Bluetooth's Numeric Comparison: BOTH a valid proof AND a CONFIRM on this
+glass, in either order.** `handlePairOk` sets `pairProofOk` and waits - no store, no `PAIRDONE`;
+`pairConfirm()` (Task 3's button, deliberately with no call site yet) sets `pairConfirmed`; and
+`pairCommitIfReady()` is the **only** thing in the block that reaches `upsertHost`, which the
+checker asserts by counting rather than by reading. The proof is kept as defence in depth - it says
+the peer that sent it is the peer that did the ECDH, which the human comparison alone cannot
+establish - never as sufficient. A bad proof still fails and closes the window, unchanged.
+**`pairConfirmable()` is ONE predicate** (`pairWindowOpen() && pairPending`) read by the commit path
+and, next task, by the button's draw site AND its hit test: this codebase's classic defect is a
+control drawn under one condition and hit-tested under another, so the checker forbids a second
+spelling of the condition inside either function rather than merely avoiding one.
+**The gate is bound by an assertion that PARSES the guard's operands**, and reverting it to
+`if (!pairProofOk) return;` fails by name - which is the point, because the previous round shipped
+three assertions that could not fail at all.
+
+**AND THE ASSERTION ON THE WINDOW ITSELF WAS ONE OF THEM.** `pairWindowOpen()`'s BODY is the
+presence guarantee, and the signed-difference assertion ran over the whole block - where `pairTick`
+carries a copy of the same expression - so **replacing that body with `return true;`, deleting the
+guarantee outright, passed all 70 assertions**. It is bound to the function's own body now (the
+`fnBody` helper the zeroize assertions already used), with `pairTick`'s copy asserted separately,
+and that exact injection is a permanent selftest fault. Same shape as the `pairCtEq`-defined-but-
+never-called hole: **a rule that can be satisfied by a neighbouring line is not a rule.**
+
+**THE HEX PARSER'S LENGTH WAS ENFORCED AND ITS CALL SITE WAS NOT.**
+`pairHexToBytes(pubHex.c_str(), 31, pubA)` satisfies every assertion about the parser - the string
+really is 62 characters and every one of them really is hex - and leaves `pubA[31]` holding stack
+garbage that flows into the derivation, which is precisely the "wrong length by one" the parser
+exists to prevent. Every call site's requested length is now asserted against the **declared size of
+the buffer it writes into**, both RESOLVED (through the sketch's `#define`s and board 2's `const
+int`s) rather than transcribed; the same rule pins the proof compare to `pairProofWant`'s size less
+its NUL, and pins the length refused before that compare to the same number.
+
+**`PROVISION:` IS THE ONLY MARKER IN THIS REPO THAT A KEY ARRIVED OVER THE CABLE**, i.e. that a
+person was holding the device with a lead in it - and `upsertHost()` printed it on the radio path
+too, forging the audit trail for the exact property this feature rests on. The wireless commit says
+`WIRELESS PAIR:` instead. **The previous round's stated reason for leaving it - that fixing it would
+move board 1's binary - was false, and verifying that took one build**: the `#if
+BOARD_HAS_WIRELESS_PAIR` arm emits nothing on board 1, so its `PROVISION` line is textually
+identical after preprocessing and `--check 1` reports `UNCHANGED`.
+
+**Three smaller rules over attacker-supplied text, all now asserted:** the hostId is **lowercased at
+parse** (`pairHostIdOk` accepts `A-F`, `findHost` compares with `strcmp`, so `C532AB01` and
+`c532ab01` would take two of the four slots for one Mac and both would answer); the derived key's
+`String(pairKeyHex)` **temporary is named and zeroized before it is freed** (`free()` does not
+clear, so a 128-bit key sat in reusable heap with nothing left pointing at it); and the label
+writer's `w + 1 < outSize` - **correct, and one character from `w < outSize`, which puts the NUL one
+past the end** - is now a named `cap = outSize - 1` the checker binds, since correct-but-unasserted
+is what this file keeps paying for.
+
 **`MAX_HOSTS` IS 4 AND FULL IS FULL - CHECKED TWICE, AND THE SECOND CHECK IS THE INTERESTING ONE.**
 `PAIRREQ` answers `PAIRFAIL full` **before `esp_fill_random` runs**, so no key material exists for a
-Mac that cannot be stored. It is re-checked at COMMIT inside `PAIROK`, because `upsertHost()`'s own
+Mac that cannot be stored. It is re-checked at COMMIT (in `pairCommitIfReady`), because
+`upsertHost()`'s own
 full-behaviour is to **RECYCLE SLOT 0** - correct for a deliberate USB `PROVISION`, and a silent
 destruction of a key the user still wanted if a USB `PROVISION` fills the last slot while a radio
 window is open. Task 3 makes the first path unreachable from the UI; never rely on a UI to enforce
@@ -896,14 +955,15 @@ use to skip the human, which is the whole thing that makes this equal to the cab
 
 **VERIFIED ON HARDWARE, AND WHAT WAS NOT.** All three verbs dispatch and refuse a shut window over
 BOTH transports with the cause named (`PAIRFAIL closed` on the wire, `PAIR: -> PAIRFAIL closed` in
-the log), and `PAIRVECTOR` still prints RFC 7748's own values unchanged. **The accepting paths -
-`PAIRPUB`, `PAIRDONE`, `badproof`, `badhost`, `badkey`, `full` and the 120s expiry - have NOT run on
-hardware**, because nothing calls `pairOpen()` until Task 3 draws the button, and inventing a
+the log), and `PAIRVECTOR` still prints RFC 7748's own values unchanged - re-run after the commit-
+gate redesign, not carried over. **The accepting paths - `PAIRPUB`, `PAIRDONE`, the CONFIRM half,
+`badproof`, `badhost`, `badkey`, `full` and the 120s expiry - have NOT run on hardware**, because nothing calls `pairOpen()` until Task 3 draws the button, and inventing a
 `PAIROPEN` command to reach them would be exactly the "a device you can put into pairing mode from
 the Mac" the presence argument forbids. They are covered structurally, not by execution.
 
-**Board 2 cost: +3,080 bytes of flash and +144 RAM** (1,017,194 / 66,012 -> 1,020,274 / 66,156),
-re-baselined deliberately. **Board 1 is `UNCHANGED`** at 1,386,934 / 69,804 - every line of this
+**Board 2 cost: +560 bytes of flash and +8 RAM for the commit-gate fix round**
+(1,020,274 / 66,156 -> 1,020,834 / 66,164), re-baselined deliberately, and before it
+**+3,080 / +144** for the window and handlers (1,017,194 / 66,012 -> 1,020,274 / 66,156). **Board 1 is `UNCHANGED`** at 1,386,934 / 69,804 - every line of this
 sits behind `#if BOARD_HAS_WIRELESS_PAIR`, including the three close sites in shared code.
 
 **Board 2 cost: +23,380 bytes of flash and +112 RAM** (993,814 / 65,900 -> 1,017,194 / 66,012),

@@ -326,7 +326,14 @@ function sourceSuite(ok, over) {
   // The block ALONE, never the file: strcmp is legitimate elsewhere in
   // pairing.ino (the host-slot lookup compares public hostIds), so a
   // file-wide rule would have to be weakened until it caught nothing.
-  const blockStart = code.indexOf("#if BOARD_HAS_WIRELESS_PAIR");
+  // ANCHORED ON THE CRYPTO SECTION'S OWN #if, not on the first one in the file.
+  // upsertHost() now carries a small BOARD_HAS_WIRELESS_PAIR guard of its own
+  // (the audit-marker fix below), and taking the first #if would drag findHost /
+  // forgetHost into "the block" - whose strcmp on a PUBLIC hostId would then trip
+  // the byte-compare ban, i.e. a correct line failing a rule that does not apply
+  // to it. That is how a checker teaches people to ignore it.
+  const blockStart = code.lastIndexOf("#if BOARD_HAS_WIRELESS_PAIR",
+                                      code.indexOf("#define PAIR_SAS_INFO"));
   const block = blockStart < 0 ? "" : code.slice(blockStart, code.lastIndexOf("#endif"));
   ok("SOURCE: the wireless-pairing block is found and non-empty", block.length > 500);
 
@@ -406,6 +413,39 @@ function sourceSuite(ok, over) {
   // does die on a tab switch and on sleep, and that no secret ever reaches a
   // Serial.print or the wire.
   // =========================================================================
+  const b1 = fs.readFileSync(path.join(REPO, "firmware", "deckhand_display", "board_e32r28t.h"), "utf8");
+  const b2 = fs.readFileSync(path.join(REPO, "firmware", "deckhand_display", "board_es3c35p.h"), "utf8");
+
+  // ---- a tiny constant resolver, so a SIZE can be asserted against a NAME ----
+  // Buffer sizes here are macros and expressions (PAIR_KEY_BYTES * 2 + 1), and a
+  // checker that transcribed 33 would be the exact defect this repo has paid for
+  // three times. Values come from the sketch's own #defines and board 2's own
+  // const ints; anything that will not resolve returns null and fails loudly
+  // rather than passing as NaN.
+  const consts = {};
+  for (const m of code.matchAll(/#define\s+([A-Za-z_]\w*)\s+(\d+)/g)) consts[m[1]] = Number(m[2]);
+  for (const m of b2.matchAll(/^const int\s+([A-Za-z_]\w*)\s*=\s*(\d+);/gm)) consts[m[1]] = Number(m[2]);
+  const resolve = (expr) => {
+    if (expr == null) return null;
+    const sub = String(expr).replace(/[A-Za-z_]\w*/g, (id) =>
+      consts[id] != null ? String(consts[id]) : "?");
+    if (!/^[0-9+\-*/() ]+$/.test(sub)) return null;
+    try { const v = Function(`"use strict";return (${sub});`)(); return Number.isFinite(v) ? v : null; }
+    catch { return null; }
+  };
+  // Every array declared in the block, by name -> its declared size expression.
+  const arrSize = {};
+  for (const m of block.matchAll(/\b(?:uint8_t|char)\s+([^;()]+);/g)) {
+    for (const part of m[1].split(",")) {
+      // Everything from an initialiser on is not part of the declarator:
+      // `char pairProofWant[33] = "";` is the shape half these fields have, and
+      // a parse that skipped them silently resolved their size to undefined -
+      // which is not a failed assertion, it is an assertion that never ran.
+      const d = part.split("=")[0].trim().match(/^([A-Za-z_]\w*)\s*\[\s*([^\]]+?)\s*\]$/);
+      if (d) arrSize[d[1]] = d[2].trim();
+    }
+  }
+
   const reqBody = fnBody(block, "handlePairReq") || "";
   const okBody = fnBody(block, "handlePairOk") || "";
   const cancelBody = fnBody(block, "handlePairCancel") || "";
@@ -413,9 +453,19 @@ function sourceSuite(ok, over) {
   const closeBody = fnBody(block, "pairClose") || "";
   const hexBody = fnBody(block, "pairHexToBytes") || "";
   const replyBody = fnBody(block, "pairReply") || "";
+  const winBody = fnBody(block, "pairWindowOpen") || "";
+  const commitBody = fnBody(block, "pairCommitIfReady") || "";
+  const confirmBody = fnBody(block, "pairConfirm") || "";
+  const confirmableBody = fnBody(block, "pairConfirmable") || "";
+  const labelBody = fnBody(block, "pairSanitiseLabel") || "";
+  // The storage entry point, named once: every assertion about "what stores a
+  // key" reads this rather than repeating the spelling.
+  const upsertName = "upsertHost";
   ok("WINDOW: all three handlers plus pairWipe/pairClose/pairReply are found",
     [reqBody, okBody, cancelBody, wipeBody, closeBody, hexBody, replyBody]
       .every((b) => b.length > 40));
+  ok("COMMIT: pairConfirmable, pairCommitIfReady and pairConfirm are all found",
+    [commitBody, confirmBody, confirmableBody].every((b) => b.length > 20));
 
   // The length check the security review deferred here: every device-side entry
   // point takes uint8_t[32], which decays to a pointer and can check nothing, so
@@ -424,6 +474,40 @@ function sourceSuite(ok, over) {
     /if\s*\(\s*strlen\([^)]*\)\s*!=[^)]*\)\s*return false;/.test(hexBody));
   ok("WINDOW: it also refuses a non-hex character rather than parsing a prefix",
     /pairHexNibble/.test(hexBody) && /return false/.test(hexBody));
+
+  // THE PARSER ENFORCES *A* LENGTH; THE CALL SITE CHOOSES *WHICH*, AND ONLY THE
+  // CALL SITE KNOWS HOW BIG THE DESTINATION IS. pairHexToBytes(pubHex.c_str(),
+  // 31, pubA) satisfies every assertion above it - the string really is 62
+  // characters and every one of them really is hex - and leaves pubA[31] holding
+  // whatever the stack held before, which then flows into the derivation. So the
+  // requested length is asserted against the DECLARED SIZE of the buffer it
+  // writes into, both resolved rather than transcribed.
+  const hexCalls = [...block.matchAll(
+    /pairHexToBytes\s*\(\s*[^,]+,\s*([^,]+),\s*([A-Za-z_]\w*)\s*\)/g)];
+  ok("WINDOW: pairHexToBytes is actually called", hexCalls.length >= 1);
+  const badLen = [];
+  for (const c of hexCalls) {
+    const want = resolve(c[1]);
+    const have = resolve(arrSize[c[2]]);
+    if (want == null || have == null || want !== have)
+      badLen.push(`${c[2]}: asks ${c[1].trim()} into [${arrSize[c[2]]}]`);
+  }
+  ok(`WINDOW: every pairHexToBytes call asks for exactly its destination's size ${badLen.length ? "[" + badLen.join(", ") + "]" : ""}`,
+    badLen.length === 0);
+  ok("WINDOW: the peer PUBLIC KEY is parsed as 32 bytes",
+    hexCalls.some((c) => resolve(c[1]) === 32 && /pub/i.test(c[2])));
+
+  // The same rule on the other fixed-length thing off the radio: the proof is
+  // compared over its whole 32 hex characters - its buffer's size less the NUL -
+  // and the length refused before the compare is that same number, so the two
+  // cannot drift apart.
+  const ctCall = /pairCtEq\s*\(\s*[^,]+,\s*(pair[A-Za-z0-9_]*)\s*,\s*([0-9A-Za-z_]+)\s*\)/.exec(okBody);
+  const lenCheck = /\.length\(\)\s*!=\s*(\d+)/.exec(okBody);
+  ok("WINDOW: the proof compare covers its whole buffer less the terminator",
+    ctCall != null && resolve(ctCall[2]) != null &&
+    resolve(ctCall[2]) === resolve(arrSize[ctCall[1]]) - 1);
+  ok("WINDOW: the length refused before that compare is the same number",
+    ctCall != null && lenCheck != null && Number(lenCheck[1]) === resolve(ctCall[2]));
 
   // Order, not mere presence: a validation that runs after the derivation has
   // already spent the attacker's bytes.
@@ -440,7 +524,7 @@ function sourceSuite(ok, over) {
   ok("WINDOW: a FULL pairing store is refused before any key material exists",
     before(reqBody, "pairHasRoomFor", "esp_fill_random") && /"full"/.test(reqBody));
   ok("WINDOW: the store is re-checked at COMMIT too, so upsertHost can never recycle a slot",
-    /pairHasRoomFor/.test(okBody) && /"full"/.test(okBody));
+    /pairHasRoomFor/.test(commitBody) && /"full"/.test(commitBody));
   ok("WINDOW: the label is sanitised rather than stored as it arrived",
     /pairSanitiseLabel/.test(reqBody));
   ok("WINDOW: a second PAIRREQ wipes the pending exchange before storing a new one",
@@ -448,6 +532,102 @@ function sourceSuite(ok, over) {
 
   // The one comparison in this whole task that a timing attack can reach.
   ok("WINDOW: PAIROK compares the proof with pairCtEq", /pairCtEq\s*\(/.test(okBody));
+
+  // =========================================================================
+  // THE COMMIT GATE - the single most important assertion in this feature.
+  //
+  // The first design committed on a valid proof ALONE, and that was broken:
+  // proof = HMAC(key, "deckhand-pairok/1") where key derives from the ECDH
+  // shared secret and nothing else, so ANY peer that completes the exchange can
+  // compute it WITHOUT EVER SEEING THE DISPLAYED CODE. A racing attacker
+  // answers the window the instant the user taps PAIR NEW MAC and is stored in
+  // milliseconds; the code was decorative from the device's point of view.
+  //
+  // What holds the whole design up now is that BOTH a valid proof AND a CONFIRM
+  // on the glass are required, in either order - so that is what is asserted,
+  // by PARSING the guard's operands rather than by matching a spelling.
+  // =========================================================================
+  const gate = /if\s*\(\s*!\s*([A-Za-z_]\w*)\s*\|\|\s*!\s*([A-Za-z_]\w*)\s*\)\s*return\s*;/.exec(commitBody);
+  const gateOperands = gate ? [gate[1], gate[2]].sort().join(" + ") : "(no guard found)";
+  ok(`COMMIT: the store is gated on BOTH the proof and the on-glass confirm [${gateOperands}]`,
+    gateOperands === "pairConfirmed + pairProofOk");
+  ok("COMMIT: that gate runs BEFORE anything is stored",
+    gate != null && commitBody.indexOf(upsertName) > 0 &&
+    commitBody.indexOf(gate[0]) < commitBody.indexOf(upsertName));
+  ok("COMMIT: a valid proof alone stores nothing and answers no PAIRDONE",
+    !new RegExp(`\\b${upsertName}\\s*\\(`).test(okBody) && !/PAIRDONE/.test(okBody) &&
+    /pairProofOk\s*=\s*true/.test(okBody));
+  const stores = (block.match(new RegExp(`(^|[^\\w])${upsertName}\\s*\\(`, "g")) || []).length;
+  const storesInCommit = (commitBody.match(new RegExp(`(^|[^\\w])${upsertName}\\s*\\(`, "g")) || []).length;
+  ok("COMMIT: pairCommitIfReady is the ONLY thing in the pairing block that stores a key",
+    stores === 1 && storesInCommit === 1);
+  ok("COMMIT: both halves lead to the commit, so whichever lands second is the one that stores",
+    /pairCommitIfReady\s*\(\s*\)/.test(okBody) && /pairCommitIfReady\s*\(\s*\)/.test(confirmBody));
+
+  // pairConfirm() must be inert with nothing pending: there is nothing to
+  // confirm before a PAIRREQ has arrived and a code is on the screen, and a flag
+  // set early is a flag still set when the NEXT peer's request lands.
+  ok("COMMIT: pairConfirm refuses before it sets the flag when nothing is pending",
+    /if\s*\(\s*!\s*pairConfirmable\s*\(\s*\)\s*\)\s*\{[^}]*return;[^}]*\}/.test(confirmBody) &&
+    confirmBody.indexOf("pairConfirmable") < confirmBody.indexOf("pairConfirmed = true"));
+  // ONE predicate, read by the commit path and (in task 3) by the button's draw
+  // site and its hit test. This codebase's classic defect is a control drawn
+  // under one condition and hit-tested under another, so a second spelling of
+  // the condition is the thing to forbid - not merely to avoid.
+  ok("COMMIT: 'is there anything to confirm' is ONE predicate, not two that could disagree",
+    /pairWindowOpen\s*\(\s*\)\s*&&\s*pairPending/.test(confirmableBody) &&
+    ![confirmBody, commitBody].some((b) => /pairPending|pairWindowOpen/.test(b)));
+
+  // Both commit halves must die with the exchange they belonged to, or a confirm
+  // aimed at one peer commits the next one's key. PARSED from the declarations,
+  // like the char/uint8_t fields below, so a flag added later is covered.
+  const pairFlags = [];
+  for (const m of block.matchAll(/^\s*bool\s+(pair[A-Za-z0-9_]*)\s*=/gm))
+    if (!pairFlags.includes(m[1])) pairFlags.push(m[1]);
+  ok(`COMMIT: the exchange's flags are found [${pairFlags.join(", ")}]`, pairFlags.length >= 3);
+  for (const f of pairFlags)
+    ok(`COMMIT: pairWipe clears ${f}`, new RegExp(`${f}\\s*=\\s*false`).test(wipeBody));
+
+  // The derived key's temporary String was `upsertHost(id, String(pairKeyHex),
+  // label)` - a heap copy of the 128-bit key dropped at the end of the
+  // statement, and free() does not clear. Named, then wiped while the pointer is
+  // still ours.
+  const keyStr = /String\s+([A-Za-z_]\w*)\s*\(\s*pairKeyHex\s*\)/.exec(commitBody);
+  ok("COMMIT: the key's String copy is named rather than a temporary", keyStr != null);
+  ok("COMMIT: and it is zeroized before it goes out of scope and is freed",
+    keyStr != null &&
+    new RegExp(`mbedtls_platform_zeroize\\(\\s*\\(void\\*\\)\\s*${keyStr[1]}\\.c_str\\(\\)`).test(commitBody));
+
+  // ---- the audit trail ----
+  // "PROVISION:" is this repo's ONLY marker that a key arrived over the CABLE,
+  // i.e. that a person was holding the device with a USB lead in it. A radio
+  // pairing printing it forges that, in the exact property this feature rests on.
+  const upBody = fnBody(code, upsertName) || "";
+  ok("AUDIT: the wireless commit logs its OWN marker, not the cable's PROVISION:",
+    /pairRadioCommit/.test(upBody) && /WIRELESS PAIR/.test(upBody) &&
+    upBody.indexOf("WIRELESS PAIR") < upBody.indexOf("PROVISION:"));
+  ok("AUDIT: that marker is behind BOARD_HAS_WIRELESS_PAIR, so board 1's arm is unchanged",
+    /#if BOARD_HAS_WIRELESS_PAIR[\s\S]*WIRELESS PAIR[\s\S]*#endif[\s\S]*PROVISION:/.test(upBody));
+  ok("AUDIT: the radio path is what raises the flag, around the store itself",
+    /pairRadioCommit\s*=\s*true/.test(commitBody) && /pairRadioCommit\s*=\s*false/.test(commitBody) &&
+    commitBody.indexOf("pairRadioCommit = true") < commitBody.indexOf(upsertName));
+
+  // ---- two smaller rules over attacker-supplied text ----
+  // The hostId becomes an NVS key and findHost() compares it with strcmp, while
+  // pairHostIdOk accepts A-F as well as a-f: without normalising, C532AB01 and
+  // c532ab01 are two of the four slots for one Mac.
+  ok("WINDOW: the hostId is normalised to lowercase before it is used as a key",
+    /\.toLowerCase\s*\(\s*\)/.test(reqBody) &&
+    before(reqBody, "pairHostIdOk", "toLowerCase") &&
+    before(reqBody, "toLowerCase", "pairHasRoomFor"));
+  // The label writer's terminator: `w + 1 < outSize` is correct and is one
+  // character from `w < outSize`, which puts the NUL one past the end.
+  ok("WINDOW: the label writer reserves the terminator's byte by name",
+    /\bcap\s*=\s*outSize\s*-\s*1\b/.test(labelBody) && /w\s*<\s*cap\b/.test(labelBody) &&
+    !/w\s*(\+\s*\d+\s*)?<\s*outSize\b/.test(labelBody));
+  ok("WINDOW: ... refuses a zero-sized buffer, which is what makes outSize - 1 safe",
+    /outSize\s*==\s*0\s*\)\s*return/.test(labelBody));
+  ok("WINDOW: ... and always NUL-terminates", /out\[w\]\s*=\s*0;/.test(labelBody));
 
   // Refusing with a LOGGED, NAMED reason: from the Mac, "not in pairing mode"
   // and "not there" look identical, which is the rule POWERPROBE's refusal
@@ -473,14 +653,25 @@ function sourceSuite(ok, over) {
     /pairWipe\s*\(\s*\)/.test(closeBody) && /pairWindowUntil\s*=\s*0/.test(closeBody));
   ok("WINDOW: pairClose names the reason in the log",
     /Serial\.printf/.test(closeBody) && /why/.test(closeBody));
-  ok("WINDOW: the deadline is compared as a SIGNED difference, so millis() wrap is safe",
-    /\(long\)\s*\(\s*millis\(\)\s*-\s*pairWindowUntil\s*\)/.test(block));
+  // BOUND TO pairWindowOpen'S OWN BODY, not to the file. The old assertion ran
+  // the regex over the whole block, and pairTick() carries a copy of the same
+  // expression - so REPLACING pairWindowOpen's body with `return true;`, i.e.
+  // deleting the entire presence guarantee this feature rests on, passed every
+  // assertion here. Same shape as the "pairCtEq is defined but never called"
+  // hole one section up, and the same fix: bind the claim to the function that
+  // has to make it.
+  ok("WINDOW: pairWindowOpen itself tests the deadline, as a SIGNED difference",
+    /\(long\)\s*\(\s*millis\(\)\s*-\s*pairWindowUntil\s*\)\s*<\s*0/.test(winBody) &&
+    /pairWindowUntil\s*!=\s*0/.test(winBody));
+  ok("WINDOW: pairTick's own timeout uses the same signed comparison",
+    /\(long\)\s*\(\s*millis\(\)\s*-\s*pairWindowUntil\s*\)/.test(fnBody(block, "pairTick") || ""));
 
   // The trailing address every device->host line already uses, so the OTHER
   // paired Mac drops these instead of logging a failure it had no part in.
   ok("WINDOW: pairReply appends the trailing to=<hostId> address",
     /\bto=%s/.test(replyBody) && /snprintf/.test(replyBody));
-  ok("WINDOW: PAIRDONE goes out addressed", /"PAIRDONE %s"/.test(okBody) && /pairReply/.test(okBody));
+  ok("WINDOW: PAIRDONE goes out addressed",
+    /"PAIRDONE %s"/.test(commitBody) && /pairReply/.test(commitBody));
   ok("WINDOW: every PAIRFAIL goes out addressed through the same helper",
     /"PAIRFAIL %s"/.test(fnBody(block, "pairFail") || "") &&
     /pairReply/.test(fnBody(block, "pairFail") || ""));
@@ -519,8 +710,6 @@ function sourceSuite(ok, over) {
     /#if\s+BOARD_HAS_WIRELESS_PAIR/.test(code));
 
   // Board 1 must gain the flag and nothing else - the flag alone emits no code.
-  const b1 = fs.readFileSync(path.join(REPO, "firmware", "deckhand_display", "board_e32r28t.h"), "utf8");
-  const b2 = fs.readFileSync(path.join(REPO, "firmware", "deckhand_display", "board_es3c35p.h"), "utf8");
   ok("SOURCE: board 1 declares BOARD_HAS_WIRELESS_PAIR 0",
     /^#define BOARD_HAS_WIRELESS_PAIR\s+0\b/m.test(b1));
   ok("SOURCE: board 2 declares BOARD_HAS_WIRELESS_PAIR 1",
@@ -678,6 +867,46 @@ function selftest() {
       { power: realPower.replace('  pairClose("screen blanked");\n', "") }],
     ["deep sleep no longer closes the window",
       { power: realPower.replace('  pairClose("powering off");\n', "") }],
+
+    // ---- the fix round: the commit gate, and the rules around it ----
+    // THIS IS THE ONE THAT MATTERS. The shipped design committed on a valid
+    // proof alone, which any peer completing the ECDH can produce without ever
+    // having seen the code - so deleting the confirm half of the gate IS the
+    // flaw, and it has to fail by name rather than by something noticing later.
+    ["the commit runs on a valid proof ALONE (the flaw this redesign exists for)",
+      P("  if (!pairProofOk || !pairConfirmed) return;", "  if (!pairProofOk) return;")],
+    ["PAIROK stores the key itself the moment the proof verifies",
+      P("  pairProofOk = true;",
+        "  pairProofOk = true;\n  upsertHost(pairHostId, String(pairKeyHex), pairLabel);")],
+    ["pairConfirm sets the confirm flag with no request pending",
+      P('  if (!pairConfirmable()) {\n    Serial.println("PAIR: CONFIRM ignored - no request is pending");\n    return;\n  }\n', "")],
+    ["pairWipe stops clearing the confirm flag, so a tap outlives its own exchange",
+      P("  pairConfirmed = false;\n", "")],
+    // The reviewer's own measurement: replacing this body with `return true;`
+    // deletes the entire presence guarantee and passed all 70 assertions,
+    // because pairTick carries a copy of the same expression.
+    ["pairWindowOpen's body becomes `return true;` (the presence guarantee, deleted)",
+      P("  return pairWindowUntil != 0 && (long) (millis() - pairWindowUntil) < 0;",
+        "  return true;")],
+    ["the hex parser's CALL SITE asks for 31 bytes into a 32-byte buffer",
+      P("pairHexToBytes(pubHex.c_str(), 32, pubA)", "pairHexToBytes(pubHex.c_str(), 31, pubA)")],
+    ["the proof compare's length is one short of the 32 hex characters",
+      P("pairCtEq(got.c_str(), pairProofWant, 32)", "pairCtEq(got.c_str(), pairProofWant, 31)")],
+    ["the label writer stops reserving the terminator's byte",
+      P("&& w < cap; p++", "&& w < outSize; p++")],
+    ["the hostId is stored as it arrived, so C532AB01 and c532ab01 take two slots",
+      P("  id.toLowerCase();\n", "")],
+    ["the derived key's String copy goes back to being an unwiped temporary",
+      P([
+        "  String secret(pairKeyHex);",
+        "  pairRadioCommit = true;",
+        "  upsertHost(id, secret, label);",
+        "  pairRadioCommit = false;",
+        "  mbedtls_platform_zeroize((void*) secret.c_str(), secret.length());",
+      ].join("\n"), "  upsertHost(id, String(pairKeyHex), label);")],
+    ["a radio pairing logs PROVISION:, forging the cable's own audit marker",
+      P('Serial.printf("WIRELESS PAIR: pairing stored for %s (%s), slot %d of %d"',
+        'Serial.printf("PROVISION: pairing stored for %s (%s), slot %d of %d"')],
   ];
 
   let caught = 0;
