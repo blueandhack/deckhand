@@ -712,11 +712,11 @@ parse every cap out of the hook, the host and the firmware rather than transcrib
 that moves fails by name instead of taking the numbers with it:
 
 ```
-node host/wire-bytes-check.mjs               # 255 assertions: every device-bound cap is exact in BYTES,
+node host/wire-bytes-check.mjs               # 305 assertions: every device-bound cap is exact in BYTES,
                                              #   the hook's inline toAscii matches host/to-ascii.mjs over
                                              #   71,738 strings, and the saturated tick line is measured
                                              #   against feedChar's guard (incl. the still-over tripwire)
-node host/wire-bytes-check.mjs --selftest    # 19/19 injected faults, each printing WHICH assertion caught it
+node host/wire-bytes-check.mjs --selftest    # 36/36 injected faults, each printing WHICH assertion caught it
 node host/ask-optdescs-check.mjs             # 38 assertions: optDescs is capped in bytes on a codepoint
                                              #   boundary, parallel to options, absent when nothing
                                              #   is described
@@ -1715,7 +1715,11 @@ which took the page to three buttons for a different reason entirely.
   line-oriented and nothing announces when it silently skips a declaration.
 
 **GUARDS, and the one gap this branch created for itself.** `settings-geom-check.mjs` went 990 →
-1686 lines and prints **548 assertions** across both boards; `--selftest` now injects **two** faults
+1700-odd lines and now **PRINTS ITS OWN ASSERTION COUNT**, as do the other two geometry checkers —
+this paragraph used to transcribe "548 assertions" from a checker that printed no total at all, so
+the figure was a hand count of `ok` lines plus the known-shortfall lines, against this file's own
+rule that a checker states its count rather than having it copied into prose (the same rule
+`--pace-check` already follows). Run it for today's number. `--selftest` injects **two** faults
 and exits 0 only when EACH is caught by the assertion that exists for it, matched by message rather
 than counted — with two faults in flight a bare total cannot tell "both caught" from "one caught
 twice". The second injection is `HOME_ROW_H + 1`, the smallest change there is: HOME's rows are
@@ -1737,14 +1741,42 @@ re-derive.) And **the six page ids plus `SET_GROUP_COUNT` were read by no checke
 geometry, which is exactly why they were missed, but load-bearing in the three silent ways above.
 All nine now fail by name at ±1 in both directions.
 
-**COST, MEASURED.** Board 2 **+1,856 bytes of flash and +296 RAM** across the whole branch
-(992,122 / 65,604 → 993,978 / 65,900). **Board 1 is `UNCHANGED` at every commit** —
+**A SIXTH FINDING, FROM THE WHOLE-BRANCH REVIEW, AND IT IS THE ONE CORRECTNESS BUG: A LIVE FIELD
+DREW A CONTROL INTO CHROME THAT DID NOT EXIST.** `renderHostsPage()` walks `i < hostCount` every
+tick and `drawHostsPageStatic()` draws the card, the name and the `x` — but `upsertHost()` repaints
+nothing, so a Mac pairing **while the Pairing group is open** raised `hostCount` between the two.
+The next tick painted a live dot and a state line onto bare page background at
+`p3RowY(hostCount - 1)`, and `handleSettingsTouch` walks the same `hostCount`, so the right end of
+that invisible band raised `CFM_FORGET_HOST`: **a row you cannot see that forgets a Mac when
+tapped.** The count is a cache like every other field on the page now, and a change repaints the
+chrome first. **The class is "a change-only field whose CHROME is count-dependent needs the count
+in its cache"** — the change-only discipline this file is built on assumes the chrome is static,
+and every previous instance of it was. The other two live groups were audited against the same
+rule and are safe by construction: Status draws exactly three cards and HOME exactly
+`SET_GROUP_COUNT` rows, neither derived from anything that can move at runtime.
+
+**AND THE MOCK IS BOUND TO THE HEADER NOW.** `docs/design/settings-redesign/check.mjs` checked the
+PICTURE — ASCII-ness, panel bounds, footer clearance — against a hand-transcribed `K` table nobody
+compared to `board_es3c35p.h`. A committed spec whose numbers can drift while it still reports
+"50/50 passed" is the same class as an assertion that cannot fail, and it is the class this branch
+has now paid for three times. It parses the header through the geometry checkers' own `consts()`
+and asserts all **87** shared constants by name; the four before-picture screens keep the replaced
+page's geometry in a separate `WAS` table that is deliberately unbound, with a rule that every
+entry there must actually DIFFER from what ships, so a live constant cannot be parked in it to
+escape the bind. Proven by injection: `SET_CAP_STEP` 24 → 25 in the header fails 15 assertions by
+name, all the way down the derivation chain.
+
+**COST, MEASURED.** Board 2 **+1,696 bytes of flash and +296 RAM** across the whole branch
+(992,122 / 65,604 → 993,818 / 65,900) — the final fix round gave 160 bytes back, mostly by routing
+all seven group captions through one `drawGroupCaption()` instead of six inline copies of the same
+four lines. **Board 1 is `UNCHANGED` at every commit** —
 `0cc2e77b66fb6947...`, size 1,387,200 — which is the only reason the scoping is what it is: every
 shared-code change is an `#if BOARD_SETTINGS_HOME` around text board 1 never sees.
 
 **WHAT IS NOT VERIFIED, stated plainly. NOTHING IN THIS BRANCH HAS BEEN ON THE GLASS** — no device
 was attached for any of the five tasks. The evidence is the three geometry checkers, the sweep, the
-committed pixel-accurate mock (`docs/design/settings-redesign/`, `node check.mjs` = 50 checks), and
+committed pixel-accurate mock (`docs/design/settings-redesign/`, `node check.mjs`, which now also
+binds every constant it shares with the board header), and
 board 1's baseline; all of it is arithmetic and bitmaps, which is the right instrument for layout
 and the wrong one for colour. **`SCREENSHOT` could not settle colour here even with a device
 attached**, because on board 2 it reads the shadow framebuffer (see the verification trap under Two
@@ -1914,21 +1946,34 @@ silently erased.
 
 #### Outstanding board-2 items, found by writing this documentation
 
-None of these is fixed, and none is a port regression — they are gaps between what board 2 does and
-what the rules on this page already require. Recorded here rather than in a scratch file because a
-known gap nobody wrote down is indistinguishable from a bug nobody found.
+These are gaps between what board 2 does and what the rules on this page already require, not port
+regressions. Recorded here rather than in a scratch file because a known gap nobody wrote down is
+indistinguishable from a bug nobody found — and **an entry that has been FIXED is corrected in
+place rather than deleted**, because the only thing worse than an unrecorded gap is a list of
+"outstanding" items a reader cannot trust to be outstanding.
 
-- **TWO strings promise a touch wake board 2 does not have.** `settings.ino:333`'s hint reads
-  `"power off = deep sleep, touch to wake"` and the POWER OFF confirm dialog at `:444` reads
-  `"deep sleep - touch the screen to wake"`. On board 2 the only way back is RESET. The two farewell
-  screens are already correct — they share the `WAKE_HINT` macro in `power.ino`, which is
-  `#if BOARD_HAS_TOUCH_SLEEP_WAKE`-conditional for exactly this reason — so the mechanism exists and
-  these two sites simply never adopted it. **The dialog one is the worse of the two**, because a
-  confirm dialog's entire documented job in this repo is to state the consequence, and here it
-  states the wrong one. Not fixed in this pass: `WAKE_HINT` is `"touch screen to wake"` while these
-  are `"touch to wake"` / `"touch the screen to wake"`, so routing them through it changes board 1's
-  rodata and breaks the byte-identity this port holds. It is a two-line fix on a board-1-inclusive
-  branch.
+- **RESOLVED, AND THE ENTRY IS KEPT AS A CORRECTION RATHER THAN DELETED: the two strings that
+  promised a touch wake board 2 does not have.** This bullet described `settings.ino`'s POWER OFF
+  hint and its confirm dialog as both saying "touch to wake", and said the fix was blocked because
+  routing them through `WAKE_HINT` would move board 1's rodata. **Both have been
+  `#if BOARD_HAS_TOUCH_SLEEP_WAKE`-conditional since before the settings-redesign branch** — the
+  resolution was not `WAKE_HINT` at all but a second `drawConfirm`/`uiHint` call under the same
+  flag, which changes board 1's binary by nothing because board 1 compiles the arm it always had.
+  The entry stood as "not fixed" long after it was, which is worse than a gap nobody wrote down: a
+  reader consults this list to know what still needs doing, and a stale item spends someone's time
+  proving it is stale. **The general form is the one this branch's `BOARD_HAS_MIC` paragraph
+  already names — a comment is not parsed, so nothing can catch prose that has stopped being true;
+  the only defence is reconciling the list whenever the code it describes moves.**
+- **THE SAME CLASS, FOUND ON THE THIRD DIALOG AND FIXED HERE.** `CFM_RECAL`'s note read
+  `"5 taps; current setup kept if it fails"` on both boards, and on board 2 `runCalibration()` is a
+  stub — the touch controller is inside the ST77922 and factory-aligned, `BOARD_TOUCH_NEEDS_CAL` is
+  0 — so there is no 5-tap run and no previous mapping to keep: **both halves of the sentence were
+  false, in a confirm dialog, whose entire documented job in this repo is stating the consequence.**
+  It is now board-conditional the way the POWER OFF note beside it already was, board 1's arm
+  character-identical. **The CALIBRATE TOUCH button itself is deliberately still there.** By this
+  file's own "never offer a control that cannot work" rule it arguably should not be — that is a
+  real open question, listed here rather than settled — but the mock the user approved carries the
+  button, so it is their call and not a fix to make in passing.
 
 **TWO SHARED-CODE BUGS WERE FIXED DELIBERATELY, and both are the same lesson in different
 clothes.** Board 1's binary moved for each, which is why the byte-identity check is now
