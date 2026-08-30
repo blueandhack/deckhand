@@ -1771,7 +1771,7 @@ const int P3_ROW_NAME_DY = 10, P3_ROW_SUB_DY = 30;
 // one pixel left of CARD_X + PAD and ends at 39, against text at 30 + 18 = 48.
 const int P3_ROW_DOT_R   = 4;
 const int P3_ROW_TEXT_DX = 18;
-const int P3_X_W         = 40;   // "forget" hit zone at the right edge (>= a fingertip)
+const int P3_X_W         = 46;   // "forget" hit zone at the right edge (>= TAP_MIN, this board's fingertip floor)
 // The state line's padded width, and its cache. "connected, 9999s ago" is the
 // widest the row can draw - the age is capped at 9999s for exactly that reason -
 // and 20 * 8 = 160px from x=48 ends at 208, clear of the "x" zone which starts at

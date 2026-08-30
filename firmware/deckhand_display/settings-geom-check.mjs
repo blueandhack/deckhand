@@ -150,7 +150,7 @@ const ST_HOST_RIGHT = ["up 99h 59m", "no Macs", "2 Macs"];
 // one drawn when no hostLinks[] slot matches at all - there is no persisted
 // lastSeen on this device, so a Mac that has not been here THIS BOOT cannot be
 // dated and the row says so rather than inventing an age.
-const P3_SUBS = ["connected, 9999s ago", "last seen 999m ago", "not seen since boot"];
+const P3_SUBS = ["connected, 9999s ago", "last seen 999m ago", "last seen 59s ago", "not seen since boot"];
 // uiHint centres on the PANEL, not on the card, so these two are measured against
 // the panel width the way page 2's hints are.
 const SET_HINTS = ["AUTO = light 07:00 to 19:00", "beeps when a session needs input"];
@@ -719,7 +719,7 @@ for (const b of [1, 2]) {
     chk(pairEnd < contentBottom, `Pairing: ${MAX_HOSTS} Macs end ${pairEnd}, inside the region (${contentBottom})`);
     chk(c.P3_ROW_STEP >= c.P3_ROW_H, `Pairing: rows do not overlap (step ${c.P3_ROW_STEP} >= height ${c.P3_ROW_H})`);
     chk(c.P3_ROW_H >= c.TAP_MIN, `a pairing row is a touch target: ${c.P3_ROW_H} >= TAP_MIN ${c.TAP_MIN}`);
-    chk(c.P3_X_W >= 40, `the "forget" x zone is ${c.P3_X_W}px wide`);
+    chk(c.P3_X_W >= c.TAP_MIN, `the "forget" x zone (${c.P3_X_W}) clears TAP_MIN (${c.TAP_MIN})`);
     // THE ROW'S OWN STACK. The name is a plain drawString (tlBox); the state line
     // goes through drawIfChanged (fieldBox, a row taller at each end).
     {

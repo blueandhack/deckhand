@@ -915,6 +915,11 @@ void renderHostsPage() {
       if (live) {
         if (secs > 9999) secs = 9999;      // capped so the padded width cannot grow
         snprintf(buf, sizeof(buf), "connected, %lus ago", secs);
+      } else if (secs < 60) {
+        // Under a minute idle still reads in SECONDS, the same unit the live rows
+        // use - "last seen 0m ago" beside a row ticking in seconds reads as a
+        // stopped clock rather than as "just now".
+        snprintf(buf, sizeof(buf), "last seen %lus ago", secs);
       } else {
         unsigned long mins = secs / 60;
         if (mins > 999) mins = 999;
