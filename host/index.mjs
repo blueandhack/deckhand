@@ -416,8 +416,27 @@ const isValidDeviceName = (n) => typeof n === "string" && VALID_DEVICE_NAME.test
 // not have it, and fall back to the device we believe is selected. That's safe:
 // if the guess is wrong the HMAC simply fails and the answer is rejected.
 function deviceNameFor(via) {
+  // A PAIRING LINK HAS NO PAIRED DEVICE, BY CONSTRUCTION. It is opened to
+  // create a key, so until PAIRDONE there is none - and falling through to the
+  // usb/selected branch would attribute an ANSWER or PROMPT arriving there to
+  // whichever Mac-side pairing happened to be current. It fails CLOSED either
+  // way (the HMAC is checked against that other device's key, which this peer
+  // does not have), but the refusal would then name the wrong subject, and a
+  // log line that misnames its subject is the class this repo keeps paying
+  // for. "" means "no paired device", which is exactly true here.
+  if (via === "pair") return "";
   if (via === "ble") return bleDeviceName;
   return usbDeviceName || selectedDevice;
+}
+
+// How a refusal names where the line came from. The pairing link is named as
+// such rather than left to read as an unknown ble/usb device, because those are
+// different facts: one is a device we could not identify, the other is a link
+// that cannot have an identity yet.
+function senderDescription(via, from) {
+  if (via === "pair")
+    return "over the PAIRING link, which is unauthenticated by construction (no key exists until PAIRDONE)";
+  return `via ${via}${from ? ` from ${from}` : " (unknown device)"}`;
 }
 
 async function loadPairing() {
@@ -2346,8 +2365,8 @@ async function handleVoiceAnswer(parts, via) {
     // Loud on purpose: "text does not match the signed hash" is the tamper case
     // and must not look like an ordinary rejection.
     console.error(
-      `Voice answer REJECTED (${v.why}) for prompt ${pid} via ${via}` +
-        `${from ? ` from ${from}` : " (unknown device)"} - ignoring.`
+      `Voice answer REJECTED (${v.why}) for prompt ${pid} ` +
+        `${senderDescription(via, from)} - ignoring.`
     );
     return;
   }
@@ -2446,8 +2465,8 @@ async function handleTypedPrompt(line, via) {
   const v = verifyPrompt({ secret: dev?.secret, nonce, id12, b64, mac });
   if (!v.ok) {
     console.error(
-      `Prompt REJECTED for session ${id12} via ${via}` +
-        `${from ? ` from ${from}` : " (unknown device)"} - ${v.why}.`
+      `Prompt REJECTED for session ${id12} ` +
+        `${senderDescription(via, from)} - ${v.why}.`
     );
     return;
   }
@@ -2467,8 +2486,8 @@ async function handleTypedAnswer(parts, via) {
     // Loud on purpose: "text is empty, over the cap, or not printable ASCII" and
     // "bad hmac" are a foreign peer, not an ordinary rejection.
     console.error(
-      `Typed answer REJECTED (${v.why}) for prompt ${pid} via ${via}` +
-        `${from ? ` from ${from}` : " (unknown device)"} - ignoring.`
+      `Typed answer REJECTED (${v.why}) for prompt ${pid} ` +
+        `${senderDescription(via, from)} - ignoring.`
     );
     return;
   }
@@ -2723,8 +2742,8 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want));
   if (!good) {
     console.error(
-      `Remote answer REJECTED (bad/missing auth) for prompt ${pid} via ${via}` +
-        `${from ? ` from ${from}` : " (unknown device)"} - ignoring.`
+      `Remote answer REJECTED (bad/missing auth) for prompt ${pid} ` +
+        `${senderDescription(via, from)} - ignoring.`
     );
     return;
   }
