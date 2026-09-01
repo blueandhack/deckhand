@@ -807,12 +807,26 @@ cover_cham  = 1.5;    // that chamfer, when cover_taper is false
 // in the hand - defined walls rather than a sparse lattice under a thin skin -
 // and that is a judgement about the object, not an optimisation.
 cover_shell = true;   // hollow the taper skirt (see above - not a material saving)
-// How far the cavity spreads outward over its full depth. This is the ONE number
-// that has to satisfy two bounds at once, and both are asserted where the
-// plateau is derived: the ceiling must stay inside the printable overhang, and
-// the cavity must stop short of the lip's root. 4.0 over a 5.0 depth is 38.7 deg
-// from vertical - comfortably support-free - and leaves 1.4 mm to the lip.
-cover_shell_run = 4.0;
+// THE CAVITY FOLLOWS THE TAPER, so the skirt is a constant cover_th wall rather
+// than a wedge that merely has a hole in it. It is the outer frustum offset
+// straight down by cover_th - hull(plateau @ cover_th, the frustum's own base @
+// rimI) - which is parallel by construction on all four faces at once, and could
+// not be got by expanding the cavity at some chosen angle: the sides run 35.5
+// deg and the ends 17.4, so one angle cannot be parallel to both.
+//
+// A FIRST ATTEMPT CAPPED THE CEILING AT 45 DEG "so it stays printable", and that
+// was the wrong constraint applied to the wrong surface. 45 deg is the limit for
+// a roof over AIR; this is the inside of a continuous sloping wall, and what
+// matters is how far each layer sits back from the one under it. Measured
+// against a 2 mm wall at 0.2 mm layers: 0.28 mm on the sides, 0.64 at the ends -
+// 14% and 32% unsupported, both comfortably self-supporting. The cap bought
+// nothing and left the skirt 2 mm thick at the corral and 4.5 at the rim.
+//
+// The one real bound is the LIP: a parallel cavity reaching rimI necessarily
+// reaches the plate's own edge, which would undercut the root the snap barbs are
+// anchored in. So it is clipped short of the lip's inner face, and the band
+// outside that clip stays solid - which is exactly where you want material.
+cover_shell_edge = 1.0;   // clip the cavity this far short of the lip's inner face
 plat_gap    = 0.6;    // clearance from the cell to the plateau's inner wall
 plat_wall   = 2.0;    // and the thickness of that wall
 lip_h    = 4.0;     // cover lip depth — shared by cover() and the retainer risers
@@ -930,19 +944,18 @@ plat_y1 = batt_y0 + batt_h + plat_gap + plat_wall;
 plat_cx0 = plat_x0 + plat_wall;  plat_cx1 = plat_x1 - plat_wall;
 plat_cy0 = plat_y0 + plat_wall;  plat_cy1 = plat_y1 - plat_wall;
 
-// The two bounds on cover_shell_run, asserted rather than left to a comment,
-// because both fail SILENTLY: an overhang prints as drooped strings inside a
-// cavity nobody can see, and a cavity that reaches the lip undercuts the very
-// wall the snap barbs root into.
-cover_shell_depth = (cover_rise + cover_th) - cover_th;   // the skirt's own height
-assert(!cover_shell || cover_rise == 0 ||
-       atan(cover_shell_run / cover_shell_depth) <= 45,
-       str("cover_shell_run is too far for the depth it spreads over: ",
-           atan(cover_shell_run / cover_shell_depth), " deg from vertical, over 45. ",
-           "The cavity ceiling would need support."));
-assert(!cover_shell || cover_rise == 0 ||
-       plat_x0 - cover_shell_run > wall + 0.3 + (wall - 1.0) + 0.8,
-       "cover_shell_run reaches the cover's lip - the cavity would undercut the snap barbs' root.");
+// Where the shell cavity is clipped, per axis, so it never undercuts the lip.
+// Derived from the lip's own inner face rather than transcribed, so a change to
+// the lip clearance or its thickness carries through.
+shell_x0 = wall + 0.3 + (wall - 1.0) + cover_shell_edge;
+shell_y0 = wall + 0.55 + (wall - 1.0) + cover_shell_edge;
+// A wall this cavity leaves has to be thick enough to print. The thinnest place
+// is the clip itself, where the shell meets the solid lip band; anywhere inboard
+// of it the wall is cover_th by construction.
+assert(!cover_shell || cover_rise == 0 || cover_shell_edge > 0.4,
+       "cover_shell_edge is under one extrusion width - the shell would break into the lip.");
+assert(!cover_shell || cover_rise == 0 || shell_x0 < plat_x0 && shell_y0 < plat_y0,
+       "the shell cavity is clipped inside the plateau it is supposed to surround.");
 
 // ks_gap - sized to the plateau the leaf folds onto.
 // A 50.8 leaf on a 41.2 plateau cantilevers 4.8 a side over the thin rim, which
@@ -1637,14 +1650,20 @@ module cover(){
     // the plateau's own column is subtracted back out, leaving a ring bounded
     // inboard by the corral's outer face and flaring down and out toward the rim.
     if (cover_rise > 0 && cover_shell) {
-      ex = cover_shell_run;
       difference(){
-        hull(){
-          translate([out_w/2, out_h/2, cover_th])
-            linear_extrude(0.01) rrect_c(pw, ph, 3);
-          translate([out_w/2, out_h/2, rimI - 0.005])
-            linear_extrude(0.01) rrect_c(pw + 2*ex, ph + 2*ex, 3);
+        intersection(){
+          // the frustum offset straight down by cover_th: parallel on all faces
+          hull(){
+            translate([out_w/2, out_h/2, cover_th])
+              linear_extrude(0.01) rrect_c(pw, ph, 3);
+            translate([out_w/2, out_h/2, rimI - 0.005])
+              linear_extrude(0.01) rrect_c(in_w + 0.2, in_h + 0.2, max(oc_r-wall,2));
+          }
+          // ...clipped short of the lip, so the barbs keep something to root in
+          translate([shell_x0, shell_y0, cover_th - 1])
+            cube([out_w - 2*shell_x0, out_h - 2*shell_y0, rimI - cover_th + 2]);
         }
+        // and the plateau's own column put back, or this takes the corral with it
         translate([plat_x0, plat_y0, cover_th - 1]) cube([pw, ph, rimI - cover_th + 2]);
       }
     }
