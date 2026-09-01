@@ -535,6 +535,43 @@ without support); **false** gives a vertical wall with a `cover_cham` chamfer.
 `plat_wall` 2.0, giving 41.2 × 71.2 at x 9.1–50.3, y 18.1–89.3. A different pack moves the
 plateau, the taper angles and the stand together.
 
+### The skirt is hollow, and not to save plastic
+
+Everything else about this cover was already a shell — 2 mm of skin over the cell, 2 mm
+corral walls around it, a 2 mm rim plate. Only the wedge between the corral and the lip
+was a solid lump. `cover_shell` hollows it, taking the cover **21,733 → 19,416 mm³**.
+
+**The obvious justification for that is wrong, and it is worth writing down so nobody
+"optimises" it back.** A solid STL is not a solid print — the slicer fills it with infill.
+Hollowing removes 2,317 mm³ of interior that would only ever have been ~15% filled, while
+creating ~2,800 mm² of new internal surface needing its own perimeters, about 2,200 mm³ of
+plastic:
+
+| infill | hollowing |
+|---|---|
+| 15% | **+1,788 mm³ — heavier** |
+| 50% | +764 mm³ — heavier |
+| 100% | −699 mm³ — lighter |
+
+Break-even is around **76% infill**. Below that the hollow version is heavier *and* slower,
+because perimeters print slower than infill. It is here for the part in the hand — defined
+walls rather than a sparse lattice under a thin skin — which is a judgement about the
+object, not an optimisation.
+
+**The cavity is a RING, and the `difference()` is what makes it one.** A plain hull spans
+the whole plateau footprint at its top and takes the corral walls with it — the first
+attempt did exactly that, and the cell would have been left rattling inside a shell with no
+walls. The plateau's own column is subtracted back out, leaving a ring bounded inboard by
+the corral's outer face. Verified by volume accounting rather than by eye: the cut removes
+**2,317 mm³** against an analytical ring of 2,353 (the difference is corner rounding), where
+eating the corral would have removed ~4,500.
+
+`cover_shell_run` 4.0 is the one number, and it satisfies two bounds that both fail
+silently — an overhang prints as drooped strings inside a cavity nobody can see, and a
+cavity reaching the lip undercuts the root the snap barbs are anchored in. Both are
+asserts: the ceiling comes out **38.7° from vertical** (limit 45, so support-free) and the
+cavity stops **1.4 mm** short of the lip. Each fails by name when pushed past.
+
 ### Four things it forced
 
 **`batt_ribs` is redundant.** The plateau's cavity walls stand 0.6 off the pack on all four
