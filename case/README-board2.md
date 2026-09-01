@@ -570,6 +570,21 @@ plate's own edge, which would undercut the root the snap barbs anchor in — so 
 `cover_shell_edge` short of the lip's inner face, derived from that face rather than
 transcribed. The band outside the clip stays solid, which is exactly where material belongs.
 
+**The buttons need a solid column through the cavity, and this was found by inspection
+rather than by any check.** The skirt cavity runs right through the service end and the
+buttons sit in it. Unguarded, it undercut each guide sleeve: measured on the mesh, the
+plate over the button dropped to **1.39 mm** where `btn_plate` claims 2.97, and **76% of
+the sleeve's base was separated from the plate by a 1.57 mm void** — it stayed attached
+only over the 87° crescent that happened to fall outside the cavity's clip. (Not a floating
+ring, which is what it looked like from a single ray cast; a sleeve hanging off a quarter of
+its base is bad enough.) Each button now keeps a `btn_boss_d` column, wide enough for the
+sleeve plus a wall, and an assert keeps that column off the speaker grille — a merged
+boss-and-grille reads as a rendering artefact rather than a blocked port.
+
+A **connected-component count** over every part is the check that would have caught the
+worse version of this, and it is worth running after any cut that crosses a feature: every
+part comes back as one solid (`buttons` as two, being two parts).
+
 **And the cavity is a ring — the `difference()` is what makes it one.** A plain hull spans
 the whole plateau footprint at its top and takes the corral walls with it; the first attempt
 did exactly that, and the cell would have been left rattling inside a shell with no walls.

@@ -956,6 +956,12 @@ assert(!cover_shell || cover_rise == 0 || cover_shell_edge > 0.4,
        "cover_shell_edge is under one extrusion width - the shell would break into the lip.");
 assert(!cover_shell || cover_rise == 0 || shell_x0 < plat_x0 && shell_y0 < plat_y0,
        "the shell cavity is clipped inside the plateau it is supposed to surround.");
+// The button bosses sit between the grille and the case edge, and the grille is
+// the thing they can run into. Asserted because a merged boss-and-grille is a
+// blocked speaker port, which looks like a rendering artefact rather than a fault.
+assert(!spk_grille || !cover_buttons || cover_rise == 0 ||
+       abs(reset_dx) - btn_boss_d/2 >= spk_grille_w/2 + 0.5,
+       "a button's solid boss overlaps the speaker grille - narrow btn_boss_d or move the grille.");
 
 // ks_gap - sized to the plateau the leaf folds onto.
 // A 50.8 leaf on a 41.2 plateau cantilevers 4.8 a side over the thin rim, which
@@ -996,6 +1002,14 @@ function taper_y(y) =
 btn_pad_d = btn_guide_d + 3.0;
 btn_pad_z = min(cover_rise, taper_y(btn_y + btn_pad_d/2));
 btn_plate = (cover_rise - btn_pad_z) + cover_th;   // material left under the pad
+// AND THE SHELL HAS TO LEAVE THAT MATERIAL THERE. The skirt cavity runs right
+// through the service end, and the button sits in it: unguarded, it cut between
+// the plate and the guide sleeve and left the sleeve a FLOATING RING, printing
+// detached, with the plate over the button down to 1.39 where btn_plate says
+// 2.97. So each button keeps a solid column through the cavity, wide enough to
+// carry the sleeve plus a wall around it.
+btn_sleeve_od = btn_guide_d + 2.0;                 // as drawn at the sleeve itself
+btn_boss_d    = max(btn_pad_d, btn_sleeve_od) + 2.8;
 // speaker centre, at the end OPPOSITE the USB-C edge
 spk_px     = bcx + spk_cx;
 spk_py     = usb_at_top ? by0 + spk_cy : by0 + board_h - spk_cy;
@@ -1665,6 +1679,12 @@ module cover(){
         }
         // and the plateau's own column put back, or this takes the corral with it
         translate([plat_x0, plat_y0, cover_th - 1]) cube([pw, ph, rimI - cover_th + 2]);
+        // ...plus a solid column at each button, or the shell severs the guide
+        // sleeve from the plate it hangs off - see btn_boss_d
+        if (cover_buttons)
+          for (dx = [reset_dx, boot_dx])
+            translate([bcx + dx, btn_y, cover_th - 1])
+              cylinder(d = btn_boss_d, h = rimI - cover_th + 2);
       }
     }
     // A FLAT LANDING FOR EACH BUTTON - see btn_pad_z. Cut square to the board and
