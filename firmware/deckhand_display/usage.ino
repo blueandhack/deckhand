@@ -423,6 +423,19 @@ uint32_t usageRingHash() {
 const long BURN_NOT_YET   = -1;   // cannot state a number yet - keep watching
 const long BURN_EMPTY_NOW = -2;   // the cap is already reached
 
+// CLAMPED for the same reason power.ino's charge estimator clamps at 99 hours:
+// this is a DISPLAY, not a claim. At BURN_MIN_PCT (3) over the full 7-day window
+// the unclamped average reaches ~226 days - "empty ~226d 23h" is 15 characters,
+// filling SIDE_CHARS (15) exactly with zero headroom, the same landmine the
+// resetAt1Cache pre-flight audit found. The ring-slope branch can reach
+// arbitrarily large numbers too, as slope approaches zero. 143940 = 99*1440 +
+// 23*60: the largest value that still decomposes as "99d 23h" - one day short
+// of the day count growing a third digit - so the widest label this clamp can
+// ever produce is "empty ~99d 23h", 14 characters, matching BURN_LABEL_BYTES's
+// own comment. usage-trend-check.py derives its `worst` string from this
+// constant rather than transcribing it, so a re-derivation here moves both.
+const long BURN_MAX_LEFT_MIN = 143940;
+
 long usageBurnMinutes(int pct, long resetMin, long windowMin, bool stale) {
   // A STALE READING DRIVES NO ESTIMATE. The clock has kept running while the
   // number has not, so any slope through it measures the gap rather than the burn.
@@ -438,6 +451,7 @@ long usageBurnMinutes(int pct, long resetMin, long windowMin, bool stale) {
     if (span < BURN_RING_MIN_SPAN || rise < BURN_RING_MIN_RISE || slope <= 0.0f)
       return BURN_NOT_YET;
     long left = (long) (((float) (100 - pct)) / slope + 0.5f);
+    if (left > BURN_MAX_LEFT_MIN) left = BURN_MAX_LEFT_MIN;
     return left < 1 ? BURN_EMPTY_NOW : left;
   }
 
@@ -446,6 +460,7 @@ long usageBurnMinutes(int pct, long resetMin, long windowMin, bool stale) {
   long elapsed = windowMin - resetMin;
   if (elapsed < BURN_MIN_ELAPSED) return BURN_NOT_YET;
   long left = (long) ((((double) (100 - pct)) * (double) elapsed) / (double) pct + 0.5);
+  if (left > BURN_MAX_LEFT_MIN) left = BURN_MAX_LEFT_MIN;
   return left < 1 ? BURN_EMPTY_NOW : left;
 }
 
@@ -476,6 +491,12 @@ void usageBurnLabel(char* out, size_t n, long mins, long resetMin) {
 // still with integer-percent noise would draw a dramatic mountain.
 void drawUsageSpark(uint32_t* cache, int x, int y, int w, int h, uint16_t fg, uint16_t bg) {
   uint32_t sig = usageRingHash();
+  // THE TINT IS PART OF THE SIGNATURE, not just the samples. A stale flip or a
+  // colorForPct band crossing changes fg while the ring content is unchanged, and
+  // the early return below would then keep a bright spark beside a dimmed hero for
+  // up to USAGE_RING_STEP_MIN minutes. Same trap CLAUDE.md records for
+  // drawPaceBar's (pct, tick)-blind key and for battTextColorCache.
+  sig = (sig ^ (uint32_t) fg) * 16777619UL;
   if (sig == *cache) return;          // or this repaints 260x32 every 5s tick
   *cache = sig;
   tft.fillRect(x - 1, y - 1, w + 2, h + 2, bg);
@@ -527,8 +548,8 @@ void renderNowCard() {
                   ? (usage.fiveHourPct >= 90 ? COLOR_BAD : COLOR_WARN) : COLOR_LABEL,
                 COLOR_CARD, TR_DATUM);
 
-  snprintf(buf, sizeof(buf), "%s", usage.fiveHourResetInMin >= 0
-             ? formatResetIn(usage.fiveHourResetInMin).c_str() : "no data yet");
+  // formatResetIn(-1) already returns "no data yet" - no ternary needed.
+  snprintf(buf, sizeof(buf), "%s", formatResetIn(usage.fiveHourResetInMin).c_str());
   padLeftTo(buf, sizeof(buf), SIDE_CHARS);
   drawIfChanged(left1Cache, sizeof(left1Cache), buf, CARD_X + CARD_W - PAD,
                 y0 + NOW_SIDE_Y + NOW_SIDE_STEP, 1, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);

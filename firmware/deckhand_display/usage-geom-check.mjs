@@ -132,10 +132,11 @@ const BODY_H = { 1: UI_FONTS[1][2].cellH, 2: UI_FONTS[2][2].cellH };
 const HERO_H_NATIVE = { 1: UI_FONTS[1][4].cellH, 2: UI_FONTS[2][4].cellH };
 // The NOW card's own bands need T_META (index 1, the label row's cell height -
 // board 2's is 16, distinct from board 1's 13 which happens to equal BODY_H
-// there too) and T_HEAD (index 3, the settings-style heading face) - parsed
-// the identical way BODY_H/HERO_H_NATIVE are, never transcribed as 13/16/18/24.
+// there too) - parsed the identical way BODY_H/HERO_H_NATIVE are, never
+// transcribed as 13/16. (T_HEAD's cellH is NOT here: no board-2 NOW-card field
+// draws at T_HEAD, and an unread derivation is one more thing to keep true for
+// nothing - Task 8 can add it back when its 24px number actually needs it.)
 const META_H = { 1: UI_FONTS[1][1].cellH, 2: UI_FONTS[2][1].cellH };  // T_META
-const HEAD_H = { 1: UI_FONTS[1][3].cellH, 2: UI_FONTS[2][3].cellH };  // T_HEAD
 
 // LOGO_SIZE is a #define rather than a const int, so it is read from the art
 // header the same way settings-geom-check.mjs reads KB_MAX_BYTES out of the host -
@@ -611,22 +612,69 @@ for (const b of [1, 2]) {
         + `- got ${got}`);
     }
 
-    // EVERY change-only cache must hold its own padded string plus its NUL.
-    // drawIfChanged compares only cacheSize bytes, so a short cache stops
-    // noticing changes past that point and the field freezes - silently. The
-    // USAGE tab's caches were the only ones in this repo with no such
-    // assertion, until a pre-flight audit found resetAt1Cache filled EXACTLY
-    // by the pad width the first draft of this task specified (13, not 10).
-    for (const [cache, padW, what] of [
-      ["right1Cache",   12, "NOW meta left, tokens"],
-      ["resetAt1Cache", 10, "NOW meta right, spark caption / staleness"],
-      ["left1Cache",    c.SIDE_CHARS, "NOW side line 2, reset countdown"],
-      ["burn1Cache",    c.SIDE_CHARS, "NOW side line 1, burn verdict"],
+    // THE SPARK'S CACHE KEY MUST FOLD IN THE TINT, not just usageRingHash()'s
+    // samples. A stale flip or a colorForPct band crossing changes fg while the
+    // ring content is unchanged, and a signature blind to that would keep a
+    // bright spark beside a dimmed hero for up to USAGE_RING_STEP_MIN minutes -
+    // the same trap CLAUDE.md records for drawPaceBar's (pct, tick)-blind key
+    // and for battTextColorCache. Scoped to the text between the hash call and
+    // the cache check, so this cannot be satisfied by `fg` merely appearing
+    // somewhere else in the function (the signature, or a later drawFastHLine).
+    const spark = fnBody(stripComments("usage.ino"), "void drawUsageSpark(", "usage.ino");
+    const hashAt = spark.indexOf("usageRingHash()");
+    chk(hashAt >= 0, "drawUsageSpark calls usageRingHash()");
+    const guardAt = spark.indexOf("if (sig == *cache)", hashAt);
+    chk(hashAt >= 0 && guardAt > hashAt,
+        "drawUsageSpark checks the signature against *cache after computing it");
+    if (hashAt >= 0 && guardAt > hashAt) {
+      const between = spark.slice(hashAt, guardAt);
+      chk(/\bfg\b/.test(between),
+          "drawUsageSpark's cache key mixes fg (the tint) in between usageRingHash() "
+        + "and the cache check");
+    }
+
+    // THE SPARK'S COLUMN WIDTH HAS A FLOOR. drawUsageSpark's cw = w / SLOTS is an
+    // integer divide with no guard - past ~130 slots the caps go zero-width and
+    // every fillRect no-ops silently, degrading to a bare baseline with nothing
+    // reporting it. At today's 31 slots this has 6px of margin (8 - 2).
+    const sparkW = c.CARD_W - 2 * c.PAD;
+    const sparkCw = Math.floor(sparkW / c.USAGE_RING_SLOTS);
+    chk(sparkCw >= 2,
+        `spark column ${sparkCw}px (${sparkW}px / ${c.USAGE_RING_SLOTS} slots) is >= 2px`);
+
+    // EVERY change-only cache must hold its own padded string plus its NUL, with
+    // headroom rather than an exact fit - "a buffer exactly as long as its
+    // string is this repo's oldest silent bug". drawIfChanged compares only
+    // cacheSize bytes, so a short cache stops noticing changes past that point
+    // and the field freezes - silently. The pad widths are PARSED out of
+    // renderNowCard's own pad-then-drawIfChanged call pairs, not transcribed: a
+    // transcribed width only checks the checker's OWN belief about the source,
+    // and a pre-flight audit found exactly that - reverting the real pad width
+    // left this loop green while resetAt1Cache was filled exactly.
+    const padCalls = [...body.matchAll(
+      /pad(?:Left)?To\(buf,\s*sizeof\(buf\),\s*([^)]+)\)\s*;[\s\S]{0,400}?drawIfChanged\(\s*(\w+)/g)];
+    const pads = {};
+    for (const m of padCalls) pads[m[2]] = drawArg(c, m[1]);
+    chk(Object.keys(pads).length > 0,
+        "renderNowCard's pad-then-drawIfChanged parse found at least one cache "
+      + "(an empty result must fail loudly, not pass vacuously)");
+    for (const [cache, what] of [
+      ["right1Cache",   "NOW meta left, tokens"],
+      ["resetAt1Cache", "NOW meta right, spark caption / staleness"],
+      ["left1Cache",    "NOW side line 2, reset countdown"],
+      ["burn1Cache",    "NOW side line 1, burn verdict"],
     ]) {
+      chk(pads[cache] !== undefined,
+          `renderNowCard's pad-then-drawIfChanged parse found a pad width for ${cache}`);
       chk(CACHE[cache] !== undefined, `${cache} is declared where cacheSizes() can parse it`);
-      chk(CACHE[cache] >= padW + 1,
-          `${cache}[${CACHE[cache]}] holds its ${padW}-char padded string + NUL `
-        + `(${what}) - ${CACHE[cache] - padW - 1} bytes spare`);
+      if (pads[cache] === undefined || CACHE[cache] === undefined) continue;
+      // Strict > , not >=: a cache filled EXACTLY (headroom 0) is not an
+      // overflow today, but it silently truncates the moment the field's
+      // widest string grows by one character - which is precisely the
+      // pre-flight audit's finding. >= would pass that case; only > catches it.
+      chk(CACHE[cache] > pads[cache] + 1,
+          `${cache}[${CACHE[cache]}] holds its ${pads[cache]}-char padded string + NUL `
+        + `(${what}) with ${CACHE[cache] - pads[cache] - 1} bytes of real headroom`);
     }
   }
 }

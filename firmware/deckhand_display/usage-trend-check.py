@@ -12,11 +12,98 @@ HDR = (D / "board_es3c35p.h").read_text()
 INO = (D / "usage.ino").read_text()
 
 def const(name, src=HDR):
-    m = re.search(r"const\s+(?:int|long|unsigned long|float)\s+" + name + r"\s*=\s*([^;]+);", src)
-    if not m:
-        sys.exit(f"FAIL: could not parse {name} out of the firmware - "
-                 f"the checker's parse is broken, or the constant was renamed")
-    return m.group(1).strip()
+    # SCANS EVERY const DECLARATION STATEMENT, not just one built around `name` -
+    # a single-name regex (`const int NAME\s*=\s*([^;]+);`) cannot see past the
+    # first comma, so on a multi-declarator line ("const int CARD_X = 12,
+    # CARD_W = 296;") it silently returned "12, CARD_W = 296" for CARD_X and
+    # nothing at all for CARD_W - proven by running it. Splitting the whole
+    # declarator list on commas is what fixes both.
+    for m in re.finditer(
+            r"const\s+(?:int|long|unsigned long|float)\s+([A-Za-z_0-9 ,=\-+*/()]+);", src):
+        for part in m.group(1).split(","):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            if k.strip() == name:
+                return v.strip()
+    sys.exit(f"FAIL: could not parse {name} out of the firmware - "
+             f"the checker's parse is broken, or the constant was renamed")
+
+def eval_const_expr(expr, src=HDR):
+    """A tiny recursive-descent evaluator - numbers, identifiers (resolved via
+    const_int, recursively), +, -, *, /, parens, unary minus, C's truncating
+    division - mirroring evalInt() in geom-common.mjs. A second, independent
+    implementation rather than a shared import: this checker is deliberately a
+    Python-only verification of the same source the JS geometry checkers read,
+    and a shared parser would make the two not-independent. Used so a
+    constant's own DERIVATION (SIDE_CHARS's `(CARD_X + CARD_W - PAD - SIDE_X0)
+    / TEXT_ADV`) can be read out of the source instead of only a bare literal
+    or a bare alias, which is all const_int() handled before this."""
+    pos = [0]
+    def ws():
+        while pos[0] < len(expr) and expr[pos[0]] == " ":
+            pos[0] += 1
+    def peek():
+        ws()
+        return expr[pos[0]] if pos[0] < len(expr) else ""
+    def primary():
+        ws()
+        if pos[0] < len(expr) and expr[pos[0]] == "(":
+            pos[0] += 1
+            v = add()
+            ws()
+            if pos[0] >= len(expr) or expr[pos[0]] != ")":
+                raise ValueError(f"expected ) in {expr!r}")
+            pos[0] += 1
+            return v
+        if pos[0] < len(expr) and expr[pos[0]] == "-":
+            pos[0] += 1
+            return -primary()
+        if pos[0] < len(expr) and expr[pos[0]] == "+":
+            pos[0] += 1
+            return primary()
+        m = re.match(r"\d+", expr[pos[0]:])
+        if m:
+            pos[0] += len(m.group(0))
+            return int(m.group(0))
+        m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", expr[pos[0]:])
+        if m:
+            pos[0] += len(m.group(0))
+            return const_int(m.group(0), src)
+        raise ValueError(f"not a number/identifier at {expr[pos[0]:]!r} in {expr!r}")
+    def mul():
+        v = primary()
+        while True:
+            c = peek()
+            if c == "*":
+                pos[0] += 1
+                v *= primary()
+            elif c == "/":
+                pos[0] += 1
+                d = primary()
+                if d == 0:
+                    raise ValueError(f"divide by zero in {expr!r}")
+                q = abs(v) // abs(d)         # C truncates toward zero, // floors
+                v = q if (v < 0) == (d < 0) else -q
+            else:
+                return v
+    def add():
+        v = mul()
+        while True:
+            c = peek()
+            if c == "+":
+                pos[0] += 1
+                v += mul()
+            elif c == "-":
+                pos[0] += 1
+                v -= mul()
+            else:
+                return v
+    v = add()
+    ws()
+    if pos[0] != len(expr):
+        raise ValueError(f"trailing {expr[pos[0]:]!r} in {expr!r}")
+    return v
 
 def const_int(name, src=HDR):
     v = const(name, src)
@@ -28,7 +115,14 @@ def const_int(name, src=HDR):
         return int(v)
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", v):
         return const_int(v, src)
-    sys.exit(f"FAIL: {name} is `{v}`, which this checker cannot evaluate as an int")
+    # Anything else is a genuine arithmetic expression - SIDE_CHARS is exactly
+    # this shape. eval_const_expr() raises ValueError on anything it cannot
+    # parse (a construct this grammar does not have), which is treated the
+    # same as the two simpler cases failing: a loud exit, not a silent 0.
+    try:
+        return eval_const_expr(v, src)
+    except ValueError as e:
+        sys.exit(f"FAIL: {name} is `{v}`, which this checker cannot evaluate as an int ({e})")
 
 SLOTS    = const_int("USAGE_RING_SLOTS")
 STEP_MIN = const_int("USAGE_RING_STEP_MIN")
@@ -139,8 +233,27 @@ for lit in lits:
         f"every character of {lit!r} is inside Spleen's 0x20..0x7E")
 
 # ---- the label fits the lane it is drawn in --------------------------------
-SIDE_CHARS = 15   # (LANE_X1 - SIDE_X0) / TEXT_ADV, asserted in usage-geom-check.mjs
-worst = "empty ~99d 23h"
+# PARSED, not transcribed: a stale 15 here would stay silently correct only by
+# coincidence. Proven: with CARD_HERO_W widened to 200 the real SIDE_CHARS
+# becomes 6 while a transcribed 15 here would keep reporting the label as
+# fitting - the mirror image of the defect this task exists to fix, where a
+# 15-character label drawn TR from the unchanged right edge runs leftward
+# through the hero's own box.
+SIDE_CHARS = const_int("SIDE_CHARS")
+# worst is DERIVED from the clamp usageBurnMinutes() applies
+# (BURN_MAX_LEFT_MIN), not transcribed as a literal string - so a re-derivation
+# of the clamp (a units change, a bigger ceiling) moves `worst` with it instead
+# of leaving a stale string for the lane assertion below to trust.
+BURN_MAX_LEFT_MIN = const_int("BURN_MAX_LEFT_MIN", INO)
+def burn_label_urgent(mins):
+    """Mirrors usageBurnLabel()'s widest "empty ~..." branch only - the case
+    that actually sets the side lane's character budget."""
+    if mins >= 1440: return f"empty ~{mins // 1440}d {(mins // 60) % 24}h"
+    if mins >= 60:   return f"empty ~{mins // 60}h {mins % 60}m"
+    return f"empty ~{mins}m"
+worst = burn_label_urgent(BURN_MAX_LEFT_MIN)
+chk(worst == "empty ~99d 23h",
+    f"BURN_MAX_LEFT_MIN ({BURN_MAX_LEFT_MIN}m) still decomposes as \"99d 23h\" (got {worst!r})")
 chk(len(worst) <= SIDE_CHARS,
     f"the widest burn label ({worst!r}, {len(worst)}) fits the {SIDE_CHARS}-char side lane")
 chk(LABEL_BYTES > len(worst),
@@ -253,12 +366,14 @@ def burn_minutes(pct, reset_min, window_min, stale, ring):
         if span < RING_MIN_SPAN or rise < RING_RISE or slope <= 0.0:
             return BURN_NOT_YET
         left = int((100 - pct) / slope + 0.5)
+        left = min(left, BURN_MAX_LEFT_MIN)
         return BURN_EMPTY_NOW if left < 1 else left
     else:
         elapsed = window_min - reset_min
         if elapsed < MIN_ELAP:
             return BURN_NOT_YET
         left = int((100 - pct) * elapsed / pct + 0.5)
+        left = min(left, BURN_MAX_LEFT_MIN)
         return BURN_EMPTY_NOW if left < 1 else left
 
 # ---- item 1: least squares over an exact linear series gives the exact slope
@@ -403,6 +518,31 @@ chk(burn_minutes(MAX_PCT + 1, 0, 300, False, None) == BURN_EMPTY_NOW and
     "mirror 10: BURN_EMPTY_NOW and BURN_NOT_YET are distinguishable - a caller "
     "checking `< 0` alone would show 'empty now' where it meant 'cannot say yet'")
 
+# ---- item 11: the long-window estimate is CLAMPED, not left to grow into a
+# day count the side lane cannot hold. At BURN_MIN_PCT over the full 7-day
+# window the unclamped average is ~226 days.
+uncrampled = (100 - MIN_PCT) * 10080 / MIN_PCT / 1440
+avg_clamped = burn_minutes(MIN_PCT, 0, 10080, False, None)
+chk(avg_clamped == BURN_MAX_LEFT_MIN,
+    f"mirror 11a: an average-branch estimate that would reach ~{uncrampled:.0f}d "
+    f"clamps to BURN_MAX_LEFT_MIN ({BURN_MAX_LEFT_MIN}m = 99d 23h), got {avg_clamped}")
+# The ring-slope branch can reach arbitrarily large numbers too, as slope
+# approaches (but does not reach) zero - a valid, positive, tiny slope, built
+# from a real integer-percentage staircase (rise EXACTLY BURN_RING_MIN_RISE,
+# so the "rise < RING_RISE" gate is cleared and not tripped) spread over a
+# synthetic ~13.9-day span (not a realistic OAuth-poll cadence, just large
+# enough that (100-pct)/slope clears BURN_MAX_LEFT_MIN before the clamp, and
+# still safely inside the ~49.7-day millis() wrap this repo documents).
+r14 = Ring()
+STEP_LARGE_MS = 40_000_000
+for i in range(SLOTS):
+    pct = 40 + (i * RING_RISE) // (SLOTS - 1)
+    r14.sample(0, pct, i * STEP_LARGE_MS)
+ring_clamped = burn_minutes(41, 0, RING_MAX, False, r14)
+chk(ring_clamped == BURN_MAX_LEFT_MIN,
+    f"mirror 11b: a ring-slope estimate from a near-zero positive slope also "
+    f"clamps to BURN_MAX_LEFT_MIN, got {ring_clamped}")
+
 # ---- the precision fix: a series whose sample times are NOT whole-minute
 # multiples. usage.ino:389 used to divide in the unsigned-long domain BEFORE
 # casting to double, truncating every x to a whole minute before the regression
@@ -493,6 +633,21 @@ chk(reset_calls_in_sample == 2,
     f"structural 5: usageRingReset() is called from both reset paths inside "
     f"usageRingSample() (found {reset_calls_in_sample} call sites, want 2: the "
     f"staleness edge and the drop)")
+
+# 6. usageBurnMinutes() CLAMPS its estimate in BOTH branches against
+# BURN_MAX_LEFT_MIN - not merely in the mirror above, which would keep passing
+# even if the real clamp were deleted. Counted by the GUARD (`if (left >
+# BURN_MAX_LEFT_MIN)`), one per branch, NOT by raw token mentions: a single
+# `if (left > BURN_MAX_LEFT_MIN) left = BURN_MAX_LEFT_MIN;` statement names
+# the constant TWICE on its own, which is exactly what let a first version of
+# this assertion pass with only ONE branch actually clamped - caught by
+# running the intended fault (deleting the ring-slope branch's clamp) and
+# finding it did not fail.
+clamp_sites = len(re.findall(r"if\s*\(\s*left\s*>\s*BURN_MAX_LEFT_MIN\s*\)", body3))
+chk(clamp_sites == 2,
+    f"structural 6: usageBurnMinutes() clamps against BURN_MAX_LEFT_MIN in "
+    f"both the ring-slope and the average branch (found {clamp_sites} `if "
+    f"(left > BURN_MAX_LEFT_MIN)` guard(s), want exactly 2)")
 
 STRUCTURAL_COUNT = n - MIRROR_COUNT
 
