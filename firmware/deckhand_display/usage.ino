@@ -386,7 +386,11 @@ bool usageRingSlope(float* slopeOut, int* riseOut, long* spanMinOut) {
   double sx = 0, sy = 0, sxx = 0, sxy = 0;
   for (int i = 0; i < usageRingCount; i++) {
     int idx = (oldest + i) % USAGE_RING_SLOTS;
-    double x = (double) ((usageRingAt[idx] - usageRingAt[oldest]) / 60000UL);
+    // Cast THEN divide, as battPctPerHourX10 does. Dividing in the unsigned-long
+    // domain first truncates every x to a whole minute before the regression sees
+    // it - self-consistent, but it quietly throws away precision the fit is there
+    // to use, and a mirror written against it would enshrine the truncation.
+    double x = ((double) (usageRingAt[idx] - usageRingAt[oldest])) / 60000.0;
     double y = (double) usageRingPct[idx];
     sx += x; sy += y; sxx += x * x; sxy += x * y;
   }
@@ -411,6 +415,58 @@ uint32_t usageRingHash() {
     h = (h ^ usageRingPct[idx]) * 16777619UL;
   }
   return h;
+}
+
+// Negative returns are NAMED, the same convention the charge estimator's
+// BATT_CHG_NOT_YET / BATT_CHG_TOPPING use: a bare -1 at a call site says nothing
+// about which of two very different refusals happened.
+const long BURN_NOT_YET   = -1;   // cannot state a number yet - keep watching
+const long BURN_EMPTY_NOW = -2;   // the cap is already reached
+
+long usageBurnMinutes(int pct, long resetMin, long windowMin, bool stale) {
+  // A STALE READING DRIVES NO ESTIMATE. The clock has kept running while the
+  // number has not, so any slope through it measures the gap rather than the burn.
+  if (stale || pct < 0 || resetMin < 0 || windowMin <= 0) return BURN_NOT_YET;
+  if (pct > BURN_MAX_PCT) return BURN_EMPTY_NOW;
+  if (pct < BURN_MIN_PCT) return BURN_NOT_YET;
+
+  if (windowMin <= BURN_RING_MAX_WIN) {
+    // SHORT WINDOW: the ring slope. It sees a burst in the last ten minutes,
+    // which an average over the whole window cannot.
+    float slope; int rise; long span;
+    if (!usageRingSlope(&slope, &rise, &span)) return BURN_NOT_YET;
+    if (span < BURN_RING_MIN_SPAN || rise < BURN_RING_MIN_RISE || slope <= 0.0f)
+      return BURN_NOT_YET;
+    long left = (long) (((float) (100 - pct)) / slope + 0.5f);
+    return left < 1 ? BURN_EMPTY_NOW : left;
+  }
+
+  // LONG WINDOW: the average. The ring is blind here - a 7-day window moves 1.49
+  // points across a 150-minute span, inside the integer-percent rounding.
+  long elapsed = windowMin - resetMin;
+  if (elapsed < BURN_MIN_ELAPSED) return BURN_NOT_YET;
+  long left = (long) ((((double) (100 - pct)) * (double) elapsed) / (double) pct + 0.5);
+  return left < 1 ? BURN_EMPTY_NOW : left;
+}
+
+// True when the cap is reached BEFORE the window resets - which is the only case
+// worth colouring, because it is the only one that costs the user anything.
+bool usageBurnUrgent(long mins, long resetMin) {
+  return mins > 0 && resetMin >= 0 && mins < resetMin;
+}
+
+void usageBurnLabel(char* out, size_t n, long mins, long resetMin) {
+  if (mins == BURN_EMPTY_NOW) { snprintf(out, n, "empty now"); return; }
+  if (mins < 0)               { snprintf(out, n, "burn --");   return; }
+  if (!usageBurnUrgent(mins, resetMin)) { snprintf(out, n, "resets first"); return; }
+  // "~" MEANS ABOUT. Never the greater-or-equal glyph, which is reserved for
+  // the charge estimator's deliberate floor - the two notations make different
+  // promises, and a reader who cannot tell them apart has been told the cap
+  // arrives later than it will. Written with "<" throughout, so that glyph
+  // does not appear anywhere in this function, comments included.
+  if (mins < 60)        snprintf(out, n, "empty ~%ldm", mins);
+  else if (mins < 1440) snprintf(out, n, "empty ~%ldh %ldm", mins / 60, mins % 60);
+  else                  snprintf(out, n, "empty ~%ldd %ldh", mins / 1440, (mins / 60) % 24);
 }
 #endif  // BOARD_USAGE_V2
 

@@ -564,6 +564,42 @@ const int USAGE_RING_DROP_PCT = 3;
 // than replaced - naming it there would risk that board's binary for nothing.
 const int QUOTA_STALE_SEC = 900;
 
+// ---------- The burn gate: ONE budget, every term derived from it ----------
+// T = elapsed * (100 - pct) / pct, so half a point of quantization on an integer
+// percentage costs a RELATIVE error of 50 / (pct * (100 - pct)) - independent of
+// elapsed. This budget is what picks the admissible range.
+const int BURN_ERR_BUDGET_PCT = 20;
+// The smallest and largest integer pct inside that budget: 3 costs 17.2% and 2
+// costs 25.5%. Above BURN_MAX_PCT the answer is "empty now" rather than a number.
+const int BURN_MIN_PCT = 3;
+const int BURN_MAX_PCT = 97;
+// ONE OAUTH POLL INTERVAL, and it is a data-VALIDITY bound rather than a taste
+// call: below one interval the percentage the device holds may have been read
+// before the window boundary, so it can belong to the previous window.
+// Quantization on elapsed itself (resetInMin is integer minutes) asks only for
+// 0.5 / e <= 20%, i.e. 2.5 min, so the poll interval is the binding half.
+//
+// IT PROVABLY NEVER FIRES, and saying so is better than leaving it open to the
+// charge of being a magic number: the average estimator only runs above
+// BURN_RING_MAX_WIN, where reaching BURN_MIN_PCT already takes 0.03 * 2880 = 86
+// min - and 302 min on the real 7-day window, so the week's burn appears about 5
+// hours after a reset, gated by the percent floor every time.
+const int BURN_MIN_ELAPSED = USAGE_RING_STEP_MIN;
+// The ring must have run this long and moved this far before it speaks.
+const int BURN_RING_MIN_SPAN = 30;
+const int BURN_RING_MIN_RISE = 3;
+// ABOVE THIS THE RING IS BLIND AND THE AVERAGE TAKES OVER. Movement across the
+// ring is 100 * span / window, so it falls to BURN_RING_MIN_RISE at
+// 100 * 150 / 3 = 5000 min = 3.47 days; 2880 (2 days) sits inside that with
+// margin. Measured: the 5-hour window moves 50.00 points across the ring and the
+// 7-day window 1.49 - and the percentage is an INTEGER, so the week's movement is
+// inside the rounding. The average is accurate there precisely because elapsed is
+// huge (0.8% at 61% with 2400 min elapsed).
+const int BURN_RING_MAX_WIN = 2880;
+// "empty ~99d 23h" is 14 characters; 16 leaves room for it and its NUL. A buffer
+// exactly as long as its string is this repo's oldest silent bug.
+const int BURN_LABEL_BYTES = 16;
+
 // ---------- Inside the WEEK card ----------
 // Secondary, so a T_HEAD (12x24) number rather than a 64px hero. That contrast
 // IS the hierarchy. Border owns +142..+143; ceiling +141, last clear +138.
