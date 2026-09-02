@@ -459,14 +459,12 @@ void usageBurnLabel(char* out, size_t n, long mins, long resetMin) {
   if (mins == BURN_EMPTY_NOW) { snprintf(out, n, "empty now"); return; }
   if (mins < 0)               { snprintf(out, n, "burn --");   return; }
   if (!usageBurnUrgent(mins, resetMin)) { snprintf(out, n, "resets first"); return; }
-  // "~" MEANS ABOUT. Never the greater-or-equal glyph, which is reserved for
-  // the charge estimator's deliberate floor - the two notations make different
-  // promises, and a reader who cannot tell them apart has been told the cap
-  // arrives later than it will. Written with "<" throughout, so that glyph
-  // does not appear anywhere in this function, comments included.
-  if (mins < 60)        snprintf(out, n, "empty ~%ldm", mins);
-  else if (mins < 1440) snprintf(out, n, "empty ~%ldh %ldm", mins / 60, mins % 60);
-  else                  snprintf(out, n, "empty ~%ldd %ldh", mins / 1440, (mins / 60) % 24);
+  // "~" MEANS ABOUT. Never ">=", which is reserved for the charge estimator's
+  // deliberate floor - the two notations make different promises, and a reader who
+  // cannot tell them apart has been told the cap arrives later than it will.
+  if (mins >= 1440)    snprintf(out, n, "empty ~%ldd %ldh", mins / 1440, (mins / 60) % 24);
+  else if (mins >= 60) snprintf(out, n, "empty ~%ldh %ldm", mins / 60, mins % 60);
+  else                 snprintf(out, n, "empty ~%ldm", mins);
 }
 #endif  // BOARD_USAGE_V2
 

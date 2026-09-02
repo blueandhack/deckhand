@@ -111,13 +111,25 @@ chk(300 <= RING_MAX < 10080,
 # ">=" is reserved for the charge estimator's deliberate floor; the two make
 # different promises, and a reader who cannot tell them apart has been told the
 # cap will be reached later than it will.
+#
+# The rule is about the LABEL TEXT a person reads, not about C's >= operator -
+# scanning the raw function body conflates the two and rejects a perfectly
+# ordinary `if (mins >= 1440)` that never puts ">=" on the glass. Scan ONLY the
+# string literals, with comments stripped first: the function's own comment
+# explaining this rule quotes ">=" in prose ("Never \">=\", which is..."), and a
+# literal regex over uncommented text cannot tell that quoted prose apart from a
+# real snprintf() format string.
 label = INO[INO.index("void usageBurnLabel"):]
 label = label[:label.index("\n}")]
-chk("~" in label, "usageBurnLabel writes ~ for an estimate")
-chk(">=" not in label, "usageBurnLabel never writes >=, which is the charge floor's notation")
+label_code = re.sub(r"//[^\n]*", "", label)
+lits = re.findall(r'"((?:[^"\\]|\\.)*)"', label_code)
+bad = [s for s in lits if ">=" in s]
+chk(not bad, f"a label string says >=: {bad}" if bad
+             else "no label string writes >=, which is the charge floor's notation")
+chk(any("~" in s for s in lits), "a label string writes ~ for an estimate")
 chk("empty now" in label and "resets first" in label and "burn --" in label,
     "all three refusal/verdict strings are present")
-for lit in re.findall(r'"([^"]*)"', label):
+for lit in lits:
     chk(all(0x20 <= ord(ch) <= 0x7E for ch in lit),
         f"every character of {lit!r} is inside Spleen's 0x20..0x7E")
 
@@ -457,11 +469,17 @@ chk(re.search(r"if\s*\(\s*windowMin\s*<=\s*BURN_RING_MAX_WIN\s*\)", body3) is no
     "`windowMin <= BURN_RING_MAX_WIN`, not on resetMin or anything else")
 
 # 4. usageBurnLabel writes ~ and NEVER >= - the two notations make different
-# promises and >= is reserved for the charge estimator's floor.
+# promises and >= is reserved for the charge estimator's floor. This is a claim
+# about the label TEXT, so only the string literals are scanned - the function's
+# own `if (mins >= 1440)` comparisons are C, not notation, and a raw-body scan
+# would reject them for a reason that has nothing to do with what a person reads.
 body4 = strip_comments(func_body("void usageBurnLabel(", INO))
-chk("~" in body4, "structural 4a: usageBurnLabel() writes ~ for an estimate")
-chk(">=" not in body4,
-    "structural 4b: usageBurnLabel() never writes >=, reserved for the charge floor")
+lits4 = re.findall(r'"((?:[^"\\]|\\.)*)"', body4)
+chk(any("~" in s for s in lits4), "structural 4a: usageBurnLabel() writes ~ for an estimate")
+bad4 = [s for s in lits4 if ">=" in s]
+chk(not bad4,
+    f"structural 4b: usageBurnLabel() never writes >= in a label string, reserved "
+    f"for the charge floor (found {bad4})")
 
 # 5. usageRingReset() is reached from BOTH reset paths inside usageRingSample -
 # the drop and the staleness edge - counted rather than eyeballed.
