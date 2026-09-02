@@ -224,12 +224,46 @@ for (const b of [1, 2]) {
   console.log(`content area ${c.CONTENT_Y}..${contentBottom} = ${content}px`);
   chk(c.CARD_X + c.CARD_W + c.CARD_X === W, `card spans the width: ${c.CARD_X}+${c.CARD_W}+${c.CARD_X} = ${W}`);
   // column
+  // (a) THE POSITIONS ARE BOUND TO THE GAPS AND HEIGHTS. What this catches is a
+  // HARDCODED position and a DRIFTED gap, on both boards, plus a height change on
+  // board 1 - whose CARD1_Y/CARD2_Y/CODEX_Y are literals (38/146/254). It does NOT
+  // catch a height change on board 2, whose positions are live formulas of CARD_H
+  // that consts() re-evaluates, so both sides of the comparison move together.
+  // Board 2's heights are guarded by the declared-sum assertion below instead.
+  // (`air > 0` alone passed when FOOTER_H moved 18 -> 20 and the real air went
+  // 8 -> 6 - exactly the drift it existed to catch.)
+  const gap = b === 2 ? c.SP_2 : 4;
+  const y1 = c.CONTENT_Y + gap;
+  const y2 = y1 + c.CARD_H + gap;
+  const y3 = y2 + c.CARD_H + gap;
+  chk(c.CARD1_Y === y1, `CARD1_Y ${c.CARD1_Y} == CONTENT_Y + gap (${y1})`);
+  chk(c.CARD2_Y === y2, `CARD2_Y ${c.CARD2_Y} == CARD1_Y + CARD_H + gap (${y2})`);
+  chk(c.CODEX_Y === y3, `CODEX_Y ${c.CODEX_Y} == CARD2_Y + CARD_H + gap (${y3})`);
   const colEnd = c.CODEX_Y + c.CODEX_H;
   const air = contentBottom - colEnd;
-  chk(air > 0, `column ends at ${colEnd}, ${air}px of air above the footer (must be > 0)`);
-  chk(c.CARD1_Y >= c.CONTENT_Y, `card1 starts at ${c.CARD1_Y} >= CONTENT_Y ${c.CONTENT_Y}`);
-  chk(c.CARD2_Y >= c.CARD1_Y + c.CARD_H, `gap card1->card2 = ${c.CARD2_Y - (c.CARD1_Y + c.CARD_H)}`);
-  chk(c.CODEX_Y >= c.CARD2_Y + c.CARD_H, `gap card2->codex = ${c.CODEX_Y - (c.CARD2_Y + c.CARD_H)}`);
+  chk(air > 0, `column ends at ${colEnd}, ${air}px of air (never flush on the footer)`);
+
+  // (b) THE v2 COLUMN SUMS EXACTLY, from the declared heights and gaps - not
+  // from any position, so this one can and must fail on a height change.
+  // Nothing draws this column yet; Task 9 is what moves the card positions
+  // onto it.
+  if (b === 2) {
+    const v2 = [c.SP_2, c.NOW_CARD_H, c.SP_2, c.WEEK_CARD_H, c.SP_2, c.CODEX_H, c.SP_2];
+    const sum = v2.reduce((a, x) => a + x, 0);
+    chk(sum === content,
+        `v2 column ${v2.join(" + ")} = ${sum}, must be exactly ${content} `
+      + `(BOARD_H ${H} - TAB_BAR_H ${c.TAB_BAR_H} - FOOTER_H ${c.FOOTER_H})`);
+  }
+
+  // Board 1's column, summed from its DECLARED terms. Its gaps are literal 4s in
+  // the header rather than named constants, so they are stated here; the HEIGHTS
+  // come from the header, which is what makes this fail on a CARD_H change.
+  if (b === 1) {
+    const v1 = [4, c.CARD_H, 4, c.CARD_H, 4, c.CODEX_H, 4];
+    const sum = v1.reduce((a, x) => a + x, 0);
+    chk(sum === content,
+        `board 1 column ${v1.join(" + ")} = ${sum}, must be exactly ${content}`);
+  }
 
   // --- bands inside a Claude card, as CLEAR boxes ---
   const heroSize = c.CARD_HERO_SIZE;              // board 1 only - undefined on board 2
@@ -497,14 +531,19 @@ for (const b of [1, 2]) {
 // drawSeverityAction's own arguments.
 {
   const row = fnBody(stripComments("usage.ino"), "void renderCodexRow(", "usage.ino");
-  const fmts = [...row.matchAll(/snprintf\(buf,\s*sizeof\(buf\),\s*"([^"]*)"/g)].map(m => m[1]);
-  const right = fmts.filter(f => f.includes("%d%%"));   // the percentage branches
+  // The WHOLE argument list, not the first string literal: C concatenates
+  // adjacent literals, so `"%d%%  %s"  "  %02ld:%02ld"` reads as one format and
+  // a first-literal regex cannot see the half that matters. Balanced to the
+  // closing paren so a nested call in the args does not truncate the match.
+  const calls = [...row.matchAll(/snprintf\(buf,\s*sizeof\(buf\),([\s\S]*?)\);/g)].map(m => m[1]);
+  const right = calls.filter(a => a.includes("%d%%"));
   chk(right.length >= 2,
-      `renderCodexRow's right field has ${right.length} percentage branches to check (expected >= 2)`);
-  const clock = right.filter(f => /%02ld:%02ld/.test(f));
+      `renderCodexRow's right field has ${right.length} percentage branches (expected >= 2)`);
+  const clock = right.filter(a => /%02ld:%02ld/.test(a));
   chk(clock.length === 0,
-      clock.length ? `a right-field branch carries a wall-clock suffix again (${clock[0]}) - that field's `
-                   + `width is what bounds CODEX_LANE_CHARS, so this silently moves the real clear box left`
+      clock.length ? `a right-field branch carries a wall-clock suffix again - that field's width `
+                   + `bounds CODEX_LANE_CHARS, so this silently moves the real clear box left: `
+                   + clock[0].trim().slice(0, 70)
                    : `no right-field branch carries a wall-clock suffix, so the lane derivation holds`);
 }
 

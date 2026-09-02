@@ -442,8 +442,12 @@ const int BAR_H = 12;
 // smooth", which is what a board-1 corner on a 37%-wider card looks like.
 const int RADIUS = R_MD;
 
-// THE COLUMN. Content area = BOARD_H - TAB_BAR_H - FOOTER_H = 480 - 46 - 18 =
-// 416, against board 1's 320 - 34 - 18 = 268. Board 1 spends its 268 as
+// THE COLUMN. Content area = BOARD_H - TAB_BAR_H - FOOTER_H = 480 - 46 - 20 =
+// 414, against board 1's 320 - 34 - 18 = 268. (This comment previously derived
+// 416 with 8px of air below the column; that was written when FOOTER_H was 18,
+// and contentBottom() has been 460 since it became 20. The shipping v1 column
+// really ends at 454 with SIX rows of air, and usage-geom-check.mjs asserted
+// only `air > 0`, so it never said so.) Board 1 spends its 268 as
 // 4 + 104 + 4 + 104 + 4 + 44 = 264 with 4px of air below, every gap squeezed to
 // 4 because the cards could not give any more (its own comment: shrinking them
 // to 98 would clip the reset line).
@@ -456,17 +460,101 @@ const int RADIUS = R_MD;
 // where it belongs, because the content is what the tab is for and there is no
 // more of it to add.
 //
-//   8 + 164 + 8 + 164 + 8 + 56 + 8 = 416  (the last 8 is the air below)
+//   8 + 164 + 8 + 164 + 8 + 56 + 6 = 414  (the last 6 is the air below)
 //
-// so the column runs CONTENT_Y(46)..454 against a contentBottom() of 462.
+// so the column runs CONTENT_Y(46)..454 against a contentBottom() of 460.
 // THE COLUMN MUST NOT END FLUSH ON contentBottom() - board 1 shipped that once
 // (6+104+4+104+4+46 spent all 268) and the Codex row sat against the footer
-// reading as one joined block. 8px of air below, matching the gaps above it.
+// reading as one joined block. 6px of air below, matching the gaps above it.
 const int CARD_H = 164;
 const int CARD1_Y = CONTENT_Y + 8;                 // 54
 const int CARD2_Y = CARD1_Y + CARD_H + 8;          // 226
 const int CODEX_Y = CARD2_Y + CARD_H + 8;          // 398
-const int CODEX_H = 56;                            // ends at 454, 8px clear
+const int CODEX_H = 56;                            // ends at 454, 6px clear
+
+// ---------- USAGE tab v2: NOW / WEEK / CODEX (board 2 only) ----------
+// Nothing reads these constants yet - CARD1_Y/CARD2_Y/CODEX_Y/CARD_H above are
+// UNCHANGED and v1's renderCard still draws 164px cards until Task 9, which is
+// the commit that moves the column onto these numbers and flips
+// renderUsageTab. Declaring the v2 heights and band offsets now is what lets
+// Tasks 5-9 refer to them by name.
+//
+//   8 + 182 + 8 + 144 + 8 + 56 + 8 = 414
+//
+// Uniform 8px gaps (SP_2), and the column must not end flush on contentBottom()
+// - board 1 shipped that once and its Codex row read as one block with the
+// footer.
+const int BOARD_USAGE_V2  = 1;      // see board.h; 0 on board 1, where it emits nothing
+const int NOW_CARD_H      = 182;
+const int WEEK_CARD_H     = 144;
+
+// ---------- Inside the NOW card ----------
+// Bands are CLEARED extents, not glyph ink. The 2px border owns +180..+181, so
+// nothing may end past +179; the last clear ends +174, 5 rows clear.
+//
+//   +0..+1     border
+//   +3..+5     pin bar          CARD_PIN_BAR_Y 3
+//   +6..+21    label / icon     CARD_LABEL_Y 6, T_META 16px
+//   +26..+90   hero box         NOW_HERO_Y 26, CARD_HERO_H 65, CARD_HERO_W 132
+//   +39..+56   side fact 1      T_META, TR at LANE_X1 - the burn verdict
+//   +61..+78   side fact 2      T_META, TR at LANE_X1 - the reset countdown
+//   +95..+114  pace bar clear   NOW_BAR_Y 99, BAR_H 12
+//   +119..+152 spark clear      NOW_SPARK_Y 120, NOW_SPARK_H 32
+//   +157..+174 meta clear       NOW_META_Y 158
+//   +180..+181 border
+const int NOW_HERO_Y   = 26;
+const int NOW_BAR_Y    = 99;
+const int NOW_SPARK_Y  = 120;
+const int NOW_SPARK_H  = 32;
+const int NOW_META_Y   = 158;
+// The two side facts, stacked and right-aligned beside the hero.
+const int NOW_SIDE_Y    = 40;
+const int NOW_SIDE_STEP = 22;
+
+// THE HERO'S OWN CLEAR BOX, and it is the whole density win. drawBigNumber()
+// clears the box it is HANDED, and v1 handed it the full CARD_W - 2*PAD = 260px
+// lane while "100%" at Spleen32x64 inks only 4 * 32 = 128 - so 132px beside
+// every hero was not merely unused, it was ERASED on every repaint. 132 is the
+// glyph plus 4px of slack, the same plus-slack convention CARD_HERO_H (65 for a
+// 64px glyph) already uses.
+const int CARD_HERO_W = 132;
+// LANE_X0 + CARD_HERO_W + 8 = 30 + 132 + 8 = 170, so the side lane is
+// 170..290 = 120px = 15 characters at TEXT_ADV 8. DERIVED, never transcribed.
+// The "+8" is a literal SP_2 rather than the name: SP_1/SP_2 are declared in
+// deckhand_display.ino (line ~676), well AFTER board.h is #included (line 20),
+// so this header cannot reference them - the same reason CARD1_Y a few lines
+// above spells its own gap as a literal "+ 8" instead of "+ SP_2". Verified by
+// trying it: `SP_1` here fails compilation with "was not declared in this
+// scope", twice.
+const int SIDE_X0     = CARD_X + PAD + CARD_HERO_W + 8;
+// The fact lines beside the hero right-align at LANE_X1, so their lane is
+// bounded by the hero's own clear box: (CARD_X + CARD_W - PAD - SIDE_X0) /
+// TEXT_ADV, derived rather than stated so a change to CARD_HERO_W or PAD moves
+// it. The WEEK card reuses this cap even though its own lane is wider (its left
+// neighbour is a 48px T_HEAD number, not the 132px hero) - one cap for one
+// lane, deliberately under-using the roomier case.
+const int SIDE_CHARS = (CARD_X + CARD_W - PAD - SIDE_X0) / TEXT_ADV;
+
+// ---------- Inside the WEEK card ----------
+// Secondary, so a T_HEAD (12x24) number rather than a 64px hero. That contrast
+// IS the hierarchy. Border owns +142..+143; ceiling +141, last clear +138.
+//
+//   +0..+1     border
+//   +3..+5     pin bar
+//   +6..+21    label / icon
+//   +25..+50   number clear     WEEK_NUM_Y 26, T_HEAD 24px
+//   +29..+46   burn line        WEEK_BURN_Y 30, T_META, TR at LANE_X1
+//   +54..+73   ALL bar clear    WEEK_BAR_Y 58
+//   +77..+94   meta clear       WEEK_META_Y 78
+//   +98..+115  Fable line       WEEK_FABLE_Y 99
+//   +119..+138 Fable bar clear  WEEK_FABLE_BAR_Y 123
+//   +142..+143 border
+const int WEEK_NUM_Y       = 26;
+const int WEEK_BURN_Y      = 30;
+const int WEEK_BAR_Y       = 58;
+const int WEEK_META_Y      = 78;
+const int WEEK_FABLE_Y     = 99;
+const int WEEK_FABLE_BAR_Y = 123;
 
 // ---------- USAGE tab: inside a Claude card ----------
 // CHECK CLEAR BOXES, NOT GLYPHS. drawIfChanged() clears

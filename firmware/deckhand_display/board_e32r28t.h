@@ -24,6 +24,10 @@
 #define BOARD_TOUCH_NEEDS_CAL 1
 #define BOARD_SETTINGS_HOME  0   // four pages behind a chevron pager; see settings.ino
 #define BOARD_HAS_WIRELESS_PAIR 0  // PROVISION over USB is the only pairing path here; see board_es3c35p.h
+// The USAGE tab's NOW / WEEK / CODEX layout is board 2 only: it needs a trend
+// ring (~165 bytes of DRAM against board 1's ~26KB of free heap, which the audio
+// path already competes for) and a 64px native hero this board does not have.
+#define BOARD_USAGE_V2 0
 // Deep sleep can be ended by TOUCHING THE GLASS on this board, which is a
 // capability and not a preference: ext0/ext1 wake only from an RTC GPIO, and
 // this panel's PENIRQ happens to be on one (IO36). See BOARD_SLEEP_WAKE_GPIO
