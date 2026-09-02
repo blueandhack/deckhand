@@ -1232,6 +1232,7 @@ node firmware/deckhand_display/usage-geom-check.mjs      # USAGE cards, hero/bar
 node firmware/deckhand_display/sessions-geom-check.mjs   # the row-height ladder, tall/sub/compact gates, detail card, ask option chips
 node firmware/deckhand_display/settings-geom-check.mjs   # settings pages, steppers, keyboard, history reader, confirm-screen line cap
 node firmware/deckhand_display/geom-sweep.mjs            # fault-injection sweep over all three (~110s, see below)
+python3 firmware/deckhand_display/usage-trend-check.py   # the USAGE ring/burn arithmetic these three do NOT bind - see below
 ```
 
 Each takes `--selftest`, which injects a fault and **exits 0 only when that fault IS caught** (exit
@@ -2301,7 +2302,7 @@ USAGE tab is now a **NOW** card (182px, the 5-hour window, a 64px hero), a **WEE
 56px **CODEX** row. The guard is `BOARD_USAGE_V2`, 1 in `board_es3c35p.h` and 0 in
 `board_e32r28t.h`. The normative geometric spec is the committed mock,
 `docs/design/usage-redesign/` (`node check.mjs`, 582 checks, every constant it shares with the
-board header parsed out of it rather than transcribed).
+board header parsed out of it rather than transcribed; `--selftest` perturbs a bound `K` value in memory and requires that bind to fail, run through the real comparison function rather than a second reimplementation of it — it used to silently accept the flag and report the normal clean pass instead).
 
 **THE COLUMN IS 414 ROWS, NOT 416, AND THE HEADER'S OWN COMMENT SAID 416 FOR AS LONG AS THE
 DRIFT EXISTED.** `8 + 182 + 8 + 144 + 8 + 56 + 8 = 414`. The old derivation
@@ -2331,6 +2332,23 @@ step — about six distinct values in half an hour, drawn as a staircase that is
 sampler rather than of the account. At the poll cadence the same 31 slots span **150 minutes**.
 - **31 slots, not 30, and the reason is the CAPTION.** The span is `(n-1) * step`, so 30 slots
   span 145 minutes and a card captioned `LAST 2.5H` over a 145-minute ring overstates it by five.
+- **DECLARED SPEC DEVIATION: the caption is a LITERAL, not computed, and that is recorded here
+  rather than left reading as satisfied.** The design spec says the code "must compute it rather
+  than carry a literal 150, so changing either constant moves the crossover and the caption with
+  it" — `usage.ino`'s `renderNowCard()` writes the bare string `"LAST 2.5H"`, with no runtime
+  formatting deriving `2.5H` from `USAGE_RING_SLOTS`/`USAGE_RING_STEP_MIN`. What actually ships is
+  a PAIR of assertions in `usage-trend-check.py` — `SPAN == 150` and `"LAST 2.5H" in INO` — bound
+  together rather than the string being computed: change either ring constant so `SPAN` stops
+  being 150 and the first assertion fails by name, which is what forces a human to look at the
+  (still-literal) caption rather than the caption silently drifting out of truth. That meets the
+  spec's INTENT — a ring/caption mismatch cannot ship unnoticed — without meeting its letter, and
+  the gap is real: nothing stops a future edit from changing the *caption's own string* to
+  something wrong while leaving both assertions green, which a genuinely computed caption could
+  not do. Recorded as a deliberate, accepted deviation rather than a defect to silently "fix" —
+  fixing it would mean either sprintf'ing the span into the caption at runtime (a cost this 5s-tick
+  UI has so far avoided paying for two static words) or teaching the checker to derive the STRING
+  rather than merely gate it, and neither was judged worth it for a value that has been 150 since
+  Task 5 chose 31 slots specifically to make it so.
 - **`USAGE_RING_DROP_PCT` (3) is DERIVED, not picked.** A large fall means the window turned over
   and a slope across that discontinuity is meaningless — but `mergeUsage()` can swap the source
   Mac at any tick, and the two Macs' readings differ only in AGE, bounded by one poll interval, in
@@ -2448,7 +2466,17 @@ not evidence of anything being emitted.
 MISLEADING FAILURE THAN NOT SUMMING.** Everything Tasks 6, 7 and 8 added was UNREACHABLE when
 those tasks were measured — both card renderers had no callers, so the estimators, both cards, the
 sparkline and their caches were stripped — so their recorded `.bin` size did not move across any
-of the three (one contemporaneous per-task record says +4 for Task 8; the baseline file says +0), and
+of the three (one contemporaneous per-task record says +4 for Task 8; the baseline file says +0 —
+**the cause is now known rather than left as a curiosity**: board 2's `.bin` was byte-size
+**identical, 1023328, across all four consecutive commits**, since Tasks 6–8's code was genuinely
+uncalled and `--gc-sections` stripped every byte of it, so those four images differ only by the
+internal link-order relocation the paragraph above already establishes. The "+4" was never a
+`.bin` measurement at all — it was a `Sketch uses` figure, and a `.bin`-vs-`Sketch uses` offset
+spread of **266–270 bytes** measured across the same commits is a ±4-byte window on its own,
+which is exactly the "+4" — so the two records were never actually in conflict, only reading two
+different quantities as if they were one. This also explains why `fc0f8d1`'s recorded masked hash
+equals `d1ad605`'s: a RETURN to a previously-seen link order, not a stale unreached record — their
+`updated` timestamps differ, so each was genuinely re-measured rather than copied forward) and
 Task 9, which wires the renderers in, absorbs the lot at once (+2256). Tasks 1 and 2 are the
 exception and DO stand alone: shared-code fixes in already-reachable code. **So the only
 meaningful figure is branch-point-to-HEAD**, and a reader who takes the intermediate numbers as a
@@ -2555,7 +2583,7 @@ A per-gap bound is the only instrument that can, and a per-gap bound needs an ex
   slot count fits the lane and there is no geometric bound to violate (the one real bound,
   `w / SLOTS >= 2`, does not trip until 130); the other two measure TIME. `USAGE_RING_DROP_PCT`
   and the seven `BURN_*` constants are read by no layout checker at all, also correctly.
-  **`usage-trend-check.py` binds all of them** — 55 assertions, 47 mirror + 8 structural.
+  **`usage-trend-check.py` binds all of them** — 55 assertions, 47 mirror + 8 structural, and `--selftest` re-runs mirror 4's scenario through the permanent `level_bug` variant, exiting 0 only when the checker's own `reset_calls == 1` assertion fails under it (it used to silently accept the flag and report the normal clean pass instead).
 - **A comment can create a phantom gap.** The sweep decides whether a checker READS a constant
   with a regex over that checker's own text, so naming a constant in a COMMENT reports it as
   read-but-unguarded. Measured: the first draft of the rhythm note above named the pairing panel's
@@ -2588,7 +2616,7 @@ and `"<"` out of a comment as if they were code literals. Untouched neighbours t
   its own arithmetic first appears about five hours after a 7-day reset.
 - **EVERY TOUCH PATH ON THE TAB IS UNEXERCISED**, since the device deliberately has no remote tap.
 - **`spark1Cache = 0` is both its initializer and its bust sentinel**, so a ring signature that
-  hashes to 0 skips exactly one repaint (p ≈ 2⁻¹⁶ per ring state) and self-heals at the next ring
+  hashes to 0 skips exactly one repaint (p ≈ 2⁻³² per ring state) and self-heals at the next ring
   step. Known, measured in probability rather than observed, and not worth changing.
 
 **DEFERRED MINORS, NAMED RATHER THAN FIXED**, so the next reader can trust the list to be
@@ -3146,7 +3174,10 @@ two things `host/index.mjs` cannot get any other way:
     clears from `CARD_HERO_Y` across the full card interior. Board 1's hero starts at `y0+20`, so a
     16px icon (`+6`..`+21`) would be rubbed out by the hero's own erase on every tick the digits
     move — the same clear-box-not-glyphs arithmetic the `+88` stats row documents. Board 2's hero
-    starts at `y0+24`, so 16px (`+6`..`+21`) clears it by **2 rows**. Clearance at the other five,
+    started at `y0+24` (`CARD_HERO_Y`), so 16px (`+6`..`+21`) cleared it by 2 rows — **stale since
+    the USAGE v2 redesign, where `CARD_HERO_Y` is dead on board 2** (read only inside the v1
+    `#if !BOARD_USAGE_V2` `renderCard`) and the live NOW card's hero starts at `y0+26`
+    (`NOW_HERO_Y`), which the icon clears by **4 rows**. Clearance at the other five,
     all re-derived at 16px rather than assumed: `sessions.ino` tall-row tag `+9`..`+24` against a
     pill no higher than `+31` on the shortest tall row (**6 rows**); `settings.ino` Mac rows clear
     `+129`..`+146` and `+153`..`+170`, the icon inside the first (**7 rows** to the next);

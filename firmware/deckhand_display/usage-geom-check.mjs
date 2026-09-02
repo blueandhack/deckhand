@@ -1061,6 +1061,33 @@ for (const b of [1, 2]) {
         + `(got "${args[args.length - 1].trim().slice(0, 50)}")`);
     }
   }
+
+  // 5. The tab's two PRIMARY READINGS must dim too: the hero % (drawBigNumber,
+  // NOW) and the week % (a pctNCache drawIfChanged, WEEK). The drawPaceBar
+  // loop above does not reach either - confirmed by injection: deleting the
+  // stale ternary from EITHER site (usage.ino:565 or :637) left 226
+  // assertions passing and 0 failing, while CLAUDE.md documents dimming
+  // these two specifically so a frozen reading cannot masquerade as live.
+  // Parsed as a property - every drawBigNumber call, and every
+  // drawIfChanged writing a pctNCache - rather than as two remembered line
+  // numbers, so a third primary-reading number added to either renderer
+  // later is covered by construction instead of by someone extending a list.
+  for (const fn of ["void renderNowCard(", "void renderWeekCard("]) {
+    const body = fnBody(src, fn, "usage.ino");
+    const hero = [...body.matchAll(/drawBigNumber\(([\s\S]*?)\)\s*;/g)]
+      .map((m) => ({ what: "drawBigNumber", args: splitArgs(m[1]) }));
+    const pctN = [...body.matchAll(/drawIfChanged\((pct\d+Cache)\s*,([\s\S]*?)\)\s*;/g)]
+      .map((m) => ({ what: `drawIfChanged(${m[1]}...)`, args: splitArgs(m[2]) }));
+    const calls = [...hero, ...pctN];
+    chk(calls.length >= 1,
+        `${fn} has a primary-reading draw call to check (found ${calls.length})`);
+    for (const c of calls) {
+      const fg = c.args[c.args.length - 2];
+      chk(/\bstale\b/.test(fg),
+          `${fn}: ${c.what}'s fg colour argument is stale-aware `
+        + `(got "${(fg || "").trim().slice(0, 50)}")`);
+    }
+  }
 }
 
 // ---- padding helper vs datum, read out of the source -----------------------

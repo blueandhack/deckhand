@@ -350,6 +350,39 @@ class Ring:
         span  = uwrap(self.at[newest] - self.at[oldest]) // 60000
         return slope, rise, span
 
+def run_selftest():
+    """--selftest, same teeth-proving convention as palette-check.mjs: exit 0
+    ONLY when the injected fault IS caught by the checker's own assertion,
+    non-zero if the checker would be blind to it. The fault is the permanent
+    in-mirror `level_bug` variant (Ring.sample's level_bug=True path, added
+    for item 4's inline teeth-proof): a stale-triggered ring reset that fires
+    on every stale TICK instead of once on the EDGE into staleness - the exact
+    regression item 4's `mirror 4` assertion (reset_calls == 1) exists to
+    catch. This reruns that scenario through the injected variant and checks
+    that mirror 4's own condition would now report FAIL, rather than merely
+    trusting the teeth-proof already embedded in the normal run (mirror 4
+    teeth, which proves the MIRROR can tell the two apart, not that this
+    checker's own --selftest flag does)."""
+    print("--selftest: injecting the level_bug variant (reset on every stale "
+          "tick, not on the edge into staleness) into mirror 4's scenario.")
+    r = Ring()
+    for i in range(3):
+        r.sample(0, 50, i * STEP_MS)
+    for i in range(5):
+        r.sample(1000, 50, (3 + i) * STEP_MS, level_bug=True)
+    print(f"  injected: reset_calls={r.reset_calls} (mirror 4 wants exactly 1)")
+    if r.reset_calls != 1:
+        print(f"  mirror 4's `reset_calls == 1` assertion correctly reports FAIL "
+              f"under the injected fault (reset_calls={r.reset_calls}) - selftest PASSES")
+        sys.exit(0)
+    else:
+        print("  mirror 4's `reset_calls == 1` assertion is BLIND to the injected "
+              "fault (still reads 1 under it) - selftest FAILS")
+        sys.exit(1)
+
+if "--selftest" in sys.argv:
+    run_selftest()
+
 def burn_minutes(pct, reset_min, window_min, stale, ring):
     """Mirrors usageBurnMinutes()."""
     if stale or pct < 0 or reset_min < 0 or window_min <= 0:

@@ -194,11 +194,12 @@ void drawCardChrome(int y0, const char* label, const char* tag) {
     // sprite cannot carry. A bar, not an underline: it sits ABOVE the glyph,
     // inside the interior (the 2px border owns y0..y0+1, the label row starts
     // at y0+CARD_LABEL_Y) - below the icon lands inside the hero number's own
-    // clear box at y0+CARD_HERO_Y. THE TIGHTEST SITE FOR THE ICON, on both
-    // boards: it spans CARD_LABEL_Y .. CARD_LABEL_Y + MAC_EMOJI_SIZE - 1, i.e.
-    // +6..+18 against board 1's hero at +20 (1 row clear) and +6..+21 against
-    // board 2's at +24 (2 rows clear). The bar is MAC_EMOJI_SIZE wide so it
-    // tracks the glyph it marks.
+    // clear box. THE TIGHTEST SITE FOR THE ICON, on both boards: it spans
+    // CARD_LABEL_Y .. CARD_LABEL_Y + MAC_EMOJI_SIZE - 1, i.e. +6..+18 against
+    // board 1's hero at +20 (CARD_HERO_Y, 1 row clear) and +6..+21 against
+    // board 2's LIVE hero at +26 (NOW_HERO_Y, not the dead v1 CARD_HERO_Y -
+    // 4 rows clear). The bar is MAC_EMOJI_SIZE wide so it tracks the glyph
+    // it marks.
     //
     // COLOR_LABEL, not COLOR_ACCENT, and that was a real complaint rather than
     // taste: in accent this read as a red-orange stripe over the icon and the
@@ -475,7 +476,18 @@ long usageBurnMinutes(int pct, long resetMin, long windowMin, bool stale) {
     if (!usageRingSlope(&slope, &rise, &span)) return BURN_NOT_YET;
     if (span < BURN_RING_MIN_SPAN || rise < BURN_RING_MIN_RISE || slope <= 0.0f)
       return BURN_NOT_YET;
-    long left = (long) (((float) (100 - pct)) / slope + 0.5f);
+    // CLAMP THE FLOAT BEFORE THE CAST, not after: for slope < ~4.7e-8 %/min
+    // the quotient exceeds LONG_MAX and (long) of an out-of-range float is
+    // undefined behaviour, not a defined saturate. A UB result that happens
+    // to land negative would fall through `left > BURN_MAX_LEFT_MIN` and hit
+    // `left < 1` -> BURN_EMPTY_NOW, i.e. the card would read "empty now" for
+    // a glacial burn - inverted and alarming. Not reachable through the
+    // `rise >= 3` / `span >= 30` gate above with 31 integer-percent samples,
+    // and the Python mirror is arbitrary-precision so it cannot see this by
+    // construction - caught only by reading the cast, not by running it.
+    float leftF = ((float) (100 - pct)) / slope + 0.5f;
+    if (leftF > (float) BURN_MAX_LEFT_MIN) leftF = (float) BURN_MAX_LEFT_MIN;
+    long left = (long) leftF;
     if (left > BURN_MAX_LEFT_MIN) left = BURN_MAX_LEFT_MIN;
     return left < 1 ? BURN_EMPTY_NOW : left;
   }

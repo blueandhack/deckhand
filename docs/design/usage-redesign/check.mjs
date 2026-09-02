@@ -73,7 +73,11 @@ const chk = (c,m) => { n++; if (!c) { fail++; console.log("  FAIL "+m); } };
 // ---- the mock against the header -------------------------------------------
 // consts() is the parser the three geometry checkers use, so this reads the
 // same values they certify rather than a second transcription of the header.
-{
+// Factored into a function (rather than an inline block) so --selftest can
+// call the SAME comparison code after perturbing a bound K value in memory,
+// instead of a second, possibly-diverging reimplementation of the bind.
+const DERIVED = new Set(["contentBottom","CONTENT_ROWS","LANE_X0","LANE_X1","LANE_W"]);
+function runHeaderBind() {
   const H = consts("deckhand_display.ino", consts("board_es3c35p.h"));
   // MAC_EMOJI_SIZE is a #define in an ART HEADER geom-common's consts() does not
   // parse for this file (only DeckhandLogo.h is in its ART_HEADERS list) - read
@@ -85,7 +89,6 @@ const chk = (c,m) => { n++; if (!c) { fail++; console.log("  FAIL "+m); } };
   // way the device would, if it named them), so the DERIVATION is asserted
   // rather than a number - the same treatment settings-redesign/check.mjs
   // gives contentBottom().
-  const DERIVED = new Set(["contentBottom","CONTENT_ROWS","LANE_X0","LANE_X1","LANE_W"]);
   let bound = 0;
   for (const [name,val] of Object.entries(K)) {
     if (DERIVED.has(name)) continue;
@@ -116,7 +119,41 @@ const chk = (c,m) => { n++; if (!c) { fail++; console.log("  FAIL "+m); } };
     if (name in K) chk(WAS[name]!==K[name], `WAS.${name} is ${val}, the same as K.${name} - it records nothing and belongs in K`);
     else chk(!(name in H), `WAS.${name} is still a live constant (header says ${H[name]}) - it belongs in K`);
   }
+  return H;
 }
+
+if (process.argv.includes("--selftest")) {
+  // --selftest, same teeth-proving convention as palette-check.mjs and this
+  // repo's other checkers: exit 0 ONLY when an injected fault IS caught, non-
+  // zero if the bind is blind to it. The fault is a bound K value perturbed
+  // IN MEMORY, run through the real runHeaderBind() above - not a second
+  // reimplementation of the comparison, which could pass or fail independent
+  // of whether the actual bind still works.
+  const probeH = consts("deckhand_display.ino", consts("board_es3c35p.h"));
+  const name = Object.keys(K).find(k => !DERIVED.has(k) && k in probeH);
+  if (!name) {
+    console.log("--selftest: could not find a bound K constant to perturb");
+    process.exit(1);
+  }
+  const before = K[name];
+  K[name] = before + 1;
+  console.log(`--selftest: perturbed K.${name} ${before} -> ${K[name]} in memory `
+             +`(board_es3c35p.h still says ${probeH[name]})`);
+  const failBefore = fail;
+  runHeaderBind();
+  K[name] = before;   // restore before anything else reads K
+  const caught = fail > failBefore;
+  if (caught) {
+    console.log(`  runHeaderBind() correctly failed on the perturbed K.${name} - selftest PASSES`);
+    process.exit(0);
+  } else {
+    console.log(`  runHeaderBind() did NOT fail on the perturbed K.${name} - selftest FAILS `
+               +`(the bind is blind to a live constant drifting from the header)`);
+    process.exit(1);
+  }
+}
+
+runHeaderBind();
 
 // ---- the picture ------------------------------------------------------------
 // Same assertions the in-browser checker makes (runChecks, in usage.js) -
