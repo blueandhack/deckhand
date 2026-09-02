@@ -137,6 +137,11 @@ const HERO_H_NATIVE = { 1: UI_FONTS[1][4].cellH, 2: UI_FONTS[2][4].cellH };
 // draws at T_HEAD, and an unread derivation is one more thing to keep true for
 // nothing - Task 8 can add it back when its 24px number actually needs it.)
 const META_H = { 1: UI_FONTS[1][1].cellH, 2: UI_FONTS[2][1].cellH };  // T_META
+// Index 3 is T_HEAD - the WEEK card's own number, deliberately NOT a hero: 18 on
+// board 1 (Terminus10x18b), 24 on board 2 (Spleen12x24). Parsed the same way as
+// BODY_H/HERO_H_NATIVE/META_H, never transcribed as 18/24 - dropped in Task 7 as
+// an unread derivation, re-added here now the WEEK card's number needs it.
+const HEAD_H = { 1: UI_FONTS[1][3].cellH, 2: UI_FONTS[2][3].cellH };  // T_HEAD
 
 // LOGO_SIZE is a #define rather than a const int, so it is read from the art
 // header the same way settings-geom-check.mjs reads KB_MAX_BYTES out of the host -
@@ -675,6 +680,80 @@ for (const b of [1, 2]) {
       chk(CACHE[cache] > pads[cache] + 1,
           `${cache}[${CACHE[cache]}] holds its ${pads[cache]}-char padded string + NUL `
         + `(${what}) with ${CACHE[cache] - pads[cache] - 1} bytes of real headroom`);
+    }
+
+    // --- the WEEK card (board 2 only): SECONDARY, so a T_HEAD number rather
+    // than a 64px hero - that size contrast against NOW's hero IS the hierarchy
+    // this redesign exists for. Fable moves INTO this card as a real labelled
+    // bar, sharing the 7-day window/tick with the percentage above it.
+    const head = HEAD_H[b];        // parsed T_HEAD cellH: 18 on board 1, 24 on board 2
+    const wb = [
+      ["pin",    c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
+      ["label",  c.CARD_LABEL_Y,   c.CARD_LABEL_Y + meta - 1],
+      // the number and the burn line share one row: union of the two clear boxes
+      ["numrow", Math.min(c.WEEK_NUM_Y - 1, c.WEEK_BURN_Y - 1),
+                 Math.max(c.WEEK_NUM_Y + head, c.WEEK_BURN_Y + meta)],
+      ["allbar", c.WEEK_BAR_Y - 4,   c.WEEK_BAR_Y + c.BAR_H + 3],
+      ["meta",   c.WEEK_META_Y - 1,  c.WEEK_META_Y + meta],
+      ["fable",  c.WEEK_FABLE_Y - 1, c.WEEK_FABLE_Y + meta],
+      ["fbar",   c.WEEK_FABLE_BAR_Y - 4, c.WEEK_FABLE_BAR_Y + c.BAR_H + 3],
+    ];
+    for (let i = 1; i < wb.length; i++)
+      chk(wb[i][1] > wb[i - 1][2],
+          `WEEK band ${wb[i - 1][0]} -> ${wb[i][0]}: gap ${wb[i][1] - wb[i - 1][2] - 1} (must be >= 0)`);
+    const wlast = wb[wb.length - 1][2];
+    chk(wlast <= c.WEEK_CARD_H - 3,
+        `WEEK last clear ends +${wlast}, ceiling +${c.WEEK_CARD_H - 3} `
+      + `(${c.WEEK_CARD_H - 3 - wlast} rows clear)`);
+
+    // THE SECONDARY NUMBER MUST BE SMALLER THAN THE PRIMARY'S. That contrast is
+    // the hierarchy this redesign exists for, so it is asserted rather than left
+    // to whoever next edits a font id.
+    chk(HEAD_H[b] < c.CARD_HERO_H,
+        `WEEK's number (${HEAD_H[b]}px) is smaller than NOW's hero `
+      + `(${c.CARD_HERO_H}px), which is what carries the hierarchy`);
+
+    // The draw site's own font id, PARSED - the static HEAD_H < CARD_HERO_H fact
+    // above says nothing about which font renderWeekCard actually HANDS
+    // drawIfChanged, and a rewrite that quietly drew the number at T_HERO would
+    // leave that fact true while erasing the contrast on the glass. Bound to
+    // font id 3 (T_HEAD) at the pct2Cache call specifically.
+    const wbody = fnBody(stripComments("usage.ino"), "void renderWeekCard(", "usage.ino");
+    const numDraw = wbody.match(/drawIfChanged\(\s*pct2Cache[\s\S]*?\)\s*;/);
+    chk(!!numDraw, "renderWeekCard draws pct2Cache via drawIfChanged");
+    if (numDraw) {
+      const dargs = splitArgs(numDraw[0].slice(numDraw[0].indexOf("(") + 1, numDraw[0].lastIndexOf(")")));
+      chk(dargs[5].trim() === "3",
+          `renderWeekCard's number is drawn with font id ${dargs[5].trim()}, expected 3 (T_HEAD) `
+        + `- T_HERO there would erase the size contrast this card exists for`);
+    }
+
+    // EVERY change-only cache this card writes must hold its own padded string
+    // plus its NUL, with real headroom - the same audit renderNowCard's fields
+    // get above, extended over this card's six fields (four reused from v1's
+    // caches, burn2Cache and fable2Cache new/newly-used here).
+    const wpadCalls = [...wbody.matchAll(
+      /pad(?:Left)?To\(buf,\s*sizeof\(buf\),\s*([^)]+)\)\s*;[\s\S]{0,400}?drawIfChanged\(\s*(\w+)/g)];
+    const wpads = {};
+    for (const m of wpadCalls) wpads[m[2]] = drawArg(c, m[1]);
+    chk(Object.keys(wpads).length > 0,
+        "renderWeekCard's pad-then-drawIfChanged parse found at least one cache "
+      + "(an empty result must fail loudly, not pass vacuously)");
+    for (const [cache, what] of [
+      ["pct2Cache",   "WEEK number"],
+      ["left2Cache",  "WEEK meta left, tokens"],
+      ["right2Cache", "WEEK meta right, reset time / staleness"],
+      ["burn2Cache",  "WEEK burn verdict"],
+      ["fable1Cache", "WEEK Fable label"],
+      ["fable2Cache", "WEEK Fable tokens"],
+    ]) {
+      chk(wpads[cache] !== undefined,
+          `renderWeekCard's pad-then-drawIfChanged parse found a pad width for ${cache}`);
+      chk(CACHE[cache] !== undefined, `${cache} is declared where cacheSizes() can parse it`);
+      if (wpads[cache] === undefined || CACHE[cache] === undefined) continue;
+      chk(CACHE[cache] > wpads[cache] + 1,
+          `${cache}[${CACHE[cache]}] holds its ${wpads[cache]}-char padded string + NUL `
+        + `(${what}) with ${CACHE[cache] - wpads[cache] - 1} bytes of real headroom`);
     }
   }
 }

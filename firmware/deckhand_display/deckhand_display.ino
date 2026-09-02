@@ -867,6 +867,14 @@ char burn1Cache[19] = "";
 // compares it against usageRingHash() directly, so it never goes through
 // drawIfChanged()'s string comparison at all.
 uint32_t spark1Cache = 0;
+// The WEEK card's burn verdict, same SIDE_CHARS(15)+4 convention and same
+// reason as burn1Cache above: a PLAIN LITERAL, because cacheSizes() only
+// parses one [A-Za-z_0-9]+ token per array dimension and "SIDE_CHARS + 4"
+// would leave it unparsed rather than merely unchecked.
+char burn2Cache[19] = "";
+// The WEEK card's Fable bar - drawPaceBar's (pct, tick) cache, the same shape
+// as bar1Cache/bar2Cache/cxBarCache above.
+int fableBarCache = -2;
 #endif
 
 // Footer (persistent across both tabs).

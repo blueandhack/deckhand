@@ -584,6 +584,84 @@ void renderNowCard() {
   drawIfChanged(resetAt1Cache, sizeof(resetAt1Cache), buf, CARD_X + CARD_W - PAD,
                 y0 + NOW_META_Y, 1, 1, stale ? COLOR_BAD : COLOR_LABEL, COLOR_CARD, TR_DATUM);
 }
+
+// The 7-day card, v2: SECONDARY, so a T_HEAD (24px) number rather than a 64px
+// hero - that size contrast against NOW's hero IS the hierarchy this whole
+// redesign exists for. Fable moves INTO this card and gains a real labelled
+// bar: it is the SAME 7-day window rather than a separate thing, and it is the
+// SCARCER cap, which v1 rendered as an 8px crumb in a shared foot row with no
+// bar and no colour.
+void renderWeekCard() {
+  char buf[BURN_LABEL_BYTES + 8];
+  const int y0 = CARD2_Y;
+  const long WIN = 7L * 24 * 60;
+  bool stale = usage.quotaAgeSec > QUOTA_STALE_SEC;
+  uint16_t color = colorForPct(usage.sevenDayPct);
+  drawCardBorder(&border2Cache, CARD_X, y0, CARD_W, WEEK_CARD_H, color);
+
+  // T_HEAD, not T_HERO. The week is background rather than the thing that stops
+  // you working, and the size contrast against NOW's 64px IS the hierarchy.
+  if (usage.sevenDayPct >= 0) snprintf(buf, sizeof(buf), "%d%%", usage.sevenDayPct);
+  else snprintf(buf, sizeof(buf), "--");
+  padTo(buf, sizeof(buf), 4);
+  drawIfChanged(pct2Cache, sizeof(pct2Cache), buf, CARD_X + PAD, y0 + WEEK_NUM_Y,
+                3, 1, stale ? COLOR_LABEL : COLOR_VALUE, COLOR_CARD);
+
+  // THE AVERAGE, NOT THE RING: at a 7-day window the ring moves 1.49 points
+  // across its span, inside the integer-percent rounding. usageBurnMinutes picks
+  // it on windowMin, so passing WIN here is what selects the estimator.
+  long mins = usageBurnMinutes(usage.sevenDayPct, usage.sevenDayResetInMin, WIN, stale);
+  usageBurnLabel(buf, BURN_LABEL_BYTES, mins, usage.sevenDayResetInMin);
+  padLeftTo(buf, sizeof(buf), SIDE_CHARS);
+  drawIfChanged(burn2Cache, sizeof(burn2Cache), buf, CARD_X + CARD_W - PAD,
+                y0 + WEEK_BURN_Y, 1, 1,
+                usageBurnUrgent(mins, usage.sevenDayResetInMin)
+                  ? (usage.sevenDayPct >= 90 ? COLOR_BAD : COLOR_WARN) : COLOR_LABEL,
+                COLOR_CARD, TR_DATUM);
+
+  int tickPct = usage.sevenDayResetInMin >= 0
+                  ? (int) (100 - usage.sevenDayResetInMin * 100 / WIN) : -1;
+  drawPaceBar(&bar2Cache, CARD_X + PAD, y0 + WEEK_BAR_Y, CARD_W - 2 * PAD, BAR_H,
+              usage.sevenDayPct, tickPct, color);
+
+  snprintf(buf, sizeof(buf), "%s",
+           usage.weekAllTokens > 0 ? formatTokens(usage.weekAllTokens).c_str() : "");
+  padTo(buf, sizeof(buf), 12);
+  drawIfChanged(left2Cache, sizeof(left2Cache), buf, CARD_X + PAD, y0 + WEEK_META_Y,
+                2, 1, COLOR_LABEL, COLOR_CARD);
+
+  if (stale) {
+    long m = usage.quotaAgeSec / 60;
+    if (m < 60) snprintf(buf, sizeof(buf), "stale %ldm", m);
+    else        snprintf(buf, sizeof(buf), "stale %ldh", m / 60);
+  } else {
+    snprintf(buf, sizeof(buf), "%s", usage.sevenDayResetInMin >= 0
+               ? formatResetIn(usage.sevenDayResetInMin).c_str() : "no data yet");
+  }
+  padLeftTo(buf, sizeof(buf), 12);
+  drawIfChanged(right2Cache, sizeof(right2Cache), buf, CARD_X + CARD_W - PAD,
+                y0 + WEEK_META_Y, 2, 1, stale ? COLOR_BAD : COLOR_LABEL, COLOR_CARD, TR_DATUM);
+
+  // FABLE, IN THIS CARD, because Fable IS the same 7-day window rather than a
+  // separate thing - and it is the SCARCER cap, which v1 rendered as an 8px
+  // crumb in a shared foot row with no bar at all. Its tick is the 7-day tick.
+  if (usage.weekFablePct >= 0) snprintf(buf, sizeof(buf), "FABLE  %d%%", usage.weekFablePct);
+  else snprintf(buf, sizeof(buf), "FABLE  --");
+  padTo(buf, sizeof(buf), 10);
+  drawIfChanged(fable1Cache, sizeof(fable1Cache), buf, CARD_X + PAD, y0 + WEEK_FABLE_Y,
+                2, 1, COLOR_LABEL, COLOR_CARD);
+
+  snprintf(buf, sizeof(buf), "%s",
+           usage.weekFableTokens > 0 ? formatTokens(usage.weekFableTokens).c_str() : "");
+  padLeftTo(buf, sizeof(buf), 12);
+  drawIfChanged(fable2Cache, sizeof(fable2Cache), buf, CARD_X + CARD_W - PAD,
+                y0 + WEEK_FABLE_Y, 2, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
+
+  drawPaceBar(&fableBarCache, CARD_X + PAD, y0 + WEEK_FABLE_BAR_Y, CARD_W - 2 * PAD, BAR_H,
+              usage.weekFablePct < 0 ? 0 : usage.weekFablePct, tickPct,
+              usage.weekFablePct < 0 ? COLOR_UNKNOWN
+                                     : (stale ? COLOR_LABEL : colorForPct(usage.weekFablePct)));
+}
 #endif  // BOARD_USAGE_V2
 
 // Codex's row. One line, because Codex publishes one number: a percentage of its
