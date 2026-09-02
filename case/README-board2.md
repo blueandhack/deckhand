@@ -535,6 +535,45 @@ without support); **false** gives a vertical wall with a `cover_cham` chamfer.
 `plat_wall` 2.0, giving 41.2 × 71.2 at x 9.1–50.3, y 18.1–89.3. A different pack moves the
 plateau, the taper angles and the stand together.
 
+### Screws: one per corner, through cover, board and body
+
+The board was **already back-fastened** — a screw enters through its ~3.2 mm hole and
+threads into the column's pilot below, head bearing on the board. What was missing was the
+cover joining that stack, and the geometry allows it: all four mounting holes sit at
+**(5.75, 6.1)** and friends, in the corners, **outside the plateau**, so nothing puts the
+cell near a screw axis.
+
+Each corner now carries a pillar on the cover's inner face, landing on the board's back.
+Without it the screw would only pull the cover onto the body and pass through the board;
+with it, one screw clamps all three. The stack, in absolute z:
+
+| | |
+|---|---|
+| head lands on its flat landing | 17.21 |
+| cover pillar, down to the board | → 6.90 |
+| board | 6.90 → 5.30 |
+| column pilot | 5.30 → 1.01 |
+| **screw needed / used** | **16.2 / M3×16 + 0.2 tip margin** |
+
+**The screw goes M3×6 → M3×16**, which is a real thing to buy before printing. Front-face
+material left is 1.01 mm against a 0.6 minimum.
+
+**`screw_boss_d` is bounded by the lip, not by the head.** The holes are 5.75 from the case
+edge and the lip's outer face is at 2.5, so anything over 6.5 puts the pillar past the lip
+into the clearance gap the body wall needs, where it would fuse to the wall in the print.
+At 6.0 the pillar's edge is 2.75 — just inboard of the lip, so it *merges* with the lip
+rather than approaching the wall on its own. Asserted, with the max quoted in the message.
+
+**The snaps are gone** (`cover_snaps = !cover_screws`), and the body's catch pockets with
+them — the wall now measures solid where they were. Eight barbs plus four screws is
+insertion force for nothing once the screws are what holds it.
+
+**Two things to know before printing.** The pillars land on the board around its mounting
+holes, so they assume a keep-out annulus there — *not verified against the real board*, the
+vendor drawing gives no component map. And the pillars are now the cover's deepest feature
+at 10.3 mm, past the 4 mm lip, so printed inner-face-down the part rests on four points and
+wants support or a different orientation.
+
 ### The cover is a shell, 2.00 mm throughout
 
 Everything else was already a shell — 2 mm of skin over the cell, 2 mm corral walls, a
@@ -570,8 +609,8 @@ plate's own edge, which would undercut the root the snap barbs anchor in — so 
 `cover_shell_edge` short of the lip's inner face, derived from that face rather than
 transcribed. The band outside the clip stays solid, which is exactly where material belongs.
 
-**The buttons need a solid column through the cavity, and this was found by inspection
-rather than by any check.** The skirt cavity runs right through the service end and the
+**The buttons and the screw pillars each need a solid column through the cavity, and the
+button one was found by inspection rather than by any check.** The skirt cavity runs right through the service end and the
 buttons sit in it. Unguarded, it undercut each guide sleeve: measured on the mesh, the
 plate over the button dropped to **1.39 mm** where `btn_plate` claims 2.97, and **76% of
 the sleeve's base was separated from the plate by a 1.57 mm void** — it stayed attached

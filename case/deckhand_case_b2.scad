@@ -215,6 +215,37 @@ print_shrink = 0.5;   // measured, on a DIAMETER or an opening
 //
 // A screw REPLACES the pin - they want the same axis - so board_screws picks one
 // or the other rather than adding to it.
+// ---------- SCREWING THE COVER, THE BOARD AND THE BODY INTO ONE STACK ----------
+// The board was ALREADY back-fastened: a screw enters through its ~3.2 mm hole
+// and threads into the column's pilot below, head bearing on the board. What was
+// missing is the cover joining that stack, and the geometry allows it because all
+// four mounting holes sit in the CORNERS - outside the plateau, in the thin rim -
+// so nothing puts the cell anywhere near a screw axis.
+//
+// One screw per corner now runs the whole way: head on a flat landing in the
+// cover, down a pillar that bears on the board's back, through the board's own
+// hole and into the column. Tightening clamps all three at once.
+//
+// TWO CONSEQUENCES, both real:
+//   * THE SCREW GETS MUCH LONGER - M3 x 16 against the M3 x 6 this file was built
+//     around. screw_len is that number and screw_skin still lands on 0.7, which is
+//     luck rather than design and is worth knowing before changing either.
+//   * THE PILLAR LANDS ON THE BOARD around its mounting hole, so it assumes a
+//     keep-out annulus there. Not verified against the real board - the vendor
+//     drawing gives no component map, only a 4.70 max height.
+cover_screws = true;
+// THE PILLAR IS BOUNDED BY THE LIP, not by the head. The holes sit 5.75 from the
+// case edge and the cover's lip outer face is at 2.5, so anything over 6.5 puts
+// the pillar past the lip and into the clearance gap the body wall needs - where
+// it would fuse to the wall in the print. 6.0 keeps its edge just inboard of the
+// lip, which also means it MERGES with the lip rather than approaching the wall
+// independently, so the pillar never gets nearer the wall than the lip already is.
+screw_boss_d = 6.0;   // the pillar - see the assert by the plateau
+// Snaps and screws are alternatives, not a pair. Eight barbs plus four screws is
+// insertion force for nothing once the screws are what actually hold it - and the
+// body's catch pockets go with them, so the wall keeps its material.
+cover_snaps = !cover_screws;
+
 board_screws = true;
 // 2.6, opened from 2.5 after a print where the screws would not drive - and the
 // small step is the point. 2.9 was tried first and is WRONG: engagement is
@@ -272,7 +303,7 @@ screw_lead   = 0.6;  // conical lead-in at the column top, so the screw centres 
 // bottoms out looks exactly like a hole that is too small: it stops dead partway
 // and no force helps. That symptom cost one print already, when the advice given
 // was "M3 x 6 or 8" against 5.9 mm of usable space.
-screw_len        = 6.0;  // the screw you HAVE. Measured: 6 mm, M3 self-tapping.
+screw_len        = cover_screws ? 16.0 : 6.0;  // M3 x 16 through the whole stack, or x 6 board-only
 screw_tip_margin = 0.2;  // clear air past the tip, so it clamps rather than bottoms
 screw_skin_min   = 0.6;  // least front-face material to leave; see the assert
                     // (kept small — a big taper on a thin pin leaves a point)
@@ -827,6 +858,10 @@ cover_shell = true;   // hollow the taper skirt (see above - not a material savi
 // anchored in. So it is clipped short of the lip's inner face, and the band
 // outside that clip stays solid - which is exactly where you want material.
 cover_shell_edge = 1.0;   // clip the cavity this far short of the lip's inner face
+
+// The cover-screw flags (cover_screws, screw_boss_d, cover_snaps) live UP with
+// board_screws, because screw_len reads them ~570 lines before this point.
+
 plat_gap    = 0.6;    // clearance from the cell to the plateau's inner wall
 plat_wall   = 2.0;    // and the thickness of that wall
 lip_h    = 4.0;     // cover lip depth — shared by cover() and the retainer risers
@@ -843,13 +878,13 @@ z_pcb_b    = z_pcb_f + board_t;             // column tops / board back
 // Derived HERE and not with the other screw parameters, because it needs z_pcb_b
 // and OpenSCAD does not hoist - a forward reference yields a silent undef, which
 // this file has been bitten by before (see mic_pcb_x0's note).
-screw_skin = z_pcb_b - screw_len - screw_tip_margin;
+// screw_skin, screw_entry and their assert are DERIVED FURTHER DOWN, past the
+// plateau: they read screw_pad_z, which needs plat_x0/plat_y0, which need in_w
+// and batt_y0. Declaring them here read undef - the SEVENTH forward reference
+// this file has caught, and like the other six it announced itself rather than
+// producing a quietly wrong number.
 // A LONGER SCREW EATS THE FRONT FACE, and past a point it comes through the
-// bezel. That must be loud rather than discovered on the glass, so it is an
-// assert: at screw_len 6.0 the skin is 0.7, and 7.6 would reach zero.
-assert(screw_skin >= screw_skin_min,
-       str("screw_len is too long: the pilot would leave too little front-face ",
-           "material. Use a shorter screw, or lower screw_skin_min deliberately."));
+// bezel, so the assert that guards it travels with them.
 cavity_d   = max(rim_clear, batt_seat + batt_t + batt_extra);
 // How far the plateau stands above the rim: the whole difference between what the
 // CELL needs and what everything else needs. Clamped at 0 so a build whose plugs
@@ -982,16 +1017,47 @@ ks_gap = cover_rise > 0
 // lands the tip at 88.7 inside a plateau ending at 89.3.
 ks_lug_from = cover_rise > 0 ? 24 : 15;
 
-// Outer-face depth (measured DOWN from the plateau, cover-local) at a point on
-// the end slopes. Only the y axis is needed: everything that has to sit flat is
-// well inside the plateau's x range, and on the sides the slope is steeper and
-// nothing sits on it.
+// Outer-face depth (measured DOWN from the plateau, cover-local) at a point.
+// THE RUN IS TAKEN FROM THE FRUSTUM'S OWN BASE, not from zero, and that was wrong
+// here for two commits: the base rect starts at wall-0.1, so dividing by plat_y0
+// stretched the run by 2.1 mm and under-reported every depth by up to 0.6.
+// Measured against the built mesh it now agrees to 0.01 where it was 0.5 out -
+// which is why the button pad did not quite flatten its own hole.
+taper_b0 = wall - 0.1;                       // the frustum's base, both axes
+function taper_x(x) =
+    cover_rise == 0 ? 0
+  : !cover_taper    ? ((x >= plat_x0 && x <= plat_x1) ? 0 : cover_rise)
+  : x < plat_x0     ? cover_rise * (plat_x0 - x) / (plat_x0 - taper_b0)
+  : x > plat_x1     ? cover_rise * (x - plat_x1) / ((out_w - taper_b0) - plat_x1)
+  : 0;
 function taper_y(y) =
     cover_rise == 0 ? 0
   : !cover_taper    ? ((y >= plat_y0 && y <= plat_y1) ? 0 : cover_rise)
-  : y < plat_y0     ? cover_rise * (plat_y0 - y) / plat_y0
-  : y > plat_y1     ? cover_rise * (y - plat_y1) / (out_h - plat_y1)
+  : y < plat_y0     ? cover_rise * (plat_y0 - y) / (plat_y0 - taper_b0)
+  : y > plat_y1     ? cover_rise * (y - plat_y1) / ((out_h - taper_b0) - plat_y1)
   : 0;
+// The deepest the outer face gets anywhere under a round pad of diameter d at
+// (cx, cy). The CORNERS slope on both axes at once - which the end slopes do not -
+// so a pad there has to be cut to whichever axis has fallen further.
+function pad_depth(cx, cy, d) = min(cover_rise,
+    max(taper_x(cx - d/2), taper_x(cx + d/2), taper_y(cy - d/2), taper_y(cy + d/2)));
+
+// The corner landings the screw heads sit on. Every mounting hole is out in the
+// rim where the taper has fallen furthest, and it falls on BOTH axes there, which
+// is what pad_depth is for.
+screw_pad_z = pad_depth(bx0 + hole_ins_x, by0 + hole_ins_y, screw_boss_d);
+assert(!cover_screws ||
+       (bx0 + hole_ins_x) - screw_boss_d/2 >= wall + 0.3,
+       str("screw_boss_d is too wide: the pillar would pass the cover's lip and ",
+           "foul the body wall. Max is ", 2*((bx0 + hole_ins_x) - (wall + 0.3))));
+// WHERE THE SCREW ENTERS moved when the cover joined the stack: at the landing
+// cut into the cover, not at the board's back. Everything downstream reads this,
+// so clearing cover_screws restores the short-screw geometry exactly.
+screw_entry = cover_screws ? total_th - screw_pad_z : z_pcb_b;
+screw_skin  = screw_entry - screw_len - screw_tip_margin;
+assert(screw_skin >= screw_skin_min,
+       str("screw_len is too long: the pilot would leave ", screw_skin,
+           " of front face, under screw_skin_min. Use a shorter screw."));
 
 // A BUTTON ON A SLOPE IS NOT A BUTTON. At the service end the taper drops 1.61
 // across the 6 mm hole, so against btn_proud of 1.5 the head would be buried on
@@ -1000,7 +1066,7 @@ function taper_y(y) =
 // level ground - which is the pad's far edge, since that is where the slope has
 // fallen furthest.
 btn_pad_d = btn_guide_d + 3.0;
-btn_pad_z = min(cover_rise, taper_y(btn_y + btn_pad_d/2));
+btn_pad_z = pad_depth(bcx + reset_dx, btn_y, btn_pad_d);
 btn_plate = (cover_rise - btn_pad_z) + cover_th;   // material left under the pad
 // AND THE SHELL HAS TO LEAVE THAT MATERIAL THERE. The skirt cavity runs right
 // through the service end, and the button sits in it: unguarded, it cut between
@@ -1325,7 +1391,7 @@ module body_core(){
     // (and therefore how the cover seats) is unchanged — only the opening grows
     // Cut from just inside the OUTER face (leaving snap_skin) inward past the wall,
     // rather than straight through it.
-    for(s=snaps()) translate([s[0],s[1],body_d-3.2]) rotate([0,0, s[2]])
+    if (cover_snaps) for(s=snaps()) translate([s[0],s[1],body_d-3.2]) rotate([0,0, s[2]])
       translate([-4-snap_win_extra, -wall/2 + snap_skin, -snap_win_extra])
         cube([8+2*snap_win_extra, wall*2, 1.6+2*snap_win_extra]);
   }
@@ -1554,6 +1620,15 @@ module cover(){
     union(){
       // the thin rim
       translate([wall-0.1,wall-0.1,rim0]) soft_box(in_w+0.2,in_h+0.2,cover_th,max(oc_r-wall,2),soft_r*0.5);
+      // ONE PILLAR PER CORNER, carrying the screw from its landing in the cover
+      // down onto the board's back. This is what makes the screw clamp all three
+      // parts instead of just pulling the cover onto the body: without it the
+      // head bears on the cover, the threads bite the column, and the board in
+      // between is simply passed through.
+      if (cover_screws)
+        for (c = holes())
+          translate([c[0], c[1], screw_pad_z])
+            cylinder(d = screw_boss_d, h = (total_th - z_pcb_b) - screw_pad_z);
       // ...and the plateau over the cell, plus how it meets that rim
       if (cover_rise > 0) {
         if (cover_taper)
@@ -1619,7 +1694,7 @@ module cover(){
       // sides run g (0.3) and the ends gy (0.55), so a single constant here
       // would put every side barb 0.25 mm off its lip. Reproduces the ends
       // exactly (1.1 + 1.65 = 2.75 = wall + gy) rather than approximating them.
-      for(s=snaps()) translate([s[0], s[1], rimI+lip_h])
+      if (cover_snaps) for(s=snaps()) translate([s[0], s[1], rimI+lip_h])
         rotate([0,0,s[2]])
           translate([0, wall/2 + ((s[2] == 90 || s[2] == 270) ? g : gy), 0])
           translate([-3.5,0,0]) hull(){
@@ -1685,6 +1760,13 @@ module cover(){
           for (dx = [reset_dx, boot_dx])
             translate([bcx + dx, btn_y, cover_th - 1])
               cylinder(d = btn_boss_d, h = rimI - cover_th + 2);
+        // ...and off the screw pillars, for exactly the same reason: the cavity
+        // runs through the corners, and a severed pillar is a screw pulling on
+        // nothing.
+        if (cover_screws)
+          for (c = holes())
+            translate([c[0], c[1], cover_th - 1])
+              cylinder(d = screw_boss_d, h = rimI - cover_th + 2);
       }
     }
     // A FLAT LANDING FOR EACH BUTTON - see btn_pad_z. Cut square to the board and
@@ -1693,6 +1775,14 @@ module cover(){
     if (cover_buttons && cover_rise > 0 && btn_pad_z > 0.05)
       for (dx = [reset_dx, boot_dx])
         translate([bcx + dx, btn_y, -1]) cylinder(d = btn_pad_d, h = btn_pad_z + 1);
+    // The screw landings and their bores. The landing is cut to pad_depth, which
+    // takes the WORSE of the two axes - a corner falls on both at once, unlike the
+    // end slopes the buttons sit on.
+    if (cover_screws)
+      for (c = holes()) {
+        translate([c[0], c[1], -1]) cylinder(d = screw_boss_d, h = screw_pad_z + 1);
+        translate([c[0], c[1], -1]) cylinder(d = m3_clear, h = (total_th - z_pcb_b) + 2);
+      }
     // The hole starts ABOVE the outer surface wherever that surface has got to,
     // rather than at a fixed z: on a taper there is no single outer plane.
     for (dx = [reset_dx, boot_dx])
