@@ -806,9 +806,68 @@ for (const b of [1, 2]) {
   chk(staleIdx >= 0 && cxIdx > staleIdx,
       "found the stale-flip block inside renderUsageTab to check");
   const staleBlock = tab.slice(staleIdx < 0 ? 0 : staleIdx, cxIdx < 0 ? undefined : cxIdx);
-  for (const cache of ["burn1Cache", "burn2Cache", "spark1Cache",
-                       "bar1Cache", "bar2Cache", "fableBarCache"])
-    chk(staleBlock.includes(cache), `the stale flip busts ${cache}`);
+  // PARSED, not the full 17 from item 1's `used` set and not a hand-typed
+  // six: a full generalisation would be wrong here (right1Cache's text
+  // already carries "stale Xh" and self-heals through drawIfChanged's own
+  // comparison; busting it too would be noise), but the colour-blind
+  // population - every cache drawPaceBar or drawUsageSpark writes, which
+  // CANNOT self-heal on a colour-only change - is exactly parseable, so a
+  // seventh bar added later is covered without anyone remembering to extend
+  // a list by hand.
+  const colourBlind = new Set();
+  for (const fn of ["void renderNowCard(", "void renderWeekCard("]) {
+    const body = fnBody(src, fn, "usage.ino");
+    for (const m of body.matchAll(/drawPaceBar\(\s*&(\w+Cache)/g))    colourBlind.add(m[1]);
+    for (const m of body.matchAll(/drawUsageSpark\(\s*&(\w+Cache)/g)) colourBlind.add(m[1]);
+  }
+  chk(colourBlind.size >= 3,
+      `parsed ${colourBlind.size} colour-blind (drawPaceBar/drawUsageSpark) caches out of the two card renderers (expected >= 3)`);
+  for (const cache of [...colourBlind].sort())
+    chk(staleBlock.includes(cache),
+        `the stale flip busts ${cache} (drawPaceBar/drawUsageSpark cache, cannot self-heal on a colour-only change)`);
+
+  // 2b. ONE SPELLING OF ONE THRESHOLD. Board 2's v2 fields dim on
+  // QUOTA_STALE_SEC (renderNowCard/renderWeekCard); renderUsageTab's own
+  // stale-flip bust must compute staleness from that SAME named constant -
+  // otherwise a header retune of QUOTA_STALE_SEC leaves the bust firing at
+  // the OLD value while the colour flips at the new one, and in the window
+  // between them every colour-blind cache above holds a WRONG HUE
+  // INDEFINITELY. Bounded to each function's #if BOARD_USAGE_V2 arm the same
+  // way staleBlock is bounded above - an unbounded match would find
+  // whichever "quotaAgeSec >" comes first in the raw text, which is exactly
+  // the ordering trap the bust slice was already caught by once, even though
+  // today the #if arm happens to come first.
+  const v2Arm = (body) => {
+    const i = body.indexOf("#if BOARD_USAGE_V2");
+    if (i < 0) return body;              // no #if here - the whole body is v2-only already
+    const e = body.indexOf("#else", i);
+    const z = body.indexOf("#endif", i);
+    const end = e >= 0 ? e : z;
+    if (end < 0) throw new Error("v2Arm: no #else/#endif found after #if BOARD_USAGE_V2");
+    return body.slice(i, end);
+  };
+  for (const fn of ["void renderUsageTab(", "void renderNowCard(", "void renderWeekCard("]) {
+    const body = fnBody(src, fn, "usage.ino");
+    const arm = v2Arm(body);
+    const m = arm.match(/quotaAgeSec\s*>\s*([A-Za-z_][A-Za-z_0-9]*)/);
+    chk(!!m, `${fn}'s v2 arm computes a staleness threshold from a NAMED constant`);
+    if (m) chk(m[1] === "QUOTA_STALE_SEC",
+        `${fn} uses QUOTA_STALE_SEC, not "${m[1]}" - two spellings of one threshold `
+      + `leave the bars' colour and their bust firing at different values`);
+  }
+  // Board 1 keeps the LITERAL, not a board-2-only constant its header does
+  // not declare - asserted so the #if scoping above cannot rot into board 1
+  // referencing a name that would not compile there.
+  {
+    const ifIdx = tab.indexOf("#if BOARD_USAGE_V2");
+    const elseIdx = tab.indexOf("#else", ifIdx);
+    const endIdx = tab.indexOf("#endif", elseIdx);
+    chk(ifIdx >= 0 && elseIdx > ifIdx && endIdx > elseIdx,
+        "renderUsageTab's stale computation has an #if BOARD_USAGE_V2 / #else / #endif to check");
+    const elseArm = tab.slice(elseIdx, endIdx);
+    chk(/quotaAgeSec\s*>\s*900\b/.test(elseArm),
+        "renderUsageTab's board-1 (#else) arm keeps the literal 900, so its binary cannot move");
+  }
 
   // 3. The spark is keyed on the ring's CONTENT, not drawn unconditionally,
   // or it repaints 260x32 on every 5s tick - and on this board that is a

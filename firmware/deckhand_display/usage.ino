@@ -863,7 +863,17 @@ void renderUsageTab() {
   // When staleness flips, bust the hero-number caches so their dim/normal
   // color actually repaints - drawBigNumber only redraws on a text change,
   // and a stale % often keeps the same digits (e.g. a frozen "0%").
+#if BOARD_USAGE_V2
+  // ONE SPELLING OF ONE THRESHOLD. The colour the v2 fields take is decided by
+  // QUOTA_STALE_SEC in renderNowCard/renderWeekCard. If this bust fired on a
+  // different value, the window between the two would leave bar1Cache, bar2Cache
+  // and fableBarCache holding a wrong hue INDEFINITELY - all three key on
+  // (pct, tick) and cannot self-heal. Board 1 keeps the literal below, so its
+  // binary cannot move.
+  int stale = usage.quotaAgeSec > QUOTA_STALE_SEC ? 1 : 0;
+#else
   int stale = usage.quotaAgeSec > 900 ? 1 : 0;
+#endif
   if (stale != quotaStaleCache) {
     quotaStaleCache = stale;
     pct1Cache[0] = '\0';
