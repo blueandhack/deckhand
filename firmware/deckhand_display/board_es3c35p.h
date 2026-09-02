@@ -484,7 +484,12 @@ const int CODEX_H = 56;                            // ends at 454, 6px clear
 // Uniform 8px gaps (SP_2), and the column must not end flush on contentBottom()
 // - board 1 shipped that once and its Codex row read as one block with the
 // footer.
-const int BOARD_USAGE_V2  = 1;      // see board.h; 0 on board 1, where it emits nothing
+// A #define, NOT a const int, and this is load-bearing: the preprocessor cannot see
+// a C++ const int, so `#if BOARD_USAGE_V2` on one evaluates the identifier as 0 -
+// silently, with no warning under -Wall - and every guarded arm in usage.ino would
+// take board 1's branch on board 2. The whole layout would compile clean and never
+// reach the glass. Same trap as panel_shim.cpp's `#if BOARD_PANEL_INVERT`.
+#define BOARD_USAGE_V2 1
 const int NOW_CARD_H      = 182;
 const int WEEK_CARD_H     = 144;
 

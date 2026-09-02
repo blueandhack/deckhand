@@ -216,6 +216,22 @@ if (SELFTEST) {
   console.log("--selftest: board 2's CARD_FOOT_Y pushed 8px down; the ceiling assertion MUST fail");
 }
 
+// A CAPABILITY FLAG MUST BE A #define, NEVER A const int. `#if FOO` on a C++
+// const int evaluates an undefined identifier as 0, silently and without a -Wall
+// warning, so every guarded arm takes the wrong branch while this checker - which
+// parses BOTH forms and cannot tell them apart - reports green. consts() is
+// therefore structurally unable to catch it, so the check has to read the raw text.
+for (const [b, hdr] of [[1, "board_e32r28t.h"], [2, "board_es3c35p.h"]]) {
+  const raw = fs.readFileSync(`${DIR}/${hdr}`, "utf8");
+  const bad = [...raw.matchAll(/^\s*const\s+int\s+(BOARD_[A-Z0-9_]+)\s*=/gm)].map(m => m[1]);
+  chk(bad.length === 0,
+      bad.length ? `board ${b}: ${bad.join(", ")} declared as const int - a capability flag `
+                 + `must be #define or every #if on it is silently false`
+                 : `board ${b}: every BOARD_* capability flag is a #define`);
+  chk(/^\s*#define\s+BOARD_USAGE_V2\s+[01]\s*$/m.test(raw),
+      `board ${b}: BOARD_USAGE_V2 is #define'd`);
+}
+
 for (const b of [1, 2]) {
   const c = B[b], [W, H] = PANEL[b];
   console.log(`\n=== board ${b} (${W}x${H}) ===`);
@@ -229,7 +245,9 @@ for (const b of [1, 2]) {
   // board 1 - whose CARD1_Y/CARD2_Y/CODEX_Y are literals (38/146/254). It does NOT
   // catch a height change on board 2, whose positions are live formulas of CARD_H
   // that consts() re-evaluates, so both sides of the comparison move together.
-  // Board 2's heights are guarded by the declared-sum assertion below instead.
+  // Board 2's V2 heights (NOW_CARD_H/WEEK_CARD_H) are guarded by the declared-sum
+  // assertion below. Its still-live v1 CARD_H is guarded by nothing here until the
+  // task that swaps the column over; that gap is pre-existing, not introduced here.
   // (`air > 0` alone passed when FOOTER_H moved 18 -> 20 and the real air went
   // 8 -> 6 - exactly the drift it existed to catch.)
   const gap = b === 2 ? c.SP_2 : 4;
