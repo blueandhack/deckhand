@@ -102,7 +102,21 @@ const MAGNITUDES = (() => {
 const VERBOSE = process.argv.includes("--verbose");
 // How many child processes each (checker, board) is split across - a ceiling on
 // runs-per-process, see the note at the top of this file.
-const SLICES = 4;
+//
+// 4 -> 8 BECAUSE 4 STOPPED BEING ENOUGH, AND IT FAILED IN THE WAY THE NOTE ABOVE
+// PREDICTS RATHER THAN IN A NEW WAY. At 4, three of the four sessions/board-2
+// children OOM'd on a REGEXP CODE OBJECT at ~1070MB, the sweep printed its own
+// "3 checker sweep(s) hit an INTERNAL ERROR" line and exited 1 - loud about the
+// failure, and quiet about the cost, which was that the ONE surviving slice's 94
+// constants were all that reached the union: every SESSION_*/DETAIL_*/ASK_*
+// constant then appeared under "read by no checker", because the checker that
+// constrains them was absent. That is the documented shape, one branch later.
+// Board 2 parses 376 constants against board 1's 237, so a quarter-slice there is
+// ~94 constants and an unguarded one costs all six magnitudes; 8 puts it back to
+// ~47, well inside the wall. RAISE THIS, NEVER THE HEAP - the limit is V8's CODE
+// space and --max-old-space-size provably does nothing (measured: death at 840MB
+// against a 4.5GB heap limit).
+const SLICES = 8;
 
 // ---- running one checker, once ----
 class Exited extends Error { }

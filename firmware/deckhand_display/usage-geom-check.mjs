@@ -410,10 +410,24 @@ for (const b of [1, 2]) {
   // padLeftTo() would pad PAST the worst case this lane assumes and
   // re-widen the real clear box - the identical bug this commit fixes,
   // reappearing through the pad width instead of through the wall clock.
-  chk(c.CODEX_RIGHT_CHARS <= worst,
-      `CODEX_RIGHT_CHARS (${c.CODEX_RIGHT_CHARS}) <= the right field's own worst `
-    + `case (${worst} chars) - padLeftTo() pads UP TO CODEX_RIGHT_CHARS, so a `
-    + `wider pad target re-widens the real clear box past what the lane below assumes`);
+  // AND IT MUST BE THE WORST CASE EXACTLY, NOT MERELY NO LARGER THAN IT. `<=`
+  // was a one-sided ceiling and the sweep said so: CODEX_RIGHT_CHARS was caught
+  // at |1| in the + direction and NOT AT ALL in the -, so 17 passed. Both sides
+  // are real, and they are different bugs:
+  //   too LARGE - padLeftTo() pads past the worst case this lane assumes and
+  //     re-widens the clear box, the Task-1 bug returning through the pad width;
+  //   too SMALL - padLeftTo() then never blanks the field's own widest value.
+  //     Padding exists for exactly one job: drawIfChanged clears fx-1 for the
+  //     NEW string's width, so a long value followed by a short one leaves the
+  //     long one's left tail on the row unless every value is padded to the
+  //     LONGEST. A pad width under `worst` silently stops doing that job.
+  // The two bounds meet, so the pad width IS the worst case - which is what both
+  // board headers already say in prose ("this constant IS the field's assumed
+  // worst case, not merely a cap"). Asserted as one equality on both boards.
+  chk(c.CODEX_RIGHT_CHARS === worst,
+      `CODEX_RIGHT_CHARS (${c.CODEX_RIGHT_CHARS}) IS the right field's own worst `
+    + `case (${worst} chars) - larger and padLeftTo() pads past what the lane `
+    + `assumes, smaller and it stops blanking this field's own widest value`);
   const rightX = c.CARD_X + c.CARD_W - c.PAD;
   const rightW = worst * charW;
   const clearFrom = rightX - rightW - 1;
@@ -575,6 +589,42 @@ for (const b of [1, 2]) {
     chk(sideChars === c.SIDE_CHARS,
         `side lane is ${sideChars} characters, header's SIDE_CHARS says ${c.SIDE_CHARS}`);
 
+    // ...AND THAT BUDGET MUST HOLD THE FIELD'S OWN WORST-CASE CONTENT, which is
+    // the assertion this lane was missing entirely - the same shape as the Codex
+    // lane bug Task 1 of this branch fixed, arriving on the other card.
+    // padLeftTo() only ever GROWS a short string; handed one already longer than
+    // the pad width it returns early rather than truncating. So SIDE_CHARS is a
+    // FLOOR on what these two fields draw, never a ceiling, and if the worst case
+    // exceeds it the field is wider than the lane assumes: drawIfChanged clears
+    // fx-1 for the NEW string's width, so a long value followed by a short one
+    // leaves the long one's left tail on the card with nothing that will ever
+    // clear it.
+    //
+    // The worst case is DERIVED FROM THE CLAMP, not transcribed:
+    // usageBurnMinutes() caps `left` at BURN_MAX_LEFT_MIN before
+    // usageBurnLabel() formats it, and that cap exists precisely to make one
+    // string the ceiling - so the longest label this field can hold is that
+    // clamp rendered through the same "empty ~%ldd %ldh" branch. A raised clamp
+    // fails here rather than silently outgrowing the lane.
+    const clampSrc = stripComments("usage.ino");
+    const clampM = clampSrc.match(/BURN_MAX_LEFT_MIN\s*=\s*(\d+)/);
+    chk(!!clampM, "usage.ino declares BURN_MAX_LEFT_MIN (the burn label's own ceiling)");
+    if (clampM) {
+      const cap = +clampM[1];
+      const burnWorst = `empty ~${Math.floor(cap / 1440)}d ${Math.floor(cap / 60) % 24}h`;
+      // The other field on this lane, formatResetIn()'s widest output. Its own
+      // days term is bounded by the window (7d on the WEEK card, 5h here), so
+      // "no data yet" is the longest string it can produce; kept in the max so
+      // adding a wider branch to either field fails here.
+      const resetWorst = "no data yet";
+      const worstSide = Math.max(burnWorst.length, resetWorst.length);
+      chk(c.SIDE_CHARS >= worstSide,
+          `side lane holds its own worst case: SIDE_CHARS ${c.SIDE_CHARS} >= `
+        + `${worstSide} ("${burnWorst}", from BURN_MAX_LEFT_MIN ${cap}) - padLeftTo() `
+        + `pads UP to SIDE_CHARS and never truncates, so a shorter lane is a field `
+        + `wider than the box that clears it`);
+    }
+
     // The NOW card's bands, as CLEARED extents, disjoint and inside the
     // ceiling. META_H comes from the PARSED UI_FONTS[] table, beside BODY_H
     // and HERO_H_NATIVE this checker already derives that way.
@@ -600,6 +650,94 @@ for (const b of [1, 2]) {
       chk(y - 1 >= c.NOW_HERO_Y && y + meta <= c.NOW_HERO_Y + c.CARD_HERO_H - 1,
           `NOW side fact ${n} clear +${y - 1}..+${y + meta} inside the hero band`);
     }
+
+    // ---- THE CARD'S VERTICAL RHYTHM: THE ONLY TWO-SIDED BOUND THESE OFFSETS
+    // HAVE, and geom-sweep.mjs is what proved they needed one. ----
+    //
+    // Every band offset on this card was reported caught only at +-16, and
+    // NOW_SPARK_H and NOW_SIDE_STEP in ONE DIRECTION ONLY. The reason is
+    // structural rather than an oversight: the disjointness loop above asks
+    // `gap >= 0` and every real gap here is 4, so a single offset may move one,
+    // two, three or four rows in either direction and stay disjoint. And no
+    // CUMULATIVE assertion can see it either - moving one band down by a row
+    // enlarges the gap above it and shrinks the gap below it, leaving the total,
+    // the last band's end and the ceiling clearance all unchanged. A per-gap
+    // bound is the only instrument that can, and a per-gap bound needs an
+    // expected value.
+    //
+    // The expected value is the card's own rhythm. Both v2 cards were laid out
+    // on a uniform gap - 4 rows on NOW, 3 on WEEK, in the band tables the design
+    // spec and the board header each print - so a rhythm broken at exactly one
+    // boundary IS the signature of an offset that moved. This is a bound on the
+    // CARD rather than on any one constant, which is what makes it able to fail:
+    // it is not derived from the positions it checks (the mistake the spec's own
+    // "the mock's first air assertion was vacuous" note records), and it is not
+    // fitted to a single number.
+    //
+    // DELIBERATELY NOT SOLVED BY NAMING THE AIR IN THE HEADER, which is the
+    // shape the wireless-pairing panel used. Deriving each offset as
+    // `prev + cell + AIR` makes them a CHAIN OF RELATIVE IDENTITIES, and
+    // geom-sweep.mjs injects at PARSE time: perturb one term and every offset
+    // below it follows, so every identity still holds and the sweep goes blind -
+    // the exact failure CLAUDE.md records for the pairing panel's top-air
+    // constant and its four siblings, all five of which were unguarded at +-16
+    // under assertions written for them. (Their names are deliberately NOT
+    // spelled here: geom-sweep.mjs decides whether a checker READS a constant
+    // with a regex over this file's own text, so a constant named only in a
+    // comment is reported as read-but-unguarded - a gap that does not exist.
+    // Measured: the first draft of this note put one in the sweep's findings.)
+    // Independent literals in the header plus a rhythm assertion here
+    // is strictly better, because the perturbation cannot propagate into the
+    // checker's own expectation.
+    //
+    // The cost, stated rather than discovered later: a future change to either
+    // card's spacing has to change it at EVERY boundary, or say here why one
+    // boundary is different.
+    const rhythm = (name, bandList, cardH, extra) => {
+      // From index 2: the pin bar sits DIRECTLY on the label row (gap 0) by
+      // design, so that boundary is not part of the rhythm.
+      const gaps = [];
+      for (let i = 2; i < bandList.length; i++)
+        gaps.push([`${bandList[i - 1][0]}->${bandList[i][0]}`,
+                   bandList[i][1] - bandList[i - 1][2] - 1]);
+      for (const g of extra || []) gaps.push(g);
+      const air = gaps[0][1];
+      const off = gaps.filter(g => g[1] !== air);
+      chk(off.length === 0,
+          `${name} card's ${gaps.length} band gaps are all ${air} rows`
+        + (off.length ? ` - OFF-RHYTHM: ${off.map(g => `${g[0]} is ${g[1]}`).join(", ")}`
+                      : ` (${gaps.map(g => g[0]).join(", ")})`));
+      // ...and the trailing clearance is at least one unit of that rhythm, so
+      // the card cannot be shortened until the last band sits tight against the
+      // border. WEEK's is exactly the rhythm; NOW carries one row more.
+      const lastEnd = Math.max(...bandList.map(x => x[2]));
+      const trailing = (cardH - 2) - lastEnd - 1;
+      chk(trailing >= air,
+          `${name} card's trailing clearance ${trailing} rows >= its ${air}-row rhythm `
+        + `(last clear +${lastEnd}, border owns +${cardH - 2}..+${cardH - 1})`);
+      return air;
+    };
+    rhythm("NOW", bands, c.NOW_CARD_H, [
+      // The two side facts are stacked on the same rhythm inside the hero band,
+      // which is what binds NOW_SIDE_STEP: the step is the field's own cleared
+      // height plus one gap, and nothing else on the card measures it.
+      ["side1->side2",
+       (c.NOW_SIDE_Y + c.NOW_SIDE_STEP - 1) - (c.NOW_SIDE_Y + meta) - 1],
+    ]);
+
+    // THE SIDE-FACT BLOCK IS CENTRED IN THE HERO BAND IT SHARES, with the
+    // rounding named. The inside-the-band test above has 12-13 rows of slack at
+    // each end, so it cannot see NOW_SIDE_Y move at all; this pins it. An odd
+    // surplus cannot split evenly, and the extra row goes ABOVE - which is what
+    // the shipped 13/12 split is, so this is the geometry's own rule rather than
+    // a tolerance fitted to it.
+    const sideBlockH = (c.NOW_SIDE_Y + c.NOW_SIDE_STEP + meta) - (c.NOW_SIDE_Y - 1) + 1;
+    const sideAbove = (c.NOW_SIDE_Y - 1) - c.NOW_HERO_Y;
+    const sideWant = Math.ceil((c.CARD_HERO_H - sideBlockH) / 2);
+    chk(sideAbove === sideWant,
+        `NOW side block (${sideBlockH} rows) is centred in the ${c.CARD_HERO_H}-row hero `
+      + `band: ${sideAbove} rows above, want ${sideWant} `
+      + `(${c.CARD_HERO_H - sideBlockH - sideAbove} below)`);
 
     // The draw site's own arguments, PARSED - not a restatement of the
     // constants. A comment claiming the hero is handed CARD_HERO_W is not a
@@ -705,6 +843,35 @@ for (const b of [1, 2]) {
     chk(wlast <= c.WEEK_CARD_H - 3,
         `WEEK last clear ends +${wlast}, ceiling +${c.WEEK_CARD_H - 3} `
       + `(${c.WEEK_CARD_H - 3 - wlast} rows clear)`);
+
+    // The same rhythm bind as NOW - see the long note there for why a per-gap
+    // bound is the only thing that can see these offsets move, and why naming
+    // the air in the header would blind the sweep instead of helping it. WEEK's
+    // rhythm is 3 rows and its trailing clearance is exactly one unit of it.
+    rhythm("WEEK", wb, c.WEEK_CARD_H);
+
+    // WEEK_BURN_Y IS INVISIBLE TO EVERY BAND ASSERTION, INCLUDING THE RHYTHM,
+    // and that is not a gap in the rhythm - it is what sharing a band means. The
+    // burn line and the number occupy ONE band (the union of their two clear
+    // boxes) precisely because they sit side by side, and at meta 16 inside a
+    // head 24 the burn line's box is strictly inside the number's: min() and
+    // max() both come from WEEK_NUM_Y, so WEEK_BURN_Y can move several rows in
+    // either direction without changing the band at all. Measured: the sweep
+    // caught it only at +-16, and only then because the line finally escaped the
+    // number's extent.
+    //
+    // What binds it is the thing it is FOR: a T_META line reading as a caption
+    // ON the T_HEAD number beside it has to be optically centred against it, so
+    // the offset is half the difference of the two cells. That divides exactly
+    // here (24 - 16 = 8), and both cells are PARSED from UI_FONTS[] rather than
+    // transcribed, so changing either font id moves the expectation with it.
+    chk((head - meta) % 2 === 0,
+        `WEEK's number cell (${head}) and burn cell (${meta}) differ by an even `
+      + `number of rows, so the burn line can be centred on it exactly`);
+    chk(c.WEEK_BURN_Y - c.WEEK_NUM_Y === (head - meta) / 2,
+        `WEEK burn line is centred on the number beside it: WEEK_BURN_Y - `
+      + `WEEK_NUM_Y = ${c.WEEK_BURN_Y - c.WEEK_NUM_Y}, want (${head} - ${meta})/2 = `
+      + `${(head - meta) / 2}`);
 
     // THE SECONDARY NUMBER MUST BE SMALLER THAN THE PRIMARY'S. That contrast is
     // the hierarchy this redesign exists for, so it is asserted rather than left
