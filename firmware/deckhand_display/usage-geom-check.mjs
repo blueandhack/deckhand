@@ -27,8 +27,8 @@
 // The textWidth implementation, the header parser and the panel table are shared
 // with sessions-geom-check.mjs (geom-common.mjs) - one copy of the measurement
 // rule, checked once against the device's own numbers.
-import { consts, DIR, evalInt, fnBody, lineH, PANEL, preflight, splitArgs,
-         stripComments, textWidth } from "./geom-common.mjs";
+import { cacheSizes, consts, DIR, evalInt, fnBody, lineH, PANEL, preflight,
+         splitArgs, stripComments, textWidth } from "./geom-common.mjs";
 import fs from "fs";
 preflight();
 
@@ -130,11 +130,38 @@ const BODY_H = { 1: UI_FONTS[1][2].cellH, 2: UI_FONTS[2][2].cellH };
 // against the registry's size 2). So only board 2's parsed value is used
 // directly below; board 1 keeps its own heroSize-based figure.
 const HERO_H_NATIVE = { 1: UI_FONTS[1][4].cellH, 2: UI_FONTS[2][4].cellH };
+// The NOW card's own bands need T_META (index 1, the label row's cell height -
+// board 2's is 16, distinct from board 1's 13 which happens to equal BODY_H
+// there too) and T_HEAD (index 3, the settings-style heading face) - parsed
+// the identical way BODY_H/HERO_H_NATIVE are, never transcribed as 13/16/18/24.
+const META_H = { 1: UI_FONTS[1][1].cellH, 2: UI_FONTS[2][1].cellH };  // T_META
+const HEAD_H = { 1: UI_FONTS[1][3].cellH, 2: UI_FONTS[2][3].cellH };  // T_HEAD
 
 // LOGO_SIZE is a #define rather than a const int, so it is read from the art
 // header the same way settings-geom-check.mjs reads KB_MAX_BYTES out of the host -
 // from the file that owns it, not from a number copied over here.
 const LOGO_SIZE = +fs.readFileSync(`${DIR}/DeckhandLogo.h`, "utf8").match(/#define\s+LOGO_SIZE\s+(\d+)/)[1];
+
+// Change-only cache sizes, PARSED from deckhand_display.ino - the same helper
+// sessions-geom-check.mjs and settings-geom-check.mjs already bind theirs
+// through. The USAGE tab's caches (v1 AND v2, since v2 reuses v1's) had no
+// such assertion at all until this task.
+const CACHE = cacheSizes("deckhand_display.ino");
+
+// One parsed call argument, resolved against a board's own constant table -
+// the same trick settings-geom-check.mjs's spineArg() uses for the severity
+// spine's uiFillRound() arguments. evalInt() itself only parses NUMBERS, so an
+// identifier like "CARD_HERO_W" has to be substituted first; a token that
+// resolves to nothing THROWS rather than silently reading as 0, which is what
+// makes a rewritten draw call fail loudly instead of comparing NaN to a number
+// and reporting green by accident.
+function drawArg(c, expr) {
+  const e = expr.replace(/[A-Za-z_][A-Za-z_0-9]*/g, (t) => {
+    if (t in c) return String(c[t]);
+    throw new Error(`drawArg(): "${expr}" names "${t}", which is not a known board constant`);
+  });
+  return evalInt(e);
+}
 
 // --- board constants, parsed from the real source so this cannot drift ---
 // The board header FIRST, then deckhand_display.ino seeded with it - the order the
@@ -517,6 +544,91 @@ for (const b of [1, 2]) {
     chk(bodyTextWidth(b, t) < W - 8, `waiting line "${t}" ${bodyTextWidth(b, t)}px inside the ${W}px panel`);
   chk(heroTextWidth(b, "DECKHAND") < W - 8,
       `wordmark ${heroTextWidth(b, "DECKHAND")}px inside the ${W}px panel`);
+
+  // --- the NOW card (board 2 only): the 64px hero's own clear box, and the
+  // two fact lines living in the 132px beside it that v1's full-lane hero used
+  // to erase on every repaint ---
+  if (b === 2) {
+    const laneX0 = c.CARD_X + c.PAD, laneX1 = c.CARD_X + c.CARD_W - c.PAD;
+    // THE HERO'S CLEAR BOX MUST NOT REACH THE SIDE LANE. drawBigNumber clears
+    // the box it is handed; hand it the full lane again and it erases both
+    // fact lines on every value change, which is the defect CARD_HERO_W
+    // exists to prevent.
+    chk(laneX0 + c.CARD_HERO_W < c.SIDE_X0,
+        `hero box ends at ${laneX0 + c.CARD_HERO_W - 1}, side lane starts at ${c.SIDE_X0}`);
+    // ...and it must still hold the widest number the card can draw.
+    // heroTextWidth() is this checker's own measurer over the parsed
+    // Spleen32x64 glyph table - do not multiply a transcribed advance.
+    const heroInk = heroTextWidth(b, "100%");
+    chk(heroInk <= c.CARD_HERO_W, `"100%" inks ${heroInk}px inside CARD_HERO_W ${c.CARD_HERO_W}`);
+    // The side lane's character budget, DERIVED and bound to the constant the
+    // draw site actually names (SIDE_CHARS) rather than a bare literal 15 -
+    // a drift in SIDE_CHARS's own derivation must fail here too, not just
+    // agree with whatever it currently says.
+    const sideChars = Math.floor((laneX1 - c.SIDE_X0) / c.TEXT_ADV);
+    chk(sideChars === c.SIDE_CHARS,
+        `side lane is ${sideChars} characters, header's SIDE_CHARS says ${c.SIDE_CHARS}`);
+
+    // The NOW card's bands, as CLEARED extents, disjoint and inside the
+    // ceiling. META_H comes from the PARSED UI_FONTS[] table, beside BODY_H
+    // and HERO_H_NATIVE this checker already derives that way.
+    const meta = META_H[b];
+    const bands = [
+      ["pin",   c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
+      ["label", c.CARD_LABEL_Y,   c.CARD_LABEL_Y + meta - 1],
+      ["hero",  c.NOW_HERO_Y,     c.NOW_HERO_Y + c.CARD_HERO_H - 1],
+      ["bar",   c.NOW_BAR_Y - 4,  c.NOW_BAR_Y + c.BAR_H + 3],
+      ["spark", c.NOW_SPARK_Y - 1, c.NOW_SPARK_Y + c.NOW_SPARK_H],
+      ["meta",  c.NOW_META_Y - 1, c.NOW_META_Y + meta],
+    ];
+    for (let i = 1; i < bands.length; i++)
+      chk(bands[i][1] >= bands[i][2] || bands[i][1] > bands[i - 1][2],
+          `NOW band ${bands[i - 1][0]} -> ${bands[i][0]}: gap ${bands[i][1] - bands[i - 1][2] - 1}`);
+    const last = bands[bands.length - 1][2];
+    chk(last <= c.NOW_CARD_H - 3,
+        `NOW last clear ends +${last}, ceiling +${c.NOW_CARD_H - 3} `
+      + `(${c.NOW_CARD_H - 3 - last} rows clear of the 2px border)`);
+
+    // The two side facts sit inside the hero's vertical band and beside it.
+    for (const [n, y] of [[1, c.NOW_SIDE_Y], [2, c.NOW_SIDE_Y + c.NOW_SIDE_STEP]]) {
+      chk(y - 1 >= c.NOW_HERO_Y && y + meta <= c.NOW_HERO_Y + c.CARD_HERO_H - 1,
+          `NOW side fact ${n} clear +${y - 1}..+${y + meta} inside the hero band`);
+    }
+
+    // The draw site's own arguments, PARSED - not a restatement of the
+    // constants. A comment claiming the hero is handed CARD_HERO_W is not a
+    // constraint; the settings branch learned that when a reviewer rewrote a
+    // draw call and every checker still passed. drawArg() resolves each token
+    // through the board's own constant table.
+    const body = fnBody(stripComments("usage.ino"), "void renderNowCard(", "usage.ino");
+    const hero = body.match(/drawBigNumber\(([^;]*)\)\s*;/);
+    chk(!!hero, "renderNowCard calls drawBigNumber");
+    if (hero) {
+      const args = splitArgs(hero[1]);
+      const got = drawArg(c, args[5]);
+      chk(got === c.CARD_HERO_W,
+          `drawBigNumber is handed CARD_HERO_W (${c.CARD_HERO_W}), not the full lane `
+        + `- got ${got}`);
+    }
+
+    // EVERY change-only cache must hold its own padded string plus its NUL.
+    // drawIfChanged compares only cacheSize bytes, so a short cache stops
+    // noticing changes past that point and the field freezes - silently. The
+    // USAGE tab's caches were the only ones in this repo with no such
+    // assertion, until a pre-flight audit found resetAt1Cache filled EXACTLY
+    // by the pad width the first draft of this task specified (13, not 10).
+    for (const [cache, padW, what] of [
+      ["right1Cache",   12, "NOW meta left, tokens"],
+      ["resetAt1Cache", 10, "NOW meta right, spark caption / staleness"],
+      ["left1Cache",    c.SIDE_CHARS, "NOW side line 2, reset countdown"],
+      ["burn1Cache",    c.SIDE_CHARS, "NOW side line 1, burn verdict"],
+    ]) {
+      chk(CACHE[cache] !== undefined, `${cache} is declared where cacheSizes() can parse it`);
+      chk(CACHE[cache] >= padW + 1,
+          `${cache}[${CACHE[cache]}] holds its ${padW}-char padded string + NUL `
+        + `(${what}) - ${CACHE[cache] - padW - 1} bytes spare`);
+    }
+  }
 }
 
 // ---- padding helper vs datum, read out of the source -----------------------

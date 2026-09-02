@@ -46,9 +46,14 @@ def chk(cond, msg):
 # ---- the span is exactly 150 min, and the caption depends on it -------------
 # 30 slots span 145, and a card captioned LAST 2.5H over a 145-minute ring
 # overstates it by five minutes. 31 slots span exactly 150.
-# (The LAST 2.5H caption assertion itself belongs to Task 7, which writes the
-# spark that satisfies it - see CONTROLLER RULING in the task-5 brief.)
 chk(SPAN == 150, f"ring span (SLOTS-1)*STEP_MIN = {SPAN} min, must be exactly 150")
+# THE CAPTION ITSELF - the half of this claim Task 5 could not make true, since
+# the spark that carries it did not exist yet (see CONTROLLER RULING in the
+# task-5 brief). Task 7 is what writes drawUsageSpark()/renderNowCard() and the
+# "LAST 2.5H" string they draw, so this is the task that makes the sentence
+# above actually true rather than merely arithmetically consistent.
+chk("LAST 2.5H" in INO,
+    f"the spark's caption says LAST 2.5H, matching the {SPAN}-minute ring span")
 
 # ---- the ring must be able to measure the window it is used for ------------
 for name, win, want in [("5h session", 300, True), ("7d week", 10080, False)]:

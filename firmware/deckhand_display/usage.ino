@@ -466,6 +466,103 @@ void usageBurnLabel(char* out, size_t n, long mins, long resetMin) {
   else if (mins >= 60) snprintf(out, n, "empty ~%ldh %ldm", mins / 60, mins % 60);
   else                 snprintf(out, n, "empty ~%ldm", mins);
 }
+
+// The sparkline. CAPS PLUS CONNECTORS, not columns: a bar chart sitting directly
+// under the pace bar reads as a second pace bar, and caps alone read as a dashed
+// rule. One cap and one connector per sample is two fillRects a column.
+//
+// SCALE IS 0..100, so it agrees with the bar above it. Auto-scaling to the
+// series' own min and max reads better and lies by omission - a quota sitting
+// still with integer-percent noise would draw a dramatic mountain.
+void drawUsageSpark(uint32_t* cache, int x, int y, int w, int h, uint16_t fg, uint16_t bg) {
+  uint32_t sig = usageRingHash();
+  if (sig == *cache) return;          // or this repaints 260x32 every 5s tick
+  *cache = sig;
+  tft.fillRect(x - 1, y - 1, w + 2, h + 2, bg);
+  tft.drawFastHLine(x, y + h - 1, w, COLOR_LABEL);
+  if (usageRingCount < 2) return;     // baseline only; the caption says "no history"
+  int cw = w / USAGE_RING_SLOTS;
+  int oldest = (usageRingHead + USAGE_RING_SLOTS - usageRingCount) % USAGE_RING_SLOTS;
+  int prevCy = -1;
+  for (int i = 0; i < usageRingCount; i++) {
+    int v  = (int) usageRingPct[(oldest + i) % USAGE_RING_SLOTS];
+    int cy = y + h - 3 - ((h - 5) * v) / 100;
+    bool last = (i == usageRingCount - 1);
+    if (prevCy >= 0 && prevCy != cy) {
+      int a0 = prevCy < cy ? prevCy : cy;
+      int a1 = prevCy < cy ? cy : prevCy;
+      tft.fillRect(x + i * cw - 1, a0, 2, a1 - a0 + 2, fg);
+    }
+    tft.fillRect(x + i * cw, cy, cw - 1, last ? 4 : 2, last ? COLOR_VALUE : fg);
+    prevCy = cy;
+  }
+}
+
+// The 5-hour card, v2: the 64px hero keeps CARD_HERO_W's box, and the 132px it
+// no longer spends on an empty clear now holds two facts a bare percentage only
+// implies - the burn verdict and the reset countdown - plus a pace bar, a
+// sparkline of the last 2.5h, and a meta row (session tokens / staleness or the
+// spark's own caption).
+void renderNowCard() {
+  char buf[BURN_LABEL_BYTES + 8];
+  const int y0 = CARD1_Y;
+  bool stale = usage.quotaAgeSec > QUOTA_STALE_SEC;
+  uint16_t color = colorForPct(usage.fiveHourPct);
+  drawCardBorder(&border1Cache, CARD_X, y0, CARD_W, NOW_CARD_H, color);
+
+  if (usage.fiveHourPct >= 0) snprintf(buf, sizeof(buf), "%d%%", usage.fiveHourPct);
+  else snprintf(buf, sizeof(buf), "--");
+  // CARD_HERO_W, NOT THE FULL LANE. drawBigNumber clears the box it is given, and
+  // the two fact lines below live in what the full lane would erase.
+  drawBigNumber(pct1Cache, 8, buf, CARD_X + PAD, y0 + NOW_HERO_Y,
+                CARD_HERO_W, CARD_HERO_H,
+                stale ? COLOR_LABEL : COLOR_VALUE, COLOR_CARD);
+
+  long mins = usageBurnMinutes(usage.fiveHourPct, usage.fiveHourResetInMin, 5 * 60, stale);
+  usageBurnLabel(buf, BURN_LABEL_BYTES, mins, usage.fiveHourResetInMin);
+  padLeftTo(buf, sizeof(buf), SIDE_CHARS);
+  drawIfChanged(burn1Cache, sizeof(burn1Cache), buf, CARD_X + CARD_W - PAD,
+                y0 + NOW_SIDE_Y, 1, 1,
+                usageBurnUrgent(mins, usage.fiveHourResetInMin)
+                  ? (usage.fiveHourPct >= 90 ? COLOR_BAD : COLOR_WARN) : COLOR_LABEL,
+                COLOR_CARD, TR_DATUM);
+
+  snprintf(buf, sizeof(buf), "%s", usage.fiveHourResetInMin >= 0
+             ? formatResetIn(usage.fiveHourResetInMin).c_str() : "no data yet");
+  padLeftTo(buf, sizeof(buf), SIDE_CHARS);
+  drawIfChanged(left1Cache, sizeof(left1Cache), buf, CARD_X + CARD_W - PAD,
+                y0 + NOW_SIDE_Y + NOW_SIDE_STEP, 1, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
+
+  int tickPct = usage.fiveHourResetInMin >= 0
+                  ? (int) (100 - usage.fiveHourResetInMin * 100 / (5 * 60)) : -1;
+  drawPaceBar(&bar1Cache, CARD_X + PAD, y0 + NOW_BAR_Y, CARD_W - 2 * PAD, BAR_H,
+              usage.fiveHourPct, tickPct, color);
+
+  drawUsageSpark(&spark1Cache, CARD_X + PAD, y0 + NOW_SPARK_Y, CARD_W - 2 * PAD,
+                 NOW_SPARK_H, stale ? COLOR_LABEL : color, COLOR_CARD);
+
+  snprintf(buf, sizeof(buf), "%s",
+           usage.sessionTokens > 0 ? formatTokens(usage.sessionTokens).c_str() : "");
+  padTo(buf, sizeof(buf), 12);
+  drawIfChanged(right1Cache, sizeof(right1Cache), buf, CARD_X + PAD, y0 + NOW_META_Y,
+                2, 1, COLOR_LABEL, COLOR_CARD);
+
+  if (stale) {
+    long m = usage.quotaAgeSec / 60;
+    if (m < 60) snprintf(buf, sizeof(buf), "stale %ldm", m);
+    else        snprintf(buf, sizeof(buf), "stale %ldh", m / 60);
+  } else {
+    snprintf(buf, sizeof(buf), "%s", usageRingCount >= 2 ? "LAST 2.5H" : "no history");
+  }
+  // padLeftTo to 10, the longest value this field can hold ("no history"; the
+  // others are "LAST 2.5H" and staleTxt's 9). That is all the padding has to do -
+  // blank a previously-longer value - and it leaves resetAt1Cache[14] three bytes
+  // of headroom. Padding to 13 fills that cache EXACTLY, which is correct today
+  // and silently truncates the first time anyone widens this field.
+  padLeftTo(buf, sizeof(buf), 10);
+  drawIfChanged(resetAt1Cache, sizeof(resetAt1Cache), buf, CARD_X + CARD_W - PAD,
+                y0 + NOW_META_Y, 1, 1, stale ? COLOR_BAD : COLOR_LABEL, COLOR_CARD, TR_DATUM);
+}
 #endif  // BOARD_USAGE_V2
 
 // Codex's row. One line, because Codex publishes one number: a percentage of its

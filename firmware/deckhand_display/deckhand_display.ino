@@ -853,6 +853,22 @@ int cxStaleCache = -1;
 // dimmed when the % is stale (a frozen bold value otherwise reads as live).
 int quotaStaleCache = -1;
 
+#if BOARD_USAGE_V2
+// The NOW card's two new fields, board 2 only. burn1Cache is a PLAIN LITERAL
+// (not "SIDE_CHARS + 4"), deliberately: usage-geom-check.mjs's cacheSizes()
+// only parses a single [A-Za-z_0-9]+ token per array dimension, and an
+// expression there would leave this cache unparsed rather than merely
+// unchecked - "declared where cacheSizes() can parse it" is its own
+// assertion. 19 = SIDE_CHARS(15) + 4 bytes of slack, the same convention
+// CARD_HERO_H (glyph + slack) already uses; it holds the padded 15-char burn
+// verdict ("empty ~99d 23h" is 14 chars) plus its NUL with 3 bytes spare.
+char burn1Cache[19] = "";
+// The sparkline's change-only cache is a hash, not text - drawUsageSpark()
+// compares it against usageRingHash() directly, so it never goes through
+// drawIfChanged()'s string comparison at all.
+uint32_t spark1Cache = 0;
+#endif
+
 // Footer (persistent across both tabs).
 char clockCache[12] = "";
 char updatedCache[24] = "";
