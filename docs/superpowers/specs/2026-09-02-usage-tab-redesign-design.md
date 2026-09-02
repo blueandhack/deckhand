@@ -146,8 +146,9 @@ same exemption the `PAIR_*_MS` durations already carry, and for the same reason.
 | `SIDE_X0` | 170 | `LANE_X0 + CARD_HERO_W + 8`; derived, not transcribed |
 | `USAGE_RING_SLOTS` | 31 | ring depth — 31, so the span is exactly 150 min |
 | `USAGE_RING_STEP_MIN` | 5 | sample cadence — the OAuth poll interval, not 1/min |
-| `BURN_MIN_PCT` / `BURN_MAX_PCT` | 3 / 97 | **derived** from a 20% quantization budget |
-| `BURN_MIN_ELAPSED` | 30 min | **judgement**, stated as one |
+| `BURN_ERR_BUDGET_PCT` | 20 | the one budget every gate term below is derived from |
+| `BURN_MIN_PCT` / `BURN_MAX_PCT` | 3 / 97 | **derived** — quantization inside the budget |
+| `BURN_MIN_ELAPSED` | 5 min | **derived** — one OAuth poll interval; provably non-binding |
 | `BURN_RING_MIN_SPAN` | 30 min | ring must span this before it speaks |
 | `BURN_RING_MIN_RISE` | 3 points | and must have moved this far |
 | `BURN_RING_MAX_WIN` | 2880 min | above this the ring is blind; use the average |
@@ -204,7 +205,7 @@ measure the weekly window.** So:
 Least squares over the whole ring, never endpoint-to-endpoint — the same reason `battMinutesLeft`
 gives.
 
-### The gate: one number derived, one admitted as judgement
+### The gate: one error budget, every term derived from it
 
 `T = elapsed * (100 - pct) / pct`, so `dT/dpct = -100 * elapsed / pct²` and half a point of
 quantization costs a **relative** error of `50 / (pct * (100 - pct))` — **independent of
@@ -214,12 +215,30 @@ elapsed**. A 20% error budget therefore admits `pct` in **3..97** and refuses be
 |---|---|---|---|---|---|---|---|---|
 | error | 50.5% | 25.5% | **17.2%** | 10.5% | 5.6% | 2.0% | 5.6% | **17.2%** |
 
-So `BURN_MIN_PCT` 3 and `BURN_MAX_PCT` 97 are derived. Above 97 the answer is `empty now`.
+So `BURN_MIN_PCT` 3 and `BURN_MAX_PCT` 97 fall out of `BURN_ERR_BUDGET_PCT` alone. Above 97 the
+answer is `empty now`.
 
-**`BURN_MIN_ELAPSED` (30 min) is NOT derived and must not be presented as though it were.** It
-guards the constant-rate assumption right after a window resets, when one burst dominates the
-average, and no single sample can bound that error. It is a judgement, stated as one — the same
-honesty `SESSION_PULSE_MS` is recorded with.
+**`BURN_MIN_ELAPSED` is one OAuth poll interval (5 min), and that is a data-validity bound rather
+than a taste call.** The percentage is refreshed every `OAUTH_POLL_INTERVAL_MS`, so below one
+interval the figure the device holds may have been read *before* the window boundary — it is not
+merely imprecise, it can belong to the previous window. Quantization on `elapsed` itself
+(`resetInMin` is integer minutes) asks only for `0.5 / e <= 20%`, i.e. 2.5 min, so the poll
+interval is the binding half.
+
+**And it is provably never the gate that fires.** The average estimator only runs for
+`window > BURN_RING_MAX_WIN` (2880 min), where reaching `BURN_MIN_PCT` at a linear burn already
+takes `0.03 * 2880 = 86.4 min` — and 302 min on the real 7-day window, so the week's burn figure
+appears about **5 hours** after a reset, gated by the percent floor every time. The elapsed term
+is therefore belt-and-braces, and stating that it cannot bind is better than leaving a constant
+open to the charge of being a magic number.
+
+**The one error nothing here bounds is burst representativeness, and it is not pretended
+otherwise** — a window's whole consumption arriving in one interval makes any average
+unrepresentative, at any elapsed. What removes the concern is *which* estimator uses the average:
+one 5-minute interval is **0.05%** of a 7-day window (against **1.67%** of a 5-hour one), so the
+error is negligible exactly where the average is used, and material exactly where the ring
+replaces it. That is the same split the two estimators already make, arrived at from the other
+direction.
 
 **A stale reading drives no estimate.** Past `quotaAgeSec > 900` the clock has kept running while
 the number has not, so any slope through it measures the gap rather than the burn. The figure
@@ -339,16 +358,17 @@ ring; board 1 by **zero** until the two fix commits.
 - **The ring's behaviour across a real window reset is untested**, because it needs 5 hours of
   wall clock to observe once.
 
-## Open questions
+## The three open questions, resolved
 
-1. **When does the ring reset?** The battery ring clears when the state leaves `DISCHARGING` or
-   the charge rises >40mV. Three candidate events here: the **window resetting** (the percentage
-   drops, and a slope across that discontinuity is meaningless), the reading **going stale**, and
-   `mergeUsage` **switching source Mac**. Inclination: clear on a drop and on a staleness edge, and
-   ignore a source switch since both Macs poll the same account — but that last one should be
-   looked at rather than assumed.
-2. **`BURN_MIN_ELAPSED`** is the one number in the gate with nothing behind it. Either accept it as
-   a judgement and say so at the constant, or derive a floor from something measurable.
-3. **Does the pin bar survive?** It drew the "why is there a red underline?" complaint and this
-   redesign does not address it. Out of scope as chosen, recorded so it is not mistaken for
-   settled.
+1. **The ring resets on a percentage DROP and on a staleness EDGE, and on nothing else.** A drop
+   means the window turned over, and a slope taken across that discontinuity is meaningless. A
+   staleness edge means the clock has kept running while the number has not, so the samples either
+   side of it are not a series. `mergeUsage` **switching source Mac deliberately does not reset**:
+   both Macs poll the same account, so the two readings are the same measurement at different
+   ages, and clearing 2.5 hours of history because a link aged out would throw away good data for
+   no gain. Reset on the edge, not per tick, or a 5s loop clears the ring it is filling.
+2. **`BURN_MIN_ELAPSED` is derived** — see the gate section. It is one OAuth poll interval, it is a
+   data-validity bound, and it provably never binds. No judgement constant remains in the gate.
+3. **The pin bar is untouched and out of scope.** It drew the "why is there a red underline?"
+   complaint and this redesign does not address it. Recorded so it is not mistaken for settled,
+   and it should not be fixed in passing inside a diff whose claim is the layout.
