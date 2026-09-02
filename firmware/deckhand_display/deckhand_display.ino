@@ -5767,6 +5767,10 @@ void loop() {
     lastBattSample = millis();
     sampleBattery();
     battTrendSample();
+#if BOARD_USAGE_V2
+    usageRingSample();   // self-rate-limits to USAGE_RING_STEP_MS; the 1s outer
+                         // tick just gives it a chance to look
+#endif
 #if !BOARD_USES_TFT_ESPI
     // The charging counterpart, BOARD 2 ONLY. Each returns immediately unless the
     // battery is in ITS state, so the two rings can never both be accumulating -

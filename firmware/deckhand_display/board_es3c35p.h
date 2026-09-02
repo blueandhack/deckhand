@@ -540,6 +540,30 @@ const int SIDE_X0     = CARD_X + PAD + CARD_HERO_W + 8;
 // lane, deliberately under-using the roomier case.
 const int SIDE_CHARS = (CARD_X + CARD_W - PAD - SIDE_X0) / TEXT_ADV;
 
+// ---------- USAGE trend ring (board 2 only) ----------
+// 31 SLOTS, NOT 30, AND THE REASON IS THE CAPTION. The span is (n-1)*step, so 30
+// slots span 145 minutes - and a card captioned LAST 2.5H over a 145-minute ring
+// overstates it by five. 31 spans exactly 150.
+const int USAGE_RING_SLOTS = 31;
+// THE OAUTH POLL CADENCE, NOT ONCE A MINUTE, and this is what makes the sparkline
+// worth drawing. The quota only MOVES every OAUTH_POLL_INTERVAL_MS (5 min, in
+// host/index.mjs), so a 1-per-minute ring holds five identical samples then a
+// step - about six distinct values in half an hour. At the poll cadence the same
+// 31 slots span 150 minutes.
+const int USAGE_RING_STEP_MIN = 5;
+const unsigned long USAGE_RING_STEP_MS = (unsigned long) USAGE_RING_STEP_MIN * 60000UL;
+// A DROP this large means the window turned over, and a slope taken across that
+// discontinuity is meaningless. DERIVED rather than picked: mergeUsage() can swap
+// the source Mac at any tick, the two Macs' readings differ only in AGE, that
+// difference is bounded by one poll interval, and in one interval the shortest
+// window this ring serves moves 100 * 5 / 300 = 1.67 points. So a 1- or 2-point
+// fall is explicable by a source switch and must NOT clear the ring; 3 is not.
+const int USAGE_RING_DROP_PCT = 3;
+// The staleness threshold this ring and the burn gate key off. Board 2 only, so
+// board 1's own inline 900s in renderUsageTab is deliberately left alone rather
+// than replaced - naming it there would risk that board's binary for nothing.
+const int QUOTA_STALE_SEC = 900;
+
 // ---------- Inside the WEEK card ----------
 // Secondary, so a T_HEAD (12x24) number rather than a 64px hero. That contrast
 // IS the hierarchy. Border owns +142..+143; ceiling +141, last clear +138.

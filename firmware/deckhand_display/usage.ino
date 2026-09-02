@@ -323,6 +323,97 @@ void renderFooter() {
   tft.flush();
 #endif
 }
+#if BOARD_USAGE_V2
+// ---------- The USAGE trend ring ----------
+// Modelled on battTrend* in power.ino: a fixed ring of one-per-interval samples,
+// least-squares fitted, refusing to speak until it has earned a number. ONE ring
+// serves both the sparkline and the burn rate, which is what makes it worth its
+// DRAM - and it samples the 5-hour percentage only, because the week's burn uses
+// no history at all (see usageBurnMinutes).
+uint8_t       usageRingPct[USAGE_RING_SLOTS];
+unsigned long usageRingAt[USAGE_RING_SLOTS];
+int           usageRingCount = 0;
+int           usageRingHead  = 0;
+unsigned long usageRingLast  = 0;
+bool          usageRingWasStale = false;
+
+void usageRingReset() {
+  usageRingCount = 0;
+  usageRingHead  = 0;
+  usageRingLast  = 0;
+}
+
+void usageRingSample() {
+  bool stale = usage.quotaAgeSec > QUOTA_STALE_SEC;
+  // A staleness EDGE clears, never the level. The clock keeps running while the
+  // number does not, so samples either side of the gap are not one series - but
+  // testing the level would clear the ring on every one of the 5s ticks it spends
+  // stale, which is the ring it is trying to fill.
+  if (stale != usageRingWasStale) {
+    usageRingWasStale = stale;
+    if (stale) usageRingReset();
+  }
+  if (stale || usage.fiveHourPct < 0) return;
+
+  unsigned long now = millis();
+  if (usageRingLast != 0 && now - usageRingLast < USAGE_RING_STEP_MS) return;
+
+  // A DROP means the window turned over. Note this deliberately does NOT reset on
+  // a mergeUsage source-Mac switch: both Macs poll the same account, so their
+  // readings are the same measurement at different ages, and clearing 2.5 hours
+  // of history because a link aged out would throw away good data. The threshold
+  // is what separates the two - see USAGE_RING_DROP_PCT's derivation.
+  if (usageRingCount > 0) {
+    int prev = (int) usageRingPct[(usageRingHead + USAGE_RING_SLOTS - 1) % USAGE_RING_SLOTS];
+    if (usage.fiveHourPct <= prev - USAGE_RING_DROP_PCT) usageRingReset();
+  }
+
+  usageRingLast = now;
+  usageRingPct[usageRingHead] = (uint8_t) usage.fiveHourPct;
+  usageRingAt[usageRingHead]  = now;
+  usageRingHead = (usageRingHead + 1) % USAGE_RING_SLOTS;
+  if (usageRingCount < USAGE_RING_SLOTS) usageRingCount++;
+}
+
+// Least squares over the whole ring, never endpoint-to-endpoint - the same reason
+// battMinutesLeft gives: one sample taken at an odd moment sits well off the
+// trend, and two endpoints give it full weight. x comes from the stored
+// timestamps rather than the slot index, because a missed poll leaves a real gap.
+bool usageRingSlope(float* slopeOut, int* riseOut, long* spanMinOut) {
+  if (usageRingCount < 2) return false;
+  int oldest = (usageRingHead + USAGE_RING_SLOTS - usageRingCount) % USAGE_RING_SLOTS;
+  int newest = (usageRingHead + USAGE_RING_SLOTS - 1) % USAGE_RING_SLOTS;
+  double sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (int i = 0; i < usageRingCount; i++) {
+    int idx = (oldest + i) % USAGE_RING_SLOTS;
+    double x = (double) ((usageRingAt[idx] - usageRingAt[oldest]) / 60000UL);
+    double y = (double) usageRingPct[idx];
+    sx += x; sy += y; sxx += x * x; sxy += x * y;
+  }
+  double den = (double) usageRingCount * sxx - sx * sx;
+  if (den == 0) return false;
+  *slopeOut   = (float) (((double) usageRingCount * sxy - sx * sy) / den);
+  *riseOut    = (int) usageRingPct[newest] - (int) usageRingPct[oldest];
+  *spanMinOut = (long) ((usageRingAt[newest] - usageRingAt[oldest]) / 60000UL);
+  return true;
+}
+
+// FNV-1a 32-bit over the samples, for the sparkline's change-only cache. It is
+// compared against the ONE previous value and never against a population, so a
+// missed repaint needs a collision with that single value - 2^-32 per event, not
+// a birthday problem. Same hash and same argument buildDetailSignature already
+// uses for optDescs.
+uint32_t usageRingHash() {
+  uint32_t h = 2166136261UL;
+  h = (h ^ (uint32_t) usageRingCount) * 16777619UL;
+  for (int i = 0; i < usageRingCount; i++) {
+    int idx = (usageRingHead + USAGE_RING_SLOTS - usageRingCount + i) % USAGE_RING_SLOTS;
+    h = (h ^ usageRingPct[idx]) * 16777619UL;
+  }
+  return h;
+}
+#endif  // BOARD_USAGE_V2
+
 // Codex's row. One line, because Codex publishes one number: a percentage of its
 // primary window and when that window resets. No token count, no second window, and
 // nothing to plot a pace against - so a full card would be mostly empty chrome.
