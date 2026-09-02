@@ -2241,6 +2241,15 @@ bool drawBigNumber(char* cache, size_t cacheSize, const char* text, int x, int y
   return true;
 }
 
+#if !BOARD_USAGE_V2
+// v1's card renderer - one function drawing both the 5h and 7d cards
+// identically. Board 2 draws renderNowCard()/renderWeekCard() instead
+// (usage.ino), and this is WRAPPED rather than just left uncalled: an
+// uncalled function is dead weight the linker may or may not drop, which
+// would silently spend flash on a renderer that can never run on this board.
+// Duplicated behind the flag rather than parameterised, because
+// parameterising a shared function to serve both layouts would risk board
+// 1's binary for no benefit - the same trade the ask screen's READ chip made.
 void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long windowMin,
                 char* pctCache, char* leftCache, char* rightCache, char* fableCache,
                 char* resetAtCache, int* barCache, int* borderCache,
@@ -2340,6 +2349,7 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
     drawIfChanged(fableCache, 24, buf, CARD_X + PAD, y0 + CARD_FOOT_Y, 1, 1, COLOR_ACCENT, COLOR_CARD);
   }
 }
+#endif  // !BOARD_USAGE_V2
 
 
 

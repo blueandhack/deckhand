@@ -36,6 +36,17 @@ void resetUsageCaches() {
   resetAt2Cache[0] = '\0'; bar2Cache = -2; border2Cache = -1;
   cxPctCache[0] = '\0'; cxRightCache[0] = '\0'; cxBorderCache = -1;
   cxBarCache = -1; cxStaleCache = -1;
+#if BOARD_USAGE_V2
+  // The NOW/WEEK cards' own fields - drawUsageStatic() repaints the chrome
+  // these are drawn ON, so a cache left out of this reset leaves its field
+  // BLANK after any full repaint (tab switch, theme change, returning from
+  // settings): "unchanged" per drawIfChanged, though its pixels were just
+  // erased. That shipped once as "USAGE shows no numbers after recording".
+  burn1Cache[0] = '\0';
+  burn2Cache[0] = '\0';
+  spark1Cache = 0;
+  fableBarCache = -2;
+#endif
 }
 // Which link (Mac) supplied the figures currently on screen - see mergeUsage().
 // -1 means no link has a usable reading yet.
@@ -139,8 +150,22 @@ bool usageCyclePin() {
   }
   return true;
 }
+// THE SIGNATURE ITSELF IS #if'd, NOT DEFAULTED - and that is deliberate,
+// proven by injection. A 4th `h` argument defaulting to CARD_H moved board
+// 1's binary (+0 bytes, masked hash CHANGED) even though CARD_H was the only
+// value board 1 ever passed: turning a compile-time constant baked into the
+// function body into a runtime-passed parameter is a real codegen change,
+// not a no-op, regardless of what value ends up in it. So board 1's arm is
+// the ORIGINAL 3-argument text, byte-for-byte, and only board 2 - whose two
+// v2 cards are different heights (NOW_CARD_H/WEEK_CARD_H, not one CARD_H) -
+// takes an explicit height.
+#if BOARD_USAGE_V2
+void drawCardChrome(int y0, const char* label, const char* tag, int h) {
+  uiCard(CARD_X, y0, CARD_W, h, COLOR_CARD);  // border added by caller when active
+#else
 void drawCardChrome(int y0, const char* label, const char* tag) {
   uiCard(CARD_X, y0, CARD_W, CARD_H, COLOR_CARD);  // border added by caller when active
+#endif
   setUIFont(T_META);
   tft.setTextColor(COLOR_LABEL, COLOR_CARD);
   tft.setTextDatum(TL_DATUM);
@@ -556,8 +581,12 @@ void renderNowCard() {
 
   int tickPct = usage.fiveHourResetInMin >= 0
                   ? (int) (100 - usage.fiveHourResetInMin * 100 / (5 * 60)) : -1;
+  // stale-aware colour, not bare `color`: a bright bar beside a dimmed hero
+  // and spark would read as live data - the same reasoning the Codex row's
+  // bar already documents, and busted in the stale flip above (drawPaceBar
+  // caches on (pct, tick) alone, so a colour-only change would not repaint).
   drawPaceBar(&bar1Cache, CARD_X + PAD, y0 + NOW_BAR_Y, CARD_W - 2 * PAD, BAR_H,
-              usage.fiveHourPct, tickPct, color);
+              usage.fiveHourPct, tickPct, stale ? COLOR_LABEL : color);
 
   drawUsageSpark(&spark1Cache, CARD_X + PAD, y0 + NOW_SPARK_Y, CARD_W - 2 * PAD,
                  NOW_SPARK_H, stale ? COLOR_LABEL : color, COLOR_CARD);
@@ -621,8 +650,11 @@ void renderWeekCard() {
 
   int tickPct = usage.sevenDayResetInMin >= 0
                   ? (int) (100 - usage.sevenDayResetInMin * 100 / WIN) : -1;
+  // Same stale-aware colour as NOW's bar above, for the same reason: the ALL
+  // bar sits directly over the Fable bar below it, which already dims - a
+  // bright ALL bar over a dimmed Fable bar was the inconsistency this fixes.
   drawPaceBar(&bar2Cache, CARD_X + PAD, y0 + WEEK_BAR_Y, CARD_W - 2 * PAD, BAR_H,
-              usage.sevenDayPct, tickPct, color);
+              usage.sevenDayPct, tickPct, stale ? COLOR_LABEL : color);
 
   snprintf(buf, sizeof(buf), "%s",
            usage.weekAllTokens > 0 ? formatTokens(usage.weekAllTokens).c_str() : "");
@@ -836,6 +868,19 @@ void renderUsageTab() {
     quotaStaleCache = stale;
     pct1Cache[0] = '\0';
     pct2Cache[0] = '\0';
+#if BOARD_USAGE_V2
+    // Every v2 field dims with the card, and FOUR of them would never repaint
+    // on their own: drawPaceBar keys its cache on (pct, tick) alone and
+    // drawUsageSpark on the ring's content hash, so a colour-only change
+    // moves neither. This is the same bust cxBarCache already needs below,
+    // for the same reason.
+    burn1Cache[0] = '\0';
+    burn2Cache[0] = '\0';
+    spark1Cache = 0;
+    bar1Cache = -2;
+    bar2Cache = -2;
+    fableBarCache = -2;
+#endif
   }
   // Codex's row dims on ITS OWN age, so it gets its own flip. This used to hang off the
   // Claude flag above, which was wrong in both directions: Codex going stale while the
@@ -891,12 +936,17 @@ void renderUsageTab() {
     emojiCache = emojiNow;
     drawUsageStatic();   // repaints chrome; resetUsageCaches() runs inside it
   }
+#if BOARD_USAGE_V2
+  renderNowCard();
+  renderWeekCard();
+#else
   renderCard(CARD1_Y, usage.fiveHourPct, usage.sessionTokens, usage.fiveHourResetInMin,
              5 * 60, pct1Cache, left1Cache, right1Cache, fable1Cache, resetAt1Cache,
              &bar1Cache, &border1Cache);
   renderCard(CARD2_Y, usage.sevenDayPct, usage.weekAllTokens, usage.sevenDayResetInMin,
              7 * 24 * 60, pct2Cache, left2Cache, right2Cache, fable2Cache, resetAt2Cache,
              &bar2Cache, &border2Cache, usage.weekFableTokens, usage.weekFablePct);
+#endif
   renderCodexRow();
 #if !BOARD_USES_TFT_ESPI
   tft.flush();
@@ -911,7 +961,17 @@ void drawUsageStatic() {
   resetUsageCaches();
   // Both Claude cards (5h and 7d) are merged from the SAME link in
   // mergeUsage(), so they always carry the same source tag.
+#if BOARD_USAGE_V2
+  // v2 labels and heights, matched to renderNowCard/renderWeekCard's own
+  // NOW_CARD_H/WEEK_CARD_H - the same heights CARD1_Y/CARD2_Y/CODEX_Y in the
+  // board header now derive from. "NOW", not "SESSION", because this card is
+  // the one that stops you working - the semantic hierarchy this redesign is
+  // for (docs/design/usage-redesign/usage.js's selected layout B).
+  drawCardChrome(CARD1_Y, "NOW - 5 HOUR WINDOW", linkTag(usageSourceLink), NOW_CARD_H);
+  drawCardChrome(CARD2_Y, "WEEK - 7 DAY, ALL MODELS", linkTag(usageSourceLink), WEEK_CARD_H);
+#else
   drawCardChrome(CARD1_Y, "SESSION - 5 HOUR WINDOW", linkTag(usageSourceLink));
   drawCardChrome(CARD2_Y, "WEEK - 7 DAY, ALL MODELS", linkTag(usageSourceLink));
+#endif
   uiCard(CARD_X, CODEX_Y, CARD_W, CODEX_H, COLOR_CARD);
 }

@@ -32,8 +32,14 @@ const K = {
   BOARD_W:320, BOARD_H:480, TAB_BAR_H:46, CONTENT_Y:46, FOOTER_H:20,
   CARD_X:12, CARD_W:296, PAD:18, BAR_H:12, R_MD:12, BORDER_CARD:2,
   TAB_REC_W:40, TAB_COUNT:3, SP_2:8,
-  // v1, still live and still drawn by the "today" (WAS) baseline panel.
-  CARD_H:164, CODEX_H:56, CARD1_Y:54, CARD2_Y:226, CODEX_Y:398,
+  // CARD_H/CODEX_H/CARD1_Y are unchanged by the column move (Task 9): CARD_H
+  // stays declared in the header - v1's, unread there now - and CARD1_Y is
+  // CONTENT_Y+8 under both layouts. CARD2_Y/CODEX_Y are NOT still v1's: Task
+  // 9 moved the header's own CARD2_Y/CODEX_Y onto the v2 heights
+  // (NOW_CARD_H/WEEK_CARD_H), so these two now hold the CURRENT (v2) values
+  // and the "today" (WAS) baseline panel's old 226/398 live in WAS instead -
+  // same split CODEX_LANE_CHARS/CODEX_RIGHT_CHARS already use below.
+  CARD_H:164, CODEX_H:56, CARD1_Y:54, CARD2_Y:244, CODEX_Y:396,
   CARD_PIN_BAR_Y:3, CARD_LABEL_Y:6, CARD_HERO_Y:24, CARD_HERO_H:65,
   CARD_BAR_Y:95, CARD_STATS_Y:118, CARD_FOOT_Y:140,
   CODEX_TEXT_Y:8, CODEX_BAR_Y:37,
@@ -74,6 +80,10 @@ K.SIDE_CHARS = Math.floor((K.LANE_X1 - K.SIDE_X0) / 8); // 15
 // ---------------------------------------------------------------------------
 const WAS = {
   CODEX_LANE_CHARS:12, CODEX_RIGHT_CHARS:20,
+  // Task 9 moved the header's CARD2_Y/CODEX_Y onto the v2 column
+  // (NOW_CARD_H/WEEK_CARD_H); these are the v1 positions the "today" panel
+  // still draws its 164px-tall cards at.
+  CARD2_Y:226, CODEX_Y:398,
 };
 
 // font ids as the sketch uses them: T_META 1, T_BODY 2, T_HEAD 3, T_HERO 8
@@ -386,10 +396,10 @@ function drawToday(p,d) {
   };
   card(K.CARD1_Y,"SESSION - 5 HOUR WINDOW",d.fh,d.fhT,d.fhR,300,null);
   const fb = d.fbP>=0&&d.fbT>=1e6 ? `Fable: ${d.fbP}% ${(d.fbT/1e6).toFixed(1)}M` : d.fbP>=0 ? `Fable: ${d.fbP}%` : "";
-  card(K.CARD2_Y,"WEEK - 7 DAY, ALL MODELS",d.sd,d.sdT,d.sdR,10080,fb);
+  card(WAS.CARD2_Y,"WEEK - 7 DAY, ALL MODELS",d.sd,d.sdT,d.sdR,10080,fb);
   // Codex: one line, and the STALE 12-character label ceiling (WAS, not K).
   const cs = isCxStale(d), have = d.cx>=0, col = have ? pctCol(t,d.cx) : t.unknown;
-  p.card("codex",K.CODEX_Y,K.CODEX_H,col);
+  p.card("codex",WAS.CODEX_Y,K.CODEX_H,col);
   const { lab, showTag } = codexLabel(d);
   let right = !have ? "--" : d.cxR>=0 ? (showTag ? `${d.cx}%  ${fmtResetIn(d.cxR)}`
               : `${d.cx}%  ${fmtResetIn(d.cxR)}  ${at(NOW,d.cxR)}`) : `${d.cx}%`;
@@ -400,11 +410,11 @@ function drawToday(p,d) {
   // actually starts - which depends on CONTENT, not on CODEX_RIGHT_CHARS.
   const rightX = K.LANE_X1-right.length*8;
   const laneCeil = Math.floor((rightX-1-K.LANE_X0)/8);
-  p.text(padR(lab,WAS.CODEX_LANE_CHARS),K.LANE_X0,K.CODEX_Y+K.CODEX_TEXT_Y,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
-  if (d.icon) p.icon(K.LANE_X0+tw("CX",2)+4,K.CODEX_Y+K.CODEX_TEXT_Y,t.card);
-  p.text(right,K.LANE_X1,K.CODEX_Y+K.CODEX_TEXT_Y,2,cs?t.label:(have?t.value:t.label),t.card,"TR","ifchanged",K.LANE_W);
+  p.text(padR(lab,WAS.CODEX_LANE_CHARS),K.LANE_X0,WAS.CODEX_Y+K.CODEX_TEXT_Y,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
+  if (d.icon) p.icon(K.LANE_X0+tw("CX",2)+4,WAS.CODEX_Y+K.CODEX_TEXT_Y,t.card);
+  p.text(right,K.LANE_X1,WAS.CODEX_Y+K.CODEX_TEXT_Y,2,cs?t.label:(have?t.value:t.label),t.card,"TR","ifchanged",K.LANE_W);
   p.laneCeil = laneCeil; p.laneNeed = lab.length;
-  p.paceBar(K.LANE_X0,K.CODEX_Y+K.CODEX_BAR_Y,K.LANE_W,K.BAR_H,have?d.cx:0,
+  p.paceBar(K.LANE_X0,WAS.CODEX_Y+K.CODEX_BAR_Y,K.LANE_W,K.BAR_H,have?d.cx:0,
     (have&&d.cxR>=0&&d.cxW>0)?tickOf(d.cxR,d.cxW):-1,cs?t.label:col);
 }
 

@@ -274,22 +274,22 @@ for (const b of [1, 2]) {
   chk(c.CARD_X + c.CARD_W + c.CARD_X === W, `card spans the width: ${c.CARD_X}+${c.CARD_W}+${c.CARD_X} = ${W}`);
   // column
   // (a) THE POSITIONS ARE BOUND TO THE GAPS AND HEIGHTS. What this catches is a
-  // HARDCODED position and a DRIFTED gap, on both boards, plus a height change on
-  // board 1 - whose CARD1_Y/CARD2_Y/CODEX_Y are literals (38/146/254). It does NOT
-  // catch a height change on board 2, whose positions are live formulas of CARD_H
-  // that consts() re-evaluates, so both sides of the comparison move together.
-  // Board 2's V2 heights (NOW_CARD_H/WEEK_CARD_H) are guarded by the declared-sum
-  // assertion below. Its still-live v1 CARD_H is guarded by nothing here until the
-  // task that swaps the column over; that gap is pre-existing, not introduced here.
+  // HARDCODED position and a DRIFTED gap, on both boards, plus a height change
+  // on either. Board 1's CARD1_Y/CARD2_Y/CODEX_Y are literals (38/146/254)
+  // bound against its uniform CARD_H. Board 2's positions moved onto the v2
+  // heights in Task 9 (NOW_CARD_H/WEEK_CARD_H, no longer CARD_H - v1's
+  // renderCard is #if'd out on this board and CARD_H is unread here), so this
+  // now follows THOSE heights rather than CARD_H, or a v2 height change would
+  // pass here while failing only the declared-sum assertion below.
   // (`air > 0` alone passed when FOOTER_H moved 18 -> 20 and the real air went
   // 8 -> 6 - exactly the drift it existed to catch.)
   const gap = b === 2 ? c.SP_2 : 4;
-  const y1 = c.CONTENT_Y + gap;
-  const y2 = y1 + c.CARD_H + gap;
-  const y3 = y2 + c.CARD_H + gap;
+  const h1 = b === 2 ? c.NOW_CARD_H  : c.CARD_H;
+  const h2 = b === 2 ? c.WEEK_CARD_H : c.CARD_H;
+  const y1 = c.CONTENT_Y + gap, y2 = y1 + h1 + gap, y3 = y2 + h2 + gap;
   chk(c.CARD1_Y === y1, `CARD1_Y ${c.CARD1_Y} == CONTENT_Y + gap (${y1})`);
-  chk(c.CARD2_Y === y2, `CARD2_Y ${c.CARD2_Y} == CARD1_Y + CARD_H + gap (${y2})`);
-  chk(c.CODEX_Y === y3, `CODEX_Y ${c.CODEX_Y} == CARD2_Y + CARD_H + gap (${y3})`);
+  chk(c.CARD2_Y === y2, `CARD2_Y ${c.CARD2_Y} == CARD1_Y + h1 + gap (${y2})`);
+  chk(c.CODEX_Y === y3, `CODEX_Y ${c.CODEX_Y} == CARD2_Y + h2 + gap (${y3})`);
   const colEnd = c.CODEX_Y + c.CODEX_H;
   const air = contentBottom - colEnd;
   chk(air > 0, `column ends at ${colEnd}, ${air}px of air (never flush on the footer)`);
@@ -754,6 +754,85 @@ for (const b of [1, 2]) {
       chk(CACHE[cache] > wpads[cache] + 1,
           `${cache}[${CACHE[cache]}] holds its ${wpads[cache]}-char padded string + NUL `
         + `(${what}) with ${CACHE[cache] - wpads[cache] - 1} bytes of real headroom`);
+    }
+  }
+}
+
+// ---- v2 cache hygiene: reset, stale bust, and bar-colour consistency -------
+// Three change-only hazards Task 9 introduced, all asserted over the real
+// source rather than a hand-kept list - the pattern this whole file uses,
+// because a hand-kept list is a list that goes stale the first time someone
+// adds a field, silently.
+{
+  const src = stripComments("usage.ino");
+
+  // 1. EVERY cache either card renderer writes must be cleared in
+  // resetUsageCaches(). drawUsageStatic() repaints the chrome these fields
+  // sit ON, so a cache it misses leaves the value BLANK - "hasn't changed"
+  // per drawIfChanged, even though its pixels were just erased. Shipped once
+  // as "USAGE shows no numbers after recording". Parsed from the renderers,
+  // not listed here, so a sixth cache added later is covered by default.
+  const reset = fnBody(src, "void resetUsageCaches(", "usage.ino");
+  const used = new Set();
+  for (const fn of ["void renderNowCard(", "void renderWeekCard("]) {
+    const body = fnBody(src, fn, "usage.ino");
+    for (const m of body.matchAll(/drawIfChanged\(\s*(\w+Cache)/g))       used.add(m[1]);
+    for (const m of body.matchAll(/drawBigNumber\(\s*(\w+Cache)/g))       used.add(m[1]);
+    for (const m of body.matchAll(/drawPaceBar\(\s*&(\w+Cache)/g))        used.add(m[1]);
+    for (const m of body.matchAll(/drawUsageSpark\(\s*&(\w+Cache)/g))     used.add(m[1]);
+    for (const m of body.matchAll(/drawCardBorder\(\s*&(\w+Cache)/g))     used.add(m[1]);
+  }
+  // Not ceremony: without this, a regex that stopped matching would make the
+  // loop below iterate zero times and the whole block would pass vacuously -
+  // the failure mode this branch has now hit five times.
+  chk(used.size >= 10, `parsed ${used.size} caches out of the two card renderers (expected >= 10)`);
+  for (const cache of [...used].sort())
+    chk(reset.includes(cache), `resetUsageCaches() clears ${cache}, which a card renderer writes`);
+
+  // 2. The STALE flip busts the caches drawIfChanged's own text comparison
+  // cannot: drawPaceBar caches on (pct, tick) alone and drawUsageSpark on the
+  // ring's content hash, so a colour-only staleness change moves neither.
+  // This is the same class cxBarCache already needs, for the same reason.
+  const tab = fnBody(src, "void renderUsageTab(", "usage.ino");
+  const staleIdx = tab.indexOf("stale != quotaStaleCache");
+  // Bounded to the NEXT bust block (cxStale's), not to the end of the
+  // function - renderUsageTab's #else arm still calls renderCard(...,
+  // &bar1Cache, &border1Cache) further down for board 1, and an unbounded
+  // slice would find that mention and pass vacuously whether or not the
+  // stale-flip block itself busts the cache. Caught by injection while
+  // writing this: deleting the real bust line left every assertion green
+  // until the slice was bounded.
+  const cxIdx = tab.indexOf("cxStale != cxStaleCache", staleIdx);
+  chk(staleIdx >= 0 && cxIdx > staleIdx,
+      "found the stale-flip block inside renderUsageTab to check");
+  const staleBlock = tab.slice(staleIdx < 0 ? 0 : staleIdx, cxIdx < 0 ? undefined : cxIdx);
+  for (const cache of ["burn1Cache", "burn2Cache", "spark1Cache",
+                       "bar1Cache", "bar2Cache", "fableBarCache"])
+    chk(staleBlock.includes(cache), `the stale flip busts ${cache}`);
+
+  // 3. The spark is keyed on the ring's CONTENT, not drawn unconditionally,
+  // or it repaints 260x32 on every 5s tick - and on this board that is a
+  // real slice of a 30ms flush rather than "some SPI writes".
+  chk(/drawUsageSpark\(\s*&spark1Cache/.test(src),
+      "drawUsageSpark is passed a cache rather than drawing unconditionally");
+  chk(fnBody(src, "void drawUsageSpark(", "usage.ino").includes("usageRingHash"),
+      "drawUsageSpark keys its cache on usageRingHash()");
+
+  // 4. EVERY drawPaceBar call inside the two v2 card renderers must pass a
+  // stale-aware colour, or that bar keeps its pre-stale hue indefinitely
+  // while the hero/spark beside it dim - the inconsistency Task 8's review
+  // found (the NOW and WEEK ALL bars did not dim; the Fable bar did, but was
+  // dead code without the bust above). Parsed rather than spot-checked, so a
+  // THIRD bar added later cannot reopen this by omission.
+  for (const fn of ["void renderNowCard(", "void renderWeekCard("]) {
+    const body = fnBody(src, fn, "usage.ino");
+    const bars = [...body.matchAll(/drawPaceBar\(([\s\S]*?)\)\s*;/g)];
+    chk(bars.length >= 1, `${fn} has drawPaceBar calls to check (found ${bars.length})`);
+    for (const m of bars) {
+      const args = splitArgs(m[1]);
+      chk(/\bstale\b/.test(args[args.length - 1]),
+          `${fn}: a drawPaceBar colour argument is stale-aware `
+        + `(got "${args[args.length - 1].trim().slice(0, 50)}")`);
     }
   }
 }

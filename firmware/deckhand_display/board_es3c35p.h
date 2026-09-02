@@ -459,39 +459,48 @@ const int RADIUS = R_MD;
 // compressible part and the cards were protected; given surplus, the cards are
 // where it belongs, because the content is what the tab is for and there is no
 // more of it to add.
+// This comment is the v1 arithmetic; Task 9 moved the column onto the v2
+// heights below, and this is why the two card constants each carry TWO
+// derivations now rather than one:
 //
-//   8 + 164 + 8 + 164 + 8 + 56 + 6 = 414  (the last 6 is the air below)
+//   v1: 8 + 164 + 8 + 164 + 8 + 56 + 6 = 414  (the last 6 is the air below)
+//   v2: 8 + 182 + 8 + 144 + 8 + 56 + 8 = 414
 //
-// so the column runs CONTENT_Y(46)..454 against a contentBottom() of 460.
+// so the column runs CONTENT_Y(46)..452 against a contentBottom() of 460.
 // THE COLUMN MUST NOT END FLUSH ON contentBottom() - board 1 shipped that once
 // (6+104+4+104+4+46 spent all 268) and the Codex row sat against the footer
-// reading as one joined block. 6px of air below, matching the gaps above it.
-const int CARD_H = 164;
-const int CARD1_Y = CONTENT_Y + 8;                 // 54
-const int CARD2_Y = CARD1_Y + CARD_H + 8;          // 226
-const int CODEX_Y = CARD2_Y + CARD_H + 8;          // 398
-const int CODEX_H = 56;                            // ends at 454, 6px clear
-
-// ---------- USAGE tab v2: NOW / WEEK / CODEX (board 2 only) ----------
-// Nothing reads these constants yet - CARD1_Y/CARD2_Y/CODEX_Y/CARD_H above are
-// UNCHANGED and v1's renderCard still draws 164px cards until Task 9, which is
-// the commit that moves the column onto these numbers and flips
-// renderUsageTab. Declaring the v2 heights and band offsets now is what lets
-// Tasks 5-9 refer to them by name.
+// reading as one joined block. 8px of air below, matching the gaps above it.
 //
-//   8 + 182 + 8 + 144 + 8 + 56 + 8 = 414
-//
-// Uniform 8px gaps (SP_2), and the column must not end flush on contentBottom()
-// - board 1 shipped that once and its Codex row read as one block with the
-// footer.
 // A #define, NOT a const int, and this is load-bearing: the preprocessor cannot see
 // a C++ const int, so `#if BOARD_USAGE_V2` on one evaluates the identifier as 0 -
 // silently, with no warning under -Wall - and every guarded arm in usage.ino would
 // take board 1's branch on board 2. The whole layout would compile clean and never
-// reach the glass. Same trap as panel_shim.cpp's `#if BOARD_PANEL_INVERT`.
+// reach the glass. Same trap as panel_shim.cpp's `#if BOARD_PANEL_INVERT`. It has
+// to be defined BEFORE CARD1_Y/CARD2_Y/CODEX_Y below, which branch on it
+// directly - unlike deckhand_display.ino's SP_1/SP_2/SP_3, which this header may
+// NOT reference: those are declared long after board.h is included (line ~676
+// against board.h's line ~20), so a header using them would not compile, and
+// every gap here is spelled as a literal "+ 8" instead.
 #define BOARD_USAGE_V2 1
+
+// v1's card height. renderCard (v1's renderer) is #if'd out entirely on this
+// board now (deckhand_display.ino), so CARD_H is UNREAD here - it stays
+// declared because geom-common.mjs's consts() and other checkers parse it by
+// name, and removing it would break their parse.
+const int CARD_H = 164;
+// The v2 heights, NOW and WEEK - see the "v2:" line above.
 const int NOW_CARD_H      = 182;
 const int WEEK_CARD_H     = 144;
+#if BOARD_USAGE_V2
+const int CARD1_Y = CONTENT_Y + 8;                     // 54  - the NOW card
+const int CARD2_Y = CARD1_Y + NOW_CARD_H + 8;          // 244 - the WEEK card
+const int CODEX_Y = CARD2_Y + WEEK_CARD_H + 8;         // 396
+#else
+const int CARD1_Y = CONTENT_Y + 8;                     // 54
+const int CARD2_Y = CARD1_Y + CARD_H + 8;              // 226
+const int CODEX_Y = CARD2_Y + CARD_H + 8;              // 398
+#endif
+const int CODEX_H = 56;                            // ends at 452, 8px clear
 
 // ---------- Inside the NOW card ----------
 // Bands are CLEARED extents, not glyph ink. The 2px border owns +180..+181, so
