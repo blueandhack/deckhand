@@ -1,0 +1,101 @@
+<meta charset="utf-8">
+<title>USAGE tab v2 — board 2</title>
+<style>
+:root{--ink:#1a1a1a;--muted:#666;--line:#ddd;--page:#f6f5f3;--panel:#fff;--bad:#b42318;--ok:#1a7f37;--warn:#c9822a}
+@media (prefers-color-scheme:dark){:root{--ink:#e8e8e8;--muted:#999;--line:#333;--page:#131313;--panel:#1c1c1c;--bad:#f85149;--ok:#3fb950;--warn:#d29922}}
+*{box-sizing:border-box}
+body{margin:0;padding:26px 22px 70px;background:var(--page);color:var(--ink);
+font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font-size:23px;margin:0 0 6px} h2{font-size:16px;margin:38px 0 6px}
+h2 span{color:var(--muted);font-weight:400}
+p{max-width:86ch} p.sub{color:var(--muted);margin:0 0 18px}
+.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--warn);
+border-radius:8px;padding:13px 15px;margin:14px 0 20px;max-width:88ch;font-size:14px}
+.note b{color:var(--warn)} .note.grey{border-left-color:#888}.note.grey b{color:var(--ink)}
+.note.good{border-left-color:var(--ok)}.note.good b{color:var(--ok)}
+.bar{display:flex;gap:18px;align-items:center;flex-wrap:wrap;padding:11px 13px;background:var(--panel);
+border:1px solid var(--line);border-radius:10px;margin:18px 0;position:sticky;top:0;z-index:9}
+label{display:flex;gap:6px;align-items:center;font-size:13px}
+.strip{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start}
+.station{display:flex;flex-direction:column;gap:8px}
+.stationhd{display:flex;gap:8px;align-items:baseline}
+.stationhd .n{font:600 11px/1 ui-monospace,monospace;color:var(--muted);border:1px solid var(--line);
+border-radius:3px;padding:3px 5px}
+.stationhd .t{font-weight:700;font-size:14px}
+.xs{font-size:12px;color:var(--muted)}
+figure{margin:0} .bezel{padding:6px;border-radius:9px;background:var(--panel);border:1px solid var(--line);
+box-shadow:0 2px 14px rgba(0,0,0,.18)}
+canvas{border-radius:2px;image-rendering:pixelated;display:block}
+.cap{font-size:12.5px;color:var(--muted);max-width:340px;margin-top:6px}
+code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;background:rgba(128,128,128,.14);padding:1px 5px;border-radius:4px}
+#checks{font-family:ui-monospace,monospace;font-size:12.5px;line-height:1.7;max-width:1000px}
+#checks .row{display:flex;gap:9px;padding:2px 0;border-bottom:1px solid rgba(128,128,128,.15)}
+#checks .mk{width:1.4em;flex:none;font-weight:600}
+#checks .ok .mk{color:var(--ok)} #checks .fail .mk{color:var(--bad)} #checks .known .mk{color:var(--warn)}
+#checks .who{width:8.5em;flex:none;color:var(--muted)}
+.tally{font:600 13px/1 ui-monospace,monospace;padding:9px 0 13px}
+</style>
+<body>
+<h1>USAGE tab v2, redesigned</h1>
+<p class="sub">Board 2, 320&times;480. Every glyph below is the <b>real Spleen bitmap</b> read out of
+<code>Spleen8x16.h</code>, <code>Spleen12x24.h</code> and <code>Spleen32x64.h</code>; every position in
+layout <b>B</b> is a constant parsed from <code>board_es3c35p.h</code> &mdash; that binding is what
+<code>check.mjs</code> proves, not this page. This page is the picture; the gate is the command below.</p>
+
+<pre style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 15px;
+max-width:88ch;overflow-x:auto"><code>node docs/design/usage-redesign/check.mjs</code></pre>
+
+<div class="note good">
+<b>B is what shipped.</b> <code>board_es3c35p.h</code>'s v2 section (<code>NOW_CARD_H</code>,
+<code>WEEK_CARD_H</code>, <code>NOW_HERO_Y</code>, <code>WEEK_NUM_Y</code>, and the rest) derives
+exactly the "Now / Week / Codex" column below. A and C are kept as the record of what was compared
+against it before that decision, and draw their own unbound geometry &mdash; nothing in the header
+answers to them, and <code>check.mjs</code> does not bind them.
+</div>
+
+<div class="bar">
+  <div><span class="xs">STATE</span><br>
+    <label><input type="radio" name="state" value="nominal" checked> nominal</label>
+    <label><input type="radio" name="state" value="critical"> 100% / critical</label>
+    <label><input type="radio" name="state" value="stale"> stale</label>
+    <label><input type="radio" name="state" value="empty"> no data</label>
+    <label><input type="radio" name="state" value="twomacs"> two Macs</label>
+    <label><input type="radio" name="state" value="cxworst"> Codex worst case</label>
+  </div>
+  <div><span class="xs">PANEL</span><br>
+    <label><input type="radio" name="dev" value="DARK" checked> dark</label>
+    <label><input type="radio" name="dev" value="LIGHT"> light</label>
+  </div>
+  <label>scale <select id="scale"><option value="1" selected>1x</option><option value="1.5">1.5x</option><option value="2">2x</option></select></label>
+  <label><input type="checkbox" id="boxes"> show clear boxes</label>
+</div>
+
+<h2>Side by side <span>&mdash; today, then A / B / C</span></h2>
+<p class="xs" style="margin-bottom:10px">Switch state above &mdash; a layout that only works at one
+selection is not a layout.</p>
+<div class="strip" id="strip"></div>
+
+<h2>It checks itself</h2>
+<p class="xs" style="margin:0 0 12px;max-width:70ch">Same convention as <code>check.mjs</code> and the
+three geometry checkers: the mock asserts its own claims rather than asking to be trusted. Each
+assertion is written so that reverting the thing it guards makes it fail.</p>
+<div class="tally" id="tally"></div>
+<div id="checks"></div>
+
+<div class="note grey" style="margin-top:26px">
+<b>What this does not prove.</b> Nothing here has been on the glass, and board 2's
+<code>SCREENSHOT</code> reads the shadow framebuffer anyway (see the verification trap in
+<code>CLAUDE.md</code>) &mdash; this is arithmetic and bitmaps, the right instrument for layout and the
+wrong one for colour. The Mac icon is a generated stand-in for <code>MacEmoji16.h</code>'s real art,
+occupying the correct 16&times;16 slot and nothing more. See <code>README.md</code> for the rest.
+</div>
+
+<script src="spleenfonts.js"></script>
+<script src="usage.js"></script>
+<script>
+document.querySelectorAll('input[name="state"]').forEach(r => r.onchange = e => { UI.state = e.target.value; render(); });
+document.querySelectorAll('input[name="dev"]').forEach(r => r.onchange = e => { UI.dev = e.target.value; render(); });
+document.getElementById("scale").onchange = e => { UI.scale = +e.target.value; render(); };
+document.getElementById("boxes").onchange = e => { UI.boxes = e.target.checked; render(); };
+render();
+</script>
