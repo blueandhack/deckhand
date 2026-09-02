@@ -196,20 +196,21 @@ trade. The rest are the items above. Each entry says which it is.
 Fixing an item here means **deleting its `KNOWN` entry in the same commit**. Otherwise the checker
 keeps tolerating something that is no longer there, and will not notice it coming back.
 
-## 12. `CODEX_RIGHT_CHARS` can be exceeded by its own content — BOTH boards
+## 12. RESOLVED — `CODEX_RIGHT_CHARS` could be exceeded by its own content, on BOTH boards
 
-`renderCodexRow()` pads its right-hand field to `CODEX_RIGHT_CHARS` (20), but the string it
-formats — `"%d%%  %s  %02ld:%02ld"` with `formatResetIn()`'s multi-day branch, e.g.
-`"0%  6d 23h left  22:55"` — runs to about 23-24 characters. `padLeftTo()` refuses an oversized
-width rather than truncating (deliberately, and documented), so the real string simply draws
-wider than the lane arithmetic assumes.
+Was: `renderCodexRow()` padded its right-hand field to `CODEX_RIGHT_CHARS` (20), but the string it
+formatted — `"%d%%  %s  %02ld:%02ld"` with `formatResetIn()`'s multi-day branch, e.g.
+`"0%  6d 23h left  22:55"` — ran to about 23-24 characters. `padLeftTo()` refuses an oversized
+width rather than truncating (deliberately, and documented), so the real string simply drew wider
+than the lane arithmetic assumed, and the right field's clear box — drawn AFTER the label on every
+tick — could reach far enough left to erase the tail of the `CODEX …` label beside it.
 
-**Consequence:** when a multi-day Codex reset countdown lands on a two-digit hour — recurring
-roughly an hour a day — and no Mac tag is being shown, the right field's clear box extends left
-of its assumed `clearFrom` and can erase the tail of the `CODEX …` label beside it.
-
-Found while re-deriving board 2's lane for an 8px advance, but it is **not** a consequence of
-that change: the overflow is in the character count against its own content and is present on
-board 1 identically. Not fixed because the fix moves board 1's frozen constant, which the type-
-scale branch holds byte-identical. Severity: cosmetic and intermittent, but it is real corruption
-of a label rather than a margin being tight.
+This entry used to say "not fixed because the fix moves board 1's frozen constant" — true when
+written, and no longer true: board 1's byte-identity requirement was retired for `board-baseline.mjs`
+(see the top of this file), which expects deliberate movement re-baselined with a stated reason.
+Fixed by dropping the right field's wall-clock suffix (the countdown beside it already says the
+same thing in relative terms), which takes its real worst case from ~24 characters down to 18, and
+by shrinking `CODEX_RIGHT_CHARS` to 18 alongside it so the pad width is a genuine ceiling on that
+worst case again rather than a floor mistaken for one. `CODEX_LANE_CHARS` moved 11→13 (board 1) and
+12→14 (board 2), and `usage-geom-check.mjs` now asserts `CODEX_RIGHT_CHARS <= worst` directly, so a
+regression fails by name rather than waiting to be found again. Both baselines re-derived.

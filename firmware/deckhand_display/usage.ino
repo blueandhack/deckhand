@@ -365,35 +365,45 @@ void renderCodexRow() {
   // right field's clear box simply erases whatever the label left under it, and
   // that clear runs EVERY tick, always after the left field has drawn in full.
   // The lane is therefore (the right field's clear-box left edge - the label's
-  // x) / 6, four numbers that ALL move with CARD_W and PAD:
+  // x) / the face's own advance, four numbers that ALL move with CARD_W and PAD:
   //
-  //   board 1 (CARD_W 216, PAD 14): right field at 214, 20 chars = 120px, spans
-  //     94..214, clears from 93; label at 26; (93 - 26) / 6 = 11.17 -> 11
-  //   board 2 (CARD_W 296, PAD 18): right field at 290, 20 chars at Spleen8x16's
-  //     8px = 160px, spans 130..290, clears from 129; label at 30;
-  //     (129 - 30) / 8 = 12.375 -> 12
+  //   board 1 (CARD_W 216, PAD 14): right field at 214, its OWN worst case (18
+  //     chars - see the right-lane comment below) = 108px, spans 106..214,
+  //     clears from 105; label at 26; (105 - 26) / 6 = 13.17 -> 13
+  //   board 2 (CARD_W 296, PAD 18): right field at 290, 18 chars at Spleen8x16's
+  //     8px = 144px, spans 146..290, clears from 145; label at 30;
+  //     (145 - 30) / 8 = 14.375 -> 14
   //
   // NOTE THE ADVANCE IS PER BOARD - 6px on board 1's Cozette, 8px on board 2's
-  // Spleen8x16 - and this used to divide by 6 on both. That is what made board 2
-  // read 23 when its real ceiling is 12: the label then drew 184px into a lane
-  // that ends at 129 and the right field, which draws AFTER it on every tick,
-  // erased the tail continuously. Counting characters is the bug; the advance is
-  // a property of the face, so derive from the face.
+  // Spleen8x16. Counting characters instead of measuring the advance was a
+  // real bug here once (board 2 read 23 against a true ceiling of 12): the
+  // advance is a property of the face, so derive from the face, not from a
+  // literal 6.
   //
-  // Board 1's ceiling was confirmed on-device both with a real tag
+  // THE LANE ITSELF MOVED, from 11/12 to 13/14, when the wall-clock suffix
+  // below was dropped. CODEX_RIGHT_CHARS - the right field's pad width - used
+  // to be treated as this field's ceiling, but padLeftTo() only ever PADS a
+  // short string up; it returns early and does NOT truncate one already
+  // longer than the pad width. With the clock, real content ran to ~24
+  // characters against a pad width of 20, so the field routinely drew WIDER
+  // than the old 11/12 derivation assumed, and its clear box ate the label's
+  // own tail. CODEX_RIGHT_CHARS is 18 now - equal to this field's real worst
+  // case with no clock - so it is a genuine ceiling again rather than a floor
+  // being mistaken for one (usage-geom-check.mjs asserts that relationship,
+  // not just today's two numbers).
+  //
+  // Board 1's OLD ceiling (11) was confirmed on-device both with a real tag
   // ("CODEX  studio" -> "CODEX  stud" on screen, the "io" erased) and a plain
   // diagnostic literal with no lowercase or spaces at all ("ABCDEFGHIJKLM" ->
   // "ABCDEFGHIJK", cut at the identical 11th character) - proof it is
   // positional, not a content or font issue. IT ALSO MOVES if the right field's
-  // pad width (CODEX_RIGHT_CHARS, 20) ever changes; re-derive, do not copy a
+  // pad width (CODEX_RIGHT_CHARS, 18) ever changes; re-derive, do not copy a
   // number forward.
   // What the branches below actually emit: "CX " + a 6-char tag (the macTag()
-  // cap) is 9 characters, inside both boards' ceilings (11 and 12), while
-  // "CODEX  " + the same tag would be 13 - over BOTH. So the tag-versus-window
-  // trade is load-bearing on both panels now, where it used to be load-bearing
-  // on board 1 and a mere margin on board 2. It is kept IDENTICAL on both: a
-  // roomier lane was never a reason for the two panels to render different text,
-  // and board 2's lane turned out not to be roomier anyway.
+  // cap) is 9 characters, comfortably inside both boards' ceilings (13 and
+  // 14). The tag-versus-window trade (see showCxTag below) is kept IDENTICAL
+  // on both boards regardless: a roomier lane was never a reason for the two
+  // panels to render different text.
   const char* cxTag = linkTag(cxSourceLink);
   bool showCxTag = cxTag && *cxTag && usedLinkCount() > 1;
   // Icon shown whenever one is set, same reasoning as the Claude cards' chrome:
@@ -427,42 +437,35 @@ void renderCodexRow() {
     // "CX" + 4px gap + the icon, from the label's x, at each board's own
     // advance: 12+4+13 = 29px ending at 55 on board 1, and 16+4+16 = 36px
     // ending at 66 on board 2 - well clear of the right field's clear box
-    // either way (93 and 169). Vertically the icon shares CODEX_TEXT_Y with
+    // either way (105 and 145, see the right-lane derivation below).
+    // Vertically the icon shares CODEX_TEXT_Y with
     // the row's text, whose own clear box is 2 rows taller than the icon on
     // both boards. See the long derivation above.
     setUIFont(2);
     drawEmoji(cxEmoji, CARD_X + PAD + tft.textWidth("CX") + 4, CODEX_Y + CODEX_TEXT_Y, COLOR_CARD);
   }
 
-  // Right lane: the percentage, the reset countdown, and (usually) the wall-clock time
-  // it resets at - the same three facts the Claude cards give, so the row can be read
-  // the same way. "--" when the host has never seen a rate_limits record, which is what
-  // an unused Codex install looks like - deliberately NOT 0%, which would read as a
-  // measurement.
+  // Right lane: the percentage and the reset countdown - two facts, not three.
+  // "--" when the host has never seen a rate_limits record, which is what an
+  // unused Codex install looks like - deliberately NOT 0%, which would read
+  // as a measurement.
   //
-  // The wall-clock suffix is DROPPED whenever the left lane is showing the tag instead
-  // of the window (showCxTag, above). "CX <tag>" tops out at 9 characters, so this isn't
-  // load-bearing against the truncation ceiling the way an earlier "CODEX  <tag>" design
-  // was - it's a second, cheap margin against the right lane's OWN worst case ("NN%  Xd
-  // Yh left  HH:MM", up to 23 chars) ever reaching left past the tag, which pre-existed
-  // this task at the window-text width too and is unlikely but not provably impossible.
-  // The clock is the least useful of the three facts here anyway - the countdown already
-  // says the same thing in relative terms - so dropping it costs nothing to gain a margin.
+  // THE WALL-CLOCK SUFFIX IS GONE, and the countdown beside it already says the
+  // same thing in relative terms. That is not a cosmetic trim: this field's clear
+  // box is what bounds the LABEL's lane (see CODEX_LANE_CHARS in the board
+  // header), and padLeftTo() cannot cap it - it returns early on an over-long
+  // string rather than truncating - so the field's own worst case IS the bound.
+  // With the clock, that worst case ran to ~24 characters (docs/board-1-known-
+  // defects.md used to record #12 for exactly this: content that outgrew its
+  // own pad width). Without it, the longest this field ever prints is
+  // "100%  23h 59m left" - 18 characters - safely under CODEX_RIGHT_CHARS (18
+  // itself now, see the header), so padLeftTo() always successfully pads and
+  // the field's rendered width is a fixed 18 characters, not a moving target.
   if (!have) {
     snprintf(buf, sizeof(buf), "--");
   } else if (usage.cxResetInMin >= 0) {
-    long nowSec = hostNowSec();
-    // Same arithmetic renderCard uses for its "at 14:32", including the same guard: with
-    // no host clock yet there is nothing to add the countdown to, so print the countdown
-    // alone rather than a time computed from zero.
-    if (nowSec >= 0 && !showCxTag) {
-      long atSec = (nowSec + usage.cxResetInMin * 60) % 86400;
-      snprintf(buf, sizeof(buf), "%d%%  %s  %02ld:%02ld", usage.cxPct,
-               formatResetIn(usage.cxResetInMin).c_str(), atSec / 3600, (atSec / 60) % 60);
-    } else {
-      snprintf(buf, sizeof(buf), "%d%%  %s", usage.cxPct,
-               formatResetIn(usage.cxResetInMin).c_str());
-    }
+    snprintf(buf, sizeof(buf), "%d%%  %s", usage.cxPct,
+             formatResetIn(usage.cxResetInMin).c_str());
   } else {
     snprintf(buf, sizeof(buf), "%d%%", usage.cxPct);
   }

@@ -222,14 +222,32 @@ const int CODEX_BAR_Y  = 26;     // bar +26..+35, clear +22..+39
 
 // The Codex label's lane, bounded by ITS NEIGHBOUR rather than by anything of
 // its own - the full derivation is the long comment in renderCodexRow(). Four
-// numbers: the right field draws at CARD_X + CARD_W - PAD = 214 with TR_DATUM
-// padded to CODEX_RIGHT_CHARS (20) = 120px, so it spans 94..214 and
-// drawIfChanged clears from 93; the label starts at CARD_X + PAD = 26; so
-// (93 - 26) / 6 = 11.17 -> 11 characters. EVERY ONE of those numbers changes on
-// a wider card - do not copy 11 forward.
-const int CODEX_LANE_CHARS  = 11;
-const int CODEX_RIGHT_CHARS = 20;
-// The buffer and the change-only cache holding that padded string. 24 here (11
+// numbers: the right field draws at CARD_X + CARD_W - PAD = 214 with TR_DATUM,
+// its own WORST-CASE CONTENT ("100%  23h 59m left", 18 chars - not
+// CODEX_RIGHT_CHARS, which padLeftTo() only ever pads UP to and never
+// truncates past) = 108px, so it spans 106..214 and drawIfChanged clears from
+// 105; the label starts at CARD_X + PAD = 26; so (105 - 26) / 6 = 13.17 -> 13
+// characters. EVERY ONE of those numbers changes on a wider card - do not
+// copy 13 forward.
+//
+// THIS WAS 11, derived from CODEX_RIGHT_CHARS (20) rather than from the right
+// field's real content - which, with a wall-clock suffix renderCodexRow() no
+// longer prints, ran to ~24 characters and was never truncated (padLeftTo()
+// refuses an over-long string instead). At the real worst case the right
+// field's clear box - which draws AFTER the label on every tick - reached
+// further left than 11 assumed and ate the label's own tail. Dropping the
+// wall clock took the real worst case to 18, safely under CODEX_RIGHT_CHARS
+// now that it is ALSO 18, so the pad width is a genuine ceiling again.
+const int CODEX_LANE_CHARS  = 13;
+// The right field's pad WIDTH - padLeftTo() pads any shorter string UP to
+// this many characters, so this constant IS the field's assumed worst case,
+// not merely a cap that content happens to respect. It must never exceed the
+// field's true longest formatted output ("100%  23h 59m left", 18 chars) or
+// CODEX_LANE_CHARS above is derived from a case padLeftTo() can no longer
+// guarantee - usage-geom-check.mjs asserts CODEX_RIGHT_CHARS <= that worst
+// case directly, so raising this back past 18 fails by name.
+const int CODEX_RIGHT_CHARS = 18;
+// The buffer and the change-only cache holding that padded string. 24 here (13
 // chars needs nowhere near it, and this is the size cxPctCache/cxRightCache
 // have always been declared and compared at - see the note on them in
 // deckhand_display.ino, which is emphatic that the declaration and the

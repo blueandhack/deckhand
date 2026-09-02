@@ -311,25 +311,46 @@ for (const b of [1, 2]) {
   // exactly the "counted, not measured" bug this checker exists to catch and
   // instead blessed - bodyAdvance() below measures it instead of assuming it.
   const charW = bodyAdvance(b);
+  // THE LANE IS BOUNDED BY ITS NEIGHBOUR'S CLEAR BOX, AND THAT BOX MOVES WITH
+  // CONTENT. padLeftTo() only ever GROWS a short string - it returns early
+  // when the string is already longer than the pad width - so
+  // CODEX_RIGHT_CHARS is a floor on that field, never a ceiling, and a lane
+  // derived FROM it (the old formula: rightW = CODEX_RIGHT_CHARS * charW) is
+  // wrong whenever real content exceeds it. Derive from the field's real
+  // worst-case content instead. Both boards format this field identically.
+  const worst = "100%  23h 59m left".length;          // no wall-clock suffix
+  // The reverse must ALSO hold, or this derivation is decorative rather than
+  // load-bearing: if CODEX_RIGHT_CHARS were ever raised back past `worst`,
+  // padLeftTo() would pad PAST the worst case this lane assumes and
+  // re-widen the real clear box - the identical bug this commit fixes,
+  // reappearing through the pad width instead of through the wall clock.
+  chk(c.CODEX_RIGHT_CHARS <= worst,
+      `CODEX_RIGHT_CHARS (${c.CODEX_RIGHT_CHARS}) <= the right field's own worst `
+    + `case (${worst} chars) - padLeftTo() pads UP TO CODEX_RIGHT_CHARS, so a `
+    + `wider pad target re-widens the real clear box past what the lane below assumes`);
   const rightX = c.CARD_X + c.CARD_W - c.PAD;
-  const rightW = c.CODEX_RIGHT_CHARS * charW;
+  const rightW = worst * charW;
   const clearFrom = rightX - rightW - 1;
   const labelX = c.CARD_X + c.PAD;
   const lane = Math.floor((clearFrom - labelX) / charW);
   chk(lane === c.CODEX_LANE_CHARS,
-      `codex lane: right field at ${rightX} spans ${rightX - rightW}..${rightX}, clears from ${clearFrom}; label at ${labelX}; (${clearFrom}-${labelX})/${charW} = ${((clearFrom - labelX) / charW).toFixed(2)} -> ${lane}, header says ${c.CODEX_LANE_CHARS}`);
+      `codex lane: right field's worst case (${worst} chars) at ${rightX} spans ${rightX - rightW}..${rightX}, clears from ${clearFrom}; label at ${labelX}; (${clearFrom}-${labelX})/${charW} = ${((clearFrom - labelX) / charW).toFixed(2)} -> ${lane}, header says ${c.CODEX_LANE_CHARS}`);
+  // and the longest label the row can actually emit must fit in it
+  const longest = "CODEX  7d".length;
+  chk(longest <= lane, `the widest Codex label (${longest} chars) fits the ${lane}-char lane`);
   chk(c.CODEX_LANE_CACHE >= c.CODEX_LANE_CHARS + 1,
       `lane cache ${c.CODEX_LANE_CACHE} holds ${c.CODEX_LANE_CHARS} chars + NUL`);
   // ONE buffer serves BOTH fields, and the larger one was never checked against it.
   // usage.ino declares `char buf[CODEX_LANE_CACHE]` once and both drawIfChanged
   // calls pass CODEX_LANE_CACHE as the cacheSize - the left field padded to
-  // CODEX_LANE_CHARS, the RIGHT one padded to CODEX_RIGHT_CHARS, which is nearly
-  // twice as long. Checking only the smaller of the two is exactly the "a cache
-  // shorter than the string it stores silently stops noticing changes" trap this
-  // repo has paid for repeatedly; board 1 passes by 3 (24 against 21), which is
-  // margin nobody had asserted. NOTE this is the BUFFER-SIZE assertion only -
-  // whether CODEX_RIGHT_CHARS is wide enough for its own CONTENT is a separate,
-  // known defect (docs/board-1-known-defects.md #12) and is not what this checks.
+  // CODEX_LANE_CHARS, the RIGHT one padded to CODEX_RIGHT_CHARS. Checking only
+  // the smaller of the two is exactly the "a cache shorter than the string it
+  // stores silently stops noticing changes" trap this repo has paid for
+  // repeatedly. (docs/board-1-known-defects.md #12, "CODEX_RIGHT_CHARS can be
+  // exceeded by its own content", is fixed by the CODEX_RIGHT_CHARS <= worst
+  // assertion above and its entry is deleted in this commit - the buffer-size
+  // margin checked here was never the defect; the pad-width-as-ceiling
+  // assumption was.)
   chk(c.CODEX_LANE_CACHE >= c.CODEX_RIGHT_CHARS + 1,
       `lane cache ${c.CODEX_LANE_CACHE} also holds the RIGHT field's ${c.CODEX_RIGHT_CHARS} chars + NUL (one buf serves both)`);
   // The label field is padded to CODEX_LANE_CHARS on every tick (padTo(), so

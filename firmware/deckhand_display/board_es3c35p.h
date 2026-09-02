@@ -556,47 +556,59 @@ const int CARD_FOOT_Y    = 140;
 const int CODEX_TEXT_Y = 8;
 const int CODEX_BAR_Y  = 37;
 
-// THE LABEL LANE, RE-DERIVED - AND RE-DERIVED AGAIN, because the first pass
-// through this file (23) carried Cozette's 6px advance over into a formula
-// this board no longer uses. renderCodexRow() draws both fields with font id
-// 2 (T_BODY), which on this board is Spleen8x16 - EVERY glyph declares
-// xAdvance 8 with xOffset 0 (verified: Spleen is genuinely monospace, unlike
-// Cozette, whose ink widths vary but whose xAdvance is uniformly 6 - the fact
-// the original /6 relied on). At the wrong 23 characters x 8px = 184px, the
-// label overlapped the right field's own reserved 20 x 8 = 160px lane by
-// ~84px - and not as a rare worst case: the right field pads to its FULL
-// width on every tick specifically to keep its clear box stable (see
-// renderCodexRow()'s comment on padTo/padLeftTo), so it erased the tail of
-// the label continuously, every ~5s tick, for as long as this board has had
-// its own font registry. Nothing truncates the label - the device draws
-// every character it is given - so the lane is bounded by its neighbour:
+// THE LABEL LANE, RE-DERIVED A THIRD TIME - because the second pass fixed the
+// per-board ADVANCE (Spleen8x16's 8px, not Cozette's 6) but still derived the
+// lane from CODEX_RIGHT_CHARS, the right field's PAD WIDTH. padLeftTo() only
+// ever GROWS a short string - it returns early when the string is already
+// longer than the pad width, never truncating - so CODEX_RIGHT_CHARS was a
+// FLOOR on that field, never a ceiling. With a wall-clock suffix its real
+// content ran to ~24 characters against a pad width of 20: wider than the
+// 12-character lane below assumed, so the right field's clear box (which
+// draws AFTER the label on every tick) ate the label's own tail. Fixed by
+// dropping the wall-clock suffix in renderCodexRow() - the countdown beside
+// it already says the same thing in relative terms - which takes the right
+// field's real worst case down to 18 characters, and by shrinking
+// CODEX_RIGHT_CHARS to 18 alongside it, so the pad width is once again a
+// genuine ceiling rather than a floor mistaken for one:
 //
 //   right field draws at CARD_X + CARD_W - PAD = 12 + 296 - 18 = 290, TR_DATUM,
-//   padded to CODEX_RIGHT_CHARS (20) = 160px in Spleen8x16's 8px advance
-//     -> it spans x 130..290, and drawIfChanged clears from fx-1 = 129
+//   its own worst case ("100%  23h 59m left", 18 chars, no wall clock) = 144px
+//   in Spleen8x16's 8px advance -> it spans x 146..290, and drawIfChanged
+//   clears from fx-1 = 145
 //   label starts at CARD_X + PAD = 30
-//     -> (129 - 30) / 8 = 12.375 -> 12 characters
+//     -> (145 - 30) / 8 = 14.375 -> 14 characters
 //
-// Board 1 is untouched by any of this - it is still Cozette at 6px, so its
-// own (93 - 26) / 6 = 11.17 -> 11 in board_e32r28t.h is unaffected and stays
-// literal there rather than risking board 1's byte-identical binary on an
-// equivalent-but-different-looking expression. Consequence worth knowing: at
-// 12, the tag-versus-window trade in renderCodexRow() IS load-bearing here
-// too now, the same way it already is on board 1 ("CODEX  7d studio" is 16,
-// over the 12-character ceiling; "CX studio" is 9, comfortably under it) -
-// the roomier-lane assumption in the comment this replaces no longer holds.
-const int CODEX_LANE_CHARS  = 12;
-const int CODEX_RIGHT_CHARS = 20;
+// DERIVED FROM THE FIELD'S CONTENT, NOT FROM CODEX_RIGHT_CHARS - padLeftTo()
+// only pads a SHORT string up; it returns early on a long one, so that
+// constant is a floor and never a ceiling. usage-geom-check.mjs asserts
+// CODEX_RIGHT_CHARS <= the field's worst-case content directly, so raising it
+// back past 18 fails by name rather than silently re-opening this bug.
+//
+// Board 1 is untouched by the advance fix (it is still Cozette at 6px), but
+// its OWN lane moved for the identical reason - see board_e32r28t.h, whose
+// (105 - 26) / 6 = 13.17 -> 13 uses the same worst-case-content derivation.
+// Consequence worth knowing: at 14, the tag-versus-window trade in
+// renderCodexRow() is comfortably clear ("CX studio" is 9, well under 14)
+// where it used to be load-bearing at the tighter, unsafe 12.
+const int CODEX_LANE_CHARS  = 14;
+// The right field's pad WIDTH, not merely its typical length - padLeftTo()
+// pads any shorter string UP to this many characters, so this constant IS
+// this field's assumed worst case, not a cap on it (see the derivation
+// above). It must never exceed the field's true longest formatted output -
+// "100%  23h 59m left" at 18 characters - or CODEX_LANE_CHARS above is
+// derived from a case padLeftTo() can no longer guarantee.
+const int CODEX_RIGHT_CHARS = 18;
 // The buffer AND the change-only cache that hold a CODEX_LANE_CHARS-wide
 // padded string. Sized to the RIGHT field's worst case, not the label's -
 // CODEX_LANE_CACHE is shared by both drawIfChanged() calls in
-// renderCodexRow(), and the right field's content ("100%  23h 59m left
-// 23:59", 25 chars) is longer than the label ever is. 32, not 26: a cache
-// exactly as long as its string is this file's oldest silent bug. The
-// declaration and the cacheSize passed at the call site MUST be this same
-// constant - see the long note on cxPctCache/cxRightCache in
-// deckhand_display.ino for what happens when they disagree in either
-// direction.
+// renderCodexRow(). The right field's content ("100%  23h 59m left", 18
+// chars now that the wall clock is gone) is still the longer of the two. 32
+// is far more than either needs now, and is kept rather than shrunk - a
+// cache exactly as long as its string is this file's oldest silent bug, and
+// there is no cost to carrying the slack. The declaration and the cacheSize
+// passed at the call site MUST be this same constant - see the long note on
+// cxPctCache/cxRightCache in deckhand_display.ino for what happens when they
+// disagree in either direction.
 const int CODEX_LANE_CACHE = 32;
 
 // ---------- Footer ----------
