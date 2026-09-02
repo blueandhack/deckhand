@@ -2254,7 +2254,12 @@ void renderCard(int y0, int pct, unsigned long tokens, long resetInMin, long win
   } else {
     snprintf(buf, sizeof(buf), "%s", formatResetIn(resetInMin).c_str());
   }
-  padTo(buf, sizeof(buf), 16);
+  // padLeftTo, not padTo: this field is TR_DATUM, so RIGHT padding would sit
+  // between the glyphs and the anchor and inset the text by (16 - len) * advance -
+  // 40px for "2h 14m left", 24px for "starts on use". It was not right-aligned at
+  // all; it floated with its content. Every other TR_DATUM field on this tab
+  // already left-pads, and padLeftTo's own comment says why.
+  padLeftTo(buf, sizeof(buf), 16);
   drawIfChanged(rightCache, 20, buf, CARD_X + CARD_W - PAD, statY, 2, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
 
   // The countdown is relative; the wall-clock reset time is what you can

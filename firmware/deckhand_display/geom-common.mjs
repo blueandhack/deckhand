@@ -265,6 +265,36 @@ function preprocess(src, defs) {
   return lines.join("\n");
 }
 
+// Source-text helpers, shared because three checkers now read the firmware's own
+// draw calls rather than only its constants. Same reason evalInt lives here: a
+// second copy is a second thing to drift.
+export function stripComments(file) {
+  return fs.readFileSync(`${DIR}/${file}`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+}
+// The body of one function, from its signature to the first column-0 close brace.
+// THROWS rather than returning "" - an assertion run over an empty string passes
+// vacuously, which is the failure mode this whole family of checks exists to avoid.
+export function fnBody(src, sig, where) {
+  const a = src.indexOf(sig);
+  if (a < 0) throw new Error(`fnBody: ${sig} not found in ${where}`);
+  const z = src.indexOf("\n}\n", a);
+  if (z < 0) throw new Error(`fnBody: no close brace after ${sig} in ${where}`);
+  return src.slice(a, z);
+}
+// One call's arguments, split on top-level commas only, so a nested call or a
+// parenthesised expression is not torn in half.
+export function splitArgs(s) {
+  const out = []; let depth = 0, cur = "";
+  for (const ch of s) {
+    if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") depth--;
+    if (ch === "," && depth === 0) { out.push(cur.trim()); cur = ""; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
 // `const int` declarations, parsed out of the real source so a header that drifts
 // from the checker fails instead of being silently ignored. `seed` lets a second
 // file be parsed against constants an earlier one defined - which is how the

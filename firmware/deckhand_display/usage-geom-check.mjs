@@ -27,7 +27,8 @@
 // The textWidth implementation, the header parser and the panel table are shared
 // with sessions-geom-check.mjs (geom-common.mjs) - one copy of the measurement
 // rule, checked once against the device's own numbers.
-import { consts, DIR, lineH, PANEL, preflight, textWidth } from "./geom-common.mjs";
+import { consts, DIR, evalInt, fnBody, lineH, PANEL, preflight, splitArgs,
+         stripComments, textWidth } from "./geom-common.mjs";
 import fs from "fs";
 preflight();
 
@@ -348,9 +349,9 @@ for (const b of [1, 2]) {
   // stores silently stops noticing changes" trap this repo has paid for
   // repeatedly. (docs/board-1-known-defects.md #12, "CODEX_RIGHT_CHARS can be
   // exceeded by its own content", is fixed by the CODEX_RIGHT_CHARS <= worst
-  // assertion above and its entry is deleted in this commit - the buffer-size
-  // margin checked here was never the defect; the pad-width-as-ceiling
-  // assumption was.)
+  // assertion above and its entry is marked RESOLVED in this commit - the
+  // buffer-size margin checked here was never the defect; the pad-width-as-
+  // ceiling assumption was.)
   chk(c.CODEX_LANE_CACHE >= c.CODEX_RIGHT_CHARS + 1,
       `lane cache ${c.CODEX_LANE_CACHE} also holds the RIGHT field's ${c.CODEX_RIGHT_CHARS} chars + NUL (one buf serves both)`);
   // The label field is padded to CODEX_LANE_CHARS on every tick (padTo(), so
@@ -465,6 +466,48 @@ for (const b of [1, 2]) {
   chk(heroTextWidth(b, "DECKHAND") < W - 8,
       `wordmark ${heroTextWidth(b, "DECKHAND")}px inside the ${W}px panel`);
 }
+
+// ---- padding helper vs datum, read out of the source -----------------------
+// padTo() pads on the RIGHT and padLeftTo() on the left, so a TR_DATUM field
+// padded with padTo puts its spaces between the glyphs and the anchor and is
+// inset by (width - len) * advance - i.e. it is not right-aligned at all, and
+// its apparent position moves with its content. Asserted over the source rather
+// than over a constant, since no constant is wrong here.
+{
+  const body = fnBody(stripComments("deckhand_display.ino"), "void renderCard(",
+                      "deckhand_display.ino");
+  // every drawIfChanged in renderCard that passes TR_DATUM, with the pad call
+  // that immediately precedes it
+  const calls = [...body.matchAll(/pad(Left)?To\([^;]*;\s*drawIfChanged\([^;]*TR_DATUM[^;]*;/g)];
+  chk(calls.length >= 2,
+      `renderCard has ${calls.length} padded TR_DATUM fields to check (expected >= 2)`);
+  const wrong = calls.filter(m => !m[1]);        // matched padTo, not padLeftTo
+  chk(wrong.length === 0,
+      wrong.length ? `${wrong.length} TR_DATUM field(s) in renderCard are padded with `
+                   + `padTo (pad RIGHT), so they are inset by the padding and float `
+                   + `with their content: ${wrong[0][0].slice(0, 60).replace(/\s+/g, " ")}`
+                   : `every padded TR_DATUM field in renderCard uses padLeftTo`);
+}
+
+// THE CODE CHANGE NEEDS AN ASSERTION TOO, not just the constants that bound it.
+// `worst` above is a transcribed literal and this checker never reads usage.ino,
+// so restoring the wall-clock suffix - the bug Task 1 fixed - would leave every
+// assertion green while the real clear box moved 16px left and the label lost its
+// tail again. Parse the draw site instead, the way settings-geom-check.mjs parses
+// drawSeverityAction's own arguments.
+{
+  const row = fnBody(stripComments("usage.ino"), "void renderCodexRow(", "usage.ino");
+  const fmts = [...row.matchAll(/snprintf\(buf,\s*sizeof\(buf\),\s*"([^"]*)"/g)].map(m => m[1]);
+  const right = fmts.filter(f => f.includes("%d%%"));   // the percentage branches
+  chk(right.length >= 2,
+      `renderCodexRow's right field has ${right.length} percentage branches to check (expected >= 2)`);
+  const clock = right.filter(f => /%02ld:%02ld/.test(f));
+  chk(clock.length === 0,
+      clock.length ? `a right-field branch carries a wall-clock suffix again (${clock[0]}) - that field's `
+                   + `width is what bounds CODEX_LANE_CHARS, so this silently moves the real clear box left`
+                   : `no right-field branch carries a wall-clock suffix, so the lane derivation holds`);
+}
+
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 overlaps`);
 if (SELFTEST) {
   if (fail <= BASELINE_FAILURES) {

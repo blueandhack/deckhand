@@ -247,11 +247,16 @@ const int CODEX_LANE_CHARS  = 13;
 // guarantee - usage-geom-check.mjs asserts CODEX_RIGHT_CHARS <= that worst
 // case directly, so raising this back past 18 fails by name.
 const int CODEX_RIGHT_CHARS = 18;
-// The buffer and the change-only cache holding that padded string. 24 here (13
-// chars needs nowhere near it, and this is the size cxPctCache/cxRightCache
-// have always been declared and compared at - see the note on them in
+// The buffer AND the change-only cache that hold a CODEX_LANE_CHARS-wide
+// padded string. Sized to the RIGHT field's worst case, not the label's -
+// CODEX_LANE_CACHE is shared by both drawIfChanged() calls in
+// renderCodexRow(). The right field's content ("100%  23h 59m left", 18
+// chars now that the wall clock is gone) is still the longer of the two, and
+// is what this size must hold (19 of these 24 bytes) - the label's 13 chars
+// needs nowhere near it. This is the size cxPctCache/cxRightCache have
+// always been declared and compared at - see the note on them in
 // deckhand_display.ino, which is emphatic that the declaration and the
-// cacheSize passed at the call site must be the SAME number).
+// cacheSize passed at the call site must be the SAME number.
 const int CODEX_LANE_CACHE = 24;
 
 // Footer battery pill. The clock and the freshness field are edge-pinned and

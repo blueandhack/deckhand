@@ -18,7 +18,7 @@
 //
 //   node sessions-geom-check.mjs             check both boards
 //   node sessions-geom-check.mjs --selftest  prove the checker has teeth
-import { cacheSizes, consts, DIR, lineH, PANEL, preflight, textWidth } from "./geom-common.mjs";
+import { cacheSizes, consts, DIR, fnBody, lineH, PANEL, preflight, textWidth } from "./geom-common.mjs";
 import fs from "fs";
 preflight();
 
@@ -2099,12 +2099,6 @@ for (const b of [1, 2]) {
     {
       const strip = (f) =>
         fs.readFileSync(`${DIR}/${f}`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
-      const fnBody = (src, sig, where) => {
-        const a = src.indexOf(sig);
-        const z = src.indexOf("\n}\n", a);
-        if (a < 0 || z < 0) throw new Error(`${sig} not found in ${where}`);
-        return src.slice(a, z);
-      };
       const band = fnBody(strip("sessions.ino"), "void drawSessionBand(", "sessions.ino");
       chk(/const bool working = strcmp\(s\.status, "working"\) == 0;/.test(band),
           "the band binds `working` to the row's OWN status");
