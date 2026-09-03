@@ -833,6 +833,14 @@ void renderCodexRow() {
   // margin-of-nothing that makes a short change-only cache this file's oldest
   // silent bug. Same constant the caches use, so the three cannot drift.
   char buf[CODEX_LANE_CACHE];
+  // NOT the same question the early return above asks. That predicate is
+  // "is the ROW on screen at all" (usageCodexShown(), board 2 only); this is
+  // "is there a READING to print" (-- versus a percentage), which board 1
+  // still needs on every tick, having no predicate of its own. They agree
+  // only because both test cxPct < 0 - do not fold `have` into the return
+  // above or delete its two branches as "always true now": that compiles,
+  // is internally consistent, and silently breaks board 1's --/percentage
+  // switch (and its byte-identity) while every assertion here stays green.
   bool have = usage.cxPct >= 0;
   bool stale = usage.cxAgeSec > 900;
   uint16_t color = have ? colorForPct(usage.cxPct) : COLOR_UNKNOWN;

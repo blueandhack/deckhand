@@ -1056,6 +1056,87 @@ for (const b of [1, 2]) {
     if (bustIf) chk(/codexShownCache != codexShownNow/.test(bustIf[0]),
         "the layout state is part of the OUTER bust condition (not just the inner "
       + "clear guard), so a layout flip with no other change still repaints the chrome");
+
+    // FIX ROUND 1, FINDING 1: the bust condition is DUPLICATED across the two
+    // arms (necessary, not merely defensive - see the commit message: routing
+    // renderCodexRow's/renderUsageTab's shared-code sites through a function
+    // call would cost board 1 codegen it must never pay for). Duplication is
+    // only safe when it is "guarded by a checker assertion rather than
+    // trusted" (this file's own precedent for the Codex icon chip), and
+    // nothing above checks that BOTH arms carry the SAME shared terms - the
+    // comment right above this block names a REAL hardware bug from one of
+    // them going missing once already (linksCache). Parsed from both arms'
+    // own if-conditions, not transcribed, so a term added to one and not the
+    // other fails by name instead of by a report from the field.
+    {
+      const declAt = tabBody.indexOf("static int srcCache = -2");
+      chk(declAt >= 0, "found renderUsageTab's chrome-bust static-cache declaration");
+      const ifAt = tabBody.lastIndexOf("#if BOARD_USAGE_V2", declAt);
+      const elseAt = tabBody.indexOf("#else", declAt);
+      const endAt = tabBody.indexOf("#endif", elseAt);
+      chk(ifAt >= 0 && elseAt > declAt && endAt > elseAt,
+          "found the bust block's #if/#else/#endif to check both arms separately");
+      if (ifAt >= 0 && elseAt > declAt && endAt > elseAt) {
+        const v2Arm = tabBody.slice(ifAt, elseAt);
+        const v1Arm = tabBody.slice(elseAt, endAt);
+        const ifCond = (arm) => arm.match(/if \(srcCache != usageSourceLink[\s\S]*?\)\s*\{/);
+        const v2If = ifCond(v2Arm), v1If = ifCond(v1Arm);
+        chk(!!v2If, "found the v2 arm's own bust if-condition");
+        chk(!!v1If, "found the v1 arm's own bust if-condition");
+        if (v2If && v1If) {
+          const terms = (s) => new Set([...s.matchAll(/(\w+)\s*!=\s*\w+/g)].map((m) => m[1]));
+          const v2Terms = terms(v2If[0]), v1Terms = terms(v1If[0]);
+          const SHARED = ["srcCache", "cxSrcCache", "pinCache", "linksCache", "emojiCache"];
+          for (const t of SHARED) {
+            chk(v1Terms.has(t), `v1 (board 1) arm's bust condition still carries ${t}`);
+            chk(v2Terms.has(t), `v2 (board 2) arm's bust condition still carries ${t}`);
+          }
+          const v2Extra = [...v2Terms].filter((t) => !v1Terms.has(t));
+          chk(v2Extra.length === 1 && v2Extra[0] === "codexShownCache",
+              `v2 arm carries exactly one bust term v1 lacks (codexShownCache), got [${v2Extra.join(", ")}]`);
+          const v1Extra = [...v1Terms].filter((t) => !v2Terms.has(t));
+          chk(v1Extra.length === 0,
+              `v1 arm carries no bust term v2 lacks (got [${v1Extra.join(", ")}])`);
+        }
+      }
+    }
+
+    // FIX ROUND 1, FINDING 2: weekCardY()'s/codexRowY()'s OWN DERIVATION was
+    // unasserted - Addition 1's ten-constant mapping check cannot see it,
+    // because CARD2_Y/CODEX_Y are not among the _SOLO-paired constants it
+    // walks. Escaping edit proved: `int weekCardY() { return CARD2_Y; }`
+    // passed every assertion above while drawing WEEK at the DUO position
+    // inside the SOLO layout - invisible until Codex goes quiet for a full
+    // window. Two binds: each derived accessor's body names the right terms,
+    // and - the stronger form - CARD2_Y/CODEX_Y may not appear anywhere
+    // inside the accessor block at all, since that block's whole job is
+    // deriving from CARD1_Y/SP_2/the ten selectors, never from the row/card
+    // positions it exists to replace.
+    {
+      const accessorsAt = uino.indexOf("int nowCardH()");
+      const codexRowYAt = uino.indexOf("int codexRowY()");
+      const codexRowYEnd = codexRowYAt >= 0 ? uino.indexOf("\n", codexRowYAt) : -1;
+      chk(accessorsAt >= 0 && codexRowYAt > accessorsAt && codexRowYEnd > codexRowYAt,
+          "found the accessor block (nowCardH() .. codexRowY()) to check");
+      if (accessorsAt >= 0 && codexRowYEnd > codexRowYAt) {
+        const accessorBlock = uino.slice(accessorsAt, codexRowYEnd);
+        const weekCardYBody = accessorBlock.match(/int weekCardY\(\)\s*\{[^}]*\}/);
+        chk(!!weekCardYBody, "found weekCardY()'s body to check");
+        if (weekCardYBody) chk(/\bnowCardH\(\)/.test(weekCardYBody[0]),
+            "weekCardY() derives from nowCardH() - not from CARD2_Y, the DUO row's own literal");
+        const codexRowYBody = accessorBlock.match(/int codexRowY\(\)\s*\{[^}]*\}/);
+        chk(!!codexRowYBody, "found codexRowY()'s body to check");
+        if (codexRowYBody) {
+          chk(/\bweekCardY\(\)/.test(codexRowYBody[0]), "codexRowY() derives from weekCardY()");
+          chk(/\bweekCardH\(\)/.test(codexRowYBody[0]), "codexRowY() derives from weekCardH()");
+        }
+        chk(!/\bCARD2_Y\b/.test(accessorBlock),
+            "CARD2_Y does not appear inside the accessor block - every derived Y comes from "
+          + "nowCardH()/weekCardH()/SP_2, never from the duo row's own literal");
+        chk(!/\bCODEX_Y\b/.test(accessorBlock),
+            "CODEX_Y does not appear inside the accessor block, for the same reason");
+      }
+    }
   }
 }
 
