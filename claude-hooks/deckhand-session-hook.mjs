@@ -718,6 +718,18 @@ try {
           const cur = JSON.parse(fs.readFileSync(filePath, "utf8"));
           if (cur.ask && cur.ask.pid === ask.pid) {
             delete cur.ask;
+            // A DEVICE ANSWER MUST ALSO RETURN THE STATUS, or the row keeps saying NEEDS
+            // INPUT with nothing left to answer. Nothing else will do it: a question
+            // answered here resolves as a DENY, and a denied AskUserQuestion fires
+            // neither PostToolUse nor PostToolUseFailure - measured, 623 of the latter
+            // in one log and not one for AskUserQuestion - so status was only
+            // recomputed by the next unrelated event, seen at 75s and 2m41s.
+            // CONDITIONAL on `answer`, deliberately: the wait's other exit is a real
+            // TIMEOUT, which leaves the Mac's dialog still on screen, so the session
+            // genuinely is still asking and claiming otherwise would be a lie in the
+            // one direction the user cannot detect. (The Mac-answered case never gets
+            // here - its ask no longer matches, so the guard above skips it.)
+            if (answer) cur.status = "working";
             cur.updated_at = Date.now();
             writeRecord(filePath, cur);
           }
