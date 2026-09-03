@@ -2087,12 +2087,32 @@ for (const b of [1, 2]) {
       "scrollback: the vertical column closes exactly on BOARD_H");
     chk(c.SCROLL_LINES === Math.floor((PANEL[b][1] - c.SCROLL_BOT_AIR - c.SCROLL_TOP) / c.CODE_LINE_H),
       "scrollback: SCROLL_LINES is the column's own height in whole cells");
-    chk(c.SCROLL_BOT === c.SCROLL_TOP + c.SCROLL_LINES * c.CODE_LINE_H,
-      "scrollback: SCROLL_BOT is derived from TOP and LINES, not a second literal");
+    // THE NUMERIC FORM OF THIS COULD NOT FAIL, and a reviewer proved it by
+    // injection: SCROLL_BOT is DECLARED as `SCROLL_TOP + SCROLL_LINES *
+    // CODE_LINE_H`, and consts() evaluates it by substituting those same terms, so
+    // `c.SCROLL_BOT === c.SCROLL_TOP + ...` holds for every value they could
+    // take - the "derivation asserted against its own term" class this repo has
+    // now paid for four times. What the assertion was REACHING for is a claim
+    // about the DECLARATION, so it is made against the header's raw text: BOT
+    // must be an expression naming both terms, never a second literal that could
+    // silently disagree with them.
+    const rawH = fs.readFileSync(`${DIR}/board_es3c35p.h`, "utf8");
+    const botDecl = rawH.match(/const int SCROLL_BOT\s*=\s*([^;]+);/);
+    chk(botDecl != null, "scrollback: SCROLL_BOT's declaration is findable");
+    chk(botDecl != null && /SCROLL_TOP/.test(botDecl[1]) && /SCROLL_LINES/.test(botDecl[1]),
+      "scrollback: SCROLL_BOT is DECLARED from TOP and LINES, not a second literal");
 
     // The back key carries the CLOSE the deleted button row used to provide, so it
     // is the one control here that must not shrink below the fingertip floor.
-    chk(c.SCROLL_BACK_W >= c.TAP_MIN, "scrollback: the back key is at least TAP_MIN wide");
+    // AND SO COULD THIS ONE: SCROLL_BACK_W is declared as a bare `= TAP_MIN`, so
+    // the numeric comparison was `TAP_MIN >= TAP_MIN`. The declaration is the real
+    // claim and it is STRONGER than the inequality - an alias cannot drift at all,
+    // where `>= TAP_MIN` would have permitted a 60px key that no longer tracks
+    // the fingertip floor if TAP_MIN ever moved.
+    const backDecl = rawH.match(/const int SCROLL_BACK_W\s*=\s*([^;]+);/);
+    chk(backDecl != null, "scrollback: SCROLL_BACK_W's declaration is findable");
+    chk(backDecl != null && /^\s*TAP_MIN\s*$/.test(backDecl[1]),
+      "scrollback: the back key IS TAP_MIN, aliased rather than merely >= it");
     chk(c.HIST_CHIP_H >= c.TAP_MIN, "scrollback: the filter chip is at least TAP_MIN tall");
 
     // THE NAME LANE IS ASSERTED AGAINST THE HOST'S OWN CAP, parsed rather than
