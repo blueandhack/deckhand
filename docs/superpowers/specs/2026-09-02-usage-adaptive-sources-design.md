@@ -234,22 +234,29 @@ argued, never observed.
   still hold when one term is perturbed. Independent literals plus the rhythm
   assertion is strictly better.
 
-## 9. One decision found during design, flagged for review
+## 9. The allocation decision, RESOLVED against the rendered pixels
 
-The approved allocation was "grow both cards". Deriving it against the real
-tables showed a cost that was not visible when it was chosen:
+Deriving the approved "grow both" allocation against the real band tables turned up
+a cost that was not visible when it was chosen:
 
 | allocation | new constants | WEEK | answers the open spark question |
 |---|---|---|---|
 | **grow both** (this spec) | ~11 | rhythm re-pitched 3 -> 8 | partly (spark 32 -> 64) |
 | all 64 to NOW | ~4 | untouched | fully (spark 32 -> 96, ~1.1 pt/px) |
 
-Growing only NOW leaves WEEK entirely alone, needs `NOW_CARD_H_SOLO`,
-`NOW_SPARK_H_SOLO`, `NOW_META_Y_SOLO` and `CARD2_Y_SOLO`, keeps both rhythms at
-their shipped values, and takes the sparkline to ~1 pixel per percentage point.
-Against that, WEEK's Claude block and Fable block stay 3 rows apart, which is the
-tightest spacing on the tab.
+**Both were then MOCKED at 1:1 with the real Spleen bitmaps and compared side by
+side, and "grow both" was chosen again with that cost visible.** The mock calls the
+shipped painters (`leadCard`, `capRow`, `heroSide`, `codexRow`) with `K` patched per
+layout, so it restates no offset the header owns; it made the trade legible in the
+one way a table cannot - the re-pitched WEEK card reads as a visibly looser card,
+which is what the 32 rows actually buy.
 
-**This spec implements the approved "grow both".** The alternative is recorded
-here with its arithmetic so the choice can be revisited at the review gate rather
-than rediscovered mid-implementation.
+So the decision is settled and this section is the record of it rather than an open
+question. **The rejected allocation's arithmetic is kept above on purpose**: it is
+the cheaper option by a factor of nearly three in constants, so a future reader who
+finds the ~11 solo constants expensive should know that alternative was measured,
+mocked, seen and declined - not overlooked.
+
+The one thing "grow both" leaves on the table, stated so it is not rediscovered as
+a finding: the sparkline reaches 1.69 points per pixel rather than 1.10, so the
+"never read by a human at 320x480" question is improved but not fully closed.
