@@ -2661,6 +2661,116 @@ already records that hanging the Codex row's dimming off the Claude quota's age 
 directions. The correct fix is a separate `CX_STALE_SEC`, which is pre-existing scope rather than
 this branch's.
 
+#### USAGE on board 2: the column adapts to whether Codex is even here
+
+**THE PREDICATE, AND ITS THRESHOLD IS DATA-DRIVEN RATHER THAN A LITERAL.** `usageCodexShown()`
+(`usage.ino`) is the one thing every layout accessor, `renderUsageTab()` and `drawUsageStatic()`
+ask — never re-derived, for the same reason the pairing panel's `pairConfirmable()` is one
+predicate read by both the draw site and the hit test: two spellings of "is Codex here" is how a
+tab comes to paint one column while its chrome believes it is the other.
+```
+if (usage.cxPct < 0) return false;       // never measured
+if (usage.cxAgeSec < 0) return false;    // ditto, by the age's own sentinel
+long win = usage.cxWindowMin > 0 ? usage.cxWindowMin : CODEX_HIDE_FALLBACK_MIN;
+return usage.cxAgeSec <= win * 60;
+```
+The window rides the wire as `cxWin` (`host/index.mjs` sends `primary?.windowMin ?? null`) and is
+stored as `usage.cxWindowMin`, so the real threshold is **one full quota window of silence** and
+moves with whatever plan the paired account is on — the host polled roughly 120,000 times over
+that window and learned nothing, which is a stronger claim than "old". `CODEX_HIDE_FALLBACK_MIN`
+(10,080 minutes = 7 days, the observed Codex window) is only the fallback for a percentage that
+arrives with no window beside it, because a percentage and its window can arrive apart and
+trusting an absent window as `0` would hide the row the instant it was first measured.
+**Deliberately NOT keyed on `QUOTA_STALE_SEC` (900s).** That threshold already dims a Claude card
+in place — its claim is "we cannot vouch for this number right now". A full window of silence is a
+different and stronger claim — "nobody is running the tool at all" — and it earns removing the row
+rather than dimming it.
+
+**THE ASYMMETRY: CLAUDE NEVER HIDES, BECAUSE ITS QUOTA IS ACCOUNT-LEVEL AND ARRIVES EVEN AT 0%.**
+There is no Claude-side predicate and none is planned — the OAuth usage endpoint is polled every
+five minutes regardless of whether anyone is typing, so a reading always arrives, all the way down
+to a legitimately exhausted `0%`. Days of silence there is not "nobody is using Claude"; it is an
+**expired OAuth refresh token or a poller stuck in back-off** — a fault this file already spends a
+long section on (`getFreshAccessToken()`, the 429/401 guards) — and a card that quietly disappeared
+would bury exactly the failure this repo's stale-dimming exists to surface. So a stale Claude
+reading stays on screen, dimmed and labelled `stale`, while a stale-past-a-window Codex reading is
+removed outright: the two sources fail differently, so they are handled differently on purpose,
+not by oversight.
+
+**THE RHYTHM CONSTRAINT, AND WHY THE TWO CARDS SPENT THEIR RECLAIMED ROWS DIFFERENTLY.** Hiding
+the Codex row frees 64 rows (`8 + CODEX_H(56) + 8`), and the two cards split them 32/32 — but
+*where* each 32 landed follows from what each card actually has to grow.
+- **NOW put its whole share into the SPARKLINE BAND.** `NOW_SPARK_H` 32 → `NOW_SPARK_H_SOLO` 64,
+  and nothing else in that card's rhythm moves: the gap between blocks (4) and the trailing
+  clearance under the last one (5) are the same **identical** numbers in both layouts, so only two
+  offsets — the spark's height and everything below it — actually shift. `drawUsageSpark` scales
+  its plot to whatever height it is handed, so doubling the band takes the fixed 0..100 scale from
+  3.70 to 1.69 percentage points per pixel — a genuinely more legible trend, not merely a bigger box.
+- **WEEK re-pitched its uniform GAP instead, because it has no band that should grow.** A WEEK
+  sparkline would be a flat line pretending to be a trend — the ring moves **1.49 points** across
+  the whole 7-day window, inside integer rounding — so there is nothing on that card worth spending
+  pixels to enlarge. Its 32 rows went into the one number that already touches every block on the
+  card: the uniform gap between them, 3 → 8. (`WEEK_CARD_H_SOLO`'s minimum for a gap `k` is
+  `126 + 6k`, which is 174 at `k = 8`; the column needs 176, so the card is one row wider than the
+  minimum and the trailing clearance below the last block comes out at 10 against the 8-row rhythm
+  everywhere else on the card.)
+  All ten `_SOLO` offsets are **independent literals in the board header, not `prev + cell + AIR`
+  chains** — deliberately, because `geom-sweep.mjs` injects at parse time and a chain of relative
+  identities lets a perturbation propagate into every offset below it, leaving every identity still
+  holding (the exact failure the wireless-pairing panel's five air constants shipped with, and
+  fixed here before it shipped rather than after). `usage-geom-check.mjs`'s rhythm assertion is
+  what actually binds them, and this task's own sweep confirms it: all ten are caught at `|1|` in
+  both directions.
+
+**THE LAYOUT-FLIP CONTENT-AREA CLEAR, AND WHY A CHROME REPAINT ALONE IS NOT ENOUGH.** Every other
+chrome bust in this tab repaints the boxes and lets the change-only fields redraw inside them — but
+flipping `usageCodexShown()` moves the card BORDERS themselves. NOW grows past where WEEK used to
+start (the duo layout's `CARD2_Y` is 244; the solo layout's WEEK card starts at 276), so a bare
+`drawUsageStatic()` would leave rows in the old WEEK card's former top strip carrying the old
+card's pixels while every field draws at its new offset inside a box that is no longer there —
+the settings redesign's "a live field drew a control into chrome that did not exist" arriving
+through geometry instead of a session count. `renderUsageTab()`'s bust block therefore does a full
+`fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG)` on the one tick the
+flag actually flips (`codexShownCache != codexShownNow && codexShownCache != -1`, so the very first
+draw of the tab does not pay for a clear nothing needs), and only then calls `drawUsageStatic()`.
+
+**COSTS, MEASURED IN ONE SESSION AGAINST THE BRANCH POINT** (`arduino-cli`'s cache keys on the
+sketch path, so this compares real builds rather than recorded figures from different sessions):
+
+| | branch point | HEAD (Task 5) | delta |
+|---|---|---|---|
+| board 2 `.bin` | 1,025,888 | 1,026,320 | **+432 bytes**, RAM unchanged (74,116 throughout) |
+| board 2 `Sketch uses` | 1,025,626 | 1,026,062 | +436 (the few-byte `.bin`-vs-`Sketch-uses` spread this file already documents) |
+| board 1 | 1,387,024 (`8f64b7f7...`) | 1,387,024 (`8f64b7f7...`) | **UNCHANGED** |
+
+Almost all of it is Task 3 wiring the predicate into reachable code (**+448** measured there, the
+first task on this branch whose diff was not stripped by `--gc-sections`); Task 1's predicate
+function alone moved the `.bin` by **-16** while unreachable — a link-order artifact, not emitted
+code, the same class this file already documents for USAGE v2's own Tasks 6-8. Tasks 2 and 4 added
+no board-2 firmware bytes at all (a committed mock plus checker-only changes). Board 1 is
+`UNCHANGED` at every commit on this branch: the whole feature sits behind `#if BOARD_USAGE_V2` and
+`usageCodexShown()`'s own call sites, none of which board 1 compiles.
+
+**WHAT IS NOT VERIFIED, STATED PLAINLY.**
+- **The DUO layout is now unreachable on THIS machine, so the two layouts are verified at
+  different times by different means rather than both by one run.** `usage.cxPct` has been `-1`
+  here since before this branch existed — Codex has never reported to this host, every line of the
+  log reads `codex=?` — so the device enters the solo column the instant it boots and stays there.
+  The solo column is the one this task put on the glass (`SCREENSHOT`, both card borders measured
+  off the PNG at exactly the predicted rows). The duo column is verified only by the geometry
+  checkers and the fault-injection sweep, never by a device that has actually shown it since this
+  branch began.
+- **The threshold's own EDGE takes seven days of wall clock to observe, and is unit-checked and
+  argued rather than watched.** Nothing here has run a Codex reading forward from fresh to exactly
+  one window stale and watched the row disappear on the glass; `usage-geom-check.mjs`'s bind on
+  `usageCodexShown()`'s own body is a structural proof that the right comparison is being made, not
+  a timed observation of it firing.
+- **No claim in this section covers colour.** Step 5's confirmation that the WEEK card's top border
+  sits at `y = 276` and its bottom at `y = 451` is **framebuffer evidence** — board 2's
+  `SCREENSHOT` reads the shadow framebuffer the renderer just composed, not the panel (see the
+  verification trap under Two boards) — so it vouches for the GEOMETRY this task built and says
+  nothing about how any of it actually looks on the glass.
+
 #### Board 2's battery divider is CONFIRMED by measurement
 
 `BOARD_BAT_MV_SCALE 2`. The LCDWIKI table for this board gives no ratio and the vendor self-test
@@ -3939,7 +4049,17 @@ two things `host/index.mjs` cannot get any other way:
   publishes one percentage and a reset time — no token count and no second window, so a
   card's other two lines would be empty chrome.
   It shows `--`, never `0%`, when no `rate_limits` has ever been seen; 0% is a
-  measurement and "never measured" is not.
+  measurement and "never measured" is not. **CORRECTION: on board 2 that state is no
+  longer reachable at all.** The adaptive column (see "USAGE on board 2: the column that
+  adapts to whether Codex is even here", below) hides the whole row once Codex has gone
+  quiet for a full window — and "never measured" is silence since forever, so it is the
+  first thing the predicate catches. `renderCodexRow()`'s `bool have = usage.cxPct >= 0;`
+  and its `"--"` branch are unchanged and still execute — this sentence is still literally
+  true of the function — but on board 2 nothing calls it into view while `have` is false,
+  because `usageCodexShown()` already returned false and the row was never drawn this tick.
+  **Board 1 is the row's live path to `--` now**: it has no predicate, no solo column and
+  no hide, so a Codex that has never reported still shows a permanent `--` row there,
+  exactly as this bullet always described.
 - **Codex DOES get a pace bar, and the note above used to say it couldn't.** The claim was
   "nothing to plot a pace against" — wrong: `resets_at` plus `window_minutes` give the
   elapsed fraction, so the tick is the identical calculation the Claude cards use
