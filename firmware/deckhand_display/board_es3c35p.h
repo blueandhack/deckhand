@@ -2625,6 +2625,18 @@ const int SCROLL_TAIL_BYTES_BLE = 8192;
 // term, since a newline becomes \n and DOUBLES. Worst case for one entry is
 // 4000 chars of pure newlines = 8000 escaped plus ~200 of envelope, so a single
 // entry always fits alone.
+// THERE ARE TWO CEILINGS ON THIS, NOT ONE, AND THE SECOND WAS FOUND ON HARDWARE.
+// feedChar's line guard is 16000 bytes - but every chunk over ~4KB produced ZERO
+// device-side output, a silent JSON parse failure reproduced twice, because
+// `Serial.setRxBufferSize()` sets a 4096-byte RX RING and an overflowing ring
+// DISCARDS bytes (its own comment in deckhand_display.ino says so, for board 1's
+// audio ACKs). Shrinking the chunk to fit 4096 does NOT work: a single history
+// entry at HIST_FULL_CAP is up to ~8400 bytes escaped, so one entry would not fit
+// one chunk. The ring is therefore raised to 16384 FOR BOARD 2 ONLY, behind
+// BOARD_HISTORY_SCROLL, leaving board 1's call character-identical.
+// So 12000 is bounded by the line guard with 4000 bytes of headroom - enough for
+// the envelope and for one worst-case entry alone - and the SCROLLACK handshake
+// stops the host putting a second chunk in flight before the first is drained.
 const int SCROLL_WIRE_CHUNK_BYTES = 12000;
 
 const int SCROLL_FETCH_TIMEOUT_MS     = 20000;

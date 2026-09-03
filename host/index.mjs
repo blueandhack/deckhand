@@ -1543,9 +1543,42 @@ async function sendHistory(id, filter, want, budget) {
 // size-bounded lines. A third request form beside `<page|last>` and `item:<n>`, so board 1
 // keeps its exact behaviour and no version bump is needed: the same backward-compatible
 // shape as the optional `<cols>x<lines>` token and the trailing `to=<hostId>` address.
-const SCROLL_WIRE_CHUNK_BYTES = 12000;   // mirrors board_es3c35p.h; asserted by scrollback-check.mjs
+// Mirrors board_es3c35p.h and is asserted against it by scrollback-check.mjs.
+// Bounded by feedChar's 16000-byte line guard. The device's RX ring is the other
+// ceiling and is raised to 16384 on board 2 for exactly this - see the header.
+const SCROLL_WIRE_CHUNK_BYTES = 12000;
+const SCROLL_ACK_TIMEOUT_MS = 4000;
+
+// seq -> resolve, for the per-chunk handshake. The host MUST NOT put a second
+// chunk in flight before the device has drained the first: measured on hardware,
+// back-to-back writes overflow that 4096-byte ring and it DISCARDS the excess
+// silently, which presents as a fetch that simply never arrives.
+// KEYED BY GENERATION AS WELL AS SEQ. Keyed by seq alone, two concurrent fetches
+// collide: the second Map.set overwrites the first's resolver, so one ACK resolves
+// the wrong waiter and the other times out - observed as "ACK 0 (waiter found)"
+// immediately followed by "ACK 0 (waiter MISSING)". The device-side dedup above
+// should stop a second fetch ever starting; this is the belt to that braces,
+// because a superseded fetch must LOSE rather than corrupt the winner.
+let scrollFetchGen = 0;
+// A duplicate request arrives on every send, because the device transmits on USB
+// and BLE at once. 1500ms comfortably covers the gap between the two copies
+// (measured in the same millisecond) without swallowing a real re-request: a
+// filter toggle changes the key, and a retry of the SAME filter is what the
+// device's own in-flight dedup already refuses.
+const SCROLL_REQ_DEDUP_MS = 1500;
+const scrollReqSeen = new Map();
+const scrollAckWaiters = new Map();
+const ackKey = (gen, seq) => `${gen}:${seq}`;
+function waitForScrollAck(gen, seq) {
+  const k = ackKey(gen, seq);
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { scrollAckWaiters.delete(k); resolve(false); }, SCROLL_ACK_TIMEOUT_MS);
+    scrollAckWaiters.set(k, () => { clearTimeout(t); scrollAckWaiters.delete(k); resolve(true); });
+  });
+}
 
 async function sendScrollback(id, filter, maxBytes) {
+  const gen = ++scrollFetchGen;      // a later fetch supersedes this one
   const all = await histItems(id);
   const chatOnly = filter !== "all";
   const items = chatOnly ? all.filter((x) => x.r === "you" || x.r === "claude") : all;
@@ -1594,6 +1627,21 @@ async function sendScrollback(id, filter, maxBytes) {
       console.log(`Scrollback: WARNING chunk ${i} is ${Buffer.byteLength(line, "utf8")} bytes`);
     if (usbPort) usbPort.write(line);
     else if (bleCharacteristic) await sendOverBle(line);
+    // Wait for this chunk to be drained before sending the next. A timeout
+    // ABANDONS the fetch rather than pressing on into a ring we know is full -
+    // the device's own SCROLL_FETCH_TIMEOUT then reports it on the glass, so the
+    // failure is named at both ends instead of arriving as a silent short read.
+    if (gen !== scrollFetchGen) {
+      console.log(`Scrollback: superseded at chunk ${i} - abandoning this fetch`);
+      return;
+    }
+    if (i + 1 < groups.length) {
+      const ok = await waitForScrollAck(gen, i);
+      if (!ok) {
+        console.log(`Scrollback: no ACK for chunk ${i} after ${SCROLL_ACK_TIMEOUT_MS}ms - abandoning`);
+        return;
+      }
+    }
   }
   console.log(
     `Scrollback: ${id} ${chatOnly ? "chat" : "all"} ${kept.length} of ${items.length} entries ` +
@@ -2632,6 +2680,15 @@ async function handleDeviceLine(line, via, pairGen = 0) {
   }
   // History request from the detail screen. Handled here rather than in the tick so the
   // transcript is only read when someone is actually looking at it.
+  if (line.startsWith("SCROLLACK ")) {
+    const seq = Number.parseInt(line.slice(10).trim(), 10);
+    const w = scrollAckWaiters.get(ackKey(scrollFetchGen, seq));
+    // Deliberately unlogged, and a missing waiter is EXPECTED rather than a
+    // fault: the device acks on every live transport, so a cabled device sends
+    // each ACK twice and the second finds the waiter already resolved.
+    if (w) w();
+    return;
+  }
   if (line.startsWith("HISTORY ")) {
     // The 4th token is the device's reader budget, `<cols>x<lines>` - absent from
     // board 1 and from any pre-budget firmware, which is exactly why histBudget()
@@ -2639,9 +2696,21 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     // the item: path (one whole entry, no pagination) ignores it.
     const [id, filter = "chat", want = "last", budgetTok] = line.slice(8).trim().split(/\s+/);
     console.log(`[device/${via}] ${line}`);
-    if (want.startsWith("tail:"))
+    if (want.startsWith("tail:")) {
+      // THE DEVICE SENDS ON EVERY LIVE TRANSPORT AT ONCE, so a cabled device
+      // delivers this request TWICE and we would run two fetches whose chunks
+      // interleave through the device's single scrollNextSeq - measured, and it
+      // abandoned every fetch. The first one wins; a second is not an error.
+      // Same rule the pairing path states for PAIRPUB, and the same reason the
+      // ANSWER path dedups. Keyed on the whole request so a genuinely different
+      // one (a filter toggle) is never swallowed.
+      const now = Date.now();
+      for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
+      const reqKey = `${id}|${filter}|${want}`;
+      if (scrollReqSeen.has(reqKey)) return;
+      scrollReqSeen.set(reqKey, now);
       await sendScrollback(id, filter, Number.parseInt(want.slice(5), 10) || 65536);
-    else if (want.startsWith("item:"))
+    } else if (want.startsWith("item:"))
       await sendHistoryItem(id, filter, Number.parseInt(want.slice(5), 10) || 0);
     else await sendHistory(id, filter, want, histBudget(budgetTok));
     return;

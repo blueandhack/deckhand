@@ -1220,6 +1220,7 @@ extern int      scrollCount;
 extern uint32_t scrollTotalLines;
 extern int      scrollTotal;
 extern int      scrollDropped;
+extern uint8_t  scrollHostSlot;
 #endif
 
 // Second level: ONE entry, in full, in its own pager. The list rows are previews, and an
@@ -3892,6 +3893,21 @@ void handleLine(const String& line) {
           if (!scrollAppend(role, t)) break;   // arena or index full: keep what fits
         }
       }
+      // KEPT, not temporary. This one line is what separated "the chunk never
+      // arrived" from "the ack never returned" when the fetch was failing, and
+      // those two have identical symptoms from the Mac. 11 lines per fetch, and a
+      // fetch only happens when someone opens a transcript.
+      Serial.printf("SCROLL: chunk %d/%d in, %d entries so far\n", seq, of, scrollCount);
+      // ACK, so the host cannot put a second chunk in flight before this one is
+      // drained. Without it the host writes every chunk back to back and the
+      // shared 4096-byte RX ring silently DISCARDS the overflow - measured, and
+      // it is the same flow-control lesson board 1's audio path already learned
+      // ("the bytes it discards include the flow-control ACKs").
+      {
+        char ack[24];
+        snprintf(ack, sizeof(ack), "SCROLLACK %d", seq);
+        sendLineToHost(ack, scrollHostSlot);
+      }
       scrollNextSeq = seq + 1;
       scrollChunksIn = seq + 1;
       scrollChunksOf = of;
@@ -4880,7 +4896,19 @@ void setup() {
   // overflows while the device is busy sending audio, and the bytes it discards
   // include the flow-control ACKs. Losing those deadlocked the send window: a
   // stream produced 8 chunks in 18s and dropped half its samples.
+  // PER BOARD, and board 1's arm is character-identical to what it always had, so
+  // its binary does not move. Board 2 needs a bigger ring because the scrollback
+  // fetch's chunks are the largest lines this device ever RECEIVES: a single
+  // history entry at HIST_FULL_CAP (4000 chars) is up to ~8400 bytes once JSON
+  // escaping is counted, so a 4096-byte ring cannot hold one entry - and an
+  // overflowing ring DISCARDS, exactly as the note above records. 16384 clears
+  // both that and feedChar's 16000-byte line guard, and costs 16KB of the 261KB
+  // this board has free.
+#if BOARD_HISTORY_SCROLL
+  Serial.setRxBufferSize(16384);
+#else
   Serial.setRxBufferSize(4096);
+#endif
   Serial.begin(115200);
 
   // ---- WAKE GUARD, before anything expensive ----
@@ -5230,6 +5258,27 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     handlePairOk(buf.substring(7));
   } else if (buf == "PAIRCANCEL") {
     handlePairCancel();
+#endif
+#if BOARD_HISTORY_SCROLL
+  } else if (buf.startsWith("SCROLLFETCH")) {
+    // SCROLLFETCH answers exactly ONE question - "does the wire work?" - and draws
+    // nothing, so silence after it is a WIRE fault and can never be blamed on the
+    // renderer. Same ladder AUDIOPROBE/TONETEST already won the argument for: a
+    // probe that configures nothing cannot be the cause of what it reports.
+    // It earned its place immediately - the fetch's chunks are the largest lines
+    // this device ever RECEIVES, and the first version silently lost every one
+    // over ~4KB to an overflowing RX ring.
+    if (sessionCount == 0) {
+      Serial.println("SCROLLFETCH: no sessions");
+    } else {
+      int idx = 0;
+      const char* arg = buf.c_str() + 11;
+      while (*arg == ' ') arg++;
+      if (*arg) idx = constrain(atoi(arg), 0, sessionCount - 1);
+      detailIndex = idx;              // requestScrollback addresses the session's Mac
+      requestScrollback(idx);
+      Serial.printf("SCROLLFETCH: asked for session %d (%s)\n", idx, sessions[idx].name);
+    }
 #endif
   } else if (buf.startsWith("READTEST")) {
     // THE ASK READER IS OTHERWISE UNCAPTURABLE, and that is the same argument

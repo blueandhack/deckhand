@@ -19,6 +19,15 @@ uint32_t scrollTextUsed = 0;
 uint32_t scrollTotalLines = 0;
 int      scrollTotal = 0;              // entries in the whole filtered history
 int      scrollDropped = 0;            // withheld at the head to fit the budget
+// What is currently LOADED, so a repeat request for the same thing is answered
+// from PSRAM instead of re-downloading 108KB. Not merely an optimisation: the
+// trigger-file path delivers a command twice, the first copy's fetch finishes in
+// about two seconds, and the second copy then re-requested - only for the host's
+// own duplicate-request dedup to swallow it, leaving the device sat in `pending`
+// for the full 20s timeout and then reporting "could not reach the Mac" over a
+// transcript it already had. Observed exactly that way.
+char scrollLoadedId[16] = "";
+bool scrollLoadedChat = true;
 
 const char* scrollMark(uint8_t r) {
   // ASCII ONLY. Claude Code's own markers are U+23FA and U+257C, and Spleen
@@ -108,6 +117,10 @@ bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize) {
 }
 
 void scrollReset() {
+  // scrollLoadedId is deliberately NOT cleared here: reset runs at the START of
+  // each chunked fetch (seq 0) for the session we are loading, and clearing it
+  // would make the "already held" check above unable to see its own load. It is
+  // cleared by scrollEnd(), which is where the store genuinely stops existing.
   scrollCount = 0;
   scrollTextUsed = 0;
   scrollTotalLines = 0;
@@ -132,6 +145,7 @@ bool scrollBegin() {
 }
 
 void scrollEnd() {
+  scrollLoadedId[0] = '\0';        // the store is gone; it holds nothing
   if (scrollText) { heap_caps_free(scrollText); scrollText = nullptr; }
   if (scrollIdx)  { heap_caps_free(scrollIdx);  scrollIdx  = nullptr; }
   scrollReset();
@@ -191,10 +205,35 @@ int  scrollNextSeq = 0;
 int  scrollChunksOf = 1;
 int  scrollChunksIn = 0;
 unsigned long scrollFetchStart = 0;
+// The link the fetch was requested on. The ACK is addressed to it rather than
+// broadcast: a stray ack reaching the other Mac would be a line it never awaited.
+uint8_t scrollHostSlot = 0;
 uint32_t scrollY = 0;             // pixel scroll offset from the top of the transcript
 
 void requestScrollback(int idx) {
   if (idx < 0 || idx >= sessionCount) return;
+  // A SECOND REQUEST WHILE ONE IS IN FLIGHT IS A NO-OP, and this is not a
+  // nicety: the host delivers every trigger-file command over BOTH transports,
+  // so one SCROLLFETCH reaches loop() twice. Two fetches then interleave chunks
+  // through ONE scrollNextSeq, the second chunk 0 fails the continuity check,
+  // and the fetch is abandoned - observed on hardware exactly that way
+  // (`SCROLL: seq 0, expected 1`). Same defect POWERPROBE already documents,
+  // and the same answer: re-issuing reports progress rather than restarting.
+  if (scrollPending) {
+    Serial.printf("SCROLL: already fetching (%d/%d chunks, %lums) - ignoring\n",
+                  scrollChunksIn, scrollChunksOf, millis() - scrollFetchStart);
+    return;
+  }
+  // Already held: answer from PSRAM. The filter is part of the identity because
+  // CHAT and ALL are different entry sets, so a toggle must genuinely re-fetch.
+  if (scrollCount > 0 && histChatOnly == scrollLoadedChat &&
+      strcmp(scrollLoadedId, sessions[idx].id) == 0) {
+    Serial.printf("SCROLL: already have %d entries for this session - not re-fetching\n",
+                  scrollCount);
+    scrollPending = false;
+    scrollFetchFailed = false;
+    return;
+  }
   if (!scrollBegin()) { scrollFetchFailed = true; return; }
   // BLE genuinely cannot have the whole thing: 122KB at ~666 B/s is over three
   // minutes. It gets a bounded tail and the wait is STATED, not hidden.
@@ -205,6 +244,10 @@ void requestScrollback(int idx) {
   scrollChunksIn = 0;
   scrollChunksOf = 1;
   scrollFetchStart = millis();
+  scrollHostSlot = sessions[idx].hostSlot;
+  strncpy(scrollLoadedId, sessions[idx].id, sizeof(scrollLoadedId) - 1);
+  scrollLoadedId[sizeof(scrollLoadedId) - 1] = '\0';
+  scrollLoadedChat = histChatOnly;
   char line[72];
   snprintf(line, sizeof(line), "HISTORY %s %s tail:%ld", sessions[idx].id,
            histChatOnly ? "chat" : "all", budget);

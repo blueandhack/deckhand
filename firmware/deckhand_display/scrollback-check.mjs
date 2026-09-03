@@ -223,9 +223,42 @@ if (gm) {
     `structural: a worst-case single entry (${worst}B fully escaped) fits one chunk`);
 }
 
+// THE RX RING IS A SECOND, LOWER CEILING THAN feedChar's LINE GUARD, and nothing
+// asserted it until a chunk over ~4KB was measured producing ZERO device-side
+// output - a silent JSON parse failure, twice. `Serial.setRxBufferSize()` is
+// SHARED, UNGUARDED code sized for board 1's audio flow control, and its own
+// comment records that an overflowing ring DISCARDS bytes. So the budget is
+// bounded by the SMALLER of the two, and the ring is parsed rather than
+// transcribed because raising it is a shared-code change someone might make.
+// The BOARD 2 arm specifically: the sketch now has two calls, and matching the
+// first would compare the budget against board 1's 4096 and fail for the wrong
+// reason. Anchored on the guard so a future reorder cannot silently pick the
+// other arm.
+const rxArm = SKETCH.match(/#if BOARD_HISTORY_SCROLL\s*\n\s*Serial\.setRxBufferSize\((\d+)\)/);
+const rx = rxArm;
+s(rx != null, "structural: the shared Serial RX buffer size is still findable");
+if (rx) s(c.SCROLL_WIRE_CHUNK_BYTES < +rx[1],
+  `structural: the chunk budget (${c.SCROLL_WIRE_CHUNK_BYTES}) fits the shared RX ring (${rx[1]})`);
+
 // The HOST measures the budget on the SERIALISED line, never on raw text length.
 const HOSTSRC = stripComments("../../host/index.mjs");
 const sbBody = body(HOSTSRC, "async function sendScrollback(id, filter, maxBytes)", "host/index.mjs");
+// The host mirrors the constant; a drift means the host builds chunks the device
+// cannot receive, which is exactly the failure above with nothing logging it.
+const hostChunk = HOSTSRC.match(/const SCROLL_WIRE_CHUNK_BYTES = (\d+);/);
+s(hostChunk != null, "structural: the host's chunk budget is still findable");
+if (hostChunk) s(+hostChunk[1] === c.SCROLL_WIRE_CHUNK_BYTES,
+  "structural: the host's chunk budget equals the board header's");
+
+// The handshake itself: the host must WAIT rather than writing back to back.
+const sbBody2 = body(HOSTSRC, "async function sendScrollback(id, filter, maxBytes)", "host/index.mjs");
+present(sbBody2, /waitForScrollAck/,
+  "structural: the host awaits a per-chunk ACK instead of writing back to back");
+s(/line\.startsWith\("SCROLLACK "\)/.test(HOSTSRC),
+  "structural: the host resolves the device's SCROLLACK");
+s(/SCROLLACK %d/.test(SKETCH),
+  "structural: the device sends SCROLLACK for each chunk it drains");
+
 present(sbBody, /JSON\.stringify/, "structural: the host builds the chunk envelope with JSON.stringify");
 present(sbBody, /byteLength/,
   "structural: the host measures the chunk on the SERIALISED line, in BYTES");
