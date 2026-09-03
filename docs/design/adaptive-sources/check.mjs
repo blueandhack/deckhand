@@ -88,6 +88,36 @@ for (const bare of ["NOW_CARD_H", "NOW_SPARK_H", "NOW_META_Y"]) {
     + `(${both === null ? "MISSING" : both}) - it records nothing`);
 }
 
+// FIX (final review, finding B): adaptive.html's own comment above `const K =
+// {` claims "check.mjs ... asserts every one of these against it" - it did
+// not. Everything above this point binds SOLO_BOTH's ten entries plus a
+// derived sum and SOLO_NOW's differ-check; K's ~47 DIRECT entries (BOARD_W,
+// CARD_HERO_Y, NOW_SPARK_Y, ...) were never read by this file at all, so a
+// header drift in any one of them - NOW_SPARK_Y moving 120 -> 121, say -
+// left the mock silently wrong while this file kept reporting a clean pass,
+// in a file whose own opening line calls exactly that "the same class as an
+// assertion that cannot fail". Bound now by parsing the `const K = { ... };`
+// object the same way SOLO_BOTH/SOLO_NOW are parsed above, and comparing
+// every NAME: NUMBER entry it contains against c[NAME].
+const kSrc = src.match(/const K = \{([\s\S]*?)\n\};/);
+ok(kSrc !== null, "K: no `const K = { ... };` object found in adaptive.html");
+if (kSrc) {
+  const kEntries = [...kSrc[1].matchAll(/([A-Z][A-Z0-9_]*)\s*:\s*(-?\d+)/g)];
+  ok(kEntries.length > 40,
+    `K: parsed only ${kEntries.length} NAME: NUMBER entries out of it (expected > 40)`);
+  for (const [, name, val] of kEntries) {
+    // MAC_EMOJI_SIZE is the one entry consts() cannot resolve - it lives in
+    // MacEmoji16.h, not the board header or the .ino (the same gap
+    // sessions-geom-check.mjs works around with its own bespoke regex,
+    // recorded in CLAUDE.md as a deferred minor rather than fixed here) - so
+    // it is named and skipped rather than silently reported as agreeing.
+    if (name === "MAC_EMOJI_SIZE") continue;
+    const want = +val;
+    ok(name in c && c[name] === want,
+      `K.${name}: mock says ${want}, header says ${name in c ? c[name] : "UNDEFINED"}`);
+  }
+}
+
 for (const f of fails) console.log("FAIL  " + f);
 console.log(fails.length ? `\n${fails.length} failed, ${pass} passed`
   : `ok  ${pass} bindings pass`);

@@ -717,7 +717,7 @@ for (const b of [1, 2]) {
         + `(last clear +${lastEnd}, border owns +${cardH - 2}..+${cardH - 1})`);
       return air;
     };
-    rhythm("NOW", bands, c.NOW_CARD_H, [
+    const nowAir = rhythm("NOW", bands, c.NOW_CARD_H, [
       // The two side facts are stacked on the same rhythm inside the hero band,
       // which is what binds NOW_SIDE_STEP: the step is the field's own cleared
       // height plus one gap, and nothing else on the card measures it.
@@ -866,7 +866,12 @@ for (const b of [1, 2]) {
         `solo column: ${c.SP_2}+${c.NOW_CARD_H_SOLO}+${c.SP_2}+${c.WEEK_CARD_H_SOLO}+${c.SP_2} `
       + `= ${content} content rows, the SAME area the duo column fills`);
     // The reclaimed rows are exactly the Codex row plus its gap - nothing is
-    // invented and nothing is left over.
+    // invented and nothing is left over. NOTE: this is algebraically IMPLIED
+    // by the solo-column-sums-to-content check just above plus the duo
+    // column's own declared-terms sum at line ~302 - both columns fill the
+    // same content area, so their difference is forced once those two hold.
+    // It cannot fail alone; it exists as a BETTER ERROR MESSAGE (names the
+    // reclaimed amount directly) rather than as independent coverage.
     chk((c.NOW_CARD_H_SOLO - c.NOW_CARD_H) + (c.WEEK_CARD_H_SOLO - c.WEEK_CARD_H)
           === c.CODEX_H + c.SP_2,
         `the two cards grow by exactly the ${c.CODEX_H + c.SP_2} rows the Codex row `
@@ -888,9 +893,14 @@ for (const b of [1, 2]) {
       ["side1->side2",
        (c.NOW_SIDE_Y + c.NOW_SIDE_STEP - 1) - (c.NOW_SIDE_Y + meta) - 1],
     ]);
-    chk(soloNowAir === 4,
-        `NOW solo keeps the duo card's 4-row rhythm (got ${soloNowAir}) - its whole `
-      + `share went into the spark band, so no gap moved`);
+    // Bound to the DUO card's own measured rhythm (nowAir, captured above),
+    // not to the literal 4 - a hardcoded literal here is exactly the "better
+    // error message, not extra coverage" trap: re-pitching the duo card's
+    // rhythm would leave this line quietly false (comparing solo's new
+    // rhythm to a stale duo number) rather than failing where it happened.
+    chk(soloNowAir === nowAir,
+        `NOW solo keeps the duo card's ${nowAir}-row rhythm (got ${soloNowAir}) - its `
+      + `whole share went into the spark band, so no gap moved`);
 
     const soloWeek = [
       ["pin",    c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
@@ -1004,8 +1014,17 @@ for (const b of [1, 2]) {
       chk(hits === 1,
           `${n} is read in exactly ONE place in usage.ino - its accessor (got ${hits})`);
     }
-    chk((uino.match(/\bCONTENT_ROWS_UNUSED\b/g) || []).length === 0,
-        "sanity: the regex above is not matching a name that does not exist");
+    // POSITIVE CONTROL for the "hits === 1" loop above: a name that does not
+    // exist matches zero times whether or not the counting machinery works,
+    // so a check against CONTENT_ROWS_UNUSED (never used before this line)
+    // could never fail and proved nothing about the regex actually counting.
+    // usageCodexShown itself is read by the SAME mechanism and is known to
+    // appear more than once in this file (every ACCESSOR_FOR ternary calls
+    // it), so this proves the \b...\b(?!_SOLO) form really does count real
+    // occurrences rather than always reading as zero.
+    chk((uino.match(/\busageCodexShown\b(?!_SOLO)/g) || []).length > 1,
+        "sanity: the regex above DOES count real occurrences (usageCodexShown "
+      + "is read by every accessor's ternary, so it must match more than once)");
 
     // THE MAPPING, NOT JUST THE COUNT. "Read in exactly one place" is
     // satisfied just as well by a BACKWARDS ternary
@@ -1071,6 +1090,14 @@ for (const b of [1, 2]) {
     {
       const declAt = tabBody.indexOf("static int srcCache = -2");
       chk(declAt >= 0, "found renderUsageTab's chrome-bust static-cache declaration");
+      // NOTE: v2Arm/v1Arm below are assigned POSITIONALLY - v2Arm is
+      // whichever text comes BEFORE #else and v1Arm whichever comes after,
+      // which is only "the v2 arm" and "the v1 (board 1) arm" because #if
+      // always precedes #else in valid C. Swapping which arm is which - e.g.
+      // by writing `#if !BOARD_USAGE_V2` here - fails LOUDLY (every SHARED
+      // term-presence check below would then be checking the arms against
+      // the wrong expectations and fail by name) rather than silently
+      // passing, so the fragility is safe in the direction that matters.
       const ifAt = tabBody.lastIndexOf("#if BOARD_USAGE_V2", declAt);
       const elseAt = tabBody.indexOf("#else", declAt);
       const endAt = tabBody.indexOf("#endif", elseAt);
@@ -1135,6 +1162,113 @@ for (const b of [1, 2]) {
           + "nowCardH()/weekCardH()/SP_2, never from the duo row's own literal");
         chk(!/\bCODEX_Y\b/.test(accessorBlock),
             "CODEX_Y does not appear inside the accessor block, for the same reason");
+
+        // FIX ROUND 2 (final review, finding A): the six binds above are all
+        // TERM PRESENCE - "weekCardY() names nowCardH()", "CARD2_Y is absent"
+        // - not ARITHMETIC, and three wrong bodies each pass every one of
+        // them at 320/320: `CARD1_Y + nowCardH() + SP_1` (SP_1 != SP_2, so the
+        // whole column below NOW rides 4 rows high in BOTH layouts),
+        // `CARD1_Y + nowCardH()` (WEEK overlaps NOW's bottom border by SP_2),
+        // and `weekCardY() + weekCardH()` for codexRowY() itself (the row
+        // sits flush on WEEK's border - the "reads as one joined block"
+        // defect CLAUDE.md already records for the v1 column - reachable only
+        // in the duo layout, which the spec's own §7 says cannot be observed
+        // on this machine). So this EVALUATES the parsed body's arithmetic -
+        // via drawArg(), the same resolver the severity-spine assertions use
+        // - against a value derived independently from the constants, in
+        // BOTH layouts, rather than merely checking which names appear in it.
+        const evalAccessorReturn = (body, subs) => {
+          const m = body.match(/return\s+([^;]+);/);
+          chk(!!m, `found a return expression in: ${body}`);
+          if (!m) return NaN;
+          let expr = m[1];
+          for (const [name, val] of Object.entries(subs))
+            expr = expr.replace(new RegExp(`\\b${name}\\(\\)`, "g"), String(val));
+          return drawArg(c, expr);
+        };
+        if (weekCardYBody) {
+          for (const [state, nowLabel, nowH] of [
+            ["duo",  "NOW_CARD_H",      c.NOW_CARD_H],
+            ["solo", "NOW_CARD_H_SOLO", c.NOW_CARD_H_SOLO],
+          ]) {
+            const want = c.CARD1_Y + nowH + c.SP_2;
+            const got = evalAccessorReturn(weekCardYBody[0], { nowCardH: nowH });
+            chk(got === want,
+                `weekCardY() in the ${state} layout evaluates to ${got}, must be `
+              + `${want} (CARD1_Y ${c.CARD1_Y} + ${nowLabel} ${nowH} + SP_2 ${c.SP_2})`);
+          }
+        }
+        // codexRowY() is only ever DRAWN in the duo layout - renderCodexRow()
+        // and drawUsageStatic() both gate the call on usageCodexShown() - so
+        // only its duo value has to be right. It is checked through
+        // weekCardY()'s CORRECT value (not through re-evaluating weekCardY()'s
+        // own body), so a bug shared by both accessors cannot cancel out.
+        if (codexRowYBody) {
+          const wantWeekCardY = c.CARD1_Y + c.NOW_CARD_H + c.SP_2;
+          const want = wantWeekCardY + c.WEEK_CARD_H + c.SP_2;
+          const got = evalAccessorReturn(codexRowYBody[0],
+            { weekCardY: wantWeekCardY, weekCardH: c.WEEK_CARD_H });
+          chk(got === want,
+              `codexRowY() in the duo layout evaluates to ${got}, must be ${want} `
+            + `(CARD1_Y ${c.CARD1_Y} + NOW_CARD_H ${c.NOW_CARD_H} + SP_2 ${c.SP_2} `
+            + `+ WEEK_CARD_H ${c.WEEK_CARD_H} + SP_2 ${c.SP_2})`);
+        }
+
+        // FIX (final review, finding D): spec SS1/SS6 require this file to
+        // "forbid a second spelling" of usageCodexShown()'s CONDITION inside
+        // the layout selector, renderUsageTab and drawUsageStatic - not
+        // merely assert each layout constant is read exactly once, which is
+        // all that shipped. cxPct/cxAgeSec/cxWindowMin appeared NOWHERE in
+        // this checker before this block, so a fifth reader re-deriving the
+        // predicate's logic inline - `if (usage.cxAgeSec > 604800) return;`,
+        // say - would pass every existing assertion here.
+        //
+        // A FILE-WIDE ban is impossible: renderCodexRow() legitimately reads
+        // all three fields for its own "--" rendering, entirely outside the
+        // predicate's scope (Task 1's own ruling in progress.md - `have` at
+        // usage.ino:840 answers "is there a reading to print", not "is the
+        // row on screen"). So this is FUNCTION-SCOPED, over exactly the
+        // functions the spec names: the accessor block (checked above, this
+        // block is what would host a re-derivation if one leaked in), and
+        // renderUsageTab/drawUsageStatic below.
+        //
+        // renderUsageTab is NOT a clean 0 - it carries ONE pre-existing
+        // direct read that predates this feature and is not the predicate:
+        // the Codex row's own 900s stale-DIM bust, `cxStale =
+        // usage.cxAgeSec > 900`. A ban that could not tell that apart from a
+        // new 7-day-window re-derivation would have to choose between
+        // failing on sight (unrunnable) or being weakened past the point of
+        // catching anything - so the tolerance is bound to the SPECIFIC known
+        // line, and the total count must match that tolerance exactly: one
+        // more occurrence, anywhere, still fails by name.
+        const CX_FIELDS = /\busage\.(cxPct|cxAgeSec|cxWindowMin)\b/g;
+        const accessorCxHits = accessorBlock.match(CX_FIELDS) || [];
+        chk(accessorCxHits.length === 0,
+            `the accessor block reads usage.cx{Pct,AgeSec,WindowMin} directly `
+          + `${accessorCxHits.length} time(s) [${accessorCxHits.join(", ")}] - `
+          + `it must read usageCodexShown()'s RESULT only, never re-derive its `
+          + `condition`);
+
+        const tabBodyForCx = fnBody(uino, "void renderUsageTab(", "usage.ino");
+        const staticBody = fnBody(uino, "void drawUsageStatic(", "usage.ino");
+        const KNOWN_BUST = "usage.cxAgeSec > 900";
+        chk(tabBodyForCx.includes(KNOWN_BUST),
+            `renderUsageTab no longer contains the known pre-existing Codex `
+          + `stale-dim bust ("${KNOWN_BUST}") that this ban tolerates - if it `
+          + `moved or was reworded, update KNOWN_BUST here rather than widen `
+          + `the tolerance below`);
+        const tabCxHits = tabBodyForCx.match(CX_FIELDS) || [];
+        chk(tabCxHits.length === 1,
+            `renderUsageTab reads usage.cx{Pct,AgeSec,WindowMin} directly `
+          + `${tabCxHits.length} time(s) [${tabCxHits.join(", ")}], expected `
+          + `exactly 1 (the pre-existing stale-dim bust) - any further `
+          + `occurrence is a second spelling of usageCodexShown()'s condition`);
+        const staticCxHits = staticBody.match(CX_FIELDS) || [];
+        chk(staticCxHits.length === 0,
+            `drawUsageStatic reads usage.cx{Pct,AgeSec,WindowMin} directly `
+          + `${staticCxHits.length} time(s) [${staticCxHits.join(", ")}] - it `
+          + `must read usageCodexShown()'s RESULT only, never re-derive its `
+          + `condition`);
       }
     }
   }
