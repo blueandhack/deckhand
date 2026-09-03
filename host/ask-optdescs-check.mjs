@@ -49,6 +49,7 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK_SRC = path.join(REPO, "claude-hooks", "deckhand-session-hook.mjs");
 const HOST_SRC = path.join(REPO, "host", "index.mjs");
 const FW_SRC = path.join(REPO, "firmware", "deckhand_display", "deckhand_display.ino");
+const B2_SRC = path.join(REPO, "firmware", "deckhand_display", "board_es3c35p.h");
 
 // The most UTF-8 bytes ONE UTF-16 code unit can become. A BMP char in
 // U+0800..U+FFFF is 1 unit and 3 bytes; an astral char is 2 units and 4 bytes,
@@ -74,7 +75,7 @@ function grab(src, label, re, cast = Number) {
   return m ? cast(m[1]) : NaN;
 }
 
-function readCaps(hookSrc, hostSrc, fwSrc) {
+function readCaps(hookSrc, hostSrc, fwSrc, b2Src) {
   const c = {};
   c.descMaxBytes = grab(hookSrc, "ASK_OPT_DESC_MAX_BYTES (hook)", /const ASK_OPT_DESC_MAX_BYTES = (\d+);/);
   c.labelChars = grab(hookSrc, "the option LABEL cap (hook)", /\.map\(\(o\) => clean\(o\?\.label \?\? o, (\d+)\)\)/);
@@ -85,6 +86,9 @@ function readCaps(hookSrc, hostSrc, fwSrc) {
   c.maxSessionsFw = grab(fwSrc, "MAX_SESSIONS (firmware)", /#define MAX_SESSIONS (\d+)/);
   c.lineGuard = grab(fwSrc, "feedChar's line guard (firmware)", /if \(buf\.length\(\) > (\d+)\) buf = "";/);
   c.askDetailBuf = grab(fwSrc, "SessionInfo.askDetail size (firmware)", /char askDetail\[(\d+)\];/);
+  // The DEVICE's own per-slot buffer, PARSED and never transcribed: this is the
+  // number the hook's cap must fill exactly, and nothing asserted it before.
+  c.descBufFw = grab(b2Src, "ASK_OPT_DESC_BYTES (board 2)", /const int ASK_OPT_DESC_BYTES = (\d+);/);
   // Structural, not numeric: the description cap must reach the BYTE walk. A
   // cap that is only ever handed to clean() is a CHARACTER cap wearing a
   // byte-flavoured name, which is exactly the defect the name exists to prevent.
@@ -205,10 +209,15 @@ function runBehaviour(hookPath, caps) {
       ok(stdout === "", "BEHAVIOUR: stdout empty (perm prompt)");
       ok(rec?.ask?.kind === "perm" && !("optDescs" in rec.ask), "BEHAVIOUR: a perm prompt carries no optDescs");
     }
-    // 5. THE CODEPOINT BOUNDARY. 200 em-dashes is 600 bytes; the cap lands inside
-    //    one of them, and a naive byte slice would emit half a character.
+    // 5. THE CODEPOINT BOUNDARY. The input must OVERFLOW the cap or this test proves
+    //    nothing, so its length is DERIVED from the cap rather than fixed. It was a
+    //    hardcoded 200 em-dashes, tuned to a 96-byte cap; the moment the cap passed
+    //    200 the input stopped binding and two assertions here failed - the
+    //    transcribe-don't-parse rule biting INSIDE a checker whose whole subject is
+    //    parsed caps.
     {
-      const { stdout, rec } = fire(ask("b5", [{ label: "A", description: "—".repeat(200) }]));
+      const EM = caps.descMaxBytes + 20;
+      const { stdout, rec } = fire(ask("b5", [{ label: "A", description: "—".repeat(EM) }]));
       const d = rec?.ask?.optDescs?.[0] ?? "";
       const bytes = Buffer.byteLength(d, "utf8");
       ok(stdout === "", "BEHAVIOUR: stdout empty (boundary case)");
@@ -216,16 +225,16 @@ function runBehaviour(hookPath, caps) {
       ok(!d.includes("�"), "BEHAVIOUR: no replacement char - the cap never splits a codepoint");
       // WHAT CHANGED, AND WHY THIS TEST NO LONGER SEES WHAT IT USED TO. clean() now
       // transliterates to ASCII before its slice (see host/to-ascii.mjs), so those
-      // 200 em-dashes arrive here as 200 hyphens and the byte walk below can never
+      // those em-dashes arrive as the same number of hyphens, so the byte walk cannot
       // be reached by this input: bytes and characters are the same unit now.
       // capBytes() is KEPT anyway - it is the last line of defence if a future field
       // reaches it un-transliterated, and it costs nothing on ASCII.
       ok(d === "-".repeat(caps.descMaxBytes),
-         `BEHAVIOUR: 200 em-dashes arrive as exactly ${caps.descMaxBytes} ASCII hyphens, got ${JSON.stringify(d.slice(0, 12))} x ${d.length}`);
+         `BEHAVIOUR: ${EM} em-dashes arrive as exactly ${caps.descMaxBytes} ASCII hyphens, got ${JSON.stringify(d.slice(0, 12))} x ${d.length}`);
       ok(d.length === bytes, "BEHAVIOUR: the description's character count IS its byte count - the whole point of the ASCII fix");
       // capBytes still walks codepoints when it IS handed multi-byte input, proved
       // directly rather than through a path that can no longer deliver any.
-      ok(Buffer.byteLength("—".repeat(200).slice(0, caps.descMaxBytes), "utf8") === caps.descMaxBytes * 3,
+      ok(Buffer.byteLength("—".repeat(EM).slice(0, caps.descMaxBytes), "utf8") === caps.descMaxBytes * 3,
          "BEHAVIOUR: a character cap on untransliterated input really would emit 3x the budget - which is what the ASCII fix removes");
     }
     // 6. A pending ask survives an event that defines no ask of its own.
@@ -252,7 +261,8 @@ function main({ hookPath = HOOK_SRC, quiet = false } = {}) {
   const hookSrc = fs.readFileSync(hookPath, "utf8");
   const hostSrc = fs.readFileSync(HOST_SRC, "utf8");
   const fwSrc = fs.readFileSync(FW_SRC, "utf8");
-  const c = readCaps(hookSrc, hostSrc, fwSrc);
+  const b2Src = fs.readFileSync(B2_SRC, "utf8");
+  const c = readCaps(hookSrc, hostSrc, fwSrc, b2Src);
 
   // ---- structure -----------------------------------------------------------
   ok(c.usesCapBytes, "STRUCTURE: the description cap must go through capBytes() - a cap only handed to clean() is a CHARACTER cap wearing a byte name");
@@ -261,16 +271,37 @@ function main({ hookPath = HOOK_SRC, quiet = false } = {}) {
   ok(c.maxSessionsHost === c.maxSessionsFw,
      `STRUCTURE: the host sends ${c.maxSessionsHost} sessions and the device holds ${c.maxSessionsFw} - the budget is meaningless if they disagree`);
 
-  // ---- THE CAP'S BOUND, derived rather than picked -------------------------
-  // A description may not cost more bytes on the wire than the LABEL it
-  // explains. A label is capped at c.labelChars CHARACTERS, so its byte
-  // ceiling is that x BYTES_PER_UNIT. Both numbers are parsed out of the hook,
-  // so this fails the moment either moves.
-  const labelByteCeiling = c.labelChars * BYTES_PER_UNIT;
-  ok(c.descMaxBytes <= labelByteCeiling,
-     `CAP: ASK_OPT_DESC_MAX_BYTES (${c.descMaxBytes}) must not exceed one option LABEL's own byte ceiling ` +
-     `(${c.labelChars} chars x ${BYTES_PER_UNIT} = ${labelByteCeiling}) - a description may not cost more than the label it explains`);
+  // ---- THE CAP'S TWO REAL BOUNDS ------------------------------------------
+  // What used to live here was the LABEL convention (cap <= 32 chars x 3 bytes),
+  // and it was a FOSSIL. Since device-bound text became ASCII on the host, a
+  // 32-character label is 32 BYTES, so that same convention now yields 32 - and
+  // the 96 it licensed was already 3x its own stated derivation. It was never
+  // causal either (nothing says an explanation needs no more room than the caption
+  // it explains), and while it sat here looking like a bound it CONCEALED the one
+  // that was genuinely missing, immediately below.
+  //
+  // BOUND 1: EXACT parity with the device's own buffer. copyField truncates by
+  // BYTE, so a cap above ASK_OPT_DESC_BYTES - 1 is silently cut on arrival with
+  // nothing anywhere reporting it, and a cap below it wastes DRAM on all
+  // 4 x MAX_SESSIONS slots. UNASSERTED until now: the hook's 96 and the header's
+  // 97 agreed only because someone kept them in step by hand.
+  ok(c.descBufFw === c.descMaxBytes + 1,
+     `CAP: board 2's ASK_OPT_DESC_BYTES (${c.descBufFw}) must be exactly ` +
+     `ASK_OPT_DESC_MAX_BYTES + 1 (${c.descMaxBytes} + 1 = ${c.descMaxBytes + 1}) - the hook's byte ` +
+     `cap must exactly fill the device's buffer plus its NUL, or arrivals are cut in silence`);
   ok(c.descMaxBytes > 0, "CAP: the cap must be positive, or the field is dead code");
+
+  // BOUND 2: TWO concurrently asking sessions at the cap must still fit the guard.
+  // Two is ordinary traffic - two Macs, or two projects - so shedding there would
+  // make the COMMON case lossy. The saturated 6-session case cannot set this cap,
+  // because it is already over budget with this field absent entirely (see the
+  // tripwire below); that is wire-fit's problem, not this field's. The parked voice
+  // transcript is included, being the largest an ask legitimately gets.
+  const oneAsking = tickBytes(c, { descCap: c.descMaxBytes, sessions: 1, parkedVoice: true });
+  const twoAsking = tickBytes(c, { descCap: c.descMaxBytes, sessions: 2, parkedVoice: true });
+  ok(twoAsking < c.lineGuard,
+     `CAP: two asking sessions at the cap (${twoAsking} bytes; one is ${oneAsking}) must fit ` +
+     `feedChar's ${c.lineGuard}-byte guard - two concurrent prompts is ordinary traffic`);
 
   // ---- what the field actually costs on the wire ---------------------------
   const asciiNoDesc = tickBytes(c, { descCap: null });
@@ -305,10 +336,22 @@ function main({ hookPath = HOOK_SRC, quiet = false } = {}) {
   ok(wideNoDesc > c.lineGuard,
      `BUDGET: the PRE-FIX model must still exceed the ${c.lineGuard}-byte guard WITHOUT optDescs (got ${wideNoDesc}). ` +
      `This models the wire BEFORE host/to-ascii.mjs; the fixed figures are in host/wire-bytes-check.mjs`);
-  // And the dominant term is the detail, not this field, by a wide margin.
+  // OPTDESCS IS A REAL TERM NOW, DELIBERATELY, AND THIS ASSERTION RECORDS THE
+  // MOMENT THAT CHANGED. It used to demand `detailBytes > marginal * 5` - the stance
+  // that this field must stay a rounding term - and that stance was formed when the
+  // cap was 96 for a reason that turned out to be a fossil. Measuring 674 real
+  // descriptions killed it: the largest cap PRESERVING the 5x relation is about 203
+  // bytes, which is the MEDIAN, so half of every description would still be cut
+  // mid-word - exactly the complaint. The field took its own budget instead (BOUND 1
+  // and BOUND 2 above), which is a real ceiling rather than a comparison against a
+  // neighbour. What survives here is the weaker claim that is still true and still
+  // worth pinning: the DETAIL remains the dominant term, so a future reader chasing
+  // wire bytes does not mistake this field for the thing to shrink.
   const detailBytes = c.maxSessionsHost * c.detailChars * BYTES_PER_UNIT;
-  ok(detailBytes > marginal * 5,
-     `BUDGET: the detail cap (${detailBytes} bytes across ${c.maxSessionsHost} sessions) should dwarf optDescs (${marginal}) - if not, this field has become a real term and needs its own budget`);
+  ok(detailBytes > marginal,
+     `BUDGET: the detail cap (${detailBytes} bytes across ${c.maxSessionsHost} sessions) must still be the ` +
+     `DOMINANT term over optDescs (${marginal}); it is ${(detailBytes / marginal).toFixed(1)}x. optDescs is a ` +
+     `real term now by choice - its ceiling is BOUND 2, not this ratio`);
 
   // The device's own ask buffer has the same unit mismatch; record it by asserting
   // the char-sized relationship that IS true, so a future byte-sizing is noticed.
@@ -347,8 +390,10 @@ function selftest() {
   const box = fs.mkdtempSync(path.join(os.tmpdir(), "deckhand-optdescs-selftest-"));
   const orig = fs.readFileSync(HOOK_SRC, "utf8");
   const faults = [
-    ["the cap raised past one label's byte ceiling",
-     (s) => s.replace(/const ASK_OPT_DESC_MAX_BYTES = \d+;/, "const ASK_OPT_DESC_MAX_BYTES = 97;")],
+    ["the cap RAISED out of step with the device buffer (arrivals cut in silence)",
+     (s) => s.replace(/const ASK_OPT_DESC_MAX_BYTES = \d+;/, "const ASK_OPT_DESC_MAX_BYTES = 512;")],
+    ["the cap LOWERED out of step with the device buffer (DRAM wasted on every slot)",
+     (s) => s.replace(/const ASK_OPT_DESC_MAX_BYTES = \d+;/, "const ASK_OPT_DESC_MAX_BYTES = 96;")],
     ["the byte cap replaced by clean()'s CHARACTER slice",
      (s) => s.replace(/capBytes\(clean\(o\?\.description \?\? "", ASK_OPT_DESC_MAX_BYTES\), ASK_OPT_DESC_MAX_BYTES\)/,
                       'clean(o?.description ?? "", ASK_OPT_DESC_MAX_BYTES)')],

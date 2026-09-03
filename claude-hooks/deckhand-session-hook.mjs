@@ -324,16 +324,33 @@ function clean(s, max) {
 // can be up to 3x its stated number in bytes. That is pre-existing, and
 // host/ask-optdescs-check.mjs records the arithmetic rather than papering over it.
 //
-// 96 IS A STATED CONVENTION, MECHANICALLY ENFORCED - not a derivation from
-// anything physical. The convention: A DESCRIPTION MAY NOT COST MORE BYTES THAN
-// THE LABEL IT EXPLAINS. A label is capped at LABEL_MAX_CHARS (32) and its byte
-// ceiling is 3 per character, so the number is 32 x 3 = 96, and the checker
-// asserts the bound by parsing BOTH numbers out of this file, failing the moment
-// either moves. What the convention is NOT is a causal claim: nothing says an
-// explanation needs no more room than the caption it explains, and in practice
-// this truncates every real description (190-326 bytes measured) to about a
-// third, mid-word. It is a defensible line drawn on purpose rather than a
-// quantity computed - and the wire budget cannot draw it, for the reason below.
+// 416 IS DERIVED FROM MEASURED TRAFFIC, AND THE NUMBER IT REPLACES WAS A FOSSIL.
+// The old cap was 96, justified as a stated convention - a description may not
+// cost more bytes than the LABEL it explains - computed as LABEL_MAX_CHARS (32)
+// x 3 bytes per character. That multiplier died when device-bound text became
+// ASCII on this host (see toAscii below): a 32-character label is now 32 BYTES,
+// so the very same convention yields 32, and 96 was already 3x its own stated
+// derivation. A bound whose arithmetic no longer holds is not a bound.
+//
+// What replaces it is a measurement. 674 real option descriptions, captured out
+// of this machine's own hook debug log: median 210 bytes, p75 258, p90 313,
+// p99 412, max 606. AT 96 BYTES, 92.7% OF THEM WERE TRUNCATED MID-WORD - not an
+// edge case but essentially every description the API produces, which is how
+// this was reported ("options' long description not show full, it cut"). 416
+// covers p99, so about 1 in 100 is still cut; re-run that measurement to revisit
+// the number rather than arguing about it.
+//
+// The two REAL bounds, both asserted by host/ask-optdescs-check.mjs:
+//   1. It must EXACTLY fill the device's own buffer - ASK_OPT_DESC_BYTES, 417
+//      (this + NUL) in board_es3c35p.h. copyField truncates by BYTE, so a cap
+//      above that is silently cut on arrival and a cap below it wastes DRAM.
+//      NOTHING ASSERTED THIS BEFORE: the two numbers agreed only by hand, which
+//      is the missing guard this change closes rather than a bound it adds.
+//   2. TWO concurrently asking sessions at the cap must still fit feedChar's
+//      guard, because two is ordinary (two Macs, two projects) and shedding at
+//      two would make the common case lossy.
+// Device cost: 4 slots x 6 sessions x 417 = 10,008 bytes of DRAM, up 7,680.
+// Board 1 stores 1 byte per slot and draws no descriptions, so it pays nothing.
 //
 // It is deliberately NOT set from the saturated worst case (6 simultaneously
 // asking sessions, each a 1400-char AskUserQuestion with four maximal options
@@ -346,7 +363,7 @@ function clean(s, max) {
 // was in characters where the guard counts bytes. The real exposure there is
 // the 1400-char detail, 6 x 1400 x 3 = 25,200 bytes on its own, and it is the
 // guard's problem rather than this field's.
-const ASK_OPT_DESC_MAX_BYTES = 96;
+const ASK_OPT_DESC_MAX_BYTES = 416;
 
 // The same boundary walk as capUtf8() in host/voice-answer.mjs, DUPLICATED
 // rather than imported: install.sh copies this file alone into ~/.claude, so it

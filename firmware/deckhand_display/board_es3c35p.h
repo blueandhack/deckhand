@@ -1580,7 +1580,7 @@ const int ASK_TITLE_Y = 75;
 // BATT_LEFT_BYTES once gave board 1 a false reading. Cost here is
 // 4 x 97 x MAX_SESSIONS = 2,328 bytes of DRAM, against 8MB of PSRAM and a board
 // whose framebuffer already owns 300KB of it.
-const int ASK_OPT_DESC_BYTES = 97;
+const int ASK_OPT_DESC_BYTES = 417;
 
 // ---------- Component heights ----------
 // The design system's own note on these two is "derived from TAP_MIN, not chosen
