@@ -6194,11 +6194,19 @@ void loop() {
   // freshness readout over the bottom line of chat every second instead of
   // every ~5s. #if'd rather than spelled `false` on board 1, so board 1 never
   // sees the text of a flag it does not declare.
+  // ONE `if`, with only the extra TERM behind the guard - NOT a whole duplicated
+  // condition per arm. Duplicated, both arms opened a brace, so any tool that
+  // counts braces without running the preprocessor saw one more `{` than `}` in
+  // loop(). host/pair-crypto-check.mjs is such a tool: its fnBody() brace-counts,
+  // found no close for loop(), returned null, and failed "WINDOW: loop() ticks the
+  // timeout" - an assertion about PAIRING, broken by an edit to the scrollback,
+  // reporting a defect that did not exist. Board 1 still sees exactly its original
+  // condition; only the line break moved.
+  if (!isAsleep && !octoActive && !readerActive && !histActive && !kbActive && !emojiTestActive
 #if BOARD_HISTORY_SCROLL
-  if (!isAsleep && !octoActive && !readerActive && !histActive && !kbActive && !emojiTestActive && !scrollActive) {
-#else
-  if (!isAsleep && !octoActive && !readerActive && !histActive && !kbActive && !emojiTestActive) {
+      && !scrollActive
 #endif
+     ) {
     static unsigned long lastFooterTick = 0;
     if (millis() - lastFooterTick > 1000) {
       lastFooterTick = millis();
