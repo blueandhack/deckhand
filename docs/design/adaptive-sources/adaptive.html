@@ -1,0 +1,932 @@
+<title>Adaptive USAGE Column</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+:root{
+  --ground:#efebe6; --panel:#fdfcfa; --sunk:#e4ded6;
+  --ink:#1a1819; --body:#4a443e; --faint:#8a8278; --rule:#d6cfc5;
+  --amber:#b54900; --blue:#105da5; --warn:#b57500; --mauve:#6b103a;
+  --shadow:0 1px 2px rgba(26,24,25,.06),0 8px 22px rgba(26,24,25,.07);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#0b0b0e; --panel:#17171c; --sunk:#101015;
+  --ink:#f2f0ee; --body:#b8b3ac; --faint:#7e7970; --rule:#2a2a32;
+  --amber:#ffa600; --blue:#4a9fdd; --warn:#e69e00; --mauve:#ce79a5;
+  --shadow:0 1px 2px rgba(0,0,0,.5),0 10px 30px rgba(0,0,0,.45);
+}}
+:root[data-theme="dark"]{
+  --ground:#0b0b0e; --panel:#17171c; --sunk:#101015;
+  --ink:#f2f0ee; --body:#b8b3ac; --faint:#7e7970; --rule:#2a2a32;
+  --amber:#ffa600; --blue:#4a9fdd; --warn:#e69e00; --mauve:#ce79a5;
+  --shadow:0 1px 2px rgba(0,0,0,.5),0 10px 30px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--body);
+  font:400 15.5px/1.62 "IBM Plex Sans",-apple-system,BlinkMacSystemFont,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1180px;margin:0 auto;padding:38px 26px 90px}
+h1,h2,h3,.eyebrow{font-family:Archivo,"Helvetica Neue",sans-serif;color:var(--ink)}
+h1{font-weight:700;font-size:clamp(30px,4.4vw,46px);line-height:1.04;letter-spacing:-.022em;margin:0 0 14px;text-wrap:balance}
+h2{font-weight:600;font-size:22px;letter-spacing:-.01em;margin:0 0 6px;text-wrap:balance}
+h3{font-weight:600;font-size:15px;letter-spacing:-.005em;margin:0 0 4px}
+.eyebrow{font-weight:600;font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:var(--amber);margin:0 0 10px}
+p{margin:0 0 13px;max-width:66ch}
+.lede{font-size:18px;line-height:1.55;color:var(--body);max-width:64ch}
+b,strong{color:var(--ink);font-weight:600}
+code,.mono{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
+code{font-size:.88em;background:color-mix(in srgb,var(--faint) 16%,transparent);
+  padding:1.5px 5px;border-radius:4px;color:var(--ink)}
+section{margin:52px 0 0}
+hr{border:0;border-top:1px solid var(--rule);margin:52px 0 0}
+
+/* live readout - the device's own instrument vernacular */
+.readout{display:flex;flex-wrap:wrap;gap:1px;background:var(--rule);border:1px solid var(--rule);
+  border-radius:9px;overflow:hidden;margin:26px 0 0}
+.rcell{background:var(--panel);padding:11px 16px;flex:1 1 150px;min-width:0}
+.rcell .k{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--faint);display:block;margin-bottom:3px}
+.rcell .v{font-family:"JetBrains Mono",monospace;font-size:19px;font-weight:700;color:var(--ink);
+  font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.rcell .v.dead{color:var(--mauve)} .rcell .v.live{color:var(--blue)}
+.rcell .n{font-size:11.5px;color:var(--faint);display:block;margin-top:2px}
+
+/* controls */
+.ctl{display:flex;gap:22px;align-items:center;flex-wrap:wrap;margin:30px 0 0;
+  padding:12px 16px;background:var(--panel);border:1px solid var(--rule);border-radius:9px}
+.ctl .grp{display:flex;gap:8px;align-items:center}
+.ctl .lab{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--faint)}
+.seg{display:flex;background:var(--sunk);border-radius:7px;padding:2px;gap:2px}
+.seg button{appearance:none;border:0;background:transparent;color:var(--body);cursor:pointer;
+  font:500 12.5px/1 "IBM Plex Sans",sans-serif;padding:7px 11px;border-radius:5px}
+.seg button[aria-pressed="true"]{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.18)}
+.seg button:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
+
+/* the comparison strip */
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:26px;margin:24px 0 0;align-items:start}
+.opt{display:flex;flex-direction:column;gap:0;background:var(--panel);border:1px solid var(--rule);
+  border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
+.opt.pick{border-color:var(--amber)}
+.opthd{padding:15px 17px 13px;border-bottom:1px solid var(--rule);min-height:122px}
+.opthd .row1{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.opthd h3{margin:0}
+.chip{font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:700;letter-spacing:.07em;
+  text-transform:uppercase;padding:3px 7px;border-radius:4px;white-space:nowrap}
+.chip.now{background:color-mix(in srgb,var(--faint) 20%,transparent);color:var(--body)}
+.chip.rec{background:var(--amber);color:var(--ground)}
+.chip.alt{background:color-mix(in srgb,var(--blue) 22%,transparent);color:var(--blue)}
+.opthd p{margin:7px 0 0;font-size:13.5px;line-height:1.5;color:var(--body);max-width:none}
+.screen{padding:18px;display:flex;justify-content:center;background:var(--sunk)}
+.bezel{padding:7px;border-radius:11px;background:#26242a;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07),0 6px 18px rgba(0,0,0,.32)}
+canvas{display:block;border-radius:3px;image-rendering:pixelated}
+.facts{border-top:1px solid var(--rule)}
+.facts .f{display:flex;justify-content:space-between;gap:12px;padding:8px 17px;font-size:12.5px;
+  border-bottom:1px solid color-mix(in srgb,var(--rule) 55%,transparent)}
+.facts .f:last-child{border-bottom:0}
+.facts .f .fk{color:var(--faint)}
+.facts .f .fv{font-family:"JetBrains Mono",monospace;color:var(--ink);font-variant-numeric:tabular-nums;text-align:right}
+.facts .f .fv.warnv{color:var(--warn)} .facts .f .fv.okv{color:var(--blue)}
+
+/* tables */
+.tw{overflow-x:auto;margin:18px 0 0;border:1px solid var(--rule);border-radius:9px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-family:"JetBrains Mono",monospace;font-size:12.5px;
+  font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:8px 13px;border-bottom:1px solid color-mix(in srgb,var(--rule) 60%,transparent);white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+thead th{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+  background:var(--sunk);border-bottom:1px solid var(--rule);position:sticky;top:0}
+tbody tr:last-child td{border-bottom:0}
+td.hi{color:var(--ink);font-weight:700}
+td.was{color:var(--faint)}
+.arrow{color:var(--amber)}
+
+/* notes */
+.note{border-left:3px solid var(--rule);padding:2px 0 2px 15px;margin:16px 0 0;max-width:70ch}
+.note.key{border-left-color:var(--amber)}
+.note.warnn{border-left-color:var(--warn)}
+.note h3{margin:0 0 3px}
+.note p{margin:0;font-size:14px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:26px;margin:20px 0 0}
+ul{margin:10px 0 0;padding-left:20px;max-width:66ch}
+li{margin:0 0 7px}
+li::marker{color:var(--faint)}
+</style>
+<div class="wrap">
+
+<p class="eyebrow">Board 2 &middot; USAGE tab &middot; layout decision</p>
+<h1>Where do 64 reclaimed rows go?</h1>
+<p class="lede">The CODEX row holds 64 of this tab&rsquo;s 414 rows and reads <code>--</code>
+for a tool this machine has never reported. Hiding it is settled. What is <em>not</em> settled
+is which card absorbs the space &mdash; and that turned out to be constrained by something
+invisible until the arithmetic was done.</p>
+
+<div class="readout" id="readout"></div>
+
+<div class="ctl">
+  <div class="grp"><span class="lab">Panel theme</span>
+    <div class="seg" id="segTheme"><button data-v="DARK" aria-pressed="true">Dark</button><button data-v="LIGHT" aria-pressed="false">Light</button></div></div>
+  <div class="grp"><span class="lab">Device state</span>
+    <div class="seg" id="segState"></div></div>
+  <div class="grp"><span class="lab">Bands</span>
+    <div class="seg" id="segBands"><button data-v="off" aria-pressed="true">Off</button><button data-v="on" aria-pressed="false">Show</button></div></div>
+</div>
+
+<div class="strip" id="strip"></div>
+
+<hr>
+<section>
+<p class="eyebrow">The decision</p>
+<h2>Both allocations fill the column. They cost very differently.</h2>
+<p>Each panel above sums to exactly 414 rows, so &ldquo;fills the tab&rdquo; does not separate them.
+What separates them is how many constants move, and whether either card&rsquo;s
+<b>rhythm</b> &mdash; the uniform gap the fault-injection sweep forced into existence &mdash;
+has to be re-pitched.</p>
+<div class="tw"><table>
+<thead><tr><th>&nbsp;</th><th>New constants</th><th>NOW spark</th><th>Points per pixel</th><th>WEEK rhythm</th><th>WEEK touched</th></tr></thead>
+<tbody>
+<tr><td>Today <span class="was">(duo)</span></td><td class="was">&mdash;</td><td class="was">32px</td><td class="was">3.70</td><td class="was">3 rows</td><td class="was">&mdash;</td></tr>
+<tr><td>Grow both</td><td class="hi">~11</td><td>64px</td><td>1.69</td><td class="hi">3 <span class="arrow">&rarr;</span> 8 rows</td><td class="hi">6 offsets</td></tr>
+<tr><td>All to NOW</td><td class="hi">~4</td><td>96px</td><td class="hi">1.10</td><td>3 rows <span class="was">(unchanged)</span></td><td>none</td></tr>
+</tbody></table></div>
+<div class="note key">
+<h3>The sparkline is the only element with an open question against it</h3>
+<p>The redesign shipped with &ldquo;the sparkline has never been read by a human at
+320&times;480 &mdash; whether 31 caps in a 260&times;32 box read as a trend or as texture&rdquo;
+recorded as unverified. <code>drawUsageSpark</code> scales with its height
+(<code>cy = y + h - 3 - ((h-5)&middot;v)/100</code>), so the fixed 0&ndash;100 scale gains real
+vertical resolution as the band grows. At 96px it is roughly one pixel per percentage point.</p>
+</div>
+<div class="note warnn">
+<h3>Why WEEK cannot simply be given air</h3>
+<p><code>rhythm()</code> asserts every band gap equals the first, exempting only the pin bar,
+and its <code>extra</code> gaps are <em>added to</em> that check rather than excused from it.
+So 32 rows at one boundary fails it. WEEK has no band that should grow either &mdash; a WEEK
+sparkline would be a flat line pretending to be a trend, the ring moving <b>1.49 points</b>
+across a 7-day window. That leaves re-pitching the uniform gap, which moves all six offsets.</p>
+</div>
+</section>
+
+<hr>
+<section>
+<p class="eyebrow">The threshold</p>
+<h2>One full window of silence &mdash; derived, not chosen</h2>
+<div class="two">
+<div>
+<p>A reading is dead once a whole window has passed with no refresh. Codex&rsquo;s window already
+crosses the wire as <code>cxWin</code> and is stored as <code>usage.cxWindowMin</code>, so the
+threshold is <b>data-driven</b>: a plan with a different window moves it.</p>
+<ul>
+<li><b>Below one window the number is merely stale</b>, and that state already exists &mdash;
+<code>QUOTA_STALE_SEC</code> dims at 900s. Hiding is the stronger claim that nobody is running
+the tool: the host polled ~120,000 times and learned nothing.</li>
+<li><b>It cannot flap.</b> Age grows monotonically until a refresh arrives, so the edge fires
+once and a refresh brings the row straight back.</li>
+</ul>
+</div>
+<div>
+<div class="note">
+<h3>Claude never hides &mdash; the asymmetry is the design</h3>
+<p>Claude&rsquo;s quota is <em>account-level</em>: the host polls OAuth whether or not you use
+Claude Code, so a reading arrives even at 0%. For it to reach days, the refresh token must have
+expired <em>and</em> the statusLine cache gone cold &mdash; that is broken auth, with a fix.
+A tidy Codex-only tab would conceal the only evidence of it.</p>
+</div>
+<div class="note">
+<h3>What this page is, and is not</h3>
+<p>Every glyph is the real Spleen bitmap read out of the headers the firmware links, and every
+shared constant is the value parsed from <code>board_es3c35p.h</code>. It vouches for
+<b>geometry</b>. It cannot vouch for colour on the panel &mdash; that needs
+<code>COLORTEST</code> and a person.</p>
+</div>
+</div>
+</div>
+</section>
+</div>
+<script>
+// Spleen8x16 / Spleen12x24 / Spleen32x64, extracted from the Adafruit-GFX headers
+// firmware/deckhand_display links (Spleen8x16.h / Spleen12x24.h / Spleen32x64.h), by
+// gfx-extract.mjs in this directory - the script committed alongside this file, not
+// merely the blob it produced. check.mjs re-runs it and diffs the result against this
+// file, so a font-header edit that this file has not followed fails by name.
+//
+// Rows are BASE36-PACKED on disk (each glyph's rows joined by commas, one string per
+// glyph) purely to keep this file's diff readable; rehydrated below into the same
+// {w, h, glyphs: {cp: [rows...]}} shape ../settings-redesign/spleenfonts.js already
+// uses for Spleen8x16 and Spleen12x24, so the two can be compared glyph for glyph with
+// no reshaping. Spleen32x64 carries only the characters a hero draws - 0-9, %, -, space
+// - because no known-good third-party copy of that face exists to verify a full set
+// against; see README.md.
+const _SPLEEN_PACKED = {"Spleen8x16":{"w":8,"h":16,"g":{"32":"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0","33":"0,0,o,o,o,o,o,o,o,0,o,o,0,0,0,0","34":"0,2u,2u,2u,2u,0,0,0,0,0,0,0,0,0,0,0","35":"0,0,30,30,72,30,30,30,30,72,30,30,0,0,0,0","36":"0,g,3i,5s,5s,5s,3g,m,m,m,m,70,g,0,0,0","37":"0,0,6,2u,30,c,o,o,1c,1i,2u,2o,0,0,0,0","38":"0,0,1k,30,30,30,1k,34,62,5o,5o,3e,0,0,0,0","39":"0,o,o,o,o,0,0,0,0,0,0,0,0,0,0,0","40":"0,e,o,1c,1c,2o,2o,2o,2o,1c,1c,o,e,0,0,0","41":"0,34,o,c,c,6,6,6,6,c,c,o,34,0,0,0","42":"0,0,0,0,2u,1o,o,73,o,1o,2u,0,0,0,0,0","43":"0,0,0,0,0,o,o,3i,o,o,0,0,0,0,0,0","44":"0,0,0,0,0,0,0,0,0,0,o,o,1c,0,0,0","45":"0,0,0,0,0,0,0,3i,0,0,0,0,0,0,0,0","46":"0,0,0,0,0,0,0,0,0,0,o,o,0,0,0,0","47":"0,6,6,c,c,o,o,1c,1c,2o,2o,5c,5c,0,0,0","48":"0,0,3g,5i,5i,5q,66,6u,6e,5i,5i,3g,0,0,0,0","49":"0,0,o,1k,3c,2g,o,o,o,o,o,3i,0,0,0,0","50":"0,0,3g,5i,6,6,c,o,1c,2o,5i,72,0,0,0,0","51":"0,0,3g,5i,6,6,1o,6,6,6,5i,3g,0,0,0,0","52":"0,0,5c,5c,5o,5o,5o,5o,72,c,c,c,0,0,0,0","53":"0,0,72,5i,5c,5c,70,6,6,6,5i,3g,0,0,0,0","54":"0,0,3g,5i,5c,5c,70,5i,5i,5i,5i,3g,0,0,0,0","55":"0,0,72,5i,6,6,c,o,1c,1c,1c,1c,0,0,0,0","56":"0,0,3g,5i,5i,5i,3g,5i,5i,5i,5i,3g,0,0,0,0","57":"0,0,3g,5i,5i,5i,5i,3i,6,6,5i,3g,0,0,0,0","58":"0,0,0,0,0,o,o,0,0,0,o,o,0,0,0,0","59":"0,0,0,0,0,o,o,0,0,0,o,o,1c,0,0,0","60":"0,0,6,c,o,1c,2o,2o,1c,o,c,6,0,0,0,0","61":"0,0,0,0,0,3i,0,0,3i,0,0,0,0,0,0,0","62":"0,0,2o,1c,o,c,6,6,c,o,1c,2o,0,0,0,0","63":"0,0,3g,5i,6,c,o,1c,1c,0,1c,1c,0,0,0,0","64":"0,0,0,3g,5e,62,62,62,62,66,5c,3g,0,0,0,0","65":"0,0,3g,5i,5i,5i,72,5i,5i,5i,5i,5i,0,0,0,0","66":"0,0,70,5i,5i,5i,70,5i,5i,5i,5i,70,0,0,0,0","67":"0,0,3i,5c,5c,5c,5c,5c,5c,5c,5c,3i,0,0,0,0","68":"0,0,70,5i,5i,5i,5i,5i,5i,5i,5i,70,0,0,0,0","69":"0,0,3i,5c,5c,5c,6w,5c,5c,5c,5c,3i,0,0,0,0","70":"0,0,3i,5c,5c,5c,6w,5c,5c,5c,5c,5c,0,0,0,0","71":"0,0,3i,5c,5c,5c,66,5i,5i,5i,5i,3i,0,0,0,0","72":"0,0,5i,5i,5i,5i,72,5i,5i,5i,5i,5i,0,0,0,0","73":"0,0,3i,o,o,o,o,o,o,o,o,3i,0,0,0,0","74":"0,0,3i,o,o,o,o,o,o,o,o,6o,0,0,0,0","75":"0,0,5i,5i,5i,5o,6w,5o,5i,5i,5i,5i,0,0,0,0","76":"0,0,5c,5c,5c,5c,5c,5c,5c,5c,5c,3i,0,0,0,0","77":"0,0,5i,6m,72,5y,5i,5i,5i,5i,5i,5i,0,0,0,0","78":"0,0,5i,5i,6e,6e,5y,5y,5q,5q,5i,5i,0,0,0,0","79":"0,0,3g,5i,5i,5i,5i,5i,5i,5i,5i,3g,0,0,0,0","80":"0,0,70,5i,5i,5i,70,5c,5c,5c,5c,5c,0,0,0,0","81":"0,0,3g,5i,5i,5i,5i,5i,5i,5y,5y,3g,o,c,0,0","82":"0,0,70,5i,5i,5i,70,5i,5i,5i,5i,5i,0,0,0,0","83":"0,0,3i,5c,5c,5c,3g,6,6,6,6,70,0,0,0,0","84":"0,0,73,o,o,o,o,o,o,o,o,o,0,0,0,0","85":"0,0,5i,5i,5i,5i,5i,5i,5i,5i,5i,3i,0,0,0,0","86":"0,0,5i,5i,5i,5i,5i,5i,5i,30,1k,g,0,0,0,0","87":"0,0,5i,5i,5i,5i,5i,5i,5y,72,6m,5i,0,0,0,0","88":"0,0,5i,5i,5i,30,1k,30,5i,5i,5i,5i,0,0,0,0","89":"0,0,5i,5i,5i,5i,3i,6,6,6,6,70,0,0,0,0","90":"0,0,72,6,6,c,o,1c,2o,5c,5c,72,0,0,0,0","91":"0,1q,1c,1c,1c,1c,1c,1c,1c,1c,1c,1c,1q,0,0,0","92":"0,5c,5c,2o,2o,1c,1c,o,o,c,c,6,6,0,0,0","93":"0,3g,c,c,c,c,c,c,c,c,c,c,3g,0,0,0","94":"0,g,1k,30,5i,0,0,0,0,0,0,0,0,0,0,0","95":"0,0,0,0,0,0,0,0,0,0,0,0,0,0,72,0","96":"0,1c,o,c,0,0,0,0,0,0,0,0,0,0,0,0","97":"0,0,0,0,0,3g,6,3i,5i,5i,5i,3i,0,0,0,0","98":"0,0,5c,5c,5c,70,5i,5i,5i,5i,5i,70,0,0,0,0","99":"0,0,0,0,0,3i,5c,5c,5c,5c,5c,3i,0,0,0,0","100":"0,0,6,6,6,3i,5i,5i,5i,5i,5i,3i,0,0,0,0","101":"0,0,0,0,0,3i,5i,5i,72,5c,5c,3i,0,0,0,0","102":"0,0,u,1c,1c,1c,3g,1c,1c,1c,1c,1c,0,0,0,0","103":"0,0,0,0,0,3i,5i,5i,5i,5i,5i,3g,6,6,70,0","104":"0,0,5c,5c,5c,70,5i,5i,5i,5i,5i,5i,0,0,0,0","105":"0,0,o,o,0,1k,o,o,o,o,o,s,0,0,0,0","106":"0,0,o,o,0,o,o,o,o,o,o,o,o,o,34,0","107":"0,0,5c,5c,5c,5o,60,6o,6o,60,5o,5i,0,0,0,0","108":"0,0,1c,1c,1c,1c,1c,1c,1c,1c,1c,s,0,0,0,0","109":"0,0,0,0,0,6k,5y,5y,5y,5y,5i,5i,0,0,0,0","110":"0,0,0,0,0,70,5i,5i,5i,5i,5i,5i,0,0,0,0","111":"0,0,0,0,0,3g,5i,5i,5i,5i,5i,3g,0,0,0,0","112":"0,0,0,0,0,70,5i,5i,5i,5i,5i,70,5c,5c,5c,0","113":"0,0,0,0,0,3i,5i,5i,5i,5i,5i,3i,6,6,6,0","114":"0,0,0,0,0,3i,5i,5c,5c,5c,5c,5c,0,0,0,0","115":"0,0,0,0,0,3i,5c,5c,3g,6,6,70,0,0,0,0","116":"0,0,1c,1c,1c,3g,1c,1c,1c,1c,1c,u,0,0,0,0","117":"0,0,0,0,0,5i,5i,5i,5i,5i,5i,3i,0,0,0,0","118":"0,0,0,0,0,5i,5i,5i,5i,30,1k,g,0,0,0,0","119":"0,0,0,0,0,5i,5i,5y,5y,5y,5y,32,0,0,0,0","120":"0,0,0,0,0,5i,30,1k,1k,30,5i,5i,0,0,0,0","121":"0,0,0,0,0,5i,5i,5i,5i,5i,5i,3i,6,6,70,0","122":"0,0,0,0,0,72,6,c,o,1c,2o,72,0,0,0,0","123":"0,e,o,o,o,o,34,34,o,o,o,o,e,0,0,0","124":"0,o,o,o,o,o,o,o,o,o,o,o,o,0,0,0","125":"0,34,o,o,o,o,e,e,o,o,o,o,34,0,0,0","126":"0,0,0,0,0,0,1e,3i,24,0,0,0,0,0,0,0"}},"Spleen12x24":{"w":12,"h":24,"g":{"32":"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0","33":"0,0,0,0,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,0,0,2o,2o,0,0,0,0,0","34":"0,0,lo,lo,lo,lo,lo,lo,lo,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0","35":"0,0,0,0,lo,lo,lo,1ku,lo,lo,lo,lo,lo,lo,lo,1ku,lo,lo,lo,0,0,0,0,0","36":"0,0,2o,2o,e6,o0,19c,19c,19c,19c,o0,e0,30,2u,2u,2u,2u,30,1ko,2o,2o,0,0,0","37":"0,0,0,0,0,c,p8,1co,1co,q8,1c,2o,2o,5c,64,c6,c6,m4,lc,0,0,0,0,0","38":"0,0,0,0,6o,bc,lo,lo,lo,lo,bc,6o,mo,17e,172,170,170,m6,dv,0,0,0,0,0","39":"0,0,2o,2o,2o,2o,2o,2o,2o,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0","40":"0,0,e,o,1c,2o,5c,5c,ao,ao,ao,ao,ao,ao,ao,ao,5c,5c,2o,1c,o,e,0,0","41":"0,0,1ds,ao,5c,2o,1c,1c,o,o,o,o,o,o,o,o,1c,1c,2o,5c,ao,1ds,0,0","42":"0,0,0,0,0,0,0,0,lo,bc,6o,2o,1ku,2o,6o,bc,lo,0,0,0,0,0,0,0","43":"0,0,0,0,0,0,0,0,0,2o,2o,2o,sc,2o,2o,2o,0,0,0,0,0,0,0,0","44":"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2o,2o,2o,5c,ao,0,0,0","45":"0,0,0,0,0,0,0,0,0,0,0,0,sc,0,0,0,0,0,0,0,0,0,0,0","46":"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2o,2o,0,0,0,0,0","47":"0,0,3,3,6,6,c,c,o,o,1c,1c,2o,2o,5c,5c,ao,ao,lc,lc,16o,16o,0,0","48":"0,0,0,0,e0,lo,16u,16u,172,17i,186,19i,1c6,1hi,1dy,16u,16u,lo,e0,0,0,0,0,0","49":"0,0,0,0,68,dc,o0,gw,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,sc,0,0,0,0,0","50":"0,0,0,0,e0,lo,16u,6,6,6,c,o,1c,2o,5c,ao,lc,16u,1ku,0,0,0,0,0","51":"0,0,0,0,e0,lo,16u,6,6,c,6w,c,6,6,6,6,16u,lo,e0,0,0,0,0,0","52":"0,0,0,0,16o,16o,16o,17c,17c,17c,17c,17c,17c,17c,1ku,o,o,o,o,0,0,0,0,0","53":"0,0,0,0,1ku,16u,16o,16o,16o,16o,1ko,c,6,6,6,6,16u,lo,e0,0,0,0,0,0","54":"0,0,0,0,e4,li,16o,16o,16o,16o,1ko,170,16u,16u,16u,16u,16u,lo,e0,0,0,0,0,0","55":"0,0,0,0,1ku,16u,6,6,6,c,o,1c,2o,5c,5c,5c,5c,5c,5c,0,0,0,0,0","56":"0,0,0,0,e0,lo,16u,16u,16u,lo,e0,lo,16u,16u,16u,16u,16u,lo,e0,0,0,0,0,0","57":"0,0,0,0,e0,lo,16u,16u,16u,16u,16u,li,e6,6,6,6,6,170,s8,0,0,0,0,0","58":"0,0,0,0,0,0,0,0,0,0,2o,2o,0,0,0,0,0,2o,2o,0,0,0,0,0","59":"0,0,0,0,0,0,0,0,0,0,2o,2o,0,0,0,0,2o,2o,2o,5c,ao,0,0,0","60":"0,0,0,0,c,o,1c,2o,5c,ao,lc,16o,lc,ao,5c,2o,1c,o,c,0,0,0,0,0","61":"0,0,0,0,0,0,0,0,0,1ku,0,0,0,0,1ku,0,0,0,0,0,0,0,0,0","62":"0,0,0,0,lc,ao,5c,2o,1c,o,c,6,c,o,1c,2o,5c,ao,lc,0,0,0,0,0","63":"0,0,0,0,e0,lo,16u,6,6,c,o,1c,2o,2o,2o,0,0,2o,2o,0,0,0,0,0","64":"0,0,0,0,0,e0,lo,16u,16u,19y,19y,19y,19y,19y,19y,1a6,16o,lc,e4,0,0,0,0,0","65":"0,0,0,0,e0,lo,16u,16u,16u,16u,16u,1ku,16u,16u,16u,16u,16u,16u,16u,0,0,0,0,0","66":"0,0,0,0,1ko,170,16u,16u,16u,16u,170,1ko,170,16u,16u,16u,16u,170,1ko,0,0,0,0,0","67":"0,0,0,0,e6,lc,16o,16o,16o,16o,16o,16o,16o,16o,16o,16o,16o,lc,e6,0,0,0,0,0","68":"0,0,0,0,1ko,170,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,170,1ko,0,0,0,0,0","69":"0,0,0,0,e6,lc,16o,16o,16o,16o,16o,1ko,16o,16o,16o,16o,16o,lc,e6,0,0,0,0,0","70":"0,0,0,0,e6,lc,16o,16o,16o,16o,16o,1ko,16o,16o,16o,16o,16o,16o,16o,0,0,0,0,0","71":"0,0,0,0,e6,lc,16o,16o,16o,16o,16o,18e,16u,16u,16u,16u,16u,li,e6,0,0,0,0,0","72":"0,0,0,0,16u,16u,16u,16u,16u,16u,16u,1ku,16u,16u,16u,16u,16u,16u,16u,0,0,0,0,0","73":"0,0,0,0,sc,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,sc,0,0,0,0,0","74":"0,0,0,0,sc,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,68,1j4,0,0,0,0,0","75":"0,0,0,0,16u,16u,16u,16u,16u,170,17c,1kg,17c,170,16u,16u,16u,16u,16u,0,0,0,0,0","76":"0,0,0,0,16o,16o,16o,16o,16o,16o,16o,16o,16o,16o,16o,16o,16o,lc,e6,0,0,0,0,0","77":"0,0,0,0,16u,1e6,1i6,1di,19i,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,0,0,0,0,0","78":"0,0,0,0,16u,1dy,1dy,1hi,1hi,1c6,1c6,19i,19i,186,186,17i,17i,172,172,0,0,0,0,0","79":"0,0,0,0,e0,lo,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,lo,e0,0,0,0,0,0","80":"0,0,0,0,1ko,170,16u,16u,16u,16u,170,1ko,16o,16o,16o,16o,16o,16o,16o,0,0,0,0,0","81":"0,0,0,0,e0,lo,16u,16u,16u,16u,16u,16u,16u,16u,19i,19i,186,n0,e0,o,c,c,0,0","82":"0,0,0,0,1ko,170,16u,16u,16u,16u,170,1ko,170,16u,16u,16u,16u,16u,16u,0,0,0,0,0","83":"0,0,0,0,e6,lc,16o,16o,16o,16o,lc,e0,c,6,6,6,6,c,1ko,0,0,0,0,0","84":"0,0,0,0,1ku,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,0,0,0,0,0","85":"0,0,0,0,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,li,e6,0,0,0,0,0","86":"0,0,0,0,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,lo,lo,bc,6o,2o,0,0,0,0,0","87":"0,0,0,0,16u,16u,16u,16u,16u,16u,16u,16u,16u,16u,19i,1di,1i6,1e6,16u,0,0,0,0,0","88":"0,0,0,0,16u,16u,16u,16u,16u,16u,lo,e0,lo,16u,16u,16u,16u,16u,16u,0,0,0,0,0","89":"0,0,0,0,16u,16u,16u,16u,16u,16u,li,e6,6,6,6,6,6,e,1ks,0,0,0,0,0","90":"0,0,0,0,1ku,6,6,6,c,o,1c,2o,5c,ao,lc,16o,16o,16o,1ku,0,0,0,0,0","91":"0,e6,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,ao,e6,0","92":"0,0,2dc,2dc,16o,16o,lc,lc,ao,ao,5c,5c,2o,2o,1c,1c,o,o,c,c,6,6,0,0","93":"0,1ko,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,1ko,0","94":"0,0,1s,68,c0,m0,170,2di,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0","95":"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1ku,0","96":"0,0,ao,5c,2o,1c,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0","97":"0,0,0,0,0,0,0,0,s8,c,6,6,e6,li,16u,16u,16u,li,e6,0,0,0,0,0","98":"0,0,0,0,16o,16o,16o,16o,1ko,170,16u,16u,16u,16u,16u,16u,16u,170,1ko,0,0,0,0,0","99":"0,0,0,0,0,0,0,0,e6,lc,16o,16o,16o,16o,16o,16o,16o,lc,e6,0,0,0,0,0","100":"0,0,0,0,6,6,6,6,e6,li,16u,16u,16u,16u,16u,16u,16u,li,e6,0,0,0,0,0","101":"0,0,0,0,0,0,0,0,e6,li,16u,16u,16u,1ku,16o,16o,16o,lc,e6,0,0,0,0,0","102":"0,0,0,0,3g,68,5c,5c,5c,5c,s8,5c,5c,5c,5c,5c,5c,5c,5c,0,0,0,0,0","103":"0,0,0,0,0,0,0,0,e6,li,16u,16u,16u,16u,16u,16u,16u,li,e4,c,6,6,c,s8","104":"0,0,0,0,16o,16o,16o,16o,1ko,170,16u,16u,16u,16u,16u,16u,16u,16u,16u,0,0,0,0,0","105":"0,0,0,0,2o,2o,0,0,dc,2o,2o,2o,2o,2o,2o,2o,2o,2o,3c,0,0,0,0,0","106":"0,0,0,0,2o,2o,0,0,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,5c,1hc","107":"0,0,0,0,lc,lc,lc,lc,lo,lo,m0,mo,rk,o0,mo,m0,lo,li,li,0,0,0,0,0","108":"0,0,0,0,5c,5c,5c,5c,5c,5c,5c,5c,5c,5c,5c,5c,5c,68,3g,0,0,0,0,0","109":"0,0,0,0,0,0,0,0,1i0,19o,19i,19i,19i,19i,19i,19i,16u,16u,16u,0,0,0,0,0","110":"0,0,0,0,0,0,0,0,1ko,170,16u,16u,16u,16u,16u,16u,16u,16u,16u,0,0,0,0,0","111":"0,0,0,0,0,0,0,0,e0,lo,16u,16u,16u,16u,16u,16u,16u,lo,e0,0,0,0,0,0","112":"0,0,0,0,0,0,0,0,1ko,170,16u,16u,16u,16u,16u,16u,16u,170,1ko,16o,16o,16o,16o,16o","113":"0,0,0,0,0,0,0,0,e6,li,16u,16u,16u,16u,16u,16u,16u,li,e6,6,6,6,6,6","114":"0,0,0,0,0,0,0,0,e6,li,16o,16o,16o,16o,16o,16o,16o,16o,16o,0,0,0,0,0","115":"0,0,0,0,0,0,0,0,se,16o,16o,16o,16o,sc,6,6,6,6,1ks,0,0,0,0,0","116":"0,0,0,0,5c,5c,5c,5c,s8,5c,5c,5c,5c,5c,5c,5c,5c,68,3g,0,0,0,0,0","117":"0,0,0,0,0,0,0,0,16u,16u,16u,16u,16u,16u,16u,16u,16u,li,e6,0,0,0,0,0","118":"0,0,0,0,0,0,0,0,16u,16u,16u,16u,16u,16u,lo,lo,bc,6o,2o,0,0,0,0,0","119":"0,0,0,0,0,0,0,0,16u,16u,16u,19i,19i,19i,19i,19i,19i,o6,bi,0,0,0,0,0","120":"0,0,0,0,0,0,0,0,16u,16u,lo,bc,6o,6o,bc,lo,lo,16u,16u,0,0,0,0,0","121":"0,0,0,0,0,0,0,0,16u,16u,16u,16u,16u,16u,16u,16u,16u,li,e6,6,6,6,c,1ko","122":"0,0,0,0,0,0,0,0,1ku,6,c,o,1c,2o,5c,ao,lc,16o,1ku,0,0,0,0,0","123":"0,u,1c,2o,2o,2o,2o,2o,2o,2o,5c,ow,ow,5c,2o,2o,2o,2o,2o,2o,2o,1c,u,0","124":"0,0,0,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,2o,0,0,0","125":"0,1hc,5c,2o,2o,2o,2o,2o,2o,2o,1c,s,s,1c,2o,2o,2o,2o,2o,2o,2o,5c,1hc,0","126":"0,0,0,0,0,0,0,0,0,0,p2,1c6,2gc,2ew,0,0,0,0,0,0,0,0,0,0"}},"Spleen32x64":{"w":32,"h":64,"g":{"32":"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0","37":"0,0,0,0,0,0,0,0,0,0,0,0,dc,dc,jnyzk,13ss0w,2434xs,2434xs,2436gw,2436gw,2439j4,2439j4,13t3i8,joagw,ohs,ohs,1czk,1czk,2pz4,2pz4,5fy8,5fy8,avwg,avwg,lrsw,lrsw,17jls,17jls,2f37k,2f37k,4ucn4,4uj0g,9p0ww,9p0ww,jddr4,jddr4,12q3fk,12q3fk,25f7b4,25f0xs,22wydc,22wydc,0,0,0,0,0,0,0,0,0,0,0,0","45":"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4fti40,4fti40,4fti40,4fti40,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0","48":"0,0,0,0,0,0,0,0,0,0,0,0,4zsao,jz6o0,13ydhc,27wr1c,25evhc,4atptc,45twxc,45twxc,45twxc,45tx4g,45txio,45tyb4,45tzw0,45u31s,45u9dc,45ultc,45vapc,45wohc,45zg1c,464z5c,46g1dc,4725tc,48aepc,4aqwhc,4fnw1c,4fi9rk,4f7180,4ekk4w,4dblyo,4atpm8,45twxc,45twxc,45twxc,45twxc,4atptc,25evhc,27wr1c,13ydhc,jz6o0,4zsao,0,0,0,0,0,0,0,0,0,0,0,0","49":"0,0,0,0,0,0,0,0,0,0,0,0,m4g0,18lj4,2hjpc,4zg1s,9tmgw,jhzb4,12uozk,11lqtc,z3ugw,u41s0,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,59mo,13ydhc,13ydhc,13ydhc,13ydhc,0,0,0,0,0,0,0,0,0,0,0,0","50":"0,0,0,0,0,0,0,0,0,0,0,0,4zsao,jz6o0,13ydhc,27wr1c,25evhc,4atptc,45twxc,45twxc,6o,6o,6o,6o,6o,dc,rk,1j4,328,64g,c8w,ohs,1czk,2pz4,5fy8,avwg,lrsw,17jls,2f37k,4u6f4,9ocu8,jcpog,12pfcw,25eups,4atpm8,45twxc,45twxc,45twxc,4fti40,4fti40,4fti40,4fti40,0,0,0,0,0,0,0,0,0,0,0,0","51":"0,0,0,0,0,0,0,0,0,0,0,0,4zsao,jz6o0,13ydhc,27wr1c,25evhc,4atptc,45twxc,45twxc,6o,6o,6o,6o,6o,6o,dc,qo,2hw8w,2hw5c,2hw5c,2hw8w,qo,dc,6o,6o,6o,6o,6o,6o,6o,6o,6o,6o,45twxc,45twxc,4atptc,25evhc,27wr1c,13ydhc,jz6o0,4zsao,0,0,0,0,0,0,0,0,0,0,0,0","52":"0,0,0,0,0,0,0,0,0,0,0,0,45twqo,45twqo,45twqo,45twqo,45twqo,45twqo,45twqo,45twqo,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,45tzpc,4fti40,4fti40,4fti40,4fti40,2yo,2yo,2yo,2yo,2yo,2yo,2yo,2yo,2yo,2yo,2yo,2yo,0,0,0,0,0,0,0,0,0,0,0,0","53":"0,0,0,0,0,0,0,0,0,0,0,0,4fti40,4fti40,4fti40,4fti40,45twxc,45twxc,45twxc,45twxc,45twqo,45twqo,45twqo,45twqo,45twqo,45twqo,45twqo,45twqo,4fthq8,4fti0w,4fti2o,4fti3k,rk,ds,6o,6o,6o,6o,6o,6o,6o,6o,6o,6o,45twxc,45twxc,4atptc,25evhc,27wr1c,13ydhc,jz6o0,4zsao,0,0,0,0,0,0,0,0,0,0,0,0","54":"0,0,0,0,0,0,0,0,0,0,0,0,4zsao,jz6o0,13ydhc,27wr1c,25evhc,4atptc,45twxc,45twxc,45twqo,45twqo,45twqo,45twqo,45twqo,45twqo,45twqo,45twqo,4fthq8,4fti0w,4fti2o,4fti3k,45txi8,45tx4g,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,4atptc,25evhc,27wr1c,13ydhc,jz6o0,4zsao,0,0,0,0,0,0,0,0,0,0,0,0","55":"0,0,0,0,0,0,0,0,0,0,0,0,4fti40,4fti40,4fti40,4fti40,45twxc,45twxc,45twxc,45twxc,6o,6o,6o,6o,6o,ds,rk,1j4,328,64g,c8w,ohs,1czk,2pz4,5fy8,avwg,lrsw,l2io,l2io,l2io,l2io,l2io,l2io,l2io,l2io,l2io,l2io,l2io,l2io,l2io,l2io,l2io,0,0,0,0,0,0,0,0,0,0,0,0","56":"0,0,0,0,0,0,0,0,0,0,0,0,4zsao,jz6o0,13ydhc,27wr1c,25evhc,4atptc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,22wyqo,11ghxc,jz6o0,9zl6o,9zl6o,jz6o0,11ghxc,22wyqo,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,4atptc,25evhc,27wr1c,13ydhc,jz6o0,4zsao,0,0,0,0,0,0,0,0,0,0,0,0","57":"0,0,0,0,0,0,0,0,0,0,0,0,4zsao,jz6o0,13ydhc,27wr1c,25evhc,4atptc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,45twxc,4atpm8,25euwg,27wr1s,13ydio,jz6r4,4zsog,6o,6o,6o,6o,6o,6o,6o,6o,45twxc,45twxc,4atptc,25evhc,27wr1c,13ydhc,jz6o0,4zsao,0,0,0,0,0,0,0,0,0,0,0,0"}}};
+const SPLEEN_FONTS = {};
+for (const name in _SPLEEN_PACKED) {
+  const f = _SPLEEN_PACKED[name];
+  SPLEEN_FONTS[name] = { w: f.w, h: f.h, glyphs: {} };
+  for (const cp in f.g) SPLEEN_FONTS[name].glyphs[cp] = f.g[cp].split(",").map(v => parseInt(v, 36));
+}
+
+// ---------------------------------------------------------------------------
+// Board 2 USAGE tab v2 mock. Every glyph is the REAL Spleen bitmap, extracted
+// from Spleen8x16.h / Spleen12x24.h / Spleen32x64.h (the headers the firmware
+// links) by gfx-extract.mjs. Every geometry constant in K is the value parsed
+// out of board_es3c35p.h - see check.mjs, which binds K to the header by name.
+//
+// Four layouts are drawn: the pre-branch baseline ("today", WAS) and three
+// options that were compared before picking one - A (Subtract), B (Now / Week
+// / Codex), C (Urgency ladder). B is what board_es3c35p.h actually derives;
+// A and C are kept as the record of what was rejected and why (see LAYOUTS'
+// own blurbs). Only B's and today's numbers are bound to the header - A and C
+// draw their own unbound literals, because nothing in the header answers to
+// them.
+// ---------------------------------------------------------------------------
+
+// THEMES[] from deckhand_display.ino, field order bg,card,label,value,accent,good,warn,bad,unknown
+const RAW = {
+  DARK:  [0x0000,0x18C4,0x8410,0xFFFF,0xFD20,0x0396,0xE4E0,0xCBD4,0x7BEF],
+  LIGHT: [0xEF5C,0xFFFF,0x62CA,0x18C3,0xB240,0x12F4,0xB3A0,0x6887,0x8C30],
+};
+const CNAMES = ["bg","card","label","value","accent","good","warn","bad","unknown"];
+const c565 = v => `rgb(${Math.round((v>>11&31)*255/31)},${Math.round((v>>5&63)*255/63)},${Math.round((v&31)*255/31)})`;
+const TH = {}; for (const k in RAW) { TH[k] = {}; RAW[k].forEach((v,i) => TH[k][CNAMES[i]] = c565(v)); }
+
+// ---------------------------------------------------------------------------
+// K - every constant this mock shares with board_es3c35p.h, under the header's
+// own name. check.mjs parses the header (through the geometry checkers' own
+// consts()) and asserts every one of these against it, so the mock cannot
+// drift from the header while still reporting itself trustworthy.
+// ---------------------------------------------------------------------------
+const K = {
+  BOARD_W:320, BOARD_H:480, TAB_BAR_H:46, CONTENT_Y:46, FOOTER_H:20,
+  CARD_X:12, CARD_W:296, PAD:18, BAR_H:12, R_MD:12, BORDER_CARD:2,
+  TAB_REC_W:40, TAB_COUNT:3, SP_2:8,
+  // CARD_H/CODEX_H/CARD1_Y are unchanged by the column move (Task 9): CARD_H
+  // stays declared in the header - v1's, unread there now - and CARD1_Y is
+  // CONTENT_Y+8 under both layouts. CARD2_Y/CODEX_Y are NOT still v1's: Task
+  // 9 moved the header's own CARD2_Y/CODEX_Y onto the v2 heights
+  // (NOW_CARD_H/WEEK_CARD_H), so these two now hold the CURRENT (v2) values
+  // and the "today" (WAS) baseline panel's old 226/398 live in WAS instead -
+  // same split CODEX_LANE_CHARS/CODEX_RIGHT_CHARS already use below.
+  CARD_H:164, CODEX_H:56, CARD1_Y:54, CARD2_Y:244, CODEX_Y:396,
+  CARD_PIN_BAR_Y:3, CARD_LABEL_Y:6, CARD_HERO_Y:24, CARD_HERO_H:65,
+  CARD_BAR_Y:95, CARD_STATS_Y:118, CARD_FOOT_Y:140,
+  CODEX_TEXT_Y:8, CODEX_BAR_Y:37,
+  MAC_EMOJI_SIZE:16, FOOTER_BATT_X:135, FOOTER_BATT_TEXT_X:160,
+  // v2 (BOARD_USAGE_V2) - what layout B, the selected design, actually draws.
+  BOARD_USAGE_V2:1, NOW_CARD_H:182, WEEK_CARD_H:144,
+  NOW_HERO_Y:26, NOW_BAR_Y:99, NOW_SPARK_Y:120, NOW_SPARK_H:32, NOW_META_Y:158,
+  WEEK_NUM_Y:26, WEEK_BURN_Y:30, WEEK_BAR_Y:58, WEEK_META_Y:78,
+  WEEK_FABLE_Y:99, WEEK_FABLE_BAR_Y:123,
+  CARD_HERO_W:132,
+  // Task 1 dropped the wall-clock suffix from the Codex row and shrank the pad
+  // width alongside it - 12/20 was the pre-fix state, kept in WAS below as the
+  // "today" panel's own numbers.
+  CODEX_LANE_CHARS:14, CODEX_RIGHT_CHARS:18,
+};
+// contentBottom()/CONTENT_ROWS/the LANE_* triple are DERIVED, not declared -
+// there is no such name in the header - so check.mjs asserts the identity
+// rather than the number, the same treatment it gives contentBottom.
+K.contentBottom  = K.BOARD_H - K.FOOTER_H;              // 460
+K.CONTENT_ROWS   = K.contentBottom - K.CONTENT_Y;       // 414
+K.LANE_X0        = K.CARD_X + K.PAD;                    // 30
+K.LANE_X1        = K.CARD_X + K.CARD_W - K.PAD;         // 290
+K.LANE_W         = K.LANE_X1 - K.LANE_X0;               // 260
+// SIDE_X0/SIDE_CHARS ARE declared in the header, but as a derivation from
+// CARD_HERO_W/PAD/TEXT_ADV - reproduced here the same way so a change to
+// CARD_HERO_W moves both, and check.mjs still binds the RESULT by name.
+K.SIDE_X0    = K.LANE_X0 + K.CARD_HERO_W + 8;           // 170
+K.SIDE_CHARS = Math.floor((K.LANE_X1 - K.SIDE_X0) / 8); // 15
+
+// ---------------------------------------------------------------------------
+// WAS - the constants of the page THIS branch replaced, kept because the
+// "today" panel is a before picture and has to keep drawing it. Deliberately
+// OUT of K and therefore out of check.mjs's header bind: a before picture
+// that tracked the header would stop being a before picture the moment the
+// header moved. check.mjs asserts every entry here actually DIFFERS from
+// what ships - a value equal to K's (or to the header's) records nothing and
+// is how a live constant would escape the bind.
+// ---------------------------------------------------------------------------
+const WAS = {
+  CODEX_LANE_CHARS:12, CODEX_RIGHT_CHARS:20,
+  // Task 9 moved the header's CARD2_Y/CODEX_Y onto the v2 column
+  // (NOW_CARD_H/WEEK_CARD_H); these are the v1 positions the "today" panel
+  // still draws its 164px-tall cards at.
+  CARD2_Y:226, CODEX_Y:398,
+};
+
+// font ids as the sketch uses them: T_META 1, T_BODY 2, T_HEAD 3, T_HERO 8
+const FID = { 1:"Spleen8x16", 2:"Spleen8x16", 3:"Spleen12x24", 8:"Spleen32x64" };
+const face = f => SPLEEN_FONTS[FID[f]];
+const adv  = f => face(f).w, cell = f => face(f).h;
+const tw   = (s,f) => String(s).length * adv(f);
+
+// ---------------------------------------------------------------------------
+// formatters, transcribed from usage.ino
+// ---------------------------------------------------------------------------
+const fmtTokens = t => t>=1e6 ? `${(t/1e6).toFixed(2)}M tok` : t>=1e3 ? `${(t/1e3).toFixed(1)}K tok` : `${t} tok`;
+const fmtResetIn = m => m<0 ? "no data yet" : m>=1440 ? `${(m/1440)|0}d ${((m/60)|0)%24}h left`
+  : m>=60 ? `${(m/60)|0}h ${m%60}m left` : `${m}m left`;
+const fmtDur = m => m>=1440 ? `${(m/1440)|0}d ${((m/60)|0)%24}h` : m>=60 ? `${(m/60)|0}h ${m%60}m` : `${m}m`;
+const at = (now,m) => { const s=(now+m*60)%86400; return `${String((s/3600)|0).padStart(2,"0")}:${String(((s/60)|0)%60).padStart(2,"0")}`; };
+
+// ---------------------------------------------------------------------------
+// BURN RATE. Two estimators, picked by window length rather than preference -
+// see docs/design/usage-redesign/README.md for the derivation. Transcribed
+// unchanged from the published exploration.
+// ---------------------------------------------------------------------------
+const BURN_MIN_PCT = 3, BURN_MAX_PCT = 97;
+const OAUTH_POLL_MIN = 5;
+const BURN_MIN_ELAPSED = OAUTH_POLL_MIN;
+const BURN_RING_MIN_SPAN = 30, BURN_RING_MIN_RISE = 3;
+const BURN_RING_MAX_WIN = 2880;
+const GATED = { txt:"burn --", gated:true };
+function burnAvg(pct,resetMin,winMin) {
+  if (pct<0||resetMin<0||winMin<=0) return GATED;
+  const elapsed = winMin-resetMin;
+  if (elapsed<BURN_MIN_ELAPSED||pct<BURN_MIN_PCT) return GATED;
+  if (pct>BURN_MAX_PCT) return { txt:"empty now", urgent:true };
+  const left = Math.round((100-pct)/(pct/elapsed));
+  return left<resetMin ? { txt:`empty ~${fmtDur(left)}`, min:left, urgent:true }
+                        : { txt:"won't run out", min:left, urgent:false };
+}
+function burnRing(series,pct,resetMin) {
+  if (!series||pct<0||resetMin<0) return GATED;
+  const n = series.length; let sx=0,sy=0,sxx=0,sxy=0;
+  for (let i=0;i<n;i++) { const x=i*RING_STEP_MIN,y=series[i]; sx+=x; sy+=y; sxx+=x*x; sxy+=x*y; }
+  const den = n*sxx-sx*sx; if (!den) return GATED;
+  const slope = (n*sxy-sx*sy)/den;
+  const rise = series[n-1]-series[0];
+  if (RING_SPAN_MIN<BURN_RING_MIN_SPAN||rise<BURN_RING_MIN_RISE||slope<=0) return GATED;
+  if (pct>BURN_MAX_PCT) return { txt:"empty now", urgent:true };
+  const left = Math.round((100-pct)/slope);
+  return left<resetMin ? { txt:`empty ~${fmtDur(left)}`, min:left, urgent:true }
+                        : { txt:"won't run out", min:left, urgent:false };
+}
+function burnFor(pct,resetMin,winMin,series,stale) {
+  if (stale) return GATED;
+  return (winMin>0&&winMin<=BURN_RING_MAX_WIN&&series) ? burnRing(series,pct,resetMin) : burnAvg(pct,resetMin,winMin);
+}
+const pctCol = (t,p) => p<0 ? t.unknown : p>=90 ? t.bad : p>=70 ? t.warn : t.good;
+
+// 16x16 stand-in for MacEmoji16.h's "wave". Generated, not transcribed - see
+// README.md for what this does and does not vouch for.
+const ICON = (() => { const r=[]; for (let y=0;y<16;y++) { let v=0; for (let x=0;x<16;x++) {
+  const a=8+Math.round(2.6*Math.sin((x/16)*Math.PI*2)), b=13+Math.round(2.0*Math.sin((x/16)*Math.PI*2+1));
+  v = v*2 + ((y===a||y===a+1||y===b)?1:0); } r.push(v); } return r; })();
+
+// 32-bit rows exceed the range of |0/>>>, so bit extraction divides rather
+// than shifts (used by the hero glyph decode, at draw time AND at paint time).
+const TWO = Array.from({length:33}, (_,i) => Math.pow(2,i));
+
+// ---------------------------------------------------------------------------
+// The painter. Builds TWO things per call: a compact op list (`ops`, painted
+// only by the browser) and field/card METADATA (`fields`/`cards`, built by
+// `_reg()`), which is what check.mjs's picture assertions actually read - the
+// same data the in-browser checker already used, so running headlessly is not
+// a second implementation of the checks, only a second place to run them.
+// `_f()` never touches a canvas: it pushes an op. `paint(ctx)` is the replay,
+// called only by the browser - the same seam settings.js already has.
+// ---------------------------------------------------------------------------
+class P {
+  constructor(theme) { this.t = TH[theme]; this.ops = []; this.fields = []; this.cards = []; this.cur = null; }
+  _f(x,y,w,h,col) { if (w<=0||h<=0) return; this.ops.push(["r",x,y,w,h,col]); }
+  fill(col) { this._f(0,0,K.BOARD_W,K.BOARD_H,col); }
+  rect(x,y,w,h,col) { this._f(x,y,w,h,col); }
+  round(x,y,w,h,r,col) { this.ops.push(["rr",x,y,w,h,r,col]); }
+  strokeRound(x,y,w,h,r,t,col) { this.ops.push(["rs",x,y,w,h,r,t,col]); }
+  hline(x,y,w,col) { this._f(x,y,w,1,col); }
+  // a card, and everything drawn after it attaches to it for the checks
+  card(name,y,h,border) {
+    this.round(K.CARD_X,y,K.CARD_W,h,K.R_MD,this.t.card);
+    this.strokeRound(K.CARD_X,y,K.CARD_W,h,K.R_MD,K.BORDER_CARD,border||this.t.label);
+    this.cur = { name,y,h,fields:[] }; this.cards.push(this.cur); return this.cur;
+  }
+  _reg(kind,txt,x,y,w,h,lane,inks,always) {
+    const f = { kind,txt,x,y,w,h,lane, always:!!always, inks:inks||[{x,y,w,h}],
+                chrome:!!this.chromeMode, card:this.cur };
+    this.fields.push(f); if (this.cur) this.cur.fields.push(f); return f;
+  }
+  // datum: "TL" (y = cell top) | "TR" (x = right edge) | "MC" (centre; TFT_eSPI
+  // centres on the ascent, so the box top is cy - 3h/8)
+  text(s,x,y,fid,fg,bg,datum="TL",clear="ifchanged",lane=null) {
+    s = String(s); const w = tw(s,fid), ch = cell(fid);
+    let x0 = datum==="TR" ? x-w : x, y0 = datum==="MC" ? Math.round(y-3*ch/8) : y;
+    if (datum==="MC") x0 = Math.round(x-w/2);
+    const bx = clear==="ifchanged" ? x0-1 : x0, by = clear==="ifchanged" ? y0-1 : y0;
+    const bw = clear==="ifchanged" ? w+2 : w,  bh = clear==="ifchanged" ? ch+2 : ch;
+    if (bg) this._f(bx,by,bw,bh,bg);
+    const inks = [];
+    for (let i=0;i<s.length;i++) {
+      // INK is per glyph, not per string: the Codex row deliberately draws its
+      // Mac icon into a run of reserved SPACES inside the label, so an extent-
+      // based model would report that as a collision and an interior gap as
+      // safe. A space carries no ink and cannot be erased.
+      if (s[i]!==" ") inks.push({ x:x0+i*adv(fid), y:y0, w:face(fid).w, h:ch });
+    }
+    this.ops.push(["t",s,x0,y0,fid,fg]);
+    return this._reg("text",s,bx,by,bw,bh,lane,inks);
+  }
+  // drawBigNumber: clears exactly the box it is handed, then draws.
+  hero(s,x,y,w,h,fg,bg) {
+    this._f(x,y,w,h,bg);
+    this.ops.push(["hero",s,x,y,h,fg]);
+    const F = SPLEEN_FONTS.Spleen32x64, yy = y + Math.round((h-F.h)/2);
+    return this._reg("hero",s,x,y,w,h,w,[{x,y:yy,w:s.length*F.w,h:F.h}]);
+  }
+  // drawPaceBar: clears (x-1, y-4, w+2, h+8) to cover the tick's overhang.
+  paceBar(x,y,w,h,pct,tick,fg) {
+    this._f(x-1,y-4,w+2,h+8,this.t.card);
+    this.ops.push(["bar",x,y,w,h,pct,tick,fg]);
+    // the tick can land anywhere along the bar, so the whole span counts as ink
+    return this._reg("bar","",x-1,y-4,w+2,h+8,w,[{x,y:y-4,w,h:h+8}]);
+  }
+  // PROPOSED, layout B and C only: a 30-sample trend. Needs new device state.
+  spark(x,y,w,h,series,fg) {
+    this._f(x-1,y-1,w+2,h+2,this.t.card);
+    this.ops.push(["spark",x,y,w,h,series,fg]);
+    return this._reg("spark","",x-1,y-1,w+2,h+2,w,[{x,y,w,h}]);
+  }
+  icon(x,y,bg) {
+    this._f(x,y,16,16,bg);
+    this.ops.push(["icon",x,y]);
+    return this._reg("icon","",x,y,16,16,16,null,true);
+  }
+  // ---- browser-only replay. check.mjs never calls this - it runs against
+  // `fields`/`cards` above, which never touched a canvas in the first place.
+  paint(ctx) {
+    const path = (x,y,w,h,r) => { ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+      ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); };
+    const glyphs = (s,x0,y0,fid,col) => {
+      const F = face(fid), gw = F.w; ctx.fillStyle = col;
+      for (let i=0;i<s.length;i++) {
+        const rows = F.glyphs[s.codePointAt(i)]; if (!rows) continue;
+        const gx = x0+i*gw;
+        for (let ry=0;ry<rows.length;ry++) {
+          const v = rows[ry]; if (!v) continue; let run=0;
+          for (let bx=0;bx<gw;bx++) {
+            const on = gw<=16 ? (v>>>(gw-1-bx))&1 : Math.floor(v/TWO[gw-1-bx])%2;
+            if (on) run++; else if (run) { ctx.fillRect(gx+bx-run,y0+ry,run,1); run=0; }
+          }
+          if (run) ctx.fillRect(gx+gw-run,y0+ry,run,1);
+        }
+      }
+    };
+    for (const o of this.ops) {
+      const k = o[0];
+      if (k==="r") { ctx.fillStyle=o[5]; ctx.fillRect(o[1],o[2],o[3],o[4]); }
+      else if (k==="rr") { const [,x,y,w,h,r,col]=o; path(x,y,w,h,r); ctx.fillStyle=col; ctx.fill(); }
+      else if (k==="rs") { const [,x,y,w,h,r,t,col]=o; path(x+t/2,y+t/2,w-t,h-t,Math.max(0,r-t/2));
+        ctx.lineWidth=t; ctx.strokeStyle=col; ctx.stroke(); }
+      else if (k==="t") glyphs(o[1],o[2],o[3],o[4],o[5]);
+      else if (k==="hero") { const [,s,x,y,h,fg]=o; const F=SPLEEN_FONTS.Spleen32x64;
+        glyphs(s,x,y+Math.round((h-F.h)/2),8,fg); }
+      else if (k==="bar") { const [,x,y,w,h,pct,tick,fg]=o, t=this.t;
+        path(x,y,w,h,h/2); ctx.fillStyle=t.bg; ctx.fill();
+        const cl=pct<0?0:Math.min(100,pct), filled=Math.round(w*cl/100);
+        if (filled>=h) { path(x,y,filled,h,h/2); ctx.fillStyle=fg; ctx.fill(); }
+        else if (filled>0) { ctx.beginPath(); ctx.arc(x+h/2,y+h/2,h/2,0,7); ctx.fillStyle=fg; ctx.fill(); }
+        if (tick>=0) { const tx=x+Math.round((w-3)*Math.min(100,tick)/100); ctx.fillStyle=t.value; ctx.fillRect(tx,y-4,3,h+8); } }
+      else if (k==="spark") { const [,x,y,w,h,series,fg]=o, t=this.t;
+        const n=series.length, cw=Math.floor(w/n);
+        ctx.fillStyle=t.label; ctx.fillRect(x,y+h-1,cw*n,1);
+        const cyOf = v => y+h-3-Math.round((h-5)*Math.max(0,Math.min(100,v))/100);
+        let prev=null;
+        for (let i=0;i<n;i++) { const cy=cyOf(series[i]), last=i===n-1;
+          if (prev!==null&&prev!==cy) { const a0=Math.min(prev,cy),a1=Math.max(prev,cy);
+            ctx.fillStyle=fg; ctx.fillRect(x+i*cw-1,a0,2,a1-a0+2); }
+          ctx.fillStyle = last?t.value:fg; ctx.fillRect(x+i*cw,cy,cw-1,last?4:2); prev=cy; } }
+      else if (k==="icon") { const [,x,y]=o; ctx.fillStyle=this.t.value;
+        for (let ry=0;ry<16;ry++) { const v=ICON[ry]; if (!v) continue;
+          for (let bx=0;bx<16;bx++) if ((v>>>(15-bx))&1) ctx.fillRect(x+bx,y+ry,1,1); } }
+      else if (k==="box") { ctx.strokeStyle="rgba(255,64,129,.85)"; ctx.lineWidth=1;
+        ctx.strokeRect(o[1]+.5,o[2]+.5,o[3]-1,o[4]-1); }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// States. A layout that only works at 47% is not a layout, so every option is
+// drawn under all six.
+// ---------------------------------------------------------------------------
+const NOW = 14*3600+18*60+7;
+const RING_SLOTS = 31, RING_STEP_MIN = 5;         // span = (31-1)*5 = exactly 150 min
+const RING_SPAN_MIN = (RING_SLOTS-1)*RING_STEP_MIN;
+const mkSpark = p => { if (p<0) return null;
+  const n = RING_SLOTS, a = [];
+  for (let i=0;i<n;i++) { const base = p*0.55+(p*0.45)*(i/(n-1));
+    a.push(Math.max(0,Math.round(base+1.6*Math.sin(i*1.7)+0.9*Math.sin(i*0.6)))); }
+  a[n-1] = p; return a; };
+const STATES = {
+  nominal:{lbl:"nominal",fh:72,fhR:134,fhT:1.20e6,sd:61,sdR:7680,sdT:31.9e6,fbP:61,fbT:30.1e6,
+    cx:44,cxR:4460,cxW:10080,age:5,cxAge:40,macs:1,icon:true,tag:"studio",bat:63,fresh:"5s ago"},
+  critical:{lbl:"critical",fh:97,fhR:12,fhT:2.44e6,sd:100,sdR:5240,sdT:52.6e6,fbP:100,fbT:41.8e6,
+    cx:96,cxR:900,cxW:10080,age:8,cxAge:60,macs:1,icon:true,tag:"studio",bat:9,fresh:"3s ago"},
+  stale:{lbl:"stale",fh:72,fhR:134,fhT:1.20e6,sd:61,sdR:7680,sdT:31.9e6,fbP:61,fbT:30.1e6,
+    cx:44,cxR:4460,cxW:10080,age:11400,cxAge:14000,macs:1,icon:true,tag:"studio",bat:41,fresh:"stale 190s"},
+  empty:{lbl:"no data",fh:-1,fhR:-1,fhT:0,sd:-1,sdR:-1,sdT:0,fbP:-1,fbT:0,
+    cx:-1,cxR:-1,cxW:-1,age:-1,cxAge:-1,macs:1,icon:false,tag:"",bat:63,fresh:"no data"},
+  // padLeftTo() returns early when the string is already longer than the pad
+  // width - it never truncates - so the Codex right field is not bounded by
+  // CODEX_RIGHT_CHARS at all. This is the state that reaches the real worst
+  // case the header's own comment names, "100%  23h 59m left" at 18 chars.
+  cxworst:{lbl:"Codex worst case",fh:72,fhR:134,fhT:1.20e6,sd:61,sdR:7680,sdT:31.9e6,fbP:61,fbT:30.1e6,
+    cx:100,cxR:1439,cxW:10080,age:5,cxAge:40,macs:1,icon:false,tag:"",bat:63,fresh:"5s ago"},
+  twomacs:{lbl:"two Macs",fh:72,fhR:134,fhT:1.20e6,sd:61,sdR:7680,sdT:31.9e6,fbP:61,fbT:30.1e6,
+    cx:44,cxR:4460,cxW:10080,age:5,cxAge:40,macs:2,icon:false,tag:"studio",bat:63,fresh:"5s ago"},
+};
+const isStale = d => d.age>900, isCxStale = d => d.cxAge>900;
+const heroTxt = p => p<0 ? "--" : `${p}%`;
+const staleTxt = d => { const m=(d.age/60)|0; return m<60 ? `stale ${m}m` : `stale ${(m/60)|0}h`; };
+
+// ---------------------------------------------------------------------------
+// Chrome: the tab bar and footer, so every panel below is honest edge to edge.
+// ---------------------------------------------------------------------------
+function chrome(p,d) {
+  const t = p.t; p.fill(t.bg); p.chromeMode = true;
+  p.rect(0,0,K.BOARD_W,K.TAB_BAR_H,t.card);
+  const tabsW = K.BOARD_W-K.TAB_REC_W, tabW = Math.floor(tabsW/K.TAB_COUNT);
+  ["USAGE","SESSIONS","SETTINGS"].forEach((L,i) => {
+    p.text(L,i*tabW+Math.floor(tabW/2),Math.floor(K.TAB_BAR_H/2),1,i===0?t.value:t.label,t.card,"MC","string");
+    if (i===0) p.rect(i*tabW+8,K.TAB_BAR_H-3,tabW-16,3,t.accent);
+  });
+  const rx = tabsW+Math.floor((K.TAB_REC_W-27)/2), cy = Math.floor(K.TAB_BAR_H/2);
+  p.ops.push(["r",rx,cy-3,6,6,t.label]); // record dot, approximated as a small square - cosmetic only
+  p.text("REC",rx+9,cy-8,1,t.label,null,"TL","string");
+  // footer
+  p.hline(0,K.contentBottom,K.BOARD_W,t.label);
+  p.rect(0,K.contentBottom+1,K.BOARD_W,K.FOOTER_H-1,t.bg);
+  const fy = K.contentBottom+4;
+  p.text(`${String((NOW/3600)|0).padStart(2,"0")}:${String(((NOW/60)|0)%60).padStart(2,"0")}:${String(NOW%60).padStart(2,"0")}`,
+    10,fy,1,t.label,t.bg);
+  const bc = d.bat<=10?t.bad:d.bat<=30?t.warn:t.good;
+  p.rect(K.FOOTER_BATT_X,fy,21,9,t.bg);
+  p.rect(K.FOOTER_BATT_X,fy,18,1,bc); p.rect(K.FOOTER_BATT_X,fy+8,18,1,bc);
+  p.rect(K.FOOTER_BATT_X,fy,1,9,bc);  p.rect(K.FOOTER_BATT_X+17,fy,1,9,bc);
+  p.rect(K.FOOTER_BATT_X+18,fy+2,2,5,bc);
+  p.rect(K.FOOTER_BATT_X+2,fy+2,Math.round(14*d.bat/100),5,bc);
+  p.text(`${d.bat}%`,K.FOOTER_BATT_TEXT_X,fy,1,bc,t.bg);
+  p.text(d.fresh,K.BOARD_W-10,fy,1,d.fresh.startsWith("stale")||d.fresh==="no data"?t.bad:t.label,t.bg,"TR");
+  p.chromeMode = false;
+}
+// label row shared by every card: caption left, Mac icon or tag right
+function capRow(p,y,label,d,src=true) {
+  const t = p.t;
+  p.text(label,K.LANE_X0,y+K.CARD_LABEL_Y,1,t.label,t.card,"TL","string",K.LANE_W);
+  if (!src) return;
+  if (d.icon) p.icon(K.LANE_X1-K.MAC_EMOJI_SIZE,y+K.CARD_LABEL_Y,t.card);
+  else if (d.tag && d.macs>1) p.text(d.tag,K.LANE_X1,y+K.CARD_LABEL_Y,1,t.label,t.card,"TR","string");
+}
+// the reclaimed space: a narrow hero box plus right-aligned fact lines
+function heroSide(p,y,heroY,pct,lines,stale) {
+  const t = p.t;
+  p.hero(heroTxt(pct),K.LANE_X0,y+heroY,K.CARD_HERO_W,K.CARD_HERO_H,stale?t.label:t.value,t.card);
+  const n = lines.length, blk = n*16+(n-1)*6, y0 = y+heroY+Math.round((K.CARD_HERO_H-blk)/2);
+  lines.forEach((L,i) => { p.text(L.s,K.LANE_X1,y0+i*22,1,L.c||t.label,t.card,"TR","ifchanged",K.SIDE_CHARS*8); });
+}
+// ONE builder for the Codex label, used by the baseline AND by the fix, so the
+// only thing that differs between them is the RIGHT field's length - which is
+// what the label lane is bounded by. Transcribed from renderCodexRow.
+function codexLabel(d) {
+  const showTag = !!(d.tag && d.macs>1 && !d.icon);
+  const dd = d.cxW>0 ? ((d.cxW/1440)|0) : 0;
+  const lab = d.icon   ? (d.cxW>0?`CX    ${dd}d`:"CX")
+            : showTag  ? `CX ${d.tag}`
+            : d.cxW>0  ? `CODEX  ${dd}d` : "CODEX";
+  return { lab, showTag };
+}
+const padR = (s,n) => s.length>=n ? s : s+" ".repeat(n-s.length);
+const padL = (s,n) => s.length>=n ? s : " ".repeat(n-s.length)+s;
+const tickOf = (r,w) => (r>=0&&w>0) ? 100-Math.trunc(r*100/w) : -1;
+
+// ===========================================================================
+// TODAY (WAS) - the before picture, drawn from what shipped pre-branch. Uses
+// WAS.CODEX_LANE_CHARS/CODEX_RIGHT_CHARS deliberately, NOT K's - this panel
+// exists to keep showing the stale numbers Task 1 fixed, not to track them.
+// ===========================================================================
+function drawToday(p,d) {
+  const t = p.t, st = isStale(d);
+  const card = (y,label,pct,tok,resetR,win,fable) => {
+    const col = pctCol(t,pct);
+    p.card(label,y,K.CARD_H,col);
+    capRow(p,y,label,d);
+    // THE DEFECT: the hero is handed the whole 260px lane, so it erases
+    // everything beside it on every repaint. 132 of those px are never inked.
+    p.hero(heroTxt(pct),K.LANE_X0,y+K.CARD_HERO_Y,K.LANE_W,K.CARD_HERO_H,st?t.label:t.value,t.card);
+    p.paceBar(K.LANE_X0,y+K.CARD_BAR_Y,K.LANE_W,K.BAR_H,pct,tickOf(resetR,win),col);
+    p.text(padR(tok>0?fmtTokens(tok):"",12),K.LANE_X0,y+K.CARD_STATS_Y,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
+    // padTo (RIGHT pad) with TR_DATUM - so this field is inset by (16-len)*8px
+    // and its apparent position MOVES with its content. Reproduced faithfully.
+    p.text(padR(resetR<0&&pct>=0?"starts on use":fmtResetIn(resetR),16),
+      K.LANE_X1,y+K.CARD_STATS_Y,2,t.label,t.card,"TR","ifchanged",K.LANE_W);
+    if (fable) p.text(padR(fable,18),K.LANE_X0,y+K.CARD_FOOT_Y,1,t.label,t.card,"TL","ifchanged",K.LANE_W);
+    p.text(padL(st?staleTxt(d):(resetR>=0?`at ${at(NOW,resetR)}`:""),10),
+      K.LANE_X1,y+K.CARD_FOOT_Y,1,st?t.bad:t.label,t.card,"TR","ifchanged",K.LANE_W);
+  };
+  card(K.CARD1_Y,"SESSION - 5 HOUR WINDOW",d.fh,d.fhT,d.fhR,300,null);
+  const fb = d.fbP>=0&&d.fbT>=1e6 ? `Fable: ${d.fbP}% ${(d.fbT/1e6).toFixed(1)}M` : d.fbP>=0 ? `Fable: ${d.fbP}%` : "";
+  card(WAS.CARD2_Y,"WEEK - 7 DAY, ALL MODELS",d.sd,d.sdT,d.sdR,10080,fb);
+  // Codex: one line, and the STALE 12-character label ceiling (WAS, not K).
+  const cs = isCxStale(d), have = d.cx>=0, col = have ? pctCol(t,d.cx) : t.unknown;
+  p.card("codex",WAS.CODEX_Y,K.CODEX_H,col);
+  const { lab, showTag } = codexLabel(d);
+  let right = !have ? "--" : d.cxR>=0 ? (showTag ? `${d.cx}%  ${fmtResetIn(d.cxR)}`
+              : `${d.cx}%  ${fmtResetIn(d.cxR)}  ${at(NOW,d.cxR)}`) : `${d.cx}%`;
+  right = padL(right,WAS.CODEX_RIGHT_CHARS);
+  // DRAW ORDER MATTERS AND IS THE FIRMWARE'S: renderCodexRow draws the label in
+  // full, then the right field, whose clear box erases whatever the label left
+  // under it. So the ceiling is derived from where the right field's clear box
+  // actually starts - which depends on CONTENT, not on CODEX_RIGHT_CHARS.
+  const rightX = K.LANE_X1-right.length*8;
+  const laneCeil = Math.floor((rightX-1-K.LANE_X0)/8);
+  p.text(padR(lab,WAS.CODEX_LANE_CHARS),K.LANE_X0,WAS.CODEX_Y+K.CODEX_TEXT_Y,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
+  if (d.icon) p.icon(K.LANE_X0+tw("CX",2)+4,WAS.CODEX_Y+K.CODEX_TEXT_Y,t.card);
+  p.text(right,K.LANE_X1,WAS.CODEX_Y+K.CODEX_TEXT_Y,2,cs?t.label:(have?t.value:t.label),t.card,"TR","ifchanged",K.LANE_W);
+  p.laneCeil = laneCeil; p.laneNeed = lab.length;
+  p.paceBar(K.LANE_X0,WAS.CODEX_Y+K.CODEX_BAR_Y,K.LANE_W,K.BAR_H,have?d.cx:0,
+    (have&&d.cxR>=0&&d.cxW>0)?tickOf(d.cxR,d.cxW):-1,cs?t.label:col);
+}
+
+// ---------------------------------------------------------------------------
+// Shared by A / B / C: a Codex row whose right field is SHORT (the "big"
+// two-line variant used by A, and the fixed one-line variant used by B - both
+// drop the wall-clock suffix, which is the whole fix: the countdown beside it
+// already says the same thing in relative terms).
+// ---------------------------------------------------------------------------
+function codexRow(p,d,y,h,big) {
+  const t = p.t, cs = isCxStale(d), have = d.cx>=0, col = have ? pctCol(t,d.cx) : t.unknown;
+  p.card("codex",y,h,col);
+  if (big) capRow(p,y,d.cxW>0?`CODEX - ${(d.cxW/1440)|0} DAY WINDOW`:"CODEX",d);
+  if (big) {
+    p.text(have?`${d.cx}%`:"--",K.LANE_X0,y+26,3,cs?t.label:t.value,t.card,"TL","ifchanged",K.LANE_W);
+    p.text(padL(have?fmtResetIn(d.cxR):"no data yet",16),K.LANE_X1,y+30,1,t.label,t.card,"TR","ifchanged",K.SIDE_CHARS*8+40);
+    p.paceBar(K.LANE_X0,y+58,K.LANE_W,K.BAR_H,have?d.cx:0,(have&&d.cxR>=0&&d.cxW>0)?tickOf(d.cxR,d.cxW):-1,cs?t.label:col);
+  } else {
+    const { lab:lab2, showTag:st2 } = codexLabel(d);
+    const right = padL(have?(d.cxR>=0?`${d.cx}%  ${fmtResetIn(d.cxR)}`:`${d.cx}%`):"--",15);
+    const rightX = K.LANE_X1-right.length*8;
+    p.laneCeil = Math.floor((rightX-1-K.LANE_X0)/8);
+    p.laneNeed = lab2.length;
+    p.text(padR(lab2,K.CODEX_LANE_CHARS),K.LANE_X0,y+K.CODEX_TEXT_Y,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
+    if (d.icon) p.icon(K.LANE_X0+tw("CX",2)+4,y+K.CODEX_TEXT_Y,t.card);
+    p.text(right,K.LANE_X1,y+K.CODEX_TEXT_Y,2,cs?t.label:(have?t.value:t.label),t.card,"TR","ifchanged",K.LANE_W);
+    p.paceBar(K.LANE_X0,y+K.CODEX_BAR_Y,K.LANE_W,K.BAR_H,have?d.cx:0,(have&&d.cxR>=0&&d.cxW>0)?tickOf(d.cxR,d.cxW):-1,cs?t.label:col);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A - SUBTRACT. Same three-block stack, one meta row folded away, and the
+// 132px beside each hero put to work. No new device state at all. NOT what
+// the header derives (B was picked) - unbound, illustrative only.
+// ---------------------------------------------------------------------------
+function drawA(p,d) {
+  const t = p.t, st = isStale(d);
+  let col = pctCol(t,d.fh);
+  p.card("5h",54,140,col);
+  capRow(p,54,"SESSION - 5 HOUR",d);
+  heroSide(p,54,K.CARD_HERO_Y,d.fh,[
+    { s:padL(burnAvg(d.fh,d.fhR,300).txt,15), c:burnAvg(d.fh,d.fhR,300).urgent?t.warn:t.label },
+    { s:padL(d.fhR>=0?fmtResetIn(d.fhR):"no data yet",15) }],st);
+  p.paceBar(K.LANE_X0,54+K.CARD_BAR_Y,K.LANE_W,K.BAR_H,d.fh,tickOf(d.fhR,300),col);
+  p.text(padR(d.fhT>0?fmtTokens(d.fhT):"",12),K.LANE_X0,54+K.CARD_STATS_Y,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
+  p.text(padL(st?staleTxt(d):(d.fhR>=0?`at ${at(NOW,d.fhR)}`:""),10),
+    K.LANE_X1,54+K.CARD_STATS_Y,1,st?t.bad:t.label,t.card,"TR","ifchanged",K.LANE_W);
+  col = pctCol(t,d.sd);
+  p.card("7d",202,164,col);
+  capRow(p,202,"WEEK - 7 DAY, ALL MODELS",d);
+  heroSide(p,202,K.CARD_HERO_Y,d.sd,[
+    { s:padL(burnAvg(d.sd,d.sdR,10080).txt,15), c:burnAvg(d.sd,d.sdR,10080).urgent?t.warn:t.label },
+    { s:padL(d.sdR>=0?fmtResetIn(d.sdR):"no data yet",15) }],st);
+  p.paceBar(K.LANE_X0,202+K.CARD_BAR_Y,K.LANE_W,K.BAR_H,d.sd,tickOf(d.sdR,10080),col);
+  p.text(padR(d.sdT>0?fmtTokens(d.sdT):"",12),K.LANE_X0,202+K.CARD_STATS_Y,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
+  p.text(padL(d.fbP>=0?`FABLE  ${d.fbP}%  ${d.fbT>=1e6?(d.fbT/1e6).toFixed(1)+"M":"--"}`:"FABLE  --",17),
+    K.LANE_X1,202+K.CARD_STATS_Y,2,t.label,t.card,"TR","ifchanged",K.LANE_W);
+  p.paceBar(K.LANE_X0,202+140,K.LANE_W,K.BAR_H,d.fbP<0?0:d.fbP,tickOf(d.sdR,10080),d.fbP<0?t.unknown:pctCol(t,d.fbP));
+  codexRow(p,d,374,78,true);
+}
+// ---------------------------------------------------------------------------
+// B - NOW / WEEK / CODEX. THE SELECTED DESIGN - board_es3c35p.h derives this
+// one. A semantic hierarchy: the 5-hour window is the one that actually stops
+// you working, so it alone keeps the 64px hero and gains the sparkline; the
+// week collapses to a 24px number carrying Fable's bar in the same card.
+// ---------------------------------------------------------------------------
+function leadCard(p,d,y,h,label,pct,resetR,win,tok,st) {
+  const t = p.t, col = pctCol(t,pct), sp = mkSpark(pct);
+  const b = burnFor(pct,resetR,win,sp,st);
+  p.card("lead",y,h,col);
+  capRow(p,y,label,d);
+  heroSide(p,y,K.NOW_HERO_Y,pct,[
+    { s:padL(b.txt,15), c:b.urgent?(pct>=90?t.bad:t.warn):t.label },
+    { s:padL(resetR>=0?fmtResetIn(resetR):"no data yet",15) }],st);
+  p.paceBar(K.LANE_X0,y+K.NOW_BAR_Y,K.LANE_W,K.BAR_H,pct,tickOf(resetR,win),col);
+  if (sp) p.spark(K.LANE_X0,y+K.NOW_SPARK_Y,K.LANE_W,K.NOW_SPARK_H,sp,st?t.label:col);
+  else { p.rect(K.LANE_X0-1,y+K.NOW_SPARK_Y-1,K.LANE_W+2,K.NOW_SPARK_H+2,t.card); p.hline(K.LANE_X0,y+K.NOW_SPARK_Y+K.NOW_SPARK_H-2,K.LANE_W,t.label); }
+  p.text(padR(tok>0?fmtTokens(tok):"",12),K.LANE_X0,y+K.NOW_META_Y,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
+  p.text(padL(st?staleTxt(d):(sp?"LAST 2.5H":"no history"),13),
+    K.LANE_X1,y+K.NOW_META_Y,1,st?t.bad:t.label,t.card,"TR","ifchanged",K.LANE_W);
+}
+function drawB(p,d) {
+  const t = p.t, st = isStale(d);
+  const nowY = K.CARD1_Y;
+  const weekY = nowY + K.NOW_CARD_H + K.SP_2;                 // 244
+  const codexY = weekY + K.WEEK_CARD_H + K.SP_2;               // 396
+  leadCard(p,d,nowY,K.NOW_CARD_H,"NOW - 5 HOUR WINDOW",d.fh,d.fhR,300,d.fhT,st);
+  // WEEK, 144: secondary, so a 24px number rather than a 64px hero. Its burn is
+  // the AVERAGE - the ring is blind at a 7-day window (see burnFor).
+  const col = pctCol(t,d.sd), b = burnFor(d.sd,d.sdR,10080,null,st);
+  p.card("7d",weekY,K.WEEK_CARD_H,col);
+  capRow(p,weekY,"WEEK - 7 DAY, ALL MODELS",d);
+  p.text(heroTxt(d.sd),K.LANE_X0,weekY+K.WEEK_NUM_Y,3,st?t.label:t.value,t.card,"TL","ifchanged",K.CARD_HERO_W);
+  p.text(padL(b.txt,15),K.LANE_X1,weekY+K.WEEK_BURN_Y,1,b.urgent?(d.sd>=90?t.bad:t.warn):t.label,t.card,"TR","ifchanged",K.SIDE_CHARS*8);
+  p.paceBar(K.LANE_X0,weekY+K.WEEK_BAR_Y,K.LANE_W,K.BAR_H,d.sd,tickOf(d.sdR,10080),col);
+  p.text(padR(d.sdT>0?fmtTokens(d.sdT):"",12),K.LANE_X0,weekY+K.WEEK_META_Y,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
+  p.text(padL(st?staleTxt(d):(d.sdR>=0?fmtResetIn(d.sdR):"no data yet"),12),
+    K.LANE_X1,weekY+K.WEEK_META_Y,2,st?t.bad:t.label,t.card,"TR","ifchanged",K.LANE_W);
+  p.text(padR(d.fbP>=0?`FABLE  ${d.fbP}%`:"FABLE  --",10),K.LANE_X0,weekY+K.WEEK_FABLE_Y,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
+  p.text(padL(d.fbT>=1e6?fmtTokens(d.fbT):"",12),K.LANE_X1,weekY+K.WEEK_FABLE_Y,2,t.label,t.card,"TR","ifchanged",K.LANE_W);
+  p.paceBar(K.LANE_X0,weekY+K.WEEK_FABLE_BAR_Y,K.LANE_W,K.BAR_H,d.fbP<0?0:d.fbP,tickOf(d.sdR,10080),d.fbP<0?t.unknown:pctCol(t,d.fbP));
+  codexRow(p,d,codexY,K.CODEX_H,false);
+}
+
+// ---------------------------------------------------------------------------
+// C - URGENCY LADDER. Rows sort by how close to trouble they are and the
+// leader expands. The cost is that the geometry becomes state-dependent. NOT
+// what the header derives - unbound, illustrative only.
+// ---------------------------------------------------------------------------
+function rankItems(d) {
+  const it = [
+    { lab:"SESSION 5H",   pct:d.fh, r:d.fhR, w:300,     tok:d.fhT },
+    { lab:"WEEK 7D ALL",  pct:d.sd, r:d.sdR, w:10080,   tok:d.sdT },
+    { lab:"WEEK 7D FABLE",pct:d.fbP,r:d.sdR, w:10080,   tok:d.fbT },
+    { lab:"CODEX 7D",     pct:d.cx, r:d.cxR, w:d.cxW,   tok:0 },
+  ];
+  return it.slice().sort((a,b) => (b.pct-a.pct)||(a.w-b.w));
+}
+function drawC(p,d) {
+  const t = p.t, st = isStale(d), it = rankItems(d);
+  const L = it[0];
+  leadCard(p,d,54,186,`TIGHTEST: ${L.lab}`,L.pct,L.r,L.w,L.tok,st);
+  [248,318,388].forEach((y,i) => {
+    const o = it[i+1], col = o.pct<0 ? t.unknown : pctCol(t,o.pct);
+    p.card("row"+i,y,64,col);
+    const right = padL(o.pct<0?"--":`${o.pct}%  ${o.r>=0?fmtResetIn(o.r):"no data"}`,15);
+    const rightX = K.LANE_X1-right.length*8;
+    const ceil = Math.floor((rightX-1-K.LANE_X0)/8);
+    p.laneCeil = ceil; p.laneNeed = Math.max(p.laneNeed||0,o.lab.length);
+    p.text(padR(o.lab,ceil),K.LANE_X0,y+8,2,t.label,t.card,"TL","ifchanged",K.LANE_W);
+    p.text(right,K.LANE_X1,y+8,2,st?t.label:t.value,t.card,"TR","ifchanged",K.LANE_W);
+    p.paceBar(K.LANE_X0,y+40,K.LANE_W,K.BAR_H,o.pct<0?0:o.pct,(o.r>=0&&o.w>0)?tickOf(o.r,o.w):-1,col);
+  });
+}
+
+// ---------------------------------------------------------------------------
+const LAYOUTS = [
+  { id:"today", n:"0", title:"Today", tag:"what shipped", draw:drawToday,
+    col:"8 + 164 + 8 + 164 + 8 + 56 + 6",
+    blurb:"Two structurally identical 164px cards, then a 56px Codex line. The hero is handed the whole 260px lane, so 132px beside every percentage is erased on each repaint; the Codex label lane is bounded at 12 characters by its neighbour - the defect Task 1 fixed." },
+  { id:"A", n:"A", title:"Subtract", tag:"no new state", draw:drawA,
+    col:"8 + 140 + 8 + 164 + 8 + 78 + 8",
+    blurb:"The stack and its symmetry survive. Card 1 loses 24px by folding two meta rows into one; the burn verdict and the countdown move into the space beside the hero. Fable becomes a real bar inside the WEEK card, and Codex gets two lines so its label lane stops being bounded at all." },
+  { id:"B", n:"B", title:"Now / Week / Codex", tag:"selected - what shipped", draw:drawB,
+    col:"8 + 182 + 8 + 144 + 8 + 56 + 8",
+    blurb:"A semantic hierarchy instead of a repeated template. NOW keeps the 64px hero and gains a 30-sample sparkline; WEEK drops to a 24px number and carries Fable's bar in the same card; Codex keeps one line and gains characters of label lane for free. board_es3c35p.h derives exactly this." },
+  { id:"C", n:"C", title:"Urgency ladder", tag:"state-dependent", draw:drawC,
+    col:"8 + 186 + 8 + 64 + 6 + 64 + 6 + 64 + 8",
+    blurb:"Four caps as peers, sorted by how close to trouble each is, with the leader expanded. Switch the state and the order changes. Its cost is real: the geometry now depends on data, so it needs new cache-bust terms and three checkers taught about a layout that moves." },
+];
+
+// ---------------------------------------------------------------------------
+// THE CHECKS. Each is written so that reverting the thing it guards makes it
+// fail. Two are deliberately stricter than the shipping checker:
+//   - the column must sum to EXACTLY K.CONTENT_ROWS, where usage-geom-check.mjs
+//     asserts only air > 0 and therefore cannot see the drift it exists for;
+//   - a LATER field's clear box may not touch an EARLIER field's ink, per
+//     glyph. That is the real device hazard, and it is directional: the
+//     reverse repairs itself on the next draw, which is exactly the argument
+//     renderCodexRow's own comment makes about its right field.
+// This is the SAME function the in-browser checker calls - it reads only
+// `fields`/`cards`, which never touch a canvas, so it needs no browser.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The three layouts. `drawAdaptive` mirrors drawB - the shipped painter - with
+// the Codex row behind a flag, so the two solo panels and today's panel all
+// run the SAME verified primitives (leadCard, capRow, heroSide, codexRow).
+// The solo geometries are applied by patching K, so nothing here restates an
+// offset that the header already owns.
+// ---------------------------------------------------------------------------
+function drawAdaptive(p, d, showCodex) {
+  const t = p.t, st = isStale(d);
+  const nowY = K.CARD1_Y;
+  const weekY = nowY + K.NOW_CARD_H + K.SP_2;
+  leadCard(p, d, nowY, K.NOW_CARD_H, "NOW - 5 HOUR WINDOW", d.fh, d.fhR, 300, d.fhT, st);
+  const col = pctCol(t, d.sd), b = burnFor(d.sd, d.sdR, 10080, null, st);
+  p.card("7d", weekY, K.WEEK_CARD_H, col);
+  capRow(p, weekY, "WEEK - 7 DAY, ALL MODELS", d);
+  p.text(heroTxt(d.sd), K.LANE_X0, weekY + K.WEEK_NUM_Y, 3, st ? t.label : t.value, t.card, "TL", "ifchanged", K.CARD_HERO_W);
+  p.text(padL(b.txt, 15), K.LANE_X1, weekY + K.WEEK_BURN_Y, 1, b.urgent ? (d.sd >= 90 ? t.bad : t.warn) : t.label, t.card, "TR", "ifchanged", K.SIDE_CHARS * 8);
+  p.paceBar(K.LANE_X0, weekY + K.WEEK_BAR_Y, K.LANE_W, K.BAR_H, d.sd, tickOf(d.sdR, 10080), col);
+  p.text(padR(d.sdT > 0 ? fmtTokens(d.sdT) : "", 12), K.LANE_X0, weekY + K.WEEK_META_Y, 2, t.label, t.card, "TL", "ifchanged", K.LANE_W);
+  p.text(padL(st ? staleTxt(d) : (d.sdR >= 0 ? fmtResetIn(d.sdR) : "no data yet"), 12),
+    K.LANE_X1, weekY + K.WEEK_META_Y, 2, st ? t.bad : t.label, t.card, "TR", "ifchanged", K.LANE_W);
+  p.text(padR(d.fbP >= 0 ? `FABLE  ${d.fbP}%` : "FABLE  --", 10), K.LANE_X0, weekY + K.WEEK_FABLE_Y, 2, t.label, t.card, "TL", "ifchanged", K.LANE_W);
+  p.text(padL(d.fbT >= 1e6 ? fmtTokens(d.fbT) : "", 12), K.LANE_X1, weekY + K.WEEK_FABLE_Y, 2, t.label, t.card, "TR", "ifchanged", K.LANE_W);
+  p.paceBar(K.LANE_X0, weekY + K.WEEK_FABLE_BAR_Y, K.LANE_W, K.BAR_H, d.fbP < 0 ? 0 : d.fbP, tickOf(d.sdR, 10080), d.fbP < 0 ? t.unknown : pctCol(t, d.fbP));
+  if (showCodex) codexRow(p, d, weekY + K.WEEK_CARD_H + K.SP_2, K.CODEX_H, false);
+}
+
+// K overrides per layout, every number checked against the rhythm engine before
+// this page was written (see the spec's section 4 tables).
+const SOLO_BOTH = { NOW_CARD_H:214, NOW_SPARK_H:64, NOW_META_Y:190,
+  WEEK_CARD_H:176, WEEK_NUM_Y:31, WEEK_BURN_Y:35, WEEK_BAR_Y:68,
+  WEEK_META_Y:93, WEEK_FABLE_Y:119, WEEK_FABLE_BAR_Y:148 };
+const SOLO_NOW  = { NOW_CARD_H:246, NOW_SPARK_H:96, NOW_META_Y:222 };
+function withK(over, fn) {
+  const save = {}; for (const k in over) { save[k] = K[k]; K[k] = over[k]; }
+  try { return fn(); } finally { for (const k in save) K[k] = save[k]; }
+}
+
+// This machine's actual state: Claude live, Codex never measured and 6.97 days
+// since anything Codex-shaped moved.
+const BASE = STATES.nominal;
+const CODEXLESS = Object.assign({}, BASE, { cx:-1, cxR:-1, cxW:-1, cxAge:602897, icon:true });
+
+const PANELS = [
+  { id:"today", name:"Today", chip:"now", chipTxt:"Shipping", over:null, codex:true, data:()=>BASE,
+    blurb:"The duo column, drawn as it actually reads here: the CODEX row present, bordered and captioned, carrying <code>--</code>.",
+    facts:[["Column","8+182+8+144+8+56+8"],["NOW spark","32px &middot; 3.70 pt/px"],
+           ["NOW rhythm","4 rows, trailing 5"],["WEEK rhythm","3 rows, trailing 3"]] },
+  { id:"both", name:"Grow both", chip:"rec", chipTxt:"In the spec", over:SOLO_BOTH, codex:false, data:()=>CODEXLESS,
+    blurb:"The approved allocation. Both cards grow; WEEK&rsquo;s uniform gap is re-pitched 3&rarr;8 because it has no band that should grow.",
+    facts:[["Column","8+214+8+176+8"],["NOW spark","64px &middot; 1.69 pt/px"],
+           ["NOW rhythm","4 rows, trailing 5","ok"],["WEEK rhythm","8 rows, trailing 10","warn"]] },
+  { id:"now", name:"All to NOW", chip:"alt", chipTxt:"Cheaper", over:SOLO_NOW, codex:false, data:()=>CODEXLESS,
+    blurb:"Every reclaimed row into the sparkline. WEEK is untouched; four constants move instead of eleven.",
+    facts:[["Column","8+246+8+144+8"],["NOW spark","96px &middot; 1.10 pt/px","ok"],
+           ["NOW rhythm","4 rows, trailing 5","ok"],["WEEK rhythm","3 rows, trailing 3","ok"]] },
+];
+
+let theme = "DARK", stateKey = "nominal", bands = false;
+
+// the readout header, from the same numbers the spec quotes
+const RO = [
+  ["cxPct","-1","dead","never measured"],
+  ["cxAgeSec","602,897","dead","6.97 days"],
+  ["cxWindowMin","10,080","","7-day window"],
+  ["quotaAgeSec","121","live","Claude is live"],
+  ["codex= in log","6,124&times;","dead","every one of them &ldquo;?&rdquo;"],
+];
+document.getElementById("readout").innerHTML = RO.map(([k,v,c,n]) =>
+  `<div class="rcell"><span class="k">${k}</span><span class="v ${c}">${v}</span><span class="n">${n}</span></div>`).join("");
+
+// state selector, from the mock's own STATES plus this machine's real one
+const segState = document.getElementById("segState");
+segState.innerHTML = ["nominal","critical","stale","empty"].map((s,i) =>
+  `<button data-v="${s}" aria-pressed="${i===0}">${STATES[s].lbl}</button>`).join("");
+
+function render() {
+  const strip = document.getElementById("strip");
+  strip.innerHTML = PANELS.map(L => `
+    <div class="opt${L.chip==="rec"?" pick":""}">
+      <div class="opthd">
+        <div class="row1"><h3>${L.name}</h3><span class="chip ${L.chip}">${L.chipTxt}</span></div>
+        <p>${L.blurb}</p>
+      </div>
+      <div class="screen"><div class="bezel"><canvas id="cv-${L.id}" width="320" height="480"
+        style="width:320px;height:480px"></canvas></div></div>
+      <div class="facts">${L.facts.map(f =>
+        `<div class="f"><span class="fk">${f[0]}</span><span class="fv${f[2]==="ok"?" okv":f[2]==="warn"?" warnv":""}">${f[1]}</span></div>`).join("")}</div>
+    </div>`).join("");
+
+  for (const L of PANELS) {
+    const base = L.data();
+    // Codex is dead in ALL THREE panels - it is the premise, not a variable.
+    // Today keeps the row and shows what it actually reads; the other two drop it.
+    // Applied LAST so the state selector cannot re-populate it.
+    const d = Object.assign({}, base, STATES[stateKey], { cx:-1, cxR:-1, cxW:-1, cxAge:602897 });
+    const paint = () => { const p = new P(theme); chrome(p, d); drawAdaptive(p, d, L.codex); return p; };
+    const p = L.over ? withK(L.over, paint) : paint();
+    const cv = document.getElementById("cv-" + L.id), ctx = cv.getContext("2d");
+    ctx.clearRect(0, 0, 320, 480);
+    p.paint(ctx);
+    if (bands) {
+      ctx.lineWidth = 1;
+      for (const c of p.cards) {
+        ctx.strokeStyle = "rgba(255,166,0,.85)";
+        ctx.strokeRect(K.CARD_X + .5, c.y + .5, K.CARD_W - 1, c.h - 1);
+        ctx.strokeStyle = "rgba(74,159,221,.7)";
+        for (const f of c.fields) ctx.strokeRect(f.x + .5, f.y + .5, Math.max(1, f.w - 1), Math.max(1, f.h - 1));
+      }
+    }
+  }
+}
+
+function wire(id, set) {
+  document.getElementById(id).addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    for (const s of e.currentTarget.querySelectorAll("button")) s.setAttribute("aria-pressed", String(s === b));
+    set(b.dataset.v); render();
+  });
+}
+wire("segTheme", v => theme = v);
+wire("segState", v => stateKey = v);
+wire("segBands", v => bands = (v === "on"));
+render();
+
+</script>
