@@ -4452,6 +4452,18 @@ void handleLine(const String& line) {
     exitReaderToList();
     return;
   }
+#if BOARD_HISTORY_SCROLL
+  // The scrollback screen owns the whole panel too - unlike every OTHER tab it
+  // reserves no footer strip at all, so without this an ordinary ~5s tick falls
+  // through to `renderSessionsTab()` + `renderFooter()` below and paints the
+  // clock/battery/freshness readout straight over the transcript's own bottom
+  // row. FOUND on the glass: SCROLLPERF's own SCREENSHOT showed "04:49:38 / 1s
+  // ago" where the last visible line of chat should have been. New chunks still
+  // reach the screen - the `hist` reply handler in processCompletedLine() calls
+  // drawScrollback() itself the moment they land - so an ordinary tick carrying
+  // no history has nothing to repaint here.
+  if (scrollActive) return;
+#endif
 
   if (firstEver) {
     // The standalone screen owns the whole content area (a 64px mark, a wordmark
@@ -5329,6 +5341,89 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       if (!opened) Serial.println("READTEST refused: no ask is pending");
     }
 #endif
+#if BOARD_HISTORY_SCROLL
+  } else if (buf.startsWith("SCROLLPERF")) {
+    // SCROLLPERF exists for the reason PERF, TEXTPROBE and READTEST do: this screen
+    // is otherwise unverifiable without a finger, and SCREENSHOT can only record
+    // what is already on the glass. It opens the transcript on the first session
+    // that has one, then times N frames of scrolling - compose and flush SEPARATELY,
+    // because this repo's own history says the instinct about which dominates is
+    // unreliable (the USAGE tab's 888ms was assumed to be flush-bound and was AA
+    // primitives). Both refusals print their cause.
+    //
+    // TWO REENTRANCY HAZARDS, both found ON HARDWARE, neither in the brief's own
+    // text - this command is the first thing in the sketch to block and pump
+    // BOTH transports from inside a command handler, so it is the first thing to
+    // hit them:
+    //   1. The host delivers every trigger-file command over BOTH transports (the
+    //      "one POWERPROBE produced four refusal lines" note under Commands), so
+    //      this line completes a SECOND time - via BLE if this copy arrived over
+    //      USB, or vice versa - while the first copy is still down in the wait
+    //      loop below. `scrollPerfRunning` makes the second copy a no-op, the
+    //      same answer requestScrollback's own "already fetching" guard gives
+    //      the identical hazard one call down.
+    //   2. `buf` (the line just matched) is NOT cleared until processCompletedLine
+    //      returns, so pumping the SAME transport again from inside this handler
+    //      - before that return - appends the NEXT completed line onto the tail
+    //      of "SCROLLPERF" instead of into an empty buffer. The accumulated
+    //      string still matches `buf.startsWith("SCROLLPERF")`, so every line
+    //      that follows - including the real chunk-0 reply this loop exists to
+    //      wait for - is swallowed as a duplicate command rather than parsed,
+    //      and each swallowed line reopens this whole handler one frame deeper
+    //      with nothing to unwind it. MEASURED: 6 nested frames, one per ~5.7s
+    //      host tick, then "Debug exception reason: Stack canary watchpoint
+    //      triggered (loopTask)". Clearing `buf` before the wait starts is what
+    //      keeps every later line clean; the reentrancy guard above is what
+    //      keeps a genuine duplicate delivery from opening a second wait loop
+    //      nested inside the first at all.
+    static bool scrollPerfRunning = false;
+    if (scrollPerfRunning) {
+      Serial.println("SCROLLPERF: already running (duplicate command delivery) - ignoring");
+      buf = "";
+      return;
+    }
+    scrollPerfRunning = true;
+    buf = "";
+    if (sessionCount == 0) {
+      Serial.println("SCROLLPERF: no sessions");
+      scrollPerfRunning = false;
+      return;
+    }
+    if (kbActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
+      Serial.println("SCROLLPERF: another full-screen surface is up");
+      scrollPerfRunning = false;
+      return;
+    }
+    switchTab(TAB_SESSIONS);
+    openSessionDetail(0);
+    openScrollback(0);
+    unsigned long t0 = millis();
+    // pumpStream() takes no arguments in this sketch (unlike the brief's sketch);
+    // drive both transports the way loop() does, or a fetch over either one
+    // never completes and this spins to the 20s cap every time.
+    while (scrollPending && millis() - t0 < 20000) {
+      pumpStream(Serial, serialBufUSB, &lastRxUSBMillis);
+      drainBleRx();
+      delay(10);
+    }
+    if (scrollPending) {
+      Serial.println("SCROLLPERF: fetch did not complete");
+      scrollPerfRunning = false;
+      return;
+    }
+    const int FRAMES = 20;
+    unsigned long compose = 0, flushT = 0;
+    for (int i = 0; i < FRAMES; i++) {
+      scrollY = (uint32_t) ((long) scrollMaxY() * i / (FRAMES - 1));
+      unsigned long a = micros(); scrollDrawBody();  unsigned long b = micros();
+      tft.flush();                                   unsigned long c = micros();
+      compose += b - a; flushT += c - b;
+    }
+    Serial.printf("SCROLLPERF: %d frames  compose %luus  flush %luus  frame %luus (%lu fps)\n",
+                  FRAMES, compose / FRAMES, flushT / FRAMES,
+                  (compose + flushT) / FRAMES, 1000000UL / ((compose + flushT) / FRAMES));
+    scrollPerfRunning = false;
+#endif
   } else if (buf.startsWith("EMOJITEST")) {
     // Refuse while another full-screen surface owns the glass. emojiTestActive
     // is tested BEFORE kbActive in handleTouch's dismiss chain, so opening the
@@ -6024,7 +6119,18 @@ void loop() {
   // which would paint the session list straight over the keyboard exactly the
   // way the 5s host tick would if handleLine didn't absorb it. emojiTestActive
   // joins them for the same reason.
+  //
+  // scrollActive joins them too (board 2 only), for the reason spelled out at
+  // the 5s host tick's own scrollActive guard above: the transcript reserves no
+  // footer strip, so this local tick's renderFooter() would paint the clock and
+  // freshness readout over the bottom line of chat every second instead of
+  // every ~5s. #if'd rather than spelled `false` on board 1, so board 1 never
+  // sees the text of a flag it does not declare.
+#if BOARD_HISTORY_SCROLL
+  if (!isAsleep && !octoActive && !readerActive && !histActive && !kbActive && !emojiTestActive && !scrollActive) {
+#else
   if (!isAsleep && !octoActive && !readerActive && !histActive && !kbActive && !emojiTestActive) {
+#endif
     static unsigned long lastFooterTick = 0;
     if (millis() - lastFooterTick > 1000) {
       lastFooterTick = millis();

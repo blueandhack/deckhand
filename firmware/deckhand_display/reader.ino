@@ -27,6 +27,10 @@ uint16_t histRoleColor(uint8_t r) {
 // splitting one across a page boundary makes it unreadable. An item taller than a whole
 // page gets its own page and is clipped rather than lost.
 void drawHistory() {
+#if BOARD_HISTORY_SCROLL
+  drawScrollback();
+  return;
+#else
   if (detailIndex < 0 || detailIndex >= sessionCount) return;
   const SessionInfo& s = sessions[detailIndex];
   if (histPage >= histPages) histPage = histPages - 1;
@@ -122,6 +126,7 @@ void drawHistory() {
 #if !BOARD_USES_TFT_ESPI
   tft.flush();
 #endif
+#endif  // BOARD_HISTORY_SCROLL
 }
 // `HISTORY <id> <chat|all> <page|last>`. Every page turn is a round trip - instant over
 // USB, and it is what keeps the device from having to hold the whole transcript.

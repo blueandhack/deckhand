@@ -268,14 +268,181 @@ void tickScrollFetch() {
   if (scrollActive) drawScrollback();
 }
 
-// TEMPORARY, both replaced in Task 4. scrollMaxY's body is already final; only
-// drawScrollback is a placeholder, so the screen keeps drawing the old pager
-// this task, which is the correct visible outcome for a wire-only change.
 uint32_t scrollMaxY() {
   uint32_t total = scrollTotalLines * CODE_LINE_H;
-  uint32_t view = (uint32_t) SCROLL_LINES * CODE_LINE_H;
+  uint32_t view  = (uint32_t) SCROLL_LINES * CODE_LINE_H;
   return total > view ? total - view : 0;
 }
-void drawScrollback() { }
+
+// One dim centred line, for every state that is not a transcript. Each names its
+// own cause: from the Mac "there is no more history" and "I cannot fetch the rest
+// here" look identical, which is the class POWERPROBE's refusal exists for.
+static void scrollNote(const char* s, int y) {
+  setUIFont(1);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(s, tft.width() / 2, y + CODE_LINE_H / 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// The body only. Kept separate from the chrome so a scroll frame repaints just
+// this - the chrome is static between fetches.
+void scrollDrawBody() {
+  tft.fillRect(0, SCROLL_TOP, tft.width(), SCROLL_BOT - SCROLL_TOP, COLOR_BG);
+
+  if (scrollPending) {
+    char b[40];
+    if (usbLinkActive()) snprintf(b, sizeof(b), "-- fetching %d/%d --", scrollChunksIn, scrollChunksOf);
+    else snprintf(b, sizeof(b), "-- fetching over Bluetooth --");
+    scrollNote(b, (SCROLL_TOP + SCROLL_BOT) / 2 - CODE_LINE_H / 2);
+    return;
+  }
+  if (scrollFetchFailed) {
+    scrollNote("-- could not reach the Mac --", (SCROLL_TOP + SCROLL_BOT) / 2 - CODE_LINE_H / 2);
+    return;
+  }
+  if (scrollCount == 0) {
+    scrollNote("-- nothing here --", (SCROLL_TOP + SCROLL_BOT) / 2 - CODE_LINE_H / 2);
+    return;
+  }
+
+  const uint32_t y0 = scrollY;
+  const int firstLine = (int) (y0 / CODE_LINE_H);
+  const int subPx = (int) (y0 % CODE_LINE_H);
+
+  // The head note sits ABOVE line 0, so it is only drawn when the transcript is
+  // scrolled to its very top.
+  if (y0 == 0) {
+    if (scrollDropped > 0) {
+      char b[40];
+      snprintf(b, sizeof(b), "-- %d older need USB --", scrollDropped);
+      scrollNote(b, SCROLL_TOP);
+    } else {
+      scrollNote("-- start of history --", SCROLL_TOP);
+    }
+  }
+
+  char buf[SCROLL_COLS + 2];
+  int ei = scrollEntryAtLine((uint32_t) firstLine);
+  for (int row = 0; row <= SCROLL_LINES; row++) {
+    const int line = firstLine + row;
+    if (line < 0 || (uint32_t) line >= scrollTotalLines) break;
+    // Advance to the entry owning this line. The index makes this a walk of at
+    // most one entry per row rather than a search per row.
+    while (ei + 1 < scrollCount && scrollIdx[ei + 1].lineFirst <= (uint32_t) line) ei++;
+    const ScrollEntry& e = scrollIdx[ei];
+    const int k = line - (int) e.lineFirst;
+    if (k >= e.lines) continue;                      // the spacer: draw nothing
+
+    const int y = SCROLL_TOP + row * CODE_LINE_H - subPx;
+    // The bottom edge is clipped at the CALL SITE. pushImage clips a negative y
+    // correctly by offsetting its source pointer, but drawString clips only to
+    // the SCREEN, so without this a line at the edge spills into the bottom air.
+    if (y + CODE_LINE_H <= SCROLL_TOP) continue;
+    if (y >= SCROLL_BOT) break;
+
+    // Roles 2/3/4 are one line, clipped with THREE ASCII DOTS - never U+2026,
+    // which is outside Spleen's range and would give a truncated line no visible
+    // sign that anything was missing.
+    if (e.role >= 2) {
+      if (k > 0) continue;
+      const char* t = scrollTextAt(ei);
+      int n = strlen(t);
+      if (n > SCROLL_COLS) {
+        memcpy(buf, t, SCROLL_COLS - 3);
+        buf[SCROLL_COLS - 3] = '\0';
+        strcat(buf, "...");
+      } else {
+        strncpy(buf, t, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+      }
+    } else {
+      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf));
+    }
+
+    setUIFont(1);
+    if (k == 0) {
+      tft.setTextColor(scrollMarkColor(e.role), COLOR_BG);
+      tft.setTextDatum(TL_DATUM);
+      tft.drawString(scrollMark(e.role), SCROLL_GUT_X, y);
+    }
+    tft.setTextColor(scrollTextColor(e.role), COLOR_BG);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString(buf, SCROLL_TXT_X, y);
+  }
+
+  // THE RAIL, drawn only when there is more than a screenful - so a three-message
+  // session shows none. It replaces a 46px scrubber band with 4px of ink, and it
+  // is the only thing that answers "how much is above me" continuously.
+  const uint32_t maxY = scrollMaxY();
+  if (maxY > 0) {
+    const int h = SCROLL_BOT - SCROLL_TOP;
+    tft.fillRect(SCROLL_RAIL_X, SCROLL_TOP, SCROLL_RAIL_W, h, COLOR_CARD);
+    int kh = (int) ((long) h * h / (long) (scrollTotalLines * CODE_LINE_H));
+    if (kh < 24) kh = 24;
+    int ky = SCROLL_TOP + (int) ((long) (h - kh) * y0 / maxY);
+    tft.fillRect(SCROLL_RAIL_X, ky, SCROLL_RAIL_W, kh, COLOR_ACCENT);
+  }
+}
+
+void drawScrollback() {
+  tft.fillScreen(COLOR_BG);
+
+  // The back key carries the CLOSE the deleted button row used to provide.
+  uiStrokeRound(SCROLL_BACK_X, HIST_CHIP_Y, SCROLL_BACK_W, HIST_CHIP_H, 3,
+                BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
+  setUIFont(2);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("<", SCROLL_BACK_X + SCROLL_BACK_W / 2, HIST_CHIP_Y + HIST_CHIP_H / 2);
+  tft.setTextDatum(TL_DATUM);
+
+  // Name and counter are the same 16px cell - Spleen's smallest rung - so they are
+  // separated by COLOUR and POSITION, never by size, the rule the rest of the
+  // device follows.
+  if (detailIndex >= 0 && detailIndex < sessionCount) {
+    char nm[SCROLL_NAME_COLS + 1];
+    strncpy(nm, sessions[detailIndex].name, SCROLL_NAME_COLS);
+    nm[SCROLL_NAME_COLS] = '\0';
+    setUIFont(2);
+    tft.setTextColor(COLOR_VALUE, COLOR_BG);
+    tft.drawString(nm, SCROLL_NAME_X, 12);
+  }
+  char pos[24];
+  if (scrollPending) snprintf(pos, sizeof(pos), "...");
+  else if (scrollCount > 0) {
+    // Which entry the top visible line belongs to, out of the whole filtered
+    // history - the same claim the pager's "412/628" makes.
+    int ei = scrollEntryAtLine(scrollY / CODE_LINE_H);
+    snprintf(pos, sizeof(pos), "%d/%d", scrollDropped + ei + 1, scrollTotal);
+  } else snprintf(pos, sizeof(pos), "0/0");
+  setUIFont(1);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.drawString(pos, SCROLL_NAME_X, 30);
+
+  const char* chip = histChatOnly ? "CHAT" : "ALL";
+  int chipW = histChatOnly ? HIST_CHIP_W_CHAT : HIST_CHIP_W_ALL;
+  int chipX = tft.width() - 12 - chipW;
+  uiFillRound(chipX, HIST_CHIP_Y, chipW, HIST_CHIP_H, 3, COLOR_ACCENT, COLOR_BG);
+  setUIFont(1);
+  tft.setTextColor(COLOR_BG, COLOR_ACCENT);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(chip, chipX + chipW / 2, HIST_CHIP_CY);
+  tft.setTextDatum(TL_DATUM);
+
+  tft.drawFastHLine(0, HIST_RULE_Y, tft.width(), COLOR_LABEL);
+  scrollDrawBody();
+  tft.flush();
+}
+
+// The minimal opener SCROLLPERF needs; Task 5 grows this into the real drag-loop
+// entry point.
+void openScrollback(int idx) {
+  if (idx < 0 || idx >= sessionCount) return;
+  scrollActive = true;
+  scrollY = 0;
+  requestScrollback(idx);
+  drawScrollback();
+}
 
 #endif  // BOARD_HISTORY_SCROLL
