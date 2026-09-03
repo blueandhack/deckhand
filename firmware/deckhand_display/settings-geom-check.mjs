@@ -2119,6 +2119,17 @@ for (const b of [1, 2]) {
     const textEnd = c.SCROLL_TXT_X + c.SCROLL_COLS * c.TEXT_ADV;
     chk(c.SCROLL_RAIL_X >= textEnd, "scrollback: the rail clears the text lane");
     chk(c.SCROLL_RAIL_TAP_X >= textEnd, "scrollback: the rail's tap zone clears the text lane");
+    // A slop of 0 makes `moved < SCROLL_TAP_SLOP_PX` unsatisfiable, so the rail
+    // tap becomes permanently DEAD - drawn and hit-tested but unreachable, the
+    // failure fabVisible() is gated in one place to avoid. That is a real lower
+    // bound; the upper one below is real too, but THE TWO DO NOT MEET, so this
+    // constant has genuine slack and the sweep reports it unguarded at +/-1
+    // CORRECTLY. Manufacturing a tighter bound would mean inventing a constraint -
+    // what this repo's "a bound taken from the geometry rather than fitted to
+    // today's value" rule forbids. Same for SCROLL_RAIL_TAP_X above: its lower
+    // bound is exact, its upper bound is the spec's own 20px judgement.
+    chk(c.SCROLL_TAP_SLOP_PX >= 1,
+      "scrollback: the tap slop is at least 1, or the rail tap is unreachable");
     chk(c.SCROLL_TAP_SLOP_PX < c.CODE_LINE_H / 2,
       "scrollback: the tap slop is under half a line, so a tap has moved no text");
 
