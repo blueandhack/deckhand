@@ -895,19 +895,41 @@ chk("QUOTA_STALE_SEC" not in codex_body,
 # fn_body(INO, "usageCodexShown") - never against INO as a whole, which is how
 # the pairWindowOpen assertion passed while the guarantee was gone (pairTick
 # carried a copy of the same expression elsewhere in the file).
-chk(re.search(r"cxPct\s*<\s*0", codex_body) is not None,
-    "the never-measured percentage guard tests cxPct against < 0")
-chk(re.search(r"cxAgeSec\s*<\s*0\b", codex_body) is not None,
-    "the never-measured age guard tests cxAgeSec against < 0 (distinct from "
-    "the <= comparison below, which this pattern cannot match)")
-chk(re.search(r"cxWindowMin\s*>\s*0\s*\?\s*(?:\w+\.)?cxWindowMin\s*:\s*"
-              r"CODEX_HIDE_FALLBACK_MIN", codex_body) is not None,
+#
+# ROUND 2: binding only the CONDITION left the CONSEQUENCE free - a guard
+# mutated from `return false` to `return true` still matched a pattern that
+# only checked `cxPct < 0`/`cxAgeSec < 0` were present, silently inverting
+# "never measured" into "always shown". Each guard pattern below now spans
+# the condition AND its `return false`, in one match, so an inverted
+# consequence breaks the pattern even though the condition text is
+# unchanged - the same shape the window-comparison pattern already had by
+# binding through to its own `return` expression.
+chk(re.search(r"cxPct\s*<\s*0\s*\)\s*return\s+false\s*;", codex_body) is not None,
+    "the never-measured percentage guard both TESTS cxPct < 0 AND RETURNS "
+    "false in the same statement - not merely tests it")
+chk(re.search(r"cxAgeSec\s*<\s*0\s*\)\s*return\s+false\s*;", codex_body) is not None,
+    "the never-measured age guard both TESTS cxAgeSec < 0 AND RETURNS false "
+    "in the same statement (distinct from the final <= comparison, which "
+    "this pattern cannot match)")
+# The fallback ternary and the window comparison are bound THROUGH the local
+# variable the ternary assigns, rather than asserted independently - two
+# patterns that each pass in isolation would still let a body compute `win`
+# correctly and then compare cxAgeSec against something else entirely. The
+# variable's own name is captured rather than assumed to be `win`, so a
+# rename does not break this.
+ternary_m = re.search(
+    r"(\w+)\s*=\s*(?:\w+\.)?cxWindowMin\s*>\s*0\s*\?\s*(?:\w+\.)?"
+    r"cxWindowMin\s*:\s*CODEX_HIDE_FALLBACK_MIN", codex_body)
+chk(ternary_m is not None,
     "the fallback selects CODEX_HIDE_FALLBACK_MIN only when cxWindowMin is "
-    "absent (<= 0), never unconditionally and never some other constant")
-chk(re.search(r"cxAgeSec\s*<=\s*[^;]*\*\s*60", codex_body) is not None,
-    "the window comparison is cxAgeSec <= (window * 60) - a bare < would be "
-    "off by one window-second, and a missing *60 would compare seconds "
-    "against minutes")
+    "absent (<= 0), never unconditionally and never some other constant, "
+    "assigned to a local the comparison below must reuse")
+win_var = re.escape(ternary_m.group(1)) if ternary_m else "no_such_variable_xyz"
+chk(re.search(rf"cxAgeSec\s*<=\s*{win_var}\s*\*\s*60", codex_body) is not None,
+    "the window comparison is cxAgeSec <= (THAT SAME ternary variable * 60) "
+    "- not a coincidentally-similar comparison against something else, and "
+    "a bare < would be off by one window-second while a missing *60 would "
+    "compare seconds against minutes")
 
 STRUCTURAL_COUNT = n - MIRROR_COUNT
 
