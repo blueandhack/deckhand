@@ -961,6 +961,12 @@ function askReaderChip(b, c, W) {
       "the two sections are separated by the same full-width rule the header uses");
 
   // ---- 8. THE LANES THE SECTION DRAWS INTO ----
+  // Parsed, never transcribed: this is the constant the bound below rests on.
+  const WRAP_LINE_STOP = (() => {
+    const m = DISPLAY_INO.match(/while \(pos < len && lines < (\d+)\) \{/);
+    chk(m != null, "countWrappedLines' line stop is still findable - the bound below is unproven without it");
+    return m ? +m[1] : NaN;
+  })();
   const maxW = W - 24;                       // the reader's own text lane
   const indent = 3 * c.TEXT_ADV;             // parsed as `3 * TEXT_ADV` at the site
   chk(new RegExp(`const int indent = 3 \\* TEXT_ADV;`).test(sect),
@@ -971,9 +977,21 @@ function askReaderChip(b, c, W) {
       `a numbered option label (${optCap} chars + "N. ") is ${labelW}px in the ${maxW}px lane - one line,` +
       " so the numbering can never wrap away from its description");
   const descCols = Math.floor((maxW - indent) / c.TEXT_ADV);
-  chk(descCols * 3 >= OPT_DESC_MAX_BYTES,
+  // THE CONDITION HERE USED TO DISAGREE WITH ITS OWN MESSAGE. The message reasons
+  // about drawWrappedText's 80-line stop; the condition tested
+  // `descCols * 3 >= OPT_DESC_MAX_BYTES`, which is a different claim - that the cap
+  // fits in about three lines - and it held only because 34 * 3 = 102 happened to
+  // clear a 96-byte cap. The 3 was bytes-per-character, and it stopped meaning
+  // anything when device-bound text became ASCII: a byte IS a character now, so
+  // that product had no stated bound behind it at all. Raising the cap to 416 is
+  // what exposed it. The real bound is the one the message always named: BOTH
+  // countWrappedLines and drawWrappedText hard-stop at 80 lines, so a cap above
+  // 80 * descCols would be silently CLIPPED with nothing reporting it.
+  const descLines = Math.ceil(OPT_DESC_MAX_BYTES / descCols);
+  chk(descLines <= WRAP_LINE_STOP,
       `the indented lane holds ${descCols} chars/line, so the hook's ${OPT_DESC_MAX_BYTES}-byte cap` +
-      ` needs ${Math.ceil(OPT_DESC_MAX_BYTES / descCols)} lines - well inside drawWrappedText's 80-line stop`);
+      ` needs ${descLines} lines - inside drawWrappedText's ${WRAP_LINE_STOP}-line stop` +
+      ` (the largest cap this lane can render is ${WRAP_LINE_STOP * descCols})`);
 
   // ---- 9. THE SIGNPOST ROW ----
   // A long detail can push the options onto page 2. That is acceptable only
