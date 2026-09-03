@@ -269,7 +269,24 @@ present(sbBody, /SCROLL_WIRE_CHUNK_BYTES|CHUNK_BYTES/,
 // 1700, not 1400: the real block (comments stripped) runs to ~1530 chars - the
 // discontinuity branch, the item loop and the completion tail all sit inside
 // it, and 1400 cut the match off before reaching the arm's own closing brace.
-const parseArm = SKETCH.match(/if \(!hist\["seq"\]\.isNull\(\)\)[\s\S]{0,1700}?\n    \}/);
+// BRACE-MATCHED, not length-capped. The first version matched up to 1400 chars,
+// was raised to 1700 when the real block outgrew it, and broke AGAIN the moment
+// the SCROLLACK handshake was added - a cap on a block that is expected to grow
+// is a guard that fails for the wrong reason, and it reported "the chunk arm is
+// not findable" when the arm was right there.
+function braceBlock(src, openSig) {
+  const a = src.indexOf(openSig);
+  if (a < 0) return null;
+  let i = src.indexOf("{", a), depth = 0;
+  if (i < 0) return null;
+  for (let j = i; j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}") { depth--; if (depth === 0) return src.slice(a, j + 1); }
+  }
+  return null;
+}
+const parseArmSrc = braceBlock(SKETCH, 'if (!hist["seq"].isNull())');
+const parseArm = parseArmSrc ? [parseArmSrc] : null;
 s(parseArm != null, "structural: the chunk arm of the hist parser is findable");
 const parseArmBody = parseArm ? parseArm[0] : null;
 present(parseArmBody, /scrollReset\(\)/,
