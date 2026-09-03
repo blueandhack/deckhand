@@ -302,12 +302,52 @@ present(reqBody, /usbLinkActive\(\)/, "structural: the fetch budget is chosen by
 present(reqBody, /SCROLL_TAIL_BYTES_USB/, "structural: the USB tail budget is a named constant");
 present(reqBody, /SCROLL_TAIL_BYTES_BLE/, "structural: the BLE tail budget is a named constant");
 
+// ---------------- STRUCTURAL: touch (Task 5) ----------------
+
+// THE DRAG LOOP'S OBLIGATIONS. It blocks loop(), the pattern micMonitor,
+// micStream and runCalibration already use - so it inherits their duties, and
+// each has a named failure if it is missing.
+const dragBody = fnBody(INO, "void scrollDragLoop(int sy0)", "scrollback.ino");
+s(dragBody !== null, "structural: scrollDragLoop is findable");
+s(/reapBleLinks\(true\)/.test(dragBody),
+  "structural: the drag loop reaps BLE links - drainBleRx only runs from loop()");
+s(/lastActivityMillis = millis\(\)/.test(dragBody),
+  "structural: the drag loop refreshes lastActivityMillis, or the backlight blanks mid-drag");
+s(/getTouchPoint/.test(dragBody),
+  "structural: the drag loop polls getTouchPoint rather than touchPressed alone");
+
+// ONE predicate for "is this a tap", read by the loop and by the hit test - the
+// classic defect here is a control drawn under one condition and hit-tested under
+// another, so a second spelling is forbidden rather than merely avoided.
+const touchBody = fnBody(INO, "bool handleScrollTouch(int sx, int sy)", "scrollback.ino");
+s(touchBody !== null, "structural: handleScrollTouch is findable");
+s(/SCROLL_TAP_SLOP_PX/.test(dragBody || ""),
+  "structural: the tap/drag threshold is the named constant, in the loop that measures it");
+// BOUND TO dragBody, NOT touchBody - a tap cannot be told from a drag until
+// release, so the rail-zone decision has to be made post-release with the
+// coordinates the PRESS carried (scrollTapX, sy0), inside the loop that
+// already owns that logic. Binding this to handleScrollTouch's own body
+// would be checking the wrong function for a constant that cannot correctly
+// live there: handleScrollTouch only ever sees the touch that STARTED the
+// drag, never whether it turned into one.
+s(/SCROLL_RAIL_TAP_X/.test(dragBody),
+  "structural: the rail's tap zone is the named constant");
+
+// Closing must restore the surface underneath, and clear the PSRAM.
+const exitBody = fnBody(INO, "void exitScrollback()", "scrollback.ino");
+s(/scrollEnd\(\)/.test(exitBody),
+  "structural: exiting frees the PSRAM store rather than holding 304KB forever");
+s(/scrollActive = false/.test(exitBody),
+  "structural: exiting clears scrollActive");
+
 console.log(`\n${mirror} mirror + ${structural} structural assertions, ${fail} failures`);
 if (SELFTEST) {
   const WANT = {
     "wrap-cap":    /scrollWrapLines carries NO line cap/,
     "wide-marker": /every gutter marker is ASCII/,
     "seq-append":  /flags scrollFetchFailed rather than appending into a hole/,
+    "no-reap":     /the drag loop reaps BLE links/,
+    "no-activity": /the drag loop refreshes lastActivityMillis/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

@@ -209,6 +209,7 @@ unsigned long scrollFetchStart = 0;
 // broadcast: a stray ack reaching the other Mac would be a line it never awaited.
 uint8_t scrollHostSlot = 0;
 uint32_t scrollY = 0;             // pixel scroll offset from the top of the transcript
+int scrollTapX = 0;                // sx carried from PRESS to release, for the rail tap
 
 void requestScrollback(int idx) {
   if (idx < 0 || idx >= sessionCount) return;
@@ -536,8 +537,112 @@ void drawScrollback() {
   tft.flush();
 }
 
-// The minimal opener SCROLLPERF needs; Task 5 grows this into the real drag-loop
-// entry point.
+// A BLOCKING loop, the pattern micMonitor, micStream and runCalibration already
+// use - chosen over extending handleTouch() for two reasons. handleTouch() is
+// SHARED CODE and returns immediately on `touching && wasTouching` ("a finger
+// still down has nothing left to do"), so putting drag state there risks board
+// 1's binary for a board-2 feature. And the precedent already exists three times.
+void scrollDragLoop(int sy0) {
+  int lastY = sy0;
+  int moved = 0;
+  const uint32_t maxY = scrollMaxY();
+  // Task 7's scrollRect()+scrollDrawBand() path is MEASURED faster than a full
+  // recompose (60ms vs 73.7ms), and it is exactly this loop's own shape: a
+  // small per-frame shift while a finger drags. scrollDrawBody() stays the
+  // fallback for a shift at least a viewport tall - scrollRect saves nothing
+  // there and the band would be the whole body anyway.
+  const int viewH = SCROLL_BOT - SCROLL_TOP;
+  while (true) {
+    // drainBleRx() only runs from loop(), so for the whole drag nothing else
+    // would reap a pending BLE slot - leaving the device un-advertised with no
+    // log line saying why. Every existing blocking loop does this.
+    reapBleLinks(true);
+    // The 30s backlight blank sits well inside a drag's life, and the waking tap
+    // would be swallowed rather than scrolling. The keyboard needed exactly this.
+    lastActivityMillis = millis();
+
+    int sx, sy;
+    if (!getTouchPoint(sx, sy)) break;         // released: the drag is over
+    int dy = lastY - sy;                       // finger up scrolls content up
+    if (dy != 0) {
+      moved += dy < 0 ? -dy : dy;
+      long ny = (long) scrollY + dy;
+      if (ny < 0) ny = 0;
+      if (ny > (long) maxY) ny = maxY;
+      if ((uint32_t) ny != scrollY) {
+        const int shift = (int) (ny - (long) scrollY);
+        scrollY = (uint32_t) ny;
+        if (shift > -viewH && shift < viewH) {
+          tft.scrollRect(0, SCROLL_TOP, tft.width(), viewH, -shift);
+          scrollDrawBand(shift);
+        } else {
+          scrollDrawBody();
+        }
+        tft.flush();
+      }
+      lastY = sy;
+    }
+    // 15ms, matching handleTouch()'s own rate. getTouchPoint costs 1125us, so
+    // that is 7.5% of the interval, on a bus the TFT does not share.
+    delay(15);
+  }
+  // A TAP IS A DRAG THAT MOVED LESS THAN THIS. Without a named threshold "tap the
+  // rail" and "drag anywhere" are not separable, because every tap moves a pixel
+  // or two on a capacitive panel.
+  if (moved < SCROLL_TAP_SLOP_PX && sy0 >= SCROLL_TOP && sy0 < SCROLL_BOT) {
+    // Only the rail's zone does anything on a tap; the body deliberately has no
+    // tap action at all, which is why there is no tap/drag ambiguity to resolve.
+    // The coordinates are the ones the PRESS carried (scrollTapX, sy0) - reading
+    // getTouchPoint here would return false, the finger having just left.
+    if (scrollTapX >= SCROLL_RAIL_TAP_X && maxY > 0) {
+      long f = (long) (sy0 - SCROLL_TOP) * (long) maxY / (SCROLL_BOT - SCROLL_TOP - 1);
+      scrollY = (uint32_t) (f < 0 ? 0 : (f > (long) maxY ? (long) maxY : f));
+      scrollDrawBody();
+      tft.flush();
+    }
+  }
+}
+
+bool handleScrollTouch(int sx, int sy) {
+  if (sy <= HIST_CHIP_TAP_H) {
+    if (sx < SCROLL_BACK_X + SCROLL_BACK_W + 8) { exitScrollback(); return true; }
+    if (sx >= tft.width() - 12 - HIST_CHIP_W_CHAT - 8) {
+      histChatOnly = !histChatOnly;
+      scrollY = 0;
+      requestScrollback(detailIndex);   // entry counts differ per filter
+      drawScrollback();
+      return true;
+    }
+    return true;
+  }
+  if (sy >= SCROLL_TOP && sy < SCROLL_BOT && !scrollPending) {
+    scrollTapX = sx;
+    scrollDragLoop(sy);
+    return true;
+  }
+  return true;
+}
+
+void exitScrollback() {
+  scrollActive = false;
+  scrollEnd();                    // 304KB of PSRAM back; only one session is ever open
+  histActive = false;
+  tft.fillScreen(COLOR_BG);
+  drawTabBar();
+  drawFooterChrome();
+  if (showingDetail && detailIndex >= 0 && detailIndex < sessionCount) {
+    drawSessionDetail(detailIndex);
+    buildDetailSignature(detailIndex, detailSigCache, sizeof(detailSigCache));
+  } else {
+    drawSessionsAll();
+  }
+  renderFooter();
+  tft.flush();
+}
+
+// The real entry point now - reached from openHistory()'s board-2 arm (a session
+// row tap) as well as from SCROLLPERF, which is why it stayed this minimal: the
+// drag/tap machinery lives in scrollDragLoop()/handleScrollTouch(), not here.
 void openScrollback(int idx) {
   if (idx < 0 || idx >= sessionCount) return;
   scrollActive = true;

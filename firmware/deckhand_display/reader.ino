@@ -263,6 +263,13 @@ void requestHistory(int idx, const char* want) {
   sendLineToHost(line, sessions[idx].hostSlot);
 }
 void openHistory(int idx) {
+#if BOARD_HISTORY_SCROLL
+  histActive = true;                       // handleTouch dispatches on this
+  strncpy(histId, sessions[idx].id, sizeof(histId) - 1);
+  histId[sizeof(histId) - 1] = '\0';
+  openScrollback(idx);
+  return;
+#else
   if (idx < 0 || idx >= sessionCount) return;
   histActive = true;
   histCount = 0;
@@ -272,8 +279,13 @@ void openHistory(int idx) {
   histId[sizeof(histId) - 1] = '\0';
   requestHistory(idx, "last");   // newest screen first - that is what you came for
   drawHistory();
+#endif
 }
 void exitHistory() {
+#if BOARD_HISTORY_SCROLL
+  exitScrollback();
+  return;
+#else
   histActive = false;
   tft.fillScreen(COLOR_BG);
   drawTabBar();
@@ -285,6 +297,7 @@ void exitHistory() {
     drawSessionsAll();
   }
   renderFooter();
+#endif
 }
 // Tap map: control bar, then the jump bar, then the body (body = next page, wrapping,
 // which is how you skim without reaching for the buttons).
@@ -299,6 +312,9 @@ void histGoto(int page) {
   drawHistory();   // shows "Asking the Mac..." until the page lands
 }
 bool handleHistoryTouch(int sx, int sy) {
+#if BOARD_HISTORY_SCROLL
+  return handleScrollTouch(sx, sy);
+#else
   if (sy <= HIST_CHIP_TAP_H && sx < HIST_CHIP_TAP_W) {   // the filter chip
     histChatOnly = !histChatOnly;
     histCount = 0;
@@ -339,6 +355,7 @@ bool handleHistoryTouch(int sx, int sy) {
     }
   }
   return true;
+#endif
 }
 bool handleHistFullTouch(int sx, int sy) {
   if (sy >= READER_CTRL_Y) {
