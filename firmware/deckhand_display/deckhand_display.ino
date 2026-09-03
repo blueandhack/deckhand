@@ -5280,6 +5280,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     handlePairCancel();
 #endif
 #if BOARD_HISTORY_SCROLL
+  } else if (buf == "SCROLLCLOSE") {
+    // A HEADLESS ESCAPE FROM A FULL-SCREEN SURFACE, which this codebase has
+    // wanted once already: switchTab() returns early while histActive is set, so
+    // TAB and PAGE are refused and the only way out of the transcript is a
+    // finger. That is exactly the gap recorded for EMOJITEST ("nothing dismisses
+    // it remotely... the only remote escape is a re-flash"), and it matters more
+    // here, because a device parked on a transcript has stopped being a status
+    // display until somebody walks over to it.
+    if (scrollActive) { exitScrollback(); Serial.println("SCROLLCLOSE: closed"); }
+    else Serial.println("SCROLLCLOSE: the transcript is not open");
   } else if (buf.startsWith("SCROLLFETCH")) {
     // SCROLLFETCH answers exactly ONE question - "does the wire work?" - and draws
     // nothing, so silence after it is a WIRE fault and can never be blamed on the
