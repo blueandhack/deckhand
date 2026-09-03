@@ -2332,23 +2332,23 @@ step — about six distinct values in half an hour, drawn as a staircase that is
 sampler rather than of the account. At the poll cadence the same 31 slots span **150 minutes**.
 - **31 slots, not 30, and the reason is the CAPTION.** The span is `(n-1) * step`, so 30 slots
   span 145 minutes and a card captioned `LAST 2.5H` over a 145-minute ring overstates it by five.
-- **DECLARED SPEC DEVIATION: the caption is a LITERAL, not computed, and that is recorded here
-  rather than left reading as satisfied.** The design spec says the code "must compute it rather
-  than carry a literal 150, so changing either constant moves the crossover and the caption with
-  it" — `usage.ino`'s `renderNowCard()` writes the bare string `"LAST 2.5H"`, with no runtime
-  formatting deriving `2.5H` from `USAGE_RING_SLOTS`/`USAGE_RING_STEP_MIN`. What actually ships is
-  a PAIR of assertions in `usage-trend-check.py` — `SPAN == 150` and `"LAST 2.5H" in INO` — bound
-  together rather than the string being computed: change either ring constant so `SPAN` stops
-  being 150 and the first assertion fails by name, which is what forces a human to look at the
-  (still-literal) caption rather than the caption silently drifting out of truth. That meets the
-  spec's INTENT — a ring/caption mismatch cannot ship unnoticed — without meeting its letter, and
-  the gap is real: nothing stops a future edit from changing the *caption's own string* to
-  something wrong while leaving both assertions green, which a genuinely computed caption could
-  not do. Recorded as a deliberate, accepted deviation rather than a defect to silently "fix" —
-  fixing it would mean either sprintf'ing the span into the caption at runtime (a cost this 5s-tick
-  UI has so far avoided paying for two static words) or teaching the checker to derive the STRING
-  rather than merely gate it, and neither was judged worth it for a value that has been 150 since
-  Task 5 chose 31 slots specifically to make it so.
+- **THE DECLARED SPEC DEVIATION IS RESOLVED: the caption is now COMPUTED, and it had to be, because
+  the literal was overpromising at partial fill.** This bullet used to record that `renderNowCard()`
+  wrote the bare string `"LAST 2.5H"` regardless of how much of the ring had actually filled, gated
+  only by a pair of assertions (`SPAN == 150` and `"LAST 2.5H" in INO`) that could catch a ring-size
+  change but not a caption lying about a ring that had barely started. That gap was not
+  hypothetical: **observed on the glass**, two samples five minutes apart captioned `LAST 2.5H` —
+  the span of a FULL ring — in a repo whose whole discipline is not claiming more than you measured.
+  Fixed with `usageRingSpanMin()` (mirrors `battTrendSpanMin()` in `power.ino` exactly, including
+  the `count < 2` → 0 guard) and `usageSpanCaption()`, which formats `"no history"` below two
+  samples, `"LAST %dM"` below an hour and `"LAST %d.%dH"` at or above it — computed from
+  `USAGE_RING_SLOTS`/`USAGE_RING_STEP_MIN` at last, so a ring-constant change moves the caption with
+  it rather than leaving a literal to drift. `usage-trend-check.py` now mirrors the formatter itself
+  (`span_caption()`) and binds it to the real source structurally: `renderNowCard()` must call
+  `usageSpanCaption(...)`/`usageRingSpanMin()` and must NOT contain a bare `"LAST 2.5H"` literal
+  anywhere in its own body, and `usageRingSpanMin()` must return 0 below two samples. Widest output
+  is still `"no history"` (10 chars) — `padLeftTo(buf, sizeof(buf), 10)` into `resetAt1Cache[14]`
+  needed no change, verified by the existing parsed-cache-width assertion rather than assumed.
 - **`USAGE_RING_DROP_PCT` (3) is DERIVED, not picked.** A large fall means the window turned over
   and a slope across that discontinuity is meaningless — but `mergeUsage()` can swap the source
   Mac at any tick, and the two Macs' readings differ only in AGE, bounded by one poll interval, in
@@ -2390,6 +2390,21 @@ real 7-day window**, so the week's burn appears about five hours after a reset, 
 percent floor every single time. It is kept because a guard that has been deleted cannot catch the
 change that would make it necessary — the same reason the charge estimator keeps its provably
 unreachable 99h clamp.
+
+**`BURN_NOT_YET` USED TO CONFLATE TWO REFUSALS THAT LOOK IDENTICAL ON THE GLASS, AND A USER CANNOT
+TELL "WAIT" FROM "NOTHING TO SAY".** The ring-slope branch returned `BURN_NOT_YET` both while the
+ring was still filling (`usageRingCount < 2`, or a real ring that has not yet SPANNED
+`BURN_RING_MIN_SPAN`) and when the trend is flat or falling and may never resolve — both rendered
+`burn --`. Measured consequence: after every 5-hour window reset the card reads `burn --` for at
+least `BURN_RING_MIN_SPAN` (30) minutes, longer at light usage, with nothing distinguishing "ask
+again shortly" from "there may never be an answer". A third named code, `BURN_WARMING` (-3, the
+same convention as the charge estimator's `BATT_CHG_NOT_YET`/`BATT_CHG_TOPPING`), now covers the
+two still-filling cases and renders `"measuring"`; a fully-spanned-but-flat ring still returns
+`BURN_NOT_YET` and keeps `"burn --"` — the pairing that proves the split is real rather than a
+rename is in `usage-trend-check.py`'s mirror 9d (still filling → WARMING) beside mirror 9e (spanned
+but flat → NOT_YET). `usageBurnUrgent()` and the average-window path are untouched: the average
+path's `BURN_MIN_ELAPSED` gate above is a data-validity floor, not a "still filling" state, and
+conflating the two would misname a refusal that genuinely may never resolve.
 
 **THE THREE CACHE HAZARDS, and all three are the change-only redraw discipline failing in the one
 way it always fails: a field whose PIXELS are wrong while its VALUE has not changed.** Each is

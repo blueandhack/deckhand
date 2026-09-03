@@ -137,17 +137,57 @@ def chk(cond, msg):
         fails += 1
         print("  FAIL " + msg)
 
-# ---- the span is exactly 150 min, and the caption depends on it -------------
+# ---- the span is exactly 150 min, and a FULL ring's caption depends on it ---
 # 30 slots span 145, and a card captioned LAST 2.5H over a 145-minute ring
 # overstates it by five minutes. 31 slots span exactly 150.
 chk(SPAN == 150, f"ring span (SLOTS-1)*STEP_MIN = {SPAN} min, must be exactly 150")
-# THE CAPTION ITSELF - the half of this claim Task 5 could not make true, since
-# the spark that carries it did not exist yet (see CONTROLLER RULING in the
-# task-5 brief). Task 7 is what writes drawUsageSpark()/renderNowCard() and the
-# "LAST 2.5H" string they draw, so this is the task that makes the sentence
-# above actually true rather than merely arithmetically consistent.
-chk("LAST 2.5H" in INO,
-    f"the spark's caption says LAST 2.5H, matching the {SPAN}-minute ring span")
+
+# ---- THE CAPTION ITSELF, bound to the DERIVATION rather than to the string --
+# This used to be `chk("LAST 2.5H" in INO, ...)` - a literal the device wrote
+# regardless of how much of the ring had actually filled, so two samples five
+# minutes apart captioned as "LAST 2.5H" (a FULL ring's span) just as
+# confidently as a genuinely full one. usageSpanCaption() now computes the
+# caption from usageRingSpanMin(), so this mirrors THAT function and checks it
+# against the ring's own SPAN - a re-derivation of either the ring size or the
+# formatting moves this assertion with it, where the old string search could
+# not tell a correct caption from a lucky one.
+def span_caption(span_min):
+    """Mirrors usage.ino's usageSpanCaption()."""
+    if span_min < 1:
+        return "no history"
+    if span_min < 60:
+        return f"LAST {span_min}M"
+    hours = span_min // 60
+    tenths = ((span_min % 60) * 10 + 30) // 60   # round to the nearest tenth
+    if tenths >= 10:                             # carry a rounded-up .10 into the hour
+        hours += 1
+        tenths = 0
+    return f"LAST {hours}.{tenths}H"
+
+chk(span_caption(0) == "no history",
+    "an empty or one-sample ring (span 0, usageRingSpanMin()'s own sentinel) "
+    "captions as \"no history\"")
+chk(span_caption(SPAN) == "LAST 2.5H",
+    f"a FULL ring (span={SPAN} min) captions as LAST 2.5H - now DERIVED from "
+    f"the ring's own size, not a literal that could drift from it")
+# THE BUG THIS TASK FIXES: two samples one poll interval apart is a real,
+# non-empty ring - and must NOT read as a full ring's 2.5 hours.
+chk(span_caption(STEP_MIN) == f"LAST {STEP_MIN}M",
+    f"the smallest possible non-empty span ({STEP_MIN} min - two samples one "
+    f"ring step apart, the exact scenario observed on the glass) captions in "
+    f"minutes, not as LAST 2.5H")
+chk(span_caption(59) == "LAST 59M",
+    "the widest minutes-branch caption is \"LAST 59M\" (8 chars)")
+chk(span_caption(60) == "LAST 1.0H", "the hour branch starts exactly at 60 minutes")
+# Every reachable span - 0 through a full ring, with slack for scheduling
+# jitter pushing a poll slightly past its nominal interval - captions to at
+# most 10 characters: the padLeftTo() width and the resetAt1Cache headroom
+# this fix is pinned to, not merely today's two known strings.
+worst_caption_len = max(len(span_caption(m)) for m in range(0, SPAN + 30))
+chk(worst_caption_len <= 10,
+    f"every reachable ring span (0..{SPAN + 29} min) captions to <= 10 "
+    f"characters (worst {worst_caption_len}), matching renderNowCard's "
+    f"`padLeftTo(buf, sizeof(buf), 10)` and resetAt1Cache[14]'s headroom")
 
 # ---- the ring must be able to measure the window it is used for ------------
 for name, win, want in [("5h session", 300, True), ("7d week", 10080, False)]:
@@ -259,6 +299,15 @@ chk(len(worst) <= SIDE_CHARS,
 chk(LABEL_BYTES > len(worst),
     "BURN_LABEL_BYTES has room for the widest label plus its NUL")
 
+# "measuring" (BURN_WARMING's label) is far short of the worst case above, but
+# it is a NEW string and this file's own rule is to check what is certified,
+# not assume it - the same reason "burn --" and "resets first" are covered by
+# the SIDE_CHARS assertion in HALF 2 rather than left implicit.
+chk(len("measuring") <= SIDE_CHARS,
+    f"\"measuring\" ({len('measuring')} chars) fits the {SIDE_CHARS}-char side lane")
+chk(LABEL_BYTES > len("measuring"),
+    "BURN_LABEL_BYTES has room for \"measuring\" plus its NUL")
+
 # =============================================================================
 # HALF 1 - the arithmetic MIRROR of usageRingSample/usageRingSlope/usageBurnMinutes.
 #
@@ -281,6 +330,10 @@ def uwrap(a):
 QUOTA_STALE = const_int("QUOTA_STALE_SEC")
 STEP_MS = STEP_MIN * 60000
 BURN_NOT_YET, BURN_EMPTY_NOW = -1, -2
+# PARSED, not transcribed alongside its two siblings above - it is new, and the
+# rule this whole file follows ("a checker must parse what it certifies, never
+# transcribe it") applies most to the constant nobody has looked at twice yet.
+BURN_WARMING = const_int("BURN_WARMING", INO)
 
 class Ring:
     """Mirrors usageRingPct[]/usageRingAt[]/usageRingSample()/usageRingSlope()."""
@@ -392,11 +445,17 @@ def burn_minutes(pct, reset_min, window_min, stale, ring):
     if pct < MIN_PCT:
         return BURN_NOT_YET
     if window_min <= RING_MAX:
+        # TWO refusals, not one: a ring that has not filled (or not yet
+        # SPANNED enough time) WILL speak later - BURN_WARMING. A ring that
+        # has filled but shows no real movement MAY NEVER resolve - that
+        # stays BURN_NOT_YET. Mirrors usage.ino's usageBurnMinutes() exactly.
         s = ring.slope() if ring is not None else None
         if s is None:
-            return BURN_NOT_YET
+            return BURN_WARMING          # count < 2
         slope, rise, span = s
-        if span < RING_MIN_SPAN or rise < RING_RISE or slope <= 0.0:
+        if span < RING_MIN_SPAN:
+            return BURN_WARMING          # still filling
+        if rise < RING_RISE or slope <= 0.0:
             return BURN_NOT_YET
         left = int((100 - pct) / slope + 0.5)
         left = min(left, BURN_MAX_LEFT_MIN)
@@ -523,17 +582,40 @@ chk(burn_minutes(MAX_PCT + 1, 0, 300, False, r10) == BURN_EMPTY_NOW,
 chk(burn_minutes(50, 10080 - (MIN_ELAP - 1), 10080, False, None) == BURN_NOT_YET,
     f"mirror 9c: elapsed < BURN_MIN_ELAPSED ({MIN_ELAP}) refuses on the long window")
 
+# mirror 9d used to expect BURN_NOT_YET here - this scenario (a real ring that
+# simply hasn't spanned enough time yet) is exactly the "WILL speak later"
+# case BURN_WARMING exists to name separately from "may never resolve".
 r11 = Ring()
 r11.sample(0, 40, 0)
 r11.sample(0, 43, STEP_MS)               # span = 5 min < BURN_RING_MIN_SPAN (30)
-chk(burn_minutes(43, 0, 300, False, r11) == BURN_NOT_YET,
-    f"mirror 9d: span < BURN_RING_MIN_SPAN ({RING_MIN_SPAN}) refuses")
+chk(burn_minutes(43, 0, 300, False, r11) == BURN_WARMING,
+    f"mirror 9d: span < BURN_RING_MIN_SPAN ({RING_MIN_SPAN}) is STILL FILLING "
+    f"- BURN_WARMING, not BURN_NOT_YET, because it will resolve once the ring "
+    f"spans enough time")
 
+# A ring with fewer than two samples at all - the most common real case, hit
+# on every 5-hour window reset - is the other WARMING path.
+r11b = Ring()
+chk(burn_minutes(50, 0, 300, False, r11b) == BURN_WARMING,
+    "mirror 9d2: a ring with zero samples (count < 2, usageRingSlope() itself "
+    "returns false) is BURN_WARMING, not BURN_NOT_YET")
+chk(burn_minutes(50, 0, 300, False, None) == BURN_WARMING,
+    "mirror 9d3: no ring at all behaves the same as an empty one - BURN_WARMING")
+
+# mirror 9e is the PAIRED case that proves the distinction is real, not just a
+# renamed constant: a ring that HAS filled (span clears BURN_RING_MIN_SPAN)
+# but shows no real movement MAY NEVER resolve, and stays BURN_NOT_YET.
 r12 = Ring()
 for i in range(10):
     r12.sample(0, 40, i * STEP_MS)       # flat: rise = 0 < BURN_RING_MIN_RISE
+chk(r12.slope()[2] >= RING_MIN_SPAN,
+    f"mirror 9e precondition: r12's span ({r12.slope()[2]} min) clears "
+    f"BURN_RING_MIN_SPAN ({RING_MIN_SPAN}) - this case must be a FLAT ring, "
+    f"not a still-filling one, or it would not be distinguishing anything")
 chk(burn_minutes(40, 0, 300, False, r12) == BURN_NOT_YET,
-    f"mirror 9e: rise < BURN_RING_MIN_RISE ({RING_RISE}) refuses")
+    f"mirror 9e: a FULLY-SPANNED but flat ring (rise < BURN_RING_MIN_RISE "
+    f"{RING_RISE}) is BURN_NOT_YET - it may never resolve, unlike r11/r11b's "
+    f"still-filling BURN_WARMING above")
 
 r13 = Ring()
 for i in range(SLOTS):
@@ -544,12 +626,16 @@ chk(burn_minutes(30, 0, 300, False, r13) == BURN_NOT_YET,
 chk(burn_minutes(50, 0, 300, True, r10) == BURN_NOT_YET,
     "mirror 9g: a stale reading refuses regardless of everything else")
 
-# ---- item 10: BURN_EMPTY_NOW vs BURN_NOT_YET are distinguishable
+# ---- item 10: all THREE refusal codes are pairwise distinguishable ---------
+# Was "BURN_EMPTY_NOW vs BURN_NOT_YET" only, from before BURN_WARMING existed.
 chk(burn_minutes(MAX_PCT + 1, 0, 300, False, None) == BURN_EMPTY_NOW and
     burn_minutes(MIN_PCT - 1, 0, 300, False, None) == BURN_NOT_YET and
-    BURN_EMPTY_NOW != BURN_NOT_YET,
-    "mirror 10: BURN_EMPTY_NOW and BURN_NOT_YET are distinguishable - a caller "
-    "checking `< 0` alone would show 'empty now' where it meant 'cannot say yet'")
+    burn_minutes(50, 0, 300, False, None) == BURN_WARMING and
+    len({BURN_EMPTY_NOW, BURN_NOT_YET, BURN_WARMING}) == 3,
+    "mirror 10: BURN_EMPTY_NOW, BURN_NOT_YET and BURN_WARMING are pairwise "
+    "distinguishable - a caller checking `< 0` alone cannot tell 'the cap is "
+    "reached', 'this trend may never resolve' and 'ask again shortly' apart, "
+    "which is what put 'burn --' on the glass for all three")
 
 # ---- item 11: the long-window estimate is CLAMPED, not left to grow into a
 # day count the side lane cannot hold. At BURN_MIN_PCT over the full 7-day
@@ -658,6 +744,20 @@ bad4 = [s for s in lits4 if ">=" in s]
 chk(not bad4,
     f"structural 4b: usageBurnLabel() never writes >= in a label string, reserved "
     f"for the charge floor (found {bad4})")
+chk("measuring" in lits4,
+    "structural 4c: usageBurnLabel() renders BURN_WARMING as \"measuring\", "
+    "distinct from BURN_NOT_YET's \"burn --\"")
+# 4d. ORDER matters: BURN_WARMING must be tested BEFORE the generic `mins < 0`
+# catch-all that produces "burn --", or the specific check is dead code and
+# every negative value - WARMING included - reads as the ambiguous fallback
+# this whole fix exists to remove.
+warm_check = re.search(r"mins\s*==\s*BURN_WARMING", body4)
+generic_check = re.search(r"mins\s*<\s*0", body4)
+chk(warm_check is not None and generic_check is not None
+    and warm_check.start() < generic_check.start(),
+    "structural 4d: usageBurnLabel() checks `mins == BURN_WARMING` BEFORE the "
+    "generic `mins < 0` catch-all - reversed, BURN_WARMING would always print "
+    "\"burn --\" instead of \"measuring\"")
 
 # 5. usageRingReset() is reached from BOTH reset paths inside usageRingSample -
 # the drop and the staleness edge - counted rather than eyeballed.
@@ -681,6 +781,56 @@ chk(clamp_sites == 2,
     f"structural 6: usageBurnMinutes() clamps against BURN_MAX_LEFT_MIN in "
     f"both the ring-slope and the average branch (found {clamp_sites} `if "
     f"(left > BURN_MAX_LEFT_MIN)` guard(s), want exactly 2)")
+
+# 7. usageBurnMinutes() distinguishes "still filling" (BURN_WARMING) from "may
+# never resolve" (BURN_NOT_YET) in the ring branch - the fix this task exists
+# for. Counted by the GUARD, not by raw token mentions, for the same reason
+# structural 6 counts `if (left > ...)` rather than occurrences of the name:
+# a single return statement can name a constant once while a sloppier one
+# could name it twice, so counting sites (not mentions) is what actually
+# proves there are two distinct refusal POINTS.
+warming_sites = len(re.findall(r"return\s+BURN_WARMING\s*;", body3))
+chk(warming_sites == 2,
+    f"structural 7a: usageBurnMinutes() returns BURN_WARMING from exactly two "
+    f"sites in the ring branch - `!usageRingSlope(...)` (count < 2) and "
+    f"`span < BURN_RING_MIN_SPAN` (still filling) (found {warming_sites}, want 2)")
+chk(re.search(
+        r"rise\s*<\s*BURN_RING_MIN_RISE\s*\|\|\s*slope\s*<=\s*0\.0f\s*\)\s*return\s+BURN_NOT_YET\s*;",
+        body3) is not None,
+    "structural 7b: usageBurnMinutes() still returns BURN_NOT_YET for a flat "
+    "or falling ring (rise < BURN_RING_MIN_RISE or slope <= 0) - the "
+    "may-never-resolve case, kept distinct from BURN_WARMING's still-filling one")
+# The two WARMING returns must come BEFORE the NOT_YET one in source order, or
+# a still-filling ring would never reach the code that is supposed to name it.
+warming_positions = [m.start() for m in re.finditer(r"return\s+BURN_WARMING\s*;", body3)]
+not_yet_in_ring_branch = re.search(
+    r"rise\s*<\s*BURN_RING_MIN_RISE\s*\|\|\s*slope\s*<=\s*0\.0f\s*\)\s*return\s+BURN_NOT_YET\s*;",
+    body3)
+chk(len(warming_positions) == 2 and not_yet_in_ring_branch is not None
+    and all(p < not_yet_in_ring_branch.start() for p in warming_positions),
+    "structural 7c: both BURN_WARMING returns precede the ring branch's "
+    "BURN_NOT_YET return in source order")
+
+# 8. The sparkline's caption is COMPUTED from the ring's own span, not a
+# literal - the exact thing this task fixes. Bound to renderNowCard()'s real
+# source rather than only to the mirror above, which would keep passing even
+# if renderNowCard() still wrote a bare "LAST 2.5H" (or "no history") itself.
+body_now = strip_comments(func_body("void renderNowCard()", INO))
+chk("usageSpanCaption(" in body_now and "usageRingSpanMin()" in body_now,
+    "structural 8a: renderNowCard() computes its caption via "
+    "usageSpanCaption(buf, sizeof(buf), usageRingSpanMin())")
+chk('"LAST 2.5H"' not in body_now,
+    "structural 8b: renderNowCard() no longer writes a bare \"LAST 2.5H\" "
+    "literal - the caption is computed, so the string cannot appear as a "
+    "literal in the render function's own code")
+# usageRingSpanMin() itself must return 0 for a not-yet-fillable ring - the
+# same shape battTrendSpanMin() (power.ino) uses, so a caption built on it can
+# never claim history that was never sampled.
+body_span = strip_comments(func_body("int usageRingSpanMin()", INO))
+chk(re.search(r"usageRingCount\s*<\s*2", body_span) is not None
+    and re.search(r"return\s+0\s*;", body_span) is not None,
+    "structural 8c: usageRingSpanMin() returns 0 when usageRingCount < 2, "
+    "mirroring battTrendSpanMin()'s own guard")
 
 STRUCTURAL_COUNT = n - MIRROR_COUNT
 

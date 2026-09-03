@@ -428,6 +428,41 @@ bool usageRingSlope(float* slopeOut, int* riseOut, long* spanMinOut) {
   return true;
 }
 
+// The ring's ACTUAL span in minutes, for the sparkline's caption - 0 when there
+// is nothing to caption yet (fewer than two samples). Mirrors battTrendSpanMin()
+// in power.ino exactly, down to the count<2 guard: both answer "how much history
+// does this ring actually hold", and a caption built from anything else would be
+// claiming a full ring's span at partial fill - which is the bug this exists to
+// fix (two samples five minutes apart is not "LAST 2.5H"). Deliberately separate
+// from usageRingSlope(), which also computes a span but only as a byproduct of a
+// slope fit that needs a healthy den and returns nothing at all through a false
+// return - the caption needs a number even while the burn estimator is still
+// refusing one.
+int usageRingSpanMin() {
+  if (usageRingCount < 2) return 0;
+  int oldest = (usageRingHead + USAGE_RING_SLOTS - usageRingCount) % USAGE_RING_SLOTS;
+  int newest = (usageRingHead + USAGE_RING_SLOTS - 1) % USAGE_RING_SLOTS;
+  return (int) ((usageRingAt[newest] - usageRingAt[oldest]) / 60000UL);
+}
+
+// The sparkline's caption, DERIVED from the span the ring actually holds rather
+// than assumed from a full one. Below one ring step there is nothing to caption
+// (usageRingSpanMin() returns 0 exactly when the ring holds fewer than two
+// samples); below an hour the span reads in whole minutes ("LAST 59M", the
+// widest of that branch); at or above an hour it reads in tenths of an hour, the
+// same "LAST 2.5H" text a full 150-minute ring produces - but computed now, so a
+// change to USAGE_RING_SLOTS/USAGE_RING_STEP_MIN moves the caption with it
+// instead of leaving a literal to drift out of truth. Widest overall output is
+// "no history" (10 chars); see usage-trend-check.py's exhaustive width sweep.
+void usageSpanCaption(char* out, size_t n, int spanMin) {
+  if (spanMin < 1) { snprintf(out, n, "no history"); return; }
+  if (spanMin < 60) { snprintf(out, n, "LAST %dM", spanMin); return; }
+  int hours  = spanMin / 60;
+  int tenths = ((spanMin % 60) * 10 + 30) / 60;   // round to the nearest tenth
+  if (tenths >= 10) { hours++; tenths = 0; }       // carry a rounded-up .10 into the hour
+  snprintf(out, n, "LAST %d.%dH", hours, tenths);
+}
+
 // FNV-1a 32-bit over the samples, for the sparkline's change-only cache. It is
 // compared against the ONE previous value and never against a population, so a
 // missed repaint needs a collision with that single value - 2^-32 per event, not
@@ -445,9 +480,17 @@ uint32_t usageRingHash() {
 
 // Negative returns are NAMED, the same convention the charge estimator's
 // BATT_CHG_NOT_YET / BATT_CHG_TOPPING use: a bare -1 at a call site says nothing
-// about which of two very different refusals happened.
-const long BURN_NOT_YET   = -1;   // cannot state a number yet - keep watching
+// about which of two very different refusals happened. BURN_WARMING is a third
+// one, for the same reason the charge estimator needed two rather than one:
+// "the ring is still filling and WILL speak" and "the trend is too flat or
+// negative to ever state" read as the same "burn --" on the glass, and a user
+// cannot tell "wait" from "nothing to say" without a distinct code. It fires
+// only from the ring path (usageRingCount < 2, or a real but too-short span) -
+// the average path's refusals are unchanged, because BURN_MIN_ELAPSED is a
+// data-validity floor, not a "still filling" state.
+const long BURN_NOT_YET   = -1;   // may never resolve - flat or falling trend
 const long BURN_EMPTY_NOW = -2;   // the cap is already reached
+const long BURN_WARMING   = -3;   // the ring is still filling - ask again later
 
 // CLAMPED for the same reason power.ino's charge estimator clamps at 99 hours:
 // this is a DISPLAY, not a claim. At BURN_MIN_PCT (3) over the full 7-day window
@@ -472,10 +515,19 @@ long usageBurnMinutes(int pct, long resetMin, long windowMin, bool stale) {
   if (windowMin <= BURN_RING_MAX_WIN) {
     // SHORT WINDOW: the ring slope. It sees a burst in the last ten minutes,
     // which an average over the whole window cannot.
+    //
+    // TWO DIFFERENT REFUSALS, so the card can say which one is happening. A
+    // ring with under two samples, or one that has not yet SPANNED enough
+    // time, WILL speak once it fills - that is BURN_WARMING, and it fires for
+    // at least BURN_RING_MIN_SPAN minutes after every window reset (measured:
+    // 30+ minutes, more at light usage). A ring that has filled but shows no
+    // real movement (flat or falling) MAY NEVER resolve, which stays
+    // BURN_NOT_YET - conflating the two used to read as "burn --" for both,
+    // indistinguishable from the glass.
     float slope; int rise; long span;
-    if (!usageRingSlope(&slope, &rise, &span)) return BURN_NOT_YET;
-    if (span < BURN_RING_MIN_SPAN || rise < BURN_RING_MIN_RISE || slope <= 0.0f)
-      return BURN_NOT_YET;
+    if (!usageRingSlope(&slope, &rise, &span)) return BURN_WARMING;   // count < 2
+    if (span < BURN_RING_MIN_SPAN) return BURN_WARMING;               // still filling
+    if (rise < BURN_RING_MIN_RISE || slope <= 0.0f) return BURN_NOT_YET;
     // CLAMP THE FLOAT BEFORE THE CAST, not after: for slope < ~4.7e-8 %/min
     // the quotient exceeds LONG_MAX and (long) of an out-of-range float is
     // undefined behaviour, not a defined saturate. A UB result that happens
@@ -509,6 +561,10 @@ bool usageBurnUrgent(long mins, long resetMin) {
 
 void usageBurnLabel(char* out, size_t n, long mins, long resetMin) {
   if (mins == BURN_EMPTY_NOW) { snprintf(out, n, "empty now"); return; }
+  // BURN_WARMING is checked BEFORE the bare `mins < 0` catch-all, or it would
+  // read as the same "burn --" the may-never-resolve case gets - the exact
+  // ambiguity this code exists to remove.
+  if (mins == BURN_WARMING)   { snprintf(out, n, "measuring"); return; }
   if (mins < 0)               { snprintf(out, n, "burn --");   return; }
   if (!usageBurnUrgent(mins, resetMin)) { snprintf(out, n, "resets first"); return; }
   // "~" MEANS ABOUT. Never ">=", which is reserved for the charge estimator's
@@ -614,13 +670,18 @@ void renderNowCard() {
     if (m < 60) snprintf(buf, sizeof(buf), "stale %ldm", m);
     else        snprintf(buf, sizeof(buf), "stale %ldh", m / 60);
   } else {
-    snprintf(buf, sizeof(buf), "%s", usageRingCount >= 2 ? "LAST 2.5H" : "no history");
+    // DERIVED FROM THE RING'S ACTUAL SPAN, not assumed from a full one - a
+    // partial ring (e.g. two samples five minutes apart) must not read "LAST
+    // 2.5H", which is the span of a FULL ring. See usageRingSpanMin()/
+    // usageSpanCaption() above.
+    usageSpanCaption(buf, sizeof(buf), usageRingSpanMin());
   }
   // padLeftTo to 10, the longest value this field can hold ("no history"; the
-  // others are "LAST 2.5H" and staleTxt's 9). That is all the padding has to do -
-  // blank a previously-longer value - and it leaves resetAt1Cache[14] three bytes
-  // of headroom. Padding to 13 fills that cache EXACTLY, which is correct today
-  // and silently truncates the first time anyone widens this field.
+  // others are "LAST 2.5H"/"LAST 59M" and staleTxt's 9). That is all the
+  // padding has to do - blank a previously-longer value - and it leaves
+  // resetAt1Cache[14] three bytes of headroom. Padding to 13 fills that cache
+  // EXACTLY, which is correct today and silently truncates the first time
+  // anyone widens this field.
   padLeftTo(buf, sizeof(buf), 10);
   drawIfChanged(resetAt1Cache, sizeof(resetAt1Cache), buf, CARD_X + CARD_W - PAD,
                 y0 + NOW_META_Y, 1, 1, stale ? COLOR_BAD : COLOR_LABEL, COLOR_CARD, TR_DATUM);
