@@ -5412,6 +5412,9 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       return;
     }
     const int FRAMES = 20;
+    // PATH 1: the full recompose every frame already paid for, before
+    // Task 7's memmove. Measured first so path 2 is a before/after on the
+    // same hardware in the same run, not a claim taken on faith.
     unsigned long compose = 0, flushT = 0;
     for (int i = 0; i < FRAMES; i++) {
       scrollY = (uint32_t) ((long) scrollMaxY() * i / (FRAMES - 1));
@@ -5419,9 +5422,41 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       tft.flush();                                   unsigned long c = micros();
       compose += b - a; flushT += c - b;
     }
-    Serial.printf("SCROLLPERF: %d frames  compose %luus  flush %luus  frame %luus (%lu fps)\n",
+    Serial.printf("SCROLLPERF: %d frames  compose %luus  flush %luus  frame %luus (%lu fps)  [scrollDrawBody]\n",
                   FRAMES, compose / FRAMES, flushT / FRAMES,
                   (compose + flushT) / FRAMES, 1000000UL / ((compose + flushT) / FRAMES));
+
+    // PATH 2: scrollRect() + scrollDrawBand(), simulating a drag - a fixed
+    // small shift per frame, well under the viewport height so scrollRect
+    // always takes the fast path (the decision between the two paths for a
+    // large jump is the drag loop's job, Task 5, not this measurement's).
+    // scrollDrawBody() above left scrollY at scrollMaxY(); redraw once to
+    // give path 2 a clean, fully-composed frame to shift from, so its own
+    // first iteration is not paying to fill in a stale canvas.
+    scrollY = 0;
+    scrollDrawBody();
+    tft.flush();
+    const int SCROLL_STEP = CODE_LINE_H * 2;   // a plausible per-frame drag delta
+    unsigned long compose2 = 0, flush2 = 0;
+    for (int i = 0; i < FRAMES; i++) {
+      const uint32_t maxY = scrollMaxY();
+      uint32_t newY = scrollY + (uint32_t) SCROLL_STEP;
+      if (newY > maxY) newY = 0;   // wrap back to the top rather than stalling at the end
+      const int shift = (int) ((long) newY - (long) scrollY);
+      scrollY = newY;
+      unsigned long a = micros();
+      if (shift != 0) {
+        tft.scrollRect(0, SCROLL_TOP, tft.width(), SCROLL_BOT - SCROLL_TOP, -shift);
+        scrollDrawBand(shift);
+      }
+      unsigned long b = micros();
+      tft.flush();
+      unsigned long c = micros();
+      compose2 += b - a; flush2 += c - b;
+    }
+    Serial.printf("SCROLLPERF: %d frames  compose %luus  flush %luus  frame %luus (%lu fps)  [scrollRect+scrollDrawBand]\n",
+                  FRAMES, compose2 / FRAMES, flush2 / FRAMES,
+                  (compose2 + flush2) / FRAMES, 1000000UL / ((compose2 + flush2) / FRAMES));
     scrollPerfRunning = false;
 #endif
   } else if (buf.startsWith("EMOJITEST")) {

@@ -99,6 +99,10 @@ public:
   void drawFastVLine(int x, int y, int h, uint16_t c);
   void drawPixel(int x, int y, uint16_t c);
   void pushImage(int x, int y, int w, int h, const uint16_t* data);
+  // Shift a logical rect vertically inside the framebuffer and mark it dirty.
+  // Board 2 only, and it exists for one caller: a scroll frame that would
+  // otherwise recompose every visible line. dy > 0 moves content DOWN.
+  void scrollRect(int x, int y, int w, int h, int dy);
   void readRect(int x, int y, int w, int h, uint16_t* out);
   void setSwapBytes(bool s);
   bool getSwapBytes() const;

@@ -268,6 +268,65 @@ void PanelShim::pushImage(int x, int y, int w, int h, const uint16_t* data) {
   markDirty(px0, py0, px1, py1);
 }
 
+// Shifts a logical rect vertically by memmove-ing whole rows, instead of
+// recomposing every line inside it - the one caller is a scroll frame, where
+// most of the visible text did not change and only moved.
+//
+// ROTATION-AWARE, not a bare row memmove. A framebuffer row shift equals a
+// LOGICAL vertical scroll only when a logical row maps to a single
+// contiguous PHYSICAL row - true at rotation 0 and rotation 2 (the only two
+// values the screen-flip feature ever selects; both are pure flips, never a
+// 90-degree transpose), and this function is not meant to be reached at
+// rotation 1/3, where a logical row maps to a physical COLUMN instead. Two
+// things are derived from mapPoint rather than assumed:
+//   - ROW ORDER: at rotation 2, increasing logical y DECREASES physical y,
+//     so the direction that avoids overwriting a source row before it has
+//     been read reverses too. (In fact the row-processing order below is
+//     provably safe independent of that: it is expressed purely in LOGICAL
+//     row indices, and dst = src + dy is monotonic either way, so a row is
+//     never read after an earlier iteration has already overwritten it as a
+//     destination - which direction is physically "up" never enters into
+//     it.)
+//   - ROW START ADDRESS: at rotation 2, increasing logical x DECREASES
+//     physical x within a row, so the smaller of the row's two mapped
+//     endpoints - not whichever endpoint mapPoint(x, ...) happens to be
+//     called with - is the row's real starting address.
+// A framebuffer row memmove that assumed rotation 0's mapping (row order
+// top-to-bottom, row start at the mapped left edge) would run backwards
+// under FLIPPED and there would be nothing else in this plan to catch it.
+void PanelShim::scrollRect(int x, int y, int w, int h, int dy) {
+  if (!_fb || dy == 0) return;
+  clipLogicalRect(x, y, w, h);
+  if (w <= 0 || h <= 0) return;
+  int n = dy < 0 ? -dy : dy;
+  if (n >= h) return;                     // nothing survives the shift
+  const int rows = h - n;
+  for (int i = 0; i < rows; i++) {
+    // Copy in the direction that cannot overwrite a source row before it is
+    // read. Expressed in logical row indices only - see the note above for
+    // why that is safe regardless of which physical direction it turns out
+    // to be.
+    const int srcL = (dy > 0) ? (rows - 1 - i) : (n + i);
+    const int dstL = srcL + dy;
+    int sxA, syA, sxB, syB, dxA, dyA, dxB, dyB;
+    mapPoint(x,         y + srcL, sxA, syA);
+    mapPoint(x + w - 1, y + srcL, sxB, syB);
+    mapPoint(x,         y + dstL, dxA, dyA);
+    mapPoint(x + w - 1, y + dstL, dxB, dyB);
+    const int srcPx = sxA < sxB ? sxA : sxB;
+    const int dstPx = dxA < dxB ? dxA : dxB;
+    memmove(&_fb[(size_t) dyA * PANEL_PHYS_W + dstPx],
+            &_fb[(size_t) syA * PANEL_PHYS_W + srcPx],
+            (size_t) w * sizeof(uint16_t));
+  }
+  int mx0, my0, mx1, my1;
+  mapPoint(x, y, mx0, my0);
+  mapPoint(x + w - 1, y + h - 1, mx1, my1);
+  if (mx0 > mx1) { int t = mx0; mx0 = mx1; mx1 = t; }
+  if (my0 > my1) { int t = my0; my0 = my1; my1 = t; }
+  markDirty(mx0, my0, mx1, my1);
+}
+
 // readRect is a straight framebuffer read - the only reason SCREENSHOT can
 // work on this board at all, since QSPI has no readback. Board 1's readRect
 // returns pixels BYTE-SWAPPED relative to a plain read (readPixel does not

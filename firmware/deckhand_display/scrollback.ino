@@ -385,6 +385,107 @@ void scrollDrawBody() {
   }
 }
 
+// Draws only the band of rows a scrollRect() shift newly exposed, plus the
+// rail - which the shift moved and which cannot be shifted correctly in
+// place, being one 4px-wide position indicator rather than per-line content.
+// `shift` is scrollY's own delta (positive = scrolled further into the
+// document, i.e. content moved UP), the same sign scrollDrawBody's caller
+// would pass to scrollRect as -dy.
+//
+// THE SAME PER-LINE LOOP scrollDrawBody() ALREADY USES, bounded to the
+// exposed band rather than the whole body - deliberately reusing its exact
+// structure (same entry walk, same spacer/role/truncation handling, same
+// head-note-at-the-very-top case) rather than re-deriving a tighter row
+// range from the band's pixel bounds. The cheap per-row bookkeeping
+// (advancing `ei`) still runs for every row, same as scrollDrawBody; only
+// the expensive part - the drawString calls - is skipped for rows outside
+// the band, which is where the whole saving comes from.
+void scrollDrawBand(int shift) {
+  if (shift == 0) return;
+  const int n = shift > 0 ? shift : -shift;
+  const int bandY0 = shift > 0 ? (SCROLL_BOT - n) : SCROLL_TOP;
+  const int bandY1 = shift > 0 ? SCROLL_BOT       : (SCROLL_TOP + n);
+  tft.fillRect(0, bandY0, tft.width(), bandY1 - bandY0, COLOR_BG);
+
+  // scrollDrawBody() covers these three states with a centred note across
+  // the WHOLE body - a shift never happens without a loaded transcript to
+  // drag through, but the check is kept so a banded redraw can never leave
+  // stale text under a note it did not draw.
+  if (scrollPending || scrollFetchFailed || scrollCount == 0) return;
+
+  const uint32_t y0 = scrollY;
+  const int firstLine = (int) (y0 / CODE_LINE_H);
+  const int subPx = (int) (y0 % CODE_LINE_H);
+
+  // Same condition as scrollDrawBody's: only reachable here when the band
+  // that shift exposed actually reaches the very top row.
+  if (y0 == 0 && bandY0 <= SCROLL_TOP) {
+    if (scrollDropped > 0) {
+      char b[40];
+      snprintf(b, sizeof(b), "-- %d older need USB --", scrollDropped);
+      scrollNote(b, SCROLL_TOP);
+    } else {
+      scrollNote("-- start of history --", SCROLL_TOP);
+    }
+  }
+
+  char buf[SCROLL_COLS + 2];
+  int ei = scrollEntryAtLine((uint32_t) firstLine);
+  for (int row = 0; row <= SCROLL_LINES; row++) {
+    const int line = firstLine + row;
+    if (line < 0 || (uint32_t) line >= scrollTotalLines) break;
+    while (ei + 1 < scrollCount && scrollIdx[ei + 1].lineFirst <= (uint32_t) line) ei++;
+    const ScrollEntry& e = scrollIdx[ei];
+    const int k = line - (int) e.lineFirst;
+    if (k >= e.lines) continue;                      // the spacer: draw nothing
+
+    const int y = SCROLL_TOP + row * CODE_LINE_H - subPx;
+    // Bounded to the EXPOSED BAND rather than [SCROLL_TOP, SCROLL_BOT) - the
+    // only difference from scrollDrawBody's identical loop.
+    if (y + CODE_LINE_H <= bandY0) continue;
+    if (y >= bandY1) break;
+
+    if (e.role >= 2) {
+      if (k > 0) continue;
+      const char* t = scrollTextAt(ei);
+      int tn = strlen(t);
+      if (tn > SCROLL_COLS) {
+        memcpy(buf, t, SCROLL_COLS - 3);
+        buf[SCROLL_COLS - 3] = '\0';
+        strcat(buf, "...");
+      } else {
+        strncpy(buf, t, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+      }
+    } else {
+      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf));
+    }
+
+    setUIFont(1);
+    if (k == 0) {
+      tft.setTextColor(scrollMarkColor(e.role), COLOR_BG);
+      tft.setTextDatum(TL_DATUM);
+      tft.drawString(scrollMark(e.role), SCROLL_GUT_X, y);
+    }
+    tft.setTextColor(scrollTextColor(e.role), COLOR_BG);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString(buf, SCROLL_TXT_X, y);
+  }
+
+  // The rail, repainted WHOLE - the shift moved the viewport's fraction of
+  // the document, so the thumb's position changed with it, and it is one
+  // indicator, not per-line content a row-bounded loop could partially redraw.
+  const uint32_t maxY = scrollMaxY();
+  if (maxY > 0) {
+    const int h = SCROLL_BOT - SCROLL_TOP;
+    tft.fillRect(SCROLL_RAIL_X, SCROLL_TOP, SCROLL_RAIL_W, h, COLOR_CARD);
+    int kh = (int) ((long) h * h / (long) (scrollTotalLines * CODE_LINE_H));
+    if (kh < 24) kh = 24;
+    int ky = SCROLL_TOP + (int) ((long) (h - kh) * y0 / maxY);
+    tft.fillRect(SCROLL_RAIL_X, ky, SCROLL_RAIL_W, kh, COLOR_ACCENT);
+  }
+}
+
 void drawScrollback() {
   tft.fillScreen(COLOR_BG);
 
