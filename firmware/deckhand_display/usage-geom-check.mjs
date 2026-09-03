@@ -986,6 +986,76 @@ for (const b of [1, 2]) {
           `${cache}[${CACHE[cache]}] holds its ${wpads[cache]}-char padded string + NUL `
         + `(${what}) with ${CACHE[cache] - wpads[cache] - 1} bytes of real headroom`);
     }
+
+    // ---- the layout SELECTION: one accessor per constant pair, read exactly
+    // once, and pointed the right WAY round -----------------------------
+    // ONE SPELLING. Every layout-dependent read goes through an accessor, and
+    // each accessor is the ONLY place its constant pair appears outside the
+    // header - so a draw site cannot quietly pin itself to one column.
+    const uino = stripComments("usage.ino");
+    const ACCESSOR_FOR = {
+      NOW_CARD_H: "nowCardH", NOW_SPARK_H: "nowSparkH", NOW_META_Y: "nowMetaY",
+      WEEK_CARD_H: "weekCardH", WEEK_NUM_Y: "weekNumY", WEEK_BURN_Y: "weekBurnY",
+      WEEK_BAR_Y: "weekBarY", WEEK_META_Y: "weekMetaY", WEEK_FABLE_Y: "weekFableY",
+      WEEK_FABLE_BAR_Y: "weekFableBarY",
+    };
+    for (const n of Object.keys(ACCESSOR_FOR)) {
+      const hits = (uino.match(new RegExp(`\\b${n}\\b(?!_SOLO)`, "g")) || []).length;
+      chk(hits === 1,
+          `${n} is read in exactly ONE place in usage.ino - its accessor (got ${hits})`);
+    }
+    chk((uino.match(/\bCONTENT_ROWS_UNUSED\b/g) || []).length === 0,
+        "sanity: the regex above is not matching a name that does not exist");
+
+    // THE MAPPING, NOT JUST THE COUNT. "Read in exactly one place" is
+    // satisfied just as well by a BACKWARDS ternary
+    // (usageCodexShown() ? X_SOLO : X) - it still names each constant once,
+    // and it draws the duo column exactly when Codex is HIDDEN. Parsed from
+    // each accessor's own body: the branch BEFORE ':' (taken when the row IS
+    // shown) must be the bare constant, and the branch AFTER ':' (taken when
+    // it is hidden) must be its _SOLO sibling.
+    for (const [base, fn] of Object.entries(ACCESSOR_FOR)) {
+      const sig = `int ${fn}()`;
+      const at = uino.indexOf(sig);
+      chk(at >= 0, `${fn}() is defined in usage.ino`);
+      if (at < 0) continue;
+      const stmtEnd = uino.indexOf(";", at);
+      const stmt = uino.slice(at, stmtEnd + 1);
+      const m = stmt.match(/usageCodexShown\(\)\s*\?\s*(\w+)\s*:\s*(\w+)/);
+      chk(!!m, `${fn}() reads as a ternary on usageCodexShown()`);
+      if (!m) continue;
+      chk(m[1] === base,
+          `${fn}(): the SHOWN branch (before ':') is ${base}, got ${m[1]} - a `
+        + `backwards ternary draws the duo column exactly when Codex is hidden`);
+      chk(m[2] === `${base}_SOLO`,
+          `${fn}(): the HIDDEN branch (after ':') is ${base}_SOLO, got ${m[2]}`);
+    }
+
+    // The row's fields and its chrome must be gated by the SAME predicate.
+    chk(/if \(!usageCodexShown\(\)\) return;/.test(fnBody(uino, "void renderCodexRow(", "usage.ino")),
+        "renderCodexRow returns early on the predicate, so no field draws into a row that is not there");
+    chk(/if \(usageCodexShown\(\)\) uiCard\(/.test(fnBody(uino, "void drawUsageStatic(", "usage.ino")),
+        "the Codex card's CHROME is gated by the same predicate as its fields");
+    // The layout flip must clear the content area, or the old borders survive.
+    const tabBody = fnBody(uino, "void renderUsageTab(", "usage.ino");
+    chk(/codexShownCache != codexShownNow[\s\S]{0,200}fillRect\(0, CONTENT_Y/
+          .test(tabBody),
+        "a layout flip clears the content area before repainting the chrome");
+    // BOUND TO THE OUTER IF'S OWN CONDITION, not just "does this substring
+    // appear somewhere in the function" - the fillRect guard a few lines
+    // below ALSO tests codexShownCache != codexShownNow, so an unbounded
+    // match is satisfied by that neighbouring line even after the term is
+    // deleted from the OUTER if, which is exactly the fault this assertion
+    // exists to catch (deleting it there means a layout flip with no other
+    // change - source/pin/links/emoji all unchanged - never re-enters the
+    // block at all, so the inner clear is never reached either). Proven by
+    // injection: deleting only the outer clause left the old unbounded
+    // regex passing, because the inner occurrence still matched.
+    const bustIf = tabBody.match(/if \(srcCache != usageSourceLink[\s\S]*?\)\s*\{/);
+    chk(!!bustIf, "found renderUsageTab's chrome-bust if-condition to check");
+    if (bustIf) chk(/codexShownCache != codexShownNow/.test(bustIf[0]),
+        "the layout state is part of the OUTER bust condition (not just the inner "
+      + "clear guard), so a layout flip with no other change still repaints the chrome");
   }
 }
 

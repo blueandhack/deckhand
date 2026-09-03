@@ -629,6 +629,28 @@ bool usageCodexShown() {
   long win = usage.cxWindowMin > 0 ? usage.cxWindowMin : CODEX_HIDE_FALLBACK_MIN;
   return usage.cxAgeSec <= win * 60;
 }
+
+// THE LAYOUT, DERIVED FROM THE ONE PREDICATE at every read. No cached copy:
+// two variables tracking one layout is how a UI comes to draw one column while
+// its chrome is in the other, and this tab already has the ingredients (the
+// fields and the chrome are painted by different functions on different ticks).
+// The cost is a handful of comparisons per render, against a 41ms full flush.
+int nowCardH()      { return usageCodexShown() ? NOW_CARD_H      : NOW_CARD_H_SOLO; }
+int nowSparkH()     { return usageCodexShown() ? NOW_SPARK_H     : NOW_SPARK_H_SOLO; }
+int nowMetaY()      { return usageCodexShown() ? NOW_META_Y      : NOW_META_Y_SOLO; }
+int weekCardH()     { return usageCodexShown() ? WEEK_CARD_H     : WEEK_CARD_H_SOLO; }
+int weekNumY()      { return usageCodexShown() ? WEEK_NUM_Y      : WEEK_NUM_Y_SOLO; }
+int weekBurnY()     { return usageCodexShown() ? WEEK_BURN_Y     : WEEK_BURN_Y_SOLO; }
+int weekBarY()      { return usageCodexShown() ? WEEK_BAR_Y      : WEEK_BAR_Y_SOLO; }
+int weekMetaY()     { return usageCodexShown() ? WEEK_META_Y     : WEEK_META_Y_SOLO; }
+int weekFableY()    { return usageCodexShown() ? WEEK_FABLE_Y    : WEEK_FABLE_Y_SOLO; }
+int weekFableBarY() { return usageCodexShown() ? WEEK_FABLE_BAR_Y: WEEK_FABLE_BAR_Y_SOLO; }
+// SP_2 IS visible here - it is declared in deckhand_display.ino, which the
+// board header cannot see (hence the header's own literal 8 in CARD2_Y/CODEX_Y)
+// but this file can, being concatenated after it. So the gap is named at the
+// only two sites that can name it.
+int weekCardY()     { return CARD1_Y + nowCardH() + SP_2; }
+int codexRowY()     { return weekCardY() + weekCardH() + SP_2; }
 #endif
 
 // The 5-hour card, v2: the 64px hero keeps CARD_HERO_W's box, and the 132px it
@@ -641,7 +663,7 @@ void renderNowCard() {
   const int y0 = CARD1_Y;
   bool stale = usage.quotaAgeSec > QUOTA_STALE_SEC;
   uint16_t color = colorForPct(usage.fiveHourPct);
-  drawCardBorder(&border1Cache, CARD_X, y0, CARD_W, NOW_CARD_H, color);
+  drawCardBorder(&border1Cache, CARD_X, y0, CARD_W, nowCardH(), color);
 
   if (usage.fiveHourPct >= 0) snprintf(buf, sizeof(buf), "%d%%", usage.fiveHourPct);
   else snprintf(buf, sizeof(buf), "--");
@@ -676,12 +698,12 @@ void renderNowCard() {
               usage.fiveHourPct, tickPct, stale ? COLOR_LABEL : color);
 
   drawUsageSpark(&spark1Cache, CARD_X + PAD, y0 + NOW_SPARK_Y, CARD_W - 2 * PAD,
-                 NOW_SPARK_H, stale ? COLOR_LABEL : color, COLOR_CARD);
+                 nowSparkH(), stale ? COLOR_LABEL : color, COLOR_CARD);
 
   snprintf(buf, sizeof(buf), "%s",
            usage.sessionTokens > 0 ? formatTokens(usage.sessionTokens).c_str() : "");
   padTo(buf, sizeof(buf), 12);
-  drawIfChanged(right1Cache, sizeof(right1Cache), buf, CARD_X + PAD, y0 + NOW_META_Y,
+  drawIfChanged(right1Cache, sizeof(right1Cache), buf, CARD_X + PAD, y0 + nowMetaY(),
                 2, 1, COLOR_LABEL, COLOR_CARD);
 
   if (stale) {
@@ -703,7 +725,7 @@ void renderNowCard() {
   // anyone widens this field.
   padLeftTo(buf, sizeof(buf), 10);
   drawIfChanged(resetAt1Cache, sizeof(resetAt1Cache), buf, CARD_X + CARD_W - PAD,
-                y0 + NOW_META_Y, 1, 1, stale ? COLOR_BAD : COLOR_LABEL, COLOR_CARD, TR_DATUM);
+                y0 + nowMetaY(), 1, 1, stale ? COLOR_BAD : COLOR_LABEL, COLOR_CARD, TR_DATUM);
 }
 
 // The 7-day card, v2: SECONDARY, so a T_HEAD (24px) number rather than a 64px
@@ -714,18 +736,18 @@ void renderNowCard() {
 // bar and no colour.
 void renderWeekCard() {
   char buf[BURN_LABEL_BYTES + 8];
-  const int y0 = CARD2_Y;
+  const int y0 = weekCardY();
   const long WIN = 7L * 24 * 60;
   bool stale = usage.quotaAgeSec > QUOTA_STALE_SEC;
   uint16_t color = colorForPct(usage.sevenDayPct);
-  drawCardBorder(&border2Cache, CARD_X, y0, CARD_W, WEEK_CARD_H, color);
+  drawCardBorder(&border2Cache, CARD_X, y0, CARD_W, weekCardH(), color);
 
   // T_HEAD, not T_HERO. The week is background rather than the thing that stops
   // you working, and the size contrast against NOW's 64px IS the hierarchy.
   if (usage.sevenDayPct >= 0) snprintf(buf, sizeof(buf), "%d%%", usage.sevenDayPct);
   else snprintf(buf, sizeof(buf), "--");
   padTo(buf, sizeof(buf), 4);
-  drawIfChanged(pct2Cache, sizeof(pct2Cache), buf, CARD_X + PAD, y0 + WEEK_NUM_Y,
+  drawIfChanged(pct2Cache, sizeof(pct2Cache), buf, CARD_X + PAD, y0 + weekNumY(),
                 3, 1, stale ? COLOR_LABEL : COLOR_VALUE, COLOR_CARD);
 
   // THE AVERAGE, NOT THE RING: at a 7-day window the ring moves 1.49 points
@@ -735,7 +757,7 @@ void renderWeekCard() {
   usageBurnLabel(buf, BURN_LABEL_BYTES, mins, usage.sevenDayResetInMin);
   padLeftTo(buf, sizeof(buf), SIDE_CHARS);
   drawIfChanged(burn2Cache, sizeof(burn2Cache), buf, CARD_X + CARD_W - PAD,
-                y0 + WEEK_BURN_Y, 1, 1,
+                y0 + weekBurnY(), 1, 1,
                 usageBurnUrgent(mins, usage.sevenDayResetInMin)
                   ? (usage.sevenDayPct >= 90 ? COLOR_BAD : COLOR_WARN) : COLOR_LABEL,
                 COLOR_CARD, TR_DATUM);
@@ -745,13 +767,13 @@ void renderWeekCard() {
   // Same stale-aware colour as NOW's bar above, for the same reason: the ALL
   // bar sits directly over the Fable bar below it, which already dims - a
   // bright ALL bar over a dimmed Fable bar was the inconsistency this fixes.
-  drawPaceBar(&bar2Cache, CARD_X + PAD, y0 + WEEK_BAR_Y, CARD_W - 2 * PAD, BAR_H,
+  drawPaceBar(&bar2Cache, CARD_X + PAD, y0 + weekBarY(), CARD_W - 2 * PAD, BAR_H,
               usage.sevenDayPct, tickPct, stale ? COLOR_LABEL : color);
 
   snprintf(buf, sizeof(buf), "%s",
            usage.weekAllTokens > 0 ? formatTokens(usage.weekAllTokens).c_str() : "");
   padTo(buf, sizeof(buf), 12);
-  drawIfChanged(left2Cache, sizeof(left2Cache), buf, CARD_X + PAD, y0 + WEEK_META_Y,
+  drawIfChanged(left2Cache, sizeof(left2Cache), buf, CARD_X + PAD, y0 + weekMetaY(),
                 2, 1, COLOR_LABEL, COLOR_CARD);
 
   if (stale) {
@@ -764,7 +786,7 @@ void renderWeekCard() {
   }
   padLeftTo(buf, sizeof(buf), 12);
   drawIfChanged(right2Cache, sizeof(right2Cache), buf, CARD_X + CARD_W - PAD,
-                y0 + WEEK_META_Y, 2, 1, stale ? COLOR_BAD : COLOR_LABEL, COLOR_CARD, TR_DATUM);
+                y0 + weekMetaY(), 2, 1, stale ? COLOR_BAD : COLOR_LABEL, COLOR_CARD, TR_DATUM);
 
   // FABLE, IN THIS CARD, because Fable IS the same 7-day window rather than a
   // separate thing - and it is the SCARCER cap, which v1 rendered as an 8px
@@ -772,16 +794,16 @@ void renderWeekCard() {
   if (usage.weekFablePct >= 0) snprintf(buf, sizeof(buf), "FABLE  %d%%", usage.weekFablePct);
   else snprintf(buf, sizeof(buf), "FABLE  --");
   padTo(buf, sizeof(buf), 10);
-  drawIfChanged(fable1Cache, sizeof(fable1Cache), buf, CARD_X + PAD, y0 + WEEK_FABLE_Y,
+  drawIfChanged(fable1Cache, sizeof(fable1Cache), buf, CARD_X + PAD, y0 + weekFableY(),
                 2, 1, COLOR_LABEL, COLOR_CARD);
 
   snprintf(buf, sizeof(buf), "%s",
            usage.weekFableTokens > 0 ? formatTokens(usage.weekFableTokens).c_str() : "");
   padLeftTo(buf, sizeof(buf), 12);
   drawIfChanged(fable2Cache, sizeof(fable2Cache), buf, CARD_X + CARD_W - PAD,
-                y0 + WEEK_FABLE_Y, 2, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
+                y0 + weekFableY(), 2, 1, COLOR_LABEL, COLOR_CARD, TR_DATUM);
 
-  drawPaceBar(&fableBarCache, CARD_X + PAD, y0 + WEEK_FABLE_BAR_Y, CARD_W - 2 * PAD, BAR_H,
+  drawPaceBar(&fableBarCache, CARD_X + PAD, y0 + weekFableBarY(), CARD_W - 2 * PAD, BAR_H,
               usage.weekFablePct < 0 ? 0 : usage.weekFablePct, tickPct,
               usage.weekFablePct < 0 ? COLOR_UNKNOWN
                                      : (stale ? COLOR_LABEL : colorForPct(usage.weekFablePct)));
@@ -795,6 +817,12 @@ void renderWeekCard() {
 // out of a rollout file, and a file that stopped being written keeps its last value
 // forever.
 void renderCodexRow() {
+#if BOARD_USAGE_V2
+  // Nothing to draw, and nothing to CLEAR either: the layout flip repaints the
+  // whole content area (see renderUsageTab's bust), so the row's old pixels are
+  // gone before this returns.
+  if (!usageCodexShown()) return;
+#endif
   // Sized by the lane it has to hold, not a literal. padTo() pads to
   // CODEX_LANE_CHARS but stops at `len + 1 < bufSize`, so a buffer one byte too
   // small UNDER-PADS instead of failing - the leftover pixels of a
@@ -808,7 +836,11 @@ void renderCodexRow() {
   bool have = usage.cxPct >= 0;
   bool stale = usage.cxAgeSec > 900;
   uint16_t color = have ? colorForPct(usage.cxPct) : COLOR_UNKNOWN;
+#if BOARD_USAGE_V2
+  drawCardBorder(&cxBorderCache, CARD_X, codexRowY(), CARD_W, CODEX_H, color);
+#else
   drawCardBorder(&cxBorderCache, CARD_X, CODEX_Y, CARD_W, CODEX_H, color);
+#endif
 
   // Left lane: the agent's name and its window, so this can never be mistaken for
   // one of the Claude figures above.
@@ -896,8 +928,13 @@ void renderCodexRow() {
     snprintf(buf, sizeof(buf), "CODEX");
   }
   padTo(buf, sizeof(buf), CODEX_LANE_CHARS);
+#if BOARD_USAGE_V2
+  drawIfChanged(cxPctCache, CODEX_LANE_CACHE, buf, CARD_X + PAD, codexRowY() + CODEX_TEXT_Y, 2, 1,
+                COLOR_LABEL, COLOR_CARD);
+#else
   drawIfChanged(cxPctCache, CODEX_LANE_CACHE, buf, CARD_X + PAD, CODEX_Y + CODEX_TEXT_Y, 2, 1,
                 COLOR_LABEL, COLOR_CARD);
+#endif
   if (showCxIcon) {
     // "CX" + 4px gap + the icon, from the label's x, at each board's own
     // advance: 12+4+13 = 29px ending at 55 on board 1, and 16+4+16 = 36px
@@ -907,7 +944,11 @@ void renderCodexRow() {
     // the row's text, whose own clear box is 2 rows taller than the icon on
     // both boards. See the long derivation above.
     setUIFont(2);
+#if BOARD_USAGE_V2
+    drawEmoji(cxEmoji, CARD_X + PAD + tft.textWidth("CX") + 4, codexRowY() + CODEX_TEXT_Y, COLOR_CARD);
+#else
     drawEmoji(cxEmoji, CARD_X + PAD + tft.textWidth("CX") + 4, CODEX_Y + CODEX_TEXT_Y, COLOR_CARD);
+#endif
   }
 
   // Right lane: the percentage and the reset countdown - two facts, not three.
@@ -935,8 +976,13 @@ void renderCodexRow() {
     snprintf(buf, sizeof(buf), "%d%%", usage.cxPct);
   }
   padLeftTo(buf, sizeof(buf), CODEX_RIGHT_CHARS);
+#if BOARD_USAGE_V2
+  drawIfChanged(cxRightCache, CODEX_LANE_CACHE, buf, CARD_X + CARD_W - PAD, codexRowY() + CODEX_TEXT_Y, 2, 1,
+                stale ? COLOR_LABEL : (have ? COLOR_VALUE : COLOR_LABEL), COLOR_CARD, TR_DATUM);
+#else
   drawIfChanged(cxRightCache, CODEX_LANE_CACHE, buf, CARD_X + CARD_W - PAD, CODEX_Y + CODEX_TEXT_Y, 2, 1,
                 stale ? COLOR_LABEL : (have ? COLOR_VALUE : COLOR_LABEL), COLOR_CARD, TR_DATUM);
+#endif
 
   // Pace bar, with the same tick the Claude cards carry: fill ahead of the marker means
   // quota is going faster than time. tickPct -1 when either input is missing, which
@@ -947,8 +993,13 @@ void renderCodexRow() {
   int tickPct = (have && usage.cxResetInMin >= 0 && usage.cxWindowMin > 0)
                     ? (int) (100 - usage.cxResetInMin * 100 / usage.cxWindowMin)
                     : -1;
+#if BOARD_USAGE_V2
+  drawPaceBar(&cxBarCache, CARD_X + PAD, codexRowY() + CODEX_BAR_Y, CARD_W - 2 * PAD, BAR_H,
+              have ? usage.cxPct : 0, tickPct, stale ? COLOR_LABEL : color);
+#else
   drawPaceBar(&cxBarCache, CARD_X + PAD, CODEX_Y + CODEX_BAR_Y, CARD_W - 2 * PAD, BAR_H,
               have ? usage.cxPct : 0, tickPct, stale ? COLOR_LABEL : color);
+#endif
 }
 void renderUsageTab() {
   if (!everReceived) return;
@@ -1023,6 +1074,33 @@ void renderUsageTab() {
   // without a bust term, and carrying one here would only cost an avoidable
   // full-chrome repaint on every icon-only change in a file whose whole
   // discipline is flicker avoidance.
+#if BOARD_USAGE_V2
+  static int srcCache = -2, cxSrcCache = -2, pinCache = -1, linksCache = -1,
+             emojiCache = -3, codexShownCache = -1;
+  int pinNow = usagePinHostId[0] ? 1 : 0;
+  int linksNow = usedLinkCount();
+  int emojiNow = emojiIdForLink(usageSourceLink);
+  int codexShownNow = usageCodexShown() ? 1 : 0;
+  if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink ||
+      pinCache != pinNow || linksCache != linksNow ||
+      emojiCache != emojiNow || codexShownCache != codexShownNow) {
+    // THE LAYOUT MOVES THE CARD BORDERS, so this is the one bust term that
+    // needs more than a chrome repaint. Without the clear, NOW growing past
+    // where WEEK used to start leaves a band of the old card behind, and the
+    // fields then draw at the new offsets inside the old boxes - the settings
+    // branch's "a live field drew a control into chrome that did not exist",
+    // arriving through geometry instead of a count.
+    if (codexShownCache != codexShownNow && codexShownCache != -1)
+      tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
+    srcCache = usageSourceLink;
+    cxSrcCache = cxSourceLink;
+    pinCache = pinNow;
+    linksCache = linksNow;
+    emojiCache = emojiNow;
+    codexShownCache = codexShownNow;
+    drawUsageStatic();   // repaints chrome; resetUsageCaches() runs inside it
+  }
+#else
   static int srcCache = -2, cxSrcCache = -2, pinCache = -1, linksCache = -1,
              emojiCache = -3;
   int pinNow = usagePinHostId[0] ? 1 : 0;
@@ -1038,6 +1116,7 @@ void renderUsageTab() {
     emojiCache = emojiNow;
     drawUsageStatic();   // repaints chrome; resetUsageCaches() runs inside it
   }
+#endif
 #if BOARD_USAGE_V2
   renderNowCard();
   renderWeekCard();
@@ -1069,11 +1148,15 @@ void drawUsageStatic() {
   // board header now derive from. "NOW", not "SESSION", because this card is
   // the one that stops you working - the semantic hierarchy this redesign is
   // for (docs/design/usage-redesign/usage.js's selected layout B).
-  drawCardChrome(CARD1_Y, "NOW - 5 HOUR WINDOW", linkTag(usageSourceLink), NOW_CARD_H);
-  drawCardChrome(CARD2_Y, "WEEK - 7 DAY, ALL MODELS", linkTag(usageSourceLink), WEEK_CARD_H);
+  drawCardChrome(CARD1_Y, "NOW - 5 HOUR WINDOW", linkTag(usageSourceLink), nowCardH());
+  drawCardChrome(weekCardY(), "WEEK - 7 DAY, ALL MODELS", linkTag(usageSourceLink), weekCardH());
 #else
   drawCardChrome(CARD1_Y, "SESSION - 5 HOUR WINDOW", linkTag(usageSourceLink));
   drawCardChrome(CARD2_Y, "WEEK - 7 DAY, ALL MODELS", linkTag(usageSourceLink));
 #endif
+#if BOARD_USAGE_V2
+  if (usageCodexShown()) uiCard(CARD_X, codexRowY(), CARD_W, CODEX_H, COLOR_CARD);
+#else
   uiCard(CARD_X, CODEX_Y, CARD_W, CODEX_H, COLOR_CARD);
+#endif
 }
