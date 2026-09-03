@@ -1,0 +1,615 @@
+<title>Deckhand Scrollback</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ink:#14171c; --ink-2:#464f5c; --ink-3:#7c8798; --rule:#d9d5cf; --rule-2:#ebe8e3;
+  --ground:#f3f1ed; --panel:#fffefc; --raise:#e9e6e0;
+  --hot:#b54900; --cool:#105da5;
+  --d-bg:#000000; --d-card:#181821; --d-label:#848284; --d-value:#ffffff;
+  --d-accent:#ffa600; --d-good:#0071b5; --d-warn:#e79e00; --d-bad:#ce79a5;
+  --adv:8px;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --ink:#eceef2; --ink-2:#a4adbb; --ink-3:#6d7787; --rule:#2b3039; --rule-2:#1e2229;
+  --ground:#0e1013; --panel:#161a1f; --raise:#1d222a;
+  --hot:#ffa600; --cool:#5aa9e8;
+}}
+:root[data-theme="dark"]{
+  --ink:#eceef2; --ink-2:#a4adbb; --ink-3:#6d7787; --rule:#2b3039; --rule-2:#1e2229;
+  --ground:#0e1013; --panel:#161a1f; --raise:#1d222a;
+  --hot:#ffa600; --cool:#5aa9e8;
+}
+*{box-sizing:border-box}
+body{background:var(--ground); color:var(--ink); font-family:"IBM Plex Sans",system-ui,sans-serif;
+  font-size:15px; line-height:1.62; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:1120px; margin:0 auto; padding:44px 26px 90px}
+h1,h2,h3{font-family:Archivo,system-ui,sans-serif; text-wrap:balance; margin:0}
+h1{font-weight:800; font-size:clamp(34px,5.2vw,56px); line-height:1.02; letter-spacing:-.024em}
+h2{font-weight:700; font-size:25px; letter-spacing:-.012em; margin:0 0 6px}
+h3{font-weight:600; font-size:15px; letter-spacing:.02em; margin:0 0 8px}
+p{margin:0 0 14px; max-width:66ch}
+a{color:var(--cool)}
+.lede{font-size:19px; line-height:1.55; color:var(--ink-2); max-width:60ch; margin-top:18px}
+.eyebrow{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.16em;
+  text-transform:uppercase; color:var(--ink-3); font-weight:500}
+.mono{font-family:"IBM Plex Mono",monospace; font-size:.9em}
+code{font-family:"IBM Plex Mono",monospace; font-size:.87em; background:var(--raise);
+  padding:1px 5px; border-radius:3px}
+hr.sep{border:0; border-top:1px solid var(--rule); margin:56px 0 34px}
+
+/* ---- chips ---- */
+.chips{display:flex; flex-wrap:wrap; gap:8px; margin-top:26px}
+.chip{font-family:"IBM Plex Mono",monospace; font-size:11.5px; letter-spacing:.03em;
+  border:1px solid var(--rule); color:var(--ink-2); padding:5px 9px; border-radius:4px;
+  background:var(--panel)}
+.chip b{color:var(--ink); font-weight:600}
+
+/* ---- controls ---- */
+.bar{display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:0 0 22px}
+button.ctl{font-family:"IBM Plex Mono",monospace; font-size:11.5px; letter-spacing:.05em;
+  text-transform:uppercase; background:var(--panel); color:var(--ink-2);
+  border:1px solid var(--rule); padding:7px 12px; border-radius:4px; cursor:pointer}
+button.ctl[aria-pressed="true"]{background:var(--ink); color:var(--ground); border-color:var(--ink)}
+button.ctl:focus-visible{outline:2px solid var(--cool); outline-offset:2px}
+
+/* ---- device ---- */
+.stage{display:flex; flex-wrap:wrap; gap:38px; align-items:flex-start}
+.unit{flex:0 0 auto}
+.cap{margin-top:12px; max-width:330px}
+.cap .t{font-family:Archivo,sans-serif; font-weight:700; font-size:14px; letter-spacing:.01em}
+.cap .d{font-size:13px; color:var(--ink-3); line-height:1.5; margin-top:3px}
+.bezel{padding:9px; background:#0a0b0d; border-radius:15px; width:338px;
+  box-shadow:0 1px 0 #ffffff14 inset, 0 14px 34px -14px #00000073}
+.dev{position:relative; width:320px; height:480px; overflow:hidden;
+  background:var(--d-bg); border-radius:6px;
+  font-family:"IBM Plex Mono",monospace; font-size:14px; letter-spacing:-0.4px;
+  font-weight:500;}
+.dev *{position:absolute; white-space:pre}
+.dev .h{height:16px; line-height:16px}
+.dev .rule{left:0; width:320px; height:1px; background:var(--d-label); opacity:.55}
+.dev .clip{overflow:hidden}
+.dev .tape{position:absolute; left:0; top:0; width:320px}
+.grab{cursor:grab} .grab:active{cursor:grabbing}
+
+/* ---- notes / grid ---- */
+.cols{display:grid; grid-template-columns:repeat(auto-fit,minmax(268px,1fr)); gap:22px}
+.note{background:var(--panel); border:1px solid var(--rule); border-radius:7px; padding:17px 18px}
+.note h3{color:var(--ink)}
+.note p{font-size:13.5px; line-height:1.55; color:var(--ink-2); margin:0 0 9px}
+.note p:last-child{margin:0}
+.tbl{width:100%; border-collapse:collapse; font-size:13.5px}
+.tbl th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:10.5px;
+  letter-spacing:.13em; text-transform:uppercase; color:var(--ink-3); font-weight:500;
+  padding:0 12px 7px 0; border-bottom:1px solid var(--rule)}
+.tbl td{padding:9px 12px 9px 0; border-bottom:1px solid var(--rule-2); vertical-align:top;
+  color:var(--ink-2)}
+.tbl td:first-child{color:var(--ink); font-weight:500; white-space:nowrap}
+.tbl .num{font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; color:var(--ink)}
+.scrollx{overflow-x:auto}
+.key{display:inline-block; width:1.2em; text-align:center;
+  font-family:"IBM Plex Mono",monospace; font-weight:600}
+ul.tight{margin:0 0 14px; padding-left:20px; max-width:66ch}
+ul.tight li{margin-bottom:6px; color:var(--ink-2)}
+ul.tight li b, p b{color:var(--ink); font-weight:600}
+.gallery{display:flex; flex-wrap:wrap; gap:30px}
+/* a scaled transform does not change layout size, so the bezel must be sized for the
+   SCALED device or it clips: 320x480 at .6875 is 220x330, plus 7px padding = 234x344. */
+.gallery .bezel{width:234px; height:344px; padding:7px; border-radius:12px; overflow:hidden}
+.gallery .dev{transform:scale(.6875); transform-origin:top left; flex:0 0 auto}
+.gallery .unit{width:234px}
+.flag{border-left:3px solid var(--hot); padding:2px 0 2px 15px; margin:0 0 16px}
+.flag p{margin:0; font-size:14px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Deckhand &middot; board 2 &middot; ES3C35P 320&times;480</div>
+  <h1>Scrollback</h1>
+  <p class="lede">Session history stops being a paged list of previews and becomes one continuous
+  transcript &mdash; newest at the bottom, drag up for older. Deleting the pager's chrome returns
+  <b>seven lines of text</b> to the screen.</p>
+  <div class="chips">
+    <span class="chip"><b>18 &rarr; 25</b> lines of transcript</span>
+    <span class="chip"><b>34</b> columns after the gutter</span>
+    <span class="chip"><b>0</b> round trips per screen</span>
+    <span class="chip"><b>ASCII only</b> &mdash; 0x20..0x7E</span>
+  </div>
+</header>
+
+<hr class="sep">
+
+<h2>Now, and proposed</h2>
+<p>Both panels are drawn at <b>1&times; real geometry</b> &mdash; 320&times;480, Spleen&nbsp;8&times;16 on
+an 8px advance, the live DARK palette straight out of <code>THEMES[]</code>. The right-hand panel
+is really scrollable: <b>drag it</b>.</p>
+
+<div class="bar">
+  <button class="ctl" id="t-theme" aria-pressed="false">Light palette</button>
+  <button class="ctl" id="t-filter" aria-pressed="false">Show tool calls (ALL)</button>
+  <button class="ctl" id="t-block" aria-pressed="false">Fill user blocks</button>
+  <button class="ctl" id="t-quant" aria-pressed="false">Quantise to 16px lines</button>
+  <button class="ctl" id="t-top">Jump to oldest</button>
+  <button class="ctl" id="t-bot">Jump to newest</button>
+</div>
+
+<div class="stage">
+  <div class="unit">
+    <div class="bezel"><div class="dev" id="dev-before"></div></div>
+    <div class="cap">
+      <div class="t">NOW &mdash; paged previews</div>
+      <div class="d">One screen at a time, 300-character previews, a round trip per page.
+      A scrubber and three buttons own the bottom 120px. Tapping a row opens a second,
+      separate pager to read one message whole.</div>
+    </div>
+  </div>
+  <div class="unit">
+    <div class="bezel"><div class="dev grab" id="dev-after"></div></div>
+    <div class="cap">
+      <div class="t">PROPOSED &mdash; one transcript</div>
+      <div class="d">Full message text inline, ASCII gutter markers per role, drag to scroll.
+      No scrubber, no buttons, no second screen &mdash; and 25 lines of text where there
+      were 18.</div>
+    </div>
+  </div>
+</div>
+
+<hr class="sep">
+
+<h2>The gutter is the whole design</h2>
+<p>Claude Code marks each turn in a gutter rather than in a bubble, which is the right instinct for
+a 320px-wide panel: bubbles spend horizontal space, and horizontal space is the scarce axis here.
+But <b>Claude Code's own markers cannot be drawn on this device.</b> Spleen declares
+<code>0x20..0x7E</code>, so <span class="mono">&#9207;</span> and <span class="mono">&#9500;</span>
+render as nothing at all &mdash; the trap this repo has already paid for five times, most recently
+with a truncation marker that was invisible for months. So the vocabulary is ASCII, one column wide,
+and colour is never the only carrier.</p>
+
+<div class="scrollx">
+<table class="tbl">
+  <tr><th>Mark</th><th>Role</th><th>Colour token</th><th>Treatment</th></tr>
+  <tr><td><span class="key" style="color:var(--d-accent)">&gt;</span></td><td>You</td>
+      <td class="mono">COLOR_ACCENT</td><td>Full text, wrapped to 34 columns. The turn that started everything.</td></tr>
+  <tr><td><span class="key" style="color:var(--d-good)">*</span></td><td>Claude</td>
+      <td class="mono">COLOR_GOOD</td><td>Full text, wrapped. The bulk of the transcript.</td></tr>
+  <tr><td><span class="key" style="color:var(--d-label)">$</span></td><td>Ran a tool</td>
+      <td class="mono">COLOR_LABEL</td><td>One line, dim, clipped with three ASCII dots. Tool name plus its one interesting field.</td></tr>
+  <tr><td><span class="key" style="color:var(--d-label)">|</span></td><td>Result</td>
+      <td class="mono">COLOR_LABEL</td><td>One line, dim, tucked against the call above it with no spacer &mdash; they read as one unit.</td></tr>
+  <tr><td><span class="key" style="color:var(--d-bad)">!</span></td><td>Denied / error</td>
+      <td class="mono">COLOR_BAD</td><td>One line. The only entry that keeps full colour weight while dim.</td></tr>
+</table>
+</div>
+
+<div class="cols" style="margin-top:24px">
+  <div class="note">
+    <h3>Why 34 columns</h3>
+    <p>The lane is <span class="mono">12 + 16 (gutter) &rarr; 28</span>, then 34 &times; 8px of text
+    ending at 299, a 6px gap, a 4px scrollbar at 306, and a 10px right margin. Sums to exactly 320.</p>
+    <p>The pager gets 37 columns today, so the gutter costs <b>three columns, 8%</b>. That is what
+    buys a transcript you can read as a conversation instead of a list of labelled rows.</p>
+  </div>
+  <div class="note">
+    <h3>Why the header keeps a back key</h3>
+    <p>Removing the buttons removes <code>CLOSE</code>, so the header takes a <span class="mono">&lt;</span>
+    key at <b>46&times;46</b> &mdash; exactly <code>TAP_MIN</code>, the 7.1mm fingertip floor.</p>
+    <p>The name lane between it and the filter chip is <b>178px = 22 columns</b>, which is precisely
+    the 22 characters the host already caps a session name to. Derived, not chosen.</p>
+  </div>
+  <div class="note">
+    <h3>Why a scrollbar at all</h3>
+    <p>The counter says <span class="mono">412/628</span>, but a number cannot track a finger. A
+    4px rail is the only thing that answers &ldquo;how much is above me&rdquo; continuously while
+    you drag, and it replaces a 46px scrubber band.</p>
+    <p>It is drawn only when the transcript is taller than the view, so a three-message session
+    shows none.</p>
+  </div>
+</div>
+
+<hr class="sep">
+
+<h2>States</h2>
+<p>Every panel below is the same renderer at the same geometry, scaled to 0.69 for the page.</p>
+
+<div class="gallery" id="gallery"></div>
+
+<hr class="sep">
+
+<h2>What this deletes</h2>
+<p>The strongest argument for the design is subtraction. Scrolling makes four separate mechanisms
+unnecessary, and one of them is an entire screen with its own touch handler and wire verb.</p>
+<ul class="tight">
+  <li><b>The second-level pager.</b> <code>drawHistFull()</code>, <code>handleHistFullTouch()</code>
+  and the <code>HISTORY &lt;id&gt; &lt;filter&gt; item:&lt;n&gt;</code> verb with its host handler
+  <code>sendHistoryItem()</code> &mdash; all gone, because full text is already inline. This existed
+  only because a message taller than one screen was otherwise unreachable.</li>
+  <li><b>The scrubber.</b> 46px of tap band plus a 20px track, replaced by a 4px rail that does the
+  same job continuously rather than by jump.</li>
+  <li><b>PREV / CLOSE / NEXT.</b> A 50px button row plus its margins. <code>CLOSE</code> survives as
+  the header's back key; the other two are what scrolling <i>is</i>.</li>
+  <li><b>Per-screen round trips.</b> <code>histPaginate()</code> and the page/pages/from bookkeeping
+  stop being per-turn work &mdash; the device fetches once and then owns the whole transcript.</li>
+</ul>
+<p>Set against that: the gutter costs three columns, and a very long message costs real scrolling
+&mdash; a 4,000-character turn is about 118 lines, roughly five screens.</p>
+
+<hr class="sep">
+
+<h2>Engineering notes</h2>
+
+<div class="cols">
+  <div class="note">
+    <h3>Fetch once, into PSRAM</h3>
+    <p>Board 1's reader holds <b>one screen</b> in a 2.4KB arena because that board has ~26KB of
+    free heap. Board 2 has <b>8,388,608 bytes of PSRAM</b>, of which the framebuffer takes 307,200.
+    A real transcript's whole conversation is <b>122KB</b>; everything including tool calls is 584KB.</p>
+    <p>So the constraint that shaped the paged design does not exist here, and the fetch can be
+    the whole thing. Over board 2's native USB CDC &mdash; measured at ~384 KB/s from the
+    <code>SCREENSHOT</code> path &mdash; that is <b>~0.3s</b>.</p>
+  </div>
+  <div class="note">
+    <h3>BLE cannot have it</h3>
+    <p>The same 122KB over BLE at ~666 B/s is <b>183 seconds</b>. So the request carries a
+    <i>byte</i> budget and the host returns the newest entries that fit, plus a count of what it
+    withheld.</p>
+    <p>The top of the scroll then states the limit rather than hiding it &mdash; the same rule that
+    makes <code>POWERPROBE</code> refuse with <span class="mono">not on battery</span> instead of
+    going quiet. Never offer a control that cannot work.</p>
+  </div>
+  <div class="note">
+    <h3>The flush is the frame budget</h3>
+    <p>A full-screen flush is <b>30ms</b> measured (gather 8.3 + transfer 21.8). The list area is
+    412 of 480 rows, so a scrolled frame is <b>~23ms derived by proportion</b> &mdash; derived, not
+    measured, and worth measuring with <code>PERF</code> before anyone trusts it.</p>
+    <p>That puts the ceiling near <b>40fps</b> and says the bottleneck is QSPI, not glyphs. The
+    shim owns the framebuffer, so a scroll should <code>memmove</code> rows and draw only the
+    newly exposed band.</p>
+  </div>
+</div>
+
+<h3 style="margin:26px 0 10px">The one open engineering question</h3>
+<div class="flag">
+  <p><b>Pixel-smooth or quantised to the 16px cell?</b> Toggle it on the panel above and drag.
+  Quantised means the <code>memmove</code> is always a whole number of lines and no glyph is ever
+  drawn clipped &mdash; which suits a bitmap font on an exact 16px cell, and suits this repo's
+  preference for exact arithmetic. But 16px is 2.5mm at 6.49 px/mm, and a slow drag in 2.5mm
+  steps is visibly notchy.</p>
+</div>
+<p>Smooth scrolling needs the shim to clip a partial glyph row, which <b>I have not verified it can
+do</b> &mdash; that is the first thing to establish, because it decides this. If it cannot,
+quantised is not a preference but the only option.</p>
+
+<hr class="sep">
+
+<h2>Not decided, and not mine to decide</h2>
+<ul class="tight">
+  <li><b>Live tailing.</b> A working session keeps producing entries. &ldquo;Newest at the bottom&rdquo;
+  invites the transcript to grow while you watch it, with a <span class="mono">2 NEW</span> affordance
+  when you have scrolled away &mdash; but that is a second feature with its own refresh cadence, and
+  it is not in this mock. Snapshot-on-open is what is drawn.</li>
+  <li><b>Momentum.</b> Every fling frame is another ~23ms flush, so a long decay is expensive in a
+  way it would not be on a phone. Drawn here as a short decay; worth feeling on real glass before
+  fixing.</li>
+  <li><b>Board 1 keeps its pager.</b> Everything here sits behind a board flag. Board 1 is resistive,
+  where this repo already measured that drag-scroll misfires, and its binary is held byte-identical.</li>
+</ul>
+
+<div class="flag" style="border-color:var(--cool); margin-top:22px">
+  <p><b>What this mock is not evidence of.</b> Nothing here has been on the glass. It is a
+  browser rendering at the device's arithmetic, so it vouches for geometry and for the
+  interaction &mdash; and for nothing else. Colour in particular it cannot settle: on board 2 even
+  <code>SCREENSHOT</code> reads the shadow framebuffer rather than the panel, so
+  <code>COLORTEST</code> is the instrument and a person is the authority.</p>
+</div>
+
+</div>
+
+<script>
+"use strict";
+/* ---------------- transcript content ---------------- */
+/* roles: 0 you, 1 claude, 2 ran, 3 result, 4 error */
+var ENTRIES = [
+  {r:0,t:"the geom sweep is reporting ten unguarded constants on board 2 and they are all the ones this branch just added"},
+  {r:1,t:"That pattern usually means the constants are a chain of relative identities rather than independent literals. The sweep injects at parse time, so perturbing one term moves every offset below it and every identity still holds."},
+  {r:2,t:"Grep: NOW_SPARK_H_SOLO"},
+  {r:3,t:"board_es3c35p.h:2871  4 matches"},
+  {r:1,t:"Confirmed. All ten are written as prev + cell + AIR. Let me check what the rhythm assertion actually binds."},
+  {r:2,t:"Read: usage-geom-check.mjs"},
+  {r:3,t:"330 assertions, rhythm() at line 604"},
+  {r:0,t:"so rewrite them as independent literals?"},
+  {r:1,t:"Yes, and that is the opposite of what the wireless-pairing panel did. Independent literals plus a rhythm assertion in the checker is strictly better, because the perturbation cannot propagate into the checker's own expectation."},
+  {r:1,t:"The cost, stated rather than discovered later: a future change to either card's spacing has to change it at every boundary, or say at the assertion why one boundary differs."},
+  {r:2,t:"Edit: board_es3c35p.h"},
+  {r:3,t:"10 replacements"},
+  {r:2,t:"Bash: node geom-sweep.mjs --board 2"},
+  {r:3,t:"514 of 582 guarded, 10 newly caught at |1|"},
+  {r:0,t:"nice. and the two that are still unguarded?"},
+  {r:1,t:"NOW_SIDE_Y and WEEK_BURN_Y are invisible to any band assertion, each for its own reason. The first sits inside the hero band with 12 rows of slack at each end; the second shares one band with the number beside it by construction, so min and max both come from WEEK_NUM_Y."},
+  {r:1,t:"Both needed their own bind: centred-in-band for the first, optically centred on the number for the second, with both cells parsed from UI_FONTS rather than transcribed."},
+  {r:2,t:"Bash: node board-baseline.mjs --check 1"},
+  {r:4,t:"board 1 CHANGED  +0 bytes"},
+  {r:0,t:"+0 bytes but changed?"},
+  {r:1,t:"That is the case the old size check could never see, and it is exactly why it was replaced. A pure content change at identical size. Let me find what moved."},
+  {r:2,t:"Bash: nm -S build/*.elf | sort"},
+  {r:3,t:"one mul16s with operands swapped"},
+  {r:1,t:"A default argument on a shared function changed board 1's codegen without changing its size. Fixed by putting the signature behind the board flag so board 1 never sees the extra parameter."},
+  {r:0,t:"good catch. re-check and then we can baseline"},
+  {r:2,t:"Bash: node board-baseline.mjs --check 1"},
+  {r:3,t:"board 1 UNCHANGED  8f64b7f7  size=1387024"}
+];
+
+/* ---------------- geometry, straight from board_es3c35p.h ---------------- */
+var W=320, H=480, ADV=8, LH=16;
+var HDR_H=54, RULE_Y=54, LIST_TOP=60, LIST_BOT=472;
+var LIST_H=LIST_BOT-LIST_TOP;                  /* 412 */
+var VIS=Math.floor(LIST_H/LH);                 /* 25 lines */
+var GUT_X=12, TXT_X=28, COLS=34;
+var SB_X=306, SB_W=4;
+var CHIP_W=60, CHIP_X=W-12-CHIP_W, CHIP_Y=4, CHIP_H=46;
+var BACK_X=12, BACK_W=46;
+var NAME_X=66;
+
+var MARK={0:">",1:"*",2:"$",3:"|",4:"!"};
+var MCOL={0:"accent",1:"good",2:"label",3:"label",4:"bad"};
+var TCOL={0:"value",1:"value",2:"label",3:"label",4:"bad"};
+
+/* ---------------- wrapping (mirrors drawWrappedText: word wrap, hard-break long words) ------- */
+function wrap(text, cols){
+  var out=[], words=String(text).split(/\s+/).filter(Boolean), cur="";
+  for(var i=0;i<words.length;i++){
+    var w=words[i];
+    while(w.length>cols){                       /* a word wider than the lane breaks hard */
+      if(cur){ out.push(cur); cur=""; }
+      out.push(w.slice(0,cols)); w=w.slice(cols);
+    }
+    if(!cur) cur=w;
+    else if(cur.length+1+w.length<=cols) cur+=" "+w;
+    else { out.push(cur); cur=w; }
+  }
+  if(cur) out.push(cur);
+  return out.length?out:[""];
+}
+function clip1(text, cols){
+  var t=String(text).replace(/\s+/g," ").trim();
+  return t.length>cols ? t.slice(0,cols-3)+"..." : t;   /* three ASCII dots, never U+2026 */
+}
+
+/* ---------------- tape: entries -> flat 16px lines ---------------- */
+function buildTape(entries, opt){
+  var chat = opt.filter==="chat", lines=[], i;
+  var kept = entries.filter(function(e){ return chat ? (e.r===0||e.r===1) : true; });
+  if(opt.headNote) lines.push({note:opt.headNote});
+  for(i=0;i<kept.length;i++){
+    var e=kept[i], prev=kept[i-1];
+    /* a result tucks against its own call with no spacer: they read as one unit */
+    var tight = e.r===3 && prev && prev.r===2;
+    if(i>0 && !tight) lines.push({spacer:true});
+    if(e.r===2||e.r===3||e.r===4){
+      lines.push({m:MARK[e.r], mc:MCOL[e.r], t:clip1(e.t,COLS), tc:TCOL[e.r], r:e.r});
+    } else {
+      var ws=wrap(e.t,COLS);
+      for(var k=0;k<ws.length;k++)
+        lines.push({m:k===0?MARK[e.r]:"", mc:MCOL[e.r], t:ws[k], tc:TCOL[e.r], r:e.r,
+                    blk:e.r===0, blkTop:e.r===0&&k===0, blkBot:e.r===0&&k===ws.length-1});
+    }
+  }
+  return lines;
+}
+
+/* ---------------- DOM helpers ---------------- */
+function el(parent, cls, css, text){
+  var d=document.createElement("div");
+  if(cls) d.className=cls;
+  if(css) for(var k in css) d.style[k]=css[k];
+  if(text!==undefined) d.textContent=text;
+  parent.appendChild(d); return d;
+}
+function px(n){ return n+"px"; }
+function tok(name){ return "var(--d-"+name+")"; }
+
+function header(dev, name, pos, filter){
+  /* back key - TAP_MIN 46x46, replaces the deleted CLOSE button */
+  var b=el(dev,null,{left:px(BACK_X),top:px(CHIP_Y),width:px(BACK_W),height:px(CHIP_H),
+    border:"2px solid "+tok("accent"), borderRadius:"3px"});
+  el(b,null,{left:"0",top:px((CHIP_H-LH)/2),width:px(BACK_W),height:px(LH),lineHeight:px(LH),
+    textAlign:"center",color:tok("accent")},"<");
+  /* name, then the position counter under it - two 16px lines inside the 54px header */
+  el(dev,"h",{left:px(NAME_X),top:"12px",color:tok("value")}, clip1(name,22));
+  el(dev,"h",{left:px(NAME_X),top:"30px",color:tok("label"),fontSize:"12px",letterSpacing:"-0.2px"}, pos);
+  /* filter chip */
+  var c=el(dev,null,{left:px(CHIP_X),top:px(CHIP_Y),width:px(CHIP_W),height:px(CHIP_H),
+    background:tok("accent"),borderRadius:"3px"});
+  el(c,null,{left:"0",top:px((CHIP_H-LH)/2),width:px(CHIP_W),height:px(LH),lineHeight:px(LH),
+    textAlign:"center",color:tok("bg"),fontWeight:"600"}, filter==="chat"?"CHAT":"ALL");
+  el(dev,"rule",{top:px(RULE_Y)});
+}
+
+/* ---------------- the proposed screen ---------------- */
+function renderAfter(dev, state){
+  dev.textContent="";
+  var tape=buildTape(ENTRIES,state);
+  var total=tape.length*LH;
+  var maxScroll=Math.max(0,total-LIST_H);
+  if(state.y>maxScroll) state.y=maxScroll;
+  if(state.y<0) state.y=0;
+  var y=state.quant ? Math.round(state.y/LH)*LH : state.y;
+
+  /* position counter: which entry the top visible line belongs to */
+  var shown=ENTRIES.filter(function(e){ return state.filter==="chat"?(e.r===0||e.r===1):true; }).length;
+  var frac=maxScroll?y/maxScroll:1;
+  var at=Math.min(shown,Math.max(1,Math.round(frac*(shown-1))+1));
+  header(dev,"deckhand", at+"/"+shown+" entries", state.filter);
+
+  var clip=el(dev,"clip",{left:"0",top:px(LIST_TOP),width:px(W),height:px(LIST_H)});
+  var tapeEl=el(clip,"tape",{transform:"translateY("+px(-y)+")"});
+
+  var first=Math.max(0,Math.floor(y/LH)-1), last=Math.min(tape.length,Math.ceil((y+LIST_H)/LH)+1);
+  for(var i=first;i<last;i++){
+    var L=tape[i], ty=i*LH;
+    if(L.spacer) continue;
+    if(L.note){
+      el(tapeEl,"h",{left:"0",top:px(ty),width:px(W),textAlign:"center",color:tok("label"),
+        fontSize:"12px",letterSpacing:"-0.2px"}, L.note);
+      continue;
+    }
+    if(L.blk && state.block){
+      el(tapeEl,null,{left:px(GUT_X-4),top:px(ty),width:px(300-GUT_X+8),height:px(LH),
+        background:tok("card"),
+        borderRadius:(L.blkTop?"4px 4px ":"0 0 ")+(L.blkBot?"4px 4px":"0 0")});
+    }
+    if(L.m) el(tapeEl,"h",{left:px(GUT_X),top:px(ty),color:tok(L.mc),fontWeight:"600"},L.m);
+    el(tapeEl,"h",{left:px(TXT_X),top:px(ty),color:tok(L.tc)},L.t);
+  }
+
+  /* the 4px rail, drawn only when there is more than a screenful */
+  if(maxScroll>0){
+    el(dev,null,{left:px(SB_X),top:px(LIST_TOP),width:px(SB_W),height:px(LIST_H),
+      background:tok("card")});
+    var kh=Math.max(24,Math.round(LIST_H*LIST_H/total));
+    var ky=LIST_TOP+Math.round((LIST_H-kh)*(y/maxScroll));
+    el(dev,null,{left:px(SB_X),top:px(ky),width:px(SB_W),height:px(kh),background:tok("accent")});
+  }
+  state.maxScroll=maxScroll;
+}
+
+/* ---------------- the current pager, for comparison ---------------- */
+function renderBefore(dev){
+  dev.textContent="";
+  var CH_X=12,CH_Y=4,CH_W=60,CH_H=46,CH_CY=27;
+  var c=el(dev,null,{left:px(CH_X),top:px(CH_Y),width:px(CH_W),height:px(CH_H),
+    background:tok("accent"),borderRadius:"3px"});
+  el(c,null,{left:"0",top:px(CH_CY-LH/2),width:px(CH_W),height:px(LH),lineHeight:px(LH),
+    textAlign:"center",color:tok("bg"),fontWeight:"600"},"CHAT");
+  el(dev,"h",{left:px(CH_X+CH_W+8),top:"19px",color:tok("accent")},"deckhand");
+  el(dev,"h",{left:"0",top:"19px",width:px(W-12),textAlign:"right",color:tok("accent")},"412/628");
+  el(dev,"rule",{top:"54px"});
+
+  /* HIST_TOP 60 .. HIST_JUMP_Y-4 = 360, so 18 lines of 16 */
+  var rows=[
+    {r:0,t:"the geom sweep is reporting ten unguarded constants on board 2 and they are all the ones this branch just added"},
+    {r:1,t:"That pattern usually means the constants are a chain of relative identities rather than independent literals. The sweep injects at parse time, so perturbing one term moves every offset below it."},
+    {r:0,t:"so rewrite them as independent literals?"},
+    {r:1,t:"Yes, and that is the opposite of what the wireless-pairing panel did. Independent literals plus a rhythm assertion is strictly better."}
+  ];
+  var y=60, LABEL={0:"YOU",1:"CLAUDE"};
+  for(var i=0;i<rows.length;i++){
+    if(y+LH>356) break;
+    el(dev,"h",{left:"12px",top:px(y),color:tok(rows[i].r===0?"accent":"good")},LABEL[rows[i].r]);
+    y+=LH;
+    var room=Math.floor((356-y)/LH); if(room<=0) break;
+    var ws=wrap(rows[i].t,37).slice(0,room);
+    for(var k=0;k<ws.length;k++) el(dev,"h",{left:"12px",top:px(y+k*LH),color:tok("value")},ws[k]);
+    y+=ws.length*LH+3;
+  }
+  /* scrubber: HIST_JUMP_Y 364, band 46, track 20 centred -> 377 */
+  el(dev,null,{left:"12px",top:"377px",width:px(W-24),height:"20px",
+    background:tok("card"),border:"1px solid "+tok("label")});
+  el(dev,null,{left:px(12+Math.round((W-24-8)*0.65)),top:"378px",width:"8px",height:"18px",
+    background:tok("accent")});
+  /* READER_CTRL_Y 422, READER_BTN_H 50 */
+  var btns=[[12,91,"< PREV",1],[115,90,"CLOSE",1],[217,91,"NEXT >",1]];
+  for(var b=0;b<3;b++){
+    var col=btns[b][3]?tok("accent"):tok("label");
+    var d=el(dev,null,{left:px(btns[b][0]),top:"422px",width:px(btns[b][1]),height:"50px",
+      background:tok("card"),border:"2px solid "+col,borderRadius:"12px"});
+    el(d,null,{left:"0",top:px((50-LH)/2),width:px(btns[b][1]-4),height:px(LH),lineHeight:px(LH),
+      textAlign:"center",color:col},btns[b][2]);
+  }
+}
+
+/* ---------------- wire it up ---------------- */
+var devA=document.getElementById("dev-after");
+var devB=document.getElementById("dev-before");
+var state={filter:"chat",block:false,quant:false,y:1e9,maxScroll:0,headNote:null};
+
+function draw(){ renderAfter(devA,state); }
+renderBefore(devB);
+draw();
+state.y=state.maxScroll; draw();          /* opens at the newest, per the brief */
+
+function toggle(id,fn){
+  var b=document.getElementById(id);
+  b.addEventListener("click",function(){
+    var on=b.getAttribute("aria-pressed")!=="true";
+    b.setAttribute("aria-pressed",String(on)); fn(on); draw();
+  });
+}
+toggle("t-theme",function(on){
+  /* Swaps the DEVICE palette only - the nine COLOR_* tokens out of THEMES[]. The PAGE
+     deliberately keeps the viewer's own light/dark, so both can be seen at once. */
+  var r=document.documentElement.style;
+  var LIGHT={bg:"#efebe7",card:"#ffffff",label:"#635952",value:"#181818",
+             accent:"#b54900",good:"#105da5",warn:"#b57500",bad:"#6b1039"};
+  Object.keys(LIGHT).forEach(function(k){
+    if(on) r.setProperty("--d-"+k,LIGHT[k]); else r.removeProperty("--d-"+k);
+  });
+  renderBefore(devB); buildGallery();
+});
+toggle("t-filter",function(on){ state.filter=on?"all":"chat"; state.y=1e9; });
+toggle("t-block",function(on){ state.block=on; });
+toggle("t-quant",function(on){ state.quant=on; });
+document.getElementById("t-top").addEventListener("click",function(){ state.y=0; draw(); });
+document.getElementById("t-bot").addEventListener("click",function(){ state.y=1e9; draw(); });
+
+/* drag to scroll, with a short decay - every fling frame is another ~23ms flush */
+(function(){
+  var dragging=false, lastY=0, vel=0, lastT=0, raf=null;
+  function down(e){
+    dragging=true; vel=0; lastY=(e.touches?e.touches[0].clientY:e.clientY);
+    lastT=performance.now(); if(raf){cancelAnimationFrame(raf); raf=null;}
+    e.preventDefault();
+  }
+  function move(e){
+    if(!dragging) return;
+    var cy=(e.touches?e.touches[0].clientY:e.clientY), t=performance.now();
+    var dy=cy-lastY;
+    state.y-=dy;
+    if(t>lastT){ vel=-dy/(t-lastT)*16; }
+    lastY=cy; lastT=t; draw(); e.preventDefault();
+  }
+  function up(){
+    if(!dragging) return; dragging=false;
+    if(Math.abs(vel)<0.6) return;
+    var step=function(){
+      state.y+=vel; vel*=0.90;                 /* short decay, deliberately */
+      draw();
+      if(Math.abs(vel)>0.4 && state.y>0 && state.y<state.maxScroll) raf=requestAnimationFrame(step);
+      else raf=null;
+    };
+    raf=requestAnimationFrame(step);
+  }
+  devA.addEventListener("mousedown",down); devA.addEventListener("touchstart",down,{passive:false});
+  window.addEventListener("mousemove",move); devA.addEventListener("touchmove",move,{passive:false});
+  window.addEventListener("mouseup",up); devA.addEventListener("touchend",up);
+  devA.addEventListener("wheel",function(e){ state.y+=e.deltaY; draw(); e.preventDefault(); },{passive:false});
+})();
+
+/* ---------------- states gallery ---------------- */
+var GAL=[
+  {name:"ALL - tool calls inline", note:"The filter chip reads ALL and the $ / | pairs join the stream, dim and one line each. This is the only place the device shows what commands actually ran.",
+   st:{filter:"all",block:false,y:1e9}},
+  {name:"Oldest - start of history", note:"Dragged to the top. The transcript states its own beginning rather than just stopping.",
+   st:{filter:"chat",block:false,y:0,headNote:"-- start of history --"}},
+  {name:"Oldest - bounded by BLE", note:"Same position, cable out. The limit is on the glass with the remedy named, not hidden behind a scroll that quietly ends.",
+   st:{filter:"chat",block:false,y:0,headNote:"-- 412 older need USB --"}},
+  {name:"User blocks filled", note:"The one style variant worth a look: a COLOR_CARD block behind your own turns. Truer to a chat, less true to Claude Code, and it costs a rounded rect per message on a 23ms frame budget.",
+   st:{filter:"chat",block:true,y:1e9}}
+];
+function buildGallery(){
+  var g=document.getElementById("gallery"); g.textContent="";
+  GAL.forEach(function(item){
+    var u=el(g,"unit");
+    var bz=el(u,"bezel"); var d=el(bz,"dev");
+    var st={filter:item.st.filter,block:item.st.block,quant:false,y:0,maxScroll:0,
+            headNote:item.st.headNote||null};
+    renderAfter(d,st);
+    if(item.st.y>1e8){ st.y=st.maxScroll; renderAfter(d,st); }
+    var c=el(u,"cap");
+    el(c,"t",null,item.name); el(c,"d",null,item.note);
+  });
+}
+buildGallery();
+</script>
