@@ -266,7 +266,7 @@ bad = [s for s in lits if ">=" in s]
 chk(not bad, f"a label string says >=: {bad}" if bad
              else "no label string writes >=, which is the charge floor's notation")
 chk(any("~" in s for s in lits), "a label string writes ~ for an estimate")
-chk("empty now" in label and "resets first" in label and "burn --" in label,
+chk("empty now" in label and "won't run out" in label and "burn --" in label,
     "all three refusal/verdict strings are present")
 for lit in lits:
     chk(all(0x20 <= ord(ch) <= 0x7E for ch in lit),
@@ -301,7 +301,7 @@ chk(LABEL_BYTES > len(worst),
 
 # "measuring" (BURN_WARMING's label) is far short of the worst case above, but
 # it is a NEW string and this file's own rule is to check what is certified,
-# not assume it - the same reason "burn --" and "resets first" are covered by
+# not assume it - the same reason "burn --" and "won't run out" are covered by
 # the SIDE_CHARS assertion in HALF 2 rather than left implicit.
 chk(len("measuring") <= SIDE_CHARS,
     f"\"measuring\" ({len('measuring')} chars) fits the {SIDE_CHARS}-char side lane")

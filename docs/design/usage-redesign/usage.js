@@ -119,7 +119,7 @@ function burnAvg(pct,resetMin,winMin) {
   if (pct>BURN_MAX_PCT) return { txt:"empty now", urgent:true };
   const left = Math.round((100-pct)/(pct/elapsed));
   return left<resetMin ? { txt:`empty ~${fmtDur(left)}`, min:left, urgent:true }
-                        : { txt:"resets first", min:left, urgent:false };
+                        : { txt:"won't run out", min:left, urgent:false };
 }
 function burnRing(series,pct,resetMin) {
   if (!series||pct<0||resetMin<0) return GATED;
@@ -132,7 +132,7 @@ function burnRing(series,pct,resetMin) {
   if (pct>BURN_MAX_PCT) return { txt:"empty now", urgent:true };
   const left = Math.round((100-pct)/slope);
   return left<resetMin ? { txt:`empty ~${fmtDur(left)}`, min:left, urgent:true }
-                        : { txt:"resets first", min:left, urgent:false };
+                        : { txt:"won't run out", min:left, urgent:false };
 }
 function burnFor(pct,resetMin,winMin,series,stale) {
   if (stale) return GATED;

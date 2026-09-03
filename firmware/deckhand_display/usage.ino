@@ -566,7 +566,7 @@ void usageBurnLabel(char* out, size_t n, long mins, long resetMin) {
   // ambiguity this code exists to remove.
   if (mins == BURN_WARMING)   { snprintf(out, n, "measuring"); return; }
   if (mins < 0)               { snprintf(out, n, "burn --");   return; }
-  if (!usageBurnUrgent(mins, resetMin)) { snprintf(out, n, "resets first"); return; }
+  if (!usageBurnUrgent(mins, resetMin)) { snprintf(out, n, "won't run out"); return; }
   // "~" MEANS ABOUT. Never ">=", which is reserved for the charge estimator's
   // deliberate floor - the two notations make different promises, and a reader who
   // cannot tell them apart has been told the cap arrives later than it will.
