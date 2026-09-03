@@ -502,6 +502,16 @@ const int CODEX_Y = CARD2_Y + CARD_H + 8;              // 398
 #endif
 const int CODEX_H = 56;                            // ends at 452, 8px clear
 
+// A Codex reading is DEAD once a full window has passed with no refresh: the
+// host polled ~120,000 times and learned nothing, so nobody is running it.
+// The window itself rides the wire as cxWin and is stored as usage.cxWindowMin,
+// so the real threshold is DATA-DRIVEN and moves with the plan. This is only
+// the fallback for a percentage that arrives with no window beside it - the
+// host sends `cxWin: primary?.windowMin ?? null`, so the two really can arrive
+// apart, and trusting an absent window would mean win = 0 and a row that hides
+// the instant it is measured.
+const int CODEX_HIDE_FALLBACK_MIN = 10080;   // 7 days, the observed Codex window
+
 // ---------- Inside the NOW card ----------
 // Bands are CLEARED extents, not glyph ink. The 2px border owns +180..+181, so
 // nothing may end past +179; the last clear ends +174, 5 rows clear.

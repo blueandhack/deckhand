@@ -832,6 +832,59 @@ chk(re.search(r"usageRingCount\s*<\s*2", body_span) is not None
     "structural 8c: usageRingSpanMin() returns 0 when usageRingCount < 2, "
     "mirroring battTrendSpanMin()'s own guard")
 
+def fn_body(src, name):
+    """The braces-balanced body of a C function, comments stripped."""
+    i = src.index(name + "(")
+    i = src.index("{", i)
+    depth, j = 0, i
+    while j < len(src):
+        if src[j] == "{": depth += 1
+        elif src[j] == "}":
+            depth -= 1
+            if depth == 0: break
+        j += 1
+    body = src[i:j + 1]
+    return re.sub(r"//.*?$", "", body, flags=re.M)
+
+# ---------------------------------------------------------------------------
+# usageCodexShown() - the ONE predicate deciding the tab's layout.
+# ---------------------------------------------------------------------------
+CODEX_HIDE_FALLBACK_MIN = const_int("CODEX_HIDE_FALLBACK_MIN")
+
+def codex_shown(cx_pct, cx_age_sec, cx_window_min):
+    """Mirrors usage.ino's usageCodexShown() exactly."""
+    if cx_pct < 0:
+        return False
+    if cx_age_sec < 0:
+        return False
+    win = cx_window_min if cx_window_min > 0 else CODEX_HIDE_FALLBACK_MIN
+    return cx_age_sec <= win * 60
+
+chk(CODEX_HIDE_FALLBACK_MIN == 10080,
+    "the fallback window is 7 days (10080 min), the window Codex actually reports")
+chk(codex_shown(-1, 40, 10080) is False,
+    "never measured (cxPct < 0) hides, however fresh the age looks")
+chk(codex_shown(44, -1, 10080) is False,
+    "a negative age is the 'never measured' sentinel and hides too")
+chk(codex_shown(44, 40, 10080) is True,
+    "a fresh reading inside its window is shown")
+chk(codex_shown(44, 10080 * 60, 10080) is True,
+    "exactly one window of silence is still shown - the bound is inclusive")
+chk(codex_shown(44, 10080 * 60 + 1, 10080) is False,
+    "one second past a full window hides: the reading describes a dead window")
+chk(codex_shown(44, 602897, 10080) is True,
+    "this machine's 6.97 days would still be SHOWN on age alone - it hides on cxPct")
+chk(codex_shown(44, 40, -1) is True,
+    "an absent window falls back to CODEX_HIDE_FALLBACK_MIN rather than 0")
+chk(codex_shown(44, CODEX_HIDE_FALLBACK_MIN * 60 + 1, -1) is False,
+    "the fallback really is applied as a bound, not merely defaulted")
+# STRUCTURAL: the predicate must exist exactly once and take no arguments, so
+# the Arduino prototype generator cannot meet a type declared after it.
+chk(len(re.findall(r"bool usageCodexShown\(\)", INO)) == 1,
+    "usageCodexShown() is defined exactly once and takes no arguments")
+chk("QUOTA_STALE_SEC" not in fn_body(INO, "usageCodexShown"),
+    "the predicate does NOT reuse the 900s stale threshold - hiding is a different claim")
+
 STRUCTURAL_COUNT = n - MIRROR_COUNT
 
 if fails:

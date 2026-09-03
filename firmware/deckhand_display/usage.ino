@@ -612,6 +612,25 @@ void drawUsageSpark(uint32_t* cache, int x, int y, int w, int h, uint16_t fg, ui
   }
 }
 
+#if BOARD_USAGE_V2
+// ONE PREDICATE, READ EVERYWHERE - the layout accessors, renderUsageTab and
+// drawUsageStatic all ask this and nothing re-derives it. A control drawn under
+// one condition and hit-tested under another is this codebase's classic defect;
+// there is no hit test on this tab, but a second spelling would still let the
+// chrome and the fields disagree about which column they are in.
+//
+// Deliberately NOT keyed on QUOTA_STALE_SEC. That threshold (900s) means "we
+// cannot vouch for this number" and already dims the row. This is the stronger
+// claim that nobody is RUNNING the tool, and a full window of silence is what
+// earns it.
+bool usageCodexShown() {
+  if (usage.cxPct < 0) return false;       // never measured
+  if (usage.cxAgeSec < 0) return false;    // ditto, by the age's own sentinel
+  long win = usage.cxWindowMin > 0 ? usage.cxWindowMin : CODEX_HIDE_FALLBACK_MIN;
+  return usage.cxAgeSec <= win * 60;
+}
+#endif
+
 // The 5-hour card, v2: the 64px hero keeps CARD_HERO_W's box, and the 132px it
 // no longer spends on an empty clear now holds two facts a bare percentage only
 // implies - the burn verdict and the reset countdown - plus a pace bar, a
