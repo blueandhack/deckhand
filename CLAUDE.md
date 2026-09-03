@@ -731,7 +731,7 @@ node host/wire-bytes-check.mjs               # 305 assertions: every device-boun
                                              #   71,738 strings, and the saturated tick line is measured
                                              #   against feedChar's guard (incl. the still-over tripwire)
 node host/wire-bytes-check.mjs --selftest    # 36/36 injected faults, each printing WHICH assertion caught it
-node host/ask-optdescs-check.mjs             # 38 assertions: optDescs is capped in bytes on a codepoint
+node host/ask-optdescs-check.mjs             # 40 assertions: optDescs is capped in bytes on a codepoint
                                              #   boundary, parallel to options, absent when nothing
                                              #   is described
 node host/ask-optdescs-check.mjs --selftest  # 5/5 injected faults
@@ -2980,6 +2980,30 @@ two things `host/index.mjs` cannot get any other way:
   draws the options as a flat list under "ANSWER ON YOUR MAC" and swallows taps, so it never offers
   a control that can't work (and `visLines` reserves that caption's row, or a full-length detail
   runs into it). The host also drops `ANSWER` lines while answering is off.
+  **AN ANSWER USED TO WITHDRAW THE BUTTONS AND LEAVE THE ROW SAYING NEEDS INPUT, for up to
+  minutes.** When the wait returns, the hook re-reads the record and deletes the `ask` — but it
+  never touched `status`, so the record went out as `status:"asking"` with nothing left to answer.
+  **Nothing else recomputes it:** a device answer resolves a question as a DENY, and a denied
+  `AskUserQuestion` fires **neither `PostToolUse` nor `PostToolUseFailure`** — measured, 623 of the
+  latter in a 3.8MB log and not one of them for `AskUserQuestion` — so status only corrected when
+  some unrelated later event happened to rewrite the record: **75s** on one real answer and
+  **2m41s** on another. The device half was already right (`handleAskTouch` records `answeredPid`
+  and repaints on the tap), so what lagged was purely the status.
+  **The fix is CONDITIONAL on an answer having actually arrived, and that is the whole subtlety.**
+  The wait has two null exits: if the Mac answered, our ask no longer matches and the guard skips
+  it, but a genuine TIMEOUT leaves the Mac's dialog still on screen, so the session really is still
+  asking and forcing `working` there would be a lie in the one direction the user cannot detect.
+  `claude-hooks/answer-status-check.mjs` drives the REAL hook as a child against a throwaway `$HOME`,
+  learns the random `pid` from the published record and then answers it — 11 assertions, and
+  `--selftest` catches BOTH the original bug and **the plausible wrong fix** of setting status
+  unconditionally, which is why the answered and timed-out cases are asserted as a pair.
+  **Its first assertion is a vacuity guard** (an ask really was published), because with a stale
+  heartbeat the hook publishes nothing at all and "never created" is indistinguishable from
+  "stripped" — the same false negative that cost real time on the `Notification` bug.
+  **Found en route: the INSTALLED hook was stale relative to the repo**, carrying an older revision
+  of that cap's comment. Comments only, verified by stripping them and diffing, so no behaviour had
+  drifted — but `install.sh` copies these files and nothing warns when the live copy falls behind.
+
   Nothing strips a display-only `ask` — the next event for that session
   (`PostToolUse`/`PostToolUseFailure` → `working`) rebuilds the record without it.
   **The wait is now effectively UNLIMITED for Claude Code, and configurable.**
@@ -5674,7 +5698,44 @@ Other things that aren't obvious from a single file:
   `host/index.mjs` needed no functional change: the pass-through is the existing
   `{ ...record.ask, nonce }` spread, and a comment pins that as the invariant, since turning it into
   a named field list is the one edit that breaks this silently.
-  **THE 96-BYTE CAP IS A STATED CONVENTION, MECHANICALLY ENFORCED — NOT A DERIVATION FROM THE WIRE
+  **THE CAP IS 416 NOW, DERIVED FROM 674 MEASURED DESCRIPTIONS, AND THE 96 IT REPLACED WAS A FOSSIL
+  THAT CONCEALED A MISSING GUARD.** Reported off the glass — "options' long description not show
+  full, it cut" — and measured out of the hook's own debug log rather than estimated: median **210**
+  bytes, p75 258, p90 313, p99 412, max 606, and **625 of 674 (92.7%) were truncated mid-word at
+  96**. The old justification was "a description may not cost more bytes than the LABEL it
+  explains", computed as 32 chars × 3 bytes — and **that multiplier died when device-bound text
+  became ASCII**: a 32-character label is now 32 BYTES, so the same convention yields 32 and the 96
+  it licensed was already 3× its own stated derivation. A bound whose arithmetic no longer holds is
+  not a bound. Worse, while it sat there looking like one it hid the bound that was **genuinely
+  missing**: nothing anywhere asserted that the hook's cap and the device's `ASK_OPT_DESC_BYTES`
+  buffer agree. They matched only because someone kept them in step by hand, and `copyField`
+  truncates by BYTE, so a drift would have been cut in silence on arrival.
+  Two real bounds replace it, both parsed from their own files: **exact parity** with the device
+  buffer (`ASK_OPT_DESC_BYTES` = cap + 1, so 417), and **two concurrently asking sessions at the cap
+  fitting `feedChar`'s guard** (one is 5,021 bytes; two is ordinary traffic — two Macs, or two
+  projects). The saturated 6-session case cannot set this cap, being already over budget with the
+  field absent entirely — that is `wire-fit.mjs`'s problem.
+  **The "optDescs must stay a rounding term" assertion was deliberately RELAXED** from
+  `detail > marginal * 5` to `detail > marginal`. Keeping 5× would have capped this at **~203 bytes,
+  the MEDIAN**, so half of every description would still be cut — the complaint, unfixed. The field
+  is a real term now by choice; its ceiling is its own budget rather than a ratio against a
+  neighbour, and the detail cap is still dominant at 2.5×.
+  **Two transcribed-not-parsed bugs fell out of raising it, both inside checkers.** The
+  codepoint-boundary behaviour test fed a hardcoded **200 em-dashes** tuned to a 96-byte cap, so the
+  moment the cap passed 200 the input stopped overflowing it and two assertions failed — the rule
+  biting inside the checker whose whole subject is parsed caps; its length is derived now. And
+  `sessions-geom-check.mjs` had an assertion whose **condition disagreed with its own message**: it
+  claimed "well inside `drawWrappedText`'s 80-line stop" while testing `descCols * 3 >= cap`, a
+  different claim that held only because 34 × 3 = 102 cleared 96. Both `countWrappedLines` and
+  `drawWrappedText` really do hard-stop at 80 lines, so the fixed condition tests that, with the 80
+  parsed out of the firmware — 416 bytes needs 13 lines, and the lane's real ceiling is **2,720**.
+  **Cost:** board 2 RAM **+7,680** (66,436 → 74,116, exactly 4 slots × 6 sessions × 320) and flash
+  +8, `.bin` size unchanged so re-baselined at +0 bytes with a differing hash. **Board 1
+  `UNCHANGED`** — it stores 1 byte per slot and draws no descriptions.
+
+  **THE ORIGINAL 96-BYTE REASONING IS KEPT BELOW AS THE RECORD OF WHAT WAS WRONG WITH IT.**
+
+  **THE 96-BYTE CAP WAS A STATED CONVENTION, MECHANICALLY ENFORCED — NOT A DERIVATION FROM THE WIRE
   BUDGET.** The convention: *a description may not cost more bytes than the LABEL it explains*, and
   a label is capped at 32 characters, so its byte ceiling is 32 x 3 = **96**. Both numbers are
   parsed out of the hook, so 97 fails by name. It is capped in BYTES on a codepoint boundary, not
@@ -5763,7 +5824,9 @@ Other things that aren't obvious from a single file:
   Mac silence and impossibility look identical.
   **WHAT IS STILL OPEN.** Board 1 draws no descriptions at all — it stores a placeholder and its
   chip still says `READ ALL`, which is honest there because there is nothing else behind it. The
-  96-byte cap truncates every real description to about a third, mid-word, which is a convention's
+  96-byte cap truncated every real description to about a third, mid-word — **FIXED, see the cap
+  paragraph above; this sentence is corrected rather than deleted because it called the truncation a
+  convention's cost and not a bug, and a person looking at the glass disagreed.** It was a convention's
   cost and not a bug. And the wire's own unit mismatch, above, is untouched: a question in CJK can
   still overflow `feedChar`'s guard **with this field absent entirely**. **No screenshot in this
   work vouches for the panel's colours** — board 2's `SCREENSHOT` reads the shadow framebuffer, so
