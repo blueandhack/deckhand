@@ -850,6 +850,70 @@ for (const b of [1, 2]) {
     // rhythm is 3 rows and its trailing clearance is exactly one unit of it.
     rhythm("WEEK", wb, c.WEEK_CARD_H);
 
+    // ---- THE SOLO COLUMN --------------------------------------------------
+    // Asserted from the DECLARED heights and gaps, never from drawn positions:
+    // a sum of drawn offsets telescopes to contentBottom - CONTENT_Y for ANY
+    // values, which is how this file's predecessor shipped a vacuous column
+    // identity twice.
+    // `content` is the checker's own in-scope local (usage-geom-check.mjs:272,
+    // `contentBottom - c.CONTENT_Y`). There is NO `CONTENT_ROWS` in the parsed
+    // constant set - that name exists only in the browser mock - and an
+    // assertion against an undefined constant computes NaN and proves nothing.
+    // The DUO column is deliberately NOT re-asserted here: line ~302 already
+    // sums it from its declared terms, and a second copy would report one drift
+    // as two findings.
+    chk(c.SP_2 + c.NOW_CARD_H_SOLO + c.SP_2 + c.WEEK_CARD_H_SOLO + c.SP_2 === content,
+        `solo column: ${c.SP_2}+${c.NOW_CARD_H_SOLO}+${c.SP_2}+${c.WEEK_CARD_H_SOLO}+${c.SP_2} `
+      + `= ${content} content rows, the SAME area the duo column fills`);
+    // The reclaimed rows are exactly the Codex row plus its gap - nothing is
+    // invented and nothing is left over.
+    chk((c.NOW_CARD_H_SOLO - c.NOW_CARD_H) + (c.WEEK_CARD_H_SOLO - c.WEEK_CARD_H)
+          === c.CODEX_H + c.SP_2,
+        `the two cards grow by exactly the ${c.CODEX_H + c.SP_2} rows the Codex row `
+      + `and its gap release (${c.NOW_CARD_H_SOLO - c.NOW_CARD_H} + `
+      + `${c.WEEK_CARD_H_SOLO - c.WEEK_CARD_H})`);
+
+    // Both cards keep a uniform rhythm in the solo layout too. NOW's is the
+    // SAME 4 rows with the SAME trailing 5, which is what makes its growth two
+    // constants rather than five; WEEK's is re-pitched to 8.
+    const soloNow = [
+      ["pin",   c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
+      ["label", c.CARD_LABEL_Y,   c.CARD_LABEL_Y + meta - 1],
+      ["hero",  c.NOW_HERO_Y,     c.NOW_HERO_Y + c.CARD_HERO_H - 1],
+      ["bar",   c.NOW_BAR_Y - 4,  c.NOW_BAR_Y + c.BAR_H + 3],
+      ["spark", c.NOW_SPARK_Y - 1, c.NOW_SPARK_Y + c.NOW_SPARK_H_SOLO],
+      ["meta",  c.NOW_META_Y_SOLO - 1, c.NOW_META_Y_SOLO + meta],
+    ];
+    const soloNowAir = rhythm("NOW solo", soloNow, c.NOW_CARD_H_SOLO, [
+      ["side1->side2",
+       (c.NOW_SIDE_Y + c.NOW_SIDE_STEP - 1) - (c.NOW_SIDE_Y + meta) - 1],
+    ]);
+    chk(soloNowAir === 4,
+        `NOW solo keeps the duo card's 4-row rhythm (got ${soloNowAir}) - its whole `
+      + `share went into the spark band, so no gap moved`);
+
+    const soloWeek = [
+      ["pin",    c.CARD_PIN_BAR_Y, c.CARD_PIN_BAR_Y + 2],
+      ["label",  c.CARD_LABEL_Y,   c.CARD_LABEL_Y + meta - 1],
+      ["numrow", Math.min(c.WEEK_NUM_Y_SOLO - 1, c.WEEK_BURN_Y_SOLO - 1),
+                 Math.max(c.WEEK_NUM_Y_SOLO + head, c.WEEK_BURN_Y_SOLO + meta)],
+      ["allbar", c.WEEK_BAR_Y_SOLO - 4,   c.WEEK_BAR_Y_SOLO + c.BAR_H + 3],
+      ["meta",   c.WEEK_META_Y_SOLO - 1,  c.WEEK_META_Y_SOLO + meta],
+      ["fable",  c.WEEK_FABLE_Y_SOLO - 1, c.WEEK_FABLE_Y_SOLO + meta],
+      ["fbar",   c.WEEK_FABLE_BAR_Y_SOLO - 4, c.WEEK_FABLE_BAR_Y_SOLO + c.BAR_H + 3],
+    ];
+    const soloWeekAir = rhythm("WEEK solo", soloWeek, c.WEEK_CARD_H_SOLO);
+    chk(soloWeekAir === 8,
+        `WEEK solo is re-pitched to an 8-row rhythm (got ${soloWeekAir}) - the 32 `
+      + `rows went into the gaps, because no band on this card should grow`);
+    // The burn line stays optically centred on the number it captions, the same
+    // relation the duo card has, so re-pitching cannot silently break it.
+    chk(c.WEEK_BURN_Y_SOLO - c.WEEK_NUM_Y_SOLO === (head - meta) / 2,
+        `WEEK solo burn line is centred on the number: `
+      + `${c.WEEK_BURN_Y_SOLO} - ${c.WEEK_NUM_Y_SOLO} = (${head} - ${meta}) / 2`);
+    chk(c.WEEK_BURN_Y_SOLO - c.WEEK_NUM_Y_SOLO === c.WEEK_BURN_Y - c.WEEK_NUM_Y,
+        `...the SAME relation the duo card uses (${c.WEEK_BURN_Y - c.WEEK_NUM_Y})`);
+
     // WEEK_BURN_Y IS INVISIBLE TO EVERY BAND ASSERTION, INCLUDING THE RHYTHM,
     // and that is not a gap in the rhythm - it is what sharing a band means. The
     // burn line and the number occupy ONE band (the union of their two clear

@@ -640,6 +640,36 @@ const int WEEK_META_Y      = 78;
 const int WEEK_FABLE_Y     = 99;
 const int WEEK_FABLE_BAR_Y = 123;
 
+// ---- THE SOLO COLUMN: what this tab becomes when Codex is hidden ----------
+// 8 + 214 + 8 + 176 + 8 = 414, the same content area the duo column fills.
+//
+// INDEPENDENT LITERALS, NOT `prev + cell + AIR`. geom-sweep.mjs injects at
+// PARSE time, so a chain of relative identities lets a perturbation propagate
+// into every offset below it and every identity still holds - the exact failure
+// the wireless-pairing panel's five air constants shipped with. The rhythm
+// assertion in usage-geom-check.mjs is what binds these instead.
+//
+// NOW takes its whole share in the SPARKLINE band, so its rhythm (4) and its
+// trailing clearance (5) are IDENTICAL in both layouts and only two offsets
+// move. drawUsageSpark scales with its height, so 32 -> 64 takes the fixed
+// 0..100 scale from 3.70 to 1.69 percentage points per pixel.
+const int NOW_CARD_H_SOLO  = 214;
+const int NOW_SPARK_H_SOLO = 64;
+const int NOW_META_Y_SOLO  = 190;   // spark clear ends +184, +4 rhythm, +1
+
+// WEEK has no band that should grow - a WEEK sparkline would be a flat line
+// pretending to be a trend, the ring moving 1.49 points across a 7-day window -
+// so its 32 rows go into the uniform gap, 3 -> 8. Its height is 126 + 6k at
+// minimum for gap k, which is 174 at k = 8; the column needs 176, so trailing
+// clearance is 10 against the 8-row rhythm.
+const int WEEK_CARD_H_SOLO      = 176;
+const int WEEK_NUM_Y_SOLO       = 31;
+const int WEEK_BURN_Y_SOLO      = 35;   // NUM + (T_HEAD cell - T_META cell) / 2
+const int WEEK_BAR_Y_SOLO       = 68;
+const int WEEK_META_Y_SOLO      = 93;
+const int WEEK_FABLE_Y_SOLO     = 119;
+const int WEEK_FABLE_BAR_Y_SOLO = 148;
+
 // ---------- USAGE tab: inside a Claude card ----------
 // CHECK CLEAR BOXES, NOT GLYPHS. drawIfChanged() clears
 // fillRect(fx-1, fy-1, tw+2, th+2) before drawing, and drawPaceBar() clears
