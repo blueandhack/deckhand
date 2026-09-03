@@ -184,4 +184,55 @@ int scrollEntryAtLine(uint32_t line) {
   return best;
 }
 
+bool scrollActive = false;        // the transcript owns the screen
+bool scrollPending = false;       // a fetch is in flight
+bool scrollFetchFailed = false;
+int  scrollNextSeq = 0;
+int  scrollChunksOf = 1;
+int  scrollChunksIn = 0;
+unsigned long scrollFetchStart = 0;
+uint32_t scrollY = 0;             // pixel scroll offset from the top of the transcript
+
+void requestScrollback(int idx) {
+  if (idx < 0 || idx >= sessionCount) return;
+  if (!scrollBegin()) { scrollFetchFailed = true; return; }
+  // BLE genuinely cannot have the whole thing: 122KB at ~666 B/s is over three
+  // minutes. It gets a bounded tail and the wait is STATED, not hidden.
+  const long budget = usbLinkActive() ? SCROLL_TAIL_BYTES_USB : SCROLL_TAIL_BYTES_BLE;
+  scrollPending = true;
+  scrollFetchFailed = false;
+  scrollNextSeq = 0;
+  scrollChunksIn = 0;
+  scrollChunksOf = 1;
+  scrollFetchStart = millis();
+  char line[72];
+  snprintf(line, sizeof(line), "HISTORY %s %s tail:%ld", sessions[idx].id,
+           histChatOnly ? "chat" : "all", budget);
+  // Addressed to the session's own Mac - only it holds that transcript.
+  sendLineToHost(line, sessions[idx].hostSlot);
+}
+
+// Called from loop(). A stalled fetch must say so rather than leaving
+// "fetching" on the glass forever.
+void tickScrollFetch() {
+  if (!scrollPending) return;
+  const unsigned long cap = usbLinkActive() ? SCROLL_FETCH_TIMEOUT_MS : SCROLL_FETCH_TIMEOUT_BLE_MS;
+  if (millis() - scrollFetchStart < cap) return;
+  Serial.printf("SCROLL: fetch timed out after %lums (%d/%d chunks)\n",
+                millis() - scrollFetchStart, scrollChunksIn, scrollChunksOf);
+  scrollPending = false;
+  scrollFetchFailed = true;
+  if (scrollActive) drawScrollback();
+}
+
+// TEMPORARY, both replaced in Task 4. scrollMaxY's body is already final; only
+// drawScrollback is a placeholder, so the screen keeps drawing the old pager
+// this task, which is the correct visible outcome for a wire-only change.
+uint32_t scrollMaxY() {
+  uint32_t total = scrollTotalLines * CODE_LINE_H;
+  uint32_t view = (uint32_t) SCROLL_LINES * CODE_LINE_H;
+  return total > view ? total - view : 0;
+}
+void drawScrollback() { }
+
 #endif  // BOARD_HISTORY_SCROLL

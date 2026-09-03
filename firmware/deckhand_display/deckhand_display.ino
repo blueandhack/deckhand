@@ -1200,6 +1200,28 @@ int histPages = 1;
 // the conversation about 2:1, so an unfiltered view is mostly commands.
 bool histChatOnly = true;
 
+#if BOARD_HISTORY_SCROLL
+// Forward-declared: these are DEFINED in scrollback.ino, which the build
+// concatenates AFTER this file (deckhand_display.ino matches the sketch
+// folder name and always goes first, then the rest alphabetically) - but the
+// hist parser's chunk arm, below, and loop()'s tickScrollFetch() both read and
+// write them. Functions get an auto-generated prototype from anywhere in the
+// sketch; plain globals do not, so a real declaration has to come first. Same
+// idiom as `extern bool octoActive;` above, which solves the identical
+// ordering problem within one file.
+extern bool     scrollActive;
+extern bool     scrollPending;
+extern bool     scrollFetchFailed;
+extern int      scrollNextSeq;
+extern int      scrollChunksOf;
+extern int      scrollChunksIn;
+extern uint32_t scrollY;
+extern int      scrollCount;
+extern uint32_t scrollTotalLines;
+extern int      scrollTotal;
+extern int      scrollDropped;
+#endif
+
 // Second level: ONE entry, in full, in its own pager. The list rows are previews, and an
 // entry longer than a screen used to be clipped with no way to reach the rest.
 #define HIST_FULL_MAX 4001
@@ -3837,6 +3859,54 @@ void handleLine(const String& line) {
     const char* hid = hist["id"] | "";
     strncpy(histId, hid, sizeof(histId) - 1);
     histId[sizeof(histId) - 1] = '\0';
+#if BOARD_HISTORY_SCROLL
+    // THE CHUNKED SCROLLBACK FETCH, identified by `seq`. Handled before the page
+    // state for the same reason the `full` reply is: a parser that mutates shared
+    // state before it has identified the message is the bug class this file
+    // already paid for once, when clearing histCount up here blanked the list.
+    if (!hist["seq"].isNull()) {
+      int seq = hist["seq"] | 0;
+      int of  = hist["of"]  | 1;
+      if (seq == 0) scrollReset();
+      if (seq != scrollNextSeq) {
+        // A HOLE. Clear rather than assemble a transcript with a gap in it: a
+        // gap would read as the conversation having jumped, which is worse than
+        // a named failure.
+        Serial.printf("SCROLL: seq %d, expected %d - fetch abandoned\n", seq, scrollNextSeq);
+        scrollReset();
+        scrollPending = false;
+        scrollFetchFailed = true;
+        if (scrollActive) drawScrollback();
+        return;
+      }
+      JsonArray sitems = hist["items"].as<JsonArray>();
+      if (!sitems.isNull()) {
+        for (JsonObject it : sitems) {
+          const char* t = it["t"] | "";
+          const char* r = it["r"] | "out";
+          uint8_t role = strcmp(r, "you") == 0      ? 0
+                         : strcmp(r, "claude") == 0 ? 1
+                         : strcmp(r, "ran") == 0    ? 2
+                         : strcmp(r, "no") == 0     ? 4
+                                                    : 3;
+          if (!scrollAppend(role, t)) break;   // arena or index full: keep what fits
+        }
+      }
+      scrollNextSeq = seq + 1;
+      scrollChunksIn = seq + 1;
+      scrollChunksOf = of;
+      scrollTotal   = hist["total"]   | 0;
+      scrollDropped = hist["dropped"] | 0;
+      if (seq + 1 >= of) {
+        scrollPending = false;
+        scrollY = scrollMaxY();              // opens at the NEWEST
+        Serial.printf("SCROLL: %d entries, %lu lines, %d dropped\n",
+                      scrollCount, (unsigned long) scrollTotalLines, scrollDropped);
+      }
+      if (scrollActive) drawScrollback();
+      return;
+    }
+#endif
     // ONE ENTRY IN FULL, handled BEFORE the page state is touched - and that
     // ordering is the whole fix for a real bug. An `item:<n>` reply carries a
     // `full` object and NO `items` array at all (host/index.mjs's
@@ -5752,6 +5822,9 @@ void loop() {
   tickMicProcessing();  // no-op unless a capture is being processed
   tickWaitingWheel();   // no-op unless the standalone screen is on the glass
   tickAutoTheme();      // no-op unless the theme is set to AUTO
+#if BOARD_HISTORY_SCROLL
+  tickScrollFetch();
+#endif
 #if BOARD_HAS_WIRELESS_PAIR
   pairTick();           // no-op unless a pairing window is open; closes it at 120s
   tickPairPanel();      // no-op unless the pairing panel is on the glass

@@ -27,7 +27,11 @@ const c = consts("board_es3c35p.h");
 // stripComments() takes a file NAME relative to DIR and reads it ITSELF - it is
 // not a filter over content already in hand.
 let INO = stripComments("scrollback.ino");
-const SKETCH = stripComments("deckhand_display.ino");
+// `let`, not `const`: the SELFTEST block's `seq-append` fault has to mutate the
+// SKETCH text (the hist parser's chunk arm lives in deckhand_display.ino, not
+// scrollback.ino), which is exactly what the pre-existing fault line here failed
+// to do - see the note at that line.
+let SKETCH = stripComments("deckhand_display.ino");
 
 // fnBody() THROWS when a signature is missing - deliberately, so an assertion can
 // never run over an empty string and pass vacuously. But a SELFTEST that deletes
@@ -55,7 +59,18 @@ if (SELFTEST) {
   if (fault === "wrap-cap") INO = INO.replace(/while \(t\[pos\]\)/, "while (t[pos] && lines < 80)");
   if (fault === "no-reap") INO = INO.replace(/reapBleLinks\(true\);/g, "");
   if (fault === "no-activity") INO = INO.replace(/lastActivityMillis = millis\(\);/g, "");
-  if (fault === "seq-append") INO = INO.replace(/scrollReset\(\);\s*scrollFetchFailed = true;/, "");
+  // FIXED IN TASK 3: this line was added in Task 2, forward-provisioned for an
+  // assertion that did not exist yet, and it targeted the wrong file. The
+  // discontinuity handler lands in deckhand_display.ino's hist parser (Task 3
+  // Step 6), not in scrollback.ino - so `INO.replace(...)` against that literal
+  // pair silently matched nothing (scrollback.ino never contains
+  // "scrollReset();scrollFetchFailed = true;" adjacent), and the fault was a
+  // no-op. It now empties the discontinuity `if` block's own body in SKETCH,
+  // which is what the seq-append name actually describes: on a gap, nothing
+  // resets, nothing is flagged, and the parser falls through to append into
+  // the hole instead of abandoning the fetch.
+  if (fault === "seq-append")
+    SKETCH = SKETCH.replace(/if \(seq != scrollNextSeq\) \{[\s\S]*?\n      \}/, "if (seq != scrollNextSeq) {\n      }");
   if (fault === "wide-marker") INO = INO.replace(/"\$"/, '"·"');
 }
 
@@ -186,11 +201,63 @@ if (markBody) {
   s(new Set(lits).size === lits.length, "structural: the markers are distinct shapes, one per role");
 }
 
+// ---------------- STRUCTURAL: the wire (Task 3) ----------------
+
+// THE CHUNK BUDGET IS ASSERTED AGAINST feedChar's GUARD, PARSED - not transcribed.
+// That guard does not DROP an over-long line, it CLEARS THE BUFFER mid-line, so
+// the remainder accumulates into an emptied buffer, the parse fails, and every
+// tick carrying it is lost while both links look healthy.
+// ANCHORED on `buf = ""`, not merely on `buf.length() >`: the sketch has an
+// earlier, unrelated `buf.length() > 11 ? buf.substring(11) : ...` (the command
+// dispatcher), and a bare `buf.length()\s*>\s*(\d+)` match finds THAT one first
+// and captures 11 - which would compare SCROLL_WIRE_CHUNK_BYTES against 11
+// instead of 16000. Only the real guard clears the buffer.
+const gm = SKETCH.match(/buf\.length\(\)\s*>=?\s*(\d+)\)\s*buf\s*=\s*""/);
+s(gm != null, "structural: feedChar's line guard is still findable in the sketch");
+if (gm) {
+  s(c.SCROLL_WIRE_CHUNK_BYTES < +gm[1],
+    `structural: the chunk budget (${c.SCROLL_WIRE_CHUNK_BYTES}) is under feedChar's guard (${gm[1]})`);
+  // One entry must always fit ALONE: 4000 chars of pure newlines escape to 8000.
+  const worst = 2 * 4000 + 400;
+  s(worst <= c.SCROLL_WIRE_CHUNK_BYTES,
+    `structural: a worst-case single entry (${worst}B fully escaped) fits one chunk`);
+}
+
+// The HOST measures the budget on the SERIALISED line, never on raw text length.
+const HOSTSRC = stripComments("../../host/index.mjs");
+const sbBody = body(HOSTSRC, "async function sendScrollback(id, filter, maxBytes)", "host/index.mjs");
+present(sbBody, /JSON\.stringify/, "structural: the host builds the chunk envelope with JSON.stringify");
+present(sbBody, /byteLength/,
+  "structural: the host measures the chunk on the SERIALISED line, in BYTES");
+present(sbBody, /SCROLL_WIRE_CHUNK_BYTES|CHUNK_BYTES/,
+  "structural: the host bounds each chunk by the named budget");
+
+// A seq discontinuity CLEARS rather than assembling a transcript with a hole.
+// 1700, not 1400: the real block (comments stripped) runs to ~1530 chars - the
+// discontinuity branch, the item loop and the completion tail all sit inside
+// it, and 1400 cut the match off before reaching the arm's own closing brace.
+const parseArm = SKETCH.match(/if \(!hist\["seq"\]\.isNull\(\)\)[\s\S]{0,1700}?\n    \}/);
+s(parseArm != null, "structural: the chunk arm of the hist parser is findable");
+const parseArmBody = parseArm ? parseArm[0] : null;
+present(parseArmBody, /scrollReset\(\)/,
+  "structural: a seq discontinuity clears the arena (scrollReset)");
+present(parseArmBody, /scrollFetchFailed/,
+  "structural: a seq discontinuity flags scrollFetchFailed rather than appending into a hole");
+present(parseArmBody, /seq != scrollNextSeq/,
+  "structural: the discontinuity is tested on seq against the expected next, by operand");
+
+// The request picks its budget by TRANSPORT - BLE cannot have the whole thing.
+const reqBody = body(INO, "void requestScrollback(int idx)", "scrollback.ino");
+present(reqBody, /usbLinkActive\(\)/, "structural: the fetch budget is chosen by transport, not fixed");
+present(reqBody, /SCROLL_TAIL_BYTES_USB/, "structural: the USB tail budget is a named constant");
+present(reqBody, /SCROLL_TAIL_BYTES_BLE/, "structural: the BLE tail budget is a named constant");
+
 console.log(`\n${mirror} mirror + ${structural} structural assertions, ${fail} failures`);
 if (SELFTEST) {
   const WANT = {
     "wrap-cap":    /scrollWrapLines carries NO line cap/,
     "wide-marker": /every gutter marker is ASCII/,
+    "seq-append":  /flags scrollFetchFailed rather than appending into a hole/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

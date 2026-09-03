@@ -1539,6 +1539,68 @@ async function sendHistory(id, filter, want, budget) {
   );
 }
 
+// `HISTORY <id> <chat|all> tail:<maxBytes>` - the WHOLE filtered history, in a run of
+// size-bounded lines. A third request form beside `<page|last>` and `item:<n>`, so board 1
+// keeps its exact behaviour and no version bump is needed: the same backward-compatible
+// shape as the optional `<cols>x<lines>` token and the trailing `to=<hostId>` address.
+const SCROLL_WIRE_CHUNK_BYTES = 12000;   // mirrors board_es3c35p.h; asserted by scrollback-check.mjs
+
+async function sendScrollback(id, filter, maxBytes) {
+  const all = await histItems(id);
+  const chatOnly = filter !== "all";
+  const items = chatOnly ? all.filter((x) => x.r === "you" || x.r === "claude") : all;
+
+  // Keep the NEWEST tail that fits. Walk backwards, because the entries a person is
+  // most likely to want are the recent ones; `dropped` says how many did not make it,
+  // and the device states that on the glass rather than letting the scroll end quietly.
+  let used = 0, from = items.length;
+  while (from > 0) {
+    const n = Buffer.byteLength(items[from - 1].full, "utf8") + 1;
+    if (used + n > maxBytes) break;
+    used += n; from--;
+  }
+  const kept = items.slice(from);
+  const dropped = from;
+
+  const envelope = (arr, seq, of) =>
+    JSON.stringify({
+      hist: { id, f: chatOnly ? "chat" : "all", seq, of,
+              total: items.length, dropped,
+              items: arr.map((x) => ({ r: x.r, t: x.full })) },
+    });
+
+  // CHUNKED ON THE SERIALISED LENGTH, never on the sum of text lengths. JSON escaping
+  // is not a rounding term: a newline becomes \n and DOUBLES, so a raw-length check
+  // would let a newline-heavy transcript blow feedChar's 16000-BYTE guard - which does
+  // not drop the line, it CLEARS THE BUFFER mid-line, losing every tick that carries it
+  // while both links look perfectly healthy.
+  const groups = [];
+  let cur = [];
+  for (const it of kept) {
+    if (cur.length &&
+        Buffer.byteLength(envelope(cur.concat([it]), 0, 9999), "utf8") > SCROLL_WIRE_CHUNK_BYTES) {
+      groups.push(cur); cur = [it];
+    } else {
+      cur.push(it);
+    }
+  }
+  if (cur.length || !groups.length) groups.push(cur);
+
+  for (let i = 0; i < groups.length; i++) {
+    const line = envelope(groups[i], i, groups.length) + "\n";
+    // Belt and braces: a single entry can be big enough that even alone it approaches
+    // the budget, so the built line is checked rather than assumed.
+    if (Buffer.byteLength(line, "utf8") > SCROLL_WIRE_CHUNK_BYTES + 200)
+      console.log(`Scrollback: WARNING chunk ${i} is ${Buffer.byteLength(line, "utf8")} bytes`);
+    if (usbPort) usbPort.write(line);
+    else if (bleCharacteristic) await sendOverBle(line);
+  }
+  console.log(
+    `Scrollback: ${id} ${chatOnly ? "chat" : "all"} ${kept.length} of ${items.length} entries ` +
+      `(${dropped} dropped, ${groups.length} chunks, ${used} bytes) via ${usbPort ? "usb" : "ble"}`
+  );
+}
+
 async function readSessions() {
   let files;
   try {
@@ -2577,7 +2639,10 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     // the item: path (one whole entry, no pagination) ignores it.
     const [id, filter = "chat", want = "last", budgetTok] = line.slice(8).trim().split(/\s+/);
     console.log(`[device/${via}] ${line}`);
-    if (want.startsWith("item:")) await sendHistoryItem(id, filter, Number.parseInt(want.slice(5), 10) || 0);
+    if (want.startsWith("tail:"))
+      await sendScrollback(id, filter, Number.parseInt(want.slice(5), 10) || 65536);
+    else if (want.startsWith("item:"))
+      await sendHistoryItem(id, filter, Number.parseInt(want.slice(5), 10) || 0);
     else await sendHistory(id, filter, want, histBudget(budgetTok));
     return;
   }
