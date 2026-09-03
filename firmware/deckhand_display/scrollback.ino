@@ -270,7 +270,7 @@ void tickScrollFetch() {
 }
 
 uint32_t scrollMaxY() {
-  uint32_t total = scrollTotalLines * CODE_LINE_H;
+  uint32_t total = (scrollTotalLines + SCROLL_HEAD_LINES) * CODE_LINE_H;
   uint32_t view  = (uint32_t) SCROLL_LINES * CODE_LINE_H;
   return total > view ? total - view : 0;
 }
@@ -289,7 +289,12 @@ static void scrollNote(const char* s, int y) {
 // The body only. Kept separate from the chrome so a scroll frame repaints just
 // this - the chrome is static between fetches.
 void scrollDrawBody() {
-  tft.fillRect(0, SCROLL_TOP, tft.width(), SCROLL_BOT - SCROLL_TOP, COLOR_BG);
+  // Cleared from just under the RULE, not from SCROLL_TOP: the 6 rows of air
+  // between them (SCROLL_TOP is HIST_RULE_Y + 6) belong to no one otherwise, so
+  // they kept whatever the previous screen left there whenever the body was
+  // redrawn without a full drawScrollback() first. Visible as a clipped line of
+  // stale text under the header.
+  tft.fillRect(0, HIST_RULE_Y + 1, tft.width(), SCROLL_BOT - HIST_RULE_Y - 1, COLOR_BG);
 
   if (scrollPending) {
     char b[40];
@@ -311,35 +316,59 @@ void scrollDrawBody() {
   const int firstLine = (int) (y0 / CODE_LINE_H);
   const int subPx = (int) (y0 % CODE_LINE_H);
 
-  // The head note sits ABOVE line 0, so it is only drawn when the transcript is
-  // scrolled to its very top.
-  if (y0 == 0) {
-    if (scrollDropped > 0) {
-      char b[40];
-      snprintf(b, sizeof(b), "-- %d older need USB --", scrollDropped);
-      scrollNote(b, SCROLL_TOP);
-    } else {
-      scrollNote("-- start of history --", SCROLL_TOP);
-    }
-  }
+  // THE HEAD NOTE IS LINE 0 OF THE SCROLL SPACE, not something drawn on top at
+  // SCROLL_TOP. Drawn on top it collided with the transcript's own first line,
+  // which lands at exactly the same y when scrollY is 0 - the note was painted
+  // and then immediately overwritten within the same call. As a real line it
+  // scrolls away under the finger like everything else, which is also what
+  // Claude Code's own scrollback does with its top-of-history marker.
 
   char buf[SCROLL_COLS + 2];
-  int ei = scrollEntryAtLine((uint32_t) firstLine);
+  int ei = scrollEntryAtLine((uint32_t) (firstLine > 0 ? firstLine - SCROLL_HEAD_LINES : 0));
   for (int row = 0; row <= SCROLL_LINES; row++) {
     const int line = firstLine + row;
-    if (line < 0 || (uint32_t) line >= scrollTotalLines) break;
+    if (line < 0 || (uint32_t) line >= scrollTotalLines + SCROLL_HEAD_LINES) break;
+    const int y0row = SCROLL_TOP + row * CODE_LINE_H - subPx;
+    // LINE 0 IS THE HEAD NOTE. One spelling, read by both draw paths, so the two
+    // can never disagree about whether the top of the transcript says anything.
+    if (line == 0) {
+      if (y0row >= SCROLL_TOP && y0row < SCROLL_BOT) {
+        if (scrollDropped > 0) {
+          // NAME THE RIGHT CAUSE. "need USB" is only true when the BLE budget is
+          // what cut them; on USB the limit is the store, and 102 entries were
+          // dropped on a cabled fetch - so the first version of this line said
+          // "need USB" while the cable was plugged in, which is simply false.
+          // Caught by reading a screenshot of the top of history.
+          char hb[44];
+          snprintf(hb, sizeof(hb), "-- %d older %s --", scrollDropped,
+                   usbLinkActive() ? "not kept" : "need USB");
+          scrollNote(hb, y0row);
+        } else {
+          scrollNote("-- start of history --", y0row);
+        }
+      }
+      continue;
+    }
+    const int tline = line - SCROLL_HEAD_LINES;
     // Advance to the entry owning this line. The index makes this a walk of at
     // most one entry per row rather than a search per row.
-    while (ei + 1 < scrollCount && scrollIdx[ei + 1].lineFirst <= (uint32_t) line) ei++;
+    while (ei + 1 < scrollCount && scrollIdx[ei + 1].lineFirst <= (uint32_t) tline) ei++;
     const ScrollEntry& e = scrollIdx[ei];
-    const int k = line - (int) e.lineFirst;
+    const int k = tline - (int) e.lineFirst;
     if (k >= e.lines) continue;                      // the spacer: draw nothing
 
     const int y = SCROLL_TOP + row * CODE_LINE_H - subPx;
     // The bottom edge is clipped at the CALL SITE. pushImage clips a negative y
     // correctly by offsetting its source pointer, but drawString clips only to
     // the SCREEN, so without this a line at the edge spills into the bottom air.
-    if (y + CODE_LINE_H <= SCROLL_TOP) continue;
+    // THE TOP EDGE, and it was missed while the bottom one was commented as
+    // handled. A partial first line starts at SCROLL_TOP - subPx, up to 15 rows
+    // ABOVE the list, and drawString clips only to the SCREEN - so it painted
+    // over the header and the rule. Seen as a clipped line of text under the
+    // name. A line is drawn only when it starts inside the list; the cost is a
+    // sliver of background at the top mid-drag, which reads as the transcript
+    // sliding under the header rather than as text cut in half over it.
+    if (y < SCROLL_TOP) continue;
     if (y >= SCROLL_BOT) break;
 
     // Roles 2/3/4 are one line, clipped with THREE ASCII DOTS - never U+2026,
@@ -418,31 +447,52 @@ void scrollDrawBand(int shift) {
   const int firstLine = (int) (y0 / CODE_LINE_H);
   const int subPx = (int) (y0 % CODE_LINE_H);
 
-  // Same condition as scrollDrawBody's: only reachable here when the band
-  // that shift exposed actually reaches the very top row.
-  if (y0 == 0 && bandY0 <= SCROLL_TOP) {
-    if (scrollDropped > 0) {
-      char b[40];
-      snprintf(b, sizeof(b), "-- %d older need USB --", scrollDropped);
-      scrollNote(b, SCROLL_TOP);
-    } else {
-      scrollNote("-- start of history --", SCROLL_TOP);
-    }
-  }
+  // The head note is line 0 of the scroll space; the shared row loop below
+  // draws it, so there is ONE spelling of it rather than a copy per path.
 
   char buf[SCROLL_COLS + 2];
-  int ei = scrollEntryAtLine((uint32_t) firstLine);
+  int ei = scrollEntryAtLine((uint32_t) (firstLine > 0 ? firstLine - SCROLL_HEAD_LINES : 0));
   for (int row = 0; row <= SCROLL_LINES; row++) {
     const int line = firstLine + row;
-    if (line < 0 || (uint32_t) line >= scrollTotalLines) break;
-    while (ei + 1 < scrollCount && scrollIdx[ei + 1].lineFirst <= (uint32_t) line) ei++;
+    if (line < 0 || (uint32_t) line >= scrollTotalLines + SCROLL_HEAD_LINES) break;
+    const int y0row = SCROLL_TOP + row * CODE_LINE_H - subPx;
+    // LINE 0 IS THE HEAD NOTE. One spelling, read by both draw paths, so the two
+    // can never disagree about whether the top of the transcript says anything.
+    if (line == 0) {
+      if (y0row >= SCROLL_TOP && y0row < SCROLL_BOT) {
+        if (scrollDropped > 0) {
+          // NAME THE RIGHT CAUSE. "need USB" is only true when the BLE budget is
+          // what cut them; on USB the limit is the store, and 102 entries were
+          // dropped on a cabled fetch - so the first version of this line said
+          // "need USB" while the cable was plugged in, which is simply false.
+          // Caught by reading a screenshot of the top of history.
+          char hb[44];
+          snprintf(hb, sizeof(hb), "-- %d older %s --", scrollDropped,
+                   usbLinkActive() ? "not kept" : "need USB");
+          scrollNote(hb, y0row);
+        } else {
+          scrollNote("-- start of history --", y0row);
+        }
+      }
+      continue;
+    }
+    const int tline = line - SCROLL_HEAD_LINES;
+    while (ei + 1 < scrollCount && scrollIdx[ei + 1].lineFirst <= (uint32_t) tline) ei++;
     const ScrollEntry& e = scrollIdx[ei];
-    const int k = line - (int) e.lineFirst;
+    const int k = tline - (int) e.lineFirst;
     if (k >= e.lines) continue;                      // the spacer: draw nothing
 
     const int y = SCROLL_TOP + row * CODE_LINE_H - subPx;
     // Bounded to the EXPOSED BAND rather than [SCROLL_TOP, SCROLL_BOT) - the
     // only difference from scrollDrawBody's identical loop.
+    // TWO SEPARATE TESTS, and conflating them is what made the body path and this
+    // one disagree. The BAND test says "is this line in the region the shift
+    // exposed" - a line straddling bandY0 when scrolling DOWN must still be
+    // drawn, because its lower half is in that region while its upper half was
+    // moved there correctly by the memmove. The HEADER test is the same one the
+    // body path uses and must be identical to it, or the two paths render
+    // different pixels and the equivalence a checksum harness proved is gone.
+    if (y < SCROLL_TOP) continue;
     if (y + CODE_LINE_H <= bandY0) continue;
     if (y >= bandY1) break;
 
@@ -646,6 +696,16 @@ void exitScrollback() {
 void openScrollback(int idx) {
   if (idx < 0 || idx >= sessionCount) return;
   scrollActive = true;
+  // histActive TOO, and this is not redundancy. Roughly ten guard lists in shared
+  // code already name histActive as "the history surface owns the glass", and
+  // setting it makes this surface join every one of them for free rather than
+  // needing a #if per site. It is semantically right - this IS the history
+  // surface on this board - and it was found the hard way: SCROLLPERF opens
+  // through here rather than through openHistory, so histActive stayed false and
+  // detailBandVisible() cheerfully blitted the detail card's 32x32 agent mark
+  // over the middle of the transcript. Visible in a screenshot as a starburst
+  // sitting in the text.
+  histActive = true;
   scrollY = 0;
   requestScrollback(idx);
   drawScrollback();

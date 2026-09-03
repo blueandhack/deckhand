@@ -131,6 +131,7 @@ void drawHistory() {
 // `HISTORY <id> <chat|all> <page|last>`. Every page turn is a round trip - instant over
 // USB, and it is what keeps the device from having to hold the whole transcript.
 // Full-entry pager. Same shape as the ask reader: page by tapping, PREV/CLOSE/NEXT below.
+#if !BOARD_HISTORY_SCROLL
 void drawHistFull() {
   int maxW = tft.width() - 24;
   int textTop = READER_TEXT_TOP;
@@ -179,6 +180,7 @@ void drawHistFull() {
   tft.flush();
 #endif
 }
+#endif  // !BOARD_HISTORY_SCROLL
 // THE DEVICE TELLS THE HOST HOW BIG ITS READER IS, as a trailing `<cols>x<lines>`
 // token, because the host cannot know it and used to assume. host/index.mjs
 // paginated against a hardcoded 36 chars / 14 lines - board 1's 216px column and
@@ -357,6 +359,7 @@ bool handleHistoryTouch(int sx, int sy) {
   return true;
 #endif
 }
+#if !BOARD_HISTORY_SCROLL
 bool handleHistFullTouch(int sx, int sy) {
   if (sy >= READER_CTRL_Y) {
     if (sx < HIST_TAP_1) { if (histFullPage > 0) { histFullPage--; drawHistFull(); } }
@@ -367,6 +370,7 @@ bool handleHistFullTouch(int sx, int sy) {
   if (sy > HIST_RULE_Y) { histFullPage++; drawHistFull(); }   // tap to page, like the ask reader
   return true;
 }
+#endif  // !BOARD_HISTORY_SCROLL
 #if !BOARD_USES_TFT_ESPI
 // ---- THE READER'S SECOND SECTION: the options, with what each one MEANS ----
 // The ask screen has one top-right slot, so there is one chip and one reader, and

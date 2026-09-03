@@ -2585,6 +2585,12 @@ const int SCROLL_TAP_SLOP_PX = 6;
 // of it comes from deleting the 46px scrubber band and the 50px button row.
 const int SCROLL_TOP     = HIST_TOP;
 const int SCROLL_LINES   = 26;
+// The head note ("-- start of history --", or the count BLE could not fetch) is a
+// real LINE of the scroll space rather than something painted on top at
+// SCROLL_TOP. Painted on top it was overwritten by the transcript's own first
+// line, which lands at the same y when scrollY is 0. As a line it scrolls away
+// under the finger like anything else.
+const int SCROLL_HEAD_LINES = 1;
 const int SCROLL_BOT     = SCROLL_TOP + SCROLL_LINES * CODE_LINE_H;
 const int SCROLL_BOT_AIR = 4;
 

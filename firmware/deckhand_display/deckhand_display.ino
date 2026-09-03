@@ -3569,8 +3569,12 @@ void handleTouch() {
   }
 
   if (histActive) {
+#if BOARD_HISTORY_SCROLL
+    handleHistoryTouch(sx, sy);      // the scrollback; there is no second level
+#else
     if (histFullActive) handleHistFullTouch(sx, sy);
     else handleHistoryTouch(sx, sy);
+#endif
     return;
   }
 
@@ -3932,6 +3936,7 @@ void handleLine(const String& line) {
     // It then "fixed itself" on PREV or NEXT, because paging re-requests a page
     // and that reply does carry items - which is exactly what made it look like
     // a redraw bug rather than state being destroyed.
+#if !BOARD_HISTORY_SCROLL
     JsonObject full = hist["full"];
     if (!full.isNull()) {
       const char* t = full["t"] | "";
@@ -3947,9 +3952,12 @@ void handleLine(const String& line) {
       histFull[n] = '\0';
       histPending = false;
       histFullPage = 0;
+#if !BOARD_HISTORY_SCROLL
       if (histFullActive) drawHistFull();
+#endif
       return;
     }
+#endif
 
     histCount = 0;
     histArenaUsed = 0;
@@ -5343,6 +5351,11 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
 #endif
 #if BOARD_HISTORY_SCROLL
   } else if (buf.startsWith("SCROLLPERF")) {
+    // CAPTURED FIRST, before the reentrancy guard below clears `buf`. Reading it
+    // at the END of this branch found an empty string every time, which presented
+    // as `SCROLLPERF top` silently behaving like plain SCROLLPERF - a flag that
+    // looks supported and does nothing.
+    const bool parkTop = buf.indexOf("top") > 0;
     // SCROLLPERF exists for the reason PERF, TEXTPROBE and READTEST do: this screen
     // is otherwise unverifiable without a finger, and SCREENSHOT can only record
     // what is already on the glass. It opens the transcript on the first session
@@ -5457,6 +5470,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     Serial.printf("SCROLLPERF: %d frames  compose %luus  flush %luus  frame %luus (%lu fps)  [scrollRect+scrollDrawBand]\n",
                   FRAMES, compose2 / FRAMES, flush2 / FRAMES,
                   (compose2 + flush2) / FRAMES, 1000000UL / ((compose2 + flush2) / FRAMES));
+    // `SCROLLPERF top` parks the view at line 0 afterwards, because the head note
+    // is only drawn there and SCREENSHOT can only record what is on the glass -
+    // the same reason TAB and PAGE exist. Default is the bottom, which is where
+    // the transcript actually opens.
+    if (parkTop) {
+      scrollY = 0;
+      scrollDrawBody();
+      tft.flush();
+      Serial.println("SCROLLPERF: parked at the top of history");
+    }
     scrollPerfRunning = false;
 #endif
   } else if (buf.startsWith("EMOJITEST")) {
