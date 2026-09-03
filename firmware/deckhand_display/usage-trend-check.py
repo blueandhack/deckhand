@@ -882,8 +882,32 @@ chk(codex_shown(44, CODEX_HIDE_FALLBACK_MIN * 60 + 1, -1) is False,
 # the Arduino prototype generator cannot meet a type declared after it.
 chk(len(re.findall(r"bool usageCodexShown\(\)", INO)) == 1,
     "usageCodexShown() is defined exactly once and takes no arguments")
-chk("QUOTA_STALE_SEC" not in fn_body(INO, "usageCodexShown"),
+codex_body = fn_body(INO, "usageCodexShown")
+chk("QUOTA_STALE_SEC" not in codex_body,
     "the predicate does NOT reuse the 900s stale threshold - hiding is a different claim")
+# STRUCTURAL, BOUND TO THE C BODY'S OWN OPERANDS - not to the file, and not to a
+# whole-line spelling. The eight codex_shown() checks above exercise a Python
+# MIRROR of the predicate and never touch usage.ino at all, so replacing the
+# real body with `return true;` would satisfy every one of them - the exact
+# hole this repo already paid for once in pairWindowOpen() ("replacing that
+# body with `return true;` ... passed all 70 assertions"). Each pattern below
+# is anchored on the operand NAMES the predicate must use, matched only inside
+# fn_body(INO, "usageCodexShown") - never against INO as a whole, which is how
+# the pairWindowOpen assertion passed while the guarantee was gone (pairTick
+# carried a copy of the same expression elsewhere in the file).
+chk(re.search(r"cxPct\s*<\s*0", codex_body) is not None,
+    "the never-measured percentage guard tests cxPct against < 0")
+chk(re.search(r"cxAgeSec\s*<\s*0\b", codex_body) is not None,
+    "the never-measured age guard tests cxAgeSec against < 0 (distinct from "
+    "the <= comparison below, which this pattern cannot match)")
+chk(re.search(r"cxWindowMin\s*>\s*0\s*\?\s*(?:\w+\.)?cxWindowMin\s*:\s*"
+              r"CODEX_HIDE_FALLBACK_MIN", codex_body) is not None,
+    "the fallback selects CODEX_HIDE_FALLBACK_MIN only when cxWindowMin is "
+    "absent (<= 0), never unconditionally and never some other constant")
+chk(re.search(r"cxAgeSec\s*<=\s*[^;]*\*\s*60", codex_body) is not None,
+    "the window comparison is cxAgeSec <= (window * 60) - a bare < would be "
+    "off by one window-second, and a missing *60 would compare seconds "
+    "against minutes")
 
 STRUCTURAL_COUNT = n - MIRROR_COUNT
 
