@@ -2148,6 +2148,14 @@ for (const b of [1, 2]) {
     // what this repo's "a bound taken from the geometry rather than fitted to
     // today's value" rule forbids. Same for SCROLL_RAIL_TAP_X above: its lower
     // bound is exact, its upper bound is the spec's own 20px judgement.
+    // SCROLL_HEAD_LINES has no GEOMETRIC constraint - the head note occupies one of
+    // the SCROLL_LINES already on screen rather than an extra row, so it appears in
+    // neither closing identity and the sweep reports it unguarded, correctly. It
+    // does have a real bound though, and nothing asserted it: `scrollNote()` draws
+    // ONE line, so anything above 1 leaves the head's remaining lines permanently
+    // blank, and 0 removes the note while the row loop still reserves line 0 for it.
+    chk(c.SCROLL_HEAD_LINES === 1,
+      "scrollback: the head note is exactly one line, which is all scrollNote draws");
     chk(c.SCROLL_TAP_SLOP_PX >= 1,
       "scrollback: the tap slop is at least 1, or the rail tap is unreachable");
     chk(c.SCROLL_TAP_SLOP_PX < c.CODE_LINE_H / 2,
