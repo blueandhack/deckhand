@@ -193,7 +193,8 @@ In `settings-geom-check.mjs`, inside the per-board block, guarded to board 2 (fo
     // THE NAME LANE IS ASSERTED AGAINST THE HOST'S OWN CAP, parsed rather than
     // transcribed - the rule that governs every other cross-file cap here. If the
     // host ever sends longer names, this fails instead of the panel clipping them.
-    const HOST = fs.readFileSync(path.join(DIR, "../../host/index.mjs"), "utf8");
+    // DIR + a relative suffix, because this checker imports fs but NOT path.
+    const HOST = fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8");
     const nm = HOST.match(/name:\s*deviceText\(await projectName\([^)]*\),\s*(\d+)\)/);
     chk(nm != null, "scrollback: the host's session-name cap is still findable");
     chk(nm != null && c.SCROLL_NAME_COLS === +nm[1],
@@ -224,17 +225,15 @@ In `settings-geom-check.mjs`, inside the per-board block, guarded to board 2 (fo
   }
 ```
 
-- [ ] **Step 4: Run the checker and watch it FAIL**
-
-Run: `node firmware/deckhand_display/settings-geom-check.mjs`
-Expected: FAIL on every new assertion — the constants do not exist yet, so `c.SCROLL_*` is `undefined` and the comparisons are false. **If any new assertion PASSES here, it cannot fail and must be rewritten** — that is the point of running it before Step 2's constants land. (If Step 2 was applied first, revert it, run this, then re-apply.)
-
-- [ ] **Step 5: Run the checker and watch it pass**
+- [ ] **Step 4: Run the checker and watch it pass**
 
 Run: `node firmware/deckhand_display/settings-geom-check.mjs`
 Expected: PASS, with the new assertions in the `ok` list and the printed total up by 14.
+**Passing proves nothing on its own** — Step 5 is where these earn their place, by
+perturbing each constant and requiring a failure BY NAME. That is the stronger test
+than watching them fail against absent constants, which any typo also achieves.
 
-- [ ] **Step 6: Prove each assertion can fail, one constant at a time**
+- [ ] **Step 5: Prove each assertion can fail, one constant at a time**
 
 For each of `SCROLL_COLS`, `SCROLL_RIGHT_AIR`, `SCROLL_LINES`, `SCROLL_BOT_AIR`, `SCROLL_NAME_COLS`, `SCROLL_RAIL_TAP_X`, `SCROLL_TAP_SLOP_PX`: change it by `+1` in `board_es3c35p.h`, run the checker, confirm it FAILS **by name**, revert.
 
@@ -250,7 +249,7 @@ for k in SCROLL_COLS SCROLL_RIGHT_AIR SCROLL_LINES SCROLL_BOT_AIR SCROLL_NAME_CO
 done
 ```
 
-- [ ] **Step 7: Bind the committed mock to the header**
+- [ ] **Step 6: Bind the committed mock to the header**
 
 Create `docs/design/scrollback/check.mjs`, following `docs/design/usage-redesign/check.mjs`'s shape:
 
@@ -258,12 +257,12 @@ Create `docs/design/scrollback/check.mjs`, following `docs/design/usage-redesign
 // Binds the mock to board_es3c35p.h. A committed design artifact whose numbers can
 // drift while it still reports "all passed" is the same class of defect as an
 // assertion that cannot fail, and it is a class this repo has paid for three times.
-import { consts, DIR as GEOM_DIR } from "../../../firmware/deckhand_display/geom-common.mjs";
+import { consts } from "../../../firmware/deckhand_display/geom-common.mjs";
 import fs from "node:fs";
-import path from "node:path";
 
-const HDR = path.join(GEOM_DIR, "board_es3c35p.h");
-const c = consts(HDR);
+// consts() is keyed by BASENAME (BOARD_OF[file] picks the board), so it takes a
+// name and not a path - it resolves against geom-common's own DIR itself.
+const c = consts("board_es3c35p.h");
 const page = fs.readFileSync(new URL("./scrollback.html", import.meta.url), "utf8");
 
 // The mock's own geometry block, parsed out of its JS rather than transcribed.
@@ -306,7 +305,7 @@ if (fail) process.exit(1);
 console.log("the scrollback mock agrees with board_es3c35p.h");
 ```
 
-- [ ] **Step 8: Run the mock bind, and prove it has teeth**
+- [ ] **Step 7: Run the mock bind, and prove it has teeth**
 
 ```bash
 node docs/design/scrollback/check.mjs
@@ -318,7 +317,7 @@ cp /tmp/h.bak firmware/deckhand_display/board_es3c35p.h
 ```
 Expected: clean pass, then `COLS (34) == SCROLL_COLS (35)` FAILing and `exit=1`.
 
-- [ ] **Step 9: Update the mock's README to record that the bind now exists**
+- [ ] **Step 8: Update the mock's README to record that the bind now exists**
 
 Replace the README's last paragraph (the one beginning "**This mock is NOT yet bound") with:
 
@@ -329,7 +328,7 @@ separate `WAS` table which is asserted to genuinely differ from what ships, so a
 constant cannot be parked there to escape the bind.
 ```
 
-- [ ] **Step 10: Verify both boards and the sweep**
+- [ ] **Step 9: Verify both boards and the sweep**
 
 ```bash
 arduino-cli compile --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashMode=dio,USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=huge_app" --output-dir /tmp/b2 firmware/deckhand_display
@@ -340,7 +339,7 @@ node firmware/deckhand_display/geom-sweep.mjs 2>&1 | tail -25
 ```
 Expected: board 2 `UNCHANGED` (`const int`s nothing reads are discarded by `--gc-sections`); **board 1 `UNCHANGED`** — its header gains one `#define` that emits no code. The sweep will report the new non-geometric constants as unguarded (they measure bytes and time); every geometric one must be caught at `|1|`.
 
-- [ ] **Step 11: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add firmware/deckhand_display/board_es3c35p.h firmware/deckhand_display/board_e32r28t.h \
@@ -393,7 +392,6 @@ Create `firmware/deckhand_display/scrollback-check.mjs`. It has two halves repor
 //                neighbouring line can satisfy is not a rule (the pairWindowOpen
 //                hole: replacing that body with `return true` passed 70 assertions).
 import fs from "node:fs";
-import path from "node:path";
 import { consts, stripComments, fnBody, DIR } from "./geom-common.mjs";
 
 const SELFTEST = process.argv.includes("--selftest");
@@ -408,8 +406,31 @@ const m = (cond, msg) => chk(cond, msg, "m");
 const s = (cond, msg) => chk(cond, msg, "s");
 
 const c = consts(path.join(DIR, "board_es3c35p.h"));
-let INO = stripComments(fs.readFileSync(path.join(DIR, "scrollback.ino"), "utf8"));
-const SKETCH = stripComments(fs.readFileSync(path.join(DIR, "deckhand_display.ino"), "utf8"));
+// stripComments() takes a file NAME relative to DIR and reads it ITSELF - it is
+// not a filter over content already in hand.
+let INO = stripComments("scrollback.ino");
+const SKETCH = stripComments("deckhand_display.ino");
+
+// fnBody() THROWS when a signature is missing - deliberately, so an assertion can
+// never run over an empty string and pass vacuously. But a SELFTEST that deletes
+// code must fail BY NAME rather than crash the checker, so the throw is caught
+// here, recorded as a named failure, and "" returned: the content assertions
+// downstream then fail loudly too, which is several named failures and no crash.
+function body(src, sig, where) {
+  try {
+    const b = fnBody(src, sig, where);
+    if (!b.trim()) { chk(false, `structural: ${sig} has a non-empty body`, "s"); return null; }
+    return b;
+  } catch { chk(false, `structural: ${sig} is findable in ${where}`, "s"); return null; }
+}
+
+// EVERY NEGATIVE ASSERTION GOES THROUGH THIS, because `!/x/.test("")` is TRUE:
+// a missing function would otherwise PASS the three "must not contain" checks
+// while only the findability check failed. A vacuous pass standing beside a real
+// failure is still a vacuous pass, and it is the exact trap geom-common's own
+// comment on fnBody's throw exists to prevent.
+const absent = (b, re, msg) => s(b !== null && !re.test(b), msg);
+const present = (b, re, msg) => s(b !== null && re.test(b), msg);
 
 if (SELFTEST) {
   const fault = process.env.SB_FAULT || "wrap-cap";
@@ -504,20 +525,20 @@ for (let L = 0; L < totalLines; L++) {
 m(bad === null, `mirror: the binary search lands in range for every line${bad === null ? "" : ` (first bad: ${bad})`}`);
 
 // ---------------- STRUCTURAL: bound to scrollback.ino's own function bodies ----------------
-const wrapBody = fnBody(INO, "int scrollWrapLines(const char* t, int cols)", "scrollback.ino");
-s(wrapBody !== null && !/\b80\b/.test(wrapBody),
+const wrapBody = body(INO, "int scrollWrapLines(const char* t, int cols)", "scrollback.ino");
+absent(wrapBody, /\b80\b/,
   "structural: scrollWrapLines carries NO line cap - a 4000-byte entry is 118 lines");
-s(wrapBody !== null && !/countWrappedLines|wrapLineLen/.test(wrapBody),
+absent(wrapBody, /countWrappedLines|wrapLineLen/,
   "structural: scrollWrapLines does not reuse the 80-line-capped shared helpers");
-s(wrapBody !== null && !/textWidth/.test(wrapBody),
+absent(wrapBody, /textWidth/,
   "structural: the wrap is integer arithmetic, not a per-character width call");
 
-const appendBody = fnBody(INO, "bool scrollAppend(uint8_t role, const char* t)", "scrollback.ino");
-s(appendBody !== null && /SCROLL_TEXT_BYTES/.test(appendBody),
+const appendBody = body(INO, "bool scrollAppend(uint8_t role, const char* t)", "scrollback.ino");
+present(appendBody, /SCROLL_TEXT_BYTES/,
   "structural: scrollAppend bounds itself against SCROLL_TEXT_BYTES");
-s(appendBody !== null && /SCROLL_MAX_ENTRIES/.test(appendBody),
+present(appendBody, /SCROLL_MAX_ENTRIES/,
   "structural: scrollAppend bounds itself against SCROLL_MAX_ENTRIES");
-s(appendBody !== null && /p\.role == 2 && role == 3/.test(appendBody),
+present(appendBody, /p\.role == 2 && role == 3/,
   "structural: the result-after-ran spacer rule is in scrollAppend, by operand");
 
 // The whole feature must be inside ONE #if, so board 1 never sees the TEXT of it.
@@ -536,7 +557,7 @@ for (const h of ["board_es3c35p.h", "board_e32r28t.h"]) {
 
 // Every gutter marker is ASCII. Spleen declares 0x20..0x7E; anything else draws
 // nothing AND advances nothing, the trap this repo has paid for repeatedly.
-const markBody = fnBody(INO, "const char* scrollMark(uint8_t r)", "scrollback.ino");
+const markBody = body(INO, "const char* scrollMark(uint8_t r)", "scrollback.ino");
 s(markBody !== null, "structural: scrollMark is findable");
 if (markBody) {
   const lits = [...markBody.matchAll(/"([^"]*)"/g)].map(x => x[1]);
@@ -765,7 +786,13 @@ int scrollEntryAtLine(uint32_t line) {
 - [ ] **Step 4: Run the checker and watch it pass**
 
 Run: `node firmware/deckhand_display/scrollback-check.mjs`
-Expected: PASS, printing `N mirror + M structural assertions, 0 failures`. The `no-reap`, `no-activity` and `seq-append` structural assertions are added in Tasks 3 and 5; only the ones written above are present now, so remove those three from `WANT` until their tasks land, or leave them and accept that those selftest faults are not yet exercisable.
+Expected: PASS, printing `N mirror + M structural assertions, 0 failures`.
+
+**The `WANT` map above must ship with ONLY the two faults whose assertions exist —
+`wrap-cap` and `wide-marker`.** Delete the `no-reap`, `no-activity` and `seq-append`
+entries; Task 3 adds `seq-append` alongside the assertion that catches it, and Task 5
+adds the other two. A selftest entry with no matching assertion cannot pass, and a
+selftest that cannot pass is worse than one that is merely incomplete.
 
 - [ ] **Step 5: Prove the checker has teeth on the two faults reachable now**
 
@@ -854,9 +881,9 @@ if (gm) {
 const HOSTSRC = stripComments(fs.readFileSync(path.join(DIR, "../../host/index.mjs"), "utf8"));
 const sbBody = fnBody(HOSTSRC, "async function sendScrollback(id, filter, maxBytes)", "host/index.mjs");
 s(sbBody !== null, "structural: sendScrollback is findable in the host");
-s(sbBody !== null && /JSON\.stringify/.test(sbBody) && /byteLength/.test(sbBody),
+s(/JSON\.stringify/.test(sbBody) && /byteLength/.test(sbBody),
   "structural: the host measures the chunk on the SERIALISED line, in BYTES");
-s(sbBody !== null && /SCROLL_WIRE_CHUNK_BYTES|CHUNK_BYTES/.test(sbBody),
+s(/SCROLL_WIRE_CHUNK_BYTES|CHUNK_BYTES/.test(sbBody),
   "structural: the host bounds each chunk by the named budget");
 
 // A seq discontinuity CLEARS rather than assembling a transcript with a hole.
@@ -869,9 +896,9 @@ s(parseArm != null && /seq != scrollNextSeq/.test(parseArm[0]),
 
 // The request picks its budget by TRANSPORT - BLE cannot have the whole thing.
 const reqBody = fnBody(INO, "void requestScrollback(int idx)", "scrollback.ino");
-s(reqBody !== null && /usbLinkActive\(\)/.test(reqBody),
+s(/usbLinkActive\(\)/.test(reqBody),
   "structural: the fetch budget is chosen by transport, not fixed");
-s(reqBody !== null && /SCROLL_TAIL_BYTES_USB/.test(reqBody) && /SCROLL_TAIL_BYTES_BLE/.test(reqBody),
+s(/SCROLL_TAIL_BYTES_USB/.test(reqBody) && /SCROLL_TAIL_BYTES_BLE/.test(reqBody),
   "structural: both transport budgets are named constants");
 ```
 
@@ -1072,22 +1099,17 @@ In `deckhand_display.ino`'s `loop()`, beside the other tick calls:
 #endif
 ```
 
-- [ ] **Step 8: Run the checker and watch it pass**
+- [ ] **Step 8: Add the two stubs so this task compiles standalone**
 
-Run: `node firmware/deckhand_display/scrollback-check.mjs`
-Expected: PASS. `drawScrollback()` and `scrollMaxY()` do not exist yet, so **the sketch will not compile until Task 4** — add temporary forward stubs at the top of `scrollback.ino`'s `#if` block for this task only:
-
-```c
-void drawScrollback();      // Task 4
-uint32_t scrollMaxY();      // Task 4
-```
-
-and implement them in Task 4. Note them in the commit message so the next reviewer knows they are deliberate.
-
-- [ ] **Step 9: Add the two stubs' bodies so this task compiles standalone**
+`drawScrollback()` and `scrollMaxY()` are called by the parser arm and by
+`requestScrollback`, and Task 4 implements them. A task must compile and be
+reviewable on its own, so ship real (trivial) bodies now rather than forward
+declarations — a declaration without a definition does not link.
 
 ```c
-// TEMPORARY, replaced in Task 4. A task must compile and be reviewable on its own.
+// TEMPORARY, both replaced in Task 4. scrollMaxY's body is already final; only
+// drawScrollback is a placeholder, so the screen keeps drawing the old pager
+// this task, which is the correct visible outcome for a wire-only change.
 uint32_t scrollMaxY() {
   uint32_t total = scrollTotalLines * CODE_LINE_H;
   uint32_t view = (uint32_t) SCROLL_LINES * CODE_LINE_H;
@@ -1095,6 +1117,13 @@ uint32_t scrollMaxY() {
 }
 void drawScrollback() { }
 ```
+
+- [ ] **Step 9: Run the checker and watch it pass**
+
+Run: `node firmware/deckhand_display/scrollback-check.mjs`
+Expected: PASS, and add `seq-append` to the selftest `WANT` map now that the
+assertion catching it exists. Verify it:
+`SB_FAULT=seq-append node firmware/deckhand_display/scrollback-check.mjs --selftest`
 
 - [ ] **Step 10: Verify on hardware that a transcript lands**
 
@@ -1464,11 +1493,11 @@ Append to `scrollback-check.mjs`'s structural half:
 // each has a named failure if it is missing.
 const dragBody = fnBody(INO, "void scrollDragLoop(int sy0)", "scrollback.ino");
 s(dragBody !== null, "structural: scrollDragLoop is findable");
-s(dragBody !== null && /reapBleLinks\(true\)/.test(dragBody),
+s(/reapBleLinks\(true\)/.test(dragBody),
   "structural: the drag loop reaps BLE links - drainBleRx only runs from loop()");
-s(dragBody !== null && /lastActivityMillis = millis\(\)/.test(dragBody),
+s(/lastActivityMillis = millis\(\)/.test(dragBody),
   "structural: the drag loop refreshes lastActivityMillis, or the backlight blanks mid-drag");
-s(dragBody !== null && /getTouchPoint/.test(dragBody),
+s(/getTouchPoint/.test(dragBody),
   "structural: the drag loop polls getTouchPoint rather than touchPressed alone");
 
 // ONE predicate for "is this a tap", read by the loop and by the hit test - the
@@ -1476,16 +1505,16 @@ s(dragBody !== null && /getTouchPoint/.test(dragBody),
 // another, so a second spelling is forbidden rather than merely avoided.
 const touchBody = fnBody(INO, "bool handleScrollTouch(int sx, int sy)", "scrollback.ino");
 s(touchBody !== null, "structural: handleScrollTouch is findable");
-s(touchBody !== null && /SCROLL_TAP_SLOP_PX/.test(dragBody || ""),
+s(/SCROLL_TAP_SLOP_PX/.test(dragBody || ""),
   "structural: the tap/drag threshold is the named constant, in the loop that measures it");
-s(touchBody !== null && /SCROLL_RAIL_TAP_X/.test(touchBody),
+s(/SCROLL_RAIL_TAP_X/.test(touchBody),
   "structural: the rail's tap zone is the named constant");
 
 // Closing must restore the surface underneath, and clear the PSRAM.
 const exitBody = fnBody(INO, "void exitScrollback()", "scrollback.ino");
-s(exitBody !== null && /scrollEnd\(\)/.test(exitBody),
+s(/scrollEnd\(\)/.test(exitBody),
   "structural: exiting frees the PSRAM store rather than holding 304KB forever");
-s(exitBody !== null && /scrollActive = false/.test(exitBody),
+s(/scrollActive = false/.test(exitBody),
   "structural: exiting clears scrollActive");
 ```
 
@@ -1542,8 +1571,8 @@ void scrollDragLoop(int sy0) {
   if (moved < SCROLL_TAP_SLOP_PX && sy0 >= SCROLL_TOP && sy0 < SCROLL_BOT) {
     // Only the rail's zone does anything on a tap; the body deliberately has no
     // tap action at all, which is why there is no tap/drag ambiguity to resolve.
-    int sx, sy;
-    (void) getTouchPoint(sx, sy);
+    // The coordinates are the ones the PRESS carried (scrollTapX, sy0) - reading
+    // getTouchPoint here would return false, the finger having just left.
     if (scrollTapX >= SCROLL_RAIL_TAP_X && maxY > 0) {
       long f = (long) (sy0 - SCROLL_TOP) * (long) maxY / (SCROLL_BOT - SCROLL_TOP - 1);
       scrollY = (uint32_t) (f < 0 ? 0 : (f > (long) maxY ? (long) maxY : f));
