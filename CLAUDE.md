@@ -21,7 +21,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386758, RAM 69804 | flash 1025318, RAM 66436 |
+| size today | flash 1386758, RAM 69804 | flash 1026062, RAM 74116 |
 
 **Those two figures are `arduino-cli`'s own `Sketch uses` / `Global variables` lines, NOT the
 `.bin` file's size, and the distinction has to be stated or the two records read as
@@ -2698,7 +2698,9 @@ removed outright: the two sources fail differently, so they are handled differen
 not by oversight.
 
 **THE RHYTHM CONSTRAINT, AND WHY THE TWO CARDS SPENT THEIR RECLAIMED ROWS DIFFERENTLY.** Hiding
-the Codex row frees 64 rows (`8 + CODEX_H(56) + 8`), and the two cards split them 32/32 — but
+the Codex row frees 64 rows (`CODEX_H(56) + SP_2(8)` — the row plus the one gap that closes with
+it; `8 + 56 + 8` is 72 and was never the figure, a slip this file is correcting in itself), and the
+two cards split them 32/32 — but
 *where* each 32 landed follows from what each card actually has to grow.
 - **NOW put its whole share into the SPARKLINE BAND.** `NOW_SPARK_H` 32 → `NOW_SPARK_H_SOLO` 64,
   and nothing else in that card's rhythm moves: the gap between blocks (4) and the trailing
@@ -2734,22 +2736,46 @@ through geometry instead of a session count. `renderUsageTab()`'s bust block the
 flag actually flips (`codexShownCache != codexShownNow && codexShownCache != -1`, so the very first
 draw of the tab does not pay for a clear nothing needs), and only then calls `drawUsageStatic()`.
 
-**COSTS, MEASURED IN ONE SESSION AGAINST THE BRANCH POINT** (`arduino-cli`'s cache keys on the
-sketch path, so this compares real builds rather than recorded figures from different sessions):
+**COSTS, MEASURED IN ONE SESSION AGAINST THE BRANCH POINT — and that claim was FALSE the first
+time this table was written, which the final whole-plan review caught.** The first version cited
+`arduino-cli`'s sketch-path cache keying as if it meant "this compares real builds", when the
+figures actually came from `board-baseline.json` at three different commits (807a080, 0ee4eaf,
+db44586), captured across separate task dispatches on different days — recorded figures from
+different sessions, the exact thing this file elsewhere warns cannot be safely diffed
+("BUILDING BOTH ENDS IN ONE SESSION IS NOT A CONVENIENCE"). Only HEAD had been freshly built. The
+method is now real: the branch point (`807a080`) was checked out into a **`git worktree` at a
+scratch path** — never in place, since `arduino-cli` keys its build cache on the sketch PATH and an
+in-place rebuild would have evicted the objects the current baseline was just taken from — and
+compiled back-to-back with HEAD in one sitting, both reporting `core stamp not pooled`:
 
-| | branch point | HEAD (Task 5) | delta |
+| | branch point (`807a080`, worktree build) | HEAD (Task 5) | delta |
 |---|---|---|---|
-| board 2 `.bin` | 1,025,888 | 1,026,320 | **+432 bytes**, RAM unchanged (74,116 throughout) |
+| board 2 `.bin` | 1,025,888 (`2b0409ed...`) | 1,026,320 (`3b1afb17...`) | **+432 bytes**, RAM unchanged (74,116 throughout) |
 | board 2 `Sketch uses` | 1,025,626 | 1,026,062 | +436 (the few-byte `.bin`-vs-`Sketch-uses` spread this file already documents) |
 | board 1 | 1,387,024 (`8f64b7f7...`) | 1,387,024 (`8f64b7f7...`) | **UNCHANGED** |
 
+**The real, same-session build reproduces the original figures exactly** — +432 `.bin`, +436
+`Sketch uses`, RAM unchanged — so the numbers were never wrong, only the method claimed to have
+produced them. The branch-point rebuild's hash (`2b0409ed...`) is also byte-for-byte the hash
+`807a080`'s own baseline entry recorded at the time, which is further evidence today's rebuild
+lands in the same place the original session did.
+
 Almost all of it is Task 3 wiring the predicate into reachable code (**+448** measured there, the
 first task on this branch whose diff was not stripped by `--gc-sections`); Task 1's predicate
-function alone moved the `.bin` by **-16** while unreachable — a link-order artifact, not emitted
-code, the same class this file already documents for USAGE v2's own Tasks 6-8. Tasks 2 and 4 added
-no board-2 firmware bytes at all (a committed mock plus checker-only changes). Board 1 is
-`UNCHANGED` at every commit on this branch: the whole feature sits behind `#if BOARD_USAGE_V2` and
-`usageCodexShown()`'s own call sites, none of which board 1 compiles.
+function alone moved the recorded `.bin` by **-16** while unreachable.
+**That -16 is a stale cross-session baseline, not emitted code caused by the change at all — and
+it is NOT the same class as USAGE v2's own Tasks 6-8, which this table previously (and wrongly)
+called it.** Tasks 6-8 were a real ~4,500-byte internal RELOCATION *caused by* code those tasks
+added, later confirmed unreachable and stripped. Task 1's predicate is the opposite: commit
+0ee4eaf's own message records that two independent board-2 compiles — one **with** the new
+predicate, one **without** it — produced the identical -16/-12 delta and the identical masked hash
+against the then-current baseline. A delta that reproduces on the UNCHANGED tree cannot have been
+caused by the change; it is the recorded baseline itself sitting one build-session's worth of
+core-cache/link-order drift away from a fresh compile, the same phenomenon this file's pooling
+notes describe at a different timescale. Tasks 2 and 4 added no board-2 firmware bytes at all (a
+committed mock plus checker-only changes). Board 1 is `UNCHANGED` at every commit on this branch:
+the whole feature sits behind `#if BOARD_USAGE_V2` and `usageCodexShown()`'s own call sites, none
+of which board 1 compiles.
 
 **WHAT IS NOT VERIFIED, STATED PLAINLY.**
 - **The DUO layout is now unreachable on THIS machine, so the two layouts are verified at
@@ -4050,8 +4076,8 @@ two things `host/index.mjs` cannot get any other way:
   card's other two lines would be empty chrome.
   It shows `--`, never `0%`, when no `rate_limits` has ever been seen; 0% is a
   measurement and "never measured" is not. **CORRECTION: on board 2 that state is no
-  longer reachable at all.** The adaptive column (see "USAGE on board 2: the column that
-  adapts to whether Codex is even here", below) hides the whole row once Codex has gone
+  longer reachable at all.** The adaptive column (see "USAGE on board 2: the column
+  adapts to whether Codex is even here", above) hides the whole row once Codex has gone
   quiet for a full window — and "never measured" is silence since forever, so it is the
   first thing the predicate catches. `renderCodexRow()`'s `bool have = usage.cxPct >= 0;`
   and its `"--"` branch are unchanged and still execute — this sentence is still literally

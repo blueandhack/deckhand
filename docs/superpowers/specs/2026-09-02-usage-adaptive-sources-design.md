@@ -66,9 +66,15 @@ Why a whole window rather than something shorter:
   `stale 3h`. Hiding is a different claim - not "we cannot vouch for this
   number" but "nobody is running this tool" - and one full window of silence is
   what earns it: the host polled roughly 120,000 times and learned nothing new.
-- **It cannot flap.** Age grows monotonically until a refresh arrives, so the
-  edge fires once. A refresh brings the row straight back, which is a reflow the
-  user caused by starting Codex.
+- **It cannot flap, for one Mac.** Age grows monotonically until a refresh
+  arrives, so the edge fires once. A refresh brings the row straight back,
+  which is a reflow the user caused by starting Codex. This is a single-source
+  argument: `usage.cxAgeSec` is set by `mergeUsage()`, which re-picks the
+  freshest Codex age across every linked Mac on every tick, so with two Macs
+  connected the row could in principle flip as the freshest source switches.
+  Not reachable on this machine (`cxPct` is `-1`, so there is nothing to merge
+  a source for) - recorded so a future reader with two live Macs narrows this
+  claim rather than re-discovering the gap.
 
 `CODEX_HIDE_FALLBACK_MIN` (10080) covers the case where a percentage arrives with
 no window beside it - the host sends `cxWin: primary?.windowMin ?? null`, so the

@@ -250,8 +250,11 @@ const TH = {}; for (const k in RAW) { TH[k] = {}; RAW[k].forEach((v,i) => TH[k][
 // ---------------------------------------------------------------------------
 // K - every constant this mock shares with board_es3c35p.h, under the header's
 // own name. check.mjs parses the header (through the geometry checkers' own
-// consts()) and asserts every one of these against it, so the mock cannot
-// drift from the header while still reporting itself trustworthy.
+// consts()) and asserts every one of these against it - all but
+// MAC_EMOJI_SIZE, which lives in MacEmoji16.h rather than the board header or
+// the .ino and is named-and-skipped there rather than silently passed - so
+// the mock cannot drift from the header while still reporting itself
+// trustworthy.
 // ---------------------------------------------------------------------------
 const K = {
   BOARD_W:320, BOARD_H:480, TAB_BAR_H:46, CONTENT_Y:46, FOOTER_H:20,
