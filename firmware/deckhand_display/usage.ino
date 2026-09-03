@@ -1098,6 +1098,16 @@ void renderUsageTab() {
     // fields then draw at the new offsets inside the old boxes - the settings
     // branch's "a live field drew a control into chrome that did not exist",
     // arriving through geometry instead of a count.
+    // NOTE: if the layout flips while a DIFFERENT tab is showing,
+    // switchTab(TAB_USAGE) already clears the content area and calls
+    // drawUsageStatic() fresh for the new layout - and this bust then fires
+    // on its own stale codexShownCache and clears/paints the identical
+    // column a second time. Invisible today, because switchTab's own clear
+    // already ran first, but it is exactly the double-draw the pin-tap
+    // handler at deckhand_display.ino:3607 explicitly refuses to create by
+    // routing through this bust rather than calling drawUsageStatic()
+    // directly. Worth fixing alongside that handler if this bust is ever
+    // reworked, not on its own.
     if (codexShownCache != codexShownNow && codexShownCache != -1)
       tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
     srcCache = usageSourceLink;
