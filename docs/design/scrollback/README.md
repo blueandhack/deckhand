@@ -16,8 +16,7 @@ and the mock is a picture. Two known deliberate differences:
 - The mock's `pushImage`-clipped partial lines are simulated by CSS overflow, which cannot
   represent the real frame cost.
 
-**This mock is NOT yet bound to `board_es3c35p.h`.** Every other committed mock here parses the
-constants it shares with the header, so it cannot silently drift while still reporting a clean
-pass. That bind (`check.mjs`) is the implementation plan's first task and cannot be written
-before the `SCROLL_*` constants exist. Until then, treat the numbers in the spec as the
-authority and the numbers in this page as illustration.
+**Bound to the header:** `node check.mjs` asserts every constant this page shares with
+`board_es3c35p.h`, parsed from both sides. The two deliberate differences above live in a
+separate `WAS` table which is asserted to genuinely differ from what ships, so a live
+constant cannot be parked there to escape the bind.

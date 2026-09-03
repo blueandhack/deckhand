@@ -2074,6 +2074,60 @@ for (const b of [1, 2]) {
     chk(HIST_ARENA >= page, `HIST_ARENA ${HIST_ARENA} >= one page ((${chars} + 1) x ${listLines} = ${page})`);
     chk(chars < 60, `the reader's ${chars}-character lane is under wrapLineLen's 60-character ceiling`);
   }
+
+  // ================= SCROLLBACK: THE TRANSCRIPT SURFACE (board 2) =================
+  if (b === 2) {
+    // THE TWO CLOSING IDENTITIES. Each is the only two-sided bound on its axis:
+    // a per-term check passes for any redistribution that preserves the sum, and
+    // a sum-only check passes for any single term that moves if another absorbs
+    // it. Asserting the identity is what makes a one-constant change fail here.
+    chk(c.SCROLL_RAIL_X + c.SCROLL_RAIL_W + c.SCROLL_RIGHT_AIR === PANEL[b][0],
+      "scrollback: the horizontal lane closes exactly on BOARD_W");
+    chk(c.SCROLL_TOP + c.SCROLL_LINES * c.CODE_LINE_H + c.SCROLL_BOT_AIR === PANEL[b][1],
+      "scrollback: the vertical column closes exactly on BOARD_H");
+    chk(c.SCROLL_LINES === Math.floor((PANEL[b][1] - c.SCROLL_BOT_AIR - c.SCROLL_TOP) / c.CODE_LINE_H),
+      "scrollback: SCROLL_LINES is the column's own height in whole cells");
+    chk(c.SCROLL_BOT === c.SCROLL_TOP + c.SCROLL_LINES * c.CODE_LINE_H,
+      "scrollback: SCROLL_BOT is derived from TOP and LINES, not a second literal");
+
+    // The back key carries the CLOSE the deleted button row used to provide, so it
+    // is the one control here that must not shrink below the fingertip floor.
+    chk(c.SCROLL_BACK_W >= c.TAP_MIN, "scrollback: the back key is at least TAP_MIN wide");
+    chk(c.HIST_CHIP_H >= c.TAP_MIN, "scrollback: the filter chip is at least TAP_MIN tall");
+
+    // THE NAME LANE IS ASSERTED AGAINST THE HOST'S OWN CAP, parsed rather than
+    // transcribed - the rule that governs every other cross-file cap here. If the
+    // host ever sends longer names, this fails instead of the panel clipping them.
+    // DIR + a relative suffix, because this checker imports fs but NOT path.
+    const HOST = fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8");
+    const nm = HOST.match(/name:\s*deviceText\(await projectName\([^)]*\),\s*(\d+)\)/);
+    chk(nm != null, "scrollback: the host's session-name cap is still findable");
+    chk(nm != null && c.SCROLL_NAME_COLS === +nm[1],
+      "scrollback: the name lane is exactly the host's session-name cap in columns");
+    const chipX = PANEL[b][0] - 12 - c.HIST_CHIP_W_CHAT;
+    chk(c.SCROLL_NAME_X + c.SCROLL_NAME_COLS * c.TEXT_ADV <= chipX - 4,
+      "scrollback: the name lane's ink clears the widest filter chip");
+
+    // The two header lines are 16px boxes that must not share a row (drawString
+    // paints an OPAQUE box, so a shared row erases its neighbour's tail - the
+    // defect the keyboard's meta row hit twice) and must stay above the rule.
+    const nameBox = tlBox(b, 2, 12), posBox = tlBox(b, 1, 30);
+    chk(nameBox[1] < posBox[0], "scrollback: the header's name and counter rows are disjoint");
+    chk(posBox[1] < c.HIST_RULE_Y, "scrollback: the header's counter clears the rule");
+
+    // The rail must not eat a text column, and the tap zone must not either.
+    const textEnd = c.SCROLL_TXT_X + c.SCROLL_COLS * c.TEXT_ADV;
+    chk(c.SCROLL_RAIL_X >= textEnd, "scrollback: the rail clears the text lane");
+    chk(c.SCROLL_RAIL_TAP_X >= textEnd, "scrollback: the rail's tap zone clears the text lane");
+    chk(c.SCROLL_TAP_SLOP_PX < c.CODE_LINE_H / 2,
+      "scrollback: the tap slop is under half a line, so a tap has moved no text");
+
+    // The lane is EXACTLY the column count because every Spleen glyph has
+    // xOffset + width == xAdvance, which this header already asserts. That is why
+    // a column count that divides exactly is exact for ANY string on this board.
+    chk(advanceB(b, 1) === c.TEXT_ADV,
+      "scrollback: the body face's advance is TEXT_ADV, so the lane is exact");
+  }
 }
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 shortfalls`);
 if (SELFTEST) {

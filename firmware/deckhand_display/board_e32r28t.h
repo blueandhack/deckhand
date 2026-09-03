@@ -23,6 +23,12 @@
 #define BOARD_HAS_RGBLED     0
 #define BOARD_TOUCH_NEEDS_CAL 1
 #define BOARD_SETTINGS_HOME  0   // four pages behind a chevron pager; see settings.ino
+// The scrolling transcript is board 2's. This board keeps its paged reader: the
+// panel is RESISTIVE, where this repo has already measured that drag-scroll
+// misfires and settled on discrete pages, and its binary is held byte-identical.
+// A #define, NOT a const int - the preprocessor cannot see a C++ const int, so
+// `#if` on one is silently false with no warning. That has shipped here twice.
+#define BOARD_HISTORY_SCROLL 0
 #define BOARD_HAS_WIRELESS_PAIR 0  // PROVISION over USB is the only pairing path here; see board_es3c35p.h
 // The USAGE tab's NOW / WEEK / CODEX layout is board 2 only: it needs a trend
 // ring (~165 bytes of DRAM against board 1's ~26KB of free heap, which the audio

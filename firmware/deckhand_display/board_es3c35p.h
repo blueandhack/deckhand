@@ -2536,6 +2536,100 @@ const int READER_BTN_R_X = 217, READER_BTN_R_W = 91;
 const int HIST_TAP_1   = 108, HIST_TAP_2   = 210;
 const int READER_TAP_1 = 108, READER_TAP_2 = 210;
 
+#define BOARD_HISTORY_SCROLL 1
+
+// ---------- Scrollback: the transcript surface ----------
+// THE HORIZONTAL LANE CLOSES EXACTLY ON BOARD_W, and SCROLL_RIGHT_AIR is the
+// closing term - the HOME_Y0_BOT / PAIR_AIR_LEFT shape. SCROLL_TXT_X and
+// SCROLL_RAIL_X are DERIVED, so the literals a sweep can perturb are GUT_X,
+// COLS, RAIL_AIR, RAIL_W and RIGHT_AIR, and the identity catches every one.
+//
+//   12  gutter x       marker, one glyph in a two-column cell
+//   28  text x         = SCROLL_GUT_X + 2 * TEXT_ADV
+//       34 columns     272px, ends at 299
+//    6  gap
+//  306  rail x         4px, ends at 309
+//   10  right margin
+//  ---
+//  320  = BOARD_W
+//
+// 34 against the pager's 37: the gutter costs THREE COLUMNS, 8%. That is what
+// buys a transcript that reads as a conversation rather than a list of labelled
+// rows, and it is the whole trade this surface makes.
+const int SCROLL_GUT_X     = 12;
+const int SCROLL_TXT_X     = SCROLL_GUT_X + 2 * TEXT_ADV;
+const int SCROLL_COLS      = 34;
+const int SCROLL_RAIL_AIR  = 6;
+const int SCROLL_RAIL_X    = SCROLL_TXT_X + SCROLL_COLS * TEXT_ADV + SCROLL_RAIL_AIR;
+const int SCROLL_RAIL_W    = 4;
+const int SCROLL_RIGHT_AIR = 10;
+
+// The rail is a TAP target (jump to that fraction), not a drag target, so it
+// cannot be ambiguous against a body drag: a tap has moved less than
+// SCROLL_TAP_SLOP_PX, a scroll has moved more. 20px is 3.1mm - UNDER the 7.1mm
+// TAP_MIN floor - and that is accepted here for two stated reasons: it starts at
+// or after the text lane's end so it never eats a column, and missing it costs a
+// body scroll rather than anything destructive. If it proves hard to hit on the
+// glass, drop SCROLL_COLS to 33 and this gains 8px.
+const int SCROLL_RAIL_TAP_X = 300;
+
+// A TAP IS A DRAG THAT MOVED LESS THAN THIS. Without a named threshold "tap the
+// rail" and "drag anywhere" are not separable, because every tap moves a pixel
+// or two on a capacitive panel. 6 is under half a line, so a scroll small enough
+// to read as a tap has moved no text.
+const int SCROLL_TAP_SLOP_PX = 6;
+
+// THE VERTICAL COLUMN CLOSES EXACTLY ON BOARD_H, with SCROLL_BOT_AIR closing it.
+// SCROLL_TOP is HIST_TOP - the same "6 below the rule" fact, one source, not a
+// second literal. 26 lines against the pager's (360-60)/16 = 18 is +44%, and all
+// of it comes from deleting the 46px scrubber band and the 50px button row.
+const int SCROLL_TOP     = HIST_TOP;
+const int SCROLL_LINES   = 26;
+const int SCROLL_BOT     = SCROLL_TOP + SCROLL_LINES * CODE_LINE_H;
+const int SCROLL_BOT_AIR = 4;
+
+// The header keeps HIST_RULE_Y's 54px. Two facts here are DERIVATIONS, not
+// choices: the back key is exactly TAP_MIN because it carries the CLOSE the
+// deleted button row used to provide, and the name lane is exactly the 22
+// characters the host already caps a session name to (host/index.mjs's
+// `deviceText(await projectName(...), 22)`), which settings-geom-check.mjs
+// asserts against the host's own number rather than against this one.
+const int SCROLL_BACK_X    = 12;
+const int SCROLL_BACK_W    = TAP_MIN;
+const int SCROLL_NAME_X    = SCROLL_BACK_X + SCROLL_BACK_W + 8;
+const int SCROLL_NAME_COLS = 22;
+
+// ---------- Scrollback: the store and the wire ----------
+// PSRAM, not DRAM. Board 1 holds ONE screen in a 2400-byte arena because it has
+// ~26KB of free heap; this board has 8,388,608 bytes of PSRAM against a MEASURED
+// 122KB conversation, so the constraint that produced the paged design does not
+// exist here. 262144 covers that conversation 2.1x; the ALL filter on a very long
+// session will not fit 584KB and drops the oldest, with the count stated on the
+// glass. Total with the index: 304KB, 3.7% of PSRAM, and zero DRAM.
+const int SCROLL_TEXT_BYTES  = 262144;
+const int SCROLL_MAX_ENTRIES = 4096;      // 12 bytes each = 49152
+
+// The fetch budget is chosen by TRANSPORT because BLE genuinely cannot have the
+// whole thing: 122KB at ~666 B/s is over three minutes. USB is native CDC at
+// ~384 KB/s measured, so the typical fetch is ~0.3s. 8192 over BLE is ~12s, which
+// is a long pause and is why the pending state has to name the transport.
+const int SCROLL_TAIL_BYTES_USB = 262144;
+const int SCROLL_TAIL_BYTES_BLE = 8192;
+
+// THE REPLY IS A SEQUENCE OF LINES, NOT ONE LINE, and this is the number that
+// makes that safe. feedChar's guard is 16000 BYTES and it does not drop an
+// over-long line - it CLEARS THE BUFFER mid-line, so the remainder accumulates
+// into an emptied buffer, the parse fails, and every tick carrying it is lost
+// while both links look healthy. 12000 is the WHOLE SERIALISED LINE, measured on
+// the JSON rather than on the sum of text lengths: escaping is not a rounding
+// term, since a newline becomes \n and DOUBLES. Worst case for one entry is
+// 4000 chars of pure newlines = 8000 escaped plus ~200 of envelope, so a single
+// entry always fits alone.
+const int SCROLL_WIRE_CHUNK_BYTES = 12000;
+
+const int SCROLL_FETCH_TIMEOUT_MS     = 20000;
+const int SCROLL_FETCH_TIMEOUT_BLE_MS = 40000;
+
 // ---------- Easter-egg crab-walk surface ----------
 // The art does not scale, so only its position is derived: OCTO_H is CRAB_H * 3
 // (== CRAB_DRAW_H) on both boards, and the band is centred vertically - board 1's
