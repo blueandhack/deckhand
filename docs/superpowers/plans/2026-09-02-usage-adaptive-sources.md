@@ -19,7 +19,7 @@
 - **Board flags are `#define`, values are `const int`.** `#if` on a `const int` is silently false with no warning.
 - **Constants are independent literals in the header, never `prev + cell + AIR`.** A chain of relative identities blinds `geom-sweep.mjs`, which injects at parse time.
 - **One predicate, one spelling.** No second expression of "is Codex shown" anywhere.
-- **The column gap is the literal `8`** in both the header and `usage.ino`, because `SP_2` is not visible in a board header (it is declared in `deckhand_display.ino`, after `board.h` is included).
+- **The column gap is `SP_2` in `usage.ino` and `c.SP_2` in the checkers, but the literal `8` in the board header.** `SP_2` is declared in `deckhand_display.ino`, *after* `board.h` is included, so the header cannot see it — which is why its own `CARD2_Y`/`CODEX_Y` use `8`. Both checkers parse BOTH files, so `c.SP_2` resolves there.
 
 ---
 
@@ -146,10 +146,28 @@ bool usageCodexShown() {
 Run: `python3 firmware/deckhand_display/usage-trend-check.py`
 Expected: PASS, with the printed count 11 higher than before.
 
-- [ ] **Step 5: Prove the new assertions can fail**
+- [ ] **Step 5: Prove the assertions can fail — BOTH halves, because they bind different things**
 
-Temporarily change the predicate's first line to `if (usage.cxPct < -99) return false;` and re-run.
-Expected: FAIL on "never measured (cxPct < 0) hides". Revert with `git checkout -p` or by re-editing — do **not** `git checkout` the whole file, which would discard Steps 1 and 3.
+Nine of the eleven assertions execute the PYTHON MIRROR and never the sketch, so tampering
+the C source cannot fail them. Both halves need their own injection, and the second is the
+one that matters: without it, replacing `usageCodexShown()`'s body with `return true;`
+passes every assertion — the `pairWindowOpen()` hole this repo has already paid for once.
+
+Add body-bound structural assertions before injecting, each against
+`fn_body(INO, "usageCodexShown")` and each matched on its OPERANDS rather than a whole-line
+spelling (a whole-line match breaks on reformatting and can be satisfied by a neighbouring
+line): the body must test `cxPct` against `< 0`; must test `cxAgeSec` against `< 0`; must
+name `CODEX_HIDE_FALLBACK_MIN` and select it against `cxWindowMin`; and must compare
+`cxAgeSec` with `<=` against a `* 60` conversion, so a `<` or a missing seconds conversion
+fails.
+
+Then inject three faults, restoring each **by hand** — never `git checkout` the file, which
+would discard Steps 1 and 3:
+1. the mirror's own logic (proves the nine mirror assertions bite),
+2. the whole C body replaced with `return true;`,
+3. only the `cxAgeSec < 0` guard deleted — the subtle case a wholesale replacement hides.
+
+Expected: a named failure for each.
 
 - [ ] **Step 6: Compile both boards and check baselines**
 
@@ -241,19 +259,21 @@ Inside the existing `if (b === 2)` v2 block, after the current `rhythm("WEEK", w
     // a sum of drawn offsets telescopes to contentBottom - CONTENT_Y for ANY
     // values, which is how this file's predecessor shipped a vacuous column
     // identity twice.
-    const GAP = 8;   // the literal the header's own CARD2_Y/CODEX_Y use
-    chk(GAP + c.NOW_CARD_H + GAP + c.WEEK_CARD_H + GAP + c.CODEX_H + GAP
-          === c.CONTENT_ROWS,
-        `duo column: 8+${c.NOW_CARD_H}+8+${c.WEEK_CARD_H}+8+${c.CODEX_H}+8 `
-      + `= ${c.CONTENT_ROWS} content rows`);
-    chk(GAP + c.NOW_CARD_H_SOLO + GAP + c.WEEK_CARD_H_SOLO + GAP === c.CONTENT_ROWS,
-        `solo column: 8+${c.NOW_CARD_H_SOLO}+8+${c.WEEK_CARD_H_SOLO}+8 `
-      + `= ${c.CONTENT_ROWS} content rows, the SAME area the duo column fills`);
+    // `content` is the checker's own in-scope local (usage-geom-check.mjs:272,
+    // `contentBottom - c.CONTENT_Y`). There is NO `CONTENT_ROWS` in the parsed
+    // constant set - that name exists only in the browser mock - and an
+    // assertion against an undefined constant computes NaN and proves nothing.
+    // The DUO column is deliberately NOT re-asserted here: line ~302 already
+    // sums it from its declared terms, and a second copy would report one drift
+    // as two findings.
+    chk(c.SP_2 + c.NOW_CARD_H_SOLO + c.SP_2 + c.WEEK_CARD_H_SOLO + c.SP_2 === content,
+        `solo column: ${c.SP_2}+${c.NOW_CARD_H_SOLO}+${c.SP_2}+${c.WEEK_CARD_H_SOLO}+${c.SP_2} `
+      + `= ${content} content rows, the SAME area the duo column fills`);
     // The reclaimed rows are exactly the Codex row plus its gap - nothing is
     // invented and nothing is left over.
     chk((c.NOW_CARD_H_SOLO - c.NOW_CARD_H) + (c.WEEK_CARD_H_SOLO - c.WEEK_CARD_H)
-          === c.CODEX_H + GAP,
-        `the two cards grow by exactly the ${c.CODEX_H + GAP} rows the Codex row `
+          === c.CODEX_H + c.SP_2,
+        `the two cards grow by exactly the ${c.CODEX_H + c.SP_2} rows the Codex row `
       + `and its gap release (${c.NOW_CARD_H_SOLO - c.NOW_CARD_H} + `
       + `${c.WEEK_CARD_H_SOLO - c.WEEK_CARD_H})`);
 
@@ -366,11 +386,12 @@ int weekBarY()      { return usageCodexShown() ? WEEK_BAR_Y      : WEEK_BAR_Y_SO
 int weekMetaY()     { return usageCodexShown() ? WEEK_META_Y     : WEEK_META_Y_SOLO; }
 int weekFableY()    { return usageCodexShown() ? WEEK_FABLE_Y    : WEEK_FABLE_Y_SOLO; }
 int weekFableBarY() { return usageCodexShown() ? WEEK_FABLE_BAR_Y: WEEK_FABLE_BAR_Y_SOLO; }
-// The literal 8 is the gap the header's own CARD2_Y/CODEX_Y use - SP_2 is not
-// visible in a board header, so the column's gap has exactly one value spelled
-// two places, and usage-geom-check.mjs asserts they agree.
-int weekCardY()     { return CARD1_Y + nowCardH() + 8; }
-int codexRowY()     { return weekCardY() + weekCardH() + 8; }
+// SP_2 IS visible here - it is declared in deckhand_display.ino, which the
+// board header cannot see (hence the header's own literal 8 in CARD2_Y/CODEX_Y)
+// but this file can, being concatenated after it. So the gap is named at the
+// only two sites that can name it.
+int weekCardY()     { return CARD1_Y + nowCardH() + SP_2; }
+int codexRowY()     { return weekCardY() + weekCardH() + SP_2; }
 ```
 
 - [ ] **Step 2: Replace the fixed reads**
