@@ -56,7 +56,7 @@ const present = (b, re, msg) => s(b !== null && re.test(b), msg);
 
 if (SELFTEST) {
   const fault = process.env.SB_FAULT || "wrap-cap";
-  if (fault === "wrap-cap") INO = INO.replace(/while \(t\[pos\]\)/, "while (t[pos] && lines < 80)");
+  if (fault === "wrap-cap") INO = INO.replace(/while \(t\[pos\]\) \{/, "while (t[pos] && drawn < 80) {");
   if (fault === "no-reap") INO = INO.replace(/reapBleLinks\(true\);/g, "");
   if (fault === "no-activity") INO = INO.replace(/lastActivityMillis = millis\(\);/g, "");
   // FIXED IN TASK 3: this line was added in Task 2, forward-provisioned for an
@@ -75,30 +75,55 @@ if (SELFTEST) {
 }
 
 // ---------------- MIRROR: the wrap rule and the line index ----------------
-// Mirrors scrollLineLen: monospace, so wrapping is exact integer arithmetic and
-// needs no width call at all. Same rule as the shared wrapLineLen - hard '\n',
-// word-friendly break at the last space in the lane's second half, never stall.
-function lineLen(t, pos, cols) {
-  let i = 0;
-  while (i < cols && pos + i < t.length && t[pos + i] !== "\n") i++;
-  if (t[pos + i] === "\n") return [i, true];
-  if (pos + i >= t.length) return [i, false];
-  for (let b = i; b > Math.floor(cols / 2); b--)
-    if (t[pos + b - 1] === " ") return [b, false];
-  return [i, false];
-}
-function wrapLines(t, cols) {
-  if (!t.length) return 1;
-  let pos = 0, lines = 0;
+// MIRRORS scrollWalk, WHICH IS FENCE-AWARE. The firmware wraps prose and code by
+// different rules and MUST: prose takes a word-friendly break, code takes a HARD
+// break at the column, because breaking a program at spaces destroys the
+// indentation you read it by. A ``` fence toggles the mode and draws no row.
+// The mirror was stale for one commit - it still modelled word-wrap only, i.e. a
+// rule the firmware had stopped using - which is exactly the weakness this file
+// already records for a mirror: it proves the ALGORITHM and binds nothing, so it
+// can agree with itself while the device does something else.
+function walk(t, cols) {
+  const rows = [];                       // {text, code, cont, head}
+  if (!t.length) return [{ text: "", code: false, cont: false, head: false }];
+  let pos = 0, inCode = false;
   while (pos < t.length) {
-    const [n, hard] = lineLen(t, pos, cols);
-    pos += n;
-    if (hard && t[pos] === "\n") pos++;
-    lines++;
-    if (n === 0 && !hard) break;
+    let eol = pos;
+    while (eol < t.length && t[eol] !== "\n") eol++;
+    const srcLen = eol - pos;
+    if (srcLen >= 3 && t.slice(pos, pos + 3) === "```") {
+      inCode = !inCode;
+      pos = eol < t.length ? eol + 1 : eol;
+      continue;
+    }
+    const head = !inCode && srcLen > 0 && t[pos] === "#";
+    let off = 0;
+    if (head) {
+      while (off < srcLen && t[pos + off] === "#") off++;
+      while (off < srcLen && t[pos + off] === " ") off++;
+    }
+    let q = pos + off, rem = srcLen - off, first = true;
+    do {
+      let n;
+      if (rem <= cols) n = rem;
+      else if (inCode) n = cols;
+      else {
+        n = cols;
+        let b = n;
+        while (b > Math.floor(cols / 2) && t[q + b - 1] !== " ") b--;
+        if (b > Math.floor(cols / 2)) n = b;
+      }
+      if (n <= 0 && rem > 0) n = 1;
+      rows.push({ text: t.slice(q, q + n), code: inCode, cont: !first, head });
+      q += n; rem -= n; first = false;
+      if (!inCode) while (rem > 0 && t[q] === " ") { q++; rem--; }
+    } while (rem > 0);
+    pos = eol < t.length ? eol + 1 : eol;
   }
-  return lines || 1;
+  return rows.length ? rows : [{ text: "", code: false, cont: false, head: false }];
 }
+const wrapLines = (t, cols) => walk(t, cols).length;
+
 const COLS = c.SCROLL_COLS;
 m(wrapLines("", COLS) === 1, "mirror: an empty entry still occupies one line");
 m(wrapLines("hi", COLS) === 1, "mirror: a short entry is one line");
@@ -114,6 +139,28 @@ m(wrapLines(big, COLS) > 80, `mirror: a 4000-char entry wraps past 80 lines (${w
 m(wrapLines("aaaa bb", 6)[0] === undefined, "mirror: the wrap returns a number, not a tuple");
 // A word longer than the lane must still advance, or the fetch spins forever.
 m(wrapLines("x".repeat(200), 10) === 20, "mirror: an unbreakable word breaks at the lane and never stalls");
+
+m(walk("```\nabc\n```", COLS).length === 1, "mirror: a fence draws no row of its own");
+m(walk("```\nabc\n```", COLS)[0].code === true, "mirror: a line inside a fence is code");
+m(walk("## Title", COLS)[0].head === true, "mirror: a leading # marks a heading");
+m(walk("## Title", COLS)[0].text === "Title", "mirror: the heading's markers are stripped");
+{
+  // code HARD-wraps: the first row is exactly COLS characters even though the
+  // text has spaces to break on, which is the whole difference from prose.
+  const codeRow = walk("```\n" + "a".repeat(5) + " " + "b".repeat(COLS) + "\n```", COLS);
+  m(codeRow[0].text.length === COLS, "mirror: code hard-wraps at the column, ignoring spaces");
+  m(codeRow[1].cont === true, "mirror: a wrapped code row is marked as a continuation");
+  // The space must sit in the lane's SECOND HALF: wrapLineLen only searches back
+  // as far as cols/2 and otherwise hard-breaks, so a space at column 5 is
+  // correctly ignored. My first version of this test put it there and the
+  // assertion failed - the test was wrong, not the wrap.
+  const proseRow = walk("a".repeat(COLS - 6) + " " + "b".repeat(COLS), COLS);
+  m(proseRow[0].text.length === COLS - 5,
+    `mirror: prose breaks at a space in the lane's second half (${proseRow[0].text.length})`);
+  const proseHard = walk("a".repeat(5) + " " + "b".repeat(COLS), COLS);
+  m(proseHard[0].text.length === COLS,
+    "mirror: prose hard-breaks when the only space is before cols/2 - never stalls");
+}
 
 // The index: lineFirst accumulates lines PLUS the spacer, and a result tucks
 // against its own call with no spacer - the pair reads as one unit.
@@ -158,7 +205,24 @@ for (let L = 0; L < totalLines; L++) {
 m(bad === null, `mirror: the binary search lands in range for every line${bad === null ? "" : ` (first bad: ${bad})`}`);
 
 // ---------------- STRUCTURAL: bound to scrollback.ino's own function bodies ----------------
-const wrapBody = body(INO, "int scrollWrapLines(const char* t, int cols)", "scrollback.ino");
+// BOUND TO scrollWalk, NOT scrollWrapLines. The wrap moved into a shared walker
+// and scrollWrapLines became a one-line delegate - so these three assertions
+// were briefly VACUOUS, guarding a body with no loop in it, and the wrap-cap
+// selftest went BLIND at the same moment. The rule they exist for lives wherever
+// the loop is.
+const wrapBody = body(INO, "static int scrollWalk(const char* t, int cols, int want,", "scrollback.ino");
+// And ONE rule, not two: the counter must delegate to the same walker the
+// renderer drives, or the index says one thing and the screen draws another.
+const wlBody = body(INO, "int scrollWrapLines(const char* t, int cols)", "scrollback.ino");
+present(wlBody, /scrollWalk\(/,
+  "structural: scrollWrapLines delegates to the walker rather than wrapping itself");
+const laBody = body(INO, "bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize, uint8_t* flags)", "scrollback.ino");
+present(laBody, /scrollWalk\(/,
+  "structural: scrollLineAt drives the SAME walker, so both agree by construction");
+// The walker must be fence-aware, or code and prose wrap by one rule and the
+// hard break that keeps indentation readable is gone.
+present(wrapBody, /inCode/,
+  "structural: the walker tracks fenced code, so code hard-wraps and prose does not");
 absent(wrapBody, /\b80\b/,
   "structural: scrollWrapLines carries NO line cap - a 4000-byte entry is 118 lines");
 absent(wrapBody, /countWrappedLines|wrapLineLen/,

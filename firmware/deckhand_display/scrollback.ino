@@ -57,63 +57,105 @@ uint16_t scrollTextColor(uint8_t r) {
   return (r == 0 || r == 1) ? COLOR_VALUE : (r == 4 ? COLOR_BAD : COLOR_LABEL);
 }
 
-// Length of the line starting at `pos`, and whether it ended on a '\n'.
-// MONOSPACE, so this is exact integer arithmetic with no width call at all -
-// which matters twice: it runs once per entry over the whole transcript at fetch
-// time, and it is what lets a JS mirror agree with it exactly. Every Spleen glyph
-// in 0x20..0x7E has xOffset 0, width 8 and xAdvance 8, asserted in the header.
-static int scrollLineLen(const char* t, int pos, int cols, bool* hardBreak) {
-  *hardBreak = false;
-  int i = 0;
-  while (i < cols && t[pos + i] && t[pos + i] != '\n') i++;
-  if (t[pos + i] == '\n') { *hardBreak = true; return i; }
-  if (!t[pos + i]) return i;                 // the rest fits on this line
-  // Word-friendly break: the last space in the lane's second half, the same rule
-  // the shared wrapLineLen uses.
-  for (int b = i; b > cols / 2; b--)
-    if (t[pos + b - 1] == ' ') return b;
-  return i;                                  // unbreakable word: never stall
+// ONE WALKER, DRIVEN BY BOTH THE COUNTER AND THE EXTRACTOR. The wrapped line
+// count is computed once at append and never re-derived, so if these two used
+// different rules the index would say one thing and the screen would draw
+// another - text jumping as you scroll, with nothing to point at.
+//
+// It is FENCE-AWARE because code and prose wrap differently and must:
+//   prose  - word-friendly break, the same rule the shared wrapLineLen uses
+//   code   - HARD break at the column, because breaking a program at spaces is
+//            wrong and it destroys the indentation you read code by
+// MONOSPACE is what makes this exact integer arithmetic with no width call:
+// every Spleen glyph in 0x20..0x7E has xOffset 0, width 8 and xAdvance 8.
+//
+// A ``` fence line toggles the mode and draws NOTHING - it consumes no row, so a
+// three-line code block costs three rows rather than five.
+#define SCROLL_F_CODE 0x1
+#define SCROLL_F_CONT 0x2
+#define SCROLL_F_HEAD 0x4
+
+static int scrollWalk(const char* t, int cols, int want,
+                      char* out, int outSize, uint8_t* flags, bool* found) {
+  if (found) *found = false;
+  if (!t[0]) {                                  // an empty entry still owns a row
+    if (want == 0 && out && outSize > 0) { out[0] = '\0'; if (flags) *flags = 0; if (found) *found = true; }
+    return 1;
+  }
+  int pos = 0, drawn = 0;
+  bool inCode = false;
+  while (t[pos]) {
+    int eol = pos;
+    while (t[eol] && t[eol] != '\n') eol++;
+    const int srcLen = eol - pos;
+
+    // A fence toggles the mode and is never drawn.
+    if (srcLen >= 3 && t[pos] == '`' && t[pos + 1] == '`' && t[pos + 2] == '`') {
+      inCode = !inCode;
+      pos = t[eol] ? eol + 1 : eol;
+      continue;
+    }
+
+    // A heading keeps its text and loses its markers - the device styles it
+    // rather than the Mac, so the wire stays self-describing.
+    const bool head = !inCode && srcLen > 0 && t[pos] == '#';
+    int off = 0;
+    if (head) {
+      while (off < srcLen && t[pos + off] == '#') off++;
+      while (off < srcLen && t[pos + off] == ' ') off++;
+    }
+
+    int q = pos + off, rem = srcLen - off;
+    bool first = true;
+    do {
+      int n;
+      if (rem <= cols) n = rem;
+      else if (inCode) n = cols;                // HARD
+      else {
+        n = cols;
+        int b = n;
+        while (b > cols / 2 && t[q + b - 1] != ' ') b--;
+        if (b > cols / 2) n = b;                // word-friendly, else fall back
+      }
+      if (n <= 0 && rem > 0) n = 1;             // never stall
+      if (drawn == want) {
+        if (out && outSize > 0) {
+          int cap = n < outSize - 1 ? n : outSize - 1;
+          memcpy(out, t + q, cap);
+          out[cap] = '\0';
+        }
+        if (flags) *flags = (inCode ? SCROLL_F_CODE : 0)
+                          | (first ? 0 : SCROLL_F_CONT)
+                          | (head ? SCROLL_F_HEAD : 0);
+        if (found) *found = true;
+        return drawn + 1;                       // caller only reads this when counting
+      }
+      drawn++;
+      q += n; rem -= n; first = false;
+      if (!inCode) while (rem > 0 && t[q] == ' ') { q++; rem--; }
+    } while (rem > 0);
+
+    pos = t[eol] ? eol + 1 : eol;
+  }
+  return drawn ? drawn : 1;
 }
 
 // DELIBERATELY NOT countWrappedLines(). That helper stops at 80 lines and its
 // wrapLineLen carries a `char buf[64]` capped at 60 characters, so a 4000-byte
-// entry - 118 lines at 34 columns - cannot pass through it at all. Raising either
-// would move board 1's binary for a board-2 feature.
+// entry - well over a hundred lines here - cannot pass through it at all.
+// Raising either would move board 1's binary for a board-2 feature.
 int scrollWrapLines(const char* t, int cols) {
-  if (!t[0]) return 1;                       // an empty entry still owns a line
-  int pos = 0, lines = 0;
-  while (t[pos]) {
-    bool hard;
-    int n = scrollLineLen(t, pos, cols, &hard);
-    pos += n;
-    if (hard && t[pos] == '\n') pos++;
-    lines++;
-    if (n == 0 && !hard) break;              // cannot happen; must not spin
-  }
-  return lines ? lines : 1;
+  return scrollWalk(t, cols, -1, nullptr, 0, nullptr, nullptr);
 }
 
-// The `want`-th wrapped line of `t`, into `out`. O(lines) per call, so drawing
-// the last line of a 118-line entry walks it - 26 lines x 118 is a few thousand
-// iterations of a trivial loop per frame, which is nothing beside one flush.
-bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize) {
-  int pos = 0, line = 0;
-  while (t[pos]) {
-    bool hard;
-    int n = scrollLineLen(t, pos, cols, &hard);
-    if (line == want) {
-      int cap = n < outSize - 1 ? n : outSize - 1;
-      memcpy(out, t + pos, cap);
-      out[cap] = '\0';
-      return true;
-    }
-    pos += n;
-    if (hard && t[pos] == '\n') pos++;
-    line++;
-    if (n == 0 && !hard) break;
-  }
-  out[0] = '\0';
-  return false;
+// The `want`-th DRAWN line of `t`, with what kind of line it is. O(lines) per
+// call, so drawing the last line of a long entry walks it - a few thousand
+// iterations of a trivial loop per frame, nothing beside one flush.
+bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize, uint8_t* flags) {
+  bool found = false;
+  scrollWalk(t, cols, want, out, outSize, flags, &found);
+  if (!found && out && outSize > 0) out[0] = '\0';
+  return found;
 }
 
 void scrollReset() {
@@ -306,6 +348,36 @@ static void scrollNote(const char* s, int y) {
   tft.setTextDatum(TL_DATUM);
 }
 
+// THE COUNTER IS THE HEADER'S ONLY DYNAMIC FIELD, and nothing redrew it while
+// scrolling: the drag loop paints the body and the rail, and drawScrollback()
+// only runs when the surface opens. So it sat at whatever the first frame said -
+// observed reading 123/559 while parked at line 9900 of 10234. Change-only, with
+// its own cache, so a frame that does not move the entry index costs nothing.
+char scrollPosCache[24] = "";
+
+void scrollDrawCounter() {
+  char cpos[24];
+  if (scrollPending) snprintf(cpos, sizeof(cpos), "...");
+  else if (scrollCount > 0) {
+    uint32_t line = scrollY / CODE_LINE_H;
+    // The head note occupies line 0 of the scroll space, so the transcript's own
+    // lines start at SCROLL_HEAD_LINES - the same offset the row loop applies.
+    uint32_t tline = line > (uint32_t) SCROLL_HEAD_LINES ? line - SCROLL_HEAD_LINES : 0;
+    snprintf(cpos, sizeof(cpos), "%d/%d", scrollDropped + scrollEntryAtLine(tline) + 1, scrollTotal);
+  } else snprintf(cpos, sizeof(cpos), "0/0");
+  if (strcmp(cpos, scrollPosCache) == 0) return;
+  strncpy(scrollPosCache, cpos, sizeof(scrollPosCache) - 1);
+  scrollPosCache[sizeof(scrollPosCache) - 1] = '\0';
+  // Padded, so a shorter string cannot leave the previous one's tail behind -
+  // the change-only discipline's standard hazard.
+  char padded[24];
+  snprintf(padded, sizeof(padded), "%-12s", cpos);
+  setUIFont(1);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(padded, SCROLL_NAME_X, 30);
+}
+
 // The body only. Kept separate from the chrome so a scroll frame repaints just
 // this - the chrome is static between fetches.
 void scrollDrawBody() {
@@ -344,6 +416,7 @@ void scrollDrawBody() {
   // Claude Code's own scrollback does with its top-of-history marker.
 
   char buf[SCROLL_COLS + 2];
+  uint8_t lf = 0;
   int ei = scrollEntryAtLine((uint32_t) (firstLine > 0 ? firstLine - SCROLL_HEAD_LINES : 0));
   for (int row = 0; row <= SCROLL_LINES; row++) {
     const int line = firstLine + row;
@@ -407,16 +480,35 @@ void scrollDrawBody() {
         buf[sizeof(buf) - 1] = '\0';
       }
     } else {
-      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf));
+      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf), &lf);
     }
+
+    // CODE SITS ON A PANEL, the treatment ask details already give code - and it
+    // is painted BEFORE the text, because drawString's own background is opaque
+    // and would cut a hole in a panel drawn after it. Full-lane rather than
+    // text-width: a ragged right edge would not read as a block.
+    const bool isCode = (lf & SCROLL_F_CODE) != 0;
+    const uint16_t bg = isCode ? COLOR_CARD : COLOR_BG;
+    if (isCode)
+      tft.fillRect(SCROLL_GUT_X, y, SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_GUT_X,
+                   CODE_LINE_H, COLOR_CARD);
 
     setUIFont(1);
     if (k == 0) {
-      tft.setTextColor(scrollMarkColor(e.role), COLOR_BG);
+      tft.setTextColor(scrollMarkColor(e.role), bg);
       tft.setTextDatum(TL_DATUM);
       tft.drawString(scrollMark(e.role), SCROLL_GUT_X, y);
+    } else if (isCode && (lf & SCROLL_F_CONT)) {
+      // A WRAPPED CODE LINE IS MARKED, or it reads as a real line and misleads
+      // about indentation - which is most of how code is read. Prose
+      // continuations get none: wrapping is simply how prose reads.
+      tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+      tft.setTextDatum(TL_DATUM);
+      tft.drawString("+", SCROLL_GUT_X, y);
     }
-    tft.setTextColor(scrollTextColor(e.role), COLOR_BG);
+    // A heading takes the accent so sections are findable while scrolling; its
+    // own # markers were stripped by the walker.
+    tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
     tft.setTextDatum(TL_DATUM);
     tft.drawString(buf, SCROLL_TXT_X, y);
   }
@@ -471,6 +563,7 @@ void scrollDrawBand(int shift) {
   // draws it, so there is ONE spelling of it rather than a copy per path.
 
   char buf[SCROLL_COLS + 2];
+  uint8_t lf = 0;
   int ei = scrollEntryAtLine((uint32_t) (firstLine > 0 ? firstLine - SCROLL_HEAD_LINES : 0));
   for (int row = 0; row <= SCROLL_LINES; row++) {
     const int line = firstLine + row;
@@ -529,16 +622,35 @@ void scrollDrawBand(int shift) {
         buf[sizeof(buf) - 1] = '\0';
       }
     } else {
-      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf));
+      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf), &lf);
     }
+
+    // CODE SITS ON A PANEL, the treatment ask details already give code - and it
+    // is painted BEFORE the text, because drawString's own background is opaque
+    // and would cut a hole in a panel drawn after it. Full-lane rather than
+    // text-width: a ragged right edge would not read as a block.
+    const bool isCode = (lf & SCROLL_F_CODE) != 0;
+    const uint16_t bg = isCode ? COLOR_CARD : COLOR_BG;
+    if (isCode)
+      tft.fillRect(SCROLL_GUT_X, y, SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_GUT_X,
+                   CODE_LINE_H, COLOR_CARD);
 
     setUIFont(1);
     if (k == 0) {
-      tft.setTextColor(scrollMarkColor(e.role), COLOR_BG);
+      tft.setTextColor(scrollMarkColor(e.role), bg);
       tft.setTextDatum(TL_DATUM);
       tft.drawString(scrollMark(e.role), SCROLL_GUT_X, y);
+    } else if (isCode && (lf & SCROLL_F_CONT)) {
+      // A WRAPPED CODE LINE IS MARKED, or it reads as a real line and misleads
+      // about indentation - which is most of how code is read. Prose
+      // continuations get none: wrapping is simply how prose reads.
+      tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+      tft.setTextDatum(TL_DATUM);
+      tft.drawString("+", SCROLL_GUT_X, y);
     }
-    tft.setTextColor(scrollTextColor(e.role), COLOR_BG);
+    // A heading takes the accent so sections are findable while scrolling; its
+    // own # markers were stripped by the walker.
+    tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
     tft.setTextDatum(TL_DATUM);
     tft.drawString(buf, SCROLL_TXT_X, y);
   }
@@ -580,17 +692,9 @@ void drawScrollback() {
     tft.setTextColor(COLOR_VALUE, COLOR_BG);
     tft.drawString(nm, SCROLL_NAME_X, 12);
   }
-  char pos[24];
-  if (scrollPending) snprintf(pos, sizeof(pos), "...");
-  else if (scrollCount > 0) {
-    // Which entry the top visible line belongs to, out of the whole filtered
-    // history - the same claim the pager's "412/628" makes.
-    int ei = scrollEntryAtLine(scrollY / CODE_LINE_H);
-    snprintf(pos, sizeof(pos), "%d/%d", scrollDropped + ei + 1, scrollTotal);
-  } else snprintf(pos, sizeof(pos), "0/0");
-  setUIFont(1);
-  tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.drawString(pos, SCROLL_NAME_X, 30);
+// ONE spelling of the counter, shared with the drag loop's per-frame update.
+  scrollPosCache[0] = '\0';        // header just repainted, so force a draw
+  scrollDrawCounter();
 
   const char* chip = histChatOnly ? "CHAT" : "ALL";
   int chipW = histChatOnly ? HIST_CHIP_W_CHAT : HIST_CHIP_W_ALL;
@@ -612,6 +716,23 @@ void drawScrollback() {
 // SHARED CODE and returns immediately on `touching && wasTouching` ("a finger
 // still down has nothing left to do"), so putting drag state there risks board
 // 1's binary for a board-2 feature. And the precedent already exists three times.
+// The first drawn line that is CODE, or -1. Walks the index rather than the
+// text, so it is O(entries) plus one wrap per entry, and it exists so a fenced
+// block can actually be LOOKED at - 13 of 512 messages in a real transcript
+// carry one, so blind sampling finds prose almost every time.
+long scrollFindCode() {
+  char tmp[SCROLL_COLS + 2];
+  uint8_t f = 0;
+  for (int i = 0; i < scrollCount; i++) {
+    const ScrollEntry& e = scrollIdx[i];
+    for (int k = 0; k < e.lines; k++) {
+      if (scrollLineAt(scrollTextAt(i), SCROLL_COLS, k, tmp, sizeof(tmp), &f) && (f & SCROLL_F_CODE))
+        return (long) e.lineFirst + k + SCROLL_HEAD_LINES;
+    }
+  }
+  return -1;
+}
+
 void scrollDragLoop(int sy0) {
   int lastY = sy0;
   int moved = 0;
@@ -648,6 +769,7 @@ void scrollDragLoop(int sy0) {
         } else {
           scrollDrawBody();
         }
+        scrollDrawCounter();
         tft.flush();
       }
       lastY = sy;
@@ -668,6 +790,7 @@ void scrollDragLoop(int sy0) {
       long f = (long) (sy0 - SCROLL_TOP) * (long) maxY / (SCROLL_BOT - SCROLL_TOP - 1);
       scrollY = (uint32_t) (f < 0 ? 0 : (f > (long) maxY ? (long) maxY : f));
       scrollDrawBody();
+      scrollDrawCounter();
       tft.flush();
     }
   }

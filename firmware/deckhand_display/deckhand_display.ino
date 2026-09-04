@@ -5369,7 +5369,17 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // at the END of this branch found an empty string every time, which presented
     // as `SCROLLPERF top` silently behaving like plain SCROLLPERF - a flag that
     // looks supported and does nothing.
-    const bool parkTop = buf.indexOf("top") > 0;
+    const bool parkTop  = buf.indexOf("top") > 0;
+    const bool parkCode = buf.indexOf("code") > 0;
+    // `SCROLLPERF <line>` parks at a given transcript line afterwards. Without it
+    // a code block in a 10,000-line transcript is unfindable from a script, and
+    // SCREENSHOT can only record what is already on the glass.
+    long parkLine = -1;
+    {
+      const char* a = buf.c_str() + 10;
+      while (*a == ' ') a++;
+      if (*a >= '0' && *a <= '9') parkLine = atol(a);
+    }
     // SCROLLPERF exists for the reason PERF, TEXTPROBE and READTEST do: this screen
     // is otherwise unverifiable without a finger, and SCREENSHOT can only record
     // what is already on the glass. It opens the transcript on the first session
@@ -5488,9 +5498,22 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // is only drawn there and SCREENSHOT can only record what is on the glass -
     // the same reason TAB and PAGE exist. Default is the bottom, which is where
     // the transcript actually opens.
-    if (parkTop) {
+    if (parkCode) {
+      long cl = scrollFindCode();
+      if (cl < 0) Serial.println("SCROLLPERF: no code lines in this transcript");
+      else parkLine = cl;
+    }
+    if (parkLine >= 0) {
+      scrollY = (uint32_t) parkLine * CODE_LINE_H;
+      if (scrollY > scrollMaxY()) scrollY = scrollMaxY();
+      scrollDrawBody();
+      scrollDrawCounter();
+      tft.flush();
+      Serial.printf("SCROLLPERF: parked at line %ld\n", parkLine);
+    } else if (parkTop) {
       scrollY = 0;
       scrollDrawBody();
+      scrollDrawCounter();
       tft.flush();
       Serial.println("SCROLLPERF: parked at the top of history");
     }

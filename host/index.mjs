@@ -1380,6 +1380,51 @@ function histFlatten(v, max = HIST_PREVIEW_CAP) {
   return t.length > max ? t.slice(0, max - 3) + "..." : t;
 }
 
+// THE TRANSCRIPT PATH KEEPS ITS LINE STRUCTURE, which histFlatten destroys. That
+// function replaces every control character with a space and collapses runs, so a
+// code block or a table arrives as one flowed paragraph - the structure is lost on
+// the MAC, before anything is sent, and no amount of device-side cleverness can
+// recover it. Board 1's paged reader keeps histFlatten unchanged, so its display
+// and its binary are untouched.
+//
+// What crosses the wire stays SELF-DESCRIBING rather than pre-styled: the ```
+// fences and the leading # of a heading are KEPT, so the device decides how to
+// present them. What is removed is markdown that carries no meaning without a
+// bold face - `**`, `__` and inline backticks - and only OUTSIDE fenced code,
+// where those characters are part of the program.
+function histBlockText(v, max = HIST_FULL_CAP) {
+  const lines = toAscii(v).replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let inFence = false;
+  for (let raw of lines) {
+    // Tabs become TWO spaces, not eight: a 34-column lane cannot spend eight on
+    // one indent level, and code is usually nested more than once.
+    let t = raw.replace(/\t/g, "  ").replace(/[\u0000-\u001f]/g, "").replace(/\s+$/, "");
+    // ENTITIES FIRST AND UNCONDITIONALLY. They are an encoding artifact rather
+    // than markdown, so they are wrong inside code too - `if (a &lt; b)` is not
+    // what anyone wrote. &amp; goes LAST, or `&amp;lt;` decodes twice into `<`.
+    t = t.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+         .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
+         .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
+    if (/^\s*```/.test(t)) { inFence = !inFence; out.push("```"); continue; }
+    if (!inFence) {
+      // Emphasis markers carry nothing without a bold face. Doubles first, then
+      // SINGLES - `*fall*` was reaching the screen with its asterisks because
+      // only `**` was handled. A single `*` is required to hug its text on both
+      // sides, so a `* ` bullet at the start of a line survives as a bullet.
+      t = t.replace(/\*\*([^*\n]+)\*\*/g, "$1").replace(/__([^_\n]+)__/g, "$1");
+      t = t.replace(/(^|[^\w*])\*([^\s*][^*\n]*?)\*(?![\w*])/g, "$1$2");
+      t = t.replace(/`([^`\n]+)`/g, "$1");
+    }
+    out.push(t);
+  }
+  // Three or more blank lines become one. A transcript is full of them and each
+  // one costs a row of a 26-row screen.
+  let t = out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "").replace(/\n+$/, "");
+  if (t.length > max) t = t.slice(0, max - 3) + "...";
+  return t;
+}
+
 // One line that says what a tool call actually did. The interesting field differs per tool,
 // and a raw JSON dump of the input is unreadable at 240px.
 function histToolSummary(name, input, max = HIST_PREVIEW_CAP) {
@@ -1427,7 +1472,12 @@ async function histItems(id) {
   // Each entry keeps its preview AND its full text. The full text is never sent with a
   // page - only when that entry is opened - so the list stays small.
   const push = (r, t) => {
-    if (t) items.push({ r, t: histFlatten(t, HIST_PREVIEW_CAP), full: histFlatten(t, HIST_FULL_CAP) });
+    // `block` keeps the line structure for the scrollback; `t` and `full` stay
+    // flattened for board 1's paged reader, which is unchanged. It does cost a
+    // second copy of each entry's text in the per-transcript cache (bounded to 2
+    // transcripts), which is memory on a Mac rather than on the device.
+    if (t) items.push({ r, t: histFlatten(t, HIST_PREVIEW_CAP), full: histFlatten(t, HIST_FULL_CAP),
+                        block: histBlockText(t, HIST_FULL_CAP) });
   };
   for (const line of text.split("\n")) {
     if (!line.startsWith("{")) continue;
@@ -1649,8 +1699,12 @@ async function sendScrollback(id, filter, maxBytes) {
   // 1200 must stay UNDER the BLE chunk budget less the envelope, or a single
   // entry forms a chunk too big to be absorbed - which is the failure above.
   const perEntryCap = usbPort ? HIST_FULL_CAP : 1200;
+  // `block` for conversation, which is where structure lives. Tool calls and
+  // results are already one-liners by construction (histToolSummary flattens
+  // them), so they have no `block` and fall back.
+  const src = (x) => x.block || x.full;
   const textOf = (x) =>
-    x.full.length > perEntryCap ? x.full.slice(0, perEntryCap - 3) + "..." : x.full;
+    src(x).length > perEntryCap ? src(x).slice(0, perEntryCap - 3) + "..." : src(x);
 
   let used = 0, from = items.length;
   while (from > 0) {
