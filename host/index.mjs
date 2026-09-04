@@ -1547,8 +1547,34 @@ async function sendHistory(id, filter, want, budget) {
 // Bounded by feedChar's 16000-byte line guard. The device's RX ring is the other
 // ceiling and is raised to 16384 on board 2 for exactly this - see the header.
 const SCROLL_WIRE_CHUNK_BYTES = 12000;
-const SCROLL_WIRE_CHUNK_BLE_BYTES = 800;   // mirrors board_es3c35p.h
-const BLE_SCROLL_PACE_MS = 30;             // ~one packet per connection interval
+// 1500 on BLE against 12000 on USB, and the reason is BURST SIZE, not bandwidth.
+// Bisected: an ~850-byte chunk (43 packets) unpaced NEVER ARRIVED - "chunks=0/1",
+// the device timing out at 40s - while ~316 bytes (16 packets) did. Paced, 1500
+// arrives reliably. So the rule is that a chunk is a burst CoreBluetooth's
+// un-flow-controlled queue has to absorb, and pacing is what makes a large one
+// absorbable.
+// A corollary worth knowing: the ordinary tick payload is ~779 bytes and has
+// always been sent unpaced, i.e. in the size range that measurably loses packets.
+// It gets away with it because a LOST TICK IS INVISIBLE - the device just keeps
+// the previous values for 5 seconds. A lost scrollback chunk fails the whole
+// fetch, which is why this path is the first to notice.
+const SCROLL_WIRE_CHUNK_BLE_BYTES = 1500;
+// ZERO, now that writes are serialised. The chunk budget is already the size of
+// the tick payload, which crosses this link unpaced every 5 seconds - so the
+// evidence says an 800-byte burst is fine and the pacing was solving a problem
+// (queue overflow at 183 packets) that a smaller chunk solves better. Kept as a
+// named knob rather than deleted, because if a larger chunk is ever wanted this
+// is the dial that makes it survivable.
+// 4ms, AND EVERY NUMBER HERE WAS BISECTED ON HARDWARE RATHER THAN DERIVED.
+// Measured, same link, same 8KB tail, one chunk size (1500):
+//     8ms -> 4901ms     4ms -> 2944ms     1ms -> 2161ms
+// The returns stop: 4 -> 1 buys 0.7s while quadrupling the burst rate toward the
+// unpaced case that failed outright, so 4 is the pick - nearly as fast with four
+// times the margin. The radio, not the pacing, is the bound at this point
+// (~2.7 KB/s measured, against the ~666 B/s the theoretical 20-bytes-per-30ms
+// bound predicts - so that bound is pessimistic and should not be used to size
+// anything).
+const BLE_SCROLL_PACE_MS = 4;
 // THE HOST CLAMPS WHAT BLE IS ASKED FOR, rather than trusting the device's
 // budget. The device requests SCROLL_TAIL_BYTES_BLE (8192), which at this link's
 // ~666 B/s is over twelve seconds of radio before anything appears - long enough
@@ -1556,7 +1582,12 @@ const BLE_SCROLL_PACE_MS = 30;             // ~one packet per connection interva
 // recent messages and lands in ~5s, and the top of the scroll already states how
 // many older ones were not kept. The device's number stays the upper bound; this
 // is the transport's own limit, which only the host knows.
-const SCROLL_TAIL_BLE_SERVED = 3000;
+// 8192 - which is what the DEVICE asks for on BLE anyway, so this clamp now only
+// bites in the one case it was added for: usbLinkActive() keys off recent RX and
+// is stale for ~10s after the cable comes out, so the device asks for the USB
+// budget (262144) over the radio. Observed exactly that. At the measured
+// ~2.7 KB/s an 8KB tail is ~3s and carries ~28 recent messages.
+const SCROLL_TAIL_BLE_SERVED = 8192;
 // Per transport, because a BLE chunk's airtime dwarfs a USB one: 800 bytes at
 // ~666 B/s is ~1.2s of radio before the device can even parse it, and the ack
 // then has to travel back. 4s would time out on a link that is working fine.
@@ -1596,6 +1627,7 @@ function waitForScrollAck(gen, seq) {
 
 async function sendScrollback(id, filter, maxBytes) {
   const gen = ++scrollFetchGen;      // a later fetch supersedes this one
+  const t0 = Date.now();
   const all = await histItems(id);
   const chatOnly = filter !== "all";
   const items = chatOnly ? all.filter((x) => x.r === "you" || x.r === "claude") : all;
@@ -1614,7 +1646,9 @@ async function sendScrollback(id, filter, maxBytes) {
   // message no sign that anything was missing. The head note already says the
   // history is partial here; a message that says so too is better than a screen
   // that spends its whole budget on one of them.
-  const perEntryCap = usbPort ? HIST_FULL_CAP : 700;
+  // 1200 must stay UNDER the BLE chunk budget less the envelope, or a single
+  // entry forms a chunk too big to be absorbed - which is the failure above.
+  const perEntryCap = usbPort ? HIST_FULL_CAP : 1200;
   const textOf = (x) =>
     x.full.length > perEntryCap ? x.full.slice(0, perEntryCap - 3) + "..." : x.full;
 
@@ -1666,6 +1700,7 @@ async function sendScrollback(id, filter, maxBytes) {
     // the budget, so the built line is checked rather than assumed.
     if (Buffer.byteLength(line, "utf8") > chunkCap + 200)
       console.log(`Scrollback: WARNING chunk ${i} is ${Buffer.byteLength(line, "utf8")} bytes`);
+    if (!usbPort) console.log(`Scrollback: chunk ${i}/${groups.length} is ${Buffer.byteLength(line, "utf8")} bytes (${groups[i].length} entries)`);
     if (usbPort) usbPort.write(line);
     else if (bleCharacteristic) await sendOverBle(line, BLE_SCROLL_PACE_MS);
     // Wait for this chunk to be drained before sending the next. A timeout
@@ -1686,7 +1721,7 @@ async function sendScrollback(id, filter, maxBytes) {
   }
   console.log(
     `Scrollback: ${id} ${chatOnly ? "chat" : "all"} ${kept.length} of ${items.length} entries ` +
-      `(${dropped} dropped, ${groups.length} chunks, ${used} bytes) via ${usbPort ? "usb" : "ble"}`
+      `(${dropped} dropped, ${groups.length} chunks, ${used} bytes, ${Date.now() - t0}ms) via ${usbPort ? "usb" : "ble"}`
   );
 }
 
@@ -3212,7 +3247,25 @@ function withTimeout(promise, ms, what) {
 // packet per interval - which is also exactly the ~666 B/s ceiling this file
 // already documents, so pacing does not make the transfer slower than the radio
 // already is. It just stops it being FASTER than the radio can carry.
+// EVERY BLE WRITE IS SERIALISED THROUGH ONE CHAIN, and that is a latent bug in
+// the whole system rather than a scrollback detail. A payload goes out as many
+// 20-byte packets on ONE characteristic, and the device accumulates them into one
+// buffer per link - so two overlapping callers interleave their bytes and BOTH
+// lines become garbage that fails to parse. Nothing serialised them.
+// It never bit before because every caller's write completed in ~0ms: noble's mac
+// binding reports done straight after -[CBPeripheral writeValue:], so the whole
+// payload was queued before anything else ran. The scrollback broke that by
+// PACING - a 40-packet chunk spends over a second inside this function, and the
+// 5-second tick lands in the middle of it. Measured: the device received chunk 0
+// of a paced fetch not at all ("chunks=0/1"), while an ~800-byte tick payload of
+// the same size crosses this link every 5s reliably.
+let bleWriteChain = Promise.resolve();
 async function sendOverBle(text, gapMs = 0) {
+  const run = bleWriteChain.then(() => bleWriteRaw(text, gapMs), () => bleWriteRaw(text, gapMs));
+  bleWriteChain = run.catch(() => {});
+  return run;
+}
+async function bleWriteRaw(text, gapMs) {
   const characteristic = bleCharacteristic;
   if (!characteristic) return;
   const buf = Buffer.from(text, "utf8");

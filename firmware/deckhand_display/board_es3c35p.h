@@ -2656,12 +2656,14 @@ const int SCROLL_WIRE_CHUNK_BYTES = 12000;
 // fails the JSON parse, and reports "could not reach the Mac" 40 seconds later.
 // MEASURED THE HARD WAY - a real finger on the glass with the cable out.
 //
-// 800 is not a guess: the ordinary tick payload is ~779 bytes and crosses THIS
-// link every 5 seconds reliably, so it is the burst size this transport is known
-// to survive. At 800 the BLE tail is ~11 chunks, each one ACKED before the next
-// goes out, which is the flow control the radio does not provide - the same
-// answer the USB RX ring needed, and the same one board 1's audio path reached.
-const int SCROLL_WIRE_CHUNK_BLE_BYTES = 800;
+// 1500, BISECTED ON HARDWARE. Unpaced, ~850 bytes (43 packets) never arrived at
+// all while ~316 (16 packets) did; PACED at 4ms, 1500 arrives reliably and an 8KB
+// tail takes ~3s. Two mechanisms together: the ack gates one chunk against the
+// next, and the pacing keeps a single chunk inside what CoreBluetooth's queue can
+// absorb. Note the ordinary ~779-byte tick payload has always been sent unpaced,
+// i.e. inside the lossy range - it gets away with it because a lost tick is
+// INVISIBLE, where a lost chunk fails a whole fetch.
+const int SCROLL_WIRE_CHUNK_BLE_BYTES = 1500;
 
 const int SCROLL_FETCH_TIMEOUT_MS     = 20000;
 const int SCROLL_FETCH_TIMEOUT_BLE_MS = 40000;

@@ -253,8 +253,17 @@ s(bleChunk != null, "structural: the host's BLE chunk budget is still findable")
 if (bleChunk) {
   s(+bleChunk[1] === c.SCROLL_WIRE_CHUNK_BLE_BYTES,
     "structural: the host's BLE chunk budget equals the board header's");
-  s(c.SCROLL_WIRE_CHUNK_BLE_BYTES <= 1000,
-    `structural: the BLE chunk stays a survivable burst (${c.SCROLL_WIRE_CHUNK_BLE_BYTES} <= 1000)`);
+  // THE REAL BOUND IS NOT A MAGIC SIZE - IT IS THAT A BIG CHUNK NEEDS PACING.
+  // Bisected on hardware: unpaced, ~850 bytes never arrived and ~316 did, so
+  // anything past ~400 is outside what CoreBluetooth's un-flow-controlled queue
+  // absorbs in one burst. A larger chunk is fine, but ONLY paced - so the
+  // assertion ties the two together rather than capping the size on its own,
+  // which is what an earlier `<= 1000` did and it simply went stale when the
+  // measurement said 1500 was reachable.
+  const pace = HOSTSRC.match(/const BLE_SCROLL_PACE_MS = (\d+);/);
+  s(pace != null, "structural: the BLE pacing gap is still findable");
+  if (pace) s(c.SCROLL_WIRE_CHUNK_BLE_BYTES <= 400 || +pace[1] > 0,
+    `structural: a BLE chunk over the unpaced-safe size (${c.SCROLL_WIRE_CHUNK_BLE_BYTES}) is PACED (${pace[1]}ms)`);
   s(c.SCROLL_WIRE_CHUNK_BLE_BYTES < c.SCROLL_WIRE_CHUNK_BYTES,
     "structural: the BLE chunk is smaller than the USB one");
 }
