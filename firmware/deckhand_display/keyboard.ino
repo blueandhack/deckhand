@@ -76,17 +76,16 @@ void drawKbKey(int r, int col, bool pressed) {
   // that state. It used to be restored by a follow-up drawKbKey at each call
   // site, which is one more thing to remember at every future one.
   if (row[col] == KB_SHIFT && kbShiftMode > 0) pressed = true;
-  uiButton(x, y, KB_KEY_W, KB_ROW_H - 4, label, COLOR_ACCENT, pressed, COLOR_BG);
+  uiKeyCap(x, y, KB_KEY_W, KB_ROW_H - 4, label, pressed, COLOR_BG);
 }
 
 void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
   int y = kbRowY(3), h = KB_ROW_H - 4, x = 0;
-  uiButton(x, y, KB_R3_PAGE_W, h, kbSymbols ? "ABC" : "?123",
-           COLOR_ACCENT, pressed == 0, COLOR_BG);
+  uiKeyCap(x, y, KB_R3_PAGE_W, h, kbSymbols ? "ABC" : "?123", pressed == 0, COLOR_BG);
   x += KB_R3_PAGE_W;
-  uiButton(x, y, KB_R3_SPACE_W, h, "SPACE", COLOR_ACCENT, pressed == 1, COLOR_BG);
+  uiKeyCap(x, y, KB_R3_SPACE_W, h, "SPACE", pressed == 1, COLOR_BG);
   x += KB_R3_SPACE_W;
-  uiButton(x, y, tft.width() - x, h, ".", COLOR_ACCENT, pressed == 2, COLOR_BG);
+  uiKeyCap(x, y, tft.width() - x, h, ".", pressed == 2, COLOR_BG);
 }
 
 // HARD wrap, deliberately unlike drawWrappedText's word wrap - see the KB_COLS

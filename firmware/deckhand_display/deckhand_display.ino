@@ -796,6 +796,24 @@ void uiButton(int x, int y, int w, int h, const char* label,
   tft.setTextDatum(TL_DATUM);
 }
 
+// A KEY, not a button. uiButton's R_MD is a card radius (see KB_KEY_R's own
+// comment in the board headers) and its 1px outline on COLOR_BG leaves the
+// interior reading as background, so the target you aim at is smaller than the
+// band kbTouch() tests. Inking the whole cap costs nothing: the COLOR_CARD fill
+// is already there - uiButton fills an unpressed control with it and THEN
+// strokes, so this is that same fill with the stroke dropped and the label
+// moved from COLOR_ACCENT to COLOR_VALUE. This adds no palette entry.
+void uiKeyCap(int x, int y, int w, int h, const char* label,
+              bool pressed = false, uint16_t behind = COLOR_BG) {
+  uint16_t bg = pressed ? COLOR_ACCENT : COLOR_CARD;
+  uiFillRound(x, y, w, h, KB_KEY_R, bg, behind);
+  setUIFont(T_TITLE);
+  tft.setTextColor(pressed ? COLOR_BG : COLOR_VALUE, bg);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(label, x + w / 2, y + h / 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
 // Boolean control. The LABEL changes with state as well as the fill, so it
 // reads correctly without colour.
 void uiToggle(int x, int y, int w, int h, const char* onLabel, const char* offLabel, bool on) {

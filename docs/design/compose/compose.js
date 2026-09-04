@@ -94,7 +94,7 @@ const K = {
     TEXT_ADV:8,                 // Spleen 8x16's uniform advance
     R_MD:12,
     KB_PITCH:32, KB_KEY_W:30,
-    KB_KEY_R:3,                 // NEW: 10.0% of KB_KEY_W, x1.154 off board 1 like R_MD
+    KB_KEY_R:3,                 // NEW: KB_KEY_W / 10 truncated, 10.0% of KB_KEY_W - NOT x1.154 off board 1's 2 (that computes to 2.31, truncating back to 2)
     KB_COLS:35, KB_TEXT_LINES:5,
     KB_STRIP_Y:6, KB_STRIP_H:20,          // NEW: KB_LINE_PITCH + 4
     KB_TEXT_Y:34, KB_TEXT_H:120,

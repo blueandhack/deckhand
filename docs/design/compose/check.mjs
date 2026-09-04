@@ -82,7 +82,6 @@ const HEADER = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // happens to say.
 // ===========================================================================
 const PENDING = {
-  "1:KB_KEY_R":         [2,   null],
   "1:KB_STRIP_Y":       [4,   null],
   "1:KB_STRIP_H":       [17,  null],
   "1:KB_ACT_DRAWN":     [26,  null],
@@ -96,7 +95,6 @@ const PENDING = {
   "1:KB_ROW_H":         [41,  44],
   "1:KB_ACT_Y":         [280, 276],
   "1:KB_ACT_H":         [40,  44],
-  "2:KB_KEY_R":         [3,   null],
   "2:KB_STRIP_Y":       [6,   null],
   "2:KB_STRIP_H":       [20,  null],
   "2:KB_ACT_DRAWN":     [32,  null],

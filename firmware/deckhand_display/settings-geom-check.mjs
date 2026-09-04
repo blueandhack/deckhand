@@ -1920,6 +1920,38 @@ for (const b of [1, 2]) {
         `the tap band (${c.KB_PITCH}x${c.KB_ROW_H}) is bigger than the drawn key (${c.KB_KEY_W}x${drawnKeyH}) in BOTH dimensions - the split is kept, not collapsed`);
     chk(drawnKeyH / c.KB_KEY_W <= 40 / 22 + 0.001,
         `key aspect 1:${(drawnKeyH / c.KB_KEY_W).toFixed(2)} no more elongated than board 1's 1:${(40 / 22).toFixed(2)}`);
+    // KB_KEY_R: the key's OWN radius, not R_MD's (a card radius). A flat edge
+    // means the radius covers half the width or more - a circle, not a rounded
+    // square - so this fails the moment KB_KEY_R stops being a corner treatment.
+    chk(c.KB_KEY_R * 2 < c.KB_KEY_W, `KB_KEY_R ${c.KB_KEY_R} leaves a flat edge on a ${c.KB_KEY_W}px key`);
+    // THE LOAD-BEARING ONE: this is what fails if KB_KEY_R is set back to R_MD.
+    // The threshold is deliberately NOT "about 9%" - board 1's share at KB_KEY_R
+    // is 0.4% today (0.4% again at Task 6's KB_ROW_H 41) and board 2's is 0.5%,
+    // where R_MD's share is 9.8%/10.5% and 7.6% respectively (R_MD scales x1.2
+    // between the boards while the key scales x1.36, so a single R_MD-side
+    // threshold would describe neither). 2% sits above both KB_KEY_R shares and
+    // below both R_MD shares, and the message prints the real numbers for THIS
+    // board rather than asserting a shared one.
+    const cornerLoss = (r) => 4 * r * r * (1 - Math.PI / 4);
+    const drawnKeyArea = c.KB_KEY_W * drawnKeyH;
+    const lossR = cornerLoss(c.KB_KEY_R), lossMD = cornerLoss(c.R_MD);
+    chk(lossR / drawnKeyArea < 0.02,
+        `KB_KEY_R ${c.KB_KEY_R} rounds ${lossR.toFixed(1)}px2 off the corners, ` +
+        `${(lossR / drawnKeyArea * 100).toFixed(1)}% of the ${drawnKeyArea}px2 drawn ` +
+        `${c.KB_KEY_W}x${drawnKeyH} key (R_MD ${c.R_MD} would be ` +
+        `${(lossMD / drawnKeyArea * 100).toFixed(1)}%)`);
+    if (b === 1) {
+      // Bound to the FUNCTION BODY, not the file: a grep for uiStrokeRound over
+      // deckhand_display.ino passes while uiKeyCap strokes freely, because
+      // uiButton next door calls it. fnSrc(...).length > 0 is asserted FIRST -
+      // !/re/.test("") is true, so a negative assertion over a function that
+      // failed to parse would otherwise pass vacuously.
+      const keyCapSrc = fnSrc(SRC_MAIN, "uiKeyCap");
+      chk(keyCapSrc.length > 0, "uiKeyCap's body was found in deckhand_display.ino (parse gate)");
+      chk(!/uiStrokeRound/.test(keyCapSrc),
+          "uiKeyCap's OWN BODY does not stroke - an outline on COLOR_BG is what makes the drawn key read smaller than its band");
+      chk(/KB_KEY_R/.test(keyCapSrc), "uiKeyCap's OWN BODY uses KB_KEY_R, not R_MD");
+    }
     chk(10 * c.KB_PITCH <= W, `10 columns x ${c.KB_PITCH} = ${10 * c.KB_PITCH} inside the ${W}px panel`);
     chk(c.KB_PITCH - c.KB_KEY_W === 2, `${c.KB_PITCH - c.KB_KEY_W}px of the pitch is the gap`);
     for (const n of KB_ROW_CELLS) {

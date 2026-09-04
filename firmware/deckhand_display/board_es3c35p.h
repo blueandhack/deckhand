@@ -2341,6 +2341,17 @@ const int KB_TEXT_LINES = 5;
 // one dimension this panel simply hands over.
 const int KB_PITCH = 32;
 const int KB_KEY_W = 30;
+// KB_KEY_W / 10 under C truncation: 30/10 = 3 here, 22/10 = 2 on board 1. That
+// form gives BOTH boards their value exactly, where the x1.154 scaling this
+// header uses for R_MD and the borders does NOT - 2 * 1.154 is 2.31, which
+// truncates back to 2, not 3, so a scaled derivation cannot produce board 1's
+// value either. 3px is 10.0% of a 30px key and 0.46mm; it costs 4*r^2*(1 -
+// pi/4) = 7.7px2 of corner off this board's 30x54 (1620px2) drawn key - 0.5%
+// of it - against R_MD's 123.6px2 there, which is 7.6%. That 7.6% is SMALLER
+// than board 1's 10.5% (at board 1's Task-6 KB_ROW_H 41, 22x37) even though
+// R_MD is bigger here, because R_MD scales x1.2 between the boards while the
+// key scales x1.36 - so no single percentage describes both boards.
+const int KB_KEY_R = 3;
 // KB_ROW_H 58, and the DRAWN key is KB_ROW_H - 4 = 54 while the TESTED band is
 // KB_PITCH x KB_ROW_H = 32x58 = 1856px2 against board 1's 24x44 = 1056 - the
 // drawn/tested split kept rather than collapsed, in BOTH dimensions. The tested
