@@ -1194,6 +1194,12 @@ bool pairPanelActive = false;
 bool kbActive = false;
 char kbText[151];              // 150 bytes + NUL, matching the host's cap exactly
 int  kbLen = 0;
+// -1 means "pinned to the end" - the state after openKeyboard, and it must
+// survive until the user taps the text card so existing behaviour (typing
+// always appends, DEL always trims the last byte) is unchanged until then.
+// Once a tap sets it to a real byte offset, kbInsert/kbBackspace splice AT it
+// instead of at kbLen. Tasks 7, 10 and 11 read it under this exact name.
+int  kbCaret = -1;
 char kbPid[24] = "";
 // The Mac that raised the ask kbPid pins to. PIDs are per-machine, so kbPid
 // ALONE is not a unique key once two Macs are both ticking - two of them can

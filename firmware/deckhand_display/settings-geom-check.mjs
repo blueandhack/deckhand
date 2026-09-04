@@ -1969,6 +1969,50 @@ for (const b of [1, 2]) {
     // caret is a TEXT_ADV-wide block at column caretCol.
     chk((caretCol + 1) * adv <= lane,
         `caret at column ${caretCol} inks ${caretCol * adv}..${(caretCol + 1) * adv - 1} inside the ${lane}px lane`);
+    // TAP-TO-PLACE: kbTouch's card branch (sy < KB_ROWS_Y, kbLen > 0) turns a
+    // touch point into a byte offset - the exact inverse of the caret draw
+    // above. Bound to kbTouch's OWN BODY via fnSrc's brace matching, not the
+    // file: a clamp on an unrelated variable sitting next door would satisfy a
+    // bare grep. The parse gates come first - !/re/.test("") is true, so every
+    // claim below would pass vacuously over a function or fragment that failed
+    // to parse.
+    {
+      const touchSrc = fnSrc(KB_SRC, "bool kbTouch");
+      chk(touchSrc.length > 0, "kbTouch's body was found in keyboard.ino (parse gate)");
+      const m = touchSrc.match(/if\s*\(kbLen > 0\)\s*\{([\s\S]*?)kbCaret = off;/);
+      chk(!!m, "kbTouch's card branch computes an offset and assigns kbCaret before drawing (parse gate)");
+      const frag = m ? m[1] : "";
+      // FOUR CLAMPS, each tied to the REAL constant by a backreference between
+      // the comparison and the assignment - not merely "some clamp exists",
+      // which a col clamped to KB_ROWS_Y by mistake would also satisfy.
+      chk(/if\s*\(\s*line\s*<\s*0\s*\)\s*line\s*=\s*0\s*;/.test(frag),
+          "kbTouch clamps the tapped line's lower bound to 0");
+      chk(/if\s*\(\s*line\s*>=\s*(KB_TEXT_LINES)\s*\)\s*line\s*=\s*\1\s*-\s*1\s*;/.test(frag),
+          "kbTouch clamps the tapped line's upper bound to KB_TEXT_LINES - 1, tied to the real constant by name");
+      chk(/if\s*\(\s*col\s*<\s*0\s*\)\s*col\s*=\s*0\s*;/.test(frag),
+          "kbTouch clamps the tapped column's lower bound to 0");
+      chk(/if\s*\(\s*col\s*>=\s*(KB_COLS)\s*\)\s*col\s*=\s*\1\s*-\s*1\s*;/.test(frag),
+          "kbTouch clamps the tapped column's upper bound to KB_COLS - 1, tied to the real constant by name");
+      chk(/off\s*=\s*line\s*\*\s*KB_COLS\s*\+\s*col\s*;/.test(frag),
+          "kbTouch combines the clamped line and column via KB_COLS, matching drawKbText's own division");
+      chk(/if\s*\(\s*off\s*>\s*kbLen\s*\)\s*off\s*=\s*kbLen\s*;/.test(frag),
+          "kbTouch clamps the combined offset down to kbLen - a tap below or right of the text must land ON it, not past it");
+      // WHY THE CLAMP IS LOAD-BEARING, MEASURED rather than assumed: the RAW
+      // (unclamped) line and column - from this board's own geometry, not from
+      // the clamp code above - already reach past KB_TEXT_LINES and past a full
+      // KB_MAX_BYTES-byte buffer before either intermediate is combined. So the
+      // offset the clamp exists to stop is a real, reachable number on THIS
+      // board, not a hypothetical one a looser board might never hit.
+      const line0Y = c.KB_TEXT_Y + c.KB_LINE0_DY;
+      const rawLineMax = Math.floor((c.KB_ROWS_Y - 1 - line0Y) / c.KB_LINE_PITCH);
+      const rawColMax = Math.floor((W - 1 - c.CARD_X - 6) / c.TEXT_ADV);
+      const rawOffMax = rawLineMax * c.KB_COLS + rawColMax;
+      console.log(`    tap-to-place: unclamped worst case line ${rawLineMax} col ${rawColMax} -> off ${rawOffMax}, against KB_TEXT_LINES ${c.KB_TEXT_LINES} / KB_COLS ${c.KB_COLS} / kbLen <= ${KB_MAX_BYTES}`);
+      chk(rawLineMax >= c.KB_TEXT_LINES,
+          `an unclamped tap at the card's bottom reaches line ${rawLineMax}, past the ${c.KB_TEXT_LINES}-line budget - the line clamp is load-bearing`);
+      chk(rawOffMax > KB_MAX_BYTES,
+          `an unclamped tap at the card's bottom-right reaches offset ${rawOffMax}, past even a full ${KB_MAX_BYTES}-byte buffer - the offset clamp is load-bearing`);
+    }
     // THE META ROW must share no pixel row with any text line - drawString paints
     // an opaque box the full height of a line, so a shared row erases text.
     const metaY = c.KB_TEXT_Y + c.KB_META_DY, line0 = c.KB_TEXT_Y + c.KB_LINE0_DY;

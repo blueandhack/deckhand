@@ -288,17 +288,22 @@ void drawKbText() {
   } else {
     drawKbHardWrapped();
     // Caret: a block at the insertion point, so the card reads as focused and it
-    // is obvious where the next character lands. Its position is PROVABLE rather
-    // than clamped: at kbLen == KB_MAX_BYTES the furthest it can reach is line
-    // KB_MAX_BYTES / KB_COLS, column KB_MAX_BYTES % KB_COLS, and KB_TEXT_LINES is
-    // ceil(KB_MAX_BYTES / KB_COLS) - so the line index is always inside the
-    // budget by construction, on any KB_COLS. The two boards land on line 4 col 14
-    // and line 4 col 10; settings-geom-check.mjs asserts it per board.
+    // is obvious where the next character lands. kbCaret == -1 means "pinned to
+    // the end" (the state after openKeyboard and after every append typed with
+    // no tap yet), so it draws at kbLen exactly as before; once a tap in the card
+    // has set it, it draws there instead. Either way its position is PROVABLE
+    // rather than clamped: it is always <= kbLen <= KB_MAX_BYTES, so the furthest
+    // it can ever reach is line KB_MAX_BYTES / KB_COLS, column KB_MAX_BYTES %
+    // KB_COLS, and KB_TEXT_LINES is ceil(KB_MAX_BYTES / KB_COLS) - so the line
+    // index is always inside the budget by construction, on any KB_COLS. The two
+    // boards land on line 4 col 14 and line 4 col 10 at that furthest point;
+    // settings-geom-check.mjs asserts it per board.
     // Its x step and its own size come from TEXT_ADV and KB_LINE_PITCH rather than
     // the literals 6 and 11 they used to be - a caret 6px wide stepping 6px at a
     // time under an 8px face lands under the wrong character and is thinner than
     // the glyph it marks. 6/11 on board 1, 8/14 here.
-    int cl = kbLen / KB_COLS, cc = kbLen % KB_COLS;
+    int off = kbCaret < 0 ? kbLen : kbCaret;
+    int cl = off / KB_COLS, cc = off % KB_COLS;
     if (cl < KB_TEXT_LINES)
       tft.fillRect(CARD_X + 6 + cc * TEXT_ADV, KB_LINE0_Y + cl * KB_LINE_PITCH + 1,
                    TEXT_ADV, KB_LINE_PITCH - 2, COLOR_ACCENT);
@@ -396,6 +401,7 @@ void openKeyboard(int idx) {
   kbSessionIdx = idx;
   kbLen = 0;
   kbText[0] = '\0';
+  kbCaret = -1;                 // pinned to the end until a tap in the card moves it
   kbShiftMode = 0;
   kbPage = 0;
   // Cleared here so an ANSWER can never inherit message mode from an earlier open.
@@ -471,11 +477,24 @@ void closeKeyboard() {
   renderFooter();
 }
 
+// Both of these act AT kbCaret, splicing rather than appending, so a correction
+// forty characters back no longer costs forty re-taps of DEL plus forty re-taps
+// to retype the tail. kbCaret == -1 ("pinned to the end") is handled by pointing
+// pos at kbLen, which reproduces the old append-only/trim-only behaviour exactly
+// - and it STAYS -1 afterwards, rather than becoming a stated offset that happens
+// to equal kbLen, so the pin survives every keystroke until a tap ends it.
+
 void kbInsert(char c) {
   if (kbLen >= KB_MAX_BYTES) { drawKbText(); return; }  // repaint so the counter shows why
   if (kbShiftMode > 0 && c >= 'a' && c <= 'z') c -= 32;
-  kbText[kbLen++] = c;
-  kbText[kbLen] = '\0';
+  int pos = kbCaret < 0 ? kbLen : kbCaret;
+  // Shift [pos..kbLen] (the NUL included) up by one byte to open a gap at pos.
+  // kbLen < KB_MAX_BYTES (150) was just checked, so kbLen+1 <= 150 stays inside
+  // kbText[151].
+  memmove(kbText + pos + 1, kbText + pos, kbLen - pos + 1);
+  kbText[pos] = c;
+  kbLen++;
+  if (kbCaret >= 0) kbCaret++;  // moves right past what it just placed
   if (kbShiftMode == 1) {          // one-shot clears; locked stays
     kbShiftMode = 0;
     // The whole letter page re-labels when shift clears, so repaint rows 0-2.
@@ -488,7 +507,12 @@ void kbInsert(char c) {
 
 void kbBackspace() {
   if (kbLen == 0) return;
-  kbText[--kbLen] = '\0';
+  int pos = kbCaret < 0 ? kbLen : kbCaret;
+  if (pos == 0) return;    // nothing left of the caret - a no-op, not a trim off the end
+  // Shift [pos..kbLen] (the NUL included) down by one byte to close the gap at pos-1.
+  memmove(kbText + pos - 1, kbText + pos, kbLen - pos + 1);
+  kbLen--;
+  if (kbCaret >= 0) kbCaret--;  // moves left with the byte it just deleted
   drawKbText();
   drawKbActions();      // SEND goes inert again at zero
 }
@@ -527,10 +551,33 @@ bool kbTouch(int sx, int sy) {
     }
     return true;                 // the margins outside the lane, likewise
   }
-  // The text card: a tap peeks the prompt. It used to be inert, which is what
-  // made the question unreachable once you had typed a character.
+  // The text card. With a draft in progress (kbLen > 0), a tap PLACES THE
+  // CARET rather than peeking - the card is showing your answer, not the
+  // question, so a tap on it is about the answer. Only with an empty buffer
+  // (kbLen == 0, exactly when drawKbText shows the question and, if there is
+  // one, "tap here to read it") does a tap still open the peek; that hint's
+  // text stays true because this is the only branch left that can fire then.
   if (sy < KB_ROWS_Y) {
-    if (kbHasDetail()) { kbPeekPage = 0; drawKeyboard(); }
+    if (kbLen > 0) {
+      // The exact inverse of drawKbText's division. Clamp each intermediate
+      // BEFORE combining them into a byte offset: a tap below the last line
+      // or right of the last column must not carry that overshoot into the
+      // product, or it could land past kbLen instead of AT it.
+      int line = (sy - KB_LINE0_Y) / KB_LINE_PITCH;
+      if (line < 0) line = 0;
+      if (line >= KB_TEXT_LINES) line = KB_TEXT_LINES - 1;
+      int col = (sx - CARD_X - 6) / TEXT_ADV;
+      if (col < 0) col = 0;
+      if (col >= KB_COLS) col = KB_COLS - 1;
+      int off = line * KB_COLS + col;
+      if (off > kbLen) off = kbLen;    // past the last character: land ON it
+      if (off < 0) off = 0;
+      kbCaret = off;
+      drawKbText();
+    } else if (kbHasDetail()) {
+      kbPeekPage = 0;
+      drawKeyboard();
+    }
     return true;
   }
   int r = (sy - KB_ROWS_Y) / KB_ROW_H;
