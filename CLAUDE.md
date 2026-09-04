@@ -3575,8 +3575,25 @@ two things `host/index.mjs` cannot get any other way:
     delivered as a memo — a visible failure instead of silence on both.
   - **BLE chunking and what the airtime numbers do and do not say.** noble on macOS does not
     report an MTU (`peripheral.mtu` came back `undefined` against the real device), so
-    `BLE_CHUNK_SIZE` stays the module constant **20** — there is nothing negotiated to size
-    against. A 779-byte payload (a normal one-session tick) dispatched in **0–1ms** over five
+    the HOST cannot size against the MTU — but **the DEVICE can, and for the life of this
+    project nobody asked.** `ble_att_mtu(conn_handle)` reports the negotiated value, and on
+    this link it is **256**, not the 23 the 20-byte constant assumed (23 less the 3-byte ATT
+    header). So every BLE write was a fraction of what the radio would carry.
+    **MEASURED by forcing the host's size by hand against a real link, same ~7.8KB payload:
+    20 bytes -> 2944ms (2.7 KB/s), 60 -> 1356ms (5.4), 180 -> 938ms (8.4).** A 3.1x speedup,
+    with no algorithm and no decompressor — reached for before compression precisely because
+    it needed neither, and it composes with compression later.
+    The device now REPORTS its MTU from `loop()` (`BLEMTU link=<n> mtu=<n>`) and the host
+    raises `bleChunkSize` to `mtu - 3`, clamped to the 180 measured working. It is sent from
+    `loop()` and not `onConnect` because that callback runs on BTC_TASK, where this file's
+    rules forbid touching drivers, and negotiation settles slightly after connect.
+    **DO NOT hard-code the larger value.** A Mac that does not negotiate up leaves the MTU at
+    23, and CoreBluetooth **DROPS an oversized write-without-response SILENTLY** — so the link
+    does not error, it simply appears dead, and with a cable also attached the fault is
+    invisible until someone unplugs. The floor stays 20 and a device reporting 23 keeps it
+    there. **Headroom not taken: 253 (256 - 3) is the real ceiling and is UNTESTED**, because
+    verifying it needs the cable OUT — a host->device write size cannot be exercised while USB
+    is carrying the same payload.
     consecutive ticks, but that is the time to hand chunks to CoreBluetooth, **not** over-the-air
     completion: `sendOverBle` writes `withoutResponse`, and the mac binding fires the JS write
     completion immediately after calling `-[CBPeripheral writeValue:...]`. True over-the-air
