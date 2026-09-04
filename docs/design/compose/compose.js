@@ -53,16 +53,18 @@ const TH = {}; for(const k in THEME_RAW){TH[k]={}; THEME_RAW[k].forEach((v,i)=>T
 // expression against its own term, which always holds. Two independent literals
 // can disagree; a derivation cannot.
 //
-// AS OF TASK 2, EIGHT OF THESE NAMES DO NOT EXIST IN EITHER HEADER YET
-// (KB_ACT_DRAWN, KB_ACT_DY, KB_STRIP_H, KB_STRIP_Y, COMPOSE_PROMPT_H,
-// COMPOSE_LEGEND_H, COMPOSE_DRAFT_H, COMPOSE_GAP - KB_KEY_R landed and is no
-// longer among them) and five more still hold their pre-compose values (board
-// 1's KB_TEXT_Y, KB_ROWS_Y, KB_ROW_H, and both boards' KB_TEXT_Y, KB_ACT_Y,
-// KB_ACT_H). check.mjs therefore FAILS BY NAME on each of them today. That
-// failure is the binding working; see README.md. THIS COUNT IS PROSE, NOT
-// CODE - it is not read by check.mjs and cannot be derived from PENDING
-// automatically without executing the mock first, so each landing task must
-// hand-correct it same as this one did, rather than it going silently stale.
+// SOME OF THESE NAMES ARE AHEAD OF THE HEADERS: this mock is the spec the
+// firmware is built TOWARDS, so until the task that lands a name has run, that
+// name either does not exist in either header or still holds its pre-compose
+// value, and check.mjs FAILS BY NAME on it. That failure is the binding working;
+// see README.md.
+//
+// WHICH NAMES, AND HOW MANY, ARE NOT RESTATED HERE. They were, twice, and the
+// roster went stale the moment a task landed - a count in prose is a count that
+// rots, and this file has now been corrected for it more than once. check.mjs's
+// PENDING table is the record, and its closing summary counts and names them
+// live from that table: run `node docs/design/compose/check.mjs` and read its
+// last few lines. The number that must be zero is the UNEXPECTED count.
 // ---------------------------------------------------------------------------
 const K = {
   1: {

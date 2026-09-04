@@ -22,13 +22,12 @@
 // ===========================================================================
 // THIS CHECKER IS EXPECTED TO FAIL TODAY, BY NAME, AND THAT IS THE DELIVERABLE.
 // ===========================================================================
-// As of Task 3, six of K's names do not exist in either header yet (KB_KEY_R
-// landed in Task 2, and KB_ACT_DRAWN/KB_ACT_DY in Task 3, so none of the three
-// is among them any more) and four more still hold their pre-compose values -
-// three on board 1 and one on board 2, KB_ACT_Y and KB_ACT_H having moved in
-// Task 3 on both. Tasks 6 and 10 of the compose plan add and move the rest.
-// Until each lands, the bind below fails and PRINTS THE NAME. That
-// is the binding working. There is deliberately no "not yet defined" escape
+// Some of K's names are ahead of the headers: a later task of the compose plan
+// adds or moves each one, and until it lands the bind below fails and PRINTS THE
+// NAME. WHICH NAMES, AND HOW MANY, ARE NOT WRITTEN DOWN HERE - the PENDING table
+// is the record and the closing summary counts and names them live from it, so
+// there is no restated roster to go stale as tasks land (there was, twice, and
+// it did). That is the binding working. There is deliberately no "not yet defined" escape
 // hatch: an assertion that can be satisfied by the constant's absence is an
 // assertion that cannot fail, which is the defect this whole family of files
 // exists to prevent. The closing summary sorts the failures into "waiting on a
@@ -66,9 +65,9 @@ const HEADER = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // would leave every gap assertion in this file green while the row it describes
 // had changed.
 //
-// BOUND TO THE FUNCTION BODY, not to the file: `const int gap = 8` appears
-// nowhere else today, but a grep over deckhand_display.ino would be satisfied by
-// any neighbouring declaration that happened to use the same name. The body is
+// BOUND TO THE FUNCTION BODY, not to the file: a grep over deckhand_display.ino
+// would be satisfied by any neighbouring declaration that used the same name,
+// now or later. The body is
 // brace-matched from the definition, and the two parse gates below run BEFORE
 // the comparison, because a parse that silently returned "" makes the regex
 // below match nothing and the comparison meaningless.
@@ -93,11 +92,11 @@ const FW_ACT_GAP = (ACT_ROW_SRC.match(/const int gap\s*=\s*(\d+)/) || [])[1];
 // PENDING - the bind failures a later task is expected to fix, keyed on
 // `board:name` and pinning BOTH VALUES: [ what this mock targets, what the
 // header holds TODAY ] with null meaning "the header does not define the name
-// at all". 16 as of Task 3 (26 at Task 1; minus KB_KEY_R x2 boards in Task 2,
-// minus KB_ACT_H, KB_ACT_Y, KB_ACT_DRAWN and KB_ACT_DY x2 boards here) - THIS
-// COUNT IS PROSE, not read by any assertion, so each task that lands an entry
-// must hand-correct it: Object.keys(PENDING).length is printed live in the
-// closing summary below, which is the number to trust if this one goes stale.
+// at all". THE COUNT IS NOT WRITTEN HERE, and that is the fix for a defect this
+// file kept re-committing: every restatement of "there are N" went stale the
+// moment a task landed one, once per task for two tasks running. The closing
+// summary computes it from this table - waiting, unexpected, and the names in
+// each - so the table below is the only place the roster exists.
 //
 // IT USED TO BE TWO LISTS OF BARE NAMES, and that was an excuse that could not
 // fail. Matching on the NAME alone excused any value: setting K[1].KB_ROW_H
@@ -753,8 +752,8 @@ function run() {
 // the comparison, which could pass or fail independently of whether the real
 // assertions still work.
 //
-// This checker has EXPECTED failures today (the header does not define eight of
-// K's names yet, as of Task 2), so "did anything fail" cannot be the test. The test is whether
+// This checker has EXPECTED failures (the headers do not define every name in K
+// yet - PENDING says which), so "did anything fail" cannot be the test. The test is whether
 // the message set GREW, and whether the new messages come from the budget
 // assertion by name.
 // ===========================================================================
@@ -816,7 +815,7 @@ const waiting = r.msgs.filter(m => r.excused.has(m));
 const unexpected = r.msgs.filter(m => !r.excused.has(m));
 
 console.log(`\n${r.n - failed} of ${r.n} assertions passed, ${failed} failed`);
-console.log(`  ${waiting.length} waiting on a later task (tasks 6 and 10 add or move the constant):`);
+console.log(`  ${waiting.length} waiting on a later task of the compose plan to add or move the constant:`);
 console.log(`    names no header defines yet: ${pendingMissing.join(" ") || "(none)"}`);
 console.log(`    names still at their pre-compose value: ${pendingStale.join(" ") || "(none)"}`);
 console.log(`  ${unexpected.length} UNEXPECTED - this is the number that must be zero:`);

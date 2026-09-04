@@ -16,28 +16,18 @@ node docs/design/compose/check.mjs --selftest  # proves the bind has teeth
 
 ## THIS CHECKER FAILS TODAY, BY NAME, AND THAT IS THE POINT
 
-`node docs/design/compose/check.mjs` **exits 1**, with 24 failures across both
-boards (26 at Task 1's commit; `KB_KEY_R` landed on both boards in Task 2, and
-`KB_ACT_H`, `KB_ACT_Y`, `KB_ACT_DRAWN` and `KB_ACT_DY` in Task 3, so all five
-are bound and agree on both boards and dropped out of this table). Every one of
-the remaining 16 is a constant a later task of the compose plan adds or moves:
+`node docs/design/compose/check.mjs` **exits 1**. Every failure is one of two
+kinds — a name no header defines yet, or a name still at its pre-compose value —
+and each is a constant a later task of the compose plan adds or moves. **Each
+failure goes green when its task does, and until then the checker prints the
+name.** That is the binding working, not a broken checker.
 
-| | board 1 | board 2 |
-|---|---|---|
-| **names no header defines yet** (6 each) | `KB_STRIP_Y` `KB_STRIP_H` `COMPOSE_PROMPT_H` `COMPOSE_LEGEND_H` `COMPOSE_DRAFT_H` `COMPOSE_GAP` | the same six |
-| **names still at their pre-compose value** | `KB_TEXT_Y` 4→24, `KB_ROWS_Y` 96→115, `KB_ROW_H` 44→41 | `KB_TEXT_Y` 12→34 |
-
-Tasks 6 and 10 land the rest (Task 2 landed `KB_KEY_R`, Task 3 the four action-row
-names). **Each failure goes green when its task does, and until then the checker
-prints the name.** That is the binding working, not a broken checker.
-
-**This 16 is prose, not code** - it is not read by `check.mjs`, so it cannot
-be kept in sync automatically; each task that resolves a `PENDING` entry must
-hand-correct it, the way this update did (26 → 24 → 16). The number to actually
-trust at any moment is the checker's own closing summary, which computes
-`waiting.length` and `unexpected.length` live from `PENDING` rather than
-restating them - run `node docs/design/compose/check.mjs` and read its last
-few lines if this count and the live one ever disagree.
+**How many there are, and which, is not written down here.** It was, and it went
+stale the moment a task landed one — twice, costing a review finding each time.
+`PENDING` in `check.mjs` is the record, and the checker's closing summary counts
+and names both kinds live from it. **Run it and read its last few lines: that is
+the single authority.** The number that must be zero is the UNEXPECTED count,
+which the same summary prints.
 
 There is deliberately **no "not yet defined" escape hatch**. An assertion a
 constant's *absence* can satisfy is an assertion that cannot fail, which is the
