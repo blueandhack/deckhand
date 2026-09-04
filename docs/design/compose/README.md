@@ -33,10 +33,38 @@ There is deliberately **no "not yet defined" escape hatch**. An assertion a
 constant's *absence* can satisfy is an assertion that cannot fail, which is the
 defect this whole family of files exists to prevent. What the closing summary
 does instead is *sort* the failures — "waiting on a later task" against
-"UNEXPECTED" — by mechanism only: a `[bind]` message naming one of the fourteen
-constants above. **The number that must be zero is the UNEXPECTED count.** A bind
-failure on any other name, or a failure from any other assertion group, lands
-there and is a real defect.
+"UNEXPECTED" — and **the number that must be zero is the UNEXPECTED count**.
+
+### The excuse names the VALUE, not just the name
+
+`PENDING` in `check.mjs` is keyed on `board:name` and pins **both** values:
+`[ what this mock targets, what the header holds today ]`, with `null` meaning
+"the header does not define the name at all". A bind failure is excused only if
+**both** halves still match.
+
+It began as two lists of bare names, and that was an excuse that could not fail.
+Matching on the name alone excused any value, with two consequences:
+
+- setting `K[1].KB_ROW_H` 41 → 40 with a compensating gap in `D` produced
+  **byte-identical** output, `0 UNEXPECTED` included;
+- worse, a later task landing `KB_ROW_H = 42` in the header would have read
+  exactly like that task **not having run** — which defeats the binding for
+  precisely the constants Tasks 2, 3, 6 and 10 exist to add.
+
+Three `[pending]` assertions now guard the table itself, and none of them is ever
+excused: an **orphan** entry naming a constant the mock does not have; a **mock
+target** that has moved away from the value the excuse was written for; and a
+**header value** that is no longer the pre-compose one. That last message reads
+differently depending on which happened — "the task landed it RIGHT, so delete
+this line" versus "the task landed it WRONG, which is NOT the same as it not
+having run" — because those need different actions. The table cannot rot: once a
+constant lands correctly its bind failure disappears and its `PENDING` line
+starts failing, so deleting the line is part of the diff that landed it.
+
+The first column duplicates `K`, deliberately, and it is the same shape as `WAS`
+in `settings-redesign/check.mjs`: a second independent record is what makes the
+excuse exact, where deriving it from `K` would excuse whatever `K` happens to
+say.
 
 ## What is exact and what is not
 
@@ -112,9 +140,17 @@ so a gap that drifts moves an anchor and fails.
   was the one dimension that cleared, and this design must not spend it (board 1
   clears by exactly 1 px at `KB_ROW_H` 41).
 - **All 95 printable ASCII characters are reachable**, enumerated from the three
-  key pages rather than restated. Defect 3 of the spec is 14 unreachable
-  characters; the second symbol page exists for exactly those, and this
-  assertion names any that go missing.
+  key pages **and from row 3's own definition** rather than restated. Defect 3 of
+  the spec is 14 unreachable characters; the second symbol page exists for exactly
+  those, and this assertion names any that go missing. It used to end
+  `reach.add(" "); reach.add(".")` — a hand transcription of 2 of the 95, because
+  row 3 was three inline draw calls and not in `PAGES` at all, so the sweep
+  credited the row with characters it had never read. Row 3 is now the `KB_ROW3`
+  table the renderer walks, and a character cell there carries **only** `emits`,
+  with its label *derived* from that (as `keyLabel()` derives a letter key's).
+  There is therefore no label to change independently of the character. This
+  matters beyond the mock: **Task 4's whole deliverable is codepoint
+  reachability**, and this is its gate.
 - **Sub-floor controls are named, in a list that is exact in both directions.** A
   control tested under `TAP_MIN` that no `EXCEPTIONS` entry covers **fails**, and
   an entry that no longer matches anything sub-floor **also fails**, so the list
@@ -187,11 +223,19 @@ Every remaining assertion was fault-injected one at a time and confirmed to fail
 by name.
 
 `--selftest` pushes `COMPOSE_DRAFT_H` up by 8 on both boards, in memory, through
-the *same* `run()` the normal path uses, and exits 0 only when the **budget**
-assertion is among the catchers — it names all 13 new failures, 6 of them
-`[budget]`. Because this checker has expected failures today, "did anything
-fail" cannot be the test; the test is whether the failure set **grew**, and
-whether the growth came from the assertion that claims the column closes.
+the *same* `run()` the normal path uses. Because this checker has expected
+failures today, "did anything fail" cannot be the test; the test is whether the
+failure set **grew**, and whether the growth includes the assertion the verdict
+names.
+
+**It names the assertion, not its tag.** Every assertion may carry a stable `id`,
+and the verdict requires `column-closes:1:reply` and `column-closes:2:reply` to
+newly fail. Gating on the `[budget]` **tag** was not enough — four assertions
+share it, so replacing `chk(S.total === k.BOARD_H)` with `chk(true)` left the
+`KB_ACT_Y` anchor assertions firing, the tag still present, and the verdict still
+printing "the column no longer closes on BOARD_H" while being blind to the very
+assertion it named. Group-level teeth behind an assertion-level claim is the same
+defect as an assertion that cannot fail.
 
 ## One place the mock departs from the spec, and one where it was wrong
 

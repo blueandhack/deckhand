@@ -345,6 +345,26 @@ const PAGES = [
   { name:"SYM2", pager:"ABC",  rows:["$%*<>[]{}|","\\^`~","\u0002"] },
 ];
 const KEY_SHIFT = "\u0001", KEY_DEL = "\u0002";
+// ROW 3, AS DATA, because it holds two of the 95 characters and the checker's
+// reachability sweep has to read the SAME source the renderer draws from. It
+// used to be three inline uiButton calls here and a hand-written
+// `reach.add(" "); reach.add(".")` there - a transcription of 2 of the 95, and
+// relabelling the period key left the sweep still reporting 95 of 95.
+//
+// A character cell carries ONLY `emits`; its label is DERIVED from that, exactly
+// as keyLabel() derives a letter key's label from its character. So there is no
+// label to change independently of the character, which is what closes the hole:
+// "relabel the period key" now means editing `emits`, and the sweep sees it.
+// `pitch` is the cell's width in KB_PITCHes, 0 meaning "the remainder".
+const KB_ROW3 = [
+  { pitch:2, emits:null },   // the page pager - a navigate, not a character
+  { pitch:6, emits:" " },
+  { pitch:0, emits:"." },    // the remainder column
+];
+function row3Label(cell, page) {
+  if (cell.emits === null) return page.pager;
+  return cell.emits === " " ? "SPACE" : cell.emits;
+}
 function keyLabel(c, shift){
   if (c === KEY_SHIFT) return shift === 2 ? "CAPS" : "CAP";
   if (c === KEY_DEL)   return "DEL";
@@ -441,15 +461,19 @@ function drawKeyboard(p, opt = {}) {
     }
   }
   {
+    // Walked from KB_ROW3 rather than written out, so the row the checker's
+    // reachability sweep reads is the row this draws. keyboard.ino's own split
+    // is 2 pitches for the pager, 6 for SPACE and the remainder for the period.
     const band = S.find("key row 3"), h = band.h - 4;
-    const pageW = 2*k.KB_PITCH, spaceW = 6*k.KB_PITCH;
-    p.control(band.name, "key", page.pager, { x:0, y:band.y, w:pageW, h:band.h },
-      { x:0, y:band.y, w:pageW - keyGap(b), h }, 1, { radius:k.KB_KEY_R });
-    p.control(band.name, "key", "SPACE", { x:pageW, y:band.y, w:spaceW, h:band.h },
-      { x:pageW, y:band.y, w:spaceW - keyGap(b), h }, 1, { radius:k.KB_KEY_R });
-    const restW = k.BOARD_W - pageW - spaceW;
-    p.control(band.name, "key", ".", { x:pageW+spaceW, y:band.y, w:restW, h:band.h },
-      { x:pageW+spaceW, y:band.y, w:restW - keyGap(b), h }, 1, { radius:k.KB_KEY_R });
+    const fixed = KB_ROW3.reduce((a, c) => a + c.pitch, 0) * k.KB_PITCH;
+    let x = 0;
+    for (const cell of KB_ROW3) {
+      const w = cell.pitch ? cell.pitch * k.KB_PITCH : k.BOARD_W - fixed;
+      p.control(band.name, "key", row3Label(cell, page),
+        { x, y:band.y, w, h:band.h },
+        { x, y:band.y, w: w - keyGap(b), h }, 1, { radius:k.KB_KEY_R });
+      x += w;
+    }
   }
 
   // THE ACTION BAND. Tested TAP_MIN, drawn 2 * KB_LINE_PITCH centred in it -
@@ -675,5 +699,5 @@ for (const b of [1,2]) {
 if (typeof globalThis !== "undefined") {
   globalThis.__X = { SCREENS, K, D, ADV, CELL, BAD_CHARS, P, TH, stack, colWidths,
                      colX, colSpan, keyGap, ACT_GAP, EXCEPTIONS, ASK, DRAFT, PAGES,
-                     hardWrap };
+                     KB_ROW3, row3Label, hardWrap };
 }

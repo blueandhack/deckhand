@@ -48,17 +48,85 @@ new Function(fs.readFileSync(DIR + "compose.js", "utf8"))();
 const X = globalThis.__X;
 if (!X) { console.log("FATAL: compose.js did not publish globalThis.__X"); process.exit(1); }
 const { SCREENS, K, D, ADV, CELL, BAD_CHARS, P, stack, colWidths, colX, colSpan,
-        keyGap, ACT_GAP, EXCEPTIONS, ASK, PAGES } = X;
+        keyGap, ACT_GAP, EXCEPTIONS, ASK, PAGES, KB_ROW3, row3Label } = X;
 
 const HEADER = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
+
+// ===========================================================================
+// PENDING - the 26 bind failures a later task is expected to fix, keyed on
+// `board:name` and pinning BOTH VALUES: [ what this mock targets, what the
+// header holds TODAY ] with null meaning "the header does not define the name
+// at all".
+//
+// IT USED TO BE TWO LISTS OF BARE NAMES, and that was an excuse that could not
+// fail. Matching on the NAME alone excused any value: setting K[1].KB_ROW_H
+// 41 -> 40 with a compensating gap in D produced BYTE-IDENTICAL output, headline
+// `0 UNEXPECTED` included, and - worse - a later task landing KB_ROW_H = 42 in
+// the header would have read exactly like that task not having run. The whole
+// point of the bind is to tell those two apart, so the excuse has to name the
+// VALUE it excuses, on both sides:
+//
+//   - the mock's target moved  -> the excuse no longer applies, and a [pending]
+//                                 assertion says which half diverged
+//   - the header landed a WRONG value -> likewise, and it says so in those words
+//   - the header landed the RIGHT value -> the bind failure disappears and the
+//                                 entry here is stale, which also FAILS: a
+//                                 standing excuse for a passing constant is how
+//                                 a real drift gets waved through later. The fix
+//                                 is one deleted line, in the diff of the task
+//                                 that landed it.
+//
+// Yes, the first column duplicates K. That is deliberate and is the same shape
+// as WAS in settings-redesign/check.mjs: a second independent record is what
+// makes the excuse exact, where a derivation from K would excuse whatever K
+// happens to say.
+// ===========================================================================
+const PENDING = {
+  "1:KB_KEY_R":         [2,   null],
+  "1:KB_STRIP_Y":       [4,   null],
+  "1:KB_STRIP_H":       [17,  null],
+  "1:KB_ACT_DRAWN":     [26,  null],
+  "1:KB_ACT_DY":        [7,   null],
+  "1:COMPOSE_PROMPT_H": [52,  null],
+  "1:COMPOSE_LEGEND_H": [16,  null],
+  "1:COMPOSE_DRAFT_H":  [21,  null],
+  "1:COMPOSE_GAP":      [4,   null],
+  "1:KB_TEXT_Y":        [24,  4],
+  "1:KB_ROWS_Y":        [115, 96],
+  "1:KB_ROW_H":         [41,  44],
+  "1:KB_ACT_Y":         [280, 276],
+  "1:KB_ACT_H":         [40,  44],
+  "2:KB_KEY_R":         [3,   null],
+  "2:KB_STRIP_Y":       [6,   null],
+  "2:KB_STRIP_H":       [20,  null],
+  "2:KB_ACT_DRAWN":     [32,  null],
+  "2:KB_ACT_DY":        [7,   null],
+  "2:COMPOSE_PROMPT_H": [77,  null],
+  "2:COMPOSE_LEGEND_H": [19,  null],
+  "2:COMPOSE_DRAFT_H":  [24,  null],
+  "2:COMPOSE_GAP":      [8,   null],
+  "2:KB_TEXT_Y":        [34,  12],
+  "2:KB_ACT_Y":         [426, 414],
+  "2:KB_ACT_H":         [46,  58],
+};
 
 // ---- the assertion machinery ----------------------------------------------
 // Messages carry a GROUP TAG so --selftest can say which assertion caught the
 // injected fault rather than merely that something did.
-let n = 0, msgs = [], quiet = false;
-function chk(cond, group, m) {
+// `id` is a STABLE KEY for one assertion, and --selftest gates on it rather than
+// on the group TAG. The tag was not enough: four assertions share [budget], so
+// replacing `chk(S.total === k.BOARD_H)` with `chk(true)` left the anchor
+// assertions firing, the tag still present, and the selftest still printing "the
+// column no longer closes on BOARD_H" while being blind to the very assertion it
+// named. Group-level teeth behind an assertion-level claim.
+let n = 0, msgs = [], failIds = [], quiet = false;
+function chk(cond, group, m, id) {
   n++;
-  if (!cond) { msgs.push(`[${group}] ${m}`); if (!quiet) console.log(`  FAIL [${group}] ${m}`); }
+  if (!cond) {
+    msgs.push(`[${group}] ${m}`);
+    if (id) failIds.push(id);
+    if (!quiet) console.log(`  FAIL [${group}] ${m}`);
+  }
 }
 const say = (s) => { if (!quiet) console.log(s); };
 
@@ -68,8 +136,8 @@ let pendingMissing = [], pendingStale = [];
 
 // ===========================================================================
 function run() {
-  n = 0; msgs = []; pendingMissing = []; pendingStale = [];
-  const exceptionsSeen = new Set(), live = new Set();
+  n = 0; msgs = []; failIds = []; pendingMissing = []; pendingStale = [];
+  const exceptionsSeen = new Set(), live = new Set(), excused = new Set();
 
   // ---- 0. the parse gate ---------------------------------------------------
   // ASSERT THE PARSE SUCCEEDED BEFORE ANYTHING NEGATIVE RUNS. !/re/.test("") is
@@ -102,20 +170,54 @@ function run() {
   for (const b of [1, 2]) {
     let bound = 0, equal = 0;
     for (const [name, val] of Object.entries(K[b])) {
-      if (!(name in H[b])) {
-        pendingMissing.push(`${b}:${name}`);
-        chk(false, "bind",
-            `K[${b}].${name} = ${val} is not a constant ${HEADER[b]} defines - either it is `
-          + `misnamed, or the header does not name it yet`);
+      const key = `${b}:${name}`, e = PENDING[key];
+      const has = name in H[b], hdr = has ? H[b][name] : undefined;
+      // THE EXCUSE MATCHES ON BOTH SIDES OR NOT AT ALL: the mock must still
+      // target the value the excuse was written for, AND the header must still
+      // hold the pre-compose value it was written against.
+      const asExpected = !!e && e[0] === val && (e[1] === null ? !has : hdr === e[1]);
+      if (!has) {
+        const m = `K[${b}].${name} = ${val} is not a constant ${HEADER[b]} defines - either it is `
+                + `misnamed, or the header does not name it yet`;
+        pendingMissing.push(key);
+        chk(false, "bind", m);
+        if (asExpected) excused.add(`[bind] ${m}`);
         continue;
       }
       bound++;
-      if (H[b][name] === val) equal++; else pendingStale.push(`${b}:${name}`);
-      chk(H[b][name] === val, "bind",
-          `K[${b}].${name} is ${val}, ${HEADER[b]} says ${H[b][name]}`);
+      const eq = hdr === val;
+      if (eq) equal++; else pendingStale.push(key);
+      const m = `K[${b}].${name} is ${val}, ${HEADER[b]} says ${hdr}`;
+      chk(eq, "bind", m);
+      if (!eq && asExpected) excused.add(`[bind] ${m}`);
     }
     const total = Object.keys(K[b]).length;
     say(`  board ${b} bind: ${bound}/${total} names exist in ${HEADER[b]}, ${equal}/${total} agree`);
+  }
+
+  // ---- 1b. PENDING's own integrity, and it is never excused ----------------
+  // These are the assertions that make the excuse table incapable of hiding
+  // anything. Each names the divergence in the terms the reader needs to act on.
+  for (const [key, e] of Object.entries(PENDING)) {
+    const [b, name] = [+key.split(":")[0], key.split(":")[1]];
+    if (!(b in K) || !(name in K[b])) {
+      chk(false, "pending",
+          `PENDING["${key}"] excuses a name the mock does not have - an orphan excuse, delete it`);
+      continue;
+    }
+    chk(K[b][name] === e[0], "pending",
+        `PENDING["${key}"] was written to excuse the mock targeting ${e[0]}, but K[${b}].${name} `
+      + `is now ${K[b][name]} - either the mock's target moved (update this line and say why in `
+      + `the commit) or it drifted, and either way the bind failure for it is NOT excused`);
+    const has = name in H[b], hdr = has ? H[b][name] : undefined;
+    chk(e[1] === null ? !has : hdr === e[1], "pending",
+        `PENDING["${key}"] expects ${HEADER[b]} to still say `
+      + `${e[1] === null ? "nothing" : e[1]}, but it says ${has ? hdr : "nothing"}. `
+      + `${has && hdr === K[b][name]
+            ? `The task that lands this constant has run and got it RIGHT - so delete this line; `
+            + `a standing excuse for a passing constant is how a later drift gets waved through.`
+            : `The task that lands this constant has run and got it WRONG, which is NOT the same `
+            + `as it not having run - the whole point of this excuse naming the value.`}`);
   }
 
   // ---- 2. the derivations -------------------------------------------------
@@ -218,7 +320,8 @@ function run() {
       chk(S.total === k.BOARD_H, "budget",
           `board ${b} ${screen}: the column sums to ${S.total}, BOARD_H is ${k.BOARD_H} `
         + `(${S.total > k.BOARD_H ? "overruns by " + (S.total - k.BOARD_H)
-                                  : "leaves " + (k.BOARD_H - S.total) + " unaccounted"})`);
+                                  : "leaves " + (k.BOARD_H - S.total) + " unaccounted"})`,
+          `column-closes:${b}:${screen}`);
       for (const t of S.terms) {
         if (!t.at) continue;
         chk(t.y === k[t.at], "budget",
@@ -305,13 +408,32 @@ function run() {
         if (ch >= "a" && ch <= "z") reach.add(ch.toUpperCase());
       }
     }
-    reach.add(" "); reach.add(".");                          // row 3's SPACE and period
+    // ROW 3 FROM ITS OWN DEFINITION, not by hand. This used to be
+    // `reach.add(" "); reach.add(".")` - a transcription of 2 of the 95, so
+    // relabelling the period key still printed "95 of 95". KB_ROW3 is the table
+    // the renderer walks, and a character cell there carries only `emits`.
+    chk(KB_ROW3.length > 0 && KB_ROW3.some(c => c.emits !== null), "ascii",
+        `KB_ROW3 parsed as ${KB_ROW3.length} cells with no character among them - a sweep over `
+      + `an empty row would report every character it holds as reachable by omission`);
+    for (const cell of KB_ROW3) if (cell.emits !== null) reach.add(cell.emits);
     const missing = [];
     for (let cp = 0x20; cp <= 0x7E; cp++) if (!reach.has(String.fromCharCode(cp))) missing.push(String.fromCharCode(cp));
     chk(missing.length === 0, "ascii",
         `${missing.length} of the 95 printable ASCII characters cannot be typed: ${missing.join(" ")}`);
+    // And the row the DRAWING produces must hold the same characters the sweep
+    // credited it with - the two could still drift if row3Label() stopped
+    // deriving a character cell's label from its own `emits`.
+    for (const cell of KB_ROW3) {
+      if (cell.emits === null) continue;
+      const want = cell.emits === " " ? "SPACE" : cell.emits;
+      chk(row3Label(cell, PAGES[0]) === want, "ascii",
+          `row 3's cell emitting "${cell.emits}" is labelled "${row3Label(cell, PAGES[0])}", not `
+        + `"${want}" - the label must be derived from the character, or a relabel changes what `
+        + `the key types without the sweep noticing`);
+    }
     say(`  reachable characters: ${95 - missing.length} of 95 printable ASCII across `
-      + `${PAGES.length} pages (${PAGES.map(p => p.name).join(", ")})`);
+      + `${PAGES.length} pages (${PAGES.map(p => p.name).join(", ")}) plus row 3's `
+      + `${KB_ROW3.filter(c => c.emits !== null).map(c => JSON.stringify(c.emits)).join(" ")}`);
   }
 
   // ---- 7. the chips: host cap, and label-may-truncate/value-never-does ------
@@ -577,7 +699,7 @@ function run() {
         `EXCEPTIONS[${i}] (${EXCEPTIONS[i].screen}/${EXCEPTIONS[i].band}, ${EXCEPTIONS[i].axis}) `
       + `matched no sub-floor control on any screen - it permits nothing and should go`);
 
-  return { n, msgs: msgs.slice() };
+  return { n, msgs: msgs.slice(), ids: new Set(failIds), excused };
 }
 
 // ===========================================================================
@@ -597,29 +719,45 @@ function run() {
 // ===========================================================================
 if (process.argv.includes("--selftest")) {
   quiet = true;
-  const before = new Set(run().msgs);
+  // THE VERDICT NAMES THE ASSERTIONS, NOT THEIR TAG. Gating on "[budget]" was
+  // not enough: four assertions share that tag, so replacing
+  // `chk(S.total === k.BOARD_H)` with `chk(true)` left the KB_ACT_Y anchor
+  // assertions firing, the tag still present, and this verdict still printing
+  // "the column no longer closes on BOARD_H" - a group-level test behind an
+  // assertion-level claim, which is the same defect as an assertion that cannot
+  // fail. These are the two ids that MUST newly fail; deleting or neutering
+  // either one now fails the selftest by name.
+  const WANT = ["column-closes:1:reply", "column-closes:2:reply"];
+  const base = run();
+  const before = new Set(base.msgs), beforeIds = base.ids;
   const delta = 8;
   const was = { 1: K[1].COMPOSE_DRAFT_H, 2: K[2].COMPOSE_DRAFT_H };
   K[1].COMPOSE_DRAFT_H += delta; K[2].COMPOSE_DRAFT_H += delta;
-  const after = run().msgs;
+  const hit = run();
   K[1].COMPOSE_DRAFT_H = was[1]; K[2].COMPOSE_DRAFT_H = was[2];
   quiet = false;
 
-  const fresh = after.filter(m => !before.has(m));
+  const fresh = hit.msgs.filter(m => !before.has(m));
+  const freshIds = [...hit.ids].filter(i => !beforeIds.has(i));
   console.log(`--selftest: pushed COMPOSE_DRAFT_H up by ${delta} on both boards `
             + `(${was[1]} -> ${was[1] + delta} and ${was[2]} -> ${was[2] + delta}) in memory`);
   console.log(`--selftest: ${before.size} failing assertion(s) before the fault, `
-            + `${after.length} after - ${fresh.length} new`);
+            + `${hit.msgs.length} after - ${fresh.length} new`);
   for (const m of fresh) console.log(`  CAUGHT ${m}`);
-  const budget = fresh.filter(m => m.startsWith("[budget]"));
-  if (fresh.length && budget.length) {
-    console.log(`--selftest PASSES: the budget assertion caught it - `
-              + `${budget.length} of the ${fresh.length} new failure(s) are [budget], and the `
-              + `column no longer closes on BOARD_H`);
+  const missing = WANT.filter(i => !freshIds.includes(i));
+  for (const i of WANT)
+    console.log(`  ${missing.includes(i) ? "NOT CAUGHT" : "caught by"} assertion "${i}"`);
+  if (!missing.length) {
+    console.log(`--selftest PASSES: the fault was caught by the named column-closure `
+              + `assertion on both boards (${WANT.join(", ")}), not merely by something `
+              + `sharing its [budget] tag`);
     process.exit(0);
   }
-  console.log(`--selftest FAILS: the injected fault was ${fresh.length ? "caught, but not by the "
-    + "budget assertion (the column closing on BOARD_H is blind to it)" : "not caught at all"}`);
+  console.log(`--selftest FAILS: assertion(s) ${missing.join(", ")} did NOT newly fail. `
+            + `${fresh.length ? `${fresh.length} other assertion(s) did, but the one this `
+              + `selftest exists to prove - that the column closes on BOARD_H - is blind to the `
+              + `fault or has been neutered.`
+            : "Nothing failed at all."}`);
   process.exit(1);
 }
 
@@ -629,15 +767,12 @@ const r = run();
 const failed = r.msgs.length;
 
 // The closing summary SORTS the failures; it does not excuse any of them. The
-// classification is by MECHANISM only - a message from the [bind] group whose
-// name is on the pending list - so it cannot hide a real drift: a bind failure
-// on a name the headers already define lands in "unexpected" like anything else.
-const PENDING_ADDS = ["KB_KEY_R","KB_ACT_DRAWN","KB_ACT_DY","KB_STRIP_H","KB_STRIP_Y",
-                      "COMPOSE_PROMPT_H","COMPOSE_LEGEND_H","COMPOSE_DRAFT_H","COMPOSE_GAP"];
-const PENDING_MOVES = ["KB_TEXT_Y","KB_ROWS_Y","KB_ROW_H","KB_ACT_Y","KB_ACT_H"];
-const isPending = (m) => m.startsWith("[bind]")
-  && [...PENDING_ADDS, ...PENDING_MOVES].some(nm => m.includes(`.${nm} `));
-const waiting = r.msgs.filter(isPending), unexpected = r.msgs.filter(m => !isPending(m));
+// sorting is STRUCTURAL - run() built `excused` from PENDING by matching
+// `board:name` AND both values - so a bind failure this run produced for any
+// other reason lands in "unexpected", and so does every [pending] integrity
+// failure. Nothing here re-derives the classification from message text.
+const waiting = r.msgs.filter(m => r.excused.has(m));
+const unexpected = r.msgs.filter(m => !r.excused.has(m));
 
 console.log(`\n${r.n - failed} of ${r.n} assertions passed, ${failed} failed`);
 console.log(`  ${waiting.length} waiting on a later task (tasks 2, 3, 6, 10 add or move the constant):`);
