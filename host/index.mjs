@@ -1412,9 +1412,25 @@ function histBlockText(v, max = HIST_FULL_CAP) {
       // SINGLES - `*fall*` was reaching the screen with its asterisks because
       // only `**` was handled. A single `*` is required to hug its text on both
       // sides, so a `* ` bullet at the start of a line survives as a bullet.
-      t = t.replace(/\*\*([^*\n]+)\*\*/g, "$1").replace(/__([^_\n]+)__/g, "$1");
+      // INLINE CODE SPANS ARE PROTECTED FIRST, then the markers go, then the
+      // spans come back without their backticks. Order matters and doing it in
+      // one pass was wrong twice over: stripping `**` everywhere turned a span
+      // that was ABOUT the markers into an empty pair of backticks (a line
+      // reading "literal `**` asterisks" came out as "literal `` asterisks"),
+      // and code spans legitimately contain asterisks - a pointer deref or a
+      // glob is not emphasis.
+      const spans = [];
+      t = t.replace(/`([^`\n]+)`/g, (_, inner) => `\u0001${spans.push(inner) - 1}\u0002`);
+      // DOUBLE MARKERS ARE STRIPPED OUTRIGHT, not matched as pairs. A pair regex
+      // needs both markers on ONE line, and markdown bold routinely spans a line
+      // break in the source - which is why `**The counter reports...` was still
+      // on the glass with its asterisks after the pair version shipped. Stripping
+      // the marker loses nothing: there is no bold face here, so the pairing was
+      // never used for anything. A `*` bullet is untouched, since only a DOUBLED
+      // asterisk matches here and the single rule below requires its text hugged.
+      t = t.replace(/\*\*/g, "").replace(/__/g, "");
       t = t.replace(/(^|[^\w*])\*([^\s*][^*\n]*?)\*(?![\w*])/g, "$1$2");
-      t = t.replace(/`([^`\n]+)`/g, "$1");
+      t = t.replace(/\u0001(\d+)\u0002/g, (_, i) => spans[+i]);
     }
     out.push(t);
   }

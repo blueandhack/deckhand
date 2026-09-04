@@ -3919,10 +3919,10 @@ void handleLine(const String& line) {
       scrollChunksOf = of;
       scrollTotal   = hist["total"]   | 0;
       scrollDropped = hist["dropped"] | 0;
-      // Pinned to the newest on EVERY chunk, not just the last: the store grows
-      // downward, so without this the view would sit where the first chunk put
-      // it and the arriving text would pile up out of sight below.
-      scrollY = scrollMaxY();
+      // NOT pinned per chunk any more. It was, so that arriving text stayed in
+      // view - but with the content hidden until the fetch completes there is
+      // nothing to keep in view, and re-pinning 26 times was what made the page
+      // appear to scroll by itself on open.
       if (seq + 1 >= of) {
         scrollPending = false;
         scrollY = scrollMaxY();              // opens at the NEWEST

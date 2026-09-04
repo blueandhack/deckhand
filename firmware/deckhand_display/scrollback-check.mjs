@@ -399,6 +399,30 @@ present(reqBody, /SCROLL_TAIL_BYTES_BLE/, "structural: the BLE tail budget is a 
 
 // ---------------- STRUCTURAL: touch (Task 5) ----------------
 
+// THE SCROLLBACK MUST NOT HIT-TEST OR CLEAR AGAINST THE PAGED READER'S HEADER.
+// Its own header is SCROLL_HDR_H (42) where HIST_RULE_Y is 54 and
+// HIST_CHIP_TAP_H is 52, and pointing at the wrong one is silent: a tap band
+// 10px too tall makes the top of the body dead for dragging, and a clear
+// anchored 12px too low leaves a strip holding the previous screen. Both
+// happened, in the same change, along with the bottom clip - so the rule is now
+// that these two constants appear NOWHERE in the drag loop or the draw paths.
+for (const [fn, sig] of [["scrollDrawBody", "void scrollDrawBody()"],
+                         ["scrollDrawBand", "void scrollDrawBand(int shift)"],
+                         ["handleScrollTouch", "bool handleScrollTouch(int sx, int sy)"]]) {
+  const b = body(INO, sig, "scrollback.ino");
+  absent(b, /HIST_RULE_Y|HIST_CHIP_TAP_H/,
+    `structural: ${fn} bounds itself on SCROLL_*, not the paged reader's header`);
+}
+// And every drawn line must fit WHOLLY inside the body, or its descenders paint
+// into the bottom air that nothing clears.
+for (const [fn, sig] of [["scrollDrawBody", "void scrollDrawBody()"],
+                         ["scrollDrawBand", "void scrollDrawBand(int shift)"]]) {
+  const b = body(INO, sig, "scrollback.ino");
+  present(b, /y \+ CODE_LINE_H > SCROLL_BOT/,
+    `structural: ${fn} clips the bottom edge, not just the top`);
+  present(b, /y < SCROLL_TOP/, `structural: ${fn} clips the top edge`);
+}
+
 // THE DRAG LOOP'S OBLIGATIONS. It blocks loop(), the pattern micMonitor,
 // micStream and runCalibration already use - so it inherits their duties, and
 // each has a named failure if it is missing.

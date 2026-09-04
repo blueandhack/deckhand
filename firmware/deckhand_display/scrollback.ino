@@ -359,10 +359,18 @@ void scrollDrawCounter() {
   char cpos[24];
   if (scrollPending) snprintf(cpos, sizeof(cpos), "...");
   else if (scrollCount > 0) {
-    uint32_t line = scrollY / CODE_LINE_H;
+    // THE LAST VISIBLE ENTRY, NOT THE FIRST. Reporting the entry at the TOP of
+    // the screen meant that scrolling to the very bottom still stopped short of
+    // the total - the top of the last screen is 27 lines back, so it could only
+    // reach the max if the final message happened to be taller than the whole
+    // view. Reported as "scrolled to the bottom but the number did not reach the
+    // max", which was exactly right. The last visible entry reads as progress
+    // instead, reaches the total at the bottom, and matches the rail beside it.
+    uint32_t line = scrollY / CODE_LINE_H + (uint32_t) (SCROLL_LINES - 1);
     // The head note occupies line 0 of the scroll space, so the transcript's own
     // lines start at SCROLL_HEAD_LINES - the same offset the row loop applies.
     uint32_t tline = line > (uint32_t) SCROLL_HEAD_LINES ? line - SCROLL_HEAD_LINES : 0;
+    if (tline >= scrollTotalLines && scrollTotalLines) tline = scrollTotalLines - 1;
     snprintf(cpos, sizeof(cpos), "%d/%d", scrollDropped + scrollEntryAtLine(tline) + 1, scrollTotal);
   } else snprintf(cpos, sizeof(cpos), "-");
   if (strcmp(cpos, scrollPosCache) == 0) return;
@@ -387,11 +395,14 @@ void scrollDrawCounter() {
 // this - the chrome is static between fetches.
 void scrollDrawBody() {
   // Cleared from just under the RULE, not from SCROLL_TOP: the 6 rows of air
-  // between them (SCROLL_TOP is HIST_RULE_Y + 6) belong to no one otherwise, so
+  // between the rule and SCROLL_TOP belong to no one otherwise, so
   // they kept whatever the previous screen left there whenever the body was
   // redrawn without a full drawScrollback() first. Visible as a clipped line of
   // stale text under the header.
-  tft.fillRect(0, HIST_RULE_Y + 1, tft.width(), SCROLL_BOT - HIST_RULE_Y - 1, COLOR_BG);
+  // FROM THE SCROLLBACK'S OWN RULE. This anchored on HIST_RULE_Y - the PAGED
+  // reader's 54 - which stopped bounding this header when it collapsed to one
+  // 42px row, leaving rows 44..54 uncleared and holding the previous screen.
+  tft.fillRect(0, SCROLL_HDR_H + 1, tft.width(), SCROLL_BOT - SCROLL_HDR_H - 1, COLOR_BG);
 
   // PROGRESSIVE. While a fetch is still running, draw what has ALREADY arrived
   // rather than a placeholder - the store is appended chunk by chunk, so the
@@ -399,10 +410,21 @@ void scrollDrawBody() {
   // Only an empty store gets the note, because then there is genuinely nothing
   // to show. This is most of what makes a multi-second fetch feel different: the
   // bytes were always arriving, they just were not being drawn.
-  if (scrollPending && scrollCount == 0) {
+  // NOTHING IS DRAWN UNTIL THE FETCH COMPLETES, and that reverses a change made
+  // an hour earlier. Drawing progressively seemed the obvious way to make a
+  // multi-second wait feel shorter - but the store grows with each of ~26 chunks,
+  // so pinning to the newest re-pinned 26 times and the view JUMPED FORWARD on
+  // every one. On the glass that reads as the page scrolling by itself, which is
+  // worse than waiting: you cannot read moving text, and the thing you want is
+  // simply the newest message. So the store fills silently and the transcript
+  // appears once, already at the bottom.
+  // The note carries the chunk count on BOTH transports now. It said only
+  // "fetching over Bluetooth" there, from before the ACK handshake existed -
+  // with acks, scrollChunksIn/Of are known on the radio too, and a wait with a
+  // number on it is a different wait.
+  if (scrollPending) {
     char b[40];
-    if (usbLinkActive()) snprintf(b, sizeof(b), "-- fetching %d/%d --", scrollChunksIn, scrollChunksOf);
-    else snprintf(b, sizeof(b), "-- fetching over Bluetooth --");
+    snprintf(b, sizeof(b), "-- fetching %d/%d --", scrollChunksIn, scrollChunksOf);
     scrollNote(b, (SCROLL_TOP + SCROLL_BOT) / 2 - CODE_LINE_H / 2);
     return;
   }
@@ -473,7 +495,14 @@ void scrollDrawBody() {
     // sliver of background at the top mid-drag, which reads as the transcript
     // sliding under the header rather than as text cut in half over it.
     if (y < SCROLL_TOP) continue;
-    if (y >= SCROLL_BOT) break;
+    // THE BOTTOM EDGE, CLIPPED THE SAME WAY THE TOP ALREADY IS. A break on
+    // `y >= SCROLL_BOT` lets a line STARTING at 475 paint down to 490, and
+    // drawString clips only to the SCREEN - so it painted into the 4px bottom
+    // air, which no clear here ever wipes. Reported as an afterimage along the
+    // bottom, and it accumulated because every drag frame added more. A line is
+    // now drawn only if it fits WHOLLY inside the body.
+    if (y + CODE_LINE_H > SCROLL_BOT) break;
+
 
     // Roles 2/3/4 are one line, clipped with THREE ASCII DOTS - never U+2026,
     // which is outside Spleen's range and would give a truncated line no visible
@@ -617,6 +646,13 @@ void scrollDrawBand(int shift) {
     // body path uses and must be identical to it, or the two paths render
     // different pixels and the equivalence a checksum harness proved is gone.
     if (y < SCROLL_TOP) continue;
+    // THE BOTTOM EDGE, CLIPPED THE SAME WAY THE TOP ALREADY IS. A break on
+    // `y >= SCROLL_BOT` lets a line STARTING at 475 paint down to 490, and
+    // drawString clips only to the SCREEN - so it painted into the 4px bottom
+    // air, which no clear here ever wipes. Reported as an afterimage along the
+    // bottom, and it accumulated because every drag frame added more. A line is
+    // now drawn only if it fits WHOLLY inside the body.
+    if (y + CODE_LINE_H > SCROLL_BOT) break;
     if (y + CODE_LINE_H <= bandY0) continue;
     if (y >= bandY1) break;
 
@@ -840,7 +876,12 @@ void scrollDragLoop(int sy0) {
 }
 
 bool handleScrollTouch(int sx, int sy) {
-  if (sy <= HIST_CHIP_TAP_H) {
+  // SCROLL_TAP_H, NOT the paged reader's HIST_CHIP_TAP_H. That is 52 and this
+  // header is 42, so the band reached 10px INTO the text - the top of the body
+  // was dead for dragging and tapped the header's controls instead. Third
+  // instance of the same drift in one change: the clear anchor, the bottom clip
+  // and this, all still pointing at the layout the scrollback stopped sharing.
+  if (sy < SCROLL_TAP_H) {
     if (sx < SCROLL_BACK_X + SCROLL_BACK_W + 8) { exitScrollback(); return true; }
     if (sx >= tft.width() - 12 - HIST_CHIP_W_CHAT - 8) {
       histChatOnly = !histChatOnly;
