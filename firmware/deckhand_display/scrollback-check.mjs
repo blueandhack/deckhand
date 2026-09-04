@@ -423,6 +423,36 @@ for (const [fn, sig] of [["scrollDrawBody", "void scrollDrawBody()"],
   present(b, /y < SCROLL_TOP/, `structural: ${fn} clips the top edge`);
 }
 
+// THE LIVE TAIL'S POLICY, bound because its HELD branch has never executed on
+// hardware: new chat entries only appear when a turn completes, so every
+// observed append so far was the FOLLOWING case. These assertions are what
+// stands in for that, and each names the property rather than the code shape.
+const tailArm = braceBlock(SKETCH, 'if (!hist["app"].isNull())');
+s(tailArm != null, "structural: the live tail's append arm is findable");
+if (tailArm) {
+  // Captured BEFORE the append, or "was I at the bottom" is unanswerable: the
+  // append changes scrollMaxY(), so testing afterwards always reads false.
+  const i = tailArm.indexOf("scrollAtBottom()"), j = tailArm.indexOf("scrollAppend(");
+  s(i >= 0 && j >= 0 && i < j,
+    "structural: the tail decides at-bottom BEFORE appending, not after");
+  s(/if \(wasAtBottom\)/.test(tailArm),
+    "structural: the tail follows only when it was at the bottom, by operand");
+  s(/scrollNewBelow \+= added/.test(tailArm),
+    "structural: held away from the bottom, the tail COUNTS instead of moving");
+  absent(tailArm, /scrollReset\(\)/,
+    "structural: an append never resets the store the reader is looking at");
+  absent(tailArm, /scrollNextSeq/,
+    "structural: an append does not touch the chunked fetch's sequence state");
+}
+// ONE spelling of "at the bottom", read by the follow rule AND the badge - two
+// spellings could disagree and show "3 new below" while sitting on them.
+const abBody = body(INO, "bool scrollAtBottom()", "scrollback.ino");
+present(abBody, /SCROLL_AT_BOTTOM_PX/,
+  "structural: at-bottom uses a named tolerance, not equality with maxY");
+const bodyFn = body(INO, "void scrollDrawBody()", "scrollback.ino");
+present(bodyFn, /scrollNewBelow > 0 && !scrollAtBottom\(\)/,
+  "structural: the new-below badge reads the same predicate the follow rule does");
+
 // THE DRAG LOOP'S OBLIGATIONS. It blocks loop(), the pattern micMonitor,
 // micStream and runCalibration already use - so it inherits their duties, and
 // each has a named failure if it is missing.

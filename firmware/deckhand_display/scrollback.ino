@@ -26,6 +26,11 @@ int      scrollDropped = 0;            // withheld at the head to fit the budget
 // own duplicate-request dedup to swallow it, leaving the device sat in `pending`
 // for the full 20s timeout and then reporting "could not reach the Mac" over a
 // transcript it already had. Observed exactly that way.
+// Live tail state. scrollNewBelow counts entries that arrived while the view was
+// held away from the bottom - the ONLY thing that may not be silently discarded,
+// because holding position means the reader is not looking at where they landed.
+unsigned long scrollTailPolledAt = 0;
+int scrollNewBelow = 0;
 char scrollLoadedId[16] = "";
 bool scrollLoadedChat = true;
 
@@ -159,6 +164,7 @@ bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize, uin
 }
 
 void scrollReset() {
+  scrollNewBelow = 0;
   // scrollLoadedId is deliberately NOT cleared here: reset runs at the START of
   // each chunked fetch (seq 0) for the session we are loading, and clearing it
   // would make the "already held" check above unable to see its own load. It is
@@ -334,6 +340,31 @@ void tickBleMtu() {
   }
 }
 #endif
+
+// ONE spelling of "is the view at the newest", read by the tail append AND by the
+// indicator - a follow rule and a badge that disagreed about the bottom would
+// show "3 new below" while sitting on them.
+bool scrollAtBottom() {
+  const uint32_t maxY = scrollMaxY();
+  return scrollY + (uint32_t) SCROLL_AT_BOTTOM_PX >= maxY;
+}
+
+// Asks for anything newer than what we hold, while the transcript is open. Not
+// while a fetch is in flight, not after one failed, and not on an empty store -
+// in each of those the initial fetch owns the state and a tail request would
+// interleave with it through the same parser.
+void tickScrollTail() {
+  if (!scrollActive || scrollPending || scrollFetchFailed || scrollCount == 0) return;
+  if (detailIndex < 0 || detailIndex >= sessionCount) return;
+  if (millis() - scrollTailPolledAt < (unsigned long) SCROLL_TAIL_POLL_MS) return;
+  scrollTailPolledAt = millis();
+  char line[80];
+  // The global index of the next entry we do NOT have: the host withheld
+  // scrollDropped at the head, so our own count is not the index.
+  snprintf(line, sizeof(line), "HISTORY %s %s since:%d", sessions[detailIndex].id,
+           histChatOnly ? "chat" : "all", scrollDropped + scrollCount);
+  sendLineToHost(line, scrollHostSlot);
+}
 
 void tickScrollFetch() {
   if (!scrollPending) return;
@@ -580,6 +611,23 @@ void scrollDrawBody() {
     tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
     tft.setTextDatum(TL_DATUM);
     tft.drawString(buf, SCROLL_TXT_X, y);
+  }
+
+  // NEW-BELOW BADGE, over the bottom row and only while the view is held away
+  // from the newest. It costs no layout because it is an overlay, it obscures one
+  // line only while there is something to say, and it disappears the moment the
+  // reader reaches the bottom - which is also when scrollNewBelow is cleared.
+  if (scrollNewBelow > 0 && !scrollAtBottom()) {
+    const int by = SCROLL_BOT - CODE_LINE_H;
+    tft.fillRect(SCROLL_GUT_X, by, SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_GUT_X,
+                 CODE_LINE_H, COLOR_BG);
+    char b[32];
+    snprintf(b, sizeof(b), "-- %d new below --", scrollNewBelow);
+    setUIFont(1);
+    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(b, (SCROLL_GUT_X + SCROLL_RAIL_X - SCROLL_RAIL_AIR) / 2, by + CODE_LINE_H / 2);
+    tft.setTextDatum(TL_DATUM);
   }
 
   // THE RAIL, drawn only when there is more than a screenful - so a three-message
@@ -853,6 +901,7 @@ void scrollDragLoop(int sy0) {
       uint32_t ny = (uint32_t) (f < 0 ? 0 : (f > (long) maxY ? (long) maxY : f));
       if (ny != scrollY) {
         scrollY = ny;
+        if (scrollAtBottom()) scrollNewBelow = 0;   // arrived: nothing is below
         scrollDrawBody();
         scrollDrawCounter();
         tft.flush();
@@ -871,6 +920,7 @@ void scrollDragLoop(int sy0) {
       if ((uint32_t) ny != scrollY) {
         const int shift = (int) (ny - (long) scrollY);
         scrollY = (uint32_t) ny;
+        if (scrollAtBottom()) scrollNewBelow = 0;   // arrived: nothing is below
         if (shift > -viewH && shift < viewH) {
           tft.scrollRect(0, SCROLL_TOP, tft.width(), viewH, -shift);
           scrollDrawBand(shift);

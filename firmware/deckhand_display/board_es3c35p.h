@@ -2697,6 +2697,19 @@ const int SCROLL_WIRE_CHUNK_BYTES = 12000;
 // INVISIBLE, where a lost chunk fails a whole fetch.
 const int SCROLL_WIRE_CHUNK_BLE_BYTES = 1500;
 
+// LIVE TAIL. While the transcript is open the device asks for anything newer
+// than what it holds, every SCROLL_TAIL_POLL_MS. 5000 matches the host's own tick
+// so the two are not beating against each other, and the request is tiny - the
+// usual reply is an empty items array.
+// The APPEND is free: scrollAppend already appends and lineFirst already
+// accumulates, so entries arriving at the end need no index change at all. What
+// needed deciding was the VIEW, and the rule is follow-only-at-the-bottom.
+const int SCROLL_TAIL_POLL_MS = 5000;
+// "At the bottom" needs a TOLERANCE, not equality: scrollMaxY() grows as entries
+// arrive, so `scrollY == maxY` stops being true the instant new text lands and a
+// live tail would follow exactly once and then stop. One line is the smallest
+// span that cannot be an accident.
+const int SCROLL_AT_BOTTOM_PX = CODE_LINE_H;
 const int SCROLL_FETCH_TIMEOUT_MS     = 20000;
 const int SCROLL_FETCH_TIMEOUT_BLE_MS = 40000;
 

@@ -1615,6 +1615,37 @@ async function sendHistory(id, filter, want, budget) {
   );
 }
 
+// `HISTORY <id> <chat|all> since:<n>` - the LIVE TAIL. Replies with the entries
+// after global index n and nothing else, so the usual answer while nothing is
+// happening is an empty array. Deliberately UNCHUNKED: it carries no seq/of and
+// the device appends it straight in, because routing an append through the
+// chunked fetch arm would reset the store the reader is looking at. If more is
+// waiting than fits one reply, what fits goes now and the device's next poll
+// collects the rest - self-correcting, and it keeps a burst of activity from
+// turning into a multi-chunk handshake on a 5-second cadence.
+async function sendScrollbackSince(id, filter, since) {
+  const all = await histItems(id);
+  const chatOnly = filter !== "all";
+  const items = chatOnly ? all.filter((x) => x.r === "you" || x.r === "claude") : all;
+  if (since >= items.length) return;                 // nothing new: say nothing
+  const perEntryCap = usbPort ? HIST_FULL_CAP : 1200;
+  const src = (x) => x.block || x.full;
+  const textOf = (x) =>
+    src(x).length > perEntryCap ? src(x).slice(0, perEntryCap - 3) + "..." : src(x);
+  const cap = usbPort ? SCROLL_WIRE_CHUNK_BYTES : SCROLL_WIRE_CHUNK_BLE_BYTES;
+  const out = [];
+  for (const it of items.slice(since)) {
+    const next = out.concat([{ r: it.r, t: textOf(it) }]);
+    const line = JSON.stringify({ hist: { id, app: 1, total: items.length, items: next } });
+    if (out.length && Buffer.byteLength(line, "utf8") > cap) break;
+    out.push({ r: it.r, t: textOf(it) });
+  }
+  const line = JSON.stringify({ hist: { id, app: 1, total: items.length, items: out } }) + "\n";
+  if (usbPort) usbPort.write(line);
+  else if (bleCharacteristic) await sendOverBle(line, BLE_SCROLL_PACE_MS);
+  console.log(`Scrollback: tail +${out.length} of ${items.length - since} new for ${id} via ${usbPort ? "usb" : "ble"}`);
+}
+
 // `HISTORY <id> <chat|all> tail:<maxBytes>` - the WHOLE filtered history, in a run of
 // size-bounded lines. A third request form beside `<page|last>` and `item:<n>`, so board 1
 // keeps its exact behaviour and no version bump is needed: the same backward-compatible
@@ -2865,7 +2896,19 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     // the item: path (one whole entry, no pagination) ignores it.
     const [id, filter = "chat", want = "last", budgetTok] = line.slice(8).trim().split(/\s+/);
     console.log(`[device/${via}] ${line}`);
-    if (want.startsWith("tail:")) {
+    if (want.startsWith("since:")) {
+      // DEDUPED like the tail fetch, and here it matters MORE: the device sends
+      // on every live transport, so a cabled device asks twice, and two replies
+      // to the same `since:` would append the SAME entries twice - the reader
+      // would see every new message doubled. The tail path already had this; adding
+      // a second request form without it was the gap.
+      const now = Date.now();
+      for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
+      const reqKey = `${id}|${filter}|${want}`;
+      if (scrollReqSeen.has(reqKey)) return;
+      scrollReqSeen.set(reqKey, now);
+      await sendScrollbackSince(id, filter, Number.parseInt(want.slice(6), 10) || 0);
+    } else if (want.startsWith("tail:")) {
       // THE DEVICE SENDS ON EVERY LIVE TRANSPORT AT ONCE, so a cabled device
       // delivers this request TWICE and we would run two fetches whose chunks
       // interleave through the device's single scrollNextSeq - measured, and it

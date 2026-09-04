@@ -1232,6 +1232,7 @@ extern uint32_t scrollTotalLines;
 extern int      scrollTotal;
 extern int      scrollDropped;
 extern uint8_t  scrollHostSlot;
+extern int      scrollNewBelow;
 #endif
 
 // Second level: ONE entry, in full, in its own pager. The list rows are previews, and an
@@ -3876,6 +3877,45 @@ void handleLine(const String& line) {
     strncpy(histId, hid, sizeof(histId) - 1);
     histId[sizeof(histId) - 1] = '\0';
 #if BOARD_HISTORY_SCROLL
+    // THE LIVE TAIL'S APPEND, identified by `app`. Handled BEFORE the chunked
+    // fetch and deliberately as its own path: the fetch arm RESETS the store on
+    // seq 0 and owns scrollNextSeq, so routing an append through it would wipe
+    // the transcript the reader is looking at. It carries no seq/of at all - the
+    // host sends at most one chunk's worth and the next poll picks up any rest,
+    // which is self-correcting and needs no sequencing.
+    if (!hist["app"].isNull()) {
+      JsonArray add = hist["items"].as<JsonArray>();
+      // WHERE THE VIEW IS, decided BEFORE the append changes scrollMaxY(). After
+      // it, "was I at the bottom" is unanswerable - which is the whole reason
+      // this is captured here rather than tested later.
+      const bool wasAtBottom = scrollAtBottom();
+      int added = 0;
+      if (!add.isNull()) {
+        for (JsonObject it : add) {
+          const char* t = it["t"] | "";
+          const char* r = it["r"] | "out";
+          uint8_t role = strcmp(r, "you") == 0      ? 0
+                         : strcmp(r, "claude") == 0 ? 1
+                         : strcmp(r, "ran") == 0    ? 2
+                         : strcmp(r, "no") == 0     ? 4
+                                                    : 3;
+          if (!scrollAppend(role, t)) break;   // arena full: keep what fits
+          added++;
+        }
+      }
+      if (hist["total"].as<int>() > 0) scrollTotal = hist["total"] | scrollTotal;
+      if (added) {
+        // FOLLOW ONLY AT THE BOTTOM. Held away from it, the position does not
+        // move by a pixel and the count is what tells the reader something
+        // arrived - moving the page under someone reading history is the one
+        // behaviour this surface has already been asked twice to stop doing.
+        if (wasAtBottom) { scrollY = scrollMaxY(); scrollNewBelow = 0; }
+        else scrollNewBelow += added;
+        Serial.printf("SCROLL tail +%d entries%s\n", added, wasAtBottom ? " (following)" : " (held)");
+        if (scrollActive) drawScrollback();
+      }
+      return;
+    }
     // THE CHUNKED SCROLLBACK FETCH, identified by `seq`. Handled before the page
     // state for the same reason the `full` reply is: a parser that mutates shared
     // state before it has identified the message is the bug class this file
@@ -5323,6 +5363,24 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     }
 #endif
 #if BOARD_HISTORY_SCROLL
+  } else if (buf.startsWith("SCROLLTO")) {
+    // PARKS THE VIEW AND MEASURES NOTHING. SCROLLPERF also parks, but only after
+    // timing TWENTY FRAMES OF EACH RENDER PATH - which sweeps the view top to
+    // bottom TWICE, and that is what "the scroll bar scrolls two rounds" was.
+    // Reported twice, because positioning the view for a screenshot was only
+    // possible through the measuring command. Separating them is the fix; a
+    // diagnostic whose side effect is the thing being investigated is worse than
+    // no diagnostic.
+    if (!scrollActive) { Serial.println("SCROLLTO: the transcript is not open"); return; }
+    const char* a = buf.c_str() + 8;
+    while (*a == ' ') a++;
+    long ln = (*a >= '0' && *a <= '9') ? atol(a) : 999999;
+    scrollY = (uint32_t) ln * CODE_LINE_H;
+    if (scrollY > scrollMaxY()) scrollY = scrollMaxY();
+    scrollDrawBody();
+    scrollDrawCounter();
+    tft.flush();
+    Serial.printf("SCROLLTO: line %lu\n", (unsigned long) (scrollY / CODE_LINE_H));
   } else if (buf.startsWith("SCROLLOPEN")) {
     // OPENS THE TRANSCRIPT AND NOTHING ELSE - the headless equivalent of a tap.
     // Its absence was a real blind spot: the only headless opener was
@@ -6131,6 +6189,9 @@ void loop() {
 #endif
 #if BOARD_BLE_NIMBLE
   tickBleMtu();
+#endif
+#if BOARD_HISTORY_SCROLL
+  tickScrollTail();
 #endif
 #if BOARD_HAS_WIRELESS_PAIR
   pairTick();           // no-op unless a pairing window is open; closes it at 120s
