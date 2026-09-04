@@ -16,18 +16,27 @@ node docs/design/compose/check.mjs --selftest  # proves the bind has teeth
 
 ## THIS CHECKER FAILS TODAY, BY NAME, AND THAT IS THE POINT
 
-`node docs/design/compose/check.mjs` **exits 1** as committed, with 26 failures
-across both boards. Every one of them is a constant a later task of the compose
-plan adds or moves:
+`node docs/design/compose/check.mjs` **exits 1**, with 24 failures across both
+boards (26 at Task 1's commit; `KB_KEY_R` landed on both boards in Task 2 and
+is bound and agrees on both, so it dropped out of this table). Every one of
+the remaining 24 is a constant a later task of the compose plan adds or moves:
 
 | | board 1 | board 2 |
 |---|---|---|
-| **names no header defines yet** (9 each) | `KB_KEY_R` `KB_STRIP_Y` `KB_STRIP_H` `KB_ACT_DRAWN` `KB_ACT_DY` `COMPOSE_PROMPT_H` `COMPOSE_LEGEND_H` `COMPOSE_DRAFT_H` `COMPOSE_GAP` | the same nine |
+| **names no header defines yet** (8 each) | `KB_STRIP_Y` `KB_STRIP_H` `KB_ACT_DRAWN` `KB_ACT_DY` `COMPOSE_PROMPT_H` `COMPOSE_LEGEND_H` `COMPOSE_DRAFT_H` `COMPOSE_GAP` | the same eight |
 | **names still at their pre-compose value** | `KB_TEXT_Y` 4→24, `KB_ROWS_Y` 96→115, `KB_ROW_H` 44→41, `KB_ACT_Y` 276→280, `KB_ACT_H` 44→40 | `KB_TEXT_Y` 12→34, `KB_ACT_Y` 414→426, `KB_ACT_H` 58→46 |
 
-Tasks 2, 3, 6 and 10 land them. **Each failure goes green when its task does, and
-until then the checker prints the name.** That is the binding working, not a
-broken checker.
+Tasks 3, 6 and 10 land the rest (Task 2 already landed `KB_KEY_R`). **Each
+failure goes green when its task does, and until then the checker prints the
+name.** That is the binding working, not a broken checker.
+
+**This 24 is prose, not code** - it is not read by `check.mjs`, so it cannot
+be kept in sync automatically; each task that resolves a `PENDING` entry must
+hand-correct it, the way this update did (26 → 24). The number to actually
+trust at any moment is the checker's own closing summary, which computes
+`waiting.length` and `unexpected.length` live from `PENDING` rather than
+restating them - run `node docs/design/compose/check.mjs` and read its last
+few lines if this count and the live one ever disagree.
 
 There is deliberately **no "not yet defined" escape hatch**. An assertion a
 constant's *absence* can satisfy is an assertion that cannot fail, which is the

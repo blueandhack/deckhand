@@ -1924,6 +1924,16 @@ for (const b of [1, 2]) {
     // means the radius covers half the width or more - a circle, not a rounded
     // square - so this fails the moment KB_KEY_R stops being a corner treatment.
     chk(c.KB_KEY_R * 2 < c.KB_KEY_W, `KB_KEY_R ${c.KB_KEY_R} leaves a flat edge on a ${c.KB_KEY_W}px key`);
+    // KB_KEY_R MUST BE THE DERIVATION, not a literal that merely agrees with one
+    // written in a comment - "a derivation that exists only in prose is not a
+    // derivation" is how this repo names that failure, and a bare `= 2;` leaves
+    // KB_KEY_R free to drift to 1 or 4 with every other assertion here (a loose
+    // bound, not an equality) still green. Math.trunc(c.KB_KEY_W / 10) is an
+    // INDEPENDENT recomputation in the checker's own arithmetic from c.KB_KEY_W
+    // as consts() parsed it - not c.KB_KEY_R compared against itself - so this
+    // fails the moment the header's KB_KEY_R stops being exactly this derivation.
+    chk(c.KB_KEY_R === Math.trunc(c.KB_KEY_W / 10),
+        `KB_KEY_R ${c.KB_KEY_R} != KB_KEY_W / 10 (${Math.trunc(c.KB_KEY_W / 10)})`);
     // THE LOAD-BEARING ONE: this is what fails if KB_KEY_R is set back to R_MD.
     // The threshold is deliberately NOT "about 9%" - board 1's share at KB_KEY_R
     // is 0.4% today (0.4% again at Task 6's KB_ROW_H 41) and board 2's is 0.5%,

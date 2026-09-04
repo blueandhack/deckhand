@@ -53,12 +53,16 @@ const TH = {}; for(const k in THEME_RAW){TH[k]={}; THEME_RAW[k].forEach((v,i)=>T
 // expression against its own term, which always holds. Two independent literals
 // can disagree; a derivation cannot.
 //
-// NINE OF THESE NAMES DO NOT EXIST IN EITHER HEADER YET (KB_KEY_R, KB_ACT_DRAWN,
-// KB_ACT_DY, KB_STRIP_H, KB_STRIP_Y, COMPOSE_PROMPT_H, COMPOSE_LEGEND_H,
-// COMPOSE_DRAFT_H, COMPOSE_GAP) and five more still hold their pre-compose
-// values (board 1's KB_TEXT_Y, KB_ROWS_Y, KB_ROW_H, and both boards' KB_TEXT_Y,
-// KB_ACT_Y, KB_ACT_H). check.mjs therefore FAILS BY NAME on each of them today.
-// That failure is the binding working; see README.md.
+// AS OF TASK 2, EIGHT OF THESE NAMES DO NOT EXIST IN EITHER HEADER YET
+// (KB_ACT_DRAWN, KB_ACT_DY, KB_STRIP_H, KB_STRIP_Y, COMPOSE_PROMPT_H,
+// COMPOSE_LEGEND_H, COMPOSE_DRAFT_H, COMPOSE_GAP - KB_KEY_R landed and is no
+// longer among them) and five more still hold their pre-compose values (board
+// 1's KB_TEXT_Y, KB_ROWS_Y, KB_ROW_H, and both boards' KB_TEXT_Y, KB_ACT_Y,
+// KB_ACT_H). check.mjs therefore FAILS BY NAME on each of them today. That
+// failure is the binding working; see README.md. THIS COUNT IS PROSE, NOT
+// CODE - it is not read by check.mjs and cannot be derived from PENDING
+// automatically without executing the mock first, so each landing task must
+// hand-correct it same as this one did, rather than it going silently stale.
 // ---------------------------------------------------------------------------
 const K = {
   1: {

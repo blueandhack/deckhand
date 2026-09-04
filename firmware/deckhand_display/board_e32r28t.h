@@ -662,17 +662,19 @@ const int CFM_H   = 150;
 const int KB_PITCH = 24;
 const int KB_KEY_W = 22;
 // THE KEY'S OWN RADIUS, not the card's. R_MD is 10, which is 4.6% of the 216px
-// card it was sized for and 45.5% of a 22px key - a pill. The derivation is
-// KB_KEY_W / 10 under C truncation (22/10 = 2 here, 30/10 = 3 on board 2), which
-// gives BOTH boards their value exactly - unlike scaling 2 by board_es3c35p.h's
-// x1.154 (the ratio R_MD and the borders use), which computes to 2.31 and
-// truncates back to 2, not 3. Worse than the pill look: at r=10 the four corners
-// lose 4*r^2*(1 - pi/4) = 85.8px2 off a 22x40 key at the OLD KB_ROW_H 44 (9.8% of
-// that drawn key) - and at KB_ROW_H 41 (Task 6) the drawn key is 22x37, so the
-// same 85.8px2 is 10.5% of it. They are lost FURTHEST FROM CENTRE, which is
-// exactly where a mis-aim lands on a key already 40% under TAP_MIN. 2px is 9.1%
-// of the width and 0.36mm, and costs only 3.4px2 - 0.4% of the drawn key.
-const int KB_KEY_R = 2;
+// card it was sized for and 45.5% of a 22px key - a pill. WRITTEN AS THE
+// DERIVATION, not a literal that merely happens to agree with one in a
+// comment: KB_KEY_W / 10 under C truncation (22/10 = 2 here, 30/10 = 3 on
+// board 2) gives BOTH boards their value exactly - unlike scaling 2 by
+// board_es3c35p.h's x1.154 (the ratio R_MD and the borders use), which
+// computes to 2.31 and truncates back to 2, not 3. Worse than the pill look:
+// at r=10 the four corners lose 4*r^2*(1 - pi/4) = 85.8px2 off a 22x40 key at
+// the OLD KB_ROW_H 44 (9.8% of that drawn key) - and at KB_ROW_H 41 (Task 6)
+// the drawn key is 22x37, so the same 85.8px2 is 10.5% of it. They are lost
+// FURTHEST FROM CENTRE, which is exactly where a mis-aim lands on a key
+// already 40% under TAP_MIN. 2px is 9.1% of the width and 0.36mm, and costs
+// only 3.4px2 - 0.4% of the drawn key.
+const int KB_KEY_R = KB_KEY_W / 10;
 // 44 = TAP_MIN + 4, so the DRAWN key (KB_ROW_H - 4 = 40) is exactly TAP_MIN.
 const int KB_ROW_H = 44;
 // THE TEXT CARD'S BUDGET IS ARITHMETIC, and it is what stops SEND signing text

@@ -22,9 +22,10 @@
 // ===========================================================================
 // THIS CHECKER IS EXPECTED TO FAIL TODAY, BY NAME, AND THAT IS THE DELIVERABLE.
 // ===========================================================================
-// Nine of K's names do not exist in either header yet and five more still hold
-// their pre-compose values; tasks 2, 3, 6 and 10 of the compose plan add and
-// move them. Until each lands, the bind below fails and PRINTS THE NAME. That
+// As of Task 2, eight of K's names do not exist in either header yet (KB_KEY_R
+// landed and is no longer among them) and five more still hold their
+// pre-compose values; tasks 3, 6 and 10 of the compose plan add and move them.
+// Until each lands, the bind below fails and PRINTS THE NAME. That
 // is the binding working. There is deliberately no "not yet defined" escape
 // hatch: an assertion that can be satisfied by the constant's absence is an
 // assertion that cannot fail, which is the defect this whole family of files
@@ -53,10 +54,13 @@ const { SCREENS, K, D, ADV, CELL, BAD_CHARS, P, stack, colWidths, colX, colSpan,
 const HEADER = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 
 // ===========================================================================
-// PENDING - the 26 bind failures a later task is expected to fix, keyed on
+// PENDING - the bind failures a later task is expected to fix, keyed on
 // `board:name` and pinning BOTH VALUES: [ what this mock targets, what the
 // header holds TODAY ] with null meaning "the header does not define the name
-// at all".
+// at all". 24 as of Task 2 (26 at Task 1, minus KB_KEY_R x2 boards) - THIS
+// COUNT IS PROSE, not read by any assertion, so each task that lands an entry
+// must hand-correct it: Object.keys(PENDING).length is printed live in the
+// closing summary below, which is the number to trust if this one goes stale.
 //
 // IT USED TO BE TWO LISTS OF BARE NAMES, and that was an excuse that could not
 // fail. Matching on the NAME alone excused any value: setting K[1].KB_ROW_H
@@ -710,8 +714,8 @@ function run() {
 // the comparison, which could pass or fail independently of whether the real
 // assertions still work.
 //
-// This checker has EXPECTED failures today (the header does not define nine of
-// K's names yet), so "did anything fail" cannot be the test. The test is whether
+// This checker has EXPECTED failures today (the header does not define eight of
+// K's names yet, as of Task 2), so "did anything fail" cannot be the test. The test is whether
 // the message set GREW, and whether the new messages come from the budget
 // assertion by name.
 // ===========================================================================
