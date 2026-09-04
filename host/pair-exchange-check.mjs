@@ -70,7 +70,7 @@ function buildSource(src) {
   const SERVICE = constant(src, "BLE_SERVICE_UUID", /const BLE_SERVICE_UUID = "([0-9a-f]{32})";/);
   const RX = constant(src, "BLE_RX_CHAR_UUID", /const BLE_RX_CHAR_UUID = "([0-9a-f]{32})";/);
   const TX = constant(src, "BLE_TX_CHAR_UUID", /const BLE_TX_CHAR_UUID = "([0-9a-f]{32})";/);
-  const CHUNK = constant(src, "BLE_CHUNK_SIZE", /const BLE_CHUNK_SIZE = (\d+);/);
+  const CHUNK = constant(src, "BLE_CHUNK_MIN", /const BLE_CHUNK_MIN = (\d+);/);
 
   const timeoutSlice = cut(src, "const BLE_WRITE_TIMEOUT_MS = 3000;", "// MEASURED TWICE, hours apart:",
     ["function withTimeout("], "withTimeout");
@@ -99,7 +99,7 @@ import { toAscii } from ${JSON.stringify(ascii)};
 const BLE_SERVICE_UUID = ${JSON.stringify(SERVICE)};
 const BLE_RX_CHAR_UUID = ${JSON.stringify(RX)};
 const BLE_TX_CHAR_UUID = ${JSON.stringify(TX)};
-const BLE_CHUNK_SIZE = ${CHUNK};
+const BLE_CHUNK_MIN = ${CHUNK};
 
 // Timers are OWNED by the test. pairArm()'s shortest fuse is 15s and the
 // exchange window is 120s, so a real clock would make the timeout and the
@@ -162,7 +162,7 @@ export const api = {
   remembered: __remembered,
   scanRestores: () => __scanRestores,
   noble,
-  uuids: { BLE_SERVICE_UUID, BLE_RX_CHAR_UUID, BLE_TX_CHAR_UUID, BLE_CHUNK_SIZE },
+  uuids: { BLE_SERVICE_UUID, BLE_RX_CHAR_UUID, BLE_TX_CHAR_UUID, BLE_CHUNK_MIN },
   see: (name, peripheral, at = Date.now()) =>
     pairScanSeen.set(name, { name, rssi: -40, peripheral, at }),
   forgetSightings: () => pairScanSeen.clear(),
@@ -677,6 +677,47 @@ async function selftest() {
   }
   console.log(`\nselftest: ${caught}/${FAULTS.length} injected faults caught`);
   process.exit(caught === FAULTS.length ? 0 : 1);
+}
+
+// ---------- STRUCTURAL: read the real index.mjs, not the mirror ----------
+// The mirror above DECLARES every stub it needs, so a pairing path referencing an
+// undeclared constant passes there while the real host throws ReferenceError on
+// its first write. That shipped once: renaming BLE_CHUNK_SIZE to the adaptive
+// bleChunkSize left pairWrite() naming a constant that no longer existed, and BLE
+// pairing crashed on first use. This half binds identifiers to DECLARATIONS in the
+// real file, which is the only place that bug is visible.
+function structural(src) {
+  const failures = [];
+  const ok = (name, cond) => { if (!cond) failures.push(name); };
+
+  const declared = new Set(
+    [...src.matchAll(/^(?:const|let|var)\s+(BLE_CHUNK_[A-Za-z_]+|bleChunkSize)\s*=/gm)].map((m) => m[1])
+  );
+  ok("index.mjs declares a BLE chunk-width constant", declared.size > 0);
+
+  // pairWrite is the write path pairing depends on; bind to its BODY, because a
+  // neighbouring function naming a valid constant must not satisfy this.
+  const body = src.match(/async function pairWrite\([^)]*\)\s*\{([\s\S]*?)\n\}/);
+  ok("pairWrite() is present", body !== null);
+  if (body) {
+    // Comments are STRIPPED first: this file's own body comment names
+    // bleChunkSize, and an identifier mentioned in prose must never satisfy an
+    // assertion about what the CODE does -- nor fail one by being mentioned.
+    const code = body[1].replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const used = [...code.matchAll(/\b(BLE_CHUNK_[A-Za-z_]+|bleChunkSize)\b/g)].map((m) => m[1]);
+    ok("pairWrite() sizes its writes from a chunk constant", used.length > 0);
+    for (const u of new Set(used)) {
+      ok(`pairWrite()'s ${u} is actually declared in index.mjs`, declared.has(u));
+    }
+  }
+  return failures;
+}
+
+const structFailures = structural(real);
+if (structFailures.length) {
+  for (const f of structFailures) console.log(`  FAIL  STRUCTURAL: ${f}`);
+  console.log(`\n${structFailures.length} structural check(s) FAILED`);
+  process.exit(1);
 }
 
 if (process.argv.includes("--selftest")) {

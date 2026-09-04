@@ -101,7 +101,9 @@ clothes.** Board 1's binary moved for each, which is why the byte-identity check
 persisted. Two Macs with identical hostnames have different hostIds, so pairing, key selection and
 answer addressing were never ambiguous; only the *display* collided. A MAC address would be strictly
 worse: CoreBluetooth never exposes the local BT address and BLE uses rotating private addresses (the
-same opacity that leaves `BLE_CHUNK_SIZE` hard-coded at 20 because noble reports no MTU), macOS uses
+same opacity that once left `BLE_CHUNK_SIZE` hard-coded at 20 because noble reports no MTU --
+noble still reports none, but **CORRECTED 2026-09-03:** the device now reports its own negotiated
+MTU over the wire and the host sizes writes from that, so the constant no longer exists), macOS uses
 private per-network Wi-Fi addresses, six bytes of hex cannot be read in a 6-character tag lane, and
 it is needless PII on the wire.
 

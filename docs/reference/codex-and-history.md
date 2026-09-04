@@ -231,7 +231,15 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   - **The reply goes over USB when USB is up, and BLE only as a fallback — never both.**
     BLE writes go out in 20-byte chunks (`BLE_CHUNK_SIZE`), so at the 30ms connection
     interval macOS negotiates the theoretical ceiling is ~666 B/s and a few KB is seconds
-    **on the air**. That RATE is the reason USB wins. This note used to say each chunk
+    **on the air**. **CORRECTED 2026-09-03: the 20-byte figure and the constant naming it
+    are both gone.** The device now reports its negotiated ATT MTU (`BLEMTU`, NimBLE's
+    `ble_att_mtu(conn_handle)`) and the host sizes writes to `mtu - 3`, clamped to
+    `BLE_CHUNK_MAX` 180 -- measured 20B -> 2.7 KB/s, 60B -> 5.4 KB/s, 180B -> 8.4 KB/s on
+    board 2. The MTU is 256, not the 23 this note assumed. `noble` still does not expose it,
+    which is exactly why the DEVICE reports it over the wire. The rate argument below is
+    therefore weaker than it reads, though USB (11.5 KB/s on board 1, far more on board 2)
+    still wins. Pairing is the one exception and still writes at `BLE_CHUNK_MIN` 20, because
+    pairing runs before any MTU has been reported for that link. That RATE is the reason USB wins. This note used to say each chunk
     awaited a response, and that is simply false: `sendOverBle` passes noble's
     `withoutResponse` flag (`writeAsync(chunk, true)`), so the host is **not** blocked
     behind the radio — and for the same reason over-the-air completion is not observable

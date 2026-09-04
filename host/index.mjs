@@ -3555,9 +3555,11 @@ function pairStatus() {
 async function pairWrite(characteristic, text) {
   if (!characteristic) throw new Error("no write characteristic");
   const buf = Buffer.from(text, "utf8");
-  for (let i = 0; i < buf.length; i += BLE_CHUNK_SIZE) {
+  // BLE_CHUNK_MIN, not the adaptive bleChunkSize: pairing runs BEFORE the device
+  // has reported its MTU for this link, so the floor is the only safe width here.
+  for (let i = 0; i < buf.length; i += BLE_CHUNK_MIN) {
     await withTimeout(
-      characteristic.writeAsync(buf.subarray(i, i + BLE_CHUNK_SIZE), true),
+      characteristic.writeAsync(buf.subarray(i, i + BLE_CHUNK_MIN), true),
       BLE_WRITE_TIMEOUT_MS,
       "pairing write"
     );
