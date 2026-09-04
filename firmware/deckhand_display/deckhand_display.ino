@@ -65,6 +65,17 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#if BOARD_BLE_NIMBLE
+// ble_att_mtu() reports the ATT MTU actually NEGOTIATED for a connection, which
+// nothing here has ever asked for: the host hard-codes 20-byte writes because
+// noble does not report an MTU, and 20 is the pre-negotiation floor (23 less the
+// 3-byte ATT header). If macOS has negotiated more - it routinely asks for far
+// more - then every BLE payload has been going out in packets a fraction of the
+// size the link can carry. The DEVICE is the side that knows, so the device
+// reports it and the host adapts, exactly as the history reader's <cols>x<lines>
+// budget already works.
+#include <host/ble_att.h>
+#endif
 #if !BOARD_BLE_NIMBLE
 // Bluedroid only. Under NimBLE the class still EXISTS in the 3.3.11 library, but
 // it is marked [[deprecated]] with the reason spelled out in its own header:
@@ -5287,6 +5298,30 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
   } else if (buf == "PAIRCANCEL") {
     handlePairCancel();
 #endif
+#if BOARD_BLE_NIMBLE
+  } else if (buf == "BLEMTU") {
+    // Reports the NEGOTIATED ATT MTU per live link. A probe that configures
+    // nothing, so a surprising number here can never be blamed on it - the
+    // AUDIOPROBE/TONETEST ladder.
+    // ALWAYS reports, even with nothing to report: silence and "no links" are
+    // indistinguishable from the Mac, which is the whole reason every refusal
+    // here names its cause.
+    int seen = 0;
+    for (int i = 0; i < MAX_LINKS; i++) {
+      if (!bleLinks[i].used) continue;
+      seen++;
+      char m[56];
+      snprintf(m, sizeof(m), "BLEMTU link=%d conn=%u mtu=%u", i,
+               (unsigned) bleLinks[i].connId,
+               (unsigned) ble_att_mtu(bleLinks[i].connId));
+      sendLineToHost(m);
+    }
+    if (!seen) {
+      char m[56];
+      snprintf(m, sizeof(m), "BLEMTU none used (bleConnected=%d)", bleConnected ? 1 : 0);
+      sendLineToHost(m);
+    }
+#endif
 #if BOARD_HISTORY_SCROLL
   } else if (buf == "SCROLLCLOSE") {
     // A HEADLESS ESCAPE FROM A FULL-SCREEN SURFACE, which this codebase has
@@ -6067,6 +6102,9 @@ void loop() {
   tickAutoTheme();      // no-op unless the theme is set to AUTO
 #if BOARD_HISTORY_SCROLL
   tickScrollFetch();
+#endif
+#if BOARD_BLE_NIMBLE
+  tickBleMtu();
 #endif
 #if BOARD_HAS_WIRELESS_PAIR
   pairTick();           // no-op unless a pairing window is open; closes it at 120s

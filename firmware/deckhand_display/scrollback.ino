@@ -306,6 +306,35 @@ void requestScrollback(int idx) {
 
 // Called from loop(). A stalled fetch must say so rather than leaving
 // "fetching" on the glass forever.
+#if BOARD_BLE_NIMBLE
+// REPORTS THE NEGOTIATED ATT MTU ONCE PER LINK, so the host can size its writes
+// to what the radio will actually carry. The host cannot learn this itself -
+// noble reports no MTU on macOS (re-measured: `peripheral.mtu` is undefined) -
+// and it has therefore always written 20-byte packets, the pre-negotiation floor
+// of 23 less the 3-byte ATT header. Measured on this link with the host's chunk
+// size forced by hand: 20 bytes gives 2.7 KB/s, 60 gives 5.4, and 180 gives
+// 8.4 - a 3.1x difference that was being left on the table.
+//
+// Sent from loop() rather than onConnect: that callback runs on BTC_TASK, where
+// this file's own rules forbid touching drivers, and negotiation finishes a
+// little after connect, so a loop-based report catches the settled value.
+uint16_t scrollMtuSent[MAX_LINKS] = {0};
+
+void tickBleMtu() {
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!bleLinks[i].used) { scrollMtuSent[i] = 0; continue; }
+    uint16_t m = ble_att_mtu(bleLinks[i].connId);
+    // 0 while negotiation is still in flight; 23 is the floor and worth
+    // reporting too, because it tells the host to STAY at 20 rather than guess.
+    if (m == 0 || m == scrollMtuSent[i]) continue;
+    scrollMtuSent[i] = m;
+    char line[48];
+    snprintf(line, sizeof(line), "BLEMTU link=%d mtu=%u", i, (unsigned) m);
+    sendLineToHost(line);
+  }
+}
+#endif
+
 void tickScrollFetch() {
   if (!scrollPending) return;
   const unsigned long cap = usbLinkActive() ? SCROLL_FETCH_TIMEOUT_MS : SCROLL_FETCH_TIMEOUT_BLE_MS;

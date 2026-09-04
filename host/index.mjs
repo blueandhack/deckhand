@@ -353,10 +353,20 @@ const HOST_ALIVE = path.join(RUNTIME_DIR, "host-alive");
 // reading from an hour ago is not a battery level - the same reason quotaAgeSec
 // exists for the OAuth cache.
 let lastBatt = null;
-// Conservative chunk size that doesn't depend on MTU negotiation succeeding -
-// 20 bytes is the default ATT payload before any negotiation, so this works
-// even in the worst case.
-const BLE_CHUNK_SIZE = 20;
+// STARTS at 20 - the pre-negotiation ATT payload, which works in the worst case -
+// and is RAISED when the device reports the MTU it actually negotiated. The host
+// cannot learn this itself: noble reports no MTU on macOS, re-measured today
+// (`peripheral.mtu` is undefined and there is no maxValueSize either), which is
+// why this was a hard 20 for so long.
+// MEASURED on a real link by forcing the size by hand, same 7.8KB payload:
+//     20 -> 2944ms (2.7 KB/s)    60 -> 1356ms (5.4)    180 -> 938ms (8.4)
+// So a 3.1x speedup was being left on the table. It is NOT safe to hard-code
+// 180: a Mac that does not negotiate up leaves the MTU at 23, and CoreBluetooth
+// DROPS an oversized write-without-response silently, so the link would simply
+// appear dead. Hence device-reported rather than assumed.
+const BLE_CHUNK_MIN = 20;
+const BLE_CHUNK_MAX = 180;    // the largest value measured working here
+let bleChunkSize = BLE_CHUNK_MIN;
 
 // ---------- Remote-answer authentication (A + B), MULTI-PAIRING ----------
 // This Mac remembers MANY devices, each with its OWN secret, so a pairing is the
@@ -2826,6 +2836,19 @@ async function handleDeviceLine(line, via, pairGen = 0) {
   }
   // History request from the detail screen. Handled here rather than in the tick so the
   // transcript is only read when someone is actually looking at it.
+  if (line.startsWith("BLEMTU ")) {
+    const m = line.match(/mtu=(\d+)/);
+    if (m) {
+      // MTU less the 3-byte ATT header, clamped to what has been measured
+      // working. Never below the floor: a device reporting 23 means STAY at 20.
+      const want = Math.max(BLE_CHUNK_MIN, Math.min(BLE_CHUNK_MAX, +m[1] - 3));
+      if (want !== bleChunkSize) {
+        console.log(`BLE: device reports MTU ${m[1]} - writing ${want}-byte packets (was ${bleChunkSize})`);
+        bleChunkSize = want;
+      }
+    }
+    return;
+  }
   if (line.startsWith("SCROLLACK ")) {
     const seq = Number.parseInt(line.slice(10).trim(), 10);
     const w = scrollAckWaiters.get(ackKey(scrollFetchGen, seq));
@@ -3214,7 +3237,7 @@ function startBle() {
         [BLE_RX_CHAR_UUID, BLE_TX_CHAR_UUID]
       );
       bleCharacteristic = characteristics.find((c) => c.uuid === BLE_RX_CHAR_UUID) ?? null;
-      if (!bleCharacteristic) {
+            if (!bleCharacteristic) {
         console.error("BLE: RX characteristic not found on peripheral");
         await peripheral.disconnectAsync().catch(() => {});
         return;
@@ -3339,11 +3362,11 @@ async function bleWriteRaw(text, gapMs) {
   const characteristic = bleCharacteristic;
   if (!characteristic) return;
   const buf = Buffer.from(text, "utf8");
-  for (let i = 0; i < buf.length; i += BLE_CHUNK_SIZE) {
+  for (let i = 0; i < buf.length; i += bleChunkSize) {
     if (gapMs && i) await new Promise((r) => setTimeout(r, gapMs));
     try {
       await withTimeout(
-        characteristic.writeAsync(buf.subarray(i, i + BLE_CHUNK_SIZE), true),
+        characteristic.writeAsync(buf.subarray(i, i + bleChunkSize), true),
         BLE_WRITE_TIMEOUT_MS,
         "BLE write"
       );
