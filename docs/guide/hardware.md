@@ -34,7 +34,7 @@ The rest of this section is board 1.
 | Optional | Battery | [3.7V 3000mAh LiPo](https://www.amazon.com/dp/B08T6GT7DV) — JST 1.25, protection circuit (4-pack) |
 | Optional | Speaker | [1W 8Ω mini speaker](https://www.amazon.com/dp/B0D7SC3ZFG) — JST-PH 1.25 (10-pack) |
 | Optional | Microphone | [MAX4466 electret amp module](https://www.amazon.com/dp/B08N4FNFTR) — adjustable gain (6-pack) |
-| Optional | Case | print it yourself — [`case/`](case/) |
+| Optional | Case | print it yourself — [`case/`](../../case/) |
 
 *The exact parts this was built and tested with, not recommendations. Note the
 multipacks. Listings go stale, so the specs below are what actually matter if an

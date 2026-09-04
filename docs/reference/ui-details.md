@@ -4,8 +4,8 @@
 > taken on real hardware at a specific commit, so do not paraphrase or "tidy" them.
 > If you change the behaviour, change the number and say what you measured.
 
-Index: [`docs/README.md`](README.md). The rules an agent must not miss stay in
-[`../CLAUDE.md`](../CLAUDE.md).
+Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay in
+[`CLAUDE.md`](../../CLAUDE.md).
 
 ---
 
