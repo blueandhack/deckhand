@@ -59,13 +59,35 @@ Each is fixed here, and each is fixed for its own sake rather than as a side eff
 | 1 | The caret lives at `kbLen` and nowhere else; a typo 40 places back costs 40 re-taps | Drag in the text card places the caret |
 | 2 | `CANCEL` discards up to 150 characters, same width as `SEND`, 8 px away | Proportional action row; `DISCARD` at half `SEND`'s width; and under the pairing the keyboard's left key is `BACK`, not a destructive control at all |
 | 3 | 14 of the 95 printable ASCII characters cannot be typed: `$ % * < > [ \ ] ^ ` { \| } ~` (81 of 95 reachable) | A second symbol page; `?123` becomes a 3-state pager |
-| 4 | The answer hard-wraps mid-word | Word wrap, with a **measured** line budget via `countWrappedLines()` |
+| 4 | ~~The answer hard-wraps mid-word~~ **WITHDRAWN — not a defect, a constraint.** See below | Nothing. The hard wrap stays. |
 | 5 | Re-reading the prompt covers the keyboard, and then every tap is a pager tap | A persistent one-line prompt strip; the peek stays for the full detail |
 | 6 | A character commits on **press**, so a mis-hit is already in the buffer | Release-commit with a magnified bubble |
 | 7 | Hold-to-repeat on `DEL` is undiscoverable; clearing 150 bytes is 18 s of holding (`KB_REPEAT_EVERY_MS` 120) | `CLR` on the draft line |
 | 8 | Board 1 has 12 spare pixels in 320 (4 margin + 4 + 4 + 0) against board 2's 70 | Named explicitly in every budget below |
 | 9 | `KB_ACT_H` is *defined* as equal to `KB_ROW_H`, so the least-pressed control is the tallest, and it has no drawn/tested split | Band `TAP_MIN`, button `2 * KB_LINE_PITCH` |
 | 10 | Keys are drawn with `R_MD`, the **card** radius: 10 px on a 22 px key is 45.5% of its width against 4.6% on the 216 px card, and it rounds 85.8 px² off the corners — **10.5%** of the drawn 22x37 key board 1 ends up with, and 7.6% (123.6 px²) of board 2's 30x54 — where a mis-aim lands | `KB_KEY_R`, derived from the key |
+
+### Defect 4 is withdrawn, and the measurement that withdraws it
+
+**Word wrap does not fit, and the evidence was already in this repo before I wrote the defect.**
+`settings-geom-check.mjs:378` records that the voice-answer panel's worst case over the same 150
+bytes is **exactly 8 lines** on board 1, at 17-character words, in a `CARD_W - 8` = 208 px lane.
+The keyboard's lane is `CARD_W - 12` = **204 px** — narrower, so it can only be worse. Measured
+directly with that same `worstWrappedLines()` search: **8 lines on board 1** (16-character words,
+line lengths `[17x7, 31]`) and **8 on board 2** (17-character words, `[18x7, 24]`).
+
+The card budgets **5**. That is a three-line gap on both boards, not a near miss.
+
+So the hard wrap is **load-bearing, not an oversight**: slicing at exactly `KB_COLS` is what makes
+`KB_TEXT_LINES = ceil(KB_MAX_BYTES / KB_COLS)` an arithmetic guarantee, and that guarantee is the
+only thing stopping `SEND` signing text that scrolled off the card. Every escape was checked with
+numbers and none exists: 8 lines end at y=129 on board 1 where the card ends at 91 and the keys
+start at 96; narrowing `KB_COLS` is strictly worse; and the largest byte cap that fits 5
+word-wrapped lines is 101, against a `KB_MAX_BYTES` pinned to the host's 150.
+
+**The caret (defect 1) is independent and stays in scope.** Under the hard slice its position is
+the `off / KB_COLS` division `drawKbText` already performs, and tap-to-place is the exact inverse
+— which is *simpler* than it would have been under word wrap, not harder.
 
 ## Scope, and what is explicitly NOT in it
 
@@ -86,6 +108,8 @@ host-side token extraction and its wire field, and the checkers for all of it. B
 - **Persisting recents.** They live in RAM and die with the session. Writing sent text to NVS
   would give the device a plaintext log of replies and a flash-wear budget, for a one-tap
   convenience. Reversible later; not the default.
+- **Word wrap.** Withdrawn above on measurement, not preference. Revisit only if `KB_MAX_BYTES`
+  ever drops below ~101 or the card gains three lines, and re-run `worstWrappedLines()` first.
 - **Predictive text or autocorrect.** No dictionary, no RAM for one on board 1, and a wrong
   correction on an answer to Claude is worse than a wrong character.
 - **Raising `KB_MAX_BYTES`.** It is 150 on the host too (`ANSWER_TEXT_MAX_BYTES` in

@@ -485,7 +485,7 @@ Board 1's binary moves; baselines are re-taken in the last commit."
 
 ---
 
-### Task 5: Word wrap and a placeable caret
+### Task 5: A placeable caret
 
 Closes spec defects 4 and 1. The answer hard-wraps mid-word, and the caret lives at `kbLen` and nowhere else — a wrong character forty places back costs five seconds of held `DEL` and forty re-taps on a sub-floor key.
 
