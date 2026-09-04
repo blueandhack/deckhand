@@ -277,6 +277,18 @@ void tickScrollFetch() {
   if (scrollActive) drawScrollback();
 }
 
+// IS THIS SCREEN A DEAD END? A failed or empty fetch leaves nothing to scroll,
+// so the body has no drag to offer and a tap on it did NOTHING - the screen said
+// "could not reach the Mac" and sat there, with the only way out a 46px key in
+// the corner that nothing pointed at. Reported as the device being "stuck on
+// something", which it was, from the only point of view that counts.
+// ONE predicate, read by the draw site and the hit test both: a control drawn
+// under one condition and hit-tested under another is this codebase's classic
+// defect, and pairConfirmable() is the precedent for spelling it once.
+bool scrollDeadEnd() {
+  return !scrollPending && (scrollFetchFailed || scrollCount == 0);
+}
+
 uint32_t scrollMaxY() {
   uint32_t total = (scrollTotalLines + SCROLL_HEAD_LINES) * CODE_LINE_H;
   uint32_t view  = (uint32_t) SCROLL_LINES * CODE_LINE_H;
@@ -311,12 +323,12 @@ void scrollDrawBody() {
     scrollNote(b, (SCROLL_TOP + SCROLL_BOT) / 2 - CODE_LINE_H / 2);
     return;
   }
-  if (scrollFetchFailed) {
-    scrollNote("-- could not reach the Mac --", (SCROLL_TOP + SCROLL_BOT) / 2 - CODE_LINE_H / 2);
-    return;
-  }
-  if (scrollCount == 0) {
-    scrollNote("-- nothing here --", (SCROLL_TOP + SCROLL_BOT) / 2 - CODE_LINE_H / 2);
+  if (scrollDeadEnd()) {
+    // The way out is NAMED. Both lines are ASCII and inside SCROLL_COLS: the
+    // longest is 29 characters against 34.
+    const int cy = (SCROLL_TOP + SCROLL_BOT) / 2 - CODE_LINE_H;
+    scrollNote(scrollFetchFailed ? "-- could not reach the Mac --" : "-- nothing here --", cy);
+    scrollNote("tap to retry,  < to go back", cy + CODE_LINE_H * 2);
     return;
   }
 
@@ -674,6 +686,16 @@ bool handleScrollTouch(int sx, int sy) {
     return true;
   }
   if (sy >= SCROLL_TOP && sy < SCROLL_BOT && !scrollPending) {
+    // The SAME predicate the note above is drawn from. With nothing to scroll a
+    // drag has nothing to do, so the body's tap becomes the retry - which is not
+    // a second meaning for the gesture so much as the only one available here.
+    if (scrollDeadEnd()) {
+      scrollFetchFailed = false;
+      scrollEnd();                 // drop the empty store so the fetch re-allocates
+      requestScrollback(detailIndex);
+      drawScrollback();
+      return true;
+    }
     scrollTapX = sx;
     scrollDragLoop(sy);
     return true;
