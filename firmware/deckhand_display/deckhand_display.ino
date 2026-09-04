@@ -5323,6 +5323,25 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     }
 #endif
 #if BOARD_HISTORY_SCROLL
+  } else if (buf.startsWith("SCROLLOPEN")) {
+    // OPENS THE TRANSCRIPT AND NOTHING ELSE - the headless equivalent of a tap.
+    // Its absence was a real blind spot: the only headless opener was
+    // SCROLLPERF, whose measurement sweep walks the view from top to bottom, so
+    // every "verification" of the open path was watching a diagnostic's side
+    // effect rather than the product. That side effect is also what got reported
+    // as the page scrolling by itself.
+    if (sessionCount == 0) { Serial.println("SCROLLOPEN: no sessions"); return; }
+    if (kbActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
+      Serial.println("SCROLLOPEN: another full-screen surface is up"); return;
+    }
+    int idx = 0;
+    const char* a = buf.c_str() + 10;
+    while (*a == ' ') a++;
+    if (*a) idx = constrain(atoi(a), 0, sessionCount - 1);
+    switchTab(TAB_SESSIONS);
+    openSessionDetail(idx);
+    openScrollback(idx);
+    Serial.printf("SCROLLOPEN: session %d (%s)\n", idx, sessions[idx].name);
   } else if (buf == "SCROLLCLOSE") {
     // A HEADLESS ESCAPE FROM A FULL-SCREEN SURFACE, which this codebase has
     // wanted once already: switchTab() returns early while histActive is set, so
@@ -5537,6 +5556,13 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // is only drawn there and SCREENSHOT can only record what is on the glass -
     // the same reason TAB and PAGE exist. Default is the bottom, which is where
     // the transcript actually opens.
+    // THE SWEEP ABOVE IS A VISIBLE SCROLL FROM TOP TO BOTTOM, twice - once per
+    // render path - and it used to leave the view wherever the last frame landed.
+    // Run while somebody is holding the device it reads exactly like the page
+    // scrolling by itself, which is how it was reported. It now RESTS AT THE
+    // NEWEST by default, which is where the transcript opens, so the diagnostic
+    // leaves the screen in the state the product would be in.
+    scrollY = scrollMaxY();
     if (parkCode) {
       long cl = scrollFindCode();
       if (cl < 0) Serial.println("SCROLLPERF: no code lines in this transcript");

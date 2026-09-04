@@ -974,6 +974,12 @@ void openScrollback(int idx) {
   histActive = true;
   scrollY = 0;
   requestScrollback(idx);
+  // LAND AT THE NEWEST EVEN WHEN THE FETCH DID NOT RUN. requestScrollback
+  // answers locally when the transcript is already held in PSRAM, and that path
+  // has no completion callback to place the view - so a second open showed the
+  // OLDEST message instead of the latest. Deciding where to land is the opener's
+  // job, not the fetch's, which is why it is here and not in both branches.
+  if (!scrollPending) scrollY = scrollMaxY();
   drawScrollback();
 }
 
