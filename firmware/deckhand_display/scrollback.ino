@@ -363,15 +363,18 @@ void scrollDrawCounter() {
     // The head note occupies line 0 of the scroll space, so the transcript's own
     // lines start at SCROLL_HEAD_LINES - the same offset the row loop applies.
     uint32_t tline = line > (uint32_t) SCROLL_HEAD_LINES ? line - SCROLL_HEAD_LINES : 0;
-    snprintf(cpos, sizeof(cpos), "%d/%d", scrollDropped + scrollEntryAtLine(tline) + 1, scrollTotal);
-  } else snprintf(cpos, sizeof(cpos), "0/0");
+    snprintf(cpos, sizeof(cpos), "msg %d/%d", scrollDropped + scrollEntryAtLine(tline) + 1, scrollTotal);
+  } else snprintf(cpos, sizeof(cpos), "no messages");
   if (strcmp(cpos, scrollPosCache) == 0) return;
   strncpy(scrollPosCache, cpos, sizeof(scrollPosCache) - 1);
   scrollPosCache[sizeof(scrollPosCache) - 1] = '\0';
   // Padded, so a shorter string cannot leave the previous one's tail behind -
   // the change-only discipline's standard hazard.
   char padded[24];
-  snprintf(padded, sizeof(padded), "%-12s", cpos);
+  // 14 wide: "msg 999/9999" is 12 and "no messages" is 11, both inside the
+  // 22-column name lane, and padding is what stops a shorter string leaving the
+  // previous one's tail behind.
+  snprintf(padded, sizeof(padded), "%-14s", cpos);
   setUIFont(1);
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -388,7 +391,13 @@ void scrollDrawBody() {
   // stale text under the header.
   tft.fillRect(0, HIST_RULE_Y + 1, tft.width(), SCROLL_BOT - HIST_RULE_Y - 1, COLOR_BG);
 
-  if (scrollPending) {
+  // PROGRESSIVE. While a fetch is still running, draw what has ALREADY arrived
+  // rather than a placeholder - the store is appended chunk by chunk, so the
+  // transcript fills in as it lands and the wait stops being a blank screen.
+  // Only an empty store gets the note, because then there is genuinely nothing
+  // to show. This is most of what makes a multi-second fetch feel different: the
+  // bytes were always arriving, they just were not being drawn.
+  if (scrollPending && scrollCount == 0) {
     char b[40];
     if (usbLinkActive()) snprintf(b, sizeof(b), "-- fetching %d/%d --", scrollChunksIn, scrollChunksOf);
     else snprintf(b, sizeof(b), "-- fetching over Bluetooth --");

@@ -3919,6 +3919,10 @@ void handleLine(const String& line) {
       scrollChunksOf = of;
       scrollTotal   = hist["total"]   | 0;
       scrollDropped = hist["dropped"] | 0;
+      // Pinned to the newest on EVERY chunk, not just the last: the store grows
+      // downward, so without this the view would sit where the first chunk put
+      // it and the arriving text would pile up out of sight below.
+      scrollY = scrollMaxY();
       if (seq + 1 >= of) {
         scrollPending = false;
         scrollY = scrollMaxY();              // opens at the NEWEST

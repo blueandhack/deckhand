@@ -84,7 +84,21 @@ void PanelShim::init() {
   // live out there - the FRAMEBUFFER has to (300KB), this does not.
   // Falls back to PSRAM rather than halting: a slow display beats no display.
   const size_t stripBytes = (size_t) PANEL_PHYS_W * FLUSH_STRIP_LINES * 2;
+  // TWO STRIP BUFFERS, so a gather can run while the previous strip's DMA is
+  // still reading. drawBitmap with timeout_ms = -1 BLOCKS, so gather and
+  // transfer serialise and their costs ADD - measured 39ms for the scroll's
+  // 416-row rect against a full-screen 30ms in PERF, which looked backwards
+  // until the difference showed up: PERF re-reads the same rows five times over
+  // and is CACHE-WARM, while a scroll frame gathers straight after a 245KB
+  // memmove has evicted everything, so every read is a PSRAM miss with nothing
+  // to hide behind. Alternating buffers lets the DMA cover the cold reads.
+  // This is also precisely the fix for the hazard the non-blocking timeout has:
+  // the race was the next strip's memcpy overwriting a buffer still being read,
+  // and writing the OTHER buffer makes that impossible by construction.
   _stripBuf = (uint16_t*) heap_caps_malloc(stripBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  _stripBuf2 = (uint16_t*) heap_caps_malloc(stripBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  if (!_stripBuf2)
+    Serial.println("PANEL: no second strip buffer - flush will not overlap gather with DMA");
   if (!_stripBuf) {
     _stripBuf = (uint16_t*) heap_caps_malloc(stripBytes, MALLOC_CAP_SPIRAM);
     Serial.println("PANEL: strip buffer fell back to PSRAM - flush will be ~3x slower");
@@ -301,6 +315,24 @@ void PanelShim::scrollRect(int x, int y, int w, int h, int dy) {
   int n = dy < 0 ? -dy : dy;
   if (n >= h) return;                     // nothing survives the shift
   const int rows = h - n;
+
+  // A BULK MOVE FOR THE ROTATION-0 FULL-WIDTH CASE WAS TRIED, MEASURED, AND
+  // REVERTED - the number is the useful part. One memmove of the whole block
+  // instead of `rows` per-row moves each with two mapPoint() calls took compose
+  // from 20713us to 20440us: 1.3%, inside the noise. So the per-row overhead is
+  // NOT the cost here; PSRAM BANDWIDTH is. The block is 320x384x2 = 245KB read
+  // plus 245KB written, and at this bus's rate that is essentially the whole
+  // 20ms. Reverted rather than kept, because it bought nothing measurable and
+  // added a rotation-dependent branch that would scroll BACKWARDS if it ever
+  // took the wrong arm on a flipped panel.
+  //
+  // The consequence is worth stating plainly: with a SOFTWARE scroll the compose
+  // half is irreducible. Getting past ~24fps means not moving the framebuffer at
+  // all - i.e. the panel's own VSCRDEF/VSCSAD hardware scroll, which would also
+  // shrink the flush to just the newly exposed band. That needs raw-command
+  // passthrough (writecommand is a no-op here) and a way to keep the shadow
+  // buffer and the panel from diverging, so it is a real piece of work.
+
   for (int i = 0; i < rows; i++) {
     // Copy in the direction that cannot overwrite a source row before it is
     // read. Expressed in logical row indices only - see the note above for
@@ -494,11 +526,15 @@ void PanelShim::flush() {
   if (x1 >= PANEL_PHYS_W) x1 = PANEL_PHYS_W - 1;   // never past the panel
   int w = x1 - x0 + 1;
 
+  bool useB = false;
   for (int y = y0; y <= y1; y += FLUSH_STRIP_LINES) {
     int lines = min(FLUSH_STRIP_LINES, y1 - y + 1);
+    // Alternate, when there is a second buffer to alternate with.
+    uint16_t* strip = (useB && _stripBuf2) ? _stripBuf2 : _stripBuf;
+    const bool last = (y + FLUSH_STRIP_LINES) > y1;
     for (int r = 0; r < lines; r++) {
       const uint16_t* src = _fb + (size_t) (y + r) * PANEL_PHYS_W + x0;
-      uint16_t* dst = _stripBuf + (size_t) r * w;
+      uint16_t* dst = strip + (size_t) r * w;
       // Byte-swap on the way out, not in storage. Keeping the framebuffer in
       // native order is what lets every drawing path - blending, readRect, the
       // AA coverage maths - work in ordinary RGB565 without unswapping first,
@@ -526,10 +562,17 @@ void PanelShim::flush() {
         for (; c < w; c++) dst[c] = (uint16_t) ((src[c] >> 8) | (src[c] << 8));
       }
     }
-    if (!_lcd->drawBitmap(x0, y, w, lines, (const uint8_t*) _stripBuf, -1)) {
+    // timeout 0 hands the strip to the DMA and returns, so the NEXT gather runs
+    // against it - into the other buffer. The last one waits, because flush()
+    // must not return with a transfer still reading a buffer the caller may
+    // start drawing into. With no second buffer every transfer waits, which is
+    // exactly the old behaviour.
+    const int wait = (last || !_stripBuf2) ? -1 : 0;
+    if (!_lcd->drawBitmap(x0, y, w, lines, (const uint8_t*) strip, wait)) {
       Serial.printf("PANEL: drawBitmap failed at y=%d\n", y);
       break;
     }
+    useB = !useB;
   }
   _lastFlushUs = (uint32_t) (micros() - flushT0);
   _dirtyX1 = -1;   // mark clean; _dirtyX0 unchanged, harmless since X1<X0 is the only test

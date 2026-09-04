@@ -177,7 +177,8 @@ private:
   int  drawGlyph(uint16_t uniCode, int x, int y);
 
   uint16_t* _fb = nullptr;          // PANEL_PHYS_W x PANEL_PHYS_H, native order
-  uint16_t* _stripBuf = nullptr;    // scratch for a cropped <=32-line strip
+  uint16_t* _stripBuf = nullptr;
+  uint16_t* _stripBuf2 = nullptr;   // see flush(): gather overlaps the previous DMA    // scratch for a cropped <=32-line strip
   uint8_t   _rotation = 0;
   bool      _swapBytes = false;
 
