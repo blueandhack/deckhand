@@ -145,9 +145,11 @@ const int KB_KEY_R = 2;
 
 ```cpp
 // board_es3c35p.h
-// 2 * 1.154 = 2.31 -> 3, the same scaling this header applies to R_MD (10 -> 12)
-// and the border weights. 3px is 10.0% of a 30px key and 0.46mm, so the two
-// boards are at near physical parity; it costs 7.7px2 against R_MD's 123.6.
+// KB_KEY_W / 10 under C truncation: 30/10 = 3 here, 22/10 = 2 there. That form
+// gives both boards their value exactly, where the x1.154 scaling this header
+// uses for R_MD and the borders does NOT - 2 * 1.154 is 2.31, which truncates
+// back to 2. 3px is 10.0% of a 30px key and 0.46mm; it costs 7.7px2 of corner
+// against R_MD's 123.6, which is 7.6% of this board's drawn key.
 const int KB_KEY_R = 3;
 ```
 

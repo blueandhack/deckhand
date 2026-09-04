@@ -65,7 +65,7 @@ Each is fixed here, and each is fixed for its own sake rather than as a side eff
 | 7 | Hold-to-repeat on `DEL` is undiscoverable; clearing 150 bytes is 18 s of holding (`KB_REPEAT_EVERY_MS` 120) | `CLR` on the draft line |
 | 8 | Board 1 has 12 spare pixels in 320 (4 margin + 4 + 4 + 0) against board 2's 70 | Named explicitly in every budget below |
 | 9 | `KB_ACT_H` is *defined* as equal to `KB_ROW_H`, so the least-pressed control is the tallest, and it has no drawn/tested split | Band `TAP_MIN`, button `2 * KB_LINE_PITCH` |
-| 10 | Keys are drawn with `R_MD`, the **card** radius: 10 px on a 22 px key is 45.5% of its width against 4.6% on the 216 px card, and it rounds 85.8 px² — 9.8% of the drawn key — off the corners, where a mis-aim lands | `KB_KEY_R`, derived from the key |
+| 10 | Keys are drawn with `R_MD`, the **card** radius: 10 px on a 22 px key is 45.5% of its width against 4.6% on the 216 px card, and it rounds 85.8 px² off the corners — **10.5%** of the drawn 22x37 key board 1 ends up with, and 7.6% (123.6 px²) of board 2's 30x54 — where a mis-aim lands | `KB_KEY_R`, derived from the key |
 
 ## Scope, and what is explicitly NOT in it
 
@@ -153,14 +153,21 @@ Two consequences beyond the lighter look:
 
 ### The key treatment: `KB_KEY_R`, and one stroke removed
 
-`R_MD` is a card radius. Its replacement is derived from the key and scaled between boards the
-way board 2's header already scales `R_MD` and the border weights (x1.154):
+`R_MD` is a card radius. Its replacement is derived **from the key itself**: `KB_KEY_R =
+KB_KEY_W / 10` under C truncation, which gives 22/10 = 2 and 30/10 = 3 exactly. An earlier draft
+claimed 2 "scaled by x1.154" to reach 3, which does not compute — 2 x 1.154 is 2.31, and that
+truncates to 2 on both boards. The width-derived form is the one that holds:
 
 | | board 1 | board 2 |
 |---|---|---|
 | `R_MD` today | 10 px = 45.5% of key width | 12 px = 40.0% |
 | `KB_KEY_R` | **2 px** = 9.1% = 0.36 mm | **3 px** = 10.0% = 0.46 mm |
 | corner area rounded away | 85.8 -> **3.4 px²** | 123.6 -> **7.7 px²** |
+| as a share of the drawn key | 10.5% -> 0.4% | 7.6% -> 0.5% |
+
+The two shares differ because `R_MD` scales x1.2 between the boards while the key scales x1.36,
+so a single threshold describes neither. A checker asserting "about 9%" would pass on board 1 and
+fail on board 2 while claiming to cover both.
 
 And the key becomes a **filled tile**: `uiButton` already fills an unpressed control with
 `COLOR_CARD` before stroking it, so the tile is that fill with `uiStrokeRound` dropped and the
@@ -269,9 +276,13 @@ assert the column instead of transcribing it.
 
 ### What board 1 pays
 
-Two constants move, and only on board 1: **`KB_ACT_H` 44 -> 40** and **`KB_ROW_H` 44 -> 41**.
-Both still clear `TAP_MIN` (40). With 12 spare pixels there was no room for a prompt strip, and
-the shorter action row is what buys it — which is why defect 9 is in scope rather than deferred.
+**The action row moves on BOTH boards** — `KB_ACT_H` 44 -> 40 and `KB_ACT_Y` 276 -> 280 on board
+1, 58 -> 46 and 414 -> 426 on board 2 — because `KB_ACT_H == TAP_MIN` is a per-board derivation,
+not a board-1 concession. An earlier draft of this section said "only on board 1" and was wrong.
+
+**What board 1 alone pays is `KB_ROW_H` 44 -> 41.** Both it and the shorter action row still clear
+`TAP_MIN` (40). With 12 spare pixels there was no room for a prompt strip, and those two together
+are what buy it — which is why defect 9 is in scope rather than deferred.
 
 **`KB_MAX_BYTES`, `KB_COLS` and `KB_TEXT_LINES` do not move on either board.** The card keeps
 its 5 provable lines, so `SEND` still cannot sign text that is off the card.
