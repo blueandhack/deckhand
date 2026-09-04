@@ -42,17 +42,37 @@ const int KB_MAX_BYTES = 150;                  // must equal the host's cap
 #define KB_DEL   '\x02'
 const char* KB_ALPHA[3] = { "qwertyuiop", "asdfghjkl", "\x01zxcvbnm\x02" };
 const char* KB_SYM[3]   = { "1234567890", "-_/:;()&@#", ".,?!'\"+=\x02" };
+// THE 14 CHARACTERS NO PAGE COULD REACH. 81 of the 95 printable ASCII
+// codepoints were typeable; these are the rest, and five of them ($ * [ ] `)
+// are ordinary in a shell command or a path, which is what this device answers
+// questions about. The row lengths are 10 / 4 / 1, so rows 1 and 2 are CENTRED
+// by kbRowX0() exactly as the 9-cell alpha rows already are. Matches
+// docs/design/compose/compose.js's SYM2 rows exactly - that mock is the
+// normative geometric spec for this split.
+const char* KB_SYM2[3] = { "$%*<>[]{}|", "\\^`~", "\x02" };
 
-const char* kbRow(int r) { return kbSymbols ? KB_SYM[r] : KB_ALPHA[r]; }
+// kbPage: 0 letters, 1 symbols, 2 the remaining symbols. Was a bool (kbSymbols);
+// a third page needs a third state.
+const char* kbRow(int r) {
+  if (kbPage == 1) return KB_SYM[r];
+  if (kbPage == 2) return KB_SYM2[r];
+  return KB_ALPHA[r];
+}
 int kbRowLen(int r) { return (int) strlen(kbRow(r)); }
 // Rows shorter than 10 cells are CENTRED, so the hit test and the draw must both
 // derive x from the same place or a tap lands one key off at the ends.
 int kbRowX0(int r) { return (tft.width() - kbRowLen(r) * KB_PITCH) / 2; }
 int kbRowY(int r)  { return KB_ROWS_Y + r * KB_ROW_H; }
 
-// Row 3 is [?123|ABC] 2 cells, [space] 6 cells, [.] 2 cells.
+// Row 3 is [?123|2/2|ABC] 2 cells, [space] 6 cells, [.] 2 cells.
 const int KB_R3_PAGE_W  = 2 * KB_PITCH;
 const int KB_R3_SPACE_W = 6 * KB_PITCH;
+// The page key's three labels, indexed by kbPage - what tapping it will switch
+// TO is what it shows, same convention the two-page ?123/ABC toggle always had.
+// All three are real labels, not the three-ASCII-dots ellipsis: "?123" is the
+// widest at 4 characters, which settings-geom-check.mjs measures against the
+// 2-cell key (KB_R3_PAGE_W).
+const char* KB_PAGE_LABEL[3] = { "?123", "2/2", "ABC" };
 
 void kbKeyLabel(char c, char* out, size_t n) {
   // CAPS vs CAP is the whole distinction between locked and one-shot, in TEXT -
@@ -81,7 +101,7 @@ void drawKbKey(int r, int col, bool pressed) {
 
 void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
   int y = kbRowY(3), h = KB_ROW_H - 4, x = 0;
-  uiKeyCap(x, y, KB_R3_PAGE_W, h, kbSymbols ? "ABC" : "?123", pressed == 0, COLOR_BG);
+  uiKeyCap(x, y, KB_R3_PAGE_W, h, KB_PAGE_LABEL[kbPage], pressed == 0, COLOR_BG);
   x += KB_R3_PAGE_W;
   uiKeyCap(x, y, KB_R3_SPACE_W, h, "SPACE", pressed == 1, COLOR_BG);
   x += KB_R3_SPACE_W;
@@ -372,7 +392,7 @@ void openKeyboard(int idx) {
   kbLen = 0;
   kbText[0] = '\0';
   kbShiftMode = 0;
-  kbSymbols = false;
+  kbPage = 0;
   // Cleared here so an ANSWER can never inherit message mode from an earlier open.
   kbMessageMode = false;
   kbSessionId[0] = '\0';
@@ -512,7 +532,7 @@ bool kbTouch(int sx, int sy) {
   if (r < 0 || r > 3) return true;
   if (r == 3) {
     if (sx < KB_R3_PAGE_W) {
-      kbSymbols = !kbSymbols;
+      kbPage = (kbPage + 1) % 3;
       kbShiftMode = 0;
       drawKeyboard();
     } else if (sx < KB_R3_PAGE_W + KB_R3_SPACE_W) {

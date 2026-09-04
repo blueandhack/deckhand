@@ -1214,7 +1214,7 @@ int kbPeekPage = -1;
 // Hold-to-repeat state for DEL. -1 = no key held.
 int kbRepeatRow = -1, kbRepeatCol = -1;
 unsigned long kbRepeatNext = 0;
-bool kbSymbols = false;        // ?123 page
+uint8_t kbPage = 0;             // 0 letters, 1 symbols, 2 the remaining symbols
 bool kbWindowClosed = false;   // the ask vanished while typing - keep the text
 int kbSessionIdx = -1;
 // Prompt mode: the keyboard is composing a MESSAGE to a READY session rather than

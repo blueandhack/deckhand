@@ -235,6 +235,28 @@ const HOST_CAP = +fs.readFileSync(`${DIR}/../../host/voice-answer.mjs`, "utf8")
 const KB_SRC = fs.readFileSync(`${DIR}/keyboard.ino`, "utf8");
 const KB_MAX_BYTES = +KB_SRC.match(/KB_MAX_BYTES\s*=\s*(\d+)/)[1];
 
+// THE THREE KEY-PAGE TABLES, PARSED out of keyboard.ino rather than transcribed.
+// KB_ROW_CELLS below and the reachability sweep further down BOTH derive from
+// this SAME parse, so a fourth page (or a rebalanced row) changes what both
+// assert instead of one of them going stale while the other stays green - the
+// exact fate of the hand-written KB_ROW_CELLS = [10, 9, 9, 10, 10, 9] this
+// replaced once a third page existed and it did not.
+// `\};` (the closing brace FOLLOWED BY THE STATEMENT'S SEMICOLON), not `[^}]*\}`:
+// KB_SYM2's own row ("$%*<>[]{}|") embeds a literal `{`/`}` INSIDE a quoted
+// string, so a capture that stops at the first bare `}` truncates that row's
+// initializer at its own middle character instead of the array's actual close.
+// The embedded `}` here is followed by `|"`, never by `;`, so anchoring on `};`
+// finds the real end even though the naive form would not.
+const KB_PAGE_ROWS = [...KB_SRC.matchAll(/const char\* KB_(?:ALPHA|SYM|SYM2)\[3\]\s*=\s*\{(.*?)\};/gs)];
+if (KB_PAGE_ROWS.length !== 3)
+  throw new Error(`settings-geom-check: expected 3 key pages (KB_ALPHA/KB_SYM/KB_SYM2) parsed out of keyboard.ino, found ${KB_PAGE_ROWS.length}`);
+// The row literals as they appear in the C source use \xNN (KB_SHIFT '\x01',
+// KB_DEL '\x02') - a C escape, not a JSON one, so a bare JSON.parse on the
+// extracted literal throws ("Bad escaped character"). Translate \xNN to JSON's
+// \u00NN first rather than hand-decoding the row string ourselves, which would
+// itself be a transcription of the escape rules JSON.parse already implements.
+const parseCLit = (lit) => JSON.parse(lit.replace(/\\x([0-9a-fA-F]{2})/g, "\\u00$1"));
+
 // THE FRACS, READ OUT OF drawKbActions() FOR THE SAME REASON. The mirror below
 // needs the proportion the firmware actually passes: with [1, 2] restated on the
 // checker's side, "SEND is at least twice the destructive control" is computed
@@ -327,8 +349,12 @@ const DIALOGS = [
 // hosts[].label is char[20], and uiListRow draws "\xB7 " + it with no fitText at
 // all - so the widest row the PAIRED MACS page can draw is 21 characters.
 const HOST_LABEL_MAX = 19;
-// Key row lengths, from KB_ALPHA/KB_SYM (the two control bytes count as cells).
-const KB_ROW_CELLS = [10, 9, 9, 10, 10, 9];
+// Key row lengths, DERIVED from KB_PAGE_ROWS (the parse above), not transcribed -
+// the two control bytes (CAP/DEL) count as cells, same as they always did. With
+// the mock's KB_SYM2 split (10/4/1) the nine lengths are
+// 10, 9, 9, 10, 10, 9, 10, 4, 1.
+const KB_ROW_CELLS = KB_PAGE_ROWS.flatMap(m =>
+  m[1].match(/"(?:[^"\\]|\\.)*"/g).map(lit => parseCLit(lit).length));
 
 // THE OTHER 150-BYTE PAIRING. The voice-answer confirm screen caps its transcript
 // panel at 8 WORD-wrapped lines (askVoiceTooLong() in sessions.ino, measured
@@ -2000,6 +2026,32 @@ for (const b of [1, 2]) {
       chk(!/uiStrokeRound/.test(keyCapSrc),
           "uiKeyCap's OWN BODY does not stroke - an outline on COLOR_BG is what makes the drawn key read smaller than its band");
       chk(/KB_KEY_R/.test(keyCapSrc), "uiKeyCap's OWN BODY uses KB_KEY_R, not R_MD");
+
+      // EVERY PRINTABLE ASCII CODEPOINT REACHABLE, swept from the SAME
+      // KB_PAGE_ROWS parse KB_ROW_CELLS derives from - not restated, so this is
+      // provable against the source rather than against a description of it.
+      // SPACE and "." are row 3's own two characters (drawKbRow3/kbTouch, data
+      // rather than a KB_*[3] table) and are seeded here rather than hand-added
+      // as a blanket claim: relabelling the "." key once still reported "95 of
+      // 95" because "." also lives on KB_SYM's row 2 - seeding only the two row-3
+      // characters (not every character that happens to also appear elsewhere)
+      // keeps this sweep from hiding that class of bug again.
+      // (KB_PAGE_ROWS.length === 3 is asserted once, hard, at parse time above -
+      // a chk() here would be unreachable dead code, since a wrong count already
+      // throws before this line runs.)
+      const reach = new Set([" ", "."]);
+      for (const m of KB_PAGE_ROWS)
+        for (const lit of m[1].match(/"(?:[^"\\]|\\.)*"/g))
+          for (const ch of parseCLit(lit)) {
+            if (ch === "\x01" || ch === "\x02") continue;   // CAP and DEL stand-ins
+            reach.add(ch);
+            if (ch >= "a" && ch <= "z") reach.add(ch.toUpperCase());
+          }
+      const missing = [];
+      for (let cp = 0x20; cp <= 0x7e; cp++)
+        if (!reach.has(String.fromCharCode(cp))) missing.push(String.fromCharCode(cp));
+      chk(missing.length === 0,
+          `every printable ASCII codepoint is reachable; missing ${missing.length}: ${missing.join(" ")}`);
     }
     chk(10 * c.KB_PITCH <= W, `10 columns x ${c.KB_PITCH} = ${10 * c.KB_PITCH} inside the ${W}px panel`);
     chk(c.KB_PITCH - c.KB_KEY_W === 2, `${c.KB_PITCH - c.KB_KEY_W}px of the pitch is the gap`);
