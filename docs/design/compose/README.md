@@ -120,13 +120,43 @@ so a gap that drifts moves an anchor and fails.
   an entry that no longer matches anything sub-floor **also fails**, so the list
   cannot rot into a blanket permission. There are three: the key band's width
   (the design's premise), the keyboard's prompt strip height, and the draft
-  line's height, which carries `CLR` and `TYPE...`. The repo has the precedent —
+  line's height, which carries `CLR` **alone**. The repo has the precedent —
   `HIST_CHIP_H` ships at 17 drawn / 24 tested and says so.
 - **The drawn/tested split exists per control.** A control drawn at exactly its
   tested size fails; the surfaces that *are* their own target (the peek cards,
   the caret lane) are exempt by name, not by accident.
 - **No two controls in one band have overlapping tested rects.** An ambiguous
   tap is worse than a dead one: the wrong thing happens rather than nothing.
+- **The action row is `uiActionRow()`'s arithmetic, not the three-column model.**
+  Two column systems live on the reply panel and they are not the same: the
+  reply/token/recent bands are `lane/3` cells with the 2 px gap on the left
+  button's right (72+72+72 and 98+98+100), while the **action band** is
+  proportional — `gap = 8`, `avail = lane - gap*(n-1)`, `w[i] = avail *
+  fracs[i] / total` under C truncation, the remainder on the last, and each
+  tested zone **swallowing the gap to its right**. The checker asserts the reply
+  panel's row carries **three** controls (`CLOSE`/`DISCARD`, `TYPE...`, `SEND`)
+  at fracs `{1,1,2}`, that `SEND`'s drawn width is **exactly twice** the left
+  control's (board 1: 50 / 50 / 100; board 2: 70 / 70 / 140), that consecutive
+  drawn buttons sit exactly `ACT_GAP` apart, that the row closes on the lane, and
+  that `BOARD_W - 2*CARD_X` equals the **header's** `CARD_W` — since
+  `uiActionRow` derives its lane from `tft.width()` while the panel derives its
+  from `CARD_W`. (The keyboard's two-control row is 69/139 rather than 69/138
+  because the last column takes the remainder; only the three-control row is
+  exact, and only that one is asserted as such.)
+- **`ACT_GAP` is the one number on this screen nothing binds.** `uiActionRow()`
+  does not exist in the firmware yet, so there is no literal to parse. **Task 3
+  should bind it** by parsing `const int gap = 8` out of `uiActionRow`'s body,
+  the way `settings-geom-check.mjs` already parses the severity spine's
+  `uiFillRound()` arguments. Until then the gap assertion catches the band
+  arithmetic drifting from the draw arithmetic — the bug the plan's own Step 4
+  warns about — but not the constant itself moving.
+- **On the reply panel, `CLR` is the only control allowed under `TAP_MIN`, and
+  only in height.** Asserted directly as a set equality, so it fails both if
+  something else goes sub-floor and if `CLR` stops being sub-floor. Its
+  `EXCEPTIONS` entry names the **label**, not just the band, so a control parked
+  on the draft line cannot inherit `CLR`'s reason: that reason is about a
+  recoverable clear of a draft you can still see, and it is false of `TYPE...`,
+  which is the only bridge from this panel to free text.
 - **The lane-wide bands tile the lane exactly**, read off the *drawn* control
   rects rather than off `colWidths()`. A gap between two tested rects is a strip
   where a tap does nothing, and removing one such strip is why this design makes
@@ -163,31 +193,49 @@ assertion is among the catchers — it names all 13 new failures, 6 of them
 fail" cannot be the test; the test is whether the failure set **grew**, and
 whether the growth came from the assertion that claims the column closes.
 
-## Two places where the mock departs from the spec, on purpose
+## One place the mock departs from the spec, and one where it was wrong
 
-Both are recorded here rather than silently absorbed, because after this task the
-mock is the authority and the spec's tables are not.
+Kept and marked rather than deleted, which is this repo's rule: a described
+decision that turned out wrong costs the next reader either the time to disprove
+it or a no-op "fix".
 
-1. **Board 2's token row is ONE band, and its residual is 64 — not the budget
-   block's "2 x 46 band" and "18 residual".** The spec contradicts itself: three
-   prose claims in the same document say one band ("one band on both boards keeps
-   the two panels structurally identical"; "a second token band costs 46 of [the]
-   64 px residual … It is deliberately NOT in this design"; "same stack as board
-   1, one row taller because recents fit"), and the chip arithmetic settles it —
-   the host caps chips at 4, a token band is 3 columns (2 chips + the pager), so
-   one band shows 2, which is what the spec says board 1 shows, and a second band
-   would re-lay out at 2 wider columns to show "3 of 4 chips", also exactly what
-   the spec says. Six 3-column cells could never fill from a 4-chip cap. **Both
-   columns close on 480 either way**, so flipping it is `RP_TOKEN_BANDS` 1→2 and
-   `RP_RESIDUAL` 64→18 in `compose.js`, one line each, and the checker will hold
-   the new column to 480 just as tightly.
-2. **`TYPE...` and `CLR` both live on the draft line, not in the action band.**
-   The lane is three columns and the spec requires `DISCARD` at **half** `SEND`'s
-   width, so the action row has to be `DISCARD`(1 cell) + `SEND`(2 cells) — there
-   is no third cell for `TYPE...`. Both draft-line controls operate on the draft,
-   which is what the line already holds. `CLR` is `TAP_MIN` *wide* even though it
-   is three characters, because there is no reason to be short in both axes when
-   the lane has the pixels.
+### 1. Board 2's token row is ONE band, residual 64 — and the spec now agrees
+
+The spec's board-2 reply budget block used to say "2 x 46 band" and "18
+residual" while three prose passages said one band and 64. One band is the
+considered choice: the two panels stay structurally identical and paging already
+reaches every token. `9d21d8c` fixed the stale block, so this is no longer a
+departure at all. Flipping it, if the pager ever proves annoying on board 2, is
+`RP_TOKEN_BANDS` 1→2 and `RP_RESIDUAL` 64→18 in `compose.js` — one line each,
+and the checker will hold the new column to 480 just as tightly.
+
+**The reasoning this README gave for the choice was itself shaky and is corrected
+here:** it argued that six `lane/3` cells could never fill from a 4-chip cap. But
+the token row is variable-width chips, not fixed cells, so a 4-chip cap would in
+fact fill two bands *better* than one. The answer is right; the argument for it
+is the spec's, not that one.
+
+### 2. ~~`TYPE...` and `CLR` both live on the draft line~~ — WRONG, and fixed
+
+**This was a defect in the mock's first version.** The reading was that the lane
+is three `lane/3` cells, so an action row satisfying defect 2 (`DISCARD` at
+**half** `SEND`) had to be `DISCARD`(1 cell) + `SEND`(2 cells) with no third cell
+for `TYPE...` — which pushed `TYPE...` onto the draft line, the one sub-floor
+band on the screen.
+
+**`uiActionRow` takes proportions, not cells.** It sums the fracs and divides the
+lane by the total, so `{1,1,2}` puts `SEND` at half the lane and the other two at
+a quarter each: `SEND` is exactly twice `DISCARD` *with* a third control on the
+row. Board 1: 50 / 50 / 100 in a 216 px lane with two 8 px gaps. Board 2:
+70 / 70 / 140 in 296. `"DISCARD"` is 42 px of Cozette in 50 and 56 px of Spleen
+in 70, so both fit.
+
+The cells were the mistake, not the third control — and the consequence was worse
+than cosmetic. `TYPE...` is the only bridge from the reply panel to free text, so
+making it the hardest control on the screen to hit inverted the design's own
+priority: the 20% case that stops the panel being a dead end would have been the
+worst-served thing on it. `CLR` keeps the draft line and keeps its exception,
+which now names `CLR` **by label** so nothing else can inherit its reason.
 
 And one number in the spec that is right for the wrong board: defect 10's "it
 rounds 85.8 px² — **9.8%** of the drawn key" is board 1's alone, computed against

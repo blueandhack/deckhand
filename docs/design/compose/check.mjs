@@ -48,7 +48,7 @@ new Function(fs.readFileSync(DIR + "compose.js", "utf8"))();
 const X = globalThis.__X;
 if (!X) { console.log("FATAL: compose.js did not publish globalThis.__X"); process.exit(1); }
 const { SCREENS, K, D, ADV, CELL, BAD_CHARS, P, stack, colWidths, colX, colSpan,
-        keyGap, EXCEPTIONS, ASK, PAGES } = X;
+        keyGap, ACT_GAP, EXCEPTIONS, ASK, PAGES } = X;
 
 const HEADER = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 
@@ -418,25 +418,95 @@ function run() {
           `${label}: ${bandName} closes at ${x}, the lane ends at ${k.CARD_X + k.CARD_W}`);
     }
 
+    // 8e3. THE ACTION ROW IS PROPORTIONAL, AND SEND IS EXACTLY TWICE DISCARD.
+    // Read off the DRAWN widths, not off the fracs that produced them, so the
+    // claim is about the row on the glass. The reply panel's row must carry
+    // THREE controls: an earlier draft of this mock laid the row out in lane/3
+    // cells, concluded a third would not fit, and exiled TYPE... to the draft
+    // line - so this is the assertion that would have caught that.
+    {
+      const act = (byBand.get("action band") || []).slice().sort((a, z) => a.tested.x - z.tested.x);
+      const lane = k.BOARD_W - 2 * k.CARD_X;
+      chk(lane === H[b].CARD_W, "act",
+          `${label}: uiActionRow derives its lane as BOARD_W - 2*CARD_X = ${lane}, but `
+        + `${HEADER[b]}'s CARD_W is ${H[b].CARD_W} - the row and the panel would use `
+        + `different lanes`);
+      if (sc.screen === "reply" && !/-sent$/.test(sc.key)) {
+        chk(act.length === 3, "act",
+            `${label}: the reply panel's action band has ${act.length} controls, not the three `
+          + `the design needs (CLOSE/DISCARD, TYPE..., SEND) - TYPE... is the only bridge from `
+          + `this panel to free text and it belongs on a full TAP_MIN band`);
+        if (act.length === 3) {
+          const [left, type, send] = act;
+          chk(send.drawn.w === 2 * left.drawn.w, "act",
+              `${label}: SEND is drawn ${send.drawn.w}px against "${left.label}"'s `
+            + `${left.drawn.w} - defect 2 asks for exactly twice, not ${(send.drawn.w / left.drawn.w).toFixed(2)}x`);
+          chk(send.drawn.w === 2 * type.drawn.w, "act",
+              `${label}: SEND is drawn ${send.drawn.w}px against TYPE...'s ${type.drawn.w}`);
+          chk(left.label === "DISCARD" || left.label === "CLOSE", "act",
+              `${label}: the left action is "${left.label}", expected DISCARD (a draft to lose) `
+            + `or CLOSE (none)`);
+          chk(type.label === "TYPE...", "act",
+              `${label}: the middle action is "${type.label}", expected TYPE...`);
+          chk(send.label === "SEND", "act", `${label}: the right action is "${send.label}"`);
+        }
+      }
+      // Each zone swallows the gap to its RIGHT, so consecutive drawn buttons
+      // must sit exactly ACT_GAP apart and the last must close on the lane.
+      for (let i = 0; i + 1 < act.length; i++) {
+        const d = act[i + 1].drawn.x - (act[i].drawn.x + act[i].drawn.w);
+        chk(d === ACT_GAP, "act",
+            `${label}: "${act[i].label}" and "${act[i + 1].label}" are ${d}px apart, `
+          + `uiActionRow's gap is ${ACT_GAP}`);
+      }
+      if (act.length) {
+        const lastC = act[act.length - 1];
+        chk(lastC.drawn.x + lastC.drawn.w === k.CARD_X + lane, "act",
+            `${label}: the action row closes at ${lastC.drawn.x + lastC.drawn.w}, the lane ends `
+          + `at ${k.CARD_X + lane} - the remainder did not land on the last control`);
+      }
+    }
+
     // 8f. TAP_MIN, with the sub-floor controls named rather than tolerated.
     // The list is exact in BOTH directions: a sub-floor control that is not
     // excepted fails, and an exception that is no longer sub-floor fails too, so
     // the list cannot rot into a blanket permission.
-    const matches = (e, bandName) => e.screen === sc.screen
-      && (e.band instanceof RegExp ? e.band.test(bandName) : e.band === bandName);
+    // An entry may name a LABEL as well as a band, and when it does it permits
+    // that control ALONE. The draft line's does: it covers CLR and nothing else,
+    // so TYPE... reappearing on that line fails instead of inheriting CLR's
+    // reason - the reason is about a recoverable clear, not about a bridge to
+    // free text.
+    const matches = (e, bandName, label) => e.screen === sc.screen
+      && (e.band instanceof RegExp ? e.band.test(bandName) : e.band === bandName)
+      && (e.label === undefined || e.label === label);
     const used = new Set();
     for (const c of p.controls) {
       if (c.noSplit && c.kind === "caret") continue;         // a drag lane, not a target
       for (const [axis, size] of [["h", c.tested.h], ["w", c.tested.w]]) {
         if (size >= k.TAP_MIN) continue;
-        const e = EXCEPTIONS.find(e => e.axis === axis && matches(e, c.band));
+        const e = EXCEPTIONS.find(e => e.axis === axis && matches(e, c.band, c.label));
         chk(!!e, "tapmin",
             `${label}: "${c.label}" is tested ${size}px in ${axis} against TAP_MIN ${k.TAP_MIN}, and `
-          + `no EXCEPTIONS entry covers ${sc.screen}/${c.band} in that axis - a control under the `
+          + `no EXCEPTIONS entry covers ${sc.screen}/${c.band}/"${c.label}" in that axis - a control under the `
           + `fingertip floor must be named with its reason, not merely allowed`);
         if (e) used.add(EXCEPTIONS.indexOf(e));
       }
     }
+    // AND, STATED DIRECTLY RATHER THAN LEFT TO THE EXCEPTION MACHINERY: on the
+    // reply panel every control except CLR clears TAP_MIN in BOTH axes. This
+    // fails if anything else goes sub-floor AND if CLR stops being sub-floor, so
+    // it cannot rot into a description of whatever the mock happens to draw.
+    if (sc.screen === "reply") {
+      const sub = p.controls.filter(c => !(c.noSplit && c.kind === "caret"))
+        .filter(c => c.tested.h < k.TAP_MIN || c.tested.w < k.TAP_MIN)
+        .map(c => c.label);
+      const want = /-sent$/.test(sc.key) ? [] : ["CLR"];
+      chk(sub.length === want.length && sub.every(l => want.includes(l)), "tapmin",
+          `${label}: the sub-floor controls are [${sub.join(", ")}], expected `
+        + `[${want.join(", ") || "none"}] - on this screen only CLR may be short, and only in `
+        + `height`);
+    }
+
     // `used` only holds entries a sub-floor control already matched, so asking
     // whether each matched something sub-floor is trivially true. The claim that
     // can fail - an entry matching nothing on ANY screen - is made once, after

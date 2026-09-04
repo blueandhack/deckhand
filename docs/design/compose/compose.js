@@ -299,12 +299,19 @@ const EXCEPTIONS = [
     why:"A one-line strip is KB_LINE_PITCH + 4 by definition. It is a re-read, "
        +"not an answer: the full paged peek behind it is reachable from the ask "
        +"screen too, and the cost of a miss is one extra tap on a label." },
-  { screen:"reply", band:"draft line", axis:"h",
-    why:"CLR and TYPE... sit on a line that is one text cell plus its air, so "
-       +"neither can be TAP_MIN tall without a band board 1 does not have (12 "
-       +"spare pixels in 320). Same treatment HIST_CHIP_H already ships with - "
-       +"17 drawn, 24 tested, both under board 1's floor. A miss on either costs "
-       +"nothing: the draft is still there and nothing was sent." },
+  // LABELLED, not merely banded: this permits CLR and nothing else. TYPE... was
+  // briefly parked on this line and this entry covered it too, which was wrong -
+  // TYPE... is the only bridge from the reply panel to free text, so making it
+  // the hardest control on the screen to hit inverts the design's own priority.
+  // It is in the action band now, and if it ever comes back here it FAILS.
+  { screen:"reply", band:"draft line", label:"CLR", axis:"h",
+    why:"CLR sits on a line that is one text cell plus its air, so it cannot be "
+       +"TAP_MIN tall without a band board 1 does not have (12 spare pixels in "
+       +"320). It is the right control to spend that on: CLR is a RECOVERY for a "
+       +"draft you can still see and re-edit character by character, so a miss "
+       +"costs one more tap and loses nothing. It is TAP_MIN WIDE, so it is short "
+       +"in one axis only. Same treatment HIST_CHIP_H already ships with - 17 "
+       +"drawn, 24 tested, both under board 1's floor." },
 ];
 
 // ---------------------------------------------------------------------------
@@ -450,23 +457,54 @@ function drawKeyboard(p, opt = {}) {
   // defined as KB_ROW_H. The left key is BACK, not a destructive control:
   // DISCARD lives on the reply panel, one surface away from a full draft.
   actionRow(p, S.find("action band"), [
-    { label:"BACK", kind:"navigate", cells:1 },
-    { label:"SEND", kind:"send", cells:2 },
+    { label:"BACK", kind:"navigate", frac:1 },
+    { label:"SEND", kind:"send", frac:2 },
   ]);
 }
 
-// The action band, proportional. SEND takes two of the three columns and the
-// left control takes one, so DISCARD is half SEND's width rather than equal to
-// it 8 pixels away.
+// THE ACTION BAND IS PROPORTIONAL, AND IT IS NOT THE THREE-COLUMN MODEL. This
+// is uiActionRow()'s own arithmetic (Task 3 of the plan), reproduced term for
+// term, because the row the mock draws and the row the firmware draws have to be
+// the same row:
+//
+//   gap = 8, lane = BOARD_W - 2 * CARD_X, total = sum(fracs)
+//   avail = lane - gap * (n - 1)
+//   w[i]  = last ? (CARD_X + lane - x) : avail * fracs[i] / total   (C truncated)
+//   band  = w[i] + (last ? 0 : gap)      -- each zone SWALLOWS the gap to its
+//                                           right, so no strip between two
+//                                           buttons is dead, exactly as
+//                                           kbTouch() treats KB_PITCH
+//
+// FRACS ARE PROPORTIONS, NOT CELLS, and that is the whole point: {1,1,2} puts
+// SEND at half the lane and DISCARD at a quarter, so SEND is EXACTLY twice
+// DISCARD with a third control still on the row. An earlier draft of this mock
+// laid the action row out in the reply panel's lane/3 cells and concluded there
+// was no room for TYPE... - which pushed the one bridge from the panel to free
+// text onto the draft line, making the design's own 20% case the hardest thing
+// on the screen to hit. The cells were the mistake, not the third control.
+//
+// ACT_GAP IS THE ONE NUMBER ON THIS SCREEN NOTHING BINDS, and it is stated here
+// rather than left implied. uiActionRow() does not exist in the firmware yet -
+// Task 3 adds it, with `const int gap = 8` inside its body - so there is nothing
+// for check.mjs to parse. TASK 3 SHOULD BIND IT, by parsing that literal out of
+// uiActionRow()'s body the way settings-geom-check.mjs already parses the
+// severity spine's uiFillRound() arguments. Until then the gap assertion below
+// only catches the band arithmetic drifting from the DRAW arithmetic - which is
+// the bug the plan's own Step 4 warns about - and not the constant itself moving.
+const ACT_GAP = 8;
 function actionRow(p, band, spec) {
-  const k = p.k, b = p.b;
-  let i = 0;
-  for (const s of spec) {
-    const x = colX(b, i), w = colSpan(b, i, s.cells);
-    p.control(band.name, s.kind, s.label,
-      { x, y:band.y, w, h:band.h },
-      { x, y:band.y + k.KB_ACT_DY, w: w - keyGap(b), h: k.KB_ACT_DRAWN }, 2);
-    i += s.cells;
+  const k = p.k;
+  const lane = k.BOARD_W - 2 * k.CARD_X;
+  const n = spec.length, total = spec.reduce((a, s) => a + s.frac, 0);
+  const avail = lane - ACT_GAP * (n - 1);
+  let x = k.CARD_X;
+  for (let i = 0; i < n; i++) {
+    const last = i === n - 1;
+    const w = last ? (k.CARD_X + lane - x) : Math.trunc(avail * spec[i].frac / total);
+    p.control(band.name, spec[i].kind, spec[i].label,
+      { x, y:band.y, w: w + (last ? 0 : ACT_GAP), h:band.h },
+      { x, y:band.y + k.KB_ACT_DY, w, h:k.KB_ACT_DRAWN }, 2);
+    x += w + ACT_GAP;
   }
 }
 
@@ -542,28 +580,21 @@ function drawReply(p, opt = {}) {
   // it holds silently stops noticing changes past that point, and this string
   // changes per character. In the sent state it becomes a SENT: receipt.
   //
-  // TYPE... AND CLR BOTH LIVE HERE, not in the action band, and that is what
-  // keeps DISCARD at HALF SEND's width: the lane is three columns, so an action
-  // row of DISCARD(1) + SEND(2) is the only split that makes the destructive
-  // control half the size of the one beside it. Both draft-line controls operate
-  // on the draft, which is what the line already holds.
+  // CLR IS THE ONLY CONTROL ON THIS LINE. TYPE... is in the action band, where a
+  // full TAP_MIN band is - see actionRow() above for why the earlier "no room for
+  // a third control" reading was wrong.
   const dl = S.find("draft line");
   // CLR is TAP_MIN WIDE even though it is three characters: the height is
   // already sub-floor and there is no reason to be short in both axes when the
-  // lane has the pixels. TYPE... is wider than TAP_MIN by its own label.
-  const clrW  = k.TAP_MIN;                       // "CLR"
-  const typeW = 7*ADV[b][1] + 8;                 // "TYPE..." - three ASCII dots
-  const dlLane = k.CARD_W - 12 - (sent ? 0 : clrW + typeW);
+  // lane has the pixels.
+  const clrW = k.TAP_MIN;
+  const dlLane = k.CARD_W - 12 - (sent ? 0 : clrW);
   p.rect(k.CARD_X, dl.y, k.CARD_W, dl.h, t.bg);
   if (sent) {
     p.text(p.fit("SENT: " + draft, dlLane, 2), k.CARD_X+6, dl.y + 4, 2, t.good);
   } else {
     p.text(p.fit(draft || "(empty)", dlLane, 2), k.CARD_X+6, dl.y + 4, 2, t.value);
-    const clrX  = k.CARD_X + k.CARD_W - clrW;
-    const typeX = clrX - typeW;
-    p.control(dl.name, "navigate", "TYPE...",
-      { x:typeX, y:dl.y, w:typeW, h:dl.h },
-      { x:typeX, y:dl.y, w:typeW - keyGap(b), h:dl.h - 2 }, 1, { radius:k.KB_KEY_R });
+    const clrX = k.CARD_X + k.CARD_W - clrW;
     p.control(dl.name, "navigate", "CLR",
       { x:clrX, y:dl.y, w:clrW, h:dl.h },
       { x:clrX, y:dl.y, w:clrW - keyGap(b), h:dl.h - 2 }, 1, { radius:k.KB_KEY_R });
@@ -594,21 +625,21 @@ function drawReply(p, opt = {}) {
   // BOARD_H, so the two surfaces cannot disagree about where SEND lives.
   if (sent) {
     // The row collapses to DONE: a one-tap send has no undo, so nothing that
-    // looks like SEND is left on the glass to press again.
-    const band = S.find("action band");
-    const x = colX(b,0), w = colSpan(b,0,3);
-    p.control(band.name, "navigate", "DONE",
-      { x, y:band.y, w, h:band.h },
-      { x, y:band.y + k.KB_ACT_DY, w: w - keyGap(b), h: k.KB_ACT_DRAWN }, 2);
+    // looks like SEND is left on the glass to press again. One frac, so the
+    // single button IS the lane.
+    actionRow(p, S.find("action band"), [{ label:"DONE", kind:"navigate", frac:1 }]);
   } else {
-    // DISCARD, at HALF SEND's width, and COLOR_WARN because there is a draft to
-    // lose. With no draft it is CLOSE and it is not a destructive control at
-    // all. Today's row is CANCEL and SEND at the same width 8 pixels apart,
-    // which is defect 2.
+    // THREE CONTROLS, fracs {1,1,2}: SEND takes half the lane and DISCARD a
+    // quarter, so SEND is EXACTLY twice DISCARD - which is what defect 2 asks
+    // for - and TYPE... still gets a full TAP_MIN band. DISCARD turns
+    // COLOR_WARN and relabels because there is a draft to lose; with no draft it
+    // is CLOSE and is not a destructive control at all. Label AND colour, never
+    // colour alone. Today's row is CANCEL and SEND at the same width 8px apart.
     actionRow(p, S.find("action band"), [
-      draft ? { label:"DISCARD", kind:"danger", cells:1 }
-            : { label:"CLOSE", kind:"navigate", cells:1 },
-      { label:"SEND", kind:"send", cells:2 },
+      draft ? { label:"DISCARD", kind:"danger", frac:1 }
+            : { label:"CLOSE", kind:"navigate", frac:1 },
+      { label:"TYPE...", kind:"navigate", frac:1 },
+      { label:"SEND", kind:"send", frac:2 },
     ]);
   }
 }
@@ -643,5 +674,6 @@ for (const b of [1,2]) {
 // new Function() wrapper. One list, two consumers, no second transcription.
 if (typeof globalThis !== "undefined") {
   globalThis.__X = { SCREENS, K, D, ADV, CELL, BAD_CHARS, P, TH, stack, colWidths,
-                     colX, colSpan, keyGap, EXCEPTIONS, ASK, DRAFT, PAGES, hardWrap };
+                     colX, colSpan, keyGap, ACT_GAP, EXCEPTIONS, ASK, DRAFT, PAGES,
+                     hardWrap };
 }
