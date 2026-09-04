@@ -3877,7 +3877,9 @@ void handleLine(const String& line) {
         // A HOLE. Clear rather than assemble a transcript with a gap in it: a
         // gap would read as the conversation having jumped, which is worse than
         // a named failure.
-        Serial.printf("SCROLL: seq %d, expected %d - fetch abandoned\n", seq, scrollNextSeq);
+        char m[64];
+        snprintf(m, sizeof(m), "SCROLL seqgap got=%d want=%d", seq, scrollNextSeq);
+        sendLineToHost(m);
         scrollReset();
         scrollPending = false;
         scrollFetchFailed = true;
@@ -3920,8 +3922,10 @@ void handleLine(const String& line) {
       if (seq + 1 >= of) {
         scrollPending = false;
         scrollY = scrollMaxY();              // opens at the NEWEST
-        Serial.printf("SCROLL: %d entries, %lu lines, %d dropped\n",
-                      scrollCount, (unsigned long) scrollTotalLines, scrollDropped);
+        char m[80];
+        snprintf(m, sizeof(m), "SCROLL done entries=%d lines=%lu dropped=%d",
+                 scrollCount, (unsigned long) scrollTotalLines, scrollDropped);
+        sendLineToHost(m);
       }
       if (scrollActive) drawScrollback();
       return;

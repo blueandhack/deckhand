@@ -136,7 +136,7 @@ bool scrollBegin() {
   if (!scrollText || !scrollIdx) {
     // Report the cause. From the Mac a failed allocation and a failed fetch look
     // identical, which is the class POWERPROBE's `not on battery` refusal exists for.
-    Serial.printf("SCROLL: PSRAM alloc failed (text=%p idx=%p)\n", scrollText, scrollIdx);
+    sendLineToHost("SCROLL allocfail");
     scrollEnd();
     return false;
   }
@@ -221,16 +221,22 @@ void requestScrollback(int idx) {
   // (`SCROLL: seq 0, expected 1`). Same defect POWERPROBE already documents,
   // and the same answer: re-issuing reports progress rather than restarting.
   if (scrollPending) {
-    Serial.printf("SCROLL: already fetching (%d/%d chunks, %lums) - ignoring\n",
-                  scrollChunksIn, scrollChunksOf, millis() - scrollFetchStart);
+    // Via sendLineToHost, NOT Serial.printf: with the cable out Serial reaches
+    // NOTHING, and a BLE-only session is exactly when a refusal needs to be
+    // visible. Same reason BATT goes through this helper.
+    char m[80];
+    snprintf(m, sizeof(m), "SCROLL busy chunks=%d/%d ms=%lu",
+             scrollChunksIn, scrollChunksOf, millis() - scrollFetchStart);
+    sendLineToHost(m);
     return;
   }
   // Already held: answer from PSRAM. The filter is part of the identity because
   // CHAT and ALL are different entry sets, so a toggle must genuinely re-fetch.
   if (scrollCount > 0 && histChatOnly == scrollLoadedChat &&
       strcmp(scrollLoadedId, sessions[idx].id) == 0) {
-    Serial.printf("SCROLL: already have %d entries for this session - not re-fetching\n",
-                  scrollCount);
+    char m[64];
+    snprintf(m, sizeof(m), "SCROLL held entries=%d", scrollCount);
+    sendLineToHost(m);
     scrollPending = false;
     scrollFetchFailed = false;
     return;
@@ -262,8 +268,10 @@ void tickScrollFetch() {
   if (!scrollPending) return;
   const unsigned long cap = usbLinkActive() ? SCROLL_FETCH_TIMEOUT_MS : SCROLL_FETCH_TIMEOUT_BLE_MS;
   if (millis() - scrollFetchStart < cap) return;
-  Serial.printf("SCROLL: fetch timed out after %lums (%d/%d chunks)\n",
-                millis() - scrollFetchStart, scrollChunksIn, scrollChunksOf);
+  char m[80];
+  snprintf(m, sizeof(m), "SCROLL timeout ms=%lu chunks=%d/%d",
+           millis() - scrollFetchStart, scrollChunksIn, scrollChunksOf);
+  sendLineToHost(m);
   scrollPending = false;
   scrollFetchFailed = true;
   if (scrollActive) drawScrollback();
