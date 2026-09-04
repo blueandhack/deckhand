@@ -246,7 +246,12 @@ const KB_MAX_BYTES = +KB_SRC.match(/KB_MAX_BYTES\s*=\s*(\d+)/)[1];
 // string, so a capture that stops at the first bare `}` truncates that row's
 // initializer at its own middle character instead of the array's actual close.
 // The embedded `}` here is followed by `|"`, never by `;`, so anchoring on `};`
-// finds the real end even though the naive form would not.
+// finds the real end for THIS source TODAY - it is a heuristic, not a proof:
+// a future row containing the literal two characters `};` would truncate the
+// same way the naive form does, and silently, since the match COUNT would
+// still come out at 3 (the truncated tail just never gets captured) - the
+// `KB_PAGE_ROWS.length !== 3` gate below would not catch it either. Revisit
+// this parse if a row ever needs to contain `};`.
 const KB_PAGE_ROWS = [...KB_SRC.matchAll(/const char\* KB_(?:ALPHA|SYM|SYM2)\[3\]\s*=\s*\{(.*?)\};/gs)];
 if (KB_PAGE_ROWS.length !== 3)
   throw new Error(`settings-geom-check: expected 3 key pages (KB_ALPHA/KB_SYM/KB_SYM2) parsed out of keyboard.ino, found ${KB_PAGE_ROWS.length}`);
@@ -2030,16 +2035,27 @@ for (const b of [1, 2]) {
       // EVERY PRINTABLE ASCII CODEPOINT REACHABLE, swept from the SAME
       // KB_PAGE_ROWS parse KB_ROW_CELLS derives from - not restated, so this is
       // provable against the source rather than against a description of it.
-      // SPACE and "." are row 3's own two characters (drawKbRow3/kbTouch, data
-      // rather than a KB_*[3] table) and are seeded here rather than hand-added
-      // as a blanket claim: relabelling the "." key once still reported "95 of
-      // 95" because "." also lives on KB_SYM's row 2 - seeding only the two row-3
-      // characters (not every character that happens to also appear elsewhere)
-      // keeps this sweep from hiding that class of bug again.
-      // (KB_PAGE_ROWS.length === 3 is asserted once, hard, at parse time above -
-      // a chk() here would be unreachable dead code, since a wrong count already
-      // throws before this line runs.)
-      const reach = new Set([" ", "."]);
+      // SPACE and "." are row 3's own two characters (drawKbRow3 draws them,
+      // kbTouch inserts them - there is no KB_*[3] table for row 3, it is data
+      // inline in the touch handler) and used to be hand-seeded here as
+      // `new Set([" ", "."])`. That is Task 1's exact bug in the half that
+      // matters: SPACE has nowhere else to come from, so a checker that
+      // ASSERTS it is reachable rather than reading it off the source proves
+      // nothing about SPACE - drop " " from a hand seed and the sweep still
+      // reports 95 of 95. "." is merely redundant (it also lives on KB_SYM's
+      // row 2), not load-bearing, but is derived the same way for the same
+      // reason. Parsed instead, from kbTouch's OWN BODY: bound via fnSrc (the
+      // parse gate is asserted FIRST - `!/re/.test("")` is true, so a claim
+      // over an unparsed function would pass vacuously), pulling the literal
+      // char out of every `kbInsert('X')` call kbTouch makes. The row 0-2
+      // branch calls `kbInsert(c)` with a variable, never a literal, so this
+      // only ever matches row 3's two calls.
+      const touchSrcForInsert = fnSrc(KB_SRC, "bool kbTouch");
+      chk(touchSrcForInsert.length > 0, "kbTouch's body was found in keyboard.ino (parse gate)");
+      const row3Chars = [...touchSrcForInsert.matchAll(/kbInsert\('([^'\\])'\)/g)].map((m) => m[1]);
+      chk(row3Chars.length === 2,
+          `kbTouch calls kbInsert with exactly 2 literal characters (SPACE and the row-3 dot), found ${row3Chars.length}: ${JSON.stringify(row3Chars)}`);
+      const reach = new Set(row3Chars);
       for (const m of KB_PAGE_ROWS)
         for (const lit of m[1].match(/"(?:[^"\\]|\\.)*"/g))
           for (const ch of parseCLit(lit)) {

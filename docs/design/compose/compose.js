@@ -347,7 +347,7 @@ const KB_MAX_BYTES_SHOWN = 150;   // the label only; check.mjs parses the real c
 // than being pulled up to fill row 1.
 const PAGES = [
   { name:"ABC",  pager:"?123", rows:["qwertyuiop","asdfghjkl","\u0001zxcvbnm\u0002"] },
-  { name:"SYM",  pager:"#+=",  rows:["1234567890","-_/:;()&@#",".,?!'\"+=\u0002"] },
+  { name:"SYM",  pager:"$%*",  rows:["1234567890","-_/:;()&@#",".,?!'\"+=\u0002"] },
   { name:"SYM2", pager:"ABC",  rows:["$%*<>[]{}|","\\^`~","\u0002"] },
 ];
 const KEY_SHIFT = "\u0001", KEY_DEL = "\u0002";

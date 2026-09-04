@@ -69,10 +69,15 @@ const int KB_R3_PAGE_W  = 2 * KB_PITCH;
 const int KB_R3_SPACE_W = 6 * KB_PITCH;
 // The page key's three labels, indexed by kbPage - what tapping it will switch
 // TO is what it shows, same convention the two-page ?123/ABC toggle always had.
+// "$%*" (not "2/2", a position indicator that breaks the preview pattern
+// ?123 sets on page 0, and not "#+=", which is genuinely on page 1 but never
+// on page 2 - it would preview the page you are LEAVING, not the one you are
+// going TO): all three characters are on KB_SYM2 and never on KB_SYM, so
+// "$%*" reads as a preview exactly the way "?123" and "ABC" already do.
 // All three are real labels, not the three-ASCII-dots ellipsis: "?123" is the
 // widest at 4 characters, which settings-geom-check.mjs measures against the
 // 2-cell key (KB_R3_PAGE_W).
-const char* KB_PAGE_LABEL[3] = { "?123", "2/2", "ABC" };
+const char* KB_PAGE_LABEL[3] = { "?123", "$%*", "ABC" };
 
 void kbKeyLabel(char c, char* out, size_t n) {
   // CAPS vs CAP is the whole distinction between locked and one-shot, in TEXT -
