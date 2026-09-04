@@ -17,22 +17,23 @@ node docs/design/compose/check.mjs --selftest  # proves the bind has teeth
 ## THIS CHECKER FAILS TODAY, BY NAME, AND THAT IS THE POINT
 
 `node docs/design/compose/check.mjs` **exits 1**, with 24 failures across both
-boards (26 at Task 1's commit; `KB_KEY_R` landed on both boards in Task 2 and
-is bound and agrees on both, so it dropped out of this table). Every one of
-the remaining 24 is a constant a later task of the compose plan adds or moves:
+boards (26 at Task 1's commit; `KB_KEY_R` landed on both boards in Task 2, and
+`KB_ACT_H`, `KB_ACT_Y`, `KB_ACT_DRAWN` and `KB_ACT_DY` in Task 3, so all five
+are bound and agree on both boards and dropped out of this table). Every one of
+the remaining 16 is a constant a later task of the compose plan adds or moves:
 
 | | board 1 | board 2 |
 |---|---|---|
-| **names no header defines yet** (8 each) | `KB_STRIP_Y` `KB_STRIP_H` `KB_ACT_DRAWN` `KB_ACT_DY` `COMPOSE_PROMPT_H` `COMPOSE_LEGEND_H` `COMPOSE_DRAFT_H` `COMPOSE_GAP` | the same eight |
-| **names still at their pre-compose value** | `KB_TEXT_Y` 4→24, `KB_ROWS_Y` 96→115, `KB_ROW_H` 44→41, `KB_ACT_Y` 276→280, `KB_ACT_H` 44→40 | `KB_TEXT_Y` 12→34, `KB_ACT_Y` 414→426, `KB_ACT_H` 58→46 |
+| **names no header defines yet** (6 each) | `KB_STRIP_Y` `KB_STRIP_H` `COMPOSE_PROMPT_H` `COMPOSE_LEGEND_H` `COMPOSE_DRAFT_H` `COMPOSE_GAP` | the same six |
+| **names still at their pre-compose value** | `KB_TEXT_Y` 4→24, `KB_ROWS_Y` 96→115, `KB_ROW_H` 44→41 | `KB_TEXT_Y` 12→34 |
 
-Tasks 3, 6 and 10 land the rest (Task 2 already landed `KB_KEY_R`). **Each
-failure goes green when its task does, and until then the checker prints the
-name.** That is the binding working, not a broken checker.
+Tasks 6 and 10 land the rest (Task 2 landed `KB_KEY_R`, Task 3 the four action-row
+names). **Each failure goes green when its task does, and until then the checker
+prints the name.** That is the binding working, not a broken checker.
 
-**This 24 is prose, not code** - it is not read by `check.mjs`, so it cannot
+**This 16 is prose, not code** - it is not read by `check.mjs`, so it cannot
 be kept in sync automatically; each task that resolves a `PENDING` entry must
-hand-correct it, the way this update did (26 → 24). The number to actually
+hand-correct it, the way this update did (26 → 24 → 16). The number to actually
 trust at any moment is the checker's own closing summary, which computes
 `waiting.length` and `unexpected.length` live from `PENDING` rather than
 restating them - run `node docs/design/compose/check.mjs` and read its last
@@ -188,13 +189,13 @@ so a gap that drifts moves an anchor and fails.
   from `CARD_W`. (The keyboard's two-control row is 69/139 rather than 69/138
   because the last column takes the remainder; only the three-control row is
   exact, and only that one is asserted as such.)
-- **`ACT_GAP` is the one number on this screen nothing binds.** `uiActionRow()`
-  does not exist in the firmware yet, so there is no literal to parse. **Task 3
-  should bind it** by parsing `const int gap = 8` out of `uiActionRow`'s body,
-  the way `settings-geom-check.mjs` already parses the severity spine's
-  `uiFillRound()` arguments. Until then the gap assertion catches the band
-  arithmetic drifting from the draw arithmetic — the bug the plan's own Step 4
-  warns about — but not the constant itself moving.
+- **`ACT_GAP` is bound as of Task 3.** `uiActionRow()` now exists, so `const int
+  gap = 8` is **parsed out of its body** — brace-matched from the definition,
+  with two parse gates asserted before the comparison — the way
+  `settings-geom-check.mjs` parses the severity spine's `uiFillRound()`
+  arguments. Changing the firmware's gap to 6 fails here by name (verified), on
+  top of the older assertion that the band arithmetic must not drift from the
+  draw arithmetic.
 - **On the reply panel, `CLR` is the only control allowed under `TAP_MIN`, and
   only in height.** Asserted directly as a set equality, so it fails both if
   something else goes sub-floor and if `CLR` stops being sub-floor. Its

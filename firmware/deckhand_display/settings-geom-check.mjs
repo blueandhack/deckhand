@@ -33,7 +33,7 @@
 //   node settings-geom-check.mjs             check both boards
 //   node settings-geom-check.mjs --selftest  prove the checker has teeth
 import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, DIR, evalInt, fieldBox, fnBody, stripComments,
-         lineHB, mcBox, PANEL, preflight, tlBox, widthB } from "./geom-common.mjs";
+         lineHB, mcBox, PANEL, preflight, splitArgs, tlBox, widthB } from "./geom-common.mjs";
 import fs from "fs";
 preflight();
 
@@ -141,6 +141,27 @@ function fnSrc(src, name) {
   return "";
 }
 
+// THE ACTION ROW'S GAP, READ OUT OF uiActionRow()'s OWN BODY. The mirror below
+// recomputes that function's column arithmetic, and a transcribed 8 would make
+// the mirror agree with itself no matter what the firmware drew. Bound to the
+// FUNCTION BODY through fnSrc's brace matching, not to the file: `const int gap`
+// could be declared by any neighbour. A THROW rather than a chk, the same shape
+// SPINE_ARGS uses - if the function is renamed, the fix is to move this parse
+// with it, not to leave the assertions below looking at nothing.
+// THE GAP'S VALUE IS ASSERTED ELSEWHERE: docs/design/compose/check.mjs compares
+// this same parse against the mock's ACT_GAP, and that is where moving the gap
+// fails by name. Here it only keeps the mirror describing the row the firmware
+// actually draws.
+const ACT_GAP = (() => {
+  const src = fnSrc(SRC_MAIN, "int uiActionRow");
+  if (!src.length) throw new Error("settings-geom-check: uiActionRow() not found in " +
+    "deckhand_display.ino - the action row's columns come from there, so move this parse with it");
+  const m = src.match(/const int gap\s*=\s*(\d+)/);
+  if (!m) throw new Error("settings-geom-check: uiActionRow()'s body no longer declares " +
+    "`const int gap = <n>` - the column mirror below would be measuring itself");
+  return +m[1];
+})();
+
 // THE SEVERITY SPINE'S DRAW GEOMETRY, READ OUT OF drawSeverityAction() rather than
 // restated. The four assertions this replaced constrained CONSTANTS only, under a
 // comment at the draw site claiming they bounded the draw CALL - and they did not:
@@ -211,8 +232,26 @@ function spineArg(c, n) {
 // running.
 const HOST_CAP = +fs.readFileSync(`${DIR}/../../host/voice-answer.mjs`, "utf8")
   .match(/ANSWER_TEXT_MAX_BYTES\s*=\s*(\d+)/)[1];
-const KB_MAX_BYTES = +fs.readFileSync(`${DIR}/keyboard.ino`, "utf8")
-  .match(/KB_MAX_BYTES\s*=\s*(\d+)/)[1];
+const KB_SRC = fs.readFileSync(`${DIR}/keyboard.ino`, "utf8");
+const KB_MAX_BYTES = +KB_SRC.match(/KB_MAX_BYTES\s*=\s*(\d+)/)[1];
+
+// THE FRACS, READ OUT OF drawKbActions() FOR THE SAME REASON. The mirror below
+// needs the proportion the firmware actually passes: with [1, 2] restated on the
+// checker's side, "SEND is at least twice the destructive control" is computed
+// from the checker's own numbers and CANNOT FAIL - relabelling the row {1, 1}
+// would leave it green. Parsed, that mutation fails by name.
+const KB_ACT_FRACS = (() => {
+  const src = fnSrc(KB_SRC, "void drawKbActions");
+  if (!src.length) throw new Error("settings-geom-check: drawKbActions() not found in keyboard.ino");
+  const m = src.match(/fracs\[[^\]]*\]\s*=\s*\{([^}]*)\}/);
+  if (!m) throw new Error("settings-geom-check: drawKbActions()'s body no longer declares a " +
+    "fracs[] initialiser - the column mirror below would be measuring itself");
+  const f = m[1].split(",").map((t) => +t.trim());
+  if (f.some((x) => !Number.isInteger(x) || x <= 0))
+    throw new Error(`settings-geom-check: drawKbActions()'s fracs parsed as [${m[1]}]`);
+  return f;
+})();
+
 const HIST_ARENA = +fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8")
   .match(/HIST_ARENA (\d+)/)[1];
 
@@ -1975,14 +2014,136 @@ for (const b of [1, 2]) {
     chk(c.KB_TEXT_Y + c.KB_TEXT_H <= c.KB_ROWS_Y, `text card ends ${c.KB_TEXT_Y + c.KB_TEXT_H - 1} above the keys at ${c.KB_ROWS_Y} (break ${c.KB_ROWS_Y - c.KB_TEXT_Y - c.KB_TEXT_H})`);
     chk(keysEnd <= c.KB_ACT_Y, `keys end ${keysEnd - 1} above the action row at ${c.KB_ACT_Y}`);
     chk(c.KB_ACT_Y + c.KB_ACT_H <= H, `action row ends ${c.KB_ACT_Y + c.KB_ACT_H - 1} inside the ${H}px panel`);
-    chk(c.KB_ACT_H === c.KB_ROW_H, `action row ${c.KB_ACT_H} == KB_ROW_H ${c.KB_ROW_H}`);
-    // The action row's two buttons, and the closed-window message sharing the lane.
-    const halfW = Math.floor((W - c.CARD_X * 2 - 8) / 2);
-    for (const l of ["CANCEL", "SEND"]) chk(widthB(b, T_BODY, l) + 8 <= halfW, `"${l}" ${widthB(b, T_BODY, l)}px inside a ${halfW}px half`);
-    const laneW = c.CARD_W - halfW - 8;
+    // THE ACTION ROW'S DRAWN/TESTED SPLIT (spec defect 9). `KB_ACT_H === KB_ROW_H`
+    // STOOD HERE AND IS GONE, and it is worth being exact about why: while the
+    // header said `const int KB_ACT_H = 44;  // == KB_ROW_H`, that assertion
+    // compared two literals and could fail - but what it certified was the defect
+    // itself, that the least-pressed control on the screen is as tall as a letter
+    // key. It was not broken by this change; it was the claim this change reverses.
+    chk(c.KB_ACT_H === c.TAP_MIN, `KB_ACT_H ${c.KB_ACT_H} == TAP_MIN ${c.TAP_MIN}`);
+    chk(c.KB_ACT_DRAWN === 2 * c.KB_LINE_PITCH,
+        `KB_ACT_DRAWN ${c.KB_ACT_DRAWN} == 2 * KB_LINE_PITCH ${2 * c.KB_LINE_PITCH}`);
+    chk(c.KB_ACT_DRAWN < c.KB_ACT_H,
+        `the drawn button ${c.KB_ACT_DRAWN} is strictly inside its ${c.KB_ACT_H}px band`);
+    chk(c.KB_ACT_DY * 2 + c.KB_ACT_DRAWN === c.KB_ACT_H,
+        `the button is centred: ${c.KB_ACT_DY} + ${c.KB_ACT_DRAWN} + ${c.KB_ACT_DY} == ${c.KB_ACT_H}`);
+    // Deliberately NOT the same claim as the `<= H` line above: H is geom-common's
+    // PANEL table and c.BOARD_H is the header's own #define, so a header whose
+    // BOARD_H stopped describing its panel fails one of the two and not the other.
+    // Both boards derive KB_ACT_Y from BOARD_H, so this has teeth against a WRONG
+    // LITERAL (the `= 276` this replaced) rather than against the derivation moving.
+    chk(c.KB_ACT_Y + c.KB_ACT_H <= c.BOARD_H,
+        `the action band ends ${c.KB_ACT_Y + c.KB_ACT_H} inside BOARD_H ${c.BOARD_H}`);
+    // THE TWO COLUMNS. uiActionRow()'s arithmetic, mirrored - with THE GAP PARSED
+    // OUT OF ITS BODY rather than restated, because an 8 on both sides is the
+    // transcription this repo's rules name: the firmware's gap could move to 6 and
+    // every number below would still agree with itself.
+    const fracs = KB_ACT_FRACS, fracTotal = fracs.reduce((t, f) => t + f, 0);
+    const lane2 = W - c.CARD_X * 2, avail = lane2 - ACT_GAP * (fracs.length - 1);
+    chk(fracs.length === 2,
+        `drawKbActions draws ${fracs.length} column(s) - the CANCEL/SEND reasoning below assumes 2`);
+    const wLeft = Math.trunc(avail * fracs[0] / fracTotal);
+    const xSend = c.CARD_X + wLeft + ACT_GAP, wSend = c.CARD_X + lane2 - xSend;
+    console.log(`    action band ${c.KB_ACT_Y}..${c.KB_ACT_Y + c.KB_ACT_H - 1}, button ${c.KB_ACT_DRAWN}px at +${c.KB_ACT_DY}; columns ${wLeft} + ${ACT_GAP} + ${wSend} = ${lane2} (lane ${lane2}, CARD_W ${c.CARD_W})`);
+    chk(lane2 === c.CARD_W,
+        `uiActionRow's lane ${lane2} (tft.width() - 2*CARD_X) == CARD_W ${c.CARD_W}`);
+    chk(wLeft + ACT_GAP + wSend === lane2,
+        `the row closes on the lane: ${wLeft} + ${ACT_GAP} + ${wSend} == ${lane2}`);
+    // fracs {1,2} means SEND is at least twice the destructive control, and over
+    // by at most the remainder the last column absorbs (board 1: 139 against 138,
+    // board 2: exactly 192). The fracs are PARSED, so relabelling the firmware's
+    // row {1, 1} - equal halves, which is what this task exists to end - fails
+    // here by name rather than agreeing with a pair restated on this side.
+    chk(wSend >= 2 * wLeft && wSend - 2 * wLeft <= ACT_GAP,
+        `SEND ${wSend}px is twice the destructive control's ${wLeft}px plus the ${wSend - 2 * wLeft}px remainder`);
+    // DISCARD is the new label and it has to fit the NARROWER column - the one
+    // risk the relabelling introduces.
+    for (const [l, w] of [["CANCEL", wLeft], ["DISCARD", wLeft], ["SEND", wSend]])
+      chk(widthB(b, T_BODY, l) + 8 <= w, `"${l}" ${widthB(b, T_BODY, l)}px inside its ${w}px column`);
+    // The closed-window message: SEND's own column is its lane now, and its budget
+    // is KB_ACT_DRAWN (the drawn button) rather than KB_ACT_H (the tested band) -
+    // it is centred where the SEND button it replaces stood.
     for (const why of ["NO LONGER READY", "WINDOW CLOSED - ANSWER ON YOUR MAC"]) {
-      const n = countWrappedLinesB(b, why, T_META, laneW - 8);
-      chk(n * c.KB_LINE_PITCH <= c.KB_ACT_H, `"${why}" wraps to ${n} line(s) = ${n * c.KB_LINE_PITCH}px inside the ${c.KB_ACT_H}px action row`);
+      const n = countWrappedLinesB(b, why, T_META, wSend - 8);
+      chk(n * c.KB_LINE_PITCH <= c.KB_ACT_DRAWN, `"${why}" wraps to ${n} line(s) = ${n * c.KB_LINE_PITCH}px in the ${wSend - 8}px lane, inside the ${c.KB_ACT_DRAWN}px DRAWN button (the band is ${c.KB_ACT_H})`);
+    }
+    if (b === 1) {
+      // THE STRUCTURAL HALF, and it is separate from the mirror above on purpose:
+      // the mirror proves the ARITHMETIC - it recomputes uiActionRow's columns in
+      // the checker's own terms, and beyond the gap and the fracs it parses, it
+      // would go on agreeing with itself while the firmware drew something else.
+      // These read the firmware's own text instead, and each is
+      // bound to a FUNCTION BODY rather than to the file, because a frac pair or a
+      // kbActW[] living next door satisfies a grep. The parse gates come first:
+      // !/re/.test("") is true, so every negative claim here would pass vacuously
+      // over a function that failed to parse. Board 1 only, since the source is
+      // the same for both and the assertion is about the source.
+      const actSrc = fnSrc(KB_SRC, "void drawKbActions");
+      const touchSrc = fnSrc(KB_SRC, "bool kbTouch");
+      const rowSrc = fnSrc(SRC_MAIN, "int uiActionRow");
+      chk(actSrc.length > 0, "drawKbActions parsed");
+      chk(touchSrc.length > 0, "kbTouch parsed");
+      chk(rowSrc.length > 0, "uiActionRow parsed");
+      // BOUND TO THE labels[]/tints[] INITIALISERS, not to the whole body, and
+      // that is a correction rather than a flourish: `/COLOR_WARN/.test(actSrc)`
+      // PASSED with the destructive tint deleted, because the closed-window
+      // message a few lines down draws in COLOR_WARN too. A rule a neighbouring
+      // line can satisfy is not a rule, even inside the right function.
+      const labelsInit = (actSrc.match(/labels\[[^\]]*\]\s*=\s*\{([^}]*)\}/) || ["", ""])[1];
+      const tintsInit = (actSrc.match(/tints\[[^\]]*\]\s*=\s*\{([^}]*)\}/) || ["", ""])[1];
+      chk(labelsInit.length > 0 && tintsInit.length > 0,
+          "drawKbActions' labels[] and tints[] initialisers parsed (gate)");
+      chk(/DISCARD/.test(labelsInit),
+          "drawKbActions' OWN labels[] relabels the destructive control to DISCARD - the label carries it, not the colour");
+      chk(/COLOR_WARN/.test(tintsInit),
+          "drawKbActions' OWN tints[] tints that control COLOR_WARN - label AND colour, never colour alone");
+      chk(/\{\s*1\s*,\s*2\s*\}/.test(actSrc),
+          "drawKbActions' OWN BODY gives SEND twice the destructive control's width");
+      chk(/uiActionRow\s*\(/.test(actSrc),
+          "drawKbActions' OWN BODY gets its columns from uiActionRow, not from arithmetic of its own");
+      // THE ONE-PLACE RULE, as two negatives and one positive. `halfW` in either
+      // body is the two-functions-two-derivations bug kbRowX0()'s comment names.
+      chk(!/halfW/.test(actSrc), "drawKbActions' OWN BODY no longer computes a halfW");
+      chk(!/halfW/.test(touchSrc), "kbTouch's OWN BODY no longer computes a halfW");
+      chk(/kbActX\[/.test(touchSrc) && /kbActW\[/.test(touchSrc),
+          "kbTouch's OWN BODY hit-tests the columns drawKbActions stored, so the draw and the test cannot disagree");
+      chk(/kbActW\[1\]/.test(actSrc),
+          "the closed-window message takes its lane from SEND's returned column, not from a second derivation");
+      chk(/countWrappedLines\(/.test(actSrc),
+          "the closed-window wrap is still MEASURED - it was `const int lines = 3;` once");
+      // READ OUT OF THE CALL'S ARGUMENTS, brace/paren-matched the way SPINE_ARGS
+      // reads the severity spine's uiFillRound() - and again a correction, not a
+      // flourish: `/KB_ACT_DRAWN/.test(actSrc)` PASSED with the whole uiActionRow
+      // call deleted, because the closed-window branch below names KB_ACT_DRAWN
+      // and KB_ACT_DY too. The arguments are the only place that says the row is
+      // TESTED at KB_ACT_H and DRAWN at KB_ACT_DRAWN, and that the bands it
+      // writes are the arrays kbTouch reads.
+      const callArgs = (() => {
+        const a = actSrc.indexOf("uiActionRow(");
+        if (a < 0) return [];
+        let depth = 0, j = a + "uiActionRow".length;
+        for (; j < actSrc.length; j++) {
+          if (actSrc[j] === "(") depth++;
+          else if (actSrc[j] === ")" && --depth === 0) break;
+        }
+        return depth === 0 ? splitArgs(actSrc.slice(a + "uiActionRow(".length, j)) : [];
+      })();
+      chk(callArgs.length === 11,
+          `drawKbActions' uiActionRow(...) call parsed into ${callArgs.length} argument(s), expected 11 (gate)`);
+      chk(callArgs[0] === "KB_ACT_Y" && callArgs[1] === "KB_ACT_H",
+          "drawKbActions' uiActionRow CALL places the row at KB_ACT_Y and hands it KB_ACT_H as the TESTED band");
+      chk(callArgs[2] === "KB_ACT_DRAWN" && callArgs[3] === "KB_ACT_DY",
+          "drawKbActions' uiActionRow CALL draws KB_ACT_DRAWN tall, inset by KB_ACT_DY - the split, at the call site");
+      chk(callArgs[9] === "kbActX" && callArgs[10] === "kbActW",
+          "drawKbActions' uiActionRow CALL writes its bands into the very arrays kbTouch hit-tests");
+      chk(/KB_ACT_H/.test(touchSrc) && !/KB_ACT_DRAWN/.test(touchSrc),
+          "kbTouch tests the BAND (KB_ACT_H) and not the drawn button - the 7px of air belongs to the control");
+      // The gap-swallow and the remainder, in uiActionRow's own body: these two
+      // lines are the whole of "no dead strip" and "the row closes on the lane".
+      chk(/outW\[i\]\s*=\s*w\s*\+\s*\(last\s*\?\s*0\s*:\s*gap\)/.test(rowSrc),
+          "uiActionRow's OWN BODY makes every zone swallow the gap to its right");
+      chk(/last\s*\?\s*\(CARD_X\s*\+\s*lane\s*-\s*x\)/.test(rowSrc),
+          "uiActionRow's OWN BODY gives the remainder to the last column, so the row closes on the lane");
     }
     // THE PEEK OVERLAY, and its three STACKED ROWS. The rows are what needed adding:
     // they were the literals 8 / 22 / 40 in drawKbPeek(), and drawString paints an

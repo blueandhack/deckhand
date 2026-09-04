@@ -281,45 +281,69 @@ void drawKbText() {
   tft.setTextDatum(TL_DATUM);
 }
 
+// THE TESTED BANDS, written by drawKbActions() and read by kbTouch(). Two
+// functions computing `halfW` inline is exactly the disagreement kbRowX0()'s
+// comment warns about; uiActionRow() is now the single place either one gets a
+// column from, and these are where the answer is kept. Zero-width until the row
+// has been drawn once, which kbTouch() treats as "no control here" rather than
+// as column 0.
+const int KB_ACT_COLS = 2;
+int kbActX[KB_ACT_COLS] = {0, 0}, kbActW[KB_ACT_COLS] = {0, 0};
+
 void drawKbActions() {
-  int halfW = (tft.width() - CARD_X * 2 - 8) / 2;
   // OUTLINED, where both buttons used to be filled and so had no hierarchy.
-  // SEND is what you came here to do, and CANCEL is the one that throws away a
-  // sentence you spent a minute typing - the same reasoning the confirm dialog
-  // uses when it refuses to make a destructive choice the easiest thing to hit.
-  uiButton(CARD_X, KB_ACT_Y, halfW, KB_ACT_H, "CANCEL", COLOR_ACCENT, false, COLOR_BG);
+  // SEND is what you came here to do, and the left key is the one that throws
+  // away a sentence you spent a minute typing - the same reasoning the confirm
+  // dialog uses when it refuses to make a destructive choice the easiest thing
+  // to hit. Now it is not the same SIZE either: fracs {1, 2} gives SEND twice
+  // the width, where the two used to be equal halves 8px apart.
+  // LABEL AND COLOUR, never colour alone (kbKeyLabel's CAPS/CAP comment states
+  // the rule): with a draft to lose the left key says DISCARD in COLOR_WARN,
+  // and with an empty buffer it is CANCEL and destroys nothing.
+  const bool draft = kbLen > 0;
+  const char* labels[KB_ACT_COLS] = { draft ? "DISCARD" : "CANCEL",
+                                      kbWindowClosed ? nullptr : "SEND" };
+  // An empty answer would reach Claude as a blank deny message, which reads as
+  // a refusal with no reason. Offer SEND only when there is something to send.
+  const uint16_t tints[KB_ACT_COLS] = { draft ? COLOR_WARN : COLOR_ACCENT,
+                                        draft ? COLOR_GOOD : COLOR_LABEL };
+  const uint8_t fills[KB_ACT_COLS] = { 0, (uint8_t)(draft ? 1 : 0) };
+  const uint8_t fracs[KB_ACT_COLS] = {1, 2};
+  uiActionRow(KB_ACT_Y, KB_ACT_H, KB_ACT_DRAWN, KB_ACT_DY, labels, tints, fills,
+              fracs, KB_ACT_COLS, kbActX, kbActW);
   if (kbWindowClosed) {
     // The prompt expired or was answered on the Mac. The text STAYS - throwing
     // away a sentence someone spent a minute on, with no explanation, is the
     // worst outcome available here - but SEND is withheld because it cannot work.
-    // The message is 34 characters (204px on board 1, 272 here) but its lane -
-    // right of CANCEL, clear of the 8px gap - is only halfW (104px on board 1,
-    // 144 here) wide: a single MC_DATUM
-    // line here used to run off the screen edge AND rub out CANCEL's right
-    // half with its own opaque background box. Wrapped to the lane instead,
-    // same rule CLAUDE.md states for the confirm dialog's card text. Measured
-    // (see the task report): wraps to exactly 3 lines on BOTH boards - 39px in
-    // board 1's 44px row, 48px in board 2's 58px one - with room to spare.
-    int laneX = CARD_X + halfW + 8, laneW = CARD_W - halfW - 8;
+    // The message is 34 characters (204px on board 1, 272 here) and its lane is
+    // SEND's OWN COLUMN, taken from what uiActionRow() just returned rather than
+    // re-derived: a single MC_DATUM line here used to run off the screen edge AND
+    // rub out CANCEL's right half with its own opaque background box. Wrapped to
+    // the lane instead, same rule CLAUDE.md states for the confirm dialog's card
+    // text. It was halfW - 104px on board 1, 144 here - and is now the wider
+    // SEND column: 139 and 192, less the 4px inset on each side.
+    const int laneX = kbActX[1], laneW = kbActW[1];
     // Clear first: SEND (a full uiButton fill) or an earlier draw of this same
     // message may have left pixels here that the new wrapped text won't cover -
-    // it's narrower than the lane at every line.
+    // it's narrower than the lane at every line. The clear is the full BAND,
+    // not the drawn button: uiActionRow only ever inks the button, so anything
+    // left in the 7px above or below it would survive a smaller clear.
     tft.fillRect(laneX, KB_ACT_Y, laneW, KB_ACT_H, COLOR_BG);
     // In message mode the prompt did not expire - the SESSION stopped being READY,
     // and "answer on your Mac" would be answering a question nobody asked.
     const char* why = kbIsMessage() ? "NO LONGER READY" : "WINDOW CLOSED - ANSWER ON YOUR MAC";
     // MEASURED, not hardcoded. This was `const int lines = 3;` beside a comment
     // telling the next person to re-measure when the string changed - exactly the
-    // instruction that gets missed, and there are two strings now.
+    // instruction that gets missed, and there are two strings now. RE-MEASURED
+    // for the wider lane and the shorter box: 2 lines on both boards, which is
+    // 26px in board 1's KB_ACT_DRAWN 26 and 32px in board 2's 32 - exactly full,
+    // and settings-geom-check.mjs asserts that against KB_ACT_DRAWN per board.
     int lines = countWrappedLines(why, T_META, laneW - 8);
-    int y = KB_ACT_Y + (KB_ACT_H - lines * KB_LINE_PITCH) / 2;
+    // Centred in the DRAWN box, not the band: the message stands where the SEND
+    // button it replaces stood, so the row keeps one baseline.
+    int y = KB_ACT_Y + KB_ACT_DY + (KB_ACT_DRAWN - lines * KB_LINE_PITCH) / 2;
     drawWrappedText(why, laneX + 4, y, T_META, KB_LINE_PITCH, laneW - 8, 0, lines,
                     COLOR_WARN, COLOR_BG);
-  } else {
-    // An empty answer would reach Claude as a blank deny message, which reads as
-    // a refusal with no reason. Offer SEND only when there is something to send.
-    uiButton(CARD_X + halfW + 8, KB_ACT_Y, halfW, KB_ACT_H, "SEND",
-             kbLen > 0 ? COLOR_GOOD : COLOR_LABEL, kbLen > 0, COLOR_BG);
   }
 }
 
@@ -457,15 +481,26 @@ bool kbTouch(int sx, int sy) {
     drawKeyboard();
     return true;
   }
+  // THE ACTION BAND. sy is tested against KB_ACT_H (the band, TAP_MIN) and NOT
+  // against KB_ACT_DRAWN: the drawn button is 26/32px of that band and the 7px
+  // of air above and below it belong to the control, which is the whole point of
+  // the split. sx is tested against the columns drawKbActions() stored, so the
+  // hit test cannot disagree with the draw - it used to recompute halfW here,
+  // inline, a second time. Each column already SWALLOWS the 8px gap to its
+  // right, so the strip between the two buttons lands on the left one instead of
+  // being dead, and the last column closes on the lane.
   if (sy >= KB_ACT_Y && sy < KB_ACT_Y + KB_ACT_H) {
-    int halfW = (tft.width() - CARD_X * 2 - 8) / 2;
-    if (sx < CARD_X + halfW) { closeKeyboard(); return true; }
-    if (!kbWindowClosed && kbLen > 0 && sx >= CARD_X + halfW + 8) {
-      if (kbIsMessage()) sendPromptToHost();
-      else sendTypedAnswerToHost();
-      return true;
+    for (int i = 0; i < KB_ACT_COLS; i++) {
+      if (kbActW[i] <= 0) continue;            // the row has not been drawn yet
+      if (sx < kbActX[i] || sx >= kbActX[i] + kbActW[i]) continue;
+      if (i == 0) { closeKeyboard(); return true; }
+      if (!kbWindowClosed && kbLen > 0) {
+        if (kbIsMessage()) sendPromptToHost();
+        else sendTypedAnswerToHost();
+      }
+      return true;               // SEND's column with nothing to send: swallow
     }
-    return true;                 // swallow taps in the gap rather than guessing
+    return true;                 // the margins outside the lane, likewise
   }
   // The text card: a tap peeks the prompt. It used to be inert, which is what
   // made the question unreachable once you had typed a character.

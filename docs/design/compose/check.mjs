@@ -22,9 +22,11 @@
 // ===========================================================================
 // THIS CHECKER IS EXPECTED TO FAIL TODAY, BY NAME, AND THAT IS THE DELIVERABLE.
 // ===========================================================================
-// As of Task 2, eight of K's names do not exist in either header yet (KB_KEY_R
-// landed and is no longer among them) and five more still hold their
-// pre-compose values; tasks 3, 6 and 10 of the compose plan add and move them.
+// As of Task 3, six of K's names do not exist in either header yet (KB_KEY_R
+// landed in Task 2, and KB_ACT_DRAWN/KB_ACT_DY in Task 3, so none of the three
+// is among them any more) and four more still hold their pre-compose values -
+// three on board 1 and one on board 2, KB_ACT_Y and KB_ACT_H having moved in
+// Task 3 on both. Tasks 6 and 10 of the compose plan add and move the rest.
 // Until each lands, the bind below fails and PRINTS THE NAME. That
 // is the binding working. There is deliberately no "not yet defined" escape
 // hatch: an assertion that can be satisfied by the constant's absence is an
@@ -54,10 +56,45 @@ const { SCREENS, K, D, ADV, CELL, BAD_CHARS, P, stack, colWidths, colX, colSpan,
 const HEADER = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 
 // ===========================================================================
+// ACT_GAP, NOW BOUND. It was the one number on this screen nothing bound: the
+// mock stated `const ACT_GAP = 8` and so did nothing else, because
+// uiActionRow() did not exist. Task 3 added it with `const int gap = 8` inside
+// its body, so the literal is PARSED out of that body here rather than
+// transcribed - the same shape as settings-geom-check.mjs' extraction of the
+// severity spine's uiFillRound() arguments out of drawSeverityAction(). A
+// hardcoded 8 on both sides is a transcription: moving the firmware's gap to 6
+// would leave every gap assertion in this file green while the row it describes
+// had changed.
+//
+// BOUND TO THE FUNCTION BODY, not to the file: `const int gap = 8` appears
+// nowhere else today, but a grep over deckhand_display.ino would be satisfied by
+// any neighbouring declaration that happened to use the same name. The body is
+// brace-matched from the definition, and the two parse gates below run BEFORE
+// the comparison, because a parse that silently returned "" makes the regex
+// below match nothing and the comparison meaningless.
+// ===========================================================================
+const FW_SRC = fs.readFileSync(DIR + "../../../firmware/deckhand_display/deckhand_display.ino", "utf8")
+  .replace(/^[ \t]*\/\/.*$/gm, "");            // a commented-out gap is not a gap
+const ACT_ROW_SRC = (() => {
+  const i = FW_SRC.indexOf("int uiActionRow(");
+  if (i < 0) return "";
+  const open = FW_SRC.indexOf("{", i);
+  if (open < 0) return "";
+  let depth = 0;
+  for (let j = open; j < FW_SRC.length; j++) {
+    if (FW_SRC[j] === "{") depth++;
+    else if (FW_SRC[j] === "}" && --depth === 0) return FW_SRC.slice(i, j + 1);
+  }
+  return "";
+})();
+const FW_ACT_GAP = (ACT_ROW_SRC.match(/const int gap\s*=\s*(\d+)/) || [])[1];
+
+// ===========================================================================
 // PENDING - the bind failures a later task is expected to fix, keyed on
 // `board:name` and pinning BOTH VALUES: [ what this mock targets, what the
 // header holds TODAY ] with null meaning "the header does not define the name
-// at all". 24 as of Task 2 (26 at Task 1, minus KB_KEY_R x2 boards) - THIS
+// at all". 16 as of Task 3 (26 at Task 1; minus KB_KEY_R x2 boards in Task 2,
+// minus KB_ACT_H, KB_ACT_Y, KB_ACT_DRAWN and KB_ACT_DY x2 boards here) - THIS
 // COUNT IS PROSE, not read by any assertion, so each task that lands an entry
 // must hand-correct it: Object.keys(PENDING).length is printed live in the
 // closing summary below, which is the number to trust if this one goes stale.
@@ -88,8 +125,6 @@ const HEADER = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 const PENDING = {
   "1:KB_STRIP_Y":       [4,   null],
   "1:KB_STRIP_H":       [17,  null],
-  "1:KB_ACT_DRAWN":     [26,  null],
-  "1:KB_ACT_DY":        [7,   null],
   "1:COMPOSE_PROMPT_H": [52,  null],
   "1:COMPOSE_LEGEND_H": [16,  null],
   "1:COMPOSE_DRAFT_H":  [21,  null],
@@ -97,19 +132,13 @@ const PENDING = {
   "1:KB_TEXT_Y":        [24,  4],
   "1:KB_ROWS_Y":        [115, 96],
   "1:KB_ROW_H":         [41,  44],
-  "1:KB_ACT_Y":         [280, 276],
-  "1:KB_ACT_H":         [40,  44],
   "2:KB_STRIP_Y":       [6,   null],
   "2:KB_STRIP_H":       [20,  null],
-  "2:KB_ACT_DRAWN":     [32,  null],
-  "2:KB_ACT_DY":        [7,   null],
   "2:COMPOSE_PROMPT_H": [77,  null],
   "2:COMPOSE_LEGEND_H": [19,  null],
   "2:COMPOSE_DRAFT_H":  [24,  null],
   "2:COMPOSE_GAP":      [8,   null],
   "2:KB_TEXT_Y":        [34,  12],
-  "2:KB_ACT_Y":         [426, 414],
-  "2:KB_ACT_H":         [46,  58],
 };
 
 // ---- the assertion machinery ----------------------------------------------
@@ -163,6 +192,16 @@ function run() {
     chk(Number.isFinite(KBF[b].KB_MAX_BYTES), "parse",
         `keyboard.ino's KB_MAX_BYTES did not parse for board ${b} (got ${KBF[b].KB_MAX_BYTES})`);
   }
+  // The gap's parse gates, ahead of the comparison that depends on them.
+  chk(ACT_ROW_SRC.length > 0, "parse",
+      `uiActionRow()'s body was not found in deckhand_display.ino - if the function was renamed `
+    + `or moved, move this parse with it rather than leaving the gap assertion looking at nothing`);
+  chk(FW_ACT_GAP !== undefined, "parse",
+      `uiActionRow()'s OWN BODY no longer declares "const int gap = <n>" - the mock's ACT_GAP `
+    + `has nothing to bind to, so every gap assertion below would be measuring itself`);
+  chk(+FW_ACT_GAP === ACT_GAP, "act",
+      `the mock's ACT_GAP is ${ACT_GAP}, uiActionRow()'s own body says ${FW_ACT_GAP} - the row `
+    + `the mock draws and the row the firmware draws are not the same row`);
 
   // ---- 1. the two-board header bind ---------------------------------------
   // For each board, every name in K[b] must be a constant that board's header
@@ -777,7 +816,7 @@ const waiting = r.msgs.filter(m => r.excused.has(m));
 const unexpected = r.msgs.filter(m => !r.excused.has(m));
 
 console.log(`\n${r.n - failed} of ${r.n} assertions passed, ${failed} failed`);
-console.log(`  ${waiting.length} waiting on a later task (tasks 2, 3, 6, 10 add or move the constant):`);
+console.log(`  ${waiting.length} waiting on a later task (tasks 6 and 10 add or move the constant):`);
 console.log(`    names no header defines yet: ${pendingMissing.join(" ") || "(none)"}`);
 console.log(`    names still at their pre-compose value: ${pendingStale.join(" ") || "(none)"}`);
 console.log(`  ${unexpected.length} UNEXPECTED - this is the number that must be zero:`);

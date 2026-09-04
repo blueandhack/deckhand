@@ -511,14 +511,14 @@ function drawKeyboard(p, opt = {}) {
 // text onto the draft line, making the design's own 20% case the hardest thing
 // on the screen to hit. The cells were the mistake, not the third control.
 //
-// ACT_GAP IS THE ONE NUMBER ON THIS SCREEN NOTHING BINDS, and it is stated here
-// rather than left implied. uiActionRow() does not exist in the firmware yet -
-// Task 3 adds it, with `const int gap = 8` inside its body - so there is nothing
-// for check.mjs to parse. TASK 3 SHOULD BIND IT, by parsing that literal out of
-// uiActionRow()'s body the way settings-geom-check.mjs already parses the
-// severity spine's uiFillRound() arguments. Until then the gap assertion below
-// only catches the band arithmetic drifting from the DRAW arithmetic - which is
-// the bug the plan's own Step 4 warns about - and not the constant itself moving.
+// ACT_GAP WAS THE ONE NUMBER ON THIS SCREEN NOTHING BOUND, and it is bound now:
+// Task 3 landed uiActionRow() with `const int gap = 8` inside its body, and
+// check.mjs PARSES that literal out of the body - brace-matched from the
+// definition, with the parse gated first - the way settings-geom-check.mjs
+// parses the severity spine's uiFillRound() arguments. So the gap assertions
+// below no longer merely catch the band arithmetic drifting from the DRAW
+// arithmetic (the bug the plan's own Step 4 warns about): moving the firmware's
+// gap now fails here by name.
 const ACT_GAP = 8;
 function actionRow(p, band, spec) {
   const k = p.k;

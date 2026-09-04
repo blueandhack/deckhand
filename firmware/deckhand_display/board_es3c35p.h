@@ -2402,7 +2402,10 @@ const int KB_LINE_PITCH = 16;                  // Spleen 8x16's cell - text-deri
 // is a fixed grid plus a provably 5-line card, so there is nothing here to add:
 //
 //   12 (top margin) + 120 (card) + 38 (break) + 232 (4 rows * 58)
-//   + 12 (gap) + 58 (action row) + 8 (bottom margin) = 480
+//   + 24 (gap) + 46 (action band) + 8 (bottom margin) = 480
+//
+// The gap above the action row was 12 while KB_ACT_H was 58; the 12px that band
+// gave back went there, because KB_ACT_Y is anchored to the bottom margin.
 //
 // The 38px BREAK is a RESIDUAL, not a chosen number: it is what is left once every
 // other term is fixed by something else (the card by its 5 lines at a 16px cell,
@@ -2414,8 +2417,19 @@ const int KB_LINE_PITCH = 16;                  // Spleen 8x16's cell - text-deri
 // KB_ROWS_Y itself does not move, so the key grid, the action row and every touch
 // band below the card are untouched by this.
 const int KB_ROWS_Y = 170;                     // 4 rows * 58 = 232, ending 401
-const int KB_ACT_Y  = 414;                     // 414..471, 8px above the panel edge
-const int KB_ACT_H  = 58;                      // == KB_ROW_H, as on board 1
+// THE ACTION ROW, drawn and tested separately - the split the keys already have
+// (KB_KEY_W in KB_PITCH, KB_ROW_H - 4 in KB_ROW_H) and this row never did.
+// TESTED stays TAP_MIN: CANCEL and SEND are the two taps that must not miss.
+// DRAWN is TEXT-DERIVED at 2 * KB_LINE_PITCH - one cell for the glyph, one for
+// the air - which is 32px = 4.93mm, against the 58px = 8.94mm this row painted
+// while a letter key, pressed up to 150 times, gets 4.62mm of width. Same four
+// expressions as board 1, and the same 7px of air above and below the button:
+// that fell out of the two boards' pitches rather than being arranged.
+// KB_ACT_Y keeps this board's 8px bottom margin rather than sitting on the edge.
+const int KB_ACT_H     = TAP_MIN;                 // 46, the tested band
+const int KB_ACT_DRAWN = 2 * KB_LINE_PITCH;       // 32
+const int KB_ACT_DY    = (KB_ACT_H - KB_ACT_DRAWN) / 2;   // 7
+const int KB_ACT_Y     = BOARD_H - 8 - KB_ACT_H;  // 426..471, was 414
 // The peek overlay covers the keys and the action row but NEVER the text card, so
 // its height is BOARD_H - KB_ROWS_Y - 4 = 306. Its three stacked rows were the
 // literals 8 / 22 / 40 in drawKbPeek(), and at a 16px cell the middle one was a

@@ -814,6 +814,47 @@ void uiKeyCap(int x, int y, int w, int h, const char* label,
   tft.setTextDatum(TL_DATUM);
 }
 
+// Proportional columns, which is how the destructive control stops being the
+// same size as SEND: fracs {1,2} makes SEND twice DISCARD's width. The band
+// (outX/outW) is wider than the button and is what the caller hit-tests.
+//
+// THE BAND AND THE BUTTON COME FROM HERE AND NOWHERE ELSE. drawKbActions() and
+// kbTouch() each computed `halfW` inline, in two functions - the bug class
+// kbRowX0()'s own comment names ("the hit test and the draw must both derive x
+// from the same place or a tap lands one key off"). The caller stores what this
+// writes and tests against that, so the drawn row and the tested row cannot
+// disagree.
+//
+// Each zone SWALLOWS THE GAP TO ITS RIGHT, so there is no dead strip between two
+// buttons - the same rule kbTouch() applies to KB_PITCH, where the 2px gap
+// belongs to the key on its left. The LAST column takes the remainder, so the
+// row closes on the lane exactly rather than leaving a 1-2px sliver at the edge
+// (69 + 8 + 139 = 216 on board 1, 96 + 8 + 192 = 296 here).
+//
+// A NULL label computes the band and draws NOTHING. The closed-window branch of
+// drawKbActions() owns SEND's column and writes its own wrapped message there;
+// without this it would have to paint over a SEND button that was drawn one
+// instruction earlier, which is a visible flash of a control that cannot work.
+int uiActionRow(int y, int band, int drawn, int dy, const char* const* labels,
+                const uint16_t* tints, const uint8_t* fills, const uint8_t* fracs,
+                int n, int* outX, int* outW) {
+  const int gap = 8, lane = tft.width() - CARD_X * 2;
+  int total = 0;
+  for (int i = 0; i < n; i++) total += fracs[i];
+  const int avail = lane - gap * (n - 1);
+  int x = CARD_X;
+  for (int i = 0; i < n; i++) {
+    const bool last = (i == n - 1);
+    const int w = last ? (CARD_X + lane - x) : (avail * fracs[i] / total);
+    if (labels[i]) uiButton(x, y + dy, w, drawn, labels[i], tints[i], fills[i], COLOR_BG);
+    outX[i] = x;
+    outW[i] = w + (last ? 0 : gap);
+    x += w + gap;
+  }
+  (void)band;   // the caller's own hit test owns the band's HEIGHT; see kbTouch()
+  return n;
+}
+
 // Boolean control. The LABEL changes with state as well as the fill, so it
 // reads correctly without colour.
 void uiToggle(int x, int y, int w, int h, const char* onLabel, const char* offLabel, bool on) {
@@ -4398,7 +4439,17 @@ void handleLine(const String& line) {
     }
     kbSessionIdx = idx;
     bool gone = (idx < 0);
-    if (gone != kbWindowClosed) { kbWindowClosed = gone; drawKbActions(); }
+    // The band is cleared on the TRANSITION, before the row is redrawn: the
+    // closed-window message fills KB_ACT_DRAWN exactly and the button that
+    // replaces it has rounded corners, so a few px of the old message's first
+    // line would otherwise survive inside a corner the fill does not reach.
+    // Only on the flip, never per keystroke - a clear-then-redraw of a live row
+    // is the flicker this firmware redraws by value to avoid.
+    if (gone != kbWindowClosed) {
+      kbWindowClosed = gone;
+      tft.fillRect(CARD_X, KB_ACT_Y, tft.width() - CARD_X * 2, KB_ACT_H, COLOR_BG);
+      drawKbActions();
+    }
     drawKbText();          // countdown ticks down
     return;
   }

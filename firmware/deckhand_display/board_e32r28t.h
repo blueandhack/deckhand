@@ -705,16 +705,28 @@ const int KB_TEXT_LINES = 5;                   // ceil(KB_MAX_BYTES / KB_COLS)
 // row - found twice, fixed once. The meta row and the text lines share no pixel
 // row: meta inks +10..+22, lines at 26/39/52/65/78 (the last ending ~90, 2px
 // inside the card).
-// 4 (top) + 88 (text, 4..91) + 4 (gap) + 176 (4 rows * 44, 96..271) + 4 (gap)
-// + 44 (actions, 276..319) = 320 exactly - this board has no spare row at all.
+// 4 (top) + 88 (text, 4..91) + 4 (gap) + 176 (4 rows * 44, 96..271) + 8 (gap)
+// + 40 (actions, 280..319) = 320 exactly - this board has no spare row at all.
+// The break above the action row was 4 while KB_ACT_H was 44; the 4px the band
+// gave back went there, because KB_ACT_Y is anchored to the panel's bottom edge.
 const int KB_TEXT_Y  = 4;
 const int KB_TEXT_H  = 88;
 const int KB_META_DY = 6;                      // meta row, from the card top
 const int KB_LINE0_DY = 22;                    // first wrapped line, from the card top
 const int KB_LINE_PITCH = 13;                  // Cozette's cell - text-derived
 const int KB_ROWS_Y = 96;
-const int KB_ACT_Y  = 276;
-const int KB_ACT_H  = 44;                      // == KB_ROW_H
+// THE ACTION ROW, drawn and tested separately - the split the keys already have
+// (KB_KEY_W in KB_PITCH, KB_ROW_H - 4 in KB_ROW_H) and this row never did.
+// TESTED stays TAP_MIN: CANCEL and SEND are the two taps that must not miss.
+// DRAWN is TEXT-DERIVED at 2 * KB_LINE_PITCH - one cell for the glyph, one for
+// the air - which is 26px = 4.62mm, against the 44px = 7.82mm this row painted
+// while a letter key, pressed up to 150 times, gets 4.27mm of width.
+// The 4px freed is what pays for KB_STRIP_H in Task 6; board 1 has 12 spare
+// pixels in 320 and this is where the twelfth comes from.
+const int KB_ACT_H     = TAP_MIN;                 // 40, the tested band
+const int KB_ACT_DRAWN = 2 * KB_LINE_PITCH;       // 26
+const int KB_ACT_DY    = (KB_ACT_H - KB_ACT_DRAWN) / 2;   // 7
+const int KB_ACT_Y     = BOARD_H - KB_ACT_H;      // 280, was 276
 // The peek overlay's three stacked rows, and its line budget. These were the
 // literals 8 / 22 / 40 at drawKbPeek()'s call sites; they are constants now because
 // drawString paints an OPAQUE box one full cell tall, so at a 16px cell a title at
