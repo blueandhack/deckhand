@@ -2645,6 +2645,24 @@ const int SCROLL_TAIL_BYTES_BLE = 8192;
 // stops the host putting a second chunk in flight before the first is drained.
 const int SCROLL_WIRE_CHUNK_BYTES = 12000;
 
+// AND A MUCH SMALLER ONE FOR BLE, because the constraint there is not a buffer
+// size at all - it is that NOTHING FLOW-CONTROLS THE RADIO. sendOverBle writes
+// `withoutResponse` in 20-byte packets, and noble's mac binding fires the JS
+// write completion immediately after calling -[CBPeripheral writeValue:], so
+// over-the-air completion is not observable through it at all (see the two-Mac
+// airtime note). The host therefore dumps every packet of a chunk into
+// CoreBluetooth's queue at once, and that queue has no back-pressure: a 7531-byte
+// line is 377 packets, they are dropped, and the device sees a truncated line,
+// fails the JSON parse, and reports "could not reach the Mac" 40 seconds later.
+// MEASURED THE HARD WAY - a real finger on the glass with the cable out.
+//
+// 800 is not a guess: the ordinary tick payload is ~779 bytes and crosses THIS
+// link every 5 seconds reliably, so it is the burst size this transport is known
+// to survive. At 800 the BLE tail is ~11 chunks, each one ACKED before the next
+// goes out, which is the flow control the radio does not provide - the same
+// answer the USB RX ring needed, and the same one board 1's audio path reached.
+const int SCROLL_WIRE_CHUNK_BLE_BYTES = 800;
+
 const int SCROLL_FETCH_TIMEOUT_MS     = 20000;
 const int SCROLL_FETCH_TIMEOUT_BLE_MS = 40000;
 

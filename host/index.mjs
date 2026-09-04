@@ -1547,7 +1547,24 @@ async function sendHistory(id, filter, want, budget) {
 // Bounded by feedChar's 16000-byte line guard. The device's RX ring is the other
 // ceiling and is raised to 16384 on board 2 for exactly this - see the header.
 const SCROLL_WIRE_CHUNK_BYTES = 12000;
-const SCROLL_ACK_TIMEOUT_MS = 4000;
+const SCROLL_WIRE_CHUNK_BLE_BYTES = 800;   // mirrors board_es3c35p.h
+const BLE_SCROLL_PACE_MS = 30;             // ~one packet per connection interval
+// THE HOST CLAMPS WHAT BLE IS ASKED FOR, rather than trusting the device's
+// budget. The device requests SCROLL_TAIL_BYTES_BLE (8192), which at this link's
+// ~666 B/s is over twelve seconds of radio before anything appears - long enough
+// that a person reasonably concludes it has failed. 3000 is about four or five
+// recent messages and lands in ~5s, and the top of the scroll already states how
+// many older ones were not kept. The device's number stays the upper bound; this
+// is the transport's own limit, which only the host knows.
+const SCROLL_TAIL_BLE_SERVED = 3000;
+// Per transport, because a BLE chunk's airtime dwarfs a USB one: 800 bytes at
+// ~666 B/s is ~1.2s of radio before the device can even parse it, and the ack
+// then has to travel back. 4s would time out on a link that is working fine.
+const SCROLL_ACK_TIMEOUT_USB_MS = 4000;
+// A paced chunk's airtime is its own budget, and the FIRST entry is admitted
+// whatever its size - so one oversized entry can be several KB and take many
+// seconds. 30s covers that; the device's own 40s fetch timeout is the outer bound.
+const SCROLL_ACK_TIMEOUT_BLE_MS = 30000;
 
 // seq -> resolve, for the per-chunk handshake. The host MUST NOT put a second
 // chunk in flight before the device has drained the first: measured on hardware,
@@ -1572,7 +1589,7 @@ const ackKey = (gen, seq) => `${gen}:${seq}`;
 function waitForScrollAck(gen, seq) {
   const k = ackKey(gen, seq);
   return new Promise((resolve) => {
-    const t = setTimeout(() => { scrollAckWaiters.delete(k); resolve(false); }, SCROLL_ACK_TIMEOUT_MS);
+    const t = setTimeout(() => { scrollAckWaiters.delete(k); resolve(false); }, usbPort ? SCROLL_ACK_TIMEOUT_USB_MS : SCROLL_ACK_TIMEOUT_BLE_MS);
     scrollAckWaiters.set(k, () => { clearTimeout(t); scrollAckWaiters.delete(k); resolve(true); });
   });
 }
@@ -1586,20 +1603,44 @@ async function sendScrollback(id, filter, maxBytes) {
   // Keep the NEWEST tail that fits. Walk backwards, because the entries a person is
   // most likely to want are the recent ones; `dropped` says how many did not make it,
   // and the device states that on the glass rather than letting the scroll end quietly.
+  if (!usbPort && maxBytes > SCROLL_TAIL_BLE_SERVED) {
+    console.log(`Scrollback: BLE - serving ${SCROLL_TAIL_BLE_SERVED} of the ${maxBytes} asked for`);
+    maxBytes = SCROLL_TAIL_BLE_SERVED;
+  }
+  // ON BLE, EACH ENTRY IS CAPPED TOO, not just the tail. The radio carries ~666
+  // B/s, so one 4000-character message is six seconds of airtime on its own and
+  // would be the entire budget. Truncating is lossy and it is VISIBLE - three
+  // ASCII dots, never U+2026, which is outside both fonts and would give a cut
+  // message no sign that anything was missing. The head note already says the
+  // history is partial here; a message that says so too is better than a screen
+  // that spends its whole budget on one of them.
+  const perEntryCap = usbPort ? HIST_FULL_CAP : 700;
+  const textOf = (x) =>
+    x.full.length > perEntryCap ? x.full.slice(0, perEntryCap - 3) + "..." : x.full;
+
   let used = 0, from = items.length;
   while (from > 0) {
-    const n = Buffer.byteLength(items[from - 1].full, "utf8") + 1;
+    const n = Buffer.byteLength(textOf(items[from - 1]), "utf8") + 1;
     if (used + n > maxBytes) break;
     used += n; from--;
   }
+  // ALWAYS KEEP ONE. The walk above keeps nothing at all when the NEWEST entry
+  // alone exceeds the budget, and "0 of 1641 entries, 1641 dropped" is what that
+  // looked like on the glass - an empty transcript rather than a truncated one.
+  // A single over-budget entry is admitted and paced out; that is slow, which is
+  // honest, where empty is simply wrong.
+  if (from >= items.length && items.length) from = items.length - 1;
   const kept = items.slice(from);
   const dropped = from;
 
+  // The chunk budget is the TRANSPORT's, not one number: see the header's note on
+  // why BLE needs ~800 rather than 12000, and it is not about buffer sizes.
+  const chunkCap = usbPort ? SCROLL_WIRE_CHUNK_BYTES : SCROLL_WIRE_CHUNK_BLE_BYTES;
   const envelope = (arr, seq, of) =>
     JSON.stringify({
       hist: { id, f: chatOnly ? "chat" : "all", seq, of,
               total: items.length, dropped,
-              items: arr.map((x) => ({ r: x.r, t: x.full })) },
+              items: arr.map((x) => ({ r: x.r, t: textOf(x) })) },
     });
 
   // CHUNKED ON THE SERIALISED LENGTH, never on the sum of text lengths. JSON escaping
@@ -1611,7 +1652,7 @@ async function sendScrollback(id, filter, maxBytes) {
   let cur = [];
   for (const it of kept) {
     if (cur.length &&
-        Buffer.byteLength(envelope(cur.concat([it]), 0, 9999), "utf8") > SCROLL_WIRE_CHUNK_BYTES) {
+        Buffer.byteLength(envelope(cur.concat([it]), 0, 9999), "utf8") > chunkCap) {
       groups.push(cur); cur = [it];
     } else {
       cur.push(it);
@@ -1623,10 +1664,10 @@ async function sendScrollback(id, filter, maxBytes) {
     const line = envelope(groups[i], i, groups.length) + "\n";
     // Belt and braces: a single entry can be big enough that even alone it approaches
     // the budget, so the built line is checked rather than assumed.
-    if (Buffer.byteLength(line, "utf8") > SCROLL_WIRE_CHUNK_BYTES + 200)
+    if (Buffer.byteLength(line, "utf8") > chunkCap + 200)
       console.log(`Scrollback: WARNING chunk ${i} is ${Buffer.byteLength(line, "utf8")} bytes`);
     if (usbPort) usbPort.write(line);
-    else if (bleCharacteristic) await sendOverBle(line);
+    else if (bleCharacteristic) await sendOverBle(line, BLE_SCROLL_PACE_MS);
     // Wait for this chunk to be drained before sending the next. A timeout
     // ABANDONS the fetch rather than pressing on into a ring we know is full -
     // the device's own SCROLL_FETCH_TIMEOUT then reports it on the glass, so the
@@ -1638,7 +1679,7 @@ async function sendScrollback(id, filter, maxBytes) {
     if (i + 1 < groups.length) {
       const ok = await waitForScrollAck(gen, i);
       if (!ok) {
-        console.log(`Scrollback: no ACK for chunk ${i} after ${SCROLL_ACK_TIMEOUT_MS}ms - abandoning`);
+        console.log(`Scrollback: no ACK for chunk ${i} - abandoning (via ${usbPort ? "usb" : "ble"})`);
         return;
       }
     }
@@ -3158,11 +3199,25 @@ function withTimeout(promise, ms, what) {
 // "connected" (the link really does re-establish) but USB "disconnected",
 // because the device infers USB from bytes RECEIVED - so a host that has stopped
 // transmitting looks like a USB fault rather than a stalled host.
-async function sendOverBle(text) {
+// `gapMs` PACES the packets, and it defaults to 0 so every existing caller is
+// unchanged. It exists because NOTHING ELSE FLOW-CONTROLS THIS PATH: the writes
+// are `withoutResponse`, and noble's mac binding fires the JS completion straight
+// after -[CBPeripheral writeValue:], so a loop like this hands CoreBluetooth
+// every packet of a large payload at once and its queue has no back-pressure.
+// Measured with a finger on the glass: a 3664-byte scrollback chunk (183 packets)
+// was dropped outright, and the device reported "could not reach the Mac" 40
+// seconds later. A ~779-byte tick payload survives because 39 packets fit the
+// queue; 183 do not.
+// 30ms is the connection interval macOS negotiates on this link, i.e. about one
+// packet per interval - which is also exactly the ~666 B/s ceiling this file
+// already documents, so pacing does not make the transfer slower than the radio
+// already is. It just stops it being FASTER than the radio can carry.
+async function sendOverBle(text, gapMs = 0) {
   const characteristic = bleCharacteristic;
   if (!characteristic) return;
   const buf = Buffer.from(text, "utf8");
   for (let i = 0; i < buf.length; i += BLE_CHUNK_SIZE) {
+    if (gapMs && i) await new Promise((r) => setTimeout(r, gapMs));
     try {
       await withTimeout(
         characteristic.writeAsync(buf.subarray(i, i + BLE_CHUNK_SIZE), true),

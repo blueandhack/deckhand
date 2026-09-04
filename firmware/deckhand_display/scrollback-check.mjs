@@ -243,6 +243,28 @@ if (rx) s(c.SCROLL_WIRE_CHUNK_BYTES < +rx[1],
 // The HOST measures the budget on the SERIALISED line, never on raw text length.
 const HOSTSRC = stripComments("../../host/index.mjs");
 const sbBody = body(HOSTSRC, "async function sendScrollback(id, filter, maxBytes)", "host/index.mjs");
+// THE BLE BUDGET IS A SEPARATE, MUCH SMALLER NUMBER, and the reason is not a
+// buffer: nothing flow-controls the radio, so a chunk is a BURST the device must
+// survive. 800 is the size of the ordinary tick payload, which crosses this link
+// every 5s reliably. Asserted to be well under the USB budget so a future edit
+// cannot quietly raise it back to a size that gets dropped.
+const bleChunk = HOSTSRC.match(/const SCROLL_WIRE_CHUNK_BLE_BYTES = (\d+);/);
+s(bleChunk != null, "structural: the host's BLE chunk budget is still findable");
+if (bleChunk) {
+  s(+bleChunk[1] === c.SCROLL_WIRE_CHUNK_BLE_BYTES,
+    "structural: the host's BLE chunk budget equals the board header's");
+  s(c.SCROLL_WIRE_CHUNK_BLE_BYTES <= 1000,
+    `structural: the BLE chunk stays a survivable burst (${c.SCROLL_WIRE_CHUNK_BLE_BYTES} <= 1000)`);
+  s(c.SCROLL_WIRE_CHUNK_BLE_BYTES < c.SCROLL_WIRE_CHUNK_BYTES,
+    "structural: the BLE chunk is smaller than the USB one");
+}
+// A BLE fetch must therefore be MULTI-chunk, or the ACK handshake - which only
+// runs between chunks - never engages and there is no flow control at all. That
+// is exactly how the first version failed: 8192 bytes fitted ONE 12000-byte
+// chunk, so nothing was acked and 377 packets went out in a burst.
+s(c.SCROLL_TAIL_BYTES_BLE > c.SCROLL_WIRE_CHUNK_BLE_BYTES,
+  "structural: a BLE tail spans several chunks, so the ACK handshake engages");
+
 // The host mirrors the constant; a drift means the host builds chunks the device
 // cannot receive, which is exactly the failure above with nothing logging it.
 const hostChunk = HOSTSRC.match(/const SCROLL_WIRE_CHUNK_BYTES = (\d+);/);
