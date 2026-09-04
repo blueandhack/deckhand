@@ -43,7 +43,7 @@ const BOUND = {
   GUT_X: "SCROLL_GUT_X", TXT_X: "SCROLL_TXT_X", COLS: "SCROLL_COLS",
   SB_W: "SCROLL_RAIL_W", CHIP_W: "HIST_CHIP_W_CHAT", CHIP_Y: "HIST_CHIP_Y",
   CHIP_H: "HIST_CHIP_H", BACK_X: "SCROLL_BACK_X", BACK_W: "SCROLL_BACK_W",
-  NAME_X: "SCROLL_NAME_X", RULE_Y: "HIST_RULE_Y", HDR_H: "HIST_RULE_Y",
+  NAME_X: "SCROLL_NAME_X",
 };
 for (const [mockName, hdrName] of Object.entries(BOUND)) {
   chk(g[mockName] !== undefined, `the mock still declares ${mockName}`);
@@ -56,6 +56,13 @@ for (const [mockName, hdrName] of Object.entries(BOUND)) {
 // an entry here must actually DIFFER from what ships, so a live constant cannot be
 // parked here to escape the bind.
 const WAS = {
+  // The header was TWO rows when this was drawn and is one row of 42px now, which
+  // bought the 27th line of text. RULE_Y/HDR_H were bound to HIST_RULE_Y, and
+  // that bind kept PASSING while ceasing to describe the product - HIST_RULE_Y
+  // still reads 54 because it governs board 1's pager. A bind that no longer
+  // describes what ships is worse than a failing one, so they move here.
+  RULE_Y: [54, "SCROLL_HDR_H", "the header was two rows of 54px; it is one row of 42 now"],
+  HDR_H: [54, "SCROLL_HDR_H", "and so the body starts 16px higher"],
   LIST_BOT: [472, "SCROLL_BOT", "the mock left a 12px bottom margin; the spec tightens it to 4"],
   VIS: [25, "SCROLL_LINES", "and so renders one line fewer"],
 };

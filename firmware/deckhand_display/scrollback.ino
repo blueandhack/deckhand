@@ -363,8 +363,8 @@ void scrollDrawCounter() {
     // The head note occupies line 0 of the scroll space, so the transcript's own
     // lines start at SCROLL_HEAD_LINES - the same offset the row loop applies.
     uint32_t tline = line > (uint32_t) SCROLL_HEAD_LINES ? line - SCROLL_HEAD_LINES : 0;
-    snprintf(cpos, sizeof(cpos), "msg %d/%d", scrollDropped + scrollEntryAtLine(tline) + 1, scrollTotal);
-  } else snprintf(cpos, sizeof(cpos), "no messages");
+    snprintf(cpos, sizeof(cpos), "%d/%d", scrollDropped + scrollEntryAtLine(tline) + 1, scrollTotal);
+  } else snprintf(cpos, sizeof(cpos), "-");
   if (strcmp(cpos, scrollPosCache) == 0) return;
   strncpy(scrollPosCache, cpos, sizeof(scrollPosCache) - 1);
   scrollPosCache[sizeof(scrollPosCache) - 1] = '\0';
@@ -374,11 +374,13 @@ void scrollDrawCounter() {
   // 14 wide: "msg 999/9999" is 12 and "no messages" is 11, both inside the
   // 22-column name lane, and padding is what stops a shorter string leaving the
   // previous one's tail behind.
-  snprintf(padded, sizeof(padded), "%-14s", cpos);
+  // SCROLL_POS_CHARS wide and RIGHT-aligned in its own fixed box, so the digits
+  // grow leftward into the box rather than pushing the name about.
+  snprintf(padded, sizeof(padded), "%*s", SCROLL_POS_CHARS, cpos);
   setUIFont(1);
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(padded, SCROLL_NAME_X, 30);
+  tft.drawString(padded, SCROLL_POS_X, SCROLL_HDR_TEXT_Y);
 }
 
 // The body only. Kept separate from the chrome so a scroll frame repaints just
@@ -681,41 +683,47 @@ void scrollDrawBand(int shift) {
 void drawScrollback() {
   tft.fillScreen(COLOR_BG);
 
-  // The back key carries the CLOSE the deleted button row used to provide.
-  uiStrokeRound(SCROLL_BACK_X, HIST_CHIP_Y, SCROLL_BACK_W, HIST_CHIP_H, 3,
+  // ONE ROW, 42px, so the body gets 27 lines instead of 26. The controls are
+  // DRAWN 38px inside a 42px tap band - drawn-small/hit-big, the split the
+  // settings steppers and the TYPE chip already use.
+  uiStrokeRound(SCROLL_BACK_X, SCROLL_CTRL_Y, SCROLL_BACK_W, SCROLL_CTRL_H, 3,
                 BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
   setUIFont(2);
   tft.setTextColor(COLOR_ACCENT, COLOR_BG);
   tft.setTextDatum(MC_DATUM);
-  tft.drawString("<", SCROLL_BACK_X + SCROLL_BACK_W / 2, HIST_CHIP_Y + HIST_CHIP_H / 2);
+  tft.drawString("<", SCROLL_BACK_X + SCROLL_BACK_W / 2, SCROLL_CTRL_Y + SCROLL_CTRL_H / 2);
   tft.setTextDatum(TL_DATUM);
-
-  // Name and counter are the same 16px cell - Spleen's smallest rung - so they are
-  // separated by COLOUR and POSITION, never by size, the rule the rest of the
-  // device follows.
-  if (detailIndex >= 0 && detailIndex < sessionCount) {
-    char nm[SCROLL_NAME_COLS + 1];
-    strncpy(nm, sessions[detailIndex].name, SCROLL_NAME_COLS);
-    nm[SCROLL_NAME_COLS] = '\0';
-    setUIFont(2);
-    tft.setTextColor(COLOR_VALUE, COLOR_BG);
-    tft.drawString(nm, SCROLL_NAME_X, 12);
-  }
-// ONE spelling of the counter, shared with the drag loop's per-frame update.
-  scrollPosCache[0] = '\0';        // header just repainted, so force a draw
-  scrollDrawCounter();
 
   const char* chip = histChatOnly ? "CHAT" : "ALL";
   int chipW = histChatOnly ? HIST_CHIP_W_CHAT : HIST_CHIP_W_ALL;
   int chipX = tft.width() - 12 - chipW;
-  uiFillRound(chipX, HIST_CHIP_Y, chipW, HIST_CHIP_H, 3, COLOR_ACCENT, COLOR_BG);
+  uiFillRound(chipX, SCROLL_CTRL_Y, chipW, SCROLL_CTRL_H, 3, COLOR_ACCENT, COLOR_BG);
   setUIFont(1);
   tft.setTextColor(COLOR_BG, COLOR_ACCENT);
   tft.setTextDatum(MC_DATUM);
-  tft.drawString(chip, chipX + chipW / 2, HIST_CHIP_CY);
+  tft.drawString(chip, chipX + chipW / 2, SCROLL_CTRL_Y + SCROLL_CTRL_H / 2);
   tft.setTextDatum(TL_DATUM);
 
-  tft.drawFastHLine(0, HIST_RULE_Y, tft.width(), COLOR_LABEL);
+  // The counter's box is FIXED and right-aligned, and the name is fitText'd into
+  // what is left - the same order the detail card's meta line uses, and the
+  // reason is the same: a change-only field that MOVES cannot be cached, so the
+  // fixed-width one is measured first and the flexible one takes the remainder.
+  if (detailIndex >= 0 && detailIndex < sessionCount) {
+    const int nameW = SCROLL_POS_X - 8 - SCROLL_NAME_X;
+    char nm[SCROLL_NAME_COLS + 6];
+    // setUIFont BEFORE fitText: it measures with tft.textWidth, so the font has
+    // to be the one the string will actually be drawn in.
+    setUIFont(1);
+    fitText(nm, sizeof(nm), sessions[detailIndex].name, nameW);
+    tft.setTextColor(COLOR_VALUE, COLOR_BG);
+    tft.drawString(nm, SCROLL_NAME_X, SCROLL_HDR_TEXT_Y);
+  }
+
+  // ONE spelling of the counter, shared with the drag loop's per-frame update.
+  scrollPosCache[0] = '\0';        // header just repainted, so force a draw
+  scrollDrawCounter();
+
+  tft.drawFastHLine(0, SCROLL_HDR_H, tft.width(), COLOR_LABEL);
   scrollDrawBody();
   tft.flush();
 }
@@ -743,6 +751,10 @@ long scrollFindCode() {
 }
 
 void scrollDragLoop(int sy0) {
+  // Decided ONCE from where the press landed, not re-tested per poll: a scrub
+  // that changed mode because the finger drifted out of a 20px column would be
+  // unusable, and the gesture's meaning should not depend on where it ends up.
+  const bool onRail = scrollTapX >= SCROLL_RAIL_TAP_X;
   int lastY = sy0;
   int moved = 0;
   const uint32_t maxY = scrollMaxY();
@@ -763,6 +775,28 @@ void scrollDragLoop(int sy0) {
 
     int sx, sy;
     if (!getTouchPoint(sx, sy)) break;         // released: the drag is over
+
+    // A DRAG THAT STARTED ON THE RAIL SCRUBS ABSOLUTELY, rather than moving the
+    // content by the finger's delta. That is what makes 581 messages navigable:
+    // dragging the body traverses one screen per gesture, so crossing a long
+    // transcript took dozens, and the rail crosses all of it in one. The rail was
+    // tap-only before - a jump with no way to hunt - and 4px wide, which is why
+    // it read as there being no scroll bar at all.
+    if (onRail && maxY > 0) {
+      const int usable = (SCROLL_BOT - SCROLL_TOP) - 1;
+      long f = (long) (sy - SCROLL_TOP) * (long) maxY / (usable > 0 ? usable : 1);
+      uint32_t ny = (uint32_t) (f < 0 ? 0 : (f > (long) maxY ? (long) maxY : f));
+      if (ny != scrollY) {
+        scrollY = ny;
+        scrollDrawBody();
+        scrollDrawCounter();
+        tft.flush();
+      }
+      moved += SCROLL_TAP_SLOP_PX;             // never mistaken for a tap
+      delay(15);
+      continue;
+    }
+
     int dy = lastY - sy;                       // finger up scrolls content up
     if (dy != 0) {
       moved += dy < 0 ? -dy : dy;

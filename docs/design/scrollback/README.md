@@ -16,6 +16,19 @@ and the mock is a picture. Two known deliberate differences:
 - The mock's `pushImage`-clipped partial lines are simulated by CSS overflow, which cannot
   represent the real frame cost.
 
+**The picture is now BEHIND what ships, in three named ways** — the `WAS` table
+records each with its reason and asserts it genuinely differs, so a live constant
+cannot be parked there to escape the bind:
+
+- the header was **two rows of 54px**; it is one row of **42** now, which bought
+  the 27th line of text
+- the body therefore starts 16px higher and shows **27** lines, not 25
+- the mock predates code-block panels, heading accents and the `+` continuation
+  marker entirely
+
+Everything still shared is bound. Treat the spec and the board header as the
+authority and this page as the design's origin rather than its current state.
+
 **Bound to the header:** `node check.mjs` asserts every constant this page shares with
 `board_es3c35p.h`, parsed from both sides. The two deliberate differences above live in a
 separate `WAS` table which is asserted to genuinely differ from what ships, so a live

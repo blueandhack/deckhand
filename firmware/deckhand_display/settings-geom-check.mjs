@@ -32,7 +32,7 @@
 //
 //   node settings-geom-check.mjs             check both boards
 //   node settings-geom-check.mjs --selftest  prove the checker has teeth
-import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, DIR, evalInt, fieldBox,
+import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, DIR, evalInt, fieldBox, fnBody, stripComments,
          lineHB, mcBox, PANEL, preflight, tlBox, widthB } from "./geom-common.mjs";
 import fs from "fs";
 preflight();
@@ -2122,9 +2122,41 @@ for (const b of [1, 2]) {
     const HOST = fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8");
     const nm = HOST.match(/name:\s*deviceText\(await projectName\([^)]*\),\s*(\d+)\)/);
     chk(nm != null, "scrollback: the host's session-name cap is still findable");
-    chk(nm != null && c.SCROLL_NAME_COLS === +nm[1],
-      "scrollback: the name lane is exactly the host's session-name cap in columns");
     const chipX = PANEL[b][0] - 12 - c.HIST_CHIP_W_CHAT;
+    // THIS USED TO ASSERT EQUALITY WITH THE HOST'S CAP, and that was right while
+    // the header had two rows and the name owned a whole one. It now shares one
+    // row with the position counter, so the lane is NARROWER than the cap and a
+    // long name really can be trimmed - which makes the equality false and the
+    // assertion's job different: the lane must be narrower AND the draw site
+    // must trim VISIBLY rather than clip, or a name simply runs under the
+    // counter. So it is bound to fitText's presence, not to a number.
+    chk(nm != null && c.SCROLL_NAME_COLS < +nm[1],
+      `scrollback: the name lane (${c.SCROLL_NAME_COLS}) is narrower than the host's cap (${nm && nm[1]})`);
+    const sbSrc = stripComments("scrollback.ino");
+    const dsBody = (() => { try { return fnBody(sbSrc, "void drawScrollback()", "scrollback.ino"); }
+                            catch { return ""; } })();
+    chk(/fitText\(/.test(dsBody),
+      "scrollback: the header trims the name with fitText, since its lane is narrower than the cap");
+    // The counter's own box must not overlap the name lane, and both must clear
+    // the widest chip - the whole point of measuring the fixed field first.
+    chk(c.SCROLL_POS_X >= c.SCROLL_NAME_X + c.SCROLL_NAME_COLS * c.TEXT_ADV,
+      "scrollback: the counter's box starts clear of the name lane");
+    chk(c.SCROLL_POS_X + c.SCROLL_POS_CHARS * c.TEXT_ADV <= chipX,
+      "scrollback: the counter's box clears the widest filter chip");
+    // One text row and both controls inside the header, which is now 42 not 54.
+    chk(c.SCROLL_CTRL_Y + c.SCROLL_CTRL_H <= c.SCROLL_HDR_H,
+      "scrollback: the header's controls fit inside the header");
+    chk(tlBox(b, 1, c.SCROLL_HDR_TEXT_Y)[1] < c.SCROLL_HDR_H,
+      "scrollback: the header's text row clears the rule");
+    chk(c.SCROLL_TOP > c.SCROLL_HDR_H,
+      "scrollback: the body starts below the rule");
+    // THE TAP BAND IS UNDER TAP_MIN, DELIBERATELY, and that is the price of the
+    // extra line of text - 42px is 6.5mm against the 7.1mm floor. Asserted as a
+    // bound rather than left implicit, so a future shrink has to argue with it.
+    chk(c.SCROLL_TAP_H === c.SCROLL_HDR_H,
+      "scrollback: the header's tap band IS the header, so there is no dead zone");
+    chk(c.SCROLL_TAP_H >= 40,
+      `scrollback: the header's tap band stays within 6px of TAP_MIN (${c.SCROLL_TAP_H} vs ${c.TAP_MIN})`);
     chk(c.SCROLL_NAME_X + c.SCROLL_NAME_COLS * c.TEXT_ADV <= chipX - 4,
       "scrollback: the name lane's ink clears the widest filter chip");
 

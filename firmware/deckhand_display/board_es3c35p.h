@@ -2561,8 +2561,11 @@ const int SCROLL_TXT_X     = SCROLL_GUT_X + 2 * TEXT_ADV;
 const int SCROLL_COLS      = 34;
 const int SCROLL_RAIL_AIR  = 6;
 const int SCROLL_RAIL_X    = SCROLL_TXT_X + SCROLL_COLS * TEXT_ADV + SCROLL_RAIL_AIR;
-const int SCROLL_RAIL_W    = 4;
-const int SCROLL_RIGHT_AIR = 10;
+// 6, not 4: at 4px the rail was easy to miss entirely - reported as there being
+// no scroll bar at all. It is also DRAGGABLE now rather than tap-only, which is
+// what makes 581 messages navigable in one gesture instead of screen by screen.
+const int SCROLL_RAIL_W    = 6;
+const int SCROLL_RIGHT_AIR = 8;
 
 // The rail is a TAP target (jump to that fraction), not a drag target, so it
 // cannot be ambiguous against a body drag: a tap has moved less than
@@ -2583,8 +2586,29 @@ const int SCROLL_TAP_SLOP_PX = 6;
 // SCROLL_TOP is HIST_TOP - the same "6 below the rule" fact, one source, not a
 // second literal. 26 lines against the pager's (360-60)/16 = 18 is +44%, and all
 // of it comes from deleting the 46px scrubber band and the 50px button row.
-const int SCROLL_TOP     = HIST_TOP;
-const int SCROLL_LINES   = 26;
+// THE HEADER IS THE ONLY PLACE SPARE PIXELS EXIST, and a line costs 16 of them.
+// SCROLL_TOP = BOARD_H - SCROLL_BOT_AIR - SCROLL_LINES * CODE_LINE_H, so the
+// header-plus-rule budget is 60px at 26 lines, 44 at 27, 32 at 28 and 16 at 29 -
+// which is why 27 is where this lands: at 28 the two header controls fall to a
+// 32px band (4.9mm) and at 29 there is no room for a control at all.
+//
+// It stops borrowing the paged reader's HIST_* header constants: that layout is
+// still 54px tall on board 1 and the two are no longer the same shape. One row
+// instead of two is what pays for the extra line - the name and the position
+// counter share it, the counter right-aligned at a fixed width and the name
+// fitText'd into whatever is left, the same way the detail card's meta line
+// measures its Mac cluster first.
+const int SCROLL_HDR_H      = 42;   // the rule's own y
+const int SCROLL_CTRL_Y     = 2;
+const int SCROLL_CTRL_H     = 38;   // DRAWN height of the back key and the chip
+const int SCROLL_HDR_TEXT_Y = 13;   // one 16px row centred in 42
+const int SCROLL_TAP_H      = 42;   // the header's tap band - see the note below
+// 42 is 6.5mm against TAP_MIN's 7.1, and that is the cost of the extra line,
+// taken deliberately rather than by accident. It is the same drawn-small/hit-big
+// split the settings steppers and the TYPE chip already use, just with a smaller
+// ceiling: the band is the full header height, so nothing is lost to a dead zone.
+const int SCROLL_TOP     = 44;
+const int SCROLL_LINES   = 27;
 // The head note ("-- start of history --", or the count BLE could not fetch) is a
 // real LINE of the scroll space rather than something painted on top at
 // SCROLL_TOP. Painted on top it was overwritten by the transcript's own first
@@ -2603,7 +2627,15 @@ const int SCROLL_BOT_AIR = 4;
 const int SCROLL_BACK_X    = 12;
 const int SCROLL_BACK_W    = TAP_MIN;
 const int SCROLL_NAME_X    = SCROLL_BACK_X + SCROLL_BACK_W + 8;
-const int SCROLL_NAME_COLS = 22;
+// The counter's own box: 9 columns holds "9999/9999" and it is right-aligned, so
+// the digits grow leftward instead of shoving the name. The name then gets
+// 66..(SCROLL_POS_X - 8) = 13 columns, which fits every project name here and
+// fitText's the rest - the alternative was keeping a "msg " prefix and leaving
+// the name 8 columns, and the numbers' meaning is better carried by the rail
+// beside them than by four columns of label.
+const int SCROLL_POS_CHARS = 9;
+const int SCROLL_POS_X     = 320 - 12 - HIST_CHIP_W_CHAT - 6 - SCROLL_POS_CHARS * TEXT_ADV;
+const int SCROLL_NAME_COLS = 13;
 
 // ---------- Scrollback: the store and the wire ----------
 // PSRAM, not DRAM. Board 1 holds ONE screen in a 2400-byte arena because it has
