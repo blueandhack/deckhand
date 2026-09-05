@@ -27,6 +27,7 @@ import {
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
 } from "./voice-answer.mjs";
 import { resolveSessionId } from "./session-lookup.mjs";
+import { postToSessionInbox } from "./session-inbox.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
 import { toAscii, deviceText } from "./to-ascii.mjs";
@@ -2216,10 +2217,18 @@ async function pruneAudioCaptures() {
 }
 // ---------- voice -> prompt ----------
 // HOW a dictation aimed at a session gets delivered.
-//   "clipboard" (default) - put the transcript on the Mac's clipboard and post a
-//       notification; YOU paste it into the session yourself.
+//   "inbox" (default)     - post it into the LIVE conversation over that session's
+//       own messaging socket (host/session-inbox.mjs), which is what the device was
+//       always trying to do. Falls back to the clipboard, loudly and by name,
+//       whenever the post cannot be CONFIRMED in the session's transcript.
+//   "clipboard"           - never touch the socket: put the transcript on the Mac's
+//       clipboard and post a notification; YOU paste it into the session yourself.
 //   "dispatch"            - the original behaviour: spawn `claude -p --resume <id>`.
-// Clipboard is the default because dispatch has three problems that showed up the first
+//
+// The default was "clipboard" from the day dispatch was demoted until the messaging
+// socket was found; "clipboard" is kept verbatim as the escape hatch, because it is
+// the only mode that involves no channel that can fail invisibly.
+// Clipboard displaced dispatch because dispatch has three problems that showed up the first
 // time it was used in anger: the headless run becomes a SECOND author appending to the
 // same conversation concurrently (both were writing to one transcript, neither able to
 // see the other), a headless `claude -p` does not fire PermissionRequest so nothing that
@@ -2228,7 +2237,7 @@ async function pruneAudioCaptures() {
 // information", inverting half the instruction. Handing it to you costs hands-free
 // operation and fixes all three: it arrives as an ordinary message, in one voice, with
 // permissions behaving normally, and you get to read it before anything acts on it.
-const VOICE_DELIVERY = process.env.DECKHAND_VOICE_DELIVERY || "clipboard";
+const VOICE_DELIVERY = process.env.DECKHAND_VOICE_DELIVERY || "inbox";
 const PBCOPY_BIN = "/usr/bin/pbcopy";
 const OSASCRIPT_BIN = "/usr/bin/osascript";
 
@@ -2364,7 +2373,7 @@ async function deliverTextToSession(target, text, tag = "Voice") {
   // The device only knows the first 12 chars of the id; resolve the real one.
   // Through resolveSessionId, which REFUSES an ambiguous prefix - the find() this
   // replaced silently took the first match.
-  let sessionId = null, cwd = null;
+  let sessionId = null, cwd = null, record = null;
   try {
     const found = resolveSessionId(await fs.readdir(SESSIONS_DIR), target);
     if (!found.ok) {
@@ -2373,9 +2382,10 @@ async function deliverTextToSession(target, text, tag = "Voice") {
       return;
     }
     sessionId = found.id;
-    cwd =
-      JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, `${sessionId}.json`), "utf8")).cwd ||
-      undefined;
+    // The WHOLE record now, not just `cwd`: the inbox path below needs the
+    // hook's `inbox` ({socket, token}) and the `transcript` it confirms against.
+    record = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, `${sessionId}.json`), "utf8"));
+    cwd = record.cwd || undefined;
   } catch {}
   if (!sessionId) {
     console.error(`${tag}: could not read the session record for ${target} - not dispatched.`);
@@ -2383,6 +2393,36 @@ async function deliverTextToSession(target, text, tag = "Voice") {
     return;
 }
 const where = cwd ? await projectName(cwd) : target;
+
+// THE PREFERRED PATH: post straight into the LIVE conversation over the session's
+// own messaging socket (host/session-inbox.mjs). This is what the clipboard hand-off
+// was standing in for - the belief that a running interactive session could not be
+// written to was true when it was written down and is not any more.
+//
+// Ahead of BOTH existing branches, and gated only on DECKHAND_VOICE_DELIVERY not
+// being an explicit "clipboard": that remains a working escape hatch, and forcing
+// it must still get you the old behaviour exactly.
+//
+// EVERY FAILURE FALLS THROUGH to whichever branch would have run before, and every
+// one NAMES ITS CAUSE. There are four ways to end up here without a delivery - no
+// inbox on the record (an older Claude Code, or a session that started before the
+// hook change), a socket whose session has exited, a write that failed, and - the
+// one that motivated all of this - a write that SUCCEEDED and delivered nothing,
+// because a malformed frame is accepted and silently discarded. Falling back
+// unannounced would make all four look like the clipboard being the design.
+if (VOICE_DELIVERY !== "clipboard") {
+  const r = await postToSessionInbox(record, text);
+  if (r.ok) {
+    console.log(`${tag}: posted into the live session ${sessionId} (${where}) - confirmed in the transcript in ${r.ms}ms.`);
+    setVoice("sent", { text, session: target, reply: `Sent to ${where}.` });
+    return;
+  }
+  console.error(
+    `${tag}: session inbox unavailable (${r.why}) - ` +
+      `falling back to ${VOICE_DELIVERY === "dispatch" ? "a headless claude -p" : "the clipboard"}.`
+  );
+}
+
 if (VOICE_DELIVERY !== "dispatch") {
   const ok = await copyToClipboard(text);
   if (!ok) {
@@ -4361,7 +4401,9 @@ startBle();
 console.log(
   VOICE_DELIVERY === "dispatch"
     ? "Voice: dictation will RUN HEADLESSLY (claude -p --resume). Set DECKHAND_VOICE_DELIVERY=clipboard to hand it to you instead."
-    : "Voice: dictation goes to the CLIPBOARD + a notification; paste it yourself. Set DECKHAND_VOICE_DELIVERY=dispatch for the old headless behaviour."
+    : VOICE_DELIVERY === "clipboard"
+      ? "Voice: dictation goes to the CLIPBOARD + a notification; paste it yourself. Unset DECKHAND_VOICE_DELIVERY to post into the live session instead."
+      : "Voice: dictation is POSTED INTO THE LIVE SESSION, and falls back to the clipboard (naming why) if that cannot be confirmed. Set DECKHAND_VOICE_DELIVERY=clipboard to always hand it to you."
 );
 // Checked at STARTUP, not only on first use. The old behaviour accepted a capture, spent
 // the transfer, and failed at the end - so a missing dependency presented as "dictation
