@@ -218,7 +218,21 @@ function defsFor(file) {
 }
 // Blank out every line the preprocessor would drop, keeping the line count so
 // nothing else about the parse shifts.
-function preprocess(src, defs) {
+//
+// EXPORTED because commands-check.mjs grew a second, thinner copy of this and it
+// silently mis-read one construct: `#elif` (idiomatic here - audio.ino:1339,
+// power.ino:853/1005, deckhand_display.ino:5418). That copy pushed nothing for an
+// `#elif`, so its arm inherited the `#if`'s condition, which attributes an
+// `#if BOARD_USES_TFT_ESPI / #elif BOARD_HAS_BEEPER` pair's second arm to the
+// WRONG BOARD. One implementation, so the two cannot disagree again.
+//
+// `opts.strictUnknown` is what a per-board INVENTORY needs and `consts()` must not
+// have: an identifier no header #defines becomes `unknown` here, and unknown keeps
+// BOTH arms live - which for an inventory silently exempts every verb under that
+// guard from the cross-board comparison. With it set, the unknown name THROWS by
+// name instead, exactly as commands-check.mjs's own evaluator used to.
+function preprocess(src, defs, opts) {
+  const strictUnknown = !!(opts && opts.strictUnknown);
   const lines = src.split("\n");
   const stack = [];              // {taken, active, unknown}
   const live = () => stack.every(f => f.active);
@@ -231,6 +245,8 @@ function preprocess(src, defs) {
       if (n in defs) return String(defs[n]);
       unknown = true; return "0";
     });
+    if (unknown && strictUnknown)
+      throw new Error(`"${expr}" names an identifier no board header #defines`);
     if (unknown) return { unknown: true, value: true };
     try { return { unknown: false, value: !!eval(e) }; } catch { return { unknown: true, value: true }; }
   };
@@ -263,6 +279,30 @@ function preprocess(src, defs) {
     }
   }
   return lines.join("\n");
+}
+
+export { preprocess };
+
+// LITERAL DEAD-CODE GUARDS. `if (0)`, `if (false)`, `false && (...)` and `... || true`
+// are how a mutation - or a half-finished edit - disables a live behaviour while
+// leaving every text-matching assertion satisfied: the call is still spelled out,
+// the constant is still named, the function is still reached in the source. Four of
+// the fifteen mutations a branch review got past these checkers had exactly this
+// shape. Nothing in this firmware legitimately writes one (`while (true)` is the
+// only literal-condition loop and is excluded), so their PRESENCE in a body a
+// checker binds is itself the finding.
+export function deadGuards(text) {
+  const RES = [
+    /\bif\s*\(\s*!?\s*(?:0|1|false|true)\s*\)/g,
+    /\bwhile\s*\(\s*(?:0|false)\s*\)/g,
+    /(?<=[(&|!])\s*(?:0|false)\s*&&/g,
+    /&&\s*(?:0|false)\s*(?=[)&|;]|$)/g,
+    /(?<=[(&|!])\s*(?:1|true)\s*\|\|/g,
+    /\|\|\s*(?:1|true)\s*(?=[)&|;]|$)/g,
+  ];
+  const hits = [];
+  for (const re of RES) for (const m of text.matchAll(re)) hits.push(m[0].trim());
+  return hits;
 }
 
 // Source-text helpers, shared because three checkers now read the firmware's own

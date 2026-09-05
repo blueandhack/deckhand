@@ -30,56 +30,10 @@
 // knows the name of a single command in advance, so adding a board-2-only verb
 // without a refusal fails by that verb's name.
 import fs from "fs";
-import { DIR, fnBody, stripComments } from "./geom-common.mjs";
+import { DIR, fnBody, stripComments, preprocess, deadGuards } from "./geom-common.mjs";
 
 const SELFTEST = process.argv.includes("--selftest");
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
-
-// ---------------------------------------------------------------------------
-// A BOOLEAN EVALUATOR OVER THE BOARD FLAGS. `#if` on a C++ `const int` is silently
-// FALSE with no -Wall warning - it has shipped twice in this repo - so an unknown
-// identifier THROWS here rather than defaulting to 0. A guard this file cannot
-// resolve must fail loudly; a guard it silently reads as false would quietly
-// exempt every verb under it from the whole inventory.
-function evalGuard(expr, flags) {
-  const src = expr.replace(/\/\/.*$/, "").trim();
-  let i = 0;
-  const ws = () => { while (i < src.length && /\s/.test(src[i])) i++; };
-  function primary() {
-    ws();
-    if (src[i] === "(") { i++; const v = or(); ws(); if (src[i] !== ")") throw new Error(`expected ) in "${expr}"`); i++; return v; }
-    if (src[i] === "!") { i++; return !primary(); }
-    const m = /^[A-Za-z_][A-Za-z_0-9]*|^\d+/.exec(src.slice(i));
-    if (!m) throw new Error(`cannot parse "${expr}" at ${i}`);
-    i += m[0].length;
-    if (/^\d+$/.test(m[0])) return Number(m[0]) !== 0;
-    if (!(m[0] in flags)) throw new Error(`"${expr}" names ${m[0]}, which no board header #defines`);
-    return flags[m[0]] !== 0;
-  }
-  function and() { let v = primary(); for (;;) { ws(); if (src.startsWith("&&", i)) { i += 2; const r = primary(); v = v && r; } else return v; } }
-  function or()  { let v = and();     for (;;) { ws(); if (src.startsWith("||", i)) { i += 2; const r = and();     v = v || r; } else return v; } }
-  const out = or(); ws();
-  if (i !== src.length) throw new Error(`trailing junk in "${expr}"`);
-  return out;
-}
-
-// Walk a block of source, maintaining the #if stack, and hand every line to `visit`
-// together with the stack that is open AT that line. One implementation, used for
-// both the dispatch chain and the table, so the two can never be read by different
-// rules.
-function walkGuarded(text, visit) {
-  const stack = [];
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    if (/^#if\b/.test(t)) { stack.push(t.replace(/^#if\s*/, "")); continue; }
-    if (/^#ifdef\b/.test(t)) { stack.push(`defined_${t.split(/\s+/)[1]}`); continue; }
-    if (/^#ifndef\b/.test(t)) { stack.push(`!defined_${t.split(/\s+/)[1]}`); continue; }
-    if (/^#else\b/.test(t)) { if (stack.length) stack[stack.length - 1] = `!(${stack[stack.length - 1]})`; continue; }
-    if (/^#endif\b/.test(t)) { stack.pop(); continue; }
-    visit(line, stack.slice());
-  }
-  if (stack.length) throw new Error(`unbalanced #if in the block being walked: [${stack.join(", ")}]`);
-}
 
 // ---------------------------------------------------------------------------
 function suite(ok, over = {}) {
@@ -110,66 +64,126 @@ function suite(ok, over = {}) {
        bad.length === 0);
   }
 
-  // ---- (1) the dispatch chain -------------------------------------------
-  const dispatch = fnBody(main,
-    "void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool fromUsb) {",
-    "deckhand_display.ino");
+  // ---- (0) the source EACH BOARD'S COMPILER would see ---------------------
+  // One preprocessor, geom-common's, rather than a second thinner copy: the copy
+  // that used to live here did not handle `#elif`, so an `#elif` arm inherited its
+  // `#if`'s condition and an `#if BOARD_USES_TFT_ESPI / #elif BOARD_HAS_BEEPER`
+  // pair attributed the second arm's verbs to the WRONG BOARD - a green run
+  // reachable with an inverted refusal table. deckhand_display.ino has one such
+  // pair today. strictUnknown makes an identifier no header #defines THROW by
+  // name, which is what the removed evaluator did and what an inventory needs: a
+  // guard read as "unknown" keeps both arms live and silently exempts every verb
+  // under it from the whole cross-board comparison.
+  const seen = {};
+  for (const b of [1, 2]) {
+    try { seen[b] = preprocess(main, flags[b], { strictUnknown: true }); }
+    catch (e) {
+      seen[b] = null;
+      ok(`board ${b}: every #if in deckhand_display.ino resolves against that board's own flags (${e.message})`, false);
+    }
+  }
+  ok("both boards' sources preprocess against their own headers", seen[1] != null && seen[2] != null);
+  if (!seen[1] || !seen[2]) return;
+
+  const DISPATCH_SIG = "void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool fromUsb) {";
   // All three spellings the chain actually uses, and ALL matches per line - the
   // savings toggles are three startsWith() calls ORed on ONE line, so a
   // first-match-per-line parse would silently drop CPUSLOW and BLESLOW.
   const VERB_RE = /buf\s*(?:==|\.startsWith\(|\.equalsIgnoreCase\()\s*"([A-Z][A-Z0-9]*)\s?"/g;
-  const handled = {};   // verb -> guard stack
-  walkGuarded(dispatch, (line, stack) => {
-    for (const m of line.matchAll(VERB_RE)) {
-      const v = m[1];
-      // A verb spelled twice (TONETEST is both `==` and `startsWith("TONETEST ")`)
-      // keeps the SHALLOWER guard - it is reachable if any spelling is.
-      if (!(v in handled) || stack.length < handled[v].length) handled[v] = stack;
-    }
-  });
-  ok(`the dispatch chain parses to a real inventory (${Object.keys(handled).length} verbs)`,
-     Object.keys(handled).length >= 30);
-  // POSITIVE CONTROL for the guard walk: the parse must SEE guards, or every verb
-  // would read as unguarded and the whole cross-board comparison would pass
-  // vacuously with an empty refusal table.
-  const guardedVerbs = Object.entries(handled).filter(([, g]) => g.length > 0);
-  ok(`sanity: the walk DOES attach guards (${guardedVerbs.length} of ${Object.keys(handled).length} verbs sit under one)`,
-     guardedVerbs.length >= 10);
 
-  // ---- (2) the refusal table --------------------------------------------
-  const tAt = main.indexOf("static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {");
-  ok("UNAVAILABLE_COMMANDS[] is declared in deckhand_display.ino", tAt >= 0);
-  if (tAt < 0) return;
-  const tEnd = main.indexOf("\n};", tAt);
-  ok("found the end of UNAVAILABLE_COMMANDS[]", tEnd > tAt);
-  if (tEnd < 0) return;
-  const table = main.slice(tAt, tEnd);
-  const refused = {};   // verb -> { guards, cause }
-  walkGuarded(table.slice(table.indexOf("\n")), (line, stack) => {
-    const m = /\{\s*"([A-Z][A-Z0-9]*)"\s*,/.exec(line);
-    if (m) refused[m[1]] = { guards: stack, at: line };
-  });
-  // The cause is the rest of the entry, up to the closing `},` - C concatenates the
-  // adjacent literals, so reading only the first would judge a one-line stub the
-  // same as a real explanation.
-  for (const v of Object.keys(refused)) {
-    const from = table.indexOf(`{ "${v}",`);
-    const to = table.indexOf('" },', from);
-    refused[v].cause = to > from
-      ? [...table.slice(from, to + 1).matchAll(/"((?:[^"\\]|\\.)*)"/g)].slice(1).map((m) => m[1]).join("")
-      : "";
-  }
-  ok(`the refusal table parses (${Object.keys(refused).length} entries)`,
-     Object.keys(refused).length >= 1 || flags[1].BOARD_USES_TFT_ESPI === 0);
-
-  // ---- (3) the cross-board inventory ------------------------------------
-  const on = (b, stack) => stack.every((g) => evalGuard(g, flags[b]));
+  // ---- (1) the dispatch chain, per board ---------------------------------
   const state = {};
   for (const b of [1, 2]) {
-    state[b] = { handled: new Set(), refused: new Set() };
-    for (const [v, g] of Object.entries(handled)) if (on(b, g)) state[b].handled.add(v);
-    for (const [v, r] of Object.entries(refused)) if (on(b, r.guards)) state[b].refused.add(v);
+    const dispatch = fnBody(seen[b], DISPATCH_SIG, `deckhand_display.ino (board ${b})`);
+    state[b] = {
+      handled: new Set([...dispatch.matchAll(VERB_RE)].map((m) => m[1])),
+      refused: new Set(),
+      causes: {},
+    };
   }
+  const allHandled = new Set([...state[1].handled, ...state[2].handled]);
+  ok(`the dispatch chain parses to a real inventory (${allHandled.size} verbs across both boards)`,
+     allHandled.size >= 30);
+  // POSITIVE CONTROL for the preprocessing: the two boards must NOT see the same
+  // chain. If they did - a preprocessor that dropped nothing, a flags parse that
+  // came back empty - every verb would read as handled on both and the entire
+  // cross-board comparison below would pass vacuously with an empty refusal table.
+  const onlyOne = [...allHandled].filter((v) => state[1].handled.has(v) !== state[2].handled.has(v));
+  ok(`sanity: the preprocessor DOES cut - ${onlyOne.length} verbs exist on exactly one board`,
+     onlyOne.length >= 10);
+
+  // ---- (1b) HANDLED MUST MEAN REACHABLE ----------------------------------
+  // The scrape above finds a verb inside `} else if (false && (buf == "POWERPROBE"
+  // || ...)) {` exactly as happily as inside a live arm - and that verb then reads
+  // as handled on both boards while every line of it falls through into the
+  // JSON-payload branch and is discarded in silence, which is the precise failure
+  // this whole file exists to prevent. 135/135 passed with it.
+  //
+  // So every dispatch CONDITION that names a verb is parsed whole (paren-matched,
+  // so a multi-line condition is not torn in half) and must reduce to a pure
+  // disjunction of buf comparisons: each term rewritten to T, the remainder must be
+  // `T` or `T||T||...`. `false && (T||T)` does not reduce, and neither does any
+  // other extra term bolted onto a verb's own guard.
+  const rawDispatch = fnBody(main, DISPATCH_SIG, "deckhand_display.ino");
+  const conds = [];
+  for (let i = rawDispatch.indexOf("if ("); i >= 0; i = rawDispatch.indexOf("if (", i + 1)) {
+    let d = 0, j = i + 3;
+    for (; j < rawDispatch.length; j++) {
+      if (rawDispatch[j] === "(") d++;
+      else if (rawDispatch[j] === ")" && --d === 0) break;
+    }
+    if (d !== 0) continue;
+    const c = rawDispatch.slice(i + 4, j);
+    VERB_RE.lastIndex = 0;
+    if (VERB_RE.test(c)) conds.push(c);
+  }
+  ok(`sanity: the dispatch's verb conditions are located (${conds.length})`, conds.length >= 25);
+  // The whole TERM, closing paren included: VERB_RE deliberately stops at the
+  // literal (it is a scraper), so normalising with it would leave a stray ")" in
+  // every startsWith term and no condition would ever reduce.
+  const TERM_RE = /buf\s*(?:==\s*"[A-Z][A-Z0-9]*\s?"|\.(?:startsWith|equalsIgnoreCase)\(\s*"[A-Z][A-Z0-9]*\s?"\s*\))/g;
+  const impure = conds
+    .map((c) => c.replace(TERM_RE, "T").replace(/\s+/g, ""))
+    .filter((c) => !/^T(\|\|T)*$/.test(c));
+  ok(`every verb's condition is a plain disjunction of buf comparisons, so "handled" means REACHABLE ${impure.length ? "[" + impure.join(" ; ") + "]" : ""}`,
+     impure.length === 0);
+  // The same rule for the arms' BODIES and for the whole table, where the
+  // condition trick does not apply: a literal dead-code guard anywhere in the
+  // dispatch is either debug residue or a disabled behaviour, and both must be
+  // visible rather than green.
+  const dead = deadGuards(rawDispatch);
+  ok(`no literal dead-code guard (if (0), false &&, || true) sits in the dispatch chain ${dead.length ? "[" + dead.join(", ") + "]" : ""}`,
+     dead.length === 0);
+
+  // ---- (2) the refusal table, per board ----------------------------------
+  // Located in EACH BOARD'S preprocessed text, not in `main`: preprocess blanks a
+  // dropped line to "", so line numbers survive and character offsets do not.
+  const TABLE_SIG = "static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {";
+  ok("UNAVAILABLE_COMMANDS[] is declared in deckhand_display.ino", main.indexOf(TABLE_SIG) >= 0);
+  if (main.indexOf(TABLE_SIG) < 0) return;
+  for (const b of [1, 2]) {
+    const tAt = seen[b].indexOf(TABLE_SIG);
+    const tEnd = seen[b].indexOf("\n};", tAt);
+    ok(`board ${b}: found both ends of UNAVAILABLE_COMMANDS[]`, tAt >= 0 && tEnd > tAt);
+    if (tAt < 0 || tEnd < 0) continue;
+    const table = seen[b].slice(tAt, tEnd);
+    for (const m of table.matchAll(/\{\s*"([A-Z][A-Z0-9]*)"\s*,/g)) {
+      const v = m[1];
+      state[b].refused.add(v);
+      // The cause is the rest of the entry, up to the closing `" },` - C
+      // concatenates the adjacent literals, so reading only the first would judge
+      // a one-line stub the same as a real explanation.
+      const to = table.indexOf('" },', m.index);
+      state[b].causes[v] = to > m.index
+        ? [...table.slice(m.index, to + 1).matchAll(/"((?:[^"\\]|\\.)*)"/g)].slice(1).map((x) => x[1]).join("")
+        : "";
+    }
+  }
+  const allRefused = new Set([...state[1].refused, ...state[2].refused]);
+  ok(`the refusal table parses (${allRefused.size} entries across both boards)`,
+     allRefused.size >= 1 || flags[1].BOARD_USES_TFT_ESPI === 0);
+
+  // ---- (3) the cross-board inventory ------------------------------------
   for (const [a, z] of [[2, 1], [1, 2]]) {
     for (const v of [...state[a].handled].sort()) {
       if (state[z].handled.has(v)) continue;
@@ -184,28 +198,65 @@ function suite(ok, over = {}) {
       ok(`${v}: board ${b} refuses it, and does not also handle it (a dead entry is a lie)`,
          !state[b].handled.has(v));
   // ... and a refusal for a verb NO board has is an entry describing nothing.
-  for (const v of Object.keys(refused))
-    ok(`${v}: the refusal names a verb the dispatch chain really has`, v in handled);
+  for (const v of [...allRefused].sort())
+    ok(`${v}: the refusal names a verb the dispatch chain really has`, allHandled.has(v));
 
   // ---- (4) the causes ----------------------------------------------------
-  for (const v of Object.keys(refused).sort()) {
-    const c = refused[v].cause;
+  const causeOf = {};
+  for (const b of [1, 2]) for (const v of [...state[b].refused].sort()) {
+    const c = state[b].causes[v];
     // "PERF is board 2 only" tells a reader nothing they cannot already see. The
     // floor is length because there is no way to assert usefulness, but a stub
     // short enough to be a paraphrase of the guard fails it.
     ok(`${v}: its cause is specific enough to act on (${c.length} chars)`, c.length >= 60);
+    // LENGTH ALONE IS PADDABLE, and a reviewer measured it: "PERF is board 2 only."
+    // repeated three times plus "no." clears 60 characters and says nothing. Two
+    // cheap shape rules close the two ways to pad. First, no sentence may repeat
+    // inside one cause.
+    const sentences = c.split(/(?<=\.)\s+/).map((x) => x.trim().toLowerCase()).filter((x) => x.length > 8);
+    const dupe = sentences.length !== new Set(sentences).size;
+    ok(`${v}: its cause does not pad itself by repeating a sentence`, !dupe);
+    // Second, a cause has to say something about THIS board's own hardware or point
+    // at what to use instead - a paraphrase of the guard ("X is board 2 only") has
+    // neither. Every real entry names a part, a flag, a pin, a file or an
+    // alternative command; the vocabulary is deliberately wide because the rule is
+    // "not a restatement of the #if", not "use these words".
+    ok(`${v}: its cause explains the board, not just the guard`,
+       /\b(BOARD_[A-Z0-9_]+|PIN_[A-Z0-9_]+|ES8311|ILI9341|ST77922|ESP32|PSRAM|I2C|I2S|ADC|GPIO|framebuffer|codec|beeper|sensor|driver|panel|node |\.ino|\.h\b|\.mjs)/.test(c) ||
+       /\b(instead|use |run |is on|works here|available)\b/i.test(c));
+    causeOf[v] = c;
+  }
+  // A cause may DELEGATE - CPUSLOW and BLESLOW both say "see PANELSLEEP", which is
+  // an honest pointer rather than a template - but the entry it points at has to
+  // exist, or the Mac is told to read something that is not there.
+  const xrefBad = [];
+  for (const [v, c] of Object.entries(causeOf)) {
+    const m = /\bsee ([A-Z][A-Z0-9]{2,})\b/.exec(c);
+    if (m && !allRefused.has(m[1]) && !allHandled.has(m[1])) xrefBad.push(`${v} -> ${m[1]}`);
+  }
+  ok(`every "see X" in a cause names a command that really exists ${xrefBad.length ? "[" + xrefBad.join(", ") + "]" : ""}`,
+     xrefBad.length === 0);
+  // Two entries with the SAME cause, neither of which delegates, means at least one
+  // of them is not about its own verb; the table is a set of explanations, not a
+  // template with the verb swapped out.
+  const byCause = {};
+  for (const [v, c] of Object.entries(causeOf))
+    if (!/\bsee [A-Z][A-Z0-9]{2,}\b/.test(c)) (byCause[c] = byCause[c] || []).push(v);
+  const shared = Object.values(byCause).filter((g) => g.length > 1).map((g) => g.join("/"));
+  ok(`every refusal cause is written for its own verb ${shared.length ? "[shared: " + shared.join(", ") + "]" : ""}`,
+     shared.length === 0);
+  for (const [v, c] of Object.entries(causeOf))
     // THE FONTS ARE ASCII 0x20..0x7E AND NOTHING ELSE. These lines go over the wire
     // rather than to the glass, so the font range does not bound them - but the host
     // transliterates everything device-bound, so a non-ASCII byte here could only
     // ever arrive mangled, and asserting it costs nothing.
     ok(`${v}: its cause is pure ASCII`, /^[\x20-\x7E]*$/.test(c));
-  }
 
   // ---- (5) the table is REACHED, and reached in the right place ----------
   // Bound to processCompletedLine's OWN body, not to the file: a call sitting in
   // some other function would satisfy a file-wide search and refuse nothing.
   const armRe = /\}\s*else if \(refuseUnavailableCommand\(buf\)\) \{([\s\S]*?)\n  \} else \{/;
-  const arm = dispatch.match(armRe);
+  const arm = rawDispatch.match(armRe);
   ok("processCompletedLine walks the table in the LAST arm before the payload branch",
      !!arm);
   if (arm) {
@@ -232,6 +283,45 @@ function suite(ok, over = {}) {
      /sendLineToHost\(/.test(walker));
   ok("the walker prints the entry's OWN cause, not a generic line",
      /u->cause/.test(walker));
+
+  // ---- (6) THE WALKER'S BODY, not its text -------------------------------
+  // Everything above binds what the walker SAYS. A reviewer measured what that
+  // leaves open: `return false;` as its first statement restores board 1's
+  // answer-with-silence defect - the entire reason this file was written - and all
+  // 135 assertions still passed, including the closing line "every device command
+  // is either handled or refused BY NAME on both boards". Every regex above is
+  // still satisfied by the untouched lines below the early return.
+  //
+  // So the walker's EXITS are enumerated the way pair-crypto-check enumerates
+  // pairCtEq's: the loop must come before any return, there must be exactly two,
+  // and they must be the `true` that follows a match and the final `false`. An
+  // early return of either polarity changes that list.
+  const wReturns = [...walker.matchAll(/\breturn\b([^;]*);/g)];
+  const wFor = walker.indexOf("for (");
+  ok(`the walker's only exits are `+"`true`"+` after a match and a final `+"`false`"+` [${wReturns.map((m) => m[1].trim()).join(" | ")}]`,
+     wReturns.length === 2 && wReturns[0][1].trim() === "true" && wReturns[1][1].trim() === "false");
+  ok("the table walk is the walker's FIRST statement, so nothing returns ahead of it",
+     wFor >= 0 && wReturns.length > 0 && wFor < wReturns[0].index);
+  // ...and the same dead-code rule as the dispatch: `if (0) { ... }` around the
+  // send leaves every one of the assertions above matching.
+  const wDead = deadGuards(walker);
+  ok(`no literal dead-code guard sits in the walker ${wDead.length ? "[" + wDead.join(", ") + "]" : ""}`,
+     wDead.length === 0);
+
+  // THE WHOLE CAUSE REACHES THE MAC. The table's causes are asserted at length in
+  // section (4), and a walker that ships `String(u->cause).substring(0, 3)` passes
+  // every one of them: the cause in the array is still 200 characters, and what
+  // goes over the wire is "it ". So the line the walker builds is parsed - the
+  // cause must be its final, whole term - and no truncating call may appear.
+  const outExpr = /\bString\s+\w+\s*=([^;]*);/.exec(walker);
+  ok(`the refusal line is built by concatenation and ends with the entry's whole cause [${outExpr ? outExpr[1].trim() : "not found"}]`,
+     outExpr != null && /\+\s*u->cause\s*$/.test(outExpr[1].trim()));
+  ok("nothing in the walker truncates what it sends",
+     !/\.substring\(|\bstrncpy\b|\bstrlcpy\b|\.remove\(|\bsnprintf\b/.test(walker));
+  // The refusal has to be identifiable from the Mac: silence and "impossible here"
+  // look identical, and so do "refused" and "refused, but by which board, for what".
+  ok("the refusal line names the verb and the board it was refused on",
+     outExpr != null && /u->verb/.test(outExpr[1]) && /BOARD_NAME/.test(outExpr[1]));
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +359,72 @@ function dropEntry(src, verb) {
   if (to < 0) return src;
   return src.slice(0, from) + src.slice(to + 4);
 }
+// The walker's body, LOCATED and rewritten. Same reason as dropEntry: a fault that
+// transcribes the lines it replaces stops injecting the next time they are edited,
+// and an injection that applies nothing leaves the property it was proving unproven
+// while the selftest still prints a pass.
+function patchWalker(src, fn) {
+  const sig = "bool refuseUnavailableCommand(const String& line) {";
+  const i = src.indexOf(sig);
+  if (i < 0) return src;
+  const z = src.indexOf("\n}\n", i);
+  if (z < 0) return src;
+  return src.slice(0, i) + fn(src.slice(i, z)) + src.slice(z);
+}
+// One verb's dispatch condition, found from its own literal and paren-matched, then
+// buried under a `false &&`. Located rather than quoted so it survives an edit to
+// the condition it weakens.
+function weakenCondition(src, verb) {
+  const i = src.indexOf(`buf == "${verb}"`) >= 0 ? src.indexOf(`buf == "${verb}"`)
+                                                 : src.indexOf(`"${verb}"`);
+  if (i < 0) return src;
+  const s0 = src.lastIndexOf("if (", i);
+  if (s0 < 0) return src;
+  let d = 0, j = s0 + 3;
+  for (; j < src.length; j++) {
+    if (src[j] === "(") d++;
+    else if (src[j] === ")" && --d === 0) break;
+  }
+  if (d !== 0) return src;
+  return `${src.slice(0, s0 + 4)}false && (${src.slice(s0 + 4, j)})${src.slice(j)}`;
+}
 const faults = [
+  // ---- M1: the walker's BODY. This is the one the whole file exists for: an
+  // early `return false;` restores board 1's answer-with-silence and left all 135
+  // of the previous assertions green.
+  ["refuseUnavailableCommand returns false before it walks anything (silence, restored)",
+    { main: patchWalker(realMain, (b) => b.replace("{", "{\n  return false;")) }],
+  ["a dead-code guard skips the send, so a matched verb is answered with silence",
+    { main: patchWalker(realMain, (b) => b.replace(/\bfor \(/, "if (0) return false;\n  for (")) }],
+  // ---- #2: the cause is TRUNCATED on the way out, while the table still holds it
+  ["the walker ships the first three characters of the cause",
+    { main: patchWalker(realMain, (b) => b.replace(/\+\s*u->cause/, "+ String(u->cause).substring(0, 3)")) }],
+  // ---- M4: "handled" scraped from an unreachable arm
+  ["a verb's arm is buried under `false &&`, so it is scraped as handled and reached never",
+    { main: weakenCondition(realMain, "POWERPROBE") }],
+  // ---- M3: #elif. The old walkGuarded pushed nothing for an #elif, so this arm
+  // inherited `#if 0` and the verb was invisible on BOTH boards - 135/135, count
+  // unchanged, no assertion mentioning it at all.
+  ["a board-2-only verb hides in an #elif arm whose #if is false on both boards",
+    { main: realMain.replace("  } else if (refuseUnavailableCommand(buf)) {",
+        '#if 0\n#elif BOARD_BLE_NIMBLE\n  } else if (buf == "ELIFTEST") {\n    sendLineToHost("x");\n#endif\n  } else if (refuseUnavailableCommand(buf)) {') }],
+  // ---- #6: a cause padded to clear the 60-character floor and say nothing
+  ["a cause is padded to length by repeating itself",
+    (() => {
+      const from = realMain.indexOf('{ "PERF",');
+      const to = realMain.indexOf('" },', from);
+      return { main: realMain.slice(0, from) +
+        '{ "PERF", "PERF is board 2 only. PERF is board 2 only. PERF is board 2 only. no." },' +
+        realMain.slice(to + 4) };
+    })()],
+  ["a cause delegates to an entry that does not exist",
+    (() => {
+      const from = realMain.indexOf('{ "CPUSLOW",');
+      const to = realMain.indexOf('" },', from);
+      return { main: realMain.slice(0, from) +
+        '{ "CPUSLOW", "see PANELSNOOZE: savingsSync()\'s body is behind !BOARD_USES_TFT_ESPI, so there is nothing on this board for the toggle to apply." },' +
+        realMain.slice(to + 4) };
+    })()],
   ["one refusal entry is deleted (TEMP), so board 1 answers it with silence again",
     { main: dropEntry(realMain, "TEMP") }],
   ["the whole table is bypassed - the dispatch stops walking it",
