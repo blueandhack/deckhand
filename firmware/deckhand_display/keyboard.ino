@@ -299,14 +299,32 @@ void drawKbHardWrapped() {
 
 const unsigned long KB_REPEAT_DELAY_MS = 500;   // hold this long before repeating
 const unsigned long KB_REPEAT_EVERY_MS = 120;   // then ~8 deletions a second
-// Row 3's page key is the ONE press flash with no work to time it: the character
-// keys' flash lasts as long as kbInsert()'s card repaint, and SPACE / "." borrow
-// that same repaint, but switching page redraws the whole board BEFORE the flash
-// can be drawn (see drawKeyboard's fillScreen), so there is nothing left to hold
-// it on screen. 60ms is blocking, and deliberately so - handleTouch polls at 15ms
-// and this runs once per page switch, which is rare; the alternative is a
-// deferred-unpress timer threaded through loop() for one key.
-const unsigned long KB_FLASH_MS = 60;
+// HOW LONG ROW 3'S KEYS STAY LIT. All three of them hold for this now - the page
+// key always did, and SPACE / "." were left relying on kbInsert()'s card repaint
+// to time their own flash, which is microseconds of shadow-buffer work, not a
+// duration anybody can see. That was parked as "the next lever" and this is it.
+//
+// 60ms WAS NOT ENOUGH AND A PERSON SAID SO. The pressed state genuinely reached
+// the panel after the flush fix below landed, and the user still reported no
+// visible flash on SPACE and ?123. 60ms is under four frames at 60Hz, spent with
+// a fingertip parked on the key that is flashing; a state change that brief reads
+// as nothing happening. 120ms is the value now, and the budget it is checked
+// against is measured, not guessed:
+//   - PERF on this panel: a FULL-screen flush is 17.6ms (gather 8.4 + transfer
+//     9.2, 15 strips of 32 lines). Row 3's band is 58px, so its dirty-rect flush
+//     is 2 of those strips - about 2.4ms - and the page key's full repaint pays
+//     the whole 17.6ms. Either way the hold is what dominates: at 120ms at least
+//     100ms of lit key survives even the worst case.
+//   - Against typing rate: this is BLOCKING, and deliberately so (handleTouch
+//     polls at 15ms; the alternative is a deferred-unpress timer threaded through
+//     loop() for three keys). It costs 120ms only on SPACE, "." and the page key,
+//     against 300-500ms between thumb presses on a 30px key - under a third of
+//     the gap, and nothing on the character rows, which release-commit already
+//     holds lit for as long as the finger is down.
+// THE KEYSTROKE IS NOT DELAYED BY IT. kbInsert() runs BEFORE the hold and is
+// flushed with the key still lit, so the character appears immediately and the
+// flash outlives it rather than preceding it.
+const unsigned long KB_FLASH_MS = 120;
 // AND THE FLASH HAS TO REACH THE GLASS, WHICH ON BOARD 2 IS A SEPARATE ACT.
 // PanelShim composes into a PSRAM shadow framebuffer and only a flush pushes it,
 // and the only flushes on this screen are at the end of drawKeyboard() and the
@@ -914,9 +932,13 @@ bool kbTouch(int sx, int sy) {
       delay(KB_FLASH_MS);
       drawKbRow3(-1);
     } else {
-      // SPACE and "." need no delay: kbInsert() repaints the text card and the
-      // action row between the two draws, which is the same work that times the
-      // character keys' flash.
+      // SPACE and "." HOLD FOR KB_FLASH_MS TOO, and the ordering is the whole
+      // point: draw pressed, flush so it is on the glass, INSERT, flush again so
+      // the character lands with the key still lit, and only then hold. The
+      // keystroke is therefore never delayed - it is on screen before the delay
+      // starts - and the flash outlives it. This used to rely on kbInsert()'s
+      // card repaint to time the flash, which on this board is shadow-buffer
+      // work measured in microseconds and reached the panel as nothing at all.
       // Two literal calls rather than one ternary: settings-geom-check.mjs's
       // ASCII reachability sweep PARSES the characters row 3 emits out of this
       // function (they exist in no KB_*[3] table - row 3 is data inline in the
@@ -926,6 +948,8 @@ bool kbTouch(int sx, int sy) {
       KB_FLASH_PUSH();
       if (k == 1) kbInsert(' ');
       else        kbInsert('.');
+      KB_FLASH_PUSH();
+      delay(KB_FLASH_MS);
       drawKbRow3(-1);
     }
     return true;

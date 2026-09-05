@@ -2662,6 +2662,33 @@ for (const b of [1, 2]) {
       // follows - so it is asserted rather than assumed to still be there.
       chk(/tft\.fillRect\(\s*x\s*,\s*y\s*,\s*KB_BUB_W\s*,\s*KB_BUB_H\s*,\s*COLOR_BG\s*\)\s*;[\s\S]*uiFillRound\(/.test(KB_BUB_SRC),
           "drawKbBubble()'s OWN BODY does the same thing one line before its own uiFillRound");
+      //
+      // 3. ROW 3 HOLDS ITS FLASH LONG ENOUGH TO SEE. The flush fix made the
+      // pressed state reach the panel; a person still reported no visible flash,
+      // because 60ms is under four frames with a fingertip on the key. Both arms
+      // of row 3 now hold, and the constant is PARSED so that lowering it fails
+      // here rather than on someone's eyes.
+      const KB_TOUCH_SRC = fnSrc(KB_SRC, "bool kbTouch");
+      chk(KB_TOUCH_SRC.length > 0, "kbTouch()'s body is found in keyboard.ino (parse gate)");
+      const holds = (KB_TOUCH_SRC.match(/delay\(KB_FLASH_MS\)\s*;/g) || []).length;
+      chk(holds === 2,
+          `kbTouch()'s OWN BODY holds row 3's pressed state for KB_FLASH_MS in ${holds} places, ` +
+          `expected 2 - the page key's arm and the SPACE/"." arm. SPACE and "." used to rely on ` +
+          `kbInsert()'s card repaint to time their flash, which is microseconds of shadow-buffer ` +
+          `work and reached the panel as nothing at all`);
+      // And the keystroke must not wait on the hold: kbInsert is called, then
+      // pushed, and only then does the delay run.
+      chk(/kbInsert\('\.'\)\s*;[\s\S]{0,120}?KB_FLASH_PUSH\(\)\s*;\s*delay\(KB_FLASH_MS\)\s*;/.test(KB_TOUCH_SRC),
+          "and the SPACE/\".\" arm inserts and FLUSHES before it holds, so the character is on " +
+          "the glass immediately and the flash outlives the keystroke rather than delaying it");
+      const flashMs = +(KB_SRC.match(/const unsigned long KB_FLASH_MS\s*=\s*(\d+)\s*;/) || [])[1];
+      chk(Number.isFinite(flashMs), "KB_FLASH_MS is declared in keyboard.ino (parse gate)");
+      chk(flashMs >= 100,
+          `KB_FLASH_MS is ${flashMs}ms, at least the ~100ms a state change needs to register as ` +
+          `one rather than as a flicker (60ms was reported as no flash at all)`);
+      chk(flashMs <= 200,
+          `and at most 200ms - it BLOCKS, so a longer hold on SPACE would start to eat into the ` +
+          `300-500ms between thumb presses and make the keyboard feel laggy`);
     }
     // ================= THE PROMPT STRIP =================
     // One line of the ask above the card, so the question and the keyboard are on
