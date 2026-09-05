@@ -125,7 +125,13 @@ so a gap that drifts moves an anchor and fails.
 - **The four vertical budgets close exactly on `BOARD_H`** — 320 twice and 480
   twice — and the anchored bands land on `KB_STRIP_Y`, `KB_TEXT_Y`, `KB_ROWS_Y`
   and `KB_ACT_Y`. The action band lands at the **same** `KB_ACT_Y` on both
-  screens of a board, which is derived rather than arranged.
+  screens of a board, which is derived rather than arranged. **The two action
+  bands' HEIGHTS are not compared numerically** — `stack()` pushes the same
+  `k.KB_ACT_H` on both arms, so `kbAct.h === rpAct.h` was one expression compared
+  against itself and could not fail. The claim that can fail is made
+  *structurally* instead, over `stack()`'s own brace-matched body: both arms must
+  take the band's height from the **same** `K` name, so giving the reply panel its
+  own height constant fails and says to re-point the offset comparison.
 - **The derivations**, each comparing two independent literals: `KB_STRIP_H ==
   KB_LINE_PITCH + 4`, `COMPOSE_LEGEND_H == KB_LINE_PITCH + 3`,
   `COMPOSE_DRAFT_H == KB_LINE_PITCH + 8`, `COMPOSE_PROMPT_H == 5 +
@@ -141,6 +147,24 @@ so a gap that drifts moves an anchor and fails.
   re-argued rather than assumed. `KB_ROW_H >= TAP_MIN` is asserted too — height
   was the one dimension that cleared, and this design must not spend it (board 1
   clears by exactly 1 px at `KB_ROW_H` 41).
+- **`compose.html`, the browser shell.** The mock keeps its geometry in
+  `compose.js`, which `check.mjs` *evaluates*, so unlike `scrollback.html` and
+  `adaptive.html` there is no second copy of a number in the page to parse. What
+  the page does carry is a **seam**: it destructures a fixed list of names off
+  `globalThis.__X` and calls `sc.draw()`/`sc.title`. Rename an export in
+  `compose.js` and every other assertion in this directory stays green while the
+  page a human opens throws before it paints one pixel. The destructuring list and
+  the `<script src=>` are **parsed out of the `.html`** and checked against what
+  `compose.js` actually exports. That is the only failure the shell can have, and
+  it is now the only thing asserted about it.
+- **The picture count, against the prose that claims it.** "Fourteen" above and
+  "fourteen" in `check.mjs`'s header are both **parsed** and compared to
+  `SCREENS.length` — not `SCREENS.length === 14`, which would be a transcription.
+  A report once stated the checker asserted this; it did not, and the number sat
+  claimed in two places and checked in none. Adding a state without updating the
+  prose fails, and so does editing the prose without the mock. The **shape** behind
+  the number is asserted too: both boards draw the same states, in the same order,
+  with no duplicate keys.
 - **All 95 printable ASCII characters are reachable**, enumerated from the three
   key pages **and from row 3's own definition** rather than restated. Defect 3 of
   the spec is 14 unreachable characters; the second symbol page exists for exactly

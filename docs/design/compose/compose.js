@@ -75,7 +75,7 @@ const K = {
     R_MD:10,                    // the CARD radius - what keys used to be drawn with
     // the key grid
     KB_PITCH:24, KB_KEY_W:22,
-    KB_KEY_R:2,                 // NEW: derived from the key, 9.1% of KB_KEY_W
+    KB_KEY_R:2,                 // NEW: KB_KEY_W / 10 truncated, 9.1% of KB_KEY_W (22/10 = 2.2)
     KB_COLS:34, KB_TEXT_LINES:5,
     // the prompt strip, new on both boards
     KB_STRIP_Y:4, KB_STRIP_H:17,          // NEW: KB_LINE_PITCH + 4

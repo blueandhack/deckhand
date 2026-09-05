@@ -72,21 +72,66 @@ const HEADER = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // the comparison, because a parse that silently returned "" makes the regex
 // below match nothing and the comparison meaningless.
 // ===========================================================================
-const FW_SRC = fs.readFileSync(DIR + "../../../firmware/deckhand_display/deckhand_display.ino", "utf8")
-  .replace(/^[ \t]*\/\/.*$/gm, "");            // a commented-out gap is not a gap
-const ACT_ROW_SRC = (() => {
-  const i = FW_SRC.indexOf("int uiActionRow(");
+// fnBody: the text of ONE function, brace-matched from its definition. Used for
+// every structural assertion in this file, because a grep over a whole file is
+// satisfied by any neighbouring line that happens to spell the same thing.
+// Returns "" when the definition is not found, and EVERY caller gates on
+// `.length > 0` before testing anything, because !/re/.test("") is true.
+function fnBody(src, needle) {
+  const i = src.indexOf(needle);
   if (i < 0) return "";
-  const open = FW_SRC.indexOf("{", i);
+  const open = src.indexOf("{", i);
   if (open < 0) return "";
   let depth = 0;
-  for (let j = open; j < FW_SRC.length; j++) {
-    if (FW_SRC[j] === "{") depth++;
-    else if (FW_SRC[j] === "}" && --depth === 0) return FW_SRC.slice(i, j + 1);
+  for (let j = open; j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}" && --depth === 0) return src.slice(i, j + 1);
   }
   return "";
-})();
+}
+
+const FW_SRC = fs.readFileSync(DIR + "../../../firmware/deckhand_display/deckhand_display.ino", "utf8")
+  .replace(/^[ \t]*\/\/.*$/gm, "");            // a commented-out gap is not a gap
+const ACT_ROW_SRC = fnBody(FW_SRC, "int uiActionRow(");
 const FW_ACT_GAP = (ACT_ROW_SRC.match(/const int gap\s*=\s*(\d+)/) || [])[1];
+
+// The mock's OWN source, comments stripped, for the structural assertions that
+// have to look at how a value is COMPUTED rather than at what it computes to.
+const MOCK_SRC = fs.readFileSync(DIR + "compose.js", "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+const STACK_SRC = fnBody(MOCK_SRC, "function stack(");
+// The two `push("action band", ...)` arms of stack(), one per screen, with the
+// K name each takes its height from.
+const ACT_H_TERMS = [...STACK_SRC.matchAll(/push\("action band",\s*k\.([A-Z_0-9]+)/g)].map(m => m[1]);
+
+// compose.html is the browser shell, and check.mjs never loads it, so the ONE
+// way it can rot is the seam between the two: the shell destructures a fixed set
+// of names off globalThis.__X, and renaming any of them in compose.js leaves a
+// blank page with a TypeError nobody here would see. Parsed, not transcribed.
+const HTML_SRC = fs.readFileSync(DIR + "compose.html", "utf8");
+const HTML_DESTRUCTURE = (HTML_SRC.match(/const\s*\{([^}]*)\}\s*=\s*globalThis\.__X\s*;/) || [])[1];
+const HTML_NAMES = HTML_DESTRUCTURE
+  ? HTML_DESTRUCTURE.split(",").map(s => s.trim().split(":")[0].trim()).filter(Boolean) : [];
+const HTML_SCRIPT_SRC = (HTML_SRC.match(/<script src="([^"]+)"><\/script>/) || [])[1];
+
+// A5. THE PICTURE COUNT, PARSED FROM THE PROSE THAT CLAIMS IT. A report once
+// said this checker asserted "fourteen pictures"; it did not, and the number sat
+// in two comments with nothing behind it - claimed in one place, checked in
+// none, which is the worst of the three states. Both prose sites are now parsed
+// and compared against SCREENS.length, so adding a state to the mock without
+// saying so fails, and so does editing the prose without the mock.
+const WORDS = { ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15,
+                sixteen:16, seventeen:17, eighteen:18, nineteen:19, twenty:20 };
+const README_SRC = fs.readFileSync(DIR + "README.md", "utf8");
+// Only this file's HEADER BLOCK - everything above the first import - so a
+// later message string that happens to say "pictures" cannot stand in for the
+// header claim once someone deletes it. Scoping it is the difference between
+// asserting the claim and asserting that SOMETHING says a number.
+const CHECK_HEAD = fs.readFileSync(new URL(import.meta.url).pathname, "utf8").split("\nimport ")[0];
+const claimedCount = (src) => {
+  const m = src.match(/\b([A-Za-z]+|\d+) pictures\b/);
+  if (!m) return null;
+  return /^\d+$/.test(m[1]) ? +m[1] : (WORDS[m[1].toLowerCase()] ?? null);
+};
 
 // ===========================================================================
 // PENDING - the bind failures a later task is expected to fix, keyed on
@@ -193,6 +238,69 @@ function run() {
   chk(+FW_ACT_GAP === ACT_GAP, "act",
       `the mock's ACT_GAP is ${ACT_GAP}, uiActionRow()'s own body says ${FW_ACT_GAP} - the row `
     + `the mock draws and the row the firmware draws are not the same row`);
+  // The mock's own parse gates, likewise ahead of everything that reads them.
+  chk(STACK_SRC.length > 0, "parse",
+      `compose.js's stack() body was not found - every structural claim below about how the `
+    + `column is BUILT would be testing the empty string, which passes vacuously`);
+  chk(HTML_DESTRUCTURE !== undefined, "parse",
+      `compose.html no longer destructures "const { ... } = globalThis.__X;" - the shell/mock `
+    + `seam check below has nothing to look at, so move this parse with the shell`);
+
+  // ---- 0b. compose.html, the browser shell -------------------------------
+  // A3. This mock keeps its geometry in compose.js, which run() EVALUATES, so
+  // there is no second copy of a number in the .html the way scrollback.html and
+  // adaptive.html carry theirs. What the .html does carry is a SEAM: it reads a
+  // fixed list of names off globalThis.__X and calls sc.draw()/sc.title. Rename
+  // an export in compose.js and every assertion here stays green while the page
+  // a human opens throws before it paints one pixel. That is the failure this
+  // section exists to catch, and it is the only one the shell can have.
+  {
+    chk(HTML_SCRIPT_SRC === "compose.js", "html",
+        `compose.html loads <script src="${HTML_SCRIPT_SRC}">, but check.mjs evaluates `
+      + `compose.js - the page and the checker would be describing different mocks`);
+    for (const name of HTML_NAMES)
+      chk(name in X, "html",
+          `compose.html destructures "${name}" off globalThis.__X, which compose.js does not `
+        + `export - the page throws before it paints, and nothing else in this file would notice`);
+    for (const sc of SCREENS) {
+      chk(typeof sc.draw === "function" && typeof sc.title === "string" && sc.title.length > 0,
+          "html", `SCREENS entry "${sc.key}" is missing the draw()/title the shell's paint() uses`);
+      chk([...sc.title].every(c => c.codePointAt(0) >= 0x20 && c.codePointAt(0) <= 0x7E),
+          "html", `SCREENS entry "${sc.key}" has a non-ASCII title "${sc.title}"`);
+    }
+    say(`  compose.html: ${HTML_NAMES.length} names off __X, all exported; `
+      + `${SCREENS.length} screens x ${X.TH ? Object.keys(X.TH).length : 0} themes painted`);
+  }
+
+  // ---- 0c. the picture count, against the prose that claims it -------------
+  // A5. Not `SCREENS.length === 14`, which is a transcription: the 14 is PARSED
+  // out of both places the prose states it, so the number and the mock cannot
+  // drift apart in either direction.
+  {
+    const rm = claimedCount(README_SRC), ck = claimedCount(CHECK_HEAD);
+    chk(rm !== null, "count",
+        `README.md no longer states a picture count in words this can parse ("N pictures") - `
+      + `either restore it or delete this assertion, but do not leave the number claimed `
+      + `somewhere and checked nowhere`);
+    chk(ck !== null, "count",
+        `check.mjs's own header no longer states a picture count ("N pictures")`);
+    if (rm !== null) chk(rm === SCREENS.length, "count",
+        `README.md claims ${rm} pictures, the mock builds ${SCREENS.length}`);
+    if (ck !== null) chk(ck === SCREENS.length, "count",
+        `check.mjs's header claims ${ck} pictures, the mock builds ${SCREENS.length}`);
+    // And the SHAPE behind the number, so a count that happens to match by
+    // accident still fails: the same states on both boards, no duplicate keys.
+    const perBoard = { 1: [], 2: [] };
+    for (const sc of SCREENS) perBoard[sc.board].push(sc.key.replace(/^b\d\//, ""));
+    chk(perBoard[1].length === perBoard[2].length
+        && perBoard[1].every((s, i) => s === perBoard[2][i]), "count",
+        `the two boards do not draw the same states: board 1 has [${perBoard[1].join(", ")}], `
+      + `board 2 has [${perBoard[2].join(", ")}] - a picture on one panel and not the other is `
+      + `a design decision, not a mock detail`);
+    chk(new Set(SCREENS.map(sc => sc.key)).size === SCREENS.length, "count",
+        `two SCREENS entries share a key - the per-screen failures below would name the same `
+      + `label twice and one of them would be unreadable`);
+  }
 
   // ---- 1. the two-board header bind ---------------------------------------
   // For each board, every name in K[b] must be a constant that board's header
@@ -371,14 +479,33 @@ function run() {
       say(`  board ${b} ${screen.padEnd(8)} column: ${S.terms.length} terms, `
         + `sums to ${S.total} of BOARD_H ${k.BOARD_H}`);
     }
-    // The two surfaces put SEND in the same place, and that is derived rather
-    // than arranged: both columns are fixed above the action band and both close
-    // on BOARD_H, so the reply panel and the keyboard cannot disagree about it.
+    // The two surfaces put SEND in the same place. A1: this was ONE assertion,
+    // `kbAct.y === rpAct.y && kbAct.h === rpAct.h`, and the second half COULD NOT
+    // FAIL - stack() pushes `k.KB_ACT_H` for "action band" on both arms, so the
+    // heights are the same expression compared against itself. The half that can
+    // fail is the OFFSET, which two independently accumulated columns arrive at
+    // separately; it is kept, and the height is now covered by a STRUCTURAL claim
+    // over stack()'s own body instead - if the reply panel ever gets its own
+    // height constant, that arm fails and says to re-point this comparison,
+    // rather than a numeric equality quietly turning back into a tautology.
     const kbAct = stack(b, "keyboard").find("action band");
     const rpAct = stack(b, "reply").find("action band");
-    chk(kbAct.y === rpAct.y && kbAct.h === rpAct.h, "budget",
-        `board ${b}: the action band is at ${kbAct.y}+${kbAct.h} on the keyboard and `
-      + `${rpAct.y}+${rpAct.h} on the reply panel - one surface would move SEND under the finger`);
+    chk(kbAct.y === rpAct.y, "budget",
+        `board ${b}: the action band starts at ${kbAct.y} on the keyboard and ${rpAct.y} on the `
+      + `reply panel - one surface would move SEND under the finger`, `act-band-y:${b}`);
+  }
+  // The height half of that claim, made where it can fail: both arms of stack()
+  // must take "action band" from the SAME K name. Bound to the FUNCTION BODY -
+  // a grep over compose.js would be satisfied by any neighbouring push().
+  {
+    chk(ACT_H_TERMS.length === 2, "budget",
+        `stack()'s body pushes "action band" ${ACT_H_TERMS.length} time(s) with a k.<NAME> `
+      + `height, expected 2 (one per screen) - the keyboard and the reply panel are supposed to `
+      + `declare the same band, and this check reads them by name`);
+    chk(ACT_H_TERMS.length === 2 && ACT_H_TERMS[0] === ACT_H_TERMS[1], "budget",
+        `stack() gives the action band its height from ${ACT_H_TERMS.join(" and ")} on the two `
+      + `screens - two constants can diverge, so the SEND row can move between surfaces without `
+      + `any number in this file disagreeing`);
   }
 
   // ---- 4. the three columns ------------------------------------------------
@@ -633,9 +760,17 @@ function run() {
     const matches = (e, bandName, label) => e.screen === sc.screen
       && (e.band instanceof RegExp ? e.band.test(bandName) : e.band === bandName)
       && (e.label === undefined || e.label === label);
+    // A2. THERE IS NO EXEMPTION HERE ANY MORE. A `if (c.noSplit && c.kind ===
+    // "caret") continue;` sat on this loop, excusing the text card's drag lane
+    // from TAP_MIN - and the drag lane is CARD_W x KB_TEXT_H, which clears the
+    // floor by a mile on both boards, so it excused nothing and never had. What
+    // it WAS was a second, silent permission mechanism sitting outside
+    // EXCEPTIONS: the day the caret's tested rect narrowed to a real caret lane,
+    // it would have been waved through with no entry naming a reason, which is
+    // precisely the property EXCEPTIONS exists to have. A sub-floor control is
+    // named in EXCEPTIONS or it fails; there is no third door.
     const used = new Set();
     for (const c of p.controls) {
-      if (c.noSplit && c.kind === "caret") continue;         // a drag lane, not a target
       for (const [axis, size] of [["h", c.tested.h], ["w", c.tested.w]]) {
         if (size >= k.TAP_MIN) continue;
         const e = EXCEPTIONS.find(e => e.axis === axis && matches(e, c.band, c.label));
@@ -651,7 +786,10 @@ function run() {
     // fails if anything else goes sub-floor AND if CLR stops being sub-floor, so
     // it cannot rot into a description of whatever the mock happens to draw.
     if (sc.screen === "reply") {
-      const sub = p.controls.filter(c => !(c.noSplit && c.kind === "caret"))
+      // The caret filter is gone from here too, for the reason above and one
+      // more: the reply panel has no caret control at all, so it filtered
+      // nothing on the only screens it ran over.
+      const sub = p.controls
         .filter(c => c.tested.h < k.TAP_MIN || c.tested.w < k.TAP_MIN)
         .map(c => c.label);
       const want = /-sent$/.test(sc.key) ? [] : ["CLR"];
