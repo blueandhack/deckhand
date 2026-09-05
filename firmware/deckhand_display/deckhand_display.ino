@@ -5349,6 +5349,13 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // seen at all. "KBTEST peek" opens it with the prompt peek up, "KBTEST off"
     // closes it. It cannot invent a prompt - with nothing pending it does nothing,
     // so it can never raise a keyboard that would answer a question nobody asked.
+    //
+    // THAT REFUSAL USED TO BE SILENT. With nothing pending, neither branch below
+    // did anything and printed nothing - from the Mac that is indistinguishable
+    // from KBTEST itself being broken, and it cost two implementers in this plan
+    // real time working that out from the handler's own source. Every refusal
+    // now names the condition that failed - "no ask is pending" or "no session
+    // is READY" - the same rule POWERPROBE's "not on battery" refusal follows.
     String arg = buf.substring(6);
     arg.trim();
     // ALWAYS from a closed keyboard. Re-opening one that is already open left the
@@ -5356,6 +5363,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // TYPE while the keyboard covers the screen), so it is made impossible here
     // rather than debugged.
     if (kbActive) closeKeyboard();
+    // The host delivers every trigger-file command over BOTH transports, so a
+    // cabled device sees the SAME "KBTEST ..." line twice within milliseconds
+    // (the "one POWERPROBE produced four refusal lines" note under Commands).
+    // A refusal has no state of its own to make the second copy a no-op the way
+    // POWERPROBE's probeActive or SCROLLPERF's scrollPerfRunning do, so it is
+    // deduped here instead: the same arg text within a short window prints once.
+    static String lastKbtestRefusalArg = "\x01\x01"; // never a real (trimmed) arg
+    static unsigned long lastKbtestRefusalMs = 0;
+    unsigned long nowMs = millis();
+    bool dupRefusal = arg == lastKbtestRefusalArg && nowMs - lastKbtestRefusalMs < 2000;
     if (arg.startsWith("msg")) {
       // A READY session instead of a pending ask - the message path has no ask at
       // all, so it cannot share the loop below. "KBTEST msg <text>" also types, in
@@ -5363,17 +5380,26 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       // "KBTEST type ..." would drop straight back into answer mode.
       String rest = arg.substring(3);
       rest.trim();
+      bool found = false;
       for (int i = 0; i < sessionCount; i++) {
         if (!msgOffered(i)) continue;
+        found = true;
         switchTab(TAB_SESSIONS);
         openSessionDetail(i);
         openKeyboardForMessage(i);
         for (unsigned int k = 0; k < rest.length(); k++) kbInsert(rest[k]);
         break;
       }
+      if (!found && !dupRefusal) {
+        lastKbtestRefusalArg = arg;
+        lastKbtestRefusalMs = nowMs;
+        sendLineToHost("KBTEST refused: no session is READY (msgOffered() false for every session)");
+      }
     } else if (arg != "off") {
+      bool found = false;
       for (int i = 0; i < sessionCount; i++) {
         if (!sessions[i].askTitle[0]) continue;
+        found = true;
         // Through the detail screen, the way a person reaches it, so closing the
         // keyboard returns somewhere consistent. Opening it straight from whatever
         // tab was showing left the sessions list painted under a USAGE tab bar.
@@ -5390,6 +5416,11 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
           for (unsigned int k = 0; k < t.length(); k++) kbInsert(t[k]);
         }
         break;
+      }
+      if (!found && !dupRefusal) {
+        lastKbtestRefusalArg = arg;
+        lastKbtestRefusalMs = nowMs;
+        sendLineToHost("KBTEST refused: no ask is pending (no session has an ask)");
       }
     }
 #if !BOARD_USES_TFT_ESPI

@@ -684,7 +684,10 @@ bool kbTouch(int sx, int sy) {
       if (col >= KB_COLS) col = KB_COLS - 1;
       int off = line * KB_COLS + col;
       if (off > kbLen) off = kbLen;    // past the last character: land ON it
-      if (off < 0) off = 0;
+      // No `if (off < 0) off = 0;` here: line and col are both clamped to
+      // [0, KB_TEXT_LINES-1] / [0, KB_COLS-1] above, so their product plus a
+      // non-negative col is already >= 0 by construction - that guard could
+      // never fire and was dead code sitting in shipping firmware.
       kbCaret = off;
       drawKbText();
     }
