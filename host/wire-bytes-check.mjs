@@ -429,8 +429,30 @@ function runBehaviour(hookPath, caps) {
 
 // ---------------------------------------------------------------------------
 async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC, hostPath = HOST_SRC, asciiPath = ASCII_SRC, chipsPath = CHIPS_SRC, fwPath = FW_SRC, quiet = false } = {}) {
+  // COMMENTS STRIPPED BEFORE ANY OF THE STRUCTURE REGEXES BELOW RUN. They are
+  // file-wide matches, so a COMMENTED-OUT COPY of the correct line left standing
+  // above a broken one satisfies every one of them - measured on this very file:
+  // leaving `// const chips = askChips(toAscii(...))` and
+  // `// if (chips.length) item.ask.chips = chips;` as comments above inverted
+  // replacements passed 317/317, silently un-capping CHIP_BYTES (extraction now
+  // running before transliteration) AND dropping ask.chips from the payload,
+  // while the checker reported the ordering and the delivery as both proven.
+  // Plain deletion of the same two lines IS caught, so the hole was purely the
+  // dead-code one - a commented-out call is not a call, which is the trap
+  // panel_shim.cpp's invertColor note records and sessions-geom-check.mjs's own
+  // draw-site block already strips for.
+  //
+  // Line comments only: a `/* ... */` sweep would have to survive "//" and "/*"
+  // inside string and regex literals, which this file's own regexes are full of,
+  // and the failure mode being closed is a line commented out.
+  // Scoped to those regexes alone: hookToAscii() below LOCATES the hook's inline
+  // map by a comment marker, so a globally stripped source would break an
+  // unrelated extraction and report a defect that does not exist.
+  const stripLineComments = (t) => t.replace(/^[ \t]*\/\/.*$/gm, "");
   const hookSrc = fs.readFileSync(hookPath, "utf8");
   const hostSrc = fs.readFileSync(hostPath, "utf8");
+  const hookLive = stripLineComments(hookSrc);
+  const hostLive = stripLineComments(hostSrc);
   // The firmware and the chip module are read through parameters for the same reason
   // the hook and the host are: --selftest has to be able to hand this a MUTATED copy.
   // A source only ever reachable at its repo path is a source no fault can be
@@ -444,8 +466,8 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
   const { asciiFit, describeOffenders } = await import(`${pathToFileURL(asciiPath).href}${bust}`);
 
   // ---- STRUCTURE: no bypass -----------------------------------------------
-  for (const [name, re] of HOOK_SITES) ok(re.test(hookSrc), `STRUCTURE (hook): ${name}`);
-  for (const [name, re] of HOST_SITES) ok(re.test(hostSrc), `STRUCTURE (host): ${name}`);
+  for (const [name, re] of HOOK_SITES) ok(re.test(hookLive), `STRUCTURE (hook): ${name}`);
+  for (const [name, re] of HOST_SITES) ok(re.test(hostLive), `STRUCTURE (host): ${name}`);
   ok(c.maxSessionsHost === c.maxSessionsFw,
      `STRUCTURE: the host sends ${c.maxSessionsHost} sessions and the device holds ${c.maxSessionsFw} - the budget is meaningless if they disagree`);
 
@@ -1121,6 +1143,19 @@ async function selftest() {
      { fw: (s) => s.replace("char askChips[4][50];", "char askChips[4][33];") }],
     ["the device holds fewer chip slots than CHIP_MAX, silently dropping the tail the extractor chose",
      { fw: (s) => s.replace("char askChips[4][50];", "char askChips[2][50];") }],
+    // THE DEAD-CODE HOLE, which is the reason HOST_SITES now runs over a
+    // comment-stripped copy. Plain DELETION of these two lines was already caught;
+    // leaving the correct lines above the broken ones as COMMENTS passed 317/317,
+    // silently un-capping CHIP_BYTES (extraction running before transliteration,
+    // so a BYTE cap is applied to a string whose byte count then changes under it)
+    // and dropping ask.chips from the payload entirely - while this checker
+    // reported the ordering and the delivery as both proven.
+    ["the chips composition is inverted and the payload assignment dropped, with the CORRECT lines left above as comments",
+     { host: (s) => s
+        .replace(/^([ \t]*)(const chips = askChips\(toAscii\([^\n]*\);)$/m,
+                 '$1// $2\n$1const chips = askChips(record.ask.detail ?? "", record.ask.options ?? []).map(toAscii);')
+        .replace(/^([ \t]*)(if \(chips\.length\) item\.ask\.chips = chips;)$/m,
+                 "$1// $2") }],
   ];
   let caught = 0, injected = 0;
   for (const [name, f] of faults) {

@@ -8,7 +8,7 @@
 //                hole: replacing that body with `return true` passed 70 assertions).
 import fs from "node:fs";
 import path from "node:path";
-import { consts, stripComments, fnBody, DIR } from "./geom-common.mjs";
+import { consts, deadGuards, stripComments, fnBody, DIR } from "./geom-common.mjs";
 
 const SELFTEST = process.argv.includes("--selftest");
 let mirror = 0, structural = 0, fail = 0;
@@ -316,6 +316,14 @@ if (SELFTEST) {
   // six failures; it must now be ONE, and it must be the parse that names it.
   if (hf === "host-nosig")
     HOSTSRC = HOSTSRC.replace(/async function sendScrollback\(/, "async function sendScrollbackRenamed(");
+  // THE ACK GATE, disabled two ways. Both leave `waitForScrollAck` spelled out in
+  // the body, which is all the old assertion ever asked for - and the host then
+  // writes every chunk back to back, overflowing the device's RX ring on BLE.
+  if (hf === "host-noack")
+    HOSTSRC = HOSTSRC.replace(/if \(i \+ 1 < groups\.length\) \{/, "if (false && i + 1 < groups.length) {");
+  // The quieter one: the ACK is still awaited, and its answer is thrown away.
+  if (hf === "host-dropack")
+    HOSTSRC = HOSTSRC.replace(/const\s+(\w+)\s*=\s*(await waitForScrollAck\()/, "$2");
 }
 
 // A CHECKER MUST PARSE THE CONSTANT IT CERTIFIES, NEVER TRANSCRIBE IT - and this
@@ -385,6 +393,31 @@ if (hostChunk) s(+hostChunk[1] === c.SCROLL_WIRE_CHUNK_BYTES,
 // second transcribed signature was how one stale literal produced two failures.
 if (sbSigM) present(sbBody, /waitForScrollAck/,
   "structural: the host awaits a per-chunk ACK instead of writing back to back");
+// present() IS A TEXT MATCH, and a reviewer measured what that leaves open:
+// `if (false && i + 1 < groups.length)` around the await leaves it satisfied while
+// the host writes every chunk back to back with no flow control at all - which
+// overflows the device's RX ring on BLE, the exact failure the handshake was added
+// for. Comments are already stripped from HOSTSRC; a literal dead-code guard is the
+// other way to disable a line while leaving it spelled out, and this function has
+// none today.
+if (sbSigM) {
+  const dg = deadGuards(sbBody || "");
+  s(dg.length === 0,
+    dg.length ? `structural: sendScrollback carries a dead-code guard [${dg.join(", ")}] - ` +
+                `the ACK it disables is still spelled out above it`
+              : "structural: sendScrollback carries no dead-code guard, so the lines it " +
+                "contains are the lines it runs");
+  // ...and the ACK's ANSWER is acted on. Awaiting a result nobody reads is the same
+  // burst by a quieter route: the timeout must ABANDON the fetch, so the device's
+  // own SCROLL_FETCH_TIMEOUT names it on the glass rather than a silent short read.
+  const ackVar = /const\s+(\w+)\s*=\s*await\s+waitForScrollAck\(/.exec(sbBody || "");
+  s(ackVar != null,
+    "structural: the per-chunk ACK's result is bound to a name, not awaited and dropped");
+  s(ackVar != null &&
+    new RegExp(`if\\s*\\(\\s*!${ackVar[1]}\\s*\\)[\\s\\S]{0,240}?\\breturn\\b`).test(sbBody || ""),
+    "structural: and a missing ACK RETURNS out of the fetch rather than pressing on into " +
+    "a ring the host already knows is full");
+}
 s(/line\.startsWith\("SCROLLACK "\)/.test(HOSTSRC),
   "structural: the host resolves the device's SCROLLACK");
 s(/SCROLLACK %d/.test(SKETCH),
@@ -541,6 +574,8 @@ if (SELFTEST) {
     // than six red lines about an ACK handshake that never moved.
     "host-sig":    /still takes the request it is named for/,
     "host-nosig":  /signature is PARSED out of host\/index\.mjs/,
+    "host-noack":   /carries a dead-code guard/,
+    "host-dropack": /result is bound to a name, not awaited and dropped/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }
