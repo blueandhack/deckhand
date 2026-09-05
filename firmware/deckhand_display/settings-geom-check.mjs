@@ -770,23 +770,42 @@ const KNOWN = {
     "chip widths 40/32 both clear TAP_MIN 40",
     "history chip tap band 25px >= TAP_MIN 40",
     "history scrubber tap band 16px >= TAP_MIN 40",
-    // FOUND BY THIS CHECKER, all pre-existing and all left alone because board 1's
-    // binary is held byte-identical across this port. Reported in the task report.
+    // FOUND BY THIS CHECKER. All three were once excused as "board 1's binary is
+    // held byte-identical across this port"; that constraint is lifted (CLAUDE.md),
+    // so TWO OF THE THREE WERE FIXED and the entries are gone with a note in their
+    // place. What is left below carries a reason that is true today.
     //
     // (a) The chip's tap band is `sy <= 24`, i.e. 0..24, while the header's rule is
     // drawn at 22 - so the band reaches 2px past the rule and into the first list
-    // row's territory. Harmless in practice (the first row starts at HIST_TOP 28)
-    // but it is the chip claiming rows that are not the chip.
+    // row's territory. STANDS, and the arithmetic is why: the only way to end the
+    // band at the rule is to SHRINK it to 22, and HIST_CHIP_TAP_H is already 25
+    // against this board's own TAP_MIN of 40 - the entry two lines up says so. The
+    // overlap costs nothing (the first list row starts at HIST_TOP 28, still 3px
+    // clear, so no row is ever stolen); taking a tap target that is already 15px
+    // under the fingertip floor down by another 3 to tidy it would trade a real
+    // miss for a cosmetic one. Growing the band instead runs it further past the
+    // rule, which is this entry.
     "chip tap band ends 24 above the rule, or it would claim the first list row",
-    // (b) The three reader control bars split their x range at 78/156 in the
-    // history list and the full-entry pager but at 82/158 in the ask reader. Both
-    // merely hand the 8px gap between two keys to a different neighbour, so
-    // neither is wrong - but the same bar behaves differently depending on which
-    // screen drew it, and nothing on screen says so.
-    "reader tap splits agree across the three control bars (78/156 vs 82/158)",
-    // (c) The chip's label is drawn at a literal 13 where the chip runs 4..20, whose
-    // centre is 12 - one pixel low, invisible at this size and pre-existing.
-    "chip label centre 13 == the chip's own centre 12",
+    //
+    // (b) AN ENTRY USED TO STAND HERE AND THE DEFECT IS FIXED:
+    //   "reader tap splits agree across the three control bars (78/156 vs 82/158)"
+    // The history list and the full-entry pager split at 78/156 while the ask reader
+    // split at 82/158; both merely handed the 8px gap between two keys to a
+    // different neighbour, so neither was wrong, but the same bar behaved
+    // differently depending on which screen drew it. board_e32r28t.h now DERIVES one
+    // pair from the key geometry - 82/158 are the midpoints of the two gaps, which
+    // is the only pair giving each key its own half - and defines HIST_TAP_* from
+    // READER_TAP_* so they cannot drift apart again. Removed rather than left dead.
+    //
+    // (c) AND SO IS THIS ONE:
+    //   "chip label centre 13 == the chip's own centre 12"
+    //   "HIST_HDR_TEXT_Y 8 centres a 13px line on the chip's centre 13"
+    // One pixel and two, on the same header row. HIST_CHIP_CY was a literal 13 where
+    // HIST_CHIP_Y + HIST_CHIP_H / 2 is 12, and HIST_HDR_TEXT_Y a literal 8 where a
+    // 13px cell centred on that centre starts at 6. Both are now the expressions the
+    // assertions were already comparing them against, which is what board 2 has
+    // always done. Removed rather than left dead - an unreachable allowlist entry is
+    // the same defect as an assertion that cannot fail, on the allowlist side.
     // (h) THE LAST-CHARACTER RULE, on both of board 1's counted lanes. Cozette
     // advances 6px for every glyph but drawString charges the FINAL one xOffset +
     // width, which is 7 for space, '4' and 'q' - so a lane divided by 6 is 1px hot
@@ -794,17 +813,17 @@ const KNOWN = {
     // states this for KB_COLS and calls it harmless, and the same holds for the
     // reader: 34 keyboard columns ink 205px in a 204px lane but end at x=222 inside
     // a card interior reaching 225, and 36 reader columns ink 217px in a 216px lane
-    // but end at x=228 on a 240px panel. Both are pre-existing and board 1's binary
-    // is frozen; board 2's Spleen has xOffset 0 and width == xAdvance for every
+    // but end at x=228 on a 240px panel. Both STAND on the ink, not on a freeze: the
+    // overrun is 1px and it lands INSIDE the surface either way (222 in a card
+    // interior reaching 225; 228 on a 240px panel), so nothing is clipped and
+    // nothing is drawn on a border. Dropping a column to make the division exact
+    // would cost a real character of every keyboard row and every reader line to
+    // buy a pixel that is already inside the box. Board 2's Spleen has xOffset 0 and width == xAdvance for every
     // glyph, so its counts are exact for ANY string and it needs no such entry.
     "KB_COLS 34 == the MEASURED maximum 33 for the 204px lane",
     "34 columns ending in the widest glyph ink 205px inside the 204px lane",
     "reader columns 36 == the MEASURED maximum 35 for the 216px lane",
-    // (g) The history header's text row is a literal 8 where a 13px line centred on
-    // the chip's own centre (13) starts at 7 - so the name and the position field
-    // sit 1px low against the chip beside them. Same class as (c), invisible at
-    // this size, and pre-existing; board 2 derives the number instead.
-    "HIST_HDR_TEXT_Y 8 centres a 13px line on the chip's centre 13",
+    // (g) moved up into (c), where it was fixed alongside the constant it depends on.
     // (d) "Asking the Mac..." is drawn at a literal 130, which is NOT the midpoint
     // of the region it sits in (22..272 -> 147) - it predates the control bar.
     "history empty-state y 130 is the midpoint of 22..272 (147)",
@@ -812,14 +831,19 @@ const KNOWN = {
     // the two halves of one row do not share a baseline. Both are 13px here, so the
     // stagger is invisible and it ships; at 16px it is not, which is why
     // DROW_BATT_VAL_DY became a board constant (0 on board 2) rather than a literal.
-    // Listed rather than fixed because board 1's binary is frozen.
+    // LISTED RATHER THAN FIXED, and not because of any freeze: at a 13px cell with a
+    // 10px ascent the 4px offset puts the reading's ink inside the label's own band,
+    // so the two read as one row already. Setting it to 0 moves a shipped row by 4px
+    // - a visible change to buy an alignment nobody can see at this size.
     "DROW_BATT_VAL_DY 4 puts the reading on the \"Battery\" label's own baseline (needs 0 = ascent 10 - 10)",
     // (e) FOUND by the per-board band model added for the 16px pass, and benign.
     // The stepper label's own glyph box is 10..22 (Cozette, MC_DATUM at 15) and the
     // value's drawIfChanged ERASE box starts at 22, so the erase covers the label
     // box's last row. That row is the label's second DESCENDER row, and all three
     // labels (BRIGHTNESS / SLEEP AFTER / VOLUME) are upper case, so no ink is ever
-    // there. Left alone because board 1's binary is frozen, and listed because a
+    // there - the erase can only ever clear background. LEFT ALONE on that, not on a
+    // freeze: the fix would move the value row 1px to protect a row that cannot
+    // carry ink, and the labels are asserted upper case elsewhere. Listed because a
     // board-2 layout arriving in this state would be a real defect.
     "stepper: label -> value gap -1",
   ],

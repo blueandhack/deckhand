@@ -13,15 +13,41 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 
 Re-deriving a layout from first principles turned out to be an **audit of the original**. **Ten real
 board-1 defects** fell out (across eleven numbered slots — one report turned out to be false), plus
-one board-2-only defect that *was* fixed (the farewell flush, above). None of the ten is fixed here,
-for one reason: **every fix would move board 1's binary inside a diff whose entire claim is
-byte-identity**, hiding a behaviour change where nobody would look for it. They belong on their own
-branch off main.
+one board-2-only defect that *was* fixed (the farewell flush, above). None of the ten was fixed
+*there*, for one reason: **every fix would have moved board 1's binary inside a diff whose entire
+claim was byte-identity**, hiding a behaviour change where nobody would look for it. They belonged
+on their own branch off main.
+
+> **CORRECTED 2026-09-05, and the paragraph above is kept because it is the reason every one of
+> these entries reads the way it does.** That constraint was **lifted** on `compose-surface` — the
+> ask was for board 1 to be brought into line with board 2 — so "board 1's binary is held
+> byte-identical" is no longer a reason to defer anything, and it has been removed as a stated
+> reason from every allowlist entry and constant that gave it. What each of those entries says now
+> is either **fixed, with the entry removed and a note in its place**, or **deferred, with the
+> arithmetic**. Fixed on this branch: the detail card's painted-out "answer on your Mac" notice
+> (below); the compact sub-line drawn over the row's own outline at the ladder floor
+> (`sessionSubcYAt()` clamps it — raising `SESSION_ROW_H_MIN` to 40 was *not* the fix, because six
+> rows at 40 plus five 3px gaps is 255 against an avail of 248); the reader's two disagreeing tap
+> splits (78/156 vs 82/158 — both derived from the key geometry now, the gap midpoints); the
+> history chip's label one pixel low (`HIST_CHIP_CY` derived); and the history header's text row two
+> pixels low (`HIST_HDR_TEXT_Y` derived). Deferred **with the cost stated, not excused**: the USAGE
+> card's three clear-box overlaps (−2 / −3 / −1, six pixels of deficit and nine once separated,
+> against a `CARD_H` of 104 on a 268px content area already carrying two of those cards plus the
+> Codex row — the only band big enough to pay is the 39px hero number); the reader chip's 28px tap
+> band and the history chip's 25px one (both already far under `TAP_MIN` 40, so the "fix" of
+> shrinking them to stop at the rule makes the device worse); `DETAIL_HEAD_H`'s 2-row touch overlap
+> with the card border (touch rows, not ink, and shrinking it takes a sub-floor target lower); the
+> voice card's 12px label step and its six lines holding 198 of 200 transcript characters (a
+> seventh line reaches 164 against a panel ending 157 and a reply label at 168); `VOICE_LBL_STEP`,
+> `DROW_BATT_VAL_DY` and the stepper's erase row (all three land on rows that carry no ink at a 13px
+> upper-case cell); and the `KB_COLS` / reader-column last-character rule (1px of overrun that lands
+> inside the surface either way, against a whole character of every row to remove it).
 
 They are recorded, with arithmetic and a severity order, in
 **`docs/board-1-known-defects.md`** — including the one reported defect that turned out **not** to
 be real, kept as a correction rather than deleted, because a false defect costs a future maintainer
-either the time to disprove it or a no-op "fix" that breaks byte-identity for nothing.
+either the time to disprove it or a no-op "fix" — which, while byte-identity was in force, also
+broke it for nothing.
 
 **The worst live one is now FIXED, and it is the one that used to be quoted here for
 orientation:** the session detail screen drew two footer strings at the same `MC_DATUM` y, so the

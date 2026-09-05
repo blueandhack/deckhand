@@ -906,8 +906,10 @@ const int SESSION_LINE_H = 16;   // uiLineH(T_BODY), Spleen 8x16
 // { T_HERO, T_HEAD, T_BODY }: 1, i.e. T_HEAD, because T_HERO's 64px cell does not
 // fit the 24px band above. This is the height half of the ladder's test - the
 // width half is measured at the call site - and it is a constant rather than a
-// runtime `uiLineH(rung) > SESSION_NAME_H` check because board 1's binary is held
-// byte-identical and a runtime test costs it flash. sessions-geom-check.mjs
+// runtime `uiLineH(rung) > SESSION_NAME_H` check because a runtime test costs flash
+// on the board with the least of it. (That clause used to read "because board 1's
+// binary is held byte-identical and a runtime test costs it flash"; the freeze is
+// lifted - see CLAUDE.md - and the flash is still the reason.) sessions-geom-check.mjs
 // asserts the invariant instead (the top rung's cell fits the band AND is the
 // tallest that does), against the parsed UI_FONTS[] table, so the constant cannot
 // drift from the fonts without a checker failure.
@@ -994,10 +996,14 @@ const int SESSION_LARGE_MIN_H = 56;
 // rowH >= SESSION_SUBC_Y + SESSION_LINE_H + 2 = 47. Board 1's 38 is 2 SHORT of its
 // own equivalent (25 + 13 + 2 = 40), which is not hypothetical: seven or more
 // sessions there put six rows at exactly 38 and the model/branch line is drawn over
-// the row's own outline. That defect is documented in board_e32r28t.h and in
-// sessions-geom-check.mjs and deliberately not fixed (board 1's binary is held
-// byte-identical across this port) - but inheriting the magic number into a new
-// board would be inheriting the bug, so this one is derived. Note the "+ 15" that
+// the row's own outline. THAT DEFECT IS FIXED as of the compose-surface branch, but
+// not by raising board 1's floor - six rows at 40 plus five 3px gaps is 255 against
+// an avail of 248, so the sixth would be drawn through the footer. sessionSubcYAt()
+// (sessions.ino) clamps the compact sub-line to the row it is drawn in instead; that
+// clamp is INERT on this board, because 47 is derived to hold the unclamped line and
+// the min therefore never binds - which sessions-geom-check.mjs prints per board
+// rather than leaving to be inferred. Inheriting board 1's magic number would still
+// have been inheriting the bug, so this one stays derived. Note the "+ 15" that
 // used to be written here was itself 13 + 2, i.e. a line height with a literal
 // baked in; at a 16px line it is +18.
 // It never binds today either way: six sessions are 65, 62 with the strip.

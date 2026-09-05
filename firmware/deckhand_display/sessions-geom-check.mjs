@@ -245,16 +245,23 @@ const KNOWN = {
     "prompt: 2 lines hold 62 of 100 chars",
     "path: 2 lines hold 62 of 64 chars",
     "ask badge row starts at +27, inside the +28 header touch band",
-    // FOUND BY THIS CHECKER, both pre-existing and both left alone because board
-    // 1's binary is held byte-identical across the two-board port. Reported
-    // rather than fixed - see the task report.
-    //
-    // (a) Seven or more sessions: the "+N more" strip takes 16px, six rows then
-    // come out at (248-15)/6 = 38 - exactly SESSION_ROW_H_MIN, so nothing clamps
-    // it - and a compact row's sub-line inks y+25..y+37 while the 2px border owns
-    // y+36..y+37. The last two rows of the model/branch line are drawn over the
-    // row's own outline. Board 2 cannot reach it: its smallest row is 63.
-    "strip 6x38 (compact): sub-line -> border bottom gap -2",
+    // (a) TWO ENTRIES USED TO SIT HERE AND THE DEFECT THEY DOCUMENTED IS FIXED:
+    //   "strip 6x38 (compact): sub-line -> border bottom gap -2"
+    //   "ladder floor 38 >= SESSION_SUBC_Y + line + 2 = 40 (least legal compact row)"
+    // One defect stated twice - as the row it produced, and as the constant that
+    // produced it. Seven or more sessions add the 16px "+N more" strip, leaving
+    // avail 248, and (248 - 5*3) / 6 = 38 exactly, so nothing clamped it; a compact
+    // row's sub-line inked y+25..y+37 while the 2px border owned y+36..y+37, and
+    // the last two rows of the model/branch line were drawn over the row's own
+    // outline. THE STATED REASON FOR LEAVING IT WAS THAT BOARD 1'S BINARY WAS HELD
+    // BYTE-IDENTICAL, and that is no longer true of this branch. sessionSubcYAt()
+    // clamps the sub-line to the row it is drawn in (sessions.ino carries the
+    // arithmetic, including why the ladder FLOOR could not simply be raised to 40:
+    // six rows at 40 plus five gaps is 255 against an avail of 248). The band walk
+    // measures the clamped y at every rung, so the collision is now checked where
+    // it happens. Removed rather than left dead - an unreachable allowlist entry is
+    // the same defect as an assertion that cannot fail, just on the allowlist side
+    // of it - and the precedent is 3a9a085's, 5d1acf1's and 924cecc's.
     // (b) TWO ENTRIES USED TO SIT HERE AND THE DEFECT THEY DOCUMENTED IS FIXED:
     //   "\"answer on your Mac\" ends 299 above the history hint at 287"
     //   "DETAIL_CARD_H 224 is within the 211px ceiling the history hint sets"
@@ -275,16 +282,24 @@ const KNOWN = {
     // content area. The proportion carries across even though the pixels cannot.
     "ask option 32px tall >= TAP_MIN 40",
     "ask option gap 4 separates two decision buttons",
-    // (d) The ladder floor, 2px under the least legal compact row - the same
-    // arithmetic as (a), stated as the constant rather than as the row it produces.
-    "ladder floor 38 >= SESSION_SUBC_Y + line + 2 = 40 (least legal compact row)",
-    // (e) The VOICE RESULT CARD, both pre-existing and both unreachable on board 2.
-    // The label step is 1px under Cozette's cell, so the transcript panel's fill lands
-    // on the label's last row - blank for every glyph without a descender, the same
-    // allowance (d)'s neighbours take. And six lines of a 33-column lane hold 198 of
-    // the host's 200-character transcript cap, so a full-length transcript loses its
-    // last two characters (word wrap can cost more). Both are left alone because this
-    // board's binary is held byte-identical; board 2 takes the full cell and 210.
+    // (e) THE VOICE RESULT CARD, both pre-existing, both unreachable on board 2, and
+    // both DEFERRED WITH THE ARITHMETIC rather than excused - the "board 1's binary
+    // is held byte-identical" that stood here is not a reason any more (CLAUDE.md).
+    //
+    // VOICE_LBL_STEP is 12, one pixel under Cozette's 13px cell, so the transcript
+    // panel's fill lands on the label's last row. That row is the label's DESCENDER
+    // row and the labels are "YOU SAID" / "CLAUDE" - upper case, no descenders, so
+    // no ink is ever there; the same allowance the ask badge/title pair takes. The
+    // fix is +1, and board_e32r28t.h says what it would cost on a 16px face (four
+    // rows of a real 12-row ascent), which is why the constant is per-board at all.
+    //
+    // SIX LINES HOLD 198 OF 200, and the seventh is what the card cannot give: the
+    // panel runs 68..157 and six 13px lines end at 151, so a seventh needs to reach
+    // 164 - past the panel, past the reply label at 168. Growing the panel by 13
+    // walks the reply block into the footer bound this checker already asserts (the
+    // reply ends 283 of 294). So a 200-character transcript loses its last two
+    // characters, and word wrap can cost more. Board 2 is not a better layout, it is
+    // a 480px panel: 35 columns x 6 = 210, which is over the cap with room to spare.
     "voice card label step 12 >= the label's own 13px cell",
     "voice card: 6 lines hold 198 of 200 transcript chars",
     // (f) The reader chip's tap zone is the full HEADER BAND, and board 1's band
@@ -422,7 +437,16 @@ function rowBands(b, c, rowH, kind) {
     // with the text below it and is checked against the border on its own. The name
     // is drawn at the BOTTOM rung here, so it is one body line and not the band.
     bands.push(["name", c.SESSION_NAME_Y, c.SESSION_NAME_Y + L - 1]);
-    bands.push(["sub-line", c.SESSION_SUBC_Y, c.SESSION_SUBC_Y + L - 1]);
+    // CLAMPED, exactly as sessionSubcYAt() clamps it: SESSION_SUBC_Y is an offset
+    // from the row's TOP and the border owns the last BORDER_CARD rows, so at the
+    // ladder's floor on board 1 the unclamped y put two rows of the model/branch
+    // line on the row's own outline. That was allowlisted here as "strip 6x38
+    // (compact): sub-line -> border bottom gap -2" for as long as board 1's binary
+    // was frozen. The firmware clamps now; this MIRRORS the clamp so the band walk
+    // below measures what is drawn, and the structural half asserts that the
+    // firmware's own expression is the one being mirrored.
+    const subcY = Math.min(c.SESSION_SUBC_Y, rowH - c.BORDER_CARD - L);
+    bands.push(["sub-line", subcY, subcY + L - 1]);
   }
   bands.push(["border bottom", rowH - 2, rowH - 1]);
   return bands;
@@ -752,8 +776,9 @@ function gateBefore(body, needle) {
   if (depth !== 0) throw new Error(`gateBefore(): unbalanced parens before ${needle}`);
   return cur.replace(/\s+/g, " ").trim();
 }
-// Board 1 spells askReadOffered as a function-like MACRO so its binary stays
-// byte-identical (see the note at the definition). PARSE that macro and expand it,
+// Board 1 spells askReadOffered as a function-like MACRO because a function-like
+// macro costs that board nothing at all - the flash argument at the definition,
+// which is the reason that survived the byte-identity freeze being lifted. PARSE that macro and expand it,
 // or the comparison below is between two SPELLINGS rather than between what the
 // two boards' compilers actually see - which is exactly the vacuous shape this
 // file has been caught in before.
@@ -988,7 +1013,7 @@ function askReaderChip(b, c, W) {
           ` chip that only tracked the overflow would leave the descriptions reachable` +
           ` and never found`
         : `askReadOffered is the overflow alone here: \`${def}\` - this board draws no` +
-          ` descriptions and its binary is held byte-identical`);
+          ` option descriptions at all (ASK_OPT_DESC_BYTES is a 1-byte placeholder)`);
   if (b === 2) {
     // ...and the description test is a real one: dense slots (an option with
     // nothing to say holds ""), bounded by askOptCount.
@@ -1013,8 +1038,8 @@ function askReaderChip(b, c, W) {
   chk(c.DETAIL_HEAD_H >= c.TAP_MIN, m, isKnown(b, m));
 
   // ---- 4. THE TWO COPIES OF THE CHIP'S DRAW AGREE ----
-  // It is written once per board arm, which is what keeps board 1 byte-identical
-  // (see the note at the site). Duplication is guarded rather than trusted.
+  // It is written once per board arm because the two arms genuinely differ (see the
+  // note at the site). Duplication is guarded rather than trusted.
   const chipDraw = (src) => {
     const a = src.indexOf("uiFillRound(ASK_READ_BTN_X");
     if (a < 0) return null;
@@ -1037,8 +1062,8 @@ function askReaderChip(b, c, W) {
   chk(hasSection === (b === 2),
       b === 2
         ? "drawReader composes a second section from the options"
-        : "board 1's reader is the detail alone - it draws no descriptions, and its binary" +
-          " is held byte-identical");
+        : "board 1's reader is the detail alone - it draws no option descriptions, so " +
+          "there is no second section for it to compose");
   if (b !== 2) return;
 
   // ONE WALK, TWO MODES. A separate counting function is how a pager comes to
@@ -1262,8 +1287,10 @@ for (const b of [1, 2]) {
 
   // ---- THE NAME LADDER'S HEIGHT TEST, which is a constant in the firmware ----
   // drawSessionRow starts its width walk at SESSION_NAME_TOP_RUNG instead of
-  // testing each rung's cell height at runtime, because board 1's binary is frozen
-  // and a runtime test costs it flash. So the invariant lives here: the top rung
+  // testing each rung's cell height at runtime, because a runtime test costs flash on
+  // the board with the least of it. (That used to read "because board 1's binary is
+  // frozen and a runtime test costs it flash"; the freeze is lifted, the flash is
+  // not.) So the invariant lives here: the top rung
   // must FIT the band, and must be the TALLEST that does. Get it wrong low and a
   // row draws a name over its own sub-line; wrong high and the row silently gives
   // up a rung it had room for.
@@ -1336,11 +1363,57 @@ for (const b of [1, 2]) {
       `SESSION_SUB_MIN_H ${c.SESSION_SUB_MIN_H} == sub-line end +${c.SESSION_SUB2_Y + LH - 1} + pillUp ${c.SESSION_PILL_UP}`);
   chk(c.SESSION_LARGE_MIN_H === 12 + NH + PILL_H + 2 * c.SESSION_AIR,
       `SESSION_LARGE_MIN_H ${c.SESSION_LARGE_MIN_H} == 12 + name ${NH} + pill ${PILL_H} + 2*AIR(${c.SESSION_AIR})`);
-  // The floor is the least height the COMPACT layout can legally draw: its
-  // sub-line inks SUBC_Y..+L-1 against a 2px border owning rowH-2..rowH-1. The
-  // "+ 15" this used to read was 13 + 2, a line height with a literal baked in.
-  m = `ladder floor ${c.SESSION_ROW_H_MIN} >= SESSION_SUBC_Y + line + 2 = ${c.SESSION_SUBC_Y + LH + 2} (least legal compact row)`;
-  chk(c.SESSION_ROW_H_MIN >= c.SESSION_SUBC_Y + LH + 2, m, isKnown(b, m));
+  // THE FLOOR NO LONGER HAS TO HOLD THE UNCLAMPED SUB-LINE, and the assertion that
+  // said it did is gone with the allowlist entry that excused it. What stood here
+  // was `SESSION_ROW_H_MIN >= SESSION_SUBC_Y + line + 2`, board 1 failed it by 2 at
+  // its ladder floor (38 against 40), and the entry excusing that failure gave
+  // "board 1's binary is held byte-identical" as the reason. sessionSubcYAt() now
+  // clamps the sub-line to the row it is drawn in, and the band walk below measures
+  // the clamped y at every rung the ladder can actually produce - so the border
+  // collision is checked where it happens rather than excused at the constant.
+  //
+  // WHAT THE CLAMP ITSELF CAN STILL BREAK is the other end: pulled up far enough it
+  // lands on the NAME above it, and no band walk would catch that at a height the
+  // ladder never emits. So the floor is asserted against the clamp's OWN output.
+  const subcFloor = Math.min(c.SESSION_SUBC_Y, c.SESSION_ROW_H_MIN - c.BORDER_CARD - LH);
+  chk(subcFloor >= c.SESSION_NAME_Y + LH,
+      `compact sub-line clamps to +${subcFloor} at the ladder floor ${c.SESSION_ROW_H_MIN}, ` +
+      `still clear of the name ending +${c.SESSION_NAME_Y + LH - 1}`);
+  // AND WHETHER IT BINDS AT ALL, per board, stated rather than left to be inferred:
+  // on board 2 the min never binds (its shortest legal row is far above), so the
+  // clamp is inert there by arithmetic and not by a guard. A board-2 layout change
+  // that started needing it would flip this line.
+  console.log(`  compact sub-line: SESSION_SUBC_Y ${c.SESSION_SUBC_Y}, clamp at the floor ` +
+              `${c.SESSION_ROW_H_MIN} -> ${subcFloor} (${subcFloor < c.SESSION_SUBC_Y ? "BINDS" : "inert"})`);
+  // ---- AND THE MIRROR ABOVE IS BOUND TO THE FIRMWARE'S OWN EXPRESSION ----
+  // A JS re-implementation of a clamp keeps agreeing with itself after the clamp is
+  // deleted from the device, so the three assertions below read sessions.ino's text
+  // instead: the helper's body, and BOTH call sites. Run once (b === 1) because the
+  // text is shared - sessions.ino is one file for both boards - so a second pass
+  // would print the same three lines again and certify nothing more.
+  if (b === 1) {
+    const subcFn = fnSrc("int sessionSubcYAt(int rowH) {");
+    chk(/const int lim = rowH - BORDER_CARD - SESSION_LINE_H;/.test(subcFn) &&
+        /return SESSION_SUBC_Y < lim \? SESSION_SUBC_Y : lim;/.test(subcFn),
+        "sessionSubcYAt() clamps SESSION_SUBC_Y to rowH - BORDER_CARD - SESSION_LINE_H - the " +
+        "band walk above MIRRORS this expression, and a mirror binds nothing on its own");
+    // BOTH SITES, and that is the point rather than thoroughness: the compact
+    // sub-line and the live duration are drawn at the SAME y so the duration's
+    // opaque clear box does not eat the sub-line's tail, so a clamp applied to one
+    // and not the other splits them apart at the ladder floor and nowhere else -
+    // the hardest kind of layout bug to see, because six of the seven rungs agree.
+    const sessTxt = readSource("sessions.ino").replace(/^[ \t]*\/\/.*$/gm, "");
+    const rowSrc = fnSrc("void drawSessionRow(int pos) {");
+    chk(/drawString\(subFit, nameX, y \+ sessionSubcYAt\(rowH\)\);/.test(rowSrc),
+        "the compact sub-line is drawn at sessionSubcYAt(rowH), not at the raw SESSION_SUBC_Y");
+    const calls = [...sessTxt.matchAll(/sessionSubcYAt\(/g)].length;
+    chk(calls === 3,
+        "sessionSubcYAt appears exactly 3 times in sessions.ino - its definition and the " +
+        `TWO draw sites that must share a y (the sub-line and the duration); found ${calls}`);
+    chk(!/y \+ SESSION_SUBC_Y\b/.test(sessTxt) && sessTxt.includes("sessionSubcYAt"),
+        "no draw site reaches SESSION_SUBC_Y directly any more - every compact y goes " +
+        "through the clamp (the second term is what stops this passing over an empty read)");
+  }
   // The compact pill against the LADDER FLOOR rather than only against the rungs
   // the ladder happens to produce. Added because geom-sweep.mjs found
   // SESSION_PILLC_Y completely unguarded on board 2: its ladder never emits a row
@@ -2388,8 +2461,8 @@ for (const b of [1, 2]) {
       const i2 = body.indexOf("#else"), i3 = body.indexOf("#endif");
       chk(i2 > 0 && i3 > i2, "drawStatusDot splits on BOARD_USES_TFT_ESPI");
       const b1 = body.slice(0, i2), b2 = body.slice(i2, i3);
-      // Board 1's half is held byte-identical by board-baseline.mjs; this only
-      // says the shape vocabulary is still THERE, so a future tidy-up that
+      // Board 1's half is TRACKED by board-baseline.mjs rather than frozen by it, so
+      // this cannot lean on the binary; it only says the shape vocabulary is still THERE, so a future tidy-up that
       // collapsed both boards onto the mark would fail here and not merely move
       // a binary somebody might re-baseline.
       chk(/uiRing\(cx, cy, r, 2, color, bg\);/.test(b1) && /drawAgentSpinner\(cx, cy, bg, codex\)/.test(b1),
@@ -2990,8 +3063,9 @@ for (const b of [1, 2]) {
   // rather than restated, so a future change that re-couples the two (making the
   // zone track the chip again) is what this fails on, not a hand-copied 24.
   // Board 1 is not asserted here: its 76x22 chip in a 28px row was already the
-  // pre-existing case this pattern generalises from, and it is a documented
-  // byte-identical board this task does not touch.
+  // pre-existing case this pattern generalises from, and its 28px row is the
+  // sub-TAP_MIN shortfall settings-geom-check.mjs already carries as a known entry -
+  // asserting it here would be a second copy of that record, not a second check.
   if (b === 2) {
     // Anchored on the REAL statement (`msgOffered(detailIndex) && sx >= ...`),
     // not merely "sx >= msgBtnX() - N" - that laxer pattern's first match in this
@@ -3950,9 +4024,10 @@ for (const b of [1, 2]) {
     }
   }
   // THE TRANSCRIPT CAP, hard-wrapped at this board's own advance. Board 1 needs 7 lines
-  // for the host's 200 characters and shows 6, which is pre-existing and left alone
-  // because its binary is held byte-identical; the point of asserting it is that board 2
-  // must not be WORSE, and it is exact.
+  // for the host's 200 characters and shows 6; the arithmetic for why the 7th does not
+  // fit on a 320px panel is in KNOWN[1] entry (e) above, where it replaced the
+  // byte-identity excuse. The point of asserting it here is that board 2 must not be
+  // WORSE, and it is exact.
   const vCols = Math.floor((W - 2 * c.CARD_X - 14) / advanceB(b, T_META));
   vm = `voice card: ${c.VOICE_TEXT_LINES} lines hold ${c.VOICE_TEXT_LINES * vCols} of ${VOICE_TEXT_MAX} transcript chars`;
   chk(c.VOICE_TEXT_LINES * vCols >= VOICE_TEXT_MAX, `${vm} (lane ${W - 2 * c.CARD_X - 14}px = ${vCols}/line)`,
@@ -3963,8 +4038,11 @@ for (const b of [1, 2]) {
   // wider row does not lengthen any of these - the worst cases are identical on
   // both boards, which is why nothing here moved for board 2.
   // A CACHE'S DECLARED LENGTH MAY NOW BE A NAME, not a number: rowSigCache is
-  // sized per board (SESSION_ROW_SIG_LEN) because board 2's expanded row signs two
-  // more fields and board 1's RAM is held byte-identical. cacheSizes() hands back
+  // sized per board (SESSION_ROW_SIG_LEN) because the two boards are free to differ
+  // there - though today they do NOT: both are 368, since board 1 draws the band card
+  // too and a signature holds field values rather than the text drawn from them. The
+  // note that used to stand here ("board 1's RAM is held byte-identical") was wrong on
+  // both counts by the time it was read. cacheSizes() hands back
   // the dimension as written, so a symbolic one is resolved against THIS board's
   // constant table - unresolved would come out NaN, and `NaN >= n` is false, which
   // reports as a failure rather than passing in silence.

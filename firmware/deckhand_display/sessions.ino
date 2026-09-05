@@ -163,6 +163,38 @@ int sessionRowHAt(int pos) {
   int e = sessionExpandedH(sessionCount);
   return (pos == 0 && e > 0) ? e : sessionRowH;
 }
+// THE COMPACT SUB-LINE'S y, CLAMPED TO THE ROW IT IS DRAWN IN - and this is the
+// fix for a defect that stood on sessions-geom-check.mjs's board-1 allowlist as
+// "strip 6x38 (compact): sub-line -> border bottom gap -2", justified by board 1's
+// binary being held byte-identical. That justification is gone (see CLAUDE.md), and
+// the arithmetic underneath it was real: SESSION_SUBC_Y is a fixed offset from the
+// row's TOP, the compact layout's sub-line inks it..+SESSION_LINE_H-1, and the row's
+// own 2px border owns rowH-2..rowH-1. On board 1 the two collide at the ladder's
+// floor - seven or more sessions add the 16px "+N more" strip, leaving avail 248, and
+// (248 - 5*3) / 6 = 38 exactly, so nothing clamps it - and the last two rows of the
+// model/branch line are drawn over the row's own outline.
+//
+// CLAMPED HERE RATHER THAN THE FLOOR RAISED, and the floor is why: at
+// SESSION_ROW_H_MIN 40 the same six rows are 6*40 + 5*3 = 255 against an avail of
+// 248, so the sixth row would be drawn 7px THROUGH the footer. Trading two rows of
+// sub-line for seven rows of row is not a fix. Showing five rows instead of six is a
+// product decision this is not the place to take.
+//
+// AND NOT BY MOVING SESSION_SUBC_Y, which is SHARED and derived: board 2's compact
+// arm reads the same constant at its own line height, and lowering it there would
+// move a layout that has no defect. The clamp is inert on board 2 by arithmetic
+// rather than by a guard - its shortest legal row is well above
+// SESSION_SUBC_Y + SESSION_LINE_H + BORDER_CARD, so the min never binds - which is
+// exactly the property sessions-geom-check.mjs asserts rather than assumes.
+//
+// BOTH DRAW SITES MUST GO THROUGH IT: the sub-line and the live duration are drawn
+// at the SAME y on purpose (the duration's opaque clear box would otherwise eat the
+// sub-line's tail), so a clamp applied to one and not the other reintroduces that
+// collision at the floor and nowhere else. The checker counts the call sites.
+int sessionSubcYAt(int rowH) {
+  const int lim = rowH - BORDER_CARD - SESSION_LINE_H;
+  return SESSION_SUBC_Y < lim ? SESSION_SUBC_Y : lim;
+}
 int sessionRowYAt(int pos) {
   int e = sessionExpandedH(sessionCount);
   if (e <= 0) return SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
@@ -1485,7 +1517,7 @@ void drawSessionRow(int pos) {
       int subMaxW = durBoxLeft - nameX - 4; // 4px so it never kisses that box
       char subFit[36];
       fitText(subFit, sizeof(subFit), sub, subMaxW);
-      tft.drawString(subFit, nameX, y + SESSION_SUBC_Y);
+      tft.drawString(subFit, nameX, y + sessionSubcYAt(rowH));
     }
     const char* label = working ? "WORKING" : (strcmp(s.status, "asking") == 0 ? "INPUT" : "READY");
     drawStatusPill(SESSION_ROW_X + SESSION_ROW_W - 16, y + SESSION_PILLC_Y, label, s.status, true);
@@ -1647,7 +1679,7 @@ void renderSessionsList() {
     int y = sessionRowYAt(pos);
     int rowH = sessionRowHAt(pos);
     int durY = rowH >= SESSION_LARGE_MIN_H ? y + rowH - SESSION_DUR_UP
-                                           : y + SESSION_SUBC_Y;
+                                           : y + sessionSubcYAt(rowH);
     drawIfChanged(rowDurCache[pos], sizeof(rowDurCache[pos]), dur,
                   SESSION_ROW_X + SESSION_ROW_W - 16, durY, 1, 1,
                   COLOR_LABEL, COLOR_CARD, TR_DATUM);

@@ -28,21 +28,32 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1404382, RAM 71972 | flash 1042674, RAM 71524 |
+| size today | flash 1411298, RAM 72524 | flash 1049518, RAM 72084 |
 
 **Those two figures are `arduino-cli`'s own `Sketch uses` / `Global variables` lines, NOT the
 `.bin` file's size, and the distinction has to be stated or the two records read as
 contradicting each other.** The `.bin` is larger by fixed image structure - a 24-byte image
 header, 8 bytes per segment header, the trailing 33-byte SHA-256 plus checksum, and 16-byte
-segment padding. **Measured on four builds today: +266, +266, +266 and +270** - so it is
-*nearly* constant but not exactly, because the alignment padding rounds. Consequence worth
+segment padding. **Measured on four builds: +266, +266, +266 and +270; on the two builds of
+2026-09-05, +270 (board 1) and +258 (board 2)** - so it is *nearly* constant but not exactly,
+because the alignment padding rounds. Consequence worth
 knowing: a delta taken from `.bin` sizes can differ from the same delta taken from
 `Sketch uses` by a few bytes (it did here, +2352 against +2356 on board 2), and
-`board-baseline.mjs` reports the `.bin` number. Board 1's `.bin` today is **1404656** and
-board 2's is **1042944**, which are the baseline figures below.
+`board-baseline.mjs` reports the `.bin` number. **Do not read either figure out of this
+file: `firmware/board-baseline.json` holds the two `.bin` sizes, `CLAUDE.md` quotes them, and
+`node firmware/board-baseline.mjs --doc-check` asserts the quote against the JSON.** That
+binding exists because CLAUDE.md's copy went stale five times in one day, inside the very
+instruction that says "verify it - do not reason about it"; `--update` now rewrites the
+document as well, so re-baselining cannot leave the prose behind. `--doc-check --selftest`
+injects a wrong size into an in-memory copy of CLAUDE.md and exits 0 only if it is caught. The
+RAM figures in the row above are `arduino-cli`'s and are NOT bound by it - they are still
+hand-maintained.
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
-RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
+RETIRED — replaced, not abandoned.** (The residual freeze that survived the retirement — board 1
+held byte-identical so a board-1 change could not ride inside a board-2 diff — was itself lifted
+on the `compose-surface` branch, on which board 1 is deliberately brought into line with board 2.
+Nothing anywhere may still cite byte-identity as the reason a board-1 defect stands.) Two deliberate shared-code fixes moved it on purpose (the
 history list going blank after reading one entry, and the PAIRED MACS row), so the constant is
 gone and `firmware/board-baseline.mjs` takes its place:
 
@@ -107,9 +118,9 @@ mask fixes it: the 16 bytes are a literal that either exists or does not.
 `not pooled`, `--update` records that state in `board-baseline.json`, and a `CHANGED` whose pooling
 flipped prints the explanation and tells you to rebuild the core (`arduino-cli compile --clean`)
 before believing your own diff. The alternative is a check that cries wolf once a day, and this repo
-already says elsewhere what happens to a check nobody reads. Both current baselines are recorded
-`pooled: true` — not assumed: a pooling flip changes the hash, so today's pooled builds matching
-them IS the proof. (The teeth were proven by injection: a baseline doctored to
+already says elsewhere what happens to a check nobody reads. Both current baselines are recorded with the state
+they were built in (`pooled: false` as of 2026-09-05) — not assumed: a pooling flip changes the
+hash, so a build matching its baseline IS the proof of the recorded state. (The teeth were proven by injection: a baseline doctored to
 `pooled: false, size -16` produces the `+16 bytes` line and the explanation under it.)
 The same fact is why the **`size today` row above can never be reconciled to the byte** across
 sessions — two honest measurements of one commit differ by 16 depending on the core's cache.
@@ -118,7 +129,7 @@ sessions — two honest measurements of one commit differ by 16 depending on the
 2's baseline was allowed to fall **4,112 bytes stale across 42 commits**, so `--check 2` reported
 `CHANGED` through an entire task for reasons that had nothing to do with that task's code. Nothing
 in the code caused it: re-baselining board 2 was in nobody's routine, and the plans of the day named
-board 1 only — board 1 is the one held byte-identical, so it is the one everybody remembers. That is
+board 1 only — board 1 was the one held byte-identical, so it was the one everybody remembered. That is
 the danger rather than the untidiness: a `CHANGED` you have learned to expect is a `CHANGED` you
 stop reading, and the next one will be real. **Compile board 2, `--check 2`, then compile board 1,
 `--check 1` — never concurrently** (one sketch build directory; see below), and re-baseline whichever

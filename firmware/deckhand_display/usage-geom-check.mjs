@@ -267,9 +267,21 @@ for (const b of [1, 2]) B[b] = consts("deckhand_display.ino", consts(HDR[b]));
 // earlier - with ONE known consequence, recorded here and in
 // board_e32r28t.h: the stats row's clear reaches 3 rows into the pace bar's
 // tick overhang, so a changing token count shaves the bottom of the tick until
-// the bar next repaints. It is NOT fixed, deliberately: board 1's binary is held
-// byte-identical across this port, and hiding a board-1 behaviour change inside a
-// board-2 diff is worse than a 3px cosmetic artefact. Board 2's derivation leaves
+// the bar next repaints.
+//
+// IT IS NOT FIXED, AND THE REASON IS NO LONGER A FREEZE. This block used to say
+// "board 1's binary is held byte-identical across this port"; that constraint is
+// lifted (CLAUDE.md), so the reason has to be the arithmetic, and the arithmetic
+// holds. The three gaps are -2, -3 and -1: six pixels of deficit, nine once each
+// pair is separated by one. CARD_H is 104 on this board and the content area is
+// 268 (320 - TAB_BAR_H 34 - FOOTER_H 18), which already carries TWO of these cards
+// (208) plus the Codex row plus their gaps - there are not nine pixels to give the
+// card, and the only band big enough to give them back is the 39px hero number,
+// which is the one thing on this card anybody reads at arm's length. So the choice
+// is a 3px artefact on a tick that repaints itself, or a smaller headline figure.
+// Board 2's +2 / +6 / +4 are not a better derivation, they are a 410px content
+// area. DEFERRED, with the cost stated, rather than excused. Board 2's derivation
+// leaves
 // every band disjoint by 8px, so this list must stay board-1-only - a board-2
 // entry appearing here means a layout change gave up the clearance rather than
 // keeping it.

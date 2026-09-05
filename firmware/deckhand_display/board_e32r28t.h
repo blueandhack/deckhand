@@ -25,7 +25,9 @@
 #define BOARD_SETTINGS_HOME  0   // four pages behind a chevron pager; see settings.ino
 // The scrolling transcript is board 2's. This board keeps its paged reader: the
 // panel is RESISTIVE, where this repo has already measured that drag-scroll
-// misfires and settled on discrete pages, and its binary is held byte-identical.
+// misfires and settled on discrete pages. (This line also said "and its binary is
+// held byte-identical"; that constraint is lifted - see CLAUDE.md - and the
+// resistive-panel measurement was always the reason that mattered.)
 // A #define, NOT a const int - the preprocessor cannot see a C++ const int, so
 // `#if` on one is silently false with no warning. That has shipped here twice.
 #define BOARD_HISTORY_SCROLL 0
@@ -347,18 +349,25 @@ const int SESSION_SUB_MIN_H = 70;
 const int SESSION_LARGE_MIN_H = 56;
 // The ladder's floor and ceiling (constrain() in renderSessionsList).
 //
-// 38 IS TWO PIXELS TOO SMALL, and it is reachable. The floor's job is to be the
-// least height the COMPACT layout can legally draw, and that layout's sub-line
-// inks SESSION_SUBC_Y..+12 (+25..+37) against a 2px border owning rowH-2..rowH-1,
-// so a legal row needs rowH >= SESSION_SUBC_Y + 15 = 40. At 38 the sub-line's last
-// two rows are drawn over the row's own outline. It is reached whenever the list
-// truncates: seven or more sessions add the 16px "+N more" strip, leaving
-// avail 248, and (248 - 5*3) / 6 = 38 exactly - so nothing clamps it and nothing
-// on screen names the cause. NOT FIXED HERE, because this board's binary is held
-// byte-identical across the two-board port and a board-1 rendering change must not
-// ride inside a board-2 diff; sessions-geom-check.mjs carries it as a known entry
-// with this arithmetic, and board 2 derives its floor (43) instead of inheriting
-// this number.
+// 38 IS TWO PIXELS UNDER THE UNCLAMPED COMPACT LAYOUT, AND THAT IS NOW HANDLED IN
+// THE DRAW RATHER THAN HERE. The arithmetic that made it a defect is unchanged and
+// worth keeping: the compact sub-line inks SESSION_SUBC_Y..+12 (+25..+37) against a
+// 2px border owning rowH-2..rowH-1, so an unclamped row needs rowH >= 40, and 38 is
+// reached whenever the list truncates - seven or more sessions add the 16px
+// "+N more" strip, leaving avail 248, and (248 - 5*3) / 6 = 38 exactly, so nothing
+// clamped it and nothing on screen named the cause.
+//
+// THE STATED REASON FOR LEAVING IT WAS THAT THIS BOARD'S BINARY WAS HELD
+// BYTE-IDENTICAL. That constraint is lifted (see CLAUDE.md), so it was fixed - but
+// NOT by raising this constant to 40, and the reason is arithmetic rather than
+// caution: six rows at 40 plus five 3px gaps is 255 against an avail of 248, so the
+// sixth row would be drawn 7px through the footer. Two rows of sub-line on an
+// outline is a smaller defect than seven rows of row on the footer, and dropping
+// the list to five visible rows is a product decision, not a geometry fix.
+// sessionSubcYAt() (sessions.ino) clamps the sub-line to the row it is drawn in
+// instead; sessions-geom-check.mjs mirrors that clamp in its band walk and binds
+// the firmware's own expression and both draw sites. Board 2 derives its floor (47)
+// rather than inheriting this number, which is why the clamp is inert there.
 //
 // 90 is SESSION_TITLE_MIN_H (85) plus 5 of slack, which the layout spends between
 // the sub-line and the bottom-anchored pill.
@@ -655,9 +664,18 @@ const int SESSION_EXP_PROMPT_MAX = 4;
 // The header row's TOUCH band ("< Back" on the left; TYPE or READ ALL on the
 // right), used by both handleAskTouch's `sy < CONTENT_Y + DETAIL_HEAD_H` gates.
 // 28 against a card starting at CONTENT_Y+26, i.e. the band's last 2 rows overlap
-// the card's border - harmless (the border is not tappable content) and left
-// alone here: unlike SESSION_SUB_LANE_W this one does not put ink on the border,
-// it only shares touch rows with it, so it stays the byte-identical literal.
+// the card's border. IT STANDS, and the reason is a trade rather than a freeze
+// (the byte-identity clause that used to be given here is gone with the constraint
+// - see CLAUDE.md). Two facts decide it. First, this band puts no INK on the
+// border: unlike SESSION_SUB_LANE_W, which really did draw over the outline, this
+// one only shares touch rows with it, and a border is not tappable content, so the
+// overlap costs nothing on the glass. Second, the only way to remove it is to
+// SHRINK the band to 26 - and 28 is already 12px under this board's own TAP_MIN of
+// 40, the shortfall sessions-geom-check.mjs records for the reader chip's zone and
+// every other control in this row. Taking a sub-floor tap target down by another
+// 2px to tidy an invisible 2-row overlap makes the device worse. Growing it instead
+// is not available: CONTENT_Y+26 is where the card starts, and the band would then
+// eat the card.
 const int DETAIL_HEAD_H = 28;
 const int DETAIL_BACK_Y = 4;      // "< Back" baseline inside that row
 const int DETAIL_CARD_DY = 26;    // card top = CONTENT_Y + this
@@ -795,7 +813,10 @@ const int ASK_READ_BTN_H = 24;
 // 1-byte placeholder here), so the chip means exactly what it always meant:
 // the whole of a detail that did not fit. A MACRO rather than a `const char*`
 // so it costs this board nothing at all - the same shape WAKE_HINT uses in
-// power.ino, and this board's binary is held byte-identical.
+// power.ino. (That last clause used to read "and this board's binary is held
+// byte-identical"; the constraint is lifted and the flash argument was always the
+// real one: a `const char*` here is a pointer AND its string in .rodata on a board
+// whose free flash is the tightest thing about it, for a literal used at one site.)
 #define ASK_READ_BTN_LABEL "READ ALL"
 // The ask screen's own header stack, below "< Back": the kind badge (with the
 // session name right-aligned on the same row) and then the question title.
@@ -1138,17 +1159,28 @@ const int KB_PEEK_LINES = 11;                  // was 13, at KB_ROWS_Y 96
 const int HIST_CHIP_X      = 10;
 const int HIST_CHIP_Y      = 4;
 const int HIST_CHIP_H      = 17;
-// 13, where the chip's own centre is HIST_CHIP_Y + HIST_CHIP_H / 2 = 4 + 8 = 12 -
-// so the label sits ONE PIXEL LOW. Pre-existing and invisible at this size, and
-// left alone because this board's binary is held byte-identical across the port;
-// stated here rather than papered over with arithmetic that yields 12.
-// settings-geom-check.mjs carries it as a known board-1 entry.
-const int HIST_CHIP_CY     = 13;
+// DERIVED, and it used to be a literal 13 where the chip's own centre is
+// HIST_CHIP_Y + HIST_CHIP_H / 2 = 4 + 8 = 12 - so the label sat ONE PIXEL LOW.
+// Pre-existing, invisible at this size, and left alone for exactly one reason:
+// this board's binary was held byte-identical across the port. That constraint is
+// lifted (CLAUDE.md), the fix is one pixel and the derivation is the same one
+// settings-geom-check.mjs already asserted the literal against - so the constant is
+// now the expression rather than a number that happened to differ from it.
+// HIST_HDR_TEXT_Y is derived from this in turn (a 13px cell centred on it), and its
+// own assertion is what pins the pair together.
+const int HIST_CHIP_CY     = HIST_CHIP_Y + HIST_CHIP_H / 2;
 const int HIST_CHIP_W_CHAT = 40;
 const int HIST_CHIP_W_ALL  = 32;
 const int HIST_CHIP_TAP_W  = 76;
 const int HIST_CHIP_TAP_H  = 24;
-const int HIST_HDR_TEXT_Y  = 8;    // name (left) and position (right), TL/TR
+// DERIVED FROM THE CHIP'S CENTRE, and it used to be a literal 8 where a 13px cell
+// centred on that centre starts at 6 - so the name and the position field sat 2px
+// low against the chip beside them (1px, back when HIST_CHIP_CY was itself 13). Same
+// class as HIST_CHIP_CY above and fixed in the same pass, for the same reason: the
+// only thing that had ever kept it was this board's binary being held byte-identical.
+// Board 2 has always derived its own (27 - 16/2 = 19). The row still lands inside the
+// chip (6..18 against 4..20), which settings-geom-check.mjs asserts.
+const int HIST_HDR_TEXT_Y  = HIST_CHIP_CY - CODE_LINE_H / 2;   // name (left) / position (right), TL/TR
 const int HIST_RULE_Y      = 22;   // the divider under the header
 const int HIST_TOP         = 28;   // first entry row
 const int HIST_EMPTY_CY    = 130;  // "Asking the Mac..." / "Nothing here"
@@ -1192,12 +1224,22 @@ const int READER_TEXT_TOP = 30;
 const int READER_BTN_L_X = 8,   READER_BTN_L_W = 70;
 const int READER_BTN_M_X = 86,  READER_BTN_M_W = 68;
 const int READER_BTN_R_X = 162, READER_BTN_R_W = 70;
-// The x boundaries the three touch handlers split on. TWO SETS, because this
-// board has always had two: the history list and the full-entry pager split at
-// 78/156 while the ask reader splits at 82/158. Both merely assign the 8px gap
-// between two keys to a different neighbour, so neither is wrong - but they are
-// inconsistent, and that inconsistency is preserved here rather than fixed,
-// because this board's binary is held byte-identical across the two-board port.
-// Board 2 derives ONE pair from its own key geometry.
-const int HIST_TAP_1   = 78,  HIST_TAP_2   = 156;
-const int READER_TAP_1 = 82,  READER_TAP_2 = 158;
+// The x boundaries the three touch handlers split on. ONE SET NOW, DERIVED FROM THE
+// KEYS, which is what board 2 has always done.
+//
+// THIS BOARD HAD TWO SETS AND THE REASON GIVEN WAS BYTE-IDENTITY. The history list
+// and the full-entry pager split at 78/156 while the ask reader split at 82/158;
+// both merely handed the 8px gap between two keys to a different neighbour, so
+// neither was WRONG - but the same bar behaved differently depending on which
+// screen drew it, and nothing on the glass said so. With the constraint lifted
+// (CLAUDE.md) the question is which of the two to keep, and that is not a coin
+// toss: 82/158 are the MIDPOINTS of the two gaps (78..86 and 154..162), i.e. the
+// only pair that gives each key its own half of the gap. 78 and 156 were the left
+// key's right edge and a number two pixels off the other midpoint. So the reader's
+// pair wins, both are derived from the key geometry rather than transcribed, and
+// HIST_TAP_* is defined FROM it so the two cannot drift apart again.
+// settings-geom-check.mjs asserts both that each split falls in its gap and that
+// the two sets agree.
+const int READER_TAP_1 = (READER_BTN_L_X + READER_BTN_L_W + READER_BTN_M_X) / 2;   // 82
+const int READER_TAP_2 = (READER_BTN_M_X + READER_BTN_M_W + READER_BTN_R_X) / 2;   // 158
+const int HIST_TAP_1   = READER_TAP_1,  HIST_TAP_2 = READER_TAP_2;

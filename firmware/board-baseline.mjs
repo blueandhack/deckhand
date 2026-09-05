@@ -20,6 +20,19 @@
 //   node firmware/board-baseline.mjs <bin> --check 1                # compare to baseline
 //   node firmware/board-baseline.mjs <bin> --update 1               # re-baseline, deliberately
 //   node firmware/board-baseline.mjs --selftest <binA> <binB> <board>
+//   node firmware/board-baseline.mjs --doc-check                    # CLAUDE.md vs the JSON
+//   node firmware/board-baseline.mjs --doc-check --selftest         # ... and prove it bites
+//
+// --doc-check EXISTS BECAUSE THE PROSE WENT STALE FIVE TIMES IN ONE DAY. CLAUDE.md
+// quotes the current hash and size inside the very instruction that says "Verify it
+// - do not reason about it", so a reader who follows that instruction and compares
+// a fresh build against the number printed beside it saw a five-figure discrepancy
+// that was pure bookkeeping. Tooling was never affected (everything here reads the
+// JSON), which is exactly why nobody noticed. Two halves, and the second is the one
+// that makes it stop happening: --doc-check FAILS when the document disagrees with
+// the data, and --update REWRITES the document, so re-baselining cannot leave the
+// prose behind. A checker that binds the document to the data is worth more than a
+// sixth hand correction.
 //
 // The board number is required everywhere, because PART OF THE MASK IS
 // BOARD-SPECIFIC - see MASK_BOARD.
@@ -207,7 +220,102 @@ function readBaseline() {
   }
 }
 
+// ---------- CLAUDE.md, bound to the JSON ----------
+// TWO SITES, and they say different things about the same two binaries: the
+// "Today:" line under the verify-it instruction quotes the masked HASH PREFIX and
+// the .bin size, and the board table's "size today" row quotes flash and RAM. The
+// flash figures are the same .bin sizes, so they are bound here too; the RAM
+// figures come from arduino-cli's own summary and are NOT in the JSON, so they stay
+// hand-maintained and are left alone by --update. That is stated rather than
+// quietly true - two of the four numbers on that row are checked and two are not.
+//
+// LOCATED BY SHAPE, NOT BY LINE NUMBER. Both patterns anchor on text that would
+// have to be rewritten for the sentence to still make sense, so an editor moving
+// the line does not silently stop this checking anything - a missing match is a
+// FAILURE here, never a skip.
+const CLAUDE_MD = path.join(path.dirname(BASELINE), "..", "CLAUDE.md");
+const TODAY_RE = /^Today: `([0-9a-f]{8,})\.\.\.`, size (\d+) \(board 2: `([0-9a-f]{8,})\.\.\.`, size (\d+)\)\./m;
+const SIZEROW_RE = /^\| size today \| flash (\d+), RAM (\d+) \| flash (\d+), RAM (\d+) \|$/m;
+
+// Returns [] when the document agrees with the baseline, else one complaint per
+// disagreement. Takes the text so --selftest can hand it a perturbed copy.
+function docComplaints(md, base) {
+  const out = [];
+  const b1 = base.board1, b2 = base.board2;
+  if (!b1 || !b2) { out.push("the baseline JSON has no board1/board2 entry to compare against"); return out; }
+  const t = md.match(TODAY_RE);
+  if (!t) out.push('CLAUDE.md has no "Today: `<hash>...`, size N (board 2: ...)" line to check');
+  else {
+    if (!b1.hash.startsWith(t[1])) out.push(`CLAUDE.md quotes board 1 hash ${t[1]}..., baseline is ${b1.hash.slice(0, t[1].length)}...`);
+    if (+t[2] !== b1.size) out.push(`CLAUDE.md quotes board 1 size ${t[2]}, baseline is ${b1.size}`);
+    if (!b2.hash.startsWith(t[3])) out.push(`CLAUDE.md quotes board 2 hash ${t[3]}..., baseline is ${b2.hash.slice(0, t[3].length)}...`);
+    if (+t[4] !== b2.size) out.push(`CLAUDE.md quotes board 2 size ${t[4]}, baseline is ${b2.size}`);
+  }
+  const z = md.match(SIZEROW_RE);
+  if (!z) out.push('CLAUDE.md has no "| size today | flash N, RAM N | flash N, RAM N |" row to check');
+  else {
+    if (+z[1] !== b1.size) out.push(`CLAUDE.md's table says board 1 flash ${z[1]}, baseline is ${b1.size}`);
+    if (+z[3] !== b2.size) out.push(`CLAUDE.md's table says board 2 flash ${z[3]}, baseline is ${b2.size}`);
+  }
+  return out;
+}
+
+// Rewrites both sites from the baseline, preserving the hash prefix LENGTH each
+// site already uses and the RAM figures it does not own.
+function rewriteDoc(base) {
+  const md = fs.readFileSync(CLAUDE_MD, "utf8");
+  const b1 = base.board1, b2 = base.board2;
+  if (!b1 || !b2) return false;
+  let out = md.replace(TODAY_RE, (m, h1, s1, h2, s2) =>
+    `Today: \`${b1.hash.slice(0, h1.length)}...\`, size ${b1.size} ` +
+    `(board 2: \`${b2.hash.slice(0, h2.length)}...\`, size ${b2.size}).`);
+  out = out.replace(SIZEROW_RE, (m, f1, r1, f2, r2) =>
+    `| size today | flash ${b1.size}, RAM ${r1} | flash ${b2.size}, RAM ${r2} |`);
+  if (out === md) return false;
+  fs.writeFileSync(CLAUDE_MD, out);
+  return true;
+}
+
 const args = process.argv.slice(2);
+
+if (args.includes("--doc-check")) {
+  const base = readBaseline();
+  // THE SELFTEST PERTURBS THE DOCUMENT, NOT THE DATA, and it locates what to
+  // perturb through the same regex the check uses rather than by a transcribed
+  // line - a fault anchored to a line number stops injecting the moment the line
+  // moves, which is how two faults on this branch went quietly inert.
+  if (args.includes("--selftest")) {
+    const md = fs.readFileSync(CLAUDE_MD, "utf8");
+    if (docComplaints(md, base).length) {
+      console.error("--selftest: the document is ALREADY stale, so this proves nothing.");
+      console.error("Fix it (--update), then re-run.");
+      process.exit(2);
+    }
+    const bad = md.replace(TODAY_RE, (m, h1, s1, h2, s2) =>
+      `Today: \`${h1}...\`, size ${+s1 + 1} (board 2: \`${h2}...\`, size ${s2}).`);
+    if (bad === md) {
+      console.error("--selftest: could not inject a fault - the Today: line did not match.");
+      process.exit(2);
+    }
+    const caught = docComplaints(bad, base);
+    if (!caught.length) {
+      console.error("--selftest FAILED: a wrong board-1 size in CLAUDE.md was NOT caught.");
+      process.exit(1);
+    }
+    console.log(`--doc-check selftest PASS: the injected size fault fails by name - ${caught[0]}`);
+    process.exit(0);
+  }
+  const bad = docComplaints(fs.readFileSync(CLAUDE_MD, "utf8"), base);
+  if (bad.length) {
+    console.error("CLAUDE.md DISAGREES with firmware/board-baseline.json:");
+    for (const c of bad) console.error(`  ${c}`);
+    console.error("Re-run --update <board>, which rewrites the document as well.");
+    process.exit(1);
+  }
+  console.log("CLAUDE.md agrees with firmware/board-baseline.json (both hashes, both sizes, both flash figures).");
+  console.log("The two RAM figures on that row are arduino-cli's and are NOT bound here.");
+  process.exit(0);
+}
 
 // --selftest proves the MASK, which is the only part of this that could silently
 // rot. Same teeth-proving convention as palette-check.mjs and the geometry
@@ -308,6 +416,14 @@ if (flag === "--update") {
   base[`board${board}`] = { hash: r.hash, size: r.size, pooled: r.pooled, updated: new Date().toISOString() };
   fs.writeFileSync(BASELINE, JSON.stringify(base, null, 2) + "\n");
   console.log(`baseline for board ${board} set to ${r.hash.slice(0, 16)}... size=${r.size}`);
+  // AND THE DOCUMENT WITH IT, so the prose cannot fall behind the data again. Only
+  // the hash and the two sizes; the RAM figures are arduino-cli's and are not here
+  // to give. Reported either way - a silent rewrite of CLAUDE.md would be worse
+  // than a stale line.
+  const nowDoc = readBaseline();
+  console.log(rewriteDoc(nowDoc)
+    ? "CLAUDE.md's quoted hash/size updated to match (run --doc-check to confirm)."
+    : "CLAUDE.md needed no change (or its two quoted sites could not be found - run --doc-check).");
   console.log(`core stamp ${poolWord(r.pooled)} - recorded, so a later pooling flip explains itself.`);
   console.log("Commit this, and say in the message WHY the binary was expected to move.");
   process.exit(0);

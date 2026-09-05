@@ -53,7 +53,14 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1404382, RAM 71972 | flash 1042674, RAM 71524 |
+| size today | flash 1411568, RAM 72524 | flash 1049776, RAM 72084 |
+
+The two **flash** figures on that row are the `.ino.bin` sizes in
+`firmware/board-baseline.json` and are ASSERTED against it (`node firmware/board-baseline.mjs
+--doc-check`), so they cannot go stale again; the two **RAM** figures are `arduino-cli`'s own
+"Global variables use N bytes" and are hand-maintained. `arduino-cli`'s "Sketch uses N" is a
+slightly smaller number than the `.bin` - the same image without its trailing padding - so do
+not expect the compile summary to print these.
 
 **Everything board-specific lives in the two board headers** - pins, capability flags, and
 **every layout constant**. Nothing in a shared `.ino` may hardcode a panel dimension; three
@@ -100,7 +107,12 @@ safe when the last compile was for the same board.**
 
 ## BOARD 1'S BINARY IS A CONTRACT
 
-Board 1 is held byte-identical across board-2 work. Verify it - do not reason about it:
+**Not "board 1 never changes" - "board 1 never changes by ACCIDENT".** Board 1 was held
+byte-identical for the whole two-board port, and that constraint was LIFTED on the
+`compose-surface` branch, deliberately: the user asked for board 1 to be brought into line with
+board 2, so shared-code fixes now land on both. What survives is the contract that made the
+freeze useful in the first place - every movement of either binary is measured, expected, and
+explained in the commit message that causes it. Verify it - do not reason about it:
 
 ```
 arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
@@ -108,7 +120,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `7f3d17ff5920b378...`, size 1398368 (board 2: `2de3655f5f432608...`, size 1042416).
+Today: `210ffb444b1607a8...`, size 1411568 (board 2: `3b4a346851e7b268...`, size 1049776).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -190,6 +202,7 @@ node firmware/deckhand_display/geom-sweep.mjs          # fault-injection sweep, 
 node host/{wire-bytes,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
 node host/session-inbox-check.mjs                       # the inbox frame, over a stand-in socket
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
+node firmware/board-baseline.mjs --doc-check           # the quote above vs the JSON
 node host/multi-device-check.mjs                        # two boards on two cables at once
 node claude-hooks/answer-status-check.mjs
 node docs/design/*/check.mjs                            # committed mocks, bound to the headers
