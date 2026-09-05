@@ -455,9 +455,14 @@ function drawKeyboard(p, opt = {}) {
       if (pressed) {
         // THE MAGNIFIED BUBBLE. Release-commit means the character under the
         // finger AT RELEASE is what commits, so the bubble is the only way to
-        // see which key that is. It is clamped inside the key grid and NEVER
-        // touches the text card - for row 0 it is drawn BELOW the finger - which
-        // keeps it out of the card's change-only cache entirely.
+        // see which key that is. It is ALWAYS drawn above the pressed key, row 0
+        // included, where it overlaps the text card's lower half. It used to
+        // flip BELOW the finger on row 0 to stay off that card; a preview that
+        // changes sides on one row is disorienting, and the card has no
+        // change-only cache to protect - drawKbText() repaints it wholesale, so
+        // kbClearBubble() simply calls it. The clamp that remains keeps the
+        // bubble one bubble-height clear of the card's TOP edge, so the byte
+        // counter, the countdown and the first text line are never covered.
         // THE FIRMWARE DRAWS THIS, TERM FOR TERM: keyboard.ino's KB_BUB_W /
         // KB_BUB_H / kbBubbleRow() and drawKbBubble() are these four lines,
         // and settings-geom-check.mjs parses them out of that file rather than
@@ -467,7 +472,7 @@ function drawKeyboard(p, opt = {}) {
         // a finger is down, so no screenshot could otherwise ever show it.
         const bw = k.KB_PITCH*2, bh = band.h;
         const bx = Math.min(Math.max(x + (k.KB_KEY_W>>1) - (bw>>1), 0), k.BOARD_W - bw);
-        const by = r === 0 ? band.y + band.h : band.y - bh;
+        const by = Math.max(band.y - bh, k.KB_TEXT_Y + bh);
         p.rect(bx, by, bw, bh, t.accent, k.KB_KEY_R);
         p.text(keyLabel(row[c], shift), bx + (bw>>1), by + ((bh - CELL[b][3])>>1), 3, t.bg, "C");
       }

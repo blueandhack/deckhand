@@ -159,18 +159,20 @@ void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
 // the spec into disagreement:
 //   w = 2 * KB_PITCH   48 on board 1, 64 on board 2
 //   h = KB_ROW_H       the TESTED band, so the bubble lands ON a row boundary
-//   y = the row ABOVE; for row 0, where above is the text card, the row BELOW
-// and that placement IS the clamp. This is the first element in this firmware
-// that paints over live chrome, and the trap it has to stay clear of is this
-// repo's oldest one: chrome repainted without resetting its change-only cache
-// leaves the value BLANK. Keeping the bubble inside KB_ROWS_Y .. row 3 means it
-// never reaches drawKbText's card, so that interaction does not exist rather
-// than being handled - and the offset being a whole KB_ROW_H rather than a few
-// px is what puts it outside a ~7mm contact patch.
+//   y = ALWAYS the row above, row 0 included
+// This is the first element in this firmware that paints over live chrome, and
+// the offset being a whole KB_ROW_H rather than a few px is what puts it outside
+// a ~7mm contact patch.
 //
-// The row it lands on is always 0 or 1 (r=0 -> 1, r=1 -> 0, r=2 -> 1), so it
-// covers ONE row band and, centred on a key at 2 pitches wide, at most THREE
-// columns of it. That is what makes the restore bounded - see kbClearBubble.
+// ROW 0 USED TO BE THE EXCEPTION and its bubble was drawn BELOW the finger,
+// because above row 0 is the text card. A preview that changes SIDES on one row
+// is disorienting in exactly the moment it exists to help - reported from real
+// use - and the reason it flipped turned out not to apply: see kbBubbleRow().
+//
+// The row it lands on is now always r-1 (-1, 0, 1), so it still covers ONE row
+// band and, centred on a key at 2 pitches wide, at most THREE columns of it -
+// row -1 being the card, where the restore is a drawKbText() rather than a key
+// sweep. That is what makes the restore bounded - see kbClearBubble.
 const int KB_BUB_W = 2 * KB_PITCH;
 const int KB_BUB_H = KB_ROW_H;
 
@@ -182,21 +184,42 @@ int kbArmRow = -1, kbArmCol = -1;
 bool kbBubOn = false;
 int  kbBubX = 0, kbBubY = 0;
 
-// Which key row the bubble for row `r` is drawn ON. Row 0 is the exception the
-// text card forces: above it is the card, so its bubble goes BELOW.
-int kbBubbleRow(int r) { return r == 0 ? 1 : r - 1; }
+// Which key row the bubble for row `r` is drawn ON. ALWAYS the row above, and
+// row -1 - the band a row would occupy if the grid started one row higher - is
+// a real answer, not an error: it lands on the text card's lower half.
+//
+// IT USED TO RETURN 1 FOR ROW 0, putting a row-0 bubble BELOW the finger. That
+// was not a geometry problem, it was a fear about the card: "a bubble over the
+// card would mean busting the card's change-only cache". THERE IS NO SUCH
+// CACHE. drawKbText() opens with uiFillRound(CARD_X, KB_TEXT_Y, CARD_W,
+// KB_TEXT_H, ...) and repaints the card WHOLESALE - its own comment says a
+// change-only cache would buy nothing there - and kbInsert() already calls it
+// on every keystroke, so repairing the card costs a call that already happens.
+int kbBubbleRow(int r) { return r - 1; }
 
 // Put back what the bubble covered. BOUNDED AND DETERMINISTIC: it repaints the
 // key cells whose rectangles intersect the bubble - at most three - each through
-// drawKbKey, and it deliberately does NOT call drawKeyboard(). drawKeyboard()
-// fillScreen's the whole panel, so restoring through it would repaint the card,
-// the strip, the action row and 30-odd keys on EVERY keystroke, which is exactly
-// the flicker the change-only discipline exists to prevent.
+// drawKbKey, plus the text card when the bubble reached it, and it deliberately
+// does NOT call drawKeyboard(). drawKeyboard() fillScreen's the whole panel, so
+// restoring through it would repaint the card, the strip, the action row and
+// 30-odd keys on EVERY keystroke, which is exactly the flicker the change-only
+// discipline exists to prevent.
+//
+// THE CARD ARM IS WHAT LETS THE BUBBLE SIT ABOVE ROW 0. drawKbText() repaints
+// the card wholesale, so it covers whatever background the fillRect above just
+// punched into it; the order of the two loops below relative to it does not
+// matter, because the card (KB_TEXT_Y .. KB_TEXT_Y + KB_TEXT_H) and the key grid
+// (KB_ROWS_Y onwards) do not overlap on either board - 24..111 against 115 on
+// board 1, 34..153 against 170 here. It costs one call kbInsert() already makes
+// on every keystroke.
 void kbClearBubble() {
   if (!kbBubOn) return;
   const int bx = kbBubX, by = kbBubY;
   kbBubOn = false;
   tft.fillRect(bx, by, KB_BUB_W, KB_BUB_H, COLOR_BG);
+  // Intersects the card? The clamp in drawKbBubble keeps the bubble strictly
+  // BELOW KB_TEXT_Y, so only the bottom edge can be in question.
+  if (by < KB_TEXT_Y + KB_TEXT_H) drawKbText();
   for (int r = 0; r < 3; r++) {
     const int ry = kbRowY(r);
     if (ry + KB_ROW_H <= by || ry >= by + KB_BUB_H) continue;
@@ -220,12 +243,23 @@ void drawKbBubble(int r, int col) {
   if (x < 0) x = 0;
   if (x > tft.width() - KB_BUB_W) x = tft.width() - KB_BUB_W;
   int y = kbRowY(kbBubbleRow(r));
-  // THE CLAMP, WRITTEN DOWN rather than reasoned about. kbBubbleRow() already
-  // keeps the bubble on rows 0-1 for every r it is called with, but the failure
-  // this guards is SILENT: a bubble that reached KB_TEXT_Y would paint over the
-  // card and the card's change-only cache would then have to be busted for the
-  // answer text to come back at all. Cheap insurance against a future row count.
-  if (y < KB_ROWS_Y) y = KB_ROWS_Y;
+  // THE CLAMP, WRITTEN DOWN rather than reasoned about, and REWRITTEN now that
+  // the bubble is allowed onto the card. What it used to guard - "a bubble that
+  // reached KB_TEXT_Y would paint over the card and the card's change-only cache
+  // would have to be busted" - was a fear about a cache that does not exist:
+  // drawKbText() repaints the card wholesale, so kbClearBubble() just calls it.
+  // What is still a real failure is the bubble reaching the card's TOP EDGE or
+  // the prompt strip above it, because neither is restored by anything on this
+  // path. So the floor is one bubble-height BELOW KB_TEXT_Y: the card's top
+  // KB_ROW_H rows - the byte counter, the countdown and the first text line -
+  // are never covered, and the strip (which ends at KB_STRIP_Y + KB_STRIP_H,
+  // 21 on board 1 and 26 here, both above KB_TEXT_Y) is out of reach by
+  // construction. MEASURED, not assumed: the natural position for a row-0
+  // bubble is y 74 on board 1 (floor 65, card 24..111, strip ends 21) and
+  // y 112 here (floor 92, card 34..153, strip ends 26), so the clamp does not
+  // move today's geometry on either board - it is insurance against a future
+  // row count or a taller row, and settings-geom-check.mjs asserts the margin.
+  if (y < KB_TEXT_Y + KB_BUB_H) y = KB_TEXT_Y + KB_BUB_H;
   if (y + KB_BUB_H > kbRowY(3)) y = kbRowY(3) - KB_BUB_H;
   kbBubX = x; kbBubY = y; kbBubOn = true;
   // Flat fill FIRST so uiFillRound's anti-aliased corners blend against the

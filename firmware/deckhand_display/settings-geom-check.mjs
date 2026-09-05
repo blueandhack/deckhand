@@ -311,11 +311,13 @@ const KB_ROW3_DRAWN = (() => {
 })();
 
 // THE BUBBLE'S GEOMETRY, PARSED. Its two constants and the row it lands on are
-// what keep it inside the key grid - and "inside the key grid" is not cosmetic:
-// a bubble that reached the text card would have to bust that card's change-only
-// cache, which is this repo's oldest bug. Restating 2 and KB_ROW_H here would
-// make every geometry assertion below agree with the checker instead of with the
-// firmware.
+// what put it clear of the fingertip that is hiding the key. It is now ALWAYS
+// the row above - row 0's bubble overlaps the text card's lower half, which is
+// safe because drawKbText() repaints that card wholesale and kbClearBubble()
+// calls it. What is still not safe is reaching the card's TOP edge or the prompt
+// strip, and the clamp assertions below are what hold that. Restating 2 and
+// KB_ROW_H here would make every geometry assertion below agree with the checker
+// instead of with the firmware.
 const KB_BUB_SRC = fnSrc(KB_SRC, "void drawKbBubble");
 const KB_BUB = (() => {
   const wm = KB_SRC.match(/const int KB_BUB_W\s*=\s*(\d+)\s*\*\s*KB_PITCH\s*;/);
@@ -327,13 +329,24 @@ const KB_BUB = (() => {
     "(kbClearBubble) stops being bounded by construction");
   const rs = fnSrc(KB_SRC, "int kbBubbleRow");
   if (!rs.length) throw new Error("settings-geom-check: kbBubbleRow()'s body not found in " +
-    "keyboard.ino - which row the bubble is drawn ON is the whole clamp");
-  const rm = rs.match(/return\s+r == 0\s*\?\s*(-?\d+)\s*:\s*r\s*-\s*(-?\d+)\s*;/);
+    "keyboard.ino - which row the bubble is drawn ON is the whole placement");
+  // ONE UNCONDITIONAL OFFSET, and the shape of the parse is half the assertion:
+  // the body used to read "return r == 0 ? 1 : r - 1;", which put a row-0 bubble
+  // BELOW the finger. A ternary here at all means the bubble flips sides on some
+  // row, so this refuses to parse one rather than quietly reading the else-arm
+  // and reporting "always above" about a function that is not.
+  if (/\?/.test(rs)) throw new Error("settings-geom-check: kbBubbleRow()'s OWN BODY contains a " +
+    "conditional - the bubble is meant to be ONE unconditional offset (\"return r - <n>;\") so " +
+    "that it is always drawn ABOVE the pressed key. A ternary is how the row-0 flip came back");
+  const rm = rs.match(/return\s+r\s*-\s*(\d+)\s*;/);
   if (!rm) throw new Error("settings-geom-check: kbBubbleRow()'s OWN BODY no longer reads " +
-    "\"return r == 0 ? <n> : r - <n>;\" - the placement assertions below would be measuring " +
-    "the checker's own idea of where the bubble goes");
-  return { pitches: +wm[1], row0: +rm[1], back: +rm[2] };
+    "\"return r - <n>;\" - the placement assertions below would be measuring the checker's own " +
+    "idea of where the bubble goes");
+  return { pitches: +wm[1], back: +rm[1] };
 })();
+if (KB_BUB.back <= 0)
+  throw new Error(`settings-geom-check: kbBubbleRow() returns r - ${KB_BUB.back}, which is at or ` +
+    `BELOW the pressed row - the bubble would sit under the fingertip hiding the key`);
 
 // THE THREE KEY-PAGE TABLES, PARSED out of keyboard.ino rather than transcribed.
 // KB_ROW_CELLS below and the reachability sweep further down BOTH derive from
@@ -2357,9 +2370,21 @@ for (const b of [1, 2]) {
       // ================= THE BUBBLE, AND RELEASE-COMMIT =================
       const bubSrc = KB_BUB_SRC;
       chk(bubSrc.length > 0, "drawKbBubble's body was found in keyboard.ino (parse gate)");
-      chk(/KB_ROWS_Y/.test(bubSrc),
-          "drawKbBubble's OWN BODY clamps to KB_ROWS_Y - a bubble that reaches the card has to " +
-          "bust the card's change-only cache, which is this repo's oldest bug");
+      // THE CLAMP MOVED, AND SO DID THIS. It used to require KB_ROWS_Y in the
+      // body, because the bubble was kept off the text card entirely; the reason
+      // given for that - "the card's change-only cache would have to be busted" -
+      // was about a cache that does not exist (drawKbText repaints the card
+      // wholesale). The bubble is now always ABOVE the pressed key and row 0's
+      // overlaps the card's lower half. What is still a real, silent failure is
+      // reaching the card's TOP edge or the strip, so that is what the body must
+      // clamp against, and BOTH ends have to be there: an upper clamp alone would
+      // let a future row count push it into the pager row.
+      chk(/if\s*\(\s*y\s*<\s*KB_TEXT_Y\s*\+\s*KB_BUB_H\s*\)/.test(bubSrc),
+          "drawKbBubble's OWN BODY floors y at KB_TEXT_Y + KB_BUB_H - the bubble may overlap " +
+          "the card's lower half (kbClearBubble repaints the card) but never its top edge or " +
+          "the prompt strip above it, which nothing on that path restores");
+      chk(/if\s*\(\s*y\s*\+\s*KB_BUB_H\s*>\s*kbRowY\(3\)\s*\)/.test(bubSrc),
+          "and still caps it at row 3's top, so it cannot reach the pager row or the action band");
       chk(!/fillScreen/.test(bubSrc) && !/drawKeyboard/.test(bubSrc),
           "drawKbBubble's OWN BODY does not repaint the screen or the whole board");
       const clrSrc = fnSrc(KB_SRC, "void kbClearBubble");
@@ -2497,20 +2522,42 @@ for (const b of [1, 2]) {
       const bubW = KB_BUB.pitches * c.KB_PITCH, bubH = c.KB_ROW_H;
       const rowY = (r) => c.KB_ROWS_Y + r * c.KB_ROW_H;
       for (let r = 0; r <= 2; r++) {
-        const br = r === 0 ? KB_BUB.row0 : r - KB_BUB.back;
+        const br = r - KB_BUB.back;
         const y = rowY(br);
-        chk(br !== r,
-            `the bubble for key row ${r} is drawn on row ${br}, not on row ${r} - a bubble over ` +
-            `the key it magnifies is under the fingertip that is hiding that key, which is the ` +
-            `whole defect it exists to close`);
-        chk(y >= c.KB_ROWS_Y,
-            `the bubble for key row ${r} starts at y=${y}, at or below KB_ROWS_Y ` +
-            `(${c.KB_ROWS_Y}) - above it is the text card, whose change-only cache would then ` +
-            `have to be busted for the answer text to survive a keystroke`);
+        // ALWAYS ABOVE, ROW 0 INCLUDED. This is the assertion the row-0 flip
+        // would fail: kbBubbleRow() returning 1 for r=0 put y a whole KB_ROW_H
+        // BELOW the pressed row, under the fingertip that is hiding the key.
+        chk(br === r - 1 && y < rowY(r),
+            `the bubble for key row ${r} is drawn on row ${br} at y=${y}, ABOVE row ${r} ` +
+            `(y=${rowY(r)}) - a bubble on or under the key it magnifies is under the fingertip ` +
+            `hiding that key, and one that changes SIDES on a single row is disorienting in ` +
+            `exactly the moment it exists to help`);
+        // AND THE CLAMP THAT REPLACED "never touch the card". Row 0's bubble
+        // DOES overlap the card's lower half now, which drawKbText() repairs
+        // wholesale; what it must never reach is the card's TOP edge or the
+        // prompt strip above it, because nothing on kbClearBubble's path
+        // restores those.
+        chk(y >= c.KB_TEXT_Y + bubH,
+            `and starts at y=${y}, at least one bubble-height (${bubH}) below the card's top ` +
+            `KB_TEXT_Y (${c.KB_TEXT_Y}) - so the byte counter, the countdown and the first text ` +
+            `line are never covered, and drawKbBubble's floor never has to fire`);
+        chk(y > c.KB_STRIP_Y + c.KB_STRIP_H,
+            `and clears the prompt strip, which ends at ${c.KB_STRIP_Y + c.KB_STRIP_H} - the ` +
+            `one piece of chrome above the card that nothing on this path repaints`);
         chk(y + bubH <= rowY(3),
             `and ends at y=${y + bubH}, at or above row 3's top (${rowY(3)}) - so it never ` +
             `reaches the pager row or the action band either, and kbClearBubble's sweep over ` +
             `rows 0..2 restores everything it covered`);
+        // WHICH RESTORE ARM HAS TO RUN, derived rather than assumed: a bubble
+        // that starts above the card's BOTTOM edge needs drawKbText(), and one
+        // that does not is restored entirely by the key sweep. Only row 0's is
+        // on the card, and it is on it on BOTH boards - if that ever stopped
+        // being true the "if (by < KB_TEXT_Y + KB_TEXT_H)" arm asserted below
+        // would be dead code nobody noticed.
+        chk((y < c.KB_TEXT_Y + c.KB_TEXT_H) === (r === 0),
+            `and its restore arm is the expected one: row ${r}'s bubble ${r === 0 ? "DOES" : "does not"} ` +
+            `reach the card (card ${c.KB_TEXT_Y}..${c.KB_TEXT_Y + c.KB_TEXT_H - 1}, bubble ` +
+            `${y}..${y + bubH - 1}), so kbClearBubble ${r === 0 ? "must call" : "need not call"} drawKbText()`);
       }
       // HOW MANY CELLS THE RESTORE HAS TO REPAINT, swept over every page, row and
       // column rather than argued. kbClearBubble repaints the key cells whose
@@ -2525,7 +2572,7 @@ for (const b of [1, 2]) {
           for (let col = 0; col < lens[r]; col++) {
             let bx = x0(r) + col * c.KB_PITCH + Math.floor(c.KB_KEY_W / 2) - Math.floor(bubW / 2);
             bx = Math.min(Math.max(bx, 0), W - bubW);
-            const br = r === 0 ? KB_BUB.row0 : r - KB_BUB.back;
+            const br = r - KB_BUB.back;
             const by = rowY(br);
             let n = 0;
             for (let rr = 0; rr <= 2; rr++) {
@@ -2543,10 +2590,12 @@ for (const b of [1, 2]) {
       console.log(`    bubble: ${bubW}x${bubH} (${KB_BUB.pitches} pitches x KB_ROW_H), worst ` +
                   `restore ${worst} key cells at ${worstAt}, face ${lineHB(b, T_HEAD)}px vs the ` +
                   `key's own ${lineHB(b, T_BODY)}px`);
-      chk(worst > 0 && worst <= 6,
-          `the bubble covers at most ${worst} key cells anywhere on this board (bound: 6, which ` +
-          `is 2 rows x 3 columns) - that bound is what makes kbClearBubble's restore cheap ` +
-          `enough not to need drawKeyboard()`);
+      chk(worst > 0 && worst <= 3,
+          `the bubble covers at most ${worst} key cells anywhere on this board (bound: 3 - it is ` +
+          `exactly KB_ROW_H tall and lands ON a row boundary, so it spans ONE row band, and at 2 ` +
+          `pitches wide at most THREE columns of it) - that bound plus the single drawKbText() ` +
+          `for row 0 is what makes kbClearBubble's restore cheap enough not to need ` +
+          `drawKeyboard()`);
       // AND IT ACTUALLY MAGNIFIES. A bubble in the key's own face would be
       // bigger only by being further from the finger, which is half the point at
       // most. T_HEAD is the mock's font 3, and it has to fit the bubble it is
@@ -2570,6 +2619,27 @@ for (const b of [1, 2]) {
       chk(widthB(b, T_HEAD, wideLbl) <= bubW,
           `the widest bubble label "${wideLbl}" inks ${widthB(b, T_HEAD, wideLbl)}px in the ` +
           `${bubW}px bubble (clears by ${bubW - widthB(b, T_HEAD, wideLbl)})`);
+
+      // ---- STRUCTURAL CLAIMS, EACH BOUND TO ONE FUNCTION BODY ---------------
+      // A rule a neighbouring line can satisfy is not a rule: every regex below
+      // is matched against fnSrc() of ONE function, and each function's body is
+      // gated on being found first, because /re/.test("") is false but
+      // !/re/.test("") is TRUE and a negative assertion over a missing body
+      // passes vacuously.
+      //
+      // 1. THE CARD ARM. This is what lets the bubble sit above row 0 at all: the
+      // clamp lets it overlap the card, so the restore has to repaint the card.
+      // Delete this call and row 0's bubble is left painted over the answer text
+      // until the next keystroke - which on the LAST keystroke of a message is
+      // never. The geometry assertion above proves the arm is REACHED; this
+      // proves it EXISTS.
+      const KB_CLR_SRC = fnSrc(KB_SRC, "void kbClearBubble");
+      chk(KB_CLR_SRC.length > 0, "kbClearBubble()'s body is found in keyboard.ino (parse gate)");
+      chk(/if\s*\(\s*by\s*<\s*KB_TEXT_Y\s*\+\s*KB_TEXT_H\s*\)\s*drawKbText\(\)\s*;/.test(KB_CLR_SRC),
+          "kbClearBubble()'s OWN BODY repaints the text card when the cleared rect reaches it " +
+          "(\"if (by < KB_TEXT_Y + KB_TEXT_H) drawKbText();\") - the bubble is allowed onto the " +
+          "card's lower half now, and nothing else on that path restores it");
+      //
     }
     // ================= THE PROMPT STRIP =================
     // One line of the ask above the card, so the question and the keyboard are on
