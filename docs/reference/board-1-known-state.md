@@ -44,7 +44,9 @@ on their own branch off main.
 > inside the surface either way, against a whole character of every row to remove it).
 
 They are recorded, with arithmetic and a severity order, in
-**`docs/board-1-known-defects.md`** — including the one reported defect that turned out **not** to
+**`docs/board-1-known-defects.md`** (**RECONCILED 2026-09-05 against `060f458`:** four of
+the eleven resolved and marked in place, one struck, six live — each now naming the state nobody
+produced rather than the retired blanket "board 1 is disconnected") — including the one reported defect that turned out **not** to
 be real, kept as a correction rather than deleted, because a false defect costs a future maintainer
 either the time to disprove it or a no-op "fix" — which, while byte-identity was in force, also
 broke it for nothing.
@@ -92,8 +94,8 @@ checkers for the live count — these are what they hold at the close of `compos
 | checker | `KNOWN[1]` | `KNOWN[2]` |
 |---|---|---|
 | `usage-geom-check.mjs` | 3 clear-box overlaps (`-2`/`-3`/`-1`), as `KNOWN_OVERLAPS` | empty |
-| `sessions-geom-check.mjs` | **8** | empty |
-| `settings-geom-check.mjs` | **10** | empty |
+| `sessions-geom-check.mjs` | **8** (9 tolerations - one entry is reached at two sites) | empty |
+| `settings-geom-check.mjs` | **11** | empty |
 
 `sessions`: prompt/path wrapping (2 lines holding 62 of 100 and 62 of 64 chars), the ask badge
 row at +27 inside a +28 header band, the ask option 32px against `TAP_MIN` 40, the 4px option
@@ -101,14 +103,25 @@ gap, the voice card's 12px label step and its 6 lines holding 198 of 200 transcr
 the 28px chip tap zone. `settings`: the 34px pager key, the history chip's 40/32 widths and its
 25px tap band, the 16px scrubber band, the chip tap band ending 24 above the rule, `KB_COLS` 34
 against a measured 33 and the 205-in-204px last-character overrun, the reader's 36 against a
-measured 35, the history empty-state y, and the stepper's `-1` label-to-value gap.
+measured 35, the history empty-state y, `DROW_BATT_VAL_DY`'s 4px stagger, and the stepper's `-1`
+label-to-value gap. (**CORRECTED 2026-09-05:** this list said `settings` held **10** and omitted
+`DROW_BATT_VAL_DY`. It holds 11, which is what the checker prints - the count was transcribed
+rather than parsed, which is the checkers' own rule arriving on the prose side of it.)
 
-**BYTE-IDENTITY JUSTIFICATIONS REMAINING: ZERO, from eleven.** Five of those defects were fixed
-outright and the rest kept with TRUE arithmetic in place of the retired excuse. Four allowlist
-entries were REMOVED rather than left dead, because an entry matching no message the checker can
-emit is the same defect as an assertion that cannot fail, on the allowlist side of it: the
-sub-line lane, the two that stated the compact-row border collision twice, and the two that
-stated the painted-out "answer on your Mac" warning twice. The converse check that found the last
+**BYTE-IDENTITY JUSTIFICATIONS REMAINING IN THE THREE ALLOWLISTS: ZERO, from eleven.** Five of
+those defects were fixed outright and the rest kept with TRUE arithmetic in place of the retired
+excuse. **TEN** allowlist entries were REMOVED rather than left dead (sessions 13 -> 8, settings
+16 -> 11, nothing added), because an entry matching no message the checker can emit is the same
+defect as an assertion that cannot fail, on the allowlist side of it: the sub-line lane, the two
+that stated the compact-row border collision twice, the two that stated the painted-out "answer
+on your Mac" warning twice, the reader's two disagreeing tap splits, the two that stated the
+header row's one- and two-pixel drops, and the stale pair below. (**CORRECTED 2026-09-05:** this
+said "four", counting only the sessions side and miscounting that.) The claim is scoped to the
+allowlists on purpose - **the firmware's own comments are NOT yet reconciled**, and about a dozen
+still give "board 1's binary is held byte-identical" in the present tense, `READTEST`'s own
+`deckhand_display.ino:6444` among them. None changes behaviour; all of them contradict
+[`commands-and-checks.md`](commands-and-checks.md)'s rule that nothing anywhere may still cite
+byte-identity as the reason a board-1 defect stands. The converse check that found the last
 stale pair — an allowlisted entry matching no message any more — is itself the mechanism worth
 keeping; it caught `"action button 38px tall >= TAP_MIN 40"` the day it was added.
 
