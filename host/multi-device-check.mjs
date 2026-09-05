@@ -93,8 +93,23 @@ function buildSource(src) {
      "function linkFor", "async function sendToLink", "const liveLinks",
      "async function broadcastToDevices", "function replyLinkFor", "function linkLabel"],
     "link registry");
-  const candidateSlice = cut(src, "async function listUsbCandidates()", "\nlet lastUsbScanSig",
-    ["SerialPort.list()", "1a86", "303a", "SERIAL_PORT"], "listUsbCandidates");
+  const candidateSlice = cut(src, "const USB_VID_CH340", "\nlet lastUsbScanSig",
+    ["SerialPort.list()", "1a86", "303a", "SERIAL_PORT", "async function listUsbCandidates()"],
+    "listUsbCandidates");
+  // THE HALF THAT WAS MISSING. listUsbCandidates() returning both boards proves
+  // nothing about anything turning them into links, and for three commits nothing
+  // here read the loop that does: reverting `for (const p of candidates)` to
+  // `candidates.slice(0, 1)` - THE ORIGINAL DEFECT - passed every assertion in this
+  // file. So the scan, the open, the close handler and the HELLO pulse are sliced
+  // out and EXECUTED against a stub SerialPort.
+  const scanSlice = cut(src, 'let lastUsbScanSig = "";', "async function connectUsb()",
+    ["async function scanUsbPorts()", "async function openUsbLink(portPath, vid = \"\")",
+     "usbLinks.push(link);", "function armHelloPulse(link)", "usbPulsedPaths",
+     "function usbIsCh340(link)", "USB_OPEN_TIMEOUT_MS", "forgetBatteryFor(battKey)"],
+    "scan / open / pulse");
+  const scrollKeySlice = cut(src, "const SCROLL_REQ_DEDUP_MS", "const scrollAckWaiters",
+    ["const scrollSenderKey", "function scrollReqDropped", "const scrollReqSeen"],
+    "history dedupe key");
   const nameSlice = cut(src, "function deviceNameFor(via) {", "\nasync function loadPairing()",
     ["deviceNameFor", "senderKey", "senderDescription"], "deviceNameFor");
   const dedupSlice = cut(src, "const DEVICE_DEDUP_MS", "// ---------- audio capture sink ----------",
@@ -121,14 +136,65 @@ let selectedDevice = "";
 const __bleWrites = [];
 async function sendOverBle(text, gapMs = 0) { __bleWrites.push({ text, gapMs }); }
 
-// SerialPort.list() is the thing under test in listUsbCandidates, so it is the
-// one stub whose contents the suite sets per case.
+// The sliced host code LOGS, and its refusals are part of what is asserted (a
+// board left anonymous and a board never considered look identical from the Mac).
+// A module-level \`console\` shadows the global for the whole module, so the lines
+// are captured instead of drowning the checker's own output.
+const __log = [];
+const console = {
+  log: (...a) => __log.push(a.join(" ")),
+  error: (...a) => __log.push(a.join(" ")),
+};
+
+const BAUD_RATE = 115200;
+function onAudioFrame() {}
+const __deviceLines = [];
+async function handleDeviceLine(line, via) { __deviceLines.push({ line, via }); }
+
+// SerialPort is BOTH the list() under test in listUsbCandidates and the
+// constructor openUsbLink calls, so the stub is a class with a static list().
+// It presents exactly the surface the real code touches: an ASYNCHRONOUS
+// open/error (a synchronous emit would fire before .once() is attached, which is
+// the real ordering too), on()/once() for data/close/error, set() for the modem
+// lines, and write().
 let __ports = [];
-const SerialPort = { list: async () => __ports };
+const __opened = [];        // every port the code constructed, oldest first
+let __openMode = "open";    // "open" | "error" | "hang" | "throw"
+class SerialPort {
+  static async list() { return __ports; }
+  constructor(opts) {
+    if (__openMode === "throw") throw new Error("stub: the constructor threw synchronously");
+    this.path = opts.path;
+    this.baudRate = opts.baudRate;
+    this.destroyed = false;
+    this.writable = true;
+    this.sets = [];          // every set({dtr,rts}) - this is how a pulse is observed
+    this.writes = [];
+    this._h = new Map();
+    __opened.push(this);
+    const mode = __openMode;
+    if (mode !== "hang")
+      setTimeout(() => {
+        if (mode === "open") this.emit("open");
+        else this.emit("error", new Error("stub: open failed"));
+      }, 0);
+  }
+  on(ev, fn) {
+    if (!this._h.has(ev)) this._h.set(ev, []);
+    this._h.get(ev).push(fn);
+    return this;
+  }
+  once(ev, fn) { return this.on(ev, fn); }
+  emit(ev, arg) { for (const fn of [...(this._h.get(ev) ?? [])]) fn(arg); }
+  set(opts, cb) { this.sets.push(opts); cb(null); }
+  write(text) { this.writes.push(text); return true; }
+}
 
 ${primarySlice}
 ${linkSlice}
 ${candidateSlice}
+${scrollKeySlice}
+${scanSlice}
 ${nameSlice}
 ${dedupSlice}
 ${battSlice}
@@ -139,16 +205,23 @@ function handleBattLine(line, via) {
 ${battArm}
 }
 
-// A fake serial port with the surface sendToLink actually touches.
+// A fake serial port with the surface sendToLink actually touches - plus set(),
+// because armHelloPulse() is real code here and a pulse is OBSERVED as a set().
 function fakePort(link) {
-  return {
+  const p = {
     destroyed: false,
     writable: true,
+    sets: [],
     write: (text) => __sent.push({ link, text }),
+    set: (opts, cb) => { p.sets.push(opts); cb(null); },
   };
+  return p;
 }
-function addLink(id, name = "") {
-  const l = { id, kind: "usb", path: "/dev/tty." + id.slice(4), name, scrollGen: 0,
+// The vid is derived from the id rather than defaulted, so a link added as
+// "usb:usbmodem1101" is board 2 in every assertion that reads it, the way it is
+// on the desk.
+function addLink(id, name = "", vid = /usbmodem/.test(id) ? "303a" : "1a86") {
+  const l = { id, kind: "usb", path: "/dev/tty." + id.slice(4), vid, name, scrollGen: 0,
               shot: null, audioCap: null, audioStream: null };
   l.port = fakePort(id);
   usbLinks.push(l);
@@ -168,21 +241,46 @@ export const api = {
     if ("bleName" in o) bleDeviceName = o.bleName;
     if ("selected" in o) selectedDevice = o.selected;
   },
+  // --- the scan / open / pulse surface ---
+  scanUsbPorts, openUsbLink, armHelloPulse, usbOpening, usbIsCh340,
+  setOpenMode: (m) => { __openMode = m; },
+  resetPorts: () => { __opened.length = 0; __ports = []; usbPulsedPaths.clear(); },
+  clearPulsedPaths: () => usbPulsedPaths.clear(),
+  opened: __opened,
+  portFor: (p) => [...__opened].reverse().find((x) => x.path === p) ?? null,
+  log: () => __log,
+  clearLog: () => { __log.length = 0; },
+  HELLO_GRACE_MS, USB_OPEN_TIMEOUT_MS, MAX_BATT_DEVICES, MAX_PULSED_PATHS,
+  scrollSenderKey, scrollReqDropped, scrollReqSeen, SCROLL_REQ_DEDUP_MS,
   listUsbCandidates, usbIdFor, viaKind, usbLinkFor, linkFor, sendToLink,
   liveLinks, broadcastToDevices, replyLinkFor, linkLabel,
   deviceNameFor, senderKey, senderDescription,
   isDuplicateFrom, lastAnswerBySender, lastPromptBySender,
   handleBattLine, battByDevice, batteryForHeartbeat, primaryUsbName,
+  forgetBatteryFor, boundBatteryStore,
   BLE_LINK,
 };
 `;
 }
 
+// EVERY LOAD IS A FRESH MODULE. The specifier used to be built from the SLICED
+// text alone, so a fault injected OUTSIDE every slice produced a byte-identical
+// data: URL and node handed back the CACHED module - with lastPromptBySender still
+// holding the previous run's probe. Eleven of --selftest's faults were then all
+// reported as "caught by" one unrelated DEDUPE assertion: every one of them was
+// genuinely caught when run alone, but the name printed was a constant, and
+// CLAUDE.md's whole point is that naming the catcher is what makes a failure
+// readable. A nonce makes the specifier unique whatever the fault touched.
+let __loadNonce = 0;
 async function loadHost(src) {
-  const body = buildSource(src);
+  const body = `${buildSource(src)}\n// unique per load: ${++__loadNonce} ${process.pid}\n`;
   const url = "data:text/javascript;base64," + Buffer.from(body, "utf8").toString("base64");
   return (await import(url)).api;
 }
+
+// The scan/open/pulse sections need timers to run; a settle is one macrotask plus
+// however long the case under test needs.
+const settle = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------------------
 // The suite
@@ -190,9 +288,31 @@ async function loadHost(src) {
 const B1 = "Deckhand-0528";  // board 1, CH340, /dev/tty.usbserial-10
 const B2 = "Deckhand-C114";  // board 2, native USB CDC, /dev/tty.usbmodem1101
 
+// The harness drives the pulse and the open timeout, so both are collapsed to
+// something a test can wait on. They are the documented env overrides ("the env
+// override exists to EXERCISE this path"), not a back door - and because the
+// harness sets them, the DEFAULTS are asserted structurally by PARSING them out of
+// index.mjs, which is the only half a transcribed literal would not cover.
+const OPEN_TIMEOUT_MS = 40;
+process.env.DECKHAND_HELLO_GRACE_MS = "0";
+process.env.DECKHAND_USB_OPEN_TIMEOUT_MS = String(OPEN_TIMEOUT_MS);
+delete process.env.DECKHAND_NO_USB_RESET;
+
 async function main({ indexPath = INDEX } = {}) {
   const src = fs.readFileSync(indexPath, "utf8");
   const api = await loadHost(src);
+  // Every module-level store the suite writes into, cleared UP FRONT. A fresh
+  // module makes this redundant today; it is here so a future load that is not
+  // fresh cannot make one section's leftovers into another section's failure.
+  api.clearLinks();
+  api.clearSent();
+  api.clearLog();
+  api.usbOpening.clear();
+  api.clearPulsedPaths();
+  api.battByDevice.clear();
+  api.lastAnswerBySender.clear();
+  api.lastPromptBySender.clear();
+  api.scrollReqSeen.clear();
 
   // ---- 1. EVERY MATCHING PORT, NOT THE FIRST ----
   // The defect this whole file exists for. Note the assertion is on the COUNT
@@ -430,6 +550,38 @@ async function main({ indexPath = INDEX } = {}) {
     api.handleBattLine("BATT mv=4000 pct=50 state=1 left=-1", "usb:usbserial-10");
     ok("BATTERY: an unnamed single board still publishes a reading (the pre-existing behaviour)",
       api.batteryForHeartbeat()?.pct === 50);
+
+    // BOUNDED, and not only pruned on close: an UNNAMED link keys on its port path,
+    // CLAUDE.md's own note is that ports renumber, and a key that renumbered is one
+    // no close handler will ever name again. Without a ceiling the heartbeat's
+    // `batts` array grows for the life of the process and lists phantom boards.
+    api.clearLinks();
+    api.battByDevice.clear();
+    for (let i = 0; i < api.MAX_BATT_DEVICES + 5; i++) {
+      const l = api.addLink(`usb:usbserial-1${i}`, "");
+      api.handleBattLine(`BATT mv=4000 pct=${i} state=1 left=-1`, l.id);
+    }
+    ok(`BATTERY: ${api.MAX_BATT_DEVICES + 5} renumbered ports leave at most MAX_BATT_DEVICES ` +
+       `(${api.MAX_BATT_DEVICES}) readings - the store is a ceiling, not a history`,
+      api.battByDevice.size === api.MAX_BATT_DEVICES);
+    ok("BATTERY: and it is the OLDEST that was evicted, so the freshest boards survive",
+      [...api.battByDevice.values()].every((b) => b.pct >= 5));
+
+    // A reading is NOT dropped while the same device is still reachable elsewhere:
+    // a cabled board that is also on BLE keeps its battery when the cable goes.
+    api.clearLinks();
+    api.battByDevice.clear();
+    const cabled = api.addLink("usb:usbmodem1101", B2);
+    api.setBle({ characteristic: {}, bleName: B2, selected: B2 });
+    api.handleBattLine("BATT mv=4162 pct=96 state=2 left=-1", cabled.id);
+    api.clearLinks(); // the cable came out
+    api.forgetBatteryFor(B2);
+    ok("BATTERY: a reading is KEPT while the same device is still reachable on another link",
+      api.battByDevice.size === 1);
+    api.setBle({ characteristic: null, bleName: "" });
+    api.forgetBatteryFor(B2);
+    ok("BATTERY: and DROPPED once nothing can refresh it",
+      api.battByDevice.size === 0);
   }
 
   // ---- 7. THE LOG CAN TELL THE BOARDS APART ----
@@ -451,7 +603,230 @@ async function main({ indexPath = INDEX } = {}) {
       api.linkLabel("usb:usbserial-10") === "usb:usbserial-10");
   }
 
-  // ---- 8. STRUCTURE: what running the code cannot see ----
+  // ---- 8. THE SCAN AND THE OPEN: CANDIDATES BECOME LINKS ----
+  // Section 1 proves listUsbCandidates() returns both boards. It proves NOTHING
+  // about anything turning them into links, and that gap was the whole hole in this
+  // file: reverting `for (const p of candidates)` to `candidates.slice(0, 1)` - THE
+  // ORIGINAL DEFECT, one board driven and the other left announcing HELLO to nobody
+  // - passed every assertion here. So the real scanUsbPorts() and openUsbLink() are
+  // executed against a stub SerialPort.
+  {
+    api.clearLinks();
+    api.usbOpening.clear();
+    api.resetPorts();
+    api.clearLog();
+    api.setOpenMode("open");
+    api.battByDevice.clear();
+    api.setBle({ characteristic: null, bleName: "", selected: "" });
+    api.setPorts([
+      { path: "/dev/cu.usbmodem1101", vendorId: "303a" },
+      { path: "/dev/cu.usbserial-10", vendorId: "1a86" },
+    ]);
+    await api.scanUsbPorts();
+    await settle();
+
+    ok("SCAN: BOTH candidates become live links - the scan opens every port it found, " +
+       "not the first one the OS enumerated",
+      api.usbLinks.length === 2 &&
+      api.usbLinks.map((l) => l.path).sort().join(",") ===
+        "/dev/cu.usbmodem1101,/dev/cu.usbserial-10");
+    ok("SCAN: each link carries the vendor id it was opened with, so the two boards are " +
+       "distinguishable BEFORE any HELLO",
+      api.usbLinkFor("usb:usbmodem1101")?.vid === "303a" &&
+      api.usbLinkFor("usb:usbserial-10")?.vid === "1a86");
+    ok("SCAN: no path is left marked in-flight once the opens have settled",
+      api.usbOpening.size === 0);
+
+    // A re-scan every 3 seconds must reopen NOTHING that is already open. Without
+    // the guard usbLinks and the file-descriptor table grow for the life of the
+    // process - the days-long-leak shape.
+    await api.scanUsbPorts();
+    await settle();
+    ok("SCAN: a second scan over the same ports opens nothing - links and descriptors " +
+       "do not grow every 3 seconds",
+      api.usbLinks.length === 2 && api.opened.length === 2);
+
+    // The close handler is the other half: without the splice a dead link keeps
+    // occupying the path and the scan refuses to reopen it forever.
+    api.handleBattLine("BATT mv=4162 pct=96 state=2 left=-1", "usb:usbmodem1101");
+    api.handleBattLine("BATT mv=4230 pct=100 state=3 left=-1", "usb:usbserial-10");
+    ok("CLOSE: two live links have filed two battery readings (the precondition)",
+      api.battByDevice.size === 2);
+    const closing = api.portFor("/dev/cu.usbserial-10");
+    ok("CLOSE: board 1's port was actually opened, so the close path can be exercised at all " +
+       "(asserted first: every assertion below it would otherwise pass vacuously or throw)",
+      !!closing);
+    closing?.emit("close");
+    ok("CLOSE: a closed port is spliced out of usbLinks",
+      api.usbLinks.length === 1 && api.usbLinks[0].path === "/dev/cu.usbmodem1101");
+    ok("CLOSE: and that link's battery reading is DROPPED - nothing used to delete one, " +
+       "so the heartbeat republished every dead board every 5 seconds forever",
+      api.battByDevice.size === 1 && [...api.battByDevice.values()][0].pct === 96);
+    await api.scanUsbPorts();
+    await settle();
+    ok("CLOSE: the next scan reopens the freed path, so a replug comes back",
+      api.usbLinks.length === 2 && api.opened.length === 3);
+  }
+
+  // ---- 9. THE HELLO PULSE REACHES BOARD 1 AND ONLY BOARD 1 ----
+  // `{dtr:false, rts:true}` is also esptool's USB-Serial-JTAG reset, so it reboots
+  // board 2 as well - and on board 2 the port IS the SoC, so the reset drops the USB
+  // device, the link is spliced, and `link.pulsed` dies with it. The user's cost is
+  // a board rebooted six seconds after a watchdog restart, losing an open answer
+  // window or an in-flight capture.
+  {
+    api.clearLinks();
+    api.usbOpening.clear();
+    api.resetPorts();
+    api.clearLog();
+    api.setOpenMode("open");
+    api.setPorts([
+      { path: "/dev/cu.usbmodem1101", vendorId: "303a" },
+      { path: "/dev/cu.usbserial-10", vendorId: "1a86" },
+    ]);
+    await api.scanUsbPorts();
+    await settle(20); // HELLO_GRACE_MS is 0 here, so the pulse has fired if it is going to
+    const b1port = api.portFor("/dev/cu.usbserial-10");
+    const b2port = api.portFor("/dev/cu.usbmodem1101");
+    ok("PULSE: both boards' ports were actually opened (asserted first, so nothing below " +
+       "passes vacuously over a port that is not there)",
+      !!b1port && !!b2port);
+
+    ok("PULSE: board 1's unnamed CH340 link IS pulsed - node does not drive that chip's " +
+       "modem lines, so without this the board never announces its name and cannot answer",
+      !!b1port && b1port.sets.length > 0 && b1port.sets[0].rts === true && b1port.sets[0].dtr === false);
+    ok("PULSE: board 2's native-USB link is NOT pulsed - there that sequence is esptool's " +
+       "reset, which reboots a healthy board and drops the port mid-answer",
+      !!b2port && b2port.sets.length === 0);
+    ok("PULSE: and the refusal NAMES ITS CAUSE - from the Mac, a board deliberately left " +
+       "anonymous and a board nothing ever considered look identical",
+      api.log().some((l) => /usbmodem1101/.test(l) && /not a CH340/.test(l)));
+
+    // The half a vendor gate alone would not fix. On a board whose port DOES go away
+    // (which is what the reset causes), `link.pulsed` dies with the link object, so a
+    // reopen arms a fresh pulse: "once per link" becomes a loop.
+    api.clearLog();
+    b1port?.emit("close");
+    await api.scanUsbPorts();
+    await settle(20);
+    const again = api.portFor("/dev/cu.usbserial-10");
+    ok("PULSE: a link closed and REOPENED on the same path is not pulsed a second time - " +
+       "link.pulsed dies with the link, the path record outlives it",
+      !!again && again !== b1port && again.sets.length === 0);
+    ok("PULSE: and that refusal names its cause too",
+      api.log().some((l) => /already been pulsed once/.test(l)));
+
+    // A link that HAS a name is never pulsed at all, and neither is one that has
+    // already been spliced out. Armed directly so the grace period is not a race.
+    api.clearLinks();
+    api.clearPulsedPaths();
+    const named = api.addLink("usb:usbserial-10", B1);
+    api.armHelloPulse(named);
+    await settle(20);
+    ok("PULSE: a link that already has a name is never pulsed - a healthy board is not rebooted",
+      named.port.sets.length === 0);
+
+    api.clearLinks();
+    api.clearPulsedPaths();
+    const gone = api.addLink("usb:usbserial-10", "");
+    api.armHelloPulse(gone);
+    api.clearLinks(); // the close handler spliced it before the timer fired
+    await settle(20);
+    ok("PULSE: a link already spliced out of usbLinks is not pulsed", gone.port.sets.length === 0);
+
+    api.clearLinks();
+    api.clearPulsedPaths();
+    const off = api.addLink("usb:usbserial-10", "");
+    process.env.DECKHAND_NO_USB_RESET = "1";
+    api.armHelloPulse(off);
+    delete process.env.DECKHAND_NO_USB_RESET;
+    await settle(20);
+    ok("PULSE: DECKHAND_NO_USB_RESET=1 turns it off entirely - the documented escape hatch " +
+       "for anyone who would rather have an anonymous link than a reboot",
+      off.port.sets.length === 0);
+  }
+
+  // ---- 10. A FAILED, HUNG OR THROWING OPEN RELEASES THE PATH ----
+  // usbOpening is what stops a 3s re-scan double-opening a port. A path left in it
+  // is a board that is dark for the life of the process, with nothing in the log but
+  // a stuck "connecting to".
+  {
+    api.clearLinks();
+    api.usbOpening.clear();
+    api.resetPorts();
+    api.clearLog();
+    api.setPorts([{ path: "/dev/cu.usbserial-10", vendorId: "1a86" }]);
+
+    api.setOpenMode("error");
+    await api.scanUsbPorts();
+    await settle();
+    ok("OPEN: a port that ERRORS on open releases its path, so the next scan retries it",
+      api.usbLinks.length === 0 && api.usbOpening.size === 0);
+    ok("OPEN: and the failure names its cause AND says the path was released",
+      api.log().some((l) => /connect to \/dev\/cu\.usbserial-10 failed/.test(l) && /released/.test(l)));
+
+    api.setOpenMode("hang");
+    api.clearLog();
+    await api.scanUsbPorts();
+    await settle();
+    ok("OPEN: an open that emits neither \"open\" nor \"error\" is held in flight, not lost",
+      api.usbOpening.has("/dev/cu.usbserial-10"));
+    await settle(OPEN_TIMEOUT_MS + 40);
+    ok("OPEN: and it TIMES OUT and releases the path - without a bound that board is dark " +
+       "for the life of the process",
+      api.usbOpening.size === 0 && api.usbLinks.length === 0);
+    ok("OPEN: the timeout names itself rather than logging nothing",
+      api.log().some((l) => /no "open" and no "error"/.test(l)));
+
+    api.setOpenMode("throw");
+    api.clearLog();
+    await api.scanUsbPorts();
+    await settle();
+    ok("OPEN: a constructor that throws SYNCHRONOUSLY still releases the path - " +
+       "the un-awaited call had no .catch() and pinned it forever",
+      api.usbOpening.size === 0 && api.usbLinks.length === 0);
+    ok("OPEN: and that failure names its cause",
+      api.log().some((l) => /usbserial-10/.test(l) && /released/.test(l)));
+    api.setOpenMode("open");
+  }
+
+  // ---- 11. THE HISTORY DEDUPE MUST NOT SPLIT ONE DEVICE IN TWO ----
+  // senderKey() falls back to the LINK ID for an unnamed link. That is right for an
+  // ANSWER and wrong here: one device that is cabled (unnamed) and on BLE then keys
+  // as two senders, the request is served twice, and the `since:` arm's own comment
+  // says the reader shows every new message doubled.
+  {
+    api.clearLinks();
+    api.scrollReqSeen.clear();
+    const anon = api.addLink("usb:usbmodem1101", "");  // host attached mid-run: no HELLO seen
+    api.addLink("usb:usbserial-10", B1);               // a second cable, so deviceNameFor refuses to guess
+    api.setBle({ characteristic: {}, bleName: B2, selected: B2 });
+
+    ok("HISTORY: senderKey() would split that device in two (the precondition this " +
+       "assertion exists for)",
+      api.senderKey(anon.id) !== api.senderKey("ble"));
+    ok("HISTORY: the history key does NOT - while any usb link is anonymous every sender " +
+       "collapses, so a device's two transports cannot be served twice into one reader",
+      api.scrollSenderKey(anon.id) === api.scrollSenderKey("ble") &&
+      api.scrollSenderKey("usb:usbserial-10") === api.scrollSenderKey("ble"));
+
+    // ...and once every link has a name, per-sender keying comes back, so two boards
+    // asking for the same session are each served.
+    anon.name = B2;
+    ok("HISTORY: with every link named, two boards are two senders again and neither is " +
+       "answered with silence",
+      api.scrollSenderKey("usb:usbserial-10") === B1 &&
+      api.scrollSenderKey(anon.id) === B2 &&
+      api.scrollSenderKey(anon.id) === api.scrollSenderKey("ble"));
+
+    api.clearLog();
+    api.scrollReqDropped(anon.id, "k|s|chat|tail:65536");
+    ok("HISTORY: a dropped duplicate is LOGGED with its cause and its key - silence and " +
+       "\"impossible here\" look identical from the Mac",
+      api.log().some((l) => /duplicate history request/.test(l) && /k\|s\|chat\|tail:65536/.test(l)));
+  }
+
+  // ---- 12. STRUCTURE: what running the code cannot see ----
   // A module-level capture buffer creeping back in still PASSES every behavioural
   // assertion above, because nothing above captures a screenshot. These read the
   // BODY of the function they name.
@@ -496,7 +871,105 @@ async function main({ indexPath = INDEX } = {}) {
       /onUsb \? SCROLL_WIRE_CHUNK_BYTES/.test(scroll) &&
       !/usbPort \? SCROLL_WIRE_CHUNK_BYTES/.test(scroll));
 
+    // --- the scan and the open, read as text as well as run ---
+    const scan = extractBody(src, "async function scanUsbPorts()");
+    ok("STRUCTURE: scanUsbPorts loops over EVERY candidate - the original defect was " +
+       "taking one of them",
+      /for \(const p of candidates\)/.test(scan) &&
+      !/candidates\.slice/.test(scan) && !/candidates\[0\]/.test(scan) && !/candidates\.find/.test(scan));
+    ok("STRUCTURE: scanUsbPorts skips a path that is already open OR already opening - " +
+       "without it the same port is reopened every 3s and descriptors leak",
+      /usbLinks\.some\(\(l\) => l\.path === p\.path\)/.test(scan) && /usbOpening\.has\(p\.path\)/.test(scan));
+    ok("STRUCTURE: the un-awaited open has a .catch() that RELEASES the path and names " +
+       "the cause - an unhandled rejection there pinned the path for the whole process",
+      /openUsbLink\(p\.path,[\s\S]*?\)\.catch\(/.test(scan) && /usbOpening\.delete\(p\.path\)/.test(scan));
+
+    const open = extractBody(src, 'async function openUsbLink(portPath, vid = "")');
+    ok("STRUCTURE: openUsbLink registers EVERY link it opens, unconditionally",
+      /\n  usbLinks\.push\(link\);\n/.test(open));
+    ok("STRUCTURE: openUsbLink arms the HELLO pulse on the link it just opened",
+      /\n  armHelloPulse\(link\);\n/.test(open));
+    ok("STRUCTURE: the link records the vendor id it was opened with, which is how the " +
+       "two boards are told apart before any HELLO",
+      /\n    vid,/.test(open));
+    ok("STRUCTURE: the close handler splices the link out, so a replug is reopened",
+      /usbLinks\.splice\(i, 1\)/.test(open));
+    ok("STRUCTURE: the close handler drops that link's battery reading, keyed BEFORE the " +
+       "splice because deviceNameFor() answers out of usbLinks",
+      /const battKey = senderKey\(link\.id\);/.test(open) &&
+      /forgetBatteryFor\(battKey\);/.test(open) &&
+      open.indexOf("const battKey") < open.indexOf("usbLinks.splice"));
+    ok("STRUCTURE: the open is BOUNDED - a port that emits neither \"open\" nor \"error\" " +
+       "must not pin its path forever",
+      /Promise\.race\(/.test(open) && /USB_OPEN_TIMEOUT_MS/.test(open) &&
+      /clearTimeout\(timer\)/.test(open));
+
+    // CONSTANTS ARE PARSED, NEVER TRANSCRIBED: a literal on this side means reverting
+    // the constant in index.mjs does not fail anything. Each parse is asserted to have
+    // SUCCEEDED first, because a regex that matched nothing makes every test over it
+    // vacuous.
+    const graceM = /const HELLO_GRACE_MS = Number\(process\.env\.DECKHAND_HELLO_GRACE_MS \|\| (\d+)\)/.exec(src);
+    ok("STRUCTURE: HELLO_GRACE_MS's default is PARSED out of index.mjs", !!graceM);
+    const graceMs = graceM ? Number(graceM[1]) : NaN;
+    ok(`STRUCTURE: the pulse waits a REAL grace period before resetting a board ` +
+       `(parsed ${graceM ? graceMs : "nothing"}ms; 0 resets every board the instant it connects)`,
+      Number.isFinite(graceMs) && graceMs >= 1000);
+
+    const openTmoM = /const USB_OPEN_TIMEOUT_MS = Number\(process\.env\.DECKHAND_USB_OPEN_TIMEOUT_MS \|\| (\d+)\)/.exec(src);
+    ok("STRUCTURE: USB_OPEN_TIMEOUT_MS's default is PARSED out of index.mjs", !!openTmoM);
+    const openTmo = openTmoM ? Number(openTmoM[1]) : NaN;
+    ok(`STRUCTURE: a hung open is bounded by a real timeout (parsed ${openTmoM ? openTmo : "nothing"}ms), ` +
+       `long enough not to abort a slow but working open`,
+      Number.isFinite(openTmo) && openTmo >= 2000 && openTmo <= 60000);
+
+    const battMaxM = /const MAX_BATT_DEVICES = (\d+);/.exec(src);
+    ok("STRUCTURE: MAX_BATT_DEVICES is PARSED out of index.mjs", !!battMaxM);
+    ok(`STRUCTURE: the battery store is BOUNDED (parsed ${battMaxM ? battMaxM[1] : "nothing"}) - ` +
+       `ports renumber, so a close handler can leave a key it will never name again`,
+      !!battMaxM && Number(battMaxM[1]) > 0 && Number(battMaxM[1]) <= 64);
+
+    const forget = extractBody(src, "function forgetBatteryFor(key)");
+    ok("STRUCTURE: a reading is deleted when its last link closes, but KEPT while the same " +
+       "device is still reachable on another link (the cabled-and-BLE case)",
+      /battByDevice\.delete\(key\)/.test(forget) && /for \(const l of liveLinks\(\)\)/.test(forget));
+    const bound = extractBody(src, "function boundBatteryStore()");
+    ok("STRUCTURE: the bound evicts the OLDEST reading, not an arbitrary one",
+      /MAX_BATT_DEVICES/.test(bound) && /b\.at < oldestAt/.test(bound) && /battByDevice\.delete\(oldestKey\)/.test(bound));
+
+    // --- the history dedupe key ---
+    const sskM = /const scrollSenderKey = \(via\) =>([\s\S]*?);\n/.exec(src);
+    ok("STRUCTURE: scrollSenderKey is PARSED out of index.mjs", !!sskM);
+    ok("STRUCTURE: an unnamed usb link makes every history sender unattributable, so one " +
+       "device's two transports cannot present as two devices and double the reader",
+      !!sskM && /usbLinks\.some\(\(l\) => !l\.name\)/.test(sskM[1]) && /senderKey\(via\)/.test(sskM[1]));
+    ok("STRUCTURE: both history arms key on scrollSenderKey(), never on senderKey() - " +
+       "senderKey falls back to the LINK ID, which is what split one device in two",
+      (hello.match(/\$\{scrollSenderKey\(via\)\}\|\$\{id\}/g) || []).length === 2 &&
+      !/\$\{senderKey\(via\)\}\|\$\{id\}/.test(hello));
+    ok("STRUCTURE: a dropped duplicate NAMES ITS CAUSE rather than returning in silence",
+      (hello.match(/return scrollReqDropped\(via, reqKey\)/g) || []).length === 2 &&
+      /console\.log\(/.test(extractBody(src, "function scrollReqDropped(via, reqKey)")));
+    ok("STRUCTURE: the BATT arm bounds the store it writes into",
+      /boundBatteryStore\(\);/.test(hello));
+
     const pulse = extractBody(src, "function armHelloPulse(link)");
+    ok("STRUCTURE: the pulse is gated on the board being a CH340 - on a native-USB board " +
+       "that sequence is esptool's reset and drops the port under an open answer window",
+      /usbIsCh340\(link\)/.test(pulse));
+    const ch340 = extractBody(src, "function usbIsCh340(link)");
+    ok("STRUCTURE: usbIsCh340 decides from the VENDOR ID, which is known before any HELLO",
+      /link\.vid === USB_VID_CH340/.test(ch340) && /const USB_VID_CH340 = "1a86";/.test(src));
+    ok("STRUCTURE: the once-only record is keyed on the PATH and lives OUTSIDE the link " +
+       "object, so a close/reopen cannot turn \"once\" into a loop on a board whose port " +
+       "the reset drops",
+      /usbPulsedPaths\.has\(link\.path\)/.test(pulse) &&
+      /usbPulsedPaths\.set\(link\.path/.test(pulse) &&
+      /^const usbPulsedPaths = new Map\(\);/m.test(src));
+    const pulseMaxM = /const MAX_PULSED_PATHS = (\d+);/.exec(src);
+    ok("STRUCTURE: MAX_PULSED_PATHS is PARSED out of index.mjs", !!pulseMaxM);
+    ok(`STRUCTURE: the pulse record is bounded (parsed ${pulseMaxM ? pulseMaxM[1] : "nothing"})`,
+      !!pulseMaxM && Number(pulseMaxM[1]) > 0 && /usbPulsedPaths\.delete\(usbPulsedPaths\.keys\(\)/.test(pulse));
+
     ok("STRUCTURE: the HELLO pulse holds DTR false - asserting it is the bootloader, not a reboot",
       /dtr: false, rts: true/.test(pulse) && /dtr: false, rts: false/.test(pulse) &&
       !/dtr: true/.test(pulse));
@@ -615,12 +1088,61 @@ async function selftest() {
      (s) => s.replace("    if (!link || gen !== link.scrollGen) {", "    if (false) {")],
     ["the HELLO pulse asserts DTR, which is the BOOTLOADER rather than a reboot",
      (s) => s.replace("    await set({ dtr: false, rts: true });", "    await set({ dtr: true, rts: true });")],
-    ["the pulse loses its once-per-link guard and power-cycles a silent board forever",
-     (s) => s.replace("    if (link.name || !usbLinks.includes(link) || link.pulsed) return;\n    link.pulsed = true;",
-                      "    if (!usbLinks.includes(link)) return;")],
+    ["the pulse loses its once-only guard and power-cycles a silent board forever",
+     (s) => s.replace("    if (link.pulsed || usbPulsedPaths.has(link.path)) {", "    if (false) {")],
+    ["the once-only guard goes back to link.pulsed alone, which DIES WITH THE LINK - " +
+     "a close and reopen re-pulses the same board",
+     (s) => s.replace("    if (link.pulsed || usbPulsedPaths.has(link.path)) {", "    if (link.pulsed) {")],
     ["the pulse fires even once the link HAS a name, rebooting a healthy board",
-     (s) => s.replace("    if (link.name || !usbLinks.includes(link) || link.pulsed) return;",
-                      "    if (!usbLinks.includes(link) || link.pulsed) return;")],
+     (s) => s.replace("    if (link.name || !usbLinks.includes(link)) return;",
+                      "    if (!usbLinks.includes(link)) return;")],
+    ["the pulse stops checking which board it is - board 2's port IS the SoC, so that " +
+     "sequence resets it and drops the USB device mid-answer",
+     (s) => s.replace("    if (!usbIsCh340(link)) {", "    if (false) {")],
+    ["usbIsCh340 stops reading the vendor id and says yes to everything",
+     (s) => s.replace("  if (link.vid) return link.vid === USB_VID_CH340;", "  if (link.vid) return true;")],
+    // ---- the scan / open pair: every one of these passed 42+14 assertions before ----
+    ["the port scan opens only the FIRST candidate - THE ORIGINAL DEFECT this whole " +
+     "change exists to fix, one board driven and the other left announcing HELLO to nobody",
+     (s) => s.replace("  for (const p of candidates) {", "  for (const p of candidates.slice(0, 1)) {")],
+    ["openUsbLink registers only the first link, so the second board is opened and dropped",
+     (s) => s.replace("\n  usbLinks.push(link);\n", "\n  if (usbLinks.length === 0) usbLinks.push(link);\n")],
+    ["the scan lost its already-open / in-flight guard - the same port is reopened every " +
+     "3s and links and file descriptors grow without bound",
+     (s) => s.replace("    if (usbLinks.some((l) => l.path === p.path) || usbOpening.has(p.path)) continue;\n", "")],
+    ["the close handler stopped splicing, so a dead link holds the path and a replugged " +
+     "board is never reopened",
+     (s) => s.replace("    if (i >= 0) usbLinks.splice(i, 1);\n", "")],
+    ["HELLO_GRACE_MS's default went to 0 - every board reset the instant it connects",
+     (s) => s.replace("Number(process.env.DECKHAND_HELLO_GRACE_MS || 6000)",
+                      "Number(process.env.DECKHAND_HELLO_GRACE_MS || 0)")],
+    ["openUsbLink no longer arms the HELLO pulse, so board 1 never announces its name",
+     (s) => s.replace("\n  armHelloPulse(link);\n", "\n")],
+    // ---- the minor findings, each with its own teeth ----
+    ["a hung open is unbounded again, pinning the path in usbOpening for the life of the " +
+     "process - that board is dark and the log says only \"connecting to\"",
+     (s) => s.replace("            USB_OPEN_TIMEOUT_MS\n          );", "            2147483647\n          );")],
+    ["a failed open stops releasing its path, so the next scan skips that board forever",
+     (s) => s.replace("    usbOpening.delete(portPath);\n    try {\n      port?.destroy?.();",
+                      "    try {\n      port?.destroy?.();")],
+    ["a closed link's battery reading is never dropped - the heartbeat republishes every " +
+     "dead board every 5 seconds, forever",
+     // Neutered rather than deleted, on purpose: deleting the call would trip the
+     // scan slice's own must-token and be "caught" by a THROW rather than by the
+     // assertion that is supposed to guard it - the same reason the BATT fault above
+     // leaves senderKey(via) in its expression.
+     (s) => s.replace("    forgetBatteryFor(battKey);", "    if (false) forgetBatteryFor(battKey);")],
+    ["the battery store stops being bounded, so a board that renumbers grows it without end",
+     (s) => s.replace("      boundBatteryStore();", "")],
+    ["forgetBatteryFor drops a reading even while the device is still on another link",
+     (s) => s.replace("  for (const l of liveLinks()) if (senderKey(l.id) === key) return;\n", "")],
+    ["the history dedupe keys on senderKey() again - an unnamed cable and the SAME " +
+     "device's BLE link become two senders and every new message in the reader is doubled",
+     (s) => s.replace("const scrollSenderKey = (via) =>\n  usbLinks.some((l) => !l.name) ? \"(unattributable)\" : senderKey(via);",
+                      "const scrollSenderKey = (via) => senderKey(via);")],
+    ["a dropped duplicate history request goes back to being silent",
+     (s) => s.replace("      if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);\n      scrollReqSeen.set(reqKey, now);\n      await sendScrollbackSince(",
+                      "      if (scrollReqSeen.has(reqKey)) return;\n      scrollReqSeen.set(reqKey, now);\n      await sendScrollbackSince(")],
     ["the device-command log stops naming its targets, so a missed board is invisible",
      (s) => s.replace("    console.log(`Sending command to ${targets.length} link(s) [${targets.join(\", \")}]: ${command}`);",
                       "    console.log(`Sending command to device: ${command}`);")],

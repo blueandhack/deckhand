@@ -358,6 +358,40 @@ const HOST_ALIVE = path.join(RUNTIME_DIR, "host-alive");
 // because that is what the menu bar draws; batteryForHeartbeat() says which one
 // and labels it.
 const battByDevice = new Map(); // senderKey -> { device, mv, pct, state, leftMin, at }
+// A CEILING, because the keys are not stable. An UNNAMED link keys on its port
+// path and CLAUDE.md's own note is that ports renumber, so every path a board has
+// ever enumerated under used to leave a permanent entry that nothing deleted - and
+// the heartbeat's `batts` array republished every dead one of them every 5 seconds,
+// so the menu bar's list could only grow and would list phantom boards.
+const MAX_BATT_DEVICES = 8; // the same ceiling as MAX_PAIRED_DEVICES: this Mac's boards, not a history
+
+// Dropped when the link that fed it closes - UNLESS the same device is still
+// reachable on another link, which is the ordinary cabled-and-BLE case and where
+// deleting would blank a battery that is still being reported.
+function forgetBatteryFor(key) {
+  if (!key || !battByDevice.has(key)) return;
+  for (const l of liveLinks()) if (senderKey(l.id) === key) return;
+  battByDevice.delete(key);
+  console.log(
+    `Battery: dropped the reading filed under ${key} - its last link closed, so nothing behind it can refresh it.`
+  );
+}
+// The prune above needs a close handler to name the key. A board that RENUMBERS
+// while the host runs leaves a key no close handler will ever name again, so the
+// store is bounded as well as pruned. Oldest reading goes first.
+function boundBatteryStore() {
+  while (battByDevice.size > MAX_BATT_DEVICES) {
+    let oldestKey = null;
+    let oldestAt = Infinity;
+    for (const [k, b] of battByDevice) if (b.at < oldestAt) [oldestAt, oldestKey] = [b.at, k];
+    if (oldestKey === null) return;
+    battByDevice.delete(oldestKey);
+    console.log(
+      `Battery: evicted the oldest reading (${oldestKey}) - more than ${MAX_BATT_DEVICES} devices have reported, ` +
+        `and ports renumber, so this store is bounded rather than a history.`
+    );
+  }
+}
 
 // The device the Mac's surfaces mean: the selection when it is actually
 // reporting, else the freshest reading there is. Falling back to the freshest is
@@ -1784,6 +1818,40 @@ const nextScrollGen = (link) => (link ? ++link.scrollGen : 0);
 // device's own in-flight dedup already refuses.
 const SCROLL_REQ_DEDUP_MS = 1500;
 const scrollReqSeen = new Map();
+// THE SENDER, BUT ONLY WHILE EVERY SENDER IS ACTUALLY IDENTIFIABLE - which is NOT
+// senderKey(). senderKey() falls back to the LINK ID for an unnamed link, and that
+// is right where it is used: an ANSWER from an unknown board must not collapse into
+// another unknown board's slot. Here the same fallback is wrong in the opposite
+// direction. deviceNameFor() deliberately returns "" for an unnamed USB link
+// whenever a second USB link exists, so ONE device that is cabled and on BLE
+// presents as TWO senders - its USB copy keyed on the port path, its BLE copy on the
+// device name. The dedupe then does not fire, the request is served twice, and the
+// `since:` arm's own comment says what that costs: every new message in the reader
+// appears doubled. Reachable with both boards cabled, board 2 also on BLE and its
+// USB link unnamed (a host that attached mid-run), and FULLY exposed under
+// DECKHAND_NO_USB_RESET=1 - and now also on board 2 generally, since the HELLO pulse
+// no longer papers over it there.
+//
+// So: while ANY usb link is anonymous, this host cannot attribute a history request
+// to a device at all, and says so by collapsing every sender into one bucket - which
+// is exactly the pre-change behaviour, for exactly the window in which the pre-change
+// behaviour was the correct one. Once every link has a name (the ordinary case, and
+// what HELLO produces) per-sender keying returns and two boards are each served.
+// The cost is the mirror image and deliberately the cheaper one: two boards asking
+// for the same session, filter and range inside 1500ms while one of them is
+// anonymous, and the second is answered with silence for that request rather than
+// with a corrupted transcript. Silence is the failure this repo refuses to leave
+// unexplained, so the drop is LOGGED with its cause and its key.
+const scrollSenderKey = (via) =>
+  usbLinks.some((l) => !l.name) ? "(unattributable)" : senderKey(via);
+function scrollReqDropped(via, reqKey) {
+  console.log(
+    `[device/${linkLabel(via)}] duplicate history request within ${SCROLL_REQ_DEDUP_MS}ms (${reqKey}) - ` +
+      `dropped, the first copy is being served. A device transmits on every live transport at once. ` +
+      `An "(unattributable)" key means some usb link has no name yet, so requests cannot be told apart ` +
+      `by sender and are collapsed rather than served twice into one reader.`
+  );
+}
 const scrollAckWaiters = new Map();
 const ackKey = (linkId, gen, seq) => `${linkId}:${gen}:${seq}`;
 function waitForScrollAck(link, gen, seq) {
@@ -3003,6 +3071,7 @@ async function handleDeviceLine(line, via, pairGen = 0) {
         leftMin: Number.isFinite(f.left) && f.left >= 0 ? f.left : null,
         at: Date.now(),
       });
+      boundBatteryStore(); // ports renumber; the prune on close cannot see a key it never names again
     }
   }
   // History request from the detail screen. Handled here rather than in the tick so the
@@ -3053,12 +3122,10 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       // a second request form without it was the gap.
       const now = Date.now();
       for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
-      // THE SENDER IS PART OF THE KEY. Without it, two boards asking for the
-      // same session's tail inside the dedup window are one request and the
-      // second board is answered with silence - which is the same duplicate
-      // suppression this guard exists for, aimed at the wrong thing.
-      const reqKey = `${senderKey(via)}|${id}|${filter}|${want}`;
-      if (scrollReqSeen.has(reqKey)) return;
+      // THE SENDER IS PART OF THE KEY, but only when the sender is KNOWN - see
+      // scrollSenderKey().
+      const reqKey = `${scrollSenderKey(via)}|${id}|${filter}|${want}`;
+      if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
       scrollReqSeen.set(reqKey, now);
       await sendScrollbackSince(id, filter, Number.parseInt(want.slice(6), 10) || 0, replyLink);
     } else if (want.startsWith("tail:")) {
@@ -3071,8 +3138,8 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       // one (a filter toggle) is never swallowed.
       const now = Date.now();
       for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
-      const reqKey = `${senderKey(via)}|${id}|${filter}|${want}`;   // per sender - see the since: arm
-      if (scrollReqSeen.has(reqKey)) return;
+      const reqKey = `${scrollSenderKey(via)}|${id}|${filter}|${want}`;   // per sender - see the since: arm
+      if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
       scrollReqSeen.set(reqKey, now);
       await sendScrollback(id, filter, Number.parseInt(want.slice(5), 10) || 65536, replyLink);
     } else if (want.startsWith("item:"))
@@ -3390,12 +3457,20 @@ function linkLabel(via) {
 // Which ports are ours. SERIAL_PORT still pins the host to exactly one, and it is
 // honoured as a RESTRICTION rather than an addition, so it remains the escape
 // hatch when one board must be left alone.
+// THE TWO BOARDS ARE DISTINGUISHABLE BEFORE ANY NAME IS KNOWN, and armHelloPulse()
+// below depends on that, so the ids are named once here rather than spelled twice.
+// The difference that matters to the pulse: board 1's CH340 is a SEPARATE USB device
+// sitting in front of the ESP32, so it stays enumerated across a reset of the SoC;
+// board 2's port IS the SoC, so resetting it drops the USB device.
+const USB_VID_CH340 = "1a86";      // board 1, /dev/cu.usbserial-*
+const USB_VID_ESPRESSIF = "303a";  // board 2, native USB CDC, /dev/cu.usbmodem*
 async function listUsbCandidates() {
   const ports = await SerialPort.list();
+  const vidOf = (p) => (p.vendorId ?? "").toLowerCase();
   const mine = ports.filter(
     (p) =>
-      (p.vendorId ?? "").toLowerCase() === "1a86" || // CH340 (board 1)
-      (p.vendorId ?? "").toLowerCase() === "303a" || // Espressif native USB (board 2)
+      vidOf(p) === USB_VID_CH340 ||     // CH340 (board 1)
+      vidOf(p) === USB_VID_ESPRESSIF || // Espressif native USB (board 2)
       /usbserial|wchusbserial|SLAB_USBtoUART|usbmodem/i.test(p.path)
   );
   if (process.env.SERIAL_PORT) {
@@ -3428,28 +3503,70 @@ async function scanUsbPorts() {
   }
   for (const p of candidates) {
     if (usbLinks.some((l) => l.path === p.path) || usbOpening.has(p.path)) continue;
-    openUsbLink(p.path); // deliberately not awaited: one slow port must not block the rest
+    // Deliberately not awaited: one slow port must not block the rest. The .catch()
+    // is NOT decoration - openUsbLink can reject before its own try/finally is
+    // entered (a synchronous throw out of `new SerialPort`), and an unhandled
+    // rejection there used to leave the path in usbOpening for the life of the
+    // process, which every later scan then skipped in silence. The refusal names
+    // its cause and says the path was released, because from the Mac a board that
+    // is dark and a board that is missing look identical.
+    openUsbLink(p.path, (p.vendorId ?? "").toLowerCase()).catch((err) => {
+      usbOpening.delete(p.path);
+      console.error(
+        `USB: opening ${p.path} threw (${err?.message || err}) - the path is released and the next scan will retry it.`
+      );
+    });
   }
 }
 
-async function openUsbLink(portPath) {
+// An open that emits NEITHER "open" NOR "error" is a real state (a port whose
+// device has gone but whose node hangs around), and it used to pin the path in
+// usbOpening forever: that board stayed dark until the host restarted, with
+// nothing in the log but a stuck "connecting to". Bounded here, and env-overridable
+// so the timeout path can actually be exercised.
+const USB_OPEN_TIMEOUT_MS = Number(process.env.DECKHAND_USB_OPEN_TIMEOUT_MS || 10000);
+
+async function openUsbLink(portPath, vid = "") {
   usbOpening.add(portPath);
   console.log(`USB: connecting to ${portPath} @ ${BAUD_RATE}...`);
-  const port = new SerialPort({ path: portPath, baudRate: BAUD_RATE });
+  let port = null;
   try {
-    await new Promise((resolve, reject) => {
-      port.once("open", resolve);
-      port.once("error", reject);
-    });
+    port = new SerialPort({ path: portPath, baudRate: BAUD_RATE });
+    let timer = null;
+    try {
+      await Promise.race([
+        new Promise((resolve, reject) => {
+          port.once("open", resolve);
+          port.once("error", reject);
+        }),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`no "open" and no "error" in ${USB_OPEN_TIMEOUT_MS / 1000}s`)),
+            USB_OPEN_TIMEOUT_MS
+          );
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   } catch (err) {
-    console.error(`USB: connect to ${portPath} failed:`, err.message);
+    console.error(
+      `USB: connect to ${portPath} failed: ${err.message} - the path is released and the next scan will retry it.`
+    );
     usbOpening.delete(portPath);
+    try {
+      port?.destroy?.();
+    } catch {
+      // already gone; the point was only to not leak a half-open handle
+    }
     return;
   }
   const link = {
     id: usbIdFor(portPath),
     kind: "usb",
     path: portPath,
+    vid,               // WHICH BOARD, known before any HELLO - see armHelloPulse()
     port,
     name: "",          // learned from HELLO, on THIS link
     shot: null,        // per-link, so two boards can be captured at once
@@ -3497,8 +3614,13 @@ async function openUsbLink(portPath) {
     }
   });
   port.on("close", () => {
+    // The key the BATT arm filed this link's reading under, taken BEFORE the splice
+    // because deviceNameFor() answers out of usbLinks and would give a different
+    // answer once this link is gone.
+    const battKey = senderKey(link.id);
     const i = usbLinks.indexOf(link);
     if (i >= 0) usbLinks.splice(i, 1);
+    forgetBatteryFor(battKey);
     console.log(
       `USB: ${link.name || link.id} disconnected (${usbLinks.length} USB link(s) left) - the scan will reopen it.`
     );
@@ -3520,16 +3642,66 @@ async function openUsbLink(portPath) {
 // So after a grace period a link that still has no name gets ONE reset pulse -
 // RTS asserted drives EN low, released it boots, and DTR is held false the whole
 // time because asserting it drives GPIO0 low and that is the BOOTLOADER, not a
-// reboot. Once per link, never in a loop: a device whose firmware does not HELLO
-// at all must stay dark rather than be power-cycled forever. DECKHAND_NO_USB_RESET=1
-// turns it off for anyone who would rather have an anonymous link than a reboot.
+// reboot. DECKHAND_NO_USB_RESET=1 turns it off for anyone who would rather have an
+// anonymous link than a reboot.
+//
+// IT IS FOR BOARD 1 ONLY, and that is correctness rather than tidiness.
+// `{dtr:false, rts:true}` is ALSO esptool's USB-Serial-JTAG reset sequence, which
+// board 2's controller implements in hardware under USBMode=hwcdc - so the pulse
+// resets board 2 as well, and there its serial port IS the SoC: the reset DROPS the
+// USB device, the port closes, the close handler splices the link out of usbLinks
+// and any `link.pulsed` flag dies with the link object. "Once per link" therefore
+// bounds nothing on board 2, and a reopen that lands after the fresh 15s HELLO burst
+// has ended can pulse it again - the "power-cycled forever" outcome this comment
+// used to say could not happen. The user's cost is concrete: a watchdog restart or a
+// relaunch against a board that has been up for hours would reboot it six seconds
+// later, discarding an open answer window, a fetched scrollback or an in-flight
+// capture. Board 1's CH340 is a SEPARATE USB device that stays enumerated across an
+// ESP32 reset, which is both why its port survives the pulse and why the pulse is
+// needed there at all: node does not drive that chip's modem lines, so merely
+// opening the port does not reset the board. So the gate is the VENDOR ID, which
+// SerialPort.list() gives us before any HELLO.
+//
+// And ONCE PER PHYSICAL PATH rather than once per link object: usbPulsedPaths
+// OUTLIVES the splice, so a close/reopen cycle cannot turn "once" into a loop even
+// on a board whose port does go away.
 const HELLO_GRACE_MS = Number(process.env.DECKHAND_HELLO_GRACE_MS || 6000); // env override exists to EXERCISE this path
 const RESET_PULSE_MS = 120;
+const MAX_PULSED_PATHS = 16;      // bounded: ports renumber, and this is not a history
+const usbPulsedPaths = new Map(); // portPath -> when, and it SURVIVES the link being spliced
+// Which chip is in front of the SoC. The vendor id when the OS gave us one; the
+// path shape when it did not, because SERIAL_PORT may name a port that is not
+// currently enumerated and there is then no vendorId to read. A CH340 comes up as
+// /dev/cu.usbserial-*, native USB CDC as /dev/cu.usbmodem*.
+function usbIsCh340(link) {
+  if (link.vid) return link.vid === USB_VID_CH340;
+  return /usbserial|wchusbserial|SLAB_USBtoUART/i.test(link.path || "") && !/usbmodem/i.test(link.path || "");
+}
 function armHelloPulse(link) {
   if (process.env.DECKHAND_NO_USB_RESET === "1") return;
   setTimeout(async () => {
-    if (link.name || !usbLinks.includes(link) || link.pulsed) return;
+    if (link.name || !usbLinks.includes(link)) return;
+    // EVERY REFUSAL NAMES ITS CAUSE. These are checked here rather than at arm time
+    // so they only ever print about a link that is genuinely still anonymous.
+    if (link.pulsed || usbPulsedPaths.has(link.path)) {
+      console.log(
+        `USB: ${link.id} still has no name, but ${link.path} has already been pulsed once, so it will NOT be ` +
+          `pulsed again - a board that never says HELLO must stay dark rather than be power-cycled forever.`
+      );
+      return;
+    }
+    if (!usbIsCh340(link)) {
+      console.log(
+        `USB: ${link.id} has not said HELLO in ${HELLO_GRACE_MS / 1000}s, so this host cannot authenticate an ` +
+          `answer from it - but it is not a CH340 (vendor ${link.vid || "unknown"}, path ${link.path}), and on a ` +
+          `native-USB board that RTS sequence is esptool's reset: it would reboot a healthy board and drop the ` +
+          `port mid-answer. Leaving it anonymous until it says HELLO.`
+      );
+      return;
+    }
     link.pulsed = true;
+    usbPulsedPaths.set(link.path, Date.now());
+    while (usbPulsedPaths.size > MAX_PULSED_PATHS) usbPulsedPaths.delete(usbPulsedPaths.keys().next().value);
     console.log(
       `USB: ${link.id} has not said HELLO in ${HELLO_GRACE_MS / 1000}s, so this host does not know ` +
         `which board it is and could not authenticate an answer from it. Pulsing RTS to reboot it ` +

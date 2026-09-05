@@ -43,12 +43,57 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   cabled and sending `BATT` for minutes while never once saying who it was. A link with no
   name after 6s now gets ONE reset pulse - RTS asserted drives EN low, released it boots,
   and DTR is held false throughout because asserting it drives GPIO0 low and that is the
-  BOOTLOADER, not a reboot. Once per link, so a board whose firmware never says `HELLO` is
-  not power-cycled forever, and loudly logged. **Measured:** both boards named themselves
+  BOOTLOADER, not a reboot. Loudly logged. **Measured:** both boards named themselves
   within two seconds of the pulse, and forcing the grace to 0.3s on board 1 alone reproduced
   it end to end (`has not said HELLO in 0.3s ... Pulsing RTS` -> `usb:usbserial-10 is
   Deckhand-0528`). `DECKHAND_NO_USB_RESET=1` disables it for anyone who would rather have an
   anonymous link than a reboot; `DECKHAND_HELLO_GRACE_MS` exists to exercise the path.
+- **THE PULSE IS FOR BOARD 1 ONLY, gated on the CH340's vendor id.** It first shipped
+  ungated, and the comment claiming it could not power-cycle a board forever was wrong on
+  board 2. `{dtr:false, rts:true}` is ALSO esptool's USB-Serial-JTAG reset sequence, which
+  board 2's controller implements in hardware under `USBMode=hwcdc`; board 2's serial port
+  **is** the SoC, so the reset DROPS the USB device, the port closes, the close handler
+  splices the link out and `link.pulsed` dies with the link object. "Once per link" therefore
+  bounded nothing there, and a watchdog restart or a relaunch against a board that had been
+  up for hours would have rebooted it six seconds later, discarding an open answer window, a
+  fetched scrollback or an in-flight capture. Two changes: the gate is `usbIsCh340(link)`,
+  reading the `vendorId` `SerialPort.list()` gives before any `HELLO` (`1a86` CH340 =
+  board 1, `303a` Espressif native USB = board 2), falling back to the path shape only when
+  `SERIAL_PORT` named a port that is not currently enumerated and there is no vendorId to
+  read; and the once-only record is `usbPulsedPaths`, keyed on the PORT PATH and living
+  OUTSIDE the link object, so a close/reopen cannot turn "once" into a loop. Both refusals
+  name their cause in the log. **NOT verified against a live restarted host** - proved by
+  `multi-device-check.mjs`, which executes the real `scanUsbPorts`/`openUsbLink`/
+  `armHelloPulse` against a stub `SerialPort`.
+- **A HUNG OPEN NO LONGER PINS ITS PORT.** `usbOpening` is what stops the 3s re-scan
+  double-opening a path; `openUsbLink` is called un-awaited, and a port that emitted neither
+  `open` nor `error` used to leave its path in that set for the life of the process - that
+  board dark, with nothing in the log but a stuck `USB: connecting to`. The wait is now a
+  `Promise.race` against `USB_OPEN_TIMEOUT_MS` (10s, `DECKHAND_USB_OPEN_TIMEOUT_MS`
+  overrides it to exercise the path), the path is released on every exit, and the un-awaited
+  call has a `.catch()` that releases it too. Every one of those refusals says the path was
+  released and the next scan will retry it.
+- **`battByDevice` IS PRUNED AND BOUNDED.** Nothing used to delete from it, and an unnamed
+  link keys on its port path - which renumbers - so every path a board had ever enumerated
+  under left a permanent entry and the heartbeat's `batts` array republished every dead one
+  every 5 seconds. A link's reading is now dropped in its `close` handler (keyed BEFORE the
+  splice, because `deviceNameFor()` answers out of `usbLinks`) unless the same device is
+  still reachable on another link - the ordinary cabled-and-BLE case. `MAX_BATT_DEVICES` (8)
+  bounds it on top, oldest evicted first, because a port that renumbers mid-run leaves a key
+  no close handler will ever name again.
+- **THE HISTORY DEDUPE KEY IS NOT `senderKey()`.** `senderKey()` falls back to the LINK ID
+  for an unnamed link, which is right for an `ANSWER` and wrong here: `deviceNameFor()`
+  returns `""` for an unnamed USB link whenever a second USB link exists, so ONE device that
+  is cabled and on BLE presented as TWO senders, the dedupe did not fire, and the `since:`
+  reply was appended twice - every new message in the reader doubled. `scrollSenderKey()`
+  therefore collapses every sender into one `(unattributable)` bucket for as long as ANY usb
+  link is anonymous (which is exactly the pre-multi-device behaviour, for exactly the window
+  in which it was the correct one) and returns to per-sender keying once every link has a
+  name. The cost is the mirror image and deliberately the cheaper one: two boards asking for
+  the same session, filter and range inside `SCROLL_REQ_DEDUP_MS` while one of them is
+  anonymous, and the second is answered with silence for that request rather than with a
+  corrupted transcript - and that drop is now LOGGED with its cause and its key, where it
+  used to be a bare `return`.
 - **FAN-OUT IS ONE COPY PER LINK - not per device times transports.** A cabled board 2 has
   always received the tick and every trigger-file command twice (its cable and its BLE link),
   which is why `KBTEST`, `KBPROBE`, `KBBUBBLE` and `POWERPROBE` dedupe on the device. Board 1
