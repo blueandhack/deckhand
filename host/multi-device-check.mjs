@@ -1073,6 +1073,18 @@ async function main({ indexPath = INDEX } = {}) {
       ok("STRUCTURE: the per-link reports are cleared on disconnect - indices are reused, " +
          "and a stale 23 would pin every later connection at the floor",
         /bleMtuByLink\.clear\(\)/.test(src.slice(src.indexOf('peripheral.once("disconnect"'))));
+      // ...AND THE REPORT IS ASKED FOR RATHER THAN RACED. The device reports a
+      // link's MTU from loop() the moment it settles, which is while this Mac is
+      // still subscribing - MEASURED: both `mtu=23` and `mtu=256` arrived on the
+      // CABLE and neither on the radio, and the cable's copy is not attributable.
+      // Without the ask the link silently stays at the 20-byte floor: 2.7 KB/s
+      // where 8.4 is available, which is a slow scrollback rather than a broken
+      // one and so has nothing to report itself.
+      const ready = src.slice(src.indexOf("bleDeviceName = name;"),
+                              src.indexOf('peripheral.once("disconnect"'));
+      ok("STRUCTURE: the host SOLICITS BLEMTU once the BLE link is ready, over that link, " +
+         "rather than depending on catching the unsolicited report",
+        /sendToLink\(BLE_LINK, "BLEMTU/.test(ready));
     }
 
     // --- THE SCROLLACK WAITER'S KEY, which WHOAMI made unstable ---
@@ -1277,6 +1289,8 @@ async function selftest() {
      (s) => s.replace(/(const battKey = senderKey\("ble"\);)/,
                       "$1\n        forgetBatteryFor(battKey);")
              .replace(/\n\s*forgetBatteryFor\(battKey\);\n(\s*)startBleScan\(\);/, "\n$1startBleScan();")],
+    ["the host stops asking for the MTU on connect, so the link sits at the 20-byte floor",
+     (s) => s.replace(/\n\s*await sendToLink\(BLE_LINK, "BLEMTU[^\n]*\n/, "\n")],
     ["the BLE chunk size is retuned from a BLEMTU read off the USB cable again",
      (s) => s.replace(/\n\s*if \(viaKind\(via\) !== "ble"\) return;/, "")],
     ["and from whichever link reported LAST rather than the smallest, so this Mac sizes " +

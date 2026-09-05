@@ -3135,7 +3135,7 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     // arrives here over USB as well - and the number in it describes some BLE
     // link's negotiated MTU, not the one this host writes through. Retuning from
     // it sized our writes off a link we are not on.
-    if (viaKind(via) !== "ble") return;
+    if (viaKind(via) !== "ble") return;   // solicited on connect; see startBle()
     // ...AND EVEN OVER BLE, THE REPORT MAY BE ABOUT SOMEONE ELSE'S LINK. The
     // firmware reports per link (`BLEMTU link=<i> mtu=<m>`, scrollback.ino's
     // tickBleMtu) and broadcasts each one to every host, so with two Macs paired
@@ -3982,6 +3982,17 @@ function startBle() {
       blePeripheral = peripheral;
       bleDeviceName = name; // answers over BLE are verified with THIS device's key
       console.log(`BLE: connected to ${name} and ready.`);
+      // ASK FOR THE MTU RATHER THAN RACING THE UNSOLICITED REPORT. The device
+      // reports a link's negotiated MTU from loop() the moment it settles, which
+      // is while this Mac is still discovering characteristics and subscribing -
+      // MEASURED: both `BLEMTU link=0 mtu=23` and `mtu=256` arrived on the CABLE
+      // and neither on the radio. The cable's copy is not usable (see the BLEMTU
+      // arm: it describes some BLE link, not necessarily the one this host writes
+      // through), so without asking again the link stays at the 20-byte floor -
+      // 2.7 KB/s where 8.4 was available. One line per connect, and a board that
+      // cannot answer refuses it BY NAME, which is the behaviour the refusal table
+      // exists for.
+      await sendToLink(BLE_LINK, "BLEMTU\n").catch(() => {});
       peripheral.once("disconnect", () => {
         console.log("BLE: disconnected, re-scanning...");
         // The key the BATT arm filed this link's reading under, taken BEFORE
