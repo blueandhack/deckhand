@@ -2356,14 +2356,30 @@ void drawAskDetail(int idx) {
     bool speak = s.askVoice && s.askAnswerable && !s.askVoiceText[0];
     bool type  = askTypeOffered(idx);
     int y = contentBottom() - ASK_OPT_H;
+    // THE LABEL SAYS REPLY, NOT TYPE, BECAUSE THE BUTTON STOPPED OPENING A
+    // KEYBOARD. Since Task 11 of the compose plan this opens the compose
+    // surface at its ROOT - the reply panel, where this ask's own options are
+    // one tap and its own tokens are one tap - and the keyboard is the sheet
+    // behind that panel's own TYPE... button, one further tap away. A label
+    // promising a keyboard both under-sells the panel (a reader who does not
+    // want to type never presses it, so the one-tap reply is never found) and
+    // mis-describes it. This repo has paid for the same class once already:
+    // the peek's hint read "tap here to read it" after the control moved, and
+    // a hint naming a control that has moved teaches the one gesture that no
+    // longer works. The plain detail card's own header chip still says TYPE
+    // and is still right - a READY session has no ask, so no panel is built
+    // for it and that button really does open the keyboard.
+    // Widths measured at T_BODY, the face uiButton resolves to: REPLY 30/40px
+    // in a 104/144px half, "REPLY TO THIS PROMPT" 120/160px in the 216/296px
+    // full lane - the same slot "SPEAK YOUR ANSWER" (102/136) already fills.
     if (speak && type) {
       int halfW = (CARD_W - 8) / 2;
       uiButton(CARD_X, y, halfW, ASK_OPT_H, "SPEAK", COLOR_ACCENT);
-      uiButton(CARD_X + halfW + 8, y, halfW, ASK_OPT_H, "TYPE", COLOR_ACCENT);
+      uiButton(CARD_X + halfW + 8, y, halfW, ASK_OPT_H, "REPLY", COLOR_ACCENT);
     } else if (speak) {
       uiButton(CARD_X, y, CARD_W, ASK_OPT_H, "SPEAK YOUR ANSWER", COLOR_ACCENT);
     } else {
-      uiButton(CARD_X, y, CARD_W, ASK_OPT_H, "TYPE YOUR ANSWER", COLOR_ACCENT);
+      uiButton(CARD_X, y, CARD_W, ASK_OPT_H, "REPLY TO THIS PROMPT", COLOR_ACCENT);
     }
   }
 }
@@ -2547,17 +2563,17 @@ bool handleAskTouch(int sx, int sy) {
   }
 
   int optTop = askOptionsTop(detailIndex);
-  // SPEAK/TYPE occupy the same row at the bottom of the stack - test it before
+  // SPEAK/REPLY occupy the same row at the bottom of the stack - test it before
   // the option hit-testing below, at the same y the draw used, so the two can
   // never disagree about where the button is.
   if (askInputRows(detailIndex) && sy >= contentBottom() - ASK_OPT_H) {
     bool speak = s.askVoice && s.askAnswerable && !s.askVoiceText[0];
     bool type  = askTypeOffered(detailIndex);
     int gapX0 = CARD_X + (CARD_W - 8) / 2;   // SPEAK's right edge when both buttons show
-    int gapX1 = gapX0 + 8;                    // TYPE's left edge
+    int gapX1 = gapX0 + 8;                    // REPLY's left edge
     // Same split as the draw, derived the same way, so the halves cannot drift.
     bool wantType = type && (!speak || sx >= gapX1);
-    // TYPE OPENS THE COMPOSE SURFACE AT ITS ROOT - the reply panel - and not
+    // REPLY OPENS THE COMPOSE SURFACE AT ITS ROOT - the reply panel - and not
     // straight at the keyboard it used to. The panel is where this ask's own
     // options are one tap and its own tokens are one tap; the keyboard is the
     // sheet behind its TYPE... button, one further tap away, with the draft
@@ -2568,7 +2584,7 @@ bool handleAskTouch(int sx, int sy) {
     // are drawn side by side. This used to be `if (!speak) return true;`,
     // which is dead code for that gap: it only fires when SPEAK isn't
     // offered at all, i.e. exactly the case with no gap to protect (the row
-    // is either all-TYPE, caught by wantType above, or all-SPEAK, with
+    // is either all-REPLY, caught by wantType above, or all-SPEAK, with
     // nothing here to hit). A tap actually landing in the gap fell through
     // to the SPEAK branch below and started an unwanted 20s recording.
     if (speak && type && sx >= gapX0 && sx < gapX1) return true;

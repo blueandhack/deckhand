@@ -53,12 +53,15 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1414288, RAM 73244 | flash 1052896, RAM 72804 |
+| size today | flash 1414288, RAM 73244 | flash 1052912, RAM 72804 |
 
-The two **flash** figures on that row are the `.ino.bin` sizes in
-`firmware/board-baseline.json` and are ASSERTED against it (`node firmware/board-baseline.mjs
---doc-check`), so they cannot go stale again; the two **RAM** figures are `arduino-cli`'s own
-"Global variables use N bytes" and are hand-maintained. `arduino-cli`'s "Sketch uses N" is a
+**FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
+`node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
+under *BOARD 1'S BINARY IS A CONTRACT* against `firmware/board-baseline.json`, and the two
+**flash** figures on the row above are those same sizes - so `--update` rewrites all of them and
+they cannot go stale again (that copy went stale five times in one day). The two **RAM** figures
+are `arduino-cli`'s own "Global variables use N bytes", are NOT bound by anything, and are
+hand-maintained: check them after any compile that moves `.bss`. `arduino-cli`'s "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
 
@@ -120,7 +123,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `3e8b2cf38b0bf029...`, size 1414288 (board 2: `dad444204e806f7e...`, size 1052896).
+Today: `5d772e5522a671c6...`, size 1414288 (board 2: `bbe89730b8e26b1b...`, size 1052912).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -181,6 +184,11 @@ task. A `CHANGED` you have learned to expect is a `CHANGED` you stop reading.
 - **THE HOST MUST RUN VIA `DeckhandBLE.app`.** macOS TCC SIGABRTs a bare `node` the instant it
   touches CoreBluetooth - not a permission prompt, an immediate crash. There is no bare-node
   fallback even for USB-only work.
+- **`processCompletedLine` TAKES `buf` BY REFERENCE - IT IS THE ACCUMULATOR.** A handler that
+  `return`s early without setting `buf = ""` leaves the refused text there for the next bytes to
+  be APPENDED to, which matches the same verb and refuses again for ever. Measured: one `DETAIL 9`
+  produced 63 refusal lines and ~100 seconds in which BOTH boards parsed no payloads at all - a
+  frozen display, and a `SCREENSHOT` sent inside that window went nowhere. Four handlers had it.
 - **`#if` ARMS THAT DUPLICATE A WHOLE STATEMENT ARE HOSTILE TO EVERY CHECKER HERE.** An `#if`/
   `#else` that opens a brace in both arms leaves any brace-counting tool seeing one more `{`
   than `}`. That broke an unrelated PAIRING assertion, which then reported a defect that did
@@ -194,12 +202,13 @@ the physical screen" - plus a large set of offline checkers.
 ```
 # firmware geometry and arithmetic
 node firmware/deckhand_display/{usage,sessions,settings}-geom-check.mjs
-node firmware/deckhand_display/{sessions-rank,scrollback,palette}-check.mjs
+node firmware/deckhand_display/{sessions-rank,scrollback,palette,textwidth}-check.mjs
 node firmware/deckhand_display/commands-check.mjs      # every verb handled or refused BY NAME, both boards
 python3 firmware/deckhand_display/{usage-trend,batt-trend}-check.py
 node firmware/deckhand_display/geom-sweep.mjs          # fault-injection sweep, ~110s
 # the wire and the Mac
-node host/{wire-bytes,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
+node host/{wire-bytes,ask-chips,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
+node host/{codex-refresh,line-address,session-lookup}-check.mjs
 node host/session-inbox-check.mjs                       # the inbox frame, over a stand-in socket
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
 node firmware/board-baseline.mjs --doc-check           # the quote above vs the JSON
@@ -248,9 +257,9 @@ one is neither handled nor refused.
 |---|---|
 | `RECAL` / `MICTEST` / `MICMON` / `MICREC` / `MICSTREAM` | touch calibration; mic level, live meter, one-shot and streaming capture |
 | `TAB 0..2` / `PAGE 0..3` / `KBTEST` / `EMOJITEST` / `EMOJITEST off` / `READTEST` | put a surface on the glass, since a capture can only record what is already there. **`EMOJITEST off` is the escape** - the flag gates payload absorption AND the tick, and without it a `TAB` painted over the grid left a board that looked alive with a frozen footer, recoverable only by reflashing. `TAB` now clears the grid and REFUSES over a reader/transcript rather than stranding its flag |
-| `DETAIL <n>` / `COMPOSE` | the session detail card, and the reply panel over it. `COMPOSE type <text>` types, `COMPOSE chip <n>` taps a token (an insert is NOT idempotent, so the duplicate delivery is dropped BY NAME), `COMPOSE page` pages the tokens, `COMPOSE sent` draws the receipt state and SENDS NOTHING |
+| `DETAIL <n>` | session `n`'s detail card, or its ask screen, WITHOUT the keyboard over it - the only route to either from the Mac (`KBTEST msg` opens the keyboard over it). Refuses by name on no sessions, an out-of-range `n`, or another full-screen surface |
+| `COMPOSE` + `type <text>` / `chip <n>` / `page` / `keys` / `back` / `sent` / `recent <t>` / `off` | the reply panel over the first pending ask, then the draft, a token tap, the pager, the two SCREEN MOVES, the receipt state and the recents ring. `sent` and `recent` SEND NOTHING. `chip`/`page` dedupe the double delivery BY NAME (an insert is not idempotent); opening and the screen moves do not, and say why (they are). **Nothing here can tap a control** - see `KBBUBBLE` |
 | `THEME dark\|light` | which palette is live, so "confirm this reads in both themes" stops needing a person at the device. NOT persisted - a reboot restores the stored setting |
-| `DETAIL [n]` | opens session `n`'s detail card WITHOUT the keyboard - the only route to that screen from the Mac (`KBTEST msg` opens the keyboard over it). Refuses by name on no sessions, an out-of-range `n`, or another full-screen surface |
 | `KBPROBE` / `KBPROBE off` | per keystroke: the key the press ARMED, the key the lift COMMITTED, the pixel delta. Measures where fingers land versus where they lift; says NOTHING about whether the text was right |
 | `KBBUBBLE [r c]` / `KBBUBBLE off` | draws the magnified key bubble so a capture can see it - it otherwise exists only while a finger is down. Arms, never commits; declines DEL, which commits on press |
 | `SCREENSHOT` | PNG to `~/Deckhand-shots/` (0.4s on board 2, ~18s on board 1) |

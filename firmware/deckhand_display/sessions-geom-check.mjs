@@ -55,6 +55,9 @@ const SOURCE_FAULTS = [
   ["detailSigCache is reverted to 384, three bytes from silent truncation",
     "deckhand_display.ino", (t) => t.replace(/(char detailSigCache\[)\d+/, "$1384"),
     "at or above the 64-byte margin"],
+  ["the ask's input row goes back to promising a keyboard it no longer opens",
+    "sessions.ino", (t) => t.replace(/(ASK_OPT_H, ")REPLY TO THIS PROMPT(")/, "$1TYPE YOUR ANSWER$2"),
+    "no input-row label says TYPE"],
 ];
 if (SOURCE_FAULT_INDEX >= 0) {
   const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
@@ -3940,6 +3943,39 @@ for (const b of [1, 2]) {
   const titleInk = c.CONTENT_Y + c.ASK_TITLE_Y + 2 * 17;
   chk(optTop > titleInk,
       `worst-case option stack (${stack} x ${c.ASK_OPT_H}+${c.ASK_OPT_GAP}) tops at ${optTop}, below the ask title's 2 lines ending ${titleInk}`);
+  // ---- THE INPUT ROW'S LABELS, PARSED OUT OF THE BLOCK THAT DRAWS THEM ----
+  // Both the words and the LANE each one is drawn into come from
+  // drawAskDetail's own `if (askInputRows(idx))` block. Nothing here transcribes
+  // either, because this row's wording has already moved once: the second button
+  // said TYPE while it opened a keyboard, and since Task 11 of the compose plan
+  // it opens the compose surface at its ROOT - the reply panel, where the ask's
+  // own options and tokens are one tap and the keyboard is the sheet behind that
+  // panel's TYPE... button. A checker holding a copy of the old word would have
+  // passed straight through the rename, and a checker pairing a label with a
+  // hand-written lane would have passed a label moved to the other lane.
+  {
+    const askFn = fnSrc("void drawAskDetail(int idx) {");
+    const i = askFn.indexOf("if (askInputRows(idx))");
+    chk(i >= 0, "drawAskDetail carries the `if (askInputRows(idx))` input row");
+    const blk = i >= 0 ? askFn.slice(i) : "";
+    // Width argument and label captured together, so the pairing is the source's.
+    const rows = [...blk.matchAll(/uiButton\([^;]*?,\s*y,\s*(halfW|CARD_W),\s*ASK_OPT_H,\s*"([^"]*)"/g)]
+                 .map(x => [x[1], x[2]]);
+    chk(rows.length === 4,
+        `the input row draws 4 labels, each into a parsed lane (${rows.map(r => r[1]).join(" / ")})`);
+    const halfW = Math.trunc((c.CARD_W - 8) / 2);
+    for (const [laneName, s] of rows) {
+      const lane = laneName === "CARD_W" ? c.CARD_W : halfW;
+      // +8 for uiButton's own inset, the same margin the TYPE chip is asserted at.
+      chk(widthB(b, T_BODY, s) + 8 <= lane,
+          `input row "${s}" inks ${widthB(b, T_BODY, s)}px inside its ${lane}px ${laneName} lane`);
+    }
+    // The plain detail card's TYPE chip is a DIFFERENT button on a different
+    // screen and is deliberately untouched: a READY session has no ask, so no
+    // panel is built for it and that button really does open the keyboard.
+    chk(rows.length > 0 && !rows.some(([, s]) => /\bTYPE\b/.test(s)),
+        `no input-row label says TYPE - the button opens the reply panel (${rows.map(r => r[1]).join(" / ")})`);
+  }
   // Against TAP_MIN, not a literal 32 - board 2 does clear 46, but an assertion
   // that would still pass if it did not is decoration.
   m = `ask option ${c.ASK_OPT_H}px tall >= TAP_MIN ${c.TAP_MIN}`;
