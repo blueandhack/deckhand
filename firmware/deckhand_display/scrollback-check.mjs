@@ -305,8 +305,43 @@ if (rx) s(c.SCROLL_WIRE_CHUNK_BYTES < +rx[1],
   `structural: the chunk budget (${c.SCROLL_WIRE_CHUNK_BYTES}) fits the shared RX ring (${rx[1]})`);
 
 // The HOST measures the budget on the SERIALISED line, never on raw text length.
-const HOSTSRC = stripComments("../../host/index.mjs");
-const sbBody = body(HOSTSRC, "async function sendScrollback(id, filter, maxBytes)", "host/index.mjs");
+let HOSTSRC = stripComments("../../host/index.mjs");
+if (SELFTEST) {
+  const hf = process.env.SB_FAULT || "";
+  // The multi-device shape of the fault: the parameter list moved. The parse
+  // still SUCCEEDS, so the run must report that one fact and nothing else.
+  if (hf === "host-sig")
+    HOSTSRC = HOSTSRC.replace(/async function sendScrollback\([^)]*\)/, "async function sendScrollback(req)");
+  // And the harder half: the function is gone entirely. Before this, that was
+  // six failures; it must now be ONE, and it must be the parse that names it.
+  if (hf === "host-nosig")
+    HOSTSRC = HOSTSRC.replace(/async function sendScrollback\(/, "async function sendScrollbackRenamed(");
+}
+
+// A CHECKER MUST PARSE THE CONSTANT IT CERTIFIES, NEVER TRANSCRIBE IT - and this
+// file broke that rule for one commit, in the way the rule exists to prevent. The
+// signature was written out here as `(id, filter, maxBytes)`; the multi-device
+// work gave sendScrollback a fourth `link` parameter (a reply must go back to the
+// board that ASKED, not to "the USB port"); indexOf() then found nothing, body()
+// reported ONE honest "is findable" failure - and the five content assertions
+// underneath it, which take a null body, each reported a SECOND failure of their
+// own. Six red lines, five of them describing behaviour that was entirely intact,
+// none of them naming the actual event: the host's signature moved.
+//
+// So the signature is now PARSED out of index.mjs. `sendScrollback\(` cannot match
+// `sendScrollbackSince(`, which is the neighbouring function and appears FIRST in
+// the file. The parse is asserted BY NAME before anything reads a body, and every
+// assertion that depends on it is gated on it - because the mirror image of
+// `!/re/.test("")` passing vacuously is a parse failure cascading into five
+// unrelated-looking ones, and both hide the thing that actually happened.
+const sbSigM = /async function sendScrollback\(([^)]*)\)/.exec(HOSTSRC);
+s(sbSigM != null,
+  "structural: sendScrollback's signature is PARSED out of host/index.mjs, not transcribed - " +
+  "a transcribed one goes stale on the next parameter and takes five healthy assertions with it");
+const sbBody = sbSigM ? body(HOSTSRC, sbSigM[0], "host/index.mjs") : null;
+if (sbSigM)
+  s(/\bid\b/.test(sbSigM[1]) && /\bfilter\b/.test(sbSigM[1]),
+    `structural: sendScrollback still takes the request it is named for (parsed "${sbSigM[1]}")`);
 // THE BLE BUDGET IS A SEPARATE, MUCH SMALLER NUMBER, and the reason is not a
 // buffer: nothing flow-controls the radio, so a chunk is a BURST the device must
 // survive. 800 is the size of the ordinary tick payload, which crosses this link
@@ -346,19 +381,22 @@ if (hostChunk) s(+hostChunk[1] === c.SCROLL_WIRE_CHUNK_BYTES,
   "structural: the host's chunk budget equals the board header's");
 
 // The handshake itself: the host must WAIT rather than writing back to back.
-const sbBody2 = body(HOSTSRC, "async function sendScrollback(id, filter, maxBytes)", "host/index.mjs");
-present(sbBody2, /waitForScrollAck/,
+// Reads the SAME body the parse above produced: a second body() call over a
+// second transcribed signature was how one stale literal produced two failures.
+if (sbSigM) present(sbBody, /waitForScrollAck/,
   "structural: the host awaits a per-chunk ACK instead of writing back to back");
 s(/line\.startsWith\("SCROLLACK "\)/.test(HOSTSRC),
   "structural: the host resolves the device's SCROLLACK");
 s(/SCROLLACK %d/.test(SKETCH),
   "structural: the device sends SCROLLACK for each chunk it drains");
 
-present(sbBody, /JSON\.stringify/, "structural: the host builds the chunk envelope with JSON.stringify");
-present(sbBody, /byteLength/,
-  "structural: the host measures the chunk on the SERIALISED line, in BYTES");
-present(sbBody, /SCROLL_WIRE_CHUNK_BYTES|CHUNK_BYTES/,
-  "structural: the host bounds each chunk by the named budget");
+if (sbSigM) {
+  present(sbBody, /JSON\.stringify/, "structural: the host builds the chunk envelope with JSON.stringify");
+  present(sbBody, /byteLength/,
+    "structural: the host measures the chunk on the SERIALISED line, in BYTES");
+  present(sbBody, /SCROLL_WIRE_CHUNK_BYTES|CHUNK_BYTES/,
+    "structural: the host bounds each chunk by the named budget");
+}
 
 // A seq discontinuity CLEARS rather than assembling a transcript with a hole.
 // 1700, not 1400: the real block (comments stripped) runs to ~1530 chars - the
@@ -497,6 +535,12 @@ if (SELFTEST) {
     "seq-append":  /flags scrollFetchFailed rather than appending into a hole/,
     "no-reap":     /the drag loop reaps BLE links/,
     "no-activity": /the drag loop refreshes lastActivityMillis/,
+    // The rule this file broke: a TRANSCRIBED signature. The fault renames
+    // sendScrollback's parameters the way the multi-device work added `link`,
+    // and the run must report exactly that - a PARSE failure, by name - rather
+    // than six red lines about an ACK handshake that never moved.
+    "host-sig":    /still takes the request it is named for/,
+    "host-nosig":  /signature is PARSED out of host\/index\.mjs/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

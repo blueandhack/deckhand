@@ -3666,6 +3666,10 @@ async function openUsbLink(portPath, vid = "") {
 // OUTLIVES the splice, so a close/reopen cycle cannot turn "once" into a loop even
 // on a board whose port does go away.
 const HELLO_GRACE_MS = Number(process.env.DECKHAND_HELLO_GRACE_MS || 6000); // env override exists to EXERCISE this path
+// How long the board gets to answer WHOAMI before we fall back to the pulse. It
+// is a wire round trip and a printf, so it is short - but not so short that a
+// board busy repainting a tab misses its own window.
+const WHOAMI_WAIT_MS = Number(process.env.DECKHAND_WHOAMI_WAIT_MS || 1500);
 const RESET_PULSE_MS = 120;
 const MAX_PULSED_PATHS = 16;      // bounded: ports renumber, and this is not a history
 const usbPulsedPaths = new Map(); // portPath -> when, and it SURVIVES the link being spliced
@@ -3678,11 +3682,58 @@ function usbIsCh340(link) {
   return /usbserial|wchusbserial|SLAB_USBtoUART/i.test(link.path || "") && !/usbmodem/i.test(link.path || "");
 }
 function armHelloPulse(link) {
-  if (process.env.DECKHAND_NO_USB_RESET === "1") return;
   setTimeout(async () => {
     if (link.name || !usbLinks.includes(link)) return;
+    // ASK BEFORE REBOOTING. WHOAMI makes the board re-emit the exact line HELLO
+    // does (firmware announceHello(), one emitter, four callers), so the name we
+    // needed arrives without costing the user anything. That ordering is the
+    // whole point of this arm: asking is free and works on BOTH boards, while
+    // rebooting works on one board and throws away an open answer window, a
+    // fetched scrollback or an in-flight capture on it.
+    //
+    // It runs ABOVE the DECKHAND_NO_USB_RESET gate on purpose. That variable buys
+    // "do not reboot my board", not "leave it anonymous" - the anonymity was only
+    // ever the price of the escape hatch, and this arm stops charging it.
+    if (await sendToLink(link, "WHOAMI\n")) {
+      console.log(
+        `USB: ${link.id} has not said HELLO in ${HELLO_GRACE_MS / 1000}s (HELLO is a boot-only burst, ` +
+          `so a host that attached to an already-running board never hears it). Asking it WHOAMI and ` +
+          `waiting ${WHOAMI_WAIT_MS}ms before considering anything harsher.`
+      );
+      await new Promise((r) => setTimeout(r, WHOAMI_WAIT_MS));
+      if (!usbLinks.includes(link)) return;
+      if (link.name) {
+        console.log(`USB: ${link.id} answered WHOAMI and is ${link.name} - no reset was needed.`);
+        return;
+      }
+      // THE HOST CANNOT TELL THESE TWO APART, and saying so is the honest log.
+      // A board running firmware older than WHOAMI ignores an unknown command
+      // silently, and a board whose answer is merely still in flight is also
+      // silent - there is no negative acknowledgement on this wire and adding one
+      // would need the very firmware whose absence is in question. So the bounded
+      // wait IS the discriminator, and the fallback below has to stay for the
+      // older-firmware half of it.
+      console.log(
+        `USB: ${link.id} did not answer WHOAMI within ${WHOAMI_WAIT_MS}ms. That is either firmware older ` +
+          `than WHOAMI (which ignores an unknown command in silence) or an answer still in flight - ` +
+          `indistinguishable from here, so falling back to the older behaviour.`
+      );
+    } else {
+      console.log(
+        `USB: ${link.id} has no name and WHOAMI could not be written to it (the port is not writable), ` +
+          `so this host cannot ask which board it is. Falling back to the older behaviour.`
+      );
+    }
     // EVERY REFUSAL NAMES ITS CAUSE. These are checked here rather than at arm time
     // so they only ever print about a link that is genuinely still anonymous.
+    if (process.env.DECKHAND_NO_USB_RESET === "1") {
+      console.log(
+        `USB: ${link.id} is still anonymous and DECKHAND_NO_USB_RESET=1, so it will NOT be pulsed - ` +
+          `the documented choice of an anonymous link over a reboot. It cannot authenticate an answer ` +
+          `until it says HELLO.`
+      );
+      return;
+    }
     if (link.pulsed || usbPulsedPaths.has(link.path)) {
       console.log(
         `USB: ${link.id} still has no name, but ${link.path} has already been pulsed once, so it will NOT be ` +

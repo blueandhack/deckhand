@@ -367,6 +367,23 @@ bool remoteAnswerEnabled = true;
 char deviceName[20] = "Deckhand";
 String btMacAddress; // set once in setupBLE(), shown on the STATUS page
 
+// THE ONE PLACE "HELLO <name> v2" IS EMITTED. There are four callers now -
+// setup(), the 15s boot burst in loop(), the legacy-pairing upgrade nudge in
+// handleLine(), and the WHOAMI command - and until this existed each printf'd
+// its own copy of the format string. That string is a WIRE CONTRACT the host
+// parses ("HELLO <name> [v2]", and the v2 is what selects the per-Mac PROVISION
+// form): four copies is four chances for one to drift, and a drifted copy does
+// not fail loudly - the host simply never learns that board's name, and an
+// unnamed link cannot authenticate an answer.
+//
+// USB ONLY, deliberately. The host honours HELLO over USB alone, because a BLE
+// peer must not be able to steer which device the host thinks it is talking to;
+// BLE already knows the name it connected to. So a WHOAMI that arrives over BLE
+// still answers down the CABLE - which is the link that lacked a name.
+void announceHello() {
+  Serial.printf("HELLO %s v2\n", deviceName); // v2 = multi-pairing PROVISION
+}
+
 
 
 
@@ -3969,7 +3986,7 @@ void handleLine(const String& line) {
       static unsigned long lastUpgradeHello = 0;
       if (millis() - lastUpgradeHello > 5000) {
         lastUpgradeHello = millis();
-        Serial.printf("HELLO %s v2\n", deviceName);
+        announceHello();
       }
     }
     if (slot != activeHost) activeHost = slot;
@@ -5298,7 +5315,7 @@ void setup() {
   // Announce our unique BLE name to the host over USB so it pins BLE to this
   // exact device. Opening the USB port resets the ESP32, so this boot-time
   // line reliably reaches a host that connects at any time.
-  Serial.printf("HELLO %s v2\n", deviceName); // v2 = multi-pairing PROVISION
+  announceHello();
 
   drawWaitingScreen();
 }
@@ -5338,6 +5355,32 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     applyScreenRotation(); // calibration runs unflipped - restore the user's choice
     everReceived = false;
     drawWaitingScreen();
+  } else if (buf == "WHOAMI") {
+    // "Which board is on this cable?" - the host asks when a USB link is still
+    // anonymous after HELLO_GRACE_MS. HELLO is a BOOT-ONLY 15s burst, so a host
+    // that attached to an already-running board (its own restart, a watchdog
+    // relaunch, a cable replugged after the burst) never learned that link's
+    // name - and an unnamed link cannot be attributed to a paired device, so
+    // every ANSWER down it is refused as coming from an unknown device. Before
+    // this the host's only way to find out was to REBOOT the board into a fresh
+    // burst, which costs the user an open answer window or an in-flight capture,
+    // and which is not even available on board 2 (there the RTS sequence is
+    // esptool's reset and it drops the USB device outright).
+    //
+    // Reuses announceHello() rather than printing its own line: the host parses
+    // this text, and a second emitter is a second chance to drift from it.
+    //
+    // NO DUPLICATE GUARD, and that is a decision rather than an oversight. The
+    // host delivers every trigger-file command over BOTH transports, so a cabled
+    // board 2 sees this twice within milliseconds - the shape that once made one
+    // POWERPROBE print four refusal lines, and that KBTEST's refusal dedupe and
+    // POWERPROBE's probeActive exist for. But those are a REFUSAL and a
+    // MEASUREMENT; this is an idempotent ANNOUNCEMENT. The host's HELLO arm logs
+    // and re-pins only on a CHANGE, so the second copy costs one short line and
+    // alters nothing, while a guard would be state to keep correct for no gain -
+    // and would silence a genuine second ask, which is exactly the case that
+    // matters (a link that closed and reopened asks again, and must be answered).
+    announceHello();
 #if !BOARD_USES_TFT_ESPI
   } else if (buf == "SHIMBENCH") {
     // Board 2 only. Times a full-screen flush and a small dirty-rect flush,
@@ -6359,7 +6402,7 @@ void loop() {
   static unsigned long lastHelloMs = 0;
   if (millis() < 15000 && millis() - lastHelloMs > 2000) {
     lastHelloMs = millis();
-    Serial.printf("HELLO %s v2\n", deviceName); // v2 = multi-pairing PROVISION
+    announceHello();
     Serial.printf("BUILD %s %s\n", __DATE__, __TIME__);
   }
 

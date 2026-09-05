@@ -105,7 +105,8 @@ function buildSource(src) {
   const scanSlice = cut(src, 'let lastUsbScanSig = "";', "async function connectUsb()",
     ["async function scanUsbPorts()", "async function openUsbLink(portPath, vid = \"\")",
      "usbLinks.push(link);", "function armHelloPulse(link)", "usbPulsedPaths",
-     "function usbIsCh340(link)", "USB_OPEN_TIMEOUT_MS", "forgetBatteryFor(battKey)"],
+     "function usbIsCh340(link)", "USB_OPEN_TIMEOUT_MS", "forgetBatteryFor(battKey)",
+     "WHOAMI_WAIT_MS"],
     "scan / open / pulse");
   const scrollKeySlice = cut(src, "const SCROLL_REQ_DEDUP_MS", "const scrollAckWaiters",
     ["const scrollSenderKey", "function scrollReqDropped", "const scrollReqSeen"],
@@ -170,6 +171,11 @@ class SerialPort {
     this.writable = true;
     this.sets = [];          // every set({dtr,rts}) - this is how a pulse is observed
     this.writes = [];
+    // ONE ORDERED LOG OF BOTH. sets[] and writes[] each prove a thing happened
+    // and neither can prove WHICH CAME FIRST - and "ask before you reboot" is an
+    // ORDERING claim, not a pair of existence claims. A host that pulsed the board
+    // and then asked WHOAMI would satisfy both arrays and be exactly the defect.
+    this.ops = [];
     this._h = new Map();
     __opened.push(this);
     const mode = __openMode;
@@ -186,8 +192,8 @@ class SerialPort {
   }
   once(ev, fn) { return this.on(ev, fn); }
   emit(ev, arg) { for (const fn of [...(this._h.get(ev) ?? [])]) fn(arg); }
-  set(opts, cb) { this.sets.push(opts); cb(null); }
-  write(text) { this.writes.push(text); return true; }
+  set(opts, cb) { this.sets.push(opts); this.ops.push({ op: "set", opts }); cb(null); }
+  write(text) { this.writes.push(text); this.ops.push({ op: "write", text }); return true; }
 }
 
 ${primarySlice}
@@ -212,8 +218,10 @@ function fakePort(link) {
     destroyed: false,
     writable: true,
     sets: [],
-    write: (text) => __sent.push({ link, text }),
-    set: (opts, cb) => { p.sets.push(opts); cb(null); },
+    writes: [],
+    ops: [],
+    write: (text) => { p.writes.push(text); p.ops.push({ op: "write", text }); __sent.push({ link, text }); return true; },
+    set: (opts, cb) => { p.sets.push(opts); p.ops.push({ op: "set", opts }); cb(null); },
   };
   return p;
 }
@@ -250,7 +258,7 @@ export const api = {
   portFor: (p) => [...__opened].reverse().find((x) => x.path === p) ?? null,
   log: () => __log,
   clearLog: () => { __log.length = 0; },
-  HELLO_GRACE_MS, USB_OPEN_TIMEOUT_MS, MAX_BATT_DEVICES, MAX_PULSED_PATHS,
+  HELLO_GRACE_MS, WHOAMI_WAIT_MS, USB_OPEN_TIMEOUT_MS, MAX_BATT_DEVICES, MAX_PULSED_PATHS,
   scrollSenderKey, scrollReqDropped, scrollReqSeen, SCROLL_REQ_DEDUP_MS,
   listUsbCandidates, usbIdFor, viaKind, usbLinkFor, linkFor, sendToLink,
   liveLinks, broadcastToDevices, replyLinkFor, linkLabel,
@@ -295,6 +303,7 @@ const B2 = "Deckhand-C114";  // board 2, native USB CDC, /dev/tty.usbmodem1101
 // index.mjs, which is the only half a transcribed literal would not cover.
 const OPEN_TIMEOUT_MS = 40;
 process.env.DECKHAND_HELLO_GRACE_MS = "0";
+process.env.DECKHAND_WHOAMI_WAIT_MS = "5";
 process.env.DECKHAND_USB_OPEN_TIMEOUT_MS = String(OPEN_TIMEOUT_MS);
 delete process.env.DECKHAND_NO_USB_RESET;
 
@@ -685,12 +694,36 @@ async function main({ indexPath = INDEX } = {}) {
       { path: "/dev/cu.usbserial-10", vendorId: "1a86" },
     ]);
     await api.scanUsbPorts();
-    await settle(20); // HELLO_GRACE_MS is 0 here, so the pulse has fired if it is going to
+    // HELLO_GRACE_MS is 0 and DECKHAND_WHOAMI_WAIT_MS is 5, so by now the host has
+    // asked, waited, and pulsed if it was going to.
+    await settle(120);
     const b1port = api.portFor("/dev/cu.usbserial-10");
     const b2port = api.portFor("/dev/cu.usbmodem1101");
     ok("PULSE: both boards' ports were actually opened (asserted first, so nothing below " +
        "passes vacuously over a port that is not there)",
       !!b1port && !!b2port);
+
+    // ---- ASK BEFORE REBOOTING ----
+    // HELLO is a boot-only 15s burst, so a host that attached to an already-running
+    // board never hears it, and an unnamed link cannot authenticate an ANSWER. The
+    // old cure was to reboot the board into a fresh burst; asking costs nothing and
+    // works on both boards, and on board 2 the reboot was never available at all.
+    const firstWhoami = (port) => port.ops.findIndex((o) => o.op === "write" && o.text === "WHOAMI\n");
+    const firstSet = (port) => port.ops.findIndex((o) => o.op === "set");
+    ok("WHOAMI: an anonymous CH340 link is ASKED its name",
+      !!b1port && firstWhoami(b1port) >= 0);
+    ok("WHOAMI: an anonymous native-USB link is asked too - it is the board the pulse can " +
+       "never help, so asking is its ONLY route out of anonymity",
+      !!b2port && firstWhoami(b2port) >= 0);
+    ok("WHOAMI: the ask comes BEFORE the reset pulse on the same port - the ordering IS the " +
+       "fix, since a reboot costs an open answer window and an ask costs one line",
+      !!b1port && firstSet(b1port) >= 0 && firstWhoami(b1port) < firstSet(b1port));
+    ok("WHOAMI: and the ask is logged with the reason HELLO was never heard, so a silent " +
+       "board and a board nobody asked are told apart from the Mac",
+      api.log().some((l) => /Asking it WHOAMI/.test(l) && /boot-only/.test(l)));
+    ok("WHOAMI: an unanswered ask NAMES THE AMBIGUITY it cannot resolve - firmware older " +
+       "than WHOAMI ignores it in silence, and an answer in flight is also silence",
+      api.log().some((l) => /did not answer WHOAMI/.test(l) && /older/.test(l)));
 
     ok("PULSE: board 1's unnamed CH340 link IS pulsed - node does not drive that chip's " +
        "modem lines, so without this the board never announces its name and cannot answer",
@@ -708,13 +741,37 @@ async function main({ indexPath = INDEX } = {}) {
     api.clearLog();
     b1port?.emit("close");
     await api.scanUsbPorts();
-    await settle(20);
+    await settle(120); // the reopened link is asked WHOAMI first, and only then refused the pulse
     const again = api.portFor("/dev/cu.usbserial-10");
     ok("PULSE: a link closed and REOPENED on the same path is not pulsed a second time - " +
        "link.pulsed dies with the link, the path record outlives it",
       !!again && again !== b1port && again.sets.length === 0);
     ok("PULSE: and that refusal names its cause too",
       api.log().some((l) => /already been pulsed once/.test(l)));
+
+    // A BOARD THAT ANSWERS IS NEVER REBOOTED. The port answers WHOAMI the way real
+    // firmware does - by naming itself on the link - rather than the test poking
+    // link.name in from outside, so the arm under test is the one that reads it.
+    api.clearLinks();
+    api.clearPulsedPaths();
+    api.clearLog();
+    const answers = api.addLink("usb:usbserial-10", ""); // a CH340: the pulse IS available here
+    const rawWrite = answers.port.write;
+    answers.port.write = (text) => {
+      const r = rawWrite(text);
+      if (text === "WHOAMI\n") answers.name = B1;
+      return r;
+    };
+    api.armHelloPulse(answers);
+    await settle(120);
+    ok("WHOAMI: a board that answers is NOT pulsed - the whole point, since it is a CH340 " +
+       "and every older rule would have rebooted it",
+      answers.port.sets.length === 0);
+    ok("WHOAMI: and the answer is logged as such, naming the board and saying no reset was needed",
+      api.log().some((l) => /answered WHOAMI/.test(l) && l.includes(B1)));
+    ok("WHOAMI: an answered ask leaves no reset refusal behind either - a named board is " +
+       "neither rebooted nor reported as unauthenticatable",
+      !api.log().some((l) => /Pulsing RTS/.test(l) || /not a CH340/.test(l)));
 
     // A link that HAS a name is never pulsed at all, and neither is one that has
     // already been spliced out. Armed directly so the grace period is not a race.
@@ -736,14 +793,21 @@ async function main({ indexPath = INDEX } = {}) {
 
     api.clearLinks();
     api.clearPulsedPaths();
+    api.clearLog();
     const off = api.addLink("usb:usbserial-10", "");
     process.env.DECKHAND_NO_USB_RESET = "1";
     api.armHelloPulse(off);
+    await settle(120);
     delete process.env.DECKHAND_NO_USB_RESET;
-    await settle(20);
     ok("PULSE: DECKHAND_NO_USB_RESET=1 turns it off entirely - the documented escape hatch " +
        "for anyone who would rather have an anonymous link than a reboot",
       off.port.sets.length === 0);
+    ok("WHOAMI: DECKHAND_NO_USB_RESET=1 still ASKS - that variable buys \"do not reboot my " +
+       "board\", and the anonymity was only ever the price of the escape hatch",
+      off.port.writes.includes("WHOAMI\n"));
+    ok("WHOAMI: and that refusal names its cause too, rather than the silent early return " +
+       "it used to be",
+      api.log().some((l) => /DECKHAND_NO_USB_RESET=1/.test(l) && /NOT be pulsed/.test(l)));
   }
 
   // ---- 10. A FAILED, HUNG OR THROWING OPEN RELEASES THE PATH ----
@@ -979,6 +1043,37 @@ async function main({ indexPath = INDEX } = {}) {
     ok("STRUCTURE: the pulse is skipped once the link has a name",
       /if \(link\.name \|\|/.test(pulse));
 
+    // ---- WHOAMI: read out of armHelloPulse's OWN body ----
+    // A rule a neighbouring line can satisfy is not a rule, and "the host asks
+    // before it reboots" is entirely about where the ask sits inside THIS body.
+    const askAt = pulse.indexOf('sendToLink(link, "WHOAMI');
+    ok("STRUCTURE: armHelloPulse ASKS the board its name, in its own body", askAt >= 0);
+    const ch340At = pulse.indexOf("usbIsCh340(link)");
+    const rtsAt = pulse.indexOf("dtr: false, rts: true");
+    ok("STRUCTURE: the ask is asserted findable BEFORE anything is measured against it, so " +
+       "no ordering assertion below can pass over a missing ask",
+      askAt >= 0 && ch340At >= 0 && rtsAt >= 0);
+    ok("STRUCTURE: the WHOAMI ask precedes the CH340 gate and the RTS pulse in the source - " +
+       "asking is free and works on both boards, rebooting works on one and costs a session",
+      askAt >= 0 && askAt < ch340At && askAt < rtsAt);
+    ok("STRUCTURE: the ask is bounded by a WAIT rather than awaited forever - an unanswered " +
+       "WHOAMI must fall through, not hang the arm",
+      /WHOAMI_WAIT_MS/.test(pulse) && /setTimeout\(r, WHOAMI_WAIT_MS\)/.test(pulse));
+    ok("STRUCTURE: an ANSWERED ask returns before the fallback, so a named board is never " +
+       "rebooted",
+      /if \(link\.name\) \{[\s\S]{0,240}?return;/.test(pulse));
+    ok("STRUCTURE: the FALLBACK IS STILL REACHABLE - the unanswered arm falls through to the " +
+       "CH340 gate rather than returning, because firmware older than WHOAMI never answers",
+      askAt >= 0 && !/did not answer WHOAMI[\s\S]{0,600}?\n      return;/.test(pulse));
+    ok("STRUCTURE: the unanswered path names its cause, and names it as an AMBIGUITY the host " +
+       "cannot resolve (old firmware and an answer in flight are both silence)",
+      /did not answer WHOAMI/.test(pulse) && /indistinguishable/.test(pulse));
+    const whoWaitM = /const WHOAMI_WAIT_MS = Number\(process\.env\.DECKHAND_WHOAMI_WAIT_MS \|\| (\d+)\)/.exec(src);
+    ok("STRUCTURE: WHOAMI_WAIT_MS's default is PARSED out of index.mjs", !!whoWaitM);
+    ok(`STRUCTURE: the ask gets a REAL window before the fallback (parsed ${whoWaitM ? whoWaitM[1] : "nothing"}ms) - ` +
+       "the harness collapses it to 5ms, which is the half a transcribed literal would not cover",
+      !!whoWaitM && Number(whoWaitM[1]) >= 250);
+
     const trigger = src.slice(src.indexOf("// FANNED OUT TO EVERY DEVICE"));
     ok("STRUCTURE: a device command is broadcast once per link and the log NAMES the targets - " +
        "silence and \"impossible here\" look identical from the Mac",
@@ -1093,6 +1188,26 @@ async function selftest() {
     ["the once-only guard goes back to link.pulsed alone, which DIES WITH THE LINK - " +
      "a close and reopen re-pulses the same board",
      (s) => s.replace("    if (link.pulsed || usbPulsedPaths.has(link.path)) {", "    if (link.pulsed) {")],
+    // ---- WHOAMI: the host asks before it reboots ----
+    ["the host stopped asking WHOAMI and went straight to the reset - board 2 is then " +
+     "unreachable by any means and stays anonymous until someone reboots it by hand",
+     (s) => s.replace('    if (await sendToLink(link, "WHOAMI\\n")) {', "    if (false) {")],
+    ["the CH340 gate moved AHEAD of the ask, so the one board the pulse can never help is " +
+     "also the one board that is never asked",
+     (s) => s.replace('    if (await sendToLink(link, "WHOAMI\\n")) {',
+                      '    if (!usbIsCh340(link)) { console.log("not a CH340"); return; }\n' +
+                      '    if (await sendToLink(link, "WHOAMI\\n")) {')],
+    ["the WHOAMI answer is ignored, so a board that just named itself is rebooted anyway",
+     (s) => s.replace("      if (link.name) {\n        console.log(`USB: ${link.id} answered WHOAMI",
+                      "      if (false) {\n        console.log(`USB: ${link.id} answered WHOAMI")],
+    ["an unanswered WHOAMI returns instead of falling through - firmware older than WHOAMI " +
+     "never answers, so board 1 loses the reset that was its only route to a name",
+     (s) => s.replace("indistinguishable from here, so falling back to the older behaviour.`\n      );\n",
+                      "indistinguishable from here, so falling back to the older behaviour.`\n      );\n      return;\n")],
+    ["WHOAMI_WAIT_MS's default went to 0 - the board is asked and reset in the same tick, " +
+     "which is the old behaviour wearing the new code's name",
+     (s) => s.replace("Number(process.env.DECKHAND_WHOAMI_WAIT_MS || 1500)",
+                      "Number(process.env.DECKHAND_WHOAMI_WAIT_MS || 0)")],
     ["the pulse fires even once the link HAS a name, rebooting a healthy board",
      (s) => s.replace("    if (link.name || !usbLinks.includes(link)) return;",
                       "    if (!usbLinks.includes(link)) return;")],

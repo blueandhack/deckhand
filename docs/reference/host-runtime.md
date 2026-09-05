@@ -35,6 +35,37 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   always worked. With two, an unnamed link resolves to `""`: the old fallback would have
   attributed one board's `ANSWER` to the other, and although the HMAC then fails closed, the
   refusal would name the wrong subject - the defect class this repo keeps paying for.
+- **THE HOST ASKS BEFORE IT REBOOTS: `WHOAMI`.** `HELLO` is a boot-only 15s burst, so a
+  host that attaches to an already-running board - its own restart, a watchdog relaunch, a
+  cable replugged after the burst - never learns that link's name, and an unnamed link
+  cannot be attributed to a paired device: every `ANSWER` down it is refused as coming from
+  an unknown device. **Measured on the desk before this existed:** board 1 named
+  (`[device/usb:Deckhand-0528]`) and board 2 anonymous (`[device/usb:usbmodem1101]`) at the
+  same instant, board 2 saved only by its BLE link also being live. The reset pulse below
+  was the only cure and it is available on board 1 alone, so board 2 had none at all.
+  A link with no name after `HELLO_GRACE_MS` is now sent `WHOAMI` and given
+  `WHOAMI_WAIT_MS` (1500ms, `DECKHAND_WHOAMI_WAIT_MS` overrides it) to answer. The firmware
+  re-emits the identical `HELLO <name> v2` line through `announceHello()` - **one emitter,
+  four callers** (`setup()`, the boot burst, the legacy-pairing upgrade nudge, `WHOAMI`),
+  because that string is a wire contract the host parses and a second copy of it is a second
+  chance to drift. **Asking is free and works on both boards; rebooting works on one board
+  and costs the user their session**, which is why the ask comes first and the pulse is now
+  only the fallback. It runs ABOVE the `DECKHAND_NO_USB_RESET` gate too: that variable buys
+  "do not reboot my board", and the anonymity was only ever the price of the escape hatch.
+  **THE HOST CANNOT TELL "no answer yet" FROM "this firmware has no `WHOAMI`", and the log
+  says so.** Firmware older than `WHOAMI` ignores an unknown command in silence, and an
+  answer still in flight is also silence; there is no negative acknowledgement on this wire
+  and adding one would need the very firmware whose absence is in question. So the bounded
+  wait IS the discriminator, the fallback below MUST stay for the older-firmware half, and
+  the unanswered log names the ambiguity rather than asserting a cause it does not know.
+  **Duplicate delivery is deliberately unguarded**: a cabled board 2 receives every
+  trigger-file command twice, and `WHOAMI` is an idempotent ANNOUNCEMENT rather than a
+  refusal (`KBTEST`) or a measurement (`POWERPROBE`) - the host's `HELLO` arm logs and
+  re-pins only on a CHANGE, so the second copy costs one short line. A guard would also
+  silence a genuine second ask from a link that closed and reopened.
+  **Verified on the live hardware**, both boards flashed and the host restarted against
+  boards that had been up for hours: both named within the grace period, no reset, and the
+  "not a CH340" refusal did not fire.
 - **AN UNNAMED LINK CANNOT ANSWER, so the name is MADE to arrive.** `HELLO` is a boot-only
   15-second burst, and the firmware's own comment explains why that was always enough:
   *"Opening the USB port resets the ESP32, so this boot-time line reliably reaches a host
@@ -48,6 +79,11 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   it end to end (`has not said HELLO in 0.3s ... Pulsing RTS` -> `usb:usbserial-10 is
   Deckhand-0528`). `DECKHAND_NO_USB_RESET=1` disables it for anyone who would rather have an
   anonymous link than a reboot; `DECKHAND_HELLO_GRACE_MS` exists to exercise the path.
+  **This is now the FALLBACK, not the first move** - `WHOAMI` is tried first (above) and the
+  pulse is reached only when the ask goes unanswered. It is kept rather than replaced because
+  a board flashed with firmware older than `WHOAMI` will never answer, and on board 1 the
+  reset is that board's only remaining route to a name. Every refusal on the way still names
+  its cause, including `DECKHAND_NO_USB_RESET=1`, which used to return in silence.
 - **THE PULSE IS FOR BOARD 1 ONLY, gated on the CH340's vendor id.** It first shipped
   ungated, and the comment claiming it could not power-cycle a board forever was wrong on
   board 2. `{dtr:false, rts:true}` is ALSO esptool's USB-Serial-JTAG reset sequence, which

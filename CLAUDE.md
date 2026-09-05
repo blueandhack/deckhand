@@ -239,6 +239,7 @@ look identical.
 | `AUDIOPROBE` / `TONETEST [vol]` / `TONELADDER` | a ladder of claims: on the bus / configured and playing / find the audible floor |
 | `SCROLLFETCH` / `SCROLLOPEN` / `SCROLLTO [line]` / `SCROLLPERF [top\|code\|line]` / `SCROLLCLOSE` | board 2 transcript: fetch without drawing, open, park, measure, close |
 | `BLEMTU` | board 2: the negotiated ATT MTU per link |
+| `WHOAMI` | re-emits the boot `HELLO <name> v2` line on demand, over USB. Both boards. The host sends it to an anonymous link before considering a reset - `HELLO` is a boot-only burst, so a host that attached to an already-running board otherwise had to REBOOT it to learn its name |
 | `MULTITEST <n>` / `PAIRVECTOR` | inject a synthetic second Mac; check the pairing crypto against RFC 7748 |
 
 **`SCROLLPERF` and `SCROLLTO` are separate on purpose.** `SCROLLPERF` times twenty frames of
