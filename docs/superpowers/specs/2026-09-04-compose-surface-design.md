@@ -327,15 +327,24 @@ buttons.
 3. whitespace-free tokens containing `/` (paths)
 4. quoted spans
 
-Then dedupe, preserve first-appearance order, drop anything over 32 bytes, cap at 4.
+Then dedupe, preserve first-appearance order, drop anything over **48 bytes**, cap at 4.
+
+**The cap was 32 and that was wrong.** 32 matched `askOpts[4][34]`'s label cap, which was a tidy
+symmetry and nothing more — and it drops exactly the tokens this feature exists to make typeable.
+`/Users/yujia/projects/deckhand/build` is 36 bytes; `firmware/deckhand_display/keyboard.ino`, a
+path this plan edits constantly, is 38. A cap that silently discards those defeats the case the
+spec itself names as the hardest thing to type on this device. 48 covers every path above except
+a 59-byte docs path, at a stated cost of **384 more bytes of DRAM**.
 
 **Wire:** a `chips` array on the existing ask JSON, beside `detail` and `opts`. **The ask line's
 headroom must be measured in task 1, not assumed** — `askDetail[1424]` already dominates that
 line and 4 x 32 bytes plus JSON overhead is roughly 160 more.
 
-**Firmware:** `char askChips[4][34]` on `SessionInfo`, matching `askOpts[4][34]`'s 32-char cap
-so the two do not need separate rules. **DRAM cost, stated the way the option-descriptions cap
-was:** `4 x 34 x MAX_SESSIONS(6)` = **816 bytes**, against board 1's ~26 KB of free heap.
+**Firmware:** `char askChips[4][50]` on `SessionInfo` — 48 bytes plus a NUL, deliberately NOT
+matching `askOpts[4][34]`. **DRAM cost, stated the way the option-descriptions cap was:**
+`4 x 50 x MAX_SESSIONS(6)` = **1,200 bytes**, against board 1's ~26 KB of free heap — 4.5% of it,
+up from 3.1% at the 32-byte cap. The 384-byte difference buys the absolute paths the reply panel
+exists to spare you typing.
 
 **Recents:** a global ring of 4 x 150 bytes = 600 bytes, RAM only, not per session.
 

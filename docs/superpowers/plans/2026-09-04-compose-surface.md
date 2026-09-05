@@ -757,7 +757,7 @@ No firmware in this task. It is pure, testable, and shippable on its own: the ho
 - Create: `host/ask-chips.mjs`, `host/ask-chips-check.mjs`
 
 **Interfaces:**
-- Produces: `export function askChips(detail, opts)` returning `string[]` of at most `CHIP_MAX` entries, each at most `CHIP_BYTES` bytes, ASCII only. `export const CHIP_MAX = 4`, `export const CHIP_BYTES = 32`. Consumed by Task 9.
+- Produces: `export function askChips(detail, opts)` returning `string[]` of at most `CHIP_MAX` entries, each at most `CHIP_BYTES` bytes, ASCII only. `export const CHIP_MAX = 4`, `export const CHIP_BYTES = 48`. Consumed by Task 9.
 
 - [ ] **Step 1: Write the checker first, with the cases the spec names**
 
@@ -852,7 +852,7 @@ task report."
 
 - [ ] **Step 1: MEASURE the ask line's headroom before adding to it**
 
-The spec says this must be measured, not assumed. `askDetail` is capped at 1400 characters by the hook and `SessionInfo.askDetail` is `[1424]`. Find the line buffer the ask payload is parsed into, print the longest ask line the host currently emits, and add `CHIP_MAX * (CHIP_BYTES + 4)` plus JSON overhead — about 160 bytes. **If the headroom is not there, stop and report**: the options are a separate `CHIPS` line (the shape `SCROLLFETCH` already uses for a bounded sequence) or a smaller cap, and both are design changes rather than implementation details.
+The spec says this must be measured, not assumed. `askDetail` is capped at 1400 characters by the hook and `SessionInfo.askDetail` is `[1424]`. Find the line buffer the ask payload is parsed into, print the longest ask line the host currently emits, and add `CHIP_MAX * (CHIP_BYTES + 4)` plus JSON overhead — about 230 bytes. **If the headroom is not there, stop and report**: the options are a separate `CHIPS` line (the shape `SCROLLFETCH` already uses for a bounded sequence) or a smaller cap, and both are design changes rather than implementation details.
 
 - [ ] **Step 2: Declare the buffer, with the DRAM arithmetic in the comment**
 
@@ -861,7 +861,7 @@ The spec says this must be measured, not assumed. `askDetail` is capped at 1400 
 // only draws buttons. [34] matches askOpts[4][34]'s 32-char cap so the two need
 // no separate rule. DRAM, stated the way the option-descriptions cap is:
 // 4 x 34 x MAX_SESSIONS(6) = 816 bytes, against this board's ~26KB of free heap.
-char askChips[4][34];
+char askChips[4][50];
 uint8_t askChipCount;
 ```
 
