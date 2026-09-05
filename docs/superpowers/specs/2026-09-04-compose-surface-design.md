@@ -413,7 +413,7 @@ proves the algorithm and binds nothing**, so structural and mirror halves report
 
 ## Costs
 
-- **Board 1's binary and RAM both move.** 816 bytes of chips plus 600 of recents plus the new
+- **Board 1's binary and RAM both move.** 1,200 bytes of chips plus 600 of recents plus the new
   screen, on a board with ~26 KB free.
 - **A second surface, and a state that did not exist.** The `kbActive` widening is where the
   risk is.

@@ -793,7 +793,7 @@ The ordering matters and is the same rule `host/wire-bytes-check.mjs` already en
 
 - [ ] **Step 3: PARSE the firmware's buffer, do not restate 32**
 
-Task 9 adds `char askChips[4][34]` to `SessionInfo`. Until then this assertion fails by name, which is correct. Follow `host/ask-optdescs-check.mjs:88` exactly:
+Task 9 adds `char askChips[4][50]` to `SessionInfo`. Until then this assertion fails by name, which is correct. Follow `host/ask-optdescs-check.mjs:88` exactly:
 
 ```js
 const fwSrc = fs.readFileSync("firmware/deckhand_display/deckhand_display.ino", "utf8");
@@ -848,7 +848,7 @@ task report."
 
 **Interfaces:**
 - Consumes: `askChips`, `CHIP_MAX`, `CHIP_BYTES` from Task 8.
-- Produces: `char askChips[4][34]` and `uint8_t askChipCount` on `SessionInfo`; `ask["chips"]` on the wire. Consumed by Tasks 10 and 12.
+- Produces: `char askChips[4][50]` and `uint8_t askChipCount` on `SessionInfo`; `ask["chips"]` on the wire. Consumed by Tasks 10 and 12.
 
 - [ ] **Step 1: MEASURE the ask line's headroom before adding to it**
 
@@ -860,7 +860,7 @@ The spec says this must be measured, not assumed. `askDetail` is capped at 1400 
 // Tokens lifted out of the ask by the HOST (host/ask-chips.mjs), so this board
 // only draws buttons. [34] matches askOpts[4][34]'s 32-char cap so the two need
 // no separate rule. DRAM, stated the way the option-descriptions cap is:
-// 4 x 34 x MAX_SESSIONS(6) = 816 bytes, against this board's ~26KB of free heap.
+// 4 x 50 x MAX_SESSIONS(6) = 1,200 bytes, against this board's ~26KB of free heap.
 char askChips[4][50];
 uint8_t askChipCount;
 ```
@@ -895,9 +895,10 @@ Expected: all exit 0, and `ask-chips-check` no longer reports the missing buffer
 git add host/ firmware/
 git commit -m "Ship the ask's tokens to the device
 
-ask['chips'] beside ask['opts'], into char askChips[4][34] - the same 32-char
-cap askOpts uses, so the two need no separate rule. 4 x 34 x MAX_SESSIONS(6) =
-816 bytes of DRAM against board 1's ~26KB of free heap.
+ask['chips'] beside ask['opts'], into char askChips[4][50] - 48 bytes plus a
+NUL, deliberately NOT askOpts[4][34]'s 32, which dropped the absolute paths
+chips exist to supply. 4 x 50 x MAX_SESSIONS(6) = 1,200 bytes of DRAM against
+board 1's ~26KB of free heap.
 
 The ask line's headroom was MEASURED before adding to it, not assumed; numbers
 in the task report. Nothing draws them yet.
@@ -1261,6 +1262,6 @@ implied."
 
 **One gap found and closed:** the spec's `CLR` control (defect 7) had no task; it is now Task 10 Step 3's draft line, drawn as part of the panel.
 
-**Naming, checked across tasks.** `uiKeyCap` (Task 2) is called by Tasks 4, 6, 7. `uiActionRow` (Task 3) is called by Tasks 10, 11. `kbCaret` (Task 5) is read by Tasks 7, 10, 11. `kbPage` (Task 4) replaces `kbSymbols` everywhere and is read by Task 7's `hit()`. `askChips`/`CHIP_MAX`/`CHIP_BYTES` (Task 8) are consumed by Task 9 under those exact names, and `SessionInfo.askChips[4][34]` is what Task 8's checker parses. `composeActive`/`composeScreen` (Task 11) retire `kbActive`, and Task 11 Step 5 asserts the old name is gone from all three sources so two names for one state cannot survive.
+**Naming, checked across tasks.** `uiKeyCap` (Task 2) is called by Tasks 4, 6, 7. `uiActionRow` (Task 3) is called by Tasks 10, 11. `kbCaret` (Task 5) is read by Tasks 7, 10, 11. `kbPage` (Task 4) replaces `kbSymbols` everywhere and is read by Task 7's `hit()`. `askChips`/`CHIP_MAX`/`CHIP_BYTES` (Task 8) are consumed by Task 9 under those exact names, and `SessionInfo.askChips[4][50]` is what Task 8's checker parses. `composeActive`/`composeScreen` (Task 11) retire `kbActive`, and Task 11 Step 5 asserts the old name is gone from all three sources so two names for one state cannot survive.
 
 **Ordering.** Task 1 fails by name until Tasks 2, 3, 6 and 10 land, which is stated in its own README and is the binding working. Task 8's three firmware assertions fail until Task 9, also stated. Nothing else depends on a name that does not yet exist.
