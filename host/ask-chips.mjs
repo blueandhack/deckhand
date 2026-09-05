@@ -158,7 +158,7 @@ export function askChips(detail, opts = []) {
   for (const { value } of candidates) {
     if (seen.has(value)) continue;
     seen.add(value);
-    if (skip.has(value.toLowerCase())) continue;
+    if (skip.has(value.trim().toLowerCase())) continue;
     if (Buffer.byteLength(value, "utf8") > CHIP_BYTES) continue;
     chips.push(value);
     if (chips.length >= CHIP_MAX) break;

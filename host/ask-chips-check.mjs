@@ -154,6 +154,17 @@ function checkCap(fn, label) {
      "opts defaults to [] when omitted entirely");
 }
 
+// opts is trimmed before comparison (`.trim().toLowerCase()`); a chip
+// candidate must be trimmed the same way or a quoted span that happens to
+// carry the delimiter's own whitespace ("Allow " with a trailing space,
+// captured verbatim by DQUOTE_RE) escapes suppression by a whitespace
+// technicality and duplicates a button already on screen.
+{
+  const got = askChips('Say "Allow " now', ["Allow"]);
+  ok(JSON.stringify(got) === JSON.stringify([]),
+     `OPTS SUPPRESSION (whitespace): a chip matching an option label except for surrounding whitespace ("Allow ") is still suppressed, got ${JSON.stringify(got)}`);
+}
+
 // ---------------------------------------------------------------------------
 // A real ask shape, sampled from claude-hooks/fixtures/codex-permission-
 // request.json's tool_input.command - see the task report for why this
@@ -166,9 +177,19 @@ function checkCap(fn, label) {
      `REAL-SHAPE (perm fixture): ${JSON.stringify(detail)} -> ${JSON.stringify(got)}`);
 }
 
-// Empty result is a valid result, not a crash and not a placeholder.
-ok(Array.isArray(askChips("", [])) && askChips("", []).length === 0, "EMPTY: empty detail yields []");
-ok(Array.isArray(askChips(undefined, [])) && askChips(undefined, []).length === 0, "EMPTY: undefined detail yields [], not a throw");
+// Empty result is a valid result, not a crash and not a placeholder. Call
+// once per input and reuse the result - the previous version called
+// askChips twice per assertion (once inside Array.isArray(...), again for
+// .length), doubling the work for no reason and risking the two calls
+// silently diverging if the function were ever not pure.
+{
+  const gotEmpty = askChips("", []);
+  ok(Array.isArray(gotEmpty) && gotEmpty.length === 0, "EMPTY: empty detail yields []");
+}
+{
+  const gotUndef = askChips(undefined, []);
+  ok(Array.isArray(gotUndef) && gotUndef.length === 0, "EMPTY: undefined detail yields [], not a throw");
+}
 
 // ---------------------------------------------------------------------------
 // STEP 2: extraction runs AFTER toAscii, so the byte cap is exact.
@@ -283,6 +304,24 @@ for (const f of pendingFailures) console.log(`  ${f}`);
 // (also mutated) CHIP_MAX - that would be circular and could never fail. It
 // compares against the literal 4 chips CAP_EXPECTED already asserts above,
 // which is the real, external expectation this repo actually wants.
+//
+// A previous version stopped there and gated success ONLY on `caught`. Two
+// defects followed from that:
+//   - a real, unrelated failure from the base run above (STEP 1-3) was
+//     printed in the Report section but never affected `--selftest`'s exit
+//     code, so `--selftest` could exit 0 while genuine bugs sat unaddressed.
+//   - "the cap assertion, and only it, must catch this" was asserted in a
+//     console.log and never tested: nothing re-ran the OTHER assertions
+//     against the mutated module to confirm the fault stayed confined to the
+//     cap. A prior sanity check here (`bad.CHIP_MAX === 9`) could not
+//     independently fail anyway - the `mutated === MOD_SRC` guard above it
+//     already proves a replacement landed, and "export const CHIP_MAX = 4;"
+//     appears exactly once in ask-chips.mjs, so reaching this point already
+//     guarantees bad.CHIP_MAX is 9. It has been replaced with checks that
+//     can actually fail on their own.
+// Both are fixed below: the exit code now depends on the base run's real
+// failures too, and on the mutated module's BEHAVIOUR staying identical to
+// the real module everywhere BRIEF_CASES exercises it except the cap.
 // ---------------------------------------------------------------------------
 async function selftest() {
   console.log("\nselftest: raising CHIP_MAX to 9 in a mutated copy of ask-chips.mjs.");
@@ -307,14 +346,42 @@ async function selftest() {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 
-  ok(bad.CHIP_MAX === 9, "selftest sanity: the mutated module really does report CHIP_MAX=9");
-
   const r = checkCap(bad.askChips, "MUTATED module, CHIP_MAX=9");
   const caught = !r.passed;
   console.log(caught
     ? `selftest passed: the cap assertion ("${r.label}") FAILS by name against the CHIP_MAX=9 module - got ${JSON.stringify(r.got)}, expected ${JSON.stringify(CAP_EXPECTED)}`
     : `selftest FAILED: raising CHIP_MAX to 9 did not make the cap assertion fail - it is blind to this bug`);
-  process.exit(caught ? 0 : 1);
+
+  // "and only it": CHIP_BYTES must not have moved (the replace targets only
+  // the CHIP_MAX declaration's own line), and every BRIEF_CASES input - none
+  // of which depends on CHIP_MAX - must still produce its real-module answer
+  // under the mutated module. If either check fires, the fault leaked beyond
+  // the cap and the console.log claim above was false.
+  let isolated = true;
+  if (bad.CHIP_BYTES !== CHIP_BYTES) {
+    isolated = false;
+    console.log(`selftest FAILED: "and only it" is false - CHIP_BYTES moved too (${CHIP_BYTES} -> ${bad.CHIP_BYTES}), the fault is not confined to the cap`);
+  }
+  for (const [i, [input, want]] of BRIEF_CASES.entries()) {
+    const got = bad.askChips(input, []);
+    if (JSON.stringify(got) !== JSON.stringify(want)) {
+      isolated = false;
+      console.log(`selftest FAILED: "and only it" is false - BRIEF_CASES[${i}] ${JSON.stringify(input)} diverged under the mutation: expected ${JSON.stringify(want)}, got ${JSON.stringify(got)}`);
+    }
+  }
+  if (isolated) {
+    console.log('selftest passed: "and only it" holds - CHIP_BYTES and every BRIEF_CASES input are unaffected by the CHIP_MAX=9 mutation');
+  }
+
+  // The base run above (STEP 1-3) may have left real, non-pending failures
+  // on the table - those are genuine bugs unrelated to this fault injection
+  // and must not be masked just because the injected fault was caught.
+  if (realFailures.length) {
+    console.log(`selftest FAILED: ${realFailures.length} unexpected failure(s) from the base run are being ignored:`);
+    for (const f of realFailures) console.log(`  FAIL ${f}`);
+  }
+
+  process.exit(caught && isolated && realFailures.length === 0 ? 0 : 1);
 }
 
 if (process.argv.includes("--selftest")) {
