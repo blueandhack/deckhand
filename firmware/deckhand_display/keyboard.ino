@@ -74,6 +74,19 @@ int kbRowY(int r)  { return KB_ROWS_Y + r * KB_ROW_H; }
 // Row 3 is [?123|2/2|ABC] 2 cells, [space] 6 cells, [.] 2 cells.
 const int KB_R3_PAGE_W  = 2 * KB_PITCH;
 const int KB_R3_SPACE_W = 6 * KB_PITCH;
+// THE GAP, AS A NAME, and it is the KEY's own gap rather than a second literal:
+// KB_KEY_W is KB_PITCH - 2 on both boards, so this is that same 2 read out of the
+// two header constants instead of written down again. Row 3 drew its three keys
+// at the FULL cell width - KB_R3_PAGE_W, KB_R3_SPACE_W and `tft.width() - x` -
+// while the letter rows draw KB_KEY_W inside a KB_PITCH cell. That was invisible
+// while every key carried a 1px outline that separated flush neighbours; once the
+// keys became filled tiles with no stroke, three flush tiles merged into one
+// continuous bar. THE GEOMETRY NEVER CHANGED - the tile treatment removed what was
+// hiding it. The TESTED band is still the full cell (kbTouch's r == 3 branch
+// divides nothing and compares against KB_R3_PAGE_W / +KB_R3_SPACE_W), so the gap
+// belongs to the key on its LEFT exactly as it does on the character rows and no
+// column of this row is dead.
+const int KB_KEY_GAP = KB_PITCH - KB_KEY_W;
 // The page key's three labels, indexed by kbPage - what tapping it will switch
 // TO is what it shows, same convention the two-page ?123/ABC toggle always had.
 // "$%*" (not "2/2", a position indicator that breaks the preview pattern
@@ -111,13 +124,18 @@ void drawKbKey(int r, int col, bool pressed) {
   uiKeyCap(x, y, KB_KEY_W, KB_ROW_H - 4, label, pressed, COLOR_BG);
 }
 
+// Row 3. Each key is DRAWN one KB_KEY_GAP narrower than its cell and the cursor
+// advances by the FULL cell, so the gap lands between neighbours - the letter
+// rows' drawn/tested split, applied to the row that never had it. The period key
+// is inset on its right too, which is the same 2px margin the last key of a
+// centred 10-cell row already leaves against the panel edge.
 void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
   int y = kbRowY(3), h = KB_ROW_H - 4, x = 0;
-  uiKeyCap(x, y, KB_R3_PAGE_W, h, KB_PAGE_LABEL[kbPage], pressed == 0, COLOR_BG);
+  uiKeyCap(x, y, KB_R3_PAGE_W - KB_KEY_GAP, h, KB_PAGE_LABEL[kbPage], pressed == 0, COLOR_BG);
   x += KB_R3_PAGE_W;
-  uiKeyCap(x, y, KB_R3_SPACE_W, h, "SPACE", pressed == 1, COLOR_BG);
+  uiKeyCap(x, y, KB_R3_SPACE_W - KB_KEY_GAP, h, "SPACE", pressed == 1, COLOR_BG);
   x += KB_R3_SPACE_W;
-  uiKeyCap(x, y, tft.width() - x, h, ".", pressed == 2, COLOR_BG);
+  uiKeyCap(x, y, tft.width() - x - KB_KEY_GAP, h, ".", pressed == 2, COLOR_BG);
 }
 
 // HARD wrap, deliberately unlike drawWrappedText's word wrap - see the KB_COLS
@@ -144,6 +162,14 @@ void drawKbHardWrapped() {
 
 const unsigned long KB_REPEAT_DELAY_MS = 500;   // hold this long before repeating
 const unsigned long KB_REPEAT_EVERY_MS = 120;   // then ~8 deletions a second
+// Row 3's page key is the ONE press flash with no work to time it: the character
+// keys' flash lasts as long as kbInsert()'s card repaint, and SPACE / "." borrow
+// that same repaint, but switching page redraws the whole board BEFORE the flash
+// can be drawn (see drawKeyboard's fillScreen), so there is nothing left to hold
+// it on screen. 60ms is blocking, and deliberately so - handleTouch polls at 15ms
+// and this runs once per page switch, which is rare; the alternative is a
+// deferred-unpress timer threaded through loop() for one key.
+const unsigned long KB_FLASH_MS = 60;
 
 // Peek geometry: it covers the KEYS and the action row, never the text card - so
 // the answer you are composing stays on screen while you re-read the question.
@@ -696,14 +722,37 @@ bool kbTouch(int sx, int sy) {
   int r = (sy - KB_ROWS_Y) / KB_ROW_H;
   if (r < 0 || r > 3) return true;
   if (r == 3) {
-    if (sx < KB_R3_PAGE_W) {
+    // ROW 3 KEEPS PRESS-COMMIT (all three targets clear TAP_MIN in both axes),
+    // but it now FLASHES. drawKbRow3 has always taken a pressed index and this
+    // branch never passed one: the page key repainted the board and SPACE / "."
+    // repainted the card, so two of the three gave no confirmation at all - and
+    // on a panel with no haptics that flash is the only confirmation a press
+    // registered, which is what drawKbKey's own comment says.
+    int k = sx < KB_R3_PAGE_W ? 0 : (sx < KB_R3_PAGE_W + KB_R3_SPACE_W ? 1 : 2);
+    if (k == 0) {
       kbPage = (kbPage + 1) % 3;
       kbShiftMode = 0;
+      // The flash goes AFTER the repaint, not before it: drawKeyboard()
+      // fillScreen's the panel, so a pressed row drawn first is wiped within
+      // microseconds and is never seen. It is drawn on the NEW page label,
+      // which is also the thing the tap changed.
       drawKeyboard();
-    } else if (sx < KB_R3_PAGE_W + KB_R3_SPACE_W) {
-      kbInsert(' ');
+      drawKbRow3(k);
+      delay(KB_FLASH_MS);
+      drawKbRow3(-1);
     } else {
-      kbInsert('.');
+      // SPACE and "." need no delay: kbInsert() repaints the text card and the
+      // action row between the two draws, which is the same work that times the
+      // character keys' flash.
+      // Two literal calls rather than one ternary: settings-geom-check.mjs's
+      // ASCII reachability sweep PARSES the characters row 3 emits out of this
+      // function (they exist in no KB_*[3] table - row 3 is data inline in the
+      // touch handler), so folding them into an expression would leave SPACE
+      // reachable on the glass and unprovable from the source.
+      drawKbRow3(k);
+      if (k == 1) kbInsert(' ');
+      else        kbInsert('.');
+      drawKbRow3(-1);
     }
     return true;
   }

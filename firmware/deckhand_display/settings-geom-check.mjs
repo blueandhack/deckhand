@@ -290,6 +290,26 @@ const KB_ROW3 = (() => {
   return { pageCells: cells[0], spaceCells: cells[1], labels };
 })();
 
+// B9. ROW 3'S HORIZONTAL INSET, READ OUT OF drawKbRow3()'S OWN BODY - the
+// horizontal half of the drawn/tested split that row NEVER HAD. It drew its three
+// keys at the FULL cell (KB_R3_PAGE_W, KB_R3_SPACE_W and `tft.width() - x`) while
+// the character rows draw KB_KEY_W inside a KB_PITCH cell, so once Task 2 made
+// keys filled tiles with no outline the three flush tiles merged into one
+// continuous bar. Nothing measured it because nothing read this function's own
+// widths. A THROW rather than a chk, the same shape KEY_INSET uses next door: if
+// the row is redrawn some other way the fix is to move this parse with it, not to
+// leave the gap assertions below looking at nothing.
+const KB_ROW3_DRAWN = (() => {
+  const src = fnSrc(KB_SRC, "void drawKbRow3");
+  if (!src.length) throw new Error("settings-geom-check: drawKbRow3()'s body not found in " +
+    "keyboard.ino - row 3's drawn widths come from there, so move this parse with it");
+  const w = [...src.matchAll(/uiKeyCap\(\s*x\s*,\s*y\s*,\s*([^,]+?)\s*,/g)].map(m => m[1].trim());
+  if (w.length !== 3) throw new Error(`settings-geom-check: drawKbRow3()'s body makes ${w.length} ` +
+    `uiKeyCap(x, y, <w>, ...) calls, expected 3 (the pager, SPACE and the period) - the row-3 ` +
+    `gap assertions below would be describing a row the firmware does not draw`);
+  return w;
+})();
+
 // THE THREE KEY-PAGE TABLES, PARSED out of keyboard.ino rather than transcribed.
 // KB_ROW_CELLS below and the reachability sweep further down BOTH derive from
 // this SAME parse, so a fourth page (or a rebalanced row) changes what both
@@ -2243,6 +2263,44 @@ for (const b of [1, 2]) {
         if (!reach.has(String.fromCharCode(cp))) missing.push(String.fromCharCode(cp));
       chk(missing.length === 0,
           `every printable ASCII codepoint is reachable; missing ${missing.length}: ${missing.join(" ")}`);
+      // ================= ROW 3'S GAP, AND ITS PRESS FLASH =================
+      // Two defects, both invisible until Task 2 made keys filled tiles. Bound to
+      // FUNCTION BODIES, with the parse gates first - !/re/.test("") is true, so
+      // a claim over a function that failed to parse would pass vacuously.
+      chk(/const int KB_KEY_GAP\s*=\s*KB_PITCH\s*-\s*KB_KEY_W\s*;/.test(KB_SRC),
+          "keyboard.ino derives KB_KEY_GAP as KB_PITCH - KB_KEY_W, not a second literal 2 that " +
+          "happens to agree with the character rows on both boards today");
+      for (const [i, name, w] of [[0, "the pager", KB_ROW3_DRAWN[0]],
+                                  [1, "SPACE", KB_ROW3_DRAWN[1]],
+                                  [2, "the period", KB_ROW3_DRAWN[2]]])
+        chk(/-\s*KB_KEY_GAP$/.test(w),
+            `drawKbRow3 draws ${name} at "${w}" - one KB_KEY_GAP inside its cell, so the three ` +
+            `tiles do not merge into one continuous bar the way they did at the full cell width ` +
+            `(the tested band is still the whole cell: the gap belongs to the key on its left)`);
+      chk(/int k = sx < KB_R3_PAGE_W \? 0 : \(sx < KB_R3_PAGE_W \+ KB_R3_SPACE_W \? 1 : 2\);/
+            .test(touchSrcForInsert),
+          "kbTouch's row-3 branch derives the PRESSED INDEX from the same two constants its hit " +
+          "test divides on, so the key that flashes cannot disagree with the key that acts");
+      const r3Flash = (touchSrcForInsert.match(/drawKbRow3\(k\);/g) || []).length;
+      chk(r3Flash === 2,
+          `kbTouch passes drawKbRow3 a pressed index in both of row 3's arms (found ${r3Flash} ` +
+          `of 2) - drawKbRow3 has always taken one and this branch never passed it, so the ` +
+          `pager and SPACE gave no confirmation a press landed at all`);
+      const r3Clear = (touchSrcForInsert.match(/drawKbRow3\(-1\);/g) || []).length;
+      chk(r3Clear === 2,
+          `and un-presses it again in both arms (found ${r3Clear} of 2) - a flash with no ` +
+          `release leaves row 3 stuck inverted`);
+      // AND THE PAGE KEY'S FLASH IS DRAWN AFTER ITS REPAINT. drawKeyboard()
+      // fillScreen's the panel, so a pressed row drawn BEFORE it is wiped within
+      // microseconds and is never seen - which is the state this task found.
+      const k0 = (touchSrcForInsert.match(/if \(k == 0\) \{([\s\S]*?)\n    \} else \{/) || [])[1] || "";
+      chk(k0.length > 0, "kbTouch's row-3 page-key arm was found (parse gate)");
+      chk(k0.indexOf("drawKeyboard();") >= 0 && k0.indexOf("drawKbRow3(k);") >
+            k0.indexOf("drawKeyboard();"),
+          "the page key's flash is drawn AFTER drawKeyboard()'s fillScreen, not before it - " +
+          "before it, the flash is erased in the same call and the only feedback a press " +
+          "registered never reaches the glass");
+
     }
     chk(10 * c.KB_PITCH <= W, `10 columns x ${c.KB_PITCH} = ${10 * c.KB_PITCH} inside the ${W}px panel`);
     chk(c.KB_PITCH - c.KB_KEY_W === 2, `${c.KB_PITCH - c.KB_KEY_W}px of the pitch is the gap`);
@@ -2269,16 +2327,29 @@ for (const b of [1, 2]) {
       // never a character count times the advance - drawString charges the last
       // glyph xOffset + width rather than xAdvance, which is exactly the 1px that
       // makes board 1's counted lanes hot.
+      //
+      // B9. MEASURED AGAINST THE DRAWN KEY, NOT THE CELL. Row 3 now insets each
+      // key by KB_KEY_GAP (the character rows' own gap, parsed above) so three
+      // filled tiles stop merging into one bar, and the label has to fit what is
+      // DRAWN - the fill is only the drawn key, and drawString's box paints
+      // outside it into the gutter that separates two keys.
+      const gap = c.KB_PITCH - c.KB_KEY_W;
+      const dPage = pageW - gap, dSpace = spaceW - gap, dDot = dotW - gap;
       const widest = KB_ROW3.labels.reduce((a, l) => widthB(b, T_BODY, l) > widthB(b, T_BODY, a) ? l : a);
-      console.log(`    row 3: page key ${pageW}px holds "${widest}" (${widthB(b, T_BODY, widest)}px, ` +
+      console.log(`    row 3: page key ${pageW}px cell / ${dPage}px drawn holds "${widest}" ` +
+                  `(${widthB(b, T_BODY, widest)}px, ` +
                   `widest of ${KB_ROW3.labels.map(l => `"${l}" ${widthB(b, T_BODY, l)}`).join(", ")}), ` +
-                  `SPACE ${spaceW}px, "." ${dotW}px`);
-      chk(widthB(b, T_BODY, widest) <= pageW,
+                  `SPACE ${spaceW}/${dSpace}px, "." ${dotW}/${dDot}px, gutter ${gap}px`);
+      chk(widthB(b, T_BODY, widest) <= dPage,
           `the widest page label "${widest}" inks ${widthB(b, T_BODY, widest)}px in the ` +
-          `${pageW}px ${KB_ROW3.pageCells}-cell key (clears by ${pageW - widthB(b, T_BODY, widest)})`);
-      for (const [l, w] of [["SPACE", spaceW], [".", dotW]])
+          `${dPage}px DRAWN pager key (clears by ${dPage - widthB(b, T_BODY, widest)})`);
+      for (const [l, w] of [["SPACE", dSpace], [".", dDot]])
         chk(widthB(b, T_BODY, l) <= w,
-            `row 3's "${l}" inks ${widthB(b, T_BODY, l)}px in its ${w}px key`);
+            `row 3's "${l}" inks ${widthB(b, T_BODY, l)}px in its ${w}px DRAWN key`);
+      for (const [n, d, cell] of [["the pager", dPage, pageW], ["SPACE", dSpace, spaceW],
+                                  ["the period", dDot, dotW]])
+        chk(d > 0 && d < cell,
+            `row 3's ${n} draws ${d}px strictly inside its ${cell}px tested cell`);
       // The same opaque-box rule vertically, on the key rather than the action
       // button: the label's CELL must fit the DRAWN key (KB_ROW_H less the parsed
       // inset), not the tap band, because the fill is only the drawn key.
