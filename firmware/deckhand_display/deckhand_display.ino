@@ -1223,15 +1223,22 @@ char detailId[16] = "";
 // plus 10 "|" separators between those 11 fields = 338; plus the msgOffered flag
 // "|%c" (2) = 340; plus dispMacTag() "|%s" (up to 7 chars, so 8) = 348; plus the
 // icon id "|%d" (id is -1..15, so up to 2 digits, plus the separator = 3) = 351;
-// plus, ON BOARD 2 ONLY, the agent "|%s" (agent[4] holds 3, so 4) = 355. +1 for the
-// NUL terminator = 356-byte worst case, so 384 keeps 28 bytes of headroom - re-derive
-// this comment again the next time a field is added, the same way this one had to be.
-// (sessions-geom-check.mjs derives the same sum independently and reports 363,
-// because it budgets startSec as a full %ld rather than the 5 digits a
-// seconds-since-midnight value can actually reach - deliberately the more
-// conservative of the two.) The agent joined for board 2 because §7's band draws
-// the agent's MARK and the AGENT column that used to spell it out in text is gone;
-// board 1 still draws that column and is held byte-identical, so it does not sign it.
+// plus the agent "|%s" (agent[4] holds 3, so 4) = 355. +1 for the NUL terminator =
+// 356, which is what 384 was chosen against.
+//
+// THAT 356 IS A HISTORICAL FIGURE AND MUST NOT BE BUDGETED AGAINST - the live
+// numbers are the checker's 372 (board 1) and 381 (board 2), which is why the cache
+// is 448 and not 384 (see the paragraph below). Two terms have joined since: the
+// option-description hash and the chip hash.
+//
+// AND THE AGENT IS SIGNED ON BOTH BOARDS. This paragraph used to say "ON BOARD 2
+// ONLY ... board 1 still draws that column and is held byte-identical, so it does
+// not sign it". Corrected rather than deleted, because it is a claim a reader may
+// already have budgeted against: buildDetailSignature appends the agent UNGUARDED
+// on both boards and says at length why (sessions.ino), §7's band draws the agent's
+// MARK on both, the AGENT column that used to spell it out in text is gone from
+// both, and this branch's binary moves on purpose. A reader taking 356 as the
+// board-2-only worst case budgets 25 bytes that are not there.
 //
 // drawIfChanged-style comparisons only look at
 // cacheSize bytes, so a cache shorter than the string silently stops noticing
@@ -7141,13 +7148,20 @@ void loop() {
   // than a runtime no-op so board 1 never sees the TEXT of a call it does not
   // have, the same rule the 26 tft.flush() sites follow.
   tickSessionAnim();
-  // The SESSION DETAIL card's own band, which neither tick above can reach: both
-  // return on showingDetail, so its mark, its crossfade and its pulse were all
+#endif
+  // The SESSION DETAIL card's own band, which neither tick around it can reach:
+  // both return on showingDetail, so its mark, its crossfade and its pulse were all
   // dead there while the identical band on the list animated. Its own function
   // rather than a relaxed gate on those two, because they paint at the LIST's
   // coordinates - see the block above tickDetailBandAnim() in sessions.ino.
+  //
+  // OUTSIDE THE #if, ON BOTH BOARDS. Board 1 got the band-headed detail card in
+  // 924cecc but not this tick, so its mark sat frozen on whatever frame the list
+  // left animPhase on. The board-2-only fragments are guarded inside the function
+  // (the crossfade, the pulse, the flush); the call is not. It must still come
+  // BEFORE tickWorkingSpinner - that one returns on showingDetail, so the two are
+  // mutually exclusive and only one of them advances animPhase in any frame.
   tickDetailBandAnim();
-#endif
   tickWorkingSpinner();
   tickMicProcessing();  // no-op unless a capture is being processed
   tickWaitingWheel();   // no-op unless the standalone screen is on the glass

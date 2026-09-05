@@ -927,7 +927,31 @@ void tickSessionAnim() {
     }
   }
 }
+#endif
 // ---------- §7 The DETAIL card's band, which animates for the same reasons ----------
+// OUTSIDE THE §6 GUARD, ON PURPOSE - the #endif above is where board 2's animation
+// set ends. What follows runs on BOTH boards, because the defect it fixes is on
+// both: commit 924cecc gave board 1 the same band-headed detail card, and the mark
+// in that band is drawn with animate=true, so on board 1 it was pinned at whatever
+// frame the LIST had left animPhase on and never advanced for the life of the
+// screen. Board 2 got this tick in §7 and board 1 did not, which is exactly the
+// drift a widened guard prevents and a copied function does not.
+//
+// WHAT BOARD 1 ACTUALLY RUNS HERE IS THE MARK AND NOTHING ELSE. The crossfade and
+// the pulse are §6 and stay board 2's (their state - xfadeId, xfadeFrom - does not
+// exist on board 1 at all), and so does the tft.flush() that follows the blit:
+// board 1 draws STRAIGHT TO THE GLASS. Only those fragments are behind an #if, so
+// no arm opens a brace a brace-counting checker would see unbalanced.
+//
+// THE COST ON BOARD 1 IS ONE 32x32 blit2bpp EVERY 120ms, and it is the SAME CALL,
+// on the same cadence, that tickWorkingSpinner already makes on that board's
+// sessions LIST - drawBandMarkAt, via drawBandMark, for the expanded row, plus one
+// drawAgentSpinner per other working row. So the detail screen's worst case is ONE
+// such blit where the list's is up to six, and the two screens are mutually
+// exclusive (tickWorkingSpinner returns on showingDetail; this function requires
+// it). MEASURED on board 1's own panel rather than argued: 4.64-5.17 ms for the
+// blit, 24 consecutive samples, i.e. ~4% of a 120ms tick - and the list already
+// spends up to six times that on the screen next door.
 // THE DETAIL CARD WEARS THE SAME BAND AND EVERY ONE OF ITS ANIMATIONS WAS DEAD
 // THERE. Both ticks above early-return on showingDetail, so on that screen
 // animPhase never advanced AND nothing repainted the band: a working session
@@ -985,6 +1009,9 @@ void drawDetailBandMark() {
 // screen is pushing the card's strips. (The shimmer's ride-along trick is not
 // available here and must not be imitated: there is no second animation on this
 // surface whose flush could carry it.)
+// BOARD 2 ONLY, and it is the flush that makes it so: only the crossfade and the
+// pulse call it, and both are §6.
+#if !BOARD_USES_TFT_ESPI
 uint32_t paintDetailBandFrame() {
   const int i = detailIndex;
   tft.flush();
@@ -995,6 +1022,7 @@ uint32_t paintDetailBandFrame() {
   tft.flush();
   return compose;
 }
+#endif
 void tickDetailBandAnim() {
   if (!detailBandVisible()) return;
   const int i = detailIndex;
@@ -1020,6 +1048,7 @@ void tickDetailBandAnim() {
   // one thing worse than a fade that does not run is one that resumes minutes
   // later against a status it no longer describes.
   bool faded = false;
+#if !BOARD_USES_TFT_ESPI
   if (xfadeId[0] && millis() - lastXfadeMs >= SESSION_XFADE_INTERVAL_MS) {
     lastXfadeMs = millis();
     const bool mine = strcmp(sessions[i].id, xfadeId) == 0;
@@ -1036,6 +1065,7 @@ void tickDetailBandAnim() {
       faded = true;
     }
   }
+#endif
 
   // ---- the mark's own blit, ONLY when no band repaint has already carried it ----
   // A band repaint draws the mark at the current phase itself, so blitting again
@@ -1043,9 +1073,12 @@ void tickDetailBandAnim() {
   // change - the flicker discipline's own arithmetic, applied to an animation.
   if (markDue && !faded) {
     drawDetailBandMark();
+#if !BOARD_USES_TFT_ESPI
     tft.flush();
+#endif
   }
 
+#if !BOARD_USES_TFT_ESPI
   // ---- the attention pulse ----
   // REACHABLE HERE ONLY FOR AN `asking` SESSION WITH NO ASK OBJECT, because one
   // with an askPid is drawn as the ASK screen and that screen has no band. So this
@@ -1068,8 +1101,8 @@ void tickDetailBandAnim() {
       }
     }
   }
-}
 #endif
+}
 // pos is the DISPLAY POSITION (what the row's on-screen y comes from); the
 // underlying array index - which may differ once two Macs are merged and
 // reordered - is resolved through sessionAt(pos) and used for every read of

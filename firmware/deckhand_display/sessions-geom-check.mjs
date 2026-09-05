@@ -3269,7 +3269,13 @@ for (const b of [1, 2]) {
   chk(!/s\.startSec/.test(detailBody),
       "§7: `started` is not drawn on this card - it is what the Mac's cluster cost, " +
       "and the width assertion below is why it cannot come back");
-  // ---- AND WHAT REMAINS BOARD 2's: THE MOTION ON THIS CARD ----
+  // ---- THE MOTION ON THIS CARD, WHICH IS NO LONGER BOARD 2'S ----
+  // RUN UNDER b === 2 FOR ECONOMY, NOT BECAUSE IT IS A BOARD-2 CLAIM. Every
+  // assertion below reads SHARED text - tickDetailBandAnim(), detailBandVisible(),
+  // drawBandMarkAt() and loop() are one translation unit's worth of source, the
+  // same bytes on both boards - so running them twice would print each twice and
+  // certify nothing more. The board-2-only fragments INSIDE that tick (the
+  // crossfade, the pulse, the flush) keep their own #if and are checked as text.
   if (b === 2) {
     // ---- §7 THE DETAIL BAND ANIMATES, AND THE ASK SCREEN MUST NEVER SEE IT ----
     // THE INVERSE OF WHAT STOOD HERE, AND THE OLD ASSERTION IS WORTH READING BEFORE
@@ -3357,6 +3363,25 @@ for (const b of [1, 2]) {
       chk(/bandFillShown, \/\*animate=\*\/true\);/.test(at),
           "§7: the shared band-mark blit draws over bandFillShown - the record of what is " +
           "on the glass, never colorForStatus()");
+      // (4b) animate = TRUE, AND THAT IS WHAT MAKES THE TICK LOAD-BEARING. The
+      // assertion above happens to quote this argument, but it fails in the name of
+      // bandFillShown, so nothing here named `animate` either way - which is how
+      // board 1 shipped a mark drawn at animate=true on a screen where no tick
+      // advanced animPhase: pinned at whatever frame the LIST had left it on, for
+      // the life of the screen, two taps from an identical band that turned.
+      //
+      // PARSED OUT OF THE CALL, not matched as a literal, because the other
+      // acceptable outcome is the opposite value: a mark drawn animate=FALSE is
+      // deliberately still (frame 0, the rest pose) rather than accidentally
+      // frozen. Either is defensible; what is not is animate=true with nothing
+      // advancing the phase. So this assertion pins the value, and (1)/(8)/(8b)
+      // pin the tick that value obliges.
+      const animArg = at.match(/drawAgentMark\([\s\S]*?\/\*animate=\*\/(\w+)\)/);
+      chk(animArg !== null && animArg[1] === "true",
+          "§7: the shared band-mark blit passes /*animate=*/true, so SOMETHING must advance " +
+          "animPhase on EVERY surface that wears a band - drop that to false and the mark " +
+          "is the rest pose by choice, which is a different (and documented) design " +
+          `(found: ${animArg ? animArg[1] : "no /*animate=*/ argument at all"})`);
       chk(/drawBandMarkAt\(/.test(mark) && !/drawAgentMark\(/.test(mark),
           "§7: the detail mark DELEGATES to drawBandMarkAt rather than carrying a second " +
           "copy of the blit, the way drawSpineGaps was extracted rather than copied");
@@ -3419,11 +3444,47 @@ for (const b of [1, 2]) {
       chk(g !== null,
           "§7: loop() calls tickDetailBandAnim() - an uncalled tick is the same frozen " +
           "mark with more code");
-      chk(g && g.length && g[g.length - 1].d === "#if !BOARD_USES_TFT_ESPI" &&
-          !g[g.length - 1].els,
-          "§7: ... inside #if !BOARD_USES_TFT_ESPI, so board 1 never sees the TEXT of a " +
-          "call it does not have - the rule the 26 tft.flush() sites follow" +
-          (g && g.length ? ` (innermost guard: ${g[g.length - 1].d})` : " (no guard at all)"));
+      // THIS ASSERTION USED TO REQUIRE THE OPPOSITE, and the old one is worth
+      // reading before the new one: it demanded the call sit INSIDE
+      // #if !BOARD_USES_TFT_ESPI, "so board 1 never sees the TEXT of a call it does
+      // not have". That was right while the detail card was board 2's. 924cecc gave
+      // board 1 the same band-headed card and left the tick behind, so the guard
+      // that had been a discipline became the defect: board 1's mark was drawn with
+      // animate=true and nothing on that screen advanced animPhase. The guard is
+      // widened rather than the function copied, and this is the assertion that
+      // stops it being narrowed again.
+      chk(g !== null && g.length === 0,
+          "§7: ... UNGUARDED, on both boards - board 1 wears the same band-headed detail " +
+          "card since 924cecc, and putting this call back behind #if !BOARD_USES_TFT_ESPI " +
+          "is exactly the frozen mark" +
+          (g && g.length ? ` (found inside ${g.map((x) => x.d).join(" / ")})` : ""));
+      // (8b) AND THE FOUR FUNCTIONS THEMSELVES ARE DEFINED OUTSIDE THE §6 BLOCK.
+      // An unguarded CALL to a guarded definition does not compile on board 1, which
+      // is a loud failure rather than a silent one - but the pair is what the fix
+      // IS, and the cheapest way to undo it is to slide sessions.ino's #endif back
+      // down past these four functions, at which point the call has to go back
+      // behind the guard too and the mark is frozen again with both halves
+      // "consistent". Walked through the directive stack, never matched against a
+      // #if near the line.
+      const sessSrc = readSource("sessions.ino").replace(/^[ \t]*\/\/.*$/gm, "");
+      for (const fn of ["void tickDetailBandAnim() {", "bool detailBandVisible() {",
+                        "void drawDetailBandMark() {",
+                        "void drawBandMarkAt(int x, int y, int i) {"]) {
+        const gd = guardAt(sessSrc, fn);
+        chk(gd !== null && gd.length === 0,
+            `§7: ${fn.replace(/ \{$/, "")} is defined OUTSIDE #if !BOARD_USES_TFT_ESPI - ` +
+            "both boards wear the band-headed detail card, so both need this" +
+            (gd === null ? " (NOT FOUND AT ALL)"
+                         : gd.length ? ` (found inside ${gd.map((x) => x.d).join(" / ")})` : ""));
+      }
+      // ... while paintDetailBandFrame(), which flushes, stays board 2's. The
+      // converse of the four above, and it is what keeps the widening a widening
+      // rather than a port: board 1 draws straight to the glass and has no flush.
+      const gp = guardAt(sessSrc, "uint32_t paintDetailBandFrame() {");
+      chk(gp !== null && gp.length === 1 && gp[0].d === "#if !BOARD_USES_TFT_ESPI" && !gp[0].els,
+          "§7: paintDetailBandFrame() STAYS inside #if !BOARD_USES_TFT_ESPI - it flushes " +
+          "twice, and board 1 has no flush to make" +
+          (gp === null ? " (NOT FOUND AT ALL)" : ` (found: ${gp.map((x) => x.d).join(" / ") || "no guard"})`));
       chk(loopBody.indexOf("tickSessionAnim();") < loopBody.indexOf("tickDetailBandAnim();") &&
           loopBody.indexOf("tickDetailBandAnim();") < loopBody.indexOf("tickWorkingSpinner();"),
           "§7: it runs BETWEEN the two existing ticks, so neither the shimmer's ride-along " +

@@ -201,15 +201,20 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     signature would repaint a 296x300 card every 5s — the two failures this screen's rules
     already name. `hostNowSec()` minus the elapsed time is stable to within the ±1s two
     independent `floor(ms/1000)` terms can disagree by, and `status` is already in the
-    signature. `s.agent` had to JOIN the signature, board 2 only: the band's mark is drawn
-    from it and nothing else on that card carries the agent any more.
+    signature. `s.agent` had to JOIN the signature, **on both boards**: the band's mark is
+    drawn from it and nothing else on either card carries the agent any more.
+    (This line said "board 2 only" until 2026-09-05, and `deckhand_display.ino` carried
+    the same claim. `buildDetailSignature` appends it unguarded on both boards and has
+    said so since §7. Corrected rather than deleted: the cost of the wrong version was
+    that a reader budgeting the next signature field took the stale 356-byte
+    board-2-only worst case instead of the **372 / 381** the checker derives.)
   - **THE BAND ON THIS CARD WAS COMPLETELY STATIC, AND THE FIX IS A THIRD TICK.** Both
     existing ticks early-return on `showingDetail`, so on this screen nothing repainted the
     band AND `animPhase` never advanced — which is why it was fully dead rather than merely
     slow: the ~5s host tick does repaint the card, but the phase it draws was frozen too.
     The mark sat still two taps from an identical band that turns, so the screen read as
     broken rather than as a deliberate difference. **Found on the glass**, like everything
-    else on this card. `tickDetailBandAnim()` (sessions.ino, board 2 only, called from
+    else on this card. `tickDetailBandAnim()` (sessions.ino, called from
     `loop()` between the two existing ticks) now advances the mark, the crossfade and the
     pulse at the DETAIL card's own coordinates. It is a third tick rather than a relaxed
     gate on the other two, and that is the safety argument rather than a preference: those
@@ -222,6 +227,33 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     was the renderer's own `animPhase`, so "the composed frame now changes" IS the claim. It
     says nothing about how the mark looks on the glass, and the original report came from a
     person watching the device.
+  - **AND IT WAS BOARD 2 ONLY UNTIL 2026-09-05, WHICH LEFT BOARD 1 WITH THE SAME DEFECT
+    THIS ENTRY CALLS "broken".** Corrected in place rather than rewritten away: the entry
+    above described the fix as board 2's, and `924cecc` had already given board 1 the same
+    band-headed detail card. `drawAgentMark` is called with `animate = working` on both, so
+    board 1's mark was drawn at whatever frame the LIST had left `animPhase` on and never
+    advanced for the life of the screen — while the identical band two taps away in the
+    list did turn, because `tickWorkingSpinner`'s `if (sessionRowExpanded(pos)) {
+    drawBandMark(pos); continue; }` is shared code. The `#if !BOARD_USES_TFT_ESPI` was
+    **widened rather than the function copied**, which is what the rest of that branch did
+    and what stops the two boards drifting apart again: the tick and its gate
+    (`detailBandVisible()`) are now shared, and only the §6 fragments stay board 2's — the
+    crossfade and the pulse (whose state, `xfadeId` / `xfadeFrom`, does not exist on board
+    1 at all), `paintDetailBandFrame()`, and the `tft.flush()` after the blit. Only
+    fragments are behind the guard, never a whole statement in both arms, so no
+    brace-counting checker sees an imbalance.
+  - **The cost on board 1 was MEASURED, not assumed: 4.64–5.17 ms per mark blit**, 24
+    consecutive samples off the device, i.e. ~4% of the 120ms tick. It is the same call
+    (`drawBandMarkAt`) on the same cadence that `tickWorkingSpinner` already makes on that
+    board's sessions LIST, where the worst case is up to six blits a tick against this
+    screen's one — and the two screens are mutually exclusive by construction
+    (`tickWorkingSpinner` returns on `showingDetail`; this tick requires it), so nothing
+    was added to any frame that was already paying. **Board 1's evidence is the REAL
+    PANEL**, unlike board 2's above: two `SCREENSHOT` captures 52s apart differ in **281 of
+    the mark's 1024 pixels** (x 24..55, y 62..93) and show two visibly different spark
+    frames. `sessions-geom-check.mjs` binds `drawBandMarkAt`'s `animate = true`, the
+    unguarded `tickDetailBandAnim()` call in `loop()`, and the fact that the tick's own
+    definition is NOT inside the `#if !BOARD_USES_TFT_ESPI` block.
   - **`showingDetail` IS ALSO TRUE ON THE ASK SCREEN, which has no band at all.** It is set
     in one place and the ask screen is drawn through the same entry point
     (`drawSessionDetail` hands off to `drawAskDetail` on `askPid`), so a tick that trusted
