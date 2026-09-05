@@ -336,15 +336,40 @@ async function main({ indexPath = INDEX } = {}) {
     // A different line from the same device is a different answer.
     ok("DEDUPE: a different line from the same board is taken",
       api.isDuplicateFrom(api.lastAnswerBySender, "usb:usbserial-10", line + "x") === false);
-    // Messages and answers must not suppress each other. Deliberately NOT
-    // cleared first: board 2's ANSWER of this exact line is still the newest
-    // entry in the answer map, so if the two maps were one object the prompt
-    // would be swallowed as a duplicate of it. Clearing would have made this
-    // pass with the maps shared - which is exactly the vacuous shape the
-    // selftest caught.
+
+
+    // THE REACHABLE DEFECT, and the reason the map is a map. Two boards cannot
+    // actually emit the SAME answer line - the HMAC is signed with each device's
+    // own key - so the assertion above is the mechanism, not the incident. The
+    // incident is INTERLEAVING: with one last-writer-wins slot, board 1 speaking
+    // between board 2's two transports moves the slot off board 2's line, and
+    // board 2's second copy then sails through as new. It is rejected downstream
+    // because the nonce is single-use, which presents in the log as an
+    // authentication failure on an answer that was perfectly good - exactly the
+    // noise this guard was added to stop.
+    api.lastAnswerBySender.clear();
+    const a2 = "ANSWER abc123def456 4711 0 aaaaaaaaaaaaaaaa";  // board 2 signs with its key
+    const a1 = "ANSWER abc123def456 4711 0 bbbbbbbbbbbbbbbb";  // board 1 signs with its own
+    ok("DEDUPE: board 2's USB copy is taken",
+      api.isDuplicateFrom(api.lastAnswerBySender, "usb:usbmodem1101", a2) === false);
+    ok("DEDUPE: board 1's own answer, arriving between board 2's two copies, is taken",
+      api.isDuplicateFrom(api.lastAnswerBySender, "usb:usbserial-10", a1) === false);
+    ok("DEDUPE: board 2's BLE copy is STILL a duplicate - another board speaking in " +
+       "between must not un-deduplicate it",
+      api.isDuplicateFrom(api.lastAnswerBySender, "ble", a2) === true);
+
+    // Messages and answers must not suppress each other. The precondition is
+    // established HERE rather than relied on from an earlier case: board 2's
+    // newest ANSWER is this exact line, so if the two maps were one object the
+    // prompt would be swallowed as a duplicate of it. An earlier version cleared
+    // the prompt map first, which made this pass with the maps SHARED - the
+    // selftest caught that, and it is the reason this reads the way it does.
+    const shared = "SHARED-LINE-PROBE";
+    ok("DEDUPE: board 2's answer of the probe line is taken",
+      api.isDuplicateFrom(api.lastAnswerBySender, "usb:usbmodem1101", shared) === false);
     ok("DEDUPE: the prompt map is separate, so a message is not swallowed by an answer",
-      api.lastAnswerBySender.get(api.senderKey("usb:usbmodem1101"))?.line === line &&
-      api.isDuplicateFrom(api.lastPromptBySender, "usb:usbmodem1101", line) === false);
+      api.lastAnswerBySender.get(api.senderKey("usb:usbmodem1101"))?.line === shared &&
+      api.isDuplicateFrom(api.lastPromptBySender, "usb:usbmodem1101", shared) === false);
   }
 
   // ---- 5. REPLIES GO BACK TO THE BOARD THAT ASKED ----
@@ -528,6 +553,11 @@ async function selftest() {
     ["the sender key collapses to the line again - two boards' answers become one",
      (s) => s.replace('const senderKey = (via) => deviceNameFor(via) || via;',
                       'const senderKey = () => "any";')],
+    // Aimed at the INTERLEAVING assertion specifically: sender keying survives,
+    // but the map holds only the most recent sender - which is what a single
+    // last-writer-wins slot was. Every other dedupe assertion still passes.
+    ["the dedupe remembers only the LAST sender, so a second board un-deduplicates the first",
+     (s) => s.replace("  map.set(key, { line, at: now });", "  map.clear();\n  map.set(key, { line, at: now });")],
     ["the dedupe stops keying on the sender at all",
      (s) => s.replace("  const key = senderKey(via);", '  const key = "one";')],
     ["the dedupe never fires, so one device's two transports both reach Claude",

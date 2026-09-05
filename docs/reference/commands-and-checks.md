@@ -829,8 +829,8 @@ in this checker is aimed at a failure of that shape: silent, and invisible in th
 reads.
 
 ```
-node host/multi-device-check.mjs             # 38 behaviour + 14 structural assertions
-node host/multi-device-check.mjs --selftest  # 31/31 injected faults, each naming the assertion that caught it
+node host/multi-device-check.mjs             # 42 behaviour + 14 structural assertions
+node host/multi-device-check.mjs --selftest  # 32/32 injected faults, each naming the assertion that caught it
 ```
 
 It **slices the real functions out of `host/index.mjs` and executes them** — `listUsbCandidates`,
@@ -844,10 +844,15 @@ to keep passing after the real code is deleted. Three of its assertions are wort
 - **The fan-out is counted per link AND per device.** Three links must mean three writes, never four
   — and no *device* may receive more than the two copies a cabled BLE device has always had (which
   is what `KBTEST`, `KBPROBE`, `KBBUBBLE` and `POWERPROBE` dedupe against on the device).
-- **The dedupe is proved in both directions.** One device's second transport must still collapse;
-  two DIFFERENT boards sending the same line must not. The prompt-map assertion deliberately does
-  NOT clear the map first — clearing made it pass with the two maps shared, and the selftest caught
-  exactly that vacuity.
+- **The dedupe is proved on the reachable defect, not just the mechanism.** Two boards cannot in
+  fact emit the same `ANSWER` line — each signs with its own key — so "a different board sending the
+  same line is not a duplicate" is the mechanism test. The INCIDENT is interleaving: with one
+  last-writer-wins slot, board 1 answering between board 2's two transport copies moves the slot off
+  board 2's line, and board 2's own second copy is then no longer seen as a duplicate. It is
+  rejected downstream (the nonce is single-use) and reads in the log as an authentication failure on
+  a perfectly good answer — the exact noise the guard exists to stop. Both are asserted. The
+  prompt-map assertion establishes its own precondition rather than clearing the map first:
+  clearing made it pass with the two maps SHARED, and the selftest caught exactly that vacuity.
 
 Its **structural half is reported separately** and reads the BODY of the function it names, because
 running the code cannot see a module-level capture buffer creeping back in: nothing in the behaviour
