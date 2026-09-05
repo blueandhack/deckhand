@@ -183,6 +183,7 @@ python3 firmware/deckhand_display/{usage-trend,batt-trend}-check.py
 node firmware/deckhand_display/geom-sweep.mjs          # fault-injection sweep, ~110s
 # the wire and the Mac
 node host/{wire-bytes,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
+node host/session-inbox-check.mjs                       # posting into a LIVE session
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
 node claude-hooks/answer-status-check.mjs
 node docs/design/*/check.mjs                            # committed mocks, bound to the headers

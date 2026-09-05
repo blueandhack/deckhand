@@ -787,7 +787,24 @@ node host/ask-optdescs-check.mjs             # 40 assertions: optDescs is capped
                                              #   boundary, parallel to options, absent when nothing
                                              #   is described
 node host/ask-optdescs-check.mjs --selftest  # 5/5 injected faults
+node host/session-inbox-check.mjs             # 94 assertions: the messaging-socket frame, the bytes that
+                                              #   actually reach the socket, the confirm-don't-trust rule,
+                                              #   the host's fallback wiring, and the hook publishing the
+                                              #   socket + token (driven as a real child process)
+node host/session-inbox-check.mjs --selftest  # 32/32 injected faults, each naming the assertion that caught it
 ```
+
+`session-inbox-check.mjs` is worth a paragraph, because the channel it guards **cannot report its own
+failure**. A message posted to a session's messaging socket in the wrong frame shape is accepted, the
+write returns success, and the message is discarded — measured twice. So the checker has to do two
+things a normal one does not. It **parses the frame out of `inboxFrames`' body** (each
+`JSON.stringify(...)` argument evaluated in an isolated scope with sentinel `token`/`text`), keeping
+no literal copy of the shape, so the revert to the discarded `{"type":"message","text":...}` fails by
+name rather than passing. And it **catches the bytes on a real Unix domain socket** and compares them
+against the module's own `inboxWireBytes` — the frame half proves only the *declaration*, and a
+review found that `writeFrames` could send anything at all with every assertion still green. The
+stand-in server also plays the app's part, appending an enqueue only when the bytes match, so a
+wrong writer fails twice. Its `--selftest`'s first two faults are exactly those two mistakes.
 
 Two properties are worth knowing before leaning on them. `wire-bytes-check.mjs`'s selftest names the
 assertion that caught each fault, because **"caught" alone cannot tell the assertion that exists for

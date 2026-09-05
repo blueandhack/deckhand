@@ -21,22 +21,36 @@
 // standing between that mistake and a silently dead feature is a test that reads
 // the frame the code actually builds and fails by NAME when its shape moves.
 //
-// So the file has three halves, and they fail for different reasons:
+// So the file has six sections, and they fail for different reasons:
 //
-//   FRAME     - reads inboxFrames' BODY out of the source, and checks the frames
-//               the exported function returns against what that body declares.
-//               Nothing here transcribes the shape: the checker has no literal
-//               copy of it, so it cannot keep passing over a reverted one.
-//   CONFIRM   - the "a successful write is not proof of delivery" rule:
-//               transcriptShowsEnqueue must accept only a real enqueue carrying
-//               the text, and postToSessionInbox must take its transcript offset
-//               BEFORE writing.
-//   WIRING    - the host actually reaching for the inbox ahead of the clipboard,
-//               falling through on failure, naming the cause; and the hook
-//               publishing the socket and token at all. The hook half is
-//               BEHAVIOURAL: it drives the real hook as a child process against a
-//               throwaway $HOME, because a regex over the hook would keep passing
-//               against a file that no longer runs.
+//   FRAME      - reads inboxFrames' BODY out of the source, and checks the frames
+//                the exported function returns against what that body declares.
+//                Nothing here transcribes the shape: the checker has no literal
+//                copy of it, so it cannot keep passing over a reverted one.
+//   WRITE      - the bytes that actually leave the process, caught on a REAL Unix
+//                domain socket and compared against the module's own
+//                inboxWireBytes. FRAME alone proves only the declaration: without
+//                this, writeFrames could put anything on the wire and all of it
+//                would still pass, which for a channel that discards a wrong
+//                frame in silence is the worst gap available.
+//   CONFIRM    - the "a successful write is not proof of delivery" rule:
+//                transcriptShowsEnqueue must accept only a real enqueue carrying
+//                the text, and postToSessionInbox must take its transcript offset
+//                BEFORE writing.
+//   DIAGNOSIS  - the counts that tell "never arrived" from "arrived but I could
+//                not see it". Confirmation has only ever been observed on a BUSY
+//                session while a real device tap can only target a WAITING one,
+//                so one real tap has to be conclusive on its own.
+//   THROW      - a malformed record must be REFUSED, never thrown. Every other
+//                failure here is a return value; a throw escapes the caller and
+//                takes the clipboard fallback with it.
+//   WIRING     - the host reaching for the inbox ahead of the clipboard, falling
+//                through on failure, naming the cause, and surviving a throw; the
+//                hook publishing the socket and token; and the CREDENTIAL note
+//                that tells a reader what the token is. The hook half is
+//                BEHAVIOURAL: it drives the real hook as a child process against a
+//                throwaway $HOME, because a regex over the hook would keep passing
+//                against a file that no longer runs.
 //
 // Every assertion is bound to a FUNCTION BODY rather than to a file, so a copy of
 // the expression living next door cannot satisfy it.
@@ -45,6 +59,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import net from "node:net";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const INBOX_SRC = path.join(REPO, "host", "session-inbox.mjs");
@@ -100,7 +115,7 @@ function declaredFrames(body, token, text) {
   return outs;
 }
 
-function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOOK_SRC, quiet = false } = {}) {
+async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOOK_SRC, quiet = false } = {}) {
   const inboxSrc = fs.readFileSync(inboxPath, "utf8");
   const hostSrc = fs.readFileSync(hostPath, "utf8");
 
@@ -139,7 +154,7 @@ function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOOK_SRC,
 
   // Behaviour against the source, not against a literal: the exported function
   // must actually emit what its body declares, as JSON, one frame per string.
-  return import(`file://${inboxPath}?v=${Date.now()}`).then((mod) => {
+  return import(`file://${inboxPath}?v=${Date.now()}`).then(async (mod) => {
     const emitted = mod.inboxFrames(TOKEN, TEXT);
     ok(Array.isArray(emitted) && emitted.length === declared.length,
        "FRAME: inboxFrames returns one string per declared frame");
@@ -184,19 +199,144 @@ function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOOK_SRC,
     ok(mod.transcriptShowsEnqueue("not json at all\n" + enq({}) + "\n{oops", TEXT),
        "CONFIRM: unparseable lines around it are skipped, not fatal - the transcript's tail can be mid-write");
 
+    // =======================================================================
+    // WRITE - the bytes that actually leave the process
+    // =======================================================================
+    // EVERYTHING ABOVE PROVES THE DECLARATION AND NONE OF IT PROVES THE WRITE.
+    // writeFrames could put anything on the socket and every FRAME assertion
+    // would still pass - which, for a channel that accepts a wrong frame,
+    // reports success and discards it, is the single most important thing here
+    // to bind. So: a real Unix domain socket, a real connection from the real
+    // postToSessionInbox, and the received bytes compared against the module's
+    // OWN inboxWireBytes. Not against a literal - this half's job is only "the
+    // writer sends what the code declares"; whether the declaration is right is
+    // the FRAME half's job, and keeping them separate is what lets each fail for
+    // its own reason.
+    //
+    // The stand-in server also plays the app's part: it appends an enqueue to a
+    // scratch transcript ONLY when the bytes match, so a writer that sends
+    // something else fails twice - once on the bytes and once on the delivery.
+    // That mirrors the real socket, where a wrong frame is silently dropped.
+    {
+      const wbox = fs.mkdtempSync(path.join(os.tmpdir(), "dhw-"));
+      const sockPath = path.join(wbox, "s.sock");   // short: sun_path is ~104 bytes
+      const transcript = path.join(wbox, "t.jsonl");
+      fs.writeFileSync(transcript, JSON.stringify({ type: "user", note: "pre-existing" }) + "\n");
+      fs.writeFileSync(path.join(wbox, "empty.jsonl"), "");   // for the never-enqueued case below
+      const expected = mod.inboxWireBytes(TOKEN, TEXT);
+      let got = Buffer.alloc(0);
+      const server = net.createServer((c) => {
+        c.on("data", (d) => { got = Buffer.concat([got, d]); });
+        c.on("end", () => {
+          if (got.equals(expected)) {
+            fs.appendFileSync(transcript,
+              JSON.stringify({ type: "queue-operation", operation: "enqueue", content: TEXT }) + "\n");
+          }
+          c.destroy();
+        });
+      });
+      try {
+        await new Promise((res, rej) => { server.once("error", rej); server.listen(sockPath, res); });
+        const r = await mod.postToSessionInbox({ inbox: { socket: sockPath, token: TOKEN }, transcript }, TEXT);
+        ok(got.length > 0,
+           "WRITE: postToSessionInbox must actually connect and send something - nothing arrived at the socket");
+        ok(got.equals(expected),
+           `WRITE: the bytes put on the socket must be EXACTLY inboxWireBytes(token, text) - every assertion above proves only the DECLARATION, and a writer that sends anything else is silently discarded by the real socket. got ${JSON.stringify(got.toString("utf8").slice(0, 160))}`);
+        ok(r.ok === true,
+           `WRITE: a correct write against a stand-in that enqueues it must CONFIRM - got ${JSON.stringify(r)}`);
+        ok(typeof r.ms === "number" && r.ms >= 0,
+           "WRITE: a confirmed delivery reports how long confirmation took");
+
+        // The SAME stand-in, now accepting the bytes and enqueueing nothing:
+        // exactly the shape of the silent discard. The clock is faked through
+        // the existing `now` seam so this costs one poll instead of the real 5s
+        // budget - a checker that took 5s per run would take two minutes across
+        // the selftest and stop being run.
+        got = Buffer.alloc(0);
+        const t0 = 1_000_000;
+        let ticks = 0;
+        const fakeNow = () => t0 + 10_000 * ticks++;
+        const dead = await mod.postToSessionInbox(
+          { inbox: { socket: sockPath, token: TOKEN }, transcript: path.join(wbox, "empty.jsonl") },
+          TEXT, fakeNow);
+        ok(dead.ok === false && dead.wrote === true,
+           `DIAGNOSIS: a write that lands but is never enqueued must report NOT ok WITH wrote:true - got ${JSON.stringify(dead).slice(0, 200)}`);
+        ok(dead.scan && dead.scan.enqueues === 0,
+           "DIAGNOSIS: the failed result carries the scan counts, not just a message");
+        ok(/offset \d+/.test(dead.why || "") && /grew \d+ bytes/.test(dead.why || ""),
+           `DIAGNOSIS: the refusal must name the OFFSET and how much the transcript grew, or "never arrived" and "arrived but invisible" read identically - got ${JSON.stringify(dead.why)}`);
+        ok(/\d+ enqueue\(s\)/.test(dead.why || "") && /\d+ with content/.test(dead.why || ""),
+           `DIAGNOSIS: the refusal must name the enqueue count and how many carried content - that is the whole diagnosis - got ${JSON.stringify(dead.why)}`);
+        ok(/NEVER ARRIVED/.test(dead.why || ""),
+           "DIAGNOSIS: with zero enqueues the refusal must say outright that it never arrived, so one real device tap is conclusive");
+        ok(/\d+ms/.test(dead.why || ""),
+           "DIAGNOSIS: the refusal names the window it waited");
+      } finally {
+        server.close();
+        fs.rmSync(wbox, { recursive: true, force: true });
+      }
+    }
+
+    // =======================================================================
+    // DIAGNOSIS - telling "never arrived" from "arrived but invisible"
+    // =======================================================================
+    // Confirmation has only ever been OBSERVED on a busy session, while a real
+    // device tap can only target a waiting one. If content turns out to be
+    // conditional on queue delay after all, every tap logs "NOT delivered",
+    // falls back to the clipboard, AND has delivered - a duplicate turn plus a
+    // false log line. One real tap settles it; these counts are what make that
+    // one tap conclusive instead of ambiguous.
+    {
+      const q = (o) => JSON.stringify({ type: "queue-operation", operation: "enqueue", ...o });
+      const none = mod.scanEnqueues("", TEXT);
+      ok(none.enqueues === 0 && none.withContent === 0 && !none.found,
+         "DIAGNOSIS: an empty tail counts zero of everything");
+      const bare = mod.scanEnqueues(q({}) + "\n" + q({}), TEXT);
+      ok(bare.enqueues === 2 && bare.withContent === 0 && !bare.found,
+         `DIAGNOSIS: enqueues WITHOUT content are counted separately - that is the "arrived but invisible" signature - got ${JSON.stringify(bare)}`);
+      const other = mod.scanEnqueues(q({ content: "someone else's message" }), TEXT);
+      ok(other.enqueues === 1 && other.withContent === 1 && !other.found,
+         `DIAGNOSIS: a content-carrying enqueue that does not match is counted but not found - got ${JSON.stringify(other)}`);
+      ok(mod.scanEnqueues(JSON.stringify({ type: "queue-operation", operation: "dequeue", content: TEXT }), TEXT).enqueues === 0,
+         "DIAGNOSIS: dequeues are not counted as enqueues, or the numbers would double");
+    }
+
     // Refusals, each naming its own cause: this is the whole point of the module
     // (CLAUDE.md - from the Mac, silence and "impossible here" look identical).
     const noInbox = mod.postToSessionInbox({ transcript: "/nope" }, TEXT);
     const goneSock = mod.postToSessionInbox(
       { inbox: { socket: path.join(os.tmpdir(), `deckhand-absent-${process.pid}.sock`), token: TOKEN },
         transcript: "/nope" }, TEXT);
-    return Promise.all([noInbox, goneSock]).then(([a, b]) => {
+    return Promise.all([noInbox, goneSock]).then(async ([a, b]) => {
       ok(a.ok === false && !a.wrote && /messaging socket/i.test(a.why || ""),
          `REFUSAL: a record with no inbox is refused, naming the missing socket - got ${JSON.stringify(a)}`);
       ok(b.ok === false && !b.wrote && /gone|exited/i.test(b.why || ""),
          `REFUSAL: a socket that no longer exists is refused, naming the exited session - got ${JSON.stringify(b)}`);
       ok(a.why !== b.why,
          "REFUSAL: the two refusals must not read the same - they are different problems with different fixes");
+
+      // THE THROW PATH. Every refusal above is a RETURN VALUE; a throw is a
+      // fifth path, and one that escapes takes the clipboard fallback with it -
+      // leaving the message delivered nowhere, which is strictly worse than the
+      // behaviour this replaced. The record is a JSON file another process
+      // writes and can truncate mid-write, so non-string fields are reachable,
+      // and fs.existsSync with a non-string is already deprecated (Node
+      // DEP0187) and documented to become a throw.
+      const malformed = [
+        ["socket is a number", { inbox: { socket: 5, token: TOKEN }, transcript: "/etc/hosts" }, TEXT],
+        ["socket is an object", { inbox: { socket: {}, token: TOKEN }, transcript: "/etc/hosts" }, TEXT],
+        ["token is a number", { inbox: { socket: "/tmp/x.sock", token: 7 }, transcript: "/etc/hosts" }, TEXT],
+        ["transcript is a number", { inbox: { socket: "/tmp/x.sock", token: TOKEN }, transcript: 7 }, TEXT],
+        ["the text itself is not a string", { inbox: { socket: "/tmp/x.sock", token: TOKEN }, transcript: "/etc/hosts" }, {}],
+      ];
+      for (const [name, rec, txt] of malformed) {
+        let res = null, threw = null;
+        try { res = await mod.postToSessionInbox(rec, txt); } catch (e) { threw = e; }
+        ok(threw === null,
+           `THROW: a malformed record (${name}) must be REFUSED, never thrown - a throw escapes into the caller and there is no fallback behind it (${threw?.message})`);
+        ok(res?.ok === false && /malformed|must be strings/.test(res?.why || ""),
+           `THROW: a malformed record (${name}) must be refused as MALFORMED, naming the bad field - "the session exited" would send a reader hunting the wrong thing. got ${JSON.stringify(res?.why)}`);
+      }
 
       const postBody = bodyOf(inboxSrc, "export async function postToSessionInbox(", "postToSessionInbox()");
       ok(postBody.length > 0, "PARSE: postToSessionInbox has an empty body");
@@ -211,7 +351,7 @@ function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOOK_SRC,
       // slicing back to its own `return {`. A looser regex over the whole body
       // passes on a neighbouring refusal's `ok: false` while this one says true -
       // which is precisely the defect, and it would have gone unreported.
-      const iUnconf = postBody.indexOf("but no enqueue appeared");
+      const iUnconf = postBody.indexOf("but no enqueue");
       ok(iUnconf >= 0, "PARSE: could not find the unconfirmed-write return in postToSessionInbox");
       const unconfReturn = iUnconf < 0 ? "" : postBody.slice(postBody.lastIndexOf("return {", iUnconf), iUnconf);
       ok(/\bok:\s*false\b/.test(unconfReturn) && !/\bok:\s*true\b/.test(unconfReturn),
@@ -234,6 +374,14 @@ function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOOK_SRC,
          "WIRING: the inbox must be tried BEFORE the clipboard branch");
       ok(iInbox >= 0 && iDispatch >= 0 && iInbox < iDispatch,
          "WIRING: the inbox must be tried BEFORE the headless dispatch branch");
+      // The call site must survive a THROW too, not only an ok:false. Bound to
+      // the text between the call and the clipboard branch, so a try/catch
+      // somewhere else in the file cannot satisfy it.
+      const callArm = delivBody.slice(Math.max(0, delivBody.lastIndexOf("try {", iInbox)), iClip);
+      ok(/try \{[\s\S]*postToSessionInbox\(record, text\)[\s\S]*\} catch/.test(callArm),
+         "WIRING: the inbox call must be wrapped in try/catch - the four handled failures are return values, and an unhandled throw would take the clipboard fallback down with it, delivering the message NOWHERE");
+      ok(/catch[\s\S]{0,200}ok: false[\s\S]{0,200}why:/.test(callArm),
+         "WIRING: a throw must become one more ok:false WITH ITS OWN why, so it falls through the same path as the rest and still names its cause");
       ok(/postToSessionInbox\(record,/.test(delivBody),
          "WIRING: the WHOLE session record is handed to the inbox - it needs `inbox` and `transcript`, not just `cwd`");
       ok(/record\s*=\s*JSON\.parse/.test(delivBody),
@@ -315,13 +463,42 @@ function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOOK_SRC,
         fs.rmSync(box, { recursive: true, force: true });
       }
 
-      if (!quiet) {
-        // The credential note, asserted rather than trusted to a reader: the token
-        // authorises posting into that session and is written to disk in the clear.
-        const hookSrc = fs.readFileSync(hookPath, "utf8");
-        const inboxFn = bodyOf(hookSrc, "function messagingInbox(", "messagingInbox()");
-        ok(inboxFn.length > 0, "PARSE: messagingInbox has an empty body");
+      // =====================================================================
+      // CREDENTIAL - the note, bound to the words it claims to certify
+      // =====================================================================
+      // The first version of this asserted only that messagingInbox HAD a body,
+      // which is a rule nothing can break, and it was gated behind `quiet` so no
+      // injected fault ever ran it: an assertion that cannot fail is a defect,
+      // and this repo's own rule says so. It is now bound to the DOC COMMENT
+      // above the function - the block a reader actually meets - and it fails
+      // when the note is removed.
+      //
+      // What it certifies: that a reader is TOLD the token is a credential,
+      // where it lands, and why that is nonetheless not a new exposure. The
+      // token is written verbatim into ~/.claude/deckhand-sessions/<id>.json,
+      // beside ~/.claude/deckhand-secret and every transcript, so the trust
+      // boundary is unchanged - but a reader must not have to derive that.
+      const hookSrc = fs.readFileSync(hookPath, "utf8");
+      const fnAt = hookSrc.indexOf("function messagingInbox(");
+      ok(fnAt >= 0, "PARSE: could not find messagingInbox - the CREDENTIAL assertions below are unproven");
+      // Back up to the start of its doc comment: the run of /// lines above it.
+      let noteStart = fnAt;
+      for (;;) {
+        const prev = hookSrc.lastIndexOf("\n", noteStart - 2);
+        if (prev < 0 || !hookSrc.slice(prev + 1, noteStart).trimStart().startsWith("///")) break;
+        noteStart = prev + 1;
       }
+      const note = fnAt < 0 ? "" : hookSrc.slice(noteStart, fnAt);
+      ok(note.trim().length > 0,
+         "CREDENTIAL: messagingInbox must carry a doc comment - with none, every assertion below would pass vacuously against an empty string");
+      ok(/credential/i.test(note),
+         "CREDENTIAL: the note must say outright that the token IS A CREDENTIAL - it authorises posting into that session, and a reader must not have to work that out");
+      ok(/deckhand-sessions/.test(note),
+         "CREDENTIAL: the note must name WHERE it lands - a credential whose resting place is unstated cannot be reasoned about");
+      ok(/deckhand-secret|pairing/.test(note),
+         "CREDENTIAL: the note must place it beside the device pairing secret - that comparison is the whole argument that the trust boundary is unchanged");
+      ok(/trust boundary/i.test(note),
+         "CREDENTIAL: the note must state the conclusion (the trust boundary is unchanged), not merely the facts that imply it");
     });
   });
 }
@@ -352,26 +529,43 @@ async function selftest() {
     ["inbox", "a dequeue accepted as confirmation, so every send confirms itself",
      (s) => s.replace(/if \(rec\.operation !== "enqueue"\) continue;\n/, "")],
     ["inbox", "an enqueue with no content accepted, so a background task's report confirms our send",
-     (s) => s.replace(/if \(typeof rec\.content !== "string"\) continue;\n\s*if \(rec\.content\.includes\(text\)\) return true;/,
-                      "if (typeof rec.content !== \"string\") return true;\n    if (rec.content.includes(text)) return true;")],
+     (s) => s.replace(/    if \(typeof rec\.content !== "string"\) continue;\n    withContent\+\+;/,
+                      "    if (typeof rec.content !== \"string\") { found = true; continue; }\n    withContent++;")],
     ["inbox", "empty text confirms anything (includes(\"\") is always true)",
-     (s) => s.replace(/if \(!text\) return false;\n/, "")],
+     (s) => s.replace(/if \(text && rec\.content\.includes\(text\)\) found = true;/,
+                      "if (rec.content.includes(text)) found = true;")],
     ["inbox", "an unconfirmed write reported as a SUCCESS - the exact defect the socket makes possible",
-     (s) => s.replace(/return \{\n    ok: false,\n    wrote: true,\n    why: `written to/,
-                      "return {\n    ok: true,\n    wrote: true,\n    why: `written to")],
+     (s) => s.replace(/  return \{\n    ok: false,\n    wrote: true,\n    scan,/,
+                      "  return {\n    ok: true,\n    wrote: true,\n    scan,")],
     ["inbox", "the transcript offset taken AFTER the write, so a retry confirms the previous attempt",
      (s) => s.replace(/  let from = 0;\n  try \{ from = \(await fsp\.stat\(transcript\)\)\.size; \} catch \{\}\n\n  const w = await writeFrames\(socketPath, token, text\);\n  if \(!w\.ok\) return \{ ok: false, wrote: false, why: w\.why \};/,
                       "  const w = await writeFrames(socketPath, token, text);\n  if (!w.ok) return { ok: false, wrote: false, why: w.why };\n  let from = 0;\n  try { from = (await fsp.stat(transcript)).size; } catch {}")],
     ["inbox", "a missing transcript sent blind instead of refused",
      (s) => s.replace(/      why: `no readable transcript[\s\S]*?\n    \};/,
                       "      why: `unused`,\n    };").replace(/  if \(!transcript \|\| !fs\.existsSync\(transcript\)\) \{/, "  if (false) {")],
+    // THE GAP THIS ROUND CLOSED: the frames are declared correctly and the
+    // WRITER sends something else. Nothing in the FRAME half can see this, and
+    // the real socket answers it with silence.
+    ["inbox", "writeFrames sends bytes OTHER than the declared frames (FRAME cannot see this)",
+     (s) => s.replace(/sock\.write\(inboxWireBytes\(token, text\), \(err\) => \{/,
+                      'sock.write(JSON.stringify({ type: "message", text }) + "\\n", (err) => {')],
+    ["inbox", "writeFrames drops the auth frame from the bytes while still declaring it",
+     (s) => s.replace(/sock\.write\(inboxWireBytes\(token, text\), \(err\) => \{/,
+                      'sock.write(inboxFrames(token, text)[1] + "\\n", (err) => {')],
+    ["inbox", "the malformed-record type guard removed, so fs.existsSync is handed a non-string (DEP0187, and a throw to come)",
+     (s) => s.replace(/  if \(bad\.length\) \{/, "  if (false) {")],
+    ["inbox", "the diagnosis counts stripped from the unconfirmed refusal - both failure stories read alike",
+     (s) => s.replace(/`Diagnosis: from offset \$\{from\} the transcript grew \$\{grew\} bytes holding \$\{scan\.enqueues\} enqueue\(s\), ` \+\n      `\$\{scan\.withContent\} with content\. ` \+\n/, "")],
+    ["inbox", "scanEnqueues stops counting content-less enqueues, so \"arrived but invisible\" is unreportable",
+     (s) => s.replace(/    enqueues\+\+;\n    if \(typeof rec\.content !== "string"\) continue;\n    withContent\+\+;/,
+                      '    if (typeof rec.content !== "string") continue;\n    enqueues++;\n    withContent++;')],
     ["inbox", "the two distinct refusals collapsed into one indistinguishable message",
      (s) => s.replace(/why: `the messaging socket \$\{socketPath\} is gone \(the session exited\)`/,
                       'why: "the session record carries no messaging socket"')],
 
     ["host", "the inbox call removed, so every message goes back to the clipboard",
-     (s) => s.replace(/const r = await postToSessionInbox\(record, text\);/,
-                      "const r = { ok: false, why: \"disabled\" };")],
+     (s) => s.replace(/    r = await postToSessionInbox\(record, text\);/,
+                      "    r = { ok: false, why: \"disabled\" };")],
     // Textually MOVED, not disabled: the ordering assertion is positional, so a
     // fault that only neutered the guard would be caught by a different
     // assertion and leave the ordering one unproven.
@@ -396,12 +590,24 @@ async function selftest() {
      (s) => s.replace(/const VOICE_DELIVERY = process\.env\.DECKHAND_VOICE_DELIVERY \|\| "inbox";/,
                       'const VOICE_DELIVERY = process.env.DECKHAND_VOICE_DELIVERY || "clipboard";')],
     ["host", "DECKHAND_VOICE_DELIVERY=clipboard no longer skips the socket - the escape hatch removed",
-     (s) => s.replace(/if \(VOICE_DELIVERY !== "clipboard"\) \{\n  const r = await postToSessionInbox/,
-                      "if (true) {\n  const r = await postToSessionInbox")],
+     (s) => s.replace(/if \(VOICE_DELIVERY !== "clipboard"\) \{\n  \/\/ WRAPPED,/,
+                      "if (true) {\n  // WRAPPED,")],
     ["host", "only .cwd read off the record again, so the inbox is never seen",
      (s) => s.replace(/    record = JSON\.parse\(await fs\.readFile\(path\.join\(SESSIONS_DIR, `\$\{sessionId\}\.json`\), "utf8"\)\);\n    cwd = record\.cwd \|\| undefined;/,
                       '    cwd = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, `${sessionId}.json`), "utf8")).cwd || undefined;')],
 
+    ["host", "the try/catch removed, so a throw escapes with no fallback behind it",
+     (s) => s.replace(/  let r;\n  try \{\n    r = await postToSessionInbox\(record, text\);\n  \} catch \(err\) \{\n    r = \{ ok: false, why: `the inbox threw \(\$\{\(err\?\.message \|\| String\(err\)\)\.split\("\\n"\)\[0\]\}\)` \};\n  \}/,
+                      "  const r = await postToSessionInbox(record, text);")],
+    ["host", "a throw swallowed into a nameless failure",
+     (s) => s.replace(/r = \{ ok: false, why: `the inbox threw \(\$\{\(err\?\.message \|\| String\(err\)\)\.split\("\\n"\)\[0\]\}\)` \};/,
+                      "r = { ok: false };")],
+
+    ["hook", "the CREDENTIAL note deleted, so a reader meets the token with nothing said about it",
+     (s) => s.replace(/^\/\/\/ THE TOKEN IS A CREDENTIAL[\s\S]*?\n\/\/\/\n/m, "///\n")],
+    ["hook", "the note keeps the facts but drops the conclusion about the trust boundary",
+     (s) => s.replace(/so the\n\/\/\/ trust boundary is UNCHANGED - but it is stated here rather than left for a\n\/\/\/ reader to work out\./,
+                      "and that is that.")],
     ["hook", "the inbox never published on the record",
      (s) => s.replace(/\.\.\.\(inbox \? \{ inbox \} : existing\.inbox \? \{ inbox: existing\.inbox \} : \{\}\),/, "")],
     ["hook", "the inbox NOT carried forward, so one environment-less event demotes the session for good",

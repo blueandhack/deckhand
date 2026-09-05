@@ -428,6 +428,18 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     `content` carries the text, from an offset taken *before* the write, and treats an
     unconfirmed send as a failure. `host/session-inbox-check.mjs` binds the frame shape to the
     code that builds it, so a revert to the discarded shape fails by name.
+  - **UNVERIFIED, and the one thing worth watching: confirmation has only ever been observed on a
+    BUSY session, while a real device tap can only ever target a WAITING one.** The indirect
+    evidence is reassuring but is not the case that matters: of 2,826 `queue-operation` enqueues on
+    disk, 1,785 carry no `content` at all (locally typed, dequeued in the same millisecond) and 238
+    content-carrying ones were dequeued in under 50 ms — so `content` does not appear to be
+    conditional on queue delay. If that inference is wrong, every device tap would log NOT
+    delivered, fall back to the clipboard, **and have actually delivered** — a duplicate turn plus
+    a false log line. So the unconfirmed refusal carries its own diagnosis: the offset it scanned
+    from, how much the transcript grew, how many enqueues it saw and how many carried content.
+    `enqueues=0` means it never arrived (suspect the frame or the token); `enqueues>0` with
+    `withContent=0` means it probably arrived and the confirmation rule cannot see it. **One real
+    device tap settles this**, and the log line is built so that tap is conclusive on its own.
   - **Limits, from the documented behaviour of the channel:** ~1M characters per message, a burst
     cap, at most 50 queued messages, and the connection is closed if a complete line does not
     arrive within 30 seconds. Deckhand's own cap is 150 bytes, so only the last applies — the

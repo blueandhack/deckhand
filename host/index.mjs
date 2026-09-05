@@ -2411,7 +2411,19 @@ const where = cwd ? await projectName(cwd) : target;
 // because a malformed frame is accepted and silently discarded. Falling back
 // unannounced would make all four look like the clipboard being the design.
 if (VOICE_DELIVERY !== "clipboard") {
-  const r = await postToSessionInbox(record, text);
+  // WRAPPED, because the four failure modes above are all RETURN VALUES and a
+  // throw is a fifth path with no fallback at all. The record is a JSON file
+  // another process writes and can truncate mid-write, and an unhandled
+  // rejection here would take the clipboard down with it - leaving the message
+  // delivered NOWHERE, which is strictly worse than the behaviour this
+  // replaced. A throw is treated as one more named `why` and falls through
+  // exactly like the rest.
+  let r;
+  try {
+    r = await postToSessionInbox(record, text);
+  } catch (err) {
+    r = { ok: false, why: `the inbox threw (${(err?.message || String(err)).split("\n")[0]})` };
+  }
   if (r.ok) {
     console.log(`${tag}: posted into the live session ${sessionId} (${where}) - confirmed in the transcript in ${r.ms}ms.`);
     setVoice("sent", { text, session: target, reply: `Sent to ${where}.` });

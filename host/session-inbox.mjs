@@ -126,27 +126,58 @@ function writeFrames(socketPath, token, text) {
   });
 }
 
-/// Does this transcript, from byte offset `from` onward, contain an enqueue of
-/// `text`? Exported so the confirmation rule itself can be tested without a live
-/// session.
+/// Scan a transcript tail for an enqueue of `text`, and COUNT WHAT WAS THERE.
+///
+/// The counts are not decoration; they are the only way to tell the two failure
+/// stories apart when confirmation does not arrive, and they are cheap because
+/// this already walks every line.
+///
+///   enqueues === 0        nothing was queued at all -> the message never
+///                         arrived, which is what a malformed frame looks like.
+///   enqueues > 0 but
+///   withContent === 0     the app IS queueing, but is not recording content on
+///                         these records -> the message may well have arrived and
+///                         this confirmation rule cannot see it.
+///
+/// That distinction matters more than it looks. Every confirmed delivery so far
+/// has been on a BUSY session, while a real device tap can only target a WAITING
+/// one; 2,826 enqueues on disk were checked and 1,785 carry no `content` at all
+/// (locally typed, dequeued in the same millisecond), with 238 content-carrying
+/// ones dequeued in under 50ms - so content does NOT look queue-delay-conditional.
+/// That is an inference, not a measurement of the case that matters. If it is
+/// wrong, every device tap logs "NOT delivered", falls back to the clipboard, AND
+/// has actually delivered: a duplicate turn plus a false log line. One real tap
+/// settles it, and these counts are what make that one tap conclusive.
 ///
 /// `includes` rather than `===` on purpose: the enqueued content is the text
 /// this host sent, but the channel is shared with other producers (a finished
 /// background task reports through the same queue), and a future Claude Code
 /// that wrapped or annotated the content would otherwise turn a real delivery
 /// into a false negative plus a duplicate on the clipboard.
-export function transcriptShowsEnqueue(tail, text) {
-  if (!text) return false;
+export function scanEnqueues(tail, text) {
+  let enqueues = 0, withContent = 0, found = false;
   for (const line of tail.split("\n")) {
     if (!line.startsWith("{")) continue;
     let rec;
     try { rec = JSON.parse(line); } catch { continue; }
     if (rec?.type !== "queue-operation") continue;
     if (rec.operation !== "enqueue") continue;
+    enqueues++;
     if (typeof rec.content !== "string") continue;
-    if (rec.content.includes(text)) return true;
+    withContent++;
+    // `text` empty would make includes() true for every content, confirming any
+    // enqueue at all - so it is refused here rather than at the top, where it
+    // would also suppress the counts this diagnosis needs.
+    if (text && rec.content.includes(text)) found = true;
   }
-  return false;
+  return { found, enqueues, withContent };
+}
+
+/// Does this transcript, from byte offset `from` onward, contain an enqueue of
+/// `text`? The boolean face of scanEnqueues, exported so the confirmation rule
+/// itself can be tested without a live session.
+export function transcriptShowsEnqueue(tail, text) {
+  return scanEnqueues(tail, text).found;
 }
 
 // Read only what was appended after `from`. A long-running session's transcript
@@ -186,6 +217,33 @@ export async function postToSessionInbox(record, text, now = Date.now) {
       why: "the session record carries no messaging socket (it predates the hook change, or this Claude Code does not export CLAUDE_CODE_MESSAGING_SOCKET)",
     };
   }
+  // TYPE-CHECK BEFORE TOUCHING fs. The record is a JSON file on disk that another
+  // process writes and that can be truncated mid-write, so its fields are not
+  // guaranteed to be strings - and `fs.existsSync` with a non-string argument is
+  // DEPRECATED (Node DEP0187, which emits a warning today and is documented to
+  // become a throw). A throw here would escape into the caller and take the
+  // clipboard fallback with it: worse than the behaviour this replaced, which at
+  // least always delivered something. Refused by name instead.
+  //
+  // Checked in ONE place, before any of them is used, and NAMING THE BAD FIELD:
+  // the transcript's type has to be settled here rather than at its own check
+  // further down, or a numeric transcript is reported as "the session exited"
+  // and sends a reader hunting an entirely different thing.
+  const bad = [];
+  if (typeof socketPath !== "string") bad.push(`socket is ${typeof socketPath}`);
+  if (typeof token !== "string") bad.push(`token is ${typeof token}`);
+  if (typeof text !== "string") bad.push(`text is ${typeof text}`);
+  // An ABSENT transcript is a different (and expected) case - see below - so
+  // only a present-but-wrong-typed one is malformed.
+  const tx = record?.transcript;
+  if (tx !== undefined && tx !== null && typeof tx !== "string") bad.push(`transcript is ${typeof tx}`);
+  if (bad.length) {
+    return {
+      ok: false,
+      wrote: false,
+      why: `the session record is malformed (${bad.join(", ")}) - these must be strings`,
+    };
+  }
   // Cheap and specific: an exited session leaves its record behind for a moment
   // but its socket is gone, and "no such file" is a much better log line than a
   // generic ECONNREFUSED.
@@ -193,7 +251,7 @@ export async function postToSessionInbox(record, text, now = Date.now) {
     return { ok: false, wrote: false, why: `the messaging socket ${socketPath} is gone (the session exited)` };
   }
   const transcript = record?.transcript;
-  if (!transcript || !fs.existsSync(transcript)) {
+  if (typeof transcript !== "string" || !transcript || !fs.existsSync(transcript)) {
     // Refuse rather than write blind. Without the transcript there is no way to
     // tell delivery from the silent-discard failure at the top of this file, and
     // an unverifiable send is exactly what this module exists not to do.
@@ -212,16 +270,34 @@ export async function postToSessionInbox(record, text, now = Date.now) {
   if (!w.ok) return { ok: false, wrote: false, why: w.why };
 
   const deadline = now() + INBOX_CONFIRM_TIMEOUT_MS;
+  let scan = { found: false, enqueues: 0, withContent: 0 };
+  let grew = 0;
   for (;;) {
-    if (transcriptShowsEnqueue(await readTailFrom(transcript, from), text)) {
-      return { ok: true, wrote: true, ms: now() - started };
-    }
+    const tail = await readTailFrom(transcript, from);
+    grew = Buffer.byteLength(tail, "utf8");
+    scan = scanEnqueues(tail, text);
+    if (scan.found) return { ok: true, wrote: true, ms: now() - started };
     if (now() >= deadline) break;
     await new Promise((r) => setTimeout(r, INBOX_CONFIRM_POLL_MS));
   }
+  // EVERYTHING NEEDED TO TELL THE TWO STORIES APART, in one line, because the
+  // tap that would settle it happens once and away from the Mac. "never arrived"
+  // is enqueues=0; "arrived but I could not see it" is enqueues>0 withContent=0.
+  // Without these numbers both read as the same bare "not delivered", and the
+  // second one is a duplicate turn plus a false log line - see scanEnqueues.
   return {
     ok: false,
     wrote: true,
-    why: `written to ${socketPath} but no enqueue appeared in the transcript within ${INBOX_CONFIRM_TIMEOUT_MS}ms - treat as NOT delivered (a malformed frame is accepted and discarded silently)`,
+    scan,
+    why:
+      `written to ${socketPath} but no enqueue carrying this text appeared within ${INBOX_CONFIRM_TIMEOUT_MS}ms ` +
+      `- treat as NOT delivered (a malformed frame is accepted and discarded silently). ` +
+      `Diagnosis: from offset ${from} the transcript grew ${grew} bytes holding ${scan.enqueues} enqueue(s), ` +
+      `${scan.withContent} with content. ` +
+      (scan.enqueues === 0
+        ? "0 enqueues means it NEVER ARRIVED - suspect the frame or the token."
+        : scan.withContent === 0
+          ? "enqueues WITHOUT content means it may well have arrived and this rule cannot see it - suspect the confirmation, not the send, and expect a duplicate turn."
+          : "content-carrying enqueues are present but none matched - suspect the text being altered in flight."),
   };
 }
