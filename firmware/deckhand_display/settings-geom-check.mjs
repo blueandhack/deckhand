@@ -32,9 +32,40 @@
 //
 //   node settings-geom-check.mjs             check both boards
 //   node settings-geom-check.mjs --selftest  prove the checker has teeth
-import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, DIR, evalInt, fieldBox, fnBody, stripComments,
-         lineHB, mcBox, PANEL, preflight, splitArgs, tlBox, widthB } from "./geom-common.mjs";
+import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, deadGuards, DIR,
+         evalInt, faultChildEpilogue, fieldBox, fnBody, lineHB, mcBox, PANEL, preflight,
+         readSource, setSourceFault, SOURCE_FAULT_INDEX, splitArgs, stripComments,
+         sweepSourceFaults, tlBox, widthB } from "./geom-common.mjs";
 import fs from "fs";
+
+// ---------------------------------------------------------------------------
+// SOURCE FAULTS. Same harness as the other two geom checkers, and the same
+// reason: this file's --selftest perturbs constants, while a large part of what
+// it asserts reads keyboard.ino's and deckhand_display.ino's own text. A review
+// measured three that got through at 1086/1086 - `return;` at the top of
+// tickKbFlash and `if (0)` around loop()'s call to it (a pressed key then stays
+// highlighted until the next full repaint), and `nh = 1` in kbClearBubble, which
+// brings back the orange corner specks 3cb63fb fixed on this same branch.
+// ---------------------------------------------------------------------------
+const SOURCE_FAULTS = [
+  ["tickKbFlash() gets `return;` first (the flash is never released)",
+    "keyboard.ino", (t) => t.replace(/(void tickKbFlash\(\)\s*\{)/, "$1\n  return;"),
+    "every return in tickKbFlash() is guarded"],
+  ["loop()'s call to tickKbFlash() is left dangling under an `if (0)`",
+    "deckhand_display.ino", (t) => t.replace(/\n(\s*)tickKbFlash\(\);/, "\n$1if (0)\n$1tickKbFlash();"),
+    "is a statement of loop()'s own"],
+  ["kbClearBubble's corner notch is cleared one pixel high (the orange specks return)",
+    "keyboard.ino", (t) => t.replace(/(nh\s*=\s*)cardBot - ny/, "$11"),
+    "reaches the card's own bottom edge"],
+  ["the notch fill starts at the bubble's top rather than the later of the two",
+    "keyboard.ino", (t) => t.replace(/(ny\s*=\s*)by > notchY \? by : notchY/, "$1by"),
+    "starts at the LATER of the bubble's top and the notch row"],
+];
+if (SOURCE_FAULT_INDEX >= 0) {
+  const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
+  if (!f) { console.log("ANCHOR MOVED"); process.exit(2); }
+  setSourceFault(f[1], f[2]);
+}
 preflight();
 
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
@@ -54,11 +85,11 @@ for (const b of [1, 2]) {
 const SET_CACHE = cacheSizes("deckhand_display.ino");   // the settings caches live in the main file
 // The main file's own TEXT, for a claim that is about a DECLARATION rather than
 // about a constant's value.
-const SRC_MAIN = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+const SRC_MAIN = readSource(`deckhand_display.ino`);
 // Charge-estimator thresholds, PARSED out of power.ino rather than transcribed -
 // the same drift discipline batt-trend-check.py uses, and for the same reason: the
 // widest string the battery row can draw is a function of these two.
-const POWER_SRC = fs.readFileSync(`${DIR}/power.ino`, "utf8");
+const POWER_SRC = readSource(`power.ino`);
 const POWER_CONST = Object.fromEntries(["BATT_CHG_KNEE_MV", "BATT_FULL_MV"].map(n => {
   const m = POWER_SRC.match(new RegExp(`${n}\\s*=\\s*(\\d+)`));
   if (!m) throw new Error(`${n} not found in power.ino - was it renamed?`);
@@ -85,7 +116,7 @@ const T_META = 1, T_BODY = 2, T_HEAD = 3;
 // A literal resolves to itself, so reverting the fix is still MEASURED (and fails
 // the cell assertion below on board 2), and a token the table does not know
 // THROWS rather than defaulting to a number that would quietly pass.
-const READER_SRC = fs.readFileSync(`${DIR}/reader.ino`, "utf8");
+const READER_SRC = readSource(`reader.ino`);
 const READER_STEP = (() => {
   const m = READER_SRC.match(/int lineH\s*=\s*isCode\s*\?\s*([A-Za-z_0-9]+)\s*:\s*([A-Za-z_0-9]+)\s*;/);
   if (!m) throw new Error("settings-geom-check: drawReader()'s `int lineH = isCode ? .. : ..;` " +
@@ -108,7 +139,7 @@ const T_HERO = 4;
 // board header, so it is parsed from there: 6 digits at T_HERO is the one width on
 // that screen that cannot be trimmed, and a checker that transcribed the 6 would
 // certify nothing.
-const PAIRING_INO = fs.readFileSync(`${DIR}/pairing.ino`, "utf8");
+const PAIRING_INO = readSource(`pairing.ino`);
 const PAIR_CODE_DIGITS = (() => {
   const m = PAIRING_INO.match(/#define\s+PAIR_CODE_DIGITS\s+(\d+)/);
   if (!m) throw new Error("settings-geom-check: PAIR_CODE_DIGITS not found in pairing.ino - " +
@@ -180,7 +211,7 @@ const ACT_GAP = (() => {
 // as everywhere else in this repo, arriving from a new direction: a checker must
 // PARSE THE SITE IT CERTIFIES, the way sessions-geom-check.mjs parses the TYPE chip's
 // hit-test slack term out of sessions.ino instead of restating a 24.
-const SETTINGS_INO = fs.readFileSync(`${DIR}/settings.ino`, "utf8");
+const SETTINGS_INO = readSource(`settings.ino`);
 const SPINE_ARGS = (() => {
   const src = SETTINGS_INO.replace(/^[ \t]*\/\/.*$/gm, "");   // a commented-out call is not a call
   const i = src.indexOf("void drawSeverityAction(");
@@ -239,13 +270,13 @@ function spineArg(c, n) {
 // repo is documented to be invoked (`node firmware/deckhand_display/...`). A
 // verification tool that only runs from one directory is a tool people stop
 // running.
-const HOST_CAP = +fs.readFileSync(`${DIR}/../../host/voice-answer.mjs`, "utf8")
+const HOST_CAP = +readSource(`../../host/voice-answer.mjs`)
   .match(/ANSWER_TEXT_MAX_BYTES\s*=\s*(\d+)/)[1];
-const KB_SRC = fs.readFileSync(`${DIR}/keyboard.ino`, "utf8");
+const KB_SRC = readSource(`keyboard.ino`);
 // THE REPLY PANEL'S SOURCE, and its constants. compose.ino is parsed with each
 // board header as the seed, in the compiler's own order, because
 // COMPOSE_PROMPT_LINES is derived from COMPOSE_PROMPT_H and KB_LINE_PITCH.
-const COMPOSE_SRC = fs.readFileSync(`${DIR}/compose.ino`, "utf8");
+const COMPOSE_SRC = readSource(`compose.ino`);
 
 // HOW MANY CONTROLS THE PANEL'S ACTION ROW DRAWS, parsed out of
 // drawComposeActions' own labels[] initialiser. Hoisted here rather than left
@@ -568,7 +599,7 @@ const KB_ACT_FRACS = (() => {
   return f;
 })();
 
-const HIST_ARENA = +fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8")
+const HIST_ARENA = +readSource(`deckhand_display.ino`)
   .match(/HIST_ARENA (\d+)/)[1];
 
 // wrapLineLen() / countWrappedLines() USED TO BE REIMPLEMENTED HERE, board-1-only,
@@ -2943,12 +2974,33 @@ for (const b of [1, 2]) {
       chk(/const int notchY = cardBot - KB_TEXT_R\s*;/.test(KB_CLR_SRC),
           "kbClearBubble()'s OWN BODY locates the card's bottom notch row from KB_TEXT_R, the " +
           "same constant drawKbText draws the card's radius with");
-      chk(/tft\.fillRect\(CARD_X, ny, KB_TEXT_R, nh, COLOR_BG\);/.test(KB_CLR_SRC) &&
-          /tft\.fillRect\(cardRight - KB_TEXT_R, ny, KB_TEXT_R, nh, COLOR_BG\);/.test(KB_CLR_SRC),
-          "and clears BOTH bottom corner notches to COLOR_BG - fillSmoothRoundRect skips the " +
-          "pixels outside its own curve (TFT_eSPI `continue`s on hyp2 >= r2, PanelShim's " +
-          "blendPixel returns on coverage <= 0.001f), so those keep the bubble's accent and " +
-          "nothing else on this path ever writes them");
+      // THE SEAM'S TWO LOCALS, PARSED - not just the fill calls that name them.
+      // notchY was asserted above and neither ny nor nh was, and the JS mirror in
+      // the bubble block recomputes `nh = cardBot - ny` on its OWN side, so
+      // `nh = 1` in the firmware left `wouldBeStale > 0` and `stale === 0` both
+      // holding: 1086/1086, with the orange corner specks 3cb63fb fixed on this
+      // branch back on both boards. A mirror proves the algorithm and binds
+      // nothing; these two lines are what bind it.
+      const nd = /const int\s+(\w+)\s*=\s*([^,;]+),\s*(\w+)\s*=\s*([^;]+);/
+                   .exec(KB_CLR_SRC.slice(KB_CLR_SRC.indexOf("const int notchY")));
+      chk(!!nd, "the notch fills' own two locals parse out of kbClearBubble (parse gate)");
+      const nyN = nd ? nd[1] : "?", nhN = nd ? nd[3] : "?";
+      chk(nd != null && /^by\s*>\s*notchY\s*\?\s*by\s*:\s*notchY$/.test(nd[2].trim()),
+          `the notch fill starts at the LATER of the bubble's top and the notch row ` +
+          `(${nyN} = ${nd ? nd[2].trim() : "?"}) - starting at \`by\` would punch COLOR_BG ` +
+          `through card rows the bubble never covered`);
+      chk(nd != null && nd[4].replace(/\s+/g, "") === `cardBot-${nyN}`,
+          `and its height reaches the card's own bottom edge (${nhN} = ` +
+          `${nd ? nd[4].trim() : "?"}) - any shorter and the corner pixels the bubble ` +
+          `left COLOR_ACCENT are simply not written, which is invisible to every ` +
+          `geometric assertion here and plainly visible on the glass`);
+      chk(nd != null &&
+          new RegExp(`tft\\.fillRect\\(CARD_X, ${nyN}, KB_TEXT_R, ${nhN}, COLOR_BG\\);`).test(KB_CLR_SRC) &&
+          new RegExp(`tft\\.fillRect\\(cardRight - KB_TEXT_R, ${nyN}, KB_TEXT_R, ${nhN}, COLOR_BG\\);`).test(KB_CLR_SRC),
+          "and clears BOTH bottom corner notches to COLOR_BG through those two locals - " +
+          "fillSmoothRoundRect skips the pixels outside its own curve (TFT_eSPI `continue`s on " +
+          "hyp2 >= r2, PanelShim's blendPixel returns on coverage <= 0.001f), so those keep the " +
+          "bubble's accent and nothing else on this path ever writes them");
       chk(KB_CLR_SRC.indexOf("cardRight - KB_TEXT_R, ny") < KB_CLR_SRC.indexOf("drawKbText();") &&
           KB_CLR_SRC.indexOf("drawKbText();") > 0,
           "and does it BEFORE drawKbText(), not after - after it, the flat fill would punch " +
@@ -3040,6 +3092,24 @@ for (const b of [1, 2]) {
       chk(/if\s*\(\s*!kbFlashUntil\s*\)\s*return\s*;/.test(KB_TICK_SRC),
           "and tickKbFlash()'s OWN BODY still reads 0 as \"nothing lit\", which is what makes " +
           "that sentinel load-bearing rather than decorative");
+      // EVERY ONE OF THE ASSERTIONS ABOVE IS A TEXT MATCH ON THIS BODY, and a
+      // reviewer measured what that leaves open: `return;` as tickKbFlash's FIRST
+      // statement satisfies all of them - the sentinel guard, the signed
+      // comparison and the drawKbRow3(-1) are all still there, below it - and a
+      // pressed key then stays highlighted until the next full repaint. 1086/1086.
+      // So the exits are enumerated instead: this function releases on a deadline,
+      // so every way out of it must be CONDITIONAL. An unguarded return is the
+      // whole failure, whatever it is spelled.
+      {
+        const bare = [...KB_TICK_SRC.matchAll(/(^|[;{}])\s*return\s*;/g)].map((m) => m[0].trim());
+        chk(bare.length === 0,
+            `every return in tickKbFlash() is guarded by its own if - an unguarded one releases ` +
+            `nothing and leaves row 3 inverted${bare.length ? ` [${bare.join(" ; ")}]` : ""}`);
+        const dg = deadGuards(KB_TICK_SRC);
+        chk(dg.length === 0,
+            dg.length ? `tickKbFlash() carries a dead-code guard [${dg.join(", ")}]`
+                      : "tickKbFlash() carries no dead-code guard");
+      }
       const LOOP_SRC = fnSrc(SRC_MAIN, "void loop");
       chk(LOOP_SRC.length > 0, "loop()'s body is found in deckhand_display.ino (parse gate)");
       chk(/\n\s*tickKbFlash\(\)\s*;/.test(LOOP_SRC),
@@ -3047,6 +3117,20 @@ for (const b of [1, 2]) {
           "PRESS and cannot come back on its own, so a deadline nobody polls is a flash nobody " +
           "releases; and a `if (kbActive)` here would strand one armed just before the keyboard " +
           "closed");
+      // "UNCONDITIONALLY" IS THE CLAIM, AND THE REGEX ABOVE DOES NOT MAKE IT: a
+      // dangling `if (0)` on the line above satisfies `\n\s*tickKbFlash();`
+      // exactly as well as a bare statement does, and passed. So the character
+      // that actually ENDS the previous statement is read: a call that is a
+      // statement of loop()'s own follows a `;`, a `{` or a `}`, and one hanging
+      // off a braceless if/else/for/while does not.
+      {
+        const at = LOOP_SRC.search(/\n\s*tickKbFlash\(\)\s*;/);
+        const before = at < 0 ? "" : LOOP_SRC.slice(0, at).replace(/\s+$/, "");
+        const prev = before.slice(-1);
+        chk(at >= 0 && (prev === ";" || prev === "{" || prev === "}"),
+            `and that call is a statement of loop()'s own, not the body of a braceless ` +
+            `if/for/while (the statement before it ends "${prev}")`);
+      }
       const KB_CLOSE_SRC = fnSrc(KB_SRC, "void closeKeyboard");
       chk(KB_CLOSE_SRC.length > 0, "closeKeyboard()'s body is found in keyboard.ino (parse gate)");
       chk(/kbFlashUntil\s*=\s*0\s*;/.test(KB_CLOSE_SRC),
@@ -3981,7 +4065,7 @@ for (const b of [1, 2]) {
     // about the DECLARATION, so it is made against the header's raw text: BOT
     // must be an expression naming both terms, never a second literal that could
     // silently disagree with them.
-    const rawH = fs.readFileSync(`${DIR}/board_es3c35p.h`, "utf8");
+    const rawH = readSource(`board_es3c35p.h`);
     const botDecl = rawH.match(/const int SCROLL_BOT\s*=\s*([^;]+);/);
     chk(botDecl != null, "scrollback: SCROLL_BOT's declaration is findable");
     chk(botDecl != null && /SCROLL_TOP/.test(botDecl[1]) && /SCROLL_LINES/.test(botDecl[1]),
@@ -4004,7 +4088,7 @@ for (const b of [1, 2]) {
     // transcribed - the rule that governs every other cross-file cap here. If the
     // host ever sends longer names, this fails instead of the panel clipping them.
     // DIR + a relative suffix, because this checker imports fs but NOT path.
-    const HOST = fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8");
+    const HOST = readSource(`../../host/index.mjs`);
     const nm = HOST.match(/name:\s*deviceText\(await projectName\([^)]*\),\s*(\d+)\)/);
     chk(nm != null, "scrollback: the host's session-name cap is still findable");
     const chipX = PANEL[b][0] - 12 - c.HIST_CHIP_W_CHAT;
@@ -4086,6 +4170,7 @@ for (const b of [1, 2]) {
   }
 }
 checkKnownUsed();
+faultChildEpilogue();
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 shortfalls`);
 if (SELFTEST) {
   // EXIT 0 ONLY WHEN EVERY INJECTED FAULT IS CAUGHT BY THE ASSERTION THAT EXISTS
@@ -4112,7 +4197,9 @@ if (SELFTEST) {
   }
   if (missed) process.exit(1);
   console.log(`selftest ok - ${WANT.length} injected faults, ${WANT.length} caught by name (${fail} failure(s) in total)`);
-  process.exit(0);
+  // ...and the SOURCE half, which perturbed constants cannot reach.
+  console.log("\n--selftest: source faults (each re-execs this checker and must FAIL BY NAME)");
+  process.exit(sweepSourceFaults(import.meta.url, SOURCE_FAULTS) ? 0 : 1);
 }
 if (fail) process.exit(1);
 console.log("all settings / keyboard / reader assertions pass on both boards");
