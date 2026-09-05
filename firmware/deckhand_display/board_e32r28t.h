@@ -380,13 +380,18 @@ const int SESSION_SUB_LANE_W = SESSION_ROW_W - SESSION_NAME_DX - 12;
 // TEXT, not the panel: one Cozette 6x13 line plus 3px, so it does not move with
 // the screen.
 const int SESSION_OVERFLOW_H = 16;
-// The row signature's buffer. 176, UNCHANGED - it is the literal that was in
-// deckhand_display.ino's rowSigCache declaration, moved here because board 2's
-// expanded first row appends the last prompt and the path to its own signature and
-// needs 304. Per board because it is MAX_SESSIONS copies of RAM. This board never
-// expands a row (sessionExpandedH() returns 0 unconditionally on it - there is no
-// surplus height to give), so its worst case is unchanged at 125 bytes.
-const int SESSION_ROW_SIG_LEN = 176;
+// The row signature's buffer. WAS 176 - the literal that was in
+// deckhand_display.ino's rowSigCache declaration - and is now 304, because this
+// board draws the band card too and its expanded first row appends the LAST PROMPT
+// and the PATH to that row's signature. A field drawn but not signed is exactly the
+// staleness the title itself shipped once. The worst case: name 23 + status 9 +
+// sub 35 + title 43 + tag 6 + icon 3 + 5 separators + NUL = 125 for an ordinary
+// row, plus prompt 103 + path 67 + 2 separators = 297 for the expanded one.
+// It costs MAX_SESSIONS copies of RAM - 6 x 128 = 768 bytes - and that is the
+// price of the card; appending them for every row instead would repaint a COMPACT
+// row whenever its prompt changed, which is a wholesale clear-and-redraw of pixels
+// that did not change.
+const int SESSION_ROW_SIG_LEN = 304;
 // Vertical air added at every gap and pad inside a row (see the derived offsets
 // in deckhand_display.ino). 0 here: this board's content area cannot afford any -
 // its own band table above is packed with 2px gaps and 2px pads.
@@ -411,6 +416,215 @@ const int SESSION_LINE_H = 13;   // one body/meta line: uiLineH(T_BODY), Cozette
 // invariant it encodes - the top rung's cell must FIT the band - is asserted in
 // sessions-geom-check.mjs against the parsed font table, where it costs nothing.
 const int SESSION_NAME_TOP_RUNG = 0;
+
+// ---------- §3 THE STATUS BAND ----------
+// The band card, ported from board 2 (docs/superpowers/specs/
+// 2026-08-28-sessions-redesign-board2-design.md §3-§5). It exists here for the
+// same measured reason it exists there: with ONE session - 69% of ticks - the
+// ladder draws a 90px row and then 174px of nothing, 66% of this board's list
+// area. Every constant below is DERIVED FROM THIS BOARD'S OWN CELLS, never scaled
+// off board 2's: the type scale is Cozette 6x13 / Terminus 10x18b / Cozette 12x26
+// against board 2's Spleen 8x16 / 12x24 / 32x64, and the list area is 264px
+// against 410.
+//
+// 34 = SPARK_SIZE (32) + BORDER_CARD, AND THAT IS THE BINDING CONSTRAINT rather
+// than the rung argument board 2 uses. Board 2's 44 is TAB_BAR_H (46) less the
+// card's own 2px border - "sized to the same rung so it does not read as a thin
+// stripe against the tab bar" - which here would give 34 - 2 = 32. But the agent
+// mark is a 32x32 BLIT and the SAME art on both boards (SPARK_SIZE does not
+// scale), and the band is drawn on the card INTERIOR, so the interior must be at
+// least 32 rows: SESSION_BAND_H - BORDER_CARD >= SPARK_SIZE, i.e. 34. The two
+// derivations land 2px apart and the mark's is the one that must hold, so the
+// mark sits FLUSH in the band's 32-row interior with no clearance either side.
+// Stated rather than left as a coincidence: a regenerated mark at any size above
+// 32 moves this constant, and sessions-geom-check.mjs parses SPARK_SIZE for it.
+const int SESSION_BAND_H = 34;
+// THE SIDE PAD IS THE ROW'S OWN TEXT MARGIN, MOVED ONTO THE INTERIOR. Every
+// ordinary row on this board bounds its text at SESSION_ROW_X + SESSION_ROW_W - 12
+// (the title's lane, and the expression SESSION_SUB_LANE_W is derived from), i.e.
+// 12px in from the card's OUTER edge. The band is drawn on the interior, which is
+// already BORDER_CARD in, so the same margin is 12 - BORDER_CARD = 10 here. Board
+// 2's 14 is its own number; copying it would have spent 8px of a 224px card on
+// air the rows beside it do not spend.
+const int SESSION_BAND_PAD = 10;
+// Agent mark -> status word. 8 rather than the bare 4 every icon-beside-text site
+// uses, for board 2's reason: this gap divides the AGENT from the STATUS, two
+// different facts, where the 4 binds an icon to the name it belongs to.
+const int SESSION_BAND_MARK_GAP = 8;
+// THE BODY'S OWN LEFT EDGE AND LANE, derived from the band's box rather than
+// restated - "band and body share the pad", made true. The band card draws no row
+// indicator (its mark is up in the band), so the ordinary row's SESSION_NAME_DX
+// (40px of clearance for the 32x32 indicator blit) would reserve space for nothing
+// and hang every body line 28px right of the band above it.
+//   x    = 8 + 2 + 10 = 20, against the ordinary row's name origin at 48
+//   lane = 224 - 4 - 20 = 200 = 33 characters at TEXT_ADV 6
+// 33 columns is the SAME lane width board 2's 264px/8px card gives, which is why
+// the two boards' line caps below come out identical from independent arithmetic.
+const int SESSION_BAND_BODY_X = SESSION_ROW_X + BORDER_CARD + SESSION_BAND_PAD;
+const int SESSION_BAND_BODY_LANE = SESSION_ROW_W - 2 * BORDER_CARD - 2 * SESSION_BAND_PAD;
+// THE DURATION'S LANE IS FIXED AT 3 CHARACTERS, for board 2's reason and with the
+// same bound: it is a change-only field, so its clear box must be a CONSTANT width
+// or it grows into the status word beside it. bandDurText() drops to one unit
+// (s / m / h / d) and statusSinceMillis is a millis() value, which wraps at 49.7
+// days - so "49d" is the widest string reachable and 3 is a bound, not a hope.
+const int SESSION_BAND_DUR_CHARS = 3;
+//
+// THE BAND'S CONTENTS FIT ACROSS - AND THE FULL STATUS PHRASE DOES NOT. This is
+// the same arithmetic §7 records failing on board 2's detail screen, arriving here
+// on the LIST's card because this panel is 72px narrower and its head face 2px
+// narrower per character:
+//   room = SESSION_ROW_W - 2*BORDER_CARD - 2*PAD - SPARK_SIZE - MARK_GAP
+//          - DUR_CHARS*TEXT_ADV - 1                                      = 141
+// labelForStatus()'s longest phrase, "NEEDS YOUR INPUT", inks 16 x T_HEAD's 10px
+// advance = 160. It is over by 19 and NO pad this card can afford closes it:
+// clearing 160 needs 2*PAD + MARK_GAP <= 9. So the band cannot carry both the
+// 32px mark and the full phrase, and the mark is what stays - it is the card's
+// only agent carrier and its only motion (the row indicator is skipped there).
+// bandStatusWord() therefore shows THE LONGEST FORM ITS LANE CAN HOLD, measured:
+// the full phrase where it fits (board 2, always) and shortLabelForStatus()'s
+// "WORKING" / "NEEDS INPUT" / "READY" - the words this board's own tall-row pill
+// already draws - where it does not. Longest short form: 11 x 10 = 110 of 141.
+// One mechanism, two boards, no second vocabulary invented for this card.
+
+// ---------- §4 THE SPINE ----------
+// The band's compact form for every row the band card is not: a status-coloured
+// bar down the row's left edge. Same vocabulary, scales to any row height.
+//
+// 5, NOT BOARD 2'S 6, AND THE BLIT IS WHY. The spine is drawn on the card's
+// interior at x = SESSION_ROW_X + BORDER_CARD = 10 and the 32x32 row-indicator
+// blit paints its own background from x = SESSION_DOT_CX - SPARK_SIZE/2 = 15, so
+// the spine's ink must end at 14: SESSION_SPINE_W <= 15 - 10 = 5. At 6 its last
+// column would be erased four times a second on every working row - the exact
+// defect board 2 measured at 17 pixels and fixed with the straight carve.
+const int SESSION_SPINE_W = 5;
+// CLAUDE SOLID, CODEX SEGMENTED, as a fill pattern rather than art. Neither
+// number is a taste call and both are board 2's own derivations re-run on a 5px
+// spine: ON is one more than the spine is wide, so a run reads as a SEGMENT
+// rather than a square dot; OFF is 2/3 of the width (ceil(2*5/3) = 4), so a gap
+// reads as a gap rather than as a seam.
+//
+// THE PERIOD IS 10 AND THE TWO SHORTEST RUNGS HOLD ONE GAP, NOT TWO. The knockout
+// is cut from the STRAIGHT section only (an arc knockout paints outside the card),
+// so a second gap needs r + ON + P + OFF <= h - r, i.e. 2P <= straight, where
+// straight = rowH - 2*BORDER_CARD - 2*SESSION_SPINE_INSET - 2*(R_MD - BORDER_CARD)
+// = rowH - 22. So two gaps need rowH >= 42, and this board's ladder produces 41
+// (five sessions) and 38 (six, under the "+N more" strip). Unreachable in
+// practice - 5 and 6 sessions are 0 of 9,452 measured ticks - and unfixable
+// anyway: ON >= 6 and OFF >= 4 by the two bounds above, so P >= 10 while a 38px
+// row allows 6. sessions-geom-check.mjs asserts two gaps on every rung reachable
+// at FOUR OR FEWER sessions and one everywhere else, by enumeration.
+const int SESSION_SPINE_ON = 6;
+const int SESSION_SPINE_OFF = 4;
+// ONE PIXEL DOWN AND UP, NEVER SIDEWAYS. Board 2's note carries the measurement;
+// both halves apply here unchanged and the second one harder. The carving rect's
+// left edge lands at x = 15, and at the interior's top row (+2) the border's own
+// inner edge is still at x = 18 - so without the inset the rect would rub out the
+// card's anti-aliased corner. With it (+3) the inner edge is 14.1 and the carve
+// clears it. And an x inset would put the spine's LAST column at 15, which is the
+// blit's FIRST - the very defect SESSION_SPINE_W = 5 exists to avoid, reintroduced
+// by its own fix. Both are asserted from the DRAW's own x expression.
+const int SESSION_SPINE_INSET = 1;
+// NO SHIMMER ON THIS BOARD, deliberately and by name: SESSION_SHIMMER_* do not
+// exist here. Board 2 composes into a PSRAM shadow framebuffer and flushes once,
+// so a travelling light rides a flush that was happening anyway; this board draws
+// STRAIGHT TO THE GLASS, where the same animation is a per-frame repaint with no
+// flush to hide behind and no PERF command to measure it with. The spine here is
+// STATIC. Written down rather than left to be discovered.
+
+// ---------- The band card's block stack ----------
+// SESSION_EXP_MAX_H is the SUM of these, not a chosen number, and
+// sessions-geom-check.mjs asserts that sum against the parsed blocks on BOTH
+// boards - so a future field cannot silently push a line past what its data can
+// fill.
+//
+// HOW THE LEADINGS WERE DERIVED, because they are the one place this card could
+// have been fitted by eye. Each block is one line of INK plus its own leading.
+// The ink is fixed by this board's faces (name 26, every body line 13, a rule 1)
+// and comes to 145px for the full stack; the band takes 34 of the 264px list
+// area, leaving 230, i.e. 85px of leading to distribute against board 2's 122.
+// Each block therefore gets board 2's own leading scaled by 85/122 = 0.697 and
+// floored - which spends 77 of the 85 and leaves 8px outside the card as list
+// area, exactly as §4 requires. The reason this board is TIGHTER than a
+// proportional scale of board 2's card is that its name is not scaled: the hero
+// rung's 26px cell stays (the user is already looking at a 26px "deckhand" and it
+// should not shrink), which is 2px MORE than board 2's head-rung name on a panel
+// with 64% of the height.
+//
+//   block          ink   b2 lead   x0.697   this board
+//   name            26      10        6      32
+//   sub-line        13      16       11      24
+//   title (each)    13       4        2      15
+//   rule             1      17       11      12
+//   LAST PROMPT     13      12        8      21
+//   prompt (each)   13       8        5      18
+//   path            13       4        2      15
+//   bottom pad       -       6        4       4
+const int SESSION_BAND_NAME_H = 32;      // T_HERO 26 + 6 leading
+const int SESSION_BAND_SUB_H = 24;       // T_BODY 13 + 11, the agent/model/branch line
+// The Mac's icon rides the sub-line, right-anchored, and this is the 4px every
+// icon-beside-text site on this device already uses. A named constant rather than
+// the literal its neighbours carry because the checker asserts the LANE
+// arithmetic against it: the facts are fitText'd into `lane - MAC_EMOJI_SIZE -
+// SESSION_SUB_ICON_GAP`, measuring the icon FIRST, so no model or branch name can
+// collide with it however long it is.
+const int SESSION_SUB_ICON_GAP = 4;
+const int SESSION_BAND_TITLE_STEP = 15;  // T_BODY 13 + 2
+const int SESSION_BAND_RULE_H = 12;      // 1px rule + air either side
+const int SESSION_BAND_LABEL_H = 21;     // the "LAST PROMPT" caption
+const int SESSION_BAND_PROMPT_STEP = 18; // T_BODY 13 + 5; the prompt gets the most air
+const int SESSION_BAND_PATH_H = 15;
+const int SESSION_BAND_BOTTOM_PAD = 4;   // 2 of which is the card's own border
+//
+// TWO HARD CAPS ON THE LINE COUNTS, both re-derived for this board's lane and
+// advance rather than carried over, and both asserted. The lane is
+// (224 - 2*2 - 2*10) / 6 = 33 columns - the SAME column count board 2's wider
+// card and wider face give - so:
+//   prompt[104] holds 100 characters: 3 x 33 = 99 is ONE SHORT, so 4 lines are
+//     needed and a 5th is permanently blank.
+//   title[44] holds 43: 1 x 33 = 33 is short, so 2 lines are needed and a 3rd is
+//     permanently blank.
+// SESSION_EXP_PROMPT_MAX and SESSION_EXP_TITLE_LINES are those counts and must
+// not be raised without new byte caps to justify them.
+//
+//   band 34 + name 32 + sub 24 + title 2x15 + rule 12
+//        + LAST PROMPT 21 + prompt 4x18 + rule 12 + path 15 + pad 4 = 256
+
+// ---------- THE EXPANDED FIRST ROW ----------
+// THE RULE, arithmetic on the ladder rather than a second layout - identical to
+// board 2's, reading this board's own numbers:
+//   leftover = avail - (count - 1) * (sessionRowH + SESSION_ROW_GAP)
+//   grant    = leftover < SESSION_EXP_MIN_H ? 0 : min(leftover, SESSION_EXP_MAX_H)
+//   expanded = min(grant, the block stack this session's own content fills)
+//
+// THE SIX GRANTS, avail 264. These are CEILINGS, not heights: what the card takes
+// is the block stack its own session fills and the rest stays outside it as list
+// area.
+//   1 session  leftover 264 -> 256 (cap)   prompt <= 4 lines   8px spare at the cap
+//   2 sessions leftover 171 ->   0         under the floor
+//   3 sessions leftover  86 ->   0
+//   4 sessions leftover  66 ->   0
+//   5 sessions leftover  52 ->   0
+//   6 sessions leftover  44 ->   0
+// So THE BAND CARD IS A ONE-SESSION BEHAVIOUR ON THIS BOARD, where board 2's is
+// one-to-two. That is not a tuning choice that could have gone the other way: at
+// two sessions the ladder gives each row its 90px cap and 171px is left, against a
+// floor of 220 - a card admitted there would have 137px for a 186px body, i.e. no
+// leading and no rules, which is the "card of air" §4 forbids. One session is 69%
+// of 9,452 measured ticks and it is the case that looked worst.
+//
+// SESSION_EXP_MIN_H IS THE SAME BLOCK STACK AS THE CAP WITH THE PROMPT AT ITS
+// MINIMUM, which is what makes the two ends of the range ONE derivation:
+//   MIN = band 34 + name 32 + sub 24 + title 2x15 + rule 12 + LAST PROMPT 21
+//         + prompt 2x18 + rule 12 + path 15 + pad 4                      = 220
+//   MAX = MIN + (PROMPT_MAX - PROMPT_MIN) * SESSION_BAND_PROMPT_STEP     = 256
+// The checker re-derives both from the PARSED blocks and separately asserts that
+// ONE PIXEL SHORTER overdraws the bottom-anchored path group - so this is the
+// floor, not a bound chosen with room to spare.
+const int SESSION_EXP_MIN_H = 220;
+const int SESSION_EXP_MAX_H = 256;
+const int SESSION_EXP_TITLE_LINES = 2;
+const int SESSION_EXP_PROMPT_MIN = 2;
+const int SESSION_EXP_PROMPT_MAX = 4;
 
 // ---------- Session detail card and the ask screen ----------
 // The header row's TOUCH band ("< Back" on the left; TYPE or READ ALL on the

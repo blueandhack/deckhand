@@ -247,11 +247,19 @@ const KNOWN = {
 const LADDER_SHAPE = { 1: "tttncc", 2: "ttttsn" };
 // THE SIX EXPANDED HEIGHTS, one per session count, asserted for the same reason
 // LADDER_SHAPE is: changing them deliberately should cost a deliberate edit here.
-// Board 1 never expands - it has no surplus height to give and sessionExpandedH()
-// returns 0 there unconditionally - so its row is six zeros and that is the claim,
-// not an absence of one. Board 2: the top row absorbs the leftover up to
-// SESSION_EXP_MAX_H, and 4+ sessions fall back to the uniform ladder because the
-// ladder already fills the column.
+//
+// BOARD 1'S ROW WAS SIX ZEROS AND THE SENTENCE EXPLAINING THEM WAS WRONG. It read
+// "it has no surplus height to give and sessionExpandedH() returns 0 there
+// unconditionally". The second half was true and the first was not: board 1's list
+// area is 264px and its tallest ordinary row is 90, so ONE session left 174px - 66%
+// of the tab - empty, which is a bigger share than the 48% that motivated this
+// feature on board 2. The zeros were a consequence of sessionExpCandidateH() living
+// inside `#if !BOARD_USES_TFT_ESPI`, i.e. of the port, not of the arithmetic. Board
+// 1 has the card now and its own derived stack (board_e32r28t.h).
+//
+// Board 2: the top row absorbs the leftover up to SESSION_EXP_MAX_H, and 4+
+// sessions fall back to the uniform ladder because the ladder already fills the
+// column.
 //
 // n=1 is the full avail (410) capped at 336; n=2's leftover is 307, under the cap
 // and over the floor, so it is neither capped nor refused.
@@ -262,7 +270,25 @@ const LADDER_SHAPE = { 1: "tttncc", 2: "ttttsn" };
 // under its own content. The body is now the block stack the cap is summed from,
 // which needs 288, so 204 is refused and three sessions get three ordinary spine
 // rows. Deliberate, and asserted here so it cannot happen by accident.
-const EXPANDED_H = { 1: [0, 0, 0, 0, 0, 0], 2: [336, 307, 0, 0, 0, 0] };
+//
+// BOARD 1 IS A ONE-SESSION BEHAVIOUR WHERE BOARD 2 IS ONE-TO-TWO, and that is the
+// whole of the difference the smaller panel makes. Its 256 is the cap (leftover 264
+// at one session); at TWO the ladder gives both rows their 90px cap and leaves 171,
+// under a floor of 220 - a card admitted there would have 137px for a 186px body,
+// i.e. no leading and no rules, which is the "card of air" §4 forbids. Refused
+// deliberately, not by omission.
+const EXPANDED_H = { 1: [256, 0, 0, 0, 0, 0], 2: [336, 307, 0, 0, 0, 0] };
+// THE THREE WORDS EACH BOARD'S BAND ACTUALLY DRAWS, a third hand-written string for
+// the same reason as the two above: which FORM a board lands on is a consequence of
+// its panel width, and it should cost a deliberate edit to change. Board 2's 199px
+// word lane holds labelForStatus()'s full phrases; board 1's 141px lane holds only
+// "WORKING", so its band falls back to shortLabelForStatus() for the other two -
+// the words its own tall-row pill already draws. bandStatusWord() picks by
+// MEASUREMENT, so this table is the outcome, never the input.
+const BAND_WORDS = {
+  1: "WORKING / NEEDS INPUT / READY",
+  2: "WORKING / NEEDS YOUR INPUT / WAITING FOR YOU",
+};
 
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0, known = 0, total = 0;
@@ -418,7 +444,14 @@ function expPromptLines(c, bodyH) {
 // the last line of a block inks lineH of its step and the rest of the step is
 // leading. The FLOOR is derived from the blocks instead - see expCursorEnd().
 function expBands(b, c, rowH, have, cand) {
-  const NL = lineHB(b, T_HEAD);          // the name's tallest admissible rung
+  // THE NAME'S TALLEST ADMISSIBLE RUNG, WHICH IS NOT T_HEAD ON BOTH BOARDS. This
+  // read lineHB(b, T_HEAD) while only board 2 drew a band card, and board 2's
+  // SESSION_NAME_TOP_RUNG is exactly the T_HEAD index - so it was right there by
+  // coincidence. Board 1's top rung is T_HERO (26px against T_HEAD's 18), so the
+  // transcribed rung described a name 8px shorter than the one drawn and put both
+  // its neighbouring gaps 4px out. Read the INDEX the firmware's own ladder starts
+  // at instead.
+  const NL = lineHB(b, NAME_RUNGS[c.SESSION_NAME_TOP_RUNG]);
   const L = lineHB(b, T_BODY);
   const BAND = c.SESSION_BAND_H, RULE = c.SESSION_BAND_RULE_H;
   const ruleDY = Math.trunc((RULE - 1) / 2);
@@ -481,6 +514,17 @@ function statusLabels() {
   const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
   const m = src.match(/const char\* labelForStatus\(const char\* status\) \{([\s\S]*?)\n\}/);
   if (!m) throw new Error("labelForStatus() not found in deckhand_display.ino");
+  return [...m[1].matchAll(/return\s+"([^"]*)"/g)].map((x) => x[1]);
+}
+// shortLabelForStatus()'s three words, PARSED - the SHORT form of the same
+// vocabulary, and what the status band falls back to when its lane cannot hold
+// labelForStatus's full phrase. Board 1's band lane cannot (141px against a 160px
+// "NEEDS YOUR INPUT"), so on that board these ARE the band's status words and the
+// same "the only carrier that is not hue" argument applies to them.
+function shortStatusLabels() {
+  const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+  const m = src.match(/const char\* shortLabelForStatus\(const char\* status\) \{([\s\S]*?)\n\}/);
+  if (!m) throw new Error("shortLabelForStatus() not found in deckhand_display.ino");
   return [...m[1].matchAll(/return\s+"([^"]*)"/g)].map((x) => x[1]);
 }
 // The spinner art's own size, PARSED. It was transcribed as a literal 16
@@ -782,7 +826,16 @@ function spineGaps(c, rowH) {
 // card). Derived from the ladder rather than listed, so a change to the floor, the
 // cap or the content area moves this set with it.
 function spineHeights(c, contentBottom, maxSessions) {
-  const out = new Set();
+  return [...spineHeightCounts(c, contentBottom, maxSessions).keys()].sort((a, z) => a - z);
+}
+// The same enumeration, keeping the SMALLEST session count each height comes from.
+// That number is what decides whether a rung short enough to hold one Codex gap
+// instead of two is a defect or an unreachable case: 5 and 6 sessions are 0 of
+// 9,452 measured ticks, and board 1's two shortest rungs (41 and 38) are only
+// reachable there. Derived by enumeration rather than asserted, the same way the
+// board-2 note about SESSION_ROW_H_MIN already is.
+function spineHeightCounts(c, contentBottom, maxSessions) {
+  const out = new Map();
   for (const strip of [false, true]) {
     const avail = contentBottom - c.SESSION_ROW_Y0 - (strip ? c.SESSION_OVERFLOW_H : 0);
     for (let n = 1; n <= maxSessions; n++) {
@@ -792,10 +845,10 @@ function spineHeights(c, contentBottom, maxSessions) {
       // row at all is the gate's question, and it does not depend on how much of
       // its grant that card's content ends up taking.
       if (n === 1 && expCandidateH(c, 1, avail, rowH) > 0) continue;   // no ordinary row
-      out.add(rowH);
+      if (!out.has(rowH) || out.get(rowH) > n) out.set(rowH, n);
     }
   }
-  return [...out].sort((a, z) => a - z);
+  return out;
 }
 // Which layout drawSessionRow picks for a given height - the SAME three tests it
 // makes, so the checker cannot describe a row the device does not draw.
@@ -1398,7 +1451,10 @@ for (const b of [1, 2]) {
       // the shape the severity spine's assertions had to be rebuilt into.
       {
         const drawSrc = fnSrc("void drawSessionRow(int pos) {");
-        const ICON = 16;                      // MAC_EMOJI_SIZE, board 2's body cell
+        // PARSED AND PER BOARD. This was a literal 16 - board 2's body cell and its
+        // MAC_EMOJI_SIZE - which modelled board 1's reduced lane 3px narrower than
+        // the one drawWrappedText is actually given (13 there, MacEmoji.h).
+        const ICON = macEmojiSize(b);
         const subLane = lane - ICON - c.SESSION_SUB_ICON_GAP;
         chk(/subLane\s*=\s*rowEmoji\s*>=\s*0[\s\S]{0,120}?lane\s*-\s*MAC_EMOJI_SIZE\s*-\s*SESSION_SUB_ICON_GAP/.test(drawSrc),
             `the sub-line's lane is REDUCED by the icon before anything is fitted into it`);
@@ -1416,6 +1472,19 @@ for (const b of [1, 2]) {
         // above ends at the sub-line's top, and the next block starts one step down.
         chk(ICON <= c.SESSION_BAND_SUB_H,
             `the icon's ${ICON} rows fit the sub-line's ${c.SESSION_BAND_SUB_H}px step, clear of the block below`);
+        // ... AND THE GAP IS THE SAME ONE EVERY OTHER ICON-BESIDE-TEXT SITE USES.
+        // geom-sweep reported SESSION_SUB_ICON_GAP as UNGUARDED on both boards -
+        // the lane assertion above has 129px of slack, so no perturbation of it can
+        // ever fail - which is the "an assertion that cannot fail is a defect" rule
+        // arriving through a constant nothing constrains. It is bound here to the
+        // TAG site's own literal, parsed out of the row's other icon call, so the
+        // two are two independent sources that must agree rather than one restated:
+        // move either alone and this fails by name.
+        const tagGap = drawSrc.match(/drawString\(agentTag, tagRight - MAC_EMOJI_SIZE - (\d+),/);
+        chk(!!tagGap, `the row's tag site spells its icon gap as a literal this can read`);
+        chk(!!tagGap && +tagGap[1] === c.SESSION_SUB_ICON_GAP,
+            `SESSION_SUB_ICON_GAP ${c.SESSION_SUB_ICON_GAP} IS the gap the row's own ` +
+            `icon-beside-text site uses (${tagGap ? tagGap[1] : "?"}) - one rule, two readers`);
       }
       chk(c.SESSION_EXP_PROMPT_MAX * perLine >= CAP.prompt - 3,
           `prompt: ${c.SESSION_EXP_PROMPT_MAX} lines hold ${c.SESSION_EXP_PROMPT_MAX * perLine} of ${CAP.prompt - 3} chars (lane ${lane}px = ${perLine}/line at ${adv}px)`);
@@ -1441,7 +1510,7 @@ for (const b of [1, 2]) {
       // trailing air and the path's tail are both smaller and therefore covered.
       const RDY = Math.trunc((c.SESSION_BAND_RULE_H - 1) / 2);
       const MAX_LEAD = Math.max(
-        c.SESSION_BAND_NAME_H - lineHB(b, T_HEAD),
+        c.SESSION_BAND_NAME_H - lineHB(b, NAME_RUNGS[c.SESSION_NAME_TOP_RUNG]),
         c.SESSION_BAND_SUB_H - L,
         c.SESSION_BAND_TITLE_STEP - L,
         c.SESSION_BAND_LABEL_H - L,
@@ -1589,7 +1658,13 @@ for (const b of [1, 2]) {
   // ---- §3/§4 band card: the cap is DERIVED, so assert it against its own blocks ----
   // The spec's rule: "the sum of the blocks that can actually carry ink". A future
   // field that adds a line must move this sum, not slip past it.
-  if (b === 2) {
+  //
+  // BOTH BOARDS NOW. This whole section was `if (b === 2)` because only board 2 had
+  // a band card; board 1 has one, derived from ITS OWN cells rather than scaled off
+  // board 2's, so every assertion below is re-run against board_e32r28t.h. The
+  // §6 animation assertions further down stay board 2's - board 1 draws straight to
+  // the glass and takes the band's layout without its motion.
+  {
     const B2 = (n) => c[`SESSION_BAND_${n}`];
     const blocks = [
       ["band", c.SESSION_BAND_H],
@@ -1607,6 +1682,20 @@ for (const b of [1, 2]) {
     chk(c.SESSION_EXP_MAX_H === sum,
         `SESSION_EXP_MAX_H ${c.SESSION_EXP_MAX_H} is the sum of the band card blocks ` +
         `(${blocks.map(([n, v]) => `${n} ${v}`).join(" + ")} = ${sum})`);
+    // THE NAME BLOCK MUST HOLD THE RUNG THE DRAW STARTS AT, and that is not the same
+    // rung on the two boards: SESSION_NAME_TOP_RUNG indexes drawSessionRow's
+    // NAME_RUNGS[], 0 = T_HERO on board 1 (a 26px cell) and 1 = T_HEAD on board 2
+    // (24). The draw centres the name in SESSION_BAND_NAME_H, so a block shorter
+    // than the cell centres it at a NEGATIVE offset - the name drawn up into the
+    // band it hangs under, which is the shape §7's own mutilation had on the detail
+    // card. This is also what binds expBands' model of the name band to the rung the
+    // firmware actually starts from.
+    {
+      const NL = lineHB(b, NAME_RUNGS[c.SESSION_NAME_TOP_RUNG]);
+      chk(NL <= B2("NAME_H"),
+          `the name block (${B2("NAME_H")}px) holds the top rung's ${NL}px cell, ` +
+          `centred with ${Math.trunc((B2("NAME_H") - NL) / 2)}px above it`);
+    }
 
     // The two byte caps that bound the line counts. These are the reason the sum is
     // what it is: a 5th prompt line and a 3rd title line can never carry ink.
@@ -1827,9 +1916,15 @@ for (const b of [1, 2]) {
           .slice(fs.readFileSync(`${DIR}/sessions.ino`, "utf8").indexOf("void bandStatusWord("))),
         `the band's word comes from labelForStatus(), not a second table`);
 
-    // The card must fit the column it is drawn in.
-    chk(c.SESSION_EXP_MAX_H <= 410,
-        `the band card cap (${c.SESSION_EXP_MAX_H}) fits the 1-session list area`);
+    // The card must fit the column it is drawn in. DERIVED, not the literal 410
+    // this carried: 410 is board 2's list area and board 1's is 264, so the
+    // transcribed number would have passed anything board 1 could declare.
+    {
+      const listArea = contentBottom - c.SESSION_ROW_Y0;
+      chk(c.SESSION_EXP_MAX_H <= listArea,
+          `the band card cap (${c.SESSION_EXP_MAX_H}) fits the 1-session list area ` +
+          `(${listArea}px, ${listArea - c.SESSION_EXP_MAX_H} left outside it)`);
+    }
     // The band's own contents must fit ACROSS. This is the arithmetic that fails on
     // the detail screen (FINDING 1) and passes here - assert it so the two stay apart.
     // DERIVED FROM THE TWO HELPERS, term for term, rather than written out:
@@ -1848,10 +1943,51 @@ for (const b of [1, 2]) {
     // The literal 12 in the plan mirrors board_es3c35p.h's own comment
     // ("16 chars at T_HEAD's 12px advance = 192"); parsed here instead so a face
     // swap fails this checker rather than drifting past it.
-    const headAdv = advanceB(b, T_HEAD);
-    const longestWord = "NEEDS YOUR INPUT".length * headAdv;
-    chk(longestWord <= bandRoom,
-        `the band's longest status word (${longestWord}px) clears the duration (room ${bandRoom}px)`);
+    // THE BAND SHOWS THE LONGEST FORM ITS OWN LANE HOLDS, and this used to be a
+    // single assertion that board 1 cannot satisfy at any pad. labelForStatus's
+    // "NEEDS YOUR INPUT" inks 16 x T_HEAD's advance - 192 on board 2, 160 on board
+    // 1 - against a room of 199 and 141. Clearing 160 on board 1 needs
+    // 2*SESSION_BAND_PAD + SESSION_BAND_MARK_GAP <= 9, i.e. the mark and the word
+    // cannot both have the band. The mark stays (it is that card's only agent
+    // carrier and its only motion, since the row indicator is skipped there) and
+    // bandStatusWord() falls back to shortLabelForStatus(), MEASURED.
+    //
+    // So the assertion is per status and per board: whatever the band would draw
+    // must FIT, and the three words must stay distinct - the band card has no pill
+    // and no shape, so this word is its only carrier that is not hue, on either
+    // board.
+    {
+      const LONGW = statusLabels().map((w) => w.toUpperCase());
+      const SHORTW = shortStatusLabels();
+      chk(SHORTW.length === 3 && new Set(SHORTW).size === 3 &&
+          SHORTW.every((w) => w.trim().length > 0),
+          `shortLabelForStatus() returns three DISTINCT, non-empty words (${SHORTW.join(" / ")})`);
+      // THE FALLBACK IS MEASURED IN THE FUNCTION'S OWN BODY, not modelled here. The
+      // widths below would go on agreeing with themselves after the firmware
+      // stopped choosing between the two forms at all.
+      {
+        const bsw = fnSrc("void bandStatusWord(const char* status, char* out, size_t n, int lane) {");
+        chk(/tft\.textWidth\(word\) > lane\)\s*\n?\s*snprintf\(word, sizeof\(word\), "%s", shortLabelForStatus\(status\)\);/.test(bsw),
+            `bandStatusWord() MEASURES the full phrase against the lane and drops to ` +
+            `shortLabelForStatus() only when it does not fit`);
+        chk(/fitText\(out, n, word, lane\);/.test(bsw),
+            `... and still fits the result, so a future longer label is bounded rather than overrun`);
+      }
+      const drawn = LONGW.map((w, i) => widthB(b, T_HEAD, w) <= bandRoom ? w : SHORTW[i]);
+      for (let i = 0; i < drawn.length; i++)
+        chk(widthB(b, T_HEAD, drawn[i]) <= bandRoom,
+            `the band draws "${drawn[i]}" (${widthB(b, T_HEAD, drawn[i])}px) inside its ${bandRoom}px word lane`);
+      chk(new Set(drawn).size === drawn.length,
+          `the band's three words are DISTINCT (${drawn.join(" / ")}) - it has no pill and no shape, ` +
+          `so this word is its only carrier that is not hue`);
+      // ... AND WHICH FORM EACH BOARD LANDS ON IS THE DOCUMENTED CLAIM, for the same
+      // reason LADDER_SHAPE is a hand-written string: board 1 shortening two of the
+      // three is a real cost of its panel and should cost a deliberate edit here if
+      // it ever changes, and board 2 quietly starting to shorten one would be a
+      // regression nothing else in this file could see.
+      chk(drawn.join(" / ") === BAND_WORDS[b],
+          `board ${b}'s band words are "${drawn.join(" / ")}" == the "${BAND_WORDS[b]}" this checker documents`);
+    }
 
     chk(c.SESSION_SPINE_W >= 4 && c.SESSION_SPINE_W <= 8,
         `the spine is narrower than the card border radius allows to be lost`);
@@ -1929,24 +2065,53 @@ for (const b of [1, 2]) {
     // reaches it here - spineHeights() establishes that by ENUMERATION rather than
     // by assertion. At the floor the straight section would hold only one gap; it
     // is stated in the header rather than left as a silent pixel of luck.
-    const rows = spineHeights(c, contentBottom, MAX_SESSIONS);
-    const shortest = rows[0];
-    const straightMin = shortest - 2 * c.BORDER_CARD - 2 * c.SESSION_SPINE_INSET - 2 * sr;
-    chk((c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF) * 2 <= straightMin,
-        `the pattern's period ${c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF} fits twice in the shortest ` +
-        `REACHABLE spine's straight section (${straightMin}px on a ${shortest}px row; the ladder never ` +
-        `reaches SESSION_ROW_H_MIN ${c.SESSION_ROW_H_MIN} on this board)`);
+    const counts = spineHeightCounts(c, contentBottom, MAX_SESSIONS);
+    const rows = [...counts.keys()].sort((a, z) => a - z);
+    const straightOf = (h) => h - 2 * c.BORDER_CARD - 2 * c.SESSION_SPINE_INSET - 2 * sr;
+    const P = c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF;
+    // THE BOUND IS AGAINST THE SHORTEST ROW REACHABLE AT FOUR OR FEWER SESSIONS,
+    // not against the shortest reachable at all, and the change is board 1's.
+    // 5 and 6 sessions are 0 of 9,452 measured ticks; board 1's ladder puts a 41px
+    // row at five and a 38px row at six (under the "+N more" strip), whose straight
+    // sections are 19 and 16 against a period of 10 - so they hold ONE gap. That is
+    // not fixable rather than untried: ON > SESSION_SPINE_W and OFF >= 2/3 of it
+    // give P >= 10 on a 5px spine, while a 38px row allows 6. Asserted below as one
+    // gap plus the session count that reaches it, so the compromise is bounded
+    // rather than waived.
+    const reach4 = rows.filter((h) => counts.get(h) <= 4);
+    const shortest = reach4[0];
+    const straightMin = straightOf(shortest);
+    // The shortest straight section at ANY session count, which is what the
+    // shimmer's two bounds are measured against further down - a light clipped at
+    // the ends of a six-session row is still a clipped light, where a Codex gap it
+    // cannot fit is simply one gap instead of two. Kept as its own name so the two
+    // questions cannot be answered with each other's number.
+    const straightAny = straightOf(rows[0]), shortestAny = rows[0];
+    chk(P * 2 <= straightMin,
+        `the pattern's period ${P} fits twice in the shortest spine reachable at FOUR or fewer ` +
+        `sessions (${straightMin}px on a ${shortest}px row, from ${counts.get(shortest)} sessions)`);
     // EVERY REACHABLE SPINE HEIGHT, walked the way the loop in drawSessionSpine
-    // walks it: no knockout may start above the top arc or end below the bottom
-    // one, and every row that can carry a spine must show at least two gaps.
+    // walks it: no knockout may start above the top arc or end below the bottom one.
     for (const rowH of rows) {
       const g = spineGaps(c, rowH);
-      chk(g.gaps.length >= 2,
-          `spine on a ${rowH}px row: ${g.gaps.length} Codex gaps ` +
-          `(${g.gaps.map(([a, z]) => `+${a}..+${z}`).join(" ")})`);
+      const n = counts.get(rowH);
+      const where = `spine on a ${rowH}px row (reachable at ${n} sessions)`;
+      const list = g.gaps.map(([a, z]) => `+${a}..+${z}`).join(" ");
+      if (straightOf(rowH) >= 2 * P)
+        chk(g.gaps.length >= 2, `${where}: ${g.gaps.length} Codex gaps (${list})`);
+      else {
+        // The straight section cannot hold two: assert the ONE it does hold, and
+        // that the rung is only reachable in the session counts nobody has ever
+        // produced. If a FOUR-session rung ever fell into this arm, this fails.
+        chk(g.gaps.length >= 1,
+            `${where}: ${g.gaps.length} Codex gap (${list}) - its ${straightOf(rowH)}px straight ` +
+            `section cannot hold two at a period of ${P}`);
+        chk(n >= 5,
+            `... and a row that short is only reachable at ${n} sessions, which is 0 of 9,452 measured ticks`);
+      }
       for (const [a, z] of g.gaps)
         chk(a >= g.r && z <= g.h - g.r - 1,
-            `spine on a ${rowH}px row: gap +${a}..+${z} is inside the straight section +${g.r}..+${g.h - g.r - 1}`);
+            `${where}: gap +${a}..+${z} is inside the straight section +${g.r}..+${g.h - g.r - 1}`);
     }
     // IT CLEARS EVERYTHING THE ROW ALREADY DRAWS, which is what makes this a
     // second carrier rather than a replacement. The mark is a 32x32 BLIT that
@@ -2138,7 +2303,17 @@ for (const b of [1, 2]) {
           "deleting drawBandMark(pos) is the same static card by the other route");
     }
 
-    // ---- §6 THE TWO ADOPTED ANIMATIONS ----
+    // ---- §6 THE TWO ADOPTED ANIMATIONS: BOARD 2 ONLY ----
+    // Board 1 has the band's LAYOUT and none of its motion: it draws straight to
+    // the glass, where a crossfade, a breath or a travelling light is a per-frame
+    // repaint with no deferred flush to ride and no PERF command to measure it
+    // with. So this block - and SESSION_SHIMMER_* / SESSION_PULSE_MAX with it -
+    // is asserted on board 2 alone, and board_e32r28t.h says so by name rather
+    // than leaving the absence to be discovered.
+    if (b === 2) {
+    // Not indented, deliberately: this guard wraps 300 lines that are unchanged,
+    // and re-indenting them would bury the four real edits in this file under a
+    // whitespace diff.
     // Both are PARSED out of the draw and the tick, because none of the geometry
     // above can see an animation at all: a crossfade and an instant swap produce
     // the same final frame, and a shimmer that painted the arcs would look right
@@ -2445,9 +2620,9 @@ for (const b of [1, 2]) {
     // produce, or the light is clipped at both ends on the very rows the spine
     // exists for; and the peak must stay under half, or the spine stops reading as
     // its status colour at the moment it is most visible.
-    chk(2 * c.SESSION_SHIMMER_LEN <= straightMin,
+    chk(2 * c.SESSION_SHIMMER_LEN <= straightAny,
         `the shimmer's head and falloff (${2 * c.SESSION_SHIMMER_LEN}px) fit inside the shortest ` +
-        `reachable straight section (${straightMin}px on a ${shortest}px row)`);
+        `reachable straight section (${straightAny}px on a ${shortestAny}px row)`);
     // The ARITHMETIC half only. "Under half the blend weight" is NOT the same claim
     // as "still reads as its status colour" - 126/255 satisfies this and fails the
     // perceptual bound in the animation block above, which is the one that means
@@ -2456,9 +2631,10 @@ for (const b of [1, 2]) {
     chk(c.SESSION_SHIMMER_MAX > 0 && c.SESSION_SHIMMER_MAX < 128,
         `the shimmer's peak ${c.SESSION_SHIMMER_MAX}/255 is a sane blend weight (the claim that it still ` +
         `reads as its status colour is the perceptual bound, not this)`);
-    chk(c.SESSION_SHIMMER_STEPS * 2 >= straightMin,
-        `one traverse is ${c.SESSION_SHIMMER_STEPS} frames over ${straightMin}px - the head moves at most ` +
+    chk(c.SESSION_SHIMMER_STEPS * 2 >= straightAny,
+        `one traverse is ${c.SESSION_SHIMMER_STEPS} frames over ${straightAny}px - the head moves at most ` +
         `2px a frame, so it travels rather than jumps`);
+    }   // end of the board-2-only §6 animation block
   }
 
   // ---- the name lane: MEASURED, never counted ----

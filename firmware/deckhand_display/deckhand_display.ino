@@ -1765,6 +1765,22 @@ const char* labelForStatus(const char* status) {
   if (strcmp(status, "asking") == 0) return "needs your input";
   return "waiting for you";
 }
+// THE SAME THREE STATES IN THE SHORT FORM - the words a tall row's status pill
+// already draws, factored out of drawSessionRow's two string literals rather than
+// invented, so this is not a fourth vocabulary to keep in step.
+//
+// IT EXISTS BECAUSE OF ONE MEASUREMENT. The status band's word lane is 141px on
+// board 1 (a 224px card, T_HEAD's 10px advance) against 199 on board 2, and
+// labelForStatus's longest phrase inks 160 there - over by 19, with no pad that
+// card can afford closing it (see SESSION_BAND_DUR_CHARS in board_e32r28t.h). So
+// bandStatusWord() shows the longest form its own lane holds, MEASURED: the full
+// phrase on board 2, these on board 1. Upper case here because that is the form
+// both readers want; labelForStatus is lower and the band uppercases it.
+const char* shortLabelForStatus(const char* status) {
+  if (strcmp(status, "working") == 0) return "WORKING";
+  if (strcmp(status, "asking") == 0) return "NEEDS INPUT";
+  return "READY";
+}
 
 // Shape is a second, color-independent cue, since color alone should never
 // be the only way a state is conveyed: solid dot = working, filled square =
@@ -1863,7 +1879,6 @@ void drawAgentSpinner(int cx, int cy, uint16_t bg, bool codex) {
   blit2bpp(codex ? CODEX_BITS[animPhase % CODEX_FRAMES] : SPARK_BITS[animPhase % SPARK_FRAMES],
            SPARK_SIZE, SPARK_STRIDE, cx, cy, bg, colorForStatus("working"));
 }
-#if !BOARD_USES_TFT_ESPI
 // The SAME art as drawAgentSpinner, with the two things the status band needs and
 // that function cannot give it: an arbitrary TINT (the band draws the mark
 // card-coloured ON the status colour, the inverse of every other site) and a
@@ -1872,11 +1887,14 @@ void drawAgentSpinner(int cx, int cy, uint16_t bg, bool codex) {
 // top, not its middle, so no site here carries a centring term.
 //
 // A SECOND three-line wrapper over blit2bpp rather than a refactor of the first,
-// and that is bought deliberately: drawAgentSpinner and its two call sites are
-// compiled into BOARD 1, whose binary is held byte-identical, so touching them
-// risks moving it for no functional gain. Two wrappers over one blitter is cheap
-// duplication against that. Guarded to board 2 for the same reason - an unused
-// non-static function can still be emitted into the image.
+// and that is bought deliberately: drawAgentSpinner takes a CENTRE and tints with
+// colorForStatus("working"), which is what its two row call sites want; this one
+// takes a TOP-LEFT origin and an arbitrary tint, which is what the band wants.
+// Two wrappers over one blitter is cheap duplication against a six-argument
+// function every caller has to read the defaults of. It USED to be guarded to
+// board 2, because board 1's binary was held byte-identical and an unused
+// non-static function can still be emitted into the image; board 1 draws the band
+// now, so the guard is gone and both boards call it.
 //
 // `animate` false is the rest pose (frame 0); true follows the shared animPhase,
 // so a band and a row indicator cycling at once stay in step by construction.
@@ -1886,7 +1904,6 @@ void drawAgentMark(int x, int y, bool codex, uint16_t fg, uint16_t bg, bool anim
   blit2bpp(art, SPARK_SIZE, SPARK_STRIDE,
            x + SPARK_SIZE / 2, y + SPARK_SIZE / 2, bg, fg);
 }
-#endif
 
 // ---------------------------------------------------------------------------
 // The standalone screen: what the device shows before the host has ever spoken.
@@ -2755,9 +2772,19 @@ unsigned long lastPulseMs = 0;
 // two different things and conflating them has already stranded a saving on this
 // board once (see savingsSync). Every path that paints a band goes through that
 // one function, so the record cannot drift from the panel.
+//
+// SHARED, not board 2's: drawSessionBand writes it on both boards and
+// drawBandMarkAt reads it back as the background for the mark's 32x32 blit. On
+// board 1 it can only ever hold the flat status colour (there is no fade and no
+// breath there), which is exactly why it is still a record rather than a
+// recomputation - a second copy of "what colour is that band" is the one property
+// this file has already paid for getting wrong.
+#endif
 uint16_t bandFillShown = 0;
+#if !BOARD_USES_TFT_ESPI
 uint32_t pulseComposeUs = 0, pulseFlushUs = 0, pulseWorstUs = 0;
 uint16_t pulseFrameCount = 0;
+#endif
 // ---------- The band card's MEASURED height ----------
 // THE CARD IS AS TALL AS WHAT IT DRAWS, and these two are the measurement that
 // makes that true. The ladder's leftover is only the card's CEILING; the height
@@ -2780,7 +2807,6 @@ uint16_t pulseFrameCount = 0;
 int expCardH = 0;        // 0 = no card, or not measured yet
 int expCardPrompt = 0;   // prompt lines this card's height paid for
 int expHCache = 0;       // the height the list was last laid out at
-#endif
 
 // Kept as the "force a full repaint" entry point (tab switch, closing the
 // detail screen): invalidating the count cache makes renderSessionsList
@@ -2817,7 +2843,6 @@ void tickWorkingSpinner() {
     // Same two helpers as the draw: the first row's height can differ from the
     // rest, and an animation redrawing at the old y four times a second is exactly
     // how the last fix to this indicator's position was undone once.
-#if !BOARD_USES_TFT_ESPI
     // The band card carries its agent mark IN THE BAND, so this row has no
     // indicator of its own to advance - blitting one here would put a second
     // spark in the card's name band, 44px below the mark it duplicates. The
@@ -2828,7 +2853,6 @@ void tickWorkingSpinner() {
     // tickSessionAnim so it lands on the SAME animPhase as every other row and
     // rides the trailing flush below.
     if (sessionRowExpanded(pos)) { drawBandMark(pos); continue; }
-#endif
     int y = sessionRowYAt(pos);
     int rowH = sessionRowHAt(pos);
     int dotCy = rowH >= SESSION_LARGE_MIN_H ? y + SESSION_DOT_DY : y + rowH / 2;
@@ -3799,22 +3823,15 @@ void handleTouch() {
   }
 
   if (currentTab == TAB_SESSIONS && sessionCount > 0 && sy >= SESSION_ROW_Y0) {
-#if BOARD_USES_TFT_ESPI
-    // Every row is the same height on this board, so one division answers it - and
-    // this is deliberately still the arithmetic it always was rather than the walk
-    // below, because this board's binary is held byte-identical across the port.
-    int slot = sessionRowH + SESSION_ROW_GAP;
-    int row = (sy - SESSION_ROW_Y0) / slot;
-    int offsetInSlot = (sy - SESSION_ROW_Y0) % slot;
-    if (row >= 0 && row < sessionCount && offsetInSlot < sessionRowH) openSessionDetail(sessionAt(row));
-#else
-    // The first row can be TALLER than the rest, so the uniform-slot division is
-    // wrong here by construction: it must consult the SAME helpers the layout and
-    // the draw use, or a tap lands on a different session from the one under the
-    // finger. A gap between rows returns -1 and is ignored rather than guessed.
+    // The first row can be TALLER than the rest, so the uniform-slot division this
+    // used to do on board 1 is wrong here by construction: it must consult the SAME
+    // helpers the layout and the draw use, or a tap lands on a different session
+    // from the one under the finger. A gap between rows returns -1 and is ignored
+    // rather than guessed. ONE walk on both boards now - board 1's arm was the
+    // division, kept while its binary was held byte-identical, and it would report
+    // the wrong row for every tap below a band card.
     int row = sessionRowAtY(sy);
     if (row >= 0) openSessionDetail(sessionAt(row));
-#endif
   }
 
   if (currentTab == TAB_SETTINGS) handleSettingsTouch(sx, sy);

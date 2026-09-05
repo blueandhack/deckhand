@@ -9,6 +9,86 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 
 ---
 
+- **BOARD 1 HAS THE STATUS BAND CARD NOW, DERIVED FROM ITS OWN CELLS.** It was board 2's
+  alone, and the sentence explaining why - "board 1 has no surplus height to give" - was
+  false: its list area is 264px and its tallest ordinary row is 90, so ONE session (69% of
+  9,452 measured ticks) drew a 90px row and then **174px of empty tab, 66% of the tab**,
+  against the 48% that motivated the card on board 2. The zeros were a consequence of
+  `sessionExpCandidateH()` living inside `#if !BOARD_USES_TFT_ESPI`, not of the arithmetic.
+  The port is ONE implementation reading two headers: the guards in `sessions.ino` were
+  widened rather than a board-1 arm copied in.
+  - **The blocks, and how the leadings were derived.** Each block is one line of INK plus
+    its leading. Board 1's ink is fixed by its faces (name 26, every body line 13, a rule 1)
+    and comes to 145px for the full stack; the band takes 34 of the 264, leaving 230, i.e.
+    **85px of leading to distribute against board 2's 122**. Each block therefore takes
+    board 2's own leading scaled by 85/122 = 0.697 and floored, which spends 77 and leaves
+    8px outside the card as list area. The reason board 1 is *tighter* than a proportional
+    scale is that **its name is not scaled**: the hero rung's 26px cell stays, which is 2px
+    MORE than board 2's head-rung name on a panel with 64% of the height.
+    band 34 + name 32 + sub 24 + title 2x15 + rule 12 + LAST PROMPT 21 + prompt 4x18 +
+    rule 12 + path 15 + pad 4 = **`SESSION_EXP_MAX_H` 256**, with
+    **`SESSION_EXP_MIN_H` 220** the same stack at `PROMPT_MIN`.
+  - **The band is 34 because the MARK does not scale.** Board 2's 44 is `TAB_BAR_H` less the
+    card's border, which here would give 32 - but `drawAgentMark` is a 32x32 blit on both
+    boards, drawn on the card interior, so `SESSION_BAND_H - BORDER_CARD >= SPARK_SIZE`
+    binds instead. The mark sits FLUSH in the band's 32-row interior with no clearance
+    either side. Seen on the glass: band rows 40..71, mark ink reaching both.
+  - **THE BAND CANNOT CARRY THE MARK *AND* THE FULL STATUS PHRASE, and that is measured.**
+    The word lane is `ROW_W - 2*BORDER_CARD - 2*PAD - SPARK_SIZE - MARK_GAP - DUR_CHARS*ADV
+    - 1` = **141px** on board 1 against 199 on board 2, and `labelForStatus`'s
+    "NEEDS YOUR INPUT" inks 16 x T_HEAD's 10px advance = **160**. Clearing it would need
+    `2*SESSION_BAND_PAD + SESSION_BAND_MARK_GAP <= 9`, so no pad this card can afford
+    closes it. The mark stays - it is the card's only agent carrier and its only motion,
+    since the row indicator is skipped there - and `bandStatusWord()` **measures** and drops
+    to `shortLabelForStatus()`, the words board 1's own tall-row pill already draws:
+    WORKING / NEEDS INPUT / READY, longest 110 of 141. Board 2 never takes that branch.
+    One mechanism on both boards, not a second vocabulary; the pill's two literals moved
+    into that function so there is one table rather than two.
+  - **THE LADDER: board 1's card is a ONE-session behaviour where board 2's is one-to-two.**
+    `leftover = 264 - (n-1)*(rowH + 3)` against the 220 floor: **1 -> 256 (the cap)**,
+    2 -> 171, 3 -> 86, 4 -> 66, 5 -> 52, 6 -> 44, all refused. At two sessions the ladder
+    gives both rows their 90px cap and 171 is left; a card there would have 137px for a
+    186px body - no leading and no rules, the "card of air" the design forbids. Refused
+    deliberately, and the **81px of trailing air at two sessions is the accepted cost**, not
+    a regression: it is the ladder's own `SESSION_ROW_H_MAX` and predates this work.
+  - **The spine is 5px, not board 2's 6, and it is STATIC.** `SESSION_DOT_CX - SPARK_SIZE/2`
+    is x=15 and the spine starts at x=10, so its ink must end at 14 - at 6 its last column
+    would be erased by the indicator blit four times a second, the defect board 2 measured
+    at 17 pixels. The Codex knockout's period is `ON 6 + OFF 4 = 10` against a straight
+    section of `rowH - 22`, so **two gaps need rowH >= 42**: board 1's 41px (five sessions)
+    and 38px (six, under the "+N more" strip) rungs carry ONE. Unfixable rather than
+    untried (ON > `SESSION_SPINE_W` and OFF >= 2/3 of it give P >= 10 on a 5px spine) and
+    unreachable in practice - 5 and 6 sessions are 0 of 9,452 ticks. `sessions-geom-check`
+    asserts two gaps on every rung reachable at four or fewer sessions and one below that.
+  - **NO SHIMMER, NO CROSSFADE, NO PULSE ON BOARD 1**, deliberately and by name.
+    `SESSION_SHIMMER_*` and `SESSION_PULSE_MAX` do not exist in `board_e32r28t.h`. Board 2
+    composes into a PSRAM shadow framebuffer and flushes once, so a travelling light rides a
+    flush that was happening anyway; board 1 draws STRAIGHT TO THE GLASS, where the same
+    animation is a per-frame repaint with no flush to hide behind and no `PERF` command to
+    measure it with. `sessionXfadeT`/`sessionPulseA`/`sessionBandFill` are three
+    `static inline` stubs there, so `drawSessionBand`'s source text is identical on both
+    boards and its fade terms fold away. **The band's MARK still animates on board 1** -
+    `tickWorkingSpinner` advances it in place - so the one-session working card is not
+    static.
+  - **The touch hit test now walks `sessionRowAtY()` on both boards.** Board 1 kept a
+    uniform-slot division (`(sy - Y0) / (rowH + GAP)`) while its binary was held
+    byte-identical; with a 256px first row that division reports the wrong session for
+    every tap below the card. `SESSION_ROW_SIG_LEN` also grew 176 -> 304 there, because the
+    band card signs its prompt and path - 768 bytes of DRAM, the price of the card.
+  - **Seen on board 1's REAL PANEL** (`SCREENSHOT` reads the glass on board 1, unlike board
+    2's framebuffer read), 2026-09-05, LIGHT, one working session: band 38..71 with the
+    mark, `WORKING` and `54s`; name ink 77..94; sub 105..116 with the Mac icon
+    right-anchored at x=207; title 129..140; rule at 148; `LAST PROMPT` 157..164; four
+    prompt lines at 177/195/213/231; rule at 253; path 261..272; card border 38..279.
+    Every one of those is the model's own number - **except that `uiStrokeRound` paints the
+    bottom border one row BELOW `y + rowH - 2` on this board**, so a 241px card's ring lands
+    at 278..279 rather than 277..278. That is pre-existing (an ordinary 63px row does the
+    same, and the extra row falls inside `SESSION_ROW_GAP`), and it is written down here
+    because it cost half an hour of believing the card was 242px tall.
+    `MULTITEST` at 2, 3 and 4 sessions confirmed the ladder on the glass: two 90px rows,
+    three 86px rows and four 63px rows, spines visible on each, and **no band card at any
+    of them**.
+
 - **The session DETAIL screen is laid out by a running cursor, and its extra text all
   comes from the same transcript read.** It carries name, title, status pill (with
   `for 12m - 14:31` beside it), LAST PROMPT, PATH, and then MODEL/GIT BRANCH and
