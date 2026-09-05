@@ -367,10 +367,19 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   script, so producing one means converting NVIDIA's NeMo checkpoint with torch/NeMo. Worth
   revisiting only if someone publishes a real ggml `.bin` — Parakeet TDT is a transducer, so it
   would be faster than Whisper, but turbo already solves the accuracy problem.
-- **A dictation is DELIVERED TO YOU, not run for you (`DECKHAND_VOICE_DELIVERY`, default
-  `clipboard`).** The transcript goes to the Mac's clipboard plus a notification naming the project
-  to paste into; the device card reads COPIED - PASTE IT. `dispatch` restores the original
-  behaviour below. The default flipped after the first real use, which produced all three of these
+- **A dictation or typed message is POSTED INTO THE LIVE SESSION (`DECKHAND_VOICE_DELIVERY`,
+  default `inbox`, since 2026-09-05).** The host writes it to that session's own Unix domain
+  messaging socket and it lands in the running conversation — see the correction below, and
+  `host/session-inbox.mjs`. `clipboard` forces the previous behaviour and is the escape hatch;
+  `dispatch` restores the original headless behaviour below. **Every failure falls back to the
+  clipboard and names its cause in the log** — there are four (no socket on the session record, a
+  socket whose session exited, a failed write, and a write that succeeded and delivered nothing),
+  and unannounced they would all look like the clipboard being the design.
+- **The clipboard hand-off, which was the default from the day `dispatch` was demoted until
+  2026-09-05.** The transcript goes to the Mac's clipboard plus a notification naming the project
+  to paste into; the device card reads COPIED - PASTE IT. Still exactly what
+  `DECKHAND_VOICE_DELIVERY=clipboard` does, and still the fallback. It displaced `dispatch` after
+  the first real use, which produced all three of these
   at once: the headless run became a **second author** appending to the same conversation
   concurrently (both writing one transcript, neither able to see the other), nothing needing
   permission could finish (see below), and a mis-heard word went straight to work — "make sure
@@ -381,13 +390,48 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   interpolated into AppleScript where a stray quote breaks or alters the script. The `clip` state
   is backward-compatible — an older device falls through to a generic "VOICE" label — so the host
   half ships on its own.
-  **There is no way to inject a prompt into a running interactive session**, which is why the
+  ~~**There is no way to inject a prompt into a running interactive session**, which is why the
   fallback is headless. Checked, not assumed: the transcript's `queue-operation` records are an
   *effect* the app writes (enqueue then dequeue), not an input, and no queue file exists under
   `~/.claude`; `--resume`/`--continue` both start a new process against a session's history; and
   `~/.claude/ide/<port>.lock` does describe a live websocket with an auth token (the port is open),
   but it belongs to the VS Code integration, is an undocumented internal protocol, and delivers to
-  whichever editor holds the lock rather than the session you aimed at.
+  whichever editor holds the lock rather than the session you aimed at.~~
+  **CORRECTED 2026-09-05 — this is now FALSE.** Kept above rather than deleted, because every one
+  of those four findings is still individually true and re-checking them would cost the next
+  reader the same afternoon. What the investigation missed is a fifth channel it never looked at:
+  Claude Code exports **`CLAUDE_CODE_MESSAGING_SOCKET`** (`/tmp/cc-socks/<pid>.sock`) and
+  **`CLAUDE_CODE_MESSAGING_TOKEN`** (32 hex) into every process it spawns, hooks included, and
+  anything that can read that pair may post into the live conversation. Note where the old
+  reasoning went wrong: `queue-operation`/`enqueue` was read as *only* an effect, and it is —
+  but it is the effect of exactly this input, which makes it the confirmation signal rather than
+  a dead end.
+  - **Reading the environment from a hook is the whole mechanism.** There is no registry, no CLI
+    subcommand, and no derivation from a session id; the number in the path is the Claude Code
+    process's own pid, but nothing relies on that.
+    `claude-hooks/deckhand-session-hook.mjs` publishes both fields as `inbox` on the session
+    record, and `host/index.mjs` consumes them there. The token never reaches the device — the
+    device payload is built field by field and does not include it.
+  - **Ancestry does not matter, which is why the Deckhand host can do this at all.** Measured: a
+    `launchd`-parented process with `ppid=1` and no relationship to the session posted into it
+    successfully. That is exactly the shape the host has, running as `DeckhandBLE.app`.
+  - **The message arrives attributed to a peer session**, not as your own typing — the transcript
+    renders it as "Another Claude session sent a message: ...". Inherent to the mechanism.
+  - **THE WIRE FORMAT IS UNDOCUMENTED AND GETTING IT WRONG IS SILENT.** Two newline-terminated
+    JSON lines on one connection: `{"type":"auth","token":"..."}` then
+    `{"type":"user","message":{"role":"user","content":"..."}}`. The first guess,
+    `{"type":"message","text":...}`, is wrong — and the socket **accepted it, reported a
+    successful write, and discarded the message**. Re-measured 2026-09-05 on a live session: the
+    bad frame's write callback returned no error and the transcript gained no `enqueue`. There is
+    no ack and no error line, so **a successful write is never proof of delivery**: the host
+    confirms by watching the target's own transcript for a `queue-operation`/`enqueue` whose
+    `content` carries the text, from an offset taken *before* the write, and treats an
+    unconfirmed send as a failure. `host/session-inbox-check.mjs` binds the frame shape to the
+    code that builds it, so a revert to the discarded shape fails by name.
+  - **Limits, from the documented behaviour of the channel:** ~1M characters per message, a burst
+    cap, at most 50 queued messages, and the connection is closed if a complete line does not
+    arrive within 30 seconds. Deckhand's own cap is 150 bytes, so only the last applies — the
+    host opens the socket only once it has the text, writes both lines, and closes.
 - **A pending QUESTION can be answered by speaking, and the confirm tap is what authorises it.**
   The device records with the ask's pid in the stream header (`answer=<pid>`), the host transcribes
   and PARKS the text rather than dispatching it, publishes it back on the ask (`voiceText`,
