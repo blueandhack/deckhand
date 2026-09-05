@@ -273,6 +273,30 @@ const unsigned long KB_REPEAT_EVERY_MS = 120;   // then ~8 deletions a second
 // and this runs once per page switch, which is rare; the alternative is a
 // deferred-unpress timer threaded through loop() for one key.
 const unsigned long KB_FLASH_MS = 60;
+// AND THE FLASH HAS TO REACH THE GLASS, WHICH ON BOARD 2 IS A SEPARATE ACT.
+// PanelShim composes into a PSRAM shadow framebuffer and only a flush pushes it,
+// and the only flushes on this screen are at the end of drawKeyboard() and the
+// end of loop(). All three of row 3's flashes are drawn AND erased inside one
+// handleTouch() call, so the loop-end flush pushed the state AFTER the erase and
+// the pressed row was never on the panel at all - correct ordering, invisible
+// result. The character rows escape this only because release-commit holds an
+// armed key PRESSED across many loop iterations, so the loop-end flush pushes
+// it; press-commit draws and erases within one call and has nothing to ride on.
+//
+// IT WAS INVISIBLE TO EVERY INSTRUMENT WE HAVE. SCREENSHOT reads the same shadow
+// buffer the renderer just wrote, so a capture shows the flash whether or not
+// the glass ever did - the trap CLAUDE.md names - and the checker asserted the
+// draw ORDER, which the code already satisfied. Only a person looking at the
+// panel could have caught it, and one did.
+//
+// A macro, not a helper function, so the #if guards ONE statement rather than
+// duplicating a whole one per arm - the shape that leaves brace-counting tools
+// seeing more { than }. Board 1 draws through real TFT_eSPI and needs none.
+#if !BOARD_USES_TFT_ESPI
+#define KB_FLASH_PUSH() tft.flush()
+#else
+#define KB_FLASH_PUSH() ((void) 0)
+#endif
 
 // Peek geometry: it covers the KEYS and the action row, never the text card - so
 // the answer you are composing stays on screen while you re-read the question.
@@ -852,6 +876,7 @@ bool kbTouch(int sx, int sy) {
       // which is also the thing the tap changed.
       drawKeyboard();
       drawKbRow3(k);
+      KB_FLASH_PUSH();
       delay(KB_FLASH_MS);
       drawKbRow3(-1);
     } else {
@@ -864,6 +889,7 @@ bool kbTouch(int sx, int sy) {
       // touch handler), so folding them into an expression would leave SPACE
       // reachable on the glass and unprovable from the source.
       drawKbRow3(k);
+      KB_FLASH_PUSH();
       if (k == 1) kbInsert(' ');
       else        kbInsert('.');
       drawKbRow3(-1);
@@ -912,6 +938,14 @@ bool kbTouch(int sx, int sy) {
 // moved onto a different key, not that the second key was the intended one. A
 // zero re-target rate would mean release-commit is buying nothing measurable.
 //
+// A CANCEL IS COUNTED SEPARATELY, AND IT IS THE STRONGEST SINGLE PIECE OF
+// EVIDENCE HERE: a press that armed a key, slid off the key band entirely and
+// lifted on nothing. Under press-commit that press WOULD HAVE COMMITTED a
+// character - the one the finger first landed on - and under release-commit it
+// commits none. Folded into the re-target count it would be invisible, and
+// missing from the totals altogether it would be uncounted evidence for exactly
+// the claim this instrument exists to test.
+//
 // The "release point" is the LAST SAMPLED point, not the release point proper:
 // getTouchPoint() returns false on the lift, so there is no coordinate to read
 // at that instant. At a 15ms poll that is the finger's position up to 15ms
@@ -920,7 +954,7 @@ bool kbTouch(int sx, int sy) {
 bool kbProbeOn = false;
 int  kbProbeAx = 0, kbProbeAy = 0, kbProbeAr = -1, kbProbeAc = -1;
 int  kbProbeLx = 0, kbProbeLy = 0;
-int  kbProbeN = 0, kbProbeMoved = 0;
+int  kbProbeN = 0, kbProbeMoved = 0, kbProbeCancelled = 0;
 
 void kbProbeArm(int sx, int sy, int r, int c) {
   if (!kbProbeOn) return;
@@ -932,6 +966,27 @@ void kbProbeMove(int sx, int sy) {
   if (!kbProbeOn) return;
   kbProbeLx = sx; kbProbeLy = sy;
 }
+// The lift with nothing armed, after a press that HAD armed something. Called
+// from kbRelease's own early return, which is the only place that state is
+// distinguishable from "this press never armed anything at all" (row 3, the
+// action row, DEL - none of which call kbProbeArm, so kbProbeAr stays -1).
+void kbProbeCancel() {
+  if (!kbProbeOn || kbProbeAr < 0) return;
+  char armed[8];
+  kbKeyLabel(kbRow(kbProbeAr)[kbProbeAc], armed, sizeof(armed));
+  const int dx = kbProbeLx - kbProbeAx, dy = kbProbeLy - kbProbeAy;
+  kbProbeCancelled++;
+  char m[192];
+  snprintf(m, sizeof(m),
+           "KBPROBE CANCEL #%d armed=r%dc%d \"%s\" lift=off-band at=(%d,%d)->(%d,%d) "
+           "d=(%d,%d) dist=%d - press-commit would have typed \"%s\" here",
+           kbProbeCancelled, kbProbeAr, kbProbeAc, armed,
+           kbProbeAx, kbProbeAy, kbProbeLx, kbProbeLy, dx, dy,
+           (int) lroundf(sqrtf((float) (dx * dx + dy * dy))), armed);
+  sendLineToHost(m);
+  kbProbeAr = kbProbeAc = -1;
+}
+
 void kbProbeRelease(int r, int c) {
   if (!kbProbeOn || kbProbeAr < 0) return;
   char armed[8], lift[8];
@@ -958,10 +1013,13 @@ void kbProbeRelease(int r, int c) {
 void kbProbeStop(const char* why) {
   if (!kbProbeOn) return;
   kbProbeOn = false;
-  char m[192];
-  snprintf(m, sizeof(m), "KBPROBE off (%s): %d keystrokes, %d re-targeted between press and "
-           "lift (%d%%)", why, kbProbeN, kbProbeMoved,
-           kbProbeN ? (kbProbeMoved * 100 + kbProbeN / 2) / kbProbeN : 0);
+  const int presses = kbProbeN + kbProbeCancelled;
+  char m[224];
+  snprintf(m, sizeof(m), "KBPROBE off (%s): %d armed presses -> %d committed, %d re-targeted "
+           "between press and lift (%d%% of committed), %d cancelled off the key band "
+           "(%d%% of presses)", why, presses, kbProbeN, kbProbeMoved,
+           kbProbeN ? (kbProbeMoved * 100 + kbProbeN / 2) / kbProbeN : 0, kbProbeCancelled,
+           presses ? (kbProbeCancelled * 100 + presses / 2) / presses : 0);
   sendLineToHost(m);
 }
 
@@ -1005,7 +1063,7 @@ void kbProbeCommand(const char* arg) {
   }
   lastSayMs = millis();
   kbProbeOn = true;
-  kbProbeN = kbProbeMoved = 0;
+  kbProbeN = kbProbeMoved = kbProbeCancelled = 0;
   kbProbeAr = kbProbeAc = -1;
   sendLineToHost("KBPROBE on: one line per keystroke on the character rows - armed key, "
                  "committed key, pixel delta. It measures where fingers land versus where they "
@@ -1178,7 +1236,11 @@ void kbSlide(int sx, int sy) {
 // LIFT. Commits whatever is armed. Returns true when it consumed the release, so
 // handleTouch's FAB branch below it is not also entered.
 bool kbRelease() {
-  if (kbArmRow < 0) return false;
+  // Nothing armed. That is EITHER a press that never armed (row 3, the action
+  // row, DEL, the card) OR a press that armed and then slid off the key band -
+  // and kbProbeCancel is what tells those two apart, because only the second
+  // left the probe with a live armed key.
+  if (kbArmRow < 0) { kbProbeCancel(); return false; }
   const int r = kbArmRow, c = kbArmCol;
   const char ch = kbRow(r)[c];
   kbProbeRelease(r, c);

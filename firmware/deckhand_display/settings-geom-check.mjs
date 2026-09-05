@@ -2319,6 +2319,26 @@ for (const b of [1, 2]) {
           `kbTouch passes drawKbRow3 a pressed index in both of row 3's arms (found ${r3Flash} ` +
           `of 2) - drawKbRow3 has always taken one and this branch never passed it, so the ` +
           `pager and SPACE gave no confirmation a press landed at all`);
+      // AND EVERY PRESSED DRAW IS PUSHED TO THE PANEL. This is NOT the ordering
+      // claim below it, and asserting the ordering alone is what let the defect
+      // ship: PanelShim composes into a shadow framebuffer and only a flush
+      // reaches the glass, and the only flushes on this screen are at the end of
+      // drawKeyboard() and the end of loop(). All three row-3 flashes are drawn
+      // AND erased inside one handleTouch() call, so the loop-end flush pushed
+      // the state AFTER the erase and the pressed row was never on the panel -
+      // correct order, invisible result. SCREENSHOT could not see it either: it
+      // reads the same shadow buffer the renderer just wrote. So the assertion
+      // has to bind the PUSH to the DRAW, immediately and by adjacency.
+      const r3Pushed = (touchSrcForInsert.match(/drawKbRow3\(k\);\s*KB_FLASH_PUSH\(\);/g) || []).length;
+      chk(r3Pushed === r3Flash && r3Flash > 0,
+          `every one of row 3's ${r3Flash} pressed draws is immediately followed by ` +
+          `KB_FLASH_PUSH() (found ${r3Pushed}) - on board 2 a pressed row that is not flushed ` +
+          `before it is erased in the same handleTouch() call never reaches the glass at all, ` +
+          `and neither the ordering assertion below nor a SCREENSHOT can see that`);
+      chk(/#if !BOARD_USES_TFT_ESPI\s*#define KB_FLASH_PUSH\(\) tft\.flush\(\)/.test(KB_SRC),
+          "KB_FLASH_PUSH is a #if-guarded macro over tft.flush() - board 1 draws through real " +
+          "TFT_eSPI and needs none, and a macro keeps the guard around ONE statement rather " +
+          "than duplicating a whole one per arm");
       const r3Clear = (touchSrcForInsert.match(/drawKbRow3\(-1\);/g) || []).length;
       chk(r3Clear === 2,
           `and un-presses it again in both arms (found ${r3Clear} of 2) - a flash with no ` +
@@ -2396,6 +2416,21 @@ for (const b of [1, 2]) {
       chk(/KB_DEL/.test(bcSrc),
           "kbBubbleCommand's OWN BODY declines DEL by name - DEL commits on press and is never " +
           "armed, so a bubble over it would be a capture of a state this keyboard cannot reach");
+      // A CANCEL - armed, slid off every key, lifted on nothing - is the
+      // strongest evidence release-commit produces, because that press WOULD
+      // have committed a character under press-commit and commits none now.
+      // kbRelease's early return is the only place it is distinguishable from a
+      // press that never armed at all, so the claim is bound to that return.
+      chk(/if \(kbArmRow < 0\) \{ kbProbeCancel\(\); return false; \}/.test(relSrc),
+          "kbRelease's OWN BODY reports a CANCEL on the lift-with-nothing-armed path - counted " +
+          "anywhere else it would either miss the presses that slid off (kbSlide disarms them " +
+          "and kbRelease never runs its body) or count every press that never armed");
+      const stopSrc = fnSrc(KB_SRC, "void kbProbeStop");
+      chk(stopSrc.length > 0, "kbProbeStop's body was found in keyboard.ino (parse gate)");
+      chk(/kbProbeCancelled/.test(stopSrc) && /cancelled/.test(stopSrc),
+          "and kbProbeStop's OWN BODY reports the cancels in the totals, LABELLED - folded into " +
+          "the re-target count they would be invisible, and left out they would be uncounted " +
+          "evidence for the one claim this instrument exists to test");
     }
     chk(10 * c.KB_PITCH <= W, `10 columns x ${c.KB_PITCH} = ${10 * c.KB_PITCH} inside the ${W}px panel`);
     chk(c.KB_PITCH - c.KB_KEY_W === 2, `${c.KB_PITCH - c.KB_KEY_W}px of the pitch is the gap`);
