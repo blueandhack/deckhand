@@ -3106,6 +3106,23 @@ async function handleDeviceLine(line, via, pairGen = 0) {
   // transcript is only read when someone is actually looking at it.
   if (line.startsWith("BLEMTU ")) {
     const m = line.match(/mtu=(\d+)/);
+    // ONLY A REPORT IS SWALLOWED. This arm used to `return` on any line starting
+    // "BLEMTU ", which silently ate board 1's "BLEMTU refused on E32R28T: ..." -
+    // the refusal was correctly emitted by the device and never appeared in this
+    // log, so from here it was indistinguishable from the silence the whole
+    // refusal table exists to remove. Measured: board 1 answered BLEMTU and the
+    // log showed only the "Sending command" line.
+    //
+    // AND THE REPORT ITSELF IS LOGGED NOW TOO, which is the same defect on board
+    // 2: the command table sells BLEMTU as "the negotiated ATT MTU per link", but
+    // its answer was consumed here and only mentioned when the CHUNK SIZE changed
+    // - so asking twice printed nothing the second time and the instrument
+    // silently answered into the tuner rather than to the person who asked.
+    // Bounded rather than chatty: the device emits an unsolicited report only on a
+    // CHANGE (tickBleMtu's scrollMtuSent guard), so this is at most one line per
+    // link per connect.
+    console.log(`[device/${linkLabel(via)}] ${line}`);
+    if (!m) return;
     if (m) {
       // MTU less the 3-byte ATT header, clamped to what has been measured
       // working. Never below the floor: a device reporting 23 means STAY at 20.

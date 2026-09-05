@@ -498,6 +498,22 @@ match, a `sizeof` walk, a `return` in the refusal arm and a `Serial.println` ref
 `--selftest` injects 8 faults and **catches 8/8**; deleting the `TEMP` entry fails by name with
 `TEMP: handled on board 2 and NOT on board 1, so board 1 refuses it by name`.
 
+**ONE REFUSAL WAS EMITTED CORRECTLY AND STILL INVISIBLE, AND THE HOST WAS THE REASON.** `BLEMTU`
+was the only verb of the 24 that produced nothing in `/tmp/deckhand-launchd.out` — measured, not
+suspected: the device answered and the log showed only the `Sending command` line.
+`handleDeviceLine()` in `host/index.mjs` swallowed **any** line starting `BLEMTU ` and returned,
+because that arm exists to re-tune `bleChunkSize` from an MTU report. So board 1's
+`BLEMTU refused on E32R28T: ...` went into the tuner, matched no `mtu=`, and was dropped — the
+exact silence the refusal table exists to remove, one layer up. It now logs every `BLEMTU ` line
+before parsing it, which also fixes the same defect on **board 2**: the command table sells
+`BLEMTU` as "the negotiated ATT MTU per link", but its answer was only ever mentioned when the
+chunk size CHANGED, so asking twice printed nothing the second time and the instrument answered
+into the tuner rather than to the person who asked. Bounded rather than chatty — the device sends
+an unsolicited report only on a change (`tickBleMtu`'s `scrollMtuSent` guard), so this is at most
+one line per link per connect. **The lesson generalises: a refusal is only as visible as the
+host's own line handling, so a new refusal has to be READ IN THE LOG rather than reasoned about
+from the firmware.**
+
 **`SCROLLPERF`'s guard is `BOARD_HISTORY_SCROLL` ALONE where its four neighbours read
 `!BOARD_USES_TFT_ESPI && BOARD_HISTORY_SCROLL` - checked, and it is deliberate.** `SCROLLPERF`'s
 is the honest one: its body touches only `scrollActive`, `scrollY`, `scrollMaxY()`,
