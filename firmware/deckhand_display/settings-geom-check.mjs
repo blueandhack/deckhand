@@ -2029,11 +2029,26 @@ for (const b of [1, 2]) {
     // dead. Board 1's own header used to state 22x44 = 968 here, which mixed the
     // drawn width with the tested height.
     console.log(`    key drawn ${c.KB_KEY_W}x${drawnKeyH}, tap band ${c.KB_PITCH}x${c.KB_ROW_H} = ${c.KB_PITCH * c.KB_ROW_H}px2`);
-    chk(drawnKeyH >= c.TAP_MIN, `drawn key ${drawnKeyH}px tall >= TAP_MIN ${c.TAP_MIN}`);
+    // THE FLOOR IS THE TESTED BAND, and this line used to say `drawnKeyH >=
+    // TAP_MIN` - which is a different claim and was only ever true by accident.
+    // Board 1's KB_ROW_H was TAP_MIN + 4, so its DRAWN key (KB_ROW_H - 4) came out
+    // at exactly TAP_MIN and the assertion read as a rule; board 2's 54 against 46
+    // never touched the floor at all. It was never the rule: what a finger is
+    // tested against is KB_PITCH x KB_ROW_H, which is why the drawn key has been
+    // 22px wide against a 40px floor since the keyboard shipped. Corrected here
+    // rather than deleted, because the two claims are one character apart and the
+    // next person to read this needs to know which one is load-bearing.
+    chk(c.KB_ROW_H >= c.TAP_MIN,
+        `key row band ${c.KB_ROW_H}px tall >= TAP_MIN ${c.TAP_MIN} (clears by ${c.KB_ROW_H - c.TAP_MIN}; the DRAWN key is ${drawnKeyH}, deliberately smaller)`);
     chk(c.KB_ROW_H > drawnKeyH && c.KB_PITCH > c.KB_KEY_W,
         `the tap band (${c.KB_PITCH}x${c.KB_ROW_H}) is bigger than the drawn key (${c.KB_KEY_W}x${drawnKeyH}) in BOTH dimensions - the split is kept, not collapsed`);
+    // THE CAP IS A FIXED HISTORICAL PAIR, not board 1's current key, and that is
+    // deliberate: 40/22 is the drawn key board 1 shipped before the prompt strip
+    // took 3px off KB_ROW_H. Board 1's own key is 22x37 = 1:1.68 now, and deriving
+    // the cap from it would drag board 2's KB_ROW_H down to 30 * 1.68 = 50 -
+    // moving a grid with no reason to move. Both boards are still under it.
     chk(drawnKeyH / c.KB_KEY_W <= 40 / 22 + 0.001,
-        `key aspect 1:${(drawnKeyH / c.KB_KEY_W).toFixed(2)} no more elongated than board 1's 1:${(40 / 22).toFixed(2)}`);
+        `key aspect 1:${(drawnKeyH / c.KB_KEY_W).toFixed(2)} no more elongated than the 1:${(40 / 22).toFixed(2)} board 1 shipped before the strip`);
     // KB_KEY_R: the key's OWN radius, not R_MD's (a card radius). A flat edge
     // means the radius covers half the width or more - a circle, not a rounded
     // square - so this fails the moment KB_KEY_R stops being a corner treatment.
@@ -2120,12 +2135,113 @@ for (const b of [1, 2]) {
       chk(x0 >= 0, `key row of ${n} cells starts x=${x0} (centred, must not go negative)`);
     }
     chk(8 * c.KB_PITCH < W, `row 3: ?123 (2 cells) + SPACE (6) = ${8 * c.KB_PITCH} leaves ${W - 8 * c.KB_PITCH} for "."`);
+    // ================= THE PROMPT STRIP =================
+    // One line of the ask above the card, so the question and the keyboard are on
+    // the glass at the same time. The peek could not do that: it covers the keys
+    // and routes every tap to its own pager.
+    {
+      // THE OFFSET IS THE FIRMWARE'S OWN DERIVATION, bound to the declaration
+      // rather than recomputed and compared against itself. dy below is the
+      // checker's INDEPENDENT arithmetic over two header constants; this line is
+      // what stops that arithmetic describing a firmware that used a literal.
+      chk(/const int KB_STRIP_TEXT_DY\s*=\s*\(KB_STRIP_H - KB_LINE_PITCH\)\s*\/\s*2\s*;/.test(KB_SRC),
+          "keyboard.ino derives KB_STRIP_TEXT_DY as (KB_STRIP_H - KB_LINE_PITCH) / 2, not a literal 2 that agrees with it on both boards today");
+      const dy = Math.trunc((c.KB_STRIP_H - c.KB_LINE_PITCH) / 2);
+      const stripBox = [c.KB_STRIP_Y + dy, c.KB_STRIP_Y + dy + cellH - 1];
+      // THE TAG IS PARSED, NOT TRANSCRIBED. A literal "MORE" on this side measures
+      // a string the firmware may no longer draw: the tag's width is what the
+      // text lane is reserved against, so a longer label silently eats the lane
+      // it is supposed to sit beside. (This was written as a transcribed "MORE"
+      // first, and lengthening the firmware's label to 52 characters left every
+      // assertion here green - which is this repo's transcription rule paying for
+      // itself in the same hour it was quoted.)
+      const tag = (KB_SRC.match(/const char\* KB_STRIP_MORE\s*=\s*"([^"]*)"/) || [])[1];
+      chk(!!tag, "keyboard.ino's KB_STRIP_MORE literal was parsed (parse gate)");
+      const tagW = widthB(b, T_META, tag || "") + 6;      // the tag plus the gap it keeps
+      const stripLane = c.CARD_W - 12 - tagW;
+      console.log(`    strip ${c.KB_STRIP_Y}..${c.KB_STRIP_Y + c.KB_STRIP_H - 1} (h ${c.KB_STRIP_H}), text box ${stripBox.join("..")}, card top ${c.KB_TEXT_Y}; lane ${stripLane}px = ${Math.floor(stripLane / adv)} columns after the ${tagW}px "${tag}" tag`);
+      chk(c.KB_STRIP_H === c.KB_LINE_PITCH + 4,
+          `KB_STRIP_H ${c.KB_STRIP_H} == KB_LINE_PITCH + 4 (${c.KB_LINE_PITCH + 4}) - one text cell and 2px of air each side`);
+      chk(stripBox[0] >= c.KB_STRIP_Y && stripBox[1] < c.KB_STRIP_Y + c.KB_STRIP_H,
+          `the strip's opaque text box ${stripBox.join("..")} is inside its band ${c.KB_STRIP_Y}..${c.KB_STRIP_Y + c.KB_STRIP_H - 1}`);
+      // drawString paints an OPAQUE box a full cell tall and the card's top BORDER
+      // is the next thing below it, so a strip one row too low rubs that border
+      // out - the same failure the meta row caused inside the card twice.
+      chk(stripBox[1] < c.KB_TEXT_Y,
+          `the strip's text box ends ${stripBox[1]}, ${c.KB_TEXT_Y - stripBox[1] - 1} row(s) above the card's top border at ${c.KB_TEXT_Y}`);
+      chk(c.KB_STRIP_Y + c.KB_STRIP_H <= c.KB_TEXT_Y,
+          `the strip band ends ${c.KB_STRIP_Y + c.KB_STRIP_H - 1} above the card's top ${c.KB_TEXT_Y}`);
+      // THE LANE'S REAL FLOOR, and it is measured rather than chosen: fitText
+      // gives up ENTIRELY - out[0] = 0, a blank strip - when not even one
+      // character plus its three ASCII dots fits. Anything that eats the lane
+      // (a longer tag, a narrower card) fails here with the width that did it.
+      chk(stripLane >= widthB(b, T_BODY, "M..."),
+          `the strip's ${stripLane}px lane holds at least one character plus fitText's three dots (${widthB(b, T_BODY, "M...")}px) after the "${tag}" tag - below that fitText returns "" and the strip goes blank`);
+      // The tag is right-aligned in the card lane and the text lane is reserved
+      // against it, so the two cannot collide - stated with both edges.
+      const textEnd = c.CARD_X + 6 + stripLane, tagStart = c.CARD_X + c.CARD_W - 6 - widthB(b, T_META, tag || "");
+      chk(textEnd <= tagStart,
+          `the strip's text lane ends ${textEnd - 1} and the "${tag}" tag starts ${tagStart}`);
+    }
     // The whole vertical budget.
     const keysEnd = c.KB_ROWS_Y + 4 * c.KB_ROW_H;
     console.log(`    card ..${c.KB_TEXT_Y + c.KB_TEXT_H - 1} | keys ${c.KB_ROWS_Y}..${keysEnd - 1} | actions ${c.KB_ACT_Y}..${c.KB_ACT_Y + c.KB_ACT_H - 1} of ${H}`);
     chk(c.KB_TEXT_Y + c.KB_TEXT_H <= c.KB_ROWS_Y, `text card ends ${c.KB_TEXT_Y + c.KB_TEXT_H - 1} above the keys at ${c.KB_ROWS_Y} (break ${c.KB_ROWS_Y - c.KB_TEXT_Y - c.KB_TEXT_H})`);
     chk(keysEnd <= c.KB_ACT_Y, `keys end ${keysEnd - 1} above the action row at ${c.KB_ACT_Y}`);
     chk(c.KB_ACT_Y + c.KB_ACT_H <= H, `action row ends ${c.KB_ACT_Y + c.KB_ACT_H - 1} inside the ${H}px panel`);
+    // THE WHOLE COLUMN, TERM BY TERM, and it has to close EXACTLY on BOARD_H.
+    // Board 1 has no spare pixel left in 320 - the strip costs 17, KB_ROW_H gave
+    // up 3 per row and Task 3's action band gave up 4 - so "everything fits" is
+    // not the claim: the claim is that nothing is left over and nothing overlaps.
+    // EVERY GAP IS WRITTEN AS A DIFFERENCE of the constants around it rather than
+    // as a number of its own. Each gap is a residual, and a residual asserted
+    // against itself always holds; written this way the sum can only close when
+    // the anchors themselves agree, so moving any one of KB_STRIP_Y, KB_STRIP_H,
+    // KB_TEXT_Y, KB_TEXT_H, KB_ROWS_Y, KB_ROW_H, KB_ACT_Y or KB_ACT_H without
+    // moving another to match fails here by name.
+    {
+      const gapStripCard = c.KB_TEXT_Y - c.KB_STRIP_Y - c.KB_STRIP_H;
+      const gapCardKeys = c.KB_ROWS_Y - c.KB_TEXT_Y - c.KB_TEXT_H;
+      const gapKeysAct = c.KB_ACT_Y - c.KB_ROWS_Y - 4 * c.KB_ROW_H;
+      const bottom = c.BOARD_H - c.KB_ACT_Y - c.KB_ACT_H;
+      const col = c.KB_STRIP_Y + c.KB_STRIP_H + gapStripCard
+                + c.KB_TEXT_H + gapCardKeys
+                + 4 * c.KB_ROW_H + gapKeysAct
+                + c.KB_ACT_H + bottom;
+      console.log(`    column: ${c.KB_STRIP_Y} + ${c.KB_STRIP_H} + ${gapStripCard} + ${c.KB_TEXT_H} + ${gapCardKeys} + ${4 * c.KB_ROW_H} + ${gapKeysAct} + ${c.KB_ACT_H} + ${bottom} = ${col} (BOARD_H ${c.BOARD_H})`);
+      // THAT SUM IS PRINTED AND NOT ASSERTED, and the reason is the same rule
+      // that says to write the gaps as differences in the first place. Once every
+      // gap is `next - prev - prevH`, the whole expression TELESCOPES: every term
+      // cancels and it equals BOARD_H for ANY values at all - it stays true with
+      // KB_ROW_H at 42 and the key grid three rows INTO the action band. A
+      // residual asserted against itself always holds, and a sum of nothing but
+      // residuals is that same defect at the scale of the whole column. So the
+      // line above is a LOG (it is what a reader wants to see), and the claims
+      // below are what actually close the column: each band starts at or after
+      // the previous one ended, and the last ends inside the panel.
+      let cursor = 0;
+      for (const [n, top, h] of [["the strip", c.KB_STRIP_Y, c.KB_STRIP_H],
+                                 ["the text card", c.KB_TEXT_Y, c.KB_TEXT_H],
+                                 ["the key grid", c.KB_ROWS_Y, 4 * c.KB_ROW_H],
+                                 ["the action band", c.KB_ACT_Y, c.KB_ACT_H]]) {
+        chk(top >= cursor,
+            `${n} starts ${top}, at or after the ${cursor} where the band above it ends (gap ${top - cursor})`);
+        cursor = top + h;
+      }
+      chk(cursor <= c.BOARD_H,
+          `the column's last band ends ${cursor - 1} inside BOARD_H ${c.BOARD_H}, with ${c.BOARD_H - cursor} row(s) of bottom margin`);
+      for (const [n, v] of [["the strip/card gap", gapStripCard], ["the card/keys gap", gapCardKeys],
+                            ["the keys/actions gap", gapKeysAct], ["the bottom margin", bottom]])
+        chk(v >= 0, `${n} is ${v} - a negative term means two bands overlap, which the telescoped sum cannot see`);
+      // The two TESTED bands in the column, against the fingertip floor. KB_ROW_H
+      // clears by 1 on board 1 now and 12 on board 2; KB_ACT_H is TAP_MIN exactly.
+      for (const [n, v] of [["KB_ROW_H", c.KB_ROW_H], ["KB_ACT_H", c.KB_ACT_H]])
+        chk(v >= c.TAP_MIN, `${n} ${v} >= TAP_MIN ${c.TAP_MIN}`);
+      chk(c.KB_ROWS_Y > c.KB_TEXT_Y + c.KB_TEXT_H,
+          `the key grid starts ${c.KB_ROWS_Y} below the card's last row ${c.KB_TEXT_Y + c.KB_TEXT_H - 1}`);
+      chk(c.KB_STRIP_Y + c.KB_STRIP_H < c.KB_TEXT_Y,
+          `the strip ends ${c.KB_STRIP_Y + c.KB_STRIP_H - 1} above the card's top ${c.KB_TEXT_Y}`);
+    }
     // THE ACTION ROW'S DRAWN/TESTED SPLIT (spec defect 9). `KB_ACT_H === KB_ROW_H`
     // STOOD HERE AND IS GONE, and it is worth being exact about why: while the
     // header said `const int KB_ACT_H = 44;  // == KB_ROW_H`, that assertion
@@ -2256,6 +2372,82 @@ for (const b of [1, 2]) {
           "uiActionRow's OWN BODY makes every zone swallow the gap to its right");
       chk(/last\s*\?\s*\(CARD_X\s*\+\s*lane\s*-\s*x\)/.test(rowSrc),
           "uiActionRow's OWN BODY gives the remainder to the last column, so the row closes on the lane");
+
+      // ===== THE PROMPT STRIP, in the firmware's own text =====
+      // The geometry above proves the strip HAS room. These prove it is drawn
+      // there, tapped there, and that the peek moved off the card - none of which
+      // a constant can show. Board 1 only: the source is shared, so this is a
+      // claim about the source rather than about a board. Parse gates first -
+      // !/re/.test("") is true, so every negative below would pass vacuously over
+      // a function that failed to parse.
+      const stripSrc = fnSrc(KB_SRC, "void drawKbStrip");
+      const drawKbSrc = fnSrc(KB_SRC, "void drawKeyboard");
+      const textSrc = fnSrc(KB_SRC, "void drawKbText");
+      chk(stripSrc.length > 0, "drawKbStrip's body was found in keyboard.ino (parse gate)");
+      chk(drawKbSrc.length > 0, "drawKeyboard's body was found in keyboard.ino (parse gate)");
+      chk(textSrc.length > 0, "drawKbText's body was found in keyboard.ino (parse gate)");
+      chk(/if \(!kbHasDetail\(\)\) return;/.test(stripSrc),
+          "drawKbStrip's OWN BODY draws nothing when there is no ask to read - the same gate kbTouch's strip branch uses, so no control is advertised that would do nothing");
+      chk(/fillRect\(CARD_X, KB_STRIP_Y, CARD_W, KB_STRIP_H/.test(stripSrc),
+          "drawKbStrip's OWN BODY clears its own band, so the transition that ends the ask ERASES the question rather than leaving it under a dead tap");
+      chk(/fitText\(/.test(stripSrc),
+          "drawKbStrip's OWN BODY truncates through fitText - three ASCII dots, never U+2026, which this repo has paid for six times");
+      // The '\n' case, and it is a real one: askDetail KEEPS its newlines
+      // (deckhand_display.ino spares '\n' while scrubbing every other control
+      // byte) and the fonts are ASCII 0x20..0x7E, so a newline drawn through
+      // paints nothing AND advances nothing - the next line would be drawn hard
+      // against this one and textWidth would measure the break as zero.
+      chk(/!= '\\n'/.test(stripSrc),
+          "drawKbStrip's OWN BODY stops at the first newline instead of drawing through it");
+      // The TAG counts as a literal drawKbStrip draws even though it is declared
+      // beside the function rather than inside it - and it was missed on the first
+      // pass for exactly that reason: a U+2026 in the tag sailed through a sweep
+      // of the body alone. drawString would paint nothing AND advance nothing for
+      // it, so the tag would silently vanish while still reserving its lane.
+      const stripLits = [...stripSrc.matchAll(/"([^"]*)"/g)].map(x => x[1])
+        .concat((KB_SRC.match(/const char\* KB_STRIP_MORE\s*=\s*"([^"]*)"/) || []).slice(1));
+      const wide = stripLits.filter(l => [...l].some(ch => ch.codePointAt(0) < 0x20 || ch.codePointAt(0) > 0x7e));
+      chk(wide.length === 0,
+          `every literal drawKbStrip draws is ASCII 0x20..0x7E${wide.length ? ` - offending: ${JSON.stringify(wide)}` : ""}`);
+      // drawKeyboard draws it BEFORE the peek's early return, so the question
+      // stays legible above an open peek and closing the peek does not have to
+      // repaint the strip.
+      const iStripCall = drawKbSrc.indexOf("drawKbStrip()"), iPeekRet = drawKbSrc.indexOf("if (kbPeekPage >= 0)");
+      chk(iStripCall >= 0 && iPeekRet > iStripCall,
+          "drawKeyboard calls drawKbStrip BEFORE the peek's early return, so the strip survives an open peek");
+      // kbTouch: the strip's band is tested BEFORE the card's, which is
+      // "anything above the keys" and would otherwise swallow these rows.
+      const iStripTap = touchSrc.indexOf("if (sy < KB_TEXT_Y)"), iCardTap = touchSrc.indexOf("if (sy < KB_ROWS_Y)");
+      chk(iStripTap >= 0, "kbTouch tests a strip band at sy < KB_TEXT_Y");
+      chk(iCardTap > iStripTap,
+          "kbTouch tests the strip band BEFORE the card band (sy < KB_ROWS_Y), which would otherwise swallow every row above the card");
+      const stripBranch = iStripTap >= 0 && iCardTap > iStripTap ? touchSrc.slice(iStripTap, iCardTap) : "";
+      chk(stripBranch.length > 0, "kbTouch's strip branch was sliced out (parse gate)");
+      chk(/kbHasDetail\(\)/.test(stripBranch) && /kbPeekPage = 0/.test(stripBranch),
+          "kbTouch's strip branch opens the peek, gated on kbHasDetail");
+      // ...and the CARD's branch no longer does. This is the defect this task
+      // closes: Task 5 gave the card's tap to the caret for kbLen > 0 and left the
+      // peek on the kbLen == 0 arm, which put the question out of reach again for
+      // exactly the state you are in while typing.
+      const iRows = touchSrc.indexOf("int r = (sy - KB_ROWS_Y)");
+      const cardBranch = iCardTap >= 0 && iRows > iCardTap ? touchSrc.slice(iCardTap, iRows) : "";
+      chk(cardBranch.length > 0, "kbTouch's card branch was sliced out (parse gate)");
+      chk(!/kbPeekPage/.test(cardBranch),
+          "kbTouch's CARD branch no longer touches kbPeekPage - the peek is the strip's, reachable in every state rather than only with an empty buffer");
+      // The hint on the empty card names the strip, and it is PARSED rather than
+      // transcribed: a hint pointing at a control that has moved teaches the one
+      // gesture that no longer works.
+      const hint = (textSrc.match(/drawString\("([^"]*)",\s*CARD_X \+ 6,\s*KB_LINE0_Y \+ KB_LINE_PITCH\)/) || [])[1];
+      chk(!!hint, "drawKbText's empty-buffer hint literal was parsed out of the drawString that places it under the title (parse gate)");
+      if (hint) {
+        chk(!/tap here/.test(hint),
+            `the empty-card hint is "${hint}" - it must not say "tap here", which pointed at the card's own tap when that opened the peek`);
+        chk([...hint].every(ch => ch.codePointAt(0) >= 0x20 && ch.codePointAt(0) <= 0x7e),
+            `the empty-card hint "${hint}" is ASCII 0x20..0x7E`);
+        for (const bb of [1, 2])
+          chk(widthB(bb, T_META, hint) <= B[bb].CARD_W - 12,
+              `the empty-card hint "${hint}" inks ${widthB(bb, T_META, hint)}px in board ${bb}'s ${B[bb].CARD_W - 12}px card lane`);
+      }
     }
     // THE PEEK OVERLAY, and its three STACKED ROWS. The rows are what needed adding:
     // they were the literals 8 / 22 / 40 in drawKbPeek(), and drawString paints an

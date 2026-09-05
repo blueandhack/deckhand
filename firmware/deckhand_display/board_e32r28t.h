@@ -651,12 +651,13 @@ const int CFM_H   = 150;
 // ---------- KEYBOARD (moved from keyboard.ino) ----------
 // EVERY NUMBER IS THE LITERAL keyboard.ino ALREADY USED. The keyboard owns the
 // whole screen, and what that buys is the TOUCH target rather than the artwork.
-// The drawn key is KB_KEY_W x (KB_ROW_H - 4) = 22x40; the TESTED band is
-// KB_PITCH x KB_ROW_H = 24x44 = 1056px2, and the width comes from the PITCH
+// The drawn key is KB_KEY_W x (KB_ROW_H - 4) = 22x37; the TESTED band is
+// KB_PITCH x KB_ROW_H = 24x41 = 984px2, and the width comes from the PITCH
 // rather than from KB_KEY_W because kbTouch() divides by KB_PITCH - so the 2px
 // gap between two keys belongs to the key on its left and no column is dead.
 // (An earlier version of this comment said 968, i.e. 22x44: it used the DRAWN
-// width against the TESTED height. Understated, but wrong.)
+// width against the TESTED height. Understated, but wrong. The pair was 22x40
+// and 24x44 = 1056px2 until the prompt strip took 3px off KB_ROW_H - see there.)
 //
 // 10 * 24 = 240, exactly the panel width; 2px of the pitch is the gap.
 const int KB_PITCH = 24;
@@ -675,8 +676,18 @@ const int KB_KEY_W = 22;
 // already 40% under TAP_MIN. 2px is 9.1% of the width and 0.36mm, and costs
 // only 3.4px2 - 0.4% of the drawn key.
 const int KB_KEY_R = KB_KEY_W / 10;
-// 44 = TAP_MIN + 4, so the DRAWN key (KB_ROW_H - 4 = 40) is exactly TAP_MIN.
-const int KB_ROW_H = 44;
+// THE TESTED BAND, and it is the one that has to clear TAP_MIN: 41 = TAP_MIN + 1.
+// It was 44 = TAP_MIN + 4, which made the DRAWN key (KB_ROW_H - 4) exactly TAP_MIN
+// as well - a coincidence of that value, never a rule, and the checker's own
+// `drawn key >= TAP_MIN` assertion was reading it as one. The drawn key is now
+// 22x37, under TAP_MIN in BOTH dimensions (it always was in width: 22 against 40),
+// which is the same drawn/tested split the action row got in Task 3 - what the
+// finger is tested against is the band, and the band still clears the floor.
+// The 3px is what pays for KB_STRIP_H alongside Task 3's KB_ACT_H 44 -> 40; this
+// board has 12 spare pixels in 320 and the strip needs 17. The key gets SHORTER
+// but no more elongated: 37/22 = 1.68 against the 40/22 = 1.82 it was, which is
+// the cap settings-geom-check.mjs already holds every key on both boards to.
+const int KB_ROW_H = 41;
 // THE TEXT CARD'S BUDGET IS ARITHMETIC, and it is what stops SEND signing text
 // that scrolled off the bottom. KB_COLS is the card's text lane divided by
 // Cozette's uniform 6px advance - (CARD_W - 12) / 6 = (216 - 12) / 6 = 34 - and
@@ -699,30 +710,49 @@ const int KB_ROW_H = 44;
 // and 47 was never reachable - see the corrected derivation in board_es3c35p.h.)
 const int KB_COLS = 34;
 const int KB_TEXT_LINES = 5;                   // ceil(KB_MAX_BYTES / KB_COLS)
+// KB_LINE_PITCH IS DECLARED FIRST because three of the terms below are derived
+// from it (KB_STRIP_H here, KB_ACT_DRAWN lower down, and the card's own line
+// spacing), and both the compiler and the checkers' consts() parser read this
+// file top to bottom - a derivation written above its input silently fails to
+// resolve on the checker side.
+const int KB_LINE_PITCH = 13;                  // Cozette's cell - text-derived
+// THE PROMPT STRIP: one line of the ask, above the card, that never leaves.
+// Re-reading the question used to mean opening the peek, which covers the keys
+// and routes every tap to its pager - so you could not read and type at once.
+// ITS COST IS STATED because this board had 12 spare pixels in 320 and the strip
+// needs 17: KB_ROW_H 44 -> 41 gives 3 per row (12 in all) and Task 3's KB_ACT_H
+// 44 -> 40 gives 4, less the 3 the gaps below hand back. The whole column:
+//   4 (margin) + 17 (strip, 4..20) + 3 (gap) + 88 (card, 24..111) + 3 (gap)
+//   + 164 (4 rows * 41, 115..278) + 1 (gap) + 40 (actions, 280..319) = 320
+// settings-geom-check.mjs sums exactly that, with every GAP written as a
+// difference of the constants around it rather than as a number of its own.
+// The strip's own text is one KB_LINE_PITCH cell centred in the band, so it inks
+// 6..18 and drawString's OPAQUE box stops 5 rows above the card's top border at
+// 24. That clearance is the reason the band is pitch + 4 and not pitch.
+const int KB_STRIP_Y = 4;
+const int KB_STRIP_H = KB_LINE_PITCH + 4;      // 17
 // The card, and the RESERVED META ROW inside it. The byte counter and the
 // countdown used to sit ON a text row, and drawString paints an OPAQUE box the
 // full height of a text line, so each silently erased whatever text shared its
 // row - found twice, fixed once. The meta row and the text lines share no pixel
-// row: meta inks +10..+22, lines at 26/39/52/65/78 (the last ending ~90, 2px
-// inside the card).
-// 4 (top) + 88 (text, 4..91) + 4 (gap) + 176 (4 rows * 44, 96..271) + 8 (gap)
-// + 40 (actions, 280..319) = 320 exactly - this board has no spare row at all.
-// The break above the action row was 4 while KB_ACT_H was 44; the 4px the band
-// gave back went there, because KB_ACT_Y is anchored to the panel's bottom edge.
-const int KB_TEXT_Y  = 4;
+// row: meta inks 30..42, lines at 46/59/72/85/98 (the last ending 110, one row
+// inside the card's 111). KB_TEXT_H, KB_COLS and KB_TEXT_LINES did NOT move for
+// the strip - the card keeps its five PROVABLE lines, so what SEND can sign is
+// unchanged; only its top edge moved, 4 -> 24.
+const int KB_TEXT_Y  = 24;                     // was 4, before the strip
 const int KB_TEXT_H  = 88;
 const int KB_META_DY = 6;                      // meta row, from the card top
 const int KB_LINE0_DY = 22;                    // first wrapped line, from the card top
-const int KB_LINE_PITCH = 13;                  // Cozette's cell - text-derived
-const int KB_ROWS_Y = 96;
+const int KB_ROWS_Y = 115;                     // was 96; 4 rows * 41 = 164, ending 278
 // THE ACTION ROW, drawn and tested separately - the split the keys already have
 // (KB_KEY_W in KB_PITCH, KB_ROW_H - 4 in KB_ROW_H) and this row never did.
 // TESTED stays TAP_MIN: CANCEL and SEND are the two taps that must not miss.
 // DRAWN is TEXT-DERIVED at 2 * KB_LINE_PITCH - one cell for the glyph, one for
 // the air - which is 26px = 4.62mm, against the 44px = 7.82mm this row painted
 // while a letter key, pressed up to 150 times, gets 4.27mm of width.
-// The 4px freed is what pays for KB_STRIP_H in Task 6; board 1 has 12 spare
-// pixels in 320 and this is where the twelfth comes from.
+// The 4px this freed is SPENT: it went into KB_STRIP_H along with the 12 that
+// KB_ROW_H 44 -> 41 freed, and what is left of the two is the 3px gaps above and
+// below the card and the 1px above this row. Board 1 has no spare pixel now.
 const int KB_ACT_H     = TAP_MIN;                 // 40, the tested band
 const int KB_ACT_DRAWN = 2 * KB_LINE_PITCH;       // 26
 const int KB_ACT_DY    = (KB_ACT_H - KB_ACT_DRAWN) / 2;   // 7
@@ -737,9 +767,17 @@ const int KB_PEEK_LBL_DY   = 8;
 const int KB_PEEK_TITLE_DY = 22;
 const int KB_PEEK_TEXT_DY  = 40;
 // It covers the keys and the action row (never the text card), so its height is
-// BOARD_H - KB_ROWS_Y - 4 = 220, its text starts KB_PEEK_TEXT_DY inside it and
-// stops 8 short of its bottom - (220 - 40 - 8) / 13 = 13.2 -> 13.
-const int KB_PEEK_LINES = 13;
+// BOARD_H - KB_ROWS_Y - 4 = 201, its text starts KB_PEEK_TEXT_DY inside it and
+// stops 8 short of its bottom - (201 - 40 - 8) / 13 = 11.77 -> 11.
+//
+// RE-DERIVED, NOT ADJUSTED, and this constant is the reason to be careful with
+// KB_ROWS_Y: keyboard.ino's KB_PEEK_H follows KB_ROWS_Y automatically (it is
+// BOARD_H - KB_ROWS_Y - 4), but this line does NOT - it is hand-written. The
+// strip moved KB_ROWS_Y 96 -> 115, so the overlay lost 19px and 13 lines no
+// longer fit: drawWrappedText would have painted 13 lines into room for 11, two
+// of them past the overlay's bottom edge and over the key grid, silently. The
+// same formula gives board 2 its unchanged 15 at its own 306px overlay.
+const int KB_PEEK_LINES = 11;                  // was 13, at KB_ROWS_Y 96
 
 // ---------- HISTORY READER / FULL-SCREEN READER ----------
 // Moved from deckhand_display.ino and from literals in reader.ino. Every value

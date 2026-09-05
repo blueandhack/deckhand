@@ -616,11 +616,15 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     three-ASCII-dot ellipsis — so there's no shift-arrow or backspace glyph to draw; the keys are
     sentinel bytes (`\x01`/`\x02`) labelled `CAP`/`DEL` in plain text instead.
   - **Going full-screen is what makes QWERTY viable on a 240px-wide panel at all.** On board 1 the
-    drawn key is `KB_KEY_W` x (`KB_ROW_H` - 4) = 22x40, and the **tested** band is
-    `KB_PITCH` x `KB_ROW_H` = **24x44 = 1056px²** against 880 in the ordinary content area. The win
-    going full-screen buys is in the touch target, not in the artwork. Board 2's are 30x54 drawn and
-    32x58 = 1856 tested; its key height is capped by board 1's own 1:1.82 aspect ratio rather than
-    by the panel, which is the honest constraint.
+    drawn key is `KB_KEY_W` x (`KB_ROW_H` - 4) = 22x37, and the **tested** band is
+    `KB_PITCH` x `KB_ROW_H` = **24x41 = 984px²** against 880 in the ordinary content area. The win
+    going full-screen buys is in the touch target, not in the artwork. (Those were 22x40 and
+    24x44 = 1056px² until the persistent prompt strip took 3px off board 1's `KB_ROW_H`; the
+    TESTED band still clears `TAP_MIN` 40, by 1 rather than by 4, and the drawn key is
+    deliberately under it in both dimensions — it always was in width.) Board 2's are 30x54 drawn
+    and 32x58 = 1856 tested; its key height is capped by the 1:1.82 aspect of board 1's key **as it
+    was when that cap was set** rather than by the panel, which is the honest constraint — board
+    1's own key is 1:1.68 now, and the cap is deliberately not re-derived from it.
     **The tested WIDTH comes from the PITCH, not from `KB_KEY_W`, because `kbTouch()` divides by
     `KB_PITCH`** — so the 2px gap between two keys belongs to the key on its left and there is no
     dead lane between keys. This file and board 1's header both said **968** (22x44), i.e. they used

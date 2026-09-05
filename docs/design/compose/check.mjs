@@ -122,22 +122,14 @@ const FW_ACT_GAP = (ACT_ROW_SRC.match(/const int gap\s*=\s*(\d+)/) || [])[1];
 // happens to say.
 // ===========================================================================
 const PENDING = {
-  "1:KB_STRIP_Y":       [4,   null],
-  "1:KB_STRIP_H":       [17,  null],
   "1:COMPOSE_PROMPT_H": [52,  null],
   "1:COMPOSE_LEGEND_H": [16,  null],
   "1:COMPOSE_DRAFT_H":  [21,  null],
   "1:COMPOSE_GAP":      [4,   null],
-  "1:KB_TEXT_Y":        [24,  4],
-  "1:KB_ROWS_Y":        [115, 96],
-  "1:KB_ROW_H":         [41,  44],
-  "2:KB_STRIP_Y":       [6,   null],
-  "2:KB_STRIP_H":       [20,  null],
   "2:COMPOSE_PROMPT_H": [77,  null],
   "2:COMPOSE_LEGEND_H": [19,  null],
   "2:COMPOSE_DRAFT_H":  [24,  null],
   "2:COMPOSE_GAP":      [8,   null],
-  "2:KB_TEXT_Y":        [34,  12],
 };
 
 // ---- the assertion machinery ----------------------------------------------

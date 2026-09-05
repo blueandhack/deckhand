@@ -2355,7 +2355,8 @@ const int KB_KEY_W = 30;
 // percentage describes both boards.
 const int KB_KEY_R = KB_KEY_W / 10;
 // KB_ROW_H 58, and the DRAWN key is KB_ROW_H - 4 = 54 while the TESTED band is
-// KB_PITCH x KB_ROW_H = 32x58 = 1856px2 against board 1's 24x44 = 1056 - the
+// KB_PITCH x KB_ROW_H = 32x58 = 1856px2 against board 1's 24x41 = 984 (it was
+// 24x44 = 1056 until the prompt strip took 3px off that board's rows) - the
 // drawn/tested split kept rather than collapsed, in BOTH dimensions. The tested
 // WIDTH is the pitch, not KB_KEY_W: kbTouch() divides by KB_PITCH, so the 2px gap
 // belongs to the key on its left and no column on the board is dead.
@@ -2363,9 +2364,18 @@ const int KB_KEY_R = KB_KEY_W / 10;
 // 54 IS CAPPED BY ASPECT, NOT BY THE PANEL, and this is the one place on this
 // board where a control is deliberately NOT grown to the space available. The
 // keyboard's width is fixed by its 10 columns, so every spare row makes the keys
-// taller and thinner; board 1's drawn key is 22x40 = 1:1.818, and 30 * 1.818 =
+// taller and thinner; board 1's drawn key was 22x40 = 1:1.818, and 30 * 1.818 =
 // 54.5 -> 54 is therefore the tallest key no more elongated than the one this
-// device already ships. That anchor is measured FROM THIS REPO, which is the only
+// device shipped when the cap was set.
+//
+// THAT ANCHOR IS HISTORICAL NOW AND IS DELIBERATELY LEFT SO. Board 1's drawn key
+// became 22x37 = 1:1.68 when the prompt strip took 3px off its KB_ROW_H, so 54
+// (1:1.8) is more elongated than board 1's key TODAY, though not than the key the
+// cap was measured from. Re-deriving the cap from board 1's current rows would
+// drag this board's KB_ROW_H down to 30 * 1.68 = 50, moving a grid that has no
+// reason to move and spending nothing this board needed - so the cap stays the
+// fixed 40/22 pair settings-geom-check.mjs holds both boards to, and this
+// paragraph says which key it came from rather than implying it tracks one. That anchor is measured FROM THIS REPO, which is the only
 // reason it is the one used: spending the remaining rows on height instead would
 // reach KB_ROW_H 70 (a 30x66 key, 1:2.2), and "1:2.2 is strips rather than keys"
 // is a judgement with no measurement behind it, whereas "no worse than the keyboard
@@ -2379,43 +2389,68 @@ const int KB_ROW_H = 58;
 // on a reserved row, and the invariant is preserved here by construction. At a
 // 16px cell and 5 lines the card is 120 rather than 90, which is arithmetic:
 // 8 + 16 + 8 + 5*16 + 8 = 120, every term below.
-//   card    +0..+119  (KB_TEXT_Y 12 .. 131, KB_TEXT_H 120)
-//   meta    +8..+23   (KB_META_DY 8  -> y 20..35: byte counter left, countdown right)
+//   card    +0..+119  (KB_TEXT_Y 34 .. 153, KB_TEXT_H 120)
+//   meta    +8..+23   (KB_META_DY 8  -> y 42..57: byte counter left, countdown right)
 //   gap     +24..+31  (8 rows - board 1 has 3)
-//   line 0  +32..+47  (KB_LINE0_DY 32 -> y 44)
-//   line 1            y 60
-//   line 2            y 76
-//   line 3            y 92
-//   line 4            y 108..123
+//   line 0  +32..+47  (KB_LINE0_DY 32 -> y 66)
+//   line 1            y 82
+//   line 2            y 98
+//   line 3            y 114
+//   line 4            y 130..145
 //   pad     +112..+119 (8 rows below the last line, inside the card)
-// The meta row occupies y 20..35 and the first text line starts at y 44, so they
+// The meta row occupies y 42..57 and the first text line starts at y 66, so they
 // share no pixel row with 8 to spare. The two gaps are equal at 8 deliberately:
 // the card's only job is to hold the meta row and the text, so the air above and
 // below the block is the same, and the residual lands in the BREAK below the card
-// rather than inside it.
-const int KB_TEXT_Y  = 12;
+// rather than inside it. (Every absolute y here moved by 22 when the prompt strip
+// pushed KB_TEXT_Y 12 -> 34; the card's own INTERNALS are untouched.)
+//
+// KB_LINE_PITCH IS DECLARED FIRST because three of the terms below derive from it
+// (KB_STRIP_H, the card's line spacing, KB_ACT_DRAWN), and both the compiler and
+// the checkers' consts() parser read this file top to bottom - a derivation
+// written above its input silently fails to resolve on the checker side.
+const int KB_LINE_PITCH = 16;                  // Spleen 8x16's cell - text-derived
+// THE PROMPT STRIP: one line of the ask, above the card, that never leaves.
+// Re-reading the question used to mean opening the peek, which covers the keys
+// and routes every tap to its pager - so you could not read and type at once.
+// THIS BOARD PAYS NOTHING FOR IT: the strip and its gap come out of the 38px
+// break below, which this file already calls "a RESIDUAL, not a chosen number...
+// the term with no job of its own". 6 of the old 12px top margin and 22 of that
+// break make the 28 the strip and its 8px gap need. KB_ROWS_Y, KB_ROW_H and
+// KB_PITCH are UNCHANGED, so the key grid, the action row and every touch band
+// below the card are exactly where they were.
+// KB_STRIP_Y 6 is 2 short of the 8 the bottom margin keeps, and that is where the
+// column's one odd term now sits; what the eye measures from the top edge is
+// still 8, because the strip's text is one KB_LINE_PITCH cell centred in the band
+// and so inks 8..23, with drawString's OPAQUE box stopping 10 rows above the
+// card's top border at 34.
+const int KB_STRIP_Y = 6;
+const int KB_STRIP_H = KB_LINE_PITCH + 4;      // 20
+const int KB_TEXT_Y  = 34;                     // was 12, before the strip
 const int KB_TEXT_H  = 120;
 const int KB_META_DY = 8;
 const int KB_LINE0_DY = 32;
-const int KB_LINE_PITCH = 16;                  // Spleen 8x16's cell - text-derived
 // THE VERTICAL BUDGET, and where this board's surplus actually goes. The content
 // is a fixed grid plus a provably 5-line card, so there is nothing here to add:
 //
-//   12 (top margin) + 120 (card) + 38 (break) + 232 (4 rows * 58)
-//   + 24 (gap) + 46 (action band) + 8 (bottom margin) = 480
+//   6 (top margin) + 20 (strip) + 8 (gap) + 120 (card) + 16 (break)
+//   + 232 (4 rows * 58) + 24 (gap) + 46 (action band) + 8 (bottom margin) = 480
 //
 // The gap above the action row was 12 while KB_ACT_H was 58; the 12px that band
 // gave back went there, because KB_ACT_Y is anchored to the bottom margin.
 //
-// The 38px BREAK is a RESIDUAL, not a chosen number: it is what is left once every
+// The BREAK is a RESIDUAL, not a chosen number: it is what is left once every
 // other term is fixed by something else (the card by its 5 lines at a 16px cell,
 // the rows by the aspect cap on KB_ROW_H, the action row by KB_ROW_H, the margins
 // by the 4px scale). It was 68 while the card was mis-derived at 4 lines of 13, and
-// the 30 rows the card now needs came straight out of it - which is the right
-// direction: the break is the term with no job of its own, and the card's height is
-// the one number that decides whether SEND can sign text that is off screen.
-// KB_ROWS_Y itself does not move, so the key grid, the action row and every touch
-// band below the card are untouched by this.
+// the 30 rows the card now needs came straight out of it; it was 38 until the
+// prompt strip took 22 more, leaving 16 - which is the right direction twice over:
+// the break is the term with no job of its own, and both the card's height and the
+// strip are terms with one. KB_ROWS_Y itself does not move for either of them, so
+// the key grid, the action row and every touch band below the card are untouched.
+// settings-geom-check.mjs now sums this column term by term against BOARD_H, with
+// every GAP written as a difference of the constants around it rather than as a
+// number of its own - a residual asserted against itself always holds.
 const int KB_ROWS_Y = 170;                     // 4 rows * 58 = 232, ending 401
 // THE ACTION ROW, drawn and tested separately - the split the keys already have
 // (KB_KEY_W in KB_PITCH, KB_ROW_H - 4 in KB_ROW_H) and this row never did.

@@ -9,8 +9,8 @@
 // reader does. That is not cosmetic: it is what makes QWERTY viable on a panel
 // this narrow. THAT is what going full-screen buys, and the two numbers differ in
 // BOTH dimensions rather than only in height:
-//   drawn   KB_KEY_W  x (KB_ROW_H - 4)   22x40 on board 1, 30x54 on board 2
-//   tested  KB_PITCH  x  KB_ROW_H        24x44 = 1056, 32x58 = 1856
+//   drawn   KB_KEY_W  x (KB_ROW_H - 4)   22x37 on board 1, 30x54 on board 2
+//   tested  KB_PITCH  x  KB_ROW_H        24x41 = 984, 32x58 = 1856
 // The WIDTH of the tested band comes from the PITCH, not from KB_KEY_W: kbTouch()
 // divides by KB_PITCH, so the 2px gap between two keys belongs to the key on its
 // left and there is no dead column anywhere on the board. Keep the drawn and the
@@ -32,6 +32,13 @@
 // any text line" invariant is visible next to the code that draws them.
 const int KB_META_Y  = KB_TEXT_Y + KB_META_DY;    // byte counter left, countdown right
 const int KB_LINE0_Y = KB_TEXT_Y + KB_LINE0_DY;   // first hard-wrapped line
+// The prompt strip's text row, CENTRED in its band rather than offset by a third
+// literal: KB_STRIP_H is KB_LINE_PITCH + 4 on both boards, so this is 2 on both,
+// and the strip's opaque text box lands strictly inside the band no matter what
+// either board does to its cell height. drawString paints that box the full
+// height of a line, and the strip sits directly above the text card - one row too
+// low and it rubs out the card's top border.
+const int KB_STRIP_TEXT_DY = (KB_STRIP_H - KB_LINE_PITCH) / 2;
 const int KB_MAX_BYTES = 150;                  // must equal the host's cap
 
 // Rows 0-2 are the letter/symbol pages; row 3 is fixed. Control characters stand
@@ -149,8 +156,8 @@ bool kbIsMessage() { return kbMessageMode; }
 bool kbHasDetail() {
   // Never in message mode: there is no ask to read, and the detail screen this was
   // opened from already shows the title, last prompt and path. Suppressing it here
-  // also suppresses the "tap here to read it" hint, so no control is advertised
-  // that would do nothing.
+  // also suppresses the strip, the "tap the prompt above to read it" hint and the
+  // strip's own tap band, so no control is advertised that would do nothing.
   if (kbIsMessage()) return false;
   return kbSessionIdx >= 0 && kbSessionIdx < sessionCount
          && sessions[kbSessionIdx].askDetail[0] != '\0';
@@ -164,8 +171,81 @@ int kbPeekPages() {
   return (lines + KB_PEEK_LINES - 1) / KB_PEEK_LINES;
 }
 
+// THE PROMPT STRIP: one line of the ask, above the text card, that never leaves.
+//
+// WHAT IT FIXES. Re-reading the question meant opening the peek, and the peek
+// covers the keys AND routes every tap on the board to its own pager - so the
+// question and the keyboard could not be on the glass at the same time, and the
+// only way out was to tap past the last page. The card showed the question too,
+// but only with an empty buffer: the first keystroke replaced it with your own
+// text. One line of it lives up here now instead, for the whole session.
+//
+// It is ONE LINE and it stops at the first '\n' RATHER THAN RUNNING THROUGH IT.
+// askDetail keeps its newlines (deckhand_display.ino scrubs every other control
+// byte and spares '\n' for drawWrappedText), and the fonts carry ASCII 0x20..0x7E
+// and nothing else: a '\n' handed to drawString paints nothing AND advances
+// nothing, so the second line would be drawn hard against the end of the first
+// with no separator - and textWidth would measure the break as zero, so the
+// truncation would be measured wrong as well as drawn wrong.
+//
+// The MORE tag's lane is reserved WHETHER OR NOT the tag is drawn, so the point
+// the text truncates at does not jump about as the tag comes and goes; "there is
+// more" is then exactly "the detail did not fit in that lane", plus the newline
+// case above.
+const char* KB_STRIP_MORE = "MORE";
+
+void drawKbStrip() {
+  // PAINTED UNCONDITIONALLY, not through a change-only cache, and that is
+  // deliberate. Its value cannot change while it is up - the ask is pinned by pid
+  // for the life of the keyboard - so a cache would buy nothing and would be one
+  // more thing to reset when drawKeyboard() fillScreens over the strip, which is
+  // exactly how drawSettingsStatic() and micRestoreUi() left fields BLANK. It is
+  // called from drawKeyboard() and from the ONE transition that can invalidate it
+  // (the ask going away, in the 5s tick), never per keystroke: drawKbText()
+  // repaints the CARD only, from KB_TEXT_Y down, so nothing about typing touches
+  // these rows and nothing here caches across the two.
+  tft.fillRect(CARD_X, KB_STRIP_Y, CARD_W, KB_STRIP_H, COLOR_BG);
+  // Same gate as the peek and as the card's hint, so no control is advertised
+  // that would do nothing: with no ask to read there is no text here and
+  // kbTouch's strip branch has no target.
+  if (!kbHasDetail()) return;
+  SessionInfo& sn = sessions[kbSessionIdx];
+  const int y = KB_STRIP_Y + KB_STRIP_TEXT_DY;
+  // setUIFont BEFORE every measurement: textWidth and fitText both measure the
+  // LIVE font, and measuring in one and drawing in another is the bug fitText's
+  // own signature is shaped to prevent.
+  setUIFont(T_META);
+  const int tagW = tft.textWidth(KB_STRIP_MORE) + 6;   // + the 6px gap it keeps
+  char buf[KB_COLS + 8];
+  int n = 0;
+  while (sn.askDetail[n] && sn.askDetail[n] != '\n' && n < (int) sizeof(buf) - 1) n++;
+  memcpy(buf, sn.askDetail, n);
+  buf[n] = '\0';
+  bool more = sn.askDetail[n] != '\0';       // a newline, or a longer detail, follows
+  char line[KB_COLS + 8];
+  setUIFont(T_BODY);
+  fitText(line, sizeof(line), buf, CARD_W - 12 - tagW);   // three ASCII dots, never U+2026
+  if ((int) strlen(line) != n) more = true;   // ...or it had to be cut to fit
+  tft.setTextColor(COLOR_VALUE, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(line, CARD_X + 6, y);
+  if (more) {
+    setUIFont(T_META);
+    tft.setTextColor(COLOR_LABEL, COLOR_BG);
+    tft.setTextDatum(TR_DATUM);
+    tft.drawString(KB_STRIP_MORE, CARD_X + CARD_W - 6, y);
+    tft.setTextDatum(TL_DATUM);
+  }
+}
+
 // The prompt, over the keys. Paged by tapping, because an ask detail runs to 1400
-// characters against 13 lines - the same reason the ask screen itself pages.
+// characters against KB_PEEK_LINES of them (11 on board 1 since the strip shortened
+// the overlay, 15 on board 2) - the same reason the ask screen itself pages.
+//
+// IT IS NO LONGER THE ONLY WAY TO RE-READ THE QUESTION. drawKbStrip() keeps one
+// line of the ask above the card at all times, so the peek is now the LONG read
+// rather than the only read - which is what makes it acceptable that, while it is
+// up, kbTouch routes every tap to its pager.
 void drawKbPeek() {
   if (kbSessionIdx < 0 || kbSessionIdx >= sessionCount) return;
   SessionInfo& sn = sessions[kbSessionIdx];
@@ -281,9 +361,16 @@ void drawKbText() {
     tft.setTextDatum(TL_DATUM);
     tft.drawString(line, CARD_X + 6, KB_LINE0_Y);
     if (kbHasDetail()) {
+      // NAMES THE STRIP, not this card. It said "tap here to read it" while a tap
+      // on the card was what opened the peek; kbTouch's card branch is the caret
+      // now (with an empty buffer there is nothing to place, so the tap does
+      // nothing at all), and the strip above carries the peek. A hint that points
+      // at a control that has moved is worse than none: it teaches the one
+      // gesture that no longer works.
       setUIFont(T_META);
       tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-      tft.drawString("tap here to read it", CARD_X + 6, KB_LINE0_Y + KB_LINE_PITCH);
+      tft.drawString("tap the prompt above to read it", CARD_X + 6,
+                     KB_LINE0_Y + KB_LINE_PITCH);
     }
   } else {
     drawKbHardWrapped();
@@ -379,6 +466,10 @@ void drawKbActions() {
 
 void drawKeyboard() {
   tft.fillScreen(COLOR_BG);
+  // BEFORE the peek's early return: the peek covers the keys from KB_ROWS_Y down
+  // and never the card or the strip, so the question stays legible above it and
+  // the strip does not have to be redrawn when the peek closes.
+  drawKbStrip();
   drawKbText();
   if (kbPeekPage >= 0) {
     drawKbPeek();   // the peek owns the keys' area
@@ -551,13 +642,35 @@ bool kbTouch(int sx, int sy) {
     }
     return true;                 // the margins outside the lane, likewise
   }
-  // The text card. With a draft in progress (kbLen > 0), a tap PLACES THE
-  // CARET rather than peeking - the card is showing your answer, not the
-  // question, so a tap on it is about the answer. Only with an empty buffer
-  // (kbLen == 0, exactly when drawKbText shows the question and, if there is
-  // one, "tap here to read it") does a tap still open the peek; that hint's
-  // text stays true because this is the only branch left that can fire then.
+  // THE PROMPT STRIP, tested BEFORE the card's branch below, which is "anything
+  // else above the keys" and would otherwise swallow these rows. Its band is every
+  // row from the top of the panel to the card's top edge - KB_TEXT_Y, so 24px on
+  // board 1 and 34 on board 2. That is MORE than the 17/20 the strip draws (the
+  // top margin above it and the gap below it belong to the control, the same
+  // drawn/tested split the keys and the action row have) and still UNDER TAP_MIN,
+  // which is stated rather than glossed: the column closes exactly on BOARD_H
+  // with no spare row on board 1, so there is nothing to grow it with. What it
+  // replaces was not bigger - it was a tap on the card that only worked with an
+  // empty buffer, and after Task 5 not even then.
+  if (sy < KB_TEXT_Y) {
+    if (kbHasDetail()) { kbPeekPage = 0; drawKeyboard(); }
+    return true;
+  }
+  // The text card. A tap PLACES THE CARET: the card is showing your answer, not
+  // the question, so a tap on it is about the answer.
+  //
+  // THE HISTORY, because it has been wrong twice in two different ways and the
+  // second one is this task's. The card was inert to begin with, which is what
+  // made the question unreachable once you had typed a character; a tap on it was
+  // then made to open the peek, which fixed that; Task 5 gave the tap to the
+  // caret for kbLen > 0 and left the peek on the kbLen == 0 branch - and that
+  // brought the same defect back in the same shape, because kbLen > 0 is exactly
+  // when you are typing. This task closes it for good by moving the peek to the
+  // strip above, which is reachable in EVERY state rather than in one of them.
   if (sy < KB_ROWS_Y) {
+    // Still guarded on kbLen > 0: with an empty buffer there is no character to
+    // place a caret on, so the tap is swallowed rather than setting kbCaret to a
+    // stated 0 that means the same as the -1 pin it would replace.
     if (kbLen > 0) {
       // The exact inverse of drawKbText's division. Clamp each intermediate
       // BEFORE combining them into a byte offset: a tap below the last line
@@ -574,9 +687,6 @@ bool kbTouch(int sx, int sy) {
       if (off < 0) off = 0;
       kbCaret = off;
       drawKbText();
-    } else if (kbHasDetail()) {
-      kbPeekPage = 0;
-      drawKeyboard();
     }
     return true;
   }

@@ -4455,6 +4455,14 @@ void handleLine(const String& line) {
       kbWindowClosed = gone;
       tft.fillRect(CARD_X, KB_ACT_Y, tft.width() - CARD_X * 2, KB_ACT_H, COLOR_BG);
       drawKbActions();
+      // AND THE PROMPT STRIP, on the same transition and for the same reason it
+      // is not redrawn on every tick: its text cannot change while the keyboard
+      // is up EXCEPT here, where kbSessionIdx has just gone to -1 and there is no
+      // longer an ask to read. Left alone it would keep showing the question
+      // while a tap on it silently did nothing, kbHasDetail() having gone false -
+      // a control still advertised after it stopped working. drawKbStrip() clears
+      // its band when there is no detail, so this both repaints and erases.
+      drawKbStrip();
     }
     drawKbText();          // countdown ticks down
     return;

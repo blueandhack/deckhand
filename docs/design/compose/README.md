@@ -49,7 +49,9 @@ Matching on the name alone excused any value, with two consequences:
   **byte-identical** output, `0 UNEXPECTED` included;
 - worse, a later task landing `KB_ROW_H = 42` in the header would have read
   exactly like that task **not having run** — which defeats the binding for
-  precisely the constants Tasks 2, 3, 6 and 10 exist to add.
+  precisely the constants this plan exists to add. (A roster of task numbers
+  stood here and went stale the way every other restated roster in this
+  directory did; `check.mjs`'s `PENDING` table is the live record.)
 
 Three `[pending]` assertions now guard the table itself, and none of them is ever
 excused: an **orphan** entry naming a constant the mock does not have; a **mock
