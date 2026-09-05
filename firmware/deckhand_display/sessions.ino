@@ -1701,6 +1701,43 @@ void renderSessionsTab() {
   renderSessionsList();
 }
 // ---------- Session detail screen ----------
+// THE CHIPS CANNOT GO INTO THE DETAIL SIGNATURE VERBATIM EITHER, and the arithmetic
+// says so louder than the descriptions' does: four slots of up to 49 characters with
+// a separator each is 200 bytes of a 384-byte detailSigCache that already spends 363
+// of them on board 2. A signature cache shorter than what it stores stops noticing
+// changes past that point - this codebase's oldest bug, not a new risk - so there is
+// no version of "append them as one more %s" that is not a silent truncation.
+//
+// So: the same trade askOptDescHash makes below. A 32-bit FNV-1a over all four
+// slots, printed as 8 hex characters - nine bytes with its separator, changing if and
+// only if some chip does. WHAT A COLLISION COSTS: one missed repaint of a card whose
+// every other signed field is also identical. Nothing is authenticated with it (the
+// answer HMAC is over the option INDEX, and a chip is typed into the draft rather
+// than signed), so 2^-32 is the right price for the 191 bytes of cache it saves.
+//
+// UNLIKE askOptDescHash THIS ONE IS ON BOTH BOARDS. That one is board-2 only because
+// board 1's ASK_OPT_DESC_BYTES is 1, so every slot there is permanently "" and its
+// hash is a constant - a term that can never change is cache pressure with no signal
+// in it. askChips is [4][50] on both boards and board 1 draws the same card, so this
+// term really can move here.
+//
+// The 0xFF terminator per slot is not decoration: without it {"ab", ""} and
+// {"a", "b"} hash identically, and those are two genuinely different panels.
+// askChipCount is deliberately NOT folded in: the slots are dense and every counted
+// one is non-empty, so the count is derivable from them and a term for it could
+// never change independently of the bytes already hashed.
+unsigned long askChipsHash(int idx) {
+  unsigned long h = 2166136261UL;
+  for (int k = 0; k < 4; k++) {
+    for (const char* p = sessions[idx].askChips[k]; *p; p++) {
+      h ^= (unsigned char) *p;
+      h *= 16777619UL;
+    }
+    h ^= 0xFF;
+    h *= 16777619UL;
+  }
+  return h;
+}
 #if !BOARD_USES_TFT_ESPI
 // THE OPTION DESCRIPTIONS CANNOT GO INTO THE SIGNATURE VERBATIM, and the arithmetic
 // is the whole reason this helper exists rather than a twelfth "%s".
@@ -1794,6 +1831,18 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
   used = strlen(out);
   if (used + 6 < outSize)
     snprintf(out + used, outSize - used, "|%s", sessions[idx].agent);
+  // THE ASK'S CHIPS, as the hash derived above rather than as text, and in this
+  // signature for the same shape of event that put the option descriptions in it:
+  // they are drawn on the card's reply panel and nothing else this signature tracks
+  // moves when they arrive. The host omits `chips` entirely until it extracts one,
+  // so a pending prompt can gain them mid-life - a host restarting or being upgraded
+  // under it, with askPid unchanged throughout - and without this term that panel
+  // would never repaint to show them. askDetail is itself NOT in this signature, so
+  // a detail edited under a stable askPid moves the chips and nothing else here
+  // either. Both boards, unlike the descriptions below: see askChipsHash.
+  used = strlen(out);
+  if (used + 10 < outSize)
+    snprintf(out + used, outSize - used, "|%08lx", askChipsHash(idx));
 #if !BOARD_USES_TFT_ESPI
   // THE OPTION DESCRIPTIONS, as the hash derived above rather than as text. They are
   // drawn on this card's ask screen and nothing else in this signature moves when

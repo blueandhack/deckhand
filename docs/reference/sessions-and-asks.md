@@ -596,3 +596,42 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   work vouches for the panel's colours** — board 2's `SCREENSHOT` reads the shadow framebuffer, so
   it proves the renderer self-consistent and nothing about the glass (see the verification trap
   under Two boards).
+- **THE ASK'S TAPPABLE TOKENS RIDE ON THE WIRE AS `ask.chips`, EXTRACTED ON THE MAC.** The hardest
+  thing to type on this device is exactly the token the question already printed: a path costs a
+  page switch for every `/`, a capital costs a shift. `host/ask-chips.mjs` pulls at most `CHIP_MAX`
+  = 4 of them out of the detail — backticked spans, then flags, then `/`-bearing tokens, then quoted
+  spans, deduped by FIRST APPEARANCE POSITION and dropped over `CHIP_BYTES` = 48 — and
+  `host/index.mjs` emits them beside `options`, **only when there is one**, so a prompt with no
+  tappable token costs no payload bytes. `askChips(toAscii(detail), options)` and never the reverse:
+  the cap is in BYTES, so capping before the transliteration caps a string whose byte count then
+  changes under it. `SessionInfo.askChips[4][50]` holds them on BOTH boards (48 + a NUL), counted by
+  `askChipCount`, dense, empty labels not counted, reset on the no-ask path beside `askDetail`.
+  **48 rather than the 32 that would have mirrored `askOpts[4][34]`:** 32 dropped
+  `/Users/yujia/projects/deckhand/build` (36 bytes) and this repo's own
+  `firmware/deckhand_display/keyboard.ino` (38), i.e. it failed to chip a path in its own home repo.
+  Cost 4 x 50 x MAX_SESSIONS(6) = **1,200 bytes of DRAM** (measured: board 1's globals moved 70,748
+  -> 71,948, exactly that), 4.5% of board 1's ~26KB free heap.
+  **THE LINE'S HEADROOM WAS MEASURED BEFORE THE FIELD WAS ADDED, not assumed**, because the spec
+  made that a gate whose failure was a design change (a separate `CHIPS` line, or a smaller cap) and
+  not an implementation detail. Against `feedChar`'s parsed 16,000-byte guard: the saturated
+  6-session ASCII line was **14,237** bytes, chips at their worst cost **214 bytes per session** and
+  **1,284** over six, taking it to **15,521 — 479 bytes still free**. The realistic figure is far
+  smaller: over the **133 ask-carrying ticks in the live host log**, the worst real chip cost was
+  **40 bytes**, and the largest ask-bearing sessions array ever emitted was 3,041 bytes.
+  `host/wire-bytes-check.mjs` now asserts that arithmetic with both constants parsed, so raising
+  either fails by name; it models the field's cost as a DIFFERENCE (`chips: false`) rather than
+  transcribing it. **Chips are not a `wire-fit` shed tier** and deliberately so: they survive tier
+  1 dropping the detail they came from, which is the right direction — the body is what you read on
+  the Mac, the tokens are what you cannot type here.
+  **They are in `buildDetailSignature` on BOTH boards, as an FNV-1a hash** (`askChipsHash`), for the
+  same reason `optDescs` are on board 2: the host omits `chips` until it extracts one, so a pending
+  prompt can gain them mid-life with `askPid` unchanged and nothing else on the card moving — and
+  `askDetail` is not in that signature either. Verbatim they would need 563 bytes of a 384-byte
+  `detailSigCache`. **That cache is now at 381 of 384 on board 2** (372 on board 1); the next term
+  added to the detail signature will not fit, and `sessions-geom-check.mjs` fails rather than
+  truncating silently.
+  **NOT YET DRAWN.** Nothing on either board renders a chip — that is task 10. What is verified is
+  the wire and the parse: a read-only probe ask published into the live host emitted
+  `"chips":["arduino-cli compile","--fqbn","firmware/deckhand_display/keyboard.ino"]` (the 38-byte
+  path 32 would have dropped, and `Allow`/`Deny` correctly suppressed as chips that merely restate a
+  button), and both boards drew that ask's detail card unchanged, captured.

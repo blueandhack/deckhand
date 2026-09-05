@@ -1092,6 +1092,32 @@ struct SessionInfo {
   // the RAM is opted out of.
   char askOptDesc[4][ASK_OPT_DESC_BYTES];
   uint8_t askOptCount;
+  // TOKENS LIFTED OUT OF THE ASK BY THE HOST (host/ask-chips.mjs), so this board
+  // only ever draws buttons and never re-derives what they say. The hardest thing
+  // to type here is exactly the token the question already printed: a path costs a
+  // page switch for every '/', a capital costs a shift. The Mac has already parsed
+  // the ask into its title and detail and already transliterated it to ASCII, so it
+  // is the natural place to pull them out.
+  //
+  // [50] IS CHIP_BYTES 48 PLUS A NUL, AND IT IS DELIBERATELY NOT askOpts[4][34]'s
+  // 32-char cap. 32 was chosen only to mirror that label cap - a tidy symmetry and
+  // nothing more - and it silently dropped exactly the absolute paths chips exist to
+  // supply: /Users/yujia/projects/deckhand/build is 36 bytes and this repo's own
+  // firmware/deckhand_display/keyboard.ino is 38, so the feature would have failed
+  // to chip a path in its own home repo.
+  //
+  // DRAM, stated the way ASK_OPT_DESC_BYTES' cap is: 4 x 50 x MAX_SESSIONS(6) =
+  // 1,200 bytes (816 at the 32-byte cap), against this board's ~26KB of free heap
+  // after the BLE stack - 4.5% of it, up from 3.1%. BOTH boards pay it, unlike
+  // askOptDesc: board 1 draws the same detail card and the same reply panel.
+  //
+  // DENSE AND COUNTED. askChipCount says how many slots are live, no slot at or
+  // past it is ever read, and a chip that arrived empty is not counted at all - a
+  // button with no label is worse than one fewer button. The host omits `chips`
+  // entirely when it extracted none, so a host too old to send the field leaves the
+  // count at 0 and this board behaves exactly as it did before.
+  char askChips[4][50];
+  uint8_t askChipCount;
   // May WE decide this prompt? Per-prompt, not global: it records whether the
   // hook actually blocked waiting for us when the prompt was raised. Flipping
   // the Mac's toggle mid-prompt therefore can't strand this screen - showing
@@ -4314,6 +4340,15 @@ void handleLine(const String& line) {
       info.askDetail[0] = '\0';
       for (int k = 0; k < 4; k++) info.askOptDesc[k][0] = '\0';
       info.askOptCount = 0;
+      // Reset every tick for exactly the reason askDetail is reset one line up: a
+      // chip left behind from the last time this slot held an ask would survive
+      // into a session that has no ask at all, and the reply panel would offer a
+      // token belonging to a prompt that is already answered. askChipCount gates
+      // every read, so it is the one that must be zeroed; the slots are blanked
+      // with it so nothing can read a stale label out from under a count that a
+      // later change forgot to keep in step.
+      info.askChipCount = 0;
+      for (int k = 0; k < 4; k++) info.askChips[k][0] = '\0';
       info.askAnswerable = remoteAnswerEnabled;
       info.askVoice = false;
       info.askVoiceText[0] = '\0';
@@ -4378,6 +4413,31 @@ void handleLine(const String& line) {
             // single-line, so unlike askDetail there is no '\n' to preserve.
             for (char* p = info.askOptDesc[k]; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
             k++;
+          }
+        }
+        // THE TAPPABLE TOKENS, walked exactly like the descriptions above and for
+        // the same two reasons: bounded by this buffer's own 4 slots rather than by
+        // anything on the wire, so a longer array cannot walk past it, and COUNTED,
+        // so nothing past askChipCount is ever read. Absent = a host too old to
+        // extract them, which leaves the count at 0 - the same "no chips" state as a
+        // prompt with no tappable token in it, and not an error to report.
+        JsonArray chips = ask["chips"].as<JsonArray>();
+        if (!chips.isNull()) {
+          for (JsonVariant ch : chips) {
+            if (info.askChipCount >= 4) break;
+            copyField(info.askChips[info.askChipCount], sizeof(info.askChips[0]), ch | "");
+            // Defence in depth, exactly as the title, detail and descriptions get
+            // above. The host transliterates and flattens control bytes now, but one
+            // that slipped through draws NOTHING AND ADVANCES NOTHING on this font,
+            // so the label would come out short with an invisible hole in it rather
+            // than with a visible replacement glyph. Single-line, so unlike
+            // askDetail there is no '\n' to preserve.
+            for (char* p = info.askChips[info.askChipCount]; *p; p++)
+              if ((uint8_t) *p < 0x20) *p = ' ';
+            // A chip that arrived empty is a button with no label. Don't count it -
+            // it would spend one of four scarce slots on a target that says nothing
+            // and types nothing. The slot is already "" and stays that way.
+            if (info.askChips[info.askChipCount][0]) info.askChipCount++;
           }
         }
       }

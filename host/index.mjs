@@ -31,6 +31,7 @@ import { postToSessionInbox } from "./session-inbox.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
 import { toAscii, deviceText } from "./to-ascii.mjs";
+import { askChips } from "./ask-chips.mjs";
 import { fitPayload } from "./wire-fit.mjs";
 import { asciiFit, describeOffenders } from "./wire-ascii.mjs";
 import { resolveMacEmoji } from "./mac-emoji.mjs";
@@ -2087,6 +2088,33 @@ async function readSessions() {
         // text for a question and discards it for a plan, and a spoken answer to
         // a permission prompt could only ever be a DENY.
         item.ask.voice = record.ask.kind === "question";
+        // THE TAPPABLE TOKENS. Extracted HERE and not on the device, because the
+        // ESP32 only ever draws buttons and never re-derives what they say - the
+        // hardest thing to type there is exactly the token the question already
+        // printed, and this process has already parsed the ask.
+        //
+        // toAscii FIRST, askChips SECOND, and that order is load-bearing: CHIP_BYTES
+        // is a BYTE cap, so capping before the transliteration would cap a string
+        // whose byte count then changes under the cap (a multi-byte character
+        // transliterating to a shorter or longer ASCII run), and the cap would not be
+        // a byte cap at all. Same reasoning, same shape, as session.path's
+        // truncatePath(toAscii(...)) above. `options` rides along so a chip that
+        // merely restates a button already on the screen does not spend one of four
+        // scarce slots on a duplicate.
+        //
+        // ONLY-WHEN-PRESENT, for the same reason `title` and `prompt` are: this rides
+        // in EVERY tick, and a prompt with no tappable token in it must cost no
+        // payload bytes at all.
+        //
+        // THE LINE'S HEADROOM WAS MEASURED BEFORE THIS FIELD WAS ADDED, not assumed
+        // (task 9's report has the numbers): 214 bytes is the most one session's
+        // chips can be, 1,284 for all six, against the 1,763 bytes the saturated
+        // 6-session line leaves under feedChar's 16,000-byte guard - and the worst
+        // real cost over the 133 ask-carrying ticks in the host log was 40 bytes.
+        // host/wire-bytes-check.mjs now asserts that arithmetic rather than trusting
+        // this comment.
+        const chips = askChips(toAscii(record.ask.detail ?? ""), record.ask.options ?? []);
+        if (chips.length) item.ask.chips = chips;
         // Seconds left before the hook stops waiting, for the keyboard countdown.
         const ne = askNonces.get(record.ask.pid);
         // No budget configured (the "forever" default) means no countdown to draw.

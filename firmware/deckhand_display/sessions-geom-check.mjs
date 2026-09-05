@@ -148,6 +148,10 @@ const CACHE = cacheSizes("deckhand_display.ino");
 // checked for being a NAME rather than a literal.
 const OPT_DECL = DISPLAY_INO.match(/char askOpts\[(\d+)\]\[(\d+)\];/);
 const OPT_DESC_DECL = DISPLAY_INO.match(/char askOptDesc\[(\d+)\]\[([A-Za-z_0-9]+)\];/);
+// The chips buffer, parsed the same way and for the same reason: the signature
+// arithmetic below needs its real dimensions, and a literal on this side would leave
+// the firmware's own numbers certifying nothing.
+const CHIP_DECL = DISPLAY_INO.match(/char askChips\[(\d+)\]\[(\d+)\];/);
 
 // Field caps, straight off SessionInfo in deckhand_display.ino (a char[N] holds
 // N-1 characters). These are DATA widths, identical on both boards - which is
@@ -3798,6 +3802,32 @@ for (const b of [1, 2]) {
       "§7: s.agent is in the detail signature - the band's MARK is drawn from it and " +
       "nothing else on that card carries the agent any more");
   if (signsAgent) detSig += 1 + CAP.agent;
+  // ---- the ask's CHIPS, and why they are a hash on BOTH boards ----
+  // Parsed from the arm exactly as the agent term is. Unlike the descriptions below
+  // this term is NOT board-gated: askChips is [4][50] on both boards (board 1 draws
+  // the same detail card), so the hash really can move on both, and a term that can
+  // change is a term the signature has to carry or the panel never repaints.
+  chk(!!CHIP_DECL, "SessionInfo declares askChips[n][m] - the host's extracted tokens have somewhere to land");
+  const signsChips = /askChipsHash\(/.test(sigArm);
+  chk(signsChips,
+      "the ask's chips are in the detail signature on BOTH boards - the host omits `chips` until it " +
+      "extracts one, so a pending prompt can gain them mid-life with askPid unchanged and nothing " +
+      "else on the card moving; askDetail is not signed either, so nothing else would notice");
+  if (signsChips) {
+    const cw = sigArm.match(/"\|%0(\d+)lx",\s*askChipsHash/);
+    chk(!!cw, "the chip hash's printed width is parseable out of the signature itself");
+    const chw = cw ? +cw[1] : NaN;
+    detSig += 1 + chw;
+    // THE ARITHMETIC THAT FORCES THIS HASH TOO, asserted rather than left in a
+    // comment - and it is a tighter case than the descriptions': four chips verbatim
+    // is 200 bytes, which does fit inside 384 on its own but NOT on top of what the
+    // signature already spends. So "just add them as another %s" fails by overflowing
+    // the cache as a whole, which is a silent truncation and not a close call.
+    const chipsVerbatim = detSig - (1 + chw) + (CHIP_DECL ? +CHIP_DECL[1] * (1 + +CHIP_DECL[2] - 1) : NaN);
+    chk(chipsVerbatim > cacheLen("detailSigCache"),
+        `the ${CHIP_DECL ? CHIP_DECL[1] : "?"} chips verbatim would need ${chipsVerbatim} bytes of a` +
+        ` ${cacheLen("detailSigCache")}-byte detailSigCache - hence the ${chw}-hex hash`);
+  }
   // ---- the per-option descriptions, and why they are a HASH in that signature ----
   // The buffer first. Its second dimension must be the per-board NAME: a literal
   // there would leave ASK_OPT_DESC_BYTES certifying nothing at all, which is what an
