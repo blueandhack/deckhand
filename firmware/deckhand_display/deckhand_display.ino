@@ -5464,6 +5464,76 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // what is currently on the glass.
     int t = buf.substring(4).toInt();
     if (t >= 0 && t < TAB_COUNT) switchTab((Tab) t);
+  } else if (buf.startsWith("DETAIL")) {
+    // THE SESSION DETAIL CARD, PUT ON THE GLASS FROM THE MAC - and until this
+    // existed there was NO WAY to do that. TAB switches tabs, PAGE is SETTINGS
+    // only, and the only other route into this screen was "KBTEST msg ...",
+    // which opens the keyboard OVER the card it just opened. So the most-opened
+    // secondary screen on the device had never been captured on either board,
+    // while the command table's own rationale for TAB/PAGE/KBTEST/EMOJITEST is
+    // that "a capture can only record what is already there". An instrument that
+    // cannot observe the thing it is pointed at is worse than none; this one did
+    // not exist at all.
+    //
+    // "DETAIL" alone opens session 0, "DETAIL <n>" the n-th in DISPLAY order -
+    // the same order the list draws and the same indexing SCROLLOPEN uses.
+    //
+    // EVERY REFUSAL NAMES ITS CAUSE. From the Mac, silence and "impossible here"
+    // look identical, and this handler has three distinct ways to decline.
+    // n is REFUSED rather than clamped, where SCROLLOPEN constrains: a capture
+    // script asking for session 4 and silently being handed session 0 would
+    // report the wrong card as the right one, which is the failure mode the
+    // whole command exists to remove.
+    //
+    // NO DUPLICATE GUARD, DELIBERATELY. The host writes each trigger-file line
+    // to every live transport, so a cabled board runs this twice within
+    // milliseconds - the thing that made POWERPROBE print four refusal lines and
+    // corrupted a doubled scrollback fetch. Opening a card is IDEMPOTENT (state
+    // set, card repainted, same result), so the second copy costs one repaint
+    // and one duplicate line and can change nothing. Said here rather than
+    // guarded, because a guard nobody needs is state that can go wrong.
+    //
+    // EVERY EARLY `return` BELOW CLEARS `buf` FIRST, AND THAT IS NOT TIDINESS -
+    // MEASURED, ON BOTH BOARDS. `buf` is processCompletedLine's own accumulator,
+    // passed by REFERENCE, and the only thing that empties it is the `buf = ""`
+    // at the END of this function. A refusal that returns before it leaves the
+    // refused text sitting in the buffer, so the next line the host sends is
+    // APPENDED to it - "DETAIL 9" + the heartbeat JSON still startsWith("DETAIL"),
+    // refuses again, returns again, and the buffer only ever grows. Observed:
+    // 63 identical refusal lines across the two boards from ONE `DETAIL 9`, and
+    // for the ~100 seconds it took feedChar's 16000-byte garbage guard to break
+    // the loop the device parsed NO payloads at all - a frozen display and a
+    // SCREENSHOT sent in that window that went nowhere. SCROLLPERF's own
+    // `buf = ""; return;` is the same fix and says the same thing.
+    String arg = buf.length() > 6 ? buf.substring(6) : String("");
+    arg.trim();
+    if (sessionCount == 0) {
+      Serial.println("DETAIL refused: no sessions");
+      buf = "";
+      return;
+    }
+    if (kbActive || readerActive || histActive || emojiTestActive) {
+      Serial.println("DETAIL refused: another full-screen surface is up");
+      buf = "";
+      return;
+    }
+    int di = arg.length() ? arg.toInt() : 0;
+    if (di < 0 || di >= sessionCount) {
+      Serial.printf("DETAIL refused: session %d is out of range (0..%d)\n", di, sessionCount - 1);
+      buf = "";
+      return;
+    }
+    switchTab(TAB_SESSIONS);
+    openSessionDetail(di);
+#if !BOARD_USES_TFT_ESPI
+    // Board 2 composes into the shadow framebuffer; without this the card sits
+    // there until loop()'s next end-of-iteration flush, and a SCREENSHOT sent
+    // straight after DETAIL could read the buffer mid-way. Board 1 draws to the
+    // glass, so there is nothing to push.
+    tft.flush();
+#endif
+    Serial.printf("DETAIL: session %d (%s) %s\n", di, sessions[di].name,
+                  sessions[di].askPid[0] ? "ask screen" : "detail card");
   } else if (buf.startsWith("KBTEST")) {
     // Opens the typed-answer keyboard against the first pending ask, for the same
     // reason TAB and PAGE exist: the capture path can only record what is on the
@@ -5630,7 +5700,8 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // possible through the measuring command. Separating them is the fix; a
     // diagnostic whose side effect is the thing being investigated is worse than
     // no diagnostic.
-    if (!scrollActive) { Serial.println("SCROLLTO: the transcript is not open"); return; }
+    // buf = "" before the return: see DETAIL's note above.
+    if (!scrollActive) { Serial.println("SCROLLTO: the transcript is not open"); buf = ""; return; }
     const char* a = buf.c_str() + 8;
     while (*a == ' ') a++;
     long ln = (*a >= '0' && *a <= '9') ? atol(a) : 999999;
@@ -5647,9 +5718,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // every "verification" of the open path was watching a diagnostic's side
     // effect rather than the product. That side effect is also what got reported
     // as the page scrolling by itself.
-    if (sessionCount == 0) { Serial.println("SCROLLOPEN: no sessions"); return; }
+    // buf = "" before both returns: see DETAIL's note above.
+    if (sessionCount == 0) { Serial.println("SCROLLOPEN: no sessions"); buf = ""; return; }
     if (kbActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
-      Serial.println("SCROLLOPEN: another full-screen surface is up"); return;
+      Serial.println("SCROLLOPEN: another full-screen surface is up"); buf = ""; return;
     }
     int idx = 0;
     const char* a = buf.c_str() + 10;
@@ -5716,6 +5788,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // someone else's screen.
     if (pairPanelActive) {
       Serial.println("READTEST refused: another full-screen surface is up");
+      // buf = "" before the return: see DETAIL's note above. Without it this
+      // refusal repeats on every subsequent line until the 16KB garbage guard
+      // fires, and the device parses no payloads in between.
+      buf = "";
       return;
     }
 #endif
@@ -5919,11 +5995,13 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // is left character-for-character as it was.
     if (pairPanelActive) {
       Serial.println("EMOJITEST refused: another full-screen surface is up");
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
       return;
     }
 #endif
     if (kbActive || readerActive || histActive || showingDetail) {
       Serial.println("EMOJITEST refused: another full-screen surface is up");
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
       return;
     }
     // Draws all 16 icons in a grid on the content area, on BOTH backdrops the real

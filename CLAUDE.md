@@ -230,6 +230,7 @@ look identical.
 |---|---|
 | `RECAL` / `MICTEST` / `MICMON` / `MICREC` / `MICSTREAM` | touch calibration; mic level, live meter, one-shot and streaming capture |
 | `TAB 0..2` / `PAGE 0..3` / `KBTEST` / `EMOJITEST` / `READTEST` | put a surface on the glass, since a capture can only record what is already there |
+| `DETAIL [n]` | opens session `n`'s detail card WITHOUT the keyboard - the only route to that screen from the Mac (`KBTEST msg` opens the keyboard over it). Refuses by name on no sessions, an out-of-range `n`, or another full-screen surface |
 | `KBPROBE` / `KBPROBE off` | per keystroke: the key the press ARMED, the key the lift COMMITTED, the pixel delta. Measures where fingers land versus where they lift; says NOTHING about whether the text was right |
 | `KBBUBBLE [r c]` / `KBBUBBLE off` | draws the magnified key bubble so a capture can see it - it otherwise exists only while a finger is down. Arms, never commits; declines DEL, which commits on press |
 | `SCREENSHOT` | PNG to `~/Deckhand-shots/` (0.4s on board 2, ~18s on board 1) |
