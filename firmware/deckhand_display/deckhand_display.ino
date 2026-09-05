@@ -803,9 +803,49 @@ void uiButton(int x, int y, int w, int h, const char* label,
 // is already there - uiButton fills an unpressed control with it and THEN
 // strokes, so this is that same fill with the stroke dropped and the label
 // moved from COLOR_ACCENT to COLOR_VALUE. This adds no palette entry.
+//
+// FOUR ORANGE SPECKS AT EVERY PRESSED KEY'S CORNERS, and the flat fill below is
+// the whole fix. Reported from real use, then MEASURED on the glass: KBBUBBLE
+// arms a key, SCREENSHOT captures it, and the released key kept 16 stale pixels
+// - four per corner, RGB (74,52,16) and (57,44,24) against a COLOR_CARD of
+// (24,24,33), where a key that had never been pressed reads (8,8,8) and
+// (16,20,24) at the same coordinates.
+//
+// THE CAUSE IS NOT ANTI-ALIASING SPILLING OUTSIDE THE SHAPE - that was the first
+// hypothesis and it is wrong: PanelShim::fillSmoothRoundRect's corner sweep does
+// visit x-1 .. x+w and y-1 .. y+h, but the SDF's coverage is exactly 0 one pixel
+// out and blendPixel returns on `coverage <= 0.001f`, so nothing is ever written
+// outside the nominal w x h. The capture agrees - the pixel AT each corner is
+// pure background.
+//
+// The cause is that PanelShim IGNORES uiFillRound's `behind` argument (its
+// signature reads `uint16_t /*bg*/`) and blends the anti-aliased corners against
+// whatever is ALREADY in the shadow framebuffer. So a partial-coverage corner
+// pixel painted at 0.394 coverage in COLOR_ACCENT and then repainted at 0.394
+// coverage in COLOR_CARD keeps 0.394 * (1 - 0.394) = 24% of the accent. The
+// press is what leaves the residue, and unpressing cannot remove it because the
+// second blend has no way to know what was underneath. Board 1 does not have
+// this: real TFT_eSPI composites against the `bg` VALUE it is handed, so its
+// corners are recomputed from COLOR_BG every time. So the flat fill is GUARDED
+// TO BOARD 2 rather than shared: on board 1 it would buy nothing and cost a
+// blank-then-fill of every key on a panel that draws straight to the glass -
+// the clear-then-redraw flicker this repo's whole change-only discipline
+// exists to avoid. On board 2 nothing reaches the panel until a flush, so the
+// two writes are one composited result and there is no flash to see.
+//
+// Only the ONE statement that differs sits behind the #if, with no brace in
+// either arm - the shape CLAUDE.md requires so the brace-counting checkers can
+// still read this function.
+//
+// drawKbBubble() has always done exactly this, one line before its own
+// uiFillRound and for the same stated reason. This is that line, at the call
+// site that actually toggles its fill colour.
 void uiKeyCap(int x, int y, int w, int h, const char* label,
               bool pressed = false, uint16_t behind = COLOR_BG) {
   uint16_t bg = pressed ? COLOR_ACCENT : COLOR_CARD;
+#if !BOARD_USES_TFT_ESPI
+  tft.fillRect(x, y, w, h, behind);
+#endif
   uiFillRound(x, y, w, h, KB_KEY_R, bg, behind);
   setUIFont(T_TITLE);
   tft.setTextColor(pressed ? COLOR_BG : COLOR_VALUE, bg);

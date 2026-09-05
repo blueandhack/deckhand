@@ -2640,6 +2640,28 @@ for (const b of [1, 2]) {
           "(\"if (by < KB_TEXT_Y + KB_TEXT_H) drawKbText();\") - the bubble is allowed onto the " +
           "card's lower half now, and nothing else on that path restores it");
       //
+      // 2. THE FLAT FILL UNDER EVERY KEY CAP. PanelShim ignores uiFillRound's
+      // `behind` and blends the anti-aliased corners against the framebuffer, so
+      // a key filled COLOR_ACCENT and then refilled COLOR_CARD keeps ~24% of the
+      // accent at each corner - MEASURED on the glass as four orange specks per
+      // key, RGB (74,52,16) against a card of (24,24,33). Revert this line and
+      // the specks come straight back, invisibly to every geometric assertion
+      // here. The ORDER matters as much as the call, so the regex requires the
+      // fillRect to precede uiFillRound within the same body.
+      const KEYCAP_SRC = fnSrc(SRC_MAIN, "void uiKeyCap");
+      chk(KEYCAP_SRC.length > 0, "uiKeyCap()'s body is found in deckhand_display.ino (parse gate)");
+      chk(/tft\.fillRect\(\s*x\s*,\s*y\s*,\s*w\s*,\s*h\s*,\s*behind\s*\)\s*;[\s\S]*uiFillRound\(/.test(KEYCAP_SRC),
+          "uiKeyCap()'s OWN BODY flat-fills `behind` BEFORE uiFillRound, so the rounded corners " +
+          "blend against the colour they are told they sit on rather than against the accent a " +
+          "previous press left in the shadow framebuffer");
+      chk(/#if\s*!BOARD_USES_TFT_ESPI/.test(KEYCAP_SRC),
+          "and that fill is guarded to the board that needs it - real TFT_eSPI composites against " +
+          "the `behind` VALUE, so on board 1 the same line would only add a blank-then-fill of " +
+          "every key straight to the glass");
+      // The bubble has always done this, and it is the precedent the line above
+      // follows - so it is asserted rather than assumed to still be there.
+      chk(/tft\.fillRect\(\s*x\s*,\s*y\s*,\s*KB_BUB_W\s*,\s*KB_BUB_H\s*,\s*COLOR_BG\s*\)\s*;[\s\S]*uiFillRound\(/.test(KB_BUB_SRC),
+          "drawKbBubble()'s OWN BODY does the same thing one line before its own uiFillRound");
     }
     // ================= THE PROMPT STRIP =================
     // One line of the ask above the card, so the question and the keyboard are on
