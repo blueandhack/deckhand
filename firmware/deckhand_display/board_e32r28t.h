@@ -636,10 +636,45 @@ const int SESSION_EXP_PROMPT_MAX = 4;
 const int DETAIL_HEAD_H = 28;
 const int DETAIL_BACK_Y = 4;      // "< Back" baseline inside that row
 const int DETAIL_CARD_DY = 26;    // card top = CONTENT_Y + this
-// 224. The card runs y 60..283 and the "tap here for history" hint sits at 292.
-// Content ends at cardY+213 in the worst case (title AND last prompt both
-// present), so 8 rows of slack sit above the 2px border at +222..+223.
-const int DETAIL_CARD_H = 224;
+// 210, AND IT CAME DOWN FROM 224 WHILE GAINING A BAND - because 224 was 13px OVER
+// the ceiling this card's own footer sets, and had been since it was written.
+//
+// THE DEFECT THAT WAS ON THE ALLOWLIST TWICE. The detail screen draws two MC_DATUM
+// T_META strings: "answer this one on your Mac" at cardY + DETAIL_CARD_H + 8, and
+// the "tap here for history" hint at contentBottom() - 10. At H = 224 those are the
+// SAME y (60 + 224 + 8 = 292 = 302 - 10), drawString paints an OPAQUE box, and the
+// hint is drawn second - so on this board the warning was INVISIBLE. The device
+// showed an ask it could not answer and silently swallowed the sentence saying why.
+// sessions-geom-check.mjs carried it as two KNOWN[1] entries (the two strings
+// colliding, and the constant over its ceiling); both are gone now, and the comment
+// left in their place says what they were.
+//
+// THE CEILING IS 211, DERIVED NOT CHOSEN. drawString centres MC_DATUM on the ASCENT
+// (10 for Cozette) and paints a box ascent+descent (13) tall, so a string at y inks
+// y-5 .. y+7. The hint at 292 owns 287..299; the answer line at 60 + H + 8 owns
+// H + 63 .. H + 75, and the two collide when H + 75 >= 287, i.e. AT 212. The checker
+// derives that number from the hint's own y and PRINTS it.
+//
+// AND THE STACK BELOW IT FITS WITH ROOM SPARE, because §7 spends less card than the
+// layout it replaces. The running cursor in drawSessionDetail(), every step DERIVED:
+//   +0   BAND 34 (SESSION_BAND_H) - mark, status WORD, duration. NO top pad: the
+//        band REPLACES DETAIL_PAD_Y, which neither board draws any more.
+//   +34  name 26 ink +34..+59  | step 31
+//   +65  title 13 ink +65..+77 | step 20
+//   (NO PILL. It was 18px of ink and 23 of step; the band 34px above says the same
+//    word at T_HEAD, and the "for 12m - 14:31" line beside it went with it.)
+//   +85  rule | step 12
+//   +97  LAST PROMPT label 13 | step 13
+//   +110 prompt 2 lines (11 step, last inks +121..+133) | step 29
+//   +139 rule | step 12
+//   +151 PATH label 13 | step 13
+//   +164 path 2 lines (last inks +175..+187) | step 29
+//   +193 THE META LINE, inking +193..+205 - `model - branch` on the left, the Mac's
+//        icon and (with a second Mac up) its tag right-anchored. One line where the
+//        two column pairs were four.
+// so the content ends at +205 and TWO clear rows sit above the 2px border at
+// +208..+209 - board 2's own figure, and 1px still under the 211 ceiling.
+const int DETAIL_CARD_H = 210;
 // TYPE, in the header row. 76x22 drawn; the hit zone is the whole right end of
 // the row (100x28), the same trade the tab bar's slots make.
 const int MSG_BTN_W = 76, MSG_BTN_H = 22;
@@ -651,9 +686,30 @@ const int MSG_BTN_W = 76, MSG_BTN_H = 22;
 // card is what finally makes these caps big enough to show the whole field.
 const int DETAIL_PROMPT_LINES = 2;
 const int DETAIL_PATH_LINES = 2;
-// Air added at every block boundary inside the detail card. 0 here for the same
-// reason SESSION_AIR is: this card already runs to 8px of slack.
-const int DETAIL_AIR = 0;
+// 5, AND IT IS THE SCALED LEADING BUDGET RATHER THAN A CHOSEN NUMBER - the same
+// method 5d1acf1 used for this board's band-card block stack (board 2's leadings
+// scaled by the leading each board can actually afford after its own ink).
+//
+// THE INK IS FIXED BY THIS BOARD'S FACES and comes to 162px for the worst-case
+// stack: band 34 (its own 2px card border included) + name 26 + title 13 + rule 1
+// + label 13 + prompt 24 + rule 1 + label 13 + path 24 + meta 13. The card's
+// ceiling is 211 (see DETAIL_CARD_H), and 2 of what is left is the bottom border -
+// so 47px is the whole leading budget, against board 2's 66.
+//
+// EVERY BOUNDARY THIS WIDENS IS ONE TERM IN 6*AIR + 14, and that is the identity
+// that picks the number: DETAIL_NAME_STEP, DETAIL_TITLE_STEP, both
+// DETAIL_RULE_STEPs and both detailTextStep() tails carry one AIR each, and the
+// fixed 14 is their own non-air leading. (Board 2's identity is 6*AIR + 18 rather
+// than +14, because its DETAIL_TEXT_LINE_H equals its cell and this board's 11 is
+// 2 under its 13 - so 2 of each wrapped tail's "+2" is spent recovering the last
+// line's own ink here.) 6*5 + 14 = 44 of the 47 available; AIR 6 would need 50 and
+// put the card 3px past its ceiling. The 3px left over is the two clear rows above
+// the border plus 1 under the ceiling.
+//
+// It was 0, with a note saying "this card already runs to 8px of slack" - which was
+// true of a card that was 13px over its footer's ceiling. §7 returned the room: the
+// two label+value column pairs (four labels, four values, 71px) became one line.
+const int DETAIL_AIR = 5;
 // THE DETAIL CARD'S INK HEIGHTS, which its whole running cursor is now built from.
 // 26 is uiLineH(T_HERO) and 13 is uiLineH(T_BODY) - which on this board is also
 // uiLineH(T_META), Cozette having exactly one size and its double. Every step in
@@ -678,6 +734,22 @@ const int DETAIL_TEXT_LINE_H = 11;
 // font registry (uiLineH(DETAIL_NAME_FONT) == DETAIL_NAME_H) rather than trusting
 // the pair to stay in step.
 const int DETAIL_NAME_FONT = 4;
+// The gap between the meta line's text and the Mac cluster right-anchored at the
+// card's text edge. 8, THE SAME NUMBER BOARD 2 USES, and for the same reason
+// rather than by transcription: it is twice the bare 4 that binds an icon to the
+// text beside it (SESSION_SUB_ICON_GAP here, the same literal in the SETTINGS row
+// and in the cluster below), because this gap divides two DIFFERENT things - a
+// sentence of facts from an identity - where the 4 binds one thing to its own
+// label. The 4 is not scaled between the boards, so this is not either.
+//
+// It costs this board more than it costs board 2 - 8px is 1.3 characters at
+// TEXT_ADV 6 against exactly 1 at 8 - and that cost is counted in the meta line's
+// own measurement in drawSessionDetail(), which is what decides that this board
+// carries two facts where board 2 carries three. It is what fitText clips the left
+// half against, so it can never be merely decorative. (Two facts BESIDE A SECOND
+// MAC'S TAG, which is the binding case; with one Mac the tag is empty, the lane is
+// 46px wider and all three fit. The fall-back is measured per render, not a flag.)
+const int DETAIL_META_GAP = 8;
 
 // 32 tall, under this board's own TAP_MIN of 40, and 4 of gap between two buttons
 // that may be Allow and Deny - both are the most the content area can give rather
@@ -805,7 +877,8 @@ const int H_BTN = 44;     // buttons and toggles (pages with room)
 const int H_ROW = 40;     // list rows (the tightest page fits 5 of these)
 // THE STATUS PILL'S HEIGHT, named because it had FOUR copies and is the constant
 // most likely to be re-tuned next. drawStatusPill() drew an 18 literal twice, the
-// detail card's DETAIL_PILL_STEP added a third, and sessions-geom-check.mjs
+// detail card's (now deleted) DETAIL_PILL_STEP added a third, and
+// sessions-geom-check.mjs
 // TRANSCRIBED a fourth - so raising the pill by mutating the draw sites left all
 // three checkers passing while the assertion they exist for ("the pill ends clear
 // of the row's own 2px border") was false. The checker parses this name now, which

@@ -1515,7 +1515,8 @@ const int DETAIL_PATH_LINES = 2;
 // that note has always argued for (given surplus, spend it around the content) is
 // no longer merely intact but actually exercised. The six boundaries it widens are
 // name->title, title->rule, both rule->label steps and both wrapped blocks' tails;
-// DETAIL_PAD_Y and DETAIL_PILL_STEP also carry it but are board 1's arm only.
+// (DETAIL_PAD_Y and DETAIL_PILL_STEP carried it too; both are GONE - §7 removed
+// the top pad and the status pill from BOTH cards.)
 // The whole walk is in DETAIL_CARD_H's derivation above, and sessions-geom-check.mjs
 // re-runs it from these constants rather than from the comment.
 const int DETAIL_AIR = 8;

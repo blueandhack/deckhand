@@ -2884,29 +2884,22 @@ const int DETAIL_CARD_Y = CONTENT_Y + DETAIL_CARD_DY;
 // replaces when DETAIL_AIR is 0 and the ink heights are 26/13, which is what keeps
 // board 1's binary byte-identical.
 //
-// PILL_H is drawStatusPill's own height, a per-board named constant in the board
-// header rather than the literal 18 that used to sit here - it had four copies
-// (twice in drawStatusPill, once here, once TRANSCRIBED into
-// sessions-geom-check.mjs), so raising the pill at the draw sites left all three
-// checkers passing while the border-clearance assertion they exist for was false.
-// The checker parses the name now. NOTE that SESSION_PILL_UP_T / SESSION_PILL_UP
-// above are pill-height-dependent too - they are PILL_H plus a bottom pad plus the
-// 2px border - and are deliberately NOT re-expressed against it: raising PILL_H
-// alone grows the pill DOWNWARD into that border, and the checker failing by name
-// on "pill ends +N clear of the border" is how the next person finds out they owe
-// those two an adjustment as well.
-const int DETAIL_PAD_Y       = 6 + DETAIL_AIR;                  // card top -> name
+// FOUR OF THESE ARE GONE, and they are named here because a reader looking for
+// them should find out why rather than that they were tidied away:
+//   DETAIL_PAD_Y       card top -> name. The BAND replaces it on both boards now.
+//   DETAIL_PILL_STEP   pill -> rule. There is no pill on either card.
+//   DETAIL_COL_LBL_STEP / DETAIL_COL_VAL_STEP  the two label+value column pairs,
+//                      which §7's one meta line replaced.
+// All four were still deriving correct numbers for ink nobody draws, and
+// geom-sweep.mjs listed all four as UNGUARDED-though-read the moment they went
+// dead - a constant no assertion can reach is the same defect as an assertion that
+// cannot fail.
 const int DETAIL_NAME_STEP   = DETAIL_NAME_H + DETAIL_AIR;      // name -> title
-const int DETAIL_TITLE_STEP  = DETAIL_LINE_H + 2 + DETAIL_AIR;  // title -> pill
-const int DETAIL_PILL_STEP   = PILL_H + 6 + DETAIL_AIR;         // pill -> rule
+const int DETAIL_TITLE_STEP  = DETAIL_LINE_H + 2 + DETAIL_AIR;  // title -> rule
 const int DETAIL_RULE_STEP   = 7 + DETAIL_AIR;                  // rule -> next label
 // A label and the value it names read as ONE block, so this step carries no air -
 // it is exactly one line of the label's own face.
 const int DETAIL_LBL_STEP    = DETAIL_LINE_H;
-// The two-column pairs are tighter than a full block: board 1's 12 and 18 are its
-// 13px line less one, and its 13px line plus five. Both keep their relationship.
-const int DETAIL_COL_LBL_STEP = DETAIL_LINE_H - 1;
-const int DETAIL_COL_VAL_STEP = DETAIL_LINE_H + 5 + DETAIL_AIR;
 // A wrapped text block of n lines, plus the 2px that has always separated it from
 // the rule below. DETAIL_TEXT_LINE_H is the line step the block is DRAWN at, which
 // is the board's ascent-or-cell judgement rather than a cell height - see the two
@@ -3017,10 +3010,10 @@ bool detailLooksLikeCode(const char* kind, const char* detail) {
 
 // Single-line value in font `fnt`, clipping the TAIL with ".." if it
 // overflows (model names / branches read left-to-right, so keep the start).
-// Where the status pill ended up this repaint. The duration ticks on its own cache every
-// second, so it has to know the row the (now variable) layout put the pill on - a fixed
-// offset would drift the moment a title or prompt appears above it.
-int detailPillY = 0;
+// `int detailPillY` USED TO BE HERE: the row the detail card's status pill landed
+// on, so the duration ticking beside it could follow a variable layout. §7 removed
+// that pill from both boards - the band at the head of the card carries the word and
+// the duration - so there is no pill to follow and nothing reads this.
 
 
 

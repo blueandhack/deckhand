@@ -198,18 +198,21 @@ const KNOWN = {
     // y+36..y+37. The last two rows of the model/branch line are drawn over the
     // row's own outline. Board 2 cannot reach it: its smallest row is 63.
     "strip 6x38 (compact): sub-line -> border bottom gap -2",
-    // (b) The detail screen's two footer strings are drawn at the SAME y. Both use
-    // MC_DATUM: "answer this one on your Mac" at cardY + DETAIL_CARD_H + 8 =
-    // 60+224+8 = 292, and the history hint at contentBottom() - 10 = 292. Since
-    // drawString paints an opaque box and the hint is drawn second, the warning is
-    // invisible on this board - i.e. board 1's card is 13px OVER the ceiling the
-    // hint sets (224 against 211), which is why the same defect shows up twice
-    // below: once as the two strings colliding, and once as the constant itself.
-    // Board 2's card is AT its own ceiling (330 of 330) and the two boxes are
-    // adjacent rather than overlapping: §7's band costs 6px of ink on a card that
-    // had 4px of slack, so this is the whole of that headroom being spent.
-    "\"answer on your Mac\" ends 299 above the history hint at 287",
-    "DETAIL_CARD_H 224 is within the 211px ceiling the history hint sets",
+    // (b) TWO ENTRIES USED TO SIT HERE AND THE DEFECT THEY DOCUMENTED IS FIXED:
+    //   "\"answer on your Mac\" ends 299 above the history hint at 287"
+    //   "DETAIL_CARD_H 224 is within the 211px ceiling the history hint sets"
+    // One defect stated twice. The detail screen's two footer strings were drawn at
+    // the SAME y - both MC_DATUM: "answer this one on your Mac" at cardY +
+    // DETAIL_CARD_H + 8 = 60 + 224 + 8 = 292, and the history hint at
+    // contentBottom() - 10 = 292 - and drawString paints an OPAQUE box with the hint
+    // drawn second, so on this board the warning was INVISIBLE. The device showed an
+    // ask it could not answer and silently swallowed the sentence saying why. Board
+    // 1's card was 13px over the ceiling its own footer sets (224 against 211).
+    // §7's port took that card to 210: the two label+value column pairs (four
+    // labels, four values) became one meta line, which paid for the band AND for
+    // the 14px the card had to give back. Removed rather than left dead - an
+    // unreachable allowlist entry is the same defect as an assertion that cannot
+    // fail, just on the allowlist side of it - and the precedent is 3a9a085's.
     // (c) Both under board 1's own TAP_MIN of 40, and its own header comment says
     // so: at board 2's 46+8 the worst-case option stack would be 270 of a 268px
     // content area. The proportion carries across even though the pixels cannot.
@@ -288,6 +291,24 @@ const EXPANDED_H = { 1: [256, 0, 0, 0, 0, 0], 2: [336, 307, 0, 0, 0, 0] };
 const BAND_WORDS = {
   1: "WORKING / NEEDS INPUT / READY",
   2: "WORKING / NEEDS YOUR INPUT / WAITING FOR YOU",
+};
+// §7's META LINE, the same kind of table for the same reason. drawSessionDetail
+// composes `model - branch - HH:MM`, measures it against the lane the Mac cluster
+// leaves, and recomposes without the clock when it does not fit.
+//
+// THIS TABLE IS THE BINDING CASE, NOT "WHAT THE SCREEN ALWAYS SAYS", and the
+// distinction is worth being exact about because the fall-back is per-render. The
+// case measured here is a SECOND MAC CONNECTED: dispMacTag() is non-empty at its
+// 7-character cap and the icon sits beside it, which is the widest the cluster ever
+// gets and therefore the narrowest the facts' lane ever gets. With one Mac the tag
+// is "" and the lane is 46px wider on board 1 - MEASURED ON THE GLASS, board 1
+// drew `opus-5 - main - 07:30`, all three facts, in exactly that case. So board 2
+// carries three facts whatever is connected and board 1 carries three or two
+// depending, which is what an adaptive fall-back is for; what this table pins is
+// which board is FORCED to give one up, since that is the design decision.
+const DETAIL_META_FACTS = {
+  1: "model - branch",
+  2: "model - branch - HH:MM",
 };
 
 const SELFTEST = process.argv.includes("--selftest");
@@ -2933,7 +2954,10 @@ for (const b of [1, 2]) {
   const hasMeta = /tft\.drawString\(metaFit\b/.test(detailBody);
   const startM  = detailBody.match(/int cy = cardY \+ ([A-Za-z_][A-Za-z0-9_]*);/);
   chk(!!startM, "drawSessionDetail's body cursor starts at `cardY + <named constant>`");
-  const startId = startM ? startM[1] : "DETAIL_PAD_Y";
+  // The fallback is deliberately NOT a real constant: it was "DETAIL_PAD_Y", which
+  // no longer exists, and a fallback that names a live constant lets a failed parse
+  // walk a plausible-looking card instead of failing on the next line.
+  const startId = startM ? startM[1] : "(unparsed)";
   chk(startId in c, `the detail body cursor's start (${startId}) is a constant this board declares`);
   const cyStart = startId in c ? c[startId] : 0;
   // ---- THE BAND'S ORIGIN, PARSED OFF ITS CALL - IT USED TO BE TRANSCRIBED ----
@@ -3046,25 +3070,61 @@ for (const b of [1, 2]) {
         `0x${lo.toString(16)}..0x${hi.toString(16)} - anything outside it draws as a BLANK BOX` +
         (bad.length ? `; offending: ${bad.map(t => JSON.stringify(t)).join(", ")}` : ""));
   }
+  // ---- §7 IS BOTH BOARDS' CARD NOW, AND THIS `if (b === 2)` IS GONE WITH IT ----
+  // Everything below used to sit inside it, with an `else` arm asserting that board
+  // 1's card was STILL the old one - no band, a status pill, a body cursor at
+  // DETAIL_PAD_Y and two label+value column pairs - because that board's binary was
+  // held byte-identical. It is not on this branch: board 1 was brought to the same
+  // vocabulary deliberately, so the same three halves are asserted on both boards
+  // and a revert on EITHER names itself. What stays board-2-only below is the
+  // MOTION (the crossfade, the pulse, the mark's tick): that board composes into a
+  // PSRAM shadow framebuffer and flushes once, board 1 draws straight to the glass
+  // and takes the band's layout and none of its animation.
+  // §7's three halves, each its own assertion so a partial revert names itself.
+  chk(banded,
+      "§7: the detail card is HEADED BY drawSessionBand() - the same component, on the " +
+      "same card interior, as the sessions tab's first row");
+  chk(startId === "SESSION_BAND_H",
+      `§7: the detail body cursor starts at the BAND's bottom (cardY + ${startId}), not at a top pad - ` +
+      "the band replaces DETAIL_PAD_Y rather than sitting above it");
+  chk(!hasPill,
+      "§7: the status pill is GONE from the detail card - the band carries the word, and " +
+      "drawing it twice on one card is the duplication STARTED/AGENT was paired to avoid");
+  // The duration moved WITH the pill, and the two are separable: leaving the old
+  // "for 12m - 14:31" behind would draw it at a detailPillY nothing sets any
+  // more, i.e. over the prompt block, and no geometry above can see that.
+  const durBody = armFor(fnSrc("void renderDetailDuration()"), b);
+  chk(/bandDurText\(detailIndex,/.test(durBody),
+      "§7: renderDetailDuration ticks the BAND's duration through bandDurText()");
+  chk(!/for %s - %s/.test(durBody),
+      "... and board 1's \"for 12m - 14:31\" line is not also drawn, at a detailPillY nothing sets");
+  // §7's meta line: the two label+value column pairs are GONE and one dim line
+  // stands where they were. Two assertions rather than one, so a half-done revert
+  // (columns back AND the line kept, or the line dropped with nothing in its
+  // place) names which half it is.
+  chk(!hasCols,
+      "§7: the MODEL / GIT BRANCH and STARTED / AGENT column pairs are GONE from the " +
+      "detail card - four labels and four values for three short facts and a Mac tag");
+  chk(hasMeta,
+      "§7: one dim meta line stands where they were - `model - branch - HH:MM` with " +
+      "the Mac's icon and tag right-anchored on the same row");
+  // WHICH CLOCK, and it is not a detail. s.actSec advances on every event while
+  // nothing else on this card changes, so a meta line drawing it would freeze
+  // silently between repaints - and adding actSec to the signature instead
+  // repaints the whole card every tick. The status-since instant is derived from
+  // hostNowSec() minus the elapsed time and is CONSTANT between repaints, and
+  // `status` is already signed, so a status change repaints and recomputes it.
+  chk(/hostNowSec\(\)/.test(detailBody) && !/formatClock\(s\.actSec/.test(detailBody),
+      "§7: the meta line's clock is the STATUS-SINCE instant (hostNowSec() - elapsed), " +
+      "not s.actSec - actSec moves with no signature field beside it and would freeze");
+  // `started` is the field this line dropped, and s.startSec is the only thing
+  // that could put it back. Asserted as an ABSENCE so re-adding it fails here as
+  // well as on the width assertion further down.
+  chk(!/s\.startSec/.test(detailBody),
+      "§7: `started` is not drawn on this card - it is what the Mac's cluster cost, " +
+      "and the width assertion below is why it cannot come back");
+  // ---- AND WHAT REMAINS BOARD 2's: THE MOTION ON THIS CARD ----
   if (b === 2) {
-    // §7's three halves, each its own assertion so a partial revert names itself.
-    chk(banded,
-        "§7: the detail card is HEADED BY drawSessionBand() - the same component, on the " +
-        "same card interior, as the sessions tab's first row");
-    chk(startId === "SESSION_BAND_H",
-        `§7: the detail body cursor starts at the BAND's bottom (cardY + ${startId}), not at a top pad - ` +
-        "the band replaces DETAIL_PAD_Y rather than sitting above it");
-    chk(!hasPill,
-        "§7: the status pill is GONE from the detail card - the band carries the word, and " +
-        "drawing it twice on one card is the duplication STARTED/AGENT was paired to avoid");
-    // The duration moved WITH the pill, and the two are separable: leaving the old
-    // "for 12m - 14:31" behind would draw it at a detailPillY nothing sets any
-    // more, i.e. over the prompt block, and no geometry above can see that.
-    const durBody = armFor(fnSrc("void renderDetailDuration()"), b);
-    chk(/bandDurText\(detailIndex,/.test(durBody),
-        "§7: renderDetailDuration ticks the BAND's duration through bandDurText()");
-    chk(!/for %s - %s/.test(durBody),
-        "... and board 1's \"for 12m - 14:31\" line is not also drawn, at a detailPillY nothing sets");
     // ---- §7 THE DETAIL BAND ANIMATES, AND THE ASK SCREEN MUST NEVER SEE IT ----
     // THE INVERSE OF WHAT STOOD HERE, AND THE OLD ASSERTION IS WORTH READING BEFORE
     // THE NEW ONE. It required drawSessionDetail to CLEAR xfadeId before painting
@@ -3233,48 +3293,15 @@ for (const b of [1, 2]) {
           "§7: the detail duration's opaque box RE-ASKS sessionBandFill() now that the band " +
           "animates under it - bandFillShown there is a frame old mid-fade");
     }
-    // §7's meta line: the two label+value column pairs are GONE and one dim line
-    // stands where they were. Two assertions rather than one, so a half-done revert
-    // (columns back AND the line kept, or the line dropped with nothing in its
-    // place) names which half it is.
-    chk(!hasCols,
-        "§7: the MODEL / GIT BRANCH and STARTED / AGENT column pairs are GONE from the " +
-        "detail card - four labels and four values for three short facts and a Mac tag");
-    chk(hasMeta,
-        "§7: one dim meta line stands where they were - `model - branch - HH:MM` with " +
-        "the Mac's icon and tag right-anchored on the same row");
-    // WHICH CLOCK, and it is not a detail. s.actSec advances on every event while
-    // nothing else on this card changes, so a meta line drawing it would freeze
-    // silently between repaints - and adding actSec to the signature instead
-    // repaints the whole card every tick. The status-since instant is derived from
-    // hostNowSec() minus the elapsed time and is CONSTANT between repaints, and
-    // `status` is already signed, so a status change repaints and recomputes it.
-    chk(/hostNowSec\(\)/.test(detailBody) && !/formatClock\(s\.actSec/.test(detailBody),
-        "§7: the meta line's clock is the STATUS-SINCE instant (hostNowSec() - elapsed), " +
-        "not s.actSec - actSec moves with no signature field beside it and would freeze");
-    // `started` is the field this line dropped, and s.startSec is the only thing
-    // that could put it back. Asserted as an ABSENCE so re-adding it fails here as
-    // well as on the width assertion further down.
-    chk(!/s\.startSec/.test(detailBody),
-        "§7: `started` is not drawn on this card - it is what the Mac's cluster cost, " +
-        "and the width assertion below is why it cannot come back");
-  } else {
-    // Board 1 is held byte-identical, so its arm of this function must still be the
-    // card it always was. Asserted rather than assumed: these three facts are
-    // exactly what a careless unconditional edit would change.
-    chk(!banded && hasPill && startId === "DETAIL_PAD_Y",
-        "board 1's detail card is unchanged: no band, a status pill, body cursor at cardY + DETAIL_PAD_Y");
-    chk(hasCols && !hasMeta,
-        "board 1 keeps its two column pairs and takes no meta line - §7 is a board-2 " +
-        "layout and this branch is held byte-identical");
   }
 
   const detailSteps = [["wrapped text line", c.DETAIL_TEXT_LINE_H],
                        ["label -> its value", c.DETAIL_LBL_STEP]];
-  // The column pair's own internal step is asserted only on the board that still
-  // draws one - on board 2 it constrains nothing, and an assertion about ink that
-  // is never laid down is the vacuous kind this file has already paid for.
-  if (hasCols) detailSteps.push(["column label -> its value", c.DETAIL_COL_LBL_STEP]);
+  // The column pair's own internal step used to be pushed here under `if (hasCols)`.
+  // Neither board draws columns now, `!hasCols` is asserted on BOTH above, and
+  // DETAIL_COL_LBL_STEP no longer exists - so the branch was dead and pushing an
+  // undefined step would have compared NaN. Removed rather than left: a branch no
+  // input can reach is the same defect as an assertion that cannot fail.
   for (const [nm, step] of detailSteps)
     chk(step >= asc,
         `detail ${nm} step ${step} >= the ${asc}px ascent of ${UI[b][T_META].face} (cell ${LBLH})`);
@@ -3290,9 +3317,9 @@ for (const b of [1, 2]) {
   if (banded) blk.push(["BAND", bandDY, bandDY + bandH - 1]);
   blk.push(["name", cy, cy + lineHB(b, NF) - 1]);            cy += c.DETAIL_NAME_STEP;
   blk.push(["title", cy, cy + BODYH - 1]);                   cy += c.DETAIL_TITLE_STEP;
-  if (hasPill) {
-    blk.push(["pill", cy, cy + c.PILL_H - 1]);               cy += c.DETAIL_PILL_STEP;
-  }
+  // The pill's block used to sit here under `if (hasPill)`, stepped by
+  // DETAIL_PILL_STEP. §7 removed the pill from BOTH cards and `!hasPill` is
+  // asserted above, so the branch and its constant are both gone.
   blk.push(["rule", cy, cy]);                                cy += c.DETAIL_RULE_STEP;
   top = cy; cy += c.DETAIL_LBL_STEP;
   blk.push([`LAST PROMPT + ${c.DETAIL_PROMPT_LINES} lines`, top, textInk(cy, c.DETAIL_PROMPT_LINES)]);
@@ -3301,23 +3328,15 @@ for (const b of [1, 2]) {
   top = cy; cy += c.DETAIL_LBL_STEP;
   blk.push([`PATH + ${c.DETAIL_PATH_LINES} lines`, top, textInk(cy, c.DETAIL_PATH_LINES)]);
   cy += c.DETAIL_PATH_LINES * c.DETAIL_TEXT_LINE_H + 2 + A;
-  // The card's last block, and the two boards no longer agree on what it is. Read
-  // from the arm rather than branched on the board number, the same way the band
-  // and the pill above are: a revert that puts the columns back on board 2 must
-  // move this walk with it, or the walk reports geometry that is not drawn.
-  if (hasCols) {
-    top = cy; cy += c.DETAIL_COL_LBL_STEP;
-    blk.push(["MODEL / GIT BRANCH", top, cy + BODYH - 1]);      cy += c.DETAIL_COL_VAL_STEP;
-    top = cy; cy += c.DETAIL_COL_LBL_STEP;
-    blk.push(["STARTED / AGENT", top, cy + BODYH - 1]);
-  } else {
-    // ONE line at T_META, so its ink is that face's cell and nothing else - no
-    // label row above it and no second row under it. The Mac's icon shares the
-    // row rather than adding to it: MAC_EMOJI_SIZE is this board's body cell
-    // height, which is the identity every icon site in this sketch rests on and
-    // is asserted just below.
-    blk.push(["meta line + Mac", cy, cy + LBLH - 1]);
-  }
+  // The card's last block, and it is the same one on both boards now. The
+  // MODEL / GIT BRANCH and STARTED / AGENT arm that used to stand beside this one
+  // is gone with the constants that stepped it; `!hasCols` is asserted on both.
+  //
+  // ONE line at T_META, so its ink is that face's cell and nothing else - no label
+  // row above it and no second row under it. The Mac's icon shares the row rather
+  // than adding to it: MAC_EMOJI_SIZE is this board's body cell height, which is
+  // the identity every icon site in this sketch rests on and is asserted just below.
+  blk.push(["meta line + Mac", cy, cy + LBLH - 1]);
   for (const [nm, a, z] of blk) console.log(`    detail +${String(a).padStart(3)}..+${String(z).padStart(3)} ${nm}`);
   for (let i = 1; i < blk.length; i++)
     chk(blk[i][1] - blk[i - 1][2] - 1 >= 0,
@@ -3390,24 +3409,40 @@ for (const b of [1, 2]) {
   // the digits do. The mark's size is PARSED out of ClaudeSpark.h and T_HEAD's
   // advance out of the font registry, so a regenerated mark or a face swap fails
   // here rather than drifting past it.
-  if (b === 2) {
+  //
+  // BOTH BOARDS, AND ON BOARD 1 THE LANE IS ITS OWN NUMBER RATHER THAN THE TAB'S.
+  // This block was `if (b === 2)`, and one of its two assertions was why: it required
+  // CARD_W === SESSION_ROW_W, which holds on board 2 (296 == 296) and does NOT on
+  // board 1 (216 against 224). So the detail card's word lane there is 133 where its
+  // own list row's is 141 - 8px narrower on a board that is ALREADY the one whose
+  // band falls back to shortLabelForStatus(). Recomputed from CARD_W below rather
+  // than inherited, which is exactly what the equality assertion existed to force,
+  // and the vocabulary it lands on is asserted against BAND_WORDS - so a card
+  // narrow enough to shorten a word the TAB still spells out fails by name here.
+  {
     const detailBandRoom = c.CARD_W - 2 * c.BORDER_CARD - 2 * c.SESSION_BAND_PAD
                            - sparkSize() - c.SESSION_BAND_MARK_GAP
                            - c.SESSION_BAND_DUR_CHARS * c.TEXT_ADV - 1;
-    const detailLongest = "NEEDS YOUR INPUT".length * advanceB(b, T_HEAD);
+    const LONGW = statusLabels().map((w) => w.toUpperCase());
+    const SHORTW = shortStatusLabels();
+    // bandStatusWord()'s own choice, re-run at THIS surface's lane: the full phrase
+    // when it fits, shortLabelForStatus()'s word when it does not.
+    const drawn = LONGW.map((w, i) => widthB(b, T_HEAD, w) <= detailBandRoom ? w : SHORTW[i]);
+    const detailLongest = Math.max(...drawn.map((w) => widthB(b, T_HEAD, w)));
     const clockCost = "4m - 09:34".length * c.TEXT_ADV;
     chk(detailLongest <= detailBandRoom,
         `§7: the DETAIL card's band holds its longest status word (${detailLongest}px) ` +
         `clear of the duration (room ${detailBandRoom}px) - and would NOT hold the ` +
         `wall-clock §7 asked for, which needs ${clockCost}px where a bare duration needs ` +
         `${c.SESSION_BAND_DUR_CHARS * c.TEXT_ADV}`);
-    // ... and the card the band is drawn on really is the width that room was
-    // computed against. Two constants that happen to be equal today is exactly the
-    // coincidence this repo has already been bitten by (CARD_W - 12 and CARD_W - 8
-    // both giving 34 at board 1's width), so it is asserted, not assumed.
-    chk(c.CARD_W === c.SESSION_ROW_W,
-        `the detail card (${c.CARD_W}px) is the same width as the session row the band was ` +
-        `sized on (${c.SESSION_ROW_W}px), so the tab's lane arithmetic carries to it`);
+    chk(drawn.join(" / ") === BAND_WORDS[b],
+        `§7: the DETAIL card's band lands on the SAME words as the tab's ` +
+        `("${drawn.join(" / ")}") in a lane ${detailBandRoom}px wide - the two surfaces wear ` +
+        `one component and must not disagree about its vocabulary`);
+    chk(c.CARD_W <= c.SESSION_ROW_W,
+        `the detail card (${c.CARD_W}px) is no wider than the session row the band was sized ` +
+        `on (${c.SESSION_ROW_W}px) - ${c.SESSION_ROW_W - c.CARD_W}px narrower here, which is why ` +
+        `the lane above is recomputed rather than inherited`);
   }
   chk(hintBot < contentBottom,
       `history hint ends ${hintBot} inside contentBottom ${contentBottom}`);
@@ -3491,10 +3526,46 @@ for (const b of [1, 2]) {
     // overflow this lane on their own, which is exactly why the firmware clips with
     // fitText against the lane the cluster leaves. What is being asserted is that
     // the ORDINARY line is not clipped, and that one more field would be.
+    //
+    // ---- WHICH FACTS EACH BOARD'S LINE ACTUALLY CARRIES ----
+    // DETAIL_META_FACTS is a hand-written OUTCOME table, exactly as BAND_WORDS is
+    // for the band's status word and for the same reason: which form a board lands
+    // on is a consequence of its panel width, and it should cost a deliberate edit
+    // here to change. The firmware picks by MEASUREMENT - metaFacts() composes all
+    // three, the caller measures against the lane the Mac cluster has left, and
+    // recomposes without the clock if it does not fit - so this table is the result
+    // and never the input. Board 2's 260px lane holds all three (168 + 84 = 252, 8
+    // to spare); board 1's is 188 with a 67px cluster, leaving 121 against a
+    // 126px three-fact line - over by 5 before any real model or branch name.
     const meta = "opus-5 - main - 09:34".length * adv;
-    chk(meta + mac <= lane,
-        `§7: the meta line (${meta}px) plus the Mac (${mac}px = ${c.DETAIL_META_GAP} gap + ` +
-        `${macEmojiSize(b)}px icon + 4 + a ${macTagMax()}-char tag) fits its ${lane}px lane`);
+    const metaTwo = "opus-5 - main".length * adv;
+    const carriesClock = meta + mac <= lane;
+    chk(carriesClock === DETAIL_META_FACTS[b].includes("HH:MM"),
+        `§7: with a SECOND MAC up this board's meta line carries \`${DETAIL_META_FACTS[b]}\` - the three-fact form ` +
+        `(${meta}px) plus the Mac (${mac}px = ${c.DETAIL_META_GAP} gap + ${macEmojiSize(b)}px icon ` +
+        `+ ${iconGap} + a ${macTagMax()}-char tag) ${carriesClock ? "fits" : "does NOT fit"} its ` +
+        `${lane}px lane, by ${Math.abs(lane - mac - meta)}px`);
+    // THE FORM IT FALLS BACK TO MUST ALWAYS FIT, on the board that takes it and on
+    // the one that does not - otherwise the fall-back is only a shorter clip and the
+    // measurement bought nothing. Two facts, because that is what metaFacts() leaves
+    // when the clock is dropped; a third fall-back does not exist and must not be
+    // needed here.
+    chk(metaTwo + mac <= lane,
+        `§7: the two-fact form the clock's fall-back leaves (${metaTwo}px) fits the same ` +
+        `${lane}px lane beside the Mac, with ${lane - mac - metaTwo}px in hand`);
+    // ---- AND THE FIRMWARE REALLY DOES FALL BACK, structurally ----
+    // The three assertions above are ARITHMETIC and would all still hold with the
+    // fall-back deleted - a mirror proves the algorithm and binds nothing. These two
+    // read drawSessionDetail's own text: the second metaFacts() call with an EMPTY
+    // clock, and the measured condition that reaches it. Bound to the call and its
+    // argument, not to the file: `metaFacts(` alone would be satisfied by the first
+    // call on its own.
+    chk(/metaFacts\(metaBuf, sizeof\(metaBuf\), metaModel, s\.branch, ""\)/.test(detailBody),
+        "§7: drawSessionDetail recomposes the meta line WITHOUT the clock - the fall-back " +
+        "metaFacts()'s empty-field skip exists for");
+    chk(/if \(tft\.textWidth\(metaBuf\) > metaLane\)/.test(detailBody),
+        "§7: ... and it reaches that recompose by MEASURING the composed line against the " +
+        "lane the Mac cluster left, not by a board flag - one implementation, two headers");
     // ... AND THAT RESTORING `started` WOULD NOT. This is the unusual assertion and
     // it is the point of the pair: it encodes WHY the field is absent, so a future
     // reader who re-adds it fails here rather than shipping a line clipped at its
@@ -3713,19 +3784,19 @@ for (const b of [1, 2]) {
                2 /* answeredIdx */ + CAP.title + CAP.prompt + 11 /* startSec */ +
                CAP.askVoiceSha + 10 /* separators */ + 2 /* |M */ +
                1 + CAP.macTag + 1 + CAP.emojiId + 1 /* NUL */;
-  // THE AGENT IS BOARD 2'S TERM ONLY, and it is parsed from the arm rather than
+  // THE AGENT IS BOTH BOARDS' TERM NOW, and it is parsed from the arm rather than
   // branched on the board number for the same reason the walk above is. It joined
   // the signature because §7's band draws the agent's MARK and nothing else on that
   // card says which agent it is - the AGENT column that used to spell it out in
-  // text is gone. Board 1's arm is held byte-identical and does not sign it.
+  // text is gone from BOTH boards. This assertion read `signsAgent === (b === 2)`,
+  // and its board-1 half said "its AGENT column still spells the agent out, and its
+  // binary is held byte-identical": neither is true any more, and an assertion whose
+  // stated reason has expired is how a checker starts certifying the wrong layout.
   const sigArm = armFor(fnSrc("void buildDetailSignature(int idx, char* out, size_t outSize) {"), b);
   const signsAgent = /sessions\[idx\]\.agent/.test(sigArm);
-  chk(signsAgent === (b === 2),
-      b === 2
-        ? "§7: s.agent is in the detail signature - the band's MARK is drawn from it and " +
-          "nothing else on that card carries the agent any more"
-        : "board 1 does not sign s.agent: its AGENT column still spells the agent out, and " +
-          "its binary is held byte-identical");
+  chk(signsAgent,
+      "§7: s.agent is in the detail signature - the band's MARK is drawn from it and " +
+      "nothing else on that card carries the agent any more");
   if (signsAgent) detSig += 1 + CAP.agent;
   // ---- the per-option descriptions, and why they are a HASH in that signature ----
   // The buffer first. Its second dimension must be the per-board NAME: a literal
@@ -3770,8 +3841,17 @@ for (const b of [1, 2]) {
   chk(cacheLen("detailSigCache") >= detSig,
       `detailSigCache ${CACHE.detailSigCache} holds its ${detSig}-byte worst case` +
       ` (${cacheLen("detailSigCache") - detSig} bytes of headroom)`);
-  chk(cacheLen("detailDurCache") >= 23,
-      `detailDurCache ${CACHE.detailDurCache} holds "for 999h59m - 23:59" padded to 22 + NUL`);
+  // §7 CHANGED WHAT THIS CACHE HOLDS, ON BOTH BOARDS, AND THE OLD BOUND WOULD HAVE
+  // OUTLIVED THE FIELD. It read `>= 23`, for board 1's `"for 999h59m - 23:59"`
+  // padded to 22 - a line no board draws any more. The field is the band's own
+  // duration lane on both now, padLeftTo'd to SESSION_BAND_DUR_CHARS by
+  // bandDurText(), so the bound is that constant + NUL and it fails if the lane
+  // widens without the cache following. A cache shorter than the string it holds
+  // silently stops noticing changes past that point, which on this field is a
+  // duration frozen at whatever it read when the card last repainted.
+  chk(cacheLen("detailDurCache") >= c.SESSION_BAND_DUR_CHARS + 1,
+      `detailDurCache ${CACHE.detailDurCache} holds bandDurText()'s ` +
+      `${c.SESSION_BAND_DUR_CHARS}-character lane + NUL`);
   chk(cacheLen("rowDurCache") >= 8, `rowDurCache ${CACHE.rowDurCache} holds a 7-char padded duration + NUL`);
 }
 

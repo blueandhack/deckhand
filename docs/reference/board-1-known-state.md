@@ -21,10 +21,19 @@ branch off main.
 They are recorded, with arithmetic and a severity order, in
 **`docs/board-1-known-defects.md`** — including the one reported defect that turned out **not** to
 be real, kept as a correction rather than deleted, because a false defect costs a future maintainer
-either the time to disprove it or a no-op "fix" that breaks byte-identity for nothing. The worst live one, for orientation: **the session
-detail screen draws two footer strings at the same `MC_DATUM` y**, so the "answer this one on your
-Mac" notice is painted out by the history hint — a message about where an action must happen,
-silently erased.
+either the time to disprove it or a no-op "fix" that breaks byte-identity for nothing.
+
+**The worst live one is now FIXED, and it is the one that used to be quoted here for
+orientation:** the session detail screen drew two footer strings at the same `MC_DATUM` y, so the
+"answer this one on your Mac" notice was painted out by the history hint — a message about where
+an action must happen, silently erased. Board 1's card was 13px over the ceiling its own footer
+sets (224 against 211). §7's port to board 1 (see [`sessions-and-asks.md`](sessions-and-asks.md))
+replaced the two label+value column pairs with one meta line, which paid for both the status band
+and the 14px the card had to give back: `DETAIL_CARD_H` is 210 and the warning is on the glass —
+**seen**, in `~/Deckhand-shots/shot-2026-09-05T14-31-57-Deckhand-0528.png`, on an injected
+`asking` session. The two `KNOWN[1]` allowlist entries that recorded it are removed, with a
+comment in their place. Byte-identity is no longer the reason to defer a board-1 fix on this
+branch; it was lifted deliberately so board 1 could be brought into line with board 2.
 
 #### What is NOT verified on board 2, stated plainly
 

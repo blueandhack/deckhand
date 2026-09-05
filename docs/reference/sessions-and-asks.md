@@ -90,10 +90,13 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     of them**.
 
 - **The session DETAIL screen is laid out by a running cursor, and its extra text all
-  comes from the same transcript read.** It carries name, title, status pill (with
+  comes from the same transcript read.** It USED to carry name, title, status pill (with
   `for 12m - 14:31` beside it), LAST PROMPT, PATH, and then MODEL/GIT BRANCH and
   STARTED/AGENT as **paired columns** rather than a four-row ladder — the pairing is what
-  buys room for the new text without a taller card. Offsets are a `cy` cursor, not the
+  bought room for the new text without a taller card. **That is the card §7 replaced on
+  BOTH boards; the paragraphs below it are kept because their reasoning is still what the
+  current card rests on, and the "§7 IS NOW BOTH BOARDS' CARD" note says what changed.**
+  Offsets are a `cy` cursor, not the
   hand-derived `cardY + 78 / +120 / +158` constants it used to have; those had to be
   re-derived by hand whenever a field moved, which is how the screen drifted sparse.
   Where the values come from: `lastPrompt` and the title from the **same 64KB tail** as
@@ -120,10 +123,43 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     ACTIVE column pair, which both said the same thing twice and created a field that
     could only update by repainting the whole card. The column pairs with AGENT instead,
     and both of those never change for a session.
-  **EVERYTHING ABOVE IS BOARD 1'S ARM NOW. On board 2 the pill, the `for 12m - 14:31`
-  line and BOTH column pairs are gone — §7 of the sessions redesign heads that card
-  with the same 44px status band the sessions tab's first row wears, and closes it with
-  ONE dim `T_META` line.** The band carries the agent MARK, the status WORD at `T_HEAD`
+  **§7 IS NOW BOTH BOARDS' CARD. The pill, the `for 12m - 14:31` line and BOTH column
+  pairs are gone from BOTH — §7 of the sessions redesign heads the card with the same
+  status band the sessions tab's first row wears (44px on board 2, 34 on board 1) and
+  closes it with ONE dim `T_META` line.** The `#if BOARD_USES_TFT_ESPI` arms in
+  `drawSessionDetail` and `renderDetailDuration` were WIDENED rather than copied into, so
+  the card is one implementation reading two headers; `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`,
+  `DETAIL_COL_LBL_STEP`, `DETAIL_COL_VAL_STEP`, `pillLabel()`, `drawColValue()` and
+  `detailPillY` are all deleted, and `s.agent` joined the detail signature on board 1 too
+  (the band's MARK is the only thing on that card that now says which agent it is).
+  **Board 1's own numbers, derived in `board_e32r28t.h` and never chosen:**
+  `DETAIL_CARD_H` **224 → 210** and `DETAIL_AIR` **0 → 5**. The ceiling its footer sets is
+  **211**, so the old 224 was 13px OVER it — that is the defect two `KNOWN[1]` entries
+  recorded (the "answer this one on your Mac" line invisible under the history hint), and
+  it is fixed by the card shrinking. `DETAIL_AIR` is the scaled leading budget: the ink is
+  162px, the ceiling leaves **47px** of leading against board 2's 66, every boundary is one
+  term in `6*AIR + 14`, and `6*5 + 14 = 44` is the most of the 47 that fits (AIR 6 needs 50).
+  The band's word lane on board 1's detail card is **133px**, not the 141 of its own list
+  row (the card is 8px narrower than the row), and `bandStatusWord()` lands on the same
+  `WORKING / NEEDS INPUT / READY` there — asserted, so a card narrow enough to shorten a
+  word the tab still spells out fails by name.
+  **The meta line's THIRD fact is dropped by MEASUREMENT, not by a board flag.** `metaFacts()`
+  composes `model - branch - HH:MM`, the caller measures it against the lane the Mac cluster
+  leaves and recomposes without the clock if it does not fit — the same compose-measure-fall-back
+  `bandStatusWord()` uses. Board 1's lane is `216 - 2*14 = 188` at `TEXT_ADV` 6; with a second
+  Mac up the cluster costs `8 + 13 + 4 + 7*6 = 67`, leaving 121 against a 126px three-fact
+  line, **over by 5** — so it carries two facts there and three when only one Mac is
+  connected. **SEEN both ways on the glass**:
+  `shot-2026-09-05T14-28-28-Deckhand-0528.png` (`opus-5 - compose-surface`, the clock dropped
+  because the branch is 15 characters) and `shot-2026-09-05T14-31-57-Deckhand-0528.png`
+  (`opus-5 - main - 07:30`, all three). Board 2 keeps three at its 260px lane (168 + 84 = 252,
+  8 to spare) and drops the clock on a long branch for the same measured reason —
+  `shot-2026-09-05T14-28-11-Deckhand-C114.png`. Which board is FORCED to give one up is
+  pinned by `DETAIL_META_FACTS` in `sessions-geom-check.mjs`, the way `BAND_WORDS` pins the
+  status words. **Board 1 has no shimmer, crossfade or pulse** — `sessionXfadeT()`,
+  `sessionPulseA()` and `sessionBandFill()` are `static inline` stubs there, so the shared
+  band text folds to `t = -1` and a flat fill at compile time.
+  **On board 2:** The band carries the agent MARK, the status WORD at `T_HEAD`
   and the duration; the meta line carries `model - branch - <status-since HH:MM>` on the
   left with the Mac's icon (and, with a second Mac up, its tag) right-anchored to the
   card's text edge. `DETAIL_CARD_H` went 326 → 330 → **300** across the two tasks and
