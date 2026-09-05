@@ -178,7 +178,13 @@ const NAME_RUNGS = [T_HERO, T_HEAD, T_BODY];
 // up the same clearance rather than keeping it.
 const KNOWN = {
   1: [
-    "sub-line lane 184 <= the row's own text lane 172",
+    // "sub-line lane 184 <= the row's own text lane 172" used to be here: it was
+    // the sub-line running 12px onto the card's own border, fixed by deriving
+    // SESSION_SUB_LANE_W the same way on both boards (board_e32r28t.h). Removed
+    // rather than left dead, since the message this checker now emits for that
+    // line ("sub-line lane 172 <= ... 172") would never match it again anyway -
+    // an unreachable entry here is what "AN ASSERTION THAT CANNOT FAIL IS A
+    // DEFECT" is about, just on the allowlist side of it instead of the chk().
     "prompt: 2 lines hold 62 of 100 chars",
     "path: 2 lines hold 62 of 64 chars",
     "ask badge row starts at +27, inside the +28 header touch band",
@@ -2513,9 +2519,38 @@ for (const b of [1, 2]) {
   for (const [n, below] of [["title", c.SESSION_TITLE_Y], ["sub-line", c.SESSION_SUB2_Y]])
     chk(c.SESSION_TAG_Y + lineHB(b, T_META) <= below,
         `tag inks +${c.SESSION_TAG_Y}..+${c.SESSION_TAG_Y + lineHB(b, T_META) - 1}, clear of the ${n} at +${below}`);
-  // The accent chevron sits at the row's right edge and must not be walked into.
-  chk(tagRight + 4 <= c.SESSION_ROW_X + c.SESSION_ROW_W - 8,
-      `tag right edge ${tagRight} clears the chevron's ink at ${c.SESSION_ROW_X + c.SESSION_ROW_W - 8}..${c.SESSION_ROW_X + c.SESSION_ROW_W - 2}`);
+  // The accent chevron sits at the row's right edge. Two things must be true of
+  // it and neither was checked before this: the tag to its left must not be
+  // walked into, and (the defect this task fixes) its own tip must not land on
+  // the card's border - drawChevron's shape and inset are parsed from its BODY,
+  // not transcribed, so reverting either fails here by name.
+  {
+    const strip = (f) => fs.readFileSync(`${DIR}/${f}`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+    const chevron = fnBody(strip("sessions.ino"), "void drawChevron(", "sessions.ino");
+    const insetM = chevron.match(/rightX -= ([A-Za-z_][A-Za-z_0-9]*);/);
+    chk(!!insetM,
+        "drawChevron insets its caller's rightX before drawing, rather than drawing on " +
+        "the card's OUTER edge its one caller passes");
+    const inset = insetM && Number.isFinite(c[insetM[1]]) ? c[insetM[1]] : 0;
+    if (insetM) chk(Number.isFinite(c[insetM[1]]),
+                     `drawChevron's inset identifier "${insetM[1]}" is a known const`);
+    const shapeM = chevron.match(
+      /fillTriangle\(rightX - (\d+), cy - 5, rightX - \1, cy \+ 5, rightX - (\d+), cy/);
+    if (!shapeM) throw new Error("drawChevron(): fillTriangle call not in the expected shape");
+    const [baseOff, tipOff] = shapeM.slice(1).map(Number);
+    const outerX = c.SESSION_ROW_X + c.SESSION_ROW_W;      // the one call site's argument
+    const rightX = outerX - inset;
+    const tip = rightX - tipOff, base = rightX - baseOff;
+    const borderL = outerX - c.BORDER_CARD;                // first of the border's columns
+    chk(tip < borderL,
+        `chevron tip x=${tip} clears the card's border at x=${borderL}..${outerX - 1}`);
+    // The inset MOVES the whole shape toward the tag by BORDER_CARD (that is what
+    // fixing the border overlap costs here) - so the old 4px margin this used to
+    // assert is gone; what must still hold is that the two do not touch.
+    chk(tagRight < base,
+        `tag right edge ${tagRight} clears the chevron's ink at x=${base}..${tip} ` +
+        `(by ${base - tagRight}px, down from a 4px margin before this board's border fix)`);
+  }
 
   // ---- the spinner blit vs the row's rounded corner ----
   const blitL = c.SESSION_DOT_CX - sparkSize() / 2, blitTopRow = c.SESSION_DOT_DY - sparkSize() / 2;

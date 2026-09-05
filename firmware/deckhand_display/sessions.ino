@@ -201,7 +201,18 @@ static inline bool sessionRowExpanded(int pos) { (void) pos; return false; }
 static inline int sessionRowHAt(int pos) { (void) pos; return sessionRowH; }
 static inline int sessionRowYAt(int pos) { return SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP); }
 #endif
+// rightX is the card's OUTER right edge (its one caller passes
+// SESSION_ROW_X + SESSION_ROW_W, the honest thing for it to pass) - so the whole
+// shape is inset by BORDER_CARD here, moving it off the card's own border and
+// onto the interior. Before the inset the tip sat at rightX-2, which is the
+// FIRST of the border's BORDER_CARD columns on both boards (board 1: rightX=232,
+// tip=230, border 230..231; board 2: rightX=308, tip=306, border 306..307) - a
+// visible nick in the ring on an "asking" row, where the tip is COLOR_ACCENT
+// against a status-coloured border. After the inset the tip is at
+// rightX-2-BORDER_CARD (board 1: 228; board 2: 304), clear of both boards'
+// border columns.
 void drawChevron(int rightX, int cy, uint16_t color = COLOR_LABEL) {
+  rightX -= BORDER_CARD;
   tft.fillTriangle(rightX - 8, cy - 5, rightX - 8, cy + 5, rightX - 2, cy, color);
 }
 // How long a session has been in its current status. Minutes granularity
@@ -1333,11 +1344,15 @@ void drawSessionRow(int pos) {
       tft.drawString(titleBuf, nameX, y + SESSION_TITLE_Y);
       tft.setTextColor(COLOR_LABEL, COLOR_CARD); // restore for the sub-line below
       // Bound to SESSION_SUB_LANE_W, the sub-line's own lane from the name's left
-      // edge to the row's right - a long branch name plus a Mac tag could otherwise
-      // run past the row. 30 characters on BOTH boards, as it happens: 184px at
-      // Cozette's 6px advance and 244px at Spleen's 8px, against a
-      // buildSessionSubline that can emit 35 - so the worst case is trimmed with
-      // "..." on either panel.
+      // edge to the row's right (SESSION_ROW_W - SESSION_NAME_DX - 12, the same
+      // 12px right margin the title above uses) - a long branch name plus a Mac
+      // tag could otherwise run past the row. NOT 30 characters on both boards any
+      // more: 172px at Cozette's 6px advance is 28 characters on board 1 (it used
+      // to be a 184px literal that ran 12px past this lane and onto the card's own
+      // border - see board_e32r28t.h), and 244px at Spleen's 8px is still 30 on
+      // board 2, against a buildSessionSubline that can emit 35 - so the worst
+      // case is trimmed with "..." on either panel, board 1's now trimming 2
+      // characters sooner than before.
       if (sub[0]) {
         char subFit[36];
         fitText(subFit, sizeof(subFit), sub, SESSION_SUB_LANE_W);

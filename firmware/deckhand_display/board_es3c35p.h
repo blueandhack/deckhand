@@ -1045,17 +1045,21 @@ const int SESSION_DOT_CX = SESSION_ROW_X + 24;
 // 40, unchanged, and for the same reason: it is set by the 32x32 art, not by the
 // panel. The blit owns x SESSION_ROW_X+7..+38 and the name starts 2px clear.
 const int SESSION_NAME_DX = 40;
-// The sub-line's lane, DERIVED here rather than carried forward: it is the row's
-// own text lane, SESSION_ROW_X + SESSION_ROW_W - 12 - (SESSION_ROW_X +
-// SESSION_NAME_DX) = 12 + 296 - 12 - 52 = 244. At Spleen 8x16's 8px advance that
-// is 30 characters, and buildSessionSubline can emit 35 - so a sub-line CAN be
-// trimmed here, and the previous version of this note ("40 characters ... never
-// truncated at all") was arithmetic done at Cozette's 6px advance before this
-// board had its own faces. 30 is the same count board 1 gets from its narrower
-// lane, so the worst case is unchanged rather than newly introduced: fitText trims
-// with "..." at the measured lane, which is what the whole "lanes are measured,
-// never counted" rule exists for.
-const int SESSION_SUB_LANE_W = 244;
+// The sub-line's lane, DERIVED (SESSION_ROW_W - SESSION_NAME_DX - 12) rather than
+// carried forward as a literal: it is the row's own text lane, SESSION_ROW_X +
+// SESSION_ROW_W - 12 - (SESSION_ROW_X + SESSION_NAME_DX) = 12 + 296 - 12 - 52 =
+// 244, unchanged by making it an expression - board 2 was already exactly this
+// value; board 1 was not (see its own header), which is what made this worth
+// deriving on both sides rather than trusting two literals to stay equal. At
+// Spleen 8x16's 8px advance that is 30 characters, and buildSessionSubline can
+// emit 35 - so a sub-line CAN be trimmed here, and the previous version of this
+// note ("40 characters ... never truncated at all") was arithmetic done at
+// Cozette's 6px advance before this board had its own faces. 30 is also what
+// board 1 gets from its own (now-narrower, 172px) lane at Cozette's 6px advance -
+// 172/6 = 28, not 30 - so the worst case is 28 characters there, not the 30 both
+// boards used to share; fitText trims with "..." at the measured lane either way,
+// which is what the whole "lanes are measured, never counted" rule exists for.
+const int SESSION_SUB_LANE_W = SESSION_ROW_W - SESSION_NAME_DX - 12;
 // The "+N more" strip's reserved band. Derived from the TEXT, like FOOTER_H, so a
 // bigger panel does not move it - but it moves with the FACE: one SESSION_LINE_H
 // line plus 3px, which is 19 here against board 1's 16. Left at 16 the strip's own

@@ -366,14 +366,16 @@ const int SESSION_ROW_W = 224;
 // x SESSION_ROW_X+7..+38 and the name starts 2px clear of it. Same 32x32 frames
 // on both boards, so this number does not move.
 const int SESSION_NAME_DX = 40;
-// The sub-line's measured lane. 184 rather than the row's own text lane
-// (SESSION_ROW_X + SESSION_ROW_W - 12 - nameX = 172) because that is the literal
-// this board has always used - it over-runs the 12px right inset by 12px, which a
-// 30-character sub-line has never reached. Kept AS IS rather than tightened: this
-// board's binary is held byte-identical across the two-board port, and a silent
-// 12px change to when a sub-line starts truncating is exactly the kind of
-// board-1 behaviour change that must not ride inside a board-2 diff.
-const int SESSION_SUB_LANE_W = 184;
+// The sub-line's measured lane. This board shipped it as the literal 184 - 12px
+// WIDER than the row's own text lane (SESSION_ROW_X + SESSION_ROW_W - 12 - nameX
+// = 172, the same expression the title on this card is bounded by two lines
+// above its own call site in sessions.ino) - which let two columns of sub-line
+// text land ON the card's 2px border (BORDER_CARD), visible on the real panel as
+// the model/branch line running into the ring. DERIVED here instead, so the two
+// boards can never drift apart again: this comes out to 172 on this board, a 12px
+// narrower lane than before, and 244 on board 2 - unchanged there, since board 2
+// was already exactly this expression.
+const int SESSION_SUB_LANE_W = SESSION_ROW_W - SESSION_NAME_DX - 12;
 // The "+N more" strip's reserved band at the bottom of the list. Derived from the
 // TEXT, not the panel: one Cozette 6x13 line plus 3px, so it does not move with
 // the screen.
@@ -415,7 +417,8 @@ const int SESSION_NAME_TOP_RUNG = 0;
 // right), used by both handleAskTouch's `sy < CONTENT_Y + DETAIL_HEAD_H` gates.
 // 28 against a card starting at CONTENT_Y+26, i.e. the band's last 2 rows overlap
 // the card's border - harmless (the border is not tappable content) and left
-// alone here for the same byte-identical reason as SESSION_SUB_LANE_W.
+// alone here: unlike SESSION_SUB_LANE_W this one does not put ink on the border,
+// it only shares touch rows with it, so it stays the byte-identical literal.
 const int DETAIL_HEAD_H = 28;
 const int DETAIL_BACK_Y = 4;      // "< Back" baseline inside that row
 const int DETAIL_CARD_DY = 26;    // card top = CONTENT_Y + this
