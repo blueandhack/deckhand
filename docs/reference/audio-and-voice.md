@@ -622,6 +622,16 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     **and** every loop tick while `composeActive`, because the 30s default backlight timeout sits well
     inside the 90s answer budget: without it, typing a normal-length answer could blank the screen
     mid-sentence and the waking tap would be swallowed rather than typed.
+  - **THE KEYBOARD IS NOW ONE SCREEN OF A TWO-SCREEN COMPOSE SURFACE, and everything below
+    describes the KEY SCREEN only.** `kbActive` is `composeActive` and means "the compose
+    surface is up"; `composeScreen` says which screen. The other screen is the REPLY PANEL,
+    reached from the ask screen's `REPLY` button, and it - not the keyboard - is the root: the
+    keyboard is the sheet behind the panel's own `TYPE...`, and its left key is `BACK`, not
+    DISCARD. **The surface, the four control kinds, the chips, the recents ring, the send split
+    and what none of it verifies are in
+    [`sessions-and-asks.md`](sessions-and-asks.md#the-compose-surface).** This file keeps the key
+    screen's own history because that reasoning is still what the screen rests on; where a
+    sentence below has been overtaken it is MARKED, not deleted.
   - **The placeholder is the QUESTION, and a PERSISTENT STRIP keeps one line of it.**
     `drawKeyboard()` fillScreen's the ask screen away, so without this you compose a reply
     to something you can no longer read. While the box is empty the ask's title sits where
@@ -667,6 +677,16 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     no hierarchy at all — and CANCEL is the one that discards a sentence someone spent a
     minute typing. Same reasoning the confirm dialog uses when it refuses to make a
     destructive choice the easiest thing to hit.
+    **SUPERSEDED IN PART, and the reasoning above is kept because it is why the current shape is
+    right: on the ANSWER path the left key is no longer CANCEL at all, it is `BACK`** — the
+    destructive control is off the key screen entirely, which is the same argument taken one step
+    further. `kbTouch` and `drawKbActions` both ask `composeHasPanel()`, so the key cannot say BACK
+    and close the surface. **It is still `DISCARD`/`CANCEL` in MESSAGE mode**, where a READY session
+    has no ask and therefore no panel behind the keyboard, so the keyboard IS the root and the key
+    does what it says. `composeHasPanel()` is `!kbIsMessage()` — derived from the surface's own
+    state, not a third flag. The row also has three columns now at proportions `{1,1,2}` (`SEND` is
+    half the lane, twice the destructive control), with a DRAWN height of `KB_ACT_DRAWN` inside a
+    TESTED band of `KB_ACT_H` = `TAP_MIN`.
   - **`KBTEST` exists because this screen is otherwise unverifiable without a person.** It
     opens the keyboard against the first pending ask — the same reason `TAB` and `PAGE`
     exist, since the capture path can only record what is on the glass. `KBTEST peek`,
@@ -674,8 +694,14 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     otherwise cannot: caret, byte counter, live SEND, caps labels. It **cannot invent a
     prompt** (with nothing pending it does nothing) and it cannot send — that still needs a
     real tap. It always closes an open keyboard first: re-opening one already open left the
-    screen untouched, and since you cannot tap TYPE while the keyboard covers the screen
+    screen untouched, and since you cannot tap REPLY while the compose surface covers the screen
     that re-entrant path is scaffolding-only, so it is made impossible rather than debugged.
+    **`KBTEST` now opens the KEY screen specifically** (`openComposeKeys`), because the surface has
+    two and the opener takes the screen as an ARGUMENT rather than leaving a flag for the caller to
+    set. `COMPOSE` opens the panel; `COMPOSE keys`/`COMPOSE back` move between them and print the
+    draft after the move. **And `KBTEST` with nothing pending is no longer SILENT** — it names both
+    causes (`no ask is pending`, `no session is READY`) and dedupes the host's double delivery,
+    which is the rule the whole refusal table exists for.
     It goes through `switchTab(TAB_SESSIONS)` + `openSessionDetail(i)` the way a person
     would, because opening straight from whatever tab was showing left the sessions list
     painted under a USAGE tab bar when the keyboard closed.
@@ -715,6 +741,11 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 - **A READY session can be sent a typed MESSAGE, and it is the keyboard half of a path the
   mic already had.** The record button is visible on a plain detail screen so a dictation can be
   aimed at a session; **TYPE** in that screen's header row does the same with the keyboard.
+  **That `TYPE` chip is still called TYPE and is still right** — a READY session has no ask, so no
+  reply panel is built for it and the button really does open the keyboard. **The ASK screen's
+  button is a different one and it says `REPLY` now**, because since the compose surface landed it
+  opens the panel rather than a keyboard; see
+  [`sessions-and-asks.md`](sessions-and-asks.md#the-compose-surface).
   Delivery is the SAME function for both (`deliverTextToSession`) driven by the same
   `DECKHAND_VOICE_DELIVERY` - so with the default, SEND **copies the text to the Mac and
   notifies you**; it runs nothing until that is set to `dispatch`. One copy of that logic is what

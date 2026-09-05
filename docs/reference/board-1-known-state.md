@@ -61,6 +61,96 @@ and the 14px the card had to give back: `DETAIL_CARD_H` is 210 and the warning i
 comment in their place. Byte-identity is no longer the reason to defer a board-1 fix on this
 branch; it was lifted deliberately so board 1 could be brought into line with board 2.
 
+#### What the compose surface moved on board 1, and what the allowlists say now
+
+**`KB_ROW_H` went 44 -> 41 and it is BOARD 1'S ALONE.** The persistent prompt strip needed 17px
+(`KB_STRIP_H` = `KB_LINE_PITCH + 4`) and the column had no slack: three key rows give 3px each,
+12 in all, and Task 3's `KB_ACT_H` 44 -> 40 gave the other 4. Board 2's `KB_ROW_H` did not move —
+its column had the room. **The drawn key is 22x37 now and the TESTED band `KB_PITCH x KB_ROW_H`
+is 24x41 = 984px2**, which still clears `TAP_MIN` 40 but **by 1 rather than by 4**. Before the
+strip it was 22x40 drawn and 24x44 = 1056 tested. That is the whole margin board 1 has on its
+letter keys; anything that wants another pixel of vertical budget on that screen is taking it
+from the touch floor.
+
+**`KB_ACT_H` moved on BOTH boards and is a per-board derivation, not a board-1 special case.**
+It is `TAP_MIN` (40 / 46) — the TESTED band — while `KB_ACT_DRAWN` is `2 * KB_LINE_PITCH`
+(26 / 32) and `KB_ACT_DY` centres one in the other. The spec said "only on board 1" and was
+wrong; the correction is recorded here because the two constants read as one change and are not.
+
+**A DERIVED CONSTANT THAT DOES NOT FOLLOW ITS OWN INPUT: `KB_PEEK_LINES` 13 -> 11.** `KB_PEEK_H`
+is computed in `keyboard.ino` as `BOARD_H - KB_ROWS_Y - 4`, so it tracks `KB_ROWS_Y`
+automatically; `KB_PEEK_LINES` is a HAND-WRITTEN header constant and does not. Moving board 1's
+`KB_ROWS_Y` 96 -> 115 shrank the peek 220 -> 201px, and the repo's own derivation
+`(201 - 40 - 8) / 13 = 11.77 -> 11` against the old 13 says what the gap was: **left at 13,
+`drawWrappedText` would have painted TWO LINES PAST THE OVERLAY'S BOTTOM, over the key grid,
+silently.** Today's 13 reproduces from the same formula at the old height, which is what makes
+the formula the right one. Board 2's `KB_ROWS_Y` did not move, so its 15 stands.
+
+**THE `KNOWN` ALLOWLISTS ARE THE BOARD-1 BACKLOG, AND THIS IS THE RECONCILED INVENTORY** (run the
+checkers for the live count — these are what they hold at the close of `compose-surface`):
+
+| checker | `KNOWN[1]` | `KNOWN[2]` |
+|---|---|---|
+| `usage-geom-check.mjs` | 3 clear-box overlaps (`-2`/`-3`/`-1`), as `KNOWN_OVERLAPS` | empty |
+| `sessions-geom-check.mjs` | **8** | empty |
+| `settings-geom-check.mjs` | **10** | empty |
+
+`sessions`: prompt/path wrapping (2 lines holding 62 of 100 and 62 of 64 chars), the ask badge
+row at +27 inside a +28 header band, the ask option 32px against `TAP_MIN` 40, the 4px option
+gap, the voice card's 12px label step and its 6 lines holding 198 of 200 transcript chars, and
+the 28px chip tap zone. `settings`: the 34px pager key, the history chip's 40/32 widths and its
+25px tap band, the 16px scrubber band, the chip tap band ending 24 above the rule, `KB_COLS` 34
+against a measured 33 and the 205-in-204px last-character overrun, the reader's 36 against a
+measured 35, the history empty-state y, and the stepper's `-1` label-to-value gap.
+
+**BYTE-IDENTITY JUSTIFICATIONS REMAINING: ZERO, from eleven.** Five of those defects were fixed
+outright and the rest kept with TRUE arithmetic in place of the retired excuse. Four allowlist
+entries were REMOVED rather than left dead, because an entry matching no message the checker can
+emit is the same defect as an assertion that cannot fail, on the allowlist side of it: the
+sub-line lane, the two that stated the compact-row border collision twice, and the two that
+stated the painted-out "answer on your Mac" warning twice. The converse check that found the last
+stale pair — an allowlisted entry matching no message any more — is itself the mechanism worth
+keeping; it caught `"action button 38px tall >= TAP_MIN 40"` the day it was added.
+
+**Board 1 gained board 2's status band card, its §7 detail card and an animating band mark**, and
+`drawSessionDetail`/`renderDetailDuration` now contain ZERO `#if` — the guards were widened rather
+than a board-1 arm copied in, which is what stops the two drifting apart again. The mark's cost
+was MEASURED rather than assumed: **4.64-5.17ms per blit over 24 samples** off a throwaway
+instrumented build, ~4% of the 120ms tick, against the same call `tickWorkingSpinner` already
+makes up to six times a tick on the list next door. Motion was proved by **two captures 52
+seconds apart differing in 281 of the mark's 1024 pixels** — a single capture cannot show motion,
+and none was claimed.
+
+**Board 1's meta line drops the CLOCK by measurement, not by preference.** Its lane is 188px at
+advance 6 (not `SESSION_ROW_W`'s 224); with a second Mac the emoji cluster costs 67, leaving 121
+against a 126px three-fact line — **over by 5**. `metaFacts()` composes all three, the caller
+measures against what the cluster left and recomposes without the clock. With ONE Mac board 1
+fits all three and was seen to. Same fall-back shape as `bandStatusWord()`, so one implementation
+and no board flag.
+
+**Board 1 answers by NAME now, on 24 verbs it used to answer with silence.** Measured before the
+fix with both boards attached: one `TEMP` produced four lines from board 2 and nothing at all from
+board 1. Each cause is derived from its own handler's guard rather than paraphrased. See
+[`commands-and-checks.md`](commands-and-checks.md).
+
+**Still NOT verified on board 1:**
+
+- **Six 38px compact rows have never been seen on its glass.** Reaching them needs seven
+  concurrent sessions and this Mac had one, so `sessionSubcYAt()`'s clamp — the fix for the
+  sub-line drawn over the row's own outline — is CHECKER-VERIFIED ONLY.
+- **`READTEST` is refused on board 1 for a cause that no longer holds.** Every dependency its
+  refusal names is shared code now. The refusal is honest about its own guard, so it is not
+  misleading, but it is stale; enabling it is a behaviour change that needs board 1's reader
+  exercised on the glass, so it was left rather than flipped blind.
+- **Board 1's prompt card on the reply panel has three lines of which the 2nd and 3rd are never
+  used.** The hook caps `askTitle` at 34 characters and board 1's lane is exactly 34 columns, so a
+  title always wraps to one line: **~34px of that panel is dead.** The ask-is-gone card does use
+  both lines.
+- **`uiStrokeRound` paints the bottom border one row BELOW `y + rowH - 2` on this board**, so a
+  241px card's ring lands at 278..279 rather than 277..278. Pre-existing (an ordinary 63px row
+  does the same, and the extra row falls inside `SESSION_ROW_GAP`), and written down because it
+  cost half an hour of believing the card was 242px tall.
+
 #### What is NOT verified on board 2, stated plainly
 
 - **The two-`conn_id` NimBLE demux has never run.** Same reason board 1's Bluedroid demux has never

@@ -28,7 +28,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1411298, RAM 72524 | flash 1049518, RAM 72084 |
+| size today | flash 1414022, RAM 73244 | flash 1052646, RAM 72804 |
 
 **Those two figures are `arduino-cli`'s own `Sketch uses` / `Global variables` lines, NOT the
 `.bin` file's size, and the distinction has to be stated or the two records read as
@@ -445,6 +445,19 @@ echo "TONETEST" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: configure 
 echo "TONETEST 90" > ~/.claude/deckhand-device-command # ... at a given volume, 1-100 (default 30)
 echo "TONELADDER" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: five rising volumes, find the audible floor
 echo "PAIRVECTOR" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: the pairing crypto against a pinned RFC 7748 vector
+echo "WHOAMI" > ~/.claude/deckhand-device-command   # re-emit the boot HELLO line - both boards, see below
+echo "EMOJITEST off" > ~/.claude/deckhand-device-command # the escape; without it TAB left a frozen footer
+echo "THEME dark" > ~/.claude/deckhand-device-command   # flip the live palette - NOT persisted
+echo "DETAIL 0" > ~/.claude/deckhand-device-command # session n's detail/ask card, WITHOUT the keyboard over it
+echo "COMPOSE" > ~/.claude/deckhand-device-command  # the reply panel over the first pending ask
+echo "COMPOSE type hello" > ~/.claude/deckhand-device-command # ...with text typed into the draft
+echo "COMPOSE chip 1" > ~/.claude/deckhand-device-command # tap token 1 - the insert a finger would do
+echo "COMPOSE page" > ~/.claude/deckhand-device-command   # advance the token pager
+echo "COMPOSE keys" > ~/.claude/deckhand-device-command   # the TYPE... move, and print the draft after it
+echo "COMPOSE back" > ~/.claude/deckhand-device-command   # the BACK move, and print the draft after it
+echo "COMPOSE sent" > ~/.claude/deckhand-device-command   # the receipt state - SENDS NOTHING
+echo "COMPOSE recent yes" > ~/.claude/deckhand-device-command # fill the recents ring - SENDS NOTHING
+echo "COMPOSE off" > ~/.claude/deckhand-device-command    # close the surface
 ```
 
 **The three audio commands are a LADDER OF CLAIMS, and running them out of order debugs two
@@ -488,7 +501,12 @@ Three details that are load-bearing rather than stylistic:
   by reference, and a refusal that returns before the tail's `buf = ""` leaves the refused text in
   the buffer for the next line to be APPENDED to - which still matches the same verb and refuses
   again for ever. One `DETAIL 9` produced 63 refusal lines that way and ~100 seconds in which the
-  device parsed no payloads at all (fixed in `924cecc`).
+  device parsed no payloads at all - **both boards frozen, and a `SCREENSHOT` sent inside that
+  window went nowhere** (fixed in `924cecc`). **FOUR handlers had it, not one**: `READTEST`,
+  `EMOJITEST` (BOTH arms), `SCROLLTO` and `SCROLLOPEN`. They all clear `buf` first now, and the fix
+  was confirmed on the glass - 3 lines from one command, no repeat. **The rule generalises past the
+  refusal table: any handler that `return`s early owns clearing the accumulator**, and every
+  `COMPOSE` arm was written that way from the start because of this.
 
 Refusals go out through `sendLineToHost`, not `Serial.println`, because a refusal is most wanted
 when someone is driving over BLE with the cable out - and they are deduped on a 2s window per verb,
@@ -506,7 +524,7 @@ boolean evaluator - an identifier no header defines THROWS rather than reading a
 handled or refused by name. It also refuses a dead entry (a verb the board both handles and
 refuses), a cause short enough to be a paraphrase of its own guard, a non-ASCII cause, a prefix
 match, a `sizeof` walk, a `return` in the refusal arm and a `Serial.println` refusal.
-`--selftest` injects 8 faults and **catches 8/8**; deleting the `TEMP` entry fails by name with
+`--selftest` injects **17** faults and catches 17/17; deleting the `TEMP` entry fails by name with
 `TEMP: handled on board 2 and NOT on board 1, so board 1 refuses it by name`.
 
 **ONE REFUSAL WAS EMITTED CORRECTLY AND STILL INVISIBLE, AND THE HOST WAS THE REASON.** `BLEMTU`
@@ -523,7 +541,11 @@ into the tuner rather than to the person who asked. Bounded rather than chatty �
 an unsolicited report only on a change (`tickBleMtu`'s `scrollMtuSent` guard), so this is at most
 one line per link per connect. **The lesson generalises: a refusal is only as visible as the
 host's own line handling, so a new refusal has to be READ IN THE LOG rather than reasoned about
-from the firmware.**
+from the firmware.** **AND THE CLASS IS BOUND, not just the instance:** `commands-check.mjs`
+parses `handleDeviceLine()`'s own body for every arm that `return`s WITHOUT logging, prints the
+list it found (and requires it to be non-empty, so the assertion cannot pass vacuously over a
+parse that matched nothing), and fails by verb name if any refusal line the firmware emits would
+be swallowed by one of them. A `--selftest` fault adds a new swallowing arm and is caught.
 
 **`SCROLLPERF`'s guard is `BOARD_HISTORY_SCROLL` ALONE where its four neighbours read
 `!BOARD_USES_TFT_ESPI && BOARD_HISTORY_SCROLL` - checked, and it is deliberate.** `SCROLLPERF`'s
@@ -558,7 +580,7 @@ nothing.
 | `emojiTestActive` | yes | yes (`EMOJITEST`) | **fixed** - `EMOJITEST off`, and `TAB` clears it |
 | `histActive` / `readerActive` | yes | board 2 only (`READTEST`) | `READTEST off`; on board 1 only a finger can raise it |
 | `scrollActive` | yes | yes (`SCROLLOPEN`) | `SCROLLCLOSE` |
-| `composeActive` | yes | yes (`KBTEST`) | `KBTEST off` |
+| `composeActive` | yes | yes (`KBTEST`, `COMPOSE`, `DETAIL`+`REPLY`) | `KBTEST off` / `COMPOSE off` |
 | `octoActive` | yes | no (touch only) | self-clears after 30s |
 | `voiceCardActive` | no | no (a host payload raises it) | the next voice state |
 | `isAsleep` | n/a - `SLEEP` is a power-off | yes (`SLEEP`) | **none, by design**: a held touch wakes it |
@@ -577,6 +599,59 @@ Two refusals came out of that sweep, both real and both the same defect one surf
   earlier are recorded below): both its callees only act while `currentTab == TAB_SETTINGS`, and
   the pairing panel is reached FROM settings - so `PAGE` could repaint over a code somebody was
   comparing while `pairPanelActive` stayed true and `CONFIRM` stayed tappable underneath.
+
+## `WHOAMI`, `DETAIL`, `THEME` and the `COMPOSE` verbs
+
+- **`WHOAMI` re-emits the boot `HELLO <name> v2` line on demand, over USB, on BOTH boards, and it
+  exists because `HELLO` IS A BOOT-ONLY BURST.** A host that attaches to an already-running board
+  never sees one, so the link stays ANONYMOUS - measured live as `[device/usb:usbmodem1101]` - and
+  **an answer sent down an anonymous link is refused as coming from an unknown device.** The host
+  used to learn the name by REBOOTING the board with an RTS pulse (`dtr:false,rts:true`), which is
+  also esptool's USB-Serial-JTAG reset: on board 2 that drops the USB device, so the port closes,
+  the link is spliced and `link.pulsed` dies with it - a watchdog restart against a board past its
+  15s burst would reboot the user's board 2 six seconds later, mid-answer. **The host now ASKS.**
+  Proven with both boards left running minutes past their bursts and only the host restarted:
+  board 2 named, no `Pulsing RTS`, no `BUILD` line, no disconnect. Cost if it had gone the other
+  way: one command verb and a 1500ms wait on a link that would have been named anyway.
+- **`DETAIL <n>` opens session `n`'s detail card WITHOUT the keyboard over it, and before it there
+  was NO WAY TO PUT THAT SCREEN ON THE GLASS FROM THE MAC AT ALL.** `TAB` switches tabs, `PAGE` is
+  SETTINGS-only, and the only other route in is `KBTEST msg`, which opens the keyboard OVER it - so
+  that surface had never been captured on either board in this project's history. Refuses by name
+  on no sessions, an out-of-range `n`, or another full-screen surface. If the session has a pending
+  ask it lands on the ask screen, which is how the `SPEAK`/`REPLY` input row is capturable.
+- **`THEME dark|light` flips the live palette, so "confirm this reads in both themes" stopped
+  needing a person at the device.** NOT persisted - a reboot restores the stored setting. It does
+  not settle board 2's COLOUR: `SCREENSHOT` there reads the shadow framebuffer, so `COLORTEST` is
+  still the instrument and a person is still the authority.
+- **`EMOJITEST off` is an escape, and the section above says why one was mandatory.**
+- **The `COMPOSE` verbs put the reply panel on the glass and move between its two screens.**
+  `COMPOSE` opens it on the first pending ask; `type`, `chip <n>` and `page` edit and page it;
+  `keys`/`back` are the two SCREEN MOVES; `sent` draws the receipt state; `recent <text>` fills the
+  recents ring; `off` closes it. **`sent` and `recent` SEND NOTHING** - they put a state on the
+  glass, which is all a capture can record.
+  - **`chip <n>` and `page` are DEDUPED and the drop names its cause; opening and the screen moves
+    are NOT, and that asymmetry is the rule rather than an oversight.** The host writes each
+    trigger-file line to every live transport, so a cabled BLE board runs each command twice within
+    milliseconds. Opening the panel and moving a screen are IDEMPOTENT - the same flag, the same
+    repaint - so the second copy costs one repaint and can change nothing. **An INSERT is not**, and
+    this was MEASURED rather than anticipated: the first `COMPOSE chip 1` put 31 bytes in the draft
+    and the second made it 62, reading
+    `firmware/tft_setup/User_Setup.hfirmware/tft_setup/User_Setup.h`, which looks exactly like the
+    splice path inserting wrongly. The ring's own dedupe makes `COMPOSE recent` idempotent, which is
+    why it needs no guard where `chip` does.
+  - **`keys`/`back` exist because THE CLAIM THE WHOLE SURFACE RESTS ON CANNOT OTHERWISE BE SEEN.**
+    `TYPE...` and `BACK` exist only as a finger on the glass, and nothing here can inject a tap, so
+    without these two verbs "the draft survives the move" could be reasoned about and never
+    observed. They print the byte count and the text after the move - that line is the evidence.
+    They call the same two functions the buttons call, and they cannot send, open, close or edit.
+  - **THERE IS NO TOUCH-INJECTION COMMAND AND ONE WAS DELIBERATELY NOT ADDED.** The project already
+    decided this class: `KBBUBBLE` arms a key through the real `kbSetArm()` but NEVER commits, and
+    declines `DEL` by name precisely because `DEL` commits on press. A `TAP x y` verb that could
+    reach a commit would put "send a message to Claude Code" on the trigger file - a remote-control
+    hole rather than an instrument. **The cost of that decision is recorded rather than hidden:**
+    four of the compose panel's eight exits, a tap on the recents row on either board, and
+    message-mode's `DISCARD`/`CANCEL` arm are bound STRUCTURALLY and have never been performed as a
+    gesture. See *The compose surface* in [`sessions-and-asks.md`](sessions-and-asks.md).
 
 ## `KBPROBE` and `KBBUBBLE` - the keyboard's touch model
 
@@ -911,15 +986,15 @@ parse every cap out of the hook, the host and the firmware rather than transcrib
 that moves fails by name instead of taking the numbers with it:
 
 ```
-node host/wire-bytes-check.mjs               # 305 assertions: every device-bound cap is exact in BYTES,
+node host/wire-bytes-check.mjs               # 317 assertions: every device-bound cap is exact in BYTES,
                                              #   the hook's inline toAscii matches host/to-ascii.mjs over
                                              #   71,738 strings, and the saturated tick line is measured
                                              #   against feedChar's guard (incl. the still-over tripwire)
-node host/wire-bytes-check.mjs --selftest    # 36/36 injected faults, each printing WHICH assertion caught it
+node host/wire-bytes-check.mjs --selftest    # 42/42 injected faults, each printing WHICH assertion caught it
 node host/ask-optdescs-check.mjs             # 40 assertions: optDescs is capped in bytes on a codepoint
                                              #   boundary, parallel to options, absent when nothing
                                              #   is described
-node host/ask-optdescs-check.mjs --selftest  # 5/5 injected faults
+node host/ask-optdescs-check.mjs --selftest  # 6/6 injected faults
 node host/session-inbox-check.mjs             # 94 assertions: the messaging-socket frame, the bytes that
                                               #   actually reach the socket, the confirm-don't-trust rule,
                                               #   the host's fallback wiring, and the hook publishing the
@@ -962,8 +1037,8 @@ in this checker is aimed at a failure of that shape: silent, and invisible in th
 reads.
 
 ```
-node host/multi-device-check.mjs             # 42 behaviour + 14 structural assertions
-node host/multi-device-check.mjs --selftest  # 32/32 injected faults, each naming the assertion that caught it
+node host/multi-device-check.mjs             # 85 behaviour + 67 structural assertions
+node host/multi-device-check.mjs --selftest  # 59/59 injected faults, each naming the assertion that caught it
 ```
 
 It **slices the real functions out of `host/index.mjs` and executes them** — `listUsbCandidates`,
@@ -1476,6 +1551,28 @@ node firmware/deckhand_display/geom-sweep.mjs            # fault-injection sweep
 python3 firmware/deckhand_display/usage-trend-check.py   # the USAGE ring/burn arithmetic these three do NOT bind - see below
 ```
 
+**The complete run list, so no checker rots for want of a workflow that runs it.** `CLAUDE.md`'s
+Verification block is the short form; this is all of them, and every one is green plain AND
+`--selftest` at the close of `compose-surface`:
+
+```
+node firmware/deckhand_display/{usage,sessions,settings}-geom-check.mjs
+node firmware/deckhand_display/{sessions-rank,scrollback,palette,commands,textwidth}-check.mjs
+python3 firmware/deckhand_display/{usage-trend,batt-trend}-check.py
+node firmware/deckhand_display/geom-sweep.mjs
+node firmware/board-baseline.mjs --doc-check      # CLAUDE.md's quoted hashes/sizes vs the JSON
+node host/{wire-bytes,ask-chips,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
+node host/{session-inbox,multi-device,host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
+node host/{codex-refresh,line-address,session-lookup}-check.mjs
+node claude-hooks/answer-status-check.mjs
+node docs/design/*/check.mjs                       # six committed mocks, each bound to the headers
+```
+
+**`session-inbox-check.mjs` stands up its own Unix socket in a temp dir and never touches a real
+session** - the comment that once said "posting into a LIVE session" was wrong and would have
+taught the next reader to skip it. **Assertion COUNTS quoted anywhere in this file go stale**; the
+checkers print their own, live, and that print is the authority.
+
 Each takes `--selftest`, which injects a fault and **exits 0 only when that fault IS caught** (exit
 1 if the checker is blind to it) — the same teeth-proving convention as `palette-check.mjs
 --selftest`. Two things to know before leaning on them:
@@ -1518,7 +1615,8 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   — the run was killed rather than diagnosed, so there is no evidence to point at, and the only
   honest statement is that the sweep is affordable today and the earlier figure is unexplained
   rather than explained away. The plausible candidate, offered as a hypothesis and not a
-  measurement, is contention: the sweep is four children per checker-board, so anything else heavy
+  measurement, is contention: the sweep is eight children per checker-board (`SLICES`, raised from
+  four when the sessions checker outgrew it), so anything else heavy
   on the machine (an `arduino-cli` build takes minutes) multiplies straight through it. **Time it
   when you run it**, and treat a wildly different number as a question about the machine before it
   is a question about the sweep.
@@ -1540,10 +1638,25 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   opaque box paints `COLOR_CARD` over the chip's own stroke, the clear-box-not-glyphs hazard the
   usage cards already pay for. Asserting that box clears the stroke at both ends is a bound taken
   from the geometry rather than fitted to today's 26, and it catches the chip at 20.
-  Where it stands today: **514 of 582 constant-board pairs guarded** (board 1 32/237 unguarded,
-  board 2 36/345) — board 2 gained **50 constants** in the settings redesign and its unguarded count
+  Where it stood at the settings redesign: **514 of 582 constant-board pairs guarded** (board 1
+  32/237 unguarded, board 2 36/345) — board 2 gained **50 constants** there and its unguarded count
   went DOWN, which is the standard this file sets for constants the repo just added: every one of
-  them is caught at **±1 in both directions**. (`ASK_OPT_DESC_BYTES` from the option-descriptions
+  them is caught at **±1 in both directions**.
+  **Where it stands at the close of `compose-surface`: 628 of 713 guarded** (board 1 31/277
+  unguarded, board 2 54/436). The compose surface added `KB_KEY_R`, `KB_KEY_GAP`, the four
+  `KB_ACT_*`, both `KB_STRIP_*` and eleven `COMPOSE_*` on each board, and **not one of them appears
+  in either board's unguarded list, nor under "caught only as a CRASH".** Spot-checked by injecting
+  the fault and reading the message rather than trusting the histogram: `COMPOSE_TOP -16` fails with
+  `the prompt card starts -12, at or after the 0 where the band above it ends`,
+  `COMPOSE_DRAFT_H -16` with `the draft line its T_BODY cell (13 in 5)`, `COMPOSE_ACT_MAX -1` with
+  `2 holds the 3 column(s) drawComposeActions writes into`, and `KB_KEY_R +1` with
+  `KB_KEY_R 3 != KB_KEY_W / 10 (2)`. **`COMPOSE_TOP`, `COMPOSE_GAP` and `COMPOSE_DRAFT_H` are caught
+  in ONE DIRECTION ONLY and that is correct, not a gap:** a bigger top margin or gap is legal
+  arithmetic the 31/64px residual absorbs, and their VALUES are bound by the committed mock instead.
+  Two of the panel's constants needed the sweep to find them - `COMPOSE_KEY_GAP` was unguarded and
+  `COMPOSE_COLS` was caught only as a CRASH - and a SECOND sweep found the fix half-done, because
+  `COMPOSE_ACT_MAX`'s new claim sat inside a board-1-only block while the sweep perturbs a constant
+  per BOARD. That is the argument for running it twice after adding assertions. (`ASK_OPT_DESC_BYTES` from the option-descriptions
   work, and `READER_CODE_LINE_H` from the reader line-step fix, likewise.) Board 1's numbers are
   unchanged, which is the sweep agreeing with `board-baseline.mjs` that nothing there moved.
   **Wireless pairing then added 25 more to board 2 and only THREE of them are unguarded, all
@@ -1554,9 +1667,21 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   was not when the panel first landed, and the story of how it got there is under **the pairing
   panel** below: a chain of relative identities is invisible to an injector that perturbs one term
   and lets the rest follow.
-  Of the unguarded ones only **8 on board 1 and 12 on board 2 are read by any
-  checker at all** — the other 24 and 24 are mic, beeper, crab, pairing-duration and
-  preset-count constants with no geometry to violate. **Four of board 2's entries in THAT list are unguarded BY CONSTRUCTION
+  Of the unguarded ones only **7 on board 1 and 10 on board 2 are read by any
+  checker at all** — the other 24 and 44 are mic, beeper, crab, scrollback-wire, burn-estimator,
+  pairing-duration and preset-count constants with no geometry to violate.
+  **THAT "READ BY A CHECKER" FLAG USED TO COUNT COMMENTS, AND THE FALSE POSITIVES COST A TASK'S
+  WORTH OF READING.** It is a regex over the checker's source, and `KB_MAX_BYTES` is named in a
+  cross-reference COMMENT in both `usage-geom-check.mjs` and `sessions-geom-check.mjs` ("the same
+  way settings-geom-check.mjs reads KB_MAX_BYTES out of the host"), so both listed it as
+  "UNGUARDED though this checker reads it" while neither asserts one thing about it — and the union
+  always said it was guarded, by `settings-geom-check`. Full-line `//` comments are stripped before
+  the flag is computed now (the same conservative rule `geom-common.mjs`'s own `stripComments()`
+  uses, because a checker's regex literals can contain `//` and a to-end-of-line strip would delete
+  real code). `USAGE_RING_STEP_MIN` moved out of the list for the same reason. **The VERDICT never
+  read that flag** — caught-or-not comes from the injection — so this changed a triage aid and no
+  number of record. A triage aid that points at healthy constants is read once and then skipped,
+  which is the same failure as a suppressed list. **Four of board 2's entries in THAT list are unguarded BY CONSTRUCTION
   and are not a gap** (as are the two `PAIR_*_MS` durations above): `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`,
   `DETAIL_COL_LBL_STEP` and `DETAIL_COL_VAL_STEP` are
   board 1's arm only since §7 replaced the pill and the two column pairs with the band and one
@@ -1580,7 +1705,8 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   quietly deleted.
   **The sweep needs its own memory discipline and that is not optional.** It re-imports each
   checker once per injection, ~1400 times, and every instance is compiled code the ESM cache can
-  never release, so runs are sliced across four child processes per (checker, board). Before that
+  never release, so runs are sliced across `SLICES` child processes per (checker, board) - **8
+  today, raised from 4 on this branch when the sessions checker outgrew it**. Before that
   the sessions child OOM'd. **It did not fail silently** — the parent already checked the child's
   exit status, so it printed "1 checker sweep(s) hit an INTERNAL ERROR - the numbers above are
   incomplete" and exited 1. What it did lose was *coverage*: the checker that constrains every
@@ -1596,7 +1722,9 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   one process. Measured today, on both invocations, at this commit. So the coverage is **present**,
   not absent — a report that the sessions checker's constants are unswept is a report about which
   command was typed. **Run the plain sweep**; to look at one checker by hand, add
-  `--board <n> --slice <i>/4` (that is exactly what the parent does) and read the four slices, or
+  `--board <n> --slice <i>/8` (that is exactly what the parent does - read `SLICES` out of
+  `geom-sweep.mjs` rather than this sentence, which has already gone stale once) and read the
+  slices, or
   raise `SLICES`. This is recorded rather than fixed: it is pre-existing, and the working
   invocation is the documented one.
 

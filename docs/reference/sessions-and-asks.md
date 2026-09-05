@@ -662,8 +662,233 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   `detailSigCache`. **That cache is now at 381 of 384 on board 2** (372 on board 1); the next term
   added to the detail signature will not fit, and `sessions-geom-check.mjs` fails rather than
   truncating silently.
-  **NOT YET DRAWN.** Nothing on either board renders a chip — that is task 10. What is verified is
-  the wire and the parse: a read-only probe ask published into the live host emitted
+  **"NOT YET DRAWN" WAS TRUE WHEN WRITTEN AND IS NOT ANY MORE — corrected in place, because the
+  sentence below is still the record of what the WIRE was proved to carry, which is a different
+  claim from what the panel draws.** Chips are drawn now, as the compose panel's INSERT band; see
+  *The compose surface* at the end of this file. What that task verified was the wire and the
+  parse: a read-only probe ask published into the live host emitted
   `"chips":["arduino-cli compile","--fqbn","firmware/deckhand_display/keyboard.ino"]` (the 38-byte
   path 32 would have dropped, and `Allow`/`Deny` correctly suppressed as chips that merely restate a
-  button), and both boards drew that ask's detail card unchanged, captured.
+  button), and both boards drew that ask's detail card unchanged, captured. **`detailSigCache` is
+  448 now, not 384** — the 381-of-384 figure above is what forced the widening and is kept for
+  that reason; the reply panel added a term and at 384 the NEXT term would have been silently
+  DROPPED rather than overflowing, because every term is appended under `if (used + n < outSize)`.
+
+---
+
+## The compose surface
+
+> Landed on the `compose-surface` branch (Tasks 1-13, plus five alignment tasks and a
+> whole-branch review). **Every number below is measured or parsed. Where nothing measured it,
+> it says so** — the list of unverified things at the end of this section is not an appendix,
+> it is half the point.
+
+- **IT IS ONE SURFACE WITH TWO SCREENS OVER ONE DRAFT, and that is the whole design.**
+  `composeActive` means "the compose surface is up" (it is the old `kbActive`, renamed;
+  a grep for `kbActive` finds nothing anywhere, asserted across all three sources including
+  comments). `uint8_t composeScreen` is `COMPOSE_SCREEN_PANEL` 0 or `COMPOSE_SCREEN_KEYS` 1 —
+  `#define`s, not `const int`s, because `#if` on a `const int` is silently false and a screen
+  identifier that might one day be guarded is spelled the way that cannot fail quietly.
+  **`handleTouch` is the only place that reads `composeScreen`**; it is the router. Every other
+  seam asks `composeOnPanel()` / `composeOnKeys()`, which fold "the surface is up" into the same
+  question so no caller can test the screen and forget the surface. Two assertions hold that
+  shape: `handleTouch`'s body reads `composeScreen` exactly ONCE, and the three sources together
+  may name it on at most 10 non-comment lines (it is on 9).
+  - **The draft is `kbText`/`kbLen`/`kbCaret` and it belongs to the SURFACE, not to a screen.**
+    `TYPE...` on the panel and `BACK` on the keyboard are a flag flip plus one repaint; neither
+    touches the draft. Verified on board 1's REAL panel, both directions: capture `20-44-40`
+    (panel, draft `ok--no-verify`), `20-45-19` (keyboard, `13/150`, same text with the caret),
+    `20-45-57` (panel again, byte-identical to the first by eye).
+  - **`openComposeOn(idx, screen)` is the ONE place every reset lives** — the draft, the
+    keyboard's modes, and the panel's four globals. The screen is an ARGUMENT, never a flag the
+    caller sets before the call (a second list to remember) or after it (a full-screen double
+    paint). Three public openers name their screen: `openCompose`, `openComposeKeys` (`KBTEST`),
+    `openComposeForMessage`.
+- **THE KEYBOARD'S LEFT KEY IS `BACK`, NOT `DISCARD` — the destructive control is off that screen
+  entirely.** `kbTouch` and `drawKbActions` ask the same `composeHasPanel()`, so the key cannot
+  say BACK and close the surface. **The exception is a MESSAGE to a READY session**, which has no
+  ask and therefore no panel behind it (the panel is built out of an ask's options, tokens and
+  prompt; for a message all three legends would say "ask" about a thing with no ask). There the
+  keyboard IS the root and its left key is still `DISCARD`/`CANCEL`. `composeHasPanel()` is
+  `!kbIsMessage()` — derived from the surface's own state, not a third flag.
+- **THE PANEL'S FOUR CONTROL KINDS ARE TOLD APART BY FORM, NEVER BY COLOUR**, and that is the
+  reason a colour-blind reader and a board-2 screenshot can both still read it:
+  | kind | form | where |
+  |---|---|---|
+  | **send** | filled, label centred | the reply bands - one tap answers the ask |
+  | **insert** | unstroked on `COLOR_CARD`, label LEFT, prefixed `+ ` | the token band |
+  | **navigate** | `COLOR_ACCENT` stroke, label centred | the `1/2>` pager |
+  | **reuse** | card fill + `COLOR_LABEL` stroke, label LEFT | the recents row |
+  All four are in ONE frame in board-2 capture `21-34-25`. **Board 2's `SCREENSHOT` reads the
+  shadow framebuffer, so that capture vouches for GEOMETRY and FORM and NOT for what the panel's
+  colour pipeline did with them** — `COLORTEST` is the instrument for colour and a person is the
+  authority. Board 1's capture reads the real glass and shows the same four forms.
+- **A CHIP'S LABEL IS TRUNCATED AND ITS VALUE IS NOT, and nothing on the glass can show that.**
+  The label is `"+ " + value` fitted into `drawn.w - 8` — **62px = 10 characters on board 1**, 88px
+  = 11 on board 2 — so even an 11-byte flag like `--no-verify` draws with three ASCII dots. The
+  INSERT puts the whole token in. That difference is why `COMPOSE chip <n>` prints the byte count
+  of what it inserted: measured on board 1, the button read `+ firmw...` and the draft gained all
+  31 bytes of `firmware/tft_setup/User_Setup.h`. The truncation lives in `drawComposeControl`, the
+  one function that draws all four kinds; `drawComposeChip` is asserted to route through it and to
+  call no `drawString` of its own, so a second truncation rule cannot appear beside the first.
+- **DRAWN AND TESTED ARE DIFFERENT RECTANGLES, and the action row is where that was established.**
+  `KB_ACT_H` is `TAP_MIN` (the TESTED band, 40 on board 1 and 46 on board 2) while `KB_ACT_DRAWN`
+  is `2 * KB_LINE_PITCH` (26 / 32) and `KB_ACT_DY` centres the one in the other. The rule the
+  whole plan exists to state is that **the TESTED band clears the floor, never the drawn control**
+  — a checker asserting the DRAWN key against `TAP_MIN` passed only while board 1's `KB_ROW_H` was
+  44 (drawn 40, exactly the floor) and was found the moment it went to 41. Sub-floor controls are
+  a NAMED list (`EXCEPTIONS`) that is exact in BOTH directions: an unlisted sub-floor control
+  fails, and a listed one that is no longer sub-floor fails too. The panel has exactly one entry,
+  the draft line, sub-floor in HEIGHT only (its tested zone is `TAP_MIN` wide).
+  - **The action row takes PROPORTIONS, not cells.** `uiActionRow`'s `fracs` are `{1,1,2}`, so
+    `SEND` is 50% of the lane and the destructive control 25% — "SEND twice DISCARD" exactly, and
+    the checker parses that initialiser rather than restating it. Columns close on the panel:
+    69+8+139 = 216 on board 1, 96+8+192 = 296 on board 2. `ACT_GAP` (8) is parsed out of
+    `uiActionRow`'s own body, so the committed mock's gap cannot drift from the firmware's.
+  - **Screen-edge margins stopped counting as taps and that was ACCEPTED with arithmetic, not
+    waved through.** The old `sx < CARD_X + halfW` test gave the left 12px to CANCEL and the right
+    to SEND; the zones now start at `CARD_X`. SEND's tested AREA still GREW 8.9% on board 1
+    (116x44 = 5104 -> 139x40 = 5560) and fell only 2.4% on board 2, because the `{1,2}` widening
+    plus the swallowed 8px gap more than repay the margin. And the left margin's loss is a straight
+    win: x 0..11 used to DISCARD 150 characters. Board 1's XPT2046 affine fit is also worst at the
+    edges, so those pixels were the least reliable rather than the cheapest.
+- **THE COLUMN CLOSES ON `BOARD_H`, AND IT IS ASSERTED BY A CONTIGUITY WALK, NOT A SUM.** A sum of
+  bands with each gap written as a difference TELESCOPES: 10,000 sets of ARBITRARY constants
+  produce ZERO failures, so the identity holds no matter what any constant is. What ships is a
+  walk (no overlap, no negative gap, last band inside `BOARD_H`) plus the claim the walk cannot
+  make — that **all** of the slack is the three terms the design names. It rejects 98.96% of the
+  same garbage. As the checker prints it:
+  ```
+  board 1  prompt card 4..55 | reply legend 60..75 | reply band 0 76..115 | reply band 1 116..155
+           | insert legend 156..171 | token band 172..211 | draft line 212..232
+           | recent legend 233..248 | action band 280..319 of 320       (no recents row)
+           slack 39 = COMPOSE_TOP 4 + COMPOSE_GAP 4 + residual 31
+  board 2  prompt card 12..88 | reply legend 97..115 | reply band 0 116..161 | reply band 1 162..207
+           | insert legend 208..226 | token band 227..272 | draft line 273..296
+           | recent legend 297..315 | recent band 316..361 | action band 426..471 of 480
+           slack 84 = COMPOSE_TOP 12 + COMPOSE_GAP 8 + residual 64
+  ```
+  Both land the action band exactly on `KB_ACT_Y` — 280 and 426 — which is the number the
+  KEYBOARD's own column produces, so the two screens cannot disagree about where `SEND` lives.
+  **Whether recents fit is asked of the GEOMETRY, not of the board number:** `composeRecentsFit()`
+  is `KB_ACT_Y - composeRecentY() >= TAP_MIN` — 31 against 40 on board 1 (false), 110 against 46
+  on board 2 (true) — and the checker asserts that body names no board flag at all.
+- **RELEASE-COMMIT: a character on the three letter rows commits on the LIFT.** A press arms a
+  candidate and draws a magnified bubble one key row clear of the finger, the held path re-targets
+  as the finger slides, and the release commits. Row 3, the action row, the card, the strip, the
+  peek and `DEL` keep press-commit, because each already clears the ~7.1mm fingertip floor and
+  `DEL` must delete on a tap and repeat on a hold.
+  - **THE MEASUREMENT THAT JUSTIFIES IT HAS NOT BEEN TAKEN. `KBPROBE` reads 0 keystrokes.** The
+    instrument ships, refuses with a named cause, dedupes against the double delivery, and was
+    exercised end to end — the host log's only completed run reads
+    `KBPROBE off (KBPROBE off): 0 keystrokes, 0 re-targeted between press and lift (0%)`, because
+    nobody has typed the two passes. So **the slide-correction rate is UNKNOWN**, and
+    "release-commit cuts mis-hits" is still a claim. To take it: raise the keyboard on a real
+    prompt, send `KBPROBE`, type the same ~40-character sentence twice (once carefully, once at
+    speed), send `KBPROBE off`, read the percentage. **A rate near zero means release-commit is
+    buying nothing measurable** and the spec's fallback — six columns, two taps a character — is
+    what should come next.
+  - **What the probe can and cannot say, even once it is run.** It measures where fingers LAND
+    versus where they LIFT. It says NOTHING about whether the resulting text was right: a
+    re-target means the finger moved onto a different key, not that the second key was the
+    intended one. And the "release point" is the LAST SAMPLED point — `getTouchPoint()` returns
+    false on the lift — so at a 15ms poll it is the finger's position up to 15ms before it left.
+    That caps the precision of every number it prints. CANCELS (armed, slid off the key band
+    entirely, lifted on nothing) are counted separately, because an arm that ends on nothing is
+    the single strongest evidence for release-commit and it is invisible in a re-target total.
+- **THE SEND SPLIT: the panel leaves a receipt, the keyboard closes.** `sendTypedAnswerToHost` and
+  `sendPromptToHost` return `bool` and close nothing. Before this, one screen had two answers to
+  "what happened" — an option tapped two bands up left `SENT: ...` and `DONE`, while a chip-built
+  draft sent from the same screen's own SEND dropped the whole surface. The senders' early returns
+  send NOTHING, which is what makes the bool load-bearing rather than cosmetic.
+  `composeSentText` is `KB_MAX_BYTES + 1`, not the 36 bytes it was sized at when only an option
+  label reached it — at 36 a 150-byte draft's receipt would have been cut at 35 with no marker and
+  would have silently disagreed with what went to Claude.
+- **THE RECENTS RING holds four and the row draws three.** `char composeRecent[4][KB_MAX_BYTES+1]`,
+  **604 bytes of DRAM**, global rather than per session (a per-session copy would cost 3,624 bytes
+  to say the same thing six times). The fourth entry is what keeps an older reply DEDUPING when it
+  is sent again rather than arriving as a second copy. **It is NOT persisted, deliberately:** NVS
+  would give a BLE-paired device a plaintext log of every reply plus a flash-wear budget for a
+  one-tap convenience, so it is empty after a reboot and the legend says
+  `RECENT - NOTHING SENT YET` in exactly that state. Entries are remembered **after** the send, past
+  every `return false` guard — the checker binds the INDEX of the call against the index of the
+  last guard, because an entry the ring offers back as sent that never went out is a record that
+  lies. Board 1 pays the 604 bytes and draws nothing; its legend says `RECENTS: NO ROOM ON THIS
+  PANEL`, and `composeRecentsFit()` is asked at the HIT TEST as well as the draw — without that, a
+  tap on board 1's 31px residual would replace the draft out of a ring that is nowhere on its
+  glass.
+- **THE ASK SCREEN'S BUTTON SAYS `REPLY` NOW, NOT `TYPE`, because it stopped opening a keyboard.**
+  It opens the compose surface at its ROOT — the panel, where this ask's own options and tokens are
+  one tap each — and the keyboard is the sheet behind that panel's own `TYPE...`, one further tap
+  away with the draft carried. `TYPE` under-sold it (a reader who does not want to type never
+  presses it, so the one-tap reply is never found) and mis-described it, which is the same class as
+  the peek hint that read "tap here to read it" after the control moved. Labels: half-width `REPLY`
+  beside `SPEAK`, full-width `REPLY TO THIS PROMPT`. **Seen on board 1's REAL panel**
+  (`shot-2026-09-05T22-00-35-Deckhand-0528.png`): `SPEAK` and `REPLY` side by side under two option
+  buttons, both comfortably inside their halves. `sessions-geom-check.mjs` parses both the labels
+  AND the lane each is drawn into out of `drawAskDetail`'s own `if (askInputRows(idx))` block and
+  asserts the fit per board (REPLY 30/40px in a 104/144px half; `REPLY TO THIS PROMPT` 120/160px in
+  the 216/296px lane, the same slot `SPEAK YOUR ANSWER`'s 102/136 already filled), plus that no
+  label says TYPE. A `--selftest` fault puts `TYPE YOUR ANSWER` back and fails by name.
+  **Not renamed, and right not to be: the plain detail card's own header chip still says `TYPE`.**
+  A READY session has no ask, so no panel is built for it and that button really does open the
+  keyboard.
+  **Measured cost of the rename: board 1 +0 BYTES with a DIFFERENT HASH** (`3e8b2cf3` ->
+  `5d772e55`, size 1414288 both sides), board 2 +16. That is a live instance of the hazard
+  `CLAUDE.md` names — a size comparison passes it — on a change that adds 5 bytes of string and has
+  them absorbed by rodata alignment.
+  **A FINDING, pre-existing rather than introduced: the full-width `REPLY TO THIS PROMPT` arm is
+  UNREACHABLE with today's host.** It draws only when `type && !speak`, and `host/index.mjs:2097`
+  sets `item.ask.voice = record.ask.kind === "question"` unconditionally while `askTypeOffered`
+  requires that same `kind == "question"` — so `speak` is true whenever `type` is, and the row is
+  always the half-width pair. It was equally unreachable when it read `TYPE YOUR ANSWER`. Left
+  alone and recorded: the arm is a correct fallback for a payload that omits `voice`, and deleting
+  it would remove the only handling of that case.
+
+### What the compose surface does NOT verify, stated rather than implied
+
+- **THAT MOST ANSWERS ARE SHORT.** The whole reply panel rests on it — one-tap options and
+  pasteable tokens are only the right shape if the typical reply is a word or a path rather than a
+  paragraph. **The host has the history and it has still not been measured.** Nobody has counted
+  the length of the answers actually sent from this device or from the Mac.
+- **THAT RELEASE-COMMIT REDUCES THE ERROR RATE.** `KBPROBE` reads 0 keystrokes (above). There is no
+  measurement, only the mechanism.
+- **THAT THE FILLED TILE READS AS A KEY** in every theme on every panel. A person looked at it once
+  (Task 2 Step 8) and said yes; that is the only kind of evidence available, since board 2's
+  capture reads the shadow framebuffer and board 1's real-glass capture is one panel under one
+  light.
+- **THAT THE FOUR EXTRACTION HEURISTICS PICK THE RIGHT TOKENS** in general. Backticked spans,
+  flags, `/`-bearing tokens and quoted spans are merged by first-appearance position. Over the 133
+  ask-carrying ticks in the live host log, rule 4 produced `"Use Case:"` — a prose fragment, not a
+  tappable token — and that single sample is the whole review of chip QUALITY there has ever been.
+  What IS measured is the COST: worst real chip cost 40 bytes over those 133 asks, against a
+  theoretical worst of 214 per session.
+- **FOUR OF THE PANEL'S EIGHT EXITS HAVE NEVER BEEN PERFORMED AS A GESTURE**, plus tapping a
+  recents row on either board, plus message-mode's `DISCARD`/`CANCEL` arm. The four are a one-tap
+  send, `SEND` with a chip-built draft, `SEND` from the keyboard, and "the session goes away". All
+  are bound structurally; none has had a finger on it. **NO TOUCH-INJECTION COMMAND EXISTS AND ONE
+  WAS DELIBERATELY NOT ADDED** — `KBBUBBLE` arms a key but never commits, and declines `DEL`
+  precisely because `DEL` commits on press, so a `TAP x y` verb that could reach a commit would put
+  "send a message to Claude Code" on the trigger file. That is a remote-control hole rather than an
+  instrument. **The decision is the record, as much as the gap is.** What IS verified on the glass:
+  `TYPE...` -> `BACK` in both directions on both boards, `CLOSE`/`DISCARD` as far as
+  `closeCompose()` goes, and the ask expiring under both screens (four captures).
+- **SIX 38px COMPACT ROWS HAVE NEVER BEEN SEEN ON THE GLASS.** Reaching them needs seven concurrent
+  sessions and this Mac had one. The clamp that fixes their sub-line overrun is checker-verified
+  only.
+- **BOARD 2'S COLOUR, throughout.** Its `SCREENSHOT` reads the shadow framebuffer the renderer just
+  wrote, so a capture is correct by construction even when the panel is not. This produced a clean
+  example worth keeping: a board-2 capture at 11:07 showed the status band in AMBER and it was
+  taken as a board-to-board palette difference, until board 1's real-glass capture at 14:47 showed
+  both bands rendering the same dark orange. There was no palette difference to chase — the
+  framebuffer was simply not the panel.
+- **BOARD 1'S PROMPT CARD HAS THREE LINES OF WHICH THE 2nd AND 3rd ARE NEVER USED.** The hook caps
+  `askTitle` at 34 characters and board 1's card lane is exactly 34 columns (204px / 6), so a title
+  always wraps to ONE line. **~34px of that panel is dead.** Not a bug and not fixed: what fills
+  those lines is a design question and the committed mock draws the title alone. The ask-is-gone
+  card does use both.
+- **THE SENT STATE SHOWS LIVE-LOOKING CONTROLS THAT REFUSE** — the recents row, the reply buttons
+  and the token chips alike. Each refuses with a named cause, and it matches the committed mock, so
+  it is a PRE-EXISTING CLASS rather than a new defect. It is written down here as a class so it is
+  not rediscovered one control at a time: **if the panel ever stops advertising dead controls in
+  the sent state, all of them come off together.**

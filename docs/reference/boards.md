@@ -384,6 +384,25 @@ the multi-pairing feature working precisely as designed, and it presents as a pr
 device being invisible. `SELECT Deckhand-C114` re-pointed it and the tick line went to
 `via=usb,ble`. **When a board's BLE will not connect, check `selected` before the radio.**
 
+**BOTH BOARDS ARE DRIVEN AT ONCE NOW, over independent USB links plus one BLE link, and
+`via=usb,ble` is no longer a sufficient tick line.** Every matching port is opened as its own link
+and each is NAMED, so the tick reads `via=usb:Deckhand-C114,usb:Deckhand-0528,ble` — because
+`via=usb,ble` read identically whether that was ONE board on two transports or TWO boards on one
+each, and for a while it was silently the former: `findUsbPort()` used `.find()` and returned the
+first matching port, so board 1's `usbserial-10` was ignored while board 1 sat there emitting
+`HELLO` to a host that never answered. Proven at the time by a `SCREENSHOT` returning ONE 320x480
+capture and by `[device/usb]` and `[device/ble]` reporting IDENTICAL `BATT mv=4162 pct=96`.
+**A board's NAME is now ASKED FOR (`WHOAMI`) rather than obtained by rebooting it**, and BATTERY
+IS STORED PER DEVICE. Details, including why the RTS pulse it replaced was actively harmful on
+board 2, are in [`host-runtime.md`](host-runtime.md) and
+[`commands-and-checks.md`](commands-and-checks.md).
+**Board 1's SESSIONS and USAGE tabs are NOT the old design any more.** It has board 2's status
+band list card, the §7 detail card with an animating band mark, its own `SESSION_BAND_*` /
+`SESSION_EXP_*` / `SESSION_SPINE_*` constants, and no `CODEX` card when no Codex is running.
+Anything describing them as "board 2's redesign, board 1 kept the old shape" is stale — see
+[`sessions-and-asks.md`](sessions-and-asks.md) and
+[`board-1-known-state.md`](board-1-known-state.md).
+
 #### Native USB, and what it buys
 
 Board 2 has no CH340. It is native USB-Serial/JTAG, which removes the constraint that shapes half
