@@ -318,6 +318,107 @@ const KB_ROW3_DRAWN = (() => {
 // strip, and the clamp assertions below are what hold that. Restating 2 and
 // KB_ROW_H here would make every geometry assertion below agree with the checker
 // instead of with the firmware.
+// THE TEXT CARD'S CORNER RADIUS, PARSED, and the reason it has a name at all.
+// kbClearBubble() repairs the notches a rounded corner leaves OUTSIDE its own
+// curve, and that repair has to be exactly as wide as the radius the card is
+// DRAWN with. Two 6s - one at drawKbText's uiFillRound and one at the repair -
+// could drift apart in silence, so the firmware names it once and this reads
+// that name rather than restating either. A THROW, not a chk: if the constant
+// moves, the fix is to move this parse with it, not to leave the corner
+// assertions below measuring a radius the card is not drawn at.
+const KB_TEXT_R = (() => {
+  const m = KB_SRC.match(/const int KB_TEXT_R\s*=\s*(\d+)\s*;/);
+  if (!m) throw new Error("settings-geom-check: KB_TEXT_R is not declared in keyboard.ino - the " +
+    "text card's corner radius is what sizes kbClearBubble's notch repair, and transcribing it " +
+    "here would let the repair and the drawn radius drift apart with nothing to say so");
+  const txt = fnSrc(KB_SRC, "void drawKbText");
+  if (!/uiFillRound\(\s*CARD_X\s*,\s*KB_TEXT_Y\s*,\s*CARD_W\s*,\s*KB_TEXT_H\s*,\s*KB_TEXT_R\s*,/.test(txt))
+    throw new Error("settings-geom-check: drawKbText()'s OWN BODY no longer draws the card with " +
+      "KB_TEXT_R - the notch repair in kbClearBubble is sized from that constant, so a literal " +
+      "radius at the draw site is a repair of the wrong size at the first change");
+  return +m[1];
+})();
+
+// WHICH PIXELS OF A ROUNDED RECT'S BOUNDING BOX ARE NEVER WRITTEN AT ALL. This
+// is a MIRROR - it reads no firmware text and proves nothing about the sketch on
+// its own - but without it the corner repair below is a rule with no measurement
+// under it, and the repair would be just as invisible as the defect was.
+//
+// Board 1 draws through real TFT_eSPI::fillSmoothRoundRect, which `continue`s on
+// `hyp2 >= r2` and starts each corner row's drawFastHLine at the first covered
+// column. Board 2 draws through PanelShim::fillSmoothRoundRect, whose blendPixel
+// returns on `coverage <= 0.001f`. Both leave the pixels outside the curve
+// holding WHATEVER WAS THERE BEFORE - which at a pressed key is COLOR_ACCENT.
+// Both are reimplemented here from those two functions.
+function sqrtFraction(num) {                      // TFT_eSPI's own fixed-point helper
+  if (num > 0x40000000) return 0;
+  let bsh = 0x00004000, fpr = 0, osh = 0;
+  while (num > bsh) { bsh <<= 2; osh++; }
+  do {
+    const bod = bsh + fpr;
+    if (num >= bod) { num -= bod; fpr = bsh + bod; }
+    num = (num << 1) >>> 0;
+  } while (bsh >>= 1);
+  return (fpr >>> osh) & 0xff;
+}
+function roundRectCoverage(board, x, y, w, h, r) {
+  const cov = new Map();
+  const put = (X, Y, a) => {
+    const k = `${X},${Y}`, prev = cov.get(k) || 0;
+    cov.set(k, prev >= 0.999 || a >= 0.999 ? 1 : prev + a * (1 - prev));
+  };
+  if (r > w / 2) r = Math.floor(w / 2);
+  if (r > h / 2) r = Math.floor(h / 2);
+  if (board === 1) {
+    let yy = y + r, hh = h - 2 * r, xx = x, ww = w;
+    for (let j = 0; j < hh; j++) for (let i = 0; i < ww; i++) put(xx + i, yy + j, 1);
+    hh--; xx += r; ww -= 2 * r + 1;
+    const r1 = r * r; const rr = r + 1, r2 = rr * rr;
+    let xs = 0, cx = 0;
+    for (let cy = rr - 1; cy > 0; cy--) {
+      const dy2 = (rr - cy) * (rr - cy);
+      for (cx = xs; cx < rr; cx++) {
+        const hyp2 = (rr - cx) * (rr - cx) + dy2;
+        if (hyp2 <= r1) break;
+        if (hyp2 >= r2) continue;
+        const alpha = (~sqrtFraction(hyp2)) & 0xff;
+        if (alpha > 246) break;
+        xs = cx;
+        if (alpha < 9) continue;
+        const a = alpha / 255;
+        put(xx + cx - rr, yy + cy - rr, a);            put(xx - cx + rr + ww, yy + cy - rr, a);
+        put(xx - cx + rr + ww, yy - cy + rr + hh, a);  put(xx + cx - rr, yy - cy + rr + hh, a);
+      }
+      const len = 2 * (rr - cx) + 1 + ww;
+      for (let i = 0; i < len; i++) put(xx + cx - rr + i, yy + cy - rr, 1);
+      for (let i = 0; i < len; i++) put(xx + cx - rr + i, yy - cy + rr + hh, 1);
+    }
+  } else {
+    const cx = x + (w - 1) / 2, cy = y + (h - 1) / 2;
+    const halfW = (w - 1) / 2, halfH = (h - 1) / 2;
+    const sdf = (px, py) => {
+      const bw = halfW - r, bh = halfH - r;
+      const qx = Math.abs(px - cx) - bw, qy = Math.abs(py - cy) - bh;
+      const ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0;
+      return Math.sqrt(ox * ox + oy * oy) + Math.min(Math.max(qx, qy), 0) - r;
+    };
+    const midH = h - 2 * r;
+    if (midH > 0) for (let j = 0; j < midH; j++) for (let i = 0; i < w; i++) put(x + i, y + r + j, 1);
+    if (w - 2 * r > 0 && r > 0) {
+      for (let j = 0; j < r; j++) for (let i = 0; i < w - 2 * r; i++) put(x + r + i, y + j, 1);
+      for (let j = 0; j < r; j++) for (let i = 0; i < w - 2 * r; i++) put(x + r + i, y + h - r + j, 1);
+    }
+    for (const bx of [x - 1, x + w - r - 1]) for (const by of [y - 1, y + h - r - 1])
+      for (let py = by; py <= by + r + 1; py++) for (let px = bx; px <= bx + r + 1; px++) {
+        let a = 1 - sdf(px, py);
+        if (a < 0) a = 0; if (a > 1) a = 1;
+        if (a <= 0.001) continue;                 // blendPixel's own early return
+        put(px, py, a);
+      }
+  }
+  return cov;
+}
+
 const KB_BUB_SRC = fnSrc(KB_SRC, "void drawKbBubble");
 const KB_BUB = (() => {
   const wm = KB_SRC.match(/const int KB_BUB_W\s*=\s*(\d+)\s*\*\s*KB_PITCH\s*;/);
@@ -2352,10 +2453,21 @@ for (const b of [1, 2]) {
           "KB_FLASH_PUSH is a #if-guarded macro over tft.flush() - board 1 draws through real " +
           "TFT_eSPI and needs none, and a macro keeps the guard around ONE statement rather " +
           "than duplicating a whole one per arm");
+      // AND IT DOES NOT UN-PRESS IT HERE. Both arms used to end drawKbRow3(k);
+      // delay(KB_FLASH_MS); drawKbRow3(-1); - draw, block, erase, all inside one
+      // handleTouch() call. The blocking delay was the keystroke-eater, and an
+      // inline erase is what makes a non-blocking version WORSE than the delay
+      // rather than better: erase immediately after the draw and on board 2 the
+      // loop-end flush pushes the state after the erase, so the pressed row never
+      // reaches the glass at all - correct order, invisible result, and a
+      // SCREENSHOT of the shadow buffer agreeing with it. The release now belongs
+      // to tickKbFlash(), which the structural block below binds by name.
       const r3Clear = (touchSrcForInsert.match(/drawKbRow3\(-1\);/g) || []).length;
-      chk(r3Clear === 2,
-          `and un-presses it again in both arms (found ${r3Clear} of 2) - a flash with no ` +
-          `release leaves row 3 stuck inverted`);
+      chk(r3Clear === 0,
+          `and does NOT un-press it in the same call (found ${r3Clear} inline drawKbRow3(-1), ` +
+          `expected 0) - the release is tickKbFlash()'s, polled from loop(); an erase here is ` +
+          `either preceded by a blocking delay that swallows the next press or reached by the ` +
+          `loop-end flush only after it has already happened`);
       // AND THE PAGE KEY'S FLASH IS DRAWN AFTER ITS REPAINT. drawKeyboard()
       // fillScreen's the panel, so a pressed row drawn BEFORE it is wiped within
       // microseconds and is never seen - which is the state this task found.
@@ -2596,6 +2708,94 @@ for (const b of [1, 2]) {
           `pitches wide at most THREE columns of it) - that bound plus the single drawKbText() ` +
           `for row 0 is what makes kbClearBubble's restore cheap enough not to need ` +
           `drawKeyboard()`);
+
+      // ================= THE CARD'S CORNER NOTCHES =================
+      // MIRROR HALF. Nothing in this block reads the firmware's text - it
+      // reimplements both boards' fillSmoothRoundRect and kbClearBubble's clip,
+      // and it BINDS NOTHING on its own; the structural half further down is what
+      // holds the code to it. What it can do that the structural half cannot is
+      // answer the question that was never asked before: not "is a repair written
+      // down" but "IS EVERY PIXEL THE BUBBLE CAN LEAVE ACCENT IN ACTUALLY
+      // WRITTEN BY SOMETHING".
+      //
+      // uiFillRound does not write every pixel of its bounding box. Real
+      // TFT_eSPI `continue`s on `hyp2 >= r2`; PanelShim's blendPixel returns on
+      // `coverage <= 0.001f`. So handing the card's rows back to drawKbText()
+      // restores everything EXCEPT the pixels outside the r = KB_TEXT_R curve -
+      // and a row-0 bubble's own uiFillRound (KB_KEY_R = 2/3) paints those flat
+      // COLOR_ACCENT. That is the regression this block exists to make loud.
+      {
+        const cov = roundRectCoverage(b, c.CARD_X, c.KB_TEXT_Y, c.CARD_W, c.KB_TEXT_H, KB_TEXT_R);
+        const cardBot = c.KB_TEXT_Y + c.KB_TEXT_H, cardRight = c.CARD_X + c.CARD_W;
+        const written = (x, y) => (cov.get(`${x},${y}`) || 0) > 0;
+        let holes = 0, notchHoles = 0;
+        for (let y = c.KB_TEXT_Y; y < cardBot; y++)
+          for (let x = c.CARD_X; x < cardRight; x++)
+            if (!written(x, y)) { holes++; if (y >= cardBot - KB_TEXT_R) notchHoles++; }
+        chk(holes > 0 && notchHoles > 0,
+            `drawKbText's uiFillRound leaves ${holes} pixels of the card's own bounding box ` +
+            `unwritten (${notchHoles} of them in the two BOTTOM corner notches) - if this ever ` +
+            `reads 0 the repair below is dead code and this whole block is asserting nothing`);
+        // kbClearBubble's clip and repair, reimplemented, then swept over every
+        // row-0 column - the only row whose bubble reaches the card.
+        const rects = (bx, by, withNotch) => {
+          const out = [];
+          const botY = by < cardBot ? cardBot : by;
+          if (by + bubH > botY) out.push([bx, botY, bubW, by + bubH - botY]);
+          if (by < cardBot) {
+            const h = botY - by;
+            if (bx < c.CARD_X) out.push([bx, by, c.CARD_X - bx, h]);
+            if (bx + bubW > cardRight) out.push([cardRight, by, bx + bubW - cardRight, h]);
+            if (withNotch) {
+              const notchY = cardBot - KB_TEXT_R;
+              if (by + bubH > notchY) {
+                const ny = by > notchY ? by : notchY, nh = cardBot - ny;
+                if (bx < c.CARD_X + KB_TEXT_R && bx + bubW > c.CARD_X)
+                  out.push([c.CARD_X, ny, KB_TEXT_R, nh]);
+                if (bx < cardRight && bx + bubW > cardRight - KB_TEXT_R)
+                  out.push([cardRight - KB_TEXT_R, ny, KB_TEXT_R, nh]);
+              }
+            }
+          }
+          return out;
+        };
+        const inRects = (rs, x, y) => rs.some(([rx, ry, rw, rh]) => x >= rx && x < rx + rw && y >= ry && y < ry + rh);
+        const lens0 = KB_PAGE_ROW_LENS.map((p) => p[0]);
+        let stale = 0, staleAt = "", wouldBeStale = 0, cols = 0;
+        for (let pg = 0; pg < KB_PAGE_ROW_LENS.length; pg++) {
+          const len = KB_PAGE_ROW_LENS[pg][0];
+          const x0 = Math.floor((W - len * c.KB_PITCH) / 2);
+          for (let col = 0; col < len; col++) {
+            let bx = x0 + col * c.KB_PITCH + Math.floor(c.KB_KEY_W / 2) - Math.floor(bubW / 2);
+            bx = Math.min(Math.max(bx, 0), W - bubW);
+            const by = rowY(0 - KB_BUB.back);
+            if (by >= cardBot) continue;              // this row's bubble never reaches the card
+            cols++;
+            const rs = rects(bx, by, true), rsNo = rects(bx, by, false);
+            // Every pixel the bubble painted must be written again by SOMETHING:
+            // one of the clearing fills, or drawKbText's own coverage.
+            for (let y = by; y < by + bubH; y++)
+              for (let x = bx; x < bx + bubW; x++) {
+                const byCard = x >= c.CARD_X && x < cardRight && y >= c.KB_TEXT_Y && y < cardBot && written(x, y);
+                if (!byCard && !inRects(rs, x, y)) { stale++; if (!staleAt) staleAt = `page ${pg} col ${col} (${x},${y})`; }
+                if (!byCard && !inRects(rsNo, x, y)) wouldBeStale++;
+              }
+          }
+        }
+        chk(cols > 0 && lens0.every((l) => l > 0),
+            `${cols} row-0 bubble positions across ${KB_PAGE_ROW_LENS.length} pages actually ` +
+            `reach the card, so the sweep below is not vacuous`);
+        chk(stale === 0,
+            `every pixel a row-0 bubble paints is written again by the clip, the notch repair or ` +
+            `drawKbText (${stale} would keep COLOR_ACCENT${staleAt ? `, first at ${staleAt}` : ""})`);
+        // AND THE REPAIR IS LOAD-BEARING. Without it this same sweep leaves the
+        // card's bottom corner notches holding the bubble's accent - which is
+        // exactly the state 1ce10bb shipped. If this ever reads 0 the assertion
+        // above has stopped testing anything.
+        chk(wouldBeStale > 0,
+            `and the notch repair is what does it: drop those two fills and ${wouldBeStale} ` +
+            `pixels across the row-0 columns keep COLOR_ACCENT until the next fillScreen`);
+      }
       // AND IT ACTUALLY MAGNIFIES. A bubble in the key's own face would be
       // bigger only by being further from the finger, which is half the point at
       // most. T_HEAD is the mock's font 3, and it has to fit the bubble it is
@@ -2635,10 +2835,52 @@ for (const b of [1, 2]) {
       // proves it EXISTS.
       const KB_CLR_SRC = fnSrc(KB_SRC, "void kbClearBubble");
       chk(KB_CLR_SRC.length > 0, "kbClearBubble()'s body is found in keyboard.ino (parse gate)");
-      chk(/if\s*\(\s*by\s*<\s*KB_TEXT_Y\s*\+\s*KB_TEXT_H\s*\)\s*drawKbText\(\)\s*;/.test(KB_CLR_SRC),
-          "kbClearBubble()'s OWN BODY repaints the text card when the cleared rect reaches it " +
-          "(\"if (by < KB_TEXT_Y + KB_TEXT_H) drawKbText();\") - the bubble is allowed onto the " +
-          "card's lower half now, and nothing else on that path restores it");
+      // THE ARM ITSELF, now that the fill is CLIPPED OUT of the card instead of
+      // drawn over it. The old shape was one line, "if (by < KB_TEXT_Y +
+      // KB_TEXT_H) drawKbText();", and this assertion was a transcription of that
+      // line - so the rewrite invalidated it and left the whole card path
+      // unasserted, which is how the corner regression below got in. Every claim
+      // here is bound to a piece of the arithmetic that has to be right, and the
+      // card's bottom edge is read as the firmware DERIVES it rather than as a
+      // literal 112/154.
+      chk(/const int cardBot = KB_TEXT_Y \+ KB_TEXT_H\s*;/.test(KB_CLR_SRC),
+          "kbClearBubble()'s OWN BODY derives the card's bottom edge from KB_TEXT_Y + KB_TEXT_H " +
+          "- a literal here would keep clipping at board 1's 112 after the card moved");
+      chk(/const int botY = by < cardBot \? cardBot : by\s*;/.test(KB_CLR_SRC),
+          "and clips the clearing fill at that edge (botY), so the fill never enters the card - " +
+          "blanking the card and letting drawKbText repaint it is a visible clear-then-redraw on " +
+          "board 1, which draws straight to the glass, and invisible on board 2's shadow buffer");
+      chk(/if \(by \+ KB_BUB_H > botY\)\s*\n\s*tft\.fillRect\(bx, botY, KB_BUB_W, by \+ KB_BUB_H - botY, COLOR_BG\);/
+            .test(KB_CLR_SRC),
+          "and the sub-card fill starts AT botY with the remaining height, guarded against the " +
+          "negative height a fully-clamped bubble would otherwise pass to fillRect");
+      chk(/if \(bx < CARD_X\)\s+tft\.fillRect\(bx, by, CARD_X - bx, h, COLOR_BG\);/.test(KB_CLR_SRC) &&
+          /if \(bx \+ KB_BUB_W > cardRight\)\s+tft\.fillRect\(cardRight, by, bx \+ KB_BUB_W - cardRight, h, COLOR_BG\);/
+            .test(KB_CLR_SRC),
+          "and both side slivers are cleared - row 0 is 10 cells and exactly fills the panel on " +
+          "both boards, so its end columns' bubbles hang past CARD_X and CARD_X + CARD_W, where " +
+          "drawKbText never paints and the accent would stay");
+      // THE CORNER NOTCHES. uiFillRound does not write every pixel of its
+      // bounding box, so handing the card's rows back to drawKbText() restores
+      // everything EXCEPT the pixels outside the r = KB_TEXT_R curve - which at a
+      // pressed key are COLOR_ACCENT. Delete these two fills and the mirror
+      // assertions in the bubble block fail by name on both boards.
+      chk(/const int notchY = cardBot - KB_TEXT_R\s*;/.test(KB_CLR_SRC),
+          "kbClearBubble()'s OWN BODY locates the card's bottom notch row from KB_TEXT_R, the " +
+          "same constant drawKbText draws the card's radius with");
+      chk(/tft\.fillRect\(CARD_X, ny, KB_TEXT_R, nh, COLOR_BG\);/.test(KB_CLR_SRC) &&
+          /tft\.fillRect\(cardRight - KB_TEXT_R, ny, KB_TEXT_R, nh, COLOR_BG\);/.test(KB_CLR_SRC),
+          "and clears BOTH bottom corner notches to COLOR_BG - fillSmoothRoundRect skips the " +
+          "pixels outside its own curve (TFT_eSPI `continue`s on hyp2 >= r2, PanelShim's " +
+          "blendPixel returns on coverage <= 0.001f), so those keep the bubble's accent and " +
+          "nothing else on this path ever writes them");
+      chk(KB_CLR_SRC.indexOf("cardRight - KB_TEXT_R, ny") < KB_CLR_SRC.indexOf("drawKbText();") &&
+          KB_CLR_SRC.indexOf("drawKbText();") > 0,
+          "and does it BEFORE drawKbText(), not after - after it, the flat fill would punch " +
+          "COLOR_BG through the corner the card had just drawn correctly");
+      chk(/drawKbText\(\);/.test(KB_CLR_SRC),
+          "and repaints the card itself - the bubble is allowed onto the card's lower half now, " +
+          "and nothing else on that path restores the text under it");
       //
       // 2. THE FLAT FILL UNDER EVERY KEY CAP. PanelShim ignores uiFillRound's
       // `behind` and blends the anti-aliased corners against the framebuffer, so
@@ -2670,25 +2912,80 @@ for (const b of [1, 2]) {
       // here rather than on someone's eyes.
       const KB_TOUCH_SRC = fnSrc(KB_SRC, "bool kbTouch");
       chk(KB_TOUCH_SRC.length > 0, "kbTouch()'s body is found in keyboard.ino (parse gate)");
-      const holds = (KB_TOUCH_SRC.match(/delay\(KB_FLASH_MS\)\s*;/g) || []).length;
+      const holds = (KB_TOUCH_SRC.match(/kbFlashArm\(\)\s*;/g) || []).length;
       chk(holds === 2,
-          `kbTouch()'s OWN BODY holds row 3's pressed state for KB_FLASH_MS in ${holds} places, ` +
-          `expected 2 - the page key's arm and the SPACE/"." arm. SPACE and "." used to rely on ` +
-          `kbInsert()'s card repaint to time their flash, which is microseconds of shadow-buffer ` +
-          `work and reached the panel as nothing at all`);
-      // And the keystroke must not wait on the hold: kbInsert is called, then
-      // pushed, and only then does the delay run.
-      chk(/kbInsert\('\.'\)\s*;[\s\S]{0,120}?KB_FLASH_PUSH\(\)\s*;\s*delay\(KB_FLASH_MS\)\s*;/.test(KB_TOUCH_SRC),
-          "and the SPACE/\".\" arm inserts and FLUSHES before it holds, so the character is on " +
-          "the glass immediately and the flash outlives the keystroke rather than delaying it");
+          `kbTouch()'s OWN BODY arms row 3's flash in ${holds} places, expected 2 - the page ` +
+          `key's arm and the SPACE/"." arm. SPACE and "." used to rely on kbInsert()'s card ` +
+          `repaint to time their flash, which is microseconds of shadow-buffer work and reached ` +
+          `the panel as nothing at all`);
+      // AND NOTHING IN THAT BODY BLOCKS. The hold used to be delay(KB_FLASH_MS)
+      // right here, and at 120ms that is long enough to LOSE a keystroke with no
+      // trace: handleTouch edge-detects on wasTouching and has no queue, so a
+      // lift plus the next press inside the delay is never seen as a lift and the
+      // second press is dropped. This is the assertion that stops it coming back
+      // - the arm count above would be just as happy with an arm AND a delay.
+      chk(!/\bdelay\s*\(/.test(KB_TOUCH_SRC),
+          "and kbTouch()'s OWN BODY does not block at all - a delay() long enough for a flash " +
+          "to be seen is also long enough to swallow the next press whole, which handleTouch " +
+          "has no queue to recover");
+      // And the keystroke must not wait on the flash: kbInsert is called, then
+      // pushed, and only then is the release armed.
+      chk(/kbInsert\('\.'\)\s*;[\s\S]{0,120}?KB_FLASH_PUSH\(\)\s*;\s*kbFlashArm\(\)\s*;/.test(KB_TOUCH_SRC),
+          "and the SPACE/\".\" arm inserts and FLUSHES before it arms the release, so the " +
+          "character is on the glass immediately and the flash outlives the keystroke rather " +
+          "than delaying it");
+      // ===== AND THE FLASH IS ACTUALLY RELEASED =====
+      // This is the claim 1ce10bb deleted the only teeth on. The release moved
+      // OUT of kbTouch and into tickKbFlash, so the old "drawKbRow3(-1) appears
+      // twice in kbTouch" count went to zero and was not replaced - leaving
+      // "row 3 stuck inverted" unasserted by anything at all. It is now bound in
+      // three places, because the release needs all three to happen: a body that
+      // un-presses, a caller that runs it, and a sentinel that cannot be a
+      // legal deadline.
+      const KB_TICK_SRC = fnSrc(KB_SRC, "void tickKbFlash");
+      chk(KB_TICK_SRC.length > 0, "tickKbFlash()'s body is found in keyboard.ino (parse gate)");
+      chk(/drawKbRow3\(-1\)\s*;/.test(KB_TICK_SRC),
+          "tickKbFlash()'s OWN BODY un-presses row 3 (drawKbRow3(-1)) - a flash with no release " +
+          "leaves row 3 stuck inverted until the next drawKeyboard()");
+      chk(/\(\s*long\s*\)\s*\(\s*millis\(\)\s*-\s*kbFlashUntil\s*\)\s*<\s*0/.test(KB_TICK_SRC),
+          "and compares the deadline SIGNED - `millis() < kbFlashUntil` leaves the flash stuck " +
+          "lit across the 49.7-day rollover until the deadline comes round again");
+      const KB_ARM_SRC = fnSrc(KB_SRC, "void kbFlashArm");
+      chk(KB_ARM_SRC.length > 0, "kbFlashArm()'s body is found in keyboard.ino (parse gate)");
+      // THE OTHER HALF OF THAT ROLLOVER, and the half the signed comparison does
+      // not cover: 0 is reserved for "nothing lit", and millis() + KB_FLASH_MS
+      // IS exactly 0 for one millisecond every 49.7 days. Forcing the low bit
+      // makes an armed deadline odd, so it can never BE the sentinel. Drop the
+      // `| 1` and this fails by name.
+      chk(/kbFlashUntil\s*=\s*\(\s*millis\(\)\s*\+\s*KB_FLASH_MS\s*\)\s*\|\s*1\s*;/.test(KB_ARM_SRC),
+          "kbFlashArm()'s OWN BODY forces the deadline ODD (`| 1`), so it can never collide with " +
+          "the 0 that means \"nothing lit\" - millis() + KB_FLASH_MS is exactly 0 for one " +
+          "millisecond every 49.7 days, and in that window tickKbFlash's sentinel guard never " +
+          "releases and row 3 stays inverted");
+      chk(/if\s*\(\s*!kbFlashUntil\s*\)\s*return\s*;/.test(KB_TICK_SRC),
+          "and tickKbFlash()'s OWN BODY still reads 0 as \"nothing lit\", which is what makes " +
+          "that sentinel load-bearing rather than decorative");
+      const LOOP_SRC = fnSrc(SRC_MAIN, "void loop");
+      chk(LOOP_SRC.length > 0, "loop()'s body is found in deckhand_display.ino (parse gate)");
+      chk(/\n\s*tickKbFlash\(\)\s*;/.test(LOOP_SRC),
+          "and loop()'s OWN BODY calls tickKbFlash() UNCONDITIONALLY - handleTouch dispatches on " +
+          "PRESS and cannot come back on its own, so a deadline nobody polls is a flash nobody " +
+          "releases; and a `if (kbActive)` here would strand one armed just before the keyboard " +
+          "closed");
+      const KB_CLOSE_SRC = fnSrc(KB_SRC, "void closeKeyboard");
+      chk(KB_CLOSE_SRC.length > 0, "closeKeyboard()'s body is found in keyboard.ino (parse gate)");
+      chk(/kbFlashUntil\s*=\s*0\s*;/.test(KB_CLOSE_SRC),
+          "and closeKeyboard()'s OWN BODY disarms it - a pending flash that outlived the keyboard " +
+          "would paint a row of keys onto whatever screen replaced them");
       const flashMs = +(KB_SRC.match(/const unsigned long KB_FLASH_MS\s*=\s*(\d+)\s*;/) || [])[1];
       chk(Number.isFinite(flashMs), "KB_FLASH_MS is declared in keyboard.ino (parse gate)");
       chk(flashMs >= 100,
           `KB_FLASH_MS is ${flashMs}ms, at least the ~100ms a state change needs to register as ` +
           `one rather than as a flicker (60ms was reported as no flash at all)`);
       chk(flashMs <= 200,
-          `and at most 200ms - it BLOCKS, so a longer hold on SPACE would start to eat into the ` +
-          `300-500ms between thumb presses and make the keyboard feel laggy`);
+          `and at most 200ms - it no longer blocks, but a flash still lit when the next thumb ` +
+          `press lands (300-500ms apart) would have row 3 un-press under a finger that is ` +
+          `already pressing something else`);
     }
     // ================= THE PROMPT STRIP =================
     // One line of the ask above the card, so the question and the keyboard are on

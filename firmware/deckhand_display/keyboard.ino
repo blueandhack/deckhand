@@ -176,6 +176,15 @@ void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
 const int KB_BUB_W = 2 * KB_PITCH;
 const int KB_BUB_H = KB_ROW_H;
 
+// THE TEXT CARD'S OWN CORNER RADIUS, named rather than left as the bare 6 it was
+// at drawKbText()'s single call site. kbClearBubble() has to repair exactly the
+// notches a rounded corner leaves OUTSIDE its own curve, and a second 6 written
+// down there would be a transcription free to drift from the radius the card is
+// actually drawn with - the notch would then be repaired at the wrong size and
+// nothing would say so. Deliberately NOT R_SM: that is 6 on board 1 but 7 on
+// board 2, and this card has always been drawn at 6 on both.
+const int KB_TEXT_R = 6;
+
 // The armed candidate: the key a press landed on, which is NOT yet committed.
 // -1/-1 is "nothing armed", which is also every state outside a live press.
 int kbArmRow = -1, kbArmCol = -1;
@@ -228,7 +237,11 @@ int kbBubbleRow(int r) { return r - 1; }
 //     so without these two slivers that overhang would keep the bubble's accent.
 // drawKbText() then restores the card's own area with a single opaque repaint -
 // one write per pixel, not a blank followed by a write - and it costs a call
-// kbInsert() already makes on every keystroke.
+// kbInsert() already makes on every keystroke. WITH ONE EXCEPTION, and missing it
+// is what made this clip a regression when it was first written: uiFillRound
+// leaves the pixels OUTSIDE its corner curve untouched, so the card's two bottom
+// notches are not repainted by anything and kept the bubble's accent. They are
+// filled explicitly below, before drawKbText() runs.
 //
 // The key sweep below is unaffected: the card (KB_TEXT_Y .. KB_TEXT_Y+KB_TEXT_H)
 // and the key grid (KB_ROWS_Y onwards) do not overlap on either board - 24..111
@@ -249,6 +262,52 @@ void kbClearBubble() {
     const int h = botY - by, cardRight = CARD_X + CARD_W;
     if (bx < CARD_X)                  tft.fillRect(bx, by, CARD_X - bx, h, COLOR_BG);
     if (bx + KB_BUB_W > cardRight)    tft.fillRect(cardRight, by, bx + KB_BUB_W - cardRight, h, COLOR_BG);
+    // AND THE CARD'S TWO BOTTOM CORNER NOTCHES, WHICH drawKbText() DOES NOT PUT
+    // BACK. uiFillRound does not write every pixel of its bounding box: real
+    // TFT_eSPI's fillSmoothRoundRect `continue`s on `hyp2 >= r2` and PanelShim's
+    // blendPixel returns on `coverage <= 0.001f`, so at r = KB_TEXT_R the pixels
+    // outside the curve keep whatever was already there. SIMULATED against both
+    // implementations rather than reasoned about - per corner, 6 pixels at
+    // coverage EXACTLY 0 and 8 more at partial coverage:
+    //   board 1 bottom-left  x 12..17, y 106..111:  (12,109) (12,110) (13,110)
+    //                                               (12,111) (13,111) (14,111)
+    //   board 2 bottom-left  x 12..17, y 148..153:  the same six shape, 42px down
+    // and mirrored at each bottom-right (227.. / 307..).
+    //
+    // A row-0 bubble on column 0, 1, 8 or 9 covers those, so without this the
+    // press leaves COLOR_ACCENT stuck in the card's corner notches until the next
+    // fillScreen - which is the defect 2849f42 measured at the key caps, 12px
+    // lower and one commit later. On board 1 only the six coverage-0 pixels are
+    // wrong, because TFT_eSPI composites the partial ones against the `behind`
+    // VALUE it is handed; on board 2 all fourteen are, because PanelShim ignores
+    // `behind` and blends against the shadow framebuffer.
+    //
+    // SO IT IS NOT GUARDED TO ONE BOARD, unlike uiKeyCap's flat fill - here both
+    // boards are wrong. Nor is it the clear-then-redraw the clip above exists to
+    // avoid: it touches 2 x KB_TEXT_R x KB_TEXT_R pixels whose SETTLED value is
+    // COLOR_BG for the six that matter, and drawKbText() blends the curve back
+    // over it on the very next line.
+    //
+    // WHAT THIS DOES NOT FIX, WRITTEN DOWN RATHER THAN LEFT TO BE REDISCOVERED:
+    // on board 2 the card's four corner AA pixels drift a little every time
+    // drawKbText() is called, because PanelShim blends against the framebuffer
+    // and the card is repainted on every keystroke by kbInsert() - so a corner
+    // pixel that should stay a partial blend of COLOR_CARD over COLOR_BG creeps
+    // toward solid COLOR_CARD. SIMULATED: 32 corner pixels move, saturating at
+    // 15/255 on the worst channel after ~5 repaints, i.e. the rounded corner ends
+    // up about a pixel sharper. That is a DIFFERENT defect from this one - it
+    // predates the bubble, it is not COLOR_ACCENT, it affects all four corners
+    // including the two no bubble can reach, and its fix is drawKbText's, not
+    // kbClearBubble's. Board 1 does not have it: real TFT_eSPI composites against
+    // the `behind` VALUE it is handed, so its corners are recomputed every time.
+    const int notchY = cardBot - KB_TEXT_R;
+    if (by + KB_BUB_H > notchY) {
+      const int ny = by > notchY ? by : notchY, nh = cardBot - ny;
+      if (bx < CARD_X + KB_TEXT_R && bx + KB_BUB_W > CARD_X)
+        tft.fillRect(CARD_X, ny, KB_TEXT_R, nh, COLOR_BG);
+      if (bx < cardRight && bx + KB_BUB_W > cardRight - KB_TEXT_R)
+        tft.fillRect(cardRight - KB_TEXT_R, ny, KB_TEXT_R, nh, COLOR_BG);
+    }
     drawKbText();
   }
   for (int r = 0; r < 3; r++) {
@@ -403,13 +462,25 @@ const unsigned long KB_FLASH_MS = 120;
 // whole row, so WHICH key was lit is not state anybody needs afterwards - and an
 // unread `kbFlashKey` would be exactly the kind of thing that looks load-bearing
 // to the next reader.
-unsigned long kbFlashUntil = 0;    // 0 = nothing lit; otherwise the release time
+unsigned long kbFlashUntil = 0;    // 0 = nothing lit; otherwise the release time,
+                                   // and ALWAYS ODD - see kbFlashArm
 
 // Set the deadline. The DRAW is the caller's, because the page key has to draw
 // its flash AFTER drawKeyboard()'s fillScreen while the SPACE arm draws its
 // before kbInsert(); only the timing is shared.
+//
+// THE `| 1` IS THE SENTINEL, NOT AN OFFSET, and it is the other half of the
+// rollover the comment above claims to have handled. The signed comparison in
+// tickKbFlash is genuinely correct across the wrap; what is not is that 0 is
+// reserved for "nothing lit" and `millis() + KB_FLASH_MS` IS exactly 0 for one
+// millisecond every 49.7 days. In that window tickKbFlash's `if (!kbFlashUntil)
+// return;` never releases and row 3 stays inverted until the next
+// drawKeyboard(). Forcing the low bit makes every armed deadline odd, so it can
+// never BE the sentinel; the cost is a flash up to 1ms long, under a hundredth
+// of KB_FLASH_MS. A second `bool kbFlashArmed` would also work and was rejected:
+// two variables that can disagree, where one invariant on one variable cannot.
 void kbFlashArm() {
-  kbFlashUntil = millis() + KB_FLASH_MS;
+  kbFlashUntil = (millis() + KB_FLASH_MS) | 1;
 }
 
 // Release it. Called every tick from loop(), next to tickKbRepeat and for the
@@ -591,7 +662,7 @@ void tickKbRepeat() {
 // rather than through drawIfChanged - the text changes on every keystroke, so a
 // change-only cache would buy nothing and would need to be as long as the buffer.
 void drawKbText() {
-  uiFillRound(CARD_X, KB_TEXT_Y, CARD_W, KB_TEXT_H, 6, COLOR_CARD, COLOR_BG);
+  uiFillRound(CARD_X, KB_TEXT_Y, CARD_W, KB_TEXT_H, KB_TEXT_R, COLOR_CARD, COLOR_BG);
   // Meta row: byte counter left, countdown right, both anchored to KB_META_Y -
   // a row no text line ever occupies (see the header comment). The byte counter
   // turns amber at the cap, so a key that stops inserting has a visible reason
