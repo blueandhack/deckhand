@@ -6536,6 +6536,10 @@ void loop() {
   // because that dispatches on PRESS and ignores a held finger - which is right
   // for every other key, where one press must be exactly one character.
   if (kbActive) tickKbRepeat();
+  // Row 3's press flash, released by deadline rather than by a blocking delay -
+  // same reason, and it deliberately runs whether or not kbActive, so a flash
+  // armed just before the keyboard closed still clears its own state.
+  tickKbFlash();
 
   // kbActive excluded for the same reason readerActive/histActive already are:
   // this local 1s tick calls renderSessionsTab()/renderSettingsTab() directly,

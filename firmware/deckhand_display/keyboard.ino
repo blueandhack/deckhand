@@ -205,21 +205,52 @@ int kbBubbleRow(int r) { return r - 1; }
 // 30-odd keys on EVERY keystroke, which is exactly the flicker the change-only
 // discipline exists to prevent.
 //
-// THE CARD ARM IS WHAT LETS THE BUBBLE SIT ABOVE ROW 0. drawKbText() repaints
-// the card wholesale, so it covers whatever background the fillRect above just
-// punched into it; the order of the two loops below relative to it does not
-// matter, because the card (KB_TEXT_Y .. KB_TEXT_Y + KB_TEXT_H) and the key grid
-// (KB_ROWS_Y onwards) do not overlap on either board - 24..111 against 115 on
-// board 1, 34..153 against 170 here. It costs one call kbInsert() already makes
-// on every keystroke.
+// THE CARD ARM IS WHAT LETS THE BUBBLE SIT ABOVE ROW 0, and THE CLEARING FILL IS
+// CLIPPED OUT OF THE CARD RATHER THAN DRAWN OVER IT. The first version simply
+// blanked the whole bubble rect to COLOR_BG and let drawKbText() paint the card
+// back on top. That composes invisibly on board 2 - PanelShim writes to a shadow
+// framebuffer and one flush pushes the finished result - and it is a VISIBLE
+// CLEAR-THEN-REDRAW OF THE CARD ON BOARD 1, which draws straight to the glass
+// through real TFT_eSPI: every row-0 keystroke would blank a 216x88 card to
+// background and repaint it, which is precisely the flicker the change-only
+// discipline exists to prevent. Board 1 has not been flashed this whole plan, so
+// nobody would have seen it. The shadow buffer hiding a board-1 defect is the
+// trap CLAUDE.md names about SCREENSHOT, in a second guise.
+//
+// So the fill is cut into the pieces that are NOT the card:
+//   - everything at or below the card's bottom edge (the gap between the card
+//     and KB_ROWS_Y, plus any key rows), full bubble width;
+//   - within the card's own rows, only the slivers to the LEFT of CARD_X and to
+//     the RIGHT of CARD_X + CARD_W. Those are real: row 0 is 10 cells wide and
+//     exactly fills the panel on both boards, so its col-0 bubble clamps to x=0
+//     and its col-9 bubble to x = BOARD_W - KB_BUB_W, hanging 12px past the card
+//     on either side. drawKbText() only ever repaints CARD_X..CARD_X+CARD_W-1,
+//     so without these two slivers that overhang would keep the bubble's accent.
+// drawKbText() then restores the card's own area with a single opaque repaint -
+// one write per pixel, not a blank followed by a write - and it costs a call
+// kbInsert() already makes on every keystroke.
+//
+// The key sweep below is unaffected: the card (KB_TEXT_Y .. KB_TEXT_Y+KB_TEXT_H)
+// and the key grid (KB_ROWS_Y onwards) do not overlap on either board - 24..111
+// against 115 on board 1, 34..153 against 170 here - so no key cell is ever
+// inside the region drawKbText owns.
 void kbClearBubble() {
   if (!kbBubOn) return;
   const int bx = kbBubX, by = kbBubY;
   kbBubOn = false;
-  tft.fillRect(bx, by, KB_BUB_W, KB_BUB_H, COLOR_BG);
-  // Intersects the card? The clamp in drawKbBubble keeps the bubble strictly
-  // BELOW KB_TEXT_Y, so only the bottom edge can be in question.
-  if (by < KB_TEXT_Y + KB_TEXT_H) drawKbText();
+  const int cardBot = KB_TEXT_Y + KB_TEXT_H;
+  // The first row of the bubble that the card does NOT own. drawKbBubble's clamp
+  // keeps by strictly below KB_TEXT_Y, so the card can only ever claim rows from
+  // the bubble's TOP; there is no case where the card sits inside it.
+  const int botY = by < cardBot ? cardBot : by;
+  if (by + KB_BUB_H > botY)
+    tft.fillRect(bx, botY, KB_BUB_W, by + KB_BUB_H - botY, COLOR_BG);
+  if (by < cardBot) {
+    const int h = botY - by, cardRight = CARD_X + CARD_W;
+    if (bx < CARD_X)                  tft.fillRect(bx, by, CARD_X - bx, h, COLOR_BG);
+    if (bx + KB_BUB_W > cardRight)    tft.fillRect(cardRight, by, bx + KB_BUB_W - cardRight, h, COLOR_BG);
+    drawKbText();
+  }
   for (int r = 0; r < 3; r++) {
     const int ry = kbRowY(r);
     if (ry + KB_ROW_H <= by || ry >= by + KB_BUB_H) continue;
@@ -349,6 +380,52 @@ const unsigned long KB_FLASH_MS = 120;
 #else
 #define KB_FLASH_PUSH() ((void) 0)
 #endif
+
+// AND IT MUST NOT BLOCK, WHICH IS WHY THIS IS A DEADLINE AND NOT A delay().
+// The first version of the longer hold was `delay(KB_FLASH_MS)` in the touch
+// handler, and at 120ms that is long enough to LOSE A KEYSTROKE WITH NO TRACE:
+// handleTouch has no queue and edge-detects on `wasTouching`, so a lift followed
+// by the next press INSIDE the delay is never seen as a lift at all, and the
+// second press is silently dropped. The ordering was right - the character was
+// inserted and flushed before the hold - but the hold itself was the hazard, and
+// a dropped character on a keyboard is the worst failure this surface has.
+//
+// So the flash is armed with a deadline and released on a later poll, exactly
+// the shape tickKbRepeat() already uses for DEL's hold: it re-samples every tick
+// rather than blocking. The press stays instant, the flash still lasts
+// KB_FLASH_MS, and nothing can miss an edge because nothing blocks.
+//
+// millis() ROLLOVER is handled by the signed difference, not by `millis() <
+// kbFlashUntil`: at 49.7 days the naive comparison leaves the flash stuck on
+// until the deadline is reached again. `(long)(now - until) < 0` is correct
+// across the wrap.
+// One variable, not two: the release draws drawKbRow3(-1), which un-presses the
+// whole row, so WHICH key was lit is not state anybody needs afterwards - and an
+// unread `kbFlashKey` would be exactly the kind of thing that looks load-bearing
+// to the next reader.
+unsigned long kbFlashUntil = 0;    // 0 = nothing lit; otherwise the release time
+
+// Set the deadline. The DRAW is the caller's, because the page key has to draw
+// its flash AFTER drawKeyboard()'s fillScreen while the SPACE arm draws its
+// before kbInsert(); only the timing is shared.
+void kbFlashArm() {
+  kbFlashUntil = millis() + KB_FLASH_MS;
+}
+
+// Release it. Called every tick from loop(), next to tickKbRepeat and for the
+// same reason: handleTouch dispatches on PRESS and cannot come back on its own.
+//
+// The kbActive / kbPeekPage guards are not defensive tidying. Closing the
+// keyboard or raising the peek inside the 120ms window would otherwise have this
+// paint a row of keys onto whatever screen replaced them - closeKeyboard() also
+// disarms it, and this is the second half of that pair, for the peek, which does
+// not close the keyboard.
+void tickKbFlash() {
+  if (!kbFlashUntil) return;
+  if ((long) (millis() - kbFlashUntil) < 0) return;
+  kbFlashUntil = 0;
+  if (kbActive && kbPeekPage < 0) drawKbRow3(-1);
+}
 
 // Peek geometry: it covers the KEYS and the action row, never the text card - so
 // the answer you are composing stays on screen while you re-read the question.
@@ -740,6 +817,8 @@ void closeKeyboard() {
   kbSessionId[0] = '\0';
   kbPeekPage = -1;
   kbRepeatRow = kbRepeatCol = -1;
+  kbFlashUntil = 0;            // a pending row-3 flash must not draw onto the
+                               // screen that replaces the keyboard
   int idx = kbSessionIdx;
   kbSessionIdx = -1;
   kbPid[0] = '\0';
@@ -929,16 +1008,17 @@ bool kbTouch(int sx, int sy) {
       drawKeyboard();
       drawKbRow3(k);
       KB_FLASH_PUSH();
-      delay(KB_FLASH_MS);
-      drawKbRow3(-1);
+      kbFlashArm();        // tickKbFlash() un-presses it; see kbFlashArm's own comment
     } else {
       // SPACE and "." HOLD FOR KB_FLASH_MS TOO, and the ordering is the whole
       // point: draw pressed, flush so it is on the glass, INSERT, flush again so
-      // the character lands with the key still lit, and only then hold. The
-      // keystroke is therefore never delayed - it is on screen before the delay
-      // starts - and the flash outlives it. This used to rely on kbInsert()'s
+      // the character lands with the key still lit, and only then arm the
+      // release. The keystroke is on the panel before the flash's clock even
+      // starts, and the flash outlives it. This used to rely on kbInsert()'s
       // card repaint to time the flash, which on this board is shadow-buffer
       // work measured in microseconds and reached the panel as nothing at all.
+      // NOTHING HERE BLOCKS: see kbFlashArm - a delay() long enough to be seen
+      // is also long enough to swallow the next press whole.
       // Two literal calls rather than one ternary: settings-geom-check.mjs's
       // ASCII reachability sweep PARSES the characters row 3 emits out of this
       // function (they exist in no KB_*[3] table - row 3 is data inline in the
@@ -949,8 +1029,7 @@ bool kbTouch(int sx, int sy) {
       if (k == 1) kbInsert(' ');
       else        kbInsert('.');
       KB_FLASH_PUSH();
-      delay(KB_FLASH_MS);
-      drawKbRow3(-1);
+      kbFlashArm();
     }
     return true;
   }
