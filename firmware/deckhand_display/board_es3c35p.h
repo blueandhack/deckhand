@@ -2366,7 +2366,14 @@ const int KB_KEY_R = KB_KEY_W / 10;
 // keyboard's width is fixed by its 10 columns, so every spare row makes the keys
 // taller and thinner; board 1's drawn key was 22x40 = 1:1.818, and 30 * 1.818 =
 // 54.5 -> 54 is therefore the tallest key no more elongated than the one this
-// device shipped when the cap was set.
+// device shipped when the cap was set. That anchor is measured FROM THIS REPO,
+// which is the only reason it is the one used: spending the remaining rows on
+// height instead would reach KB_ROW_H 70 (a 30x66 key, 1:2.2), and "1:2.2 is
+// strips rather than keys" is a judgement with no measurement behind it, whereas
+// "no worse than the keyboard already shipping" is a fact this file can check.
+// (An earlier draft of this comment cited iOS portrait keys at about 1:1.3 as a
+// scale reference. Nothing here measured that, so it is removed rather than left
+// looking like evidence.)
 //
 // THAT ANCHOR IS HISTORICAL NOW AND IS DELIBERATELY LEFT SO. Board 1's drawn key
 // became 22x37 = 1:1.68 when the prompt strip took 3px off its KB_ROW_H, so 54
@@ -2374,14 +2381,8 @@ const int KB_KEY_R = KB_KEY_W / 10;
 // cap was measured from. Re-deriving the cap from board 1's current rows would
 // drag this board's KB_ROW_H down to 30 * 1.68 = 50, moving a grid that has no
 // reason to move and spending nothing this board needed - so the cap stays the
-// fixed 40/22 pair settings-geom-check.mjs holds both boards to, and this
-// paragraph says which key it came from rather than implying it tracks one. That anchor is measured FROM THIS REPO, which is the only
-// reason it is the one used: spending the remaining rows on height instead would
-// reach KB_ROW_H 70 (a 30x66 key, 1:2.2), and "1:2.2 is strips rather than keys"
-// is a judgement with no measurement behind it, whereas "no worse than the keyboard
-// already shipping" is a fact this file can check. (An earlier draft of this
-// comment cited iOS portrait keys at about 1:1.3 as a scale reference. Nothing here
-// measured that, so it is removed rather than left looking like evidence.)
+// fixed 40/22 pair settings-geom-check.mjs holds both boards to, and the
+// paragraph above says which key it came from rather than implying it tracks one.
 const int KB_ROW_H = 58;
 // THE TEXT CARD, and the RESERVED META ROW inside it. drawString paints an OPAQUE
 // box the full height of a text line, so a counter sharing a row with wrapped

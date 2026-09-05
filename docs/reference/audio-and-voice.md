@@ -566,15 +566,30 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     **and** every loop tick while `kbActive`, because the 30s default backlight timeout sits well
     inside the 90s answer budget: without it, typing a normal-length answer could blank the screen
     mid-sentence and the waking tap would be swallowed rather than typed.
-  - **The placeholder is the QUESTION, and the card peeks the full prompt.**
+  - **The placeholder is the QUESTION, and a PERSISTENT STRIP keeps one line of it.**
     `drawKeyboard()` fillScreen's the ask screen away, so without this you compose a reply
     to something you can no longer read. While the box is empty the ask's title sits where
-    "Type your answer" used to, and **tapping the text card** pages the full detail over the
-    keys — the card used to be inert (`if (sy < KB_ROWS_Y) return true;`), so the gesture
-    costs nothing. It covers the keys and the action row but **never the text card**, so the
-    answer stays visible while you re-read the question; each further tap pages and a tap
-    past the last page closes it, so there is always a way out without hunting for a target.
-    Font follows `detailLooksLikeCode`, the same choice the ask screen makes.
+    "Type your answer" used to.
+    **THIS CONTROL HAS MOVED TWICE AND THE ROUTE IT DESCRIBES NO LONGER EXISTS**, so the
+    history is recorded rather than the paragraph rewritten as if it had always been this
+    way. The card was inert first (`if (sy < KB_ROWS_Y) return true;`); then **tapping the
+    text card** paged the full detail over the keys, which was free because the card was
+    doing nothing; then Task 5 of the compose plan gave that tap to the **caret** for
+    `kbLen > 0` and left the peek only on the empty-buffer arm — which put the question
+    out of reach again in exactly the state you are in while typing. **Since Task 6 the card's
+    tap is the caret in every state and the peek is not reachable from it at all.** One
+    `fitText`-truncated line of the ask now lives above the card permanently
+    (`drawKbStrip`, `KB_STRIP_Y`/`KB_STRIP_H`, with a right-aligned `MORE` when there is
+    more), and **a tap on the strip** opens the paged peek — a band of `KB_TEXT_Y`, which is
+    24px on board 1 and 34 on board 2, both deliberately under `TAP_MIN` because the
+    vertical column closes exactly on `BOARD_H` with nothing left to grow it with.
+    The peek still covers the keys and the action row but **never the text card or the
+    strip**, so the answer *and* the question stay visible while it is up; each further tap
+    pages and a tap past the last page closes it, so there is always a way out without
+    hunting for a target. Font follows `detailLooksLikeCode`, the same choice the ask screen
+    makes. The strip carries no change-only cache and is repainted only by `drawKeyboard()`
+    and by the one transition that can invalidate it — the ask going away, which clears it
+    rather than leaving a question under a tap that would silently do nothing.
   - **CAP has THREE states — off, one-shot, locked — and the LABEL carries which.** It was a
     bool cleared by the next character, so an acronym or a name cost one CAP tap per letter.
     `kbShiftMode` cycles off → once → locked; only `once` clears on insert. The key reads
@@ -608,10 +623,21 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     It goes through `switchTab(TAB_SESSIONS)` + `openSessionDetail(i)` the way a person
     would, because opening straight from whatever tab was showing left the sessions list
     painted under a USAGE tab bar when the keyboard closed.
-  - **No cursor, backspace only.** Insertion is always append (`kbInsert`), deletion always trims
-    the end (`kbBackspace`) — there is no caret position anywhere in the state. Aiming a cursor at
-    hard-wrapped text on a resistive panel is a worse interaction than retyping up to 150
-    characters, so the capability was never built rather than built and then hidden.
+  - **No cursor, backspace only — TRUE UNTIL TASK 5 OF THE COMPOSE PLAN, AND NO LONGER.**
+    The reasoning stands as the reason it was not built for a long time: insertion was always
+    append (`kbInsert`), deletion always trimmed the end (`kbBackspace`), there was no caret
+    position anywhere in the state, and aiming a cursor at hard-wrapped text on a resistive
+    panel is a worse interaction than retyping up to 150 characters. What changed is that a
+    typo forty characters back cost forty re-taps of DEL **plus** retyping the tail, which is
+    worse still. `kbCaret` now exists (`-1` means "pinned to the end", the state after
+    `openKeyboard` and until you tap the card); `kbInsert`/`kbBackspace` splice at it with
+    `memmove`; and a tap on the text card computes the exact inverse of `drawKbText`'s
+    line/column division, clamping each intermediate **before** combining them so a tap below
+    the last line or right of the last column lands **on** the text rather than past it.
+    `settings-geom-check.mjs` binds those four clamps to `kbTouch`'s own body and proves the
+    unclamped reach genuinely overshoots on each board's geometry, so they are load-bearing
+    rather than defensive. The resistive-panel objection is still real; it is answered by the
+    clamps and by the caret being a `TEXT_ADV`-wide block you can see, not by it going away.
   - **Cozette is ASCII 0x20-0x7E only** — the same fact that already forces `fitText`'s
     three-ASCII-dot ellipsis — so there's no shift-arrow or backspace glyph to draw; the keys are
     sentinel bytes (`\x01`/`\x02`) labelled `CAP`/`DEL` in plain text instead.
@@ -677,10 +703,14 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     `sessions.ino` rather than restating it, so a future change that RE-COUPLES the zone to the
     drawn size is what fails.
   - **Prompt mode differs from answer mode in exactly the ways the situation does:** no countdown
-    (nothing is waiting, and a timer would be a lie), no peek and so no "tap here to read it"
-    hint (there is no ask, and the detail screen it opened from already shows the context), a
-    placeholder naming the session, and a window tracked by session id plus `msgOffered()` rather
-    than by `askPid`. Leaving READY withholds SEND and **keeps the text**, saying
+    (nothing is waiting, and a timer would be a lie), no peek — and so no prompt strip, no
+    strip tap band and no hint pointing at either (there is no ask, and the detail screen it
+    opened from already shows the context; `kbHasDetail()` returns false in message mode and
+    gates all three from one place). That hint read "tap here to read it" while the card's own
+    tap opened the peek; since Task 6 it reads **"tap the prompt above to read it"**, because
+    a hint that names a control which has moved teaches the one gesture that no longer works.
+    Also a placeholder naming the session, and a window tracked by session id plus
+    `msgOffered()` rather than by `askPid`. Leaving READY withholds SEND and **keeps the text**, saying
     `NO LONGER READY` - "answer on your Mac" would be answering a question nobody asked.
   - **`KBTEST msg [text]`** opens it against the first READY session and optionally types, for the
     same reason `TAB`/`PAGE` exist. It still **cannot SEND** - that needs a real tap, and keeping
