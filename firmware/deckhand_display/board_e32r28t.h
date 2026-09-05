@@ -395,17 +395,28 @@ const int SESSION_SUB_LANE_W = SESSION_ROW_W - SESSION_NAME_DX - 12;
 // the screen.
 const int SESSION_OVERFLOW_H = 16;
 // The row signature's buffer. WAS 176 - the literal that was in
-// deckhand_display.ino's rowSigCache declaration - and is now 304, because this
-// board draws the band card too and its expanded first row appends the LAST PROMPT
-// and the PATH to that row's signature. A field drawn but not signed is exactly the
+// deckhand_display.ino's rowSigCache declaration - then 304, because this board
+// draws the band card too and its expanded first row appends the LAST PROMPT and
+// the PATH to that row's signature. A field drawn but not signed is exactly the
 // staleness the title itself shipped once. The worst case: name 23 + status 9 +
 // sub 35 + title 43 + tag 6 + icon 3 + 5 separators + NUL = 125 for an ordinary
 // row, plus prompt 103 + path 67 + 2 separators = 297 for the expanded one.
-// It costs MAX_SESSIONS copies of RAM - 6 x 128 = 768 bytes - and that is the
-// price of the card; appending them for every row instead would repaint a COMPACT
-// row whenever its prompt changed, which is a wholesale clear-and-redraw of pixels
-// that did not change.
-const int SESSION_ROW_SIG_LEN = 304;
+//
+// 368 NOW, AND THE SIX BYTES IT HAD LEFT ARE WHY - the same argument, and the same
+// 64-byte step, that took detailSigCache from 384 to 448. At 304 this held its
+// 298-byte worst case with SIX bytes spare, and the expanded row's append is
+// guarded by `if (used + 2 < sizeof(sig))` - which reserves room for the two
+// SEPARATORS and nothing else, so snprintf truncates in silence rather than
+// overflowing. One more signed field and the band card stops repainting when the
+// tail of its path changes: a card that never repaints, with no symptom on the
+// glass but the wrong text. 368 = 304 + 64 leaves 70, which is one more field of
+// every kind this signature already carries but the prompt, and the margin is
+// asserted rather than trusted (SESSION_SIG_MARGIN, see deckhand_display.ino).
+// It costs MAX_SESSIONS copies of RAM - 6 x 64 = 384 bytes more, 2208 in all - and
+// that is the price of the card; appending prompt and path for every row instead
+// would repaint a COMPACT row whenever its prompt changed, which is a wholesale
+// clear-and-redraw of pixels that did not change.
+const int SESSION_ROW_SIG_LEN = 368;
 // Vertical air added at every gap and pad inside a row (see the derived offsets
 // in deckhand_display.ino). 0 here: this board's content area cannot afford any -
 // its own band table above is packed with 2px gaps and 2px pads.

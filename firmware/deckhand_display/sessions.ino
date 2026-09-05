@@ -1542,8 +1542,8 @@ void renderSessionsList() {
     // belongs to. dispMacTag() (not a bare hostSlot int) is what's compared, because
     // that's the value actually drawn - it's also what makes a usedLinkCount() flip
     // (second Mac connects/drops) repaint every row: dispMacTag() changes for every
-    // session at once even though no session's own data did. 176 because the tag adds
-    // up to 7 chars plus a separator - see the rowSigCache declaration.
+    // session at once even though no session's own data did. The tag adds up to 7
+    // chars plus a separator - see the rowSigCache declaration and its header.
     // The icon id belongs here too, for the same staleness reason as the tag: a row
     // whose Mac's icon changes (or appears/disappears) has none of its other fields
     // change, so without this it would keep drawing the old icon (or the old text
@@ -1557,8 +1557,11 @@ void renderSessionsList() {
     // Appended ONLY for the row that is actually expanded: signing them for every
     // row would repaint a compact row whenever its prompt changed, and a wholesale
     // repaint of pixels that did not change is the flicker this discipline exists
-    // to prevent. SESSION_ROW_SIG_LEN is 304 on BOTH boards for exactly these two
-    // fields - board 1's grew from 176 when it got the card, at 768 bytes of RAM.
+    // to prevent. SESSION_ROW_SIG_LEN is 368 on BOTH boards for exactly these two
+    // fields - board 1's grew from 176 when it got the card - and the guard below
+    // reserves room for the two SEPARATORS only, so a signature that outgrows the
+    // buffer is truncated in SILENCE rather than refused. That is why the header
+    // keeps SESSION_SIG_MARGIN of slack and why sessions-geom-check.mjs asserts it.
     if (sessionRowExpanded(pos)) {
       size_t used = strlen(sig);
       if (used + 2 < sizeof(sig))

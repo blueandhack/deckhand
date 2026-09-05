@@ -1411,15 +1411,28 @@ const int SESSION_EXP_TITLE_LINES = 2;
 // a line the helper did not budget.
 const int SESSION_EXP_PROMPT_MIN = 2;
 const int SESSION_EXP_PROMPT_MAX = 4;
-// The row signature's buffer, per board because it is 6 copies of RAM and board
-// 1's is held byte-identical. 176 there (a 125-byte worst case: name 23 + status 9
-// + sub 35 + title 43 + tag 6 + icon 3 + 5 separators + NUL). The expanded row
-// also draws the last prompt and the path, so both join the signature for that ONE
-// row - prompt 103 + path 67 + 2 separators = 172 more, i.e. 297 - hence 304.
-// Appending them for every row instead would repaint a COMPACT row whenever its
-// prompt changed, which is a wholesale clear-and-redraw of pixels that did not
-// change: exactly the flicker the change-only discipline exists to prevent.
-const int SESSION_ROW_SIG_LEN = 304;
+// The row signature's buffer, per board because it is 6 copies of RAM. It is the
+// SAME number on both boards today: board 1 draws the band card too, and a
+// signature holds field VALUES rather than the text drawn from them, so a wider
+// row does not lengthen it. (This comment used to say board 1's was 176 and held
+// "byte-identical". Neither has been true since 924cecc gave that board the card,
+// and a stale justification is how a checker starts certifying the wrong layout.)
+// A 125-byte worst case for an ordinary row (name 23 + status 9 + sub 35 +
+// title 43 + tag 6 + icon 3 + 5 separators + NUL); the expanded row also draws the
+// last prompt and the path, so both join the signature for that ONE row -
+// prompt 103 + path 67 + 2 separators = 172 more, i.e. 297.
+//
+// 368, NOT 304, FOR THE REASON detailSigCache IS 448 AND NOT 384: at 304 this held
+// its 298-byte worst case with SIX bytes spare, and the append is guarded by
+// `if (used + 2 < sizeof(sig))` - room for the two separators only - so the next
+// term is SILENTLY TRUNCATED rather than overflowing, and the band card then never
+// repaints when the tail of its path changes. Same 64-byte step, leaving 70 bytes:
+// one more field of every kind this signature carries but the prompt. The margin
+// is asserted, not trusted - see SESSION_SIG_MARGIN in deckhand_display.ino.
+// Appending prompt and path for every row instead would repaint a COMPACT row
+// whenever its prompt changed, which is a wholesale clear-and-redraw of pixels that
+// did not change: exactly the flicker the change-only discipline exists to prevent.
+const int SESSION_ROW_SIG_LEN = 368;
 
 // ---------- Session detail card and the ask screen ----------
 // THE HEADER ROW IS A TOUCH BAND, and this is the one place on this screen where

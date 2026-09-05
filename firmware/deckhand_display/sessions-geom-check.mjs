@@ -18,8 +18,49 @@
 //
 //   node sessions-geom-check.mjs             check both boards
 //   node sessions-geom-check.mjs --selftest  prove the checker has teeth
-import { cacheSizes, consts, DIR, fnBody, lineH, PANEL, preflight, textWidth } from "./geom-common.mjs";
+import { cacheSizes, consts, deadGuards, DIR, faultChildEpilogue, fnBody, lineH,
+         PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX, splitArgs,
+         stripComments, sweepSourceFaults, textWidth } from "./geom-common.mjs";
 import fs from "fs";
+
+// ---------------------------------------------------------------------------
+// SOURCE FAULTS. This checker's --selftest injected exactly ONE perturbed
+// constant, while a growing half of what it asserts reads the firmware's own
+// TEXT. A reviewer measured what that left unproven: `return;` at the top of
+// drawBandMark, `rowH >= SESSION_TITLE_MIN_H + 24`, and the sub-line drawn at
+// `y + SESSION_SUB2_Y + 9` all passed 2042/2042 - the last of them reintroducing
+// precisely the border overrun KNOWN[1]'s first entry records as FIXED.
+//
+// Each fault is a function over one file's text, located structurally, and the
+// registration happens before preflight() because every file is read at module
+// scope. The parent re-execs this checker once per fault and requires the child to
+// fail BY THE NAMED ASSERTION; a fault that changed nothing prints ANCHOR MOVED.
+// ---------------------------------------------------------------------------
+const SOURCE_FAULTS = [
+  ["drawBandMark() gets `return;` first (the fully-static working card)",
+    "sessions.ino", (t) => t.replace(/(void drawBandMark\(int pos\)\s*\{)/, "$1\n  return;"),
+    "drawBandMark() has no return at all"],
+  ["the title rung's height test gains + 24 (the ladder goes nnnncc on the glass)",
+    "sessions.ino", (t) => t.replace(/(rowH\s*>=\s*SESSION_TITLE_MIN_H)/, "$1 + 24"),
+    "is exactly `rowH >= SESSION_TITLE_MIN_H`"],
+  ["the compact sub-line is drawn 9px lower, back onto the card's own border",
+    "sessions.ino", (t) => t.replace(/(drawString\([^;]*?y \+ SESSION_SUB2_Y)\)/, "$1 + 9)"),
+    "draws at exactly `y + <the constant>`"],
+  ["SESSION_NAME_TOP_RUNG is pushed off the end of the rung ladder",
+    "board_e32r28t.h", (t) => t.replace(/(const int SESSION_NAME_TOP_RUNG\s*=\s*)\d+/, "$14"),
+    "indexes NAME_RUNGS"],
+  ["rowSigCache is reverted to the six bytes of headroom it had",
+    "board_es3c35p.h", (t) => t.replace(/(const int SESSION_ROW_SIG_LEN\s*=\s*)\d+/, "$1304"),
+    "at or above the 64-byte margin"],
+  ["detailSigCache is reverted to 384, three bytes from silent truncation",
+    "deckhand_display.ino", (t) => t.replace(/(char detailSigCache\[)\d+/, "$1384"),
+    "at or above the 64-byte margin"],
+];
+if (SOURCE_FAULT_INDEX >= 0) {
+  const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
+  if (!f) { console.log("ANCHOR MOVED"); process.exit(2); }
+  setSourceFault(f[1], f[2]);
+}
 preflight();
 
 // ---- PER-BOARD TEXT MEASUREMENT, and why this file needed it ----
@@ -37,7 +78,7 @@ preflight();
 // device's own 136 recorded widths by preflight()); board 2's faces are genuinely
 // monospace, which is asserted rather than assumed.
 function parseGfxFont(file) {
-  const src = fs.readFileSync(`${DIR}/${file}`, "utf8");
+  const src = readSource(`${file}`);
   const gl = src.slice(src.indexOf("Glyphs[]"));
   const rows = [...gl.matchAll(/\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\}/g)];
   return rows.map(m => ({ w: +m[2], h: +m[3], xa: +m[4], xo: +m[5], yo: +m[6] }));
@@ -47,7 +88,7 @@ function parseGfxFont(file) {
 // before the array), and a shape it does not recognise THROWS - a parser that
 // silently falls back to a default is worse than the literal it replaces.
 function parseUiFonts() {
-  const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+  const src = readSource(`deckhand_display.ino`);
   const at = src.indexOf("UI_FONTS[] = {");
   if (at < 0) throw new Error("parseUiFonts(): UI_FONTS[] = { not found");
   let ifStart = -1, idx = -1;
@@ -113,27 +154,26 @@ function widthB(b, id, s) {
 // The transcript cap comes from the file that OWNS it - host/index.mjs - rather than
 // from a number copied here, the same way settings-geom-check.mjs reads KB_MAX_BYTES
 // out of the firmware and ANSWER_TEXT_MAX_BYTES out of the host.
-const VOICE_TEXT_MAX = +fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
+const VOICE_TEXT_MAX = +readSource(`../../host/index.mjs`)
   .match(/VOICE_TEXT_MAX\s*=\s*(\d+)/)[1];
 
 // The per-option description cap, from the file that OWNS it - the hook - for the
 // identical reason VOICE_TEXT_MAX comes from host/index.mjs. Nothing in a
 // translation unit can see a JS constant, so this read IS the link between the
 // host's cap and the device's buffer, and it fails if either moves alone.
-const OPT_DESC_MAX_BYTES = +fs.readFileSync(
-  `${DIR}/../../claude-hooks/deckhand-session-hook.mjs`, "utf8")
+const OPT_DESC_MAX_BYTES = +readSource(`../../claude-hooks/deckhand-session-hook.mjs`)
   .match(/ASK_OPT_DESC_MAX_BYTES = (\d+);/)[1];
 
 // The TYPE chip's own source, so the hit test's slack term is PARSED rather than
 // restated - the whole point of the assertion below is that it can see a future
 // change that couples the chip's drawn size back to the tap zone.
-const SESSIONS_INO = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
-const DISPLAY_INO  = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+const SESSIONS_INO = readSource(`sessions.ino`);
+const DISPLAY_INO  = readSource(`deckhand_display.ino`);
 // The reader is a fourth file this checker has to read: the ask screen's chip and
 // the screen it opens are one feature, and the assertions that matter are about
 // the seam between them (which predicate opens it, and on which line grid the
 // second section is drawn).
-const READER_INO   = fs.readFileSync(`${DIR}/reader.ino`, "utf8");
+const READER_INO   = readSource(`reader.ino`);
 
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // The board header FIRST, then deckhand_display.ino seeded with it - which is the
@@ -175,6 +215,19 @@ const T_HERO = 4, T_HEAD = 3, T_BODY = 2, T_META = 1;
 // drawSessionRow's NAME_RUNGS[], largest first. Kept in the same order as the
 // firmware's array, because SESSION_NAME_TOP_RUNG is an INDEX into it.
 const NAME_RUNGS = [T_HERO, T_HEAD, T_BODY];
+// THE INDEX, RANGE-CHECKED IN ONE PLACE. SESSION_NAME_TOP_RUNG is an index into
+// the array above, and expBands() used to read NAME_RUNGS[...] raw - so an
+// out-of-range value reached UI[b][undefined] and threw an uncaught TypeError
+// before the range assertion further down could name it. Measured: -1 and 1 fail
+// by name; 4, 16 and -4 CRASHED. geom-sweep counts a crash as "caught", which is
+// how it stayed: a crash says nothing about which assertion would have fired, and
+// a checker that dies cannot report the other 2041 things it knows. Every read of
+// the rung goes through here now, and rungOk() is what the assertion tests.
+function rungOk(c) {
+  const i = c.SESSION_NAME_TOP_RUNG;
+  return Number.isInteger(i) && i >= 0 && i < NAME_RUNGS.length;
+}
+function topRungOf(c) { return rungOk(c) ? NAME_RUNGS[c.SESSION_NAME_TOP_RUNG] : T_BODY; }
 
 // Documented, deliberately-unfixed board-1 facts. Every one of them is a place
 // board 1's packed content area gives something up; board 2's derivation does
@@ -476,7 +529,7 @@ function expBands(b, c, rowH, have, cand) {
   // transcribed rung described a name 8px shorter than the one drawn and put both
   // its neighbouring gaps 4px out. Read the INDEX the firmware's own ladder starts
   // at instead.
-  const NL = lineHB(b, NAME_RUNGS[c.SESSION_NAME_TOP_RUNG]);
+  const NL = lineHB(b, topRungOf(c));
   const L = lineHB(b, T_BODY);
   const BAND = c.SESSION_BAND_H, RULE = c.SESSION_BAND_RULE_H;
   const ruleDY = Math.trunc((RULE - 1) / 2);
@@ -536,7 +589,7 @@ function expAnchorTop(c, rowH) {
 // word is the ONLY carrier of status that is not hue. Collapsing two of these arms
 // left this checker at zero failures before the assertion below existed.
 function statusLabels() {
-  const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+  const src = readSource(`deckhand_display.ino`);
   const m = src.match(/const char\* labelForStatus\(const char\* status\) \{([\s\S]*?)\n\}/);
   if (!m) throw new Error("labelForStatus() not found in deckhand_display.ino");
   return [...m[1].matchAll(/return\s+"([^"]*)"/g)].map((x) => x[1]);
@@ -547,7 +600,7 @@ function statusLabels() {
 // "NEEDS YOUR INPUT"), so on that board these ARE the band's status words and the
 // same "the only carrier that is not hue" argument applies to them.
 function shortStatusLabels() {
-  const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+  const src = readSource(`deckhand_display.ino`);
   const m = src.match(/const char\* shortLabelForStatus\(const char\* status\) \{([\s\S]*?)\n\}/);
   if (!m) throw new Error("shortLabelForStatus() not found in deckhand_display.ino");
   return [...m[1].matchAll(/return\s+"([^"]*)"/g)].map((x) => x[1]);
@@ -557,7 +610,7 @@ function shortStatusLabels() {
 // turns on - a regenerated 40px mark would move the blit's left edge under every
 // one of those literals without any of them noticing.
 function sparkSize() {
-  const m = fs.readFileSync(`${DIR}/ClaudeSpark.h`, "utf8").match(/#define\s+SPARK_SIZE\s+(\d+)/);
+  const m = readSource(`ClaudeSpark.h`).match(/#define\s+SPARK_SIZE\s+(\d+)/);
   if (!m) throw new Error("SPARK_SIZE not found in ClaudeSpark.h");
   return Number(m[1]);
 }
@@ -569,7 +622,7 @@ function sparkSize() {
 // beside it. Same reason sparkSize() is parsed and not the literal 16 it was.
 function macEmojiSize(b) {
   const f = b === 1 ? "MacEmoji.h" : "MacEmoji16.h";
-  const m = fs.readFileSync(`${DIR}/${f}`, "utf8").match(/#define\s+MAC_EMOJI_SIZE\s+(\d+)/);
+  const m = readSource(`${f}`).match(/#define\s+MAC_EMOJI_SIZE\s+(\d+)/);
   if (!m) throw new Error(`MAC_EMOJI_SIZE not found in ${f}`);
   return Number(m[1]);
 }
@@ -585,7 +638,7 @@ function macEmojiSize(b) {
 // font it is judging, not from memory. A future face with a wider range would then
 // relax this on its own instead of failing.
 function fontRange(face) {
-  const src = fs.readFileSync(`${DIR}/${face}.h`, "utf8");
+  const src = readSource(`${face}.h`);
   const m = src.match(new RegExp(`const GFXfont ${face} PROGMEM = \\{[\\s\\S]*?(0x[0-9A-Fa-f]+),\\s*(0x[0-9A-Fa-f]+),\\s*\\d+\\s*\\}`));
   if (!m) throw new Error(`${face}: no GFXfont first/last range found`);
   return [parseInt(m[1], 16), parseInt(m[2], 16)];
@@ -610,7 +663,7 @@ function stringLiterals(src) {
   return out;
 }
 function macTagMax() {
-  const m = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8")
+  const m = readSource(`deckhand_display.ino`)
               .match(/struct HostLink\s*\{[\s\S]*?\bchar\s+tag\[(\d+)\]/);
   if (!m) throw new Error("HostLink's tag[] not found in deckhand_display.ino");
   return Number(m[1]) - 1;
@@ -715,7 +768,7 @@ function normGate(b, expr) {
 // The chip's LABEL is a per-board #define, because the two boards' chips no longer
 // offer the same thing. Parsed from the header that owns it, never transcribed.
 function chipLabel(b) {
-  const m = fs.readFileSync(`${DIR}/${HDR[b]}`, "utf8")
+  const m = readSource(`${HDR[b]}`)
               .match(/#define\s+ASK_READ_BTN_LABEL\s+"([^"]*)"/);
   if (!m) throw new Error(`ASK_READ_BTN_LABEL not found in ${HDR[b]}`);
   return m[1];
@@ -1188,9 +1241,8 @@ for (const b of [1, 2]) {
   // why: an out-of-range SESSION_NAME_TOP_RUNG used to reach UI[b][undefined] and
   // CRASH the checker, which the sweep counts as "caught" while reporting it as a
   // crash - and a crash says nothing about which assertion would have fired.
-  const rungOk = c.SESSION_NAME_TOP_RUNG >= 0 && c.SESSION_NAME_TOP_RUNG < NAME_RUNGS.length;
-  chk(rungOk, `SESSION_NAME_TOP_RUNG ${c.SESSION_NAME_TOP_RUNG} indexes NAME_RUNGS[${NAME_RUNGS.length}]`);
-  const topRung = rungOk ? NAME_RUNGS[c.SESSION_NAME_TOP_RUNG] : T_BODY;
+  chk(rungOk(c), `SESSION_NAME_TOP_RUNG ${c.SESSION_NAME_TOP_RUNG} indexes NAME_RUNGS[${NAME_RUNGS.length}]`);
+  const topRung = topRungOf(c);
   console.log(`type scale: name band ${NH} (${UI[b][topRung].face}), ` +
               `body ${LH} (${UI[b][T_BODY].face}, ${advanceB(b, T_BODY)}px advance), ` +
               `hero ${lineHB(b, T_HERO)} (${UI[b][T_HERO].face})`);
@@ -1219,10 +1271,11 @@ for (const b of [1, 2]) {
       `top name rung (font ${topRung}, ${lineHB(b, topRung)}px) fits the ${NH}px name band`);
   chk(lineHB(b, topRung) === NH,
       `the band IS the top rung's cell (${NH} == ${lineHB(b, topRung)}) - no dead pixels above the tallest name`);
-  for (let r = 0; r < c.SESSION_NAME_TOP_RUNG; r++)
+  for (let r = 0; rungOk(c) && r < c.SESSION_NAME_TOP_RUNG; r++)
     chk(lineHB(b, NAME_RUNGS[r]) > NH,
         `rung ${r} (font ${NAME_RUNGS[r]}, ${lineHB(b, NAME_RUNGS[r])}px) is excluded by HEIGHT, not by taste - it does not fit ${NH}px`);
-  for (let r = c.SESSION_NAME_TOP_RUNG + 1; r < NAME_RUNGS.length; r++)
+  for (let r = rungOk(c) ? c.SESSION_NAME_TOP_RUNG + 1 : NAME_RUNGS.length;
+       r < NAME_RUNGS.length; r++)
     chk(lineHB(b, NAME_RUNGS[r]) <= NH,
         `rung ${r} (font ${NAME_RUNGS[r]}, ${lineHB(b, NAME_RUNGS[r])}px) is drawable in the band`);
 
@@ -1370,6 +1423,70 @@ for (const b of [1, 2]) {
       chk(got.join("") === LADDER_SHAPE[b],
           `ladder shape ${got.join("")} == the ${LADDER_SHAPE[b]} this board's header documents ` +
           `(t=title s=sub-line n=big name only c=compact)`);
+      // ---- AND THE MIRROR IS BOUND TO THE FIRMWARE'S OWN THREE TESTS ----
+      // A MIRROR PROVES THE ALGORITHM AND BINDS NOTHING. layoutFor() above is a JS
+      // re-implementation of drawSessionRow's three height tests, and the ladder
+      // shape is read entirely out of it - so changing sessions.ino's own
+      // `rowH >= SESSION_TITLE_MIN_H` to `+ 24` makes the ladder nnnncc on the
+      // glass while LADDER_SHAPE still reads tttncc here. Measured: 2042/2042.
+      //
+      // These four assertions are the STRUCTURAL half. They read drawSessionRow's
+      // text and say nothing about the numbers: each threshold must be compared
+      // against rowH with `>=` and with NOTHING ADDED TO IT, at every site. A term
+      // bolted onto either side moves the rung boundary away from the constant the
+      // header declares and the mirror models, and that divergence is the whole
+      // failure this names.
+      const rowSrc = fnSrc("void drawSessionRow(");
+      // The thresholds are read OUT OF THE MIRROR ITSELF rather than retyped here,
+      // so the two halves cannot drift: a layoutFor() taught a different constant
+      // drags this binding along with it instead of leaving it certifying the old
+      // one. Both sides parsed, neither transcribed.
+      const mirrorKs = [...new Set([...layoutFor.toString()
+        .matchAll(/c\.(SESSION_[A-Z0-9_]+)/g)].map((m) => m[1]))];
+      chk(mirrorKs.length === 3,
+          `layoutFor()'s own thresholds parse out of the mirror (${mirrorKs.length}) ` +
+          `[${mirrorKs.join(", ")}] - an empty parse would pass every assertion below vacuously`);
+      for (const k of mirrorKs) {
+        const uses = [...rowSrc.matchAll(
+          new RegExp(`rowH\\s*(>=|>|<=|<|==)\\s*${k}\\b\\s*([+\\-*/]\\s*[\\w()]+)?`, "g"))];
+        chk(uses.length >= 1,
+            `drawSessionRow compares rowH against ${k} (${uses.length} site(s)) - ` +
+            `layoutFor()'s mirror of this test is otherwise bound to nothing`);
+        const wrong = uses.filter((m) => m[1] !== ">=" || m[2]).map((m) => m[0].replace(/\s+/g, " "));
+        chk(wrong.length === 0,
+            `every rowH/${k} test is exactly \`rowH >= ${k}\`, with no term added to either side` +
+            (wrong.length ? ` [${wrong.join(" ; ")}]` : ""));
+      }
+
+      // ---- THE ROW'S Y CONSTANTS ARE BOUND TO THEIR DRAW SITES ----
+      // The other half of the same finding: this file certifies SESSION_SUB2_Y and
+      // its siblings at length, and NOTHING read the drawString that consumes them.
+      // Drawing the sub-line at `y + SESSION_SUB2_Y + 9` reintroduces exactly the
+      // border overrun KNOWN[1]'s first entry records as fixed, and passed 2042/2042
+      // - geom-sweep cannot see it either, because it perturbs parsed constants and
+      // this is a literal at a call site.
+      //
+      // The rule is the shape, not a list: every drawString in drawSessionRow whose
+      // y argument NAMES a row offset must be exactly `y + <that constant>`. The
+      // four sites whose y is a computed local (nameTop + nameOffset, cy, pathTop)
+      // are laid out by their own assertions above and are not matched here.
+      const yArgs = [...rowSrc.matchAll(/tft\.drawString\(([^;]*)\)\s*;/g)]
+        .map((m) => (splitArgs(m[1])[2] || "").replace(/\s+/g, " ").trim())
+        .filter((e) => /\bSESSION_[A-Z0-9_]*_Y\b/.test(e));
+      chk(yArgs.length >= 4,
+          `parsed ${yArgs.length} drawString sites in drawSessionRow whose y is a named row ` +
+          `offset (an empty parse must fail, not pass vacuously)`);
+      const offBy = yArgs.filter((e) => !/^y \+ SESSION_[A-Z0-9_]*_Y$/.test(e));
+      chk(offBy.length === 0,
+          `every one of them draws at exactly \`y + <the constant>\`, with no literal nudge` +
+          (offBy.length ? ` [${offBy.join(" ; ")}]` : ""));
+      // ...and each constant it names is one this board's header really declares,
+      // so a typo cannot satisfy the shape rule above while resolving to nothing.
+      const unknownY = [...new Set(yArgs.map((e) => e.replace("y + ", "")))]
+        .filter((k) => typeof c[k] !== "number");
+      chk(unknownY.length === 0,
+          `every row offset drawn through is a constant this board declares` +
+          (unknownY.length ? ` [${unknownY.join(", ")}]` : ""));
     }
   }
 
@@ -1450,7 +1567,7 @@ for (const b of [1, 2]) {
       // produce a prompt line its height never paid for, and the band tables would
       // stay green because they model the baseline rather than read it.
       {
-        const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+        const src = readSource(`sessions.ino`);
         chk(/\(bodyH - \(SESSION_EXP_MIN_H - SESSION_BAND_H\)\) \/\s*\n?\s*SESSION_BAND_PROMPT_STEP/.test(src),
             "sessionExpPromptLines() counts from SESSION_EXP_MIN_H - SESSION_BAND_H " +
             "(the gate's own floor, less the band the caller already subtracted) " +
@@ -1535,7 +1652,7 @@ for (const b of [1, 2]) {
       // trailing air and the path's tail are both smaller and therefore covered.
       const RDY = Math.trunc((c.SESSION_BAND_RULE_H - 1) / 2);
       const MAX_LEAD = Math.max(
-        c.SESSION_BAND_NAME_H - lineHB(b, NAME_RUNGS[c.SESSION_NAME_TOP_RUNG]),
+        c.SESSION_BAND_NAME_H - lineHB(b, topRungOf(c)),
         c.SESSION_BAND_SUB_H - L,
         c.SESSION_BAND_TITLE_STEP - L,
         c.SESSION_BAND_LABEL_H - L,
@@ -1716,7 +1833,7 @@ for (const b of [1, 2]) {
     // card. This is also what binds expBands' model of the name band to the rung the
     // firmware actually starts from.
     {
-      const NL = lineHB(b, NAME_RUNGS[c.SESSION_NAME_TOP_RUNG]);
+      const NL = lineHB(b, topRungOf(c));
       chk(NL <= B2("NAME_H"),
           `the name block (${B2("NAME_H")}px) holds the top rung's ${NL}px cell, ` +
           `centred with ${Math.trunc((B2("NAME_H") - NL) / 2)}px above it`);
@@ -1756,7 +1873,7 @@ for (const b of [1, 2]) {
     // duration's own right-aligned datum. A model of "14 from the interior" would
     // go on agreeing with itself after either moved.
     {
-      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const src = readSource(`sessions.ino`);
       chk(/drawSessionBand\(SESSION_ROW_X \+ BORDER_CARD, y \+ BORDER_CARD,\s*\n?\s*SESSION_ROW_W - 2 \* BORDER_CARD/.test(src),
           "the band is drawn on the card INTERIOR (SESSION_ROW_X + BORDER_CARD, " +
           "SESSION_ROW_W - 2*BORDER_CARD) - which is what the body's edges are measured from");
@@ -1800,7 +1917,7 @@ for (const b of [1, 2]) {
     // sees the line, not whether the preprocessor kept it. The band tables above
     // are what constrain the geometry; these are what tie them to the code.
     const drawSrc = (() => {
-      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const src = readSource(`sessions.ino`);
       const a = src.indexOf("void drawSessionRow(int pos) {");
       const z = src.indexOf("\nvoid renderSessionsList()", a);
       if (a < 0 || z < 0) throw new Error("drawSessionRow() not found in sessions.ino");
@@ -1862,7 +1979,7 @@ for (const b of [1, 2]) {
     // model of this arithmetic would go on agreeing with itself after the firmware
     // stopped agreeing with it.
     {
-      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const src = readSource(`sessions.ino`);
       const a = src.indexOf("void sessionExpMeasure(");
       if (a < 0) throw new Error("sessionExpMeasure() not found in sessions.ino");
       const m = src.slice(a, src.indexOf("\n}\n", a)).replace(/^[ \t]*\/\/.*$/gm, "");
@@ -1937,8 +2054,8 @@ for (const b of [1, 2]) {
         `word is its only carrier that is not hue`);
     // ... and the band really does draw THAT string, rather than a fourth copy of
     // the vocabulary that could drift from it.
-    chk(/labelForStatus\(status\)/.test(fs.readFileSync(`${DIR}/sessions.ino`, "utf8")
-          .slice(fs.readFileSync(`${DIR}/sessions.ino`, "utf8").indexOf("void bandStatusWord("))),
+    chk(/labelForStatus\(status\)/.test(readSource(`sessions.ino`)
+          .slice(readSource(`sessions.ino`).indexOf("void bandStatusWord("))),
         `the band's word comes from labelForStatus(), not a second table`);
 
     // The card must fit the column it is drawn in. DERIVED, not the literal 410
@@ -2024,7 +2141,7 @@ for (const b of [1, 2]) {
     // the shape the checker imagined. `x0` is the interior the call site passes;
     // anything the function adds to it has to move these numbers with it.
     const spineSrc = (() => {
-      const s = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const s = readSource(`sessions.ino`);
       const fn = s.slice(s.indexOf("void drawSessionSpine("));
       return fn.slice(0, fn.indexOf("\n}\n") + 2);
     })();
@@ -2044,7 +2161,7 @@ for (const b of [1, 2]) {
     // arc. Parsed, because none of the geometry above can see which shape the
     // firmware actually fills.
     {
-      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const src = readSource(`sessions.ino`);
       const fn = src.slice(src.indexOf("void drawSessionSpine("));
       const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
       chk(/const int r = R_MD - BORDER_CARD;/.test(body),
@@ -2193,7 +2310,7 @@ for (const b of [1, 2]) {
     // a band row draws no spine. Both are properties of the call site, not of the
     // geometry, so both are parsed.
     {
-      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const src = readSource(`sessions.ino`);
       chk(/if \(expanded\)\s*\n\s*drawSessionBand\([\s\S]*?\n\s*else\b[\s\S]*?drawSessionSpine\(/.test(src),
           "the spine is the band's ELSE - a row gets one head or the other, never both");
       chk(/drawSessionSpine\(SESSION_ROW_X \+ BORDER_CARD, y \+ BORDER_CARD,\s*\n\s*rowH - 2 \* BORDER_CARD,/.test(src),
@@ -2265,7 +2382,7 @@ for (const b of [1, 2]) {
     // filled-vs-outlined carrier survives. Deleting either of them now costs the
     // distinction outright, where before it only cost a duplicate.
     {
-      const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+      const src = readSource(`deckhand_display.ino`);
       const fn = src.slice(src.indexOf("void drawStatusDot("));
       const body = fn.slice(0, fn.indexOf("\n}\n"));
       const i2 = body.indexOf("#else"), i3 = body.indexOf("#endif");
@@ -2312,7 +2429,7 @@ for (const b of [1, 2]) {
     // are: a commented-out call is the likeliest way one of these gets disabled.
     {
       const strip = (f) =>
-        fs.readFileSync(`${DIR}/${f}`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+        readSource(`${f}`).replace(/^[ \t]*\/\/.*$/gm, "");
       const band = fnBody(strip("sessions.ino"), "void drawSessionBand(", "sessions.ino");
       chk(/const bool working = strcmp\(s\.status, "working"\) == 0;/.test(band),
           "the band binds `working` to the row's OWN status");
@@ -2326,6 +2443,31 @@ for (const b of [1, 2]) {
       chk(/if \(sessionRowExpanded\(pos\)\) \{ drawBandMark\(pos\); continue; \}/.test(tick),
           "tickWorkingSpinner ADVANCES the band card's mark rather than skipping the row - " +
           "deleting drawBandMark(pos) is the same static card by the other route");
+      // ---- AND THE THING BOTH SITES CALL. Both assertions above are text
+      // matches on their CALLERS: `return;` as drawBandMark's first statement
+      // leaves them both matching and produces the identical fully-static card
+      // that this block's own comment says "NOTHING ELSE IN THIS FILE CAN SEE".
+      // Measured green. So the two-function chain is bound to its own bodies:
+      // drawBandMark must delegate, drawBandMarkAt must reach drawAgentMark, and
+      // neither may return or be smothered before it gets there.
+      //
+      // Deliberately says NOTHING about the `animate` argument: that is
+      // drawSessionBand's assertion two lines up, and board 1's frozen animPhase
+      // is a separate, recorded defect that this must not quietly certify.
+      for (const [fn, must] of [["void drawBandMark(", "drawBandMarkAt("],
+                                ["void drawBandMarkAt(", "drawAgentMark("]]) {
+        const body = fnSrcIn(strip("sessions.ino"), fn, "sessions.ino");
+        chk(body.length > 40, `${fn}) is found and is not a stub (${body.length} chars)`);
+        chk(body.includes(must),
+            `${fn}) reaches ${must}) - the mark's draw chain is unbroken`);
+        chk(!/\breturn\b/.test(body),
+            `${fn}) has no return at all, so nothing can leave before the mark is drawn ` +
+            `(an early return is the fully-static card, with both call sites still matching)`);
+        const dg = deadGuards(body);
+        chk(dg.length === 0,
+            dg.length ? `${fn}) carries a dead-code guard [${dg.join(", ")}]`
+                      : `${fn}) carries no dead-code guard`);
+      }
     }
 
     // ---- §6 THE TWO ADOPTED ANIMATIONS: BOARD 2 ONLY ----
@@ -2344,8 +2486,8 @@ for (const b of [1, 2]) {
     // the same final frame, and a shimmer that painted the arcs would look right
     // in every screenshot taken between two frames.
     {
-      const dsrc = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
-      const ssrc = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const dsrc = readSource(`deckhand_display.ino`);
+      const ssrc = readSource(`sessions.ino`);
       // Body of a function, sliced to its own closing brace at column 0 - the
       // same anchoring drawStatusPill's branch check uses, and for the same
       // reason: a lazy regex across a whole file finds a neighbour's line.
@@ -2726,7 +2868,7 @@ for (const b of [1, 2]) {
   // the card's border - drawChevron's shape and inset are parsed from its BODY,
   // not transcribed, so reverting either fails here by name.
   {
-    const strip = (f) => fs.readFileSync(`${DIR}/${f}`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+    const strip = (f) => readSource(`${f}`).replace(/^[ \t]*\/\/.*$/gm, "");
     const chevron = fnBody(strip("sessions.ino"), "void drawChevron(", "sessions.ino");
     const insetM = chevron.match(/rightX -= ([A-Za-z_][A-Za-z_0-9]*);/);
     chk(!!insetM,
@@ -3736,7 +3878,7 @@ for (const b of [1, 2]) {
   // line count while drawWrappedText drew another, and the symptom is a panel that no
   // longer wraps its own text. Board-independent, so only checked once.
   if (b === 1) {
-    const audio = fs.readFileSync(`${DIR}/audio.ino`, "utf8");
+    const audio = readSource(`audio.ino`);
     const clamp = audio.match(/int h = \(lines > (\d+) \? (\d+) : lines\) \* CODE_LINE_H/);
     const maxLines = audio.match(/drawWrappedText\(voiceText,[^;]*?CODE_LINE_H, maxW - 14, 0, (\d+),/s);
     chk(!!clamp && !!maxLines, "drawVoiceCard's clamp and maxLines literals are still parseable from audio.ino");
@@ -3777,8 +3919,28 @@ for (const b of [1, 2]) {
   // both are DRAWN on that card, and a field drawn but not signed is the staleness
   // the title itself shipped once. Only a board that expands pays for them.
   if (c.SESSION_EXP_MIN_H !== undefined) rowSig += 1 + CAP.prompt + 1 + CAP.path;
-  chk(cacheLen("rowSigCache") >= rowSig,
-      `rowSigCache ${cacheLen("rowSigCache")} (${CACHE.rowSigCache}) holds its ${rowSig}-byte worst case`);
+  // THE MARGIN, PARSED FROM THE SKETCH RATHER THAN CHOSEN HERE. "Holds its worst
+  // case" is the assertion that let both signature caches drift to within a
+  // handful of bytes of silent truncation: rowSigCache had SIX bytes spare at 304
+  // and detailSigCache THREE at 384, and in both the next term appended under an
+  // `if (used + n < outSize)` guard would have been DROPPED rather than
+  // overflowing - a card that stops repainting, with nothing on the glass to say
+  // so. `>= worst case` cannot see that coming; `>= worst case + margin` can.
+  // SESSION_SIG_MARGIN lives beside the caches in deckhand_display.ino with the
+  // argument for its size, and is read here through the same constant table as
+  // everything else, so moving it moves this rule rather than un-binding it.
+  const SIGM = c.SESSION_SIG_MARGIN;
+  chk(typeof SIGM === "number" && SIGM > 0,
+      `SESSION_SIG_MARGIN parses out of the sketch (${SIGM}) - a NaN floor would make ` +
+      `every margin assertion below pass vacuously`);
+  const sigOk = (name, worst) => {
+    const have = cacheLen(name);
+    chk(have >= worst + SIGM,
+        `${name} ${have} (${CACHE[name]}) holds its ${worst}-byte worst case with ` +
+        `${have - worst} bytes to spare, at or above the ${SIGM}-byte margin - below it the ` +
+        `next guarded term is silently DROPPED, not an overflow`);
+  };
+  sigOk("rowSigCache", rowSig);
   // RE-DERIVED FOR §7, FIELD BY FIELD, and this task is the case the previous
   // derivation's own note warned about: it removed fields from the CARD (the two
   // column pairs) and added one to the SIGNATURE (the agent), so "removing only
@@ -3868,9 +4030,10 @@ for (const b of [1, 2]) {
         `the four descriptions verbatim would need ${verbatim} bytes of a` +
         ` ${cacheLen("detailSigCache")}-byte detailSigCache - hence the ${hw}-hex hash`);
   }
-  chk(cacheLen("detailSigCache") >= detSig,
-      `detailSigCache ${CACHE.detailSigCache} holds its ${detSig}-byte worst case` +
-      ` (${cacheLen("detailSigCache") - detSig} bytes of headroom)`);
+  // Same margin rule as rowSigCache above, and this cache is where the rule came
+  // from: `448 -> 384` used to pass in silence because 384 genuinely does hold 381
+  // - it just holds it with THREE bytes left, which is what the widening was for.
+  sigOk("detailSigCache", detSig);
   // §7 CHANGED WHAT THIS CACHE HOLDS, ON BOTH BOARDS, AND THE OLD BOUND WOULD HAVE
   // OUTLIVED THE FIELD. It read `>= 23`, for board 1's `"for 999h59m - 23:59"`
   // padded to 22 - a line no board draws any more. The field is the band's own
@@ -3885,11 +4048,13 @@ for (const b of [1, 2]) {
   chk(cacheLen("rowDurCache") >= 8, `rowDurCache ${CACHE.rowDurCache} holds a 7-char padded duration + NUL`);
 }
 
+faultChildEpilogue();
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 compromises`);
 if (SELFTEST) {
   if (fail === 0) { console.log("SELFTEST FAILED: the checker did not notice a 1px threshold change"); process.exit(1); }
   console.log(`selftest ok - the injected fault produced ${fail} failure(s)`);
-  process.exit(0);
+  console.log("\n--selftest: source faults (each re-execs this checker and must FAIL BY NAME)");
+  process.exit(sweepSourceFaults(import.meta.url, SOURCE_FAULTS) ? 0 : 1);
 }
 if (fail) process.exit(1);
 console.log("all sessions geometry assertions pass on both boards");

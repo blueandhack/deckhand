@@ -1179,12 +1179,30 @@ int hiddenAskingCount = 0;
 // Per-row render caches: a row only redraws when its own signature changes,
 // so one session flipping status doesn't flash the whole list. The duration
 // field ticks on its own cache, independent of the rest of the row.
-// 176, not 160: the signature now carries dispMacTag() on top of name|status|sub|title.
-// Worst case name(23)+status(9)+sub(35)+title(43)+tag(7)+4 separators+NUL = 122, so 176
-// leaves real headroom - but the reason the tag is here at all is identity, not length:
+// SESSION_ROW_SIG_LEN, not a literal, and 368 on both boards today - the header
+// carries the derivation and the reason for the margin. The signature carries
+// dispMacTag() on top of name|status|sub|title, and the reason the tag is here at
+// all is identity, not length:
 // two sessions with the same name|status|sub|title at the same display position on
 // DIFFERENT Macs would otherwise never repaint, and the row would keep showing whichever
 // Mac's tag was drawn first rather than the one it now actually belongs to.
+// THE MARGIN EVERY SIGNATURE CACHE MUST KEEP, in one place because both of them
+// failed the same way and neither noticed. A signature is built by appending
+// guarded terms - `if (used + n < outSize)` on the detail card, `if (used + 2 <
+// sizeof(sig))` on the row - so a cache that is nearly full does not OVERFLOW when
+// the next term is added: the term is SILENTLY DROPPED, and a signature missing a
+// term is a card that never repaints when that term changes. There is no symptom
+// on the glass except stale text, which reads as a data problem rather than as a
+// cache one.
+//
+// 64 is the step detailSigCache was widened by (384 -> 448) when a review found it
+// three bytes from that edge, and rowSigCache with it (304 -> 368, six bytes from
+// the same edge). It is one more term of every kind these signatures carry except
+// a full prompt, and it costs 64 bytes here per copy. sessions-geom-check.mjs
+// asserts BOTH caches against their own re-derived worst case PLUS this number and
+// prints the headroom, so "it still fits" is measured rather than assumed - and
+// reverting either widening now fails by name instead of passing in silence.
+const int SESSION_SIG_MARGIN = 64;
 char rowSigCache[MAX_SESSIONS][SESSION_ROW_SIG_LEN]; // sized per board - see the header
 char rowDurCache[MAX_SESSIONS][8];
 char overflowCache[32] = "";
