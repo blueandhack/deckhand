@@ -421,6 +421,13 @@ function batteryForHeartbeat() {
 const BLE_CHUNK_MIN = 20;
 const BLE_CHUNK_MAX = 180;    // the largest value measured working here
 let bleChunkSize = BLE_CHUNK_MIN;
+// The per-link reports behind that one number. The firmware reports each BLE
+// link's negotiated MTU separately and broadcasts every one of them, so with two
+// Macs on one board this Mac sees the other's too; nothing on the wire says which
+// index is ours, so the SMALLEST of them is what bleChunkSize follows. Cleared on
+// disconnect: link indices are reused, and a stale 23 from a link that is gone
+// would hold every later connection at the 20-byte floor for ever.
+const bleMtuByLink = new Map();  // "link=<i>" -> negotiated ATT MTU
 
 // ---------- Remote-answer authentication (A + B), MULTI-PAIRING ----------
 // This Mac remembers MANY devices, each with its OWN secret, so a pairing is the
@@ -3123,14 +3130,34 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     // link per connect.
     console.log(`[device/${linkLabel(via)}] ${line}`);
     if (!m) return;
-    if (m) {
-      // MTU less the 3-byte ATT header, clamped to what has been measured
-      // working. Never below the floor: a device reporting 23 means STAY at 20.
-      const want = Math.max(BLE_CHUNK_MIN, Math.min(BLE_CHUNK_MAX, +m[1] - 3));
-      if (want !== bleChunkSize) {
-        console.log(`BLE: device reports MTU ${m[1]} - writing ${want}-byte packets (was ${bleChunkSize})`);
-        bleChunkSize = want;
-      }
+    // A REPORT READ OFF THE CABLE SAYS NOTHING ABOUT THIS MAC'S RADIO. The device
+    // answers every command on EVERY live transport, so a cabled board's BLEMTU
+    // arrives here over USB as well - and the number in it describes some BLE
+    // link's negotiated MTU, not the one this host writes through. Retuning from
+    // it sized our writes off a link we are not on.
+    if (viaKind(via) !== "ble") return;
+    // ...AND EVEN OVER BLE, THE REPORT MAY BE ABOUT SOMEONE ELSE'S LINK. The
+    // firmware reports per link (`BLEMTU link=<i> mtu=<m>`, scrollback.ino's
+    // tickBleMtu) and broadcasts each one to every host, so with two Macs paired
+    // to one board this Mac sees the OTHER Mac's MTU too - and nothing in the wire
+    // format says which index is ours. Clamped to 20 against a 180-byte link costs
+    // throughput (2.7 KB/s against 8.4, measured in scrollback.ino); raised to 180
+    // against a 23-byte link is DROPPED SILENTLY by CoreBluetooth, which is a fetch
+    // that stalls with nothing to read. So the reports are kept per link index and
+    // the SMALLEST is used: the safe direction, chosen deliberately rather than by
+    // whichever report happened to arrive last.
+    const idx = (line.match(/link=(\d+)/) || [, "0"])[1];
+    bleMtuByLink.set(idx, +m[1]);
+    const smallest = Math.min(...bleMtuByLink.values());
+    // MTU less the 3-byte ATT header, clamped to what has been measured
+    // working. Never below the floor: a device reporting 23 means STAY at 20.
+    const want = Math.max(BLE_CHUNK_MIN, Math.min(BLE_CHUNK_MAX, smallest - 3));
+    if (want !== bleChunkSize) {
+      console.log(
+        `BLE: smallest reported MTU ${smallest} of ${bleMtuByLink.size} link(s) - ` +
+          `writing ${want}-byte packets (was ${bleChunkSize})`
+      );
+      bleChunkSize = want;
     }
     return;
   }
@@ -3139,12 +3166,26 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     // Mapped back through replyLinkFor, the SAME function that chose where the
     // chunk went: a cabled device acks on BLE too, and that ack must resolve the
     // waiter for the USB fetch it belongs to rather than miss and time out.
-    const ackLink = replyLinkFor(via);
-    const w = ackLink && scrollAckWaiters.get(ackKey(ackLink.id, ackLink.scrollGen, seq));
-    // Deliberately unlogged, and a missing waiter is EXPECTED rather than a
-    // fault: the device acks on every live transport, so a cabled device sends
-    // each ACK twice and the second finds the waiter already resolved.
-    if (w) w();
+    //
+    // BOTH CANDIDATES, because that mapping is NOT STABLE FOR THE LIFE OF A FETCH.
+    // replyLinkFor("ble") only finds the cabled link once bleDeviceName matches a
+    // USB link's name, and WHOAMI is what made that newly reachable: before this
+    // branch a USB link could acquire its name only during the 15s boot burst, so
+    // the mapping was settled before any fetch began. Now a name can land
+    // mid-fetch, and the key silently moves from "ble:gen:seq" to
+    // "usb:<path>:gen:seq" - the waiter keyed at SEND time is then never found and
+    // the fetch stalls at chunk 0 for the full timeout. Each candidate carries its
+    // OWN scrollGen, so a superseded fetch still cannot be resolved by a stale ack.
+    const arrived = linkFor(via);
+    const mapped = replyLinkFor(via);
+    for (const l of [mapped, arrived]) {
+      if (!l) continue;
+      const w = scrollAckWaiters.get(ackKey(l.id, l.scrollGen, seq));
+      // Deliberately unlogged, and a missing waiter is EXPECTED rather than a
+      // fault: the device acks on every live transport, so a cabled device sends
+      // each ACK twice and the second finds the waiter already resolved.
+      if (w) { w(); break; }
+    }
     return;
   }
   if (line.startsWith("HISTORY ")) {
@@ -3943,9 +3984,26 @@ function startBle() {
       console.log(`BLE: connected to ${name} and ready.`);
       peripheral.once("disconnect", () => {
         console.log("BLE: disconnected, re-scanning...");
+        // The key the BATT arm filed this link's reading under, taken BEFORE
+        // bleDeviceName is cleared - senderKey() reads it, and afterwards this
+        // link's key is the bare "ble" rather than the board's own name. Exactly
+        // the same two-step the USB close handler does, and it was missing here:
+        // a board 2 taken off the cable kept republishing a stale `batts` entry in
+        // the 5s heartbeat for ever, with a growing ageSec, which is the phantom
+        // board the prune's own comment says it removes. Not unbounded growth (the
+        // key is stable per device, and boundBatteryStore caps the map anyway) -
+        // a claim the code did not keep.
+        const battKey = senderKey("ble");
+        bleMtuByLink.clear();      // indices are reused; a stale one would pin the floor
+        bleChunkSize = BLE_CHUNK_MIN;
         bleCharacteristic = null;
         blePeripheral = null;
         bleDeviceName = "";
+        // AFTER the teardown, never before: forgetBatteryFor keeps the reading if
+        // any LIVE link still answers to that key, and liveLinks() counts the BLE
+        // link while bleCharacteristic is set. Called first, it would find this
+        // very link and decline to prune every time.
+        forgetBatteryFor(battKey);
         startBleScan();
       });
     } catch (err) {

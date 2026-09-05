@@ -1000,6 +1000,120 @@ async function main({ indexPath = INDEX } = {}) {
     ok("STRUCTURE: the bound evicts the OLDEST reading, not an arbitrary one",
       /MAX_BATT_DEVICES/.test(bound) && /b\.at < oldestAt/.test(bound) && /battByDevice\.delete\(oldestKey\)/.test(bound));
 
+    // --- THE OTHER HALF OF THE SAME PRUNE, which was missing for the whole of the
+    // multi-device branch. Everything above binds the USB close handler; the BLE
+    // one cleared bleCharacteristic/blePeripheral/bleDeviceName and never called
+    // forgetBatteryFor, so a board 2 taken off the cable kept republishing a stale
+    // `batts` entry in the 5s heartbeat with a growing ageSec - the phantom board
+    // that prune's own comment claims it removes. Bound to the DISCONNECT
+    // CALLBACK's own body, brace-matched, not to the file: forgetBatteryFor is
+    // called from the USB handler next door and a file-wide match reads as passing
+    // while this handler does nothing.
+    {
+      const at = src.indexOf('peripheral.once("disconnect", () => {');
+      ok("STRUCTURE: the BLE disconnect handler is found", at >= 0);
+      let disc = "";
+      if (at >= 0) {
+        const open = src.indexOf("{", src.indexOf("=> {", at));
+        let d = 0;
+        for (let i = open; i < src.length; i++) {
+          if (src[i] === "{") d++;
+          else if (src[i] === "}" && --d === 0) { disc = src.slice(open, i + 1); break; }
+        }
+      }
+      ok("STRUCTURE: the BLE disconnect handler's own body is delimited", disc.length > 60);
+      ok("STRUCTURE: it drops that device's battery reading too, the way the USB close " +
+         "handler does - otherwise a board off the cable republishes a phantom `batts` " +
+         "entry in the heartbeat for ever",
+        /forgetBatteryFor\(/.test(disc));
+      // ORDER, both ways round, because both are wrong in a way that looks right:
+      // the key must be taken BEFORE bleDeviceName is cleared (senderKey reads it,
+      // and afterwards the key is the bare "ble"), and the prune must run AFTER
+      // bleCharacteristic is cleared (forgetBatteryFor keeps the reading if any LIVE
+      // link answers to that key, and liveLinks() counts the BLE link while that is
+      // still set - so called first it would find this very link and never prune).
+      const iKey = disc.indexOf("const battKey"), iName = disc.indexOf("bleDeviceName = \"\"");
+      const iChar = disc.indexOf("bleCharacteristic = null"), iForget = disc.indexOf("forgetBatteryFor(");
+      ok("STRUCTURE: it keys the reading BEFORE clearing bleDeviceName, which senderKey reads",
+        iKey >= 0 && iName > iKey);
+      ok("STRUCTURE: and prunes AFTER clearing bleCharacteristic, or liveLinks() still counts " +
+         "this very link and the prune declines every time",
+        iChar >= 0 && iForget > iChar);
+    }
+
+    // --- THE BLE CHUNK SIZE IS NOT TUNED FROM SOMEONE ELSE'S LINK ---
+    // The device answers every command on EVERY live transport and reports each BLE
+    // link separately (`BLEMTU link=<i> mtu=<m>`), broadcasting all of them. So a
+    // cabled board's BLEMTU arrives here over USB, and with two Macs on one board
+    // this Mac sees the other Mac's MTU - and nothing on the wire says which index
+    // is ours. Clamped to 20 against a 180-byte link costs 3.1x throughput; raised
+    // to 180 against a 23-byte link is DROPPED SILENTLY by CoreBluetooth.
+    {
+      const at = src.indexOf('if (line.startsWith("BLEMTU "))');
+      ok("STRUCTURE: the BLEMTU arm is found in index.mjs", at >= 0);
+      const open = at >= 0 ? src.indexOf("{", at) : -1;
+      let arm = "";
+      if (open >= 0) {
+        let d = 0;
+        for (let i = open; i < src.length; i++) {
+          if (src[i] === "{") d++;
+          else if (src[i] === "}" && --d === 0) { arm = src.slice(open, i + 1); break; }
+        }
+      }
+      ok("STRUCTURE: the BLEMTU arm's own body is delimited", arm.length > 100);
+      ok("STRUCTURE: it refuses to retune from a report that did not arrive over BLE",
+        /viaKind\(via\)\s*!==\s*"ble"[\s\S]{0,40}return/.test(arm));
+      ok("STRUCTURE: it files the report under its own link index rather than overwriting " +
+         "one global from whichever report arrived last",
+        /link=\(\\d\+\)/.test(arm) && /bleMtuByLink\.set\(/.test(arm));
+      ok("STRUCTURE: and sizes the writes from the SMALLEST link reported - undersizing " +
+         "costs throughput, oversizing is dropped in silence",
+        /Math\.min\(\.\.\.bleMtuByLink\.values\(\)\)/.test(arm) &&
+        /bleChunkSize = want/.test(arm));
+      ok("STRUCTURE: the per-link reports are cleared on disconnect - indices are reused, " +
+         "and a stale 23 would pin every later connection at the floor",
+        /bleMtuByLink\.clear\(\)/.test(src.slice(src.indexOf('peripheral.once("disconnect"'))));
+    }
+
+    // --- THE SCROLLACK WAITER'S KEY, which WHOAMI made unstable ---
+    // waitForScrollAck keys at SEND time through the link it was handed;
+    // replyLinkFor maps at ARRIVAL time and only finds the cabled link once
+    // bleDeviceName matches a USB link's name. Before this branch a USB link could
+    // acquire its name only during the 15s boot burst, so that mapping was settled
+    // before any fetch began - WHOAMI lets a name land mid-fetch, moving the key
+    // from "ble:gen:seq" to "usb:<path>:gen:seq" and stalling the fetch at chunk 0
+    // for the full timeout. So BOTH candidates are tried.
+    {
+      const at = src.indexOf('if (line.startsWith("SCROLLACK "))');
+      ok("STRUCTURE: the SCROLLACK arm is found in index.mjs", at >= 0);
+      const open = at >= 0 ? src.indexOf("{", at) : -1;
+      let arm = "";
+      if (open >= 0) {
+        let d = 0;
+        for (let i = open; i < src.length; i++) {
+          if (src[i] === "{") d++;
+          else if (src[i] === "}" && --d === 0) { arm = src.slice(open, i + 1); break; }
+        }
+      }
+      ok("STRUCTURE: the SCROLLACK arm's own body is delimited", arm.length > 80);
+      // THE ITERATED ARRAY, not merely the two calls. `for (const l of [mapped])`
+      // leaves both calls and the loop spelled out while trying one candidate,
+      // which is the whole defect - so the two names are PARSED from their own
+      // assignments and the array's items are checked to include both.
+      const mappedN = (/const (\w+) = replyLinkFor\(via\);/.exec(arm) || [])[1];
+      const arrivedN = (/const (\w+) = linkFor\(via\);/.exec(arm) || [])[1];
+      const listM = /for \(const \w+ of \[([^\]]*)\]\)/.exec(arm);
+      const items = listM ? listM[1].split(",").map((x) => x.trim()) : [];
+      ok(`STRUCTURE: both candidates are named from their own calls [${mappedN || "?"}, ${arrivedN || "?"}]`,
+        !!mappedN && !!arrivedN && mappedN !== arrivedN);
+      ok("STRUCTURE: and the loop tries BOTH of them, because WHOAMI can change that " +
+         `mapping in the middle of a fetch [${items.join(", ") || "no loop"}]`,
+        items.includes(mappedN) && items.includes(arrivedN));
+      ok("STRUCTURE: and each candidate is keyed with its OWN scrollGen, so a superseded " +
+         "fetch cannot be resolved by a stale ack",
+        /ackKey\(l\.id, l\.scrollGen, seq\)/.test(arm));
+    }
+
     // --- the history dedupe key ---
     const sskM = /const scrollSenderKey = \(via\) =>([\s\S]*?);\n/.exec(src);
     ok("STRUCTURE: scrollSenderKey is PARSED out of index.mjs", !!sskM);
@@ -1154,6 +1268,24 @@ async function selftest() {
     ["an unnamed link is labelled with another board's name",
      (s) => s.replace("  return l?.name ? `usb:${l.name}` : via;",
                       "  return `usb:${l?.name || usbLinks.find((x) => x.name)?.name || via}`;")],
+    // ---- the three host defects the branch review named, each reverted ----
+    ["the BLE disconnect handler stops pruning the battery, so a board off the cable " +
+     "republishes a phantom `batts` entry for ever",
+     (s) => s.replace(/\n\s*forgetBatteryFor\(battKey\);\n(\s*)startBleScan\(\);/, "\n$1startBleScan();")],
+    ["it prunes BEFORE tearing the link down, so liveLinks() finds this very link and " +
+     "the prune declines every time",
+     (s) => s.replace(/(const battKey = senderKey\("ble"\);)/,
+                      "$1\n        forgetBatteryFor(battKey);")
+             .replace(/\n\s*forgetBatteryFor\(battKey\);\n(\s*)startBleScan\(\);/, "\n$1startBleScan();")],
+    ["the BLE chunk size is retuned from a BLEMTU read off the USB cable again",
+     (s) => s.replace(/\n\s*if \(viaKind\(via\) !== "ble"\) return;/, "")],
+    ["and from whichever link reported LAST rather than the smallest, so this Mac sizes " +
+     "its writes off the other Mac's MTU",
+     (s) => s.replace("const smallest = Math.min(...bleMtuByLink.values());",
+                      "const smallest = +m[1];")],
+    ["SCROLLACK resolves through the mapped link ALONE, so a name landing mid-fetch " +
+     "moves the key and stalls the fetch at chunk 0",
+     (s) => s.replace("    for (const l of [mapped, arrived]) {", "    for (const l of [mapped]) {")],
     // ---- structural faults: invisible to every behavioural assertion above ----
     ["a module-level shotCapture creeps back, so two captures interleave into one PNG",
      (s) => s.replace("const SHOT_DIR = path.join(os.homedir(), \"Deckhand-shots\");",
