@@ -402,7 +402,9 @@ bool handleHistFullTouch(int sx, int sy) {
 // would not compile. See the note in pairing.ino.
 //
 // BOARD 2 ONLY. Board 1's ASK_OPT_DESC_BYTES is a 1-byte placeholder, every slot
-// is permanently empty, and its binary is held byte-identical.
+// is permanently empty. (This note used to end "and its binary is held
+// byte-identical"; the freeze is lifted - see CLAUDE.md - and the empty slots are
+// the whole reason now.)
 int askOptSection(int idx, bool draw, uint8_t font, int lineH, int maxW,
                   int textTop, int pageLo, int visLines, int startLine) {
   const SessionInfo& s = sessions[idx];

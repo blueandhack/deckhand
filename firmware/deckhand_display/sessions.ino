@@ -1266,8 +1266,10 @@ void drawSessionRow(int pos) {
   // there at all however well it fits the lane - board 2's T_HERO is 64px against
   // a 24px band - so SESSION_NAME_TOP_RUNG names the tallest admissible rung per
   // board (0 = T_HERO on board 1, 1 = T_HEAD on board 2) and the width walk starts
-  // from it. Skipping by height at RUNTIME instead would cost board 1 flash it
-  // cannot spend (its binary is held byte-identical), so the invariant - the top
+  // from it. Skipping by height at RUNTIME instead would cost board 1 flash on the
+  // board with the least of it (that parenthesis used to read "its binary is held
+  // byte-identical"; the freeze is lifted - see CLAUDE.md - and the flash is still
+  // the reason, exactly as board_es3c35p.h's twin of this note records), so the top
   // rung fits the band, and is the tallest that does - is asserted in
   // sessions-geom-check.mjs against the parsed font table instead.
   // Compact rows start at the bottom rung, exactly as they always have: a hero or
@@ -1975,8 +1977,10 @@ int askInputRows(int idx) {
 // the chip's height no longer has to fill the row; on board 2, where it just
 // shrank, msgBtnY() centres it in DETAIL_HEAD_H instead of sitting a fixed 2px
 // into it. Board 1 keeps the literal `+ 2` behind its own #if - (28-22)/2 is 3,
-// not 2, so the "centre" formula is not this board's existing position and
-// switching it over would move a binary this port holds byte-identical.
+// not 2, so the "centre" formula is not this board's existing position. Switching
+// it over would MOVE THE CHIP by a pixel on a control a finger already finds; that
+// used to be refused because the binary was held byte-identical, and now it is
+// refused because moving a live tap target wants its own change and its own look.
 int msgBtnX() { return CARD_X + CARD_W - MSG_BTN_W; }
 int msgBtnY() {
 #if BOARD_USES_TFT_ESPI
@@ -2171,8 +2175,10 @@ void drawAskDetail(int idx) {
   // The honest derivation is uiLineH(2) + 4, which is 17 on board 1 and 20 on board 2;
   // that is a change to make with the rest of this screen's vertical rhythm (the title
   // block feeds `textTop`, which feeds `visLines` and the READ ALL overflow decision),
-  // not as a side effect of a correctness fix, and board 1's binary is held
-  // byte-identical. sessions-geom-check.mjs measures the title block at this literal,
+  // not as a side effect of a correctness fix. (The clause "and board 1's binary is
+  // held byte-identical" used to stand here too; the freeze is lifted - see
+  // CLAUDE.md - and the rhythm argument is the whole of it now.)
+  // sessions-geom-check.mjs measures the title block at this literal,
   // so the clearance below it is checked at what the panel actually draws.
   int y = drawWrappedText(s.askTitle, CARD_X, CONTENT_Y + ASK_TITLE_Y, 2, 17, maxW, 0, 2,
                           COLOR_VALUE, COLOR_BG);
@@ -2198,9 +2204,10 @@ void drawAskDetail(int idx) {
   // The PROSE step stays a literal 17 on both boards. It is not a cell height: on
   // board 1 it is Cozette's 13 plus 4 of leading, and on board 2 it is 1px over
   // Spleen's 16 - tight leading, but a step OVER the cell, so nothing overlaps.
-  // Board 1's binary is held byte-identical, so deriving it (uiLineH(2) + 4 = 20
-  // here) is a change to make with the rest of the ask screen's rhythm rather than
-  // as a side effect of a correctness fix.
+  // Deriving it (uiLineH(2) + 4 = 20 here) is a change to make with the rest of the
+  // ask screen's rhythm rather than as a side effect of a correctness fix. (That
+  // sentence used to open "Board 1's binary is held byte-identical, so"; the freeze
+  // is lifted - see CLAUDE.md - and the rhythm argument stands on its own.)
   int dLineH = isCode ? CODE_LINE_H : 17;
   int pad = isCode ? 7 : 0;
   int textW = maxW - 2 * pad;
@@ -2222,8 +2229,9 @@ void drawAskDetail(int idx) {
   // on board 2 (ASK_OPT_H 46, label at optTop+15). The honest derivation is
   // uiLineH(1) + 1, which is 14 here and 17 there; taking it would shrink board 2's
   // `visLines` budget and so change which details show READ ALL, which belongs with
-  // the rest of this screen's vertical rhythm rather than inside a correctness fix -
-  // and board 1's binary is held byte-identical besides.
+  // the rest of this screen's vertical rhythm rather than inside a correctness fix.
+  // ("- and board 1's binary is held byte-identical besides" used to close this;
+  // the freeze is lifted, see CLAUDE.md, and it was never the load-bearing half.)
   int hintH = s.askAnswerable ? 0 : 14;
   int visLines = (optTop - 8 - hintH - textTop - 2 * pad) / dLineH;
   if (visLines < 1) visLines = 1;

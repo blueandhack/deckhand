@@ -148,7 +148,9 @@ typedef esp_ble_gatts_cb_param_t BleCbParam;
 // header carries its own extern "C") plus Arduino's I2S wrapper. Both are inside
 // this guard rather than at the top of the file for the reason es8311.c's own
 // header comment spells out - es8311.h pulls in legacy driver/i2c.h, and board 1
-// has no I2C at all and is held byte-identical. Included HERE, in the
+// has no I2C at all. ("and is held byte-identical" used to close that clause; the
+// freeze is lifted - see CLAUDE.md - and the missing I2C was always the real
+// reason.) Included HERE, in the
 // folder-named .ino, because Arduino concatenates that one FIRST and audio.ino
 // (which is where toneTest() lives) alphabetically after it.
 #include "es8311.h"
@@ -3012,8 +3014,11 @@ const int DETAIL_CARD_Y = CONTENT_Y + DETAIL_CARD_DY;
 // treatment the session row's offsets already get, and for the identical reason: a
 // literal 13 or 26 left in drawSessionDetail laid board 2's 16px lines and 24px
 // name band out on Cozette's spacing. Every value below equals the literal it
-// replaces when DETAIL_AIR is 0 and the ink heights are 26/13, which is what keeps
-// board 1's binary byte-identical.
+// replaces when DETAIL_AIR is 0 and the ink heights are 26/13 - which is what USED
+// to keep board 1's binary byte-identical. Board 1's DETAIL_AIR is 5 now (924cecc
+// gave it the band card and derived the leading budget), so that identity no longer
+// holds and the freeze it served is lifted; the derivation is kept because it is
+// still the honest way to express one set of steps for two type scales.
 //
 // FOUR OF THESE ARE GONE, and they are named here because a reader looking for
 // them should find out why rather than that they were tidied away:
@@ -6441,7 +6446,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // TAB/PAGE/KBTEST/EMOJITEST/MULTITEST already won: SCREENSHOT can only record
     // what is on the glass, and reaching this screen needs a finger on the chip in
     // the ask header. Board 2 only - it is this board that gained a second section
-    // to look at, and board 1's binary is held byte-identical.
+    // to look at. (That clause used to end "and board 1's binary is held
+    // byte-identical"; the freeze is lifted - see CLAUDE.md - and the reason is now
+    // only that board 1's reader has never been exercised on its glass. Board 1
+    // REFUSES this verb by name, so the Mac is told which of the two it is.)
     //
     // Through the detail screen, the way a person reaches it, for the reason
     // KBTEST records: opening straight from whatever tab was showing leaves the
