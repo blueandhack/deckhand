@@ -6020,6 +6020,38 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       buf = "";
       return;
     }
+    if (arg == "keys" || arg == "back") {
+      // THE TWO SCREEN MOVES, FROM THE MAC, AND THIS IS THE ONLY WAY THEY CAN BE
+      // OBSERVED AT ALL. TYPE... and BACK exist only as a finger on the glass;
+      // nothing here can inject a tap (deliberately - a scaffolding command that
+      // could reach a commit would be a way to answer Claude without a person,
+      // which is exactly what kbBubbleCommand is asserted NOT to be), so without
+      // these two verbs the claim this whole task rests on - THE DRAFT SURVIVES
+      // THE MOVE - can be reasoned about and never seen. The line printed below
+      // is the evidence: the byte count and the text after the move.
+      //
+      // They move a screen and repaint. They cannot send, cannot open, cannot
+      // close, and cannot edit the draft - the two functions they call are the
+      // same two the buttons call, so what is captured is the shipping path.
+      //
+      // NO DUPLICATE GUARD, DELIBERATELY, the same call the COMPOSE open makes:
+      // the host writes each trigger-file line to every live transport, so a
+      // cabled board runs this twice within milliseconds. A screen move is
+      // IDEMPOTENT - the same flag, the same repaint - so the second copy costs
+      // one repaint and can change nothing. (COMPOSE chip is deduped because an
+      // INSERT is not idempotent; this is the other half of that same rule.)
+      if (!composeActive) {
+        Serial.println("COMPOSE refused: the compose surface is not up (send COMPOSE first)");
+        buf = "";
+        return;
+      }
+      if (arg == "keys") composeOpenKeyboard();
+      else               composeBackToPanel();   // names its own cause if it declines
+      Serial.printf("COMPOSE: screen is now %s; the draft is %d bytes: \"%s\"\n",
+                    composeOnPanel() ? "the reply panel" : "the keyboard", kbLen, kbText);
+      buf = "";
+      return;
+    }
     if (arg == "page" || arg.startsWith("chip ")) {
       // TAPPING A CHIP, AND PAGING, FROM THE MAC. Both exist for the reason
       // KBBUBBLE does: the thing they produce exists only while a finger is on

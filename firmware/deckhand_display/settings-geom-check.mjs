@@ -76,6 +76,9 @@ const SOURCE_FAULTS = [
   ["composeOpenKeyboard clears the draft, so TYPE... throws away what the chips built",
     "compose.ino", (t) => t.replace(/(void composeOpenKeyboard\(\)\s*\{)/, "$1\n  kbLen = 0;"),
     "does not clear the draft"],
+  ["the panel's SEND drops the whole surface again instead of leaving a receipt",
+    "compose.ino", (t) => t.replace(/if \(sent\) composeShowSentState\(kbText\);/, "if (sent) closeCompose();"),
+    "leaves the RECEIPT and does NOT close"],
   ["the keyboard's left key goes back to being destructive, beside SEND",
     "keyboard.ino", (t) => t.replace(/back \? "BACK" : \(draft \? "DISCARD" : "CANCEL"\)/,
                                      "(draft ? \"DISCARD\" : \"CANCEL\")"),
@@ -4086,6 +4089,33 @@ for (const b of [1, 2]) {
           "drawCompose's OWN BODY has no early return on a missing session - it would leave the dead ask's reply buttons on the glass, and every later repaint of this screen would leave them there too");
       chk(/drawComposeGone\(\)/.test(cDrawSrc) && /fillScreen/.test(cDrawSrc),
           "drawCompose draws the ask-is-gone card instead, on the same cleared screen");
+      // ONE SEND, TWO SCREENS, TWO ANSWERS TO "WHAT HAPPENED" - and that is what
+      // the bool return closes. The senders used to end in closeCompose()
+      // themselves, so an option tapped on the panel left a receipt while a draft
+      // sent from the panel's own SEND dropped the whole surface. Neither may
+      // close now, and each caller must do the thing its screen does.
+      {
+        const sendSrc = fnSrc(KB_SRC, "bool sendTypedAnswerToHost");
+        const promptSrc = fnSrc(KB_SRC, "bool sendPromptToHost");
+        chk(sendSrc.length > 0 && promptSrc.length > 0,
+            "sendTypedAnswerToHost and sendPromptToHost parsed, and BOTH return bool (gate) - a void one here means the parse found a different function and every claim below is vacuous");
+        for (const [n, src] of [["sendTypedAnswerToHost", sendSrc], ["sendPromptToHost", promptSrc]]) {
+          chk(!/closeCompose\(\)/.test(src),
+              `${n}'s OWN BODY does not close the surface - the caller owns the screen, because the two screens do different things with one answer`);
+          chk(/return false\s*;/.test(src) && /return true\s*;/.test(src),
+              `${n}'s OWN BODY reports whether the line went out - its early returns send NOTHING, and a caller that acted regardless would be acting on a failure`);
+        }
+        // Bound to the SEND arm itself, not to the function: composeTouch calls
+        // closeCompose twice legitimately (DONE and CLOSE), so "does it close"
+        // says nothing. The arm is the text from the send call to its return.
+        const armAt = cTouchSrc.indexOf("sendPromptToHost()");
+        chk(armAt > 0, "composeTouch's SEND arm located (gate)");
+        const arm = cTouchSrc.slice(armAt, armAt + 400);
+        chk(/composeShowSentState\(/.test(arm) && !/closeCompose\(/.test(arm),
+            "composeTouch's SEND arm leaves the RECEIPT and does NOT close - the same thing the one-tap reply path two bands up leaves, so one screen has one answer to what just happened");
+        chk(/closeCompose\(\)/.test(kbTouchSrc2),
+            "kbTouch's SEND arm closes instead, which is what the keyboard has always done and what the detail card underneath is repainted for");
+      }
       chk(/kbIsMessage\(\)/.test(cGoneSrc),
           "drawComposeGone's OWN BODY names WHICH cause it was - an expired prompt and a session that stopped being READY are different facts, and only one of them is answerable on your Mac");
       // AND ITS TWO SENTENCES FIT THE CARD THEY ARE DRAWN INTO. drawWrappedText
