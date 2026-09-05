@@ -583,6 +583,39 @@ function owningApp() {
   return { id: id.slice(0, 64), entry: entry.slice(0, 32) };
 }
 
+/// The live session's message inbox, as {socket, token}, or null when this
+/// Claude Code does not expose one.
+///
+/// THIS IS THE ONLY WAY TO LEARN THE SOCKET PATH. Claude Code exports
+/// CLAUDE_CODE_MESSAGING_SOCKET (/tmp/cc-socks/<pid>.sock) and
+/// CLAUDE_CODE_MESSAGING_TOKEN into every process it spawns, hooks included;
+/// there is no registry, no CLI subcommand and no derivation from a session id,
+/// so a hook reading its own environment is the whole mechanism. Anything that
+/// can read the pair may post a message INTO the running conversation - see
+/// host/session-inbox.mjs, which is what does.
+///
+/// THE TOKEN IS A CREDENTIAL. It authorises posting into that session, and it is
+/// written verbatim into ~/.claude/deckhand-sessions/<id>.json. That is the same
+/// single-user, mode-0700-adjacent directory that already holds ~/.claude/
+/// deckhand-secret (the device pairing keys) and every session transcript, so the
+/// trust boundary is UNCHANGED - but it is stated here rather than left for a
+/// reader to work out. Nothing sends it to the device: the record's `inbox` is
+/// consumed on the Mac and is not part of any device payload.
+///
+/// Read defensively, both fields required together: an older Claude Code exports
+/// neither, and half a pair is unusable. A hook that throws while gathering
+/// telemetry would be far worse than a missing line, so this cannot fail - two
+/// env lookups, no I/O, no parsing.
+function messagingInbox() {
+  const socket = process.env.CLAUDE_CODE_MESSAGING_SOCKET ?? "";
+  const token = process.env.CLAUDE_CODE_MESSAGING_TOKEN ?? "";
+  if (!socket || !token) return null;
+  // Capped for the same reason owningApp's fields are: these ride in a record
+  // rewritten on every hook event. A socket path is ~25 characters and the token
+  // is 32 hex, so anything far longer is not one of these.
+  return { socket: socket.slice(0, 256), token: token.slice(0, 128) };
+}
+
 function writeRecord(filePath, record) {
   const tmp = filePath + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(record));
@@ -675,6 +708,7 @@ try {
       // no display is connected, is authoritative), and one that means the
       // prompt is over. Everything else leaves it alone.
       const app = owningApp();
+      const inbox = messagingInbox();
       const definesAsk = isPermEvent || isPreAsk;
       const clearsAsk = ["PostToolUse", "PostToolUseFailure", "Stop", "UserPromptSubmit"]
         .includes(data.hook_event_name);
@@ -698,6 +732,15 @@ try {
         // process tree; `existing` is the fallback purely for a payload that
         // somehow arrives with neither set.
         ...(app ? { app } : existing.app ? { app: existing.app } : {}),
+        // WHERE TO POST A MESSAGE INTO THIS SESSION while it is still running.
+        // Same shape as `app` above and for the same reasons: recomputed per
+        // event from the environment this hook inherits (every event for a
+        // session runs inside that process tree), with `existing` as the
+        // fallback for a payload that somehow arrives without it. Carrying the
+        // old value forward matters more here than for `app` - dropping it
+        // would silently demote the host back to the clipboard for the rest of
+        // the session, which looks like the feature never shipped.
+        ...(inbox ? { inbox } : existing.inbox ? { inbox: existing.inbox } : {}),
         model: data.model ?? existing.model ?? "",
         // Most hook events don't carry the model (desktop-app sessions never
         // do), but the transcript path is in every payload and each assistant
