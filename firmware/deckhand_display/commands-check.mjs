@@ -284,6 +284,70 @@ function suite(ok, over = {}) {
   ok("the walker prints the entry's OWN cause, not a generic line",
      /u->cause/.test(walker));
 
+  // ---- (5b) AND THE MAC MUST NOT SWALLOW THE REFUSAL ---------------------
+  // 28795e3 fixed ONE instance of this: host/index.mjs's `BLEMTU ` arm returned
+  // on any line starting with that prefix, which silently ate board 1's
+  // "BLEMTU refused on E32R28T: ..." - correctly emitted by the device, never
+  // shown, and from the Mac indistinguishable from the silence this whole table
+  // exists to remove. That fix closed the instance and nothing closed the CLASS,
+  // and the class was checked by a reviewer enumerating 24 verbs against the
+  // handler's prefixes BY HAND. This is the assertion that keeps it true.
+  //
+  // The rule: a device line is logged by the general `[device/<link>]` line at the
+  // end of the handler, so any earlier arm that RETURNS without logging swallows
+  // whatever it matched. Every such arm's prefix is parsed out of the handler
+  // itself - never listed here - and no verb's refusal line may fall into one.
+  // Asserted for EVERY verb the dispatch has, not only the ones refused today: a
+  // verb that gains a table entry later must not have to rediscover this.
+  {
+    const hostSrc = over.host != null ? over.host
+      : fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+    const LOG = "console.log(`[device/${linkLabel(via)}] ${line}`);";
+    // The GENERAL log is the one at the handler's own top level (two spaces of
+    // indent); the earlier copies sit inside arms and are indented further.
+    const generalAt = hostSrc.indexOf(`\n  ${LOG}`);
+    ok("HOST: the general [device/...] log line is found in host/index.mjs", generalAt > 0);
+    if (generalAt > 0) {
+      const window = hostSrc.slice(0, generalAt);
+      // Every arm before it, brace-matched from its own `if`, so a nested arm is
+      // read as itself rather than as part of its parent.
+      const swallow = [];
+      const ARM = /if \(line\.startsWith\("([^"]+)"\)\)|if \(line === "([^"]+)"\)/g;
+      for (const m of window.matchAll(ARM)) {
+        const lit = m[1] || m[2];
+        // BRACELESS ARMS COUNT TOO. `if (line.startsWith("TEMP")) return;` is the
+        // cheapest possible way to reintroduce this and has no block at all, so a
+        // brace-only parse reads it as the NEXT arm's block and misses it.
+        const after = window.slice(m.index + m[0].length);
+        let block;
+        if (after.replace(/^\s*/, "").startsWith("{")) {
+          const open = window.indexOf("{", m.index + m[0].length - 1);
+          let d = 0, close = -1;
+          for (let j = open; j < window.length; j++) {
+            if (window[j] === "{") d++;
+            else if (window[j] === "}" && --d === 0) { close = j; break; }
+          }
+          block = close > open ? window.slice(open, close) : "";
+        } else block = after.slice(0, after.indexOf(";") + 1);
+        if (/\breturn\b/.test(block) && !block.includes("[device/")) swallow.push([lit, !!m[1]]);
+      }
+      ok(`HOST: the handler's silently-returning arms parse (${swallow.length}) ` +
+         `[${swallow.map(([l]) => JSON.stringify(l)).join(", ")}]`,
+         swallow.length >= 2);
+      const eaten = [];
+      for (const v of [...new Set([...allHandled, ...allRefused])].sort()) {
+        // The exact text refuseUnavailableCommand builds, less the board name and
+        // the cause - which is all any prefix here could ever see.
+        const refusal = `${v} refused on `;
+        for (const [lit, isPrefix] of swallow)
+          if (isPrefix ? refusal.startsWith(lit) : refusal === lit) eaten.push(`${v} <- ${lit}`);
+      }
+      ok(`HOST: no verb's "<VERB> refused on <board>: ..." line is swallowed by an arm that ` +
+         `returns before the general device log ${eaten.length ? "[" + eaten.join(", ") + "]" : ""}`,
+         eaten.length === 0);
+    }
+  }
+
   // ---- (6) THE WALKER'S BODY, not its text -------------------------------
   // Everything above binds what the walker SAYS. A reviewer measured what that
   // leaves open: `return false;` as its first statement restores board 1's
@@ -349,6 +413,25 @@ if (!SELFTEST) {
 // has moved applies nothing and would then be credited to whatever else fails.
 const realMain = stripComments("deckhand_display.ino");
 const realH1 = fs.readFileSync(`${DIR}/${HDR[1]}`, "utf8");
+const realHost = fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
+  .replace(/^[ \t]*\/\/.*$/gm, "");
+// One arm of host/index.mjs's device-line handler, LOCATED by its own literal and
+// brace-matched, with the `[device/...]` log removed from it - i.e. the shape
+// 28795e3 fixed for BLEMTU, put back.
+function unlogArm(src, lit) {
+  const at = src.indexOf(`if (line.startsWith("${lit}"))`);
+  if (at < 0) return src;
+  const open = src.indexOf("{", at);
+  let d = 0, close = -1;
+  for (let j = open; j < src.length; j++) {
+    if (src[j] === "{") d++;
+    else if (src[j] === "}" && --d === 0) { close = j; break; }
+  }
+  if (close < 0) return src;
+  const block = src.slice(open, close);
+  return src.slice(0, open) + block.replace(/\n[ \t]*console\.log\(`\[device\/[^\n]*\n/, "\n") +
+         src.slice(close);
+}
 // Located by PARSING - the entry for one verb, brace to brace - so these survive an
 // edit to the text they remove. Both of the pair-crypto checker's own EMOJITEST and
 // READTEST faults broke by transcribing the block they deleted.
@@ -448,12 +531,19 @@ const faults = [
     { h1: realH1.replace("#define BOARD_HISTORY_SCROLL 0", "const int BOARD_HISTORY_SCROLL = 0;") }],
   ["the refusal is printed to Serial, so a cable-less BLE session sees nothing",
     { main: realMain.replace("      sendLineToHost(out.c_str());", "      Serial.println(out);") }],
+  // ---- m6: the CLASS the BLEMTU fix closed only one instance of ----
+  ["the Mac's BLEMTU arm goes back to returning before it logs (28795e3, reverted)",
+    { host: unlogArm(realHost, "BLEMTU ") }],
+  ["a new host arm swallows a verb's refusal on its way to the log",
+    { host: realHost.replace("\n  console.log(`[device/${linkLabel(via)}] ${line}`);",
+        '\n  if (line.startsWith("TEMP")) return;\n  console.log(`[device/${linkLabel(via)}] ${line}`);') }],
 ];
 
 let caught = 0;
 for (const [name, over] of faults) {
   const unchanged = (over.main == null || over.main === realMain) &&
-                    (over.h1 == null || over.h1 === realH1);
+                    (over.h1 == null || over.h1 === realH1) &&
+                    (over.host == null || over.host === realHost);
   if (unchanged) { console.log(`  MISSED  ${name}  <- the injection did not apply (anchor moved)`); continue; }
   const r = run(over, true);
   if (r.failures.length) {
