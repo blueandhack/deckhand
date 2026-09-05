@@ -40,8 +40,17 @@ preflight();
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // The board header FIRST, then deckhand_display.ino seeded with it - the order the
 // compiler sees, and what makes the derived P1_/P2_/P3_/CFM_ offsets resolve.
-const B = {};
-for (const b of [1, 2]) B[b] = consts("deckhand_display.ino", consts(HDR[b]));
+const B = {}, CMP = {};
+for (const b of [1, 2]) {
+  B[b] = consts("deckhand_display.ino", consts(HDR[b]));
+  // compose.ino's OWN const ints (COMPOSE_PROMPT_LINES, COMPOSE_COLS,
+  // COMPOSE_KEY_GAP, ...), parsed in the compiler's order with the header and the
+  // main file already in scope - COMPOSE_PROMPT_LINES is derived from
+  // COMPOSE_PROMPT_H and KB_LINE_PITCH, so the seed is not optional. Parsed
+  // INSIDE this loop rather than after it because consts() tracks the board from
+  // the last header it saw.
+  CMP[b] = consts("compose.ino", B[b]);
+}
 const SET_CACHE = cacheSizes("deckhand_display.ino");   // the settings caches live in the main file
 // The main file's own TEXT, for a claim that is about a DECLARATION rather than
 // about a constant's value.
@@ -233,6 +242,54 @@ function spineArg(c, n) {
 const HOST_CAP = +fs.readFileSync(`${DIR}/../../host/voice-answer.mjs`, "utf8")
   .match(/ANSWER_TEXT_MAX_BYTES\s*=\s*(\d+)/)[1];
 const KB_SRC = fs.readFileSync(`${DIR}/keyboard.ino`, "utf8");
+// THE REPLY PANEL'S SOURCE, and its constants. compose.ino is parsed with each
+// board header as the seed, in the compiler's own order, because
+// COMPOSE_PROMPT_LINES is derived from COMPOSE_PROMPT_H and KB_LINE_PITCH.
+const COMPOSE_SRC = fs.readFileSync(`${DIR}/compose.ino`, "utf8");
+
+// THE PANEL'S BAND TOPS, READ OUT OF THE FIRMWARE'S OWN ACCESSORS. compose.ino
+// keeps its vertical column as a chain of `int composeXxxY() { return <expr>; }`
+// so that the draw and the hit test read ONE source; this evaluates those
+// expressions against a board's constant table, recursing through the chain.
+//
+// A MIRROR THAT RECOMPUTED THE STACK HERE WOULD BIND NOTHING - it would agree
+// with itself while the panel drew something else, which is this repo's
+// fourth verification rule in as many words. Reordering two bands in
+// compose.ino, or changing one gap, moves the walk below with it.
+//
+// An identifier the board's table does not know THROWS rather than resolving to
+// 0: a silent 0 would slide the whole column up and the closure assertions would
+// then be measuring a stack that does not exist.
+const COMPOSE_ACC = (() => {
+  const out = {};
+  for (const m of stripComments("compose.ino")
+        .matchAll(/\bint\s+(compose[A-Za-z0-9_]*)\(\)\s*\{\s*return\s+([^;]+);\s*\}/g))
+    out[m[1]] = m[2].trim();
+  if (!Object.keys(out).length)
+    throw new Error("settings-geom-check: compose.ino declares no `int composeXxxY() { return ...; }` " +
+                    "accessors - the reply panel's column comes from those, so move this parse with them " +
+                    "rather than leaving the walk below looking at nothing");
+  return out;
+})();
+function composeAcc(b, name, seen = new Set()) {
+  if (!(name in COMPOSE_ACC))
+    throw new Error(`settings-geom-check: compose.ino has no accessor ${name}() - if the panel's ` +
+                    `column was renamed, move this walk with it`);
+  if (seen.has(name))
+    throw new Error(`settings-geom-check: compose.ino's ${name}() is cyclic through ${[...seen].join(" -> ")}`);
+  seen.add(name);
+  let e = COMPOSE_ACC[name];
+  // Nested accessors first, then the constants. Both are substituted textually
+  // and the result is evaluated by geom-common's C-integer evaluator, so `/`
+  // truncates the way the firmware's does.
+  e = e.replace(/([A-Za-z_]\w*)\s*\(\s*\)/g, (m, fn) => `(${composeAcc(b, fn, new Set(seen))})`);
+  e = e.replace(/[A-Za-z_]\w*/g, (id) => {
+    if (id in CMP[b]) return String(CMP[b][id]);
+    throw new Error(`settings-geom-check: compose.ino's ${name}() names ${id}, which is not a ` +
+                    `constant board ${b} declares - a silent 0 here would slide the whole column`);
+  });
+  return evalInt(e);
+}
 const KB_MAX_BYTES = +KB_SRC.match(/KB_MAX_BYTES\s*=\s*(\d+)/)[1];
 
 // B1. THE DRAWN KEY'S VERTICAL INSET, READ OUT OF THE TWO FUNCTIONS THAT DRAW
@@ -3470,6 +3527,286 @@ for (const b of [1, 2]) {
         `KB_PEEK_LINES ${c.KB_PEEK_LINES} == (${peekH} - ${c.KB_PEEK_TEXT_DY} - 8) / ${c.KB_LINE_PITCH} = ${((peekH - c.KB_PEEK_TEXT_DY - 8) / c.KB_LINE_PITCH).toFixed(2)} -> ${peekLines}`);
     chk(c.KB_PEEK_TEXT_DY + peekLines * c.KB_LINE_PITCH <= peekH,
         `peek's ${peekLines} lines end ${c.KB_PEEK_TEXT_DY + peekLines * c.KB_LINE_PITCH - 1} inside the ${peekH}px overlay`);
+  }
+
+  // ================= THE REPLY PANEL (compose.ino) =================
+  // The compose surface's other screen. Its column closes on the SAME KB_ACT_Y the
+  // keyboard's does - derived, not arranged, since both stacks are fixed above it -
+  // and every band on it is TAP_MIN with a KB_ACT_DRAWN button centred inside.
+  {
+    const yOf = (n) => composeAcc(b, n);
+    const k = CMP[b];
+    // RECENTS FIT WHERE THE GEOMETRY SAYS SO, not where a board number does. The
+    // firmware asks the same question in composeRecentsFit(), and its body is
+    // asserted below to be this expression rather than a board #if.
+    const recentsFit = c.KB_ACT_Y - yOf("composeRecentY") >= c.TAP_MIN;
+    // [name, top, height, tappable]
+    const bands = [
+      ["the prompt card", yOf("composePromptY"), c.COMPOSE_PROMPT_H, true],
+      ["the reply legend", yOf("composeLegend1Y"), c.COMPOSE_LEGEND_H, false],
+      ["reply band 0", yOf("composeReplyY"), c.TAP_MIN, true],
+      ["reply band 1", yOf("composeReplyY") + c.TAP_MIN, c.TAP_MIN, true],
+      ["the insert legend", yOf("composeLegend2Y"), c.COMPOSE_LEGEND_H, false],
+      ["the token band", yOf("composeTokenY"), c.TAP_MIN, true],
+      ["the draft line", yOf("composeDraftY"), c.COMPOSE_DRAFT_H, true],
+      ["the recent legend", yOf("composeLegend3Y"), c.COMPOSE_LEGEND_H, false],
+    ];
+    if (recentsFit) bands.push(["the recent band", yOf("composeRecentY"), c.TAP_MIN, true]);
+    bands.push(["the action band", c.KB_ACT_Y, c.KB_ACT_H, true]);
+    console.log(`  reply panel: ` + bands.map(([n, t, h]) => `${n.replace(/^the /, "")} ${t}..${t + h - 1}`).join(" | ")
+              + ` of ${c.BOARD_H}${recentsFit ? "" : " (no recents row)"}`);
+    // THE CONTIGUITY WALK, and it is deliberately NOT a sum of the terms. Once
+    // every gap is written as `next - prev - prevH` the sum TELESCOPES and holds
+    // for any values at all - the defect the keyboard's own column block above
+    // documents at length. What can fail is this: each band starts at or after the
+    // one above it ended, no gap is negative, and the last ends inside BOARD_H.
+    let cursor = 0, slack = 0;
+    for (const [n, top, h] of bands) {
+      chk(top >= cursor,
+          `reply panel: ${n} starts ${top}, at or after the ${cursor} where the band above it ends (gap ${top - cursor})`);
+      slack += top - cursor;
+      cursor = top + h;
+    }
+    chk(cursor <= c.BOARD_H,
+        `reply panel: the last band ends ${cursor - 1} inside BOARD_H ${c.BOARD_H}, with ${c.BOARD_H - cursor} row(s) of bottom margin`);
+    // THE PANEL'S ONE FREE TERM, and it is the residual above the action row. The
+    // walk above forbids overlap but would accept slack anywhere; this says where
+    // the slack IS. Board 1 has 31px and board 2 has 64, all of it in one place,
+    // and a term that drifted would show up here as slack in two.
+    const residual = c.KB_ACT_Y - (recentsFit ? yOf("composeRecentY") + c.TAP_MIN : yOf("composeRecentY"));
+    console.log(`    slack ${slack}px = COMPOSE_TOP ${c.COMPOSE_TOP} + COMPOSE_GAP ${c.COMPOSE_GAP} + residual ${residual}`);
+    chk(slack === c.COMPOSE_TOP + c.COMPOSE_GAP + residual,
+        `reply panel: the ${slack}px of slack in this column is exactly the three terms the design names - the ` +
+        `${c.COMPOSE_TOP}px top margin, the ${c.COMPOSE_GAP}px gap under the prompt card and the ${residual}px ` +
+        `residual above the action band. A gap ANYWHERE else is a strip the design did not put there, and the ` +
+        `contiguity walk above cannot see it: it forbids overlap, not slack`);
+    chk(residual >= 0,
+        `reply panel: the residual above the action band is ${residual} - a negative one means the stack has ` +
+        `grown into the row that answers Claude`);
+    // EVERY TESTED BAND CLEARS THE FINGERTIP FLOOR, except the ONE that is named.
+    // The list is exact in both directions: a new sub-floor band fails, and so
+    // does an entry here that is no longer sub-floor, so the permission cannot rot
+    // into a blanket one. Same shape as docs/design/compose/check.mjs's EXCEPTIONS.
+    const SUB_FLOOR_OK = ["the draft line"];
+    const subFloor = bands.filter(([n, t, h, tap]) => tap && h < c.TAP_MIN).map(([n]) => n);
+    chk(subFloor.join("|") === SUB_FLOOR_OK.join("|"),
+        `reply panel: the tested bands under TAP_MIN ${c.TAP_MIN} are [${subFloor.join(", ")}], and the ` +
+        `only one this design permits is [${SUB_FLOOR_OK.join(", ")}] - the draft line is one text cell ` +
+        `plus its air (COMPOSE_DRAFT_H ${c.COMPOSE_DRAFT_H}) and carries CLR, a RECOVERY for a draft you ` +
+        `can still see, so a miss costs one tap and loses nothing`);
+    for (const [n, t, h, tap] of bands)
+      if (tap && !SUB_FLOOR_OK.includes(n))
+        chk(h >= c.TAP_MIN, `reply panel: ${n} is ${h}px tall >= TAP_MIN ${c.TAP_MIN}`);
+    // CLR IS SHORT IN ONE AXIS ONLY. Its tested zone runs from composeClrX() to
+    // the lane's right edge, and that width is read out of the firmware's own
+    // accessor rather than restated.
+    const clrW = c.CARD_X + c.CARD_W - yOf("composeClrX");
+    chk(clrW >= c.TAP_MIN,
+        `reply panel: CLR's tested zone is ${clrW}px wide >= TAP_MIN ${c.TAP_MIN} - it is sub-floor in HEIGHT alone`);
+    // THE DRAWN BUTTON IS STRICTLY INSIDE ITS BAND, and the panel reuses the
+    // action row's three numbers rather than deriving new ones - so this is the
+    // claim that they still centre in a TAP_MIN band, which is what every band on
+    // this screen is. It fails the moment KB_ACT_H stops being TAP_MIN.
+    chk(c.KB_ACT_DRAWN < c.TAP_MIN,
+        `reply panel: the drawn control ${c.KB_ACT_DRAWN} is strictly inside its ${c.TAP_MIN}px band`);
+    chk(2 * c.KB_ACT_DY + c.KB_ACT_DRAWN === c.TAP_MIN,
+        `reply panel: the drawn control is centred in a TAP_MIN band - ${c.KB_ACT_DY} + ${c.KB_ACT_DRAWN} + ${c.KB_ACT_DY} == ${c.TAP_MIN}`);
+    // THE THREE COLUMNS. The cell comes from composeCellW()'s own expression; the
+    // remainder goes to the last column, so the row closes on the lane exactly.
+    const cell = yOf("composeCellW"), last = c.CARD_W - (k.COMPOSE_COLS - 1) * cell;
+    console.log(`    columns: ${Array(k.COMPOSE_COLS - 1).fill(cell).join(" + ")} + ${last} = ${(k.COMPOSE_COLS - 1) * cell + last} (lane ${c.CARD_W}), drawn ${cell - k.COMPOSE_KEY_GAP} wide`);
+    chk(cell === Math.trunc(c.CARD_W / k.COMPOSE_COLS),
+        `reply panel: composeCellW() is ${cell} == CARD_W ${c.CARD_W} / ${k.COMPOSE_COLS} = ${Math.trunc(c.CARD_W / k.COMPOSE_COLS)}`);
+    chk(last - cell === c.CARD_W % k.COMPOSE_COLS && last >= cell,
+        `reply panel: the last column takes the ${c.CARD_W % k.COMPOSE_COLS}px remainder (${cell} -> ${last}), so the three columns close on the ${c.CARD_W}px lane rather than leaving a sliver at the edge`);
+    // THE THREE CONSTANTS compose.ino KEEPS FOR ITSELF, each against something
+    // independent of it - geom-sweep.mjs reported all three as either unread or
+    // caught only by a crash, and a constant no assertion reads is a constant
+    // that can move without anyone noticing.
+    chk(k.COMPOSE_KEY_GAP === c.KB_PITCH - c.KB_KEY_W,
+        `reply panel: COMPOSE_KEY_GAP ${k.COMPOSE_KEY_GAP} == KB_PITCH ${c.KB_PITCH} - KB_KEY_W ` +
+        `${c.KB_KEY_W} = ${c.KB_PITCH - c.KB_KEY_W} - the panel's drawn/tested gap is the KEY's own, ` +
+        `not a second number, and keyboard.ino spells the same expression KB_KEY_GAP`);
+    chk(k.COMPOSE_CHIPS_PER_PAGE === k.COMPOSE_COLS - 1,
+        `reply panel: a token page is ${k.COMPOSE_CHIPS_PER_PAGE} chip(s) of ${k.COMPOSE_COLS} columns - ` +
+        `the pager's lane is RESERVED before the chips are laid out, so a wide chip can never run ` +
+        `underneath it`);
+    chk(k.COMPOSE_REPLY_BANDS * k.COMPOSE_COLS >= 4,
+        `reply panel: the reply grid is ${k.COMPOSE_REPLY_BANDS} x ${k.COMPOSE_COLS} = ` +
+        `${k.COMPOSE_REPLY_BANDS * k.COMPOSE_COLS} cells, enough for the 4 options SessionInfo can hold ` +
+        `- a smaller grid would silently drop the last option rather than draw it`);
+    // THE PANEL'S WHOLE CASE, in one line: a reply button clears the fingertip
+    // floor in WIDTH, which no key on either board does (KB_PITCH is 24 and 32
+    // against a floor of 40 and 46). If this ever stopped holding the panel would
+    // have to be re-argued rather than assumed.
+    chk(cell >= c.TAP_MIN,
+        `reply panel: a column is ${cell}px wide >= TAP_MIN ${c.TAP_MIN} - the key band is ${c.KB_PITCH}, which is the whole reason this screen exists`);
+    // THE PAGER'S OWN LABEL has to fit the column it is centred in - it is the one
+    // string on this screen that is generated rather than authored, and a
+    // truncated "9/9>" would read as a different control.
+    chk(widthB(b, T_BODY, "9/9>") + 4 <= cell - k.COMPOSE_KEY_GAP,
+        `reply panel: the pager's widest label "9/9>" is ${widthB(b, T_BODY, "9/9>")}px inside its ${cell - k.COMPOSE_KEY_GAP}px button`);
+    // THE PROMPT CARD'S LINE COUNT, derived back out of the card's height in
+    // compose.ino. This is an EXACTNESS claim, not the derivation restated: at
+    // COMPOSE_PROMPT_H 53 the count would still be 2 and this would fail by 1.
+    const promptWant = 5 + c.KB_LINE_PITCH + 4 + k.COMPOSE_PROMPT_LINES * c.KB_LINE_PITCH + 4;
+    chk(promptWant === c.COMPOSE_PROMPT_H,
+        `reply panel: COMPOSE_PROMPT_H ${c.COMPOSE_PROMPT_H} == 5 + KB_LINE_PITCH + 4 + ${k.COMPOSE_PROMPT_LINES} lines + 4 (${promptWant})`);
+    chk(k.COMPOSE_PROMPT_LINES >= 2,
+        `reply panel: the prompt card holds ${k.COMPOSE_PROMPT_LINES} wrapped lines of the question - one line is a title, not a question`);
+    chk(lineHB(b, T_BODY) <= c.KB_LINE_PITCH,
+        `reply panel: a T_BODY cell is ${lineHB(b, T_BODY)}px and the card steps ${c.KB_LINE_PITCH}px per line - drawString paints an OPAQUE box a full cell tall, so a shorter step eats the line above`);
+    chk(c.COMPOSE_PROMPT_H >= c.TAP_MIN,
+        `reply panel: the prompt card is ${c.COMPOSE_PROMPT_H}px and is one tap target - well over TAP_MIN ${c.TAP_MIN}, so nothing about it is excepted`);
+    chk(lineHB(b, T_META) <= c.COMPOSE_LEGEND_H && lineHB(b, T_BODY) <= c.COMPOSE_DRAFT_H,
+        `reply panel: a legend holds its T_META cell (${lineHB(b, T_META)} in ${c.COMPOSE_LEGEND_H}) and the draft line its T_BODY cell (${lineHB(b, T_BODY)} in ${c.COMPOSE_DRAFT_H})`);
+    // EVERY LEGEND FITS ITS LANE WITHOUT BEING TRUNCATED, and the strings are
+    // PARSED out of the drawComposeLegend() call sites rather than restated here.
+    // A legend is the sentence that says what the band under it does - and one of
+    // them exists only to name why a row is absent, so a legend cut off at three
+    // dots would lose exactly the cause it was written to carry.
+    {
+      // SCOPED TO THE CALL SITES, and every string INSIDE one - the legends are
+      // ternaries (a band that is empty says WHY it is empty), so taking only the
+      // first literal per call would measure half of them and taking every
+      // ternary in the file would measure button labels against a lane that is
+      // not theirs.
+      const calls = [...stripComments("compose.ino").matchAll(/drawComposeLegend\(([^;]*)\);/gs)].map((m) => m[1]);
+      const all = [...new Set(calls.flatMap((a) =>
+        [...a.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1])))];
+      chk(all.length >= 4,
+          `reply panel: ${all.length} legend string(s) parsed out of compose.ino's drawComposeLegend call sites (gate - a parse that found none would make every claim below vacuous)`);
+      for (const t of all) {
+        chk(widthB(b, T_META, t) <= c.CARD_W - 12,
+            `reply panel: legend "${t}" is ${widthB(b, T_META, t)}px inside the ${c.CARD_W - 12}px lane, so it is never cut to three dots`);
+      }
+    }
+    // EVERY STRING IN compose.ino IS ASCII 0x20..0x7E. An out-of-range codepoint
+    // draws NOTHING and advances NOTHING - it is invisible rather than a fallback
+    // glyph - and this repo has paid for that at least six times, twice on a
+    // truncation marker. The panel adds a pager arrow ("N>"), a "+ " prefix and a
+    // "SENT:" receipt, every one of which is the kind of string someone reaches
+    // for a real glyph to draw.
+    {
+      const bad = [];
+      for (const m of stripComments("compose.ino").matchAll(/"((?:[^"\\]|\\.)*)"/g))
+        for (const ch of m[1])
+          if (ch.codePointAt(0) < 0x20 || ch.codePointAt(0) > 0x7e) bad.push(`U+${ch.codePointAt(0).toString(16)} in "${m[1]}"`);
+      chk(bad.length === 0,
+          `reply panel: every string literal in compose.ino is printable ASCII${bad.length ? " - found " + bad.join(", ") : ""}`);
+    }
+    if (b === 1) {
+      // ===== THE STRUCTURAL HALF. Everything above is arithmetic over constants,
+      // and arithmetic cannot say that the panel truncates a label but never a
+      // token, that the pager PAGES rather than counts, or that the two screens
+      // share one draft. These read the firmware's own text, each bound to a
+      // FUNCTION BODY rather than to the file - a rule a neighbouring line can
+      // satisfy is not a rule - with the parse gates first, because
+      // !/re/.test("") is TRUE and every negative below would otherwise pass
+      // vacuously over a function that failed to parse. Board 1 only: the source
+      // is shared, so these are claims about the source and not about a board.
+      const chipSrc = fnSrc(COMPOSE_SRC, "void drawComposeChip");
+      const insSrc = fnSrc(COMPOSE_SRC, "void composeInsertChip");
+      const ctlSrc = fnSrc(COMPOSE_SRC, "void drawComposeControl");
+      const cTouchSrc = fnSrc(COMPOSE_SRC, "bool composeTouch");
+      const actSrc2 = fnSrc(COMPOSE_SRC, "void drawComposeActions");
+      const recSrc = fnSrc(COMPOSE_SRC, "void drawComposeRecents");
+      const fitSrc = fnSrc(COMPOSE_SRC, "bool composeRecentsFit");
+      const draftSrc = fnSrc(COMPOSE_SRC, "void drawComposeDraft");
+      const kbDrawSrc = fnSrc(KB_SRC, "void drawKeyboard");
+      const kbCloseSrc = fnSrc(KB_SRC, "void closeKeyboard");
+      const kbInsSrc = fnSrc(KB_SRC, "void kbInsert");
+      const htSrc = fnSrc(SRC_MAIN, "void handleTouch");
+      for (const [n, src] of [["drawComposeChip", chipSrc], ["composeInsertChip", insSrc],
+                              ["drawComposeControl", ctlSrc], ["composeTouch", cTouchSrc],
+                              ["drawComposeActions", actSrc2], ["drawComposeRecents", recSrc],
+                              ["composeRecentsFit", fitSrc], ["drawComposeDraft", draftSrc],
+                              ["drawKeyboard", kbDrawSrc], ["closeKeyboard", kbCloseSrc],
+                              ["kbInsert", kbInsSrc], ["handleTouch", htSrc]])
+        chk(src.length > 0, `${n} parsed (gate)`);
+      // THE LABEL TRUNCATES AND THE VALUE NEVER DOES. Truncating the INSERTED
+      // token would quietly send Claude a path that does not exist, which is
+      // worse than any drawing defect. The truncation lives in the ONE function
+      // that draws all four control kinds, so the positive claim is made there
+      // and drawComposeChip is asserted to route through it - a chip that grew a
+      // draw of its own would fail this rather than silently escaping the rule.
+      chk(/fitText\(/.test(ctlSrc),
+          "drawComposeControl's OWN BODY truncates every label it draws through fitText - three ASCII dots, never U+2026");
+      chk(/drawComposeControl\(/.test(chipSrc) && !/drawString/.test(chipSrc),
+          "drawComposeChip's OWN BODY draws through drawComposeControl and nowhere else, so the label truncation it inherits is the one asserted above");
+      chk(!/fitText/.test(insSrc),
+          "composeInsertChip's OWN BODY inserts the WHOLE token - a truncated path is a path that does not exist");
+      chk(/kbInsert\(/.test(insSrc),
+          "composeInsertChip's OWN BODY splices through kbInsert, so the caret arithmetic and the KB_MAX_BYTES cap stay in one place");
+      // THE PAGER IS REAL, NOT A COUNT. The row fits two tokens on both boards and
+      // the host ships up to four, so a label that only counted would leave half
+      // of them unreachable. Bound to composeTouch's body: the page has to ADVANCE
+      // and it has to wrap on the page count rather than on a literal.
+      chk(/composeChipPage\s*=\s*\(composeChipPage\s*\+\s*1\)\s*%\s*pages/.test(cTouchSrc),
+          "composeTouch's OWN BODY advances composeChipPage modulo the page count - the pager pages, and a token on page 2 is reachable");
+      chk(/composeChipPages\(/.test(cTouchSrc),
+          "composeTouch's OWN BODY takes that page count from composeChipPages(), the same function the draw uses");
+      // THE ACTION ROW'S TESTED BANDS come from uiActionRow and are hit-tested
+      // from what it stored - the same one-place rule kbTouch/drawKbActions
+      // already follow, and the reason neither recomputes a column inline.
+      chk(/uiActionRow\s*\(/.test(actSrc2),
+          "drawComposeActions' OWN BODY gets its columns from uiActionRow, not from arithmetic of its own");
+      chk(/composeActX\[/.test(cTouchSrc) && /composeActW\[/.test(cTouchSrc),
+          "composeTouch's OWN BODY hit-tests the columns drawComposeActions stored, so the draw and the test cannot disagree");
+      chk(/KB_ACT_H/.test(cTouchSrc) && !/KB_ACT_DRAWN/.test(cTouchSrc),
+          "composeTouch tests the BAND (KB_ACT_H) and not the drawn button - the air above and below belongs to the control");
+      {
+        const fracsInit = (actSrc2.match(/fracs\[3\]\s*=\s*\{([^}]*)\}/) || ["", ""])[1];
+        const labelsInit = (actSrc2.match(/labels\[3\]\s*=\s*\{([^}]*)\}/) || ["", ""])[1];
+        chk(fracsInit.length > 0 && labelsInit.length > 0,
+            "drawComposeActions' three-control labels[]/fracs[] initialisers parsed (gate)");
+        const fr = splitArgs(fracsInit).map((t) => +t.trim()), lb = splitArgs(labelsInit);
+        chk(fr.length === 3 && lb.length === 3,
+            `drawComposeActions' row is ${lb.length} control(s) at fracs {${fr.join(", ")}} - the design's row is three`);
+        // THE STORED BANDS MUST HOLD THE WIDEST ROW THIS FUNCTION DRAWS. An array
+        // shorter than what uiActionRow writes into it is an out-of-bounds write
+        // on every repaint - the exact shape of the cxRightCache bug, which
+        // silently corrupted four bytes past its array on every tick. The row's
+        // width is PARSED from the initialiser above rather than restated, so
+        // growing the row without growing the array fails here.
+        chk(CMP[b].COMPOSE_ACT_MAX >= lb.length,
+            `COMPOSE_ACT_MAX ${CMP[b].COMPOSE_ACT_MAX} holds the ${lb.length} column(s) drawComposeActions ` +
+            `writes into composeActX/composeActW`);
+        if (fr.length === 3 && lb.length === 3) {
+          chk(fr[2] === 2 * fr[0] && fr[2] === 2 * fr[1],
+              `drawComposeActions' fracs are {${fr.join(", ")}} - SEND is EXACTLY twice the destructive control, which is what spec defect 2 asks for, and the third control still gets a full band`);
+          chk(/DISCARD/.test(lb[0]) && /CLOSE/.test(lb[0]) && !/DISCARD/.test(lb[2]),
+              "drawComposeActions puts the destructive control in COLUMN 0 and relabels it CLOSE with nothing to lose - label AND colour, never colour alone, and never adjacent to SEND");
+          chk(/TYPE/.test(lb[1]),
+              "drawComposeActions puts TYPE... in COLUMN 1, on a full TAP_MIN band - it is the only bridge from this panel to free text, and an earlier draft parked it on the draft line, the one sub-floor band on the screen");
+        }
+      }
+      // RECENTS ARE ASKED OF THE GEOMETRY, NOT OF THE BOARD NUMBER, and where
+      // they do not fit the panel SAYS SO on the glass. Every refusal names its
+      // cause - the rule this repo states for device commands, applied to a row
+      // that is absent.
+      chk(/KB_ACT_Y\s*-\s*composeRecentY\(\)\s*>=\s*TAP_MIN/.test(fitSrc),
+          "composeRecentsFit's OWN BODY asks whether a whole TAP_MIN band is left above the action row - not which board it is on, which would be a second place to keep the column");
+      chk(/BOARD_/.test(fitSrc) === false,
+          "composeRecentsFit's OWN BODY names no board flag at all");
+      chk(/drawComposeLegend\(/.test(recSrc) && /NO ROOM/.test(recSrc),
+          "drawComposeRecents' OWN BODY draws a LINE where the row does not fit, not a gap the reader has to interpret");
+      // ONE DRAFT, TWO SCREENS, and the panel's own repaint discipline. The draft
+      // line changes per character, so it is repainted wholesale exactly as
+      // drawKbText() is - a change-only cache shorter than the string it holds
+      // silently stops noticing changes past that point, and this string is the
+      // one that changes most.
+      chk(/fillRect\(CARD_X,\s*(?:y|composeDraftY\(\)),\s*CARD_W,\s*COMPOSE_DRAFT_H/.test(draftSrc),
+          "drawComposeDraft's OWN BODY clears its own band before redrawing it, so a shorter draft cannot leave the tail of a longer one behind");
+      chk(/composePanelOn/.test(kbDrawSrc) && /drawCompose\(\)/.test(kbDrawSrc),
+          "drawKeyboard's OWN BODY routes to the panel on composePanelOn - ONE screen-painting entry point for both screens of the compose surface");
+      chk(/composePanelOn\s*=\s*false/.test(kbCloseSrc),
+          "closeKeyboard's OWN BODY clears composePanelOn - leaving it set would paint the panel over the NEXT keyboard and route every tap on it to composeTouch, which is exactly the screen-does-not-match-the-router bug that function's own comment records");
+      chk(/composePanelOn/.test(kbInsSrc) && /composeAfterEdit\(\)/.test(kbInsSrc),
+          "kbInsert's OWN BODY repaints whichever screen is up - drawKbText would paint the keyboard's card over the panel's prompt card and reply buttons");
+      chk(/composePanelOn/.test(htSrc) && /composeTouch\(/.test(htSrc),
+          "handleTouch's OWN BODY dispatches on composePanelOn - one router, one flag, and the panel takes the whole tap because every target on it clears TAP_MIN");
+    }
   }
 
   // ================= THE READER AND HISTORY PAGER =================

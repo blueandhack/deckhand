@@ -822,6 +822,13 @@ void drawKeyboard() {
   // to go with them - otherwise the next kbClearBubble() would repaint three
   // keys over a board that no longer has a bubble on it.
   kbBubOn = false;
+  // THE COMPOSE SURFACE HAS TWO SCREENS AND THIS IS THE ONE ENTRY POINT TO BOTH.
+  // openKeyboard()'s last act is a call to this function, so composeOpen() only
+  // has to set the flag before it - and TYPE.../BACK are then a flag flip and one
+  // call to here, with the draft (kbText/kbLen/kbCaret) untouched by either.
+  // Routing at the top rather than painting the keyboard and then the panel over
+  // it: that would be a full-screen double paint, visible on board 1.
+  if (composePanelOn) { drawCompose(); return; }
   tft.fillScreen(COLOR_BG);
   // BEFORE the peek's early return: the peek covers the keys from KB_ROWS_Y down
   // and never the card or the strip, so the question stays legible above it and
@@ -881,6 +888,13 @@ void closeKeyboard() {
   // Before kbActive goes false: kbProbeStop's totals are the measurement, and a
   // BACK tap in the middle of a typing pass would otherwise throw them away.
   kbProbeStop("keyboard closed");
+  // BOTH SCREENS OF THE COMPOSE SURFACE GO AT ONCE, and this line is not
+  // optional: composePanelOn is what drawKeyboard() and handleTouch() dispatch
+  // on, so leaving it true would mean the NEXT keyboard opened (from the detail
+  // card's TYPE chip, say) painted the reply panel, and every tap on it routed to
+  // composeTouch against a screen that no longer matched. That is precisely the
+  // class of bug this function's long comment below records.
+  composePanelOn = false;
   kbArmRow = kbArmCol = -1;    // a press cannot survive the screen it landed on
   kbBubOn = false;             // the fillScreen below takes the pixels with it
   kbActive = false;
@@ -942,7 +956,15 @@ void closeKeyboard() {
 // to equal kbLen, so the pin survives every keystroke until a tap ends it.
 
 void kbInsert(char c) {
-  if (kbLen >= KB_MAX_BYTES) { drawKbText(); return; }  // repaint so the counter shows why
+  // Repaint so the counter shows why - and on the panel, so the draft line does:
+  // the cap is the one thing on this path that can make a tap do nothing, and a
+  // key (or a chip) that stops inserting with no visible reason reads as a
+  // dropped press.
+  if (kbLen >= KB_MAX_BYTES) {
+    if (composePanelOn) composeAfterEdit();
+    else drawKbText();
+    return;
+  }
   if (kbShiftMode > 0 && c >= 'a' && c <= 'z') c -= 32;
   int pos = kbCaret < 0 ? kbLen : kbCaret;
   // Shift [pos..kbLen] (the NUL included) up by one byte to open a gap at pos.
@@ -958,6 +980,11 @@ void kbInsert(char c) {
     for (int r = 0; r < 3; r++)
       for (int col = 0; col < kbRowLen(r); col++) drawKbKey(r, col, false);
   }
+  // WHICHEVER SCREEN IS ACTUALLY UP. The splice above is shared by both, but the
+  // keyboard's text card and the reply panel's draft line are different pixels -
+  // and drawKbText() would paint that card over the panel's prompt card and reply
+  // buttons, which is a full-width repaint of the wrong screen.
+  if (composePanelOn) { composeAfterEdit(); return; }
   drawKbText();
   drawKbActions();      // SEND becomes live on the first character
 }
@@ -970,6 +997,7 @@ void kbBackspace() {
   memmove(kbText + pos - 1, kbText + pos, kbLen - pos + 1);
   kbLen--;
   if (kbCaret >= 0) kbCaret--;  // moves left with the byte it just deleted
+  if (composePanelOn) { composeAfterEdit(); return; }   // see kbInsert
   drawKbText();
   drawKbActions();      // SEND goes inert again at zero
 }

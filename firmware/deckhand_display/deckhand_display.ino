@@ -1225,7 +1225,20 @@ char detailId[16] = "";
 // session already on screen. The icon id joins it for the same reason once
 // more: an icon changing (or a link's icon appearing/disappearing) changes
 // nothing else that this signature already tracks.
-char detailSigCache[384] = "";
+// 448, NOT 384, AND THE THREE BYTES IT HAD LEFT ARE WHY. At 384 this held its
+// 381-byte worst case on board 2 with THREE bytes of headroom, and every term
+// appended below is guarded by `if (used + n < outSize)` - so the next term does
+// not overflow, it is SILENTLY DROPPED, and a signature missing a term is a card
+// that never repaints when that term changes. That is the silent-truncation
+// failure mode this whole discipline exists to prevent, three bytes away, on a
+// signature that has gained a term in each of the last three tasks (the agent,
+// the option-description hash, the chip hash). 448 = 384 + 64 leaves room for
+// several more `|%08lx` hash terms plus slack; it costs 64 bytes of DRAM here and
+// 64 on the stack in renderSessionDetail, which sizes its scratch from
+// sizeof(detailSigCache) rather than guessing. sessions-geom-check.mjs asserts
+// the worst case against whatever this says and PRINTS the headroom, so the
+// number is checked rather than trusted.
+char detailSigCache[448] = "";
 // 28, not 16: this now holds "for 12m - 14:31" padded to 22, and drawIfChanged compares
 // only the first cacheSize bytes. At 16 the trailing clock fell outside the comparison
 // entirely, so the time would silently freeze while the duration beside it kept ticking.
@@ -1311,6 +1324,30 @@ int kbSessionIdx = -1;
 // and no ask to peek - and it pins the session ID, because there is no askPid.
 bool kbMessageMode = false;
 char kbSessionId[16] = "";
+
+// ---- The reply panel's state, DEFINED IN compose.ino ----
+// Forward-declared for the same reason scrollback.ino's globals are, below: the
+// build concatenates this file FIRST and compose.ino third, but handleTouch (in
+// this file) dispatches on composePanelOn, so a real declaration has to come
+// first. Functions get a generated prototype from anywhere in the sketch; plain
+// globals do not.
+//
+// composePanelOn says WHICH SCREEN of the compose surface is up - kbActive still
+// means "compose is up" and this says whether that is the reply panel (true) or
+// the keyboard (false). Task 11 of the compose plan folds the pair into
+// composeActive/composeScreen, and this extern moves with them.
+extern bool composePanelOn;
+extern int  composeChipPage;
+extern bool composeSent;
+// The three entry points this file uses, declared rather than left to the
+// builder's generated prototypes - they are the interface between the touch
+// router here and the screen over there, and NONE of them names SessionInfo,
+// Theme, Usage, HostPairing or ConfirmAction in its signature. A prototype that
+// did would be emitted ABOVE those declarations and would not compile.
+void drawCompose();
+bool composeTouch(int sx, int sy);
+void composeOpen(int idx);
+void composeShowSentState(const char* text);
 
 // ---------- Session history ----------
 // Fetched ON DEMAND and PAGED FROM THE MAC. The device stores only the page it is showing:
@@ -3755,7 +3792,12 @@ void handleTouch() {
   // press-commit, because every one of those targets already clears the ~7.1mm
   // fingertip floor in both axes.
   if (kbActive) {
-    if (!kbArm(sx, sy)) kbTouch(sx, sy);
+    // ONE SURFACE, TWO SCREENS, and exactly one dispatch on which. The reply panel
+    // takes the whole tap: every target on it clears TAP_MIN in both axes, so
+    // nothing there needs the arm-then-commit the 4.3mm key band needs, and the
+    // press-commit model is what the rest of the device already uses.
+    if (composePanelOn) composeTouch(sx, sy);
+    else if (!kbArm(sx, sy)) kbTouch(sx, sy);
     lastActivityMillis = millis();
     return;
   }
@@ -4620,6 +4662,16 @@ void handleLine(const String& line) {
     // is the flicker this firmware redraws by value to avoid.
     if (gone != kbWindowClosed) {
       kbWindowClosed = gone;
+      // WHICHEVER SCREEN OF THE COMPOSE SURFACE IS UP. kbActive covers both now,
+      // and every repaint below is the KEYBOARD's - drawKbActions would paint its
+      // row over the panel's (same band, different controls), drawKbStrip would
+      // paint a strip the panel does not have across its prompt card, and
+      // drawKbText would paint the keyboard's text card over the panel's reply
+      // buttons every 5 seconds. The panel's own row carries the same fact in its
+      // SEND label (SEND -> CLOSED), and it needs no clear: the button is redrawn
+      // at the same rect with a full uiFillRound, unlike the wrapped message the
+      // keyboard's row puts there.
+      if (composePanelOn) { drawComposeActions(); return; }
       tft.fillRect(CARD_X, KB_ACT_Y, tft.width() - CARD_X * 2, KB_ACT_H, COLOR_BG);
       drawKbActions();
       // AND THE PROMPT STRIP, on the same transition and for the same reason it
@@ -4631,7 +4683,9 @@ void handleLine(const String& line) {
       // its band when there is no detail, so this both repaints and erases.
       drawKbStrip();
     }
-    drawKbText();          // countdown ticks down
+    // The countdown is the keyboard's meta row; the panel draws no countdown, so
+    // there is nothing on it that a tick changes and it is left alone.
+    if (!composePanelOn) drawKbText();          // countdown ticks down
     return;
   }
 
@@ -5829,6 +5883,185 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
 #endif
     Serial.printf("DETAIL: session %d (%s) %s\n", di, sessions[di].name,
                   sessions[di].askPid[0] ? "ask screen" : "detail card");
+  } else if (buf.startsWith("THEME")) {
+    // WHICH PALETTE IS ON THE GLASS, FROM THE MAC. Every "confirm this reads in
+    // LIGHT and in DARK" step in this repo has, until now, needed a person to tap
+    // SETTINGS > THEME between two captures - and a capture can only record what
+    // is already there, which is the whole reason TAB, PAGE, DETAIL and COMPOSE
+    // exist. Colour is exactly the property a board-2 SCREENSHOT cannot vouch
+    // for, so the instrument that puts the other palette up matters most on the
+    // board whose captures are weakest.
+    //
+    // NOT PERSISTED, DELIBERATELY: it never touches the stored themeMode, so a
+    // capture cannot change what the device does tomorrow. A reboot restores the
+    // user's own setting, and so does tickAutoTheme's next 30s pass if the stored
+    // mode is AUTO - which is stated here rather than discovered, because a
+    // palette that reverted mid-capture would otherwise read as a drawing bug.
+    //
+    // Repaints WHATEVER IS UP rather than always calling forceFullRepaint():
+    // applyTheme's own comment says a caller that forgets to repaint leaves the
+    // previous palette on the glass, since every change-only cache here keys on
+    // CONTENT and not on colour - and forceFullRepaint() repaints the TABS, which
+    // would erase a full-screen surface instead of recolouring it.
+    String arg = buf.length() > 5 ? buf.substring(5) : String("");
+    arg.trim();
+    arg.toLowerCase();
+    int ti = arg == "dark" ? 0 : (arg == "light" ? 1 : -1);
+    if (ti < 0) {
+      Serial.printf("THEME refused: say \"THEME dark\" or \"THEME light\" (got \"%s\")\n", arg.c_str());
+      buf = "";
+      return;
+    }
+    applyTheme((uint8_t) ti);
+    if (kbActive) drawKeyboard();          // both compose screens repaint through here
+    else forceFullRepaint();
+#if !BOARD_USES_TFT_ESPI
+    tft.flush();
+#endif
+    Serial.printf("THEME: %s palette live (the stored setting is unchanged - a reboot puts it back)\n",
+                  THEMES[ti].name);
+  } else if (buf.startsWith("COMPOSE")) {
+    // THE REPLY PANEL, PUT ON THE GLASS FROM THE MAC. Nothing routes to this
+    // screen from the UI yet - task 11 of the compose plan is what opens it from
+    // the detail card - and a capture can only record what is already there, which
+    // is the same reason TAB, PAGE, KBTEST and DETAIL all exist.
+    //
+    //   COMPOSE             the first pending ask, panel open
+    //   COMPOSE type <text> the same, with <text> typed into the draft
+    //   COMPOSE chip <n>    taps token n - the insert a finger would do
+    //   COMPOSE page        advances the token pager
+    //   COMPOSE sent        the sent state (receipt + DONE), SENDING NOTHING
+    //   COMPOSE off         close it
+    //
+    // EVERY REFUSAL NAMES ITS CAUSE, and every early return CLEARS buf FIRST -
+    // buf is processCompletedLine's own accumulator, passed by reference, so a
+    // return that leaves the refused text in it has the next line APPENDED to the
+    // old one, which refuses again forever (measured: 63 refusal lines and ~100
+    // seconds of parsing nothing, from one bad DETAIL).
+    //
+    // NO DUPLICATE GUARD, DELIBERATELY, the same call DETAIL makes: the host
+    // writes each trigger-file line to every live transport, so a cabled board
+    // runs this twice within milliseconds. Opening the panel is IDEMPOTENT - the
+    // state is set and the screen repainted to the same pixels - so the second
+    // copy costs one repaint and can change nothing.
+    String arg = buf.length() > 7 ? buf.substring(7) : String("");
+    arg.trim();
+    if (arg == "off") {
+      if (kbActive) closeKeyboard();
+      Serial.println("COMPOSE: closed");
+      buf = "";
+      return;
+    }
+    if (arg == "page" || arg.startsWith("chip ")) {
+      // TAPPING A CHIP, AND PAGING, FROM THE MAC. Both exist for the reason
+      // KBBUBBLE does: the thing they produce exists only while a finger is on
+      // the glass, so a capture cannot record it and no checker can see it - a
+      // chip's whole point is that its LABEL is truncated and its VALUE is not,
+      // and that difference is invisible until a token has actually been
+      // inserted. The line printed below is the proof: the byte count is the
+      // WHOLE token's, not the drawn label's.
+      if (!kbActive || !composePanelOn) {
+        Serial.println("COMPOSE refused: the reply panel is not up (send COMPOSE first)");
+        buf = "";
+        return;
+      }
+      int ci = kbSessionIdx;
+      if (ci < 0 || ci >= sessionCount) {
+        Serial.println("COMPOSE refused: the ask this panel was opened for is gone");
+        buf = "";
+        return;
+      }
+      // THE HOST DELIVERS EVERY TRIGGER-FILE LINE OVER BOTH TRANSPORTS, so a
+      // BLE-paired board runs this twice within milliseconds. Opening the panel
+      // is idempotent and says so; an INSERT is NOT, and this was MEASURED
+      // rather than anticipated: the first "COMPOSE chip 1" put 31 bytes in the
+      // draft and the second made it 62 -
+      // "firmware/tft_setup/User_Setup.hfirmware/tft_setup/User_Setup.h" - which
+      // would have been read as the insert path splicing wrongly. Deduped the
+      // way KBTEST's refusal is, and the drop NAMES ITS CAUSE, because from the
+      // Mac a command that did nothing and a command that was deduped look
+      // identical.
+      static String lastComposeEditArg = "\x01\x01";   // never a real (trimmed) arg
+      static unsigned long lastComposeEditMs = 0;
+      unsigned long nowMs = millis();
+      if (arg == lastComposeEditArg && nowMs - lastComposeEditMs < 2000) {
+        Serial.printf("COMPOSE: dropped a duplicate \"%s\" - the host writes each command to every "
+                      "live transport and an insert is not idempotent\n", arg.c_str());
+        buf = "";
+        return;
+      }
+      lastComposeEditArg = arg;
+      lastComposeEditMs = nowMs;
+      if (arg == "page") {
+        int pages = composeChipPages(ci);
+        if (pages > 1) composeChipPage = (composeChipPage + 1) % pages;
+        drawCompose();
+        Serial.printf("COMPOSE: token page %d of %d\n", composeChipPage + 1, pages);
+        buf = "";
+        return;
+      }
+      int cn = arg.substring(5).toInt();
+      if (cn < 0 || cn >= sessions[ci].askChipCount) {
+        Serial.printf("COMPOSE refused: chip %d is out of range (this ask has %d)\n",
+                      cn, sessions[ci].askChipCount);
+        buf = "";
+        return;
+      }
+      composeInsertChip(sessions[ci].askChips[cn]);
+      Serial.printf("COMPOSE: inserted chip %d \"%s\" (%d bytes); the draft is now %d bytes: \"%s\"\n",
+                    cn, sessions[ci].askChips[cn], (int) strlen(sessions[ci].askChips[cn]),
+                    kbLen, kbText);
+      buf = "";
+      return;
+    }
+    if (arg == "sent") {
+      if (!kbActive || !composePanelOn) {
+        Serial.println("COMPOSE refused: the reply panel is not up (send COMPOSE first)");
+        buf = "";
+        return;
+      }
+      // A CAPTURE AID AND NOTHING ELSE: it draws the receipt state so the collapsed
+      // action row can be photographed, and it does NOT answer Claude. Said out
+      // loud on the wire, because a command that looked like it sent an answer
+      // and did not would be the worst kind of quiet.
+      composeShowSentState(kbLen > 0 ? kbText : "(nothing typed)");
+      Serial.println("COMPOSE: sent state drawn for capture - NO answer was sent");
+      buf = "";
+      return;
+    }
+    // ALWAYS from a closed surface, the rule KBTEST already follows: re-opening
+    // over an open one is scaffolding-only and is made impossible rather than
+    // debugged.
+    if (kbActive) closeKeyboard();
+    if (readerActive || histActive || emojiTestActive) {
+      Serial.println("COMPOSE refused: another full-screen surface is up");
+      buf = "";
+      return;
+    }
+    int ci = -1;
+    for (int i = 0; i < sessionCount; i++)
+      if (sessions[i].askTitle[0]) { ci = i; break; }
+    if (ci < 0) {
+      Serial.println("COMPOSE refused: no ask is pending (no session has an askTitle)");
+      buf = "";
+      return;
+    }
+    // Through the detail screen, the way a person will reach it once task 11 lands,
+    // so closing the panel returns somewhere consistent - the same reason KBTEST
+    // opens the card first.
+    switchTab(TAB_SESSIONS);
+    openSessionDetail(ci);
+    composeOpen(ci);
+    if (arg.startsWith("type ")) {
+      String rest = arg.substring(5);
+      for (unsigned int k = 0; k < rest.length(); k++) kbInsert(rest[k]);
+    }
+#if !BOARD_USES_TFT_ESPI
+    tft.flush();
+#endif
+    Serial.printf("COMPOSE: session %d (%s), %d option(s), %d chip(s), %d byte draft\n",
+                  ci, sessions[ci].name, sessions[ci].askOptCount,
+                  sessions[ci].askChipCount, kbLen);
   } else if (buf.startsWith("KBTEST")) {
     // Opens the typed-answer keyboard against the first pending ask, for the same
     // reason TAB and PAGE exist: the capture path can only record what is on the
@@ -6756,8 +6989,22 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
               "\",\"name\":\"testproj" + String(i) +
               "\",\"status\":\"" + (i == 0 ? "asking" : "working") +
               "\",\"agent\":\"cc\",\"model\":\"claude-opus-5\",\"path\":\"/tmp/test\"" +
-              (i == 0 ? ",\"ask\":{\"pid\":\"9901\",\"kind\":\"perm\",\"title\":\"Allow Bash?\","
-                        "\"detail\":\"echo synthetic\",\"options\":[\"Allow\",\"Deny\"],"
+              // THE ASK CARRIES FOUR OPTIONS AND FOUR CHIPS, and the title is at
+              // the hook's own 34-character cap. That is not decoration: the
+              // reply panel draws its options three to a band across TWO bands
+              // and pages its chips two at a time, and nothing else on the
+              // device can put either on the glass - a real ask has the tokens
+              // its own text happened to contain, so a capture of the panel with
+              // a full reply grid and a live pager was not reproducible before
+              // this. The long chip (31 bytes) is the case the panel exists for:
+              // its LABEL truncates on the button and its VALUE inserts whole.
+              (i == 0 ? ",\"ask\":{\"pid\":\"9901\",\"kind\":\"perm\","
+                        "\"title\":\"Run release.sh --no-verify on main\","
+                        "\"detail\":\"The pre-commit hook rejects the vendored font dump in "
+                        "firmware/tft_setup/User_Setup.h, which is expected.\","
+                        "\"options\":[\"Allow\",\"Allow always\",\"Deny\",\"Deny + explain\"],"
+                        "\"chips\":[\"--no-verify\",\"firmware/tft_setup/User_Setup.h\","
+                        "\"main\",\"release.sh\"],"
                         "\"answerable\":true,\"nonce\":\"testnonce\"}"
                       : "") +
               "}";

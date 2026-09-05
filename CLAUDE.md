@@ -235,6 +235,8 @@ one is neither handled nor refused.
 |---|---|
 | `RECAL` / `MICTEST` / `MICMON` / `MICREC` / `MICSTREAM` | touch calibration; mic level, live meter, one-shot and streaming capture |
 | `TAB 0..2` / `PAGE 0..3` / `KBTEST` / `EMOJITEST` / `EMOJITEST off` / `READTEST` | put a surface on the glass, since a capture can only record what is already there. **`EMOJITEST off` is the escape** - the flag gates payload absorption AND the tick, and without it a `TAB` painted over the grid left a board that looked alive with a frozen footer, recoverable only by reflashing. `TAB` now clears the grid and REFUSES over a reader/transcript rather than stranding its flag |
+| `DETAIL <n>` / `COMPOSE` | the session detail card, and the reply panel over it. `COMPOSE type <text>` types, `COMPOSE chip <n>` taps a token (an insert is NOT idempotent, so the duplicate delivery is dropped BY NAME), `COMPOSE page` pages the tokens, `COMPOSE sent` draws the receipt state and SENDS NOTHING |
+| `THEME dark\|light` | which palette is live, so "confirm this reads in both themes" stops needing a person at the device. NOT persisted - a reboot restores the stored setting |
 | `DETAIL [n]` | opens session `n`'s detail card WITHOUT the keyboard - the only route to that screen from the Mac (`KBTEST msg` opens the keyboard over it). Refuses by name on no sessions, an out-of-range `n`, or another full-screen surface |
 | `KBPROBE` / `KBPROBE off` | per keystroke: the key the press ARMED, the key the lift COMMITTED, the pixel delta. Measures where fingers land versus where they lift; says NOTHING about whether the text was right |
 | `KBBUBBLE [r c]` / `KBBUBBLE off` | draws the magnified key bubble so a capture can see it - it otherwise exists only while a finger is down. Arms, never commits; declines DEL, which commits on press |
@@ -283,6 +285,7 @@ to the board header, are under [`docs/design/`](docs/design/).
 |---|---|
 | `deckhand_display.ino` | types, globals, components, tab bar, setup/loop, protocol |
 | `usage.ino` / `sessions.ino` / `settings.ino` | the three tabs |
+| `compose.ino` | the reply panel - the compose surface's other screen, over the keyboard's own draft |
 | `reader.ino` | board 1's paged history reader; board-2 arms delegate to `scrollback.ino` |
 | `scrollback.ino` | BOARD 2 ONLY, one `#if`: the PSRAM transcript, wrap, line index, renderer, drag |
 | `audio.ino` / `power.ino` / `keyboard.ino` / `pairing.ino` | mic and beeper; battery and sleep; the QWERTY; NVS keys and the answer HMAC |

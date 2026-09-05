@@ -1061,6 +1061,39 @@ const int KB_ACT_H     = TAP_MIN;                 // 40, the tested band
 const int KB_ACT_DRAWN = 2 * KB_LINE_PITCH;       // 26
 const int KB_ACT_DY    = (KB_ACT_H - KB_ACT_DRAWN) / 2;   // 7
 const int KB_ACT_Y     = BOARD_H - KB_ACT_H;      // 280, was 276
+// ---------- THE REPLY PANEL (compose.ino) ----------
+// The compose surface's OTHER screen, and its column closes exactly on BOARD_H
+// the way the keyboard's does. There is no spare pixel on this board, so the
+// terms are stated as arithmetic rather than as numbers:
+//
+//    4 (COMPOSE_TOP) + 52 (prompt card) + 4 (COMPOSE_GAP) + 16 (legend)
+//  + 80 (reply, 2 x TAP_MIN) + 16 (legend) + 40 (tokens, 1 x TAP_MIN)
+//  + 21 (draft line) + 16 (legend, "no room for recents") + 31 (residual)
+//  + 40 (KB_ACT_H) = 320
+//
+// EVERY TERM IS ONE OF SIX EXPRESSIONS - TAP_MIN, KB_LINE_PITCH + k,
+// 2 * KB_LINE_PITCH, KB_TEXT_H, n x KB_ROW_H, or a term with no job of its own
+// (the two margins and the residual). There is no value here that was CHOSEN
+// while having a job, which is the property that lets settings-geom-check.mjs
+// assert the column instead of transcribing it.
+//
+// THE RESIDUAL IS NOT NAMED and must not be: compose.ino lays the bands out
+// top-down from COMPOSE_TOP and the action band is anchored at KB_ACT_Y, so what
+// is left between them is arithmetic. A constant for it would be a second place
+// to keep the same number.
+const int COMPOSE_PROMPT_H = 5 + KB_LINE_PITCH + 4 + 2 * KB_LINE_PITCH + 4;  // 52
+const int COMPOSE_LEGEND_H = KB_LINE_PITCH + 3;                              // 16
+const int COMPOSE_DRAFT_H  = KB_LINE_PITCH + 8;                              // 21
+// The 4px scale this board's whole layout is pitched on (board 2 is 8), used for
+// the one gap the panel has - between the prompt card and the first legend.
+const int COMPOSE_GAP      = 4;
+// THE TOP MARGIN, and it is a MARGIN - the same kind of term as the residual
+// above the action band, at the other end of the column. It is the one term here
+// that is neither derived nor free, so it is stated where the rest of the panel's
+// geometry is: 4 on this board, 12 on board 2, which is what the spec's two reply
+// budgets print and what docs/design/compose/compose.js's D.RP_TOP mirrors (that
+// mock's check.mjs binds this name against it, so the two cannot drift).
+const int COMPOSE_TOP      = 4;
 // The peek overlay's three stacked rows, and its line budget. These were the
 // literals 8 / 22 / 40 at drawKbPeek()'s call sites; they are constants now because
 // drawString paints an OPAQUE box one full cell tall, so at a 16px cell a title at

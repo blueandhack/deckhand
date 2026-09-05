@@ -14,16 +14,18 @@ node docs/design/compose/check.mjs             # binds K to both headers
 node docs/design/compose/check.mjs --selftest  # proves the bind has teeth
 ```
 
-## THIS CHECKER FAILS TODAY, BY NAME, AND THAT IS THE POINT
+## THIS CHECKER FAILED BY NAME UNTIL EVERY CONSTANT LANDED
 
-`node docs/design/compose/check.mjs` **exits 1**. Every failure is one of two
-kinds — a name no header defines yet, or a name still at its pre-compose value —
-and each is a constant a later task of the compose plan adds or moves. **Each
-failure goes green when its task does, and until then the checker prints the
-name.** That is the binding working, not a broken checker.
+`node docs/design/compose/check.mjs` **exits 0 as of task 10** - `PENDING` is
+empty and the closing summary says `Everything binds`. It exited 1 for most of
+this plan, and every failure was one of two kinds: a name no header defined yet,
+or a name still at its pre-compose value. **Each went green when its task did,
+and until then the checker printed the name.** That was the binding working, not
+a broken checker, and the machinery below is all still in place for the next
+constant this design moves.
 
 **How many there are, and which, is not written down here.** It was, and it went
-stale the moment a task landed one — twice, costing a review finding each time.
+stale the moment a task landed one - twice, costing a review finding each time.
 `PENDING` in `check.mjs` is the record, and the checker's closing summary counts
 and names both kinds live from it. **Run it and read its last few lines: that is
 the single authority.** The number that must be zero is the UNEXPECTED count,
@@ -32,8 +34,8 @@ which the same summary prints.
 There is deliberately **no "not yet defined" escape hatch**. An assertion a
 constant's *absence* can satisfy is an assertion that cannot fail, which is the
 defect this whole family of files exists to prevent. What the closing summary
-does instead is *sort* the failures — "waiting on a later task" against
-"UNEXPECTED" — and **the number that must be zero is the UNEXPECTED count**.
+does instead is *sort* the failures - "waiting on a later task" against
+"UNEXPECTED" - and **the number that must be zero is the UNEXPECTED count**.
 
 ### The excuse names the VALUE, not just the name
 
@@ -132,6 +134,13 @@ so a gap that drifts moves an anchor and fails.
   *structurally* instead, over `stack()`'s own brace-matched body: both arms must
   take the band's height from the **same** `K` name, so giving the reply panel its
   own height constant fails and says to re-point the offset comparison.
+- **`D.RP_TOP` is bound to `COMPOSE_TOP`, and it is the one term of `D` that is.**
+  The reply panel's top margin is a term with no job of its own - which is why it
+  sits in `D` with the gaps and the residual - but the firmware cannot derive it
+  either, so task 10 gave it a header constant. Two independent literals now
+  describe one pixel row, and the assertion fails by name if either moves. It is
+  deliberately **not** excusable through `PENDING`: a top margin the mock and the
+  panel disagree about is a panel that does not look like its own picture.
 - **The derivations**, each comparing two independent literals: `KB_STRIP_H ==
   KB_LINE_PITCH + 4`, `COMPOSE_LEGEND_H == KB_LINE_PITCH + 3`,
   `COMPOSE_DRAFT_H == KB_LINE_PITCH + 8`, `COMPOSE_PROMPT_H == 5 +

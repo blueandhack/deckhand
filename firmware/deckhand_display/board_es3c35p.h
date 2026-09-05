@@ -2471,6 +2471,37 @@ const int KB_ACT_H     = TAP_MIN;                 // 46, the tested band
 const int KB_ACT_DRAWN = 2 * KB_LINE_PITCH;       // 32
 const int KB_ACT_DY    = (KB_ACT_H - KB_ACT_DRAWN) / 2;   // 7
 const int KB_ACT_Y     = BOARD_H - 8 - KB_ACT_H;  // 426..471, was 414
+// ---------- THE REPLY PANEL (compose.ino) ----------
+// The compose surface's OTHER screen. Same four expressions as board 1 and the
+// same stack, ONE ROW TALLER because recents fit here and do not fit there:
+//
+//   12 (COMPOSE_TOP) + 77 (prompt card) + 8 (COMPOSE_GAP) + 19 (legend)
+//  + 92 (reply, 2 x TAP_MIN) + 19 (legend) + 46 (tokens, 1 x TAP_MIN)
+//  + 24 (draft line) + 19 (legend) + 46 (recents, 1 x TAP_MIN) + 64 (residual)
+//  + 46 (KB_ACT_H) + 8 (bottom margin, already inside KB_ACT_Y) = 480
+//
+// ONE TOKEN BAND, NOT TWO, and the 64px residual is deliberately unspent. A
+// second band costs 46 of it and would show 3 of 4 chips without paging where
+// board 1 shows 2 - but one band on both boards keeps the two panels
+// structurally identical, and the pager already reaches every token. If paging
+// proves annoying on this board, that residual is the first thing to spend and
+// this is the change to make.
+//
+// The prompt card is THREE wrapped lines here against board 1's two; that is the
+// only difference in the four expressions, and compose.ino derives the line
+// count back out of COMPOSE_PROMPT_H rather than carrying a second constant.
+const int COMPOSE_PROMPT_H = 5 + KB_LINE_PITCH + 4 + 3 * KB_LINE_PITCH + 4;  // 77
+const int COMPOSE_LEGEND_H = KB_LINE_PITCH + 3;                              // 19
+const int COMPOSE_DRAFT_H  = KB_LINE_PITCH + 8;                              // 24
+// This board's 8px scale, where board 1 is pitched on 4.
+const int COMPOSE_GAP      = 8;
+// THE TOP MARGIN, and it is a MARGIN - the same kind of term as the 64px
+// residual above the action band, at the other end of the column. 12 is what
+// this board's reply budget prints in the spec and what
+// docs/design/compose/compose.js's D.RP_TOP mirrors; that mock's check.mjs binds
+// this name against it, so the two cannot drift. The 8px bottom margin is NOT a
+// term here - KB_ACT_Y already carries it (BOARD_H - 8 - KB_ACT_H).
+const int COMPOSE_TOP      = 12;
 // The peek overlay covers the keys and the action row but NEVER the text card, so
 // its height is BOARD_H - KB_ROWS_Y - 4 = 306. Its three stacked rows were the
 // literals 8 / 22 / 40 in drawKbPeek(), and at a 16px cell the middle one was a

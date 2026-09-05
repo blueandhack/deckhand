@@ -166,16 +166,14 @@ const claimedCount = (src) => {
 // makes the excuse exact, where a derivation from K would excuse whatever K
 // happens to say.
 // ===========================================================================
-const PENDING = {
-  "1:COMPOSE_PROMPT_H": [52,  null],
-  "1:COMPOSE_LEGEND_H": [16,  null],
-  "1:COMPOSE_DRAFT_H":  [21,  null],
-  "1:COMPOSE_GAP":      [4,   null],
-  "2:COMPOSE_PROMPT_H": [77,  null],
-  "2:COMPOSE_LEGEND_H": [19,  null],
-  "2:COMPOSE_DRAFT_H":  [24,  null],
-  "2:COMPOSE_GAP":      [8,   null],
-};
+// EMPTY, AND THAT IS THE MILESTONE. It held the four COMPOSE_* names per board
+// until task 10 landed them in the two headers; each line was deleted in the diff
+// that landed its constant, which is what this table's own integrity assertions
+// force (a standing excuse for a passing constant FAILS). An empty table means
+// every name in K is bound to a header that defines it at the value the mock
+// draws. Leave the table - and the three [pending] assertions over it - in place:
+// the next constant this design moves gets a line here and the same treatment.
+const PENDING = {};
 
 // ---- the assertion machinery ----------------------------------------------
 // Messages carry a GROUP TAG so --selftest can say which assertion caught the
@@ -333,6 +331,19 @@ function run() {
     }
     const total = Object.keys(K[b]).length;
     say(`  board ${b} bind: ${bound}/${total} names exist in ${HEADER[b]}, ${equal}/${total} agree`);
+    // THE ONE TERM OF D THE HEADERS DO NAME. RP_TOP is the reply panel's top
+    // margin - a term with no job of its own, which is why it lives in D with
+    // the gaps and the residual rather than in K - but the FIRMWARE cannot
+    // derive it either, so task 10 gave it a header constant (COMPOSE_TOP) and
+    // two independent literals now describe one pixel row. Bound here rather
+    // than moved into K so D keeps its property of being outside the bind: this
+    // is one assertion comparing two files, and it fails by name if either
+    // moves. It is NOT excusable through PENDING, deliberately - a top margin
+    // the mock and the panel disagree about is a panel that does not look like
+    // its own picture.
+    chk(H[b].COMPOSE_TOP === D[b].RP_TOP, "bind",
+        `board ${b}: the mock's reply panel starts at RP_TOP ${D[b].RP_TOP}, `
+      + `${HEADER[b]} says COMPOSE_TOP ${H[b].COMPOSE_TOP === undefined ? "nothing" : H[b].COMPOSE_TOP}`);
   }
 
   // ---- 1b. PENDING's own integrity, and it is never excused ----------------
