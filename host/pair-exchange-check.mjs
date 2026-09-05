@@ -76,7 +76,14 @@ function buildSource(src) {
     ["function withTimeout("], "withTimeout");
   const nameSlice = cut(src, "const VALID_DEVICE_NAME", "\n\n", ["isValidDeviceName"], "isValidDeviceName");
   const viaSlice = cut(src, "function deviceNameFor(via) {", "\nasync function loadPairing()",
-    ["deviceNameFor", "senderDescription"], "deviceNameFor");
+    ["deviceNameFor", "senderDescription", "senderKey"], "deviceNameFor");
+  // The link registry, sliced rather than restubbed: deviceNameFor() and
+  // pairReplyIsOurs() now answer "which device is this?" through it, so a
+  // hand-written stand-in here would be testing the harness's idea of a link
+  // rather than the host's.
+  const linkSlice = cut(src, "const BLE_LINK = ", "// Which ports are ours.",
+    ["const viaKind", "const usbLinkFor", "function linkFor", "async function sendToLink",
+     "function replyLinkFor", "function linkLabel"], "link registry");
   const dispatchSlice = cut(src, '  if (line.startsWith("PAIRPUB ")) {',
     "  // Device announces its unique BLE name over USB",
     ["handlePairPub", "handlePairDone", "handlePairFail"], "pairing dispatch");
@@ -120,7 +127,12 @@ const console = {
 let hostId = "9f3c1a20";
 let hostLabel = "harness-mac";
 let selectedDevice = "";
-let usbDeviceName = "";
+// ONE USB LINK, with the id "usb" so every \`via\` in this suite reads as it
+// always has. The host's real ids are port-derived ("usb:usbserial-10") and are
+// opaque to everything under test here; what matters is that the name now lives
+// ON A LINK, which is what pairReplyIsOurs() reads.
+const usbLinks = [{ id: "usb", kind: "usb", name: "", scrollGen: 0 }];
+const usbOpening = new Set();
 let bleDeviceName = "";
 let bleCharacteristic = null;
 let blePeripheral = null;
@@ -140,6 +152,7 @@ async function rememberDevice(name, secret = "") { __remembered.push({ name, sec
 
 ${timeoutSlice}
 ${nameSlice}
+${linkSlice}
 ${viaSlice}
 ${pairSlice}
 
@@ -152,7 +165,7 @@ ${dispatchSlice}
 // ---- the seam the suite drives ----
 export const api = {
   pairStatus, pairScanStart, pairScanFinish, pairStart, pairConfirm, pairCancel, pairEnd,
-  handleDeviceLine, deviceNameFor, senderDescription, isValidDeviceName,
+  handleDeviceLine, deviceNameFor, senderDescription, isValidDeviceName, senderKey, linkLabel,
   exchange: () => pairExchange,
   state: () => pairState,
   generation: () => pairGeneration,
@@ -170,7 +183,8 @@ export const api = {
     if ("characteristic" in o) bleCharacteristic = o.characteristic;
     if ("peripheral" in o) blePeripheral = o.peripheral;
     if ("bleName" in o) bleDeviceName = o.bleName;
-    if ("usbName" in o) usbDeviceName = o.usbName;
+    if ("usbName" in o) usbLinks[0].name = o.usbName;
+    if ("usbLinks" in o) { usbLinks.length = 0; usbLinks.push(...o.usbLinks); }
     if ("selected" in o) selectedDevice = o.selected;
   },
   timers: () => [...__timers.entries()].map(([id, t]) => ({ id, ...t })),
