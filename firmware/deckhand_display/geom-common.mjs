@@ -24,6 +24,8 @@
 // runtime output - see textwidth-check.mjs, which uses the same file to close the
 // shim's equivalence gate.
 import fs from "fs";
+import { spawnSync } from "child_process";
+import { fileURLToPath } from "url";
 import path from "path";
 export const DIR = path.dirname(new URL(import.meta.url).pathname);
 
@@ -35,8 +37,89 @@ const SRC = new Map();
 function read(file) {
   const p = `${DIR}/${file}`;
   if (!SRC.has(p)) SRC.set(p, fs.readFileSync(p, "utf8"));
-  return SRC.get(p);
+  // The RAW text is what is memoised and the fault is applied on the way OUT, not
+  // on the way in. This module reads deckhand_display.ino itself at import time
+  // (parseUiFonts), which is BEFORE a checker can register its fault - so caching
+  // the mutated text meant that one file was silently exempt from its own teeth,
+  // and every fault aimed at it reported "anchor moved".
+  return applyFault(file, SRC.get(p));
 }
+
+// ---------------------------------------------------------------------------
+// SOURCE FAULTS, for the geometry checkers' --selftest.
+//
+// Those checkers grew a second half that reads the firmware's own DRAW CALLS,
+// not only its constants - and their --selftest still injects exactly one
+// perturbed constant, so every one of those source assertions was unproven. A
+// reviewer measured the consequence: `return;` at the top of drawBandMark,
+// `if (0) tickKbFlash();`, and `usageCodexShown() { return true; }` all passed.
+//
+// A source fault cannot be injected in-process the way a constant can, because
+// the checkers read their files once at module scope. So the checker re-execs
+// ITSELF, once per fault, with DECK_SOURCE_FAULT set to the fault's index; this
+// module applies that fault at read time and the parent requires the child to
+// exit non-zero. `mutate` is a FUNCTION over the file's text, never a
+// transcribed line - and a fault that changes nothing is reported as "anchor
+// moved" rather than credited to whatever else fails.
+let FAULT = null;             // { file, mutate, applied }
+export function setSourceFault(file, mutate) { FAULT = { file, mutate, applied: false }; }
+export function sourceFaultApplied() { return FAULT != null && FAULT.applied; }
+export const SOURCE_FAULT_INDEX =
+  process.env.DECK_SOURCE_FAULT != null && process.env.DECK_SOURCE_FAULT !== ""
+    ? Number(process.env.DECK_SOURCE_FAULT) : -1;
+function applyFault(file, text) {
+  if (!FAULT || FAULT.file !== file) return text;
+  const out = FAULT.mutate(text);
+  if (out !== text) FAULT.applied = true;
+  return out;
+}
+// The child's own last word: if the fault it was asked to inject changed nothing,
+// the run proves NOTHING and must not be credited as a pass or as a catch.
+export function faultChildEpilogue() {
+  if (SOURCE_FAULT_INDEX < 0) return;
+  if (!sourceFaultApplied()) { console.log("ANCHOR MOVED"); process.exit(2); }
+}
+// The parent's half: re-exec this checker once per source fault and require each
+// child to FAIL - BY THE ASSERTION THE FAULT EXISTS FOR. `faults` is
+// [name, file, mutate, expect] quadruples, `expect` being a substring of the
+// assertion that must name it. Merely exiting non-zero is not enough: a source
+// edit disturbs proximity regexes elsewhere, so a fault "caught" by a collateral
+// failure proves nothing about the assertion it was written to prove. The checker
+// registers the fault named by DECK_SOURCE_FAULT before it reads anything.
+export function sweepSourceFaults(selfUrl, faults) {
+  const self = fileURLToPath(selfUrl);
+  let caught = 0;
+  for (const [name, , , expect] of faults) {
+    const i = faults.findIndex((f) => f[0] === name);
+    const r = spawnSync(process.execPath, [self], {
+      env: { ...process.env, DECK_SOURCE_FAULT: String(i) },
+      encoding: "utf8", maxBuffer: 64e6,
+    });
+    const out = `${r.stdout || ""}${r.stderr || ""}`;
+    const fails = out.split("\n").filter((l) => /^\s*(FAIL|x )/.test(l) || /THREW|Error:/.test(l));
+    const named = expect ? fails.find((l) => l.includes(expect)) : fails[0];
+    if (/ANCHOR MOVED/.test(out))
+      console.log(`  MISSED  ${name}  <- the injection did not apply (anchor moved)`);
+    else if (r.status === 0)
+      console.log(`  MISSED  ${name}  <- no assertion notices this`);
+    else if (!named)
+      console.log(`  MISSED  ${name}  <- ${fails.length} assertion(s) failed but NONE was "${expect}" ` +
+                  `(first: ${(fails[0] || "").trim().slice(0, 90)})`);
+    else {
+      caught++;
+      console.log(`  caught  ${name}`);
+      console.log(`            by: ${named.trim().slice(0, 150)}`);
+    }
+  }
+  console.log(`\nsource faults: ${caught}/${faults.length} caught`);
+  return caught === faults.length;
+}
+
+// The same read the rest of this module uses, so a checker that wants the RAW
+// text of a firmware file still gets the --selftest source fault applied to it.
+// A direct fs.readFileSync in a checker silently opts that file out of its own
+// teeth, which is how usageCodexShown()'s body stayed unproven.
+export { read as readSource };
 
 function parseFont(file, name) {
   const src = read(file);
@@ -309,7 +392,8 @@ export function deadGuards(text) {
 // draw calls rather than only its constants. Same reason evalInt lives here: a
 // second copy is a second thing to drift.
 export function stripComments(file) {
-  return fs.readFileSync(`${DIR}/${file}`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+  return applyFault(file, fs.readFileSync(`${DIR}/${file}`, "utf8"))
+    .replace(/^[ \t]*\/\/.*$/gm, "");
 }
 // The body of one function, from its signature to the first column-0 close brace.
 // THROWS rather than returning "" - an assertion run over an empty string passes

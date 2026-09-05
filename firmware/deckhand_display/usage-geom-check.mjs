@@ -27,9 +27,90 @@
 // The textWidth implementation, the header parser and the panel table are shared
 // with sessions-geom-check.mjs (geom-common.mjs) - one copy of the measurement
 // rule, checked once against the device's own numbers.
-import { cacheSizes, consts, DIR, evalInt, fnBody, lineH, PANEL, preflight,
-         splitArgs, stripComments, textWidth } from "./geom-common.mjs";
+import { cacheSizes, consts, deadGuards, DIR, evalInt, faultChildEpilogue, fnBody,
+         lineH, PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX,
+         splitArgs, stripComments, sweepSourceFaults, textWidth } from "./geom-common.mjs";
 import fs from "fs";
+
+// ---------------------------------------------------------------------------
+// SOURCE FAULTS. This file's --selftest used to inject exactly ONE fault - a
+// constant perturbed by 8px - while half of what it asserts reads usage.ino's
+// own TEXT. A reviewer measured what that left unproven: usageCodexShown()
+// neutered to `return true;` passed 351/351 (board 1 draws "CODEX  --" for ever
+// again, which is half of what 26c0946 exists for), and the three colour-blind
+// stale-flip busts wrapped in `if (false)` passed too (the bars then hold the
+// wrong hue indefinitely - the defect that block's own comment describes).
+//
+// Each fault is a FUNCTION over the file's text, located structurally, and the
+// registration happens here because the file is read at module scope. The parent
+// re-execs this checker once per fault and requires the child to exit non-zero;
+// a fault that changed nothing prints ANCHOR MOVED and is reported as a miss.
+// ---------------------------------------------------------------------------
+// The interior of one brace-matched block, wrapped in a dead-code guard: the
+// lines it disables are all still present and still say the right thing.
+function smother(src, needle) {
+  const at = src.indexOf(needle);
+  if (at < 0) return src;
+  let i = src.indexOf("{", at), d = 0, z = -1;
+  for (let j = i; j < src.length; j++) {
+    if (src[j] === "{") d++;
+    else if (src[j] === "}" && --d === 0) { z = j; break; }
+  }
+  if (z < 0) return src;
+  // The inner brace closes on the SAME line as the outer one, so no new column-0
+  // `}` appears and fnBody's "first close brace at column 0" span is unchanged -
+  // otherwise the fault truncates the function every later assertion reads and is
+  // "caught" by collateral rather than by the rule it exists to prove.
+  return `${src.slice(0, i + 1)}\n  if (0) {${src.slice(i + 1, z)}}${src.slice(z)}`;
+}
+function bodyOf(src, sig, replacement) {
+  const at = src.indexOf(sig);
+  if (at < 0) return src;
+  const i = src.indexOf("{", at);
+  let d = 0, z = -1;
+  for (let j = i; j < src.length; j++) {
+    if (src[j] === "{") d++;
+    else if (src[j] === "}" && --d === 0) { z = j; break; }
+  }
+  if (z < 0) return src;
+  return src.slice(0, i + 1) + replacement + src.slice(z);
+}
+const SOURCE_FAULTS = [
+  ["usageCodexShown() is neutered to `return true;` (board 1 draws CODEX -- for ever)",
+    "usage.ino", (t) => bodyOf(t, "bool usageCodexShown()", "\n  return true;\n"),
+    "refuses twice on a sentinel and then decides once"],
+  ["usageCodexShown() is neutered to `return false;` (the row can never come back)",
+    "usage.ino", (t) => bodyOf(t, "bool usageCodexShown()", "\n  return false;\n"),
+    "refuses twice on a sentinel and then decides once"],
+  ["the predicate stops falling back when no Codex window arrived",
+    "usage.ino", (t) => bodyOf(t, "bool usageCodexShown()",
+      "\n  if (usage.cxPct < 0) return false;\n  if (usage.cxAgeSec < 0) return false;\n" +
+      "  return usage.cxAgeSec <= usage.cxWindowMin * 60;\n"),
+    "CODEX_HIDE_FALLBACK_MIN when it did not"],
+  ["the predicate compares an age in SECONDS against a window in MINUTES",
+    "usage.ino", (t) => bodyOf(t, "bool usageCodexShown()",
+      "\n  if (usage.cxPct < 0) return false;\n  if (usage.cxAgeSec < 0) return false;\n" +
+      "  long win = usage.cxWindowMin > 0 ? usage.cxWindowMin : CODEX_HIDE_FALLBACK_MIN;\n" +
+      "  return usage.cxAgeSec <= win;\n"),
+    "the age in seconds against the window converted from"],
+  ["the stale flip's busts are wrapped in a dead-code guard (bars hold a wrong hue)",
+    "usage.ino", (t) => smother(t, "if (stale != quotaStaleCache)"),
+    "the stale-flip block carries a dead-code guard"],
+  ["board 1's Codex show/hide flip busts nothing (the field is left BLANK for ever)",
+    // Scoped to the #else arm: `codexShownCache != codexShownNow` appears three
+    // times in this file and the first is board 2's chrome bust, which is a
+    // different block with a different property.
+    "usage.ino", (t) => {
+      const e = t.indexOf("#else", t.indexOf("static int srcCache = -2"));
+      return e < 0 ? t : t.slice(0, e) + smother(t.slice(e), "if (codexShownCache != codexShownNow)");
+    },
+    "board 1's flip block carries a dead-code guard"],
+];
+if (SOURCE_FAULT_INDEX >= 0) {
+  const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
+  if (!f) { console.log("ANCHOR MOVED"); process.exit(2); }
+  setSourceFault(f[1], f[2]);
+}
 preflight();
 
 // A generic GFXfont glyph-table parser and measurer, for the Spleen faces
@@ -1341,6 +1422,14 @@ for (const b of [1, 2]) {
   for (const cache of [...colourBlind].sort())
     chk(staleBlock.includes(cache),
         `the stale flip busts ${cache} (drawPaceBar/drawUsageSpark cache, cannot self-heal on a colour-only change)`);
+  // includes() IS A SUBSTRING TEST, and a substring test cannot tell a live bust
+  // from a dead one: `if (false) { bar1Cache = -2; }` satisfies every line above
+  // it, and the colour-blind bars then hold the wrong hue indefinitely. Measured
+  // green before this line existed.
+  const staleDead = deadGuards(staleBlock);
+  chk(staleDead.length === 0,
+      staleDead.length ? `the stale-flip block carries a dead-code guard, so its busts never run [${staleDead.join(", ")}]`
+                       : "the stale-flip block's busts are live, not smothered by a dead-code guard");
 
   // 2b. ONE SPELLING OF ONE THRESHOLD. Board 2's v2 fields dim on
   // QUOTA_STALE_SEC (renderNowCard/renderWeekCard); renderUsageTab's own
@@ -1498,7 +1587,7 @@ for (const b of [1, 2]) {
 // leaves the 44px empty, the way its SESSIONS tab already leaves the rest of the tab
 // empty behind a single card.
 {
-  const raw = fs.readFileSync(`${DIR}/usage.ino`, "utf8");
+  const raw = readSource("usage.ino");
   // THE PREPROCESSOR NESTING OF ONE LINE, parsed rather than eyeballed. "Is this
   // function inside #if BOARD_USAGE_V2" is the entire question here, and grepping
   // for the text of the guard answers a different one - the file has eleven of them.
@@ -1545,6 +1634,48 @@ for (const b of [1, 2]) {
   chk(B[1].CODEX_HIDE_FALLBACK_MIN === B[2].CODEX_HIDE_FALLBACK_MIN,
       `both boards use the same Codex hide fallback `
     + `(${B[1].CODEX_HIDE_FALLBACK_MIN} == ${B[2].CODEX_HIDE_FALLBACK_MIN} minutes)`);
+
+  // ---- THE PREDICATE'S OWN BODY ------------------------------------------
+  // Everything above binds where usageCodexShown() is CALLED and that the constant
+  // it falls back to exists on both boards. A reviewer measured what that leaves
+  // open: replacing the body with `return true;` passes 351/351 - every call site
+  // is still there, every ternary still reads it, the constant is still declared -
+  // and board 1 draws "CODEX  --" permanently again, which is half of what commit
+  // 26c0946 exists for. `return false;` is the same hole in the other direction:
+  // the row can never come back.
+  //
+  // So the four decisions the predicate makes are asserted against its own
+  // brace-matched body, each by name. The field names are PARSED from the body's
+  // own comparisons rather than transcribed, so a rename fails loudly here instead
+  // of silently un-binding the assertion.
+  const predBody = fnBody(raw, "bool usageCodexShown()", "usage.ino");
+  chk(predBody.length > 100,
+      `usageCodexShown()'s body is found and is not a stub (${predBody.length} chars)`);
+  const predReturns = [...predBody.matchAll(/\breturn\b([^;]*);/g)].map((m) => m[1].trim());
+  chk(predReturns.length === 3 && predReturns[0] === "false" && predReturns[1] === "false",
+      `usageCodexShown() refuses twice on a sentinel and then decides once `
+    + `[${predReturns.join(" | ")}] - a body with any other set of exits is not this predicate`);
+  // The two sentinels: a percentage that was never measured, and an age that was
+  // never measured. Both are "-1 means no data" fields off the wire, and reading
+  // either as 0 would draw the row on every Mac that has never run Codex.
+  const sentinels = [...predBody.matchAll(/if\s*\(\s*usage\.(\w+)\s*<\s*0\s*\)\s*return false;/g)]
+                      .map((m) => m[1]);
+  chk(sentinels.length === 2 && sentinels.includes("cxPct") && sentinels.includes("cxAgeSec"),
+      `it refuses on BOTH unmeasured sentinels before deciding [${sentinels.join(", ")}]`);
+  // The fallback is USED, not merely named: only when the wire brought no window.
+  chk(/usage\.cxWindowMin\s*>\s*0\s*\?\s*usage\.cxWindowMin\s*:\s*CODEX_HIDE_FALLBACK_MIN/.test(predBody),
+      "the window comes from the wire when it arrived, and from CODEX_HIDE_FALLBACK_MIN when it did not");
+  // MINUTES ON ONE SIDE, SECONDS ON THE OTHER. cxAgeSec is seconds and
+  // CODEX_HIDE_FALLBACK_MIN is minutes; dropping the * 60 makes the row vanish
+  // after 10080 SECONDS (2.8 hours) instead of 7 days, which looks like a hide
+  // that works rather than a hide that is 60x too eager.
+  chk(/usage\.cxAgeSec\s*<=\s*\w+\s*\*\s*60/.test(predReturns[2] || ""),
+      `the decision compares the age in seconds against the window converted from `
+    + `minutes [${predReturns[2] || "not found"}]`);
+  const predDead = deadGuards(predBody);
+  chk(predDead.length === 0,
+      predDead.length ? `usageCodexShown() carries a dead-code guard [${predDead.join(", ")}]`
+                      : "usageCodexShown() carries no dead-code guard");
 
   // ---- board 1's flip: clear the rect, bust every cache that covers it ----
   const uino2 = stripComments("usage.ino");
@@ -1605,9 +1736,16 @@ for (const b of [1, 2]) {
       chk(new RegExp(`\\b${cache}\\s*(\\[0\\]\\s*=|=)`).test(flip),
           `the flip busts ${cache} - renderCodexRow draws through it into the rect just `
         + `cleared, and an unbusted cache leaves that field BLANK for ever`);
+    // Same reason as the stale block above: every assertion in this block is a
+    // text match, and a dead-code guard leaves all of them satisfied.
+    const flipDead = deadGuards(flip);
+    chk(flipDead.length === 0,
+        flipDead.length ? `board 1's flip block carries a dead-code guard [${flipDead.join(", ")}]`
+                        : "board 1's flip block is live, not smothered by a dead-code guard");
   }
 }
 
+faultChildEpilogue();
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 overlaps`);
 if (SELFTEST) {
   if (fail <= BASELINE_FAILURES) {
@@ -1616,7 +1754,9 @@ if (SELFTEST) {
     process.exit(1);
   }
   console.log(`selftest ok - the injected fault produced ${fail} failure(s)`);
-  process.exit(0);
+  // ...and the SOURCE half, which the constant perturbation above cannot reach.
+  console.log("\n--selftest: source faults (each re-execs this checker and must FAIL)");
+  process.exit(sweepSourceFaults(import.meta.url, SOURCE_FAULTS) ? 0 : 1);
 }
 if (fail) process.exit(1);
 console.log("all geometry assertions pass on both boards");
