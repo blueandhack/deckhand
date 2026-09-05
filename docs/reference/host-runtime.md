@@ -9,6 +9,91 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 
 ---
 
+- **THE HOST DRIVES EVERY BOARD ON THE DESK, NOT THE FIRST ONE.** `findUsbPort()` used
+  `.find()` and returned the first port `SerialPort.list()` matched. That was invisible for
+  as long as there was one board; with two cabled it drove whichever the OS enumerated
+  first - board 2's `/dev/tty.usbmodem1101` - and board 1 sat on `/dev/tty.usbserial-10`
+  announcing `HELLO Deckhand-0528 v2` every two seconds to a host that never answered.
+  **Nothing in the log said so.** The tick line read `via=usb,ble`, which is what one board
+  on two transports looks like and what two boards on one each would have looked like; the
+  measurement that settled it was a `SCREENSHOT` returning exactly ONE 320x480 capture, and
+  `[device/usb]` and `[device/ble]` reporting the identical `BATT mv=4162 pct=96`.
+  Every matching port is now opened and run as its own **link**, and the scan repeats every
+  `RECONNECT_INTERVAL_MS`, so a board plugged in later is picked up without a restart.
+  `SERIAL_PORT` still RESTRICTS the host to exactly one port, and the candidate list is
+  logged on the edge (`USB: 2 candidate port(s): ... - every one of them is opened as its
+  own link`), because "which ports did you find and which did you choose" was the first
+  question and nothing in the log answered it.
+- **A LINK IS THE UNIT OF IDENTITY, and its id comes from the PORT PATH** (`usb:usbserial-10`),
+  not from the device name. The name is learned from `HELLO` and sometimes never arrives,
+  while a dedupe key, a reply route and a capture buffer all need an identity from the first
+  byte. The name, once known, is what the log shows (`[device/usb:Deckhand-0528]`) and what
+  an answer's HMAC is verified against. The tick's `via=` lists the links by name:
+  `via=usb:Deckhand-C114,usb:Deckhand-0528,ble`.
+- **`deviceNameFor()` REFUSES TO GUESS once a second board is attached.** With one link it
+  still falls back to the selected device, which is how a host that attached mid-run has
+  always worked. With two, an unnamed link resolves to `""`: the old fallback would have
+  attributed one board's `ANSWER` to the other, and although the HMAC then fails closed, the
+  refusal would name the wrong subject - the defect class this repo keeps paying for.
+- **AN UNNAMED LINK CANNOT ANSWER, so the name is MADE to arrive.** `HELLO` is a boot-only
+  15-second burst, and the firmware's own comment explains why that was always enough:
+  *"Opening the USB port resets the ESP32, so this boot-time line reliably reaches a host
+  that connects at any time."* That is true of board 1's CH340 only when the modem lines are
+  actually driven, and node opens the port without driving them. **Measured:** board 1
+  cabled and sending `BATT` for minutes while never once saying who it was. A link with no
+  name after 6s now gets ONE reset pulse - RTS asserted drives EN low, released it boots,
+  and DTR is held false throughout because asserting it drives GPIO0 low and that is the
+  BOOTLOADER, not a reboot. Once per link, so a board whose firmware never says `HELLO` is
+  not power-cycled forever, and loudly logged. **Measured:** both boards named themselves
+  within two seconds of the pulse, and forcing the grace to 0.3s on board 1 alone reproduced
+  it end to end (`has not said HELLO in 0.3s ... Pulsing RTS` -> `usb:usbserial-10 is
+  Deckhand-0528`). `DECKHAND_NO_USB_RESET=1` disables it for anyone who would rather have an
+  anonymous link than a reboot; `DECKHAND_HELLO_GRACE_MS` exists to exercise the path.
+- **FAN-OUT IS ONE COPY PER LINK - not per device times transports.** A cabled board 2 has
+  always received the tick and every trigger-file command twice (its cable and its BLE link),
+  which is why `KBTEST`, `KBPROBE`, `KBBUBBLE` and `POWERPROBE` dedupe on the device. Board 1
+  adds one LINK, so it gets one copy and **no device receives more than it did before**.
+  Suppressing the BLE copy for a board that is also cabled was considered and rejected: it
+  would make delivery depend on the host having learned that link's name, which it sometimes
+  never does. The command log now names its targets
+  (`Sending command to 3 link(s) [usb:Deckhand-C114, usb:Deckhand-0528, ble]: SCREENSHOT`),
+  because from the Mac a board that missed a command and a board that refused one look
+  identical.
+- **A REPLY GOES BACK TO THE BOARD THAT ASKED.** History and scrollback replies used to go to
+  "the USB port"; with two boards that answered board 1's request down board 2's cable. They
+  now go to the link the request arrived on, with one exception that PRESERVES an existing
+  optimisation rather than adding a rule: a request that came over BLE from a device that is
+  also cabled is answered over **that device's** cable, because BLE writes go out in 20-byte
+  packets with a response awaited on each and the tick loop blocks behind them. Same device,
+  faster pipe - never a different device. The chunk budgets, the ACK waiter key and the
+  fetch generation are all per link too, so one board's fetch can no longer supersede the
+  other's.
+- **THE ANSWER AND PROMPT DEDUPES KEY ON THE SENDER, NOT THE LINE.** This is the subtlest
+  correctness risk in the multi-device change, because the failure is a wrong answer reaching
+  Claude. A device transmits every answer on both of its transports at once, so one device's
+  two copies must still collapse - what these guards have always done. Keyed on the LINE
+  alone, they would also collapse two DIFFERENT boards answering the same prompt with the
+  same option index, which is entirely ordinary: the second board's answer would vanish with
+  nothing saying so. The key is now `deviceNameFor(via) || via`, so an unnamed link is still
+  its own sender rather than joining a shared bucket.
+- **SHOT AND AUDIO CAPTURE BUFFERS ARE PER LINK.** One `SCREENSHOT` fans out to every board
+  and their rows come back concurrently on separate ports; a single `shotCapture` would have
+  appended both into one buffer and written one PNG that is neither board - and `finishShot`'s
+  row-count guard could not have caught it, because the row counts add up. The PNG filename
+  now carries the device (`shot-...-Deckhand-0528.png`); the timestamp alone was never a
+  distinguisher, since board 2 finishes a capture in 0.4s and board 1 in ~18s but "rarely in
+  the same second" is not a filename rule.
+- **BATTERY IS STORED PER DEVICE.** A single `lastBatt` meant two boards overwrote each other
+  every few seconds and the heartbeat showed whichever spoke last - one board at 96% and the
+  other at 100% alternating under one label, which is worse than showing nothing. The
+  heartbeat still publishes ONE `batt` (that is what the menu bar draws) but it is chosen by
+  `batteryForHeartbeat()`, carries the `device` it came from, and every device's reading is
+  beside it in `batts`. `links` lists what the host is actually driving.
+- **BLE IS STILL EXACTLY ONE PEER.** Making it multi-peer was deliberately left out of this
+  change. A second board therefore reaches the host over its cable only, which is enough for
+  a cabled board and is why `via=` shows two USB links and one BLE. `lastVoice` is likewise
+  still global, so a dictation started on one board is mirrored on the other - cosmetic, and
+  unfixed.
 - **A `Notification` used to DELETE the prompt it was notifying about, and that made
   remote answering of a question almost impossible.** Measured: an `AskUserQuestion` fires
   `PermissionRequest` (which publishes the ask and blocks up to `REMOTE_WAIT_MS`) and then,

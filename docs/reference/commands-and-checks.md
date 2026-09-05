@@ -820,6 +820,40 @@ have been reported as nine findings rather than one, which is the "an instrument
 pointing the other way. The caps are passed in now, and the behaviour suite's sandbox is torn down
 in a `finally`, since the run that fails is exactly the one whose scratch directory must not survive.
 
+**Check the MULTI-DEVICE path — two boards on two cables at once.** `findUsbPort()` used `.find()`
+and returned the first matching port for a year; nothing noticed, because there was only ever one
+board on the desk. With two plugged in the host drove whichever the OS enumerated first and left the
+other announcing HELLO to nobody, **and the log said `via=usb,ble` either way** — which reads
+identically whether that is one board on two transports or two boards on one each. Every assertion
+in this checker is aimed at a failure of that shape: silent, and invisible in the one line a human
+reads.
+
+```
+node host/multi-device-check.mjs             # 38 behaviour + 14 structural assertions
+node host/multi-device-check.mjs --selftest  # 31/31 injected faults, each naming the assertion that caught it
+```
+
+It **slices the real functions out of `host/index.mjs` and executes them** — `listUsbCandidates`,
+the whole link registry (`sendToLink`/`liveLinks`/`broadcastToDevices`/`replyLinkFor`/`linkLabel`),
+`deviceNameFor`/`senderKey`, the answer and prompt dedupe, the battery store and `handleDeviceLine`'s
+own `BATT` arm — with two fake boards and a fake BLE peer around them. There is no re-implementation
+to keep passing after the real code is deleted. Three of its assertions are worth knowing:
+
+- **The port scan is run in BOTH enumeration orders.** A `.find()` regression still returns board 1
+  when board 1 happens to be listed first, so a single-order test would pass on a lucky machine.
+- **The fan-out is counted per link AND per device.** Three links must mean three writes, never four
+  — and no *device* may receive more than the two copies a cabled BLE device has always had (which
+  is what `KBTEST`, `KBPROBE`, `KBBUBBLE` and `POWERPROBE` dedupe against on the device).
+- **The dedupe is proved in both directions.** One device's second transport must still collapse;
+  two DIFFERENT boards sending the same line must not. The prompt-map assertion deliberately does
+  NOT clear the map first — clearing made it pass with the two maps shared, and the selftest caught
+  exactly that vacuity.
+
+Its **structural half is reported separately** and reads the BODY of the function it names, because
+running the code cannot see a module-level capture buffer creeping back in: nothing in the behaviour
+half takes a screenshot, so `let shotCapture` at file scope would pass all 38 and then interleave two
+boards' rows into one PNG whose row count still adds up.
+
 **Check the WIRELESS-PAIRING CRYPTO, and know which half a checker can prove.** Board 2 can pair a
 Mac without the cable (`BOARD_HAS_WIRELESS_PAIR`, 1 there and **0 on board 1**, where `PROVISION`
 over USB stays the only path): an ephemeral X25519 exchange plus a 6-digit code derived from the

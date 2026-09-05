@@ -26,8 +26,12 @@ host/index.mjs  <----------------------------------------------------- +
         --(USB serial AND/OR BLE, JSON lines)-->  deckhand_display.ino
 ```
 
-USB and BLE are **independent, not fallbacks**: both are normally live at once
-(`via=usb,ble` in the log) and the host writes the same payload to whichever are connected.
+USB and BLE are **independent, not fallbacks**: both are normally live at once and the host
+writes the same payload to whichever are connected. **"The USB link" is plural** - every
+matching port is opened as its own link, so two boards can be driven at once, and the tick's
+`via=` names each link (`via=usb:Deckhand-C114,usb:Deckhand-0528,ble`) because `via=usb,ble`
+read identically whether that was one board on two transports or two boards on one each.
+See [`docs/reference/host-runtime.md`](docs/reference/host-runtime.md).
 
 ## THERE ARE TWO BOARDS
 
@@ -185,6 +189,7 @@ node firmware/deckhand_display/geom-sweep.mjs          # fault-injection sweep, 
 node host/{wire-bytes,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
 node host/session-inbox-check.mjs                       # the inbox frame, over a stand-in socket
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
+node host/multi-device-check.mjs                        # two boards on two cables at once
 node claude-hooks/answer-status-check.mjs
 node docs/design/*/check.mjs                            # committed mocks, bound to the headers
 ```
