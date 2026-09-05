@@ -11,11 +11,14 @@
 // firmware/deckhand_display/deckhand_display.ino the way
 // host/ask-optdescs-check.mjs:88 parses askDetail's — but Task 9 is the task
 // that adds that field, and this repo's rule is that a checker must parse the
-// constant it certifies, never transcribe it. So until Task 9 lands, the
-// PARSE assertion fails with "askChips[N][M] - Task 9 adds it", and the two
-// size assertions that depend on it fail as NaN comparisons. That is the
+// constant it certifies, never transcribe it. So until Task 9 lands, all
+// three fail, tagged "PENDING TASK 9". That tag is gated on the parse itself
+// failing (dims == null) - NOT applied unconditionally to these three
+// messages - so it self-retires the instant Task 9 declares the field: if
+// the declared buffer is undersized, the size assertions fail as ORDINARY,
+// unlabelled failures instead of being excused as still-pending. That is the
 // correct state for this task: the binding is proven by the fact that it can
-// fail, not stubbed past.
+// fail, not stubbed past, and it stays provable after Task 9 lands too.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -73,6 +76,20 @@ ok(JSON.stringify(askChips('Rename the file to "final_report.pdf"?', [])) === JS
   const got = askChips("Try '--force' now", []);
   ok(JSON.stringify(got) === JSON.stringify(["--force"]),
      `DEDUPE (two rules, one token): "Try '--force' now" -> ["--force"] exactly once, got ${JSON.stringify(got)}`);
+}
+
+// Ask text is prose written by Claude, and single quotes are the one
+// delimiter English also uses as a letter - contractions and possessives.
+// Naively pairing "the nearest two apostrophes" reads "it's" as an opening
+// delimiter and "don't" as the closing one, capturing "s fine, don" as a
+// chip: a garbage token that occupies one of four scarce slots and reads as
+// noise you must look past to reach TYPE. There is no genuine quoted span in
+// this sentence at all, so the correct result is [].
+{
+  const input = "...it's fine, don't you think?";
+  const got = askChips(input, []);
+  ok(JSON.stringify(got) === JSON.stringify([]),
+     `QUOTES (no contraction garbage): ${JSON.stringify(input)} -> [], got ${JSON.stringify(got)}`);
 }
 
 // A case where PURE RULE-ORDER concatenation (rule 1 backticks, then rule 2
@@ -155,23 +172,47 @@ ok(Array.isArray(askChips(undefined, [])) && askChips(undefined, []).length === 
 
 // ---------------------------------------------------------------------------
 // STEP 2: extraction runs AFTER toAscii, so the byte cap is exact.
+//
+// The two statements below are real, sequential, and executed - not a
+// presence check on one combined pattern. There is no production call site
+// yet (Task 9 wires this into host/index.mjs); the only real call site that
+// exists today is this checker's own invocation, so that is what is bound.
 // ---------------------------------------------------------------------------
-{
-  const chips = askChips(toAscii("Run `café --wîde` now"), []);
-  ok(chips.length > 0, "ORDERING SANITY: the café/wîde case actually produces chips to check");
-  for (const c of chips) {
-    ok(Buffer.byteLength(c, "utf8") === c.length,
-       `ORDERING: chip ${JSON.stringify(c)} is ASCII, so its byte cap is its character cap`);
-  }
+const ORDER_XLATE_STMT = 'const orderedAscii = toAscii("Run `café --wîde` now");';
+const ORDER_CHIPS_STMT = "const orderedChips = askChips(orderedAscii, []);";
+
+const orderedAscii = toAscii("Run `café --wîde` now");
+const orderedChips = askChips(orderedAscii, []);
+ok(orderedChips.length > 0, "ORDERING SANITY: the café/wîde case actually produces chips to check");
+for (const c of orderedChips) {
+  ok(Buffer.byteLength(c, "utf8") === c.length,
+     `ORDERING: chip ${JSON.stringify(c)} is ASCII, so its byte cap is its character cap`);
 }
 
-// Structural half of the ordering rule, in the same shape
-// host/wire-bytes-check.mjs uses at :100-103 (nested-call composition proves
-// the transliteration is the INNERMOST call, i.e. runs first): this file's
-// own call sites must compose `askChips(toAscii(...), ...)`, never the other
-// way round.
-ok(/askChips\(toAscii\(/.test(SELF_SRC),
-   "ORDERING (structural): this checker's own call sites compose askChips(toAscii(...)), the same shape wire-bytes-check.mjs binds the voice path to");
+// Structural half of the ordering rule, as a genuine INDEX COMPARISON of two
+// separate statements - the shape host/wire-bytes-check.mjs uses at :100-103
+// (comparing the index of the voice path's transliterate-and-cap line
+// against the index of the line that later parks and hashes it). A single
+// combined regex like /askChips\(toAscii\(/ is a PRESENCE check: it is
+// satisfied the instant that substring exists ANYWHERE in this file,
+// including inside a comment, and says nothing about the order of two
+// things relative to each other. This instead locates the two real
+// statements just executed above and compares their positions in this
+// file's own source.
+// lastIndexOf, not indexOf: ORDER_XLATE_STMT/ORDER_CHIPS_STMT above are
+// THEMSELVES string literals containing this exact text, so a plain indexOf
+// would match its own constant declaration (always in the same order,
+// regardless of what the REAL executed statements below do) rather than the
+// real statements. The LAST occurrence of each is always the executed one.
+function orderingHolds(src) {
+  const xlateIdx = src.lastIndexOf(ORDER_XLATE_STMT);
+  const chipsIdx = src.lastIndexOf(ORDER_CHIPS_STMT);
+  return xlateIdx >= 0 && chipsIdx >= 0 && xlateIdx < chipsIdx;
+}
+ok(SELF_SRC.includes(ORDER_XLATE_STMT), "PARSE SANITY: the toAscii statement text is findable in this checker's own source");
+ok(SELF_SRC.includes(ORDER_CHIPS_STMT), "PARSE SANITY: the askChips statement text is findable in this checker's own source");
+ok(orderingHolds(SELF_SRC),
+   "ORDERING (structural, index comparison): this checker's own toAscii(...) statement's INDEX is lower than the askChips(...) statement's INDEX that consumes its result");
 
 // The module itself must stay pure: it is the CALLER's job to transliterate
 // first, exactly once. If askChips.mjs ever calls toAscii internally, a
@@ -184,18 +225,41 @@ ok(/askChips\(toAscii\(/.test(SELF_SRC),
 function stripComments(src) {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 }
-ok(!/toAscii/.test(stripComments(MOD_SRC)),
+const strippedMod = stripComments(MOD_SRC);
+// Positive anchors FIRST: a negative test (`!/toAscii/.test(...)`) passes
+// vacuously on an empty or accidentally-emptied string, exactly the
+// `!/re/.test("")` trap this plan's rules name. Prove the read and the strip
+// both actually produced real content, and that a KNOWN real declaration
+// survived the strip, before trusting the negative result.
+ok(MOD_SRC.length > 0, "PARSE SANITY: ask-chips.mjs was read and is non-empty");
+ok(strippedMod.length > 0, "PARSE SANITY: stripComments left non-trivial code behind (did not eat the whole file)");
+ok(/export function askChips/.test(strippedMod),
+   "PARSE SANITY: stripComments left askChips's real declaration intact - the negative test below is not passing vacuously");
+ok(!/toAscii/.test(strippedMod),
    "ORDERING (purity): ask-chips.mjs does not call toAscii itself outside its own comments - the ordering is the CALLER's responsibility, asserted rather than assumed");
 
 // ---------------------------------------------------------------------------
-// STEP 3: PARSE the firmware's buffer, do not restate 32. EXPECTED TO FAIL
+// STEP 3: PARSE the firmware's buffer, do not restate 32/48. EXPECTED TO FAIL
 // until Task 9 adds the field - see the file header.
+//
+// The "PENDING TASK 9" label is gated on `dims == null` (the field does not
+// exist yet), NOT applied unconditionally to these three messages. That
+// distinction is the whole point: once Task 9 declares `askChips[N][M]`,
+// `dims` parses successfully, and the label disappears on its own - so if
+// the declared buffer is undersized (e.g. `[4][34]` instead of `[4][50]`),
+// assertions 2 and 3 fail as ORDINARY, unlabelled failures and the checker
+// exits 1. A prefix applied unconditionally to these three messages would
+// have kept excusing a wrong buffer forever, which is exactly the bug this
+// gating fixes.
 // ---------------------------------------------------------------------------
 {
   const dims = FW_SRC.match(/char askChips\[(\d+)\]\[(\d+)\];/);
-  ok(dims != null, "PENDING TASK 9: SessionInfo declares askChips[N][M] in firmware/deckhand_display/deckhand_display.ino");
-  ok(dims && +dims[1] >= CHIP_MAX, `PENDING TASK 9: askChips holds >= CHIP_MAX (${CHIP_MAX}) chips - dims[1]=${dims ? dims[1] : "n/a"}`);
-  ok(dims && +dims[2] >= CHIP_BYTES + 1, `PENDING TASK 9: askChips[][>=${CHIP_BYTES + 1}] holds CHIP_BYTES (${CHIP_BYTES}) bytes plus a NUL - dims[2]=${dims ? dims[2] : "n/a"}`);
+  const tag = (msg) => (dims == null ? "PENDING TASK 9: " : "") + msg;
+  ok(dims != null, tag("SessionInfo declares askChips[N][M] in firmware/deckhand_display/deckhand_display.ino"));
+  ok(dims != null && +dims[1] >= CHIP_MAX,
+     tag(`askChips holds >= CHIP_MAX (${CHIP_MAX}) chips - dims[1]=${dims ? dims[1] : "n/a"}`));
+  ok(dims != null && +dims[2] >= CHIP_BYTES + 1,
+     tag(`askChips[][>=${CHIP_BYTES + 1}] holds CHIP_BYTES (${CHIP_BYTES}) bytes plus a NUL - dims[2]=${dims ? dims[2] : "n/a"}`));
 }
 
 // ---------------------------------------------------------------------------

@@ -59,7 +59,18 @@ export const CHIP_BYTES = 48;
 // signal away.
 const BACKTICK_RE = /`([^`]+)`/g;
 const DQUOTE_RE = /"([^"]+)"/g;
-const SQUOTE_RE = /'([^']+)'/g;
+// Single quotes are the one delimiter English prose also uses as a letter -
+// contractions and possessives ("it's fine, don't you think?") - so unlike
+// the other three spans, this one requires a non-word character or a string
+// boundary on both sides of the quote mark itself: the opening quote must
+// not be immediately preceded by a word character, and the closing quote
+// must not be immediately followed by one. That is what "it's" fails and
+// "'--force'" (surrounded by spaces) passes. Without this, "it's fine,
+// don't you think?" reads its FIRST apostrophe as an opening delimiter and
+// its SECOND (in "don't", a different contraction entirely) as the closing
+// one, capturing "s fine, don" as a chip - a garbage token spending one of
+// four scarce slots on a panel where every row is scarce.
+const SQUOTE_RE = /(?<!\w)'([^']+)'(?!\w)/g;
 
 // Punctuation a SENTENCE wraps around a token with ("Use -f or --force?" —
 // the `?` belongs to the sentence, not the flag). Deliberately excludes `-`
