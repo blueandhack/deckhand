@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1386758, RAM 69804 | flash 1033802, RAM 70140 |
+| size today | flash 1397662, RAM 70748 | flash 1041294, RAM 70324 |
 
 **Everything board-specific lives in the two board headers** - pins, capability flags, and
 **every layout constant**. Nothing in a shared `.ino` may hardcode a panel dimension; three
@@ -108,7 +108,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `8f64b7f78c14b39e...`, size 1387024.
+Today: `b45b6588287550fb...`, size 1397936 (board 2: `5303b6e66014463e...`, size 1041552).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
