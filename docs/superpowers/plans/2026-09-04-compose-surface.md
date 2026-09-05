@@ -595,14 +595,27 @@ const int KB_TEXT_Y  = 34;                  // was 12
 
 - [ ] **Step 3: Assert both columns close exactly on `BOARD_H`, per board**
 
+**Do NOT write a sum-of-differences.** Summing every band with each gap written as a difference
+telescopes to `BOARD_H` identically — proved numerically: 10,000 sets of ARBITRARY constants give
+zero failures, so `sum === BOARD_H` cannot fail. Walk the column and assert each gap is
+non-negative instead, which rejects 98.96% of the same garbage:
+
 ```js
-const col = c.KB_STRIP_Y + c.KB_STRIP_H + (c.KB_TEXT_Y - c.KB_STRIP_Y - c.KB_STRIP_H)
-          + c.KB_TEXT_H + (c.KB_ROWS_Y - c.KB_TEXT_Y - c.KB_TEXT_H)
-          + 4 * c.KB_ROW_H + (c.KB_ACT_Y - c.KB_ROWS_Y - 4 * c.KB_ROW_H)
-          + c.KB_ACT_H + (c.BOARD_H - c.KB_ACT_Y - c.KB_ACT_H);
-chk(col === c.BOARD_H, `the keyboard column sums to ${col} == BOARD_H ${c.BOARD_H}`);
+const edges = [
+  ["top margin",   0,                             c.KB_STRIP_Y],
+  ["strip->card",  c.KB_STRIP_Y + c.KB_STRIP_H,   c.KB_TEXT_Y],
+  ["card->keys",   c.KB_TEXT_Y  + c.KB_TEXT_H,    c.KB_ROWS_Y],
+  ["keys->action", c.KB_ROWS_Y  + 4 * c.KB_ROW_H, c.KB_ACT_Y],
+  ["action->end",  c.KB_ACT_Y   + c.KB_ACT_H,     c.BOARD_H],
+];
+for (const [name, end, start] of edges)
+  chk(start >= end, `${name}: ${start} >= ${end} - no overlap`);
+// THE TESTED BAND clears TAP_MIN, never the drawn control. settings-geom-check
+// asserted the DRAWN key against it, which passed only while KB_ROW_H was 44
+// (drawn 40, exactly TAP_MIN) and fails at 41 (drawn 37) - the wrong rule,
+// getting away with it on a coincidence.
 for (const [n, v] of [["KB_ROW_H", c.KB_ROW_H], ["KB_ACT_H", c.KB_ACT_H]])
-  chk(v >= c.TAP_MIN, `${n} ${v} >= TAP_MIN ${c.TAP_MIN}`);
+  chk(v >= c.TAP_MIN, `${n} ${v} >= TAP_MIN ${c.TAP_MIN} (TESTED band, not the drawn control)`);
 chk(c.KB_ROWS_Y > c.KB_TEXT_Y + c.KB_TEXT_H,
     `the key grid starts ${c.KB_ROWS_Y} below the card's last row ${c.KB_TEXT_Y + c.KB_TEXT_H - 1}`);
 chk(c.KB_STRIP_Y + c.KB_STRIP_H < c.KB_TEXT_Y,
@@ -965,7 +978,7 @@ Not a gap, a line: `recents: no vertical budget on board 1`, in `COLOR_LABEL`. *
 
 - [ ] **Step 7: Assert the column, per board**
 
-Same shape as Task 6 Step 3: sum the terms including every gap as a difference, assert `=== BOARD_H`, assert every band `>= TAP_MIN`, assert every drawn button strictly inside its band, and assert the three reply columns sum to the lane exactly (72+72+72 = 216 on board 1, 98+98+100 = 296 on board 2, remainder on the last).
+Same shape as Task 6 Step 3 **as corrected there** — a contiguity walk asserting every gap is non-negative, NOT a sum of differences, which telescopes and cannot fail. Then assert every band `>= TAP_MIN`, assert every drawn button strictly inside its band, and assert the three reply columns sum to the lane exactly (72+72+72 = 216 on board 1, 98+98+100 = 296 on board 2, remainder on the last).
 
 - [ ] **Step 8: Update the mock, run every checker, compile both boards separately**
 
