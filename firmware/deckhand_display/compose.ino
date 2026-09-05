@@ -327,18 +327,134 @@ void drawComposeDraft() {
 // to interpret - the same rule the device commands follow, arriving at a row that
 // is absent instead of at a refusal that is silent.
 //
-// THE RING ITSELF IS TASK 12 OF THIS PLAN. Until it lands the count is 0 and the
-// legend names that as the cause too, so this band is never three blank cells with
-// no explanation.
+// SENT TEXT, REMEMBERED FOR THE SESSION AND NO LONGER. 4 x 151 = 604 bytes of
+// DRAM, global rather than per session - what you last replied is a property of
+// the person at the device, not of one ask, and a per-session copy would cost
+// 3,624 bytes to say the same thing six times. Deliberately NOT in NVS:
+// persisting it would give a BLE-paired device a plaintext log of everything you
+// have replied, plus a flash-wear budget, in exchange for a one-tap convenience.
+// The spec lists it under what is OUT, in those words. Reversible later if asked;
+// not the default. IT IS EMPTY AFTER A REBOOT, and that is the design rather than
+// a defect.
+//
+// KB_MAX_BYTES + 1 RATHER THAN 151, the same rule kbText and composeSentText
+// follow: a literal is how the two drift when the cap moves. The margin is EXACT
+// and worth stating, since three buffers on this branch were found within a few
+// bytes of silent truncation - the longest string that can reach here is kbText
+// itself, which kbInsert caps at KB_MAX_BYTES, so a row holds the whole draft and
+// its NUL with nothing spare and nothing to truncate. An option label
+// (askOpts[4][34]) is far shorter.
+//
+// THE RING HOLDS FOUR AND THE ROW DRAWS THREE, which is said here rather than
+// left to be discovered from a loop bound. The row is COMPOSE_COLS cells and
+// there is one of it (a second row could hold at most one more entry, and the
+// 64px residual it would spend is what the spec names as the first thing to spend
+// if the pager proves annoying). Until then the fourth slot is what keeps an older
+// reply DEDUPING when it is sent again instead of arriving as a second copy of a
+// string the ring already holds.
 // ---------------------------------------------------------------------------
+char composeRecent[4][KB_MAX_BYTES + 1];
 uint8_t composeRecentCount = 0;
+// The ring's own length, asked of the array rather than written down twice.
+int composeRecentSlots() { return (int) (sizeof(composeRecent) / sizeof(composeRecent[0])); }
+// How many of them the one row can show: min(what the ring holds, the columns) -
+// not a third number, and the draw and the hit test both read it.
+int composeRecentShown() { return composeRecentCount < COMPOSE_COLS ? composeRecentCount : COMPOSE_COLS; }
+
+// REMEMBERING ONE SEND. Called from the THREE places a line is KNOWN TO HAVE GONE
+// OUT - sendTypedAnswerToHost and sendPromptToHost, at the point past every one of
+// their early returns, and this file's one-tap composeSendOption after
+// sendAnswerToHost - and from NONE of the places a button was pressed. A send that
+// returns early on an empty draft, a closed window, an unresolved session or an
+// unprovisioned MAC must not enter a ring the next tap can reuse: the ring is a
+// record of what went to Claude, and an entry that never went is a record that
+// lies.
+//
+// NEWEST FIRST, AND AN IDENTICAL STRING MOVES rather than adding a second entry:
+// four slots are too few to spend one on a duplicate. The dedupe is also what
+// makes this IDEMPOTENT, which is why the COMPOSE recent capture verb needs no
+// duplicate guard where COMPOSE chip does - the host writes every trigger-file
+// line to both transports, and a second copy of a string already at the front
+// moves it to the front.
+void composeRemember(const char* text) {
+  if (!text || !text[0]) return;               // nothing went out, nothing to recall
+  const int slots = composeRecentSlots();
+  int hit = -1;
+  for (int i = 0; i < (int) composeRecentCount; i++)
+    if (strcmp(composeRecent[i], text) == 0) { hit = i; break; }
+  if (hit == 0) return;                        // already the newest: nothing moves
+  // Where the shift starts: the duplicate's OWN slot when there is one, so the
+  // entries in front of it slide down over it and the ring neither grows nor
+  // loses an entry to a repeat; otherwise the last slot the ring has room for.
+  const int from = hit >= 0 ? hit
+                            : ((int) composeRecentCount < slots ? (int) composeRecentCount : slots - 1);
+  for (int i = from; i > 0; i--)
+    copyField(composeRecent[i], sizeof(composeRecent[i]), composeRecent[i - 1]);
+  copyField(composeRecent[0], sizeof(composeRecent[0]), text);
+  if (hit < 0 && (int) composeRecentCount < slots) composeRecentCount++;
+}
+
+// TAPPING A RECENT REPLACES THE DRAFT. Its own function rather than four lines
+// inside composeTouch, so the claim a RECALL IS NOT AN ACTION can be bound to a
+// BODY: nothing in here sends anything, and that is the whole distinction the
+// reuse form promises - it is the one kind on this screen that puts text in front
+// of you instead of putting it on the wire.
+//
+// IT REPLACES RATHER THAN APPENDS, which is what the spec's interaction table
+// says and what a whole remembered reply means. It does throw away whatever was in
+// the draft, with no undo; the mitigation is that appending would make two taps
+// read "yesno", and that the thing thrown away is one SEND from being in this ring
+// itself. The caret goes back to the pin, exactly as CLR leaves it.
+void composeUseRecent(int k) {
+  if (k < 0 || k >= composeRecentShown()) return;
+  copyField(kbText, sizeof(kbText), composeRecent[k]);
+  kbLen = (int) strlen(kbText);
+  kbCaret = -1;
+  composeAfterEdit();
+}
+
+// THE RING, ON THE WIRE. Here rather than at the COMPOSE command site for the
+// reason composeShowSentState is there: an `extern char composeRecent[][...]` over
+// in deckhand_display.ino would spell this buffer's bound a second time, and that
+// is exactly the drift a checker would have to catch later. It also means the
+// ORDER is provable from the host log alone, not only from a photograph of a row
+// that one board cannot draw at all.
+void composeReportRecents(const char* why) {
+  Serial.printf("COMPOSE: %s; the ring holds %d of %d, newest first:\n",
+                why, composeRecentCount, composeRecentSlots());
+  for (int i = 0; i < (int) composeRecentCount; i++)
+    Serial.printf("  recent %d \"%s\" (%d bytes)\n", i, composeRecent[i], (int) strlen(composeRecent[i]));
+  if (composeRecentsFit())
+    Serial.printf("COMPOSE: %d of them are on the glass - the row is %d cell(s)\n",
+                  composeRecentShown(), COMPOSE_COLS);
+  else
+    Serial.println("COMPOSE: none of them are on the glass - this panel has no whole band left above "
+                   "the action row, and the legend under the draft line says so");
+}
+
+// THE ROW. It clears its own two bands before drawing them, because this is NOT
+// only called out of drawCompose()'s fillScreen: composeSendOption repaints it on
+// the send transition, when the ring has just changed and the legend can go from
+// "NOTHING SENT YET" to a longer sentence. drawString paints an OPAQUE box exactly
+// as wide as the string it draws, so a shorter line after a longer one leaves the
+// tail of the longer one behind - the same reason drawComposeDraft clears its band.
+//
+// THE ENTRIES ARE DRAWN IN THE SENT STATE TOO, like the reply buttons and the
+// token chips above them: the sent panel is terminal until DONE, and every band on
+// it behaves this one way. composeTouch names the cause when one of them is tapped.
 void drawComposeRecents() {
+  const int lgY = composeLegend3Y();
   if (!composeRecentsFit()) {
-    drawComposeLegend(composeLegend3Y(), "RECENTS: NO ROOM ON THIS PANEL");
+    tft.fillRect(CARD_X, lgY, CARD_W, COMPOSE_LEGEND_H, COLOR_BG);
+    drawComposeLegend(lgY, "RECENTS: NO ROOM ON THIS PANEL");
     return;
   }
-  drawComposeLegend(composeLegend3Y(), composeRecentCount ? "RECENT - TAP TO REPLACE THE DRAFT"
-                                                          : "RECENT - NOTHING SENT YET");
+  tft.fillRect(CARD_X, lgY, CARD_W, COMPOSE_LEGEND_H + TAP_MIN, COLOR_BG);
+  drawComposeLegend(lgY, composeRecentCount ? "RECENT - TAP TO REPLACE THE DRAFT"
+                                            : "RECENT - NOTHING SENT YET");
+  const int bandY = composeRecentY(), n = composeRecentShown();
+  for (int c = 0; c < n; c++)
+    drawComposeControl(COMPOSE_REUSE, composeColX(c), bandY, composeColW(c), composeRecent[c]);
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +773,27 @@ bool composeTouch(int sx, int sy) {
     }
     return true;
   }
+  // THE RECENTS ROW, and THE FIT QUESTION IS ASKED HERE TOO. On board 1 there is no
+  // row - the legend above says so - and the 31px between that legend and the action
+  // band is residual with no control in it. Without this guard a tap on that residual
+  // would replace the draft out of a ring that is NOWHERE ON THE GLASS: a control
+  // that exists only in the firmware, on the board whose panel says it does not
+  // exist. Same expression the draw asks, so the two cannot disagree about whether
+  // the row is there.
+  if (composeRecentsFit() && sy >= composeRecentY() && sy < composeRecentY() + TAP_MIN) {
+    if (composeSent) {
+      Serial.println("COMPOSE: recent refused: this prompt has already been answered from this panel - the draft line is a receipt now and DONE is the way off");
+      return true;
+    }
+    const int col = composeColAt(sx);
+    if (col < 0) return true;
+    if (col >= composeRecentShown()) {
+      Serial.println("COMPOSE: recent refused: nothing has been sent into that cell yet - the ring fills from the left and is empty after a reboot by design");
+      return true;
+    }
+    composeUseRecent(col);
+    return true;
+  }
   return true;                 // a legend or the residual: swallowed, never dispatched
 }
 
@@ -693,9 +830,15 @@ void composeSendOption(int idx, int k) {
   answeredHostSlot = sessions[idx].hostSlot;
   answeredIdx = k;
   sendAnswerToHost(idx, k);
+  // PAST EVERY REFUSAL ABOVE, so the ring records what actually went out. The row
+  // is repainted with it because this transition is not a full repaint - the draft
+  // line and the action row were already the only two things it touched, and the
+  // ring has just changed under a third.
+  composeRemember(sessions[idx].askOpts[k]);
   composeSent = true;
   copyField(composeSentText, sizeof(composeSentText), sessions[idx].askOpts[k]);
   drawComposeDraft();
+  drawComposeRecents();
   drawComposeActions();
 }
 

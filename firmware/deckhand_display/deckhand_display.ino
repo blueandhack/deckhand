@@ -1398,6 +1398,13 @@ void drawCompose();
 bool composeTouch(int sx, int sy);
 void composeShowSentState(const char* text);
 void composeWindowClosed();
+// The recents ring's three entry points. The BUFFER itself is deliberately not
+// externed here: `extern char composeRecent[][KB_MAX_BYTES + 1]` would spell that
+// bound a second time, so the one place that prints the ring lives beside it in
+// compose.ino and this file asks for the report instead.
+void composeRemember(const char* text);
+void drawComposeRecents();
+void composeReportRecents(const char* why);
 // "The surface is up AND it is showing THIS screen", asked as one question so no
 // caller can test the screen without testing the surface. Every seam but
 // handleTouch's one dispatch goes through these.
@@ -5999,6 +6006,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     //   COMPOSE chip <n>    taps token n - the insert a finger would do
     //   COMPOSE page        advances the token pager
     //   COMPOSE sent        the sent state (receipt + DONE), SENDING NOTHING
+    //   COMPOSE recent <t>  puts <t> in the recents ring, SENDING NOTHING
     //   COMPOSE off         close it
     //
     // EVERY REFUSAL NAMES ITS CAUSE, and every early return CLEARS buf FIRST -
@@ -6111,6 +6119,45 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       Serial.printf("COMPOSE: inserted chip %d \"%s\" (%d bytes); the draft is now %d bytes: \"%s\"\n",
                     cn, sessions[ci].askChips[cn], (int) strlen(sessions[ci].askChips[cn]),
                     kbLen, kbText);
+      buf = "";
+      return;
+    }
+    if (arg.startsWith("recent ")) {
+      // FILLING THE RECENTS RING FROM THE MAC, and nothing else. It exists for the
+      // reason KBBUBBLE and COMPOSE sent do: the row is drawn out of what a person
+      // has already sent from this device, so on a fresh boot it is empty and its
+      // one control - the only REUSE-form control on either screen - cannot be
+      // photographed at all. This remembers a string exactly as a completed send
+      // would and repaints the row.
+      //
+      // IT SENDS NOTHING AND IT ANSWERS NOTHING, and it still cannot commit a tap:
+      // there is no way from the Mac to press a reply, which is deliberate (the
+      // same rule kbBubbleCommand is asserted to follow - it arms a key and never
+      // commits it). The most it can do is put a string where a FINGER could later
+      // recall it into the draft, which is what KBTEST msg already does directly.
+      //
+      // NO DUPLICATE GUARD, and unlike COMPOSE chip it needs none: the ring
+      // DEDUPES, so the host's second copy of this line moves a string already at
+      // the front to the front. Idempotent by the feature's own rule rather than by
+      // a timer.
+      if (!composeOnPanel()) {
+        Serial.println("COMPOSE refused: the reply panel is not up (send COMPOSE first)");
+        buf = "";
+        return;
+      }
+      String rest = arg.substring(7);
+      rest.trim();
+      if (rest.length() == 0) {
+        Serial.println("COMPOSE refused: `COMPOSE recent <text>` needs the text to remember - an empty send never enters the ring, so neither does this");
+        buf = "";
+        return;
+      }
+      composeRemember(rest.c_str());
+      drawComposeRecents();
+#if !BOARD_USES_TFT_ESPI
+      tft.flush();
+#endif
+      composeReportRecents("remembered from the Mac - NO answer was sent");
       buf = "";
       return;
     }

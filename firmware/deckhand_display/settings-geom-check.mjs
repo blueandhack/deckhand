@@ -83,6 +83,28 @@ const SOURCE_FAULTS = [
     "keyboard.ino", (t) => t.replace(/back \? "BACK" : \(draft \? "DISCARD" : "CANCEL"\)/,
                                      "(draft ? \"DISCARD\" : \"CANCEL\")"),
     "left key is BACK whenever there is a panel"],
+  // ---- Task 12: the recents ring ----
+  // Each of these LOCATES ITS TARGET STRUCTURALLY - by the declaration it
+  // re-literalises, by the expression it perturbs, or by a function's own
+  // signature - and never by a transcribed line.
+  ["composeRecent's row is re-literalised as 151, so the ring and KB_MAX_BYTES can drift apart",
+    "compose.ino", (t) => t.replace(/(char composeRecent\[\d+\]\[)KB_MAX_BYTES \+ 1(\])/, "$1151$2"),
+    "is KB_MAX_BYTES + 1"],
+  ["composeRemember stops deduping, so a repeat takes a second of the four slots",
+    "compose.ino", (t) => t.replace(/strcmp\(composeRecent\[i\], text\) == 0/, "false"),
+    "OWN BODY dedupes"],
+  ["sendTypedAnswerToHost remembers the draft at the TOP, above its own early returns",
+    "keyboard.ino", (t) => t.replace(/(bool sendTypedAnswerToHost\(\)\s*\{)/,
+                                     "$1\n  composeRemember(kbText);"),
+    "past every early return"],
+  ["composeTouch's recents branch stops asking whether the row is on the glass at all",
+    "compose.ino", (t) => t.replace(/composeRecentsFit\(\) && sy >= composeRecentY\(\)/,
+                                    "sy >= composeRecentY()"),
+    "asks composeRecentsFit()"],
+  ["composeUseRecent sends the recalled line instead of putting it in the draft",
+    "compose.ino", (t) => t.replace(/(void composeUseRecent\(int k\)\s*\{)/,
+                                    "$1\n  sendTypedAnswerToHost();"),
+    "sends NOTHING"],
 ];
 if (SOURCE_FAULT_INDEX >= 0) {
   const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
@@ -3891,6 +3913,14 @@ for (const b of [1, 2]) {
       const actSrc2 = fnSrc(COMPOSE_SRC, "void drawComposeActions");
       const recSrc = fnSrc(COMPOSE_SRC, "void drawComposeRecents");
       const fitSrc = fnSrc(COMPOSE_SRC, "bool composeRecentsFit");
+      const remSrc = fnSrc(COMPOSE_SRC, "void composeRemember");
+      const useSrc = fnSrc(COMPOSE_SRC, "void composeUseRecent");
+      const slotSrc = fnSrc(COMPOSE_SRC, "int composeRecentSlots");
+      const shownSrc = fnSrc(COMPOSE_SRC, "int composeRecentShown");
+      const resetSrc = fnSrc(COMPOSE_SRC, "void composeResetPanel");
+      const typedSrc = fnSrc(KB_SRC, "bool sendTypedAnswerToHost");
+      const promptSrc = fnSrc(KB_SRC, "bool sendPromptToHost");
+      const optSrc = fnSrc(COMPOSE_SRC, "void composeSendOption");
       const draftSrc = fnSrc(COMPOSE_SRC, "void drawComposeDraft");
       const kbDrawSrc = fnSrc(KB_SRC, "void drawKeyboard");
       const kbCloseSrc = fnSrc(KB_SRC, "void closeCompose");
@@ -3912,7 +3942,11 @@ for (const b of [1, 2]) {
                               ["openComposeOn", kbOpenSrc], ["drawKbActions", kbActSrc],
                               ["kbTouch", kbTouchSrc2], ["composeOpenKeyboard", cTypeSrc],
                               ["composeBackToPanel", cBackSrc], ["drawComposeGone", cGoneSrc],
-                              ["drawCompose", cDrawSrc]])
+                              ["drawCompose", cDrawSrc], ["composeRemember", remSrc],
+                              ["composeUseRecent", useSrc], ["composeRecentSlots", slotSrc],
+                              ["composeRecentShown", shownSrc], ["composeResetPanel", resetSrc],
+                              ["sendTypedAnswerToHost", typedSrc], ["sendPromptToHost", promptSrc],
+                              ["composeSendOption", optSrc]])
         chk(src.length > 0, `${n} parsed (gate)`);
       // THE LABEL TRUNCATES AND THE VALUE NEVER DOES. Truncating the INSERTED
       // token would quietly send Claude a path that does not exist, which is
@@ -3979,6 +4013,109 @@ for (const b of [1, 2]) {
           "composeRecentsFit's OWN BODY names no board flag at all");
       chk(/drawComposeLegend\(/.test(recSrc) && /NO ROOM/.test(recSrc),
           "drawComposeRecents' OWN BODY draws a LINE where the row does not fit, not a gap the reader has to interpret");
+
+      // ================ TASK 12: THE RECENTS RING ================
+      // The ring is 604 bytes of DRAM that no arithmetic above can see: it has no
+      // constant, no band of its own on board 1, and its whole behaviour is
+      // "which string ends up where". Every claim below is bound to a FUNCTION
+      // BODY, and the three that matter most are POSITIONAL - a call to
+      // composeRemember at the top of a send function passes any test that only
+      // asks whether the call exists, and records a line that never went out.
+      const ring = COMPOSE_SRC.match(/char composeRecent\[(\d+)\]\[([^\]]+)\];/);
+      chk(!!ring, "composeRecent[N][M] is declared in compose.ino (gate - every claim below reads this parse)");
+      if (ring) {
+        chk(/KB_MAX_BYTES\s*\+\s*1/.test(ring[2]),
+            `composeRecent's row is KB_MAX_BYTES + 1 rather than a literal (it is declared ` +
+            `"${ring[2].trim()}") - a literal is how ` +
+            `the two drift when the cap moves, and it drifts in the direction that truncates the ` +
+            `longest thing that can reach it (kbText, capped at exactly KB_MAX_BYTES)`);
+        chk(+ring[1] >= k.COMPOSE_COLS,
+            `the ring holds ${ring[1]} entries and the one row draws ${k.COMPOSE_COLS} of them - a ` +
+            `ring SHORTER than the row would leave a cell drawn out of a slot that does not exist`);
+      }
+      // THE DEDUPE, AND NEWEST-FIRST, in the one body that owns both. Four slots
+      // are too few to spend one on a duplicate, and the dedupe is also what makes
+      // the COMPOSE recent verb idempotent under the host's double delivery.
+      chk(/strcmp|strncmp/.test(remSrc),
+          "composeRemember's OWN BODY dedupes - four slots are too few to spend one on a duplicate, " +
+          "and it is the dedupe that makes remembering idempotent when the host delivers a line twice");
+      chk(/composeRecent\[0\]\s*,/.test(remSrc) || /copyField\(composeRecent\[0\]/.test(remSrc),
+          "composeRemember's OWN BODY writes slot 0 - the ring is NEWEST FIRST, which is what makes " +
+          "the leftmost cell the last thing you sent");
+      chk(/composeRecentSlots\(\)/.test(remSrc) && /sizeof\(composeRecent\)/.test(slotSrc),
+          "composeRemember bounds itself by composeRecentSlots(), whose OWN BODY asks sizeof the " +
+          "array - a transcribed 4 beside a ring of 3 is an out-of-bounds write on every send");
+      chk(/if\s*\(!text \|\| !text\[0\]\)\s*return;/.test(remSrc),
+          "composeRemember's OWN BODY drops an empty string - a blank entry would draw a blank " +
+          "reuse button, which is a control that does nothing");
+      // WHERE THE CALL SITES ARE, not merely that they exist. Each send function
+      // returns false at every point it sends NOTHING (an empty draft, a closed
+      // window, a session that has gone, the wrong mode); the record has to be
+      // past the LAST of them.
+      for (const [n, src] of [["sendTypedAnswerToHost", typedSrc], ["sendPromptToHost", promptSrc]]) {
+        const guard = src.lastIndexOf("return false;"), rem = src.indexOf("composeRemember(");
+        chk(guard >= 0 && rem > guard,
+            `${n}'s OWN BODY remembers the draft past every early return (last \`return false;\` at ` +
+            `${guard}, composeRemember at ${rem}) - a send that returned early sent NOTHING, and an ` +
+            `entry the ring offers back as sent would be a record that lies`);
+        chk(/composeRemember\(kbText\)/.test(src),
+            `${n} remembers kbText - the bytes it just signed and put on the wire, not a label near them`);
+      }
+      {
+        const out = optSrc.indexOf("sendAnswerToHost("), rem = optSrc.indexOf("composeRemember(");
+        chk(out >= 0 && rem > out,
+            "composeSendOption's OWN BODY remembers the option label past every early return AND " +
+            "past sendAnswerToHost - the one-tap path has four ways to refuse above it (a closed " +
+            "window, an already-sent panel, a mirrored ask, an already-answered prompt)");
+        chk(/drawComposeRecents\(\)/.test(optSrc),
+            "composeSendOption repaints the recents row it just changed - this transition is NOT a " +
+            "full repaint, and the row would otherwise show the ring as it was before the send");
+      }
+      // THE ROW ITSELF. The reuse FORM is what separates a recall from an action,
+      // and the row is bounded by what the ring holds so an empty slot is never
+      // drawn as an empty button.
+      chk(/COMPOSE_REUSE/.test(recSrc),
+          "drawComposeRecents' OWN BODY draws the REUSE kind - COLOR_CARD fill, COLOR_LABEL stroke, " +
+          "left aligned - so a recall is not shaped like the SEND buttons three bands above it");
+      chk(/composeRecentShown\(\)/.test(recSrc) && /composeRecentShown\(\)/.test(cTouchSrc),
+          "the draw and the hit test both bound themselves by composeRecentShown(), so a tap can " +
+          "never reach a cell the row did not draw");
+      chk(/composeRecentCount/.test(shownSrc) && /COMPOSE_COLS/.test(shownSrc),
+          "composeRecentShown's OWN BODY is min(what the ring holds, the columns) - not a third number");
+      chk(/fillRect\(CARD_X,\s*lgY,\s*CARD_W/.test(recSrc),
+          "drawComposeRecents' OWN BODY clears the pixels it is about to redraw. It is called on the " +
+          "send transition as well as after a fillScreen, and drawString paints an opaque box only as " +
+          "wide as its own string, so a shorter legend after a longer one leaves the tail behind");
+      // THE FIT QUESTION IS ASKED AT THE HIT TEST TOO. Board 1 draws no row and
+      // says so; the 31px between that legend and the action band is residual.
+      // Without this the residual would replace the draft out of a ring that is
+      // nowhere on the glass - a control that exists only in the firmware, on the
+      // board whose own panel says it does not exist.
+      chk(/composeRecentsFit\(\)\s*&&\s*sy >= composeRecentY\(\)/.test(cTouchSrc),
+          "composeTouch asks composeRecentsFit() before it dispatches a tap to the recents row - on " +
+          "board 1 that band is RESIDUAL, and a tap there must not recall out of a row the panel " +
+          "says it has no room to draw");
+      // A RECALL IS NOT AN ACTION. The one thing this control must never do is the
+      // thing every control above it does.
+      chk(!/send[A-Za-z]*ToHost\(/.test(useSrc),
+          "composeUseRecent's OWN BODY sends NOTHING - it is the one control on this screen that " +
+          "puts text in front of you instead of on the wire, which is what the reuse form promises");
+      chk(/kbText/.test(useSrc) && /kbLen\s*=/.test(useSrc) && /kbCaret\s*=\s*-1/.test(useSrc),
+          "composeUseRecent's OWN BODY replaces the draft and puts the caret back to the pin (-1), " +
+          "the state CLR and openComposeOn both leave it in - a stale caret past the new end would " +
+          "splice the next keystroke outside the string");
+      chk(/composeAfterEdit\(\)/.test(useSrc),
+          "composeUseRecent repaints through composeAfterEdit(), the same seam a keystroke uses, so " +
+          "the draft line and the action row agree with the draft it just replaced");
+      // NOT PERSISTED, WHICH IS A SPEC DECISION AND THEREFORE TESTABLE. NVS would
+      // give a BLE-paired device a plaintext log of every reply and a flash-wear
+      // budget, for a one-tap convenience.
+      chk(!/Preferences|nvs|prefs\./i.test(stripComments("compose.ino")),
+          "nothing in compose.ino writes the ring to NVS - it is RAM only and empty after a reboot, " +
+          "which the spec lists under what is OUT rather than left to be inferred");
+      chk(!/composeRecent/.test(resetSrc),
+          "composeResetPanel does NOT clear the ring - it is global to the device rather than per " +
+          "ask, so what you last replied survives closing one prompt and opening the next");
       // ONE DRAFT, TWO SCREENS, and the panel's own repaint discipline. The draft
       // line changes per character, so it is repainted wholesale exactly as
       // drawKbText() is - a change-only cache shorter than the string it holds

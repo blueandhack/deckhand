@@ -1601,6 +1601,10 @@ bool sendPromptToHost() {
   char line[280];
   snprintf(line, sizeof(line), "PROMPT %s %s %s", kbSessionId, b64, mac.c_str());
   sendLineToHost(line, sessions[idx].hostSlot);
+  // THE RECENTS RING, at the ONE point in this function the line is known to have
+  // gone out - below every early return above, not at the top where the button was
+  // pressed. A message that never left must not be offered back as one that did.
+  composeRemember(kbText);
   return true;
 }
 
@@ -1630,5 +1634,6 @@ bool sendTypedAnswerToHost() {
   snprintf(line, sizeof(line), "ANSWER %s %s TYPED %s %s",
            sessions[idx].id, kbPid, b64, mac.c_str());
   sendLineToHost(line, sessions[idx].hostSlot);
+  composeRemember(kbText);      // below every early return, for the reason above
   return true;
 }
