@@ -60,6 +60,26 @@ const SOURCE_FAULTS = [
   ["the notch fill starts at the bubble's top rather than the later of the two",
     "keyboard.ino", (t) => t.replace(/(ny\s*=\s*)by > notchY \? by : notchY/, "$1by"),
     "starts at the LATER of the bubble's top and the notch row"],
+  // ---- Task 11: one surface, one state, one draft ----
+  // Each of these four LOCATES ITS TARGET STRUCTURALLY - by the function's own
+  // signature or by the expression it perturbs - and not by a transcribed line.
+  // Two faults on this branch silently stopped injecting when their anchors
+  // moved, which is a selftest reporting teeth it no longer has.
+  ["composeTouch gets its session guard back at the TOP (every tap swallowed once the ask expires, CLOSE included)",
+    "compose.ino", (t) => t.replace(/(bool composeTouch\(int sx, int sy\)\s*\{\n\s*const int idx = kbSessionIdx;)/,
+                                    "$1\n  if (idx < 0 || idx >= sessionCount) return true;"),
+    "no session-guarded return above it"],
+  ["drawCompose gets its early return back (the dead ask's reply buttons stay on the glass)",
+    "compose.ino", (t) => t.replace(/(void drawCompose\(\)\s*\{\n\s*const int idx = kbSessionIdx;)/,
+                                    "$1\n  if (idx < 0 || idx >= sessionCount) return;"),
+    "no early return on a missing session"],
+  ["composeOpenKeyboard clears the draft, so TYPE... throws away what the chips built",
+    "compose.ino", (t) => t.replace(/(void composeOpenKeyboard\(\)\s*\{)/, "$1\n  kbLen = 0;"),
+    "does not clear the draft"],
+  ["the keyboard's left key goes back to being destructive, beside SEND",
+    "keyboard.ino", (t) => t.replace(/back \? "BACK" : \(draft \? "DISCARD" : "CANCEL"\)/,
+                                     "(draft ? \"DISCARD\" : \"CANCEL\")"),
+    "left key is BACK whenever there is a panel"],
 ];
 if (SOURCE_FAULT_INDEX >= 0) {
   const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
@@ -86,6 +106,16 @@ const SET_CACHE = cacheSizes("deckhand_display.ino");   // the settings caches l
 // The main file's own TEXT, for a claim that is about a DECLARATION rather than
 // about a constant's value.
 const SRC_MAIN = readSource(`deckhand_display.ino`);
+// KB_MAX_BYTES comes out of the PARSED CONSTANT TABLE, not out of a regex over
+// the text, and that is the difference between an assertion geom-sweep can
+// perturb and one it cannot. It moved into deckhand_display.ino with the buffer
+// it sizes, which put it inside the sweep's reach for the first time - and a
+// second text parse beside the table would have gone on reading 150 while the
+// sweep moved the table's copy, reporting the constant as unguarded when the
+// assertion below is what guards it. B is per board, so this is asserted per
+// board too, at the keyboard block.
+const KB_MAX_BYTES = B[1].KB_MAX_BYTES;
+const KB_TEXT_DECL = (SRC_MAIN.match(/char kbText\[([^\]]+)\]\s*;/) || [])[1] || "";
 // Charge-estimator thresholds, PARSED out of power.ino rather than transcribed -
 // the same drift discipline batt-trend-check.py uses, and for the same reason: the
 // widest string the battery row can draw is a function of these two.
@@ -339,7 +369,14 @@ function composeAcc(b, name, seen = new Set()) {
   });
   return evalInt(e);
 }
-const KB_MAX_BYTES = +KB_SRC.match(/KB_MAX_BYTES\s*=\s*(\d+)/)[1];
+// KB_MAX_BYTES MOVED OUT OF keyboard.ino and into deckhand_display.ino, beside
+// the kbText buffer it sizes - the cap and the array are one fact, and the array
+// has to be declared in the file the build concatenates FIRST so compose.ino can
+// name it as well. Parsed from there, with the array's own declaration read back
+// out of the SAME file and required to be expressed in terms of the cap: a
+// re-literalised `char kbText[151]` is exactly how the two drift when the cap
+// moves, and it drifts silently in the direction that overflows.
+
 
 // B1. THE DRAWN KEY'S VERTICAL INSET, READ OUT OF THE TWO FUNCTIONS THAT DRAW
 // IT. `const drawnKeyH = c.KB_ROW_H - 4;` transcribed the 4, and the whole
@@ -2326,9 +2363,13 @@ for (const b of [1, 2]) {
     // draws Spleen 8x16, so it blessed KB_COLS 47 against a lane that holds 35.
     const lane = c.CARD_W - 12;
     const cols = Math.floor(lane / adv);
-    const lines = Math.ceil(KB_MAX_BYTES / c.KB_COLS);
+    const lines = Math.ceil(c.KB_MAX_BYTES / c.KB_COLS);
     console.log(`  keyboard: KB_COLS ${c.KB_COLS} (lane ${lane}px / ${adv} = ${(lane / adv).toFixed(2)}), ${c.KB_TEXT_LINES} lines (ceil(${KB_MAX_BYTES}/${c.KB_COLS}) = ${(KB_MAX_BYTES / c.KB_COLS).toFixed(2)})`);
-    chk(KB_MAX_BYTES === HOST_CAP, `KB_MAX_BYTES ${KB_MAX_BYTES} == the host's ANSWER_TEXT_MAX_BYTES ${HOST_CAP}`);
+    chk(Number.isFinite(c.KB_MAX_BYTES),
+        `KB_MAX_BYTES parsed out of deckhand_display.ino's constant table (got ${c.KB_MAX_BYTES}) - it moved there from keyboard.ino to sit beside the buffer it sizes, and a parse that returned undefined would make every claim below compare against NaN`);
+    chk(/KB_MAX_BYTES\s*\+\s*1/.test(KB_TEXT_DECL),
+        `kbText is declared [${KB_TEXT_DECL || "not found"}] - it must be KB_MAX_BYTES + 1 and not the literal, or the cap and the buffer it caps drift apart, silently and in the direction that overflows`);
+    chk(c.KB_MAX_BYTES === HOST_CAP, `KB_MAX_BYTES ${c.KB_MAX_BYTES} == the host's ANSWER_TEXT_MAX_BYTES ${HOST_CAP} - ONE limit, two sides`);
     chk(c.TEXT_ADV === adv, `TEXT_ADV ${c.TEXT_ADV} == the body face's measured advance ${adv}`);
     chk(c.KB_COLS === cols, `KB_COLS ${c.KB_COLS} == floor((CARD_W - 12) / TEXT_ADV) = ${cols}`);
     chk(c.KB_TEXT_LINES === lines, `KB_TEXT_LINES ${c.KB_TEXT_LINES} == ceil(KB_MAX_BYTES / KB_COLS) = ${lines}`);
@@ -2343,7 +2384,7 @@ for (const b of [1, 2]) {
     chk(c.KB_COLS === mc.cols, `KB_COLS ${c.KB_COLS} == the MEASURED maximum ${mc.cols} for the ${lane}px lane`);
     chk(widthB(b, T_BODY, widestLine) <= lane,
         `${c.KB_COLS} columns ending in the widest glyph ink ${widthB(b, T_BODY, widestLine)}px inside the ${lane}px lane`);
-    const caretLine = Math.floor(KB_MAX_BYTES / c.KB_COLS), caretCol = KB_MAX_BYTES % c.KB_COLS;
+    const caretLine = Math.floor(c.KB_MAX_BYTES / c.KB_COLS), caretCol = c.KB_MAX_BYTES % c.KB_COLS;
     chk(caretLine < c.KB_TEXT_LINES, `caret's furthest position is line ${caretLine} col ${caretCol}, inside the ${c.KB_TEXT_LINES} lines budgeted`);
     // ...and it must be inside the LANE too, not merely inside the line budget: the
     // caret is a TEXT_ADV-wide block at column caretCol.
@@ -2390,8 +2431,8 @@ for (const b of [1, 2]) {
       console.log(`    tap-to-place: unclamped worst case line ${rawLineMax} col ${rawColMax} -> off ${rawOffMax}, against KB_TEXT_LINES ${c.KB_TEXT_LINES} / KB_COLS ${c.KB_COLS} / kbLen <= ${KB_MAX_BYTES}`);
       chk(rawLineMax >= c.KB_TEXT_LINES,
           `an unclamped tap at the card's bottom reaches line ${rawLineMax}, past the ${c.KB_TEXT_LINES}-line budget - the line clamp is load-bearing`);
-      chk(rawOffMax > KB_MAX_BYTES,
-          `an unclamped tap at the card's bottom-right reaches offset ${rawOffMax}, past even a full ${KB_MAX_BYTES}-byte buffer - the offset clamp is load-bearing`);
+      chk(rawOffMax > c.KB_MAX_BYTES,
+          `an unclamped tap at the card's bottom-right reaches offset ${rawOffMax}, past even a full ${c.KB_MAX_BYTES}-byte buffer - the offset clamp is load-bearing`);
     }
     // THE META ROW must share no pixel row with any text line - drawString paints
     // an opaque box the full height of a line, so a shared row erases text.
@@ -2661,10 +2702,12 @@ for (const b of [1, 2]) {
       chk(/if \(!kbArm\(sx, sy\)\) kbTouch\(sx, sy\);/.test(htSrc),
           "handleTouch offers every keyboard press to kbArm FIRST and falls through to kbTouch " +
           "only for what it declines - two commit paths for one press is a doubled character");
-      chk(/if \(kbActive\) kbSlide\(sx, sy\);/.test(htSrc),
+      chk(/if \(composeOnKeys\(\)\) kbSlide\(sx, sy\);/.test(htSrc),
           "handleTouch's held path re-samples through kbSlide instead of returning with no work " +
-          "- without it a finger that landed wrong can never be corrected, which is the point");
-      chk(/if \(kbActive && kbRelease\(\)\)/.test(htSrc),
+          "- without it a finger that landed wrong can never be corrected, which is the point - " +
+          "and it asks composeOnKeys(), not the surface: nothing on the reply panel arms, so " +
+          "nothing there can slide or commit");
+      chk(/if \(composeOnKeys\(\) && kbRelease\(\)\)/.test(htSrc),
           "handleTouch's RELEASE path - the one the record FAB already used - is where the " +
           "keystroke commits");
       chk(/kbSetArm\(-1, -1\);/.test(armSrc),
@@ -3139,7 +3182,7 @@ for (const b of [1, 2]) {
       chk(/\n\s*tickKbFlash\(\)\s*;/.test(LOOP_SRC),
           "and loop()'s OWN BODY calls tickKbFlash() UNCONDITIONALLY - handleTouch dispatches on " +
           "PRESS and cannot come back on its own, so a deadline nobody polls is a flash nobody " +
-          "releases; and a `if (kbActive)` here would strand one armed just before the keyboard " +
+          "releases; and a `if (composeActive)` here would strand one armed just before the keyboard " +
           "closed");
       // "UNCONDITIONALLY" IS THE CLAIM, AND THE REGEX ABOVE DOES NOT MAKE IT: a
       // dangling `if (0)` on the line above satisfies `\n\s*tickKbFlash();`
@@ -3155,10 +3198,10 @@ for (const b of [1, 2]) {
             `and that call is a statement of loop()'s own, not the body of a braceless ` +
             `if/for/while (the statement before it ends "${prev}")`);
       }
-      const KB_CLOSE_SRC = fnSrc(KB_SRC, "void closeKeyboard");
-      chk(KB_CLOSE_SRC.length > 0, "closeKeyboard()'s body is found in keyboard.ino (parse gate)");
+      const KB_CLOSE_SRC = fnSrc(KB_SRC, "void closeCompose");
+      chk(KB_CLOSE_SRC.length > 0, "closeCompose()'s body is found in keyboard.ino (parse gate)");
       chk(/kbFlashUntil\s*=\s*0\s*;/.test(KB_CLOSE_SRC),
-          "and closeKeyboard()'s OWN BODY disarms it - a pending flash that outlived the keyboard " +
+          "and closeCompose()'s OWN BODY disarms it - a pending flash that outlived the surface " +
           "would paint a row of keys onto whatever screen replaced them");
       const flashMs = +(KB_SRC.match(/const unsigned long KB_FLASH_MS\s*=\s*(\d+)\s*;/) || [])[1];
       chk(Number.isFinite(flashMs), "KB_FLASH_MS is declared in keyboard.ino (parse gate)");
@@ -3847,15 +3890,26 @@ for (const b of [1, 2]) {
       const fitSrc = fnSrc(COMPOSE_SRC, "bool composeRecentsFit");
       const draftSrc = fnSrc(COMPOSE_SRC, "void drawComposeDraft");
       const kbDrawSrc = fnSrc(KB_SRC, "void drawKeyboard");
-      const kbCloseSrc = fnSrc(KB_SRC, "void closeKeyboard");
+      const kbCloseSrc = fnSrc(KB_SRC, "void closeCompose");
+      const kbOpenSrc = fnSrc(KB_SRC, "void openComposeOn");
+      const kbActSrc = fnSrc(KB_SRC, "void drawKbActions");
+      const kbTouchSrc2 = fnSrc(KB_SRC, "bool kbTouch");
+      const cTypeSrc = fnSrc(COMPOSE_SRC, "void composeOpenKeyboard");
+      const cBackSrc = fnSrc(COMPOSE_SRC, "void composeBackToPanel");
+      const cGoneSrc = fnSrc(COMPOSE_SRC, "void drawComposeGone");
+      const cDrawSrc = fnSrc(COMPOSE_SRC, "void drawCompose");
       const kbInsSrc = fnSrc(KB_SRC, "void kbInsert");
       const htSrc = fnSrc(SRC_MAIN, "void handleTouch");
       for (const [n, src] of [["drawComposeChip", chipSrc], ["composeInsertChip", insSrc],
                               ["drawComposeControl", ctlSrc], ["composeTouch", cTouchSrc],
                               ["drawComposeActions", actSrc2], ["drawComposeRecents", recSrc],
                               ["composeRecentsFit", fitSrc], ["drawComposeDraft", draftSrc],
-                              ["drawKeyboard", kbDrawSrc], ["closeKeyboard", kbCloseSrc],
-                              ["kbInsert", kbInsSrc], ["handleTouch", htSrc]])
+                              ["drawKeyboard", kbDrawSrc], ["closeCompose", kbCloseSrc],
+                              ["kbInsert", kbInsSrc], ["handleTouch", htSrc],
+                              ["openComposeOn", kbOpenSrc], ["drawKbActions", kbActSrc],
+                              ["kbTouch", kbTouchSrc2], ["composeOpenKeyboard", cTypeSrc],
+                              ["composeBackToPanel", cBackSrc], ["drawComposeGone", cGoneSrc],
+                              ["drawCompose", cDrawSrc]])
         chk(src.length > 0, `${n} parsed (gate)`);
       // THE LABEL TRUNCATES AND THE VALUE NEVER DOES. Truncating the INSERTED
       // token would quietly send Claude a path that does not exist, which is
@@ -3929,14 +3983,135 @@ for (const b of [1, 2]) {
       // one that changes most.
       chk(/fillRect\(CARD_X,\s*(?:y|composeDraftY\(\)),\s*CARD_W,\s*COMPOSE_DRAFT_H/.test(draftSrc),
           "drawComposeDraft's OWN BODY clears its own band before redrawing it, so a shorter draft cannot leave the tail of a longer one behind");
-      chk(/composePanelOn/.test(kbDrawSrc) && /drawCompose\(\)/.test(kbDrawSrc),
-          "drawKeyboard's OWN BODY routes to the panel on composePanelOn - ONE screen-painting entry point for both screens of the compose surface");
-      chk(/composePanelOn\s*=\s*false/.test(kbCloseSrc),
-          "closeKeyboard's OWN BODY clears composePanelOn - leaving it set would paint the panel over the NEXT keyboard and route every tap on it to composeTouch, which is exactly the screen-does-not-match-the-router bug that function's own comment records");
-      chk(/composePanelOn/.test(kbInsSrc) && /composeAfterEdit\(\)/.test(kbInsSrc),
+      chk(/composeOnPanel\(\)/.test(kbDrawSrc) && /drawCompose\(\)/.test(kbDrawSrc),
+          "drawKeyboard's OWN BODY routes to the panel on composeOnPanel() - ONE screen-painting entry point for both screens of the compose surface");
+      chk(/composeScreen\s*=\s*COMPOSE_SCREEN_PANEL/.test(kbCloseSrc),
+          "closeCompose's OWN BODY puts composeScreen back to the ROOT - leaving it on the keyboard would paint the keyboard over the NEXT surface opened at the panel and route every tap on it to kbTouch, which is exactly the screen-does-not-match-the-router bug that function's own comment records");
+      chk(/composeOnPanel\(\)/.test(kbInsSrc) && /composeAfterEdit\(\)/.test(kbInsSrc),
           "kbInsert's OWN BODY repaints whichever screen is up - drawKbText would paint the keyboard's card over the panel's prompt card and reply buttons");
-      chk(/composePanelOn/.test(htSrc) && /composeTouch\(/.test(htSrc),
-          "handleTouch's OWN BODY dispatches on composePanelOn - one router, one flag, and the panel takes the whole tap because every target on it clears TAP_MIN");
+
+      // ============ TASK 11: ONE SURFACE, ONE STATE, ONE DRAFT ============
+      // The bug this whole task risks is a screen that no longer matches its
+      // touch router, and it is SILENT - nothing repaints it away. None of these
+      // assertions can catch it on the glass; what they CAN do is forbid the
+      // shapes that produce it: two names for one state, two routers, a screen
+      // move that clears the draft, and a destructive control back beside SEND.
+      chk(!/kbActive/.test(SRC_MAIN + KB_SRC + COMPOSE_SRC),
+          "kbActive is fully retired from deckhand_display.ino, keyboard.ino and compose.ino - it meant 'the keyboard is up' while it gated BOTH screens, and two names for one state is how a screen and its touch router disagree");
+      chk(!/composePanelOn/.test(SRC_MAIN + KB_SRC + COMPOSE_SRC),
+          "and so is composePanelOn, the second of the two names - composeScreen alone says which screen is up");
+      {
+        // ONE DISPATCH. handleTouch is allowed to read composeScreen directly
+        // because it is the router; every other seam asks composeOnPanel() /
+        // composeOnKeys(), which fold "the surface is up" into the same question
+        // so no caller can test the screen and forget the surface.
+        chk(/composeActive/.test(htSrc) && /composeScreen\s*==\s*COMPOSE_SCREEN_PANEL/.test(htSrc)
+            && /composeTouch\(/.test(htSrc),
+            "handleTouch's OWN BODY gates on composeActive and then dispatches on composeScreen - one router, one flag, and the panel takes the whole tap because every target on it clears TAP_MIN");
+        const dispatches = (htSrc.match(/composeScreen/g) || []).length;
+        chk(dispatches === 1,
+            `handleTouch's OWN BODY reads composeScreen exactly once (found ${dispatches}) - a second read is a second router, and two routers over one flag is the same defect as two flags for one state`);
+        const raw = [SRC_MAIN, KB_SRC, COMPOSE_SRC].join("\n")
+          .split("\n").filter((l) => !/^\s*\/\//.test(l) && /\bcomposeScreen\b/.test(l));
+        // The definition, the extern, the two accessors, the two writes that move
+        // between screens, closeCompose's reset, openComposeOn's argument, and
+        // handleTouch's one dispatch. Anything beyond that set is a seam deciding
+        // for itself what "which screen" means.
+        chk(raw.length <= 10,
+            `composeScreen is named on ${raw.length} non-comment lines across the three files - the flag is the state, and every extra site that reads it raw is a seam that can disagree with the router [${raw.map((l) => l.trim().slice(0, 46)).join(" | ")}]`);
+      }
+      // THE DRAFT SURVIVES BOTH MOVES. This is the one thing that makes the two
+      // screens COMPOSE rather than coexist: a chip tapped on the panel is
+      // editable on the keyboard, and a sentence typed there is on the panel's
+      // draft line when you come back.
+      for (const [n, src] of [["composeOpenKeyboard", cTypeSrc], ["composeBackToPanel", cBackSrc]]) {
+        chk(!/kbLen\s*=\s*0/.test(src) && !/kbText\[0\]\s*=/.test(src) && !/kbCaret\s*=/.test(src),
+            `${n}'s OWN BODY does not clear the draft - kbText, kbLen and kbCaret belong to the SURFACE, not to either screen, and a screen change that emptied them would make TYPE... a destructive control that says nothing about it`);
+        chk(/drawKeyboard\(\)/.test(src),
+            `${n}'s OWN BODY repaints through drawKeyboard(), the surface's ONE screen-painting entry point - a second painter is a second place that decides what a screen looks like`);
+      }
+      chk(/composeScreen\s*=\s*COMPOSE_SCREEN_KEYS/.test(cTypeSrc),
+          "composeOpenKeyboard's OWN BODY moves to the KEYBOARD screen");
+      chk(/composeScreen\s*=\s*COMPOSE_SCREEN_PANEL/.test(cBackSrc),
+          "composeBackToPanel's OWN BODY moves to the PANEL screen");
+      // AND THE 120ms ROW-3 FLASH BELONGS TO THE KEY SCREEN, not to the surface.
+      // BACK put the reply panel one finger-travel away from a SPACE press, so a
+      // release that asked only "is compose up" would paint the keyboard's row 3
+      // across the panel's legend and action band.
+      chk(/composeOnKeys\(\)/.test(fnSrc(KB_SRC, "void tickKbFlash")),
+          "tickKbFlash's OWN BODY releases only while the KEY SCREEN is up - composeActive covers the reply panel too, and row 3 does not exist there");
+      // BACK, NOT A DESTRUCTIVE CONTROL. Spec defect 2's worst form was DISCARD
+      // sitting next to SEND on a screen whose every key already misses the
+      // fingertip floor. It is not on that screen at all now - except for a
+      // message to a READY session, which has no panel behind it, and that arm
+      // says so on its own label.
+      {
+        const labInit = (kbActSrc.match(/labels\[KB_ACT_COLS\]\s*=\s*\{([\s\S]*?)\}/) || ["", ""])[1];
+        chk(labInit.length > 0, "drawKbActions' labels[] initialiser parsed (gate)");
+        chk(/"BACK"/.test(labInit) && /composeHasPanel\(\)/.test(kbActSrc),
+            "drawKbActions' left key is BACK whenever there is a panel behind the keyboard - leaving compose is the panel's job, so the destructive control is off this screen entirely");
+        chk(/DISCARD/.test(labInit) && /CANCEL/.test(labInit),
+            "and it still relabels DISCARD/CANCEL for the ONE case with no panel behind it - a message to a READY session, where this keyboard is the root and its left key is the way out");
+        chk(/composeHasPanel\(\)/.test(kbTouchSrc2) && /composeBackToPanel\(\)/.test(kbTouchSrc2)
+            && /closeCompose\(\)/.test(kbTouchSrc2),
+            "kbTouch's OWN BODY asks the SAME composeHasPanel() the label did - a key that said BACK and closed the surface, or said DISCARD and left it up, is a control disagreeing with its own label");
+      }
+      // EVERY EXIT IS REACHABLE WHEN THE ASK GOES AWAY. composeTouch used to open
+      // with `if (idx < 0) return true;` over its whole body, and kbSessionIdx
+      // goes to -1 the instant the ask expires - so every tap on the panel was
+      // swallowed from that moment, CLOSE included, and the only ways off the
+      // screen were the trigger file and the power button.
+      {
+        const bandAt = cTouchSrc.indexOf("KB_ACT_Y");
+        chk(bandAt > 0, "composeTouch's action-band test located (gate)");
+        const head = cTouchSrc.slice(0, bandAt);
+        // The PEEK branch above the band returns, legitimately; what must not be
+        // there is a return GUARDED ON THE SESSION, which is what stranded the
+        // user. One line carried both, so one line is what is looked for.
+        const bad = head.split("\n").filter((l) => !/^\s*\/\//.test(l)
+                                                 && /return/.test(l)
+                                                 && /\b(idx|sessionCount|haveAsk)\b/.test(l));
+        chk(bad.length === 0,
+            `composeTouch reaches its ACTION BAND with no session-guarded return above it - that band carries CLOSE, and a guard over the whole body strands the user on a panel whose every tap is swallowed the instant the ask expires${bad.length ? ` [${bad.map((l) => l.trim()).join(" | ")}]` : ""}`);
+        chk(cTouchSrc.indexOf("haveAsk") > bandAt,
+            "and the session question is asked BELOW the action band, not above it - the fix is to move the guard past the way out, not to delete it");
+        chk(/haveAsk/.test(cTouchSrc) && /sessions\[idx\]/.test(cTouchSrc),
+            "composeTouch still asks about sessions[idx] before reading it - the fix is to move the question below the way out, not to delete it");
+      }
+      // AND THE PANEL REPAINTS ITSELF WITHOUT ONE. drawCompose used to return
+      // having drawn NOTHING when the session was gone, which left the dead ask's
+      // option buttons on the glass looking exactly as live as they had a second
+      // earlier, with a tap on one doing nothing at all.
+      chk(!/^\s*if \(idx < 0[^\n]*\) return;/m.test(cDrawSrc),
+          "drawCompose's OWN BODY has no early return on a missing session - it would leave the dead ask's reply buttons on the glass, and every later repaint of this screen would leave them there too");
+      chk(/drawComposeGone\(\)/.test(cDrawSrc) && /fillScreen/.test(cDrawSrc),
+          "drawCompose draws the ask-is-gone card instead, on the same cleared screen");
+      chk(/kbIsMessage\(\)/.test(cGoneSrc),
+          "drawComposeGone's OWN BODY names WHICH cause it was - an expired prompt and a session that stopped being READY are different facts, and only one of them is answerable on your Mac");
+      // AND ITS TWO SENTENCES FIT THE CARD THEY ARE DRAWN INTO. drawWrappedText
+      // takes a line CAP and silently drops everything past it, so a string one
+      // word too long loses its tail with no marker - and the tail here is the
+      // half that says the draft survived. Measured per board at the board's own
+      // face, against the card's own line count, not eyeballed.
+      {
+        const strs = [...cGoneSrc.matchAll(/"([A-Z][^"]{20,})"/g)].map((m) => m[1])
+          .filter((t) => / [a-z]/.test(t));   // the sentences, not the upper-case headings
+        chk(strs.length === 2,
+            `drawComposeGone's two body sentences parsed (found ${strs.length}) - a parse that found none would make the wrap claim below vacuously true`);
+        // The two HEADINGS go out through drawString with no fitText, so they are
+        // measured rather than trusted: an opaque text box wider than the card
+        // paints straight over its right edge.
+        const heads = [...cGoneSrc.matchAll(/"([A-Z][A-Z ]{10,})"/g)].map((m) => m[1]);
+        chk(heads.length === 2, `drawComposeGone's two headings parsed (found ${heads.length})`);
+        for (const t of heads)
+          chk(t.length * advanceB(b, T_META) <= c.CARD_W - 12,
+              `ask-is-gone card: heading "${t}" is ${t.length * advanceB(b, T_META)}px inside the ${c.CARD_W - 12}px card lane - it is drawn with no fitText, so an overflow paints over the card's own edge`);
+        for (const t of strs) {
+          const n = countWrappedLinesB(b, t, T_BODY, c.CARD_W - 12);
+          chk(n <= CMP[b].COMPOSE_PROMPT_LINES,
+              `ask-is-gone card: "${t}" wraps to ${n} line(s) inside COMPOSE_PROMPT_LINES ${CMP[b].COMPOSE_PROMPT_LINES} - drawWrappedText drops the overflow SILENTLY, and the dropped half is the one that says your draft survived`);
+        }
+      }
     }
   }
 

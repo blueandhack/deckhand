@@ -786,7 +786,7 @@ void tickSessionAnim() {
   if (pairPanelActive) { xfadeId[0] = '\0'; return; }
 #endif
   if (isAsleep || octoActive || showingDetail || readerActive || histActive
-      || kbActive || emojiTestActive) {
+      || composeActive || emojiTestActive) {
     // STILL GATED OUT - this function paints at the LIST's coordinates and must
     // not run over a full-screen surface. What changed is the CLEAR: the detail
     // card wears the same band and tickDetailBandAnim() advances the fade there,
@@ -1014,7 +1014,7 @@ void tickSessionAnim() {
 // AND IT REFUSES EVERY OTHER FULL-SCREEN SURFACE, not because showingDetail is
 // wrong about them but because it does not always go false underneath them: the
 // keyboard in particular runs with showingDetail still true (see
-// closeKeyboard()'s own note), which would put a spark on the key rows.
+// closeCompose()'s own note), which would put a spark on the key rows.
 bool detailBandVisible() {
 #if BOARD_HAS_WIRELESS_PAIR
   // AND THE PAIRING PANEL, which owns the glass the same way. Its own #if keeps
@@ -1024,7 +1024,7 @@ bool detailBandVisible() {
   // would be answering about a card that is not on the screen.
   if (pairPanelActive) return false;
 #endif
-  if (isAsleep || octoActive || readerActive || histActive || kbActive || emojiTestActive)
+  if (isAsleep || octoActive || readerActive || histActive || composeActive || emojiTestActive)
     return false;
   if (!showingDetail || currentTab != TAB_SESSIONS) return false;
   if (detailIndex < 0 || detailIndex >= sessionCount) return false;
@@ -2534,7 +2534,7 @@ bool handleAskTouch(int sx, int sy) {
       // give and cost the header row all its air.
       // Everything else in this row is still back.
       if (msgOffered(detailIndex) && sx >= msgBtnX() - 24) {
-        openKeyboardForMessage(detailIndex);
+        openComposeForMessage(detailIndex);
         return true;
       }
       return false; // header row = back
@@ -2557,7 +2557,13 @@ bool handleAskTouch(int sx, int sy) {
     int gapX1 = gapX0 + 8;                    // TYPE's left edge
     // Same split as the draw, derived the same way, so the halves cannot drift.
     bool wantType = type && (!speak || sx >= gapX1);
-    if (wantType) { openKeyboard(detailIndex); return true; }
+    // TYPE OPENS THE COMPOSE SURFACE AT ITS ROOT - the reply panel - and not
+    // straight at the keyboard it used to. The panel is where this ask's own
+    // options are one tap and its own tokens are one tap; the keyboard is the
+    // sheet behind its TYPE... button, one further tap away, with the draft
+    // carried across. Before Task 11 the panel was reachable only from the
+    // trigger file, which made the whole surface unreachable in normal use.
+    if (wantType) { openCompose(detailIndex); return true; }
     // The 8px gap between the two half-width buttons only exists when BOTH
     // are drawn side by side. This used to be `if (!speak) return true;`,
     // which is dead code for that gap: it only fires when SPEAK isn't

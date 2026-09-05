@@ -39,7 +39,11 @@ const int KB_LINE0_Y = KB_TEXT_Y + KB_LINE0_DY;   // first hard-wrapped line
 // height of a line, and the strip sits directly above the text card - one row too
 // low and it rubs out the card's top border.
 const int KB_STRIP_TEXT_DY = (KB_STRIP_H - KB_LINE_PITCH) / 2;
-const int KB_MAX_BYTES = 150;                  // must equal the host's cap
+// KB_MAX_BYTES MOVED to deckhand_display.ino, beside the kbText buffer it sizes.
+// The cap and the array are one fact, and the array has to be declared in the
+// file the build concatenates FIRST; leaving the cap here meant compose.ino -
+// concatenated BEFORE this file - could not name it, so anything over there
+// that has to fit a draft had to write the number again instead.
 
 // Rows 0-2 are the letter/symbol pages; row 3 is fixed. Control characters stand
 // in for the non-letter keys, because Cozette is ASCII 0x20-0x7E ONLY - there is
@@ -486,16 +490,22 @@ void kbFlashArm() {
 // Release it. Called every tick from loop(), next to tickKbRepeat and for the
 // same reason: handleTouch dispatches on PRESS and cannot come back on its own.
 //
-// The kbActive / kbPeekPage guards are not defensive tidying. Closing the
-// keyboard or raising the peek inside the 120ms window would otherwise have this
-// paint a row of keys onto whatever screen replaced them - closeKeyboard() also
+// The composeOnKeys() / kbPeekPage guards are not defensive tidying. Closing the
+// surface or raising the peek inside the 120ms window would otherwise have this
+// paint a row of keys onto whatever screen replaced them - closeCompose() also
 // disarms it, and this is the second half of that pair, for the peek, which does
-// not close the keyboard.
+// not close the surface.
+//
+// IT ASKS FOR THE KEY SCREEN AND NOT FOR THE SURFACE, and that got sharper with
+// Task 11: the keyboard's left key is now BACK, so the reply panel is 120ms of
+// finger travel away from a row-3 press rather than a whole screen transition
+// away. On composeActive alone, a SPACE followed inside the window by BACK would
+// paint the keyboard's row 3 across the panel's recents legend and action band.
 void tickKbFlash() {
   if (!kbFlashUntil) return;
   if ((long) (millis() - kbFlashUntil) < 0) return;
   kbFlashUntil = 0;
-  if (kbActive && kbPeekPage < 0) drawKbRow3(-1);
+  if (composeOnKeys() && kbPeekPage < 0) drawKbRow3(-1);
 }
 
 // Peek geometry: it covers the KEYS and the action row, never the text card - so
@@ -729,7 +739,7 @@ void drawKbText() {
     drawKbHardWrapped();
     // Caret: a block at the insertion point, so the card reads as focused and it
     // is obvious where the next character lands. kbCaret == -1 means "pinned to
-    // the end" (the state after openKeyboard and after every append typed with
+    // the end" (the state after openCompose and after every append typed with
     // no tap yet), so it draws at kbLen exactly as before; once a tap in the card
     // has set it, it draws there instead. Either way its position is PROVABLE
     // rather than clamped: it is always <= kbLen <= KB_MAX_BYTES, so the furthest
@@ -762,20 +772,31 @@ int kbActX[KB_ACT_COLS] = {0, 0}, kbActW[KB_ACT_COLS] = {0, 0};
 
 void drawKbActions() {
   // OUTLINED, where both buttons used to be filled and so had no hierarchy.
-  // SEND is what you came here to do, and the left key is the one that throws
-  // away a sentence you spent a minute typing - the same reasoning the confirm
-  // dialog uses when it refuses to make a destructive choice the easiest thing
-  // to hit. Now it is not the same SIZE either: fracs {1, 2} gives SEND twice
-  // the width, where the two used to be equal halves 8px apart.
-  // LABEL AND COLOUR, never colour alone (kbKeyLabel's CAPS/CAP comment states
-  // the rule): with a draft to lose the left key says DISCARD in COLOR_WARN,
-  // and with an empty buffer it is CANCEL and destroys nothing.
+  // SEND is what you came here to do, and it is not the same SIZE either: fracs
+  // {1, 2} gives SEND twice the width, where the two used to be equal halves 8px
+  // apart.
+  //
+  // THE LEFT KEY IS **BACK**, AND THAT IS THE POINT OF PAIRING THE TWO SCREENS.
+  // Standalone, this keyboard's left key was CANCEL/DISCARD - a control that
+  // threw away a sentence you spent a minute typing, sitting immediately beside
+  // SEND on a screen whose every key already misses this repo's fingertip floor.
+  // Leaving compose is the REPLY PANEL's job now (its own row carries CLOSE, and
+  // DISCARD when there is a draft to lose), so the destructive control is not on
+  // this screen at all and BACK returns to the panel with the draft intact.
+  //
+  // THE ONE EXCEPTION IS A MESSAGE TO A READY SESSION, which has no ask and so no
+  // panel behind it - composeHasPanel() asks that of the surface rather than of a
+  // third flag. There the keyboard IS the root, so the left key has to be the way
+  // out, and it says which: LABEL AND COLOUR, never colour alone (kbKeyLabel's
+  // CAPS/CAP comment states the rule) - DISCARD in COLOR_WARN with a draft to
+  // lose, CANCEL when there is nothing to destroy.
   const bool draft = kbLen > 0;
-  const char* labels[KB_ACT_COLS] = { draft ? "DISCARD" : "CANCEL",
+  const bool back = composeHasPanel();
+  const char* labels[KB_ACT_COLS] = { back ? "BACK" : (draft ? "DISCARD" : "CANCEL"),
                                       kbWindowClosed ? nullptr : "SEND" };
   // An empty answer would reach Claude as a blank deny message, which reads as
   // a refusal with no reason. Offer SEND only when there is something to send.
-  const uint16_t tints[KB_ACT_COLS] = { draft ? COLOR_WARN : COLOR_ACCENT,
+  const uint16_t tints[KB_ACT_COLS] = { (!back && draft) ? COLOR_WARN : COLOR_ACCENT,
                                         draft ? COLOR_GOOD : COLOR_LABEL };
   const uint8_t fills[KB_ACT_COLS] = { 0, (uint8_t)(draft ? 1 : 0) };
   const uint8_t fracs[KB_ACT_COLS] = {1, 2};
@@ -823,12 +844,12 @@ void drawKeyboard() {
   // keys over a board that no longer has a bubble on it.
   kbBubOn = false;
   // THE COMPOSE SURFACE HAS TWO SCREENS AND THIS IS THE ONE ENTRY POINT TO BOTH.
-  // openKeyboard()'s last act is a call to this function, so composeOpen() only
-  // has to set the flag before it - and TYPE.../BACK are then a flag flip and one
-  // call to here, with the draft (kbText/kbLen/kbCaret) untouched by either.
-  // Routing at the top rather than painting the keyboard and then the panel over
-  // it: that would be a full-screen double paint, visible on board 1.
-  if (composePanelOn) { drawCompose(); return; }
+  // openComposeOn()'s last act is a call to this function, having already set the
+  // screen - and TYPE.../BACK are then a flag flip and one call to here, with the
+  // draft (kbText/kbLen/kbCaret) untouched by either. Routing at the top rather
+  // than painting the keyboard and then the panel over it: that would be a
+  // full-screen double paint, visible on board 1.
+  if (composeOnPanel()) { drawCompose(); return; }
   tft.fillScreen(COLOR_BG);
   // BEFORE the peek's early return: the peek covers the keys from KB_ROWS_Y down
   // and never the card or the strip, so the question stays legible above it and
@@ -851,8 +872,22 @@ void drawKeyboard() {
 #endif
 }
 
-void openKeyboard(int idx) {
-  kbActive = true;
+// ---------------------------------------------------------------------------
+// OPENING THE SURFACE. EVERY RESET LIVES IN THIS ONE FUNCTION - the draft, the
+// keyboard's modes, the panel's four globals, and WHICH SCREEN the surface opens
+// on. The screen is an ARGUMENT and not something the caller sets before or
+// after the call: set before, it is a second list of things to remember at every
+// entry point; set after, the surface paints one screen and then paints the
+// other over it, which is a full-screen double paint and visible on the board
+// that draws straight to the glass.
+//
+// It is deliberately not called directly from anywhere. The two public openers
+// below name their screen, so a call site reads as the screen it lands on.
+// ---------------------------------------------------------------------------
+void openComposeOn(int idx, uint8_t screen) {
+  if (idx < 0 || idx >= sessionCount) return;
+  composeActive = true;
+  composeScreen = screen;
   kbArmRow = kbArmCol = -1;
   kbBubOn = false;
   kbSessionIdx = idx;
@@ -867,37 +902,51 @@ void openKeyboard(int idx) {
   kbPeekPage = -1;
   kbRepeatRow = kbRepeatCol = -1;
   kbWindowClosed = false;
+  composeResetPanel();          // the reply panel's four, defined in compose.ino
   copyField(kbPid, sizeof(kbPid), sessions[idx].askPid);
   kbHostSlot = sessions[idx].hostSlot;
-  drawKeyboard();
+  drawKeyboard();               // routes on composeScreen - one entry, both screens
 }
 
+// THE ROOT. Answering an ask starts on the reply panel, because most answers are
+// not prose: an option is one tap, a token the question already printed is one
+// tap, and the keyboard is the sheet behind TYPE... for the case that really is
+// a sentence. This is what the detail card's TYPE button now reaches.
+void openCompose(int idx) { openComposeOn(idx, COMPOSE_SCREEN_PANEL); }
+
+// STRAIGHT TO FREE TEXT, skipping the root. Used by KBTEST, which exists to put
+// the KEY BAND on the glass for a capture, and by the message opener below - a
+// message to a READY session has no ask, so there are no options and no tokens
+// and there is no panel to be the root of.
+void openComposeKeys(int idx) { openComposeOn(idx, COMPOSE_SCREEN_KEYS); }
+
 // Compose a MESSAGE to a READY session rather than an answer to a pending ask.
-// Goes through openKeyboard first so every reset lives in one place, then switches
-// the mode and repaints - the placeholder and the meta row both differ.
-void openKeyboardForMessage(int idx) {
+// Goes through the opener above so every reset still lives in one place, then
+// switches the mode and repaints - the placeholder and the meta row both differ.
+void openComposeForMessage(int idx) {
   if (idx < 0 || idx >= sessionCount) return;
-  openKeyboard(idx);
+  openComposeKeys(idx);
   kbMessageMode = true;
   kbPid[0] = '\0';                 // there is no pending prompt to pin to
   copyField(kbSessionId, sizeof(kbSessionId), sessions[idx].id);
   drawKeyboard();
 }
 
-void closeKeyboard() {
-  // Before kbActive goes false: kbProbeStop's totals are the measurement, and a
+void closeCompose() {
+  // Before composeActive goes false: kbProbeStop's totals are the measurement, and a
   // BACK tap in the middle of a typing pass would otherwise throw them away.
   kbProbeStop("keyboard closed");
   // BOTH SCREENS OF THE COMPOSE SURFACE GO AT ONCE, and this line is not
-  // optional: composePanelOn is what drawKeyboard() and handleTouch() dispatch
-  // on, so leaving it true would mean the NEXT keyboard opened (from the detail
-  // card's TYPE chip, say) painted the reply panel, and every tap on it routed to
-  // composeTouch against a screen that no longer matched. That is precisely the
-  // class of bug this function's long comment below records.
-  composePanelOn = false;
+  // optional: composeScreen is what drawKeyboard() and handleTouch() dispatch on,
+  // so leaving it on the keyboard would mean the NEXT surface opened at the root
+  // painted the panel and then routed every tap on it to kbTouch - a screen that
+  // no longer matches its router, which is precisely the class of bug this
+  // function's long comment below records. Reset to the ROOT rather than to
+  // "whatever it was", so the surface always reopens where it is defined to.
+  composeScreen = COMPOSE_SCREEN_PANEL;
   kbArmRow = kbArmCol = -1;    // a press cannot survive the screen it landed on
   kbBubOn = false;             // the fillScreen below takes the pixels with it
-  kbActive = false;
+  composeActive = false;
   kbMessageMode = false;
   kbSessionId[0] = '\0';
   kbPeekPage = -1;
@@ -961,7 +1010,7 @@ void kbInsert(char c) {
   // key (or a chip) that stops inserting with no visible reason reads as a
   // dropped press.
   if (kbLen >= KB_MAX_BYTES) {
-    if (composePanelOn) composeAfterEdit();
+    if (composeOnPanel()) composeAfterEdit();
     else drawKbText();
     return;
   }
@@ -984,7 +1033,7 @@ void kbInsert(char c) {
   // keyboard's text card and the reply panel's draft line are different pixels -
   // and drawKbText() would paint that card over the panel's prompt card and reply
   // buttons, which is a full-width repaint of the wrong screen.
-  if (composePanelOn) { composeAfterEdit(); return; }
+  if (composeOnPanel()) { composeAfterEdit(); return; }
   drawKbText();
   drawKbActions();      // SEND becomes live on the first character
 }
@@ -997,7 +1046,7 @@ void kbBackspace() {
   memmove(kbText + pos - 1, kbText + pos, kbLen - pos + 1);
   kbLen--;
   if (kbCaret >= 0) kbCaret--;  // moves left with the byte it just deleted
-  if (composePanelOn) { composeAfterEdit(); return; }   // see kbInsert
+  if (composeOnPanel()) { composeAfterEdit(); return; }   // see kbInsert
   drawKbText();
   drawKbActions();      // SEND goes inert again at zero
 }
@@ -1027,10 +1076,24 @@ bool kbTouch(int sx, int sy) {
     for (int i = 0; i < KB_ACT_COLS; i++) {
       if (kbActW[i] <= 0) continue;            // the row has not been drawn yet
       if (sx < kbActX[i] || sx >= kbActX[i] + kbActW[i]) continue;
-      if (i == 0) { closeKeyboard(); return true; }
+      // COLUMN 0 IS BACK, AND IT MUST AGREE WITH THE LABEL drawKbActions DREW -
+      // both ask composeHasPanel(), so the key cannot say BACK and close the
+      // surface, or say DISCARD and leave it up. Only the message case, which has
+      // no panel behind it, still leaves compose from this screen.
+      if (i == 0) {
+        if (composeHasPanel()) composeBackToPanel();
+        else closeCompose();
+        return true;
+      }
+      // SEND from the KEYBOARD leaves the surface, which is what it has always
+      // done and what the detail card underneath is repainted for. (The panel's
+      // own SEND stays and shows a receipt instead - see composeTouch.) The send
+      // reports whether the line went out, so a session that vanished between the
+      // press and here closes nothing and says why.
       if (!kbWindowClosed && kbLen > 0) {
-        if (kbIsMessage()) sendPromptToHost();
-        else sendTypedAnswerToHost();
+        const bool sent = kbIsMessage() ? sendPromptToHost() : sendTypedAnswerToHost();
+        if (sent) closeCompose();
+        else Serial.println("KB: SEND refused: the session this draft was typed for is gone");
       }
       return true;               // SEND's column with nothing to send: swallow
     }
@@ -1275,8 +1338,8 @@ void kbProbeCommand(const char* arg) {
   static unsigned long lastSayMs = 0;
   const bool dup = millis() - lastSayMs < 2000;
   const bool off = arg && arg[0] == 'o' && arg[1] == 'f' && arg[2] == 'f';
-  if (!kbActive) {
-    if (!dup) sendLineToHost("KBPROBE refused: the keyboard is not open (kbActive=0) - raise it "
+  if (!composeActive) {
+    if (!dup) sendLineToHost("KBPROBE refused: the keyboard is not open (composeActive=0) - raise it "
                              "with \"KBTEST msg <text>\" or by answering a pending ask, then "
                              "send KBPROBE");
     lastSayMs = millis();
@@ -1327,10 +1390,10 @@ void kbBubbleCommand(const char* arg) {
   // refused, so one command printed two contradictory lines per transport.
   static unsigned long lastSayMs = 0;
   const bool dup = millis() - lastSayMs < 2000;
-  if (!kbActive || kbPeekPage >= 0) {
-    if (!dup) sendLineToHost(kbActive
+  if (!composeActive || kbPeekPage >= 0) {
+    if (!dup) sendLineToHost(composeActive
       ? "KBBUBBLE refused: the prompt peek is up and covers the keys (kbPeekPage >= 0)"
-      : "KBBUBBLE refused: the keyboard is not open (kbActive=0) - raise it with "
+      : "KBBUBBLE refused: the keyboard is not open (composeActive=0) - raise it with "
         "\"KBTEST msg <text>\" or by answering a pending ask");
     lastSayMs = millis();
     return;
@@ -1437,7 +1500,7 @@ void kbSetArm(int r, int c) {
 // card, the strip, the peek - and DEL, which is the one exception inside the
 // key band.
 bool kbArm(int sx, int sy) {
-  if (!kbActive) return false;
+  if (!composeActive) return false;
   int r = -1, c = -1;
   // The peek owns every tap while it is up, and DEL is the one key inside the
   // band that must still commit on PRESS.
@@ -1512,10 +1575,17 @@ void kbBase64(char* out, size_t outSize) {
 
 // A typed message to a READY session. Signs the PROMPT label so this can never
 // authenticate as an answer, over a hash of exactly the bytes on screen.
-void sendPromptToHost() {
-  if (kbLen == 0 || kbWindowClosed || !kbIsMessage()) return;
+// RETURNS WHETHER THE LINE ACTUALLY WENT OUT, and closes nothing. It used to end
+// in closeCompose(), which meant the two screens of one surface did different
+// things with one answer: an option tapped on the panel left a receipt, and a
+// draft sent from the panel's own SEND dropped the whole surface. The caller owns
+// the screen now - the panel shows the receipt, the keyboard closes - and the
+// early returns below are exactly why this has to be a bool: they send nothing,
+// and a caller that closed regardless would be closing on a failure.
+bool sendPromptToHost() {
+  if (kbLen == 0 || kbWindowClosed || !kbIsMessage()) return false;
   int idx = kbSessionIdx;
-  if (idx < 0 || idx >= sessionCount) return;
+  if (idx < 0 || idx >= sessionCount) return false;
   String sha = sha256Hex16(kbText);
   // Signed with the session's OWN Mac, not activeHost - a message typed while
   // a second Mac happens to have ticked most recently must still be signed
@@ -1531,13 +1601,14 @@ void sendPromptToHost() {
   char line[280];
   snprintf(line, sizeof(line), "PROMPT %s %s %s", kbSessionId, b64, mac.c_str());
   sendLineToHost(line, sessions[idx].hostSlot);
-  closeKeyboard();
+  return true;
 }
 
-void sendTypedAnswerToHost() {
-  if (kbLen == 0 || kbWindowClosed) return;
+// Returns whether the line went out - see sendPromptToHost above for why.
+bool sendTypedAnswerToHost() {
+  if (kbLen == 0 || kbWindowClosed) return false;
   int idx = kbSessionIdx;
-  if (idx < 0 || idx >= sessionCount) return;
+  if (idx < 0 || idx >= sessionCount) return false;
   // Sign the HASH of the text, not the base64: the two sides then agree on the
   // signed bytes without depending on padding or case in the encoding.
   String sha = sha256Hex16(kbText);
@@ -1559,5 +1630,5 @@ void sendTypedAnswerToHost() {
   snprintf(line, sizeof(line), "ANSWER %s %s TYPED %s %s",
            sessions[idx].id, kbPid, b64, mac.c_str());
   sendLineToHost(line, sessions[idx].hostSlot);
-  closeKeyboard();
+  return true;
 }

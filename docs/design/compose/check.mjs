@@ -223,8 +223,14 @@ function run() {
     chk(H[b].BOARD_W === PANEL[b][0] && H[b].BOARD_H === PANEL[b][1], "parse",
         `${HEADER[b]} gave BOARD_W/BOARD_H ${H[b].BOARD_W}x${H[b].BOARD_H}, `
       + `geom-common's PANEL table says ${PANEL[b][0]}x${PANEL[b][1]}`);
+    // KB_MAX_BYTES MOVED to deckhand_display.ino, beside the kbText buffer it
+    // sizes: the cap and the array are one fact, and the array has to live in the
+    // file the build concatenates FIRST so compose.ino can name it too. Read from
+    // where it is now rather than where it was - a parse that quietly returned
+    // undefined would make the KB_TEXT_LINES claim below compare against NaN.
+    KBF[b].KB_MAX_BYTES = +(FW_SRC.match(/const int KB_MAX_BYTES\s*=\s*(\d+)\s*;/) || [])[1];
     chk(Number.isFinite(KBF[b].KB_MAX_BYTES), "parse",
-        `keyboard.ino's KB_MAX_BYTES did not parse for board ${b} (got ${KBF[b].KB_MAX_BYTES})`);
+        `deckhand_display.ino's KB_MAX_BYTES did not parse for board ${b} (got ${KBF[b].KB_MAX_BYTES})`);
   }
   // The gap's parse gates, ahead of the comparison that depends on them.
   chk(ACT_ROW_SRC.length > 0, "parse",

@@ -354,7 +354,7 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     pager or a session detail screen owns the glass, the same guard `fabVisible()` already paid
     for once: `emojiTestActive` dismisses on any tap ahead of those surfaces in `handleTouch`, and
     without the refusal a tap on the grid opened over an active keyboard force-repaints the tab
-    underneath while `kbActive` stays true, leaving every further tap typing invisibly.
+    underneath while `composeActive` stays true, leaving every further tap typing invisibly.
   - **Env beats the picker, and the MENU SAYS SO rather than showing a checkmark it cannot
     honour.** With `DECKHAND_MAC_EMOJI` set to a valid name the submenu parent reads **`Mac icon
     (set by env)`**, followed by the resolved glyph, and every child is disabled — a checkmark a

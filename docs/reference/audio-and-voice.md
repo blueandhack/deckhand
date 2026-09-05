@@ -607,19 +607,19 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     meta at 20 and text at 41/54/67/80 (four lines, not five) — found as this exact bug twice
     before landing on a row neither can encroach on. The non-overlap is the invariant; the
     y-values are per-board and derived in `board_*.h`.
-  - **`fabVisible()` had to gain a `kbActive` check.** The record/mic button's hit test runs
+  - **`fabVisible()` had to gain a `composeActive` check.** The record/mic button's hit test runs
     before the keyboard branch in `handleTouch`, and its tab-bar slot sits right where the
     keyboard's countdown corner is — a tap there started a mic capture, and on release
-    `micRestoreUi()`'s repaint painted a tab bar over the still-open keyboard while `kbActive`
+    `micRestoreUi()`'s repaint painted a tab bar over the still-open keyboard while `composeActive`
     stayed true, leaving every later tap typing invisibly into a screen that no longer looked like
     a keyboard.
   - **Two periodic repaints had to be absorbed, not one.** The ~5s host-driven tick (`handleLine`)
-    is intercepted while `kbActive`: it re-resolves the countdown and `kbWindowClosed` from the
+    is intercepted while `composeActive`: it re-resolves the countdown and `kbWindowClosed` from the
     fresh payload and returns, never repainting the session list underneath. A second, independent
-    ~1s loop-local tick that repaints the footer/tabs directly is separately gated on `!kbActive`,
+    ~1s loop-local tick that repaints the footer/tabs directly is separately gated on `!composeActive`,
     the same way it already excludes `readerActive`/`histActive` — missing either one repaints the
     keyboard away every few seconds. `lastActivityMillis` is also refreshed on every keyboard touch
-    **and** every loop tick while `kbActive`, because the 30s default backlight timeout sits well
+    **and** every loop tick while `composeActive`, because the 30s default backlight timeout sits well
     inside the 90s answer budget: without it, typing a normal-length answer could blank the screen
     mid-sentence and the waking tap would be swallowed rather than typed.
   - **The placeholder is the QUESTION, and a PERSISTENT STRIP keeps one line of it.**

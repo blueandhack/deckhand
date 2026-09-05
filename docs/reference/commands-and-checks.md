@@ -558,14 +558,14 @@ nothing.
 | `emojiTestActive` | yes | yes (`EMOJITEST`) | **fixed** - `EMOJITEST off`, and `TAB` clears it |
 | `histActive` / `readerActive` | yes | board 2 only (`READTEST`) | `READTEST off`; on board 1 only a finger can raise it |
 | `scrollActive` | yes | yes (`SCROLLOPEN`) | `SCROLLCLOSE` |
-| `kbActive` | yes | yes (`KBTEST`) | `KBTEST off` |
+| `composeActive` | yes | yes (`KBTEST`) | `KBTEST off` |
 | `octoActive` | yes | no (touch only) | self-clears after 30s |
 | `voiceCardActive` | no | no (a host payload raises it) | the next voice state |
 | `isAsleep` | n/a - `SLEEP` is a power-off | yes (`SLEEP`) | **none, by design**: a held touch wakes it |
 
 Two refusals came out of that sweep, both real and both the same defect one surface along:
 
-- **`TAB` is refused while `kbActive`/`readerActive`/`histActive`/`scrollActive`.** `switchTab()`
+- **`TAB` is refused while `composeActive`/`readerActive`/`histActive`/`scrollActive`.** `switchTab()`
   paints the tab and clears nobody's flag, so `TAB` over an open reader or transcript left the flag
   set and the tick absorbed - EMOJITEST's freeze exactly. Those three are refused rather than
   cleared because each has an exit function that repaints the screen `switchTab` is about to
@@ -615,7 +615,7 @@ a mock of it. It **never commits** - only `handleTouch`'s release path calls `kb
 `DEL` commits on press and is never armed: a bubble over it would be a capture of a state this
 keyboard cannot reach.
 
-Both refuse with a NAMED cause off the keyboard (`kbActive=0`, or the peek covering the keys), and
+Both refuse with a NAMED cause off the keyboard (`composeActive=0`, or the peek covering the keys), and
 both are idempotent against the host delivering every trigger-file command over **both** transports:
 a second copy within 2s changes nothing and prints nothing, while a genuine repeat later says
 `already running` / `already drawn`. Getting that wrong is what made one `POWERPROBE` print four

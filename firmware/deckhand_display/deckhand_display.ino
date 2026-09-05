@@ -1287,7 +1287,7 @@ int readerPage = 0;
 
 // EMOJITEST's grid, the only way to get all 16 icons onto the glass without a
 // person standing at the device tapping through settings - same reason TAB and
-// PAGE exist. A full-screen surface, so it joins octoActive/readerActive/kbActive
+// PAGE exist. A full-screen surface, so it joins octoActive/readerActive/composeActive
 // in the touch dispatch and the periodic-repaint guards.
 bool emojiTestActive = false;
 
@@ -1296,7 +1296,7 @@ bool emojiTestActive = false;
 // own code because the Arduino build concatenates these files in one order and a
 // global used above its own declaration does not compile - handleTouch, handleLine
 // and loop() all sit in this file and all three have to know the panel owns the
-// glass. It joins octoActive/readerActive/kbActive in exactly those three guards.
+// glass. It joins octoActive/readerActive/composeActive in exactly those three guards.
 //
 // The panel and the WINDOW are one lifetime, enforced from THIS side: whatever
 // shuts the window - the 120s timeout, a commit, a bad proof, the Mac cancelling,
@@ -1308,14 +1308,31 @@ bool emojiTestActive = false;
 bool pairPanelActive = false;
 #endif
 
-// ---- Keyboard state ----
-// One keyboard at a time, so this is global rather than per-session: it is a
+// ---- The compose surface's state ----
+// ONE SURFACE AT A TIME, so this is global rather than per-session: it is a
 // surface, not a property of a row. kbPid pins it to the prompt it was opened
 // for, so a payload that rewrites the session list cannot redirect a typed answer.
-bool kbActive = false;
-char kbText[151];              // 150 bytes + NUL, matching the host's cap exactly
+//
+// composeActive WAS NAMED FOR THE KEYBOARD until Task 11, and the rename is the
+// whole of that task's risk. It stopped meaning "the keyboard is up" the moment
+// the reply panel landed - it means "compose is up", on ONE OF TWO SCREENS, and
+// a flag whose name says one screen while it gates both is exactly how a screen
+// and its touch router end up disagreeing. (The old name is not written here:
+// settings-geom-check asserts it survives nowhere in this file, keyboard.ino or
+// compose.ino, and a comment carrying it would fail that for no code reason.) That disagreement is the bug closeCompose()'s own long comment
+// records, and it is SILENT: nothing repaints it away. One name for one state,
+// and composeScreen (below) says which screen, so there is no second name that
+// can drift out of step with this one.
+bool composeActive = false;
+// THE CAP, AND THE BUFFER IT SIZES, IN ONE PLACE. 150 must equal the host's cap
+// (ANSWER_TEXT_MAX_BYTES in host/voice-answer.mjs) - one limit, two sides. It
+// lives here rather than in keyboard.ino because the build concatenates this
+// file first, so compose.ino can name it too and nothing over there has to
+// write 150 again.
+const int KB_MAX_BYTES = 150;
+char kbText[KB_MAX_BYTES + 1];   // the cap plus its NUL
 int  kbLen = 0;
-// -1 means "pinned to the end" - the state after openKeyboard, and it must
+// -1 means "pinned to the end" - the state after openCompose, and it must
 // survive until the user taps the text card so existing behaviour (typing
 // always appends, DEL always trims the last byte) is unchanged until then.
 // Once a tap sets it to a real byte offset, kbInsert/kbBackspace splice AT it
@@ -1325,7 +1342,7 @@ char kbPid[24] = "";
 // The Mac that raised the ask kbPid pins to. PIDs are per-machine, so kbPid
 // ALONE is not a unique key once two Macs are both ticking - two of them can
 // coincidentally raise the same pid, and without this the per-tick re-anchor
-// (see the kbActive block in handleLine()) would happily re-point a half-typed
+// (see the composeActive block in handleLine()) would happily re-point a half-typed
 // answer at whichever Mac's session matches askPid FIRST, signing text typed
 // for one prompt with the other Mac's key against the other Mac's nonce.
 int kbHostSlot = -1;
@@ -1350,29 +1367,48 @@ int kbSessionIdx = -1;
 bool kbMessageMode = false;
 char kbSessionId[16] = "";
 
-// ---- The reply panel's state, DEFINED IN compose.ino ----
-// Forward-declared for the same reason scrollback.ino's globals are, below: the
-// build concatenates this file FIRST and compose.ino third, but handleTouch (in
-// this file) dispatches on composePanelOn, so a real declaration has to come
-// first. Functions get a generated prototype from anywhere in the sketch; plain
-// globals do not.
+// ---- WHICH SCREEN OF THE COMPOSE SURFACE IS UP ----
+// composeActive says the surface is up; this says which of its two screens has
+// the glass. 0 is the reply panel - THE ROOT, the screen the surface opens on -
+// and 1 is the keyboard, the sheet behind TYPE... The draft (kbText/kbLen/
+// kbCaret) belongs to the SURFACE and not to either screen, which is what makes
+// the two compose rather than coexist: a chip tapped on the panel is editable on
+// the keyboard, and text typed there is on the panel's draft line when you come
+// back.
 //
-// composePanelOn says WHICH SCREEN of the compose surface is up - kbActive still
-// means "compose is up" and this says whether that is the reply panel (true) or
-// the keyboard (false). Task 11 of the compose plan folds the pair into
-// composeActive/composeScreen, and this extern moves with them.
-extern bool composePanelOn;
+// A #define AND NOT A const int. Nothing here is behind an #if today, but
+// `#if` on a C++ const int is SILENTLY FALSE with no -Wall warning and has
+// shipped twice in this repo, so a screen identifier that might one day be
+// guarded is spelled the way that cannot fail quietly.
+#define COMPOSE_SCREEN_PANEL 0
+#define COMPOSE_SCREEN_KEYS  1
+// DEFINED IN compose.ino, forward-declared here for the same reason
+// scrollback.ino's globals are: the build concatenates this file FIRST and
+// compose.ino third, but handleTouch (in this file) dispatches on it. Functions
+// get a generated prototype from anywhere in the sketch; plain globals do not.
+extern uint8_t composeScreen;
 extern int  composeChipPage;
 extern bool composeSent;
-// The three entry points this file uses, declared rather than left to the
-// builder's generated prototypes - they are the interface between the touch
-// router here and the screen over there, and NONE of them names SessionInfo,
-// Theme, Usage, HostPairing or ConfirmAction in its signature. A prototype that
-// did would be emitted ABOVE those declarations and would not compile.
+// The entry points this file uses, declared rather than left to the builder's
+// generated prototypes - they are the interface between the touch router here
+// and the screen over there, and NONE of them names SessionInfo, Theme, Usage,
+// HostPairing or ConfirmAction in its signature. A prototype that did would be
+// emitted ABOVE those declarations and would not compile.
 void drawCompose();
 bool composeTouch(int sx, int sy);
-void composeOpen(int idx);
 void composeShowSentState(const char* text);
+void composeWindowClosed();
+// "The surface is up AND it is showing THIS screen", asked as one question so no
+// caller can test the screen without testing the surface. Every seam but
+// handleTouch's one dispatch goes through these.
+bool composeOnPanel();
+bool composeOnKeys();
+// openCompose/closeCompose live in keyboard.ino - the resets they own are that
+// file's globals (kbShiftMode, kbPage, kbMessageMode), and a global is only
+// visible to the files concatenated AFTER the one that defines it.
+void openCompose(int idx);
+void openComposeKeys(int idx);
+void closeCompose();
 
 // ---------- Session history ----------
 // Fetched ON DEMAND and PAGED FROM THE MAC. The device stores only the page it is showing:
@@ -2284,7 +2320,7 @@ extern bool octoActive;
 // beside drawWaitingScreen() because it needs the octoActive declaration above.
 bool waitingScreenVisible() {
   return !everReceived && !isAsleep && !octoActive && !showingDetail &&
-         !readerActive && !kbActive && currentTab == TAB_USAGE;
+         !readerActive && !composeActive && currentTab == TAB_USAGE;
 }
 
 // The wheel's own timer. Like the working spinner this is a small blit rather
@@ -2325,15 +2361,15 @@ bool fabPressed = false;           // the press currently down started on the bu
 // content area at all. Chrome that blinks in and out reads as a glitch, so the
 // only things that hide it are the states where the bar itself is gone.
 bool fabVisible() {
-  // kbActive joins isAsleep/octoActive rather than being handled by touch-order
+  // composeActive joins isAsleep/octoActive rather than being handled by touch-order
   // alone: drawKeyboard() fillScreens over the slot, so the button is already
   // invisible the moment the keyboard opens, but fabHit() only checks THIS
   // function - without this line it kept claiming taps in that corner (the
   // keyboard's countdown sits right under the old slot), silently starting a
   // mic capture and, on release, forceFullRepaint()ing a tab over the keyboard
-  // while kbActive stayed true. Same invariant isAsleep/octoActive already
+  // while composeActive stayed true. Same invariant isAsleep/octoActive already
   // rely on: fabVisible() means "actually visible AND tappable", not just drawn.
-  if (isAsleep || octoActive || kbActive) return false;
+  if (isAsleep || octoActive || composeActive) return false;
 #if !BOARD_HAS_MIC
   // No capture path on this board, so no button. BOARD_HAS_MIC describes the
   // SOFTWARE, not the hardware: board 2 has an ES8311 I2S codec with a real mic
@@ -2438,7 +2474,7 @@ void tickAutoTheme() {
   // someone is in the middle of comparing against their Mac.
   if (pairPanelActive) return;
 #endif
-  if (isAsleep || octoActive || readerActive || histActive || showingDetail || voiceCardActive || kbActive || emojiTestActive) return;
+  if (isAsleep || octoActive || readerActive || histActive || showingDetail || voiceCardActive || composeActive || emojiTestActive) return;
   static unsigned long lastCheck = 0;
   if (lastCheck && millis() - lastCheck < 30000) return;
   lastCheck = millis();
@@ -2917,7 +2953,7 @@ void tickWorkingSpinner() {
   // onto the pairing code at the list's own coordinates.
   if (pairPanelActive) return;
 #endif
-  if (isAsleep || octoActive || showingDetail || readerActive || histActive || kbActive || emojiTestActive) return;
+  if (isAsleep || octoActive || showingDetail || readerActive || histActive || composeActive || emojiTestActive) return;
   if (currentTab != TAB_SESSIONS || sessionCount == 0) return;
   if (millis() - lastAnimMs < ANIM_INTERVAL_MS) return;
   lastAnimMs = millis();
@@ -3749,10 +3785,14 @@ void handleTouch() {
   // press only ARMED a candidate, so the held path has to re-sample and
   // re-target - the same thing tickKbRepeat already does for DEL's hold, and the
   // only way a 4.3mm key can be corrected by the finger that is covering it.
-  // Guarded on kbActive so no other screen pays for the extra work, and kbSlide
-  // itself returns immediately when nothing is armed.
+  // Guarded on THE KEYBOARD SCREEN specifically - not on composeActive, which
+  // now covers the reply panel too. Nothing on the panel arms, so nothing there
+  // can slide or commit, and gating on the surface would have the panel paying
+  // for a re-target it can never use. (kbSlide/kbRelease are also safe on their
+  // own - one returns immediately with nothing armed and the other returns false
+  // - but "safe because the callee checks" is how the two ended up disagreeing.)
   if (touching && wasTouching) {
-    if (kbActive) kbSlide(sx, sy);
+    if (composeOnKeys()) kbSlide(sx, sy);
     return;
   }
   // Released: the keyboard's key band COMMITS here (kbRelease returns false when
@@ -3762,7 +3802,7 @@ void handleTouch() {
     wasTouching = false;
     const bool onFab = fabPressed;
     fabPressed = false;
-    if (kbActive && kbRelease()) { lastActivityMillis = millis(); return; }
+    if (composeOnKeys() && kbRelease()) { lastActivityMillis = millis(); return; }
     if (onFab) {
       drawFab(0);
       micStream(); // streams for as long as you talk; MICREC is the short fallback
@@ -3807,7 +3847,7 @@ void handleTouch() {
   // full-screen surfaces - before voiceCardActive, readerActive and
   // histActive, not after them - and consumes every tap. This used to run
   // after voiceCardActive, which let a dictation reporting back (drawn a
-  // couple hundred lines away in handleLine, with no kbActive check of its
+  // couple hundred lines away in handleLine, with no composeActive check of its
   // own) paint over an in-progress typed answer and then have every further
   // tap silently type into whatever the voice-card dismissal repainted.
   // kbArm() FIRST, and kbTouch only for what it declines. A press on a character
@@ -3816,12 +3856,17 @@ void handleTouch() {
   // card, the strip, the peek, and DEL - falls through to kbTouch and keeps
   // press-commit, because every one of those targets already clears the ~7.1mm
   // fingertip floor in both axes.
-  if (kbActive) {
-    // ONE SURFACE, TWO SCREENS, and exactly one dispatch on which. The reply panel
-    // takes the whole tap: every target on it clears TAP_MIN in both axes, so
-    // nothing there needs the arm-then-commit the 4.3mm key band needs, and the
-    // press-commit model is what the rest of the device already uses.
-    if (composePanelOn) composeTouch(sx, sy);
+  if (composeActive) {
+    // ONE SURFACE, TWO SCREENS, AND EXACTLY ONE DISPATCH ON WHICH. This `if` and
+    // the `composeScreen` inside it are the only place in the firmware that
+    // decides which screen a tap belongs to; every other seam asks
+    // composeOnKeys()/composeOnPanel() rather than reading the flag again. Two
+    // routers reading one flag is the same defect as two flags for one state.
+    //
+    // The reply panel takes the whole tap: every target on it clears TAP_MIN in
+    // both axes, so nothing there needs the arm-then-commit the 4.3mm key band
+    // needs, and press-commit is what the rest of the device already uses.
+    if (composeScreen == COMPOSE_SCREEN_PANEL) composeTouch(sx, sy);
     else if (!kbArm(sx, sy)) kbTouch(sx, sy);
     lastActivityMillis = millis();
     return;
@@ -4638,7 +4683,7 @@ void handleLine(const String& line) {
   mergeUsage();
   reorderSessions();  // re-rank across both Macs before anything renders
 
-  // Record that a tick arrived BEFORE the kbActive guard below can return -
+  // Record that a tick arrived BEFORE the composeActive guard below can return -
   // the tick did arrive and the host is still live, only its RENDERING is
   // being absorbed while someone types, and the footer's "Xs ago" freshness
   // must not stall for the whole typing session (and read stale for another
@@ -4651,15 +4696,15 @@ void handleLine(const String& line) {
   // fully rebuilt for this tick, and BEFORE the voice-card raise, the
   // voiceConfirmGone close-and-repaint below, and the octoActive/histActive/
   // readerActive absorbs that follow - so nothing later in this function can
-  // paint over someone typing or leave showingDetail/kbActive disagreeing
+  // paint over someone typing or leave showingDetail/composeActive disagreeing
   // about what's on the glass. It used to sit after all of that (see the old
-  // kbActive block this replaced, further down where octoActive/histActive/
+  // composeActive block this replaced, further down where octoActive/histActive/
   // readerActive are still checked), which let a voice-card update - raised
   // unconditionally, ~250 lines above that old spot - paint over an
   // in-progress typed answer. Placed here, using THIS tick's sessions[] (not
   // last tick's), so the countdown still ticks and a closed window is still
   // detected the same poll it closes on - the only things this absorb needs.
-  if (kbActive) {
+  if (composeActive) {
     int idx = -1;
     for (int i = 0; i < sessionCount; i++) {
       // In message mode there is no askPid to match on, and LEAVING READY is what
@@ -4687,16 +4732,14 @@ void handleLine(const String& line) {
     // is the flicker this firmware redraws by value to avoid.
     if (gone != kbWindowClosed) {
       kbWindowClosed = gone;
-      // WHICHEVER SCREEN OF THE COMPOSE SURFACE IS UP. kbActive covers both now,
+      // WHICHEVER SCREEN OF THE COMPOSE SURFACE IS UP. composeActive covers both,
       // and every repaint below is the KEYBOARD's - drawKbActions would paint its
       // row over the panel's (same band, different controls), drawKbStrip would
       // paint a strip the panel does not have across its prompt card, and
       // drawKbText would paint the keyboard's text card over the panel's reply
-      // buttons every 5 seconds. The panel's own row carries the same fact in its
-      // SEND label (SEND -> CLOSED), and it needs no clear: the button is redrawn
-      // at the same rect with a full uiFillRound, unlike the wrapped message the
-      // keyboard's row puts there.
-      if (composePanelOn) { drawComposeActions(); return; }
+      // buttons every 5 seconds. The panel has its own transition, which also has
+      // to take its reply buttons off the glass - see composeWindowClosed().
+      if (composeOnPanel()) { composeWindowClosed(); return; }
       tft.fillRect(CARD_X, KB_ACT_Y, tft.width() - CARD_X * 2, KB_ACT_H, COLOR_BG);
       drawKbActions();
       // AND THE PROMPT STRIP, on the same transition and for the same reason it
@@ -4710,20 +4753,20 @@ void handleLine(const String& line) {
     }
     // The countdown is the keyboard's meta row; the panel draws no countdown, so
     // there is nothing on it that a tick changes and it is left alone.
-    if (!composePanelOn) drawKbText();          // countdown ticks down
+    if (composeOnKeys()) drawKbText();          // countdown ticks down
     return;
   }
 
   // Close the confirm screen rather than leaving a SEND button that can no
   // longer do anything - see voiceConfirmGone above. sessions[]/sessionCount
   // are fully rebuilt for this tick now, so this repaints a consistent list.
-  // (Now behind the kbActive guard above - this used to run whether or not
+  // (Now behind the composeActive guard above - this used to run whether or not
   // the keyboard was up, and it repaints straight over it.)
   if (voiceConfirmGone) closeSessionDetail();
 
   // Voice result. Raise the card only on a NEW exchange (host timestamp), so it
   // appears once and a later tick can't resurrect a card the user dismissed.
-  // Gated on !kbActive as defense in depth - kbActive already returned above,
+  // Gated on !composeActive as defense in depth - composeActive already returned above,
   // so this can't currently fire while typing, but a dictation reporting back
   // must never repaint over the keyboard regardless of how this function
   // gets reshuffled later.
@@ -4786,7 +4829,7 @@ void handleLine(const String& line) {
       // "COPIED - PASTE IT" label for it the whole time that the raise path could
       // never reach. Same class as the askerror/asksent omission above: a state
       // published by the host and surfaced nowhere.
-      if (!kbActive && seq > vSeqShown &&
+      if (!composeActive && seq > vSeqShown &&
           (!strcmp(voiceState, "sent") || !strcmp(voiceState, "done") ||
            !strcmp(voiceState, "memo") || !strcmp(voiceState, "clip") ||
            !strcmp(voiceState, "error") ||
@@ -4796,7 +4839,7 @@ void handleLine(const String& line) {
         showingDetail = false;   // the card owns the content area
         drawVoiceCard();
       }
-    } else if (voiceCardActive && !kbActive) {
+    } else if (voiceCardActive && !composeActive) {
       drawVoiceCard();           // same exchange, fresher reply text
     }
   }
@@ -5825,7 +5868,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // ONE `if`, with only the extra TERM behind the guard - never a duplicated
     // statement per arm, which leaves every brace-counting checker here seeing one
     // more `{` than `}`.
-    bool surfaceUp = kbActive || readerActive || histActive;
+    bool surfaceUp = composeActive || readerActive || histActive;
 #if BOARD_HISTORY_SCROLL
     surfaceUp = surfaceUp || scrollActive;
 #endif
@@ -5886,7 +5929,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       buf = "";
       return;
     }
-    if (kbActive || readerActive || histActive || emojiTestActive) {
+    if (composeActive || readerActive || histActive || emojiTestActive) {
       Serial.println("DETAIL refused: another full-screen surface is up");
       buf = "";
       return;
@@ -5938,7 +5981,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       return;
     }
     applyTheme((uint8_t) ti);
-    if (kbActive) drawKeyboard();          // both compose screens repaint through here
+    if (composeActive) drawKeyboard();          // both compose screens repaint through here
     else forceFullRepaint();
 #if !BOARD_USES_TFT_ESPI
     tft.flush();
@@ -5972,7 +6015,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     String arg = buf.length() > 7 ? buf.substring(7) : String("");
     arg.trim();
     if (arg == "off") {
-      if (kbActive) closeKeyboard();
+      if (composeActive) closeCompose();
       Serial.println("COMPOSE: closed");
       buf = "";
       return;
@@ -5985,7 +6028,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       // and that difference is invisible until a token has actually been
       // inserted. The line printed below is the proof: the byte count is the
       // WHOLE token's, not the drawn label's.
-      if (!kbActive || !composePanelOn) {
+      if (!composeOnPanel()) {
         Serial.println("COMPOSE refused: the reply panel is not up (send COMPOSE first)");
         buf = "";
         return;
@@ -6040,7 +6083,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       return;
     }
     if (arg == "sent") {
-      if (!kbActive || !composePanelOn) {
+      if (!composeOnPanel()) {
         Serial.println("COMPOSE refused: the reply panel is not up (send COMPOSE first)");
         buf = "";
         return;
@@ -6057,7 +6100,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // ALWAYS from a closed surface, the rule KBTEST already follows: re-opening
     // over an open one is scaffolding-only and is made impossible rather than
     // debugged.
-    if (kbActive) closeKeyboard();
+    if (composeActive) closeCompose();
     if (readerActive || histActive || emojiTestActive) {
       Serial.println("COMPOSE refused: another full-screen surface is up");
       buf = "";
@@ -6071,12 +6114,12 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       buf = "";
       return;
     }
-    // Through the detail screen, the way a person will reach it once task 11 lands,
-    // so closing the panel returns somewhere consistent - the same reason KBTEST
-    // opens the card first.
+    // Through the detail screen, the way a person reaches it now that the card's
+    // TYPE button opens this panel, so closing the panel returns somewhere
+    // consistent - the same reason KBTEST opens the card first.
     switchTab(TAB_SESSIONS);
     openSessionDetail(ci);
-    composeOpen(ci);
+    openCompose(ci);
     if (arg.startsWith("type ")) {
       String rest = arg.substring(5);
       for (unsigned int k = 0; k < rest.length(); k++) kbInsert(rest[k]);
@@ -6107,7 +6150,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // screen untouched - the re-entrant path is scaffolding-only (you cannot tap
     // TYPE while the keyboard covers the screen), so it is made impossible here
     // rather than debugged.
-    if (kbActive) closeKeyboard();
+    if (composeActive) closeCompose();
     // The host delivers every trigger-file command over BOTH transports, so a
     // cabled device sees the SAME "KBTEST ..." line twice within milliseconds
     // (the "one POWERPROBE produced four refusal lines" note under Commands).
@@ -6131,7 +6174,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
         found = true;
         switchTab(TAB_SESSIONS);
         openSessionDetail(i);
-        openKeyboardForMessage(i);
+        openComposeForMessage(i);
         for (unsigned int k = 0; k < rest.length(); k++) kbInsert(rest[k]);
         break;
       }
@@ -6150,7 +6193,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
         // tab was showing left the sessions list painted under a USAGE tab bar.
         switchTab(TAB_SESSIONS);
         openSessionDetail(i);
-        openKeyboard(i);
+        openComposeKeys(i);
         if (arg == "peek" && kbHasDetail()) { kbPeekPage = 0; drawKeyboard(); }
         else if (arg == "caps") { kbShiftMode = 2; drawKeyboard(); }
         else if (arg.startsWith("type ")) {
@@ -6273,7 +6316,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // as the page scrolling by itself.
     // buf = "" before both returns: see DETAIL's note above.
     if (sessionCount == 0) { Serial.println("SCROLLOPEN: no sessions"); buf = ""; return; }
-    if (kbActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
+    if (composeActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
       Serial.println("SCROLLOPEN: another full-screen surface is up"); buf = ""; return;
     }
     int idx = 0;
@@ -6350,7 +6393,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
 #endif
     if (arg == "off") {
       if (readerActive) exitReader();
-    } else if (kbActive || histActive || emojiTestActive) {
+    } else if (composeActive || histActive || emojiTestActive) {
       Serial.println("READTEST refused: another full-screen surface is up");
     } else {
       bool opened = false;
@@ -6430,7 +6473,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       scrollPerfRunning = false;
       return;
     }
-    if (kbActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
+    if (composeActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
       Serial.println("SCROLLPERF: another full-screen surface is up");
       scrollPerfRunning = false;
       return;
@@ -6532,10 +6575,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
 #endif
   } else if (buf.startsWith("EMOJITEST")) {
     // Refuse while another full-screen surface owns the glass. emojiTestActive
-    // is tested BEFORE kbActive in handleTouch's dismiss chain, so opening the
+    // is tested BEFORE composeActive in handleTouch's dismiss chain, so opening the
     // grid over an open keyboard and then tapping anywhere calls
-    // forceFullRepaint() with kbActive still true underneath - the exact class
-    // of bug fabVisible()'s own kbActive check was already paid for once,
+    // forceFullRepaint() with composeActive still true underneath - the exact class
+    // of bug fabVisible()'s own composeActive check was already paid for once,
     // leaving invisible typing into a screen that no longer looks like a
     // keyboard.
 #if BOARD_HAS_WIRELESS_PAIR
@@ -6583,7 +6626,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
       return;
     }
-    if (kbActive || readerActive || histActive || showingDetail) {
+    if (composeActive || readerActive || histActive || showingDetail) {
       Serial.println("EMOJITEST refused: another full-screen surface is up");
       buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
       return;
@@ -6614,7 +6657,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // per arm. An #if/#else that opens a brace in both arms leaves every brace-counting
     // checker here seeing one more `{` than `}`; that once broke an unrelated PAIRING
     // assertion, which then reported a defect that did not exist.
-    bool surfaceUp = kbActive || readerActive || histActive || emojiTestActive;
+    bool surfaceUp = composeActive || readerActive || histActive || emojiTestActive;
 #if BOARD_HAS_WIRELESS_PAIR
     surfaceUp = surfaceUp || pairPanelActive;
 #endif
@@ -7302,11 +7345,11 @@ void loop() {
   }
 
   // The reader is a static full-screen page: keep the display awake while
-  // it's open, and keep the footer/tab renderers off its pixels. kbActive joins
+  // it's open, and keep the footer/tab renderers off its pixels. composeActive joins
   // this for a sharper reason than annoyance: default sleep is 30s against a
   // 90s answer budget, so without this the backlight could blank mid-answer in
   // ordinary use, and the waking tap would be swallowed rather than typed.
-  if (readerActive || histActive || kbActive) lastActivityMillis = millis();
+  if (readerActive || histActive || composeActive) lastActivityMillis = millis();
 #if BOARD_HAS_WIRELESS_PAIR
   // The pairing panel joins them, and here it is load-bearing rather than merely
   // tidy: the default backlight timeout is 30s against a 120s window, so without
@@ -7318,13 +7361,13 @@ void loop() {
   // Hold-to-repeat for the keyboard's DEL. Runs from here rather than handleTouch
   // because that dispatches on PRESS and ignores a held finger - which is right
   // for every other key, where one press must be exactly one character.
-  if (kbActive) tickKbRepeat();
+  if (composeActive) tickKbRepeat();
   // Row 3's press flash, released by deadline rather than by a blocking delay -
-  // same reason, and it deliberately runs whether or not kbActive, so a flash
+  // same reason, and it deliberately runs whether or not composeActive, so a flash
   // armed just before the keyboard closed still clears its own state.
   tickKbFlash();
 
-  // kbActive excluded for the same reason readerActive/histActive already are:
+  // composeActive excluded for the same reason readerActive/histActive already are:
   // this local 1s tick calls renderSessionsTab()/renderSettingsTab() directly,
   // which would paint the session list straight over the keyboard exactly the
   // way the 5s host tick would if handleLine didn't absorb it. emojiTestActive
@@ -7344,7 +7387,7 @@ void loop() {
   // timeout" - an assertion about PAIRING, broken by an edit to the scrollback,
   // reporting a defect that did not exist. Board 1 still sees exactly its original
   // condition; only the line break moved.
-  if (!isAsleep && !octoActive && !readerActive && !histActive && !kbActive && !emojiTestActive
+  if (!isAsleep && !octoActive && !readerActive && !histActive && !composeActive && !emojiTestActive
 #if BOARD_HISTORY_SCROLL
       && !scrollActive
 #endif

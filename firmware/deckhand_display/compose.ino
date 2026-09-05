@@ -37,24 +37,36 @@
 //
 // ONE TRANSLATION UNIT, AND THIS FILE IS THIRD. The build concatenates
 // deckhand_display.ino first, then the rest alphabetically - audio.ino, THIS FILE,
-// keyboard.ino, ... - so everything keyboard.ino declares (KB_MAX_BYTES, kbText,
-// KB_KEY_GAP) is NOT visible here as a name, even though the two files end up in one
-// unit. Functions are fine (the builder generates a prototype for every one of
+// keyboard.ino, ... - so everything keyboard.ino declares (KB_KEY_GAP, kbActX,
+// KB_ACT_COLS) is NOT visible here as a name, even though the two files end up in
+// one unit. KB_MAX_BYTES and kbText are NOT in that set: they live in
+// deckhand_display.ino, beside each other, and this file names them both. Functions are fine (the builder generates a prototype for every one of
 // them); plain globals and const ints are not. Where this file needs one of those it
 // re-derives it from the HEADER constants both files share, and says so at the site.
 
 // ---------------------------------------------------------------------------
 // State. All of it is read by deckhand_display.ino's handleTouch and by
-// keyboard.ino's drawKeyboard/closeKeyboard/kbInsert, which is why the first two
+// keyboard.ino's drawKeyboard/closeCompose/kbInsert, which is why the first two
 // carry an `extern` in the main file - a function gets a generated prototype from
 // anywhere in the sketch, a global does not.
 // ---------------------------------------------------------------------------
-// WHICH SCREEN OF THE COMPOSE SURFACE IS UP. kbActive still means "compose is up";
-// this says which of its two screens. Task 11 of this plan folds the pair into
-// composeActive/composeScreen - one name for one state - and every seam this flag
-// touches (drawKeyboard's first line, closeKeyboard's reset, kbInsert's repaint,
-// handleTouch's dispatch) is exactly the set that moves with it.
-bool composePanelOn = false;
+// WHICH SCREEN OF THE COMPOSE SURFACE IS UP - COMPOSE_SCREEN_PANEL (0, the root)
+// or COMPOSE_SCREEN_KEYS (1, the sheet behind TYPE...). composeActive says the
+// surface is up; this says which screen. The two were once a flag named for the
+// KEYBOARD, meaning "the keyboard is up", plus a second bool meaning "no, the
+// panel is" - TWO NAMES FOR ONE STATE, and exactly how a screen and its touch
+// router end up disagreeing. That is the silent bug closeCompose()'s own comment
+// records. The old names are deliberately not written here: a checker asserts
+// neither survives anywhere in these three files, and a comment naming one would
+// pass or fail that assertion for a reason that has nothing to do with the code.
+//
+// ONLY handleTouch READS THIS DIRECTLY, because it is the one place that has to
+// decide which screen a tap belongs to. Every other seam asks composeOnPanel()
+// or composeOnKeys(), so the surface-is-up half of the question can never be
+// forgotten at one of them.
+uint8_t composeScreen = COMPOSE_SCREEN_PANEL;
+bool composeOnPanel() { return composeActive && composeScreen == COMPOSE_SCREEN_PANEL; }
+bool composeOnKeys()  { return composeActive && composeScreen == COMPOSE_SCREEN_KEYS; }
 // The token row pages rather than counting: the row fits two chips on both boards
 // and the host ships up to four, so an "N>" label that only counted would leave
 // half of them unreachable.
@@ -63,7 +75,14 @@ int composeChipPage = 0;
 // and collapse the action row to DONE - nothing that looks like SEND is left on the
 // glass to press again.
 bool composeSent = false;
-char composeSentText[36] = "";   // askOpts[4][34] is the widest thing that lands here
+// THE WHOLE DRAFT FITS. This was askOpts[4][34]'s width plus a NUL, sized when
+// the only thing that reached it was a one-tap option label - and then SEND on
+// this row started leaving a receipt too, which can be the full 150-byte draft.
+// A copyField into 36 bytes would have cut it at 35 with no marker, so the
+// receipt would have SILENTLY disagreed with what went to Claude. The 115 extra
+// bytes are DRAM, once, not per session. KB_MAX_BYTES + 1 rather than 151: the
+// literal is how the two drift when the cap moves.
+char composeSentText[KB_MAX_BYTES + 1] = "";
 // True while composeInsertChip is spooling a token in, so the draft line repaints
 // ONCE at the end instead of once per byte. A 38-byte path would otherwise repaint
 // that line 38 times on a panel that draws straight to the glass.
@@ -275,9 +294,11 @@ void drawComposeDraft() {
   const int y = composeDraftY();
   tft.fillRect(CARD_X, y, CARD_W, COMPOSE_DRAFT_H, COLOR_BG);
   setUIFont(T_BODY);
-  char shown[64];
+  char shown[64];   // fitText bounds by WIDTH, so this only has to beat the widest lane
   if (composeSent) {
-    char line[48];
+    // Sized from the cap, not from the option labels that used to be all this
+    // held: "SENT: " plus a full-length draft plus the NUL.
+    char line[KB_MAX_BYTES + 8];
     snprintf(line, sizeof(line), "SENT: %s", composeSentText);
     fitText(shown, sizeof(shown), line, CARD_W - 12);
     tft.setTextColor(COLOR_GOOD, COLOR_BG);
@@ -364,20 +385,63 @@ void drawComposeActions() {
   composeActDrawn = n;
 }
 
+// ---------------------------------------------------------------------------
+// THE ASK WENT AWAY UNDER THE PANEL. kbSessionIdx goes to -1 the moment the 5s
+// tick cannot find the prompt this surface was opened for - it expired, or it
+// was answered on the Mac - and from then on there is no sessions[] row to draw
+// a prompt card, a reply button or a token from.
+//
+// WHAT THIS REPLACES IS THE DEFECT, not a blank area: the panel used to keep the
+// dead ask's option buttons on the glass, filled COLOR_GOOD and looking exactly
+// as live as they had a second earlier, while a tap on one did nothing at all.
+// A control that is still advertised after it stopped working is the same class
+// of lie as a refusal with no cause, so the buttons come OFF and the card SAYS
+// WHY. The draft is untouched and the action row still carries CLOSE/DISCARD,
+// because throwing away a sentence someone spent a minute on is the worst
+// outcome available here - the rule drawKbActions already states for the
+// keyboard's side of the same transition.
+// ---------------------------------------------------------------------------
+void drawComposeGone() {
+  const int y = composePromptY();
+  uiFillRound(CARD_X, y, CARD_W, COMPOSE_PROMPT_H, R_MD, COLOR_CARD, COLOR_BG);
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_WARN, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  // In message mode nothing expired - the SESSION stopped being READY - so
+  // "answer on your Mac" would be answering a question nobody asked. Same
+  // distinction drawKbActions draws, and the same two causes.
+  tft.drawString(kbIsMessage() ? "SESSION NO LONGER READY" : "THIS PROMPT HAS CLOSED",
+                 CARD_X + 6, y + 5);
+  drawWrappedText(kbIsMessage() ? "Nothing is waiting on this. Your draft is still here."
+                                : "Answered or expired. Your draft is still here.",
+                  CARD_X + 6, y + 5 + KB_LINE_PITCH + 4, T_BODY, KB_LINE_PITCH,
+                  CARD_W - 12, 0, COMPOSE_PROMPT_LINES, COLOR_VALUE, COLOR_CARD);
+  drawComposeLegend(composeLegend1Y(), "REPLY: NO ASK, NO OPTIONS");
+  drawComposeLegend(composeLegend2Y(), "INSERT: NO ASK, NO TOKENS");
+}
+
 // The whole panel. Called from drawKeyboard(), which is the ONE screen-painting
-// entry point the compose surface has - openKeyboard()'s last act, and where BACK
+// entry point the compose surface has - openCompose()'s last act, and where BACK
 // and TYPE... arrive too.
 void drawCompose() {
   const int idx = kbSessionIdx;
-  if (idx < 0 || idx >= sessionCount) return;
   tft.fillScreen(COLOR_BG);
-  drawComposePrompt(idx);
-  drawComposeLegend(composeLegend1Y(), sessions[idx].askOptCount ? "REPLY - ONE TAP SENDS"
-                                                                : "REPLY: THIS ASK OFFERS NO OPTIONS");
-  drawComposeReplies(idx);
-  drawComposeLegend(composeLegend2Y(), sessions[idx].askChipCount ? "INSERT AT THE CARET"
-                                                                 : "INSERT: NO TOKENS IN THIS ASK");
-  drawComposeTokens(idx);
+  // NO EARLY RETURN ON A MISSING SESSION. It used to return here having drawn
+  // NOTHING, which meant that once the ask went away every repaint of this
+  // screen - the peek closing, a keystroke, the window-closed transition - left
+  // whatever was already on the glass. The three bands that need sessions[idx]
+  // are the three inside this branch; everything below it is the surface's own.
+  if (idx >= 0 && idx < sessionCount) {
+    drawComposePrompt(idx);
+    drawComposeLegend(composeLegend1Y(), sessions[idx].askOptCount ? "REPLY - ONE TAP SENDS"
+                                                                  : "REPLY: THIS ASK OFFERS NO OPTIONS");
+    drawComposeReplies(idx);
+    drawComposeLegend(composeLegend2Y(), sessions[idx].askChipCount ? "INSERT AT THE CARET"
+                                                                   : "INSERT: NO TOKENS IN THIS ASK");
+    drawComposeTokens(idx);
+  } else {
+    drawComposeGone();
+  }
   drawComposeDraft();
   drawComposeRecents();
   composeActDrawn = 0;          // the fillScreen took the row's pixels with it
@@ -388,6 +452,55 @@ void drawCompose() {
 #if !BOARD_USES_TFT_ESPI
   tft.flush();
 #endif
+}
+
+// THE WINDOW-CLOSED TRANSITION, the panel's half. The 5s tick owns the flag;
+// this owns what the panel does about it, so the tick does not have to know that
+// three of the panel's bands are drawn out of a sessions[] row that has just
+// gone. One full repaint on a transition that happens once per ask - not per
+// tick, and not per keystroke - which is the same trade the keyboard's side of
+// this transition already makes when it clears and rewraps its action band.
+void composeWindowClosed() {
+  // The peek reads the ask's DETAIL, so with no ask there is nothing to page.
+  // Left up it would be an overlay drawKbPeek() declines to paint over a screen
+  // whose pager still swallows every tap - a modal with nothing in it.
+  if (!kbHasDetail()) kbPeekPage = -1;
+  drawCompose();
+}
+
+// ---------------------------------------------------------------------------
+// MOVING BETWEEN THE TWO SCREENS. Both are a screen change and NOTHING ELSE:
+// neither touches kbText, kbLen or kbCaret. That shared draft is the whole
+// reason the two screens compose rather than coexist - a chip tapped on the
+// panel is editable on the keyboard, and a sentence typed on the keyboard is on
+// the panel's draft line when you come back. Clearing it in either direction
+// would make TYPE... a destructive control that says nothing about it.
+//
+// Both repaint through drawKeyboard(), the surface's ONE screen-painting entry
+// point, which routes on composeScreen - so the flag is set before the call and
+// there is no second place that decides what a screen looks like.
+// ---------------------------------------------------------------------------
+void composeOpenKeyboard() {
+  composeScreen = COMPOSE_SCREEN_KEYS;
+  drawKeyboard();
+}
+// IS THERE A PANEL BEHIND THE KEYBOARD? Asked of the surface's own state rather
+// than remembered in a third flag: the reply panel is drawn out of an ASK - its
+// options, its tokens, its prompt - and a message to a READY session has no ask
+// at all, so for a message the surface is one screen and the keyboard is its
+// root. That is the one case where the keyboard's left key is still the way OUT
+// rather than the way BACK, and it says so on its own label.
+bool composeHasPanel() { return !kbIsMessage(); }
+void composeBackToPanel() {
+  if (!composeHasPanel()) {
+    // Unreachable from the glass (drawKbActions draws no BACK without a panel),
+    // and it names its cause anyway: a silent no-op here would look exactly like
+    // a dropped press on the one screen where a press is hardest to land.
+    Serial.println("COMPOSE: BACK refused: this is a message to a READY session, which has no reply panel behind it");
+    return;
+  }
+  composeScreen = COMPOSE_SCREEN_PANEL;
+  drawKeyboard();
 }
 
 // Called by kbInsert/kbBackspace instead of the keyboard's own two repaints when
@@ -431,7 +544,16 @@ int composeColAt(int sx) {
 }
 bool composeTouch(int sx, int sy) {
   const int idx = kbSessionIdx;
-  if (idx < 0 || idx >= sessionCount) return true;
+  // THE ACTION BAND AND THE PEEK ARE TESTED BEFORE idx, AND THAT IS A FIX, NOT A
+  // TIDY. This function used to open `if (idx < 0) return true;` over the WHOLE
+  // body, and kbSessionIdx goes to -1 the moment the ask this panel was opened
+  // for disappears (the 5s tick's window-closed transition sets it). So every tap
+  // on the panel was swallowed from that instant - CLOSE included - and the only
+  // ways off the screen were the trigger file and the power button. Walking the
+  // exit paths by hand is what found it; no checker did, and the brief said it
+  // would be that way. Everything that reads sessions[idx] still asks first, and
+  // says so when it declines.
+  //
   // While peeking, EVERY tap is the pager - including one on a control the overlay
   // covers. Past the last page it closes, so there is always a way out. Same
   // contract kbTouch's own peek branch has.
@@ -449,15 +571,9 @@ bool composeTouch(int sx, int sy) {
     for (int i = 0; i < COMPOSE_ACT_MAX; i++) {
       if (composeActW[i] <= 0) continue;
       if (sx < composeActX[i] || sx >= composeActX[i] + composeActW[i]) continue;
-      if (composeSent) { closeKeyboard(); return true; }        // DONE
-      if (i == 0) { closeKeyboard(); return true; }             // CLOSE / DISCARD
-      if (i == 1) {                                             // TYPE...
-        // The draft is NOT touched: kbText, kbLen and kbCaret are one field shared
-        // by the two screens, which is what makes them compose rather than coexist.
-        composePanelOn = false;
-        drawKeyboard();
-        return true;
-      }
+      if (composeSent) { closeCompose(); return true; }         // DONE
+      if (i == 0) { closeCompose(); return true; }              // CLOSE / DISCARD
+      if (i == 1) { composeOpenKeyboard(); return true; }       // TYPE...
       if (kbWindowClosed) {                                     // SEND, but it cannot
         Serial.println("COMPOSE: SEND refused: the prompt's window has closed - answer on your Mac");
         return true;
@@ -466,26 +582,43 @@ bool composeTouch(int sx, int sy) {
         Serial.println("COMPOSE: SEND refused: the draft is empty - a blank answer reads as a refusal with no reason");
         return true;
       }
-      // Leaves the compose surface: sendTypedAnswerToHost ends in closeKeyboard(),
-      // which clears composePanelOn with the rest of the state. Clearing it here as
-      // well would be a second place that has to remember.
-      if (kbIsMessage()) sendPromptToHost();
-      else sendTypedAnswerToHost();
+      // STAYS ON THE SURFACE AND SHOWS THE RECEIPT, which is what the one-tap
+      // reply path has always done. These two used to end in closeCompose()
+      // themselves, so a draft built out of chips and sent from THIS row dropped
+      // the whole surface while an option tapped two bands up left "SENT: ..."
+      // and a collapsed DONE - one screen, two answers to "what happened". They
+      // now report whether the line actually went out (an unresolved session or
+      // an empty buffer returns false and sends nothing), and the caller decides
+      // what the screen does about it: here a receipt, on the keyboard a close.
+      const bool sent = kbIsMessage() ? sendPromptToHost() : sendTypedAnswerToHost();
+      if (sent) composeShowSentState(kbText);
+      else Serial.println("COMPOSE: SEND refused: the session this draft was typed for is gone");
       return true;
     }
     return true;               // the margins outside the lane
   }
+  // FROM HERE DOWN, EVERY BAND BUT THE DRAFT LINE READS sessions[idx]. Asked once,
+  // here, rather than at the top of the function where it also swallowed the way
+  // out - and every arm that declines NAMES which of the two causes it was, since
+  // "this ask has no detail" and "this ask no longer exists" are different facts
+  // and only one of them is about the ask you were looking at.
+  const bool haveAsk = idx >= 0 && idx < sessionCount;
   // THE PROMPT CARD, and its band is the top margin plus the card plus the gap
   // under it - everything above the first legend, the same "the air belongs to the
   // control" split the action row has.
   if (sy < composeLegend1Y()) {
-    if (kbHasDetail()) { kbPeekPage = 0; drawCompose(); }
+    if (!haveAsk)          Serial.println("COMPOSE: PEEK refused: the ask this panel was opened for is gone - the card says so, and your draft is still on the glass");
+    else if (kbHasDetail()) { kbPeekPage = 0; drawCompose(); }
     else Serial.println("COMPOSE: PEEK refused: this ask has no detail beyond its title");
     return true;
   }
   // THE REPLY BANDS. One tap sends, and it is the ask's own option index that goes
   // out - the same signed answer the detail card's option buttons send.
   if (sy >= composeReplyY() && sy < composeLegend2Y()) {
+    if (!haveAsk) {
+      Serial.println("COMPOSE: reply refused: the ask this panel was opened for is gone - its options went with it");
+      return true;
+    }
     const int band = (sy - composeReplyY()) / TAP_MIN;
     const int col = composeColAt(sx);
     if (col < 0) return true;
@@ -496,6 +629,10 @@ bool composeTouch(int sx, int sy) {
   }
   // THE TOKEN BAND: two chips and the pager.
   if (sy >= composeTokenY() && sy < composeDraftY()) {
+    if (!haveAsk) {
+      Serial.println("COMPOSE: insert refused: the ask this panel was opened for is gone - its tokens went with it");
+      return true;
+    }
     const int col = composeColAt(sx);
     if (col < 0) return true;
     if (col == COMPOSE_COLS - 1) {
@@ -528,6 +665,15 @@ bool composeTouch(int sx, int sy) {
 // and the same signed line, because a second route that answers differently is a
 // second thing to keep right.
 void composeSendOption(int idx, int k) {
+  // THE WINDOW FIRST. Once it has closed there is nothing on the other end to
+  // answer, and this used to fall through to sendAnswerToHost() - which returns
+  // early on its own, so the tap did nothing AND said nothing. The buttons are
+  // off the glass by then (drawComposeGone), so this is the belt to that brace:
+  // a repaint that has not happened yet must not turn into a silent send.
+  if (kbWindowClosed) {
+    Serial.println("COMPOSE: refused: the prompt's window has closed - answer on your Mac");
+    return;
+  }
   if (composeSent) {
     Serial.println("COMPOSE: refused: this prompt has already been answered from this panel");
     return;
@@ -565,17 +711,14 @@ void composeShowSentState(const char* text) {
   drawCompose();
 }
 
-// Opens the panel. Goes THROUGH openKeyboard so every reset stays in one place -
-// the shape openKeyboardForMessage already uses - with composePanelOn set FIRST,
-// because openKeyboard's last act is drawKeyboard() and that is where the two
-// screens part. Setting it after would paint the keyboard and then the panel over
-// it: a full-screen double paint, visible on the board that draws to the glass.
-void composeOpen(int idx) {
-  if (idx < 0 || idx >= sessionCount) return;
-  composePanelOn = true;
+// THE PANEL'S OWN RESETS, called from openComposeOn() in keyboard.ino - which is
+// where EVERY reset for this surface lives, in one function, because a surface
+// with two screens and two openers is a surface with two lists of things to
+// remember. This is here rather than there only because these four globals are
+// defined in this file, and it is called from nowhere else.
+void composeResetPanel() {
   composeSent = false;
   composeSentText[0] = '\0';
   composeChipPage = 0;
   composeActDrawn = 0;
-  openKeyboard(idx);
 }
