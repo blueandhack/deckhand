@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1398102, RAM 71948 | flash 1042150, RAM 71524 |
+| size today | flash 1404382, RAM 71972 | flash 1042674, RAM 71524 |
 
 **Everything board-specific lives in the two board headers** - pins, capability flags, and
 **every layout constant**. Nothing in a shared `.ino` may hardcode a panel dimension; three
@@ -183,6 +183,7 @@ the physical screen" - plus a large set of offline checkers.
 # firmware geometry and arithmetic
 node firmware/deckhand_display/{usage,sessions,settings}-geom-check.mjs
 node firmware/deckhand_display/{sessions-rank,scrollback,palette}-check.mjs
+node firmware/deckhand_display/commands-check.mjs      # every verb handled or refused BY NAME, both boards
 python3 firmware/deckhand_display/{usage-trend,batt-trend}-check.py
 node firmware/deckhand_display/geom-sweep.mjs          # fault-injection sweep, ~110s
 # the wire and the Mac
@@ -224,12 +225,16 @@ whichever transports are live. **The host delivers each command over BOTH transp
 cabled device receives it twice** - every handler must tolerate that, and several have had to
 learn it (`POWERPROBE` produced four refusal lines; a duplicated scrollback fetch corrupted
 itself). **Every refusal must NAME ITS CAUSE**: from the Mac, silence and "impossible here"
-look identical.
+look identical. **A verb this board does not have is refused from one table**
+(`UNAVAILABLE_COMMANDS[]` in `deckhand_display.ino`), walked at the end of the dispatch
+chain, each entry guarded by the exact negation of its handler's guard;
+`commands-check.mjs` evaluates both against the two headers and fails by verb name if
+one is neither handled nor refused.
 
 | command | what it does |
 |---|---|
 | `RECAL` / `MICTEST` / `MICMON` / `MICREC` / `MICSTREAM` | touch calibration; mic level, live meter, one-shot and streaming capture |
-| `TAB 0..2` / `PAGE 0..3` / `KBTEST` / `EMOJITEST` / `READTEST` | put a surface on the glass, since a capture can only record what is already there |
+| `TAB 0..2` / `PAGE 0..3` / `KBTEST` / `EMOJITEST` / `EMOJITEST off` / `READTEST` | put a surface on the glass, since a capture can only record what is already there. **`EMOJITEST off` is the escape** - the flag gates payload absorption AND the tick, and without it a `TAB` painted over the grid left a board that looked alive with a frozen footer, recoverable only by reflashing. `TAB` now clears the grid and REFUSES over a reader/transcript rather than stranding its flag |
 | `DETAIL [n]` | opens session `n`'s detail card WITHOUT the keyboard - the only route to that screen from the Mac (`KBTEST msg` opens the keyboard over it). Refuses by name on no sessions, an out-of-range `n`, or another full-screen surface |
 | `KBPROBE` / `KBPROBE off` | per keystroke: the key the press ARMED, the key the lift COMMITTED, the pixel delta. Measures where fingers land versus where they lift; says NOTHING about whether the text was right |
 | `KBBUBBLE [r c]` / `KBBUBBLE off` | draws the magnified key bubble so a capture can see it - it otherwise exists only while a finger is down. Arms, never commits; declines DEL, which commits on press |

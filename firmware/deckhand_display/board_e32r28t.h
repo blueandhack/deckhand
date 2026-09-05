@@ -186,6 +186,20 @@ const int CARD1_Y = 38, CARD2_Y = 146;
 // its slack: content reaches +39 (the pace bar's clear starts 4px above the bar at +26
 // and runs 18 rows) inside CODEX_H 44, leaving the 2px border at +42..+43 clear of it.
 const int CODEX_Y = 254, CODEX_H = 44;
+// HOW LONG A CODEX READING STAYS ALIVE. usageCodexShown() (usage.ino) hides the row
+// once a full window has passed with no refresh - the host polled and learned
+// nothing, so nobody is running the tool - and this board now honours that instead
+// of drawing "CODEX  --" for ever on a Mac that has never run Codex.
+//
+// SAME VALUE AS BOARD 2, and it has to be: the threshold is really DATA-DRIVEN (the
+// window rides the wire as cxWin into usage.cxWindowMin and moves with the plan),
+// and this is only the fallback for a percentage that arrives with no window beside
+// it - the host sends `cxWin: primary?.windowMin ?? null`, so the two genuinely can
+// arrive apart, and trusting an absent window would mean win = 0 and a row that hides
+// the instant it is measured. Declared per board rather than shared because every
+// other constant this predicate touches is, and a header is where a future board
+// with a different plan would change it.
+const int CODEX_HIDE_FALLBACK_MIN = 10080;   // 7 days, the observed Codex window
 // RADIUS is defined FROM R_MD rather than repeated, so the two cannot drift -
 // drawCardBorder() strokes with RADIUS over a fill uiCard() drew with R_MD, and
 // a mismatch fringes every card corner. Same value as before on this board.

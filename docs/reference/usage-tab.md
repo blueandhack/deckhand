@@ -401,6 +401,46 @@ in place — its claim is "we cannot vouch for this number right now". A full wi
 different and stronger claim — "nobody is running the tool at all" — and it earns removing the row
 rather than dimming it.
 
+**THE PREDICATE IS SHARED NOW, AND BOARD 1 HIDES ITS ROW TOO — WITHOUT BOARD 2's LADDER.** It
+used to sit inside `#if BOARD_USAGE_V2`, so board 1 could not see it and its five draw sites were
+unconditional: a permanent 44px card reading `CODEX  --` on a Mac that has never run Codex, 44
+rows of chrome and a dash saying nothing. The predicate reads three fields of the shared `Usage`
+struct (`cxPct`, `cxAgeSec`, `cxWindowMin`, all parsed unconditionally out of every payload) and
+one header constant, so `CODEX_HIDE_FALLBACK_MIN` is now declared in **both** headers at the same
+10,080 — checked by `usage-geom-check.mjs`, which parses it out of each header and asserts they
+agree rather than transcribing the number.
+
+**Board 1 does NOT get the variable-height ladder, deliberately.** Its column is fixed
+(`CARD1_Y 38`, `CARD2_Y 146`, `CODEX_Y 254`, `CODEX_H 44`, content ending at 302), so it simply
+leaves those 44px EMPTY — the same thing its SESSIONS tab already does when one card leaves the
+rest of the tab blank. Growing the other two cards would mean a `_SOLO` constant for every y that
+moves, which is a different and much larger change.
+
+**THE FLIP IS THE PART THAT NEEDED CARE, AND IT IS THE TRAP THIS REPO PAYS FOR MOST OFTEN.** A
+field whose CHROME is repainted but whose cache is not reset is left **BLANK** — `drawIfChanged`
+reads "hasn't changed" from a cache describing pixels that no longer exist. Board 2 gets away with
+repainting the whole content area, because its flip MOVES the other two cards. Board 1's do not
+move, and it draws straight to the glass, so a full-content clear would be a visible flash of the
+whole tab for a row that changed 44px. So its flip clears exactly the row's own rect
+(`CARD_X, CODEX_Y, CARD_W, CODEX_H`), repaints exactly its own card fill when the row comes back,
+and busts exactly the four caches that describe pixels inside it:
+
+| cache | why it must be busted |
+|---|---|
+| `cxPctCache` | the left lane, compared as a STRING — `CODEX  7d` before the hide equals `CODEX  7d` after the show, so it would never redraw |
+| `cxRightCache` | the right lane, the same way — and it is the one that held the `--` |
+| `cxBorderCache` | `drawCardBorder` caches the border COLOUR as an int; an unchanged colour skips the stroke, leaving a card with no outline |
+| `cxBarCache` | `drawPaceBar` keys on `(pct, tick)` only, so an unchanged reading skips the bar entirely |
+
+`cxStaleCache` is deliberately **not** busted: it is not a picture of any pixels, it is the
+dim-state edge detector that drives the four above, and clearing it would only cost one redundant
+repaint on the next tick. `usage-geom-check.mjs` derives that list from `renderCodexRow()`'s own
+`drawIfChanged`/`drawCardBorder`/`drawPaceBar` calls rather than transcribing it, so a fifth cached
+field added to the row later fails by name instead of silently drawing blank after the first flip;
+it also evaluates the clear's rect against board 1's own parsed constants, because
+`fillRect(CARD_X, CODEX_Y + 2, CARD_W, CODEX_H - 4)` reads almost identically and leaves the card's
+border behind on a hide. Teeth proven by deleting one bust line: `FAIL the flip busts cxBarCache`.
+
 **THE ASYMMETRY: CLAUDE NEVER HIDES, BECAUSE ITS QUOTA IS ACCOUNT-LEVEL AND ARRIVES EVEN AT 0%.**
 There is no Claude-side predicate and none is planned — the OAuth usage endpoint is polled every
 five minutes regardless of whether anyone is typing, so a reading always arrives, all the way down

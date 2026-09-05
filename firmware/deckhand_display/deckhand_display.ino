@@ -3570,6 +3570,24 @@ void drawEmojiTestScreen(const char* only) {
 }
 
 void switchTab(Tab newTab) {
+  // LEAVING THE ICON GRID CLEARS ITS FLAG, rather than painting over it. TAB used to
+  // do the latter: the new tab was drawn, emojiTestActive stayed true, and that flag
+  // gates BOTH the 5s payload absorb and the 1s local tick - so the device looked
+  // alive with a footer frozen from that moment on, recoverable only by a re-flash.
+  // The same shape pairPanelActive already has below, and for the same reason: a
+  // surface that comes down must take its flag with it or the two disagree about
+  // what is on the glass.
+  //
+  // ABOVE the same-tab early return, and that placement is the whole fix rather than
+  // a detail: "TAB 0" while the grid is up over TAB 0 is the case an operator reaches
+  // for first, and returning early would clear nothing at all. The repaint switchTab
+  // would otherwise have done is issued here instead, because the return below skips
+  // it. (forceFullRepaint() cannot land on the pairing panel from here: EMOJITEST
+  // refuses to open while pairPanelActive, so the two flags are never both set.)
+  if (emojiTestActive) {
+    emojiTestActive = false;
+    if (newTab == currentTab) forceFullRepaint();
+  }
   if (newTab == currentTab) return;
 #if BOARD_HAS_WIRELESS_PAIR
   // The presence guarantee is the window, so it must not outlive the screen
@@ -5415,6 +5433,197 @@ uint32_t lastPayloadHash = 0;
 unsigned long lastPayloadMillis = 0;
 const unsigned long PAYLOAD_DEDUP_MS = 1000;
 
+// ---------- COMMANDS THIS BOARD DOES NOT HAVE ----------
+// EVERY REFUSAL MUST NAME ITS CAUSE - and until this table existed board 1 broke
+// that rule wholesale. Twenty-odd verbs sit inside `#if !BOARD_USES_TFT_ESPI` (or
+// behind a capability flag), so on board 1 the line fell through the whole
+// if/else-if chain into the JSON-payload branch, which silently discarded it.
+// Measured with both boards attached: `TEMP` produced four lines from board 2 and
+// NOTHING AT ALL from board 1, and from the Mac that is indistinguishable from
+// board 1 being wedged - which is exactly the confusion this project's own rule
+// exists to prevent.
+//
+// A TABLE WALKED ONCE AT THE END OF THE CHAIN, not eighteen hand-written `else if`
+// arms. Two reasons, and neither is tidiness: an arm per verb doubles the length of
+// the dispatch every reader has to scan past to find a real handler, and a table is
+// something an offline checker can PARSE - commands-check.mjs reads both this array
+// and the dispatch chain and asserts that every verb reachable on one board is
+// either handled or explicitly refused on the other.
+//
+// EACH ENTRY'S GUARD IS THE EXACT NEGATION OF ITS HANDLER'S, so the entry exists
+// precisely when the handler does not. That is the property commands-check.mjs
+// evaluates (it reads both board headers and works out which arms each board
+// takes), and it is why the guards below name the CAPABILITY FLAG wherever the
+// handler's does - BOARD_HISTORY_SCROLL, BOARD_HAS_WIRELESS_PAIR, BOARD_BLE_NIMBLE
+// - rather than the board. A future board that turns one of those on gets the
+// handler and loses the refusal in the same edit.
+//
+// The causes are long on purpose. "PERF is board 2 only" tells a reader nothing
+// they cannot see; naming the thing that is absent (the deferred flush, the codec,
+// the PSRAM transcript) tells them whether to go and add it, use a different
+// instrument, or stop. They go over the WIRE, never to the glass, so the ASCII-only
+// font range does not bound them - but they are ASCII anyway, since the host
+// transliterates everything device-bound and a non-ASCII byte here would only ever
+// arrive at the Mac mangled.
+struct UnavailableCommand { const char* verb; const char* cause; };
+
+static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
+#if BOARD_USES_TFT_ESPI
+  { "SHIMBENCH",
+    "it times a full-screen and a dirty-rect flush of the PSRAM shadow framebuffer. "
+    "This board is BOARD_USES_TFT_ESPI 1 and draws straight to the glass through real "
+    "TFT_eSPI, so there is no deferred flush to time." },
+  { "PERF",
+    "it reports PanelShim::perfReport()'s split of the flush path (the CPU-side gather "
+    "out of the PSRAM framebuffer, then the blocking drawBitmap) plus the three board-2 "
+    "session animations. This board draws straight to the glass, so there is no gather "
+    "to separate, and sessions.ino's xfade/pulse/shimmer are static inline stubs here." },
+  { "TEMP",
+    "it reads the ESP32-S3's internal die sensor. dieTempBegin()/dieTempRead() are behind "
+    "!BOARD_USES_TFT_ESPI because this board's plain ESP32 has no temperature_sensor "
+    "driver at all. Battery mV is on the SETTINGS status page and in POWERPROBE, which "
+    "both work here." },
+  { "INV",
+    "it toggles display inversion through PanelShim::invertColor(). This board's ILI9341 "
+    "is driven by real TFT_eSPI and its inversion is fixed by the init in "
+    "firmware/tft_setup/User_Setup.h, so there is no runtime transform to flip." },
+  { "SWAP",
+    "it flips the byte order the shadow framebuffer is pushed to the panel in "
+    "(panelSwapBytes, defaulting to BOARD_PANEL_SWAP_BYTES). This board has no shadow "
+    "framebuffer - TFT_eSPI writes each pixel straight out - so there is no byte order "
+    "of ours to swap." },
+  { "COLORTEST",
+    "it exists to settle whether the shadow framebuffer's byte order matches the panel's, "
+    "and this board has no shadow framebuffer, so that question cannot arise. Its palette "
+    "is checked offline instead: node firmware/deckhand_display/palette-check.mjs." },
+  { "AUDIOPROBE",
+    "it probes the ES8311 codec at 0x18 and reports the I2S pin map. This board has no "
+    "codec: the beeper is a bare GPIO square wave (BOARD_HAS_BEEPER 1, PIN_BEEPER) and the "
+    "mic is on an ADC pin. MICTEST prints this board's own DC bias and level." },
+  { "TONETEST",
+    "it configures the ES8311 over I2C and plays through it, once per amp-enable polarity. "
+    "This board has no codec and no amp-enable line - its beeper is driven directly from a "
+    "GPIO, and it sounds on the UI events that use it." },
+  { "TONELADDER",
+    "it is TONETEST's five-volume ladder for finding the audible floor of the ES8311's dB "
+    "volume scale. This board has no codec and no volume scale; its beeper is on or off." },
+  { "PANELSLEEP",
+    "the three blanked-state savings (PANELSLEEP, CPUSLOW, BLESLOW) are board 2's: "
+    "savingsSync()'s whole body is behind !BOARD_USES_TFT_ESPI. This board has no panel "
+    "sleep-out path of its own, no esp_pm CPU floor and no NimBLE connection interval to "
+    "slow. POWERPROBE works here and measures whatever state the board is in." },
+  { "CPUSLOW",
+    "see PANELSLEEP: savingsSync()'s body is behind !BOARD_USES_TFT_ESPI, so there is "
+    "nothing on this board for the toggle to apply." },
+  { "BLESLOW",
+    "see PANELSLEEP: savingsSync()'s body is behind !BOARD_USES_TFT_ESPI, so there is "
+    "nothing on this board for the toggle to apply." },
+  { "PULSE",
+    "it toggles the asking band's breathing animation, which is board 2's. Here "
+    "sessionPulseA() is the static inline stub that always returns 0 (sessions.ino), "
+    "because this board draws straight to the glass and has no deferred flush for a "
+    "timer-driven repaint to ride." },
+  { "READTEST",
+    "it is not compiled on this board (guard !BOARD_USES_TFT_ESPI) - and NOTHING HERE "
+    "PREVENTS IT: reader.ino is this board's own ask reader, and drawReader(), exitReader() "
+    "and readerActive all exist. It was left out while board 1's binary was held "
+    "byte-identical through the board-2 port. Reach the reader by tapping the chip in the "
+    "ask header; enabling the command is a one-line guard move." },
+#endif
+#if BOARD_USES_TFT_ESPI || !BOARD_HAS_WIRELESS_PAIR
+  { "PAIRVECTOR",
+    "it prints the wireless-pairing key derivation against a fixed X25519 vector. This "
+    "board is BOARD_HAS_WIRELESS_PAIR 0 and has no such derivation to check." },
+  { "PAIRREQ",
+    "wireless pairing is BOARD_HAS_WIRELESS_PAIR 0 on this board: there is no 120s window, "
+    "no pairing panel and no CONFIRM here. Pair it with PROVISION over USB instead." },
+  { "PAIROK",
+    "wireless pairing is BOARD_HAS_WIRELESS_PAIR 0 on this board; see PAIRREQ. Pair it with "
+    "PROVISION over USB." },
+  { "PAIRCANCEL",
+    "wireless pairing is BOARD_HAS_WIRELESS_PAIR 0 on this board, so there is no window "
+    "open to cancel; see PAIRREQ." },
+#endif
+#if BOARD_USES_TFT_ESPI || !BOARD_BLE_NIMBLE
+  { "BLEMTU",
+    "it reports each live link's negotiated ATT MTU through NimBLE's ble_att_mtu(). This "
+    "board is BOARD_BLE_NIMBLE 0 and runs Bluedroid, which this firmware never asks for an "
+    "MTU - so there is no number to report rather than a number it declines to give." },
+#endif
+#if BOARD_USES_TFT_ESPI || !BOARD_HISTORY_SCROLL
+  { "SCROLLTO",
+    "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board: scrollback.ino "
+    "compiles to nothing here and there is no PSRAM to hold a transcript. This board's "
+    "history is reader.ino's paged reader, reached from the session detail card." },
+  { "SCROLLOPEN",
+    "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board; see SCROLLTO." },
+  { "SCROLLCLOSE",
+    "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board, so nothing is open "
+    "to close; see SCROLLTO." },
+  { "SCROLLFETCH",
+    "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board, so there is nothing "
+    "to fetch a transcript into; see SCROLLTO." },
+#endif
+#if !BOARD_HISTORY_SCROLL
+  // SCROLLPERF's own guard is BOARD_HISTORY_SCROLL ALONE, where its four neighbours
+  // read `!BOARD_USES_TFT_ESPI && BOARD_HISTORY_SCROLL`. CHECKED, NOT ASSUMED: that
+  // is deliberate and SCROLLPERF's is the honest one. Its body touches scrollActive,
+  // scrollY, scrollMaxY(), scrollDrawBody() and CODE_LINE_H - every one of them
+  // declared inside scrollback.ino's single `#if BOARD_HISTORY_SCROLL` - and nothing
+  // in it depends on the board. The neighbours' extra term is redundant rather than
+  // wrong (no board declares BOARD_HISTORY_SCROLL 1 with BOARD_USES_TFT_ESPI 1), and
+  // it is left alone: narrowing four working guards to match would move board 1's
+  // binary for no behaviour. This entry mirrors the guard SCROLLPERF actually has.
+  { "SCROLLPERF",
+    "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board, so there are no "
+    "scroll frames to time; see SCROLLTO." },
+#endif
+  // TERMINATOR, and it is what makes an all-#if'd array legal: on board 2 every
+  // block above is skipped and `UnavailableCommand[] = {}` would not compile.
+  // The walk below stops on the null verb rather than on a sizeof() count, so
+  // the two can never disagree.
+  { nullptr, nullptr },
+};
+
+// True when the line was a command this board does not have, and a refusal naming
+// the cause has been sent. Walked ONLY from the final `else` of the dispatch chain,
+// so by construction it can never shadow a real handler - a verb that is handled
+// here never reaches it.
+//
+// Matched as a WHOLE VERB (end of line, or a space) rather than as a prefix, because
+// the chain itself uses all three of `buf == "X"`, `buf.startsWith("X")` and
+// `buf.startsWith("X ")` and one table has to cover them. A prefix match would also
+// make SCROLLTO shadow nothing today but collide with any future SCROLLTOP.
+//
+// DEDUPED, the same way KBTEST's refusal is and for the same measured reason: the
+// host writes every trigger-file line to EVERY live transport, so a board on a cable
+// and a radio at once sees the identical line twice within milliseconds. One
+// POWERPROBE once produced four refusal lines that way. A refusal carries no state
+// of its own to make the second copy a no-op, so the window is kept here.
+//
+// sendLineToHost, not Serial.println: a refusal is most needed when someone is
+// driving the board over BLE with the cable out, which is exactly when a
+// Serial.println would go nowhere and log nothing.
+bool refuseUnavailableCommand(const String& line) {
+  for (const UnavailableCommand* u = UNAVAILABLE_COMMANDS; u->verb != nullptr; u++) {
+    const size_t n = strlen(u->verb);
+    if (strncmp(line.c_str(), u->verb, n) != 0) continue;
+    const char after = line.c_str()[n];
+    if (after != '\0' && after != ' ') continue;
+    static const char* lastVerb = nullptr;
+    static unsigned long lastVerbMs = 0;
+    const unsigned long nowMs = millis();
+    if (!(lastVerb == u->verb && nowMs - lastVerbMs < 2000)) {
+      lastVerb = u->verb;
+      lastVerbMs = nowMs;
+      String out = String(u->verb) + " refused on " + BOARD_NAME + ": " + u->cause;
+      sendLineToHost(out.c_str());
+    }
+    return true;
+  }
+  return false;
+}
+
 void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool fromUsb) {
   // Consumed once inside handleLine(), for the same tick's hostId. Set here
   // rather than adding a parameter to handleLine(const String&), whose fixed
@@ -5515,8 +5724,41 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // Remote tab switch. Added so screenshots can be taken of every tab without
     // someone standing at the device - the capture path can only ever record
     // what is currently on the glass.
+    //
+    // REFUSED WHILE A SURFACE WITH ITS OWN TEARDOWN OWNS THE GLASS, and this is the
+    // same defect EMOJITEST's escape exists for, one surface along. switchTab()
+    // paints the tab and clears NOBODY's flag, so with the reader or the transcript
+    // up the tab appeared while histActive/readerActive/scrollActive stayed true -
+    // and each of those absorbs the ~5s host tick in handleLine(). The device then
+    // looks alive with a frozen footer and no payload reaching it, which is exactly
+    // the state that costs a reflash. Those three are not CLEARED here the way the
+    // icon grid is (in switchTab below): the grid has no teardown - one flag and a
+    // repaint - while each of these has an exit function that repaints the screen
+    // switchTab is about to repaint again, so calling one from here is an ordering
+    // question rather than a one-liner. Each already has its own way out: a finger,
+    // "READTEST off" and SCROLLCLOSE. A named refusal is what turns this from a
+    // freeze into a sentence.
+    //
+    // pairPanelActive is deliberately NOT in this list: switchTab() takes the panel
+    // down AND closes the window (pairClose + pairPanelActive = false), so TAB is a
+    // correct escape from it and refusing would remove one.
+    //
+    // ONE `if`, with only the extra TERM behind the guard - never a duplicated
+    // statement per arm, which leaves every brace-counting checker here seeing one
+    // more `{` than `}`.
+    bool surfaceUp = kbActive || readerActive || histActive;
+#if BOARD_HISTORY_SCROLL
+    surfaceUp = surfaceUp || scrollActive;
+#endif
+    if (surfaceUp) {
+      Serial.println("TAB refused: another full-screen surface is up (a tab painted over it "
+                     "would leave its flag set, and that flag absorbs every host tick)");
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
     int t = buf.substring(4).toInt();
     if (t >= 0 && t < TAB_COUNT) switchTab((Tab) t);
+    else Serial.printf("TAB refused: %d is out of range (0..%d)\n", t, TAB_COUNT - 1);
   } else if (buf.startsWith("DETAIL")) {
     // THE SESSION DETAIL CARD, PUT ON THE GLASS FROM THE MAC - and until this
     // existed there was NO WAY to do that. TAB switches tabs, PAGE is SETTINGS
@@ -6052,6 +6294,37 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       return;
     }
 #endif
+    // "EMOJITEST off" - THE ESCAPE, and its ABSENCE was a trap that cost a reflash.
+    // emojiTestActive gates BOTH the 5s payload absorb (handleLine's own early return)
+    // and the 1s local tick, and TAB painted OVER the grid without clearing the flag -
+    // so the device kept drawing, looked alive, and its footer never moved again while
+    // no payload reached it. The only recovery measured was a re-flash, and an agent
+    // hit it by accident. Every other stateful instrument here already had one:
+    // KBTEST off, KBPROBE off, KBBUBBLE off, SCROLLCLOSE.
+    //
+    // AN `off` ARGUMENT rather than SCROLLCLOSE's separate verb: EMOJITEST already
+    // takes an argument (one icon's name), so a second verb would be a second name for
+    // one surface, and `off` is what the three keyboard instruments already answer to.
+    // It takes SCROLLCLOSE's other half though - BOTH outcomes are named, so "closed"
+    // and "there was nothing open" never look the same from the Mac.
+    //
+    // AFTER the pairing guard above, deliberately. `off` repaints the tab underneath,
+    // which is a full-screen paint like any other, and it must not run over the
+    // pairing panel: emojiTestActive and pairPanelActive can never both be true (the
+    // guard above refuses to OPEN the grid while the panel is up), so this arm has
+    // nothing to do in that state anyway and refusing it costs nothing.
+    String arg = buf.substring(9); arg.trim();
+    if (arg == "off") {
+      if (emojiTestActive) {
+        emojiTestActive = false;
+        forceFullRepaint();
+        Serial.println("EMOJITEST: closed, the tab underneath is back");
+      } else {
+        Serial.println("EMOJITEST: the icon grid is not open");
+      }
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
     if (kbActive || readerActive || histActive || showingDetail) {
       Serial.println("EMOJITEST refused: another full-screen surface is up");
       buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
@@ -6061,11 +6334,37 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // surfaces use (page background and card fill), so the alpha blend can be judged
     // where it actually has to work rather than on one convenient colour. Any tap
     // restores the tab. "EMOJITEST <name>" highlights one by name instead.
-    String arg = buf.substring(9); arg.trim();
     emojiTestActive = true;
     drawEmojiTestScreen(arg.c_str());
   } else if (buf.startsWith("PAGE ")) {
     // Settings page, for the same reason. No-op unless SETTINGS is showing.
+    //
+    // REFUSED WHILE ANOTHER FULL-SCREEN SURFACE OWNS THE GLASS, which it was not
+    // before and which is the SAME defect EMOJITEST's own escape exists for.
+    // gotoSettingsPage()/openSettingsGroup() paint the settings page into the content
+    // area and clear nobody's flag, so with the icon grid up this reproduced exactly
+    // the freeze that costs a reflash: a page drawn over a surface whose flag still
+    // absorbs every payload and every tick. Both of PAGE's callees only act while
+    // currentTab == TAB_SETTINGS, and the pairing panel is REACHED from SETTINGS - so
+    // on board 2 this could also repaint over a code somebody was comparing while
+    // pairPanelActive stayed true and CONFIRM stayed tappable underneath, which is the
+    // property EMOJITEST's and READTEST's guards are asserted for in
+    // host/pair-crypto-check.mjs. PAGE was the fifth refusal list that did not know
+    // the panel is a full-screen surface.
+    //
+    // ONE `if`, with only the extra TERM behind the guard - not a duplicated statement
+    // per arm. An #if/#else that opens a brace in both arms leaves every brace-counting
+    // checker here seeing one more `{` than `}`; that once broke an unrelated PAIRING
+    // assertion, which then reported a defect that did not exist.
+    bool surfaceUp = kbActive || readerActive || histActive || emojiTestActive;
+#if BOARD_HAS_WIRELESS_PAIR
+    surfaceUp = surfaceUp || pairPanelActive;
+#endif
+    if (surfaceUp) {
+      Serial.println("PAGE refused: another full-screen surface is up");
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
     int pg = buf.substring(5).toInt();
 #if BOARD_SETTINGS_HOME
     // PAGE 0 is HOME here, 1..5 the five groups - the same numbering settingsPage
@@ -6479,6 +6778,20 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     handleLine(line);
     curLineFromUsb = savedFromUsb;
     activeHost = savedActiveHost;
+  } else if (refuseUnavailableCommand(buf)) {
+    // A COMMAND THIS BOARD DOES NOT HAVE. Reached only after every real handler
+    // has declined the line, so this arm can never shadow one - and placed here,
+    // rather than as an `if` inside the payload branch below, so a refused command
+    // never stamps *lastRxTimestamp or feeds payloadHash32(): it is not a payload
+    // and must not count as one for the footer's freshness readout.
+    //
+    // `buf` is cleared by the tail of this function, which this arm falls through
+    // to - it does NOT return early. That is deliberate: `buf` is this function's
+    // own accumulator, passed by REFERENCE, and a refusal that returns without
+    // clearing it leaves the refused text in the buffer for the next line to be
+    // APPENDED to, which still matches the same verb and refuses again forever.
+    // One DETAIL 9 produced 63 refusal lines and ~100s of parsing no payloads at
+    // all that way (see DETAIL's own note above).
   } else {
     *lastRxTimestamp = millis();
 #if !BOARD_USES_TFT_ESPI

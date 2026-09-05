@@ -1485,6 +1485,129 @@ for (const b of [1, 2]) {
                    : `no right-field branch carries a wall-clock suffix, so the lane derivation holds`);
 }
 
+// ---- THE CODEX ROW HIDES ON BOTH BOARDS ------------------------------------
+// Board 1 used to draw a 44px card reading "CODEX  --" permanently, on a Mac that
+// has never run Codex. The predicate that decides this - usageCodexShown() - already
+// existed and was already correct; it just sat inside #if BOARD_USAGE_V2 where board
+// 1 could not see it, and board 1's five draw sites were unconditional.
+//
+// These assertions bind the SHARING (the predicate and its fallback constant reach
+// both boards) and board 1's own HIDE PATH (the flip clears the row's rect and busts
+// every cache that describes pixels inside it). They are deliberately NOT a check
+// that board 1 grew board 2's variable-height ladder: it did not, and must not - it
+// leaves the 44px empty, the way its SESSIONS tab already leaves the rest of the tab
+// empty behind a single card.
+{
+  const raw = fs.readFileSync(`${DIR}/usage.ino`, "utf8");
+  // THE PREPROCESSOR NESTING OF ONE LINE, parsed rather than eyeballed. "Is this
+  // function inside #if BOARD_USAGE_V2" is the entire question here, and grepping
+  // for the text of the guard answers a different one - the file has eleven of them.
+  // Returns the stack of open #if conditions at the line matching `needle`.
+  const guardsAt = (needle) => {
+    const stack = [];
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (/^#if/.test(t)) stack.push(t.replace(/^#if(n?def)?\s*/, ""));
+      else if (/^#else\b/.test(t) && stack.length) stack[stack.length - 1] = `!(${stack[stack.length - 1]})`;
+      else if (/^#endif/.test(t)) stack.pop();
+      else if (line.includes(needle)) return stack.slice();
+    }
+    return null;
+  };
+  for (const [needle, what] of [
+    ["bool usageCodexShown()", "the predicate itself"],
+    ["if (!usageCodexShown()) return;", "renderCodexRow's early return"],
+    ["if (usageCodexShown()) uiCard(", "drawUsageStatic's gate on the card chrome"],
+  ]) {
+    const g = guardsAt(needle);
+    chk(g !== null, `found ${what} in usage.ino ("${needle}")`);
+    if (g === null) continue;
+    chk(g.length === 0,
+        `${what} is OUTSIDE every #if, so board 1 sees it too `
+      + (g.length ? `- but it sits inside [${g.join(" -> ")}]` : ""));
+  }
+  // POSITIVE CONTROL for guardsAt(): a line that IS inside #if BOARD_USAGE_V2 must
+  // come back with a non-empty stack, or the three assertions above would pass
+  // vacuously on a parser that always returns []. nowCardH() is board 2's own
+  // accessor and must stay guarded - it names constants board 1 does not declare.
+  const guardedCtl = guardsAt("int nowCardH()");
+  chk(guardedCtl !== null && guardedCtl.length > 0 && /BOARD_USAGE_V2/.test(guardedCtl.join(" ")),
+      "sanity: guardsAt() DOES see a guard - nowCardH() reads as inside "
+    + `[${(guardedCtl || []).join(" -> ")}]`);
+
+  // The fallback the predicate falls back TO has to exist on both boards, and be the
+  // same number: the real threshold rides the wire (cxWin -> usage.cxWindowMin), and
+  // this only covers a percentage that arrives with no window beside it. Parsed from
+  // each header via consts(), never transcribed here.
+  for (const b of [1, 2])
+    chk(typeof B[b].CODEX_HIDE_FALLBACK_MIN === "number",
+        `board ${b} declares CODEX_HIDE_FALLBACK_MIN (${B[b].CODEX_HIDE_FALLBACK_MIN})`);
+  chk(B[1].CODEX_HIDE_FALLBACK_MIN === B[2].CODEX_HIDE_FALLBACK_MIN,
+      `both boards use the same Codex hide fallback `
+    + `(${B[1].CODEX_HIDE_FALLBACK_MIN} == ${B[2].CODEX_HIDE_FALLBACK_MIN} minutes)`);
+
+  // ---- board 1's flip: clear the rect, bust every cache that covers it ----
+  const uino2 = stripComments("usage.ino");
+  const tab = fnBody(uino2, "void renderUsageTab(", "usage.ino");
+  const elseAt = tab.indexOf("#else", tab.indexOf("static int srcCache = -2"));
+  const endAt = tab.indexOf("#endif", elseAt);
+  chk(elseAt > 0 && endAt > elseAt, "found renderUsageTab's board-1 (v1) bust arm");
+  const v1Arm = elseAt > 0 && endAt > elseAt ? tab.slice(elseAt, endAt) : "";
+  // The flip block, brace-matched from its own if - NOT a fixed look-back window.
+  // A rule a neighbouring line can satisfy is not a rule, and this arm has a second
+  // if-block (the chrome bust) sitting immediately above this one.
+  const flipAt = v1Arm.indexOf("if (codexShownCache != codexShownNow)");
+  chk(flipAt >= 0, "board 1's bust arm has its OWN flip block for the Codex row");
+  let flip = "";
+  if (flipAt >= 0) {
+    let i = v1Arm.indexOf("{", flipAt), d = 0;
+    for (; i < v1Arm.length; i++) {
+      if (v1Arm[i] === "{") d++;
+      else if (v1Arm[i] === "}") { d--; if (d === 0) { i++; break; } }
+    }
+    flip = v1Arm.slice(flipAt, i);
+  }
+  chk(flip.length > 0, "found the board-1 flip block's body to check");
+  if (flip.length > 0) {
+    // (a) THE CLEAR COVERS THE WHOLE CARD. Evaluated against board 1's own parsed
+    // constants rather than compared as text: `fillRect(CARD_X, CODEX_Y, CARD_W,
+    // CODEX_H)` and `fillRect(CARD_X, CODEX_Y + 2, CARD_W, CODEX_H - 4)` read almost
+    // identically and the second leaves the card's border behind on a hide.
+    const fr = flip.match(/tft\.fillRect\(([^;]*)\)\s*;/);
+    chk(!!fr, "the flip clears a rect before anything else");
+    if (fr) {
+      const a = splitArgs(fr[1]);
+      const got = a.slice(0, 4).map((x) => drawArg(B[1], x));
+      const want = [B[1].CARD_X, B[1].CODEX_Y, B[1].CARD_W, B[1].CODEX_H];
+      chk(got.join(",") === want.join(","),
+          `the flip's clear is exactly the Codex card's rect: got (${got.join(", ")}), `
+        + `card is (${want.join(", ")})`);
+    }
+    // (b) IT REPAINTS THE CARD FILL when the row comes BACK. Without this the row's
+    // fields draw onto COLOR_BG with no card under them - and every one of them
+    // passes COLOR_CARD as its background, so the clear boxes would paint card-
+    // coloured rectangles onto a bare page.
+    chk(/if \(codexShownNow\) uiCard\(/.test(flip),
+        "the flip repaints the card fill when the row comes back (never fields on bare page)");
+    // (c) EVERY CACHE THAT DESCRIBES PIXELS IN THAT RECT IS BUSTED - and the list is
+    // DERIVED from renderCodexRow's own draw calls, not transcribed here. That is the
+    // whole point: a fifth cached field added to the row later fails this by name
+    // instead of silently drawing blank after the first hide/show flip, which is this
+    // repo's most-repeated defect (chrome repainted, cache not reset, value left
+    // BLANK because drawIfChanged reads "hasn't changed").
+    const row = fnBody(uino2, "void renderCodexRow(", "usage.ino");
+    const drawn = new Set([...row.matchAll(/draw(?:IfChanged|CardBorder|PaceBar)\(\s*&?(\w+)/g)]
+                            .map((m) => m[1]));
+    chk(drawn.size >= 4,
+        `renderCodexRow's cached draw calls parse to ${drawn.size} caches `
+      + `[${[...drawn].join(", ")}] (an empty parse must fail, not pass vacuously)`);
+    for (const cache of drawn)
+      chk(new RegExp(`\\b${cache}\\s*(\\[0\\]\\s*=|=)`).test(flip),
+          `the flip busts ${cache} - renderCodexRow draws through it into the rect just `
+        + `cleared, and an unbusted cache leaves that field BLANK for ever`);
+  }
+}
+
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 overlaps`);
 if (SELFTEST) {
   if (fail <= BASELINE_FAILURES) {

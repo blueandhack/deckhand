@@ -349,6 +349,38 @@ void renderFooter() {
   tft.flush();
 #endif
 }
+// ONE PREDICATE, READ EVERYWHERE - the layout accessors, renderUsageTab and
+// drawUsageStatic all ask this and nothing re-derives it. A control drawn under
+// one condition and hit-tested under another is this codebase's classic defect;
+// there is no hit test on this tab, but a second spelling would still let the
+// chrome and the fields disagree about which column they are in.
+//
+// Deliberately NOT keyed on QUOTA_STALE_SEC. That threshold (900s) means "we
+// cannot vouch for this number" and already dims the row. This is the stronger
+// claim that nobody is RUNNING the tool, and a full window of silence is what
+// earns it.
+//
+// SHARED, not board 2's. It used to sit inside #if BOARD_USAGE_V2, so board 1
+// could not see it and drew a CODEX card reading "CODEX  --" for ever on a Mac
+// that has never run Codex - 44px of chrome and a dash, permanently, saying
+// nothing. It reads three fields (cxPct, cxAgeSec, cxWindowMin) and one header
+// constant, and all four exist on both boards: the fields are plain members of
+// the shared Usage struct in deckhand_display.ino, parsed unconditionally out of
+// every payload, and CODEX_HIDE_FALLBACK_MIN is now declared in both headers.
+//
+// WHAT THE TWO BOARDS DO WITH THE ANSWER STILL DIFFERS, and deliberately so.
+// Board 2 (BOARD_USAGE_V2) grows its other two cards into the freed space through
+// a _SOLO constant for every y that moves. Board 1 has a fixed three-card column
+// and simply LEAVES THE 44px EMPTY - the same thing its SESSIONS tab already does
+// when one session leaves the rest of the tab blank. Porting the ladder is a much
+// larger change and would move every constant this file's checker derives.
+bool usageCodexShown() {
+  if (usage.cxPct < 0) return false;       // never measured
+  if (usage.cxAgeSec < 0) return false;    // ditto, by the age's own sentinel
+  long win = usage.cxWindowMin > 0 ? usage.cxWindowMin : CODEX_HIDE_FALLBACK_MIN;
+  return usage.cxAgeSec <= win * 60;
+}
+
 #if BOARD_USAGE_V2
 // ---------- The USAGE trend ring ----------
 // Modelled on battTrend* in power.ino: a fixed ring of one-per-interval samples,
@@ -613,22 +645,6 @@ void drawUsageSpark(uint32_t* cache, int x, int y, int w, int h, uint16_t fg, ui
 }
 
 #if BOARD_USAGE_V2
-// ONE PREDICATE, READ EVERYWHERE - the layout accessors, renderUsageTab and
-// drawUsageStatic all ask this and nothing re-derives it. A control drawn under
-// one condition and hit-tested under another is this codebase's classic defect;
-// there is no hit test on this tab, but a second spelling would still let the
-// chrome and the fields disagree about which column they are in.
-//
-// Deliberately NOT keyed on QUOTA_STALE_SEC. That threshold (900s) means "we
-// cannot vouch for this number" and already dims the row. This is the stronger
-// claim that nobody is RUNNING the tool, and a full window of silence is what
-// earns it.
-bool usageCodexShown() {
-  if (usage.cxPct < 0) return false;       // never measured
-  if (usage.cxAgeSec < 0) return false;    // ditto, by the age's own sentinel
-  long win = usage.cxWindowMin > 0 ? usage.cxWindowMin : CODEX_HIDE_FALLBACK_MIN;
-  return usage.cxAgeSec <= win * 60;
-}
 
 // THE LAYOUT, DERIVED FROM THE ONE PREDICATE at every read. No cached copy:
 // two variables tracking one layout is how a UI comes to draw one column while
@@ -817,12 +833,12 @@ void renderWeekCard() {
 // out of a rollout file, and a file that stopped being written keeps its last value
 // forever.
 void renderCodexRow() {
-#if BOARD_USAGE_V2
-  // Nothing to draw, and nothing to CLEAR either: the layout flip repaints the
-  // whole content area (see renderUsageTab's bust), so the row's old pixels are
-  // gone before this returns.
+  // Nothing to draw, and nothing to CLEAR either - on BOTH boards, by two different
+  // routes. Board 2's layout flip repaints the whole content area; board 1's flip
+  // clears this row's own rect and busts the four caches that cover it (see
+  // renderUsageTab's bust). Either way the row's old pixels are gone before this
+  // returns, so an early return here can never strand them.
   if (!usageCodexShown()) return;
-#endif
   // Sized by the lane it has to hold, not a literal. padTo() pads to
   // CODEX_LANE_CHARS but stops at `len + 1 < bufSize`, so a buffer one byte too
   // small UNDER-PADS instead of failing - the leftover pixels of a
@@ -1120,10 +1136,11 @@ void renderUsageTab() {
   }
 #else
   static int srcCache = -2, cxSrcCache = -2, pinCache = -1, linksCache = -1,
-             emojiCache = -3;
+             emojiCache = -3, codexShownCache = -1;
   int pinNow = usagePinHostId[0] ? 1 : 0;
   int linksNow = usedLinkCount();
   int emojiNow = emojiIdForLink(usageSourceLink);
+  int codexShownNow = usageCodexShown() ? 1 : 0;
   if (srcCache != usageSourceLink || cxSrcCache != cxSourceLink ||
       pinCache != pinNow || linksCache != linksNow ||
       emojiCache != emojiNow) {
@@ -1133,6 +1150,41 @@ void renderUsageTab() {
     linksCache = linksNow;
     emojiCache = emojiNow;
     drawUsageStatic();   // repaints chrome; resetUsageCaches() runs inside it
+  }
+  // THE CODEX ROW APPEARING OR DISAPPEARING, handled on its OWN flip and NOT by
+  // folding codexShownNow into the chrome bust above. Board 2 can afford to route
+  // its flip through drawUsageStatic() because the layout MOVES - its other two
+  // cards grow into the freed space, so every border has to be repainted anyway.
+  // Nothing moves here: CARD1_Y and CARD2_Y are fixed, and this board draws STRAIGHT
+  // TO THE GLASS, so clearing and repainting two untouched cards is a visible flash
+  // of the whole tab for a row that changed 44px. So this clears exactly the row's
+  // own rect and repaints exactly its own chrome.
+  //
+  // THE FOUR CACHES ARE BUSTED BECAUSE THE PIXELS UNDER THEM WERE JUST ERASED, and
+  // this is the trap this repo pays for most often - a field whose CHROME is
+  // repainted but whose cache is not reset is left BLANK, because drawIfChanged
+  // reads "hasn't changed" from a cache describing pixels that no longer exist.
+  // Each one covers part of the rect cleared below and each would otherwise skip:
+  //   cxPctCache    the left lane's text, compared as a STRING - "CODEX  7d" before
+  //                 the hide equals "CODEX  7d" after the show, so it would not redraw
+  //   cxRightCache  the right lane, the same way (and it is the one that held "--")
+  //   cxBorderCache drawCardBorder caches the border COLOUR as an int; an unchanged
+  //                 colour skips the stroke, leaving a card with no outline
+  //   cxBarCache    drawPaceBar keys on (pct, tick) only, so an unchanged reading
+  //                 skips the bar entirely
+  // cxStaleCache is deliberately NOT busted: it is not a picture of any pixels, it
+  // is the dim-state edge detector that drives the four above, and clearing it would
+  // only cost one redundant repaint on the next tick.
+  if (codexShownCache != codexShownNow) {
+    if (codexShownCache != -1) {
+      tft.fillRect(CARD_X, CODEX_Y, CARD_W, CODEX_H, COLOR_BG);
+      cxPctCache[0] = '\0';
+      cxRightCache[0] = '\0';
+      cxBorderCache = -1;
+      cxBarCache = -1;
+      if (codexShownNow) uiCard(CARD_X, CODEX_Y, CARD_W, CODEX_H, COLOR_CARD);
+    }
+    codexShownCache = codexShownNow;
   }
 #endif
 #if BOARD_USAGE_V2
@@ -1172,9 +1224,13 @@ void drawUsageStatic() {
   drawCardChrome(CARD1_Y, "SESSION - 5 HOUR WINDOW", linkTag(usageSourceLink));
   drawCardChrome(CARD2_Y, "WEEK - 7 DAY, ALL MODELS", linkTag(usageSourceLink));
 #endif
+  // ONE gated call, with only the Y behind the guard - board 2's row moves with the
+  // layout, board 1's is fixed at CODEX_Y. Board 1 used to paint this card
+  // unconditionally, which is what left "CODEX  --" on the glass for ever.
 #if BOARD_USAGE_V2
-  if (usageCodexShown()) uiCard(CARD_X, codexRowY(), CARD_W, CODEX_H, COLOR_CARD);
+  const int cxY = codexRowY();
 #else
-  uiCard(CARD_X, CODEX_Y, CARD_W, CODEX_H, COLOR_CARD);
+  const int cxY = CODEX_Y;
 #endif
+  if (usageCodexShown()) uiCard(CARD_X, cxY, CARD_W, CODEX_H, COLOR_CARD);
 }

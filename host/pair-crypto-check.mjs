@@ -873,6 +873,31 @@ function selftest() {
   const realSessions = fs.readFileSync(SESSIONS_INO, "utf8");
   const inject = (fn) => ({ pairing: realSrc.replace(CT_ANCHOR, `${fn}\n${CT_ANCHOR}`) });
   const P = (from, to) => ({ pairing: realSrc.replace(from, to) });
+// THE GUARD, LOCATED RATHER THAN QUOTED. Returns `src` with one command branch's
+// `if (pairPanelActive) { ... }` block removed, or `src` UNCHANGED if it cannot
+// find it - which the caller reports as "the injection did not apply (anchor
+// moved)" rather than crediting the fault to whatever else happens to fail.
+//
+// SCOPED TO THE COMMAND'S OWN BRANCH, bounded by the next `} else if (buf` at the
+// same level, for the reason the assertion it feeds already records: with an
+// unbounded search READTEST's guard sits inside the window a search from
+// EMOJITEST's anchor would scan, and a fault that deletes the neighbour's guard
+// proves nothing about this one.
+function dropPairPanelGuard(src, cmd) {
+  const from = src.indexOf(`buf.startsWith("${cmd}")`);
+  if (from < 0) return src;
+  const branchEnd = src.indexOf("} else if (buf", from + 1);
+  const g = src.indexOf("if (pairPanelActive) {", from);
+  if (g < 0 || (branchEnd > 0 && g > branchEnd)) return src;
+  let i = src.indexOf("{", g), d = 0;
+  for (; i < src.length; i++) {
+    if (src[i] === "{") d++;
+    else if (src[i] === "}") { d--; if (d === 0) { i++; break; } }
+  }
+  if (d !== 0) return src;
+  return src.slice(0, g) + src.slice(i);
+}
+
   const sourceFaults = [
     ["a proof compare using strcmp is added beside pairCtEq (reviewer's injection 1)",
       inject("bool pairVerifyProof(const char* got, const char* want) { return strcmp(got, want) == 0; }")],
@@ -975,12 +1000,30 @@ function selftest() {
         .pairing.replace("  sendLineToHost(line);",
                          "  sendLineToHost(line);\n  renderPairPanel();")],
     // ---- and the panel as a full-screen surface ----
+    // PARSED, NOT TRANSCRIBED - and this pair is why the rule exists. Both faults
+    // used to spell the whole guard out character for character, including a
+    // `return;` that had no `buf = "";` in front of it. Commit 924cecc added that
+    // line (a refusal returning without clearing processCompletedLine's own
+    // accumulator re-parses the stale text against every later line - one DETAIL 9
+    // produced 63 refusal lines), the two transcriptions stopped matching, and both
+    // injections silently applied NOTHING. The assertions still passed, which is
+    // worse than a failure: a fault that cannot inject leaves the property it was
+    // proving unproven, and nothing says so except the selftest's own
+    // "anchor moved" line. Re-transcribing the new text would only move the next
+    // breakage, so the guard is LOCATED instead: the command's own branch, then the
+    // first `if (pairPanelActive) {` inside it, brace-matched to its close. That
+    // survives any edit to the body it deletes.
+    //
+    // WHAT EACH ONE NOW INJECTS: the whole `if (pairPanelActive) { ... }` block is
+    // removed from that command's branch and nothing else is touched - so the
+    // command can once again paint its full-screen surface over the pairing panel
+    // while pairPanelActive stays true and CONFIRM stays tappable underneath a
+    // screen showing neither. The assertion that must notice is the one that reads
+    // the slice from the command's own anchor to the refusal it prints.
     ["EMOJITEST paints over the pairing panel and leaves CONFIRM live underneath",
-      { main: realMain.replace(
-          "    if (pairPanelActive) {\n      Serial.println(\"EMOJITEST refused: another full-screen surface is up\");\n      return;\n    }\n#endif\n", "") }],
+      { main: dropPairPanelGuard(realMain, "EMOJITEST") }],
     ["READTEST does the same",
-      { main: realMain.replace(
-          "    if (pairPanelActive) {\n      Serial.println(\"READTEST refused: another full-screen surface is up\");\n      return;\n    }\n#endif\n", "") }],
+      { main: dropPairPanelGuard(realMain, "READTEST") }],
     ["a tab switch shuts the window but leaves the panel up, so taps still reach CONFIRM",
       { main: realMain.replace("  pairPanelActive = false;\n#endif\n#if !BOARD_USES_TFT_ESPI", "#endif\n#if !BOARD_USES_TFT_ESPI") }],
     ["the session shimmer runs down the rows underneath the pairing panel",

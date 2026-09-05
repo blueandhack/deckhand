@@ -28,7 +28,7 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386758, RAM 69804 | flash 1030298, RAM 70140 |
+| size today | flash 1404382, RAM 71972 | flash 1042674, RAM 71524 |
 
 **Those two figures are `arduino-cli`'s own `Sketch uses` / `Global variables` lines, NOT the
 `.bin` file's size, and the distinction has to be stated or the two records read as
@@ -38,8 +38,8 @@ segment padding. **Measured on four builds today: +266, +266, +266 and +270** - 
 *nearly* constant but not exactly, because the alignment padding rounds. Consequence worth
 knowing: a delta taken from `.bin` sizes can differ from the same delta taken from
 `Sketch uses` by a few bytes (it did here, +2352 against +2356 on board 2), and
-`board-baseline.mjs` reports the `.bin` number. Board 1's `.bin` today is **1387024**, which
-is the baseline figure below.
+`board-baseline.mjs` reports the `.bin` number. Board 1's `.bin` today is **1404656** and
+board 2's is **1042944**, which are the baseline figures below.
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
 RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
@@ -444,6 +444,112 @@ downstream" a statement rather than a hope. `TONELADDER` exists because the volu
 in dB and therefore hopeless to guess at: volume 15 is about -77dB and volume 90 about +20dB, so it
 plays five rising steps and the listener names the first one they hear. Prefer it to re-running
 `TONETEST` at a guessed volume — that costs one run per guess and this costs one run total.
+
+## A verb this board does not have is REFUSED BY NAME, from one table
+
+**Board 1 used to answer roughly twenty of the commands above with SILENCE, and nothing noticed
+for the whole board-2 port.** Measured on the live hardware with both boards attached, one
+`TEMP` produced four lines from board 2 (USB and BLE both deliver it, and most handlers have no
+duplicate guard) and *nothing at all* from board 1 - because those handlers sit inside
+`#if !BOARD_USES_TFT_ESPI`, so the line fell through the entire `if/else if` chain into the
+JSON-payload branch, which discards what it cannot parse. From the Mac that is indistinguishable
+from a wedged board, which is exactly what CLAUDE.md's "every refusal must name its cause" rule
+exists to prevent.
+
+`UNAVAILABLE_COMMANDS[]` in `deckhand_display.ino` is one `{verb, cause}` table, walked once at
+the END of the dispatch chain (so it can never shadow a real handler), with **each entry's `#if`
+the exact NEGATION of its handler's** - `#if BOARD_USES_TFT_ESPI` against the handler's
+`#if !BOARD_USES_TFT_ESPI`, `#if BOARD_USES_TFT_ESPI || !BOARD_HISTORY_SCROLL` against
+`#if !BOARD_USES_TFT_ESPI && BOARD_HISTORY_SCROLL`, and so on. Where the handler's guard names a
+CAPABILITY rather than a board, so does the entry, because a future board could turn that flag on
+and would then gain the handler and lose the refusal in one edit. Today board 1 refuses **24**
+verbs and board 2 refuses none.
+
+Three details that are load-bearing rather than stylistic:
+
+- **The array is terminated by a `{ nullptr, nullptr }` entry and walked to it**, not counted with
+  `sizeof`. Every block in it is `#if`'d, so on board 2 all of them vanish - and `X arr[] = {}` is
+  not legal C++. The terminator is what makes an all-guarded table compile, and walking to it is
+  what stops a count and an array disagreeing.
+- **A verb is matched WHOLE** (end of line, or a space), because the chain itself uses all three of
+  `buf == "X"`, `buf.startsWith("X")` and `buf.startsWith("X ")` and one table has to cover them.
+- **The refusal arm does not `return`.** `buf` is `processCompletedLine`'s own accumulator, passed
+  by reference, and a refusal that returns before the tail's `buf = ""` leaves the refused text in
+  the buffer for the next line to be APPENDED to - which still matches the same verb and refuses
+  again for ever. One `DETAIL 9` produced 63 refusal lines that way and ~100 seconds in which the
+  device parsed no payloads at all (fixed in `924cecc`).
+
+Refusals go out through `sendLineToHost`, not `Serial.println`, because a refusal is most wanted
+when someone is driving over BLE with the cable out - and they are deduped on a 2s window per verb,
+the way `KBTEST`'s already is, because the host delivers every trigger-file line to every live
+transport.
+
+**`node firmware/deckhand_display/commands-check.mjs`** is what keeps it honest, and it is a new
+file rather than an extension of an existing checker because none of them owns the dispatch chain -
+a command inventory folded into `usage-geom-check` is a parse nobody would look under. It PARSES
+three things and transcribes none: every `buf ==` / `startsWith` / `equalsIgnoreCase` verb in
+`processCompletedLine()` with its preprocessor guard stack, every table entry with ITS stack, and
+every `#define BOARD_*` out of both headers. Then it EVALUATES those guards per board with a real
+boolean evaluator - an identifier no header defines THROWS rather than reading as 0, which is the
+`const int` trap - and asserts that a verb reachable on either board is, on the other, either
+handled or refused by name. It also refuses a dead entry (a verb the board both handles and
+refuses), a cause short enough to be a paraphrase of its own guard, a non-ASCII cause, a prefix
+match, a `sizeof` walk, a `return` in the refusal arm and a `Serial.println` refusal.
+`--selftest` injects 8 faults and **catches 8/8**; deleting the `TEMP` entry fails by name with
+`TEMP: handled on board 2 and NOT on board 1, so board 1 refuses it by name`.
+
+**`SCROLLPERF`'s guard is `BOARD_HISTORY_SCROLL` ALONE where its four neighbours read
+`!BOARD_USES_TFT_ESPI && BOARD_HISTORY_SCROLL` - checked, and it is deliberate.** `SCROLLPERF`'s
+is the honest one: its body touches only `scrollActive`, `scrollY`, `scrollMaxY()`,
+`scrollDrawBody()` and `CODE_LINE_H`, every one declared inside `scrollback.ino`'s single
+`#if BOARD_HISTORY_SCROLL`, and nothing in it depends on the board. The neighbours' extra term is
+redundant rather than wrong (no board declares `BOARD_HISTORY_SCROLL 1` with
+`BOARD_USES_TFT_ESPI 1`) and was left alone, since narrowing four working guards would move a
+binary for no behaviour.
+
+## `EMOJITEST off` - the escape a stateful instrument must have
+
+`emojiTestActive` gates **both** `handleLine()`'s payload absorption and `loop()`'s 1s tick, and
+`TAB` used to paint over the grid without clearing it. The device then kept drawing, LOOKED ALIVE,
+and its footer never moved again while no payload reached it - and the only recovery measured was
+a re-flash. An agent hit this by accident while testing an unrelated refusal.
+
+`EMOJITEST off` is now the escape, shaped as an `off` ARGUMENT rather than a separate verb
+(`EMOJITEST` already takes an icon name, so a second verb would be a second name for one surface,
+and `off` is what `KBTEST`/`KBPROBE`/`KBBUBBLE` already answer to) but taking `SCROLLCLOSE`'s other
+half: **both outcomes are named**, so "closed" and "there was nothing open" never look the same
+from the Mac. It sits AFTER the `pairPanelActive` guard, so it cannot repaint over the pairing
+panel; the two flags can never both be true, because `EMOJITEST` refuses to open while the panel is
+up. `switchTab()` now clears the flag as well, ABOVE its same-tab early return - `TAB 0` while the
+grid is up over tab 0 is the case an operator reaches for first, and returning early would clear
+nothing.
+
+**The same class of trap in the neighbours, all of them checked:**
+
+| flag | absorbs the tick? | remotely reachable? | escape |
+|---|---|---|---|
+| `emojiTestActive` | yes | yes (`EMOJITEST`) | **fixed** - `EMOJITEST off`, and `TAB` clears it |
+| `histActive` / `readerActive` | yes | board 2 only (`READTEST`) | `READTEST off`; on board 1 only a finger can raise it |
+| `scrollActive` | yes | yes (`SCROLLOPEN`) | `SCROLLCLOSE` |
+| `kbActive` | yes | yes (`KBTEST`) | `KBTEST off` |
+| `octoActive` | yes | no (touch only) | self-clears after 30s |
+| `voiceCardActive` | no | no (a host payload raises it) | the next voice state |
+| `isAsleep` | n/a - `SLEEP` is a power-off | yes (`SLEEP`) | **none, by design**: a held touch wakes it |
+
+Two refusals came out of that sweep, both real and both the same defect one surface along:
+
+- **`TAB` is refused while `kbActive`/`readerActive`/`histActive`/`scrollActive`.** `switchTab()`
+  paints the tab and clears nobody's flag, so `TAB` over an open reader or transcript left the flag
+  set and the tick absorbed - EMOJITEST's freeze exactly. Those three are refused rather than
+  cleared because each has an exit function that repaints the screen `switchTab` is about to
+  repaint again, which is an ordering question rather than a one-liner, and each already has a way
+  out. `pairPanelActive` is deliberately NOT in the list: `switchTab()` takes the panel down AND
+  closes the window, so `TAB` is a correct escape from it.
+- **`PAGE` is refused while any full-screen surface is up, the pairing panel included.** `PAGE` was
+  the FIFTH refusal list that did not know the panel is a full-screen surface (the four found
+  earlier are recorded below): both its callees only act while `currentTab == TAB_SETTINGS`, and
+  the pairing panel is reached FROM settings - so `PAGE` could repaint over a code somebody was
+  comparing while `pairPanelActive` stayed true and `CONFIRM` stayed tappable underneath.
 
 ## `KBPROBE` and `KBBUBBLE` - the keyboard's touch model
 
