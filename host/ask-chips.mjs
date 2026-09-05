@@ -40,11 +40,18 @@
 // the four rules ARE applied in their stated order as the tiebreak, because
 // that is the only remaining thing to break the tie with.
 
-// Matches Task 9's firmware buffer: `char askChips[CHIP_MAX][CHIP_BYTES + 1]`
-// (askOpts[4][34] already reserves one NUL past its 32-char cap; this mirrors
-// that shape so the two fields do not need separate rules).
+// Matches Task 9's firmware buffer: `char askChips[CHIP_MAX][CHIP_BYTES + 1]`.
+//
+// CHIP_BYTES was originally 32, matching askOpts[4][34]'s label cap - a tidy
+// symmetry and nothing more. It silently dropped exactly the tokens this
+// feature exists for: /Users/yujia/projects/deckhand/build is 36 bytes, and
+// this repo's OWN firmware/deckhand_display/keyboard.ino is 38 - the feature
+// would have failed to chip a path in its own home repo. Raised to 48 (see
+// commit ddd03f9), which covers every path measured except a 59-byte docs
+// path. Cost: 4 x 50 x MAX_SESSIONS(6) = 1,200 bytes of DRAM (was 816),
+// 4.5% of board 1's ~26KB free heap (was 3.1%).
 export const CHIP_MAX = 4;
-export const CHIP_BYTES = 32;
+export const CHIP_BYTES = 48;
 
 // Spans: captured whole, including whatever punctuation lives inside them,
 // because the point of a backtick or a quote is that the AUTHOR already
@@ -116,6 +123,9 @@ function collectTokenMatches(text, testFn) {
 // any. A chip that exactly (case-insensitively) restates a button already on
 // the screen is redundant — the button already answers in one tap — so those
 // are dropped rather than spent one of the four slots on a duplicate.
+// DESIGN CALL: the brief specified this parameter's signature, not its
+// meaning; this suppression behaviour was proposed in the task-8 report and
+// accepted as the design, not inherited from the brief.
 export function askChips(detail, opts = []) {
   const text = String(detail ?? "");
   const skip = new Set((opts ?? []).map((o) => String(o ?? "").trim().toLowerCase()));

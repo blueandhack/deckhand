@@ -36,8 +36,13 @@ const ok = (cond, msg) => { if (cond) pass++; else failures.push(msg); };
 // ---------------------------------------------------------------------------
 // STEP 1: the cases the spec names (docs/superpowers/specs/2026-09-04-compose-
 // surface-design.md, "The token chips: host, wire, firmware", and this task's
-// brief). Kept VERBATIM from the brief for traceability, with one documented
-// correction below.
+// brief). Kept VERBATIM from the brief, and now correct on their own terms:
+// CHIP_BYTES was raised from 32 to 48 (commit ddd03f9) specifically BECAUSE
+// case 2 below ("/Users/yujia/projects/deckhand/build", 36 bytes) failed
+// under 32 — this checker caught that as a documented override rather than
+// quietly editing the expectation, which is what made the defect visible.
+// Now that CHIP_BYTES covers it, the override is gone; the cap itself is
+// still exercised below, by a token that is over 48 bytes.
 // ---------------------------------------------------------------------------
 const BRIEF_CASES = [
   ["arduino-cli compile --fqbn esp32:esp32:esp32s3 firmware/deckhand_display",
@@ -50,31 +55,10 @@ const BRIEF_CASES = [
   ["No tokens here at all", []],
 ];
 
-// DISCREPANCY FOUND WHILE VERIFYING (not assumed — measured with
-// Buffer.byteLength): the brief's case 3 path is
-// "/Users/yujia/projects/deckhand/build", which is 36 BYTES, not <= 32.
-// CHIP_BYTES=32 is not a number this checker can bend to fit one example —
-// it mirrors the firmware's askOpts[4][34] cap (34 = 32 usable chars + NUL),
-// which Task 9's askChips buffer is sized from. A cap that let this one
-// example through would let a genuinely oversized chip overrun that buffer.
-// So the CORRECT output for this exact input is [] (the only candidate is
-// the oversized path, and it is dropped) — verified by literally disabling
-// the byte-cap drop below and confirming the path reappears (see "cap has
-// teeth" section). Rule 3 (paths) is independently exercised, well under the
-// cap, by case 1's "firmware/deckhand_display" (25 bytes).
-const EXPECTED_OVERRIDES = new Map([
-  [2, { expected: [], why: "the listed path is 36 bytes, over CHIP_BYTES=32 - correctly dropped, not returned" }],
-]);
-
 for (const [i, [input, want]] of BRIEF_CASES.entries()) {
-  const override = EXPECTED_OVERRIDES.get(i);
-  const expected = override ? override.expected : want;
   const got = askChips(input, []);
-  const label = override
-    ? `case ${i} ${JSON.stringify(input)} -> ${JSON.stringify(expected)} (${override.why})`
-    : `case ${i} ${JSON.stringify(input)} -> ${JSON.stringify(expected)}`;
-  ok(JSON.stringify(got) === JSON.stringify(expected),
-     `FLAGS/PATHS/BACKTICKS: ${label}, got ${JSON.stringify(got)}`);
+  ok(JSON.stringify(got) === JSON.stringify(want),
+     `FLAGS/PATHS/BACKTICKS: case ${i} ${JSON.stringify(input)} -> ${JSON.stringify(want)}, got ${JSON.stringify(got)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -130,11 +114,15 @@ function checkCap(fn, label) {
 // sits right beside it - the drop does not consume one of the four slots.
 // ---------------------------------------------------------------------------
 {
-  const longPath = "/" + "a".repeat(40);
-  ok(Buffer.byteLength(longPath, "utf8") > CHIP_BYTES, "PARSE SANITY: the constructed long path really is over CHIP_BYTES");
+  // A real, 59-byte docs path (docs/superpowers/specs/2026-09-04-compose-
+  // surface-design.md) - the exact example the coordinator measured as the
+  // one path CHIP_BYTES=48 does NOT cover. Not constructed: this is a real
+  // file in this repo.
+  const longPath = "docs/superpowers/specs/2026-09-04-compose-surface-design.md";
+  ok(Buffer.byteLength(longPath, "utf8") > CHIP_BYTES, "PARSE SANITY: the docs path really is over CHIP_BYTES");
   const got = askChips(`Check -x or ${longPath} and stop`, []);
   ok(JSON.stringify(got) === JSON.stringify(["-x"]),
-     `CHIP_BYTES drop: an over-length path (${Buffer.byteLength(longPath, "utf8")} bytes) is dropped, only "-x" remains, got ${JSON.stringify(got)}`);
+     `CHIP_BYTES drop: an over-length path (${Buffer.byteLength(longPath, "utf8")} bytes, over CHIP_BYTES=${CHIP_BYTES}) is dropped, only "-x" remains, got ${JSON.stringify(got)}`);
 }
 
 // ---------------------------------------------------------------------------
