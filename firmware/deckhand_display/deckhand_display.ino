@@ -3564,13 +3564,25 @@ void handleTouch() {
   int sx, sy;
   bool touching = getTouchPoint(sx, sy);
 
-  // A finger still down has nothing left to do: the button acts on RELEASE.
-  if (touching && wasTouching) return;
-  // Released: if the press started on the record button, that was a tap on it.
+  // A finger still down: on every surface but the keyboard's key band there is
+  // nothing left to do, because the target acted on the press. On the key band a
+  // press only ARMED a candidate, so the held path has to re-sample and
+  // re-target - the same thing tickKbRepeat already does for DEL's hold, and the
+  // only way a 4.3mm key can be corrected by the finger that is covering it.
+  // Guarded on kbActive so no other screen pays for the extra work, and kbSlide
+  // itself returns immediately when nothing is armed.
+  if (touching && wasTouching) {
+    if (kbActive) kbSlide(sx, sy);
+    return;
+  }
+  // Released: the keyboard's key band COMMITS here (kbRelease returns false when
+  // nothing was armed, which is every press that kept press-commit), and
+  // otherwise, if the press started on the record button, that was a tap on it.
   if (!touching && wasTouching) {
     wasTouching = false;
     const bool onFab = fabPressed;
     fabPressed = false;
+    if (kbActive && kbRelease()) { lastActivityMillis = millis(); return; }
     if (onFab) {
       drawFab(0);
       micStream(); // streams for as long as you talk; MICREC is the short fallback
@@ -3618,7 +3630,17 @@ void handleTouch() {
   // couple hundred lines away in handleLine, with no kbActive check of its
   // own) paint over an in-progress typed answer and then have every further
   // tap silently type into whatever the voice-card dismissal repainted.
-  if (kbActive) { kbTouch(sx, sy); lastActivityMillis = millis(); return; }
+  // kbArm() FIRST, and kbTouch only for what it declines. A press on a character
+  // key or CAP arms a candidate and draws the bubble; kbRelease() above commits
+  // it on the lift. Everything kbArm() declines - row 3, the action row, the
+  // card, the strip, the peek, and DEL - falls through to kbTouch and keeps
+  // press-commit, because every one of those targets already clears the ~7.1mm
+  // fingertip floor in both axes.
+  if (kbActive) {
+    if (!kbArm(sx, sy)) kbTouch(sx, sy);
+    lastActivityMillis = millis();
+    return;
+  }
 
 #if BOARD_HAS_WIRELESS_PAIR
   // The pairing panel is a full-screen surface, so it is tested here with the rest
@@ -5423,6 +5445,29 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
         sendLineToHost("KBTEST refused: no ask is pending (no session has an ask)");
       }
     }
+  } else if (buf.startsWith("KBPROBE")) {
+    // Measures the touch model this keyboard now uses: one line per keystroke on
+    // the character rows with the key the press ARMED, the key the lift
+    // COMMITTED and the pixel delta between them. "KBPROBE off" stops it and
+    // prints the totals. It shipped with release-commit because "release-commit
+    // cuts mis-hits" is a claim, not a fact, and without the instrument the
+    // first real attempt would be the test - the argument AUDIOPROBE, TEXTPROBE
+    // and COLORTEST already won. Every refusal names its cause, and a duplicate
+    // (the host sends each command over BOTH transports) is a no-op that says
+    // so. See kbProbeCommand() in keyboard.ino.
+    String pa = buf.substring(7);
+    pa.trim();
+    kbProbeCommand(pa.c_str());
+  } else if (buf.startsWith("KBBUBBLE")) {
+    // Draws the magnified key bubble so a CAPTURE CAN SEE IT. It exists only
+    // while a finger is on the glass, so without this the one element this task
+    // adds is the one element no screenshot can record - the same argument TAB,
+    // PAGE, KBTEST, EMOJITEST and READTEST each already won. It arms through the
+    // real kbSetArm() and NEVER commits; "KBBUBBLE off" clears it, and so does
+    // the next real press. See kbBubbleCommand() in keyboard.ino.
+    String bb = buf.substring(8);
+    bb.trim();
+    kbBubbleCommand(bb.c_str());
 #if !BOARD_USES_TFT_ESPI
 #if BOARD_HAS_WIRELESS_PAIR
   } else if (buf == "PAIRVECTOR") {

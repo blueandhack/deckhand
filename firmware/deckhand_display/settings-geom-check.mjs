@@ -310,6 +310,31 @@ const KB_ROW3_DRAWN = (() => {
   return w;
 })();
 
+// THE BUBBLE'S GEOMETRY, PARSED. Its two constants and the row it lands on are
+// what keep it inside the key grid - and "inside the key grid" is not cosmetic:
+// a bubble that reached the text card would have to bust that card's change-only
+// cache, which is this repo's oldest bug. Restating 2 and KB_ROW_H here would
+// make every geometry assertion below agree with the checker instead of with the
+// firmware.
+const KB_BUB_SRC = fnSrc(KB_SRC, "void drawKbBubble");
+const KB_BUB = (() => {
+  const wm = KB_SRC.match(/const int KB_BUB_W\s*=\s*(\d+)\s*\*\s*KB_PITCH\s*;/);
+  if (!wm) throw new Error("settings-geom-check: KB_BUB_W is no longer declared as " +
+    "\"<n> * KB_PITCH\" in keyboard.ino - the bubble's width would be transcribed");
+  const hm = KB_SRC.match(/const int KB_BUB_H\s*=\s*KB_ROW_H\s*;/);
+  if (!hm) throw new Error("settings-geom-check: KB_BUB_H is no longer declared as KB_ROW_H in " +
+    "keyboard.ino - the bubble stops landing on a key-row boundary and the bounded restore " +
+    "(kbClearBubble) stops being bounded by construction");
+  const rs = fnSrc(KB_SRC, "int kbBubbleRow");
+  if (!rs.length) throw new Error("settings-geom-check: kbBubbleRow()'s body not found in " +
+    "keyboard.ino - which row the bubble is drawn ON is the whole clamp");
+  const rm = rs.match(/return\s+r == 0\s*\?\s*(-?\d+)\s*:\s*r\s*-\s*(-?\d+)\s*;/);
+  if (!rm) throw new Error("settings-geom-check: kbBubbleRow()'s OWN BODY no longer reads " +
+    "\"return r == 0 ? <n> : r - <n>;\" - the placement assertions below would be measuring " +
+    "the checker's own idea of where the bubble goes");
+  return { pitches: +wm[1], row0: +rm[1], back: +rm[2] };
+})();
+
 // THE THREE KEY-PAGE TABLES, PARSED out of keyboard.ino rather than transcribed.
 // KB_ROW_CELLS below and the reachability sweep further down BOTH derive from
 // this SAME parse, so a fourth page (or a rebalanced row) changes what both
@@ -434,6 +459,13 @@ const HOST_LABEL_MAX = 19;
 // the mock's KB_SYM2 split (10/4/1) the nine lengths are
 // 10, 9, 9, 10, 10, 9, 10, 4, 1.
 const KB_ROW_CELLS = KB_PAGE_ROWS.flatMap(m =>
+  m[1].match(/"(?:[^"\\]|\\.)*"/g).map(lit => parseCLit(lit).length));
+
+// The three key pages as ROW LENGTHS, 3 x 3, so the bubble's cell-coverage sweep
+// below can see the NEIGHBOURING row's length (rows are centred by kbRowX0, and a
+// bubble drawn over a 4-cell row sits at a different x0 than over a 10-cell one).
+// KB_ROW_CELLS just above is the same parse flattened; this one keeps the shape.
+const KB_PAGE_ROW_LENS = KB_PAGE_ROWS.map(m =>
   m[1].match(/"(?:[^"\\]|\\.)*"/g).map(lit => parseCLit(lit).length));
 
 // THE OTHER 150-BYTE PAIRING. The voice-answer confirm screen caps its transcript
@@ -2263,6 +2295,7 @@ for (const b of [1, 2]) {
         if (!reach.has(String.fromCharCode(cp))) missing.push(String.fromCharCode(cp));
       chk(missing.length === 0,
           `every printable ASCII codepoint is reachable; missing ${missing.length}: ${missing.join(" ")}`);
+
       // ================= ROW 3'S GAP, AND ITS PRESS FLASH =================
       // Two defects, both invisible until Task 2 made keys filled tiles. Bound to
       // FUNCTION BODIES, with the parse gates first - !/re/.test("") is true, so
@@ -2301,6 +2334,68 @@ for (const b of [1, 2]) {
           "before it, the flash is erased in the same call and the only feedback a press " +
           "registered never reaches the glass");
 
+      // ================= THE BUBBLE, AND RELEASE-COMMIT =================
+      const bubSrc = KB_BUB_SRC;
+      chk(bubSrc.length > 0, "drawKbBubble's body was found in keyboard.ino (parse gate)");
+      chk(/KB_ROWS_Y/.test(bubSrc),
+          "drawKbBubble's OWN BODY clamps to KB_ROWS_Y - a bubble that reaches the card has to " +
+          "bust the card's change-only cache, which is this repo's oldest bug");
+      chk(!/fillScreen/.test(bubSrc) && !/drawKeyboard/.test(bubSrc),
+          "drawKbBubble's OWN BODY does not repaint the screen or the whole board");
+      const clrSrc = fnSrc(KB_SRC, "void kbClearBubble");
+      chk(clrSrc.length > 0, "kbClearBubble's body was found in keyboard.ino (parse gate)");
+      chk(!/fillScreen/.test(clrSrc) && !/drawKeyboard/.test(clrSrc) && /drawKbKey\(/.test(clrSrc),
+          "kbClearBubble's OWN BODY restores through drawKbKey and never through drawKeyboard() " +
+          "- drawKeyboard fillScreen's the panel, so restoring that way would repaint the card, " +
+          "the strip and thirty keys on EVERY keystroke, which is the flicker the change-only " +
+          "discipline exists to prevent");
+      const armSrc = fnSrc(KB_SRC, "bool kbArm");
+      chk(armSrc.length > 0, "kbArm's body was found in keyboard.ino (parse gate)");
+      chk(/KB_DEL/.test(armSrc),
+          "kbArm's OWN BODY declines DEL by name - DEL is the one exception inside the key " +
+          "band and must commit on PRESS, or a tap stops deleting immediately and " +
+          "tickKbRepeat's hold-to-repeat never arms");
+      chk(/kbPeekPage/.test(armSrc),
+          "kbArm's OWN BODY declines while the peek is up - the peek covers the keys and routes " +
+          "every tap to its own pager, so arming under it would type a character the user " +
+          "cannot see they aimed at");
+      const relSrc = fnSrc(KB_SRC, "bool kbRelease");
+      chk(relSrc.length > 0, "kbRelease's body was found in keyboard.ino (parse gate)");
+      chk(/kbInsert\(/.test(relSrc),
+          "kbRelease's OWN BODY is what inserts the character - the commit moved off the press, " +
+          "which is the whole of this change");
+      chk(!/drawKeyboard/.test(relSrc),
+          "kbRelease's OWN BODY does not repaint the board per keystroke");
+      chk(/if \(c != KB_DEL\) return true;/.test(touchSrcForInsert),
+          "kbTouch's rows 0-2 branch now commits ONLY DEL - if it still inserted the character " +
+          "too, one press would arm in kbArm AND commit here, and every keystroke would double");
+      const htSrc = fnSrc(SRC_MAIN, "void handleTouch");
+      chk(htSrc.length > 0, "handleTouch's body was found in deckhand_display.ino (parse gate)");
+      chk(/if \(!kbArm\(sx, sy\)\) kbTouch\(sx, sy\);/.test(htSrc),
+          "handleTouch offers every keyboard press to kbArm FIRST and falls through to kbTouch " +
+          "only for what it declines - two commit paths for one press is a doubled character");
+      chk(/if \(kbActive\) kbSlide\(sx, sy\);/.test(htSrc),
+          "handleTouch's held path re-samples through kbSlide instead of returning with no work " +
+          "- without it a finger that landed wrong can never be corrected, which is the point");
+      chk(/if \(kbActive && kbRelease\(\)\)/.test(htSrc),
+          "handleTouch's RELEASE path - the one the record FAB already used - is where the " +
+          "keystroke commits");
+      chk(/kbSetArm\(-1, -1\);/.test(armSrc),
+          "kbArm's OWN BODY clears any stale arm on the presses it declines - handleTouch " +
+          "commits whatever is armed on the NEXT lift, so an arm that outlived its press would " +
+          "make a tap on SEND send and then type a character into the emptied buffer");
+      // KBBUBBLE is SCAFFOLDING and must stay scaffolding: it draws through the
+      // real kbSetArm so a capture records the shipping path, and it must have
+      // no way to reach the commit that path normally ends in.
+      const bcSrc = fnSrc(KB_SRC, "void kbBubbleCommand");
+      chk(bcSrc.length > 0, "kbBubbleCommand's body was found in keyboard.ino (parse gate)");
+      chk(/kbSetArm\(/.test(bcSrc) && !/kbRelease\(/.test(bcSrc) && !/kbInsert\(/.test(bcSrc),
+          "kbBubbleCommand's OWN BODY arms through kbSetArm and can neither commit nor insert - " +
+          "a scaffolding command that could type would be a way to answer a prompt from the Mac " +
+          "without a person touching the glass");
+      chk(/KB_DEL/.test(bcSrc),
+          "kbBubbleCommand's OWN BODY declines DEL by name - DEL commits on press and is never " +
+          "armed, so a bubble over it would be a capture of a state this keyboard cannot reach");
     }
     chk(10 * c.KB_PITCH <= W, `10 columns x ${c.KB_PITCH} = ${10 * c.KB_PITCH} inside the ${W}px panel`);
     chk(c.KB_PITCH - c.KB_KEY_W === 2, `${c.KB_PITCH - c.KB_KEY_W}px of the pitch is the gap`);
@@ -2357,6 +2452,89 @@ for (const b of [1, 2]) {
           `a T_BODY cell is ${lineHB(b, T_BODY)}px and the drawn key is ${drawnKeyH}px ` +
           `(clears by ${drawnKeyH - lineHB(b, T_BODY)}) - drawString's opaque box would ` +
           `otherwise paint outside the key cap it is centred in`);
+    }
+    // ================= THE MAGNIFIED BUBBLE =================
+    // The character keys are 4.27mm and 4.93mm wide against a ~7.1mm fingertip,
+    // so the finger covers the key it is pressing. The bubble is what makes the
+    // armed key visible - and it is the FIRST element here that paints over live
+    // chrome, so where it lands is a correctness claim, not a style one.
+    {
+      const bubW = KB_BUB.pitches * c.KB_PITCH, bubH = c.KB_ROW_H;
+      const rowY = (r) => c.KB_ROWS_Y + r * c.KB_ROW_H;
+      for (let r = 0; r <= 2; r++) {
+        const br = r === 0 ? KB_BUB.row0 : r - KB_BUB.back;
+        const y = rowY(br);
+        chk(br !== r,
+            `the bubble for key row ${r} is drawn on row ${br}, not on row ${r} - a bubble over ` +
+            `the key it magnifies is under the fingertip that is hiding that key, which is the ` +
+            `whole defect it exists to close`);
+        chk(y >= c.KB_ROWS_Y,
+            `the bubble for key row ${r} starts at y=${y}, at or below KB_ROWS_Y ` +
+            `(${c.KB_ROWS_Y}) - above it is the text card, whose change-only cache would then ` +
+            `have to be busted for the answer text to survive a keystroke`);
+        chk(y + bubH <= rowY(3),
+            `and ends at y=${y + bubH}, at or above row 3's top (${rowY(3)}) - so it never ` +
+            `reaches the pager row or the action band either, and kbClearBubble's sweep over ` +
+            `rows 0..2 restores everything it covered`);
+      }
+      // HOW MANY CELLS THE RESTORE HAS TO REPAINT, swept over every page, row and
+      // column rather than argued. kbClearBubble repaints the key cells whose
+      // rectangles intersect the bubble; this is that same intersection, run over
+      // the real row lengths (rows are CENTRED, so a bubble on row 0 above a
+      // 4-cell row sits at a different x0 than above a 10-cell one).
+      let worst = 0, worstAt = "";
+      for (let pg = 0; pg < KB_PAGE_ROW_LENS.length; pg++) {
+        const lens = KB_PAGE_ROW_LENS[pg];
+        const x0 = (r) => Math.floor((W - lens[r] * c.KB_PITCH) / 2);
+        for (let r = 0; r <= 2; r++) {
+          for (let col = 0; col < lens[r]; col++) {
+            let bx = x0(r) + col * c.KB_PITCH + Math.floor(c.KB_KEY_W / 2) - Math.floor(bubW / 2);
+            bx = Math.min(Math.max(bx, 0), W - bubW);
+            const br = r === 0 ? KB_BUB.row0 : r - KB_BUB.back;
+            const by = rowY(br);
+            let n = 0;
+            for (let rr = 0; rr <= 2; rr++) {
+              if (rowY(rr) + c.KB_ROW_H <= by || rowY(rr) >= by + bubH) continue;
+              for (let cc = 0; cc < lens[rr]; cc++) {
+                const cx = x0(rr) + cc * c.KB_PITCH;
+                if (cx + c.KB_PITCH <= bx || cx >= bx + bubW) continue;
+                n++;
+              }
+            }
+            if (n > worst) { worst = n; worstAt = `page ${pg} row ${r} col ${col}`; }
+          }
+        }
+      }
+      console.log(`    bubble: ${bubW}x${bubH} (${KB_BUB.pitches} pitches x KB_ROW_H), worst ` +
+                  `restore ${worst} key cells at ${worstAt}, face ${lineHB(b, T_HEAD)}px vs the ` +
+                  `key's own ${lineHB(b, T_BODY)}px`);
+      chk(worst > 0 && worst <= 6,
+          `the bubble covers at most ${worst} key cells anywhere on this board (bound: 6, which ` +
+          `is 2 rows x 3 columns) - that bound is what makes kbClearBubble's restore cheap ` +
+          `enough not to need drawKeyboard()`);
+      // AND IT ACTUALLY MAGNIFIES. A bubble in the key's own face would be
+      // bigger only by being further from the finger, which is half the point at
+      // most. T_HEAD is the mock's font 3, and it has to fit the bubble it is
+      // centred in - drawString paints an opaque box.
+      chk(KB_BUB_SRC.length > 0 && /setUIFont\(T_HEAD\)/.test(KB_BUB_SRC),
+          "drawKbBubble's OWN BODY sets T_HEAD, the rung above the key cap's own T_TITLE/T_BODY " +
+          "- and the same font the mock's bubble uses (docs/design/compose/compose.js, font 3)");
+      chk(lineHB(b, T_HEAD) > lineHB(b, T_BODY),
+          `T_HEAD inks ${lineHB(b, T_HEAD)}px against the key label's ${lineHB(b, T_BODY)}px, ` +
+          `so the bubble is genuinely magnified on this board`);
+      chk(lineHB(b, T_HEAD) <= bubH,
+          `a T_HEAD cell is ${lineHB(b, T_HEAD)}px and the bubble is ${bubH}px ` +
+          `(clears by ${bubH - lineHB(b, T_HEAD)}) - drawString's opaque box would otherwise ` +
+          `paint outside the bubble it is centred in`);
+      // The widest label the bubble ever holds is CAPS, and it is READ OUT OF
+      // kbKeyLabel rather than transcribed: rename the lock state and this moves
+      // with it instead of certifying a string the firmware stopped drawing.
+      const bubLabels = [...fnSrc(KB_SRC, "void kbKeyLabel").matchAll(/"([A-Za-z]+)"/g)].map(m => m[1]);
+      chk(bubLabels.length > 0, "kbKeyLabel's OWN BODY yields the multi-character key labels (parse gate)");
+      const wideLbl = bubLabels.reduce((a, l) => widthB(b, T_HEAD, l) > widthB(b, T_HEAD, a) ? l : a, "M");
+      chk(widthB(b, T_HEAD, wideLbl) <= bubW,
+          `the widest bubble label "${wideLbl}" inks ${widthB(b, T_HEAD, wideLbl)}px in the ` +
+          `${bubW}px bubble (clears by ${bubW - widthB(b, T_HEAD, wideLbl)})`);
     }
     // ================= THE PROMPT STRIP =================
     // One line of the ask above the card, so the question and the keyboard are on

@@ -445,6 +445,51 @@ in dB and therefore hopeless to guess at: volume 15 is about -77dB and volume 90
 plays five rising steps and the listener names the first one they hear. Prefer it to re-running
 `TONETEST` at a guessed volume — that costs one run per guess and this costs one run total.
 
+## `KBPROBE` and `KBBUBBLE` - the keyboard's touch model
+
+A character on the keyboard's three letter rows commits **on the LIFT, not on the press**: a press
+arms a candidate and draws a magnified bubble one key row clear of the finger, the held path
+re-targets as the finger slides, and the release commits. Row 3, the action row, the card, the
+strip, the peek and `DEL` all keep press-commit, because every one of those targets already clears
+the ~7.1mm fingertip floor - and `DEL` specifically must delete immediately on a tap and repeat on
+a hold.
+
+**`KBPROBE` ships with that change because "release-commit cuts mis-hits" is a CLAIM, not a fact.**
+It prints one line per keystroke:
+
+```
+KBPROBE #7 armed=r1c3 "e" lift=r1c4 "r" at=(120,180)->(127,177) d=(7,-3) dist=8 retarget=1
+```
+
+and `KBPROBE off` prints the totals, `N keystrokes, M re-targeted between press and lift (X%)`.
+Closing the keyboard stops it and reports the same totals rather than throwing them away.
+
+**What it measures and what it does not.** It measures where fingers LAND versus where they LIFT.
+It says nothing about whether the resulting text was CORRECT: a re-target only means the finger
+moved onto a different key, not that the second key was the intended one. A correction rate near
+zero would mean release-commit is buying nothing measurable, and the spec's fallback (six columns,
+two taps per character) is what should come next. **The "release point" is the LAST SAMPLED point,
+not the release proper** - `getTouchPoint()` returns false on the lift, so at a 15ms poll the
+reported point is the finger's position up to 15ms before it left. That caps the precision of
+every number the probe prints.
+
+**`KBBUBBLE` exists because the bubble is drawn only while a finger is down, so no capture can ever
+record it** - the same argument `TAB`/`PAGE`/`KBTEST`/`EMOJITEST`/`READTEST` each already won.
+`KBBUBBLE [r c]` (default `1 3`, the key the committed mock draws pressed) arms that key through
+the SAME `kbSetArm()` a real press uses, so a screenshot records the shipping code path rather than
+a mock of it. It **never commits** - only `handleTouch`'s release path calls `kbRelease()` - and
+`KBBUBBLE off`, or the next real press anywhere, clears it. It **declines `DEL` by name**, because
+`DEL` commits on press and is never armed: a bubble over it would be a capture of a state this
+keyboard cannot reach.
+
+Both refuse with a NAMED cause off the keyboard (`kbActive=0`, or the peek covering the keys), and
+both are idempotent against the host delivering every trigger-file command over **both** transports:
+a second copy within 2s changes nothing and prints nothing, while a genuine repeat later says
+`already running` / `already drawn`. Getting that wrong is what made one `POWERPROBE` print four
+refusal lines - and `KBBUBBLE off` reproduced it exactly once during this work (the first copy
+cleared and said `cleared`, the second found nothing armed and refused), which is why the dedupe
+window covers every line these two print rather than only their refusals.
+
 `COLORTEST` and `TEXTPROBE` exist for the same reason `TAB`/`PAGE`/`KBTEST`/`EMOJITEST` do: the
 glass is otherwise unverifiable. `COLORTEST` in particular is the **only** instrument that can see
 board 2's panel colour pipeline, because `SCREENSHOT` there reads the framebuffer rather than the
@@ -1335,10 +1380,15 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   cannot be caught by a small perturbation at all (`CODEX_LANE_CACHE` *is* now caught on both
   boards, because ONE buffer serves both Codex fields and it is asserted against the LARGER,
   `CODEX_RIGHT_CHARS`, as well as the lane); and `CFM_Y`/`CFM_H`,
-  `HIST_CHIP_X`/`HIST_CHIP_TAP_W`/`HIST_JUMP_H`, `P1_TOP`/`P2_TOP`/`P2_GAP`, `KB_TEXT_Y` and
+  `HIST_CHIP_X`/`HIST_CHIP_TAP_W`/`HIST_JUMP_H`, `P1_TOP`/`P2_TOP`/`P2_GAP` and
   `WAIT_CMD_H` all sit inside documented slack (board 2's page 2 has 149px of it - the checker
-  reports its hint ending at 311 against a footer at 460 - and its keyboard
-  break 38px) — each IS asserted, just not tightly enough for ±16 to trip it.
+  reports its hint ending at 311 against a footer at 460) — each IS asserted, just not tightly
+  enough for ±16 to trip it. **`KB_TEXT_Y` was on that list and is not exempt any more**, and
+  the number quoted beside it went stale too: the "keyboard break" was 38px before the prompt
+  strip took 22 of them, and is 16 today (`KB_ROWS_Y` 170 less `KB_TEXT_Y` 34 + `KB_TEXT_H`
+  120). Measured 2026-09-05 by perturbing the constant by ±16 in both headers:
+  `settings-geom-check.mjs` fails on all four, so the entry is corrected in place rather than
+  quietly deleted.
   **The sweep needs its own memory discipline and that is not optional.** It re-imports each
   checker once per injection, ~1400 times, and every instance is compiled code the ESM cache can
   never release, so runs are sliced across four child processes per (checker, board). Before that

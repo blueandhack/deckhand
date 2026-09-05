@@ -458,6 +458,13 @@ function drawKeyboard(p, opt = {}) {
         // see which key that is. It is clamped inside the key grid and NEVER
         // touches the text card - for row 0 it is drawn BELOW the finger - which
         // keeps it out of the card's change-only cache entirely.
+        // THE FIRMWARE DRAWS THIS, TERM FOR TERM: keyboard.ino's KB_BUB_W /
+        // KB_BUB_H / kbBubbleRow() and drawKbBubble() are these four lines,
+        // and settings-geom-check.mjs parses them out of that file rather than
+        // restating them. Change one side and change the other, or the panel and
+        // the normative spec disagree about the one element this surface added.
+        // It is capturable on the glass through KBBUBBLE - it exists only while
+        // a finger is down, so no screenshot could otherwise ever show it.
         const bw = k.KB_PITCH*2, bh = band.h;
         const bx = Math.min(Math.max(x + (k.KB_KEY_W>>1) - (bw>>1), 0), k.BOARD_W - bw);
         const by = r === 0 ? band.y + band.h : band.y - bh;

@@ -138,6 +138,109 @@ void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
   uiKeyCap(x, y, tft.width() - x - KB_KEY_GAP, h, ".", pressed == 2, COLOR_BG);
 }
 
+// ---------------------------------------------------------------------------
+// THE MAGNIFIED BUBBLE, and the release-commit model it exists for.
+//
+// The character rows' keys are 4.27mm wide on board 1 and 4.93mm on board 2
+// against a ~7.1mm fingertip: 40% and 31% under the floor, and the fingertip
+// COVERS the key it is pressing. A press used to commit, so the first pixel a
+// finger landed on was the character you got and the only feedback was a flash
+// of a key under the finger hiding it. Now a press on rows 0-2 ARMS a candidate
+// and draws this bubble one row clear of the finger, the held path RE-TARGETS,
+// and the LIFT commits. That extends two paths that already exist rather than
+// inventing a touch model: handleTouch already acts on release for the record
+// FAB, and tickKbRepeat already re-samples getTouchPoint() every tick and
+// re-qualifies against a key's own rectangle.
+//
+// THE GEOMETRY IS THE MOCK'S, term for term - docs/design/compose/compose.js,
+// the `if (pressed)` arm of its drawKeyboard(). That mock is the normative
+// geometric spec for this surface and docs/design/compose/check.mjs binds it to
+// both board headers, so a bubble placed anywhere else would put the panel and
+// the spec into disagreement:
+//   w = 2 * KB_PITCH   48 on board 1, 64 on board 2
+//   h = KB_ROW_H       the TESTED band, so the bubble lands ON a row boundary
+//   y = the row ABOVE; for row 0, where above is the text card, the row BELOW
+// and that placement IS the clamp. This is the first element in this firmware
+// that paints over live chrome, and the trap it has to stay clear of is this
+// repo's oldest one: chrome repainted without resetting its change-only cache
+// leaves the value BLANK. Keeping the bubble inside KB_ROWS_Y .. row 3 means it
+// never reaches drawKbText's card, so that interaction does not exist rather
+// than being handled - and the offset being a whole KB_ROW_H rather than a few
+// px is what puts it outside a ~7mm contact patch.
+//
+// The row it lands on is always 0 or 1 (r=0 -> 1, r=1 -> 0, r=2 -> 1), so it
+// covers ONE row band and, centred on a key at 2 pitches wide, at most THREE
+// columns of it. That is what makes the restore bounded - see kbClearBubble.
+const int KB_BUB_W = 2 * KB_PITCH;
+const int KB_BUB_H = KB_ROW_H;
+
+// The armed candidate: the key a press landed on, which is NOT yet committed.
+// -1/-1 is "nothing armed", which is also every state outside a live press.
+int kbArmRow = -1, kbArmCol = -1;
+// The bubble currently on the glass, so the restore knows what to repair. Only
+// the origin is kept - the size is the two constants above.
+bool kbBubOn = false;
+int  kbBubX = 0, kbBubY = 0;
+
+// Which key row the bubble for row `r` is drawn ON. Row 0 is the exception the
+// text card forces: above it is the card, so its bubble goes BELOW.
+int kbBubbleRow(int r) { return r == 0 ? 1 : r - 1; }
+
+// Put back what the bubble covered. BOUNDED AND DETERMINISTIC: it repaints the
+// key cells whose rectangles intersect the bubble - at most three - each through
+// drawKbKey, and it deliberately does NOT call drawKeyboard(). drawKeyboard()
+// fillScreen's the whole panel, so restoring through it would repaint the card,
+// the strip, the action row and 30-odd keys on EVERY keystroke, which is exactly
+// the flicker the change-only discipline exists to prevent.
+void kbClearBubble() {
+  if (!kbBubOn) return;
+  const int bx = kbBubX, by = kbBubY;
+  kbBubOn = false;
+  tft.fillRect(bx, by, KB_BUB_W, KB_BUB_H, COLOR_BG);
+  for (int r = 0; r < 3; r++) {
+    const int ry = kbRowY(r);
+    if (ry + KB_ROW_H <= by || ry >= by + KB_BUB_H) continue;
+    for (int c = 0; c < kbRowLen(r); c++) {
+      const int cx = kbRowX0(r) + c * KB_PITCH;
+      if (cx + KB_PITCH <= bx || cx >= bx + KB_BUB_W) continue;
+      // The CURRENT arm, not the old one: on a slide the new key may sit under
+      // the bubble being cleared, and it has to come back PRESSED.
+      drawKbKey(r, c, r == kbArmRow && c == kbArmCol);
+    }
+  }
+}
+
+// Draw the bubble for (r, col). Assumes the previous one is already cleared -
+// kbSetArm owns that ordering so it happens exactly once per re-target.
+void drawKbBubble(int r, int col) {
+  if (r < 0 || r > 2 || col < 0 || col >= kbRowLen(r)) return;
+  char label[8];
+  kbKeyLabel(kbRow(r)[col], label, sizeof(label));
+  int x = kbRowX0(r) + col * KB_PITCH + KB_KEY_W / 2 - KB_BUB_W / 2;
+  if (x < 0) x = 0;
+  if (x > tft.width() - KB_BUB_W) x = tft.width() - KB_BUB_W;
+  int y = kbRowY(kbBubbleRow(r));
+  // THE CLAMP, WRITTEN DOWN rather than reasoned about. kbBubbleRow() already
+  // keeps the bubble on rows 0-1 for every r it is called with, but the failure
+  // this guards is SILENT: a bubble that reached KB_TEXT_Y would paint over the
+  // card and the card's change-only cache would then have to be busted for the
+  // answer text to come back at all. Cheap insurance against a future row count.
+  if (y < KB_ROWS_Y) y = KB_ROWS_Y;
+  if (y + KB_BUB_H > kbRowY(3)) y = kbRowY(3) - KB_BUB_H;
+  kbBubX = x; kbBubY = y; kbBubOn = true;
+  // Flat fill FIRST so uiFillRound's anti-aliased corners blend against the
+  // colour they are told they sit on. `behind` is COLOR_BG everywhere else on
+  // this screen, but the bubble lands on COLOR_CARD key caps - without this the
+  // four corners would ring with a halo of the wrong background.
+  tft.fillRect(x, y, KB_BUB_W, KB_BUB_H, COLOR_BG);
+  uiFillRound(x, y, KB_BUB_W, KB_BUB_H, KB_KEY_R, COLOR_ACCENT, COLOR_BG);
+  setUIFont(T_HEAD);          // the mock's font 3: the rung above the key's own
+  tft.setTextColor(COLOR_BG, COLOR_ACCENT);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(label, x + KB_BUB_W / 2, y + KB_BUB_H / 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
 // HARD wrap, deliberately unlike drawWrappedText's word wrap - see the KB_COLS
 // derivation in the board headers for why. Slices kbText into KB_COLS-column
 // chunks with no regard for word boundaries and draws each on its own fixed line;
@@ -491,6 +594,10 @@ void drawKbActions() {
 }
 
 void drawKeyboard() {
+  // A full repaint erases the bubble's pixels, so the record of where it was has
+  // to go with them - otherwise the next kbClearBubble() would repaint three
+  // keys over a board that no longer has a bubble on it.
+  kbBubOn = false;
   tft.fillScreen(COLOR_BG);
   // BEFORE the peek's early return: the peek covers the keys from KB_ROWS_Y down
   // and never the card or the strip, so the question stays legible above it and
@@ -515,6 +622,8 @@ void drawKeyboard() {
 
 void openKeyboard(int idx) {
   kbActive = true;
+  kbArmRow = kbArmCol = -1;
+  kbBubOn = false;
   kbSessionIdx = idx;
   kbLen = 0;
   kbText[0] = '\0';
@@ -545,6 +654,11 @@ void openKeyboardForMessage(int idx) {
 }
 
 void closeKeyboard() {
+  // Before kbActive goes false: kbProbeStop's totals are the measurement, and a
+  // BACK tap in the middle of a typing pass would otherwise throw them away.
+  kbProbeStop("keyboard closed");
+  kbArmRow = kbArmCol = -1;    // a press cannot survive the screen it landed on
+  kbBubOn = false;             // the fillScreen below takes the pixels with it
   kbActive = false;
   kbMessageMode = false;
   kbSessionId[0] = '\0';
@@ -765,26 +879,319 @@ bool kbTouch(int sx, int sy) {
   if (sx < kbRowX0(r)) return true;
   int col = (sx - kbRowX0(r)) / KB_PITCH;
   if (col < 0 || col >= kbRowLen(r)) return true;   // the right margin
+  // ROWS 0-2 NO LONGER COMMIT ON PRESS. handleTouch offers every press to
+  // kbArm() first and only falls through to here when kbArm() DECLINED it, so
+  // the character keys and CAP have already been armed and will commit in
+  // kbRelease() when the finger lifts. The one press that still reaches this
+  // line is DEL, which kbArm() declines by name: a tap on it must delete
+  // IMMEDIATELY and a hold must repeat, and neither works if the delete waits
+  // for a lift. Anything else arriving here is a margin kbArm() also declined.
   char c = kbRow(r)[col];
+  if (c != KB_DEL) return true;
   drawKbKey(r, col, true);       // flash: the only confirmation a press landed
-  if (c == KB_SHIFT) {
+  kbBackspace();
+  // Arm the repeat and leave the key drawn PRESSED - tickKbRepeat releases it
+  // when the finger lifts or slides off, so a quick tap looks the same as
+  // before while a hold keeps deleting.
+  kbRepeatRow = r;
+  kbRepeatCol = col;
+  kbRepeatNext = millis() + KB_REPEAT_DELAY_MS;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// KBPROBE. Release-commit's entire justification is "it cuts mis-hits", and that
+// is A CLAIM, NOT A FACT - so it ships with the instrument that turns it into a
+// number. One line per keystroke: the key the press ARMED, the key the lift
+// COMMITTED, and the pixel delta between the landing point and the last point
+// sampled before the finger left the glass.
+//
+// WHAT IT MEASURES AND WHAT IT DOES NOT. It measures where fingers land versus
+// where they lift, on this hardware, in this hand. It says NOTHING about whether
+// the resulting text was correct: a re-target is only evidence that the finger
+// moved onto a different key, not that the second key was the intended one. A
+// zero re-target rate would mean release-commit is buying nothing measurable.
+//
+// The "release point" is the LAST SAMPLED point, not the release point proper:
+// getTouchPoint() returns false on the lift, so there is no coordinate to read
+// at that instant. At a 15ms poll that is the finger's position up to 15ms
+// before it left. Stated rather than glossed, because it caps the precision of
+// every number this prints.
+bool kbProbeOn = false;
+int  kbProbeAx = 0, kbProbeAy = 0, kbProbeAr = -1, kbProbeAc = -1;
+int  kbProbeLx = 0, kbProbeLy = 0;
+int  kbProbeN = 0, kbProbeMoved = 0;
+
+void kbProbeArm(int sx, int sy, int r, int c) {
+  if (!kbProbeOn) return;
+  kbProbeAx = kbProbeLx = sx;
+  kbProbeAy = kbProbeLy = sy;
+  kbProbeAr = r; kbProbeAc = c;
+}
+void kbProbeMove(int sx, int sy) {
+  if (!kbProbeOn) return;
+  kbProbeLx = sx; kbProbeLy = sy;
+}
+void kbProbeRelease(int r, int c) {
+  if (!kbProbeOn || kbProbeAr < 0) return;
+  char armed[8], lift[8];
+  kbKeyLabel(kbRow(kbProbeAr)[kbProbeAc], armed, sizeof(armed));
+  kbKeyLabel(kbRow(r)[c], lift, sizeof(lift));
+  const int dx = kbProbeLx - kbProbeAx, dy = kbProbeLy - kbProbeAy;
+  const int moved = (r != kbProbeAr || c != kbProbeAc) ? 1 : 0;
+  kbProbeN++;
+  kbProbeMoved += moved;
+  char m[192];
+  snprintf(m, sizeof(m),
+           "KBPROBE #%d armed=r%dc%d \"%s\" lift=r%dc%d \"%s\" at=(%d,%d)->(%d,%d) "
+           "d=(%d,%d) dist=%d retarget=%d",
+           kbProbeN, kbProbeAr, kbProbeAc, armed, r, c, lift,
+           kbProbeAx, kbProbeAy, kbProbeLx, kbProbeLy, dx, dy,
+           (int) lroundf(sqrtf((float) (dx * dx + dy * dy))), moved);
+  sendLineToHost(m);
+  kbProbeAr = kbProbeAc = -1;
+}
+
+// Stopping ALWAYS reports the totals, including when the keyboard closes under
+// it - the counts are the measurement, and losing them to a BACK tap would mean
+// re-typing the whole pass.
+void kbProbeStop(const char* why) {
+  if (!kbProbeOn) return;
+  kbProbeOn = false;
+  char m[192];
+  snprintf(m, sizeof(m), "KBPROBE off (%s): %d keystrokes, %d re-targeted between press and "
+           "lift (%d%%)", why, kbProbeN, kbProbeMoved,
+           kbProbeN ? (kbProbeMoved * 100 + kbProbeN / 2) / kbProbeN : 0);
+  sendLineToHost(m);
+}
+
+// The command. EVERY REFUSAL NAMES ITS CAUSE: from the Mac, silence and
+// "impossible here" look identical, which is the rule POWERPROBE's "not on
+// battery" refusal exists for. And the host delivers each trigger-file command
+// over BOTH transports, so a cabled device receives this twice within
+// milliseconds - a second KBPROBE while probing says so and changes nothing,
+// rather than restarting the count. A refusal has no state of its own to make
+// the duplicate a no-op, so it is deduped on a short window the way KBTEST's is;
+// POWERPROBE produced four refusal lines by having neither.
+void kbProbeCommand(const char* arg) {
+  // The window covers EVERY line this function prints, not only its refusals.
+  // Stamping it on success too is what makes the second transport's copy silent
+  // instead of answering "already running" to a command the user sent once - the
+  // measured shape of POWERPROBE's four refusal lines, seen again here.
+  static unsigned long lastSayMs = 0;
+  const bool dup = millis() - lastSayMs < 2000;
+  const bool off = arg && arg[0] == 'o' && arg[1] == 'f' && arg[2] == 'f';
+  if (!kbActive) {
+    if (!dup) sendLineToHost("KBPROBE refused: the keyboard is not open (kbActive=0) - raise it "
+                             "with \"KBTEST msg <text>\" or by answering a pending ask, then "
+                             "send KBPROBE");
+    lastSayMs = millis();
+    return;
+  }
+  if (off) {
+    if (kbProbeOn) { kbProbeStop("commanded"); lastSayMs = millis(); }
+    else {
+      if (!dup) sendLineToHost("KBPROBE off refused: no probe is running (kbProbeOn=0)");
+      lastSayMs = millis();
+    }
+    return;
+  }
+  if (kbProbeOn) {
+    if (!dup) sendLineToHost("KBPROBE already running - ignored, not restarted (the host "
+                             "delivers each command over BOTH transports, so a cabled device "
+                             "sees this line twice); send \"KBPROBE off\" to stop and report");
+    lastSayMs = millis();
+    return;
+  }
+  lastSayMs = millis();
+  kbProbeOn = true;
+  kbProbeN = kbProbeMoved = 0;
+  kbProbeAr = kbProbeAc = -1;
+  sendLineToHost("KBPROBE on: one line per keystroke on the character rows - armed key, "
+                 "committed key, pixel delta. It measures where fingers land versus where they "
+                 "lift and says nothing about whether the text was right. Row 3, DEL and the "
+                 "action row commit on press and are not counted.");
+}
+
+// KBBUBBLE - scaffolding, and it exists for exactly the reason TAB, PAGE,
+// KBTEST, EMOJITEST and READTEST already do: A CAPTURE CAN ONLY RECORD WHAT IS
+// ALREADY ON THE GLASS. The bubble exists only while a finger is down, so
+// without this the one element this task adds is the one element no screenshot
+// can ever show - and "an instrument that cannot observe the thing it is pointed
+// at is worse than none" is this repo's own rule.
+//
+// It draws through the SAME kbSetArm() a real press uses, so what a capture
+// records is the shipping code path and not a mock of it. It NEVER commits: only
+// handleTouch's release path calls kbRelease(), and a real press landing
+// anywhere afterwards clears the arm it leaves behind (see kbArm). Drawing the
+// same key twice is already a no-op inside kbSetArm, which is what makes this
+// idempotent against the host delivering the command over BOTH transports.
+void kbBubbleCommand(const char* arg) {
+  // Covers every line, not only the refusals - see kbProbeCommand's own note.
+  // "KBBUBBLE off" is the case that proved it: the first transport's copy
+  // cleared and said "cleared", and the second then found nothing armed and
+  // refused, so one command printed two contradictory lines per transport.
+  static unsigned long lastSayMs = 0;
+  const bool dup = millis() - lastSayMs < 2000;
+  if (!kbActive || kbPeekPage >= 0) {
+    if (!dup) sendLineToHost(kbActive
+      ? "KBBUBBLE refused: the prompt peek is up and covers the keys (kbPeekPage >= 0)"
+      : "KBBUBBLE refused: the keyboard is not open (kbActive=0) - raise it with "
+        "\"KBTEST msg <text>\" or by answering a pending ask");
+    lastSayMs = millis();
+    return;
+  }
+  if (arg && arg[0] == 'o' && arg[1] == 'f' && arg[2] == 'f') {
+    const bool had = kbArmRow >= 0;
+    kbSetArm(-1, -1);
+    if (had) sendLineToHost("KBBUBBLE off: cleared");
+    else if (!dup) sendLineToHost("KBBUBBLE off refused: nothing is armed");
+    lastSayMs = millis();
+    return;
+  }
+  int r = 1, c = 3;                 // the mock's own pressed key, so the two compare
+  // atoi + strchr, not sscanf: pulling sscanf into this sketch for one pair of
+  // small integers linked 19KB of scanf's float and width machinery into BOTH
+  // boards' images (measured: board 2 1038298 -> 1057230) for a scaffolding
+  // argument. The same trade the rest of this firmware already makes.
+  if (arg && arg[0]) {
+    r = atoi(arg);
+    const char* sp = strchr(arg, ' ');
+    if (sp) c = atoi(sp + 1);
+  }
+  int rr, cc;
+  // Qualified through the SAME hit test the touch path uses, by asking it about
+  // the key's own centre - a refusal here names a key that does not exist rather
+  // than drawing a bubble over a cell the finger could never reach.
+  const bool onKey =
+      r >= 0 && r <= 2 && c >= 0 && c < kbRowLen(r) &&
+      kbKeyAt(kbRowX0(r) + c * KB_PITCH + KB_KEY_W / 2, kbRowY(r) + KB_ROW_H / 2, rr, cc) &&
+      rr == r && cc == c;
+  // DEL IS DECLINED HERE TOO, for the same reason kbArm declines it: it commits
+  // on PRESS and is never armed, so a bubble over it would be a capture of a
+  // state this keyboard cannot reach - an instrument that shows something the
+  // thing it points at never does is worse than none.
+  if (!onKey || kbRow(r)[c] == KB_DEL) {
+    char m[144];
+    snprintf(m, sizeof(m), onKey
+             ? "KBBUBBLE refused: r%dc%d is DEL, which commits on PRESS and is never armed - "
+               "no bubble is ever drawn over it (page %d has %d/%d/%d cells)"
+             : "KBBUBBLE refused: r%dc%d is not a key on this page "
+               "(rows are 0..2, page %d has %d/%d/%d cells)", r, c, kbPage,
+             kbRowLen(0), kbRowLen(1), kbRowLen(2));
+    if (!dup) sendLineToHost(m);
+    lastSayMs = millis();
+    return;
+  }
+  // The SECOND copy of the same command (both transports carry it) would arm the
+  // same key - already a no-op inside kbSetArm - and then print an identical
+  // line, which is the shape of POWERPROBE's four refusals. Report only when the
+  // arm actually moved, or when enough time has passed to be a real second ask.
+  const bool same = (r == kbArmRow && c == kbArmCol);
+  kbSetArm(r, c);
+  if (same && dup) return;
+  lastSayMs = millis();
+  char m[144];   // the longest form is "already drawn for", and it was truncated at 112
+  snprintf(m, sizeof(m), "KBBUBBLE %s r%dc%d - armed, NOT committed; "
+           "\"KBBUBBLE off\" clears it, and so does the next real press",
+           same ? "already drawn for" : "drawn for", r, c);
+  sendLineToHost(m);
+}
+
+// ---------------------------------------------------------------------------
+// THE THREE PHASES. handleTouch calls these and nothing else does: kbArm() from
+// its press path (before kbTouch, which handles every press kbArm declines),
+// kbSlide() from the `touching && wasTouching` early return it used to take
+// with no work at all, and kbRelease() from the release path that already
+// existed for the record FAB.
+// ---------------------------------------------------------------------------
+
+// The rows 0-2 hit test, in ONE place. kbArm() and kbSlide() must qualify a
+// point identically or a slide could "re-target" onto something a press could
+// never have armed - the same rule kbRowX0()'s comment states for the draw and
+// the hit test. Returns false for row 3, the action band, the card, the strip
+// and both margins. Reproduces kbTouch's own division rather than sharing it
+// because kbTouch's is embedded in a chain of earlier branches.
+bool kbKeyAt(int sx, int sy, int& r, int& c) {
+  r = -1; c = -1;
+  if (sy < KB_ROWS_Y) return false;
+  int rr = (sy - KB_ROWS_Y) / KB_ROW_H;
+  if (rr < 0 || rr > 2) return false;
+  if (sx < kbRowX0(rr)) return false;           // the left margin of a centred row
+  int cc = (sx - kbRowX0(rr)) / KB_PITCH;
+  if (cc < 0 || cc >= kbRowLen(rr)) return false;
+  r = rr; c = cc;
+  return true;
+}
+
+// Move the armed candidate, or clear it with r < 0. Four things have to stay in
+// step - the old key un-presses, the cells under the old bubble are restored,
+// the new key presses, the new bubble is drawn - so they live in one function
+// instead of at each of the three call sites.
+void kbSetArm(int r, int c) {
+  if (r == kbArmRow && c == kbArmCol) return;
+  const int pr = kbArmRow, pc = kbArmCol;
+  kbArmRow = r; kbArmCol = c;
+  kbClearBubble();                       // reads the NEW arm, set above
+  if (pr >= 0) drawKbKey(pr, pc, false);
+  if (r >= 0) { drawKbKey(r, c, true); drawKbBubble(r, c); }
+}
+
+// PRESS. Returns true when it took the press - handleTouch then does not call
+// kbTouch for it. Everything it declines keeps press-commit, which is every
+// target that already clears the fingertip floor: row 3, the action row, the
+// card, the strip, the peek - and DEL, which is the one exception inside the
+// key band.
+bool kbArm(int sx, int sy) {
+  if (!kbActive) return false;
+  int r = -1, c = -1;
+  // The peek owns every tap while it is up, and DEL is the one key inside the
+  // band that must still commit on PRESS.
+  const bool onKey = kbPeekPage < 0 && kbKeyAt(sx, sy, r, c);
+  if (!onKey || kbRow(r)[c] == KB_DEL) {
+    // A PRESS ANYWHERE ELSE CANCELS A STALE ARM, and this is not defensive
+    // tidying: handleTouch commits on release whenever something is armed, so an
+    // arm that outlived its press would be committed by the NEXT lift - a tap on
+    // SEND would send, and then type a character into the emptied buffer. Nothing
+    // in the touch path can leave one behind today, but KBBUBBLE's scaffolding
+    // can, and a future caller of kbSetArm would inherit the hazard silently.
+    kbSetArm(-1, -1);
+    return false;
+  }
+  kbProbeArm(sx, sy, r, c);
+  kbSetArm(r, c);
+  return true;
+}
+
+// HELD. Re-samples where the finger is now and re-targets. Sliding off the key
+// band entirely DISARMS - that is the escape hatch a press-commit keyboard has
+// no room for: a finger that landed wrong can be taken off the keys and the
+// character is never typed.
+void kbSlide(int sx, int sy) {
+  if (kbArmRow < 0) return;
+  kbProbeMove(sx, sy);
+  int r, c;
+  kbKeyAt(sx, sy, r, c);        // r = -1 when the finger has left the key band
+  kbSetArm(r, c);
+}
+
+// LIFT. Commits whatever is armed. Returns true when it consumed the release, so
+// handleTouch's FAB branch below it is not also entered.
+bool kbRelease() {
+  if (kbArmRow < 0) return false;
+  const int r = kbArmRow, c = kbArmCol;
+  const char ch = kbRow(r)[c];
+  kbProbeRelease(r, c);
+  kbSetArm(-1, -1);             // un-press and restore BEFORE the commit repaints
+  if (ch == KB_SHIFT) {
     kbShiftMode = (kbShiftMode + 1) % 3;   // off -> once -> locked -> off
     for (int rr = 0; rr < 3; rr++)
       for (int cc = 0; cc < kbRowLen(rr); cc++) drawKbKey(rr, cc, false);
-    return true;
+  } else if (ch == KB_DEL) {
+    kbBackspace();              // reachable only by SLIDING onto DEL from elsewhere
+  } else {
+    kbInsert(ch);
   }
-  if (c == KB_DEL) {
-    kbBackspace();
-    // Arm the repeat and leave the key drawn PRESSED - tickKbRepeat releases it
-    // when the finger lifts or slides off, so a quick tap looks the same as
-    // before while a hold keeps deleting.
-    kbRepeatRow = r;
-    kbRepeatCol = col;
-    kbRepeatNext = millis() + KB_REPEAT_DELAY_MS;
-    return true;
-  }
-  kbInsert(c);
-  drawKbKey(r, col, false);
   return true;
 }
 

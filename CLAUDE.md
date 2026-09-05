@@ -224,6 +224,8 @@ look identical.
 |---|---|
 | `RECAL` / `MICTEST` / `MICMON` / `MICREC` / `MICSTREAM` | touch calibration; mic level, live meter, one-shot and streaming capture |
 | `TAB 0..2` / `PAGE 0..3` / `KBTEST` / `EMOJITEST` / `READTEST` | put a surface on the glass, since a capture can only record what is already there |
+| `KBPROBE` / `KBPROBE off` | per keystroke: the key the press ARMED, the key the lift COMMITTED, the pixel delta. Measures where fingers land versus where they lift; says NOTHING about whether the text was right |
+| `KBBUBBLE [r c]` / `KBBUBBLE off` | draws the magnified key bubble so a capture can see it - it otherwise exists only while a finger is down. Arms, never commits; declines DEL, which commits on press |
 | `SCREENSHOT` | PNG to `~/Deckhand-shots/` (0.4s on board 2, ~18s on board 1) |
 | `COLORTEST` / `SWAP 0\|1` / `INV 0\|1` | board 2: the only instruments that can see the panel's colour pipeline |
 | `PERF` / `TEMP` / `TEXTPROBE` | flush timing; SoC DIE temperature; the text-width table |
