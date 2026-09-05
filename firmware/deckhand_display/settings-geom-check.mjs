@@ -247,6 +247,24 @@ const KB_SRC = fs.readFileSync(`${DIR}/keyboard.ino`, "utf8");
 // COMPOSE_PROMPT_LINES is derived from COMPOSE_PROMPT_H and KB_LINE_PITCH.
 const COMPOSE_SRC = fs.readFileSync(`${DIR}/compose.ino`, "utf8");
 
+// HOW MANY CONTROLS THE PANEL'S ACTION ROW DRAWS, parsed out of
+// drawComposeActions' own labels[] initialiser. Hoisted here rather than left
+// inside the board-1 structural block because COMPOSE_ACT_MAX has to be checked
+// on BOTH boards: geom-sweep.mjs perturbs a constant per board, and an assertion
+// that only runs on board 1 leaves that board-2 constant read-but-unguarded -
+// which is exactly what the sweep reported for it.
+const COMPOSE_ACT_COLS = (() => {
+  const src = fnSrc(COMPOSE_SRC, "void drawComposeActions");
+  if (!src.length) throw new Error("settings-geom-check: drawComposeActions() not found in " +
+    "compose.ino - the reply panel's action row comes from there, so move this parse with it");
+  const m = src.match(/labels\[(\d+)\]\s*=\s*\{([^}]*)\}[^;]*;\s*$/m)
+         || src.match(/const char\* labels\[(\d+)\]\s*=\s*\{/);
+  const all = [...src.matchAll(/labels\[(\d+)\]\s*=\s*\{/g)].map((x) => +x[1]);
+  if (!all.length) throw new Error("settings-geom-check: drawComposeActions() no longer declares " +
+    "a labels[n] initialiser - the row's width would be transcribed");
+  return Math.max(...all);
+})();
+
 // THE PANEL'S BAND TOPS, READ OUT OF THE FIRMWARE'S OWN ACCESSORS. compose.ino
 // keeps its vertical column as a chain of `int composeXxxY() { return <expr>; }`
 // so that the draw and the hit test read ONE source; this evaluates those
@@ -3627,6 +3645,13 @@ for (const b of [1, 2]) {
         `reply panel: COMPOSE_KEY_GAP ${k.COMPOSE_KEY_GAP} == KB_PITCH ${c.KB_PITCH} - KB_KEY_W ` +
         `${c.KB_KEY_W} = ${c.KB_PITCH - c.KB_KEY_W} - the panel's drawn/tested gap is the KEY's own, ` +
         `not a second number, and keyboard.ino spells the same expression KB_KEY_GAP`);
+    chk(CMP[b].COMPOSE_ACT_MAX >= COMPOSE_ACT_COLS,
+        `reply panel: COMPOSE_ACT_MAX ${CMP[b].COMPOSE_ACT_MAX} holds the ${COMPOSE_ACT_COLS} column(s) ` +
+        `drawComposeActions writes into composeActX/composeActW - an array shorter than the row it ` +
+        `stores is an out-of-bounds write on every repaint, which is the shape of the cxRightCache bug`);
+    chk(k.COMPOSE_CHIPS_PER_PAGE >= 2,
+        `reply panel: a token row shows ${k.COMPOSE_CHIPS_PER_PAGE} chip(s) - the design's row fits TWO ` +
+        `tokens on both boards, and at one per page the pager would be doing the work the row is for`);
     chk(k.COMPOSE_CHIPS_PER_PAGE === k.COMPOSE_COLS - 1,
         `reply panel: a token page is ${k.COMPOSE_CHIPS_PER_PAGE} chip(s) of ${k.COMPOSE_COLS} columns - ` +
         `the pager's lane is RESERVED before the chips are laid out, so a wide chip can never run ` +
@@ -3763,15 +3788,13 @@ for (const b of [1, 2]) {
         const fr = splitArgs(fracsInit).map((t) => +t.trim()), lb = splitArgs(labelsInit);
         chk(fr.length === 3 && lb.length === 3,
             `drawComposeActions' row is ${lb.length} control(s) at fracs {${fr.join(", ")}} - the design's row is three`);
-        // THE STORED BANDS MUST HOLD THE WIDEST ROW THIS FUNCTION DRAWS. An array
-        // shorter than what uiActionRow writes into it is an out-of-bounds write
-        // on every repaint - the exact shape of the cxRightCache bug, which
-        // silently corrupted four bytes past its array on every tick. The row's
-        // width is PARSED from the initialiser above rather than restated, so
-        // growing the row without growing the array fails here.
-        chk(CMP[b].COMPOSE_ACT_MAX >= lb.length,
-            `COMPOSE_ACT_MAX ${CMP[b].COMPOSE_ACT_MAX} holds the ${lb.length} column(s) drawComposeActions ` +
-            `writes into composeActX/composeActW`);
+        // The COMPOSE_ACT_MAX claim that used to stand here is now made per BOARD,
+        // above, because the sweep perturbs per board and a board-1-only
+        // assertion left board 2's copy of that constant unguarded.
+        chk(COMPOSE_ACT_COLS === lb.length,
+            `the hoisted labels[] width ${COMPOSE_ACT_COLS} is the ${lb.length} this block re-parsed - ` +
+            `two parses of one initialiser must agree, or the per-board assertion above is measuring ` +
+            `a row nobody draws`);
         if (fr.length === 3 && lb.length === 3) {
           chk(fr[2] === 2 * fr[0] && fr[2] === 2 * fr[1],
               `drawComposeActions' fracs are {${fr.join(", ")}} - SEND is EXACTLY twice the destructive control, which is what spec defect 2 asks for, and the third control still gets a full band`);
