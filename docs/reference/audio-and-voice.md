@@ -415,8 +415,22 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   - **Ancestry does not matter, which is why the Deckhand host can do this at all.** Measured: a
     `launchd`-parented process with `ppid=1` and no relationship to the session posted into it
     successfully. That is exactly the shape the host has, running as `DeckhandBLE.app`.
-  - **The message arrives attributed to a peer session**, not as your own typing — the transcript
-    renders it as "Another Claude session sent a message: ...". Inherent to the mechanism.
+  - **The message arrives attributed to a peer session**, not as your own typing — Claude sees
+    "Another Claude session sent a message: ..." wrapped in the peer-message boilerplate.
+    Inherent to the mechanism.
+  - **AND THE PERSON WHO SENT IT SEES NOTHING.** Measured 2026-09-06 against the session JSONL,
+    after the user asked why their own device message was missing from their chat. The entry IS
+    a user turn — `type:"user"`, `message.role:"user"` — but it also carries **`isMeta: true`**
+    and `origin: {"kind":"peer","from":"unknown","verifiedPeerPid":<pid>}`, and the UI hides meta
+    entries. So the round trip works perfectly and is invisible at the one end that matters:
+    you type on the device, it reaches Claude in 125ms, and your own transcript shows nothing.
+    **The host cannot fix this.** The injection frame is fixed at
+    `{"type":"user","message":{"role":"user","content":"..."}}` — the `claude` binary's own
+    `[uds-messaging] Inject messages` help string prints exactly that shape and no other — and it
+    carries no field that could change the classification; `isMeta` is applied by Claude Code on
+    receipt, keyed on the origin being a peer. The only remedy available is for the assistant to
+    **quote the message back** at the top of its reply, which puts the text in the visible
+    transcript. Do that.
   - **THE WIRE FORMAT IS UNDOCUMENTED AND GETTING IT WRONG IS SILENT.** Two newline-terminated
     JSON lines on one connection: `{"type":"auth","token":"..."}` then
     `{"type":"user","message":{"role":"user","content":"..."}}`. The first guess,
@@ -428,7 +442,14 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     `content` carries the text, from an offset taken *before* the write, and treats an
     unconfirmed send as a failure. `host/session-inbox-check.mjs` binds the frame shape to the
     code that builds it, so a revert to the discarded shape fails by name.
-  - **UNVERIFIED, and the one thing worth watching: confirmation has only ever been observed on a
+  - **RESOLVED 2026-09-06 by three real device taps. Kept below rather than deleted, because
+    the reasoning is what made the tap conclusive.** `handleTypedPrompt` refuses anything whose
+    record is not `waiting`, so all three sends were on a WAITING session, and all three
+    confirmed: `Prompt: posted into the live session ... confirmed in the transcript in 125ms`,
+    twice from `Deckhand-C114` (12 and 39 chars) and once from `Deckhand-0528` (24 chars) — the
+    first send ever tapped on board 1's glass. The inference below was right; no fallback fired
+    and no turn was duplicated.
+  - was UNVERIFIED: **confirmation had only ever been observed on a
     BUSY session, while a real device tap can only ever target a WAITING one.** The indirect
     evidence is reassuring but is not the case that matters: of 2,826 `queue-operation` enqueues on
     disk, 1,785 carry no `content` at all (locally typed, dequeued in the same millisecond) and 238

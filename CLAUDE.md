@@ -329,3 +329,10 @@ that library reads it from inside itself - so reinstalling TFT_eSPI silently wip
 - **Correct in place rather than deleting.** A described defect that no longer exists costs the
   next reader either the time to disprove it or a no-op "fix" - so entries that turned out to
   be wrong are kept and marked, not removed.
+- **QUOTE BACK ANY MESSAGE THAT ARRIVES FROM THE DEVICE.** It reaches you as "Another Claude
+  session sent a message"; the person who typed it SEES NOTHING. Claude Code marks anything
+  arriving over `CLAUDE_CODE_MESSAGING_SOCKET` from an external process `isMeta: true`, and the
+  UI hides meta entries - so the send works, lands in 125ms, and is invisible at the one end
+  that matters. The host cannot fix it (the injection frame carries no field that changes the
+  classification). Opening your reply with the text is the only remedy there is. See
+  [`docs/reference/audio-and-voice.md`](docs/reference/audio-and-voice.md).
