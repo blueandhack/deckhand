@@ -394,6 +394,45 @@ function boundBatteryStore() {
   }
 }
 
+// THE DEVICE'S OWN "how should my messages land" CHOICE, keyed and pruned
+// EXACTLY like battByDevice above, and for the same reason: two boards can
+// disagree, and the priority applies to messages from THAT board. A single
+// global would mean whichever board spoke last decided for both - the same
+// defect a single `lastBatt` had, arrived at from the other end.
+//
+// This is the first device SETTING the host stores at all. Theme, brightness and
+// sound never leave the panel; MSGPRI does, so there is now a second thing in the
+// per-device family and it follows the first's shape rather than inventing one.
+const msgPriByDevice = new Map(); // senderKey -> { device, priority, at }
+
+// Dropped when the link that fed it closes - UNLESS the same device is still
+// reachable on another link (the ordinary cabled-and-BLE case). A COPY of
+// forgetBatteryFor's rule rather than a call into it, because the two stores hold
+// different things and folding them into one function would mean a future third
+// store either joins a growing switch or quietly does not get pruned at all.
+function forgetMsgPriorityFor(key) {
+  if (!key || !msgPriByDevice.has(key)) return;
+  for (const l of liveLinks()) if (senderKey(l.id) === key) return;
+  msgPriByDevice.delete(key);
+  console.log(
+    `Inbox: dropped the send priority filed under ${key} - its last link closed, ` +
+      `so messages attributed to it fall back to the default until it says MSGPRI again.`
+  );
+}
+// The same ceiling and the same reason: an UNNAMED link keys on its port path,
+// ports renumber, and a key no close handler will ever name again would otherwise
+// live forever.
+function boundMsgPriorityStore() {
+  while (msgPriByDevice.size > MAX_BATT_DEVICES) {
+    let oldestKey = null;
+    let oldestAt = Infinity;
+    for (const [k, v] of msgPriByDevice) if (v.at < oldestAt) [oldestAt, oldestKey] = [v.at, k];
+    if (oldestKey === null) return;
+    msgPriByDevice.delete(oldestKey);
+    console.log(`Inbox: evicted the oldest send priority (${oldestKey}) - this store is bounded, not a history.`);
+  }
+}
+
 // The device the Mac's surfaces mean: the selection when it is actually
 // reporting, else the freshest reading there is. Falling back to the freshest is
 // what keeps a single unnamed board (a host that attached mid-run and never saw
@@ -2456,10 +2495,26 @@ const INBOX_PRIORITY_ENV = INBOX_PRIORITIES.includes(INBOX_PRIORITY_ENV_RAW)
 /// file. Same shape as currentMacEmoji()'s "(but DECKHAND_MAC_EMOJI overrides
 /// it)": a knob whose effect is invisible is a knob that gets flipped twice.
 ///
-/// Today the environment is the only contributor, so there is nothing for it to
-/// override yet.
-function resolveInboxPriority() {
-  if (INBOX_PRIORITY_ENV) return { priority: INBOX_PRIORITY_ENV, why: "DECKHAND_INBOX_PRIORITY" };
+/// THE ENV VAR WINS, AND THE LOG SAYS SO WHEN IT DOES. Two contributors and one
+/// of them silently beating the other is the shape where a user flips the toggle
+/// on the device, nothing changes, and there is no way anywhere to find out why.
+/// Same pattern as currentMacEmoji()'s "(but DECKHAND_MAC_EMOJI overrides it)",
+/// and it is named ONLY when there is actually something being overridden - an
+/// "overrides nothing" on every line would be noise that teaches a reader to skip
+/// the line that matters.
+function resolveInboxPriority(via) {
+  const dev = via ? msgPriByDevice.get(senderKey(via)) : null;
+  const chosen = dev?.priority || "";
+  if (INBOX_PRIORITY_ENV) {
+    return {
+      priority: INBOX_PRIORITY_ENV,
+      why:
+        chosen && chosen !== INBOX_PRIORITY_ENV
+          ? `DECKHAND_INBOX_PRIORITY, which OVERRIDES ${dev.device || senderKey(via)}'s own "${chosen}"`
+          : "DECKHAND_INBOX_PRIORITY",
+    };
+  }
+  if (chosen) return { priority: chosen, why: `${dev.device || senderKey(via)}'s SETTINGS toggle` };
   return { priority: INBOX_PRIORITY_DEFAULT, why: "the default" };
 }
 
@@ -2665,7 +2720,7 @@ if (VOICE_DELIVERY !== "clipboard") {
   // field. The receiver then defaults it to "unknown", which is the true
   // statement and also the byte-identical frame this sent before.
   const from = via ? deviceNameFor(via) : "";
-  const pri = resolveInboxPriority();
+  const pri = resolveInboxPriority(via);
   let r;
   try {
     r = await postToSessionInbox(record, text, { from, priority: pri.priority });
@@ -3175,6 +3230,58 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       boundBatteryStore(); // ports renumber; the prune on close cannot see a key it never names again
     }
   }
+  // MSGPRI <now|next|later> - the device's own choice of how the messages IT sends
+  // should land in the target session's queue. The FIRST device setting that
+  // reaches this host: theme, brightness and sound all stay on the panel.
+  //
+  // THE REFUSAL IS AS IMPORTANT AS THE REPORT, and BLEMTU is why. That arm used to
+  // `return` on any line starting "BLEMTU ", which silently ate board 1's own
+  // refusal - correctly emitted by the firmware and invisible here, so from the Mac
+  // it was indistinguishable from silence. So an unparseable MSGPRI is LOGGED
+  // rather than dropped, and it names the value.
+  // MSGPRI <now|next|later> - the device's own choice of how the messages IT sends
+  // should land in the target session's queue. The FIRST device setting that
+  // reaches this host: theme, brightness and sound all stay on the panel.
+  //
+  // THE GUARD IS THE ACCEPTANCE TEST, not a prefix match with the test nested
+  // inside it, and that is the BLEMTU lesson caught before it could be re-learned.
+  // BLEMTU's arm used to `return` on ANY line starting "BLEMTU ", which silently
+  // ate board 1's own "BLEMTU refused on E32R28T: ..." - correctly emitted by the
+  // firmware and invisible here, so from the Mac it was indistinguishable from
+  // silence. Every verb can produce "<VERB> refused on <board>: <cause>", and
+  // "MSGPRI refused on ..." starts with "MSGPRI " too. Written this way the arm
+  // claims exactly the three lines it understands; the refusal, and anything else
+  // the device says under this verb, falls through to the general [device/...] log
+  // at the foot of this function and reaches the Mac in the device's own words.
+  // commands-check.mjs asserts this for every verb the dispatch has, and it is
+  // what failed on the first draft of this arm.
+  const msgPri = line.startsWith("MSGPRI ") ? line.slice(7).trim() : "";
+  if (INBOX_PRIORITIES.includes(msgPri)) {
+    const key = senderKey(via);
+    const dev = deviceNameFor(via) || null;
+    // LOGGED ONLY ON A CHANGE, the same rule the HELLO arm follows and for the
+    // same reason: the device re-announces its priority on every WHOAMI (which is
+    // every host attach), and a cabled board receives every trigger-file command
+    // TWICE - so the unchanged case is the common one, and a line for each would
+    // bury the one that matters.
+    const before = msgPriByDevice.get(key)?.priority;
+    msgPriByDevice.set(key, { device: dev, priority: msgPri, at: Date.now() });
+    boundMsgPriorityStore();
+    if (before !== msgPri) {
+      // THE PRECEDENCE, SAID AT THE MOMENT IT BITES. currentMacEmoji()'s
+      // "(but DECKHAND_MAC_EMOJI overrides it)" is the pattern: the person has
+      // just tapped something and is entitled to learn HERE that it will not take
+      // effect, rather than on some later delivery they are not watching.
+      const overridden = INBOX_PRIORITY_ENV && INBOX_PRIORITY_ENV !== msgPri;
+      console.log(
+        `Inbox: ${dev || key} asks for "${msgPri}"` +
+          (overridden
+            ? ` (but DECKHAND_INBOX_PRIORITY=${INBOX_PRIORITY_ENV} overrides it, so its messages still land at "${INBOX_PRIORITY_ENV}").`
+            : `, so its messages land at "${msgPri}".`)
+      );
+    }
+    return;
+  }
   // History request from the detail screen. Handled here rather than in the tick so the
   // transcript is only read when someone is actually looking at it.
   if (line.startsWith("BLEMTU ")) {
@@ -3428,6 +3535,23 @@ async function handleDeviceLine(line, via, pairGen = 0) {
           ? `PROVISION ${hostId} ${entry.secret} ${hostLabel}\n` // USB only
           : `PROVISION ${entry.secret}\n` // pre-multi-pairing firmware
       );
+      // AND ASK FOR ITS SEND PRIORITY IF WE HAVE NONE, which closes a hole
+      // MEASURED rather than reasoned about. The device announces MSGPRI at boot
+      // and on WHOAMI, and WHOAMI is the answer to "HELLO is a boot-only burst".
+      // But the host only ASKS WHOAMI while a link is still ANONYMOUS - so a host
+      // that attaches DURING the 15-second burst gets named by HELLO, never asks
+      // WHOAMI, and misses the single setup()-time MSGPRI it arrived too late for.
+      // That is exactly what happened on board 2's first flashed boot: board 1
+      // reported on two restarts and board 2 reported on none, and the next bare
+      // `MSGPRI` answered instantly.
+      //
+      // Guarded on NOT ALREADY HAVING ONE, because this arm runs for every HELLO
+      // in the burst - eight of them - and an unguarded ask would be eight asks
+      // and eight replies to learn one word. A reply still in flight can produce a
+      // second ask; that is bounded at a couple and is the cheap side of the
+      // trade. It also self-heals a report lost to a garbled line, which the boot
+      // announce alone cannot.
+      if (!msgPriByDevice.has(senderKey(via))) await sendToLink(helloLink, "MSGPRI\n");
     }
     return;
   }
@@ -3773,6 +3897,7 @@ async function openUsbLink(portPath, vid = "") {
     const i = usbLinks.indexOf(link);
     if (i >= 0) usbLinks.splice(i, 1);
     forgetBatteryFor(battKey);
+    forgetMsgPriorityFor(battKey);   // the same key, the same rule - see its own note
     console.log(
       `USB: ${link.name || link.id} disconnected (${usbLinks.length} USB link(s) left) - the scan will reopen it.`
     );
@@ -4081,6 +4206,7 @@ function startBle() {
         // link while bleCharacteristic is set. Called first, it would find this
         // very link and decline to prune every time.
         forgetBatteryFor(battKey);
+        forgetMsgPriorityFor(battKey);   // likewise, and likewise AFTER the teardown
         startBleScan();
       });
     } catch (err) {

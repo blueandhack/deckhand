@@ -1,4 +1,4 @@
-# SETTINGS: board 2's HOME screen and five groups
+# SETTINGS: board 2's HOME screen and six groups
 
 > Extracted verbatim from CLAUDE.md. **The measurements are the point** - they were
 > taken on real hardware at a specific commit, so do not paraphrase or "tidy" them.
@@ -11,7 +11,7 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 
 #### SETTINGS on board 2: a HOME screen and five groups, where board 1 keeps its chevron pager
 
-Board 1 is unchanged: four pages behind a prev/next pager. Board 2 opens SETTINGS on **HOME** —
+Board 1 keeps its prev/next pager (**five** pages now — see the MESSAGES note at the foot). Board 2 opens SETTINGS on **HOME** —
 five cards, one per group (Status, Display, Sound, Pairing, Actions), each carrying the group's
 name, a **live summary of what is inside it**, and a plain ASCII `>` (Spleen declares
 `0x20..0x7E`, so a real chevron glyph would draw as nothing at all — the trap this repo has now
@@ -207,3 +207,82 @@ attached**, because on board 2 it reads the shadow framebuffer (see the verifica
 boards); `COLORTEST` is the instrument, and the severity spine's greyscale claim needs a person
 rather than either. Also unverified by execution: every touch path on HOME and in the five groups,
 since the device deliberately has no remote tap.
+
+
+---
+
+## MESSAGES: the first device setting that reaches the Mac, added 2026-09-06
+
+**Theme, brightness, sleep and sound all change what this panel does; this one changes what the
+MAC does with what the panel sends** — so it is the first setting on the device that needed a
+channel off it at all. It chooses the `priority` on the session-inbox frame
+(`now` | `next` | `later`, default `next`), travels as `MSGPRI <word>`, and is stored in NVS
+under `msgpri` alongside `theme`.
+
+**It is a WHOLE PAGE on both boards, and that is arithmetic rather than taste.** Board 1's page
+region is `PAGE_TOP(80)..contentBottom(302)` = 222px and not one of the four existing pages has
+40 spare rows: page 1 is over-subscribed by its own comment's admission (208 of 222, 14px for
+five gaps), page 2 is four buttons and a hint, page 3 is four Mac rows ending at 298. So board 1
+gained a fifth page, which costs one `titles[]` entry and one pager dot and moves nothing.
+Board 2 had the same problem — Display ends 446, Sound 448, Pairing 450, Status 456 — so it
+gained a **sixth HOME group**, and **the sixth row was paid for out of the other five**:
+`6*HOME_ROW_H + 5*HOME_GAP + HOME_Y0_BOT = 406` lands exactly at 58/10/8, against the old
+70/12/8 for five. The 12px per row comes out of the two pads inside it, never out of the two
+type sizes — the name is still T_HEAD 24 and the summary still T_BODY 16 — and 58 is still 12
+over `TAP_MIN`, so the row got shorter, not harder to hit. Measured on both boards' glass.
+
+**THREE `uiListRow`s, NOT the THEME control's three segments**, and the departure is deliberate.
+THEME's segments share one row because their labels are one word each and the choice is about
+the screen you are looking at. These three need a PHRASE each — "after this turn" IS the content
+of the setting — and a 96px segment cannot hold one. `uiListRow` is the component this device
+already uses for a mutually-exclusive choice that needs a line of its own, on the Pairing group's
+ANY MAC row. It also makes the hit boxes unmistakable: three full-width rows with a positive gap
+between them, where three abutting segments would put NOW and LATER on either side of a 4px seam.
+The gaps are INERT, and the tested band is exactly `H_ROW` (which is `TAP_MIN` on both boards) —
+never `P4_ROW_STEP`, which would hand a tap that landed on nothing to the row above it.
+
+**The hint is the PRECEDENCE RULE and it earns its line.** `DECKHAND_INBOX_PRIORITY` on the Mac
+overrides whatever is chosen here, and without "the Mac can override this" on the glass the
+failure is the worst kind available on a device with no error channel: you tap LATER, the Mac
+keeps sending NEXT, and nothing in the room says why. The host says so too, at the moment the tap
+arrives rather than on some later delivery nobody is watching —
+`Inbox: Deckhand-0528 asks for "later" (but DECKHAND_INBOX_PRIORITY=next overrides it, so its
+messages still land at "next").` Both surfaces exist because only one of them is in the room.
+
+**The trailing air is NAMED, and geom-sweep is why.** Board 2's page carries 80 rows of slack
+under the hint, and with only "the hint clears the last row" and "the hint clears the footer" as
+rules, `P4_HINT_Y`, `P4_ROW_GAP` and `P4_HINT_GAP` could each move by 16 in either direction with
+nothing noticing — the sweep reported all three as *unguarded though this checker reads it*. A
+page with enough air in it is a page whose constants are constrained by nothing. `P4_AIR_BOT`
+names the surplus and `settings-geom-check.mjs` asserts the SUM (`hint ink bottom + 1 +
+P4_AIR_BOT == contentBottom()`), the same thing `HOME_Y0_BOT` does for HOME's pitch. Board 1: 29
+rows. Board 2: 80.
+
+**REACHING THE HOST NEEDED TWO MECHANISMS, NOT ONE, AND THE SECOND WAS MEASURED RATHER THAN
+REASONED.** The device announces `MSGPRI` at boot and on `WHOAMI` — `WHOAMI` because it exists
+for exactly this hole, `HELLO` being a boot-only 15s burst that a host attaching later never
+hears. It is deliberately NOT in the burst itself: that would be eight extra lines per boot on an
+11.5KB/s link to repeat something that has not changed. **But the host only ASKS `WHOAMI` while a
+link is still ANONYMOUS**, so a host that attaches *during* the burst is named by `HELLO`, never
+asks, and misses the one `setup()`-time announce. That is not hypothetical: on board 2's first
+flashed boot, board 1 reported on two host restarts and **board 2 reported on none**, and a bare
+`MSGPRI` answered instantly. So the host's `HELLO` arm now asks — `sendToLink(helloLink,
+"MSGPRI\n")` — guarded on not already having one, because that arm runs for every `HELLO` in the
+burst. Re-measured after the fix: both boards report on every attach.
+
+**Per device, keyed and pruned exactly like `battByDevice`.** Two boards can disagree and the
+priority applies to messages *from that board*; a global would let whichever spoke last decide for
+both, which is the defect a single `lastBatt` had. `forgetMsgPriorityFor()` drops it when the last
+link feeding it closes — unless the same device is still reachable on another link, the ordinary
+cabled-and-BLE case — and `boundMsgPriorityStore()` caps it, because an unnamed link keys on its
+port path and ports renumber.
+
+**The host arm's GUARD IS THE ACCEPTANCE TEST**, not a `"MSGPRI "` prefix with the test nested
+inside it, and `commands-check.mjs` is what caught the first draft. Every verb can emit
+`<VERB> refused on <board>: <cause>`, `"MSGPRI refused on ..."` starts with `"MSGPRI "`, and a
+prefix arm that returns would eat it — the BLEMTU defect exactly. Written the other way the
+refusal falls through to the general `[device/...]` log in the device's own words. Measured:
+`[device/usb:Deckhand-0528] MSGPRI refused: "zzz" is not one of now|next|later - unchanged at
+later`. A cabled board prints it twice (USB and BLE both received the bad command); that is
+tolerated rather than deduped, because each transport did receive it and the line is short and
+says the same true thing.

@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1414288, RAM 73244 | flash 1052912, RAM 72804 |
+| size today | flash 1415520, RAM 73244 | flash 1054272, RAM 72836 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -123,7 +123,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `5d772e5522a671c6...`, size 1414288 (board 2: `bbe89730b8e26b1b...`, size 1052912).
+Today: `def9c811c0b0b5a9...`, size 1415520 (board 2: `8c2985a23e9bf0e4...`, size 1054272).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -256,7 +256,7 @@ one is neither handled nor refused.
 | command | what it does |
 |---|---|
 | `RECAL` / `MICTEST` / `MICMON` / `MICREC` / `MICSTREAM` | touch calibration; mic level, live meter, one-shot and streaming capture |
-| `TAB 0..2` / `PAGE 0..3` / `KBTEST` / `EMOJITEST` / `EMOJITEST off` / `READTEST` | put a surface on the glass, since a capture can only record what is already there. **`EMOJITEST off` is the escape** - the flag gates payload absorption AND the tick, and without it a `TAB` painted over the grid left a board that looked alive with a frozen footer, recoverable only by reflashing. `TAB` now clears the grid and REFUSES over a reader/transcript rather than stranding its flag |
+| `TAB 0..2` / `PAGE 0..4` (board 1) or `PAGE 0..6` (board 2) / `KBTEST` / `EMOJITEST` / `EMOJITEST off` / `READTEST` | put a surface on the glass, since a capture can only record what is already there. **`EMOJITEST off` is the escape** - the flag gates payload absorption AND the tick, and without it a `TAB` painted over the grid left a board that looked alive with a frozen footer, recoverable only by reflashing. `TAB` now clears the grid and REFUSES over a reader/transcript rather than stranding its flag |
 | `DETAIL <n>` | session `n`'s detail card, or its ask screen, WITHOUT the keyboard over it - the only route to either from the Mac (`KBTEST msg` opens the keyboard over it). Refuses by name on no sessions, an out-of-range `n`, or another full-screen surface |
 | `COMPOSE` + `type <text>` / `chip <n>` / `page` / `keys` / `back` / `sent` / `recent <t>` / `off` | the reply panel over the first pending ask, then the draft, a token tap, the pager, the two SCREEN MOVES, the receipt state and the recents ring. `sent` and `recent` SEND NOTHING. `chip`/`page` dedupe the double delivery BY NAME (an insert is not idempotent); opening and the screen moves do not, and say why (they are). **Nothing here can tap a control** - see `KBBUBBLE` |
 | `THEME dark\|light` | which palette is live, so "confirm this reads in both themes" stops needing a person at the device. NOT persisted - a reboot restores the stored setting |
@@ -269,6 +269,7 @@ one is neither handled nor refused.
 | `AUDIOPROBE` / `TONETEST [vol]` / `TONELADDER` | a ladder of claims: on the bus / configured and playing / find the audible floor |
 | `SCROLLFETCH` / `SCROLLOPEN` / `SCROLLTO [line]` / `SCROLLPERF [top\|code\|line]` / `SCROLLCLOSE` | board 2 transcript: fetch without drawing, open, park, measure, close |
 | `BLEMTU` | board 2: the negotiated ATT MTU per link |
+| `MSGPRI` / `MSGPRI now\|next\|later` | report or set how a message sent FROM this device lands in the Mac's session queue. NVS-backed, on the SETTINGS tab; the device announces it at boot and on `WHOAMI`, and the host asks for it when a HELLO names a link it has no priority for |
 | `WHOAMI` | re-emits the boot `HELLO <name> v2` line on demand, over USB. Both boards. The host sends it to an anonymous link before considering a reset - `HELLO` is a boot-only burst, so a host that attached to an already-running board otherwise had to REBOOT it to learn its name |
 | `MULTITEST <n>` / `PAIRVECTOR` | inject a synthetic second Mac; check the pairing crypto against RFC 7748 |
 

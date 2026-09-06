@@ -978,6 +978,41 @@ const int P1_GAP = 3;
 const int P2_TOP   = 12;
 const int P2_BTN_H = 38;
 const int P2_GAP   = 8;
+// PAGE 4: MESSAGES - how a message sent from this device lands on the Mac.
+// The FIFTH page, added rather than squeezed in, and the reason is arithmetic
+// rather than taste: this board's page region is PAGE_TOP(80)..contentBottom(302)
+// = 222px, and not one of the four existing pages has 40 spare rows in it. Page 1
+// is over-subscribed by its own comment's admission (208 of 222, with 14px for
+// five gaps); page 2 is four buttons plus a hint; page 3 is four Mac rows ending
+// at 298. A fifth page costs one more entry in drawPager()'s titles[] and one
+// more dot, and moves nothing that already works.
+//
+//   92..104   "SEND PRIORITY"            P4_CAP_Y, T_META, TL_DATUM
+//   113..152  NOW    interrupt the turn  P4_ROW_Y, H_ROW
+//   161..200  NEXT   after this turn     + P4_ROW_STEP
+//   209..248  LATER  after the queue     + 2*P4_ROW_STEP
+//   260..272  "the Mac can override..."  P4_HINT_Y = 265, MC_DATUM ink
+//   273..301  29 rows clear to contentBottom()
+//
+// SET_CAP_STEP IS DERIVED, NOT COPIED. Board 2's is 24 = its T_META cell (16)
+// plus SP_2; the same relation at this board's 13px cell is 21. Written as the
+// relation rather than as 21, because the two boards' faces are what differ and a
+// transcribed 24 would have put the caption's descenders into the first row.
+// The 8 is SP_2. It is a LITERAL because SP_1..SP_4 are declared in
+// deckhand_display.ino AFTER board.h is included, so no board header can name
+// them - which is why every other spacing value in this file is a literal too.
+const int SET_CAP_STEP = CODE_LINE_H + 8;
+const int P4_TOP      = 12;   // PAGE_TOP -> the caption
+const int P4_ROW_GAP  = 8;    // between two option rows
+const int P4_HINT_GAP = 16;   // the last row's bottom -> the hint's MC_DATUM centre
+// The trailing air, NAMED, so this page lands rather than merely ending - see
+// board_es3c35p.h's own note for why (geom-sweep found the same three constants
+// unconstrained there, and the identity guards both boards).
+const int P4_AIR_BOT  = 29;
+// P4_LABEL_CHARS is NOT here: it derives from SP_3, which no board header can
+// name (see SET_CAP_STEP above), and it is the same expression on both boards.
+// It lives with the P4 chain in deckhand_display.ino, once.
+
 // The confirm dialog's card. CFM_H holds a centred text block (title T_HEAD 18 +
 // emph T_BODY 13 + up to 2 note lines of 13, with SP_2 between) above a button
 // row of H_BTN + SP_3.

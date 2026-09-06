@@ -1738,32 +1738,60 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 // the hint takes SET_CAP_STEP from the button it explains, and floating it down to
 // the footer would make it read as page furniture.
 
-// ---------- SETTINGS: HOME and the five groups ----------
-// settingsPage carries HOME plus five group ids rather than a second state
+// ---------- SETTINGS: HOME and the six groups ----------
+// settingsPage carries HOME plus six group ids rather than a second state
 // variable, because two variables tracking one screen is how a UI ends up
 // drawing one page while hit-testing another.
-const int SET_HOME = 0, SET_STATUS = 1, SET_DISPLAY = 2, SET_SOUND = 3, SET_PAIRING = 4, SET_ACTIONS = 5;
-const int SET_GROUP_COUNT = 5;   // SET_STATUS..SET_ACTIONS, contiguous by design
+//
+// MESSAGES SITS AFTER PAIRING AND BEFORE ACTIONS, and the position is an
+// argument rather than a preference. It is about the Mac relationship, which is
+// what Pairing is about - which Macs exist, which may answer, and now how what
+// this device sends lands in the one it is talking to - so it reads as the next
+// sentence rather than as a stray. And Actions stays LAST because it is the only
+// group that destroys state; a destructive group in the middle of a menu is the
+// one thing this list's order actually has to protect.
+// ONE LINE, and it has to stay one line: geom-common.mjs parses `const int`
+// declarations with /^const int (...);/m, so a wrapped one is invisible to every
+// checker that reads these ids. It failed loudly when this was split (seven
+// assertions reporting `undefined == NaN`) rather than passing over half of them,
+// which is the only reason this is a note instead of a defect.
+const int SET_HOME = 0, SET_STATUS = 1, SET_DISPLAY = 2, SET_SOUND = 3, SET_PAIRING = 4, SET_MESSAGES = 5, SET_ACTIONS = 6;
+const int SET_GROUP_COUNT = 6;   // SET_STATUS..SET_ACTIONS, contiguous by design
 
 // HOME owns the WHOLE content area - there is no band above it, because the tab
 // bar already says SETTINGS and a second title would be chrome repeating itself.
 // The pitch is derived to land exactly on contentBottom():
-//   HOME_Y0 + 5*HOME_ROW_H + 4*HOME_GAP + HOME_Y0_BOT = 54 + 350 + 48 + 8 = 460
+//   HOME_Y0 + 6*HOME_ROW_H + 5*HOME_GAP + HOME_Y0_BOT = 54 + 348 + 50 + 8 = 460
 // so a row height change must be paid for out of the gap or the pads, and
-// settings-geom-check.mjs asserts the identity rather than the value.
+// settings-geom-check.mjs asserts the identity rather than the value - which is
+// exactly what made the SIXTH row affordable to work out rather than to guess.
+//
+// THE SIXTH ROW WAS PAID FOR OUT OF THE OTHER FIVE, and here is the whole sum.
+// At the old 70/12 pitch five rows filled the area exactly, so a sixth had to
+// come from somewhere: 6*R + 5*G + 8 = 406. R 58 with G 10 lands on it dead on,
+// and 58 is still 12 over TAP_MIN (46), so every row remains a comfortable touch
+// target - the row got shorter, not tighter to hit. The 12px lost per row comes
+// entirely out of the two pads inside it (see the stack below), never out of the
+// two type sizes: the name is still T_HEAD 24 and the summary still T_BODY 16,
+// because shrinking a face to fit one more row is how a menu becomes unreadable
+// one row at a time.
 const int HOME_Y0     = 54;
-const int HOME_ROW_H  = 70;
-const int HOME_GAP    = 12;
+const int HOME_ROW_H  = 58;
+const int HOME_GAP    = 10;
 const int HOME_Y0_BOT = 8;
 // Inside a row: name at T_HEAD, summary at T_BODY under it, chevron right.
 //   +0..+1    border
-//   +14..+37  name    (T_HEAD 24)
-//   +38..+43  gap 6
-//   +44..+59  summary (T_BODY 16)
-//   +60..+67  pad
-//   +68..+69  border                                   = 70
-const int HOME_NAME_DY = 14;
-const int HOME_SUB_DY  = 44;
+//   +8..+31   name    (T_HEAD 24)
+//   +32..+35  gap 4
+//   +36..+51  summary (T_BODY 16)
+//   +52..+55  pad
+//   +56..+57  border                                   = 58
+// Against the 70px row this is 6 rows off the top pad, 2 off the gap between the
+// two lines, and 4 off the bottom pad. The two ends still clear the card's own
+// 2px border with room (8 >= 2 at the top, 51 <= 55 at the foot) and the two
+// lines still share no pixel row (31 < 36) - all four asserted, none assumed.
+const int HOME_NAME_DY = 8;
+const int HOME_SUB_DY  = 36;
 // The summary is COMPOSED each tick from live globals and drawn through
 // drawIfChanged, so it carries fixed-width padded text and its opaque box is a
 // constant 30 * TEXT_ADV = 240px. The lane it has to fit is the row's own text
@@ -2207,6 +2235,64 @@ const int PAIR_LEFT_BYTES = PAIR_LEFT_CHARS + 1;
 const int PAIR_RESULT_Y     = PAIR_CODE_Y + (HERO_LINE_H - PAIR_HEAD_H) / 2;
 const int PAIR_RESULT_SUB_Y = PAIR_RESULT_Y + PAIR_HEAD_H + PAIR_AIR_TITLE;
 const int PAIR_RESULT_MS    = 1500;
+
+// ---------- SETTINGS group: Messages ----------
+// HOW A MESSAGE SENT FROM THIS DEVICE LANDS ON THE MAC, and it is the first
+// setting on this device that is not about this device. Theme, brightness, sleep
+// and sound all change what this panel does; this one changes what the Mac does
+// with what the panel sends, which is why it has a group of its own rather than a
+// row on Pairing - a control whose effect is somewhere else needs the room to say
+// so, and Pairing has none (four Mac cards end at 449 of 460).
+//
+//   116..131  "HOW MY MESSAGES LAND"     P4_CAP_Y, T_META, TL_DATUM
+//   140..185  NOW    interrupt the turn  P4_ROW_Y,  H_ROW
+//   220..265  NEXT   after this turn     + P4_ROW_STEP
+//   300..345  LATER  after the queue     + 2*P4_ROW_STEP
+//   364..379  "the Mac can override..."  P4_HINT_Y = 370, MC_DATUM ink
+//   380..459  80 rows clear to contentBottom()
+//
+// THREE uiListRows, NOT three segments, and that is the one place this page
+// departs from the THEME control it would otherwise copy. THEME's three segments
+// share one row because their labels are one word each and the choice is about
+// this screen, where you can see the answer the moment you tap. These three need
+// a PHRASE each - "after this turn" is the whole content of the setting - and a
+// segment 96px wide cannot hold one. uiListRow is the component this device
+// already uses for a mutually-exclusive choice that needs its own line, on the
+// Pairing group's own ANY MAC row, so this is that vocabulary rather than a new
+// one. It also makes the hit boxes unmistakable: three full-width rows with 34px
+// between them, where three abutting segments put two different meanings on
+// either side of a 4px seam.
+//
+// P4_TOP IS 12, LEVEL WITH P1_TOP, PS_TOP AND P2_TOP. Every group starts its
+// content at PAGE_TOP + 12, so moving between groups does not jog the page up
+// and down; settings-geom-check.mjs asserts that as an EQUALITY across all the
+// parsed tops rather than against a literal 116.
+//
+// P4_ROW_GAP IS 34 WHERE BOARD 1'S IS 8, and that is deliberate rather than a
+// scale factor. This page holds the same three rows on a 356px region as board 1
+// holds on a 222px one; at board 1's gap the list would sit entirely in the top
+// third with a third of the page empty beneath it, which reads as a page that
+// failed to finish drawing. The remaining 78 rows of trailing air is real and is
+// stated rather than hidden - it is the same order as the ACTIONS group's own 55,
+// and the alternative was inflating the gaps until three rows stopped reading as
+// one list.
+const int P4_TOP      = 12;   // PAGE_TOP -> the caption, level with P1/PS/P2
+const int P4_ROW_GAP  = 34;   // between two option rows
+const int P4_HINT_GAP = 24;   // the last row's bottom -> the hint's MC_DATUM centre
+// THE TRAILING AIR, NAMED, so the page has a LANDING IDENTITY rather than a
+// leftover. Same shape as HOME_Y0_BOT and PAIR_AIR_LEFT, and it exists for a
+// reason geom-sweep found rather than one anybody argued: with 80 rows of slack
+// under the hint, P4_HINT_Y, P4_ROW_GAP and P4_HINT_GAP could each be perturbed
+// by 16 in either direction and no assertion noticed - the sweep reported all
+// three as "unguarded though this checker reads it". A page with enough air in it
+// is a page whose constants are not constrained by anything. Written as
+//   hint ink bottom + 1 + P4_AIR_BOT == contentBottom()
+// and asserted as that identity, so a change to ANY term in the chain fails here
+// instead of quietly eating into the footer or floating away from it.
+const int P4_AIR_BOT  = 80;
+// P4_LABEL_CHARS is NOT here: it derives from SP_3, which no board header can
+// name (SP_1..SP_4 are declared in deckhand_display.ino after board.h), and it
+// is the same expression on both boards. It lives with the P4 chain there, once.
 
 // ---------- SETTINGS group: Actions ----------
 // Geometry is settings.js `bActions`.

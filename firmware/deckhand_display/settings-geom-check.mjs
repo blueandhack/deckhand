@@ -680,7 +680,7 @@ const TOGGLES = ["SOUND", "MUTED", "FLIPPED", "NORMAL", "DARK", "LIGHT", "AUTO"]
 // band's title and HOME's row name - they must be the same word or the screen you
 // tapped into is not the one you tapped on), the labels its split Display and Sound
 // groups draw, and the WORST CASE of each of HOME's five composed summaries.
-const GROUP_TITLES = ["Status", "Display", "Sound", "Pairing", "Actions"];
+const GROUP_TITLES = ["Status", "Display", "Sound", "Pairing", "Messages", "Actions"];
 const THEME_SEGS = ["DARK", "LIGHT", "AUTO"];
 const SOUND_LABELS = ["SOUND ON", "SOUND OFF", "TEST BEEP", "MIC TEST",
                       "SCREEN FLIPPED", "SCREEN NORMAL"];
@@ -1082,6 +1082,7 @@ for (const b of [1, 2]) {
           `SET_HOME ${c.SET_HOME} == the shared \`int settingsPage = ${+m[1]};\` the device boots with`);
       const ids = [["SET_STATUS", c.SET_STATUS], ["SET_DISPLAY", c.SET_DISPLAY],
                    ["SET_SOUND", c.SET_SOUND], ["SET_PAIRING", c.SET_PAIRING],
+                   ["SET_MESSAGES", c.SET_MESSAGES],
                    ["SET_ACTIONS", c.SET_ACTIONS]];
       for (let i = 0; i < ids.length; i++)
         chk(ids[i][1] === c.SET_HOME + 1 + i,
@@ -1298,6 +1299,133 @@ for (const b of [1, 2]) {
       const macWorst = c.MAC_ROW_W + 1 + 2 + 1;   // padded text + \x01 + icon id + NUL
       chk(+SET_CACHE.macRowCache >= macWorst, `macRowCache ${SET_CACHE.macRowCache} >= worst signature ${macWorst}`);
     }
+  }
+
+  // ================= SETTINGS: the MESSAGES page (BOTH boards) =================
+  // The one settings surface that exists in the same form on both: the same
+  // caption, the same MSG_PRI_COUNT uiListRows and the same hint, differing only
+  // in the four constants behind the chain. So it is asserted OUTSIDE the
+  // if (b === 2) blocks around it, and every assertion runs twice.
+  {
+    const rows = c.MSG_PRI_COUNT;
+    chk(Number.isInteger(rows) && rows >= 2,
+        `MSG_PRI_COUNT parsed as ${rows} - every MESSAGES assertion below is derived from it`);
+    const lastEnd = c.P4_ROW_Y + (rows - 1) * c.P4_ROW_STEP + c.H_ROW - 1;
+    const [hTop, hBot] = mcBox(b, T_META, c.P4_HINT_Y);
+    console.log(`  Messages: caption ${c.P4_CAP_Y}, rows ${c.P4_ROW_Y}..${lastEnd} ` +
+                `step ${c.P4_ROW_STEP}, hint ink ${hTop}..${hBot}, ` +
+                `${contentBottom - hBot - 1}px trailing air`);
+    // ---- the block fits, end to end ----
+    chk(c.P4_CAP_Y >= c.PAGE_TOP,
+        `Messages: the caption starts ${c.P4_CAP_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
+    // The caption's OWN TEXT BOX must clear the first row - not merely its datum.
+    // TL_DATUM, so the box is the cell height from the y it is given; comparing
+    // the two y's would have been a derivation against its own term, which is the
+    // vacuous shape this file has already paid for twice.
+    chk(c.P4_CAP_Y + lineHB(b, T_META) - 1 < c.P4_ROW_Y,
+        `Messages: the caption's ink ${c.P4_CAP_Y}..${c.P4_CAP_Y + lineHB(b, T_META) - 1} clears the first row at ${c.P4_ROW_Y}`);
+    chk(hTop > lastEnd,
+        `Messages: the hint's ink starts ${hTop}, clear of the last row's bottom ${lastEnd}`);
+    chk(hBot < contentBottom,
+        `Messages: the hint's ink ends ${hBot}, above contentBottom ${contentBottom} - a page ending flush on the footer reads as joined to it`);
+    // THE LANDING IDENTITY, and it is here because geom-sweep said so rather than
+    // because anybody argued it. Board 2's page carries 80 rows of slack under the
+    // hint, and with the bounds above as the only rules P4_HINT_Y, P4_ROW_GAP and
+    // P4_HINT_GAP could each move by 16 in either direction with nothing noticing -
+    // reported as "unguarded though this checker reads it". Naming the surplus and
+    // asserting the SUM makes every term in the chain load-bearing, the same thing
+    // HOME_Y0_BOT does for HOME's pitch.
+    chk(hBot + 1 + c.P4_AIR_BOT === contentBottom,
+        `Messages: the page lands exactly - hint ink ends ${hBot}, + 1 + P4_AIR_BOT ${c.P4_AIR_BOT} == contentBottom ${contentBottom} (got ${hBot + 1 + c.P4_AIR_BOT})`);
+    chk(c.P4_AIR_BOT > 0,
+        `Messages: the trailing air is positive (${c.P4_AIR_BOT}) - a page ending flush on contentBottom reads as joined to the footer, which board 1 shipped once`);
+    // ---- the rows are touch targets, and the GAPS BETWEEN THEM ARE NOT ----
+    chk(c.H_ROW >= c.TAP_MIN,
+        `Messages: an option row is ${c.H_ROW}, at least this board's own TAP_MIN ${c.TAP_MIN}`);
+    chk(c.P4_ROW_GAP > 0,
+        `Messages: the option rows are separated (${c.P4_ROW_GAP}px) - three abutting rows would put NOW and LATER on either side of an invisible seam`);
+    chk(c.P4_ROW_STEP === c.H_ROW + c.P4_ROW_GAP,
+        `Messages: the step ${c.P4_ROW_STEP} is the row plus its gap (${c.H_ROW} + ${c.P4_ROW_GAP})`);
+  }
+  // The MESSAGES page's DRAW SITES and HIT TEST, bound to their own function
+  // bodies. Geometry alone would pass with the page never drawn, and with a hit
+  // test that claimed a band the draw does not fill - the failure the retired
+  // P2_MIC_Y note describes, arrived at from the other side.
+  if (b === 1) {   // the sources are one text; assert them once, not per board
+    const stat = fnSrc(SETTINGS_INO, "void drawMessagesPageStatic");
+    const rend = fnSrc(SETTINGS_INO, "void renderMessagesPage");
+    const hit  = fnSrc(SETTINGS_INO, "void handleMessagesTouch");
+    const setp = fnSrc(SETTINGS_INO, "void setMsgPriority");
+    chk(stat.length > 0 && rend.length > 0 && hit.length > 0 && setp.length > 0,
+        "Messages: all four functions parse - every assertion below binds to one of their bodies, and an empty body would satisfy them all vacuously");
+    // The static half draws the two things that do not change, and NOTHING that
+    // does: a row drawn here would be painted once and then never updated,
+    // because renderMessagesPage's cache would report it unchanged.
+    chk(/drawGroupCaption\("[^"]+", P4_CAP_Y\)/.test(stat),
+        "Messages: drawMessagesPageStatic draws its caption at P4_CAP_Y");
+    chk(/uiHint\("[^"]+", P4_HINT_Y\)/.test(stat),
+        "Messages: drawMessagesPageStatic draws its hint at P4_HINT_Y");
+    chk(!/uiListRow/.test(stat),
+        "Messages: no option row is drawn on the STATIC side - it would be painted once and never repainted, since the change-only cache would then report it unchanged");
+    // THE HINT IS THE PRECEDENCE RULE. Without it, a user who sets
+    // DECKHAND_INBOX_PRIORITY on the Mac and then taps LATER here gets no
+    // change and no explanation anywhere in the room.
+    chk(/uiHint\("[^"]*[Mm]ac[^"]*override[^"]*"/.test(stat),
+        "Messages: the hint must say the MAC CAN OVERRIDE this - the env var wins, and the device is the only surface the person tapping is looking at");
+    // The render half walks MSG_PRI_COUNT and draws at the same three constants
+    // the geometry above is asserted over.
+    chk(/for \(int i = 0; i < MSG_PRI_COUNT; i\+\+\)/.test(rend),
+        "Messages: renderMessagesPage walks MSG_PRI_COUNT, so a fourth option draws rather than being silently absent");
+    chk(/uiListRow\(CARD_X, P4_ROW_Y \+ i \* P4_ROW_STEP, CARD_W, H_ROW,/.test(rend),
+        "Messages: the rows are drawn at P4_ROW_Y + i*P4_ROW_STEP, H_ROW tall - the exact band the hit test claims");
+    chk(/msgPriBtnCache/.test(rend),
+        "Messages: the rows go through a change-only cache, or the page repaints three rows every tick");
+    // THE HIT TEST AND THE DRAW MUST NOT BE ABLE TO DISAGREE. Same three
+    // constants, same loop bound, and a band of exactly H_ROW - not P4_ROW_STEP,
+    // which would swallow the gap and hand a tap between two rows to the one
+    // above it.
+    chk(/for \(int i = 0; i < MSG_PRI_COUNT; i\+\+\)/.test(hit),
+        "Messages: the hit test walks MSG_PRI_COUNT too");
+    chk(/int y = P4_ROW_Y \+ i \* P4_ROW_STEP;/.test(hit),
+        "Messages: the hit test derives its band from the SAME P4_ROW_Y and P4_ROW_STEP the draw uses");
+    chk(/sy >= y && sy < y \+ H_ROW/.test(hit) && !/y \+ P4_ROW_STEP/.test(hit),
+        "Messages: the tested band is exactly H_ROW, never the step - a step-tall band claims the inert gap and gives a tap that landed on nothing to the row above");
+    // setMsgPriority is the one place the value moves, and all four of its jobs
+    // are asserted here because a caller doing three of them is the drift the
+    // function exists to prevent.
+    chk(/saveMsgPriority\(\)/.test(setp),
+        "Messages: a change is PERSISTED - NVS is the whole point of a setting that survives a reboot");
+    chk(/announceMsgPriority\(\)/.test(setp),
+        "Messages: a change is ANNOUNCED to the host - a device setting the Mac never hears about changes nothing");
+    chk(/messagesPageShowing\(\)/.test(setp),
+        "Messages: the repaint is GATED on the page being up. renderMessagesPage draws at P4_ROW_Y whatever surface is showing, so an ungated call from the MSGPRI command paints three option rows across the USAGE tab");
+    chk(/msgPriBtnCache = -1/.test(setp),
+        "Messages: the cache is busted on every change, drawn now or not, so the rows are right the moment the page is next opened");
+    // A no-op must return before any of that: the host delivers every command
+    // over BOTH transports, so a cabled board sees each one twice.
+    chk(/if \(v >= MSG_PRI_COUNT \|\| v == msgPriority\) return;/.test(setp),
+        "Messages: an out-of-range or unchanged value returns before persisting, redrawing or announcing - the host sends every command down both transports and a cabled board sees it twice");
+    // The chrome-repaint rule: drawSettingsStatic clears the whole page area, so
+    // a cache left set leaves the rows BLANK.
+    chk(/msgPriBtnCache = -1/.test(fnSrc(SETTINGS_INO, "void resetSettingsCaches")),
+        "Messages: msgPriBtnCache is reset with the other settings caches, or a page whose chrome was just repainted draws no rows at all");
+    // ---- the three phrases FIT, on the binding board ----
+    // Parsed out of renderMessagesPage rather than transcribed, and measured
+    // against P4_LABEL_CHARS - the lane uiListRow actually leaves between its
+    // label origin and its tag.
+    const rowLabels = [...rend.matchAll(/^\s*"([^"]+)",$/gm)].map(m => m[1]);
+    chk(rowLabels.length === B[1].MSG_PRI_COUNT,
+        `Messages: parsed ${rowLabels.length} row labels out of renderMessagesPage, expected MSG_PRI_COUNT ${B[1].MSG_PRI_COUNT} - a transcribed list here would keep passing over a renamed one`);
+    for (const bb of [1, 2])
+      for (const t of rowLabels)
+        chk(t.length <= B[bb].P4_LABEL_CHARS,
+            `Messages: board ${bb} row "${t}" is ${t.length} of the ${B[bb].P4_LABEL_CHARS} characters uiListRow leaves it`);
+    // THE PHRASES CARRY THE MEANING, not the option name. "NEXT" alone is not a
+    // setting anybody can act on, and this is the assertion that stops the labels
+    // being quietly shortened back to three bare words.
+    for (const t of rowLabels)
+      chk(t.trim().split(/\s+/).length >= 3,
+          `Messages: row "${t}" says what the option MEANS, not just what it is called - a bare "NEXT" tells the person tapping nothing`);
   }
 
   // ================= SETTINGS: the STATUS group (board 2) =================

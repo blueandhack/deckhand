@@ -369,6 +369,42 @@ bool remoteAnswerEnabled = true;
 char deviceName[20] = "Deckhand";
 String btMacAddress; // set once in setupBLE(), shown on the STATUS page
 
+// ---------- how a message SENT FROM THIS DEVICE lands on the Mac ----------
+// DECLARED HERE, ABOVE announceMsgPriority(), and not down with themeMode where
+// it would read more naturally. The .ino files are ONE translation unit and
+// Arduino's generated prototypes do not cover DATA, so a table used by a
+// function 60 lines up is simply undeclared - which is what it was.
+// The Mac posts a typed message or a dictation into the target session's own
+// messaging socket, and that frame carries a `priority`. Claude Code's own line
+// (disassembled, quoted in host/session-inbox.mjs) is
+//   e.priority==="now"||"next"||"later" ? e.priority : "next"
+// so an absent field already means NEXT, and NEXT is the default here too: NOW
+// INTERRUPTS the turn Claude is in the middle of, which is a thing to ask for
+// rather than to inherit.
+//
+// THIS IS THE FIRST DEVICE SETTING THAT REACHES THE HOST. Theme, brightness and
+// sound are all local - they change what this panel does and nothing else - so
+// there was no channel for a setting at all until now. It travels as MSGPRI, on
+// change AND on WHOAMI; see announceMsgPriority() for why those two and not the
+// boot burst.
+//
+// TWO TABLES, not one uppercased at the draw site. The segments draw LABELS and
+// the wire carries WORDS, and the two are allowed to differ (they do not today):
+// a toUpper() at the draw site would silently tie the panel's vocabulary to the
+// protocol's, so a protocol rename would change what a person reads.
+// `const int`, NOT const uint8_t like THEME_MODE_* next door, and the reason is
+// the checkers rather than the code: geom-common.mjs parses declarations with
+// /^const int (...);/m, so a uint8_t constant is invisible to every assertion
+// that reads it - and P4_HINT_Y is DERIVED from MSG_PRI_COUNT. It failed loudly
+// (NaN through four assertions) rather than quietly, which is the only reason
+// this is a note. The stored value stays a uint8_t: it is written with
+// putUChar and it is an index into two 3-entry tables.
+const int MSG_PRI_NOW = 0, MSG_PRI_NEXT = 1, MSG_PRI_LATER = 2;
+const int MSG_PRI_COUNT = 3;
+uint8_t msgPriority = MSG_PRI_NEXT;
+const char* const MSG_PRI_LABELS[MSG_PRI_COUNT] = {"NOW", "NEXT", "LATER"};
+const char* const MSG_PRI_WIRE[MSG_PRI_COUNT]   = {"now", "next", "later"};
+
 // THE ONE PLACE "HELLO <name> v2" IS EMITTED. There are four callers now -
 // setup(), the 15s boot burst in loop(), the legacy-pairing upgrade nudge in
 // handleLine(), and the WHOAMI command - and until this existed each printf'd
@@ -384,6 +420,27 @@ String btMacAddress; // set once in setupBLE(), shown on the STATUS page
 // still answers down the CABLE - which is the link that lacked a name.
 void announceHello() {
   Serial.printf("HELLO %s v2\n", deviceName); // v2 = multi-pairing PROVISION
+}
+
+// THE ONE PLACE "MSGPRI <word>" IS EMITTED, for the reason announceHello() gives
+// about its own line: the host parses this text, and a second emitter is a second
+// chance to drift from it.
+//
+// USB ONLY, like HELLO, and for a weaker reason than HELLO's: this is a
+// preference rather than an identity, so a BLE peer steering it would cost
+// nothing an attacker wants. It goes down the cable because Serial.printf is
+// where every other device->host report already goes, and because the host keys
+// this per DEVICE while a BLE link and a USB link to the same board resolve to
+// the same key anyway.
+//
+// NOT IN THE BOOT BURST, and that is the decision the WHOAMI note below turns on.
+// announceHello() has four callers and one of them is a 15-second burst that
+// repeats every 2 seconds; hanging a second line off it would put eight extra
+// MSGPRI lines on a link with an 11.5KB/s ceiling to say something that has not
+// changed. The three callers that matter are setup(), WHOAMI, and the tap that
+// changes it.
+void announceMsgPriority() {
+  Serial.printf("MSGPRI %s\n", MSG_PRI_WIRE[msgPriority < MSG_PRI_COUNT ? msgPriority : MSG_PRI_NEXT]);
 }
 
 
@@ -443,7 +500,6 @@ const uint8_t THEME_MODE_COUNT = 3;
 uint8_t themeMode = THEME_MODE_DARK;
 const long THEME_LIGHT_FROM = 7L * 3600;    // 07:00 local
 const long THEME_LIGHT_TO   = 19L * 3600;   // 19:00 local
-
 // Defined much further down, with the host payload handling. Declared here
 // explicitly rather than leaning on Arduino's generated prototypes - this file
 // has been bitten by their insertion order before (see the enum note above).
@@ -3206,10 +3262,26 @@ const int VOICE_TEXT_LINES = 6;
 //   0 STATUS   - device connections, battery, pairing (read-only)
 //   1 CONTROLS - brightness, sleep-after, volume steppers + sound toggle
 //   2 ACTIONS  - calibrate touch, power off
+//   3 PAIRED MACS
+//   4 MESSAGES - how a message sent from here lands on the Mac
 #if !BOARD_SETTINGS_HOME
-const int SETTINGS_PAGES = 4;
+// FIVE, and the page it counts was ADDED rather than squeezed into one of the
+// four - board_e32r28t.h's P4 section carries the arithmetic showing none of them
+// had 40 spare rows. drawPager() reads this for its titles[] bound AND for its
+// dot count, and gotoSettingsPage() wraps on it, so the three stay in step from
+// one constant.
+const int SETTINGS_PAGES = 5;
+// ONE NAME FOR THE MESSAGES SURFACE ON BOTH BOARDS. Board 2 already has an id
+// for every group (SET_MESSAGES); board 1's pages are bare ordinals, and a bare 4
+// in a dispatch chain, a render chain, a touch chain and a "is it showing?" test
+// is four transcriptions of one fact. The alias means the three shared functions
+// below (drawMessagesPageStatic, renderMessagesPage, handleMessagesTouch) are
+// reached by the same expression on both boards.
+const int SETTINGS_PAGE_MESSAGES = 4;
+#else
+const int SETTINGS_PAGE_MESSAGES = SET_MESSAGES;
 #endif
-// On board 2 this carries SET_HOME plus five group ids instead (board_es3c35p.h),
+// On board 2 this carries SET_HOME plus six group ids instead (board_es3c35p.h),
 // and nothing outside settings.ino assumes the 0..3 range - SETTINGS_PAGES itself
 // is read only by drawPager() and gotoSettingsPage(), both of which board 2 does
 // not compile.
@@ -3338,6 +3410,31 @@ const int P3_LIST_Y = P3_ANY_Y + H_ROW + SP_1;
 const int P3_X_W    = 40;   // "forget" hit zone at the right edge (>= a fingertip)
 #endif
 
+// Page 4 / the MESSAGES group - how a message SENT FROM THIS DEVICE lands on the
+// Mac. ONE CHAIN FOR BOTH BOARDS, unlike pages 2 and 3, and that is worth saying
+// because those two split. They split because their CONTENT differs per board
+// (board 2's Actions grew captioned sections, its Pairing grew two-line cards);
+// this page holds the same caption, the same three uiListRows and the same hint
+// on both, so the only per-board facts are the four constants in the headers.
+// A split arm here would be two copies of one derivation and two chances to
+// drift.
+const int P4_CAP_Y   = PAGE_TOP + P4_TOP;
+const int P4_ROW_Y   = P4_CAP_Y + SET_CAP_STEP;
+const int P4_ROW_STEP = H_ROW + P4_ROW_GAP;
+// From the LAST row's bottom, not from P4_ROW_Y: the hint explains the block as a
+// whole and must sit under all of it. MSG_PRI_COUNT is the row count, so adding a
+// fourth option moves the hint instead of drawing it through the new row.
+const int P4_HINT_Y  = P4_ROW_Y + (MSG_PRI_COUNT - 1) * P4_ROW_STEP + H_ROW + P4_HINT_GAP;
+// The option label's lane, so the three phrases are MEASURED rather than counted.
+// uiListRow draws its label at x + SP_3 and its tag right-aligned at x + w -
+// SP_3, so the lane is CARD_W - 2*SP_3 minus the widest tag ("ON", 2 characters):
+//   board 1: 216 - 24 - 12 = 180px = 30 characters at TEXT_ADV 6
+//   board 2: 296 - 24 - 16 = 256px = 32 characters at TEXT_ADV 8
+// Board 1 is the binding one, so a phrase that fits there fits both. Here rather
+// than in the two headers because SP_3 is declared in this file, below board.h -
+// no board header can name it.
+const int P4_LABEL_CHARS = (CARD_W - 2 * SP_3 - 2 * TEXT_ADV) / TEXT_ADV;
+
 // Every consequential action confirms first. They all reach the same modal, so
 // the dialog is one component rather than one per action: it lives above the
 // page, swallows all other touches (including the pager) while it is up, and is
@@ -3440,6 +3537,12 @@ int p3LiveCache[MAX_HOSTS] = {-1, -1, -1, -1};
 int p3CountCache = -1;
 #endif
 int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
+// The MESSAGES page's three option rows. ONE cache for the whole block, not one
+// per row, because the three are a single mutually-exclusive control: exactly one
+// row is filled, so any change repaints all three and a per-row cache would be
+// three values that can only ever move together. Same shape as themeBtnCache next
+// door, and for the same reason.
+int msgPriBtnCache = -1;
 int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+
 char brightPctCache[8] = "";
 int brightBarCache = -1;
@@ -3452,7 +3555,7 @@ char volValCache[8] = "";
 // discipline exists to prevent. HOME_SUB_BYTES is HOME_SUB_CHARS + NUL, and the
 // text is padded to HOME_SUB_CHARS so the opaque box is a constant width and a
 // shrinking summary cannot leave the tail of a longer one behind.
-char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", ""};
+char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", "", ""};
 // The Status summary's colour is cached beside its text and busts it, the guard
 // battRowColorCache documents. Today the two cannot disagree - the colour keys off
 // the same link count the row's leading phrase spells out, so a flip always
@@ -5529,6 +5632,7 @@ void setup() {
   loadSleepTimeout();
   loadBeepEnabled();
   loadVolume();
+  loadMsgPriority();
   Serial.printf("BUILD %s %s\n", __DATE__, __TIME__); // confirms which binary is live
   loadHostPairings(); // remote-answer auth keys (one per paired Mac)
   lastActivityMillis = millis(); // don't start the sleep countdown from millis()==0
@@ -5538,6 +5642,10 @@ void setup() {
   // exact device. Opening the USB port resets the ESP32, so this boot-time
   // line reliably reaches a host that connects at any time.
   announceHello();
+  // And the one setting the host needs from us. AFTER loadMsgPriority(), or this
+  // would announce the compiled-in default and the stored choice would only take
+  // effect at the next tap.
+  announceMsgPriority();
 
   drawWaitingScreen();
 }
@@ -5794,6 +5902,49 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // and would silence a genuine second ask, which is exactly the case that
     // matters (a link that closed and reopened asks again, and must be answered).
     announceHello();
+    // AND THE SETTING, on the same reply, because WHOAMI exists for exactly this
+    // hole. HELLO is a boot-only burst, so a host that attached to an
+    // already-running board never heard it - and MSGPRI has the same shape: it is
+    // sent at boot and on change, so a host that restarted mid-run would carry no
+    // priority for this board until the user happened to touch the control. The
+    // host asks WHOAMI on every attach where a link is anonymous, which is every
+    // host restart, so answering here closes the hole with no new mechanism and
+    // no new timer. Idempotent for the same reason the HELLO above is: the host's
+    // arm logs only on a CHANGE, so the duplicate a cabled board receives costs
+    // one short line and alters nothing.
+    announceMsgPriority();
+  } else if (buf == "MSGPRI" || buf.startsWith("MSGPRI ")) {
+    // The instrument for the setting the SETTINGS tab owns, so a capture is not
+    // the only way to see it and a change can be driven without a fingertip.
+    //   MSGPRI                  report the current choice
+    //   MSGPRI now|next|later   set it
+    // Bare MSGPRI reports through announceMsgPriority() rather than printing its
+    // own line: one emitter, one format, and the host's parser only ever has one
+    // shape to know.
+    String arg = buf.length() > 7 ? buf.substring(7) : String("");
+    arg.trim();
+    if (arg.length() == 0) {
+      announceMsgPriority();
+    } else {
+      int want = -1;
+      for (int i = 0; i < MSG_PRI_COUNT; i++) if (arg == MSG_PRI_WIRE[i]) want = i;
+      if (want < 0) {
+        // NAME THE CAUSE, and name the value. From the Mac, a command that did
+        // nothing and a command that was not understood look identical - and the
+        // one instrument this setting has must not be the thing that is silent.
+        Serial.printf("MSGPRI refused: \"%s\" is not one of now|next|later - unchanged at %s\n",
+                      arg.c_str(), MSG_PRI_WIRE[msgPriority]);
+      } else if ((uint8_t) want == msgPriority) {
+        // NOT SILENT, and not a refusal either. The host delivers every command
+        // over BOTH transports, so a cabled board sees this twice; the second copy
+        // has to answer with something rather than nothing, or "already set" and
+        // "never arrived" read the same from the Mac. setMsgPriority() drops the
+        // no-op, so this is where the second copy gets its reply.
+        announceMsgPriority();
+      } else {
+        setMsgPriority((uint8_t) want);
+      }
+    }
 #if !BOARD_USES_TFT_ESPI
   } else if (buf == "SHIMBENCH") {
     // Board 2 only. Times a full-screen flush and a small dirty-rect flush,
@@ -6755,8 +6906,12 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     }
     int pg = buf.substring(5).toInt();
 #if BOARD_SETTINGS_HOME
-    // PAGE 0 is HOME here, 1..5 the five groups - the same numbering settingsPage
+    // PAGE 0 is HOME here, 1..6 the six groups - the same numbering settingsPage
     // uses, so a capture script names a group rather than counting chevron taps.
+    // Board 1's arm below wraps modulo SETTINGS_PAGES (5), so the same MESSAGES
+    // surface is PAGE 4 there and PAGE 5 here. The two boards' page numbering has
+    // never agreed and this does not make it worse; what it does mean is that a
+    // capture script aimed at one board's number lands somewhere else on the other.
     if (currentTab == TAB_SETTINGS) { if (pg <= SET_HOME) settingsBack(); else openSettingsGroup(pg); }
 #else
     if (currentTab == TAB_SETTINGS) gotoSettingsPage(pg);

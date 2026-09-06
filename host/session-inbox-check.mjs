@@ -613,13 +613,106 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
       // searched the whole body, and deleting the env branch's `why` left the
       // default branch's to satisfy it. A rule a neighbouring line can satisfy
       // is not a rule.
-      const priReturns = [...resolveBody.matchAll(/return \{[^}]*\}/g)].map((m) => m[0]);
+      // BRACE-BALANCED, not /return \{[^}]*\}/. One of these returns carries a
+      // ternary inside a template literal, whose own ${...} closes the lazy
+      // character class early and cut the return in half - so the assertion failed
+      // on a `why` that was right there. Same class as the frame-literal parse.
+      const priReturns = [];
+      for (let at = resolveBody.indexOf("return {"); at >= 0; at = resolveBody.indexOf("return {", at + 1)) {
+        let d = 0, end = -1;
+        for (let j = at + 7; j < resolveBody.length; j++) {
+          if (resolveBody[j] === "{") d++;
+          else if (resolveBody[j] === "}" && --d === 0) { end = j; break; }
+        }
+        if (end < 0) break;
+        priReturns.push(resolveBody.slice(at, end + 1));
+        at = end;
+      }
       ok(priReturns.length >= 2,
          `PARSE: resolveInboxPriority must have at least two returns to choose between - found ${priReturns.length}`);
-      ok(priReturns.length >= 2 && priReturns.every((r) => /why:\s*["'`]/.test(r)),
+      // `why:` followed by SOMETHING, rather than by a string literal: one of the
+      // three whys is a ternary that picks between naming the override and not,
+      // and demanding a literal would have forced it back into a form that cannot
+      // say which case it is.
+      ok(priReturns.length >= 2 && priReturns.every((r) => /\bwhy:\s*\S/.test(r)),
          "PRECEDENCE: EVERY return out of resolveInboxPriority must carry its own `why` - one that does not is a priority whose cause cannot be traced, and it is exactly the one someone will hit");
       ok(/INBOX_PRIORITY_DEFAULT/.test(resolveBody),
          "PRECEDENCE: the fallback must be the named default, not a literal that could drift from it");
+      // ---- the DEVICE's own choice, and the env var beating it ----
+      ok(/msgPriByDevice\.get\(senderKey\(via\)\)/.test(resolveBody),
+         "PRECEDENCE: the device's own choice is looked up PER DEVICE, through senderKey(via) - a global would let whichever board spoke last decide for both, which is the defect a single `lastBatt` had");
+      // ORDER, positionally: the env-var branch must be able to return before the
+      // device's is read out. A regex that merely found both would pass with them
+      // swapped, which is the whole rule inverted.
+      const iEnvArm = resolveBody.indexOf("if (INBOX_PRIORITY_ENV)");
+      const iDevArm = resolveBody.indexOf("if (chosen)");
+      ok(iEnvArm >= 0 && iDevArm > iEnvArm,
+         "PRECEDENCE: the env var's branch must come FIRST and return - with the device's branch above it the toggle would silently win, which is the rule backwards");
+      // And the override has to be NAMED when it actually happens. A precedence
+      // rule nobody can observe is the exact shape of "flip the toggle, nothing
+      // changes, no way to find out why".
+      ok(/OVERRIDES/.test(resolveBody),
+         "PRECEDENCE: when the env var beats a device's own choice the `why` must SAY SO by name - currentMacEmoji()'s \"(but DECKHAND_MAC_EMOJI overrides it)\" is the pattern this follows");
+      ok(/chosen !== INBOX_PRIORITY_ENV/.test(resolveBody),
+         "PRECEDENCE: the override is named only when the two actually DIFFER - \"overrides nothing\" on every line teaches a reader to skip the line that matters");
+
+      // =====================================================================
+      // DEVICE TOGGLE - the first setting that travels from the device
+      // =====================================================================
+      const iMsgArm = hostSrc.indexOf("if (INBOX_PRIORITIES.includes(msgPri))");
+      const msgArm = iMsgArm < 0 ? "" : hostSrc.slice(iMsgArm, hostSrc.indexOf('if (line.startsWith("BLEMTU "))', iMsgArm));
+      ok(msgArm.length > 0 && msgArm.includes("msgPriByDevice.set"),
+         "PARSE: could not isolate the MSGPRI arm - every assertion below it is unproven");
+      // THE GUARD IS THE ACCEPTANCE TEST, not a "MSGPRI " prefix with the test
+      // nested inside it. Every verb can emit "<VERB> refused on <board>: <cause>",
+      // and a prefix arm that returns would eat MSGPRI's - the BLEMTU defect, which
+      // commands-check.mjs caught on this arm's first draft. Written this way the
+      // refusal falls through to the general [device/...] log in the device's own
+      // words.
+      ok(/const msgPri = line\.startsWith\("MSGPRI "\) \? line\.slice\(7\)\.trim\(\) : "";/.test(hostSrc),
+         "DEVICE: the MSGPRI payload is extracted, then the ARM ITSELF is guarded on the accepted set");
+      ok(!/if \(line\.startsWith\("MSGPRI "\)\) \{/.test(hostSrc),
+         "DEVICE: there must be NO arm keyed on the \"MSGPRI \" PREFIX that returns - it would swallow the firmware's own \"MSGPRI refused on <board>: ...\", which is the BLEMTU defect exactly");
+      ok(/msgPriByDevice\.set\(key, \{[^}]*device:[^}]*priority: msgPri/.test(msgArm),
+         "DEVICE: the reading is filed per device WITH the device name on it, the way battByDevice carries its own - nothing downstream can then lose track of whose it is");
+      ok(/boundMsgPriorityStore\(\)/.test(msgArm),
+         "DEVICE: the store is bounded after every write - an unnamed link keys on its port path and ports renumber, so a key no close handler will ever name again would live forever");
+      ok(/before !== msgPri/.test(msgArm),
+         "DEVICE: the arrival is logged only on a CHANGE - the device re-announces on every WHOAMI and a cabled board sees every command twice, so the unchanged case is the common one");
+      ok(/DECKHAND_INBOX_PRIORITY=\$\{INBOX_PRIORITY_ENV\} overrides it/.test(msgArm),
+         "DEVICE: the moment the user taps, the log says whether the env var will override it - not on the next delivery, when they have stopped looking");
+      // THE HOLE WHOAMI DOES NOT CLOSE, measured on board 2's first flashed boot.
+      // The device announces MSGPRI at boot and on WHOAMI; the host only ASKS
+      // WHOAMI while a link is still anonymous, so a host that attaches DURING the
+      // 15s HELLO burst is named by HELLO, never asks, and misses the one
+      // setup()-time announce. So the HELLO arm asks for what it does not have.
+      {
+        const helloArm = stripComments(
+          hostSrc.slice(hostSrc.indexOf('if (line.startsWith("HELLO ") && viaKind(via) === "usb")'),
+                        hostSrc.indexOf('if (!line.startsWith("ANSWER "))'))
+        );
+        ok(helloArm.length > 0 && helloArm.includes("PROVISION"),
+           "PARSE: could not isolate the HELLO arm - the two assertions below are unproven");
+        ok(/sendToLink\(helloLink, "MSGPRI\\n"\)/.test(helloArm),
+           "DEVICE: a newly-named link is ASKED for its send priority - WHOAMI only fires while a link is anonymous, so a host that attached during the HELLO burst would otherwise never learn it (measured: board 2 reported on none of its first attaches)");
+        ok(/if \(!msgPriByDevice\.has\(senderKey\(via\)\)\)/.test(helloArm),
+           "DEVICE: ...and asked only when we have NONE - this arm runs for every HELLO in the 15s burst, so an unguarded ask is eight asks and eight replies to learn one word");
+      }
+
+      // THE PRUNE. battByDevice grew this in review THIS SESSION after leaking;
+      // a second per-device store that did not would be the same leak, knowingly.
+      const forgetBody = stripComments(bodyOf(hostSrc, "function forgetMsgPriorityFor(", "forgetMsgPriorityFor()"));
+      ok(/msgPriByDevice\.delete\(key\)/.test(forgetBody),
+         "DEVICE: the per-device priority is DROPPED when its last link closes - battByDevice leaked exactly this way until a review caught it");
+      ok(/for \(const l of liveLinks\(\)\) if \(senderKey\(l\.id\) === key\) return;/.test(forgetBody),
+         "DEVICE: ...unless the same device is still reachable on another link - the ordinary cabled-AND-BLE case, where deleting would blank a setting that is still being reported");
+      // Both close handlers, bound to their own bodies: one of the two forgetting
+      // to prune is a leak that only shows up on the transport nobody unplugged.
+      const usbClose = stripComments(hostSrc.slice(hostSrc.indexOf('port.on("close"'), hostSrc.indexOf('port.on("error"')));
+      ok(/forgetMsgPriorityFor\(battKey\)/.test(usbClose),
+         "DEVICE: the USB close handler prunes the priority as well as the battery");
+      ok(/forgetBatteryFor\(battKey\);\s*\n\s*forgetMsgPriorityFor\(battKey\);\s*\n\s*startBleScan\(\);/.test(stripComments(hostSrc)),
+         "DEVICE: the BLE disconnect handler prunes it too, AFTER the teardown - called before it, liveLinks() still counts the link being torn down and the prune declines every time");
 
       // The escape hatch, both directions. The default matters as much as the
       // override: with the default still "clipboard" the inbox path would be
@@ -883,12 +976,77 @@ async function selftest() {
     ["host", "the bad-value boot line loses the value it is refusing",
      (s) => s.replace(/`Inbox: DECKHAND_INBOX_PRIORITY=\$\{JSON\.stringify\(INBOX_PRIORITY_ENV_RAW\)\} is not one of `/,
                       "`Inbox: that priority is unusable `")],
-    ["host", "resolveInboxPriority stops saying why, so precedence is untraceable",
-     (s) => s.replace(/return \{ priority: INBOX_PRIORITY_ENV, why: "DECKHAND_INBOX_PRIORITY" \};/,
-                      "return { priority: INBOX_PRIORITY_ENV };")],
+    // STRIPS THE FIRST `why:` STRUCTURALLY rather than matching one return's exact
+    // text: the env-var return grew a ternary the moment the device toggle gave it
+    // something to override, and a transcribed copy would have stopped injecting
+    // in silence - the failure eight faults in this file already had.
+    ["host", "resolveInboxPriority's FIRST return stops saying why, so precedence is untraceable",
+     (s) => {
+       const at = s.indexOf("function resolveInboxPriority(");
+       if (at < 0) return s;
+       const r = s.indexOf("return {", at);
+       if (r < 0) return s;
+       const w = s.indexOf("why:", r);
+       if (w < 0) return s;
+       let cut = w;
+       while (cut > r && /[\s,]/.test(s[cut - 1])) cut--;
+       const close = s.indexOf("}", w);
+       return s.slice(0, cut) + s.slice(close);
+     }],
     ["host", "resolveInboxPriority falls back to a literal that can drift from the named default",
      (s) => s.replace(/return \{ priority: INBOX_PRIORITY_DEFAULT, why: "the default" \};/,
                       'return { priority: "next", why: "the default" };')],
+
+    // ---- the device toggle and its precedence ----
+    ["host", "the device's own choice never consulted, so the toggle does nothing",
+     (s) => s.replace(/  const dev = via \? msgPriByDevice\.get\(senderKey\(via\)\) : null;/,
+                      "  const dev = null;")],
+    ["host", "the toggle read GLOBALLY, so whichever board spoke last decides for both",
+     (s) => s.replace(/msgPriByDevice\.get\(senderKey\(via\)\)/,
+                      "[...msgPriByDevice.values()][0]")],
+    ["host", "the device's branch moved ABOVE the env var's, inverting the precedence rule",
+     (s) => {
+       const at = s.indexOf("function resolveInboxPriority(");
+       if (at < 0) return s;
+       const a = s.indexOf("  if (INBOX_PRIORITY_ENV) {", at);
+       const b = s.indexOf("  if (chosen) return", at);
+       if (a < 0 || b < 0 || a >= b) return s;
+       const envArm = s.slice(a, b);
+       const devEnd = s.indexOf("\n", b) + 1;
+       return s.slice(0, a) + s.slice(b, devEnd) + envArm + s.slice(devEnd);
+     }],
+    ["host", "the override stops being named, so a toggle that does nothing explains nothing",
+     (s) => s.replace(/\? `DECKHAND_INBOX_PRIORITY, which OVERRIDES \$\{dev\.device \|\| senderKey\(via\)\}'s own "\$\{chosen\}"`/,
+                      '? "DECKHAND_INBOX_PRIORITY"')],
+    ["host", "the override named on EVERY line, whether or not anything is overridden",
+     (s) => s.replace(/chosen && chosen !== INBOX_PRIORITY_ENV/, "true")],
+    ["host", "the HELLO arm stops asking for a priority it does not have, reopening the burst-attach hole",
+     (s) => s.replace(/      if \(!msgPriByDevice\.has\(senderKey\(via\)\)\) await sendToLink\(helloLink, "MSGPRI\\n"\);\n/, "")],
+    ["host", "the ask is unguarded, so every HELLO in the 15s burst asks again",
+     (s) => s.replace(/if \(!msgPriByDevice\.has\(senderKey\(via\)\)\) await sendToLink\(helloLink, "MSGPRI\\n"\);/,
+                      'await sendToLink(helloLink, "MSGPRI\\n");')],
+    ["host", "the arm keyed on the \"MSGPRI \" PREFIX again, swallowing the firmware's own refusal",
+     (s) => s.replace(/  const msgPri = line\.startsWith\("MSGPRI "\) \? line\.slice\(7\)\.trim\(\) : "";\n  if \(INBOX_PRIORITIES\.includes\(msgPri\)\) \{/,
+                      '  if (line.startsWith("MSGPRI ")) {\n    const msgPri = line.slice(7).trim();\n    if (!INBOX_PRIORITIES.includes(msgPri)) return;')],
+    ["host", "the reading filed WITHOUT the device it came from",
+     (s) => s.replace(/msgPriByDevice\.set\(key, \{ device: dev, priority: msgPri, at: Date\.now\(\) \}\);/,
+                      "msgPriByDevice.set(key, { priority: msgPri, at: Date.now() });")],
+    ["host", "the store left unbounded, so a renumbering port leaves a key nothing can prune",
+     (s) => s.replace(/    boundMsgPriorityStore\(\);\n/, "")],
+    ["host", "MSGPRI logged on every arrival, burying the change among the WHOAMI echoes",
+     (s) => s.replace(/    if \(before !== msgPri\) \{/, "    if (true) {")],
+    ["host", "the tap-time override notice removed, so precedence is only visible on the next send",
+     (s) => s.replace(/ \(but DECKHAND_INBOX_PRIORITY=\$\{INBOX_PRIORITY_ENV\} overrides it, so its messages still land at "\$\{INBOX_PRIORITY_ENV\}"\)\./,
+                      " (overridden).")],
+    ["host", "the per-device priority never pruned - the leak battByDevice was fixed for",
+     (s) => s.replace(/  msgPriByDevice\.delete\(key\);/, "  /* leaked */;")],
+    ["host", "the prune drops a setting a still-live second link is reporting",
+     (s) => s.replace(/  for \(const l of liveLinks\(\)\) if \(senderKey\(l\.id\) === key\) return;\n  msgPriByDevice\.delete\(key\);/,
+                      "  msgPriByDevice.delete(key);")],
+    ["host", "the USB close handler stops pruning it",
+     (s) => s.replace(/    forgetMsgPriorityFor\(battKey\);   \/\/ the same key, the same rule - see its own note\n/, "")],
+    ["host", "the BLE disconnect handler stops pruning it",
+     (s) => s.replace(/        forgetMsgPriorityFor\(battKey\);   \/\/ likewise, and likewise AFTER the teardown\n/, "")],
 
     ["host", "the inbox call removed, so every message goes back to the clipboard",
      (s) => s.replace(/    r = await postToSessionInbox\(record, text[^;]*\);/,

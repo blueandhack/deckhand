@@ -119,6 +119,13 @@ function buildSource(src) {
     ["function batteryForHeartbeat"], "battery store");
   const primarySlice = cut(src, "function primaryUsbName()", "let bleDeviceName",
     ["usbLinks.some", "usbLinks.find"], "primaryUsbName");
+  // The send-priority constants and the resolver, SLICED rather than stubbed.
+  // The MSGPRI arm inside the BATT window below reads INBOX_PRIORITIES, and a
+  // transcribed copy of the three words here would be a second place the accepted
+  // set lives - the failure the whole file is arranged against. Slicing it also
+  // puts resolveInboxPriority() under test on the one bench that has two boards.
+  const prioritySlice = cut(src, "const INBOX_PRIORITIES = [", "const PBCOPY_BIN",
+    ["INBOX_PRIORITY_DEFAULT", "function resolveInboxPriority"], "inbox send priority");
   // The BATT arm of handleDeviceLine, lifted whole: whether a reading is stored
   // PER DEVICE is a property of the arm, not of the store it writes into.
   const battArm = cut(src, '  if (line.startsWith("BATT ")) {',
@@ -204,6 +211,7 @@ ${scanSlice}
 ${nameSlice}
 ${dedupSlice}
 ${battSlice}
+${prioritySlice}
 
 // The REAL BATT arm, lifted out of handleDeviceLine: which key a reading is
 // filed under is part of what is under test.
@@ -266,6 +274,8 @@ export const api = {
   isDuplicateFrom, lastAnswerBySender, lastPromptBySender,
   handleBattLine, battByDevice, batteryForHeartbeat, primaryUsbName,
   forgetBatteryFor, boundBatteryStore,
+  msgPriByDevice, forgetMsgPriorityFor, boundMsgPriorityStore,
+  resolveInboxPriority, INBOX_PRIORITIES, INBOX_PRIORITY_DEFAULT, INBOX_PRIORITY_ENV,
   BLE_LINK,
 };
 `;
@@ -591,6 +601,68 @@ async function main({ indexPath = INDEX } = {}) {
     api.forgetBatteryFor(B2);
     ok("BATTERY: and DROPPED once nothing can refresh it",
       api.battByDevice.size === 0);
+  }
+
+  // ---- 6b. THE SEND PRIORITY IS PER DEVICE TOO, AND PRUNED THE SAME WAY ----
+  // The second per-device store, and the first device SETTING to reach this host.
+  // It is on this bench rather than only in session-inbox-check.mjs because both
+  // of its failure modes are two-board failures: a global that lets whichever
+  // board spoke last decide for the other, and a prune that either leaks or drops
+  // a setting a still-live link is reporting. battByDevice had both.
+  {
+    api.clearLinks();
+    api.msgPriByDevice.clear();
+    api.setBle({ characteristic: null, bleName: "", selected: "" });
+    const l2 = api.addLink("usb:usbmodem1101", B2);
+    const l1 = api.addLink("usb:usbserial-10", B1);
+    api.handleBattLine("MSGPRI now", l2.id);
+    api.handleBattLine("MSGPRI later", l1.id);
+    ok("PRIORITY: two boards asking for different priorities are two entries, not one",
+      api.msgPriByDevice.size === 2);
+    ok(`PRIORITY: each board's messages resolve to ITS OWN choice - ${B2} now, ${B1} later ` +
+       `(got ${api.resolveInboxPriority(l2.id).priority} / ${api.resolveInboxPriority(l1.id).priority})`,
+      api.resolveInboxPriority(l2.id).priority === "now" &&
+      api.resolveInboxPriority(l1.id).priority === "later");
+    ok("PRIORITY: and the `why` names the board, so a delivery at an unexpected priority can be traced to the thing that set it",
+      api.resolveInboxPriority(l1.id).why.includes(B1));
+    // A device that has said nothing falls back to the default rather than
+    // inheriting the other board's choice - the exact failure a global would have.
+    const l3 = api.addLink("usb:usbserial-99", "");
+    ok(`PRIORITY: a board that has never reported gets the default "${api.INBOX_PRIORITY_DEFAULT}", ` +
+       `never the other board's choice`,
+      api.resolveInboxPriority(l3.id).priority === api.INBOX_PRIORITY_DEFAULT);
+    // An unusable word is refused rather than stored: a device on newer firmware
+    // must not be able to put an unknown value into the frame.
+    api.handleBattLine("MSGPRI sideways", l1.id);
+    ok("PRIORITY: an unrecognised word does not overwrite a good stored value",
+      api.msgPriByDevice.get(api.senderKey(l1.id)).priority === "later");
+    // The prune, both halves, exactly as the battery's is tested above.
+    api.clearLinks();
+    api.msgPriByDevice.clear();
+    const cabled2 = api.addLink("usb:usbmodem1101", B2);
+    api.setBle({ characteristic: {}, bleName: B2, selected: B2 });
+    api.handleBattLine("MSGPRI now", cabled2.id);
+    api.clearLinks();              // the cable came out; BLE is still up
+    api.forgetMsgPriorityFor(B2);
+    ok("PRIORITY: a setting is KEPT while the same device is still reachable on another link",
+      api.msgPriByDevice.size === 1);
+    api.setBle({ characteristic: null, bleName: "" });
+    api.forgetMsgPriorityFor(B2);
+    ok("PRIORITY: and DROPPED once nothing can refresh it - battByDevice leaked exactly this way until a review caught it",
+      api.msgPriByDevice.size === 0);
+    // Bounded as well as pruned: a renumbering port leaves a key no close handler
+    // will ever name again.
+    api.clearLinks();
+    api.msgPriByDevice.clear();
+    for (let i = 0; i < api.MAX_BATT_DEVICES + 5; i++) {
+      const l = api.addLink(`usb:usbserial-2${i}`, "");
+      api.handleBattLine("MSGPRI next", l.id);
+    }
+    ok(`PRIORITY: ${api.MAX_BATT_DEVICES + 5} renumbered ports leave at most ${api.MAX_BATT_DEVICES} entries`,
+      api.msgPriByDevice.size === api.MAX_BATT_DEVICES);
+    api.clearLinks();
+    api.msgPriByDevice.clear();
+    api.setBle({ characteristic: null, bleName: "", selected: "" });
   }
 
   // ---- 7. THE LOG CAN TELL THE BOARDS APART ----
@@ -919,9 +991,16 @@ async function main({ indexPath = INDEX } = {}) {
     ok("STRUCTURE: HELLO is matched on the KIND of the via, not the literal \"usb\" - " +
        "a literal is false for every real link id and would skip the arm in silence",
       /viaKind\(via\) === "usb"/.test(hello) && !/via === "usb"/.test(hello));
+    // BOUND TO THE PROVISION SEND ITSELF, not to "some sendToLink(helloLink, ...)
+    // exists in this arm". The arm gained a SECOND per-link write when it started
+    // asking a newly-named board for its send priority, and the loose form then
+    // passed with PROVISION broadcast - the fault was injected and MISSED, which
+    // is exactly the "a rule a neighbouring line can satisfy is not a rule" shape.
     ok("STRUCTURE: PROVISION is written to the link the HELLO arrived on, never broadcast - " +
        "a key is per device",
-      /sendToLink\(\s*helloLink,/.test(hello));
+      /sendToLink\(\s*helloLink,\s*\n\s*proto === "v2"/.test(hello));
+    ok("STRUCTURE: and the send-priority ask goes to that same link, not to every board",
+      /sendToLink\(helloLink, "MSGPRI\\n"\)/.test(hello) && !/broadcastToDevices\("MSGPRI/.test(hello));
 
     const pairOurs = extractBody(src, "function pairReplyIsOurs(ex, via, gen)");
     ok("STRUCTURE: a pairing reply on usb is matched against THAT LINK's name",
@@ -1219,6 +1298,27 @@ async function selftest() {
   const orig = fs.readFileSync(INDEX, "utf8");
 
   const faults = [
+    // ---- the second per-device store ----
+    ["the send priority filed GLOBALLY, so whichever board spoke last decides for both",
+     (s) => s.replace(/msgPriByDevice\.set\(key, \{ device: dev, priority: msgPri, at: Date\.now\(\) \}\);/,
+                      'msgPriByDevice.set("one", { device: dev, priority: msgPri, at: Date.now() });')],
+    ["the resolver reads the store globally, so one board's toggle answers for the other",
+     (s) => s.replace("  const dev = via ? msgPriByDevice.get(senderKey(via)) : null;",
+                      "  const dev = via ? [...msgPriByDevice.values()][0] : null;")],
+    ["an unrecognised word stored anyway, so a newer firmware can put anything in the frame",
+     (s) => s.replace("  if (INBOX_PRIORITIES.includes(msgPri)) {", "  if (msgPri) {")],
+    ["the priority never pruned when its last link closes - battByDevice's own leak, again",
+     (s) => s.replace("  msgPriByDevice.delete(key);\n  console.log(\n    `Inbox: dropped",
+                      "  console.log(\n    `Inbox: dropped")],
+    ["the prune drops a setting a still-live second link is reporting",
+     (s) => s.replace("  for (const l of liveLinks()) if (senderKey(l.id) === key) return;\n  msgPriByDevice.delete(key);",
+                      "  msgPriByDevice.delete(key);")],
+    ["the priority store left unbounded, so renumbering ports accumulate forever",
+     (s) => s.replace(/ *boundMsgPriorityStore\(\);\n/, "")],
+    ["the resolver's `why` stops naming the board that set it",
+     (s) => s.replace("if (chosen) return { priority: chosen, why: `${dev.device || senderKey(via)}'s SETTINGS toggle` };",
+                      'if (chosen) return { priority: chosen, why: "a device" };')],
+
     ["the port scan reverted to .find() - the ORIGINAL defect, one board driven and one ignored",
      (s) => s.replace("  const mine = ports.filter(", "  const mine = [ports.find(")
               .replace(/\/usbserial\|wchusbserial\|SLAB_USBtoUART\|usbmodem\/i\.test\(p\.path\)\n  \);/,
@@ -1283,7 +1383,19 @@ async function selftest() {
     // ---- the three host defects the branch review named, each reverted ----
     ["the BLE disconnect handler stops pruning the battery, so a board off the cable " +
      "republishes a phantom `batts` entry for ever",
-     (s) => s.replace(/\n\s*forgetBatteryFor\(battKey\);\n(\s*)startBleScan\(\);/, "\n$1startBleScan();")],
+     // The BATTERY prune only - the priority prune now sits between it and
+     // startBleScan(), and the old anchor (which required the two to be adjacent)
+     // silently stopped injecting the moment that line was added. Anchored on the
+     // one line it is about.
+     // ANCHORED ON THE BLE SITE ALONE. The old anchor required forgetBatteryFor and
+     // startBleScan to be ADJACENT and silently stopped injecting when the priority
+     // prune was added between them; the first repair then matched the USB close
+     // handler instead (replace() takes the FIRST match) and "caught" it by making
+     // the module throw - a fault whose name no longer described what it did. The
+     // lookahead pins it to the disconnect handler by naming both lines that follow.
+     (s) => s.replace(
+       /\n[ \t]*forgetBatteryFor\(battKey\);[^\n]*\n(?=[ \t]*forgetMsgPriorityFor\(battKey\);[^\n]*\n[ \t]*startBleScan\(\);)/,
+       "\n")],
     ["it prunes BEFORE tearing the link down, so liveLinks() finds this very link and " +
      "the prune declines every time",
      (s) => s.replace(/(const battKey = senderKey\("ble"\);)/,
