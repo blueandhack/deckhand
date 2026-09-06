@@ -58,6 +58,18 @@ const SOURCE_FAULTS = [
   ["the ask's input row goes back to promising a keyboard it no longer opens",
     "sessions.ino", (t) => t.replace(/(ASK_OPT_H, ")REPLY TO THIS PROMPT(")/, "$1TYPE YOUR ANSWER$2"),
     "no input-row label says TYPE"],
+  ["the detail screen swallows the tab bar again, so USAGE reads as BACK",
+    "deckhand_display.ino",
+    (t) => t.replace(/    if \(sy < TAB_BAR_H\) \{\n      int tabW = tabsW\(\) \/ TAB_COUNT;\n      Tab tapped = \(Tab\) constrain\(sx \/ tabW, 0, TAB_COUNT - 1\);\n      if \(tapped == currentTab\) closeSessionDetail\(\);\n      else                     switchTab\(tapped\);\n      return;\n    \}\n/, ""),
+    "the detail screen tests the tab bar itself"],
+  ["the tab-bar test is moved AFTER the close-this-page fallthrough",
+    "deckhand_display.ino",
+    (t) => t.replace(/(    if \(sy < TAB_BAR_H\) \{\n      int tabW[\s\S]*?\n    \}\n)(    detailIndex = resolveDetailIndex\(\);[^\n]*\n)/, "$2$1"),
+    "runs BEFORE the close-this-page fallthrough"],
+  ["a different tab closes the detail instead of switching, so it still takes two taps",
+    "deckhand_display.ino",
+    (t) => t.replace(/else                     switchTab\(tapped\);/, "else                     closeSessionDetail();"),
+    "calls switchTab(tapped)"],
 ];
 if (SOURCE_FAULT_INDEX >= 0) {
   const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
@@ -4221,6 +4233,73 @@ for (const b of [1, 2]) {
       `detailDurCache ${CACHE.detailDurCache} holds bandDurText()'s ` +
       `${c.SESSION_BAND_DUR_CHARS}-character lane + NUL`);
   chk(cacheLen("rowDurCache") >= 8, `rowDurCache ${CACHE.rowDurCache} holds a 7-char padded duration + NUL`);
+}
+
+// ---------------------------------------------------------------------------
+// THE TAB BAR ON THE DETAIL SCREEN MUST BE HONOURED, NOT SWALLOWED
+// ---------------------------------------------------------------------------
+// Board-independent: this is one shared block in handleTouch(), so it is asserted
+// once rather than per board.
+//
+// The detail screen is the ONLY full-screen surface here that leaves the tab bar
+// drawn. compose, the reader, the scrollback and the pairing panel all paint over
+// it, which is why each of them consumes every tap - "a tap that fell through
+// would act on chrome the user cannot see". The detail card leaves the bar
+// visible AND underlined on SESSIONS, and it used to fall through to the handler
+// that treats an unclaimed tap as "close this page", so a tap on USAGE read as
+// BACK. Reported from the device, which is the only place a visible control that
+// lies about itself can be noticed.
+//
+// Bound to handleTouch()'s OWN `if (showingDetail)` BLOCK, brace-matched - not to
+// the file, and not to the function. `sy < TAB_BAR_H` appears in fabHit() and in
+// the list's own bar handler a few lines below; either would satisfy a file-wide
+// regex while this block swallowed the tap exactly as before.
+{
+  const src = DISPLAY_INO.replace(/^[ \t]*\/\/.*$/gm, "");
+  const fi = src.indexOf("void handleTouch() {");
+  chk(fi >= 0, "handleTouch() is found in deckhand_display.ino");
+  const fnEnd = fi >= 0 ? fi + src.slice(fi).indexOf("\n}\n") : -1;
+  const fn = fi >= 0 ? src.slice(fi, fnEnd) : "";
+  const bi = fn.indexOf("if (showingDetail) {");
+  chk(bi >= 0, "handleTouch() still has an `if (showingDetail)` block to bind to");
+  let blk = "";
+  if (bi >= 0) {
+    let depth = 0;
+    const open = fn.indexOf("{", bi);
+    for (let j = open; j < fn.length; j++) {
+      if (fn[j] === "{") depth++;
+      else if (fn[j] === "}" && --depth === 0) { blk = fn.slice(bi, j + 1); break; }
+    }
+  }
+  chk(blk.length > 0, "the showingDetail block is brace-balanced and parseable");
+  // The tab test must exist INSIDE that block...
+  const tabAt = blk.indexOf("sy < TAB_BAR_H");
+  chk(tabAt >= 0,
+      "the detail screen tests the tab bar itself - a tap on USAGE is a tab" +
+      " switch, not a swallowed tap that reads as BACK");
+  // ...and BEFORE the fallthrough, or the tap is consumed before it can be seen.
+  const fallAt = blk.indexOf("resolveDetailIndex");
+  chk(fallAt >= 0, "the showingDetail block still resolves the detail index");
+  chk(tabAt >= 0 && fallAt >= 0 && tabAt < fallAt,
+      "the tab-bar test runs BEFORE the close-this-page fallthrough" +
+      ` (tab bar at ${tabAt}, fallthrough at ${fallAt})`);
+  // Both arms, by name: same tab is BACK, a different tab GOES THERE. Asserting
+  // only that switchTab is mentioned would pass with the close arm deleted, and
+  // vice versa.
+  chk(/tapped\s*==\s*currentTab/.test(blk),
+      "the two arms are told apart by `tapped == currentTab`, so the underlined" +
+      " tab still means the sessions list");
+  chk(/tapped\s*==\s*currentTab\s*\)\s*closeSessionDetail\(\)/.test(blk),
+      "tapping the tab you are already on closes the detail (BACK, unchanged)");
+  chk(/else\s+switchTab\(tapped\)/.test(blk),
+      "tapping a DIFFERENT tab calls switchTab(tapped) - one tap, not two");
+  // switchTab() clears showingDetail and repaints the content area itself, so the
+  // close path must not also run: closeSessionDetail()'s drawSessionsAll() would
+  // paint a sessions list nobody asked for on the way past, and board 1 draws
+  // straight to the glass.
+  chk(/showingDetail\s*=\s*false/.test(fnSrcIn(DISPLAY_INO, "void switchTab(Tab newTab) {", "deckhand_display.ino")),
+      "switchTab() clears showingDetail itself, which is why the different-tab" +
+      " arm does not call closeSessionDetail() first");
 }
 
 faultChildEpilogue();

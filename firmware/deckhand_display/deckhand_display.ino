@@ -4037,6 +4037,41 @@ void handleTouch() {
   }
 
   if (showingDetail) {
+    // THE TAB BAR IS DRAWN ON THIS SCREEN, AND IT USED TO LIE ABOUT WHAT IT DOES.
+    // Every OTHER full-screen surface tested above - compose, the reader, the
+    // scrollback, the pairing panel - PAINTS OVER the bar, which is exactly why
+    // consuming their taps is right: "a tap that fell through would act on chrome
+    // the user cannot see" (pairPanelActive, above). The detail screen is the one
+    // that leaves the bar VISIBLE, still underlined on SESSIONS, looking as live
+    // as it does on the list - and then fell through to the handler below, which
+    // treats any unclaimed tap as "close this page". So tapping USAGE from a
+    // session's detail card acted as BACK, and getting to USAGE took two taps on
+    // a control that was showing you where you already were.
+    //
+    // Reported from the device, which is the only place it is visible: "when user
+    // goes to session detail page, if user want to change to usage, the real ux
+    // is back".
+    //
+    // SAME TAB IS STILL BACK, and that is not a compromise - the underline says
+    // SESSIONS, so a tap on SESSIONS meaning "the sessions list" is what the bar
+    // already claims. Only a DIFFERENT tab changes: it now goes there in one tap.
+    //
+    // switchTab() clears showingDetail itself and repaints the whole content area,
+    // so closeSessionDetail() must NOT run first on that path - its own
+    // drawSessionsAll() would paint a list nobody asked for on the way past, which
+    // board 1 draws straight to the glass and would show.
+    //
+    // The REC slot is not excluded here, for the same reason the list's own bar
+    // handler does not exclude it: fabHit() claims that slot earlier WHEN THE
+    // BUTTON IS VISIBLE, and when it is not, constrain() folds the slot into the
+    // last tab exactly as it already does on every other screen. One rule, not two.
+    if (sy < TAB_BAR_H) {
+      int tabW = tabsW() / TAB_COUNT;
+      Tab tapped = (Tab) constrain(sx / tabW, 0, TAB_COUNT - 1);
+      if (tapped == currentTab) closeSessionDetail();
+      else                     switchTab(tapped);
+      return;
+    }
     detailIndex = resolveDetailIndex(); // ensure the tap acts on the right session
     if (detailIndex < 0) { closeSessionDetail(); return; }
     if (!handleAskTouch(sx, sy)) closeSessionDetail();
