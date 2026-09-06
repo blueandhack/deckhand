@@ -2424,6 +2424,45 @@ async function pruneAudioCaptures() {
 // operation and fixes all three: it arrives as an ordinary message, in one voice, with
 // permissions behaving normally, and you get to read it before anything acts on it.
 const VOICE_DELIVERY = process.env.DECKHAND_VOICE_DELIVERY || "inbox";
+
+// ---------- how a device message LANDS in the queue ----------
+// The inbox frame carries a `priority`, and the receiver's own line is
+//
+//   let a = e.priority==="now"||e.priority==="next"||e.priority==="later"
+//             ? e.priority : "next";
+//
+// (session-inbox.mjs carries the full disassembly and where to re-read it). So
+// "next" is what an absent field already means, and THAT IS THE DEFAULT HERE
+// TOO: "now" interrupts the turn Claude is in the middle of, which is a thing to
+// ask for rather than a thing to inherit.
+const INBOX_PRIORITIES = ["now", "next", "later"];
+const INBOX_PRIORITY_DEFAULT = "next";
+// The raw environment, KEPT SEPARATELY from the validated value, because a
+// refusal has to be able to name what it refused - CLAUDE.md's "every refusal
+// must NAME ITS CAUSE". `DECKHAND_INBOX_PRIORITY=noew` resolving silently to
+// "next" is exactly the shape where a user changes a setting, nothing happens,
+// and there is no way to find out why.
+const INBOX_PRIORITY_ENV_RAW = (process.env.DECKHAND_INBOX_PRIORITY || "").trim();
+// "" means "the env var is not in play" - unset OR set to something unusable.
+// Both are the same fact for precedence (the device's own choice is free to
+// win), and they are told apart in the BOOT LINE, not here.
+const INBOX_PRIORITY_ENV = INBOX_PRIORITIES.includes(INBOX_PRIORITY_ENV_RAW)
+  ? INBOX_PRIORITY_ENV_RAW
+  : "";
+
+/// What priority this message goes out at, AND WHY - the second half is the
+/// point. `why` is logged on every delivery, so a priority that is not what
+/// someone expected can be traced to the thing that set it without reading this
+/// file. Same shape as currentMacEmoji()'s "(but DECKHAND_MAC_EMOJI overrides
+/// it)": a knob whose effect is invisible is a knob that gets flipped twice.
+///
+/// Today the environment is the only contributor, so there is nothing for it to
+/// override yet.
+function resolveInboxPriority() {
+  if (INBOX_PRIORITY_ENV) return { priority: INBOX_PRIORITY_ENV, why: "DECKHAND_INBOX_PRIORITY" };
+  return { priority: INBOX_PRIORITY_DEFAULT, why: "the default" };
+}
+
 const PBCOPY_BIN = "/usr/bin/pbcopy";
 const OSASCRIPT_BIN = "/usr/bin/osascript";
 
@@ -2498,7 +2537,7 @@ const WHISPER_MODEL =
 // (see the remote-answering note) - so a misheard command cannot quietly run a
 // tool. Raising it to acceptEdits/bypassPermissions would remove that safeguard,
 // and that is the user's call to make, not a default to inherit.
-async function transcribeAndDispatch(captureFile, target) {
+async function transcribeAndDispatch(captureFile, target, via = null) {
   const wav = path.join(AUDIO_DIR, "latest.wav");
   const clean = path.join(AUDIO_DIR, "latest-clean.wav");
   // Tell the device work has actually STARTED, so its recording bar can go from
@@ -2544,7 +2583,7 @@ async function transcribeAndDispatch(captureFile, target) {
     setVoice("memo", { text });
     return;
   }
-  await deliverTextToSession(target, text);
+  await deliverTextToSession(target, text, "Voice", via);
 }
 
 // Hand text to a session. This is the shared tail of a dictation aimed at a session
@@ -2555,7 +2594,22 @@ async function transcribeAndDispatch(captureFile, target) {
 // `tag` changes only the LOG prefix. The setVoice states are deliberately identical
 // - the device's result card and the menu bar's row key off those strings, and a
 // typed message should surface exactly the way a dictation does.
-async function deliverTextToSession(target, text, tag = "Voice") {
+//
+// `via` IS THE LINK THE TEXT CAME UP, and it is threaded here for one reason:
+// the inbox frame can name its sender, and the name it should carry is the
+// BOARD'S ("Deckhand-0528"), not this Mac's and not the session's. Without it
+// `origin.from` is the literal "unknown" and the wrapper Claude is handed reads
+// "Another Claude session sent a message" - false, and misleading in the
+// direction that matters, because it was the user, on their own hardware, six
+// inches away.
+//
+// THE DICTATION PATH CARRIES A NAME TOO, and that is a decision rather than an
+// oversight. A dictation is not "from" the board in the sense that its WORDS are
+// the board's - they are the user's - but `from` names the SENDING DEVICE, and
+// the device that sent it is exactly as much the board as it is for a tap. The
+// alternative is that the one case where a human demonstrably spoke is the one
+// case that arrives attributed to nothing.
+async function deliverTextToSession(target, text, tag = "Voice", via = null) {
   // The device only knows the first 12 chars of the id; resolve the real one.
   // Through resolveSessionId, which REFUSES an ambiguous prefix - the find() this
   // replaced silently took the first match.
@@ -2604,14 +2658,26 @@ if (VOICE_DELIVERY !== "clipboard") {
   // delivered NOWHERE, which is strictly worse than the behaviour this
   // replaced. A throw is treated as one more named `why` and falls through
   // exactly like the rest.
+  // NEVER INVENT A NAME. deviceNameFor() already returns "" for the three cases
+  // where the sender is honestly unknown - a pairing link, an unnamed USB link
+  // with two boards cabled, a board that has neither burst HELLO nor answered
+  // WHOAMI - and "" is passed straight through to inboxFrames(), which OMITS the
+  // field. The receiver then defaults it to "unknown", which is the true
+  // statement and also the byte-identical frame this sent before.
+  const from = via ? deviceNameFor(via) : "";
+  const pri = resolveInboxPriority();
   let r;
   try {
-    r = await postToSessionInbox(record, text);
+    r = await postToSessionInbox(record, text, { from, priority: pri.priority });
   } catch (err) {
     r = { ok: false, why: `the inbox threw (${(err?.message || String(err)).split("\n")[0]})` };
   }
   if (r.ok) {
-    console.log(`${tag}: posted into the live session ${sessionId} (${where}) - confirmed in the transcript in ${r.ms}ms.`);
+    console.log(
+      `${tag}: posted into the live session ${sessionId} (${where}) as ` +
+        `${from || 'an unnamed device (from omitted, so it reads as "unknown")'} ` +
+        `at priority ${pri.priority} [${pri.why}] - confirmed in the transcript in ${r.ms}ms.`
+    );
     setVoice("sent", { text, session: target, reply: `Sent to ${where}.` });
     return;
   }
@@ -2765,7 +2831,7 @@ async function finishAudioCapture(link, complete) {
   );
   // One-shot captures get transcribed too. They carry no target, so they land as a
   // memo rather than being dispatched anywhere.
-  if (pct >= 98) transcribeAndDispatch(file, "-").catch((e) => console.error("Voice:", e.message));
+  if (pct >= 98) transcribeAndDispatch(file, "-", link.id).catch((e) => console.error("Voice:", e.message));
   pruneAudioCaptures().catch(() => {});
 }
 
@@ -2875,7 +2941,7 @@ async function finishAudioStream(link, tail) {
   if (st.answerPid) {
     transcribeForAnswer(file, st.answerPid).catch((e) => console.error("Voice answer:", e.message));
   } else {
-    transcribeAndDispatch(file, st.target).catch((e) => console.error("Voice:", e.message));
+    transcribeAndDispatch(file, st.target, link.id).catch((e) => console.error("Voice:", e.message));
   }
   pruneAudioCaptures().catch(() => {});
 }
@@ -3006,7 +3072,7 @@ async function handleTypedPrompt(line, via) {
   }
   consumeSessionNonce(record.id); // single-use: no replay
   console.log(`Prompt: accepted ${v.text.length} chars for ${id12} from ${from}.`);
-  await deliverTextToSession(id12, v.text, "Prompt");
+  await deliverTextToSession(id12, v.text, "Prompt", via);
 }
 
 async function handleTypedAnswer(parts, via) {
@@ -5084,6 +5150,23 @@ console.log(
     : VOICE_DELIVERY === "clipboard"
       ? "Voice: dictation goes to the CLIPBOARD + a notification; paste it yourself. Unset DECKHAND_VOICE_DELIVERY to post into the live session instead."
       : "Voice: dictation is POSTED INTO THE LIVE SESSION, and falls back to the clipboard (naming why) if that cannot be confirmed. Set DECKHAND_VOICE_DELIVERY=clipboard to always hand it to you."
+);
+// SAID AT BOOT, the way the voice modes above are, and THREE-WAY rather than
+// two: unset, set to something valid, and set to something that is not. The
+// third is the one that has to be loud - a typo resolves to the same "next" as
+// unset, so without this line a user who set DECKHAND_INBOX_PRIORITY=noew has no
+// way at all to learn that nothing they did took effect.
+console.log(
+  !INBOX_PRIORITY_ENV_RAW
+    ? `Inbox: device messages queue at "${INBOX_PRIORITY_DEFAULT}" (behind the turn Claude is in). ` +
+        `Set DECKHAND_INBOX_PRIORITY=${INBOX_PRIORITIES.join("|")} to change it.`
+    : INBOX_PRIORITY_ENV
+      ? `Inbox: DECKHAND_INBOX_PRIORITY=${INBOX_PRIORITY_ENV} - device messages queue at "${INBOX_PRIORITY_ENV}"` +
+          `${INBOX_PRIORITY_ENV === "now" ? " and INTERRUPT the turn in progress" : ""}.`
+      : `Inbox: DECKHAND_INBOX_PRIORITY=${JSON.stringify(INBOX_PRIORITY_ENV_RAW)} is not one of ` +
+          `${INBOX_PRIORITIES.join("|")} - IGNORED, falling back to "${INBOX_PRIORITY_DEFAULT}". ` +
+          `It is refused here rather than passed on: the receiver would silently do the same, ` +
+          `and a knob that quietly does nothing is worse than one that says it did nothing.`
 );
 // Checked at STARTUP, not only on first use. The old behaviour accepted a capture, spent
 // the transfer, and failed at the end - so a missing dependency presented as "dictation

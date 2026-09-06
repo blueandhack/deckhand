@@ -424,13 +424,46 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     and `origin: {"kind":"peer","from":"unknown","verifiedPeerPid":<pid>}`, and the UI hides meta
     entries. So the round trip works perfectly and is invisible at the one end that matters:
     you type on the device, it reaches Claude in 125ms, and your own transcript shows nothing.
-    **The host cannot fix this.** The injection frame is fixed at
-    `{"type":"user","message":{"role":"user","content":"..."}}` — the `claude` binary's own
-    `[uds-messaging] Inject messages` help string prints exactly that shape and no other — and it
-    carries no field that could change the classification; `isMeta` is applied by Claude Code on
-    receipt, keyed on the origin being a peer. The only remedy available is for the assistant to
-    **quote the message back** at the top of its reply, which puts the text in the visible
-    transcript. Do that.
+    **The host cannot fix this.** `isMeta` is applied by Claude Code on receipt, keyed on the
+    origin being a peer. The only remedy available is for the assistant to **quote the message
+    back** at the top of its reply, which puts the text in the visible transcript. Do that.
+    - ~~The injection frame is fixed at `{"type":"user","message":{"role":"user","content":"..."}}`
+      — the `claude` binary's own `[uds-messaging] Inject messages` help string prints exactly
+      that shape and no other — and it carries no field that could change the classification.~~
+      **HALF WRONG, corrected 2026-09-05.** The conclusion survives and the premise does not, so
+      the premise is struck rather than removed: a reader who re-derives it from the help string
+      would reach the same wrong place. The *help string* prints one shape; the *handler* reads
+      more. Disassembled from `/opt/homebrew/Caskroom/claude-code/2.1.236/claude` (`strings -a`,
+      grep `verifiedPeerPid`), the frame's readable fields are **`from`, `priority`, `msg_id`,
+      `file_attachments`** (plus `uuid` and `session_id`, which are plumbing). What is genuinely
+      fixed is the classification: `origin.kind` is the literal `"peer"` and `isMeta` the literal
+      `true`, neither read from the frame. So the entry cannot be made visible — and it CAN be
+      made to say who sent it.
+  - **`from` NAMES THE BOARD, and not sending it was making a false statement.** With the field
+    absent, `origin.from` is the literal `"unknown"` and the wrapper Claude is handed reads
+    *"Another Claude session sent a message"* — which is not merely unhelpful, it is **wrong**: it
+    was the user, on their own hardware, six inches away. The host now sends
+    `deviceNameFor(via)` — `Deckhand-0528` / `Deckhand-C114` — on the typed-prompt path **and on
+    the dictation path**, because `from` names the sending DEVICE rather than the authorship of
+    the words, and leaving the one case where a human demonstrably spoke attributed to nothing was
+    the worst of the three options. **An unknown sender OMITS the field rather than inventing one:**
+    `deviceNameFor()` honestly returns `""` for a pairing link, for an unnamed USB link while two
+    boards are cabled, and for a board that has neither burst `HELLO` nor answered `WHOAMI`, and
+    the receiver's own `e.from ?? "unknown"` then produces the old behaviour byte for byte.
+    Measured on a live session: `origin` now reads
+    `{"kind":"peer","from":"Deckhand-0528","verifiedPeerPid":<pid>,"hopChain":[...]}`.
+    A **second, unadvertised** effect, read off the same disassembly: the admission guard
+    rate-limits on `from:<name>` when a name is present and on `pid:<pid>` when it is not — so
+    naming the boards moves two cabled units out of one shared bucket (this host's pid) into one
+    each.
+  - **`priority` is `now` | `next` | `later`, and the default stays `next`.** The receiver's own
+    line is `let a = e.priority==="now"||e.priority==="next"||e.priority==="later" ? e.priority :
+    "next"`, so an absent or unrecognised value already means `next` at the far end. `now`
+    INTERRUPTS the turn Claude is in the middle of, which is a thing to ask for rather than to
+    inherit. `DECKHAND_INBOX_PRIORITY` sets it host-wide; an unrecognised value is **refused by
+    name in the boot log and falls back to `next`** rather than forwarded, because the receiver
+    would rewrite it in silence and a knob that quietly does nothing is worse than one that says
+    so. Every delivery logs which priority applied and what set it.
   - **THE WIRE FORMAT IS UNDOCUMENTED AND GETTING IT WRONG IS SILENT.** Two newline-terminated
     JSON lines on one connection: `{"type":"auth","token":"..."}` then
     `{"type":"user","message":{"role":"user","content":"..."}}`. The first guess,

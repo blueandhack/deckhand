@@ -377,3 +377,22 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   fresh left the row bright, and a Claude flip repainted a row that hadn't changed. The
   bar has to be busted on that flip too, since `drawPaceBar` caches on `(pct, tick)` alone
   and would never repaint a colour-only change.
+- **`DECKHAND_INBOX_PRIORITY=now|next|later` chooses how a device message LANDS, and the
+  default `next` is deliberate.** The session-inbox frame carries a `priority`, and the
+  receiver's own line — disassembled from
+  `/opt/homebrew/Caskroom/claude-code/2.1.236/claude`, quoted verbatim in
+  `host/session-inbox.mjs` — is
+  `let a = e.priority==="now"||e.priority==="next"||e.priority==="later" ? e.priority : "next"`.
+  So an absent field already means `next`, and unset must keep meaning exactly that: `now`
+  **interrupts the turn Claude is in the middle of**, which is a thing to ask for rather than
+  to inherit. **An unrecognised value is refused BY NAME at boot** —
+  `Inbox: DECKHAND_INBOX_PRIORITY="noew" is not one of now|next|later - IGNORED, falling back
+  to "next"` — rather than forwarded, because the receiver would rewrite it to `next` in
+  silence and the user would have no way to learn their variable did nothing. Every delivery
+  logs the priority it used and what set it (`at priority next [the default]`), so the knob is
+  traceable from the log without reading the source. `session-inbox-check.mjs` binds the host's
+  accepted set and its default to that quoted receiver line rather than transcribing them, so
+  the two cannot drift apart without failing by name.
+  The launchd plist (`~/Library/LaunchAgents/com.deckhand.host.plist`) carries it as a
+  **commented-out** entry in `EnvironmentVariables` — documented where a reader looks for it,
+  and inert, because the absent variable must go on meaning `next` exactly.

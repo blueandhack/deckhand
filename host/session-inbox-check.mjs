@@ -82,11 +82,29 @@ function ok(cond, msg) {
 // JS with no #if arms, which is what makes that safe (CLAUDE.md's note about
 // brace-counting tools applies to the firmware, not to this).
 // ---------------------------------------------------------------------------
+// THE PARAMETER LIST IS SKIPPED BY BALANCING ITS OWN PARENTHESES, not by taking
+// the next `{`. postToSessionInbox's third argument is a DESTRUCTURED options bag
+// ({ from, priority, now } = {}), so "the first brace after the header" is the
+// parameter pattern - and every assertion bound to the body then read a
+// four-line fragment and reported PARSE failures for things that were right
+// there. A checker that silently certifies a slice of what it names is the
+// failure this whole file is arranged against, so it fails loudly instead.
 function bodyOf(src, header, label) {
   const at = src.indexOf(header);
   ok(at >= 0, `PARSE: could not find ${label} - every assertion bound to its body is unproven`);
   if (at < 0) return "";
-  let i = src.indexOf("{", at);
+  // Every header here ends AT its opening "(" - balance from there to the close.
+  const paren = src.lastIndexOf("(", at + header.length);
+  let pd = 0, afterParams = -1;
+  for (let j = paren; j >= 0 && j < src.length; j++) {
+    if (src[j] === "(") pd++;
+    else if (src[j] === ")" && --pd === 0) { afterParams = j; break; }
+  }
+  if (afterParams < 0) {
+    ok(false, `PARSE: ${label}'s parameter list is unbalanced - refusing to assert over a partial read`);
+    return "";
+  }
+  let i = src.indexOf("{", afterParams);
   if (i < 0) return "";
   let depth = 0;
   for (let j = i; j < src.length; j++) {
@@ -97,17 +115,80 @@ function bodyOf(src, header, label) {
   return "";
 }
 
+// COMMENTS OUT, STRINGS IN. Several assertions below certify an ORDER inside a
+// function ("the transcript offset is taken before the write"), and they do it
+// by searching for the call's text - so a COMMENT that happens to mention
+// `writeFrames(` sits earlier in the body than the call does and the assertion
+// fails on prose. That happened the moment a note explaining a renamed variable
+// quoted the call it was about. Comments must not be able to satisfy an
+// assertion OR to break one; the strings must survive, because the messages
+// these assertions read ("NOT delivered") live in template literals.
+function stripComments(src) {
+  let out = "";
+  let i = 0;
+  const q = { "'": 1, '"': 1, "`": 1 };
+  while (i < src.length) {
+    const c = src[i];
+    if (q[c]) {
+      out += c;
+      i++;
+      while (i < src.length && src[i] !== c) {
+        if (src[i] === "\\") { out += src[i] + (src[i + 1] ?? ""); i += 2; continue; }
+        out += src[i++];
+      }
+      out += src[i] ?? "";
+      i++;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
 // The frame shape, read OUT OF the source rather than written down here. Each
-// JSON.stringify({...}) argument inside inboxFrames' body is evaluated in an
-// isolated scope where `token` and `text` are known sentinels, so what comes
-// back is the literal object the code will send - with no copy of it in this file.
-function declaredFrames(body, token, text) {
+// JSON.stringify(...) argument inside inboxFrames' body is evaluated in an
+// isolated scope where `token`, `text`, `from` and `priority` are known
+// sentinels, so what comes back is the literal object the code will send - with
+// no copy of it in this file.
+//
+// THE ARGUMENT IS FOUND BY BALANCING PARENTHESES, not by a lazy regex to the
+// next `),`. The user frame is a multi-line literal with two conditional
+// spreads in it, and `...(from ? { from } : {}),` ENDS IN `}),` - so a regex
+// that stopped at the first one cut the object in half and evaluated a
+// fragment. It happened to fail loudly here (a syntax error, reported by the
+// catch below) but it is the same class as a checker quietly certifying half of
+// what it names.
+function declaredFrames(body, token, text, from, priority) {
   const outs = [];
-  const re = /JSON\.stringify\(([\s\S]*?)\),\n/g;
-  let m;
-  while ((m = re.exec(body))) {
+  const NEEDLE = "JSON.stringify(";
+  for (let at = body.indexOf(NEEDLE); at >= 0; at = body.indexOf(NEEDLE, at + 1)) {
+    const open = at + NEEDLE.length;
+    let depth = 1, close = -1;
+    for (let j = open; j < body.length; j++) {
+      const c = body[j];
+      if (c === "(") depth++;
+      else if (c === ")" && --depth === 0) { close = j; break; }
+    }
+    if (close < 0) {
+      ok(false, "PARSE: an argument to JSON.stringify inside inboxFrames has unbalanced parentheses - refusing to assert over a partial read");
+      continue;
+    }
+    const expr = body.slice(open, close);
     try {
-      outs.push(new Function("token", "text", `return (${m[1]});`)(token, text));
+      outs.push(
+        new Function("token", "text", "from", "priority", `return (${expr});`)(token, text, from, priority)
+      );
     } catch (e) {
       ok(false, `PARSE: an argument to JSON.stringify inside inboxFrames could not be evaluated (${e.message})`);
     }
@@ -127,7 +208,9 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
 
   const TOKEN = "0123456789abcdef0123456789abcdef";
   const TEXT = "ship it, but keep the fallback";
-  const declared = declaredFrames(framesBody, TOKEN, TEXT);
+  const FROM = "Deckhand-0528";
+  const PRI = "later";
+  const declared = declaredFrames(framesBody, TOKEN, TEXT, FROM, PRI);
   ok(declared.length === 2,
      `FRAME: inboxFrames must build exactly TWO frames (auth then user); its body declares ${declared.length}`);
 
@@ -152,10 +235,46 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
   ok(Object.keys(user?.message ?? {}).length === 2,
      `FRAME: the user frame's message must carry role and content and nothing else - got ${JSON.stringify(Object.keys(user?.message ?? {}))}`);
 
+  // ---- FROM and PRIORITY, the two fields the receiver actually reads ----
+  // Both are TOP-LEVEL siblings of `message`, not nested inside it: the handler
+  // reads `e.from` and `e.priority` off the parsed frame while the text comes
+  // from `e.message.content`. A field put one level down is not a syntax error,
+  // it is silently ignored - the same silence the wrong first frame shape got.
+  ok(user?.from === FROM,
+     `FRAME: the sending device's name must ride at TOP-LEVEL .from - got ${JSON.stringify(user?.from)}. ` +
+     "The handler reads e.from; anything nested under .message is dropped without a word");
+  ok(user?.message?.from === undefined,
+     "FRAME: .from must NOT be nested inside message - the handler never looks there");
+  ok(user?.priority === PRI,
+     `FRAME: the priority must ride at TOP-LEVEL .priority - got ${JSON.stringify(user?.priority)}`);
+  ok(user?.message?.priority === undefined,
+     "FRAME: .priority must NOT be nested inside message");
+
+  // THE OMISSION RULE, and it is the half that is easy to get wrong. An unknown
+  // sender must leave the key ABSENT, because `e.from ?? "unknown"` only
+  // defaults on undefined: a `from:""` survives the ?? and becomes an EMPTY
+  // sender name, which is neither the truth nor the old behaviour. Same for
+  // priority, whose empty string is not one of the three the receiver accepts.
+  const anon = declaredFrames(framesBody, TOKEN, TEXT, "", "");
+  const anonUser = anon[1];
+  ok(!("from" in (anonUser ?? { from: 1 })),
+     `FRAME: with no device name the key must be OMITTED, not sent empty - got ${JSON.stringify(anonUser)}. ` +
+     'The receiver defaults an ABSENT from to "unknown"; an empty string it keeps verbatim');
+  ok(!("priority" in (anonUser ?? { priority: 1 })),
+     "FRAME: with no priority the key must be OMITTED, not sent empty");
+  // THE FRAME WITHOUT THE TWO NEW KEYS, DERIVED FROM THE NAMED ONE rather than
+  // written out here: an anonymous send must be the SAME frame it always was, so
+  // a Claude Code build that parses neither field sees byte-identical traffic.
+  // A transcribed literal would have made this the second place the shape lives,
+  // which is the failure the whole file is arranged to avoid.
+  const { from: _f, priority: _p, ...namedMinusNew } = user ?? {};
+  ok(JSON.stringify(anonUser) === JSON.stringify(namedMinusNew),
+     `FRAME: an anonymous, default-priority send must be the named frame with EXACTLY those two keys removed and nothing else moved - got ${JSON.stringify(anonUser)} against ${JSON.stringify(namedMinusNew)}`);
+
   // Behaviour against the source, not against a literal: the exported function
   // must actually emit what its body declares, as JSON, one frame per string.
   return import(`file://${inboxPath}?v=${Date.now()}`).then(async (mod) => {
-    const emitted = mod.inboxFrames(TOKEN, TEXT);
+    const emitted = mod.inboxFrames(TOKEN, TEXT, FROM, PRI);
     ok(Array.isArray(emitted) && emitted.length === declared.length,
        "FRAME: inboxFrames returns one string per declared frame");
     for (let i = 0; i < declared.length; i++) {
@@ -170,9 +289,17 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
     // The bytes. Two lines, each newline-terminated, nothing else: the server
     // reads line-delimited frames, and a missing trailing newline leaves the
     // last frame unterminated - which the 30s line timer eventually kills.
-    const wire = mod.inboxWireBytes(TOKEN, TEXT).toString("utf8");
+    const wire = mod.inboxWireBytes(TOKEN, TEXT, FROM, PRI).toString("utf8");
     ok(wire === emitted.map((l) => l + "\n").join(""),
        "FRAME: inboxWireBytes is exactly the frames, each newline-terminated");
+    // inboxWireBytes has its OWN parameter list, so it can drop the two new
+    // arguments on the floor while inboxFrames still declares them perfectly -
+    // and every assertion above would pass. That is the FRAME/WRITE gap this
+    // file already learned once, one layer further in.
+    ok(JSON.parse(wire.split("\n")[1] ?? "{}").from === FROM,
+       "FRAME: inboxWireBytes must FORWARD the device name to inboxFrames - it has its own parameter list and can silently drop it");
+    ok(JSON.parse(wire.split("\n")[1] ?? "{}").priority === PRI,
+       "FRAME: inboxWireBytes must FORWARD the priority to inboxFrames");
     ok(wire.endsWith("\n"),
        "FRAME: the wire ends with a newline - an unterminated final frame is never processed");
     ok(wire.split("\n").filter(Boolean).length === 2,
@@ -223,7 +350,7 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
       const transcript = path.join(wbox, "t.jsonl");
       fs.writeFileSync(transcript, JSON.stringify({ type: "user", note: "pre-existing" }) + "\n");
       fs.writeFileSync(path.join(wbox, "empty.jsonl"), "");   // for the never-enqueued case below
-      const expected = mod.inboxWireBytes(TOKEN, TEXT);
+      const expected = mod.inboxWireBytes(TOKEN, TEXT, FROM, PRI);
       let got = Buffer.alloc(0);
       const server = net.createServer((c) => {
         c.on("data", (d) => { got = Buffer.concat([got, d]); });
@@ -237,11 +364,25 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
       });
       try {
         await new Promise((res, rej) => { server.once("error", rej); server.listen(sockPath, res); });
-        const r = await mod.postToSessionInbox({ inbox: { socket: sockPath, token: TOKEN }, transcript }, TEXT);
+        const r = await mod.postToSessionInbox(
+          { inbox: { socket: sockPath, token: TOKEN }, transcript }, TEXT,
+          { from: FROM, priority: PRI });
         ok(got.length > 0,
            "WRITE: postToSessionInbox must actually connect and send something - nothing arrived at the socket");
         ok(got.equals(expected),
-           `WRITE: the bytes put on the socket must be EXACTLY inboxWireBytes(token, text) - every assertion above proves only the DECLARATION, and a writer that sends anything else is silently discarded by the real socket. got ${JSON.stringify(got.toString("utf8").slice(0, 160))}`);
+           `WRITE: the bytes put on the socket must be EXACTLY inboxWireBytes(token, text, from, priority) - every assertion above proves only the DECLARATION, and a writer that sends anything else is silently discarded by the real socket. got ${JSON.stringify(got.toString("utf8").slice(0, 160))}`);
+        // NAMED SEPARATELY from the bytes comparison above, because there are
+        // three hand-offs between the caller and the socket (postToSessionInbox
+        // -> writeFrames -> inboxWireBytes) and any one of them can drop an
+        // argument while the other two are perfect. A bare "bytes differ" points
+        // at all three at once.
+        {
+          const sent = JSON.parse(got.toString("utf8").split("\n")[1] || "{}");
+          ok(sent.from === FROM,
+             `WRITE: the device name handed to postToSessionInbox must reach the SOCKET - got ${JSON.stringify(sent.from)}`);
+          ok(sent.priority === PRI,
+             `WRITE: the priority handed to postToSessionInbox must reach the SOCKET - got ${JSON.stringify(sent.priority)}`);
+        }
         ok(r.ok === true,
            `WRITE: a correct write against a stand-in that enqueues it must CONFIRM - got ${JSON.stringify(r)}`);
         ok(typeof r.ms === "number" && r.ms >= 0,
@@ -258,7 +399,7 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
         const fakeNow = () => t0 + 10_000 * ticks++;
         const dead = await mod.postToSessionInbox(
           { inbox: { socket: sockPath, token: TOKEN }, transcript: path.join(wbox, "empty.jsonl") },
-          TEXT, fakeNow);
+          TEXT, { now: fakeNow });
         ok(dead.ok === false && dead.wrote === true,
            `DIAGNOSIS: a write that lands but is never enqueued must report NOT ok WITH wrote:true - got ${JSON.stringify(dead).slice(0, 200)}`);
         ok(dead.scan && dead.scan.enqueues === 0,
@@ -338,7 +479,9 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
            `THROW: a malformed record (${name}) must be refused as MALFORMED, naming the bad field - "the session exited" would send a reader hunting the wrong thing. got ${JSON.stringify(res?.why)}`);
       }
 
-      const postBody = bodyOf(inboxSrc, "export async function postToSessionInbox(", "postToSessionInbox()");
+      const postBody = stripComments(
+        bodyOf(inboxSrc, "export async function postToSessionInbox(", "postToSessionInbox()")
+      );
       ok(postBody.length > 0, "PARSE: postToSessionInbox has an empty body");
       // ORDER MATTERS: the offset has to be taken before the write, or a retry of
       // the same text finds the PREVIOUS attempt's enqueue and reports a delivery
@@ -378,7 +521,7 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
       // the text between the call and the clipboard branch, so a try/catch
       // somewhere else in the file cannot satisfy it.
       const callArm = delivBody.slice(Math.max(0, delivBody.lastIndexOf("try {", iInbox)), iClip);
-      ok(/try \{[\s\S]*postToSessionInbox\(record, text\)[\s\S]*\} catch/.test(callArm),
+      ok(/try \{[\s\S]*postToSessionInbox\(record, text[,)][\s\S]*\} catch/.test(callArm),
          "WIRING: the inbox call must be wrapped in try/catch - the four handled failures are return values, and an unhandled throw would take the clipboard fallback down with it, delivering the message NOWHERE");
       ok(/catch[\s\S]{0,200}ok: false[\s\S]{0,200}why:/.test(callArm),
          "WIRING: a throw must become one more ok:false WITH ITS OWN why, so it falls through the same path as the rest and still names its cause");
@@ -394,6 +537,90 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
       ok(!/\breturn\b/.test(failArm.slice(failArm.indexOf("console.error"))),
          "WIRING: the inbox failure arm must FALL THROUGH to the clipboard, never return - a returned failure is a message that silently vanished");
 
+      // =====================================================================
+      // ATTRIBUTION - the frame names the board that sent it
+      // =====================================================================
+      // `from` is what turns "Another Claude session sent a message" into
+      // something true. The three assertions here are about the three ways to
+      // get it wrong: never computing it, computing it from the wrong thing, and
+      // INVENTING one when the sender is honestly unknown.
+      const delivCode = stripComments(delivBody);
+      ok(/const from = via \? deviceNameFor\(via\) : ""/.test(delivCode),
+         "ATTRIBUTION: the sender name must come from deviceNameFor(via) - it is the one function that refuses to guess when two boards are cabled and one link is unnamed");
+      ok(!/from\s*[:=]\s*["'`]Deckhand/.test(delivCode),
+         'ATTRIBUTION: no literal device name may appear here - an invented "Deckhand-something" is worse than "unknown", because it is confidently wrong');
+      ok(/postToSessionInbox\(record, text, \{[^}]*\bfrom\b/.test(delivCode),
+         "ATTRIBUTION: the name must actually be HANDED to postToSessionInbox - computing it and dropping it leaves origin.from at \"unknown\" with nothing in the log to say so");
+      ok(/postToSessionInbox\(record, text, \{[^}]*priority/.test(delivCode),
+         "ATTRIBUTION: the priority must be handed to postToSessionInbox alongside it");
+      // THE LOG LINE. A delivery whose attribution and priority are invisible is
+      // a delivery nobody can debug, and this is the only surface either field
+      // has on the Mac.
+      // BOUND TO THE SUCCESS ARM, not to the function: the failure arm below it
+      // also mentions `r.why`, and a rule a neighbouring line can satisfy is not
+      // a rule.
+      const iOk = delivCode.indexOf("if (r.ok)");
+      const iFail = delivCode.indexOf("console.error", iOk);
+      ok(iOk >= 0 && iFail > iOk, "PARSE: could not isolate the success arm of the inbox call");
+      const sentArm = iOk < 0 ? "" : delivCode.slice(iOk, iFail > iOk ? iFail : undefined);
+      ok(/\$\{from \|\|/.test(sentArm),
+         "ATTRIBUTION: the success line must name the device it posted AS, including the unnamed case - otherwise the one thing this change does is unobservable");
+      ok(/priority \$\{pri\.priority\}/.test(sentArm) && /pri\.why/.test(sentArm),
+         "PRECEDENCE: the success line must name the priority AND what set it - a knob whose effect cannot be traced gets flipped twice and trusted neither time");
+
+      // The threading. deliverTextToSession cannot name a device it was never
+      // told about, and the typed-prompt path is the one that matters most.
+      const typedBody = stripComments(bodyOf(hostSrc, "async function handleTypedPrompt(", "handleTypedPrompt()"));
+      ok(/deliverTextToSession\([^)]*,\s*via\s*\)/.test(typedBody),
+         "ATTRIBUTION: handleTypedPrompt must pass `via` through to deliverTextToSession - it already knows which link the prompt arrived on, and dropping it here is how the name is lost");
+      const dictBody = stripComments(bodyOf(hostSrc, "async function transcribeAndDispatch(", "transcribeAndDispatch()"));
+      ok(/deliverTextToSession\([^)]*,\s*via\s*\)/.test(dictBody),
+         "ATTRIBUTION: the DICTATION path carries the device name too - a recording is made on a board and sent by it, and leaving the one case where a human demonstrably spoke attributed to nothing is the worst of the three");
+
+      // =====================================================================
+      // PRIORITY - the host's accepted set, bound to the RECEIVER's own line
+      // =====================================================================
+      // Not transcribed. session-inbox.mjs quotes the disassembled receiver
+      // ("let a = e.priority===...? e.priority : \"next\";"), and the host's list
+      // and default are checked against THAT. So the three names cannot drift
+      // from what the other end actually accepts without failing here, and the
+      // evidence a reader is pointed at is the evidence the test uses.
+      const quoted = inboxSrc.match(/e\.priority===[^\n]*\n[^\n]*\?\s*e\.priority\s*:\s*"(\w+)"/);
+      ok(quoted != null,
+         "PARSE: session-inbox.mjs must quote the receiver's own priority line - without it the assertions below have nothing to bind to and would pass vacuously");
+      const accepted = quoted ? [...quoted[0].matchAll(/e\.priority==="(\w+)"/g)].map((m) => m[1]) : [];
+      ok(accepted.length === 3,
+         `PARSE: the quoted receiver line must name three accepted priorities - parsed ${JSON.stringify(accepted)}`);
+      const listed = hostSrc.match(/const INBOX_PRIORITIES = \[([^\]]*)\]/);
+      ok(listed != null, "PARSE: could not find INBOX_PRIORITIES in the host");
+      const hostList = listed ? [...listed[1].matchAll(/"(\w+)"/g)].map((m) => m[1]) : [];
+      ok(accepted.length === 3 && JSON.stringify(hostList) === JSON.stringify(accepted),
+         `PRIORITY: the host's accepted set must be EXACTLY the receiver's - host ${JSON.stringify(hostList)} against the quoted receiver's ${JSON.stringify(accepted)}. A value the receiver does not know is silently rewritten to its own default, so a wider list here is a knob that does nothing`);
+      const hostDflt = hostSrc.match(/const INBOX_PRIORITY_DEFAULT = "(\w+)"/);
+      ok(hostDflt != null, "PARSE: could not find INBOX_PRIORITY_DEFAULT");
+      ok(quoted != null && hostDflt?.[1] === quoted[1],
+         `PRIORITY: the default must be the receiver's OWN fallback (${quoted?.[1]}) - got ${hostDflt?.[1]}. "now" INTERRUPTS the turn in progress and is a thing to ask for, never to inherit`);
+      // The validation. An unrecognised value must be REFUSED here rather than
+      // forwarded: the receiver would silently rewrite it, and a knob that
+      // quietly does nothing is the failure this whole repo keeps paying for.
+      ok(/INBOX_PRIORITIES\.includes\(INBOX_PRIORITY_ENV_RAW\)/.test(hostSrc),
+         "PRIORITY: DECKHAND_INBOX_PRIORITY must be checked against the accepted set, not passed through");
+      ok(/INBOX_PRIORITY_ENV_RAW[\s\S]{0,400}not one of/.test(hostSrc),
+         "PRIORITY: an unrecognised DECKHAND_INBOX_PRIORITY must NAME ITSELF in the boot log - a typo that resolves silently to the default is indistinguishable from the variable working");
+      const resolveBody = stripComments(bodyOf(hostSrc, "function resolveInboxPriority(", "resolveInboxPriority()"));
+      ok(resolveBody.length > 0, "PARSE: resolveInboxPriority has an empty body");
+      // EVERY return, not "the body mentions why:" - the first version of this
+      // searched the whole body, and deleting the env branch's `why` left the
+      // default branch's to satisfy it. A rule a neighbouring line can satisfy
+      // is not a rule.
+      const priReturns = [...resolveBody.matchAll(/return \{[^}]*\}/g)].map((m) => m[0]);
+      ok(priReturns.length >= 2,
+         `PARSE: resolveInboxPriority must have at least two returns to choose between - found ${priReturns.length}`);
+      ok(priReturns.length >= 2 && priReturns.every((r) => /why:\s*["'`]/.test(r)),
+         "PRECEDENCE: EVERY return out of resolveInboxPriority must carry its own `why` - one that does not is a priority whose cause cannot be traced, and it is exactly the one someone will hit");
+      ok(/INBOX_PRIORITY_DEFAULT/.test(resolveBody),
+         "PRECEDENCE: the fallback must be the named default, not a literal that could drift from it");
+
       // The escape hatch, both directions. The default matters as much as the
       // override: with the default still "clipboard" the inbox path would be
       // unreachable unless someone opted in, which is not shipping it.
@@ -403,7 +630,14 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
          "WIRING: the DEFAULT must not be \"clipboard\", or the inbox path never runs unless someone opts in");
       ok(dflt?.[1] !== "dispatch",
          "WIRING: the DEFAULT must not be \"dispatch\" - the second-author problem that demoted it has not gone away");
-      ok(/if \(VOICE_DELIVERY !== "clipboard"\) \{[\s\S]{0,600}postToSessionInbox\(/.test(delivBody),
+      // POSITIONAL, not a bounded-window regex. This was
+      // `/if \(VOICE_DELIVERY !== "clipboard"\) \{[\s\S]{0,600}postToSessionInbox\(/`
+      // and the 600 was a guess about how much prose would ever sit between the
+      // guard and the call. Adding a paragraph broke it - a checker failing
+      // because a COMMENT got longer is a checker that will be edited to shut it
+      // up. The fact it certifies is an ORDER, so it is written as one.
+      const iGuard = delivBody.indexOf('if (VOICE_DELIVERY !== "clipboard") {');
+      ok(iGuard >= 0 && iInbox >= 0 && iGuard < iInbox,
          "WIRING: DECKHAND_VOICE_DELIVERY=clipboard must SKIP the socket entirely - it is a working escape hatch and must keep meaning exactly what it meant");
       ok(/if \(VOICE_DELIVERY !== "dispatch"\) \{/.test(delivBody),
          "WIRING: the clipboard branch's own guard is unchanged, so `dispatch` still reaches `claude -p`");
@@ -507,6 +741,32 @@ async function main({ inboxPath = INBOX_SRC, hostPath = HOST_SRC, hookPath = HOO
 // --selftest. Each fault is injected into a COPY in a temp dir - never the repo
 // file - and the run must FAIL. An assertion that cannot fail is a defect.
 // ---------------------------------------------------------------------------
+// LOCATE THE FRAME LITERAL, DO NOT TRANSCRIBE IT. The two frame-shape faults
+// below used to carry a copy of the exact one-line object literal, and both
+// silently stopped injecting the moment that literal became a multi-line one -
+// reported as "NOT INJECTED", which is loud, but only because the harness counts
+// injections. This finds the Nth JSON.stringify(...) argument inside
+// inboxFrames' body by BALANCING PARENTHESES, so it keeps working across
+// reformatting and fails loudly if the function is gone.
+function replaceFrameArg(src, n, newExpr) {
+  const head = src.indexOf("export function inboxFrames(");
+  if (head < 0) return src;
+  const NEEDLE = "JSON.stringify(";
+  let seen = 0;
+  for (let at = src.indexOf(NEEDLE, head); at >= 0; at = src.indexOf(NEEDLE, at + 1)) {
+    const open = at + NEEDLE.length;
+    let d = 1, close = -1;
+    for (let j = open; j < src.length; j++) {
+      if (src[j] === "(") d++;
+      else if (src[j] === ")" && --d === 0) { close = j; break; }
+    }
+    if (close < 0) return src;
+    if (seen++ === n) return src.slice(0, open) + newExpr + src.slice(close);
+    at = close;
+  }
+  return src;
+}
+
 async function selftest() {
   const box = fs.mkdtempSync(path.join(os.tmpdir(), "deckhand-inbox-selftest-"));
   const origInbox = fs.readFileSync(INBOX_SRC, "utf8");
@@ -517,11 +777,9 @@ async function selftest() {
     // THE fault this checker was written for: the shape that is accepted,
     // reports success, and delivers nothing.
     ["inbox", 'the user frame reverted to the WRONG {"type":"message","text":...} shape',
-     (s) => s.replace(/\{ type: "user", message: \{ role: "user", content: text \} \}/,
-                      '{ type: "message", text }')],
+     (s) => replaceFrameArg(s, 1, '{ type: "message", text }')],
     ["inbox", "the text moved off message.content to a top-level .text",
-     (s) => s.replace(/\{ type: "user", message: \{ role: "user", content: text \} \}/,
-                      '{ type: "user", text, message: { role: "user" } }')],
+     (s) => replaceFrameArg(s, 1, '{ type: "user", text, message: { role: "user" } }')],
     ["inbox", "the auth frame dropped, so the connection is never authorised",
      (s) => s.replace(/\{ type: "auth", token \}\),\n/, '{ type: "auth" }),\n')],
     ["inbox", "the frames joined WITHOUT newlines, so the server sees one unterminated line",
@@ -538,8 +796,16 @@ async function selftest() {
      (s) => s.replace(/  return \{\n    ok: false,\n    wrote: true,\n    scan,/,
                       "  return {\n    ok: true,\n    wrote: true,\n    scan,")],
     ["inbox", "the transcript offset taken AFTER the write, so a retry confirms the previous attempt",
-     (s) => s.replace(/  let from = 0;\n  try \{ from = \(await fsp\.stat\(transcript\)\)\.size; \} catch \{\}\n\n  const w = await writeFrames\(socketPath, token, text\);\n  if \(!w\.ok\) return \{ ok: false, wrote: false, why: w\.why \};/,
-                      "  const w = await writeFrames(socketPath, token, text);\n  if (!w.ok) return { ok: false, wrote: false, why: w.why };\n  let from = 0;\n  try { from = (await fsp.stat(transcript)).size; } catch {}")],
+     // MOVED, not neutered, and located by the two STATEMENTS rather than by a
+     // transcribed block: this fault stopped injecting once the offset variable
+     // was renamed (`from` -> `fromOffset`, when the wire's own `from` arrived
+     // beside it) and the writeFrames call grew arguments.
+     (s) => {
+       const stat = s.match(/ {2}let (\w+) = 0;\n {2}try \{ \1 = \(await fsp\.stat\(transcript\)\)\.size; \} catch \{\}\n/);
+       const write = s.match(/ {2}const w = await writeFrames\([^)]*\);\n {2}if \(!w\.ok\) return \{ ok: false, wrote: false, why: w\.why \};\n/);
+       if (!stat || !write) return s;
+       return s.replace(stat[0], "").replace(write[0], write[0] + stat[0]);
+     }],
     ["inbox", "a missing transcript sent blind instead of refused",
      (s) => s.replace(/      why: `no readable transcript[\s\S]*?\n    \};/,
                       "      why: `unused`,\n    };").replace(/  if \(!transcript \|\| !fs\.existsSync\(transcript\)\) \{/, "  if (false) {")],
@@ -547,15 +813,15 @@ async function selftest() {
     // WRITER sends something else. Nothing in the FRAME half can see this, and
     // the real socket answers it with silence.
     ["inbox", "writeFrames sends bytes OTHER than the declared frames (FRAME cannot see this)",
-     (s) => s.replace(/sock\.write\(inboxWireBytes\(token, text\), \(err\) => \{/,
+     (s) => s.replace(/sock\.write\(inboxWireBytes\([^)]*\), \(err\) => \{/,
                       'sock.write(JSON.stringify({ type: "message", text }) + "\\n", (err) => {')],
     ["inbox", "writeFrames drops the auth frame from the bytes while still declaring it",
-     (s) => s.replace(/sock\.write\(inboxWireBytes\(token, text\), \(err\) => \{/,
-                      'sock.write(inboxFrames(token, text)[1] + "\\n", (err) => {')],
+     (s) => s.replace(/sock\.write\(inboxWireBytes\([^)]*\), \(err\) => \{/,
+                      'sock.write(inboxFrames(token, text, from, priority)[1] + "\\n", (err) => {')],
     ["inbox", "the malformed-record type guard removed, so fs.existsSync is handed a non-string (DEP0187, and a throw to come)",
      (s) => s.replace(/  if \(bad\.length\) \{/, "  if (false) {")],
     ["inbox", "the diagnosis counts stripped from the unconfirmed refusal - both failure stories read alike",
-     (s) => s.replace(/`Diagnosis: from offset \$\{from\} the transcript grew \$\{grew\} bytes holding \$\{scan\.enqueues\} enqueue\(s\), ` \+\n      `\$\{scan\.withContent\} with content\. ` \+\n/, "")],
+     (s) => s.replace(/`Diagnosis: from offset \$\{\w+\} the transcript grew \$\{grew\} bytes holding \$\{scan\.enqueues\} enqueue\(s\), ` \+\n      `\$\{scan\.withContent\} with content\. ` \+\n/, "")],
     ["inbox", "scanEnqueues stops counting content-less enqueues, so \"arrived but invisible\" is unreportable",
      (s) => s.replace(/    enqueues\+\+;\n    if \(typeof rec\.content !== "string"\) continue;\n    withContent\+\+;/,
                       '    if (typeof rec.content !== "string") continue;\n    enqueues++;\n    withContent++;')],
@@ -563,8 +829,69 @@ async function selftest() {
      (s) => s.replace(/why: `the messaging socket \$\{socketPath\} is gone \(the session exited\)`/,
                       'why: "the session record carries no messaging socket"')],
 
+    // ---- from / priority: the two fields this round put on the wire ----
+    ["inbox", "the device name dropped from the frame, so every message is from \"unknown\" again",
+     (s) => s.replace(/      \.\.\.\(from \? \{ from \} : \{\}\),\n/, "")],
+    ["inbox", "the device name NESTED under message, where the handler never looks",
+     (s) => s.replace(/      \.\.\.\(from \? \{ from \} : \{\}\),\n      \.\.\.\(priority \? \{ priority \} : \{\}\),\n      message: \{ role: "user", content: text \},/,
+                      '      message: { role: "user", content: text, from, priority },')],
+    ["inbox", "an UNKNOWN sender sent as from:\"\" instead of omitted - the ?? default never fires and the name is empty",
+     (s) => s.replace(/\.\.\.\(from \? \{ from \} : \{\}\),/, "from,")],
+    ["inbox", "an absent priority sent as priority:\"\", which the receiver does not accept",
+     (s) => s.replace(/\.\.\.\(priority \? \{ priority \} : \{\}\),/, "priority,")],
+    ["inbox", "the priority dropped from the frame while still being declared a parameter",
+     (s) => s.replace(/      \.\.\.\(priority \? \{ priority \} : \{\}\),\n/, "")],
+    ["inbox", "inboxWireBytes stops FORWARDING from/priority - inboxFrames is perfect and the wire is not",
+     (s) => s.replace(/    inboxFrames\(token, text, from, priority\)\.map/, "    inboxFrames(token, text).map")],
+    ["inbox", "writeFrames stops forwarding them one layer further in",
+     (s) => s.replace(/sock\.write\(inboxWireBytes\(token, text, from, priority\)/,
+                      "sock.write(inboxWireBytes(token, text)")],
+    ["inbox", "postToSessionInbox stops forwarding them to writeFrames",
+     (s) => s.replace(/await writeFrames\(socketPath, token, text, from, priority\)/,
+                      "await writeFrames(socketPath, token, text)")],
+    ["inbox", "the quoted receiver line deleted, so the host's priority set is bound to nothing",
+     (s) => s.replace(/\/\/   let a = e\.priority===[^\n]*\n\/\/[^\n]*\n/, "")],
+
+    ["host", "the device name never computed - deliverTextToSession posts anonymously again",
+     (s) => s.replace(/  const from = via \? deviceNameFor\(via\) : "";/, '  const from = "";')],
+    ["host", "a device name INVENTED rather than resolved, which is confidently wrong",
+     (s) => s.replace(/  const from = via \? deviceNameFor\(via\) : "";/, '  const from = "Deckhand-0000";')],
+    ["host", "the name computed and then not handed to the inbox",
+     (s) => s.replace(/postToSessionInbox\(record, text, \{ from, priority: pri\.priority \}\)/,
+                      "postToSessionInbox(record, text, { priority: pri.priority })")],
+    ["host", "the priority computed and then not handed to the inbox",
+     (s) => s.replace(/postToSessionInbox\(record, text, \{ from, priority: pri\.priority \}\)/,
+                      "postToSessionInbox(record, text, { from })")],
+    ["host", "the success line stops naming the device, so the attribution is unobservable from the Mac",
+     (s) => s.replace(/\$\{from \|\| 'an unnamed device \(from omitted, so it reads as "unknown"\)'\} /, "")],
+    ["host", "the success line stops naming WHY that priority applied",
+     (s) => s.replace(/at priority \$\{pri\.priority\} \[\$\{pri\.why\}\]/, "at priority ${pri.priority}")],
+    ["host", "handleTypedPrompt stops threading `via`, so the board that was tapped is unnameable",
+     (s) => s.replace(/await deliverTextToSession\(id12, v\.text, "Prompt", via\);/,
+                      'await deliverTextToSession(id12, v.text, "Prompt");')],
+    ["host", "the dictation path stops threading it, so a spoken message is the one that arrives from nothing",
+     (s) => s.replace(/  await deliverTextToSession\(target, text, "Voice", via\);/,
+                      "  await deliverTextToSession(target, text, \"Voice\");")],
+    ["host", "DECKHAND_INBOX_PRIORITY passed through unvalidated to a receiver that rewrites it in silence",
+     (s) => s.replace(/const INBOX_PRIORITY_ENV = INBOX_PRIORITIES\.includes\(INBOX_PRIORITY_ENV_RAW\)\n  \? INBOX_PRIORITY_ENV_RAW\n  : "";/,
+                      "const INBOX_PRIORITY_ENV = INBOX_PRIORITY_ENV_RAW;")],
+    ["host", "the default moved to \"now\", so every device message interrupts the turn in progress",
+     (s) => s.replace(/const INBOX_PRIORITY_DEFAULT = "next";/, 'const INBOX_PRIORITY_DEFAULT = "now";')],
+    ["host", "a fourth priority the receiver does not accept added to the host's set",
+     (s) => s.replace(/const INBOX_PRIORITIES = \["now", "next", "later"\];/,
+                      'const INBOX_PRIORITIES = ["now", "next", "later", "urgent"];')],
+    ["host", "the bad-value boot line loses the value it is refusing",
+     (s) => s.replace(/`Inbox: DECKHAND_INBOX_PRIORITY=\$\{JSON\.stringify\(INBOX_PRIORITY_ENV_RAW\)\} is not one of `/,
+                      "`Inbox: that priority is unusable `")],
+    ["host", "resolveInboxPriority stops saying why, so precedence is untraceable",
+     (s) => s.replace(/return \{ priority: INBOX_PRIORITY_ENV, why: "DECKHAND_INBOX_PRIORITY" \};/,
+                      "return { priority: INBOX_PRIORITY_ENV };")],
+    ["host", "resolveInboxPriority falls back to a literal that can drift from the named default",
+     (s) => s.replace(/return \{ priority: INBOX_PRIORITY_DEFAULT, why: "the default" \};/,
+                      'return { priority: "next", why: "the default" };')],
+
     ["host", "the inbox call removed, so every message goes back to the clipboard",
-     (s) => s.replace(/    r = await postToSessionInbox\(record, text\);/,
+     (s) => s.replace(/    r = await postToSessionInbox\(record, text[^;]*\);/,
                       "    r = { ok: false, why: \"disabled\" };")],
     // Textually MOVED, not disabled: the ordering assertion is positional, so a
     // fault that only neutered the guard would be caught by a different
@@ -597,8 +924,8 @@ async function selftest() {
                       '    cwd = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, `${sessionId}.json`), "utf8")).cwd || undefined;')],
 
     ["host", "the try/catch removed, so a throw escapes with no fallback behind it",
-     (s) => s.replace(/  let r;\n  try \{\n    r = await postToSessionInbox\(record, text\);\n  \} catch \(err\) \{\n    r = \{ ok: false, why: `the inbox threw \(\$\{\(err\?\.message \|\| String\(err\)\)\.split\("\\n"\)\[0\]\}\)` \};\n  \}/,
-                      "  const r = await postToSessionInbox(record, text);")],
+     (s) => s.replace(/  let r;\n  try \{\n    r = (await postToSessionInbox\(record, text[^;]*\));\n  \} catch \(err\) \{\n    r = \{ ok: false, why: `the inbox threw \(\$\{\(err\?\.message \|\| String\(err\)\)\.split\("\\n"\)\[0\]\}\)` \};\n  \}/,
+                      "  const r = $1;")],
     ["host", "a throw swallowed into a nameless failure",
      (s) => s.replace(/r = \{ ok: false, why: `the inbox threw \(\$\{\(err\?\.message \|\| String\(err\)\)\.split\("\\n"\)\[0\]\}\)` \};/,
                       "r = { ok: false };")],

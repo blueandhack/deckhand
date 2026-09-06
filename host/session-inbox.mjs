@@ -69,26 +69,83 @@ export const INBOX_WRITE_TIMEOUT_MS = 3000;
 export const INBOX_CONFIRM_TIMEOUT_MS = 5000;
 export const INBOX_CONFIRM_POLL_MS = 120;
 
+// -----------------------------------------------------------------------------
+// WHAT THE FRAME CAN AND CANNOT SET, read out of the binary rather than guessed
+// -----------------------------------------------------------------------------
+// Disassembled from the `uds-messaging` handler in
+// /opt/homebrew/Caskroom/claude-code/2.1.236/claude - `strings -a` and grep for
+// `verifiedPeerPid` puts you on the line. It builds the queue entry as:
+//
+//   let a = e.priority==="now"||e.priority==="next"||e.priority==="later"
+//             ? e.priority : "next";
+//   let u = bXt({kind:"peer", from: e.from ?? "unknown",
+//                ...(t!==undefined && {verifiedPeerPid:t}),
+//                ...(c && {selfSent:c}),
+//                ...($Ko(e.msg_id) && {msg_id:e.msg_id}), ...}, l, o),
+//       d = {mode:"prompt", agentId:Di(), value:l, uuid:i, priority:a,
+//            origin:u, skipSlashCommands:true, isMeta:true};
+//
+// Three things follow, and all three are settled AT THE SOURCE rather than
+// inferred from behaviour:
+//
+//   1. `origin.kind` is the literal "peer" and `isMeta` is the literal `true`.
+//      Neither reads anything off the frame, and `isMeta` is what makes the UI
+//      hide the entry. SO NO FRAME CAN MAKE A DEVICE MESSAGE RENDER AS THE
+//      USER'S OWN TYPING. That is not fixable from this side, and this module
+//      does not pretend otherwise.
+//   2. The frame's settable fields are `from`, `priority`, `msg_id`,
+//      `file_attachments` (plus `uuid` and `session_id`, which are plumbing).
+//      This module sends the first two.
+//   3. `from` is not decoration. `iUp(origin)` is
+//      `verifiedPeerPid!==undefined || from!=="unknown"`, and the admission
+//      guard then rate-limits on
+//      `senderKey = from!=="unknown" ? "from:"+from : "pid:"+verifiedPeerPid`.
+//      So naming the board moves two cabled boards out of ONE shared bucket
+//      (this host's pid) into one bucket each - which is what you want, since
+//      they are two people's-worth of independent traffic.
+//
+// THE VERSION IN THAT PATH IS PART OF THE FINDING. A different Claude Code build
+// may parse different fields, so everything optional here is OMITTED when it is
+// not known rather than sent empty: an absent `from` reads as `"unknown"` (the
+// behaviour before this existed, byte for byte), an absent or unrecognised
+// `priority` falls back to "next" INSIDE THE RECEIVER by the line quoted above.
+// Both degrade to exactly today's behaviour on a build that ignores them.
+
 /// The two frames, in order, as strings WITHOUT their newlines.
+///
+/// `from` is the SENDING DEVICE's name ("Deckhand-0528"), not this Mac and not
+/// the session - it is what turns the wrapper Claude sees from "Another Claude
+/// session sent a message" (false, and actively misleading: it was the user, on
+/// their own hardware) into something that names the thing they tapped.
+/// `priority` is "now" | "next" | "later". BOTH ARE OMITTED WHEN EMPTY rather
+/// than sent as "" or null: see the note above on degrading to the old frame.
 ///
 /// Kept as a function rather than inlined at the call site so a checker can
 /// assert the shape it certifies by PARSING this, instead of transcribing a
 /// copy that would keep passing after the real one regressed.
-export function inboxFrames(token, text) {
+export function inboxFrames(token, text, from = "", priority = "") {
   return [
     JSON.stringify({ type: "auth", token }),
-    JSON.stringify({ type: "user", message: { role: "user", content: text } }),
+    JSON.stringify({
+      type: "user",
+      ...(from ? { from } : {}),
+      ...(priority ? { priority } : {}),
+      message: { role: "user", content: text },
+    }),
   ];
 }
 
 /// Exactly the bytes that go on the wire: both frames, each newline-terminated.
-export function inboxWireBytes(token, text) {
-  return Buffer.from(inboxFrames(token, text).map((l) => l + "\n").join(""), "utf8");
+export function inboxWireBytes(token, text, from = "", priority = "") {
+  return Buffer.from(
+    inboxFrames(token, text, from, priority).map((l) => l + "\n").join(""),
+    "utf8"
+  );
 }
 
 // Write the two lines and close. Resolves {ok} / {ok:false, why} - it NEVER
 // throws, because every caller's alternative is the clipboard, not a crash.
-function writeFrames(socketPath, token, text) {
+function writeFrames(socketPath, token, text, from = "", priority = "") {
   return new Promise((resolve) => {
     let done = false;
     const finish = (r) => {
@@ -115,7 +172,7 @@ function writeFrames(socketPath, token, text) {
       // Both lines in ONE write: the server reads line-delimited frames off the
       // stream, so splitting them buys nothing and only widens the window in
       // which the 30s line timer could matter.
-      sock.write(inboxWireBytes(token, text), (err) => {
+      sock.write(inboxWireBytes(token, text, from, priority), (err) => {
         if (err) return finish({ ok: false, why: `write failed: ${err.message}` });
         // end() flushes and half-closes. The write callback firing means the
         // bytes left this process - which, per the note at the top, says
@@ -206,7 +263,14 @@ async function readTailFrom(transcript, from) {
 /// Returns {ok:true, ms} or {ok:false, why, wrote} - `wrote` distinguishing
 /// "never reached the socket" from "written but unconfirmed", which are
 /// different problems and must not read the same in the log.
-export async function postToSessionInbox(record, text, now = Date.now) {
+///
+/// `from` and `priority` ride into inboxFrames(); see its note. They are an
+/// OPTIONS BAG rather than two more positionals because `now` (the clock seam
+/// the checker fakes) was already the third argument, and a caller that got the
+/// order wrong would send the clock as the device name - a mistake the receiver
+/// answers with silence, which is the failure mode this whole module exists to
+/// remove.
+export async function postToSessionInbox(record, text, { from = "", priority = "", now = Date.now } = {}) {
   const started = now();
   const socketPath = record?.inbox?.socket;
   const token = record?.inbox?.token;
@@ -263,17 +327,25 @@ export async function postToSessionInbox(record, text, now = Date.now) {
   }
   // Offset BEFORE the write, so an older enqueue of the same text - a retry, or
   // the same message sent twice - cannot be mistaken for this one.
-  let from = 0;
-  try { from = (await fsp.stat(transcript)).size; } catch {}
+  //
+  // `fromOffset`, NOT `from`. It was `from` until the wire's own `from` (the
+  // sending device's name) arrived beside it, and the two then collided in one
+  // scope: `writeFrames(socketPath, token, text, from, priority)` would have put
+  // A BYTE OFFSET on the wire as the device name. Node refused the file outright
+  // over the redeclaration, which is the only reason that was a five-second
+  // mistake instead of a silent one - the receiver would have taken "4831" as a
+  // sender name without a word.
+  let fromOffset = 0;
+  try { fromOffset = (await fsp.stat(transcript)).size; } catch {}
 
-  const w = await writeFrames(socketPath, token, text);
+  const w = await writeFrames(socketPath, token, text, from, priority);
   if (!w.ok) return { ok: false, wrote: false, why: w.why };
 
   const deadline = now() + INBOX_CONFIRM_TIMEOUT_MS;
   let scan = { found: false, enqueues: 0, withContent: 0 };
   let grew = 0;
   for (;;) {
-    const tail = await readTailFrom(transcript, from);
+    const tail = await readTailFrom(transcript, fromOffset);
     grew = Buffer.byteLength(tail, "utf8");
     scan = scanEnqueues(tail, text);
     if (scan.found) return { ok: true, wrote: true, ms: now() - started };
@@ -292,7 +364,7 @@ export async function postToSessionInbox(record, text, now = Date.now) {
     why:
       `written to ${socketPath} but no enqueue carrying this text appeared within ${INBOX_CONFIRM_TIMEOUT_MS}ms ` +
       `- treat as NOT delivered (a malformed frame is accepted and discarded silently). ` +
-      `Diagnosis: from offset ${from} the transcript grew ${grew} bytes holding ${scan.enqueues} enqueue(s), ` +
+      `Diagnosis: from offset ${fromOffset} the transcript grew ${grew} bytes holding ${scan.enqueues} enqueue(s), ` +
       `${scan.withContent} with content. ` +
       (scan.enqueues === 0
         ? "0 enqueues means it NEVER ARRIVED - suspect the frame or the token."
