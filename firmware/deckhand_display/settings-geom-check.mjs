@@ -32,24 +32,119 @@
 //
 //   node settings-geom-check.mjs             check both boards
 //   node settings-geom-check.mjs --selftest  prove the checker has teeth
-import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, DIR, evalInt, fieldBox, fnBody, stripComments,
-         lineHB, mcBox, PANEL, preflight, tlBox, widthB } from "./geom-common.mjs";
+import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, deadGuards, DIR,
+         evalInt, faultChildEpilogue, fieldBox, fnBody, lineHB, mcBox, PANEL, preflight,
+         readSource, setSourceFault, SOURCE_FAULT_INDEX, splitArgs, stripComments,
+         sweepSourceFaults, tlBox, widthB } from "./geom-common.mjs";
 import fs from "fs";
+
+// ---------------------------------------------------------------------------
+// SOURCE FAULTS. Same harness as the other two geom checkers, and the same
+// reason: this file's --selftest perturbs constants, while a large part of what
+// it asserts reads keyboard.ino's and deckhand_display.ino's own text. A review
+// measured three that got through at 1086/1086 - `return;` at the top of
+// tickKbFlash and `if (0)` around loop()'s call to it (a pressed key then stays
+// highlighted until the next full repaint), and `nh = 1` in kbClearBubble, which
+// brings back the orange corner specks 3cb63fb fixed on this same branch.
+// ---------------------------------------------------------------------------
+const SOURCE_FAULTS = [
+  ["tickKbFlash() gets `return;` first (the flash is never released)",
+    "keyboard.ino", (t) => t.replace(/(void tickKbFlash\(\)\s*\{)/, "$1\n  return;"),
+    "every return in tickKbFlash() is guarded"],
+  ["loop()'s call to tickKbFlash() is left dangling under an `if (0)`",
+    "deckhand_display.ino", (t) => t.replace(/\n(\s*)tickKbFlash\(\);/, "\n$1if (0)\n$1tickKbFlash();"),
+    "is a statement of loop()'s own"],
+  ["kbClearBubble's corner notch is cleared one pixel high (the orange specks return)",
+    "keyboard.ino", (t) => t.replace(/(nh\s*=\s*)cardBot - ny/, "$11"),
+    "reaches the card's own bottom edge"],
+  ["the notch fill starts at the bubble's top rather than the later of the two",
+    "keyboard.ino", (t) => t.replace(/(ny\s*=\s*)by > notchY \? by : notchY/, "$1by"),
+    "starts at the LATER of the bubble's top and the notch row"],
+  // ---- Task 11: one surface, one state, one draft ----
+  // Each of these four LOCATES ITS TARGET STRUCTURALLY - by the function's own
+  // signature or by the expression it perturbs - and not by a transcribed line.
+  // Two faults on this branch silently stopped injecting when their anchors
+  // moved, which is a selftest reporting teeth it no longer has.
+  ["composeTouch gets its session guard back at the TOP (every tap swallowed once the ask expires, CLOSE included)",
+    "compose.ino", (t) => t.replace(/(bool composeTouch\(int sx, int sy\)\s*\{\n\s*const int idx = kbSessionIdx;)/,
+                                    "$1\n  if (idx < 0 || idx >= sessionCount) return true;"),
+    "no session-guarded return above it"],
+  ["drawCompose gets its early return back (the dead ask's reply buttons stay on the glass)",
+    "compose.ino", (t) => t.replace(/(void drawCompose\(\)\s*\{\n\s*const int idx = kbSessionIdx;)/,
+                                    "$1\n  if (idx < 0 || idx >= sessionCount) return;"),
+    "no early return on a missing session"],
+  ["composeOpenKeyboard clears the draft, so TYPE... throws away what the chips built",
+    "compose.ino", (t) => t.replace(/(void composeOpenKeyboard\(\)\s*\{)/, "$1\n  kbLen = 0;"),
+    "does not clear the draft"],
+  ["the panel's SEND drops the whole surface again instead of leaving a receipt",
+    "compose.ino", (t) => t.replace(/if \(sent\) composeShowSentState\(kbText\);/, "if (sent) closeCompose();"),
+    "leaves the RECEIPT and does NOT close"],
+  ["the keyboard's left key goes back to being destructive, beside SEND",
+    "keyboard.ino", (t) => t.replace(/back \? "BACK" : \(draft \? "DISCARD" : "CANCEL"\)/,
+                                     "(draft ? \"DISCARD\" : \"CANCEL\")"),
+    "left key is BACK whenever there is a panel"],
+  // ---- Task 12: the recents ring ----
+  // Each of these LOCATES ITS TARGET STRUCTURALLY - by the declaration it
+  // re-literalises, by the expression it perturbs, or by a function's own
+  // signature - and never by a transcribed line.
+  ["composeRecent's row is re-literalised as 151, so the ring and KB_MAX_BYTES can drift apart",
+    "compose.ino", (t) => t.replace(/(char composeRecent\[\d+\]\[)KB_MAX_BYTES \+ 1(\])/, "$1151$2"),
+    "is KB_MAX_BYTES + 1"],
+  ["composeRemember stops deduping, so a repeat takes a second of the four slots",
+    "compose.ino", (t) => t.replace(/strcmp\(composeRecent\[i\], text\) == 0/, "false"),
+    "OWN BODY dedupes"],
+  ["sendTypedAnswerToHost remembers the draft at the TOP, above its own early returns",
+    "keyboard.ino", (t) => t.replace(/(bool sendTypedAnswerToHost\(\)\s*\{)/,
+                                     "$1\n  composeRemember(kbText);"),
+    "past every early return"],
+  ["composeTouch's recents branch stops asking whether the row is on the glass at all",
+    "compose.ino", (t) => t.replace(/composeRecentsFit\(\) && sy >= composeRecentY\(\)/,
+                                    "sy >= composeRecentY()"),
+    "asks composeRecentsFit()"],
+  ["composeUseRecent sends the recalled line instead of putting it in the draft",
+    "compose.ino", (t) => t.replace(/(void composeUseRecent\(int k\)\s*\{)/,
+                                    "$1\n  sendTypedAnswerToHost();"),
+    "sends NOTHING"],
+];
+if (SOURCE_FAULT_INDEX >= 0) {
+  const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
+  if (!f) { console.log("ANCHOR MOVED"); process.exit(2); }
+  setSourceFault(f[1], f[2]);
+}
 preflight();
 
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // The board header FIRST, then deckhand_display.ino seeded with it - the order the
 // compiler sees, and what makes the derived P1_/P2_/P3_/CFM_ offsets resolve.
-const B = {};
-for (const b of [1, 2]) B[b] = consts("deckhand_display.ino", consts(HDR[b]));
+const B = {}, CMP = {};
+for (const b of [1, 2]) {
+  B[b] = consts("deckhand_display.ino", consts(HDR[b]));
+  // compose.ino's OWN const ints (COMPOSE_PROMPT_LINES, COMPOSE_COLS,
+  // COMPOSE_KEY_GAP, ...), parsed in the compiler's order with the header and the
+  // main file already in scope - COMPOSE_PROMPT_LINES is derived from
+  // COMPOSE_PROMPT_H and KB_LINE_PITCH, so the seed is not optional. Parsed
+  // INSIDE this loop rather than after it because consts() tracks the board from
+  // the last header it saw.
+  CMP[b] = consts("compose.ino", B[b]);
+}
 const SET_CACHE = cacheSizes("deckhand_display.ino");   // the settings caches live in the main file
 // The main file's own TEXT, for a claim that is about a DECLARATION rather than
 // about a constant's value.
-const SRC_MAIN = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+const SRC_MAIN = readSource(`deckhand_display.ino`);
+// KB_MAX_BYTES comes out of the PARSED CONSTANT TABLE, not out of a regex over
+// the text, and that is the difference between an assertion geom-sweep can
+// perturb and one it cannot. It moved into deckhand_display.ino with the buffer
+// it sizes, which put it inside the sweep's reach for the first time - and a
+// second text parse beside the table would have gone on reading 150 while the
+// sweep moved the table's copy, reporting the constant as unguarded when the
+// assertion below is what guards it. B is per board, so this is asserted per
+// board too, at the keyboard block.
+const KB_MAX_BYTES = B[1].KB_MAX_BYTES;
+const KB_TEXT_DECL = (SRC_MAIN.match(/char kbText\[([^\]]+)\]\s*;/) || [])[1] || "";
 // Charge-estimator thresholds, PARSED out of power.ino rather than transcribed -
 // the same drift discipline batt-trend-check.py uses, and for the same reason: the
 // widest string the battery row can draw is a function of these two.
-const POWER_SRC = fs.readFileSync(`${DIR}/power.ino`, "utf8");
+const POWER_SRC = readSource(`power.ino`);
 const POWER_CONST = Object.fromEntries(["BATT_CHG_KNEE_MV", "BATT_FULL_MV"].map(n => {
   const m = POWER_SRC.match(new RegExp(`${n}\\s*=\\s*(\\d+)`));
   if (!m) throw new Error(`${n} not found in power.ino - was it renamed?`);
@@ -76,7 +171,7 @@ const T_META = 1, T_BODY = 2, T_HEAD = 3;
 // A literal resolves to itself, so reverting the fix is still MEASURED (and fails
 // the cell assertion below on board 2), and a token the table does not know
 // THROWS rather than defaulting to a number that would quietly pass.
-const READER_SRC = fs.readFileSync(`${DIR}/reader.ino`, "utf8");
+const READER_SRC = readSource(`reader.ino`);
 const READER_STEP = (() => {
   const m = READER_SRC.match(/int lineH\s*=\s*isCode\s*\?\s*([A-Za-z_0-9]+)\s*:\s*([A-Za-z_0-9]+)\s*;/);
   if (!m) throw new Error("settings-geom-check: drawReader()'s `int lineH = isCode ? .. : ..;` " +
@@ -99,7 +194,7 @@ const T_HERO = 4;
 // board header, so it is parsed from there: 6 digits at T_HERO is the one width on
 // that screen that cannot be trimmed, and a checker that transcribed the 6 would
 // certify nothing.
-const PAIRING_INO = fs.readFileSync(`${DIR}/pairing.ino`, "utf8");
+const PAIRING_INO = readSource(`pairing.ino`);
 const PAIR_CODE_DIGITS = (() => {
   const m = PAIRING_INO.match(/#define\s+PAIR_CODE_DIGITS\s+(\d+)/);
   if (!m) throw new Error("settings-geom-check: PAIR_CODE_DIGITS not found in pairing.ino - " +
@@ -141,6 +236,27 @@ function fnSrc(src, name) {
   return "";
 }
 
+// THE ACTION ROW'S GAP, READ OUT OF uiActionRow()'s OWN BODY. The mirror below
+// recomputes that function's column arithmetic, and a transcribed 8 would make
+// the mirror agree with itself no matter what the firmware drew. Bound to the
+// FUNCTION BODY through fnSrc's brace matching, not to the file: `const int gap`
+// could be declared by any neighbour. A THROW rather than a chk, the same shape
+// SPINE_ARGS uses - if the function is renamed, the fix is to move this parse
+// with it, not to leave the assertions below looking at nothing.
+// THE GAP'S VALUE IS ASSERTED ELSEWHERE: docs/design/compose/check.mjs compares
+// this same parse against the mock's ACT_GAP, and that is where moving the gap
+// fails by name. Here it only keeps the mirror describing the row the firmware
+// actually draws.
+const ACT_GAP = (() => {
+  const src = fnSrc(SRC_MAIN, "int uiActionRow");
+  if (!src.length) throw new Error("settings-geom-check: uiActionRow() not found in " +
+    "deckhand_display.ino - the action row's columns come from there, so move this parse with it");
+  const m = src.match(/const int gap\s*=\s*(\d+)/);
+  if (!m) throw new Error("settings-geom-check: uiActionRow()'s body no longer declares " +
+    "`const int gap = <n>` - the column mirror below would be measuring itself");
+  return +m[1];
+})();
+
 // THE SEVERITY SPINE'S DRAW GEOMETRY, READ OUT OF drawSeverityAction() rather than
 // restated. The four assertions this replaced constrained CONSTANTS only, under a
 // comment at the draw site claiming they bounded the draw CALL - and they did not:
@@ -150,7 +266,7 @@ function fnSrc(src, name) {
 // as everywhere else in this repo, arriving from a new direction: a checker must
 // PARSE THE SITE IT CERTIFIES, the way sessions-geom-check.mjs parses the TYPE chip's
 // hit-test slack term out of sessions.ino instead of restating a 24.
-const SETTINGS_INO = fs.readFileSync(`${DIR}/settings.ino`, "utf8");
+const SETTINGS_INO = readSource(`settings.ino`);
 const SPINE_ARGS = (() => {
   const src = SETTINGS_INO.replace(/^[ \t]*\/\/.*$/gm, "");   // a commented-out call is not a call
   const i = src.indexOf("void drawSeverityAction(");
@@ -209,11 +325,343 @@ function spineArg(c, n) {
 // repo is documented to be invoked (`node firmware/deckhand_display/...`). A
 // verification tool that only runs from one directory is a tool people stop
 // running.
-const HOST_CAP = +fs.readFileSync(`${DIR}/../../host/voice-answer.mjs`, "utf8")
+const HOST_CAP = +readSource(`../../host/voice-answer.mjs`)
   .match(/ANSWER_TEXT_MAX_BYTES\s*=\s*(\d+)/)[1];
-const KB_MAX_BYTES = +fs.readFileSync(`${DIR}/keyboard.ino`, "utf8")
-  .match(/KB_MAX_BYTES\s*=\s*(\d+)/)[1];
-const HIST_ARENA = +fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8")
+const KB_SRC = readSource(`keyboard.ino`);
+// THE REPLY PANEL'S SOURCE, and its constants. compose.ino is parsed with each
+// board header as the seed, in the compiler's own order, because
+// COMPOSE_PROMPT_LINES is derived from COMPOSE_PROMPT_H and KB_LINE_PITCH.
+const COMPOSE_SRC = readSource(`compose.ino`);
+
+// HOW MANY CONTROLS THE PANEL'S ACTION ROW DRAWS, parsed out of
+// drawComposeActions' own labels[] initialiser. Hoisted here rather than left
+// inside the board-1 structural block because COMPOSE_ACT_MAX has to be checked
+// on BOTH boards: geom-sweep.mjs perturbs a constant per board, and an assertion
+// that only runs on board 1 leaves that board-2 constant read-but-unguarded -
+// which is exactly what the sweep reported for it.
+const COMPOSE_ACT_COLS = (() => {
+  const src = fnSrc(COMPOSE_SRC, "void drawComposeActions");
+  if (!src.length) throw new Error("settings-geom-check: drawComposeActions() not found in " +
+    "compose.ino - the reply panel's action row comes from there, so move this parse with it");
+  const m = src.match(/labels\[(\d+)\]\s*=\s*\{([^}]*)\}[^;]*;\s*$/m)
+         || src.match(/const char\* labels\[(\d+)\]\s*=\s*\{/);
+  const all = [...src.matchAll(/labels\[(\d+)\]\s*=\s*\{/g)].map((x) => +x[1]);
+  if (!all.length) throw new Error("settings-geom-check: drawComposeActions() no longer declares " +
+    "a labels[n] initialiser - the row's width would be transcribed");
+  return Math.max(...all);
+})();
+
+// THE PANEL'S BAND TOPS, READ OUT OF THE FIRMWARE'S OWN ACCESSORS. compose.ino
+// keeps its vertical column as a chain of `int composeXxxY() { return <expr>; }`
+// so that the draw and the hit test read ONE source; this evaluates those
+// expressions against a board's constant table, recursing through the chain.
+//
+// A MIRROR THAT RECOMPUTED THE STACK HERE WOULD BIND NOTHING - it would agree
+// with itself while the panel drew something else, which is this repo's
+// fourth verification rule in as many words. Reordering two bands in
+// compose.ino, or changing one gap, moves the walk below with it.
+//
+// An identifier the board's table does not know THROWS rather than resolving to
+// 0: a silent 0 would slide the whole column up and the closure assertions would
+// then be measuring a stack that does not exist.
+const COMPOSE_ACC = (() => {
+  const out = {};
+  for (const m of stripComments("compose.ino")
+        .matchAll(/\bint\s+(compose[A-Za-z0-9_]*)\(\)\s*\{\s*return\s+([^;]+);\s*\}/g))
+    out[m[1]] = m[2].trim();
+  if (!Object.keys(out).length)
+    throw new Error("settings-geom-check: compose.ino declares no `int composeXxxY() { return ...; }` " +
+                    "accessors - the reply panel's column comes from those, so move this parse with them " +
+                    "rather than leaving the walk below looking at nothing");
+  return out;
+})();
+function composeAcc(b, name, seen = new Set()) {
+  if (!(name in COMPOSE_ACC))
+    throw new Error(`settings-geom-check: compose.ino has no accessor ${name}() - if the panel's ` +
+                    `column was renamed, move this walk with it`);
+  if (seen.has(name))
+    throw new Error(`settings-geom-check: compose.ino's ${name}() is cyclic through ${[...seen].join(" -> ")}`);
+  seen.add(name);
+  let e = COMPOSE_ACC[name];
+  // Nested accessors first, then the constants. Both are substituted textually
+  // and the result is evaluated by geom-common's C-integer evaluator, so `/`
+  // truncates the way the firmware's does.
+  e = e.replace(/([A-Za-z_]\w*)\s*\(\s*\)/g, (m, fn) => `(${composeAcc(b, fn, new Set(seen))})`);
+  e = e.replace(/[A-Za-z_]\w*/g, (id) => {
+    if (id in CMP[b]) return String(CMP[b][id]);
+    throw new Error(`settings-geom-check: compose.ino's ${name}() names ${id}, which is not a ` +
+                    `constant board ${b} declares - a silent 0 here would slide the whole column`);
+  });
+  return evalInt(e);
+}
+// KB_MAX_BYTES MOVED OUT OF keyboard.ino and into deckhand_display.ino, beside
+// the kbText buffer it sizes - the cap and the array are one fact, and the array
+// has to be declared in the file the build concatenates FIRST so compose.ino can
+// name it as well. Parsed from there, with the array's own declaration read back
+// out of the SAME file and required to be expressed in terms of the cap: a
+// re-literalised `char kbText[151]` is exactly how the two drift when the cap
+// moves, and it drifts silently in the direction that overflows.
+
+
+// B1. THE DRAWN KEY'S VERTICAL INSET, READ OUT OF THE TWO FUNCTIONS THAT DRAW
+// IT. `const drawnKeyH = c.KB_ROW_H - 4;` transcribed the 4, and the whole
+// drawn-versus-tested split below - the aspect cap, the corner-loss share, the
+// TAP_MIN split, and B7's new cell claim - is arithmetic ON that number. Moving
+// the firmware's inset to 6 would have left every one of them green while
+// describing a key the firmware no longer draws.
+//
+// BOTH drawing sites are parsed and they must AGREE. drawKbKey() insets the
+// character rows and drawKbRow3() insets the pager row, independently, in two
+// different statements; a checker that read only one of them would describe half
+// the keyboard. A THROW rather than a chk, the same shape ACT_GAP and SPINE_ARGS
+// use: if a function is renamed the fix is to move this parse with it, not to
+// leave the split's arithmetic looking at nothing.
+const KEY_INSET = (() => {
+  const sites = [
+    ["drawKbKey", /uiKeyCap\([^;]*?KB_ROW_H\s*-\s*(\d+)/],
+    ["drawKbRow3", /\bh\s*=\s*KB_ROW_H\s*-\s*(\d+)/],
+  ];
+  const got = sites.map(([name, re]) => {
+    const src = fnSrc(KB_SRC, `void ${name}`);
+    if (!src.length) throw new Error(`settings-geom-check: ${name}()'s body not found in ` +
+      `keyboard.ino - the drawn key's height comes from there, so move this parse with it`);
+    const m = src.match(re);
+    if (!m) throw new Error(`settings-geom-check: ${name}()'s OWN BODY no longer insets the ` +
+      `drawn key as "KB_ROW_H - <n>" - every drawn-versus-tested assertion below would be ` +
+      `measuring a key the firmware does not draw`);
+    return +m[1];
+  });
+  if (got[0] !== got[1]) throw new Error(`settings-geom-check: drawKbKey() insets the drawn key ` +
+    `by ${got[0]} and drawKbRow3() by ${got[1]} - the pager row and the character rows would be ` +
+    `drawn at different heights, and every assertion here describes only one of them`);
+  return got[0];
+})();
+
+// B8. ROW 3'S THREE KEYS, PARSED. The page key's label is the only one that
+// CHANGES ("?123" / "$%*" / "ABC"), so it is the only one whose fit depends on
+// which page is up - and nothing measured any of them. The cell counts come out
+// of keyboard.ino's own `= n * KB_PITCH` declarations rather than the 2 and 6
+// this file's row-3 message already transcribed; the labels come out of
+// KB_PAGE_LABEL. Both are throws, not chks: a rename means moving the parse.
+const KB_ROW3 = (() => {
+  const cells = ["KB_R3_PAGE_W", "KB_R3_SPACE_W"].map(n => {
+    const m = KB_SRC.match(new RegExp(`const int ${n}\\s*=\\s*(\\d+)\\s*\\*\\s*KB_PITCH`));
+    if (!m) throw new Error(`settings-geom-check: ${n} is no longer declared as ` +
+      `"<n> * KB_PITCH" in keyboard.ino - row 3's key widths would be transcribed`);
+    return +m[1];
+  });
+  const lm = KB_SRC.match(/const char\* KB_PAGE_LABEL\[\d+\]\s*=\s*\{([^}]*)\}/);
+  if (!lm) throw new Error("settings-geom-check: KB_PAGE_LABEL's initialiser not found in " +
+    "keyboard.ino - the widest page label is what row 3's first key has to hold");
+  const labels = [...lm[1].matchAll(/"([^"]*)"/g)].map(m => m[1]);
+  if (!labels.length) throw new Error("settings-geom-check: KB_PAGE_LABEL parsed to no labels");
+  return { pageCells: cells[0], spaceCells: cells[1], labels };
+})();
+
+// B9. ROW 3'S HORIZONTAL INSET, READ OUT OF drawKbRow3()'S OWN BODY - the
+// horizontal half of the drawn/tested split that row NEVER HAD. It drew its three
+// keys at the FULL cell (KB_R3_PAGE_W, KB_R3_SPACE_W and `tft.width() - x`) while
+// the character rows draw KB_KEY_W inside a KB_PITCH cell, so once Task 2 made
+// keys filled tiles with no outline the three flush tiles merged into one
+// continuous bar. Nothing measured it because nothing read this function's own
+// widths. A THROW rather than a chk, the same shape KEY_INSET uses next door: if
+// the row is redrawn some other way the fix is to move this parse with it, not to
+// leave the gap assertions below looking at nothing.
+const KB_ROW3_DRAWN = (() => {
+  const src = fnSrc(KB_SRC, "void drawKbRow3");
+  if (!src.length) throw new Error("settings-geom-check: drawKbRow3()'s body not found in " +
+    "keyboard.ino - row 3's drawn widths come from there, so move this parse with it");
+  const w = [...src.matchAll(/uiKeyCap\(\s*x\s*,\s*y\s*,\s*([^,]+?)\s*,/g)].map(m => m[1].trim());
+  if (w.length !== 3) throw new Error(`settings-geom-check: drawKbRow3()'s body makes ${w.length} ` +
+    `uiKeyCap(x, y, <w>, ...) calls, expected 3 (the pager, SPACE and the period) - the row-3 ` +
+    `gap assertions below would be describing a row the firmware does not draw`);
+  return w;
+})();
+
+// THE BUBBLE'S GEOMETRY, PARSED. Its two constants and the row it lands on are
+// what put it clear of the fingertip that is hiding the key. It is now ALWAYS
+// the row above - row 0's bubble overlaps the text card's lower half, which is
+// safe because drawKbText() repaints that card wholesale and kbClearBubble()
+// calls it. What is still not safe is reaching the card's TOP edge or the prompt
+// strip, and the clamp assertions below are what hold that. Restating 2 and
+// KB_ROW_H here would make every geometry assertion below agree with the checker
+// instead of with the firmware.
+// THE TEXT CARD'S CORNER RADIUS, PARSED, and the reason it has a name at all.
+// kbClearBubble() repairs the notches a rounded corner leaves OUTSIDE its own
+// curve, and that repair has to be exactly as wide as the radius the card is
+// DRAWN with. Two 6s - one at drawKbText's uiFillRound and one at the repair -
+// could drift apart in silence, so the firmware names it once and this reads
+// that name rather than restating either. A THROW, not a chk: if the constant
+// moves, the fix is to move this parse with it, not to leave the corner
+// assertions below measuring a radius the card is not drawn at.
+const KB_TEXT_R = (() => {
+  const m = KB_SRC.match(/const int KB_TEXT_R\s*=\s*(\d+)\s*;/);
+  if (!m) throw new Error("settings-geom-check: KB_TEXT_R is not declared in keyboard.ino - the " +
+    "text card's corner radius is what sizes kbClearBubble's notch repair, and transcribing it " +
+    "here would let the repair and the drawn radius drift apart with nothing to say so");
+  const txt = fnSrc(KB_SRC, "void drawKbText");
+  if (!/uiFillRound\(\s*CARD_X\s*,\s*KB_TEXT_Y\s*,\s*CARD_W\s*,\s*KB_TEXT_H\s*,\s*KB_TEXT_R\s*,/.test(txt))
+    throw new Error("settings-geom-check: drawKbText()'s OWN BODY no longer draws the card with " +
+      "KB_TEXT_R - the notch repair in kbClearBubble is sized from that constant, so a literal " +
+      "radius at the draw site is a repair of the wrong size at the first change");
+  return +m[1];
+})();
+
+// WHICH PIXELS OF A ROUNDED RECT'S BOUNDING BOX ARE NEVER WRITTEN AT ALL. This
+// is a MIRROR - it reads no firmware text and proves nothing about the sketch on
+// its own - but without it the corner repair below is a rule with no measurement
+// under it, and the repair would be just as invisible as the defect was.
+//
+// Board 1 draws through real TFT_eSPI::fillSmoothRoundRect, which `continue`s on
+// `hyp2 >= r2` and starts each corner row's drawFastHLine at the first covered
+// column. Board 2 draws through PanelShim::fillSmoothRoundRect, whose blendPixel
+// returns on `coverage <= 0.001f`. Both leave the pixels outside the curve
+// holding WHATEVER WAS THERE BEFORE - which at a pressed key is COLOR_ACCENT.
+// Both are reimplemented here from those two functions.
+function sqrtFraction(num) {                      // TFT_eSPI's own fixed-point helper
+  if (num > 0x40000000) return 0;
+  let bsh = 0x00004000, fpr = 0, osh = 0;
+  while (num > bsh) { bsh <<= 2; osh++; }
+  do {
+    const bod = bsh + fpr;
+    if (num >= bod) { num -= bod; fpr = bsh + bod; }
+    num = (num << 1) >>> 0;
+  } while (bsh >>= 1);
+  return (fpr >>> osh) & 0xff;
+}
+function roundRectCoverage(board, x, y, w, h, r) {
+  const cov = new Map();
+  const put = (X, Y, a) => {
+    const k = `${X},${Y}`, prev = cov.get(k) || 0;
+    cov.set(k, prev >= 0.999 || a >= 0.999 ? 1 : prev + a * (1 - prev));
+  };
+  if (r > w / 2) r = Math.floor(w / 2);
+  if (r > h / 2) r = Math.floor(h / 2);
+  if (board === 1) {
+    let yy = y + r, hh = h - 2 * r, xx = x, ww = w;
+    for (let j = 0; j < hh; j++) for (let i = 0; i < ww; i++) put(xx + i, yy + j, 1);
+    hh--; xx += r; ww -= 2 * r + 1;
+    const r1 = r * r; const rr = r + 1, r2 = rr * rr;
+    let xs = 0, cx = 0;
+    for (let cy = rr - 1; cy > 0; cy--) {
+      const dy2 = (rr - cy) * (rr - cy);
+      for (cx = xs; cx < rr; cx++) {
+        const hyp2 = (rr - cx) * (rr - cx) + dy2;
+        if (hyp2 <= r1) break;
+        if (hyp2 >= r2) continue;
+        const alpha = (~sqrtFraction(hyp2)) & 0xff;
+        if (alpha > 246) break;
+        xs = cx;
+        if (alpha < 9) continue;
+        const a = alpha / 255;
+        put(xx + cx - rr, yy + cy - rr, a);            put(xx - cx + rr + ww, yy + cy - rr, a);
+        put(xx - cx + rr + ww, yy - cy + rr + hh, a);  put(xx + cx - rr, yy - cy + rr + hh, a);
+      }
+      const len = 2 * (rr - cx) + 1 + ww;
+      for (let i = 0; i < len; i++) put(xx + cx - rr + i, yy + cy - rr, 1);
+      for (let i = 0; i < len; i++) put(xx + cx - rr + i, yy - cy + rr + hh, 1);
+    }
+  } else {
+    const cx = x + (w - 1) / 2, cy = y + (h - 1) / 2;
+    const halfW = (w - 1) / 2, halfH = (h - 1) / 2;
+    const sdf = (px, py) => {
+      const bw = halfW - r, bh = halfH - r;
+      const qx = Math.abs(px - cx) - bw, qy = Math.abs(py - cy) - bh;
+      const ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0;
+      return Math.sqrt(ox * ox + oy * oy) + Math.min(Math.max(qx, qy), 0) - r;
+    };
+    const midH = h - 2 * r;
+    if (midH > 0) for (let j = 0; j < midH; j++) for (let i = 0; i < w; i++) put(x + i, y + r + j, 1);
+    if (w - 2 * r > 0 && r > 0) {
+      for (let j = 0; j < r; j++) for (let i = 0; i < w - 2 * r; i++) put(x + r + i, y + j, 1);
+      for (let j = 0; j < r; j++) for (let i = 0; i < w - 2 * r; i++) put(x + r + i, y + h - r + j, 1);
+    }
+    for (const bx of [x - 1, x + w - r - 1]) for (const by of [y - 1, y + h - r - 1])
+      for (let py = by; py <= by + r + 1; py++) for (let px = bx; px <= bx + r + 1; px++) {
+        let a = 1 - sdf(px, py);
+        if (a < 0) a = 0; if (a > 1) a = 1;
+        if (a <= 0.001) continue;                 // blendPixel's own early return
+        put(px, py, a);
+      }
+  }
+  return cov;
+}
+
+const KB_BUB_SRC = fnSrc(KB_SRC, "void drawKbBubble");
+const KB_BUB = (() => {
+  const wm = KB_SRC.match(/const int KB_BUB_W\s*=\s*(\d+)\s*\*\s*KB_PITCH\s*;/);
+  if (!wm) throw new Error("settings-geom-check: KB_BUB_W is no longer declared as " +
+    "\"<n> * KB_PITCH\" in keyboard.ino - the bubble's width would be transcribed");
+  const hm = KB_SRC.match(/const int KB_BUB_H\s*=\s*KB_ROW_H\s*;/);
+  if (!hm) throw new Error("settings-geom-check: KB_BUB_H is no longer declared as KB_ROW_H in " +
+    "keyboard.ino - the bubble stops landing on a key-row boundary and the bounded restore " +
+    "(kbClearBubble) stops being bounded by construction");
+  const rs = fnSrc(KB_SRC, "int kbBubbleRow");
+  if (!rs.length) throw new Error("settings-geom-check: kbBubbleRow()'s body not found in " +
+    "keyboard.ino - which row the bubble is drawn ON is the whole placement");
+  // ONE UNCONDITIONAL OFFSET, and the shape of the parse is half the assertion:
+  // the body used to read "return r == 0 ? 1 : r - 1;", which put a row-0 bubble
+  // BELOW the finger. A ternary here at all means the bubble flips sides on some
+  // row, so this refuses to parse one rather than quietly reading the else-arm
+  // and reporting "always above" about a function that is not.
+  if (/\?/.test(rs)) throw new Error("settings-geom-check: kbBubbleRow()'s OWN BODY contains a " +
+    "conditional - the bubble is meant to be ONE unconditional offset (\"return r - <n>;\") so " +
+    "that it is always drawn ABOVE the pressed key. A ternary is how the row-0 flip came back");
+  const rm = rs.match(/return\s+r\s*-\s*(\d+)\s*;/);
+  if (!rm) throw new Error("settings-geom-check: kbBubbleRow()'s OWN BODY no longer reads " +
+    "\"return r - <n>;\" - the placement assertions below would be measuring the checker's own " +
+    "idea of where the bubble goes");
+  return { pitches: +wm[1], back: +rm[1] };
+})();
+if (KB_BUB.back <= 0)
+  throw new Error(`settings-geom-check: kbBubbleRow() returns r - ${KB_BUB.back}, which is at or ` +
+    `BELOW the pressed row - the bubble would sit under the fingertip hiding the key`);
+
+// THE THREE KEY-PAGE TABLES, PARSED out of keyboard.ino rather than transcribed.
+// KB_ROW_CELLS below and the reachability sweep further down BOTH derive from
+// this SAME parse, so a fourth page (or a rebalanced row) changes what both
+// assert instead of one of them going stale while the other stays green - the
+// exact fate of the hand-written KB_ROW_CELLS = [10, 9, 9, 10, 10, 9] this
+// replaced once a third page existed and it did not.
+// `\};` (the closing brace FOLLOWED BY THE STATEMENT'S SEMICOLON), not `[^}]*\}`:
+// KB_SYM2's own row ("$%*<>[]{}|") embeds a literal `{`/`}` INSIDE a quoted
+// string, so a capture that stops at the first bare `}` truncates that row's
+// initializer at its own middle character instead of the array's actual close.
+// The embedded `}` here is followed by `|"`, never by `;`, so anchoring on `};`
+// finds the real end for THIS source TODAY - it is a heuristic, not a proof:
+// a future row containing the literal two characters `};` would truncate the
+// same way the naive form does, and silently, since the match COUNT would
+// still come out at 3 (the truncated tail just never gets captured) - the
+// `KB_PAGE_ROWS.length !== 3` gate below would not catch it either. Revisit
+// this parse if a row ever needs to contain `};`.
+const KB_PAGE_ROWS = [...KB_SRC.matchAll(/const char\* KB_(?:ALPHA|SYM|SYM2)\[3\]\s*=\s*\{(.*?)\};/gs)];
+if (KB_PAGE_ROWS.length !== 3)
+  throw new Error(`settings-geom-check: expected 3 key pages (KB_ALPHA/KB_SYM/KB_SYM2) parsed out of keyboard.ino, found ${KB_PAGE_ROWS.length}`);
+// The row literals as they appear in the C source use \xNN (KB_SHIFT '\x01',
+// KB_DEL '\x02') - a C escape, not a JSON one, so a bare JSON.parse on the
+// extracted literal throws ("Bad escaped character"). Translate \xNN to JSON's
+// \u00NN first rather than hand-decoding the row string ourselves, which would
+// itself be a transcription of the escape rules JSON.parse already implements.
+const parseCLit = (lit) => JSON.parse(lit.replace(/\\x([0-9a-fA-F]{2})/g, "\\u00$1"));
+
+// THE FRACS, READ OUT OF drawKbActions() FOR THE SAME REASON. The mirror below
+// needs the proportion the firmware actually passes: with [1, 2] restated on the
+// checker's side, "SEND is at least twice the destructive control" is computed
+// from the checker's own numbers and CANNOT FAIL - relabelling the row {1, 1}
+// would leave it green. Parsed, that mutation fails by name.
+const KB_ACT_FRACS = (() => {
+  const src = fnSrc(KB_SRC, "void drawKbActions");
+  if (!src.length) throw new Error("settings-geom-check: drawKbActions() not found in keyboard.ino");
+  const m = src.match(/fracs\[[^\]]*\]\s*=\s*\{([^}]*)\}/);
+  if (!m) throw new Error("settings-geom-check: drawKbActions()'s body no longer declares a " +
+    "fracs[] initialiser - the column mirror below would be measuring itself");
+  const f = m[1].split(",").map((t) => +t.trim());
+  if (f.some((x) => !Number.isInteger(x) || x <= 0))
+    throw new Error(`settings-geom-check: drawKbActions()'s fracs parsed as [${m[1]}]`);
+  return f;
+})();
+
+const HIST_ARENA = +readSource(`deckhand_display.ino`)
   .match(/HIST_ARENA (\d+)/)[1];
 
 // wrapLineLen() / countWrappedLines() USED TO BE REIMPLEMENTED HERE, board-1-only,
@@ -232,7 +680,7 @@ const TOGGLES = ["SOUND", "MUTED", "FLIPPED", "NORMAL", "DARK", "LIGHT", "AUTO"]
 // band's title and HOME's row name - they must be the same word or the screen you
 // tapped into is not the one you tapped on), the labels its split Display and Sound
 // groups draw, and the WORST CASE of each of HOME's five composed summaries.
-const GROUP_TITLES = ["Status", "Display", "Sound", "Pairing", "Actions"];
+const GROUP_TITLES = ["Status", "Display", "Sound", "Pairing", "Messages", "Actions"];
 const THEME_SEGS = ["DARK", "LIGHT", "AUTO"];
 const SOUND_LABELS = ["SOUND ON", "SOUND OFF", "TEST BEEP", "MIC TEST",
                       "SCREEN FLIPPED", "SCREEN NORMAL"];
@@ -288,8 +736,19 @@ const DIALOGS = [
 // hosts[].label is char[20], and uiListRow draws "\xB7 " + it with no fitText at
 // all - so the widest row the PAIRED MACS page can draw is 21 characters.
 const HOST_LABEL_MAX = 19;
-// Key row lengths, from KB_ALPHA/KB_SYM (the two control bytes count as cells).
-const KB_ROW_CELLS = [10, 9, 9, 10, 10, 9];
+// Key row lengths, DERIVED from KB_PAGE_ROWS (the parse above), not transcribed -
+// the two control bytes (CAP/DEL) count as cells, same as they always did. With
+// the mock's KB_SYM2 split (10/4/1) the nine lengths are
+// 10, 9, 9, 10, 10, 9, 10, 4, 1.
+const KB_ROW_CELLS = KB_PAGE_ROWS.flatMap(m =>
+  m[1].match(/"(?:[^"\\]|\\.)*"/g).map(lit => parseCLit(lit).length));
+
+// The three key pages as ROW LENGTHS, 3 x 3, so the bubble's cell-coverage sweep
+// below can see the NEIGHBOURING row's length (rows are centred by kbRowX0, and a
+// bubble drawn over a 4-cell row sits at a different x0 than over a 10-cell one).
+// KB_ROW_CELLS just above is the same parse flattened; this one keeps the shape.
+const KB_PAGE_ROW_LENS = KB_PAGE_ROWS.map(m =>
+  m[1].match(/"(?:[^"\\]|\\.)*"/g).map(lit => parseCLit(lit).length));
 
 // THE OTHER 150-BYTE PAIRING. The voice-answer confirm screen caps its transcript
 // panel at 8 WORD-wrapped lines (askVoiceTooLong() in sessions.ino, measured
@@ -360,33 +819,55 @@ const KNOWN = {
   1: [
     // Its own header comment says so: at 26 these were "the most missed control".
     "pager key 34px tall >= TAP_MIN 40",
-    // Four buttons plus a hint would not fit at H_BTN, so the height came down.
-    "action button 38px tall >= TAP_MIN 40",
-    // The list above the chip and the control bar below own every other row.
-    "history filter chip 17px drawn >= TAP_MIN 40",
+    // TWO ENTRIES USED TO STAND HERE AND BOTH WERE STALE - the converse check
+    // below is what found them. "action button 38px tall >= TAP_MIN 40" matched no
+    // message this checker produces any more (H_BTN is 44 and the assertion that
+    // phrased it that way is gone); "history filter chip 17px drawn >= TAP_MIN 40"
+    // excused the DRAWN chip against the fingertip floor, which was never the rule
+    // - the TESTED band is, its real shortfall is the 25px entry below, and the
+    // assertion itself is deleted at the site (B12).
     // The ALL state is 32 wide against a 40 floor, so the chip is under the floor in
     // WIDTH as well as height on this board - and only in one of its two states,
     // which is the part that would never be noticed by eye.
     "chip widths 40/32 both clear TAP_MIN 40",
     "history chip tap band 25px >= TAP_MIN 40",
     "history scrubber tap band 16px >= TAP_MIN 40",
-    // FOUND BY THIS CHECKER, all pre-existing and all left alone because board 1's
-    // binary is held byte-identical across this port. Reported in the task report.
+    // FOUND BY THIS CHECKER. All three were once excused as "board 1's binary is
+    // held byte-identical across this port"; that constraint is lifted (CLAUDE.md),
+    // so TWO OF THE THREE WERE FIXED and the entries are gone with a note in their
+    // place. What is left below carries a reason that is true today.
     //
     // (a) The chip's tap band is `sy <= 24`, i.e. 0..24, while the header's rule is
     // drawn at 22 - so the band reaches 2px past the rule and into the first list
-    // row's territory. Harmless in practice (the first row starts at HIST_TOP 28)
-    // but it is the chip claiming rows that are not the chip.
+    // row's territory. STANDS, and the arithmetic is why: the only way to end the
+    // band at the rule is to SHRINK it to 22, and HIST_CHIP_TAP_H is already 25
+    // against this board's own TAP_MIN of 40 - the entry two lines up says so. The
+    // overlap costs nothing (the first list row starts at HIST_TOP 28, still 3px
+    // clear, so no row is ever stolen); taking a tap target that is already 15px
+    // under the fingertip floor down by another 3 to tidy it would trade a real
+    // miss for a cosmetic one. Growing the band instead runs it further past the
+    // rule, which is this entry.
     "chip tap band ends 24 above the rule, or it would claim the first list row",
-    // (b) The three reader control bars split their x range at 78/156 in the
-    // history list and the full-entry pager but at 82/158 in the ask reader. Both
-    // merely hand the 8px gap between two keys to a different neighbour, so
-    // neither is wrong - but the same bar behaves differently depending on which
-    // screen drew it, and nothing on screen says so.
-    "reader tap splits agree across the three control bars (78/156 vs 82/158)",
-    // (c) The chip's label is drawn at a literal 13 where the chip runs 4..20, whose
-    // centre is 12 - one pixel low, invisible at this size and pre-existing.
-    "chip label centre 13 == the chip's own centre 12",
+    //
+    // (b) AN ENTRY USED TO STAND HERE AND THE DEFECT IS FIXED:
+    //   "reader tap splits agree across the three control bars (78/156 vs 82/158)"
+    // The history list and the full-entry pager split at 78/156 while the ask reader
+    // split at 82/158; both merely handed the 8px gap between two keys to a
+    // different neighbour, so neither was wrong, but the same bar behaved
+    // differently depending on which screen drew it. board_e32r28t.h now DERIVES one
+    // pair from the key geometry - 82/158 are the midpoints of the two gaps, which
+    // is the only pair giving each key its own half - and defines HIST_TAP_* from
+    // READER_TAP_* so they cannot drift apart again. Removed rather than left dead.
+    //
+    // (c) AND SO IS THIS ONE:
+    //   "chip label centre 13 == the chip's own centre 12"
+    //   "HIST_HDR_TEXT_Y 8 centres a 13px line on the chip's centre 13"
+    // One pixel and two, on the same header row. HIST_CHIP_CY was a literal 13 where
+    // HIST_CHIP_Y + HIST_CHIP_H / 2 is 12, and HIST_HDR_TEXT_Y a literal 8 where a
+    // 13px cell centred on that centre starts at 6. Both are now the expressions the
+    // assertions were already comparing them against, which is what board 2 has
+    // always done. Removed rather than left dead - an unreachable allowlist entry is
+    // the same defect as an assertion that cannot fail, on the allowlist side.
     // (h) THE LAST-CHARACTER RULE, on both of board 1's counted lanes. Cozette
     // advances 6px for every glyph but drawString charges the FINAL one xOffset +
     // width, which is 7 for space, '4' and 'q' - so a lane divided by 6 is 1px hot
@@ -394,17 +875,17 @@ const KNOWN = {
     // states this for KB_COLS and calls it harmless, and the same holds for the
     // reader: 34 keyboard columns ink 205px in a 204px lane but end at x=222 inside
     // a card interior reaching 225, and 36 reader columns ink 217px in a 216px lane
-    // but end at x=228 on a 240px panel. Both are pre-existing and board 1's binary
-    // is frozen; board 2's Spleen has xOffset 0 and width == xAdvance for every
+    // but end at x=228 on a 240px panel. Both STAND on the ink, not on a freeze: the
+    // overrun is 1px and it lands INSIDE the surface either way (222 in a card
+    // interior reaching 225; 228 on a 240px panel), so nothing is clipped and
+    // nothing is drawn on a border. Dropping a column to make the division exact
+    // would cost a real character of every keyboard row and every reader line to
+    // buy a pixel that is already inside the box. Board 2's Spleen has xOffset 0 and width == xAdvance for every
     // glyph, so its counts are exact for ANY string and it needs no such entry.
     "KB_COLS 34 == the MEASURED maximum 33 for the 204px lane",
     "34 columns ending in the widest glyph ink 205px inside the 204px lane",
     "reader columns 36 == the MEASURED maximum 35 for the 216px lane",
-    // (g) The history header's text row is a literal 8 where a 13px line centred on
-    // the chip's own centre (13) starts at 7 - so the name and the position field
-    // sit 1px low against the chip beside them. Same class as (c), invisible at
-    // this size, and pre-existing; board 2 derives the number instead.
-    "HIST_HDR_TEXT_Y 8 centres a 13px line on the chip's centre 13",
+    // (g) moved up into (c), where it was fixed alongside the constant it depends on.
     // (d) "Asking the Mac..." is drawn at a literal 130, which is NOT the midpoint
     // of the region it sits in (22..272 -> 147) - it predates the control bar.
     "history empty-state y 130 is the midpoint of 22..272 (147)",
@@ -412,14 +893,19 @@ const KNOWN = {
     // the two halves of one row do not share a baseline. Both are 13px here, so the
     // stagger is invisible and it ships; at 16px it is not, which is why
     // DROW_BATT_VAL_DY became a board constant (0 on board 2) rather than a literal.
-    // Listed rather than fixed because board 1's binary is frozen.
+    // LISTED RATHER THAN FIXED, and not because of any freeze: at a 13px cell with a
+    // 10px ascent the 4px offset puts the reading's ink inside the label's own band,
+    // so the two read as one row already. Setting it to 0 moves a shipped row by 4px
+    // - a visible change to buy an alignment nobody can see at this size.
     "DROW_BATT_VAL_DY 4 puts the reading on the \"Battery\" label's own baseline (needs 0 = ascent 10 - 10)",
     // (e) FOUND by the per-board band model added for the 16px pass, and benign.
     // The stepper label's own glyph box is 10..22 (Cozette, MC_DATUM at 15) and the
     // value's drawIfChanged ERASE box starts at 22, so the erase covers the label
     // box's last row. That row is the label's second DESCENDER row, and all three
     // labels (BRIGHTNESS / SLEEP AFTER / VOLUME) are upper case, so no ink is ever
-    // there. Left alone because board 1's binary is frozen, and listed because a
+    // there - the erase can only ever clear background. LEFT ALONE on that, not on a
+    // freeze: the fix would move the value row 1px to protect a row that cannot
+    // carry ink, and the labels are asserted upper case elsewhere. Listed because a
     // board-2 layout arriving in this state would be a real defect.
     "stepper: label -> value gap -1",
   ],
@@ -433,12 +919,38 @@ let fail = 0, known = 0, total = 0;
 // a fault from an unrelated crash. Same reason wire-bytes-check.mjs's selftest names
 // which assertion caught each of its injected faults.
 const FAILED = [];
+// WHICH KNOWN ENTRIES ACTUALLY EXCUSED SOMETHING. Found while fixing the batch of
+// deferred findings, and not on that list: nothing checked the CONVERSE of the
+// allowlist. An entry whose message no longer matches any assertion excuses
+// nothing today, so it reads as a documented shortfall while being dead text -
+// and worse, it lies in wait: reword an assertion back into its phrasing, or
+// reintroduce the shortfall under the old wording, and it is waved through with
+// no review. That is the "a stale permission is how a sub-floor control gets
+// waved through later" rule docs/design/compose/check.mjs already enforces over
+// its EXCEPTIONS table, arriving here from the other direction. TWO ENTRIES WERE
+// STALE when this was added and both are gone; see KNOWN's own comment.
+const KNOWN_USED = new Set();
 let CUR = 1;
 function chk(cond, msg) {
   total++;
-  if (!cond && KNOWN[CUR].includes(msg)) { known++; console.log(` known  ${msg}`); return; }
+  if (!cond && KNOWN[CUR].includes(msg)) {
+    known++; KNOWN_USED.add(`${CUR}|${msg}`); console.log(` known  ${msg}`); return;
+  }
   console.log(`${cond ? "  ok  " : " FAIL "} ${msg}`);
   if (!cond) { fail++; FAILED.push(msg); }
+}
+// Run AFTER both boards, since an entry is used by whichever board reaches it.
+function checkKnownUsed() {
+  for (const b of Object.keys(KNOWN))
+    for (const m of KNOWN[b]) {
+      total++;
+      if (KNOWN_USED.has(`${b}|${m}`)) continue;
+      console.log(` FAIL  KNOWN[${b}] entry "${m}" excused nothing on this run - either the ` +
+        `assertion it documents was reworded (move the entry with it), or the shortfall was ` +
+        `fixed (delete the entry and say so). A permission for a failure that no longer ` +
+        `happens is not documentation, it is a trap for whoever reintroduces that wording.`);
+      fail++;
+    }
 }
 
 if (SELFTEST) {
@@ -570,6 +1082,7 @@ for (const b of [1, 2]) {
           `SET_HOME ${c.SET_HOME} == the shared \`int settingsPage = ${+m[1]};\` the device boots with`);
       const ids = [["SET_STATUS", c.SET_STATUS], ["SET_DISPLAY", c.SET_DISPLAY],
                    ["SET_SOUND", c.SET_SOUND], ["SET_PAIRING", c.SET_PAIRING],
+                   ["SET_MESSAGES", c.SET_MESSAGES],
                    ["SET_ACTIONS", c.SET_ACTIONS]];
       for (let i = 0; i < ids.length; i++)
         chk(ids[i][1] === c.SET_HOME + 1 + i,
@@ -786,6 +1299,133 @@ for (const b of [1, 2]) {
       const macWorst = c.MAC_ROW_W + 1 + 2 + 1;   // padded text + \x01 + icon id + NUL
       chk(+SET_CACHE.macRowCache >= macWorst, `macRowCache ${SET_CACHE.macRowCache} >= worst signature ${macWorst}`);
     }
+  }
+
+  // ================= SETTINGS: the MESSAGES page (BOTH boards) =================
+  // The one settings surface that exists in the same form on both: the same
+  // caption, the same MSG_PRI_COUNT uiListRows and the same hint, differing only
+  // in the four constants behind the chain. So it is asserted OUTSIDE the
+  // if (b === 2) blocks around it, and every assertion runs twice.
+  {
+    const rows = c.MSG_PRI_COUNT;
+    chk(Number.isInteger(rows) && rows >= 2,
+        `MSG_PRI_COUNT parsed as ${rows} - every MESSAGES assertion below is derived from it`);
+    const lastEnd = c.P4_ROW_Y + (rows - 1) * c.P4_ROW_STEP + c.H_ROW - 1;
+    const [hTop, hBot] = mcBox(b, T_META, c.P4_HINT_Y);
+    console.log(`  Messages: caption ${c.P4_CAP_Y}, rows ${c.P4_ROW_Y}..${lastEnd} ` +
+                `step ${c.P4_ROW_STEP}, hint ink ${hTop}..${hBot}, ` +
+                `${contentBottom - hBot - 1}px trailing air`);
+    // ---- the block fits, end to end ----
+    chk(c.P4_CAP_Y >= c.PAGE_TOP,
+        `Messages: the caption starts ${c.P4_CAP_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
+    // The caption's OWN TEXT BOX must clear the first row - not merely its datum.
+    // TL_DATUM, so the box is the cell height from the y it is given; comparing
+    // the two y's would have been a derivation against its own term, which is the
+    // vacuous shape this file has already paid for twice.
+    chk(c.P4_CAP_Y + lineHB(b, T_META) - 1 < c.P4_ROW_Y,
+        `Messages: the caption's ink ${c.P4_CAP_Y}..${c.P4_CAP_Y + lineHB(b, T_META) - 1} clears the first row at ${c.P4_ROW_Y}`);
+    chk(hTop > lastEnd,
+        `Messages: the hint's ink starts ${hTop}, clear of the last row's bottom ${lastEnd}`);
+    chk(hBot < contentBottom,
+        `Messages: the hint's ink ends ${hBot}, above contentBottom ${contentBottom} - a page ending flush on the footer reads as joined to it`);
+    // THE LANDING IDENTITY, and it is here because geom-sweep said so rather than
+    // because anybody argued it. Board 2's page carries 80 rows of slack under the
+    // hint, and with the bounds above as the only rules P4_HINT_Y, P4_ROW_GAP and
+    // P4_HINT_GAP could each move by 16 in either direction with nothing noticing -
+    // reported as "unguarded though this checker reads it". Naming the surplus and
+    // asserting the SUM makes every term in the chain load-bearing, the same thing
+    // HOME_Y0_BOT does for HOME's pitch.
+    chk(hBot + 1 + c.P4_AIR_BOT === contentBottom,
+        `Messages: the page lands exactly - hint ink ends ${hBot}, + 1 + P4_AIR_BOT ${c.P4_AIR_BOT} == contentBottom ${contentBottom} (got ${hBot + 1 + c.P4_AIR_BOT})`);
+    chk(c.P4_AIR_BOT > 0,
+        `Messages: the trailing air is positive (${c.P4_AIR_BOT}) - a page ending flush on contentBottom reads as joined to the footer, which board 1 shipped once`);
+    // ---- the rows are touch targets, and the GAPS BETWEEN THEM ARE NOT ----
+    chk(c.H_ROW >= c.TAP_MIN,
+        `Messages: an option row is ${c.H_ROW}, at least this board's own TAP_MIN ${c.TAP_MIN}`);
+    chk(c.P4_ROW_GAP > 0,
+        `Messages: the option rows are separated (${c.P4_ROW_GAP}px) - three abutting rows would put NOW and LATER on either side of an invisible seam`);
+    chk(c.P4_ROW_STEP === c.H_ROW + c.P4_ROW_GAP,
+        `Messages: the step ${c.P4_ROW_STEP} is the row plus its gap (${c.H_ROW} + ${c.P4_ROW_GAP})`);
+  }
+  // The MESSAGES page's DRAW SITES and HIT TEST, bound to their own function
+  // bodies. Geometry alone would pass with the page never drawn, and with a hit
+  // test that claimed a band the draw does not fill - the failure the retired
+  // P2_MIC_Y note describes, arrived at from the other side.
+  if (b === 1) {   // the sources are one text; assert them once, not per board
+    const stat = fnSrc(SETTINGS_INO, "void drawMessagesPageStatic");
+    const rend = fnSrc(SETTINGS_INO, "void renderMessagesPage");
+    const hit  = fnSrc(SETTINGS_INO, "void handleMessagesTouch");
+    const setp = fnSrc(SETTINGS_INO, "void setMsgPriority");
+    chk(stat.length > 0 && rend.length > 0 && hit.length > 0 && setp.length > 0,
+        "Messages: all four functions parse - every assertion below binds to one of their bodies, and an empty body would satisfy them all vacuously");
+    // The static half draws the two things that do not change, and NOTHING that
+    // does: a row drawn here would be painted once and then never updated,
+    // because renderMessagesPage's cache would report it unchanged.
+    chk(/drawGroupCaption\("[^"]+", P4_CAP_Y\)/.test(stat),
+        "Messages: drawMessagesPageStatic draws its caption at P4_CAP_Y");
+    chk(/uiHint\("[^"]+", P4_HINT_Y\)/.test(stat),
+        "Messages: drawMessagesPageStatic draws its hint at P4_HINT_Y");
+    chk(!/uiListRow/.test(stat),
+        "Messages: no option row is drawn on the STATIC side - it would be painted once and never repainted, since the change-only cache would then report it unchanged");
+    // THE HINT IS THE PRECEDENCE RULE. Without it, a user who sets
+    // DECKHAND_INBOX_PRIORITY on the Mac and then taps LATER here gets no
+    // change and no explanation anywhere in the room.
+    chk(/uiHint\("[^"]*[Mm]ac[^"]*override[^"]*"/.test(stat),
+        "Messages: the hint must say the MAC CAN OVERRIDE this - the env var wins, and the device is the only surface the person tapping is looking at");
+    // The render half walks MSG_PRI_COUNT and draws at the same three constants
+    // the geometry above is asserted over.
+    chk(/for \(int i = 0; i < MSG_PRI_COUNT; i\+\+\)/.test(rend),
+        "Messages: renderMessagesPage walks MSG_PRI_COUNT, so a fourth option draws rather than being silently absent");
+    chk(/uiListRow\(CARD_X, P4_ROW_Y \+ i \* P4_ROW_STEP, CARD_W, H_ROW,/.test(rend),
+        "Messages: the rows are drawn at P4_ROW_Y + i*P4_ROW_STEP, H_ROW tall - the exact band the hit test claims");
+    chk(/msgPriBtnCache/.test(rend),
+        "Messages: the rows go through a change-only cache, or the page repaints three rows every tick");
+    // THE HIT TEST AND THE DRAW MUST NOT BE ABLE TO DISAGREE. Same three
+    // constants, same loop bound, and a band of exactly H_ROW - not P4_ROW_STEP,
+    // which would swallow the gap and hand a tap between two rows to the one
+    // above it.
+    chk(/for \(int i = 0; i < MSG_PRI_COUNT; i\+\+\)/.test(hit),
+        "Messages: the hit test walks MSG_PRI_COUNT too");
+    chk(/int y = P4_ROW_Y \+ i \* P4_ROW_STEP;/.test(hit),
+        "Messages: the hit test derives its band from the SAME P4_ROW_Y and P4_ROW_STEP the draw uses");
+    chk(/sy >= y && sy < y \+ H_ROW/.test(hit) && !/y \+ P4_ROW_STEP/.test(hit),
+        "Messages: the tested band is exactly H_ROW, never the step - a step-tall band claims the inert gap and gives a tap that landed on nothing to the row above");
+    // setMsgPriority is the one place the value moves, and all four of its jobs
+    // are asserted here because a caller doing three of them is the drift the
+    // function exists to prevent.
+    chk(/saveMsgPriority\(\)/.test(setp),
+        "Messages: a change is PERSISTED - NVS is the whole point of a setting that survives a reboot");
+    chk(/announceMsgPriority\(\)/.test(setp),
+        "Messages: a change is ANNOUNCED to the host - a device setting the Mac never hears about changes nothing");
+    chk(/messagesPageShowing\(\)/.test(setp),
+        "Messages: the repaint is GATED on the page being up. renderMessagesPage draws at P4_ROW_Y whatever surface is showing, so an ungated call from the MSGPRI command paints three option rows across the USAGE tab");
+    chk(/msgPriBtnCache = -1/.test(setp),
+        "Messages: the cache is busted on every change, drawn now or not, so the rows are right the moment the page is next opened");
+    // A no-op must return before any of that: the host delivers every command
+    // over BOTH transports, so a cabled board sees each one twice.
+    chk(/if \(v >= MSG_PRI_COUNT \|\| v == msgPriority\) return;/.test(setp),
+        "Messages: an out-of-range or unchanged value returns before persisting, redrawing or announcing - the host sends every command down both transports and a cabled board sees it twice");
+    // The chrome-repaint rule: drawSettingsStatic clears the whole page area, so
+    // a cache left set leaves the rows BLANK.
+    chk(/msgPriBtnCache = -1/.test(fnSrc(SETTINGS_INO, "void resetSettingsCaches")),
+        "Messages: msgPriBtnCache is reset with the other settings caches, or a page whose chrome was just repainted draws no rows at all");
+    // ---- the three phrases FIT, on the binding board ----
+    // Parsed out of renderMessagesPage rather than transcribed, and measured
+    // against P4_LABEL_CHARS - the lane uiListRow actually leaves between its
+    // label origin and its tag.
+    const rowLabels = [...rend.matchAll(/^\s*"([^"]+)",$/gm)].map(m => m[1]);
+    chk(rowLabels.length === B[1].MSG_PRI_COUNT,
+        `Messages: parsed ${rowLabels.length} row labels out of renderMessagesPage, expected MSG_PRI_COUNT ${B[1].MSG_PRI_COUNT} - a transcribed list here would keep passing over a renamed one`);
+    for (const bb of [1, 2])
+      for (const t of rowLabels)
+        chk(t.length <= B[bb].P4_LABEL_CHARS,
+            `Messages: board ${bb} row "${t}" is ${t.length} of the ${B[bb].P4_LABEL_CHARS} characters uiListRow leaves it`);
+    // THE PHRASES CARRY THE MEANING, not the option name. "NEXT" alone is not a
+    // setting anybody can act on, and this is the assertion that stops the labels
+    // being quietly shortened back to three bare words.
+    for (const t of rowLabels)
+      chk(t.trim().split(/\s+/).length >= 3,
+          `Messages: row "${t}" says what the option MEANS, not just what it is called - a bare "NEXT" tells the person tapping nothing`);
   }
 
   // ================= SETTINGS: the STATUS group (board 2) =================
@@ -1876,9 +2516,13 @@ for (const b of [1, 2]) {
     // draws Spleen 8x16, so it blessed KB_COLS 47 against a lane that holds 35.
     const lane = c.CARD_W - 12;
     const cols = Math.floor(lane / adv);
-    const lines = Math.ceil(KB_MAX_BYTES / c.KB_COLS);
+    const lines = Math.ceil(c.KB_MAX_BYTES / c.KB_COLS);
     console.log(`  keyboard: KB_COLS ${c.KB_COLS} (lane ${lane}px / ${adv} = ${(lane / adv).toFixed(2)}), ${c.KB_TEXT_LINES} lines (ceil(${KB_MAX_BYTES}/${c.KB_COLS}) = ${(KB_MAX_BYTES / c.KB_COLS).toFixed(2)})`);
-    chk(KB_MAX_BYTES === HOST_CAP, `KB_MAX_BYTES ${KB_MAX_BYTES} == the host's ANSWER_TEXT_MAX_BYTES ${HOST_CAP}`);
+    chk(Number.isFinite(c.KB_MAX_BYTES),
+        `KB_MAX_BYTES parsed out of deckhand_display.ino's constant table (got ${c.KB_MAX_BYTES}) - it moved there from keyboard.ino to sit beside the buffer it sizes, and a parse that returned undefined would make every claim below compare against NaN`);
+    chk(/KB_MAX_BYTES\s*\+\s*1/.test(KB_TEXT_DECL),
+        `kbText is declared [${KB_TEXT_DECL || "not found"}] - it must be KB_MAX_BYTES + 1 and not the literal, or the cap and the buffer it caps drift apart, silently and in the direction that overflows`);
+    chk(c.KB_MAX_BYTES === HOST_CAP, `KB_MAX_BYTES ${c.KB_MAX_BYTES} == the host's ANSWER_TEXT_MAX_BYTES ${HOST_CAP} - ONE limit, two sides`);
     chk(c.TEXT_ADV === adv, `TEXT_ADV ${c.TEXT_ADV} == the body face's measured advance ${adv}`);
     chk(c.KB_COLS === cols, `KB_COLS ${c.KB_COLS} == floor((CARD_W - 12) / TEXT_ADV) = ${cols}`);
     chk(c.KB_TEXT_LINES === lines, `KB_TEXT_LINES ${c.KB_TEXT_LINES} == ceil(KB_MAX_BYTES / KB_COLS) = ${lines}`);
@@ -1893,12 +2537,56 @@ for (const b of [1, 2]) {
     chk(c.KB_COLS === mc.cols, `KB_COLS ${c.KB_COLS} == the MEASURED maximum ${mc.cols} for the ${lane}px lane`);
     chk(widthB(b, T_BODY, widestLine) <= lane,
         `${c.KB_COLS} columns ending in the widest glyph ink ${widthB(b, T_BODY, widestLine)}px inside the ${lane}px lane`);
-    const caretLine = Math.floor(KB_MAX_BYTES / c.KB_COLS), caretCol = KB_MAX_BYTES % c.KB_COLS;
+    const caretLine = Math.floor(c.KB_MAX_BYTES / c.KB_COLS), caretCol = c.KB_MAX_BYTES % c.KB_COLS;
     chk(caretLine < c.KB_TEXT_LINES, `caret's furthest position is line ${caretLine} col ${caretCol}, inside the ${c.KB_TEXT_LINES} lines budgeted`);
     // ...and it must be inside the LANE too, not merely inside the line budget: the
     // caret is a TEXT_ADV-wide block at column caretCol.
     chk((caretCol + 1) * adv <= lane,
         `caret at column ${caretCol} inks ${caretCol * adv}..${(caretCol + 1) * adv - 1} inside the ${lane}px lane`);
+    // TAP-TO-PLACE: kbTouch's card branch (sy < KB_ROWS_Y, kbLen > 0) turns a
+    // touch point into a byte offset - the exact inverse of the caret draw
+    // above. Bound to kbTouch's OWN BODY via fnSrc's brace matching, not the
+    // file: a clamp on an unrelated variable sitting next door would satisfy a
+    // bare grep. The parse gates come first - !/re/.test("") is true, so every
+    // claim below would pass vacuously over a function or fragment that failed
+    // to parse.
+    {
+      const touchSrc = fnSrc(KB_SRC, "bool kbTouch");
+      chk(touchSrc.length > 0, "kbTouch's body was found in keyboard.ino (parse gate)");
+      const m = touchSrc.match(/if\s*\(kbLen > 0\)\s*\{([\s\S]*?)kbCaret = off;/);
+      chk(!!m, "kbTouch's card branch computes an offset and assigns kbCaret before drawing (parse gate)");
+      const frag = m ? m[1] : "";
+      // FOUR CLAMPS, each tied to the REAL constant by a backreference between
+      // the comparison and the assignment - not merely "some clamp exists",
+      // which a col clamped to KB_ROWS_Y by mistake would also satisfy.
+      chk(/if\s*\(\s*line\s*<\s*0\s*\)\s*line\s*=\s*0\s*;/.test(frag),
+          "kbTouch clamps the tapped line's lower bound to 0");
+      chk(/if\s*\(\s*line\s*>=\s*(KB_TEXT_LINES)\s*\)\s*line\s*=\s*\1\s*-\s*1\s*;/.test(frag),
+          "kbTouch clamps the tapped line's upper bound to KB_TEXT_LINES - 1, tied to the real constant by name");
+      chk(/if\s*\(\s*col\s*<\s*0\s*\)\s*col\s*=\s*0\s*;/.test(frag),
+          "kbTouch clamps the tapped column's lower bound to 0");
+      chk(/if\s*\(\s*col\s*>=\s*(KB_COLS)\s*\)\s*col\s*=\s*\1\s*-\s*1\s*;/.test(frag),
+          "kbTouch clamps the tapped column's upper bound to KB_COLS - 1, tied to the real constant by name");
+      chk(/off\s*=\s*line\s*\*\s*KB_COLS\s*\+\s*col\s*;/.test(frag),
+          "kbTouch combines the clamped line and column via KB_COLS, matching drawKbText's own division");
+      chk(/if\s*\(\s*off\s*>\s*kbLen\s*\)\s*off\s*=\s*kbLen\s*;/.test(frag),
+          "kbTouch clamps the combined offset down to kbLen - a tap below or right of the text must land ON it, not past it");
+      // WHY THE CLAMP IS LOAD-BEARING, MEASURED rather than assumed: the RAW
+      // (unclamped) line and column - from this board's own geometry, not from
+      // the clamp code above - already reach past KB_TEXT_LINES and past a full
+      // KB_MAX_BYTES-byte buffer before either intermediate is combined. So the
+      // offset the clamp exists to stop is a real, reachable number on THIS
+      // board, not a hypothetical one a looser board might never hit.
+      const line0Y = c.KB_TEXT_Y + c.KB_LINE0_DY;
+      const rawLineMax = Math.floor((c.KB_ROWS_Y - 1 - line0Y) / c.KB_LINE_PITCH);
+      const rawColMax = Math.floor((W - 1 - c.CARD_X - 6) / c.TEXT_ADV);
+      const rawOffMax = rawLineMax * c.KB_COLS + rawColMax;
+      console.log(`    tap-to-place: unclamped worst case line ${rawLineMax} col ${rawColMax} -> off ${rawOffMax}, against KB_TEXT_LINES ${c.KB_TEXT_LINES} / KB_COLS ${c.KB_COLS} / kbLen <= ${KB_MAX_BYTES}`);
+      chk(rawLineMax >= c.KB_TEXT_LINES,
+          `an unclamped tap at the card's bottom reaches line ${rawLineMax}, past the ${c.KB_TEXT_LINES}-line budget - the line clamp is load-bearing`);
+      chk(rawOffMax > c.KB_MAX_BYTES,
+          `an unclamped tap at the card's bottom-right reaches offset ${rawOffMax}, past even a full ${c.KB_MAX_BYTES}-byte buffer - the offset clamp is load-bearing`);
+    }
     // THE META ROW must share no pixel row with any text line - drawString paints
     // an opaque box the full height of a line, so a shared row erases text.
     const metaY = c.KB_TEXT_Y + c.KB_META_DY, line0 = c.KB_TEXT_Y + c.KB_LINE0_DY;
@@ -1909,38 +2597,1239 @@ for (const b of [1, 2]) {
     chk(metaEnd < line0, `meta row ends ${metaEnd} before the first text line starts ${line0} (gap ${line0 - metaEnd - 1})`);
     chk(lastLineEnd < c.KB_TEXT_Y + c.KB_TEXT_H, `last text line ends ${lastLineEnd} inside the card (${c.KB_TEXT_Y + c.KB_TEXT_H - 1})`);
     // The grid, and the drawn-versus-tested split.
-    const drawnKeyH = c.KB_ROW_H - 4;
+    // KEY_INSET is PARSED out of drawKbKey()'s and drawKbRow3()'s own bodies
+    // (see its definition), not the literal 4 that stood here: everything below
+    // is arithmetic on this number, so a transcribed inset would have kept the
+    // aspect cap, the corner-loss share and the cell claims all green while
+    // describing a key the firmware had stopped drawing.
+    const drawnKeyH = c.KB_ROW_H - KEY_INSET;
     // The TESTED band's width is KB_PITCH, not KB_KEY_W: kbTouch() divides by
     // KB_PITCH, so the 2px gap belongs to the key on its left and no column is
     // dead. Board 1's own header used to state 22x44 = 968 here, which mixed the
     // drawn width with the tested height.
     console.log(`    key drawn ${c.KB_KEY_W}x${drawnKeyH}, tap band ${c.KB_PITCH}x${c.KB_ROW_H} = ${c.KB_PITCH * c.KB_ROW_H}px2`);
-    chk(drawnKeyH >= c.TAP_MIN, `drawn key ${drawnKeyH}px tall >= TAP_MIN ${c.TAP_MIN}`);
+    // THE FLOOR IS THE TESTED BAND, and this line used to say `drawnKeyH >=
+    // TAP_MIN` - which is a different claim and was only ever true by accident.
+    // Board 1's KB_ROW_H was TAP_MIN + 4, so its DRAWN key (KB_ROW_H - 4) came out
+    // at exactly TAP_MIN and the assertion read as a rule; board 2's 54 against 46
+    // never touched the floor at all. It was never the rule: what a finger is
+    // tested against is KB_PITCH x KB_ROW_H, which is why the drawn key has been
+    // 22px wide against a 40px floor since the keyboard shipped. Corrected here
+    // rather than deleted, because the two claims are one character apart and the
+    // next person to read this needs to know which one is load-bearing.
+    chk(c.KB_ROW_H >= c.TAP_MIN,
+        `key row band ${c.KB_ROW_H}px tall >= TAP_MIN ${c.TAP_MIN} (clears by ${c.KB_ROW_H - c.TAP_MIN}; the DRAWN key is ${drawnKeyH}, deliberately smaller)`);
     chk(c.KB_ROW_H > drawnKeyH && c.KB_PITCH > c.KB_KEY_W,
         `the tap band (${c.KB_PITCH}x${c.KB_ROW_H}) is bigger than the drawn key (${c.KB_KEY_W}x${drawnKeyH}) in BOTH dimensions - the split is kept, not collapsed`);
+    // THE CAP IS A FIXED HISTORICAL PAIR, not board 1's current key, and that is
+    // deliberate: 40/22 is the drawn key board 1 shipped before the prompt strip
+    // took 3px off KB_ROW_H. Board 1's own key is 22x37 = 1:1.68 now, and deriving
+    // the cap from it would drag board 2's KB_ROW_H down to 30 * 1.68 = 50 -
+    // moving a grid with no reason to move. Both boards are still under it.
     chk(drawnKeyH / c.KB_KEY_W <= 40 / 22 + 0.001,
-        `key aspect 1:${(drawnKeyH / c.KB_KEY_W).toFixed(2)} no more elongated than board 1's 1:${(40 / 22).toFixed(2)}`);
+        `key aspect 1:${(drawnKeyH / c.KB_KEY_W).toFixed(2)} no more elongated than the 1:${(40 / 22).toFixed(2)} board 1 shipped before the strip`);
+    // B2. THE FLAT-EDGE GUARD IS GONE, AND ITS ARITHMETIC IS WHY. It read
+    // `chk(c.KB_KEY_R * 2 < c.KB_KEY_W)` under a comment saying it fails "the
+    // moment KB_KEY_R stops being a corner treatment", and a report claimed it and
+    // the corner-loss guard below caught different faults. That was half right.
+    // The corner-loss guard is STRICTLY STRONGER on both boards: it first fires at
+    // KB_KEY_R 5 on board 1 and 7 on board 2, where the flat-edge guard needs 11
+    // and 15. Every radius the flat-edge guard would have caught, the corner-loss
+    // guard has already caught six radii earlier.
+    //
+    // The two are not identical in FORM - corner loss divides by the key's AREA,
+    // so it weakens as the key gets taller, while the flat-edge guard reads the
+    // width alone. That is the "different faults" the report meant, and it is
+    // unreachable: the DRAWN key has to reach 237px on board 1 and 322px on board
+    // 2 before the flat-edge guard becomes the independent one, on panels 320 and
+    // 480 tall with a text card, a strip and an action row above it. There is no
+    // geometry this repo can build where it is the assertion that catches
+    // something, so it was protection in appearance only - one more green line the
+    // next reader learns to stop checking. The corner-loss guard below is the real
+    // one and always was.
+    // KB_KEY_R MUST BE THE DERIVATION, not a literal that merely agrees with one
+    // written in a comment - "a derivation that exists only in prose is not a
+    // derivation" is how this repo names that failure, and a bare `= 2;` leaves
+    // KB_KEY_R free to drift to 1 or 4 with every other assertion here (a loose
+    // bound, not an equality) still green. Math.trunc(c.KB_KEY_W / 10) is an
+    // INDEPENDENT recomputation in the checker's own arithmetic from c.KB_KEY_W
+    // as consts() parsed it - not c.KB_KEY_R compared against itself - so this
+    // fails the moment the header's KB_KEY_R stops being exactly this derivation.
+    chk(c.KB_KEY_R === Math.trunc(c.KB_KEY_W / 10),
+        `KB_KEY_R ${c.KB_KEY_R} != KB_KEY_W / 10 (${Math.trunc(c.KB_KEY_W / 10)})`);
+    // THE LOAD-BEARING ONE: this is what fails if KB_KEY_R is set back to R_MD.
+    // The threshold is deliberately NOT "about 9%" - board 1's share at KB_KEY_R
+    // is 0.4% today (0.4% again at Task 6's KB_ROW_H 41) and board 2's is 0.5%,
+    // where R_MD's share is 9.8%/10.5% and 7.6% respectively (R_MD scales x1.2
+    // between the boards while the key scales x1.36, so a single R_MD-side
+    // threshold would describe neither). 2% sits above both KB_KEY_R shares and
+    // below both R_MD shares, and the message prints the real numbers for THIS
+    // board rather than asserting a shared one.
+    const cornerLoss = (r) => 4 * r * r * (1 - Math.PI / 4);
+    const drawnKeyArea = c.KB_KEY_W * drawnKeyH;
+    const lossR = cornerLoss(c.KB_KEY_R), lossMD = cornerLoss(c.R_MD);
+    chk(lossR / drawnKeyArea < 0.02,
+        `KB_KEY_R ${c.KB_KEY_R} rounds ${lossR.toFixed(1)}px2 off the corners, ` +
+        `${(lossR / drawnKeyArea * 100).toFixed(1)}% of the ${drawnKeyArea}px2 drawn ` +
+        `${c.KB_KEY_W}x${drawnKeyH} key (R_MD ${c.R_MD} would be ` +
+        `${(lossMD / drawnKeyArea * 100).toFixed(1)}%)`);
+    if (b === 1) {
+      // B3. BOARD 1 ONLY, AND HERE IS THE REASON, which the comment used to leave
+      // to the reader. Everything in this block is a claim about the SOURCE, not
+      // about a board: uiKeyCap's body, kbTouch's body and the KB_ALPHA/KB_SYM/
+      // KB_SYM2 tables are one shared translation unit, compiled identically for
+      // both FQBNs (keyboard.ino wraps none of them in a board #if). Running them
+      // under both headers would not test anything twice - it would REPORT the
+      // same defect twice, once under each board heading, which is how a reader
+      // learns to skim a failure. The board loop is the wrong axis for a source
+      // claim, so it is entered once and `b === 1` is the arbitrary pick. Anything
+      // here that ever does become board-dependent must move OUT of this guard,
+      // not have the guard relaxed.
+      //
+      // Bound to the FUNCTION BODY, not the file: a grep for uiStrokeRound over
+      // deckhand_display.ino passes while uiKeyCap strokes freely, because
+      // uiButton next door calls it. fnSrc(...).length > 0 is asserted FIRST -
+      // !/re/.test("") is true, so a negative assertion over a function that
+      // failed to parse would otherwise pass vacuously.
+      const keyCapSrc = fnSrc(SRC_MAIN, "uiKeyCap");
+      chk(keyCapSrc.length > 0, "uiKeyCap's body was found in deckhand_display.ino (parse gate)");
+      chk(!/uiStrokeRound/.test(keyCapSrc),
+          "uiKeyCap's OWN BODY does not stroke - an outline on COLOR_BG is what makes the drawn key read smaller than its band");
+      chk(/KB_KEY_R/.test(keyCapSrc), "uiKeyCap's OWN BODY uses KB_KEY_R, not R_MD");
+
+      // EVERY PRINTABLE ASCII CODEPOINT REACHABLE, swept from the SAME
+      // KB_PAGE_ROWS parse KB_ROW_CELLS derives from - not restated, so this is
+      // provable against the source rather than against a description of it.
+      // SPACE and "." are row 3's own two characters (drawKbRow3 draws them,
+      // kbTouch inserts them - there is no KB_*[3] table for row 3, it is data
+      // inline in the touch handler) and used to be hand-seeded here as
+      // `new Set([" ", "."])`. That is Task 1's exact bug in the half that
+      // matters: SPACE has nowhere else to come from, so a checker that
+      // ASSERTS it is reachable rather than reading it off the source proves
+      // nothing about SPACE - drop " " from a hand seed and the sweep still
+      // reports 95 of 95. "." is merely redundant (it also lives on KB_SYM's
+      // row 2), not load-bearing, but is derived the same way for the same
+      // reason. Parsed instead, from kbTouch's OWN BODY: bound via fnSrc (the
+      // parse gate is asserted FIRST - `!/re/.test("")` is true, so a claim
+      // over an unparsed function would pass vacuously), pulling the literal
+      // char out of every `kbInsert('X')` call kbTouch makes. The row 0-2
+      // branch calls `kbInsert(c)` with a variable, never a literal, so this
+      // only ever matches row 3's two calls.
+      const touchSrcForInsert = fnSrc(KB_SRC, "bool kbTouch");
+      chk(touchSrcForInsert.length > 0, "kbTouch's body was found in keyboard.ino (parse gate)");
+      const row3Chars = [...touchSrcForInsert.matchAll(/kbInsert\('([^'\\])'\)/g)].map((m) => m[1]);
+      chk(row3Chars.length === 2,
+          `kbTouch calls kbInsert with exactly 2 literal characters (SPACE and the row-3 dot), found ${row3Chars.length}: ${JSON.stringify(row3Chars)}`);
+      const reach = new Set(row3Chars);
+      for (const m of KB_PAGE_ROWS)
+        for (const lit of m[1].match(/"(?:[^"\\]|\\.)*"/g))
+          for (const ch of parseCLit(lit)) {
+            if (ch === "\x01" || ch === "\x02") continue;   // CAP and DEL stand-ins
+            reach.add(ch);
+            if (ch >= "a" && ch <= "z") reach.add(ch.toUpperCase());
+          }
+      const missing = [];
+      for (let cp = 0x20; cp <= 0x7e; cp++)
+        if (!reach.has(String.fromCharCode(cp))) missing.push(String.fromCharCode(cp));
+      chk(missing.length === 0,
+          `every printable ASCII codepoint is reachable; missing ${missing.length}: ${missing.join(" ")}`);
+
+      // ================= ROW 3'S GAP, AND ITS PRESS FLASH =================
+      // Two defects, both invisible until Task 2 made keys filled tiles. Bound to
+      // FUNCTION BODIES, with the parse gates first - !/re/.test("") is true, so
+      // a claim over a function that failed to parse would pass vacuously.
+      chk(/const int KB_KEY_GAP\s*=\s*KB_PITCH\s*-\s*KB_KEY_W\s*;/.test(KB_SRC),
+          "keyboard.ino derives KB_KEY_GAP as KB_PITCH - KB_KEY_W, not a second literal 2 that " +
+          "happens to agree with the character rows on both boards today");
+      for (const [i, name, w] of [[0, "the pager", KB_ROW3_DRAWN[0]],
+                                  [1, "SPACE", KB_ROW3_DRAWN[1]],
+                                  [2, "the period", KB_ROW3_DRAWN[2]]])
+        chk(/-\s*KB_KEY_GAP$/.test(w),
+            `drawKbRow3 draws ${name} at "${w}" - one KB_KEY_GAP inside its cell, so the three ` +
+            `tiles do not merge into one continuous bar the way they did at the full cell width ` +
+            `(the tested band is still the whole cell: the gap belongs to the key on its left)`);
+      chk(/int k = sx < KB_R3_PAGE_W \? 0 : \(sx < KB_R3_PAGE_W \+ KB_R3_SPACE_W \? 1 : 2\);/
+            .test(touchSrcForInsert),
+          "kbTouch's row-3 branch derives the PRESSED INDEX from the same two constants its hit " +
+          "test divides on, so the key that flashes cannot disagree with the key that acts");
+      const r3Flash = (touchSrcForInsert.match(/drawKbRow3\(k\);/g) || []).length;
+      chk(r3Flash === 2,
+          `kbTouch passes drawKbRow3 a pressed index in both of row 3's arms (found ${r3Flash} ` +
+          `of 2) - drawKbRow3 has always taken one and this branch never passed it, so the ` +
+          `pager and SPACE gave no confirmation a press landed at all`);
+      // AND EVERY PRESSED DRAW IS PUSHED TO THE PANEL. This is NOT the ordering
+      // claim below it, and asserting the ordering alone is what let the defect
+      // ship: PanelShim composes into a shadow framebuffer and only a flush
+      // reaches the glass, and the only flushes on this screen are at the end of
+      // drawKeyboard() and the end of loop(). All three row-3 flashes are drawn
+      // AND erased inside one handleTouch() call, so the loop-end flush pushed
+      // the state AFTER the erase and the pressed row was never on the panel -
+      // correct order, invisible result. SCREENSHOT could not see it either: it
+      // reads the same shadow buffer the renderer just wrote. So the assertion
+      // has to bind the PUSH to the DRAW, immediately and by adjacency.
+      const r3Pushed = (touchSrcForInsert.match(/drawKbRow3\(k\);\s*KB_FLASH_PUSH\(\);/g) || []).length;
+      chk(r3Pushed === r3Flash && r3Flash > 0,
+          `every one of row 3's ${r3Flash} pressed draws is immediately followed by ` +
+          `KB_FLASH_PUSH() (found ${r3Pushed}) - on board 2 a pressed row that is not flushed ` +
+          `before it is erased in the same handleTouch() call never reaches the glass at all, ` +
+          `and neither the ordering assertion below nor a SCREENSHOT can see that`);
+      chk(/#if !BOARD_USES_TFT_ESPI\s*#define KB_FLASH_PUSH\(\) tft\.flush\(\)/.test(KB_SRC),
+          "KB_FLASH_PUSH is a #if-guarded macro over tft.flush() - board 1 draws through real " +
+          "TFT_eSPI and needs none, and a macro keeps the guard around ONE statement rather " +
+          "than duplicating a whole one per arm");
+      // AND IT DOES NOT UN-PRESS IT HERE. Both arms used to end drawKbRow3(k);
+      // delay(KB_FLASH_MS); drawKbRow3(-1); - draw, block, erase, all inside one
+      // handleTouch() call. The blocking delay was the keystroke-eater, and an
+      // inline erase is what makes a non-blocking version WORSE than the delay
+      // rather than better: erase immediately after the draw and on board 2 the
+      // loop-end flush pushes the state after the erase, so the pressed row never
+      // reaches the glass at all - correct order, invisible result, and a
+      // SCREENSHOT of the shadow buffer agreeing with it. The release now belongs
+      // to tickKbFlash(), which the structural block below binds by name.
+      const r3Clear = (touchSrcForInsert.match(/drawKbRow3\(-1\);/g) || []).length;
+      chk(r3Clear === 0,
+          `and does NOT un-press it in the same call (found ${r3Clear} inline drawKbRow3(-1), ` +
+          `expected 0) - the release is tickKbFlash()'s, polled from loop(); an erase here is ` +
+          `either preceded by a blocking delay that swallows the next press or reached by the ` +
+          `loop-end flush only after it has already happened`);
+      // AND THE PAGE KEY'S FLASH IS DRAWN AFTER ITS REPAINT. drawKeyboard()
+      // fillScreen's the panel, so a pressed row drawn BEFORE it is wiped within
+      // microseconds and is never seen - which is the state this task found.
+      const k0 = (touchSrcForInsert.match(/if \(k == 0\) \{([\s\S]*?)\n    \} else \{/) || [])[1] || "";
+      chk(k0.length > 0, "kbTouch's row-3 page-key arm was found (parse gate)");
+      chk(k0.indexOf("drawKeyboard();") >= 0 && k0.indexOf("drawKbRow3(k);") >
+            k0.indexOf("drawKeyboard();"),
+          "the page key's flash is drawn AFTER drawKeyboard()'s fillScreen, not before it - " +
+          "before it, the flash is erased in the same call and the only feedback a press " +
+          "registered never reaches the glass");
+
+      // ================= THE BUBBLE, AND RELEASE-COMMIT =================
+      const bubSrc = KB_BUB_SRC;
+      chk(bubSrc.length > 0, "drawKbBubble's body was found in keyboard.ino (parse gate)");
+      // THE CLAMP MOVED, AND SO DID THIS. It used to require KB_ROWS_Y in the
+      // body, because the bubble was kept off the text card entirely; the reason
+      // given for that - "the card's change-only cache would have to be busted" -
+      // was about a cache that does not exist (drawKbText repaints the card
+      // wholesale). The bubble is now always ABOVE the pressed key and row 0's
+      // overlaps the card's lower half. What is still a real, silent failure is
+      // reaching the card's TOP edge or the strip, so that is what the body must
+      // clamp against, and BOTH ends have to be there: an upper clamp alone would
+      // let a future row count push it into the pager row.
+      chk(/if\s*\(\s*y\s*<\s*KB_TEXT_Y\s*\+\s*KB_BUB_H\s*\)/.test(bubSrc),
+          "drawKbBubble's OWN BODY floors y at KB_TEXT_Y + KB_BUB_H - the bubble may overlap " +
+          "the card's lower half (kbClearBubble repaints the card) but never its top edge or " +
+          "the prompt strip above it, which nothing on that path restores");
+      chk(/if\s*\(\s*y\s*\+\s*KB_BUB_H\s*>\s*kbRowY\(3\)\s*\)/.test(bubSrc),
+          "and still caps it at row 3's top, so it cannot reach the pager row or the action band");
+      chk(!/fillScreen/.test(bubSrc) && !/drawKeyboard/.test(bubSrc),
+          "drawKbBubble's OWN BODY does not repaint the screen or the whole board");
+      const clrSrc = fnSrc(KB_SRC, "void kbClearBubble");
+      chk(clrSrc.length > 0, "kbClearBubble's body was found in keyboard.ino (parse gate)");
+      chk(!/fillScreen/.test(clrSrc) && !/drawKeyboard/.test(clrSrc) && /drawKbKey\(/.test(clrSrc),
+          "kbClearBubble's OWN BODY restores through drawKbKey and never through drawKeyboard() " +
+          "- drawKeyboard fillScreen's the panel, so restoring that way would repaint the card, " +
+          "the strip and thirty keys on EVERY keystroke, which is the flicker the change-only " +
+          "discipline exists to prevent");
+      const armSrc = fnSrc(KB_SRC, "bool kbArm");
+      chk(armSrc.length > 0, "kbArm's body was found in keyboard.ino (parse gate)");
+      chk(/KB_DEL/.test(armSrc),
+          "kbArm's OWN BODY declines DEL by name - DEL is the one exception inside the key " +
+          "band and must commit on PRESS, or a tap stops deleting immediately and " +
+          "tickKbRepeat's hold-to-repeat never arms");
+      chk(/kbPeekPage/.test(armSrc),
+          "kbArm's OWN BODY declines while the peek is up - the peek covers the keys and routes " +
+          "every tap to its own pager, so arming under it would type a character the user " +
+          "cannot see they aimed at");
+      const relSrc = fnSrc(KB_SRC, "bool kbRelease");
+      chk(relSrc.length > 0, "kbRelease's body was found in keyboard.ino (parse gate)");
+      chk(/kbInsert\(/.test(relSrc),
+          "kbRelease's OWN BODY is what inserts the character - the commit moved off the press, " +
+          "which is the whole of this change");
+      chk(!/drawKeyboard/.test(relSrc),
+          "kbRelease's OWN BODY does not repaint the board per keystroke");
+      chk(/if \(c != KB_DEL\) return true;/.test(touchSrcForInsert),
+          "kbTouch's rows 0-2 branch now commits ONLY DEL - if it still inserted the character " +
+          "too, one press would arm in kbArm AND commit here, and every keystroke would double");
+      const htSrc = fnSrc(SRC_MAIN, "void handleTouch");
+      chk(htSrc.length > 0, "handleTouch's body was found in deckhand_display.ino (parse gate)");
+      chk(/if \(!kbArm\(sx, sy\)\) kbTouch\(sx, sy\);/.test(htSrc),
+          "handleTouch offers every keyboard press to kbArm FIRST and falls through to kbTouch " +
+          "only for what it declines - two commit paths for one press is a doubled character");
+      chk(/if \(composeOnKeys\(\)\) kbSlide\(sx, sy\);/.test(htSrc),
+          "handleTouch's held path re-samples through kbSlide instead of returning with no work " +
+          "- without it a finger that landed wrong can never be corrected, which is the point - " +
+          "and it asks composeOnKeys(), not the surface: nothing on the reply panel arms, so " +
+          "nothing there can slide or commit");
+      chk(/if \(composeOnKeys\(\) && kbRelease\(\)\)/.test(htSrc),
+          "handleTouch's RELEASE path - the one the record FAB already used - is where the " +
+          "keystroke commits");
+      chk(/kbSetArm\(-1, -1\);/.test(armSrc),
+          "kbArm's OWN BODY clears any stale arm on the presses it declines - handleTouch " +
+          "commits whatever is armed on the NEXT lift, so an arm that outlived its press would " +
+          "make a tap on SEND send and then type a character into the emptied buffer");
+      // KBBUBBLE is SCAFFOLDING and must stay scaffolding: it draws through the
+      // real kbSetArm so a capture records the shipping path, and it must have
+      // no way to reach the commit that path normally ends in.
+      const bcSrc = fnSrc(KB_SRC, "void kbBubbleCommand");
+      chk(bcSrc.length > 0, "kbBubbleCommand's body was found in keyboard.ino (parse gate)");
+      chk(/kbSetArm\(/.test(bcSrc) && !/kbRelease\(/.test(bcSrc) && !/kbInsert\(/.test(bcSrc),
+          "kbBubbleCommand's OWN BODY arms through kbSetArm and can neither commit nor insert - " +
+          "a scaffolding command that could type would be a way to answer a prompt from the Mac " +
+          "without a person touching the glass");
+      chk(/KB_DEL/.test(bcSrc),
+          "kbBubbleCommand's OWN BODY declines DEL by name - DEL commits on press and is never " +
+          "armed, so a bubble over it would be a capture of a state this keyboard cannot reach");
+      // A CANCEL - armed, slid off every key, lifted on nothing - is the
+      // strongest evidence release-commit produces, because that press WOULD
+      // have committed a character under press-commit and commits none now.
+      // kbRelease's early return is the only place it is distinguishable from a
+      // press that never armed at all, so the claim is bound to that return.
+      chk(/if \(kbArmRow < 0\) \{ kbProbeCancel\(\); return false; \}/.test(relSrc),
+          "kbRelease's OWN BODY reports a CANCEL on the lift-with-nothing-armed path - counted " +
+          "anywhere else it would either miss the presses that slid off (kbSlide disarms them " +
+          "and kbRelease never runs its body) or count every press that never armed");
+      const stopSrc = fnSrc(KB_SRC, "void kbProbeStop");
+      chk(stopSrc.length > 0, "kbProbeStop's body was found in keyboard.ino (parse gate)");
+      chk(/kbProbeCancelled/.test(stopSrc) && /cancelled/.test(stopSrc),
+          "and kbProbeStop's OWN BODY reports the cancels in the totals, LABELLED - folded into " +
+          "the re-target count they would be invisible, and left out they would be uncounted " +
+          "evidence for the one claim this instrument exists to test");
+    }
     chk(10 * c.KB_PITCH <= W, `10 columns x ${c.KB_PITCH} = ${10 * c.KB_PITCH} inside the ${W}px panel`);
     chk(c.KB_PITCH - c.KB_KEY_W === 2, `${c.KB_PITCH - c.KB_KEY_W}px of the pitch is the gap`);
     for (const n of KB_ROW_CELLS) {
       const x0 = Math.floor((W - n * c.KB_PITCH) / 2);
       chk(x0 >= 0, `key row of ${n} cells starts x=${x0} (centred, must not go negative)`);
     }
-    chk(8 * c.KB_PITCH < W, `row 3: ?123 (2 cells) + SPACE (6) = ${8 * c.KB_PITCH} leaves ${W - 8 * c.KB_PITCH} for "."`);
+    {
+      // Row 3's cell budget, with the cell counts PARSED out of KB_R3_PAGE_W and
+      // KB_R3_SPACE_W rather than the 2 and 6 this message used to state.
+      const pageW = KB_ROW3.pageCells * c.KB_PITCH, spaceW = KB_ROW3.spaceCells * c.KB_PITCH;
+      const dotW = W - pageW - spaceW;
+      chk(pageW + spaceW < W,
+          `row 3: the page key (${KB_ROW3.pageCells} cells) + SPACE (${KB_ROW3.spaceCells}) = ` +
+          `${pageW + spaceW} leaves ${dotW} for "."`);
+      // B8. AND THE LABELS FIT THE KEYS THEY ARE DRAWN IN. Nothing measured this.
+      // uiKeyCap centres the label MC_DATUM in the key with no padding and
+      // drawString paints an OPAQUE box, so a label wider than its key does not
+      // merely look cramped - it paints over the neighbouring key's fill and over
+      // the gap that separates them. The page key is the one that matters: its
+      // label CHANGES with the page, so the widest of KB_PAGE_LABEL is what the
+      // 2-cell key has to hold, and the other two are never on screen to show it.
+      // MEASURED with widthB (uiKeyCap sets T_TITLE, which is font id 2 here),
+      // never a character count times the advance - drawString charges the last
+      // glyph xOffset + width rather than xAdvance, which is exactly the 1px that
+      // makes board 1's counted lanes hot.
+      //
+      // B9. MEASURED AGAINST THE DRAWN KEY, NOT THE CELL. Row 3 now insets each
+      // key by KB_KEY_GAP (the character rows' own gap, parsed above) so three
+      // filled tiles stop merging into one bar, and the label has to fit what is
+      // DRAWN - the fill is only the drawn key, and drawString's box paints
+      // outside it into the gutter that separates two keys.
+      const gap = c.KB_PITCH - c.KB_KEY_W;
+      const dPage = pageW - gap, dSpace = spaceW - gap, dDot = dotW - gap;
+      const widest = KB_ROW3.labels.reduce((a, l) => widthB(b, T_BODY, l) > widthB(b, T_BODY, a) ? l : a);
+      console.log(`    row 3: page key ${pageW}px cell / ${dPage}px drawn holds "${widest}" ` +
+                  `(${widthB(b, T_BODY, widest)}px, ` +
+                  `widest of ${KB_ROW3.labels.map(l => `"${l}" ${widthB(b, T_BODY, l)}`).join(", ")}), ` +
+                  `SPACE ${spaceW}/${dSpace}px, "." ${dotW}/${dDot}px, gutter ${gap}px`);
+      chk(widthB(b, T_BODY, widest) <= dPage,
+          `the widest page label "${widest}" inks ${widthB(b, T_BODY, widest)}px in the ` +
+          `${dPage}px DRAWN pager key (clears by ${dPage - widthB(b, T_BODY, widest)})`);
+      for (const [l, w] of [["SPACE", dSpace], [".", dDot]])
+        chk(widthB(b, T_BODY, l) <= w,
+            `row 3's "${l}" inks ${widthB(b, T_BODY, l)}px in its ${w}px DRAWN key`);
+      for (const [n, d, cell] of [["the pager", dPage, pageW], ["SPACE", dSpace, spaceW],
+                                  ["the period", dDot, dotW]])
+        chk(d > 0 && d < cell,
+            `row 3's ${n} draws ${d}px strictly inside its ${cell}px tested cell`);
+      // The same opaque-box rule vertically, on the key rather than the action
+      // button: the label's CELL must fit the DRAWN key (KB_ROW_H less the parsed
+      // inset), not the tap band, because the fill is only the drawn key.
+      chk(lineHB(b, T_BODY) <= drawnKeyH,
+          `a T_BODY cell is ${lineHB(b, T_BODY)}px and the drawn key is ${drawnKeyH}px ` +
+          `(clears by ${drawnKeyH - lineHB(b, T_BODY)}) - drawString's opaque box would ` +
+          `otherwise paint outside the key cap it is centred in`);
+    }
+    // ================= THE MAGNIFIED BUBBLE =================
+    // The character keys are 4.27mm and 4.93mm wide against a ~7.1mm fingertip,
+    // so the finger covers the key it is pressing. The bubble is what makes the
+    // armed key visible - and it is the FIRST element here that paints over live
+    // chrome, so where it lands is a correctness claim, not a style one.
+    {
+      const bubW = KB_BUB.pitches * c.KB_PITCH, bubH = c.KB_ROW_H;
+      const rowY = (r) => c.KB_ROWS_Y + r * c.KB_ROW_H;
+      for (let r = 0; r <= 2; r++) {
+        const br = r - KB_BUB.back;
+        const y = rowY(br);
+        // ALWAYS ABOVE, ROW 0 INCLUDED. This is the assertion the row-0 flip
+        // would fail: kbBubbleRow() returning 1 for r=0 put y a whole KB_ROW_H
+        // BELOW the pressed row, under the fingertip that is hiding the key.
+        chk(br === r - 1 && y < rowY(r),
+            `the bubble for key row ${r} is drawn on row ${br} at y=${y}, ABOVE row ${r} ` +
+            `(y=${rowY(r)}) - a bubble on or under the key it magnifies is under the fingertip ` +
+            `hiding that key, and one that changes SIDES on a single row is disorienting in ` +
+            `exactly the moment it exists to help`);
+        // AND THE CLAMP THAT REPLACED "never touch the card". Row 0's bubble
+        // DOES overlap the card's lower half now, which drawKbText() repairs
+        // wholesale; what it must never reach is the card's TOP edge or the
+        // prompt strip above it, because nothing on kbClearBubble's path
+        // restores those.
+        chk(y >= c.KB_TEXT_Y + bubH,
+            `and starts at y=${y}, at least one bubble-height (${bubH}) below the card's top ` +
+            `KB_TEXT_Y (${c.KB_TEXT_Y}) - so the byte counter, the countdown and the first text ` +
+            `line are never covered, and drawKbBubble's floor never has to fire`);
+        chk(y > c.KB_STRIP_Y + c.KB_STRIP_H,
+            `and clears the prompt strip, which ends at ${c.KB_STRIP_Y + c.KB_STRIP_H} - the ` +
+            `one piece of chrome above the card that nothing on this path repaints`);
+        chk(y + bubH <= rowY(3),
+            `and ends at y=${y + bubH}, at or above row 3's top (${rowY(3)}) - so it never ` +
+            `reaches the pager row or the action band either, and kbClearBubble's sweep over ` +
+            `rows 0..2 restores everything it covered`);
+        // WHICH RESTORE ARM HAS TO RUN, derived rather than assumed: a bubble
+        // that starts above the card's BOTTOM edge needs drawKbText(), and one
+        // that does not is restored entirely by the key sweep. Only row 0's is
+        // on the card, and it is on it on BOTH boards - if that ever stopped
+        // being true the "if (by < KB_TEXT_Y + KB_TEXT_H)" arm asserted below
+        // would be dead code nobody noticed.
+        chk((y < c.KB_TEXT_Y + c.KB_TEXT_H) === (r === 0),
+            `and its restore arm is the expected one: row ${r}'s bubble ${r === 0 ? "DOES" : "does not"} ` +
+            `reach the card (card ${c.KB_TEXT_Y}..${c.KB_TEXT_Y + c.KB_TEXT_H - 1}, bubble ` +
+            `${y}..${y + bubH - 1}), so kbClearBubble ${r === 0 ? "must call" : "need not call"} drawKbText()`);
+      }
+      // HOW MANY CELLS THE RESTORE HAS TO REPAINT, swept over every page, row and
+      // column rather than argued. kbClearBubble repaints the key cells whose
+      // rectangles intersect the bubble; this is that same intersection, run over
+      // the real row lengths (rows are CENTRED, so a bubble on row 0 above a
+      // 4-cell row sits at a different x0 than above a 10-cell one).
+      let worst = 0, worstAt = "";
+      for (let pg = 0; pg < KB_PAGE_ROW_LENS.length; pg++) {
+        const lens = KB_PAGE_ROW_LENS[pg];
+        const x0 = (r) => Math.floor((W - lens[r] * c.KB_PITCH) / 2);
+        for (let r = 0; r <= 2; r++) {
+          for (let col = 0; col < lens[r]; col++) {
+            let bx = x0(r) + col * c.KB_PITCH + Math.floor(c.KB_KEY_W / 2) - Math.floor(bubW / 2);
+            bx = Math.min(Math.max(bx, 0), W - bubW);
+            const br = r - KB_BUB.back;
+            const by = rowY(br);
+            let n = 0;
+            for (let rr = 0; rr <= 2; rr++) {
+              if (rowY(rr) + c.KB_ROW_H <= by || rowY(rr) >= by + bubH) continue;
+              for (let cc = 0; cc < lens[rr]; cc++) {
+                const cx = x0(rr) + cc * c.KB_PITCH;
+                if (cx + c.KB_PITCH <= bx || cx >= bx + bubW) continue;
+                n++;
+              }
+            }
+            if (n > worst) { worst = n; worstAt = `page ${pg} row ${r} col ${col}`; }
+          }
+        }
+      }
+      console.log(`    bubble: ${bubW}x${bubH} (${KB_BUB.pitches} pitches x KB_ROW_H), worst ` +
+                  `restore ${worst} key cells at ${worstAt}, face ${lineHB(b, T_HEAD)}px vs the ` +
+                  `key's own ${lineHB(b, T_BODY)}px`);
+      chk(worst > 0 && worst <= 3,
+          `the bubble covers at most ${worst} key cells anywhere on this board (bound: 3 - it is ` +
+          `exactly KB_ROW_H tall and lands ON a row boundary, so it spans ONE row band, and at 2 ` +
+          `pitches wide at most THREE columns of it) - that bound plus the single drawKbText() ` +
+          `for row 0 is what makes kbClearBubble's restore cheap enough not to need ` +
+          `drawKeyboard()`);
+
+      // ================= THE CARD'S CORNER NOTCHES =================
+      // MIRROR HALF. Nothing in this block reads the firmware's text - it
+      // reimplements both boards' fillSmoothRoundRect and kbClearBubble's clip,
+      // and it BINDS NOTHING on its own; the structural half further down is what
+      // holds the code to it. What it can do that the structural half cannot is
+      // answer the question that was never asked before: not "is a repair written
+      // down" but "IS EVERY PIXEL THE BUBBLE CAN LEAVE ACCENT IN ACTUALLY
+      // WRITTEN BY SOMETHING".
+      //
+      // uiFillRound does not write every pixel of its bounding box. Real
+      // TFT_eSPI `continue`s on `hyp2 >= r2`; PanelShim's blendPixel returns on
+      // `coverage <= 0.001f`. So handing the card's rows back to drawKbText()
+      // restores everything EXCEPT the pixels outside the r = KB_TEXT_R curve -
+      // and a row-0 bubble's own uiFillRound (KB_KEY_R = 2/3) paints those flat
+      // COLOR_ACCENT. That is the regression this block exists to make loud.
+      {
+        const cov = roundRectCoverage(b, c.CARD_X, c.KB_TEXT_Y, c.CARD_W, c.KB_TEXT_H, KB_TEXT_R);
+        const cardBot = c.KB_TEXT_Y + c.KB_TEXT_H, cardRight = c.CARD_X + c.CARD_W;
+        const written = (x, y) => (cov.get(`${x},${y}`) || 0) > 0;
+        let holes = 0, notchHoles = 0;
+        for (let y = c.KB_TEXT_Y; y < cardBot; y++)
+          for (let x = c.CARD_X; x < cardRight; x++)
+            if (!written(x, y)) { holes++; if (y >= cardBot - KB_TEXT_R) notchHoles++; }
+        chk(holes > 0 && notchHoles > 0,
+            `drawKbText's uiFillRound leaves ${holes} pixels of the card's own bounding box ` +
+            `unwritten (${notchHoles} of them in the two BOTTOM corner notches) - if this ever ` +
+            `reads 0 the repair below is dead code and this whole block is asserting nothing`);
+        // kbClearBubble's clip and repair, reimplemented, then swept over every
+        // row-0 column - the only row whose bubble reaches the card.
+        const rects = (bx, by, withNotch) => {
+          const out = [];
+          const botY = by < cardBot ? cardBot : by;
+          if (by + bubH > botY) out.push([bx, botY, bubW, by + bubH - botY]);
+          if (by < cardBot) {
+            const h = botY - by;
+            if (bx < c.CARD_X) out.push([bx, by, c.CARD_X - bx, h]);
+            if (bx + bubW > cardRight) out.push([cardRight, by, bx + bubW - cardRight, h]);
+            if (withNotch) {
+              const notchY = cardBot - KB_TEXT_R;
+              if (by + bubH > notchY) {
+                const ny = by > notchY ? by : notchY, nh = cardBot - ny;
+                if (bx < c.CARD_X + KB_TEXT_R && bx + bubW > c.CARD_X)
+                  out.push([c.CARD_X, ny, KB_TEXT_R, nh]);
+                if (bx < cardRight && bx + bubW > cardRight - KB_TEXT_R)
+                  out.push([cardRight - KB_TEXT_R, ny, KB_TEXT_R, nh]);
+              }
+            }
+          }
+          return out;
+        };
+        const inRects = (rs, x, y) => rs.some(([rx, ry, rw, rh]) => x >= rx && x < rx + rw && y >= ry && y < ry + rh);
+        const lens0 = KB_PAGE_ROW_LENS.map((p) => p[0]);
+        let stale = 0, staleAt = "", wouldBeStale = 0, cols = 0;
+        for (let pg = 0; pg < KB_PAGE_ROW_LENS.length; pg++) {
+          const len = KB_PAGE_ROW_LENS[pg][0];
+          const x0 = Math.floor((W - len * c.KB_PITCH) / 2);
+          for (let col = 0; col < len; col++) {
+            let bx = x0 + col * c.KB_PITCH + Math.floor(c.KB_KEY_W / 2) - Math.floor(bubW / 2);
+            bx = Math.min(Math.max(bx, 0), W - bubW);
+            const by = rowY(0 - KB_BUB.back);
+            if (by >= cardBot) continue;              // this row's bubble never reaches the card
+            cols++;
+            const rs = rects(bx, by, true), rsNo = rects(bx, by, false);
+            // Every pixel the bubble painted must be written again by SOMETHING:
+            // one of the clearing fills, or drawKbText's own coverage.
+            for (let y = by; y < by + bubH; y++)
+              for (let x = bx; x < bx + bubW; x++) {
+                const byCard = x >= c.CARD_X && x < cardRight && y >= c.KB_TEXT_Y && y < cardBot && written(x, y);
+                if (!byCard && !inRects(rs, x, y)) { stale++; if (!staleAt) staleAt = `page ${pg} col ${col} (${x},${y})`; }
+                if (!byCard && !inRects(rsNo, x, y)) wouldBeStale++;
+              }
+          }
+        }
+        chk(cols > 0 && lens0.every((l) => l > 0),
+            `${cols} row-0 bubble positions across ${KB_PAGE_ROW_LENS.length} pages actually ` +
+            `reach the card, so the sweep below is not vacuous`);
+        chk(stale === 0,
+            `every pixel a row-0 bubble paints is written again by the clip, the notch repair or ` +
+            `drawKbText (${stale} would keep COLOR_ACCENT${staleAt ? `, first at ${staleAt}` : ""})`);
+        // AND THE REPAIR IS LOAD-BEARING. Without it this same sweep leaves the
+        // card's bottom corner notches holding the bubble's accent - which is
+        // exactly the state 1ce10bb shipped. If this ever reads 0 the assertion
+        // above has stopped testing anything.
+        chk(wouldBeStale > 0,
+            `and the notch repair is what does it: drop those two fills and ${wouldBeStale} ` +
+            `pixels across the row-0 columns keep COLOR_ACCENT until the next fillScreen`);
+      }
+      // AND IT ACTUALLY MAGNIFIES. A bubble in the key's own face would be
+      // bigger only by being further from the finger, which is half the point at
+      // most. T_HEAD is the mock's font 3, and it has to fit the bubble it is
+      // centred in - drawString paints an opaque box.
+      chk(KB_BUB_SRC.length > 0 && /setUIFont\(T_HEAD\)/.test(KB_BUB_SRC),
+          "drawKbBubble's OWN BODY sets T_HEAD, the rung above the key cap's own T_TITLE/T_BODY " +
+          "- and the same font the mock's bubble uses (docs/design/compose/compose.js, font 3)");
+      chk(lineHB(b, T_HEAD) > lineHB(b, T_BODY),
+          `T_HEAD inks ${lineHB(b, T_HEAD)}px against the key label's ${lineHB(b, T_BODY)}px, ` +
+          `so the bubble is genuinely magnified on this board`);
+      chk(lineHB(b, T_HEAD) <= bubH,
+          `a T_HEAD cell is ${lineHB(b, T_HEAD)}px and the bubble is ${bubH}px ` +
+          `(clears by ${bubH - lineHB(b, T_HEAD)}) - drawString's opaque box would otherwise ` +
+          `paint outside the bubble it is centred in`);
+      // The widest label the bubble ever holds is CAPS, and it is READ OUT OF
+      // kbKeyLabel rather than transcribed: rename the lock state and this moves
+      // with it instead of certifying a string the firmware stopped drawing.
+      const bubLabels = [...fnSrc(KB_SRC, "void kbKeyLabel").matchAll(/"([A-Za-z]+)"/g)].map(m => m[1]);
+      chk(bubLabels.length > 0, "kbKeyLabel's OWN BODY yields the multi-character key labels (parse gate)");
+      const wideLbl = bubLabels.reduce((a, l) => widthB(b, T_HEAD, l) > widthB(b, T_HEAD, a) ? l : a, "M");
+      chk(widthB(b, T_HEAD, wideLbl) <= bubW,
+          `the widest bubble label "${wideLbl}" inks ${widthB(b, T_HEAD, wideLbl)}px in the ` +
+          `${bubW}px bubble (clears by ${bubW - widthB(b, T_HEAD, wideLbl)})`);
+
+      // ---- STRUCTURAL CLAIMS, EACH BOUND TO ONE FUNCTION BODY ---------------
+      // A rule a neighbouring line can satisfy is not a rule: every regex below
+      // is matched against fnSrc() of ONE function, and each function's body is
+      // gated on being found first, because /re/.test("") is false but
+      // !/re/.test("") is TRUE and a negative assertion over a missing body
+      // passes vacuously.
+      //
+      // 1. THE CARD ARM. This is what lets the bubble sit above row 0 at all: the
+      // clamp lets it overlap the card, so the restore has to repaint the card.
+      // Delete this call and row 0's bubble is left painted over the answer text
+      // until the next keystroke - which on the LAST keystroke of a message is
+      // never. The geometry assertion above proves the arm is REACHED; this
+      // proves it EXISTS.
+      const KB_CLR_SRC = fnSrc(KB_SRC, "void kbClearBubble");
+      chk(KB_CLR_SRC.length > 0, "kbClearBubble()'s body is found in keyboard.ino (parse gate)");
+      // THE ARM ITSELF, now that the fill is CLIPPED OUT of the card instead of
+      // drawn over it. The old shape was one line, "if (by < KB_TEXT_Y +
+      // KB_TEXT_H) drawKbText();", and this assertion was a transcription of that
+      // line - so the rewrite invalidated it and left the whole card path
+      // unasserted, which is how the corner regression below got in. Every claim
+      // here is bound to a piece of the arithmetic that has to be right, and the
+      // card's bottom edge is read as the firmware DERIVES it rather than as a
+      // literal 112/154.
+      chk(/const int cardBot = KB_TEXT_Y \+ KB_TEXT_H\s*;/.test(KB_CLR_SRC),
+          "kbClearBubble()'s OWN BODY derives the card's bottom edge from KB_TEXT_Y + KB_TEXT_H " +
+          "- a literal here would keep clipping at board 1's 112 after the card moved");
+      chk(/const int botY = by < cardBot \? cardBot : by\s*;/.test(KB_CLR_SRC),
+          "and clips the clearing fill at that edge (botY), so the fill never enters the card - " +
+          "blanking the card and letting drawKbText repaint it is a visible clear-then-redraw on " +
+          "board 1, which draws straight to the glass, and invisible on board 2's shadow buffer");
+      chk(/if \(by \+ KB_BUB_H > botY\)\s*\n\s*tft\.fillRect\(bx, botY, KB_BUB_W, by \+ KB_BUB_H - botY, COLOR_BG\);/
+            .test(KB_CLR_SRC),
+          "and the sub-card fill starts AT botY with the remaining height, guarded against the " +
+          "negative height a fully-clamped bubble would otherwise pass to fillRect");
+      chk(/if \(bx < CARD_X\)\s+tft\.fillRect\(bx, by, CARD_X - bx, h, COLOR_BG\);/.test(KB_CLR_SRC) &&
+          /if \(bx \+ KB_BUB_W > cardRight\)\s+tft\.fillRect\(cardRight, by, bx \+ KB_BUB_W - cardRight, h, COLOR_BG\);/
+            .test(KB_CLR_SRC),
+          "and both side slivers are cleared - row 0 is 10 cells and exactly fills the panel on " +
+          "both boards, so its end columns' bubbles hang past CARD_X and CARD_X + CARD_W, where " +
+          "drawKbText never paints and the accent would stay");
+      // THE CORNER NOTCHES. uiFillRound does not write every pixel of its
+      // bounding box, so handing the card's rows back to drawKbText() restores
+      // everything EXCEPT the pixels outside the r = KB_TEXT_R curve - which at a
+      // pressed key are COLOR_ACCENT. Delete these two fills and the mirror
+      // assertions in the bubble block fail by name on both boards.
+      chk(/const int notchY = cardBot - KB_TEXT_R\s*;/.test(KB_CLR_SRC),
+          "kbClearBubble()'s OWN BODY locates the card's bottom notch row from KB_TEXT_R, the " +
+          "same constant drawKbText draws the card's radius with");
+      // THE SEAM'S TWO LOCALS, PARSED - not just the fill calls that name them.
+      // notchY was asserted above and neither ny nor nh was, and the JS mirror in
+      // the bubble block recomputes `nh = cardBot - ny` on its OWN side, so
+      // `nh = 1` in the firmware left `wouldBeStale > 0` and `stale === 0` both
+      // holding: 1086/1086, with the orange corner specks 3cb63fb fixed on this
+      // branch back on both boards. A mirror proves the algorithm and binds
+      // nothing; these two lines are what bind it.
+      const nd = /const int\s+(\w+)\s*=\s*([^,;]+),\s*(\w+)\s*=\s*([^;]+);/
+                   .exec(KB_CLR_SRC.slice(KB_CLR_SRC.indexOf("const int notchY")));
+      chk(!!nd, "the notch fills' own two locals parse out of kbClearBubble (parse gate)");
+      const nyN = nd ? nd[1] : "?", nhN = nd ? nd[3] : "?";
+      chk(nd != null && /^by\s*>\s*notchY\s*\?\s*by\s*:\s*notchY$/.test(nd[2].trim()),
+          `the notch fill starts at the LATER of the bubble's top and the notch row ` +
+          `(${nyN} = ${nd ? nd[2].trim() : "?"}) - starting at \`by\` would punch COLOR_BG ` +
+          `through card rows the bubble never covered`);
+      chk(nd != null && nd[4].replace(/\s+/g, "") === `cardBot-${nyN}`,
+          `and its height reaches the card's own bottom edge (${nhN} = ` +
+          `${nd ? nd[4].trim() : "?"}) - any shorter and the corner pixels the bubble ` +
+          `left COLOR_ACCENT are simply not written, which is invisible to every ` +
+          `geometric assertion here and plainly visible on the glass`);
+      chk(nd != null &&
+          new RegExp(`tft\\.fillRect\\(CARD_X, ${nyN}, KB_TEXT_R, ${nhN}, COLOR_BG\\);`).test(KB_CLR_SRC) &&
+          new RegExp(`tft\\.fillRect\\(cardRight - KB_TEXT_R, ${nyN}, KB_TEXT_R, ${nhN}, COLOR_BG\\);`).test(KB_CLR_SRC),
+          "and clears BOTH bottom corner notches to COLOR_BG through those two locals - " +
+          "fillSmoothRoundRect skips the pixels outside its own curve (TFT_eSPI `continue`s on " +
+          "hyp2 >= r2, PanelShim's blendPixel returns on coverage <= 0.001f), so those keep the " +
+          "bubble's accent and nothing else on this path ever writes them");
+      chk(KB_CLR_SRC.indexOf("cardRight - KB_TEXT_R, ny") < KB_CLR_SRC.indexOf("drawKbText();") &&
+          KB_CLR_SRC.indexOf("drawKbText();") > 0,
+          "and does it BEFORE drawKbText(), not after - after it, the flat fill would punch " +
+          "COLOR_BG through the corner the card had just drawn correctly");
+      chk(/drawKbText\(\);/.test(KB_CLR_SRC),
+          "and repaints the card itself - the bubble is allowed onto the card's lower half now, " +
+          "and nothing else on that path restores the text under it");
+      //
+      // 2. THE FLAT FILL UNDER EVERY KEY CAP. PanelShim ignores uiFillRound's
+      // `behind` and blends the anti-aliased corners against the framebuffer, so
+      // a key filled COLOR_ACCENT and then refilled COLOR_CARD keeps ~24% of the
+      // accent at each corner - MEASURED on the glass as four orange specks per
+      // key, RGB (74,52,16) against a card of (24,24,33). Revert this line and
+      // the specks come straight back, invisibly to every geometric assertion
+      // here. The ORDER matters as much as the call, so the regex requires the
+      // fillRect to precede uiFillRound within the same body.
+      const KEYCAP_SRC = fnSrc(SRC_MAIN, "void uiKeyCap");
+      chk(KEYCAP_SRC.length > 0, "uiKeyCap()'s body is found in deckhand_display.ino (parse gate)");
+      chk(/tft\.fillRect\(\s*x\s*,\s*y\s*,\s*w\s*,\s*h\s*,\s*behind\s*\)\s*;[\s\S]*uiFillRound\(/.test(KEYCAP_SRC),
+          "uiKeyCap()'s OWN BODY flat-fills `behind` BEFORE uiFillRound, so the rounded corners " +
+          "blend against the colour they are told they sit on rather than against the accent a " +
+          "previous press left in the shadow framebuffer");
+      chk(/#if\s*!BOARD_USES_TFT_ESPI/.test(KEYCAP_SRC),
+          "and that fill is guarded to the board that needs it - real TFT_eSPI composites against " +
+          "the `behind` VALUE, so on board 1 the same line would only add a blank-then-fill of " +
+          "every key straight to the glass");
+      // The bubble has always done this, and it is the precedent the line above
+      // follows - so it is asserted rather than assumed to still be there.
+      chk(/tft\.fillRect\(\s*x\s*,\s*y\s*,\s*KB_BUB_W\s*,\s*KB_BUB_H\s*,\s*COLOR_BG\s*\)\s*;[\s\S]*uiFillRound\(/.test(KB_BUB_SRC),
+          "drawKbBubble()'s OWN BODY does the same thing one line before its own uiFillRound");
+      //
+      // 3. ROW 3 HOLDS ITS FLASH LONG ENOUGH TO SEE. The flush fix made the
+      // pressed state reach the panel; a person still reported no visible flash,
+      // because 60ms is under four frames with a fingertip on the key. Both arms
+      // of row 3 now hold, and the constant is PARSED so that lowering it fails
+      // here rather than on someone's eyes.
+      const KB_TOUCH_SRC = fnSrc(KB_SRC, "bool kbTouch");
+      chk(KB_TOUCH_SRC.length > 0, "kbTouch()'s body is found in keyboard.ino (parse gate)");
+      const holds = (KB_TOUCH_SRC.match(/kbFlashArm\(\)\s*;/g) || []).length;
+      chk(holds === 2,
+          `kbTouch()'s OWN BODY arms row 3's flash in ${holds} places, expected 2 - the page ` +
+          `key's arm and the SPACE/"." arm. SPACE and "." used to rely on kbInsert()'s card ` +
+          `repaint to time their flash, which is microseconds of shadow-buffer work and reached ` +
+          `the panel as nothing at all`);
+      // AND NOTHING IN THAT BODY BLOCKS. The hold used to be delay(KB_FLASH_MS)
+      // right here, and at 120ms that is long enough to LOSE a keystroke with no
+      // trace: handleTouch edge-detects on wasTouching and has no queue, so a
+      // lift plus the next press inside the delay is never seen as a lift and the
+      // second press is dropped. This is the assertion that stops it coming back
+      // - the arm count above would be just as happy with an arm AND a delay.
+      chk(!/\bdelay\s*\(/.test(KB_TOUCH_SRC),
+          "and kbTouch()'s OWN BODY does not block at all - a delay() long enough for a flash " +
+          "to be seen is also long enough to swallow the next press whole, which handleTouch " +
+          "has no queue to recover");
+      // And the keystroke must not wait on the flash: kbInsert is called, then
+      // pushed, and only then is the release armed.
+      chk(/kbInsert\('\.'\)\s*;[\s\S]{0,120}?KB_FLASH_PUSH\(\)\s*;\s*kbFlashArm\(\)\s*;/.test(KB_TOUCH_SRC),
+          "and the SPACE/\".\" arm inserts and FLUSHES before it arms the release, so the " +
+          "character is on the glass immediately and the flash outlives the keystroke rather " +
+          "than delaying it");
+      // ===== AND THE FLASH IS ACTUALLY RELEASED =====
+      // This is the claim 1ce10bb deleted the only teeth on. The release moved
+      // OUT of kbTouch and into tickKbFlash, so the old "drawKbRow3(-1) appears
+      // twice in kbTouch" count went to zero and was not replaced - leaving
+      // "row 3 stuck inverted" unasserted by anything at all. It is now bound in
+      // three places, because the release needs all three to happen: a body that
+      // un-presses, a caller that runs it, and a sentinel that cannot be a
+      // legal deadline.
+      const KB_TICK_SRC = fnSrc(KB_SRC, "void tickKbFlash");
+      chk(KB_TICK_SRC.length > 0, "tickKbFlash()'s body is found in keyboard.ino (parse gate)");
+      chk(/drawKbRow3\(-1\)\s*;/.test(KB_TICK_SRC),
+          "tickKbFlash()'s OWN BODY un-presses row 3 (drawKbRow3(-1)) - a flash with no release " +
+          "leaves row 3 stuck inverted until the next drawKeyboard()");
+      chk(/\(\s*long\s*\)\s*\(\s*millis\(\)\s*-\s*kbFlashUntil\s*\)\s*<\s*0/.test(KB_TICK_SRC),
+          "and compares the deadline SIGNED - `millis() < kbFlashUntil` leaves the flash stuck " +
+          "lit across the 49.7-day rollover until the deadline comes round again");
+      const KB_ARM_SRC = fnSrc(KB_SRC, "void kbFlashArm");
+      chk(KB_ARM_SRC.length > 0, "kbFlashArm()'s body is found in keyboard.ino (parse gate)");
+      // THE OTHER HALF OF THAT ROLLOVER, and the half the signed comparison does
+      // not cover: 0 is reserved for "nothing lit", and millis() + KB_FLASH_MS
+      // IS exactly 0 for one millisecond every 49.7 days. Forcing the low bit
+      // makes an armed deadline odd, so it can never BE the sentinel. Drop the
+      // `| 1` and this fails by name.
+      chk(/kbFlashUntil\s*=\s*\(\s*millis\(\)\s*\+\s*KB_FLASH_MS\s*\)\s*\|\s*1\s*;/.test(KB_ARM_SRC),
+          "kbFlashArm()'s OWN BODY forces the deadline ODD (`| 1`), so it can never collide with " +
+          "the 0 that means \"nothing lit\" - millis() + KB_FLASH_MS is exactly 0 for one " +
+          "millisecond every 49.7 days, and in that window tickKbFlash's sentinel guard never " +
+          "releases and row 3 stays inverted");
+      chk(/if\s*\(\s*!kbFlashUntil\s*\)\s*return\s*;/.test(KB_TICK_SRC),
+          "and tickKbFlash()'s OWN BODY still reads 0 as \"nothing lit\", which is what makes " +
+          "that sentinel load-bearing rather than decorative");
+      // EVERY ONE OF THE ASSERTIONS ABOVE IS A TEXT MATCH ON THIS BODY, and a
+      // reviewer measured what that leaves open: `return;` as tickKbFlash's FIRST
+      // statement satisfies all of them - the sentinel guard, the signed
+      // comparison and the drawKbRow3(-1) are all still there, below it - and a
+      // pressed key then stays highlighted until the next full repaint. 1086/1086.
+      // So the exits are enumerated instead: this function releases on a deadline,
+      // so every way out of it must be CONDITIONAL. An unguarded return is the
+      // whole failure, whatever it is spelled.
+      {
+        const bare = [...KB_TICK_SRC.matchAll(/(^|[;{}])\s*return\s*;/g)].map((m) => m[0].trim());
+        chk(bare.length === 0,
+            `every return in tickKbFlash() is guarded by its own if - an unguarded one releases ` +
+            `nothing and leaves row 3 inverted${bare.length ? ` [${bare.join(" ; ")}]` : ""}`);
+        const dg = deadGuards(KB_TICK_SRC);
+        chk(dg.length === 0,
+            dg.length ? `tickKbFlash() carries a dead-code guard [${dg.join(", ")}]`
+                      : "tickKbFlash() carries no dead-code guard");
+      }
+      const LOOP_SRC = fnSrc(SRC_MAIN, "void loop");
+      chk(LOOP_SRC.length > 0, "loop()'s body is found in deckhand_display.ino (parse gate)");
+      chk(/\n\s*tickKbFlash\(\)\s*;/.test(LOOP_SRC),
+          "and loop()'s OWN BODY calls tickKbFlash() UNCONDITIONALLY - handleTouch dispatches on " +
+          "PRESS and cannot come back on its own, so a deadline nobody polls is a flash nobody " +
+          "releases; and a `if (composeActive)` here would strand one armed just before the keyboard " +
+          "closed");
+      // "UNCONDITIONALLY" IS THE CLAIM, AND THE REGEX ABOVE DOES NOT MAKE IT: a
+      // dangling `if (0)` on the line above satisfies `\n\s*tickKbFlash();`
+      // exactly as well as a bare statement does, and passed. So the character
+      // that actually ENDS the previous statement is read: a call that is a
+      // statement of loop()'s own follows a `;`, a `{` or a `}`, and one hanging
+      // off a braceless if/else/for/while does not.
+      {
+        const at = LOOP_SRC.search(/\n\s*tickKbFlash\(\)\s*;/);
+        const before = at < 0 ? "" : LOOP_SRC.slice(0, at).replace(/\s+$/, "");
+        const prev = before.slice(-1);
+        chk(at >= 0 && (prev === ";" || prev === "{" || prev === "}"),
+            `and that call is a statement of loop()'s own, not the body of a braceless ` +
+            `if/for/while (the statement before it ends "${prev}")`);
+      }
+      const KB_CLOSE_SRC = fnSrc(KB_SRC, "void closeCompose");
+      chk(KB_CLOSE_SRC.length > 0, "closeCompose()'s body is found in keyboard.ino (parse gate)");
+      chk(/kbFlashUntil\s*=\s*0\s*;/.test(KB_CLOSE_SRC),
+          "and closeCompose()'s OWN BODY disarms it - a pending flash that outlived the surface " +
+          "would paint a row of keys onto whatever screen replaced them");
+      const flashMs = +(KB_SRC.match(/const unsigned long KB_FLASH_MS\s*=\s*(\d+)\s*;/) || [])[1];
+      chk(Number.isFinite(flashMs), "KB_FLASH_MS is declared in keyboard.ino (parse gate)");
+      chk(flashMs >= 100,
+          `KB_FLASH_MS is ${flashMs}ms, at least the ~100ms a state change needs to register as ` +
+          `one rather than as a flicker (60ms was reported as no flash at all)`);
+      chk(flashMs <= 200,
+          `and at most 200ms - it no longer blocks, but a flash still lit when the next thumb ` +
+          `press lands (300-500ms apart) would have row 3 un-press under a finger that is ` +
+          `already pressing something else`);
+    }
+    // ================= THE PROMPT STRIP =================
+    // One line of the ask above the card, so the question and the keyboard are on
+    // the glass at the same time. The peek could not do that: it covers the keys
+    // and routes every tap to its own pager.
+    {
+      // THE OFFSET IS THE FIRMWARE'S OWN DERIVATION, bound to the declaration
+      // rather than recomputed and compared against itself. dy below is the
+      // checker's INDEPENDENT arithmetic over two header constants; this line is
+      // what stops that arithmetic describing a firmware that used a literal.
+      chk(/const int KB_STRIP_TEXT_DY\s*=\s*\(KB_STRIP_H - KB_LINE_PITCH\)\s*\/\s*2\s*;/.test(KB_SRC),
+          "keyboard.ino derives KB_STRIP_TEXT_DY as (KB_STRIP_H - KB_LINE_PITCH) / 2, not a literal 2 that agrees with it on both boards today");
+      const dy = Math.trunc((c.KB_STRIP_H - c.KB_LINE_PITCH) / 2);
+      const stripBox = [c.KB_STRIP_Y + dy, c.KB_STRIP_Y + dy + cellH - 1];
+      // THE TAG IS PARSED, NOT TRANSCRIBED. A literal "MORE" on this side measures
+      // a string the firmware may no longer draw: the tag's width is what the
+      // text lane is reserved against, so a longer label silently eats the lane
+      // it is supposed to sit beside. (This was written as a transcribed "MORE"
+      // first, and lengthening the firmware's label to 52 characters left every
+      // assertion here green - which is this repo's transcription rule paying for
+      // itself in the same hour it was quoted.)
+      const tag = (KB_SRC.match(/const char\* KB_STRIP_MORE\s*=\s*"([^"]*)"/) || [])[1];
+      chk(!!tag, "keyboard.ino's KB_STRIP_MORE literal was parsed (parse gate)");
+      const tagW = widthB(b, T_META, tag || "") + 6;      // the tag plus the gap it keeps
+      const stripLane = c.CARD_W - 12 - tagW;
+      console.log(`    strip ${c.KB_STRIP_Y}..${c.KB_STRIP_Y + c.KB_STRIP_H - 1} (h ${c.KB_STRIP_H}), text box ${stripBox.join("..")}, card top ${c.KB_TEXT_Y}; lane ${stripLane}px = ${Math.floor(stripLane / adv)} columns after the ${tagW}px "${tag}" tag`);
+      chk(c.KB_STRIP_H === c.KB_LINE_PITCH + 4,
+          `KB_STRIP_H ${c.KB_STRIP_H} == KB_LINE_PITCH + 4 (${c.KB_LINE_PITCH + 4}) - one text cell and 2px of air each side`);
+      chk(stripBox[0] >= c.KB_STRIP_Y && stripBox[1] < c.KB_STRIP_Y + c.KB_STRIP_H,
+          `the strip's opaque text box ${stripBox.join("..")} is inside its band ${c.KB_STRIP_Y}..${c.KB_STRIP_Y + c.KB_STRIP_H - 1}`);
+      // drawString paints an OPAQUE box a full cell tall and the card's top BORDER
+      // is the next thing below it, so a strip one row too low rubs that border
+      // out - the same failure the meta row caused inside the card twice.
+      chk(stripBox[1] < c.KB_TEXT_Y,
+          `the strip's text box ends ${stripBox[1]}, ${c.KB_TEXT_Y - stripBox[1] - 1} row(s) above the card's top border at ${c.KB_TEXT_Y}`);
+      chk(c.KB_STRIP_Y + c.KB_STRIP_H <= c.KB_TEXT_Y,
+          `the strip band ends ${c.KB_STRIP_Y + c.KB_STRIP_H - 1} above the card's top ${c.KB_TEXT_Y}`);
+      // THE LANE'S REAL FLOOR, and it is measured rather than chosen: fitText
+      // gives up ENTIRELY - out[0] = 0, a blank strip - when not even one
+      // character plus its three ASCII dots fits. Anything that eats the lane
+      // (a longer tag, a narrower card) fails here with the width that did it.
+      chk(stripLane >= widthB(b, T_BODY, "M..."),
+          `the strip's ${stripLane}px lane holds at least one character plus fitText's three dots (${widthB(b, T_BODY, "M...")}px) after the "${tag}" tag - below that fitText returns "" and the strip goes blank`);
+      // The tag is right-aligned in the card lane and the text lane is reserved
+      // against it, so the two cannot collide - stated with both edges.
+      const textEnd = c.CARD_X + 6 + stripLane, tagStart = c.CARD_X + c.CARD_W - 6 - widthB(b, T_META, tag || "");
+      chk(textEnd <= tagStart,
+          `the strip's text lane ends ${textEnd - 1} and the "${tag}" tag starts ${tagStart}`);
+      // B9. THE SECOND TRUNCATION CAP, WHICH NOTHING CHECKED. drawKbStrip copies
+      // the detail into `char buf[KB_COLS + N]` before fitText ever sees it, so
+      // there are TWO places the line can be cut and only ONE of them adds dots.
+      // If buf fills first, fitText receives an already-short string that FITS,
+      // adds nothing, and the strip shows a sentence chopped mid-word with no
+      // three dots to say so - only the tag at the right edge hints that anything
+      // follows, and the tag is there for the newline case too. N is PARSED out of
+      // the declaration; a transcribed one would let the firmware's buffer shrink
+      // under a green assertion.
+      const bufN = (() => {
+        const src = fnSrc(KB_SRC, "void drawKbStrip");
+        const m = src.match(/char buf\[KB_COLS\s*\+\s*(\d+)\]/);
+        return m ? +m[1] : null;
+      })();
+      chk(bufN !== null,
+          "drawKbStrip's OWN BODY still declares `char buf[KB_COLS + <n>]` - a buffer that stops " +
+          "being expressed in KB_COLS is a second cap nothing downstream can reason about (parse gate)");
+      if (bufN !== null) {
+        // The copy loop stops at sizeof(buf) - 1, so buf holds KB_COLS + N - 1
+        // characters.
+        const bufChars = c.KB_COLS + bufN - 1;
+        const laneCols = Math.floor(stripLane / adv);
+        console.log(`    strip buffer: KB_COLS ${c.KB_COLS} + ${bufN} holds ${bufChars} chars against a ${laneCols}-column lane (${bufChars - laneCols} of headroom)`);
+        // THE CLAIM IS "AT LEAST A FULL CARD LINE", NOT "MORE THAN THE LANE", and
+        // the difference is the whole reason this line is worth having. The lane
+        // is floor((CARD_W - 12 - tagW) / adv) and KB_COLS is floor((CARD_W - 12) /
+        // adv) - the lane is narrower than the card BY CONSTRUCTION, so `bufChars >
+        // laneCols` holds for every N >= 1 no matter what the firmware does. It was
+        // written that way first and it could not fail: injecting N = 1 AND an
+        // empty tag - the only pair that even approaches it - still left one column
+        // of headroom and printed `ok`. What CAN fail on N alone is this: at N = 0
+        // the buffer is one byte short of a full card line, so a line as wide as
+        // the card is clipped by the BUFFER rather than by fitText, with no dots.
+        // The headroom against the lane is printed above, where a reader can see
+        // it, rather than asserted where it would only look like protection.
+        chk(bufChars >= c.KB_COLS,
+            `drawKbStrip's buf holds ${bufChars} characters (KB_COLS ${c.KB_COLS} + ${bufN} - 1), ` +
+            `short of a full ${c.KB_COLS}-column card line - a line that wide would be cut by the ` +
+            `buffer instead of by fitText, and fitText is the only one of the two that adds dots`);
+      }
+    }
     // The whole vertical budget.
     const keysEnd = c.KB_ROWS_Y + 4 * c.KB_ROW_H;
     console.log(`    card ..${c.KB_TEXT_Y + c.KB_TEXT_H - 1} | keys ${c.KB_ROWS_Y}..${keysEnd - 1} | actions ${c.KB_ACT_Y}..${c.KB_ACT_Y + c.KB_ACT_H - 1} of ${H}`);
     chk(c.KB_TEXT_Y + c.KB_TEXT_H <= c.KB_ROWS_Y, `text card ends ${c.KB_TEXT_Y + c.KB_TEXT_H - 1} above the keys at ${c.KB_ROWS_Y} (break ${c.KB_ROWS_Y - c.KB_TEXT_Y - c.KB_TEXT_H})`);
     chk(keysEnd <= c.KB_ACT_Y, `keys end ${keysEnd - 1} above the action row at ${c.KB_ACT_Y}`);
     chk(c.KB_ACT_Y + c.KB_ACT_H <= H, `action row ends ${c.KB_ACT_Y + c.KB_ACT_H - 1} inside the ${H}px panel`);
-    chk(c.KB_ACT_H === c.KB_ROW_H, `action row ${c.KB_ACT_H} == KB_ROW_H ${c.KB_ROW_H}`);
-    // The action row's two buttons, and the closed-window message sharing the lane.
-    const halfW = Math.floor((W - c.CARD_X * 2 - 8) / 2);
-    for (const l of ["CANCEL", "SEND"]) chk(widthB(b, T_BODY, l) + 8 <= halfW, `"${l}" ${widthB(b, T_BODY, l)}px inside a ${halfW}px half`);
-    const laneW = c.CARD_W - halfW - 8;
+    // THE WHOLE COLUMN, TERM BY TERM, and it has to close EXACTLY on BOARD_H.
+    // Board 1 has no spare pixel left in 320 - the strip costs 17, KB_ROW_H gave
+    // up 3 per row and Task 3's action band gave up 4 - so "everything fits" is
+    // not the claim: the claim is that nothing is left over and nothing overlaps.
+    // EVERY GAP IS WRITTEN AS A DIFFERENCE of the constants around it rather than
+    // as a number of its own. Each gap is a residual, and a residual asserted
+    // against itself always holds; written this way the sum can only close when
+    // the anchors themselves agree, so moving any one of KB_STRIP_Y, KB_STRIP_H,
+    // KB_TEXT_Y, KB_TEXT_H, KB_ROWS_Y, KB_ROW_H, KB_ACT_Y or KB_ACT_H without
+    // moving another to match fails here by name.
+    {
+      const gapStripCard = c.KB_TEXT_Y - c.KB_STRIP_Y - c.KB_STRIP_H;
+      const gapCardKeys = c.KB_ROWS_Y - c.KB_TEXT_Y - c.KB_TEXT_H;
+      const gapKeysAct = c.KB_ACT_Y - c.KB_ROWS_Y - 4 * c.KB_ROW_H;
+      const bottom = c.BOARD_H - c.KB_ACT_Y - c.KB_ACT_H;
+      const col = c.KB_STRIP_Y + c.KB_STRIP_H + gapStripCard
+                + c.KB_TEXT_H + gapCardKeys
+                + 4 * c.KB_ROW_H + gapKeysAct
+                + c.KB_ACT_H + bottom;
+      console.log(`    column: ${c.KB_STRIP_Y} + ${c.KB_STRIP_H} + ${gapStripCard} + ${c.KB_TEXT_H} + ${gapCardKeys} + ${4 * c.KB_ROW_H} + ${gapKeysAct} + ${c.KB_ACT_H} + ${bottom} = ${col} (BOARD_H ${c.BOARD_H})`);
+      // THAT SUM IS PRINTED AND NOT ASSERTED, and the reason is the same rule
+      // that says to write the gaps as differences in the first place. Once every
+      // gap is `next - prev - prevH`, the whole expression TELESCOPES: every term
+      // cancels and it equals BOARD_H for ANY values at all - it stays true with
+      // KB_ROW_H at 42 and the key grid three rows INTO the action band. A
+      // residual asserted against itself always holds, and a sum of nothing but
+      // residuals is that same defect at the scale of the whole column. So the
+      // line above is a LOG (it is what a reader wants to see), and the claims
+      // below are what actually close the column: each band starts at or after
+      // the previous one ended, and the last ends inside the panel.
+      //
+      // B11, AND THIS IS WHY THE TOTAL STAYS PROSE. The walk below is weaker than
+      // "the column closes EXACTLY": it forbids overlap and it forbids running off
+      // the panel, but it would accept any amount of slack anywhere. The obvious
+      // repair - assert the total - is the identity this comment already rejects,
+      // and every other form of it fails the same way or worse:
+      //   - sum of bands + sum of gaps == BOARD_H telescopes, as above;
+      //   - `bottom == 0` on board 1 restates KB_ACT_Y's own header derivation
+      //     (BOARD_H - KB_ACT_H), so it is that derivation compared with itself;
+      //   - a cap on the total slack ("under one key row", "at most 12px") is a
+      //     bound FITTED to today's numbers, which this repo forbids in the same
+      //     breath as transcription - it would pass forever, mean nothing, and
+      //     need re-fitting every time a band moved.
+      // So the exactness claim is left as prose deliberately, and what stands
+      // behind it is decomposed: no overlaps (the walk), no negative gaps (the
+      // loop below), the last band inside BOARD_H, and - the part that actually
+      // pins the bottom - KB_ACT_Y asserted against BOARD_H further up. A reader
+      // looking for "nothing is left over" should read the printed sum; it is a
+      // log because that is honestly all it is.
+      let cursor = 0;
+      for (const [n, top, h] of [["the strip", c.KB_STRIP_Y, c.KB_STRIP_H],
+                                 ["the text card", c.KB_TEXT_Y, c.KB_TEXT_H],
+                                 ["the key grid", c.KB_ROWS_Y, 4 * c.KB_ROW_H],
+                                 ["the action band", c.KB_ACT_Y, c.KB_ACT_H]]) {
+        chk(top >= cursor,
+            `${n} starts ${top}, at or after the ${cursor} where the band above it ends (gap ${top - cursor})`);
+        cursor = top + h;
+      }
+      chk(cursor <= c.BOARD_H,
+          `the column's last band ends ${cursor - 1} inside BOARD_H ${c.BOARD_H}, with ${c.BOARD_H - cursor} row(s) of bottom margin`);
+      for (const [n, v] of [["the strip/card gap", gapStripCard], ["the card/keys gap", gapCardKeys],
+                            ["the keys/actions gap", gapKeysAct], ["the bottom margin", bottom]])
+        chk(v >= 0, `${n} is ${v} - a negative term means two bands overlap, which the telescoped sum cannot see`);
+      // The two TESTED bands in the column, against the fingertip floor. KB_ROW_H
+      // clears by 1 on board 1 now and 12 on board 2; KB_ACT_H is TAP_MIN exactly.
+      for (const [n, v] of [["KB_ROW_H", c.KB_ROW_H], ["KB_ACT_H", c.KB_ACT_H]])
+        chk(v >= c.TAP_MIN, `${n} ${v} >= TAP_MIN ${c.TAP_MIN}`);
+      chk(c.KB_ROWS_Y > c.KB_TEXT_Y + c.KB_TEXT_H,
+          `the key grid starts ${c.KB_ROWS_Y} below the card's last row ${c.KB_TEXT_Y + c.KB_TEXT_H - 1}`);
+      chk(c.KB_STRIP_Y + c.KB_STRIP_H < c.KB_TEXT_Y,
+          `the strip ends ${c.KB_STRIP_Y + c.KB_STRIP_H - 1} above the card's top ${c.KB_TEXT_Y}`);
+    }
+    // THE ACTION ROW'S DRAWN/TESTED SPLIT (spec defect 9). `KB_ACT_H === KB_ROW_H`
+    // STOOD HERE AND IS GONE, and it is worth being exact about why: while the
+    // header said `const int KB_ACT_H = 44;  // == KB_ROW_H`, that assertion
+    // compared two literals and could fail - but what it certified was the defect
+    // itself, that the least-pressed control on the screen is as tall as a letter
+    // key. It was not broken by this change; it was the claim this change reverses.
+    chk(c.KB_ACT_H === c.TAP_MIN, `KB_ACT_H ${c.KB_ACT_H} == TAP_MIN ${c.TAP_MIN}`);
+    chk(c.KB_ACT_DRAWN === 2 * c.KB_LINE_PITCH,
+        `KB_ACT_DRAWN ${c.KB_ACT_DRAWN} == 2 * KB_LINE_PITCH ${2 * c.KB_LINE_PITCH}`);
+    chk(c.KB_ACT_DRAWN < c.KB_ACT_H,
+        `the drawn button ${c.KB_ACT_DRAWN} is strictly inside its ${c.KB_ACT_H}px band`);
+    chk(c.KB_ACT_DY * 2 + c.KB_ACT_DRAWN === c.KB_ACT_H,
+        `the button is centred: ${c.KB_ACT_DY} + ${c.KB_ACT_DRAWN} + ${c.KB_ACT_DY} == ${c.KB_ACT_H}`);
+    // Deliberately NOT the same claim as the `<= H` line above: H is geom-common's
+    // PANEL table and c.BOARD_H is the header's own #define, so a header whose
+    // BOARD_H stopped describing its panel fails one of the two and not the other.
+    // Both boards derive KB_ACT_Y from BOARD_H, so this has teeth against a WRONG
+    // LITERAL (the `= 276` this replaced) rather than against the derivation moving.
+    chk(c.KB_ACT_Y + c.KB_ACT_H <= c.BOARD_H,
+        `the action band ends ${c.KB_ACT_Y + c.KB_ACT_H} inside BOARD_H ${c.BOARD_H}`);
+    // THE TWO COLUMNS. uiActionRow()'s arithmetic, mirrored - with THE GAP PARSED
+    // OUT OF ITS BODY rather than restated, because an 8 on both sides is the
+    // transcription this repo's rules name: the firmware's gap could move to 6 and
+    // every number below would still agree with itself.
+    const fracs = KB_ACT_FRACS, fracTotal = fracs.reduce((t, f) => t + f, 0);
+    const lane2 = W - c.CARD_X * 2, avail = lane2 - ACT_GAP * (fracs.length - 1);
+    chk(fracs.length === 2,
+        `drawKbActions draws ${fracs.length} column(s) - the CANCEL/SEND reasoning below assumes 2`);
+    const wLeft = Math.trunc(avail * fracs[0] / fracTotal);
+    const xSend = c.CARD_X + wLeft + ACT_GAP, wSend = c.CARD_X + lane2 - xSend;
+    console.log(`    action band ${c.KB_ACT_Y}..${c.KB_ACT_Y + c.KB_ACT_H - 1}, button ${c.KB_ACT_DRAWN}px at +${c.KB_ACT_DY}; columns ${wLeft} + ${ACT_GAP} + ${wSend} = ${lane2} (lane ${lane2}, CARD_W ${c.CARD_W})`);
+    chk(lane2 === c.CARD_W,
+        `uiActionRow's lane ${lane2} (tft.width() - 2*CARD_X) == CARD_W ${c.CARD_W}`);
+    // B4. `chk(wLeft + ACT_GAP + wSend === lane2)` STOOD HERE AND IS GONE. wSend
+    // is DEFINED four lines up as `c.CARD_X + lane2 - xSend` with `xSend =
+    // c.CARD_X + wLeft + ACT_GAP`, so the expression reduces to lane2 === lane2:
+    // it held for any fracs, any gap, any lane, and it would have gone on holding
+    // with the firmware's row drawn any way at all. It read as "the row closes on
+    // the lane" and certified only that the checker can do subtraction.
+    //
+    // The claim it appeared to make - that the LAST column absorbs the remainder,
+    // which is what actually closes the row on the lane - is made where it CAN
+    // fail, over uiActionRow's own text: `last ? (CARD_X + lane - x)` further
+    // down. That is the structural assertion the finding called the real teeth,
+    // and it is why this one is deleted rather than rewritten: there is nothing
+    // left for a numeric form of it to say.
+    // fracs {1,2} means SEND is at least twice the destructive control, and over
+    // by at most the remainder the last column absorbs (board 1: 139 against 138,
+    // board 2: exactly 192). The fracs are PARSED, so relabelling the firmware's
+    // row {1, 1} - equal halves, which is what this task exists to end - fails
+    // here by name rather than agreeing with a pair restated on this side.
+    chk(wSend >= 2 * wLeft && wSend - 2 * wLeft <= ACT_GAP,
+        `SEND ${wSend}px is twice the destructive control's ${wLeft}px plus the ${wSend - 2 * wLeft}px remainder`);
+    // DISCARD is the new label and it has to fit the NARROWER column - the one
+    // risk the relabelling introduces.
+    for (const [l, w] of [["CANCEL", wLeft], ["DISCARD", wLeft], ["SEND", wSend]])
+      chk(widthB(b, T_BODY, l) + 8 <= w, `"${l}" ${widthB(b, T_BODY, l)}px inside its ${w}px column`);
+    // B7. THE BUTTON IS 26px TALL ON BOARD 1 AND 32 ON BOARD 2, AND NOTHING
+    // CHECKED THAT ANYTHING FITS IN IT. Two claims, neither of which any line
+    // above makes:
+    //
+    // (a) uiActionRow draws each zone with R_MD, a CARD radius - the radius
+    // KB_KEY_R exists to be smaller than. Two R_MD arcs meeting is a stadium end,
+    // not a rounded corner, and past that the fill is a lens: the label's own
+    // glyph box would run outside the ink at both ends of the button. This is the
+    // vertical twin of the flat-edge claim deleted above and, unlike that one, it
+    // is NOT dominated by anything - no corner-loss guard exists on this control.
+    // 20 <= 26 and 24 <= 32 today, so the boards clear it by 6 and 8.
+    chk(2 * c.R_MD <= c.KB_ACT_DRAWN,
+        `the action button's two R_MD ${c.R_MD} arcs total ${2 * c.R_MD}px against its ` +
+        `${c.KB_ACT_DRAWN}px drawn height (clears by ${c.KB_ACT_DRAWN - 2 * c.R_MD}) - at or ` +
+        `past equal the button is a stadium and the label runs outside the fill`);
+    // (b) The label's CELL, not its width: drawString paints an opaque box a full
+    // cell tall, so a T_BODY cell taller than the drawn button paints outside the
+    // button it is centred in - and it paints the row's background over whatever
+    // was there. Measured from the face, the way every lane here is measured.
+    chk(lineHB(b, T_BODY) <= c.KB_ACT_DRAWN,
+        `a T_BODY cell is ${lineHB(b, T_BODY)}px and the drawn button is ${c.KB_ACT_DRAWN}px ` +
+        `(clears by ${c.KB_ACT_DRAWN - lineHB(b, T_BODY)}) - drawString's opaque box would ` +
+        `otherwise paint outside the fill it is centred in`);
+    // The closed-window message: SEND's own column is its lane now, and its budget
+    // is KB_ACT_DRAWN (the drawn button) rather than KB_ACT_H (the tested band) -
+    // it is centred where the SEND button it replaces stood.
     for (const why of ["NO LONGER READY", "WINDOW CLOSED - ANSWER ON YOUR MAC"]) {
-      const n = countWrappedLinesB(b, why, T_META, laneW - 8);
-      chk(n * c.KB_LINE_PITCH <= c.KB_ACT_H, `"${why}" wraps to ${n} line(s) = ${n * c.KB_LINE_PITCH}px inside the ${c.KB_ACT_H}px action row`);
+      const n = countWrappedLinesB(b, why, T_META, wSend - 8);
+      chk(n * c.KB_LINE_PITCH <= c.KB_ACT_DRAWN, `"${why}" wraps to ${n} line(s) = ${n * c.KB_LINE_PITCH}px in the ${wSend - 8}px lane, inside the ${c.KB_ACT_DRAWN}px DRAWN button (the band is ${c.KB_ACT_H})`);
+    }
+    if (b === 1) {
+      // THE STRUCTURAL HALF, and it is separate from the mirror above on purpose:
+      // the mirror proves the ARITHMETIC - it recomputes uiActionRow's columns in
+      // the checker's own terms, and beyond the gap and the fracs it parses, it
+      // would go on agreeing with itself while the firmware drew something else.
+      // These read the firmware's own text instead, and each is
+      // bound to a FUNCTION BODY rather than to the file, because a frac pair or a
+      // kbActW[] living next door satisfies a grep. The parse gates come first:
+      // !/re/.test("") is true, so every negative claim here would pass vacuously
+      // over a function that failed to parse. Board 1 only, since the source is
+      // the same for both and the assertion is about the source.
+      const actSrc = fnSrc(KB_SRC, "void drawKbActions");
+      const touchSrc = fnSrc(KB_SRC, "bool kbTouch");
+      const rowSrc = fnSrc(SRC_MAIN, "int uiActionRow");
+      chk(actSrc.length > 0, "drawKbActions parsed");
+      chk(touchSrc.length > 0, "kbTouch parsed");
+      chk(rowSrc.length > 0, "uiActionRow parsed");
+      // BOUND TO THE labels[]/tints[] INITIALISERS, not to the whole body, and
+      // that is a correction rather than a flourish: `/COLOR_WARN/.test(actSrc)`
+      // PASSED with the destructive tint deleted, because the closed-window
+      // message a few lines down draws in COLOR_WARN too. A rule a neighbouring
+      // line can satisfy is not a rule, even inside the right function.
+      const labelsInit = (actSrc.match(/labels\[[^\]]*\]\s*=\s*\{([^}]*)\}/) || ["", ""])[1];
+      const tintsInit = (actSrc.match(/tints\[[^\]]*\]\s*=\s*\{([^}]*)\}/) || ["", ""])[1];
+      chk(labelsInit.length > 0 && tintsInit.length > 0,
+          "drawKbActions' labels[] and tints[] initialisers parsed (gate)");
+      // B6. PER COLUMN, NOT PER INITIALISER. `/DISCARD/.test(labelsInit)` and
+      // `/COLOR_WARN/.test(tintsInit)` were satisfied by the string appearing
+      // ANYWHERE in the list, so swapping the two columns - putting the
+      // destructive control on the right, where SEND is, under the finger that has
+      // been tapping SEND - passed both. The whole point of the relabelling is
+      // WHICH column is destructive, so the index is the claim. Split with
+      // splitArgs, which respects the ternaries' own nesting; the element count is
+      // gated first, because indexing past the end yields undefined and
+      // `!/re/.test(undefined)` is not a failure anyone would read.
+      const labelCols = splitArgs(labelsInit), tintCols = splitArgs(tintsInit);
+      chk(labelCols.length === 2 && tintCols.length === 2,
+          `drawKbActions' labels[]/tints[] split into ${labelCols.length}/${tintCols.length} ` +
+          `columns, expected 2 each (gate)`);
+      if (labelCols.length === 2 && tintCols.length === 2) {
+        chk(/DISCARD/.test(labelCols[0]) && !/DISCARD/.test(labelCols[1]),
+            "drawKbActions' labels[] puts DISCARD in COLUMN 0 and nowhere else - the destructive control is the LEFT one, the narrow one, the one furthest from the finger that has been tapping SEND");
+        chk(/COLOR_WARN/.test(tintCols[0]) && !/COLOR_WARN/.test(tintCols[1]),
+            "drawKbActions' tints[] puts COLOR_WARN on COLUMN 0 - the same column the DISCARD label is in, so label and colour name the same key");
+        chk(/SEND/.test(labelCols[1]) && !/SEND/.test(labelCols[0]),
+            "drawKbActions' labels[] puts SEND in COLUMN 1 - the wide one, and the one uiActionRow gives the remainder to");
+      }
+      // B5. OVER THE fracs[] INITIALISER, NOT THE WHOLE BODY. This was
+      // `/\{\s*1\s*,\s*2\s*\}/.test(actSrc)`, which is the exact flaw already
+      // corrected one line up for labels[] and tints[]: any `{1, 2}` anywhere in
+      // drawKbActions satisfied it, and it transcribed the pair besides. Asserted
+      // instead over KB_ACT_FRACS, which is parsed FROM that initialiser, and as
+      // the RULE rather than the pair - relabelling the row {1, 1} fails, {2, 1}
+      // (SEND narrow, DISCARD wide) fails, and {1, 3} correctly does not.
+      chk(KB_ACT_FRACS.length === 2 && KB_ACT_FRACS[1] >= 2 * KB_ACT_FRACS[0],
+          `drawKbActions' OWN fracs[] initialiser is {${KB_ACT_FRACS.join(", ")}} - SEND's share ` +
+          `must be at least twice the destructive control's, which is what stops the two being ` +
+          `equal halves again`);
+      chk(/uiActionRow\s*\(/.test(actSrc),
+          "drawKbActions' OWN BODY gets its columns from uiActionRow, not from arithmetic of its own");
+      // THE ONE-PLACE RULE, as two negatives and one positive. `halfW` in either
+      // body is the two-functions-two-derivations bug kbRowX0()'s comment names.
+      chk(!/halfW/.test(actSrc), "drawKbActions' OWN BODY no longer computes a halfW");
+      chk(!/halfW/.test(touchSrc), "kbTouch's OWN BODY no longer computes a halfW");
+      chk(/kbActX\[/.test(touchSrc) && /kbActW\[/.test(touchSrc),
+          "kbTouch's OWN BODY hit-tests the columns drawKbActions stored, so the draw and the test cannot disagree");
+      chk(/kbActW\[1\]/.test(actSrc),
+          "the closed-window message takes its lane from SEND's returned column, not from a second derivation");
+      chk(/countWrappedLines\(/.test(actSrc),
+          "the closed-window wrap is still MEASURED - it was `const int lines = 3;` once");
+      // READ OUT OF THE CALL'S ARGUMENTS, brace/paren-matched the way SPINE_ARGS
+      // reads the severity spine's uiFillRound() - and again a correction, not a
+      // flourish: `/KB_ACT_DRAWN/.test(actSrc)` PASSED with the whole uiActionRow
+      // call deleted, because the closed-window branch below names KB_ACT_DRAWN
+      // and KB_ACT_DY too. The arguments are the only place that says the row is
+      // TESTED at KB_ACT_H and DRAWN at KB_ACT_DRAWN, and that the bands it
+      // writes are the arrays kbTouch reads.
+      const callArgs = (() => {
+        const a = actSrc.indexOf("uiActionRow(");
+        if (a < 0) return [];
+        let depth = 0, j = a + "uiActionRow".length;
+        for (; j < actSrc.length; j++) {
+          if (actSrc[j] === "(") depth++;
+          else if (actSrc[j] === ")" && --depth === 0) break;
+        }
+        return depth === 0 ? splitArgs(actSrc.slice(a + "uiActionRow(".length, j)) : [];
+      })();
+      chk(callArgs.length === 11,
+          `drawKbActions' uiActionRow(...) call parsed into ${callArgs.length} argument(s), expected 11 (gate)`);
+      chk(callArgs[0] === "KB_ACT_Y" && callArgs[1] === "KB_ACT_H",
+          "drawKbActions' uiActionRow CALL places the row at KB_ACT_Y and hands it KB_ACT_H as the TESTED band");
+      chk(callArgs[2] === "KB_ACT_DRAWN" && callArgs[3] === "KB_ACT_DY",
+          "drawKbActions' uiActionRow CALL draws KB_ACT_DRAWN tall, inset by KB_ACT_DY - the split, at the call site");
+      chk(callArgs[9] === "kbActX" && callArgs[10] === "kbActW",
+          "drawKbActions' uiActionRow CALL writes its bands into the very arrays kbTouch hit-tests");
+      chk(/KB_ACT_H/.test(touchSrc) && !/KB_ACT_DRAWN/.test(touchSrc),
+          "kbTouch tests the BAND (KB_ACT_H) and not the drawn button - the 7px of air belongs to the control");
+      // The gap-swallow and the remainder, in uiActionRow's own body: these two
+      // lines are the whole of "no dead strip" and "the row closes on the lane".
+      chk(/outW\[i\]\s*=\s*w\s*\+\s*\(last\s*\?\s*0\s*:\s*gap\)/.test(rowSrc),
+          "uiActionRow's OWN BODY makes every zone swallow the gap to its right");
+      chk(/last\s*\?\s*\(CARD_X\s*\+\s*lane\s*-\s*x\)/.test(rowSrc),
+          "uiActionRow's OWN BODY gives the remainder to the last column, so the row closes on the lane");
+
+      // ===== THE PROMPT STRIP, in the firmware's own text =====
+      // The geometry above proves the strip HAS room. These prove it is drawn
+      // there, tapped there, and that the peek moved off the card - none of which
+      // a constant can show. Board 1 only: the source is shared, so this is a
+      // claim about the source rather than about a board. Parse gates first -
+      // !/re/.test("") is true, so every negative below would pass vacuously over
+      // a function that failed to parse.
+      const stripSrc = fnSrc(KB_SRC, "void drawKbStrip");
+      const drawKbSrc = fnSrc(KB_SRC, "void drawKeyboard");
+      const textSrc = fnSrc(KB_SRC, "void drawKbText");
+      chk(stripSrc.length > 0, "drawKbStrip's body was found in keyboard.ino (parse gate)");
+      chk(drawKbSrc.length > 0, "drawKeyboard's body was found in keyboard.ino (parse gate)");
+      chk(textSrc.length > 0, "drawKbText's body was found in keyboard.ino (parse gate)");
+      chk(/if \(!kbHasDetail\(\)\) return;/.test(stripSrc),
+          "drawKbStrip's OWN BODY draws nothing when there is no ask to read - the same gate kbTouch's strip branch uses, so no control is advertised that would do nothing");
+      chk(/fillRect\(CARD_X, KB_STRIP_Y, CARD_W, KB_STRIP_H/.test(stripSrc),
+          "drawKbStrip's OWN BODY clears its own band, so the transition that ends the ask ERASES the question rather than leaving it under a dead tap");
+      chk(/fitText\(/.test(stripSrc),
+          "drawKbStrip's OWN BODY truncates through fitText - three ASCII dots, never U+2026, which this repo has paid for six times");
+      // B10. "ITS VALUE CANNOT CHANGE WHILE IT IS UP" WAS REASONING, and the strip
+      // is painted unconditionally on the strength of it - no cache, so nothing
+      // repaints it unless someone calls it. The reasoning has two limbs and both
+      // are assertions now rather than a comment:
+      //
+      //  (i) the per-keystroke repaint must not be what keeps it fresh. drawKbText
+      //      repaints the CARD only, from KB_TEXT_Y down; if it ever grew to cover
+      //      the strip's band the strip would look fresh for the wrong reason and
+      //      this claim would go quietly false.
+      //  (ii) the ONE transition that can invalidate it must still call it. The
+      //      strip has exactly two call sites - drawKeyboard(), and the 5s tick
+      //      where the ask goes away - and deleting the second is precisely the
+      //      edit that leaves a question on the glass with a dead tap under it.
+      //      The COUNT is asserted, not just the existence: a THIRD call site means
+      //      some other transition has learned to invalidate the strip, and then
+      //      this reasoning needs re-reading rather than trusting.
+      //
+      // WHAT THIS STILL DOES NOT COVER, written down because leaving it implied is
+      // how the reasoning came to be trusted in the first place: askDetail being
+      // REWRITTEN IN PLACE for a LIVE pid. copyField() does exactly that in the
+      // protocol handler, and nothing on that path repaints the strip - the strip
+      // would show the old question under a live ask. Whether that path is
+      // reachable, and what should repaint if it is, is a firmware question and
+      // not one a geometry checker can settle.
+      chk(!/KB_STRIP_Y/.test(textSrc),
+          "drawKbText's OWN BODY never touches the strip's band - it repaints the card from KB_TEXT_Y down, so nothing about typing keeps the strip fresh and the no-cache reasoning stands on its call sites alone");
+      {
+        const sites = (KB_SRC.match(/drawKbStrip\(\)\s*;/g) || []).length
+                    + (SRC_MAIN.match(/drawKbStrip\(\)\s*;/g) || []).length;
+        chk(sites === 2,
+            `drawKbStrip() is called from ${sites} site(s), expected 2 - drawKeyboard(), and the 5s tick where the ask goes away. It has no cache, so a deleted call leaves a question on the glass with a dead tap under it, and a third means some other transition now invalidates it and the no-cache reasoning needs re-reading`);
+      }
+      // The '\n' case, and it is a real one: askDetail KEEPS its newlines
+      // (deckhand_display.ino spares '\n' while scrubbing every other control
+      // byte) and the fonts are ASCII 0x20..0x7E, so a newline drawn through
+      // paints nothing AND advances nothing - the next line would be drawn hard
+      // against this one and textWidth would measure the break as zero.
+      chk(/!= '\\n'/.test(stripSrc),
+          "drawKbStrip's OWN BODY stops at the first newline instead of drawing through it");
+      // The TAG counts as a literal drawKbStrip draws even though it is declared
+      // beside the function rather than inside it - and it was missed on the first
+      // pass for exactly that reason: a U+2026 in the tag sailed through a sweep
+      // of the body alone. drawString would paint nothing AND advance nothing for
+      // it, so the tag would silently vanish while still reserving its lane.
+      const stripLits = [...stripSrc.matchAll(/"([^"]*)"/g)].map(x => x[1])
+        .concat((KB_SRC.match(/const char\* KB_STRIP_MORE\s*=\s*"([^"]*)"/) || []).slice(1));
+      const wide = stripLits.filter(l => [...l].some(ch => ch.codePointAt(0) < 0x20 || ch.codePointAt(0) > 0x7e));
+      chk(wide.length === 0,
+          `every literal drawKbStrip draws is ASCII 0x20..0x7E${wide.length ? ` - offending: ${JSON.stringify(wide)}` : ""}`);
+      // drawKeyboard draws it BEFORE the peek's early return, so the question
+      // stays legible above an open peek and closing the peek does not have to
+      // repaint the strip.
+      const iStripCall = drawKbSrc.indexOf("drawKbStrip()"), iPeekRet = drawKbSrc.indexOf("if (kbPeekPage >= 0)");
+      chk(iStripCall >= 0 && iPeekRet > iStripCall,
+          "drawKeyboard calls drawKbStrip BEFORE the peek's early return, so the strip survives an open peek");
+      // kbTouch: the strip's band is tested BEFORE the card's, which is
+      // "anything above the keys" and would otherwise swallow these rows.
+      const iStripTap = touchSrc.indexOf("if (sy < KB_TEXT_Y)"), iCardTap = touchSrc.indexOf("if (sy < KB_ROWS_Y)");
+      chk(iStripTap >= 0, "kbTouch tests a strip band at sy < KB_TEXT_Y");
+      chk(iCardTap > iStripTap,
+          "kbTouch tests the strip band BEFORE the card band (sy < KB_ROWS_Y), which would otherwise swallow every row above the card");
+      const stripBranch = iStripTap >= 0 && iCardTap > iStripTap ? touchSrc.slice(iStripTap, iCardTap) : "";
+      chk(stripBranch.length > 0, "kbTouch's strip branch was sliced out (parse gate)");
+      chk(/kbHasDetail\(\)/.test(stripBranch) && /kbPeekPage = 0/.test(stripBranch),
+          "kbTouch's strip branch opens the peek, gated on kbHasDetail");
+      // ...and the CARD's branch no longer does. This is the defect this task
+      // closes: Task 5 gave the card's tap to the caret for kbLen > 0 and left the
+      // peek on the kbLen == 0 arm, which put the question out of reach again for
+      // exactly the state you are in while typing.
+      const iRows = touchSrc.indexOf("int r = (sy - KB_ROWS_Y)");
+      const cardBranch = iCardTap >= 0 && iRows > iCardTap ? touchSrc.slice(iCardTap, iRows) : "";
+      chk(cardBranch.length > 0, "kbTouch's card branch was sliced out (parse gate)");
+      chk(!/kbPeekPage/.test(cardBranch),
+          "kbTouch's CARD branch no longer touches kbPeekPage - the peek is the strip's, reachable in every state rather than only with an empty buffer");
+      // The hint on the empty card names the strip, and it is PARSED rather than
+      // transcribed: a hint pointing at a control that has moved teaches the one
+      // gesture that no longer works.
+      const hint = (textSrc.match(/drawString\("([^"]*)",\s*CARD_X \+ 6,\s*KB_LINE0_Y \+ KB_LINE_PITCH\)/) || [])[1];
+      chk(!!hint, "drawKbText's empty-buffer hint literal was parsed out of the drawString that places it under the title (parse gate)");
+      if (hint) {
+        chk(!/tap here/.test(hint),
+            `the empty-card hint is "${hint}" - it must not say "tap here", which pointed at the card's own tap when that opened the peek`);
+        chk([...hint].every(ch => ch.codePointAt(0) >= 0x20 && ch.codePointAt(0) <= 0x7e),
+            `the empty-card hint "${hint}" is ASCII 0x20..0x7E`);
+        for (const bb of [1, 2])
+          chk(widthB(bb, T_META, hint) <= B[bb].CARD_W - 12,
+              `the empty-card hint "${hint}" inks ${widthB(bb, T_META, hint)}px in board ${bb}'s ${B[bb].CARD_W - 12}px card lane`);
+      }
     }
     // THE PEEK OVERLAY, and its three STACKED ROWS. The rows are what needed adding:
     // they were the literals 8 / 22 / 40 in drawKbPeek(), and drawString paints an
@@ -1962,13 +3851,587 @@ for (const b of [1, 2]) {
         `peek's ${peekLines} lines end ${c.KB_PEEK_TEXT_DY + peekLines * c.KB_LINE_PITCH - 1} inside the ${peekH}px overlay`);
   }
 
+  // ================= THE REPLY PANEL (compose.ino) =================
+  // The compose surface's other screen. Its column closes on the SAME KB_ACT_Y the
+  // keyboard's does - derived, not arranged, since both stacks are fixed above it -
+  // and every band on it is TAP_MIN with a KB_ACT_DRAWN button centred inside.
+  {
+    const yOf = (n) => composeAcc(b, n);
+    const k = CMP[b];
+    // RECENTS FIT WHERE THE GEOMETRY SAYS SO, not where a board number does. The
+    // firmware asks the same question in composeRecentsFit(), and its body is
+    // asserted below to be this expression rather than a board #if.
+    const recentsFit = c.KB_ACT_Y - yOf("composeRecentY") >= c.TAP_MIN;
+    // [name, top, height, tappable]
+    const bands = [
+      ["the prompt card", yOf("composePromptY"), c.COMPOSE_PROMPT_H, true],
+      ["the reply legend", yOf("composeLegend1Y"), c.COMPOSE_LEGEND_H, false],
+      ["reply band 0", yOf("composeReplyY"), c.TAP_MIN, true],
+      ["reply band 1", yOf("composeReplyY") + c.TAP_MIN, c.TAP_MIN, true],
+      ["the insert legend", yOf("composeLegend2Y"), c.COMPOSE_LEGEND_H, false],
+      ["the token band", yOf("composeTokenY"), c.TAP_MIN, true],
+      ["the draft line", yOf("composeDraftY"), c.COMPOSE_DRAFT_H, true],
+      ["the recent legend", yOf("composeLegend3Y"), c.COMPOSE_LEGEND_H, false],
+    ];
+    if (recentsFit) bands.push(["the recent band", yOf("composeRecentY"), c.TAP_MIN, true]);
+    bands.push(["the action band", c.KB_ACT_Y, c.KB_ACT_H, true]);
+    console.log(`  reply panel: ` + bands.map(([n, t, h]) => `${n.replace(/^the /, "")} ${t}..${t + h - 1}`).join(" | ")
+              + ` of ${c.BOARD_H}${recentsFit ? "" : " (no recents row)"}`);
+    // THE CONTIGUITY WALK, and it is deliberately NOT a sum of the terms. Once
+    // every gap is written as `next - prev - prevH` the sum TELESCOPES and holds
+    // for any values at all - the defect the keyboard's own column block above
+    // documents at length. What can fail is this: each band starts at or after the
+    // one above it ended, no gap is negative, and the last ends inside BOARD_H.
+    let cursor = 0, slack = 0;
+    for (const [n, top, h] of bands) {
+      chk(top >= cursor,
+          `reply panel: ${n} starts ${top}, at or after the ${cursor} where the band above it ends (gap ${top - cursor})`);
+      slack += top - cursor;
+      cursor = top + h;
+    }
+    chk(cursor <= c.BOARD_H,
+        `reply panel: the last band ends ${cursor - 1} inside BOARD_H ${c.BOARD_H}, with ${c.BOARD_H - cursor} row(s) of bottom margin`);
+    // THE PANEL'S ONE FREE TERM, and it is the residual above the action row. The
+    // walk above forbids overlap but would accept slack anywhere; this says where
+    // the slack IS. Board 1 has 31px and board 2 has 64, all of it in one place,
+    // and a term that drifted would show up here as slack in two.
+    const residual = c.KB_ACT_Y - (recentsFit ? yOf("composeRecentY") + c.TAP_MIN : yOf("composeRecentY"));
+    console.log(`    slack ${slack}px = COMPOSE_TOP ${c.COMPOSE_TOP} + COMPOSE_GAP ${c.COMPOSE_GAP} + residual ${residual}`);
+    chk(slack === c.COMPOSE_TOP + c.COMPOSE_GAP + residual,
+        `reply panel: the ${slack}px of slack in this column is exactly the three terms the design names - the ` +
+        `${c.COMPOSE_TOP}px top margin, the ${c.COMPOSE_GAP}px gap under the prompt card and the ${residual}px ` +
+        `residual above the action band. A gap ANYWHERE else is a strip the design did not put there, and the ` +
+        `contiguity walk above cannot see it: it forbids overlap, not slack`);
+    chk(residual >= 0,
+        `reply panel: the residual above the action band is ${residual} - a negative one means the stack has ` +
+        `grown into the row that answers Claude`);
+    // EVERY TESTED BAND CLEARS THE FINGERTIP FLOOR, except the ONE that is named.
+    // The list is exact in both directions: a new sub-floor band fails, and so
+    // does an entry here that is no longer sub-floor, so the permission cannot rot
+    // into a blanket one. Same shape as docs/design/compose/check.mjs's EXCEPTIONS.
+    const SUB_FLOOR_OK = ["the draft line"];
+    const subFloor = bands.filter(([n, t, h, tap]) => tap && h < c.TAP_MIN).map(([n]) => n);
+    chk(subFloor.join("|") === SUB_FLOOR_OK.join("|"),
+        `reply panel: the tested bands under TAP_MIN ${c.TAP_MIN} are [${subFloor.join(", ")}], and the ` +
+        `only one this design permits is [${SUB_FLOOR_OK.join(", ")}] - the draft line is one text cell ` +
+        `plus its air (COMPOSE_DRAFT_H ${c.COMPOSE_DRAFT_H}) and carries CLR, a RECOVERY for a draft you ` +
+        `can still see, so a miss costs one tap and loses nothing`);
+    for (const [n, t, h, tap] of bands)
+      if (tap && !SUB_FLOOR_OK.includes(n))
+        chk(h >= c.TAP_MIN, `reply panel: ${n} is ${h}px tall >= TAP_MIN ${c.TAP_MIN}`);
+    // CLR IS SHORT IN ONE AXIS ONLY. Its tested zone runs from composeClrX() to
+    // the lane's right edge, and that width is read out of the firmware's own
+    // accessor rather than restated.
+    const clrW = c.CARD_X + c.CARD_W - yOf("composeClrX");
+    chk(clrW >= c.TAP_MIN,
+        `reply panel: CLR's tested zone is ${clrW}px wide >= TAP_MIN ${c.TAP_MIN} - it is sub-floor in HEIGHT alone`);
+    // THE DRAWN BUTTON IS STRICTLY INSIDE ITS BAND, and the panel reuses the
+    // action row's three numbers rather than deriving new ones - so this is the
+    // claim that they still centre in a TAP_MIN band, which is what every band on
+    // this screen is. It fails the moment KB_ACT_H stops being TAP_MIN.
+    chk(c.KB_ACT_DRAWN < c.TAP_MIN,
+        `reply panel: the drawn control ${c.KB_ACT_DRAWN} is strictly inside its ${c.TAP_MIN}px band`);
+    chk(2 * c.KB_ACT_DY + c.KB_ACT_DRAWN === c.TAP_MIN,
+        `reply panel: the drawn control is centred in a TAP_MIN band - ${c.KB_ACT_DY} + ${c.KB_ACT_DRAWN} + ${c.KB_ACT_DY} == ${c.TAP_MIN}`);
+    // THE THREE COLUMNS. The cell comes from composeCellW()'s own expression; the
+    // remainder goes to the last column, so the row closes on the lane exactly.
+    const cell = yOf("composeCellW"), last = c.CARD_W - (k.COMPOSE_COLS - 1) * cell;
+    console.log(`    columns: ${Array(k.COMPOSE_COLS - 1).fill(cell).join(" + ")} + ${last} = ${(k.COMPOSE_COLS - 1) * cell + last} (lane ${c.CARD_W}), drawn ${cell - k.COMPOSE_KEY_GAP} wide`);
+    chk(cell === Math.trunc(c.CARD_W / k.COMPOSE_COLS),
+        `reply panel: composeCellW() is ${cell} == CARD_W ${c.CARD_W} / ${k.COMPOSE_COLS} = ${Math.trunc(c.CARD_W / k.COMPOSE_COLS)}`);
+    chk(last - cell === c.CARD_W % k.COMPOSE_COLS && last >= cell,
+        `reply panel: the last column takes the ${c.CARD_W % k.COMPOSE_COLS}px remainder (${cell} -> ${last}), so the three columns close on the ${c.CARD_W}px lane rather than leaving a sliver at the edge`);
+    // THE THREE CONSTANTS compose.ino KEEPS FOR ITSELF, each against something
+    // independent of it - geom-sweep.mjs reported all three as either unread or
+    // caught only by a crash, and a constant no assertion reads is a constant
+    // that can move without anyone noticing.
+    chk(k.COMPOSE_KEY_GAP === c.KB_PITCH - c.KB_KEY_W,
+        `reply panel: COMPOSE_KEY_GAP ${k.COMPOSE_KEY_GAP} == KB_PITCH ${c.KB_PITCH} - KB_KEY_W ` +
+        `${c.KB_KEY_W} = ${c.KB_PITCH - c.KB_KEY_W} - the panel's drawn/tested gap is the KEY's own, ` +
+        `not a second number, and keyboard.ino spells the same expression KB_KEY_GAP`);
+    chk(CMP[b].COMPOSE_ACT_MAX >= COMPOSE_ACT_COLS,
+        `reply panel: COMPOSE_ACT_MAX ${CMP[b].COMPOSE_ACT_MAX} holds the ${COMPOSE_ACT_COLS} column(s) ` +
+        `drawComposeActions writes into composeActX/composeActW - an array shorter than the row it ` +
+        `stores is an out-of-bounds write on every repaint, which is the shape of the cxRightCache bug`);
+    chk(k.COMPOSE_CHIPS_PER_PAGE >= 2,
+        `reply panel: a token row shows ${k.COMPOSE_CHIPS_PER_PAGE} chip(s) - the design's row fits TWO ` +
+        `tokens on both boards, and at one per page the pager would be doing the work the row is for`);
+    chk(k.COMPOSE_CHIPS_PER_PAGE === k.COMPOSE_COLS - 1,
+        `reply panel: a token page is ${k.COMPOSE_CHIPS_PER_PAGE} chip(s) of ${k.COMPOSE_COLS} columns - ` +
+        `the pager's lane is RESERVED before the chips are laid out, so a wide chip can never run ` +
+        `underneath it`);
+    chk(k.COMPOSE_REPLY_BANDS * k.COMPOSE_COLS >= 4,
+        `reply panel: the reply grid is ${k.COMPOSE_REPLY_BANDS} x ${k.COMPOSE_COLS} = ` +
+        `${k.COMPOSE_REPLY_BANDS * k.COMPOSE_COLS} cells, enough for the 4 options SessionInfo can hold ` +
+        `- a smaller grid would silently drop the last option rather than draw it`);
+    // THE PANEL'S WHOLE CASE, in one line: a reply button clears the fingertip
+    // floor in WIDTH, which no key on either board does (KB_PITCH is 24 and 32
+    // against a floor of 40 and 46). If this ever stopped holding the panel would
+    // have to be re-argued rather than assumed.
+    chk(cell >= c.TAP_MIN,
+        `reply panel: a column is ${cell}px wide >= TAP_MIN ${c.TAP_MIN} - the key band is ${c.KB_PITCH}, which is the whole reason this screen exists`);
+    // THE PAGER'S OWN LABEL has to fit the column it is centred in - it is the one
+    // string on this screen that is generated rather than authored, and a
+    // truncated "9/9>" would read as a different control.
+    chk(widthB(b, T_BODY, "9/9>") + 4 <= cell - k.COMPOSE_KEY_GAP,
+        `reply panel: the pager's widest label "9/9>" is ${widthB(b, T_BODY, "9/9>")}px inside its ${cell - k.COMPOSE_KEY_GAP}px button`);
+    // THE PROMPT CARD'S LINE COUNT, derived back out of the card's height in
+    // compose.ino. This is an EXACTNESS claim, not the derivation restated: at
+    // COMPOSE_PROMPT_H 53 the count would still be 2 and this would fail by 1.
+    const promptWant = 5 + c.KB_LINE_PITCH + 4 + k.COMPOSE_PROMPT_LINES * c.KB_LINE_PITCH + 4;
+    chk(promptWant === c.COMPOSE_PROMPT_H,
+        `reply panel: COMPOSE_PROMPT_H ${c.COMPOSE_PROMPT_H} == 5 + KB_LINE_PITCH + 4 + ${k.COMPOSE_PROMPT_LINES} lines + 4 (${promptWant})`);
+    chk(k.COMPOSE_PROMPT_LINES >= 2,
+        `reply panel: the prompt card holds ${k.COMPOSE_PROMPT_LINES} wrapped lines of the question - one line is a title, not a question`);
+    chk(lineHB(b, T_BODY) <= c.KB_LINE_PITCH,
+        `reply panel: a T_BODY cell is ${lineHB(b, T_BODY)}px and the card steps ${c.KB_LINE_PITCH}px per line - drawString paints an OPAQUE box a full cell tall, so a shorter step eats the line above`);
+    chk(c.COMPOSE_PROMPT_H >= c.TAP_MIN,
+        `reply panel: the prompt card is ${c.COMPOSE_PROMPT_H}px and is one tap target - well over TAP_MIN ${c.TAP_MIN}, so nothing about it is excepted`);
+    chk(lineHB(b, T_META) <= c.COMPOSE_LEGEND_H && lineHB(b, T_BODY) <= c.COMPOSE_DRAFT_H,
+        `reply panel: a legend holds its T_META cell (${lineHB(b, T_META)} in ${c.COMPOSE_LEGEND_H}) and the draft line its T_BODY cell (${lineHB(b, T_BODY)} in ${c.COMPOSE_DRAFT_H})`);
+    // EVERY LEGEND FITS ITS LANE WITHOUT BEING TRUNCATED, and the strings are
+    // PARSED out of the drawComposeLegend() call sites rather than restated here.
+    // A legend is the sentence that says what the band under it does - and one of
+    // them exists only to name why a row is absent, so a legend cut off at three
+    // dots would lose exactly the cause it was written to carry.
+    {
+      // SCOPED TO THE CALL SITES, and every string INSIDE one - the legends are
+      // ternaries (a band that is empty says WHY it is empty), so taking only the
+      // first literal per call would measure half of them and taking every
+      // ternary in the file would measure button labels against a lane that is
+      // not theirs.
+      const calls = [...stripComments("compose.ino").matchAll(/drawComposeLegend\(([^;]*)\);/gs)].map((m) => m[1]);
+      const all = [...new Set(calls.flatMap((a) =>
+        [...a.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1])))];
+      chk(all.length >= 4,
+          `reply panel: ${all.length} legend string(s) parsed out of compose.ino's drawComposeLegend call sites (gate - a parse that found none would make every claim below vacuous)`);
+      for (const t of all) {
+        chk(widthB(b, T_META, t) <= c.CARD_W - 12,
+            `reply panel: legend "${t}" is ${widthB(b, T_META, t)}px inside the ${c.CARD_W - 12}px lane, so it is never cut to three dots`);
+      }
+    }
+    // EVERY STRING IN compose.ino IS ASCII 0x20..0x7E. An out-of-range codepoint
+    // draws NOTHING and advances NOTHING - it is invisible rather than a fallback
+    // glyph - and this repo has paid for that at least six times, twice on a
+    // truncation marker. The panel adds a pager arrow ("N>"), a "+ " prefix and a
+    // "SENT:" receipt, every one of which is the kind of string someone reaches
+    // for a real glyph to draw.
+    {
+      const bad = [];
+      for (const m of stripComments("compose.ino").matchAll(/"((?:[^"\\]|\\.)*)"/g))
+        for (const ch of m[1])
+          if (ch.codePointAt(0) < 0x20 || ch.codePointAt(0) > 0x7e) bad.push(`U+${ch.codePointAt(0).toString(16)} in "${m[1]}"`);
+      chk(bad.length === 0,
+          `reply panel: every string literal in compose.ino is printable ASCII${bad.length ? " - found " + bad.join(", ") : ""}`);
+    }
+    if (b === 1) {
+      // ===== THE STRUCTURAL HALF. Everything above is arithmetic over constants,
+      // and arithmetic cannot say that the panel truncates a label but never a
+      // token, that the pager PAGES rather than counts, or that the two screens
+      // share one draft. These read the firmware's own text, each bound to a
+      // FUNCTION BODY rather than to the file - a rule a neighbouring line can
+      // satisfy is not a rule - with the parse gates first, because
+      // !/re/.test("") is TRUE and every negative below would otherwise pass
+      // vacuously over a function that failed to parse. Board 1 only: the source
+      // is shared, so these are claims about the source and not about a board.
+      const chipSrc = fnSrc(COMPOSE_SRC, "void drawComposeChip");
+      const insSrc = fnSrc(COMPOSE_SRC, "void composeInsertChip");
+      const ctlSrc = fnSrc(COMPOSE_SRC, "void drawComposeControl");
+      const cTouchSrc = fnSrc(COMPOSE_SRC, "bool composeTouch");
+      const actSrc2 = fnSrc(COMPOSE_SRC, "void drawComposeActions");
+      const recSrc = fnSrc(COMPOSE_SRC, "void drawComposeRecents");
+      const fitSrc = fnSrc(COMPOSE_SRC, "bool composeRecentsFit");
+      const remSrc = fnSrc(COMPOSE_SRC, "void composeRemember");
+      const useSrc = fnSrc(COMPOSE_SRC, "void composeUseRecent");
+      const slotSrc = fnSrc(COMPOSE_SRC, "int composeRecentSlots");
+      const shownSrc = fnSrc(COMPOSE_SRC, "int composeRecentShown");
+      const resetSrc = fnSrc(COMPOSE_SRC, "void composeResetPanel");
+      const typedSrc = fnSrc(KB_SRC, "bool sendTypedAnswerToHost");
+      const promptSrc = fnSrc(KB_SRC, "bool sendPromptToHost");
+      const optSrc = fnSrc(COMPOSE_SRC, "void composeSendOption");
+      const draftSrc = fnSrc(COMPOSE_SRC, "void drawComposeDraft");
+      const kbDrawSrc = fnSrc(KB_SRC, "void drawKeyboard");
+      const kbCloseSrc = fnSrc(KB_SRC, "void closeCompose");
+      const kbOpenSrc = fnSrc(KB_SRC, "void openComposeOn");
+      const kbActSrc = fnSrc(KB_SRC, "void drawKbActions");
+      const kbTouchSrc2 = fnSrc(KB_SRC, "bool kbTouch");
+      const cTypeSrc = fnSrc(COMPOSE_SRC, "void composeOpenKeyboard");
+      const cBackSrc = fnSrc(COMPOSE_SRC, "void composeBackToPanel");
+      const cGoneSrc = fnSrc(COMPOSE_SRC, "void drawComposeGone");
+      const cDrawSrc = fnSrc(COMPOSE_SRC, "void drawCompose");
+      const kbInsSrc = fnSrc(KB_SRC, "void kbInsert");
+      const htSrc = fnSrc(SRC_MAIN, "void handleTouch");
+      for (const [n, src] of [["drawComposeChip", chipSrc], ["composeInsertChip", insSrc],
+                              ["drawComposeControl", ctlSrc], ["composeTouch", cTouchSrc],
+                              ["drawComposeActions", actSrc2], ["drawComposeRecents", recSrc],
+                              ["composeRecentsFit", fitSrc], ["drawComposeDraft", draftSrc],
+                              ["drawKeyboard", kbDrawSrc], ["closeCompose", kbCloseSrc],
+                              ["kbInsert", kbInsSrc], ["handleTouch", htSrc],
+                              ["openComposeOn", kbOpenSrc], ["drawKbActions", kbActSrc],
+                              ["kbTouch", kbTouchSrc2], ["composeOpenKeyboard", cTypeSrc],
+                              ["composeBackToPanel", cBackSrc], ["drawComposeGone", cGoneSrc],
+                              ["drawCompose", cDrawSrc], ["composeRemember", remSrc],
+                              ["composeUseRecent", useSrc], ["composeRecentSlots", slotSrc],
+                              ["composeRecentShown", shownSrc], ["composeResetPanel", resetSrc],
+                              ["sendTypedAnswerToHost", typedSrc], ["sendPromptToHost", promptSrc],
+                              ["composeSendOption", optSrc]])
+        chk(src.length > 0, `${n} parsed (gate)`);
+      // THE LABEL TRUNCATES AND THE VALUE NEVER DOES. Truncating the INSERTED
+      // token would quietly send Claude a path that does not exist, which is
+      // worse than any drawing defect. The truncation lives in the ONE function
+      // that draws all four control kinds, so the positive claim is made there
+      // and drawComposeChip is asserted to route through it - a chip that grew a
+      // draw of its own would fail this rather than silently escaping the rule.
+      chk(/fitText\(/.test(ctlSrc),
+          "drawComposeControl's OWN BODY truncates every label it draws through fitText - three ASCII dots, never U+2026");
+      chk(/drawComposeControl\(/.test(chipSrc) && !/drawString/.test(chipSrc),
+          "drawComposeChip's OWN BODY draws through drawComposeControl and nowhere else, so the label truncation it inherits is the one asserted above");
+      chk(!/fitText/.test(insSrc),
+          "composeInsertChip's OWN BODY inserts the WHOLE token - a truncated path is a path that does not exist");
+      chk(/kbInsert\(/.test(insSrc),
+          "composeInsertChip's OWN BODY splices through kbInsert, so the caret arithmetic and the KB_MAX_BYTES cap stay in one place");
+      // THE PAGER IS REAL, NOT A COUNT. The row fits two tokens on both boards and
+      // the host ships up to four, so a label that only counted would leave half
+      // of them unreachable. Bound to composeTouch's body: the page has to ADVANCE
+      // and it has to wrap on the page count rather than on a literal.
+      chk(/composeChipPage\s*=\s*\(composeChipPage\s*\+\s*1\)\s*%\s*pages/.test(cTouchSrc),
+          "composeTouch's OWN BODY advances composeChipPage modulo the page count - the pager pages, and a token on page 2 is reachable");
+      chk(/composeChipPages\(/.test(cTouchSrc),
+          "composeTouch's OWN BODY takes that page count from composeChipPages(), the same function the draw uses");
+      // THE ACTION ROW'S TESTED BANDS come from uiActionRow and are hit-tested
+      // from what it stored - the same one-place rule kbTouch/drawKbActions
+      // already follow, and the reason neither recomputes a column inline.
+      chk(/uiActionRow\s*\(/.test(actSrc2),
+          "drawComposeActions' OWN BODY gets its columns from uiActionRow, not from arithmetic of its own");
+      chk(/composeActX\[/.test(cTouchSrc) && /composeActW\[/.test(cTouchSrc),
+          "composeTouch's OWN BODY hit-tests the columns drawComposeActions stored, so the draw and the test cannot disagree");
+      chk(/KB_ACT_H/.test(cTouchSrc) && !/KB_ACT_DRAWN/.test(cTouchSrc),
+          "composeTouch tests the BAND (KB_ACT_H) and not the drawn button - the air above and below belongs to the control");
+      {
+        const fracsInit = (actSrc2.match(/fracs\[3\]\s*=\s*\{([^}]*)\}/) || ["", ""])[1];
+        const labelsInit = (actSrc2.match(/labels\[3\]\s*=\s*\{([^}]*)\}/) || ["", ""])[1];
+        chk(fracsInit.length > 0 && labelsInit.length > 0,
+            "drawComposeActions' three-control labels[]/fracs[] initialisers parsed (gate)");
+        const fr = splitArgs(fracsInit).map((t) => +t.trim()), lb = splitArgs(labelsInit);
+        chk(fr.length === 3 && lb.length === 3,
+            `drawComposeActions' row is ${lb.length} control(s) at fracs {${fr.join(", ")}} - the design's row is three`);
+        // The COMPOSE_ACT_MAX claim that used to stand here is now made per BOARD,
+        // above, because the sweep perturbs per board and a board-1-only
+        // assertion left board 2's copy of that constant unguarded.
+        chk(COMPOSE_ACT_COLS === lb.length,
+            `the hoisted labels[] width ${COMPOSE_ACT_COLS} is the ${lb.length} this block re-parsed - ` +
+            `two parses of one initialiser must agree, or the per-board assertion above is measuring ` +
+            `a row nobody draws`);
+        if (fr.length === 3 && lb.length === 3) {
+          chk(fr[2] === 2 * fr[0] && fr[2] === 2 * fr[1],
+              `drawComposeActions' fracs are {${fr.join(", ")}} - SEND is EXACTLY twice the destructive control, which is what spec defect 2 asks for, and the third control still gets a full band`);
+          chk(/DISCARD/.test(lb[0]) && /CLOSE/.test(lb[0]) && !/DISCARD/.test(lb[2]),
+              "drawComposeActions puts the destructive control in COLUMN 0 and relabels it CLOSE with nothing to lose - label AND colour, never colour alone, and never adjacent to SEND");
+          chk(/TYPE/.test(lb[1]),
+              "drawComposeActions puts TYPE... in COLUMN 1, on a full TAP_MIN band - it is the only bridge from this panel to free text, and an earlier draft parked it on the draft line, the one sub-floor band on the screen");
+        }
+      }
+      // RECENTS ARE ASKED OF THE GEOMETRY, NOT OF THE BOARD NUMBER, and where
+      // they do not fit the panel SAYS SO on the glass. Every refusal names its
+      // cause - the rule this repo states for device commands, applied to a row
+      // that is absent.
+      chk(/KB_ACT_Y\s*-\s*composeRecentY\(\)\s*>=\s*TAP_MIN/.test(fitSrc),
+          "composeRecentsFit's OWN BODY asks whether a whole TAP_MIN band is left above the action row - not which board it is on, which would be a second place to keep the column");
+      chk(/BOARD_/.test(fitSrc) === false,
+          "composeRecentsFit's OWN BODY names no board flag at all");
+      chk(/drawComposeLegend\(/.test(recSrc) && /NO ROOM/.test(recSrc),
+          "drawComposeRecents' OWN BODY draws a LINE where the row does not fit, not a gap the reader has to interpret");
+
+      // ================ TASK 12: THE RECENTS RING ================
+      // The ring is 604 bytes of DRAM that no arithmetic above can see: it has no
+      // constant, no band of its own on board 1, and its whole behaviour is
+      // "which string ends up where". Every claim below is bound to a FUNCTION
+      // BODY, and the three that matter most are POSITIONAL - a call to
+      // composeRemember at the top of a send function passes any test that only
+      // asks whether the call exists, and records a line that never went out.
+      const ring = COMPOSE_SRC.match(/char composeRecent\[(\d+)\]\[([^\]]+)\];/);
+      chk(!!ring, "composeRecent[N][M] is declared in compose.ino (gate - every claim below reads this parse)");
+      if (ring) {
+        chk(/KB_MAX_BYTES\s*\+\s*1/.test(ring[2]),
+            `composeRecent's row is KB_MAX_BYTES + 1 rather than a literal (it is declared ` +
+            `"${ring[2].trim()}") - a literal is how ` +
+            `the two drift when the cap moves, and it drifts in the direction that truncates the ` +
+            `longest thing that can reach it (kbText, capped at exactly KB_MAX_BYTES)`);
+        chk(+ring[1] >= k.COMPOSE_COLS,
+            `the ring holds ${ring[1]} entries and the one row draws ${k.COMPOSE_COLS} of them - a ` +
+            `ring SHORTER than the row would leave a cell drawn out of a slot that does not exist`);
+      }
+      // THE DEDUPE, AND NEWEST-FIRST, in the one body that owns both. Four slots
+      // are too few to spend one on a duplicate, and the dedupe is also what makes
+      // the COMPOSE recent verb idempotent under the host's double delivery.
+      chk(/strcmp|strncmp/.test(remSrc),
+          "composeRemember's OWN BODY dedupes - four slots are too few to spend one on a duplicate, " +
+          "and it is the dedupe that makes remembering idempotent when the host delivers a line twice");
+      chk(/composeRecent\[0\]\s*,/.test(remSrc) || /copyField\(composeRecent\[0\]/.test(remSrc),
+          "composeRemember's OWN BODY writes slot 0 - the ring is NEWEST FIRST, which is what makes " +
+          "the leftmost cell the last thing you sent");
+      chk(/composeRecentSlots\(\)/.test(remSrc) && /sizeof\(composeRecent\)/.test(slotSrc),
+          "composeRemember bounds itself by composeRecentSlots(), whose OWN BODY asks sizeof the " +
+          "array - a transcribed 4 beside a ring of 3 is an out-of-bounds write on every send");
+      chk(/if\s*\(!text \|\| !text\[0\]\)\s*return;/.test(remSrc),
+          "composeRemember's OWN BODY drops an empty string - a blank entry would draw a blank " +
+          "reuse button, which is a control that does nothing");
+      // WHERE THE CALL SITES ARE, not merely that they exist. Each send function
+      // returns false at every point it sends NOTHING (an empty draft, a closed
+      // window, a session that has gone, the wrong mode); the record has to be
+      // past the LAST of them.
+      for (const [n, src] of [["sendTypedAnswerToHost", typedSrc], ["sendPromptToHost", promptSrc]]) {
+        const guard = src.lastIndexOf("return false;"), rem = src.indexOf("composeRemember(");
+        chk(guard >= 0 && rem > guard,
+            `${n}'s OWN BODY remembers the draft past every early return (last \`return false;\` at ` +
+            `${guard}, composeRemember at ${rem}) - a send that returned early sent NOTHING, and an ` +
+            `entry the ring offers back as sent would be a record that lies`);
+        chk(/composeRemember\(kbText\)/.test(src),
+            `${n} remembers kbText - the bytes it just signed and put on the wire, not a label near them`);
+      }
+      {
+        const out = optSrc.indexOf("sendAnswerToHost("), rem = optSrc.indexOf("composeRemember(");
+        chk(out >= 0 && rem > out,
+            "composeSendOption's OWN BODY remembers the option label past every early return AND " +
+            "past sendAnswerToHost - the one-tap path has four ways to refuse above it (a closed " +
+            "window, an already-sent panel, a mirrored ask, an already-answered prompt)");
+        chk(/drawComposeRecents\(\)/.test(optSrc),
+            "composeSendOption repaints the recents row it just changed - this transition is NOT a " +
+            "full repaint, and the row would otherwise show the ring as it was before the send");
+      }
+      // THE ROW ITSELF. The reuse FORM is what separates a recall from an action,
+      // and the row is bounded by what the ring holds so an empty slot is never
+      // drawn as an empty button.
+      chk(/COMPOSE_REUSE/.test(recSrc),
+          "drawComposeRecents' OWN BODY draws the REUSE kind - COLOR_CARD fill, COLOR_LABEL stroke, " +
+          "left aligned - so a recall is not shaped like the SEND buttons three bands above it");
+      chk(/composeRecentShown\(\)/.test(recSrc) && /composeRecentShown\(\)/.test(cTouchSrc),
+          "the draw and the hit test both bound themselves by composeRecentShown(), so a tap can " +
+          "never reach a cell the row did not draw");
+      chk(/composeRecentCount/.test(shownSrc) && /COMPOSE_COLS/.test(shownSrc),
+          "composeRecentShown's OWN BODY is min(what the ring holds, the columns) - not a third number");
+      chk(/fillRect\(CARD_X,\s*lgY,\s*CARD_W/.test(recSrc),
+          "drawComposeRecents' OWN BODY clears the pixels it is about to redraw. It is called on the " +
+          "send transition as well as after a fillScreen, and drawString paints an opaque box only as " +
+          "wide as its own string, so a shorter legend after a longer one leaves the tail behind");
+      // THE FIT QUESTION IS ASKED AT THE HIT TEST TOO. Board 1 draws no row and
+      // says so; the 31px between that legend and the action band is residual.
+      // Without this the residual would replace the draft out of a ring that is
+      // nowhere on the glass - a control that exists only in the firmware, on the
+      // board whose own panel says it does not exist.
+      chk(/composeRecentsFit\(\)\s*&&\s*sy >= composeRecentY\(\)/.test(cTouchSrc),
+          "composeTouch asks composeRecentsFit() before it dispatches a tap to the recents row - on " +
+          "board 1 that band is RESIDUAL, and a tap there must not recall out of a row the panel " +
+          "says it has no room to draw");
+      // A RECALL IS NOT AN ACTION. The one thing this control must never do is the
+      // thing every control above it does.
+      chk(!/send[A-Za-z]*ToHost\(/.test(useSrc),
+          "composeUseRecent's OWN BODY sends NOTHING - it is the one control on this screen that " +
+          "puts text in front of you instead of on the wire, which is what the reuse form promises");
+      chk(/kbText/.test(useSrc) && /kbLen\s*=/.test(useSrc) && /kbCaret\s*=\s*-1/.test(useSrc),
+          "composeUseRecent's OWN BODY replaces the draft and puts the caret back to the pin (-1), " +
+          "the state CLR and openComposeOn both leave it in - a stale caret past the new end would " +
+          "splice the next keystroke outside the string");
+      chk(/composeAfterEdit\(\)/.test(useSrc),
+          "composeUseRecent repaints through composeAfterEdit(), the same seam a keystroke uses, so " +
+          "the draft line and the action row agree with the draft it just replaced");
+      // NOT PERSISTED, WHICH IS A SPEC DECISION AND THEREFORE TESTABLE. NVS would
+      // give a BLE-paired device a plaintext log of every reply and a flash-wear
+      // budget, for a one-tap convenience.
+      chk(!/Preferences|nvs|prefs\./i.test(stripComments("compose.ino")),
+          "nothing in compose.ino writes the ring to NVS - it is RAM only and empty after a reboot, " +
+          "which the spec lists under what is OUT rather than left to be inferred");
+      chk(!/composeRecent/.test(resetSrc),
+          "composeResetPanel does NOT clear the ring - it is global to the device rather than per " +
+          "ask, so what you last replied survives closing one prompt and opening the next");
+      // ONE DRAFT, TWO SCREENS, and the panel's own repaint discipline. The draft
+      // line changes per character, so it is repainted wholesale exactly as
+      // drawKbText() is - a change-only cache shorter than the string it holds
+      // silently stops noticing changes past that point, and this string is the
+      // one that changes most.
+      chk(/fillRect\(CARD_X,\s*(?:y|composeDraftY\(\)),\s*CARD_W,\s*COMPOSE_DRAFT_H/.test(draftSrc),
+          "drawComposeDraft's OWN BODY clears its own band before redrawing it, so a shorter draft cannot leave the tail of a longer one behind");
+      chk(/composeOnPanel\(\)/.test(kbDrawSrc) && /drawCompose\(\)/.test(kbDrawSrc),
+          "drawKeyboard's OWN BODY routes to the panel on composeOnPanel() - ONE screen-painting entry point for both screens of the compose surface");
+      chk(/composeScreen\s*=\s*COMPOSE_SCREEN_PANEL/.test(kbCloseSrc),
+          "closeCompose's OWN BODY puts composeScreen back to the ROOT - leaving it on the keyboard would paint the keyboard over the NEXT surface opened at the panel and route every tap on it to kbTouch, which is exactly the screen-does-not-match-the-router bug that function's own comment records");
+      chk(/composeOnPanel\(\)/.test(kbInsSrc) && /composeAfterEdit\(\)/.test(kbInsSrc),
+          "kbInsert's OWN BODY repaints whichever screen is up - drawKbText would paint the keyboard's card over the panel's prompt card and reply buttons");
+
+      // ============ TASK 11: ONE SURFACE, ONE STATE, ONE DRAFT ============
+      // The bug this whole task risks is a screen that no longer matches its
+      // touch router, and it is SILENT - nothing repaints it away. None of these
+      // assertions can catch it on the glass; what they CAN do is forbid the
+      // shapes that produce it: two names for one state, two routers, a screen
+      // move that clears the draft, and a destructive control back beside SEND.
+      chk(!/kbActive/.test(SRC_MAIN + KB_SRC + COMPOSE_SRC),
+          "kbActive is fully retired from deckhand_display.ino, keyboard.ino and compose.ino - it meant 'the keyboard is up' while it gated BOTH screens, and two names for one state is how a screen and its touch router disagree");
+      chk(!/composePanelOn/.test(SRC_MAIN + KB_SRC + COMPOSE_SRC),
+          "and so is composePanelOn, the second of the two names - composeScreen alone says which screen is up");
+      {
+        // ONE DISPATCH. handleTouch is allowed to read composeScreen directly
+        // because it is the router; every other seam asks composeOnPanel() /
+        // composeOnKeys(), which fold "the surface is up" into the same question
+        // so no caller can test the screen and forget the surface.
+        chk(/composeActive/.test(htSrc) && /composeScreen\s*==\s*COMPOSE_SCREEN_PANEL/.test(htSrc)
+            && /composeTouch\(/.test(htSrc),
+            "handleTouch's OWN BODY gates on composeActive and then dispatches on composeScreen - one router, one flag, and the panel takes the whole tap because every target on it clears TAP_MIN");
+        const dispatches = (htSrc.match(/composeScreen/g) || []).length;
+        chk(dispatches === 1,
+            `handleTouch's OWN BODY reads composeScreen exactly once (found ${dispatches}) - a second read is a second router, and two routers over one flag is the same defect as two flags for one state`);
+        const raw = [SRC_MAIN, KB_SRC, COMPOSE_SRC].join("\n")
+          .split("\n").filter((l) => !/^\s*\/\//.test(l) && /\bcomposeScreen\b/.test(l));
+        // The definition, the extern, the two accessors, the two writes that move
+        // between screens, closeCompose's reset, openComposeOn's argument, and
+        // handleTouch's one dispatch. Anything beyond that set is a seam deciding
+        // for itself what "which screen" means.
+        chk(raw.length <= 10,
+            `composeScreen is named on ${raw.length} non-comment lines across the three files - the flag is the state, and every extra site that reads it raw is a seam that can disagree with the router [${raw.map((l) => l.trim().slice(0, 46)).join(" | ")}]`);
+      }
+      // THE DRAFT SURVIVES BOTH MOVES. This is the one thing that makes the two
+      // screens COMPOSE rather than coexist: a chip tapped on the panel is
+      // editable on the keyboard, and a sentence typed there is on the panel's
+      // draft line when you come back.
+      for (const [n, src] of [["composeOpenKeyboard", cTypeSrc], ["composeBackToPanel", cBackSrc]]) {
+        chk(!/kbLen\s*=\s*0/.test(src) && !/kbText\[0\]\s*=/.test(src) && !/kbCaret\s*=/.test(src),
+            `${n}'s OWN BODY does not clear the draft - kbText, kbLen and kbCaret belong to the SURFACE, not to either screen, and a screen change that emptied them would make TYPE... a destructive control that says nothing about it`);
+        chk(/drawKeyboard\(\)/.test(src),
+            `${n}'s OWN BODY repaints through drawKeyboard(), the surface's ONE screen-painting entry point - a second painter is a second place that decides what a screen looks like`);
+      }
+      chk(/composeScreen\s*=\s*COMPOSE_SCREEN_KEYS/.test(cTypeSrc),
+          "composeOpenKeyboard's OWN BODY moves to the KEYBOARD screen");
+      chk(/composeScreen\s*=\s*COMPOSE_SCREEN_PANEL/.test(cBackSrc),
+          "composeBackToPanel's OWN BODY moves to the PANEL screen");
+      // AND THE 120ms ROW-3 FLASH BELONGS TO THE KEY SCREEN, not to the surface.
+      // BACK put the reply panel one finger-travel away from a SPACE press, so a
+      // release that asked only "is compose up" would paint the keyboard's row 3
+      // across the panel's legend and action band.
+      chk(/composeOnKeys\(\)/.test(fnSrc(KB_SRC, "void tickKbFlash")),
+          "tickKbFlash's OWN BODY releases only while the KEY SCREEN is up - composeActive covers the reply panel too, and row 3 does not exist there");
+      // BACK, NOT A DESTRUCTIVE CONTROL. Spec defect 2's worst form was DISCARD
+      // sitting next to SEND on a screen whose every key already misses the
+      // fingertip floor. It is not on that screen at all now - except for a
+      // message to a READY session, which has no panel behind it, and that arm
+      // says so on its own label.
+      {
+        const labInit = (kbActSrc.match(/labels\[KB_ACT_COLS\]\s*=\s*\{([\s\S]*?)\}/) || ["", ""])[1];
+        chk(labInit.length > 0, "drawKbActions' labels[] initialiser parsed (gate)");
+        chk(/"BACK"/.test(labInit) && /composeHasPanel\(\)/.test(kbActSrc),
+            "drawKbActions' left key is BACK whenever there is a panel behind the keyboard - leaving compose is the panel's job, so the destructive control is off this screen entirely");
+        chk(/DISCARD/.test(labInit) && /CANCEL/.test(labInit),
+            "and it still relabels DISCARD/CANCEL for the ONE case with no panel behind it - a message to a READY session, where this keyboard is the root and its left key is the way out");
+        chk(/composeHasPanel\(\)/.test(kbTouchSrc2) && /composeBackToPanel\(\)/.test(kbTouchSrc2)
+            && /closeCompose\(\)/.test(kbTouchSrc2),
+            "kbTouch's OWN BODY asks the SAME composeHasPanel() the label did - a key that said BACK and closed the surface, or said DISCARD and left it up, is a control disagreeing with its own label");
+      }
+      // EVERY EXIT IS REACHABLE WHEN THE ASK GOES AWAY. composeTouch used to open
+      // with `if (idx < 0) return true;` over its whole body, and kbSessionIdx
+      // goes to -1 the instant the ask expires - so every tap on the panel was
+      // swallowed from that moment, CLOSE included, and the only ways off the
+      // screen were the trigger file and the power button.
+      {
+        const bandAt = cTouchSrc.indexOf("KB_ACT_Y");
+        chk(bandAt > 0, "composeTouch's action-band test located (gate)");
+        const head = cTouchSrc.slice(0, bandAt);
+        // The PEEK branch above the band returns, legitimately; what must not be
+        // there is a return GUARDED ON THE SESSION, which is what stranded the
+        // user. One line carried both, so one line is what is looked for.
+        const bad = head.split("\n").filter((l) => !/^\s*\/\//.test(l)
+                                                 && /return/.test(l)
+                                                 && /\b(idx|sessionCount|haveAsk)\b/.test(l));
+        chk(bad.length === 0,
+            `composeTouch reaches its ACTION BAND with no session-guarded return above it - that band carries CLOSE, and a guard over the whole body strands the user on a panel whose every tap is swallowed the instant the ask expires${bad.length ? ` [${bad.map((l) => l.trim()).join(" | ")}]` : ""}`);
+        chk(cTouchSrc.indexOf("haveAsk") > bandAt,
+            "and the session question is asked BELOW the action band, not above it - the fix is to move the guard past the way out, not to delete it");
+        chk(/haveAsk/.test(cTouchSrc) && /sessions\[idx\]/.test(cTouchSrc),
+            "composeTouch still asks about sessions[idx] before reading it - the fix is to move the question below the way out, not to delete it");
+      }
+      // AND THE PANEL REPAINTS ITSELF WITHOUT ONE. drawCompose used to return
+      // having drawn NOTHING when the session was gone, which left the dead ask's
+      // option buttons on the glass looking exactly as live as they had a second
+      // earlier, with a tap on one doing nothing at all.
+      chk(!/^\s*if \(idx < 0[^\n]*\) return;/m.test(cDrawSrc),
+          "drawCompose's OWN BODY has no early return on a missing session - it would leave the dead ask's reply buttons on the glass, and every later repaint of this screen would leave them there too");
+      chk(/drawComposeGone\(\)/.test(cDrawSrc) && /fillScreen/.test(cDrawSrc),
+          "drawCompose draws the ask-is-gone card instead, on the same cleared screen");
+      // ONE SEND, TWO SCREENS, TWO ANSWERS TO "WHAT HAPPENED" - and that is what
+      // the bool return closes. The senders used to end in closeCompose()
+      // themselves, so an option tapped on the panel left a receipt while a draft
+      // sent from the panel's own SEND dropped the whole surface. Neither may
+      // close now, and each caller must do the thing its screen does.
+      {
+        const sendSrc = fnSrc(KB_SRC, "bool sendTypedAnswerToHost");
+        const promptSrc = fnSrc(KB_SRC, "bool sendPromptToHost");
+        chk(sendSrc.length > 0 && promptSrc.length > 0,
+            "sendTypedAnswerToHost and sendPromptToHost parsed, and BOTH return bool (gate) - a void one here means the parse found a different function and every claim below is vacuous");
+        for (const [n, src] of [["sendTypedAnswerToHost", sendSrc], ["sendPromptToHost", promptSrc]]) {
+          chk(!/closeCompose\(\)/.test(src),
+              `${n}'s OWN BODY does not close the surface - the caller owns the screen, because the two screens do different things with one answer`);
+          chk(/return false\s*;/.test(src) && /return true\s*;/.test(src),
+              `${n}'s OWN BODY reports whether the line went out - its early returns send NOTHING, and a caller that acted regardless would be acting on a failure`);
+        }
+        // Bound to the SEND arm itself, not to the function: composeTouch calls
+        // closeCompose twice legitimately (DONE and CLOSE), so "does it close"
+        // says nothing. The arm is the text from the send call to its return.
+        const armAt = cTouchSrc.indexOf("sendPromptToHost()");
+        chk(armAt > 0, "composeTouch's SEND arm located (gate)");
+        const arm = cTouchSrc.slice(armAt, armAt + 400);
+        chk(/composeShowSentState\(/.test(arm) && !/closeCompose\(/.test(arm),
+            "composeTouch's SEND arm leaves the RECEIPT and does NOT close - the same thing the one-tap reply path two bands up leaves, so one screen has one answer to what just happened");
+        chk(/closeCompose\(\)/.test(kbTouchSrc2),
+            "kbTouch's SEND arm closes instead, which is what the keyboard has always done and what the detail card underneath is repainted for");
+      }
+      chk(/kbIsMessage\(\)/.test(cGoneSrc),
+          "drawComposeGone's OWN BODY names WHICH cause it was - an expired prompt and a session that stopped being READY are different facts, and only one of them is answerable on your Mac");
+      // AND ITS TWO SENTENCES FIT THE CARD THEY ARE DRAWN INTO. drawWrappedText
+      // takes a line CAP and silently drops everything past it, so a string one
+      // word too long loses its tail with no marker - and the tail here is the
+      // half that says the draft survived. Measured per board at the board's own
+      // face, against the card's own line count, not eyeballed.
+      {
+        const strs = [...cGoneSrc.matchAll(/"([A-Z][^"]{20,})"/g)].map((m) => m[1])
+          .filter((t) => / [a-z]/.test(t));   // the sentences, not the upper-case headings
+        chk(strs.length === 2,
+            `drawComposeGone's two body sentences parsed (found ${strs.length}) - a parse that found none would make the wrap claim below vacuously true`);
+        // The two HEADINGS go out through drawString with no fitText, so they are
+        // measured rather than trusted: an opaque text box wider than the card
+        // paints straight over its right edge.
+        const heads = [...cGoneSrc.matchAll(/"([A-Z][A-Z ]{10,})"/g)].map((m) => m[1]);
+        chk(heads.length === 2, `drawComposeGone's two headings parsed (found ${heads.length})`);
+        for (const t of heads)
+          chk(t.length * advanceB(b, T_META) <= c.CARD_W - 12,
+              `ask-is-gone card: heading "${t}" is ${t.length * advanceB(b, T_META)}px inside the ${c.CARD_W - 12}px card lane - it is drawn with no fitText, so an overflow paints over the card's own edge`);
+        for (const t of strs) {
+          const n = countWrappedLinesB(b, t, T_BODY, c.CARD_W - 12);
+          chk(n <= CMP[b].COMPOSE_PROMPT_LINES,
+              `ask-is-gone card: "${t}" wraps to ${n} line(s) inside COMPOSE_PROMPT_LINES ${CMP[b].COMPOSE_PROMPT_LINES} - drawWrappedText drops the overflow SILENTLY, and the dropped half is the one that says your draft survived`);
+        }
+      }
+    }
+  }
+
   // ================= THE READER AND HISTORY PAGER =================
   {
     console.log(`  reader: chip ${c.HIST_CHIP_W_CHAT}x${c.HIST_CHIP_H} at ${c.HIST_CHIP_X},${c.HIST_CHIP_Y}; rule ${c.HIST_RULE_Y}; list ${c.HIST_TOP}..${c.HIST_JUMP_Y - 4}; scrubber band ${c.HIST_JUMP_Y}..${c.HIST_JUMP_Y + c.HIST_JUMP_TAP_H - 1}; ctrl ${c.READER_CTRL_Y}..${c.READER_CTRL_Y + c.READER_BTN_H - 1} of ${H}`);
     chk(c.HIST_CHIP_Y + c.HIST_CHIP_H <= c.HIST_RULE_Y, `chip ends ${c.HIST_CHIP_Y + c.HIST_CHIP_H - 1} above the rule at ${c.HIST_RULE_Y}`);
-    chk(c.HIST_CHIP_H >= c.TAP_MIN, `history filter chip ${c.HIST_CHIP_H}px drawn >= TAP_MIN ${c.TAP_MIN}`);
+    // B12. THE DRAWN CHIP IS NO LONGER TESTED AGAINST TAP_MIN, and this is the
+    // same correction Task 6 made one screen up for the key. `HIST_CHIP_H >=
+    // TAP_MIN` was the WRONG RULE: what a finger is tested against is
+    // HIST_CHIP_TAP_H, and the drawn chip is deliberately smaller - 17 drawn / 24
+    // tested is the split this repo cites as precedent everywhere else, including
+    // in the compose mock's own EXCEPTIONS entry for CLR. Asserting the DRAWN
+    // control against the floor made board 1 report a shortfall it does not have,
+    // parked in KNOWN as though it were one, while the shortfall it DOES have -
+    // the 25px TESTED band against a 40px floor - sat in the same list looking
+    // identical. Two entries, one real; the unreal one is gone from KNOWN too.
+    // Deleted rather than corrected in place, because the correct claim is the
+    // next line and has been all along. What is ADDED is the split itself, which
+    // nothing stated: the tap band must be STRICTLY taller than the chip it
+    // covers, the way the key's band is asserted strictly bigger than the drawn
+    // key in both dimensions.
     chk(c.HIST_CHIP_TAP_H + 1 >= c.TAP_MIN, `history chip tap band ${c.HIST_CHIP_TAP_H + 1}px >= TAP_MIN ${c.TAP_MIN}`);
-    chk(c.HIST_CHIP_TAP_H >= c.HIST_CHIP_H, `chip tap band ${c.HIST_CHIP_TAP_H} >= drawn ${c.HIST_CHIP_H}`);
+    chk(c.HIST_CHIP_TAP_H > c.HIST_CHIP_H,
+        `the chip's tap band ${c.HIST_CHIP_TAP_H} is strictly taller than the ${c.HIST_CHIP_H}px chip it covers - the split is kept, not collapsed`);
     chk(c.HIST_CHIP_TAP_H < c.HIST_RULE_Y, `chip tap band ends ${c.HIST_CHIP_TAP_H} above the rule, or it would claim the first list row`);
     chk(c.HIST_CHIP_TAP_W >= c.HIST_CHIP_X + c.HIST_CHIP_W_CHAT, `chip tap band ${c.HIST_CHIP_TAP_W}px wide covers the drawn chip (ends ${c.HIST_CHIP_X + c.HIST_CHIP_W_CHAT})`);
     chk(c.HIST_CHIP_W_CHAT >= c.TAP_MIN && c.HIST_CHIP_W_ALL >= c.TAP_MIN,
@@ -2096,7 +4559,7 @@ for (const b of [1, 2]) {
     // about the DECLARATION, so it is made against the header's raw text: BOT
     // must be an expression naming both terms, never a second literal that could
     // silently disagree with them.
-    const rawH = fs.readFileSync(`${DIR}/board_es3c35p.h`, "utf8");
+    const rawH = readSource(`board_es3c35p.h`);
     const botDecl = rawH.match(/const int SCROLL_BOT\s*=\s*([^;]+);/);
     chk(botDecl != null, "scrollback: SCROLL_BOT's declaration is findable");
     chk(botDecl != null && /SCROLL_TOP/.test(botDecl[1]) && /SCROLL_LINES/.test(botDecl[1]),
@@ -2119,7 +4582,7 @@ for (const b of [1, 2]) {
     // transcribed - the rule that governs every other cross-file cap here. If the
     // host ever sends longer names, this fails instead of the panel clipping them.
     // DIR + a relative suffix, because this checker imports fs but NOT path.
-    const HOST = fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8");
+    const HOST = readSource(`../../host/index.mjs`);
     const nm = HOST.match(/name:\s*deviceText\(await projectName\([^)]*\),\s*(\d+)\)/);
     chk(nm != null, "scrollback: the host's session-name cap is still findable");
     const chipX = PANEL[b][0] - 12 - c.HIST_CHIP_W_CHAT;
@@ -2200,6 +4663,8 @@ for (const b of [1, 2]) {
       "scrollback: the body face's advance is TEXT_ADV, so the lane is exact");
   }
 }
+checkKnownUsed();
+faultChildEpilogue();
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 shortfalls`);
 if (SELFTEST) {
   // EXIT 0 ONLY WHEN EVERY INJECTED FAULT IS CAUGHT BY THE ASSERTION THAT EXISTS
@@ -2226,7 +4691,9 @@ if (SELFTEST) {
   }
   if (missed) process.exit(1);
   console.log(`selftest ok - ${WANT.length} injected faults, ${WANT.length} caught by name (${fail} failure(s) in total)`);
-  process.exit(0);
+  // ...and the SOURCE half, which perturbed constants cannot reach.
+  console.log("\n--selftest: source faults (each re-execs this checker and must FAIL BY NAME)");
+  process.exit(sweepSourceFaults(import.meta.url, SOURCE_FAULTS) ? 0 : 1);
 }
 if (fail) process.exit(1);
 console.log("all settings / keyboard / reader assertions pass on both boards");

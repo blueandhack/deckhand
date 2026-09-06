@@ -46,8 +46,14 @@ stall or deadlock every Codex prompt. That's also why typing isn't offered on Co
 
 A session sitting at **READY** can also be sent a typed message: open its detail
 screen and tap **TYPE** in the header. Be clear about what SEND does — with the
-default delivery it **copies the text to your Mac and notifies you to paste it**,
-because there is no way to inject a prompt into a live interactive session. Set
+default delivery it **posts the text into that live session**, where it arrives
+attributed to a peer session rather than to your own typing; if delivery cannot be
+confirmed it falls back to copying the text to your Mac with a notification to paste
+it, and the host log names the reason. (Until 2026-09-05 the clipboard was the only
+option, "because there is no way to inject a prompt into a live interactive session" —
+that turned out to be false; see
+[`docs/reference/audio-and-voice.md`](../reference/audio-and-voice.md).)
+`DECKHAND_VOICE_DELIVERY=clipboard` forces the clipboard hand-off. Set
 `DECKHAND_VOICE_DELIVERY=dispatch` and it instead runs `claude -p --resume` in that
 session's directory, which is a second author on that conversation and halts on
 anything needing permission. The same switch governs dictation, so the mic and the

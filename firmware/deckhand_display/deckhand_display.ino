@@ -148,7 +148,9 @@ typedef esp_ble_gatts_cb_param_t BleCbParam;
 // header carries its own extern "C") plus Arduino's I2S wrapper. Both are inside
 // this guard rather than at the top of the file for the reason es8311.c's own
 // header comment spells out - es8311.h pulls in legacy driver/i2c.h, and board 1
-// has no I2C at all and is held byte-identical. Included HERE, in the
+// has no I2C at all. ("and is held byte-identical" used to close that clause; the
+// freeze is lifted - see CLAUDE.md - and the missing I2C was always the real
+// reason.) Included HERE, in the
 // folder-named .ino, because Arduino concatenates that one FIRST and audio.ino
 // (which is where toneTest() lives) alphabetically after it.
 #include "es8311.h"
@@ -367,6 +369,80 @@ bool remoteAnswerEnabled = true;
 char deviceName[20] = "Deckhand";
 String btMacAddress; // set once in setupBLE(), shown on the STATUS page
 
+// ---------- how a message SENT FROM THIS DEVICE lands on the Mac ----------
+// DECLARED HERE, ABOVE announceMsgPriority(), and not down with themeMode where
+// it would read more naturally. The .ino files are ONE translation unit and
+// Arduino's generated prototypes do not cover DATA, so a table used by a
+// function 60 lines up is simply undeclared - which is what it was.
+// The Mac posts a typed message or a dictation into the target session's own
+// messaging socket, and that frame carries a `priority`. Claude Code's own line
+// (disassembled, quoted in host/session-inbox.mjs) is
+//   e.priority==="now"||"next"||"later" ? e.priority : "next"
+// so an absent field already means NEXT, and NEXT is the default here too: NOW
+// INTERRUPTS the turn Claude is in the middle of, which is a thing to ask for
+// rather than to inherit.
+//
+// THIS IS THE FIRST DEVICE SETTING THAT REACHES THE HOST. Theme, brightness and
+// sound are all local - they change what this panel does and nothing else - so
+// there was no channel for a setting at all until now. It travels as MSGPRI, on
+// change AND on WHOAMI; see announceMsgPriority() for why those two and not the
+// boot burst.
+//
+// TWO TABLES, not one uppercased at the draw site. The segments draw LABELS and
+// the wire carries WORDS, and the two are allowed to differ (they do not today):
+// a toUpper() at the draw site would silently tie the panel's vocabulary to the
+// protocol's, so a protocol rename would change what a person reads.
+// `const int`, NOT const uint8_t like THEME_MODE_* next door, and the reason is
+// the checkers rather than the code: geom-common.mjs parses declarations with
+// /^const int (...);/m, so a uint8_t constant is invisible to every assertion
+// that reads it - and P4_HINT_Y is DERIVED from MSG_PRI_COUNT. It failed loudly
+// (NaN through four assertions) rather than quietly, which is the only reason
+// this is a note. The stored value stays a uint8_t: it is written with
+// putUChar and it is an index into two 3-entry tables.
+const int MSG_PRI_NOW = 0, MSG_PRI_NEXT = 1, MSG_PRI_LATER = 2;
+const int MSG_PRI_COUNT = 3;
+uint8_t msgPriority = MSG_PRI_NEXT;
+const char* const MSG_PRI_LABELS[MSG_PRI_COUNT] = {"NOW", "NEXT", "LATER"};
+const char* const MSG_PRI_WIRE[MSG_PRI_COUNT]   = {"now", "next", "later"};
+
+// THE ONE PLACE "HELLO <name> v2" IS EMITTED. There are four callers now -
+// setup(), the 15s boot burst in loop(), the legacy-pairing upgrade nudge in
+// handleLine(), and the WHOAMI command - and until this existed each printf'd
+// its own copy of the format string. That string is a WIRE CONTRACT the host
+// parses ("HELLO <name> [v2]", and the v2 is what selects the per-Mac PROVISION
+// form): four copies is four chances for one to drift, and a drifted copy does
+// not fail loudly - the host simply never learns that board's name, and an
+// unnamed link cannot authenticate an answer.
+//
+// USB ONLY, deliberately. The host honours HELLO over USB alone, because a BLE
+// peer must not be able to steer which device the host thinks it is talking to;
+// BLE already knows the name it connected to. So a WHOAMI that arrives over BLE
+// still answers down the CABLE - which is the link that lacked a name.
+void announceHello() {
+  Serial.printf("HELLO %s v2\n", deviceName); // v2 = multi-pairing PROVISION
+}
+
+// THE ONE PLACE "MSGPRI <word>" IS EMITTED, for the reason announceHello() gives
+// about its own line: the host parses this text, and a second emitter is a second
+// chance to drift from it.
+//
+// USB ONLY, like HELLO, and for a weaker reason than HELLO's: this is a
+// preference rather than an identity, so a BLE peer steering it would cost
+// nothing an attacker wants. It goes down the cable because Serial.printf is
+// where every other device->host report already goes, and because the host keys
+// this per DEVICE while a BLE link and a USB link to the same board resolve to
+// the same key anyway.
+//
+// NOT IN THE BOOT BURST, and that is the decision the WHOAMI note below turns on.
+// announceHello() has four callers and one of them is a 15-second burst that
+// repeats every 2 seconds; hanging a second line off it would put eight extra
+// MSGPRI lines on a link with an 11.5KB/s ceiling to say something that has not
+// changed. The three callers that matter are setup(), WHOAMI, and the tap that
+// changes it.
+void announceMsgPriority() {
+  Serial.printf("MSGPRI %s\n", MSG_PRI_WIRE[msgPriority < MSG_PRI_COUNT ? msgPriority : MSG_PRI_NEXT]);
+}
+
 
 
 
@@ -424,7 +500,6 @@ const uint8_t THEME_MODE_COUNT = 3;
 uint8_t themeMode = THEME_MODE_DARK;
 const long THEME_LIGHT_FROM = 7L * 3600;    // 07:00 local
 const long THEME_LIGHT_TO   = 19L * 3600;   // 19:00 local
-
 // Defined much further down, with the host payload handling. Declared here
 // explicitly rather than leaning on Arduino's generated prototypes - this file
 // has been bitten by their insertion order before (see the enum note above).
@@ -796,6 +871,105 @@ void uiButton(int x, int y, int w, int h, const char* label,
   tft.setTextDatum(TL_DATUM);
 }
 
+// A KEY, not a button. uiButton's R_MD is a card radius (see KB_KEY_R's own
+// comment in the board headers) and its 1px outline on COLOR_BG leaves the
+// interior reading as background, so the target you aim at is smaller than the
+// band kbTouch() tests. Inking the whole cap costs nothing: the COLOR_CARD fill
+// is already there - uiButton fills an unpressed control with it and THEN
+// strokes, so this is that same fill with the stroke dropped and the label
+// moved from COLOR_ACCENT to COLOR_VALUE. This adds no palette entry.
+//
+// FOUR ORANGE SPECKS AT EVERY PRESSED KEY'S CORNERS, and the flat fill below is
+// the whole fix. Reported from real use, then MEASURED on the glass: KBBUBBLE
+// arms a key, SCREENSHOT captures it, and the released key kept 16 stale pixels
+// - four per corner, RGB (74,52,16) and (57,44,24) against a COLOR_CARD of
+// (24,24,33), where a key that had never been pressed reads (8,8,8) and
+// (16,20,24) at the same coordinates.
+//
+// THE CAUSE IS NOT ANTI-ALIASING SPILLING OUTSIDE THE SHAPE - that was the first
+// hypothesis and it is wrong: PanelShim::fillSmoothRoundRect's corner sweep does
+// visit x-1 .. x+w and y-1 .. y+h, but the SDF's coverage is exactly 0 one pixel
+// out and blendPixel returns on `coverage <= 0.001f`, so nothing is ever written
+// outside the nominal w x h. The capture agrees - the pixel AT each corner is
+// pure background.
+//
+// The cause is that PanelShim IGNORES uiFillRound's `behind` argument (its
+// signature reads `uint16_t /*bg*/`) and blends the anti-aliased corners against
+// whatever is ALREADY in the shadow framebuffer. So a partial-coverage corner
+// pixel painted at 0.394 coverage in COLOR_ACCENT and then repainted at 0.394
+// coverage in COLOR_CARD keeps 0.394 * (1 - 0.394) = 24% of the accent. The
+// press is what leaves the residue, and unpressing cannot remove it because the
+// second blend has no way to know what was underneath. Board 1 does not have
+// this: real TFT_eSPI composites against the `bg` VALUE it is handed, so its
+// corners are recomputed from COLOR_BG every time. So the flat fill is GUARDED
+// TO BOARD 2 rather than shared: on board 1 it would buy nothing and cost a
+// blank-then-fill of every key on a panel that draws straight to the glass -
+// the clear-then-redraw flicker this repo's whole change-only discipline
+// exists to avoid. On board 2 nothing reaches the panel until a flush, so the
+// two writes are one composited result and there is no flash to see.
+//
+// Only the ONE statement that differs sits behind the #if, with no brace in
+// either arm - the shape CLAUDE.md requires so the brace-counting checkers can
+// still read this function.
+//
+// drawKbBubble() has always done exactly this, one line before its own
+// uiFillRound and for the same stated reason. This is that line, at the call
+// site that actually toggles its fill colour.
+void uiKeyCap(int x, int y, int w, int h, const char* label,
+              bool pressed = false, uint16_t behind = COLOR_BG) {
+  uint16_t bg = pressed ? COLOR_ACCENT : COLOR_CARD;
+#if !BOARD_USES_TFT_ESPI
+  tft.fillRect(x, y, w, h, behind);
+#endif
+  uiFillRound(x, y, w, h, KB_KEY_R, bg, behind);
+  setUIFont(T_TITLE);
+  tft.setTextColor(pressed ? COLOR_BG : COLOR_VALUE, bg);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(label, x + w / 2, y + h / 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// Proportional columns, which is how the destructive control stops being the
+// same size as SEND: fracs {1,2} makes SEND twice DISCARD's width. The band
+// (outX/outW) is wider than the button and is what the caller hit-tests.
+//
+// THE BAND AND THE BUTTON COME FROM HERE AND NOWHERE ELSE. drawKbActions() and
+// kbTouch() each computed `halfW` inline, in two functions - the bug class
+// kbRowX0()'s own comment names ("the hit test and the draw must both derive x
+// from the same place or a tap lands one key off"). The caller stores what this
+// writes and tests against that, so the drawn row and the tested row cannot
+// disagree.
+//
+// Each zone SWALLOWS THE GAP TO ITS RIGHT, so there is no dead strip between two
+// buttons - the same rule kbTouch() applies to KB_PITCH, where the 2px gap
+// belongs to the key on its left. The LAST column takes the remainder, so the
+// row closes on the lane exactly rather than leaving a 1-2px sliver at the edge
+// (69 + 8 + 139 = 216 on board 1, 96 + 8 + 192 = 296 here).
+//
+// A NULL label computes the band and draws NOTHING. The closed-window branch of
+// drawKbActions() owns SEND's column and writes its own wrapped message there;
+// without this it would have to paint over a SEND button that was drawn one
+// instruction earlier, which is a visible flash of a control that cannot work.
+int uiActionRow(int y, int band, int drawn, int dy, const char* const* labels,
+                const uint16_t* tints, const uint8_t* fills, const uint8_t* fracs,
+                int n, int* outX, int* outW) {
+  const int gap = 8, lane = tft.width() - CARD_X * 2;
+  int total = 0;
+  for (int i = 0; i < n; i++) total += fracs[i];
+  const int avail = lane - gap * (n - 1);
+  int x = CARD_X;
+  for (int i = 0; i < n; i++) {
+    const bool last = (i == n - 1);
+    const int w = last ? (CARD_X + lane - x) : (avail * fracs[i] / total);
+    if (labels[i]) uiButton(x, y + dy, w, drawn, labels[i], tints[i], fills[i], COLOR_BG);
+    outX[i] = x;
+    outW[i] = w + (last ? 0 : gap);
+    x += w + gap;
+  }
+  (void)band;   // the caller's own hit test owns the band's HEIGHT; see kbTouch()
+  return n;
+}
+
 // Boolean control. The LABEL changes with state as well as the fill, so it
 // reads correctly without colour.
 void uiToggle(int x, int y, int w, int h, const char* onLabel, const char* offLabel, bool on) {
@@ -976,6 +1150,32 @@ struct SessionInfo {
   // the RAM is opted out of.
   char askOptDesc[4][ASK_OPT_DESC_BYTES];
   uint8_t askOptCount;
+  // TOKENS LIFTED OUT OF THE ASK BY THE HOST (host/ask-chips.mjs), so this board
+  // only ever draws buttons and never re-derives what they say. The hardest thing
+  // to type here is exactly the token the question already printed: a path costs a
+  // page switch for every '/', a capital costs a shift. The Mac has already parsed
+  // the ask into its title and detail and already transliterated it to ASCII, so it
+  // is the natural place to pull them out.
+  //
+  // [50] IS CHIP_BYTES 48 PLUS A NUL, AND IT IS DELIBERATELY NOT askOpts[4][34]'s
+  // 32-char cap. 32 was chosen only to mirror that label cap - a tidy symmetry and
+  // nothing more - and it silently dropped exactly the absolute paths chips exist to
+  // supply: /Users/yujia/projects/deckhand/build is 36 bytes and this repo's own
+  // firmware/deckhand_display/keyboard.ino is 38, so the feature would have failed
+  // to chip a path in its own home repo.
+  //
+  // DRAM, stated the way ASK_OPT_DESC_BYTES' cap is: 4 x 50 x MAX_SESSIONS(6) =
+  // 1,200 bytes (816 at the 32-byte cap), against this board's ~26KB of free heap
+  // after the BLE stack - 4.5% of it, up from 3.1%. BOTH boards pay it, unlike
+  // askOptDesc: board 1 draws the same detail card and the same reply panel.
+  //
+  // DENSE AND COUNTED. askChipCount says how many slots are live, no slot at or
+  // past it is ever read, and a chip that arrived empty is not counted at all - a
+  // button with no label is worse than one fewer button. The host omits `chips`
+  // entirely when it extracted none, so a host too old to send the field leaves the
+  // count at 0 and this board behaves exactly as it did before.
+  char askChips[4][50];
+  uint8_t askChipCount;
   // May WE decide this prompt? Per-prompt, not global: it records whether the
   // hook actually blocked waiting for us when the prompt was raised. Flipping
   // the Mac's toggle mid-prompt therefore can't strand this screen - showing
@@ -1037,12 +1237,30 @@ int hiddenAskingCount = 0;
 // Per-row render caches: a row only redraws when its own signature changes,
 // so one session flipping status doesn't flash the whole list. The duration
 // field ticks on its own cache, independent of the rest of the row.
-// 176, not 160: the signature now carries dispMacTag() on top of name|status|sub|title.
-// Worst case name(23)+status(9)+sub(35)+title(43)+tag(7)+4 separators+NUL = 122, so 176
-// leaves real headroom - but the reason the tag is here at all is identity, not length:
+// SESSION_ROW_SIG_LEN, not a literal, and 368 on both boards today - the header
+// carries the derivation and the reason for the margin. The signature carries
+// dispMacTag() on top of name|status|sub|title, and the reason the tag is here at
+// all is identity, not length:
 // two sessions with the same name|status|sub|title at the same display position on
 // DIFFERENT Macs would otherwise never repaint, and the row would keep showing whichever
 // Mac's tag was drawn first rather than the one it now actually belongs to.
+// THE MARGIN EVERY SIGNATURE CACHE MUST KEEP, in one place because both of them
+// failed the same way and neither noticed. A signature is built by appending
+// guarded terms - `if (used + n < outSize)` on the detail card, `if (used + 2 <
+// sizeof(sig))` on the row - so a cache that is nearly full does not OVERFLOW when
+// the next term is added: the term is SILENTLY DROPPED, and a signature missing a
+// term is a card that never repaints when that term changes. There is no symptom
+// on the glass except stale text, which reads as a data problem rather than as a
+// cache one.
+//
+// 64 is the step detailSigCache was widened by (384 -> 448) when a review found it
+// three bytes from that edge, and rowSigCache with it (304 -> 368, six bytes from
+// the same edge). It is one more term of every kind these signatures carry except
+// a full prompt, and it costs 64 bytes here per copy. sessions-geom-check.mjs
+// asserts BOTH caches against their own re-derived worst case PLUS this number and
+// prints the headroom, so "it still fits" is measured rather than assumed - and
+// reverting either widening now fails by name instead of passing in silence.
+const int SESSION_SIG_MARGIN = 64;
 char rowSigCache[MAX_SESSIONS][SESSION_ROW_SIG_LEN]; // sized per board - see the header
 char rowDurCache[MAX_SESSIONS][8];
 char overflowCache[32] = "";
@@ -1063,15 +1281,22 @@ char detailId[16] = "";
 // plus 10 "|" separators between those 11 fields = 338; plus the msgOffered flag
 // "|%c" (2) = 340; plus dispMacTag() "|%s" (up to 7 chars, so 8) = 348; plus the
 // icon id "|%d" (id is -1..15, so up to 2 digits, plus the separator = 3) = 351;
-// plus, ON BOARD 2 ONLY, the agent "|%s" (agent[4] holds 3, so 4) = 355. +1 for the
-// NUL terminator = 356-byte worst case, so 384 keeps 28 bytes of headroom - re-derive
-// this comment again the next time a field is added, the same way this one had to be.
-// (sessions-geom-check.mjs derives the same sum independently and reports 363,
-// because it budgets startSec as a full %ld rather than the 5 digits a
-// seconds-since-midnight value can actually reach - deliberately the more
-// conservative of the two.) The agent joined for board 2 because §7's band draws
-// the agent's MARK and the AGENT column that used to spell it out in text is gone;
-// board 1 still draws that column and is held byte-identical, so it does not sign it.
+// plus the agent "|%s" (agent[4] holds 3, so 4) = 355. +1 for the NUL terminator =
+// 356, which is what 384 was chosen against.
+//
+// THAT 356 IS A HISTORICAL FIGURE AND MUST NOT BE BUDGETED AGAINST - the live
+// numbers are the checker's 372 (board 1) and 381 (board 2), which is why the cache
+// is 448 and not 384 (see the paragraph below). Two terms have joined since: the
+// option-description hash and the chip hash.
+//
+// AND THE AGENT IS SIGNED ON BOTH BOARDS. This paragraph used to say "ON BOARD 2
+// ONLY ... board 1 still draws that column and is held byte-identical, so it does
+// not sign it". Corrected rather than deleted, because it is a claim a reader may
+// already have budgeted against: buildDetailSignature appends the agent UNGUARDED
+// on both boards and says at length why (sessions.ino), §7's band draws the agent's
+// MARK on both, the AGENT column that used to spell it out in text is gone from
+// both, and this branch's binary moves on purpose. A reader taking 356 as the
+// board-2-only worst case budgets 25 bytes that are not there.
 //
 // drawIfChanged-style comparisons only look at
 // cacheSize bytes, so a cache shorter than the string silently stops noticing
@@ -1083,7 +1308,20 @@ char detailId[16] = "";
 // session already on screen. The icon id joins it for the same reason once
 // more: an icon changing (or a link's icon appearing/disappearing) changes
 // nothing else that this signature already tracks.
-char detailSigCache[384] = "";
+// 448, NOT 384, AND THE THREE BYTES IT HAD LEFT ARE WHY. At 384 this held its
+// 381-byte worst case on board 2 with THREE bytes of headroom, and every term
+// appended below is guarded by `if (used + n < outSize)` - so the next term does
+// not overflow, it is SILENTLY DROPPED, and a signature missing a term is a card
+// that never repaints when that term changes. That is the silent-truncation
+// failure mode this whole discipline exists to prevent, three bytes away, on a
+// signature that has gained a term in each of the last three tasks (the agent,
+// the option-description hash, the chip hash). 448 = 384 + 64 leaves room for
+// several more `|%08lx` hash terms plus slack; it costs 64 bytes of DRAM here and
+// 64 on the stack in renderSessionDetail, which sizes its scratch from
+// sizeof(detailSigCache) rather than guessing. sessions-geom-check.mjs asserts
+// the worst case against whatever this says and PRINTS the headroom, so the
+// number is checked rather than trusted.
+char detailSigCache[448] = "";
 // 28, not 16: this now holds "for 12m - 14:31" padded to 22, and drawIfChanged compares
 // only the first cacheSize bytes. At 16 the trailing clock fell outside the comparison
 // entirely, so the time would silently freeze while the duration beside it kept ticking.
@@ -1107,7 +1345,7 @@ int readerPage = 0;
 
 // EMOJITEST's grid, the only way to get all 16 icons onto the glass without a
 // person standing at the device tapping through settings - same reason TAB and
-// PAGE exist. A full-screen surface, so it joins octoActive/readerActive/kbActive
+// PAGE exist. A full-screen surface, so it joins octoActive/readerActive/composeActive
 // in the touch dispatch and the periodic-repaint guards.
 bool emojiTestActive = false;
 
@@ -1116,7 +1354,7 @@ bool emojiTestActive = false;
 // own code because the Arduino build concatenates these files in one order and a
 // global used above its own declaration does not compile - handleTouch, handleLine
 // and loop() all sit in this file and all three have to know the panel owns the
-// glass. It joins octoActive/readerActive/kbActive in exactly those three guards.
+// glass. It joins octoActive/readerActive/composeActive in exactly those three guards.
 //
 // The panel and the WINDOW are one lifetime, enforced from THIS side: whatever
 // shuts the window - the 120s timeout, a commit, a bad proof, the Mac cancelling,
@@ -1128,18 +1366,41 @@ bool emojiTestActive = false;
 bool pairPanelActive = false;
 #endif
 
-// ---- Keyboard state ----
-// One keyboard at a time, so this is global rather than per-session: it is a
+// ---- The compose surface's state ----
+// ONE SURFACE AT A TIME, so this is global rather than per-session: it is a
 // surface, not a property of a row. kbPid pins it to the prompt it was opened
 // for, so a payload that rewrites the session list cannot redirect a typed answer.
-bool kbActive = false;
-char kbText[151];              // 150 bytes + NUL, matching the host's cap exactly
+//
+// composeActive WAS NAMED FOR THE KEYBOARD until Task 11, and the rename is the
+// whole of that task's risk. It stopped meaning "the keyboard is up" the moment
+// the reply panel landed - it means "compose is up", on ONE OF TWO SCREENS, and
+// a flag whose name says one screen while it gates both is exactly how a screen
+// and its touch router end up disagreeing. (The old name is not written here:
+// settings-geom-check asserts it survives nowhere in this file, keyboard.ino or
+// compose.ino, and a comment carrying it would fail that for no code reason.) That disagreement is the bug closeCompose()'s own long comment
+// records, and it is SILENT: nothing repaints it away. One name for one state,
+// and composeScreen (below) says which screen, so there is no second name that
+// can drift out of step with this one.
+bool composeActive = false;
+// THE CAP, AND THE BUFFER IT SIZES, IN ONE PLACE. 150 must equal the host's cap
+// (ANSWER_TEXT_MAX_BYTES in host/voice-answer.mjs) - one limit, two sides. It
+// lives here rather than in keyboard.ino because the build concatenates this
+// file first, so compose.ino can name it too and nothing over there has to
+// write 150 again.
+const int KB_MAX_BYTES = 150;
+char kbText[KB_MAX_BYTES + 1];   // the cap plus its NUL
 int  kbLen = 0;
+// -1 means "pinned to the end" - the state after openCompose, and it must
+// survive until the user taps the text card so existing behaviour (typing
+// always appends, DEL always trims the last byte) is unchanged until then.
+// Once a tap sets it to a real byte offset, kbInsert/kbBackspace splice AT it
+// instead of at kbLen. Tasks 7, 10 and 11 read it under this exact name.
+int  kbCaret = -1;
 char kbPid[24] = "";
 // The Mac that raised the ask kbPid pins to. PIDs are per-machine, so kbPid
 // ALONE is not a unique key once two Macs are both ticking - two of them can
 // coincidentally raise the same pid, and without this the per-tick re-anchor
-// (see the kbActive block in handleLine()) would happily re-point a half-typed
+// (see the composeActive block in handleLine()) would happily re-point a half-typed
 // answer at whichever Mac's session matches askPid FIRST, signing text typed
 // for one prompt with the other Mac's key against the other Mac's nonce.
 int kbHostSlot = -1;
@@ -1155,7 +1416,7 @@ int kbPeekPage = -1;
 // Hold-to-repeat state for DEL. -1 = no key held.
 int kbRepeatRow = -1, kbRepeatCol = -1;
 unsigned long kbRepeatNext = 0;
-bool kbSymbols = false;        // ?123 page
+uint8_t kbPage = 0;             // 0 letters, 1 symbols, 2 the remaining symbols
 bool kbWindowClosed = false;   // the ask vanished while typing - keep the text
 int kbSessionIdx = -1;
 // Prompt mode: the keyboard is composing a MESSAGE to a READY session rather than
@@ -1163,6 +1424,56 @@ int kbSessionIdx = -1;
 // and no ask to peek - and it pins the session ID, because there is no askPid.
 bool kbMessageMode = false;
 char kbSessionId[16] = "";
+
+// ---- WHICH SCREEN OF THE COMPOSE SURFACE IS UP ----
+// composeActive says the surface is up; this says which of its two screens has
+// the glass. 0 is the reply panel - THE ROOT, the screen the surface opens on -
+// and 1 is the keyboard, the sheet behind TYPE... The draft (kbText/kbLen/
+// kbCaret) belongs to the SURFACE and not to either screen, which is what makes
+// the two compose rather than coexist: a chip tapped on the panel is editable on
+// the keyboard, and text typed there is on the panel's draft line when you come
+// back.
+//
+// A #define AND NOT A const int. Nothing here is behind an #if today, but
+// `#if` on a C++ const int is SILENTLY FALSE with no -Wall warning and has
+// shipped twice in this repo, so a screen identifier that might one day be
+// guarded is spelled the way that cannot fail quietly.
+#define COMPOSE_SCREEN_PANEL 0
+#define COMPOSE_SCREEN_KEYS  1
+// DEFINED IN compose.ino, forward-declared here for the same reason
+// scrollback.ino's globals are: the build concatenates this file FIRST and
+// compose.ino third, but handleTouch (in this file) dispatches on it. Functions
+// get a generated prototype from anywhere in the sketch; plain globals do not.
+extern uint8_t composeScreen;
+extern int  composeChipPage;
+extern bool composeSent;
+// The entry points this file uses, declared rather than left to the builder's
+// generated prototypes - they are the interface between the touch router here
+// and the screen over there, and NONE of them names SessionInfo, Theme, Usage,
+// HostPairing or ConfirmAction in its signature. A prototype that did would be
+// emitted ABOVE those declarations and would not compile.
+void drawCompose();
+bool composeTouch(int sx, int sy);
+void composeShowSentState(const char* text);
+void composeWindowClosed();
+// The recents ring's three entry points. The BUFFER itself is deliberately not
+// externed here: `extern char composeRecent[][KB_MAX_BYTES + 1]` would spell that
+// bound a second time, so the one place that prints the ring lives beside it in
+// compose.ino and this file asks for the report instead.
+void composeRemember(const char* text);
+void drawComposeRecents();
+void composeReportRecents(const char* why);
+// "The surface is up AND it is showing THIS screen", asked as one question so no
+// caller can test the screen without testing the surface. Every seam but
+// handleTouch's one dispatch goes through these.
+bool composeOnPanel();
+bool composeOnKeys();
+// openCompose/closeCompose live in keyboard.ino - the resets they own are that
+// file's globals (kbShiftMode, kbPage, kbMessageMode), and a global is only
+// visible to the files concatenated AFTER the one that defines it.
+void openCompose(int idx);
+void openComposeKeys(int idx);
+void closeCompose();
 
 // ---------- Session history ----------
 // Fetched ON DEMAND and PAGED FROM THE MAC. The device stores only the page it is showing:
@@ -1643,6 +1954,22 @@ const char* labelForStatus(const char* status) {
   if (strcmp(status, "asking") == 0) return "needs your input";
   return "waiting for you";
 }
+// THE SAME THREE STATES IN THE SHORT FORM - the words a tall row's status pill
+// already draws, factored out of drawSessionRow's two string literals rather than
+// invented, so this is not a fourth vocabulary to keep in step.
+//
+// IT EXISTS BECAUSE OF ONE MEASUREMENT. The status band's word lane is 141px on
+// board 1 (a 224px card, T_HEAD's 10px advance) against 199 on board 2, and
+// labelForStatus's longest phrase inks 160 there - over by 19, with no pad that
+// card can afford closing it (see SESSION_BAND_DUR_CHARS in board_e32r28t.h). So
+// bandStatusWord() shows the longest form its own lane holds, MEASURED: the full
+// phrase on board 2, these on board 1. Upper case here because that is the form
+// both readers want; labelForStatus is lower and the band uppercases it.
+const char* shortLabelForStatus(const char* status) {
+  if (strcmp(status, "working") == 0) return "WORKING";
+  if (strcmp(status, "asking") == 0) return "NEEDS INPUT";
+  return "READY";
+}
 
 // Shape is a second, color-independent cue, since color alone should never
 // be the only way a state is conveyed: solid dot = working, filled square =
@@ -1741,7 +2068,6 @@ void drawAgentSpinner(int cx, int cy, uint16_t bg, bool codex) {
   blit2bpp(codex ? CODEX_BITS[animPhase % CODEX_FRAMES] : SPARK_BITS[animPhase % SPARK_FRAMES],
            SPARK_SIZE, SPARK_STRIDE, cx, cy, bg, colorForStatus("working"));
 }
-#if !BOARD_USES_TFT_ESPI
 // The SAME art as drawAgentSpinner, with the two things the status band needs and
 // that function cannot give it: an arbitrary TINT (the band draws the mark
 // card-coloured ON the status colour, the inverse of every other site) and a
@@ -1750,11 +2076,14 @@ void drawAgentSpinner(int cx, int cy, uint16_t bg, bool codex) {
 // top, not its middle, so no site here carries a centring term.
 //
 // A SECOND three-line wrapper over blit2bpp rather than a refactor of the first,
-// and that is bought deliberately: drawAgentSpinner and its two call sites are
-// compiled into BOARD 1, whose binary is held byte-identical, so touching them
-// risks moving it for no functional gain. Two wrappers over one blitter is cheap
-// duplication against that. Guarded to board 2 for the same reason - an unused
-// non-static function can still be emitted into the image.
+// and that is bought deliberately: drawAgentSpinner takes a CENTRE and tints with
+// colorForStatus("working"), which is what its two row call sites want; this one
+// takes a TOP-LEFT origin and an arbitrary tint, which is what the band wants.
+// Two wrappers over one blitter is cheap duplication against a six-argument
+// function every caller has to read the defaults of. It USED to be guarded to
+// board 2, because board 1's binary was held byte-identical and an unused
+// non-static function can still be emitted into the image; board 1 draws the band
+// now, so the guard is gone and both boards call it.
 //
 // `animate` false is the rest pose (frame 0); true follows the shared animPhase,
 // so a band and a row indicator cycling at once stay in step by construction.
@@ -1764,7 +2093,6 @@ void drawAgentMark(int x, int y, bool codex, uint16_t fg, uint16_t bg, bool anim
   blit2bpp(art, SPARK_SIZE, SPARK_STRIDE,
            x + SPARK_SIZE / 2, y + SPARK_SIZE / 2, bg, fg);
 }
-#endif
 
 // ---------------------------------------------------------------------------
 // The standalone screen: what the device shows before the host has ever spoken.
@@ -2057,7 +2385,7 @@ extern bool octoActive;
 // beside drawWaitingScreen() because it needs the octoActive declaration above.
 bool waitingScreenVisible() {
   return !everReceived && !isAsleep && !octoActive && !showingDetail &&
-         !readerActive && !kbActive && currentTab == TAB_USAGE;
+         !readerActive && !composeActive && currentTab == TAB_USAGE;
 }
 
 // The wheel's own timer. Like the working spinner this is a small blit rather
@@ -2098,15 +2426,15 @@ bool fabPressed = false;           // the press currently down started on the bu
 // content area at all. Chrome that blinks in and out reads as a glitch, so the
 // only things that hide it are the states where the bar itself is gone.
 bool fabVisible() {
-  // kbActive joins isAsleep/octoActive rather than being handled by touch-order
+  // composeActive joins isAsleep/octoActive rather than being handled by touch-order
   // alone: drawKeyboard() fillScreens over the slot, so the button is already
   // invisible the moment the keyboard opens, but fabHit() only checks THIS
   // function - without this line it kept claiming taps in that corner (the
   // keyboard's countdown sits right under the old slot), silently starting a
   // mic capture and, on release, forceFullRepaint()ing a tab over the keyboard
-  // while kbActive stayed true. Same invariant isAsleep/octoActive already
+  // while composeActive stayed true. Same invariant isAsleep/octoActive already
   // rely on: fabVisible() means "actually visible AND tappable", not just drawn.
-  if (isAsleep || octoActive || kbActive) return false;
+  if (isAsleep || octoActive || composeActive) return false;
 #if !BOARD_HAS_MIC
   // No capture path on this board, so no button. BOARD_HAS_MIC describes the
   // SOFTWARE, not the hardware: board 2 has an ES8311 I2S codec with a real mic
@@ -2211,7 +2539,7 @@ void tickAutoTheme() {
   // someone is in the middle of comparing against their Mac.
   if (pairPanelActive) return;
 #endif
-  if (isAsleep || octoActive || readerActive || histActive || showingDetail || voiceCardActive || kbActive || emojiTestActive) return;
+  if (isAsleep || octoActive || readerActive || histActive || showingDetail || voiceCardActive || composeActive || emojiTestActive) return;
   static unsigned long lastCheck = 0;
   if (lastCheck && millis() - lastCheck < 30000) return;
   lastCheck = millis();
@@ -2633,9 +2961,19 @@ unsigned long lastPulseMs = 0;
 // two different things and conflating them has already stranded a saving on this
 // board once (see savingsSync). Every path that paints a band goes through that
 // one function, so the record cannot drift from the panel.
+//
+// SHARED, not board 2's: drawSessionBand writes it on both boards and
+// drawBandMarkAt reads it back as the background for the mark's 32x32 blit. On
+// board 1 it can only ever hold the flat status colour (there is no fade and no
+// breath there), which is exactly why it is still a record rather than a
+// recomputation - a second copy of "what colour is that band" is the one property
+// this file has already paid for getting wrong.
+#endif
 uint16_t bandFillShown = 0;
+#if !BOARD_USES_TFT_ESPI
 uint32_t pulseComposeUs = 0, pulseFlushUs = 0, pulseWorstUs = 0;
 uint16_t pulseFrameCount = 0;
+#endif
 // ---------- The band card's MEASURED height ----------
 // THE CARD IS AS TALL AS WHAT IT DRAWS, and these two are the measurement that
 // makes that true. The ladder's leftover is only the card's CEILING; the height
@@ -2658,7 +2996,6 @@ uint16_t pulseFrameCount = 0;
 int expCardH = 0;        // 0 = no card, or not measured yet
 int expCardPrompt = 0;   // prompt lines this card's height paid for
 int expHCache = 0;       // the height the list was last laid out at
-#endif
 
 // Kept as the "force a full repaint" entry point (tab switch, closing the
 // detail screen): invalidating the count cache makes renderSessionsList
@@ -2681,7 +3018,7 @@ void tickWorkingSpinner() {
   // onto the pairing code at the list's own coordinates.
   if (pairPanelActive) return;
 #endif
-  if (isAsleep || octoActive || showingDetail || readerActive || histActive || kbActive || emojiTestActive) return;
+  if (isAsleep || octoActive || showingDetail || readerActive || histActive || composeActive || emojiTestActive) return;
   if (currentTab != TAB_SESSIONS || sessionCount == 0) return;
   if (millis() - lastAnimMs < ANIM_INTERVAL_MS) return;
   lastAnimMs = millis();
@@ -2695,7 +3032,6 @@ void tickWorkingSpinner() {
     // Same two helpers as the draw: the first row's height can differ from the
     // rest, and an animation redrawing at the old y four times a second is exactly
     // how the last fix to this indicator's position was undone once.
-#if !BOARD_USES_TFT_ESPI
     // The band card carries its agent mark IN THE BAND, so this row has no
     // indicator of its own to advance - blitting one here would put a second
     // spark in the card's name band, 44px below the mark it duplicates. The
@@ -2706,7 +3042,6 @@ void tickWorkingSpinner() {
     // tickSessionAnim so it lands on the SAME animPhase as every other row and
     // rides the trailing flush below.
     if (sessionRowExpanded(pos)) { drawBandMark(pos); continue; }
-#endif
     int y = sessionRowYAt(pos);
     int rowH = sessionRowHAt(pos);
     int dotCy = rowH >= SESSION_LARGE_MIN_H ? y + SESSION_DOT_DY : y + rowH / 2;
@@ -2735,32 +3070,28 @@ const int DETAIL_CARD_Y = CONTENT_Y + DETAIL_CARD_DY;
 // treatment the session row's offsets already get, and for the identical reason: a
 // literal 13 or 26 left in drawSessionDetail laid board 2's 16px lines and 24px
 // name band out on Cozette's spacing. Every value below equals the literal it
-// replaces when DETAIL_AIR is 0 and the ink heights are 26/13, which is what keeps
-// board 1's binary byte-identical.
+// replaces when DETAIL_AIR is 0 and the ink heights are 26/13 - which is what USED
+// to keep board 1's binary byte-identical. Board 1's DETAIL_AIR is 5 now (924cecc
+// gave it the band card and derived the leading budget), so that identity no longer
+// holds and the freeze it served is lifted; the derivation is kept because it is
+// still the honest way to express one set of steps for two type scales.
 //
-// PILL_H is drawStatusPill's own height, a per-board named constant in the board
-// header rather than the literal 18 that used to sit here - it had four copies
-// (twice in drawStatusPill, once here, once TRANSCRIBED into
-// sessions-geom-check.mjs), so raising the pill at the draw sites left all three
-// checkers passing while the border-clearance assertion they exist for was false.
-// The checker parses the name now. NOTE that SESSION_PILL_UP_T / SESSION_PILL_UP
-// above are pill-height-dependent too - they are PILL_H plus a bottom pad plus the
-// 2px border - and are deliberately NOT re-expressed against it: raising PILL_H
-// alone grows the pill DOWNWARD into that border, and the checker failing by name
-// on "pill ends +N clear of the border" is how the next person finds out they owe
-// those two an adjustment as well.
-const int DETAIL_PAD_Y       = 6 + DETAIL_AIR;                  // card top -> name
+// FOUR OF THESE ARE GONE, and they are named here because a reader looking for
+// them should find out why rather than that they were tidied away:
+//   DETAIL_PAD_Y       card top -> name. The BAND replaces it on both boards now.
+//   DETAIL_PILL_STEP   pill -> rule. There is no pill on either card.
+//   DETAIL_COL_LBL_STEP / DETAIL_COL_VAL_STEP  the two label+value column pairs,
+//                      which §7's one meta line replaced.
+// All four were still deriving correct numbers for ink nobody draws, and
+// geom-sweep.mjs listed all four as UNGUARDED-though-read the moment they went
+// dead - a constant no assertion can reach is the same defect as an assertion that
+// cannot fail.
 const int DETAIL_NAME_STEP   = DETAIL_NAME_H + DETAIL_AIR;      // name -> title
-const int DETAIL_TITLE_STEP  = DETAIL_LINE_H + 2 + DETAIL_AIR;  // title -> pill
-const int DETAIL_PILL_STEP   = PILL_H + 6 + DETAIL_AIR;         // pill -> rule
+const int DETAIL_TITLE_STEP  = DETAIL_LINE_H + 2 + DETAIL_AIR;  // title -> rule
 const int DETAIL_RULE_STEP   = 7 + DETAIL_AIR;                  // rule -> next label
 // A label and the value it names read as ONE block, so this step carries no air -
 // it is exactly one line of the label's own face.
 const int DETAIL_LBL_STEP    = DETAIL_LINE_H;
-// The two-column pairs are tighter than a full block: board 1's 12 and 18 are its
-// 13px line less one, and its 13px line plus five. Both keep their relationship.
-const int DETAIL_COL_LBL_STEP = DETAIL_LINE_H - 1;
-const int DETAIL_COL_VAL_STEP = DETAIL_LINE_H + 5 + DETAIL_AIR;
 // A wrapped text block of n lines, plus the 2px that has always separated it from
 // the rule below. DETAIL_TEXT_LINE_H is the line step the block is DRAWN at, which
 // is the board's ascent-or-cell judgement rather than a cell height - see the two
@@ -2871,10 +3202,10 @@ bool detailLooksLikeCode(const char* kind, const char* detail) {
 
 // Single-line value in font `fnt`, clipping the TAIL with ".." if it
 // overflows (model names / branches read left-to-right, so keep the start).
-// Where the status pill ended up this repaint. The duration ticks on its own cache every
-// second, so it has to know the row the (now variable) layout put the pill on - a fixed
-// offset would drift the moment a title or prompt appears above it.
-int detailPillY = 0;
+// `int detailPillY` USED TO BE HERE: the row the detail card's status pill landed
+// on, so the duration ticking beside it could follow a variable layout. §7 removed
+// that pill from both boards - the band at the head of the card carries the word and
+// the duration - so there is no pill to follow and nothing reads this.
 
 
 
@@ -2931,10 +3262,26 @@ const int VOICE_TEXT_LINES = 6;
 //   0 STATUS   - device connections, battery, pairing (read-only)
 //   1 CONTROLS - brightness, sleep-after, volume steppers + sound toggle
 //   2 ACTIONS  - calibrate touch, power off
+//   3 PAIRED MACS
+//   4 MESSAGES - how a message sent from here lands on the Mac
 #if !BOARD_SETTINGS_HOME
-const int SETTINGS_PAGES = 4;
+// FIVE, and the page it counts was ADDED rather than squeezed into one of the
+// four - board_e32r28t.h's P4 section carries the arithmetic showing none of them
+// had 40 spare rows. drawPager() reads this for its titles[] bound AND for its
+// dot count, and gotoSettingsPage() wraps on it, so the three stay in step from
+// one constant.
+const int SETTINGS_PAGES = 5;
+// ONE NAME FOR THE MESSAGES SURFACE ON BOTH BOARDS. Board 2 already has an id
+// for every group (SET_MESSAGES); board 1's pages are bare ordinals, and a bare 4
+// in a dispatch chain, a render chain, a touch chain and a "is it showing?" test
+// is four transcriptions of one fact. The alias means the three shared functions
+// below (drawMessagesPageStatic, renderMessagesPage, handleMessagesTouch) are
+// reached by the same expression on both boards.
+const int SETTINGS_PAGE_MESSAGES = 4;
+#else
+const int SETTINGS_PAGE_MESSAGES = SET_MESSAGES;
 #endif
-// On board 2 this carries SET_HOME plus five group ids instead (board_es3c35p.h),
+// On board 2 this carries SET_HOME plus six group ids instead (board_es3c35p.h),
 // and nothing outside settings.ino assumes the 0..3 range - SETTINGS_PAGES itself
 // is read only by drawPager() and gotoSettingsPage(), both of which board 2 does
 // not compile.
@@ -3063,6 +3410,31 @@ const int P3_LIST_Y = P3_ANY_Y + H_ROW + SP_1;
 const int P3_X_W    = 40;   // "forget" hit zone at the right edge (>= a fingertip)
 #endif
 
+// Page 4 / the MESSAGES group - how a message SENT FROM THIS DEVICE lands on the
+// Mac. ONE CHAIN FOR BOTH BOARDS, unlike pages 2 and 3, and that is worth saying
+// because those two split. They split because their CONTENT differs per board
+// (board 2's Actions grew captioned sections, its Pairing grew two-line cards);
+// this page holds the same caption, the same three uiListRows and the same hint
+// on both, so the only per-board facts are the four constants in the headers.
+// A split arm here would be two copies of one derivation and two chances to
+// drift.
+const int P4_CAP_Y   = PAGE_TOP + P4_TOP;
+const int P4_ROW_Y   = P4_CAP_Y + SET_CAP_STEP;
+const int P4_ROW_STEP = H_ROW + P4_ROW_GAP;
+// From the LAST row's bottom, not from P4_ROW_Y: the hint explains the block as a
+// whole and must sit under all of it. MSG_PRI_COUNT is the row count, so adding a
+// fourth option moves the hint instead of drawing it through the new row.
+const int P4_HINT_Y  = P4_ROW_Y + (MSG_PRI_COUNT - 1) * P4_ROW_STEP + H_ROW + P4_HINT_GAP;
+// The option label's lane, so the three phrases are MEASURED rather than counted.
+// uiListRow draws its label at x + SP_3 and its tag right-aligned at x + w -
+// SP_3, so the lane is CARD_W - 2*SP_3 minus the widest tag ("ON", 2 characters):
+//   board 1: 216 - 24 - 12 = 180px = 30 characters at TEXT_ADV 6
+//   board 2: 296 - 24 - 16 = 256px = 32 characters at TEXT_ADV 8
+// Board 1 is the binding one, so a phrase that fits there fits both. Here rather
+// than in the two headers because SP_3 is declared in this file, below board.h -
+// no board header can name it.
+const int P4_LABEL_CHARS = (CARD_W - 2 * SP_3 - 2 * TEXT_ADV) / TEXT_ADV;
+
 // Every consequential action confirms first. They all reach the same modal, so
 // the dialog is one component rather than one per action: it lives above the
 // page, swallows all other touches (including the pager) while it is up, and is
@@ -3165,6 +3537,12 @@ int p3LiveCache[MAX_HOSTS] = {-1, -1, -1, -1};
 int p3CountCache = -1;
 #endif
 int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
+// The MESSAGES page's three option rows. ONE cache for the whole block, not one
+// per row, because the three are a single mutually-exclusive control: exactly one
+// row is filled, so any change repaints all three and a per-row cache would be
+// three values that can only ever move together. Same shape as themeBtnCache next
+// door, and for the same reason.
+int msgPriBtnCache = -1;
 int stepGlyphCache[6] = {-1, -1, -1, -1, -1, -1}; // bright-/+, sleep-/+, vol-/+
 char brightPctCache[8] = "";
 int brightBarCache = -1;
@@ -3177,7 +3555,7 @@ char volValCache[8] = "";
 // discipline exists to prevent. HOME_SUB_BYTES is HOME_SUB_CHARS + NUL, and the
 // text is padded to HOME_SUB_CHARS so the opaque box is a constant width and a
 // shrinking summary cannot leave the tail of a longer one behind.
-char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", ""};
+char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", "", ""};
 // The Status summary's colour is cached beside its text and busts it, the guard
 // battRowColorCache documents. Today the two cannot disagree - the colour keys off
 // the same link count the row's leading phrase spells out, so a flip always
@@ -3405,6 +3783,24 @@ void drawEmojiTestScreen(const char* only) {
 }
 
 void switchTab(Tab newTab) {
+  // LEAVING THE ICON GRID CLEARS ITS FLAG, rather than painting over it. TAB used to
+  // do the latter: the new tab was drawn, emojiTestActive stayed true, and that flag
+  // gates BOTH the 5s payload absorb and the 1s local tick - so the device looked
+  // alive with a footer frozen from that moment on, recoverable only by a re-flash.
+  // The same shape pairPanelActive already has below, and for the same reason: a
+  // surface that comes down must take its flag with it or the two disagree about
+  // what is on the glass.
+  //
+  // ABOVE the same-tab early return, and that placement is the whole fix rather than
+  // a detail: "TAB 0" while the grid is up over TAB 0 is the case an operator reaches
+  // for first, and returning early would clear nothing at all. The repaint switchTab
+  // would otherwise have done is issued here instead, because the return below skips
+  // it. (forceFullRepaint() cannot land on the pairing panel from here: EMOJITEST
+  // refuses to open while pairPanelActive, so the two flags are never both set.)
+  if (emojiTestActive) {
+    emojiTestActive = false;
+    if (newTab == currentTab) forceFullRepaint();
+  }
   if (newTab == currentTab) return;
 #if BOARD_HAS_WIRELESS_PAIR
   // The presence guarantee is the window, so it must not outlive the screen
@@ -3499,13 +3895,29 @@ void handleTouch() {
   int sx, sy;
   bool touching = getTouchPoint(sx, sy);
 
-  // A finger still down has nothing left to do: the button acts on RELEASE.
-  if (touching && wasTouching) return;
-  // Released: if the press started on the record button, that was a tap on it.
+  // A finger still down: on every surface but the keyboard's key band there is
+  // nothing left to do, because the target acted on the press. On the key band a
+  // press only ARMED a candidate, so the held path has to re-sample and
+  // re-target - the same thing tickKbRepeat already does for DEL's hold, and the
+  // only way a 4.3mm key can be corrected by the finger that is covering it.
+  // Guarded on THE KEYBOARD SCREEN specifically - not on composeActive, which
+  // now covers the reply panel too. Nothing on the panel arms, so nothing there
+  // can slide or commit, and gating on the surface would have the panel paying
+  // for a re-target it can never use. (kbSlide/kbRelease are also safe on their
+  // own - one returns immediately with nothing armed and the other returns false
+  // - but "safe because the callee checks" is how the two ended up disagreeing.)
+  if (touching && wasTouching) {
+    if (composeOnKeys()) kbSlide(sx, sy);
+    return;
+  }
+  // Released: the keyboard's key band COMMITS here (kbRelease returns false when
+  // nothing was armed, which is every press that kept press-commit), and
+  // otherwise, if the press started on the record button, that was a tap on it.
   if (!touching && wasTouching) {
     wasTouching = false;
     const bool onFab = fabPressed;
     fabPressed = false;
+    if (composeOnKeys() && kbRelease()) { lastActivityMillis = millis(); return; }
     if (onFab) {
       drawFab(0);
       micStream(); // streams for as long as you talk; MICREC is the short fallback
@@ -3550,10 +3962,30 @@ void handleTouch() {
   // full-screen surfaces - before voiceCardActive, readerActive and
   // histActive, not after them - and consumes every tap. This used to run
   // after voiceCardActive, which let a dictation reporting back (drawn a
-  // couple hundred lines away in handleLine, with no kbActive check of its
+  // couple hundred lines away in handleLine, with no composeActive check of its
   // own) paint over an in-progress typed answer and then have every further
   // tap silently type into whatever the voice-card dismissal repainted.
-  if (kbActive) { kbTouch(sx, sy); lastActivityMillis = millis(); return; }
+  // kbArm() FIRST, and kbTouch only for what it declines. A press on a character
+  // key or CAP arms a candidate and draws the bubble; kbRelease() above commits
+  // it on the lift. Everything kbArm() declines - row 3, the action row, the
+  // card, the strip, the peek, and DEL - falls through to kbTouch and keeps
+  // press-commit, because every one of those targets already clears the ~7.1mm
+  // fingertip floor in both axes.
+  if (composeActive) {
+    // ONE SURFACE, TWO SCREENS, AND EXACTLY ONE DISPATCH ON WHICH. This `if` and
+    // the `composeScreen` inside it are the only place in the firmware that
+    // decides which screen a tap belongs to; every other seam asks
+    // composeOnKeys()/composeOnPanel() rather than reading the flag again. Two
+    // routers reading one flag is the same defect as two flags for one state.
+    //
+    // The reply panel takes the whole tap: every target on it clears TAP_MIN in
+    // both axes, so nothing there needs the arm-then-commit the 4.3mm key band
+    // needs, and press-commit is what the rest of the device already uses.
+    if (composeScreen == COMPOSE_SCREEN_PANEL) composeTouch(sx, sy);
+    else if (!kbArm(sx, sy)) kbTouch(sx, sy);
+    lastActivityMillis = millis();
+    return;
+  }
 
 #if BOARD_HAS_WIRELESS_PAIR
   // The pairing panel is a full-screen surface, so it is tested here with the rest
@@ -3655,22 +4087,15 @@ void handleTouch() {
   }
 
   if (currentTab == TAB_SESSIONS && sessionCount > 0 && sy >= SESSION_ROW_Y0) {
-#if BOARD_USES_TFT_ESPI
-    // Every row is the same height on this board, so one division answers it - and
-    // this is deliberately still the arithmetic it always was rather than the walk
-    // below, because this board's binary is held byte-identical across the port.
-    int slot = sessionRowH + SESSION_ROW_GAP;
-    int row = (sy - SESSION_ROW_Y0) / slot;
-    int offsetInSlot = (sy - SESSION_ROW_Y0) % slot;
-    if (row >= 0 && row < sessionCount && offsetInSlot < sessionRowH) openSessionDetail(sessionAt(row));
-#else
-    // The first row can be TALLER than the rest, so the uniform-slot division is
-    // wrong here by construction: it must consult the SAME helpers the layout and
-    // the draw use, or a tap lands on a different session from the one under the
-    // finger. A gap between rows returns -1 and is ignored rather than guessed.
+    // The first row can be TALLER than the rest, so the uniform-slot division this
+    // used to do on board 1 is wrong here by construction: it must consult the SAME
+    // helpers the layout and the draw use, or a tap lands on a different session
+    // from the one under the finger. A gap between rows returns -1 and is ignored
+    // rather than guessed. ONE walk on both boards now - board 1's arm was the
+    // division, kept while its binary was held byte-identical, and it would report
+    // the wrong row for every tap below a band card.
     int row = sessionRowAtY(sy);
     if (row >= 0) openSessionDetail(sessionAt(row));
-#endif
   }
 
   if (currentTab == TAB_SETTINGS) handleSettingsTouch(sx, sy);
@@ -3842,7 +4267,7 @@ void handleLine(const String& line) {
       static unsigned long lastUpgradeHello = 0;
       if (millis() - lastUpgradeHello > 5000) {
         lastUpgradeHello = millis();
-        Serial.printf("HELLO %s v2\n", deviceName);
+        announceHello();
       }
     }
     if (slot != activeHost) activeHost = slot;
@@ -4160,6 +4585,15 @@ void handleLine(const String& line) {
       info.askDetail[0] = '\0';
       for (int k = 0; k < 4; k++) info.askOptDesc[k][0] = '\0';
       info.askOptCount = 0;
+      // Reset every tick for exactly the reason askDetail is reset one line up: a
+      // chip left behind from the last time this slot held an ask would survive
+      // into a session that has no ask at all, and the reply panel would offer a
+      // token belonging to a prompt that is already answered. askChipCount gates
+      // every read, so it is the one that must be zeroed; the slots are blanked
+      // with it so nothing can read a stale label out from under a count that a
+      // later change forgot to keep in step.
+      info.askChipCount = 0;
+      for (int k = 0; k < 4; k++) info.askChips[k][0] = '\0';
       info.askAnswerable = remoteAnswerEnabled;
       info.askVoice = false;
       info.askVoiceText[0] = '\0';
@@ -4224,6 +4658,31 @@ void handleLine(const String& line) {
             // single-line, so unlike askDetail there is no '\n' to preserve.
             for (char* p = info.askOptDesc[k]; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
             k++;
+          }
+        }
+        // THE TAPPABLE TOKENS, walked exactly like the descriptions above and for
+        // the same two reasons: bounded by this buffer's own 4 slots rather than by
+        // anything on the wire, so a longer array cannot walk past it, and COUNTED,
+        // so nothing past askChipCount is ever read. Absent = a host too old to
+        // extract them, which leaves the count at 0 - the same "no chips" state as a
+        // prompt with no tappable token in it, and not an error to report.
+        JsonArray chips = ask["chips"].as<JsonArray>();
+        if (!chips.isNull()) {
+          for (JsonVariant ch : chips) {
+            if (info.askChipCount >= 4) break;
+            copyField(info.askChips[info.askChipCount], sizeof(info.askChips[0]), ch | "");
+            // Defence in depth, exactly as the title, detail and descriptions get
+            // above. The host transliterates and flattens control bytes now, but one
+            // that slipped through draws NOTHING AND ADVANCES NOTHING on this font,
+            // so the label would come out short with an invisible hole in it rather
+            // than with a visible replacement glyph. Single-line, so unlike
+            // askDetail there is no '\n' to preserve.
+            for (char* p = info.askChips[info.askChipCount]; *p; p++)
+              if ((uint8_t) *p < 0x20) *p = ' ';
+            // A chip that arrived empty is a button with no label. Don't count it -
+            // it would spend one of four scarce slots on a target that says nothing
+            // and types nothing. The slot is already "" and stays that way.
+            if (info.askChips[info.askChipCount][0]) info.askChipCount++;
           }
         }
       }
@@ -4339,7 +4798,7 @@ void handleLine(const String& line) {
   mergeUsage();
   reorderSessions();  // re-rank across both Macs before anything renders
 
-  // Record that a tick arrived BEFORE the kbActive guard below can return -
+  // Record that a tick arrived BEFORE the composeActive guard below can return -
   // the tick did arrive and the host is still live, only its RENDERING is
   // being absorbed while someone types, and the footer's "Xs ago" freshness
   // must not stall for the whole typing session (and read stale for another
@@ -4352,15 +4811,15 @@ void handleLine(const String& line) {
   // fully rebuilt for this tick, and BEFORE the voice-card raise, the
   // voiceConfirmGone close-and-repaint below, and the octoActive/histActive/
   // readerActive absorbs that follow - so nothing later in this function can
-  // paint over someone typing or leave showingDetail/kbActive disagreeing
+  // paint over someone typing or leave showingDetail/composeActive disagreeing
   // about what's on the glass. It used to sit after all of that (see the old
-  // kbActive block this replaced, further down where octoActive/histActive/
+  // composeActive block this replaced, further down where octoActive/histActive/
   // readerActive are still checked), which let a voice-card update - raised
   // unconditionally, ~250 lines above that old spot - paint over an
   // in-progress typed answer. Placed here, using THIS tick's sessions[] (not
   // last tick's), so the countdown still ticks and a closed window is still
   // detected the same poll it closes on - the only things this absorb needs.
-  if (kbActive) {
+  if (composeActive) {
     int idx = -1;
     for (int i = 0; i < sessionCount; i++) {
       // In message mode there is no askPid to match on, and LEAVING READY is what
@@ -4380,21 +4839,49 @@ void handleLine(const String& line) {
     }
     kbSessionIdx = idx;
     bool gone = (idx < 0);
-    if (gone != kbWindowClosed) { kbWindowClosed = gone; drawKbActions(); }
-    drawKbText();          // countdown ticks down
+    // The band is cleared on the TRANSITION, before the row is redrawn: the
+    // closed-window message fills KB_ACT_DRAWN exactly and the button that
+    // replaces it has rounded corners, so a few px of the old message's first
+    // line would otherwise survive inside a corner the fill does not reach.
+    // Only on the flip, never per keystroke - a clear-then-redraw of a live row
+    // is the flicker this firmware redraws by value to avoid.
+    if (gone != kbWindowClosed) {
+      kbWindowClosed = gone;
+      // WHICHEVER SCREEN OF THE COMPOSE SURFACE IS UP. composeActive covers both,
+      // and every repaint below is the KEYBOARD's - drawKbActions would paint its
+      // row over the panel's (same band, different controls), drawKbStrip would
+      // paint a strip the panel does not have across its prompt card, and
+      // drawKbText would paint the keyboard's text card over the panel's reply
+      // buttons every 5 seconds. The panel has its own transition, which also has
+      // to take its reply buttons off the glass - see composeWindowClosed().
+      if (composeOnPanel()) { composeWindowClosed(); return; }
+      tft.fillRect(CARD_X, KB_ACT_Y, tft.width() - CARD_X * 2, KB_ACT_H, COLOR_BG);
+      drawKbActions();
+      // AND THE PROMPT STRIP, on the same transition and for the same reason it
+      // is not redrawn on every tick: its text cannot change while the keyboard
+      // is up EXCEPT here, where kbSessionIdx has just gone to -1 and there is no
+      // longer an ask to read. Left alone it would keep showing the question
+      // while a tap on it silently did nothing, kbHasDetail() having gone false -
+      // a control still advertised after it stopped working. drawKbStrip() clears
+      // its band when there is no detail, so this both repaints and erases.
+      drawKbStrip();
+    }
+    // The countdown is the keyboard's meta row; the panel draws no countdown, so
+    // there is nothing on it that a tick changes and it is left alone.
+    if (composeOnKeys()) drawKbText();          // countdown ticks down
     return;
   }
 
   // Close the confirm screen rather than leaving a SEND button that can no
   // longer do anything - see voiceConfirmGone above. sessions[]/sessionCount
   // are fully rebuilt for this tick now, so this repaints a consistent list.
-  // (Now behind the kbActive guard above - this used to run whether or not
+  // (Now behind the composeActive guard above - this used to run whether or not
   // the keyboard was up, and it repaints straight over it.)
   if (voiceConfirmGone) closeSessionDetail();
 
   // Voice result. Raise the card only on a NEW exchange (host timestamp), so it
   // appears once and a later tick can't resurrect a card the user dismissed.
-  // Gated on !kbActive as defense in depth - kbActive already returned above,
+  // Gated on !composeActive as defense in depth - composeActive already returned above,
   // so this can't currently fire while typing, but a dictation reporting back
   // must never repaint over the keyboard regardless of how this function
   // gets reshuffled later.
@@ -4457,7 +4944,7 @@ void handleLine(const String& line) {
       // "COPIED - PASTE IT" label for it the whole time that the raise path could
       // never reach. Same class as the askerror/asksent omission above: a state
       // published by the host and surfaced nowhere.
-      if (!kbActive && seq > vSeqShown &&
+      if (!composeActive && seq > vSeqShown &&
           (!strcmp(voiceState, "sent") || !strcmp(voiceState, "done") ||
            !strcmp(voiceState, "memo") || !strcmp(voiceState, "clip") ||
            !strcmp(voiceState, "error") ||
@@ -4467,7 +4954,7 @@ void handleLine(const String& line) {
         showingDetail = false;   // the card owns the content area
         drawVoiceCard();
       }
-    } else if (voiceCardActive && !kbActive) {
+    } else if (voiceCardActive && !composeActive) {
       drawVoiceCard();           // same exchange, fresher reply text
     }
   }
@@ -5145,6 +5632,7 @@ void setup() {
   loadSleepTimeout();
   loadBeepEnabled();
   loadVolume();
+  loadMsgPriority();
   Serial.printf("BUILD %s %s\n", __DATE__, __TIME__); // confirms which binary is live
   loadHostPairings(); // remote-answer auth keys (one per paired Mac)
   lastActivityMillis = millis(); // don't start the sleep countdown from millis()==0
@@ -5153,7 +5641,11 @@ void setup() {
   // Announce our unique BLE name to the host over USB so it pins BLE to this
   // exact device. Opening the USB port resets the ESP32, so this boot-time
   // line reliably reaches a host that connects at any time.
-  Serial.printf("HELLO %s v2\n", deviceName); // v2 = multi-pairing PROVISION
+  announceHello();
+  // And the one setting the host needs from us. AFTER loadMsgPriority(), or this
+  // would announce the compiled-in default and the stored choice would only take
+  // effect at the next tap.
+  announceMsgPriority();
 
   drawWaitingScreen();
 }
@@ -5183,6 +5675,197 @@ uint32_t lastPayloadHash = 0;
 unsigned long lastPayloadMillis = 0;
 const unsigned long PAYLOAD_DEDUP_MS = 1000;
 
+// ---------- COMMANDS THIS BOARD DOES NOT HAVE ----------
+// EVERY REFUSAL MUST NAME ITS CAUSE - and until this table existed board 1 broke
+// that rule wholesale. Twenty-odd verbs sit inside `#if !BOARD_USES_TFT_ESPI` (or
+// behind a capability flag), so on board 1 the line fell through the whole
+// if/else-if chain into the JSON-payload branch, which silently discarded it.
+// Measured with both boards attached: `TEMP` produced four lines from board 2 and
+// NOTHING AT ALL from board 1, and from the Mac that is indistinguishable from
+// board 1 being wedged - which is exactly the confusion this project's own rule
+// exists to prevent.
+//
+// A TABLE WALKED ONCE AT THE END OF THE CHAIN, not eighteen hand-written `else if`
+// arms. Two reasons, and neither is tidiness: an arm per verb doubles the length of
+// the dispatch every reader has to scan past to find a real handler, and a table is
+// something an offline checker can PARSE - commands-check.mjs reads both this array
+// and the dispatch chain and asserts that every verb reachable on one board is
+// either handled or explicitly refused on the other.
+//
+// EACH ENTRY'S GUARD IS THE EXACT NEGATION OF ITS HANDLER'S, so the entry exists
+// precisely when the handler does not. That is the property commands-check.mjs
+// evaluates (it reads both board headers and works out which arms each board
+// takes), and it is why the guards below name the CAPABILITY FLAG wherever the
+// handler's does - BOARD_HISTORY_SCROLL, BOARD_HAS_WIRELESS_PAIR, BOARD_BLE_NIMBLE
+// - rather than the board. A future board that turns one of those on gets the
+// handler and loses the refusal in the same edit.
+//
+// The causes are long on purpose. "PERF is board 2 only" tells a reader nothing
+// they cannot see; naming the thing that is absent (the deferred flush, the codec,
+// the PSRAM transcript) tells them whether to go and add it, use a different
+// instrument, or stop. They go over the WIRE, never to the glass, so the ASCII-only
+// font range does not bound them - but they are ASCII anyway, since the host
+// transliterates everything device-bound and a non-ASCII byte here would only ever
+// arrive at the Mac mangled.
+struct UnavailableCommand { const char* verb; const char* cause; };
+
+static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
+#if BOARD_USES_TFT_ESPI
+  { "SHIMBENCH",
+    "it times a full-screen and a dirty-rect flush of the PSRAM shadow framebuffer. "
+    "This board is BOARD_USES_TFT_ESPI 1 and draws straight to the glass through real "
+    "TFT_eSPI, so there is no deferred flush to time." },
+  { "PERF",
+    "it reports PanelShim::perfReport()'s split of the flush path (the CPU-side gather "
+    "out of the PSRAM framebuffer, then the blocking drawBitmap) plus the three board-2 "
+    "session animations. This board draws straight to the glass, so there is no gather "
+    "to separate, and sessions.ino's xfade/pulse/shimmer are static inline stubs here." },
+  { "TEMP",
+    "it reads the ESP32-S3's internal die sensor. dieTempBegin()/dieTempRead() are behind "
+    "!BOARD_USES_TFT_ESPI because this board's plain ESP32 has no temperature_sensor "
+    "driver at all. Battery mV is on the SETTINGS status page and in POWERPROBE, which "
+    "both work here." },
+  { "INV",
+    "it toggles display inversion through PanelShim::invertColor(). This board's ILI9341 "
+    "is driven by real TFT_eSPI and its inversion is fixed by the init in "
+    "firmware/tft_setup/User_Setup.h, so there is no runtime transform to flip." },
+  { "SWAP",
+    "it flips the byte order the shadow framebuffer is pushed to the panel in "
+    "(panelSwapBytes, defaulting to BOARD_PANEL_SWAP_BYTES). This board has no shadow "
+    "framebuffer - TFT_eSPI writes each pixel straight out - so there is no byte order "
+    "of ours to swap." },
+  { "COLORTEST",
+    "it exists to settle whether the shadow framebuffer's byte order matches the panel's, "
+    "and this board has no shadow framebuffer, so that question cannot arise. Its palette "
+    "is checked offline instead: node firmware/deckhand_display/palette-check.mjs." },
+  { "AUDIOPROBE",
+    "it probes the ES8311 codec at 0x18 and reports the I2S pin map. This board has no "
+    "codec: the beeper is a bare GPIO square wave (BOARD_HAS_BEEPER 1, PIN_BEEPER) and the "
+    "mic is on an ADC pin. MICTEST prints this board's own DC bias and level." },
+  { "TONETEST",
+    "it configures the ES8311 over I2C and plays through it, once per amp-enable polarity. "
+    "This board has no codec and no amp-enable line - its beeper is driven directly from a "
+    "GPIO, and it sounds on the UI events that use it." },
+  { "TONELADDER",
+    "it is TONETEST's five-volume ladder for finding the audible floor of the ES8311's dB "
+    "volume scale. This board has no codec and no volume scale; its beeper is on or off." },
+  { "PANELSLEEP",
+    "the three blanked-state savings (PANELSLEEP, CPUSLOW, BLESLOW) are board 2's: "
+    "savingsSync()'s whole body is behind !BOARD_USES_TFT_ESPI. This board has no panel "
+    "sleep-out path of its own, no esp_pm CPU floor and no NimBLE connection interval to "
+    "slow. POWERPROBE works here and measures whatever state the board is in." },
+  { "CPUSLOW",
+    "see PANELSLEEP: savingsSync()'s body is behind !BOARD_USES_TFT_ESPI, so there is "
+    "nothing on this board for the toggle to apply." },
+  { "BLESLOW",
+    "see PANELSLEEP: savingsSync()'s body is behind !BOARD_USES_TFT_ESPI, so there is "
+    "nothing on this board for the toggle to apply." },
+  { "PULSE",
+    "it toggles the asking band's breathing animation, which is board 2's. Here "
+    "sessionPulseA() is the static inline stub that always returns 0 (sessions.ino), "
+    "because this board draws straight to the glass and has no deferred flush for a "
+    "timer-driven repaint to ride." },
+  { "READTEST",
+    "it is not compiled on this board (guard !BOARD_USES_TFT_ESPI) - and NOTHING HERE "
+    "PREVENTS IT: reader.ino is this board's own ask reader, and drawReader(), exitReader() "
+    "and readerActive all exist. It was left out while board 1's binary was held "
+    "byte-identical through the board-2 port. Reach the reader by tapping the chip in the "
+    "ask header; enabling the command is a one-line guard move." },
+#endif
+#if BOARD_USES_TFT_ESPI || !BOARD_HAS_WIRELESS_PAIR
+  { "PAIRVECTOR",
+    "it prints the wireless-pairing key derivation against a fixed X25519 vector. This "
+    "board is BOARD_HAS_WIRELESS_PAIR 0 and has no such derivation to check." },
+  { "PAIRREQ",
+    "wireless pairing is BOARD_HAS_WIRELESS_PAIR 0 on this board: there is no 120s window, "
+    "no pairing panel and no CONFIRM here. Pair it with PROVISION over USB instead." },
+  { "PAIROK",
+    "wireless pairing is BOARD_HAS_WIRELESS_PAIR 0 on this board; see PAIRREQ. Pair it with "
+    "PROVISION over USB." },
+  { "PAIRCANCEL",
+    "wireless pairing is BOARD_HAS_WIRELESS_PAIR 0 on this board, so there is no window "
+    "open to cancel; see PAIRREQ." },
+#endif
+#if BOARD_USES_TFT_ESPI || !BOARD_BLE_NIMBLE
+  { "BLEMTU",
+    "it reports each live link's negotiated ATT MTU through NimBLE's ble_att_mtu(). This "
+    "board is BOARD_BLE_NIMBLE 0 and runs Bluedroid, which this firmware never asks for an "
+    "MTU - so there is no number to report rather than a number it declines to give." },
+#endif
+#if BOARD_USES_TFT_ESPI || !BOARD_HISTORY_SCROLL
+  { "SCROLLTO",
+    "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board: scrollback.ino "
+    "compiles to nothing here and there is no PSRAM to hold a transcript. This board's "
+    "history is reader.ino's paged reader, reached from the session detail card." },
+  { "SCROLLOPEN",
+    "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board; see SCROLLTO." },
+  { "SCROLLCLOSE",
+    "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board, so nothing is open "
+    "to close; see SCROLLTO." },
+  { "SCROLLFETCH",
+    "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board, so there is nothing "
+    "to fetch a transcript into; see SCROLLTO." },
+#endif
+#if !BOARD_HISTORY_SCROLL
+  // SCROLLPERF's own guard is BOARD_HISTORY_SCROLL ALONE, where its four neighbours
+  // read `!BOARD_USES_TFT_ESPI && BOARD_HISTORY_SCROLL`. CHECKED, NOT ASSUMED: that
+  // is deliberate and SCROLLPERF's is the honest one. Its body touches scrollActive,
+  // scrollY, scrollMaxY(), scrollDrawBody() and CODE_LINE_H - every one of them
+  // declared inside scrollback.ino's single `#if BOARD_HISTORY_SCROLL` - and nothing
+  // in it depends on the board. The neighbours' extra term is redundant rather than
+  // wrong (no board declares BOARD_HISTORY_SCROLL 1 with BOARD_USES_TFT_ESPI 1), and
+  // it is left alone: narrowing four working guards to match would move board 1's
+  // binary for no behaviour. This entry mirrors the guard SCROLLPERF actually has.
+  { "SCROLLPERF",
+    "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board, so there are no "
+    "scroll frames to time; see SCROLLTO." },
+#endif
+  // TERMINATOR, and it is what makes an all-#if'd array legal: on board 2 every
+  // block above is skipped and `UnavailableCommand[] = {}` would not compile.
+  // The walk below stops on the null verb rather than on a sizeof() count, so
+  // the two can never disagree.
+  { nullptr, nullptr },
+};
+
+// True when the line was a command this board does not have, and a refusal naming
+// the cause has been sent. Walked ONLY from the final `else` of the dispatch chain,
+// so by construction it can never shadow a real handler - a verb that is handled
+// here never reaches it.
+//
+// Matched as a WHOLE VERB (end of line, or a space) rather than as a prefix, because
+// the chain itself uses all three of `buf == "X"`, `buf.startsWith("X")` and
+// `buf.startsWith("X ")` and one table has to cover them. A prefix match would also
+// make SCROLLTO shadow nothing today but collide with any future SCROLLTOP.
+//
+// DEDUPED, the same way KBTEST's refusal is and for the same measured reason: the
+// host writes every trigger-file line to EVERY live transport, so a board on a cable
+// and a radio at once sees the identical line twice within milliseconds. One
+// POWERPROBE once produced four refusal lines that way. A refusal carries no state
+// of its own to make the second copy a no-op, so the window is kept here.
+//
+// sendLineToHost, not Serial.println: a refusal is most needed when someone is
+// driving the board over BLE with the cable out, which is exactly when a
+// Serial.println would go nowhere and log nothing.
+bool refuseUnavailableCommand(const String& line) {
+  for (const UnavailableCommand* u = UNAVAILABLE_COMMANDS; u->verb != nullptr; u++) {
+    const size_t n = strlen(u->verb);
+    if (strncmp(line.c_str(), u->verb, n) != 0) continue;
+    const char after = line.c_str()[n];
+    if (after != '\0' && after != ' ') continue;
+    static const char* lastVerb = nullptr;
+    static unsigned long lastVerbMs = 0;
+    const unsigned long nowMs = millis();
+    if (!(lastVerb == u->verb && nowMs - lastVerbMs < 2000)) {
+      lastVerb = u->verb;
+      lastVerbMs = nowMs;
+      String out = String(u->verb) + " refused on " + BOARD_NAME + ": " + u->cause;
+      sendLineToHost(out.c_str());
+    }
+    return true;
+  }
+  return false;
+}
+
 void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool fromUsb) {
   // Consumed once inside handleLine(), for the same tick's hostId. Set here
   // rather than adding a parameter to handleLine(const String&), whose fixed
@@ -5193,6 +5876,75 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     applyScreenRotation(); // calibration runs unflipped - restore the user's choice
     everReceived = false;
     drawWaitingScreen();
+  } else if (buf == "WHOAMI") {
+    // "Which board is on this cable?" - the host asks when a USB link is still
+    // anonymous after HELLO_GRACE_MS. HELLO is a BOOT-ONLY 15s burst, so a host
+    // that attached to an already-running board (its own restart, a watchdog
+    // relaunch, a cable replugged after the burst) never learned that link's
+    // name - and an unnamed link cannot be attributed to a paired device, so
+    // every ANSWER down it is refused as coming from an unknown device. Before
+    // this the host's only way to find out was to REBOOT the board into a fresh
+    // burst, which costs the user an open answer window or an in-flight capture,
+    // and which is not even available on board 2 (there the RTS sequence is
+    // esptool's reset and it drops the USB device outright).
+    //
+    // Reuses announceHello() rather than printing its own line: the host parses
+    // this text, and a second emitter is a second chance to drift from it.
+    //
+    // NO DUPLICATE GUARD, and that is a decision rather than an oversight. The
+    // host delivers every trigger-file command over BOTH transports, so a cabled
+    // board 2 sees this twice within milliseconds - the shape that once made one
+    // POWERPROBE print four refusal lines, and that KBTEST's refusal dedupe and
+    // POWERPROBE's probeActive exist for. But those are a REFUSAL and a
+    // MEASUREMENT; this is an idempotent ANNOUNCEMENT. The host's HELLO arm logs
+    // and re-pins only on a CHANGE, so the second copy costs one short line and
+    // alters nothing, while a guard would be state to keep correct for no gain -
+    // and would silence a genuine second ask, which is exactly the case that
+    // matters (a link that closed and reopened asks again, and must be answered).
+    announceHello();
+    // AND THE SETTING, on the same reply, because WHOAMI exists for exactly this
+    // hole. HELLO is a boot-only burst, so a host that attached to an
+    // already-running board never heard it - and MSGPRI has the same shape: it is
+    // sent at boot and on change, so a host that restarted mid-run would carry no
+    // priority for this board until the user happened to touch the control. The
+    // host asks WHOAMI on every attach where a link is anonymous, which is every
+    // host restart, so answering here closes the hole with no new mechanism and
+    // no new timer. Idempotent for the same reason the HELLO above is: the host's
+    // arm logs only on a CHANGE, so the duplicate a cabled board receives costs
+    // one short line and alters nothing.
+    announceMsgPriority();
+  } else if (buf == "MSGPRI" || buf.startsWith("MSGPRI ")) {
+    // The instrument for the setting the SETTINGS tab owns, so a capture is not
+    // the only way to see it and a change can be driven without a fingertip.
+    //   MSGPRI                  report the current choice
+    //   MSGPRI now|next|later   set it
+    // Bare MSGPRI reports through announceMsgPriority() rather than printing its
+    // own line: one emitter, one format, and the host's parser only ever has one
+    // shape to know.
+    String arg = buf.length() > 7 ? buf.substring(7) : String("");
+    arg.trim();
+    if (arg.length() == 0) {
+      announceMsgPriority();
+    } else {
+      int want = -1;
+      for (int i = 0; i < MSG_PRI_COUNT; i++) if (arg == MSG_PRI_WIRE[i]) want = i;
+      if (want < 0) {
+        // NAME THE CAUSE, and name the value. From the Mac, a command that did
+        // nothing and a command that was not understood look identical - and the
+        // one instrument this setting has must not be the thing that is silent.
+        Serial.printf("MSGPRI refused: \"%s\" is not one of now|next|later - unchanged at %s\n",
+                      arg.c_str(), MSG_PRI_WIRE[msgPriority]);
+      } else if ((uint8_t) want == msgPriority) {
+        // NOT SILENT, and not a refusal either. The host delivers every command
+        // over BOTH transports, so a cabled board sees this twice; the second copy
+        // has to answer with something rather than nothing, or "already set" and
+        // "never arrived" read the same from the Mac. setMsgPriority() drops the
+        // no-op, so this is where the second copy gets its reply.
+        announceMsgPriority();
+      } else {
+        setMsgPriority((uint8_t) want);
+      }
+    }
 #if !BOARD_USES_TFT_ESPI
   } else if (buf == "SHIMBENCH") {
     // Board 2 only. Times a full-screen flush and a small dirty-rect flush,
@@ -5257,8 +6009,362 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // Remote tab switch. Added so screenshots can be taken of every tab without
     // someone standing at the device - the capture path can only ever record
     // what is currently on the glass.
+    //
+    // REFUSED WHILE A SURFACE WITH ITS OWN TEARDOWN OWNS THE GLASS, and this is the
+    // same defect EMOJITEST's escape exists for, one surface along. switchTab()
+    // paints the tab and clears NOBODY's flag, so with the reader or the transcript
+    // up the tab appeared while histActive/readerActive/scrollActive stayed true -
+    // and each of those absorbs the ~5s host tick in handleLine(). The device then
+    // looks alive with a frozen footer and no payload reaching it, which is exactly
+    // the state that costs a reflash. Those three are not CLEARED here the way the
+    // icon grid is (in switchTab below): the grid has no teardown - one flag and a
+    // repaint - while each of these has an exit function that repaints the screen
+    // switchTab is about to repaint again, so calling one from here is an ordering
+    // question rather than a one-liner. Each already has its own way out: a finger,
+    // "READTEST off" and SCROLLCLOSE. A named refusal is what turns this from a
+    // freeze into a sentence.
+    //
+    // pairPanelActive is deliberately NOT in this list: switchTab() takes the panel
+    // down AND closes the window (pairClose + pairPanelActive = false), so TAB is a
+    // correct escape from it and refusing would remove one.
+    //
+    // ONE `if`, with only the extra TERM behind the guard - never a duplicated
+    // statement per arm, which leaves every brace-counting checker here seeing one
+    // more `{` than `}`.
+    bool surfaceUp = composeActive || readerActive || histActive;
+#if BOARD_HISTORY_SCROLL
+    surfaceUp = surfaceUp || scrollActive;
+#endif
+    if (surfaceUp) {
+      Serial.println("TAB refused: another full-screen surface is up (a tab painted over it "
+                     "would leave its flag set, and that flag absorbs every host tick)");
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
     int t = buf.substring(4).toInt();
     if (t >= 0 && t < TAB_COUNT) switchTab((Tab) t);
+    else Serial.printf("TAB refused: %d is out of range (0..%d)\n", t, TAB_COUNT - 1);
+  } else if (buf.startsWith("DETAIL")) {
+    // THE SESSION DETAIL CARD, PUT ON THE GLASS FROM THE MAC - and until this
+    // existed there was NO WAY to do that. TAB switches tabs, PAGE is SETTINGS
+    // only, and the only other route into this screen was "KBTEST msg ...",
+    // which opens the keyboard OVER the card it just opened. So the most-opened
+    // secondary screen on the device had never been captured on either board,
+    // while the command table's own rationale for TAB/PAGE/KBTEST/EMOJITEST is
+    // that "a capture can only record what is already there". An instrument that
+    // cannot observe the thing it is pointed at is worse than none; this one did
+    // not exist at all.
+    //
+    // "DETAIL" alone opens session 0, "DETAIL <n>" the n-th in DISPLAY order -
+    // the same order the list draws and the same indexing SCROLLOPEN uses.
+    //
+    // EVERY REFUSAL NAMES ITS CAUSE. From the Mac, silence and "impossible here"
+    // look identical, and this handler has three distinct ways to decline.
+    // n is REFUSED rather than clamped, where SCROLLOPEN constrains: a capture
+    // script asking for session 4 and silently being handed session 0 would
+    // report the wrong card as the right one, which is the failure mode the
+    // whole command exists to remove.
+    //
+    // NO DUPLICATE GUARD, DELIBERATELY. The host writes each trigger-file line
+    // to every live transport, so a cabled board runs this twice within
+    // milliseconds - the thing that made POWERPROBE print four refusal lines and
+    // corrupted a doubled scrollback fetch. Opening a card is IDEMPOTENT (state
+    // set, card repainted, same result), so the second copy costs one repaint
+    // and one duplicate line and can change nothing. Said here rather than
+    // guarded, because a guard nobody needs is state that can go wrong.
+    //
+    // EVERY EARLY `return` BELOW CLEARS `buf` FIRST, AND THAT IS NOT TIDINESS -
+    // MEASURED, ON BOTH BOARDS. `buf` is processCompletedLine's own accumulator,
+    // passed by REFERENCE, and the only thing that empties it is the `buf = ""`
+    // at the END of this function. A refusal that returns before it leaves the
+    // refused text sitting in the buffer, so the next line the host sends is
+    // APPENDED to it - "DETAIL 9" + the heartbeat JSON still startsWith("DETAIL"),
+    // refuses again, returns again, and the buffer only ever grows. Observed:
+    // 63 identical refusal lines across the two boards from ONE `DETAIL 9`, and
+    // for the ~100 seconds it took feedChar's 16000-byte garbage guard to break
+    // the loop the device parsed NO payloads at all - a frozen display and a
+    // SCREENSHOT sent in that window that went nowhere. SCROLLPERF's own
+    // `buf = ""; return;` is the same fix and says the same thing.
+    String arg = buf.length() > 6 ? buf.substring(6) : String("");
+    arg.trim();
+    if (sessionCount == 0) {
+      Serial.println("DETAIL refused: no sessions");
+      buf = "";
+      return;
+    }
+    if (composeActive || readerActive || histActive || emojiTestActive) {
+      Serial.println("DETAIL refused: another full-screen surface is up");
+      buf = "";
+      return;
+    }
+    int di = arg.length() ? arg.toInt() : 0;
+    if (di < 0 || di >= sessionCount) {
+      Serial.printf("DETAIL refused: session %d is out of range (0..%d)\n", di, sessionCount - 1);
+      buf = "";
+      return;
+    }
+    switchTab(TAB_SESSIONS);
+    openSessionDetail(di);
+#if !BOARD_USES_TFT_ESPI
+    // Board 2 composes into the shadow framebuffer; without this the card sits
+    // there until loop()'s next end-of-iteration flush, and a SCREENSHOT sent
+    // straight after DETAIL could read the buffer mid-way. Board 1 draws to the
+    // glass, so there is nothing to push.
+    tft.flush();
+#endif
+    Serial.printf("DETAIL: session %d (%s) %s\n", di, sessions[di].name,
+                  sessions[di].askPid[0] ? "ask screen" : "detail card");
+  } else if (buf.startsWith("THEME")) {
+    // WHICH PALETTE IS ON THE GLASS, FROM THE MAC. Every "confirm this reads in
+    // LIGHT and in DARK" step in this repo has, until now, needed a person to tap
+    // SETTINGS > THEME between two captures - and a capture can only record what
+    // is already there, which is the whole reason TAB, PAGE, DETAIL and COMPOSE
+    // exist. Colour is exactly the property a board-2 SCREENSHOT cannot vouch
+    // for, so the instrument that puts the other palette up matters most on the
+    // board whose captures are weakest.
+    //
+    // NOT PERSISTED, DELIBERATELY: it never touches the stored themeMode, so a
+    // capture cannot change what the device does tomorrow. A reboot restores the
+    // user's own setting, and so does tickAutoTheme's next 30s pass if the stored
+    // mode is AUTO - which is stated here rather than discovered, because a
+    // palette that reverted mid-capture would otherwise read as a drawing bug.
+    //
+    // Repaints WHATEVER IS UP rather than always calling forceFullRepaint():
+    // applyTheme's own comment says a caller that forgets to repaint leaves the
+    // previous palette on the glass, since every change-only cache here keys on
+    // CONTENT and not on colour - and forceFullRepaint() repaints the TABS, which
+    // would erase a full-screen surface instead of recolouring it.
+    String arg = buf.length() > 5 ? buf.substring(5) : String("");
+    arg.trim();
+    arg.toLowerCase();
+    int ti = arg == "dark" ? 0 : (arg == "light" ? 1 : -1);
+    if (ti < 0) {
+      Serial.printf("THEME refused: say \"THEME dark\" or \"THEME light\" (got \"%s\")\n", arg.c_str());
+      buf = "";
+      return;
+    }
+    applyTheme((uint8_t) ti);
+    if (composeActive) drawKeyboard();          // both compose screens repaint through here
+    else forceFullRepaint();
+#if !BOARD_USES_TFT_ESPI
+    tft.flush();
+#endif
+    Serial.printf("THEME: %s palette live (the stored setting is unchanged - a reboot puts it back)\n",
+                  THEMES[ti].name);
+  } else if (buf.startsWith("COMPOSE")) {
+    // THE REPLY PANEL, PUT ON THE GLASS FROM THE MAC. Nothing routes to this
+    // screen from the UI yet - task 11 of the compose plan is what opens it from
+    // the detail card - and a capture can only record what is already there, which
+    // is the same reason TAB, PAGE, KBTEST and DETAIL all exist.
+    //
+    //   COMPOSE             the first pending ask, panel open
+    //   COMPOSE type <text> the same, with <text> typed into the draft
+    //   COMPOSE chip <n>    taps token n - the insert a finger would do
+    //   COMPOSE page        advances the token pager
+    //   COMPOSE sent        the sent state (receipt + DONE), SENDING NOTHING
+    //   COMPOSE recent <t>  puts <t> in the recents ring, SENDING NOTHING
+    //   COMPOSE off         close it
+    //
+    // EVERY REFUSAL NAMES ITS CAUSE, and every early return CLEARS buf FIRST -
+    // buf is processCompletedLine's own accumulator, passed by reference, so a
+    // return that leaves the refused text in it has the next line APPENDED to the
+    // old one, which refuses again forever (measured: 63 refusal lines and ~100
+    // seconds of parsing nothing, from one bad DETAIL).
+    //
+    // NO DUPLICATE GUARD, DELIBERATELY, the same call DETAIL makes: the host
+    // writes each trigger-file line to every live transport, so a cabled board
+    // runs this twice within milliseconds. Opening the panel is IDEMPOTENT - the
+    // state is set and the screen repainted to the same pixels - so the second
+    // copy costs one repaint and can change nothing.
+    String arg = buf.length() > 7 ? buf.substring(7) : String("");
+    arg.trim();
+    if (arg == "off") {
+      if (composeActive) closeCompose();
+      Serial.println("COMPOSE: closed");
+      buf = "";
+      return;
+    }
+    if (arg == "keys" || arg == "back") {
+      // THE TWO SCREEN MOVES, FROM THE MAC, AND THIS IS THE ONLY WAY THEY CAN BE
+      // OBSERVED AT ALL. TYPE... and BACK exist only as a finger on the glass;
+      // nothing here can inject a tap (deliberately - a scaffolding command that
+      // could reach a commit would be a way to answer Claude without a person,
+      // which is exactly what kbBubbleCommand is asserted NOT to be), so without
+      // these two verbs the claim this whole task rests on - THE DRAFT SURVIVES
+      // THE MOVE - can be reasoned about and never seen. The line printed below
+      // is the evidence: the byte count and the text after the move.
+      //
+      // They move a screen and repaint. They cannot send, cannot open, cannot
+      // close, and cannot edit the draft - the two functions they call are the
+      // same two the buttons call, so what is captured is the shipping path.
+      //
+      // NO DUPLICATE GUARD, DELIBERATELY, the same call the COMPOSE open makes:
+      // the host writes each trigger-file line to every live transport, so a
+      // cabled board runs this twice within milliseconds. A screen move is
+      // IDEMPOTENT - the same flag, the same repaint - so the second copy costs
+      // one repaint and can change nothing. (COMPOSE chip is deduped because an
+      // INSERT is not idempotent; this is the other half of that same rule.)
+      if (!composeActive) {
+        Serial.println("COMPOSE refused: the compose surface is not up (send COMPOSE first)");
+        buf = "";
+        return;
+      }
+      if (arg == "keys") composeOpenKeyboard();
+      else               composeBackToPanel();   // names its own cause if it declines
+      Serial.printf("COMPOSE: screen is now %s; the draft is %d bytes: \"%s\"\n",
+                    composeOnPanel() ? "the reply panel" : "the keyboard", kbLen, kbText);
+      buf = "";
+      return;
+    }
+    if (arg == "page" || arg.startsWith("chip ")) {
+      // TAPPING A CHIP, AND PAGING, FROM THE MAC. Both exist for the reason
+      // KBBUBBLE does: the thing they produce exists only while a finger is on
+      // the glass, so a capture cannot record it and no checker can see it - a
+      // chip's whole point is that its LABEL is truncated and its VALUE is not,
+      // and that difference is invisible until a token has actually been
+      // inserted. The line printed below is the proof: the byte count is the
+      // WHOLE token's, not the drawn label's.
+      if (!composeOnPanel()) {
+        Serial.println("COMPOSE refused: the reply panel is not up (send COMPOSE first)");
+        buf = "";
+        return;
+      }
+      int ci = kbSessionIdx;
+      if (ci < 0 || ci >= sessionCount) {
+        Serial.println("COMPOSE refused: the ask this panel was opened for is gone");
+        buf = "";
+        return;
+      }
+      // THE HOST DELIVERS EVERY TRIGGER-FILE LINE OVER BOTH TRANSPORTS, so a
+      // BLE-paired board runs this twice within milliseconds. Opening the panel
+      // is idempotent and says so; an INSERT is NOT, and this was MEASURED
+      // rather than anticipated: the first "COMPOSE chip 1" put 31 bytes in the
+      // draft and the second made it 62 -
+      // "firmware/tft_setup/User_Setup.hfirmware/tft_setup/User_Setup.h" - which
+      // would have been read as the insert path splicing wrongly. Deduped the
+      // way KBTEST's refusal is, and the drop NAMES ITS CAUSE, because from the
+      // Mac a command that did nothing and a command that was deduped look
+      // identical.
+      static String lastComposeEditArg = "\x01\x01";   // never a real (trimmed) arg
+      static unsigned long lastComposeEditMs = 0;
+      unsigned long nowMs = millis();
+      if (arg == lastComposeEditArg && nowMs - lastComposeEditMs < 2000) {
+        Serial.printf("COMPOSE: dropped a duplicate \"%s\" - the host writes each command to every "
+                      "live transport and an insert is not idempotent\n", arg.c_str());
+        buf = "";
+        return;
+      }
+      lastComposeEditArg = arg;
+      lastComposeEditMs = nowMs;
+      if (arg == "page") {
+        int pages = composeChipPages(ci);
+        if (pages > 1) composeChipPage = (composeChipPage + 1) % pages;
+        drawCompose();
+        Serial.printf("COMPOSE: token page %d of %d\n", composeChipPage + 1, pages);
+        buf = "";
+        return;
+      }
+      int cn = arg.substring(5).toInt();
+      if (cn < 0 || cn >= sessions[ci].askChipCount) {
+        Serial.printf("COMPOSE refused: chip %d is out of range (this ask has %d)\n",
+                      cn, sessions[ci].askChipCount);
+        buf = "";
+        return;
+      }
+      composeInsertChip(sessions[ci].askChips[cn]);
+      Serial.printf("COMPOSE: inserted chip %d \"%s\" (%d bytes); the draft is now %d bytes: \"%s\"\n",
+                    cn, sessions[ci].askChips[cn], (int) strlen(sessions[ci].askChips[cn]),
+                    kbLen, kbText);
+      buf = "";
+      return;
+    }
+    if (arg.startsWith("recent ")) {
+      // FILLING THE RECENTS RING FROM THE MAC, and nothing else. It exists for the
+      // reason KBBUBBLE and COMPOSE sent do: the row is drawn out of what a person
+      // has already sent from this device, so on a fresh boot it is empty and its
+      // one control - the only REUSE-form control on either screen - cannot be
+      // photographed at all. This remembers a string exactly as a completed send
+      // would and repaints the row.
+      //
+      // IT SENDS NOTHING AND IT ANSWERS NOTHING, and it still cannot commit a tap:
+      // there is no way from the Mac to press a reply, which is deliberate (the
+      // same rule kbBubbleCommand is asserted to follow - it arms a key and never
+      // commits it). The most it can do is put a string where a FINGER could later
+      // recall it into the draft, which is what KBTEST msg already does directly.
+      //
+      // NO DUPLICATE GUARD, and unlike COMPOSE chip it needs none: the ring
+      // DEDUPES, so the host's second copy of this line moves a string already at
+      // the front to the front. Idempotent by the feature's own rule rather than by
+      // a timer.
+      if (!composeOnPanel()) {
+        Serial.println("COMPOSE refused: the reply panel is not up (send COMPOSE first)");
+        buf = "";
+        return;
+      }
+      String rest = arg.substring(7);
+      rest.trim();
+      if (rest.length() == 0) {
+        Serial.println("COMPOSE refused: `COMPOSE recent <text>` needs the text to remember - an empty send never enters the ring, so neither does this");
+        buf = "";
+        return;
+      }
+      composeRemember(rest.c_str());
+      drawComposeRecents();
+#if !BOARD_USES_TFT_ESPI
+      tft.flush();
+#endif
+      composeReportRecents("remembered from the Mac - NO answer was sent");
+      buf = "";
+      return;
+    }
+    if (arg == "sent") {
+      if (!composeOnPanel()) {
+        Serial.println("COMPOSE refused: the reply panel is not up (send COMPOSE first)");
+        buf = "";
+        return;
+      }
+      // A CAPTURE AID AND NOTHING ELSE: it draws the receipt state so the collapsed
+      // action row can be photographed, and it does NOT answer Claude. Said out
+      // loud on the wire, because a command that looked like it sent an answer
+      // and did not would be the worst kind of quiet.
+      composeShowSentState(kbLen > 0 ? kbText : "(nothing typed)");
+      Serial.println("COMPOSE: sent state drawn for capture - NO answer was sent");
+      buf = "";
+      return;
+    }
+    // ALWAYS from a closed surface, the rule KBTEST already follows: re-opening
+    // over an open one is scaffolding-only and is made impossible rather than
+    // debugged.
+    if (composeActive) closeCompose();
+    if (readerActive || histActive || emojiTestActive) {
+      Serial.println("COMPOSE refused: another full-screen surface is up");
+      buf = "";
+      return;
+    }
+    int ci = -1;
+    for (int i = 0; i < sessionCount; i++)
+      if (sessions[i].askTitle[0]) { ci = i; break; }
+    if (ci < 0) {
+      Serial.println("COMPOSE refused: no ask is pending (no session has an askTitle)");
+      buf = "";
+      return;
+    }
+    // Through the detail screen, the way a person reaches it now that the card's
+    // TYPE button opens this panel, so closing the panel returns somewhere
+    // consistent - the same reason KBTEST opens the card first.
+    switchTab(TAB_SESSIONS);
+    openSessionDetail(ci);
+    openCompose(ci);
+    if (arg.startsWith("type ")) {
+      String rest = arg.substring(5);
+      for (unsigned int k = 0; k < rest.length(); k++) kbInsert(rest[k]);
+    }
+#if !BOARD_USES_TFT_ESPI
+    tft.flush();
+#endif
+    Serial.printf("COMPOSE: session %d (%s), %d option(s), %d chip(s), %d byte draft\n",
+                  ci, sessions[ci].name, sessions[ci].askOptCount,
+                  sessions[ci].askChipCount, kbLen);
   } else if (buf.startsWith("KBTEST")) {
     // Opens the typed-answer keyboard against the first pending ask, for the same
     // reason TAB and PAGE exist: the capture path can only record what is on the
@@ -5266,13 +6372,30 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // seen at all. "KBTEST peek" opens it with the prompt peek up, "KBTEST off"
     // closes it. It cannot invent a prompt - with nothing pending it does nothing,
     // so it can never raise a keyboard that would answer a question nobody asked.
+    //
+    // THAT REFUSAL USED TO BE SILENT. With nothing pending, neither branch below
+    // did anything and printed nothing - from the Mac that is indistinguishable
+    // from KBTEST itself being broken, and it cost two implementers in this plan
+    // real time working that out from the handler's own source. Every refusal
+    // now names the condition that failed - "no ask is pending" or "no session
+    // is READY" - the same rule POWERPROBE's "not on battery" refusal follows.
     String arg = buf.substring(6);
     arg.trim();
     // ALWAYS from a closed keyboard. Re-opening one that is already open left the
     // screen untouched - the re-entrant path is scaffolding-only (you cannot tap
     // TYPE while the keyboard covers the screen), so it is made impossible here
     // rather than debugged.
-    if (kbActive) closeKeyboard();
+    if (composeActive) closeCompose();
+    // The host delivers every trigger-file command over BOTH transports, so a
+    // cabled device sees the SAME "KBTEST ..." line twice within milliseconds
+    // (the "one POWERPROBE produced four refusal lines" note under Commands).
+    // A refusal has no state of its own to make the second copy a no-op the way
+    // POWERPROBE's probeActive or SCROLLPERF's scrollPerfRunning do, so it is
+    // deduped here instead: the same arg text within a short window prints once.
+    static String lastKbtestRefusalArg = "\x01\x01"; // never a real (trimmed) arg
+    static unsigned long lastKbtestRefusalMs = 0;
+    unsigned long nowMs = millis();
+    bool dupRefusal = arg == lastKbtestRefusalArg && nowMs - lastKbtestRefusalMs < 2000;
     if (arg.startsWith("msg")) {
       // A READY session instead of a pending ask - the message path has no ask at
       // all, so it cannot share the loop below. "KBTEST msg <text>" also types, in
@@ -5280,23 +6403,32 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       // "KBTEST type ..." would drop straight back into answer mode.
       String rest = arg.substring(3);
       rest.trim();
+      bool found = false;
       for (int i = 0; i < sessionCount; i++) {
         if (!msgOffered(i)) continue;
+        found = true;
         switchTab(TAB_SESSIONS);
         openSessionDetail(i);
-        openKeyboardForMessage(i);
+        openComposeForMessage(i);
         for (unsigned int k = 0; k < rest.length(); k++) kbInsert(rest[k]);
         break;
       }
+      if (!found && !dupRefusal) {
+        lastKbtestRefusalArg = arg;
+        lastKbtestRefusalMs = nowMs;
+        sendLineToHost("KBTEST refused: no session is READY (msgOffered() false for every session)");
+      }
     } else if (arg != "off") {
+      bool found = false;
       for (int i = 0; i < sessionCount; i++) {
         if (!sessions[i].askTitle[0]) continue;
+        found = true;
         // Through the detail screen, the way a person reaches it, so closing the
         // keyboard returns somewhere consistent. Opening it straight from whatever
         // tab was showing left the sessions list painted under a USAGE tab bar.
         switchTab(TAB_SESSIONS);
         openSessionDetail(i);
-        openKeyboard(i);
+        openComposeKeys(i);
         if (arg == "peek" && kbHasDetail()) { kbPeekPage = 0; drawKeyboard(); }
         else if (arg == "caps") { kbShiftMode = 2; drawKeyboard(); }
         else if (arg.startsWith("type ")) {
@@ -5308,7 +6440,35 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
         }
         break;
       }
+      if (!found && !dupRefusal) {
+        lastKbtestRefusalArg = arg;
+        lastKbtestRefusalMs = nowMs;
+        sendLineToHost("KBTEST refused: no ask is pending (no session has an ask)");
+      }
     }
+  } else if (buf.startsWith("KBPROBE")) {
+    // Measures the touch model this keyboard now uses: one line per keystroke on
+    // the character rows with the key the press ARMED, the key the lift
+    // COMMITTED and the pixel delta between them. "KBPROBE off" stops it and
+    // prints the totals. It shipped with release-commit because "release-commit
+    // cuts mis-hits" is a claim, not a fact, and without the instrument the
+    // first real attempt would be the test - the argument AUDIOPROBE, TEXTPROBE
+    // and COLORTEST already won. Every refusal names its cause, and a duplicate
+    // (the host sends each command over BOTH transports) is a no-op that says
+    // so. See kbProbeCommand() in keyboard.ino.
+    String pa = buf.substring(7);
+    pa.trim();
+    kbProbeCommand(pa.c_str());
+  } else if (buf.startsWith("KBBUBBLE")) {
+    // Draws the magnified key bubble so a CAPTURE CAN SEE IT. It exists only
+    // while a finger is on the glass, so without this the one element this task
+    // adds is the one element no screenshot can record - the same argument TAB,
+    // PAGE, KBTEST, EMOJITEST and READTEST each already won. It arms through the
+    // real kbSetArm() and NEVER commits; "KBBUBBLE off" clears it, and so does
+    // the next real press. See kbBubbleCommand() in keyboard.ino.
+    String bb = buf.substring(8);
+    bb.trim();
+    kbBubbleCommand(bb.c_str());
 #if !BOARD_USES_TFT_ESPI
 #if BOARD_HAS_WIRELESS_PAIR
   } else if (buf == "PAIRVECTOR") {
@@ -5371,7 +6531,8 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // possible through the measuring command. Separating them is the fix; a
     // diagnostic whose side effect is the thing being investigated is worse than
     // no diagnostic.
-    if (!scrollActive) { Serial.println("SCROLLTO: the transcript is not open"); return; }
+    // buf = "" before the return: see DETAIL's note above.
+    if (!scrollActive) { Serial.println("SCROLLTO: the transcript is not open"); buf = ""; return; }
     const char* a = buf.c_str() + 8;
     while (*a == ' ') a++;
     long ln = (*a >= '0' && *a <= '9') ? atol(a) : 999999;
@@ -5388,9 +6549,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // every "verification" of the open path was watching a diagnostic's side
     // effect rather than the product. That side effect is also what got reported
     // as the page scrolling by itself.
-    if (sessionCount == 0) { Serial.println("SCROLLOPEN: no sessions"); return; }
-    if (kbActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
-      Serial.println("SCROLLOPEN: another full-screen surface is up"); return;
+    // buf = "" before both returns: see DETAIL's note above.
+    if (sessionCount == 0) { Serial.println("SCROLLOPEN: no sessions"); buf = ""; return; }
+    if (composeActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
+      Serial.println("SCROLLOPEN: another full-screen surface is up"); buf = ""; return;
     }
     int idx = 0;
     const char* a = buf.c_str() + 10;
@@ -5435,7 +6597,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // TAB/PAGE/KBTEST/EMOJITEST/MULTITEST already won: SCREENSHOT can only record
     // what is on the glass, and reaching this screen needs a finger on the chip in
     // the ask header. Board 2 only - it is this board that gained a second section
-    // to look at, and board 1's binary is held byte-identical.
+    // to look at. (That clause used to end "and board 1's binary is held
+    // byte-identical"; the freeze is lifted - see CLAUDE.md - and the reason is now
+    // only that board 1's reader has never been exercised on its glass. Board 1
+    // REFUSES this verb by name, so the Mac is told which of the two it is.)
     //
     // Through the detail screen, the way a person reaches it, for the reason
     // KBTEST records: opening straight from whatever tab was showing leaves the
@@ -5457,12 +6622,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // someone else's screen.
     if (pairPanelActive) {
       Serial.println("READTEST refused: another full-screen surface is up");
+      // buf = "" before the return: see DETAIL's note above. Without it this
+      // refusal repeats on every subsequent line until the 16KB garbage guard
+      // fires, and the device parses no payloads in between.
+      buf = "";
       return;
     }
 #endif
     if (arg == "off") {
       if (readerActive) exitReader();
-    } else if (kbActive || histActive || emojiTestActive) {
+    } else if (composeActive || histActive || emojiTestActive) {
       Serial.println("READTEST refused: another full-screen surface is up");
     } else {
       bool opened = false;
@@ -5542,7 +6711,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       scrollPerfRunning = false;
       return;
     }
-    if (kbActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
+    if (composeActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
       Serial.println("SCROLLPERF: another full-screen surface is up");
       scrollPerfRunning = false;
       return;
@@ -5644,10 +6813,10 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
 #endif
   } else if (buf.startsWith("EMOJITEST")) {
     // Refuse while another full-screen surface owns the glass. emojiTestActive
-    // is tested BEFORE kbActive in handleTouch's dismiss chain, so opening the
+    // is tested BEFORE composeActive in handleTouch's dismiss chain, so opening the
     // grid over an open keyboard and then tapping anywhere calls
-    // forceFullRepaint() with kbActive still true underneath - the exact class
-    // of bug fabVisible()'s own kbActive check was already paid for once,
+    // forceFullRepaint() with composeActive still true underneath - the exact class
+    // of bug fabVisible()'s own composeActive check was already paid for once,
     // leaving invisible typing into a screen that no longer looks like a
     // keyboard.
 #if BOARD_HAS_WIRELESS_PAIR
@@ -5660,26 +6829,89 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // is left character-for-character as it was.
     if (pairPanelActive) {
       Serial.println("EMOJITEST refused: another full-screen surface is up");
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
       return;
     }
 #endif
-    if (kbActive || readerActive || histActive || showingDetail) {
+    // "EMOJITEST off" - THE ESCAPE, and its ABSENCE was a trap that cost a reflash.
+    // emojiTestActive gates BOTH the 5s payload absorb (handleLine's own early return)
+    // and the 1s local tick, and TAB painted OVER the grid without clearing the flag -
+    // so the device kept drawing, looked alive, and its footer never moved again while
+    // no payload reached it. The only recovery measured was a re-flash, and an agent
+    // hit it by accident. Every other stateful instrument here already had one:
+    // KBTEST off, KBPROBE off, KBBUBBLE off, SCROLLCLOSE.
+    //
+    // AN `off` ARGUMENT rather than SCROLLCLOSE's separate verb: EMOJITEST already
+    // takes an argument (one icon's name), so a second verb would be a second name for
+    // one surface, and `off` is what the three keyboard instruments already answer to.
+    // It takes SCROLLCLOSE's other half though - BOTH outcomes are named, so "closed"
+    // and "there was nothing open" never look the same from the Mac.
+    //
+    // AFTER the pairing guard above, deliberately. `off` repaints the tab underneath,
+    // which is a full-screen paint like any other, and it must not run over the
+    // pairing panel: emojiTestActive and pairPanelActive can never both be true (the
+    // guard above refuses to OPEN the grid while the panel is up), so this arm has
+    // nothing to do in that state anyway and refusing it costs nothing.
+    String arg = buf.substring(9); arg.trim();
+    if (arg == "off") {
+      if (emojiTestActive) {
+        emojiTestActive = false;
+        forceFullRepaint();
+        Serial.println("EMOJITEST: closed, the tab underneath is back");
+      } else {
+        Serial.println("EMOJITEST: the icon grid is not open");
+      }
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
+    if (composeActive || readerActive || histActive || showingDetail) {
       Serial.println("EMOJITEST refused: another full-screen surface is up");
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
       return;
     }
     // Draws all 16 icons in a grid on the content area, on BOTH backdrops the real
     // surfaces use (page background and card fill), so the alpha blend can be judged
     // where it actually has to work rather than on one convenient colour. Any tap
     // restores the tab. "EMOJITEST <name>" highlights one by name instead.
-    String arg = buf.substring(9); arg.trim();
     emojiTestActive = true;
     drawEmojiTestScreen(arg.c_str());
   } else if (buf.startsWith("PAGE ")) {
     // Settings page, for the same reason. No-op unless SETTINGS is showing.
+    //
+    // REFUSED WHILE ANOTHER FULL-SCREEN SURFACE OWNS THE GLASS, which it was not
+    // before and which is the SAME defect EMOJITEST's own escape exists for.
+    // gotoSettingsPage()/openSettingsGroup() paint the settings page into the content
+    // area and clear nobody's flag, so with the icon grid up this reproduced exactly
+    // the freeze that costs a reflash: a page drawn over a surface whose flag still
+    // absorbs every payload and every tick. Both of PAGE's callees only act while
+    // currentTab == TAB_SETTINGS, and the pairing panel is REACHED from SETTINGS - so
+    // on board 2 this could also repaint over a code somebody was comparing while
+    // pairPanelActive stayed true and CONFIRM stayed tappable underneath, which is the
+    // property EMOJITEST's and READTEST's guards are asserted for in
+    // host/pair-crypto-check.mjs. PAGE was the fifth refusal list that did not know
+    // the panel is a full-screen surface.
+    //
+    // ONE `if`, with only the extra TERM behind the guard - not a duplicated statement
+    // per arm. An #if/#else that opens a brace in both arms leaves every brace-counting
+    // checker here seeing one more `{` than `}`; that once broke an unrelated PAIRING
+    // assertion, which then reported a defect that did not exist.
+    bool surfaceUp = composeActive || readerActive || histActive || emojiTestActive;
+#if BOARD_HAS_WIRELESS_PAIR
+    surfaceUp = surfaceUp || pairPanelActive;
+#endif
+    if (surfaceUp) {
+      Serial.println("PAGE refused: another full-screen surface is up");
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
     int pg = buf.substring(5).toInt();
 #if BOARD_SETTINGS_HOME
-    // PAGE 0 is HOME here, 1..5 the five groups - the same numbering settingsPage
+    // PAGE 0 is HOME here, 1..6 the six groups - the same numbering settingsPage
     // uses, so a capture script names a group rather than counting chevron taps.
+    // Board 1's arm below wraps modulo SETTINGS_PAGES (5), so the same MESSAGES
+    // surface is PAGE 4 there and PAGE 5 here. The two boards' page numbering has
+    // never agreed and this does not make it worse; what it does mean is that a
+    // capture script aimed at one board's number lands somewhere else on the other.
     if (currentTab == TAB_SETTINGS) { if (pg <= SET_HOME) settingsBack(); else openSettingsGroup(pg); }
 #else
     if (currentTab == TAB_SETTINGS) gotoSettingsPage(pg);
@@ -6067,8 +7299,22 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
               "\",\"name\":\"testproj" + String(i) +
               "\",\"status\":\"" + (i == 0 ? "asking" : "working") +
               "\",\"agent\":\"cc\",\"model\":\"claude-opus-5\",\"path\":\"/tmp/test\"" +
-              (i == 0 ? ",\"ask\":{\"pid\":\"9901\",\"kind\":\"perm\",\"title\":\"Allow Bash?\","
-                        "\"detail\":\"echo synthetic\",\"options\":[\"Allow\",\"Deny\"],"
+              // THE ASK CARRIES FOUR OPTIONS AND FOUR CHIPS, and the title is at
+              // the hook's own 34-character cap. That is not decoration: the
+              // reply panel draws its options three to a band across TWO bands
+              // and pages its chips two at a time, and nothing else on the
+              // device can put either on the glass - a real ask has the tokens
+              // its own text happened to contain, so a capture of the panel with
+              // a full reply grid and a live pager was not reproducible before
+              // this. The long chip (31 bytes) is the case the panel exists for:
+              // its LABEL truncates on the button and its VALUE inserts whole.
+              (i == 0 ? ",\"ask\":{\"pid\":\"9901\",\"kind\":\"perm\","
+                        "\"title\":\"Run release.sh --no-verify on main\","
+                        "\"detail\":\"The pre-commit hook rejects the vendored font dump in "
+                        "firmware/tft_setup/User_Setup.h, which is expected.\","
+                        "\"options\":[\"Allow\",\"Allow always\",\"Deny\",\"Deny + explain\"],"
+                        "\"chips\":[\"--no-verify\",\"firmware/tft_setup/User_Setup.h\","
+                        "\"main\",\"release.sh\"],"
                         "\"answerable\":true,\"nonce\":\"testnonce\"}"
                       : "") +
               "}";
@@ -6089,6 +7335,20 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     handleLine(line);
     curLineFromUsb = savedFromUsb;
     activeHost = savedActiveHost;
+  } else if (refuseUnavailableCommand(buf)) {
+    // A COMMAND THIS BOARD DOES NOT HAVE. Reached only after every real handler
+    // has declined the line, so this arm can never shadow one - and placed here,
+    // rather than as an `if` inside the payload branch below, so a refused command
+    // never stamps *lastRxTimestamp or feeds payloadHash32(): it is not a payload
+    // and must not count as one for the footer's freshness readout.
+    //
+    // `buf` is cleared by the tail of this function, which this arm falls through
+    // to - it does NOT return early. That is deliberate: `buf` is this function's
+    // own accumulator, passed by REFERENCE, and a refusal that returns without
+    // clearing it leaves the refused text in the buffer for the next line to be
+    // APPENDED to, which still matches the same verb and refuses again forever.
+    // One DETAIL 9 produced 63 refusal lines and ~100s of parsing no payloads at
+    // all that way (see DETAIL's own note above).
   } else {
     *lastRxTimestamp = millis();
 #if !BOARD_USES_TFT_ESPI
@@ -6160,7 +7420,7 @@ void loop() {
   static unsigned long lastHelloMs = 0;
   if (millis() < 15000 && millis() - lastHelloMs > 2000) {
     lastHelloMs = millis();
-    Serial.printf("HELLO %s v2\n", deviceName); // v2 = multi-pairing PROVISION
+    announceHello();
     Serial.printf("BUILD %s %s\n", __DATE__, __TIME__);
   }
 
@@ -6173,13 +7433,20 @@ void loop() {
   // than a runtime no-op so board 1 never sees the TEXT of a call it does not
   // have, the same rule the 26 tft.flush() sites follow.
   tickSessionAnim();
-  // The SESSION DETAIL card's own band, which neither tick above can reach: both
-  // return on showingDetail, so its mark, its crossfade and its pulse were all
+#endif
+  // The SESSION DETAIL card's own band, which neither tick around it can reach:
+  // both return on showingDetail, so its mark, its crossfade and its pulse were all
   // dead there while the identical band on the list animated. Its own function
   // rather than a relaxed gate on those two, because they paint at the LIST's
   // coordinates - see the block above tickDetailBandAnim() in sessions.ino.
+  //
+  // OUTSIDE THE #if, ON BOTH BOARDS. Board 1 got the band-headed detail card in
+  // 924cecc but not this tick, so its mark sat frozen on whatever frame the list
+  // left animPhase on. The board-2-only fragments are guarded inside the function
+  // (the crossfade, the pulse, the flush); the call is not. It must still come
+  // BEFORE tickWorkingSpinner - that one returns on showingDetail, so the two are
+  // mutually exclusive and only one of them advances animPhase in any frame.
   tickDetailBandAnim();
-#endif
   tickWorkingSpinner();
   tickMicProcessing();  // no-op unless a capture is being processed
   tickWaitingWheel();   // no-op unless the standalone screen is on the glass
@@ -6320,11 +7587,11 @@ void loop() {
   }
 
   // The reader is a static full-screen page: keep the display awake while
-  // it's open, and keep the footer/tab renderers off its pixels. kbActive joins
+  // it's open, and keep the footer/tab renderers off its pixels. composeActive joins
   // this for a sharper reason than annoyance: default sleep is 30s against a
   // 90s answer budget, so without this the backlight could blank mid-answer in
   // ordinary use, and the waking tap would be swallowed rather than typed.
-  if (readerActive || histActive || kbActive) lastActivityMillis = millis();
+  if (readerActive || histActive || composeActive) lastActivityMillis = millis();
 #if BOARD_HAS_WIRELESS_PAIR
   // The pairing panel joins them, and here it is load-bearing rather than merely
   // tidy: the default backlight timeout is 30s against a 120s window, so without
@@ -6336,9 +7603,13 @@ void loop() {
   // Hold-to-repeat for the keyboard's DEL. Runs from here rather than handleTouch
   // because that dispatches on PRESS and ignores a held finger - which is right
   // for every other key, where one press must be exactly one character.
-  if (kbActive) tickKbRepeat();
+  if (composeActive) tickKbRepeat();
+  // Row 3's press flash, released by deadline rather than by a blocking delay -
+  // same reason, and it deliberately runs whether or not composeActive, so a flash
+  // armed just before the keyboard closed still clears its own state.
+  tickKbFlash();
 
-  // kbActive excluded for the same reason readerActive/histActive already are:
+  // composeActive excluded for the same reason readerActive/histActive already are:
   // this local 1s tick calls renderSessionsTab()/renderSettingsTab() directly,
   // which would paint the session list straight over the keyboard exactly the
   // way the 5s host tick would if handleLine didn't absorb it. emojiTestActive
@@ -6358,7 +7629,7 @@ void loop() {
   // timeout" - an assertion about PAIRING, broken by an edit to the scrollback,
   // reporting a defect that did not exist. Board 1 still sees exactly its original
   // condition; only the line break moved.
-  if (!isAsleep && !octoActive && !readerActive && !histActive && !kbActive && !emojiTestActive
+  if (!isAsleep && !octoActive && !readerActive && !histActive && !composeActive && !emojiTestActive
 #if BOARD_HISTORY_SCROLL
       && !scrollActive
 #endif

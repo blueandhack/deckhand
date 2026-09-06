@@ -9,8 +9,8 @@
 // reader does. That is not cosmetic: it is what makes QWERTY viable on a panel
 // this narrow. THAT is what going full-screen buys, and the two numbers differ in
 // BOTH dimensions rather than only in height:
-//   drawn   KB_KEY_W  x (KB_ROW_H - 4)   22x40 on board 1, 30x54 on board 2
-//   tested  KB_PITCH  x  KB_ROW_H        24x44 = 1056, 32x58 = 1856
+//   drawn   KB_KEY_W  x (KB_ROW_H - 4)   22x37 on board 1, 30x54 on board 2
+//   tested  KB_PITCH  x  KB_ROW_H        24x41 = 984, 32x58 = 1856
 // The WIDTH of the tested band comes from the PITCH, not from KB_KEY_W: kbTouch()
 // divides by KB_PITCH, so the 2px gap between two keys belongs to the key on its
 // left and there is no dead column anywhere on the board. Keep the drawn and the
@@ -32,7 +32,18 @@
 // any text line" invariant is visible next to the code that draws them.
 const int KB_META_Y  = KB_TEXT_Y + KB_META_DY;    // byte counter left, countdown right
 const int KB_LINE0_Y = KB_TEXT_Y + KB_LINE0_DY;   // first hard-wrapped line
-const int KB_MAX_BYTES = 150;                  // must equal the host's cap
+// The prompt strip's text row, CENTRED in its band rather than offset by a third
+// literal: KB_STRIP_H is KB_LINE_PITCH + 4 on both boards, so this is 2 on both,
+// and the strip's opaque text box lands strictly inside the band no matter what
+// either board does to its cell height. drawString paints that box the full
+// height of a line, and the strip sits directly above the text card - one row too
+// low and it rubs out the card's top border.
+const int KB_STRIP_TEXT_DY = (KB_STRIP_H - KB_LINE_PITCH) / 2;
+// KB_MAX_BYTES MOVED to deckhand_display.ino, beside the kbText buffer it sizes.
+// The cap and the array are one fact, and the array has to be declared in the
+// file the build concatenates FIRST; leaving the cap here meant compose.ino -
+// concatenated BEFORE this file - could not name it, so anything over there
+// that has to fit a draft had to write the number again instead.
 
 // Rows 0-2 are the letter/symbol pages; row 3 is fixed. Control characters stand
 // in for the non-letter keys, because Cozette is ASCII 0x20-0x7E ONLY - there is
@@ -42,17 +53,55 @@ const int KB_MAX_BYTES = 150;                  // must equal the host's cap
 #define KB_DEL   '\x02'
 const char* KB_ALPHA[3] = { "qwertyuiop", "asdfghjkl", "\x01zxcvbnm\x02" };
 const char* KB_SYM[3]   = { "1234567890", "-_/:;()&@#", ".,?!'\"+=\x02" };
+// THE 14 CHARACTERS NO PAGE COULD REACH. 81 of the 95 printable ASCII
+// codepoints were typeable; these are the rest, and five of them ($ * [ ] `)
+// are ordinary in a shell command or a path, which is what this device answers
+// questions about. The row lengths are 10 / 4 / 1, so rows 1 and 2 are CENTRED
+// by kbRowX0() exactly as the 9-cell alpha rows already are. Matches
+// docs/design/compose/compose.js's SYM2 rows exactly - that mock is the
+// normative geometric spec for this split.
+const char* KB_SYM2[3] = { "$%*<>[]{}|", "\\^`~", "\x02" };
 
-const char* kbRow(int r) { return kbSymbols ? KB_SYM[r] : KB_ALPHA[r]; }
+// kbPage: 0 letters, 1 symbols, 2 the remaining symbols. Was a bool (kbSymbols);
+// a third page needs a third state.
+const char* kbRow(int r) {
+  if (kbPage == 1) return KB_SYM[r];
+  if (kbPage == 2) return KB_SYM2[r];
+  return KB_ALPHA[r];
+}
 int kbRowLen(int r) { return (int) strlen(kbRow(r)); }
 // Rows shorter than 10 cells are CENTRED, so the hit test and the draw must both
 // derive x from the same place or a tap lands one key off at the ends.
 int kbRowX0(int r) { return (tft.width() - kbRowLen(r) * KB_PITCH) / 2; }
 int kbRowY(int r)  { return KB_ROWS_Y + r * KB_ROW_H; }
 
-// Row 3 is [?123|ABC] 2 cells, [space] 6 cells, [.] 2 cells.
+// Row 3 is [?123|2/2|ABC] 2 cells, [space] 6 cells, [.] 2 cells.
 const int KB_R3_PAGE_W  = 2 * KB_PITCH;
 const int KB_R3_SPACE_W = 6 * KB_PITCH;
+// THE GAP, AS A NAME, and it is the KEY's own gap rather than a second literal:
+// KB_KEY_W is KB_PITCH - 2 on both boards, so this is that same 2 read out of the
+// two header constants instead of written down again. Row 3 drew its three keys
+// at the FULL cell width - KB_R3_PAGE_W, KB_R3_SPACE_W and `tft.width() - x` -
+// while the letter rows draw KB_KEY_W inside a KB_PITCH cell. That was invisible
+// while every key carried a 1px outline that separated flush neighbours; once the
+// keys became filled tiles with no stroke, three flush tiles merged into one
+// continuous bar. THE GEOMETRY NEVER CHANGED - the tile treatment removed what was
+// hiding it. The TESTED band is still the full cell (kbTouch's r == 3 branch
+// divides nothing and compares against KB_R3_PAGE_W / +KB_R3_SPACE_W), so the gap
+// belongs to the key on its LEFT exactly as it does on the character rows and no
+// column of this row is dead.
+const int KB_KEY_GAP = KB_PITCH - KB_KEY_W;
+// The page key's three labels, indexed by kbPage - what tapping it will switch
+// TO is what it shows, same convention the two-page ?123/ABC toggle always had.
+// "$%*" (not "2/2", a position indicator that breaks the preview pattern
+// ?123 sets on page 0, and not "#+=", which is genuinely on page 1 but never
+// on page 2 - it would preview the page you are LEAVING, not the one you are
+// going TO): all three characters are on KB_SYM2 and never on KB_SYM, so
+// "$%*" reads as a preview exactly the way "?123" and "ABC" already do.
+// All three are real labels, not the three-ASCII-dots ellipsis: "?123" is the
+// widest at 4 characters, which settings-geom-check.mjs measures against the
+// 2-cell key (KB_R3_PAGE_W).
+const char* KB_PAGE_LABEL[3] = { "?123", "$%*", "ABC" };
 
 void kbKeyLabel(char c, char* out, size_t n) {
   // CAPS vs CAP is the whole distinction between locked and one-shot, in TEXT -
@@ -76,17 +125,248 @@ void drawKbKey(int r, int col, bool pressed) {
   // that state. It used to be restored by a follow-up drawKbKey at each call
   // site, which is one more thing to remember at every future one.
   if (row[col] == KB_SHIFT && kbShiftMode > 0) pressed = true;
-  uiButton(x, y, KB_KEY_W, KB_ROW_H - 4, label, COLOR_ACCENT, pressed, COLOR_BG);
+  uiKeyCap(x, y, KB_KEY_W, KB_ROW_H - 4, label, pressed, COLOR_BG);
 }
 
+// Row 3. Each key is DRAWN one KB_KEY_GAP narrower than its cell and the cursor
+// advances by the FULL cell, so the gap lands between neighbours - the letter
+// rows' drawn/tested split, applied to the row that never had it. The period key
+// is inset on its right too, which is the same 2px margin the last key of a
+// centred 10-cell row already leaves against the panel edge.
 void drawKbRow3(int pressed /* -1 none, 0 page, 1 space, 2 dot */) {
   int y = kbRowY(3), h = KB_ROW_H - 4, x = 0;
-  uiButton(x, y, KB_R3_PAGE_W, h, kbSymbols ? "ABC" : "?123",
-           COLOR_ACCENT, pressed == 0, COLOR_BG);
+  uiKeyCap(x, y, KB_R3_PAGE_W - KB_KEY_GAP, h, KB_PAGE_LABEL[kbPage], pressed == 0, COLOR_BG);
   x += KB_R3_PAGE_W;
-  uiButton(x, y, KB_R3_SPACE_W, h, "SPACE", COLOR_ACCENT, pressed == 1, COLOR_BG);
+  uiKeyCap(x, y, KB_R3_SPACE_W - KB_KEY_GAP, h, "SPACE", pressed == 1, COLOR_BG);
   x += KB_R3_SPACE_W;
-  uiButton(x, y, tft.width() - x, h, ".", COLOR_ACCENT, pressed == 2, COLOR_BG);
+  uiKeyCap(x, y, tft.width() - x - KB_KEY_GAP, h, ".", pressed == 2, COLOR_BG);
+}
+
+// ---------------------------------------------------------------------------
+// THE MAGNIFIED BUBBLE, and the release-commit model it exists for.
+//
+// The character rows' keys are 4.27mm wide on board 1 and 4.93mm on board 2
+// against a ~7.1mm fingertip: 40% and 31% under the floor, and the fingertip
+// COVERS the key it is pressing. A press used to commit, so the first pixel a
+// finger landed on was the character you got and the only feedback was a flash
+// of a key under the finger hiding it. Now a press on rows 0-2 ARMS a candidate
+// and draws this bubble one row clear of the finger, the held path RE-TARGETS,
+// and the LIFT commits. That extends two paths that already exist rather than
+// inventing a touch model: handleTouch already acts on release for the record
+// FAB, and tickKbRepeat already re-samples getTouchPoint() every tick and
+// re-qualifies against a key's own rectangle.
+//
+// THE GEOMETRY IS THE MOCK'S, term for term - docs/design/compose/compose.js,
+// the `if (pressed)` arm of its drawKeyboard(). That mock is the normative
+// geometric spec for this surface and docs/design/compose/check.mjs binds it to
+// both board headers, so a bubble placed anywhere else would put the panel and
+// the spec into disagreement:
+//   w = 2 * KB_PITCH   48 on board 1, 64 on board 2
+//   h = KB_ROW_H       the TESTED band, so the bubble lands ON a row boundary
+//   y = ALWAYS the row above, row 0 included
+// This is the first element in this firmware that paints over live chrome, and
+// the offset being a whole KB_ROW_H rather than a few px is what puts it outside
+// a ~7mm contact patch.
+//
+// ROW 0 USED TO BE THE EXCEPTION and its bubble was drawn BELOW the finger,
+// because above row 0 is the text card. A preview that changes SIDES on one row
+// is disorienting in exactly the moment it exists to help - reported from real
+// use - and the reason it flipped turned out not to apply: see kbBubbleRow().
+//
+// The row it lands on is now always r-1 (-1, 0, 1), so it still covers ONE row
+// band and, centred on a key at 2 pitches wide, at most THREE columns of it -
+// row -1 being the card, where the restore is a drawKbText() rather than a key
+// sweep. That is what makes the restore bounded - see kbClearBubble.
+const int KB_BUB_W = 2 * KB_PITCH;
+const int KB_BUB_H = KB_ROW_H;
+
+// THE TEXT CARD'S OWN CORNER RADIUS, named rather than left as the bare 6 it was
+// at drawKbText()'s single call site. kbClearBubble() has to repair exactly the
+// notches a rounded corner leaves OUTSIDE its own curve, and a second 6 written
+// down there would be a transcription free to drift from the radius the card is
+// actually drawn with - the notch would then be repaired at the wrong size and
+// nothing would say so. Deliberately NOT R_SM: that is 6 on board 1 but 7 on
+// board 2, and this card has always been drawn at 6 on both.
+const int KB_TEXT_R = 6;
+
+// The armed candidate: the key a press landed on, which is NOT yet committed.
+// -1/-1 is "nothing armed", which is also every state outside a live press.
+int kbArmRow = -1, kbArmCol = -1;
+// The bubble currently on the glass, so the restore knows what to repair. Only
+// the origin is kept - the size is the two constants above.
+bool kbBubOn = false;
+int  kbBubX = 0, kbBubY = 0;
+
+// Which key row the bubble for row `r` is drawn ON. ALWAYS the row above, and
+// row -1 - the band a row would occupy if the grid started one row higher - is
+// a real answer, not an error: it lands on the text card's lower half.
+//
+// IT USED TO RETURN 1 FOR ROW 0, putting a row-0 bubble BELOW the finger. That
+// was not a geometry problem, it was a fear about the card: "a bubble over the
+// card would mean busting the card's change-only cache". THERE IS NO SUCH
+// CACHE. drawKbText() opens with uiFillRound(CARD_X, KB_TEXT_Y, CARD_W,
+// KB_TEXT_H, ...) and repaints the card WHOLESALE - its own comment says a
+// change-only cache would buy nothing there - and kbInsert() already calls it
+// on every keystroke, so repairing the card costs a call that already happens.
+int kbBubbleRow(int r) { return r - 1; }
+
+// Put back what the bubble covered. BOUNDED AND DETERMINISTIC: it repaints the
+// key cells whose rectangles intersect the bubble - at most three - each through
+// drawKbKey, plus the text card when the bubble reached it, and it deliberately
+// does NOT call drawKeyboard(). drawKeyboard() fillScreen's the whole panel, so
+// restoring through it would repaint the card, the strip, the action row and
+// 30-odd keys on EVERY keystroke, which is exactly the flicker the change-only
+// discipline exists to prevent.
+//
+// THE CARD ARM IS WHAT LETS THE BUBBLE SIT ABOVE ROW 0, and THE CLEARING FILL IS
+// CLIPPED OUT OF THE CARD RATHER THAN DRAWN OVER IT. The first version simply
+// blanked the whole bubble rect to COLOR_BG and let drawKbText() paint the card
+// back on top. That composes invisibly on board 2 - PanelShim writes to a shadow
+// framebuffer and one flush pushes the finished result - and it is a VISIBLE
+// CLEAR-THEN-REDRAW OF THE CARD ON BOARD 1, which draws straight to the glass
+// through real TFT_eSPI: every row-0 keystroke would blank a 216x88 card to
+// background and repaint it, which is precisely the flicker the change-only
+// discipline exists to prevent. Board 1 has not been flashed this whole plan, so
+// nobody would have seen it. The shadow buffer hiding a board-1 defect is the
+// trap CLAUDE.md names about SCREENSHOT, in a second guise.
+//
+// So the fill is cut into the pieces that are NOT the card:
+//   - everything at or below the card's bottom edge (the gap between the card
+//     and KB_ROWS_Y, plus any key rows), full bubble width;
+//   - within the card's own rows, only the slivers to the LEFT of CARD_X and to
+//     the RIGHT of CARD_X + CARD_W. Those are real: row 0 is 10 cells wide and
+//     exactly fills the panel on both boards, so its col-0 bubble clamps to x=0
+//     and its col-9 bubble to x = BOARD_W - KB_BUB_W, hanging 12px past the card
+//     on either side. drawKbText() only ever repaints CARD_X..CARD_X+CARD_W-1,
+//     so without these two slivers that overhang would keep the bubble's accent.
+// drawKbText() then restores the card's own area with a single opaque repaint -
+// one write per pixel, not a blank followed by a write - and it costs a call
+// kbInsert() already makes on every keystroke. WITH ONE EXCEPTION, and missing it
+// is what made this clip a regression when it was first written: uiFillRound
+// leaves the pixels OUTSIDE its corner curve untouched, so the card's two bottom
+// notches are not repainted by anything and kept the bubble's accent. They are
+// filled explicitly below, before drawKbText() runs.
+//
+// The key sweep below is unaffected: the card (KB_TEXT_Y .. KB_TEXT_Y+KB_TEXT_H)
+// and the key grid (KB_ROWS_Y onwards) do not overlap on either board - 24..111
+// against 115 on board 1, 34..153 against 170 here - so no key cell is ever
+// inside the region drawKbText owns.
+void kbClearBubble() {
+  if (!kbBubOn) return;
+  const int bx = kbBubX, by = kbBubY;
+  kbBubOn = false;
+  const int cardBot = KB_TEXT_Y + KB_TEXT_H;
+  // The first row of the bubble that the card does NOT own. drawKbBubble's clamp
+  // keeps by strictly below KB_TEXT_Y, so the card can only ever claim rows from
+  // the bubble's TOP; there is no case where the card sits inside it.
+  const int botY = by < cardBot ? cardBot : by;
+  if (by + KB_BUB_H > botY)
+    tft.fillRect(bx, botY, KB_BUB_W, by + KB_BUB_H - botY, COLOR_BG);
+  if (by < cardBot) {
+    const int h = botY - by, cardRight = CARD_X + CARD_W;
+    if (bx < CARD_X)                  tft.fillRect(bx, by, CARD_X - bx, h, COLOR_BG);
+    if (bx + KB_BUB_W > cardRight)    tft.fillRect(cardRight, by, bx + KB_BUB_W - cardRight, h, COLOR_BG);
+    // AND THE CARD'S TWO BOTTOM CORNER NOTCHES, WHICH drawKbText() DOES NOT PUT
+    // BACK. uiFillRound does not write every pixel of its bounding box: real
+    // TFT_eSPI's fillSmoothRoundRect `continue`s on `hyp2 >= r2` and PanelShim's
+    // blendPixel returns on `coverage <= 0.001f`, so at r = KB_TEXT_R the pixels
+    // outside the curve keep whatever was already there. SIMULATED against both
+    // implementations rather than reasoned about - per corner, 6 pixels at
+    // coverage EXACTLY 0 and 8 more at partial coverage:
+    //   board 1 bottom-left  x 12..17, y 106..111:  (12,109) (12,110) (13,110)
+    //                                               (12,111) (13,111) (14,111)
+    //   board 2 bottom-left  x 12..17, y 148..153:  the same six shape, 42px down
+    // and mirrored at each bottom-right (227.. / 307..).
+    //
+    // A row-0 bubble on column 0, 1, 8 or 9 covers those, so without this the
+    // press leaves COLOR_ACCENT stuck in the card's corner notches until the next
+    // fillScreen - which is the defect 2849f42 measured at the key caps, 12px
+    // lower and one commit later. On board 1 only the six coverage-0 pixels are
+    // wrong, because TFT_eSPI composites the partial ones against the `behind`
+    // VALUE it is handed; on board 2 all fourteen are, because PanelShim ignores
+    // `behind` and blends against the shadow framebuffer.
+    //
+    // SO IT IS NOT GUARDED TO ONE BOARD, unlike uiKeyCap's flat fill - here both
+    // boards are wrong. Nor is it the clear-then-redraw the clip above exists to
+    // avoid: it touches 2 x KB_TEXT_R x KB_TEXT_R pixels whose SETTLED value is
+    // COLOR_BG for the six that matter, and drawKbText() blends the curve back
+    // over it on the very next line.
+    //
+    // WHAT THIS DOES NOT FIX, WRITTEN DOWN RATHER THAN LEFT TO BE REDISCOVERED:
+    // on board 2 the card's four corner AA pixels drift a little every time
+    // drawKbText() is called, because PanelShim blends against the framebuffer
+    // and the card is repainted on every keystroke by kbInsert() - so a corner
+    // pixel that should stay a partial blend of COLOR_CARD over COLOR_BG creeps
+    // toward solid COLOR_CARD. SIMULATED: 32 corner pixels move, saturating at
+    // 15/255 on the worst channel after ~5 repaints, i.e. the rounded corner ends
+    // up about a pixel sharper. That is a DIFFERENT defect from this one - it
+    // predates the bubble, it is not COLOR_ACCENT, it affects all four corners
+    // including the two no bubble can reach, and its fix is drawKbText's, not
+    // kbClearBubble's. Board 1 does not have it: real TFT_eSPI composites against
+    // the `behind` VALUE it is handed, so its corners are recomputed every time.
+    const int notchY = cardBot - KB_TEXT_R;
+    if (by + KB_BUB_H > notchY) {
+      const int ny = by > notchY ? by : notchY, nh = cardBot - ny;
+      if (bx < CARD_X + KB_TEXT_R && bx + KB_BUB_W > CARD_X)
+        tft.fillRect(CARD_X, ny, KB_TEXT_R, nh, COLOR_BG);
+      if (bx < cardRight && bx + KB_BUB_W > cardRight - KB_TEXT_R)
+        tft.fillRect(cardRight - KB_TEXT_R, ny, KB_TEXT_R, nh, COLOR_BG);
+    }
+    drawKbText();
+  }
+  for (int r = 0; r < 3; r++) {
+    const int ry = kbRowY(r);
+    if (ry + KB_ROW_H <= by || ry >= by + KB_BUB_H) continue;
+    for (int c = 0; c < kbRowLen(r); c++) {
+      const int cx = kbRowX0(r) + c * KB_PITCH;
+      if (cx + KB_PITCH <= bx || cx >= bx + KB_BUB_W) continue;
+      // The CURRENT arm, not the old one: on a slide the new key may sit under
+      // the bubble being cleared, and it has to come back PRESSED.
+      drawKbKey(r, c, r == kbArmRow && c == kbArmCol);
+    }
+  }
+}
+
+// Draw the bubble for (r, col). Assumes the previous one is already cleared -
+// kbSetArm owns that ordering so it happens exactly once per re-target.
+void drawKbBubble(int r, int col) {
+  if (r < 0 || r > 2 || col < 0 || col >= kbRowLen(r)) return;
+  char label[8];
+  kbKeyLabel(kbRow(r)[col], label, sizeof(label));
+  int x = kbRowX0(r) + col * KB_PITCH + KB_KEY_W / 2 - KB_BUB_W / 2;
+  if (x < 0) x = 0;
+  if (x > tft.width() - KB_BUB_W) x = tft.width() - KB_BUB_W;
+  int y = kbRowY(kbBubbleRow(r));
+  // THE CLAMP, WRITTEN DOWN rather than reasoned about, and REWRITTEN now that
+  // the bubble is allowed onto the card. What it used to guard - "a bubble that
+  // reached KB_TEXT_Y would paint over the card and the card's change-only cache
+  // would have to be busted" - was a fear about a cache that does not exist:
+  // drawKbText() repaints the card wholesale, so kbClearBubble() just calls it.
+  // What is still a real failure is the bubble reaching the card's TOP EDGE or
+  // the prompt strip above it, because neither is restored by anything on this
+  // path. So the floor is one bubble-height BELOW KB_TEXT_Y: the card's top
+  // KB_ROW_H rows - the byte counter, the countdown and the first text line -
+  // are never covered, and the strip (which ends at KB_STRIP_Y + KB_STRIP_H,
+  // 21 on board 1 and 26 here, both above KB_TEXT_Y) is out of reach by
+  // construction. MEASURED, not assumed: the natural position for a row-0
+  // bubble is y 74 on board 1 (floor 65, card 24..111, strip ends 21) and
+  // y 112 here (floor 92, card 34..153, strip ends 26), so the clamp does not
+  // move today's geometry on either board - it is insurance against a future
+  // row count or a taller row, and settings-geom-check.mjs asserts the margin.
+  if (y < KB_TEXT_Y + KB_BUB_H) y = KB_TEXT_Y + KB_BUB_H;
+  if (y + KB_BUB_H > kbRowY(3)) y = kbRowY(3) - KB_BUB_H;
+  kbBubX = x; kbBubY = y; kbBubOn = true;
+  // Flat fill FIRST so uiFillRound's anti-aliased corners blend against the
+  // colour they are told they sit on. `behind` is COLOR_BG everywhere else on
+  // this screen, but the bubble lands on COLOR_CARD key caps - without this the
+  // four corners would ring with a halo of the wrong background.
+  tft.fillRect(x, y, KB_BUB_W, KB_BUB_H, COLOR_BG);
+  uiFillRound(x, y, KB_BUB_W, KB_BUB_H, KB_KEY_R, COLOR_ACCENT, COLOR_BG);
+  setUIFont(T_HEAD);          // the mock's font 3: the rung above the key's own
+  tft.setTextColor(COLOR_BG, COLOR_ACCENT);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(label, x + KB_BUB_W / 2, y + KB_BUB_H / 2);
+  tft.setTextDatum(TL_DATUM);
 }
 
 // HARD wrap, deliberately unlike drawWrappedText's word wrap - see the KB_COLS
@@ -113,6 +393,120 @@ void drawKbHardWrapped() {
 
 const unsigned long KB_REPEAT_DELAY_MS = 500;   // hold this long before repeating
 const unsigned long KB_REPEAT_EVERY_MS = 120;   // then ~8 deletions a second
+// HOW LONG ROW 3'S KEYS STAY LIT. All three of them hold for this now - the page
+// key always did, and SPACE / "." were left relying on kbInsert()'s card repaint
+// to time their own flash, which is microseconds of shadow-buffer work, not a
+// duration anybody can see. That was parked as "the next lever" and this is it.
+//
+// 60ms WAS NOT ENOUGH AND A PERSON SAID SO. The pressed state genuinely reached
+// the panel after the flush fix below landed, and the user still reported no
+// visible flash on SPACE and ?123. 60ms is under four frames at 60Hz, spent with
+// a fingertip parked on the key that is flashing; a state change that brief reads
+// as nothing happening. 120ms is the value now, and the budget it is checked
+// against is measured, not guessed:
+//   - PERF on this panel: a FULL-screen flush is 17.6ms (gather 8.4 + transfer
+//     9.2, 15 strips of 32 lines). Row 3's band is 58px, so its dirty-rect flush
+//     is 2 of those strips - about 2.4ms - and the page key's full repaint pays
+//     the whole 17.6ms. Either way the hold is what dominates: at 120ms at least
+//     100ms of lit key survives even the worst case.
+//   - Against typing rate: this is BLOCKING, and deliberately so (handleTouch
+//     polls at 15ms; the alternative is a deferred-unpress timer threaded through
+//     loop() for three keys). It costs 120ms only on SPACE, "." and the page key,
+//     against 300-500ms between thumb presses on a 30px key - under a third of
+//     the gap, and nothing on the character rows, which release-commit already
+//     holds lit for as long as the finger is down.
+// THE KEYSTROKE IS NOT DELAYED BY IT. kbInsert() runs BEFORE the hold and is
+// flushed with the key still lit, so the character appears immediately and the
+// flash outlives it rather than preceding it.
+const unsigned long KB_FLASH_MS = 120;
+// AND THE FLASH HAS TO REACH THE GLASS, WHICH ON BOARD 2 IS A SEPARATE ACT.
+// PanelShim composes into a PSRAM shadow framebuffer and only a flush pushes it,
+// and the only flushes on this screen are at the end of drawKeyboard() and the
+// end of loop(). All three of row 3's flashes are drawn AND erased inside one
+// handleTouch() call, so the loop-end flush pushed the state AFTER the erase and
+// the pressed row was never on the panel at all - correct ordering, invisible
+// result. The character rows escape this only because release-commit holds an
+// armed key PRESSED across many loop iterations, so the loop-end flush pushes
+// it; press-commit draws and erases within one call and has nothing to ride on.
+//
+// IT WAS INVISIBLE TO EVERY INSTRUMENT WE HAVE. SCREENSHOT reads the same shadow
+// buffer the renderer just wrote, so a capture shows the flash whether or not
+// the glass ever did - the trap CLAUDE.md names - and the checker asserted the
+// draw ORDER, which the code already satisfied. Only a person looking at the
+// panel could have caught it, and one did.
+//
+// A macro, not a helper function, so the #if guards ONE statement rather than
+// duplicating a whole one per arm - the shape that leaves brace-counting tools
+// seeing more { than }. Board 1 draws through real TFT_eSPI and needs none.
+#if !BOARD_USES_TFT_ESPI
+#define KB_FLASH_PUSH() tft.flush()
+#else
+#define KB_FLASH_PUSH() ((void) 0)
+#endif
+
+// AND IT MUST NOT BLOCK, WHICH IS WHY THIS IS A DEADLINE AND NOT A delay().
+// The first version of the longer hold was `delay(KB_FLASH_MS)` in the touch
+// handler, and at 120ms that is long enough to LOSE A KEYSTROKE WITH NO TRACE:
+// handleTouch has no queue and edge-detects on `wasTouching`, so a lift followed
+// by the next press INSIDE the delay is never seen as a lift at all, and the
+// second press is silently dropped. The ordering was right - the character was
+// inserted and flushed before the hold - but the hold itself was the hazard, and
+// a dropped character on a keyboard is the worst failure this surface has.
+//
+// So the flash is armed with a deadline and released on a later poll, exactly
+// the shape tickKbRepeat() already uses for DEL's hold: it re-samples every tick
+// rather than blocking. The press stays instant, the flash still lasts
+// KB_FLASH_MS, and nothing can miss an edge because nothing blocks.
+//
+// millis() ROLLOVER is handled by the signed difference, not by `millis() <
+// kbFlashUntil`: at 49.7 days the naive comparison leaves the flash stuck on
+// until the deadline is reached again. `(long)(now - until) < 0` is correct
+// across the wrap.
+// One variable, not two: the release draws drawKbRow3(-1), which un-presses the
+// whole row, so WHICH key was lit is not state anybody needs afterwards - and an
+// unread `kbFlashKey` would be exactly the kind of thing that looks load-bearing
+// to the next reader.
+unsigned long kbFlashUntil = 0;    // 0 = nothing lit; otherwise the release time,
+                                   // and ALWAYS ODD - see kbFlashArm
+
+// Set the deadline. The DRAW is the caller's, because the page key has to draw
+// its flash AFTER drawKeyboard()'s fillScreen while the SPACE arm draws its
+// before kbInsert(); only the timing is shared.
+//
+// THE `| 1` IS THE SENTINEL, NOT AN OFFSET, and it is the other half of the
+// rollover the comment above claims to have handled. The signed comparison in
+// tickKbFlash is genuinely correct across the wrap; what is not is that 0 is
+// reserved for "nothing lit" and `millis() + KB_FLASH_MS` IS exactly 0 for one
+// millisecond every 49.7 days. In that window tickKbFlash's `if (!kbFlashUntil)
+// return;` never releases and row 3 stays inverted until the next
+// drawKeyboard(). Forcing the low bit makes every armed deadline odd, so it can
+// never BE the sentinel; the cost is a flash up to 1ms long, under a hundredth
+// of KB_FLASH_MS. A second `bool kbFlashArmed` would also work and was rejected:
+// two variables that can disagree, where one invariant on one variable cannot.
+void kbFlashArm() {
+  kbFlashUntil = (millis() + KB_FLASH_MS) | 1;
+}
+
+// Release it. Called every tick from loop(), next to tickKbRepeat and for the
+// same reason: handleTouch dispatches on PRESS and cannot come back on its own.
+//
+// The composeOnKeys() / kbPeekPage guards are not defensive tidying. Closing the
+// surface or raising the peek inside the 120ms window would otherwise have this
+// paint a row of keys onto whatever screen replaced them - closeCompose() also
+// disarms it, and this is the second half of that pair, for the peek, which does
+// not close the surface.
+//
+// IT ASKS FOR THE KEY SCREEN AND NOT FOR THE SURFACE, and that got sharper with
+// Task 11: the keyboard's left key is now BACK, so the reply panel is 120ms of
+// finger travel away from a row-3 press rather than a whole screen transition
+// away. On composeActive alone, a SPACE followed inside the window by BACK would
+// paint the keyboard's row 3 across the panel's recents legend and action band.
+void tickKbFlash() {
+  if (!kbFlashUntil) return;
+  if ((long) (millis() - kbFlashUntil) < 0) return;
+  kbFlashUntil = 0;
+  if (composeOnKeys() && kbPeekPage < 0) drawKbRow3(-1);
+}
 
 // Peek geometry: it covers the KEYS and the action row, never the text card - so
 // the answer you are composing stays on screen while you re-read the question.
@@ -125,8 +519,8 @@ bool kbIsMessage() { return kbMessageMode; }
 bool kbHasDetail() {
   // Never in message mode: there is no ask to read, and the detail screen this was
   // opened from already shows the title, last prompt and path. Suppressing it here
-  // also suppresses the "tap here to read it" hint, so no control is advertised
-  // that would do nothing.
+  // also suppresses the strip, the "tap the prompt above to read it" hint and the
+  // strip's own tap band, so no control is advertised that would do nothing.
   if (kbIsMessage()) return false;
   return kbSessionIdx >= 0 && kbSessionIdx < sessionCount
          && sessions[kbSessionIdx].askDetail[0] != '\0';
@@ -140,8 +534,81 @@ int kbPeekPages() {
   return (lines + KB_PEEK_LINES - 1) / KB_PEEK_LINES;
 }
 
+// THE PROMPT STRIP: one line of the ask, above the text card, that never leaves.
+//
+// WHAT IT FIXES. Re-reading the question meant opening the peek, and the peek
+// covers the keys AND routes every tap on the board to its own pager - so the
+// question and the keyboard could not be on the glass at the same time, and the
+// only way out was to tap past the last page. The card showed the question too,
+// but only with an empty buffer: the first keystroke replaced it with your own
+// text. One line of it lives up here now instead, for the whole session.
+//
+// It is ONE LINE and it stops at the first '\n' RATHER THAN RUNNING THROUGH IT.
+// askDetail keeps its newlines (deckhand_display.ino scrubs every other control
+// byte and spares '\n' for drawWrappedText), and the fonts carry ASCII 0x20..0x7E
+// and nothing else: a '\n' handed to drawString paints nothing AND advances
+// nothing, so the second line would be drawn hard against the end of the first
+// with no separator - and textWidth would measure the break as zero, so the
+// truncation would be measured wrong as well as drawn wrong.
+//
+// The MORE tag's lane is reserved WHETHER OR NOT the tag is drawn, so the point
+// the text truncates at does not jump about as the tag comes and goes; "there is
+// more" is then exactly "the detail did not fit in that lane", plus the newline
+// case above.
+const char* KB_STRIP_MORE = "MORE";
+
+void drawKbStrip() {
+  // PAINTED UNCONDITIONALLY, not through a change-only cache, and that is
+  // deliberate. Its value cannot change while it is up - the ask is pinned by pid
+  // for the life of the keyboard - so a cache would buy nothing and would be one
+  // more thing to reset when drawKeyboard() fillScreens over the strip, which is
+  // exactly how drawSettingsStatic() and micRestoreUi() left fields BLANK. It is
+  // called from drawKeyboard() and from the ONE transition that can invalidate it
+  // (the ask going away, in the 5s tick), never per keystroke: drawKbText()
+  // repaints the CARD only, from KB_TEXT_Y down, so nothing about typing touches
+  // these rows and nothing here caches across the two.
+  tft.fillRect(CARD_X, KB_STRIP_Y, CARD_W, KB_STRIP_H, COLOR_BG);
+  // Same gate as the peek and as the card's hint, so no control is advertised
+  // that would do nothing: with no ask to read there is no text here and
+  // kbTouch's strip branch has no target.
+  if (!kbHasDetail()) return;
+  SessionInfo& sn = sessions[kbSessionIdx];
+  const int y = KB_STRIP_Y + KB_STRIP_TEXT_DY;
+  // setUIFont BEFORE every measurement: textWidth and fitText both measure the
+  // LIVE font, and measuring in one and drawing in another is the bug fitText's
+  // own signature is shaped to prevent.
+  setUIFont(T_META);
+  const int tagW = tft.textWidth(KB_STRIP_MORE) + 6;   // + the 6px gap it keeps
+  char buf[KB_COLS + 8];
+  int n = 0;
+  while (sn.askDetail[n] && sn.askDetail[n] != '\n' && n < (int) sizeof(buf) - 1) n++;
+  memcpy(buf, sn.askDetail, n);
+  buf[n] = '\0';
+  bool more = sn.askDetail[n] != '\0';       // a newline, or a longer detail, follows
+  char line[KB_COLS + 8];
+  setUIFont(T_BODY);
+  fitText(line, sizeof(line), buf, CARD_W - 12 - tagW);   // three ASCII dots, never U+2026
+  if ((int) strlen(line) != n) more = true;   // ...or it had to be cut to fit
+  tft.setTextColor(COLOR_VALUE, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(line, CARD_X + 6, y);
+  if (more) {
+    setUIFont(T_META);
+    tft.setTextColor(COLOR_LABEL, COLOR_BG);
+    tft.setTextDatum(TR_DATUM);
+    tft.drawString(KB_STRIP_MORE, CARD_X + CARD_W - 6, y);
+    tft.setTextDatum(TL_DATUM);
+  }
+}
+
 // The prompt, over the keys. Paged by tapping, because an ask detail runs to 1400
-// characters against 13 lines - the same reason the ask screen itself pages.
+// characters against KB_PEEK_LINES of them (11 on board 1 since the strip shortened
+// the overlay, 15 on board 2) - the same reason the ask screen itself pages.
+//
+// IT IS NO LONGER THE ONLY WAY TO RE-READ THE QUESTION. drawKbStrip() keeps one
+// line of the ask above the card at all times, so the peek is now the LONG read
+// rather than the only read - which is what makes it acceptable that, while it is
+// up, kbTouch routes every tap to its pager.
 void drawKbPeek() {
   if (kbSessionIdx < 0 || kbSessionIdx >= sessionCount) return;
   SessionInfo& sn = sessions[kbSessionIdx];
@@ -205,7 +672,7 @@ void tickKbRepeat() {
 // rather than through drawIfChanged - the text changes on every keystroke, so a
 // change-only cache would buy nothing and would need to be as long as the buffer.
 void drawKbText() {
-  uiFillRound(CARD_X, KB_TEXT_Y, CARD_W, KB_TEXT_H, 6, COLOR_CARD, COLOR_BG);
+  uiFillRound(CARD_X, KB_TEXT_Y, CARD_W, KB_TEXT_H, KB_TEXT_R, COLOR_CARD, COLOR_BG);
   // Meta row: byte counter left, countdown right, both anchored to KB_META_Y -
   // a row no text line ever occupies (see the header comment). The byte counter
   // turns amber at the cap, so a key that stops inserting has a visible reason
@@ -257,24 +724,36 @@ void drawKbText() {
     tft.setTextDatum(TL_DATUM);
     tft.drawString(line, CARD_X + 6, KB_LINE0_Y);
     if (kbHasDetail()) {
+      // NAMES THE STRIP, not this card. It said "tap here to read it" while a tap
+      // on the card was what opened the peek; kbTouch's card branch is the caret
+      // now (with an empty buffer there is nothing to place, so the tap does
+      // nothing at all), and the strip above carries the peek. A hint that points
+      // at a control that has moved is worse than none: it teaches the one
+      // gesture that no longer works.
       setUIFont(T_META);
       tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-      tft.drawString("tap here to read it", CARD_X + 6, KB_LINE0_Y + KB_LINE_PITCH);
+      tft.drawString("tap the prompt above to read it", CARD_X + 6,
+                     KB_LINE0_Y + KB_LINE_PITCH);
     }
   } else {
     drawKbHardWrapped();
     // Caret: a block at the insertion point, so the card reads as focused and it
-    // is obvious where the next character lands. Its position is PROVABLE rather
-    // than clamped: at kbLen == KB_MAX_BYTES the furthest it can reach is line
-    // KB_MAX_BYTES / KB_COLS, column KB_MAX_BYTES % KB_COLS, and KB_TEXT_LINES is
-    // ceil(KB_MAX_BYTES / KB_COLS) - so the line index is always inside the
-    // budget by construction, on any KB_COLS. The two boards land on line 4 col 14
-    // and line 4 col 10; settings-geom-check.mjs asserts it per board.
+    // is obvious where the next character lands. kbCaret == -1 means "pinned to
+    // the end" (the state after openCompose and after every append typed with
+    // no tap yet), so it draws at kbLen exactly as before; once a tap in the card
+    // has set it, it draws there instead. Either way its position is PROVABLE
+    // rather than clamped: it is always <= kbLen <= KB_MAX_BYTES, so the furthest
+    // it can ever reach is line KB_MAX_BYTES / KB_COLS, column KB_MAX_BYTES %
+    // KB_COLS, and KB_TEXT_LINES is ceil(KB_MAX_BYTES / KB_COLS) - so the line
+    // index is always inside the budget by construction, on any KB_COLS. The two
+    // boards land on line 4 col 14 and line 4 col 10 at that furthest point;
+    // settings-geom-check.mjs asserts it per board.
     // Its x step and its own size come from TEXT_ADV and KB_LINE_PITCH rather than
     // the literals 6 and 11 they used to be - a caret 6px wide stepping 6px at a
     // time under an 8px face lands under the wrong character and is thinner than
     // the glyph it marks. 6/11 on board 1, 8/14 here.
-    int cl = kbLen / KB_COLS, cc = kbLen % KB_COLS;
+    int off = kbCaret < 0 ? kbLen : kbCaret;
+    int cl = off / KB_COLS, cc = off % KB_COLS;
     if (cl < KB_TEXT_LINES)
       tft.fillRect(CARD_X + 6 + cc * TEXT_ADV, KB_LINE0_Y + cl * KB_LINE_PITCH + 1,
                    TEXT_ADV, KB_LINE_PITCH - 2, COLOR_ACCENT);
@@ -282,50 +761,100 @@ void drawKbText() {
   tft.setTextDatum(TL_DATUM);
 }
 
+// THE TESTED BANDS, written by drawKbActions() and read by kbTouch(). Two
+// functions computing `halfW` inline is exactly the disagreement kbRowX0()'s
+// comment warns about; uiActionRow() is now the single place either one gets a
+// column from, and these are where the answer is kept. Zero-width until the row
+// has been drawn once, which kbTouch() treats as "no control here" rather than
+// as column 0.
+const int KB_ACT_COLS = 2;
+int kbActX[KB_ACT_COLS] = {0, 0}, kbActW[KB_ACT_COLS] = {0, 0};
+
 void drawKbActions() {
-  int halfW = (tft.width() - CARD_X * 2 - 8) / 2;
   // OUTLINED, where both buttons used to be filled and so had no hierarchy.
-  // SEND is what you came here to do, and CANCEL is the one that throws away a
-  // sentence you spent a minute typing - the same reasoning the confirm dialog
-  // uses when it refuses to make a destructive choice the easiest thing to hit.
-  uiButton(CARD_X, KB_ACT_Y, halfW, KB_ACT_H, "CANCEL", COLOR_ACCENT, false, COLOR_BG);
+  // SEND is what you came here to do, and it is not the same SIZE either: fracs
+  // {1, 2} gives SEND twice the width, where the two used to be equal halves 8px
+  // apart.
+  //
+  // THE LEFT KEY IS **BACK**, AND THAT IS THE POINT OF PAIRING THE TWO SCREENS.
+  // Standalone, this keyboard's left key was CANCEL/DISCARD - a control that
+  // threw away a sentence you spent a minute typing, sitting immediately beside
+  // SEND on a screen whose every key already misses this repo's fingertip floor.
+  // Leaving compose is the REPLY PANEL's job now (its own row carries CLOSE, and
+  // DISCARD when there is a draft to lose), so the destructive control is not on
+  // this screen at all and BACK returns to the panel with the draft intact.
+  //
+  // THE ONE EXCEPTION IS A MESSAGE TO A READY SESSION, which has no ask and so no
+  // panel behind it - composeHasPanel() asks that of the surface rather than of a
+  // third flag. There the keyboard IS the root, so the left key has to be the way
+  // out, and it says which: LABEL AND COLOUR, never colour alone (kbKeyLabel's
+  // CAPS/CAP comment states the rule) - DISCARD in COLOR_WARN with a draft to
+  // lose, CANCEL when there is nothing to destroy.
+  const bool draft = kbLen > 0;
+  const bool back = composeHasPanel();
+  const char* labels[KB_ACT_COLS] = { back ? "BACK" : (draft ? "DISCARD" : "CANCEL"),
+                                      kbWindowClosed ? nullptr : "SEND" };
+  // An empty answer would reach Claude as a blank deny message, which reads as
+  // a refusal with no reason. Offer SEND only when there is something to send.
+  const uint16_t tints[KB_ACT_COLS] = { (!back && draft) ? COLOR_WARN : COLOR_ACCENT,
+                                        draft ? COLOR_GOOD : COLOR_LABEL };
+  const uint8_t fills[KB_ACT_COLS] = { 0, (uint8_t)(draft ? 1 : 0) };
+  const uint8_t fracs[KB_ACT_COLS] = {1, 2};
+  uiActionRow(KB_ACT_Y, KB_ACT_H, KB_ACT_DRAWN, KB_ACT_DY, labels, tints, fills,
+              fracs, KB_ACT_COLS, kbActX, kbActW);
   if (kbWindowClosed) {
     // The prompt expired or was answered on the Mac. The text STAYS - throwing
     // away a sentence someone spent a minute on, with no explanation, is the
     // worst outcome available here - but SEND is withheld because it cannot work.
-    // The message is 34 characters (204px on board 1, 272 here) but its lane -
-    // right of CANCEL, clear of the 8px gap - is only halfW (104px on board 1,
-    // 144 here) wide: a single MC_DATUM
-    // line here used to run off the screen edge AND rub out CANCEL's right
-    // half with its own opaque background box. Wrapped to the lane instead,
-    // same rule CLAUDE.md states for the confirm dialog's card text. Measured
-    // (see the task report): wraps to exactly 3 lines on BOTH boards - 39px in
-    // board 1's 44px row, 48px in board 2's 58px one - with room to spare.
-    int laneX = CARD_X + halfW + 8, laneW = CARD_W - halfW - 8;
+    // The message is 34 characters (204px on board 1, 272 here) and its lane is
+    // SEND's OWN COLUMN, taken from what uiActionRow() just returned rather than
+    // re-derived: a single MC_DATUM line here used to run off the screen edge AND
+    // rub out CANCEL's right half with its own opaque background box. Wrapped to
+    // the lane instead, same rule CLAUDE.md states for the confirm dialog's card
+    // text. It was halfW - 104px on board 1, 144 here - and is now the wider
+    // SEND column: 139 and 192, less the 4px inset on each side.
+    const int laneX = kbActX[1], laneW = kbActW[1];
     // Clear first: SEND (a full uiButton fill) or an earlier draw of this same
     // message may have left pixels here that the new wrapped text won't cover -
-    // it's narrower than the lane at every line.
+    // it's narrower than the lane at every line. The clear is the full BAND,
+    // not the drawn button: uiActionRow only ever inks the button, so anything
+    // left in the 7px above or below it would survive a smaller clear.
     tft.fillRect(laneX, KB_ACT_Y, laneW, KB_ACT_H, COLOR_BG);
     // In message mode the prompt did not expire - the SESSION stopped being READY,
     // and "answer on your Mac" would be answering a question nobody asked.
     const char* why = kbIsMessage() ? "NO LONGER READY" : "WINDOW CLOSED - ANSWER ON YOUR MAC";
     // MEASURED, not hardcoded. This was `const int lines = 3;` beside a comment
     // telling the next person to re-measure when the string changed - exactly the
-    // instruction that gets missed, and there are two strings now.
+    // instruction that gets missed, and there are two strings now. RE-MEASURED
+    // for the wider lane and the shorter box: 2 lines on both boards, which is
+    // 26px in board 1's KB_ACT_DRAWN 26 and 32px in board 2's 32 - exactly full,
+    // and settings-geom-check.mjs asserts that against KB_ACT_DRAWN per board.
     int lines = countWrappedLines(why, T_META, laneW - 8);
-    int y = KB_ACT_Y + (KB_ACT_H - lines * KB_LINE_PITCH) / 2;
+    // Centred in the DRAWN box, not the band: the message stands where the SEND
+    // button it replaces stood, so the row keeps one baseline.
+    int y = KB_ACT_Y + KB_ACT_DY + (KB_ACT_DRAWN - lines * KB_LINE_PITCH) / 2;
     drawWrappedText(why, laneX + 4, y, T_META, KB_LINE_PITCH, laneW - 8, 0, lines,
                     COLOR_WARN, COLOR_BG);
-  } else {
-    // An empty answer would reach Claude as a blank deny message, which reads as
-    // a refusal with no reason. Offer SEND only when there is something to send.
-    uiButton(CARD_X + halfW + 8, KB_ACT_Y, halfW, KB_ACT_H, "SEND",
-             kbLen > 0 ? COLOR_GOOD : COLOR_LABEL, kbLen > 0, COLOR_BG);
   }
 }
 
 void drawKeyboard() {
+  // A full repaint erases the bubble's pixels, so the record of where it was has
+  // to go with them - otherwise the next kbClearBubble() would repaint three
+  // keys over a board that no longer has a bubble on it.
+  kbBubOn = false;
+  // THE COMPOSE SURFACE HAS TWO SCREENS AND THIS IS THE ONE ENTRY POINT TO BOTH.
+  // openComposeOn()'s last act is a call to this function, having already set the
+  // screen - and TYPE.../BACK are then a flag flip and one call to here, with the
+  // draft (kbText/kbLen/kbCaret) untouched by either. Routing at the top rather
+  // than painting the keyboard and then the panel over it: that would be a
+  // full-screen double paint, visible on board 1.
+  if (composeOnPanel()) { drawCompose(); return; }
   tft.fillScreen(COLOR_BG);
+  // BEFORE the peek's early return: the peek covers the keys from KB_ROWS_Y down
+  // and never the card or the strip, so the question stays legible above it and
+  // the strip does not have to be redrawn when the peek closes.
+  drawKbStrip();
   drawKbText();
   if (kbPeekPage >= 0) {
     drawKbPeek();   // the peek owns the keys' area
@@ -343,42 +872,87 @@ void drawKeyboard() {
 #endif
 }
 
-void openKeyboard(int idx) {
-  kbActive = true;
+// ---------------------------------------------------------------------------
+// OPENING THE SURFACE. EVERY RESET LIVES IN THIS ONE FUNCTION - the draft, the
+// keyboard's modes, the panel's four globals, and WHICH SCREEN the surface opens
+// on. The screen is an ARGUMENT and not something the caller sets before or
+// after the call: set before, it is a second list of things to remember at every
+// entry point; set after, the surface paints one screen and then paints the
+// other over it, which is a full-screen double paint and visible on the board
+// that draws straight to the glass.
+//
+// It is deliberately not called directly from anywhere. The two public openers
+// below name their screen, so a call site reads as the screen it lands on.
+// ---------------------------------------------------------------------------
+void openComposeOn(int idx, uint8_t screen) {
+  if (idx < 0 || idx >= sessionCount) return;
+  composeActive = true;
+  composeScreen = screen;
+  kbArmRow = kbArmCol = -1;
+  kbBubOn = false;
   kbSessionIdx = idx;
   kbLen = 0;
   kbText[0] = '\0';
+  kbCaret = -1;                 // pinned to the end until a tap in the card moves it
   kbShiftMode = 0;
-  kbSymbols = false;
+  kbPage = 0;
   // Cleared here so an ANSWER can never inherit message mode from an earlier open.
   kbMessageMode = false;
   kbSessionId[0] = '\0';
   kbPeekPage = -1;
   kbRepeatRow = kbRepeatCol = -1;
   kbWindowClosed = false;
+  composeResetPanel();          // the reply panel's four, defined in compose.ino
   copyField(kbPid, sizeof(kbPid), sessions[idx].askPid);
   kbHostSlot = sessions[idx].hostSlot;
-  drawKeyboard();
+  drawKeyboard();               // routes on composeScreen - one entry, both screens
 }
 
+// THE ROOT. Answering an ask starts on the reply panel, because most answers are
+// not prose: an option is one tap, a token the question already printed is one
+// tap, and the keyboard is the sheet behind TYPE... for the case that really is
+// a sentence. This is what the detail card's TYPE button now reaches.
+void openCompose(int idx) { openComposeOn(idx, COMPOSE_SCREEN_PANEL); }
+
+// STRAIGHT TO FREE TEXT, skipping the root. Used by KBTEST, which exists to put
+// the KEY BAND on the glass for a capture, and by the message opener below - a
+// message to a READY session has no ask, so there are no options and no tokens
+// and there is no panel to be the root of.
+void openComposeKeys(int idx) { openComposeOn(idx, COMPOSE_SCREEN_KEYS); }
+
 // Compose a MESSAGE to a READY session rather than an answer to a pending ask.
-// Goes through openKeyboard first so every reset lives in one place, then switches
-// the mode and repaints - the placeholder and the meta row both differ.
-void openKeyboardForMessage(int idx) {
+// Goes through the opener above so every reset still lives in one place, then
+// switches the mode and repaints - the placeholder and the meta row both differ.
+void openComposeForMessage(int idx) {
   if (idx < 0 || idx >= sessionCount) return;
-  openKeyboard(idx);
+  openComposeKeys(idx);
   kbMessageMode = true;
   kbPid[0] = '\0';                 // there is no pending prompt to pin to
   copyField(kbSessionId, sizeof(kbSessionId), sessions[idx].id);
   drawKeyboard();
 }
 
-void closeKeyboard() {
-  kbActive = false;
+void closeCompose() {
+  // Before composeActive goes false: kbProbeStop's totals are the measurement, and a
+  // BACK tap in the middle of a typing pass would otherwise throw them away.
+  kbProbeStop("keyboard closed");
+  // BOTH SCREENS OF THE COMPOSE SURFACE GO AT ONCE, and this line is not
+  // optional: composeScreen is what drawKeyboard() and handleTouch() dispatch on,
+  // so leaving it on the keyboard would mean the NEXT surface opened at the root
+  // painted the panel and then routed every tap on it to kbTouch - a screen that
+  // no longer matches its router, which is precisely the class of bug this
+  // function's long comment below records. Reset to the ROOT rather than to
+  // "whatever it was", so the surface always reopens where it is defined to.
+  composeScreen = COMPOSE_SCREEN_PANEL;
+  kbArmRow = kbArmCol = -1;    // a press cannot survive the screen it landed on
+  kbBubOn = false;             // the fillScreen below takes the pixels with it
+  composeActive = false;
   kbMessageMode = false;
   kbSessionId[0] = '\0';
   kbPeekPage = -1;
   kbRepeatRow = kbRepeatCol = -1;
+  kbFlashUntil = 0;            // a pending row-3 flash must not draw onto the
+                               // screen that replaces the keyboard
   int idx = kbSessionIdx;
   kbSessionIdx = -1;
   kbPid[0] = '\0';
@@ -423,24 +997,56 @@ void closeKeyboard() {
   renderFooter();
 }
 
+// Both of these act AT kbCaret, splicing rather than appending, so a correction
+// forty characters back no longer costs forty re-taps of DEL plus forty re-taps
+// to retype the tail. kbCaret == -1 ("pinned to the end") is handled by pointing
+// pos at kbLen, which reproduces the old append-only/trim-only behaviour exactly
+// - and it STAYS -1 afterwards, rather than becoming a stated offset that happens
+// to equal kbLen, so the pin survives every keystroke until a tap ends it.
+
 void kbInsert(char c) {
-  if (kbLen >= KB_MAX_BYTES) { drawKbText(); return; }  // repaint so the counter shows why
+  // Repaint so the counter shows why - and on the panel, so the draft line does:
+  // the cap is the one thing on this path that can make a tap do nothing, and a
+  // key (or a chip) that stops inserting with no visible reason reads as a
+  // dropped press.
+  if (kbLen >= KB_MAX_BYTES) {
+    if (composeOnPanel()) composeAfterEdit();
+    else drawKbText();
+    return;
+  }
   if (kbShiftMode > 0 && c >= 'a' && c <= 'z') c -= 32;
-  kbText[kbLen++] = c;
-  kbText[kbLen] = '\0';
+  int pos = kbCaret < 0 ? kbLen : kbCaret;
+  // Shift [pos..kbLen] (the NUL included) up by one byte to open a gap at pos.
+  // kbLen < KB_MAX_BYTES (150) was just checked, so kbLen+1 <= 150 stays inside
+  // kbText[151].
+  memmove(kbText + pos + 1, kbText + pos, kbLen - pos + 1);
+  kbText[pos] = c;
+  kbLen++;
+  if (kbCaret >= 0) kbCaret++;  // moves right past what it just placed
   if (kbShiftMode == 1) {          // one-shot clears; locked stays
     kbShiftMode = 0;
     // The whole letter page re-labels when shift clears, so repaint rows 0-2.
     for (int r = 0; r < 3; r++)
       for (int col = 0; col < kbRowLen(r); col++) drawKbKey(r, col, false);
   }
+  // WHICHEVER SCREEN IS ACTUALLY UP. The splice above is shared by both, but the
+  // keyboard's text card and the reply panel's draft line are different pixels -
+  // and drawKbText() would paint that card over the panel's prompt card and reply
+  // buttons, which is a full-width repaint of the wrong screen.
+  if (composeOnPanel()) { composeAfterEdit(); return; }
   drawKbText();
   drawKbActions();      // SEND becomes live on the first character
 }
 
 void kbBackspace() {
   if (kbLen == 0) return;
-  kbText[--kbLen] = '\0';
+  int pos = kbCaret < 0 ? kbLen : kbCaret;
+  if (pos == 0) return;    // nothing left of the caret - a no-op, not a trim off the end
+  // Shift [pos..kbLen] (the NUL included) down by one byte to close the gap at pos-1.
+  memmove(kbText + pos - 1, kbText + pos, kbLen - pos + 1);
+  kbLen--;
+  if (kbCaret >= 0) kbCaret--;  // moves left with the byte it just deleted
+  if (composeOnPanel()) { composeAfterEdit(); return; }   // see kbInsert
   drawKbText();
   drawKbActions();      // SEND goes inert again at zero
 }
@@ -458,33 +1064,134 @@ bool kbTouch(int sx, int sy) {
     drawKeyboard();
     return true;
   }
+  // THE ACTION BAND. sy is tested against KB_ACT_H (the band, TAP_MIN) and NOT
+  // against KB_ACT_DRAWN: the drawn button is 26/32px of that band and the 7px
+  // of air above and below it belong to the control, which is the whole point of
+  // the split. sx is tested against the columns drawKbActions() stored, so the
+  // hit test cannot disagree with the draw - it used to recompute halfW here,
+  // inline, a second time. Each column already SWALLOWS the 8px gap to its
+  // right, so the strip between the two buttons lands on the left one instead of
+  // being dead, and the last column closes on the lane.
   if (sy >= KB_ACT_Y && sy < KB_ACT_Y + KB_ACT_H) {
-    int halfW = (tft.width() - CARD_X * 2 - 8) / 2;
-    if (sx < CARD_X + halfW) { closeKeyboard(); return true; }
-    if (!kbWindowClosed && kbLen > 0 && sx >= CARD_X + halfW + 8) {
-      if (kbIsMessage()) sendPromptToHost();
-      else sendTypedAnswerToHost();
-      return true;
+    for (int i = 0; i < KB_ACT_COLS; i++) {
+      if (kbActW[i] <= 0) continue;            // the row has not been drawn yet
+      if (sx < kbActX[i] || sx >= kbActX[i] + kbActW[i]) continue;
+      // COLUMN 0 IS BACK, AND IT MUST AGREE WITH THE LABEL drawKbActions DREW -
+      // both ask composeHasPanel(), so the key cannot say BACK and close the
+      // surface, or say DISCARD and leave it up. Only the message case, which has
+      // no panel behind it, still leaves compose from this screen.
+      if (i == 0) {
+        if (composeHasPanel()) composeBackToPanel();
+        else closeCompose();
+        return true;
+      }
+      // SEND from the KEYBOARD leaves the surface, which is what it has always
+      // done and what the detail card underneath is repainted for. (The panel's
+      // own SEND stays and shows a receipt instead - see composeTouch.) The send
+      // reports whether the line went out, so a session that vanished between the
+      // press and here closes nothing and says why.
+      if (!kbWindowClosed && kbLen > 0) {
+        const bool sent = kbIsMessage() ? sendPromptToHost() : sendTypedAnswerToHost();
+        if (sent) closeCompose();
+        else Serial.println("KB: SEND refused: the session this draft was typed for is gone");
+      }
+      return true;               // SEND's column with nothing to send: swallow
     }
-    return true;                 // swallow taps in the gap rather than guessing
+    return true;                 // the margins outside the lane, likewise
   }
-  // The text card: a tap peeks the prompt. It used to be inert, which is what
-  // made the question unreachable once you had typed a character.
-  if (sy < KB_ROWS_Y) {
+  // THE PROMPT STRIP, tested BEFORE the card's branch below, which is "anything
+  // else above the keys" and would otherwise swallow these rows. Its band is every
+  // row from the top of the panel to the card's top edge - KB_TEXT_Y, so 24px on
+  // board 1 and 34 on board 2. That is MORE than the 17/20 the strip draws (the
+  // top margin above it and the gap below it belong to the control, the same
+  // drawn/tested split the keys and the action row have) and still UNDER TAP_MIN,
+  // which is stated rather than glossed: the column closes exactly on BOARD_H
+  // with no spare row on board 1, so there is nothing to grow it with. What it
+  // replaces was not bigger - it was a tap on the card that only worked with an
+  // empty buffer, and after Task 5 not even then.
+  if (sy < KB_TEXT_Y) {
     if (kbHasDetail()) { kbPeekPage = 0; drawKeyboard(); }
+    return true;
+  }
+  // The text card. A tap PLACES THE CARET: the card is showing your answer, not
+  // the question, so a tap on it is about the answer.
+  //
+  // THE HISTORY, because it has been wrong twice in two different ways and the
+  // second one is this task's. The card was inert to begin with, which is what
+  // made the question unreachable once you had typed a character; a tap on it was
+  // then made to open the peek, which fixed that; Task 5 gave the tap to the
+  // caret for kbLen > 0 and left the peek on the kbLen == 0 branch - and that
+  // brought the same defect back in the same shape, because kbLen > 0 is exactly
+  // when you are typing. This task closes it for good by moving the peek to the
+  // strip above, which is reachable in EVERY state rather than in one of them.
+  if (sy < KB_ROWS_Y) {
+    // Still guarded on kbLen > 0: with an empty buffer there is no character to
+    // place a caret on, so the tap is swallowed rather than setting kbCaret to a
+    // stated 0 that means the same as the -1 pin it would replace.
+    if (kbLen > 0) {
+      // The exact inverse of drawKbText's division. Clamp each intermediate
+      // BEFORE combining them into a byte offset: a tap below the last line
+      // or right of the last column must not carry that overshoot into the
+      // product, or it could land past kbLen instead of AT it.
+      int line = (sy - KB_LINE0_Y) / KB_LINE_PITCH;
+      if (line < 0) line = 0;
+      if (line >= KB_TEXT_LINES) line = KB_TEXT_LINES - 1;
+      int col = (sx - CARD_X - 6) / TEXT_ADV;
+      if (col < 0) col = 0;
+      if (col >= KB_COLS) col = KB_COLS - 1;
+      int off = line * KB_COLS + col;
+      if (off > kbLen) off = kbLen;    // past the last character: land ON it
+      // No `if (off < 0) off = 0;` here: line and col are both clamped to
+      // [0, KB_TEXT_LINES-1] / [0, KB_COLS-1] above, so their product plus a
+      // non-negative col is already >= 0 by construction - that guard could
+      // never fire and was dead code sitting in shipping firmware.
+      kbCaret = off;
+      drawKbText();
+    }
     return true;
   }
   int r = (sy - KB_ROWS_Y) / KB_ROW_H;
   if (r < 0 || r > 3) return true;
   if (r == 3) {
-    if (sx < KB_R3_PAGE_W) {
-      kbSymbols = !kbSymbols;
+    // ROW 3 KEEPS PRESS-COMMIT (all three targets clear TAP_MIN in both axes),
+    // but it now FLASHES. drawKbRow3 has always taken a pressed index and this
+    // branch never passed one: the page key repainted the board and SPACE / "."
+    // repainted the card, so two of the three gave no confirmation at all - and
+    // on a panel with no haptics that flash is the only confirmation a press
+    // registered, which is what drawKbKey's own comment says.
+    int k = sx < KB_R3_PAGE_W ? 0 : (sx < KB_R3_PAGE_W + KB_R3_SPACE_W ? 1 : 2);
+    if (k == 0) {
+      kbPage = (kbPage + 1) % 3;
       kbShiftMode = 0;
+      // The flash goes AFTER the repaint, not before it: drawKeyboard()
+      // fillScreen's the panel, so a pressed row drawn first is wiped within
+      // microseconds and is never seen. It is drawn on the NEW page label,
+      // which is also the thing the tap changed.
       drawKeyboard();
-    } else if (sx < KB_R3_PAGE_W + KB_R3_SPACE_W) {
-      kbInsert(' ');
+      drawKbRow3(k);
+      KB_FLASH_PUSH();
+      kbFlashArm();        // tickKbFlash() un-presses it; see kbFlashArm's own comment
     } else {
-      kbInsert('.');
+      // SPACE and "." HOLD FOR KB_FLASH_MS TOO, and the ordering is the whole
+      // point: draw pressed, flush so it is on the glass, INSERT, flush again so
+      // the character lands with the key still lit, and only then arm the
+      // release. The keystroke is on the panel before the flash's clock even
+      // starts, and the flash outlives it. This used to rely on kbInsert()'s
+      // card repaint to time the flash, which on this board is shadow-buffer
+      // work measured in microseconds and reached the panel as nothing at all.
+      // NOTHING HERE BLOCKS: see kbFlashArm - a delay() long enough to be seen
+      // is also long enough to swallow the next press whole.
+      // Two literal calls rather than one ternary: settings-geom-check.mjs's
+      // ASCII reachability sweep PARSES the characters row 3 emits out of this
+      // function (they exist in no KB_*[3] table - row 3 is data inline in the
+      // touch handler), so folding them into an expression would leave SPACE
+      // reachable on the glass and unprovable from the source.
+      drawKbRow3(k);
+      KB_FLASH_PUSH();
+      if (k == 1) kbInsert(' ');
+      else        kbInsert('.');
+      KB_FLASH_PUSH();
+      kbFlashArm();
     }
     return true;
   }
@@ -497,26 +1204,355 @@ bool kbTouch(int sx, int sy) {
   if (sx < kbRowX0(r)) return true;
   int col = (sx - kbRowX0(r)) / KB_PITCH;
   if (col < 0 || col >= kbRowLen(r)) return true;   // the right margin
+  // ROWS 0-2 NO LONGER COMMIT ON PRESS. handleTouch offers every press to
+  // kbArm() first and only falls through to here when kbArm() DECLINED it, so
+  // the character keys and CAP have already been armed and will commit in
+  // kbRelease() when the finger lifts. The one press that still reaches this
+  // line is DEL, which kbArm() declines by name: a tap on it must delete
+  // IMMEDIATELY and a hold must repeat, and neither works if the delete waits
+  // for a lift. Anything else arriving here is a margin kbArm() also declined.
   char c = kbRow(r)[col];
+  if (c != KB_DEL) return true;
   drawKbKey(r, col, true);       // flash: the only confirmation a press landed
-  if (c == KB_SHIFT) {
+  kbBackspace();
+  // Arm the repeat and leave the key drawn PRESSED - tickKbRepeat releases it
+  // when the finger lifts or slides off, so a quick tap looks the same as
+  // before while a hold keeps deleting.
+  kbRepeatRow = r;
+  kbRepeatCol = col;
+  kbRepeatNext = millis() + KB_REPEAT_DELAY_MS;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// KBPROBE. Release-commit's entire justification is "it cuts mis-hits", and that
+// is A CLAIM, NOT A FACT - so it ships with the instrument that turns it into a
+// number. One line per keystroke: the key the press ARMED, the key the lift
+// COMMITTED, and the pixel delta between the landing point and the last point
+// sampled before the finger left the glass.
+//
+// WHAT IT MEASURES AND WHAT IT DOES NOT. It measures where fingers land versus
+// where they lift, on this hardware, in this hand. It says NOTHING about whether
+// the resulting text was correct: a re-target is only evidence that the finger
+// moved onto a different key, not that the second key was the intended one. A
+// zero re-target rate would mean release-commit is buying nothing measurable.
+//
+// A CANCEL IS COUNTED SEPARATELY, AND IT IS THE STRONGEST SINGLE PIECE OF
+// EVIDENCE HERE: a press that armed a key, slid off the key band entirely and
+// lifted on nothing. Under press-commit that press WOULD HAVE COMMITTED a
+// character - the one the finger first landed on - and under release-commit it
+// commits none. Folded into the re-target count it would be invisible, and
+// missing from the totals altogether it would be uncounted evidence for exactly
+// the claim this instrument exists to test.
+//
+// The "release point" is the LAST SAMPLED point, not the release point proper:
+// getTouchPoint() returns false on the lift, so there is no coordinate to read
+// at that instant. At a 15ms poll that is the finger's position up to 15ms
+// before it left. Stated rather than glossed, because it caps the precision of
+// every number this prints.
+bool kbProbeOn = false;
+int  kbProbeAx = 0, kbProbeAy = 0, kbProbeAr = -1, kbProbeAc = -1;
+int  kbProbeLx = 0, kbProbeLy = 0;
+int  kbProbeN = 0, kbProbeMoved = 0, kbProbeCancelled = 0;
+
+void kbProbeArm(int sx, int sy, int r, int c) {
+  if (!kbProbeOn) return;
+  kbProbeAx = kbProbeLx = sx;
+  kbProbeAy = kbProbeLy = sy;
+  kbProbeAr = r; kbProbeAc = c;
+}
+void kbProbeMove(int sx, int sy) {
+  if (!kbProbeOn) return;
+  kbProbeLx = sx; kbProbeLy = sy;
+}
+// The lift with nothing armed, after a press that HAD armed something. Called
+// from kbRelease's own early return, which is the only place that state is
+// distinguishable from "this press never armed anything at all" (row 3, the
+// action row, DEL - none of which call kbProbeArm, so kbProbeAr stays -1).
+void kbProbeCancel() {
+  if (!kbProbeOn || kbProbeAr < 0) return;
+  char armed[8];
+  kbKeyLabel(kbRow(kbProbeAr)[kbProbeAc], armed, sizeof(armed));
+  const int dx = kbProbeLx - kbProbeAx, dy = kbProbeLy - kbProbeAy;
+  kbProbeCancelled++;
+  char m[192];
+  snprintf(m, sizeof(m),
+           "KBPROBE CANCEL #%d armed=r%dc%d \"%s\" lift=off-band at=(%d,%d)->(%d,%d) "
+           "d=(%d,%d) dist=%d - press-commit would have typed \"%s\" here",
+           kbProbeCancelled, kbProbeAr, kbProbeAc, armed,
+           kbProbeAx, kbProbeAy, kbProbeLx, kbProbeLy, dx, dy,
+           (int) lroundf(sqrtf((float) (dx * dx + dy * dy))), armed);
+  sendLineToHost(m);
+  kbProbeAr = kbProbeAc = -1;
+}
+
+void kbProbeRelease(int r, int c) {
+  if (!kbProbeOn || kbProbeAr < 0) return;
+  char armed[8], lift[8];
+  kbKeyLabel(kbRow(kbProbeAr)[kbProbeAc], armed, sizeof(armed));
+  kbKeyLabel(kbRow(r)[c], lift, sizeof(lift));
+  const int dx = kbProbeLx - kbProbeAx, dy = kbProbeLy - kbProbeAy;
+  const int moved = (r != kbProbeAr || c != kbProbeAc) ? 1 : 0;
+  kbProbeN++;
+  kbProbeMoved += moved;
+  char m[192];
+  snprintf(m, sizeof(m),
+           "KBPROBE #%d armed=r%dc%d \"%s\" lift=r%dc%d \"%s\" at=(%d,%d)->(%d,%d) "
+           "d=(%d,%d) dist=%d retarget=%d",
+           kbProbeN, kbProbeAr, kbProbeAc, armed, r, c, lift,
+           kbProbeAx, kbProbeAy, kbProbeLx, kbProbeLy, dx, dy,
+           (int) lroundf(sqrtf((float) (dx * dx + dy * dy))), moved);
+  sendLineToHost(m);
+  kbProbeAr = kbProbeAc = -1;
+}
+
+// Stopping ALWAYS reports the totals, including when the keyboard closes under
+// it - the counts are the measurement, and losing them to a BACK tap would mean
+// re-typing the whole pass.
+void kbProbeStop(const char* why) {
+  if (!kbProbeOn) return;
+  kbProbeOn = false;
+  const int presses = kbProbeN + kbProbeCancelled;
+  char m[224];
+  snprintf(m, sizeof(m), "KBPROBE off (%s): %d armed presses -> %d committed, %d re-targeted "
+           "between press and lift (%d%% of committed), %d cancelled off the key band "
+           "(%d%% of presses)", why, presses, kbProbeN, kbProbeMoved,
+           kbProbeN ? (kbProbeMoved * 100 + kbProbeN / 2) / kbProbeN : 0, kbProbeCancelled,
+           presses ? (kbProbeCancelled * 100 + presses / 2) / presses : 0);
+  sendLineToHost(m);
+}
+
+// The command. EVERY REFUSAL NAMES ITS CAUSE: from the Mac, silence and
+// "impossible here" look identical, which is the rule POWERPROBE's "not on
+// battery" refusal exists for. And the host delivers each trigger-file command
+// over BOTH transports, so a cabled device receives this twice within
+// milliseconds - a second KBPROBE while probing says so and changes nothing,
+// rather than restarting the count. A refusal has no state of its own to make
+// the duplicate a no-op, so it is deduped on a short window the way KBTEST's is;
+// POWERPROBE produced four refusal lines by having neither.
+void kbProbeCommand(const char* arg) {
+  // The window covers EVERY line this function prints, not only its refusals.
+  // Stamping it on success too is what makes the second transport's copy silent
+  // instead of answering "already running" to a command the user sent once - the
+  // measured shape of POWERPROBE's four refusal lines, seen again here.
+  static unsigned long lastSayMs = 0;
+  const bool dup = millis() - lastSayMs < 2000;
+  const bool off = arg && arg[0] == 'o' && arg[1] == 'f' && arg[2] == 'f';
+  if (!composeActive) {
+    if (!dup) sendLineToHost("KBPROBE refused: the keyboard is not open (composeActive=0) - raise it "
+                             "with \"KBTEST msg <text>\" or by answering a pending ask, then "
+                             "send KBPROBE");
+    lastSayMs = millis();
+    return;
+  }
+  if (off) {
+    if (kbProbeOn) { kbProbeStop("commanded"); lastSayMs = millis(); }
+    else {
+      if (!dup) sendLineToHost("KBPROBE off refused: no probe is running (kbProbeOn=0)");
+      lastSayMs = millis();
+    }
+    return;
+  }
+  if (kbProbeOn) {
+    if (!dup) sendLineToHost("KBPROBE already running - ignored, not restarted (the host "
+                             "delivers each command over BOTH transports, so a cabled device "
+                             "sees this line twice); send \"KBPROBE off\" to stop and report");
+    lastSayMs = millis();
+    return;
+  }
+  lastSayMs = millis();
+  kbProbeOn = true;
+  kbProbeN = kbProbeMoved = kbProbeCancelled = 0;
+  kbProbeAr = kbProbeAc = -1;
+  sendLineToHost("KBPROBE on: one line per keystroke on the character rows - armed key, "
+                 "committed key, pixel delta. It measures where fingers land versus where they "
+                 "lift and says nothing about whether the text was right. Row 3, DEL and the "
+                 "action row commit on press and are not counted.");
+}
+
+// KBBUBBLE - scaffolding, and it exists for exactly the reason TAB, PAGE,
+// KBTEST, EMOJITEST and READTEST already do: A CAPTURE CAN ONLY RECORD WHAT IS
+// ALREADY ON THE GLASS. The bubble exists only while a finger is down, so
+// without this the one element this task adds is the one element no screenshot
+// can ever show - and "an instrument that cannot observe the thing it is pointed
+// at is worse than none" is this repo's own rule.
+//
+// It draws through the SAME kbSetArm() a real press uses, so what a capture
+// records is the shipping code path and not a mock of it. It NEVER commits: only
+// handleTouch's release path calls kbRelease(), and a real press landing
+// anywhere afterwards clears the arm it leaves behind (see kbArm). Drawing the
+// same key twice is already a no-op inside kbSetArm, which is what makes this
+// idempotent against the host delivering the command over BOTH transports.
+void kbBubbleCommand(const char* arg) {
+  // Covers every line, not only the refusals - see kbProbeCommand's own note.
+  // "KBBUBBLE off" is the case that proved it: the first transport's copy
+  // cleared and said "cleared", and the second then found nothing armed and
+  // refused, so one command printed two contradictory lines per transport.
+  static unsigned long lastSayMs = 0;
+  const bool dup = millis() - lastSayMs < 2000;
+  if (!composeActive || kbPeekPage >= 0) {
+    if (!dup) sendLineToHost(composeActive
+      ? "KBBUBBLE refused: the prompt peek is up and covers the keys (kbPeekPage >= 0)"
+      : "KBBUBBLE refused: the keyboard is not open (composeActive=0) - raise it with "
+        "\"KBTEST msg <text>\" or by answering a pending ask");
+    lastSayMs = millis();
+    return;
+  }
+  if (arg && arg[0] == 'o' && arg[1] == 'f' && arg[2] == 'f') {
+    const bool had = kbArmRow >= 0;
+    kbSetArm(-1, -1);
+    if (had) sendLineToHost("KBBUBBLE off: cleared");
+    else if (!dup) sendLineToHost("KBBUBBLE off refused: nothing is armed");
+    lastSayMs = millis();
+    return;
+  }
+  int r = 1, c = 3;                 // the mock's own pressed key, so the two compare
+  // atoi + strchr, not sscanf: pulling sscanf into this sketch for one pair of
+  // small integers linked 19KB of scanf's float and width machinery into BOTH
+  // boards' images (measured: board 2 1038298 -> 1057230) for a scaffolding
+  // argument. The same trade the rest of this firmware already makes.
+  if (arg && arg[0]) {
+    r = atoi(arg);
+    const char* sp = strchr(arg, ' ');
+    if (sp) c = atoi(sp + 1);
+  }
+  int rr, cc;
+  // Qualified through the SAME hit test the touch path uses, by asking it about
+  // the key's own centre - a refusal here names a key that does not exist rather
+  // than drawing a bubble over a cell the finger could never reach.
+  const bool onKey =
+      r >= 0 && r <= 2 && c >= 0 && c < kbRowLen(r) &&
+      kbKeyAt(kbRowX0(r) + c * KB_PITCH + KB_KEY_W / 2, kbRowY(r) + KB_ROW_H / 2, rr, cc) &&
+      rr == r && cc == c;
+  // DEL IS DECLINED HERE TOO, for the same reason kbArm declines it: it commits
+  // on PRESS and is never armed, so a bubble over it would be a capture of a
+  // state this keyboard cannot reach - an instrument that shows something the
+  // thing it points at never does is worse than none.
+  if (!onKey || kbRow(r)[c] == KB_DEL) {
+    char m[144];
+    snprintf(m, sizeof(m), onKey
+             ? "KBBUBBLE refused: r%dc%d is DEL, which commits on PRESS and is never armed - "
+               "no bubble is ever drawn over it (page %d has %d/%d/%d cells)"
+             : "KBBUBBLE refused: r%dc%d is not a key on this page "
+               "(rows are 0..2, page %d has %d/%d/%d cells)", r, c, kbPage,
+             kbRowLen(0), kbRowLen(1), kbRowLen(2));
+    if (!dup) sendLineToHost(m);
+    lastSayMs = millis();
+    return;
+  }
+  // The SECOND copy of the same command (both transports carry it) would arm the
+  // same key - already a no-op inside kbSetArm - and then print an identical
+  // line, which is the shape of POWERPROBE's four refusals. Report only when the
+  // arm actually moved, or when enough time has passed to be a real second ask.
+  const bool same = (r == kbArmRow && c == kbArmCol);
+  kbSetArm(r, c);
+  if (same && dup) return;
+  lastSayMs = millis();
+  char m[144];   // the longest form is "already drawn for", and it was truncated at 112
+  snprintf(m, sizeof(m), "KBBUBBLE %s r%dc%d - armed, NOT committed; "
+           "\"KBBUBBLE off\" clears it, and so does the next real press",
+           same ? "already drawn for" : "drawn for", r, c);
+  sendLineToHost(m);
+}
+
+// ---------------------------------------------------------------------------
+// THE THREE PHASES. handleTouch calls these and nothing else does: kbArm() from
+// its press path (before kbTouch, which handles every press kbArm declines),
+// kbSlide() from the `touching && wasTouching` early return it used to take
+// with no work at all, and kbRelease() from the release path that already
+// existed for the record FAB.
+// ---------------------------------------------------------------------------
+
+// The rows 0-2 hit test, in ONE place. kbArm() and kbSlide() must qualify a
+// point identically or a slide could "re-target" onto something a press could
+// never have armed - the same rule kbRowX0()'s comment states for the draw and
+// the hit test. Returns false for row 3, the action band, the card, the strip
+// and both margins. Reproduces kbTouch's own division rather than sharing it
+// because kbTouch's is embedded in a chain of earlier branches.
+bool kbKeyAt(int sx, int sy, int& r, int& c) {
+  r = -1; c = -1;
+  if (sy < KB_ROWS_Y) return false;
+  int rr = (sy - KB_ROWS_Y) / KB_ROW_H;
+  if (rr < 0 || rr > 2) return false;
+  if (sx < kbRowX0(rr)) return false;           // the left margin of a centred row
+  int cc = (sx - kbRowX0(rr)) / KB_PITCH;
+  if (cc < 0 || cc >= kbRowLen(rr)) return false;
+  r = rr; c = cc;
+  return true;
+}
+
+// Move the armed candidate, or clear it with r < 0. Four things have to stay in
+// step - the old key un-presses, the cells under the old bubble are restored,
+// the new key presses, the new bubble is drawn - so they live in one function
+// instead of at each of the three call sites.
+void kbSetArm(int r, int c) {
+  if (r == kbArmRow && c == kbArmCol) return;
+  const int pr = kbArmRow, pc = kbArmCol;
+  kbArmRow = r; kbArmCol = c;
+  kbClearBubble();                       // reads the NEW arm, set above
+  if (pr >= 0) drawKbKey(pr, pc, false);
+  if (r >= 0) { drawKbKey(r, c, true); drawKbBubble(r, c); }
+}
+
+// PRESS. Returns true when it took the press - handleTouch then does not call
+// kbTouch for it. Everything it declines keeps press-commit, which is every
+// target that already clears the fingertip floor: row 3, the action row, the
+// card, the strip, the peek - and DEL, which is the one exception inside the
+// key band.
+bool kbArm(int sx, int sy) {
+  if (!composeActive) return false;
+  int r = -1, c = -1;
+  // The peek owns every tap while it is up, and DEL is the one key inside the
+  // band that must still commit on PRESS.
+  const bool onKey = kbPeekPage < 0 && kbKeyAt(sx, sy, r, c);
+  if (!onKey || kbRow(r)[c] == KB_DEL) {
+    // A PRESS ANYWHERE ELSE CANCELS A STALE ARM, and this is not defensive
+    // tidying: handleTouch commits on release whenever something is armed, so an
+    // arm that outlived its press would be committed by the NEXT lift - a tap on
+    // SEND would send, and then type a character into the emptied buffer. Nothing
+    // in the touch path can leave one behind today, but KBBUBBLE's scaffolding
+    // can, and a future caller of kbSetArm would inherit the hazard silently.
+    kbSetArm(-1, -1);
+    return false;
+  }
+  kbProbeArm(sx, sy, r, c);
+  kbSetArm(r, c);
+  return true;
+}
+
+// HELD. Re-samples where the finger is now and re-targets. Sliding off the key
+// band entirely DISARMS - that is the escape hatch a press-commit keyboard has
+// no room for: a finger that landed wrong can be taken off the keys and the
+// character is never typed.
+void kbSlide(int sx, int sy) {
+  if (kbArmRow < 0) return;
+  kbProbeMove(sx, sy);
+  int r, c;
+  kbKeyAt(sx, sy, r, c);        // r = -1 when the finger has left the key band
+  kbSetArm(r, c);
+}
+
+// LIFT. Commits whatever is armed. Returns true when it consumed the release, so
+// handleTouch's FAB branch below it is not also entered.
+bool kbRelease() {
+  // Nothing armed. That is EITHER a press that never armed (row 3, the action
+  // row, DEL, the card) OR a press that armed and then slid off the key band -
+  // and kbProbeCancel is what tells those two apart, because only the second
+  // left the probe with a live armed key.
+  if (kbArmRow < 0) { kbProbeCancel(); return false; }
+  const int r = kbArmRow, c = kbArmCol;
+  const char ch = kbRow(r)[c];
+  kbProbeRelease(r, c);
+  kbSetArm(-1, -1);             // un-press and restore BEFORE the commit repaints
+  if (ch == KB_SHIFT) {
     kbShiftMode = (kbShiftMode + 1) % 3;   // off -> once -> locked -> off
     for (int rr = 0; rr < 3; rr++)
       for (int cc = 0; cc < kbRowLen(rr); cc++) drawKbKey(rr, cc, false);
-    return true;
+  } else if (ch == KB_DEL) {
+    kbBackspace();              // reachable only by SLIDING onto DEL from elsewhere
+  } else {
+    kbInsert(ch);
   }
-  if (c == KB_DEL) {
-    kbBackspace();
-    // Arm the repeat and leave the key drawn PRESSED - tickKbRepeat releases it
-    // when the finger lifts or slides off, so a quick tap looks the same as
-    // before while a hold keeps deleting.
-    kbRepeatRow = r;
-    kbRepeatCol = col;
-    kbRepeatNext = millis() + KB_REPEAT_DELAY_MS;
-    return true;
-  }
-  kbInsert(c);
-  drawKbKey(r, col, false);
   return true;
 }
 
@@ -539,10 +1575,17 @@ void kbBase64(char* out, size_t outSize) {
 
 // A typed message to a READY session. Signs the PROMPT label so this can never
 // authenticate as an answer, over a hash of exactly the bytes on screen.
-void sendPromptToHost() {
-  if (kbLen == 0 || kbWindowClosed || !kbIsMessage()) return;
+// RETURNS WHETHER THE LINE ACTUALLY WENT OUT, and closes nothing. It used to end
+// in closeCompose(), which meant the two screens of one surface did different
+// things with one answer: an option tapped on the panel left a receipt, and a
+// draft sent from the panel's own SEND dropped the whole surface. The caller owns
+// the screen now - the panel shows the receipt, the keyboard closes - and the
+// early returns below are exactly why this has to be a bool: they send nothing,
+// and a caller that closed regardless would be closing on a failure.
+bool sendPromptToHost() {
+  if (kbLen == 0 || kbWindowClosed || !kbIsMessage()) return false;
   int idx = kbSessionIdx;
-  if (idx < 0 || idx >= sessionCount) return;
+  if (idx < 0 || idx >= sessionCount) return false;
   String sha = sha256Hex16(kbText);
   // Signed with the session's OWN Mac, not activeHost - a message typed while
   // a second Mac happens to have ticked most recently must still be signed
@@ -558,13 +1601,18 @@ void sendPromptToHost() {
   char line[280];
   snprintf(line, sizeof(line), "PROMPT %s %s %s", kbSessionId, b64, mac.c_str());
   sendLineToHost(line, sessions[idx].hostSlot);
-  closeKeyboard();
+  // THE RECENTS RING, at the ONE point in this function the line is known to have
+  // gone out - below every early return above, not at the top where the button was
+  // pressed. A message that never left must not be offered back as one that did.
+  composeRemember(kbText);
+  return true;
 }
 
-void sendTypedAnswerToHost() {
-  if (kbLen == 0 || kbWindowClosed) return;
+// Returns whether the line went out - see sendPromptToHost above for why.
+bool sendTypedAnswerToHost() {
+  if (kbLen == 0 || kbWindowClosed) return false;
   int idx = kbSessionIdx;
-  if (idx < 0 || idx >= sessionCount) return;
+  if (idx < 0 || idx >= sessionCount) return false;
   // Sign the HASH of the text, not the base64: the two sides then agree on the
   // signed bytes without depending on padding or case in the encoding.
   String sha = sha256Hex16(kbText);
@@ -586,5 +1634,6 @@ void sendTypedAnswerToHost() {
   snprintf(line, sizeof(line), "ANSWER %s %s TYPED %s %s",
            sessions[idx].id, kbPid, b64, mac.c_str());
   sendLineToHost(line, sessions[idx].hostSlot);
-  closeKeyboard();
+  composeRemember(kbText);      // below every early return, for the reason above
+  return true;
 }

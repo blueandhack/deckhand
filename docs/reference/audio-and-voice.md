@@ -367,10 +367,19 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   script, so producing one means converting NVIDIA's NeMo checkpoint with torch/NeMo. Worth
   revisiting only if someone publishes a real ggml `.bin` — Parakeet TDT is a transducer, so it
   would be faster than Whisper, but turbo already solves the accuracy problem.
-- **A dictation is DELIVERED TO YOU, not run for you (`DECKHAND_VOICE_DELIVERY`, default
-  `clipboard`).** The transcript goes to the Mac's clipboard plus a notification naming the project
-  to paste into; the device card reads COPIED - PASTE IT. `dispatch` restores the original
-  behaviour below. The default flipped after the first real use, which produced all three of these
+- **A dictation or typed message is POSTED INTO THE LIVE SESSION (`DECKHAND_VOICE_DELIVERY`,
+  default `inbox`, since 2026-09-05).** The host writes it to that session's own Unix domain
+  messaging socket and it lands in the running conversation — see the correction below, and
+  `host/session-inbox.mjs`. `clipboard` forces the previous behaviour and is the escape hatch;
+  `dispatch` restores the original headless behaviour below. **Every failure falls back to the
+  clipboard and names its cause in the log** — there are four (no socket on the session record, a
+  socket whose session exited, a failed write, and a write that succeeded and delivered nothing),
+  and unannounced they would all look like the clipboard being the design.
+- **The clipboard hand-off, which was the default from the day `dispatch` was demoted until
+  2026-09-05.** The transcript goes to the Mac's clipboard plus a notification naming the project
+  to paste into; the device card reads COPIED - PASTE IT. Still exactly what
+  `DECKHAND_VOICE_DELIVERY=clipboard` does, and still the fallback. It displaced `dispatch` after
+  the first real use, which produced all three of these
   at once: the headless run became a **second author** appending to the same conversation
   concurrently (both writing one transcript, neither able to see the other), nothing needing
   permission could finish (see below), and a mis-heard word went straight to work — "make sure
@@ -381,13 +390,114 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   interpolated into AppleScript where a stray quote breaks or alters the script. The `clip` state
   is backward-compatible — an older device falls through to a generic "VOICE" label — so the host
   half ships on its own.
-  **There is no way to inject a prompt into a running interactive session**, which is why the
+  ~~**There is no way to inject a prompt into a running interactive session**, which is why the
   fallback is headless. Checked, not assumed: the transcript's `queue-operation` records are an
   *effect* the app writes (enqueue then dequeue), not an input, and no queue file exists under
   `~/.claude`; `--resume`/`--continue` both start a new process against a session's history; and
   `~/.claude/ide/<port>.lock` does describe a live websocket with an auth token (the port is open),
   but it belongs to the VS Code integration, is an undocumented internal protocol, and delivers to
-  whichever editor holds the lock rather than the session you aimed at.
+  whichever editor holds the lock rather than the session you aimed at.~~
+  **CORRECTED 2026-09-05 — this is now FALSE.** Kept above rather than deleted, because every one
+  of those four findings is still individually true and re-checking them would cost the next
+  reader the same afternoon. What the investigation missed is a fifth channel it never looked at:
+  Claude Code exports **`CLAUDE_CODE_MESSAGING_SOCKET`** (`/tmp/cc-socks/<pid>.sock`) and
+  **`CLAUDE_CODE_MESSAGING_TOKEN`** (32 hex) into every process it spawns, hooks included, and
+  anything that can read that pair may post into the live conversation. Note where the old
+  reasoning went wrong: `queue-operation`/`enqueue` was read as *only* an effect, and it is —
+  but it is the effect of exactly this input, which makes it the confirmation signal rather than
+  a dead end.
+  - **Reading the environment from a hook is the whole mechanism.** There is no registry, no CLI
+    subcommand, and no derivation from a session id; the number in the path is the Claude Code
+    process's own pid, but nothing relies on that.
+    `claude-hooks/deckhand-session-hook.mjs` publishes both fields as `inbox` on the session
+    record, and `host/index.mjs` consumes them there. The token never reaches the device — the
+    device payload is built field by field and does not include it.
+  - **Ancestry does not matter, which is why the Deckhand host can do this at all.** Measured: a
+    `launchd`-parented process with `ppid=1` and no relationship to the session posted into it
+    successfully. That is exactly the shape the host has, running as `DeckhandBLE.app`.
+  - **The message arrives attributed to a peer session**, not as your own typing — Claude sees
+    "Another Claude session sent a message: ..." wrapped in the peer-message boilerplate.
+    Inherent to the mechanism.
+  - **AND THE PERSON WHO SENT IT SEES NOTHING.** Measured 2026-09-06 against the session JSONL,
+    after the user asked why their own device message was missing from their chat. The entry IS
+    a user turn — `type:"user"`, `message.role:"user"` — but it also carries **`isMeta: true`**
+    and `origin: {"kind":"peer","from":"unknown","verifiedPeerPid":<pid>}`, and the UI hides meta
+    entries. So the round trip works perfectly and is invisible at the one end that matters:
+    you type on the device, it reaches Claude in 125ms, and your own transcript shows nothing.
+    **The host cannot fix this.** `isMeta` is applied by Claude Code on receipt, keyed on the
+    origin being a peer. The only remedy available is for the assistant to **quote the message
+    back** at the top of its reply, which puts the text in the visible transcript. Do that.
+    - ~~The injection frame is fixed at `{"type":"user","message":{"role":"user","content":"..."}}`
+      — the `claude` binary's own `[uds-messaging] Inject messages` help string prints exactly
+      that shape and no other — and it carries no field that could change the classification.~~
+      **HALF WRONG, corrected 2026-09-05.** The conclusion survives and the premise does not, so
+      the premise is struck rather than removed: a reader who re-derives it from the help string
+      would reach the same wrong place. The *help string* prints one shape; the *handler* reads
+      more. Disassembled from `/opt/homebrew/Caskroom/claude-code/2.1.236/claude` (`strings -a`,
+      grep `verifiedPeerPid`), the frame's readable fields are **`from`, `priority`, `msg_id`,
+      `file_attachments`** (plus `uuid` and `session_id`, which are plumbing). What is genuinely
+      fixed is the classification: `origin.kind` is the literal `"peer"` and `isMeta` the literal
+      `true`, neither read from the frame. So the entry cannot be made visible — and it CAN be
+      made to say who sent it.
+  - **`from` NAMES THE BOARD, and not sending it was making a false statement.** With the field
+    absent, `origin.from` is the literal `"unknown"` and the wrapper Claude is handed reads
+    *"Another Claude session sent a message"* — which is not merely unhelpful, it is **wrong**: it
+    was the user, on their own hardware, six inches away. The host now sends
+    `deviceNameFor(via)` — `Deckhand-0528` / `Deckhand-C114` — on the typed-prompt path **and on
+    the dictation path**, because `from` names the sending DEVICE rather than the authorship of
+    the words, and leaving the one case where a human demonstrably spoke attributed to nothing was
+    the worst of the three options. **An unknown sender OMITS the field rather than inventing one:**
+    `deviceNameFor()` honestly returns `""` for a pairing link, for an unnamed USB link while two
+    boards are cabled, and for a board that has neither burst `HELLO` nor answered `WHOAMI`, and
+    the receiver's own `e.from ?? "unknown"` then produces the old behaviour byte for byte.
+    Measured on a live session: `origin` now reads
+    `{"kind":"peer","from":"Deckhand-0528","verifiedPeerPid":<pid>,"hopChain":[...]}`.
+    A **second, unadvertised** effect, read off the same disassembly: the admission guard
+    rate-limits on `from:<name>` when a name is present and on `pid:<pid>` when it is not — so
+    naming the boards moves two cabled units out of one shared bucket (this host's pid) into one
+    each.
+  - **`priority` is `now` | `next` | `later`, and the default stays `next`.** The receiver's own
+    line is `let a = e.priority==="now"||e.priority==="next"||e.priority==="later" ? e.priority :
+    "next"`, so an absent or unrecognised value already means `next` at the far end. `now`
+    INTERRUPTS the turn Claude is in the middle of, which is a thing to ask for rather than to
+    inherit. `DECKHAND_INBOX_PRIORITY` sets it host-wide; an unrecognised value is **refused by
+    name in the boot log and falls back to `next`** rather than forwarded, because the receiver
+    would rewrite it in silence and a knob that quietly does nothing is worse than one that says
+    so. Every delivery logs which priority applied and what set it.
+  - **THE WIRE FORMAT IS UNDOCUMENTED AND GETTING IT WRONG IS SILENT.** Two newline-terminated
+    JSON lines on one connection: `{"type":"auth","token":"..."}` then
+    `{"type":"user","message":{"role":"user","content":"..."}}`. The first guess,
+    `{"type":"message","text":...}`, is wrong — and the socket **accepted it, reported a
+    successful write, and discarded the message**. Re-measured 2026-09-05 on a live session: the
+    bad frame's write callback returned no error and the transcript gained no `enqueue`. There is
+    no ack and no error line, so **a successful write is never proof of delivery**: the host
+    confirms by watching the target's own transcript for a `queue-operation`/`enqueue` whose
+    `content` carries the text, from an offset taken *before* the write, and treats an
+    unconfirmed send as a failure. `host/session-inbox-check.mjs` binds the frame shape to the
+    code that builds it, so a revert to the discarded shape fails by name.
+  - **RESOLVED 2026-09-06 by three real device taps. Kept below rather than deleted, because
+    the reasoning is what made the tap conclusive.** `handleTypedPrompt` refuses anything whose
+    record is not `waiting`, so all three sends were on a WAITING session, and all three
+    confirmed: `Prompt: posted into the live session ... confirmed in the transcript in 125ms`,
+    twice from `Deckhand-C114` (12 and 39 chars) and once from `Deckhand-0528` (24 chars) — the
+    first send ever tapped on board 1's glass. The inference below was right; no fallback fired
+    and no turn was duplicated.
+  - was UNVERIFIED: **confirmation had only ever been observed on a
+    BUSY session, while a real device tap can only ever target a WAITING one.** The indirect
+    evidence is reassuring but is not the case that matters: of 2,826 `queue-operation` enqueues on
+    disk, 1,785 carry no `content` at all (locally typed, dequeued in the same millisecond) and 238
+    content-carrying ones were dequeued in under 50 ms — so `content` does not appear to be
+    conditional on queue delay. If that inference is wrong, every device tap would log NOT
+    delivered, fall back to the clipboard, **and have actually delivered** — a duplicate turn plus
+    a false log line. So the unconfirmed refusal carries its own diagnosis: the offset it scanned
+    from, how much the transcript grew, how many enqueues it saw and how many carried content.
+    `enqueues=0` means it never arrived (suspect the frame or the token); `enqueues>0` with
+    `withContent=0` means it probably arrived and the confirmation rule cannot see it. **One real
+    device tap settles this**, and the log line is built so that tap is conclusive on its own.
+  - **Limits, from the documented behaviour of the channel:** ~1M characters per message, a burst
+    cap, at most 50 queued messages, and the connection is closed if a complete line does not
+    arrive within 30 seconds. Deckhand's own cap is 150 bytes, so only the last applies — the
+    host opens the socket only once it has the text, writes both lines, and closes.
 - **A pending QUESTION can be answered by speaking, and the confirm tap is what authorises it.**
   The device records with the ask's pid in the stream header (`answer=<pid>`), the host transcribes
   and PARKS the text rather than dispatching it, publishes it back on the ask (`voiceText`,
@@ -551,30 +661,55 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     meta at 20 and text at 41/54/67/80 (four lines, not five) — found as this exact bug twice
     before landing on a row neither can encroach on. The non-overlap is the invariant; the
     y-values are per-board and derived in `board_*.h`.
-  - **`fabVisible()` had to gain a `kbActive` check.** The record/mic button's hit test runs
+  - **`fabVisible()` had to gain a `composeActive` check.** The record/mic button's hit test runs
     before the keyboard branch in `handleTouch`, and its tab-bar slot sits right where the
     keyboard's countdown corner is — a tap there started a mic capture, and on release
-    `micRestoreUi()`'s repaint painted a tab bar over the still-open keyboard while `kbActive`
+    `micRestoreUi()`'s repaint painted a tab bar over the still-open keyboard while `composeActive`
     stayed true, leaving every later tap typing invisibly into a screen that no longer looked like
     a keyboard.
   - **Two periodic repaints had to be absorbed, not one.** The ~5s host-driven tick (`handleLine`)
-    is intercepted while `kbActive`: it re-resolves the countdown and `kbWindowClosed` from the
+    is intercepted while `composeActive`: it re-resolves the countdown and `kbWindowClosed` from the
     fresh payload and returns, never repainting the session list underneath. A second, independent
-    ~1s loop-local tick that repaints the footer/tabs directly is separately gated on `!kbActive`,
+    ~1s loop-local tick that repaints the footer/tabs directly is separately gated on `!composeActive`,
     the same way it already excludes `readerActive`/`histActive` — missing either one repaints the
     keyboard away every few seconds. `lastActivityMillis` is also refreshed on every keyboard touch
-    **and** every loop tick while `kbActive`, because the 30s default backlight timeout sits well
+    **and** every loop tick while `composeActive`, because the 30s default backlight timeout sits well
     inside the 90s answer budget: without it, typing a normal-length answer could blank the screen
     mid-sentence and the waking tap would be swallowed rather than typed.
-  - **The placeholder is the QUESTION, and the card peeks the full prompt.**
+  - **THE KEYBOARD IS NOW ONE SCREEN OF A TWO-SCREEN COMPOSE SURFACE, and everything below
+    describes the KEY SCREEN only.** `kbActive` is `composeActive` and means "the compose
+    surface is up"; `composeScreen` says which screen. The other screen is the REPLY PANEL,
+    reached from the ask screen's `REPLY` button, and it - not the keyboard - is the root: the
+    keyboard is the sheet behind the panel's own `TYPE...`, and its left key is `BACK`, not
+    DISCARD. **The surface, the four control kinds, the chips, the recents ring, the send split
+    and what none of it verifies are in
+    [`sessions-and-asks.md`](sessions-and-asks.md#the-compose-surface).** This file keeps the key
+    screen's own history because that reasoning is still what the screen rests on; where a
+    sentence below has been overtaken it is MARKED, not deleted.
+  - **The placeholder is the QUESTION, and a PERSISTENT STRIP keeps one line of it.**
     `drawKeyboard()` fillScreen's the ask screen away, so without this you compose a reply
     to something you can no longer read. While the box is empty the ask's title sits where
-    "Type your answer" used to, and **tapping the text card** pages the full detail over the
-    keys — the card used to be inert (`if (sy < KB_ROWS_Y) return true;`), so the gesture
-    costs nothing. It covers the keys and the action row but **never the text card**, so the
-    answer stays visible while you re-read the question; each further tap pages and a tap
-    past the last page closes it, so there is always a way out without hunting for a target.
-    Font follows `detailLooksLikeCode`, the same choice the ask screen makes.
+    "Type your answer" used to.
+    **THIS CONTROL HAS MOVED TWICE AND THE ROUTE IT DESCRIBES NO LONGER EXISTS**, so the
+    history is recorded rather than the paragraph rewritten as if it had always been this
+    way. The card was inert first (`if (sy < KB_ROWS_Y) return true;`); then **tapping the
+    text card** paged the full detail over the keys, which was free because the card was
+    doing nothing; then Task 5 of the compose plan gave that tap to the **caret** for
+    `kbLen > 0` and left the peek only on the empty-buffer arm — which put the question
+    out of reach again in exactly the state you are in while typing. **Since Task 6 the card's
+    tap is the caret in every state and the peek is not reachable from it at all.** One
+    `fitText`-truncated line of the ask now lives above the card permanently
+    (`drawKbStrip`, `KB_STRIP_Y`/`KB_STRIP_H`, with a right-aligned `MORE` when there is
+    more), and **a tap on the strip** opens the paged peek — a band of `KB_TEXT_Y`, which is
+    24px on board 1 and 34 on board 2, both deliberately under `TAP_MIN` because the
+    vertical column closes exactly on `BOARD_H` with nothing left to grow it with.
+    The peek still covers the keys and the action row but **never the text card or the
+    strip**, so the answer *and* the question stay visible while it is up; each further tap
+    pages and a tap past the last page closes it, so there is always a way out without
+    hunting for a target. Font follows `detailLooksLikeCode`, the same choice the ask screen
+    makes. The strip carries no change-only cache and is repainted only by `drawKeyboard()`
+    and by the one transition that can invalidate it — the ask going away, which clears it
+    rather than leaving a question under a tap that would silently do nothing.
   - **CAP has THREE states — off, one-shot, locked — and the LABEL carries which.** It was a
     bool cleared by the next character, so an acronym or a name cost one CAP tap per letter.
     `kbShiftMode` cycles off → once → locked; only `once` clears on insert. The key reads
@@ -596,6 +731,16 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     no hierarchy at all — and CANCEL is the one that discards a sentence someone spent a
     minute typing. Same reasoning the confirm dialog uses when it refuses to make a
     destructive choice the easiest thing to hit.
+    **SUPERSEDED IN PART, and the reasoning above is kept because it is why the current shape is
+    right: on the ANSWER path the left key is no longer CANCEL at all, it is `BACK`** — the
+    destructive control is off the key screen entirely, which is the same argument taken one step
+    further. `kbTouch` and `drawKbActions` both ask `composeHasPanel()`, so the key cannot say BACK
+    and close the surface. **It is still `DISCARD`/`CANCEL` in MESSAGE mode**, where a READY session
+    has no ask and therefore no panel behind the keyboard, so the keyboard IS the root and the key
+    does what it says. `composeHasPanel()` is `!kbIsMessage()` — derived from the surface's own
+    state, not a third flag. The row also has three columns now at proportions `{1,1,2}` (`SEND` is
+    half the lane, twice the destructive control), with a DRAWN height of `KB_ACT_DRAWN` inside a
+    TESTED band of `KB_ACT_H` = `TAP_MIN`.
   - **`KBTEST` exists because this screen is otherwise unverifiable without a person.** It
     opens the keyboard against the first pending ask — the same reason `TAB` and `PAGE`
     exist, since the capture path can only record what is on the glass. `KBTEST peek`,
@@ -603,24 +748,45 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     otherwise cannot: caret, byte counter, live SEND, caps labels. It **cannot invent a
     prompt** (with nothing pending it does nothing) and it cannot send — that still needs a
     real tap. It always closes an open keyboard first: re-opening one already open left the
-    screen untouched, and since you cannot tap TYPE while the keyboard covers the screen
+    screen untouched, and since you cannot tap REPLY while the compose surface covers the screen
     that re-entrant path is scaffolding-only, so it is made impossible rather than debugged.
+    **`KBTEST` now opens the KEY screen specifically** (`openComposeKeys`), because the surface has
+    two and the opener takes the screen as an ARGUMENT rather than leaving a flag for the caller to
+    set. `COMPOSE` opens the panel; `COMPOSE keys`/`COMPOSE back` move between them and print the
+    draft after the move. **And `KBTEST` with nothing pending is no longer SILENT** — it names both
+    causes (`no ask is pending`, `no session is READY`) and dedupes the host's double delivery,
+    which is the rule the whole refusal table exists for.
     It goes through `switchTab(TAB_SESSIONS)` + `openSessionDetail(i)` the way a person
     would, because opening straight from whatever tab was showing left the sessions list
     painted under a USAGE tab bar when the keyboard closed.
-  - **No cursor, backspace only.** Insertion is always append (`kbInsert`), deletion always trims
-    the end (`kbBackspace`) — there is no caret position anywhere in the state. Aiming a cursor at
-    hard-wrapped text on a resistive panel is a worse interaction than retyping up to 150
-    characters, so the capability was never built rather than built and then hidden.
+  - **No cursor, backspace only — TRUE UNTIL TASK 5 OF THE COMPOSE PLAN, AND NO LONGER.**
+    The reasoning stands as the reason it was not built for a long time: insertion was always
+    append (`kbInsert`), deletion always trimmed the end (`kbBackspace`), there was no caret
+    position anywhere in the state, and aiming a cursor at hard-wrapped text on a resistive
+    panel is a worse interaction than retyping up to 150 characters. What changed is that a
+    typo forty characters back cost forty re-taps of DEL **plus** retyping the tail, which is
+    worse still. `kbCaret` now exists (`-1` means "pinned to the end", the state after
+    `openKeyboard` and until you tap the card); `kbInsert`/`kbBackspace` splice at it with
+    `memmove`; and a tap on the text card computes the exact inverse of `drawKbText`'s
+    line/column division, clamping each intermediate **before** combining them so a tap below
+    the last line or right of the last column lands **on** the text rather than past it.
+    `settings-geom-check.mjs` binds those four clamps to `kbTouch`'s own body and proves the
+    unclamped reach genuinely overshoots on each board's geometry, so they are load-bearing
+    rather than defensive. The resistive-panel objection is still real; it is answered by the
+    clamps and by the caret being a `TEXT_ADV`-wide block you can see, not by it going away.
   - **Cozette is ASCII 0x20-0x7E only** — the same fact that already forces `fitText`'s
     three-ASCII-dot ellipsis — so there's no shift-arrow or backspace glyph to draw; the keys are
     sentinel bytes (`\x01`/`\x02`) labelled `CAP`/`DEL` in plain text instead.
   - **Going full-screen is what makes QWERTY viable on a 240px-wide panel at all.** On board 1 the
-    drawn key is `KB_KEY_W` x (`KB_ROW_H` - 4) = 22x40, and the **tested** band is
-    `KB_PITCH` x `KB_ROW_H` = **24x44 = 1056px²** against 880 in the ordinary content area. The win
-    going full-screen buys is in the touch target, not in the artwork. Board 2's are 30x54 drawn and
-    32x58 = 1856 tested; its key height is capped by board 1's own 1:1.82 aspect ratio rather than
-    by the panel, which is the honest constraint.
+    drawn key is `KB_KEY_W` x (`KB_ROW_H` - 4) = 22x37, and the **tested** band is
+    `KB_PITCH` x `KB_ROW_H` = **24x41 = 984px²** against 880 in the ordinary content area. The win
+    going full-screen buys is in the touch target, not in the artwork. (Those were 22x40 and
+    24x44 = 1056px² until the persistent prompt strip took 3px off board 1's `KB_ROW_H`; the
+    TESTED band still clears `TAP_MIN` 40, by 1 rather than by 4, and the drawn key is
+    deliberately under it in both dimensions — it always was in width.) Board 2's are 30x54 drawn
+    and 32x58 = 1856 tested; its key height is capped by the 1:1.82 aspect of board 1's key **as it
+    was when that cap was set** rather than by the panel, which is the honest constraint — board
+    1's own key is 1:1.68 now, and the cap is deliberately not re-derived from it.
     **The tested WIDTH comes from the PITCH, not from `KB_KEY_W`, because `kbTouch()` divides by
     `KB_PITCH`** — so the 2px gap between two keys belongs to the key on its left and there is no
     dead lane between keys. This file and board 1's header both said **968** (22x44), i.e. they used
@@ -629,6 +795,11 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 - **A READY session can be sent a typed MESSAGE, and it is the keyboard half of a path the
   mic already had.** The record button is visible on a plain detail screen so a dictation can be
   aimed at a session; **TYPE** in that screen's header row does the same with the keyboard.
+  **That `TYPE` chip is still called TYPE and is still right** — a READY session has no ask, so no
+  reply panel is built for it and the button really does open the keyboard. **The ASK screen's
+  button is a different one and it says `REPLY` now**, because since the compose surface landed it
+  opens the panel rather than a keyboard; see
+  [`sessions-and-asks.md`](sessions-and-asks.md#the-compose-surface).
   Delivery is the SAME function for both (`deliverTextToSession`) driven by the same
   `DECKHAND_VOICE_DELIVERY` - so with the default, SEND **copies the text to the Mac and
   notifies you**; it runs nothing until that is set to `dispatch`. One copy of that logic is what
@@ -673,10 +844,14 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     `sessions.ino` rather than restating it, so a future change that RE-COUPLES the zone to the
     drawn size is what fails.
   - **Prompt mode differs from answer mode in exactly the ways the situation does:** no countdown
-    (nothing is waiting, and a timer would be a lie), no peek and so no "tap here to read it"
-    hint (there is no ask, and the detail screen it opened from already shows the context), a
-    placeholder naming the session, and a window tracked by session id plus `msgOffered()` rather
-    than by `askPid`. Leaving READY withholds SEND and **keeps the text**, saying
+    (nothing is waiting, and a timer would be a lie), no peek — and so no prompt strip, no
+    strip tap band and no hint pointing at either (there is no ask, and the detail screen it
+    opened from already shows the context; `kbHasDetail()` returns false in message mode and
+    gates all three from one place). That hint read "tap here to read it" while the card's own
+    tap opened the peek; since Task 6 it reads **"tap the prompt above to read it"**, because
+    a hint that names a control which has moved teaches the one gesture that no longer works.
+    Also a placeholder naming the session, and a window tracked by session id plus
+    `msgOffered()` rather than by `askPid`. Leaving READY withholds SEND and **keeps the text**, saying
     `NO LONGER READY` - "answer on your Mac" would be answering a question nobody asked.
   - **`KBTEST msg [text]`** opens it against the first READY session and optionally types, for the
     same reason `TAB`/`PAGE` exist. It still **cannot SEND** - that needs a real tap, and keeping

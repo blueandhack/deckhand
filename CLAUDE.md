@@ -26,8 +26,12 @@ host/index.mjs  <----------------------------------------------------- +
         --(USB serial AND/OR BLE, JSON lines)-->  deckhand_display.ino
 ```
 
-USB and BLE are **independent, not fallbacks**: both are normally live at once
-(`via=usb,ble` in the log) and the host writes the same payload to whichever are connected.
+USB and BLE are **independent, not fallbacks**: both are normally live at once and the host
+writes the same payload to whichever are connected. **"The USB link" is plural** - every
+matching port is opened as its own link, so two boards can be driven at once, and the tick's
+`via=` names each link (`via=usb:Deckhand-C114,usb:Deckhand-0528,ble`) because `via=usb,ble`
+read identically whether that was one board on two transports or two boards on one each.
+See [`docs/reference/host-runtime.md`](docs/reference/host-runtime.md).
 
 ## THERE ARE TWO BOARDS
 
@@ -49,7 +53,17 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1386758, RAM 69804 | flash 1033802, RAM 70140 |
+| size today | flash 1415520, RAM 73244 | flash 1054272, RAM 72836 |
+
+**FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
+`node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
+under *BOARD 1'S BINARY IS A CONTRACT* against `firmware/board-baseline.json`, and the two
+**flash** figures on the row above are those same sizes - so `--update` rewrites all of them and
+they cannot go stale again (that copy went stale five times in one day). The two **RAM** figures
+are `arduino-cli`'s own "Global variables use N bytes", are NOT bound by anything, and are
+hand-maintained: check them after any compile that moves `.bss`. `arduino-cli`'s "Sketch uses N" is a
+slightly smaller number than the `.bin` - the same image without its trailing padding - so do
+not expect the compile summary to print these.
 
 **Everything board-specific lives in the two board headers** - pins, capability flags, and
 **every layout constant**. Nothing in a shared `.ino` may hardcode a panel dimension; three
@@ -96,7 +110,12 @@ safe when the last compile was for the same board.**
 
 ## BOARD 1'S BINARY IS A CONTRACT
 
-Board 1 is held byte-identical across board-2 work. Verify it - do not reason about it:
+**Not "board 1 never changes" - "board 1 never changes by ACCIDENT".** Board 1 was held
+byte-identical for the whole two-board port, and that constraint was LIFTED on the
+`compose-surface` branch, deliberately: the user asked for board 1 to be brought into line with
+board 2, so shared-code fixes now land on both. What survives is the contract that made the
+freeze useful in the first place - every movement of either binary is measured, expected, and
+explained in the commit message that causes it. Verify it - do not reason about it:
 
 ```
 arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
@@ -104,7 +123,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `8f64b7f78c14b39e...`, size 1387024.
+Today: `def9c811c0b0b5a9...`, size 1415520 (board 2: `8c2985a23e9bf0e4...`, size 1054272).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -165,6 +184,11 @@ task. A `CHANGED` you have learned to expect is a `CHANGED` you stop reading.
 - **THE HOST MUST RUN VIA `DeckhandBLE.app`.** macOS TCC SIGABRTs a bare `node` the instant it
   touches CoreBluetooth - not a permission prompt, an immediate crash. There is no bare-node
   fallback even for USB-only work.
+- **`processCompletedLine` TAKES `buf` BY REFERENCE - IT IS THE ACCUMULATOR.** A handler that
+  `return`s early without setting `buf = ""` leaves the refused text there for the next bytes to
+  be APPENDED to, which matches the same verb and refuses again for ever. Measured: one `DETAIL 9`
+  produced 63 refusal lines and ~100 seconds in which BOTH boards parsed no payloads at all - a
+  frozen display, and a `SCREENSHOT` sent inside that window went nowhere. Four handlers had it.
 - **`#if` ARMS THAT DUPLICATE A WHOLE STATEMENT ARE HOSTILE TO EVERY CHECKER HERE.** An `#if`/
   `#else` that opens a brace in both arms leaves any brace-counting tool seeing one more `{`
   than `}`. That broke an unrelated PAIRING assertion, which then reported a defect that did
@@ -178,12 +202,17 @@ the physical screen" - plus a large set of offline checkers.
 ```
 # firmware geometry and arithmetic
 node firmware/deckhand_display/{usage,sessions,settings}-geom-check.mjs
-node firmware/deckhand_display/{sessions-rank,scrollback,palette}-check.mjs
+node firmware/deckhand_display/{sessions-rank,scrollback,palette,textwidth}-check.mjs
+node firmware/deckhand_display/commands-check.mjs      # every verb handled or refused BY NAME, both boards
 python3 firmware/deckhand_display/{usage-trend,batt-trend}-check.py
 node firmware/deckhand_display/geom-sweep.mjs          # fault-injection sweep, ~110s
 # the wire and the Mac
-node host/{wire-bytes,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
+node host/{wire-bytes,ask-chips,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
+node host/{codex-refresh,line-address,session-lookup}-check.mjs
+node host/session-inbox-check.mjs                       # the inbox frame, over a stand-in socket
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
+node firmware/board-baseline.mjs --doc-check           # the quote above vs the JSON
+node host/multi-device-check.mjs                        # two boards on two cables at once
 node claude-hooks/answer-status-check.mjs
 node docs/design/*/check.mjs                            # committed mocks, bound to the headers
 ```
@@ -218,12 +247,21 @@ whichever transports are live. **The host delivers each command over BOTH transp
 cabled device receives it twice** - every handler must tolerate that, and several have had to
 learn it (`POWERPROBE` produced four refusal lines; a duplicated scrollback fetch corrupted
 itself). **Every refusal must NAME ITS CAUSE**: from the Mac, silence and "impossible here"
-look identical.
+look identical. **A verb this board does not have is refused from one table**
+(`UNAVAILABLE_COMMANDS[]` in `deckhand_display.ino`), walked at the end of the dispatch
+chain, each entry guarded by the exact negation of its handler's guard;
+`commands-check.mjs` evaluates both against the two headers and fails by verb name if
+one is neither handled nor refused.
 
 | command | what it does |
 |---|---|
 | `RECAL` / `MICTEST` / `MICMON` / `MICREC` / `MICSTREAM` | touch calibration; mic level, live meter, one-shot and streaming capture |
-| `TAB 0..2` / `PAGE 0..3` / `KBTEST` / `EMOJITEST` / `READTEST` | put a surface on the glass, since a capture can only record what is already there |
+| `TAB 0..2` / `PAGE 0..4` (board 1) or `PAGE 0..6` (board 2) / `KBTEST` / `EMOJITEST` / `EMOJITEST off` / `READTEST` | put a surface on the glass, since a capture can only record what is already there. **`EMOJITEST off` is the escape** - the flag gates payload absorption AND the tick, and without it a `TAB` painted over the grid left a board that looked alive with a frozen footer, recoverable only by reflashing. `TAB` now clears the grid and REFUSES over a reader/transcript rather than stranding its flag |
+| `DETAIL <n>` | session `n`'s detail card, or its ask screen, WITHOUT the keyboard over it - the only route to either from the Mac (`KBTEST msg` opens the keyboard over it). Refuses by name on no sessions, an out-of-range `n`, or another full-screen surface |
+| `COMPOSE` + `type <text>` / `chip <n>` / `page` / `keys` / `back` / `sent` / `recent <t>` / `off` | the reply panel over the first pending ask, then the draft, a token tap, the pager, the two SCREEN MOVES, the receipt state and the recents ring. `sent` and `recent` SEND NOTHING. `chip`/`page` dedupe the double delivery BY NAME (an insert is not idempotent); opening and the screen moves do not, and say why (they are). **Nothing here can tap a control** - see `KBBUBBLE` |
+| `THEME dark\|light` | which palette is live, so "confirm this reads in both themes" stops needing a person at the device. NOT persisted - a reboot restores the stored setting |
+| `KBPROBE` / `KBPROBE off` | per keystroke: the key the press ARMED, the key the lift COMMITTED, the pixel delta. Measures where fingers land versus where they lift; says NOTHING about whether the text was right |
+| `KBBUBBLE [r c]` / `KBBUBBLE off` | draws the magnified key bubble so a capture can see it - it otherwise exists only while a finger is down. Arms, never commits; declines DEL, which commits on press |
 | `SCREENSHOT` | PNG to `~/Deckhand-shots/` (0.4s on board 2, ~18s on board 1) |
 | `COLORTEST` / `SWAP 0\|1` / `INV 0\|1` | board 2: the only instruments that can see the panel's colour pipeline |
 | `PERF` / `TEMP` / `TEXTPROBE` | flush timing; SoC DIE temperature; the text-width table |
@@ -231,6 +269,8 @@ look identical.
 | `AUDIOPROBE` / `TONETEST [vol]` / `TONELADDER` | a ladder of claims: on the bus / configured and playing / find the audible floor |
 | `SCROLLFETCH` / `SCROLLOPEN` / `SCROLLTO [line]` / `SCROLLPERF [top\|code\|line]` / `SCROLLCLOSE` | board 2 transcript: fetch without drawing, open, park, measure, close |
 | `BLEMTU` | board 2: the negotiated ATT MTU per link |
+| `MSGPRI` / `MSGPRI now\|next\|later` | report or set how a message sent FROM this device lands in the Mac's session queue. NVS-backed, on the SETTINGS tab; the device announces it at boot and on `WHOAMI`, and the host asks for it when a HELLO names a link it has no priority for |
+| `WHOAMI` | re-emits the boot `HELLO <name> v2` line on demand, over USB. Both boards. The host sends it to an anonymous link before considering a reset - `HELLO` is a boot-only burst, so a host that attached to an already-running board otherwise had to REBOOT it to learn its name |
 | `MULTITEST <n>` / `PAIRVECTOR` | inject a synthetic second Mac; check the pairing crypto against RFC 7748 |
 
 **`SCROLLPERF` and `SCROLLTO` are separate on purpose.** `SCROLLPERF` times twenty frames of
@@ -268,6 +308,7 @@ to the board header, are under [`docs/design/`](docs/design/).
 |---|---|
 | `deckhand_display.ino` | types, globals, components, tab bar, setup/loop, protocol |
 | `usage.ino` / `sessions.ino` / `settings.ino` | the three tabs |
+| `compose.ino` | the reply panel - the compose surface's other screen, over the keyboard's own draft |
 | `reader.ino` | board 1's paged history reader; board-2 arms delegate to `scrollback.ino` |
 | `scrollback.ino` | BOARD 2 ONLY, one `#if`: the PSRAM transcript, wrap, line index, renderer, drag |
 | `audio.ino` / `power.ino` / `keyboard.ino` / `pairing.ino` | mic and beeper; battery and sleep; the QWERTY; NVS keys and the answer HMAC |
@@ -289,3 +330,10 @@ that library reads it from inside itself - so reinstalling TFT_eSPI silently wip
 - **Correct in place rather than deleting.** A described defect that no longer exists costs the
   next reader either the time to disprove it or a no-op "fix" - so entries that turned out to
   be wrong are kept and marked, not removed.
+- **QUOTE BACK ANY MESSAGE THAT ARRIVES FROM THE DEVICE.** It reaches you as "Another Claude
+  session sent a message"; the person who typed it SEES NOTHING. Claude Code marks anything
+  arriving over `CLAUDE_CODE_MESSAGING_SOCKET` from an external process `isMeta: true`, and the
+  UI hides meta entries - so the send works, lands in 125ms, and is invisible at the one end
+  that matters. The host cannot fix it (the injection frame carries no field that changes the
+  classification). Opening your reply with the text is the only remedy there is. See
+  [`docs/reference/audio-and-voice.md`](docs/reference/audio-and-voice.md).

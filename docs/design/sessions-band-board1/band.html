@@ -1,0 +1,164 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Deckhand - the status band card, both boards</title>
+<style>
+  body { background:#111; color:#bbb; font:13px/1.5 -apple-system,system-ui,sans-serif; margin:0; padding:24px; }
+  h1 { font-size:18px; color:#eee; margin:0 0 4px; }
+  h2 { font-size:14px; color:#ddd; margin:28px 0 0; }
+  p  { max-width:76ch; }
+  .note { color:#e4a; }
+  .row { display:flex; flex-wrap:wrap; gap:28px; margin-top:16px; align-items:flex-start; }
+  figure { margin:0; }
+  figcaption { margin-top:6px; font-size:11px; color:#888; max-width:40ch; }
+  canvas { image-rendering:pixelated; border:1px solid #333; display:block; }
+  .pair { display:flex; gap:0; }
+  .gutter { position:relative; width:210px; margin-left:8px; font:10px/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:#7a7; }
+  .gutter div { position:absolute; left:0; white-space:nowrap; border-top:1px solid #353; padding-left:4px; }
+  .gutter div span { color:#585; }
+  code { color:#ddd; }
+  table { border-collapse:collapse; margin-top:8px; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  th,td { border:1px solid #333; padding:2px 8px; text-align:right; }
+  th:first-child, td:first-child { text-align:left; color:#ddd; }
+  th { color:#888; font-weight:normal; }
+</style>
+<h1>The status band card - board 1 beside board 2</h1>
+<p>
+  Board 1 (240x320) drew a 90px row and then <b>174px of empty tab</b> at one
+  session, which is 66% of its list area - a bigger share than the 48% that
+  motivated this card on board 2. It gets the same card, derived from
+  <b>its own cells</b> rather than scaled off board 2's:
+  <code>check.mjs</code> binds this page's <code>K</code> to <b>both</b> board
+  headers name-for-name, and asserts that the labelled blocks beside each card sum
+  to <code>SESSION_EXP_MAX_H</code>.
+</p>
+<p class="note">
+  GLYPH RENDERING HERE IS APPROXIMATE. The panel draws 1-bit Cozette 6x13 (board 1)
+  and Spleen 8x16 (board 2); this page steps a browser monospace face at each
+  board's real advance and cell. The <b>metrics</b> are the panel's, the ink inside
+  each cell is not. The agent mark is drawn as its 32x32 <b>box</b> rather than the
+  art - which is the point on board 1, where 32 rows is the whole of the band's
+  interior and 32 columns is what left the status word 141px instead of the 160 its
+  full phrase needs.
+</p>
+<h2>One session - the band card</h2>
+<div class="row" id="cards"></div>
+<h2>Three sessions - the spine, the band's compact form</h2>
+<p>
+  Below the floor the card stops being a card. Board 1 refuses at <b>two</b>
+  sessions (leftover 171 against a 220 floor) where board 2 refuses at three, so
+  every list with more than one session on board 1 looks like this: the status
+  colour carried by a 5px spine down each row's left edge, with the row's own text
+  pill still there beside it. Colour is never the only carrier.
+</p>
+<div class="row" id="lists"></div>
+<h2>The block stack, side by side</h2>
+<div id="table"></div>
+<script src="band.js"></script>
+<script>
+(function () {
+const { SCREENS, K, ADV, CELL, TH, P } = globalThis.__X;
+const SCALE = 2;
+const FACE = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+function paint(sc, theme) {
+  const b = sc.board, k = K[b];
+  const cv = document.createElement("canvas");
+  cv.width = k.BOARD_W * SCALE; cv.height = k.BOARD_H * SCALE;
+  cv.style.width = (k.BOARD_W * SCALE) + "px";
+  const g = cv.getContext("2d");
+  g.scale(SCALE, SCALE);
+  const p = new P(b, theme);
+  sc.draw(p);
+  for (const o of p.ops) {
+    if (o[0] === "r" || o[0] === "s") {
+      const [, x, y, w, h, c, r] = o;
+      const off = o[0] === "s" ? 0.5 : 0, sh = o[0] === "s" ? 1 : 0;
+      g.beginPath();
+      if (r) g.roundRect(x + off, y + off, w - sh, h - sh, r);
+      else   g.rect(x + off, y + off, w - sh, h - sh);
+      if (o[0] === "r") { g.fillStyle = c; g.fill(); }
+      else { g.strokeStyle = c; g.lineWidth = 1; g.stroke(); }
+    } else if (o[0] === "t") {
+      const [, s, x, y, f, c] = o;
+      const adv = ADV[b][f], cell = CELL[b][f];
+      g.fillStyle = c;
+      // Stepped one CELL at a time so the string occupies exactly the pixels the
+      // panel would advance through, whatever the browser face measures.
+      g.font = `${Math.round(cell * 0.78)}px ${FACE}`;
+      g.textBaseline = "alphabetic";
+      for (let i = 0; i < s.length; i++) {
+        const w = g.measureText(s[i]).width;
+        g.fillText(s[i], x + i * adv + Math.max(0, (adv - w) / 2), y + Math.round(cell * 0.78));
+      }
+    }
+  }
+  return { cv, p };
+}
+
+function figure(sc, theme, withGutter) {
+  const { cv, p } = paint(sc, theme);
+  const k = K[sc.board];
+  const fig = document.createElement("figure");
+  const pair = document.createElement("div");
+  pair.className = "pair";
+  pair.appendChild(cv);
+  if (withGutter) {
+    const gut = document.createElement("div");
+    gut.className = "gutter";
+    gut.style.height = (k.BOARD_H * SCALE) + "px";
+    for (const blk of p.blocks) {
+      const d = document.createElement("div");
+      d.style.top = (blk.y * SCALE) + "px";
+      const parts = blk.name.split(" ");
+      d.innerHTML = `${blk.h}px <span>${parts.slice(1).join(" ")}</span>`;
+      gut.appendChild(d);
+    }
+    pair.appendChild(gut);
+  }
+  fig.appendChild(pair);
+  const cap = document.createElement("figcaption");
+  cap.textContent = `${sc.title} - ${theme} - ${k.BOARD_W}x${k.BOARD_H} at ${SCALE}x` +
+    (withGutter ? ` - card ${p.cardH} of ${p.avail}px of list area`
+                : ` - rows ${p.rowH}px, ${p.avail}px of list area`);
+  fig.appendChild(cap);
+  return fig;
+}
+
+const cards = document.getElementById("cards"), lists = document.getElementById("lists");
+for (const theme of ["DARK", "LIGHT"])
+  for (const sc of SCREENS)
+    (sc.sessions === 1 ? cards : lists).appendChild(figure(sc, theme, sc.sessions === 1));
+
+// The two stacks as numbers, beside the pictures - the same blocks, so a reader
+// can see which leadings board 1 spends and which it does not have to spend.
+const NAMES = ["band","name","sub","title","rule","label","prompt","rule2","path","pad"];
+const rows = {};
+for (const b of [1, 2]) {
+  const sc = SCREENS.find((s) => s.board === b && s.sessions === 1);
+  const p = new P(b, "DARK"); sc.draw(p);
+  p.blocks.forEach((blk) => {
+    const key = blk.name.split(" ")[0];
+    (rows[key] = rows[key] || {})[b] = blk.h;
+  });
+}
+let html = "<table><tr><th>block</th><th>board 1</th><th>board 2</th><th>header name</th></tr>";
+const HDR = { band:"SESSION_BAND_H", name:"SESSION_BAND_NAME_H", sub:"SESSION_BAND_SUB_H",
+  title:"2 x SESSION_BAND_TITLE_STEP", rule:"SESSION_BAND_RULE_H", label:"SESSION_BAND_LABEL_H",
+  prompt:"4 x SESSION_BAND_PROMPT_STEP", rule2:"SESSION_BAND_RULE_H",
+  path:"SESSION_BAND_PATH_H", pad:"SESSION_BAND_BOTTOM_PAD" };
+let s1 = 0, s2 = 0;
+for (const n of NAMES) {
+  const a = rows[n] ? rows[n][1] : 0, z = rows[n] ? rows[n][2] : 0;
+  s1 += a; s2 += z;
+  html += `<tr><td>${n}</td><td>${a}</td><td>${z}</td><td>${HDR[n]}</td></tr>`;
+}
+html += `<tr><td><b>SESSION_EXP_MAX_H</b></td><td><b>${s1}</b></td><td><b>${s2}</b></td>` +
+        `<td>the SUM, never a chosen number</td></tr>`;
+html += `<tr><td>list area</td><td>${K[1].BOARD_H - K[1].FOOTER_H - K[1].SESSION_ROW_Y0}</td>` +
+        `<td>${K[2].BOARD_H - K[2].FOOTER_H - K[2].SESSION_ROW_Y0}</td>` +
+        `<td>what stays outside the card is list area</td></tr>`;
+html += `<tr><td>SESSION_EXP_MIN_H</td><td>${K[1].SESSION_EXP_MIN_H}</td>` +
+        `<td>${K[2].SESSION_EXP_MIN_H}</td><td>the same stack at PROMPT_MIN</td></tr></table>`;
+document.getElementById("table").innerHTML = html;
+})();
+</script>

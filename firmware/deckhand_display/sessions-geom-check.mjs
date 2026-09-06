@@ -18,8 +18,52 @@
 //
 //   node sessions-geom-check.mjs             check both boards
 //   node sessions-geom-check.mjs --selftest  prove the checker has teeth
-import { cacheSizes, consts, DIR, fnBody, lineH, PANEL, preflight, textWidth } from "./geom-common.mjs";
+import { cacheSizes, consts, deadGuards, DIR, faultChildEpilogue, fnBody, lineH,
+         PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX, splitArgs,
+         stripComments, sweepSourceFaults, textWidth } from "./geom-common.mjs";
 import fs from "fs";
+
+// ---------------------------------------------------------------------------
+// SOURCE FAULTS. This checker's --selftest injected exactly ONE perturbed
+// constant, while a growing half of what it asserts reads the firmware's own
+// TEXT. A reviewer measured what that left unproven: `return;` at the top of
+// drawBandMark, `rowH >= SESSION_TITLE_MIN_H + 24`, and the sub-line drawn at
+// `y + SESSION_SUB2_Y + 9` all passed 2042/2042 - the last of them reintroducing
+// precisely the border overrun KNOWN[1]'s first entry records as FIXED.
+//
+// Each fault is a function over one file's text, located structurally, and the
+// registration happens before preflight() because every file is read at module
+// scope. The parent re-execs this checker once per fault and requires the child to
+// fail BY THE NAMED ASSERTION; a fault that changed nothing prints ANCHOR MOVED.
+// ---------------------------------------------------------------------------
+const SOURCE_FAULTS = [
+  ["drawBandMark() gets `return;` first (the fully-static working card)",
+    "sessions.ino", (t) => t.replace(/(void drawBandMark\(int pos\)\s*\{)/, "$1\n  return;"),
+    "drawBandMark() has no return at all"],
+  ["the title rung's height test gains + 24 (the ladder goes nnnncc on the glass)",
+    "sessions.ino", (t) => t.replace(/(rowH\s*>=\s*SESSION_TITLE_MIN_H)/, "$1 + 24"),
+    "is exactly `rowH >= SESSION_TITLE_MIN_H`"],
+  ["the compact sub-line is drawn 9px lower, back onto the card's own border",
+    "sessions.ino", (t) => t.replace(/(drawString\([^;]*?y \+ SESSION_SUB2_Y)\)/, "$1 + 9)"),
+    "draws at exactly `y + <the constant>`"],
+  ["SESSION_NAME_TOP_RUNG is pushed off the end of the rung ladder",
+    "board_e32r28t.h", (t) => t.replace(/(const int SESSION_NAME_TOP_RUNG\s*=\s*)\d+/, "$14"),
+    "indexes NAME_RUNGS"],
+  ["rowSigCache is reverted to the six bytes of headroom it had",
+    "board_es3c35p.h", (t) => t.replace(/(const int SESSION_ROW_SIG_LEN\s*=\s*)\d+/, "$1304"),
+    "at or above the 64-byte margin"],
+  ["detailSigCache is reverted to 384, three bytes from silent truncation",
+    "deckhand_display.ino", (t) => t.replace(/(char detailSigCache\[)\d+/, "$1384"),
+    "at or above the 64-byte margin"],
+  ["the ask's input row goes back to promising a keyboard it no longer opens",
+    "sessions.ino", (t) => t.replace(/(ASK_OPT_H, ")REPLY TO THIS PROMPT(")/, "$1TYPE YOUR ANSWER$2"),
+    "no input-row label says TYPE"],
+];
+if (SOURCE_FAULT_INDEX >= 0) {
+  const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
+  if (!f) { console.log("ANCHOR MOVED"); process.exit(2); }
+  setSourceFault(f[1], f[2]);
+}
 preflight();
 
 // ---- PER-BOARD TEXT MEASUREMENT, and why this file needed it ----
@@ -37,7 +81,7 @@ preflight();
 // device's own 136 recorded widths by preflight()); board 2's faces are genuinely
 // monospace, which is asserted rather than assumed.
 function parseGfxFont(file) {
-  const src = fs.readFileSync(`${DIR}/${file}`, "utf8");
+  const src = readSource(`${file}`);
   const gl = src.slice(src.indexOf("Glyphs[]"));
   const rows = [...gl.matchAll(/\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\}/g)];
   return rows.map(m => ({ w: +m[2], h: +m[3], xa: +m[4], xo: +m[5], yo: +m[6] }));
@@ -47,7 +91,7 @@ function parseGfxFont(file) {
 // before the array), and a shape it does not recognise THROWS - a parser that
 // silently falls back to a default is worse than the literal it replaces.
 function parseUiFonts() {
-  const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+  const src = readSource(`deckhand_display.ino`);
   const at = src.indexOf("UI_FONTS[] = {");
   if (at < 0) throw new Error("parseUiFonts(): UI_FONTS[] = { not found");
   let ifStart = -1, idx = -1;
@@ -113,27 +157,26 @@ function widthB(b, id, s) {
 // The transcript cap comes from the file that OWNS it - host/index.mjs - rather than
 // from a number copied here, the same way settings-geom-check.mjs reads KB_MAX_BYTES
 // out of the firmware and ANSWER_TEXT_MAX_BYTES out of the host.
-const VOICE_TEXT_MAX = +fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
+const VOICE_TEXT_MAX = +readSource(`../../host/index.mjs`)
   .match(/VOICE_TEXT_MAX\s*=\s*(\d+)/)[1];
 
 // The per-option description cap, from the file that OWNS it - the hook - for the
 // identical reason VOICE_TEXT_MAX comes from host/index.mjs. Nothing in a
 // translation unit can see a JS constant, so this read IS the link between the
 // host's cap and the device's buffer, and it fails if either moves alone.
-const OPT_DESC_MAX_BYTES = +fs.readFileSync(
-  `${DIR}/../../claude-hooks/deckhand-session-hook.mjs`, "utf8")
+const OPT_DESC_MAX_BYTES = +readSource(`../../claude-hooks/deckhand-session-hook.mjs`)
   .match(/ASK_OPT_DESC_MAX_BYTES = (\d+);/)[1];
 
 // The TYPE chip's own source, so the hit test's slack term is PARSED rather than
 // restated - the whole point of the assertion below is that it can see a future
 // change that couples the chip's drawn size back to the tap zone.
-const SESSIONS_INO = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
-const DISPLAY_INO  = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+const SESSIONS_INO = readSource(`sessions.ino`);
+const DISPLAY_INO  = readSource(`deckhand_display.ino`);
 // The reader is a fourth file this checker has to read: the ask screen's chip and
 // the screen it opens are one feature, and the assertions that matter are about
 // the seam between them (which predicate opens it, and on which line grid the
 // second section is drawn).
-const READER_INO   = fs.readFileSync(`${DIR}/reader.ino`, "utf8");
+const READER_INO   = readSource(`reader.ino`);
 
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 // The board header FIRST, then deckhand_display.ino seeded with it - which is the
@@ -148,6 +191,10 @@ const CACHE = cacheSizes("deckhand_display.ino");
 // checked for being a NAME rather than a literal.
 const OPT_DECL = DISPLAY_INO.match(/char askOpts\[(\d+)\]\[(\d+)\];/);
 const OPT_DESC_DECL = DISPLAY_INO.match(/char askOptDesc\[(\d+)\]\[([A-Za-z_0-9]+)\];/);
+// The chips buffer, parsed the same way and for the same reason: the signature
+// arithmetic below needs its real dimensions, and a literal on this side would leave
+// the firmware's own numbers certifying nothing.
+const CHIP_DECL = DISPLAY_INO.match(/char askChips\[(\d+)\]\[(\d+)\];/);
 
 // Field caps, straight off SessionInfo in deckhand_display.ino (a char[N] holds
 // N-1 characters). These are DATA widths, identical on both boards - which is
@@ -171,6 +218,19 @@ const T_HERO = 4, T_HEAD = 3, T_BODY = 2, T_META = 1;
 // drawSessionRow's NAME_RUNGS[], largest first. Kept in the same order as the
 // firmware's array, because SESSION_NAME_TOP_RUNG is an INDEX into it.
 const NAME_RUNGS = [T_HERO, T_HEAD, T_BODY];
+// THE INDEX, RANGE-CHECKED IN ONE PLACE. SESSION_NAME_TOP_RUNG is an index into
+// the array above, and expBands() used to read NAME_RUNGS[...] raw - so an
+// out-of-range value reached UI[b][undefined] and threw an uncaught TypeError
+// before the range assertion further down could name it. Measured: -1 and 1 fail
+// by name; 4, 16 and -4 CRASHED. geom-sweep counts a crash as "caught", which is
+// how it stayed: a crash says nothing about which assertion would have fired, and
+// a checker that dies cannot report the other 2041 things it knows. Every read of
+// the rung goes through here now, and rungOk() is what the assertion tests.
+function rungOk(c) {
+  const i = c.SESSION_NAME_TOP_RUNG;
+  return Number.isInteger(i) && i >= 0 && i < NAME_RUNGS.length;
+}
+function topRungOf(c) { return rungOk(c) ? NAME_RUNGS[c.SESSION_NAME_TOP_RUNG] : T_BODY; }
 
 // Documented, deliberately-unfixed board-1 facts. Every one of them is a place
 // board 1's packed content area gives something up; board 2's derivation does
@@ -178,47 +238,71 @@ const NAME_RUNGS = [T_HERO, T_HEAD, T_BODY];
 // up the same clearance rather than keeping it.
 const KNOWN = {
   1: [
-    "sub-line lane 184 <= the row's own text lane 172",
+    // "sub-line lane 184 <= the row's own text lane 172" used to be here: it was
+    // the sub-line running 12px onto the card's own border, fixed by deriving
+    // SESSION_SUB_LANE_W the same way on both boards (board_e32r28t.h). Removed
+    // rather than left dead, since the message this checker now emits for that
+    // line ("sub-line lane 172 <= ... 172") would never match it again anyway -
+    // an unreachable entry here is what "AN ASSERTION THAT CANNOT FAIL IS A
+    // DEFECT" is about, just on the allowlist side of it instead of the chk().
     "prompt: 2 lines hold 62 of 100 chars",
     "path: 2 lines hold 62 of 64 chars",
     "ask badge row starts at +27, inside the +28 header touch band",
-    // FOUND BY THIS CHECKER, both pre-existing and both left alone because board
-    // 1's binary is held byte-identical across the two-board port. Reported
-    // rather than fixed - see the task report.
-    //
-    // (a) Seven or more sessions: the "+N more" strip takes 16px, six rows then
-    // come out at (248-15)/6 = 38 - exactly SESSION_ROW_H_MIN, so nothing clamps
-    // it - and a compact row's sub-line inks y+25..y+37 while the 2px border owns
-    // y+36..y+37. The last two rows of the model/branch line are drawn over the
-    // row's own outline. Board 2 cannot reach it: its smallest row is 63.
-    "strip 6x38 (compact): sub-line -> border bottom gap -2",
-    // (b) The detail screen's two footer strings are drawn at the SAME y. Both use
-    // MC_DATUM: "answer this one on your Mac" at cardY + DETAIL_CARD_H + 8 =
-    // 60+224+8 = 292, and the history hint at contentBottom() - 10 = 292. Since
-    // drawString paints an opaque box and the hint is drawn second, the warning is
-    // invisible on this board - i.e. board 1's card is 13px OVER the ceiling the
-    // hint sets (224 against 211), which is why the same defect shows up twice
-    // below: once as the two strings colliding, and once as the constant itself.
-    // Board 2's card is AT its own ceiling (330 of 330) and the two boxes are
-    // adjacent rather than overlapping: §7's band costs 6px of ink on a card that
-    // had 4px of slack, so this is the whole of that headroom being spent.
-    "\"answer on your Mac\" ends 299 above the history hint at 287",
-    "DETAIL_CARD_H 224 is within the 211px ceiling the history hint sets",
+    // (a) TWO ENTRIES USED TO SIT HERE AND THE DEFECT THEY DOCUMENTED IS FIXED:
+    //   "strip 6x38 (compact): sub-line -> border bottom gap -2"
+    //   "ladder floor 38 >= SESSION_SUBC_Y + line + 2 = 40 (least legal compact row)"
+    // One defect stated twice - as the row it produced, and as the constant that
+    // produced it. Seven or more sessions add the 16px "+N more" strip, leaving
+    // avail 248, and (248 - 5*3) / 6 = 38 exactly, so nothing clamped it; a compact
+    // row's sub-line inked y+25..y+37 while the 2px border owned y+36..y+37, and
+    // the last two rows of the model/branch line were drawn over the row's own
+    // outline. THE STATED REASON FOR LEAVING IT WAS THAT BOARD 1'S BINARY WAS HELD
+    // BYTE-IDENTICAL, and that is no longer true of this branch. sessionSubcYAt()
+    // clamps the sub-line to the row it is drawn in (sessions.ino carries the
+    // arithmetic, including why the ladder FLOOR could not simply be raised to 40:
+    // six rows at 40 plus five gaps is 255 against an avail of 248). The band walk
+    // measures the clamped y at every rung, so the collision is now checked where
+    // it happens. Removed rather than left dead - an unreachable allowlist entry is
+    // the same defect as an assertion that cannot fail, just on the allowlist side
+    // of it - and the precedent is 3a9a085's, 5d1acf1's and 924cecc's.
+    // (b) TWO ENTRIES USED TO SIT HERE AND THE DEFECT THEY DOCUMENTED IS FIXED:
+    //   "\"answer on your Mac\" ends 299 above the history hint at 287"
+    //   "DETAIL_CARD_H 224 is within the 211px ceiling the history hint sets"
+    // One defect stated twice. The detail screen's two footer strings were drawn at
+    // the SAME y - both MC_DATUM: "answer this one on your Mac" at cardY +
+    // DETAIL_CARD_H + 8 = 60 + 224 + 8 = 292, and the history hint at
+    // contentBottom() - 10 = 292 - and drawString paints an OPAQUE box with the hint
+    // drawn second, so on this board the warning was INVISIBLE. The device showed an
+    // ask it could not answer and silently swallowed the sentence saying why. Board
+    // 1's card was 13px over the ceiling its own footer sets (224 against 211).
+    // §7's port took that card to 210: the two label+value column pairs (four
+    // labels, four values) became one meta line, which paid for the band AND for
+    // the 14px the card had to give back. Removed rather than left dead - an
+    // unreachable allowlist entry is the same defect as an assertion that cannot
+    // fail, just on the allowlist side of it - and the precedent is 3a9a085's.
     // (c) Both under board 1's own TAP_MIN of 40, and its own header comment says
     // so: at board 2's 46+8 the worst-case option stack would be 270 of a 268px
     // content area. The proportion carries across even though the pixels cannot.
     "ask option 32px tall >= TAP_MIN 40",
     "ask option gap 4 separates two decision buttons",
-    // (d) The ladder floor, 2px under the least legal compact row - the same
-    // arithmetic as (a), stated as the constant rather than as the row it produces.
-    "ladder floor 38 >= SESSION_SUBC_Y + line + 2 = 40 (least legal compact row)",
-    // (e) The VOICE RESULT CARD, both pre-existing and both unreachable on board 2.
-    // The label step is 1px under Cozette's cell, so the transcript panel's fill lands
-    // on the label's last row - blank for every glyph without a descender, the same
-    // allowance (d)'s neighbours take. And six lines of a 33-column lane hold 198 of
-    // the host's 200-character transcript cap, so a full-length transcript loses its
-    // last two characters (word wrap can cost more). Both are left alone because this
-    // board's binary is held byte-identical; board 2 takes the full cell and 210.
+    // (e) THE VOICE RESULT CARD, both pre-existing, both unreachable on board 2, and
+    // both DEFERRED WITH THE ARITHMETIC rather than excused - the "board 1's binary
+    // is held byte-identical" that stood here is not a reason any more (CLAUDE.md).
+    //
+    // VOICE_LBL_STEP is 12, one pixel under Cozette's 13px cell, so the transcript
+    // panel's fill lands on the label's last row. That row is the label's DESCENDER
+    // row and the labels are "YOU SAID" / "CLAUDE" - upper case, no descenders, so
+    // no ink is ever there; the same allowance the ask badge/title pair takes. The
+    // fix is +1, and board_e32r28t.h says what it would cost on a 16px face (four
+    // rows of a real 12-row ascent), which is why the constant is per-board at all.
+    //
+    // SIX LINES HOLD 198 OF 200, and the seventh is what the card cannot give: the
+    // panel runs 68..157 and six 13px lines end at 151, so a seventh needs to reach
+    // 164 - past the panel, past the reply label at 168. Growing the panel by 13
+    // walks the reply block into the footer bound this checker already asserts (the
+    // reply ends 283 of 294). So a 200-character transcript loses its last two
+    // characters, and word wrap can cost more. Board 2 is not a better layout, it is
+    // a 480px panel: 35 columns x 6 = 210, which is over the cap with room to spare.
     "voice card label step 12 >= the label's own 13px cell",
     "voice card: 6 lines hold 198 of 200 transcript chars",
     // (f) The reader chip's tap zone is the full HEADER BAND, and board 1's band
@@ -241,11 +325,19 @@ const KNOWN = {
 const LADDER_SHAPE = { 1: "tttncc", 2: "ttttsn" };
 // THE SIX EXPANDED HEIGHTS, one per session count, asserted for the same reason
 // LADDER_SHAPE is: changing them deliberately should cost a deliberate edit here.
-// Board 1 never expands - it has no surplus height to give and sessionExpandedH()
-// returns 0 there unconditionally - so its row is six zeros and that is the claim,
-// not an absence of one. Board 2: the top row absorbs the leftover up to
-// SESSION_EXP_MAX_H, and 4+ sessions fall back to the uniform ladder because the
-// ladder already fills the column.
+//
+// BOARD 1'S ROW WAS SIX ZEROS AND THE SENTENCE EXPLAINING THEM WAS WRONG. It read
+// "it has no surplus height to give and sessionExpandedH() returns 0 there
+// unconditionally". The second half was true and the first was not: board 1's list
+// area is 264px and its tallest ordinary row is 90, so ONE session left 174px - 66%
+// of the tab - empty, which is a bigger share than the 48% that motivated this
+// feature on board 2. The zeros were a consequence of sessionExpCandidateH() living
+// inside `#if !BOARD_USES_TFT_ESPI`, i.e. of the port, not of the arithmetic. Board
+// 1 has the card now and its own derived stack (board_e32r28t.h).
+//
+// Board 2: the top row absorbs the leftover up to SESSION_EXP_MAX_H, and 4+
+// sessions fall back to the uniform ladder because the ladder already fills the
+// column.
 //
 // n=1 is the full avail (410) capped at 336; n=2's leftover is 307, under the cap
 // and over the floor, so it is neither capped nor refused.
@@ -256,7 +348,43 @@ const LADDER_SHAPE = { 1: "tttncc", 2: "ttttsn" };
 // under its own content. The body is now the block stack the cap is summed from,
 // which needs 288, so 204 is refused and three sessions get three ordinary spine
 // rows. Deliberate, and asserted here so it cannot happen by accident.
-const EXPANDED_H = { 1: [0, 0, 0, 0, 0, 0], 2: [336, 307, 0, 0, 0, 0] };
+//
+// BOARD 1 IS A ONE-SESSION BEHAVIOUR WHERE BOARD 2 IS ONE-TO-TWO, and that is the
+// whole of the difference the smaller panel makes. Its 256 is the cap (leftover 264
+// at one session); at TWO the ladder gives both rows their 90px cap and leaves 171,
+// under a floor of 220 - a card admitted there would have 137px for a 186px body,
+// i.e. no leading and no rules, which is the "card of air" §4 forbids. Refused
+// deliberately, not by omission.
+const EXPANDED_H = { 1: [256, 0, 0, 0, 0, 0], 2: [336, 307, 0, 0, 0, 0] };
+// THE THREE WORDS EACH BOARD'S BAND ACTUALLY DRAWS, a third hand-written string for
+// the same reason as the two above: which FORM a board lands on is a consequence of
+// its panel width, and it should cost a deliberate edit to change. Board 2's 199px
+// word lane holds labelForStatus()'s full phrases; board 1's 141px lane holds only
+// "WORKING", so its band falls back to shortLabelForStatus() for the other two -
+// the words its own tall-row pill already draws. bandStatusWord() picks by
+// MEASUREMENT, so this table is the outcome, never the input.
+const BAND_WORDS = {
+  1: "WORKING / NEEDS INPUT / READY",
+  2: "WORKING / NEEDS YOUR INPUT / WAITING FOR YOU",
+};
+// §7's META LINE, the same kind of table for the same reason. drawSessionDetail
+// composes `model - branch - HH:MM`, measures it against the lane the Mac cluster
+// leaves, and recomposes without the clock when it does not fit.
+//
+// THIS TABLE IS THE BINDING CASE, NOT "WHAT THE SCREEN ALWAYS SAYS", and the
+// distinction is worth being exact about because the fall-back is per-render. The
+// case measured here is a SECOND MAC CONNECTED: dispMacTag() is non-empty at its
+// 7-character cap and the icon sits beside it, which is the widest the cluster ever
+// gets and therefore the narrowest the facts' lane ever gets. With one Mac the tag
+// is "" and the lane is 46px wider on board 1 - MEASURED ON THE GLASS, board 1
+// drew `opus-5 - main - 07:30`, all three facts, in exactly that case. So board 2
+// carries three facts whatever is connected and board 1 carries three or two
+// depending, which is what an adaptive fall-back is for; what this table pins is
+// which board is FORCED to give one up, since that is the design decision.
+const DETAIL_META_FACTS = {
+  1: "model - branch",
+  2: "model - branch - HH:MM",
+};
 
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0, known = 0, total = 0;
@@ -312,7 +440,16 @@ function rowBands(b, c, rowH, kind) {
     // with the text below it and is checked against the border on its own. The name
     // is drawn at the BOTTOM rung here, so it is one body line and not the band.
     bands.push(["name", c.SESSION_NAME_Y, c.SESSION_NAME_Y + L - 1]);
-    bands.push(["sub-line", c.SESSION_SUBC_Y, c.SESSION_SUBC_Y + L - 1]);
+    // CLAMPED, exactly as sessionSubcYAt() clamps it: SESSION_SUBC_Y is an offset
+    // from the row's TOP and the border owns the last BORDER_CARD rows, so at the
+    // ladder's floor on board 1 the unclamped y put two rows of the model/branch
+    // line on the row's own outline. That was allowlisted here as "strip 6x38
+    // (compact): sub-line -> border bottom gap -2" for as long as board 1's binary
+    // was frozen. The firmware clamps now; this MIRRORS the clamp so the band walk
+    // below measures what is drawn, and the structural half asserts that the
+    // firmware's own expression is the one being mirrored.
+    const subcY = Math.min(c.SESSION_SUBC_Y, rowH - c.BORDER_CARD - L);
+    bands.push(["sub-line", subcY, subcY + L - 1]);
   }
   bands.push(["border bottom", rowH - 2, rowH - 1]);
   return bands;
@@ -412,7 +549,14 @@ function expPromptLines(c, bodyH) {
 // the last line of a block inks lineH of its step and the rest of the step is
 // leading. The FLOOR is derived from the blocks instead - see expCursorEnd().
 function expBands(b, c, rowH, have, cand) {
-  const NL = lineHB(b, T_HEAD);          // the name's tallest admissible rung
+  // THE NAME'S TALLEST ADMISSIBLE RUNG, WHICH IS NOT T_HEAD ON BOTH BOARDS. This
+  // read lineHB(b, T_HEAD) while only board 2 drew a band card, and board 2's
+  // SESSION_NAME_TOP_RUNG is exactly the T_HEAD index - so it was right there by
+  // coincidence. Board 1's top rung is T_HERO (26px against T_HEAD's 18), so the
+  // transcribed rung described a name 8px shorter than the one drawn and put both
+  // its neighbouring gaps 4px out. Read the INDEX the firmware's own ladder starts
+  // at instead.
+  const NL = lineHB(b, topRungOf(c));
   const L = lineHB(b, T_BODY);
   const BAND = c.SESSION_BAND_H, RULE = c.SESSION_BAND_RULE_H;
   const ruleDY = Math.trunc((RULE - 1) / 2);
@@ -472,9 +616,20 @@ function expAnchorTop(c, rowH) {
 // word is the ONLY carrier of status that is not hue. Collapsing two of these arms
 // left this checker at zero failures before the assertion below existed.
 function statusLabels() {
-  const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+  const src = readSource(`deckhand_display.ino`);
   const m = src.match(/const char\* labelForStatus\(const char\* status\) \{([\s\S]*?)\n\}/);
   if (!m) throw new Error("labelForStatus() not found in deckhand_display.ino");
+  return [...m[1].matchAll(/return\s+"([^"]*)"/g)].map((x) => x[1]);
+}
+// shortLabelForStatus()'s three words, PARSED - the SHORT form of the same
+// vocabulary, and what the status band falls back to when its lane cannot hold
+// labelForStatus's full phrase. Board 1's band lane cannot (141px against a 160px
+// "NEEDS YOUR INPUT"), so on that board these ARE the band's status words and the
+// same "the only carrier that is not hue" argument applies to them.
+function shortStatusLabels() {
+  const src = readSource(`deckhand_display.ino`);
+  const m = src.match(/const char\* shortLabelForStatus\(const char\* status\) \{([\s\S]*?)\n\}/);
+  if (!m) throw new Error("shortLabelForStatus() not found in deckhand_display.ino");
   return [...m[1].matchAll(/return\s+"([^"]*)"/g)].map((x) => x[1]);
 }
 // The spinner art's own size, PARSED. It was transcribed as a literal 16
@@ -482,7 +637,7 @@ function statusLabels() {
 // turns on - a regenerated 40px mark would move the blit's left edge under every
 // one of those literals without any of them noticing.
 function sparkSize() {
-  const m = fs.readFileSync(`${DIR}/ClaudeSpark.h`, "utf8").match(/#define\s+SPARK_SIZE\s+(\d+)/);
+  const m = readSource(`ClaudeSpark.h`).match(/#define\s+SPARK_SIZE\s+(\d+)/);
   if (!m) throw new Error("SPARK_SIZE not found in ClaudeSpark.h");
   return Number(m[1]);
 }
@@ -494,7 +649,7 @@ function sparkSize() {
 // beside it. Same reason sparkSize() is parsed and not the literal 16 it was.
 function macEmojiSize(b) {
   const f = b === 1 ? "MacEmoji.h" : "MacEmoji16.h";
-  const m = fs.readFileSync(`${DIR}/${f}`, "utf8").match(/#define\s+MAC_EMOJI_SIZE\s+(\d+)/);
+  const m = readSource(`${f}`).match(/#define\s+MAC_EMOJI_SIZE\s+(\d+)/);
   if (!m) throw new Error(`MAC_EMOJI_SIZE not found in ${f}`);
   return Number(m[1]);
 }
@@ -510,7 +665,7 @@ function macEmojiSize(b) {
 // font it is judging, not from memory. A future face with a wider range would then
 // relax this on its own instead of failing.
 function fontRange(face) {
-  const src = fs.readFileSync(`${DIR}/${face}.h`, "utf8");
+  const src = readSource(`${face}.h`);
   const m = src.match(new RegExp(`const GFXfont ${face} PROGMEM = \\{[\\s\\S]*?(0x[0-9A-Fa-f]+),\\s*(0x[0-9A-Fa-f]+),\\s*\\d+\\s*\\}`));
   if (!m) throw new Error(`${face}: no GFXfont first/last range found`);
   return [parseInt(m[1], 16), parseInt(m[2], 16)];
@@ -535,7 +690,7 @@ function stringLiterals(src) {
   return out;
 }
 function macTagMax() {
-  const m = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8")
+  const m = readSource(`deckhand_display.ino`)
               .match(/struct HostLink\s*\{[\s\S]*?\bchar\s+tag\[(\d+)\]/);
   if (!m) throw new Error("HostLink's tag[] not found in deckhand_display.ino");
   return Number(m[1]) - 1;
@@ -624,8 +779,9 @@ function gateBefore(body, needle) {
   if (depth !== 0) throw new Error(`gateBefore(): unbalanced parens before ${needle}`);
   return cur.replace(/\s+/g, " ").trim();
 }
-// Board 1 spells askReadOffered as a function-like MACRO so its binary stays
-// byte-identical (see the note at the definition). PARSE that macro and expand it,
+// Board 1 spells askReadOffered as a function-like MACRO because a function-like
+// macro costs that board nothing at all - the flash argument at the definition,
+// which is the reason that survived the byte-identity freeze being lifted. PARSE that macro and expand it,
 // or the comparison below is between two SPELLINGS rather than between what the
 // two boards' compilers actually see - which is exactly the vacuous shape this
 // file has been caught in before.
@@ -640,7 +796,7 @@ function normGate(b, expr) {
 // The chip's LABEL is a per-board #define, because the two boards' chips no longer
 // offer the same thing. Parsed from the header that owns it, never transcribed.
 function chipLabel(b) {
-  const m = fs.readFileSync(`${DIR}/${HDR[b]}`, "utf8")
+  const m = readSource(`${HDR[b]}`)
               .match(/#define\s+ASK_READ_BTN_LABEL\s+"([^"]*)"/);
   if (!m) throw new Error(`ASK_READ_BTN_LABEL not found in ${HDR[b]}`);
   return m[1];
@@ -776,7 +932,16 @@ function spineGaps(c, rowH) {
 // card). Derived from the ladder rather than listed, so a change to the floor, the
 // cap or the content area moves this set with it.
 function spineHeights(c, contentBottom, maxSessions) {
-  const out = new Set();
+  return [...spineHeightCounts(c, contentBottom, maxSessions).keys()].sort((a, z) => a - z);
+}
+// The same enumeration, keeping the SMALLEST session count each height comes from.
+// That number is what decides whether a rung short enough to hold one Codex gap
+// instead of two is a defect or an unreachable case: 5 and 6 sessions are 0 of
+// 9,452 measured ticks, and board 1's two shortest rungs (41 and 38) are only
+// reachable there. Derived by enumeration rather than asserted, the same way the
+// board-2 note about SESSION_ROW_H_MIN already is.
+function spineHeightCounts(c, contentBottom, maxSessions) {
+  const out = new Map();
   for (const strip of [false, true]) {
     const avail = contentBottom - c.SESSION_ROW_Y0 - (strip ? c.SESSION_OVERFLOW_H : 0);
     for (let n = 1; n <= maxSessions; n++) {
@@ -786,10 +951,10 @@ function spineHeights(c, contentBottom, maxSessions) {
       // row at all is the gate's question, and it does not depend on how much of
       // its grant that card's content ends up taking.
       if (n === 1 && expCandidateH(c, 1, avail, rowH) > 0) continue;   // no ordinary row
-      out.add(rowH);
+      if (!out.has(rowH) || out.get(rowH) > n) out.set(rowH, n);
     }
   }
-  return [...out].sort((a, z) => a - z);
+  return out;
 }
 // Which layout drawSessionRow picks for a given height - the SAME three tests it
 // makes, so the checker cannot describe a row the device does not draw.
@@ -851,7 +1016,7 @@ function askReaderChip(b, c, W) {
           ` chip that only tracked the overflow would leave the descriptions reachable` +
           ` and never found`
         : `askReadOffered is the overflow alone here: \`${def}\` - this board draws no` +
-          ` descriptions and its binary is held byte-identical`);
+          ` option descriptions at all (ASK_OPT_DESC_BYTES is a 1-byte placeholder)`);
   if (b === 2) {
     // ...and the description test is a real one: dense slots (an option with
     // nothing to say holds ""), bounded by askOptCount.
@@ -876,8 +1041,8 @@ function askReaderChip(b, c, W) {
   chk(c.DETAIL_HEAD_H >= c.TAP_MIN, m, isKnown(b, m));
 
   // ---- 4. THE TWO COPIES OF THE CHIP'S DRAW AGREE ----
-  // It is written once per board arm, which is what keeps board 1 byte-identical
-  // (see the note at the site). Duplication is guarded rather than trusted.
+  // It is written once per board arm because the two arms genuinely differ (see the
+  // note at the site). Duplication is guarded rather than trusted.
   const chipDraw = (src) => {
     const a = src.indexOf("uiFillRound(ASK_READ_BTN_X");
     if (a < 0) return null;
@@ -900,8 +1065,8 @@ function askReaderChip(b, c, W) {
   chk(hasSection === (b === 2),
       b === 2
         ? "drawReader composes a second section from the options"
-        : "board 1's reader is the detail alone - it draws no descriptions, and its binary" +
-          " is held byte-identical");
+        : "board 1's reader is the detail alone - it draws no option descriptions, so " +
+          "there is no second section for it to compose");
   if (b !== 2) return;
 
   // ONE WALK, TWO MODES. A separate counting function is how a pager comes to
@@ -1104,9 +1269,8 @@ for (const b of [1, 2]) {
   // why: an out-of-range SESSION_NAME_TOP_RUNG used to reach UI[b][undefined] and
   // CRASH the checker, which the sweep counts as "caught" while reporting it as a
   // crash - and a crash says nothing about which assertion would have fired.
-  const rungOk = c.SESSION_NAME_TOP_RUNG >= 0 && c.SESSION_NAME_TOP_RUNG < NAME_RUNGS.length;
-  chk(rungOk, `SESSION_NAME_TOP_RUNG ${c.SESSION_NAME_TOP_RUNG} indexes NAME_RUNGS[${NAME_RUNGS.length}]`);
-  const topRung = rungOk ? NAME_RUNGS[c.SESSION_NAME_TOP_RUNG] : T_BODY;
+  chk(rungOk(c), `SESSION_NAME_TOP_RUNG ${c.SESSION_NAME_TOP_RUNG} indexes NAME_RUNGS[${NAME_RUNGS.length}]`);
+  const topRung = topRungOf(c);
   console.log(`type scale: name band ${NH} (${UI[b][topRung].face}), ` +
               `body ${LH} (${UI[b][T_BODY].face}, ${advanceB(b, T_BODY)}px advance), ` +
               `hero ${lineHB(b, T_HERO)} (${UI[b][T_HERO].face})`);
@@ -1126,8 +1290,10 @@ for (const b of [1, 2]) {
 
   // ---- THE NAME LADDER'S HEIGHT TEST, which is a constant in the firmware ----
   // drawSessionRow starts its width walk at SESSION_NAME_TOP_RUNG instead of
-  // testing each rung's cell height at runtime, because board 1's binary is frozen
-  // and a runtime test costs it flash. So the invariant lives here: the top rung
+  // testing each rung's cell height at runtime, because a runtime test costs flash on
+  // the board with the least of it. (That used to read "because board 1's binary is
+  // frozen and a runtime test costs it flash"; the freeze is lifted, the flash is
+  // not.) So the invariant lives here: the top rung
   // must FIT the band, and must be the TALLEST that does. Get it wrong low and a
   // row draws a name over its own sub-line; wrong high and the row silently gives
   // up a rung it had room for.
@@ -1135,10 +1301,11 @@ for (const b of [1, 2]) {
       `top name rung (font ${topRung}, ${lineHB(b, topRung)}px) fits the ${NH}px name band`);
   chk(lineHB(b, topRung) === NH,
       `the band IS the top rung's cell (${NH} == ${lineHB(b, topRung)}) - no dead pixels above the tallest name`);
-  for (let r = 0; r < c.SESSION_NAME_TOP_RUNG; r++)
+  for (let r = 0; rungOk(c) && r < c.SESSION_NAME_TOP_RUNG; r++)
     chk(lineHB(b, NAME_RUNGS[r]) > NH,
         `rung ${r} (font ${NAME_RUNGS[r]}, ${lineHB(b, NAME_RUNGS[r])}px) is excluded by HEIGHT, not by taste - it does not fit ${NH}px`);
-  for (let r = c.SESSION_NAME_TOP_RUNG + 1; r < NAME_RUNGS.length; r++)
+  for (let r = rungOk(c) ? c.SESSION_NAME_TOP_RUNG + 1 : NAME_RUNGS.length;
+       r < NAME_RUNGS.length; r++)
     chk(lineHB(b, NAME_RUNGS[r]) <= NH,
         `rung ${r} (font ${NAME_RUNGS[r]}, ${lineHB(b, NAME_RUNGS[r])}px) is drawable in the band`);
 
@@ -1199,11 +1366,57 @@ for (const b of [1, 2]) {
       `SESSION_SUB_MIN_H ${c.SESSION_SUB_MIN_H} == sub-line end +${c.SESSION_SUB2_Y + LH - 1} + pillUp ${c.SESSION_PILL_UP}`);
   chk(c.SESSION_LARGE_MIN_H === 12 + NH + PILL_H + 2 * c.SESSION_AIR,
       `SESSION_LARGE_MIN_H ${c.SESSION_LARGE_MIN_H} == 12 + name ${NH} + pill ${PILL_H} + 2*AIR(${c.SESSION_AIR})`);
-  // The floor is the least height the COMPACT layout can legally draw: its
-  // sub-line inks SUBC_Y..+L-1 against a 2px border owning rowH-2..rowH-1. The
-  // "+ 15" this used to read was 13 + 2, a line height with a literal baked in.
-  m = `ladder floor ${c.SESSION_ROW_H_MIN} >= SESSION_SUBC_Y + line + 2 = ${c.SESSION_SUBC_Y + LH + 2} (least legal compact row)`;
-  chk(c.SESSION_ROW_H_MIN >= c.SESSION_SUBC_Y + LH + 2, m, isKnown(b, m));
+  // THE FLOOR NO LONGER HAS TO HOLD THE UNCLAMPED SUB-LINE, and the assertion that
+  // said it did is gone with the allowlist entry that excused it. What stood here
+  // was `SESSION_ROW_H_MIN >= SESSION_SUBC_Y + line + 2`, board 1 failed it by 2 at
+  // its ladder floor (38 against 40), and the entry excusing that failure gave
+  // "board 1's binary is held byte-identical" as the reason. sessionSubcYAt() now
+  // clamps the sub-line to the row it is drawn in, and the band walk below measures
+  // the clamped y at every rung the ladder can actually produce - so the border
+  // collision is checked where it happens rather than excused at the constant.
+  //
+  // WHAT THE CLAMP ITSELF CAN STILL BREAK is the other end: pulled up far enough it
+  // lands on the NAME above it, and no band walk would catch that at a height the
+  // ladder never emits. So the floor is asserted against the clamp's OWN output.
+  const subcFloor = Math.min(c.SESSION_SUBC_Y, c.SESSION_ROW_H_MIN - c.BORDER_CARD - LH);
+  chk(subcFloor >= c.SESSION_NAME_Y + LH,
+      `compact sub-line clamps to +${subcFloor} at the ladder floor ${c.SESSION_ROW_H_MIN}, ` +
+      `still clear of the name ending +${c.SESSION_NAME_Y + LH - 1}`);
+  // AND WHETHER IT BINDS AT ALL, per board, stated rather than left to be inferred:
+  // on board 2 the min never binds (its shortest legal row is far above), so the
+  // clamp is inert there by arithmetic and not by a guard. A board-2 layout change
+  // that started needing it would flip this line.
+  console.log(`  compact sub-line: SESSION_SUBC_Y ${c.SESSION_SUBC_Y}, clamp at the floor ` +
+              `${c.SESSION_ROW_H_MIN} -> ${subcFloor} (${subcFloor < c.SESSION_SUBC_Y ? "BINDS" : "inert"})`);
+  // ---- AND THE MIRROR ABOVE IS BOUND TO THE FIRMWARE'S OWN EXPRESSION ----
+  // A JS re-implementation of a clamp keeps agreeing with itself after the clamp is
+  // deleted from the device, so the three assertions below read sessions.ino's text
+  // instead: the helper's body, and BOTH call sites. Run once (b === 1) because the
+  // text is shared - sessions.ino is one file for both boards - so a second pass
+  // would print the same three lines again and certify nothing more.
+  if (b === 1) {
+    const subcFn = fnSrc("int sessionSubcYAt(int rowH) {");
+    chk(/const int lim = rowH - BORDER_CARD - SESSION_LINE_H;/.test(subcFn) &&
+        /return SESSION_SUBC_Y < lim \? SESSION_SUBC_Y : lim;/.test(subcFn),
+        "sessionSubcYAt() clamps SESSION_SUBC_Y to rowH - BORDER_CARD - SESSION_LINE_H - the " +
+        "band walk above MIRRORS this expression, and a mirror binds nothing on its own");
+    // BOTH SITES, and that is the point rather than thoroughness: the compact
+    // sub-line and the live duration are drawn at the SAME y so the duration's
+    // opaque clear box does not eat the sub-line's tail, so a clamp applied to one
+    // and not the other splits them apart at the ladder floor and nowhere else -
+    // the hardest kind of layout bug to see, because six of the seven rungs agree.
+    const sessTxt = readSource("sessions.ino").replace(/^[ \t]*\/\/.*$/gm, "");
+    const rowSrc = fnSrc("void drawSessionRow(int pos) {");
+    chk(/drawString\(subFit, nameX, y \+ sessionSubcYAt\(rowH\)\);/.test(rowSrc),
+        "the compact sub-line is drawn at sessionSubcYAt(rowH), not at the raw SESSION_SUBC_Y");
+    const calls = [...sessTxt.matchAll(/sessionSubcYAt\(/g)].length;
+    chk(calls === 3,
+        "sessionSubcYAt appears exactly 3 times in sessions.ino - its definition and the " +
+        `TWO draw sites that must share a y (the sub-line and the duration); found ${calls}`);
+    chk(!/y \+ SESSION_SUBC_Y\b/.test(sessTxt) && sessTxt.includes("sessionSubcYAt"),
+        "no draw site reaches SESSION_SUBC_Y directly any more - every compact y goes " +
+        "through the clamp (the second term is what stops this passing over an empty read)");
+  }
   // The compact pill against the LADDER FLOOR rather than only against the rungs
   // the ladder happens to produce. Added because geom-sweep.mjs found
   // SESSION_PILLC_Y completely unguarded on board 2: its ladder never emits a row
@@ -1286,6 +1499,70 @@ for (const b of [1, 2]) {
       chk(got.join("") === LADDER_SHAPE[b],
           `ladder shape ${got.join("")} == the ${LADDER_SHAPE[b]} this board's header documents ` +
           `(t=title s=sub-line n=big name only c=compact)`);
+      // ---- AND THE MIRROR IS BOUND TO THE FIRMWARE'S OWN THREE TESTS ----
+      // A MIRROR PROVES THE ALGORITHM AND BINDS NOTHING. layoutFor() above is a JS
+      // re-implementation of drawSessionRow's three height tests, and the ladder
+      // shape is read entirely out of it - so changing sessions.ino's own
+      // `rowH >= SESSION_TITLE_MIN_H` to `+ 24` makes the ladder nnnncc on the
+      // glass while LADDER_SHAPE still reads tttncc here. Measured: 2042/2042.
+      //
+      // These four assertions are the STRUCTURAL half. They read drawSessionRow's
+      // text and say nothing about the numbers: each threshold must be compared
+      // against rowH with `>=` and with NOTHING ADDED TO IT, at every site. A term
+      // bolted onto either side moves the rung boundary away from the constant the
+      // header declares and the mirror models, and that divergence is the whole
+      // failure this names.
+      const rowSrc = fnSrc("void drawSessionRow(");
+      // The thresholds are read OUT OF THE MIRROR ITSELF rather than retyped here,
+      // so the two halves cannot drift: a layoutFor() taught a different constant
+      // drags this binding along with it instead of leaving it certifying the old
+      // one. Both sides parsed, neither transcribed.
+      const mirrorKs = [...new Set([...layoutFor.toString()
+        .matchAll(/c\.(SESSION_[A-Z0-9_]+)/g)].map((m) => m[1]))];
+      chk(mirrorKs.length === 3,
+          `layoutFor()'s own thresholds parse out of the mirror (${mirrorKs.length}) ` +
+          `[${mirrorKs.join(", ")}] - an empty parse would pass every assertion below vacuously`);
+      for (const k of mirrorKs) {
+        const uses = [...rowSrc.matchAll(
+          new RegExp(`rowH\\s*(>=|>|<=|<|==)\\s*${k}\\b\\s*([+\\-*/]\\s*[\\w()]+)?`, "g"))];
+        chk(uses.length >= 1,
+            `drawSessionRow compares rowH against ${k} (${uses.length} site(s)) - ` +
+            `layoutFor()'s mirror of this test is otherwise bound to nothing`);
+        const wrong = uses.filter((m) => m[1] !== ">=" || m[2]).map((m) => m[0].replace(/\s+/g, " "));
+        chk(wrong.length === 0,
+            `every rowH/${k} test is exactly \`rowH >= ${k}\`, with no term added to either side` +
+            (wrong.length ? ` [${wrong.join(" ; ")}]` : ""));
+      }
+
+      // ---- THE ROW'S Y CONSTANTS ARE BOUND TO THEIR DRAW SITES ----
+      // The other half of the same finding: this file certifies SESSION_SUB2_Y and
+      // its siblings at length, and NOTHING read the drawString that consumes them.
+      // Drawing the sub-line at `y + SESSION_SUB2_Y + 9` reintroduces exactly the
+      // border overrun KNOWN[1]'s first entry records as fixed, and passed 2042/2042
+      // - geom-sweep cannot see it either, because it perturbs parsed constants and
+      // this is a literal at a call site.
+      //
+      // The rule is the shape, not a list: every drawString in drawSessionRow whose
+      // y argument NAMES a row offset must be exactly `y + <that constant>`. The
+      // four sites whose y is a computed local (nameTop + nameOffset, cy, pathTop)
+      // are laid out by their own assertions above and are not matched here.
+      const yArgs = [...rowSrc.matchAll(/tft\.drawString\(([^;]*)\)\s*;/g)]
+        .map((m) => (splitArgs(m[1])[2] || "").replace(/\s+/g, " ").trim())
+        .filter((e) => /\bSESSION_[A-Z0-9_]*_Y\b/.test(e));
+      chk(yArgs.length >= 4,
+          `parsed ${yArgs.length} drawString sites in drawSessionRow whose y is a named row ` +
+          `offset (an empty parse must fail, not pass vacuously)`);
+      const offBy = yArgs.filter((e) => !/^y \+ SESSION_[A-Z0-9_]*_Y$/.test(e));
+      chk(offBy.length === 0,
+          `every one of them draws at exactly \`y + <the constant>\`, with no literal nudge` +
+          (offBy.length ? ` [${offBy.join(" ; ")}]` : ""));
+      // ...and each constant it names is one this board's header really declares,
+      // so a typo cannot satisfy the shape rule above while resolving to nothing.
+      const unknownY = [...new Set(yArgs.map((e) => e.replace("y + ", "")))]
+        .filter((k) => typeof c[k] !== "number");
+      chk(unknownY.length === 0,
+          `every row offset drawn through is a constant this board declares` +
+          (unknownY.length ? ` [${unknownY.join(", ")}]` : ""));
     }
   }
 
@@ -1366,7 +1643,7 @@ for (const b of [1, 2]) {
       // produce a prompt line its height never paid for, and the band tables would
       // stay green because they model the baseline rather than read it.
       {
-        const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+        const src = readSource(`sessions.ino`);
         chk(/\(bodyH - \(SESSION_EXP_MIN_H - SESSION_BAND_H\)\) \/\s*\n?\s*SESSION_BAND_PROMPT_STEP/.test(src),
             "sessionExpPromptLines() counts from SESSION_EXP_MIN_H - SESSION_BAND_H " +
             "(the gate's own floor, less the band the caller already subtracted) " +
@@ -1392,7 +1669,10 @@ for (const b of [1, 2]) {
       // the shape the severity spine's assertions had to be rebuilt into.
       {
         const drawSrc = fnSrc("void drawSessionRow(int pos) {");
-        const ICON = 16;                      // MAC_EMOJI_SIZE, board 2's body cell
+        // PARSED AND PER BOARD. This was a literal 16 - board 2's body cell and its
+        // MAC_EMOJI_SIZE - which modelled board 1's reduced lane 3px narrower than
+        // the one drawWrappedText is actually given (13 there, MacEmoji.h).
+        const ICON = macEmojiSize(b);
         const subLane = lane - ICON - c.SESSION_SUB_ICON_GAP;
         chk(/subLane\s*=\s*rowEmoji\s*>=\s*0[\s\S]{0,120}?lane\s*-\s*MAC_EMOJI_SIZE\s*-\s*SESSION_SUB_ICON_GAP/.test(drawSrc),
             `the sub-line's lane is REDUCED by the icon before anything is fitted into it`);
@@ -1410,6 +1690,19 @@ for (const b of [1, 2]) {
         // above ends at the sub-line's top, and the next block starts one step down.
         chk(ICON <= c.SESSION_BAND_SUB_H,
             `the icon's ${ICON} rows fit the sub-line's ${c.SESSION_BAND_SUB_H}px step, clear of the block below`);
+        // ... AND THE GAP IS THE SAME ONE EVERY OTHER ICON-BESIDE-TEXT SITE USES.
+        // geom-sweep reported SESSION_SUB_ICON_GAP as UNGUARDED on both boards -
+        // the lane assertion above has 129px of slack, so no perturbation of it can
+        // ever fail - which is the "an assertion that cannot fail is a defect" rule
+        // arriving through a constant nothing constrains. It is bound here to the
+        // TAG site's own literal, parsed out of the row's other icon call, so the
+        // two are two independent sources that must agree rather than one restated:
+        // move either alone and this fails by name.
+        const tagGap = drawSrc.match(/drawString\(agentTag, tagRight - MAC_EMOJI_SIZE - (\d+),/);
+        chk(!!tagGap, `the row's tag site spells its icon gap as a literal this can read`);
+        chk(!!tagGap && +tagGap[1] === c.SESSION_SUB_ICON_GAP,
+            `SESSION_SUB_ICON_GAP ${c.SESSION_SUB_ICON_GAP} IS the gap the row's own ` +
+            `icon-beside-text site uses (${tagGap ? tagGap[1] : "?"}) - one rule, two readers`);
       }
       chk(c.SESSION_EXP_PROMPT_MAX * perLine >= CAP.prompt - 3,
           `prompt: ${c.SESSION_EXP_PROMPT_MAX} lines hold ${c.SESSION_EXP_PROMPT_MAX * perLine} of ${CAP.prompt - 3} chars (lane ${lane}px = ${perLine}/line at ${adv}px)`);
@@ -1435,7 +1728,7 @@ for (const b of [1, 2]) {
       // trailing air and the path's tail are both smaller and therefore covered.
       const RDY = Math.trunc((c.SESSION_BAND_RULE_H - 1) / 2);
       const MAX_LEAD = Math.max(
-        c.SESSION_BAND_NAME_H - lineHB(b, T_HEAD),
+        c.SESSION_BAND_NAME_H - lineHB(b, topRungOf(c)),
         c.SESSION_BAND_SUB_H - L,
         c.SESSION_BAND_TITLE_STEP - L,
         c.SESSION_BAND_LABEL_H - L,
@@ -1583,7 +1876,13 @@ for (const b of [1, 2]) {
   // ---- §3/§4 band card: the cap is DERIVED, so assert it against its own blocks ----
   // The spec's rule: "the sum of the blocks that can actually carry ink". A future
   // field that adds a line must move this sum, not slip past it.
-  if (b === 2) {
+  //
+  // BOTH BOARDS NOW. This whole section was `if (b === 2)` because only board 2 had
+  // a band card; board 1 has one, derived from ITS OWN cells rather than scaled off
+  // board 2's, so every assertion below is re-run against board_e32r28t.h. The
+  // §6 animation assertions further down stay board 2's - board 1 draws straight to
+  // the glass and takes the band's layout without its motion.
+  {
     const B2 = (n) => c[`SESSION_BAND_${n}`];
     const blocks = [
       ["band", c.SESSION_BAND_H],
@@ -1601,6 +1900,20 @@ for (const b of [1, 2]) {
     chk(c.SESSION_EXP_MAX_H === sum,
         `SESSION_EXP_MAX_H ${c.SESSION_EXP_MAX_H} is the sum of the band card blocks ` +
         `(${blocks.map(([n, v]) => `${n} ${v}`).join(" + ")} = ${sum})`);
+    // THE NAME BLOCK MUST HOLD THE RUNG THE DRAW STARTS AT, and that is not the same
+    // rung on the two boards: SESSION_NAME_TOP_RUNG indexes drawSessionRow's
+    // NAME_RUNGS[], 0 = T_HERO on board 1 (a 26px cell) and 1 = T_HEAD on board 2
+    // (24). The draw centres the name in SESSION_BAND_NAME_H, so a block shorter
+    // than the cell centres it at a NEGATIVE offset - the name drawn up into the
+    // band it hangs under, which is the shape §7's own mutilation had on the detail
+    // card. This is also what binds expBands' model of the name band to the rung the
+    // firmware actually starts from.
+    {
+      const NL = lineHB(b, topRungOf(c));
+      chk(NL <= B2("NAME_H"),
+          `the name block (${B2("NAME_H")}px) holds the top rung's ${NL}px cell, ` +
+          `centred with ${Math.trunc((B2("NAME_H") - NL) / 2)}px above it`);
+    }
 
     // The two byte caps that bound the line counts. These are the reason the sum is
     // what it is: a 5th prompt line and a 3rd title line can never carry ink.
@@ -1636,7 +1949,7 @@ for (const b of [1, 2]) {
     // duration's own right-aligned datum. A model of "14 from the interior" would
     // go on agreeing with itself after either moved.
     {
-      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const src = readSource(`sessions.ino`);
       chk(/drawSessionBand\(SESSION_ROW_X \+ BORDER_CARD, y \+ BORDER_CARD,\s*\n?\s*SESSION_ROW_W - 2 \* BORDER_CARD/.test(src),
           "the band is drawn on the card INTERIOR (SESSION_ROW_X + BORDER_CARD, " +
           "SESSION_ROW_W - 2*BORDER_CARD) - which is what the body's edges are measured from");
@@ -1680,7 +1993,7 @@ for (const b of [1, 2]) {
     // sees the line, not whether the preprocessor kept it. The band tables above
     // are what constrain the geometry; these are what tie them to the code.
     const drawSrc = (() => {
-      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const src = readSource(`sessions.ino`);
       const a = src.indexOf("void drawSessionRow(int pos) {");
       const z = src.indexOf("\nvoid renderSessionsList()", a);
       if (a < 0 || z < 0) throw new Error("drawSessionRow() not found in sessions.ino");
@@ -1742,7 +2055,7 @@ for (const b of [1, 2]) {
     // model of this arithmetic would go on agreeing with itself after the firmware
     // stopped agreeing with it.
     {
-      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const src = readSource(`sessions.ino`);
       const a = src.indexOf("void sessionExpMeasure(");
       if (a < 0) throw new Error("sessionExpMeasure() not found in sessions.ino");
       const m = src.slice(a, src.indexOf("\n}\n", a)).replace(/^[ \t]*\/\/.*$/gm, "");
@@ -1817,13 +2130,19 @@ for (const b of [1, 2]) {
         `word is its only carrier that is not hue`);
     // ... and the band really does draw THAT string, rather than a fourth copy of
     // the vocabulary that could drift from it.
-    chk(/labelForStatus\(status\)/.test(fs.readFileSync(`${DIR}/sessions.ino`, "utf8")
-          .slice(fs.readFileSync(`${DIR}/sessions.ino`, "utf8").indexOf("void bandStatusWord("))),
+    chk(/labelForStatus\(status\)/.test(readSource(`sessions.ino`)
+          .slice(readSource(`sessions.ino`).indexOf("void bandStatusWord("))),
         `the band's word comes from labelForStatus(), not a second table`);
 
-    // The card must fit the column it is drawn in.
-    chk(c.SESSION_EXP_MAX_H <= 410,
-        `the band card cap (${c.SESSION_EXP_MAX_H}) fits the 1-session list area`);
+    // The card must fit the column it is drawn in. DERIVED, not the literal 410
+    // this carried: 410 is board 2's list area and board 1's is 264, so the
+    // transcribed number would have passed anything board 1 could declare.
+    {
+      const listArea = contentBottom - c.SESSION_ROW_Y0;
+      chk(c.SESSION_EXP_MAX_H <= listArea,
+          `the band card cap (${c.SESSION_EXP_MAX_H}) fits the 1-session list area ` +
+          `(${listArea}px, ${listArea - c.SESSION_EXP_MAX_H} left outside it)`);
+    }
     // The band's own contents must fit ACROSS. This is the arithmetic that fails on
     // the detail screen (FINDING 1) and passes here - assert it so the two stay apart.
     // DERIVED FROM THE TWO HELPERS, term for term, rather than written out:
@@ -1842,10 +2161,51 @@ for (const b of [1, 2]) {
     // The literal 12 in the plan mirrors board_es3c35p.h's own comment
     // ("16 chars at T_HEAD's 12px advance = 192"); parsed here instead so a face
     // swap fails this checker rather than drifting past it.
-    const headAdv = advanceB(b, T_HEAD);
-    const longestWord = "NEEDS YOUR INPUT".length * headAdv;
-    chk(longestWord <= bandRoom,
-        `the band's longest status word (${longestWord}px) clears the duration (room ${bandRoom}px)`);
+    // THE BAND SHOWS THE LONGEST FORM ITS OWN LANE HOLDS, and this used to be a
+    // single assertion that board 1 cannot satisfy at any pad. labelForStatus's
+    // "NEEDS YOUR INPUT" inks 16 x T_HEAD's advance - 192 on board 2, 160 on board
+    // 1 - against a room of 199 and 141. Clearing 160 on board 1 needs
+    // 2*SESSION_BAND_PAD + SESSION_BAND_MARK_GAP <= 9, i.e. the mark and the word
+    // cannot both have the band. The mark stays (it is that card's only agent
+    // carrier and its only motion, since the row indicator is skipped there) and
+    // bandStatusWord() falls back to shortLabelForStatus(), MEASURED.
+    //
+    // So the assertion is per status and per board: whatever the band would draw
+    // must FIT, and the three words must stay distinct - the band card has no pill
+    // and no shape, so this word is its only carrier that is not hue, on either
+    // board.
+    {
+      const LONGW = statusLabels().map((w) => w.toUpperCase());
+      const SHORTW = shortStatusLabels();
+      chk(SHORTW.length === 3 && new Set(SHORTW).size === 3 &&
+          SHORTW.every((w) => w.trim().length > 0),
+          `shortLabelForStatus() returns three DISTINCT, non-empty words (${SHORTW.join(" / ")})`);
+      // THE FALLBACK IS MEASURED IN THE FUNCTION'S OWN BODY, not modelled here. The
+      // widths below would go on agreeing with themselves after the firmware
+      // stopped choosing between the two forms at all.
+      {
+        const bsw = fnSrc("void bandStatusWord(const char* status, char* out, size_t n, int lane) {");
+        chk(/tft\.textWidth\(word\) > lane\)\s*\n?\s*snprintf\(word, sizeof\(word\), "%s", shortLabelForStatus\(status\)\);/.test(bsw),
+            `bandStatusWord() MEASURES the full phrase against the lane and drops to ` +
+            `shortLabelForStatus() only when it does not fit`);
+        chk(/fitText\(out, n, word, lane\);/.test(bsw),
+            `... and still fits the result, so a future longer label is bounded rather than overrun`);
+      }
+      const drawn = LONGW.map((w, i) => widthB(b, T_HEAD, w) <= bandRoom ? w : SHORTW[i]);
+      for (let i = 0; i < drawn.length; i++)
+        chk(widthB(b, T_HEAD, drawn[i]) <= bandRoom,
+            `the band draws "${drawn[i]}" (${widthB(b, T_HEAD, drawn[i])}px) inside its ${bandRoom}px word lane`);
+      chk(new Set(drawn).size === drawn.length,
+          `the band's three words are DISTINCT (${drawn.join(" / ")}) - it has no pill and no shape, ` +
+          `so this word is its only carrier that is not hue`);
+      // ... AND WHICH FORM EACH BOARD LANDS ON IS THE DOCUMENTED CLAIM, for the same
+      // reason LADDER_SHAPE is a hand-written string: board 1 shortening two of the
+      // three is a real cost of its panel and should cost a deliberate edit here if
+      // it ever changes, and board 2 quietly starting to shorten one would be a
+      // regression nothing else in this file could see.
+      chk(drawn.join(" / ") === BAND_WORDS[b],
+          `board ${b}'s band words are "${drawn.join(" / ")}" == the "${BAND_WORDS[b]}" this checker documents`);
+    }
 
     chk(c.SESSION_SPINE_W >= 4 && c.SESSION_SPINE_W <= 8,
         `the spine is narrower than the card border radius allows to be lost`);
@@ -1857,7 +2217,7 @@ for (const b of [1, 2]) {
     // the shape the checker imagined. `x0` is the interior the call site passes;
     // anything the function adds to it has to move these numbers with it.
     const spineSrc = (() => {
-      const s = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const s = readSource(`sessions.ino`);
       const fn = s.slice(s.indexOf("void drawSessionSpine("));
       return fn.slice(0, fn.indexOf("\n}\n") + 2);
     })();
@@ -1877,7 +2237,7 @@ for (const b of [1, 2]) {
     // arc. Parsed, because none of the geometry above can see which shape the
     // firmware actually fills.
     {
-      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const src = readSource(`sessions.ino`);
       const fn = src.slice(src.indexOf("void drawSessionSpine("));
       const body = fn.slice(0, fn.indexOf("\n}\n") + 2);
       chk(/const int r = R_MD - BORDER_CARD;/.test(body),
@@ -1923,24 +2283,53 @@ for (const b of [1, 2]) {
     // reaches it here - spineHeights() establishes that by ENUMERATION rather than
     // by assertion. At the floor the straight section would hold only one gap; it
     // is stated in the header rather than left as a silent pixel of luck.
-    const rows = spineHeights(c, contentBottom, MAX_SESSIONS);
-    const shortest = rows[0];
-    const straightMin = shortest - 2 * c.BORDER_CARD - 2 * c.SESSION_SPINE_INSET - 2 * sr;
-    chk((c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF) * 2 <= straightMin,
-        `the pattern's period ${c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF} fits twice in the shortest ` +
-        `REACHABLE spine's straight section (${straightMin}px on a ${shortest}px row; the ladder never ` +
-        `reaches SESSION_ROW_H_MIN ${c.SESSION_ROW_H_MIN} on this board)`);
+    const counts = spineHeightCounts(c, contentBottom, MAX_SESSIONS);
+    const rows = [...counts.keys()].sort((a, z) => a - z);
+    const straightOf = (h) => h - 2 * c.BORDER_CARD - 2 * c.SESSION_SPINE_INSET - 2 * sr;
+    const P = c.SESSION_SPINE_ON + c.SESSION_SPINE_OFF;
+    // THE BOUND IS AGAINST THE SHORTEST ROW REACHABLE AT FOUR OR FEWER SESSIONS,
+    // not against the shortest reachable at all, and the change is board 1's.
+    // 5 and 6 sessions are 0 of 9,452 measured ticks; board 1's ladder puts a 41px
+    // row at five and a 38px row at six (under the "+N more" strip), whose straight
+    // sections are 19 and 16 against a period of 10 - so they hold ONE gap. That is
+    // not fixable rather than untried: ON > SESSION_SPINE_W and OFF >= 2/3 of it
+    // give P >= 10 on a 5px spine, while a 38px row allows 6. Asserted below as one
+    // gap plus the session count that reaches it, so the compromise is bounded
+    // rather than waived.
+    const reach4 = rows.filter((h) => counts.get(h) <= 4);
+    const shortest = reach4[0];
+    const straightMin = straightOf(shortest);
+    // The shortest straight section at ANY session count, which is what the
+    // shimmer's two bounds are measured against further down - a light clipped at
+    // the ends of a six-session row is still a clipped light, where a Codex gap it
+    // cannot fit is simply one gap instead of two. Kept as its own name so the two
+    // questions cannot be answered with each other's number.
+    const straightAny = straightOf(rows[0]), shortestAny = rows[0];
+    chk(P * 2 <= straightMin,
+        `the pattern's period ${P} fits twice in the shortest spine reachable at FOUR or fewer ` +
+        `sessions (${straightMin}px on a ${shortest}px row, from ${counts.get(shortest)} sessions)`);
     // EVERY REACHABLE SPINE HEIGHT, walked the way the loop in drawSessionSpine
-    // walks it: no knockout may start above the top arc or end below the bottom
-    // one, and every row that can carry a spine must show at least two gaps.
+    // walks it: no knockout may start above the top arc or end below the bottom one.
     for (const rowH of rows) {
       const g = spineGaps(c, rowH);
-      chk(g.gaps.length >= 2,
-          `spine on a ${rowH}px row: ${g.gaps.length} Codex gaps ` +
-          `(${g.gaps.map(([a, z]) => `+${a}..+${z}`).join(" ")})`);
+      const n = counts.get(rowH);
+      const where = `spine on a ${rowH}px row (reachable at ${n} sessions)`;
+      const list = g.gaps.map(([a, z]) => `+${a}..+${z}`).join(" ");
+      if (straightOf(rowH) >= 2 * P)
+        chk(g.gaps.length >= 2, `${where}: ${g.gaps.length} Codex gaps (${list})`);
+      else {
+        // The straight section cannot hold two: assert the ONE it does hold, and
+        // that the rung is only reachable in the session counts nobody has ever
+        // produced. If a FOUR-session rung ever fell into this arm, this fails.
+        chk(g.gaps.length >= 1,
+            `${where}: ${g.gaps.length} Codex gap (${list}) - its ${straightOf(rowH)}px straight ` +
+            `section cannot hold two at a period of ${P}`);
+        chk(n >= 5,
+            `... and a row that short is only reachable at ${n} sessions, which is 0 of 9,452 measured ticks`);
+      }
       for (const [a, z] of g.gaps)
         chk(a >= g.r && z <= g.h - g.r - 1,
-            `spine on a ${rowH}px row: gap +${a}..+${z} is inside the straight section +${g.r}..+${g.h - g.r - 1}`);
+            `${where}: gap +${a}..+${z} is inside the straight section +${g.r}..+${g.h - g.r - 1}`);
     }
     // IT CLEARS EVERYTHING THE ROW ALREADY DRAWS, which is what makes this a
     // second carrier rather than a replacement. The mark is a 32x32 BLIT that
@@ -1997,7 +2386,7 @@ for (const b of [1, 2]) {
     // a band row draws no spine. Both are properties of the call site, not of the
     // geometry, so both are parsed.
     {
-      const src = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const src = readSource(`sessions.ino`);
       chk(/if \(expanded\)\s*\n\s*drawSessionBand\([\s\S]*?\n\s*else\b[\s\S]*?drawSessionSpine\(/.test(src),
           "the spine is the band's ELSE - a row gets one head or the other, never both");
       chk(/drawSessionSpine\(SESSION_ROW_X \+ BORDER_CARD, y \+ BORDER_CARD,\s*\n\s*rowH - 2 \* BORDER_CARD,/.test(src),
@@ -2069,14 +2458,14 @@ for (const b of [1, 2]) {
     // filled-vs-outlined carrier survives. Deleting either of them now costs the
     // distinction outright, where before it only cost a duplicate.
     {
-      const src = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
+      const src = readSource(`deckhand_display.ino`);
       const fn = src.slice(src.indexOf("void drawStatusDot("));
       const body = fn.slice(0, fn.indexOf("\n}\n"));
       const i2 = body.indexOf("#else"), i3 = body.indexOf("#endif");
       chk(i2 > 0 && i3 > i2, "drawStatusDot splits on BOARD_USES_TFT_ESPI");
       const b1 = body.slice(0, i2), b2 = body.slice(i2, i3);
-      // Board 1's half is held byte-identical by board-baseline.mjs; this only
-      // says the shape vocabulary is still THERE, so a future tidy-up that
+      // Board 1's half is TRACKED by board-baseline.mjs rather than frozen by it, so
+      // this cannot lean on the binary; it only says the shape vocabulary is still THERE, so a future tidy-up that
       // collapsed both boards onto the mark would fail here and not merely move
       // a binary somebody might re-baseline.
       chk(/uiRing\(cx, cy, r, 2, color, bg\);/.test(b1) && /drawAgentSpinner\(cx, cy, bg, codex\)/.test(b1),
@@ -2116,7 +2505,7 @@ for (const b of [1, 2]) {
     // are: a commented-out call is the likeliest way one of these gets disabled.
     {
       const strip = (f) =>
-        fs.readFileSync(`${DIR}/${f}`, "utf8").replace(/^[ \t]*\/\/.*$/gm, "");
+        readSource(`${f}`).replace(/^[ \t]*\/\/.*$/gm, "");
       const band = fnBody(strip("sessions.ino"), "void drawSessionBand(", "sessions.ino");
       chk(/const bool working = strcmp\(s\.status, "working"\) == 0;/.test(band),
           "the band binds `working` to the row's OWN status");
@@ -2130,16 +2519,51 @@ for (const b of [1, 2]) {
       chk(/if \(sessionRowExpanded\(pos\)\) \{ drawBandMark\(pos\); continue; \}/.test(tick),
           "tickWorkingSpinner ADVANCES the band card's mark rather than skipping the row - " +
           "deleting drawBandMark(pos) is the same static card by the other route");
+      // ---- AND THE THING BOTH SITES CALL. Both assertions above are text
+      // matches on their CALLERS: `return;` as drawBandMark's first statement
+      // leaves them both matching and produces the identical fully-static card
+      // that this block's own comment says "NOTHING ELSE IN THIS FILE CAN SEE".
+      // Measured green. So the two-function chain is bound to its own bodies:
+      // drawBandMark must delegate, drawBandMarkAt must reach drawAgentMark, and
+      // neither may return or be smothered before it gets there.
+      //
+      // Deliberately says NOTHING about the `animate` argument: that is
+      // drawSessionBand's assertion two lines up, and board 1's frozen animPhase
+      // is a separate, recorded defect that this must not quietly certify.
+      for (const [fn, must] of [["void drawBandMark(", "drawBandMarkAt("],
+                                ["void drawBandMarkAt(", "drawAgentMark("]]) {
+        const body = fnSrcIn(strip("sessions.ino"), fn, "sessions.ino");
+        chk(body.length > 40, `${fn}) is found and is not a stub (${body.length} chars)`);
+        chk(body.includes(must),
+            `${fn}) reaches ${must}) - the mark's draw chain is unbroken`);
+        chk(!/\breturn\b/.test(body),
+            `${fn}) has no return at all, so nothing can leave before the mark is drawn ` +
+            `(an early return is the fully-static card, with both call sites still matching)`);
+        const dg = deadGuards(body);
+        chk(dg.length === 0,
+            dg.length ? `${fn}) carries a dead-code guard [${dg.join(", ")}]`
+                      : `${fn}) carries no dead-code guard`);
+      }
     }
 
-    // ---- §6 THE TWO ADOPTED ANIMATIONS ----
+    // ---- §6 THE TWO ADOPTED ANIMATIONS: BOARD 2 ONLY ----
+    // Board 1 has the band's LAYOUT and none of its motion: it draws straight to
+    // the glass, where a crossfade, a breath or a travelling light is a per-frame
+    // repaint with no deferred flush to ride and no PERF command to measure it
+    // with. So this block - and SESSION_SHIMMER_* / SESSION_PULSE_MAX with it -
+    // is asserted on board 2 alone, and board_e32r28t.h says so by name rather
+    // than leaving the absence to be discovered.
+    if (b === 2) {
+    // Not indented, deliberately: this guard wraps 300 lines that are unchanged,
+    // and re-indenting them would bury the four real edits in this file under a
+    // whitespace diff.
     // Both are PARSED out of the draw and the tick, because none of the geometry
     // above can see an animation at all: a crossfade and an instant swap produce
     // the same final frame, and a shimmer that painted the arcs would look right
     // in every screenshot taken between two frames.
     {
-      const dsrc = fs.readFileSync(`${DIR}/deckhand_display.ino`, "utf8");
-      const ssrc = fs.readFileSync(`${DIR}/sessions.ino`, "utf8");
+      const dsrc = readSource(`deckhand_display.ino`);
+      const ssrc = readSource(`sessions.ino`);
       // Body of a function, sliced to its own closing brace at column 0 - the
       // same anchoring drawStatusPill's branch check uses, and for the same
       // reason: a lazy regex across a whole file finds a neighbour's line.
@@ -2439,9 +2863,9 @@ for (const b of [1, 2]) {
     // produce, or the light is clipped at both ends on the very rows the spine
     // exists for; and the peak must stay under half, or the spine stops reading as
     // its status colour at the moment it is most visible.
-    chk(2 * c.SESSION_SHIMMER_LEN <= straightMin,
+    chk(2 * c.SESSION_SHIMMER_LEN <= straightAny,
         `the shimmer's head and falloff (${2 * c.SESSION_SHIMMER_LEN}px) fit inside the shortest ` +
-        `reachable straight section (${straightMin}px on a ${shortest}px row)`);
+        `reachable straight section (${straightAny}px on a ${shortestAny}px row)`);
     // The ARITHMETIC half only. "Under half the blend weight" is NOT the same claim
     // as "still reads as its status colour" - 126/255 satisfies this and fails the
     // perceptual bound in the animation block above, which is the one that means
@@ -2450,9 +2874,10 @@ for (const b of [1, 2]) {
     chk(c.SESSION_SHIMMER_MAX > 0 && c.SESSION_SHIMMER_MAX < 128,
         `the shimmer's peak ${c.SESSION_SHIMMER_MAX}/255 is a sane blend weight (the claim that it still ` +
         `reads as its status colour is the perceptual bound, not this)`);
-    chk(c.SESSION_SHIMMER_STEPS * 2 >= straightMin,
-        `one traverse is ${c.SESSION_SHIMMER_STEPS} frames over ${straightMin}px - the head moves at most ` +
+    chk(c.SESSION_SHIMMER_STEPS * 2 >= straightAny,
+        `one traverse is ${c.SESSION_SHIMMER_STEPS} frames over ${straightAny}px - the head moves at most ` +
         `2px a frame, so it travels rather than jumps`);
+    }   // end of the board-2-only §6 animation block
   }
 
   // ---- the name lane: MEASURED, never counted ----
@@ -2513,9 +2938,38 @@ for (const b of [1, 2]) {
   for (const [n, below] of [["title", c.SESSION_TITLE_Y], ["sub-line", c.SESSION_SUB2_Y]])
     chk(c.SESSION_TAG_Y + lineHB(b, T_META) <= below,
         `tag inks +${c.SESSION_TAG_Y}..+${c.SESSION_TAG_Y + lineHB(b, T_META) - 1}, clear of the ${n} at +${below}`);
-  // The accent chevron sits at the row's right edge and must not be walked into.
-  chk(tagRight + 4 <= c.SESSION_ROW_X + c.SESSION_ROW_W - 8,
-      `tag right edge ${tagRight} clears the chevron's ink at ${c.SESSION_ROW_X + c.SESSION_ROW_W - 8}..${c.SESSION_ROW_X + c.SESSION_ROW_W - 2}`);
+  // The accent chevron sits at the row's right edge. Two things must be true of
+  // it and neither was checked before this: the tag to its left must not be
+  // walked into, and (the defect this task fixes) its own tip must not land on
+  // the card's border - drawChevron's shape and inset are parsed from its BODY,
+  // not transcribed, so reverting either fails here by name.
+  {
+    const strip = (f) => readSource(`${f}`).replace(/^[ \t]*\/\/.*$/gm, "");
+    const chevron = fnBody(strip("sessions.ino"), "void drawChevron(", "sessions.ino");
+    const insetM = chevron.match(/rightX -= ([A-Za-z_][A-Za-z_0-9]*);/);
+    chk(!!insetM,
+        "drawChevron insets its caller's rightX before drawing, rather than drawing on " +
+        "the card's OUTER edge its one caller passes");
+    const inset = insetM && Number.isFinite(c[insetM[1]]) ? c[insetM[1]] : 0;
+    if (insetM) chk(Number.isFinite(c[insetM[1]]),
+                     `drawChevron's inset identifier "${insetM[1]}" is a known const`);
+    const shapeM = chevron.match(
+      /fillTriangle\(rightX - (\d+), cy - 5, rightX - \1, cy \+ 5, rightX - (\d+), cy/);
+    if (!shapeM) throw new Error("drawChevron(): fillTriangle call not in the expected shape");
+    const [baseOff, tipOff] = shapeM.slice(1).map(Number);
+    const outerX = c.SESSION_ROW_X + c.SESSION_ROW_W;      // the one call site's argument
+    const rightX = outerX - inset;
+    const tip = rightX - tipOff, base = rightX - baseOff;
+    const borderL = outerX - c.BORDER_CARD;                // first of the border's columns
+    chk(tip < borderL,
+        `chevron tip x=${tip} clears the card's border at x=${borderL}..${outerX - 1}`);
+    // The inset MOVES the whole shape toward the tag by BORDER_CARD (that is what
+    // fixing the border overlap costs here) - so the old 4px margin this used to
+    // assert is gone; what must still hold is that the two do not touch.
+    chk(tagRight < base,
+        `tag right edge ${tagRight} clears the chevron's ink at x=${base}..${tip} ` +
+        `(by ${base - tagRight}px, down from a 4px margin before this board's border fix)`);
+  }
 
   // ---- the spinner blit vs the row's rounded corner ----
   const blitL = c.SESSION_DOT_CX - sparkSize() / 2, blitTopRow = c.SESSION_DOT_DY - sparkSize() / 2;
@@ -2612,8 +3066,9 @@ for (const b of [1, 2]) {
   // rather than restated, so a future change that re-couples the two (making the
   // zone track the chip again) is what this fails on, not a hand-copied 24.
   // Board 1 is not asserted here: its 76x22 chip in a 28px row was already the
-  // pre-existing case this pattern generalises from, and it is a documented
-  // byte-identical board this task does not touch.
+  // pre-existing case this pattern generalises from, and its 28px row is the
+  // sub-TAP_MIN shortfall settings-geom-check.mjs already carries as a known entry -
+  // asserting it here would be a second copy of that record, not a second check.
   if (b === 2) {
     // Anchored on the REAL statement (`msgOffered(detailIndex) && sx >= ...`),
     // not merely "sx >= msgBtnX() - N" - that laxer pattern's first match in this
@@ -2722,7 +3177,10 @@ for (const b of [1, 2]) {
   const hasMeta = /tft\.drawString\(metaFit\b/.test(detailBody);
   const startM  = detailBody.match(/int cy = cardY \+ ([A-Za-z_][A-Za-z0-9_]*);/);
   chk(!!startM, "drawSessionDetail's body cursor starts at `cardY + <named constant>`");
-  const startId = startM ? startM[1] : "DETAIL_PAD_Y";
+  // The fallback is deliberately NOT a real constant: it was "DETAIL_PAD_Y", which
+  // no longer exists, and a fallback that names a live constant lets a failed parse
+  // walk a plausible-looking card instead of failing on the next line.
+  const startId = startM ? startM[1] : "(unparsed)";
   chk(startId in c, `the detail body cursor's start (${startId}) is a constant this board declares`);
   const cyStart = startId in c ? c[startId] : 0;
   // ---- THE BAND'S ORIGIN, PARSED OFF ITS CALL - IT USED TO BE TRANSCRIBED ----
@@ -2835,25 +3293,67 @@ for (const b of [1, 2]) {
         `0x${lo.toString(16)}..0x${hi.toString(16)} - anything outside it draws as a BLANK BOX` +
         (bad.length ? `; offending: ${bad.map(t => JSON.stringify(t)).join(", ")}` : ""));
   }
+  // ---- §7 IS BOTH BOARDS' CARD NOW, AND THIS `if (b === 2)` IS GONE WITH IT ----
+  // Everything below used to sit inside it, with an `else` arm asserting that board
+  // 1's card was STILL the old one - no band, a status pill, a body cursor at
+  // DETAIL_PAD_Y and two label+value column pairs - because that board's binary was
+  // held byte-identical. It is not on this branch: board 1 was brought to the same
+  // vocabulary deliberately, so the same three halves are asserted on both boards
+  // and a revert on EITHER names itself. What stays board-2-only below is the
+  // MOTION (the crossfade, the pulse, the mark's tick): that board composes into a
+  // PSRAM shadow framebuffer and flushes once, board 1 draws straight to the glass
+  // and takes the band's layout and none of its animation.
+  // §7's three halves, each its own assertion so a partial revert names itself.
+  chk(banded,
+      "§7: the detail card is HEADED BY drawSessionBand() - the same component, on the " +
+      "same card interior, as the sessions tab's first row");
+  chk(startId === "SESSION_BAND_H",
+      `§7: the detail body cursor starts at the BAND's bottom (cardY + ${startId}), not at a top pad - ` +
+      "the band replaces DETAIL_PAD_Y rather than sitting above it");
+  chk(!hasPill,
+      "§7: the status pill is GONE from the detail card - the band carries the word, and " +
+      "drawing it twice on one card is the duplication STARTED/AGENT was paired to avoid");
+  // The duration moved WITH the pill, and the two are separable: leaving the old
+  // "for 12m - 14:31" behind would draw it at a detailPillY nothing sets any
+  // more, i.e. over the prompt block, and no geometry above can see that.
+  const durBody = armFor(fnSrc("void renderDetailDuration()"), b);
+  chk(/bandDurText\(detailIndex,/.test(durBody),
+      "§7: renderDetailDuration ticks the BAND's duration through bandDurText()");
+  chk(!/for %s - %s/.test(durBody),
+      "... and board 1's \"for 12m - 14:31\" line is not also drawn, at a detailPillY nothing sets");
+  // §7's meta line: the two label+value column pairs are GONE and one dim line
+  // stands where they were. Two assertions rather than one, so a half-done revert
+  // (columns back AND the line kept, or the line dropped with nothing in its
+  // place) names which half it is.
+  chk(!hasCols,
+      "§7: the MODEL / GIT BRANCH and STARTED / AGENT column pairs are GONE from the " +
+      "detail card - four labels and four values for three short facts and a Mac tag");
+  chk(hasMeta,
+      "§7: one dim meta line stands where they were - `model - branch - HH:MM` with " +
+      "the Mac's icon and tag right-anchored on the same row");
+  // WHICH CLOCK, and it is not a detail. s.actSec advances on every event while
+  // nothing else on this card changes, so a meta line drawing it would freeze
+  // silently between repaints - and adding actSec to the signature instead
+  // repaints the whole card every tick. The status-since instant is derived from
+  // hostNowSec() minus the elapsed time and is CONSTANT between repaints, and
+  // `status` is already signed, so a status change repaints and recomputes it.
+  chk(/hostNowSec\(\)/.test(detailBody) && !/formatClock\(s\.actSec/.test(detailBody),
+      "§7: the meta line's clock is the STATUS-SINCE instant (hostNowSec() - elapsed), " +
+      "not s.actSec - actSec moves with no signature field beside it and would freeze");
+  // `started` is the field this line dropped, and s.startSec is the only thing
+  // that could put it back. Asserted as an ABSENCE so re-adding it fails here as
+  // well as on the width assertion further down.
+  chk(!/s\.startSec/.test(detailBody),
+      "§7: `started` is not drawn on this card - it is what the Mac's cluster cost, " +
+      "and the width assertion below is why it cannot come back");
+  // ---- THE MOTION ON THIS CARD, WHICH IS NO LONGER BOARD 2'S ----
+  // RUN UNDER b === 2 FOR ECONOMY, NOT BECAUSE IT IS A BOARD-2 CLAIM. Every
+  // assertion below reads SHARED text - tickDetailBandAnim(), detailBandVisible(),
+  // drawBandMarkAt() and loop() are one translation unit's worth of source, the
+  // same bytes on both boards - so running them twice would print each twice and
+  // certify nothing more. The board-2-only fragments INSIDE that tick (the
+  // crossfade, the pulse, the flush) keep their own #if and are checked as text.
   if (b === 2) {
-    // §7's three halves, each its own assertion so a partial revert names itself.
-    chk(banded,
-        "§7: the detail card is HEADED BY drawSessionBand() - the same component, on the " +
-        "same card interior, as the sessions tab's first row");
-    chk(startId === "SESSION_BAND_H",
-        `§7: the detail body cursor starts at the BAND's bottom (cardY + ${startId}), not at a top pad - ` +
-        "the band replaces DETAIL_PAD_Y rather than sitting above it");
-    chk(!hasPill,
-        "§7: the status pill is GONE from the detail card - the band carries the word, and " +
-        "drawing it twice on one card is the duplication STARTED/AGENT was paired to avoid");
-    // The duration moved WITH the pill, and the two are separable: leaving the old
-    // "for 12m - 14:31" behind would draw it at a detailPillY nothing sets any
-    // more, i.e. over the prompt block, and no geometry above can see that.
-    const durBody = armFor(fnSrc("void renderDetailDuration()"), b);
-    chk(/bandDurText\(detailIndex,/.test(durBody),
-        "§7: renderDetailDuration ticks the BAND's duration through bandDurText()");
-    chk(!/for %s - %s/.test(durBody),
-        "... and board 1's \"for 12m - 14:31\" line is not also drawn, at a detailPillY nothing sets");
     // ---- §7 THE DETAIL BAND ANIMATES, AND THE ASK SCREEN MUST NEVER SEE IT ----
     // THE INVERSE OF WHAT STOOD HERE, AND THE OLD ASSERTION IS WORTH READING BEFORE
     // THE NEW ONE. It required drawSessionDetail to CLEAR xfadeId before painting
@@ -2940,6 +3440,25 @@ for (const b of [1, 2]) {
       chk(/bandFillShown, \/\*animate=\*\/true\);/.test(at),
           "§7: the shared band-mark blit draws over bandFillShown - the record of what is " +
           "on the glass, never colorForStatus()");
+      // (4b) animate = TRUE, AND THAT IS WHAT MAKES THE TICK LOAD-BEARING. The
+      // assertion above happens to quote this argument, but it fails in the name of
+      // bandFillShown, so nothing here named `animate` either way - which is how
+      // board 1 shipped a mark drawn at animate=true on a screen where no tick
+      // advanced animPhase: pinned at whatever frame the LIST had left it on, for
+      // the life of the screen, two taps from an identical band that turned.
+      //
+      // PARSED OUT OF THE CALL, not matched as a literal, because the other
+      // acceptable outcome is the opposite value: a mark drawn animate=FALSE is
+      // deliberately still (frame 0, the rest pose) rather than accidentally
+      // frozen. Either is defensible; what is not is animate=true with nothing
+      // advancing the phase. So this assertion pins the value, and (1)/(8)/(8b)
+      // pin the tick that value obliges.
+      const animArg = at.match(/drawAgentMark\([\s\S]*?\/\*animate=\*\/(\w+)\)/);
+      chk(animArg !== null && animArg[1] === "true",
+          "§7: the shared band-mark blit passes /*animate=*/true, so SOMETHING must advance " +
+          "animPhase on EVERY surface that wears a band - drop that to false and the mark " +
+          "is the rest pose by choice, which is a different (and documented) design " +
+          `(found: ${animArg ? animArg[1] : "no /*animate=*/ argument at all"})`);
       chk(/drawBandMarkAt\(/.test(mark) && !/drawAgentMark\(/.test(mark),
           "§7: the detail mark DELEGATES to drawBandMarkAt rather than carrying a second " +
           "copy of the blit, the way drawSpineGaps was extracted rather than copied");
@@ -3002,11 +3521,47 @@ for (const b of [1, 2]) {
       chk(g !== null,
           "§7: loop() calls tickDetailBandAnim() - an uncalled tick is the same frozen " +
           "mark with more code");
-      chk(g && g.length && g[g.length - 1].d === "#if !BOARD_USES_TFT_ESPI" &&
-          !g[g.length - 1].els,
-          "§7: ... inside #if !BOARD_USES_TFT_ESPI, so board 1 never sees the TEXT of a " +
-          "call it does not have - the rule the 26 tft.flush() sites follow" +
-          (g && g.length ? ` (innermost guard: ${g[g.length - 1].d})` : " (no guard at all)"));
+      // THIS ASSERTION USED TO REQUIRE THE OPPOSITE, and the old one is worth
+      // reading before the new one: it demanded the call sit INSIDE
+      // #if !BOARD_USES_TFT_ESPI, "so board 1 never sees the TEXT of a call it does
+      // not have". That was right while the detail card was board 2's. 924cecc gave
+      // board 1 the same band-headed card and left the tick behind, so the guard
+      // that had been a discipline became the defect: board 1's mark was drawn with
+      // animate=true and nothing on that screen advanced animPhase. The guard is
+      // widened rather than the function copied, and this is the assertion that
+      // stops it being narrowed again.
+      chk(g !== null && g.length === 0,
+          "§7: ... UNGUARDED, on both boards - board 1 wears the same band-headed detail " +
+          "card since 924cecc, and putting this call back behind #if !BOARD_USES_TFT_ESPI " +
+          "is exactly the frozen mark" +
+          (g && g.length ? ` (found inside ${g.map((x) => x.d).join(" / ")})` : ""));
+      // (8b) AND THE FOUR FUNCTIONS THEMSELVES ARE DEFINED OUTSIDE THE §6 BLOCK.
+      // An unguarded CALL to a guarded definition does not compile on board 1, which
+      // is a loud failure rather than a silent one - but the pair is what the fix
+      // IS, and the cheapest way to undo it is to slide sessions.ino's #endif back
+      // down past these four functions, at which point the call has to go back
+      // behind the guard too and the mark is frozen again with both halves
+      // "consistent". Walked through the directive stack, never matched against a
+      // #if near the line.
+      const sessSrc = readSource("sessions.ino").replace(/^[ \t]*\/\/.*$/gm, "");
+      for (const fn of ["void tickDetailBandAnim() {", "bool detailBandVisible() {",
+                        "void drawDetailBandMark() {",
+                        "void drawBandMarkAt(int x, int y, int i) {"]) {
+        const gd = guardAt(sessSrc, fn);
+        chk(gd !== null && gd.length === 0,
+            `§7: ${fn.replace(/ \{$/, "")} is defined OUTSIDE #if !BOARD_USES_TFT_ESPI - ` +
+            "both boards wear the band-headed detail card, so both need this" +
+            (gd === null ? " (NOT FOUND AT ALL)"
+                         : gd.length ? ` (found inside ${gd.map((x) => x.d).join(" / ")})` : ""));
+      }
+      // ... while paintDetailBandFrame(), which flushes, stays board 2's. The
+      // converse of the four above, and it is what keeps the widening a widening
+      // rather than a port: board 1 draws straight to the glass and has no flush.
+      const gp = guardAt(sessSrc, "uint32_t paintDetailBandFrame() {");
+      chk(gp !== null && gp.length === 1 && gp[0].d === "#if !BOARD_USES_TFT_ESPI" && !gp[0].els,
+          "§7: paintDetailBandFrame() STAYS inside #if !BOARD_USES_TFT_ESPI - it flushes " +
+          "twice, and board 1 has no flush to make" +
+          (gp === null ? " (NOT FOUND AT ALL)" : ` (found: ${gp.map((x) => x.d).join(" / ") || "no guard"})`));
       chk(loopBody.indexOf("tickSessionAnim();") < loopBody.indexOf("tickDetailBandAnim();") &&
           loopBody.indexOf("tickDetailBandAnim();") < loopBody.indexOf("tickWorkingSpinner();"),
           "§7: it runs BETWEEN the two existing ticks, so neither the shimmer's ride-along " +
@@ -3022,48 +3577,15 @@ for (const b of [1, 2]) {
           "§7: the detail duration's opaque box RE-ASKS sessionBandFill() now that the band " +
           "animates under it - bandFillShown there is a frame old mid-fade");
     }
-    // §7's meta line: the two label+value column pairs are GONE and one dim line
-    // stands where they were. Two assertions rather than one, so a half-done revert
-    // (columns back AND the line kept, or the line dropped with nothing in its
-    // place) names which half it is.
-    chk(!hasCols,
-        "§7: the MODEL / GIT BRANCH and STARTED / AGENT column pairs are GONE from the " +
-        "detail card - four labels and four values for three short facts and a Mac tag");
-    chk(hasMeta,
-        "§7: one dim meta line stands where they were - `model - branch - HH:MM` with " +
-        "the Mac's icon and tag right-anchored on the same row");
-    // WHICH CLOCK, and it is not a detail. s.actSec advances on every event while
-    // nothing else on this card changes, so a meta line drawing it would freeze
-    // silently between repaints - and adding actSec to the signature instead
-    // repaints the whole card every tick. The status-since instant is derived from
-    // hostNowSec() minus the elapsed time and is CONSTANT between repaints, and
-    // `status` is already signed, so a status change repaints and recomputes it.
-    chk(/hostNowSec\(\)/.test(detailBody) && !/formatClock\(s\.actSec/.test(detailBody),
-        "§7: the meta line's clock is the STATUS-SINCE instant (hostNowSec() - elapsed), " +
-        "not s.actSec - actSec moves with no signature field beside it and would freeze");
-    // `started` is the field this line dropped, and s.startSec is the only thing
-    // that could put it back. Asserted as an ABSENCE so re-adding it fails here as
-    // well as on the width assertion further down.
-    chk(!/s\.startSec/.test(detailBody),
-        "§7: `started` is not drawn on this card - it is what the Mac's cluster cost, " +
-        "and the width assertion below is why it cannot come back");
-  } else {
-    // Board 1 is held byte-identical, so its arm of this function must still be the
-    // card it always was. Asserted rather than assumed: these three facts are
-    // exactly what a careless unconditional edit would change.
-    chk(!banded && hasPill && startId === "DETAIL_PAD_Y",
-        "board 1's detail card is unchanged: no band, a status pill, body cursor at cardY + DETAIL_PAD_Y");
-    chk(hasCols && !hasMeta,
-        "board 1 keeps its two column pairs and takes no meta line - §7 is a board-2 " +
-        "layout and this branch is held byte-identical");
   }
 
   const detailSteps = [["wrapped text line", c.DETAIL_TEXT_LINE_H],
                        ["label -> its value", c.DETAIL_LBL_STEP]];
-  // The column pair's own internal step is asserted only on the board that still
-  // draws one - on board 2 it constrains nothing, and an assertion about ink that
-  // is never laid down is the vacuous kind this file has already paid for.
-  if (hasCols) detailSteps.push(["column label -> its value", c.DETAIL_COL_LBL_STEP]);
+  // The column pair's own internal step used to be pushed here under `if (hasCols)`.
+  // Neither board draws columns now, `!hasCols` is asserted on BOTH above, and
+  // DETAIL_COL_LBL_STEP no longer exists - so the branch was dead and pushing an
+  // undefined step would have compared NaN. Removed rather than left: a branch no
+  // input can reach is the same defect as an assertion that cannot fail.
   for (const [nm, step] of detailSteps)
     chk(step >= asc,
         `detail ${nm} step ${step} >= the ${asc}px ascent of ${UI[b][T_META].face} (cell ${LBLH})`);
@@ -3079,9 +3601,9 @@ for (const b of [1, 2]) {
   if (banded) blk.push(["BAND", bandDY, bandDY + bandH - 1]);
   blk.push(["name", cy, cy + lineHB(b, NF) - 1]);            cy += c.DETAIL_NAME_STEP;
   blk.push(["title", cy, cy + BODYH - 1]);                   cy += c.DETAIL_TITLE_STEP;
-  if (hasPill) {
-    blk.push(["pill", cy, cy + c.PILL_H - 1]);               cy += c.DETAIL_PILL_STEP;
-  }
+  // The pill's block used to sit here under `if (hasPill)`, stepped by
+  // DETAIL_PILL_STEP. §7 removed the pill from BOTH cards and `!hasPill` is
+  // asserted above, so the branch and its constant are both gone.
   blk.push(["rule", cy, cy]);                                cy += c.DETAIL_RULE_STEP;
   top = cy; cy += c.DETAIL_LBL_STEP;
   blk.push([`LAST PROMPT + ${c.DETAIL_PROMPT_LINES} lines`, top, textInk(cy, c.DETAIL_PROMPT_LINES)]);
@@ -3090,23 +3612,15 @@ for (const b of [1, 2]) {
   top = cy; cy += c.DETAIL_LBL_STEP;
   blk.push([`PATH + ${c.DETAIL_PATH_LINES} lines`, top, textInk(cy, c.DETAIL_PATH_LINES)]);
   cy += c.DETAIL_PATH_LINES * c.DETAIL_TEXT_LINE_H + 2 + A;
-  // The card's last block, and the two boards no longer agree on what it is. Read
-  // from the arm rather than branched on the board number, the same way the band
-  // and the pill above are: a revert that puts the columns back on board 2 must
-  // move this walk with it, or the walk reports geometry that is not drawn.
-  if (hasCols) {
-    top = cy; cy += c.DETAIL_COL_LBL_STEP;
-    blk.push(["MODEL / GIT BRANCH", top, cy + BODYH - 1]);      cy += c.DETAIL_COL_VAL_STEP;
-    top = cy; cy += c.DETAIL_COL_LBL_STEP;
-    blk.push(["STARTED / AGENT", top, cy + BODYH - 1]);
-  } else {
-    // ONE line at T_META, so its ink is that face's cell and nothing else - no
-    // label row above it and no second row under it. The Mac's icon shares the
-    // row rather than adding to it: MAC_EMOJI_SIZE is this board's body cell
-    // height, which is the identity every icon site in this sketch rests on and
-    // is asserted just below.
-    blk.push(["meta line + Mac", cy, cy + LBLH - 1]);
-  }
+  // The card's last block, and it is the same one on both boards now. The
+  // MODEL / GIT BRANCH and STARTED / AGENT arm that used to stand beside this one
+  // is gone with the constants that stepped it; `!hasCols` is asserted on both.
+  //
+  // ONE line at T_META, so its ink is that face's cell and nothing else - no label
+  // row above it and no second row under it. The Mac's icon shares the row rather
+  // than adding to it: MAC_EMOJI_SIZE is this board's body cell height, which is
+  // the identity every icon site in this sketch rests on and is asserted just below.
+  blk.push(["meta line + Mac", cy, cy + LBLH - 1]);
   for (const [nm, a, z] of blk) console.log(`    detail +${String(a).padStart(3)}..+${String(z).padStart(3)} ${nm}`);
   for (let i = 1; i < blk.length; i++)
     chk(blk[i][1] - blk[i - 1][2] - 1 >= 0,
@@ -3179,24 +3693,40 @@ for (const b of [1, 2]) {
   // the digits do. The mark's size is PARSED out of ClaudeSpark.h and T_HEAD's
   // advance out of the font registry, so a regenerated mark or a face swap fails
   // here rather than drifting past it.
-  if (b === 2) {
+  //
+  // BOTH BOARDS, AND ON BOARD 1 THE LANE IS ITS OWN NUMBER RATHER THAN THE TAB'S.
+  // This block was `if (b === 2)`, and one of its two assertions was why: it required
+  // CARD_W === SESSION_ROW_W, which holds on board 2 (296 == 296) and does NOT on
+  // board 1 (216 against 224). So the detail card's word lane there is 133 where its
+  // own list row's is 141 - 8px narrower on a board that is ALREADY the one whose
+  // band falls back to shortLabelForStatus(). Recomputed from CARD_W below rather
+  // than inherited, which is exactly what the equality assertion existed to force,
+  // and the vocabulary it lands on is asserted against BAND_WORDS - so a card
+  // narrow enough to shorten a word the TAB still spells out fails by name here.
+  {
     const detailBandRoom = c.CARD_W - 2 * c.BORDER_CARD - 2 * c.SESSION_BAND_PAD
                            - sparkSize() - c.SESSION_BAND_MARK_GAP
                            - c.SESSION_BAND_DUR_CHARS * c.TEXT_ADV - 1;
-    const detailLongest = "NEEDS YOUR INPUT".length * advanceB(b, T_HEAD);
+    const LONGW = statusLabels().map((w) => w.toUpperCase());
+    const SHORTW = shortStatusLabels();
+    // bandStatusWord()'s own choice, re-run at THIS surface's lane: the full phrase
+    // when it fits, shortLabelForStatus()'s word when it does not.
+    const drawn = LONGW.map((w, i) => widthB(b, T_HEAD, w) <= detailBandRoom ? w : SHORTW[i]);
+    const detailLongest = Math.max(...drawn.map((w) => widthB(b, T_HEAD, w)));
     const clockCost = "4m - 09:34".length * c.TEXT_ADV;
     chk(detailLongest <= detailBandRoom,
         `§7: the DETAIL card's band holds its longest status word (${detailLongest}px) ` +
         `clear of the duration (room ${detailBandRoom}px) - and would NOT hold the ` +
         `wall-clock §7 asked for, which needs ${clockCost}px where a bare duration needs ` +
         `${c.SESSION_BAND_DUR_CHARS * c.TEXT_ADV}`);
-    // ... and the card the band is drawn on really is the width that room was
-    // computed against. Two constants that happen to be equal today is exactly the
-    // coincidence this repo has already been bitten by (CARD_W - 12 and CARD_W - 8
-    // both giving 34 at board 1's width), so it is asserted, not assumed.
-    chk(c.CARD_W === c.SESSION_ROW_W,
-        `the detail card (${c.CARD_W}px) is the same width as the session row the band was ` +
-        `sized on (${c.SESSION_ROW_W}px), so the tab's lane arithmetic carries to it`);
+    chk(drawn.join(" / ") === BAND_WORDS[b],
+        `§7: the DETAIL card's band lands on the SAME words as the tab's ` +
+        `("${drawn.join(" / ")}") in a lane ${detailBandRoom}px wide - the two surfaces wear ` +
+        `one component and must not disagree about its vocabulary`);
+    chk(c.CARD_W <= c.SESSION_ROW_W,
+        `the detail card (${c.CARD_W}px) is no wider than the session row the band was sized ` +
+        `on (${c.SESSION_ROW_W}px) - ${c.SESSION_ROW_W - c.CARD_W}px narrower here, which is why ` +
+        `the lane above is recomputed rather than inherited`);
   }
   chk(hintBot < contentBottom,
       `history hint ends ${hintBot} inside contentBottom ${contentBottom}`);
@@ -3280,10 +3810,46 @@ for (const b of [1, 2]) {
     // overflow this lane on their own, which is exactly why the firmware clips with
     // fitText against the lane the cluster leaves. What is being asserted is that
     // the ORDINARY line is not clipped, and that one more field would be.
+    //
+    // ---- WHICH FACTS EACH BOARD'S LINE ACTUALLY CARRIES ----
+    // DETAIL_META_FACTS is a hand-written OUTCOME table, exactly as BAND_WORDS is
+    // for the band's status word and for the same reason: which form a board lands
+    // on is a consequence of its panel width, and it should cost a deliberate edit
+    // here to change. The firmware picks by MEASUREMENT - metaFacts() composes all
+    // three, the caller measures against the lane the Mac cluster has left, and
+    // recomposes without the clock if it does not fit - so this table is the result
+    // and never the input. Board 2's 260px lane holds all three (168 + 84 = 252, 8
+    // to spare); board 1's is 188 with a 67px cluster, leaving 121 against a
+    // 126px three-fact line - over by 5 before any real model or branch name.
     const meta = "opus-5 - main - 09:34".length * adv;
-    chk(meta + mac <= lane,
-        `§7: the meta line (${meta}px) plus the Mac (${mac}px = ${c.DETAIL_META_GAP} gap + ` +
-        `${macEmojiSize(b)}px icon + 4 + a ${macTagMax()}-char tag) fits its ${lane}px lane`);
+    const metaTwo = "opus-5 - main".length * adv;
+    const carriesClock = meta + mac <= lane;
+    chk(carriesClock === DETAIL_META_FACTS[b].includes("HH:MM"),
+        `§7: with a SECOND MAC up this board's meta line carries \`${DETAIL_META_FACTS[b]}\` - the three-fact form ` +
+        `(${meta}px) plus the Mac (${mac}px = ${c.DETAIL_META_GAP} gap + ${macEmojiSize(b)}px icon ` +
+        `+ ${iconGap} + a ${macTagMax()}-char tag) ${carriesClock ? "fits" : "does NOT fit"} its ` +
+        `${lane}px lane, by ${Math.abs(lane - mac - meta)}px`);
+    // THE FORM IT FALLS BACK TO MUST ALWAYS FIT, on the board that takes it and on
+    // the one that does not - otherwise the fall-back is only a shorter clip and the
+    // measurement bought nothing. Two facts, because that is what metaFacts() leaves
+    // when the clock is dropped; a third fall-back does not exist and must not be
+    // needed here.
+    chk(metaTwo + mac <= lane,
+        `§7: the two-fact form the clock's fall-back leaves (${metaTwo}px) fits the same ` +
+        `${lane}px lane beside the Mac, with ${lane - mac - metaTwo}px in hand`);
+    // ---- AND THE FIRMWARE REALLY DOES FALL BACK, structurally ----
+    // The three assertions above are ARITHMETIC and would all still hold with the
+    // fall-back deleted - a mirror proves the algorithm and binds nothing. These two
+    // read drawSessionDetail's own text: the second metaFacts() call with an EMPTY
+    // clock, and the measured condition that reaches it. Bound to the call and its
+    // argument, not to the file: `metaFacts(` alone would be satisfied by the first
+    // call on its own.
+    chk(/metaFacts\(metaBuf, sizeof\(metaBuf\), metaModel, s\.branch, ""\)/.test(detailBody),
+        "§7: drawSessionDetail recomposes the meta line WITHOUT the clock - the fall-back " +
+        "metaFacts()'s empty-field skip exists for");
+    chk(/if \(tft\.textWidth\(metaBuf\) > metaLane\)/.test(detailBody),
+        "§7: ... and it reaches that recompose by MEASURING the composed line against the " +
+        "lane the Mac cluster left, not by a board flag - one implementation, two headers");
     // ... AND THAT RESTORING `started` WOULD NOT. This is the unusual assertion and
     // it is the point of the pair: it encodes WHY the field is absent, so a future
     // reader who re-adds it fails here rather than shipping a line clipped at its
@@ -3377,6 +3943,39 @@ for (const b of [1, 2]) {
   const titleInk = c.CONTENT_Y + c.ASK_TITLE_Y + 2 * 17;
   chk(optTop > titleInk,
       `worst-case option stack (${stack} x ${c.ASK_OPT_H}+${c.ASK_OPT_GAP}) tops at ${optTop}, below the ask title's 2 lines ending ${titleInk}`);
+  // ---- THE INPUT ROW'S LABELS, PARSED OUT OF THE BLOCK THAT DRAWS THEM ----
+  // Both the words and the LANE each one is drawn into come from
+  // drawAskDetail's own `if (askInputRows(idx))` block. Nothing here transcribes
+  // either, because this row's wording has already moved once: the second button
+  // said TYPE while it opened a keyboard, and since Task 11 of the compose plan
+  // it opens the compose surface at its ROOT - the reply panel, where the ask's
+  // own options and tokens are one tap and the keyboard is the sheet behind that
+  // panel's TYPE... button. A checker holding a copy of the old word would have
+  // passed straight through the rename, and a checker pairing a label with a
+  // hand-written lane would have passed a label moved to the other lane.
+  {
+    const askFn = fnSrc("void drawAskDetail(int idx) {");
+    const i = askFn.indexOf("if (askInputRows(idx))");
+    chk(i >= 0, "drawAskDetail carries the `if (askInputRows(idx))` input row");
+    const blk = i >= 0 ? askFn.slice(i) : "";
+    // Width argument and label captured together, so the pairing is the source's.
+    const rows = [...blk.matchAll(/uiButton\([^;]*?,\s*y,\s*(halfW|CARD_W),\s*ASK_OPT_H,\s*"([^"]*)"/g)]
+                 .map(x => [x[1], x[2]]);
+    chk(rows.length === 4,
+        `the input row draws 4 labels, each into a parsed lane (${rows.map(r => r[1]).join(" / ")})`);
+    const halfW = Math.trunc((c.CARD_W - 8) / 2);
+    for (const [laneName, s] of rows) {
+      const lane = laneName === "CARD_W" ? c.CARD_W : halfW;
+      // +8 for uiButton's own inset, the same margin the TYPE chip is asserted at.
+      chk(widthB(b, T_BODY, s) + 8 <= lane,
+          `input row "${s}" inks ${widthB(b, T_BODY, s)}px inside its ${lane}px ${laneName} lane`);
+    }
+    // The plain detail card's TYPE chip is a DIFFERENT button on a different
+    // screen and is deliberately untouched: a READY session has no ask, so no
+    // panel is built for it and that button really does open the keyboard.
+    chk(rows.length > 0 && !rows.some(([, s]) => /\bTYPE\b/.test(s)),
+        `no input-row label says TYPE - the button opens the reply panel (${rows.map(r => r[1]).join(" / ")})`);
+  }
   // Against TAP_MIN, not a literal 32 - board 2 does clear 46, but an assertion
   // that would still pass if it did not is decoration.
   m = `ask option ${c.ASK_OPT_H}px tall >= TAP_MIN ${c.TAP_MIN}`;
@@ -3450,7 +4049,7 @@ for (const b of [1, 2]) {
   // line count while drawWrappedText drew another, and the symptom is a panel that no
   // longer wraps its own text. Board-independent, so only checked once.
   if (b === 1) {
-    const audio = fs.readFileSync(`${DIR}/audio.ino`, "utf8");
+    const audio = readSource(`audio.ino`);
     const clamp = audio.match(/int h = \(lines > (\d+) \? (\d+) : lines\) \* CODE_LINE_H/);
     const maxLines = audio.match(/drawWrappedText\(voiceText,[^;]*?CODE_LINE_H, maxW - 14, 0, (\d+),/s);
     chk(!!clamp && !!maxLines, "drawVoiceCard's clamp and maxLines literals are still parseable from audio.ino");
@@ -3461,9 +4060,10 @@ for (const b of [1, 2]) {
     }
   }
   // THE TRANSCRIPT CAP, hard-wrapped at this board's own advance. Board 1 needs 7 lines
-  // for the host's 200 characters and shows 6, which is pre-existing and left alone
-  // because its binary is held byte-identical; the point of asserting it is that board 2
-  // must not be WORSE, and it is exact.
+  // for the host's 200 characters and shows 6; the arithmetic for why the 7th does not
+  // fit on a 320px panel is in KNOWN[1] entry (e) above, where it replaced the
+  // byte-identity excuse. The point of asserting it here is that board 2 must not be
+  // WORSE, and it is exact.
   const vCols = Math.floor((W - 2 * c.CARD_X - 14) / advanceB(b, T_META));
   vm = `voice card: ${c.VOICE_TEXT_LINES} lines hold ${c.VOICE_TEXT_LINES * vCols} of ${VOICE_TEXT_MAX} transcript chars`;
   chk(c.VOICE_TEXT_LINES * vCols >= VOICE_TEXT_MAX, `${vm} (lane ${W - 2 * c.CARD_X - 14}px = ${vCols}/line)`,
@@ -3474,8 +4074,11 @@ for (const b of [1, 2]) {
   // wider row does not lengthen any of these - the worst cases are identical on
   // both boards, which is why nothing here moved for board 2.
   // A CACHE'S DECLARED LENGTH MAY NOW BE A NAME, not a number: rowSigCache is
-  // sized per board (SESSION_ROW_SIG_LEN) because board 2's expanded row signs two
-  // more fields and board 1's RAM is held byte-identical. cacheSizes() hands back
+  // sized per board (SESSION_ROW_SIG_LEN) because the two boards are free to differ
+  // there - though today they do NOT: both are 368, since board 1 draws the band card
+  // too and a signature holds field values rather than the text drawn from them. The
+  // note that used to stand here ("board 1's RAM is held byte-identical") was wrong on
+  // both counts by the time it was read. cacheSizes() hands back
   // the dimension as written, so a symbolic one is resolved against THIS board's
   // constant table - unresolved would come out NaN, and `NaN >= n` is false, which
   // reports as a failure rather than passing in silence.
@@ -3491,8 +4094,28 @@ for (const b of [1, 2]) {
   // both are DRAWN on that card, and a field drawn but not signed is the staleness
   // the title itself shipped once. Only a board that expands pays for them.
   if (c.SESSION_EXP_MIN_H !== undefined) rowSig += 1 + CAP.prompt + 1 + CAP.path;
-  chk(cacheLen("rowSigCache") >= rowSig,
-      `rowSigCache ${cacheLen("rowSigCache")} (${CACHE.rowSigCache}) holds its ${rowSig}-byte worst case`);
+  // THE MARGIN, PARSED FROM THE SKETCH RATHER THAN CHOSEN HERE. "Holds its worst
+  // case" is the assertion that let both signature caches drift to within a
+  // handful of bytes of silent truncation: rowSigCache had SIX bytes spare at 304
+  // and detailSigCache THREE at 384, and in both the next term appended under an
+  // `if (used + n < outSize)` guard would have been DROPPED rather than
+  // overflowing - a card that stops repainting, with nothing on the glass to say
+  // so. `>= worst case` cannot see that coming; `>= worst case + margin` can.
+  // SESSION_SIG_MARGIN lives beside the caches in deckhand_display.ino with the
+  // argument for its size, and is read here through the same constant table as
+  // everything else, so moving it moves this rule rather than un-binding it.
+  const SIGM = c.SESSION_SIG_MARGIN;
+  chk(typeof SIGM === "number" && SIGM > 0,
+      `SESSION_SIG_MARGIN parses out of the sketch (${SIGM}) - a NaN floor would make ` +
+      `every margin assertion below pass vacuously`);
+  const sigOk = (name, worst) => {
+    const have = cacheLen(name);
+    chk(have >= worst + SIGM,
+        `${name} ${have} (${CACHE[name]}) holds its ${worst}-byte worst case with ` +
+        `${have - worst} bytes to spare, at or above the ${SIGM}-byte margin - below it the ` +
+        `next guarded term is silently DROPPED, not an overflow`);
+  };
+  sigOk("rowSigCache", rowSig);
   // RE-DERIVED FOR §7, FIELD BY FIELD, and this task is the case the previous
   // derivation's own note warned about: it removed fields from the CARD (the two
   // column pairs) and added one to the SIGNATURE (the agent), so "removing only
@@ -3502,20 +4125,46 @@ for (const b of [1, 2]) {
                2 /* answeredIdx */ + CAP.title + CAP.prompt + 11 /* startSec */ +
                CAP.askVoiceSha + 10 /* separators */ + 2 /* |M */ +
                1 + CAP.macTag + 1 + CAP.emojiId + 1 /* NUL */;
-  // THE AGENT IS BOARD 2'S TERM ONLY, and it is parsed from the arm rather than
+  // THE AGENT IS BOTH BOARDS' TERM NOW, and it is parsed from the arm rather than
   // branched on the board number for the same reason the walk above is. It joined
   // the signature because §7's band draws the agent's MARK and nothing else on that
   // card says which agent it is - the AGENT column that used to spell it out in
-  // text is gone. Board 1's arm is held byte-identical and does not sign it.
+  // text is gone from BOTH boards. This assertion read `signsAgent === (b === 2)`,
+  // and its board-1 half said "its AGENT column still spells the agent out, and its
+  // binary is held byte-identical": neither is true any more, and an assertion whose
+  // stated reason has expired is how a checker starts certifying the wrong layout.
   const sigArm = armFor(fnSrc("void buildDetailSignature(int idx, char* out, size_t outSize) {"), b);
   const signsAgent = /sessions\[idx\]\.agent/.test(sigArm);
-  chk(signsAgent === (b === 2),
-      b === 2
-        ? "§7: s.agent is in the detail signature - the band's MARK is drawn from it and " +
-          "nothing else on that card carries the agent any more"
-        : "board 1 does not sign s.agent: its AGENT column still spells the agent out, and " +
-          "its binary is held byte-identical");
+  chk(signsAgent,
+      "§7: s.agent is in the detail signature - the band's MARK is drawn from it and " +
+      "nothing else on that card carries the agent any more");
   if (signsAgent) detSig += 1 + CAP.agent;
+  // ---- the ask's CHIPS, and why they are a hash on BOTH boards ----
+  // Parsed from the arm exactly as the agent term is. Unlike the descriptions below
+  // this term is NOT board-gated: askChips is [4][50] on both boards (board 1 draws
+  // the same detail card), so the hash really can move on both, and a term that can
+  // change is a term the signature has to carry or the panel never repaints.
+  chk(!!CHIP_DECL, "SessionInfo declares askChips[n][m] - the host's extracted tokens have somewhere to land");
+  const signsChips = /askChipsHash\(/.test(sigArm);
+  chk(signsChips,
+      "the ask's chips are in the detail signature on BOTH boards - the host omits `chips` until it " +
+      "extracts one, so a pending prompt can gain them mid-life with askPid unchanged and nothing " +
+      "else on the card moving; askDetail is not signed either, so nothing else would notice");
+  if (signsChips) {
+    const cw = sigArm.match(/"\|%0(\d+)lx",\s*askChipsHash/);
+    chk(!!cw, "the chip hash's printed width is parseable out of the signature itself");
+    const chw = cw ? +cw[1] : NaN;
+    detSig += 1 + chw;
+    // THE ARITHMETIC THAT FORCES THIS HASH TOO, asserted rather than left in a
+    // comment - and it is a tighter case than the descriptions': four chips verbatim
+    // is 200 bytes, which does fit inside 384 on its own but NOT on top of what the
+    // signature already spends. So "just add them as another %s" fails by overflowing
+    // the cache as a whole, which is a silent truncation and not a close call.
+    const chipsVerbatim = detSig - (1 + chw) + (CHIP_DECL ? +CHIP_DECL[1] * (1 + +CHIP_DECL[2] - 1) : NaN);
+    chk(chipsVerbatim > cacheLen("detailSigCache"),
+        `the ${CHIP_DECL ? CHIP_DECL[1] : "?"} chips verbatim would need ${chipsVerbatim} bytes of a` +
+        ` ${cacheLen("detailSigCache")}-byte detailSigCache - hence the ${chw}-hex hash`);
+  }
   // ---- the per-option descriptions, and why they are a HASH in that signature ----
   // The buffer first. Its second dimension must be the per-board NAME: a literal
   // there would leave ASK_OPT_DESC_BYTES certifying nothing at all, which is what an
@@ -3556,19 +4205,31 @@ for (const b of [1, 2]) {
         `the four descriptions verbatim would need ${verbatim} bytes of a` +
         ` ${cacheLen("detailSigCache")}-byte detailSigCache - hence the ${hw}-hex hash`);
   }
-  chk(cacheLen("detailSigCache") >= detSig,
-      `detailSigCache ${CACHE.detailSigCache} holds its ${detSig}-byte worst case` +
-      ` (${cacheLen("detailSigCache") - detSig} bytes of headroom)`);
-  chk(cacheLen("detailDurCache") >= 23,
-      `detailDurCache ${CACHE.detailDurCache} holds "for 999h59m - 23:59" padded to 22 + NUL`);
+  // Same margin rule as rowSigCache above, and this cache is where the rule came
+  // from: `448 -> 384` used to pass in silence because 384 genuinely does hold 381
+  // - it just holds it with THREE bytes left, which is what the widening was for.
+  sigOk("detailSigCache", detSig);
+  // §7 CHANGED WHAT THIS CACHE HOLDS, ON BOTH BOARDS, AND THE OLD BOUND WOULD HAVE
+  // OUTLIVED THE FIELD. It read `>= 23`, for board 1's `"for 999h59m - 23:59"`
+  // padded to 22 - a line no board draws any more. The field is the band's own
+  // duration lane on both now, padLeftTo'd to SESSION_BAND_DUR_CHARS by
+  // bandDurText(), so the bound is that constant + NUL and it fails if the lane
+  // widens without the cache following. A cache shorter than the string it holds
+  // silently stops noticing changes past that point, which on this field is a
+  // duration frozen at whatever it read when the card last repainted.
+  chk(cacheLen("detailDurCache") >= c.SESSION_BAND_DUR_CHARS + 1,
+      `detailDurCache ${CACHE.detailDurCache} holds bandDurText()'s ` +
+      `${c.SESSION_BAND_DUR_CHARS}-character lane + NUL`);
   chk(cacheLen("rowDurCache") >= 8, `rowDurCache ${CACHE.rowDurCache} holds a 7-char padded duration + NUL`);
 }
 
+faultChildEpilogue();
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 compromises`);
 if (SELFTEST) {
   if (fail === 0) { console.log("SELFTEST FAILED: the checker did not notice a 1px threshold change"); process.exit(1); }
   console.log(`selftest ok - the injected fault produced ${fail} failure(s)`);
-  process.exit(0);
+  console.log("\n--selftest: source faults (each re-execs this checker and must FAIL BY NAME)");
+  process.exit(sweepSourceFaults(import.meta.url, SOURCE_FAULTS) ? 0 : 1);
 }
 if (fail) process.exit(1);
 console.log("all sessions geometry assertions pass on both boards");

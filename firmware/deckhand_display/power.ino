@@ -472,8 +472,11 @@ uint16_t colorForDieTemp(float c) {
 // where the CODE is: leaving it unguarded put 288 bytes of a board-2-only estimator
 // into board 1's binary, which board-baseline.mjs --check 1 caught and nothing else
 // would have. The estimator is board-agnostic ARITHMETIC, so nothing here needs the
-// S3 - it is scoped this way because board 1 is being held byte-identical and cannot
-// be verified on hardware from here, not because it could not work there.
+// S3 - it is scoped this way because it has never been verified on board 1, not
+// because it could not work there. (The clause "because board 1 is being held
+// byte-identical and cannot be verified on hardware from here" stood here until
+// 2026-09-05: the freeze is lifted and board 1 IS reachable now, so this is
+// ordinary unverified work rather than work that was forbidden.)
 #if !BOARD_USES_TFT_ESPI
 const unsigned long BATT_CHG_MIN_SPAN_MS = 1200000UL;  // 20 min, as discharge
 const int BATT_CHG_MIN_RISE_MV = 25;                   // clear of the ADC's noise

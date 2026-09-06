@@ -147,6 +147,20 @@ async function runChecker(file) {
 async function sweep(key, onlyBoard, slice) {
   const file = CHECKERS[key];
   const src = fs.readFileSync(`${DIR}/${file}`, "utf8");
+  // The "this checker READS it" triage flag below is a name-in-source test, and it
+  // used to run over the comments too. That produced FALSE POSITIVES that cost a
+  // task's worth of reading: `KB_MAX_BYTES` is named in a cross-reference comment in
+  // usage-geom-check.mjs:228 and sessions-geom-check.mjs:155 ("the same way
+  // settings-geom-check.mjs reads KB_MAX_BYTES out of the host"), so both reported it
+  // under "UNGUARDED though this checker reads it" while neither checker asserts one
+  // thing about it - the constant is genuinely guarded, by settings-geom-check, and
+  // the union below always said so. A triage aid that points at healthy constants is
+  // read once and then skipped, which is the same failure as a suppressed list.
+  // Full-line `//` only, deliberately - the same conservative rule geom-common's own
+  // stripComments() uses, because a checker's regex literals can contain `//` and a
+  // to-end-of-line strip would delete real code out of the text being searched. The
+  // VERDICT (caught / unguarded) never reads this: it comes from the injection.
+  const srcCode = src.replace(/^[ \t]*\/\/.*$/gm, "");
   // The universe of constants comes from the checker's own parse, recorded as it
   // runs, rather than from a list here - a list would drift the moment a checker
   // started parsing one more file, and it would drift SILENTLY, which is the
@@ -205,7 +219,7 @@ async function sweep(key, onlyBoard, slice) {
                     // aid: an unguarded constant the checker never even mentions
                     // is trivially unguarded, while one it reads and still does
                     // not constrain is where a missing assertion hides.
-                    referenced: new RegExp(`\\b${name}\\b`).test(src) };
+                    referenced: new RegExp(`\\b${name}\\b`).test(srcCode) };
       outer:
       for (const mag of MAGNITUDES) {
         for (const delta of [mag, -mag]) {

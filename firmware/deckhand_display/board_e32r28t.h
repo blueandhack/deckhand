@@ -25,7 +25,9 @@
 #define BOARD_SETTINGS_HOME  0   // four pages behind a chevron pager; see settings.ino
 // The scrolling transcript is board 2's. This board keeps its paged reader: the
 // panel is RESISTIVE, where this repo has already measured that drag-scroll
-// misfires and settled on discrete pages, and its binary is held byte-identical.
+// misfires and settled on discrete pages. (This line also said "and its binary is
+// held byte-identical"; that constraint is lifted - see CLAUDE.md - and the
+// resistive-panel measurement was always the reason that mattered.)
 // A #define, NOT a const int - the preprocessor cannot see a C++ const int, so
 // `#if` on one is silently false with no warning. That has shipped here twice.
 #define BOARD_HISTORY_SCROLL 0
@@ -186,6 +188,20 @@ const int CARD1_Y = 38, CARD2_Y = 146;
 // its slack: content reaches +39 (the pace bar's clear starts 4px above the bar at +26
 // and runs 18 rows) inside CODEX_H 44, leaving the 2px border at +42..+43 clear of it.
 const int CODEX_Y = 254, CODEX_H = 44;
+// HOW LONG A CODEX READING STAYS ALIVE. usageCodexShown() (usage.ino) hides the row
+// once a full window has passed with no refresh - the host polled and learned
+// nothing, so nobody is running the tool - and this board now honours that instead
+// of drawing "CODEX  --" for ever on a Mac that has never run Codex.
+//
+// SAME VALUE AS BOARD 2, and it has to be: the threshold is really DATA-DRIVEN (the
+// window rides the wire as cxWin into usage.cxWindowMin and moves with the plan),
+// and this is only the fallback for a percentage that arrives with no window beside
+// it - the host sends `cxWin: primary?.windowMin ?? null`, so the two genuinely can
+// arrive apart, and trusting an absent window would mean win = 0 and a row that hides
+// the instant it is measured. Declared per board rather than shared because every
+// other constant this predicate touches is, and a header is where a future board
+// with a different plan would change it.
+const int CODEX_HIDE_FALLBACK_MIN = 10080;   // 7 days, the observed Codex window
 // RADIUS is defined FROM R_MD rather than repeated, so the two cannot drift -
 // drawCardBorder() strokes with RADIUS over a fill uiCard() drew with R_MD, and
 // a mismatch fringes every card corner. Same value as before on this board.
@@ -333,18 +349,25 @@ const int SESSION_SUB_MIN_H = 70;
 const int SESSION_LARGE_MIN_H = 56;
 // The ladder's floor and ceiling (constrain() in renderSessionsList).
 //
-// 38 IS TWO PIXELS TOO SMALL, and it is reachable. The floor's job is to be the
-// least height the COMPACT layout can legally draw, and that layout's sub-line
-// inks SESSION_SUBC_Y..+12 (+25..+37) against a 2px border owning rowH-2..rowH-1,
-// so a legal row needs rowH >= SESSION_SUBC_Y + 15 = 40. At 38 the sub-line's last
-// two rows are drawn over the row's own outline. It is reached whenever the list
-// truncates: seven or more sessions add the 16px "+N more" strip, leaving
-// avail 248, and (248 - 5*3) / 6 = 38 exactly - so nothing clamps it and nothing
-// on screen names the cause. NOT FIXED HERE, because this board's binary is held
-// byte-identical across the two-board port and a board-1 rendering change must not
-// ride inside a board-2 diff; sessions-geom-check.mjs carries it as a known entry
-// with this arithmetic, and board 2 derives its floor (43) instead of inheriting
-// this number.
+// 38 IS TWO PIXELS UNDER THE UNCLAMPED COMPACT LAYOUT, AND THAT IS NOW HANDLED IN
+// THE DRAW RATHER THAN HERE. The arithmetic that made it a defect is unchanged and
+// worth keeping: the compact sub-line inks SESSION_SUBC_Y..+12 (+25..+37) against a
+// 2px border owning rowH-2..rowH-1, so an unclamped row needs rowH >= 40, and 38 is
+// reached whenever the list truncates - seven or more sessions add the 16px
+// "+N more" strip, leaving avail 248, and (248 - 5*3) / 6 = 38 exactly, so nothing
+// clamped it and nothing on screen named the cause.
+//
+// THE STATED REASON FOR LEAVING IT WAS THAT THIS BOARD'S BINARY WAS HELD
+// BYTE-IDENTICAL. That constraint is lifted (see CLAUDE.md), so it was fixed - but
+// NOT by raising this constant to 40, and the reason is arithmetic rather than
+// caution: six rows at 40 plus five 3px gaps is 255 against an avail of 248, so the
+// sixth row would be drawn 7px through the footer. Two rows of sub-line on an
+// outline is a smaller defect than seven rows of row on the footer, and dropping
+// the list to five visible rows is a product decision, not a geometry fix.
+// sessionSubcYAt() (sessions.ino) clamps the sub-line to the row it is drawn in
+// instead; sessions-geom-check.mjs mirrors that clamp in its band walk and binds
+// the firmware's own expression and both draw sites. Board 2 derives its floor (47)
+// rather than inheriting this number, which is why the clamp is inert there.
 //
 // 90 is SESSION_TITLE_MIN_H (85) plus 5 of slack, which the layout spends between
 // the sub-line and the bottom-anchored pill.
@@ -366,25 +389,43 @@ const int SESSION_ROW_W = 224;
 // x SESSION_ROW_X+7..+38 and the name starts 2px clear of it. Same 32x32 frames
 // on both boards, so this number does not move.
 const int SESSION_NAME_DX = 40;
-// The sub-line's measured lane. 184 rather than the row's own text lane
-// (SESSION_ROW_X + SESSION_ROW_W - 12 - nameX = 172) because that is the literal
-// this board has always used - it over-runs the 12px right inset by 12px, which a
-// 30-character sub-line has never reached. Kept AS IS rather than tightened: this
-// board's binary is held byte-identical across the two-board port, and a silent
-// 12px change to when a sub-line starts truncating is exactly the kind of
-// board-1 behaviour change that must not ride inside a board-2 diff.
-const int SESSION_SUB_LANE_W = 184;
+// The sub-line's measured lane. This board shipped it as the literal 184 - 12px
+// WIDER than the row's own text lane (SESSION_ROW_X + SESSION_ROW_W - 12 - nameX
+// = 172, the same expression the title on this card is bounded by two lines
+// above its own call site in sessions.ino) - which let two columns of sub-line
+// text land ON the card's 2px border (BORDER_CARD), visible on the real panel as
+// the model/branch line running into the ring. DERIVED here instead, so the two
+// boards can never drift apart again: this comes out to 172 on this board, a 12px
+// narrower lane than before, and 244 on board 2 - unchanged there, since board 2
+// was already exactly this expression.
+const int SESSION_SUB_LANE_W = SESSION_ROW_W - SESSION_NAME_DX - 12;
 // The "+N more" strip's reserved band at the bottom of the list. Derived from the
 // TEXT, not the panel: one Cozette 6x13 line plus 3px, so it does not move with
 // the screen.
 const int SESSION_OVERFLOW_H = 16;
-// The row signature's buffer. 176, UNCHANGED - it is the literal that was in
-// deckhand_display.ino's rowSigCache declaration, moved here because board 2's
-// expanded first row appends the last prompt and the path to its own signature and
-// needs 304. Per board because it is MAX_SESSIONS copies of RAM. This board never
-// expands a row (sessionExpandedH() returns 0 unconditionally on it - there is no
-// surplus height to give), so its worst case is unchanged at 125 bytes.
-const int SESSION_ROW_SIG_LEN = 176;
+// The row signature's buffer. WAS 176 - the literal that was in
+// deckhand_display.ino's rowSigCache declaration - then 304, because this board
+// draws the band card too and its expanded first row appends the LAST PROMPT and
+// the PATH to that row's signature. A field drawn but not signed is exactly the
+// staleness the title itself shipped once. The worst case: name 23 + status 9 +
+// sub 35 + title 43 + tag 6 + icon 3 + 5 separators + NUL = 125 for an ordinary
+// row, plus prompt 103 + path 67 + 2 separators = 297 for the expanded one.
+//
+// 368 NOW, AND THE SIX BYTES IT HAD LEFT ARE WHY - the same argument, and the same
+// 64-byte step, that took detailSigCache from 384 to 448. At 304 this held its
+// 298-byte worst case with SIX bytes spare, and the expanded row's append is
+// guarded by `if (used + 2 < sizeof(sig))` - which reserves room for the two
+// SEPARATORS and nothing else, so snprintf truncates in silence rather than
+// overflowing. One more signed field and the band card stops repainting when the
+// tail of its path changes: a card that never repaints, with no symptom on the
+// glass but the wrong text. 368 = 304 + 64 leaves 70, which is one more field of
+// every kind this signature already carries but the prompt, and the margin is
+// asserted rather than trusted (SESSION_SIG_MARGIN, see deckhand_display.ino).
+// It costs MAX_SESSIONS copies of RAM - 6 x 64 = 384 bytes more, 2208 in all - and
+// that is the price of the card; appending prompt and path for every row instead
+// would repaint a COMPACT row whenever its prompt changed, which is a wholesale
+// clear-and-redraw of pixels that did not change.
+const int SESSION_ROW_SIG_LEN = 368;
 // Vertical air added at every gap and pad inside a row (see the derived offsets
 // in deckhand_display.ino). 0 here: this board's content area cannot afford any -
 // its own band table above is packed with 2px gaps and 2px pads.
@@ -410,19 +451,273 @@ const int SESSION_LINE_H = 13;   // one body/meta line: uiLineH(T_BODY), Cozette
 // sessions-geom-check.mjs against the parsed font table, where it costs nothing.
 const int SESSION_NAME_TOP_RUNG = 0;
 
+// ---------- §3 THE STATUS BAND ----------
+// The band card, ported from board 2 (docs/superpowers/specs/
+// 2026-08-28-sessions-redesign-board2-design.md §3-§5). It exists here for the
+// same measured reason it exists there: with ONE session - 69% of ticks - the
+// ladder draws a 90px row and then 174px of nothing, 66% of this board's list
+// area. Every constant below is DERIVED FROM THIS BOARD'S OWN CELLS, never scaled
+// off board 2's: the type scale is Cozette 6x13 / Terminus 10x18b / Cozette 12x26
+// against board 2's Spleen 8x16 / 12x24 / 32x64, and the list area is 264px
+// against 410.
+//
+// 34 = SPARK_SIZE (32) + BORDER_CARD, AND THAT IS THE BINDING CONSTRAINT rather
+// than the rung argument board 2 uses. Board 2's 44 is TAB_BAR_H (46) less the
+// card's own 2px border - "sized to the same rung so it does not read as a thin
+// stripe against the tab bar" - which here would give 34 - 2 = 32. But the agent
+// mark is a 32x32 BLIT and the SAME art on both boards (SPARK_SIZE does not
+// scale), and the band is drawn on the card INTERIOR, so the interior must be at
+// least 32 rows: SESSION_BAND_H - BORDER_CARD >= SPARK_SIZE, i.e. 34. The two
+// derivations land 2px apart and the mark's is the one that must hold, so the
+// mark sits FLUSH in the band's 32-row interior with no clearance either side.
+// Stated rather than left as a coincidence: a regenerated mark at any size above
+// 32 moves this constant, and sessions-geom-check.mjs parses SPARK_SIZE for it.
+const int SESSION_BAND_H = 34;
+// THE SIDE PAD IS THE ROW'S OWN TEXT MARGIN, MOVED ONTO THE INTERIOR. Every
+// ordinary row on this board bounds its text at SESSION_ROW_X + SESSION_ROW_W - 12
+// (the title's lane, and the expression SESSION_SUB_LANE_W is derived from), i.e.
+// 12px in from the card's OUTER edge. The band is drawn on the interior, which is
+// already BORDER_CARD in, so the same margin is 12 - BORDER_CARD = 10 here. Board
+// 2's 14 is its own number; copying it would have spent 8px of a 224px card on
+// air the rows beside it do not spend.
+const int SESSION_BAND_PAD = 10;
+// Agent mark -> status word. 8 rather than the bare 4 every icon-beside-text site
+// uses, for board 2's reason: this gap divides the AGENT from the STATUS, two
+// different facts, where the 4 binds an icon to the name it belongs to.
+const int SESSION_BAND_MARK_GAP = 8;
+// THE BODY'S OWN LEFT EDGE AND LANE, derived from the band's box rather than
+// restated - "band and body share the pad", made true. The band card draws no row
+// indicator (its mark is up in the band), so the ordinary row's SESSION_NAME_DX
+// (40px of clearance for the 32x32 indicator blit) would reserve space for nothing
+// and hang every body line 28px right of the band above it.
+//   x    = 8 + 2 + 10 = 20, against the ordinary row's name origin at 48
+//   lane = 224 - 4 - 20 = 200 = 33 characters at TEXT_ADV 6
+// 33 columns is the SAME lane width board 2's 264px/8px card gives, which is why
+// the two boards' line caps below come out identical from independent arithmetic.
+const int SESSION_BAND_BODY_X = SESSION_ROW_X + BORDER_CARD + SESSION_BAND_PAD;
+const int SESSION_BAND_BODY_LANE = SESSION_ROW_W - 2 * BORDER_CARD - 2 * SESSION_BAND_PAD;
+// THE DURATION'S LANE IS FIXED AT 3 CHARACTERS, for board 2's reason and with the
+// same bound: it is a change-only field, so its clear box must be a CONSTANT width
+// or it grows into the status word beside it. bandDurText() drops to one unit
+// (s / m / h / d) and statusSinceMillis is a millis() value, which wraps at 49.7
+// days - so "49d" is the widest string reachable and 3 is a bound, not a hope.
+const int SESSION_BAND_DUR_CHARS = 3;
+//
+// THE BAND'S CONTENTS FIT ACROSS - AND THE FULL STATUS PHRASE DOES NOT. This is
+// the same arithmetic §7 records failing on board 2's detail screen, arriving here
+// on the LIST's card because this panel is 72px narrower and its head face 2px
+// narrower per character:
+//   room = SESSION_ROW_W - 2*BORDER_CARD - 2*PAD - SPARK_SIZE - MARK_GAP
+//          - DUR_CHARS*TEXT_ADV - 1                                      = 141
+// labelForStatus()'s longest phrase, "NEEDS YOUR INPUT", inks 16 x T_HEAD's 10px
+// advance = 160. It is over by 19 and NO pad this card can afford closes it:
+// clearing 160 needs 2*PAD + MARK_GAP <= 9. So the band cannot carry both the
+// 32px mark and the full phrase, and the mark is what stays - it is the card's
+// only agent carrier and its only motion (the row indicator is skipped there).
+// bandStatusWord() therefore shows THE LONGEST FORM ITS LANE CAN HOLD, measured:
+// the full phrase where it fits (board 2, always) and shortLabelForStatus()'s
+// "WORKING" / "NEEDS INPUT" / "READY" - the words this board's own tall-row pill
+// already draws - where it does not. Longest short form: 11 x 10 = 110 of 141.
+// One mechanism, two boards, no second vocabulary invented for this card.
+
+// ---------- §4 THE SPINE ----------
+// The band's compact form for every row the band card is not: a status-coloured
+// bar down the row's left edge. Same vocabulary, scales to any row height.
+//
+// 5, NOT BOARD 2'S 6, AND THE BLIT IS WHY. The spine is drawn on the card's
+// interior at x = SESSION_ROW_X + BORDER_CARD = 10 and the 32x32 row-indicator
+// blit paints its own background from x = SESSION_DOT_CX - SPARK_SIZE/2 = 15, so
+// the spine's ink must end at 14: SESSION_SPINE_W <= 15 - 10 = 5. At 6 its last
+// column would be erased four times a second on every working row - the exact
+// defect board 2 measured at 17 pixels and fixed with the straight carve.
+const int SESSION_SPINE_W = 5;
+// CLAUDE SOLID, CODEX SEGMENTED, as a fill pattern rather than art. Neither
+// number is a taste call and both are board 2's own derivations re-run on a 5px
+// spine: ON is one more than the spine is wide, so a run reads as a SEGMENT
+// rather than a square dot; OFF is 2/3 of the width (ceil(2*5/3) = 4), so a gap
+// reads as a gap rather than as a seam.
+//
+// THE PERIOD IS 10 AND THE TWO SHORTEST RUNGS HOLD ONE GAP, NOT TWO. The knockout
+// is cut from the STRAIGHT section only (an arc knockout paints outside the card),
+// so a second gap needs r + ON + P + OFF <= h - r, i.e. 2P <= straight, where
+// straight = rowH - 2*BORDER_CARD - 2*SESSION_SPINE_INSET - 2*(R_MD - BORDER_CARD)
+// = rowH - 22. So two gaps need rowH >= 42, and this board's ladder produces 41
+// (five sessions) and 38 (six, under the "+N more" strip). Unreachable in
+// practice - 5 and 6 sessions are 0 of 9,452 measured ticks - and unfixable
+// anyway: ON >= 6 and OFF >= 4 by the two bounds above, so P >= 10 while a 38px
+// row allows 6. sessions-geom-check.mjs asserts two gaps on every rung reachable
+// at FOUR OR FEWER sessions and one everywhere else, by enumeration.
+const int SESSION_SPINE_ON = 6;
+const int SESSION_SPINE_OFF = 4;
+// ONE PIXEL DOWN AND UP, NEVER SIDEWAYS. Board 2's note carries the measurement;
+// both halves apply here unchanged and the second one harder. The carving rect's
+// left edge lands at x = 15, and at the interior's top row (+2) the border's own
+// inner edge is still at x = 18 - so without the inset the rect would rub out the
+// card's anti-aliased corner. With it (+3) the inner edge is 14.1 and the carve
+// clears it. And an x inset would put the spine's LAST column at 15, which is the
+// blit's FIRST - the very defect SESSION_SPINE_W = 5 exists to avoid, reintroduced
+// by its own fix. Both are asserted from the DRAW's own x expression.
+const int SESSION_SPINE_INSET = 1;
+// NO SHIMMER ON THIS BOARD, deliberately and by name: SESSION_SHIMMER_* do not
+// exist here. Board 2 composes into a PSRAM shadow framebuffer and flushes once,
+// so a travelling light rides a flush that was happening anyway; this board draws
+// STRAIGHT TO THE GLASS, where the same animation is a per-frame repaint with no
+// flush to hide behind and no PERF command to measure it with. The spine here is
+// STATIC. Written down rather than left to be discovered.
+
+// ---------- The band card's block stack ----------
+// SESSION_EXP_MAX_H is the SUM of these, not a chosen number, and
+// sessions-geom-check.mjs asserts that sum against the parsed blocks on BOTH
+// boards - so a future field cannot silently push a line past what its data can
+// fill.
+//
+// HOW THE LEADINGS WERE DERIVED, because they are the one place this card could
+// have been fitted by eye. Each block is one line of INK plus its own leading.
+// The ink is fixed by this board's faces (name 26, every body line 13, a rule 1)
+// and comes to 145px for the full stack; the band takes 34 of the 264px list
+// area, leaving 230, i.e. 85px of leading to distribute against board 2's 122.
+// Each block therefore gets board 2's own leading scaled by 85/122 = 0.697 and
+// floored - which spends 77 of the 85 and leaves 8px outside the card as list
+// area, exactly as §4 requires. The reason this board is TIGHTER than a
+// proportional scale of board 2's card is that its name is not scaled: the hero
+// rung's 26px cell stays (the user is already looking at a 26px "deckhand" and it
+// should not shrink), which is 2px MORE than board 2's head-rung name on a panel
+// with 64% of the height.
+//
+//   block          ink   b2 lead   x0.697   this board
+//   name            26      10        6      32
+//   sub-line        13      16       11      24
+//   title (each)    13       4        2      15
+//   rule             1      17       11      12
+//   LAST PROMPT     13      12        8      21
+//   prompt (each)   13       8        5      18
+//   path            13       4        2      15
+//   bottom pad       -       6        4       4
+const int SESSION_BAND_NAME_H = 32;      // T_HERO 26 + 6 leading
+const int SESSION_BAND_SUB_H = 24;       // T_BODY 13 + 11, the agent/model/branch line
+// The Mac's icon rides the sub-line, right-anchored, and this is the 4px every
+// icon-beside-text site on this device already uses. A named constant rather than
+// the literal its neighbours carry because the checker asserts the LANE
+// arithmetic against it: the facts are fitText'd into `lane - MAC_EMOJI_SIZE -
+// SESSION_SUB_ICON_GAP`, measuring the icon FIRST, so no model or branch name can
+// collide with it however long it is.
+const int SESSION_SUB_ICON_GAP = 4;
+const int SESSION_BAND_TITLE_STEP = 15;  // T_BODY 13 + 2
+const int SESSION_BAND_RULE_H = 12;      // 1px rule + air either side
+const int SESSION_BAND_LABEL_H = 21;     // the "LAST PROMPT" caption
+const int SESSION_BAND_PROMPT_STEP = 18; // T_BODY 13 + 5; the prompt gets the most air
+const int SESSION_BAND_PATH_H = 15;
+const int SESSION_BAND_BOTTOM_PAD = 4;   // 2 of which is the card's own border
+//
+// TWO HARD CAPS ON THE LINE COUNTS, both re-derived for this board's lane and
+// advance rather than carried over, and both asserted. The lane is
+// (224 - 2*2 - 2*10) / 6 = 33 columns - the SAME column count board 2's wider
+// card and wider face give - so:
+//   prompt[104] holds 100 characters: 3 x 33 = 99 is ONE SHORT, so 4 lines are
+//     needed and a 5th is permanently blank.
+//   title[44] holds 43: 1 x 33 = 33 is short, so 2 lines are needed and a 3rd is
+//     permanently blank.
+// SESSION_EXP_PROMPT_MAX and SESSION_EXP_TITLE_LINES are those counts and must
+// not be raised without new byte caps to justify them.
+//
+//   band 34 + name 32 + sub 24 + title 2x15 + rule 12
+//        + LAST PROMPT 21 + prompt 4x18 + rule 12 + path 15 + pad 4 = 256
+
+// ---------- THE EXPANDED FIRST ROW ----------
+// THE RULE, arithmetic on the ladder rather than a second layout - identical to
+// board 2's, reading this board's own numbers:
+//   leftover = avail - (count - 1) * (sessionRowH + SESSION_ROW_GAP)
+//   grant    = leftover < SESSION_EXP_MIN_H ? 0 : min(leftover, SESSION_EXP_MAX_H)
+//   expanded = min(grant, the block stack this session's own content fills)
+//
+// THE SIX GRANTS, avail 264. These are CEILINGS, not heights: what the card takes
+// is the block stack its own session fills and the rest stays outside it as list
+// area.
+//   1 session  leftover 264 -> 256 (cap)   prompt <= 4 lines   8px spare at the cap
+//   2 sessions leftover 171 ->   0         under the floor
+//   3 sessions leftover  86 ->   0
+//   4 sessions leftover  66 ->   0
+//   5 sessions leftover  52 ->   0
+//   6 sessions leftover  44 ->   0
+// So THE BAND CARD IS A ONE-SESSION BEHAVIOUR ON THIS BOARD, where board 2's is
+// one-to-two. That is not a tuning choice that could have gone the other way: at
+// two sessions the ladder gives each row its 90px cap and 171px is left, against a
+// floor of 220 - a card admitted there would have 137px for a 186px body, i.e. no
+// leading and no rules, which is the "card of air" §4 forbids. One session is 69%
+// of 9,452 measured ticks and it is the case that looked worst.
+//
+// SESSION_EXP_MIN_H IS THE SAME BLOCK STACK AS THE CAP WITH THE PROMPT AT ITS
+// MINIMUM, which is what makes the two ends of the range ONE derivation:
+//   MIN = band 34 + name 32 + sub 24 + title 2x15 + rule 12 + LAST PROMPT 21
+//         + prompt 2x18 + rule 12 + path 15 + pad 4                      = 220
+//   MAX = MIN + (PROMPT_MAX - PROMPT_MIN) * SESSION_BAND_PROMPT_STEP     = 256
+// The checker re-derives both from the PARSED blocks and separately asserts that
+// ONE PIXEL SHORTER overdraws the bottom-anchored path group - so this is the
+// floor, not a bound chosen with room to spare.
+const int SESSION_EXP_MIN_H = 220;
+const int SESSION_EXP_MAX_H = 256;
+const int SESSION_EXP_TITLE_LINES = 2;
+const int SESSION_EXP_PROMPT_MIN = 2;
+const int SESSION_EXP_PROMPT_MAX = 4;
+
 // ---------- Session detail card and the ask screen ----------
 // The header row's TOUCH band ("< Back" on the left; TYPE or READ ALL on the
 // right), used by both handleAskTouch's `sy < CONTENT_Y + DETAIL_HEAD_H` gates.
 // 28 against a card starting at CONTENT_Y+26, i.e. the band's last 2 rows overlap
-// the card's border - harmless (the border is not tappable content) and left
-// alone here for the same byte-identical reason as SESSION_SUB_LANE_W.
+// the card's border. IT STANDS, and the reason is a trade rather than a freeze
+// (the byte-identity clause that used to be given here is gone with the constraint
+// - see CLAUDE.md). Two facts decide it. First, this band puts no INK on the
+// border: unlike SESSION_SUB_LANE_W, which really did draw over the outline, this
+// one only shares touch rows with it, and a border is not tappable content, so the
+// overlap costs nothing on the glass. Second, the only way to remove it is to
+// SHRINK the band to 26 - and 28 is already 12px under this board's own TAP_MIN of
+// 40, the shortfall sessions-geom-check.mjs records for the reader chip's zone and
+// every other control in this row. Taking a sub-floor tap target down by another
+// 2px to tidy an invisible 2-row overlap makes the device worse. Growing it instead
+// is not available: CONTENT_Y+26 is where the card starts, and the band would then
+// eat the card.
 const int DETAIL_HEAD_H = 28;
 const int DETAIL_BACK_Y = 4;      // "< Back" baseline inside that row
 const int DETAIL_CARD_DY = 26;    // card top = CONTENT_Y + this
-// 224. The card runs y 60..283 and the "tap here for history" hint sits at 292.
-// Content ends at cardY+213 in the worst case (title AND last prompt both
-// present), so 8 rows of slack sit above the 2px border at +222..+223.
-const int DETAIL_CARD_H = 224;
+// 210, AND IT CAME DOWN FROM 224 WHILE GAINING A BAND - because 224 was 13px OVER
+// the ceiling this card's own footer sets, and had been since it was written.
+//
+// THE DEFECT THAT WAS ON THE ALLOWLIST TWICE. The detail screen draws two MC_DATUM
+// T_META strings: "answer this one on your Mac" at cardY + DETAIL_CARD_H + 8, and
+// the "tap here for history" hint at contentBottom() - 10. At H = 224 those are the
+// SAME y (60 + 224 + 8 = 292 = 302 - 10), drawString paints an OPAQUE box, and the
+// hint is drawn second - so on this board the warning was INVISIBLE. The device
+// showed an ask it could not answer and silently swallowed the sentence saying why.
+// sessions-geom-check.mjs carried it as two KNOWN[1] entries (the two strings
+// colliding, and the constant over its ceiling); both are gone now, and the comment
+// left in their place says what they were.
+//
+// THE CEILING IS 211, DERIVED NOT CHOSEN. drawString centres MC_DATUM on the ASCENT
+// (10 for Cozette) and paints a box ascent+descent (13) tall, so a string at y inks
+// y-5 .. y+7. The hint at 292 owns 287..299; the answer line at 60 + H + 8 owns
+// H + 63 .. H + 75, and the two collide when H + 75 >= 287, i.e. AT 212. The checker
+// derives that number from the hint's own y and PRINTS it.
+//
+// AND THE STACK BELOW IT FITS WITH ROOM SPARE, because §7 spends less card than the
+// layout it replaces. The running cursor in drawSessionDetail(), every step DERIVED:
+//   +0   BAND 34 (SESSION_BAND_H) - mark, status WORD, duration. NO top pad: the
+//        band REPLACES DETAIL_PAD_Y, which neither board draws any more.
+//   +34  name 26 ink +34..+59  | step 31
+//   +65  title 13 ink +65..+77 | step 20
+//   (NO PILL. It was 18px of ink and 23 of step; the band 34px above says the same
+//    word at T_HEAD, and the "for 12m - 14:31" line beside it went with it.)
+//   +85  rule | step 12
+//   +97  LAST PROMPT label 13 | step 13
+//   +110 prompt 2 lines (11 step, last inks +121..+133) | step 29
+//   +139 rule | step 12
+//   +151 PATH label 13 | step 13
+//   +164 path 2 lines (last inks +175..+187) | step 29
+//   +193 THE META LINE, inking +193..+205 - `model - branch` on the left, the Mac's
+//        icon and (with a second Mac up) its tag right-anchored. One line where the
+//        two column pairs were four.
+// so the content ends at +205 and TWO clear rows sit above the 2px border at
+// +208..+209 - board 2's own figure, and 1px still under the 211 ceiling.
+const int DETAIL_CARD_H = 210;
 // TYPE, in the header row. 76x22 drawn; the hit zone is the whole right end of
 // the row (100x28), the same trade the tab bar's slots make.
 const int MSG_BTN_W = 76, MSG_BTN_H = 22;
@@ -434,9 +729,30 @@ const int MSG_BTN_W = 76, MSG_BTN_H = 22;
 // card is what finally makes these caps big enough to show the whole field.
 const int DETAIL_PROMPT_LINES = 2;
 const int DETAIL_PATH_LINES = 2;
-// Air added at every block boundary inside the detail card. 0 here for the same
-// reason SESSION_AIR is: this card already runs to 8px of slack.
-const int DETAIL_AIR = 0;
+// 5, AND IT IS THE SCALED LEADING BUDGET RATHER THAN A CHOSEN NUMBER - the same
+// method 5d1acf1 used for this board's band-card block stack (board 2's leadings
+// scaled by the leading each board can actually afford after its own ink).
+//
+// THE INK IS FIXED BY THIS BOARD'S FACES and comes to 162px for the worst-case
+// stack: band 34 (its own 2px card border included) + name 26 + title 13 + rule 1
+// + label 13 + prompt 24 + rule 1 + label 13 + path 24 + meta 13. The card's
+// ceiling is 211 (see DETAIL_CARD_H), and 2 of what is left is the bottom border -
+// so 47px is the whole leading budget, against board 2's 66.
+//
+// EVERY BOUNDARY THIS WIDENS IS ONE TERM IN 6*AIR + 14, and that is the identity
+// that picks the number: DETAIL_NAME_STEP, DETAIL_TITLE_STEP, both
+// DETAIL_RULE_STEPs and both detailTextStep() tails carry one AIR each, and the
+// fixed 14 is their own non-air leading. (Board 2's identity is 6*AIR + 18 rather
+// than +14, because its DETAIL_TEXT_LINE_H equals its cell and this board's 11 is
+// 2 under its 13 - so 2 of each wrapped tail's "+2" is spent recovering the last
+// line's own ink here.) 6*5 + 14 = 44 of the 47 available; AIR 6 would need 50 and
+// put the card 3px past its ceiling. The 3px left over is the two clear rows above
+// the border plus 1 under the ceiling.
+//
+// It was 0, with a note saying "this card already runs to 8px of slack" - which was
+// true of a card that was 13px over its footer's ceiling. §7 returned the room: the
+// two label+value column pairs (four labels, four values, 71px) became one line.
+const int DETAIL_AIR = 5;
 // THE DETAIL CARD'S INK HEIGHTS, which its whole running cursor is now built from.
 // 26 is uiLineH(T_HERO) and 13 is uiLineH(T_BODY) - which on this board is also
 // uiLineH(T_META), Cozette having exactly one size and its double. Every step in
@@ -461,6 +777,22 @@ const int DETAIL_TEXT_LINE_H = 11;
 // font registry (uiLineH(DETAIL_NAME_FONT) == DETAIL_NAME_H) rather than trusting
 // the pair to stay in step.
 const int DETAIL_NAME_FONT = 4;
+// The gap between the meta line's text and the Mac cluster right-anchored at the
+// card's text edge. 8, THE SAME NUMBER BOARD 2 USES, and for the same reason
+// rather than by transcription: it is twice the bare 4 that binds an icon to the
+// text beside it (SESSION_SUB_ICON_GAP here, the same literal in the SETTINGS row
+// and in the cluster below), because this gap divides two DIFFERENT things - a
+// sentence of facts from an identity - where the 4 binds one thing to its own
+// label. The 4 is not scaled between the boards, so this is not either.
+//
+// It costs this board more than it costs board 2 - 8px is 1.3 characters at
+// TEXT_ADV 6 against exactly 1 at 8 - and that cost is counted in the meta line's
+// own measurement in drawSessionDetail(), which is what decides that this board
+// carries two facts where board 2 carries three. It is what fitText clips the left
+// half against, so it can never be merely decorative. (Two facts BESIDE A SECOND
+// MAC'S TAG, which is the binding case; with one Mac the tag is empty, the lane is
+// 46px wider and all three fit. The fall-back is measured per render, not a flag.)
+const int DETAIL_META_GAP = 8;
 
 // 32 tall, under this board's own TAP_MIN of 40, and 4 of gap between two buttons
 // that may be Allow and Deny - both are the most the content area can give rather
@@ -481,7 +813,10 @@ const int ASK_READ_BTN_H = 24;
 // 1-byte placeholder here), so the chip means exactly what it always meant:
 // the whole of a detail that did not fit. A MACRO rather than a `const char*`
 // so it costs this board nothing at all - the same shape WAKE_HINT uses in
-// power.ino, and this board's binary is held byte-identical.
+// power.ino. (That last clause used to read "and this board's binary is held
+// byte-identical"; the constraint is lifted and the flash argument was always the
+// real one: a `const char*` here is a pointer AND its string in .rodata on a board
+// whose free flash is the tightest thing about it, for a literal used at one site.)
 #define ASK_READ_BTN_LABEL "READ ALL"
 // The ask screen's own header stack, below "< Back": the kind badge (with the
 // session name right-aligned on the same row) and then the question title.
@@ -588,7 +923,8 @@ const int H_BTN = 44;     // buttons and toggles (pages with room)
 const int H_ROW = 40;     // list rows (the tightest page fits 5 of these)
 // THE STATUS PILL'S HEIGHT, named because it had FOUR copies and is the constant
 // most likely to be re-tuned next. drawStatusPill() drew an 18 literal twice, the
-// detail card's DETAIL_PILL_STEP added a third, and sessions-geom-check.mjs
+// detail card's (now deleted) DETAIL_PILL_STEP added a third, and
+// sessions-geom-check.mjs
 // TRANSCRIBED a fourth - so raising the pill by mutating the draw sites left all
 // three checkers passing while the assertion they exist for ("the pill ends clear
 // of the row's own 2px border") was false. The checker parses this name now, which
@@ -642,6 +978,41 @@ const int P1_GAP = 3;
 const int P2_TOP   = 12;
 const int P2_BTN_H = 38;
 const int P2_GAP   = 8;
+// PAGE 4: MESSAGES - how a message sent from this device lands on the Mac.
+// The FIFTH page, added rather than squeezed in, and the reason is arithmetic
+// rather than taste: this board's page region is PAGE_TOP(80)..contentBottom(302)
+// = 222px, and not one of the four existing pages has 40 spare rows in it. Page 1
+// is over-subscribed by its own comment's admission (208 of 222, with 14px for
+// five gaps); page 2 is four buttons plus a hint; page 3 is four Mac rows ending
+// at 298. A fifth page costs one more entry in drawPager()'s titles[] and one
+// more dot, and moves nothing that already works.
+//
+//   92..104   "SEND PRIORITY"            P4_CAP_Y, T_META, TL_DATUM
+//   113..152  NOW    interrupt the turn  P4_ROW_Y, H_ROW
+//   161..200  NEXT   after this turn     + P4_ROW_STEP
+//   209..248  LATER  after the queue     + 2*P4_ROW_STEP
+//   260..272  "the Mac can override..."  P4_HINT_Y = 265, MC_DATUM ink
+//   273..301  29 rows clear to contentBottom()
+//
+// SET_CAP_STEP IS DERIVED, NOT COPIED. Board 2's is 24 = its T_META cell (16)
+// plus SP_2; the same relation at this board's 13px cell is 21. Written as the
+// relation rather than as 21, because the two boards' faces are what differ and a
+// transcribed 24 would have put the caption's descenders into the first row.
+// The 8 is SP_2. It is a LITERAL because SP_1..SP_4 are declared in
+// deckhand_display.ino AFTER board.h is included, so no board header can name
+// them - which is why every other spacing value in this file is a literal too.
+const int SET_CAP_STEP = CODE_LINE_H + 8;
+const int P4_TOP      = 12;   // PAGE_TOP -> the caption
+const int P4_ROW_GAP  = 8;    // between two option rows
+const int P4_HINT_GAP = 16;   // the last row's bottom -> the hint's MC_DATUM centre
+// The trailing air, NAMED, so this page lands rather than merely ending - see
+// board_es3c35p.h's own note for why (geom-sweep found the same three constants
+// unconstrained there, and the identity guards both boards).
+const int P4_AIR_BOT  = 29;
+// P4_LABEL_CHARS is NOT here: it derives from SP_3, which no board header can
+// name (see SET_CAP_STEP above), and it is the same expression on both boards.
+// It lives with the P4 chain in deckhand_display.ino, once.
+
 // The confirm dialog's card. CFM_H holds a centred text block (title T_HEAD 18 +
 // emph T_BODY 13 + up to 2 note lines of 13, with SP_2 between) above a button
 // row of H_BTN + SP_3.
@@ -651,18 +1022,43 @@ const int CFM_H   = 150;
 // ---------- KEYBOARD (moved from keyboard.ino) ----------
 // EVERY NUMBER IS THE LITERAL keyboard.ino ALREADY USED. The keyboard owns the
 // whole screen, and what that buys is the TOUCH target rather than the artwork.
-// The drawn key is KB_KEY_W x (KB_ROW_H - 4) = 22x40; the TESTED band is
-// KB_PITCH x KB_ROW_H = 24x44 = 1056px2, and the width comes from the PITCH
+// The drawn key is KB_KEY_W x (KB_ROW_H - 4) = 22x37; the TESTED band is
+// KB_PITCH x KB_ROW_H = 24x41 = 984px2, and the width comes from the PITCH
 // rather than from KB_KEY_W because kbTouch() divides by KB_PITCH - so the 2px
 // gap between two keys belongs to the key on its left and no column is dead.
 // (An earlier version of this comment said 968, i.e. 22x44: it used the DRAWN
-// width against the TESTED height. Understated, but wrong.)
+// width against the TESTED height. Understated, but wrong. The pair was 22x40
+// and 24x44 = 1056px2 until the prompt strip took 3px off KB_ROW_H - see there.)
 //
 // 10 * 24 = 240, exactly the panel width; 2px of the pitch is the gap.
 const int KB_PITCH = 24;
 const int KB_KEY_W = 22;
-// 44 = TAP_MIN + 4, so the DRAWN key (KB_ROW_H - 4 = 40) is exactly TAP_MIN.
-const int KB_ROW_H = 44;
+// THE KEY'S OWN RADIUS, not the card's. R_MD is 10, which is 4.6% of the 216px
+// card it was sized for and 45.5% of a 22px key - a pill. WRITTEN AS THE
+// DERIVATION, not a literal that merely happens to agree with one in a
+// comment: KB_KEY_W / 10 under C truncation (22/10 = 2 here, 30/10 = 3 on
+// board 2) gives BOTH boards their value exactly - unlike scaling 2 by
+// board_es3c35p.h's x1.154 (the ratio R_MD and the borders use), which
+// computes to 2.31 and truncates back to 2, not 3. Worse than the pill look:
+// at r=10 the four corners lose 4*r^2*(1 - pi/4) = 85.8px2 off a 22x40 key at
+// the OLD KB_ROW_H 44 (9.8% of that drawn key) - and at KB_ROW_H 41 (Task 6)
+// the drawn key is 22x37, so the same 85.8px2 is 10.5% of it. They are lost
+// FURTHEST FROM CENTRE, which is exactly where a mis-aim lands on a key
+// already 40% under TAP_MIN. 2px is 9.1% of the width and 0.36mm, and costs
+// only 3.4px2 - 0.4% of the drawn key.
+const int KB_KEY_R = KB_KEY_W / 10;
+// THE TESTED BAND, and it is the one that has to clear TAP_MIN: 41 = TAP_MIN + 1.
+// It was 44 = TAP_MIN + 4, which made the DRAWN key (KB_ROW_H - 4) exactly TAP_MIN
+// as well - a coincidence of that value, never a rule, and the checker's own
+// `drawn key >= TAP_MIN` assertion was reading it as one. The drawn key is now
+// 22x37, under TAP_MIN in BOTH dimensions (it always was in width: 22 against 40),
+// which is the same drawn/tested split the action row got in Task 3 - what the
+// finger is tested against is the band, and the band still clears the floor.
+// The 3px is what pays for KB_STRIP_H alongside Task 3's KB_ACT_H 44 -> 40; this
+// board has 12 spare pixels in 320 and the strip needs 17. The key gets SHORTER
+// but no more elongated: 37/22 = 1.68 against the 40/22 = 1.82 it was, which is
+// the cap settings-geom-check.mjs already holds every key on both boards to.
+const int KB_ROW_H = 41;
 // THE TEXT CARD'S BUDGET IS ARITHMETIC, and it is what stops SEND signing text
 // that scrolled off the bottom. KB_COLS is the card's text lane divided by
 // Cozette's uniform 6px advance - (CARD_W - 12) / 6 = (216 - 12) / 6 = 34 - and
@@ -685,22 +1081,86 @@ const int KB_ROW_H = 44;
 // and 47 was never reachable - see the corrected derivation in board_es3c35p.h.)
 const int KB_COLS = 34;
 const int KB_TEXT_LINES = 5;                   // ceil(KB_MAX_BYTES / KB_COLS)
+// KB_LINE_PITCH IS DECLARED FIRST because three of the terms below are derived
+// from it (KB_STRIP_H here, KB_ACT_DRAWN lower down, and the card's own line
+// spacing), and both the compiler and the checkers' consts() parser read this
+// file top to bottom - a derivation written above its input silently fails to
+// resolve on the checker side.
+const int KB_LINE_PITCH = 13;                  // Cozette's cell - text-derived
+// THE PROMPT STRIP: one line of the ask, above the card, that never leaves.
+// Re-reading the question used to mean opening the peek, which covers the keys
+// and routes every tap to its pager - so you could not read and type at once.
+// ITS COST IS STATED because this board had 12 spare pixels in 320 and the strip
+// needs 17: KB_ROW_H 44 -> 41 gives 3 per row (12 in all) and Task 3's KB_ACT_H
+// 44 -> 40 gives 4, less the 3 the gaps below hand back. The whole column:
+//   4 (margin) + 17 (strip, 4..20) + 3 (gap) + 88 (card, 24..111) + 3 (gap)
+//   + 164 (4 rows * 41, 115..278) + 1 (gap) + 40 (actions, 280..319) = 320
+// settings-geom-check.mjs sums exactly that, with every GAP written as a
+// difference of the constants around it rather than as a number of its own.
+// The strip's own text is one KB_LINE_PITCH cell centred in the band, so it inks
+// 6..18 and drawString's OPAQUE box stops 5 rows above the card's top border at
+// 24. That clearance is the reason the band is pitch + 4 and not pitch.
+const int KB_STRIP_Y = 4;
+const int KB_STRIP_H = KB_LINE_PITCH + 4;      // 17
 // The card, and the RESERVED META ROW inside it. The byte counter and the
 // countdown used to sit ON a text row, and drawString paints an OPAQUE box the
 // full height of a text line, so each silently erased whatever text shared its
 // row - found twice, fixed once. The meta row and the text lines share no pixel
-// row: meta inks +10..+22, lines at 26/39/52/65/78 (the last ending ~90, 2px
-// inside the card).
-// 4 (top) + 88 (text, 4..91) + 4 (gap) + 176 (4 rows * 44, 96..271) + 4 (gap)
-// + 44 (actions, 276..319) = 320 exactly - this board has no spare row at all.
-const int KB_TEXT_Y  = 4;
+// row: meta inks 30..42, lines at 46/59/72/85/98 (the last ending 110, one row
+// inside the card's 111). KB_TEXT_H, KB_COLS and KB_TEXT_LINES did NOT move for
+// the strip - the card keeps its five PROVABLE lines, so what SEND can sign is
+// unchanged; only its top edge moved, 4 -> 24.
+const int KB_TEXT_Y  = 24;                     // was 4, before the strip
 const int KB_TEXT_H  = 88;
 const int KB_META_DY = 6;                      // meta row, from the card top
 const int KB_LINE0_DY = 22;                    // first wrapped line, from the card top
-const int KB_LINE_PITCH = 13;                  // Cozette's cell - text-derived
-const int KB_ROWS_Y = 96;
-const int KB_ACT_Y  = 276;
-const int KB_ACT_H  = 44;                      // == KB_ROW_H
+const int KB_ROWS_Y = 115;                     // was 96; 4 rows * 41 = 164, ending 278
+// THE ACTION ROW, drawn and tested separately - the split the keys already have
+// (KB_KEY_W in KB_PITCH, KB_ROW_H - 4 in KB_ROW_H) and this row never did.
+// TESTED stays TAP_MIN: CANCEL and SEND are the two taps that must not miss.
+// DRAWN is TEXT-DERIVED at 2 * KB_LINE_PITCH - one cell for the glyph, one for
+// the air - which is 26px = 4.62mm, against the 44px = 7.82mm this row painted
+// while a letter key, pressed up to 150 times, gets 4.27mm of width.
+// The 4px this freed is SPENT: it went into KB_STRIP_H along with the 12 that
+// KB_ROW_H 44 -> 41 freed, and what is left of the two is the 3px gaps above and
+// below the card and the 1px above this row. Board 1 has no spare pixel now.
+const int KB_ACT_H     = TAP_MIN;                 // 40, the tested band
+const int KB_ACT_DRAWN = 2 * KB_LINE_PITCH;       // 26
+const int KB_ACT_DY    = (KB_ACT_H - KB_ACT_DRAWN) / 2;   // 7
+const int KB_ACT_Y     = BOARD_H - KB_ACT_H;      // 280, was 276
+// ---------- THE REPLY PANEL (compose.ino) ----------
+// The compose surface's OTHER screen, and its column closes exactly on BOARD_H
+// the way the keyboard's does. There is no spare pixel on this board, so the
+// terms are stated as arithmetic rather than as numbers:
+//
+//    4 (COMPOSE_TOP) + 52 (prompt card) + 4 (COMPOSE_GAP) + 16 (legend)
+//  + 80 (reply, 2 x TAP_MIN) + 16 (legend) + 40 (tokens, 1 x TAP_MIN)
+//  + 21 (draft line) + 16 (legend, "no room for recents") + 31 (residual)
+//  + 40 (KB_ACT_H) = 320
+//
+// EVERY TERM IS ONE OF SIX EXPRESSIONS - TAP_MIN, KB_LINE_PITCH + k,
+// 2 * KB_LINE_PITCH, KB_TEXT_H, n x KB_ROW_H, or a term with no job of its own
+// (the two margins and the residual). There is no value here that was CHOSEN
+// while having a job, which is the property that lets settings-geom-check.mjs
+// assert the column instead of transcribing it.
+//
+// THE RESIDUAL IS NOT NAMED and must not be: compose.ino lays the bands out
+// top-down from COMPOSE_TOP and the action band is anchored at KB_ACT_Y, so what
+// is left between them is arithmetic. A constant for it would be a second place
+// to keep the same number.
+const int COMPOSE_PROMPT_H = 5 + KB_LINE_PITCH + 4 + 2 * KB_LINE_PITCH + 4;  // 52
+const int COMPOSE_LEGEND_H = KB_LINE_PITCH + 3;                              // 16
+const int COMPOSE_DRAFT_H  = KB_LINE_PITCH + 8;                              // 21
+// The 4px scale this board's whole layout is pitched on (board 2 is 8), used for
+// the one gap the panel has - between the prompt card and the first legend.
+const int COMPOSE_GAP      = 4;
+// THE TOP MARGIN, and it is a MARGIN - the same kind of term as the residual
+// above the action band, at the other end of the column. It is the one term here
+// that is neither derived nor free, so it is stated where the rest of the panel's
+// geometry is: 4 on this board, 12 on board 2, which is what the spec's two reply
+// budgets print and what docs/design/compose/compose.js's D.RP_TOP mirrors (that
+// mock's check.mjs binds this name against it, so the two cannot drift).
+const int COMPOSE_TOP      = 4;
 // The peek overlay's three stacked rows, and its line budget. These were the
 // literals 8 / 22 / 40 at drawKbPeek()'s call sites; they are constants now because
 // drawString paints an OPAQUE box one full cell tall, so at a 16px cell a title at
@@ -711,9 +1171,17 @@ const int KB_PEEK_LBL_DY   = 8;
 const int KB_PEEK_TITLE_DY = 22;
 const int KB_PEEK_TEXT_DY  = 40;
 // It covers the keys and the action row (never the text card), so its height is
-// BOARD_H - KB_ROWS_Y - 4 = 220, its text starts KB_PEEK_TEXT_DY inside it and
-// stops 8 short of its bottom - (220 - 40 - 8) / 13 = 13.2 -> 13.
-const int KB_PEEK_LINES = 13;
+// BOARD_H - KB_ROWS_Y - 4 = 201, its text starts KB_PEEK_TEXT_DY inside it and
+// stops 8 short of its bottom - (201 - 40 - 8) / 13 = 11.77 -> 11.
+//
+// RE-DERIVED, NOT ADJUSTED, and this constant is the reason to be careful with
+// KB_ROWS_Y: keyboard.ino's KB_PEEK_H follows KB_ROWS_Y automatically (it is
+// BOARD_H - KB_ROWS_Y - 4), but this line does NOT - it is hand-written. The
+// strip moved KB_ROWS_Y 96 -> 115, so the overlay lost 19px and 13 lines no
+// longer fit: drawWrappedText would have painted 13 lines into room for 11, two
+// of them past the overlay's bottom edge and over the key grid, silently. The
+// same formula gives board 2 its unchanged 15 at its own 306px overlay.
+const int KB_PEEK_LINES = 11;                  // was 13, at KB_ROWS_Y 96
 
 // ---------- HISTORY READER / FULL-SCREEN READER ----------
 // Moved from deckhand_display.ino and from literals in reader.ino. Every value
@@ -726,17 +1194,28 @@ const int KB_PEEK_LINES = 13;
 const int HIST_CHIP_X      = 10;
 const int HIST_CHIP_Y      = 4;
 const int HIST_CHIP_H      = 17;
-// 13, where the chip's own centre is HIST_CHIP_Y + HIST_CHIP_H / 2 = 4 + 8 = 12 -
-// so the label sits ONE PIXEL LOW. Pre-existing and invisible at this size, and
-// left alone because this board's binary is held byte-identical across the port;
-// stated here rather than papered over with arithmetic that yields 12.
-// settings-geom-check.mjs carries it as a known board-1 entry.
-const int HIST_CHIP_CY     = 13;
+// DERIVED, and it used to be a literal 13 where the chip's own centre is
+// HIST_CHIP_Y + HIST_CHIP_H / 2 = 4 + 8 = 12 - so the label sat ONE PIXEL LOW.
+// Pre-existing, invisible at this size, and left alone for exactly one reason:
+// this board's binary was held byte-identical across the port. That constraint is
+// lifted (CLAUDE.md), the fix is one pixel and the derivation is the same one
+// settings-geom-check.mjs already asserted the literal against - so the constant is
+// now the expression rather than a number that happened to differ from it.
+// HIST_HDR_TEXT_Y is derived from this in turn (a 13px cell centred on it), and its
+// own assertion is what pins the pair together.
+const int HIST_CHIP_CY     = HIST_CHIP_Y + HIST_CHIP_H / 2;
 const int HIST_CHIP_W_CHAT = 40;
 const int HIST_CHIP_W_ALL  = 32;
 const int HIST_CHIP_TAP_W  = 76;
 const int HIST_CHIP_TAP_H  = 24;
-const int HIST_HDR_TEXT_Y  = 8;    // name (left) and position (right), TL/TR
+// DERIVED FROM THE CHIP'S CENTRE, and it used to be a literal 8 where a 13px cell
+// centred on that centre starts at 6 - so the name and the position field sat 2px
+// low against the chip beside them (1px, back when HIST_CHIP_CY was itself 13). Same
+// class as HIST_CHIP_CY above and fixed in the same pass, for the same reason: the
+// only thing that had ever kept it was this board's binary being held byte-identical.
+// Board 2 has always derived its own (27 - 16/2 = 19). The row still lands inside the
+// chip (6..18 against 4..20), which settings-geom-check.mjs asserts.
+const int HIST_HDR_TEXT_Y  = HIST_CHIP_CY - CODE_LINE_H / 2;   // name (left) / position (right), TL/TR
 const int HIST_RULE_Y      = 22;   // the divider under the header
 const int HIST_TOP         = 28;   // first entry row
 const int HIST_EMPTY_CY    = 130;  // "Asking the Mac..." / "Nothing here"
@@ -780,12 +1259,22 @@ const int READER_TEXT_TOP = 30;
 const int READER_BTN_L_X = 8,   READER_BTN_L_W = 70;
 const int READER_BTN_M_X = 86,  READER_BTN_M_W = 68;
 const int READER_BTN_R_X = 162, READER_BTN_R_W = 70;
-// The x boundaries the three touch handlers split on. TWO SETS, because this
-// board has always had two: the history list and the full-entry pager split at
-// 78/156 while the ask reader splits at 82/158. Both merely assign the 8px gap
-// between two keys to a different neighbour, so neither is wrong - but they are
-// inconsistent, and that inconsistency is preserved here rather than fixed,
-// because this board's binary is held byte-identical across the two-board port.
-// Board 2 derives ONE pair from its own key geometry.
-const int HIST_TAP_1   = 78,  HIST_TAP_2   = 156;
-const int READER_TAP_1 = 82,  READER_TAP_2 = 158;
+// The x boundaries the three touch handlers split on. ONE SET NOW, DERIVED FROM THE
+// KEYS, which is what board 2 has always done.
+//
+// THIS BOARD HAD TWO SETS AND THE REASON GIVEN WAS BYTE-IDENTITY. The history list
+// and the full-entry pager split at 78/156 while the ask reader split at 82/158;
+// both merely handed the 8px gap between two keys to a different neighbour, so
+// neither was WRONG - but the same bar behaved differently depending on which
+// screen drew it, and nothing on the glass said so. With the constraint lifted
+// (CLAUDE.md) the question is which of the two to keep, and that is not a coin
+// toss: 82/158 are the MIDPOINTS of the two gaps (78..86 and 154..162), i.e. the
+// only pair that gives each key its own half of the gap. 78 and 156 were the left
+// key's right edge and a number two pixels off the other midpoint. So the reader's
+// pair wins, both are derived from the key geometry rather than transcribed, and
+// HIST_TAP_* is defined FROM it so the two cannot drift apart again.
+// settings-geom-check.mjs asserts both that each split falls in its gap and that
+// the two sets agree.
+const int READER_TAP_1 = (READER_BTN_L_X + READER_BTN_L_W + READER_BTN_M_X) / 2;   // 82
+const int READER_TAP_2 = (READER_BTN_M_X + READER_BTN_M_W + READER_BTN_R_X) / 2;   // 158
+const int HIST_TAP_1   = READER_TAP_1,  HIST_TAP_2 = READER_TAP_2;

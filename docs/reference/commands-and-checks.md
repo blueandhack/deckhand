@@ -28,21 +28,32 @@ that differs and why; this section is only how to build each.
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64, every rung native |
 | body text | 6x13 = 2.31mm, 31-col detail-card lane | 8x16 = 2.47mm, 32-col detail-card lane |
-| size today | flash 1386758, RAM 69804 | flash 1030298, RAM 70140 |
+| size today | flash 1414022, RAM 73244 | flash 1052646, RAM 72804 |
 
 **Those two figures are `arduino-cli`'s own `Sketch uses` / `Global variables` lines, NOT the
 `.bin` file's size, and the distinction has to be stated or the two records read as
 contradicting each other.** The `.bin` is larger by fixed image structure - a 24-byte image
 header, 8 bytes per segment header, the trailing 33-byte SHA-256 plus checksum, and 16-byte
-segment padding. **Measured on four builds today: +266, +266, +266 and +270** - so it is
-*nearly* constant but not exactly, because the alignment padding rounds. Consequence worth
+segment padding. **Measured on four builds: +266, +266, +266 and +270; on the two builds of
+2026-09-05, +270 (board 1) and +258 (board 2)** - so it is *nearly* constant but not exactly,
+because the alignment padding rounds. Consequence worth
 knowing: a delta taken from `.bin` sizes can differ from the same delta taken from
 `Sketch uses` by a few bytes (it did here, +2352 against +2356 on board 2), and
-`board-baseline.mjs` reports the `.bin` number. Board 1's `.bin` today is **1387024**, which
-is the baseline figure below.
+`board-baseline.mjs` reports the `.bin` number. **Do not read either figure out of this
+file: `firmware/board-baseline.json` holds the two `.bin` sizes, `CLAUDE.md` quotes them, and
+`node firmware/board-baseline.mjs --doc-check` asserts the quote against the JSON.** That
+binding exists because CLAUDE.md's copy went stale five times in one day, inside the very
+instruction that says "verify it - do not reason about it"; `--update` now rewrites the
+document as well, so re-baselining cannot leave the prose behind. `--doc-check --selftest`
+injects a wrong size into an in-memory copy of CLAUDE.md and exits 0 only if it is caught. The
+RAM figures in the row above are `arduino-cli`'s and are NOT bound by it - they are still
+hand-maintained.
 
 **Board 1's binary was BYTE-IDENTICAL across the whole second-board port, and that check is now
-RETIRED — replaced, not abandoned.** Two deliberate shared-code fixes moved it on purpose (the
+RETIRED — replaced, not abandoned.** (The residual freeze that survived the retirement — board 1
+held byte-identical so a board-1 change could not ride inside a board-2 diff — was itself lifted
+on the `compose-surface` branch, on which board 1 is deliberately brought into line with board 2.
+Nothing anywhere may still cite byte-identity as the reason a board-1 defect stands.) Two deliberate shared-code fixes moved it on purpose (the
 history list going blank after reading one entry, and the PAIRED MACS row), so the constant is
 gone and `firmware/board-baseline.mjs` takes its place:
 
@@ -107,9 +118,9 @@ mask fixes it: the 16 bytes are a literal that either exists or does not.
 `not pooled`, `--update` records that state in `board-baseline.json`, and a `CHANGED` whose pooling
 flipped prints the explanation and tells you to rebuild the core (`arduino-cli compile --clean`)
 before believing your own diff. The alternative is a check that cries wolf once a day, and this repo
-already says elsewhere what happens to a check nobody reads. Both current baselines are recorded
-`pooled: true` — not assumed: a pooling flip changes the hash, so today's pooled builds matching
-them IS the proof. (The teeth were proven by injection: a baseline doctored to
+already says elsewhere what happens to a check nobody reads. Both current baselines are recorded with the state
+they were built in (`pooled: false` as of 2026-09-05) — not assumed: a pooling flip changes the
+hash, so a build matching its baseline IS the proof of the recorded state. (The teeth were proven by injection: a baseline doctored to
 `pooled: false, size -16` produces the `+16 bytes` line and the explanation under it.)
 The same fact is why the **`size today` row above can never be reconciled to the byte** across
 sessions — two honest measurements of one commit differ by 16 depending on the core's cache.
@@ -118,7 +129,7 @@ sessions — two honest measurements of one commit differ by 16 depending on the
 2's baseline was allowed to fall **4,112 bytes stale across 42 commits**, so `--check 2` reported
 `CHANGED` through an entire task for reasons that had nothing to do with that task's code. Nothing
 in the code caused it: re-baselining board 2 was in nobody's routine, and the plans of the day named
-board 1 only — board 1 is the one held byte-identical, so it is the one everybody remembers. That is
+board 1 only — board 1 was the one held byte-identical, so it was the one everybody remembered. That is
 the danger rather than the untidiness: a `CHANGED` you have learned to expect is a `CHANGED` you
 stop reading, and the next one will be real. **Compile board 2, `--check 2`, then compile board 1,
 `--check 1` — never concurrently** (one sketch build directory; see below), and re-baseline whichever
@@ -434,6 +445,19 @@ echo "TONETEST" > ~/.claude/deckhand-device-command   # BOARD 2 ONLY: configure 
 echo "TONETEST 90" > ~/.claude/deckhand-device-command # ... at a given volume, 1-100 (default 30)
 echo "TONELADDER" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: five rising volumes, find the audible floor
 echo "PAIRVECTOR" > ~/.claude/deckhand-device-command # BOARD 2 ONLY: the pairing crypto against a pinned RFC 7748 vector
+echo "WHOAMI" > ~/.claude/deckhand-device-command   # re-emit the boot HELLO line - both boards, see below
+echo "EMOJITEST off" > ~/.claude/deckhand-device-command # the escape; without it TAB left a frozen footer
+echo "THEME dark" > ~/.claude/deckhand-device-command   # flip the live palette - NOT persisted
+echo "DETAIL 0" > ~/.claude/deckhand-device-command # session n's detail/ask card, WITHOUT the keyboard over it
+echo "COMPOSE" > ~/.claude/deckhand-device-command  # the reply panel over the first pending ask
+echo "COMPOSE type hello" > ~/.claude/deckhand-device-command # ...with text typed into the draft
+echo "COMPOSE chip 1" > ~/.claude/deckhand-device-command # tap token 1 - the insert a finger would do
+echo "COMPOSE page" > ~/.claude/deckhand-device-command   # advance the token pager
+echo "COMPOSE keys" > ~/.claude/deckhand-device-command   # the TYPE... move, and print the draft after it
+echo "COMPOSE back" > ~/.claude/deckhand-device-command   # the BACK move, and print the draft after it
+echo "COMPOSE sent" > ~/.claude/deckhand-device-command   # the receipt state - SENDS NOTHING
+echo "COMPOSE recent yes" > ~/.claude/deckhand-device-command # fill the recents ring - SENDS NOTHING
+echo "COMPOSE off" > ~/.claude/deckhand-device-command    # close the surface
 ```
 
 **The three audio commands are a LADDER OF CLAIMS, and running them out of order debugs two
@@ -444,6 +468,235 @@ downstream" a statement rather than a hope. `TONELADDER` exists because the volu
 in dB and therefore hopeless to guess at: volume 15 is about -77dB and volume 90 about +20dB, so it
 plays five rising steps and the listener names the first one they hear. Prefer it to re-running
 `TONETEST` at a guessed volume — that costs one run per guess and this costs one run total.
+
+## A verb this board does not have is REFUSED BY NAME, from one table
+
+**Board 1 used to answer roughly twenty of the commands above with SILENCE, and nothing noticed
+for the whole board-2 port.** Measured on the live hardware with both boards attached, one
+`TEMP` produced four lines from board 2 (USB and BLE both deliver it, and most handlers have no
+duplicate guard) and *nothing at all* from board 1 - because those handlers sit inside
+`#if !BOARD_USES_TFT_ESPI`, so the line fell through the entire `if/else if` chain into the
+JSON-payload branch, which discards what it cannot parse. From the Mac that is indistinguishable
+from a wedged board, which is exactly what CLAUDE.md's "every refusal must name its cause" rule
+exists to prevent.
+
+`UNAVAILABLE_COMMANDS[]` in `deckhand_display.ino` is one `{verb, cause}` table, walked once at
+the END of the dispatch chain (so it can never shadow a real handler), with **each entry's `#if`
+the exact NEGATION of its handler's** - `#if BOARD_USES_TFT_ESPI` against the handler's
+`#if !BOARD_USES_TFT_ESPI`, `#if BOARD_USES_TFT_ESPI || !BOARD_HISTORY_SCROLL` against
+`#if !BOARD_USES_TFT_ESPI && BOARD_HISTORY_SCROLL`, and so on. Where the handler's guard names a
+CAPABILITY rather than a board, so does the entry, because a future board could turn that flag on
+and would then gain the handler and lose the refusal in one edit. Today board 1 refuses **24**
+verbs and board 2 refuses none.
+
+Three details that are load-bearing rather than stylistic:
+
+- **The array is terminated by a `{ nullptr, nullptr }` entry and walked to it**, not counted with
+  `sizeof`. Every block in it is `#if`'d, so on board 2 all of them vanish - and `X arr[] = {}` is
+  not legal C++. The terminator is what makes an all-guarded table compile, and walking to it is
+  what stops a count and an array disagreeing.
+- **A verb is matched WHOLE** (end of line, or a space), because the chain itself uses all three of
+  `buf == "X"`, `buf.startsWith("X")` and `buf.startsWith("X ")` and one table has to cover them.
+- **The refusal arm does not `return`.** `buf` is `processCompletedLine`'s own accumulator, passed
+  by reference, and a refusal that returns before the tail's `buf = ""` leaves the refused text in
+  the buffer for the next line to be APPENDED to - which still matches the same verb and refuses
+  again for ever. One `DETAIL 9` produced 63 refusal lines that way and ~100 seconds in which the
+  device parsed no payloads at all - **both boards frozen, and a `SCREENSHOT` sent inside that
+  window went nowhere** (fixed in `924cecc`). **FOUR handlers had it, not one**: `READTEST`,
+  `EMOJITEST` (BOTH arms), `SCROLLTO` and `SCROLLOPEN`. They all clear `buf` first now, and the fix
+  was confirmed on the glass - 3 lines from one command, no repeat. **The rule generalises past the
+  refusal table: any handler that `return`s early owns clearing the accumulator**, and every
+  `COMPOSE` arm was written that way from the start because of this.
+
+Refusals go out through `sendLineToHost`, not `Serial.println`, because a refusal is most wanted
+when someone is driving over BLE with the cable out - and they are deduped on a 2s window per verb,
+the way `KBTEST`'s already is, because the host delivers every trigger-file line to every live
+transport.
+
+**`node firmware/deckhand_display/commands-check.mjs`** is what keeps it honest, and it is a new
+file rather than an extension of an existing checker because none of them owns the dispatch chain -
+a command inventory folded into `usage-geom-check` is a parse nobody would look under. It PARSES
+three things and transcribes none: every `buf ==` / `startsWith` / `equalsIgnoreCase` verb in
+`processCompletedLine()` with its preprocessor guard stack, every table entry with ITS stack, and
+every `#define BOARD_*` out of both headers. Then it EVALUATES those guards per board with a real
+boolean evaluator - an identifier no header defines THROWS rather than reading as 0, which is the
+`const int` trap - and asserts that a verb reachable on either board is, on the other, either
+handled or refused by name. It also refuses a dead entry (a verb the board both handles and
+refuses), a cause short enough to be a paraphrase of its own guard, a non-ASCII cause, a prefix
+match, a `sizeof` walk, a `return` in the refusal arm and a `Serial.println` refusal.
+`--selftest` injects **17** faults and catches 17/17; deleting the `TEMP` entry fails by name with
+`TEMP: handled on board 2 and NOT on board 1, so board 1 refuses it by name`.
+
+**ONE REFUSAL WAS EMITTED CORRECTLY AND STILL INVISIBLE, AND THE HOST WAS THE REASON.** `BLEMTU`
+was the only verb of the 24 that produced nothing in `/tmp/deckhand-launchd.out` — measured, not
+suspected: the device answered and the log showed only the `Sending command` line.
+`handleDeviceLine()` in `host/index.mjs` swallowed **any** line starting `BLEMTU ` and returned,
+because that arm exists to re-tune `bleChunkSize` from an MTU report. So board 1's
+`BLEMTU refused on E32R28T: ...` went into the tuner, matched no `mtu=`, and was dropped — the
+exact silence the refusal table exists to remove, one layer up. It now logs every `BLEMTU ` line
+before parsing it, which also fixes the same defect on **board 2**: the command table sells
+`BLEMTU` as "the negotiated ATT MTU per link", but its answer was only ever mentioned when the
+chunk size CHANGED, so asking twice printed nothing the second time and the instrument answered
+into the tuner rather than to the person who asked. Bounded rather than chatty — the device sends
+an unsolicited report only on a change (`tickBleMtu`'s `scrollMtuSent` guard), so this is at most
+one line per link per connect. **The lesson generalises: a refusal is only as visible as the
+host's own line handling, so a new refusal has to be READ IN THE LOG rather than reasoned about
+from the firmware.** **AND THE CLASS IS BOUND, not just the instance:** `commands-check.mjs`
+parses `handleDeviceLine()`'s own body for every arm that `return`s WITHOUT logging, prints the
+list it found (and requires it to be non-empty, so the assertion cannot pass vacuously over a
+parse that matched nothing), and fails by verb name if any refusal line the firmware emits would
+be swallowed by one of them. A `--selftest` fault adds a new swallowing arm and is caught.
+
+**`SCROLLPERF`'s guard is `BOARD_HISTORY_SCROLL` ALONE where its four neighbours read
+`!BOARD_USES_TFT_ESPI && BOARD_HISTORY_SCROLL` - checked, and it is deliberate.** `SCROLLPERF`'s
+is the honest one: its body touches only `scrollActive`, `scrollY`, `scrollMaxY()`,
+`scrollDrawBody()` and `CODE_LINE_H`, every one declared inside `scrollback.ino`'s single
+`#if BOARD_HISTORY_SCROLL`, and nothing in it depends on the board. The neighbours' extra term is
+redundant rather than wrong (no board declares `BOARD_HISTORY_SCROLL 1` with
+`BOARD_USES_TFT_ESPI 1`) and was left alone, since narrowing four working guards would move a
+binary for no behaviour.
+
+## `EMOJITEST off` - the escape a stateful instrument must have
+
+`emojiTestActive` gates **both** `handleLine()`'s payload absorption and `loop()`'s 1s tick, and
+`TAB` used to paint over the grid without clearing it. The device then kept drawing, LOOKED ALIVE,
+and its footer never moved again while no payload reached it - and the only recovery measured was
+a re-flash. An agent hit this by accident while testing an unrelated refusal.
+
+`EMOJITEST off` is now the escape, shaped as an `off` ARGUMENT rather than a separate verb
+(`EMOJITEST` already takes an icon name, so a second verb would be a second name for one surface,
+and `off` is what `KBTEST`/`KBPROBE`/`KBBUBBLE` already answer to) but taking `SCROLLCLOSE`'s other
+half: **both outcomes are named**, so "closed" and "there was nothing open" never look the same
+from the Mac. It sits AFTER the `pairPanelActive` guard, so it cannot repaint over the pairing
+panel; the two flags can never both be true, because `EMOJITEST` refuses to open while the panel is
+up. `switchTab()` now clears the flag as well, ABOVE its same-tab early return - `TAB 0` while the
+grid is up over tab 0 is the case an operator reaches for first, and returning early would clear
+nothing.
+
+**The same class of trap in the neighbours, all of them checked:**
+
+| flag | absorbs the tick? | remotely reachable? | escape |
+|---|---|---|---|
+| `emojiTestActive` | yes | yes (`EMOJITEST`) | **fixed** - `EMOJITEST off`, and `TAB` clears it |
+| `histActive` / `readerActive` | yes | board 2 only (`READTEST`) | `READTEST off`; on board 1 only a finger can raise it |
+| `scrollActive` | yes | yes (`SCROLLOPEN`) | `SCROLLCLOSE` |
+| `composeActive` | yes | yes (`KBTEST`, `COMPOSE`, `DETAIL`+`REPLY`) | `KBTEST off` / `COMPOSE off` |
+| `octoActive` | yes | no (touch only) | self-clears after 30s |
+| `voiceCardActive` | no | no (a host payload raises it) | the next voice state |
+| `isAsleep` | n/a - `SLEEP` is a power-off | yes (`SLEEP`) | **none, by design**: a held touch wakes it |
+
+Two refusals came out of that sweep, both real and both the same defect one surface along:
+
+- **`TAB` is refused while `composeActive`/`readerActive`/`histActive`/`scrollActive`.** `switchTab()`
+  paints the tab and clears nobody's flag, so `TAB` over an open reader or transcript left the flag
+  set and the tick absorbed - EMOJITEST's freeze exactly. Those three are refused rather than
+  cleared because each has an exit function that repaints the screen `switchTab` is about to
+  repaint again, which is an ordering question rather than a one-liner, and each already has a way
+  out. `pairPanelActive` is deliberately NOT in the list: `switchTab()` takes the panel down AND
+  closes the window, so `TAB` is a correct escape from it.
+- **`PAGE` is refused while any full-screen surface is up, the pairing panel included.** `PAGE` was
+  the FIFTH refusal list that did not know the panel is a full-screen surface (the four found
+  earlier are recorded below): both its callees only act while `currentTab == TAB_SETTINGS`, and
+  the pairing panel is reached FROM settings - so `PAGE` could repaint over a code somebody was
+  comparing while `pairPanelActive` stayed true and `CONFIRM` stayed tappable underneath.
+
+## `WHOAMI`, `DETAIL`, `THEME` and the `COMPOSE` verbs
+
+- **`WHOAMI` re-emits the boot `HELLO <name> v2` line on demand, over USB, on BOTH boards, and it
+  exists because `HELLO` IS A BOOT-ONLY BURST.** A host that attaches to an already-running board
+  never sees one, so the link stays ANONYMOUS - measured live as `[device/usb:usbmodem1101]` - and
+  **an answer sent down an anonymous link is refused as coming from an unknown device.** The host
+  used to learn the name by REBOOTING the board with an RTS pulse (`dtr:false,rts:true`), which is
+  also esptool's USB-Serial-JTAG reset: on board 2 that drops the USB device, so the port closes,
+  the link is spliced and `link.pulsed` dies with it - a watchdog restart against a board past its
+  15s burst would reboot the user's board 2 six seconds later, mid-answer. **The host now ASKS.**
+  Proven with both boards left running minutes past their bursts and only the host restarted:
+  board 2 named, no `Pulsing RTS`, no `BUILD` line, no disconnect. Cost if it had gone the other
+  way: one command verb and a 1500ms wait on a link that would have been named anyway.
+- **`DETAIL <n>` opens session `n`'s detail card WITHOUT the keyboard over it, and before it there
+  was NO WAY TO PUT THAT SCREEN ON THE GLASS FROM THE MAC AT ALL.** `TAB` switches tabs, `PAGE` is
+  SETTINGS-only, and the only other route in is `KBTEST msg`, which opens the keyboard OVER it - so
+  that surface had never been captured on either board in this project's history. Refuses by name
+  on no sessions, an out-of-range `n`, or another full-screen surface. If the session has a pending
+  ask it lands on the ask screen, which is how the `SPEAK`/`REPLY` input row is capturable.
+- **`THEME dark|light` flips the live palette, so "confirm this reads in both themes" stopped
+  needing a person at the device.** NOT persisted - a reboot restores the stored setting. It does
+  not settle board 2's COLOUR: `SCREENSHOT` there reads the shadow framebuffer, so `COLORTEST` is
+  still the instrument and a person is still the authority.
+- **`EMOJITEST off` is an escape, and the section above says why one was mandatory.**
+- **The `COMPOSE` verbs put the reply panel on the glass and move between its two screens.**
+  `COMPOSE` opens it on the first pending ask; `type`, `chip <n>` and `page` edit and page it;
+  `keys`/`back` are the two SCREEN MOVES; `sent` draws the receipt state; `recent <text>` fills the
+  recents ring; `off` closes it. **`sent` and `recent` SEND NOTHING** - they put a state on the
+  glass, which is all a capture can record.
+  - **`chip <n>` and `page` are DEDUPED and the drop names its cause; opening and the screen moves
+    are NOT, and that asymmetry is the rule rather than an oversight.** The host writes each
+    trigger-file line to every live transport, so a cabled BLE board runs each command twice within
+    milliseconds. Opening the panel and moving a screen are IDEMPOTENT - the same flag, the same
+    repaint - so the second copy costs one repaint and can change nothing. **An INSERT is not**, and
+    this was MEASURED rather than anticipated: the first `COMPOSE chip 1` put 31 bytes in the draft
+    and the second made it 62, reading
+    `firmware/tft_setup/User_Setup.hfirmware/tft_setup/User_Setup.h`, which looks exactly like the
+    splice path inserting wrongly. The ring's own dedupe makes `COMPOSE recent` idempotent, which is
+    why it needs no guard where `chip` does.
+  - **`keys`/`back` exist because THE CLAIM THE WHOLE SURFACE RESTS ON CANNOT OTHERWISE BE SEEN.**
+    `TYPE...` and `BACK` exist only as a finger on the glass, and nothing here can inject a tap, so
+    without these two verbs "the draft survives the move" could be reasoned about and never
+    observed. They print the byte count and the text after the move - that line is the evidence.
+    They call the same two functions the buttons call, and they cannot send, open, close or edit.
+  - **THERE IS NO TOUCH-INJECTION COMMAND AND ONE WAS DELIBERATELY NOT ADDED.** The project already
+    decided this class: `KBBUBBLE` arms a key through the real `kbSetArm()` but NEVER commits, and
+    declines `DEL` by name precisely because `DEL` commits on press. A `TAP x y` verb that could
+    reach a commit would put "send a message to Claude Code" on the trigger file - a remote-control
+    hole rather than an instrument. **The cost of that decision is recorded rather than hidden:**
+    four of the compose panel's eight exits, a tap on the recents row on either board, and
+    message-mode's `DISCARD`/`CANCEL` arm are bound STRUCTURALLY and have never been performed as a
+    gesture. See *The compose surface* in [`sessions-and-asks.md`](sessions-and-asks.md).
+
+## `KBPROBE` and `KBBUBBLE` - the keyboard's touch model
+
+A character on the keyboard's three letter rows commits **on the LIFT, not on the press**: a press
+arms a candidate and draws a magnified bubble one key row clear of the finger, the held path
+re-targets as the finger slides, and the release commits. Row 3, the action row, the card, the
+strip, the peek and `DEL` all keep press-commit, because every one of those targets already clears
+the ~7.1mm fingertip floor - and `DEL` specifically must delete immediately on a tap and repeat on
+a hold.
+
+**`KBPROBE` ships with that change because "release-commit cuts mis-hits" is a CLAIM, not a fact.**
+It prints one line per keystroke:
+
+```
+KBPROBE #7 armed=r1c3 "e" lift=r1c4 "r" at=(120,180)->(127,177) d=(7,-3) dist=8 retarget=1
+```
+
+and `KBPROBE off` prints the totals, `N keystrokes, M re-targeted between press and lift (X%)`.
+Closing the keyboard stops it and reports the same totals rather than throwing them away.
+
+**What it measures and what it does not.** It measures where fingers LAND versus where they LIFT.
+It says nothing about whether the resulting text was CORRECT: a re-target only means the finger
+moved onto a different key, not that the second key was the intended one. A correction rate near
+zero would mean release-commit is buying nothing measurable, and the spec's fallback (six columns,
+two taps per character) is what should come next. **The "release point" is the LAST SAMPLED point,
+not the release proper** - `getTouchPoint()` returns false on the lift, so at a 15ms poll the
+reported point is the finger's position up to 15ms before it left. That caps the precision of
+every number the probe prints.
+
+**`KBBUBBLE` exists because the bubble is drawn only while a finger is down, so no capture can ever
+record it** - the same argument `TAB`/`PAGE`/`KBTEST`/`EMOJITEST`/`READTEST` each already won.
+`KBBUBBLE [r c]` (default `1 3`, the key the committed mock draws pressed) arms that key through
+the SAME `kbSetArm()` a real press uses, so a screenshot records the shipping code path rather than
+a mock of it. It **never commits** - only `handleTouch`'s release path calls `kbRelease()` - and
+`KBBUBBLE off`, or the next real press anywhere, clears it. It **declines `DEL` by name**, because
+`DEL` commits on press and is never armed: a bubble over it would be a capture of a state this
+keyboard cannot reach.
+
+Both refuse with a NAMED cause off the keyboard (`composeActive=0`, or the peek covering the keys), and
+both are idempotent against the host delivering every trigger-file command over **both** transports:
+a second copy within 2s changes nothing and prints nothing, while a genuine repeat later says
+`already running` / `already drawn`. Getting that wrong is what made one `POWERPROBE` print four
+refusal lines - and `KBBUBBLE off` reproduced it exactly once during this work (the first copy
+cleared and said `cleared`, the second found nothing armed and refused), which is why the dedupe
+window covers every line these two print rather than only their refusals.
 
 `COLORTEST` and `TEXTPROBE` exist for the same reason `TAB`/`PAGE`/`KBTEST`/`EMOJITEST` do: the
 glass is otherwise unverifiable. `COLORTEST` in particular is the **only** instrument that can see
@@ -733,16 +986,33 @@ parse every cap out of the hook, the host and the firmware rather than transcrib
 that moves fails by name instead of taking the numbers with it:
 
 ```
-node host/wire-bytes-check.mjs               # 305 assertions: every device-bound cap is exact in BYTES,
+node host/wire-bytes-check.mjs               # 317 assertions: every device-bound cap is exact in BYTES,
                                              #   the hook's inline toAscii matches host/to-ascii.mjs over
                                              #   71,738 strings, and the saturated tick line is measured
                                              #   against feedChar's guard (incl. the still-over tripwire)
-node host/wire-bytes-check.mjs --selftest    # 36/36 injected faults, each printing WHICH assertion caught it
+node host/wire-bytes-check.mjs --selftest    # 42/42 injected faults, each printing WHICH assertion caught it
 node host/ask-optdescs-check.mjs             # 40 assertions: optDescs is capped in bytes on a codepoint
                                              #   boundary, parallel to options, absent when nothing
                                              #   is described
-node host/ask-optdescs-check.mjs --selftest  # 5/5 injected faults
+node host/ask-optdescs-check.mjs --selftest  # 6/6 injected faults
+node host/session-inbox-check.mjs             # 94 assertions: the messaging-socket frame, the bytes that
+                                              #   actually reach the socket, the confirm-don't-trust rule,
+                                              #   the host's fallback wiring, and the hook publishing the
+                                              #   socket + token (driven as a real child process)
+node host/session-inbox-check.mjs --selftest  # 32/32 injected faults, each naming the assertion that caught it
 ```
+
+`session-inbox-check.mjs` is worth a paragraph, because the channel it guards **cannot report its own
+failure**. A message posted to a session's messaging socket in the wrong frame shape is accepted, the
+write returns success, and the message is discarded — measured twice. So the checker has to do two
+things a normal one does not. It **parses the frame out of `inboxFrames`' body** (each
+`JSON.stringify(...)` argument evaluated in an isolated scope with sentinel `token`/`text`), keeping
+no literal copy of the shape, so the revert to the discarded `{"type":"message","text":...}` fails by
+name rather than passing. And it **catches the bytes on a real Unix domain socket** and compares them
+against the module's own `inboxWireBytes` — the frame half proves only the *declaration*, and a
+review found that `writeFrames` could send anything at all with every assertion still green. The
+stand-in server also plays the app's part, appending an enqueue only when the bytes match, so a
+wrong writer fails twice. Its `--selftest`'s first two faults are exactly those two mistakes.
 
 Two properties are worth knowing before leaning on them. `wire-bytes-check.mjs`'s selftest names the
 assertion that caught each fault, because **"caught" alone cannot tell the assertion that exists for
@@ -757,6 +1027,45 @@ claims were counted twice. That is not only a vanity number: a regex that stoppe
 have been reported as nine findings rather than one, which is the "an instrument that flatters" rule
 pointing the other way. The caps are passed in now, and the behaviour suite's sandbox is torn down
 in a `finally`, since the run that fails is exactly the one whose scratch directory must not survive.
+
+**Check the MULTI-DEVICE path — two boards on two cables at once.** `findUsbPort()` used `.find()`
+and returned the first matching port for a year; nothing noticed, because there was only ever one
+board on the desk. With two plugged in the host drove whichever the OS enumerated first and left the
+other announcing HELLO to nobody, **and the log said `via=usb,ble` either way** — which reads
+identically whether that is one board on two transports or two boards on one each. Every assertion
+in this checker is aimed at a failure of that shape: silent, and invisible in the one line a human
+reads.
+
+```
+node host/multi-device-check.mjs             # 85 behaviour + 67 structural assertions
+node host/multi-device-check.mjs --selftest  # 59/59 injected faults, each naming the assertion that caught it
+```
+
+It **slices the real functions out of `host/index.mjs` and executes them** — `listUsbCandidates`,
+the whole link registry (`sendToLink`/`liveLinks`/`broadcastToDevices`/`replyLinkFor`/`linkLabel`),
+`deviceNameFor`/`senderKey`, the answer and prompt dedupe, the battery store and `handleDeviceLine`'s
+own `BATT` arm — with two fake boards and a fake BLE peer around them. There is no re-implementation
+to keep passing after the real code is deleted. Three of its assertions are worth knowing:
+
+- **The port scan is run in BOTH enumeration orders.** A `.find()` regression still returns board 1
+  when board 1 happens to be listed first, so a single-order test would pass on a lucky machine.
+- **The fan-out is counted per link AND per device.** Three links must mean three writes, never four
+  — and no *device* may receive more than the two copies a cabled BLE device has always had (which
+  is what `KBTEST`, `KBPROBE`, `KBBUBBLE` and `POWERPROBE` dedupe against on the device).
+- **The dedupe is proved on the reachable defect, not just the mechanism.** Two boards cannot in
+  fact emit the same `ANSWER` line — each signs with its own key — so "a different board sending the
+  same line is not a duplicate" is the mechanism test. The INCIDENT is interleaving: with one
+  last-writer-wins slot, board 1 answering between board 2's two transport copies moves the slot off
+  board 2's line, and board 2's own second copy is then no longer seen as a duplicate. It is
+  rejected downstream (the nonce is single-use) and reads in the log as an authentication failure on
+  a perfectly good answer — the exact noise the guard exists to stop. Both are asserted. The
+  prompt-map assertion establishes its own precondition rather than clearing the map first:
+  clearing made it pass with the two maps SHARED, and the selftest caught exactly that vacuity.
+
+Its **structural half is reported separately** and reads the BODY of the function it names, because
+running the code cannot see a module-level capture buffer creeping back in: nothing in the behaviour
+half takes a screenshot, so `let shotCapture` at file scope would pass all 38 and then interleave two
+boards' rows into one PNG whose row count still adds up.
 
 **Check the WIRELESS-PAIRING CRYPTO, and know which half a checker can prove.** Board 2 can pair a
 Mac without the cable (`BOARD_HAS_WIRELESS_PAIR`, 1 there and **0 on board 1**, where `PROVISION`
@@ -1242,6 +1551,28 @@ node firmware/deckhand_display/geom-sweep.mjs            # fault-injection sweep
 python3 firmware/deckhand_display/usage-trend-check.py   # the USAGE ring/burn arithmetic these three do NOT bind - see below
 ```
 
+**The complete run list, so no checker rots for want of a workflow that runs it.** `CLAUDE.md`'s
+Verification block is the short form; this is all of them, and every one is green plain AND
+`--selftest` at the close of `compose-surface`:
+
+```
+node firmware/deckhand_display/{usage,sessions,settings}-geom-check.mjs
+node firmware/deckhand_display/{sessions-rank,scrollback,palette,commands,textwidth}-check.mjs
+python3 firmware/deckhand_display/{usage-trend,batt-trend}-check.py
+node firmware/deckhand_display/geom-sweep.mjs
+node firmware/board-baseline.mjs --doc-check      # CLAUDE.md's quoted hashes/sizes vs the JSON
+node host/{wire-bytes,ask-chips,ask-optdescs,pair-crypto,pair-exchange,voice-answer}-check.mjs
+node host/{session-inbox,multi-device,host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
+node host/{codex-refresh,line-address,session-lookup}-check.mjs
+node claude-hooks/answer-status-check.mjs
+node docs/design/*/check.mjs                       # six committed mocks, each bound to the headers
+```
+
+**`session-inbox-check.mjs` stands up its own Unix socket in a temp dir and never touches a real
+session** - the comment that once said "posting into a LIVE session" was wrong and would have
+taught the next reader to skip it. **Assertion COUNTS quoted anywhere in this file go stale**; the
+checkers print their own, live, and that print is the authority.
+
 Each takes `--selftest`, which injects a fault and **exits 0 only when that fault IS caught** (exit
 1 if the checker is blind to it) — the same teeth-proving convention as `palette-check.mjs
 --selftest`. Two things to know before leaning on them:
@@ -1284,7 +1615,8 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   — the run was killed rather than diagnosed, so there is no evidence to point at, and the only
   honest statement is that the sweep is affordable today and the earlier figure is unexplained
   rather than explained away. The plausible candidate, offered as a hypothesis and not a
-  measurement, is contention: the sweep is four children per checker-board, so anything else heavy
+  measurement, is contention: the sweep is eight children per checker-board (`SLICES`, raised from
+  four when the sessions checker outgrew it), so anything else heavy
   on the machine (an `arduino-cli` build takes minutes) multiplies straight through it. **Time it
   when you run it**, and treat a wildly different number as a question about the machine before it
   is a question about the sweep.
@@ -1306,10 +1638,25 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   opaque box paints `COLOR_CARD` over the chip's own stroke, the clear-box-not-glyphs hazard the
   usage cards already pay for. Asserting that box clears the stroke at both ends is a bound taken
   from the geometry rather than fitted to today's 26, and it catches the chip at 20.
-  Where it stands today: **514 of 582 constant-board pairs guarded** (board 1 32/237 unguarded,
-  board 2 36/345) — board 2 gained **50 constants** in the settings redesign and its unguarded count
+  Where it stood at the settings redesign: **514 of 582 constant-board pairs guarded** (board 1
+  32/237 unguarded, board 2 36/345) — board 2 gained **50 constants** there and its unguarded count
   went DOWN, which is the standard this file sets for constants the repo just added: every one of
-  them is caught at **±1 in both directions**. (`ASK_OPT_DESC_BYTES` from the option-descriptions
+  them is caught at **±1 in both directions**.
+  **Where it stands at the close of `compose-surface`: 628 of 713 guarded** (board 1 31/277
+  unguarded, board 2 54/436). The compose surface added `KB_KEY_R`, `KB_KEY_GAP`, the four
+  `KB_ACT_*`, both `KB_STRIP_*` and eleven `COMPOSE_*` on each board, and **not one of them appears
+  in either board's unguarded list, nor under "caught only as a CRASH".** Spot-checked by injecting
+  the fault and reading the message rather than trusting the histogram: `COMPOSE_TOP -16` fails with
+  `the prompt card starts -12, at or after the 0 where the band above it ends`,
+  `COMPOSE_DRAFT_H -16` with `the draft line its T_BODY cell (13 in 5)`, `COMPOSE_ACT_MAX -1` with
+  `2 holds the 3 column(s) drawComposeActions writes into`, and `KB_KEY_R +1` with
+  `KB_KEY_R 3 != KB_KEY_W / 10 (2)`. **`COMPOSE_TOP`, `COMPOSE_GAP` and `COMPOSE_DRAFT_H` are caught
+  in ONE DIRECTION ONLY and that is correct, not a gap:** a bigger top margin or gap is legal
+  arithmetic the 31/64px residual absorbs, and their VALUES are bound by the committed mock instead.
+  Two of the panel's constants needed the sweep to find them - `COMPOSE_KEY_GAP` was unguarded and
+  `COMPOSE_COLS` was caught only as a CRASH - and a SECOND sweep found the fix half-done, because
+  `COMPOSE_ACT_MAX`'s new claim sat inside a board-1-only block while the sweep perturbs a constant
+  per BOARD. That is the argument for running it twice after adding assertions. (`ASK_OPT_DESC_BYTES` from the option-descriptions
   work, and `READER_CODE_LINE_H` from the reader line-step fix, likewise.) Board 1's numbers are
   unchanged, which is the sweep agreeing with `board-baseline.mjs` that nothing there moved.
   **Wireless pairing then added 25 more to board 2 and only THREE of them are unguarded, all
@@ -1320,9 +1667,21 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   was not when the panel first landed, and the story of how it got there is under **the pairing
   panel** below: a chain of relative identities is invisible to an injector that perturbs one term
   and lets the rest follow.
-  Of the unguarded ones only **8 on board 1 and 12 on board 2 are read by any
-  checker at all** — the other 24 and 24 are mic, beeper, crab, pairing-duration and
-  preset-count constants with no geometry to violate. **Four of board 2's entries in THAT list are unguarded BY CONSTRUCTION
+  Of the unguarded ones only **7 on board 1 and 10 on board 2 are read by any
+  checker at all** — the other 24 and 44 are mic, beeper, crab, scrollback-wire, burn-estimator,
+  pairing-duration and preset-count constants with no geometry to violate.
+  **THAT "READ BY A CHECKER" FLAG USED TO COUNT COMMENTS, AND THE FALSE POSITIVES COST A TASK'S
+  WORTH OF READING.** It is a regex over the checker's source, and `KB_MAX_BYTES` is named in a
+  cross-reference COMMENT in both `usage-geom-check.mjs` and `sessions-geom-check.mjs` ("the same
+  way settings-geom-check.mjs reads KB_MAX_BYTES out of the host"), so both listed it as
+  "UNGUARDED though this checker reads it" while neither asserts one thing about it — and the union
+  always said it was guarded, by `settings-geom-check`. Full-line `//` comments are stripped before
+  the flag is computed now (the same conservative rule `geom-common.mjs`'s own `stripComments()`
+  uses, because a checker's regex literals can contain `//` and a to-end-of-line strip would delete
+  real code). `USAGE_RING_STEP_MIN` moved out of the list for the same reason. **The VERDICT never
+  read that flag** — caught-or-not comes from the injection — so this changed a triage aid and no
+  number of record. A triage aid that points at healthy constants is read once and then skipped,
+  which is the same failure as a suppressed list. **Four of board 2's entries in THAT list are unguarded BY CONSTRUCTION
   and are not a gap** (as are the two `PAIR_*_MS` durations above): `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`,
   `DETAIL_COL_LBL_STEP` and `DETAIL_COL_VAL_STEP` are
   board 1's arm only since §7 replaced the pill and the two column pairs with the band and one
@@ -1335,13 +1694,19 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   cannot be caught by a small perturbation at all (`CODEX_LANE_CACHE` *is* now caught on both
   boards, because ONE buffer serves both Codex fields and it is asserted against the LARGER,
   `CODEX_RIGHT_CHARS`, as well as the lane); and `CFM_Y`/`CFM_H`,
-  `HIST_CHIP_X`/`HIST_CHIP_TAP_W`/`HIST_JUMP_H`, `P1_TOP`/`P2_TOP`/`P2_GAP`, `KB_TEXT_Y` and
+  `HIST_CHIP_X`/`HIST_CHIP_TAP_W`/`HIST_JUMP_H`, `P1_TOP`/`P2_TOP`/`P2_GAP` and
   `WAIT_CMD_H` all sit inside documented slack (board 2's page 2 has 149px of it - the checker
-  reports its hint ending at 311 against a footer at 460 - and its keyboard
-  break 38px) — each IS asserted, just not tightly enough for ±16 to trip it.
+  reports its hint ending at 311 against a footer at 460) — each IS asserted, just not tightly
+  enough for ±16 to trip it. **`KB_TEXT_Y` was on that list and is not exempt any more**, and
+  the number quoted beside it went stale too: the "keyboard break" was 38px before the prompt
+  strip took 22 of them, and is 16 today (`KB_ROWS_Y` 170 less `KB_TEXT_Y` 34 + `KB_TEXT_H`
+  120). Measured 2026-09-05 by perturbing the constant by ±16 in both headers:
+  `settings-geom-check.mjs` fails on all four, so the entry is corrected in place rather than
+  quietly deleted.
   **The sweep needs its own memory discipline and that is not optional.** It re-imports each
   checker once per injection, ~1400 times, and every instance is compiled code the ESM cache can
-  never release, so runs are sliced across four child processes per (checker, board). Before that
+  never release, so runs are sliced across `SLICES` child processes per (checker, board) - **8
+  today, raised from 4 on this branch when the sessions checker outgrew it**. Before that
   the sessions child OOM'd. **It did not fail silently** — the parent already checked the child's
   exit status, so it printed "1 checker sweep(s) hit an INTERNAL ERROR - the numbers above are
   incomplete" and exited 1. What it did lose was *coverage*: the checker that constrains every
@@ -1357,7 +1722,9 @@ Each takes `--selftest`, which injects a fault and **exits 0 only when that faul
   one process. Measured today, on both invocations, at this commit. So the coverage is **present**,
   not absent — a report that the sessions checker's constants are unswept is a report about which
   command was typed. **Run the plain sweep**; to look at one checker by hand, add
-  `--board <n> --slice <i>/4` (that is exactly what the parent does) and read the four slices, or
+  `--board <n> --slice <i>/8` (that is exactly what the parent does - read `SLICES` out of
+  `geom-sweep.mjs` rather than this sentence, which has already gone stale once) and read the
+  slices, or
   raise `SLICES`. This is recorded rather than fixed: it is pre-existing, and the working
   invocation is the documented one.
 

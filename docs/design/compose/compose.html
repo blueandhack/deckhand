@@ -1,0 +1,84 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Deckhand - the compose surface, both boards</title>
+<style>
+  body { background:#111; color:#bbb; font:13px/1.5 -apple-system,system-ui,sans-serif; margin:0; padding:24px; }
+  h1 { font-size:18px; color:#eee; margin:0 0 4px; }
+  p  { max-width:70ch; }
+  .note { color:#e4a; }
+  .row { display:flex; flex-wrap:wrap; gap:24px; margin-top:20px; }
+  figure { margin:0; }
+  figcaption { margin-top:6px; font-size:11px; color:#888; }
+  canvas { image-rendering:pixelated; border:1px solid #333; display:block; }
+  code { color:#ddd; }
+</style>
+<h1>The compose surface - a reply panel over a sharpened keyboard</h1>
+<p>
+  Two screens, both boards. Every rectangle, band, column and text origin is the
+  number the firmware will use; <code>check.mjs</code> binds this page's
+  <code>K</code> to <b>both</b> board headers name-for-name.
+</p>
+<p class="note">
+  GLYPH RENDERING HERE IS APPROXIMATE. The panel draws 1-bit Cozette 6x13 (board 1)
+  and Spleen 8x16 (board 2); this page draws a browser monospace face stepped at
+  each board's real advance and cell. The <b>metrics</b> are the panel's, the ink
+  inside each cell is not. Board 1 has no committed glyph dump in this repo and
+  inventing one would flatter the design, which is a mistake the settings mock
+  already paid for.
+</p>
+<div class="row" id="out"></div>
+<script src="compose.js"></script>
+<script>
+// An IIFE, because compose.js is a CLASSIC script: its top-level `const K` and
+// this file's would collide in the same script scope otherwise.
+(function () {
+const { SCREENS, K, ADV, CELL, P, TH } = globalThis.__X;
+const SCALE = 2;
+const FACE = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+function paint(sc, theme) {
+  const b = sc.board, k = K[b];
+  const cv = document.createElement("canvas");
+  cv.width = k.BOARD_W * SCALE; cv.height = k.BOARD_H * SCALE;
+  cv.style.width = (k.BOARD_W * SCALE) + "px";
+  const g = cv.getContext("2d");
+  g.scale(SCALE, SCALE);
+  const p = new P(b, theme);
+  sc.draw(p);
+  for (const o of p.ops) {
+    if (o[0] === "r" || o[0] === "s") {
+      const [, x, y, w, h, c, r] = o;
+      g.beginPath();
+      if (r) g.roundRect(x + (o[0] === "s" ? 0.5 : 0), y + (o[0] === "s" ? 0.5 : 0),
+                         w - (o[0] === "s" ? 1 : 0), h - (o[0] === "s" ? 1 : 0), r);
+      else   g.rect(x + (o[0] === "s" ? 0.5 : 0), y + (o[0] === "s" ? 0.5 : 0),
+                    w - (o[0] === "s" ? 1 : 0), h - (o[0] === "s" ? 1 : 0));
+      if (o[0] === "r") { g.fillStyle = c; g.fill(); }
+      else { g.strokeStyle = c; g.lineWidth = 1; g.stroke(); }
+    } else if (o[0] === "t") {
+      const [, s, x, y, f, c] = o;
+      const adv = ADV[b][f], cell = CELL[b][f];
+      g.fillStyle = c;
+      // Stepped one CELL at a time so the string occupies exactly the pixels the
+      // panel would advance through, whatever the browser face measures.
+      g.font = `${Math.round(cell * 0.78)}px ${FACE}`;
+      g.textBaseline = "alphabetic";
+      for (let i = 0; i < s.length; i++) {
+        const w = g.measureText(s[i]).width;
+        g.fillText(s[i], x + i * adv + Math.max(0, (adv - w) / 2), y + Math.round(cell * 0.78));
+      }
+    }
+  }
+  const fig = document.createElement("figure");
+  fig.appendChild(cv);
+  const cap = document.createElement("figcaption");
+  cap.textContent = `${sc.title} - ${theme} - ${k.BOARD_W}x${k.BOARD_H} at ${SCALE}x`;
+  fig.appendChild(cap);
+  return fig;
+}
+
+const out = document.getElementById("out");
+for (const theme of ["DARK", "LIGHT"])
+  for (const sc of SCREENS) out.appendChild(paint(sc, theme));
+})();
+</script>

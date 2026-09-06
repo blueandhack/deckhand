@@ -48,6 +48,7 @@ const MOD_SRC = path.join(REPO, "host", "to-ascii.mjs");
 const FIT_SRC = path.join(REPO, "host", "wire-fit.mjs");
 const ASCII_SRC = path.join(REPO, "host", "wire-ascii.mjs");
 const VOICE_SRC = path.join(REPO, "host", "voice-answer.mjs");
+const CHIPS_SRC = path.join(REPO, "host", "ask-chips.mjs");
 const FW_SRC = path.join(REPO, "firmware", "deckhand_display", "deckhand_display.ino");
 
 // The most UTF-8 bytes ONE UTF-16 code unit can become, i.e. what a character cap
@@ -69,7 +70,7 @@ function grab(src, label, re, cast = Number) {
   return m ? cast(m[1]) : NaN;
 }
 
-function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc) {
+function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc, chipsSrc) {
   const _voice = voiceSrc;
   const c = {};
   // hook: the ask fields
@@ -110,6 +111,19 @@ function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc) {
   // re-exported into index.mjs under the VOICE_ prefix; parse the DEFINITION.
   c.voiceAnswerMaxBytes = grab(_voice, "ANSWER_TEXT_MAX_BYTES (host/voice-answer.mjs)",
                                /export const ANSWER_TEXT_MAX_BYTES = (\d+);/);
+  // THE ASK'S CHIPS. Unlike every cap above, this one is a BYTE cap already
+  // (host/ask-chips.mjs measures with Buffer.byteLength), so it is not in
+  // CAPPED_FIELDS - what has to be proven here is different: that the extraction
+  // happens AFTER the transliteration (or the byte count changes under the cap), that
+  // the device's buffer can hold what the cap admits, and that CHIP_MAX slots of
+  // CHIP_BYTES on every one of six asks still fits the line guard. All three are
+  // PARSED - the two host constants from their own module, both firmware dimensions
+  // from SessionInfo itself - so raising either one fails an assertion by name rather
+  // than moving a number nobody re-checked.
+  c.chipMax = grab(chipsSrc, "CHIP_MAX (host/ask-chips.mjs)", /export const CHIP_MAX = (\d+);/);
+  c.chipBytes = grab(chipsSrc, "CHIP_BYTES (host/ask-chips.mjs)", /export const CHIP_BYTES = (\d+);/);
+  c.chipSlotsFw = grab(fwSrc, "SessionInfo.askChips's slot count (firmware)", /char askChips\[(\d+)\]\[\d+\];/);
+  c.chipSlotBytesFw = grab(fwSrc, "SessionInfo.askChips's per-slot bytes (firmware)", /char askChips\[\d+\]\[(\d+)\];/);
   return c;
 }
 
@@ -149,6 +163,17 @@ const HOST_SITES = [
    /t\.slice\(0, max - 3\) \+ "\.\.\."/],
   ["ask.voiceText, at the PARK SITE (Whisper output is the densest non-ASCII source there is)",
    /text = capUtf8\(toAscii\(text\), VOICE_ANSWER_TEXT_MAX_BYTES\);/],
+  // The same shape as session.path's entry above: the transliteration is the INNER
+  // call, so the composition itself is the ordering. CHIP_BYTES is measured in BYTES
+  // by host/ask-chips.mjs, so extracting first and transliterating after would cap a
+  // string whose byte count then changes under the cap - and it would be an ARRAY
+  // being handed to toAscii by then, which is the loud half of the same mistake.
+  ["ask.chips (the tokens are extracted AFTER the transliteration, or CHIP_BYTES is not a byte cap)",
+   /const chips = askChips\(toAscii\(record\.ask\.detail \?\? ""\), record\.ask\.options \?\? \[\]\);/],
+  ["ask.chips actually reaches the payload, and only when there is one to send",
+   /if \(chips\.length\) item\.ask\.chips = chips;/],
+  ["host/ask-chips.mjs is imported rather than the rules being re-implemented inline",
+   /import \{ askChips \} from "\.\/ask-chips\.mjs";/],
   ["the char/byte invariant is asserted at the point of send", /const wire = asciiFit\(\{/],
   ["and the transliteration runs BEFORE the size fit, or the line measured is not the line written",
    /const wire = asciiFit\(\{[\s\S]{0,1200}?const fitted = fitPayload\(wire\.payload\);/],
@@ -223,7 +248,7 @@ function fuzzCorpus(n = 5000) {
 // `fill` is what the char-capped fields are made of; `xlate` says whether the
 // transliteration runs, which is the difference between BEFORE and AFTER.
 // ---------------------------------------------------------------------------
-function tickBytes(caps, toAscii, capUtf8, { descCap = null, parkedVoice = false, sessions = null, fill = "ascii", wideSessions = null, xlate = true } = {}) {
+function tickBytes(caps, toAscii, capUtf8, { descCap = null, parkedVoice = false, sessions = null, fill = "ascii", wideSessions = null, xlate = true, chips = true } = {}) {
   // The em-dash is the TIGHTEST wide case, not the loudest: it is 3 bytes in and
   // 1 byte out, so it preserves LENGTH through the transliteration where CJK
   // collapses to a single '?' and would flatter the result enormously.
@@ -249,6 +274,14 @@ function tickBytes(caps, toAscii, capUtf8, { descCap = null, parkedVoice = false
     title: S(caps.titleChars), detail: S(caps.detailChars),
     options: Array.from({ length: caps.maxOptions }, () => S(caps.labelChars)),
     ...(descCap != null ? { optDescs: Array.from({ length: caps.maxOptions }, () => "x".repeat(descCap)) } : {}),
+    // THE CHIPS, at their worst: CHIP_MAX slots each of CHIP_BYTES. Deliberately NOT
+    // S(): they take neither the character caps above nor the wide fill, because
+    // host/index.mjs extracts them from ALREADY-TRANSLITERATED text, so they are
+    // ASCII by construction. Modelling them as wide would measure a line the host
+    // cannot produce and would flatter the BEFORE column with bytes the defect this
+    // file exists for never actually had. `chips: false` is what makes the cost of
+    // the field measurable as a difference rather than transcribed.
+    ...(chips ? { chips: Array.from({ length: caps.chipMax }, () => "x".repeat(caps.chipBytes)) } : {}),
     nonce: "x".repeat(32), voice: true,
     // NOT S(): this field does not take the caps above. It is parked by
     // handleVoiceAnswer under a BYTE cap, so the model has to follow the real
@@ -395,11 +428,37 @@ function runBehaviour(hookPath, caps) {
 }
 
 // ---------------------------------------------------------------------------
-async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC, hostPath = HOST_SRC, asciiPath = ASCII_SRC, quiet = false } = {}) {
+async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC, hostPath = HOST_SRC, asciiPath = ASCII_SRC, chipsPath = CHIPS_SRC, fwPath = FW_SRC, quiet = false } = {}) {
+  // COMMENTS STRIPPED BEFORE ANY OF THE STRUCTURE REGEXES BELOW RUN. They are
+  // file-wide matches, so a COMMENTED-OUT COPY of the correct line left standing
+  // above a broken one satisfies every one of them - measured on this very file:
+  // leaving `// const chips = askChips(toAscii(...))` and
+  // `// if (chips.length) item.ask.chips = chips;` as comments above inverted
+  // replacements passed 317/317, silently un-capping CHIP_BYTES (extraction now
+  // running before transliteration) AND dropping ask.chips from the payload,
+  // while the checker reported the ordering and the delivery as both proven.
+  // Plain deletion of the same two lines IS caught, so the hole was purely the
+  // dead-code one - a commented-out call is not a call, which is the trap
+  // panel_shim.cpp's invertColor note records and sessions-geom-check.mjs's own
+  // draw-site block already strips for.
+  //
+  // Line comments only: a `/* ... */` sweep would have to survive "//" and "/*"
+  // inside string and regex literals, which this file's own regexes are full of,
+  // and the failure mode being closed is a line commented out.
+  // Scoped to those regexes alone: hookToAscii() below LOCATES the hook's inline
+  // map by a comment marker, so a globally stripped source would break an
+  // unrelated extraction and report a defect that does not exist.
+  const stripLineComments = (t) => t.replace(/^[ \t]*\/\/.*$/gm, "");
   const hookSrc = fs.readFileSync(hookPath, "utf8");
   const hostSrc = fs.readFileSync(hostPath, "utf8");
-  const fwSrc = fs.readFileSync(FW_SRC, "utf8");
-  const c = readCaps(hookSrc, hostSrc, fwSrc, fs.readFileSync(VOICE_SRC, "utf8"));
+  const hookLive = stripLineComments(hookSrc);
+  const hostLive = stripLineComments(hostSrc);
+  // The firmware and the chip module are read through parameters for the same reason
+  // the hook and the host are: --selftest has to be able to hand this a MUTATED copy.
+  // A source only ever reachable at its repo path is a source no fault can be
+  // injected into, and an assertion no fault can reach is an assertion with no teeth.
+  const fwSrc = fs.readFileSync(fwPath, "utf8");
+  const c = readCaps(hookSrc, hostSrc, fwSrc, fs.readFileSync(VOICE_SRC, "utf8"), fs.readFileSync(chipsPath, "utf8"));
   const bust = `?v=${Date.now()}${Math.random()}`;
   const { toAscii, deviceText } = await import(`${pathToFileURL(modPath).href}${bust}`);
   const { capUtf8 } = await import(`${pathToFileURL(VOICE_SRC).href}${bust}`);
@@ -407,8 +466,8 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
   const { asciiFit, describeOffenders } = await import(`${pathToFileURL(asciiPath).href}${bust}`);
 
   // ---- STRUCTURE: no bypass -----------------------------------------------
-  for (const [name, re] of HOOK_SITES) ok(re.test(hookSrc), `STRUCTURE (hook): ${name}`);
-  for (const [name, re] of HOST_SITES) ok(re.test(hostSrc), `STRUCTURE (host): ${name}`);
+  for (const [name, re] of HOOK_SITES) ok(re.test(hookLive), `STRUCTURE (hook): ${name}`);
+  for (const [name, re] of HOST_SITES) ok(re.test(hostLive), `STRUCTURE (host): ${name}`);
   ok(c.maxSessionsHost === c.maxSessionsFw,
      `STRUCTURE: the host sends ${c.maxSessionsHost} sessions and the device holds ${c.maxSessionsFw} - the budget is meaningless if they disagree`);
 
@@ -521,6 +580,9 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
     wideDesc: B({ fill: "wide", descCap: c.descMaxBytes }),
     wideDescVoice: B({ fill: "wide", descCap: c.descMaxBytes, parkedVoice: true }),
     oneWideAsk: B({ wideSessions: 1 }),
+    // The same saturated line WITHOUT the chips field, so what the field costs is a
+    // measured difference rather than a number transcribed from a task report.
+    asciiNoChips: B({ chips: false }),
   };
 
   // THE RECONCILIATION, which is what the fix actually buys: with every
@@ -560,6 +622,53 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
      `BUDGET: the saturated case WITH optDescs and a parked transcript is expected to remain over the guard ` +
      `(${after.wideDescVoice} vs ${c.lineGuard}) - it is now a pure-ASCII overrun, i.e. a cap question. ` +
      `If it now fits, this tripwire and its reasoning must be re-derived`);
+
+  // ---- CHIPS: the ask line's headroom, MEASURED rather than assumed ---------
+  // The spec required this line's headroom to be measured BEFORE ask.chips was added
+  // to it, with the options on failure being a separate CHIPS line or a smaller cap -
+  // design changes, not implementation details. These assertions are that measurement
+  // made permanent: every term is parsed, and raising either constant far enough
+  // fails the last one BY NAME rather than quietly eating the headroom.
+  //
+  // The device's buffer first. copyField truncates at the destination's size, so a
+  // firmware slot narrower than CHIP_BYTES + NUL cuts a chip mid-token - and half an
+  // absolute path is worse than no chip at all, because it looks tappable.
+  ok(c.chipSlotsFw >= c.chipMax,
+     `CHIPS: SessionInfo.askChips holds ${c.chipSlotsFw} slots against the host's CHIP_MAX ` +
+     `${c.chipMax} - a shorter buffer silently drops chips the extractor already chose`);
+  ok(c.chipSlotBytesFw >= c.chipBytes + 1,
+     `CHIPS: SessionInfo.askChips[][${c.chipSlotBytesFw}] must hold CHIP_BYTES (${c.chipBytes}) plus a NUL ` +
+     `- copyField would otherwise truncate a chip mid-token, and half a path still looks tappable`);
+  // The ordering, from the other side. HOST_SITES above asserts the real composition
+  // askChips(toAscii(...)) is PRESENT, which is what keeps this negative from passing
+  // vacuously over a file that had stopped calling askChips at all.
+  ok(!/toAscii\(\s*askChips\(/.test(hostSrc),
+     "CHIPS: askChips must not be wrapped IN toAscii - that order caps in bytes before the " +
+     "transliteration can change the byte count, and by then the argument is an array");
+  // What the field costs, as a DIFFERENCE between two modelled lines rather than a
+  // literal. `chipsPerSession` is rebuilt from the two parsed constants, so it moves
+  // with them and the equality is a real cross-check of the model against the JSON.
+  const chipsPerSession = Buffer.byteLength(
+    `,"chips":${JSON.stringify(Array.from({ length: c.chipMax }, () => "x".repeat(c.chipBytes)))}`, "utf8");
+  ok(after.asciiNoDesc - after.asciiNoChips === chipsPerSession * c.maxSessionsHost,
+     `CHIPS: ${c.chipMax} chips of ${c.chipBytes} bytes must cost exactly ${chipsPerSession} bytes per ` +
+     `session (${chipsPerSession * c.maxSessionsHost} over ${c.maxSessionsHost}), measured ` +
+     `${after.asciiNoDesc - after.asciiNoChips}`);
+  ok(after.asciiNoDesc <= c.lineGuard,
+     `CHIPS: THE HEADROOM. The saturated ${c.maxSessionsHost}-session line carrying ${c.chipMax} chips ` +
+     `of ${c.chipBytes} bytes on every ask must still fit the ${c.lineGuard}-byte guard: ` +
+     `${after.asciiNoChips} without them, ${after.asciiNoDesc} with, ` +
+     `${c.lineGuard - after.asciiNoDesc} bytes left. This is the gate the field was admitted through`);
+  // WATCHED TO FAIL, and one honest caveat about which assertion reports it. With
+  // CHIP_BYTES temporarily 200 this run reported four failures: the two generic
+  // BUDGET assertions above (they measure the SAME model, so any chip growth trips
+  // them too) and the two CHIPS ones - the buffer at `[][50] must hold 200 plus a
+  // NUL` and this one at `19169 with, -3169 bytes left`. So the detection is shared
+  // with the saturated-line assertion and the generic one, being earlier, is what
+  // --selftest prints; what this assertion adds is naming the FIELD and printing the
+  // two numbers, which is the difference between "the line is too big" and "chips
+  // are what made it too big". If the generic assertion is ever narrowed to a case
+  // without an ask, this becomes the only thing standing here.
 
   // ---- VOICETEXT: the confirm screen, and the order its fix has to be in ---
   // This field BYPASSED the transliteration in the first round, and the budget
@@ -910,6 +1019,7 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
       `${String(a).padStart(6)} ${a > c.lineGuard ? "OVER" : "ok  "}`);
     console.log(`\nsaturated tick line in BYTES (guard ${c.lineGuard}):        BEFORE        AFTER`);
     row(`${c.maxSessionsHost} sessions, ASCII, no optDescs`, before.asciiNoDesc, after.asciiNoDesc);
+    row(`  the same line WITHOUT ask.chips`, before.asciiNoDesc - (after.asciiNoDesc - after.asciiNoChips), after.asciiNoChips);
     row(`${c.maxSessionsHost} sessions, WIDE, no optDescs`, before.wideNoDesc, after.wideNoDesc);
     row(`${c.maxSessionsHost} sessions, WIDE + optDescs`, before.wideDesc, after.wideDesc);
     row(`${c.maxSessionsHost} sessions, WIDE + optDescs + voice`, before.wideDescVoice, after.wideDescVoice);
@@ -935,7 +1045,11 @@ async function selftest() {
   // refusal. A mutation of the MODULE is mirrored into the hook's inline copy, or
   // the drift guard catches the fault for the wrong reason and everything else
   // passes.
-  const SRC = { hook: HOOK_SRC, mod: MOD_SRC, host: HOST_SRC, fit: FIT_SRC, ascii: ASCII_SRC };
+  // `chips` and `fw` are read as TEXT only - nothing imports them - so their copies
+  // land in the box under a .mjs name they are never loaded by. That is deliberately
+  // not tidied: the alternative is a second write path for two sources whose only use
+  // is a regex.
+  const SRC = { hook: HOOK_SRC, mod: MOD_SRC, host: HOST_SRC, fit: FIT_SRC, ascii: ASCII_SRC, chips: CHIPS_SRC, fw: FW_SRC };
   const orig = Object.fromEntries(Object.entries(SRC).map(([k, v]) => [k, fs.readFileSync(v, "utf8")]));
   const faults = [
     ["clean() no longer transliterates (the ask title and option labels go back to characters)",
@@ -1018,6 +1132,30 @@ async function selftest() {
      { host: (s) => s.replace("if (sig !== lastWireAsciiSig) {", "if (true) {") }],
     ["the all-clear line is gone, so a fixed field is never visible as fixed",
      { host: (s) => s.replace("Wire: device-bound text is ASCII again.", "Wire: ok.") }],
+    ["the ask's chips are extracted BEFORE the transliteration, so CHIP_BYTES stops being a byte cap",
+     { host: (s) => s.replace('askChips(toAscii(record.ask.detail ?? ""), record.ask.options ?? [])',
+                              'askChips(record.ask.detail ?? "", record.ask.options ?? [])') }],
+    ["the chips are extracted and then thrown away, so the device never gets them and nothing says so",
+     { host: (s) => s.replace("if (chips.length) item.ask.chips = chips;", "if (false) item.ask.chips = chips;") }],
+    ["CHIP_BYTES raised past what the line guard can hold - the BUDGET half, which no ordering or fidelity assertion can see",
+     { chips: (s) => s.replace("export const CHIP_BYTES = 48;", "export const CHIP_BYTES = 900;") }],
+    ["the device's chip buffer no longer holds CHIP_BYTES plus a NUL, so copyField cuts a path mid-token",
+     { fw: (s) => s.replace("char askChips[4][50];", "char askChips[4][33];") }],
+    ["the device holds fewer chip slots than CHIP_MAX, silently dropping the tail the extractor chose",
+     { fw: (s) => s.replace("char askChips[4][50];", "char askChips[2][50];") }],
+    // THE DEAD-CODE HOLE, which is the reason HOST_SITES now runs over a
+    // comment-stripped copy. Plain DELETION of these two lines was already caught;
+    // leaving the correct lines above the broken ones as COMMENTS passed 317/317,
+    // silently un-capping CHIP_BYTES (extraction running before transliteration,
+    // so a BYTE cap is applied to a string whose byte count then changes under it)
+    // and dropping ask.chips from the payload entirely - while this checker
+    // reported the ordering and the delivery as both proven.
+    ["the chips composition is inverted and the payload assignment dropped, with the CORRECT lines left above as comments",
+     { host: (s) => s
+        .replace(/^([ \t]*)(const chips = askChips\(toAscii\([^\n]*\);)$/m,
+                 '$1// $2\n$1const chips = askChips(record.ask.detail ?? "", record.ask.options ?? []).map(toAscii);')
+        .replace(/^([ \t]*)(if \(chips\.length\) item\.ask\.chips = chips;)$/m,
+                 "$1// $2") }],
   ];
   let caught = 0, injected = 0;
   for (const [name, f] of faults) {
@@ -1050,7 +1188,7 @@ async function selftest() {
     const mark = failures.length;
     pass = 0;
     try {
-      await main({ hookPath: paths.hook, modPath: paths.mod, hostPath: paths.host, fitPath: paths.fit, asciiPath: paths.ascii, quiet: true });
+      await main({ hookPath: paths.hook, modPath: paths.mod, hostPath: paths.host, fitPath: paths.fit, asciiPath: paths.ascii, chipsPath: paths.chips, fwPath: paths.fw, quiet: true });
     } catch { /* a crash is also a catch */ }
     const found = failures.length > mark;
     // Print WHICH assertion caught it. "caught" alone cannot tell the assertion

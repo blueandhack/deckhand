@@ -353,8 +353,88 @@ function sourceSuite(ok, over) {
   }
   ok(`SOURCE: nothing secret-bearing is compared with == or != ${eqHits.length ? "[" + eqHits.join(", ") + "]" : ""}`,
     eqHits.length === 0);
-  ok("SOURCE: the constant-time compare accumulates with OR rather than returning early",
-    /diff\s*\|=/.test(code));
+  // -------------------------------------------------------------------------
+  // pairCtEq's BODY, not its name. Everything above this point binds the
+  // function's SURROUNDINGS - that it exists, that it is called, that no unsafe
+  // compare sits beside it - and a reviewer measured exactly what that leaves
+  // open: replacing the body with `return true;` after the null check, or
+  // narrowing the loop to `i < 1`, satisfies every one of those regexes. The
+  // function is still defined, still called, `diff |=` is still SOMEWHERE in the
+  // file, and pairing.ino's `pairCtEq(got.c_str(), pairProofWant, 32)` still
+  // names the 32 the length faults guard - so 144/144 printed green while any
+  // Mac sending a 32-character PAIROK proof was accepted WITHOUT THE KEY.
+  //
+  // A file-wide /diff\|=/ is the third rule failing by the book: a rule a
+  // neighbouring line can satisfy is not a rule. So the three properties the
+  // comment above pairCtEq claims are each asserted against the body's own
+  // parsed text, each by its own name:
+  //   1. the loop runs to the LENGTH PARAMETER - not a constant, not a prefix;
+  //   2. every byte of BOTH arguments, indexed by the loop variable, is folded
+  //      into the accumulator with |= (not =, which keeps only the last byte);
+  //   3. the loop body is branch-free and the only ways out of the function are
+  //      the null guard's `false` and the accumulator's comparison - so no
+  //      third `return` can short-circuit it and no `if` inside can leak the
+  //      first differing byte through timing.
+  // The parameter, accumulator and loop-variable names are PARSED from the
+  // signature and the declaration rather than transcribed, so renaming `len` or
+  // `diff` cannot silently un-bind this the way a spelled-out `len` would.
+  // -------------------------------------------------------------------------
+  const ctSig = /\bbool\s+pairCtEq\s*\(([^)]*)\)\s*\{/.exec(block);
+  const ctBody = fnBody(block, "pairCtEq");
+  ok("CTEQ: pairCtEq's signature and body are both found (this section is not vacuous)",
+    ctSig != null && ctBody != null && ctBody.length > 20);
+  const ctParams = (ctSig ? ctSig[1] : "").split(",")
+    .map((s) => ((s.trim().match(/([A-Za-z_]\w*)\s*$/) || [])[1] || null));
+  const ctLen = ctParams.length === 3 && ctParams.every(Boolean) ? ctParams[2] : null;
+  ok(`CTEQ: it takes two buffers and an explicit length [${ctParams.join(", ")}]`,
+    ctLen != null);
+  const ctAcc = (/\buint8_t\s+([A-Za-z_]\w*)\s*=\s*0\s*;/.exec(ctBody || "") || [])[1] || null;
+  ok(`CTEQ: it declares a zeroed byte accumulator [${ctAcc || "none"}]`, ctAcc != null);
+
+  // The loop header, matched against the PARSED length parameter. `i < 32`,
+  // `i < 1` and `i < len - 1` all fail here; only the full parameter passes.
+  const ctFor = ctBody && ctLen
+    ? new RegExp("for\\s*\\(\\s*(?:[A-Za-z_][\\w \\t]*\\s)?([A-Za-z_]\\w*)\\s*=\\s*0\\s*;" +
+                 `\\s*\\1\\s*<\\s*${ctLen}\\s*;\\s*(?:\\+\\+\\1|\\1\\s*\\+\\+)\\s*\\)`).exec(ctBody)
+    : null;
+  ok(`CTEQ: the loop runs from 0 to the full length parameter (${ctLen || "?"}), not a constant or a prefix`,
+    ctFor != null);
+  // The loop's own STATEMENT, brace-matched when it has braces and taken to the
+  // first `;` when it does not - so assertions 2 and 3 read the loop body and
+  // nothing else in the function.
+  let ctLoop = "";
+  if (ctFor) {
+    const rest = ctBody.slice(ctFor.index + ctFor[0].length);
+    const t = rest.replace(/^\s*/, "");
+    if (t.startsWith("{")) {
+      let d = 0;
+      for (let j = 0; j < t.length; j++) {
+        if (t[j] === "{") d++;
+        else if (t[j] === "}" && --d === 0) { ctLoop = t.slice(0, j + 1); break; }
+      }
+    } else ctLoop = t.slice(0, t.indexOf(";") + 1);
+  }
+  ok("CTEQ: the loop's own statement is delimited", ctLoop.length > 10);
+  const idx = (buf) => new RegExp(`\\b${buf}\\s*\\[\\s*${ctFor ? ctFor[1] : "\\u0000"}\\s*\\]`);
+  ok(`CTEQ: the loop folds BOTH buffers, indexed by ${ctFor ? ctFor[1] : "?"}, into ${ctAcc || "?"} with |=`,
+    ctFor != null && ctAcc != null && ctParams[0] != null && ctParams[1] != null &&
+    new RegExp(`\\b${ctAcc}\\s*\\|=`).test(ctLoop) &&
+    idx(ctParams[0]).test(ctLoop) && idx(ctParams[1]).test(ctLoop));
+  // `diff = a[i] ^ b[i]` keeps only the LAST byte's difference and is otherwise
+  // indistinguishable from the correct line, so the assignment operator is
+  // asserted rather than assumed: no bare `=` to the accumulator anywhere.
+  ok(`CTEQ: ${ctAcc || "the accumulator"} is never plainly assigned inside the loop (|= only)`,
+    ctAcc != null && !new RegExp(`\\b${ctAcc}\\s*=[^=]`).test(ctLoop));
+  ok("CTEQ: the loop body is branch-free - no return, break, if, ?: or short-circuit",
+    ctLoop.length > 10 && !/\b(return|break|continue|goto|if|while|for)\b/.test(ctLoop) &&
+    !/&&|\|\||\?/.test(ctLoop));
+  // EVERY exit, enumerated. The C1 mutation adds a third one; the strcmp shape
+  // replaces the second. Both change this list, so both fail here by name.
+  const ctReturns = [...(ctBody || "").matchAll(/\breturn\b([^;]*);/g)]
+    .map((m) => m[1].replace(/\s+/g, " ").trim());
+  ok(`CTEQ: its only exits are the null guard's false and ${ctAcc || "the accumulator"} == 0 [${ctReturns.join(" | ")}]`,
+    ctAcc != null && ctReturns.length === 2 && ctReturns[0] === "false" &&
+    new RegExp(`^${ctAcc} == 0$`).test(ctReturns[1]));
 
   // -------------------------------------------------------------------------
   // ZEROIZATION. pairDeriveAll is the function the real 128-bit pairing secret
@@ -873,7 +953,71 @@ function selftest() {
   const realSessions = fs.readFileSync(SESSIONS_INO, "utf8");
   const inject = (fn) => ({ pairing: realSrc.replace(CT_ANCHOR, `${fn}\n${CT_ANCHOR}`) });
   const P = (from, to) => ({ pairing: realSrc.replace(from, to) });
+// THE GUARD, LOCATED RATHER THAN QUOTED. Returns `src` with one command branch's
+// `if (pairPanelActive) { ... }` block removed, or `src` UNCHANGED if it cannot
+// find it - which the caller reports as "the injection did not apply (anchor
+// moved)" rather than crediting the fault to whatever else happens to fail.
+//
+// SCOPED TO THE COMMAND'S OWN BRANCH, bounded by the next `} else if (buf` at the
+// same level, for the reason the assertion it feeds already records: with an
+// unbounded search READTEST's guard sits inside the window a search from
+// EMOJITEST's anchor would scan, and a fault that deletes the neighbour's guard
+// proves nothing about this one.
+function dropPairPanelGuard(src, cmd) {
+  const from = src.indexOf(`buf.startsWith("${cmd}")`);
+  if (from < 0) return src;
+  const branchEnd = src.indexOf("} else if (buf", from + 1);
+  const g = src.indexOf("if (pairPanelActive) {", from);
+  if (g < 0 || (branchEnd > 0 && g > branchEnd)) return src;
+  let i = src.indexOf("{", g), d = 0;
+  for (; i < src.length; i++) {
+    if (src[i] === "{") d++;
+    else if (src[i] === "}") { d--; if (d === 0) { i++; break; } }
+  }
+  if (d !== 0) return src;
+  return src.slice(0, g) + src.slice(i);
+}
+
+// pairCtEq's body, LOCATED and rewritten - never transcribed. `fn` is handed the
+// body's interior (between the outermost braces) and returns the replacement, so
+// a fault survives any edit to the lines it replaces. Returns `src` UNCHANGED if
+// the function cannot be found, which the caller reports as "anchor moved"
+// rather than crediting the fault to whatever else happens to fail.
+function patchCtEq(src, fn) {
+  const m = /\bbool\s+pairCtEq\s*\([^;{]*\)\s*\{/.exec(src);
+  if (!m) return src;
+  const open = m.index + m[0].length - 1;
+  let d = 0;
+  for (let j = open; j < src.length; j++) {
+    if (src[j] === "{") d++;
+    else if (src[j] === "}" && --d === 0)
+      return src.slice(0, open + 1) + fn(src.slice(open + 1, j)) + src.slice(j);
+  }
+  return src;
+}
+
   const sourceFaults = [
+    // ---- C1: pairCtEq's BODY. Every one of these left 144/144 green before the
+    // CTEQ block existed, and the first is the one that accepts any 32-character
+    // proof without the key.
+    // The INSIDIOUS shape first: everything correct is left standing and one
+    // `return true;` is slipped in behind the null guard, so the accumulator,
+    // the |=, the full-length loop and the final comparison all still read
+    // right. Only the enumeration of exits can see it.
+    ["pairCtEq gains an early `return true;` behind the null check (the C1 hole)",
+      { pairing: patchCtEq(realSrc, (b) =>
+          b.replace(/(return false;)/, "$1\n  return true;")) }],
+    ["pairCtEq's whole body becomes `return true;`",
+      { pairing: patchCtEq(realSrc, () => "\n  if (!a || !b) return false;\n  return true;\n") }],
+    ["pairCtEq's loop is narrowed to the first byte only",
+      { pairing: patchCtEq(realSrc, (b) => b.replace(/(<\s*)([A-Za-z_]\w*)(\s*;)/, "$1" + "1" + "$3")) }],
+    ["the accumulator is plainly assigned, so only the LAST byte's difference counts",
+      { pairing: patchCtEq(realSrc, (b) => b.replace(/\|=/, "=")) }],
+    ["the compare returns on the first differing byte (the timing leak it exists to remove)",
+      { pairing: patchCtEq(realSrc, (b) =>
+          b.replace(/(for\s*\([^)]*\)\s*)[^;]*;/, "$1{ if (a[i] != b[i]) return false; }")) }],
+    ["the compare stops indexing the second buffer, so it compares a against itself",
+      { pairing: patchCtEq(realSrc, (b) => b.replace(/\bb\s*\[\s*i\s*\]/, "a[i]")) }],
     ["a proof compare using strcmp is added beside pairCtEq (reviewer's injection 1)",
       inject("bool pairVerifyProof(const char* got, const char* want) { return strcmp(got, want) == 0; }")],
     ["a proof compare using memcmp is added beside pairCtEq (reviewer's injection 2)",
@@ -975,12 +1119,30 @@ function selftest() {
         .pairing.replace("  sendLineToHost(line);",
                          "  sendLineToHost(line);\n  renderPairPanel();")],
     // ---- and the panel as a full-screen surface ----
+    // PARSED, NOT TRANSCRIBED - and this pair is why the rule exists. Both faults
+    // used to spell the whole guard out character for character, including a
+    // `return;` that had no `buf = "";` in front of it. Commit 924cecc added that
+    // line (a refusal returning without clearing processCompletedLine's own
+    // accumulator re-parses the stale text against every later line - one DETAIL 9
+    // produced 63 refusal lines), the two transcriptions stopped matching, and both
+    // injections silently applied NOTHING. The assertions still passed, which is
+    // worse than a failure: a fault that cannot inject leaves the property it was
+    // proving unproven, and nothing says so except the selftest's own
+    // "anchor moved" line. Re-transcribing the new text would only move the next
+    // breakage, so the guard is LOCATED instead: the command's own branch, then the
+    // first `if (pairPanelActive) {` inside it, brace-matched to its close. That
+    // survives any edit to the body it deletes.
+    //
+    // WHAT EACH ONE NOW INJECTS: the whole `if (pairPanelActive) { ... }` block is
+    // removed from that command's branch and nothing else is touched - so the
+    // command can once again paint its full-screen surface over the pairing panel
+    // while pairPanelActive stays true and CONFIRM stays tappable underneath a
+    // screen showing neither. The assertion that must notice is the one that reads
+    // the slice from the command's own anchor to the refusal it prints.
     ["EMOJITEST paints over the pairing panel and leaves CONFIRM live underneath",
-      { main: realMain.replace(
-          "    if (pairPanelActive) {\n      Serial.println(\"EMOJITEST refused: another full-screen surface is up\");\n      return;\n    }\n#endif\n", "") }],
+      { main: dropPairPanelGuard(realMain, "EMOJITEST") }],
     ["READTEST does the same",
-      { main: realMain.replace(
-          "    if (pairPanelActive) {\n      Serial.println(\"READTEST refused: another full-screen surface is up\");\n      return;\n    }\n#endif\n", "") }],
+      { main: dropPairPanelGuard(realMain, "READTEST") }],
     ["a tab switch shuts the window but leaves the panel up, so taps still reach CONFIRM",
       { main: realMain.replace("  pairPanelActive = false;\n#endif\n#if !BOARD_USES_TFT_ESPI", "#endif\n#if !BOARD_USES_TFT_ESPI") }],
     ["the session shimmer runs down the rows underneath the pairing panel",

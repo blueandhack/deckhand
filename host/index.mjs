@@ -27,9 +27,11 @@ import {
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
 } from "./voice-answer.mjs";
 import { resolveSessionId } from "./session-lookup.mjs";
+import { postToSessionInbox } from "./session-inbox.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
 import { toAscii, deviceText } from "./to-ascii.mjs";
+import { askChips } from "./ask-chips.mjs";
 import { fitPayload } from "./wire-fit.mjs";
 import { asciiFit, describeOffenders } from "./wire-ascii.mjs";
 import { resolveMacEmoji } from "./mac-emoji.mjs";
@@ -352,7 +354,98 @@ const HOST_ALIVE = path.join(RUNTIME_DIR, "host-alive");
 // the time it arrived, because that line stops the instant the link drops and a
 // reading from an hour ago is not a battery level - the same reason quotaAgeSec
 // exists for the OAuth cache.
-let lastBatt = null;
+// ONE READING PER DEVICE, keyed by senderKey() - see the BATT handler for why a
+// single global conflated two boards. The heartbeat still publishes ONE `batt`,
+// because that is what the menu bar draws; batteryForHeartbeat() says which one
+// and labels it.
+const battByDevice = new Map(); // senderKey -> { device, mv, pct, state, leftMin, at }
+// A CEILING, because the keys are not stable. An UNNAMED link keys on its port
+// path and CLAUDE.md's own note is that ports renumber, so every path a board has
+// ever enumerated under used to leave a permanent entry that nothing deleted - and
+// the heartbeat's `batts` array republished every dead one of them every 5 seconds,
+// so the menu bar's list could only grow and would list phantom boards.
+const MAX_BATT_DEVICES = 8; // the same ceiling as MAX_PAIRED_DEVICES: this Mac's boards, not a history
+
+// Dropped when the link that fed it closes - UNLESS the same device is still
+// reachable on another link, which is the ordinary cabled-and-BLE case and where
+// deleting would blank a battery that is still being reported.
+function forgetBatteryFor(key) {
+  if (!key || !battByDevice.has(key)) return;
+  for (const l of liveLinks()) if (senderKey(l.id) === key) return;
+  battByDevice.delete(key);
+  console.log(
+    `Battery: dropped the reading filed under ${key} - its last link closed, so nothing behind it can refresh it.`
+  );
+}
+// The prune above needs a close handler to name the key. A board that RENUMBERS
+// while the host runs leaves a key no close handler will ever name again, so the
+// store is bounded as well as pruned. Oldest reading goes first.
+function boundBatteryStore() {
+  while (battByDevice.size > MAX_BATT_DEVICES) {
+    let oldestKey = null;
+    let oldestAt = Infinity;
+    for (const [k, b] of battByDevice) if (b.at < oldestAt) [oldestAt, oldestKey] = [b.at, k];
+    if (oldestKey === null) return;
+    battByDevice.delete(oldestKey);
+    console.log(
+      `Battery: evicted the oldest reading (${oldestKey}) - more than ${MAX_BATT_DEVICES} devices have reported, ` +
+        `and ports renumber, so this store is bounded rather than a history.`
+    );
+  }
+}
+
+// THE DEVICE'S OWN "how should my messages land" CHOICE, keyed and pruned
+// EXACTLY like battByDevice above, and for the same reason: two boards can
+// disagree, and the priority applies to messages from THAT board. A single
+// global would mean whichever board spoke last decided for both - the same
+// defect a single `lastBatt` had, arrived at from the other end.
+//
+// This is the first device SETTING the host stores at all. Theme, brightness and
+// sound never leave the panel; MSGPRI does, so there is now a second thing in the
+// per-device family and it follows the first's shape rather than inventing one.
+const msgPriByDevice = new Map(); // senderKey -> { device, priority, at }
+
+// Dropped when the link that fed it closes - UNLESS the same device is still
+// reachable on another link (the ordinary cabled-and-BLE case). A COPY of
+// forgetBatteryFor's rule rather than a call into it, because the two stores hold
+// different things and folding them into one function would mean a future third
+// store either joins a growing switch or quietly does not get pruned at all.
+function forgetMsgPriorityFor(key) {
+  if (!key || !msgPriByDevice.has(key)) return;
+  for (const l of liveLinks()) if (senderKey(l.id) === key) return;
+  msgPriByDevice.delete(key);
+  console.log(
+    `Inbox: dropped the send priority filed under ${key} - its last link closed, ` +
+      `so messages attributed to it fall back to the default until it says MSGPRI again.`
+  );
+}
+// The same ceiling and the same reason: an UNNAMED link keys on its port path,
+// ports renumber, and a key no close handler will ever name again would otherwise
+// live forever.
+function boundMsgPriorityStore() {
+  while (msgPriByDevice.size > MAX_BATT_DEVICES) {
+    let oldestKey = null;
+    let oldestAt = Infinity;
+    for (const [k, v] of msgPriByDevice) if (v.at < oldestAt) [oldestAt, oldestKey] = [v.at, k];
+    if (oldestKey === null) return;
+    msgPriByDevice.delete(oldestKey);
+    console.log(`Inbox: evicted the oldest send priority (${oldestKey}) - this store is bounded, not a history.`);
+  }
+}
+
+// The device the Mac's surfaces mean: the selection when it is actually
+// reporting, else the freshest reading there is. Falling back to the freshest is
+// what keeps a single unnamed board (a host that attached mid-run and never saw
+// a HELLO) showing a battery at all, which is how this behaved before.
+function batteryForHeartbeat() {
+  const want = selectedDevice || bleDeviceName || primaryUsbName();
+  let best = null;
+  for (const b of battByDevice.values()) {
+    if (want && b.device === want) return b;
+    if (!best || b.at > best.at) best = b;
+  }
+  return best;
+}
 // STARTS at 20 - the pre-negotiation ATT payload, which works in the worst case -
 // and is RAISED when the device reports the MTU it actually negotiated. The host
 // cannot learn this itself: noble reports no MTU on macOS, re-measured today
@@ -367,6 +460,13 @@ let lastBatt = null;
 const BLE_CHUNK_MIN = 20;
 const BLE_CHUNK_MAX = 180;    // the largest value measured working here
 let bleChunkSize = BLE_CHUNK_MIN;
+// The per-link reports behind that one number. The firmware reports each BLE
+// link's negotiated MTU separately and broadcasts every one of them, so with two
+// Macs on one board this Mac sees the other's too; nothing on the wire says which
+// index is ours, so the SMALLEST of them is what bleChunkSize follows. Cleared on
+// disconnect: link indices are reused, and a stale 23 from a link that is gone
+// would hold every later connection at the 20-byte floor for ever.
+const bleMtuByLink = new Map();  // "link=<i>" -> negotiated ATT MTU
 
 // ---------- Remote-answer authentication (A + B), MULTI-PAIRING ----------
 // This Mac remembers MANY devices, each with its OWN secret, so a pairing is the
@@ -400,7 +500,15 @@ function currentMacEmoji() {
 }
 let pairedDevices = [];          // [{ name, secret, label, lastSeen }]
 let selectedDevice = "";         // "" = auto (talk to any remembered device)
-let usbDeviceName = "";          // device currently on USB (learned from HELLO)
+// There is no single "the device on USB" any more - see the USB transport
+// section. Each link carries its own `name`, and this is the one the Mac's own
+// surfaces (the heartbeat's `device`, a bare FORGET) mean by "the USB device":
+// the selection if it is actually plugged in, else the first named link. It is
+// deliberately NOT used to authenticate anything - deviceNameFor() is.
+function primaryUsbName() {
+  if (selectedDevice && usbLinks.some((l) => l.name === selectedDevice)) return selectedDevice;
+  return usbLinks.find((l) => l.name)?.name ?? "";
+}
 let bleDeviceName = "";          // device currently on BLE
 // May the device DECIDE prompts, not just display them? On by default, because
 // it costs the Mac nothing: the hook only ever waits on a PermissionRequest, and
@@ -436,8 +544,29 @@ function deviceNameFor(via) {
   // for. "" means "no paired device", which is exactly true here.
   if (via === "pair") return "";
   if (via === "ble") return bleDeviceName;
-  return usbDeviceName || selectedDevice;
+  const link = usbLinkFor(via);
+  if (link?.name) return link.name;
+  // THE FALLBACK IS ONLY SAFE WHILE THERE IS ONE USB LINK. With two boards
+  // cabled, guessing "it must be the selected device" would attribute one
+  // board's ANSWER to the other - and since the HMAC is then checked against
+  // that other board's key it fails closed, but under a log line naming the
+  // wrong device, which is the class of defect this repo keeps paying for. With
+  // several links an unnamed one is honestly unknown: "" makes the answer
+  // unverifiable and the refusal names the LINK it came in on.
+  if (usbLinks.length <= 1) return selectedDevice;
+  return "";
 }
+
+// The identity a duplicate is judged against. THE DEVICE NAME WHEN WE HAVE IT,
+// the link id when we do not - never the line alone. The device transmits every
+// answer on both of its transports, so one device's two copies must collapse;
+// two DIFFERENT devices sending the same line (the same option index on the same
+// prompt, which is entirely ordinary) must not. Keying on the line alone did the
+// first and, with two boards, would silently do the second - dropping a real
+// answer, or worse, letting the surviving one be attributed to whichever device
+// happened to speak first. An unnamed link falls back to its own id rather than
+// to a shared bucket, so two unknown devices are still two senders.
+const senderKey = (via) => deviceNameFor(via) || via;
 
 // How a refusal names where the line came from. The pairing link is named as
 // such rather than left to read as an unknown ble/usb device, because those are
@@ -446,7 +575,7 @@ function deviceNameFor(via) {
 function senderDescription(via, from) {
   if (via === "pair")
     return "over the PAIRING link, which is unauthenticated by construction (no key exists until PAIRDONE)";
-  return `via ${via}${from ? ` from ${from}` : " (unknown device)"}`;
+  return `via ${linkLabel(via)}${from ? ` from ${from}` : " (unknown device)"}`;
 }
 
 async function loadPairing() {
@@ -1566,21 +1695,20 @@ function histPaginate(items, budget = { cols: HIST_LINE_CHARS, lines: HIST_PAGE_
 // `HISTORY <id> <chat|all> item:<n>` - one entry, WHOLE. This is the second level of the
 // reader: the list shows previews, and opening a row fetches all of it. Without this a
 // message longer than the screen was simply unreachable.
-async function sendHistoryItem(id, filter, index) {
+async function sendHistoryItem(id, filter, index, link) {
   const all = await histItems(id);
   const chatOnly = filter !== "all";
   const items = chatOnly ? all.filter((x) => x.r === "you" || x.r === "claude") : all;
   const it = items[index];
   const line =
     JSON.stringify({ hist: { id, full: { i: index, r: it ? it.r : "out", t: it ? it.full : "" } } }) + "\n";
-  if (usbPort) usbPort.write(line);
-  else if (bleCharacteristic) await sendOverBle(line);
-  console.log(`History: ${id} entry ${index} in full (${line.length} bytes)`);
+  await sendToLink(link, line);
+  console.log(`History: ${id} entry ${index} in full (${line.length} bytes) to ${linkLabel(link?.id ?? "none")}`);
 }
 
 // `HISTORY <id> <chat|all> <page|last>`. Replies with just that page plus the page count,
 // so the device can show "12/340" and scrub without ever holding the whole thing.
-async function sendHistory(id, filter, want, budget) {
+async function sendHistory(id, filter, want, budget, link) {
   const all = await histItems(id);
   const chatOnly = filter !== "all";
   const items = chatOnly ? all.filter((x) => x.r === "you" || x.r === "claude") : all;
@@ -1603,15 +1731,18 @@ async function sendHistory(id, filter, want, budget) {
         items: items.slice(from, to).map((x) => ({ r: x.r, t: x.t })),   // previews only
       },
     }) + "\n";
-  // USB when USB is up, BLE only as a fallback - never both. BLE writes go out in 20-byte
-  // chunks with a response awaited on each, so at the 30ms connection interval macOS
-  // negotiates even a few KB is seconds, with the tick loop blocked behind it. Both
-  // transports reach the same device, so USB simply wins.
-  if (usbPort) usbPort.write(line);
-  else if (bleCharacteristic) await sendOverBle(line);
+  // ONE LINK, never both, and it is the link the request came in on - see
+  // replyLinkFor(), which still prefers a device's own USB cable over its BLE
+  // link for the reason this comment always gave: BLE writes go out in 20-byte
+  // chunks with a response awaited on each, so at the 30ms connection interval
+  // macOS negotiates even a few KB is seconds, with the tick loop blocked behind
+  // it. What changed is that "USB" is no longer a single global port, so "USB
+  // simply wins" had to become "THIS DEVICE'S USB wins" - the old spelling
+  // answered board 1's request down board 2's cable.
+  await sendToLink(link, line);
   console.log(
     `History: ${id} ${chatOnly ? "chat" : "all"} page ${page + 1}/${pages} ` +
-      `(${to - from} of ${items.length} entries, ${line.length} bytes) via ${usbPort ? "usb" : "ble"}`
+      `(${to - from} of ${items.length} entries, ${line.length} bytes) via ${linkLabel(link?.id ?? "none")}`
   );
 }
 
@@ -1623,16 +1754,20 @@ async function sendHistory(id, filter, want, budget) {
 // waiting than fits one reply, what fits goes now and the device's next poll
 // collects the rest - self-correcting, and it keeps a burst of activity from
 // turning into a multi-chunk handshake on a 5-second cadence.
-async function sendScrollbackSince(id, filter, since) {
+async function sendScrollbackSince(id, filter, since, link) {
   const all = await histItems(id);
   const chatOnly = filter !== "all";
   const items = chatOnly ? all.filter((x) => x.r === "you" || x.r === "claude") : all;
   if (since >= items.length) return;                 // nothing new: say nothing
-  const perEntryCap = usbPort ? HIST_FULL_CAP : 1200;
+  // The budget is THIS LINK'S transport, not "is any USB port open anywhere":
+  // with a second board cabled, `usbPort` was true whenever board 2 was plugged
+  // in, so a BLE-only device would have been sent USB-sized chunks.
+  const onUsb = link?.kind === "usb";
+  const perEntryCap = onUsb ? HIST_FULL_CAP : 1200;
   const src = (x) => x.block || x.full;
   const textOf = (x) =>
     src(x).length > perEntryCap ? src(x).slice(0, perEntryCap - 3) + "..." : src(x);
-  const cap = usbPort ? SCROLL_WIRE_CHUNK_BYTES : SCROLL_WIRE_CHUNK_BLE_BYTES;
+  const cap = onUsb ? SCROLL_WIRE_CHUNK_BYTES : SCROLL_WIRE_CHUNK_BLE_BYTES;
   const out = [];
   for (const it of items.slice(since)) {
     const next = out.concat([{ r: it.r, t: textOf(it) }]);
@@ -1641,9 +1776,10 @@ async function sendScrollbackSince(id, filter, since) {
     out.push({ r: it.r, t: textOf(it) });
   }
   const line = JSON.stringify({ hist: { id, app: 1, total: items.length, items: out } }) + "\n";
-  if (usbPort) usbPort.write(line);
-  else if (bleCharacteristic) await sendOverBle(line, BLE_SCROLL_PACE_MS);
-  console.log(`Scrollback: tail +${out.length} of ${items.length - since} new for ${id} via ${usbPort ? "usb" : "ble"}`);
+  await sendToLink(link, line, onUsb ? 0 : BLE_SCROLL_PACE_MS);
+  console.log(
+    `Scrollback: tail +${out.length} of ${items.length - since} new for ${id} via ${linkLabel(link?.id ?? "none")}`
+  );
 }
 
 // `HISTORY <id> <chat|all> tail:<maxBytes>` - the WHOLE filtered history, in a run of
@@ -1714,7 +1850,14 @@ const SCROLL_ACK_TIMEOUT_BLE_MS = 30000;
 // immediately followed by "ACK 0 (waiter MISSING)". The device-side dedup above
 // should stop a second fetch ever starting; this is the belt to that braces,
 // because a superseded fetch must LOSE rather than corrupt the winner.
-let scrollFetchGen = 0;
+// PER LINK, not per host. A global generation counter meant board 1 starting any
+// fetch superseded board 2's mid-flight one ("superseded at chunk N - abandoning")
+// even though the two have nothing to do with each other; the ack key carries the
+// link id for the same reason, so two boards' chunk 0 acks cannot resolve each
+// other's waiter. The rule the comment above states - a superseded fetch must
+// LOSE rather than corrupt the winner - is unchanged, it is just scoped to the
+// device the fetch belongs to.
+const nextScrollGen = (link) => (link ? ++link.scrollGen : 0);
 // A duplicate request arrives on every send, because the device transmits on USB
 // and BLE at once. 1500ms comfortably covers the gap between the two copies
 // (measured in the same millisecond) without swallowing a real re-request: a
@@ -1722,18 +1865,56 @@ let scrollFetchGen = 0;
 // device's own in-flight dedup already refuses.
 const SCROLL_REQ_DEDUP_MS = 1500;
 const scrollReqSeen = new Map();
+// THE SENDER, BUT ONLY WHILE EVERY SENDER IS ACTUALLY IDENTIFIABLE - which is NOT
+// senderKey(). senderKey() falls back to the LINK ID for an unnamed link, and that
+// is right where it is used: an ANSWER from an unknown board must not collapse into
+// another unknown board's slot. Here the same fallback is wrong in the opposite
+// direction. deviceNameFor() deliberately returns "" for an unnamed USB link
+// whenever a second USB link exists, so ONE device that is cabled and on BLE
+// presents as TWO senders - its USB copy keyed on the port path, its BLE copy on the
+// device name. The dedupe then does not fire, the request is served twice, and the
+// `since:` arm's own comment says what that costs: every new message in the reader
+// appears doubled. Reachable with both boards cabled, board 2 also on BLE and its
+// USB link unnamed (a host that attached mid-run), and FULLY exposed under
+// DECKHAND_NO_USB_RESET=1 - and now also on board 2 generally, since the HELLO pulse
+// no longer papers over it there.
+//
+// So: while ANY usb link is anonymous, this host cannot attribute a history request
+// to a device at all, and says so by collapsing every sender into one bucket - which
+// is exactly the pre-change behaviour, for exactly the window in which the pre-change
+// behaviour was the correct one. Once every link has a name (the ordinary case, and
+// what HELLO produces) per-sender keying returns and two boards are each served.
+// The cost is the mirror image and deliberately the cheaper one: two boards asking
+// for the same session, filter and range inside 1500ms while one of them is
+// anonymous, and the second is answered with silence for that request rather than
+// with a corrupted transcript. Silence is the failure this repo refuses to leave
+// unexplained, so the drop is LOGGED with its cause and its key.
+const scrollSenderKey = (via) =>
+  usbLinks.some((l) => !l.name) ? "(unattributable)" : senderKey(via);
+function scrollReqDropped(via, reqKey) {
+  console.log(
+    `[device/${linkLabel(via)}] duplicate history request within ${SCROLL_REQ_DEDUP_MS}ms (${reqKey}) - ` +
+      `dropped, the first copy is being served. A device transmits on every live transport at once. ` +
+      `An "(unattributable)" key means some usb link has no name yet, so requests cannot be told apart ` +
+      `by sender and are collapsed rather than served twice into one reader.`
+  );
+}
 const scrollAckWaiters = new Map();
-const ackKey = (gen, seq) => `${gen}:${seq}`;
-function waitForScrollAck(gen, seq) {
-  const k = ackKey(gen, seq);
+const ackKey = (linkId, gen, seq) => `${linkId}:${gen}:${seq}`;
+function waitForScrollAck(link, gen, seq) {
+  const k = ackKey(link?.id ?? "none", gen, seq);
   return new Promise((resolve) => {
-    const t = setTimeout(() => { scrollAckWaiters.delete(k); resolve(false); }, usbPort ? SCROLL_ACK_TIMEOUT_USB_MS : SCROLL_ACK_TIMEOUT_BLE_MS);
+    const t = setTimeout(
+      () => { scrollAckWaiters.delete(k); resolve(false); },
+      link?.kind === "usb" ? SCROLL_ACK_TIMEOUT_USB_MS : SCROLL_ACK_TIMEOUT_BLE_MS
+    );
     scrollAckWaiters.set(k, () => { clearTimeout(t); scrollAckWaiters.delete(k); resolve(true); });
   });
 }
 
-async function sendScrollback(id, filter, maxBytes) {
-  const gen = ++scrollFetchGen;      // a later fetch supersedes this one
+async function sendScrollback(id, filter, maxBytes, link) {
+  const onUsb = link?.kind === "usb";
+  const gen = nextScrollGen(link);   // a later fetch TO THE SAME DEVICE supersedes this one
   const t0 = Date.now();
   const all = await histItems(id);
   const chatOnly = filter !== "all";
@@ -1742,7 +1923,7 @@ async function sendScrollback(id, filter, maxBytes) {
   // Keep the NEWEST tail that fits. Walk backwards, because the entries a person is
   // most likely to want are the recent ones; `dropped` says how many did not make it,
   // and the device states that on the glass rather than letting the scroll end quietly.
-  if (!usbPort && maxBytes > SCROLL_TAIL_BLE_SERVED) {
+  if (!onUsb && maxBytes > SCROLL_TAIL_BLE_SERVED) {
     console.log(`Scrollback: BLE - serving ${SCROLL_TAIL_BLE_SERVED} of the ${maxBytes} asked for`);
     maxBytes = SCROLL_TAIL_BLE_SERVED;
   }
@@ -1755,7 +1936,7 @@ async function sendScrollback(id, filter, maxBytes) {
   // that spends its whole budget on one of them.
   // 1200 must stay UNDER the BLE chunk budget less the envelope, or a single
   // entry forms a chunk too big to be absorbed - which is the failure above.
-  const perEntryCap = usbPort ? HIST_FULL_CAP : 1200;
+  const perEntryCap = onUsb ? HIST_FULL_CAP : 1200;
   // `block` for conversation, which is where structure lives. Tool calls and
   // results are already one-liners by construction (histToolSummary flattens
   // them), so they have no `block` and fall back.
@@ -1780,7 +1961,7 @@ async function sendScrollback(id, filter, maxBytes) {
 
   // The chunk budget is the TRANSPORT's, not one number: see the header's note on
   // why BLE needs ~800 rather than 12000, and it is not about buffer sizes.
-  const chunkCap = usbPort ? SCROLL_WIRE_CHUNK_BYTES : SCROLL_WIRE_CHUNK_BLE_BYTES;
+  const chunkCap = onUsb ? SCROLL_WIRE_CHUNK_BYTES : SCROLL_WIRE_CHUNK_BLE_BYTES;
   const envelope = (arr, seq, of) =>
     JSON.stringify({
       hist: { id, f: chatOnly ? "chat" : "all", seq, of,
@@ -1811,28 +1992,27 @@ async function sendScrollback(id, filter, maxBytes) {
     // the budget, so the built line is checked rather than assumed.
     if (Buffer.byteLength(line, "utf8") > chunkCap + 200)
       console.log(`Scrollback: WARNING chunk ${i} is ${Buffer.byteLength(line, "utf8")} bytes`);
-    if (!usbPort) console.log(`Scrollback: chunk ${i}/${groups.length} is ${Buffer.byteLength(line, "utf8")} bytes (${groups[i].length} entries)`);
-    if (usbPort) usbPort.write(line);
-    else if (bleCharacteristic) await sendOverBle(line, BLE_SCROLL_PACE_MS);
+    if (!onUsb) console.log(`Scrollback: chunk ${i}/${groups.length} is ${Buffer.byteLength(line, "utf8")} bytes (${groups[i].length} entries)`);
+    await sendToLink(link, line, onUsb ? 0 : BLE_SCROLL_PACE_MS);
     // Wait for this chunk to be drained before sending the next. A timeout
     // ABANDONS the fetch rather than pressing on into a ring we know is full -
     // the device's own SCROLL_FETCH_TIMEOUT then reports it on the glass, so the
     // failure is named at both ends instead of arriving as a silent short read.
-    if (gen !== scrollFetchGen) {
+    if (!link || gen !== link.scrollGen) {
       console.log(`Scrollback: superseded at chunk ${i} - abandoning this fetch`);
       return;
     }
     if (i + 1 < groups.length) {
-      const ok = await waitForScrollAck(gen, i);
+      const ok = await waitForScrollAck(link, gen, i);
       if (!ok) {
-        console.log(`Scrollback: no ACK for chunk ${i} - abandoning (via ${usbPort ? "usb" : "ble"})`);
+        console.log(`Scrollback: no ACK for chunk ${i} - abandoning (via ${linkLabel(link.id)})`);
         return;
       }
     }
   }
   console.log(
     `Scrollback: ${id} ${chatOnly ? "chat" : "all"} ${kept.length} of ${items.length} entries ` +
-      `(${dropped} dropped, ${groups.length} chunks, ${used} bytes, ${Date.now() - t0}ms) via ${usbPort ? "usb" : "ble"}`
+      `(${dropped} dropped, ${groups.length} chunks, ${used} bytes, ${Date.now() - t0}ms) via ${linkLabel(link?.id ?? "none")}`
   );
 }
 
@@ -1954,6 +2134,33 @@ async function readSessions() {
         // text for a question and discards it for a plan, and a spoken answer to
         // a permission prompt could only ever be a DENY.
         item.ask.voice = record.ask.kind === "question";
+        // THE TAPPABLE TOKENS. Extracted HERE and not on the device, because the
+        // ESP32 only ever draws buttons and never re-derives what they say - the
+        // hardest thing to type there is exactly the token the question already
+        // printed, and this process has already parsed the ask.
+        //
+        // toAscii FIRST, askChips SECOND, and that order is load-bearing: CHIP_BYTES
+        // is a BYTE cap, so capping before the transliteration would cap a string
+        // whose byte count then changes under the cap (a multi-byte character
+        // transliterating to a shorter or longer ASCII run), and the cap would not be
+        // a byte cap at all. Same reasoning, same shape, as session.path's
+        // truncatePath(toAscii(...)) above. `options` rides along so a chip that
+        // merely restates a button already on the screen does not spend one of four
+        // scarce slots on a duplicate.
+        //
+        // ONLY-WHEN-PRESENT, for the same reason `title` and `prompt` are: this rides
+        // in EVERY tick, and a prompt with no tappable token in it must cost no
+        // payload bytes at all.
+        //
+        // THE LINE'S HEADROOM WAS MEASURED BEFORE THIS FIELD WAS ADDED, not assumed
+        // (task 9's report has the numbers): 214 bytes is the most one session's
+        // chips can be, 1,284 for all six, against the 1,763 bytes the saturated
+        // 6-session line leaves under feedChar's 16,000-byte guard - and the worst
+        // real cost over the 133 ask-carrying ticks in the host log was 40 bytes.
+        // host/wire-bytes-check.mjs now asserts that arithmetic rather than trusting
+        // this comment.
+        const chips = askChips(toAscii(record.ask.detail ?? ""), record.ask.options ?? []);
+        if (chips.length) item.ask.chips = chips;
         // Seconds left before the hook stops waiting, for the keyboard countdown.
         const ne = askNonces.get(record.ask.pid);
         // No budget configured (the "forever" default) means no countdown to draw.
@@ -2088,13 +2295,26 @@ async function readUsage() {
 }
 
 // ---------- Device -> host lines (both transports) ----------
-let lastAnswerKey = "";
-let lastAnswerAt = 0;
-// Same duplicate for the same reason (the device sends on both transports at once).
-// Kept separate from the answer key so a message and an answer cannot suppress each
-// other, which sharing one variable would allow.
-let lastPromptKey = "";
-let lastPromptAt = 0;
+// KEYED BY SENDER, not by line. The device sends every answer on both of its
+// transports at once, so one device's two copies must collapse into one - that is
+// what these have always done. With two boards attached the same guard, keyed on
+// the LINE alone, would also collapse two DIFFERENT devices answering the same
+// prompt with the same option index: the second board's answer would vanish, and
+// nothing would say so. A map keyed on senderKey() keeps the first behaviour and
+// removes the second. Kept separate from the prompt map so a message and an
+// answer cannot suppress each other, which sharing one would allow.
+const DEVICE_DEDUP_MS = 3000;
+const lastAnswerBySender = new Map(); // senderKey -> { line, at }
+const lastPromptBySender = new Map();
+function isDuplicateFrom(map, via, line) {
+  const key = senderKey(via);
+  const now = Date.now();
+  for (const [k, v] of map) if (now - v.at > DEVICE_DEDUP_MS) map.delete(k);
+  const prev = map.get(key);
+  if (prev && prev.line === line && now - prev.at < DEVICE_DEDUP_MS) return true;
+  map.set(key, { line, at: now });
+  return false;
+}
 
 // ---------- audio capture sink ----------
 // MICREC dumps ~445 base64 lines back to back. Those must NOT go through
@@ -2107,19 +2327,19 @@ let lastPromptAt = 0;
 // the reader hot and keeps a megabyte of base64 out of the log.
 const AUDIO_DIR = path.join(os.homedir(), "Deckhand-audio");
 const SHOT_DIR = path.join(os.homedir(), "Deckhand-shots");
-let shotCapture = null;
-
 // Rebuilds the panel image and writes a PNG directly - no intermediate text file
 // and no external encoder. zlib is in node, and a PNG is four chunks, so the
 // whole thing is cheaper than shipping a decoder script the user has to run.
-async function finishShot() {
-  const cap = shotCapture;
-  shotCapture = null;
+// THE CAPTURE BUFFER BELONGS TO THE LINK: one SCREENSHOT fans out to every
+// connected board and their rows come back concurrently on separate ports.
+async function finishShot(link) {
+  const cap = link.shot;
+  link.shot = null;
   if (!cap) return;
   const m = cap.header.match(/w=(\d+) h=(\d+)/);
   const w = m ? Number(m[1]) : 240, h = m ? Number(m[2]) : 320;
   if (cap.rows.length !== h) {
-    console.log(`SHOT: incomplete - ${cap.rows.length}/${h} rows, not written`);
+    console.log(`SHOT: ${linkLabel(link.id)} incomplete - ${cap.rows.length}/${h} rows, not written`);
     return;
   }
   // RGB565 big-endian (the device serialises it that way so there is nothing to
@@ -2155,9 +2375,15 @@ async function finishShot() {
   ]);
   await fs.mkdir(SHOT_DIR, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const out = path.join(SHOT_DIR, `shot-${stamp}.png`);
+  // THE DEVICE IS IN THE FILENAME. One SCREENSHOT now produces one PNG per board
+  // and the two are otherwise told apart only by their dimensions - which works
+  // until both boards are the same model. The stamp alone was never a
+  // distinguisher either: board 2 finishes a capture in 0.4s and board 1 in ~18s,
+  // so they rarely share a second, but "rarely" is not a filename rule.
+  const who = (link.name || link.id).replace(/[^A-Za-z0-9_.-]/g, "_");
+  const out = path.join(SHOT_DIR, `shot-${stamp}-${who}.png`);
   await fs.writeFile(out, png);
-  console.log(`SHOT: ${w}x${h} -> ${out} (${(png.length / 1024).toFixed(1)}KB, ` +
+  console.log(`SHOT: ${linkLabel(link.id)} ${w}x${h} -> ${out} (${(png.length / 1024).toFixed(1)}KB, ` +
               `${((Date.now() - cap.started) / 1000).toFixed(1)}s)`);
 }
 
@@ -2216,10 +2442,18 @@ async function pruneAudioCaptures() {
 }
 // ---------- voice -> prompt ----------
 // HOW a dictation aimed at a session gets delivered.
-//   "clipboard" (default) - put the transcript on the Mac's clipboard and post a
-//       notification; YOU paste it into the session yourself.
+//   "inbox" (default)     - post it into the LIVE conversation over that session's
+//       own messaging socket (host/session-inbox.mjs), which is what the device was
+//       always trying to do. Falls back to the clipboard, loudly and by name,
+//       whenever the post cannot be CONFIRMED in the session's transcript.
+//   "clipboard"           - never touch the socket: put the transcript on the Mac's
+//       clipboard and post a notification; YOU paste it into the session yourself.
 //   "dispatch"            - the original behaviour: spawn `claude -p --resume <id>`.
-// Clipboard is the default because dispatch has three problems that showed up the first
+//
+// The default was "clipboard" from the day dispatch was demoted until the messaging
+// socket was found; "clipboard" is kept verbatim as the escape hatch, because it is
+// the only mode that involves no channel that can fail invisibly.
+// Clipboard displaced dispatch because dispatch has three problems that showed up the first
 // time it was used in anger: the headless run becomes a SECOND author appending to the
 // same conversation concurrently (both were writing to one transcript, neither able to
 // see the other), a headless `claude -p` does not fire PermissionRequest so nothing that
@@ -2228,7 +2462,62 @@ async function pruneAudioCaptures() {
 // information", inverting half the instruction. Handing it to you costs hands-free
 // operation and fixes all three: it arrives as an ordinary message, in one voice, with
 // permissions behaving normally, and you get to read it before anything acts on it.
-const VOICE_DELIVERY = process.env.DECKHAND_VOICE_DELIVERY || "clipboard";
+const VOICE_DELIVERY = process.env.DECKHAND_VOICE_DELIVERY || "inbox";
+
+// ---------- how a device message LANDS in the queue ----------
+// The inbox frame carries a `priority`, and the receiver's own line is
+//
+//   let a = e.priority==="now"||e.priority==="next"||e.priority==="later"
+//             ? e.priority : "next";
+//
+// (session-inbox.mjs carries the full disassembly and where to re-read it). So
+// "next" is what an absent field already means, and THAT IS THE DEFAULT HERE
+// TOO: "now" interrupts the turn Claude is in the middle of, which is a thing to
+// ask for rather than a thing to inherit.
+const INBOX_PRIORITIES = ["now", "next", "later"];
+const INBOX_PRIORITY_DEFAULT = "next";
+// The raw environment, KEPT SEPARATELY from the validated value, because a
+// refusal has to be able to name what it refused - CLAUDE.md's "every refusal
+// must NAME ITS CAUSE". `DECKHAND_INBOX_PRIORITY=noew` resolving silently to
+// "next" is exactly the shape where a user changes a setting, nothing happens,
+// and there is no way to find out why.
+const INBOX_PRIORITY_ENV_RAW = (process.env.DECKHAND_INBOX_PRIORITY || "").trim();
+// "" means "the env var is not in play" - unset OR set to something unusable.
+// Both are the same fact for precedence (the device's own choice is free to
+// win), and they are told apart in the BOOT LINE, not here.
+const INBOX_PRIORITY_ENV = INBOX_PRIORITIES.includes(INBOX_PRIORITY_ENV_RAW)
+  ? INBOX_PRIORITY_ENV_RAW
+  : "";
+
+/// What priority this message goes out at, AND WHY - the second half is the
+/// point. `why` is logged on every delivery, so a priority that is not what
+/// someone expected can be traced to the thing that set it without reading this
+/// file. Same shape as currentMacEmoji()'s "(but DECKHAND_MAC_EMOJI overrides
+/// it)": a knob whose effect is invisible is a knob that gets flipped twice.
+///
+/// THE ENV VAR WINS, AND THE LOG SAYS SO WHEN IT DOES. Two contributors and one
+/// of them silently beating the other is the shape where a user flips the toggle
+/// on the device, nothing changes, and there is no way anywhere to find out why.
+/// Same pattern as currentMacEmoji()'s "(but DECKHAND_MAC_EMOJI overrides it)",
+/// and it is named ONLY when there is actually something being overridden - an
+/// "overrides nothing" on every line would be noise that teaches a reader to skip
+/// the line that matters.
+function resolveInboxPriority(via) {
+  const dev = via ? msgPriByDevice.get(senderKey(via)) : null;
+  const chosen = dev?.priority || "";
+  if (INBOX_PRIORITY_ENV) {
+    return {
+      priority: INBOX_PRIORITY_ENV,
+      why:
+        chosen && chosen !== INBOX_PRIORITY_ENV
+          ? `DECKHAND_INBOX_PRIORITY, which OVERRIDES ${dev.device || senderKey(via)}'s own "${chosen}"`
+          : "DECKHAND_INBOX_PRIORITY",
+    };
+  }
+  if (chosen) return { priority: chosen, why: `${dev.device || senderKey(via)}'s SETTINGS toggle` };
+  return { priority: INBOX_PRIORITY_DEFAULT, why: "the default" };
+}
+
 const PBCOPY_BIN = "/usr/bin/pbcopy";
 const OSASCRIPT_BIN = "/usr/bin/osascript";
 
@@ -2303,7 +2592,7 @@ const WHISPER_MODEL =
 // (see the remote-answering note) - so a misheard command cannot quietly run a
 // tool. Raising it to acceptEdits/bypassPermissions would remove that safeguard,
 // and that is the user's call to make, not a default to inherit.
-async function transcribeAndDispatch(captureFile, target) {
+async function transcribeAndDispatch(captureFile, target, via = null) {
   const wav = path.join(AUDIO_DIR, "latest.wav");
   const clean = path.join(AUDIO_DIR, "latest-clean.wav");
   // Tell the device work has actually STARTED, so its recording bar can go from
@@ -2349,7 +2638,7 @@ async function transcribeAndDispatch(captureFile, target) {
     setVoice("memo", { text });
     return;
   }
-  await deliverTextToSession(target, text);
+  await deliverTextToSession(target, text, "Voice", via);
 }
 
 // Hand text to a session. This is the shared tail of a dictation aimed at a session
@@ -2360,11 +2649,26 @@ async function transcribeAndDispatch(captureFile, target) {
 // `tag` changes only the LOG prefix. The setVoice states are deliberately identical
 // - the device's result card and the menu bar's row key off those strings, and a
 // typed message should surface exactly the way a dictation does.
-async function deliverTextToSession(target, text, tag = "Voice") {
+//
+// `via` IS THE LINK THE TEXT CAME UP, and it is threaded here for one reason:
+// the inbox frame can name its sender, and the name it should carry is the
+// BOARD'S ("Deckhand-0528"), not this Mac's and not the session's. Without it
+// `origin.from` is the literal "unknown" and the wrapper Claude is handed reads
+// "Another Claude session sent a message" - false, and misleading in the
+// direction that matters, because it was the user, on their own hardware, six
+// inches away.
+//
+// THE DICTATION PATH CARRIES A NAME TOO, and that is a decision rather than an
+// oversight. A dictation is not "from" the board in the sense that its WORDS are
+// the board's - they are the user's - but `from` names the SENDING DEVICE, and
+// the device that sent it is exactly as much the board as it is for a tap. The
+// alternative is that the one case where a human demonstrably spoke is the one
+// case that arrives attributed to nothing.
+async function deliverTextToSession(target, text, tag = "Voice", via = null) {
   // The device only knows the first 12 chars of the id; resolve the real one.
   // Through resolveSessionId, which REFUSES an ambiguous prefix - the find() this
   // replaced silently took the first match.
-  let sessionId = null, cwd = null;
+  let sessionId = null, cwd = null, record = null;
   try {
     const found = resolveSessionId(await fs.readdir(SESSIONS_DIR), target);
     if (!found.ok) {
@@ -2373,9 +2677,10 @@ async function deliverTextToSession(target, text, tag = "Voice") {
       return;
     }
     sessionId = found.id;
-    cwd =
-      JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, `${sessionId}.json`), "utf8")).cwd ||
-      undefined;
+    // The WHOLE record now, not just `cwd`: the inbox path below needs the
+    // hook's `inbox` ({socket, token}) and the `transcript` it confirms against.
+    record = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, `${sessionId}.json`), "utf8"));
+    cwd = record.cwd || undefined;
   } catch {}
   if (!sessionId) {
     console.error(`${tag}: could not read the session record for ${target} - not dispatched.`);
@@ -2383,6 +2688,60 @@ async function deliverTextToSession(target, text, tag = "Voice") {
     return;
 }
 const where = cwd ? await projectName(cwd) : target;
+
+// THE PREFERRED PATH: post straight into the LIVE conversation over the session's
+// own messaging socket (host/session-inbox.mjs). This is what the clipboard hand-off
+// was standing in for - the belief that a running interactive session could not be
+// written to was true when it was written down and is not any more.
+//
+// Ahead of BOTH existing branches, and gated only on DECKHAND_VOICE_DELIVERY not
+// being an explicit "clipboard": that remains a working escape hatch, and forcing
+// it must still get you the old behaviour exactly.
+//
+// EVERY FAILURE FALLS THROUGH to whichever branch would have run before, and every
+// one NAMES ITS CAUSE. There are four ways to end up here without a delivery - no
+// inbox on the record (an older Claude Code, or a session that started before the
+// hook change), a socket whose session has exited, a write that failed, and - the
+// one that motivated all of this - a write that SUCCEEDED and delivered nothing,
+// because a malformed frame is accepted and silently discarded. Falling back
+// unannounced would make all four look like the clipboard being the design.
+if (VOICE_DELIVERY !== "clipboard") {
+  // WRAPPED, because the four failure modes above are all RETURN VALUES and a
+  // throw is a fifth path with no fallback at all. The record is a JSON file
+  // another process writes and can truncate mid-write, and an unhandled
+  // rejection here would take the clipboard down with it - leaving the message
+  // delivered NOWHERE, which is strictly worse than the behaviour this
+  // replaced. A throw is treated as one more named `why` and falls through
+  // exactly like the rest.
+  // NEVER INVENT A NAME. deviceNameFor() already returns "" for the three cases
+  // where the sender is honestly unknown - a pairing link, an unnamed USB link
+  // with two boards cabled, a board that has neither burst HELLO nor answered
+  // WHOAMI - and "" is passed straight through to inboxFrames(), which OMITS the
+  // field. The receiver then defaults it to "unknown", which is the true
+  // statement and also the byte-identical frame this sent before.
+  const from = via ? deviceNameFor(via) : "";
+  const pri = resolveInboxPriority(via);
+  let r;
+  try {
+    r = await postToSessionInbox(record, text, { from, priority: pri.priority });
+  } catch (err) {
+    r = { ok: false, why: `the inbox threw (${(err?.message || String(err)).split("\n")[0]})` };
+  }
+  if (r.ok) {
+    console.log(
+      `${tag}: posted into the live session ${sessionId} (${where}) as ` +
+        `${from || 'an unnamed device (from omitted, so it reads as "unknown")'} ` +
+        `at priority ${pri.priority} [${pri.why}] - confirmed in the transcript in ${r.ms}ms.`
+    );
+    setVoice("sent", { text, session: target, reply: `Sent to ${where}.` });
+    return;
+  }
+  console.error(
+    `${tag}: session inbox unavailable (${r.why}) - ` +
+      `falling back to ${VOICE_DELIVERY === "dispatch" ? "a headless claude -p" : "the clipboard"}.`
+  );
+}
+
 if (VOICE_DELIVERY !== "dispatch") {
   const ok = await copyToClipboard(text);
   if (!ok) {
@@ -2492,12 +2851,11 @@ async function transcribeForAnswer(captureFile, pid) {
   setVoice("askheard", { text });
 }
 
-let audioCapture = null; // { header, lines: [], started }
-
-async function finishAudioCapture(complete) {
-  if (!audioCapture) return;
-  const cap = audioCapture;
-  audioCapture = null;
+// { header, lines: [], started }, per link - see finishShot's note.
+async function finishAudioCapture(link, complete) {
+  if (!link.audioCap) return;
+  const cap = link.audioCap;
+  link.audioCap = null;
   const claimed = Number((cap.header.match(/samples=(\d+)/) ?? [, 0])[1]);
   const bytes = cap.lines.reduce((n, l) => n + l.length, 0);
   // BYTES PER SAMPLE, from the header, because this estimate feeds a completeness
@@ -2528,7 +2886,7 @@ async function finishAudioCapture(complete) {
   );
   // One-shot captures get transcribed too. They carry no target, so they land as a
   // memo rather than being dispatched anywhere.
-  if (pct >= 98) transcribeAndDispatch(file, "-").catch((e) => console.error("Voice:", e.message));
+  if (pct >= 98) transcribeAndDispatch(file, "-", link.id).catch((e) => console.error("Voice:", e.message));
   pruneAudioCaptures().catch(() => {});
 }
 
@@ -2568,23 +2926,25 @@ function setVoice(state, fields = {}) {
   };
 }
 
-let audioStream = null; // { header, rate, chunks: [], expectSeq, gaps, started }
-
-function onAudioFrame(seq, payload) {
-  if (!audioStream) return; // frame outside a stream: nothing to attach it to
-  if (seq !== audioStream.expectSeq) {
-    audioStream.gaps++;
-    console.error(`Audio: frame gap - expected ${audioStream.expectSeq}, got ${seq}`);
+// { header, rate, chunks: [], expectSeq, gaps, started }, per link - see finishShot.
+// The ack goes back down THE LINK THE FRAME CAME UP, which is also what stops a
+// second board being told to advance a stream it is not sending.
+function onAudioFrame(seq, payload, link) {
+  const st = link.audioStream;
+  if (!st) return; // frame outside a stream: nothing to attach it to
+  if (seq !== st.expectSeq) {
+    st.gaps++;
+    console.error(`Audio: frame gap on ${linkLabel(link.id)} - expected ${st.expectSeq}, got ${seq}`);
   }
-  audioStream.expectSeq = seq + 1;
-  audioStream.chunks.push(Buffer.from(payload));
-  if (usbPort) usbPort.write(`AUDIO ack ${seq}\n`);
+  st.expectSeq = seq + 1;
+  st.chunks.push(Buffer.from(payload));
+  sendToLink(link, `AUDIO ack ${seq}\n`);
 }
 
-async function finishAudioStream(tail) {
-  if (!audioStream) return;
-  const st = audioStream;
-  audioStream = null;
+async function finishAudioStream(link, tail) {
+  if (!link.audioStream) return;
+  const st = link.audioStream;
+  link.audioStream = null;
   const data = Buffer.concat(st.chunks);
   const file = path.join(AUDIO_DIR, `stream-${st.started}.txt`);
   try {
@@ -2636,7 +2996,7 @@ async function finishAudioStream(tail) {
   if (st.answerPid) {
     transcribeForAnswer(file, st.answerPid).catch((e) => console.error("Voice answer:", e.message));
   } else {
-    transcribeAndDispatch(file, st.target).catch((e) => console.error("Voice:", e.message));
+    transcribeAndDispatch(file, st.target, link.id).catch((e) => console.error("Voice:", e.message));
   }
   pruneAudioCaptures().catch(() => {});
 }
@@ -2723,9 +3083,7 @@ async function handleTypedPrompt(line, via) {
   // "missing pairing/nonce state" - correct behaviour (the nonce is single-use) that
   // reads in the log as an authentication failure on every message sent. Same guard
   // the answer path already uses, and the window matches it.
-  if (line === lastPromptKey && Date.now() - lastPromptAt < 3000) return;
-  lastPromptKey = line;
-  lastPromptAt = Date.now();
+  if (isDuplicateFrom(lastPromptBySender, via, line)) return;
   const parts = line.trim().split(/\s+/);
   if (parts.length !== 4) {
     console.error("Prompt: malformed frame - ignoring.");
@@ -2769,7 +3127,7 @@ async function handleTypedPrompt(line, via) {
   }
   consumeSessionNonce(record.id); // single-use: no replay
   console.log(`Prompt: accepted ${v.text.length} chars for ${id12} from ${from}.`);
-  await deliverTextToSession(id12, v.text, "Prompt");
+  await deliverTextToSession(id12, v.text, "Prompt", via);
 }
 
 async function handleTypedAnswer(parts, via) {
@@ -2856,46 +3214,165 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       if (k) f[k] = Number.parseInt(v, 10);
     }
     if (Number.isFinite(f.mv) && Number.isFinite(f.pct)) {
-      lastBatt = {
+      // KEYED BY DEVICE. A single `lastBatt` meant two boards overwrote each
+      // other every few seconds, so the menu bar showed whichever spoke last -
+      // one board reading 96% and the other 41% would have alternated under one
+      // label, which is worse than showing nothing. `device` travels WITH the
+      // reading so nothing downstream can lose track of whose it is.
+      battByDevice.set(senderKey(via), {
+        device: deviceNameFor(via) || null,
         mv: f.mv,
         pct: f.pct,
         state: Number.isFinite(f.state) ? f.state : null,
         leftMin: Number.isFinite(f.left) && f.left >= 0 ? f.left : null,
         at: Date.now(),
-      };
+      });
+      boundBatteryStore(); // ports renumber; the prune on close cannot see a key it never names again
     }
+  }
+  // MSGPRI <now|next|later> - the device's own choice of how the messages IT sends
+  // should land in the target session's queue. The FIRST device setting that
+  // reaches this host: theme, brightness and sound all stay on the panel.
+  //
+  // THE REFUSAL IS AS IMPORTANT AS THE REPORT, and BLEMTU is why. That arm used to
+  // `return` on any line starting "BLEMTU ", which silently ate board 1's own
+  // refusal - correctly emitted by the firmware and invisible here, so from the Mac
+  // it was indistinguishable from silence. So an unparseable MSGPRI is LOGGED
+  // rather than dropped, and it names the value.
+  // MSGPRI <now|next|later> - the device's own choice of how the messages IT sends
+  // should land in the target session's queue. The FIRST device setting that
+  // reaches this host: theme, brightness and sound all stay on the panel.
+  //
+  // THE GUARD IS THE ACCEPTANCE TEST, not a prefix match with the test nested
+  // inside it, and that is the BLEMTU lesson caught before it could be re-learned.
+  // BLEMTU's arm used to `return` on ANY line starting "BLEMTU ", which silently
+  // ate board 1's own "BLEMTU refused on E32R28T: ..." - correctly emitted by the
+  // firmware and invisible here, so from the Mac it was indistinguishable from
+  // silence. Every verb can produce "<VERB> refused on <board>: <cause>", and
+  // "MSGPRI refused on ..." starts with "MSGPRI " too. Written this way the arm
+  // claims exactly the three lines it understands; the refusal, and anything else
+  // the device says under this verb, falls through to the general [device/...] log
+  // at the foot of this function and reaches the Mac in the device's own words.
+  // commands-check.mjs asserts this for every verb the dispatch has, and it is
+  // what failed on the first draft of this arm.
+  const msgPri = line.startsWith("MSGPRI ") ? line.slice(7).trim() : "";
+  if (INBOX_PRIORITIES.includes(msgPri)) {
+    const key = senderKey(via);
+    const dev = deviceNameFor(via) || null;
+    // LOGGED ONLY ON A CHANGE, the same rule the HELLO arm follows and for the
+    // same reason: the device re-announces its priority on every WHOAMI (which is
+    // every host attach), and a cabled board receives every trigger-file command
+    // TWICE - so the unchanged case is the common one, and a line for each would
+    // bury the one that matters.
+    const before = msgPriByDevice.get(key)?.priority;
+    msgPriByDevice.set(key, { device: dev, priority: msgPri, at: Date.now() });
+    boundMsgPriorityStore();
+    if (before !== msgPri) {
+      // THE PRECEDENCE, SAID AT THE MOMENT IT BITES. currentMacEmoji()'s
+      // "(but DECKHAND_MAC_EMOJI overrides it)" is the pattern: the person has
+      // just tapped something and is entitled to learn HERE that it will not take
+      // effect, rather than on some later delivery they are not watching.
+      const overridden = INBOX_PRIORITY_ENV && INBOX_PRIORITY_ENV !== msgPri;
+      console.log(
+        `Inbox: ${dev || key} asks for "${msgPri}"` +
+          (overridden
+            ? ` (but DECKHAND_INBOX_PRIORITY=${INBOX_PRIORITY_ENV} overrides it, so its messages still land at "${INBOX_PRIORITY_ENV}").`
+            : `, so its messages land at "${msgPri}".`)
+      );
+    }
+    return;
   }
   // History request from the detail screen. Handled here rather than in the tick so the
   // transcript is only read when someone is actually looking at it.
   if (line.startsWith("BLEMTU ")) {
     const m = line.match(/mtu=(\d+)/);
-    if (m) {
-      // MTU less the 3-byte ATT header, clamped to what has been measured
-      // working. Never below the floor: a device reporting 23 means STAY at 20.
-      const want = Math.max(BLE_CHUNK_MIN, Math.min(BLE_CHUNK_MAX, +m[1] - 3));
-      if (want !== bleChunkSize) {
-        console.log(`BLE: device reports MTU ${m[1]} - writing ${want}-byte packets (was ${bleChunkSize})`);
-        bleChunkSize = want;
-      }
+    // ONLY A REPORT IS SWALLOWED. This arm used to `return` on any line starting
+    // "BLEMTU ", which silently ate board 1's "BLEMTU refused on E32R28T: ..." -
+    // the refusal was correctly emitted by the device and never appeared in this
+    // log, so from here it was indistinguishable from the silence the whole
+    // refusal table exists to remove. Measured: board 1 answered BLEMTU and the
+    // log showed only the "Sending command" line.
+    //
+    // AND THE REPORT ITSELF IS LOGGED NOW TOO, which is the same defect on board
+    // 2: the command table sells BLEMTU as "the negotiated ATT MTU per link", but
+    // its answer was consumed here and only mentioned when the CHUNK SIZE changed
+    // - so asking twice printed nothing the second time and the instrument
+    // silently answered into the tuner rather than to the person who asked.
+    // Bounded rather than chatty: the device emits an unsolicited report only on a
+    // CHANGE (tickBleMtu's scrollMtuSent guard), so this is at most one line per
+    // link per connect.
+    console.log(`[device/${linkLabel(via)}] ${line}`);
+    if (!m) return;
+    // A REPORT READ OFF THE CABLE SAYS NOTHING ABOUT THIS MAC'S RADIO. The device
+    // answers every command on EVERY live transport, so a cabled board's BLEMTU
+    // arrives here over USB as well - and the number in it describes some BLE
+    // link's negotiated MTU, not the one this host writes through. Retuning from
+    // it sized our writes off a link we are not on.
+    if (viaKind(via) !== "ble") return;   // solicited on connect; see startBle()
+    // ...AND EVEN OVER BLE, THE REPORT MAY BE ABOUT SOMEONE ELSE'S LINK. The
+    // firmware reports per link (`BLEMTU link=<i> mtu=<m>`, scrollback.ino's
+    // tickBleMtu) and broadcasts each one to every host, so with two Macs paired
+    // to one board this Mac sees the OTHER Mac's MTU too - and nothing in the wire
+    // format says which index is ours. Clamped to 20 against a 180-byte link costs
+    // throughput (2.7 KB/s against 8.4, measured in scrollback.ino); raised to 180
+    // against a 23-byte link is DROPPED SILENTLY by CoreBluetooth, which is a fetch
+    // that stalls with nothing to read. So the reports are kept per link index and
+    // the SMALLEST is used: the safe direction, chosen deliberately rather than by
+    // whichever report happened to arrive last.
+    const idx = (line.match(/link=(\d+)/) || [, "0"])[1];
+    bleMtuByLink.set(idx, +m[1]);
+    const smallest = Math.min(...bleMtuByLink.values());
+    // MTU less the 3-byte ATT header, clamped to what has been measured
+    // working. Never below the floor: a device reporting 23 means STAY at 20.
+    const want = Math.max(BLE_CHUNK_MIN, Math.min(BLE_CHUNK_MAX, smallest - 3));
+    if (want !== bleChunkSize) {
+      console.log(
+        `BLE: smallest reported MTU ${smallest} of ${bleMtuByLink.size} link(s) - ` +
+          `writing ${want}-byte packets (was ${bleChunkSize})`
+      );
+      bleChunkSize = want;
     }
     return;
   }
   if (line.startsWith("SCROLLACK ")) {
     const seq = Number.parseInt(line.slice(10).trim(), 10);
-    const w = scrollAckWaiters.get(ackKey(scrollFetchGen, seq));
-    // Deliberately unlogged, and a missing waiter is EXPECTED rather than a
-    // fault: the device acks on every live transport, so a cabled device sends
-    // each ACK twice and the second finds the waiter already resolved.
-    if (w) w();
+    // Mapped back through replyLinkFor, the SAME function that chose where the
+    // chunk went: a cabled device acks on BLE too, and that ack must resolve the
+    // waiter for the USB fetch it belongs to rather than miss and time out.
+    //
+    // BOTH CANDIDATES, because that mapping is NOT STABLE FOR THE LIFE OF A FETCH.
+    // replyLinkFor("ble") only finds the cabled link once bleDeviceName matches a
+    // USB link's name, and WHOAMI is what made that newly reachable: before this
+    // branch a USB link could acquire its name only during the 15s boot burst, so
+    // the mapping was settled before any fetch began. Now a name can land
+    // mid-fetch, and the key silently moves from "ble:gen:seq" to
+    // "usb:<path>:gen:seq" - the waiter keyed at SEND time is then never found and
+    // the fetch stalls at chunk 0 for the full timeout. Each candidate carries its
+    // OWN scrollGen, so a superseded fetch still cannot be resolved by a stale ack.
+    const arrived = linkFor(via);
+    const mapped = replyLinkFor(via);
+    for (const l of [mapped, arrived]) {
+      if (!l) continue;
+      const w = scrollAckWaiters.get(ackKey(l.id, l.scrollGen, seq));
+      // Deliberately unlogged, and a missing waiter is EXPECTED rather than a
+      // fault: the device acks on every live transport, so a cabled device sends
+      // each ACK twice and the second finds the waiter already resolved.
+      if (w) { w(); break; }
+    }
     return;
   }
   if (line.startsWith("HISTORY ")) {
+    // WHERE THE REPLY GOES, decided once for every arm below. Before this the
+    // reply went to "the USB port" - with two boards cabled that answered board
+    // 1's request down board 2's cable, and board 1 would have sat on an empty
+    // reader while board 2 redrew from a transcript nobody asked it for.
+    const replyLink = replyLinkFor(via);
     // The 4th token is the device's reader budget, `<cols>x<lines>` - absent from
     // board 1 and from any pre-budget firmware, which is exactly why histBudget()
     // falls back rather than validating. It matters only to the page layout, so
     // the item: path (one whole entry, no pagination) ignores it.
     const [id, filter = "chat", want = "last", budgetTok] = line.slice(8).trim().split(/\s+/);
-    console.log(`[device/${via}] ${line}`);
+    console.log(`[device/${linkLabel(via)}] ${line}`);
     if (want.startsWith("since:")) {
       // DEDUPED like the tail fetch, and here it matters MORE: the device sends
       // on every live transport, so a cabled device asks twice, and two replies
@@ -2904,10 +3381,12 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       // a second request form without it was the gap.
       const now = Date.now();
       for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
-      const reqKey = `${id}|${filter}|${want}`;
-      if (scrollReqSeen.has(reqKey)) return;
+      // THE SENDER IS PART OF THE KEY, but only when the sender is KNOWN - see
+      // scrollSenderKey().
+      const reqKey = `${scrollSenderKey(via)}|${id}|${filter}|${want}`;
+      if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
       scrollReqSeen.set(reqKey, now);
-      await sendScrollbackSince(id, filter, Number.parseInt(want.slice(6), 10) || 0);
+      await sendScrollbackSince(id, filter, Number.parseInt(want.slice(6), 10) || 0, replyLink);
     } else if (want.startsWith("tail:")) {
       // THE DEVICE SENDS ON EVERY LIVE TRANSPORT AT ONCE, so a cabled device
       // delivers this request TWICE and we would run two fetches whose chunks
@@ -2918,46 +3397,53 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       // one (a filter toggle) is never swallowed.
       const now = Date.now();
       for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
-      const reqKey = `${id}|${filter}|${want}`;
-      if (scrollReqSeen.has(reqKey)) return;
+      const reqKey = `${scrollSenderKey(via)}|${id}|${filter}|${want}`;   // per sender - see the since: arm
+      if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
       scrollReqSeen.set(reqKey, now);
-      await sendScrollback(id, filter, Number.parseInt(want.slice(5), 10) || 65536);
+      await sendScrollback(id, filter, Number.parseInt(want.slice(5), 10) || 65536, replyLink);
     } else if (want.startsWith("item:"))
-      await sendHistoryItem(id, filter, Number.parseInt(want.slice(5), 10) || 0);
-    else await sendHistory(id, filter, want, histBudget(budgetTok));
+      await sendHistoryItem(id, filter, Number.parseInt(want.slice(5), 10) || 0, replyLink);
+    else await sendHistory(id, filter, want, histBudget(budgetTok), replyLink);
     return;
   }
   // Audio first, and deliberately unlogged - see the note above.
-  if (via === "usb") {
+  //
+  // EVERY BUFFER HERE HANGS OFF THE LINK, not off a module global. One
+  // SCREENSHOT sent to two boards produces two captures whose rows arrive
+  // interleaved on two ports; a single `shotCapture` would have appended both
+  // into one buffer and written one PNG that is neither board - and the row-count
+  // guard in finishShot() would not have caught it, because the row counts add up.
+  const link = usbLinkFor(via);
+  if (link) {
     // Screenshot: same shape as an audio capture - a header, base64 rows, an end
     // marker - and deliberately unlogged for the same reason (a quarter of a
     // megabyte of base64 must not go near the log, and console.log also writes to
     // a stdout nobody is draining under `open`).
     if (line.startsWith("SHOT begin ")) {
-      shotCapture = { header: line, rows: [], started: Date.now() };
-      console.log(`[device/${via}] ${line}`);
+      link.shot = { header: line, rows: [], started: Date.now() };
+      console.log(`[device/${linkLabel(via)}] ${line}`);
       return;
     }
     if (line.startsWith("SHOT d ")) {
-      if (shotCapture) shotCapture.rows.push(line.slice(7));
+      if (link.shot) link.shot.rows.push(line.slice(7));
       return; // never logged
     }
     if (line === "SHOT end") {
-      await finishShot();
+      await finishShot(link);
       return;
     }
     if (line.startsWith("AUDIO begin ")) {
-      if (audioCapture) await finishAudioCapture(false);
-      audioCapture = { header: line, lines: [], started: Date.now() };
-      console.log(`[device/${via}] ${line}`);
+      if (link.audioCap) await finishAudioCapture(link, false);
+      link.audioCap = { header: line, lines: [], started: Date.now() };
+      console.log(`[device/${linkLabel(via)}] ${line}`);
       return;
     }
     if (line.startsWith("AUDIO d ")) {
-      if (audioCapture) audioCapture.lines.push(line.slice(8));
+      if (link.audioCap) link.audioCap.lines.push(line.slice(8));
       return; // never logged
     }
     if (line === "AUDIO end") {
-      await finishAudioCapture(true);
+      await finishAudioCapture(link, true);
       return;
     }
     if (line.startsWith("AUDIO stream ")) {
@@ -2969,24 +3455,24 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       // attempt cannot leave the previous text confirmable - RE-RECORD exists
       // to discard text, and must never end up transmitting it.
       if (answerPid) pendingVoiceAnswers.delete(answerPid);
-      audioStream = {
+      link.audioStream = {
         header: line,
         target: tm ? tm[1] : "-",
         answerPid,
         chunks: [], expectSeq: 0, gaps: 0, started: Date.now(),
       };
-      console.log(`[device/${via}] ${line}`);
+      console.log(`[device/${linkLabel(via)}] ${line}`);
       return;
     }
     if (line.startsWith("AUDIO streamend")) {
       const m = line.match(/samples=(\d+)/);
-      if (audioStream && m) audioStream.samples = parseInt(m[1], 10);
-      console.log(`[device/${via}] ${line}`);
-      await finishAudioStream(line.replace("AUDIO streamend ", ""));
+      if (link.audioStream && m) link.audioStream.samples = parseInt(m[1], 10);
+      console.log(`[device/${linkLabel(via)}] ${line}`);
+      await finishAudioStream(link, line.replace("AUDIO streamend ", ""));
       return;
     }
   }
-  console.log(`[device/${via}] ${line}`);
+  console.log(`[device/${linkLabel(via)}] ${line}`);
 
   // ---- wireless pairing, on whichever transport it arrives ----
   // These are handled here rather than on the pairing link alone because the
@@ -3011,7 +3497,7 @@ async function handleDeviceLine(line, via, pairGen = 0) {
   // Device announces its unique BLE name over USB (trusted): pin BLE to it,
   // and push it the shared secret so it can authenticate answers. HELLO is
   // only honored over USB - a BLE peer must not be able to steer us.
-  if (line.startsWith("HELLO ") && via === "usb") {
+  if (line.startsWith("HELLO ") && viaKind(via) === "usb") {
     // "HELLO <name> [v2]" - v2 firmware understands the per-Mac PROVISION form.
     // Older firmware sends just the name and stores ONE secret, so we send it
     // the bare key instead; that still works, because the key we send is this
@@ -3022,7 +3508,15 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       return;
     }
     if (name) {
-      usbDeviceName = name;
+      // ON THIS LINK, not on a host-wide "the USB device": with two boards
+      // cabled, the second HELLO used to overwrite the first and both links then
+      // claimed the same identity - which is the same wrong-subject failure the
+      // deviceNameFor() comment describes, arrived at from the other end.
+      const helloLink = usbLinkFor(via);
+      if (helloLink && helloLink.name !== name) {
+        console.log(`USB: ${helloLink.id} is ${name}.`);
+        helloLink.name = name;
+      }
       const entry = await rememberDevice(name); // mints a key for a new device
       // Nothing chosen yet (first run, or the selection was forgotten): adopt
       // the device that's physically plugged in. An existing choice is left
@@ -3033,13 +3527,31 @@ async function handleDeviceLine(line, via, pairGen = 0) {
         console.log(`Auth: selected ${name}.`);
       }
       // hostId tells a device paired with several Macs which key to sign with.
-      if (usbPort) {
-        usbPort.write(
-          proto === "v2"
-            ? `PROVISION ${hostId} ${entry.secret} ${hostLabel}\n` // USB only
-            : `PROVISION ${entry.secret}\n` // pre-multi-pairing firmware
-        );
-      }
+      // Written back to THE LINK THE HELLO CAME IN ON - a key is per device, so
+      // sending it to "the USB port" would hand board 2 board 1's secret.
+      await sendToLink(
+        helloLink,
+        proto === "v2"
+          ? `PROVISION ${hostId} ${entry.secret} ${hostLabel}\n` // USB only
+          : `PROVISION ${entry.secret}\n` // pre-multi-pairing firmware
+      );
+      // AND ASK FOR ITS SEND PRIORITY IF WE HAVE NONE, which closes a hole
+      // MEASURED rather than reasoned about. The device announces MSGPRI at boot
+      // and on WHOAMI, and WHOAMI is the answer to "HELLO is a boot-only burst".
+      // But the host only ASKS WHOAMI while a link is still ANONYMOUS - so a host
+      // that attaches DURING the 15-second burst gets named by HELLO, never asks
+      // WHOAMI, and misses the single setup()-time MSGPRI it arrived too late for.
+      // That is exactly what happened on board 2's first flashed boot: board 1
+      // reported on two restarts and board 2 reported on none, and the next bare
+      // `MSGPRI` answered instantly.
+      //
+      // Guarded on NOT ALREADY HAVING ONE, because this arm runs for every HELLO
+      // in the burst - eight of them - and an unguarded ask would be eight asks
+      // and eight replies to learn one word. A reply still in flight can produce a
+      // second ask; that is bounded at a couple and is the cheap side of the
+      // trade. It also self-heals a report lost to a garbled line, which the boot
+      // announce alone cannot.
+      if (!msgPriByDevice.has(senderKey(via))) await sendToLink(helloLink, "MSGPRI\n");
     }
     return;
   }
@@ -3053,10 +3565,8 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     console.log("Remote answer ignored - mirror mode (answer on the Mac, or enable it in the menu bar).");
     return;
   }
-  // The device sends on USB and BLE simultaneously - process one copy.
-  if (line === lastAnswerKey && Date.now() - lastAnswerAt < 3000) return;
-  lastAnswerKey = line;
-  lastAnswerAt = Date.now();
+  // The device sends on USB and BLE simultaneously - process one copy PER DEVICE.
+  if (isDuplicateFrom(lastAnswerBySender, via, line)) return;
   const parts = line.trim().split(/\s+/);
   // Voice form: ANSWER <id12> <pid> TEXT <sha16> <hmac>. Checked before the
   // option form so the two parsers never see each other's shape.
@@ -3121,48 +3631,237 @@ async function handleDeviceLine(line, via, pairGen = 0) {
   }
 }
 
-// ---------- USB transport ----------
-let usbPort = null;
+// ---------- USB transport: ONE LINK PER BOARD ----------
+// This used to be one `usbPort` opened from the FIRST matching port that
+// SerialPort.list() returned. With one board on the desk that was invisible; with
+// two it silently drove whichever the OS enumerated first (the ESP32-S3's
+// usbmodem) and left the other board announcing HELLO every two seconds to a host
+// that never answered - measured, and it is what this section was rewritten for.
+// USB and BLE were already independent links rather than fallbacks; this makes
+// "the USB link" plural in the same sense.
+//
+// A LINK IS THE UNIT OF IDENTITY, and its id comes from the PORT PATH
+// ("usb:usbserial-10"), not from the device name. The name is learned later and
+// only sometimes - HELLO bursts for ~15s after a boot, so a host that attaches
+// mid-run may never see one - while a dedupe key, a reply route and a screenshot
+// buffer all need an identity from the very first byte. The device NAME, once
+// known, is what the log shows and what an answer's HMAC is checked against; see
+// deviceNameFor().
+const usbLinks = [];              // [{ id, kind:"usb", path, port, name, shot, audioCap, audioStream, scrollGen }]
+const usbOpening = new Set();     // paths with an open() in flight, so a re-scan cannot double-open one
 
-async function findUsbPort() {
-  if (process.env.SERIAL_PORT) return process.env.SERIAL_PORT;
-  const ports = await SerialPort.list();
-  const usb = ports.find(
-    (p) =>
-      (p.vendorId ?? "").toLowerCase() === "1a86" || // CH340 (board 1)
-      (p.vendorId ?? "").toLowerCase() === "303a" || // Espressif native USB (board 2)
-      /usbserial|wchusbserial|SLAB_USBtoUART|usbmodem/i.test(p.path)
-  );
-  return usb?.path ?? null;
+// BLE is still exactly one peer - making it multi-peer is deliberately NOT part
+// of this change - but it is given the same shape so every send goes through one
+// function rather than two spellings of "write a line to a device".
+const BLE_LINK = { id: "ble", kind: "ble", scrollGen: 0, get name() { return bleDeviceName; } };
+
+// "usb:usbserial-10" from "/dev/tty.usbserial-10". Stable for as long as the
+// cable is in the same port, which is what a dedupe key needs.
+const usbIdFor = (portPath) => `usb:${portPath.replace(/^\/dev\/(tty|cu)\./, "")}`;
+
+// A `via` is either "ble", "pair", or one of the USB link ids above. Everything
+// that used to test `via === "usb"` tests this instead, because "usb" is now a
+// KIND rather than a name and a test against the literal would be false for every
+// real link - silently, since it would just skip the arm.
+const viaKind = (via) => (via === "ble" || via === "pair" ? via : "usb");
+const usbLinkFor = (via) => usbLinks.find((l) => l.id === via) ?? null;
+function linkFor(via) {
+  if (via === "ble") return bleCharacteristic ? BLE_LINK : null;
+  if (via === "pair") return null;   // a pairing link has no payload/reply traffic
+  return usbLinkFor(via);
 }
 
-async function connectUsb() {
-  const portPath = await findUsbPort();
-  if (!portPath) {
-    setTimeout(connectUsb, RECONNECT_INTERVAL_MS);
-    return;
+// The one place a line is written to a device. `false` means it did not go out,
+// which callers log rather than swallow.
+async function sendToLink(link, text, gapMs = 0) {
+  if (!link) return false;
+  if (link.kind === "usb") {
+    if (!link.port || link.port.destroyed || !link.port.writable) return false;
+    link.port.write(text);
+    return true;
   }
-  console.log(`USB: connecting to ${portPath} @ ${BAUD_RATE}...`);
-  const port = new SerialPort({ path: portPath, baudRate: BAUD_RATE });
+  if (link.kind === "ble") {
+    if (!bleCharacteristic) return false;
+    await sendOverBle(text, gapMs);
+    return true;
+  }
+  return false;
+}
 
+// Every live link, in send order. THE FAN-OUT RULE IS ONE COPY PER LINK, and it
+// is the same rule as before rather than a new one: a cabled board 2 has always
+// received the tick and every device command twice (USB and BLE), which is why
+// KBTEST/KBPROBE/KBBUBBLE/POWERPROBE dedupe on the device. Adding board 1 adds
+// ONE link, so board 1 gets one copy and board 2 still gets two - no device ever
+// receives more than it did before. Suppressing the BLE copy for a board that is
+// also cabled was considered and rejected: it would make delivery depend on the
+// host having learned the USB link's name, which it sometimes never does.
+const liveLinks = () => [...usbLinks, ...(bleCharacteristic ? [BLE_LINK] : [])];
+
+async function broadcastToDevices(text, gapMs = 0) {
+  let sent = 0;
+  for (const link of liveLinks()) if (await sendToLink(link, text, gapMs)) sent++;
+  return sent;
+}
+
+// Where a REPLY to a device request goes. Normally the link it arrived on, and
+// that is the whole point: with two boards cabled, "reply on the USB port"
+// answered board 1's history request down board 2's cable. The ONE exception
+// preserves an existing optimisation rather than adding a new rule - a request
+// that came over BLE from a device that is ALSO cabled is answered over that
+// device's own USB link, because BLE writes go out in 20-byte packets with a
+// response awaited on each and the tick loop blocks behind them. Same device,
+// faster pipe; never a different device.
+function replyLinkFor(via) {
+  if (via === "ble" && bleDeviceName) {
+    const cabled = usbLinks.find((l) => l.name === bleDeviceName);
+    if (cabled) return cabled;
+  }
+  return linkFor(via);
+}
+
+// How a link is NAMED in the log. The id is stable and the name is not, so the id
+// is what keys everything and this is display only: "[device/usb:Deckhand-0528]"
+// is readable at a glance where "[device/usb]" twice over is not - and with two
+// boards attached, an unattributable device line is the whole failure mode.
+function linkLabel(via) {
+  if (via === "ble" || via === "pair") return via;
+  const l = usbLinkFor(via);
+  return l?.name ? `usb:${l.name}` : via;
+}
+
+// Which ports are ours. SERIAL_PORT still pins the host to exactly one, and it is
+// honoured as a RESTRICTION rather than an addition, so it remains the escape
+// hatch when one board must be left alone.
+// THE TWO BOARDS ARE DISTINGUISHABLE BEFORE ANY NAME IS KNOWN, and armHelloPulse()
+// below depends on that, so the ids are named once here rather than spelled twice.
+// The difference that matters to the pulse: board 1's CH340 is a SEPARATE USB device
+// sitting in front of the ESP32, so it stays enumerated across a reset of the SoC;
+// board 2's port IS the SoC, so resetting it drops the USB device.
+const USB_VID_CH340 = "1a86";      // board 1, /dev/cu.usbserial-*
+const USB_VID_ESPRESSIF = "303a";  // board 2, native USB CDC, /dev/cu.usbmodem*
+async function listUsbCandidates() {
+  const ports = await SerialPort.list();
+  const vidOf = (p) => (p.vendorId ?? "").toLowerCase();
+  const mine = ports.filter(
+    (p) =>
+      vidOf(p) === USB_VID_CH340 ||     // CH340 (board 1)
+      vidOf(p) === USB_VID_ESPRESSIF || // Espressif native USB (board 2)
+      /usbserial|wchusbserial|SLAB_USBtoUART|usbmodem/i.test(p.path)
+  );
+  if (process.env.SERIAL_PORT) {
+    const want = process.env.SERIAL_PORT;
+    const hit = mine.find((p) => p.path === want);
+    return hit ? [hit] : [{ path: want }];
+  }
+  return mine;
+}
+
+let lastUsbScanSig = "";
+async function scanUsbPorts() {
+  let candidates = [];
   try {
-    await new Promise((resolve, reject) => {
-      port.once("open", resolve);
-      port.once("error", reject);
-    });
+    candidates = await listUsbCandidates();
   } catch (err) {
-    console.error("USB: connect failed:", err.message);
-    setTimeout(connectUsb, RECONNECT_INTERVAL_MS);
+    console.error("USB: could not list ports:", err.message);
+  }
+  // Logged on the EDGE, not every 3 seconds: which ports exist and which of them
+  // this host chose is the first question anyone asks when a board is dark, and
+  // before this change nothing in the log answered it at all.
+  const sig = candidates.map((p) => p.path).sort().join(",");
+  if (sig !== lastUsbScanSig) {
+    lastUsbScanSig = sig;
+    console.log(
+      `USB: ${candidates.length} candidate port(s): ${sig || "(none)"}` +
+        `${process.env.SERIAL_PORT ? ` [SERIAL_PORT=${process.env.SERIAL_PORT} restricts this list]` : ""}` +
+        ` - every one of them is opened as its own link.`
+    );
+  }
+  for (const p of candidates) {
+    if (usbLinks.some((l) => l.path === p.path) || usbOpening.has(p.path)) continue;
+    // Deliberately not awaited: one slow port must not block the rest. The .catch()
+    // is NOT decoration - openUsbLink can reject before its own try/finally is
+    // entered (a synchronous throw out of `new SerialPort`), and an unhandled
+    // rejection there used to leave the path in usbOpening for the life of the
+    // process, which every later scan then skipped in silence. The refusal names
+    // its cause and says the path was released, because from the Mac a board that
+    // is dark and a board that is missing look identical.
+    openUsbLink(p.path, (p.vendorId ?? "").toLowerCase()).catch((err) => {
+      usbOpening.delete(p.path);
+      console.error(
+        `USB: opening ${p.path} threw (${err?.message || err}) - the path is released and the next scan will retry it.`
+      );
+    });
+  }
+}
+
+// An open that emits NEITHER "open" NOR "error" is a real state (a port whose
+// device has gone but whose node hangs around), and it used to pin the path in
+// usbOpening forever: that board stayed dark until the host restarted, with
+// nothing in the log but a stuck "connecting to". Bounded here, and env-overridable
+// so the timeout path can actually be exercised.
+const USB_OPEN_TIMEOUT_MS = Number(process.env.DECKHAND_USB_OPEN_TIMEOUT_MS || 10000);
+
+async function openUsbLink(portPath, vid = "") {
+  usbOpening.add(portPath);
+  console.log(`USB: connecting to ${portPath} @ ${BAUD_RATE}...`);
+  let port = null;
+  try {
+    port = new SerialPort({ path: portPath, baudRate: BAUD_RATE });
+    let timer = null;
+    try {
+      await Promise.race([
+        new Promise((resolve, reject) => {
+          port.once("open", resolve);
+          port.once("error", reject);
+        }),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`no "open" and no "error" in ${USB_OPEN_TIMEOUT_MS / 1000}s`)),
+            USB_OPEN_TIMEOUT_MS
+          );
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    console.error(
+      `USB: connect to ${portPath} failed: ${err.message} - the path is released and the next scan will retry it.`
+    );
+    usbOpening.delete(portPath);
+    try {
+      port?.destroy?.();
+    } catch {
+      // already gone; the point was only to not leak a half-open handle
+    }
     return;
   }
-  console.log("USB: connected.");
-  usbPort = port;
+  const link = {
+    id: usbIdFor(portPath),
+    kind: "usb",
+    path: portPath,
+    vid,               // WHICH BOARD, known before any HELLO - see armHelloPulse()
+    port,
+    name: "",          // learned from HELLO, on THIS link
+    shot: null,        // per-link, so two boards can be captured at once
+    audioCap: null,
+    audioStream: null,
+    scrollGen: 0,
+  };
+  usbLinks.push(link);
+  usbOpening.delete(portPath);
+  console.log(`USB: connected on ${link.id} (${usbLinks.length} USB link(s) now live).`);
+  armHelloPulse(link);
 
   // Accumulates BYTES, not a string. Streaming audio arrives as raw binary frames
   // ("AUDIO bin <seq> <n>" then exactly n bytes), and `chunk.toString("utf8")`
   // would mangle every byte outside ASCII - lossily and silently. So the reader is
   // a small state machine over a Buffer: line mode until a frame header says how
   // many raw bytes follow, then byte-count mode for exactly that many.
+  // ALL OF IT IS PER LINK, closure-local as it always was - two boards streaming
+  // at once must not share a frame counter.
   let rxBuf = Buffer.alloc(0);
   let wantBytes = 0; // >0 = mid-frame, collecting binary
   let wantSeq = 0;
@@ -3174,7 +3873,7 @@ async function connectUsb() {
         const payload = rxBuf.subarray(0, wantBytes);
         rxBuf = rxBuf.subarray(wantBytes);
         wantBytes = 0;
-        onAudioFrame(wantSeq, payload);
+        onAudioFrame(wantSeq, payload, link);
         continue;
       }
       const idx = rxBuf.indexOf(0x0a); // '\n'
@@ -3187,15 +3886,169 @@ async function connectUsb() {
         wantBytes = parseInt(m[2], 10);
         continue;
       }
-      if (line) handleDeviceLine(line, "usb");
+      if (line) handleDeviceLine(line, link.id);
     }
   });
   port.on("close", () => {
-    console.log("USB: disconnected, will retry...");
-    usbPort = null;
-    setTimeout(connectUsb, RECONNECT_INTERVAL_MS);
+    // The key the BATT arm filed this link's reading under, taken BEFORE the splice
+    // because deviceNameFor() answers out of usbLinks and would give a different
+    // answer once this link is gone.
+    const battKey = senderKey(link.id);
+    const i = usbLinks.indexOf(link);
+    if (i >= 0) usbLinks.splice(i, 1);
+    forgetBatteryFor(battKey);
+    forgetMsgPriorityFor(battKey);   // the same key, the same rule - see its own note
+    console.log(
+      `USB: ${link.name || link.id} disconnected (${usbLinks.length} USB link(s) left) - the scan will reopen it.`
+    );
   });
-  port.on("error", (err) => console.error("USB: error:", err.message));
+  port.on("error", (err) => console.error(`USB: ${link.id} error:`, err.message));
+}
+
+// AN UNNAMED LINK CANNOT ANSWER, so the name is MADE to arrive rather than hoped
+// for. HELLO is boot-only (a 15s burst) and the firmware's own comment explains
+// why that was always enough: "Opening the USB port resets the ESP32, so this
+// boot-time line reliably reaches a host that connects at any time." That is true
+// of board 1's CH340 only when the modem lines are actually driven, and node
+// opens the port without driving them - MEASURED here, with board 1 cabled and
+// chatting (BATT every minute) while never once saying who it was. An unnamed
+// link is not cosmetic: deviceNameFor() refuses to guess when two boards are
+// attached, so every ANSWER from that board would be refused as coming from an
+// unknown device.
+//
+// So after a grace period a link that still has no name gets ONE reset pulse -
+// RTS asserted drives EN low, released it boots, and DTR is held false the whole
+// time because asserting it drives GPIO0 low and that is the BOOTLOADER, not a
+// reboot. DECKHAND_NO_USB_RESET=1 turns it off for anyone who would rather have an
+// anonymous link than a reboot.
+//
+// IT IS FOR BOARD 1 ONLY, and that is correctness rather than tidiness.
+// `{dtr:false, rts:true}` is ALSO esptool's USB-Serial-JTAG reset sequence, which
+// board 2's controller implements in hardware under USBMode=hwcdc - so the pulse
+// resets board 2 as well, and there its serial port IS the SoC: the reset DROPS the
+// USB device, the port closes, the close handler splices the link out of usbLinks
+// and any `link.pulsed` flag dies with the link object. "Once per link" therefore
+// bounds nothing on board 2, and a reopen that lands after the fresh 15s HELLO burst
+// has ended can pulse it again - the "power-cycled forever" outcome this comment
+// used to say could not happen. The user's cost is concrete: a watchdog restart or a
+// relaunch against a board that has been up for hours would reboot it six seconds
+// later, discarding an open answer window, a fetched scrollback or an in-flight
+// capture. Board 1's CH340 is a SEPARATE USB device that stays enumerated across an
+// ESP32 reset, which is both why its port survives the pulse and why the pulse is
+// needed there at all: node does not drive that chip's modem lines, so merely
+// opening the port does not reset the board. So the gate is the VENDOR ID, which
+// SerialPort.list() gives us before any HELLO.
+//
+// And ONCE PER PHYSICAL PATH rather than once per link object: usbPulsedPaths
+// OUTLIVES the splice, so a close/reopen cycle cannot turn "once" into a loop even
+// on a board whose port does go away.
+const HELLO_GRACE_MS = Number(process.env.DECKHAND_HELLO_GRACE_MS || 6000); // env override exists to EXERCISE this path
+// How long the board gets to answer WHOAMI before we fall back to the pulse. It
+// is a wire round trip and a printf, so it is short - but not so short that a
+// board busy repainting a tab misses its own window.
+const WHOAMI_WAIT_MS = Number(process.env.DECKHAND_WHOAMI_WAIT_MS || 1500);
+const RESET_PULSE_MS = 120;
+const MAX_PULSED_PATHS = 16;      // bounded: ports renumber, and this is not a history
+const usbPulsedPaths = new Map(); // portPath -> when, and it SURVIVES the link being spliced
+// Which chip is in front of the SoC. The vendor id when the OS gave us one; the
+// path shape when it did not, because SERIAL_PORT may name a port that is not
+// currently enumerated and there is then no vendorId to read. A CH340 comes up as
+// /dev/cu.usbserial-*, native USB CDC as /dev/cu.usbmodem*.
+function usbIsCh340(link) {
+  if (link.vid) return link.vid === USB_VID_CH340;
+  return /usbserial|wchusbserial|SLAB_USBtoUART/i.test(link.path || "") && !/usbmodem/i.test(link.path || "");
+}
+function armHelloPulse(link) {
+  setTimeout(async () => {
+    if (link.name || !usbLinks.includes(link)) return;
+    // ASK BEFORE REBOOTING. WHOAMI makes the board re-emit the exact line HELLO
+    // does (firmware announceHello(), one emitter, four callers), so the name we
+    // needed arrives without costing the user anything. That ordering is the
+    // whole point of this arm: asking is free and works on BOTH boards, while
+    // rebooting works on one board and throws away an open answer window, a
+    // fetched scrollback or an in-flight capture on it.
+    //
+    // It runs ABOVE the DECKHAND_NO_USB_RESET gate on purpose. That variable buys
+    // "do not reboot my board", not "leave it anonymous" - the anonymity was only
+    // ever the price of the escape hatch, and this arm stops charging it.
+    if (await sendToLink(link, "WHOAMI\n")) {
+      console.log(
+        `USB: ${link.id} has not said HELLO in ${HELLO_GRACE_MS / 1000}s (HELLO is a boot-only burst, ` +
+          `so a host that attached to an already-running board never hears it). Asking it WHOAMI and ` +
+          `waiting ${WHOAMI_WAIT_MS}ms before considering anything harsher.`
+      );
+      await new Promise((r) => setTimeout(r, WHOAMI_WAIT_MS));
+      if (!usbLinks.includes(link)) return;
+      if (link.name) {
+        console.log(`USB: ${link.id} answered WHOAMI and is ${link.name} - no reset was needed.`);
+        return;
+      }
+      // THE HOST CANNOT TELL THESE TWO APART, and saying so is the honest log.
+      // A board running firmware older than WHOAMI ignores an unknown command
+      // silently, and a board whose answer is merely still in flight is also
+      // silent - there is no negative acknowledgement on this wire and adding one
+      // would need the very firmware whose absence is in question. So the bounded
+      // wait IS the discriminator, and the fallback below has to stay for the
+      // older-firmware half of it.
+      console.log(
+        `USB: ${link.id} did not answer WHOAMI within ${WHOAMI_WAIT_MS}ms. That is either firmware older ` +
+          `than WHOAMI (which ignores an unknown command in silence) or an answer still in flight - ` +
+          `indistinguishable from here, so falling back to the older behaviour.`
+      );
+    } else {
+      console.log(
+        `USB: ${link.id} has no name and WHOAMI could not be written to it (the port is not writable), ` +
+          `so this host cannot ask which board it is. Falling back to the older behaviour.`
+      );
+    }
+    // EVERY REFUSAL NAMES ITS CAUSE. These are checked here rather than at arm time
+    // so they only ever print about a link that is genuinely still anonymous.
+    if (process.env.DECKHAND_NO_USB_RESET === "1") {
+      console.log(
+        `USB: ${link.id} is still anonymous and DECKHAND_NO_USB_RESET=1, so it will NOT be pulsed - ` +
+          `the documented choice of an anonymous link over a reboot. It cannot authenticate an answer ` +
+          `until it says HELLO.`
+      );
+      return;
+    }
+    if (link.pulsed || usbPulsedPaths.has(link.path)) {
+      console.log(
+        `USB: ${link.id} still has no name, but ${link.path} has already been pulsed once, so it will NOT be ` +
+          `pulsed again - a board that never says HELLO must stay dark rather than be power-cycled forever.`
+      );
+      return;
+    }
+    if (!usbIsCh340(link)) {
+      console.log(
+        `USB: ${link.id} has not said HELLO in ${HELLO_GRACE_MS / 1000}s, so this host cannot authenticate an ` +
+          `answer from it - but it is not a CH340 (vendor ${link.vid || "unknown"}, path ${link.path}), and on a ` +
+          `native-USB board that RTS sequence is esptool's reset: it would reboot a healthy board and drop the ` +
+          `port mid-answer. Leaving it anonymous until it says HELLO.`
+      );
+      return;
+    }
+    link.pulsed = true;
+    usbPulsedPaths.set(link.path, Date.now());
+    while (usbPulsedPaths.size > MAX_PULSED_PATHS) usbPulsedPaths.delete(usbPulsedPaths.keys().next().value);
+    console.log(
+      `USB: ${link.id} has not said HELLO in ${HELLO_GRACE_MS / 1000}s, so this host does not know ` +
+        `which board it is and could not authenticate an answer from it. Pulsing RTS to reboot it ` +
+        `once - it announces itself for 15s after a boot. (DECKHAND_NO_USB_RESET=1 disables this.)`
+    );
+    const set = (opts) =>
+      new Promise((res) => link.port.set(opts, (err) => res(!err || console.error(`USB: ${link.id} modem lines: ${err.message}`))));
+    await set({ dtr: false, rts: true });     // EN low: reset held, GPIO0 high so it is NOT the bootloader
+    await new Promise((r) => setTimeout(r, RESET_PULSE_MS));
+    await set({ dtr: false, rts: false });    // EN released: normal boot
+  }, HELLO_GRACE_MS);
+}
+
+async function connectUsb() {
+  await scanUsbPorts();
+  // A SCAN, not a one-shot connect: it is also how a board plugged in later gets
+  // picked up without restarting the host, which is exactly how the second board
+  // arrived.
+  setInterval(scanUsbPorts, RECONNECT_INTERVAL_MS);
 }
 
 // ---------- BLE transport ----------
@@ -3320,11 +4173,40 @@ function startBle() {
       blePeripheral = peripheral;
       bleDeviceName = name; // answers over BLE are verified with THIS device's key
       console.log(`BLE: connected to ${name} and ready.`);
+      // ASK FOR THE MTU RATHER THAN RACING THE UNSOLICITED REPORT. The device
+      // reports a link's negotiated MTU from loop() the moment it settles, which
+      // is while this Mac is still discovering characteristics and subscribing -
+      // MEASURED: both `BLEMTU link=0 mtu=23` and `mtu=256` arrived on the CABLE
+      // and neither on the radio. The cable's copy is not usable (see the BLEMTU
+      // arm: it describes some BLE link, not necessarily the one this host writes
+      // through), so without asking again the link stays at the 20-byte floor -
+      // 2.7 KB/s where 8.4 was available. One line per connect, and a board that
+      // cannot answer refuses it BY NAME, which is the behaviour the refusal table
+      // exists for.
+      await sendToLink(BLE_LINK, "BLEMTU\n").catch(() => {});
       peripheral.once("disconnect", () => {
         console.log("BLE: disconnected, re-scanning...");
+        // The key the BATT arm filed this link's reading under, taken BEFORE
+        // bleDeviceName is cleared - senderKey() reads it, and afterwards this
+        // link's key is the bare "ble" rather than the board's own name. Exactly
+        // the same two-step the USB close handler does, and it was missing here:
+        // a board 2 taken off the cable kept republishing a stale `batts` entry in
+        // the 5s heartbeat for ever, with a growing ageSec, which is the phantom
+        // board the prune's own comment says it removes. Not unbounded growth (the
+        // key is stable per device, and boundBatteryStore caps the map anyway) -
+        // a claim the code did not keep.
+        const battKey = senderKey("ble");
+        bleMtuByLink.clear();      // indices are reused; a stale one would pin the floor
+        bleChunkSize = BLE_CHUNK_MIN;
         bleCharacteristic = null;
         blePeripheral = null;
         bleDeviceName = "";
+        // AFTER the teardown, never before: forgetBatteryFor keeps the reading if
+        // any LIVE link still answers to that key, and liveLinks() counts the BLE
+        // link while bleCharacteristic is set. Called first, it would find this
+        // very link and decline to prune every time.
+        forgetBatteryFor(battKey);
+        forgetMsgPriorityFor(battKey);   // likewise, and likewise AFTER the teardown
         startBleScan();
       });
     } catch (err) {
@@ -3512,7 +4394,13 @@ function pairScanPrune(now = Date.now()) {
 function pairReplyIsOurs(ex, via, gen) {
   if (via === "pair") return gen !== 0 && gen === ex.gen;
   if (via === "ble") return !!bleDeviceName && bleDeviceName === ex.name;
-  if (via === "usb") return !!usbDeviceName && usbDeviceName === ex.name;
+  // THE LINK'S OWN name, never a host-wide "the USB device": a second board on a
+  // second cable must not be able to satisfy this test for the first one's
+  // exchange. Unnamed link (no HELLO seen) still fails, exactly as before.
+  if (viaKind(via) === "usb") {
+    const l = usbLinkFor(via);
+    return !!l && !!l.name && l.name === ex.name;
+  }
   return false;
 }
 
@@ -3520,7 +4408,7 @@ function pairReplyIsOurs(ex, via, gen) {
 // simply not working, which is the whole complaint above.
 function pairReplyAccepted(ex, kind, via, gen) {
   if (pairReplyIsOurs(ex, via, gen)) return true;
-  const where = via === "pair" ? `the pairing link of exchange #${gen}` : `the ${via} link`;
+  const where = via === "pair" ? `the pairing link of exchange #${gen}` : `the ${linkLabel(via)} link`;
   console.log(
     `Pair: ${kind} DROPPED - it arrived on ${where}, which is not the exchange with ` +
       `${ex.name} (#${ex.gen}). A late reply from an abandoned exchange must never be ` +
@@ -4073,13 +4961,18 @@ async function tick(generation = tickGeneration) {
       .writeFile(
         HOST_ALIVE,
         JSON.stringify({
-          connected: !!(usbPort || bleCharacteristic),
+          connected: usbLinks.length > 0 || !!bleCharacteristic,
           remoteAnswer,
           at: Date.now(),
           // `device` = who we're actually talking to (falls back to the choice);
           // `devices`/`selected` let the menu bar render the picker without ever
           // reading the secrets file.
-          device: bleDeviceName || usbDeviceName || selectedDevice || null,
+          device: bleDeviceName || primaryUsbName() || selectedDevice || null,
+          // Every device this host is actually driving, with the link each is on.
+          // The heartbeat's singular `device` is what the menu bar has always
+          // drawn and stays as it was; this is the honest plural beside it, so
+          // "two boards are connected" is answerable without reading the log.
+          links: liveLinks().map((l) => ({ link: l.id, device: l.name || null })),
           selected: selectedDevice || null,
           devices: pairedDevices.map((d) => d.name),
           // The menu-bar picker's icon submenu. `icon` is the fully-resolved
@@ -4100,9 +4993,16 @@ async function tick(generation = tickGeneration) {
           pairing: pairStatus(),
           // ageSec is computed on the way out rather than stored, so a stale
           // reading cannot look fresh just because the heartbeat itself is.
-          batt: lastBatt
-            ? { ...lastBatt, ageSec: Math.round((Date.now() - lastBatt.at) / 1000) }
-            : null,
+          batt: (() => {
+            const b = batteryForHeartbeat();
+            return b ? { ...b, ageSec: Math.round((Date.now() - b.at) / 1000) } : null;
+          })(),
+          // Every device's own reading, so nothing has to infer whose `batt` is
+          // whose. `batt` above is one of these, chosen by batteryForHeartbeat().
+          batts: [...battByDevice.values()].map((b) => ({
+            ...b,
+            ageSec: Math.round((Date.now() - b.at) / 1000),
+          })),
         })
       )
       .catch(() => {});
@@ -4162,8 +5062,10 @@ async function tick(generation = tickGeneration) {
       console.log(`Wire: payload was ${fitted.was} bytes against the device's 16000-byte line ` +
                   `buffer - sent ${fitted.bytes} after dropping ${fitted.dropped.join("; ")}`);
     }
-    if (usbPort) usbPort.write(line);
-    if (bleCharacteristic) await sendOverBle(line);
+    // ONE COPY PER LIVE LINK. A cabled board 2 has always received the tick
+    // twice (its USB cable and its BLE link) and the firmware is built for that;
+    // adding board 1 adds one more LINK, not a second copy to anybody.
+    await broadcastToDevices(line);
     console.log(
       `5h=${usage.fiveHourPct ?? "?"}% (resets ${usage.fiveHourResetInMin ?? "?"}m) ` +
         `7d=${usage.sevenDayPct ?? "?"}% (resets ${usage.sevenDayResetInMin ?? "?"}m) ` +
@@ -4182,7 +5084,11 @@ async function tick(generation = tickGeneration) {
         `${usage.cxWin ? `/${Math.round(usage.cxWin / 1440)}d` : ""}` +
         `${usage.cxResetMin == null ? "" : ` (resets ${usage.cxResetMin}m)`} ` +
         `sessions(${usage.sessionsTotal})=${JSON.stringify(usage.sessions)} ` +
-        `via=${[usbPort && "usb", bleCharacteristic && "ble"].filter(Boolean).join(",") || "none"}`
+        // Every live link by name, not just the transport kinds: "via=usb,ble"
+        // read identically whether one board was connected on two transports or
+        // two boards were connected on one each, which is exactly the confusion
+        // that hid the second board for as long as it did.
+        `via=${liveLinks().map((l) => linkLabel(l.id)).join(",") || "none"}`
     );
   } catch (err) {
     console.error("Failed to read usage:", err.message);
@@ -4289,7 +5195,7 @@ setInterval(async () => {
     // whichever device is current. The device keeps its own copy until a new Mac
     // re-provisions it or you use its own "Reset pairing" button.
     if (command === "FORGET" || command.startsWith("FORGET ")) {
-      const want = command.slice(6).trim() || bleDeviceName || usbDeviceName || selectedDevice;
+      const want = command.slice(6).trim() || bleDeviceName || primaryUsbName() || selectedDevice;
       if (!want) {
         console.log("Auth: FORGET ignored - no device to forget.");
         return;
@@ -4332,9 +5238,15 @@ setInterval(async () => {
       }
       return;
     }
-    console.log(`Sending command to device: ${command}`);
-    if (usbPort) usbPort.write(command + "\n");
-    if (bleCharacteristic) await sendOverBle(command + "\n");
+    // FANNED OUT TO EVERY DEVICE, one copy per link. The duplication a cabled
+    // device already sees (USB and BLE) is unchanged and is what KBTEST,
+    // KBPROBE, KBBUBBLE and POWERPROBE dedupe against on the device; what is new
+    // is that a SECOND BOARD gets the command at all instead of silently
+    // missing it. Two boards on two cables is two copies total, one each - not
+    // four - because the fan-out is per link, never per device times transports.
+    const targets = liveLinks().map((l) => linkLabel(l.id));
+    console.log(`Sending command to ${targets.length} link(s) [${targets.join(", ")}]: ${command}`);
+    await broadcastToDevices(command + "\n");
   } catch {
     // no trigger file waiting, nothing to do
   }
@@ -4361,7 +5273,26 @@ startBle();
 console.log(
   VOICE_DELIVERY === "dispatch"
     ? "Voice: dictation will RUN HEADLESSLY (claude -p --resume). Set DECKHAND_VOICE_DELIVERY=clipboard to hand it to you instead."
-    : "Voice: dictation goes to the CLIPBOARD + a notification; paste it yourself. Set DECKHAND_VOICE_DELIVERY=dispatch for the old headless behaviour."
+    : VOICE_DELIVERY === "clipboard"
+      ? "Voice: dictation goes to the CLIPBOARD + a notification; paste it yourself. Unset DECKHAND_VOICE_DELIVERY to post into the live session instead."
+      : "Voice: dictation is POSTED INTO THE LIVE SESSION, and falls back to the clipboard (naming why) if that cannot be confirmed. Set DECKHAND_VOICE_DELIVERY=clipboard to always hand it to you."
+);
+// SAID AT BOOT, the way the voice modes above are, and THREE-WAY rather than
+// two: unset, set to something valid, and set to something that is not. The
+// third is the one that has to be loud - a typo resolves to the same "next" as
+// unset, so without this line a user who set DECKHAND_INBOX_PRIORITY=noew has no
+// way at all to learn that nothing they did took effect.
+console.log(
+  !INBOX_PRIORITY_ENV_RAW
+    ? `Inbox: device messages queue at "${INBOX_PRIORITY_DEFAULT}" (behind the turn Claude is in). ` +
+        `Set DECKHAND_INBOX_PRIORITY=${INBOX_PRIORITIES.join("|")} to change it.`
+    : INBOX_PRIORITY_ENV
+      ? `Inbox: DECKHAND_INBOX_PRIORITY=${INBOX_PRIORITY_ENV} - device messages queue at "${INBOX_PRIORITY_ENV}"` +
+          `${INBOX_PRIORITY_ENV === "now" ? " and INTERRUPT the turn in progress" : ""}.`
+      : `Inbox: DECKHAND_INBOX_PRIORITY=${JSON.stringify(INBOX_PRIORITY_ENV_RAW)} is not one of ` +
+          `${INBOX_PRIORITIES.join("|")} - IGNORED, falling back to "${INBOX_PRIORITY_DEFAULT}". ` +
+          `It is refused here rather than passed on: the receiver would silently do the same, ` +
+          `and a knob that quietly does nothing is worse than one that says it did nothing.`
 );
 // Checked at STARTUP, not only on first use. The old behaviour accepted a capture, spent
 // the transfer, and failed at the end - so a missing dependency presented as "dictation

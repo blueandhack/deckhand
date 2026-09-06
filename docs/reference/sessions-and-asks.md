@@ -9,11 +9,94 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 
 ---
 
+- **BOARD 1 HAS THE STATUS BAND CARD NOW, DERIVED FROM ITS OWN CELLS.** It was board 2's
+  alone, and the sentence explaining why - "board 1 has no surplus height to give" - was
+  false: its list area is 264px and its tallest ordinary row is 90, so ONE session (69% of
+  9,452 measured ticks) drew a 90px row and then **174px of empty tab, 66% of the tab**,
+  against the 48% that motivated the card on board 2. The zeros were a consequence of
+  `sessionExpCandidateH()` living inside `#if !BOARD_USES_TFT_ESPI`, not of the arithmetic.
+  The port is ONE implementation reading two headers: the guards in `sessions.ino` were
+  widened rather than a board-1 arm copied in.
+  - **The blocks, and how the leadings were derived.** Each block is one line of INK plus
+    its leading. Board 1's ink is fixed by its faces (name 26, every body line 13, a rule 1)
+    and comes to 145px for the full stack; the band takes 34 of the 264, leaving 230, i.e.
+    **85px of leading to distribute against board 2's 122**. Each block therefore takes
+    board 2's own leading scaled by 85/122 = 0.697 and floored, which spends 77 and leaves
+    8px outside the card as list area. The reason board 1 is *tighter* than a proportional
+    scale is that **its name is not scaled**: the hero rung's 26px cell stays, which is 2px
+    MORE than board 2's head-rung name on a panel with 64% of the height.
+    band 34 + name 32 + sub 24 + title 2x15 + rule 12 + LAST PROMPT 21 + prompt 4x18 +
+    rule 12 + path 15 + pad 4 = **`SESSION_EXP_MAX_H` 256**, with
+    **`SESSION_EXP_MIN_H` 220** the same stack at `PROMPT_MIN`.
+  - **The band is 34 because the MARK does not scale.** Board 2's 44 is `TAB_BAR_H` less the
+    card's border, which here would give 32 - but `drawAgentMark` is a 32x32 blit on both
+    boards, drawn on the card interior, so `SESSION_BAND_H - BORDER_CARD >= SPARK_SIZE`
+    binds instead. The mark sits FLUSH in the band's 32-row interior with no clearance
+    either side. Seen on the glass: band rows 40..71, mark ink reaching both.
+  - **THE BAND CANNOT CARRY THE MARK *AND* THE FULL STATUS PHRASE, and that is measured.**
+    The word lane is `ROW_W - 2*BORDER_CARD - 2*PAD - SPARK_SIZE - MARK_GAP - DUR_CHARS*ADV
+    - 1` = **141px** on board 1 against 199 on board 2, and `labelForStatus`'s
+    "NEEDS YOUR INPUT" inks 16 x T_HEAD's 10px advance = **160**. Clearing it would need
+    `2*SESSION_BAND_PAD + SESSION_BAND_MARK_GAP <= 9`, so no pad this card can afford
+    closes it. The mark stays - it is the card's only agent carrier and its only motion,
+    since the row indicator is skipped there - and `bandStatusWord()` **measures** and drops
+    to `shortLabelForStatus()`, the words board 1's own tall-row pill already draws:
+    WORKING / NEEDS INPUT / READY, longest 110 of 141. Board 2 never takes that branch.
+    One mechanism on both boards, not a second vocabulary; the pill's two literals moved
+    into that function so there is one table rather than two.
+  - **THE LADDER: board 1's card is a ONE-session behaviour where board 2's is one-to-two.**
+    `leftover = 264 - (n-1)*(rowH + 3)` against the 220 floor: **1 -> 256 (the cap)**,
+    2 -> 171, 3 -> 86, 4 -> 66, 5 -> 52, 6 -> 44, all refused. At two sessions the ladder
+    gives both rows their 90px cap and 171 is left; a card there would have 137px for a
+    186px body - no leading and no rules, the "card of air" the design forbids. Refused
+    deliberately, and the **81px of trailing air at two sessions is the accepted cost**, not
+    a regression: it is the ladder's own `SESSION_ROW_H_MAX` and predates this work.
+  - **The spine is 5px, not board 2's 6, and it is STATIC.** `SESSION_DOT_CX - SPARK_SIZE/2`
+    is x=15 and the spine starts at x=10, so its ink must end at 14 - at 6 its last column
+    would be erased by the indicator blit four times a second, the defect board 2 measured
+    at 17 pixels. The Codex knockout's period is `ON 6 + OFF 4 = 10` against a straight
+    section of `rowH - 22`, so **two gaps need rowH >= 42**: board 1's 41px (five sessions)
+    and 38px (six, under the "+N more" strip) rungs carry ONE. Unfixable rather than
+    untried (ON > `SESSION_SPINE_W` and OFF >= 2/3 of it give P >= 10 on a 5px spine) and
+    unreachable in practice - 5 and 6 sessions are 0 of 9,452 ticks. `sessions-geom-check`
+    asserts two gaps on every rung reachable at four or fewer sessions and one below that.
+  - **NO SHIMMER, NO CROSSFADE, NO PULSE ON BOARD 1**, deliberately and by name.
+    `SESSION_SHIMMER_*` and `SESSION_PULSE_MAX` do not exist in `board_e32r28t.h`. Board 2
+    composes into a PSRAM shadow framebuffer and flushes once, so a travelling light rides a
+    flush that was happening anyway; board 1 draws STRAIGHT TO THE GLASS, where the same
+    animation is a per-frame repaint with no flush to hide behind and no `PERF` command to
+    measure it with. `sessionXfadeT`/`sessionPulseA`/`sessionBandFill` are three
+    `static inline` stubs there, so `drawSessionBand`'s source text is identical on both
+    boards and its fade terms fold away. **The band's MARK still animates on board 1** -
+    `tickWorkingSpinner` advances it in place - so the one-session working card is not
+    static.
+  - **The touch hit test now walks `sessionRowAtY()` on both boards.** Board 1 kept a
+    uniform-slot division (`(sy - Y0) / (rowH + GAP)`) while its binary was held
+    byte-identical; with a 256px first row that division reports the wrong session for
+    every tap below the card. `SESSION_ROW_SIG_LEN` also grew 176 -> 304 there, because the
+    band card signs its prompt and path - 768 bytes of DRAM, the price of the card.
+  - **Seen on board 1's REAL PANEL** (`SCREENSHOT` reads the glass on board 1, unlike board
+    2's framebuffer read), 2026-09-05, LIGHT, one working session: band 38..71 with the
+    mark, `WORKING` and `54s`; name ink 77..94; sub 105..116 with the Mac icon
+    right-anchored at x=207; title 129..140; rule at 148; `LAST PROMPT` 157..164; four
+    prompt lines at 177/195/213/231; rule at 253; path 261..272; card border 38..279.
+    Every one of those is the model's own number - **except that `uiStrokeRound` paints the
+    bottom border one row BELOW `y + rowH - 2` on this board**, so a 241px card's ring lands
+    at 278..279 rather than 277..278. That is pre-existing (an ordinary 63px row does the
+    same, and the extra row falls inside `SESSION_ROW_GAP`), and it is written down here
+    because it cost half an hour of believing the card was 242px tall.
+    `MULTITEST` at 2, 3 and 4 sessions confirmed the ladder on the glass: two 90px rows,
+    three 86px rows and four 63px rows, spines visible on each, and **no band card at any
+    of them**.
+
 - **The session DETAIL screen is laid out by a running cursor, and its extra text all
-  comes from the same transcript read.** It carries name, title, status pill (with
+  comes from the same transcript read.** It USED to carry name, title, status pill (with
   `for 12m - 14:31` beside it), LAST PROMPT, PATH, and then MODEL/GIT BRANCH and
   STARTED/AGENT as **paired columns** rather than a four-row ladder — the pairing is what
-  buys room for the new text without a taller card. Offsets are a `cy` cursor, not the
+  bought room for the new text without a taller card. **That is the card §7 replaced on
+  BOTH boards; the paragraphs below it are kept because their reasoning is still what the
+  current card rests on, and the "§7 IS NOW BOTH BOARDS' CARD" note says what changed.**
+  Offsets are a `cy` cursor, not the
   hand-derived `cardY + 78 / +120 / +158` constants it used to have; those had to be
   re-derived by hand whenever a field moved, which is how the screen drifted sparse.
   Where the values come from: `lastPrompt` and the title from the **same 64KB tail** as
@@ -40,10 +123,43 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     ACTIVE column pair, which both said the same thing twice and created a field that
     could only update by repainting the whole card. The column pairs with AGENT instead,
     and both of those never change for a session.
-  **EVERYTHING ABOVE IS BOARD 1'S ARM NOW. On board 2 the pill, the `for 12m - 14:31`
-  line and BOTH column pairs are gone — §7 of the sessions redesign heads that card
-  with the same 44px status band the sessions tab's first row wears, and closes it with
-  ONE dim `T_META` line.** The band carries the agent MARK, the status WORD at `T_HEAD`
+  **§7 IS NOW BOTH BOARDS' CARD. The pill, the `for 12m - 14:31` line and BOTH column
+  pairs are gone from BOTH — §7 of the sessions redesign heads the card with the same
+  status band the sessions tab's first row wears (44px on board 2, 34 on board 1) and
+  closes it with ONE dim `T_META` line.** The `#if BOARD_USES_TFT_ESPI` arms in
+  `drawSessionDetail` and `renderDetailDuration` were WIDENED rather than copied into, so
+  the card is one implementation reading two headers; `DETAIL_PAD_Y`, `DETAIL_PILL_STEP`,
+  `DETAIL_COL_LBL_STEP`, `DETAIL_COL_VAL_STEP`, `pillLabel()`, `drawColValue()` and
+  `detailPillY` are all deleted, and `s.agent` joined the detail signature on board 1 too
+  (the band's MARK is the only thing on that card that now says which agent it is).
+  **Board 1's own numbers, derived in `board_e32r28t.h` and never chosen:**
+  `DETAIL_CARD_H` **224 → 210** and `DETAIL_AIR` **0 → 5**. The ceiling its footer sets is
+  **211**, so the old 224 was 13px OVER it — that is the defect two `KNOWN[1]` entries
+  recorded (the "answer this one on your Mac" line invisible under the history hint), and
+  it is fixed by the card shrinking. `DETAIL_AIR` is the scaled leading budget: the ink is
+  162px, the ceiling leaves **47px** of leading against board 2's 66, every boundary is one
+  term in `6*AIR + 14`, and `6*5 + 14 = 44` is the most of the 47 that fits (AIR 6 needs 50).
+  The band's word lane on board 1's detail card is **133px**, not the 141 of its own list
+  row (the card is 8px narrower than the row), and `bandStatusWord()` lands on the same
+  `WORKING / NEEDS INPUT / READY` there — asserted, so a card narrow enough to shorten a
+  word the tab still spells out fails by name.
+  **The meta line's THIRD fact is dropped by MEASUREMENT, not by a board flag.** `metaFacts()`
+  composes `model - branch - HH:MM`, the caller measures it against the lane the Mac cluster
+  leaves and recomposes without the clock if it does not fit — the same compose-measure-fall-back
+  `bandStatusWord()` uses. Board 1's lane is `216 - 2*14 = 188` at `TEXT_ADV` 6; with a second
+  Mac up the cluster costs `8 + 13 + 4 + 7*6 = 67`, leaving 121 against a 126px three-fact
+  line, **over by 5** — so it carries two facts there and three when only one Mac is
+  connected. **SEEN both ways on the glass**:
+  `shot-2026-09-05T14-28-28-Deckhand-0528.png` (`opus-5 - compose-surface`, the clock dropped
+  because the branch is 15 characters) and `shot-2026-09-05T14-31-57-Deckhand-0528.png`
+  (`opus-5 - main - 07:30`, all three). Board 2 keeps three at its 260px lane (168 + 84 = 252,
+  8 to spare) and drops the clock on a long branch for the same measured reason —
+  `shot-2026-09-05T14-28-11-Deckhand-C114.png`. Which board is FORCED to give one up is
+  pinned by `DETAIL_META_FACTS` in `sessions-geom-check.mjs`, the way `BAND_WORDS` pins the
+  status words. **Board 1 has no shimmer, crossfade or pulse** — `sessionXfadeT()`,
+  `sessionPulseA()` and `sessionBandFill()` are `static inline` stubs there, so the shared
+  band text folds to `t = -1` and a flat fill at compile time.
+  **On board 2:** The band carries the agent MARK, the status WORD at `T_HEAD`
   and the duration; the meta line carries `model - branch - <status-since HH:MM>` on the
   left with the Mac's icon (and, with a second Mac up, its tag) right-anchored to the
   card's text edge. `DETAIL_CARD_H` went 326 → 330 → **300** across the two tasks and
@@ -85,15 +201,20 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     signature would repaint a 296x300 card every 5s — the two failures this screen's rules
     already name. `hostNowSec()` minus the elapsed time is stable to within the ±1s two
     independent `floor(ms/1000)` terms can disagree by, and `status` is already in the
-    signature. `s.agent` had to JOIN the signature, board 2 only: the band's mark is drawn
-    from it and nothing else on that card carries the agent any more.
+    signature. `s.agent` had to JOIN the signature, **on both boards**: the band's mark is
+    drawn from it and nothing else on either card carries the agent any more.
+    (This line said "board 2 only" until 2026-09-05, and `deckhand_display.ino` carried
+    the same claim. `buildDetailSignature` appends it unguarded on both boards and has
+    said so since §7. Corrected rather than deleted: the cost of the wrong version was
+    that a reader budgeting the next signature field took the stale 356-byte
+    board-2-only worst case instead of the **372 / 381** the checker derives.)
   - **THE BAND ON THIS CARD WAS COMPLETELY STATIC, AND THE FIX IS A THIRD TICK.** Both
     existing ticks early-return on `showingDetail`, so on this screen nothing repainted the
     band AND `animPhase` never advanced — which is why it was fully dead rather than merely
     slow: the ~5s host tick does repaint the card, but the phase it draws was frozen too.
     The mark sat still two taps from an identical band that turns, so the screen read as
     broken rather than as a deliberate difference. **Found on the glass**, like everything
-    else on this card. `tickDetailBandAnim()` (sessions.ino, board 2 only, called from
+    else on this card. `tickDetailBandAnim()` (sessions.ino, called from
     `loop()` between the two existing ticks) now advances the mark, the crossfade and the
     pulse at the DETAIL card's own coordinates. It is a third tick rather than a relaxed
     gate on the other two, and that is the safety argument rather than a preference: those
@@ -106,6 +227,33 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     was the renderer's own `animPhase`, so "the composed frame now changes" IS the claim. It
     says nothing about how the mark looks on the glass, and the original report came from a
     person watching the device.
+  - **AND IT WAS BOARD 2 ONLY UNTIL 2026-09-05, WHICH LEFT BOARD 1 WITH THE SAME DEFECT
+    THIS ENTRY CALLS "broken".** Corrected in place rather than rewritten away: the entry
+    above described the fix as board 2's, and `924cecc` had already given board 1 the same
+    band-headed detail card. `drawAgentMark` is called with `animate = working` on both, so
+    board 1's mark was drawn at whatever frame the LIST had left `animPhase` on and never
+    advanced for the life of the screen — while the identical band two taps away in the
+    list did turn, because `tickWorkingSpinner`'s `if (sessionRowExpanded(pos)) {
+    drawBandMark(pos); continue; }` is shared code. The `#if !BOARD_USES_TFT_ESPI` was
+    **widened rather than the function copied**, which is what the rest of that branch did
+    and what stops the two boards drifting apart again: the tick and its gate
+    (`detailBandVisible()`) are now shared, and only the §6 fragments stay board 2's — the
+    crossfade and the pulse (whose state, `xfadeId` / `xfadeFrom`, does not exist on board
+    1 at all), `paintDetailBandFrame()`, and the `tft.flush()` after the blit. Only
+    fragments are behind the guard, never a whole statement in both arms, so no
+    brace-counting checker sees an imbalance.
+  - **The cost on board 1 was MEASURED, not assumed: 4.64–5.17 ms per mark blit**, 24
+    consecutive samples off the device, i.e. ~4% of the 120ms tick. It is the same call
+    (`drawBandMarkAt`) on the same cadence that `tickWorkingSpinner` already makes on that
+    board's sessions LIST, where the worst case is up to six blits a tick against this
+    screen's one — and the two screens are mutually exclusive by construction
+    (`tickWorkingSpinner` returns on `showingDetail`; this tick requires it), so nothing
+    was added to any frame that was already paying. **Board 1's evidence is the REAL
+    PANEL**, unlike board 2's above: two `SCREENSHOT` captures 52s apart differ in **281 of
+    the mark's 1024 pixels** (x 24..55, y 62..93) and show two visibly different spark
+    frames. `sessions-geom-check.mjs` binds `drawBandMarkAt`'s `animate = true`, the
+    unguarded `tickDetailBandAnim()` call in `loop()`, and the fact that the tick's own
+    definition is NOT inside the `#if !BOARD_USES_TFT_ESPI` block.
   - **`showingDetail` IS ALSO TRUE ON THE ASK SCREEN, which has no band at all.** It is set
     in one place and the ask screen is drawn through the same entry point
     (`drawSessionDetail` hands off to `drawAskDetail` on `askPid`), so a tick that trusted
@@ -480,3 +628,267 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   work vouches for the panel's colours** — board 2's `SCREENSHOT` reads the shadow framebuffer, so
   it proves the renderer self-consistent and nothing about the glass (see the verification trap
   under Two boards).
+- **THE ASK'S TAPPABLE TOKENS RIDE ON THE WIRE AS `ask.chips`, EXTRACTED ON THE MAC.** The hardest
+  thing to type on this device is exactly the token the question already printed: a path costs a
+  page switch for every `/`, a capital costs a shift. `host/ask-chips.mjs` pulls at most `CHIP_MAX`
+  = 4 of them out of the detail — backticked spans, then flags, then `/`-bearing tokens, then quoted
+  spans, deduped by FIRST APPEARANCE POSITION and dropped over `CHIP_BYTES` = 48 — and
+  `host/index.mjs` emits them beside `options`, **only when there is one**, so a prompt with no
+  tappable token costs no payload bytes. `askChips(toAscii(detail), options)` and never the reverse:
+  the cap is in BYTES, so capping before the transliteration caps a string whose byte count then
+  changes under it. `SessionInfo.askChips[4][50]` holds them on BOTH boards (48 + a NUL), counted by
+  `askChipCount`, dense, empty labels not counted, reset on the no-ask path beside `askDetail`.
+  **48 rather than the 32 that would have mirrored `askOpts[4][34]`:** 32 dropped
+  `/Users/yujia/projects/deckhand/build` (36 bytes) and this repo's own
+  `firmware/deckhand_display/keyboard.ino` (38), i.e. it failed to chip a path in its own home repo.
+  Cost 4 x 50 x MAX_SESSIONS(6) = **1,200 bytes of DRAM** (measured: board 1's globals moved 70,748
+  -> 71,948, exactly that), 4.5% of board 1's ~26KB free heap.
+  **THE LINE'S HEADROOM WAS MEASURED BEFORE THE FIELD WAS ADDED, not assumed**, because the spec
+  made that a gate whose failure was a design change (a separate `CHIPS` line, or a smaller cap) and
+  not an implementation detail. Against `feedChar`'s parsed 16,000-byte guard: the saturated
+  6-session ASCII line was **14,237** bytes, chips at their worst cost **214 bytes per session** and
+  **1,284** over six, taking it to **15,521 — 479 bytes still free**. The realistic figure is far
+  smaller: over the **133 ask-carrying ticks in the live host log**, the worst real chip cost was
+  **40 bytes**, and the largest ask-bearing sessions array ever emitted was 3,041 bytes.
+  `host/wire-bytes-check.mjs` now asserts that arithmetic with both constants parsed, so raising
+  either fails by name; it models the field's cost as a DIFFERENCE (`chips: false`) rather than
+  transcribing it. **Chips are not a `wire-fit` shed tier** and deliberately so: they survive tier
+  1 dropping the detail they came from, which is the right direction — the body is what you read on
+  the Mac, the tokens are what you cannot type here.
+  **They are in `buildDetailSignature` on BOTH boards, as an FNV-1a hash** (`askChipsHash`), for the
+  same reason `optDescs` are on board 2: the host omits `chips` until it extracts one, so a pending
+  prompt can gain them mid-life with `askPid` unchanged and nothing else on the card moving — and
+  `askDetail` is not in that signature either. Verbatim they would need 563 bytes of a 384-byte
+  `detailSigCache`. **That cache is now at 381 of 384 on board 2** (372 on board 1); the next term
+  added to the detail signature will not fit, and `sessions-geom-check.mjs` fails rather than
+  truncating silently.
+  **"NOT YET DRAWN" WAS TRUE WHEN WRITTEN AND IS NOT ANY MORE — corrected in place, because the
+  sentence below is still the record of what the WIRE was proved to carry, which is a different
+  claim from what the panel draws.** Chips are drawn now, as the compose panel's INSERT band; see
+  *The compose surface* at the end of this file. What that task verified was the wire and the
+  parse: a read-only probe ask published into the live host emitted
+  `"chips":["arduino-cli compile","--fqbn","firmware/deckhand_display/keyboard.ino"]` (the 38-byte
+  path 32 would have dropped, and `Allow`/`Deny` correctly suppressed as chips that merely restate a
+  button), and both boards drew that ask's detail card unchanged, captured. **`detailSigCache` is
+  448 now, not 384** — the 381-of-384 figure above is what forced the widening and is kept for
+  that reason; the reply panel added a term and at 384 the NEXT term would have been silently
+  DROPPED rather than overflowing, because every term is appended under `if (used + n < outSize)`.
+
+---
+
+## The compose surface
+
+> Landed on the `compose-surface` branch (Tasks 1-13, plus five alignment tasks and a
+> whole-branch review). **Every number below is measured or parsed. Where nothing measured it,
+> it says so** — the list of unverified things at the end of this section is not an appendix,
+> it is half the point.
+
+- **IT IS ONE SURFACE WITH TWO SCREENS OVER ONE DRAFT, and that is the whole design.**
+  `composeActive` means "the compose surface is up" (it is the old `kbActive`, renamed;
+  a grep for `kbActive` finds nothing anywhere, asserted across all three sources including
+  comments). `uint8_t composeScreen` is `COMPOSE_SCREEN_PANEL` 0 or `COMPOSE_SCREEN_KEYS` 1 —
+  `#define`s, not `const int`s, because `#if` on a `const int` is silently false and a screen
+  identifier that might one day be guarded is spelled the way that cannot fail quietly.
+  **`handleTouch` is the only place that reads `composeScreen`**; it is the router. Every other
+  seam asks `composeOnPanel()` / `composeOnKeys()`, which fold "the surface is up" into the same
+  question so no caller can test the screen and forget the surface. Two assertions hold that
+  shape: `handleTouch`'s body reads `composeScreen` exactly ONCE, and the three sources together
+  may name it on at most 10 non-comment lines (it is on 9).
+  - **The draft is `kbText`/`kbLen`/`kbCaret` and it belongs to the SURFACE, not to a screen.**
+    `TYPE...` on the panel and `BACK` on the keyboard are a flag flip plus one repaint; neither
+    touches the draft. Verified on board 1's REAL panel, both directions: capture `20-44-40`
+    (panel, draft `ok--no-verify`), `20-45-19` (keyboard, `13/150`, same text with the caret),
+    `20-45-57` (panel again, byte-identical to the first by eye).
+  - **`openComposeOn(idx, screen)` is the ONE place every reset lives** — the draft, the
+    keyboard's modes, and the panel's four globals. The screen is an ARGUMENT, never a flag the
+    caller sets before the call (a second list to remember) or after it (a full-screen double
+    paint). Three public openers name their screen: `openCompose`, `openComposeKeys` (`KBTEST`),
+    `openComposeForMessage`.
+- **THE KEYBOARD'S LEFT KEY IS `BACK`, NOT `DISCARD` — the destructive control is off that screen
+  entirely.** `kbTouch` and `drawKbActions` ask the same `composeHasPanel()`, so the key cannot
+  say BACK and close the surface. **The exception is a MESSAGE to a READY session**, which has no
+  ask and therefore no panel behind it (the panel is built out of an ask's options, tokens and
+  prompt; for a message all three legends would say "ask" about a thing with no ask). There the
+  keyboard IS the root and its left key is still `DISCARD`/`CANCEL`. `composeHasPanel()` is
+  `!kbIsMessage()` — derived from the surface's own state, not a third flag.
+- **THE PANEL'S FOUR CONTROL KINDS ARE TOLD APART BY FORM, NEVER BY COLOUR**, and that is the
+  reason a colour-blind reader and a board-2 screenshot can both still read it:
+  | kind | form | where |
+  |---|---|---|
+  | **send** | filled, label centred | the reply bands - one tap answers the ask |
+  | **insert** | unstroked on `COLOR_CARD`, label LEFT, prefixed `+ ` | the token band |
+  | **navigate** | `COLOR_ACCENT` stroke, label centred | the `1/2>` pager |
+  | **reuse** | card fill + `COLOR_LABEL` stroke, label LEFT | the recents row |
+  All four are in ONE frame in board-2 capture `21-34-25`. **Board 2's `SCREENSHOT` reads the
+  shadow framebuffer, so that capture vouches for GEOMETRY and FORM and NOT for what the panel's
+  colour pipeline did with them** — `COLORTEST` is the instrument for colour and a person is the
+  authority. Board 1's capture reads the real glass and shows the same four forms.
+- **A CHIP'S LABEL IS TRUNCATED AND ITS VALUE IS NOT, and nothing on the glass can show that.**
+  The label is `"+ " + value` fitted into `drawn.w - 8` — **62px = 10 characters on board 1**, 88px
+  = 11 on board 2 — so even an 11-byte flag like `--no-verify` draws with three ASCII dots. The
+  INSERT puts the whole token in. That difference is why `COMPOSE chip <n>` prints the byte count
+  of what it inserted: measured on board 1, the button read `+ firmw...` and the draft gained all
+  31 bytes of `firmware/tft_setup/User_Setup.h`. The truncation lives in `drawComposeControl`, the
+  one function that draws all four kinds; `drawComposeChip` is asserted to route through it and to
+  call no `drawString` of its own, so a second truncation rule cannot appear beside the first.
+- **DRAWN AND TESTED ARE DIFFERENT RECTANGLES, and the action row is where that was established.**
+  `KB_ACT_H` is `TAP_MIN` (the TESTED band, 40 on board 1 and 46 on board 2) while `KB_ACT_DRAWN`
+  is `2 * KB_LINE_PITCH` (26 / 32) and `KB_ACT_DY` centres the one in the other. The rule the
+  whole plan exists to state is that **the TESTED band clears the floor, never the drawn control**
+  — a checker asserting the DRAWN key against `TAP_MIN` passed only while board 1's `KB_ROW_H` was
+  44 (drawn 40, exactly the floor) and was found the moment it went to 41. Sub-floor controls are
+  a NAMED list (`EXCEPTIONS`) that is exact in BOTH directions: an unlisted sub-floor control
+  fails, and a listed one that is no longer sub-floor fails too. The panel has exactly one entry,
+  the draft line, sub-floor in HEIGHT only (its tested zone is `TAP_MIN` wide).
+  - **The action row takes PROPORTIONS, not cells.** `uiActionRow`'s `fracs` are `{1,1,2}`, so
+    `SEND` is 50% of the lane and the destructive control 25% — "SEND twice DISCARD" exactly, and
+    the checker parses that initialiser rather than restating it. Columns close on the panel:
+    69+8+139 = 216 on board 1, 96+8+192 = 296 on board 2. `ACT_GAP` (8) is parsed out of
+    `uiActionRow`'s own body, so the committed mock's gap cannot drift from the firmware's.
+  - **Screen-edge margins stopped counting as taps and that was ACCEPTED with arithmetic, not
+    waved through.** The old `sx < CARD_X + halfW` test gave the left 12px to CANCEL and the right
+    to SEND; the zones now start at `CARD_X`. SEND's tested AREA still GREW 8.9% on board 1
+    (116x44 = 5104 -> 139x40 = 5560) and fell only 2.4% on board 2, because the `{1,2}` widening
+    plus the swallowed 8px gap more than repay the margin. And the left margin's loss is a straight
+    win: x 0..11 used to DISCARD 150 characters. Board 1's XPT2046 affine fit is also worst at the
+    edges, so those pixels were the least reliable rather than the cheapest.
+- **THE COLUMN CLOSES ON `BOARD_H`, AND IT IS ASSERTED BY A CONTIGUITY WALK, NOT A SUM.** A sum of
+  bands with each gap written as a difference TELESCOPES: 10,000 sets of ARBITRARY constants
+  produce ZERO failures, so the identity holds no matter what any constant is. What ships is a
+  walk (no overlap, no negative gap, last band inside `BOARD_H`) plus the claim the walk cannot
+  make — that **all** of the slack is the three terms the design names. It rejects 98.96% of the
+  same garbage. As the checker prints it:
+  ```
+  board 1  prompt card 4..55 | reply legend 60..75 | reply band 0 76..115 | reply band 1 116..155
+           | insert legend 156..171 | token band 172..211 | draft line 212..232
+           | recent legend 233..248 | action band 280..319 of 320       (no recents row)
+           slack 39 = COMPOSE_TOP 4 + COMPOSE_GAP 4 + residual 31
+  board 2  prompt card 12..88 | reply legend 97..115 | reply band 0 116..161 | reply band 1 162..207
+           | insert legend 208..226 | token band 227..272 | draft line 273..296
+           | recent legend 297..315 | recent band 316..361 | action band 426..471 of 480
+           slack 84 = COMPOSE_TOP 12 + COMPOSE_GAP 8 + residual 64
+  ```
+  Both land the action band exactly on `KB_ACT_Y` — 280 and 426 — which is the number the
+  KEYBOARD's own column produces, so the two screens cannot disagree about where `SEND` lives.
+  **Whether recents fit is asked of the GEOMETRY, not of the board number:** `composeRecentsFit()`
+  is `KB_ACT_Y - composeRecentY() >= TAP_MIN` — 31 against 40 on board 1 (false), 110 against 46
+  on board 2 (true) — and the checker asserts that body names no board flag at all.
+- **RELEASE-COMMIT: a character on the three letter rows commits on the LIFT.** A press arms a
+  candidate and draws a magnified bubble one key row clear of the finger, the held path re-targets
+  as the finger slides, and the release commits. Row 3, the action row, the card, the strip, the
+  peek and `DEL` keep press-commit, because each already clears the ~7.1mm fingertip floor and
+  `DEL` must delete on a tap and repeat on a hold.
+  - **THE MEASUREMENT THAT JUSTIFIES IT HAS NOT BEEN TAKEN. `KBPROBE` reads 0 keystrokes.** The
+    instrument ships, refuses with a named cause, dedupes against the double delivery, and was
+    exercised end to end — the host log's only completed run reads
+    `KBPROBE off (KBPROBE off): 0 keystrokes, 0 re-targeted between press and lift (0%)`, because
+    nobody has typed the two passes. So **the slide-correction rate is UNKNOWN**, and
+    "release-commit cuts mis-hits" is still a claim. To take it: raise the keyboard on a real
+    prompt, send `KBPROBE`, type the same ~40-character sentence twice (once carefully, once at
+    speed), send `KBPROBE off`, read the percentage. **A rate near zero means release-commit is
+    buying nothing measurable** and the spec's fallback — six columns, two taps a character — is
+    what should come next.
+  - **What the probe can and cannot say, even once it is run.** It measures where fingers LAND
+    versus where they LIFT. It says NOTHING about whether the resulting text was right: a
+    re-target means the finger moved onto a different key, not that the second key was the
+    intended one. And the "release point" is the LAST SAMPLED point — `getTouchPoint()` returns
+    false on the lift — so at a 15ms poll it is the finger's position up to 15ms before it left.
+    That caps the precision of every number it prints. CANCELS (armed, slid off the key band
+    entirely, lifted on nothing) are counted separately, because an arm that ends on nothing is
+    the single strongest evidence for release-commit and it is invisible in a re-target total.
+- **THE SEND SPLIT: the panel leaves a receipt, the keyboard closes.** `sendTypedAnswerToHost` and
+  `sendPromptToHost` return `bool` and close nothing. Before this, one screen had two answers to
+  "what happened" — an option tapped two bands up left `SENT: ...` and `DONE`, while a chip-built
+  draft sent from the same screen's own SEND dropped the whole surface. The senders' early returns
+  send NOTHING, which is what makes the bool load-bearing rather than cosmetic.
+  `composeSentText` is `KB_MAX_BYTES + 1`, not the 36 bytes it was sized at when only an option
+  label reached it — at 36 a 150-byte draft's receipt would have been cut at 35 with no marker and
+  would have silently disagreed with what went to Claude.
+- **THE RECENTS RING holds four and the row draws three.** `char composeRecent[4][KB_MAX_BYTES+1]`,
+  **604 bytes of DRAM**, global rather than per session (a per-session copy would cost 3,624 bytes
+  to say the same thing six times). The fourth entry is what keeps an older reply DEDUPING when it
+  is sent again rather than arriving as a second copy. **It is NOT persisted, deliberately:** NVS
+  would give a BLE-paired device a plaintext log of every reply plus a flash-wear budget for a
+  one-tap convenience, so it is empty after a reboot and the legend says
+  `RECENT - NOTHING SENT YET` in exactly that state. Entries are remembered **after** the send, past
+  every `return false` guard — the checker binds the INDEX of the call against the index of the
+  last guard, because an entry the ring offers back as sent that never went out is a record that
+  lies. Board 1 pays the 604 bytes and draws nothing; its legend says `RECENTS: NO ROOM ON THIS
+  PANEL`, and `composeRecentsFit()` is asked at the HIT TEST as well as the draw — without that, a
+  tap on board 1's 31px residual would replace the draft out of a ring that is nowhere on its
+  glass.
+- **THE ASK SCREEN'S BUTTON SAYS `REPLY` NOW, NOT `TYPE`, because it stopped opening a keyboard.**
+  It opens the compose surface at its ROOT — the panel, where this ask's own options and tokens are
+  one tap each — and the keyboard is the sheet behind that panel's own `TYPE...`, one further tap
+  away with the draft carried. `TYPE` under-sold it (a reader who does not want to type never
+  presses it, so the one-tap reply is never found) and mis-described it, which is the same class as
+  the peek hint that read "tap here to read it" after the control moved. Labels: half-width `REPLY`
+  beside `SPEAK`, full-width `REPLY TO THIS PROMPT`. **Seen on board 1's REAL panel**
+  (`shot-2026-09-05T22-00-35-Deckhand-0528.png`): `SPEAK` and `REPLY` side by side under two option
+  buttons, both comfortably inside their halves. `sessions-geom-check.mjs` parses both the labels
+  AND the lane each is drawn into out of `drawAskDetail`'s own `if (askInputRows(idx))` block and
+  asserts the fit per board (REPLY 30/40px in a 104/144px half; `REPLY TO THIS PROMPT` 120/160px in
+  the 216/296px lane, the same slot `SPEAK YOUR ANSWER`'s 102/136 already filled), plus that no
+  label says TYPE. A `--selftest` fault puts `TYPE YOUR ANSWER` back and fails by name.
+  **Not renamed, and right not to be: the plain detail card's own header chip still says `TYPE`.**
+  A READY session has no ask, so no panel is built for it and that button really does open the
+  keyboard.
+  **Measured cost of the rename: board 1 +0 BYTES with a DIFFERENT HASH** (`3e8b2cf3` ->
+  `5d772e55`, size 1414288 both sides), board 2 +16. That is a live instance of the hazard
+  `CLAUDE.md` names — a size comparison passes it — on a change that adds 5 bytes of string and has
+  them absorbed by rodata alignment.
+  **A FINDING, pre-existing rather than introduced: the full-width `REPLY TO THIS PROMPT` arm is
+  UNREACHABLE with today's host.** It draws only when `type && !speak`, and `host/index.mjs:2097`
+  sets `item.ask.voice = record.ask.kind === "question"` unconditionally while `askTypeOffered`
+  requires that same `kind == "question"` — so `speak` is true whenever `type` is, and the row is
+  always the half-width pair. It was equally unreachable when it read `TYPE YOUR ANSWER`. Left
+  alone and recorded: the arm is a correct fallback for a payload that omits `voice`, and deleting
+  it would remove the only handling of that case.
+
+### What the compose surface does NOT verify, stated rather than implied
+
+- **THAT MOST ANSWERS ARE SHORT.** The whole reply panel rests on it — one-tap options and
+  pasteable tokens are only the right shape if the typical reply is a word or a path rather than a
+  paragraph. **The host has the history and it has still not been measured.** Nobody has counted
+  the length of the answers actually sent from this device or from the Mac.
+- **THAT RELEASE-COMMIT REDUCES THE ERROR RATE.** `KBPROBE` reads 0 keystrokes (above). There is no
+  measurement, only the mechanism.
+- **THAT THE FILLED TILE READS AS A KEY** in every theme on every panel. A person looked at it once
+  (Task 2 Step 8) and said yes; that is the only kind of evidence available, since board 2's
+  capture reads the shadow framebuffer and board 1's real-glass capture is one panel under one
+  light.
+- **THAT THE FOUR EXTRACTION HEURISTICS PICK THE RIGHT TOKENS** in general. Backticked spans,
+  flags, `/`-bearing tokens and quoted spans are merged by first-appearance position. Over the 133
+  ask-carrying ticks in the live host log, rule 4 produced `"Use Case:"` — a prose fragment, not a
+  tappable token — and that single sample is the whole review of chip QUALITY there has ever been.
+  What IS measured is the COST: worst real chip cost 40 bytes over those 133 asks, against a
+  theoretical worst of 214 per session.
+- **FOUR OF THE PANEL'S EIGHT EXITS HAVE NEVER BEEN PERFORMED AS A GESTURE**, plus tapping a
+  recents row on either board, plus message-mode's `DISCARD`/`CANCEL` arm. The four are a one-tap
+  send, `SEND` with a chip-built draft, `SEND` from the keyboard, and "the session goes away". All
+  are bound structurally; none has had a finger on it. **NO TOUCH-INJECTION COMMAND EXISTS AND ONE
+  WAS DELIBERATELY NOT ADDED** — `KBBUBBLE` arms a key but never commits, and declines `DEL`
+  precisely because `DEL` commits on press, so a `TAP x y` verb that could reach a commit would put
+  "send a message to Claude Code" on the trigger file. That is a remote-control hole rather than an
+  instrument. **The decision is the record, as much as the gap is.** What IS verified on the glass:
+  `TYPE...` -> `BACK` in both directions on both boards, `CLOSE`/`DISCARD` as far as
+  `closeCompose()` goes, and the ask expiring under both screens (four captures).
+- **SIX 38px COMPACT ROWS HAVE NEVER BEEN SEEN ON THE GLASS.** Reaching them needs seven concurrent
+  sessions and this Mac had one. The clamp that fixes their sub-line overrun is checker-verified
+  only.
+- **BOARD 2'S COLOUR, throughout.** Its `SCREENSHOT` reads the shadow framebuffer the renderer just
+  wrote, so a capture is correct by construction even when the panel is not. This produced a clean
+  example worth keeping: a board-2 capture at 11:07 showed the status band in AMBER and it was
+  taken as a board-to-board palette difference, until board 1's real-glass capture at 14:47 showed
+  both bands rendering the same dark orange. There was no palette difference to chase — the
+  framebuffer was simply not the panel.
+- **BOARD 1'S PROMPT CARD HAS THREE LINES OF WHICH THE 2nd AND 3rd ARE NEVER USED.** The hook caps
+  `askTitle` at 34 characters and board 1's card lane is exactly 34 columns (204px / 6), so a title
+  always wraps to ONE line. **~34px of that panel is dead.** Not a bug and not fixed: what fills
+  those lines is a design question and the committed mock draws the title alone. The ask-is-gone
+  card does use both.
+- **THE SENT STATE SHOWS LIVE-LOOKING CONTROLS THAT REFUSE** — the recents row, the reply buttons
+  and the token chips alike. Each refuses with a named cause, and it matches the committed mock, so
+  it is a PRE-EXISTING CLASS rather than a new defect. It is written down here as a class so it is
+  not rediscovered one control at a time: **if the panel ever stops advertising dead controls in
+  the sent state, all of them come off together.**

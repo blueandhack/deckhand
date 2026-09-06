@@ -25,11 +25,20 @@ matters for a microphone sitting on a desk all day. A vocabulary prompt primes t
 decoder with this project's nouns, because without it "update CLAUDE.md" came back
 as "update core code MD5".
 
-**What happens to the transcript: it goes to your clipboard, plus a notification
-naming the project to paste into.** The device card reads `COPIED - PASTE IT`. You
-paste it into the session yourself.
+**What happens to the transcript: it is posted straight into the live session**, so it
+turns up in the conversation you aimed at, attributed to a peer session rather than to
+your own typing. If that cannot be confirmed — an older Claude Code, a session that has
+since exited, or a write that could not be verified in the session's transcript — it
+falls back to **your clipboard plus a notification** naming the project to paste into,
+and the host log says which happened and why. The device card reads `COPIED - PASTE IT`
+in that case.
 
-That is deliberate. The original version ran it for you
+`DECKHAND_VOICE_DELIVERY=clipboard` forces the clipboard hand-off every time; it was the
+default until 2026-09-05, when the per-session messaging socket that makes direct
+delivery possible was found (see
+[`docs/reference/audio-and-voice.md`](../reference/audio-and-voice.md)).
+
+The clipboard was deliberate. The original version ran it for you
 (`claude -p --resume <session>`), and the first real use produced three problems at
 once: the headless run became a **second author** appending to the same conversation
 concurrently, nothing needing permission could finish (a headless run doesn't raise

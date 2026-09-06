@@ -9,6 +9,172 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 
 ---
 
+- **THE HOST DRIVES EVERY BOARD ON THE DESK, NOT THE FIRST ONE.** `findUsbPort()` used
+  `.find()` and returned the first port `SerialPort.list()` matched. That was invisible for
+  as long as there was one board; with two cabled it drove whichever the OS enumerated
+  first - board 2's `/dev/tty.usbmodem1101` - and board 1 sat on `/dev/tty.usbserial-10`
+  announcing `HELLO Deckhand-0528 v2` every two seconds to a host that never answered.
+  **Nothing in the log said so.** The tick line read `via=usb,ble`, which is what one board
+  on two transports looks like and what two boards on one each would have looked like; the
+  measurement that settled it was a `SCREENSHOT` returning exactly ONE 320x480 capture, and
+  `[device/usb]` and `[device/ble]` reporting the identical `BATT mv=4162 pct=96`.
+  Every matching port is now opened and run as its own **link**, and the scan repeats every
+  `RECONNECT_INTERVAL_MS`, so a board plugged in later is picked up without a restart.
+  `SERIAL_PORT` still RESTRICTS the host to exactly one port, and the candidate list is
+  logged on the edge (`USB: 2 candidate port(s): ... - every one of them is opened as its
+  own link`), because "which ports did you find and which did you choose" was the first
+  question and nothing in the log answered it.
+- **A LINK IS THE UNIT OF IDENTITY, and its id comes from the PORT PATH** (`usb:usbserial-10`),
+  not from the device name. The name is learned from `HELLO` and sometimes never arrives,
+  while a dedupe key, a reply route and a capture buffer all need an identity from the first
+  byte. The name, once known, is what the log shows (`[device/usb:Deckhand-0528]`) and what
+  an answer's HMAC is verified against. The tick's `via=` lists the links by name:
+  `via=usb:Deckhand-C114,usb:Deckhand-0528,ble`.
+- **`deviceNameFor()` REFUSES TO GUESS once a second board is attached.** With one link it
+  still falls back to the selected device, which is how a host that attached mid-run has
+  always worked. With two, an unnamed link resolves to `""`: the old fallback would have
+  attributed one board's `ANSWER` to the other, and although the HMAC then fails closed, the
+  refusal would name the wrong subject - the defect class this repo keeps paying for.
+- **THE HOST ASKS BEFORE IT REBOOTS: `WHOAMI`.** `HELLO` is a boot-only 15s burst, so a
+  host that attaches to an already-running board - its own restart, a watchdog relaunch, a
+  cable replugged after the burst - never learns that link's name, and an unnamed link
+  cannot be attributed to a paired device: every `ANSWER` down it is refused as coming from
+  an unknown device. **Measured on the desk before this existed:** board 1 named
+  (`[device/usb:Deckhand-0528]`) and board 2 anonymous (`[device/usb:usbmodem1101]`) at the
+  same instant, board 2 saved only by its BLE link also being live. The reset pulse below
+  was the only cure and it is available on board 1 alone, so board 2 had none at all.
+  A link with no name after `HELLO_GRACE_MS` is now sent `WHOAMI` and given
+  `WHOAMI_WAIT_MS` (1500ms, `DECKHAND_WHOAMI_WAIT_MS` overrides it) to answer. The firmware
+  re-emits the identical `HELLO <name> v2` line through `announceHello()` - **one emitter,
+  four callers** (`setup()`, the boot burst, the legacy-pairing upgrade nudge, `WHOAMI`),
+  because that string is a wire contract the host parses and a second copy of it is a second
+  chance to drift. **Asking is free and works on both boards; rebooting works on one board
+  and costs the user their session**, which is why the ask comes first and the pulse is now
+  only the fallback. It runs ABOVE the `DECKHAND_NO_USB_RESET` gate too: that variable buys
+  "do not reboot my board", and the anonymity was only ever the price of the escape hatch.
+  **THE HOST CANNOT TELL "no answer yet" FROM "this firmware has no `WHOAMI`", and the log
+  says so.** Firmware older than `WHOAMI` ignores an unknown command in silence, and an
+  answer still in flight is also silence; there is no negative acknowledgement on this wire
+  and adding one would need the very firmware whose absence is in question. So the bounded
+  wait IS the discriminator, the fallback below MUST stay for the older-firmware half, and
+  the unanswered log names the ambiguity rather than asserting a cause it does not know.
+  **Duplicate delivery is deliberately unguarded**: a cabled board 2 receives every
+  trigger-file command twice, and `WHOAMI` is an idempotent ANNOUNCEMENT rather than a
+  refusal (`KBTEST`) or a measurement (`POWERPROBE`) - the host's `HELLO` arm logs and
+  re-pins only on a CHANGE, so the second copy costs one short line. A guard would also
+  silence a genuine second ask from a link that closed and reopened.
+  **Verified on the live hardware**, both boards flashed and the host restarted against
+  boards that had been up for hours: both named within the grace period, no reset, and the
+  "not a CH340" refusal did not fire.
+- **AN UNNAMED LINK CANNOT ANSWER, so the name is MADE to arrive.** `HELLO` is a boot-only
+  15-second burst, and the firmware's own comment explains why that was always enough:
+  *"Opening the USB port resets the ESP32, so this boot-time line reliably reaches a host
+  that connects at any time."* That is true of board 1's CH340 only when the modem lines are
+  actually driven, and node opens the port without driving them. **Measured:** board 1
+  cabled and sending `BATT` for minutes while never once saying who it was. A link with no
+  name after 6s now gets ONE reset pulse - RTS asserted drives EN low, released it boots,
+  and DTR is held false throughout because asserting it drives GPIO0 low and that is the
+  BOOTLOADER, not a reboot. Loudly logged. **Measured:** both boards named themselves
+  within two seconds of the pulse, and forcing the grace to 0.3s on board 1 alone reproduced
+  it end to end (`has not said HELLO in 0.3s ... Pulsing RTS` -> `usb:usbserial-10 is
+  Deckhand-0528`). `DECKHAND_NO_USB_RESET=1` disables it for anyone who would rather have an
+  anonymous link than a reboot; `DECKHAND_HELLO_GRACE_MS` exists to exercise the path.
+  **This is now the FALLBACK, not the first move** - `WHOAMI` is tried first (above) and the
+  pulse is reached only when the ask goes unanswered. It is kept rather than replaced because
+  a board flashed with firmware older than `WHOAMI` will never answer, and on board 1 the
+  reset is that board's only remaining route to a name. Every refusal on the way still names
+  its cause, including `DECKHAND_NO_USB_RESET=1`, which used to return in silence.
+- **THE PULSE IS FOR BOARD 1 ONLY, gated on the CH340's vendor id.** It first shipped
+  ungated, and the comment claiming it could not power-cycle a board forever was wrong on
+  board 2. `{dtr:false, rts:true}` is ALSO esptool's USB-Serial-JTAG reset sequence, which
+  board 2's controller implements in hardware under `USBMode=hwcdc`; board 2's serial port
+  **is** the SoC, so the reset DROPS the USB device, the port closes, the close handler
+  splices the link out and `link.pulsed` dies with the link object. "Once per link" therefore
+  bounded nothing there, and a watchdog restart or a relaunch against a board that had been
+  up for hours would have rebooted it six seconds later, discarding an open answer window, a
+  fetched scrollback or an in-flight capture. Two changes: the gate is `usbIsCh340(link)`,
+  reading the `vendorId` `SerialPort.list()` gives before any `HELLO` (`1a86` CH340 =
+  board 1, `303a` Espressif native USB = board 2), falling back to the path shape only when
+  `SERIAL_PORT` named a port that is not currently enumerated and there is no vendorId to
+  read; and the once-only record is `usbPulsedPaths`, keyed on the PORT PATH and living
+  OUTSIDE the link object, so a close/reopen cannot turn "once" into a loop. Both refusals
+  name their cause in the log. **NOT verified against a live restarted host** - proved by
+  `multi-device-check.mjs`, which executes the real `scanUsbPorts`/`openUsbLink`/
+  `armHelloPulse` against a stub `SerialPort`.
+- **A HUNG OPEN NO LONGER PINS ITS PORT.** `usbOpening` is what stops the 3s re-scan
+  double-opening a path; `openUsbLink` is called un-awaited, and a port that emitted neither
+  `open` nor `error` used to leave its path in that set for the life of the process - that
+  board dark, with nothing in the log but a stuck `USB: connecting to`. The wait is now a
+  `Promise.race` against `USB_OPEN_TIMEOUT_MS` (10s, `DECKHAND_USB_OPEN_TIMEOUT_MS`
+  overrides it to exercise the path), the path is released on every exit, and the un-awaited
+  call has a `.catch()` that releases it too. Every one of those refusals says the path was
+  released and the next scan will retry it.
+- **`battByDevice` IS PRUNED AND BOUNDED.** Nothing used to delete from it, and an unnamed
+  link keys on its port path - which renumbers - so every path a board had ever enumerated
+  under left a permanent entry and the heartbeat's `batts` array republished every dead one
+  every 5 seconds. A link's reading is now dropped in its `close` handler (keyed BEFORE the
+  splice, because `deviceNameFor()` answers out of `usbLinks`) unless the same device is
+  still reachable on another link - the ordinary cabled-and-BLE case. `MAX_BATT_DEVICES` (8)
+  bounds it on top, oldest evicted first, because a port that renumbers mid-run leaves a key
+  no close handler will ever name again.
+- **THE HISTORY DEDUPE KEY IS NOT `senderKey()`.** `senderKey()` falls back to the LINK ID
+  for an unnamed link, which is right for an `ANSWER` and wrong here: `deviceNameFor()`
+  returns `""` for an unnamed USB link whenever a second USB link exists, so ONE device that
+  is cabled and on BLE presented as TWO senders, the dedupe did not fire, and the `since:`
+  reply was appended twice - every new message in the reader doubled. `scrollSenderKey()`
+  therefore collapses every sender into one `(unattributable)` bucket for as long as ANY usb
+  link is anonymous (which is exactly the pre-multi-device behaviour, for exactly the window
+  in which it was the correct one) and returns to per-sender keying once every link has a
+  name. The cost is the mirror image and deliberately the cheaper one: two boards asking for
+  the same session, filter and range inside `SCROLL_REQ_DEDUP_MS` while one of them is
+  anonymous, and the second is answered with silence for that request rather than with a
+  corrupted transcript - and that drop is now LOGGED with its cause and its key, where it
+  used to be a bare `return`.
+- **FAN-OUT IS ONE COPY PER LINK - not per device times transports.** A cabled board 2 has
+  always received the tick and every trigger-file command twice (its cable and its BLE link),
+  which is why `KBTEST`, `KBPROBE`, `KBBUBBLE` and `POWERPROBE` dedupe on the device. Board 1
+  adds one LINK, so it gets one copy and **no device receives more than it did before**.
+  Suppressing the BLE copy for a board that is also cabled was considered and rejected: it
+  would make delivery depend on the host having learned that link's name, which it sometimes
+  never does. The command log now names its targets
+  (`Sending command to 3 link(s) [usb:Deckhand-C114, usb:Deckhand-0528, ble]: SCREENSHOT`),
+  because from the Mac a board that missed a command and a board that refused one look
+  identical.
+- **A REPLY GOES BACK TO THE BOARD THAT ASKED.** History and scrollback replies used to go to
+  "the USB port"; with two boards that answered board 1's request down board 2's cable. They
+  now go to the link the request arrived on, with one exception that PRESERVES an existing
+  optimisation rather than adding a rule: a request that came over BLE from a device that is
+  also cabled is answered over **that device's** cable, because BLE writes go out in 20-byte
+  packets with a response awaited on each and the tick loop blocks behind them. Same device,
+  faster pipe - never a different device. The chunk budgets, the ACK waiter key and the
+  fetch generation are all per link too, so one board's fetch can no longer supersede the
+  other's.
+- **THE ANSWER AND PROMPT DEDUPES KEY ON THE SENDER, NOT THE LINE.** This is the subtlest
+  correctness risk in the multi-device change, because the failure is a wrong answer reaching
+  Claude. A device transmits every answer on both of its transports at once, so one device's
+  two copies must still collapse - what these guards have always done. Keyed on the LINE
+  alone, they would also collapse two DIFFERENT boards answering the same prompt with the
+  same option index, which is entirely ordinary: the second board's answer would vanish with
+  nothing saying so. The key is now `deviceNameFor(via) || via`, so an unnamed link is still
+  its own sender rather than joining a shared bucket.
+- **SHOT AND AUDIO CAPTURE BUFFERS ARE PER LINK.** One `SCREENSHOT` fans out to every board
+  and their rows come back concurrently on separate ports; a single `shotCapture` would have
+  appended both into one buffer and written one PNG that is neither board - and `finishShot`'s
+  row-count guard could not have caught it, because the row counts add up. The PNG filename
+  now carries the device (`shot-...-Deckhand-0528.png`); the timestamp alone was never a
+  distinguisher, since board 2 finishes a capture in 0.4s and board 1 in ~18s but "rarely in
+  the same second" is not a filename rule.
+- **BATTERY IS STORED PER DEVICE.** A single `lastBatt` meant two boards overwrote each other
+  every few seconds and the heartbeat showed whichever spoke last - one board at 96% and the
+  other at 100% alternating under one label, which is worse than showing nothing. The
+  heartbeat still publishes ONE `batt` (that is what the menu bar draws) but it is chosen by
+  `batteryForHeartbeat()`, carries the `device` it came from, and every device's reading is
+  beside it in `batts`. `links` lists what the host is actually driving.
+- **BLE IS STILL EXACTLY ONE PEER.** Making it multi-peer was deliberately left out of this
+  change. A second board therefore reaches the host over its cable only, which is enough for
+  a cabled board and is why `via=` shows two USB links and one BLE. `lastVoice` is likewise
+  still global, so a dictation started on one board is mirrored on the other - cosmetic, and
+  unfixed.
 - **A `Notification` used to DELETE the prompt it was notifying about, and that made
   remote answering of a question almost impossible.** Measured: an `AskUserQuestion` fires
   `PermissionRequest` (which publishes the ask and blocks up to `REMOTE_WAIT_MS`) and then,
@@ -211,3 +377,22 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   fresh left the row bright, and a Claude flip repainted a row that hadn't changed. The
   bar has to be busted on that flip too, since `drawPaceBar` caches on `(pct, tick)` alone
   and would never repaint a colour-only change.
+- **`DECKHAND_INBOX_PRIORITY=now|next|later` chooses how a device message LANDS, and the
+  default `next` is deliberate.** The session-inbox frame carries a `priority`, and the
+  receiver's own line — disassembled from
+  `/opt/homebrew/Caskroom/claude-code/2.1.236/claude`, quoted verbatim in
+  `host/session-inbox.mjs` — is
+  `let a = e.priority==="now"||e.priority==="next"||e.priority==="later" ? e.priority : "next"`.
+  So an absent field already means `next`, and unset must keep meaning exactly that: `now`
+  **interrupts the turn Claude is in the middle of**, which is a thing to ask for rather than
+  to inherit. **An unrecognised value is refused BY NAME at boot** —
+  `Inbox: DECKHAND_INBOX_PRIORITY="noew" is not one of now|next|later - IGNORED, falling back
+  to "next"` — rather than forwarded, because the receiver would rewrite it to `next` in
+  silence and the user would have no way to learn their variable did nothing. Every delivery
+  logs the priority it used and what set it (`at priority next [the default]`), so the knob is
+  traceable from the log without reading the source. `session-inbox-check.mjs` binds the host's
+  accepted set and its default to that quoted receiver line rather than transcribing them, so
+  the two cannot drift apart without failing by name.
+  The launchd plist (`~/Library/LaunchAgents/com.deckhand.host.plist`) carries it as a
+  **commented-out** entry in `EnvironmentVariables` — documented where a reader looks for it,
+  and inert, because the absent variable must go on meaning `next` exactly.

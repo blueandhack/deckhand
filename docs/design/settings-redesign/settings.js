@@ -35,8 +35,8 @@ const K = {
   STEP_BTN_TOP:8, STEP_BTN_SIZE:64, STEP_BAR_H:8, STEP_BAR_GAP:10,
   SET_CAP_STEP:24,
   // HOME
-  HOME_Y0:54, HOME_ROW_H:70, HOME_GAP:12, HOME_Y0_BOT:8,
-  HOME_NAME_DY:14, HOME_SUB_DY:44,
+  HOME_Y0:54, HOME_ROW_H:58, HOME_GAP:10, HOME_Y0_BOT:8,
+  HOME_NAME_DY:8, HOME_SUB_DY:36,
   // Status
   ST_CONN_Y:116, ST_CONN_H:112, ST_PWR_Y:240, ST_PWR_H:112,
   ST_HOST_Y:364, ST_HOST_H:92,
@@ -286,6 +286,7 @@ const HOME_ROWS = [
   ["Display", "90%   sleep 30s   DARK",     null],
   ["Sound",   "ON   volume MED   mic",      null],
   ["Pairing", "2 Macs   any may answer",    null],
+  ["Messages","send NEXT",                  null],
   ["Actions", "calibrate, pairing, power",  null],
 ];
 function homeScreen(p){

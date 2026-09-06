@@ -41,11 +41,33 @@ void drawStepGlyph(int cacheIdx, int x, int btnY, const char* glyph, bool enable
   tft.drawString(glyph, x + STEP_BTN_SIZE / 2, btnY + STEP_BTN_SIZE / 2);
   tft.setTextDatum(TL_DATUM);
 }
+// A GROUP CAPTION: T_META in COLOR_LABEL at CARD_X + PAD, TL_DATUM, on the page
+// background rather than on a card - the treatment board_es3c35p.h describes once
+// for every one of them, and the step from its datum to the control it heads is
+// SET_CAP_STEP. All seven live sites go through here (Display's THEME, Sound's
+// ALERTS and MICROPHONE, Pairing's ANSWER PROMPTS FROM and PAIRED MACS, Actions'
+// SETUP and CANNOT BE UNDONE); six of them were four inline lines each, and four
+// identical lines repeated seven times is how one page comes to draw its caption
+// in a different colour or off a different datum with nothing saying which is
+// right. It is named for what it DRAWS rather than for the page that first needed
+// it - this was drawActionCaption(), on the group that happened to add it last.
+//
+// MOVED OUT OF THE BOARD-2 ARM, unchanged, because board 1's MESSAGES page needs
+// the same caption and the alternative was a second copy of four lines under the
+// other #if. One caption treatment across both boards is the point of the
+// function; having it exist on only one of them was an accident of where the
+// groups happened to be invented.
+void drawGroupCaption(const char* text, int y) {
+  setUIFont(T_META);
+  tft.setTextColor(COLOR_LABEL, COLOR_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(text, CARD_X + PAD, y);
+}
 #if !BOARD_SETTINGS_HOME
 // The pager band: < chevron, page title + dots, > chevron.
 void drawPager() {
   tft.fillRect(0, CONTENT_Y, tft.width(), PAGER_H + 4, COLOR_BG);
-  const char* titles[SETTINGS_PAGES] = {"STATUS", "DISPLAY & SOUND", "ACTIONS", "PAIRED MACS"};
+  const char* titles[SETTINGS_PAGES] = {"STATUS", "DISPLAY & SOUND", "ACTIONS", "PAIRED MACS", "MESSAGES"};
   int cy = CONTENT_Y + PAGER_H / 2;
   // Draw the prev/next targets as actual BUTTONS. A bare "<" glyph gave no clue
   // how big the tappable area was, so people aimed at the glyph itself and
@@ -92,22 +114,6 @@ void drawBackBand(const char* title) {
   tft.drawString(title, PAGER_BTN_X0 + BACK_BTN_W + BACK_TITLE_DX, CONTENT_Y + PAGER_H / 2);
   tft.setTextDatum(TL_DATUM);
 }
-// A GROUP CAPTION: T_META in COLOR_LABEL at CARD_X + PAD, TL_DATUM, on the page
-// background rather than on a card - the treatment board_es3c35p.h describes once
-// for every one of them, and the step from its datum to the control it heads is
-// SET_CAP_STEP. All seven live sites go through here (Display's THEME, Sound's
-// ALERTS and MICROPHONE, Pairing's ANSWER PROMPTS FROM and PAIRED MACS, Actions'
-// SETUP and CANNOT BE UNDONE); six of them were four inline lines each, and four
-// identical lines repeated seven times is how one page comes to draw its caption
-// in a different colour or off a different datum with nothing saying which is
-// right. It is named for what it DRAWS rather than for the page that first needed
-// it - this was drawActionCaption(), on the group that happened to add it last.
-void drawGroupCaption(const char* text, int y) {
-  setUIFont(T_META);
-  tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString(text, CARD_X + PAD, y);
-}
 // ONE table, two uses: the back band's title and HOME's row name. They must be the
 // same word or the screen you tapped into is not the one you tapped on.
 const char* settingsGroupTitle(int g) {
@@ -116,6 +122,7 @@ const char* settingsGroupTitle(int g) {
     case SET_DISPLAY: return "Display";
     case SET_SOUND:   return "Sound";
     case SET_PAIRING: return "Pairing";
+    case SET_MESSAGES: return "Messages";
     default:          return "Actions";
   }
 }
@@ -175,6 +182,13 @@ void settingsHomeSummary(int g, char* buf, size_t n, uint16_t* col) {
     case SET_PAIRING:
       snprintf(buf, n, "%d Mac%s   %s", hostCount, hostCount == 1 ? "" : "s",
                allowedHost[0] ? "one may answer" : "any may answer");
+      break;
+    // The one setting on this device the MAC acts on, so the summary says what
+    // the Mac is being asked for rather than restating the label ("send NEXT"
+    // would be the row's own name twice). It reads off msgPriority, the same
+    // global the page draws from, so HOME and the page cannot disagree.
+    case SET_MESSAGES:
+      snprintf(buf, n, "send %s", MSG_PRI_LABELS[msgPriority < MSG_PRI_COUNT ? msgPriority : MSG_PRI_NEXT]);
       break;
     default:
       snprintf(buf, n, "calibrate, pairing, power");
@@ -835,6 +849,108 @@ void drawActionsPageStatic() {
 #endif
 }
 #endif
+// ----- Page 4 / the MESSAGES group -----
+// ONE IMPLEMENTATION FOR BOTH BOARDS, deliberately. Pages 2 and 3 split into
+// per-board arms because their CONTENT diverged; nothing here does - the caption,
+// the three rows and the hint are the same on a 240x320 panel and a 320x480 one,
+// and only the four constants behind P4_CAP_Y/P4_ROW_Y/P4_ROW_STEP/P4_HINT_Y
+// differ. A split would be two copies of one page and two chances to drift.
+//
+// THE ROWS SAY WHAT THEY MEAN, not what they are called. "NEXT" alone is not a
+// setting anybody can act on; "NEXT   after this turn" is. The three phrases are
+// column-aligned because both faces are monospace, and they are bounded by
+// P4_LABEL_CHARS - the lane uiListRow actually leaves between its label origin
+// and its tag, MEASURED in each header rather than counted here.
+//
+// THE HINT IS THE PRECEDENCE RULE, and it earns its line. The Mac's
+// DECKHAND_INBOX_PRIORITY overrides whatever is chosen here, and without this
+// line the failure is the worst kind available on a device with no error
+// channel: you tap LATER, the Mac keeps sending NOW, and there is nothing
+// anywhere on the glass to say why. The host says so in its own log too - the
+// two surfaces exist because only one of them is in the room with you.
+void drawMessagesPageStatic() {
+  drawGroupCaption("HOW MY MESSAGES LAND", P4_CAP_Y);
+  uiHint("the Mac can override this", P4_HINT_Y);
+  // The three rows are drawn by renderMessagesPage - their look changes with
+  // state, so they belong on the change-only side.
+}
+// The option rows. One cache for the block (see msgPriBtnCache): exactly one row
+// is ever filled, so a change repaints all three and per-row caches could only
+// ever move together.
+void renderMessagesPage() {
+  if ((int) msgPriority == msgPriBtnCache) return;
+  msgPriBtnCache = (int) msgPriority;
+  // Selection is FILL plus the "ON" tag plus position, never colour alone - the
+  // same rule the THEME segments and every uiListRow on the Pairing page follow.
+  static const char* const MSG_PRI_ROWS[MSG_PRI_COUNT] = {
+    "NOW    interrupt the turn",
+    "NEXT   after this turn",
+    "LATER  after the queue",
+  };
+  for (int i = 0; i < MSG_PRI_COUNT; i++) {
+    bool on = (i == (int) msgPriority);
+    uiListRow(CARD_X, P4_ROW_Y + i * P4_ROW_STEP, CARD_W, H_ROW,
+              MSG_PRI_ROWS[i], on, on ? "ON" : nullptr);
+  }
+}
+// NVS, following theme's shape exactly (putUChar/getUChar with a default) and
+// clamped on read for the same reason themeMode is: a corrupt or
+// future-firmware byte must land on the SAFE option rather than on whatever
+// happens to be at that index. NEXT is the safe one - NOW interrupts a turn.
+// The key is 6 characters against NVS's 15-character cap.
+void loadMsgPriority() {
+  msgPriority = prefs.getUChar("msgpri", MSG_PRI_NEXT);
+  if (msgPriority >= MSG_PRI_COUNT) msgPriority = MSG_PRI_NEXT;
+}
+void saveMsgPriority() { prefs.putUChar("msgpri", msgPriority); }
+// The one place the setting CHANGES, so the one place that has to persist it,
+// redraw it and tell the Mac. Three callers - the row taps and the MSGPRI
+// command - and each of them forgetting one of the three is exactly the drift
+// this exists to prevent.
+//
+// A NO-OP CHANGE RETURNS EARLY AND SAYS NOTHING, which is not tidiness: the host
+// delivers every trigger-file command over BOTH transports, so a cabled board
+// sees "MSGPRI now" twice within milliseconds. Without this the second copy
+// repaints three rows and puts a second MSGPRI on a link with an 11.5KB/s
+// ceiling, to report something that did not move.
+// IS THE PAGE ACTUALLY ON THE GLASS? renderMessagesPage() draws at P4_ROW_Y
+// unconditionally - it has no idea which surface is up - so this must be asked
+// before it is called from anywhere but a tap. It nearly was not: the first
+// version of setMsgPriority() called it outright, which meant `MSGPRI now` sent
+// while the USAGE tab was showing would have painted three option rows across
+// the quota cards.
+bool messagesPageShowing() {
+  return currentTab == TAB_SETTINGS && settingsPage == SETTINGS_PAGE_MESSAGES;
+}
+void setMsgPriority(uint8_t v) {
+  if (v >= MSG_PRI_COUNT || v == msgPriority) return;
+  msgPriority = v;
+  saveMsgPriority();
+  // Busted whether or not it is drawn now, so the rows are right the moment the
+  // page is next opened - drawSettingsStatic() would reset it anyway, and relying
+  // on that would make this correct only by someone else's habit.
+  msgPriBtnCache = -1;
+  if (messagesPageShowing()) renderMessagesPage();
+  announceMsgPriority();
+}
+// The hit test, SHARED, and bound to the same three constants the draw uses -
+// which is what stops the band and the row it belongs to from ever disagreeing.
+//
+// THE GAPS BETWEEN ROWS ARE INERT, not rounded to the nearest row. The drawn row
+// IS the tested band here (H_ROW on both boards, which is exactly TAP_MIN), so
+// there is no widening to argue about; and the three choices mean genuinely
+// different things - NOW interrupts a turn where LATER waits behind a queue - so
+// a tap that lands in 8px of background must do NOTHING rather than pick one of
+// the two rows it fell between. Same rule HOME's gaps and the Pairing cards
+// follow, and the same reason.
+void handleMessagesTouch(int sx, int sy) {
+  (void) sx;   // full-width rows: the x is unconstrained, deliberately
+  for (int i = 0; i < MSG_PRI_COUNT; i++) {
+    int y = P4_ROW_Y + i * P4_ROW_STEP;
+    if (sy >= y && sy < y + H_ROW) { setMsgPriority((uint8_t) i); return; }
+  }
+}
+
 // ----- Page 3 / the PAIRING group -----
 #if BOARD_SETTINGS_HOME
 // THE LIVE MAC ROWS LAND HERE (board 2). They used to be on the STATUS page too,
@@ -1438,6 +1554,7 @@ void drawSettingsStatic() {
   else if (settingsPage == SET_DISPLAY) drawDisplayPageStatic();
   else if (settingsPage == SET_SOUND)   drawSoundPageStatic();
   else if (settingsPage == SET_PAIRING) drawHostsPageStatic();
+  else if (settingsPage == SETTINGS_PAGE_MESSAGES) drawMessagesPageStatic();
   else                                  drawActionsPageStatic();
 #else
   tft.fillRect(0, PAGE_TOP, tft.width(), contentBottom() - PAGE_TOP, COLOR_BG);
@@ -1445,7 +1562,8 @@ void drawSettingsStatic() {
   if (settingsPage == 0) drawStatusPageStatic();
   else if (settingsPage == 1) drawControlsPageStatic();
   else if (settingsPage == 2) drawActionsPageStatic();
-  else drawHostsPageStatic();
+  else if (settingsPage == 3) drawHostsPageStatic();
+  else drawMessagesPageStatic();
 #endif
 }
 void renderSettingsTab() {
@@ -1468,11 +1586,16 @@ void renderSettingsTab() {
   // is no longer static: left on the static side it would freeze at whatever age
   // was true when it was last painted, which is worse than no age at all.
   else if (settingsPage == SET_PAIRING) renderHostsPage();
+  // The three option rows change with the setting, so like the THEME segments
+  // they are on the change-only side; drawMessagesPageStatic draws only the
+  // caption and the hint.
+  else if (settingsPage == SETTINGS_PAGE_MESSAGES) renderMessagesPage();
   // Actions is static
 #else
   if (settingsPage == 0) renderStatusPage();
   else if (settingsPage == 1) renderControlsPage();
-  // page 2 is static
+  else if (settingsPage == SETTINGS_PAGE_MESSAGES) renderMessagesPage();
+  // pages 2 and 3 are static
 #endif
 #if !BOARD_USES_TFT_ESPI
   tft.flush();
@@ -1490,6 +1613,10 @@ void resetSettingsCaches() {
   battRowTextCache[0] = '\0';
 #endif
   soundBtnCache = -1; flipBtnCache = -1; themeBtnCache = -1; brightBarCache = -1;
+  // A field whose CHROME is repainted must have its cache reset or the value is
+  // left BLANK - drawSettingsStatic() clears the whole page area, so without this
+  // the three option rows would be "unchanged" and never redrawn onto it.
+  msgPriBtnCache = -1;
   battRowColorCache = 0;
 #if BOARD_SETTINGS_HOME
   // The SoC temp row's pair. Resetting these HERE rather than at the call sites is
@@ -1530,9 +1657,9 @@ void resetSettingsCaches() {
   pairLeftCache[0] = '\0';
   pairPanelSig[0] = '\0';
 #endif
-  // HOME's five summaries, and the Status row's colour beside them. Same rule as
+  // HOME's six summaries, and the Status row's colour beside them. Same rule as
   // every cache above: drawSettingsHomeStatic() repaints the cards these are drawn
-  // ON, so leaving them set leaves all five rows BLANK.
+  // ON, so leaving them set leaves all six rows BLANK.
   for (int i = 0; i < SET_GROUP_COUNT; i++) homeSubCache[i][0] = '\0';
   homeStatusColorCache = 0;
 #endif
@@ -1702,6 +1829,8 @@ void handleSettingsTouch(int sx, int sy) {
       // a mic test in, so put SETTINGS back explicitly.
       if (!everReceived) forceFullRepaint();
     }
+  } else if (settingsPage == SETTINGS_PAGE_MESSAGES) {
+    handleMessagesTouch(sx, sy);
   } else if (settingsPage == SET_ACTIONS) {
     // NO MIC TEST BRANCH: the button is drawn on the SOUND group now, and this
     // page reserves no slot for it. A `sy >= P2_MIC_Y` test left behind here would
@@ -1859,6 +1988,8 @@ void handleSettingsTouch(int sx, int sy) {
       drawHostsPageStatic();
       return;
     }
+  } else if (settingsPage == SETTINGS_PAGE_MESSAGES) {
+    handleMessagesTouch(sx, sy);
   }
 #endif
   // Anything not claimed above is inert. That is BOTH boards' STATUS surface -

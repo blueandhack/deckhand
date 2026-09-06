@@ -906,8 +906,10 @@ const int SESSION_LINE_H = 16;   // uiLineH(T_BODY), Spleen 8x16
 // { T_HERO, T_HEAD, T_BODY }: 1, i.e. T_HEAD, because T_HERO's 64px cell does not
 // fit the 24px band above. This is the height half of the ladder's test - the
 // width half is measured at the call site - and it is a constant rather than a
-// runtime `uiLineH(rung) > SESSION_NAME_H` check because board 1's binary is held
-// byte-identical and a runtime test costs it flash. sessions-geom-check.mjs
+// runtime `uiLineH(rung) > SESSION_NAME_H` check because a runtime test costs flash
+// on the board with the least of it. (That clause used to read "because board 1's
+// binary is held byte-identical and a runtime test costs it flash"; the freeze is
+// lifted - see CLAUDE.md - and the flash is still the reason.) sessions-geom-check.mjs
 // asserts the invariant instead (the top rung's cell fits the band AND is the
 // tallest that does), against the parsed UI_FONTS[] table, so the constant cannot
 // drift from the fonts without a checker failure.
@@ -994,10 +996,14 @@ const int SESSION_LARGE_MIN_H = 56;
 // rowH >= SESSION_SUBC_Y + SESSION_LINE_H + 2 = 47. Board 1's 38 is 2 SHORT of its
 // own equivalent (25 + 13 + 2 = 40), which is not hypothetical: seven or more
 // sessions there put six rows at exactly 38 and the model/branch line is drawn over
-// the row's own outline. That defect is documented in board_e32r28t.h and in
-// sessions-geom-check.mjs and deliberately not fixed (board 1's binary is held
-// byte-identical across this port) - but inheriting the magic number into a new
-// board would be inheriting the bug, so this one is derived. Note the "+ 15" that
+// the row's own outline. THAT DEFECT IS FIXED as of the compose-surface branch, but
+// not by raising board 1's floor - six rows at 40 plus five 3px gaps is 255 against
+// an avail of 248, so the sixth would be drawn through the footer. sessionSubcYAt()
+// (sessions.ino) clamps the compact sub-line to the row it is drawn in instead; that
+// clamp is INERT on this board, because 47 is derived to hold the unclamped line and
+// the min therefore never binds - which sessions-geom-check.mjs prints per board
+// rather than leaving to be inferred. Inheriting board 1's magic number would still
+// have been inheriting the bug, so this one stays derived. Note the "+ 15" that
 // used to be written here was itself 13 + 2, i.e. a line height with a literal
 // baked in; at a 16px line it is +18.
 // It never binds today either way: six sessions are 65, 62 with the strip.
@@ -1045,17 +1051,21 @@ const int SESSION_DOT_CX = SESSION_ROW_X + 24;
 // 40, unchanged, and for the same reason: it is set by the 32x32 art, not by the
 // panel. The blit owns x SESSION_ROW_X+7..+38 and the name starts 2px clear.
 const int SESSION_NAME_DX = 40;
-// The sub-line's lane, DERIVED here rather than carried forward: it is the row's
-// own text lane, SESSION_ROW_X + SESSION_ROW_W - 12 - (SESSION_ROW_X +
-// SESSION_NAME_DX) = 12 + 296 - 12 - 52 = 244. At Spleen 8x16's 8px advance that
-// is 30 characters, and buildSessionSubline can emit 35 - so a sub-line CAN be
-// trimmed here, and the previous version of this note ("40 characters ... never
-// truncated at all") was arithmetic done at Cozette's 6px advance before this
-// board had its own faces. 30 is the same count board 1 gets from its narrower
-// lane, so the worst case is unchanged rather than newly introduced: fitText trims
-// with "..." at the measured lane, which is what the whole "lanes are measured,
-// never counted" rule exists for.
-const int SESSION_SUB_LANE_W = 244;
+// The sub-line's lane, DERIVED (SESSION_ROW_W - SESSION_NAME_DX - 12) rather than
+// carried forward as a literal: it is the row's own text lane, SESSION_ROW_X +
+// SESSION_ROW_W - 12 - (SESSION_ROW_X + SESSION_NAME_DX) = 12 + 296 - 12 - 52 =
+// 244, unchanged by making it an expression - board 2 was already exactly this
+// value; board 1 was not (see its own header), which is what made this worth
+// deriving on both sides rather than trusting two literals to stay equal. At
+// Spleen 8x16's 8px advance that is 30 characters, and buildSessionSubline can
+// emit 35 - so a sub-line CAN be trimmed here, and the previous version of this
+// note ("40 characters ... never truncated at all") was arithmetic done at
+// Cozette's 6px advance before this board had its own faces. 30 is also what
+// board 1 gets from its own (now-narrower, 172px) lane at Cozette's 6px advance -
+// 172/6 = 28, not 30 - so the worst case is 28 characters there, not the 30 both
+// boards used to share; fitText trims with "..." at the measured lane either way,
+// which is what the whole "lanes are measured, never counted" rule exists for.
+const int SESSION_SUB_LANE_W = SESSION_ROW_W - SESSION_NAME_DX - 12;
 // The "+N more" strip's reserved band. Derived from the TEXT, like FOOTER_H, so a
 // bigger panel does not move it - but it moves with the FACE: one SESSION_LINE_H
 // line plus 3px, which is 19 here against board 1's 16. Left at 16 the strip's own
@@ -1407,15 +1417,28 @@ const int SESSION_EXP_TITLE_LINES = 2;
 // a line the helper did not budget.
 const int SESSION_EXP_PROMPT_MIN = 2;
 const int SESSION_EXP_PROMPT_MAX = 4;
-// The row signature's buffer, per board because it is 6 copies of RAM and board
-// 1's is held byte-identical. 176 there (a 125-byte worst case: name 23 + status 9
-// + sub 35 + title 43 + tag 6 + icon 3 + 5 separators + NUL). The expanded row
-// also draws the last prompt and the path, so both join the signature for that ONE
-// row - prompt 103 + path 67 + 2 separators = 172 more, i.e. 297 - hence 304.
-// Appending them for every row instead would repaint a COMPACT row whenever its
-// prompt changed, which is a wholesale clear-and-redraw of pixels that did not
-// change: exactly the flicker the change-only discipline exists to prevent.
-const int SESSION_ROW_SIG_LEN = 304;
+// The row signature's buffer, per board because it is 6 copies of RAM. It is the
+// SAME number on both boards today: board 1 draws the band card too, and a
+// signature holds field VALUES rather than the text drawn from them, so a wider
+// row does not lengthen it. (This comment used to say board 1's was 176 and held
+// "byte-identical". Neither has been true since 924cecc gave that board the card,
+// and a stale justification is how a checker starts certifying the wrong layout.)
+// A 125-byte worst case for an ordinary row (name 23 + status 9 + sub 35 +
+// title 43 + tag 6 + icon 3 + 5 separators + NUL); the expanded row also draws the
+// last prompt and the path, so both join the signature for that ONE row -
+// prompt 103 + path 67 + 2 separators = 172 more, i.e. 297.
+//
+// 368, NOT 304, FOR THE REASON detailSigCache IS 448 AND NOT 384: at 304 this held
+// its 298-byte worst case with SIX bytes spare, and the append is guarded by
+// `if (used + 2 < sizeof(sig))` - room for the two separators only - so the next
+// term is SILENTLY TRUNCATED rather than overflowing, and the band card then never
+// repaints when the tail of its path changes. Same 64-byte step, leaving 70 bytes:
+// one more field of every kind this signature carries but the prompt. The margin
+// is asserted, not trusted - see SESSION_SIG_MARGIN in deckhand_display.ino.
+// Appending prompt and path for every row instead would repaint a COMPACT row
+// whenever its prompt changed, which is a wholesale clear-and-redraw of pixels that
+// did not change: exactly the flicker the change-only discipline exists to prevent.
+const int SESSION_ROW_SIG_LEN = 368;
 
 // ---------- Session detail card and the ask screen ----------
 // THE HEADER ROW IS A TOUCH BAND, and this is the one place on this screen where
@@ -1511,7 +1534,8 @@ const int DETAIL_PATH_LINES = 2;
 // that note has always argued for (given surplus, spend it around the content) is
 // no longer merely intact but actually exercised. The six boundaries it widens are
 // name->title, title->rule, both rule->label steps and both wrapped blocks' tails;
-// DETAIL_PAD_Y and DETAIL_PILL_STEP also carry it but are board 1's arm only.
+// (DETAIL_PAD_Y and DETAIL_PILL_STEP carried it too; both are GONE - §7 removed
+// the top pad and the status pill from BOTH cards.)
 // The whole walk is in DETAIL_CARD_H's derivation above, and sessions-geom-check.mjs
 // re-runs it from these constants rather than from the comment.
 const int DETAIL_AIR = 8;
@@ -1714,32 +1738,60 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 // the hint takes SET_CAP_STEP from the button it explains, and floating it down to
 // the footer would make it read as page furniture.
 
-// ---------- SETTINGS: HOME and the five groups ----------
-// settingsPage carries HOME plus five group ids rather than a second state
+// ---------- SETTINGS: HOME and the six groups ----------
+// settingsPage carries HOME plus six group ids rather than a second state
 // variable, because two variables tracking one screen is how a UI ends up
 // drawing one page while hit-testing another.
-const int SET_HOME = 0, SET_STATUS = 1, SET_DISPLAY = 2, SET_SOUND = 3, SET_PAIRING = 4, SET_ACTIONS = 5;
-const int SET_GROUP_COUNT = 5;   // SET_STATUS..SET_ACTIONS, contiguous by design
+//
+// MESSAGES SITS AFTER PAIRING AND BEFORE ACTIONS, and the position is an
+// argument rather than a preference. It is about the Mac relationship, which is
+// what Pairing is about - which Macs exist, which may answer, and now how what
+// this device sends lands in the one it is talking to - so it reads as the next
+// sentence rather than as a stray. And Actions stays LAST because it is the only
+// group that destroys state; a destructive group in the middle of a menu is the
+// one thing this list's order actually has to protect.
+// ONE LINE, and it has to stay one line: geom-common.mjs parses `const int`
+// declarations with /^const int (...);/m, so a wrapped one is invisible to every
+// checker that reads these ids. It failed loudly when this was split (seven
+// assertions reporting `undefined == NaN`) rather than passing over half of them,
+// which is the only reason this is a note instead of a defect.
+const int SET_HOME = 0, SET_STATUS = 1, SET_DISPLAY = 2, SET_SOUND = 3, SET_PAIRING = 4, SET_MESSAGES = 5, SET_ACTIONS = 6;
+const int SET_GROUP_COUNT = 6;   // SET_STATUS..SET_ACTIONS, contiguous by design
 
 // HOME owns the WHOLE content area - there is no band above it, because the tab
 // bar already says SETTINGS and a second title would be chrome repeating itself.
 // The pitch is derived to land exactly on contentBottom():
-//   HOME_Y0 + 5*HOME_ROW_H + 4*HOME_GAP + HOME_Y0_BOT = 54 + 350 + 48 + 8 = 460
+//   HOME_Y0 + 6*HOME_ROW_H + 5*HOME_GAP + HOME_Y0_BOT = 54 + 348 + 50 + 8 = 460
 // so a row height change must be paid for out of the gap or the pads, and
-// settings-geom-check.mjs asserts the identity rather than the value.
+// settings-geom-check.mjs asserts the identity rather than the value - which is
+// exactly what made the SIXTH row affordable to work out rather than to guess.
+//
+// THE SIXTH ROW WAS PAID FOR OUT OF THE OTHER FIVE, and here is the whole sum.
+// At the old 70/12 pitch five rows filled the area exactly, so a sixth had to
+// come from somewhere: 6*R + 5*G + 8 = 406. R 58 with G 10 lands on it dead on,
+// and 58 is still 12 over TAP_MIN (46), so every row remains a comfortable touch
+// target - the row got shorter, not tighter to hit. The 12px lost per row comes
+// entirely out of the two pads inside it (see the stack below), never out of the
+// two type sizes: the name is still T_HEAD 24 and the summary still T_BODY 16,
+// because shrinking a face to fit one more row is how a menu becomes unreadable
+// one row at a time.
 const int HOME_Y0     = 54;
-const int HOME_ROW_H  = 70;
-const int HOME_GAP    = 12;
+const int HOME_ROW_H  = 58;
+const int HOME_GAP    = 10;
 const int HOME_Y0_BOT = 8;
 // Inside a row: name at T_HEAD, summary at T_BODY under it, chevron right.
 //   +0..+1    border
-//   +14..+37  name    (T_HEAD 24)
-//   +38..+43  gap 6
-//   +44..+59  summary (T_BODY 16)
-//   +60..+67  pad
-//   +68..+69  border                                   = 70
-const int HOME_NAME_DY = 14;
-const int HOME_SUB_DY  = 44;
+//   +8..+31   name    (T_HEAD 24)
+//   +32..+35  gap 4
+//   +36..+51  summary (T_BODY 16)
+//   +52..+55  pad
+//   +56..+57  border                                   = 58
+// Against the 70px row this is 6 rows off the top pad, 2 off the gap between the
+// two lines, and 4 off the bottom pad. The two ends still clear the card's own
+// 2px border with room (8 >= 2 at the top, 51 <= 55 at the foot) and the two
+// lines still share no pixel row (31 < 36) - all four asserted, none assumed.
+const int HOME_NAME_DY = 8;
+const int HOME_SUB_DY  = 36;
 // The summary is COMPOSED each tick from live globals and drawn through
 // drawIfChanged, so it carries fixed-width padded text and its opaque box is a
 // constant 30 * TEXT_ADV = 240px. The lane it has to fit is the row's own text
@@ -2184,6 +2236,64 @@ const int PAIR_RESULT_Y     = PAIR_CODE_Y + (HERO_LINE_H - PAIR_HEAD_H) / 2;
 const int PAIR_RESULT_SUB_Y = PAIR_RESULT_Y + PAIR_HEAD_H + PAIR_AIR_TITLE;
 const int PAIR_RESULT_MS    = 1500;
 
+// ---------- SETTINGS group: Messages ----------
+// HOW A MESSAGE SENT FROM THIS DEVICE LANDS ON THE MAC, and it is the first
+// setting on this device that is not about this device. Theme, brightness, sleep
+// and sound all change what this panel does; this one changes what the Mac does
+// with what the panel sends, which is why it has a group of its own rather than a
+// row on Pairing - a control whose effect is somewhere else needs the room to say
+// so, and Pairing has none (four Mac cards end at 449 of 460).
+//
+//   116..131  "HOW MY MESSAGES LAND"     P4_CAP_Y, T_META, TL_DATUM
+//   140..185  NOW    interrupt the turn  P4_ROW_Y,  H_ROW
+//   220..265  NEXT   after this turn     + P4_ROW_STEP
+//   300..345  LATER  after the queue     + 2*P4_ROW_STEP
+//   364..379  "the Mac can override..."  P4_HINT_Y = 370, MC_DATUM ink
+//   380..459  80 rows clear to contentBottom()
+//
+// THREE uiListRows, NOT three segments, and that is the one place this page
+// departs from the THEME control it would otherwise copy. THEME's three segments
+// share one row because their labels are one word each and the choice is about
+// this screen, where you can see the answer the moment you tap. These three need
+// a PHRASE each - "after this turn" is the whole content of the setting - and a
+// segment 96px wide cannot hold one. uiListRow is the component this device
+// already uses for a mutually-exclusive choice that needs its own line, on the
+// Pairing group's own ANY MAC row, so this is that vocabulary rather than a new
+// one. It also makes the hit boxes unmistakable: three full-width rows with 34px
+// between them, where three abutting segments put two different meanings on
+// either side of a 4px seam.
+//
+// P4_TOP IS 12, LEVEL WITH P1_TOP, PS_TOP AND P2_TOP. Every group starts its
+// content at PAGE_TOP + 12, so moving between groups does not jog the page up
+// and down; settings-geom-check.mjs asserts that as an EQUALITY across all the
+// parsed tops rather than against a literal 116.
+//
+// P4_ROW_GAP IS 34 WHERE BOARD 1'S IS 8, and that is deliberate rather than a
+// scale factor. This page holds the same three rows on a 356px region as board 1
+// holds on a 222px one; at board 1's gap the list would sit entirely in the top
+// third with a third of the page empty beneath it, which reads as a page that
+// failed to finish drawing. The remaining 78 rows of trailing air is real and is
+// stated rather than hidden - it is the same order as the ACTIONS group's own 55,
+// and the alternative was inflating the gaps until three rows stopped reading as
+// one list.
+const int P4_TOP      = 12;   // PAGE_TOP -> the caption, level with P1/PS/P2
+const int P4_ROW_GAP  = 34;   // between two option rows
+const int P4_HINT_GAP = 24;   // the last row's bottom -> the hint's MC_DATUM centre
+// THE TRAILING AIR, NAMED, so the page has a LANDING IDENTITY rather than a
+// leftover. Same shape as HOME_Y0_BOT and PAIR_AIR_LEFT, and it exists for a
+// reason geom-sweep found rather than one anybody argued: with 80 rows of slack
+// under the hint, P4_HINT_Y, P4_ROW_GAP and P4_HINT_GAP could each be perturbed
+// by 16 in either direction and no assertion noticed - the sweep reported all
+// three as "unguarded though this checker reads it". A page with enough air in it
+// is a page whose constants are not constrained by anything. Written as
+//   hint ink bottom + 1 + P4_AIR_BOT == contentBottom()
+// and asserted as that identity, so a change to ANY term in the chain fails here
+// instead of quietly eating into the footer or floating away from it.
+const int P4_AIR_BOT  = 80;
+// P4_LABEL_CHARS is NOT here: it derives from SP_3, which no board header can
+// name (SP_1..SP_4 are declared in deckhand_display.ino after board.h), and it
+// is the same expression on both boards. It lives with the P4 chain there, once.
+
 // ---------- SETTINGS group: Actions ----------
 // Geometry is settings.js `bActions`.
 //
@@ -2341,8 +2451,22 @@ const int KB_TEXT_LINES = 5;
 // one dimension this panel simply hands over.
 const int KB_PITCH = 32;
 const int KB_KEY_W = 30;
+// WRITTEN AS THE DERIVATION, not a literal that merely happens to agree with
+// one in a comment: KB_KEY_W / 10 under C truncation: 30/10 = 3 here, 22/10 =
+// 2 on board 1. That form gives BOTH boards their value exactly, where the
+// x1.154 scaling this header uses for R_MD and the borders does NOT - 2 *
+// 1.154 is 2.31, which truncates back to 2, not 3, so a scaled derivation
+// cannot produce board 1's value either. 3px is 10.0% of a 30px key and
+// 0.46mm; it costs 4*r^2*(1 - pi/4) = 7.7px2 of corner off this board's 30x54
+// (1620px2) drawn key - 0.5% of it - against R_MD's 123.6px2 there, which is
+// 7.6%. That 7.6% is SMALLER than board 1's 10.5% (at board 1's Task-6
+// KB_ROW_H 41, 22x37) even though R_MD is bigger here, because R_MD scales
+// x1.2 between the boards while the key scales x1.36 - so no single
+// percentage describes both boards.
+const int KB_KEY_R = KB_KEY_W / 10;
 // KB_ROW_H 58, and the DRAWN key is KB_ROW_H - 4 = 54 while the TESTED band is
-// KB_PITCH x KB_ROW_H = 32x58 = 1856px2 against board 1's 24x44 = 1056 - the
+// KB_PITCH x KB_ROW_H = 32x58 = 1856px2 against board 1's 24x41 = 984 (it was
+// 24x44 = 1056 until the prompt strip took 3px off that board's rows) - the
 // drawn/tested split kept rather than collapsed, in BOTH dimensions. The tested
 // WIDTH is the pitch, not KB_KEY_W: kbTouch() divides by KB_PITCH, so the 2px gap
 // belongs to the key on its left and no column on the board is dead.
@@ -2350,15 +2474,25 @@ const int KB_KEY_W = 30;
 // 54 IS CAPPED BY ASPECT, NOT BY THE PANEL, and this is the one place on this
 // board where a control is deliberately NOT grown to the space available. The
 // keyboard's width is fixed by its 10 columns, so every spare row makes the keys
-// taller and thinner; board 1's drawn key is 22x40 = 1:1.818, and 30 * 1.818 =
+// taller and thinner; board 1's drawn key was 22x40 = 1:1.818, and 30 * 1.818 =
 // 54.5 -> 54 is therefore the tallest key no more elongated than the one this
-// device already ships. That anchor is measured FROM THIS REPO, which is the only
-// reason it is the one used: spending the remaining rows on height instead would
-// reach KB_ROW_H 70 (a 30x66 key, 1:2.2), and "1:2.2 is strips rather than keys"
-// is a judgement with no measurement behind it, whereas "no worse than the keyboard
-// already shipping" is a fact this file can check. (An earlier draft of this
-// comment cited iOS portrait keys at about 1:1.3 as a scale reference. Nothing here
-// measured that, so it is removed rather than left looking like evidence.)
+// device shipped when the cap was set. That anchor is measured FROM THIS REPO,
+// which is the only reason it is the one used: spending the remaining rows on
+// height instead would reach KB_ROW_H 70 (a 30x66 key, 1:2.2), and "1:2.2 is
+// strips rather than keys" is a judgement with no measurement behind it, whereas
+// "no worse than the keyboard already shipping" is a fact this file can check.
+// (An earlier draft of this comment cited iOS portrait keys at about 1:1.3 as a
+// scale reference. Nothing here measured that, so it is removed rather than left
+// looking like evidence.)
+//
+// THAT ANCHOR IS HISTORICAL NOW AND IS DELIBERATELY LEFT SO. Board 1's drawn key
+// became 22x37 = 1:1.68 when the prompt strip took 3px off its KB_ROW_H, so 54
+// (1:1.8) is more elongated than board 1's key TODAY, though not than the key the
+// cap was measured from. Re-deriving the cap from board 1's current rows would
+// drag this board's KB_ROW_H down to 30 * 1.68 = 50, moving a grid that has no
+// reason to move and spending nothing this board needed - so the cap stays the
+// fixed 40/22 pair settings-geom-check.mjs holds both boards to, and the
+// paragraph above says which key it came from rather than implying it tracks one.
 const int KB_ROW_H = 58;
 // THE TEXT CARD, and the RESERVED META ROW inside it. drawString paints an OPAQUE
 // box the full height of a text line, so a counter sharing a row with wrapped
@@ -2366,43 +2500,113 @@ const int KB_ROW_H = 58;
 // on a reserved row, and the invariant is preserved here by construction. At a
 // 16px cell and 5 lines the card is 120 rather than 90, which is arithmetic:
 // 8 + 16 + 8 + 5*16 + 8 = 120, every term below.
-//   card    +0..+119  (KB_TEXT_Y 12 .. 131, KB_TEXT_H 120)
-//   meta    +8..+23   (KB_META_DY 8  -> y 20..35: byte counter left, countdown right)
+//   card    +0..+119  (KB_TEXT_Y 34 .. 153, KB_TEXT_H 120)
+//   meta    +8..+23   (KB_META_DY 8  -> y 42..57: byte counter left, countdown right)
 //   gap     +24..+31  (8 rows - board 1 has 3)
-//   line 0  +32..+47  (KB_LINE0_DY 32 -> y 44)
-//   line 1            y 60
-//   line 2            y 76
-//   line 3            y 92
-//   line 4            y 108..123
+//   line 0  +32..+47  (KB_LINE0_DY 32 -> y 66)
+//   line 1            y 82
+//   line 2            y 98
+//   line 3            y 114
+//   line 4            y 130..145
 //   pad     +112..+119 (8 rows below the last line, inside the card)
-// The meta row occupies y 20..35 and the first text line starts at y 44, so they
+// The meta row occupies y 42..57 and the first text line starts at y 66, so they
 // share no pixel row with 8 to spare. The two gaps are equal at 8 deliberately:
 // the card's only job is to hold the meta row and the text, so the air above and
 // below the block is the same, and the residual lands in the BREAK below the card
-// rather than inside it.
-const int KB_TEXT_Y  = 12;
+// rather than inside it. (Every absolute y here moved by 22 when the prompt strip
+// pushed KB_TEXT_Y 12 -> 34; the card's own INTERNALS are untouched.)
+//
+// KB_LINE_PITCH IS DECLARED FIRST because three of the terms below derive from it
+// (KB_STRIP_H, the card's line spacing, KB_ACT_DRAWN), and both the compiler and
+// the checkers' consts() parser read this file top to bottom - a derivation
+// written above its input silently fails to resolve on the checker side.
+const int KB_LINE_PITCH = 16;                  // Spleen 8x16's cell - text-derived
+// THE PROMPT STRIP: one line of the ask, above the card, that never leaves.
+// Re-reading the question used to mean opening the peek, which covers the keys
+// and routes every tap to its pager - so you could not read and type at once.
+// THIS BOARD PAYS NOTHING FOR IT: the strip and its gap come out of the 38px
+// break below, which this file already calls "a RESIDUAL, not a chosen number...
+// the term with no job of its own". 6 of the old 12px top margin and 22 of that
+// break make the 28 the strip and its 8px gap need. KB_ROWS_Y, KB_ROW_H and
+// KB_PITCH are UNCHANGED, so the key grid, the action row and every touch band
+// below the card are exactly where they were.
+// KB_STRIP_Y 6 is 2 short of the 8 the bottom margin keeps, and that is where the
+// column's one odd term now sits; what the eye measures from the top edge is
+// still 8, because the strip's text is one KB_LINE_PITCH cell centred in the band
+// and so inks 8..23, with drawString's OPAQUE box stopping 10 rows above the
+// card's top border at 34.
+const int KB_STRIP_Y = 6;
+const int KB_STRIP_H = KB_LINE_PITCH + 4;      // 20
+const int KB_TEXT_Y  = 34;                     // was 12, before the strip
 const int KB_TEXT_H  = 120;
 const int KB_META_DY = 8;
 const int KB_LINE0_DY = 32;
-const int KB_LINE_PITCH = 16;                  // Spleen 8x16's cell - text-derived
 // THE VERTICAL BUDGET, and where this board's surplus actually goes. The content
 // is a fixed grid plus a provably 5-line card, so there is nothing here to add:
 //
-//   12 (top margin) + 120 (card) + 38 (break) + 232 (4 rows * 58)
-//   + 12 (gap) + 58 (action row) + 8 (bottom margin) = 480
+//   6 (top margin) + 20 (strip) + 8 (gap) + 120 (card) + 16 (break)
+//   + 232 (4 rows * 58) + 24 (gap) + 46 (action band) + 8 (bottom margin) = 480
 //
-// The 38px BREAK is a RESIDUAL, not a chosen number: it is what is left once every
+// The gap above the action row was 12 while KB_ACT_H was 58; the 12px that band
+// gave back went there, because KB_ACT_Y is anchored to the bottom margin.
+//
+// The BREAK is a RESIDUAL, not a chosen number: it is what is left once every
 // other term is fixed by something else (the card by its 5 lines at a 16px cell,
 // the rows by the aspect cap on KB_ROW_H, the action row by KB_ROW_H, the margins
 // by the 4px scale). It was 68 while the card was mis-derived at 4 lines of 13, and
-// the 30 rows the card now needs came straight out of it - which is the right
-// direction: the break is the term with no job of its own, and the card's height is
-// the one number that decides whether SEND can sign text that is off screen.
-// KB_ROWS_Y itself does not move, so the key grid, the action row and every touch
-// band below the card are untouched by this.
+// the 30 rows the card now needs came straight out of it; it was 38 until the
+// prompt strip took 22 more, leaving 16 - which is the right direction twice over:
+// the break is the term with no job of its own, and both the card's height and the
+// strip are terms with one. KB_ROWS_Y itself does not move for either of them, so
+// the key grid, the action row and every touch band below the card are untouched.
+// settings-geom-check.mjs now sums this column term by term against BOARD_H, with
+// every GAP written as a difference of the constants around it rather than as a
+// number of its own - a residual asserted against itself always holds.
 const int KB_ROWS_Y = 170;                     // 4 rows * 58 = 232, ending 401
-const int KB_ACT_Y  = 414;                     // 414..471, 8px above the panel edge
-const int KB_ACT_H  = 58;                      // == KB_ROW_H, as on board 1
+// THE ACTION ROW, drawn and tested separately - the split the keys already have
+// (KB_KEY_W in KB_PITCH, KB_ROW_H - 4 in KB_ROW_H) and this row never did.
+// TESTED stays TAP_MIN: CANCEL and SEND are the two taps that must not miss.
+// DRAWN is TEXT-DERIVED at 2 * KB_LINE_PITCH - one cell for the glyph, one for
+// the air - which is 32px = 4.93mm, against the 58px = 8.94mm this row painted
+// while a letter key, pressed up to 150 times, gets 4.62mm of width. Same four
+// expressions as board 1, and the same 7px of air above and below the button:
+// that fell out of the two boards' pitches rather than being arranged.
+// KB_ACT_Y keeps this board's 8px bottom margin rather than sitting on the edge.
+const int KB_ACT_H     = TAP_MIN;                 // 46, the tested band
+const int KB_ACT_DRAWN = 2 * KB_LINE_PITCH;       // 32
+const int KB_ACT_DY    = (KB_ACT_H - KB_ACT_DRAWN) / 2;   // 7
+const int KB_ACT_Y     = BOARD_H - 8 - KB_ACT_H;  // 426..471, was 414
+// ---------- THE REPLY PANEL (compose.ino) ----------
+// The compose surface's OTHER screen. Same four expressions as board 1 and the
+// same stack, ONE ROW TALLER because recents fit here and do not fit there:
+//
+//   12 (COMPOSE_TOP) + 77 (prompt card) + 8 (COMPOSE_GAP) + 19 (legend)
+//  + 92 (reply, 2 x TAP_MIN) + 19 (legend) + 46 (tokens, 1 x TAP_MIN)
+//  + 24 (draft line) + 19 (legend) + 46 (recents, 1 x TAP_MIN) + 64 (residual)
+//  + 46 (KB_ACT_H) + 8 (bottom margin, already inside KB_ACT_Y) = 480
+//
+// ONE TOKEN BAND, NOT TWO, and the 64px residual is deliberately unspent. A
+// second band costs 46 of it and would show 3 of 4 chips without paging where
+// board 1 shows 2 - but one band on both boards keeps the two panels
+// structurally identical, and the pager already reaches every token. If paging
+// proves annoying on this board, that residual is the first thing to spend and
+// this is the change to make.
+//
+// The prompt card is THREE wrapped lines here against board 1's two; that is the
+// only difference in the four expressions, and compose.ino derives the line
+// count back out of COMPOSE_PROMPT_H rather than carrying a second constant.
+const int COMPOSE_PROMPT_H = 5 + KB_LINE_PITCH + 4 + 3 * KB_LINE_PITCH + 4;  // 77
+const int COMPOSE_LEGEND_H = KB_LINE_PITCH + 3;                              // 19
+const int COMPOSE_DRAFT_H  = KB_LINE_PITCH + 8;                              // 24
+// This board's 8px scale, where board 1 is pitched on 4.
+const int COMPOSE_GAP      = 8;
+// THE TOP MARGIN, and it is a MARGIN - the same kind of term as the 64px
+// residual above the action band, at the other end of the column. 12 is what
+// this board's reply budget prints in the spec and what
+// docs/design/compose/compose.js's D.RP_TOP mirrors; that mock's check.mjs binds
+// this name against it, so the two cannot drift. The 8px bottom margin is NOT a
+// term here - KB_ACT_Y already carries it (BOARD_H - 8 - KB_ACT_H).
+const int COMPOSE_TOP      = 12;
 // The peek overlay covers the keys and the action row but NEVER the text card, so
 // its height is BOARD_H - KB_ROWS_Y - 4 = 306. Its three stacked rows were the
 // literals 8 / 22 / 40 in drawKbPeek(), and at a 16px cell the middle one was a
