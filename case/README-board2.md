@@ -7,7 +7,7 @@ it is proven. What changed is what board 2 actually changes.
 
 ```
 openscad -o stl/deckhand_b2_body.stl -D 'part="body"' deckhand_case_b2.scad
-# parts: body | cover | retainer | stand | coupon | section | all
+# parts: body | cover | retainer | stand | buttons | btngauge | coupon | section | all
 ```
 
 ## The cover is a touch long — twice now
@@ -259,8 +259,9 @@ through the board's Ø3.2 hole (M3's 3.0 major clears it) and threads straight i
 plastic.
 
 **No captive nuts, and that is this design's existing pattern rather than a shortcut.**
-The stand hinge already threads M3 into plastic, and its comment says why: *"a nut is
-6.5 mm across corners, which is what forced the old 9 mm knuckle and all the bulk."*
+The stand hinge threads into plastic too, and its comment says why: *"a nut is 6.5 mm
+across corners, which is what forced the old 9 mm knuckle and all the bulk."* (The hinge is
+M2 now — see *The hinge is M2* — but these board screws are still M3.)
 
 | | |
 |---|---|
@@ -391,6 +392,58 @@ one board where RESET is the only way out of deep sleep.
 So the default assumes **2.5 mm**, taller than a typical SMD tactile (1.5–1.9), because a
 taller assumption makes a *shorter* stem. Measure the switch's height above the board's
 back face and set it; the stem follows.
+
+## The buttons could not be fitted, and one missing term is why
+
+Reported from a printed case: *"the two button holes are small, and the buttons extend are
+big, so I can not install them."* Both halves of that are the same omission.
+
+`print_shrink = 0.5` is measured, and the file applies it to `screw_pilot`, `clr_w`, `in_h`
+and `spk_grille_d`. **It is not applied to `btn_guide_d`.** So the guide hole is modelled
+4.2 and prints ≈3.7, while the 4.0 stem prints *larger*, not smaller:
+
+| | modelled | printed | |
+|---|---|---|---|
+| guide hole | 4.2 | ≈3.7 | shrinks — `print_shrink` never applied |
+| stem | 4.0 | ≈4.5 | grows |
+| | | **−0.80** | interference; the part cannot enter |
+
+**Opening the hole to the textbook value does not work, and the file catches it itself.**
+`btn_guide_d = 5.3` trips `"a button's solid boss overlaps the speaker grille"` —
+`btn_boss_d` is derived from the hole, so widening the hole walks the boss into the grille.
+Measured against that assert, **4.9 is the ceiling** (margin 0.15). Any permanent fix
+therefore has to move the *stem* as well, not just the hole.
+
+### The peg half has never been measured — `part="btngauge"`
+
+The hole half is measured, from a coupon. **The peg half is not.** Nothing in this repo has
+ever measured what a printed *cylinder* does, only what a printed *hole* does, so "a peg
+grows by the same 0.5 a hole loses" is an inference from the symptom and nothing better.
+Every number in the table above that describes the stem rests on it.
+
+```
+openscad -o stl/deckhand_b2_btn_gauge.stl -D 'part="btngauge"' deckhand_case_b2.scad
+```
+
+A 71 × 32 × 13 mm plate, ~10 minutes: five stems at 2.7 / 2.9 / 3.1 / 3.3 / 3.5 standing
+**vertically, like the real plunger**, and five reference bores at 3.7 / 4.1 / 4.5 / 4.9 /
+5.3, each labelled.
+
+1. **Pins** — push each into a RESET/BOOT guide hole in the cover you *already have*. The
+   one that slides with a trace of play and no force is the stem that fits that cover.
+2. **Bores** — drop the pins through these, or measure with calipers. A nominal 4.5 that
+   measures 4.0 is `print_shrink` confirming itself; one that measures 4.4 means the slicer
+   is already compensating and `print_shrink` should go to **0** rather than being paid
+   twice.
+
+**The sweep is deliberately not derived from `print_shrink`**, and it is the one hardcoded
+list in this file that is correct. An instrument must not be graduated in the quantity it
+exists to measure: a gauge computed from `print_shrink` would agree with `print_shrink`
+whatever the printer actually did. That is the *assertion that cannot fail*, in physical
+form.
+
+**Print the gauge before the cover.** `ks_barrel` is derived from `print_shrink` too, so
+the gauge's answer sets the hinge as well as the buttons — and the cover is the long print.
 
 ## A build that succeeded and lost the screw holes
 
@@ -688,8 +741,8 @@ the stand automatically.
 The cost is real and is not hidden: the device rests on its **full-width bottom edge at the
 front** and the leaf tip at the rear, so this narrows the *rear* of the stance; the larger
 effect is racking resistance at the hinge, which scales with the pivot spacing.
-`ks_ear_w` is not an alternative lever — its M3 counterbore is 3.2 deep in a 5.5 ear,
-leaving 2.3.
+`ks_ear_w` is not an alternative lever — its counterbore is 2.45 deep in a 5.5 ear,
+leaving 3.05. (At M3 it was 3.2 deep, leaving 2.3.)
 
 **The pivot moves 15 → 24, and that reverses a decision.** At 15 the folded leaf lands on
 the rim and meets the plateau's wall 3.1 mm later — a hard collision, it cannot close. It
@@ -698,9 +751,71 @@ has to pivot on the plateau, which needs `ks_lug_y >= plat_y0 + ks_bz` = 22.2; 2
 back 8 of the 11 mm of leverage commit 62a0fc2 deliberately reclaimed** (*"a stand wants
 its pivot near the edge it leans from"*). That is the price of the raised plateau.
 
-**The stand still sets the closed thickness.** Its nose stands 8.2 proud of whatever it
-folds onto, so the device shut is **30.1 mm** — unchanged by any of this. The profile
-changes the rim you hold, not the number on the spec sheet.
+**The stand no longer sets the closed thickness the way it did.** See *The blade was a
+wedge* below: the hinge is M2 and the blade is flat, so the nose stands **7.0** proud and
+the blade **2.5**, against 8.2 and an average of 6.16 before.
+
+## The blade was a wedge, and reading `ks_leaf_th` never showed it
+
+`ks_leaf_th = 3.0` described **only the last 12 mm**. `stand()` was one `hull()` from the
+full `ks_barrel` nose straight to the tip rectangle, so the blade was a long taper, and the
+constant that looked like the blade's thickness was its *smallest* value. Ray-sampled down
+the centre line of the exported mesh, the folded blade stood **6.16 mm** above the case on
+average. Nobody had been measuring it; the constant was being read instead.
+
+**The wedge was never a printing requirement**, which matters because it looks like one.
+The part prints flat, blade-down: the underside is a single plane on the bed and every face
+that changes height faces *up*, so unsupported overhang cannot arise and the profile above
+the bed is free. Only the underside had to be flat, and it still is.
+
+| measured off the mesh | before | now |
+|---|---|---|
+| peak above the case | 8.20 | **7.00** |
+| average along the blade | 6.16 | **2.50** |
+| device shut, at the hinge | 30.1 | **28.9** |
+| material | 11.8 cm³ | **6.1 cm³** |
+
+Peak is the M2 head; average is the shape, and the average is the larger half. The blade
+now rests *flat* on the plateau along its whole length — so the folded stand and the cover
+share a plane, and an intersection test between them returns 16 facets of **zero volume**.
+That is contact, not penetration, and it is why `case-b2-check.mjs` measures the
+intersection's **volume** and not its facet count.
+
+## The hinge is M2 — and nothing else in the case is
+
+**The barrel diameter *is* the lump the folded stand puts on the back**, and one thing sets
+it: burying the screw head in the blade's outer face with enough rim not to crack. So the
+screw head chooses the closed thickness of the device. An M3 head (5.5) cost 8.2 mm of
+barrel for a hinge holding a PCB leaning at 58°.
+
+`ks_barrel` is now **derived** — `ks_head_d + 2*ks_head_rim` — rather than typed. The old
+8.2 was a hand-computed copy of that same relation, and a hand-computed copy is exactly
+what goes stale when the head or the rim moves.
+
+**M2 is scoped to the hinge.** `m3_clear` is read *both* by the hinge's axle bore and by
+the cover's four stack-screw clearance holes, so the bore is now its own `ks_bore`.
+Shrinking `m3_clear` instead would have quietly taken the four screws that hold the whole
+case together down to M2 as well — and the cover would still have printed and still have
+looked right. `case-b2-check.mjs` binds that to `stand()`'s **body**, not to the file.
+
+| | M3, before | M2, now |
+|---|---|---|
+| head counterbore | 5.8 | **4.6** = 3.8 + 0.3 + `print_shrink` |
+| axle bore | 3.7 (`m3_clear + 0.3`) | **2.8** = 2.0 + 0.3 + `print_shrink` (own constant) |
+| boss pilot | 2.5 | **2.1** = 1.6 + `print_shrink` |
+| barrel | 8.2 (typed) | **7.0** (derived) |
+| boss wall | 2.85 | 2.45 |
+| screw | M3 × 8 | **M2 × 8 socket cap**, 4.55 mm engagement in a 5.0 boss |
+
+**All three holes now carry `print_shrink` and the M3 line they replace did not.** That
+omission is why the old `ks_pilot`'s own comment had to say *"if it drives too hard, open it
+to 2.6 with a drill bit"*: 2.5 modelled prints ~2.0, and an M3 thread-former into 2.0 mm of
+plastic is a press fit, not a tap. At M2 the same omission does not drive hard — it splits
+the boss, and it stops an M2 head entering a counterbore modelled at its own nominal.
+
+**Because `ks_barrel` is derived from `print_shrink`, re-measuring `print_shrink` re-derives
+the folded thickness of the whole device.** That is deliberate, and it is why the fit gauge
+below is worth printing before the cover.
 
 ## The battery is 46% of the thickness
 

@@ -745,20 +745,50 @@ ks_open    = 0;    // preview deploy angle (0 = folded flat)
 // rather than rediscovered.
 // ks_lug_from is DERIVED beside ks_gap, ~130 lines down: it reads cover_rise,
 // which is declared with the shell thicknesses BELOW this block. Same trap.
-ks_barrel  = 8.2;  // barrel diameter — shared by the cover bosses AND the blade nose.
-                   // Sized so the screw head can be BURIED in the blade's outer face
-                   // with a 1.2 mm rim; at 7.0 the rim was 0.6 mm and would crack.
+// ---- THE HINGE IS M2. EVERY OTHER SCREW IN THIS CASE IS STILL M3. ----
+// THE BARREL DIAMETER *IS* THE LUMP THE FOLDED STAND PUTS ON THE BACK, and it is
+// set by exactly one thing: burying the screw head in the blade's outer face with
+// enough rim not to crack. So the head chooses the case's folded thickness. An M3
+// head (5.5) cost 8.2 mm of barrel for a hinge that carries the weight of a
+// tablet-sized PCB leaning at 58 degrees - which is to say almost nothing.
+//
+// M2 IS SCOPED TO THE HINGE AND TO NOTHING ELSE. `m3_clear` is read BOTH by this
+// hinge's bore and by the cover's four stack-screw clearance holes (line ~1784),
+// so the bore below is its OWN constant rather than a smaller m3_clear. Shrinking
+// that one would have quietly taken the four screws that hold the whole case
+// together down to M2 as well, and the cover would still have printed and still
+// have looked right.
 ks_boss_w  = 5.0;  // boss width along the axle
 ks_ear_w   = 5.5;  // blade width outboard of each boss (holds the counterbore)
-ks_head_d  = 5.8;  // M3 socket-cap head (5.5) + clearance
-ks_head_h  = 3.2;  // head height (3.0) + a little, so it sits just below flush
 ks_hgap    = 0.4;  // clearance between a boss face and the blade
-ks_pilot   = 2.5;  // pilot hole in the boss — the M3 screw cuts its own thread.
-                   // 2.5 is the standard M3 tap drill: ~92% thread engagement.
-                   // (2.7 was far too loose — only ~55%, the threads would strip.)
-                   // Boss wall is 2.25 mm here, thick enough not to split.
-                   // If it drives too hard, open it to 2.6 with a drill bit.
-ks_leaf_th = 3.0;  // blade thickness at the tip (it tapers from ks_barrel at the nose)
+// THE THREE HOLES BELOW ALL CARRY print_shrink AND THE M3 LINE THEY REPLACE DID
+// NOT. That omission is why the old ks_pilot's own comment had to say "if it
+// drives too hard, open it to 2.6 with a drill bit": 2.5 modelled prints ~2.0, and
+// an M3 thread-former into 2.0 of plastic is a press fit, not a tap. At M2 the
+// same omission does not drive hard - it splits the boss, and it stops an M2 head
+// entering a counterbore modelled at its own nominal. Erring LARGE here is free
+// (a head sits a fraction deeper); erring small is a part you cannot assemble,
+// which is exactly the failure this revision exists to remove from the buttons.
+ks_head_d  = 3.8 + 0.3 + print_shrink;   // 4.6 - M2 socket-cap head (3.8) + fit
+ks_head_h  = 2.0 + 0.2 + print_shrink/2; // 2.45 - head height (2.0); the blade
+                   // prints FLAT, so this depth runs along the print's X and takes
+                   // the compensation on the one surface it has.
+ks_bore    = 2.0 + 0.3 + print_shrink;   // 2.8 - axle bore. NOT m3_clear + 0.3.
+ks_pilot   = 1.6 + print_shrink;         // 2.1 - the M2 screw cuts its own thread.
+                   // 1.6 is the standard M2 tap drill. Boss wall is
+                   // (6.5 - 2.1)/2 = 2.2 mm, against the 2.25 the M3 boss ran at.
+                   // SCREW: M2 x 8 SOCKET CAP. The ear is 5.5 with 2.45 of
+                   // counterbore in it, so 3.05 of ear plus 0.4 of hgap are spent
+                   // before the thread starts and 4.55 reaches into a 5.0 boss.
+ks_head_rim = 1.2; // material left around the buried head. At 0.6 it cracked.
+ks_barrel  = ks_head_d + 2*ks_head_rim;  // 7.0 - shared by the cover bosses AND
+                   // the blade nose. DERIVED, NOT TYPED: the previous 8.2 was a
+                   // hand-computed copy of this same relation, and a hand-computed
+                   // copy is the thing that goes stale when the rim or the head
+                   // moves. Re-measuring print_shrink now re-derives the barrel,
+                   // and with it the folded thickness of the whole device.
+ks_leaf_th = 2.5;  // blade thickness - OF THE WHOLE BLADE, not just the tip.
+                   // See stand(): this used to describe only the last 12 mm.
 
 // ---------- Fit / structure ----------
 clr      = 0.5;     // board-to-wall clearance along the LENGTH (Y, USB↔far end)
@@ -1137,6 +1167,8 @@ ks_bz      = ks_barrel/2;                  // axis height in the stand's own fra
 ks_axle_z  = -ks_bz;                       // axis height outside the cover's outer face
 ks_nose_hw = ks_gap/2 + ks_boss_w/2 + ks_hgap + ks_ear_w;   // blade nose half-width
 ks_leaf_l  = out_h*0.60;
+ks_leaf_ramp = 10;                         // run over which the nose barrel comes
+                                           // down to the flat blade. See stand().
 
 // ---------- helpers ----------
 module rrect(w,h,r){ offset(r) offset(-r) square([w,h]); }
@@ -1803,23 +1835,45 @@ module cover(){
 // PREVIEW + SECTION
 // ============================================================================
 // ---- Fold-out kickstand blade (its own small print, pivots on the cover) ----
-// A tapered BLADE: full-width rounded nose at the hinge (ks_barrel thick),
-// sweeping down to ks_leaf_th at the tip. Notches in the nose straddle the cover's
-// two bosses, so the blade grips each boss on both sides. One M3 cap screw per
-// side threads into its boss and clamps the blade — that's the friction.
-// PRINT-FRIENDLY: prints flat, blade-down, no support. The hull gives a single
-// FLAT underside on the bed (the nose is tangent to that plane, not below it),
-// the taper is all shallow overhang, and the bore is a TEARDROP so its top is a
-// self-supporting point instead of a ceiling that sags into strings.
+// A rounded nose at the hinge (ks_barrel thick) and then a FLAT BLADE of constant
+// ks_leaf_th. Notches in the nose straddle the cover's two bosses, so the blade
+// grips each boss on both sides. One M2 cap screw per side threads into its boss
+// and clamps the blade — that's the friction.
+//
+// THE BLADE USED TO BE ONE HULL FROM THE NOSE STRAIGHT TO THE TIP, i.e. a WEDGE,
+// and that is what made the folded case thick. ks_leaf_th described only the last
+// 12 mm of it; ray-sampled off the exported mesh the blade stood 6.16 mm above the
+// case on AVERAGE against the 3.0 the constant appeared to promise, and reading
+// the constant was the only way anyone had been checking. Peak 8.2 -> 7.0 is the
+// M2 head; average 6.16 -> 2.5 is this shape, and it is the larger half.
+//
+// THE WEDGE WAS NEVER A PRINTING REQUIREMENT, which is worth stating because it
+// looks like one. The part prints FLAT, blade-down, so the underside is a single
+// plane on the bed and EVERY face that changes height faces UP - unsupported
+// overhang cannot arise, and the profile above the bed is therefore free. Only the
+// underside had to be flat, and it still is (the nose is tangent to that plane,
+// not below it). The bore stays a TEARDROP so its top is a self-supporting point
+// rather than a ceiling that sags into strings.
 module stand(){
   R    = ks_bz;                             // nose radius = axis height
   hw   = ks_nose_hw;                        // nose half-width
-  bore = m3_clear + 0.3;
+  bore = ks_bore;
   difference(){
-    // one hull: rounded nose -> thin tip. Flat bottom at z=0 across the whole part.
-    hull(){
+    union(){
       translate([0,0,R]) rotate([0,90,0]) cylinder(d=ks_barrel, h=2*hw, center=true);
-      linear_extrude(ks_leaf_th) translate([0,-(ks_leaf_l-6)]) rrect_c(2*hw-12, 12, 5);
+      // shoulder: barrel down to the leaf over ks_leaf_ramp, so the step is a
+      // ramp rather than a cliff and the nose stays fed with material.
+      hull(){
+        translate([0,0,R]) rotate([0,90,0]) cylinder(d=ks_barrel, h=2*hw, center=true);
+        translate([0,-ks_leaf_ramp,0]) linear_extrude(ks_leaf_th)
+          translate([-(hw-1),-2]) square([2*(hw-1),4]);
+      }
+      // the flat blade, shoulder to tip. Constant ks_leaf_th throughout.
+      hull(){
+        translate([0,-ks_leaf_ramp,0]) linear_extrude(ks_leaf_th)
+          translate([-(hw-1),-2]) square([2*(hw-1),4]);
+        linear_extrude(ks_leaf_th) translate([0,-(ks_leaf_l-6)]) rrect_c(2*hw-12, 12, 5);
+      }
     }
     // notches straddling each cover boss (clearance on both faces)
     for(s=[-1,1]) translate([s*ks_gap/2, 0, R])
@@ -1918,6 +1972,72 @@ module buttons(){
 }
 
 // ============================================================================
+// BUTTON FIT GAUGE — part="btngauge"
+// ============================================================================
+// WHY THIS PART EXISTS. The buttons could not be fitted at all: btn_guide_d is
+// modelled 4.2 and prints ~3.7, while the 4.0 stem prints larger, not smaller. The
+// hole half of that is MEASURED - print_shrink 0.5, from a coupon. THE PEG HALF IS
+// NOT. Nothing in this repo has ever measured what a printed CYLINDER does, only
+// what a printed HOLE does, so "a peg grows by the same 0.5 a hole loses" is an
+// inference from the symptom and nothing better.
+//
+// THE SWEEP IS DELIBERATELY NOT DERIVED FROM print_shrink, and that is the one
+// place in this file where a hardcoded list is the correct choice. An instrument
+// must not be graduated in terms of the quantity it exists to measure - a gauge
+// computed from print_shrink would agree with print_shrink whatever the printer
+// actually did, which is the "assertion that cannot fail" in physical form.
+//
+// TO USE IT, both rows, in this order:
+//   1. PINS - push each into a RESET/BOOT guide hole in the cover you ALREADY
+//      have. The right one slides with a trace of play and does not need force.
+//      That number is the stem for a button that fits your current cover.
+//   2. HOLES - drop the pins through these instead, or measure them with calipers.
+//      A nominal 4.5 hole that measures 4.0 is print_shrink confirming itself; one
+//      that measures 4.4 means the slicer is already compensating and print_shrink
+//      should go to 0 rather than being paid twice.
+// Report both and the stem and the guide hole can be set from measurement.
+//
+// PRINTED STANDING, like the real plunger, because that is the whole point: a pin
+// lying on its side is a different dimension in a different plane and would
+// measure the printer's Z instead of its XY.
+gauge_pins  = [2.7, 2.9, 3.1, 3.3, 3.5];   // candidate stems
+gauge_holes = [3.7, 4.1, 4.5, 4.9, 5.3];   // reference bores
+gauge_pitch = 13;
+gauge_base  = 3.0;
+gauge_pin_h = 10.0;   // guide passage is btn_plate + btn_sleeve_h ~ 5.5, so this
+                      // passes clean through with something left to hold
+
+// NO font= HERE, DELIBERATELY. A named face ("Helvetica:style=Bold") resolves on
+// this Mac and falls back elsewhere, and a gauge whose labels silently changed
+// shape on someone else's machine is a gauge you cannot trust the reading of.
+// OpenSCAD's default face is present wherever OpenSCAD is.
+module gauge_label(txt){
+  linear_extrude(0.6) text(txt, size=3, halign="center");
+}
+module btngauge(){
+  n = len(gauge_pins);
+  w = n * gauge_pitch + 6;
+  difference(){
+    union(){
+      translate([-w/2, -16, 0]) cube([w, 32, gauge_base]);
+      for (i = [0:n-1])
+        translate([(i - (n-1)/2) * gauge_pitch, 8, gauge_base])
+          cylinder(d = gauge_pins[i], h = gauge_pin_h);
+      // labels: pins above, holes below
+      for (i = [0:n-1]){
+        translate([(i - (n-1)/2) * gauge_pitch, 12.5, gauge_base])
+          gauge_label(str(gauge_pins[i]));
+        translate([(i - (n-1)/2) * gauge_pitch, -14.5, gauge_base])
+          gauge_label(str(gauge_holes[i]));
+      }
+    }
+    for (i = [0:n-1])
+      translate([(i - (n-1)/2) * gauge_pitch, -8, -1])
+        cylinder(d = gauge_holes[i], h = gauge_base + 2);
+  }
+}
+
+// ============================================================================
 // FIT-TEST COUPON — print this BEFORE the body.
 // ============================================================================
 // It carries only the things that can be wrong: the four column positions (the
@@ -1966,6 +2086,7 @@ else if (part=="cover")    translate([0,0,cover_th]) rotate([180,0,0]) cover();
 else if (part=="stand")    stand();
 else if (part=="retainer") { if (use_retainer) retainer(); }
 else if (part=="buttons")  buttons();
+else if (part=="btngauge") btngauge();
 else if (part=="coupon")   coupon();
 else if (part=="section")  section();
 // A deliberate no-op, for `include`-based clearance probes: `include` re-runs this
