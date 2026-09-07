@@ -863,6 +863,86 @@ the boss, and it stops an M2 head entering a counterbore modelled at its own nom
 the folded thickness of the whole device.** That is deliberate, and it is why the fit gauge
 below is worth printing before the cover.
 
+## A flange nobody designed, and the outer edge profile
+
+**Found by slicing the exported mesh, not by reading the source**, which is the only reason
+it was found at all. On the long side, at 5.00 mm below the plateau the outer skin sat at
+`x = 2.100`; at 5.05 it jumped back to `2.850`.
+
+| measured on the as-built cover | |
+|---|---|
+| step back inward | **0.75 mm**, all the way round the perimeter |
+| thickness of the ledge it stood on | **0.01 mm** |
+| skirt wall thickness there | **0.00 mm** |
+| groove below it | ramps back to full width by z = 5.80 |
+
+**Two constructions disagreeing about one outline.** The taper was a `hull()` whose base is
+the *full* rim rectangle at `z = rim0`, while the rim is a `soft_box` that chamfers its own
+top edge **inward** by `soft_r*0.5` = 0.8. Each is right alone; unioned, the taper's base
+overhangs the chamfer and leaves a knife edge on top of it. The softened shoulder was always
+intended — that chamfer *is* it — and the taper had been burying it.
+
+`cover_outer()` now carries the whole outer form as **one profile** from the plateau's top
+face to the rim's bottom edge: slices hulled together, the profile being convex everywhere
+(going down, the slope only ever steepens). The separate rim survives only on the paths that
+have no taper to blend into.
+
+**Each of the four edges moves independently, and that is not tidiness.** The plateau is not
+centred on the rim along y — its runs are 16.0 at the mic end and 16.5 at the service end —
+so a symmetric profile built on the mean would slide the plateau 0.25 mm down the case, and
+with it the battery corral, the button landings and the stand's pivot, all of which are
+placed off `plat_*`.
+
+### The fillets, and what they cost the stand
+
+```
+cover_edge_top      = 3.0   // plateau's flat top onto the taper
+cover_edge_shoulder = 2.5   // taper onto the rim
+```
+
+**A top fillet eats the flat the kickstand lies on.** The flat lost per side is
+`r·tan(θ/2)`, and the two axes are not alike: the sides fall at **35.5°** and cost `0.32r`,
+the ends at **17.1°** and cost only `0.15r` — so the shallow ends take more than twice the
+radius for the same loss.
+
+Both leaf dimensions are therefore derived from the plateau's **flat** region rather than
+from the plateau:
+
+| | before | now |
+|---|---|---|
+| `ks_leaf_margin` | 0.6 | `0.6 + edge_t1(...)` = **1.56** |
+| `ks_gap` | 23.20 | **21.28** |
+| blade width | 40.0 | **38.08** |
+| `ks_leaf_l` | `out_h*0.60` = 64.74 | derived = **64.26** |
+
+**`ks_leaf_l` had to be derived too, and that was not foreseen.** The leaf's *width* has
+always been sized to the plateau; its *length* was a fraction of the case, which happened to
+land inside the plateau and stopped happening the moment the top edge was filleted. Measured
+on the mesh, the tip sat **0.12 mm** inside the flat — under one extrusion width, i.e.
+resting on the fillet as soon as the print wanders. Measured margins now: −x 0.60, +x 0.60,
+−y 4.66, **+y 0.60**.
+
+The price is stance: the foot on the desk narrows by 1.92 mm. That is real and is the reason
+the fillet radius is a constant you can turn down rather than a shape baked into the hull.
+
+### What the checker learned from this
+
+`case-b2-check.mjs` gained three assertions, and the first is deliberately not "there is no
+flange at z = 5":
+
+- **the outside never steps back inward** — sliced and swept, the cover only ever gets wider
+  going down, until the rim's bottom chamfer. That is the property *neither* of the two old
+  constructions had individually, so it survives whatever replaces them.
+- **the skirt keeps a wall** — thinnest 2.32 mm, against the flange's 0.00.
+- **the folded blade lands on FLAT plateau** — both extents measured off the two meshes, in
+  one shared frame. The flat top is *read as the cover's topmost face*, not recomputed from
+  `edge_t1`: a derivation checked against its own term always holds.
+
+Two bugs in those assertions on the way in, both worth recording because they are the kind
+that pass: the cover was being sliced in its own frame and compared against a stand in the
+assembly frame (margins came out 7.91 and 20.12 and looked *fine*), and a tangency yields the
+same crossing twice, which read as a zero-thickness wall and failed a good cover.
+
 ## The battery is 46% of the thickness
 
 **RE-MEASURED on the actual pack: 36 × 66 × 10 mm.** This file said 37 × 68.5 × 10 for

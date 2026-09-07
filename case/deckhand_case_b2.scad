@@ -950,6 +950,51 @@ cover_shell = true;   // hollow the taper skirt (see above - not a material savi
 // outside that clip stays solid - which is exactly where you want material.
 cover_shell_edge = 1.0;   // clip the cavity this far short of the lip's inner face
 
+// ---------- THE OUTER EDGE PROFILE, AND A FLANGE THAT SHOULD NOT EXIST ----------
+// MEASURED off the exported mesh by slicing it, not read off the source: at z=5.00
+// the outer skin is at x=2.100 and at z=5.05 it is at x=2.850. That is a 0.75 mm
+// re-entrant STEP running the whole perimeter - a flange standing proud of the rim
+// on a lip 0.01 mm thick, over a groove that ramps back to full width by z=5.80.
+//
+// NOBODY DESIGNED THAT. It is two constructions disagreeing about one outline. The
+// taper is a hull() whose base is the FULL rim rectangle at z=rim0, while the rim
+// itself is a soft_box that chamfers its own top edge INWARD by soft_r*0.5 = 0.8.
+// Each is right on its own; unioned, the taper's base overhangs the chamfer. The
+// softened shoulder was always intended - the chamfer is it - and the taper has
+// simply been burying it and adding a knife edge on top.
+//
+// So the outer form is now ONE profile from the plateau's top face to the rim's
+// bottom edge, instead of two solids meeting at a plane and arguing there. Slices
+// hulled together: the profile is convex everywhere (the slope only ever gets
+// steeper going down), so a hull reproduces it exactly.
+//
+// BOTH FILLETS ARE OPTIONAL AND DEFAULT TO ZERO, which is the sharp-creased shape
+// this file always meant to have - the flange fix is not a styling change and does
+// not wait on one.
+cover_edge_top      = 3.0;  // fillet where the plateau's flat top turns onto the taper
+cover_edge_shoulder = 2.5;  // fillet where the taper turns onto the rim
+cover_edge_steps    = 40;   // slices in the profile hull
+
+// A top fillet EATS FLAT PLATEAU, and the plateau's flat top is exactly what the
+// kickstand blade lies on - there is only ks_leaf_margin (0.6) of spare either
+// side. The flat lost per side is r*tan(theta/2), so the SHALLOW ends can take a
+// far bigger fillet than the steep sides for the same loss: at 35.5 deg a side
+// fillet costs 0.32r, at 17.1 deg an end fillet costs only 0.15r. The assert below
+// is what stops a pretty edge quietly putting the stand on a curve.
+function edge_theta(R, H) = atan2(H, R);
+function edge_t1(r, R, H) = r * tan(edge_theta(R,H)/2);              // flat lost, per side
+function edge_t2(r, R, H) = r * cos(edge_theta(R,H)) / (1 + sin(edge_theta(R,H)));
+
+// Outward offset from the plateau edge at depth z, for one face.
+function edge_off(z, R, H, rt, rs) =
+  let (th = edge_theta(R,H), t1 = edge_t1(rt,R,H), t2 = edge_t2(rs,R,H),
+       zA = rt * (1 - cos(th)),          // top fillet ends here
+       zB = H - t2 * sin(th))            // shoulder fillet starts here
+    z >= H + t2 ? R
+  : rt > 0 && z <= zA ? -t1 + sqrt(max(rt*rt - (z-rt)*(z-rt), 0))
+  : rs > 0 && z >= zB ? (R - rs) + sqrt(max(rs*rs - (z-(H+t2))*(z-(H+t2)), 0))
+  : R * z / H;
+
 // The cover-screw flags (cover_screws, screw_boss_d, cover_snaps) live UP with
 // board_screws, because screw_len reads them ~570 lines before this point.
 
@@ -1098,7 +1143,14 @@ assert(!spk_grille || !cover_buttons || cover_rise == 0 ||
 // the desk goes 38.8 -> 28.0, i.e. 65% -> 47% of the case width. The device's
 // own bottom edge is the full 59.4 either way, so this narrows the REAR of the
 // stance, not the front.
-ks_leaf_margin = 0.6;   // leaf inset from the plateau edge, per side
+// leaf inset from the plateau edge, per side. 0.6 is the fit margin; the second
+// term is the FLAT the top-edge fillet eats, and it is derived rather than left to
+// be remembered. The blade lies on the plateau's flat top and there is only 0.6 mm
+// of spare either side, so a fillet the eye would call an improvement is a fillet
+// that puts the stand on a curve and lets it rock. Raising cover_edge_top now
+// narrows the leaf automatically - and narrows the stance, which is the real price
+// and is reported in the mock rather than hidden here.
+ks_leaf_margin = 0.6 + edge_t1(cover_edge_top, plat_x0 - (wall - 0.1), cover_rise);
 ks_gap = cover_rise > 0
   ? 2*((plat_x1 - plat_x0)/2 - ks_leaf_margin - ks_boss_w/2 - ks_hgap - ks_ear_w)
   : 34;                 // the flat cover's original spacing, so cover_rise 0 restores it
@@ -1227,7 +1279,18 @@ ks_dir     = usb_at_top ? 1 : -1;          // leaf extends toward the service ed
 ks_bz      = ks_barrel/2;                  // axis height in the stand's own frame
 ks_axle_z  = -ks_bz;                       // axis height outside the cover's outer face
 ks_nose_hw = ks_gap/2 + ks_boss_w/2 + ks_hgap + ks_ear_w;   // blade nose half-width
-ks_leaf_l  = out_h*0.60;
+// DERIVED, not out_h*0.60. The leaf's WIDTH has always been sized to the plateau
+// (see ks_leaf_margin); its LENGTH was a fraction of the case, which happened to
+// land inside the plateau and stopped happening the moment the top edge was
+// filleted. Measured on the mesh at cover_edge_top 3.0, the tip sat 0.12 mm inside
+// the flat - under one extrusion width, i.e. resting on the fillet as soon as the
+// print wanders. So the tip is now placed off the SAME flat the width is, with the
+// same 0.6 fit margin, and the end fillet's own bite is what it subtracts.
+//   0.6 rather than ks_leaf_margin: that constant carries the SIDE fillet's bite,
+//   which is a different number on this axis (the ends fall at 17.1 deg, the sides
+//   at 35.5), and is already accounted for by measuring from the end's own flat.
+ks_leaf_l  = plat_y1 - edge_t1(cover_edge_top, (wall - 0.1 + in_h + 0.2) - plat_y1,
+                              cover_rise) - ks_lug_y - 0.6;
 ks_leaf_ramp = 10;                         // run over which the nose barrel comes
                                            // down to the flat blade. See stand().
 
@@ -1680,6 +1743,37 @@ assert(!spk_grille ||
          >= batt_y0 + batt_h + batt_rib_gap + batt_rib_t + 1.0,
        "speaker grille overlaps the battery retaining rib");
 
+// ONE profile for the whole outer form: plateau top face -> taper -> shoulder ->
+// rim -> the rim's bottom chamfer. It replaces a soft_box and a hull() that met at
+// z=rim0 and disagreed there; see "A FLANGE THAT SHOULD NOT EXIST".
+//
+// EACH OF THE FOUR EDGES IS MOVED INDEPENDENTLY, and that is not tidiness: the
+// plateau is NOT centred on the rim along y. Its runs are 16.0 at the mic end and
+// 16.5 at the service end, so a symmetric profile built on the mean would slide the
+// plateau 0.25 mm down the case - and with it the battery corral, the button
+// landings and the stand's pivot, all of which are placed off plat_*.
+module cover_outer(){
+  rx0 = wall - 0.1;            rx1 = rx0 + in_w + 0.2;
+  ry0 = wall - 0.1;            ry1 = ry0 + in_h + 0.2;
+  H   = cover_rise;
+  er  = soft_r * 0.5;          // the rim's bottom chamfer, as it always was
+  rc  = max(oc_r - wall, 2);
+  zmax = H + cover_th;
+  rt = cover_edge_top;  rs = cover_edge_shoulder;
+  hull(){
+    for (i = [0 : cover_edge_steps]) {
+      z   = zmax * i / cover_edge_steps;
+      cut = max(0, z - (zmax - er));               // bottom chamfer
+      x0  = plat_x0 - edge_off(z, plat_x0 - rx0, H, rt, rs) + cut;
+      x1  = plat_x1 + edge_off(z, rx1 - plat_x1, H, rt, rs) - cut;
+      y0  = plat_y0 - edge_off(z, plat_y0 - ry0, H, rt, rs) + cut;
+      y1  = plat_y1 + edge_off(z, ry1 - plat_y1, H, rt, rs) - cut;
+      r   = 3 + (rc - 3) * min(z/H, 1);
+      translate([x0, y0, z])
+        linear_extrude(0.01) rrect(x1 - x0, y1 - y0, max(r - cut, 0.5));
+    }
+  }
+}
 module cover(){
   lip_in = wall - 1.0;                 // lip that slides into the body opening (lip_h is global)
   g  = 0.3;                            // lip clearance on the SIDES (width) — kept snug
@@ -1711,8 +1805,11 @@ module cover(){
   pw = plat_x1 - plat_x0;  ph = plat_y1 - plat_y0;
   difference(){
     union(){
-      // the thin rim
-      translate([wall-0.1,wall-0.1,rim0]) soft_box(in_w+0.2,in_h+0.2,cover_th,max(oc_r-wall,2),soft_r*0.5);
+      // the thin rim - ONLY on the paths that have no taper to blend into. With a
+      // taper, cover_outer() carries the rim as part of one continuous profile,
+      // because a separate rim is exactly what produced the perimeter flange.
+      if (!(cover_rise > 0 && cover_taper))
+        translate([wall-0.1,wall-0.1,rim0]) soft_box(in_w+0.2,in_h+0.2,cover_th,max(oc_r-wall,2),soft_r*0.5);
       // ONE PILLAR PER CORNER, carrying the screw from its landing in the cover
       // down onto the board's back. This is what makes the screw clamp all three
       // parts instead of just pulling the cover onto the body: without it the
@@ -1725,15 +1822,11 @@ module cover(){
       // ...and the plateau over the cell, plus how it meets that rim
       if (cover_rise > 0) {
         if (cover_taper)
-          // ONE HULL from the plateau outline down to the full rim outline. The
-          // slopes come out planar at 37.6 deg on the sides and ~21 at the ends,
-          // and both rise AWAY from the bed, so it still prints without support.
-          hull(){
-            translate([plat_x0+pw/2, plat_y0+ph/2, 0])
-              linear_extrude(0.01) rrect_c(pw, ph, 3);
-            translate([wall-0.1+(in_w+0.2)/2, wall-0.1+(in_h+0.2)/2, rim0])
-              linear_extrude(0.01) rrect_c(in_w+0.2, in_h+0.2, max(oc_r-wall,2));
-          }
+          // MEASURED off the mesh, the slopes are planar at 35.5 deg on the sides
+          // and 17.1 at the ends (the 37.6/21 this comment used to claim were from
+          // an earlier plateau), and both rise AWAY from the bed, so it prints
+          // without support. cover_outer() now carries the rim too - see there.
+          cover_outer();
         else
           // straight wall, chamfered where it turns onto the top
           hull(){

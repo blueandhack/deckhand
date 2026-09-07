@@ -118,6 +118,37 @@ function stlTris(path) {
   return T;
 }
 
+
+// Cross-section of a mesh on the plane axis=val, as [[u,z],[u,z]] segments.
+function sectionSegs(T, axis, val){
+  const S=[], o = axis===0?1:0;
+  for(const t of T){
+    const d=[t[0][axis]-val,t[1][axis]-val,t[2][axis]-val];
+    const hits=[];
+    for(let i=0;i<3;i++){const j=(i+1)%3;
+      if((d[i]<0&&d[j]>=0)||(d[j]<0&&d[i]>=0)){
+        const f=d[i]/(d[i]-d[j]);
+        hits.push([t[i][o]+f*(t[j][o]-t[i][o]), t[i][2]+f*(t[j][2]-t[i][2])]);}}
+    if(hits.length===2) S.push(hits);
+  }
+  return S;
+}
+// Every crossing of the horizontal line z with those segments, sorted.
+function crossings(S, z){
+  const o=[];
+  for(const [a,b] of S){
+    const lo=Math.min(a[1],b[1]), hi=Math.max(a[1],b[1]);
+    if(z<lo-1e-9||z>hi+1e-9) continue;
+    o.push(Math.abs(b[1]-a[1])<1e-9 ? Math.min(a[0],b[0])
+          : a[0]+(z-a[1])/(b[1]-a[1])*(b[0]-a[0]));
+  }
+  o.sort((p,q)=>p-q);
+  const u=[];                       // a tangency yields the same crossing twice,
+  for(const x of o)                 // which would read as a zero-thickness wall
+    if(!u.length || x-u[u.length-1] > 1e-6) u.push(x);
+  return u;
+}
+
 // ---------------------------------------------------------------- the checks
 function run(scadPath) {
   failures = [];
@@ -169,7 +200,8 @@ function run(scadPath) {
   const v = scadEcho(scadPath, [
     'ks_barrel', 'ks_head_d', 'ks_head_rim', 'ks_bore', 'ks_pilot',
     'ks_boss_w', 'ks_ear_w', 'ks_head_h', 'ks_hgap', 'ks_leaf_th',
-    'ks_leaf_l', 'ks_lug_y', 'total_th', 'out_w'
+    'ks_leaf_l', 'ks_lug_y', 'total_th', 'out_w',
+    'cover_rise', 'cover_th', 'soft_r', 'cover_edge_top', 'cover_edge_shoulder'
   ]);
 
   const rim = (v.ks_barrel - v.ks_head_d) / 2;
@@ -222,6 +254,63 @@ function run(scadPath) {
   check('the blade sits at ks_leaf_th', Math.abs(Math.max(...hs) - v.ks_leaf_th) < 0.05,
     `measured ${Math.max(...hs).toFixed(2)} vs ks_leaf_th ${v.ks_leaf_th}`);
 
+  // ---- the cover's OUTER EDGE, measured by slicing it ----
+  // The flange this guards against was found by slicing, not by reading the
+  // source: at z=5.00 the skin stood at 2.100 and at 5.05 at 2.850 - a 0.75 mm
+  // lip on a 0.01 mm ledge, with ZERO wall thickness under it. It came of a
+  // taper hull and a rim soft_box disagreeing about one outline, so what is
+  // asserted is the property neither of them individually had: going down the
+  // outside, the cover only ever gets WIDER until the rim's bottom chamfer.
+  // ASSEMBLY frame, the same one stand_placed() uses - the plan extents of the two
+  // meshes are compared below, and cover()'s own frame is both flipped and offset.
+  writeFileSync(join(dir,'c.scad'),
+    `part="none";\ninclude <${scadPath}>\n` +
+    `translate([out_w,0,total_th]) rotate([0,180,0]) cover();\n`);
+  const cvf = join(dir,'cover.stl');
+  execFileSync('openscad', ['--export-format=binstl','-o',cvf,'-D','$fn=48',
+    '-D','part="none"', join(dir,'c.scad')], { stdio:['ignore','ignore','ignore'] });
+  const cs = sectionSegs(stlTris(cvf), 1, 54);
+  const zLast = v.cover_rise + v.cover_th - v.soft_r*0.5;   // before the bottom chamfer
+  let worstStep = 0, worstZ = 0, minWall = Infinity;
+  let prevW = null;
+  for (let d = 0; d <= zLast + 1e-9; d += 0.05) {          // d = depth below the outer face
+    const z = v.total_th - d;
+    const c = crossings(cs, z);
+    if (c.length < 2) continue;
+    const w = c[c.length-1] - c[0];                // full outside width at this depth
+    if (prevW !== null && prevW - w > worstStep) { worstStep = prevW - w; worstZ = d; }
+    prevW = w;
+    if (d >= 2.2) { const t = c[1]-c[0]; if (t < minWall) minWall = t; }
+  }
+  check('the outside never steps back inward - no perimeter flange',
+    worstStep < 0.15,
+    worstStep < 0.15 ? `widens monotonically to the chamfer`
+                     : `steps in ${worstStep.toFixed(2)} mm at depth ${worstZ.toFixed(2)}`);
+  check('the skirt keeps a wall', minWall > 1.2,
+    `thinnest ${minWall.toFixed(2)} mm over z 2.2..${zLast.toFixed(1)} (the flange measured 0.00)`);
+
+  // ---- the kickstand blade must land on FLAT plateau, not on the fillet ----
+  // Both extents are MEASURED off the two meshes. The flat top is read as the
+  // cover's topmost face, not recomputed from edge_t1 - a derivation checked
+  // against its own term always holds.
+  const ct = stlTris(cvf);
+  const flat = {x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity};
+  for (const t of ct) for (const p of t) if (Math.abs(p[2]-v.total_th) < 0.01) {
+    flat.x0=Math.min(flat.x0,p[0]); flat.x1=Math.max(flat.x1,p[0]);
+    flat.y0=Math.min(flat.y0,p[1]); flat.y1=Math.max(flat.y1,p[1]);
+  }
+  const blTris = stlTris(st);       // the PLACED stand, folded
+  const bl = {x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity};
+  for (const t of blTris) for (const p of t) if (p[2] < v.total_th + 0.15) {
+    bl.x0=Math.min(bl.x0,p[0]); bl.x1=Math.max(bl.x1,p[0]);
+    bl.y0=Math.min(bl.y0,p[1]); bl.y1=Math.max(bl.y1,p[1]);
+  }
+  const marg = [bl.x0-flat.x0, flat.x1-bl.x1, bl.y0-flat.y0, flat.y1-bl.y1];
+  check('the folded blade lands on FLAT plateau, not on the top fillet',
+    Math.min(...marg) >= 0.4,
+    `margins  -x ${marg[0].toFixed(2)}  +x ${marg[1].toFixed(2)}  ` +
+    `-y ${marg[2].toFixed(2)}  +y ${marg[3].toFixed(2)}  (tip was 0.12 before ks_leaf_l was derived)`);
+
   rmSync(dir, { recursive: true, force: true });
   return failures;
 }
@@ -254,6 +343,27 @@ const FAULTS = [
   { name: 'the blade goes back to a wedge',
     patch: s => s.replace(/^ks_leaf_ramp = 10;/m, 'ks_leaf_ramp = 55;'),
     expect: 'the blade is CONSTANT thickness, not a wedge' },
+  // The historical construction, restored verbatim: a rim that chamfers its own top
+  // plus a taper whose hull reaches the FULL rim outline. Each is fine alone.
+  { name: 'the cover goes back to a rim and a taper that disagree at z=rim0',
+    patch: s => s
+      .replace(/      if \(!\(cover_rise > 0 && cover_taper\)\)\n        translate\(\[wall-0\.1/,
+               '      translate([wall-0.1')
+      .replace(/          cover_outer\(\);/,
+`          hull(){
+            translate([plat_x0+pw/2, plat_y0+ph/2, 0])
+              linear_extrude(0.01) rrect_c(pw, ph, 3);
+            translate([wall-0.1+(in_w+0.2)/2, wall-0.1+(in_h+0.2)/2, rim0])
+              linear_extrude(0.01) rrect_c(in_w+0.2, in_h+0.2, max(oc_r-wall,2));
+          }`),
+    expect: 'the outside never steps back inward - no perimeter flange' },
+  { name: 'ks_leaf_margin stops tracking the top fillet (blade too WIDE)',
+    patch: s => s.replace(/^ks_leaf_margin = 0\.6 \+ edge_t1\([^;]+;/m, 'ks_leaf_margin = 0.6;'),
+    expect: 'the folded blade lands on FLAT plateau, not on the top fillet' },
+  { name: 'ks_leaf_l goes back to a fraction of the case (blade too LONG)',
+    patch: s => s.replace(/^ks_leaf_l  = plat_y1 - edge_t1\([\s\S]*?cover_rise\) - ks_lug_y - 0\.6;/m,
+                          'ks_leaf_l  = out_h*0.60;'),
+    expect: 'the folded blade lands on FLAT plateau, not on the top fillet' },
   { name: 'the axle is dropped so the blade buries itself',
     patch: s => s.replace(/^ks_axle_z\s*=\s*-ks_bz;/m, 'ks_axle_z  = -ks_bz + 3.0;'),
     expect: 'the folded blade does not penetrate the cover' },
