@@ -943,6 +943,30 @@ that pass: the cover was being sliced in its own frame and compared against a st
 assembly frame (margins came out 7.91 and 20.12 and looked *fine*), and a tangency yields the
 same crossing twice, which read as a zero-thickness wall and failed a good cover.
 
+## The cover's STL is NOT byte-reproducible — the other five are
+
+Worth knowing before anyone compares STL hashes here the way this project compares
+firmware binaries. Re-exporting `part="cover"` from unchanged source lands on one of **two**
+files, roughly 4 runs in 10 versus 6:
+
+| | |
+|---|---|
+| differing lines | **4** of 159,911 (0.003%) |
+| what differs | `facet normal` components, in the **13th** significant figure |
+| example | `3.1212578984201003e-13` vs `3.121125564771945e-13` — a normal component that should be exactly 0 |
+| vertex multiset | **identical**, all 68,532 |
+
+**The two files describe the same solid.** Only facet normals differ, and slicers recompute
+those from the vertices. Measured over five consecutive exports each, `body`, `stand`,
+`buttons`, `btngauge` and `coupon` are all stable; only `cover` flips, which points at the
+41-slice `hull()` in `cover_outer()` rather than at anything upstream.
+
+**So a changed cover hash is not by itself evidence of a changed cover.** Diff the vertex
+multiset before believing it — and do not re-commit the cover just because its hash moved,
+or the history fills with four-line normal noise and the next real change hides in it. This
+is the same trap `board-baseline.mjs` masks 95 bytes of toolchain metadata to avoid on the
+firmware side.
+
 ## The battery is 46% of the thickness
 
 **RE-MEASURED on the actual pack: 36 × 66 × 10 mm.** This file said 37 × 68.5 × 10 for
