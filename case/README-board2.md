@@ -404,9 +404,9 @@ and `spk_grille_d`. **It is not applied to `btn_guide_d`.** So the guide hole is
 
 | | modelled | printed | |
 |---|---|---|---|
-| guide hole | 4.2 | ≈3.7 | shrinks — `print_shrink` never applied |
-| stem | 4.0 | ≈4.5 | grows |
-| | | **−0.80** | interference; the part cannot enter |
+| guide hole | 4.2 | ≈3.7 | shrinks by `print_shrink` |
+| stem | 4.0 | ≈4.0 | lands on nominal — **see below** |
+| | | **−0.30** | interference; the part cannot enter |
 
 **Opening the hole to the textbook value does not work, and the file catches it itself.**
 `btn_guide_d = 5.3` trips `"a button's solid boss overlaps the speaker grille"` —
@@ -414,12 +414,55 @@ and `spk_grille_d`. **It is not applied to `btn_guide_d`.** So the guide hole is
 Measured against that assert, **4.9 is the ceiling** (margin 0.15). Any permanent fix
 therefore has to move the *stem* as well, not just the hole.
 
-### The peg half has never been measured — `part="btngauge"`
+### MEASURED 2026-09-07: the peg half was wrong, and it was mine
 
-The hole half is measured, from a coupon. **The peg half is not.** Nothing in this repo has
-ever measured what a printed *cylinder* does, only what a printed *hole* does, so "a peg
-grows by the same 0.5 a hole loses" is an inference from the symptom and nothing better.
-Every number in the table above that describes the stem rests on it.
+**A printed peg does not grow. It lands on nominal.** The first fix written here
+assumed a peg gains the same 0.5 mm a hole loses — symmetry is the intuitive reading of
+"this printer is 0.5 fat" — and predicted a 2.9 mm stem. The gauge says otherwise:
+
+> *All five stems (2.7 … 3.5) enter a guide hole modelled at 4.2, and the largest slides
+> with slight play.*
+
+A 3.5 stem with play in that hole puts the printed hole at ≈3.7 — `print_shrink = 0.5`
+confirmed — and the printed stem at ≈3.5. So `print_grow = 0.0`, **measured**, and it is
+named rather than left absent because zero is a reading here and not a default.
+
+The pair reproduces the reported failure and nothing else does: a 4.0 stem printed 4.0 into
+a hole printed 3.7 is **0.30 of interference**, and *"I can not install them."*
+
+**The hole was never wrong — 4.2 is right.** But it was right by *accident*, written as
+`btn_stem_d + 0.2` where that 0.2 was a **modelled** clearance while every other fit in the
+file is a printed one. The relation is now written out in full, with both printing terms
+present because both are real and they are not equal:
+
+```
+btn_fit     = 0.3                                                   // PRINTED clearance
+btn_stem_d  = 3.4
+btn_guide_d = mm(btn_stem_d + print_grow + btn_fit + print_shrink)  // = 4.2
+```
+
+**So the stem moves and the hole does not: every cover already printed is correct, and only
+the buttons — a five-minute part — need making again.** `deckhand_b2_cover.stl` is
+byte-identical across this change, which is the evidence rather than the argument.
+
+A note on what the checker's fault-injection had to learn: *setting the stem back to 4.0
+does not reproduce the bug*, because the hole is derived from the stem now and follows it.
+The fault that has to be caught is the old **relation**.
+
+### Derived fits are quantised — `mm()`
+
+`3.4 + 0.0 + 0.3 + 0.5` is `4.199999999999999` in IEEE doubles: 9e-16 mm, about 1e-13 of a
+printer's finest step, and meaningless as geometry. **It is not meaningless as an
+artefact.** That epsilon moved six vertices in the exported cover and changed its hash — on
+a revision whose entire claim was that the cover does not change. Forcing the exact value
+reproduced the previous cover byte-for-byte, which is how it was identified rather than
+argued about. `mm()` is applied to every derived fit including the four that come out exact
+today, because a rule applied only where it has already hurt is not a rule.
+
+### The gauge itself — `part="btngauge"`
+
+Kept, and worth reprinting on any new printer or filament: it is what turned the peg half
+from an inference into a measurement, and it disagreed with the inference.
 
 ```
 openscad -o stl/deckhand_b2_btn_gauge.stl -D 'part="btngauge"' deckhand_case_b2.scad
@@ -442,8 +485,11 @@ exists to measure: a gauge computed from `print_shrink` would agree with `print_
 whatever the printer actually did. That is the *assertion that cannot fail*, in physical
 form.
 
-**Print the gauge before the cover.** `ks_barrel` is derived from `print_shrink` too, so
-the gauge's answer sets the hinge as well as the buttons — and the cover is the long print.
+**Printing it before the cover was the right call and it paid off, though not the way
+expected.** `ks_barrel` derives from `print_shrink`, so the gauge could have moved the
+hinge too. It did not: `print_shrink` came back at the 0.5 already recorded, and `ks_barrel`
+is an *external* dimension, so `print_grow = 0.0` leaves it alone. **The hinge geometry
+stands, and the stand and cover STLs are final.**
 
 ## A build that succeeded and lost the screw holes
 

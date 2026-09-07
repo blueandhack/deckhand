@@ -128,8 +128,27 @@ function run(scadPath) {
   const coverBody = moduleBody(src, 'cover');
 
   check('ks_barrel is DERIVED from the head and the rim, not a literal',
-    /ks_barrel\s*=\s*ks_head_d\s*\+\s*2\s*\*\s*ks_head_rim\s*;/.test(src),
+    /ks_barrel\s*=\s*(?:mm\()?\s*ks_head_d\s*\+\s*2\s*\*\s*ks_head_rim\s*\)?\s*;/.test(src),
     '(a hand-computed copy is what goes stale when the head moves)');
+
+  // Every derived FIT goes through mm(). Without it btn_guide_d evaluates to
+  // 4.199999999999999 and moves six vertices in the exported cover - a hash change
+  // on a revision whose claim was that the cover does not change.
+  for (const c of ['ks_barrel', 'ks_head_d', 'ks_bore', 'ks_pilot', 'btn_guide_d']) {
+    const m = src.match(new RegExp(`^${c}\\s*=\\s*([^;]+);`, 'm'));
+    check(`${c} is quantised with mm()`, !!m && /^mm\(/.test(m[1].trim()),
+      m ? `= ${m[1].trim()}` : '(not found)');
+  }
+
+  // The button pair the gauge settled: hole loses print_shrink, stem gains
+  // print_grow, and what is left is the fit you can actually assemble.
+  const bt = scadEcho(scadPath,
+    ['btn_stem_d', 'btn_guide_d', 'btn_fit', 'print_shrink', 'print_grow']);
+  const printedClear = (bt.btn_guide_d - bt.print_shrink) - (bt.btn_stem_d + bt.print_grow);
+  check('the button actually goes in', printedClear >= 0.2 && printedClear <= 0.5,
+    `printed stem ${(bt.btn_stem_d + bt.print_grow).toFixed(2)} in printed hole ` +
+    `${(bt.btn_guide_d - bt.print_shrink).toFixed(2)} = ${printedClear >= 0 ? '+' : ''}` +
+    `${printedClear.toFixed(2)} (negative is the defect that started this)`);
 
   check('stand() bores with ks_bore and never reaches into m3_clear',
     /\bks_bore\b/.test(standBody) && !/\bm3_clear\b/.test(standBody),
@@ -212,14 +231,26 @@ function run(scadPath) {
 // the NAMED assertion that exists to catch it - not merely by "something failed".
 const FAULTS = [
   { name: 'ks_barrel hand-computed back to a literal',
-    patch: s => s.replace(/ks_barrel\s*=\s*ks_head_d \+ 2\*ks_head_rim;/, 'ks_barrel  = 7.0;'),
+    patch: s => s.replace(/ks_barrel\s*=\s*mm\(ks_head_d \+ 2\*ks_head_rim\);/, 'ks_barrel  = 7.0;'),
     expect: 'ks_barrel is DERIVED from the head and the rim, not a literal' },
   { name: 'stand() reaches back into m3_clear',
     patch: s => s.replace(/^(\s*)bore = ks_bore;/m, '$1bore = m3_clear + 0.3;'),
     expect: 'stand() bores with ks_bore and never reaches into m3_clear' },
   { name: 'ks_pilot loses its print_shrink term',
-    patch: s => s.replace(/^ks_pilot\s*=\s*1\.6 \+ print_shrink;/m, 'ks_pilot   = 1.6;'),
+    patch: s => s.replace(/^ks_pilot\s*=\s*mm\(1\.6 \+ print_shrink\);/m, 'ks_pilot   = 1.6;'),
     expect: 'ks_pilot carries print_shrink' },
+  // NOT "set the stem back to 4.0": btn_guide_d is derived FROM the stem now, so
+  // moving the stem drags the hole with it and the fit stays correct - which is the
+  // derivation doing its job. The defect this has to catch is the original wrong
+  // RELATION, where the clearance was stated as a modelled figure and the hole
+  // never carried print_shrink at all.
+  { name: 'btn_guide_d goes back to the modelled-clearance relation',
+    patch: s => s.replace(/^btn_guide_d\s*=\s*mm\([^;]+\);/m,
+                          'btn_guide_d  = btn_stem_d + 0.2;'),
+    expect: 'the button actually goes in' },
+  { name: 'btn_guide_d loses mm() and drifts off 4.2',
+    patch: s => s.replace(/^btn_guide_d\s*=\s*mm\(([^;]+)\);/m, 'btn_guide_d  = $1;'),
+    expect: 'btn_guide_d is quantised with mm()' },
   { name: 'the blade goes back to a wedge',
     patch: s => s.replace(/^ks_leaf_ramp = 10;/m, 'ks_leaf_ramp = 55;'),
     expect: 'the blade is CONSTANT thickness, not a wedge' },

@@ -173,6 +173,26 @@ col_d    = 7.0;     // mounting column diameter (the shoulder the board rests on
 pin_d    = 1.3;
 pin_lead = 0.3;     // conical lead-in at the tip so the board drops on easily
 
+// ---------- Derived dimensions are quantised to 0.01 mm ----------
+// A FIT IS A SUM OF DECIMAL TERMS AND IEEE DOUBLES CANNOT HOLD THEM. btn_guide_d
+// is 3.4 + 0.0 + 0.3 + 0.5, which evaluates to 4.199999999999999 rather than 4.2 -
+// an error of 9e-16 mm, about 1e-13 of a printer's finest step, and utterly
+// meaningless as geometry.
+//
+// IT IS NOT MEANINGLESS AS AN ARTEFACT, which is the whole reason this exists.
+// That epsilon was enough to move six vertices in the exported cover and change
+// its hash, on a revision whose entire claim was "the cover does not change, so
+// every cover already printed is still correct". A diff you have to explain away
+// as noise is a diff you stop reading - and the next real change hides in it.
+// Forcing the exact value reproduced the previous cover BYTE FOR BYTE, which is
+// how the epsilon was identified rather than argued about.
+//
+// Applied to every derived fit, INCLUDING the ones that happen to come out exact
+// today (ks_head_d, ks_bore, ks_pilot, ks_barrel all do). A rule that is only
+// applied where it has already hurt is not a rule; the next term added to any of
+// these sums would rediscover this from scratch.
+function mm(x) = round(x * 100) / 100;   // dimensions are meaningful to 0.01 mm
+
 // ---------- This printer's dimensional error, measured ----------
 // TWO SYMPTOMS, ONE CAUSE, so it is one named number rather than a fudge factor
 // hidden in each feature. From printed coupons:
@@ -200,7 +220,27 @@ pin_lead = 0.3;     // conical lead-in at the tip so the board drops on easily
 // btn_span's - and the first one to reach exported geometry. The lesson is not
 // "be careful": grep the build for WARNING as well as ERROR, which is what caught
 // it, and put derived values immediately after what they depend on.
-print_shrink = 0.5;   // measured, on a DIAMETER or an opening
+print_shrink = 0.5;   // measured, on a DIAMETER or an opening — HOLES ONLY
+
+// ---------- and what a printed PEG does, which is NOT the same thing ----------
+// MEASURED 2026-09-07 with part="btngauge", and it corrected a wrong guess that
+// had already been written into this file's fix once.
+//
+// It is tempting to read print_shrink as "this printer is 0.5 fat" and conclude
+// that a peg must GROW by the same 0.5 a hole loses. That was assumed here, and
+// it is wrong. Of the five gauge stems (2.7 .. 3.5), ALL FIVE enter a guide hole
+// modelled at 4.2, and the largest slides with slight play — so the hole printed
+// ~3.7 (shrink 0.5, confirmed) while the 3.5 stem printed ~3.5. A peg lands on
+// NOMINAL.
+//
+// The two together reproduce the reported failure exactly and nothing else does:
+// the 4.0 stem printed 4.0 into a hole printed 3.7, which is 0.3 of INTERFERENCE,
+// and "I can not install them".
+//
+// Named rather than left at zero, because zero is a MEASUREMENT here and not an
+// absence: a different printer or filament can grow a peg, and every fit in this
+// file should follow if it is ever re-measured.
+print_grow = 0.0;     // measured, on a DIAMETER, for an EXTERNAL feature
 
 // ---------- Screwing the board down (board 2) ----------
 // The pins locate the board but do not HOLD it: lift the case and the board is
@@ -423,11 +463,29 @@ btn_cham = 0.8;     // outward flare at the cover's outer face, so a nail can fi
 // the hole, stands btn_proud above the outer face to press, and reaches down to
 // just short of the switch.
 cover_buttons = true;
-btn_stem_d   = 4.0;                    // the shaft
-// 0.2 of clearance, halved from 0.4, which halves both motions a plunger has:
-// lateral slop drops to 0.10/side and tilt from 4.6 to 2.3 degrees over the
-// 5.0 mm of bearing (plate 2.0 + sleeve 3.0).
+btn_stem_d   = 3.4;                    // the shaft
+// WAS 4.0, AND THAT IS THE WHOLE DEFECT: "the two button holes are small, and the
+// buttons extend are big, so I can not install them."
 //
+// THE HOLE WAS NEVER THE PROBLEM. btn_guide_d's 4.2 turns out to be exactly right
+// - but it was right by ACCIDENT, because it was written as stem + 0.2 where the
+// 0.2 was a MODELLED clearance and every other fit in this file is stated as a
+// printed one. Modelled, the pair was 4.0 in 4.2. Printed, with the hole losing
+// print_shrink and the stem losing nothing, it was 4.0 in 3.7: THIRTY HUNDREDTHS
+// OF INTERFERENCE, i.e. a press fit into a part you are meant to drop in by hand.
+// The clearance the old comment below describes never existed at any point.
+//
+// So the derivation is now written out in full and btn_fit is a PRINTED number.
+// The stem moves and the hole does not, which is not a coincidence worth hiding:
+// it means EVERY COVER ALREADY PRINTED IS CORRECT and only the buttons - a five
+// minute part - have to be made again.
+btn_fit      = 0.3;                    // PRINTED diametral clearance, stem to hole
+//
+// The paragraph below is kept because its SAFETY argument is still exactly right
+// and still decides this number; only its arithmetic was wrong. Read "0.2" there
+// as the modelled figure it was. 0.3 printed gives 0.15/side and 3.4 degrees of
+// tilt over the 5.0 mm of bearing - looser than that paragraph aimed for, and
+// deliberately so, because the risk here is not symmetric:
 // NOT TIGHTER, AND THE REASON IS A SAFETY ONE RATHER THAN A PRINTING ONE. What
 // returns this button is the tactile switch's own dome pushing it back out -
 // roughly 1 N - so any friction in the guide has to stay well under that. A stem
@@ -437,7 +495,10 @@ btn_stem_d   = 4.0;                    // the shaft
 // a thin foam or silicone washer under the flange kills it without adding
 // friction to the sliding surface - and there is already a foam sheet in this
 // build for the battery.
-btn_guide_d  = btn_stem_d + 0.2;       // hole in the cover: a sliding fit
+// = 4.2, the value it always had, now DERIVED instead of asserted. Both printing
+// terms appear because both are real and they are not equal: the hole loses
+// print_shrink, the stem gains print_grow, and only what is left over is fit.
+btn_guide_d  = mm(btn_stem_d + print_grow + btn_fit + print_shrink);   // 4.2
 btn_flange_d = btn_guide_d + 3.0;      // wider than the hole = captive
 btn_flange_t = 1.2;
 btn_proud    = 1.5;                    // how far the button stands above the cover
@@ -769,19 +830,19 @@ ks_hgap    = 0.4;  // clearance between a boss face and the blade
 // entering a counterbore modelled at its own nominal. Erring LARGE here is free
 // (a head sits a fraction deeper); erring small is a part you cannot assemble,
 // which is exactly the failure this revision exists to remove from the buttons.
-ks_head_d  = 3.8 + 0.3 + print_shrink;   // 4.6 - M2 socket-cap head (3.8) + fit
-ks_head_h  = 2.0 + 0.2 + print_shrink/2; // 2.45 - head height (2.0); the blade
+ks_head_d  = mm(3.8 + 0.3 + print_shrink);   // 4.6 - M2 socket-cap head (3.8) + fit
+ks_head_h  = mm(2.0 + 0.2 + print_shrink/2); // 2.45 - head height (2.0); the blade
                    // prints FLAT, so this depth runs along the print's X and takes
                    // the compensation on the one surface it has.
-ks_bore    = 2.0 + 0.3 + print_shrink;   // 2.8 - axle bore. NOT m3_clear + 0.3.
-ks_pilot   = 1.6 + print_shrink;         // 2.1 - the M2 screw cuts its own thread.
+ks_bore    = mm(2.0 + 0.3 + print_shrink);   // 2.8 - axle bore. NOT m3_clear + 0.3.
+ks_pilot   = mm(1.6 + print_shrink);         // 2.1 - the M2 screw cuts its own thread.
                    // 1.6 is the standard M2 tap drill. Boss wall is
                    // (6.5 - 2.1)/2 = 2.2 mm, against the 2.25 the M3 boss ran at.
                    // SCREW: M2 x 8 SOCKET CAP. The ear is 5.5 with 2.45 of
                    // counterbore in it, so 3.05 of ear plus 0.4 of hgap are spent
                    // before the thread starts and 4.55 reaches into a 5.0 boss.
 ks_head_rim = 1.2; // material left around the buried head. At 0.6 it cracked.
-ks_barrel  = ks_head_d + 2*ks_head_rim;  // 7.0 - shared by the cover bosses AND
+ks_barrel  = mm(ks_head_d + 2*ks_head_rim);  // 7.0 - shared by the cover bosses AND
                    // the blade nose. DERIVED, NOT TYPED: the previous 8.2 was a
                    // hand-computed copy of this same relation, and a hand-computed
                    // copy is the thing that goes stale when the rim or the head
