@@ -932,7 +932,21 @@ clr      = 0.5;     // board-to-wall clearance along the LENGTH (Y, USB↔far en
 // print_shrink - the compensation that makes the printed cavity land on nominal.
 // Derived rather than typed, so it follows if print_shrink is ever re-measured
 // or zeroed after setting slicer compensation.
-clr_w    = print_shrink / 2;   // compensation, not clearance: see print_shrink
+// ASKED FOR: about 0.6 mm more width. It goes here rather than into `wall`, because
+// widening the WALL would widen the case without giving the board any more room -
+// and the wall's thickness has already been asked to stay at 2.2.
+//
+// THE WIDTH WAS THE TIGHT AXIS AND THE NUMBERS SAY SO. Before this, per side:
+//     width   0.25 mm - which is print_shrink/2, COMPENSATION and not clearance,
+//                       so the nominal fit was ZERO and the board was meant to sit
+//                       against the walls (the note below, and board 1, both say so)
+//     length  0.75 mm - clr 0.5 of real clearance, plus the same compensation
+// So one axis had three times the room of the other, and the tight one is the axis
+// a 54.5 mm board is hardest to drop into. 0.3 per side takes the width to 0.55 -
+// still snugger than the length, which is the right order for a part whose bow
+// accumulates over its 103 mm axis rather than its 55 mm one.
+clr_w_extra = 0.3;             // real clearance per side, on top of the compensation
+clr_w    = print_shrink / 2 + clr_w_extra;   // 0.55; see above and print_shrink
 // BACK TO 2.2. It was briefly 4.2 - "increase case body walls 2 mm" was read as the
 // wall's THICKNESS, and the ask was its HEIGHT. See rim_clear, which is what sets
 // the height. Left recorded rather than silently reverted, because the trip through

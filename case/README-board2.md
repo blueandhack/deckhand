@@ -943,6 +943,51 @@ that pass: the cover was being sliced in its own frame and compared against a st
 assembly frame (margins came out 7.91 and 20.12 and looked *fine*), and a tangency yields the
 same crossing twice, which read as a zero-thickness wall and failed a good cover.
 
+## The width gains 0.6 mm, on the axis that had no clearance at all
+
+Asked for as *"increase width about 0.6 mm"*. It goes into `clr_w`, not `wall` — widening the
+wall would widen the case without giving the board any more room, and the wall's thickness has
+already been asked to stay at 2.2.
+
+**The width was the tight axis, and the numbers say so.** Per side, before:
+
+| | clearance | made of |
+|---|---|---|
+| width | **0.25** | `print_shrink/2` — *compensation, not clearance*, so the nominal fit was **zero** |
+| length | 0.75 | `clr` 0.5 of real clearance, plus the same compensation |
+
+One axis had three times the room of the other, and the tight one is the axis a 54.5 mm board
+is hardest to drop into. `clr_w_extra = 0.3` per side takes the width to **0.55** — still
+snugger than the length, which is the right order for a part whose bow accumulates over its
+103 mm axis rather than its 55 mm one.
+
+```
+in_w   55.0 -> 55.6        out_w  59.4 -> 60.0
+```
+
+Measured off the body mesh: **60.0 × 107.9 × 17.90**.
+
+**It reaches the kickstand, and that is the derivations working rather than a bug.** The
+plateau is still 41.2 wide, but it now sits inside a wider rim, so the side taper's run grows
+and everything downstream of the slope follows:
+
+| | before | now |
+|---|---|---|
+| side taper run | 7.00 | 7.30 |
+| side slope | 15.95° | 15.32° |
+| top fillet's bite `t1` | 0.420 | 0.404 |
+| `ks_leaf_margin` | 1.020 | 1.004 |
+| blade width | 39.160 | **39.193** |
+
+The blade got 0.03 mm wider because a shallower slope means the fillet eats less flat. Nobody
+typed that; `ks_leaf_margin` derives the bite and `ks_gap` derives from the margin.
+
+**A side effect worth knowing, given the pillars were once asked to be wider:**
+`max_boss_d` — the assert's ceiling on `screw_boss_d` — is `2*((bx0 + hole_ins_x) - (wall + 0.3))`,
+and `bx0` is `wall + clr_w`. So the width increase raised the ceiling **6.5 → 7.1**.
+`screw_boss_d` is still 6.0; there is now 1.1 mm of headroom rather than 0.5, though still not
+the 2.0 originally asked for.
+
 ## The body's wall is 2 mm taller, and the device is not
 
 *"Increase case body walls 2 mm"* was first read as the wall's **thickness** (`wall`
