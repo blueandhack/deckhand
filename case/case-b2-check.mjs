@@ -393,9 +393,15 @@ const FAULTS = [
   { name: 'ks_leaf_margin stops tracking the top fillet (blade too WIDE)',
     patch: s => s.replace(/^ks_leaf_margin = 0\.6 \+ edge_t1\([^;]+;/m, 'ks_leaf_margin = 0.6;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet' },
-  { name: 'ks_leaf_l goes back to a fraction of the case (blade too LONG)',
+  // NOT out_h*0.60, which is what this used to inject. That literal produced a
+  // 0.12 mm margin when cover_rise was 5; at 3 the top fillet bites less and the
+  // same literal happens to FIT, so the fault stopped reproducing a defect and the
+  // assertion passed for real. A fault that cannot fail is as useless as an
+  // assertion that cannot fail. This injects the regression the derivation actually
+  // prevents: reaching the plateau's edge while forgetting the fillet's bite.
+  { name: 'ks_leaf_l forgets the fillet bite and reaches the plateau edge',
     patch: s => s.replace(/^ks_leaf_l  = plat_y1 - edge_t1\([\s\S]*?cover_rise\) - ks_lug_y - 0\.6;/m,
-                          'ks_leaf_l  = out_h*0.60;'),
+                          'ks_leaf_l  = plat_y1 - ks_lug_y;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet' },
   { name: 'the pillar drives INTO the board',
     patch: s => s.replace(/^screw_pillar_gap = 0\.0;/m, 'screw_pillar_gap = -0.5;'),

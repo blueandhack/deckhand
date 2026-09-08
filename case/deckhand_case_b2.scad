@@ -132,7 +132,27 @@ comp_back = 6.0;    // mated JST plugs, not the 4.70 bare-component spec
 cable_exit = 2.0;   // room above a mated plug for its cable to leave and turn
 // What the rim actually has to clear, and therefore how deep the cavity is
 // anywhere the cell is not.
-rim_clear = comp_back + cable_exit;
+//
+// THIS IS ALSO THE BODY'S WALL HEIGHT, which is not obvious from here and is the
+// reason the +2 below lives in this line. Following the chain:
+//   body_d  = z_floor - cover_rise
+//           = (z_pcb_b + cavity_d) - (cavity_d - rim_clear)
+//           = z_pcb_b + rim_clear
+// so the body wall stands exactly rim_clear above the board's BACK face, and there
+// is no separate constant for its height - deliberately, because the wall exists to
+// clear the back components and their cables and nothing else.
+rim_extra = 2.0;    // ASKED FOR: 2 mm more body wall. See the derivation above.
+                    // WHAT IT COSTS, AND WHAT IT DOES NOT. cover_rise is
+                    // cavity_d - rim_clear, and cavity_d is set by the CELL
+                    // (batt_seat + batt_t = 13) not by the rim, so every mm the body
+                    // gains the plateau loses: rise 5.0 -> 3.0. total_th is
+                    // z_floor + cover_th and z_floor does not read rim_clear at all,
+                    // so THE DEVICE IS EXACTLY AS THICK AS IT WAS - 21.9. The body
+                    // encloses more of the cell and the cover stands proud of it
+                    // less. If the intent was a deeper case rather than a taller
+                    // wall, that is batt_extra, which raises cavity_d and total_th
+                    // together and leaves the rise alone.
+rim_clear = comp_back + cable_exit + rim_extra;
 batt_seat = 3.0;    // component height directly under the battery (ESP32 can)
 glass_up  = 3.7;    // EXACT: CTP 1.00 + LCD 2.20 + glue 0.50. This sets how far
                     // the board sits below the front face: the 4 support shoulders are
@@ -913,19 +933,14 @@ clr      = 0.5;     // board-to-wall clearance along the LENGTH (Y, USB↔far en
 // Derived rather than typed, so it follows if print_shrink is ever re-measured
 // or zeroed after setting slicer compensation.
 clr_w    = print_shrink / 2;   // compensation, not clearance: see print_shrink
-// RAISED 2.2 -> 4.2 on request. The cavity is unchanged - out_w/out_h are
-// in_w/in_h + 2*wall - so this is +4 mm on BOTH footprint axes and the case goes
-// 59.4 x 107.9 -> 63.4 x 111.9. Nothing inside moves relative to the board.
+// BACK TO 2.2. It was briefly 4.2 - "increase case body walls 2 mm" was read as the
+// wall's THICKNESS, and the ask was its HEIGHT. See rim_clear, which is what sets
+// the height. Left recorded rather than silently reverted, because the trip through
+// 4.2 turned up a real latent defect in ks_lug_from that is worth keeping.
 //
-// IT IS NOT A LOCAL CONSTANT. `wall` is read by the lip (lip_in = wall - 1.0, now
-// 3.2), the Expand relief (exp_relief = wall - exp_skin, now 3.1 - which clears the
-// assert that used to ask for 2.6), the plateau's origin, the board's origin, the
-// snap positions and the speaker grille's clearance to the lip. That last one is
-// the only place it did not simply follow: see spk_grille_inset.
-//
-// The old note, still true as a floor: not below ~2, because the snap barbs and the
-// cover lip are cut into this wall and below that they stop holding.
-wall     = 4.2;     // was 2.2, and 2.6 before that
+// SLIMMED from 2.6: -0.8 mm on BOTH footprint axes. Not lower - the snap barbs and
+// the cover lip are cut into this wall, and below ~2 they stop holding.
+wall     = 2.2;
 // Derived HERE rather than beside the other exp_* constants, because it depends on
 // `wall` immediately above - see the note up there. See also the assert below.
 exp_relief = wall - exp_skin;
@@ -1325,12 +1340,10 @@ spk_grille_h  = 10.0;   // patch, Y   around it and no hole shorts front to back
 spk_grille_d  = 1.5 + print_shrink;   // 2.0 modelled -> 1.5 printed
 spk_grille_p  = 3.0;    // hex pitch; see above before lowering it
 spk_grille_cx = bcx;    // centred between the two button sleeves
-// 10.6 -> 14.6, FORCED BY wall RATHER THAN CHOSEN. The grille has to clear the
-// cover's lip ring, and that clearance is 2*wall + 0.4 - so raising wall by 2 pushed
-// the grille 4 mm further in. The window is narrow and both ends are already
-// asserted: below ~14.6 the grille runs under the lip, and at 16.6 it overlaps the
-// battery retaining rib. Measured by sweeping it, not by reading the arithmetic.
-spk_grille_inset = 14.6;   // centre, in from the SERVICE-edge end of the cover
+// Back to 10.6 with `wall`. It tracks 2*wall + 0.4 (the clearance to the cover's lip
+// ring), and both ends of its window are asserted: too low and the grille runs under
+// the lip, too high and it overlaps the battery retaining rib.
+spk_grille_inset = 10.6;   // centre, in from the SERVICE-edge end of the cover
 spk_grille_cy = usb_at_top ? out_h - spk_grille_inset : spk_grille_inset;
 
 // USB-C cutout centre in Z (the connector sits toward the back of the board)

@@ -943,54 +943,61 @@ that pass: the cover was being sliced in its own frame and compared against a st
 assembly frame (margins came out 7.91 and 20.12 and looked *fine*), and a tangency yields the
 same crossing twice, which read as a zero-thickness wall and failed a good cover.
 
-## The wall is 4.2 mm, and the pillars are back on the board
+## The body's wall is 2 mm taller, and the device is not
 
-Two requests together, and they reach further through this file than either looks like it
-should.
+*"Increase case body walls 2 mm"* was first read as the wall's **thickness** (`wall`
+2.2 → 4.2, a 4 mm bigger footprint) and corrected to its **height**. The thickness change is
+reverted — footprint back to 59.4 × 107.9 — but the detour is recorded below, because it
+turned up a latent defect worth keeping.
 
-### `wall` 2.2 → 4.2
+### There is no wall-height constant, and that is deliberate
 
-The cavity is unchanged — `out_w`/`out_h` are `in_w`/`in_h` + 2·`wall` — so this is +4 mm on
-**both** footprint axes and the case goes **59.4 × 107.9 → 63.4 × 111.9**, measured off the
-body mesh. Nothing inside moves relative to the board.
+```
+body_d = z_floor - cover_rise
+       = (z_pcb_b + cavity_d) - (cavity_d - rim_clear)
+       = z_pcb_b + rim_clear
+```
 
-**`wall` is not a local constant.** It is read by the lip (`lip_in = wall - 1.0`, now **3.2**),
-the Expand relief (`exp_relief = wall - exp_skin`, now **3.1** — which incidentally clears the
-assert that used to ask for `wall` 2.6), the plateau's origin, the board's origin, the snap
-positions, and the speaker grille's clearance to the lip.
+The body wall stands **exactly `rim_clear`** above the board's back face. There is no
+separate height constant because the wall exists to clear the back components and their
+cables and nothing else — so the +2 goes in as `rim_extra`, next to the terms it joins.
 
-**Two things did not simply follow, and both surfaced as asserts rather than by inspection:**
+| | before | now |
+|---|---|---|
+| `rim_clear` | 8.0 | **10.0** |
+| `body_d` (wall height) | 14.90 | **16.90** — measured off the body mesh |
+| `cover_rise` | 5.0 | **3.0** |
+| `total_th` | 21.9 | **21.9** |
 
-| | |
-|---|---|
-| `spk_grille_inset` | 10.6 → **14.6**. The grille must clear the lip ring by `2*wall + 0.4`, so +2 of wall pushed it +4 in. The window is narrow and both ends are asserted: below ~14.6 it runs under the lip, at 16.6 it overlaps the battery retaining rib. Found by sweeping it. |
-| `ks_lug_from` | a literal **24**, now **derived** — see below. |
+**The device is exactly as thick as it was**, and that surprises people. `cavity_d` is set by
+the *cell* (`batt_seat + batt_t` = 13), not by the rim, so every millimetre the body gains the
+plateau loses. `total_th` is `z_floor + cover_th`, and `z_floor` does not read `rim_clear` at
+all. The body encloses more of the cell; the cover stands proud of it less.
 
-**The hinge pivot is the one worth reading twice.** Its note read *"needs `ks_lug_y >= plat_y0
-+ ks_bz` = 22.2; 24 leaves 1.8 of margin"* — correct arithmetic against the plateau as it then
-stood. `plat_y0` moved 18.1 → 20.1 with the wall and the literal did not, so the boss came to
-start **0.4 mm** past the plateau edge instead of 1.8. **It still passed every check**, which
-is exactly the problem: a hand-computed clearance that survives the change that invalidates
-it. Now `plat_y0 + ks_barrel/2 + 1.8`, which puts it back to 1.8 and keeps it there.
-(`ks_barrel/2` rather than `ks_bz` — `ks_bz` is declared ~120 lines further down.)
+**If the intent was a deeper case rather than a taller wall**, that is `batt_extra` — it
+raises `cavity_d` and `total_th` together and leaves the rise alone.
 
-### `screw_pillar_gap` 2.0 → 0
+**The plunger follows, and should.** The buttons sit in the *rim*, whose inner face is
+`body_d`, so a 2 mm taller wall puts the cover 2 mm further from the switch: `btn_span`
+5.5 → 7.5 and the stem 5.2 → 7.2. `deckhand_b2_buttons.stl` moves with it.
 
-The pillars lengthened by 2 mm again, so they bear on the board's back face exactly as they
-originally did — measured, bottom at `z = 6.900` against a board back of 6.900. The clamp is
-restored: cover → pillar → board → column, nothing between.
+### What the wrong reading turned up
 
-**What zero means now that it is a choice and not an oversight:** there is no slack absorbing
-a printed Z stack — cover plate, pillar, a 1.6 mm board at ±0.1. If any of it comes out long
-the pillar grounds before the cover's rim reaches the body, and the cover stands off on four
-points with the seam open. `0.3` buys that margin back for a few tenths of clamp.
+`ks_lug_from` was a literal **24**. Its note read *"needs `ks_lug_y >= plat_y0 + ks_bz` = 22.2;
+24 leaves 1.8 of margin"* — correct arithmetic against the plateau as it then stood. Raising
+`wall` moved `plat_y0` 18.1 → 20.1 and the literal did not, so the hinge boss came to start
+**0.4 mm** past the plateau edge instead of 1.8. **It still passed every check.** That is the
+failure mode: a hand-computed clearance that survives the change that invalidates it. It is
+now `plat_y0 + ks_barrel/2 + 1.8`, and it stays derived after the revert.
 
-**The checker's pillar assertion has now moved three times**, and the reasoning is the same
-each time. It was a band (0.15–0.6), then a floor at 0.15, and is now `>= 0`. A zero nominal
-is a **decision**; an assertion that encodes a rejected preference is not a check but a
-disagreement that fails the build. What survives is the half that is still a defect — the
-pillar reaching *past* the board's back, where two solids occupy the same space. The fault
-injected against it now drives the pillar 0.5 mm into the board.
+### A fault that stopped being a fault
+
+The injected regression for the blade's length was `ks_leaf_l = out_h*0.60`, which left a
+0.12 mm margin when `cover_rise` was 5. At 3 the top fillet bites less — the slope falls from
+17.1° to 10.3° — and **the same literal now fits**, so the fault stopped reproducing a defect
+and the assertion passed honestly. A fault that cannot fail is as useless as an assertion
+that cannot fail. It now injects the regression the derivation actually prevents: reaching
+the plateau's edge while forgetting the fillet's bite.
 
 ## The cover's lip is 1 mm, and the barbs it was built for do not exist
 
