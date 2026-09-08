@@ -943,54 +943,54 @@ that pass: the cover was being sliced in its own frame and compared against a st
 assembly frame (margins came out 7.91 and 20.12 and looked *fine*), and a tangency yields the
 same crossing twice, which read as a zero-thickness wall and failed a good cover.
 
-## The screw pillars stop 2 mm short of the board
+## The wall is 4.2 mm, and the pillars are back on the board
 
-Reported as *"I think you did not count board thickness."* **It was counted**, and the way to
-settle that is to measure rather than re-read: the pillar bottomed at assembly `z = 6.900`,
-and `z_pcb_b = z_pcb_f + board_t` = 5.3 + 1.6 = **6.9**. It landed exactly on the board's back
-face.
+Two requests together, and they reach further through this file than either looks like it
+should.
 
-**But *exactly* was a defect of its own.** That was the one interface in the file with a
-nominal of **zero**, in a design where every other fit carries a number. Too long and the
-pillar grounds on the board before the cover's rim reaches the body — the cover stands off on
-four points and the seam gapes.
+### `wall` 2.2 → 4.2
 
-```
-screw_pillar_gap = 2.0;   // pillar stops this far short of the board's back
-```
+The cavity is unchanged — `out_w`/`out_h` are `in_w`/`in_h` + 2·`wall` — so this is +4 mm on
+**both** footprint axes and the case goes **59.4 × 107.9 → 63.4 × 111.9**, measured off the
+body mesh. Nothing inside moves relative to the board.
 
-**2.0 is a deliberate choice and it gives up the clamp.** Asked for, questioned once with the
-numbers, asked for again — so it is recorded rather than argued again. What it costs, plainly,
-because `cover()`'s own comment on the pillar will otherwise mislead the next reader:
+**`wall` is not a local constant.** It is read by the lip (`lip_in = wall - 1.0`, now **3.2**),
+the Expand relief (`exp_relief = wall - exp_skin`, now **3.1** — which incidentally clears the
+assert that used to ask for `wall` 2.6), the plateau's origin, the board's origin, the snap
+positions, and the speaker grille's clearance to the lip.
 
-- the pillar no longer touches the board. The screw runs cover → pillar → **2 mm of air** →
-  the board's hole → the column, so **nothing bears on the board's back**.
-- the board is located by the body's columns underneath it and by the screw's shank through
-  its Ø3.2 hole, and by nothing above. It can lift within the gap. It cannot escape — the
-  rim's inner face is 8 mm further up — but it is not clamped, and the pillar's comment about
-  *"clamping all three parts"* describes what a smaller gap would do, not what this one does.
-- the screw is unaffected: entry, length and thread engagement in the column all come off
-  `screw_pad_z` and `screw_len`, none of which read this.
+**Two things did not simply follow, and both surfaced as asserts rather than by inspection:**
 
-0.3 is the value that keeps the clamp while still never grounding, and is one character away
-if the board turns out to rattle.
+| | |
+|---|---|
+| `spk_grille_inset` | 10.6 → **14.6**. The grille must clear the lip ring by `2*wall + 0.4`, so +2 of wall pushed it +4 in. The window is narrow and both ends are asserted: below ~14.6 it runs under the lip, at 16.6 it overlaps the battery retaining rib. Found by sweeping it. |
+| `ks_lug_from` | a literal **24**, now **derived** — see below. |
 
-### The checker lost its upper bound, on purpose
+**The hinge pivot is the one worth reading twice.** Its note read *"needs `ks_lug_y >= plat_y0
++ ks_bz` = 22.2; 24 leaves 1.8 of margin"* — correct arithmetic against the plateau as it then
+stood. `plat_y0` moved 18.1 → 20.1 with the wall and the literal did not, so the boss came to
+start **0.4 mm** past the plateau edge instead of 1.8. **It still passed every check**, which
+is exactly the problem: a hand-computed clearance that survives the change that invalidates
+it. Now `plat_y0 + ks_barrel/2 + 1.8`, which puts it back to 1.8 and keeps it there.
+(`ks_barrel/2` rather than `ks_bz` — `ks_bz` is declared ~120 lines further down.)
 
-It first asserted a *band* — 0.15 to 0.6 mm — on the reasoning that a bigger gap gives up the
-clamp. That is true, and it has been chosen deliberately. **An assertion that encodes a
-rejected preference is not a check, it is a disagreement that fails the build every time.** So
-the upper bound went, and what remains is the half that is still a defect rather than a
-decision:
+### `screw_pillar_gap` 2.0 → 0
 
-- **the screw pillar never grounds on the board** — `short >= 0.15`, measured within the boss
-  radius of a real hole position.
-- **the pillar is still a pillar** — at least 5 mm long below its landing, so cutting it back
-  to a stub is still caught. It runs 8.31 mm today.
+The pillars lengthened by 2 mm again, so they bear on the board's back face exactly as they
+originally did — measured, bottom at `z = 6.900` against a board back of 6.900. The clamp is
+restored: cover → pillar → board → column, nothing between.
 
-**One thing neither can check, and it is worth an eye on the physical board:** at a 2 mm gap
-the pillar is no longer near the board at all, so nothing standing proud around the mounting
-holes matters any more — that concern goes away with the clamp it was protecting.
+**What zero means now that it is a choice and not an oversight:** there is no slack absorbing
+a printed Z stack — cover plate, pillar, a 1.6 mm board at ±0.1. If any of it comes out long
+the pillar grounds before the cover's rim reaches the body, and the cover stands off on four
+points with the seam open. `0.3` buys that margin back for a few tenths of clamp.
+
+**The checker's pillar assertion has now moved three times**, and the reasoning is the same
+each time. It was a band (0.15–0.6), then a floor at 0.15, and is now `>= 0`. A zero nominal
+is a **decision**; an assertion that encodes a rejected preference is not a check but a
+disagreement that fails the build. What survives is the half that is still a defect — the
+pillar reaching *past* the board's back, where two solids occupy the same space. The fault
+injected against it now drives the pillar 0.5 mm into the board.
 
 ## The cover's lip is 1 mm, and the barbs it was built for do not exist
 

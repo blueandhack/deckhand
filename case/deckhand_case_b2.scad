@@ -312,9 +312,16 @@ screw_boss_d = 6.0;   // the pillar - see the assert by the plateau
 //   - the screw is unaffected: entry, length and thread engagement in the column all
 //     come off screw_pad_z and screw_len, none of which read this.
 //
-// 0.3 was the value that keeps the clamp while still never grounding, and is one
-// character away if the board turns out to rattle.
-screw_pillar_gap = 2.0;   // pillar stops this far short of the board's back
+// BACK TO 0 ON REQUEST - the pillars lengthened by 2 mm again, so they bear on the
+// board's back face exactly as they originally did. The clamp is restored and the
+// nominal is zero: cover -> pillar -> board -> column, with nothing between.
+//
+// WHAT ZERO MEANS HERE, since it is a choice now rather than an oversight. There is
+// no slack absorbing a printed Z stack (cover plate, pillar, a 1.6 board at +/-0.1).
+// If any of it comes out long the pillar grounds before the cover's rim reaches the
+// body, and the cover stands off on four points with the seam open. 0.3 buys that
+// margin back at the cost of a few tenths of clamp, and is one character away.
+screw_pillar_gap = 0.0;   // pillar stops this far short of the board's back
 // Snaps and screws are alternatives, not a pair. Eight barbs plus four screws is
 // insertion force for nothing once the screws are what actually hold it - and the
 // body's catch pockets go with them, so the wall keeps its material.
@@ -906,9 +913,19 @@ clr      = 0.5;     // board-to-wall clearance along the LENGTH (Y, USB↔far en
 // Derived rather than typed, so it follows if print_shrink is ever re-measured
 // or zeroed after setting slicer compensation.
 clr_w    = print_shrink / 2;   // compensation, not clearance: see print_shrink
-wall     = 2.2;     // SLIMMED from 2.6: -0.8 mm on BOTH footprint axes. Not lower -
-                    // the snap barbs and the cover lip are cut into this wall, and
-                    // below ~2 they stop holding.
+// RAISED 2.2 -> 4.2 on request. The cavity is unchanged - out_w/out_h are
+// in_w/in_h + 2*wall - so this is +4 mm on BOTH footprint axes and the case goes
+// 59.4 x 107.9 -> 63.4 x 111.9. Nothing inside moves relative to the board.
+//
+// IT IS NOT A LOCAL CONSTANT. `wall` is read by the lip (lip_in = wall - 1.0, now
+// 3.2), the Expand relief (exp_relief = wall - exp_skin, now 3.1 - which clears the
+// assert that used to ask for 2.6), the plateau's origin, the board's origin, the
+// snap positions and the speaker grille's clearance to the lip. That last one is
+// the only place it did not simply follow: see spk_grille_inset.
+//
+// The old note, still true as a floor: not below ~2, because the snap barbs and the
+// cover lip are cut into this wall and below that they stop holding.
+wall     = 4.2;     // was 2.2, and 2.6 before that
 // Derived HERE rather than beside the other exp_* constants, because it depends on
 // `wall` immediately above - see the note up there. See also the assert below.
 exp_relief = wall - exp_skin;
@@ -1213,7 +1230,14 @@ ks_gap = cover_rise > 0
 // Pivot distance in from the MIC end. Must clear plat_y0 by the barrel's radius
 // or the folded leaf fouls the plateau wall; 24 leaves 1.8 of margin and still
 // lands the tip at 88.7 inside a plateau ending at 89.3.
-ks_lug_from = cover_rise > 0 ? 24 : 15;
+// DERIVED, not 24. The 24 was correct arithmetic against the plateau as it stood:
+// its own note reads "needs ks_lug_y >= plat_y0 + ks_bz = 22.2; 24 leaves 1.8 of
+// margin". Both terms in that sentence moved when `wall` went 2.2 -> 4.2 - plat_y0
+// is 18.1 -> 20.1 - and the literal did not, so the boss came to start 0.4 mm past
+// the plateau edge instead of 1.8. It still passed, which is the problem: a
+// hand-computed clearance that survives the change that invalidates it.
+// ks_barrel/2 rather than ks_bz: ks_bz is declared ~120 lines further down.
+ks_lug_from = cover_rise > 0 ? plat_y0 + ks_barrel/2 + 1.8 : 15;
 
 // Outer-face depth (measured DOWN from the plateau, cover-local) at a point.
 // THE RUN IS TAKEN FROM THE FRUSTUM'S OWN BASE, not from zero, and that was wrong
@@ -1301,7 +1325,12 @@ spk_grille_h  = 10.0;   // patch, Y   around it and no hole shorts front to back
 spk_grille_d  = 1.5 + print_shrink;   // 2.0 modelled -> 1.5 printed
 spk_grille_p  = 3.0;    // hex pitch; see above before lowering it
 spk_grille_cx = bcx;    // centred between the two button sleeves
-spk_grille_inset = 10.6;   // centre, in from the SERVICE-edge end of the cover
+// 10.6 -> 14.6, FORCED BY wall RATHER THAN CHOSEN. The grille has to clear the
+// cover's lip ring, and that clearance is 2*wall + 0.4 - so raising wall by 2 pushed
+// the grille 4 mm further in. The window is narrow and both ends are already
+// asserted: below ~14.6 the grille runs under the lip, and at 16.6 it overlaps the
+// battery retaining rib. Measured by sweeping it, not by reading the arithmetic.
+spk_grille_inset = 14.6;   // centre, in from the SERVICE-edge end of the cover
 spk_grille_cy = usb_at_top ? out_h - spk_grille_inset : spk_grille_inset;
 
 // USB-C cutout centre in Z (the connector sits toward the back of the board)

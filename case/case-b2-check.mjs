@@ -332,9 +332,14 @@ function run(scadPath) {
   // (screw_pillar_gap = 2.0). AN ASSERTION THAT ENCODES A REJECTED PREFERENCE IS NOT
   // A CHECK, it is a disagreement that fails the build every time. What remains is
   // the half that is still a DEFECT rather than a decision: grounding on the board.
-  check('the screw pillar never grounds on the board', short >= 0.15,
+  // >= 0, NOT >= 0.15. The 0.15 was a margin I wanted and the design does not: a
+  // zero nominal here is now a choice (screw_pillar_gap = 0), so asserting a margin
+  // would be encoding a rejected preference again. What is still a DEFECT rather
+  // than a decision is the pillar reaching PAST the board's back - interference,
+  // where the two solids occupy the same space.
+  check('the screw pillar does not reach past the board', short >= -1e-6,
     `bottoms at ${pillarZ.toFixed(3)}, board back is ${v.z_pcb_b.toFixed(3)} ` +
-    `-> ${short.toFixed(3)} mm of gap (at 0 it holds the cover off and the seam gapes)`);
+    `-> ${short.toFixed(3)} mm (negative is interference; 0 is a zero-clearance fit)`);
   const pillarLen = (v.total_th - v.z_pcb_b) - v.screw_pad_z - v.screw_pillar_gap;
   check('the pillar is still a pillar', pillarLen >= 5.0,
     `${pillarLen.toFixed(2)} mm long below its landing`);
@@ -392,11 +397,11 @@ const FAULTS = [
     patch: s => s.replace(/^ks_leaf_l  = plat_y1 - edge_t1\([\s\S]*?cover_rise\) - ks_lug_y - 0\.6;/m,
                           'ks_leaf_l  = out_h*0.60;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet' },
-  { name: 'the pillar grounds on the board (gap back to zero)',
-    patch: s => s.replace(/^screw_pillar_gap = 2\.0;/m, 'screw_pillar_gap = 0;'),
-    expect: 'the screw pillar never grounds on the board' },
+  { name: 'the pillar drives INTO the board',
+    patch: s => s.replace(/^screw_pillar_gap = 0\.0;/m, 'screw_pillar_gap = -0.5;'),
+    expect: 'the screw pillar does not reach past the board' },
   { name: 'the pillar is cut back until it is only a stub',
-    patch: s => s.replace(/^screw_pillar_gap = 2\.0;/m, 'screw_pillar_gap = 9.0;'),
+    patch: s => s.replace(/^screw_pillar_gap = 0\.0;/m, 'screw_pillar_gap = 9.0;'),
     expect: 'the pillar is still a pillar' },
   { name: 'the axle is dropped so the blade buries itself',
     patch: s => s.replace(/^ks_axle_z\s*=\s*-ks_bz;/m, 'ks_axle_z  = -ks_bz + 3.0;'),
