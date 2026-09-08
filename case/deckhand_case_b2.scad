@@ -1000,7 +1000,28 @@ function edge_off(z, R, H, rt, rs) =
 
 plat_gap    = 0.6;    // clearance from the cell to the plateau's inner wall
 plat_wall   = 2.0;    // and the thickness of that wall
-lip_h    = 4.0;     // cover lip depth — shared by cover() and the retainer risers
+// COVER LIP DEPTH. 0 REMOVES IT ENTIRELY, and that is a supported setting rather
+// than a theoretical one - see the guard in cover(), because linear_extrude(0) is
+// degenerate and would have failed at export rather than at the constant.
+//
+// WHAT THE LIP IS STILL FOR, WHICH IS LESS THAN IT LOOKS. It was carrying the snap
+// barbs, and the barbs are what "rooted in the lip" means everywhere in this file -
+// but `cover_snaps = !cover_screws` and cover_screws is true, so THE BARBS ARE NOT
+// BUILT. Four M3 x 16 through the corner pillars hold this cover on. The lip's
+// remaining jobs are to LOCATE the cover in the body opening and to close the seam.
+//
+// 4.0 -> 1.0 ON REQUEST, and it also answers a fault this file has recorded TWICE.
+// The lip is 103 mm on its long axis, an FDM part bows along its longest axis, and
+// both previous reports were "the cover felt a touch long" - each fixed by opening
+// the lip's clearance (g, gy) a little more. Depth is the other lever on exactly
+// that problem and nobody had pulled it: a 1 mm spigot has a quarter of the surface
+// to bind against and needs a quarter of the bow absorbed before it does.
+//
+// KEEPING 1 mm RATHER THAN REMOVING IT is the difference between the cover being
+// LOCATED and being merely bolted: at lip_h 0 the only thing setting it laterally
+// is the slop of four M3 clearance holes (m3_clear 3.4 on a 3.0 screw = 0.2 mm a
+// side), and the seam becomes a butt joint where any mismatch shows as a step.
+lip_h    = 1.0;     // cover lip depth; 0 removes it. Shared with the retainer risers
 oc_r     = 7.0;
 soft_r   = 1.6;
 
@@ -1867,10 +1888,12 @@ module cover(){
           translate([r[0], r[1], cover_th - 0.01])
             cube([r[2], r[3], batt_rib_h + 0.01]);
       }
-      // inner lip (straight wall; looser in the length direction via gy)
-      translate([wall+g,wall+gy,rimI-0.01])
-        linear_extrude(lip_h) difference(){ rrect(in_w-2*g,in_h-2*gy,3);
-                                            offset(-lip_in) rrect(in_w-2*g,in_h-2*gy,3); }
+      // inner lip (straight wall; looser in the length direction via gy).
+      // GUARDED: lip_h = 0 is a supported setting and linear_extrude(0) is not.
+      if (lip_h > 0)
+        translate([wall+g,wall+gy,rimI-0.01])
+          linear_extrude(lip_h) difference(){ rrect(in_w-2*g,in_h-2*gy,3);
+                                              offset(-lip_in) rrect(in_w-2*g,in_h-2*gy,3); }
       // snap barbs — a wedge ROOTED into the lip's outer face (not floating): a
       // catch shelf that protrudes into the wall window, ramping up to flush at
       // the tip so it cams in with light thumb pressure on insertion

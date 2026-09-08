@@ -943,6 +943,54 @@ that pass: the cover was being sliced in its own frame and compared against a st
 assembly frame (margins came out 7.91 and 20.12 and looked *fine*), and a tangency yields the
 same crossing twice, which read as a zero-thickness wall and failed a good cover.
 
+## The cover's lip is 1 mm, and the barbs it was built for do not exist
+
+`lip_h` **4.0 → 1.0**, on request, with `0` now a supported setting rather than a
+theoretical one — `linear_extrude(0)` is degenerate, so removing the lip would have failed
+at export instead of at the constant. It is guarded now.
+
+**What the lip is still for is less than it looks.** It was carrying the snap barbs, and
+"rooted in the lip" is what the barbs mean everywhere in this file — but
+`cover_snaps = !cover_screws` and `cover_screws` is **true**, so **the barbs are not built**.
+Four M3 × 16 through the corner pillars hold this cover on. The lip's remaining jobs are to
+*locate* the cover in the body opening and to close the seam.
+
+**It also answers a fault recorded twice.** The lip is 103 mm on its long axis, an FDM part
+bows along its longest axis, and both previous reports were *"the cover felt a touch long"* —
+each fixed by opening the lip's clearance (`g`, `gy`). Depth is the other lever on exactly
+that problem and nobody had pulled it: a 1 mm spigot has a quarter of the surface to bind
+against and needs a quarter of the bow absorbed before it does.
+
+**Why 1 mm and not 0**, since both were offered: at `lip_h = 0` the only thing setting the
+cover laterally is the slop of four M3 clearance holes (`m3_clear` 3.4 on a 3.0 screw = 0.2 mm
+a side), and the seam becomes a butt joint where any mismatch shows as a step. One constant
+away if that turns out to be the better trade.
+
+Measured on the mesh, material past the rim's inner face:
+
+| `lip_h` | depth past the rim |
+|---|---|
+| 4.0 (before) | 3.99 mm |
+| **1.0 (now)** | **0.99 mm** |
+| 0 | 0.01 mm |
+
+Body, stand, buttons, gauge and coupon are all byte-identical across the change, which is
+what confirms `lip_h` is cover-only.
+
+### A probe that proved nothing, and the selftest that caught it
+
+The check that the plunger still passes through was first written as an intersection of
+`cover()` with a rod down the RESET axis, sized `h = rimI + btn_sleeve_h + 6`. **`rimI` is
+local to `cover()`**, so the height was `undefined`, `cylinder(h=undef)` drew nothing, and
+every intersection came back empty — *"clear"* — whatever the rod's diameter.
+
+It was caught only because the selftest asked a rod **fatter** than the hole to be
+obstructed, and it wasn't. This is the same trap as the `print_shrink` forward reference:
+OpenSCAD emits `WARNING: Ignoring unknown variable`, not an error, so a filter grepping for
+`ERROR:` sees a clean run. Rebuilt against `cover_rise + cover_th`, the probe resolves
+0.1 mm — a 4.3 rod is obstructed by a 4.2 hole — and the real 3.4 stem passes clear at
+`lip_h` 4.0, 1.0 and 0 alike.
+
 ## The cover's STL is NOT byte-reproducible — the other five are
 
 Worth knowing before anyone compares STL hashes here the way this project compares
