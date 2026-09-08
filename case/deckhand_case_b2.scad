@@ -297,11 +297,24 @@ screw_boss_d = 6.0;   // the pillar - see the assert by the plateau
 // body's columns, still has the screw through its hole, and still cannot go
 // anywhere. So this errs SHORT, for the same reason btn_switch_h does.
 //
-// NOT 2 mm, which was the number asked for. At 2 the pillar stops clamping the
-// board at all and becomes decoration - which is precisely what the comment on the
-// pillar in cover() says the design exists to prevent. 0.3 covers a printed Z
-// stack (cover plate, pillar, a 1.6 board at +/-0.1) without spending the clamp.
-screw_pillar_gap = 0.3;   // pillar stops this far short of the board's back
+// 2.0 IS A DELIBERATE CHOICE AND IT GIVES UP THE CLAMP. Asked for, questioned once
+// with the numbers, and asked for again - so it is recorded here rather than argued
+// again. What it costs, plainly, so the next reader is not misled by the pillar's
+// own comment in cover():
+//
+//   - the pillar no longer touches the board. The screw runs cover -> pillar -> 2 mm
+//     of air -> the board's hole -> the column, so NOTHING bears on the board's back.
+//   - the board is then located by the body's columns underneath it and by the
+//     screw's shank through its O3.2 hole, and by nothing above. It can lift within
+//     the gap. It cannot escape - the rim's inner face is 8 mm further up - but it
+//     is no longer clamped, and cover()'s comment about clamping all three parts is
+//     describing what a SMALLER gap here would do, not what this one does.
+//   - the screw is unaffected: entry, length and thread engagement in the column all
+//     come off screw_pad_z and screw_len, none of which read this.
+//
+// 0.3 was the value that keeps the clamp while still never grounding, and is one
+// character away if the board turns out to rattle.
+screw_pillar_gap = 2.0;   // pillar stops this far short of the board's back
 // Snaps and screws are alternatives, not a pair. Eight barbs plus four screws is
 // insertion force for nothing once the screws are what actually hold it - and the
 // body's catch pockets go with them, so the wall keeps its material.

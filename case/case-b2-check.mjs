@@ -202,7 +202,8 @@ function run(scadPath) {
     'ks_boss_w', 'ks_ear_w', 'ks_head_h', 'ks_hgap', 'ks_leaf_th',
     'ks_leaf_l', 'ks_lug_y', 'total_th', 'out_w',
     'cover_rise', 'cover_th', 'soft_r', 'cover_edge_top', 'cover_edge_shoulder',
-    'z_pcb_b', 'screw_pillar_gap', 'screw_boss_d', 'holes()[0][0]', 'holes()[0][1]'
+    'z_pcb_b', 'screw_pillar_gap', 'screw_boss_d', 'screw_pad_z',
+    'holes()[0][0]', 'holes()[0][1]'
   ]);
 
   const rim = (v.ks_barrel - v.ks_head_d) / 2;
@@ -326,10 +327,17 @@ function run(scadPath) {
     if (dx*dx + dy*dy <= (v.screw_boss_d/2 + 0.2)**2 && p[2] < pillarZ) pillarZ = p[2];
   }
   const short = pillarZ - v.z_pcb_b;
-  check('the screw pillar stops short of the board, and only just',
-    short >= 0.15 && short <= 0.6,
+  // THE UPPER BOUND IS GONE ON PURPOSE. It used to be 0.6, on the reasoning that a
+  // bigger gap gives up the clamp - which is true, and has been chosen deliberately
+  // (screw_pillar_gap = 2.0). AN ASSERTION THAT ENCODES A REJECTED PREFERENCE IS NOT
+  // A CHECK, it is a disagreement that fails the build every time. What remains is
+  // the half that is still a DEFECT rather than a decision: grounding on the board.
+  check('the screw pillar never grounds on the board', short >= 0.15,
     `bottoms at ${pillarZ.toFixed(3)}, board back is ${v.z_pcb_b.toFixed(3)} ` +
-    `-> ${short.toFixed(3)} mm short (0 gapes the seam, 2 stops clamping the board)`);
+    `-> ${short.toFixed(3)} mm of gap (at 0 it holds the cover off and the seam gapes)`);
+  const pillarLen = (v.total_th - v.z_pcb_b) - v.screw_pad_z - v.screw_pillar_gap;
+  check('the pillar is still a pillar', pillarLen >= 5.0,
+    `${pillarLen.toFixed(2)} mm long below its landing`);
 
   rmSync(dir, { recursive: true, force: true });
   return failures;
@@ -385,11 +393,11 @@ const FAULTS = [
                           'ks_leaf_l  = out_h*0.60;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet' },
   { name: 'the pillar grounds on the board (gap back to zero)',
-    patch: s => s.replace(/^screw_pillar_gap = 0\.3;/m, 'screw_pillar_gap = 0;'),
-    expect: 'the screw pillar stops short of the board, and only just' },
-  { name: 'the pillar is cut back 2 mm and stops clamping the board',
-    patch: s => s.replace(/^screw_pillar_gap = 0\.3;/m, 'screw_pillar_gap = 2.0;'),
-    expect: 'the screw pillar stops short of the board, and only just' },
+    patch: s => s.replace(/^screw_pillar_gap = 2\.0;/m, 'screw_pillar_gap = 0;'),
+    expect: 'the screw pillar never grounds on the board' },
+  { name: 'the pillar is cut back until it is only a stub',
+    patch: s => s.replace(/^screw_pillar_gap = 2\.0;/m, 'screw_pillar_gap = 9.0;'),
+    expect: 'the pillar is still a pillar' },
   { name: 'the axle is dropped so the blade buries itself',
     patch: s => s.replace(/^ks_axle_z\s*=\s*-ks_bz;/m, 'ks_axle_z  = -ks_bz + 3.0;'),
     expect: 'the folded blade does not penetrate the cover' },

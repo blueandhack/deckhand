@@ -943,46 +943,54 @@ that pass: the cover was being sliced in its own frame and compared against a st
 assembly frame (margins came out 7.91 and 20.12 and looked *fine*), and a tangency yields the
 same crossing twice, which read as a zero-thickness wall and failed a good cover.
 
-## The screw pillars stop 0.3 mm short of the board
+## The screw pillars stop 2 mm short of the board
 
 Reported as *"I think you did not count board thickness."* **It was counted**, and the way to
-settle that is to measure it rather than re-read the source: the pillar bottoms at assembly
-`z = 6.900`, and `z_pcb_b = z_pcb_f + board_t` = 5.3 + 1.6 = **6.9**. It landed exactly on the
-board's back face.
+settle that is to measure rather than re-read: the pillar bottomed at assembly `z = 6.900`,
+and `z_pcb_b = z_pcb_f + board_t` = 5.3 + 1.6 = **6.9**. It landed exactly on the board's back
+face.
 
-**But *exactly* was the defect.** This was the one interface in the file with a nominal of
-**zero**, in a design where every other fit carries a number. The instinct was right about the
-symptom even though the stated cause was not.
-
-**The two failures are not symmetric, and that sets the sign.** Too *long* and the pillar
-grounds on the board before the cover's rim reaches the body: the cover stands off on four
-points, the seam gapes, and no amount of screw fixes it. Too *short* and the board is a few
-tenths less firmly clamped — it still sits on the body's columns, still has the screw through
-its hole, and still cannot go anywhere. So it errs **short**, for the same reason
-`btn_switch_h` does.
+**But *exactly* was a defect of its own.** That was the one interface in the file with a
+nominal of **zero**, in a design where every other fit carries a number. Too long and the
+pillar grounds on the board before the cover's rim reaches the body — the cover stands off on
+four points and the seam gapes.
 
 ```
-screw_pillar_gap = 0.3;   // pillar stops this far short of the board's back
+screw_pillar_gap = 2.0;   // pillar stops this far short of the board's back
 ```
 
-**Not the 2 mm asked for.** At 2 the pillar stops clamping the board at all and becomes
-decoration — which is exactly what `cover()`'s own comment on the pillar says the design
-exists to prevent:
+**2.0 is a deliberate choice and it gives up the clamp.** Asked for, questioned once with the
+numbers, asked for again — so it is recorded rather than argued again. What it costs, plainly,
+because `cover()`'s own comment on the pillar will otherwise mislead the next reader:
 
-> *"without it the head bears on the cover, the threads bite the column, and the board in
-> between is simply passed through."*
+- the pillar no longer touches the board. The screw runs cover → pillar → **2 mm of air** →
+  the board's hole → the column, so **nothing bears on the board's back**.
+- the board is located by the body's columns underneath it and by the screw's shank through
+  its Ø3.2 hole, and by nothing above. It can lift within the gap. It cannot escape — the
+  rim's inner face is 8 mm further up — but it is not clamped, and the pillar's comment about
+  *"clamping all three parts"* describes what a smaller gap would do, not what this one does.
+- the screw is unaffected: entry, length and thread engagement in the column all come off
+  `screw_pad_z` and `screw_len`, none of which read this.
 
-0.3 covers a printed Z stack — cover plate, pillar, a 1.6 mm board at ±0.1 — without spending
-the clamp. Measured on the mesh at three settings: gap 0 → 0.000 mm short, gap 0.3 → 0.300,
-gap 2.0 → 2.000.
+0.3 is the value that keeps the clamp while still never grounding, and is one character away
+if the board turns out to rattle.
 
-`case-b2-check.mjs` asserts a **band**, not a minimum, because both ends are failures: the
-pillar must bottom between 0.15 and 0.6 mm above the board's back, measured within the boss
-radius of a real hole position. Both directions are fault-injected.
+### The checker lost its upper bound, on purpose
 
-**One thing this cannot check, and it is worth a look at the physical board:** the pillar bears
-on the back face in a Ø6 circle around each mounting hole. If your board has anything standing
-proud inside that circle, the pillar finds it before it finds the board.
+It first asserted a *band* — 0.15 to 0.6 mm — on the reasoning that a bigger gap gives up the
+clamp. That is true, and it has been chosen deliberately. **An assertion that encodes a
+rejected preference is not a check, it is a disagreement that fails the build every time.** So
+the upper bound went, and what remains is the half that is still a defect rather than a
+decision:
+
+- **the screw pillar never grounds on the board** — `short >= 0.15`, measured within the boss
+  radius of a real hole position.
+- **the pillar is still a pillar** — at least 5 mm long below its landing, so cutting it back
+  to a stub is still caught. It runs 8.31 mm today.
+
+**One thing neither can check, and it is worth an eye on the physical board:** at a 2 mm gap
+the pillar is no longer near the board at all, so nothing standing proud around the mounting
+holes matters any more — that concern goes away with the clamp it was protecting.
 
 ## The cover's lip is 1 mm, and the barbs it was built for do not exist
 
