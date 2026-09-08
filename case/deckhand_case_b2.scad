@@ -141,7 +141,7 @@ cable_exit = 2.0;   // room above a mated plug for its cable to leave and turn
 // so the body wall stands exactly rim_clear above the board's BACK face, and there
 // is no separate constant for its height - deliberately, because the wall exists to
 // clear the back components and their cables and nothing else.
-rim_extra = 2.0;    // ASKED FOR: 2 mm more body wall. See the derivation above.
+rim_extra = 3.0;    // ASKED FOR: 2 mm more body wall, then 1 mm more again.
                     // WHAT IT COSTS, AND WHAT IT DOES NOT. cover_rise is
                     // cavity_d - rim_clear, and cavity_d is set by the CELL
                     // (batt_seat + batt_t = 13) not by the rim, so every mm the body
