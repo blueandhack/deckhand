@@ -943,6 +943,47 @@ that pass: the cover was being sliced in its own frame and compared against a st
 assembly frame (margins came out 7.91 and 20.12 and looked *fine*), and a tangency yields the
 same crossing twice, which read as a zero-thickness wall and failed a good cover.
 
+## The screw pillars stop 0.3 mm short of the board
+
+Reported as *"I think you did not count board thickness."* **It was counted**, and the way to
+settle that is to measure it rather than re-read the source: the pillar bottoms at assembly
+`z = 6.900`, and `z_pcb_b = z_pcb_f + board_t` = 5.3 + 1.6 = **6.9**. It landed exactly on the
+board's back face.
+
+**But *exactly* was the defect.** This was the one interface in the file with a nominal of
+**zero**, in a design where every other fit carries a number. The instinct was right about the
+symptom even though the stated cause was not.
+
+**The two failures are not symmetric, and that sets the sign.** Too *long* and the pillar
+grounds on the board before the cover's rim reaches the body: the cover stands off on four
+points, the seam gapes, and no amount of screw fixes it. Too *short* and the board is a few
+tenths less firmly clamped — it still sits on the body's columns, still has the screw through
+its hole, and still cannot go anywhere. So it errs **short**, for the same reason
+`btn_switch_h` does.
+
+```
+screw_pillar_gap = 0.3;   // pillar stops this far short of the board's back
+```
+
+**Not the 2 mm asked for.** At 2 the pillar stops clamping the board at all and becomes
+decoration — which is exactly what `cover()`'s own comment on the pillar says the design
+exists to prevent:
+
+> *"without it the head bears on the cover, the threads bite the column, and the board in
+> between is simply passed through."*
+
+0.3 covers a printed Z stack — cover plate, pillar, a 1.6 mm board at ±0.1 — without spending
+the clamp. Measured on the mesh at three settings: gap 0 → 0.000 mm short, gap 0.3 → 0.300,
+gap 2.0 → 2.000.
+
+`case-b2-check.mjs` asserts a **band**, not a minimum, because both ends are failures: the
+pillar must bottom between 0.15 and 0.6 mm above the board's back, measured within the boss
+radius of a real hole position. Both directions are fault-injected.
+
+**One thing this cannot check, and it is worth a look at the physical board:** the pillar bears
+on the back face in a Ø6 circle around each mounting hole. If your board has anything standing
+proud inside that circle, the pillar finds it before it finds the board.
+
 ## The cover's lip is 1 mm, and the barbs it was built for do not exist
 
 `lip_h` **4.0 → 1.0**, on request, with `0` now a supported setting rather than a

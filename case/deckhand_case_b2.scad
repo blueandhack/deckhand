@@ -281,6 +281,27 @@ cover_screws = true;
 // lip, which also means it MERGES with the lip rather than approaching the wall
 // independently, so the pillar never gets nearer the wall than the lip already is.
 screw_boss_d = 6.0;   // the pillar - see the assert by the plateau
+// HOW FAR THE PILLAR STOPS SHORT OF THE BOARD'S BACK.
+//
+// Reported as "I think you did not count board thickness". It IS counted, and
+// measured on the mesh rather than argued: the pillar bottoms at assembly z 6.900,
+// and z_pcb_b = z_pcb_f + board_t = 5.3 + 1.6 = 6.9. It lands exactly on the back
+// face. But EXACTLY is the problem, and the instinct was right about the symptom
+// even though the cause was not: this was the one interface in this file with a
+// nominal of ZERO, in a design where every other fit carries a number.
+//
+// THE TWO FAILURES ARE NOT SYMMETRIC, which is what sets the sign. Too LONG and the
+// pillar grounds on the board before the cover's rim reaches the body: the cover
+// stands off on four points, the seam gapes, and no amount of screw fixes it. Too
+// SHORT and the board is a few tenths less firmly clamped - it still sits on the
+// body's columns, still has the screw through its hole, and still cannot go
+// anywhere. So this errs SHORT, for the same reason btn_switch_h does.
+//
+// NOT 2 mm, which was the number asked for. At 2 the pillar stops clamping the
+// board at all and becomes decoration - which is precisely what the comment on the
+// pillar in cover() says the design exists to prevent. 0.3 covers a printed Z
+// stack (cover plate, pillar, a 1.6 board at +/-0.1) without spending the clamp.
+screw_pillar_gap = 0.3;   // pillar stops this far short of the board's back
 // Snaps and screws are alternatives, not a pair. Eight barbs plus four screws is
 // insertion force for nothing once the screws are what actually hold it - and the
 // body's catch pockets go with them, so the wall keeps its material.
@@ -1839,7 +1860,8 @@ module cover(){
       if (cover_screws)
         for (c = holes())
           translate([c[0], c[1], screw_pad_z])
-            cylinder(d = screw_boss_d, h = (total_th - z_pcb_b) - screw_pad_z);
+            cylinder(d = screw_boss_d,
+                     h = (total_th - z_pcb_b) - screw_pad_z - screw_pillar_gap);
       // ...and the plateau over the cell, plus how it meets that rim
       if (cover_rise > 0) {
         if (cover_taper)

@@ -201,7 +201,8 @@ function run(scadPath) {
     'ks_barrel', 'ks_head_d', 'ks_head_rim', 'ks_bore', 'ks_pilot',
     'ks_boss_w', 'ks_ear_w', 'ks_head_h', 'ks_hgap', 'ks_leaf_th',
     'ks_leaf_l', 'ks_lug_y', 'total_th', 'out_w',
-    'cover_rise', 'cover_th', 'soft_r', 'cover_edge_top', 'cover_edge_shoulder'
+    'cover_rise', 'cover_th', 'soft_r', 'cover_edge_top', 'cover_edge_shoulder',
+    'z_pcb_b', 'screw_pillar_gap', 'screw_boss_d', 'holes()[0][0]', 'holes()[0][1]'
   ]);
 
   const rim = (v.ks_barrel - v.ks_head_d) / 2;
@@ -311,6 +312,25 @@ function run(scadPath) {
     `margins  -x ${marg[0].toFixed(2)}  +x ${marg[1].toFixed(2)}  ` +
     `-y ${marg[2].toFixed(2)}  +y ${marg[3].toFixed(2)}  (tip was 0.12 before ks_leaf_l was derived)`);
 
+  // ---- the screw pillar must stop SHORT of the board, and not by much ----
+  // Reported as "you did not count board thickness". It was counted - the pillar
+  // bottomed at exactly z_pcb_b - but the nominal was ZERO, the only such fit in
+  // the file. The two failures are not symmetric, which is why this is a band and
+  // not a minimum: too LONG and the pillar grounds on the board before the cover's
+  // rim reaches the body, so the seam gapes and no screw fixes it; too SHORT and
+  // the pillar stops clamping the board and becomes decoration.
+  const hx = v['holes()[0][0]'], hy = v['holes()[0][1]'];
+  let pillarZ = Infinity;
+  for (const t of ct) for (const p of t) {
+    const dx = p[0]-hx, dy = p[1]-hy;
+    if (dx*dx + dy*dy <= (v.screw_boss_d/2 + 0.2)**2 && p[2] < pillarZ) pillarZ = p[2];
+  }
+  const short = pillarZ - v.z_pcb_b;
+  check('the screw pillar stops short of the board, and only just',
+    short >= 0.15 && short <= 0.6,
+    `bottoms at ${pillarZ.toFixed(3)}, board back is ${v.z_pcb_b.toFixed(3)} ` +
+    `-> ${short.toFixed(3)} mm short (0 gapes the seam, 2 stops clamping the board)`);
+
   rmSync(dir, { recursive: true, force: true });
   return failures;
 }
@@ -364,6 +384,12 @@ const FAULTS = [
     patch: s => s.replace(/^ks_leaf_l  = plat_y1 - edge_t1\([\s\S]*?cover_rise\) - ks_lug_y - 0\.6;/m,
                           'ks_leaf_l  = out_h*0.60;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet' },
+  { name: 'the pillar grounds on the board (gap back to zero)',
+    patch: s => s.replace(/^screw_pillar_gap = 0\.3;/m, 'screw_pillar_gap = 0;'),
+    expect: 'the screw pillar stops short of the board, and only just' },
+  { name: 'the pillar is cut back 2 mm and stops clamping the board',
+    patch: s => s.replace(/^screw_pillar_gap = 0\.3;/m, 'screw_pillar_gap = 2.0;'),
+    expect: 'the screw pillar stops short of the board, and only just' },
   { name: 'the axle is dropped so the blade buries itself',
     patch: s => s.replace(/^ks_axle_z\s*=\s*-ks_bz;/m, 'ks_axle_z  = -ks_bz + 3.0;'),
     expect: 'the folded blade does not penetrate the cover' },
