@@ -943,6 +943,33 @@ that pass: the cover was being sliced in its own frame and compared against a st
 assembly frame (margins came out 7.91 and 20.12 and looked *fine*), and a tangency yields the
 same crossing twice, which read as a zero-thickness wall and failed a good cover.
 
+## The speaker is 15 mm wide, and the file said 17 in one place and 15 in the other
+
+**Measured on the actual speaker: 1.5 × 1 × 0.4 cm.** `spk_w` was **17.0** and that was wrong
+by 2 mm — and the file already contained the right answer, twice over, without noticing.
+
+`spk_grille_w` has always been **15.0**, and its own comment reads *"the speaker's own
+footprint, so the tape seals around it"* — a constant that **claims to be `spk_w`** while
+disagreeing with it by 2 mm. Two numbers for one object, one of them describing itself as the
+other, and the comment was the accurate half.
+
+So the grille is now **derived** from the speaker rather than transcribed beside it, which is
+the only way that comment can stay true:
+
+```
+spk_w = 15.0; spk_h = 10.0; spk_t = 4.0;   // 1.5 x 1 x 0.4 cm, measured
+spk_grille_w = spk_w;   spk_grille_h = spk_h;
+```
+
+**`spk_t` = 4.0 is now confirmed rather than assumed.** It had been carried as a vendor figure
+and flagged here as never measured on this board — which mattered, because any rigid pad
+pressing the speaker down depends on it entirely.
+
+**No exported STL moved**, which is the useful part of the verification: `spk_w` was read only
+by the disabled `retainer()` and the assembly preview, and the grille was already 15. The
+correction fixes what the model *knows* about the speaker without changing a single printed
+part.
+
 ## The width gains 0.6 mm, on the axis that had no clearance at all
 
 Asked for as *"increase width about 0.6 mm"*. It goes into `clr_w`, not `wall` — widening the

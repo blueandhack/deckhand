@@ -729,7 +729,21 @@ batt_extra = 0.0;   // headroom above the pack; 0 means the cover bears on the c
                     // so trim the same amount here to keep the case the same depth.
 // Speaker pocket: in the strip at the end opposite USB-C, centred. It's on an
 // 85 mm lead so it can go anywhere that's clear on YOUR board — tweak spk_cx/cy.
-spk_w = 17.0; spk_h = 10.0; spk_t = 4.0;
+// MEASURED ON THE ACTUAL SPEAKER, reported as 1.5 x 1 x 0.4 cm.
+//
+// spk_w WAS 17.0 AND THAT WAS WRONG BY 2 mm, and the file already contained the
+// right answer twice over without noticing. spk_grille_w has always been 15.0, and
+// its own comment says it is "the speaker's own footprint, so the tape seals around
+// it" - i.e. a constant that CLAIMS to be spk_w while disagreeing with it by 2 mm.
+// Two numbers for one object, one of them describing itself as the other.
+//
+// So the grille is now DERIVED from the speaker rather than transcribed beside it,
+// which is the only way the claim in that comment can stay true.
+//
+// spk_t 4.0 is CONFIRMED by the same measurement. It had been carried as a vendor
+// figure and flagged as never measured here - which mattered, because a rigid pad
+// pressing on the speaker depends on it entirely.
+spk_w = 15.0; spk_h = 10.0; spk_t = 4.0;   // 1.5 x 1 x 0.4 cm, measured
 
 // ---------- Microphone (MAX4466 module, carried by the RETAINER) ----------
 // Stands VERTICALLY against the high-X wall - the same wall its cable plugs into -
@@ -1349,8 +1363,11 @@ spk_py     = usb_at_top ? by0 + spk_cy : by0 + board_h - spk_cy;
 // Cost: 18 holes and ~21% open instead of 22 and 26%. Being sure the holes stay
 // separate is worth more than 5 points of open area.
 spk_grille    = true;
-spk_grille_w  = 15.0;   // patch, X - the speaker's own footprint, so the tape seals
-spk_grille_h  = 10.0;   // patch, Y   around it and no hole shorts front to back
+// DERIVED from the speaker, not transcribed. These were 15.0 and 10.0 literals
+// while spk_w said 17.0 - see the note by spk_w. The comment below was the only
+// record that they were meant to be the same thing, and it was the accurate half.
+spk_grille_w  = spk_w;   // patch, X - the speaker's own footprint, so the tape seals
+spk_grille_h  = spk_h;   // patch, Y   around it and no hole shorts front to back
 spk_grille_d  = 1.5 + print_shrink;   // 2.0 modelled -> 1.5 printed
 spk_grille_p  = 3.0;    // hex pitch; see above before lowering it
 spk_grille_cx = bcx;    // centred between the two button sleeves
