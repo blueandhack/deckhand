@@ -212,7 +212,8 @@ function run(scadPath, defines = {}) {
     'ks_leaf_l', 'ks_lug_y', 'total_th', 'out_w',
     'cover_rise', 'cover_th', 'soft_r', 'cover_edge_top', 'cover_edge_shoulder',
     'z_pcb_b', 'screw_pillar_gap', 'screw_boss_d', 'screw_pad_z',
-    'holes()[0][0]', 'holes()[0][1]'
+    'holes()[0][0]', 'holes()[0][1]',
+    'screw_pilot', 'screw_skin', 'z_pcb_f', 'screw_lead', 'screw_engage_min'
   ], defines);
 
   const rim = (v.ks_barrel - v.ks_head_d) / 2;
@@ -371,6 +372,39 @@ function run(scadPath, defines = {}) {
     `${pillarLen.toFixed(2)} of ${pillarSpan.toFixed(2)} mm below its landing ` +
     `(the gap may not eat half the span)`);
 
+  // ---- the four screw pilots must actually be CUT ----
+  // Measured, not reasoned: the pilot is drawn as cylinder(h = z_pcb_f - screw_skin),
+  // and raising the body wall 5 mm drove that expression NEGATIVE (-0.39). OpenSCAD
+  // draws nothing for a negative height and warns about nothing, so the column came
+  // out solid with only its 0.6 mm lead-in cone - the same outcome as the forward
+  // reference that once lost these same four holes. The void is measured inside a
+  // pilot-sized rod, so a cone alone cannot satisfy it.
+  writeFileSync(join(dir,'v.scad'),
+    `part="none";\ninclude <${scadPath}>\n` +
+    `c0 = holes()[0];\n` +
+    `difference(){ translate([c0[0],c0[1],0]) cylinder(d=screw_pilot,h=z_pcb_f,$fn=48); body(); }\n`);
+  // MEASURED AS A VOLUME, NOT AS A Z EXTENT, and the difference is the whole check.
+  // The void is TWO disjoint pieces when the bore is degenerate - a zero-height disc
+  // down at screw_skin and the lead-in cone up at the column top - and their combined
+  // extent is 3.61 mm, which reads exactly like a healthy 3.60 bore. The fault
+  // injection is what caught that; the first version of this assertion passed on the
+  // patched file. Volume over the bore's own area gives an EQUIVALENT DEPTH that two
+  // thin slices cannot fake.
+  const vf = join(dir,'void.stl');
+  let pilotDepth = 0;
+  try {
+    execFileSync('openscad', ['--export-format=binstl','-o',vf,'-D','$fn=48',
+      '-D','part="none"', ...dArgs, join(dir,'v.scad')], { stdio:['ignore','ignore','ignore'] });
+    const area = Math.PI * (v.screw_pilot / 2) ** 2;
+    pilotDepth = stlVolume(vf) / area;
+  } catch (e) { pilotDepth = 0; }
+  const wantDepth = v.z_pcb_f - v.screw_skin;
+  check('the four screw pilots are actually cut', pilotDepth >= v.screw_engage_min,
+    `equivalent depth ${pilotDepth.toFixed(2)} mm, needs >= ${v.screw_engage_min} ` +
+    `(a lead-in cone alone measures about ${v.screw_lead.toFixed(2)})`);
+  check('the pilot reaches as deep as the arithmetic says', Math.abs(pilotDepth - wantDepth) < 0.05,
+    `measured ${pilotDepth.toFixed(2)} vs z_pcb_f - screw_skin = ${wantDepth.toFixed(2)}`);
+
   rmSync(dir, { recursive: true, force: true });
   return failures;
 }
@@ -417,11 +451,11 @@ const FAULTS = [
               linear_extrude(0.01) rrect_c(in_w+0.2, in_h+0.2, max(oc_r-wall,2));
           }`),
     expect: 'the outside never steps back inward - no perimeter flange',
-    defines: { rim_extra: 2 } },
+    defines: { rim_extra: 4 } },
   { name: 'ks_leaf_margin stops tracking the top fillet (blade too WIDE)',
     patch: s => s.replace(/^ks_leaf_margin = 0\.6 \+ edge_t1\([^;]+;/m, 'ks_leaf_margin = 0.6;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet',
-    defines: { rim_extra: 2 } },
+    defines: { rim_extra: 4 } },
   // NOT out_h*0.60, which is what this used to inject. That literal produced a
   // 0.12 mm margin when cover_rise was 5; at 3 the top fillet bites less and the
   // same literal happens to FIT, so the fault stopped reproducing a defect and the
@@ -432,13 +466,23 @@ const FAULTS = [
     patch: s => s.replace(/^ks_leaf_l  = plat_y1 - edge_t1\([\s\S]*?cover_rise\) - ks_lug_y - 0\.6;/m,
                           'ks_leaf_l  = plat_y1 - ks_lug_y;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet',
-    defines: { rim_extra: 2 } },
+    defines: { rim_extra: 4 } },
   { name: 'the pillar drives INTO the board',
     patch: s => s.replace(/^screw_pillar_gap = 0\.0;/m, 'screw_pillar_gap = -0.5;'),
     expect: 'the screw pillar does not reach past the board' },
   { name: 'the pillar is cut back until it is only a stub',
     patch: s => s.replace(/^screw_pillar_gap = 0\.0;/m, 'screw_pillar_gap = 9.0;'),
     expect: 'the pillar is still a pillar' },
+  // NOT "screw_len back to 16": that trips the .scad's own screw_engage_min assert,
+  // the build refuses, and the CHECKER never gets to prove anything - the defect is
+  // caught, but by the model rather than by this. The model's assert is verified
+  // separately (at 16 it fires by name). What this has to catch is the same hole
+  // going missing with the arithmetic still valid, which is what a degenerate height
+  // produced in the first place.
+  { name: 'the pilot bore is cut to zero height',
+    patch: s => s.replace(/cylinder\(d = screw_pilot, h = z_pcb_f - screw_skin \+ 0\.01\);/,
+                          'cylinder(d = screw_pilot, h = 0.01);'),
+    expect: 'the four screw pilots are actually cut' },
   { name: 'the axle is dropped so the blade buries itself',
     patch: s => s.replace(/^ks_axle_z\s*=\s*-ks_bz;/m, 'ks_axle_z  = -ks_bz + 3.0;'),
     expect: 'the folded blade does not penetrate the cover' },

@@ -1015,6 +1015,56 @@ and `bx0` is `wall + clr_w`. So the width increase raised the ceiling **6.5 → 
 `screw_boss_d` is still 6.0; there is now 1.1 mm of headroom rather than 0.5, though still not
 the 2.0 originally asked for.
 
+## The four screw pilots were not cut, again — this time by a negative height
+
+Reported as *"the body case has issue with screw holes."* It did, and it is the **second** time
+this file has lost these same four holes.
+
+**Measured on the mesh before anything was changed:** a Ø2.9 rod driven down a column met
+31.0 mm³ of material out of the rod's own 34.9. The only void was **z 4.70 … 5.30, 0.60 mm
+deep** — the lead-in cone alone. The bore under it was gone.
+
+```
+screw_pad_z went to 0 with the plateau, so screw_entry became total_th   21.9
+screw_skin   = 21.9 - 16 - 0.2                                          =  5.70
+the column's top is z_pcb_f                                             =  5.30
+so the pilot's own height, z_pcb_f - screw_skin                         = -0.39
+```
+
+**OpenSCAD draws nothing for a cylinder of negative height, and says nothing about it.** The
+first loss of these holes was `print_shrink`'s forward reference making `screw_pilot`
+undefined; this one is a sign. Different cause, identical outcome — and the STLs built and
+looked entirely right both times.
+
+**The screw did not reach the column either.** Its tip lands at z 5.90 and the column's top is
+5.30, so an M3 × 16 engaged *nothing*, pilot or no pilot.
+
+### The assert that existed guarded one end only
+
+`screw_skin >= screw_skin_min` asks *"is the screw too long"*. Nothing asked whether it is long
+enough to reach the column, so raising the wall walked straight past it. Now bracketed from
+both ends by `screw_engage_min = 3.0`, and its message names the valid range.
+
+| | |
+|---|---|
+| `screw_len` | 16.0 → **20.0** — M3 × 20 |
+| `screw_skin` (front face left) | 5.70 → **1.70** (min 0.60) |
+| engagement in the column | −0.40 → **3.60** |
+| pilot void, measured | 0.60 mm (the cone) → **3.59 mm equivalent depth** |
+
+**`screw_len` is only valid at this wall height.** At `rim_extra` 2 or 3 an M3 × 20 trips the
+*other* assert — the screw becomes too long. The two asserts now bracket it, which is what
+makes the coupling visible instead of silent: the required screw length is a function of the
+body wall.
+
+### And the check I wrote for it was wrong first
+
+The assertion measured the void's **z extent**, which passed on the injected fault. A
+degenerate bore leaves **two disjoint voids** — a zero-height disc at `screw_skin` and the cone
+at the column top — and their combined extent is 3.61 mm, indistinguishable from a healthy 3.60
+bore. It now measures **volume over the bore's own area**, an equivalent depth that two thin
+slices cannot fake. The fault injection is the only reason that was caught.
+
 ## The body's wall is 5 mm taller, and that extinguishes the plateau
 
 Asked for in three steps — +2, then +1, then +2 more — so `rim_extra` is **5.0**. Measured off

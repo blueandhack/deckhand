@@ -424,7 +424,11 @@ screw_lead   = 0.6;  // conical lead-in at the column top, so the screw centres 
 // bottoms out looks exactly like a hole that is too small: it stops dead partway
 // and no force helps. That symptom cost one print already, when the advice given
 // was "M3 x 6 or 8" against 5.9 mm of usable space.
-screw_len        = cover_screws ? 16.0 : 6.0;  // M3 x 16 through the whole stack, or x 6 board-only
+// M3 x 20 THROUGH THE WHOLE STACK, up from x 16. The body wall grew 5 mm and the
+// screw did not, so the x 16 stopped reaching the column - see the assert on
+// screw_engage_min, which is what now brackets this from BOTH ends. At 20 the screw
+// leaves 1.70 of front face (min 0.60) and takes 3.60 of thread in the column.
+screw_len        = cover_screws ? 20.0 : 6.0;  // M3 x 20 through the whole stack, or x 6 board-only
 screw_tip_margin = 0.2;  // clear air past the tip, so it clamps rather than bottoms
 screw_skin_min   = 0.6;  // least front-face material to leave; see the assert
                     // (kept small — a big taper on a thin pin leaves a point)
@@ -1343,6 +1347,32 @@ screw_skin  = screw_entry - screw_len - screw_tip_margin;
 assert(screw_skin >= screw_skin_min,
        str("screw_len is too long: the pilot would leave ", screw_skin,
            " of front face, under screw_skin_min. Use a shorter screw."));
+// AND THE OTHER END, WHICH WAS NOT GUARDED AND SHOULD HAVE BEEN.
+//
+// The assert above only ever asked "is the screw too LONG". Nothing asked whether
+// it is long enough to REACH the column, and raising the body wall by 5 mm made it
+// too short - silently, and in the worst possible way:
+//
+//   screw_pad_z went to 0 with the plateau, so screw_entry went to total_th (21.9)
+//   screw_skin  = 21.9 - 16 - 0.2 = 5.70
+//   the column's top is z_pcb_f = 5.30, BELOW that
+//   so the pilot's own height, z_pcb_f - screw_skin, came out NEGATIVE (-0.39)
+//
+// OpenSCAD draws nothing for a cylinder of negative height and says nothing about
+// it. Measured on the mesh: the only void left in the column was the 0.6 mm
+// lead-in cone at z 4.70..5.30, and the bore under it was gone. The screw's tip
+// meanwhile lands at z 5.90, ABOVE the column top - so even with a pilot it would
+// have engaged nothing at all. This file already has a section called "A build that
+// succeeded and lost the screw holes"; that one was a forward reference, this one is
+// a sign, and the outcome was identical.
+screw_engage_min = 3.0;   // least thread the screw must take in the column
+assert(!cover_screws || (z_pcb_f - screw_skin) >= screw_engage_min,
+       str("screw_len is too SHORT to reach the column: it would engage ",
+           z_pcb_f - screw_skin, " mm, under screw_engage_min. The pilot's own ",
+           "height is z_pcb_f - screw_skin, so at or below zero it is not cut at ",
+           "all and nothing warns. Needs screw_len <= ",
+           screw_entry - screw_tip_margin - screw_skin_min, " and >= ",
+           screw_entry - screw_tip_margin - (z_pcb_f - screw_engage_min)));
 
 // A BUTTON ON A SLOPE IS NOT A BUTTON. At the service end the taper drops 1.61
 // across the 6 mm hole, so against btn_proud of 1.5 the head would be buried on
