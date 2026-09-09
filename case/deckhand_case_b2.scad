@@ -141,9 +141,27 @@ cable_exit = 2.0;   // room above a mated plug for its cable to leave and turn
 // so the body wall stands exactly rim_clear above the board's BACK face, and there
 // is no separate constant for its height - deliberately, because the wall exists to
 // clear the back components and their cables and nothing else.
-rim_extra = 2.0;    // ASKED FOR: 2 mm more body wall. Briefly 3.0 - a further 1 mm
-                    // was asked for and then withdrawn ("ONLY increase 2 mm"), so this
-                    // is back to the first figure. See the derivation above.
+// ASKED FOR in three steps: +2, then +1, then +2 more. 2.0 -> 3.0 -> 5.0.
+//
+// 5.0 IS EXACTLY THE VALUE THAT EXTINGUISHES THE PLATEAU, and that is a coincidence
+// of the cell's own stack rather than a chosen figure. cover_rise is
+// cavity_d - rim_clear, cavity_d is max(rim_clear, batt_seat + batt_t) = 13 while
+// the rim is under it, and rim_clear reaches 13 at exactly rim_extra = 5. So:
+//   rim_extra 4.9 -> rise 0.10, body 19.8, a plateau 0.1 mm proud
+//   rim_extra 5.0 -> rise 0,    body 19.9, NO PLATEAU. The cover is flat.
+//   rim_extra 5.5 -> rise 0,    body 20.4, and total_th starts growing: 22.4
+// Below 5 the body gains what the plateau loses and total_th is pinned at 21.9;
+// above 5 there is nothing left to give and the device gets thicker.
+//
+// THE FLAT-COVER PATH IS A DIFFERENT DESIGN, not a smaller version of this one, and
+// two constants jump rather than slide: ks_gap falls back to its literal 34 (from
+// 23.16) and ks_lug_from to 15 (from 23.4), because both are written
+// `cover_rise > 0 ? <derived> : <the flat cover's original>`. So the kickstand's
+// blade widens and its pivot moves to the case edge, in one step, at this value.
+// Those fallbacks were sized for the flat cover this file shipped with, so they are
+// right - but they are a discontinuity, not a trend, and the cover's taper and both
+// edge fillets stop existing along with the plateau.
+rim_extra = 5.0;    // 2 + 1 + 2. Lands exactly on cover_rise = 0 - see above.
                     // WHAT IT COSTS, AND WHAT IT DOES NOT. cover_rise is
                     // cavity_d - rim_clear, and cavity_d is set by the CELL
                     // (batt_seat + batt_t = 13) not by the rim, so every mm the body

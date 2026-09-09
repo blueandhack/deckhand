@@ -1015,12 +1015,10 @@ and `bx0` is `wall + clr_w`. So the width increase raised the ceiling **6.5 → 
 `screw_boss_d` is still 6.0; there is now 1.1 mm of headroom rather than 0.5, though still not
 the 2.0 originally asked for.
 
-## The body's wall is 2 mm taller, and the device is not
+## The body's wall is 5 mm taller, and that extinguishes the plateau
 
-*"Increase case body walls 2 mm"* was first read as the wall's **thickness** (`wall`
-2.2 → 4.2, a 4 mm bigger footprint) and corrected to its **height**. The thickness change is
-reverted — footprint back to 59.4 × 107.9 — but the detour is recorded below, because it
-turned up a latent defect worth keeping.
+Asked for in three steps — +2, then +1, then +2 more — so `rim_extra` is **5.0**. Measured off
+the body mesh: **60.00 × 107.90 × 19.90**, against the 14.90 it started at.
 
 ### There is no wall-height constant, and that is deliberate
 
@@ -1030,63 +1028,63 @@ body_d = z_floor - cover_rise
        = z_pcb_b + rim_clear
 ```
 
-The body wall stands **exactly `rim_clear`** above the board's back face. There is no
-separate height constant because the wall exists to clear the back components and their
-cables and nothing else — so the +2 goes in as `rim_extra`, next to the terms it joins.
+The body wall stands **exactly `rim_clear`** above the board's back face. There is no separate
+height constant because the wall exists to clear the back components and their cables and
+nothing else — so the raise goes in as `rim_extra`, beside the terms it joins.
 
-`rim_extra` = **2.0**. It was briefly 3.0 — a further 1 mm was asked for and then
-withdrawn (*"ONLY increase 2 mm"*) — so the middle column is where it stands. The 3.0
-column is kept because the trip through it is what proved the pillars self-track.
+### 5.0 is exactly the value that kills the plateau, and that is arithmetic, not a choice
 
-| | original | **+2, shipped** | (briefly 3.0) |
-|---|---|---|---|
-| `rim_clear` | 8.0 | **10.0** | 11.0 |
-| `body_d` (wall height) | 14.90 | **16.90** — measured off the body mesh | 17.90 |
-| `cover_rise` | 5.0 | **3.0** | 2.0 |
-| `total_th` | 21.9 | **21.9** | 21.9 |
-| screw pillar length | 10.31 | **12.19** | 13.13 |
-| `btn_span` | 5.5 | **7.5** | 8.5 |
+`cover_rise` is `cavity_d - rim_clear`, and `cavity_d` is
+`max(rim_clear, batt_seat + batt_t)` = **13** while the rim is under it. `rim_clear` reaches 13
+at exactly `rim_extra = 5`:
 
-**The pillars lengthen on their own, which is worth knowing before asking for more.** The
-pillar runs from its landing in the cover down to the board's back, and its *end* is
-`z_pcb_b + screw_pillar_gap` — independent of `cover_rise` and of `body_d`. What moves is its
-*start*: `screw_pad_z` shrinks as the plateau flattens. So the pillar grew **1.88 mm** with
-this raise, with nobody touching it, and still bottoms exactly on the board.
+| `rim_extra` | `rim_clear` | `cover_rise` | `body_d` | `total_th` | |
+|---|---|---|---|---|---|
+| 2 | 10 | 3.0 | 16.90 | 21.9 | |
+| 3 | 11 | 2.0 | 17.90 | 21.9 | |
+| 4 | 12 | 1.0 | 18.90 | 21.9 | |
+| 4.9 | 12.9 | 0.10 | 19.80 | 21.9 | a plateau 0.1 mm proud |
+| **5** | **13** | **0** | **19.90** | **21.9** | **no plateau — the cover is flat** |
+| 5.5 | 13.5 | 0 | 20.40 | 22.4 | nothing left to give; the device grows |
 
-At `screw_pillar_gap = 0` it is already as long as it can be. A further millimetre is
-`gap = -1.0`, which puts it **1 mm into the board** — measured, bottom at `z = 5.900` against
-a board back of 6.900. In a print that is not a longer pillar; it is a cover standing 1 mm
-proud with the seam open all round.
+Below 5 the body gains what the plateau loses and `total_th` is pinned at 21.9. Above 5 there
+is nothing left to give.
 
-**The device is exactly as thick as it was**, and that surprises people. `cavity_d` is set by
-the *cell* (`batt_seat + batt_t` = 13), not by the rim, so every millimetre the body gains the
-plateau loses. `total_th` is `z_floor + cover_th`, and `z_floor` does not read `rim_clear` at
-all. The body encloses more of the cell; the cover stands proud of it less.
+### The flat-cover path is a different design, and two constants jump rather than slide
 
-**If the intent was a deeper case rather than a taller wall**, that is `batt_extra` — it
-raises `cavity_d` and `total_th` together and leaves the rise alone.
+Both are written `cover_rise > 0 ? <derived> : <the flat cover's original>`, so at this value
+they step:
 
-**The plunger follows, and should.** The buttons sit in the *rim*, whose inner face is
-`body_d`, so a 2 mm taller wall puts the cover 2 mm further from the switch: `btn_span`
-5.5 → 7.5 and the stem 5.2 → 7.2. `deckhand_b2_buttons.stl` moves with it.
+| | with a plateau | flat |
+|---|---|---|
+| `ks_gap` | 23.16 | **34** (the literal) |
+| `ks_lug_from` | 23.4 | **15** |
+| kickstand blade width | 39.0 | **50.8** |
 
-### What the wrong reading turned up
+50.8 is the leaf this file shipped with before the plateau existed, so those fallbacks are
+right — but they are a **discontinuity, not a trend**.
 
-`ks_lug_from` was a literal **24**. Its note read *"needs `ks_lug_y >= plat_y0 + ks_bz` = 22.2;
-24 leaves 1.8 of margin"* — correct arithmetic against the plateau as it then stood. Raising
-`wall` moved `plat_y0` 18.1 → 20.1 and the literal did not, so the hinge boss came to start
-**0.4 mm** past the plateau edge instead of 1.8. **It still passed every check.** That is the
-failure mode: a hand-computed clearance that survives the change that invalidates it. It is
-now `plat_y0 + ks_barrel/2 + 1.8`, and it stays derived after the revert.
+**And the cover's taper goes with the plateau, so `cover_edge_top` and `cover_edge_shoulder`
+now do nothing.** The "soft all over" edge work — the flange fix, both fillets, the leaf
+margin and length deriving from the fillet's bite — is all inert at `cover_rise = 0`. The code
+is intact and comes back the moment `rim_extra` drops below 5; it simply is not reached here.
 
-### A fault that stopped being a fault
+### Three checks now report SKIPPED, and that is the point
 
-The injected regression for the blade's length was `ks_leaf_l = out_h*0.60`, which left a
-0.12 mm margin when `cover_rise` was 5. At 3 the top fillet bites less — the slope falls from
-17.1° to 10.3° — and **the same literal now fits**, so the fault stopped reproducing a defect
-and the assertion passed honestly. A fault that cannot fail is as useless as an assertion
-that cannot fail. It now injects the regression the derivation actually prevents: reaching
-the plateau's edge while forgetting the fillet's bite.
+At `cover_rise = 0` four assertions went **vacuous** — and one of them passed by looping from
+2.2 to 1.2, i.e. not at all, on `Infinity > 1.2`. *"An assertion that cannot fail is a
+defect"*, so:
+
+- **the perimeter flange**, **the skirt wall** and **the blade landing on flat plateau** now
+  report `SKIPPED` with the reason, never `ok`. A `skip()` state was added so a switched-off
+  feature can never read as a pass.
+- **the pillar-stub check is now proportional** — `pillarLen >= 0.5 * pillarSpan` instead of a
+  flat 5 mm. The span grows with the wall (10.31 → 15.00 across the raises), so the fixed
+  floor had stopped discriminating: a gap of 9 still left 6.0 mm and passed.
+- **the three faults that need a plateau now select one**, via a new `defines` field that
+  injects them at `rim_extra = 2`. They still bind the code that is still in the file.
+
+Twelve faults, each caught by name.
 
 ## The cover's lip is 1 mm, and the barbs it was built for do not exist
 

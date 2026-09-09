@@ -31,6 +31,15 @@ function check(name, ok, detail) {
   if (ok) { if (!SELFTEST) console.log(`  ok   ${name}${detail ? '  ' + detail : ''}`); }
   else { failures.push(name); if (!SELFTEST) console.log(`  FAIL ${name}${detail ? '  ' + detail : ''}`); }
 }
+// A feature that is switched off in this configuration must report SKIP, never ok.
+// At rim_extra 5 the plateau vanishes (cover_rise 0) and four assertions here went
+// vacuous - one of them by looping from 2.2 to 1.2, i.e. not at all, and passing on
+// Infinity. "AN ASSERTION THAT CANNOT FAIL IS A DEFECT", so they say so instead.
+let skipped = [];
+function skip(name, why) {
+  skipped.push(name);
+  if (!SELFTEST) console.log(`  --   ${name}  SKIPPED: ${why}`);
+}
 
 // ---------------------------------------------------------------- helpers
 // Pull one module's BODY out of the source. Assertions must bind to the body and
@@ -150,8 +159,8 @@ function crossings(S, z){
 }
 
 // ---------------------------------------------------------------- the checks
-function run(scadPath) {
-  failures = [];
+function run(scadPath, defines = {}) {
+  failures = []; skipped = [];
   const src = readFileSync(scadPath, 'utf8');
 
   // ---- STRUCTURAL: the .scad's own text ----
@@ -174,7 +183,7 @@ function run(scadPath) {
   // The button pair the gauge settled: hole loses print_shrink, stem gains
   // print_grow, and what is left is the fit you can actually assemble.
   const bt = scadEcho(scadPath,
-    ['btn_stem_d', 'btn_guide_d', 'btn_fit', 'print_shrink', 'print_grow']);
+    ['btn_stem_d', 'btn_guide_d', 'btn_fit', 'print_shrink', 'print_grow'], defines);
   const printedClear = (bt.btn_guide_d - bt.print_shrink) - (bt.btn_stem_d + bt.print_grow);
   check('the button actually goes in', printedClear >= 0.2 && printedClear <= 0.5,
     `printed stem ${(bt.btn_stem_d + bt.print_grow).toFixed(2)} in printed hole ` +
@@ -204,7 +213,7 @@ function run(scadPath) {
     'cover_rise', 'cover_th', 'soft_r', 'cover_edge_top', 'cover_edge_shoulder',
     'z_pcb_b', 'screw_pillar_gap', 'screw_boss_d', 'screw_pad_z',
     'holes()[0][0]', 'holes()[0][1]'
-  ]);
+  ], defines);
 
   const rim = (v.ks_barrel - v.ks_head_d) / 2;
   check('buried head keeps its rim', rim >= v.ks_head_rim - 1e-6,
@@ -229,9 +238,10 @@ function run(scadPath) {
     `part="none"; what="stand";\ninclude <${scadPath}>\n` +
     `if (what=="hit") intersection(){ translate([out_w,0,total_th]) rotate([0,180,0]) cover(); stand_placed(); }\n` +
     `else stand_placed();\n`);
+  const dArgs = Object.entries(defines).flatMap(([k, val]) => ['-D', `${k}=${val}`]);
   const build = (what, file, extra = []) => execFileSync('openscad',
     ['--export-format=binstl', '-o', file, '-D', '$fn=28', '-D', 'part="none"',
-     '-D', `what="${what}"`, ...extra, probe],
+     '-D', `what="${what}"`, ...dArgs, ...extra, probe],
     { stdio: ['ignore', 'ignore', 'ignore'] });
 
   const hit = join(dir, 'hit.stl'), st = join(dir, 'st.stl');
@@ -270,7 +280,7 @@ function run(scadPath) {
     `translate([out_w,0,total_th]) rotate([0,180,0]) cover();\n`);
   const cvf = join(dir,'cover.stl');
   execFileSync('openscad', ['--export-format=binstl','-o',cvf,'-D','$fn=48',
-    '-D','part="none"', join(dir,'c.scad')], { stdio:['ignore','ignore','ignore'] });
+    '-D','part="none"', ...dArgs, join(dir,'c.scad')], { stdio:['ignore','ignore','ignore'] });
   const cs = sectionSegs(stlTris(cvf), 1, 54);
   const zLast = v.cover_rise + v.cover_th - v.soft_r*0.5;   // before the bottom chamfer
   let worstStep = 0, worstZ = 0, minWall = Infinity;
@@ -284,11 +294,20 @@ function run(scadPath) {
     prevW = w;
     if (d >= 2.2) { const t = c[1]-c[0]; if (t < minWall) minWall = t; }
   }
-  check('the outside never steps back inward - no perimeter flange',
+  if (v.cover_rise <= 0)
+    skip('the outside never steps back inward - no perimeter flange',
+         'cover_rise is 0, so there is no taper and cover_outer() is not used');
+  else check('the outside never steps back inward - no perimeter flange',
     worstStep < 0.15,
     worstStep < 0.15 ? `widens monotonically to the chamfer`
                      : `steps in ${worstStep.toFixed(2)} mm at depth ${worstZ.toFixed(2)}`);
-  check('the skirt keeps a wall', minWall > 1.2,
+  // The sweep only exists if there IS a skirt. zLast is cover_rise + cover_th -
+  // soft_r/2, which is 1.2 at cover_rise 0 - BELOW the 2.2 the loop starts at, so it
+  // ran zero times and passed on Infinity.
+  if (v.cover_rise <= 0 || zLast <= 2.2 + 0.2)
+    skip('the skirt keeps a wall',
+         `no hollow skirt to sample (cover_rise ${v.cover_rise}, sweep would be 2.2..${zLast.toFixed(1)})`);
+  else check('the skirt keeps a wall', minWall > 1.2,
     `thinnest ${minWall.toFixed(2)} mm over z 2.2..${zLast.toFixed(1)} (the flange measured 0.00)`);
 
   // ---- the kickstand blade must land on FLAT plateau, not on the fillet ----
@@ -308,7 +327,10 @@ function run(scadPath) {
     bl.y0=Math.min(bl.y0,p[1]); bl.y1=Math.max(bl.y1,p[1]);
   }
   const marg = [bl.x0-flat.x0, flat.x1-bl.x1, bl.y0-flat.y0, flat.y1-bl.y1];
-  check('the folded blade lands on FLAT plateau, not on the top fillet',
+  if (v.cover_rise <= 0)
+    skip('the folded blade lands on FLAT plateau, not on the top fillet',
+         'cover_rise is 0 - the whole back is flat, so there is no fillet to land on');
+  else check('the folded blade lands on FLAT plateau, not on the top fillet',
     Math.min(...marg) >= 0.4,
     `margins  -x ${marg[0].toFixed(2)}  +x ${marg[1].toFixed(2)}  ` +
     `-y ${marg[2].toFixed(2)}  +y ${marg[3].toFixed(2)}  (tip was 0.12 before ks_leaf_l was derived)`);
@@ -340,9 +362,14 @@ function run(scadPath) {
   check('the screw pillar does not reach past the board', short >= -1e-6,
     `bottoms at ${pillarZ.toFixed(3)}, board back is ${v.z_pcb_b.toFixed(3)} ` +
     `-> ${short.toFixed(3)} mm (negative is interference; 0 is a zero-clearance fit)`);
-  const pillarLen = (v.total_th - v.z_pcb_b) - v.screw_pad_z - v.screw_pillar_gap;
-  check('the pillar is still a pillar', pillarLen >= 5.0,
-    `${pillarLen.toFixed(2)} mm long below its landing`);
+  // PROPORTIONAL, not a flat 5 mm. The span from the landing to the board grows with
+  // the body wall (10.31 -> 15.00 across the raises), so a fixed floor stopped
+  // discriminating: at rim_extra 5 a gap of 9 still left 6.0 mm and passed.
+  const pillarSpan = (v.total_th - v.z_pcb_b) - v.screw_pad_z;
+  const pillarLen = pillarSpan - v.screw_pillar_gap;
+  check('the pillar is still a pillar', pillarLen >= 0.5 * pillarSpan,
+    `${pillarLen.toFixed(2)} of ${pillarSpan.toFixed(2)} mm below its landing ` +
+    `(the gap may not eat half the span)`);
 
   rmSync(dir, { recursive: true, force: true });
   return failures;
@@ -389,10 +416,12 @@ const FAULTS = [
             translate([wall-0.1+(in_w+0.2)/2, wall-0.1+(in_h+0.2)/2, rim0])
               linear_extrude(0.01) rrect_c(in_w+0.2, in_h+0.2, max(oc_r-wall,2));
           }`),
-    expect: 'the outside never steps back inward - no perimeter flange' },
+    expect: 'the outside never steps back inward - no perimeter flange',
+    defines: { rim_extra: 2 } },
   { name: 'ks_leaf_margin stops tracking the top fillet (blade too WIDE)',
     patch: s => s.replace(/^ks_leaf_margin = 0\.6 \+ edge_t1\([^;]+;/m, 'ks_leaf_margin = 0.6;'),
-    expect: 'the folded blade lands on FLAT plateau, not on the top fillet' },
+    expect: 'the folded blade lands on FLAT plateau, not on the top fillet',
+    defines: { rim_extra: 2 } },
   // NOT out_h*0.60, which is what this used to inject. That literal produced a
   // 0.12 mm margin when cover_rise was 5; at 3 the top fillet bites less and the
   // same literal happens to FIT, so the fault stopped reproducing a defect and the
@@ -402,7 +431,8 @@ const FAULTS = [
   { name: 'ks_leaf_l forgets the fillet bite and reaches the plateau edge',
     patch: s => s.replace(/^ks_leaf_l  = plat_y1 - edge_t1\([\s\S]*?cover_rise\) - ks_lug_y - 0\.6;/m,
                           'ks_leaf_l  = plat_y1 - ks_lug_y;'),
-    expect: 'the folded blade lands on FLAT plateau, not on the top fillet' },
+    expect: 'the folded blade lands on FLAT plateau, not on the top fillet',
+    defines: { rim_extra: 2 } },
   { name: 'the pillar drives INTO the board',
     patch: s => s.replace(/^screw_pillar_gap = 0\.0;/m, 'screw_pillar_gap = -0.5;'),
     expect: 'the screw pillar does not reach past the board' },
@@ -430,7 +460,7 @@ if (!SELFTEST) {
     const p = join(dir, 'deckhand_case_b2.scad');
     writeFileSync(p, patched);
     let caught;
-    try { caught = run(p).includes(flt.expect); }
+    try { caught = run(p, flt.defines || {}).includes(flt.expect); }
     catch (e) { caught = false; }
     console.log(`  ${caught ? 'ok   ' : 'FAIL '} ${flt.name}\n         -> ${flt.expect}`);
     if (!caught) bad++;
