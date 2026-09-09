@@ -91,6 +91,24 @@ const int PAIR_HOSTID_CHARS = 8;     // a hostId is EXACTLY 8 hex characters (th
 // with the millis() the whole UI schedules on, none of which this port measured.
 #define BOARD_HAS_TOUCH_SLEEP_WAKE 0
 
+// How long loop() yields per iteration while the screen is BLANKED, so the core
+// can actually idle. It is a yield, not a sleep: the Arduino loop task never
+// blocks on its own, so the FreeRTOS idle task on this core never runs and the
+// CPU never reaches WAITI - it spins a 100% duty core at 240MHz to evaluate a
+// loop body whose every branch is gated off by !isAsleep. This is the cheap half
+// of what the light-sleep note above describes, without any of the interactions
+// that pass has to settle.
+//
+// 20ms RATHER THAN SOMETHING LONGER, AND THE SAVING DOES NOT PAY FOR MORE. The
+// tick is 1ms (CONFIG_FREERTOS_HZ 1000) and there is no tickless idle here, so
+// the core wakes on every tick regardless of how long the delay is - the duty
+// cycle is set by how long one loop body takes against 1ms, not against this
+// number. Going 20 -> 50 buys almost nothing and costs the same again in wake
+// latency, since touch is POLLED from loop() and a tap cannot be seen until the
+// yield ends. 20ms is under the ~100ms a tap is held and well under what a
+// finger can perceive.
+#define BLANKED_LOOP_IDLE_MS 20
+
 // The ST77922 takes RGB565 HIGH BYTE FIRST, while the shadow framebuffer holds
 // native little-endian uint16 - so the strip copy in PanelShim::flush() swaps
 // every pixel on the way out. Getting this wrong is not subtle once you know the
@@ -299,6 +317,27 @@ const int BORDER_CTRL = 1;
 // If board 2's battery percentage ever reads wrong anyway, this is still the
 // first number to check before pctFromMv()'s curve.
 #define BOARD_BAT_MV_SCALE 2
+
+// The mV at which batteryState() calls the cell FULL. PER-BOARD, and split out
+// because on THIS board the shared 4180 is APPARENTLY UNREACHABLE.
+//
+// MEASURED, from two days of host logs: this board tops out at 4162..4170 mV and
+// has reported state=3 (BATT_FULL) exactly ZERO times, against board 1 which sits
+// at 4221..4226 and reports it routinely. Not a too-short charge either - a
+// 137-minute uninterrupted charge ran 4060 -> 4162 mV and was FLAT over its last
+// ten minutes. So the "full" pill can never appear here and the charge estimator
+// stays permanently in `topping up`.
+//
+// WHICH OF TWO CAUSES IT IS, IS NOT YET DECIDED, AND THE VALUE IS LEFT ALONE
+// UNTIL IT IS. Either the divider reads ~0.9% low (38mV at 4.2V is well inside
+// 1% resistors plus an uncalibrated ADC, and see BOARD_BAT_MV_SCALE above, which
+// already records that plausibility cannot tell x2 from x2.2), or this board's
+// charger genuinely terminates near 4.16V. A meter across the divider settles it
+// in seconds, and the two answers want DIFFERENT fixes: a calibration trim on the
+// reading, or a lower threshold here. Guessing now would bake one of them in.
+// Leaving 4180 keeps today's behaviour exactly as it is, wrong pill and all,
+// rather than inventing a number - the seam is what this split buys.
+#define BOARD_BATT_FULL_MV 4180
 
 // ============================================================================
 // LAYOUT - DERIVED FOR 320x480, NOT SCALED FROM BOARD 1

@@ -26,6 +26,20 @@ def firmware_const(name):
         sys.exit(f"FAIL: {name} not found in power.ino - was it renamed?")
     return int(m.group(1))
 
+# THE BOARD HEADERS, because BATT_FULL_MV now lives in them - one threshold for
+# two different analogue front ends was wrong, and this checker has to follow the
+# constant to where it went rather than keep a literal of its own.
+B1H = pathlib.Path(__file__).with_name("board_e32r28t.h").read_text()
+B2H = pathlib.Path(__file__).with_name("board_es3c35p.h").read_text()
+
+
+def board_const(src, name, where):
+    m = re.search(rf"#define\s+{name}\s+(\d+)", src)
+    if not m:
+        sys.exit(f"FAIL: {name} not found in {where} - was it renamed, or un-split?")
+    return int(m.group(1))
+
+
 MIN_SPAN_MS = firmware_const("BATT_TREND_MIN_SPAN_MS")
 MIN_DROP_MV = firmware_const("BATT_TREND_MIN_DROP_MV")
 MIN_RATE = firmware_const("BATT_TREND_MIN_PCT_PER_H_X10")
@@ -122,9 +136,13 @@ CHG_MIN_SPAN_MS = firmware_const("BATT_CHG_MIN_SPAN_MS")
 CHG_MIN_RISE_MV = firmware_const("BATT_CHG_MIN_RISE_MV")
 CHG_KNEE_MV     = firmware_const("BATT_CHG_KNEE_MV")
 CHG_TARGET_MV   = firmware_const("BATT_CHG_TARGET_MV")
-CHG_FULL_MV     = firmware_const("BATT_FULL_MV")
+# BOARD 2's, because every charge-estimator invariant below is board 2's: the
+# whole estimator is behind !BOARD_USES_TFT_ESPI.
+CHG_FULL_MV     = board_const(B2H, "BOARD_BATT_FULL_MV", "board_es3c35p.h")
+FULL_MV_B1      = board_const(B1H, "BOARD_BATT_FULL_MV", "board_e32r28t.h")
 print(f"  charge thresholds read from power.ino: span={CHG_MIN_SPAN_MS // 60000}min "
       f"rise={CHG_MIN_RISE_MV}mV knee={CHG_KNEE_MV}mV target={CHG_TARGET_MV}mV")
+print(f"  BATT_FULL_MV is PER-BOARD: board 1 {FULL_MV_B1}mV, board 2 {CHG_FULL_MV}mV")
 
 CHG_SETTLE_MS = firmware_const("BATT_CHG_SETTLE_MS")
 CHG_NOT_YET, CHG_TOPPING = -1, -2
@@ -172,6 +190,21 @@ def chgRamp(mins, riseMv, start=3900):
 
 # --- the target and the knee must sit where the rest of the firmware puts them ---
 for name, cond in [
+    # THE FULL THRESHOLD IS PER-BOARD NOW. The two boards read ~60mV apart at the
+    # top of a charge through nominally identical x2 dividers - board 1 settles at
+    # 4221..4226 and reports FULL routinely, board 2 tops out at 4162..4170 and has
+    # reported it ZERO times - so one shared literal cannot be right for both. A
+    # literal creeping back into power.ino would silently re-merge them, and
+    # nothing else in this file would notice.
+    ("power.ino DERIVES BATT_FULL_MV from the board macro rather than a literal",
+     re.search(r"BATT_FULL_MV\s*=\s*BOARD_BATT_FULL_MV", POWER) is not None
+     and re.search(r"BATT_FULL_MV\s*=\s*\d", POWER) is None),
+    ("board 1's FULL threshold sits above the charge knee", FULL_MV_B1 > CHG_KNEE_MV),
+    ("board 1's FULL threshold is at or below the 100% point",
+     FULL_MV_B1 <= CHG_TARGET_MV),
+    ("board 2's FULL threshold sits above the charge knee", CHG_FULL_MV > CHG_KNEE_MV),
+    ("board 2's FULL threshold is at or below the 100% point",
+     CHG_FULL_MV <= CHG_TARGET_MV),
     ("BATT_CHG_TARGET_MV is the mv at which pctFromMv() actually reads 100%",
      pctFromMv(CHG_TARGET_MV) == 100 and pctFromMv(CHG_TARGET_MV - 1) < 100),
     ("the knee sits below the target, so the refusal band is non-empty",
@@ -472,6 +505,16 @@ def before(body, first, second):
     return body.index(first) < body.index(second)
 
 
+def strip_comments(src):
+    """Code only. A prose mention is not a call, and conflating them cost a false
+    FAIL here: enterDeepSleep()'s comment EXPLAINS why it does not call
+    sleepPanel(), and a plain text search found that explanation."""
+    if not src:
+        return src
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return "\n".join(re.sub(r"//.*$", "", ln) for ln in src.splitlines())
+
+
 def after_last(body, last, anchor):
     if not body or last not in body or anchor not in body:
         return False
@@ -536,6 +579,233 @@ wu = fnbody(POWER, "void wakeUp()")
 # invariant is that the restore happens before the screen is lit at all.
 check("wakeUp restores savings BEFORE raising the backlight",
       before(wu, "savingsSync", "ledcWrite"))
+
+# --------------------------------------------------------------------------
+# THE FOURTH SAVING: YIELDING loop() WHILE BLANKED.
+#
+# Different in kind from the three above, and the difference is why it has no
+# *Applied twin. Those change hardware state that must later be put back; this
+# one changes nothing at all. loop() reads the flag each iteration and either
+# yields or does not, so there is no state that can be left stranded and nothing
+# for savingsSync() to reconcile. Inventing a twin would invent a leak.
+#
+# What it fixes is that the Arduino loop task never blocks on its own, so the
+# FreeRTOS idle task on that core never runs and the CPU never reaches WAITI: a
+# 100% duty core at 240MHz evaluating a loop body whose every branch is gated
+# off by !isAsleep. A BUSY-WAIT WOULD SAVE NOTHING, which is the one substitution
+# that would look right and measure zero - hence the assertion below that the
+# yield is specifically a blocking delay().
+B2 = B2H   # already read at the top, for BOARD_BATT_FULL_MV
+
+
+def arm(src, needle):
+    """The dispatch ARM starting at `needle`, not the whole function.
+
+    fnbody() would run to the end of processCompletedLine(), so any assertion
+    about this arm could be satisfied by an unrelated arm hundreds of lines
+    later - the "a rule a neighbouring line can satisfy is not a rule" trap.
+    """
+    i = src.find(needle)
+    if i < 0:
+        return None
+    j = src.find("\n  } else if", i)
+    return src[i:j] if j > 0 else src[i:]
+
+
+# PARSED out of the header, never transcribed: a literal here would keep passing
+# after the #define was reverted, which is the failure mode this repo has paid
+# for at least four times.
+m = re.search(r"#define\s+BLANKED_LOOP_IDLE_MS\s+(\d+)", B2)
+check("BLANKED_LOOP_IDLE_MS is a #define in board 2's header", m is not None)
+idle_ms = int(m.group(1)) if m else -1
+# A #define rather than a const int, and NOT decoration: `#if` on a C++ const
+# int is silently false with no warning, and this repo has shipped that twice.
+check("the blanked yield is at least one FreeRTOS tick, or the task never blocks",
+      idle_ms >= 1)
+check("...and short enough that a POLLED tap is not missed (<= 100ms)",
+      1 <= idle_ms <= 100)
+
+lp = fnbody(MAIN, "void loop()")
+check("loop() is locatable", lp is not None)
+check("loop() yields while blanked, gated on BOTH isAsleep and the toggle",
+      lp is not None and re.search(r"isAsleep\s*&&\s*saveLoopIdle", lp) is not None)
+check("the yield BLOCKS the task (delay), so the idle task can reach WAITI",
+      lp is not None and re.search(
+          r"isAsleep\s*&&\s*saveLoopIdle\s*\)\s*delay\s*\(\s*BLANKED_LOOP_IDLE_MS", lp)
+      is not None)
+check("saveLoopIdle defaults to OFF, so an A/B's baseline is unoptimised",
+      re.search(r"bool\s+saveLoopIdle\s*=\s*false", MAIN) is not None)
+check("saveLoopIdle has NO *Applied twin - it changes no state to restore",
+      re.search(r"bool\s+loopIdleApplied", MAIN) is None)
+check("savingsSync() leaves saveLoopIdle alone (there is nothing to reconcile)",
+      sy is not None and "saveLoopIdle" not in sy)
+
+# THE TRAILING `else` WAS A REAL TRAP, not a hypothetical one: while BLESLOW was
+# the last verb in the condition, `else saveBleSlow = on` was correct - and
+# adding LOOPIDLE to that condition would have routed it into the same else,
+# setting the wrong flag and reporting bleSlow=1 for a LOOPIDLE the caller asked
+# for. Both halves are asserted because either one alone permits the bug.
+tog = arm(MAIN, 'buf.startsWith("PANELSLEEP ")')
+check("the toggle arm is locatable", tog is not None)
+check("BLESLOW is matched BY NAME, so LOOPIDLE cannot fall into its else",
+      tog is not None and 'buf.startsWith("BLESLOW")' in tog)
+check("LOOPIDLE reaches its OWN flag from the dispatch",
+      tog is not None and "saveLoopIdle = on" in tog)
+# ONE emitter, shared by the setter and the read-only query, so the two cannot
+# report different things. Asserted on the emitter, not the arm, because that is
+# where the format now lives.
+sl = fnbody(POWER, "void sendSavingsLine()")
+check("sendSavingsLine() exists", sl is not None)
+for fld in ("panelSleep=%d", "cpuSlow=%d", "bleSlow=%d", "loopIdle=%d", "lightIdle=%d",
+            "asleep=%d"):
+    check(f"the SAVINGS line reports {fld.split('=')[0]}",
+          sl is not None and fld in sl)
+check("the toggle arm DELEGATES to the emitter rather than formatting its own",
+      tog is not None and "sendSavingsLine()" in tog and "snprintf" not in strip_comments(tog))
+
+# THE READ-ONLY QUERY, AND ITS ABSENCE COST A REAL SETTING. With no way to see
+# the state without setting one, `LIGHTIDLE 0` got used to read the line - and
+# silently wrote OFF to NVS for the one toggle that persists.
+q = arm(MAIN, 'buf == "SAVINGS"')
+check("a read-only SAVINGS query exists", q is not None)
+check("...and it reports through the shared emitter",
+      q is not None and "sendSavingsLine()" in q)
+# The whole point: it must not WRITE anything.
+qc = strip_comments(q) if q else None
+check("...and it sets NOTHING - no flag, no NVS write",
+      qc is not None and "= on" not in qc and "saveLightIdleSetting" not in qc
+      and "savingsSync" not in qc)
+
+# --------------------------------------------------------------------------
+# LIGHTSLEEP: an EXPERIMENT, and the assertions are about it STAYING one.
+#
+# The stock core cannot do automatic light sleep at all (CONFIG_PM_ENABLE unset,
+# so esp_pm_configure() is a stub, and CONFIG_FREERTOS_USE_TICKLESS_IDLE is its
+# absent prerequisite), so this is a manual esp_light_sleep_start() that powers
+# the radio down under a controller with no modem sleep. The BLE link is
+# expected to die across it - which is exactly why the properties below matter.
+ls = arm(MAIN, 'buf == "LIGHTSLEEP"')
+check("the LIGHTSLEEP arm is locatable", ls is not None)
+
+for name, lo, hi in (("LIGHTSLEEP_MIN_S", 1, 600), ("LIGHTSLEEP_MAX_S", 600, 86400)):
+    m = re.search(rf"{name}\s*=\s*(\d+)", MAIN)
+    check(f"{name} is declared in the sketch", m is not None)
+    check(f"{name} is a sane bound", m is not None and lo <= int(m.group(1)) <= hi)
+
+# THE ANSWER MUST SURVIVE THE LINK IT WAS MEASURING. The radio is the only way
+# off this board with the cable out, and this command deliberately stops it - so
+# a result that were only SENT could be destroyed by the very thing under test.
+# BOUND TO THE WRITE, not to the name. The first version of this assertion said
+# `"lightSleepReport" in ls` and PASSED with the retention removed, because the
+# `report` branch below still mentions the buffer - a rule the neighbouring line
+# satisfied. Caught by mutating the snprintf target, which is the only reason it
+# is written this way.
+check("the result is RETAINED in the buffer, not only sent",
+      ls is not None and "snprintf(lightSleepReport, sizeof(lightSleepReport)," in ls)
+check("...and is re-readable later with `LIGHTSLEEP report`",
+      ls is not None and 'arg == "report"' in ls)
+check("the retained buffer exists as a global the dispatch can see",
+      re.search(r"char\s+lightSleepReport\s*\[", MAIN) is not None)
+
+# AN EXPERIMENT MUST NOT CHANGE HOW THE DEVICE BEHAVES AFTER IT. A wake source
+# left armed is a behaviour change wearing a test's clothes.
+check("the timer wake is DISARMED after the run",
+      ls is not None and "esp_sleep_disable_wakeup_source" in ls)
+check("the GPIO wake is DISARMED after the run",
+      ls is not None and "gpio_wakeup_disable" in ls)
+
+# Both ends of the comparison must be the same METHOD, or the difference between
+# a raw sample and an EMA of 8 is charged to the cell.
+check("the EMA is settled on BOTH sides of the sleep (two settle loops)",
+      ls is not None and ls.count("for (int i = 0; i < 12; i++) sampleBattery();") == 2)
+
+# It refuses on USB BY NAME - the same rule POWERPROBE's refusal exists for, and
+# here it is doubly required: light sleep takes down the CDC link itself.
+check("LIGHTSLEEP refuses on USB, naming the cause",
+      ls is not None and "usbLinkActive()" in ls and "LIGHTSLEEP refused: on USB" in ls)
+check("a sleep too short to rate prints NO rate",
+      ls is not None and "LIGHTSLEEP_MIN_RATE_H" in ls and "too short to rate" in ls)
+
+# THE SCOPING DECISION, ASSERTED so it is not quietly widened: this must not
+# deinit the BLE stack. Doing so would strand bleLinks[], releasePending,
+# hostLinks[] and the server/characteristic pointers all at once.
+check("LIGHTSLEEP does NOT deinit the BLE stack",
+      ls is not None and "BLEDevice::deinit" not in ls)
+check("...but it does re-assert advertising on wake",
+      ls is not None and "BLEDevice::startAdvertising()" in ls)
+
+# --------------------------------------------------------------------------
+# LIGHTIDLE: light sleep while blanked, and POWER OFF's two board-2 additions.
+li = fnbody(POWER, "void enterLightIdle()")
+check("enterLightIdle() exists", li is not None)
+check("saveLightIdle defaults to OFF",
+      re.search(r"bool\s+saveLightIdle\s*=\s*false", MAIN) is not None)
+
+# THE CABLE IS THE ESCAPE HATCH, and it is the only one. This setting PERSISTS
+# and it suppresses the radio, so without this gate a device that failed to
+# re-advertise after a sleep would be unreachable across reboots too. Asserted
+# as three separate terms because dropping any one of them reopens that door.
+lp = fnbody(MAIN, "void loop()")
+check("light sleep is gated on isAsleep",
+      lp is not None and re.search(r"isAsleep\s*&&\s*saveLightIdle", lp) is not None)
+check("light sleep is INERT on USB - the escape hatch for a persisted setting",
+      lp is not None and re.search(r"saveLightIdle\s*&&\s*!usbLinkActive\(\)", lp) is not None)
+# else-if, not a second if: enterLightIdle() returns only after a wake, so a
+# following delay() would run at exactly the wrong moment.
+check("the LOOPIDLE yield is an ELSE of the light sleep, never both",
+      lp is not None and re.search(r"enterLightIdle\(\);\s*\n\s*else if", lp) is not None)
+
+# GPIO wake, not ext0/ext1 - the whole reason this board uses light sleep at all.
+check("the wake source is GPIO, which is what ext0/ext1 cannot do from pin 47",
+      li is not None and "esp_sleep_enable_gpio_wakeup" in li
+      and "ext0" not in li and "ext1" not in li)
+# LEVEL not EDGE: an edge arriving during setup would be missed and the first
+# tap ignored.
+check("the touch wake is LEVEL-triggered, so a tap cannot be missed",
+      li is not None and "GPIO_INTR_LOW_LEVEL" in li)
+check("the wake source is DISARMED after waking",
+      li is not None and "gpio_wakeup_disable" in li)
+check("it re-advertises on wake - the radio died with the CPU",
+      li is not None and "BLEDevice::startAdvertising()" in li)
+check("LIGHTIDLE is PERSISTED, unlike the measurement toggles",
+      re.search(r'prefs\.putBool\("lightIdle"', POWER) is not None
+      and re.search(r'prefs\.getBool\("lightIdle"', POWER) is not None)
+
+ed = fnbody(POWER, "void enterDeepSleep()")
+check("enterDeepSleep() exists", ed is not None)
+# CODE ONLY for all of these: the block carries a long comment that NAMES every
+# symbol below while explaining it, so a plain text search would pass on prose.
+edc = strip_comments(ed) if ed else None
+# THIS REVERSES AN EARLIER DECISION, deliberately. The field measurement is
+# -5.6 mV/h over 23 hours "off" (~17%/day), board 1 loses almost nothing in the
+# same state, and the difference is that board 1's writecommand(0x28/0x10) is
+# REAL while PanelShim::writecommand() ignores its argument - so board 2's panel
+# controller ran flat out through every power-off.
+check("POWER OFF actually sleeps the panel (writecommand is a no-op on board 2)",
+      edc is not None and "tft.sleepPanel(true)" in edc)
+check("POWER OFF isolates the panel bus so nothing is driven into a slept panel",
+      edc is not None and "rtc_gpio_isolate" in edc)
+# ORDER IS LOAD-BEARING: the sleep command travels over the pins the isolate
+# disconnects, so isolating first would send SLPIN into a disconnected bus and
+# leave the panel wide awake - a silent failure with no symptom but the drain.
+check("...and it sleeps the panel BEFORE isolating the bus, never after",
+      edc is not None and before(edc, "tft.sleepPanel(true)", "rtc_gpio_isolate"))
+# All six, not just CS: any pin left driving injects through the panel's clamps.
+for pin in ("PIN_LCD_CS", "PIN_LCD_SCK", "PIN_LCD_D0", "PIN_LCD_D1",
+            "PIN_LCD_D2", "PIN_LCD_D3"):
+    check(f"{pin} is isolated for deep sleep", edc is not None and pin in edc)
+# ISOLATED, NOT DRIVEN. A driven level is the thing that injects current into a
+# panel whose internal rails have collapsed, so the first version of this fix -
+# digitalWrite(PIN_LCD_CS, HIGH) plus a hold - was the wrong shape.
+check("the panel bus is ISOLATED, not driven to a level",
+      edc is not None and "digitalWrite(PIN_LCD_CS" not in edc)
+# The backlight is on GPIO41, outside the RTC set (0..21), so it cannot be
+# isolated and keeps the hold latch instead. Asserted so the two do not get
+# conflated by someone tidying them into one loop.
+check("the backlight keeps its gpio_hold_en latch - 41 is not an RTC GPIO",
+      edc is not None and "gpio_hold_en" in edc)
+check("no explicit VDD_SPI power-down: the core already does it",
+      edc is not None and "ESP_PD_DOMAIN_VDDSDIO" not in edc)
 
 # --------------------------------------------------------------------------
 # THE SESSION-GATED IDLE LADDER: lit -> dim -> blank.

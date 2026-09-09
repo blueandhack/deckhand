@@ -833,6 +833,35 @@ persisted — the answer belongs in `board_es3c35p.h` once it has been SEEN. Boa
 deliberately: different SoC, different panel driver, auto-deep-sleep as a backstop, and no way to
 measure any of it here.
 
+**THERE IS NOW A FOURTH, `LOOPIDLE`, AND IT IS THE ONLY ONE OF THE FOUR THAT IS NOT A HARDWARE
+STATE.** The Arduino loop task never blocks on its own, so the FreeRTOS idle task on that core
+never runs and the CPU never reaches `WAITI`: while blanked the S3 spins a **100% duty core at
+240MHz** evaluating a `loop()` body whose every branch is gated off by `!isAsleep`. `LOOPIDLE 1`
+makes `loop()` end with `delay(BLANKED_LOOP_IDLE_MS)` while `isAsleep`, which is `vTaskDelay` here
+and therefore BLOCKS the task so the idle task can halt the core. **A busy-wait would look right
+and measure exactly zero**, so `batt-trend-check.py` asserts the yield is specifically a blocking
+`delay()`, and that assertion is verified to fail when the call is swapped for a `millis()` spin.
+
+Two things differ from the other three, both deliberate:
+
+- **It has no `*Applied` twin and `savingsSync()` does not touch it.** Those three change hardware
+  state that must later be put back - the apply/restore split that stranded a saving on hardware.
+  This changes nothing: `loop()` reads the flag each iteration and yields or does not, so there is
+  no state to leak and inventing a twin would invent a leak. Asserted both ways in the checker.
+- **20ms, and the saving does not pay for more.** The tick is 1ms with no tickless idle, so the
+  core wakes every tick regardless; the duty cycle is set by how long one loop body takes against
+  1ms, not by this number. Going 20 -> 50 buys almost nothing and doubles the wake latency, because
+  **touch is POLLED from `loop()`** and a tap cannot be seen until the yield ends.
+
+`LOOPIDLE` is refused BY NAME on board 1, where nothing has measured what the yield would cost a
+plain ESP32 whose auto-deep-sleep backstop makes the blanked state a different question entirely.
+
+**THE BLANKED-STATE NUMBERS ARE IN [`power-and-battery.md`](power-and-battery.md), AND THE FIRST
+ANSWER WAS THAT ONE OF THE THREE IS A COST.** Measured in one session with an A-B-A: blanked
+baseline **-42 mV/h**, `PANELSLEEP` **-66**, baseline again **-42**. `PANELSLEEP` should not ship.
+That file also records why the 3-minute settle in the procedure above is too short, and why
+`POWERPROBE`'s SNR gate cannot detect the problem.
+
 **A REQUEST FLAG IS NOT A RECORD OF WHAT THE DEVICE DID, AND CONFLATING THEM STRANDED A SAVING ON
 HARDWARE.** The first version gated each restore on the same flag that enables it —
 `if (savePanelSleep) { tft.sleepPanel(false); ... }`. Clearing a toggle **while the device was still

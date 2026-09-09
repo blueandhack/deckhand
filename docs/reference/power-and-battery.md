@@ -9,6 +9,30 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 
 ---
 
+#### Board 2's battery divider is CONFIRMED by measurement - BUT ONLY TO THE NEAREST GROSS FACTOR
+
+> **CORRECTED 2026-09-09, and the heading is left standing because it is what a reader will
+> search for.** The paragraph below is sound about the RATIO and overstated as evidence of
+> ACCURACY. `board_es3c35p.h` has always been the careful version and says so at the constant
+> itself: plausibility "rules out x1 and x4, and it CANNOT distinguish x2 from x1.8 or x2.2 ...
+> the only thing that closes it is a meter across the divider". Read the header, not this
+> summary. What the argument below establishes is that the ratio is 2 rather than 1 or 4. It
+> does NOT establish the ~1% that `BATT_FULL_MV` and `pctFromMv()`'s 4200-for-100% depend on.
+>
+> **The gap is now observable rather than theoretical.** Board 2 tops out at **4162..4170 mV**
+> and has reported `BATT_FULL` (state=3) **zero times in all logged data**, while board 1 sits at
+> **4221..4226** and reports it routinely - through nominally identical x2 dividers. Not a
+> too-short charge: a **137-minute** uninterrupted charge ran 4060 -> 4162 mV and was flat over
+> its last ten minutes. So on board 2 the "full" pill can never appear and the charge estimator
+> stays permanently in `topping up`. Note board 1's 4226 is ABOVE the 4.20V a standard CC/CV
+> charger terminates at, which suggests the two dividers STRADDLE the truth - board 1 reading
+> slightly high, board 2 slightly low - rather than either cell behaving differently.
+> **`BATT_FULL_MV` is now per-board** (`BOARD_BATT_FULL_MV` in each header, both still 4180, a
+> deliberately behaviour-neutral split: both binaries compiled byte-identical across it). The
+> value is left alone until a meter says which fix is right - a calibration trim on the reading,
+> or a genuinely lower threshold here - because the two answers are incompatible and guessing
+> would bake one in.
+
 #### Board 2's battery divider is CONFIRMED by measurement
 
 `BOARD_BAT_MV_SCALE 2`. The LCDWIKI table for this board gives no ratio and the vendor self-test
@@ -127,6 +151,102 @@ declaration**, and that was forced by the checker rather than chosen: with the s
 false reading — exactly the "a checker must PARSE the constant it certifies, never TRANSCRIBE it"
 rule, arriving from a new direction. All three mutations (`BATT_ROW_CACHE` → 20, `DEV_CARD_H` → 176,
 `DROW_TEMP` removed) fail by name.
+
+#### "POWER OFF" LEAKED ~17%/DAY ON BOARD 2, AND THE CAUSE IS A NO-OP
+
+**Measured by accident, which is the only reason it was found.** The device was shut down and
+left for a day; a `BATT` collector still running on the Mac caught both ends:
+
+```
+2026-09-08 01:01:35   4106 mV  90%  state=1   last contact, on battery
+2026-09-09 00:00:20   3977 mV  74%  state=2   plugged back in
+                      -129 mV over 22.98 h = -5.6 mV/h, ~0.70 %/h
+```
+
+**~17% a day, flat in about six days, from a device the user believed was OFF.** Board 1 in the
+same state loses almost nothing, and that contrast is the whole diagnosis.
+
+**`enterDeepSleep()`'s two panel-sleep lines DO NOTHING ON BOARD 2.** `tft.writecommand(0x28)`
+and `(0x10)` reach TFT_eSPI on board 1 and put the ILI9341 into DISPOFF/SLPIN, where it draws
+microamps. On board 2 the identical calls land in `PanelShim::writecommand()`, which **ignores
+its argument** - so the ST77922 has run its oscillator, charge pumps and drivers off GRAM
+through every power-off this board has ever performed, with only the backlight latched dark.
+Everything else in that state is negligible by comparison, which is what makes the panel the
+answer rather than a suspect: the S3's own deep sleep is tens of uA (this core already sets
+`CONFIG_ESP_SLEEP_PSRAM_LEAKAGE_WORKAROUND`, `..._FLASH_LEAKAGE_WORKAROUND` and
+`..._MSPI_NEED_ALL_IO_PU`), and the SC8002B amp is **0.6uA** shut down and milliamps at worst.
+Working back from six-days-to-flat gives roughly **10 mA average** - three orders of magnitude
+above the SoC.
+
+The fix is two steps and **the order is load-bearing, because the sleep command travels over the
+pins the second step disconnects**:
+
+1. `tft.sleepPanel(true)` - the shim method that actually emits DISPOFF+SLPIN.
+2. `rtc_gpio_isolate()` on all six QSPI pins (CS 10, SCK 12, D0 11, D1 13, D2 14, D3 9). All are
+   inside the S3's RTC set (`SOC_RTCIO_PIN_COUNT` 22, so 0..21), which is what makes this
+   reachable; the backlight on **41 is not**, and keeps its `gpio_hold_en` latch instead.
+
+**STEP 2 IS ALSO THE BEST EXPLANATION FOR THE PANELSLEEP RESULT ABOVE, AND IT IS A HYPOTHESIS,
+NOT A MEASUREMENT.** SLPIN collapses the panel's internal rails; six QSPI pins still driven by an
+awake SoC then inject current through its input clamp diodes. That would make SLPIN a COST while
+awake (as measured) and a SAVING once nothing is driving (deep sleep, where the pins are
+isolated) - reconciling two results that otherwise contradict each other. `rtc_gpio_isolate()`
+disconnects output, input **and** the pulls, which is why it beats driving a pin to a level: a
+driven level is precisely what injects. **It is safe to act on unmeasured here only because deep
+sleep ends in a RESET**, so there is no state to restore and nothing to get wrong on the way out.
+The same change is deliberately NOT made in the light-sleep path, where the pins keep their
+driven state and would hit exactly the injection this describes.
+
+**An explicit `esp_sleep_pd_config(ESP_PD_DOMAIN_VDDSDIO, OFF)` was tried and REMOVED**, recorded
+because it looked obviously right: `esp_deep_sleep_start()` powers the flash down regardless of
+configuration and the two leakage workarounds are already on, so it was redundant at best and at
+worst fought the pull-ups `MSPI_NEED_ALL_IO_PU` installs.
+
+**None of this is measured yet.** The next shutdown of a day or more is the test, and the
+comparison is against the -5.6 mV/h above - taken on the same cell, in the same state, which is
+the one comparison this file's own rule permits.
+
+#### THE BLANKED STATE, MEASURED: the baseline is -42 mV/h and PANELSLEEP is a COST
+
+One session on C114, 2026-09-07, cell 4093 -> 4064 mV (~95% falling), screen blanked
+(`asleep=1` confirmed on every leg), USB out, reported over BLE. Each leg is TWO independent
+views: `POWERPROBE`'s own raw-ADC fit, and a least-squares fit of the device's one-a-minute
+`BATT mv=` line computed on the Mac. They are not the same computation over the same samples -
+`BATT` is an EMA of 8 - so agreement is evidence about the RUN, not about the arithmetic.
+
+| leg | savings in force | `POWERPROBE` | raw `BATT` |
+|---|---|---|---|
+| `base1` | none | **-41 +/- 2 mV/h** | -42.0 +/- 3.2 |
+| `panel` | PANELSLEEP | **-66 +/- 3 mV/h** | -57.2 +/- 2.9 |
+| `base1b` | none again | **-42 +/- 2 mV/h** | -44.6 +/- 3.8 |
+
+**PANELSLEEP MAKES IT WORSE - roughly +13 to +24 mV/h, about a 50% heavier blanked drain -
+and the A-B-A is why that is a result rather than drift.** The baseline returned to -42 after
+35 minutes, so the cell was not running away underneath the comparison. Both plausible drift
+mechanisms point the other way as well: relaxation is decaying (which flatters LATER legs) and
+falling SoC moves off the steep top of the curve toward the flatter middle (also flattering
+later legs), so a later leg draining FASTER cannot be drift and the true penalty may be larger.
+**The mechanism is NOT understood.** `sleepPanel(true)` sends DISPOFF then SLPIN, rendering is
+already gated on `!isAsleep` so neither leg flushes anything, and no wasted-work explanation
+survives that. Recorded as measured-and-unexplained rather than guessed at; **it should not
+ship, and it should not be re-proposed without a new measurement.**
+
+**THE DOCUMENTED 3-MINUTE SETTLE IS TOO SHORT, AND THE INSTRUMENT CANNOT SEE IT.** Unplugging
+dropped the cell **-50 mV in one minute** (4164 -> 4114), against the -21 mV this file recorded
+before, and the relaxation was still bending the fit ELEVEN minutes later: the first leg walked
+-123 -> -121 -> -113 -> -106 -> -98 -> -90 without converging, while the independent raw fit put
+the first five minutes at **-104.6 mV/h** and the following eight at **-50.6**. A leg started at
+three minutes reads roughly double the truth - an error larger than any saving being hunted.
+`POWERPROBE` reported SNR well past its gate throughout, because the standard error it publishes
+is that of a STRAIGHT-LINE fit and a relaxation curve fits a straight line beautifully: **the gate
+certifies precision, never accuracy.** What caught it was the monotonic walk across successive
+ticks plus the second computation - not the number. Wait for the fit to stop walking, and treat a
+monotonic sequence of tick reports as "still settling" no matter what its SNR says.
+
+**A LEG IS VOID IF THE DEVICE WAKES, AND `asleep=` IS THE ONLY THING THAT SAYS SO.** One leg here
+was lost to a touch: the raw series shows the backlight as a **-23 mV STEP in one minute**, and
+the fitter read that step as a slope of **-473 mV/h** - a plausible-looking number for a state the
+device was never in. Check `asleep=1` on every leg; a step is not a rate.
 
 **Layout cost: the DEVICE card grew 176 → 200** for the new row, which came out of page 0's
 TRAILING AIR rather than out of another row. `LINK_CARD_Y` is derived from `DEV_CARD_H`, so the LINK

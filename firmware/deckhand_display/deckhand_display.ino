@@ -127,6 +127,7 @@ typedef esp_ble_gatts_cb_param_t BleCbParam;
 #include <esp_random.h>
 #endif
 #include <driver/gpio.h>
+#include <driver/rtc_io.h>
 #include <esp_adc/adc_continuous.h>
 #include "Cozette6x13.h"
 #include "Terminus10x18b.h"
@@ -610,6 +611,13 @@ unsigned long lastAttentionMillis = 0;
 bool savePanelSleep = false;
 bool saveCpuSlow = false;
 bool saveBleSlow = false;
+// THE FOURTH SAVING, AND IT DELIBERATELY HAS NO *Applied TWIN BELOW. The other
+// three change hardware state that must later be put back, which is exactly the
+// apply/restore split that stranded a saving on real hardware. This one changes
+// nothing: loop() reads it each iteration and yields or does not. There is no
+// state to reconcile, so savingsSync() has no business with it, and giving it a
+// twin would invent a leak for a mechanism that cannot have one.
+bool saveLoopIdle = false;
 // WHAT IS CURRENTLY APPLIED, which is NOT the same thing as what is requested
 // above - and conflating the two stranded a saving on real hardware. Clearing a
 // toggle while the device was still blanked skipped the restore on the next
@@ -622,6 +630,59 @@ bool cpuSlowApplied = false;
 bool bleSlowApplied = false;
 const uint32_t CPU_MHZ_AWAKE = 240;
 const uint32_t CPU_MHZ_BLANKED = 80;   // the floor BLE still runs at
+
+// ---- LIGHTSLEEP: an EXPERIMENT, deliberately not a behaviour -----------------
+// It answers "what would light sleep actually save?" without committing the
+// blank path to it, because the answer decides whether the cost is worth paying
+// and nothing here has measured it. esp_pm's automatic light sleep cannot be
+// used at all (CONFIG_PM_ENABLE is not set in the stock core, so
+// esp_pm_configure() is a stub returning ESP_ERR_NOT_SUPPORTED, and its
+// prerequisite CONFIG_FREERTOS_USE_TICKLESS_IDLE is absent), so the only route
+// is a MANUAL esp_light_sleep_start() - which powers the radio down under a
+// controller that has no modem-sleep support (CONFIG_BT_CTRL_MODEM_SLEEP is
+// not set). The BLE link is therefore expected to DIE across the sleep.
+//
+// THE RADIO IS THE ONLY LINK WHILE THE CABLE IS OUT, so the result is RETAINED
+// rather than only sent: if the notify does not survive, `LIGHTSLEEP report`
+// re-reads it later over USB. A measurement whose answer can be lost with the
+// link it was measuring is not an instrument.
+//
+// It does NOT deinit the BLE stack. Dropping the link is a case this firmware
+// already handles routinely (two Macs, either may drop and rejoin) and the
+// existing 5s advertising watchdog recovers it; a BLEDevice::deinit() would
+// instead strand bleLinks[], releasePending, hostLinks[] and the server and
+// characteristic pointers all at once, which is a much larger change than the
+// question needs.
+const long LIGHTSLEEP_MIN_S = 60;
+const long LIGHTSLEEP_MAX_S = 3600;
+// Below this a delta is ADC noise multiplied by a small number - the same trap
+// that once turned 7mV of drift over 3 minutes into "-133.7 mV/h", a flat cell
+// in four hours. Under it the raw delta is printed and NO rate is.
+const double LIGHTSLEEP_MIN_RATE_H = 0.25;
+char lightSleepReport[192] = {0};
+
+// ---- LIGHTIDLE: light sleep while the screen is blanked ---------------------
+// The behaviour LIGHTSLEEP's experiment was the trial run for. While blanked and
+// OFF THE CABLE, loop() stops and the SoC light-sleeps until a finger arrives.
+//
+// IT TAKES THE DEVICE OFF THE AIR, and that is the deal rather than a defect.
+// The controller has no modem sleep here (CONFIG_BT_CTRL_MODEM_SLEEP is not
+// set), so the radio dies with the CPU and the link goes with it. On wake the
+// device re-advertises and the Mac reconnects, which means the first moments
+// after a tap show the LAST data received, not current data. Nothing un-blanks
+// this board but a touch, so nothing is missed that would have been shown.
+//
+// NO TIMER WAKE, deliberately. Slicing the sleep to reconnect periodically would
+// pay a full scan-connect-discover every slice - seconds of radio at far more
+// than the sleep saves - and would thrash the Mac's BLE stack, which this repo
+// has already watched wedge.
+//
+// PERSISTED, unlike the three measurement toggles, because this one is meant to
+// be USED rather than A/B'd. The escape hatch is the cable: it is inert while
+// usbLinkActive(), so plugging in always returns a reachable device that can
+// turn it off again - which matters for a persisted setting that suppresses the
+// radio.
+bool saveLightIdle = false;
 #endif
 
 // Automatic full deep-sleep (not just backlight-off) to protect the battery:
@@ -5667,6 +5728,9 @@ void setup() {
   loadSleepTimeout();
   loadBeepEnabled();
   loadVolume();
+#if !BOARD_USES_TFT_ESPI
+  loadLightIdle();
+#endif
   loadMsgPriority();
   Serial.printf("BUILD %s %s\n", __DATE__, __TIME__); // confirms which binary is live
   loadHostPairings(); // remote-answer auth keys (one per paired Mac)
@@ -5795,6 +5859,25 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
   { "BLESLOW",
     "see PANELSLEEP: savingsSync()'s body is behind !BOARD_USES_TFT_ESPI, so there is "
     "nothing on this board for the toggle to apply." },
+  { "LOOPIDLE",
+    "it yields loop() while the screen is blanked so the core can halt, and the yield is "
+    "behind !BOARD_USES_TFT_ESPI. Nothing here measured what that costs a plain ESP32, "
+    "whose auto-deep-sleep backstop makes the blanked state a different question anyway. "
+    "POWERPROBE works on this board and measures whatever state it is in." },
+  { "SAVINGS",
+    "it reports the four blanked-state savings toggles, whose whole implementation is behind "
+    "!BOARD_USES_TFT_ESPI - there is no state here for it to report. This board's equivalent "
+    "power lever is auto-deep-sleep, which has no toggles and is reported by SLEEP report." },
+  { "LIGHTIDLE",
+    "it light-sleeps the SoC while the screen is blanked, waking on the touch INT - which is "
+    "board 2's problem to solve. This board already deep-sleeps on idle with an ext0 touch "
+    "wake (BOARD_HAS_TOUCH_SLEEP_WAKE), which is strictly deeper than light sleep and needs "
+    "no toggle." },
+  { "LIGHTSLEEP",
+    "it is a board-2 experiment: a manual esp_light_sleep_start() measuring what light sleep "
+    "would save, reported as mV/h on wake. This board reaches the same end differently - it "
+    "has auto-deep-sleep with an ext0 touch wake, which the S3 cannot do (its RTC GPIOs stop "
+    "at 21 and the touch INT is on 47). Use SLEEP report here." },
   { "PULSE",
     "it toggles the asking band's breathing animation, which is board 2's. Here "
     "sessionPulseA() is the static inline stub that always returns 0 (sessions.ino), "
@@ -6965,7 +7048,9 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     if (arg == "off") powerProbeStop("stopped");
     else powerProbeStart(arg.c_str());
 #if !BOARD_USES_TFT_ESPI
-  } else if (buf.startsWith("PANELSLEEP ") || buf.startsWith("CPUSLOW ") || buf.startsWith("BLESLOW ")) {
+  } else if (buf.startsWith("PANELSLEEP ") || buf.startsWith("CPUSLOW ")
+             || buf.startsWith("BLESLOW ") || buf.startsWith("LOOPIDLE ")
+             || buf.startsWith("LIGHTIDLE ")) {
     // The three blanked-state savings, as runtime toggles measured with
     // POWERPROBE. Same convention as SWAP/INV: reachable in seconds so all
     // combinations can be settled in ONE battery session, and persisted
@@ -6979,19 +7064,93 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     bool on = buf.substring(sp + 1).toInt() != 0;
     if (buf.startsWith("PANELSLEEP")) savePanelSleep = on;
     else if (buf.startsWith("CPUSLOW")) saveCpuSlow = on;
-    else saveBleSlow = on;
+    // NAMED, not a trailing else. The bare `else saveBleSlow = on` this replaces
+    // was correct only while BLESLOW was the last verb in the condition above:
+    // adding LOOPIDLE to that list would have routed it here and silently set
+    // the WRONG flag, reporting bleSlow=1 for a LOOPIDLE the caller asked for.
+    else if (buf.startsWith("BLESLOW")) saveBleSlow = on;
+    else if (buf.startsWith("LOOPIDLE")) saveLoopIdle = on;
+    else { saveLightIdle = on; saveLightIdleSetting(); }   // the one that persists
     // Re-sync NOW rather than at the next blank. Without this a toggle flipped
     // while the device is already blanked does nothing until a physical tap
     // wakes and re-blanks it - which is exactly the friction that led to
     // clearing flags mid-blank and stranding what they had applied.
     savingsSync();
-    char line[128];
-    snprintf(line, sizeof(line),
-             "SAVINGS panelSleep=%d cpuSlow=%d bleSlow=%d (applied=%d/%d/%d asleep=%d)",
-             savePanelSleep ? 1 : 0, saveCpuSlow ? 1 : 0, saveBleSlow ? 1 : 0,
-             panelSleptApplied ? 1 : 0, cpuSlowApplied ? 1 : 0, bleSlowApplied ? 1 : 0,
-             isAsleep ? 1 : 0);
-    sendLineToHost(line);
+    sendSavingsLine();
+  } else if (buf == "SAVINGS") {
+    // READ-ONLY, AND IT EXISTS BECAUSE ITS ABSENCE COST A SETTING. There was no
+    // way to see the savings state without SETTING one, so "LIGHTIDLE 0" got used
+    // as a way to read the line - which is fine for the four toggles that persist
+    // nowhere and silently wrote OFF to NVS for the one that does. An instrument
+    // that cannot be read without perturbing what it measures is the trap this
+    // firmware already documents for POWERPROBE; this is the same shape, arriving
+    // through a command table rather than through an ADC.
+    sendSavingsLine();
+  } else if (buf == "LIGHTSLEEP" || buf.startsWith("LIGHTSLEEP ")) {
+    String arg = buf.length() > 10 ? buf.substring(10) : String("");
+    arg.trim();
+    char line[200];
+    if (arg == "report") {
+      sendLineToHost(lightSleepReport[0] ? lightSleepReport
+                     : "LIGHTSLEEP: no run recorded since boot");
+    } else if (usbLinkActive()) {
+      // Named, like POWERPROBE's: on USB this measures the cable, and light
+      // sleep also takes down the native USB CDC the host is talking over.
+      sendLineToHost("LIGHTSLEEP refused: on USB. It would measure the charger, and light "
+                     "sleep powers down the CDC link this line is arriving on. Unplug.");
+    } else if (arg.toInt() < LIGHTSLEEP_MIN_S || arg.toInt() > LIGHTSLEEP_MAX_S) {
+      snprintf(line, sizeof(line),
+               "LIGHTSLEEP refused: want %ld..%ld seconds, got \"%s\". A short sleep cannot "
+               "resolve a small drain: that is the point of the floor.",
+               LIGHTSLEEP_MIN_S, LIGHTSLEEP_MAX_S, arg.c_str());
+      sendLineToHost(line);
+    } else {
+      const long secs = arg.toInt();
+      // Settle the EMA first. batteryMv is an EMA of 8 and the figure this is
+      // compared against on the far side is the same EMA, so both ends must be
+      // settled or the difference between two METHODS is charged to the cell.
+      for (int i = 0; i < 12; i++) sampleBattery();
+      const int mv0 = batteryMv;
+      snprintf(line, sizeof(line),
+               "LIGHTSLEEP: going dark %lds from %dmV. The radio stops, so expect nothing "
+               "until it returns; if this link does not survive, ask LIGHTSLEEP report.",
+               secs, mv0);
+      sendLineToHost(line);
+      delay(400);   // let that notify reach the air before the radio stops
+
+      gpio_wakeup_enable((gpio_num_t) PIN_TOUCH_INT, GPIO_INTR_LOW_LEVEL);
+      esp_sleep_enable_gpio_wakeup();
+      esp_sleep_enable_timer_wakeup((uint64_t) secs * 1000000ULL);
+      const int64_t t0 = esp_timer_get_time();
+      const esp_err_t se = esp_light_sleep_start();
+      const int64_t us = esp_timer_get_time() - t0;
+      const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+      // Disarm both, so an experiment cannot change how the device behaves after
+      // it. A wake source left armed is a behaviour change disguised as a test.
+      esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+      gpio_wakeup_disable((gpio_num_t) PIN_TOUCH_INT);
+
+      // Immediate rather than waiting up to 5s for the advertising watchdog.
+      if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
+
+      for (int i = 0; i < 12; i++) sampleBattery();
+      const int mv1 = batteryMv;
+      const double hours = us / 3600e6;
+      const int fell = mv0 - mv1;
+      char rate[64];
+      if (se != ESP_OK)
+        snprintf(rate, sizeof(rate), ", NO RATE - IDF refused the sleep");
+      else if (hours < LIGHTSLEEP_MIN_RATE_H)
+        snprintf(rate, sizeof(rate), ", too short to rate");
+      else
+        snprintf(rate, sizeof(rate), ", %.1f mV/h", -fell / hours);
+      snprintf(lightSleepReport, sizeof(lightSleepReport),
+               "LIGHTSLEEP report: %s, %.1f min, %d -> %d mV (%+d mV%s), wake=%s",
+               se == ESP_OK ? "slept" : "REFUSED", us / 6e7, mv0, mv1, -fell, rate,
+               cause == ESP_SLEEP_WAKEUP_TIMER ? "timer"
+               : cause == ESP_SLEEP_WAKEUP_GPIO ? "touch" : "other/none");
+      sendLineToHost(lightSleepReport);
+    }
   } else if (buf.startsWith("PULSE ")) {
     // §6's attention pulse, the one animation gated on a measurement. Same
     // convention as the three savings above and as SWAP/INV: reachable in seconds
@@ -7707,5 +7866,18 @@ void loop() {
   // flush() (board 1 writes straight to the panel), so this is guarded
   // rather than shared - an unguarded call would break board 1's compile.
   tft.flush();
+#endif
+
+#if !BOARD_USES_TFT_ESPI
+  // BLANKED: hand the core back so it can halt. Everything above is gated on
+  // !isAsleep, so without this the loop task spins at full duty evaluating
+  // branches it will not take. delay() is vTaskDelay here, which BLOCKS the task
+  // and lets the idle task reach WAITI - a plain busy-wait would save nothing.
+  // Measured with POWERPROBE against the same session's baseline; see the
+  // blanked-state table in docs/reference/power-and-battery.md.
+  // Light sleep FIRST: it subsumes the yield below, and both would be wrong.
+  // enterLightIdle() returns only after a wake, so the delay must not also run.
+  if (isAsleep && saveLightIdle && !usbLinkActive()) enterLightIdle();
+  else if (isAsleep && saveLoopIdle) delay(BLANKED_LOOP_IDLE_MS);
 #endif
 }

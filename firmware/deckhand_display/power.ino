@@ -125,6 +125,50 @@ void savingsSync() {
 #endif
 }
 
+#if !BOARD_USES_TFT_ESPI
+// Light-sleep until a finger arrives. See saveLightIdle's note in
+// deckhand_display.ino for why there is no timer wake and why this is persisted.
+//
+// GPIO WAKE, NOT ext0/ext1, AND THAT IS THE WHOLE REASON THIS EXISTS ON THIS
+// BOARD. Deep sleep's ext0/ext1 accept only an RTC GPIO and the S3's set stops
+// at GPIO21, while the touch INT is on 47 - which is why board 2 has no
+// auto-deep-sleep at all. esp_sleep_enable_gpio_wakeup() has no such limit, so
+// light sleep can do what deep sleep cannot here. Board 1 needs none of this: a
+// pin-routing accident puts its PENIRQ on IO36, an RTC GPIO, so it deep-sleeps
+// properly instead.
+void enterLightIdle() {
+  // LEVEL, not edge: the controller holds INT low for the whole touch, and an
+  // edge that arrived while we were configuring would be missed outright,
+  // leaving a device that ignores the first tap.
+  gpio_wakeup_enable((gpio_num_t) PIN_TOUCH_INT, GPIO_INTR_LOW_LEVEL);
+  esp_sleep_enable_gpio_wakeup();
+  esp_light_sleep_start();
+  // Disarmed on the way out so the wake source cannot outlive the state that
+  // wanted it - the same rule LIGHTSLEEP's disarm follows.
+  gpio_wakeup_disable((gpio_num_t) PIN_TOUCH_INT);
+  // The radio went down with the CPU, so the link is gone and the Mac is
+  // re-scanning. Advertise at once rather than waiting up to 5s for loop()'s
+  // watchdog: this is the path a person is standing in front of.
+  if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
+}
+// ONE emitter for both the setter and the read-only query. Two snprintf sites
+// would drift, and the whole point of the query is that it reports exactly what
+// the setter would have reported.
+void sendSavingsLine() {
+  char line[160];
+  snprintf(line, sizeof(line),
+           "SAVINGS panelSleep=%d cpuSlow=%d bleSlow=%d loopIdle=%d lightIdle=%d "
+           "(applied=%d/%d/%d asleep=%d)",
+           savePanelSleep ? 1 : 0, saveCpuSlow ? 1 : 0, saveBleSlow ? 1 : 0,
+           saveLoopIdle ? 1 : 0, saveLightIdle ? 1 : 0,
+           panelSleptApplied ? 1 : 0, cpuSlowApplied ? 1 : 0, bleSlowApplied ? 1 : 0,
+           isAsleep ? 1 : 0);
+  sendLineToHost(line);
+}
+void loadLightIdle() { saveLightIdle = prefs.getBool("lightIdle", false); }
+void saveLightIdleSetting() { prefs.putBool("lightIdle", saveLightIdle); }
+#endif
+
 // Percent of the SET brightness the dim stage uses. Relative, not absolute, and
 // that is forced: brightness can be as low as BRIGHTNESS_MIN (10), where a fixed
 // "dim to 15%" would be BRIGHTER than lit. Floored at BRIGHTNESS_MIN because
@@ -264,7 +308,10 @@ const int BATT_TREND_MIN_PCT_PER_H_X10 = 2;            // 0.2%/h; flatter reads 
 // target sits at or above it - see BATT_CHG_TARGET_MV. Note it is 98% on
 // pctFromMv()'s curve, so the pill reads "full" a couple of points before the
 // percentage would reach 100; that predates this and is left exactly as it was.
-const int BATT_FULL_MV = 4180;
+// PER-BOARD - see BOARD_BATT_FULL_MV in each board header for the measured
+// top-of-charge each one actually reaches, and why board 2's is an open question.
+// A literal here would be one threshold for two different analogue front ends.
+const int BATT_FULL_MV = BOARD_BATT_FULL_MV;
 
 int battTrendMv[BATT_TREND_SLOTS];
 unsigned long battTrendAt[BATT_TREND_SLOTS];
@@ -942,6 +989,52 @@ void enterDeepSleep() {
   digitalWrite(TFT_BL_PIN, LOW);
   gpio_hold_en((gpio_num_t) TFT_BL_PIN);
   gpio_deep_sleep_hold_en();
+
+#if !BOARD_USES_TFT_ESPI
+  // ======================= WHY BOARD 2's POWER OFF LEAKED =======================
+  // MEASURED IN THE FIELD: 4106 -> 3977 mV over 23.0 hours "off" = -5.6 mV/h,
+  // ~17%/day, flat in about six days. Board 1 in the same state loses almost
+  // nothing, and the difference is THESE TWO LINES not doing anything here.
+  //
+  // The DISPOFF/SLPIN pair above is REAL on board 1 - TFT_eSPI's writecommand
+  // reaches the ILI9341, which drops to microamps. On board 2 the identical
+  // calls hit PanelShim::writecommand(), which IGNORES ITS ARGUMENT (see its own
+  // comment), so the ST77922 has run its oscillator, charge pumps and drivers off
+  // GRAM through every "power off" this board has ever done, with only the
+  // backlight dark. Everything else is microamps by comparison: the S3's deep
+  // sleep is tens of uA (the core's own PSRAM/FLASH leakage workarounds are
+  // enabled), and the SC8002B amp is 0.6uA shut down and milliamps at worst.
+  //
+  // ORDER IS LOAD-BEARING AND THE TWO STEPS UNDO EACH OTHER IF SWAPPED: the
+  // sleep command travels over the very pins step 2 disconnects.
+  //
+  // 1. ACTUALLY SLEEP THE PANEL, through the shim method that works.
+  tft.sleepPanel(true);
+  // 2. THEN STOP DRIVING ANYTHING INTO IT. This is also the best explanation for
+  //    the one result that looked like SLPIN COSTING power: measured awake and
+  //    blanked, PANELSLEEP made the drain ~50% worse (+13..24 mV/h, A-B-A). SLPIN
+  //    collapses the panel's internal rails, and six QSPI pins still driven by an
+  //    awake SoC then inject current through its input clamp diodes - current
+  //    that goes away only if the pins stop driving. That is a HYPOTHESIS, not a
+  //    measurement, and it is written down as one; what makes it safe to act on
+  //    here is that deep sleep ends in a RESET, so there is no state to restore
+  //    and nothing to get wrong on the way out.
+  //    rtc_gpio_isolate() disconnects output, input AND the pull resistors, which
+  //    is why it beats driving the pin to a level - a driven level is exactly
+  //    what injects. All six are RTC GPIOs (SOC_RTCIO_PIN_COUNT is 22, so 0..21)
+  //    which is what makes this reachable at all; the backlight on 41 is NOT, and
+  //    keeps its gpio_hold_en latch below.
+  const gpio_num_t qspi[] = {
+    (gpio_num_t) PIN_LCD_CS,  (gpio_num_t) PIN_LCD_SCK, (gpio_num_t) PIN_LCD_D0,
+    (gpio_num_t) PIN_LCD_D1,  (gpio_num_t) PIN_LCD_D2,  (gpio_num_t) PIN_LCD_D3,
+  };
+  for (unsigned i = 0; i < sizeof(qspi) / sizeof(qspi[0]); i++) rtc_gpio_isolate(qspi[i]);
+  // NOT powering down VDD_SPI here, and that is a REVERSAL of an earlier guess.
+  // This core already sets CONFIG_ESP_SLEEP_{PSRAM,FLASH}_LEAKAGE_WORKAROUND and
+  // CONFIG_ESP_SLEEP_MSPI_NEED_ALL_IO_PU, and esp_deep_sleep_start() powers the
+  // flash down regardless of configuration - so an explicit pd_config was
+  // redundant at best, and at worst fought the pull-ups that workaround installs.
+#endif
 
   // Record what we are sleeping AT, so the next real wake can report the drain.
   // RTC memory survives deep sleep and esp_timer keeps counting through it.
