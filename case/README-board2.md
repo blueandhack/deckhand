@@ -1034,22 +1034,24 @@ The body wall stands **exactly `rim_clear`** above the board's back face. There 
 separate height constant because the wall exists to clear the back components and their
 cables and nothing else — so the +2 goes in as `rim_extra`, next to the terms it joins.
 
-Raised twice: `rim_extra` 2.0, then 3.0.
+`rim_extra` = **2.0**. It was briefly 3.0 — a further 1 mm was asked for and then
+withdrawn (*"ONLY increase 2 mm"*) — so the middle column is where it stands. The 3.0
+column is kept because the trip through it is what proved the pillars self-track.
 
-| | original | +2 | **+1 again** |
+| | original | **+2, shipped** | (briefly 3.0) |
 |---|---|---|---|
-| `rim_clear` | 8.0 | 10.0 | **11.0** |
-| `body_d` (wall height) | 14.90 | 16.90 | **17.90** — measured off the body mesh |
-| `cover_rise` | 5.0 | 3.0 | **2.0** |
-| `total_th` | 21.9 | 21.9 | **21.9** |
-| screw pillar length | 10.31 | 12.19 | **13.13** |
-| `btn_span` | 5.5 | 7.5 | **8.5** |
+| `rim_clear` | 8.0 | **10.0** | 11.0 |
+| `body_d` (wall height) | 14.90 | **16.90** — measured off the body mesh | 17.90 |
+| `cover_rise` | 5.0 | **3.0** | 2.0 |
+| `total_th` | 21.9 | **21.9** | 21.9 |
+| screw pillar length | 10.31 | **12.19** | 13.13 |
+| `btn_span` | 5.5 | **7.5** | 8.5 |
 
 **The pillars lengthen on their own, which is worth knowing before asking for more.** The
 pillar runs from its landing in the cover down to the board's back, and its *end* is
 `z_pcb_b + screw_pillar_gap` — independent of `cover_rise` and of `body_d`. What moves is its
-*start*: `screw_pad_z` shrinks as the plateau flattens. So the pillar grew **2.82 mm** across
-the two wall raises with nobody touching it, and still bottoms exactly on the board.
+*start*: `screw_pad_z` shrinks as the plateau flattens. So the pillar grew **1.88 mm** with
+this raise, with nobody touching it, and still bottoms exactly on the board.
 
 At `screw_pillar_gap = 0` it is already as long as it can be. A further millimetre is
 `gap = -1.0`, which puts it **1 mm into the board** — measured, bottom at `z = 5.900` against
