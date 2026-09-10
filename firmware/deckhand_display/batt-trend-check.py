@@ -781,31 +781,57 @@ edc = strip_comments(ed) if ed else None
 # same state, and the difference is that board 1's writecommand(0x28/0x10) is
 # REAL while PanelShim::writecommand() ignores its argument - so board 2's panel
 # controller ran flat out through every power-off.
-check("POWER OFF actually sleeps the panel (writecommand is a no-op on board 2)",
-      edc is not None and "tft.sleepPanel(true)" in edc)
-check("POWER OFF isolates the panel bus so nothing is driven into a slept panel",
-      edc is not None and "rtc_gpio_isolate" in edc)
-# ORDER IS LOAD-BEARING: the sleep command travels over the pins the isolate
-# disconnects, so isolating first would send SLPIN into a disconnected bus and
-# leave the panel wide awake - a silent failure with no symptom but the drain.
-check("...and it sleeps the panel BEFORE isolating the bus, never after",
-      edc is not None and before(edc, "tft.sleepPanel(true)", "rtc_gpio_isolate"))
-# All six, not just CS: any pin left driving injects through the panel's clamps.
-for pin in ("PIN_LCD_CS", "PIN_LCD_SCK", "PIN_LCD_D0", "PIN_LCD_D1",
-            "PIN_LCD_D2", "PIN_LCD_D3"):
-    check(f"{pin} is isolated for deep sleep", edc is not None and pin in edc)
-# ISOLATED, NOT DRIVEN. A driven level is the thing that injects current into a
-# panel whose internal rails have collapsed, so the first version of this fix -
-# digitalWrite(PIN_LCD_CS, HIGH) plus a hold - was the wrong shape.
-check("the panel bus is ISOLATED, not driven to a level",
-      edc is not None and "digitalWrite(PIN_LCD_CS" not in edc)
-# The backlight is on GPIO41, outside the RTC set (0..21), so it cannot be
-# isolated and keeps the hold latch instead. Asserted so the two do not get
-# conflated by someone tidying them into one loop.
-check("the backlight keeps its gpio_hold_en latch - 41 is not an RTC GPIO",
-      edc is not None and "gpio_hold_en" in edc)
-check("no explicit VDD_SPI power-down: the core already does it",
-      edc is not None and "ESP_PD_DOMAIN_VDDSDIO" not in edc)
+# EVERY STEP IS NOW OPTIONAL, and the assertions must say so rather than keep
+# their old names. Two changes shipped unconditionally this week on reasoning
+# alone and neither moved the number, so the teardown became a runtime bitmask
+# with DEFAULT 0 - the original behaviour, kept as the baseline to compare
+# against. An assertion still claiming "POWER OFF sleeps the panel" would be
+# describing a step that is off by default.
+check("the teardown mode defaults to 0, so the baseline is the ORIGINAL teardown",
+      re.search(r"uint32_t\s+pwrOffMode\s*=\s*0\s*;", MAIN) is not None)
+bits = {}
+for nm in ("PWROFF_PANEL_SLEEP", "PWROFF_IC_RESET", "PWROFF_CODEC_DOWN",
+           "PWROFF_QSPI_ISOLATE"):
+    m = re.search(rf"#define\s+{nm}\s+(0x[0-9A-Fa-f]+|\d+)", MAIN)
+    check(f"{nm} is defined", m is not None)
+    if m:
+        bits[nm] = int(m.group(1), 0)
+check("the four teardown bits are distinct single bits",
+      len(bits) == 4 and len(set(bits.values())) == 4
+      and all(v and not (v & (v - 1)) for v in bits.values()))
+for nm in bits:
+    check(f"the {nm} step is GATED on its own bit",
+          edc is not None and f"pwrOffMode & {nm}" in edc)
+
+# THE RECORD IS THE POINT. Without it, a power-off and a light sleep are
+# indistinguishable from the Mac - which is exactly what made two days of
+# measurement unattributable.
+check("the cell is recorded BEFORE any teardown step runs",
+      edc is not None and before(edc, 'prefs.putUShort("poMv"', "pwrOffMode &"))
+check("the mode is recorded alongside it, so a result names its own combination",
+      edc is not None and 'prefs.putUInt("poMode"' in edc)
+# sleepPanel() has five return-false paths and the first version DISCARDED the
+# result, so a step that never ran looked exactly like one that did nothing.
+check("sleepPanel()'s RETURN is captured, never discarded",
+      edc is not None and re.search(r'putUChar\("poPs",\s*tft\.sleepPanel\(true\)', edc)
+      is not None)
+# GPIO48 is outside the RTC set (0..21), so it takes a hold, not an isolate.
+check("the display-IC reset is HELD through sleep (48 is not an RTC GPIO)",
+      edc is not None and "PIN_TOUCH_RST" in edc and "gpio_hold_en" in edc)
+check("the reset is driven ACTIVE LOW, as the header says the pin is",
+      edc is not None and re.search(r"digitalWrite\(PIN_TOUCH_RST,\s*LOW\)", edc) is not None)
+
+lr = fnbody(POWER, "void loadPwrOffRecord()")
+check("loadPwrOffRecord() exists", lr is not None)
+check("...and CLEARS the record, so it cannot re-report a stale outage for ever",
+      lr is not None and 'prefs.remove("poMv")' in lr)
+
+# The read-only form, and the lesson that produced it.
+pm = arm(MAIN, 'buf == "PWROFFMODE"')
+check("a bare PWROFFMODE reports", pm is not None)
+check("...and writes NOTHING unless an argument was given",
+      pm is not None and re.search(r"if\s*\(arg\.length\(\)\)\s*\{[^}]*savePwrOffMode", pm)
+      is not None)
 
 # --------------------------------------------------------------------------
 # THE SESSION-GATED IDLE LADDER: lit -> dim -> blank.

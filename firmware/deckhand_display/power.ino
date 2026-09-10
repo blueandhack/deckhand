@@ -166,6 +166,35 @@ void sendSavingsLine() {
   sendLineToHost(line);
 }
 void loadLightIdle() { saveLightIdle = prefs.getBool("lightIdle", false); }
+void loadPwrOffMode() { pwrOffMode = prefs.getUInt("pwroffMode", 0); }
+void savePwrOffMode() { prefs.putUInt("pwroffMode", pwrOffMode); }
+
+// Reads what the last power-off recorded, and CLEARS it so the line appears
+// exactly once per power-off rather than on every boot for ever - a stale record
+// re-reported would read as a fresh outage, which is the confusion this whole
+// instrument exists to end.
+//
+// IT ALSO SETTLES WHAT STATE THE DEVICE WAS IN, which is the thing that wasted
+// two days: a power-off leaves a record and a light sleep does not, so the two
+// stop being indistinguishable from the Mac.
+void loadPwrOffRecord() {
+  const uint16_t mv = prefs.getUShort("poMv", 0);
+  if (!mv) {
+    snprintf(pwrOffReport, sizeof(pwrOffReport),
+             "PWROFF: no record - the last shutdown was not a POWER OFF");
+    return;
+  }
+  const uint32_t mode = prefs.getUInt("poMode", 0);
+  const uint8_t  ps   = prefs.getUChar("poPs", 2);   // 2 = step not run
+  for (int i = 0; i < 12; i++) sampleBattery();       // settle before comparing
+  snprintf(pwrOffReport, sizeof(pwrOffReport),
+           "PWROFF record: off at %umV mode=0x%lX sleepPanel=%s; awake at %dmV "
+           "(%+d mV). Elapsed is the Mac's to supply - a reset takes RTC with it.",
+           (unsigned) mv, (unsigned long) mode,
+           ps == 2 ? "skipped" : (ps ? "ok" : "FAILED"),
+           batteryMv, batteryMv - (int) mv);
+  prefs.remove("poMv");
+}
 void saveLightIdleSetting() { prefs.putBool("lightIdle", saveLightIdle); }
 #endif
 
@@ -1008,8 +1037,41 @@ void enterDeepSleep() {
   // ORDER IS LOAD-BEARING AND THE TWO STEPS UNDO EACH OTHER IF SWAPPED: the
   // sleep command travels over the very pins step 2 disconnects.
   //
-  // 1. ACTUALLY SLEEP THE PANEL, through the shim method that works.
-  tft.sleepPanel(true);
+  // RECORDED FIRST, before any of it, so the number is the cell rather than
+  // whatever the teardown does to it on the way down.
+  sampleBattery();
+  prefs.putUShort("poMv", (uint16_t) (batteryMv > 0 ? batteryMv : 0));
+  prefs.putUInt("poMode", pwrOffMode);
+  prefs.putUChar("poPs", 2);   // 2 = the panel step did not run
+
+  // 1. SLEEP THE PANEL - and KEEP THE RETURN. sleepPanel() has five paths that
+  //    return false, and the first version of this discarded the result, so a
+  //    step that silently never ran was indistinguishable from one that ran and
+  //    did nothing. That is the same class as esp_pm_configure()'s stub.
+  if (pwrOffMode & PWROFF_PANEL_SLEEP)
+    prefs.putUChar("poPs", tft.sleepPanel(true) ? 1 : 0);
+
+  // 2. POWER DOWN THE CODEC. Register 0x00 is the ES8311's reset, and the
+  //    datasheet is explicit that reset draws far less than any running mode.
+  //    Safe to leave asserted: this board's deep sleep ends in a RESET, so the
+  //    codec is re-initialised from scratch on the way back regardless.
+  if (pwrOffMode & PWROFF_CODEC_DOWN) {
+    const uint8_t reg[2] = { 0x00, 0x1F };   // RESET asserted
+    i2c_master_write_to_device(I2C_NUM_0, ES8311_ADDRESS_0, reg, sizeof(reg),
+                               pdMS_TO_TICKS(50));
+  }
+
+  // 3. HOLD THE DISPLAY IC IN RESET. Deeper than SLPIN and it reaches what SLPIN
+  //    cannot: the capacitive TOUCH controller lives INSIDE the ST77922 (I2C
+  //    0x55) and scans continuously. Nothing is lost by it here - touch cannot
+  //    wake a powered-off board 2, which is the whole reason this board has no
+  //    auto-deep-sleep. GPIO48 is outside the RTC set (0..21) so it takes
+  //    gpio_hold_en, exactly like the backlight on 41, not rtc_gpio_isolate.
+  if (pwrOffMode & PWROFF_IC_RESET) {
+    pinMode(PIN_TOUCH_RST, OUTPUT);
+    digitalWrite(PIN_TOUCH_RST, LOW);        // active low
+    gpio_hold_en((gpio_num_t) PIN_TOUCH_RST);
+  }
   // 2. THEN STOP DRIVING ANYTHING INTO IT. This is also the best explanation for
   //    the one result that looked like SLPIN COSTING power: measured awake and
   //    blanked, PANELSLEEP made the drain ~50% worse (+13..24 mV/h, A-B-A). SLPIN
@@ -1028,7 +1090,8 @@ void enterDeepSleep() {
     (gpio_num_t) PIN_LCD_CS,  (gpio_num_t) PIN_LCD_SCK, (gpio_num_t) PIN_LCD_D0,
     (gpio_num_t) PIN_LCD_D1,  (gpio_num_t) PIN_LCD_D2,  (gpio_num_t) PIN_LCD_D3,
   };
-  for (unsigned i = 0; i < sizeof(qspi) / sizeof(qspi[0]); i++) rtc_gpio_isolate(qspi[i]);
+  if (pwrOffMode & PWROFF_QSPI_ISOLATE)
+    for (unsigned i = 0; i < sizeof(qspi) / sizeof(qspi[0]); i++) rtc_gpio_isolate(qspi[i]);
   // NOT powering down VDD_SPI here, and that is a REVERSAL of an earlier guess.
   // This core already sets CONFIG_ESP_SLEEP_{PSRAM,FLASH}_LEAKAGE_WORKAROUND and
   // CONFIG_ESP_SLEEP_MSPI_NEED_ALL_IO_PU, and esp_deep_sleep_start() powers the

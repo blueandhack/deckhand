@@ -145,10 +145,22 @@ const KB_TEXT_DECL = (SRC_MAIN.match(/char kbText\[([^\]]+)\]\s*;/) || [])[1] ||
 // the same drift discipline batt-trend-check.py uses, and for the same reason: the
 // widest string the battery row can draw is a function of these two.
 const POWER_SRC = readSource(`power.ino`);
-const POWER_CONST = Object.fromEntries(["BATT_CHG_KNEE_MV", "BATT_FULL_MV"].map(n => {
+// BATT_FULL_MV MOVED, and this guard did not follow it - it threw on every run
+// for a whole commit before anyone noticed, because only a SUBSET of the suite
+// was run after the change. It is now per-board (BOARD_BATT_FULL_MV in each
+// header) since the two boards read ~60mV apart at the top of a charge, so it is
+// parsed from where it actually lives, per board, exactly as
+// batt-trend-check.py does. The knee is still shared and still comes from
+// power.ino.
+const POWER_CONST = Object.fromEntries(["BATT_CHG_KNEE_MV"].map(n => {
   const m = POWER_SRC.match(new RegExp(`${n}\\s*=\\s*(\\d+)`));
   if (!m) throw new Error(`${n} not found in power.ino - was it renamed?`);
   return [n, +m[1]];
+}));
+const BATT_FULL_MV = Object.fromEntries([1, 2].map(b => {
+  const m = readSource(HDR[b]).match(/#define\s+BOARD_BATT_FULL_MV\s+(\d+)/);
+  if (!m) throw new Error(`BOARD_BATT_FULL_MV not found in ${HDR[b]} - renamed, or un-split?`);
+  return [b, +m[1]];
 }));
 // pctFromMv()'s table, mirrored to derive that string's length. Integer division,
 // matching the firmware.

@@ -683,6 +683,29 @@ char lightSleepReport[192] = {0};
 // turn it off again - which matters for a persisted setting that suppresses the
 // radio.
 bool saveLightIdle = false;
+
+// ---- POWER OFF teardown, SELECTABLE AT RUNTIME ------------------------------
+// Two changes shipped on reasoning this week and neither moved the number, so
+// nothing here is unconditional any more. Each step is a bit, DEFAULT 0 - which
+// is the ORIGINAL teardown, restored as a clean baseline to compare against.
+// One build settles every combination, the same reason SWAP/INV/PANELSLEEP are
+// runtime toggles rather than #ifs: a power-off measurement costs a night, so a
+// reflash per guess costs a week.
+#define PWROFF_PANEL_SLEEP  0x1   // SLPIN via the shim method that actually works
+#define PWROFF_IC_RESET     0x2   // hold the ST77922 in reset - covers the TOUCH
+                                  // block inside it, which SLPIN may not, and
+                                  // which scans continuously. Free here: touch
+                                  // cannot wake a powered-off board 2 anyway.
+#define PWROFF_CODEC_DOWN   0x4   // ES8311 reset register - never once done
+#define PWROFF_QSPI_ISOLATE 0x8   // float the panel bus. Kept only so it can be
+                                  // COMPARED; the evidence so far is against it.
+uint32_t pwrOffMode = 0;
+// What the last power-off left behind, read and CLEARED on the next boot. The
+// device cannot time its own outage - a hard reset takes RTC memory with it - so
+// this carries the mV and the mode and lets the MAC's clock supply the elapsed
+// time. Retained rather than only printed, because a board that powered off on
+// battery has no listener at boot.
+char pwrOffReport[176] = {0};
 #endif
 
 // Automatic full deep-sleep (not just backlight-off) to protect the battery:
@@ -5730,6 +5753,12 @@ void setup() {
   loadVolume();
 #if !BOARD_USES_TFT_ESPI
   loadLightIdle();
+  loadPwrOffMode();
+  loadPwrOffRecord();
+  // Best effort: on the common path a power-off ends by plugging USB in, so
+  // Serial is up here and the receipt lands in the host log by itself. It is
+  // retained either way - ask PWROFFMODE if this one went nowhere.
+  sendLineToHost(pwrOffReport);
 #endif
   loadMsgPriority();
   Serial.printf("BUILD %s %s\n", __DATE__, __TIME__); // confirms which binary is live
@@ -5864,6 +5893,11 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "behind !BOARD_USES_TFT_ESPI. Nothing here measured what that costs a plain ESP32, "
     "whose auto-deep-sleep backstop makes the blanked state a different question anyway. "
     "POWERPROBE works on this board and measures whatever state it is in." },
+  { "PWROFFMODE",
+    "it selects which teardown steps board 2's POWER OFF performs - sleeping the ST77922, "
+    "holding it in reset, powering down the ES8311, isolating the QSPI bus - none of which "
+    "exists here. This board's deep sleep already puts its ILI9341 into SLPIN through real "
+    "TFT_eSPI and wakes on touch, so it has nothing to select." },
   { "SAVINGS",
     "it reports the four blanked-state savings toggles, whose whole implementation is behind "
     "!BOARD_USES_TFT_ESPI - there is no state here for it to report. This board's equivalent "
@@ -7077,6 +7111,27 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // clearing flags mid-blank and stranding what they had applied.
     savingsSync();
     sendSavingsLine();
+  } else if (buf == "PWROFFMODE" || buf.startsWith("PWROFFMODE ")) {
+    // BARE = REPORT, and it writes nothing. LIGHTIDLE taught that one the
+    // expensive way: with no read-only form, a set command gets used to read
+    // the state and quietly persists whatever it was given.
+    String arg = buf.length() > 10 ? buf.substring(10) : String("");
+    arg.trim();
+    if (arg.length()) {
+      pwrOffMode = (uint32_t) strtoul(arg.c_str(), nullptr, 0);
+      savePwrOffMode();
+    }
+    char line[200];
+    snprintf(line, sizeof(line),
+             "PWROFFMODE 0x%lX (panelSleep=%d icReset=%d codecDown=%d qspiIsolate=%d)"
+             " - 0 is the original teardown, the baseline to compare against",
+             (unsigned long) pwrOffMode,
+             (pwrOffMode & PWROFF_PANEL_SLEEP) ? 1 : 0,
+             (pwrOffMode & PWROFF_IC_RESET) ? 1 : 0,
+             (pwrOffMode & PWROFF_CODEC_DOWN) ? 1 : 0,
+             (pwrOffMode & PWROFF_QSPI_ISOLATE) ? 1 : 0);
+    sendLineToHost(line);
+    sendLineToHost(pwrOffReport);
   } else if (buf == "SAVINGS") {
     // READ-ONLY, AND IT EXISTS BECAUSE ITS ABSENCE COST A SETTING. There was no
     // way to see the savings state without SETTING one, so "LIGHTIDLE 0" got used
