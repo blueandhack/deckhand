@@ -147,6 +147,7 @@ cable_exit = 2.0;   // room above a mated plug for its cable to leave and turn
 // of the cell's own stack rather than a chosen figure. cover_rise is
 // cavity_d - rim_clear, cavity_d is max(rim_clear, batt_seat + batt_t) = 13 while
 // the rim is under it, and rim_clear reaches 13 at exactly rim_extra = 5. So:
+//   rim_extra 4.0 -> rise 1.0,  body 18.9, the smallest plateau that exists  <-- HERE
 //   rim_extra 4.9 -> rise 0.10, body 19.8, a plateau 0.1 mm proud
 //   rim_extra 5.0 -> rise 0,    body 19.9, NO PLATEAU. The cover is flat.
 //   rim_extra 5.5 -> rise 0,    body 20.4, and total_th starts growing: 22.4
@@ -161,11 +162,22 @@ cable_exit = 2.0;   // room above a mated plug for its cable to leave and turn
 // Those fallbacks were sized for the flat cover this file shipped with, so they are
 // right - but they are a discontinuity, not a trend, and the cover's taper and both
 // edge fillets stop existing along with the plateau.
-rim_extra = 5.0;    // 2 + 1 + 2. Lands exactly on cover_rise = 0 - see above.
+// 5.0 -> 4.0, ASKED FOR AS "I need the plateau for cover" - and one millimetre of
+// wall is the whole price, because the plateau and the wall are the SAME
+// millimetres. At 5.0 the cover was flat; at 4.0 there is a 1.0 mm plateau and the
+// wall stands 18.90 instead of 19.90, i.e. +4 on the 14.90 it started at rather
+// than +5. The device is 21.9 either way.
+//
+// 4.0 IS THE LARGEST rim_extra THAT STILL HAS A PLATEAU AT ALL, chosen over the
+// wider ones for two reasons worth recording: it gives back the least wall, and it
+// is the only step on the ladder where the screw does not change - the window at
+// 4.0 is 18.46..20.16 and the M3 x 20 already specified sits inside it. Every
+// value below 3.0 needs an M3 x 18 or x 16 instead.
+rim_extra = 4.0;    // 2 + 1 + 2, less 1 for the plateau - see the ladder above.
                     // WHAT IT COSTS, AND WHAT IT DOES NOT. cover_rise is
                     // cavity_d - rim_clear, and cavity_d is set by the CELL
                     // (batt_seat + batt_t = 13) not by the rim, so every mm the body
-                    // gains the plateau loses: rise 5.0 -> 3.0. total_th is
+                    // gains the plateau loses: rise 5.0 -> 1.0. total_th is
                     // z_floor + cover_th and z_floor does not read rim_clear at all,
                     // so THE DEVICE IS EXACTLY AS THICK AS IT WAS - 21.9. The body
                     // encloses more of the cell and the cover stands proud of it

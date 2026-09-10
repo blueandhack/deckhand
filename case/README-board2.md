@@ -1065,10 +1065,19 @@ at the column top — and their combined extent is 3.61 mm, indistinguishable fr
 bore. It now measures **volume over the bore's own area**, an equivalent depth that two thin
 slices cannot fake. The fault injection is the only reason that was caught.
 
-## The body's wall is 5 mm taller, and that extinguishes the plateau
+## The body's wall is 4 mm taller, and the last millimetre is the plateau
 
-Asked for in three steps — +2, then +1, then +2 more — so `rim_extra` is **5.0**. Measured off
-the body mesh: **60.00 × 107.90 × 19.90**, against the 14.90 it started at.
+Asked for in three steps — +2, then +1, then +2 more — which put `rim_extra` at 5.0 and
+**extinguished the plateau**. Then: *"revert the plateau, I need the plateau for cover"*, so
+`rim_extra` is **4.0**. Measured off the body mesh: **60.00 × 107.90 × 18.90**, against the
+14.90 it started at.
+
+**The plateau and the wall are the same millimetres, and no setting has both.**
+`cover_rise = 5 - rim_extra` exactly, so a millimetre of plateau is a millimetre off the wall.
+4.0 is the *largest* `rim_extra` that still has a plateau at all, which is why it was chosen
+over the wider ones: it gives back the least wall, and it is the only step on the ladder where
+**the screw does not change** — the window at 4.0 is 18.46..20.16 and the M3 x 20 already
+specified sits inside it. Anything below 3.0 needs an M3 x 18 or x 16 instead.
 
 ### There is no wall-height constant, and that is deliberate
 
@@ -1092,9 +1101,9 @@ at exactly `rim_extra = 5`:
 |---|---|---|---|---|---|
 | 2 | 10 | 3.0 | 16.90 | 21.9 | |
 | 3 | 11 | 2.0 | 17.90 | 21.9 | |
-| 4 | 12 | 1.0 | 18.90 | 21.9 | |
+| **4** | **12** | **1.0** | **18.90** | **21.9** | **here — the smallest plateau that exists** |
 | 4.9 | 12.9 | 0.10 | 19.80 | 21.9 | a plateau 0.1 mm proud |
-| **5** | **13** | **0** | **19.90** | **21.9** | **no plateau — the cover is flat** |
+| 5 | 13 | 0 | 19.90 | 21.9 | no plateau — the cover is flat |
 | 5.5 | 13.5 | 0 | 20.40 | 22.4 | nothing left to give; the device grows |
 
 Below 5 the body gains what the plateau loses and `total_th` is pinned at 21.9. Above 5 there
@@ -1114,20 +1123,25 @@ they step:
 50.8 is the leaf this file shipped with before the plateau existed, so those fallbacks are
 right — but they are a **discontinuity, not a trend**.
 
-**And the cover's taper goes with the plateau, so `cover_edge_top` and `cover_edge_shoulder`
-now do nothing.** The "soft all over" edge work — the flange fix, both fillets, the leaf
-margin and length deriving from the fillet's bite — is all inert at `cover_rise = 0`. The code
-is intact and comes back the moment `rim_extra` drops below 5; it simply is not reached here.
+At `rim_extra` 4.0 the derived side is live again: `ks_gap` 22.79, `ks_lug_from` 23.4, and the
+cover's taper is back — though at a 1 mm rise it is very shallow, **7.80 deg on the sides and
+3.58 deg at the ends**.
 
-### Three checks now report SKIPPED, and that is the point
+**The shell is doing real work even at this rise**, which the checker's skip does not say:
+`cover_shell = true` removes **1,139.6 mm³**, 13,221 against 14,361 with it off. What is
+degenerate is the checker's *sampling sweep* (2.2 to 2.2), not the cavity.
+
+### Two of the three SKIPPED checks came back
 
 At `cover_rise = 0` four assertions went **vacuous** — and one of them passed by looping from
 2.2 to 1.2, i.e. not at all, on `Infinity > 1.2`. *"An assertion that cannot fail is a
 defect"*, so:
 
-- **the perimeter flange**, **the skirt wall** and **the blade landing on flat plateau** now
+- **the perimeter flange**, **the skirt wall** and **the blade landing on flat plateau**
   report `SKIPPED` with the reason, never `ok`. A `skip()` state was added so a switched-off
-  feature can never read as a pass.
+  feature can never read as a pass. **At `rim_extra` 4.0 the first and third run again and
+  pass** — the outside widens monotonically, and the folded blade clears the fillet by
+  0.60/0.60/4.43/0.60. Only the skirt-wall sweep is still degenerate at a 1 mm rise.
 - **the pillar-stub check is now proportional** — `pillarLen >= 0.5 * pillarSpan` instead of a
   flat 5 mm. The span grows with the wall (10.31 → 15.00 across the raises), so the fixed
   floor had stopped discriminating: a gap of 9 still left 6.0 mm and passed.
