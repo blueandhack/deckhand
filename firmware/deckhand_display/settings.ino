@@ -123,6 +123,7 @@ const char* settingsGroupTitle(int g) {
     case SET_SOUND:   return "Sound";
     case SET_PAIRING: return "Pairing";
     case SET_MESSAGES: return "Messages";
+    case SET_ABOUT:   return "About";
     default:          return "Actions";
   }
 }
@@ -154,6 +155,12 @@ void drawSettingsHomeStatic() {
 void settingsHomeSummary(int g, char* buf, size_t n, uint16_t* col) {
   *col = COLOR_LABEL;
   switch (g) {
+    // The build date alone. The commit is the more precise fact but it is also
+    // the one that can be `unknown`, and a HOME summary that sometimes reads
+    // "unknown" invites a tap to find out nothing.
+    case SET_ABOUT:
+      snprintf(buf, n, "%s", __DATE__);
+      break;
     case SET_STATUS: {
       bool bt = bleConnected, usb = usbLinkActive();
       const char* links = (bt && usb) ? "Both links up" : (bt || usb) ? "One link up" : "No link";
@@ -868,6 +875,32 @@ void drawActionsPageStatic() {
 // channel: you tap LATER, the Mac keeps sending NOW, and there is nothing
 // anywhere on the glass to say why. The host says so in its own log too - the
 // two surfaces exist because only one of them is in the room with you.
+#if !BOARD_USES_TFT_ESPI
+// The About group, and it is STATIC IN FULL - no render half, no caches. Every
+// value on it is fixed for the life of the boot: a build stamp, the commit that
+// produced it and a MAC do not move. A change-only cache exists to stop a
+// repaint of something that CHANGES; a page with nothing changing needs none,
+// and adding one would be cargo.
+void drawAboutPageStatic() {
+  drawGroupCaption("FIRMWARE", P5_CAP_Y);
+  // btMacAddress is a String filled by setupBLE(); it is empty only if BLE never
+  // came up, which is worth SEEING rather than papering over with a blank row.
+  const char* mac = btMacAddress.length() ? btMacAddress.c_str() : "-";
+  const char* rows[P5_ROWS][2] = {
+    { "Build",  __DATE__ },
+    { "Time",   __TIME__ },
+    // `unknown` is the honest answer, not a failure: it means this binary was
+    // not the one flash.sh stamped, so any SHA in NVS belongs to another build.
+    { "Commit", fwCommit[0] ? fwCommit : "unknown" },
+    { "Board",  BOARD_NAME },
+    { "BT MAC", mac },
+  };
+  for (int i = 0; i < P5_ROWS; i++)
+    uiListRow(CARD_X, P5_ROW_Y + i * P5_ROW_STEP, CARD_W, H_ROW,
+              rows[i][0], false, rows[i][1]);
+  uiHint("unknown = flashed outside flash.sh", P5_HINT_Y);
+}
+#endif  // !BOARD_USES_TFT_ESPI - the About group is board 2's
 void drawMessagesPageStatic() {
   drawGroupCaption("HOW MY MESSAGES LAND", P4_CAP_Y);
   uiHint("the Mac can override this", P4_HINT_Y);
@@ -1555,6 +1588,7 @@ void drawSettingsStatic() {
   else if (settingsPage == SET_SOUND)   drawSoundPageStatic();
   else if (settingsPage == SET_PAIRING) drawHostsPageStatic();
   else if (settingsPage == SETTINGS_PAGE_MESSAGES) drawMessagesPageStatic();
+  else if (settingsPage == SET_ABOUT)   drawAboutPageStatic();
   else                                  drawActionsPageStatic();
 #else
   tft.fillRect(0, PAGE_TOP, tft.width(), contentBottom() - PAGE_TOP, COLOR_BG);

@@ -35,8 +35,8 @@ const K = {
   STEP_BTN_TOP:8, STEP_BTN_SIZE:64, STEP_BAR_H:8, STEP_BAR_GAP:10,
   SET_CAP_STEP:24,
   // HOME
-  HOME_Y0:54, HOME_ROW_H:58, HOME_GAP:10, HOME_Y0_BOT:8,
-  HOME_NAME_DY:8, HOME_SUB_DY:36,
+  HOME_Y0:54, HOME_ROW_H:50, HOME_GAP:8, HOME_Y0_BOT:8,
+  HOME_NAME_DY:8, HOME_SUB_DY:32,
   // Status
   ST_CONN_Y:116, ST_CONN_H:112, ST_PWR_Y:240, ST_PWR_H:112,
   ST_HOST_Y:364, ST_HOST_H:92,
@@ -287,6 +287,9 @@ const HOME_ROWS = [
   ["Sound",   "ON   volume MED   mic",      null],
   ["Pairing", "2 Macs   any may answer",    null],
   ["Messages","send NEXT",                  null],
+  // About sits BEFORE Actions: Actions is the only group that destroys state,
+  // and "destructive last" is the one ordering rule this menu protects.
+  ["About",   "Sep  9 2026",                null],
   ["Actions", "calibrate, pairing, power",  null],
 ];
 function homeScreen(p){

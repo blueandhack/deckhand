@@ -166,6 +166,32 @@ void sendSavingsLine() {
   sendLineToHost(line);
 }
 void loadLightIdle() { saveLightIdle = prefs.getBool("lightIdle", false); }
+// The stamp this binary would report, in one place so the setter and the
+// validator cannot disagree about its format.
+// THE DATE AND TIME ARE KEPT APART, and that was FORCED by board-baseline.mjs
+// rather than chosen. Composing them - `__DATE__ " " __TIME__`, or an snprintf
+// into a static buffer - puts a THIRD literal in the image, and the mask that
+// locates the sketch's stamp needs `hh:mm:ss\0Mmm dd yyyy\0BUILD ` CONTIGUOUS.
+// The new literal landed between the date and the anchor and the mask reported
+// "found 0" - the baseline refusing to run at all rather than silently masking
+// the wrong bytes, which is the behaviour that caught this.
+// Storing the two separately costs nothing: the About page shows them on
+// separate rows anyway, so no combined string was ever needed.
+void loadFwCommit() {
+  const String stamp = prefs.getString("fwStamp", "");
+  const String sha   = prefs.getString("fwSha", "");
+  // BOTH must agree. A SHA alone proves only that some flash.sh once ran here,
+  // not that it produced the binary now running.
+  if (sha.length() && stamp == String(BUILD_STAMP))
+    snprintf(fwCommit, sizeof(fwCommit), "%s", sha.c_str());
+  else
+    fwCommit[0] = '\0';
+}
+void saveFwCommit(const char* sha) {
+  prefs.putString("fwSha", sha);
+  prefs.putString("fwStamp", BUILD_STAMP);
+  snprintf(fwCommit, sizeof(fwCommit), "%s", sha);
+}
 void loadPwrOffMode() { pwrOffMode = prefs.getUInt("pwroffMode", 0); }
 void savePwrOffMode() { prefs.putUInt("pwroffMode", pwrOffMode); }
 

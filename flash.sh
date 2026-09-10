@@ -102,6 +102,11 @@ DOMAIN="gui/$(id -u)"
 
 WAS_SUPERVISED=0
 WAS_MANUAL=0
+# Set only by a SUCCESSFUL upload. The commit stamp below is gated on it because
+# stamping after a failed upload would attribute this commit to the firmware
+# still running - and "the About page shows a commit it is not running" is the
+# one failure that whole page exists to avoid.
+UPLOAD_OK=0
 
 restore() {
   if [ "$WAS_SUPERVISED" = "1" ]; then
@@ -111,6 +116,30 @@ restore() {
   elif [ "$WAS_MANUAL" = "1" ]; then
     echo "==> restarting host (was started by hand)"
     (cd host && open DeckhandBLE.app --args "$(pwd)/index.mjs")
+  fi
+  # ---- the commit stamp, board 2's SETTINGS > About ------------------------
+  # AFTER the host is back, because the trigger file is delivered BY the host.
+  # Board 2 only: board 1 has no About page and refuses FWSTAMP by name.
+  #
+  # The SHA is stored in NVS rather than compiled in, deliberately. A baked-in
+  # SHA would change both binaries on every commit, so board-baseline's
+  # byte-for-byte --check would report CHANGED for ever; worse, only flash.sh
+  # would inject it, so the binary being baselined would differ from the binary
+  # being flashed. The device pairs the SHA with the build stamp that was live
+  # when this landed and shows it only while that still matches, so a board
+  # flashed by any other route says `unknown` instead of lying.
+  if [ "$UPLOAD_OK" = "1" ] && [ "$BOARD" = "2" ]; then
+    SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "")
+    if [ -n "$SHA" ]; then
+      # A dirty tree is NOT the commit. Marked rather than hidden: "6ed2a8f+"
+      # says the flashed code was not exactly that commit, which is precisely
+      # what you need to know when a build behaves unexpectedly.
+      git diff --quiet HEAD 2>/dev/null || SHA="$SHA+"
+      for _ in $(seq 1 20); do pgrep -f 'MacOS/Deckhand' >/dev/null && break; sleep 0.5; done
+      sleep 2   # the host has to open the port before a command can reach it
+      echo "FWSTAMP $SHA" > "$HOME/.claude/deckhand-device-command"
+      echo "==> stamped commit $SHA"
+    fi
   fi
 }
 # Runs on success, failure, and Ctrl-C alike: leaving the display dead because an
@@ -145,4 +174,8 @@ if [ -z "$PORT" ]; then
 fi
 
 echo "==> uploading to $PORT"
-arduino-cli upload -p "$PORT" --fqbn "$FQBN_UPLOAD" "$SKETCH" | tail -3
+# pipefail in a subshell so the UPLOAD's status is seen rather than tail's -
+# without it every upload, including a failed one, would look successful here.
+if (set -o pipefail; arduino-cli upload -p "$PORT" --fqbn "$FQBN_UPLOAD" "$SKETCH" | tail -3); then
+  UPLOAD_OK=1
+fi

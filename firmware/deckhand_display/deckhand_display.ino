@@ -128,6 +128,18 @@ typedef esp_ble_gatts_cb_param_t BleCbParam;
 #endif
 #include <driver/gpio.h>
 #include <driver/rtc_io.h>
+// ONE literal, never two, and this is FORCED by firmware/board-baseline.mjs.
+// That tool masks the sketch's build stamp because it is toolchain-varying, and
+// it used to locate it as `hh:mm:ss\0Mmm dd yyyy\0` immediately before the
+// "BUILD " literal. String pooling decides that adjacency, not this file: adding
+// a handful of NVS key literals put `pwroffMode\0skipped\0poMv\0` between the
+// time and the date, and the mask reported "found 0" - refusing to run rather
+// than masking the wrong bytes, which is how this was caught. A single literal
+// cannot be split by pooling, and `Mmm dd yyyy hh:mm:ss` is distinctive enough
+// to locate on its own: the core's, the BTDM controller's and libbtbb's stamps
+// are all separate date/time PAIRS and match nothing.
+// The printed line is byte-for-byte what it always was.
+#define BUILD_STAMP (__DATE__ " " __TIME__)
 #include <esp_adc/adc_continuous.h>
 #include "Cozette6x13.h"
 #include "Terminus10x18b.h"
@@ -3519,6 +3531,31 @@ const int P4_HINT_Y  = P4_ROW_Y + (MSG_PRI_COUNT - 1) * P4_ROW_STEP + H_ROW + P4
 // no board header can name it.
 const int P4_LABEL_CHARS = (CARD_W - 2 * SP_3 - 2 * TEXT_ADV) / TEXT_ADV;
 
+#if !BOARD_USES_TFT_ESPI
+// ---- About: derived, the same chain shape P4 uses -------------------------
+const int P5_CAP_Y    = PAGE_TOP + P5_TOP;
+const int P5_ROW_Y    = P5_CAP_Y + SET_CAP_STEP;
+const int P5_ROW_STEP = H_ROW + P5_ROW_GAP;
+// From the LAST row's bottom, like P4's: the hint explains the block, so a
+// sixth row must MOVE it rather than have the row drawn through it.
+const int P5_HINT_Y   = P5_ROW_Y + (P5_ROWS - 1) * P5_ROW_STEP + H_ROW + P5_HINT_GAP;
+
+// THE COMMIT IS STORED AT FLASH TIME, NOT COMPILED IN, and that is a deliberate
+// trade against the board-baseline contract. A baked-in SHA changes both
+// binaries on EVERY commit, so --check would report CHANGED for ever unless the
+// SHA were masked too; worse, flash.sh would inject it while the plain
+// arduino-cli line in CLAUDE.md would not, so the binary being baselined would
+// not be the binary being flashed. Storing it in NVS leaves the image untouched.
+//
+// THE COST OF THAT IS A STAMP THAT CAN GO STALE, so it is made SELF-VALIDATING:
+// the build stamp live at the moment FWSTAMP arrived is stored beside the SHA,
+// and the SHA is only ever shown when that stamp still matches this binary's own
+// __DATE__ __TIME__. Flash by any other route and the stamps diverge and the page
+// says `unknown`. A version display that can lie is worse than none - it is the
+// one field a reader has no way to check.
+char fwCommit[16] = {0};   // "" means: not this build, so do not claim it
+#endif
+
 // Every consequential action confirms first. They all reach the same modal, so
 // the dialog is one component rather than one per action: it lives above the
 // page, swallows all other touches (including the pager) while it is up, and is
@@ -3639,7 +3676,7 @@ char volValCache[8] = "";
 // discipline exists to prevent. HOME_SUB_BYTES is HOME_SUB_CHARS + NUL, and the
 // text is padded to HOME_SUB_CHARS so the opaque box is a constant width and a
 // shrinking summary cannot leave the tail of a longer one behind.
-char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", "", ""};
+char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", "", "", ""};
 // The Status summary's colour is cached beside its text and busts it, the guard
 // battRowColorCache documents. Today the two cannot disagree - the colour keys off
 // the same link count the row's leading phrase spells out, so a flip always
@@ -5754,6 +5791,7 @@ void setup() {
 #if !BOARD_USES_TFT_ESPI
   loadLightIdle();
   loadPwrOffMode();
+  loadFwCommit();
   loadPwrOffRecord();
   // Best effort: on the common path a power-off ends by plugging USB in, so
   // Serial is up here and the receipt lands in the host log by itself. It is
@@ -5761,7 +5799,7 @@ void setup() {
   sendLineToHost(pwrOffReport);
 #endif
   loadMsgPriority();
-  Serial.printf("BUILD %s %s\n", __DATE__, __TIME__); // confirms which binary is live
+  Serial.printf("BUILD %s\n", BUILD_STAMP); // confirms which binary is live
   loadHostPairings(); // remote-answer auth keys (one per paired Mac)
   lastActivityMillis = millis(); // don't start the sleep countdown from millis()==0
   lastNonIdleMillis = millis();  // 20-min battery auto-sleep timer starts now
@@ -5893,6 +5931,11 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "behind !BOARD_USES_TFT_ESPI. Nothing here measured what that costs a plain ESP32, "
     "whose auto-deep-sleep backstop makes the blanked state a different question anyway. "
     "POWERPROBE works on this board and measures whatever state it is in." },
+  { "FWSTAMP",
+    "it records the git commit a flash came from, for board 2's SETTINGS > About page. This "
+    "board's settings are numeric pages with no About group (settings.ino), so nothing here "
+    "would ever display what it stored. The same build stamp is printed in this board's boot "
+    "BUILD line instead." },
   { "PWROFFMODE",
     "it selects which teardown steps board 2's POWER OFF performs - sleeping the ST77922, "
     "holding it in reset, powering down the ES8311, isolating the QSPI bus - none of which "
@@ -7111,6 +7154,26 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // clearing flags mid-blank and stranding what they had applied.
     savingsSync();
     sendSavingsLine();
+  } else if (buf == "FWSTAMP" || buf.startsWith("FWSTAMP ")) {
+    // Set by flash.sh straight after an upload; bare = report, and it writes
+    // nothing. Stored rather than compiled in so the image - and therefore the
+    // board-baseline contract - is untouched; see fwCommit's note.
+    String sha = buf.length() > 7 ? buf.substring(7) : String("");
+    sha.trim();
+    char line[160];
+    if (sha.length() > 12) {
+      snprintf(line, sizeof(line),
+               "FWSTAMP refused: \"%s\" is %u chars, the store holds 12 - pass a SHORT sha",
+               sha.c_str(), (unsigned) sha.length());
+      sendLineToHost(line);
+    } else {
+      if (sha.length()) saveFwCommit(sha.c_str());
+      snprintf(line, sizeof(line),
+               "FWSTAMP commit=%s build=%s%s", fwCommit[0] ? fwCommit : "unknown",
+               BUILD_STAMP,
+               fwCommit[0] ? "" : " (no stamp for THIS build - flashed another way)");
+      sendLineToHost(line);
+    }
   } else if (buf == "PWROFFMODE" || buf.startsWith("PWROFFMODE ")) {
     // BARE = REPORT, and it writes nothing. LIGHTIDLE taught that one the
     // expensive way: with no read-only form, a set command gets used to read
@@ -7670,7 +7733,7 @@ void loop() {
   if (millis() < 15000 && millis() - lastHelloMs > 2000) {
     lastHelloMs = millis();
     announceHello();
-    Serial.printf("BUILD %s %s\n", __DATE__, __TIME__);
+    Serial.printf("BUILD %s\n", BUILD_STAMP);
   }
 
   handleTouch();

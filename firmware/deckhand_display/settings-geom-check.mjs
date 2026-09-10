@@ -1095,6 +1095,12 @@ for (const b of [1, 2]) {
       const ids = [["SET_STATUS", c.SET_STATUS], ["SET_DISPLAY", c.SET_DISPLAY],
                    ["SET_SOUND", c.SET_SOUND], ["SET_PAIRING", c.SET_PAIRING],
                    ["SET_MESSAGES", c.SET_MESSAGES],
+                   // ABOUT sits here and not last, deliberately: Actions is the
+                   // only group that destroys state, and "destructive group
+                   // last" is the one ordering rule this list protects. This
+                   // array encodes the ORDER, so it is the place that fails if
+                   // anyone moves About past it.
+                   ["SET_ABOUT", c.SET_ABOUT],
                    ["SET_ACTIONS", c.SET_ACTIONS]];
       for (let i = 0; i < ids.length; i++)
         chk(ids[i][1] === c.SET_HOME + 1 + i,
@@ -1359,6 +1365,59 @@ for (const b of [1, 2]) {
     chk(c.P4_ROW_STEP === c.H_ROW + c.P4_ROW_GAP,
         `Messages: the step ${c.P4_ROW_STEP} is the row plus its gap (${c.H_ROW} + ${c.P4_ROW_GAP})`);
   }
+  // ---- the ABOUT page, board 2 only, same chain shape as Messages ----------
+  if (b === 2) {
+    const rows = c.P5_ROWS;
+    chk(Number.isInteger(rows) && rows >= 2,
+        `P5_ROWS parsed as ${rows} - every About assertion below is derived from it`);
+    const lastEnd = c.P5_ROW_Y + (rows - 1) * c.P5_ROW_STEP + c.H_ROW - 1;
+    const [hTop, hBot] = mcBox(b, T_META, c.P5_HINT_Y);
+    console.log(`  About: caption ${c.P5_CAP_Y}, rows ${c.P5_ROW_Y}..${lastEnd} ` +
+                `step ${c.P5_ROW_STEP}, hint ink ${hTop}..${hBot}, ` +
+                `${contentBottom - hBot - 1}px trailing air`);
+    chk(c.P5_CAP_Y >= c.PAGE_TOP,
+        `About: the caption starts ${c.P5_CAP_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
+    chk(c.P5_CAP_Y + lineHB(b, T_META) - 1 < c.P5_ROW_Y,
+        `About: the caption's ink clears the first row at ${c.P5_ROW_Y}`);
+    chk(hTop > lastEnd,
+        `About: the hint's ink starts ${hTop}, clear of the last row's bottom ${lastEnd}`);
+    chk(c.P5_ROW_STEP === c.H_ROW + c.P5_ROW_GAP,
+        `About: the step ${c.P5_ROW_STEP} is the row plus its gap (${c.H_ROW} + ${c.P5_ROW_GAP})`);
+    // The landing identity, for the reason P4_AIR_BOT's note gives: air that is
+    // not named is slack nothing constrains, and geom-sweep reports every
+    // constant above it as unguarded.
+    chk(hBot + 1 + c.P5_AIR_BOT === contentBottom,
+        `About: the page lands exactly - hint ink ends ${hBot}, + 1 + P5_AIR_BOT ${c.P5_AIR_BOT} == contentBottom ${contentBottom} (got ${hBot + 1 + c.P5_AIR_BOT})`);
+    chk(c.P5_AIR_BOT > 0,
+        `About: the trailing air is positive (${c.P5_AIR_BOT})`);
+  }
+  if (b === 1) {   // the sources are one text; assert them once, not per board
+    const ab = fnSrc(SETTINGS_INO, "void drawAboutPageStatic");
+    chk(ab.length > 0,
+        "About: drawAboutPageStatic parses - an empty body would satisfy every assertion below vacuously");
+    chk(/drawGroupCaption\("[^"]+", P5_CAP_Y\)/.test(ab),
+        "About: the caption is drawn at P5_CAP_Y");
+    chk(/uiHint\("[^"]+", P5_HINT_Y\)/.test(ab),
+        "About: the hint is drawn at P5_HINT_Y");
+    // THE ROW COUNT IS THE CONSTANT, not a literal. The geometry above is all
+    // derived from P5_ROWS, so a draw loop counting to something else would put
+    // a row through the hint while every arithmetic assertion still passed.
+    chk(/i < P5_ROWS/.test(ab),
+        "About: the draw loop counts with P5_ROWS, so geometry and drawing cannot disagree about how many rows there are");
+    chk(/P5_ROW_Y \+ i \* P5_ROW_STEP/.test(ab),
+        "About: rows are placed on the P5_ROW_Y/P5_ROW_STEP chain the assertions above check");
+    // UNLIKE every other group, this page is STATIC IN FULL - there is no
+    // renderAboutPage and there must not be a cache, because nothing on it
+    // moves. Asserted so a later reader does not add one out of symmetry.
+    chk(!/renderAboutPage/.test(SETTINGS_INO),
+        "About: there is NO render half - a build stamp, a commit and a MAC cannot change while the device runs, so a change-only cache would be cargo");
+    // The commit must degrade to a WORD, never to an empty cell: a blank value
+    // reads as a rendering fault, and this is the one field a reader cannot
+    // check against anything else.
+    chk(/fwCommit\[0\] \? fwCommit : "unknown"/.test(ab),
+        "About: an unstamped build shows `unknown` rather than an empty cell - the page must never imply a commit it is not running");
+  }
+
   // The MESSAGES page's DRAW SITES and HIT TEST, bound to their own function
   // bodies. Geometry alone would pass with the page never drawn, and with a hit
   // test that claimed a band the draw does not fill - the failure the retired

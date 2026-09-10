@@ -101,18 +101,26 @@ const MASK_TAIL_BYTES = 33; // image SHA-256 + checksum
 // Anchoring on "BUILD " selects exactly the one deckhand_display.ino creates, and
 // ties the mask to the line responsible for it - so editing that line makes this
 // fail loudly rather than quietly masking the wrong 20 bytes.
-const BUILD_STAMP_RE = /[0-2]\d:[0-5]\d:[0-5]\d\x00[A-Z][a-z]{2} [ \d]\d \d{4}\x00BUILD /g;
+// THE SKETCH'S OWN STAMP, now ONE literal rather than an adjacent pair.
+// This used to be /hh:mm:ss\0Mmm dd yyyy\0BUILD / - the pair, anchored on the
+// "BUILD " that followed it. That adjacency was never the sketch's to control:
+// STRING POOLING decides it, and a few new NVS key literals slid
+// `pwroffMode\0skipped\0poMv\0` between the time and the date, at which point
+// this found nothing and refused to run. The sketch now emits
+// `__DATE__ " " __TIME__` as a single literal (BUILD_STAMP), which pooling
+// cannot split, and which needs no anchor: the core's, the BTDM controller's and
+// libbtbb's stamps are all separate date/time PAIRS and cannot match this.
+const BUILD_STAMP_RE = /[A-Z][a-z]{2} [ \d]\d \d{4} [0-2]\d:[0-5]\d:[0-5]\d\x00/g;
 
 function buildStampRange(buf) {
   const text = buf.toString("latin1");
   const hits = [...text.matchAll(BUILD_STAMP_RE)];
   if (hits.length !== 1) return { range: null, count: hits.length };
-  // The anchor is matched but NOT masked: "BUILD " is an ordinary string literal
-  // and a change to it must still be detected. Only the timestamp ahead of it is
-  // toolchain-varying, so the mask stops at the date's NUL.
-  const ANCHOR = "BUILD ";
+  // The whole literal including its NUL, and nothing else. The "BUILD %s\n"
+  // format string is a SEPARATE literal that stays unmasked, so a change to the
+  // line itself is still caught - which is what the old anchor was protecting.
   const from = hits[0].index;
-  const to = from + hits[0][0].length - 1 - ANCHOR.length;
+  const to = from + hits[0][0].length - 1;
   return { range: { from, to, why: "__DATE__/__TIME__" }, count: 1 };
 }
 

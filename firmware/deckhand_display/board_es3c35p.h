@@ -1794,8 +1794,14 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 // checker that reads these ids. It failed loudly when this was split (seven
 // assertions reporting `undefined == NaN`) rather than passing over half of them,
 // which is the only reason this is a note instead of a defect.
-const int SET_HOME = 0, SET_STATUS = 1, SET_DISPLAY = 2, SET_SOUND = 3, SET_PAIRING = 4, SET_MESSAGES = 5, SET_ACTIONS = 6;
-const int SET_GROUP_COUNT = 6;   // SET_STATUS..SET_ACTIONS, contiguous by design
+const int SET_HOME = 0, SET_STATUS = 1, SET_DISPLAY = 2, SET_SOUND = 3, SET_PAIRING = 4, SET_MESSAGES = 5, SET_ABOUT = 6, SET_ACTIONS = 7;
+const int SET_GROUP_COUNT = 7;   // SET_STATUS..SET_ACTIONS, contiguous by design
+// ABOUT SITS BEFORE ACTIONS, NOT AT THE END, and that is the note above being
+// obeyed rather than ignored. It was asked for "at the end"; putting it there
+// would have demoted POWER OFF and RESET PAIRING out of last place, and the
+// reason Actions is last is the one ordering rule on this list that protects
+// anything. So About is last of the INFORMATIONAL groups and Actions is still
+// last outright.
 
 // HOME owns the WHOLE content area - there is no band above it, because the tab
 // bar already says SETTINGS and a second title would be chrome repeating itself.
@@ -1815,8 +1821,16 @@ const int SET_GROUP_COUNT = 6;   // SET_STATUS..SET_ACTIONS, contiguous by desig
 // because shrinking a face to fit one more row is how a menu becomes unreadable
 // one row at a time.
 const int HOME_Y0     = 54;
-const int HOME_ROW_H  = 58;
-const int HOME_GAP    = 10;
+// THE PITCH IS RE-DERIVED FOR SEVEN ROWS, not nudged. HOME's rows are required
+// to land EXACTLY on contentBottom() - settings-geom-check asserts the identity
+//   HOME_Y0 + n*HOME_ROW_H + (n-1)*HOME_GAP + HOME_Y0_BOT == contentBottom
+// - so adding About made the old 58/10 overflow by 68px. Searching the whole
+// (row height, gap) space for seven rows against contentBottom 460 returns
+// EXACTLY ONE integer solution, which is why these are the numbers:
+//   54 + 7*50 + 6*8 + 8 == 460
+// A row loses 8px of padding and keeps its fingertip target (50 >= TAP_MIN).
+const int HOME_ROW_H  = 50;
+const int HOME_GAP    = 8;
 const int HOME_Y0_BOT = 8;
 // Inside a row: name at T_HEAD, summary at T_BODY under it, chevron right.
 //   +0..+1    border
@@ -1830,7 +1844,10 @@ const int HOME_Y0_BOT = 8;
 // 2px border with room (8 >= 2 at the top, 51 <= 55 at the foot) and the two
 // lines still share no pixel row (31 < 36) - all four asserted, none assumed.
 const int HOME_NAME_DY = 8;
-const int HOME_SUB_DY  = 36;
+// FORCED FROM BOTH SIDES by the shorter row, and there is exactly one value
+// left: the summary must clear the card's bottom border (32 + 16 - 1 <= 50-2-1)
+// and must not overlap the 24px name above it (>= 8 + 24). Both meet at 32.
+const int HOME_SUB_DY  = 32;
 // The summary is COMPOSED each tick from live globals and drawn through
 // drawIfChanged, so it carries fixed-width padded text and its opaque box is a
 // constant 30 * TEXT_ADV = 240px. The lane it has to fit is the row's own text
@@ -2332,6 +2349,22 @@ const int P4_AIR_BOT  = 80;
 // P4_LABEL_CHARS is NOT here: it derives from SP_3, which no board header can
 // name (SP_1..SP_4 are declared in deckhand_display.ino after board.h), and it
 // is the same expression on both boards. It lives with the P4 chain there, once.
+
+// ---------- SETTINGS group: About ----------
+// Five read-only rows: what firmware this is, and what commit it came from.
+// The whole page is STATIC - a build stamp, a commit and a MAC cannot change
+// while the device is running - so it has no render half and no caches at all.
+// That is not a shortcut: a change-only cache exists to stop a repaint of a
+// value that MOVES, and a page with nothing moving needs none.
+const int P5_TOP      = 12;   // PAGE_TOP -> the caption, level with P1/PS/P2/P4
+const int P5_ROW_GAP  = 6;    // between two rows
+const int P5_HINT_GAP = 24;   // the last row's bottom -> the hint's MC_DATUM centre
+const int P5_ROWS     = 5;    // Build / Time / Commit / Board / BT MAC
+// The trailing air, NAMED and asserted as an identity, for the reason P4_AIR_BOT
+// spells out: air that is not named is slack no assertion constrains, and
+// geom-sweep reports every constant above it as unguarded.
+//   hint ink bottom + 1 + P5_AIR_BOT == contentBottom()
+const int P5_AIR_BOT  = 32;
 
 // ---------- SETTINGS group: Actions ----------
 // Geometry is settings.js `bActions`.
