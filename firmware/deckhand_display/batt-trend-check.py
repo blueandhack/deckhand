@@ -787,8 +787,19 @@ edc = strip_comments(ed) if ed else None
 # with DEFAULT 0 - the original behaviour, kept as the baseline to compare
 # against. An assertion still claiming "POWER OFF sleeps the panel" would be
 # describing a step that is off by default.
-check("the teardown mode defaults to 0, so the baseline is the ORIGINAL teardown",
-      re.search(r"uint32_t\s+pwrOffMode\s*=\s*0\s*;", MAIN) is not None)
+# THE DEFAULT MOVED, AND SO DOES THIS ASSERTION. It used to require 0 - correct
+# while every step was a guess, since a saving defaulting ON silently optimises
+# the "before" leg of the next A/B. That expired when the combination was
+# MEASURED at -3.6 mV/h against -5.6 for the original teardown, so the default is
+# now the measured combination and this asserts THAT, by name, rather than a
+# literal that would pass for any value.
+check("the teardown default is the MEASURED combination, not a bare literal",
+      re.search(r"uint32_t\s+pwrOffMode\s*=\s*PWROFF_PANEL_SLEEP\s*\|\s*"
+                r"PWROFF_IC_RESET\s*\|\s*PWROFF_CODEC_DOWN\s*;", MAIN) is not None)
+# The one step the evidence is AGAINST must stay out of the default - it was
+# never in the combination that was measured.
+check("QSPI_ISOLATE is NOT in the default - it was not in the tested combination",
+      re.search(r"uint32_t\s+pwrOffMode\s*=[^;]*PWROFF_QSPI_ISOLATE", MAIN) is None)
 bits = {}
 for nm in ("PWROFF_PANEL_SLEEP", "PWROFF_IC_RESET", "PWROFF_CODEC_DOWN",
            "PWROFF_QSPI_ISOLATE"):

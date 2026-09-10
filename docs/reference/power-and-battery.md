@@ -152,6 +152,46 @@ false reading — exactly the "a checker must PARSE the constant it certifies, n
 rule, arriving from a new direction. All three mutations (`BATT_ROW_CACHE` → 20, `DEV_CARD_H` → 176,
 `DROW_TEMP` removed) fail by name.
 
+#### THE POWER-OFF DRAIN IS HALVED, MEASURED - and the first two attempts at it did nothing
+
+**`PWROFFMODE 0x7` (panel SLPIN + hold the ST77922 in reset + power down the ES8311) is now the
+default**, on this evidence:
+
+| teardown | drain | %/h | span | note |
+|---|---|---|---|---|
+| original (nothing extra) | **-5.6 mV/h** | 0.71 | 23.0 h | 4106 -> 3977 mV |
+| panel sleep + QSPI isolate | **-6.9 mV/h** | 0.86 | 19.4 h | 4113 -> 3979 mV, shipped blind, NO HELP |
+| **0x7** | **-3.6 mV/h** | **0.43** | 8.9 h | 4077 -> 4045 mV, `sleepPanel=ok` |
+
+About HALF - roughly 10%/day where it was 17-21%/day. **The comparison errs against the result:**
+this run sat entirely in 4045..4077 where `pctFromMv()`'s curve is STEEPER (8.3 mV per point) than
+the band the references spanned, so equal current would have read a LARGER mV/h here, not smaller.
+Converting all three to %/h - which normalises that away - gives the same 1.7-2x.
+
+**THREE CAVEATS, ALL LOAD-BEARING.**
+1. **The elapsed time is RECONSTRUCTED, not measured**: 8.94 h from 1761 host ticks (2.45 h) plus
+   23,364 s of logged "machine was asleep" (6.49 h). The host log carries NO TIMESTAMPS, which is
+   the real gap here; any error in that reconstruction scales the rate directly.
+2. **One unbracketed run.** Nothing repeated it, and nothing bracketed it.
+3. **Attribution is unknown.** All three steps ran together. Which one did the work was not
+   narrowed, deliberately: all three are free during a power-off (nothing can wake this board by
+   touch), so the combination is what ships.
+
+**IT HALVED RATHER THAN COLLAPSED**, which is consistent with a board-level floor no firmware can
+reach - an AMS1117-class LDO is ~5mA and a power LED 2-3mA, against an S3 deep sleep of tens of uA.
+Reaching the rest means an inline switch on the JP1 battery lead or an LED/LDO rework. `README.md`
+has said as much all along: *"'Off' is deep sleep, a few mA, not a hard power cut ... For true zero
+draw, unplug the battery."*
+
+**AND THE TWO ATTEMPTS BEFORE THIS ONE DID NOTHING, WHICH IS THE TRANSFERABLE PART.** Both were
+shipped on reasoning, unmeasured, and the second one measured slightly WORSE than doing nothing.
+What broke the deadlock was not a better theory but an INSTRUMENT: a runtime bitmask so one build
+tests every combination, plus an NVS receipt written before the teardown and reported on the next
+boot - which also ended the ambiguity that wasted two days, because a power-off now leaves a record
+and a light sleep does not. `sleepPanel=ok` in that receipt is what finally ruled out the "the call
+silently never ran" explanation, which had been indistinguishable from "it ran and did nothing"
+because the first version discarded the return value.
+
 #### "POWER OFF" LEAKED ~17%/DAY ON BOARD 2, AND THE CAUSE IS A NO-OP
 
 **Measured by accident, which is the only reason it was found.** The device was shut down and

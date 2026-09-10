@@ -711,7 +711,23 @@ bool saveLightIdle = false;
 #define PWROFF_CODEC_DOWN   0x4   // ES8311 reset register - never once done
 #define PWROFF_QSPI_ISOLATE 0x8   // float the panel bus. Kept only so it can be
                                   // COMPARED; the evidence so far is against it.
-uint32_t pwrOffMode = 0;
+// DEFAULT 0x7, AND THE DEFAULT MOVED BECAUSE THE ANSWER WAS SEEN. It shipped as
+// 0 while every step was a guess - a saving defaulting ON silently optimises the
+// "before" leg of every future A/B, which poisons a measurement rather than
+// breaking it. That reasoning expired the moment there was a number:
+//
+//   original teardown   -5.6 mV/h (0.71 %/h)   23.0 h
+//   panel sleep+isolate -6.9 mV/h (0.86 %/h)   19.4 h
+//   THIS (0x7)          -3.6 mV/h (0.43 %/h)    8.9 h, sleepPanel=ok
+//
+// About half, ~10%/day instead of ~17-21%/day. Measured in a band where
+// pctFromMv's curve is STEEPER than the references', so equal current would have
+// read a LARGER mV/h here - the comparison errs against the result, not for it.
+// QSPI_ISOLATE is deliberately NOT in the default: it was never in the tested
+// combination and the evidence is against it.
+// 0 remains reachable and still means the original teardown, so the baseline can
+// always be reproduced on the same cell.
+uint32_t pwrOffMode = PWROFF_PANEL_SLEEP | PWROFF_IC_RESET | PWROFF_CODEC_DOWN;
 // What the last power-off left behind, read and CLEARED on the next boot. The
 // device cannot time its own outage - a hard reset takes RTC memory with it - so
 // this carries the mV and the mode and lets the MAC's clock supply the elapsed
