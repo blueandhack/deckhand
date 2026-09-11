@@ -711,6 +711,12 @@ bool saveLightIdle = false;
 #define PWROFF_CODEC_DOWN   0x4   // ES8311 reset register - never once done
 #define PWROFF_QSPI_ISOLATE 0x8   // float the panel bus. Kept only so it can be
                                   // COMPARED; the evidence so far is against it.
+// THESE TWO ARE HYGIENE, NOT CLAIMED SAVINGS, and they are bits so they can be
+// taken back out. The -3.6 mV/h above was measured at 0x7, BEFORE them; neither
+// is expected to be visible in a measurement and saying so now is cheaper than
+// discovering later that a figure was credited to the wrong change.
+#define PWROFF_LED_LOW      0x10  // hold the WS2812's data line low
+#define PWROFF_RTC_OFF      0x20  // power down the RTC domains
 // DEFAULT 0x7, AND THE DEFAULT MOVED BECAUSE THE ANSWER WAS SEEN. It shipped as
 // 0 while every step was a guess - a saving defaulting ON silently optimises the
 // "before" leg of every future A/B, which poisons a measurement rather than
@@ -727,7 +733,8 @@ bool saveLightIdle = false;
 // combination and the evidence is against it.
 // 0 remains reachable and still means the original teardown, so the baseline can
 // always be reproduced on the same cell.
-uint32_t pwrOffMode = PWROFF_PANEL_SLEEP | PWROFF_IC_RESET | PWROFF_CODEC_DOWN;
+uint32_t pwrOffMode = PWROFF_PANEL_SLEEP | PWROFF_IC_RESET | PWROFF_CODEC_DOWN
+                    | PWROFF_LED_LOW | PWROFF_RTC_OFF;
 // What the last power-off left behind, read and CLEARED on the next boot. The
 // device cannot time its own outage - a hard reset takes RTC memory with it - so
 // this carries the mV and the mode and lets the MAC's clock supply the elapsed
@@ -7202,13 +7209,15 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     }
     char line[200];
     snprintf(line, sizeof(line),
-             "PWROFFMODE 0x%lX (panelSleep=%d icReset=%d codecDown=%d qspiIsolate=%d)"
-             " - 0 is the original teardown, the baseline to compare against",
+             "PWROFFMODE 0x%lX (panelSleep=%d icReset=%d codecDown=%d qspiIsolate=%d "
+             "ledLow=%d rtcOff=%d) - 0 is the original teardown, the baseline",
              (unsigned long) pwrOffMode,
              (pwrOffMode & PWROFF_PANEL_SLEEP) ? 1 : 0,
              (pwrOffMode & PWROFF_IC_RESET) ? 1 : 0,
              (pwrOffMode & PWROFF_CODEC_DOWN) ? 1 : 0,
-             (pwrOffMode & PWROFF_QSPI_ISOLATE) ? 1 : 0);
+             (pwrOffMode & PWROFF_QSPI_ISOLATE) ? 1 : 0,
+             (pwrOffMode & PWROFF_LED_LOW) ? 1 : 0,
+             (pwrOffMode & PWROFF_RTC_OFF) ? 1 : 0);
     sendLineToHost(line);
     sendLineToHost(pwrOffReport);
   } else if (buf == "SAVINGS") {
@@ -7814,6 +7823,16 @@ void loop() {
     autoDeepSleep();
   }
 #else
+  // AUTO POWER-OFF ON BOARD 2, at AUTO_POWEROFF_MS rather than board 1's
+  // AUTO_SLEEP_IDLE_MS, and reached through the SAME three gates board 1 uses -
+  // genuinely off USB, a battery actually present, and idle. See
+  // AUTO_POWEROFF_MS in board_es3c35p.h for why the objection below no longer
+  // holds once LIGHTIDLE has already taken this device off the air.
+  if (!onUsbPower && batteryPresent() && millis() - lastNonIdleMillis > AUTO_POWEROFF_MS) {
+    autoPowerOff();
+  }
+  // THE NOTE BELOW IS KEPT, NOT DELETED, because it is still exactly right about
+  // deep sleep's wake sources - it is the CONCLUSION that changed, not the facts.
   // NO AUTO-SLEEP ON A BOARD THAT CANNOT WAKE ITSELF. Auto-sleep's whole purpose
   // is saving battery on a device you will wake with a touch - and this chip has
   // no touch wake at all, because ext0/ext1 accept only an RTC GPIO and the S3's

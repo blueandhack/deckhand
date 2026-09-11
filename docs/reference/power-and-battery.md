@@ -152,6 +152,57 @@ false reading — exactly the "a checker must PARSE the constant it certifies, n
 rule, arriving from a new direction. All three mutations (`BATT_ROW_CACHE` → 20, `DEV_CARD_H` → 176,
 `DROW_TEMP` removed) fail by name.
 
+#### AUTO POWER-OFF: the saving existed and was simply never REACHED
+
+Power-off measures at **-3.6 mV/h** and light sleep at **-6.9**, and the everyday pattern - unplug
+and walk away - lands on the WORSE one. A 13-hour absence was measured doing exactly that: no
+`PWROFF` record, so it had light-slept the whole time. **The fix was in a path the device rarely
+entered.** `AUTO_POWEROFF_MS` (2h, board 2) now routes it there on its own.
+
+**THIS REOPENS A DECISION THAT WAS CLOSED, AND THE OLD REASONING IS KEPT IN PLACE rather than
+deleted.** `BOARD_HAS_TOUCH_SLEEP_WAKE`'s note refuses auto-sleep here because this board cannot
+wake itself on a touch, so it would become *"a status display that has silently become a brick
+until someone walks over"*. That was written before `LIGHTIDLE`, and it is much weaker now: with
+light sleep on, a blanked device on battery is ALREADY off the air - radio down, unreachable, and
+showing stale data until a finger arrives. Auto power-off costs no reachability light sleep had not
+already taken; it costs TOUCH-to-wake, replaced by RESET. **Two hours**, not board 1's twenty
+minutes: the objection is being met by a dead screen after stepping away, and at two hours you have
+not stepped away, you have left.
+
+**LIGHT SLEEP WOULD HAVE MADE THE DEADLINE UNREACHABLE, SILENTLY.** `esp_light_sleep_start()` stops
+`loop()` dead, so the check that fires `autoPowerOff()` never runs - the two features cancelling
+each other with no symptom but the drain. `enterLightIdle()` therefore arms a TIMER for the
+remaining time as well as the touch GPIO: one wake AT the deadline, with `loop()` re-evaluating its
+own gates on the way past so nothing is duplicated. Asserted, because nothing else would have
+noticed.
+
+**`autoPowerOff()` draws NO farewell**, unlike board 1's `autoDeepSleep()` which lights the panel to
+show one. That is right at twenty minutes, when somebody may still be in the room; at two hours,
+lighting a 320x480 panel to say goodbye to an empty room spends the very thing it is saving.
+
+#### Two hygiene steps that are NOT claimed as savings
+
+`PWROFF_LED_LOW` and `PWROFF_RTC_OFF`, in the default as `0x37`. **The -3.6 mV/h above was measured
+at 0x7, BEFORE both**, and neither is expected to be visible.
+
+- **The RGB LED.** `PIN_RGB_LED` is a WS2812-style part the firmware NEVER drives, which is why
+  nothing is lit. Dark is not off - its controller draws roughly 1mA (datasheet-typical, not
+  measured here) whenever powered, and only losing that supply stops it. This holds its data line
+  LOW through sleep as INSURANCE: a floating WS2812 data line can latch noise as a colour, which
+  would cost far more than the quiescent it cannot avoid. GPIO40 is outside the RTC set, so it takes
+  `gpio_hold_en`, not `rtc_gpio_isolate`.
+- **RTC_PERIPH, and only that one - the SILICON, not a choice.** `RTC_SLOW_MEM` and `RTC_FAST_MEM`
+  were tried and WOULD NOT COMPILE: every entry of `esp_sleep_pd_domain_t` sits behind a
+  `SOC_PM_SUPPORT_*_PD` capability and `esp32s3/soc_caps.h` defines only
+  `SOC_PM_SUPPORT_RTC_PERIPH_PD`. The S3 cannot gate the other two at all.
+
+**A LITERAL NVS FALLBACK SILENTLY DISCARDED THE COMPILED DEFAULT, and only the device said so.**
+`loadPwrOffMode()` read `prefs.getUInt("pwroffMode", 0)`, so a fresh NVS loaded 0 regardless of what
+the source said - changing the C++ default changed nothing. Found by asking the device after a
+flash: it answered `0x7` against a source that said `0x37`. The fallback is now the compiled default
+and that is asserted. **Every bit is in the report line too**, for the same reason `SAVINGS` gained
+a read-only form: a bit you cannot see is a setting you cannot verify.
+
 #### THE POWER-OFF DRAIN IS HALVED, MEASURED - and the first two attempts at it did nothing
 
 **`PWROFFMODE 0x7` (panel SLPIN + hold the ST77922 in reset + power down the ES8311) is now the
@@ -178,10 +229,26 @@ Converting all three to %/h - which normalises that away - gives the same 1.7-2x
    touch), so the combination is what ships.
 
 **IT HALVED RATHER THAN COLLAPSED**, which is consistent with a board-level floor no firmware can
-reach - an AMS1117-class LDO is ~5mA and a power LED 2-3mA, against an S3 deep sleep of tens of uA.
-Reaching the rest means an inline switch on the JP1 battery lead or an LED/LDO rework. `README.md`
-has said as much all along: *"'Off' is deep sleep, a few mA, not a hard power cut ... For true zero
-draw, unplug the battery."*
+reach. The FLOOR is measured; what makes it up is NOT, and an earlier version of this paragraph
+blurred those together.
+
+> **CORRECTED - the "power LED" here was never on this board.** This said the remainder was "an
+> AMS1117-class LDO at ~5mA and a power LED 2-3mA". Both figures came from generic ESP32 dev-board
+> literature and NEITHER was checked against the ES3C35P. Caught by the owner simply looking at the
+> hardware and asking why no LED was lit. There is **no power LED documented on this board** - the
+> only one in the header is `PIN_RGB_LED 40`, an addressable WS2812-style RGB that the firmware
+> **never drives**, which is exactly why nothing is visible. That part is still not free: a WS2812's
+> controller draws roughly 1mA (datasheet-typical, NOT measured here) whenever it has power, showing
+> black or not, and only losing its supply stops it. The regulator part number is likewise unknown -
+> the vendor page omits it and there is no schematic in this repo.
+>
+> So: the remaining ~10%/day is real and measured. Attributing it to named parts is guesswork until
+> somebody puts a meter in series with the cell, and it should not be written as though it were not.
+
+Reaching the rest means an inline switch on the JP1 battery lead - which cuts everything regardless
+of which part is responsible, and is why the advice does not depend on the attribution being right.
+`README.md` has said as much all along: *"'Off' is deep sleep, a few mA, not a hard power cut ...
+For true zero draw, unplug the battery."*
 
 **AND THE TWO ATTEMPTS BEFORE THIS ONE DID NOTHING, WHICH IS THE TRANSFERABLE PART.** Both were
 shipped on reasoning, unmeasured, and the second one measured slightly WORSE than doing nothing.

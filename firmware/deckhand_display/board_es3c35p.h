@@ -91,6 +91,27 @@ const int PAIR_HOSTID_CHARS = 8;     // a hostId is EXACTLY 8 hex characters (th
 // with the millis() the whole UI schedules on, none of which this port measured.
 #define BOARD_HAS_TOUCH_SLEEP_WAKE 0
 
+// AUTO POWER-OFF, and it REOPENS the decision the paragraph above closed.
+// That paragraph refuses auto-sleep here because this board cannot wake itself
+// with a touch, so it would become "a status display that has silently become a
+// brick until someone walks over". That was written before LIGHTIDLE existed and
+// it is much weaker now: with light sleep on, a blanked device on battery is
+// ALREADY off the air - radio down, unreachable from the Mac, showing stale data
+// until a finger arrives. Auto power-off therefore costs no reachability that
+// light sleep had not already taken. What it costs is TOUCH-to-wake, replaced by
+// the RESET button.
+//
+// It is worth that because the two states are now MEASURED and they are not
+// close: power-off is -3.6 mV/h (~10%/day) against light sleep's -6.9 (~17-20%).
+// The saving existed and was simply never reached, because reaching it meant
+// walking over and pressing a button.
+//
+// TWO HOURS, not board 1's twenty minutes. The whole objection is being woken by
+// a dead screen after stepping away, and at two hours you have not stepped away,
+// you have left. Long enough that the brick case is rare; short enough that an
+// overnight absence spends almost all of itself in the cheaper state.
+#define AUTO_POWEROFF_MS (2UL * 60 * 60 * 1000)
+
 // How long loop() yields per iteration while the screen is BLANKED, so the core
 // can actually idle. It is a yield, not a sleep: the Arduino loop task never
 // blocks on its own, so the FreeRTOS idle task on this core never runs and the

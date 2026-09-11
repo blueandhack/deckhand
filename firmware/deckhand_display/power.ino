@@ -142,10 +142,20 @@ void enterLightIdle() {
   // leaving a device that ignores the first tap.
   gpio_wakeup_enable((gpio_num_t) PIN_TOUCH_INT, GPIO_INTR_LOW_LEVEL);
   esp_sleep_enable_gpio_wakeup();
+  // A TIMER TOO, OR THE AUTO POWER-OFF DEADLINE CAN NEVER ARRIVE. Light sleep
+  // stops loop() dead, so the check that fires autoPowerOff() never runs -
+  // LIGHTIDLE would silently make AUTO_POWEROFF_MS unreachable, the two features
+  // cancelling each other out with nothing anywhere to say so. One wake AT the
+  // deadline rather than polling: loop() re-evaluates its own gates on the way
+  // past, so nothing here duplicates them or decides anything.
+  const unsigned long idle = millis() - lastNonIdleMillis;
+  const bool armed = idle < AUTO_POWEROFF_MS;
+  if (armed) esp_sleep_enable_timer_wakeup((uint64_t)(AUTO_POWEROFF_MS - idle) * 1000ULL);
   esp_light_sleep_start();
   // Disarmed on the way out so the wake source cannot outlive the state that
   // wanted it - the same rule LIGHTSLEEP's disarm follows.
   gpio_wakeup_disable((gpio_num_t) PIN_TOUCH_INT);
+  if (armed) esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
   // The radio went down with the CPU, so the link is gone and the Mac is
   // re-scanning. Advertise at once rather than waiting up to 5s for loop()'s
   // watchdog: this is the path a person is standing in front of.
@@ -192,7 +202,12 @@ void saveFwCommit(const char* sha) {
   prefs.putString("fwStamp", BUILD_STAMP);
   snprintf(fwCommit, sizeof(fwCommit), "%s", sha);
 }
-void loadPwrOffMode() { pwrOffMode = prefs.getUInt("pwroffMode", 0); }
+// THE FALLBACK IS THE COMPILED DEFAULT, NOT A LITERAL ZERO, and the literal was
+// a real bug: with `getUInt(..., 0)` a device with no stored value loaded 0 and
+// threw away whatever pwrOffMode was initialised to, so changing the C++ default
+// changed NOTHING on a fresh NVS. Found by asking the device after a flash - it
+// answered 0x7 where the source said 0x37.
+void loadPwrOffMode() { pwrOffMode = prefs.getUInt("pwroffMode", pwrOffMode); }
 void savePwrOffMode() { prefs.putUInt("pwroffMode", pwrOffMode); }
 
 // Reads what the last power-off recorded, and CLEARS it so the line appears
@@ -1116,6 +1131,33 @@ void enterDeepSleep() {
     (gpio_num_t) PIN_LCD_CS,  (gpio_num_t) PIN_LCD_SCK, (gpio_num_t) PIN_LCD_D0,
     (gpio_num_t) PIN_LCD_D1,  (gpio_num_t) PIN_LCD_D2,  (gpio_num_t) PIN_LCD_D3,
   };
+  // 4. HOLD THE RGB LED'S DATA LINE LOW. PIN_RGB_LED is a WS2812-style
+  //    addressable LED that this firmware NEVER drives, so it is dark - which is
+  //    why nobody sees it. Dark is not off: its controller draws around a
+  //    milliamp (datasheet-typical, NOT measured here) whenever it has power, and
+  //    only losing that supply stops it, which no pin here can do. This is
+  //    INSURANCE, not a saving: in deep sleep the pin floats, and a floating
+  //    WS2812 data line can latch noise as a colour - which would cost far more
+  //    than the quiescent it cannot avoid.
+  if (pwrOffMode & PWROFF_LED_LOW) {
+    pinMode(PIN_RGB_LED, OUTPUT);
+    digitalWrite(PIN_RGB_LED, LOW);
+    gpio_hold_en((gpio_num_t) PIN_RGB_LED);
+  }
+  // 5. POWER DOWN THE RTC PERIPHERAL DOMAIN. This board arms NO wake source at
+  //    all, so nothing in it has to survive - and RTC memory is lost to the reset
+  //    that ends this sleep regardless, which is why there is no SLEEP report on
+  //    this board.
+  //    ONE DOMAIN, NOT THREE, AND THAT IS THE SILICON RATHER THAN A CHOICE.
+  //    RTC_SLOW_MEM and RTC_FAST_MEM were tried and would not compile: every
+  //    entry of esp_sleep_pd_domain_t sits behind a SOC_PM_SUPPORT_*_PD
+  //    capability, and esp32s3/soc_caps.h defines only SOC_PM_SUPPORT_RTC_PERIPH_PD
+  //    - the other two are absent, so the S3 cannot gate those domains at all.
+  //    Expect tens of microamps against a floor of milliamps: correct, and almost
+  //    certainly invisible. It is here because it is free, not because it will show.
+  if (pwrOffMode & PWROFF_RTC_OFF)
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
+
   if (pwrOffMode & PWROFF_QSPI_ISOLATE)
     for (unsigned i = 0; i < sizeof(qspi) / sizeof(qspi[0]); i++) rtc_gpio_isolate(qspi[i]);
   // NOT powering down VDD_SPI here, and that is a REVERSAL of an earlier guess.
@@ -1163,6 +1205,19 @@ void enterDeepSleep() {
 #endif
   esp_deep_sleep_start();
 }
+#if !BOARD_USES_TFT_ESPI
+// The automatic counterpart of powerOff(), and it deliberately draws NO
+// farewell. Board 1's autoDeepSleep() raises the backlight to show one, which is
+// right there: it fires after twenty minutes, when somebody may still be in the
+// room. This fires after TWO HOURS, at which point lighting a 320x480 panel to
+// say goodbye to an empty room spends exactly the thing it is here to save.
+// The screen is already blanked; it simply stays that way.
+void autoPowerOff() {
+  Serial.printf("POWER: auto power-off after %lu min idle on battery - RESET to wake\n",
+                AUTO_POWEROFF_MS / 60000UL);
+  enterDeepSleep();
+}
+#endif
 void powerOff() {
   Serial.println("POWER: shutting down (deep sleep, touch to wake)");
 

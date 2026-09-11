@@ -793,22 +793,30 @@ edc = strip_comments(ed) if ed else None
 # MEASURED at -3.6 mV/h against -5.6 for the original teardown, so the default is
 # now the measured combination and this asserts THAT, by name, rather than a
 # literal that would pass for any value.
-check("the teardown default is the MEASURED combination, not a bare literal",
-      re.search(r"uint32_t\s+pwrOffMode\s*=\s*PWROFF_PANEL_SLEEP\s*\|\s*"
-                r"PWROFF_IC_RESET\s*\|\s*PWROFF_CODEC_DOWN\s*;", MAIN) is not None)
+# THE DEFAULT MUST CARRY ALL THREE MEASURED BITS, asserted one at a time rather
+# than as one exact expression: hygiene bits were added to the default later, and
+# an exact match would have had to be rewritten for each - which is how an
+# assertion quietly becomes a transcription of whatever the code currently says.
+_dflt = re.search(r"uint32_t\s+pwrOffMode\s*=([^;]*);", MAIN)
+check("the teardown default is an expression of named bits, not a literal",
+      _dflt is not None and "PWROFF_" in _dflt.group(1)
+      and not re.search(r"=\s*0x?[0-9A-Fa-f]+\s*$", _dflt.group(1).strip()))
+for nm in ("PWROFF_PANEL_SLEEP", "PWROFF_IC_RESET", "PWROFF_CODEC_DOWN"):
+    check(f"the default keeps the MEASURED bit {nm}",
+          _dflt is not None and nm in _dflt.group(1))
 # The one step the evidence is AGAINST must stay out of the default - it was
 # never in the combination that was measured.
 check("QSPI_ISOLATE is NOT in the default - it was not in the tested combination",
-      re.search(r"uint32_t\s+pwrOffMode\s*=[^;]*PWROFF_QSPI_ISOLATE", MAIN) is None)
+      _dflt is not None and "PWROFF_QSPI_ISOLATE" not in _dflt.group(1))
 bits = {}
 for nm in ("PWROFF_PANEL_SLEEP", "PWROFF_IC_RESET", "PWROFF_CODEC_DOWN",
-           "PWROFF_QSPI_ISOLATE"):
+           "PWROFF_QSPI_ISOLATE", "PWROFF_LED_LOW", "PWROFF_RTC_OFF"):
     m = re.search(rf"#define\s+{nm}\s+(0x[0-9A-Fa-f]+|\d+)", MAIN)
     check(f"{nm} is defined", m is not None)
     if m:
         bits[nm] = int(m.group(1), 0)
-check("the four teardown bits are distinct single bits",
-      len(bits) == 4 and len(set(bits.values())) == 4
+check("every teardown bit is a distinct single bit",
+      len(bits) == 6 and len(set(bits.values())) == 6
       and all(v and not (v & (v - 1)) for v in bits.values()))
 for nm in bits:
     check(f"the {nm} step is GATED on its own bit",
@@ -832,6 +840,94 @@ check("the display-IC reset is HELD through sleep (48 is not an RTC GPIO)",
 check("the reset is driven ACTIVE LOW, as the header says the pin is",
       edc is not None and re.search(r"digitalWrite\(PIN_TOUCH_RST,\s*LOW\)", edc) is not None)
 
+# ---- the two hygiene steps, which are NOT claimed as savings --------------
+# GPIO40 is outside the RTC set (0..21) so it takes a hold, not an isolate - the
+# same distinction the backlight on 41 already turns on.
+check("the RGB LED's data line is driven LOW and HELD",
+      edc is not None and "PIN_RGB_LED" in edc
+      and re.search(r"digitalWrite\(PIN_RGB_LED,\s*LOW\)", edc) is not None
+      and "gpio_hold_en" in edc)
+# ONE domain, and asserting the other two would be asserting a compile error:
+# esp_sleep_pd_domain_t's entries are behind SOC_PM_SUPPORT_*_PD, and the S3
+# defines only SOC_PM_SUPPORT_RTC_PERIPH_PD. Naming the two it lacks is how this
+# was found - they did not compile.
+check("ESP_PD_DOMAIN_RTC_PERIPH is powered down - nothing here survives the reset",
+      edc is not None and "ESP_PD_DOMAIN_RTC_PERIPH" in edc)
+check("the two domains this silicon cannot gate are NOT named",
+      edc is not None and "RTC_SLOW_MEM" not in edc and "RTC_FAST_MEM" not in edc)
+
+# ---- AUTO POWER-OFF, and the interaction that would have silently killed it -
+m = re.search(r"#define\s+AUTO_POWEROFF_MS\s+\(([^)]*)\)", B2H)
+check("AUTO_POWEROFF_MS is a #define in board 2's header", m is not None)
+_ms = None
+if m:
+    try: _ms = eval(m.group(1).replace("UL", ""))
+    except Exception: _ms = None
+check("AUTO_POWEROFF_MS is hours, not minutes - the brick case is the objection",
+      _ms is not None and 30*60*1000 <= _ms <= 12*60*60*1000)
+# AUTO_SLEEP_IDLE_MS lives in the SKETCH, not power.ino, and is an expression
+# rather than a literal - firmware_const() reads power.ino and exited by name
+# here, which is the parse discipline working rather than a nuisance.
+_m1 = re.search(r"AUTO_SLEEP_IDLE_MS\s*=\s*([^;]+);", MAIN)
+_b1 = None
+if _m1:
+    try: _b1 = eval(_m1.group(1).replace("UL", ""))
+    except Exception: _b1 = None
+check("board 1's AUTO_SLEEP_IDLE_MS parses, so the comparison below is real",
+      _b1 is not None)
+check("it is LONGER than board 1's touch-wakeable auto-sleep, which can afford to be brief",
+      _ms is not None and _b1 is not None and _ms > _b1)
+
+lp2 = fnbody(MAIN, "void loop()")
+check("loop() reaches autoPowerOff() on board 2",
+      lp2 is not None and "autoPowerOff()" in lp2)
+# BOUND TO THE CONDITION THAT GUARDS THE CALL, not to loop(). The first version
+# searched the whole body and PASSED with every gate deleted, because BOARD 1's
+# arm a few lines up contains the same terms - the "a rule a neighbouring line
+# can satisfy is not a rule" trap, reproduced in the assertion written to
+# prevent it. Caught by mutating the gate away and watching it pass.
+# Sliced, not regexed: the condition contains its own call parentheses
+# (batteryPresent(), millis()) and a paren-counting regex got that wrong twice.
+# Take the text between the `if (` that precedes the call and the call itself.
+def _guard_of(body, call):
+    if not body or call not in body:
+        return None
+    i = body.index(call)
+    j = body.rfind("if (", 0, i)
+    return None if j < 0 else type("M", (), {"group": lambda self, n: body[j:i]})()
+_apo = _guard_of(strip_comments(lp2), "autoPowerOff();")
+check("the autoPowerOff() call site has a guard at all", _apo is not None)
+# The same three gates board 1 uses. A missing one is the difference between
+# "idle on battery" and "powers off while you are using it on the cable".
+for g in ("!onUsbPower", "batteryPresent()", "AUTO_POWEROFF_MS"):
+    check(f"the auto power-off's OWN condition is gated on {g}",
+          _apo is not None and g in _apo.group(1))
+
+# THE ONE THAT WOULD HAVE FAILED SILENTLY: light sleep stops loop(), so without a
+# timer armed for the deadline the auto power-off can NEVER fire - the two
+# features cancelling out with no symptom but the drain.
+check("enterLightIdle arms a timer for the AUTO_POWEROFF_MS deadline",
+      li is not None and "esp_sleep_enable_timer_wakeup" in li
+      and "AUTO_POWEROFF_MS" in li)
+check("...and disarms it again, so the wake source cannot outlive the state",
+      li is not None and "esp_sleep_disable_wakeup_source" in li)
+
+# The deliberate asymmetry with board 1's autoDeepSleep(), which DOES light the
+# panel to show a farewell. At two hours there is nobody to read one.
+ap = fnbody(POWER, "void autoPowerOff()")
+check("autoPowerOff() exists", ap is not None)
+check("autoPowerOff() lights NO farewell - two hours in, it would be spending the "
+      "very thing it is saving",
+      ap is not None and "ledcWrite" not in ap and "drawString" not in ap)
+
+# A LITERAL FALLBACK HERE SILENTLY DISCARDS THE COMPILED DEFAULT. `getUInt(key,
+# 0)` means a fresh NVS loads 0 no matter what the source says, so the default
+# above becomes decoration. It shipped that way once and the device reported 0x7
+# against a source that said 0x37.
+lm = fnbody(POWER, "void loadPwrOffMode()")
+check("loadPwrOffMode falls back to the COMPILED default, not a literal",
+      lm is not None and re.search(r'getUInt\("pwroffMode",\s*pwrOffMode\)', lm) is not None)
+
 lr = fnbody(POWER, "void loadPwrOffRecord()")
 check("loadPwrOffRecord() exists", lr is not None)
 check("...and CLEARS the record, so it cannot re-report a stale outage for ever",
@@ -840,6 +936,10 @@ check("...and CLEARS the record, so it cannot re-report a stale outage for ever"
 # The read-only form, and the lesson that produced it.
 pm = arm(MAIN, 'buf == "PWROFFMODE"')
 check("a bare PWROFFMODE reports", pm is not None)
+# EVERY bit must appear in the report. A mode with a bit you cannot see is a
+# setting you cannot verify, which is how LIGHTIDLE's value got clobbered.
+for _b in ("panelSleep", "icReset", "codecDown", "qspiIsolate", "ledLow", "rtcOff"):
+    check(f"the PWROFFMODE report shows {_b}", pm is not None and f"{_b}=%d" in pm)
 check("...and writes NOTHING unless an argument was given",
       pm is not None and re.search(r"if\s*\(arg\.length\(\)\)\s*\{[^}]*savePwrOffMode", pm)
       is not None)
