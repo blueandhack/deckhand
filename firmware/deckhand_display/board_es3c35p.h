@@ -1908,7 +1908,9 @@ const int HOME_Y0_BOT = 8;
 //   +0..+1    border
 //   +8..+31   name    (T_HEAD 24)
 //   +32..+35  gap 4
-//   +36..+51  summary (T_BODY 16)
+//   +36..+51  summary (T_META 16 - the id renderSettingsHome() passes; T_META and
+//                       T_BODY resolve to the same Spleen 8x16 here, and to the same
+//                       Cozette 6x13 on board 1, so the 16 holds either way)
 //   +52..+55  pad
 //   +56..+57  border                                   = 58
 // Against the 70px row this is 6 rows off the top pad, 2 off the gap between the

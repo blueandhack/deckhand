@@ -234,11 +234,16 @@ void settingsHomeSummary(int g, char* buf, size_t n, uint16_t* col) {
       // for guarding only the fragment that differs: the rule it states is about arms
       // that OPEN A BRACE in both directions, which leaves every brace-counting reader
       // here one `{` ahead - and neither arm below opens one (`if (...) snprintf(...);`
-      // has no body). What forced it is the format string: the three spaces before the
-      // temperature live inside it, so any single-statement spelling changes the
-      // literal board 2 already emits, and board 2's binary is required to come out of
-      // this task BYTE-IDENTICAL. Measured, not assumed - the single-statement version
-      // was written first and moved board 2 by -16 bytes.
+      // has no body).
+      // THE FORCING CAUSE IS THE FORMAT-STRING LITERAL, NOT A HASH. The three spaces
+      // that separate the percentage from the temperature live INSIDE "%s   %s   %s",
+      // so there is no single-statement spelling that keeps them: moving the separator
+      // out to the temperature's own buffer replaces one string constant in .rodata
+      // with two different ones, which is a real change to the image board 2 emits -
+      // it would be wrong to call it byte-identical code that merely happened to
+      // hash differently. The hash is only how it was NOTICED: the single-statement
+      // version was written first and board-baseline.mjs reported board 2 CHANGED by
+      // -16 bytes, and board 2 is required to come out of this task byte-unchanged.
 #if !BOARD_USES_TFT_ESPI
       char tempS[8] = "--";
       float dieC = 0;

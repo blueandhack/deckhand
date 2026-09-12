@@ -1141,13 +1141,20 @@ const int HOME_Y0_BOT = 2;     // the closing term
 //   +0..+1    border
 //   +4..+21   name    (T_HEAD, Terminus 10x18)
 //   +22..+23  gap 2
-//   +24..+36  summary (T_BODY, Cozette 6x13)
+//   +24..+36  summary (T_META - see the note under the stack)
 //   +37..+39  pad
 //   +40..+41  border                                   = 42
 // The two ends clear the card's own 2px border (4 >= 2 at the top, 36 <= 39 at the
 // foot) and the two lines share no pixel row (21 < 24) - the same three board 2's
 // stack asserts, plus the pitch identity above, and none of the four is assumed
-// from this comment. THE TWO FACES ARE NOT NEGOTIABLE and did not pay for the row:
+// from this comment.
+// THE SUMMARY'S ID IS T_META, which is what renderSettingsHome() passes to
+// drawIfChanged; this stack said T_BODY, copied from board 2's, which says it too.
+// It changes no number - the font registry resolves T_META and T_BODY to the SAME
+// face at the same size on BOTH boards (Cozette 6x13 here, Spleen 8x16 there), so
+// the 13 above is right either way - but two ids being interchangeable today is a
+// property of that registry and not a guarantee, and a header naming an id the code
+// does not pass is the drift this file has been unpicking all branch. THE TWO FACES ARE NOT NEGOTIABLE and did not pay for the row:
 // the name is T_HEAD and the summary T_BODY at every pitch in the table above,
 // because shrinking a face to fit one more row is how a menu becomes unreadable one
 // row at a time (board_es3c35p.h's rule, and it binds here).
@@ -1161,24 +1168,50 @@ const int HOME_SUB_DY  = 24;
 //   chevron ink   MR_DATUM at CARD_X + CARD_W - PAD (214),
 //                 one T_HEAD advance wide                   = 204..213
 //   lane          204 - 26                                  = 178px
-//   Cozette advances 6, so 29 * 6 = 174 fits and 30 * 6 = 180 does not.
-// 29 IS ALSO THE MAXIMUM THE ERASE BOX ALLOWS, which is the bound that actually
-// matters here and the one board 2's own 30 sits on. drawIfChanged clears
-// fillRect(fx-1, fy-1, tw+2, th+2) before drawing, and tw is the PADDED string's
-// real width - whose last glyph is a space, charged xOffset + width = 7 rather than
-// the 6 it advances. So the erase box ends at 26 + (28*6 + 7) + 1 = 202, one row of
-// background clear of the chevron's ink at 204; at 30 it would end at 208 and RUB
-// THE CHEVRON OUT. The chevron is drawn ONCE by drawSettingsHomeStatic() and the
-// summary repaints on change, so a rubbed-out chevron never comes back. (Board 2 is
-// the same arithmetic with different numbers: its 30 ends at 271 against ink at 278,
-// and 31 - which its own lane arithmetic allows - would end at 279 and overlap.)
-// The longest summary settingsHomeSummary() can compose is 28 characters
-// ("Both links up   100%   -10 C"), so the cap has one character of margin, which
-// settings-geom-check.mjs asserts against every branch of that function rather than
-// against this comment.
+//   Cozette advances 6, so the lane holds 29 (29 * 6 = 174; 30 * 6 = 180 does not).
+//
+// 28, NOT THE 29 THE LANE ALLOWS, AND THE REASON IS WHAT THE LAST PIXEL RESTS ON.
+// The bound that actually matters is not the lane but the ERASE BOX: drawIfChanged
+// clears fillRect(fx-1, fy-1, tw+2, th+2) before drawing, and tw is the PADDED
+// string's real width, whose last glyph is a space - charged xOffset + width = 7
+// rather than the 6 it advances. At 28 that box ends at 26 + (27*6 + 7) + 1 = 196,
+// SEVEN rows of background clear of the chevron's ink at 204. At 29 it ends at 202
+// and the margin is ONE row; at 30 it ends at 208 and RUBS THE CHEVRON OUT, which
+// is permanent - drawSettingsHomeStatic() draws the chevron once and the summary
+// repaints on change, so nothing ever puts it back.
+//
+// 29 was written first and was arithmetically honest. Three things decide against
+// it. (1) The 7 in that sum comes from geom-common.mjs's MIRROR of TFT_eSPI's
+// last-character rule, and a mirror proves an algorithm and binds nothing - one
+// pixel is inside that model's own error bar, so the last pixel is the worst place
+// on the device to lean on it. (2) The extra character is unreachable: the longest
+// summary settingsHomeSummary() can compose HERE is 24 ("100%   sleep OFF   LIGHT"
+// and "reset pairing, power off"), so 29 buys five characters no branch can produce
+// and spends the whole margin to do it. (3) 28 costs nothing measurable - the cap
+// only sets how wide the opaque box is, and 168px still covers every string with
+// four characters to spare.
+//
+// BOARD 2's 30 IS THE SAME DERIVATION AT ITS OWN NUMBERS and is NOT the source of
+// this one: its lane is 248px = 31 characters, its erase box at 30 ends at 271
+// against ink at 278 (6 rows), and 31 would end at 279 and overlap. Both boards
+// therefore sit one character under what their lane alone would allow, and
+// settings-geom-check.mjs asserts the erase box on both - the lane division on its
+// own would have passed board 2 at 31.
+//
+// THE WORST CASE IS BOARD 1's OWN, AND THE SENTENCE HERE ONCE QUOTED BOARD 2's.
+// It read: "the longest summary settingsHomeSummary() can compose is 28 characters
+// ("Both links up   100%   -10 C"), so the cap has one character of margin" - which
+// is board 2's string, in board 1's header, for a term this board does not draw:
+// the die temperature is behind `#if !BOARD_USES_TFT_ESPI` at the composing site
+// because dieTempRead() does not exist here. Board 1's Device row is
+// "Both links up   100%", 20 characters. Kept marked rather than deleted, because
+// it is the ninth instance of the "a comment is not parsed" class on this tab and
+// it arrived inside the commit that swept fifteen others for it.
+// The real margins are asserted per board against every branch of that function,
+// never against this comment.
 // HOME_SUB_BYTES is what homeSubCache[] is declared with; a cache shorter than the
 // string it holds silently stops noticing changes past its end.
-const int HOME_SUB_CHARS = 29;
+const int HOME_SUB_CHARS = 28;
 const int HOME_SUB_BYTES = HOME_SUB_CHARS + 1;
 
 // The back band replaces the pager band AT THE SAME HEIGHT, which is the whole

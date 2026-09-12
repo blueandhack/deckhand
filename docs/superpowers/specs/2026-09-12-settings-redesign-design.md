@@ -342,9 +342,47 @@ the `CANNOT BE UNDONE` caption already inside it.
 
 42 is `TAP_MIN + 2`. This is the cost the body of this spec predicted for the fallback and
 accepted in advance: board 1's rows sit near the fingertip floor rather than the roomy 46/6/6 the
-five-row set would have given. **Search the (row height, gap) space rather than nudging** — the
-seven-row derivation on board 2 returned exactly one integer solution, and that is the standard
-here. Row internals at 42, mirroring board 2's stack at this board's type scale:
+five-row set would have given. **Search the (row height, gap) space rather than nudging.**
+
+> **CORRECTION, RULING 19 (2026-09-12).** The sentence that stood here read "the seven-row
+> derivation on board 2 returned exactly one integer solution, and that is the standard here."
+> **That is false and the error is the dispatching side's, not the implementer's.** Kept marked
+> rather than deleted, per this repo's rule about descriptions that turned out to be wrong.
+>
+> Three things are wrong with it. `board_es3c35p.h` makes **no uniqueness claim** for its live
+> six-row pitch — it calls 58/10 "the six-row pitch RESTORED". The uniqueness sentence belonged
+> to the **original seven-row comment**, for a pitch Task 1 deleted, so a dead comment about a
+> deleted pitch was promoted into a general standard. And **58/10 is not unique anyway**: with
+> `HOME_Y0` and `HOME_Y0_BOT` free, `6R + 5G + pads = 414` over `R >= TAP_MIN 46` is satisfied by
+> `R=59 / G=2 / pads 42` among others.
+>
+> **THE REAL STANDARD, and it is stricter than the one it replaces: search the space, report the
+> solutions, state the tie-break, and never claim a uniqueness you have not computed.** A
+> derivation that reports "one solution" without the enumeration behind it is the same defect as
+> an assertion that cannot fail — it looks like proof and carries none.
+>
+> Task 3B is the precedent. Board 1's six-row space, under four floors (row `>= TAP_MIN`; gap
+> `>= BORDER_CARD`, or two cards read as one rule; both pads `>= BORDER_CARD`; the row interior
+> holding `T_HEAD + T_BODY + 2*BORDER_CARD` without shrinking a face) is **six (row height, gap)
+> pairs and 46 four-tuples**:
+>
+> | row height | over `TAP_MIN` | gap | pads | splits |
+> |---|---|---|---|---|
+> | **42** | **+2** | **2** | **6** | 3 |
+> | 41 | +1 | 3 | 7 | 4 |
+> | 41 | +1 | 2 | 12 | 9 |
+> | 40 | +0 | 4 | 8 | 5 |
+> | 40 | +0 | 3 | 13 | 10 |
+> | 40 | +0 | 2 | 18 | 15 |
+>
+> 42 is the **only row height with any margin over the fingertip floor**, and taking that margin
+> is what fixes the gap at 2 and the pads at 6. **The tie-break is stated rather than implied:
+> the row is the touch target and the gap is inert, and this panel is resistive** — `PAGER_H`'s
+> own comment records that under-floor controls here were "the most missed control on the
+> device". `40/4` and `41/3` both close; both spend the margin on space between two cards.
+>
+> Everything else in the derivation below stands: 42 is still the answer, `38 + 6*42 + 5*2 + 2
+> == 302` is still the identity, and the row internals are unchanged. Row internals at 42, mirroring board 2's stack at this board's type scale:
 
     +0..+1    border
     +4..+21   name    (T_HEAD, Terminus 10x18)

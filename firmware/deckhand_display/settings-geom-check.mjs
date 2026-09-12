@@ -37,6 +37,8 @@ import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, deadGuards, 
          readSource, setSourceFault, SOURCE_FAULT_INDEX, splitArgs, stripComments,
          sweepSourceFaults, tlBox, widthB } from "./geom-common.mjs";
 import fs from "fs";
+import { spawnSync } from "child_process";
+import { fileURLToPath } from "url";
 
 // ---------------------------------------------------------------------------
 // SOURCE FAULTS. Same harness as the other two geom checkers, and the same
@@ -1166,12 +1168,15 @@ const KNOWN = {
 };
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0, known = 0, total = 0;
-// THE MESSAGES, not just the count. With two faults injected at once a bare total
-// cannot say that BOTH were caught - one fault firing twice looks identical to two
-// faults firing once - and "caught" alone cannot tell the assertion that exists for
-// a fault from an unrelated crash. Same reason wire-bytes-check.mjs's selftest names
-// which assertion caught each of its injected faults.
-const FAILED = [];
+// THE MESSAGES, not just the count, and ONE FAULT PER PROCESS. The sentence that
+// stood here was right about the hazard and wrong about the remedy: "with two faults
+// injected at once a bare total cannot say that BOTH were caught - one fault firing
+// twice looks identical to two faults firing once". Matching messages does not fix
+// that on its own, because two faults can produce the SAME message - four pairs here
+// did. The fix is that no two faults share a process any more; see CONST_FAULTS.
+// The per-fault failure list that used to be collected here is gone with the
+// single-process design: each child prints its own FAIL lines and the parent reads
+// them out of that child's output.
 // WHICH KNOWN ENTRIES ACTUALLY EXCUSED SOMETHING. Found while fixing the batch of
 // deferred findings, and not on that list: nothing checked the CONVERSE of the
 // allowlist. An entry whose message no longer matches any assertion excuses
@@ -1190,7 +1195,7 @@ function chk(cond, msg) {
     known++; KNOWN_USED.add(`${CUR}|${msg}`); console.log(` known  ${msg}`); return;
   }
   console.log(`${cond ? "  ok  " : " FAIL "} ${msg}`);
-  if (!cond) { fail++; FAILED.push(msg); }
+  if (!cond) fail++;
 }
 // Run AFTER both boards, since an entry is used by whichever board reaches it.
 function checkKnownUsed() {
@@ -1206,7 +1211,35 @@ function checkKnownUsed() {
     }
 }
 
-if (SELFTEST) {
+// ONE CONSTANT FAULT PER CHILD PROCESS, and that is a REWRITE of how this half of
+// the selftest works. It used to apply every injection at once and match each
+// expected message against one flat list of failures - and a review proved what
+// this file's own comment already warned about: board 1's pairing injection could
+// be DELETED and the run still reported "15 injected faults, 15 caught by name",
+// because board 2's `P3_ROW_STEP += 6` trips the same message. A sweep of every
+// injection in isolation then found FOUR such pairs, not one, and three of them
+// were two faults on the SAME board, where no board discriminator could have
+// helped: DEV_DIAG_STEP also breaks DEVICE's closing identity, P2_PWR_Y also
+// breaks DANGER's, and PAIR_LEFT_Y also breaks the pairing panel's. Each of those
+// three let its partner's injection be removed with the selftest still green.
+//
+// So each fault now runs ALONE, in its own child, the way sweepSourceFaults()
+// already runs the source half - which is the design that was right all along and
+// the reason the source half never had this defect. A fault proves its own
+// assertion or it proves nothing, and a message two faults can produce is no longer
+// a hazard at all, because no two faults are ever in the same process.
+//
+// [name, apply, the assertion that MUST name it]. `bump` is what makes an injection
+// that has stopped applying fail loudly: a constant that was renamed away reads as
+// `undefined + 1` = NaN, which fails EVERYTHING and looks exactly like a caught
+// fault. It throws instead - the ANCHOR MOVED rule, arriving on the constant side.
+function bump(board, name, delta) {
+  if (typeof B[board][name] !== "number")
+    throw new Error(`--selftest: B[${board}].${name} is not a number (${B[board][name]}) - ` +
+      `the injection has stopped applying, and an injection that changes nothing proves nothing`);
+  B[board][name] += delta;
+}
+const CONST_FAULTS = [
   // Push board 2's keyboard meta row down by 9. The gap between the meta row and
   // the first text line is 8 rows, so 9 is the FIRST offset that puts the two on a
   // shared pixel row - and a shared row means the byte counter's opaque background
@@ -1214,8 +1247,8 @@ if (SELFTEST) {
   // defect board 1 hit twice. 9 rather than 1 because a 1px nudge is INSIDE spec
   // and must not fail. It can only be caught by laying the rows out, so a checker
   // that merely echoed the header's own arithmetic back would pass.
-  B[2].KB_META_DY += 9;
-  console.log("--selftest: board 2's keyboard meta row pushed 9px onto the first text line; the meta-row assertion MUST fail");
+  ["board 2's keyboard meta row pushed 9px onto the first text line; the meta-row assertion MUST fail",
+    () => bump(2, "KB_META_DY", 9), /^meta row ends \d+ before the first text line/],
   // AND ONE FAULT FROM THE SETTINGS REDESIGN, because the injection above predates
   // it and a selftest that only exercises the keyboard says nothing about HOME.
   // +1 on the row height, which is the smallest change there is: HOME's five rows
@@ -1225,8 +1258,8 @@ if (SELFTEST) {
   // clearance, which is the point of asserting the identity: a +1 leaves every
   // individual row still inside its own card and still a touch target, so nothing
   // measuring one row can see it.
-  B[2].HOME_ROW_H += 1;
-  console.log("--selftest: board 2's HOME row height raised by 1; the pitch identity MUST fail");
+  ["board 2's HOME row height raised by 1; the pitch identity MUST fail",
+    () => bump(2, "HOME_ROW_H", 1), /^board 2: HOME's \d+ rows land exactly on contentBottom/],
   // AND THE SAME FAULT ON BOARD 1, which is a different assertion firing even though
   // it reads the same way: each board's HOME_* come from its OWN header, and until
   // Task 3B this block ran on board 2 alone - so a board-1-only regression would have
@@ -1237,8 +1270,8 @@ if (SELFTEST) {
   // area and under the footer. Nothing measuring ONE row can see it - every row is
   // still inside its own card, still clears both borders, and at 43 is still a touch
   // target with MORE margin over TAP_MIN than it had. Only the pitch identity can.
-  B[1].HOME_ROW_H += 1;
-  console.log("--selftest: board 1's HOME row height raised by 1; the pitch identity MUST fail");
+  ["board 1's HOME row height raised by 1; the pitch identity MUST fail",
+    () => bump(1, "HOME_ROW_H", 1), /^board 1: HOME's \d+ rows land exactly on contentBottom/],
   // AND TWO ON THE DEVICE GROUP, whose stack lands EXACTLY on contentBottom() with
   // no slack at all.
   //
@@ -1256,26 +1289,26 @@ if (SELFTEST) {
   // 17 two lines share row +16 (a drawIfChanged field clears y-1..y+cellH, and the
   // cell is 16 here), so each repaint erases a row of its neighbour - visible only
   // to an assertion that lays two consecutive lines' BOXES out.
-  B[2].DEV_DIAG_STEP -= 1;
-  console.log("--selftest: board 2's DEVICE diagnostics step narrowed by 1; two lines now share a pixel row and that disjointness MUST fail");
+  ["board 2's DEVICE diagnostics step narrowed by 1; two lines now share a pixel row and that disjointness MUST fail",
+    () => bump(2, "DEV_DIAG_STEP", -1), /^Device: two diagnostics lines share no pixel row/],
   // And ONE PIXEL on the surplus that closes the stack, the PAIR_AIR_LEFT shape:
   // it is the term that gives every other constant on this page teeth, so the tooth
   // has to be proven on the closing term itself and not only on the chain it pins.
-  B[2].DEV_AIR_BOT += 1;
-  console.log("--selftest: board 2's DEVICE surplus widened by 1; the stack no longer lands on contentBottom and that identity MUST fail");
+  ["board 2's DEVICE surplus widened by 1; the stack no longer lands on contentBottom and that identity MUST fail",
+    () => bump(2, "DEV_AIR_BOT", 1), /^Device: the stack lands exactly - the \d+th diagnostics line's box ends \d+/],
   // AND THE SAME TERM ON THE DANGER GROUP, which is the page with the MOST air on
   // this board (196 rows) and therefore the one where an unclosed stack would be
   // least visible: nothing on it is anchored to the footer, so without the closing
   // identity P2_TOP and the gap between the two buttons are pure translations that
   // no bound relative to the page can see. One pixel, the PAIR_AIR_LEFT shape.
-  B[2].P2_AIR_BOT += 1;
-  console.log("--selftest: board 2's DANGER surplus widened by 1; the stack no longer lands on contentBottom and that identity MUST fail");
+  ["board 2's DANGER surplus widened by 1; the stack no longer lands on contentBottom and that identity MUST fail",
+    () => bump(2, "P2_AIR_BOT", 1), /^Danger: the stack lands exactly - the hint's ink ends \d+/],
   // And the gap BETWEEN the two destructive buttons, pushed off the page rhythm by
   // one. Both buttons are still inside the page, still touch targets, still in the
   // right order and still clear of each other - only the "these two are one section"
   // relationship moves, and only the drawn-gap assertion measures it.
-  B[2].P2_PWR_Y += 1;
-  console.log("--selftest: board 2's POWER OFF nudged 1px down; the one-section gap MUST fail");
+  ["board 2's POWER OFF nudged 1px down; the one-section gap MUST fail",
+    () => bump(2, "P2_PWR_Y", 1), /^Danger: the two buttons are \d+px apart == SP_3/],
   // AND THREE FROM THE WIRELESS-PAIRING PANEL, whose CONFIRM button is the thing
   // that commits a pairing key - so its geometry is not cosmetic.
   //
@@ -1283,27 +1316,26 @@ if (SELFTEST) {
   // box, so a shared pixel row means the once-a-second counter erases the tail of
   // the name the code is being compared against - and nothing measuring either
   // block on its own can see it.
-  B[2].PAIR_LEFT_Y -= 30;
-  console.log("--selftest: board 2's pairing countdown pulled 30px onto the Mac's label; " +
-              "the panel's block-disjointness MUST fail");
+  ["board 2's pairing countdown pulled 30px onto the Mac's label; the panel's block-disjointness MUST fail",
+    () => bump(2, "PAIR_LEFT_Y", -30), /^pairing panel: the Mac's label ends \d+, clear of the countdown/],
   // One pixel on the button width, which is the smallest change there is: the two
   // buttons plus SP_3 stop filling the card lane exactly, so CANCEL's right edge
   // leaves the margin every other card on this device sits on.
-  B[2].PAIR_BTN_W += 1;
-  console.log("--selftest: board 2's pairing button widened by 1; the card-lane identity MUST fail");
+  ["board 2's pairing button widened by 1; the card-lane identity MUST fail",
+    () => bump(2, "PAIR_BTN_W", 1), /^pairing panel: two \d+px buttons plus \d+ fill the card lane exactly/],
   // The row step widened by 6, which pushes the LAST free slot (3 Macs paired)
   // 1px under the footer. The button would still be drawn and still be a touch
   // target - only its bottom row would be gone - so this is only visible to an
   // assertion that walks every reachable slot.
-  B[2].P3_ROW_STEP += 6;
-  console.log("--selftest: board 2's pairing row step widened by 6; the free-slot walk MUST fail");
+  ["board 2's pairing row step widened by 6; the free-slot walk MUST fail",
+    () => bump(2, "P3_ROW_STEP", 6), /^PAIR NEW MAC fits the free slot at 3 Mac\(s\)/],
   // And ONE PIXEL on the panel's surplus, the term that closes its stack onto the
   // button row. It is the smallest change there is and it is the assertion that
   // gives every other gap on this screen teeth - the sweep measured five of them
   // UNGUARDED at +-16 before it existed - so the tooth has to be proven on the
   // closing term itself rather than only on the chain it pins.
-  B[2].PAIR_AIR_LEFT += 1;
-  console.log("--selftest: board 2's pairing surplus widened by 1; the stack no longer lands on the button row and that identity MUST fail");
+  ["board 2's pairing surplus widened by 1; the stack no longer lands on the button row and that identity MUST fail",
+    () => bump(2, "PAIR_AIR_LEFT", 1), /^pairing panel: the stack lands exactly on the button row/],
   // ================= AND FOUR ON BOARD 1 =================
   // EVERY INJECTION ABOVE IS B[2], and until Task 3A that was defensible: board 2
   // was the only board with group pages. It is not any more - board 1 draws the
@@ -1315,27 +1347,37 @@ if (SELFTEST) {
   // stack ends on CALIBRATE TOUCH with DEV_AIR_BOT of 1 - the tightest closing term
   // on either board. Nothing else can see it: the button is still a touch target,
   // still inside the page, and still one caption step under SETUP.
-  B[1].DEV_AIR_BOT += 1;
-  console.log("--selftest: board 1's DEVICE surplus widened by 1; the CALIBRATE TOUCH stack no longer lands on contentBottom and that identity MUST fail");
+  ["board 1's DEVICE surplus widened by 1; the CALIBRATE TOUCH stack no longer lands on contentBottom and that identity MUST fail",
+    () => bump(1, "DEV_AIR_BOT", 1), /^Device: the stack lands exactly - CALIBRATE TOUCH ends \d+/],
   // DISPLAY. One pixel on ITS closing term. This page has no caption and no hint,
   // so P1_TOP, P1_GAP and the two top-gaps are pure translations that nothing
   // relative to the page can see - the closing identity is the only thing that
   // gives any of them teeth, and it is board 1's alone.
-  B[1].P1_AIR_BOT += 1;
-  console.log("--selftest: board 1's DISPLAY surplus widened by 1; the flip toggle no longer closes the page and that identity MUST fail");
+  ["board 1's DISPLAY surplus widened by 1; the flip toggle no longer closes the page and that identity MUST fail",
+    () => bump(1, "P1_AIR_BOT", 1), /^Display: the page lands exactly - the flip toggle ends \d+/],
   // SOUND. One pixel on ITS closing term. This is the fault that replaced a
   // drawn-gap comparison which held by construction (see the note at PS_BEEP_GAP):
   // the identity is what actually gives PS_TOP, PS_VOL_GAP, PS_BEEP_GAP and
   // PS_MIC_GAP teeth, so the tooth is proven on the closing term itself.
-  B[1].PS_AIR_BOT += 1;
-  console.log("--selftest: board 1's SOUND surplus widened by 1; MIC TEST no longer closes the page and that identity MUST fail");
+  ["board 1's SOUND surplus widened by 1; MIC TEST no longer closes the page and that identity MUST fail",
+    () => bump(1, "PS_AIR_BOT", 1), /^Sound: the page lands exactly - MIC TEST ends \d+/],
   // MACS. One pixel on the row STEP. Four cards at 44 end on 297 with 4 rows to
   // spare, so +1 puts the fourth card's last row at 301 - still on the panel, still
   // a touch target, still clear of its neighbour: the only assertion that can see it
   // is the one that walks all MAX_HOSTS slots against contentBottom, and the
   // four-Mac case is the case this geometry exists to survive.
-  B[1].P3_ROW_STEP += 2;
-  console.log("--selftest: board 1's Mac row step widened by 2; the fourth card now runs under the footer and the MAX_HOSTS walk MUST fail");
+  ["board 1's Mac row step widened by 2; the fourth card now runs under the footer and the MAX_HOSTS walk MUST fail",
+    () => bump(1, "P3_ROW_STEP", 2), /^board 1: Pairing: \d+ Macs end \d+, inside the region/],
+];
+// The child's half: one index out of the table above, applied before anything is
+// measured. The parent runs CLEAN and re-execs one child per entry.
+const CONST_FAULT_INDEX =
+  process.env.DECK_CONST_FAULT != null && process.env.DECK_CONST_FAULT !== ""
+    ? Number(process.env.DECK_CONST_FAULT) : -1;
+if (CONST_FAULT_INDEX >= 0) {
+  const [name, apply] = CONST_FAULTS[CONST_FAULT_INDEX];
+  apply();
+  console.log(`--selftest child: ${name}`);
 }
 
 console.log(`\nvoice-confirm panel (lane CARD_W - 8, NOT the keyboard's CARD_W - 12), ` +
@@ -1423,10 +1465,13 @@ for (const b of [1, 2]) {
 
   // ================= SETTINGS: the six group ids (BOTH boards) =================
   // THEY WERE BOARD 2's AND THEY ARE SHARED NOW. Board 1 declares the same run and
-  // its pager walks it, so every claim below is about a fact both boards depend on -
-  // and asserting it on one board only was how a board-1 regression would have
-  // passed a green run. The HOME and back-band blocks that used to be inside this
-  // same `if (b === 2)` stay board 2's, because board 1 has no HOME surface yet.
+  // reaches every id in it, so every claim below is about a fact both boards depend
+  // on - and asserting it on one board only was how a board-1 regression would have
+  // passed a green run. THE LAST SENTENCE HERE SAID "The HOME and back-band blocks
+  // that used to be inside this same `if (b === 2)` stay board 2's, because board 1
+  // has no HOME surface yet" - true for exactly one task, and it sat three lines
+  // above the block Task 3B ungated. Those blocks now run on both, gated on the
+  // PARSED BOARD_SETTINGS_HOME rather than on a board number.
   {
     // ---- the six group ids, which are an ORDINAL RANGE and not just names ----
     // Nothing here is geometry, and that is exactly why it was uncovered: the sweep
@@ -1587,22 +1632,35 @@ for (const b of [1, 2]) {
     // written out in board_e32r28t.h; what is asserted here is the landing.
     const homeRows = c.SET_GROUP_COUNT;
     const homeEnd = c.HOME_Y0 + homeRows * c.HOME_ROW_H + (homeRows - 1) * c.HOME_GAP + c.HOME_Y0_BOT;
-    // THE BOARD NUMBER IS IN THE MESSAGE AND THAT IS NOT DECORATION. FAILED[] is a
-    // FLAT list and --selftest matches WANT's regexes against it, so once this
-    // assertion runs on BOTH boards the two injections (B[1].HOME_ROW_H and
-    // B[2].HOME_ROW_H) produce the same-shaped message and one regex would claim
-    // whichever fired first - reporting two faults caught when only one was. The
-    // prefix is what keeps each injection's proof its own.
+    // THE BOARD NUMBER IS IN THE MESSAGE AND THAT IS NOT DECORATION. It was added
+    // when this assertion was ungated to both boards and the two HOME_ROW_H
+    // injections started producing the same-shaped message - which, under the
+    // single-process selftest of the time, let one regex claim whichever fired
+    // first. CONST_FAULTS now runs each fault alone, so the prefix is no longer
+    // load-bearing for the selftest; it stays because a CLEAN run prints this line
+    // twice, and a reader of that output is owed the board it is about.
     chk(homeEnd === contentBottom,
         `board ${b}: HOME's ${homeRows} rows land exactly on contentBottom: ${homeEnd} == ${contentBottom}`);
     chk(c.HOME_ROW_H >= c.TAP_MIN,
         `a HOME row is a touch target: ${c.HOME_ROW_H} >= TAP_MIN ${c.TAP_MIN}`);
     // The row's own stack must clear its 2px card border at both ends.
-    const subEnd = c.HOME_SUB_DY + lineHB(b, T_BODY) - 1;
+    // T_META, THE ID renderSettingsHome() ACTUALLY PASSES TO drawIfChanged. This
+    // measured at T_BODY, copied from the header comment, which said T_BODY too. It
+    // is the same number on both boards - the registry resolves the two ids to one
+    // face at one size - so nothing moves; what changes is that the checker and the
+    // firmware now name the same thing, which is the whole point of parsing rather
+    // than transcribing.
+    const subEnd = c.HOME_SUB_DY + lineHB(b, T_META) - 1;
     chk(c.HOME_NAME_DY >= c.BORDER_CARD,
         `HOME's name clears the card's top border: ${c.HOME_NAME_DY} >= ${c.BORDER_CARD}`);
     chk(subEnd <= c.HOME_ROW_H - c.BORDER_CARD - 1,
-        `HOME's summary clears the bottom border: ${subEnd} <= ${c.HOME_ROW_H - c.BORDER_CARD - 1}`);
+        `HOME's summary (T_META, ${lineHB(b, T_META)}px) clears the bottom border: ${subEnd} <= ${c.HOME_ROW_H - c.BORDER_CARD - 1}`);
+    // AND THE TWO IDS AGREE TODAY, asserted rather than relied on. Every bound above
+    // and the erase box below are computed at T_META; the headers' stacks quote the
+    // cell height once. If the registry ever gave T_META and T_BODY different cells,
+    // every one of those numbers would move and nothing else here would notice.
+    chk(lineHB(b, T_META) === lineHB(b, T_BODY) && advanceB(b, T_META) === advanceB(b, T_BODY),
+        `T_META and T_BODY resolve to one face at one size (cell ${lineHB(b, T_META)}, advance ${advanceB(b, T_META)}) - the stack in this board's header quotes a single number for both`);
     const nameEnd = c.HOME_NAME_DY + lineHB(b, T_HEAD) - 1;
     chk(nameEnd < c.HOME_SUB_DY,
         `HOME's name and summary share no pixel row: ${nameEnd} < ${c.HOME_SUB_DY}`);
@@ -2553,7 +2611,14 @@ for (const b of [1, 2]) {
       chk(c.P3_EMPTY_HINT_Y === undefined,
           `board ${b} has no P3_EMPTY_HINT_Y: there is no PAIR NEW MAC button for the hint to sit below (got ${c.P3_EMPTY_HINT_Y})`);
     }
-    chk(pairEnd < contentBottom, `Pairing: ${MAX_HOSTS} Macs end ${pairEnd}, inside the region (${contentBottom})`);
+    // THE BOARD NUMBER, for the reason HOME's pitch carries one: this line prints
+    // once per board in a clean run and both boards' Mac lists are measured by it.
+    // It is also the message board 1's P3_ROW_STEP injection is expected to produce,
+    // and board 2's P3_ROW_STEP injection trips it too - which is exactly how the
+    // review found that board 1's injection could be deleted with the selftest still
+    // green. That hole is closed by the one-fault-per-process design; this prefix is
+    // what makes the OUTPUT unambiguous regardless.
+    chk(pairEnd < contentBottom, `board ${b}: Pairing: ${MAX_HOSTS} Macs end ${pairEnd}, inside the region (${contentBottom})`);
     chk(c.P3_ROW_STEP >= c.P3_ROW_H, `Pairing: rows do not overlap (step ${c.P3_ROW_STEP} >= height ${c.P3_ROW_H})`);
     chk(c.P3_ROW_H >= c.TAP_MIN, `a pairing row is a touch target: ${c.P3_ROW_H} >= TAP_MIN ${c.TAP_MIN}`);
     // c.TAP_MIN, THIS BOARD'S OWN - 40 here and 46 there. The constant was once
@@ -5681,51 +5746,47 @@ faultChildEpilogue();
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 shortfalls`);
 if (SELFTEST) {
   // EXIT 0 ONLY WHEN EVERY INJECTED FAULT IS CAUGHT BY THE ASSERTION THAT EXISTS
-  // FOR IT. Matching the message rather than counting is what makes that a claim
-  // per fault: a checker blind to one of the two would otherwise still print a
-  // non-zero total and pass.
-  const WANT = [
-    ["the moved keyboard meta row", /^meta row ends \d+ before the first text line/],
-    ["board 2's raised HOME row height", /^board 2: HOME's \d+ rows land exactly on contentBottom/],
-    // BOARD 1's IS A SEPARATE ENTRY, not the same one firing twice - see the note at
-    // the assertion. Each board derives HOME's pitch from its OWN header and board 1's
-    // is the tighter of the two (a 268px region against 414), so the two prove
-    // different arithmetic even though the assertion reads the same.
-    ["board 1's raised HOME row height", /^board 1: HOME's \d+ rows land exactly on contentBottom/],
-    ["the pairing countdown moved onto the label",
-     /^pairing panel: the Mac's label ends \d+, clear of the countdown/],
-    ["the widened pairing button",
-     /^pairing panel: two \d+px buttons plus \d+ fill the card lane exactly/],
-    ["the widened pairing row step",
-     /^PAIR NEW MAC fits the free slot at 3 Mac\(s\)/],
-    ["the widened pairing surplus",
-     /^pairing panel: the stack lands exactly on the button row/],
-    ["the narrowed DEVICE diagnostics step",
-     /^Device: two diagnostics lines share no pixel row/],
-    ["the widened DEVICE surplus",
-     /^Device: the stack lands exactly - the \d+th diagnostics line's box ends \d+/],
-    ["the widened DANGER surplus",
-     /^Danger: the stack lands exactly - the hint's ink ends \d+/],
-    ["the nudged POWER OFF button",
-     /^Danger: the two buttons are \d+px apart == SP_3/],
-    // ---- the four board-1 faults ----
-    ["board 1's widened DEVICE surplus",
-     /^Device: the stack lands exactly - CALIBRATE TOUCH ends \d+/],
-    ["board 1's widened DISPLAY surplus",
-     /^Display: the page lands exactly - the flip toggle ends \d+/],
-    ["board 1's widened SOUND surplus",
-     /^Sound: the page lands exactly - MIC TEST ends \d+/],
-    ["board 1's widened Mac row step",
-     /^Pairing: \d+ Macs end \d+, inside the region/],
-  ];
-  let missed = 0;
-  for (const [what, re] of WANT) {
-    const hit = FAILED.find(m => re.test(m));
-    if (hit) console.log(`selftest: ${what} was caught by - ${hit}`);
-    else { console.log(`SELFTEST FAILED: the checker did not notice ${what}`); missed++; }
+  // FOR IT - and ALONE, in its own child, which is the whole of what changed here.
+  // Matching a message rather than counting was already the rule; what it could not
+  // do, while every injection shared one process, was tell "both caught" from "one
+  // caught twice". Four pairs shared a message when swept in isolation. See the
+  // CONST_FAULTS table's own header for the four and for why three of them were
+  // beyond any board discriminator.
+  //
+  // THE PARENT RUNS CLEAN. Everything above this line ran with no injection at all,
+  // so `fail` is the honest state of the tree and a --selftest that is green also
+  // says the checker passes - which the old design could not claim, because the
+  // parent was the one carrying all fifteen faults.
+  if (fail) {
+    console.log(`\nSELFTEST FAILED: the UNINJECTED run has ${fail} failure(s) - ` +
+      `fix those first; a fault injected on top of a red tree proves nothing.`);
+    process.exit(1);
   }
+  console.log("\n--selftest: constant faults (each re-execs this checker ALONE and must FAIL BY NAME)");
+  let missed = 0;
+  for (let i = 0; i < CONST_FAULTS.length; i++) {
+    const [what, , want] = CONST_FAULTS[i];
+    const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+      env: { ...process.env, DECK_CONST_FAULT: String(i) }, encoding: "utf8", maxBuffer: 64e6,
+    });
+    const out = `${r.stdout || ""}${r.stderr || ""}`;
+    const fails = out.split("\n").filter((l) => /^\s*FAIL/.test(l)).map((l) => l.replace(/^\s*FAIL\s*/, "").trim());
+    const hit = fails.find((m) => want.test(m));
+    // A THROWN child is not a catch: `bump` throws when its constant is gone, and a
+    // crash fails every assertion at once, which is the shape a real catch must not
+    // be confused with.
+    if (/--selftest: B\[\d\]\./.test(out))
+      { console.log(`  MISSED  ${what}\n            <- the injection has stopped applying (constant renamed?)`); missed++; }
+    else if (r.status === 0)
+      { console.log(`  MISSED  ${what}\n            <- no assertion notices this`); missed++; }
+    else if (!hit)
+      { console.log(`  MISSED  ${what}\n            <- ${fails.length} assertion(s) failed but NONE matched its own expectation ` +
+                    `(first: ${(fails[0] || "").slice(0, 90)})`); missed++; }
+    else
+      console.log(`  caught  ${what}\n            by: ${hit.slice(0, 150)}`);
+  }
+  console.log(`\nconstant faults: ${CONST_FAULTS.length - missed}/${CONST_FAULTS.length} caught`);
   if (missed) process.exit(1);
-  console.log(`selftest ok - ${WANT.length} injected faults, ${WANT.length} caught by name (${fail} failure(s) in total)`);
   // ...and the SOURCE half, which perturbed constants cannot reach.
   console.log("\n--selftest: source faults (each re-execs this checker and must FAIL BY NAME)");
   process.exit(sweepSourceFaults(import.meta.url, SOURCE_FAULTS) ? 0 : 1);
