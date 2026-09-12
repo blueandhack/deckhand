@@ -192,9 +192,43 @@ glass_up  = 3.7;    // EXACT: CTP 1.00 + LCD 2.20 + glue 0.50. This sets how far
                     // pushes the PCB deeper while leaving the glass at the same
                     // glass_recess, so the window + touch chamfer stay correct.
 usb_up    = 3.4;    // USB-C connector height above the PCB back
-glass_recess = 1.6; // SLIMMED from board 1's 2.6 (-1.0 mm). Display sits this far below the outer front face. This also
+// 1.6 -> 2.5, AND THE OLD VALUE WAS PRESSING THE SCREEN. Reported as "I saw the
+// screen pressed due to print error" - the print error is real, but it exposed a
+// latent defect rather than causing one.
+//
+// THE RULE IS glass_recess >= front_th, and 1.6 against a 2.2 face broke it by
+// 0.6. The window is a through-hole 50.6 x 75.0, DELIBERATELY smaller than the
+// 54.5 x 83.0 CTP so the frame hides the black border - so the bezel lies over
+// the glass's border, and if the glass's top face (z = glass_recess) sits in
+// FRONT of the bezel's inner face (z = front_th) the two occupy the same space.
+// Measured on the mesh by intersecting body() with the CTP as the vendor drawing
+// gives it: 437 mm3, biting 0.60 mm into the glass all the way round.
+//
+// The board therefore never reached its shoulders - the glass hit the bezel
+// first and carried the load - and the four cover pillars bottom on the board's
+// back at 0.000, so TIGHTENING THE SCREWS PRESSED THE SCREEN. The screws made a
+// standing defect worse; they did not create it.
+//
+// 2.5 is front_th + 0.3: zero interference at 2.2, and 0.3 of margin over the
+// print error that found this. The ladder, all measured the same way:
+//   1.6 -> 0.60 mm bite, 437 mm3    (was here)
+//   2.0 -> 0.20 mm bite, 146 mm3    (asked for as "shoulder 3.5" - still presses)
+//   2.2 -> 0.00, coplanar
+//   2.5 -> clear, 0.3 margin        <-- here
+// It costs 0.9 mm of device: total_th 21.9 -> 22.8. The cover's screw pillars
+// track z_pcb_b and still land on the board, so nothing there needed changing.
+glass_recess = 2.5; // Display sits this far below the outer front face. MUST be >= front_th
+                    // or the bezel presses the glass - see above. This also
                     // sets the board's SUPPORT SHOULDER height (= glass_recess +
-                    // glass_up - front_th): with glass_up 4.2 that's a 4.6 mm shoulder.
+                    // glass_up - front_th), which is 4.0 here.
+
+// THE CAPACITIVE PANEL, as the vendor outline drawing gives it (page 12): 54.50
+// wide x 83.00 long, centred on the PCB - 9.25 + 83.00 + 9.25 = 101.50. It is
+// BIGGER than the window on purpose, so the frame hides its black border, and
+// that overlap is exactly why glass_recess has to clear front_th. Named here so
+// the interference can be MEASURED rather than argued about - case-b2-check.mjs
+// parses these and intersects glass() with body().
+ctp_w = 54.5; ctp_h = 83.0; ctp_from_end = 9.25;
 
 usb_at_top = true;
 
@@ -1011,6 +1045,16 @@ exp_relief = wall - exp_skin;
 assert(!mic_ext || exp_relief >= exp_plug_proud,
        "Expand relief cannot clear the plug AND keep a printable skin at this wall - raise wall to 2.6");
 front_th = 2.2;     // front face thickness
+// THE BEZEL MUST NOT SIT IN THE GLASS. The window is a through-hole smaller than
+// the CTP so the frame hides its border, so the glass's top face (z =
+// glass_recess) has to be at or behind the bezel's inner face (z = front_th).
+// At 1.6 against 2.2 it was 0.6 mm inside it - 437 mm3 of interference, the board
+// never reached its shoulders, and the cover's screw pillars then pressed the
+// screen every time the case was closed. Cheap to state, and it went unstated for
+// the whole life of this file.
+assert(glass_recess >= front_th,
+       str("glass_recess (", glass_recess, ") is less than front_th (", front_th,
+           ") - the bezel would press the screen by ", front_th - glass_recess, " mm."));
 cover_th = 2.0;     // back cover plate
 
 // ---------- THE BACK COVER'S PROFILE ----------
@@ -2253,6 +2297,13 @@ module stand_placed(){
 // The MAX4466 module as fitted, for preview only: PCB on edge in the retainer's
 // slot, capsule reaching into the side wall's channel, pads facing the low-Y end
 // (toward the Expand connector).
+// The CTP as a solid, for the preview and for the interference check. The old
+// preview ghost was a board-sized cube covering display AND pcb, which is fine for
+// eyeballing clearances and useless for measuring one.
+module glass(){
+  translate([bx0, by0 + ctp_from_end, z_glass]) cube([ctp_w, ctp_h, glass_up]);
+}
+
 module mic_module(){
   x0 = wall + mic_pcb_x0;
   z0 = z_pcb_b + mic_floor;

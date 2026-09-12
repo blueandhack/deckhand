@@ -213,7 +213,8 @@ function run(scadPath, defines = {}) {
     'cover_rise', 'cover_th', 'soft_r', 'cover_edge_top', 'cover_edge_shoulder',
     'z_pcb_b', 'screw_pillar_gap', 'screw_boss_d', 'screw_pad_z',
     'holes()[0][0]', 'holes()[0][1]',
-    'screw_pilot', 'screw_skin', 'z_pcb_f', 'screw_lead', 'screw_engage_min'
+    'screw_pilot', 'screw_skin', 'z_pcb_f', 'screw_lead', 'screw_engage_min',
+    'glass_recess', 'front_th'
   ], defines);
 
   const rim = (v.ks_barrel - v.ks_head_d) / 2;
@@ -238,6 +239,12 @@ function run(scadPath, defines = {}) {
   writeFileSync(probe,
     `part="none"; what="stand";\ninclude <${scadPath}>\n` +
     `if (what=="hit") intersection(){ translate([out_w,0,total_th]) rotate([0,180,0]) cover(); stand_placed(); }\n` +
+    // A MARKER CUBE RIDES ALONG, and it is not decoration: OpenSCAD refuses to
+    // export an empty geometry and exits non-zero, so the PASSING case - no
+    // interference at all - crashed the checker while the failing case worked.
+    // 1 mm3 at (-50,-50,-50) can never touch the part, so the export always has
+    // something and its volume is subtracted back off below.
+    `else if (what=="glasshit") { intersection(){ body(); glass(); } translate([-50,-50,-50]) cube(1); }\n` +
     `else stand_placed();\n`);
   const dArgs = Object.entries(defines).flatMap(([k, val]) => ['-D', `${k}=${val}`]);
   const build = (what, file, extra = []) => execFileSync('openscad',
@@ -251,6 +258,28 @@ function run(scadPath, defines = {}) {
   const hv = stlVolume(hit);
   check('the folded blade does not penetrate the cover', hv < 1e-3,
     `intersection volume ${hv.toFixed(4)} mm3 (contact is coplanar, so 0)`);
+
+  // ---- THE BEZEL MUST NOT SIT IN THE GLASS ----
+  // This is the defect that started the check: the window is a through-hole
+  // SMALLER than the CTP so the frame hides its border, so any part of the glass
+  // that lies in front of the bezel's inner face is interference. At glass_recess
+  // 1.6 against front_th 2.2 it was 437 mm3, biting 0.60 mm all the way round -
+  // the board never reached its shoulders, and the cover's screw pillars pressed
+  // the screen every time the case closed.
+  //
+  // The .scad now asserts glass_recess >= front_th, which is the cheap half and
+  // catches the case that caused it. This is the other half: it MEASURES, so it
+  // also catches anything else that reaches into the glass's volume - a mounting
+  // column moved under the display, a boss, a rib - none of which that arithmetic
+  // can see. glass() and the CTP's dimensions live in the .scad, so nothing here
+  // is transcribed.
+  const gh = join(dir, 'gh.stl');
+  build('glasshit', gh);
+  const gv = stlVolume(gh) - 1.0;   // less the marker cube
+  check('the bezel does not press the glass', gv < 1e-3,
+    `body/CTP intersection ${gv.toFixed(3)} mm3 ` +
+    `(glass_recess ${v.glass_recess} vs front_th ${v.front_th}; the bezel lies over ` +
+    `the border by design, so any overlap here is the screen being crushed)`);
 
   const tris = stlTris(st);
   const y0 = v.ks_lug_y + 18, y1 = v.ks_lug_y + v.ks_leaf_l - 14;
@@ -483,6 +512,14 @@ const FAULTS = [
     patch: s => s.replace(/cylinder\(d = screw_pilot, h = z_pcb_f - screw_skin \+ 0\.01\);/,
                           'cylinder(d = screw_pilot, h = 0.01);'),
     expect: 'the four screw pilots are actually cut' },
+  // NOT "glass_recess back to 1.6": the .scad now refuses that outright, so the
+  // build never runs and this checker proves nothing (the same reason screw_len 16
+  // is not used above). The fault has to keep glass_recess >= front_th and still
+  // put case material inside the panel - which is what moving a mounting column
+  // under the display does, and no arithmetic in the file would notice.
+  { name: 'a mounting column is moved under the display',
+    patch: s => s.replace(/^hole_ins_y = 3\.40;/m, 'hole_ins_y = 14.0;'),
+    expect: 'the bezel does not press the glass' },
   { name: 'the axle is dropped so the blade buries itself',
     patch: s => s.replace(/^ks_axle_z\s*=\s*-ks_bz;/m, 'ks_axle_z  = -ks_bz + 3.0;'),
     expect: 'the folded blade does not penetrate the cover' },

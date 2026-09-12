@@ -1065,6 +1065,53 @@ at the column top — and their combined extent is 3.61 mm, indistinguishable fr
 bore. It now measures **volume over the bore's own area**, an equivalent depth that two thin
 slices cannot fake. The fault injection is the only reason that was caught.
 
+## The bezel was pressing the screen, and had been all along
+
+Reported as *"I saw the screen pressed due to print error"*. The print error is real, but it
+exposed a latent defect rather than causing one.
+
+**The rule is `glass_recess >= front_th`**, and 1.6 against a 2.2 face broke it by 0.6. The
+window is a through-hole **50.6 × 75.0, deliberately smaller than the 54.5 × 83.0 CTP** so the
+frame hides the black border — so the bezel lies over the glass's border, and if the glass's
+top face (z = `glass_recess`) sits in *front* of the bezel's inner face (z = `front_th`), the
+two occupy the same space.
+
+Measured on the mesh by intersecting `body()` with the CTP as the vendor drawing gives it:
+**437 mm³, biting 0.60 mm into the glass all the way round** (x 2.75–57.25, y 11.95–94.95).
+
+So the board never reached its shoulders — the glass hit the bezel first and carried the load —
+and the four cover pillars bottom on the board's back at 0.000, which means **tightening the
+screws pressed the screen**. The screws made a standing defect worse; they did not create it.
+
+`glass_recess` is now **2.5** = `front_th` + 0.3. The ladder, all measured the same way:
+
+| `glass_recess` | shoulder | interference | `total_th` |
+|---|---|---|---|
+| 1.6 | 3.10 | **0.60 mm, 437 mm³** | 21.9 |
+| 2.0 | 3.50 | 0.20 mm, 146 mm³ — *asked for first; still presses* | 22.3 |
+| 2.2 | 3.70 | 0.00, coplanar | 22.5 |
+| **2.5** | **4.00** | **clear, 0.3 margin** | **22.8** |
+
+It costs 0.9 mm of device. The cover's screw pillars track `z_pcb_b`, so they still land on the
+board with nothing to change.
+
+### Guarded twice, because the two halves catch different things
+
+- **The `.scad` asserts `glass_recess >= front_th`** and names the overlap in millimetres. Cheap,
+  immediate, and it catches the case that caused this. It went unstated for the whole life of
+  the file.
+- **`case-b2-check.mjs` measures it** — `glass()` and the CTP's dimensions (`ctp_w`, `ctp_h`,
+  `ctp_from_end`) live in the `.scad`, so nothing is transcribed. The measurement also catches
+  what the arithmetic cannot: *anything else* reaching into the glass's volume. Its injected
+  fault is **a mounting column moved under the display** — chosen because reverting
+  `glass_recess` now trips the model's own assert, so the build would refuse and the checker
+  would prove nothing (the same reason `screw_len` 16 is not used as a fault).
+
+**A marker cube rides along with that intersection**, and it is not decoration: OpenSCAD refuses
+to export an empty geometry and exits non-zero, so the *passing* case crashed the checker while
+the failing case worked. 1 mm³ far outside the part keeps the export non-empty and is subtracted
+back off.
+
 ## The body's wall is 4 mm taller, and the last millimetre is the plateau
 
 Asked for in three steps — +2, then +1, then +2 more — which put `rim_extra` at 5.0 and
