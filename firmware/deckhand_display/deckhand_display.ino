@@ -3490,8 +3490,13 @@ const int P2_SETUP_CAP_Y = PAGE_TOP + P2_TOP;
 const int P2_CAL_Y = P2_SETUP_CAP_Y + SET_CAP_STEP;
 const int P2_DANGER_CAP_Y = P2_CAL_Y + P2_BTN_H + P2_SECTION_GAP;
 const int P2_PAIR_Y = P2_DANGER_CAP_Y + SET_CAP_STEP;
-const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
-const int P2_HINT_Y = P2_PWR_Y + P2_BTN_H + P2_HINT_GAP;
+// THE CHAIN STOPS HERE ON THIS BOARD. P2_PWR_Y and P2_HINT_Y are gone with POWER
+// OFF and the hint that explained it, which are drawn at the foot of the DEVICE
+// group now - and they are DELETED rather than left computing a y nothing draws
+// at, for the reason P2_MIC_Y's absence is asserted one board over: a constant a
+// draw site no longer uses but a hit test still does is how a page comes to claim
+// taps for a button it does not draw. settings-geom-check.mjs asserts both are
+// undefined on this board.
 #else
 #if BOARD_HAS_MIC
 const int P2_MIC_Y = PAGE_TOP + P2_TOP;
@@ -3555,14 +3560,11 @@ const int P4_HINT_Y  = P4_ROW_Y + (MSG_PRI_COUNT - 1) * P4_ROW_STEP + H_ROW + P4
 const int P4_LABEL_CHARS = (CARD_W - 2 * SP_3 - 2 * TEXT_ADV) / TEXT_ADV;
 
 #if !BOARD_USES_TFT_ESPI
-// ---- About: derived, the same chain shape P4 uses -------------------------
-const int P5_CAP_Y    = PAGE_TOP + P5_TOP;
-const int P5_ROW_Y    = P5_CAP_Y + SET_CAP_STEP;
-const int P5_ROW_STEP = H_ROW + P5_ROW_GAP;
-// From the LAST row's bottom, like P4's: the hint explains the block, so a
-// sixth row must MOVE it rather than have the row drawn through it.
-const int P5_HINT_Y   = P5_ROW_Y + (P5_ROWS - 1) * P5_ROW_STEP + H_ROW + P5_HINT_GAP;
-
+// BOARD 2 ONLY, and it shares this guard with the About chain that used to sit
+// above it - which is why deleting that chain took the `#if` with it and left this
+// `#endif` orphaned for one compile. The DIAGNOSTICS line that draws the commit is
+// board 2's, and so is FWSTAMP's store.
+//
 // THE COMMIT IS STORED AT FLASH TIME, NOT COMPILED IN, and that is a deliberate
 // trade against the board-baseline contract. A baked-in SHA changes both
 // binaries on EVERY commit, so --check would report CHANGED for ever unless the
@@ -3609,21 +3611,18 @@ int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
 // arm of the board headers defines. The two flags agree on both boards that exist
 // today, so the mismatched guard compiled - but it says this row belongs to "the
 // board that draws through the shim" when it actually belongs to "the board whose
-// STATUS group has a POWER card", and the first board to have one and not the other
+// DEVICE group has a POWER card", and the first board to have one and not the other
 // would fail to compile on a line whose comment blames the wrong flag.
 #if BOARD_SETTINGS_HOME
-// BOARD 2 ONLY - the SoC die temp line, which is now the POWER card's second
-// detail line ("SoC 46.6 C") rather than a right-aligned reading in a row of its
-// own. It is padded to ST_LINE_CHARS like every other detail line on that page,
-// so its cache is the same ST_LINE_BYTES they use - a cache shorter than its own
-// padded string silently stops noticing changes past that point, and
-// settings-geom-check.mjs asserts the size against the header's constant rather
-// than trusting this comment.
-char tempRowTextCache[ST_LINE_BYTES] = "";
-// The colour is cached BESIDE the text for the reason battRowColorCache documents:
-// drawIfChanged compares text only, so crossing a threshold while the digits stay
-// identical would never reach the panel.
-uint16_t tempRowColorCache = 0;
+// THE SoC TEMP'S TWO CACHES ARE GONE FROM THIS BOARD, and so is its colour. The
+// reading shares a DIAGNOSTICS line with the flush figure now, and a line is ONE
+// padded field with one colour - so colouring it by temperature would be colouring
+// the flush figure by temperature too, which is a claim about the wrong number.
+// What is lost is the warm/hot BAND, not the reading: the value is still on this
+// page, still on HOME's DEVICE summary row, and still what TEMP reports.
+// colorForDieTemp() is left where it is in power.ino; it was already uncalled on
+// board 1 and is now uncalled on both, which is a re-home for whoever wants the
+// band back rather than a deletion that would move board 1's binary.
 #endif
 // PER BOARD, because the two boards genuinely draw different strings here and a
 // cache shorter than its string silently stops noticing changes past that point.
@@ -3643,16 +3642,22 @@ uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
 char macRowCache[MAX_LINKS][40] = {"", ""};
 #endif
 #if BOARD_SETTINGS_HOME
-// THE STATUS GROUP'S FIELDS (board 2). Every size is its field's PADDED width plus
+// THE DEVICE GROUP'S FIELDS (board 2). Every size is its field's PADDED width plus
 // NUL, taken from the board header rather than restated here, because a cache
 // shorter than the string it holds silently stops noticing changes past that
 // point - this file's oldest bug, and the reason settings-geom-check.mjs asserts
 // each declaration against the header's own constant.
 char stVerdictCache[ST_VERDICT_BYTES] = "";
-char stLinksCache[ST_LINE_BYTES] = "", stIdCache[ST_LINE_BYTES] = "";
+char stLinksCache[ST_LINE_BYTES] = "";
 char stLeftCache[ST_LINE_BYTES] = "";
-char stPayloadCache[ST_HOST_L_BYTES] = "", stFlushCache[ST_HOST_L_BYTES] = "";
-char stUptimeCache[ST_HOST_R_BYTES] = "", stMacsCache[ST_HOST_R_BYTES] = "";
+// THE DIAGNOSTICS BLOCK'S FOUR LINES, one cache each. They replace stIdCache (the
+// CONNECTION card's second line, whose two halves went to DIAGNOSTICS and to the
+// Pairing group) and the HOST card's stPayload/stFlush/stUptime/stMacs, which were
+// four caches for four HALF-lines; a line is one padded field here, so it is one
+// cache. Every one of the four is composed each tick and compared here, the fixed
+// ones included - a value on the static side is a value that goes stale silently,
+// and "Deckhand-C114 ES3C35P" is only fixed until someone renames the device.
+char devDiagCache[DEV_DIAG_LINES][DEV_DIAG_BYTES] = {"", "", "", ""};
 // THE VERDICT LINE'S COLOUR, cached beside its text and busting it on a flip -
 // the guard battRowColorCache documents, and needed here for a reason that is not
 // hypothetical: "Both links up" is ONE string across a COLOR_GOOD -> COLOR_WARN
@@ -3693,14 +3698,14 @@ int brightBarCache = -1;
 char sleepValCache[8] = "";
 char volValCache[8] = "";
 #if BOARD_SETTINGS_HOME
-// HOME's five summaries. They are COMPOSED from live globals every tick and drawn
+// HOME's six summaries. They are COMPOSED from live globals every tick and drawn
 // through drawIfChanged, so they need a cache each - without one the row would be
 // repainted on every 5s tick, which is the flicker this file's whole redraw
 // discipline exists to prevent. HOME_SUB_BYTES is HOME_SUB_CHARS + NUL, and the
 // text is padded to HOME_SUB_CHARS so the opaque box is a constant width and a
 // shrinking summary cannot leave the tail of a longer one behind.
-char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", "", "", ""};
-// The Status summary's colour is cached beside its text and busts it, the guard
+char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", "", ""};
+// The Device summary's colour is cached beside its text and busts it, the guard
 // battRowColorCache documents. Today the two cannot disagree - the colour keys off
 // the same link count the row's leading phrase spells out, so a flip always
 // changes the string too - but "the text happens to change as well" is precisely
