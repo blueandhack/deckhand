@@ -216,7 +216,7 @@ const BFLAG = Object.fromEntries([1, 2].map((b) => {
     return +m[1];
   };
   return [b, { GROUPS: one("BOARD_SETTINGS_GROUPS"), HOME: one("BOARD_SETTINGS_HOME"),
-               CAPTIONS: one("BOARD_SETTINGS_CAPTIONS"), DIAG: one("BOARD_DEVICE_DIAGNOSTICS"),
+               CAPTIONS: one("BOARD_SETTINGS_FITS_CAPTIONS"), DIAG: one("BOARD_DEVICE_DIAGNOSTICS"),
                CAL: one("BOARD_TOUCH_NEEDS_CAL"), TFT: one("BOARD_USES_TFT_ESPI") }];
 }));
 const BOARD_NAME = Object.fromEntries([1, 2].map((b) => {
@@ -1208,13 +1208,12 @@ if (SELFTEST) {
   // gives any of them teeth, and it is board 1's alone.
   B[1].P1_AIR_BOT += 1;
   console.log("--selftest: board 1's DISPLAY surplus widened by 1; the flip toggle no longer closes the page and that identity MUST fail");
-  // SOUND. Two pixels on the gap between the VOLUME card and TEST BEEP, which moves
-  // the DRAWN gap off PS_BEEP_GAP while leaving both controls inside the page, both
-  // touch targets and both clear of each other. Only the drawn-gap assertion sees
-  // it - and that assertion is what keeps the ONE shared chain line in
-  // deckhand_display.ino describing what each board actually draws.
-  B[1].PS_BEEP_Y += 2;
-  console.log("--selftest: board 1's TEST BEEP nudged 2px down; the drawn VOLUME-to-TEST-BEEP gap MUST stop matching PS_BEEP_GAP");
+  // SOUND. One pixel on ITS closing term. This is the fault that replaced a
+  // drawn-gap comparison which held by construction (see the note at PS_BEEP_GAP):
+  // the identity is what actually gives PS_TOP, PS_VOL_GAP, PS_BEEP_GAP and
+  // PS_MIC_GAP teeth, so the tooth is proven on the closing term itself.
+  B[1].PS_AIR_BOT += 1;
+  console.log("--selftest: board 1's SOUND surplus widened by 1; MIC TEST no longer closes the page and that identity MUST fail");
   // MACS. One pixel on the row STEP. Four cards at 44 end on 297 with 4 rows to
   // spare, so +1 puts the fourth card's last row at 301 - still on the panel, still
   // a touch target, still clear of its neighbour: the only assertion that can see it
@@ -2248,7 +2247,7 @@ for (const b of [1, 2]) {
   // used. What board 1 does NOT carry is the two section captions: the page spends
   // 212 of its 222px on the ANY row and four Mac rows, and the captions want 42
   // more. That is the arithmetic the spec's AMENDMENT used to reject the five-group
-  // set, and it is why they are behind BOARD_SETTINGS_CAPTIONS rather than dropped
+  // set, and it is why they are behind BOARD_SETTINGS_FITS_CAPTIONS rather than dropped
   // silently.
   {
     const pairEnd = c.P3_LIST_Y + (MAX_HOSTS - 1) * c.P3_ROW_STEP + c.P3_ROW_H - 1;
@@ -2256,7 +2255,7 @@ for (const b of [1, 2]) {
     const pairCaps = BFLAG[b].CAPTIONS === 1;
     for (const n of ["P3_ANY_CAP_Y", "P3_LIST_CAP_Y"])
       chk((c[n] !== undefined) === pairCaps,
-          `board ${b}: ${n} is ${pairCaps ? "declared" : "ABSENT"}, matching BOARD_SETTINGS_CAPTIONS ${BFLAG[b].CAPTIONS} (got ${c[n]})`);
+          `board ${b}: ${n} is ${pairCaps ? "declared" : "ABSENT"}, matching BOARD_SETTINGS_FITS_CAPTIONS ${BFLAG[b].CAPTIONS} (got ${c[n]})`);
     if (pairCaps) {
       chk(c.P3_ANY_CAP_Y >= c.PAGE_TOP,
           `Pairing: the first caption is at ${c.P3_ANY_CAP_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
@@ -2738,11 +2737,13 @@ for (const b of [1, 2]) {
     // caption y left behind on the board that draws no caption is the P2_MIC_Y
     // defect; a gap constant left behind is worse, because a later edit can re-derive
     // the chain through a term that means nothing. Asserted against the header's own
-    // parsed BOARD_SETTINGS_CAPTIONS, so flag and constants cannot disagree.
+    // parsed BOARD_SETTINGS_FITS_CAPTIONS, so flag and constants cannot disagree.
     for (const n of ["P1_THEME_CAP_Y", "P1_AUTO_HINT_Y", "P1_THEME_CAP_GAP", "P1_AUTO_HINT_GAP", "P1_FLIP_GAP"])
       chk((c[n] !== undefined) === caps,
-          `board ${b}: ${n} is ${caps ? "declared" : "ABSENT"}, matching BOARD_SETTINGS_CAPTIONS ${BFLAG[b].CAPTIONS} (got ${c[n]})`);
-    for (const n of ["P1_THEME_TOP_GAP", "P1_FLIP_TOP_GAP", "P1_AIR_BOT"])
+          `board ${b}: ${n} is ${caps ? "declared" : "ABSENT"}, matching BOARD_SETTINGS_FITS_CAPTIONS ${BFLAG[b].CAPTIONS} (got ${c[n]})`);
+    // P1_AIR_BOT IS NOT IN THIS LIST: it is on BOTH boards now, so it belongs to the
+    // closing identity above rather than to the presence table.
+    for (const n of ["P1_THEME_TOP_GAP", "P1_FLIP_TOP_GAP"])
       chk((c[n] !== undefined) === !caps,
           `board ${b}: ${n} is ${caps ? "ABSENT" : "declared"} - the uncaptioned chain steps from each control's painted bottom, which is a DIFFERENT relation from P1_FLIP_GAP's step off the hint's centre, so it carries a different name (got ${c[n]})`);
     for (const [n, a, z] of disp) console.log(`    Display ${n.padEnd(15)} ${a}..${z}`);
@@ -2754,16 +2755,15 @@ for (const b of [1, 2]) {
     // The Display group's last control must clear the footer.
     const dispEnd = c.P1_FLIP_Y + c.H_ROW - 1;
     chk(dispEnd < contentBottom, `Display's flip toggle clears the footer: ${dispEnd} < ${contentBottom}`);
-    // AND ON THE BOARD WITH NO FRAMING, IT CLOSES ON A NAMED SURPLUS. Without a
-    // closing term P1_TOP, P1_GAP and the two top-gaps are pure translations that no
-    // relative bound can see - the sweep's "unguarded though this checker reads it"
-    // report, and the same shape HOME_Y0_BOT, P4_AIR_BOT and DEV_AIR_BOT already have.
-    if (!caps) {
-      chk(dispEnd + 1 + c.P1_AIR_BOT === contentBottom,
-          `Display: the page lands exactly - the flip toggle ends ${dispEnd}, + 1 + P1_AIR_BOT ${c.P1_AIR_BOT} == contentBottom ${contentBottom} (got ${dispEnd + 1 + c.P1_AIR_BOT})`);
-      chk(c.P1_AIR_BOT > 0,
-          `Display: the trailing air is positive (${c.P1_AIR_BOT}) - a control ending flush on contentBottom reads as joined to the footer, which board 1 shipped once and named P1_TOP's bottom gap to fix`);
-    }
+    // AND IT CLOSES ON A NAMED SURPLUS, ON BOTH BOARDS. Without a closing term P1_TOP,
+    // P1_GAP and the gaps above the segments and the toggle are pure translations
+    // that no relative bound can see - the sweep's "unguarded though this checker
+    // reads it" report, and the same shape HOME_Y0_BOT, P4_AIR_BOT and DEV_AIR_BOT
+    // already have. Board 2's 14 rows of trailing air were unnamed until this round.
+    chk(dispEnd + 1 + c.P1_AIR_BOT === contentBottom,
+        `Display: the page lands exactly - the flip toggle ends ${dispEnd}, + 1 + P1_AIR_BOT ${c.P1_AIR_BOT} == contentBottom ${contentBottom} (got ${dispEnd + 1 + c.P1_AIR_BOT})`);
+    chk(c.P1_AIR_BOT > 0,
+        `Display: the trailing air is positive (${c.P1_AIR_BOT}) - a control ending flush on contentBottom reads as joined to the footer, which board 1 shipped once and named P1_TOP's bottom gap to fix`);
     // The three theme segments fit the card with their gaps, and each is still a
     // touch target - they are also the touch boundaries (the hit test divides by
     // the PITCH), so a segment wider than its share is a tap landing on the wrong
@@ -2806,7 +2806,7 @@ for (const b of [1, 2]) {
     // FOUR CONTROLS ON BOTH BOARDS - SOUND toggle, VOLUME stepper, TEST BEEP, MIC
     // TEST - and on board 2 the two captions and the hint that frame them. Board 1
     // has 38px of slack across five gaps against the ~55 those three want, so it
-    // carries none of them; see BOARD_SETTINGS_CAPTIONS in its header.
+    // carries none of them; see BOARD_SETTINGS_FITS_CAPTIONS in its header.
     const snd = [
       ...(caps ? [["ALERTS caption", ...tlBox(b, T_META, c.PS_ALERTS_Y)]] : []),
       ["SOUND toggle", c.PS_SOUND_Y, c.PS_SOUND_Y + c.H_ROW - 1],
@@ -2819,8 +2819,8 @@ for (const b of [1, 2]) {
     for (const [n, a, z] of snd) console.log(`    Sound   ${n.padEnd(15)} ${a}..${z}`);
     for (const n of ["PS_ALERTS_Y", "PS_WHAT_HINT_Y", "PS_MIC_CAP_Y", "PS_HINT_GAP", "PS_MIC_CAP_GAP"])
       chk((c[n] !== undefined) === caps,
-          `board ${b}: ${n} is ${caps ? "declared" : "ABSENT"}, matching BOARD_SETTINGS_CAPTIONS ${BFLAG[b].CAPTIONS} (got ${c[n]})`);
-    for (const n of ["PS_MIC_GAP", "PS_AIR_BOT"])
+          `board ${b}: ${n} is ${caps ? "declared" : "ABSENT"}, matching BOARD_SETTINGS_FITS_CAPTIONS ${BFLAG[b].CAPTIONS} (got ${c[n]})`);
+    for (const n of ["PS_MIC_GAP"])
       chk((c[n] !== undefined) === !caps,
           `board ${b}: ${n} is ${caps ? "ABSENT" : "declared"} - the uncaptioned chain steps TEST BEEP's bottom straight to MIC TEST, where the captioned one steps to a caption (got ${c[n]})`);
     chk(snd[0][1] === c.PAGE_TOP + c.PS_TOP,
@@ -2832,22 +2832,25 @@ for (const b of [1, 2]) {
     const soundEnd = c.PS_MIC_Y + c.PS_BTN_H - 1;
     chk(soundEnd < contentBottom, `Sound's last button clears the footer: ${soundEnd} < ${contentBottom}`);
     chk(c.PS_BTN_H >= c.TAP_MIN, `Sound's action buttons ${c.PS_BTN_H}px tall >= TAP_MIN ${c.TAP_MIN}`);
-    // THE ONE GAP THE CHAIN SPELLS AS A NAME ON BOTH BOARDS, so the shared line in
-    // deckhand_display.ino is one line rather than two. It was the literal SP_3 there
-    // and board 2's value is still SP_3; board 1 spends 8. Asserted as the DRAWN gap.
-    {
-      const beepGap = c.PS_BEEP_Y - (c.PS_VOL_Y + c.STEPPER_CARD_H);
-      chk(beepGap === c.PS_BEEP_GAP,
-          `Sound: the VOLUME card's bottom to TEST BEEP is ${beepGap}px == PS_BEEP_GAP ${c.PS_BEEP_GAP}`);
-      chk(c.PS_BEEP_GAP > 0,
-          `Sound: TEST BEEP is separated from the VOLUME card (${c.PS_BEEP_GAP}px) - a button abutting a card reads as part of it`);
-    }
-    if (!caps) {
-      chk(soundEnd + 1 + c.PS_AIR_BOT === contentBottom,
-          `Sound: the page lands exactly - MIC TEST ends ${soundEnd}, + 1 + PS_AIR_BOT ${c.PS_AIR_BOT} == contentBottom ${contentBottom} (got ${soundEnd + 1 + c.PS_AIR_BOT})`);
-      chk(c.PS_AIR_BOT > 0,
-          `Sound: the trailing air is positive (${c.PS_AIR_BOT}) - without a closing term PS_TOP and all three gaps are pure translations nothing on this page can see`);
-    }
+    // PS_BEEP_GAP IS BOUNDED BY THE CLOSING IDENTITY, NOT BY ITSELF. The assertion
+    // that stood here compared `PS_BEEP_Y - (PS_VOL_Y + STEPPER_CARD_H)` against
+    // PS_BEEP_GAP - which is how deckhand_display.ino DERIVES PS_BEEP_Y, so it held
+    // by construction and could not fail. Its only teeth came from the injected
+    // table below, and an assertion whose teeth are borrowed is the "derivation
+    // compared against its own term" shape this file has paid for twice. What
+    // actually constrains the gap is the page landing: widen it and PS_MIC_Y moves
+    // with it, and PS_AIR_BOT's identity fails - which is how geom-sweep, injecting
+    // at PARSE time, sees the whole chain. Only the one thing the identity cannot
+    // see survives here: that the gap EXISTS.
+    chk(c.PS_BEEP_GAP > 0,
+        `Sound: TEST BEEP is separated from the VOLUME card (${c.PS_BEEP_GAP}px) - a button abutting a card reads as part of it`);
+    // THE CLOSING IDENTITY, ON BOTH BOARDS. It was board 1's alone, which left board
+    // 2's PS_TOP and its four gaps bounded only by "the last button clears the
+    // footer" - 12 rows of slack. Every term in the chain is load-bearing now.
+    chk(soundEnd + 1 + c.PS_AIR_BOT === contentBottom,
+        `Sound: the page lands exactly - MIC TEST ends ${soundEnd}, + 1 + PS_AIR_BOT ${c.PS_AIR_BOT} == contentBottom ${contentBottom} (got ${soundEnd + 1 + c.PS_AIR_BOT})`);
+    chk(c.PS_AIR_BOT > 0,
+        `Sound: the trailing air is positive (${c.PS_AIR_BOT}) - without a closing term PS_TOP and every gap on this page are pure translations nothing can see`);
     // EACH CAPTION'S OWN TEXT BOX MUST CLEAR THE CONTROL IT HEADS. The equality
     // this replaced (`PS_SOUND_Y - PS_ALERTS_Y === SET_CAP_STEP`) was vacuous:
     // both sides are DERIVED in deckhand_display.ino as `<caption> + SET_CAP_STEP`,
@@ -5433,8 +5436,8 @@ if (SELFTEST) {
      /^Device: the stack lands exactly - CALIBRATE TOUCH ends \d+/],
     ["board 1's widened DISPLAY surplus",
      /^Display: the page lands exactly - the flip toggle ends \d+/],
-    ["board 1's nudged TEST BEEP",
-     /^Sound: the VOLUME card's bottom to TEST BEEP is \d+px == PS_BEEP_GAP/],
+    ["board 1's widened SOUND surplus",
+     /^Sound: the page lands exactly - MIC TEST ends \d+/],
     ["board 1's widened Mac row step",
      /^Pairing: \d+ Macs end \d+, inside the region/],
   ];

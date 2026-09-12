@@ -248,9 +248,11 @@ void renderSettingsHome() {
 #endif
 // ----- Page 0 / the DEVICE group -----
 #if BOARD_SETTINGS_GROUPS
-// TWO CARDS AND FIVE DIAGNOSTIC LINES (board 2). board_es3c35p.h's ST_*/DEV_*
-// section carries the geometry and the reasoning; what matters here is the split of
-// labour. The two facts you came for - is the host talking to me, and how is the
+// TWO LIVE CARDS ON BOTH BOARDS, and then whatever each has room for under them:
+// SIX DIAGNOSTIC LINES on board 2 (BOARD_DEVICE_DIAGNOSTICS), CALIBRATE TOUCH under
+// a SETUP caption on board 1 (BOARD_TOUCH_NEEDS_CAL). Each board header's ST_*/DEV_*
+// section carries its own geometry and the reasoning; what matters here is the split
+// of labour. The two facts you came for - is the host talking to me, and how is the
 // battery - LEAD a card each as a T_HEAD line with one dimmed detail under it. The
 // eleven you read almost never are six monospace lines under a DIAGNOSTICS
 // caption: they were the HOST card's four and the About page's five before this,
@@ -580,10 +582,12 @@ void renderDevicePage() {
 #endif
 }
 #else
-// BOARD 1's STATUS page, unchanged: the DEVICE card, its connection rows and the
-// two per-Mac link rows. Everything below this line is the text that was always
-// here, so a comment inside it that mentions board 2 is describing the constant it
-// names rather than this page - board 2 does not compile any of it.
+// THE PRE-3A STATUS page: the DEVICE card, its connection rows and the two per-Mac
+// link rows. NEITHER BOARD COMPILES THIS ANY MORE - BOARD_SETTINGS_GROUPS is 1 on
+// both, so this whole arm is dead and Task 4 deletes it. It is left exactly as it
+// stood, so a comment inside it that mentions board 2 is describing the constant it
+// names rather than this page; "board 2 does not compile any of it" was true when
+// only board 1 did, and is now true of both.
 void drawStatusPageStatic() {
   char buf[36];
   uiCard(CARD_X, DEV_CARD_Y, CARD_W, DEV_CARD_H);
@@ -822,23 +826,27 @@ void renderControlsPage() {
   }
 }
 #else
-// ----- The DISPLAY group (board 2) -----
-// Two steppers, then the THEME block: a caption, three segments, and the hint that
-// says what AUTO actually means. A cycle button shows one state and hides the other
-// two, and THEME has three - so it was never a uiToggle and it is not one here.
+// ----- The DISPLAY group (BOTH boards) -----
+// Two steppers, three THEME segments and the flip toggle on both. A cycle button
+// shows one state and hides the other two, and THEME has three - so it was never a
+// uiToggle and it is not one on either board now. What DIFFERS is the framing, not
+// the controls: board 2 heads the segments with a "THEME" caption and explains AUTO
+// in a hint under them; board 1 has 30px across four gaps against the ~46 those two
+// want, so it draws neither (BOARD_SETTINGS_FITS_CAPTIONS, arithmetic in both
+// headers). Only those two lines are behind the guard.
 void drawDisplayPageStatic() {
   drawStepperCard(P1_BRIGHT_Y, "BRIGHTNESS");
   drawStepperCard(P1_SLEEP_Y, "SLEEP AFTER");
   // THE CAPTION AND THE HINT ARE ONE BLOCK WITH THE SEGMENTS, which is why one
   // flag gates both: board 1's page has 30px across four gaps after the two
   // steppers, the segments and the flip toggle, and the two text parts want ~46.
-  // See BOARD_SETTINGS_CAPTIONS in each header for that arithmetic. The SEGMENTS
+  // See BOARD_SETTINGS_FITS_CAPTIONS in each header for that arithmetic. The SEGMENTS
   // are not gated - both boards draw all three options at once.
   //
   // AUTO is a CLOCK, not a sensor - every ADC1 channel on board 2 is spoken for,
   // so there is no light to measure. Saying so is the same rule that stops the
   // farewell screen promising a touch wake a board does not have.
-#if BOARD_SETTINGS_CAPTIONS
+#if BOARD_SETTINGS_FITS_CAPTIONS
   drawGroupCaption("THEME", P1_THEME_CAP_Y);
   uiHint("AUTO = light 07:00 to 19:00", P1_AUTO_HINT_Y);
 #endif
@@ -872,7 +880,11 @@ void renderDisplayPage() {
 
   // Three segments, one filled. Selection is fill AND position, never colour alone,
   // and all three options are on screen at once - which is the whole reason this is
-  // not the cycle button board 1 still uses.
+  // not a cycle button. Board 1 HAD one (a third-width button sharing a row with the
+  // flip toggle and the SOUND toggle) and no longer does: it draws these segments,
+  // at its own P1_THEME_SEG_W of 69 against board 2's 96. An earlier revision of this
+  // line said "the cycle button board 1 still uses", which stopped being true in the
+  // same commit that made this function shared.
   if ((int) themeMode != themeBtnCache) {
     themeBtnCache = (int) themeMode;
     static const char* THEME_SEG[THEME_MODE_COUNT] = {"DARK", "LIGHT", "AUTO"};
@@ -888,29 +900,33 @@ void renderDisplayPage() {
   // is introduced by something: the two steppers carry their own card labels, the
   // segments sit under "THEME", and the SOUND group's toggle next door already
   // reads "SOUND ON"/"SOUND OFF". A bare "NORMAL" under an unrelated hint about
-  // AUTO was the one board-2 settings control that named neither itself nor its
-  // subject. Naming it in the LABEL rather than adding a caption is what makes it
-  // free: 13-14 characters is 104-112px in a 296px control, and no offset moves.
+  // AUTO was the one settings control that named neither itself nor its subject.
+  // Naming it in the LABEL rather than adding a caption is what makes it free, and it
+  // is free on BOTH boards: 13-14 characters is 78-84px in board 1's 216px control
+  // and 104-112px in board 2's 296px one, and no offset moves on either.
   if ((int) screenFlipped != flipBtnCache) {
     flipBtnCache = (int) screenFlipped;
     uiToggle(CARD_X, P1_FLIP_Y, CARD_W, H_ROW, "SCREEN FLIPPED", "SCREEN NORMAL", screenFlipped);
   }
 }
-// ----- The SOUND group (board 2) -----
+// ----- The SOUND group (BOTH boards) -----
 // Output and input together, because a mic test IS a sound test - and it is the one
-// action you run repeatedly, since MICMON is how MIC_GAIN gets settled.
+// action you run repeatedly, since MICMON is how MIC_GAIN gets settled. Board 2 adds
+// the ALERTS and MICROPHONE captions and the hint that says what a beep means; board
+// 1 has 38px of slack across five gaps against the ~55 those three want, so its four
+// controls stand on their own names (BOARD_SETTINGS_FITS_CAPTIONS).
 void drawSoundPageStatic() {
   // The two captions and the hint are the framing, not the controls: board 1 has
-  // 38px of slack across five gaps and they want ~55. See BOARD_SETTINGS_CAPTIONS.
+  // 38px of slack across five gaps and they want ~55. See BOARD_SETTINGS_FITS_CAPTIONS.
   // What that board loses is the output/input separation MICROPHONE drew and the
   // one line saying what a beep MEANS; the four controls name themselves.
-#if BOARD_SETTINGS_CAPTIONS
+#if BOARD_SETTINGS_FITS_CAPTIONS
   drawGroupCaption("ALERTS", PS_ALERTS_Y);
   uiHint("beeps when a session needs input", PS_WHAT_HINT_Y);
 #endif
   drawStepperCard(PS_VOL_Y, "VOLUME");
   uiButton(CARD_X, PS_BEEP_Y, CARD_W, PS_BTN_H, "TEST BEEP", COLOR_ACCENT);
-#if BOARD_SETTINGS_CAPTIONS
+#if BOARD_SETTINGS_FITS_CAPTIONS
   drawGroupCaption("MICROPHONE", PS_MIC_CAP_Y);
 #endif
   uiButton(CARD_X, PS_MIC_Y, CARD_W, PS_BTN_H, "MIC TEST", COLOR_ACCENT);
@@ -953,9 +969,11 @@ void resetPairing() {
   deviceNameReported = false;
   Serial.println("PAIRING: reset by user (device is now unpaired)");
   // Brief confirmation, then rebuild whatever settings surface raised this. NOT
-  // "then STATUS now reads unpaired": the rebuild draws settingsPage, which is the
-  // ACTIONS page (board 1) or the Actions group (board 2) that this was tapped
-  // from - the page whose text changes is one the user has to navigate back to.
+  // "then the DEVICE page now reads unpaired": the rebuild draws settingsPage, which
+  // is the DANGER group this was tapped from - on BOTH boards now, where it used to
+  // be board 1's ACTIONS page and board 2's Actions group. The page whose text
+  // changes (Device's link verdict, the Macs list) is one the user has to navigate
+  // back to.
   // delay() is fine here - matches the calibrate/power-off flows.
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
   setUIFont(2);
@@ -986,9 +1004,9 @@ void resetPairing() {
   drawSettingsStatic();
   renderSettingsTab();
 }
-// ----- Page 2: ACTIONS (board 1) / the DANGER group (board 2) -----
+// ----- Page 2: the pre-3A ACTIONS page (dead) / the DANGER group (both boards) -----
 #if BOARD_SETTINGS_GROUPS
-// ----- The DANGER group (board 2) -----
+// ----- The DANGER group (BOTH boards) -----
 // TWO buttons, in ONE captioned section, and both of them destroy state. MIC TEST
 // is not here - it lives on the SOUND group, where a mic test belongs and where it
 // is the one action you run repeatedly - and CALIBRATE TOUCH is not offered on this
@@ -1012,27 +1030,41 @@ void drawSeverityAction(int y, const char* label, uint16_t tint) {
               P2_SPINE_W / 2, tint, COLOR_CARD);
 }
 // TWO buttons, ONE caption, and both buttons destroy state - which is what the
-// group is called Danger for. CALIBRATE TOUCH is not here: runCalibration() on this
-// board is a stub that prints and returns, because the touch controller is
-// factory-aligned inside the display IC, and a control that cannot work is never
-// offered. POWER OFF is LAST because it is the more severe of the two - a reset
-// costs you the keys, a power-off costs you the device until someone presses RESET.
+// group is called Danger for, on BOTH boards. POWER OFF is LAST because it is the
+// more severe of the two: a reset costs you the keys, a power-off costs you the
+// device until someone presses RESET (or touches the glass - see the hint's #if).
 //
-// NO HINT UNDER POWER OFF. "power off = deep sleep, RESET to wake" is in the confirm
-// dialog this button raises ("deep sleep - press RESET to wake"), which is nearer
-// the decision than a line under the button ever was - and the rule that hint
-// answered to, that a board which cannot wake on touch must not promise one, is
-// answered there by the same #if. Board 1 keeps the hint on its own page.
+// CALIBRATE TOUCH IS NOT HERE, and the reason is now different on each board, which
+// is exactly why both are written down. Board 2 does not offer it AT ALL:
+// runCalibration() there is a stub that prints and returns, because the touch
+// controller is factory-aligned inside the display IC, and a control that cannot
+// work is never offered. Board 1 DOES offer it - on the DEVICE group, under a SETUP
+// caption, guarded on BOARD_TOUCH_NEEDS_CAL - because it is not destructive: it
+// rewrites a touch mapping and keeps the old one if the run fails. Either way this
+// group holds exactly the two verbs that destroy state, which is what makes its name
+// right on both boards. (RULING 12; see board_e32r28t.h's Device section.)
+//
+// THE HINT UNDER POWER OFF IS DRAWN ON BOTH BOARDS. An earlier revision of this note
+// said "NO HINT UNDER POWER OFF ... Board 1 keeps the hint on its own page", which
+// was true for the one commit where this function was board 2's alone and board 1
+// still had its own four-button ACTIONS page. Board 1 compiles THIS function now, so
+// that sentence was describing a page that no longer exists while sitting directly
+// above the uiHint() call that contradicts it - the "a comment is not parsed" class
+// this file has paid for eight times on this branch. Corrected rather than deleted,
+// per the repo's own rule about descriptions that turned out to be wrong.
 void drawDangerPageStatic() {
   drawGroupCaption("CANNOT BE UNDONE", P2_DANGER_CAP_Y);
   drawSeverityAction(P2_PAIR_Y, "RESET PAIRING", COLOR_WARN);
   drawSeverityAction(P2_PWR_Y,  "POWER OFF",     COLOR_BAD);
   // THE HINT IS THE ONLY THING THAT SAYS WHAT POWER OFF DOES BEFORE THE TAP. The
   // confirm dialog says it after, which is too late to be the affordance - the
-  // decision to reach for the button has already been made by then. It sits at the
-  // same P2_PWR_Y + P2_BTN_H + SP_3 board 1 draws it at, so it reads as a line under
-  // the button rather than as page furniture: this group has 174 rows of air BELOW
-  // it (P2_AIR_BOT), so nothing here is anywhere near the footer.
+  // decision to reach for the button has already been made by then. It sits at
+  // P2_PWR_Y + P2_BTN_H + SP_3 on both boards, so it reads as a line under the
+  // button rather than as page furniture, and there is air under it either way:
+  // P2_AIR_BOT is 69 rows on board 1 and 174 on board 2, so nothing here is
+  // anywhere near the footer on either. BOTH figures, deliberately - a single
+  // number here is a number that becomes false the next time a flag moves, which
+  // is what "174 rows of air" did the moment board 1 started compiling this page.
   //
   // Only the FRAGMENT that differs is behind the #if - neither arm opens a brace, so
   // the brace-counting readers every checker here uses still balance. The rule it
@@ -1173,7 +1205,7 @@ void handleMessagesTouch(int sx, int sy) {
 
 // ----- Page 3 / the PAIRING group -----
 #if BOARD_SETTINGS_GROUPS
-// THE LIVE MAC ROWS LAND HERE (board 2). They used to be on the STATUS page too,
+// THE LIVE MAC ROWS LAND HERE, on both boards. They used to be on the STATUS page too,
 // in a second format keyed off hostLinks[] rather than off hosts[] - so the list
 // that owns the destructive controls was the one list that could not say whether
 // a Mac was connected, while the page with no slack carried a duplicate of it.
@@ -1424,17 +1456,17 @@ void drawHostsPageStatic() {
   // own AMENDMENT predicted: this page spends 212 of that board's 222px on the ANY
   // row and four Mac rows, and the captions want 42 more. It is the same table that
   // rejected the five-group set, arriving at the same answer. See
-  // BOARD_SETTINGS_CAPTIONS. What board 1 loses is "ANSWER PROMPTS FROM" over the
+  // BOARD_SETTINGS_FITS_CAPTIONS. What board 1 loses is "ANSWER PROMPTS FROM" over the
   // ANY row - which it never had - so the row's own "ANY MAC"/"SELECTED" pair is
   // what has to say what it does, as it always has here.
-#if BOARD_SETTINGS_CAPTIONS
+#if BOARD_SETTINGS_FITS_CAPTIONS
   drawGroupCaption("ANSWER PROMPTS FROM", P3_ANY_CAP_Y);
 #endif
   // The ANY row keeps the component and the height it always had: it is a choice,
   // not a Mac, so it stays a uiListRow where the rows under it are cards.
   bool any = (allowedHost[0] == 0);
   uiListRow(CARD_X, P3_ANY_Y, CARD_W, H_ROW, "ANY MAC", any, any ? "SELECTED" : nullptr);
-#if BOARD_SETTINGS_CAPTIONS
+#if BOARD_SETTINGS_FITS_CAPTIONS
   drawGroupCaption("PAIRED MACS", P3_LIST_CAP_Y);
 #endif
   // THE LIVE CACHES ARE DROPPED HERE, before the early return rather than after the
@@ -1846,11 +1878,13 @@ void renderSettingsTab() {
 }
 void resetSettingsCaches() {
 #if !BOARD_SETTINGS_GROUPS
-  // BOARD 1's DEVICE card only - its two connection dots and its one-line battery
-  // reading. Board 2's DEVICE group has neither, so declaring and resetting them
-  // there was state nothing can ever read; same treatment macRowCache below has.
-  // The line is left WHOLE rather than split around the one cache both boards keep,
-  // so board 1's resolved view of this file is character-identical to what it was.
+  // THE PRE-3A DEVICE CARD's caches - its two connection dots and its one-line
+  // battery reading - and this arm is DEAD on both boards now: BOARD_SETTINGS_GROUPS
+  // is 1 everywhere, so nothing compiles it and Task 4 deletes it. The line was kept
+  // WHOLE rather than split around the one cache both boards keep, on the grounds
+  // that "board 1's resolved view of this file is character-identical to what it
+  // was" - which was true while board 1 still drew that card and is not now. It is
+  // left as it stands only so the dead arm reads as the text it was.
   btDotCache = -1; usbDotCache = -1; battRowCache = -1; battRowTextCache[0] = '\0';
 #else
   battRowTextCache[0] = '\0';
@@ -2097,19 +2131,28 @@ void handleSettingsTouch(int sx, int sy) {
   } else if (settingsPage == SETTINGS_PAGE_MESSAGES) {
     handleMessagesTouch(sx, sy);
   } else if (settingsPage == SET_DANGER) {
-    // NO MIC TEST AND NO CALIBRATE BRANCH: MIC TEST is drawn on the SOUND group and
-    // CALIBRATE TOUCH is not offered on this board at all, and this page reserves no
-    // slot for either. A `sy >= P2_MIC_Y` or `sy >= P2_CAL_Y` test left behind here
-    // would not merely be dead - neither constant exists on this board, and had
-    // either survived as a stale constant it would claim taps belonging to whatever
-    // now sits in that band. Removing the constants and the branches in one change
-    // is what makes the two unable to disagree.
+    // NO MIC TEST AND NO CALIBRATE BRANCH, on EITHER board, and the two are absent
+    // for different reasons - which is why both are written down rather than one
+    // standing in for the other. MIC TEST is drawn on the SOUND group on both.
+    // CALIBRATE TOUCH is not offered AT ALL on board 2 (runCalibration() there is a
+    // stub, and a control that cannot work is never offered) and IS offered on board
+    // 1 - but on the DEVICE group, under BOARD_TOUCH_NEEDS_CAL, because it destroys
+    // nothing. Either way this page reserves no slot for it. An earlier revision of
+    // this note said "CALIBRATE TOUCH is not offered on this board at all" full stop,
+    // which stopped being true of one of the two boards the moment this arm became
+    // shared.
+    //
+    // A `sy >= P2_MIC_Y` or `sy >= P2_CAL_Y` test left behind here would not merely
+    // be dead - neither constant exists on either board now, and had either survived
+    // as a stale constant it would claim taps belonging to whatever now sits in that
+    // band. Removing the constants and the branches in one change is what makes the
+    // two unable to disagree.
     //
     // BOTH ask first: resetting pairing wipes every key, and powering off
-    // interrupts the display. The 12px between them is inert rather than claimed by
-    // either - the same rule HOME's gaps and the Pairing cards follow, and it
-    // matters most here because both rows destroy state, so a tap that lands in the
-    // gap and is rounded to a neighbour is rounded to something irreversible.
+    // interrupts the display. The SP_3 (12px) between them is inert rather than
+    // claimed by either - the same rule HOME's gaps and the Pairing cards follow,
+    // and it matters most here because both rows destroy state, so a tap that lands
+    // in the gap and is rounded to a neighbour is rounded to something irreversible.
     if (sy >= P2_PAIR_Y && sy < P2_PAIR_Y + P2_BTN_H) {
       pendingConfirm = CFM_RESET_PAIRING; drawPendingConfirm();
     } else if (sy >= P2_PWR_Y && sy < P2_PWR_Y + P2_BTN_H) {
@@ -2277,10 +2320,11 @@ void handleSettingsTouch(int sx, int sy) {
     handleMessagesTouch(sx, sy);
   }
 #endif
-  // Anything not claimed above is inert. That is BOTH boards' STATUS surface -
-  // board 1's page 0 and board 2's Device group are read-only apart from POWER OFF,
-  // whose own tap raises a modal rather than changing anything on the page, and neither has a
-  // control on it - so this is not the board-1-only statement it used to be.
+  // Anything not claimed above is inert, and the one page that used to be wholly
+  // inert no longer is on both boards: the DEVICE group is read-only on board 2 and
+  // carries exactly one control on board 1 (CALIBRATE TOUCH, whose own tap raises a
+  // modal rather than changing anything on the page). Its arm is above, behind
+  // BOARD_TOUCH_NEEDS_CAL, so board 2 still claims no taps there at all.
 }
 void drawSettingsTab() {
 #if BOARD_SETTINGS_HOME

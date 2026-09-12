@@ -56,9 +56,15 @@
 #define BOARD_DEVICE_DIAGNOSTICS 1
 // The section captions and the hints that frame a control block - Display's
 // "THEME" and AUTO hint, Sound's "ALERTS"/"MICROPHONE" and hint, the Macs group's
-// two. This board has the rows for all six; board 1 has 222px of page against
-// this board's 356 and carries none of them (its header has the arithmetic).
-#define BOARD_SETTINGS_CAPTIONS 1
+// two. This board has the rows for all six; board 1 has 222px of page against this
+// board's 356 and carries none of them (its header has the arithmetic).
+//
+// A STANDING PER-BOARD DIVERGENCE, like BOARD_DEVICE_DIAGNOSTICS above and unlike
+// the two flags over them: Task 4 deletes BOARD_SETTINGS_GROUPS and
+// BOARD_SETTINGS_HOME and every arm they gate, and these two survive it.
+// FITS names the CAUSE rather than the symptom (RULING 18) - it was
+// BOARD_SETTINGS_CAPTIONS, which said what was gated and not why.
+#define BOARD_SETTINGS_FITS_CAPTIONS 1
 // Pairing a Mac without the cable: an ephemeral X25519 exchange plus a 6-digit
 // code derived from the shared secret, so the 128-bit pairing key is NEVER
 // transmitted - both ends derive it. This is an ADDITION: PROVISION over USB is
@@ -2243,6 +2249,13 @@ const int P1_THEME_SEG_W    = (CARD_W - 2 * P1_THEME_GAP) / 3;
 const int P1_AUTO_HINT_GAP  = 13;   // segments' bottom -> the hint's MC_DATUM CENTRE
                                     // (7 rows of air above its ink, 9 below)
 const int P1_FLIP_GAP       = 19;   // hint centre -> the flip toggle's top
+// THE NAMED SURPLUS THAT CLOSES THIS PAGE, the DEV_AIR_BOT / P4_AIR_BOT shape, and
+// it is what gives P1_TOP, P1_GAP and the three gaps above any teeth at all: they
+// are pure translations, so no bound relative to this page can see them, and the
+// trailing air was 14 unnamed rows until now. Board 1 has the same term with its own
+// value, so settings-geom-check.mjs asserts the identity on BOTH boards:
+//   P1_FLIP_Y + H_ROW - 1 == 445, and 445 + 1 + P1_AIR_BOT == contentBottom()
+const int P1_AIR_BOT        = 14;
 
 // ---------- SETTINGS: the SOUND group ----------
 // Geometry is settings.js `bSound`. Output and input together, because a mic test
@@ -2275,6 +2288,11 @@ const int PS_BTN_H       = H_BTN;   // the two actions; H_BTN is TAP_MIN + 4
 // them. The VALUE on this board is unchanged, so nothing here moves.
 const int PS_BEEP_GAP    = 12;
 const int PS_MIC_CAP_GAP = 14;   // TEST BEEP's bottom -> the MICROPHONE caption
+// The same closing term for this page, and the same reason - PS_TOP and all four
+// gaps here were translations bounded only by "the last button clears the footer",
+// which has 12 rows of slack in it:
+//   PS_MIC_Y + PS_BTN_H - 1 == 447, and 447 + 1 + PS_AIR_BOT == contentBottom()
+const int PS_AIR_BOT     = 12;
 
 // ---------- SETTINGS group: Pairing ----------
 // Geometry is settings.js `bPairing`. The live Mac rows land HERE, where the Macs

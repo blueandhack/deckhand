@@ -3441,12 +3441,21 @@ int settingsPage = 0;
 // TWO STEPPERS, THE THEME SEGMENTS AND THE FLIP TOGGLE, on both boards. What
 // differs is the FRAMING, not the controls: board 2 heads the segments with a
 // "THEME" caption and explains AUTO in a hint under them, and board 1 has room
-// for neither (BOARD_SETTINGS_CAPTIONS, whose arithmetic is in each header). So
+// for neither (BOARD_SETTINGS_FITS_CAPTIONS, whose arithmetic is in each header). So
 // the two arms differ in the two constants the caption and the hint contribute,
 // and in nothing else - the segments and the toggle are one implementation.
+//
+// THE ARMS BELOW REPEAT WHOLE `const int` STATEMENTS, AND THAT IS ALLOWED HERE.
+// CLAUDE.md's rule is that an `#if`/`#else` must not OPEN A BRACE in both arms,
+// because a brace-counting reader then sees one more `{` than `}` and runs off the
+// end - the failure that made fnSrc() return "" for handleSettingsTouch. Nothing in
+// these four chains opens a brace: they are declarations, each arm balanced at zero,
+// so every checker that reads this file still balances. Splitting them into a shared
+// prefix plus a guarded fragment is not available anyway - what differs is the
+// RIGHT-HAND SIDE of each derivation, and a `const int` has one of those.
 const int P1_BRIGHT_Y = PAGE_TOP + P1_TOP;
 const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
-#if BOARD_SETTINGS_CAPTIONS
+#if BOARD_SETTINGS_FITS_CAPTIONS
 const int P1_THEME_CAP_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_THEME_CAP_GAP;
 const int P1_THEME_Y = P1_THEME_CAP_Y + SET_CAP_STEP;
 const int P1_AUTO_HINT_Y = P1_THEME_Y + H_ROW + P1_AUTO_HINT_GAP;
@@ -3465,7 +3474,7 @@ const int P1_FLIP_Y = P1_THEME_Y + H_ROW + P1_FLIP_TOP_GAP;
 // SOUND toggle, VOLUME stepper, TEST BEEP, MIC TEST on both boards; board 2 adds
 // the ALERTS and MICROPHONE captions and the "beeps when a session needs input"
 // hint, which board 1 has no rows for.
-#if BOARD_SETTINGS_CAPTIONS
+#if BOARD_SETTINGS_FITS_CAPTIONS
 const int PS_ALERTS_Y = PAGE_TOP + PS_TOP;
 const int PS_SOUND_Y = PS_ALERTS_Y + SET_CAP_STEP;
 const int PS_WHAT_HINT_Y = PS_SOUND_Y + H_ROW + PS_HINT_GAP;
@@ -3475,7 +3484,7 @@ const int PS_SOUND_Y = PAGE_TOP + PS_TOP;
 const int PS_VOL_Y = PS_SOUND_Y + H_ROW + PS_VOL_GAP;
 #endif
 const int PS_BEEP_Y = PS_VOL_Y + STEPPER_CARD_H + PS_BEEP_GAP;
-#if BOARD_SETTINGS_CAPTIONS
+#if BOARD_SETTINGS_FITS_CAPTIONS
 const int PS_MIC_CAP_Y = PS_BEEP_Y + PS_BTN_H + PS_MIC_CAP_GAP;
 const int PS_MIC_Y = PS_MIC_CAP_Y + SET_CAP_STEP;
 #else

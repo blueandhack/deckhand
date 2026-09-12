@@ -48,6 +48,21 @@
 // the call: this board declares no DEV_DIAG_* at all, so an unguarded body would
 // not compile rather than merely drawing nothing.
 #define BOARD_DEVICE_DIAGNOSTICS 0
+// A STANDING PER-BOARD DIVERGENCE, NOT SCAFFOLDING. BOARD_SETTINGS_GROUPS and
+// BOARD_SETTINGS_HOME above are both temporary - Task 4 deletes them and every dead
+// arm with them - but this flag and BOARD_DEVICE_DIAGNOSTICS are permanent facts
+// about the two panels, the shape BOARD_HAS_MIC and BOARD_TOUCH_NEEDS_CAL already
+// have. A reader needs to know which of the four is which before deciding whether a
+// guard is worth removing.
+//
+// NAMED FOR THE CAUSE, NOT THE SYMPTOM (RULING 18). It was BOARD_SETTINGS_CAPTIONS,
+// which says WHAT is gated; FITS says WHY - this board's group page is 222px against
+// board 2's 356, and a caption costs SET_CAP_STEP (21) plus its gap while a hint
+// costs its 13px cell plus two. The repo's own shape is BOARD_HAS_MIC,
+// BOARD_TOUCH_NEEDS_CAL, BOARD_HAS_TOUCH_SLEEP_WAKE: names that carry the reason to
+// every guard site, so nobody has to come back here to find out whether flipping it
+// is a preference or an arithmetic impossibility.
+//
 // THE SECTION CAPTIONS AND THE HINTS THAT BELONG TO THEM, on the three groups
 // where board 2 frames a control block with them: Display ("THEME" + the AUTO
 // hint), Sound ("ALERTS" + its hint + "MICROPHONE") and Macs ("ANSWER PROMPTS
@@ -66,7 +81,7 @@
 // rather than grouping are decided per page on their own arithmetic and are NOT
 // gated here - Danger's CANNOT BE UNDONE, Messages' HOW MY MESSAGES LAND, and
 // this board's own SETUP over CALIBRATE TOUCH, which fits with 1 row to spare.
-#define BOARD_SETTINGS_CAPTIONS 0
+#define BOARD_SETTINGS_FITS_CAPTIONS 0
 // The scrolling transcript is board 2's. This board keeps its paged reader: the
 // panel is RESISTIVE, where this repo has already measured that drag-scroll
 // misfires and settled on discrete pages. (This line also said "and its binary is
@@ -1154,14 +1169,15 @@ const int DEV_AIR_BOT   = 1;
 // for: all three options on screen at once, with selection carried by fill AND
 // position rather than by "the label is the state".
 //
-// NO "THEME" CAPTION AND NO AUTO HINT HERE - see BOARD_SETTINGS_CAPTIONS. This
+// NO "THEME" CAPTION AND NO AUTO HINT HERE - see BOARD_SETTINGS_FITS_CAPTIONS. This
 // board has never had either (its cycle button carried neither), so what changes
 // is the control, not the chrome around it.
 //
-// P1_TOP IS 6 AND THE OTHER GROUPS DO NOT START LEVEL WITH IT, unlike board 2
-// where all six do. That levelling is not available here: the Macs group has to
-// start at PAGE_TOP + 2 (212 of its 222px is the ANY row plus four Mac rows), so
-// a common top would have to be 2, and 2 is not a top the other five want.
+// P1_TOP IS 6 AND THE SIX GROUPS DO NOT START LEVEL ON THIS BOARD, unlike board 2
+// where all six start at PAGE_TOP + 12. See the note at P3_ANY_Y below: the Macs
+// group is what makes levelling impossible here, so the explanation lives with the
+// page that causes it and every other group's top says which side of it it is on.
+// The tops are Display 6, Sound 6, Macs 2, Device 12, Messages 12, Danger 12.
 const int P1_TOP = 6;
 const int P1_GAP = 6;
 const int P1_THEME_GAP     = 4;   // between two segments; it belongs to the LEFT
@@ -1189,7 +1205,7 @@ const int P1_AIR_BOT       = 4;
 //   250..293  MIC TEST              PS_MIC_Y   (PS_MIC_GAP)
 //   294..301  8 rows clear          PS_AIR_BOT
 //
-// NO "ALERTS" OR "MICROPHONE" CAPTION AND NO HINT - see BOARD_SETTINGS_CAPTIONS
+// NO "ALERTS" OR "MICROPHONE" CAPTION AND NO HINT - see BOARD_SETTINGS_FITS_CAPTIONS
 // for the arithmetic. The four controls name themselves: the toggle reads SOUND
 // ON / SOUND OFF, the stepper carries its own card label, and the two buttons say
 // what they do. What is lost is the output/input separation the MICROPHONE
@@ -1198,6 +1214,10 @@ const int P1_AIR_BOT       = 4;
 // No bar under VOLUME, deliberately: only BRIGHTNESS gets one, because it is the
 // single continuous 0-100 setting and a bar under three named presets would be
 // decoration.
+// 6, the same as P1_TOP and NOT the 12 the other three groups use - see the note at
+// P3_ANY_Y for why this board has no common top to level on. 6 rather than 12
+// because this page spends 184 of its 222px on four controls and the four gaps have
+// to come out of the remaining 38.
 const int PS_TOP      = 6;    // PAGE_TOP -> the SOUND toggle
 const int PS_VOL_GAP  = 8;    // the toggle's bottom -> the VOLUME card
 const int PS_BEEP_GAP = 8;    // the VOLUME card's bottom -> TEST BEEP
@@ -1269,7 +1289,7 @@ const int P2_AIR_BOT = 69;
 //   126..297  up to MAX_HOSTS rows P3_LIST_Y, P3_ROW_H at P3_ROW_STEP
 //   298..301  4 rows clear to contentBottom()
 //
-// NO SECTION CAPTIONS - see BOARD_SETTINGS_CAPTIONS. This page spends 212 of its
+// NO SECTION CAPTIONS - see BOARD_SETTINGS_FITS_CAPTIONS. This page spends 212 of its
 // 222px on the ANY row and four Mac rows; "ANSWER PROMPTS FROM" and "PAIRED MACS"
 // want 42px more and there are 10. It is the same arithmetic the spec's AMENDMENT
 // used to reject the five-group set, arriving at the same answer.
@@ -1277,6 +1297,14 @@ const int P2_AIR_BOT = 69;
 // 40 IS TAP_MIN EXACTLY - a legal target with NO margin, which the assertion
 // states rather than implies. Board 2's row is 6 over its own floor; this one is
 // at it, and the four-Mac case is the case the geometry has to survive.
+// THIS PAGE IS WHY BOARD 1's GROUPS DO NOT ALL START LEVEL, and the note belongs
+// here rather than beside any one of the groups that jogs against it. Board 2 starts
+// all six at PAGE_TOP + 12 and settings-geom-check.mjs asserts that equality; here
+// the ANY row plus four Mac rows is 212 of the page's 222px, so this group has to
+// open at PAGE_TOP + 2 and there is no common top the other five would accept. The
+// cost is real and visible: moving between groups jogs the first content by up to
+// 10 rows. The alternative was a fourth Mac row that does not fit, and the four-Mac
+// case is the case this geometry exists to survive.
 const int P3_ANY_Y  = 82;    // PAGE_TOP + SP_1/2
 const int P3_LIST_Y = 126;   // P3_ANY_Y + H_ROW + SP_1
 const int P3_ROW_H    = 40;
