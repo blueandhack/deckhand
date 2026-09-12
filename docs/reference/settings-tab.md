@@ -188,6 +188,54 @@ of air" did the moment board 1 began compiling this page).
 
 ### NOTHING IN THIS BRANCH HAS BEEN ON THE GLASS
 
+> **CORRECTION, 2026-09-12 19:31-19:35 - THE HEADING ABOVE IS NO LONGER TRUE OF BOARD 2.**
+> It is kept rather than rewritten because it was true for all six tasks and for the whole
+> of the final review, which is the fact a reader of those commits needs. **Board 2
+> (`Deckhand-C114`) was flashed with `55cc817` after the branch was finished** and driven
+> through every group. The device's own DIAGNOSTICS block reports `55cc817` and
+> `Sep 12 2026 09:24:24`, which is the fix wave's verification compile, so the image on the
+> panel is the branch HEAD rather than a cached older build.
+>
+> **SETTLED, on board 2 only:** HOME's six rows with six live summaries, landing inside the
+> footer; DEVICE's two one-line cards and its six-line two-column DIAGNOSTICS block; DANGER's
+> caption, both severity spines and the wake hint, correctly reading `RESET to wake` because
+> `BOARD_HAS_TOUCH_SLEEP_WAKE` is 0 here; DISPLAY with **no** CALIBRATE TOUCH; PAIRING with
+> **both** section captions intact; MESSAGES; and **both palettes**. Roughly twenty commands
+> produced **zero refusals and zero errors**.
+>
+> **THE SEVERITY SPINE'S GREYSCALE CLAIM IS NOW MEASURED, and the bullet below saying it is
+> ARGUED is superseded.** The capture was converted to greyscale and the spine's luminance
+> read against the button interior it sits on:
+>
+> | control | spine | interior | contrast |
+> |---|---|---|---|
+> | RESET PAIRING | 162 | 24.6 | **5.64:1** |
+> | POWER OFF | 142 | 24.6 | **4.97:1** |
+>
+> Both clear the 3:1 floor for a non-text mark comfortably, so **the spine does survive
+> greyscale**. But the two spines are 162 against 142 - **1.14:1 against EACH OTHER** - so the
+> spine marks *"this destroys state"* without colour and **does NOT rank the two controls**.
+> That ranking is carried by POSITION (POWER OFF last, under `CANNOT BE UNDONE`), which is
+> what the design claimed and which survives greyscale for free. The instrument is three lines
+> of Pillow over a `SCREENSHOT` and is repeatable; the file said "there is no instrument in
+> this repo that tests a SHAPE", and for this particular shape there now is one.
+>
+> **The SoC temperature band has been seen** - `SoC 39.6 C` renders in its own colour on its
+> own line, so `colorForDieTemp()` is reached. One band of three; the warm and hot arms have
+> still never been rendered.
+>
+> **STILL UNVERIFIED, and the list below stands for all of it:** every touch path on both
+> boards (this was driven entirely through `PAGE`; the device has no remote tap); colour
+> FIDELITY on board 2, because `SCREENSHOT` reads the shadow framebuffer and everything above
+> vouches for what the renderer COMPOSED rather than for what the panel shows; and **the whole
+> of board 1**, which was not attached - its six-row HOME at 42px, its `P3_ROW_H` at exactly
+> `TAP_MIN`, its group jog, CALIBRATE TOUCH on its Device page, and `P2_BTN_H` at 44.
+>
+> **One observation, not a defect:** with `THEME light` live, HOME's Display summary still
+> reads `DARK`. `THEME` overrides the live palette without touching the stored `themeMode`,
+> which is documented, and the summary reads the SETTING. Correct, and mildly confusing while
+> the instrument is in use.
+
 **Stated plainly rather than implied: NO DEVICE WAS ATTACHED FOR ANY OF THE SIX
 TASKS.** `/dev/cu.usbserial-*` and `/dev/cu.usbmodem*` were both empty at the start
 of the session and no board was connected at any point. Every claim on this branch is
