@@ -3388,16 +3388,6 @@ const int VOICE_TEXT_LINES = 6;
 // Task 3B. The surfaces now are SET_HOME plus SET_DEVICE..SET_DANGER, declared in
 // each board header, and the resistive-panel argument for discrete surfaces over
 // drag-scroll still holds - it is why board 1 keeps a paged reader (BOARD_HISTORY_SCROLL).
-#if !BOARD_SETTINGS_HOME
-// DEAD ON BOTH BOARDS SINCE TASK 3B: nothing compiles drawPager() or
-// gotoSettingsPage(), the only two readers of this. Task 4 deletes it with them.
-// SIX, AND IT IS THE GROUP COUNT RATHER THAN A NUMBER OF ITS OWN. Board 1's pager
-// walks the SAME six groups HOME lists on board 2 - board_e32r28t.h's SET_* run -
-// so the pager's title count, its dot count and gotoSettingsPage()'s wrap all come
-// from SET_GROUP_COUNT. A literal here would be a second place the group set is
-// recorded, and the whole point of Task 3A is that there is only one.
-const int SETTINGS_PAGES = SET_GROUP_COUNT;
-#endif
 // ONE NAME FOR THE MESSAGES SURFACE ON BOTH BOARDS, and it is now the SAME
 // EXPRESSION on both rather than an alias for a bare ordinal. Board 1's pages
 // used to be 0..4 with MESSAGES at 4; they are the group ids now, so the alias
@@ -3405,10 +3395,13 @@ const int SETTINGS_PAGES = SET_GROUP_COUNT;
 // own 4 is gone. The three shared functions (drawMessagesPageStatic,
 // renderMessagesPage, handleMessagesTouch) are reached by one expression.
 const int SETTINGS_PAGE_MESSAGES = SET_MESSAGES;
-// SET_HOME on both boards. Board 1 never lands on it - drawSettingsTab() enters at
-// SET_DEVICE and gotoSettingsPage() wraps inside SET_DEVICE..SET_DANGER - but the
-// declared initial value is what the checker binds SET_HOME to, so it stays the
-// one id that means "no group open".
+// SET_HOME on both boards, and both boards LAND on it: drawSettingsTab() enters
+// there on every tab change and settingsBack() returns there from a group. (The
+// sentence here said "board 1 never lands on it - drawSettingsTab() enters at
+// SET_DEVICE and gotoSettingsPage() wraps inside SET_DEVICE..SET_DANGER", which was
+// the chevron pager's ring; Task 3B flipped that board's navigation and Task 4
+// deleted gotoSettingsPage() outright.) The declared initial value is also what the
+// checker binds SET_HOME to, so it stays the one id that means "no group open".
 int settingsPage = 0;
 
 // PAGER_BTN_W/X0, PAGER_H and PAGE_TOP moved to board_e32r28t.h (via
@@ -3443,7 +3436,6 @@ int settingsPage = 0;
 // group there, and THEME becomes a full-width 3-segment selector rather than a
 // third-width cycle button. Its own chain is below; the offsets both arms read
 // come from the board headers, as they already did.
-#if BOARD_SETTINGS_GROUPS
 // ---- the DISPLAY group ----
 // TWO STEPPERS, THE THEME SEGMENTS AND THE FLIP TOGGLE, on both boards. What
 // differs is the FRAMING, not the controls: board 2 heads the segments with a
@@ -3497,34 +3489,21 @@ const int PS_MIC_Y = PS_MIC_CAP_Y + SET_CAP_STEP;
 #else
 const int PS_MIC_Y = PS_BEEP_Y + PS_BTN_H + PS_MIC_GAP;
 #endif
-#else
-const int P1_BRIGHT_Y = PAGE_TOP + P1_TOP;
-const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
-const int P1_VOL_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_GAP;
-const int P1_SOUND_Y = P1_VOL_Y + STEPPER_CARD_H + P1_GAP;
-const int P1_SOUND_H = H_ROW;   // toggles; H_ROW is TAP_MIN and cannot shrink
-// Three toggles share the bottom row: SOUND | FLIPPED | theme. (216-16)/3 = 66px each
-// against a longest label of 42px (FLIPPED at Cozette's 6px advance), so no new page and
-// no geometry growth were needed to add the theme switch.
-const int P1_THIRD_W = (CARD_W - 16) / 3;
-const int P1_FLIP_X  = CARD_X + P1_THIRD_W + 8;
-const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
-#endif
 
-// Page 2 - the ACTION buttons plus a hint. P2_TOP, P2_BTN_H and P2_GAP moved to
-// the board headers (via board.h): board 1's button height had to come DOWN to 38
-// to fit four of them and a hint. Going to five buttons would need a page of its
-// own on either board rather than shrinking these further.
+// Page 2 - the DANGER group. P2_TOP and P2_BTN_H are in the board headers (via
+// board.h); board 1's button height came DOWN to 38 for the four-button ACTIONS
+// column this page used to be, and it stays there. P2_GAP, which spaced that
+// column, is declared on neither board now - board_e32r28t.h records why.
 //
-// BOARD 2 DERIVES ITS OWN CHAIN and does not compile the arm below at all: its
-// DANGER group is ONE captioned section holding the two controls that destroy
-// state, so nothing about it is a four-button evenly-gapped column any more. MIC
-// TEST lives on its SOUND group there and CALIBRATE TOUCH is not offered at all
-// (runCalibration() is a stub on that board), so neither P2_MIC_Y nor P2_CAL_Y
-// exists there - which is why the #if below is on BOARD_SETTINGS_HOME and not on
-// BOARD_HAS_MIC, a flag that is 1 on both boards and therefore cannot tell them
-// apart. Board 1's arm is the text that was always here.
-#if BOARD_SETTINGS_GROUPS
+// ONE CHAIN FOR BOTH BOARDS NOW. What stood here described a `#if
+// BOARD_SETTINGS_GROUPS` split whose `#else` held board 1's four-button evenly-
+// gapped column, and it explained why the guard was that flag rather than
+// BOARD_HAS_MIC (which is 1 on both boards and so cannot tell them apart). Board 1
+// took the same arm from Task 3A and Task 4 deleted the flag and the dead column
+// with it. The DANGER group below is ONE captioned section holding the two controls
+// that destroy state, on both boards: MIC TEST lives on SOUND and CALIBRATE TOUCH
+// on board 1's DEVICE group, so neither P2_MIC_Y nor P2_CAL_Y is declared anywhere -
+// an absence settings-geom-check.mjs asserts BY NAME rather than describing.
 // ---- the DANGER group ----
 // ONE captioned section, two buttons. The gap between them is SP_3, the page
 // rhythm, rather than a P2_GAP or a P2_SECTION_GAP of their own: they are inside
@@ -3537,41 +3516,26 @@ const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
 const int P2_DANGER_CAP_Y = PAGE_TOP + P2_TOP;
 const int P2_PAIR_Y = P2_DANGER_CAP_Y + SET_CAP_STEP;
 const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + SP_3;
-// AND NO P2_HINT_Y ON THIS BOARD. "power off = deep sleep, RESET to wake" is in the
-// confirm dialog POWER OFF raises here, which is nearer the decision than a line
-// under the button ever was; board 1 keeps the hint because its dialog is smaller.
-#else
-#if BOARD_HAS_MIC
-const int P2_MIC_Y = PAGE_TOP + P2_TOP;
-const int P2_CAL_Y = P2_MIC_Y + P2_BTN_H + P2_GAP;
-#else
-// No capture path on this board, so no MIC TEST button - and no slot reserved
-// for one either. The three remaining actions move UP rather than leaving a
-// 50px hole at the top of the page, the same reason tabsW() reclaims the record
-// slot when fabVisible() is compiled out. Gating the CHAIN here rather than the
-// four draw sites and four hit tests is what keeps those eight call sites
-// identical on both boards - and keeps the button and its touch zone from ever
-// disagreeing, which is the failure mode a per-site #if invites.
-const int P2_CAL_Y = PAGE_TOP + P2_TOP;
-#endif
-const int P2_PAIR_Y = P2_CAL_Y + P2_BTN_H + P2_GAP;
-const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
-#endif
+// AND NO P2_HINT_Y ON EITHER BOARD. "power off = deep sleep, RESET to wake" is in
+// the confirm dialog POWER OFF raises, which is nearer the decision than a line
+// under the button ever was. (This said "on THIS board ... board 1 keeps the hint
+// because its dialog is smaller", which was true of the four-button ACTIONS page
+// board 1 drew until Task 3A; it takes this chain now and the constant is declared
+// nowhere.)
 
 // Page 3 - the Macs this device is paired with. One row each: tap the row to
 // restrict answering to just that Mac (tap again for "any"), tap the X to
 // forget it. The ANY row at the top clears the restriction.
 //
-// BOARD 2 DERIVES ITS OWN P3_* IN board_es3c35p.h and does not compile the arm
-// below at all: its Pairing group is two captions plus a list of two-line CARDS,
-// so nothing about it derives from H_ROW + SP_1 any more. The #if emits no code,
-// so board 1's arm is the text that was always here.
-// BOTH BOARDS DERIVE THEIR P3_* IN THEIR OWN HEADER NOW. Board 1's three used to
-// be here, under `#if !BOARD_SETTINGS_HOME`, because its Pairing page was a list
-// of one-line uiListRows with no row-internal geometry to name. It draws board
-// 2's two-line CARDS now, so it needs the same P3_ROW_* set - and those belong
+// BOTH BOARDS DERIVE THEIR P3_* IN THEIR OWN HEADER, and there is no chain here at
+// all. Board 1's three used to be, inside a guarded arm, because its Pairing page
+// was a list of one-line uiListRows with no row-internal geometry to name. It draws
+// board 2's two-line CARDS now, so it needs the same P3_ROW_* set - and those belong
 // beside the page's own arithmetic in the header, where CLAUDE.md requires every
-// layout constant to live, rather than half here and half there.
+// layout constant to live, rather than half here and half there. (A paragraph above
+// this one said "board 2 does not compile the arm below at all ... the #if emits no
+// code, so board 1's arm is the text that was always here". Task 3A made both boards
+// take one arm and Task 4 deleted the guard; there is no arm below.)
 
 // Page 4 / the MESSAGES group - how a message SENT FROM THIS DEVICE lands on the
 // Mac. ONE CHAIN FOR BOTH BOARDS, unlike pages 2 and 3, and that is worth saying
@@ -3635,16 +3599,13 @@ const int CFM_BTN_W = (CARD_W - 3 * SP_3) / 2;
 const int CFM_NO_X  = CARD_X + SP_3;
 const int CFM_YES_X = CFM_NO_X + CFM_BTN_W + SP_3;
 
-// BOARD 1 ONLY, the same treatment macRowCache below already has: these three are
-// read by board 1's renderStatusPage() and by nothing else. On board 2 the DEVICE
-// card's connection rows and its one-line battery reading are gone - the CONNECTION
-// and POWER cards draw a verdict, two detail lines and a temperature through their
-// own caches - so declaring and resetting these there is state nothing can ever
-// read, which is the "declared-but-unwired, with comments claiming it works"
-// defect class this file already deleted a dead macEmojiId for.
-#if !BOARD_SETTINGS_GROUPS
-int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
-#endif
+// THREE CACHES STOOD HERE (btDotCache, usbDotCache, battRowCache) AND TASK 4
+// DELETED THEM. They were read by board 1's pre-redesign renderStatusPage() - the
+// DEVICE card's two connection dots and its one-line battery reading - and by
+// nothing else; both boards draw the CONNECTION and POWER cards now, which carry a
+// verdict, two detail lines and a temperature through their own caches. Deleted
+// rather than left declared, because a global nothing reads with a comment claiming
+// it works is the defect class this file already deleted a dead macEmojiId for.
 // THE GUARD IS BOARD_DEVICE_DIAGNOSTICS, and picking the right flag here is the
 // same care the previous note recorded: the guard was once !BOARD_USES_TFT_ESPI,
 // which said "the board that draws through the shim" where what was meant was
@@ -3674,15 +3635,11 @@ uint16_t devDiagTempColorCache = 0;
 // settings-geom-check.mjs derives both bounds rather than trusting this comment.
 char battRowTextCache[BATT_ROW_CACHE] = "";
 uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
-// MAC_ROW_W (and its derivation comment) moved to board_e32r28t.h (via
-// board.h) - it also explains macRowCache's sizing below. BOARD 1 ONLY, because
-// renderMacLinkRows() is: board 2's per-Mac rows moved to the Pairing group,
-// where a row is a two-line card keyed off hosts[] rather than a padded line
-// keyed off hostLinks[].
-#if !BOARD_SETTINGS_GROUPS
-char macRowCache[MAX_LINKS][40] = {"", ""};
-#endif
-#if BOARD_SETTINGS_GROUPS
+// macRowCache STOOD HERE AND TASK 4 DELETED IT, with renderMacLinkRows() and the
+// pre-redesign page 0 it painted: a per-Mac row was a padded line keyed off
+// hostLinks[] there. Both boards draw the Pairing group's two-line CARDS now, keyed
+// off hosts[] and cached in p3SubCache/p3LiveCache below. MAC_ROW_W, which sized
+// that cache, is board_e32r28t.h's and nothing reads it any more either.
 // THE DEVICE GROUP'S FIELDS (both boards now). Every size is its field's PADDED width plus
 // NUL, taken from the board header rather than restated here, because a cache
 // shorter than the string it holds silently stops noticing changes past that
@@ -3735,7 +3692,6 @@ int p3LiveCache[MAX_HOSTS] = {-1, -1, -1, -1};
 // render into it, which is the same invariant drawSettingsStatic() enforces by
 // resetting caches inside itself rather than at its call sites.
 int p3CountCache = -1;
-#endif
 int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
 // The MESSAGES page's three option rows. ONE cache for the whole block, not one
 // per row, because the three are a single mutually-exclusive control: exactly one
@@ -3748,7 +3704,6 @@ char brightPctCache[8] = "";
 int brightBarCache = -1;
 char sleepValCache[8] = "";
 char volValCache[8] = "";
-#if BOARD_SETTINGS_HOME
 // BOTH BOARDS SINCE TASK 3B, at each board's own HOME_SUB_BYTES: 30 here on board 1
 // (HOME_SUB_CHARS 29, derived from its 178px lane at Cozette's 6px advance) and 31 on
 // board 2 (30 at Spleen's 8px). The array is sized from whichever header is in play,
@@ -3768,7 +3723,6 @@ char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", "", ""};
 // what made battRowTextCache correct by accident until it wasn't, and the cost of
 // not relying on it is two bytes.
 uint16_t homeStatusColorCache = 0;
-#endif
 
 
 
@@ -7159,7 +7113,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     //
     // REFUSED WHILE ANOTHER FULL-SCREEN SURFACE OWNS THE GLASS, which it was not
     // before and which is the SAME defect EMOJITEST's own escape exists for.
-    // gotoSettingsPage()/openSettingsGroup() paint the settings page into the content
+    // settingsBack()/openSettingsGroup() paint the settings page into the content
     // area and clear nobody's flag, so with the icon grid up this reproduced exactly
     // the freeze that costs a reflash: a page drawn over a surface whose flag still
     // absorbs every payload and every tick. Both of PAGE's callees only act while
@@ -7184,19 +7138,15 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       return;
     }
     int pg = buf.substring(5).toInt();
-#if BOARD_SETTINGS_HOME
     // PAGE 0..6 MEANS THE SAME THING ON BOTH BOARDS NOW: 0 is HOME and 1..6 are the
     // six groups, the ids settingsPage itself carries. They were not always the same -
     // board 1 numbered its own pages 0..4 and wrapped modulo 5, so the MESSAGES
     // surface was PAGE 4 there and PAGE 5 here and a capture script aimed at one
     // board landed somewhere else on the other. THE SENTENCE "board 1 has no HOME
     // surface, so its arm clamps 0 up to the first group" was true for exactly one
-    // task (Task 3A); since Task 3B both boards take THIS arm and PAGE 0 is HOME on
-    // both. The `#else` below is dead on both boards and Task 4 deletes it.
+    // task (Task 3A); since Task 3B both boards take this path and PAGE 0 is HOME on
+    // both, and Task 4 deleted the `#else` that clamped, along with the flag over it.
     if (currentTab == TAB_SETTINGS) { if (pg <= SET_HOME) settingsBack(); else openSettingsGroup(pg); }
-#else
-    if (currentTab == TAB_SETTINGS) gotoSettingsPage(constrain(pg, SET_DEVICE, SET_DANGER));
-#endif
   } else if (buf == "POWERPROBE" || buf.startsWith("POWERPROBE ")) {
     // Passive mV/h measurement of whatever state the device is in, labelled so
     // two runs can be compared. Both boards: the question "what is this costing"

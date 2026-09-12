@@ -42,15 +42,14 @@
 #define BOARD_HAS_SD         1   // microSD slot on the SDMMC bus; no SD code exists
 #define BOARD_HAS_RGBLED     1   // WS2812 on GPIO40; nothing drives it
 #define BOARD_TOUCH_NEEDS_CAL 0  // capacitive, factory-aligned
-// TWO FLAGS, NOT ONE - see board_e32r28t.h for the split and why it was made.
-// BOTH are 1 here, so nothing on this board moved in either task: GROUPS gates the
-// six page BODIES and their geometry chains, HOME gates the HOME list, the back band,
-// drawPager()'s absence and gotoSettingsPage()'s absence. BOTH ARE NOW 1 ON BOTH
-// BOARDS TOO (Task 3A and Task 3B respectively), so both are spent scaffolding: Task
-// 4 deletes them and every `#else` arm they gate, and its proof is that both binaries
-// come out byte-identical.
-#define BOARD_SETTINGS_GROUPS 1  // the six group PAGES
-#define BOARD_SETTINGS_HOME  1   // ...reached from a HOME screen, not a pager
+// TWO SETTINGS FLAGS STOOD HERE - BOARD_SETTINGS_GROUPS and BOARD_SETTINGS_HOME -
+// and Task 4 deleted both; see board_e32r28t.h for the split and why it was made.
+// Both were 1 here throughout, so this board never moved on either of them: they
+// existed to let board 1's page BODIES (Task 3A) and its NAVIGATION (Task 3B)
+// converge in separate commits. Once both were 1 on both boards every `#else` arm
+// was dead code, and deleting the flags with those arms left both binaries
+// byte-identical. The chevron pager they gated - drawPager(), gotoSettingsPage(),
+// SETTINGS_PAGES, the 45/55 band split - exists on neither board and in no arm.
 // THE DIAGNOSTICS BLOCK IS THIS BOARD'S, and the reason is written at its own
 // section below: the four host facts "earn their place on this board specifically
 // because there is no serial console in normal operation here". Board 1 has a
@@ -63,8 +62,9 @@
 // board's 356 and carries none of them (its header has the arithmetic).
 //
 // A STANDING PER-BOARD DIVERGENCE, like BOARD_DEVICE_DIAGNOSTICS above and unlike
-// the two flags over them: Task 4 deletes BOARD_SETTINGS_GROUPS and
-// BOARD_SETTINGS_HOME and every arm they gate, and these two survive it.
+// the two settings flags the note above records: Task 4 deleted
+// BOARD_SETTINGS_GROUPS and BOARD_SETTINGS_HOME with every arm they gated, and
+// these two survived it because 222px against 356px is not scaffolding.
 // FITS names the CAUSE rather than the symptom (RULING 18) - it was
 // BOARD_SETTINGS_CAPTIONS, which said what was gated and not why.
 #define BOARD_SETTINGS_FITS_CAPTIONS 1
@@ -1938,8 +1938,8 @@ const int HOME_SUB_BYTES = HOME_SUB_CHARS + 1;
 // and at 80 on board 1, where the same property is what made Task 3B affordable.
 // The key is the pager's own PAGER_BTN_W so the two boards' chrome stays one
 // size, and the WHOLE band is the back target - there is nothing else in it, so
-// the 45/55 split drawPager() needed to separate two keys is not needed here (and
-// drawPager() is compiled by neither board now).
+// the 45/55 split the chevron pager needed to separate two keys is not needed here
+// (drawPager() was compiled by neither board from Task 3B and deleted in Task 4).
 const int BACK_BTN_W    = PAGER_BTN_W;
 const int BACK_TITLE_DX = 16;
 
@@ -1977,7 +1977,8 @@ const int SET_CAP_STEP = 24;
 // where the Macs already are. They were on BOTH pages, and that duplication is
 // what made this the only settings page with no slack: DROW_MAC0/MAC1 spent 48 of
 // the DEVICE card's 200 rows re-stating, in a different format, a list the
-// Pairing page draws in full. renderMacLinkRows() is board 1's alone now.
+// Pairing page draws in full. renderMacLinkRows(), which drew them, was board 1's
+// alone after that and was deleted in Task 4 with the page it belonged to.
 //
 //   116..185  CONNECTION        ST_CONN_Y, ST_CONN_H
 //   198..267  POWER             ST_PWR_Y,  ST_PWR_H      (12px gap, SP_3)
@@ -2229,9 +2230,10 @@ const int STEP_BAR_GAP   = 10;
 // toggle row at 392..437", i.e. three steppers and a row of three third-width
 // toggles - which was board 1's DISPLAY & SOUND page. THE CLAUSE "and it is kept
 // there unchanged" WAS TRUE UNTIL TASK 3A and is not now: board 1 split that page in
-// two as well, so BOTH boards have a DISPLAY group and a SOUND group. The flag is
+// two as well, so BOTH boards have a DISPLAY group and a SOUND group. The flag was
 // BOARD_SETTINGS_GROUPS (the page bodies), not BOARD_SETTINGS_HOME (the navigation) -
-// the sentence named the wrong one of the pair from the moment the pair existed.
+// the sentence named the wrong one of the pair from the moment the pair existed, and
+// Task 4 deleted both once every arm they gated was dead on both boards.
 const int P1_TOP = 12;
 const int P1_GAP = 12;
 

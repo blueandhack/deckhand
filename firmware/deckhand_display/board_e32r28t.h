@@ -22,30 +22,21 @@
 #define BOARD_HAS_SD         0
 #define BOARD_HAS_RGBLED     0
 #define BOARD_TOUCH_NEEDS_CAL 1
-// TWO FLAGS, NOT ONE, AND THE SPLIT WAS THE WHOLE OF TASK 3A. They were one flag
-// and it meant two things at once: "this board draws the SIX GROUP PAGES" and
-// "this board NAVIGATES them from a HOME menu". The split existed so the two could
-// converge in separate commits with separately attributable binary movement, and
-// BOTH halves have now happened:
-//   BOARD_SETTINGS_GROUPS gates the PAGE BODIES - the Device cards, the Display
-//     and Sound split, the two-line Mac rows, the Danger section - and their
-//     geometry chains in deckhand_display.ino. 1 on BOTH boards since Task 3A.
-//   BOARD_SETTINGS_HOME gates NAVIGATION ONLY - the HOME list, the back band,
-//     drawPager(), gotoSettingsPage() and the pager's 45/55 band split. 1 on BOTH
-//     boards since Task 3B. THE SENTENCE THAT STOOD HERE - "Board 1 still pages
-//     through the six groups with its chevrons; Task 3B flips this" - was true for
-//     exactly one commit and is kept marked rather than deleted, because it is the
-//     record of why the flag exists at all.
-// BOTH ARE NOW 1 ON BOTH BOARDS AND BOTH ARE SCAFFOLDING: Task 4 deletes them and
-// every `#else` arm they still gate (drawPager(), gotoSettingsPage(), SETTINGS_PAGES,
-// the 45/55 split, the pre-group page bodies), and its proof that it removed nothing
-// live is that both binaries come out BYTE-IDENTICAL - the preprocessor was already
-// excluding all of it. Nothing may be tidied out of those arms before then, or that
-// proof is spent.
-// Both are #defines, NEVER const ints: the preprocessor cannot see a C++ const
-// int, so `#if` on one is silently false with no warning. That has shipped twice.
-#define BOARD_SETTINGS_GROUPS 1  // the six group PAGES; see settings.ino
-#define BOARD_SETTINGS_HOME  1   // ...reached from a HOME list, not a chevron pager
+// TWO SETTINGS FLAGS STOOD HERE AND TASK 4 DELETED BOTH. The record is kept
+// because it is the reason the SETTINGS tab looks the way it does, not because
+// anything still reads it: BOARD_SETTINGS_GROUPS gated the six page BODIES and
+// their geometry chains, BOARD_SETTINGS_HOME gated NAVIGATION ONLY - the HOME
+// list, the back band, and the chevron pager (drawPager(), gotoSettingsPage(),
+// SETTINGS_PAGES and the 45/55 band split) that this board used before them. They
+// were ONE flag meaning two things until Task 3A split them, and the split existed
+// so board 1's content (Task 3A) and its navigation (Task 3B) could converge in
+// separate commits with separately attributable binary movement. Both reached 1 on
+// both boards, which made every `#else` arm dead code; Task 4 removed the flags and
+// those arms, and BOTH BINARIES CAME OUT BYTE-IDENTICAL - the proof that nothing
+// live went with them. There is one implementation of this tab now.
+// The flags that remain below are #defines, NEVER const ints: the preprocessor
+// cannot see a C++ const int, so `#if` on one is silently false with no warning.
+// That has shipped twice.
 // BOARD 1's DEVICE PAGE CARRIES NO DIAGNOSTICS BLOCK, and that is a measured
 // decision rather than an omission. board_es3c35p.h's own note says those facts
 // "earn their place on this board specifically because there is no serial console
@@ -58,13 +49,14 @@
 // the call: this board declares no DEV_DIAG_* at all, so an unguarded body would
 // not compile rather than merely drawing nothing.
 #define BOARD_DEVICE_DIAGNOSTICS 0
-// A STANDING PER-BOARD DIVERGENCE, NOT SCAFFOLDING. BOARD_SETTINGS_GROUPS and
-// BOARD_SETTINGS_HOME above are both temporary - both are 1 on both boards now and
-// Task 4 deletes them and every dead arm with them - but this flag and
-// BOARD_DEVICE_DIAGNOSTICS are permanent facts
-// about the two panels, the shape BOARD_HAS_MIC and BOARD_TOUCH_NEEDS_CAL already
-// have. A reader needs to know which of the four is which before deciding whether a
-// guard is worth removing.
+// A STANDING PER-BOARD DIVERGENCE, NOT SCAFFOLDING. This flag and
+// BOARD_DEVICE_DIAGNOSTICS are permanent facts about the two panels, the shape
+// BOARD_HAS_MIC and BOARD_TOUCH_NEEDS_CAL already have - board 1's group page is
+// 222px against board 2's 356, and no refactor removes that. THE TWO FLAGS THAT
+// WERE SCAFFOLDING (BOARD_SETTINGS_GROUPS and BOARD_SETTINGS_HOME) ARE GONE, deleted
+// in Task 4 once both boards took the same arm; the note above records them. A
+// reader needs to know which kind a flag is before deciding whether a guard is
+// worth removing, and the two kinds no longer sit side by side here.
 //
 // NAMED FOR THE CAUSE, NOT THE SYMPTOM (RULING 18). It was BOARD_SETTINGS_CAPTIONS,
 // which says WHAT is gated; FITS says WHY - this board's group page is 222px against
@@ -936,29 +928,29 @@ const int PAGER_H = 42;                       // the band under the tab bar. Siz
                                               // and is not one now: the WHOLE band
                                               // (CONTENT_Y..PAGE_TOP = 46px) is the single
                                               // back target, and that is what is asserted.
-// PAGE_TOP moved here alongside PAGER_H rather than staying in the main file:
-// DEV_CARD_Y (below) is defined from it, and both need to be visible at the
-// point board.h is included, before PAGE_TOP's original declaration point.
+// PAGE_TOP moved here alongside PAGER_H rather than staying in the main file: the
+// board headers are visible at the point board.h is included, before PAGE_TOP's
+// original declaration point, and everything that derives from it is per board.
+// (It said "DEV_CARD_Y (below) is defined from it" - that was the pre-redesign
+// page 0's card, deleted in Task 4 with the page.)
 const int PAGE_TOP = CONTENT_Y + PAGER_H + 4; // top of each page's content
 
-// Page 0 - DEVICE card
-const int DEV_CARD_Y = PAGE_TOP + 4;
-// 160, not 120: +40 makes room for up to MAX_LINKS per-Mac rows below ID (see
-// DROW_MAC0/DROW_MAC1) at the same 20px gap ID already uses below BATT, plus
-// the same ~7px clearance ID itself leaves above the card's own border.
-const int DEV_CARD_H = 160;
-const int DROW_BT = 24, DROW_USB = 52, DROW_BATT = 80, DROW_ID = 100;
-// Per-Mac link rows (see renderMacLinkRows() in settings.ino). Two fixed row
-// SLOTS, not one per hostLinks[] index - the renderer compacts to however
-// many links are actually used, so a single remaining Mac always draws in
-// the first slot rather than leaving a gap where the other one used to be.
-const int DROW_MAC0 = 120, DROW_MAC1 = 140;
-// The battery READING's vertical offset from the "Battery" label beside it, and
-// board 1's value is the one that already shipped: 4. Named here only so board 2
-// can differ - at a 13px line the stagger is invisible, at 16px it reads as two
-// halves of one row failing to line up. Substituting the literal it replaces,
-// so this binary cannot move.
-const int DROW_BATT_VAL_DY = 4;
+// THE PRE-REDESIGN PAGE 0 / DEVICE CARD'S GEOMETRY STOOD HERE AND TASK 4 DELETED
+// IT: DEV_CARD_Y, DEV_CARD_H (160), DROW_BT/USB/BATT/ID, DROW_MAC0/MAC1,
+// DROW_BATT_VAL_DY, CONN_TEXT_W/H (drawConnRow()'s 100x16 erase box) and MAC_ROW_W
+// (28, the per-Mac row's padded width). They sized ONE card: a "DEVICE" heading, two
+// connection rows with a dot each, a one-line battery reading, the device id, and two
+// per-Mac link rows keyed off hostLinks[]. Task 3A replaced that page on this board
+// with the six group bodies - the CONNECTION and POWER cards carry those facts now,
+// and the Pairing group's two-line cards carry the Macs - which left every constant
+// above reading only code the preprocessor excluded. Task 4 deleted that code
+// (drawStatusPageStatic, renderStatusPage, drawConnRow, renderMacLinkRows), the
+// assertions in settings-geom-check.mjs that measured it, and these declarations,
+// and BOTH BINARIES CAME OUT BYTE-IDENTICAL - an unread `const int` emits nothing,
+// which is the proof it was dead rather than merely unreferenced by this file.
+// TWO SURVIVED because live code still reads them, and they are below with their
+// own reasoning: BATT_ROW_CACHE (the POWER card's headline field) and
+// BATT_LEFT_BYTES (its runtime label).
 // The battery row's change-only cache, in BYTES. It was 20, sized for the old
 // STATUS page's one-line "100% 4.20V ~99h" (15 + NUL) - a page this board no
 // longer draws. The DEVICE group's POWER card gives the runtime estimate a line
@@ -981,30 +973,6 @@ const int BATT_ROW_CACHE = 12;
 // because leaving this as a shared literal 12 changed board 1's binary at +0
 // BYTES once, exactly the case a size comparison cannot see.
 const int BATT_LEFT_BYTES = 8;
-// drawConnRow()'s erase box, likewise the shipping values (100 x 16). The WIDTH
-// has to cover the widest string the row draws, "Not connected", which is 78px in
-// Cozette 6x13 - so 100 has 22px of headroom here and had NONE on board 2 at 8px
-// (104), which is why this became a constant. The HEIGHT must cover
-// uiLineH(T_BODY): 16 against 13 here, i.e. 3 rows of free clearance.
-const int CONN_TEXT_W = 100;
-const int CONN_TEXT_H = 16;
-
-// Per-Mac link rows. "Mac  feedfeed  999s ago" (a bare 11-char hostId with no
-// tag, plus a generously wide age) is 26 chars - MAC_ROW_W pads to 28. Indexed
-// by ROW SLOT (0/1), not by hostLinks[] index - see renderMacLinkRows().
-// Padding every row to this SAME fixed width, used or not, is what makes a row
-// that goes away actually get erased: the erase box is sized to the padded
-// text, so an unpadded "" would leave a wide stale row un-erased instead of
-// blanking it.
-// This cache no longer holds only the padded text: renderMacLinkRows() appends
-// a "\x01" sentinel plus the row's icon id before comparing, because the icon
-// is drawn separately from that text and a changed icon otherwise leaves a
-// stale one on screen (the visible text is unaffected by an icon-only change).
-// Worst case: 28 (padded text) + 1 (sentinel) + 2 (id, "-1".."15") = 31, +1 NUL
-// = 32 - so 40 keeps 8 bytes of headroom, the same margin battRowTextCache
-// keeps over its own worst case. A cache shorter than the string it holds
-// silently stops noticing changes past that length - this file's oldest bug.
-const int MAC_ROW_W = 28;
 
 // Easter-egg crab-walk surface geometry. OCTO_H depends on CRAB_H (from
 // ClawdCrab.h), which is why deckhand_display.ino now includes ClawdCrab.h
@@ -1083,9 +1051,10 @@ const int STEP_BAR_GAP   = 10;   // between a key's edge and the bar
 // 0..5 ordinal of its own", and "SET_HOME IS DECLARED AND IS NOT REACHABLE HERE,
 // deliberately: drawSettingsTab() enters at SET_DEVICE and gotoSettingsPage() wraps
 // INSIDE the run, so 0 is the one id this board's navigation can never produce."
-// Both were true while BOARD_SETTINGS_HOME was 0 here. It is 1 now: SET_HOME is
-// reachable, it is where drawSettingsTab() enters, and the pager that could not
-// produce it is compiled by neither board.
+// Both were true for the one task this board drew a pager. SET_HOME is reachable
+// now, it is where drawSettingsTab() enters, and the pager that could not produce
+// it - with gotoSettingsPage(), SETTINGS_PAGES and the flag that gated them - was
+// deleted in Task 4.
 const int SET_HOME = 0, SET_DEVICE = 1, SET_DISPLAY = 2, SET_SOUND = 3, SET_PAIRING = 4, SET_MESSAGES = 5, SET_DANGER = 6;
 const int SET_GROUP_COUNT = 6;   // SET_DEVICE..SET_DANGER, contiguous by design
 
@@ -1217,9 +1186,10 @@ const int HOME_SUB_BYTES = HOME_SUB_CHARS + 1;
 // The back band replaces the pager band AT THE SAME HEIGHT, which is the whole
 // reason no group body needed re-deriving when this board's navigation flipped:
 // PAGE_TOP is CONTENT_Y + PAGER_H + 4 on both boards and it is unchanged at 80.
-// The key is the pager's own PAGER_BTN_W so the two boards' chrome stays one size,
-// and the WHOLE band is the back target - there is nothing else in it, so the 45/55
-// split drawPager() needed to separate two keys is not needed here. THAT IS ALSO
+// The key keeps the pager's own PAGER_BTN_W so the two boards' chrome stays one
+// size, and the WHOLE band is the back target - there is nothing else in it, so the
+// 45/55 split the chevron pager needed to separate two keys is not needed and is not
+// declared (drawPager() itself went in Task 4). THAT IS ALSO
 // WHAT RETIRED A DOCUMENTED SHORTFALL: the drawn key is PAGER_H - 8 = 34px, under
 // this board's TAP_MIN of 40, and settings-geom-check.mjs carried a KNOWN entry
 // excusing it while it was one of TWO keys you had to hit. It is an affordance
@@ -1446,11 +1416,11 @@ const int P2_SPINE_W = 4;
 const int P2_AIR_BOT = 69;
 // P2_GAP IS GONE WITH THE PAGE IT SPACED. It was "a button's bottom -> the next
 // button's top" on the four-button ACTIONS column, and this group has ONE section
-// whose two buttons sit at SP_3, the page rhythm. The pre-3A page body still
-// mentions it, but that body is behind `#if !BOARD_SETTINGS_GROUPS` - dead on both
-// boards - and Task 4 deletes it; a constant kept alive so dead text still parses
-// is the shape this repo has had to unpick before (P1_THEME_CAP_STEP), and its
-// absence is asserted on both boards now rather than on one.
+// whose two buttons sit at SP_3, the page rhythm. The pre-3A page body that still
+// mentioned it was behind a `#if` neither board took, and Task 4 deleted that body;
+// a constant kept alive so dead text still parses is the shape this repo has had to
+// unpick before (P1_THEME_CAP_STEP), and its absence is asserted rather than left
+// to be noticed.
 
 // ---------- SETTINGS group: Macs ----------
 // The live Mac rows are two-line CARDS here now, the same component board 2
