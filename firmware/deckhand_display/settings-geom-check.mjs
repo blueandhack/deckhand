@@ -48,6 +48,18 @@ import fs from "fs";
 // brings back the orange corner specks 3cb63fb fixed on this same branch.
 // ---------------------------------------------------------------------------
 const SOURCE_FAULTS = [
+  // ---- Task 2 fix round: the payload column's worst case ----
+  // The checker parsed this cap from the WHOLE FILE and bound to an unrelated
+  // `buf.length() > 7 ? buf.substring(7) : ...` nine guards earlier, certifying a
+  // 26-character line where the real one is 30. Anchored on the ACCUMULATOR RESET,
+  // which is what makes feedChar's guard the payload bound and not a token offset -
+  // the same discriminator the assertion itself uses, so the fault and the rule it
+  // tests cannot drift apart. The matching NEGATIVE case (perturbing one of the
+  // eight token offsets must move NOTHING) is structural rather than injected: the
+  // parse is scoped to feedChar's own body, so no other guard can reach it.
+  ["feedChar's payload guard drops to a token-sized 7 (the widest line on the DEVICE page is measured 4 characters short)",
+    "deckhand_display.ino", (t) => t.replace(/> 16000\) buf = ""/, '> 7) buf = ""'),
+    "a line-length bound (4+ digits)"],
   // ---- Task 2: the die temperature's warm/hot band ----
   // colorForDieTemp() was uncalled on BOTH boards before this, so the device had a
   // temperature on the glass and no warm/hot SIGNAL anywhere. Both faults below put
@@ -1750,14 +1762,48 @@ for (const b of [1, 2]) {
       // order it is drawn, and the count is asserted against DEV_DIAG_LINES: a line
       // this table forgets is a line measured by nothing, which is how the name+board
       // column went unmeasured against a 20-byte buffer once.
-      // THE PAYLOAD FIGURE IS PARSED, not transcribed. feedChar() drops any line
-      // longer than this, so it is the largest number the "%u B per tick" column can
-      // ever render - and line 0 is the WIDEST pair on this page (31 of 32), so a
-      // raised guard would spill this line first and a transcribed 16000 would go on
-      // certifying the old one.
-      const payloadCap = (SRC_MAIN.match(/buf\.length\(\) > (\d+)/) || [])[1];
-      chk(payloadCap != null,
-          `Device: the payload cap parses out of feedChar's own guard (got ${payloadCap}) - a transcribed width here would certify nothing`);
+      // THE PAYLOAD FIGURE IS PARSED OUT OF feedChar()'S OWN BODY, and the SCOPE is
+      // the whole point of this parse rather than a detail of it.
+      //
+      // The first spelling was `SRC_MAIN.match(/buf\.length\(\) > (\d+)/)` over the
+      // whole file, and deckhand_display.ino has NINE `buf.length() > N` guards. The
+      // first is an unrelated command-argument check, `buf.length() > 7 ?
+      // buf.substring(7) : ...`, so the checker bound to 7 and cheerfully certified
+      // `"7 B per tick"` at 26 of 32 characters instead of the real worst case at 30.
+      // That is WORSE than the literal it replaced: a transcribed "16000" is visibly
+      // a transcription and a reader knows to check it, where this LOOKED parsed and
+      // silently measured the wrong line - the repo's own "parse, never transcribe"
+      // rule defeated by something wearing its clothes.
+      //
+      // A THROW, not a chk, the ACT_GAP/SPINE_ARGS shape: if feedChar is renamed the
+      // fix is to move this parse with it, not to leave the assertions below looking
+      // at nothing. fnSrc's brace matching is safe here - feedChar carries no #if, so
+      // it is not in the handleSettingsTouch family where an arm opens a brace the
+      // other does not and the balancer runs off the end returning "".
+      const feedSrc = fnSrc(SRC_MAIN, "void feedChar");
+      if (!feedSrc.length) throw new Error("settings-geom-check: void feedChar() not found in " +
+        "deckhand_display.ino - the payload column's worst case is that function's own line guard, " +
+        "so move this parse with it rather than leaving the width asserted against nothing");
+      const feedGuards = [...feedSrc.matchAll(/buf\.length\(\) > (\d+)\)\s*buf = ""/g)];
+      // ONE guard, and it is the one that RESETS THE ACCUMULATOR. That is the
+      // discriminator the whole-file parse lacked: every other `buf.length() > N` in
+      // this file is `? buf.substring(N) :`, a token-length check on a verb, and the
+      // only guard that empties buf is the one bounding how long a payload LINE may
+      // get. Two of them inside this body would make "which cap" a guess.
+      chk(feedGuards.length === 1,
+          `Device: feedChar() has exactly ${feedGuards.length} line guard that resets the accumulator (buf.length() > N; buf = "") - that reset is what makes it the PAYLOAD bound rather than one of this file's eight token-length checks`);
+      const payloadCap = feedGuards.length === 1 ? feedGuards[0][1] : null;
+      // AND THE VALUE IS ASSERTED, not merely the fact that something matched. The
+      // guard this replaced was `chk(payloadCap != null)`, which any match anywhere in
+      // the file satisfied - an assertion written to enforce "parse it" that could not
+      // itself fail. What bounds this categorically is what the guard is FOR:
+      // processCompletedLine's own note says ask payloads are what make these lines
+      // long, so the bound is a line length in the thousands. A one- or two-digit cap
+      // is not that guard; it is a verb's argument offset, which is exactly the value
+      // the mis-scoped parse returned.
+      chk(payloadCap != null && payloadCap.length >= 4,
+          `Device: feedChar's payload cap is ${payloadCap} - a line-length bound (4+ digits), not one of this file's single-digit token offsets, which is what an unscoped parse binds to`);
+      console.log(`  Device DIAGNOSTICS payload column: feedChar caps a line at ${payloadCap} B, so "${payloadCap} B per tick" is ${String(payloadCap).length + 11} of ${c.DEV_DIAG_CHARS} chars`);
       const PAIRS = [
         [0, "payload / flush", `${payloadCap || "?"} B per tick`, "flush 999.9 ms"],
         [0, "payload / flush", "no payload yet", "flush 999.9 ms"],
