@@ -43,9 +43,12 @@
 #define BOARD_HAS_RGBLED     1   // WS2812 on GPIO40; nothing drives it
 #define BOARD_TOUCH_NEEDS_CAL 0  // capacitive, factory-aligned
 // TWO FLAGS, NOT ONE - see board_e32r28t.h for the split and why it was made.
-// BOTH are 1 here, so nothing on this board moves: GROUPS gates the six page
-// BODIES and their geometry chains, HOME gates the HOME list, the back band,
-// drawPager()'s absence and gotoSettingsPage()'s absence.
+// BOTH are 1 here, so nothing on this board moved in either task: GROUPS gates the
+// six page BODIES and their geometry chains, HOME gates the HOME list, the back band,
+// drawPager()'s absence and gotoSettingsPage()'s absence. BOTH ARE NOW 1 ON BOTH
+// BOARDS TOO (Task 3A and Task 3B respectively), so both are spent scaffolding: Task
+// 4 deletes them and every `#else` arm they gate, and its proof is that both binaries
+// come out byte-identical.
 #define BOARD_SETTINGS_GROUPS 1  // the six group PAGES
 #define BOARD_SETTINGS_HOME  1   // ...reached from a HOME screen, not a pager
 // THE DIAGNOSTICS BLOCK IS THIS BOARD'S, and the reason is written at its own
@@ -1755,25 +1758,38 @@ const int PILL_H = 18;
 // sit 4px under it.
 
 // ============================================================================
-// SETTINGS - THE FOUR PAGES
+// SETTINGS - HOME AND THE SIX GROUPS
 // ============================================================================
-// THE PAGER BAND SETS EVERYTHING BELOW IT, so it is derived first.
+// THE HEADING SAID "THE FOUR PAGES" and named a surface neither board has had since
+// the SETTINGS redesign. Kept marked rather than deleted: the four pager pages are
+// what this section's constants were first cut for.
 //
-// drawPager() draws its prev/next keys at CONTENT_Y + 4 with height PAGER_H - 8,
-// so the DRAWN key is PAGER_H - 8. Board 1's PAGER_H 42 gives a 34px key - 6.0mm,
-// under its own TAP_MIN of 40, and its own comment records that at 26 these were
-// "the most missed control on the device". With 160 more rows the floor is
-// affordable here, so the key is exactly TAP_MIN and PAGER_H = 46 + 8 = 54. The
-// TAP band is wider than the key in both dimensions on both boards
-// (handleSettingsTouch claims everything above PAGE_TOP, split 45%/45% with a 10%
-// dead band around the title) - that split is panel-relative and needs nothing.
+// THE BAND SETS EVERYTHING BELOW IT, so it is derived first. It is a BACK band on
+// both boards now (Task 3B); PAGER_H keeps its name because PAGE_TOP is derived from
+// it and every group body on both boards is derived from PAGE_TOP - renaming it would
+// move nothing and touch forty sites.
+//
+// The band draws its key at CONTENT_Y + 4 with height PAGER_H - 8, so the DRAWN key
+// is PAGER_H - 8. Board 1's PAGER_H 42 gives a 34px key - 6.0mm, under its own
+// TAP_MIN of 40, and its own comment records that at 26 these were "the most missed
+// control on the device". With 160 more rows the floor is affordable here, so the key
+// is exactly TAP_MIN and PAGER_H = 46 + 8 = 54.
+// THE TAP BAND IS WIDER THAN THE KEY IN BOTH DIMENSIONS ON BOTH BOARDS, and it is now
+// the WHOLE band rather than a split: handleSettingsTouch claims everything above
+// PAGE_TOP for the single back key (58px here, 46px on board 1, both over their own
+// TAP_MIN). The sentence that stood here described drawPager()'s "45%/45% with a 10%
+// dead band around the title", which needed two keys to separate and is compiled by
+// neither board since Task 3B.
 const int PAGER_H = 54;
 // 60, board 1's 52 held PHYSICALLY (52 / 5.624 * 6.489 = 60.0) - the rule Task 7
 // used for MSG_BTN_W and ASK_READ_BTN_W, and the right one for a control rather
-// than for text. Clearance: the two keys span x 8..67 and 252..311, leaving a
-// 184px title lane for a longest title ("DISPLAY & SOUND") of 120px at THIS board's
-// 8px advance - 15 chars * TEXT_ADV, not the 90px that sentence used to claim, which
-// was Cozette's 6 - centred at 160 so it runs 100..219 inside a lane of 68..251.
+// than for text. THE CLEARANCE PARAGRAPH THAT STOOD HERE COSTED OUT drawPager()'s
+// TWO-KEY BAND - "the two keys span x 8..67 and 252..311, leaving a 184px title lane
+// for a longest title ("DISPLAY & SOUND") of 120px at THIS board's 8px advance" -
+// against a page title neither board has drawn since Task 3A and a band neither
+// compiles since Task 3B. The live constraint is the BACK band's: one key at
+// PAGER_BTN_X0..+BACK_BTN_W and a LEFT-ALIGNED title beside it, which
+// settings-geom-check.mjs measures against the panel's right edge on both boards.
 const int PAGER_BTN_W  = 60;
 // 8, and the arithmetic first: board 1's 6 held physically is 6 / 5.624 * 6.489 =
 // 6.9, taken up to 8 to sit on the 4px spacing scale (SP_2). That it does not match
@@ -1803,7 +1819,8 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 // A PAGE THAT NO LONGER EXISTS - "28px on STATUS (two cards now ... the LINK card
 // spends 140 of it), 22 on DISPLAY & SOUND, 148 on ACTIONS, 108 on PAIRED MACS",
 // i.e. the four pager pages, a DEVICE card and a LINK card, none of which this
-// board has since the SETTINGS redesign split them into HOME plus five groups.
+// board has since the SETTINGS redesign split them into HOME plus SIX groups (the
+// spec's five became six in its own amendment - Danger survived).
 // A comment is not parsed, so nothing could have caught it; it is the same defect
 // the BOARD_HAS_MIC paragraph further down records, which is why the numbers below
 // name the constant each is measured from rather than standing on their own.
@@ -1915,10 +1932,12 @@ const int HOME_SUB_CHARS = 30;
 const int HOME_SUB_BYTES = HOME_SUB_CHARS + 1;
 
 // The back band replaces the pager band at the SAME height, which is the whole
-// reason the group bodies need no new arithmetic: PAGE_TOP is unchanged at 104.
+// reason the group bodies need no new arithmetic: PAGE_TOP is unchanged at 104 here
+// and at 80 on board 1, where the same property is what made Task 3B affordable.
 // The key is the pager's own PAGER_BTN_W so the two boards' chrome stays one
 // size, and the WHOLE band is the back target - there is nothing else in it, so
-// the 45/55 split the pager needs to separate two keys is not needed here.
+// the 45/55 split drawPager() needed to separate two keys is not needed here (and
+// drawPager() is compiled by neither board now).
 const int BACK_BTN_W    = PAGER_BTN_W;
 const int BACK_TITLE_DX = 16;
 
@@ -2206,9 +2225,11 @@ const int STEP_BAR_GAP   = 10;
 // THE PARAGRAPH THAT USED TO SIT HERE DESCRIBED A PAGE THIS BOARD NO LONGER HAS.
 // It read "3 * 80 + H_ROW(46) = 286 of 356 ... cards at 116 / 208 / 300 and the
 // toggle row at 392..437", i.e. three steppers and a row of three third-width
-// toggles - which is board 1's DISPLAY & SOUND page, and it is kept there
-// unchanged. On this board that page is split in two (see BOARD_SETTINGS_HOME),
-// so VOLUME and SOUND move to their own group and what is left is DISPLAY.
+// toggles - which was board 1's DISPLAY & SOUND page. THE CLAUSE "and it is kept
+// there unchanged" WAS TRUE UNTIL TASK 3A and is not now: board 1 split that page in
+// two as well, so BOTH boards have a DISPLAY group and a SOUND group. The flag is
+// BOARD_SETTINGS_GROUPS (the page bodies), not BOARD_SETTINGS_HOME (the navigation) -
+// the sentence named the wrong one of the pair from the moment the pair existed.
 const int P1_TOP = 12;
 const int P1_GAP = 12;
 
@@ -2555,8 +2576,12 @@ const int P4_AIR_BOT  = 80;
 // the same rule tabsW() follows when fabVisible() is compiled out, and
 // settings-geom-check.mjs asserts each absence by name, because a constant a draw
 // site no longer uses but a hit test still does is exactly how a page comes to
-// claim taps for a button it does not draw. Board 1 still draws all four through
-// its pager and keeps its own chain in deckhand_display.ino.
+// claim taps for a button it does not draw. THE SENTENCE "Board 1 still draws all
+// four through its pager and keeps its own chain in deckhand_display.ino" WAS TRUE
+// UNTIL TASK 3A: board 1 draws the same six groups now, MIC TEST sits on its SOUND
+// group and CALIBRATE TOUCH on its DEVICE group (BOARD_TOUCH_NEEDS_CAL), so its
+// DANGER group holds the same two controls this one does - and since Task 3B it
+// reaches them from the same HOME list. Its chain is in board_e32r28t.h.
 //
 // POWER OFF IS BACK, and the round trip is the point of this block's name. The
 // redesign this branch is executing planned to DISSOLVE this group: RESET PAIRING

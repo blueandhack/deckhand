@@ -1,4 +1,7 @@
-// Settings tab: its four pages, the stepper cards, pager and confirm dialog.
+// Settings tab: its HOME menu and six group pages, the back band, the stepper cards
+// and the confirm dialog. (It said "its four pages ... pager"; that was this tab
+// before the SETTINGS redesign, and drawPager() is compiled by neither board now -
+// see the note at drawPager() itself, and BOARD_SETTINGS_HOME in both headers.)
 // Split out of deckhand_display.ino - see pairing.ino for how the concatenated
 // build works and what may not move.
 
@@ -64,6 +67,13 @@ void drawGroupCaption(const char* text, int y) {
   tft.drawString(text, CARD_X + PAD, y);
 }
 #if !BOARD_SETTINGS_HOME
+// DEAD ON BOTH BOARDS SINCE TASK 3B. BOARD_SETTINGS_HOME is 1 in both headers, so
+// nothing below is compiled anywhere; Task 4 deletes this arm and both binaries must
+// come out byte-identical because the preprocessor was already excluding it. It is
+// left EXACTLY as Task 3A wrote it - the "board 1" and "this board" in the comments
+// below mean the board that drew a pager for one commit - so that the text Task 4
+// removes is the text that was proven, and settings-geom-check.mjs still certifies
+// it until then.
 // The pager band: < chevron, page title + dots, > chevron.
 void drawPager() {
   tft.fillRect(0, CONTENT_Y, tft.width(), PAGER_H + 4, COLOR_BG);
@@ -105,17 +115,26 @@ void drawPager() {
   tft.setTextDatum(TL_DATUM);
 }
 #else
-// ----- The back band, and HOME (board 2) -----
+// ----- The back band, and HOME (BOTH BOARDS) -----
+// THE HEADING SAID "(board 2)" AND WAS TRUE FOR ONE TASK. BOARD_SETTINGS_HOME is 1
+// on both boards since Task 3B, so everything under it - the band, HOME's cards, the
+// six summaries and their caches - is compiled by both, at each board's own geometry
+// out of its own header.
 // The pager band becomes a BACK band of exactly the same height, which is the
 // whole reason every group body below needs no new arithmetic: PAGE_TOP is
-// unchanged. There is only one key in it, so unlike drawPager() there is no
-// 45/55 split to make - the WHOLE band is the back target (handleSettingsTouch).
+// CONTENT_Y + PAGER_H + 4 on both boards (80 on board 1, 104 on board 2) and it is
+// unchanged on both. There is only one key in it, so unlike drawPager() there is no
+// 45/55 split to make - the WHOLE band is the back target (handleSettingsTouch),
+// which is also what lets board 1's 34px drawn key stand: it is an affordance inside
+// a 46px target, not one of two keys you have to hit.
 void drawBackBand(const char* title) {
   int by = CONTENT_Y + 4, bh = PAGER_H - 8;
   uiFillRound(PAGER_BTN_X0, by, BACK_BTN_W, bh, RADIUS, COLOR_CARD, COLOR_BG);
   uiStrokeRound(PAGER_BTN_X0, by, BACK_BTN_W, bh, RADIUS, BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
-  // T_HEAD, like the stepper keys' -/+ glyphs and for the same reason: a 16px
-  // glyph on a 46px key is a speck.
+  // T_HEAD, like the stepper keys' -/+ glyphs and for the same reason: a body-face
+  // glyph on a key this size is a speck. BOTH BOARDS' NUMBERS, because the sentence
+  // that stood here carried only board 2's ("a 16px glyph on a 46px key"): the key is
+  // 52x34 here and 60x46 there, and the body face is 13px here and 16px there.
   setUIFont(T_HEAD);
   tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
   tft.setTextDatum(MC_DATUM);
@@ -126,14 +145,18 @@ void drawBackBand(const char* title) {
   tft.setTextDatum(TL_DATUM);
 }
 #endif
-// ONE table, THREE uses: board 1's pager title, board 2's back band title, and
-// HOME's row name. They must be the same word or the screen you tapped into is not
-// the one you tapped on - and now that board 1 pages through the SAME six groups,
-// "the same word" has to hold across two boards as well as across two surfaces.
+// ONE table, TWO LIVE USES ON BOTH BOARDS: the back band's title and HOME's row
+// name. They must be the same word or the screen you tapped into is not the one you
+// tapped on, and that now has to hold across two boards as well as across two
+// surfaces. IT SAID "THREE USES" and named board 1's pager title first; that was
+// true while BOARD_SETTINGS_HOME was 0 here, and drawPager() is compiled by neither
+// board since Task 3B. The third caller is still in the tree until Task 4 deletes
+// the dead arm, so this function stays where it is.
 // MOVED OUT OF THE BOARD_SETTINGS_HOME ARM for that third use: board 1's pager
 // carried its own `titles[]` of five UPPERCASE strings, which was a second record
-// of the group set and a second thing to forget when one is renamed. Its band now
-// draws this, so a rename reaches every surface that names a group.
+// of the group set and a second thing to forget when one is renamed. Its band drew
+// this instead, so a rename reached every surface that names a group - and the
+// function has to stay out of the arm anyway, because both boards now draw it.
 const char* settingsGroupTitle(int g) {
   switch (g) {
     case SET_DEVICE:  return "Device";
@@ -165,10 +188,13 @@ void drawSettingsHomeStatic() {
     tft.setTextColor(COLOR_VALUE, COLOR_CARD);
     tft.setTextDatum(TL_DATUM);
     tft.drawString(settingsGroupTitle(SET_DEVICE + i), CARD_X + PAD, y + HOME_NAME_DY);
-    // A plain ASCII ">", because Spleen declares 0x20..0x7E and a chevron glyph
-    // would draw as nothing at all - the trap this repo has now paid for four
-    // times. It is the affordance that says the row OPENS something; without it a
-    // HOME row reads as a status line.
+    // A plain ASCII ">", because EVERY face on this device declares 0x20..0x7E and
+    // nothing else - Spleen on board 2, Terminus and Cozette on board 1 - so a real
+    // chevron glyph draws as nothing at all AND advances nothing. The trap this repo
+    // has now paid for at least six times; the sentence here named only Spleen, which
+    // stopped being the whole story when board 1 began drawing this row. It is the
+    // affordance that says the row OPENS something; without it a HOME row reads as a
+    // status line.
     tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
     tft.setTextDatum(MR_DATUM);
     tft.drawString(">", CARD_X + CARD_W - PAD, y + HOME_ROW_H / 2);
@@ -188,10 +214,39 @@ void settingsHomeSummary(int g, char* buf, size_t n, uint16_t* col) {
       *col = (bt && usb) ? COLOR_GOOD : COLOR_WARN;
       char pctS[8] = "--";
       if (batteryPresent()) snprintf(pctS, sizeof(pctS), "%d%%", batteryPct());
+      // THE DIE TEMPERATURE IS BOARD 2's AND THE GUARD IS THE SAME FLAG dieTempRead()
+      // CARRIES IN power.ino, not a second opinion about which board this is - the
+      // shape settings.ino already uses for battChargeLabel() further down. The
+      // ESP32-S3's internal sensor is the whole of that facility; board 1's classic
+      // ESP32 has no driver for it, so the function does not merely go unwired there,
+      // it does not EXIST, and the first board-1 compile of this line failed on it.
+      //
+      // BOARD 1's ROW DROPS THE TERM RATHER THAN DRAWING "--", and that is this
+      // function's own opening premise: the summaries are composed from the same
+      // globals each group's page draws from, so HOME and the page cannot disagree.
+      // Board 1's DEVICE group has no temperature on it either (BOARD_DEVICE_
+      // DIAGNOSTICS is 0 there), so a summary promising one would name a fact you
+      // cannot then go and read - and a permanent "--" reads as a sensor that is
+      // BROKEN rather than one that is absent, which is the distinction
+      // dieTempRead()'s own comment insists on from the other side.
+      //
+      // WHY THE WHOLE STATEMENT IS DUPLICATED HERE, against CLAUDE.md's preference
+      // for guarding only the fragment that differs: the rule it states is about arms
+      // that OPEN A BRACE in both directions, which leaves every brace-counting reader
+      // here one `{` ahead - and neither arm below opens one (`if (...) snprintf(...);`
+      // has no body). What forced it is the format string: the three spaces before the
+      // temperature live inside it, so any single-statement spelling changes the
+      // literal board 2 already emits, and board 2's binary is required to come out of
+      // this task BYTE-IDENTICAL. Measured, not assumed - the single-statement version
+      // was written first and moved board 2 by -16 bytes.
+#if !BOARD_USES_TFT_ESPI
       char tempS[8] = "--";
       float dieC = 0;
       if (dieTempRead(&dieC)) snprintf(tempS, sizeof(tempS), "%d C", (int) dieC);
       snprintf(buf, n, "%s   %s   %s", links, pctS, tempS);
+#else
+      snprintf(buf, n, "%s   %s", links, pctS);
+#endif
       break;
     }
     case SET_DISPLAY: {
@@ -1805,10 +1860,12 @@ void drawSettingsStatic() {
   // them (three visible bands on the ACTIONS page). Callers that already clear
   // just do it twice - harmless - and no caller can forget any more.
 #if BOARD_SETTINGS_GROUPS
-  // FROM CONTENT_Y, not PAGE_TOP: on board 2 HOME occupies the band's own rows, so
-  // a clear that started at PAGE_TOP would leave the group you came from wearing
-  // its back band; on board 1 the pager band is repainted by drawPager() itself and
-  // clearing it first costs nothing. Every entry path (openSettingsGroup,
+  // FROM CONTENT_Y, not PAGE_TOP: HOME occupies the band's own rows on BOTH boards
+  // now, so a clear that started at PAGE_TOP would leave the group you came from
+  // wearing its back band. (That sentence used to end "on board 1 the pager band is
+  // repainted by drawPager() itself and clearing it first costs nothing" - true while
+  // BOARD_SETTINGS_HOME was 0 here, and drawPager() is compiled by neither board
+  // since Task 3B.) Every entry path (openSettingsGroup,
   // settingsBack, gotoSettingsPage, drawSettingsTab, forceFullRepaint) comes
   // through here, so this is the one clear and the navigation helpers deliberately
   // do not repeat it.
@@ -1938,8 +1995,11 @@ void resetSettingsCaches() {
 #endif
   // HOME's six summaries, and the Device row's colour beside them. Same rule as
   // every cache above: drawSettingsHomeStatic() repaints the cards these are drawn
-  // ON, so leaving them set leaves all six rows BLANK. On BOARD_SETTINGS_HOME only -
-  // board 1 has the six group PAGES but no HOME list, so it declares neither.
+  // ON, so leaving them set leaves all six rows BLANK. BOTH BOARDS reach this since
+  // Task 3B - it said "On BOARD_SETTINGS_HOME only - board 1 has the six group PAGES
+  // but no HOME list, so it declares neither", which was true for one task. The guard
+  // stays until Task 4 deletes the flag, because the `#else` arm it pairs with is
+  // still in the tree.
 #if BOARD_SETTINGS_HOME
   for (int i = 0; i < SET_GROUP_COUNT; i++) homeSubCache[i][0] = '\0';
   homeStatusColorCache = 0;
@@ -1948,8 +2008,10 @@ void resetSettingsCaches() {
 }
 // ----- NAVIGATION, and NAVIGATION ONLY -----
 // BOARD_SETTINGS_HOME, not BOARD_SETTINGS_GROUPS: both boards draw the six group
-// PAGES now, and what this pair of flags separates is how you REACH them. HOME's
-// open/back go here; board 1's chevron ring goes in the other arm.
+// PAGES and what this pair of flags separates is how you REACH them. Both boards
+// take THIS arm since Task 3B - HOME's open/back. The `#else` below is the chevron
+// ring board 1 used for exactly one task; it is compiled by neither board and Task 4
+// deletes it, whereupon both binaries must come out byte-identical.
 #if BOARD_SETTINGS_HOME
 // HOME -> a group, and back. Both go through drawSettingsStatic(), which clears
 // from CONTENT_Y and resets every cache itself, so neither calls
@@ -1968,6 +2030,7 @@ void settingsBack() {
   renderSettingsTab();
 }
 #else
+// DEAD ON BOTH BOARDS SINCE TASK 3B - see drawPager()'s note. Task 4 deletes it.
 void gotoSettingsPage(int p) {
   // THE RING RUNS SET_DEVICE..SET_DANGER, NOT 0..SETTINGS_PAGES-1. settingsPage is
   // one global shared with board 2 and SET_HOME is 0 there, so a ring based at 0
@@ -2047,6 +2110,7 @@ void handleSettingsTouch(int sx, int sy) {
   // it, so there is no split to make and no dead zone to leave.
   if (sy < PAGE_TOP) { settingsBack(); return; }
 #else
+  // DEAD ON BOTH BOARDS SINCE TASK 3B - see drawPager()'s note. Task 4 deletes it.
   // Pager band. The hit zones are deliberately much wider than the drawn keys
   // (left/right 45% each, with a 10% dead band around the title) so a tap that
   // lands near a key still counts - on a resistive panel, aiming at a 52px key
@@ -2330,6 +2394,7 @@ void drawSettingsTab() {
 #if BOARD_SETTINGS_HOME
   settingsPage = SET_HOME;   // always enter at HOME, never a group you last left
 #else
+  // DEAD ON BOTH BOARDS SINCE TASK 3B - see drawPager()'s note. Task 4 deletes it.
   // ALWAYS ENTER ON THE FIRST GROUP, never a group you last left - and it is
   // SET_DEVICE rather than 0, because 0 is SET_HOME and this board has no HOME
   // surface: entering there would draw a pager over a page nothing paints.

@@ -2541,7 +2541,7 @@ bool fabPressed = false;           // the press currently down started on the bu
 // permission decision is a genuine hazard, not just a cosmetic one.
 // Now that it is part of the tab bar, it is drawn whenever the bar is, and the
 // old per-screen exclusions are gone with the hazards that motivated them: it
-// cannot overlap Allow/Deny, a card, or the pager, because it is not over the
+// cannot overlap Allow/Deny, a card, or the SETTINGS band, because it is not over the
 // content area at all. Chrome that blinks in and out reads as a glitch, so the
 // only things that hide it are the states where the bar itself is gone.
 bool fabVisible() {
@@ -3375,15 +3375,22 @@ const int VOICE_TEXT_LINES = 6;
 
 // ---------- Settings tab ----------
 
-// SETTINGS is paginated (3 pages), not scrollable - drag-scroll misfires on
-// this resistive panel, so discrete pages with a prev/next pager are used
-// (same reasoning as the ask-detail reader). Pages:
-//   0 STATUS   - device connections, battery, pairing (read-only)
-//   1 CONTROLS - brightness, sleep-after, volume steppers + sound toggle
-//   2 ACTIONS  - calibrate touch, power off
-//   3 PAIRED MACS
-//   4 MESSAGES - how a message sent from here lands on the Mac
+// SETTINGS OPENS ON A HOME MENU ON BOTH BOARDS and each row opens one of six group
+// pages, with a back band where the pager used to be. THE COMMENT THAT STOOD HERE
+// DESCRIBED A SURFACE THAT NO LONGER EXISTS ON EITHER BOARD and is kept marked
+// rather than deleted, because it is the record of what this tab was:
+//   "SETTINGS is paginated (3 pages), not scrollable - drag-scroll misfires on
+//    this resistive panel, so discrete pages with a prev/next pager are used
+//    (same reasoning as the ask-detail reader). Pages:
+//      0 STATUS / 1 CONTROLS / 2 ACTIONS / 3 PAIRED MACS / 4 MESSAGES"
+// It said THREE pages over a list of FIVE, which is the "nothing parses a comment"
+// class exactly; the five pages themselves went in Task 3A, and the pager went in
+// Task 3B. The surfaces now are SET_HOME plus SET_DEVICE..SET_DANGER, declared in
+// each board header, and the resistive-panel argument for discrete surfaces over
+// drag-scroll still holds - it is why board 1 keeps a paged reader (BOARD_HISTORY_SCROLL).
 #if !BOARD_SETTINGS_HOME
+// DEAD ON BOTH BOARDS SINCE TASK 3B: nothing compiles drawPager() or
+// gotoSettingsPage(), the only two readers of this. Task 4 deletes it with them.
 // SIX, AND IT IS THE GROUP COUNT RATHER THAN A NUMBER OF ITS OWN. Board 1's pager
 // walks the SAME six groups HOME lists on board 2 - board_e32r28t.h's SET_* run -
 // so the pager's title count, its dot count and gotoSettingsPage()'s wrap all come
@@ -3615,7 +3622,7 @@ char fwCommit[16] = {0};   // "" means: not this build, so do not claim it
 
 // Every consequential action confirms first. They all reach the same modal, so
 // the dialog is one component rather than one per action: it lives above the
-// page, swallows all other touches (including the pager) while it is up, and is
+// page, swallows all other touches (including the SETTINGS band) while it is up, and is
 // cleared whenever a page is redrawn so it can never be re-entered stale.
 enum ConfirmAction : uint8_t { CFM_NONE, CFM_FORGET_HOST, CFM_RECAL, CFM_RESET_PAIRING, CFM_POWER_OFF };
 ConfirmAction pendingConfirm = CFM_NONE;
@@ -3742,6 +3749,11 @@ int brightBarCache = -1;
 char sleepValCache[8] = "";
 char volValCache[8] = "";
 #if BOARD_SETTINGS_HOME
+// BOTH BOARDS SINCE TASK 3B, at each board's own HOME_SUB_BYTES: 30 here on board 1
+// (HOME_SUB_CHARS 29, derived from its 178px lane at Cozette's 6px advance) and 31 on
+// board 2 (30 at Spleen's 8px). The array is sized from whichever header is in play,
+// which is what keeps "a cache shorter than its string" impossible to reintroduce by
+// transcribing the other board's number.
 // HOME's six summaries. They are COMPOSED from live globals every tick and drawn
 // through drawIfChanged, so they need a cache each - without one the row would be
 // repainted on every 5s tick, which is the flicker this file's whole redraw
@@ -7173,12 +7185,14 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     }
     int pg = buf.substring(5).toInt();
 #if BOARD_SETTINGS_HOME
-    // PAGE 1..6 ARE THE SIX GROUPS ON BOTH BOARDS NOW, which they were not: board 1
-    // numbered its own pages 0..4 and wrapped modulo 5, so the MESSAGES surface was
-    // PAGE 4 there and PAGE 5 here and a capture script aimed at one board landed
-    // somewhere else on the other. Both arms address settingsPage's own ids now.
-    // PAGE 0 is HOME here; board 1 has no HOME surface, so its arm clamps 0 up to
-    // the first group rather than inventing one.
+    // PAGE 0..6 MEANS THE SAME THING ON BOTH BOARDS NOW: 0 is HOME and 1..6 are the
+    // six groups, the ids settingsPage itself carries. They were not always the same -
+    // board 1 numbered its own pages 0..4 and wrapped modulo 5, so the MESSAGES
+    // surface was PAGE 4 there and PAGE 5 here and a capture script aimed at one
+    // board landed somewhere else on the other. THE SENTENCE "board 1 has no HOME
+    // surface, so its arm clamps 0 up to the first group" was true for exactly one
+    // task (Task 3A); since Task 3B both boards take THIS arm and PAGE 0 is HOME on
+    // both. The `#else` below is dead on both boards and Task 4 deletes it.
     if (currentTab == TAB_SETTINGS) { if (pg <= SET_HOME) settingsBack(); else openSettingsGroup(pg); }
 #else
     if (currentTab == TAB_SETTINGS) gotoSettingsPage(constrain(pg, SET_DEVICE, SET_DANGER));

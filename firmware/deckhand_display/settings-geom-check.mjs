@@ -114,6 +114,63 @@ const SOURCE_FAULTS = [
   ["drawPager fills the dot for settingsPage rather than for its slot",
     "settings.ino", (t) => t.replace(/if \(i == slot\) tft\.fillSmoothCircle/, "if (i == settingsPage) tft.fillSmoothCircle"),
     "fills the dot for `slot`"],
+  // ---- Task 3B: board 1's navigation flips to HOME ----
+  // FIVE SOURCE FAULTS. Everything this task added on the navigation side is a SOURCE
+  // claim that perturbing a constant cannot reach: which id the tab enters at, which
+  // id the back key leaves to, whether the whole band is the back target, and whether
+  // HOME's hit test claims the rows the draw site drew. Every one of them leaves all
+  // of HOME's geometry exactly right.
+  //
+  // THE FIRST TWO ARE ALSO EACH OTHER'S NEGATIVE-ISOLATION EVIDENCE. Both
+  // drawSettingsTab() and settingsBack() contain the line `settingsPage = SET_HOME;`,
+  // so a file-wide regex for it would be satisfied by whichever survived. Each
+  // assertion is fnSrc-scoped to its OWN body, and the pair below proves it: perturb
+  // one and only THAT one's assertion names the fault. (A third copy of the same line
+  // is not available to bind to by accident - the dead `#else` arm sets SET_DEVICE -
+  // which is why the drawSettingsTab fault below sets SET_DEVICE rather than deleting
+  // the line: it is the exact spelling the dead arm one line below already has, so a
+  // parse that had drifted onto the neighbour would report a PASS.)
+  ["drawSettingsTab enters at SET_DEVICE again, so a tab change reopens the group you last left",
+    "settings.ino", (t) => t.replace(/settingsPage = SET_HOME;   \/\/ always enter at HOME/,
+                                    "settingsPage = SET_DEVICE;   // always enter at HOME"),
+    "drawSettingsTab enters at SET_HOME"],
+  ["settingsBack lands on a GROUP instead of HOME, so the back key navigates sideways",
+    "settings.ino", (t) => t.replace(/(void settingsBack\(\) \{\n  settingsPage = )SET_HOME;/,
+                                    "$1SET_DEVICE;"),
+    "settingsBack's OWN BODY returns to SET_HOME"],
+  // The band grows drawPager()'s 45/55 split back. Every pixel of chrome is unchanged
+  // and the key still works; what goes is the other 88% of the band, which is dead to
+  // the touch - and on a RESISTIVE panel a target that shrank from the whole band to
+  // one 52px key is the difference this board's PAGER_H comment was written about.
+  ["the back band grows a 45/55 split again, so only the left 45% of it goes back",
+    "settings.ino", (t) => t.replace(/if \(sy < PAGE_TOP\) \{ settingsBack\(\); return; \}/,
+                                    "if (sy < PAGE_TOP) { if (sx < tft.width() * 45 / 100) settingsBack(); return; }"),
+    "the WHOLE band above PAGE_TOP is the back target"],
+  // HOME's hit test claims the PITCH rather than the row. Every row still opens the
+  // right group; what changes is that the gaps stop being inert, so a tap between two
+  // cards opens the one above it. Invisible to every geometry assertion - the draw
+  // site is untouched and all six rows are still where they were.
+  ["HOME's hit test claims the row PITCH, so the inert gaps open the row above",
+    "settings.ino", (t) => t.replace(/if \(sy >= y && sy < y \+ HOME_ROW_H\)/,
+                                    "if (sy >= y && sy < y + HOME_ROW_H + HOME_GAP)"),
+    "HOME's hit test claims exactly settingsHomeRowY(i)..+HOME_ROW_H"],
+  // And the row-to-id mapping, which is the one thing on this surface that can be
+  // wrong while every row is drawn correctly AND every tap lands on the row under the
+  // finger: the sixth row opens the fifth group and the last group is unreachable.
+  ["HOME's rows open `i` rather than SET_DEVICE + i, so every row opens the group above it",
+    "settings.ino", (t) => t.replace(/\{ openSettingsGroup\(SET_DEVICE \+ i\); return; \}/,
+                                    "{ openSettingsGroup(i); return; }"),
+    "HOME's row i opens SET_DEVICE + i"],
+  // The die-temperature fragment loses its guard, so board 1's HOME row promises a
+  // reading from a sensor that board has no driver for. It would not COMPILE there -
+  // which is the point: the checker has to fail by name rather than leave the defect
+  // to a three-minute build, and nothing in the transcribed summary table can see it
+  // (the strings still fit the cap either way).
+  ["the Device summary's die-temperature arm loses its board guard",
+    "settings.ino", (t) => t.replace(
+      /#if !BOARD_USES_TFT_ESPI\n      char tempS\[8\] = "--";\n      float dieC = 0;\n      if \(dieTempRead\(&dieC\)\) snprintf\(tempS, sizeof\(tempS\), "%d C", \(int\) dieC\);\n      snprintf\(buf, n, "%s   %s   %s", links, pctS, tempS\);\n#else\n      snprintf\(buf, n, "%s   %s", links, pctS\);\n#endif/,
+      '      char tempS[8] = "--";\n      float dieC = 0;\n      if (dieTempRead(&dieC)) snprintf(tempS, sizeof(tempS), "%d C", (int) dieC);\n      snprintf(buf, n, "%s   %s   %s", links, pctS, tempS);'),
+    "behind the SAME flag dieTempRead() carries"],
   // CALIBRATE TOUCH's hit test survives its button. This is the P2_MIC_Y defect
   // exactly: the band is still claimed, the button is not drawn, and every
   // arithmetic assertion on the page still passes because the constants are all
@@ -343,6 +400,24 @@ function touchArm(name) {
   if (i < 0) return "";
   const j = src.indexOf("\n  } else if (", i);
   return j < 0 ? src.slice(i) : src.slice(i, j);
+}
+// handleSettingsTouch's OWN TEXT, which fnSrc() cannot give: its `#if` arms leave
+// the brace count unbalanced, so fnSrc() returns "" for it (the documented case that
+// touchArm() exists for). touchArm() slices ONE `settingsPage == X` arm; the band
+// guard and the HOME row walk are above the first of them, so neither is reachable
+// that way. This slices from the signature to the next top-level definition, which
+// is a real bound and not the whole file - the alternative is a file-wide regex, and
+// an unanchored regex binding to a neighbour has been caught three times on this
+// branch alone. A THROW if the slice is empty: an assertion over "" passes
+// vacuously, which is the failure this whole family exists to avoid.
+function settingsTouchSrc() {
+  const src = SETTINGS_INO.replace(/^[ \t]*\/\/.*$/gm, "");
+  const i = src.indexOf("void handleSettingsTouch(");
+  if (i < 0) throw new Error("handleSettingsTouch not found in settings.ino");
+  const j = src.indexOf("\nvoid ", i + 1);
+  const out = j < 0 ? src.slice(i) : src.slice(i, j);
+  if (!out.trim()) throw new Error("handleSettingsTouch's body sliced to nothing");
+  return out;
 }
 function fnSrc(src, name) {
   const clean = src.replace(/^[ \t]*\/\/.*$/gm, "");
@@ -813,10 +888,15 @@ const GROUP_TITLES = (() => {
 })();
 const STEP_LABELS = ["BRIGHTNESS", "SLEEP AFTER", "VOLUME"];
 const TOGGLES = ["SOUND", "MUTED", "FLIPPED", "NORMAL", "DARK", "LIGHT", "AUTO"];
-// BOARD 2's settings tree: the SIX group names (one table serving both the back
-// band's title and HOME's row name - they must be the same word or the screen you
-// tapped into is not the one you tapped on), the labels its split Display and Sound
-// groups draw, and the WORST CASE of each of HOME's six composed summaries.
+// THE SETTINGS TREE, ON BOTH BOARDS SINCE TASK 3B (it was board 2's alone): the SIX
+// group names (one table serving both the back band's title and HOME's row name -
+// they must be the same word or the screen you tapped into is not the one you tapped
+// on), the labels the split Display and Sound groups draw, and the WORST CASE of each
+// of HOME's six composed summaries. settingsHomeSummary() is ONE shared function
+// reading globals both boards have (bleConnected, usbLinkActive, batteryPct,
+// dieTempRead, formatSleepValue, VOL_LABELS, hostCount, MSG_PRI_LABELS), so its worst
+// cases are the same strings on both - what differs is the CAP each board pads them
+// to, which is derived per board from its own lane and asserted below.
 const THEME_SEGS = ["DARK", "LIGHT", "AUTO"];
 const SOUND_LABELS = ["SOUND ON", "SOUND OFF", "TEST BEEP", "MIC TEST",
                       "SCREEN FLIPPED", "SCREEN NORMAL"];
@@ -835,9 +915,23 @@ const SET_CAPTIONS = ["THEME", "ALERTS", "MICROPHONE", "CANNOT BE UNDONE",
 // for seven groups - Messages and About were simply missing, so the two summaries
 // nobody transcribed were measured against nothing. A table that is allowed to be
 // short is a table that silently stops covering what it is named for.
-const HOME_SUMMARIES = ["Both links up   100%   -10 C", "100%   sleep OFF   LIGHT",
-                        "OFF   volume HIGH   mic", "4 Macs   one may answer",
-                        "send LATER", "reset pairing, power off"];
+// THE DEVICE ROW IS PER BOARD AND THE REST ARE NOT, which is a fact about the device
+// rather than about the layout: settingsHomeSummary()'s Device branch appends the SoC
+// die temperature, and dieTempRead() is inside power.ino's `#if !BOARD_USES_TFT_ESPI`
+// - the ESP32-S3's internal sensor, which board 1's classic ESP32 has no driver for.
+// The fragment is guarded at the composing site with the SAME flag, so board 1's row
+// ends at the percentage. It is DROPPED rather than shown as "--" because board 1's
+// DEVICE group has no temperature on it either (BOARD_DEVICE_DIAGNOSTICS 0), and the
+// whole premise of these summaries is that HOME and the page it opens cannot disagree.
+// Both worst cases are listed, so neither board is measured against the other's.
+const HOME_SUMMARIES_B = {
+  1: ["Both links up   100%", "100%   sleep OFF   LIGHT",
+      "OFF   volume HIGH   mic", "4 Macs   one may answer",
+      "send LATER", "reset pairing, power off"],
+  2: ["Both links up   100%   -10 C", "100%   sleep OFF   LIGHT",
+      "OFF   volume HIGH   mic", "4 Macs   one may answer",
+      "send LATER", "reset pairing, power off"],
+};
 // THE STATUS GROUP'S OWN STRINGS (board 2), hand-transcribed the way
 // HOME_SUMMARIES and P2_LABELS are, and each measured against the character count
 // its field is PADDED to rather than against a lane: a string longer than its pad
@@ -967,8 +1061,17 @@ for (const b of [1, 2]) {
 // board-2 layout change quietly gave up the same clearance instead of keeping it.
 const KNOWN = {
   1: [
-    // Its own header comment says so: at 26 these were "the most missed control".
-    "pager key 34px tall >= TAP_MIN 40",
+    // AN ENTRY STOOD HERE AND TASK 3B RETIRED IT:
+    //   "pager key 34px tall >= TAP_MIN 40"
+    // It excused drawPager()'s DRAWN prev/next key (PAGER_H - 8 = 34) against this
+    // board's fingertip floor, on the grounds its own header gives - at 26 those were
+    // "the most missed control on the device". BOARD_SETTINGS_HOME is 1 on both boards
+    // now, so neither compiles drawPager(): the band holds ONE back key and the WHOLE
+    // band is its target. The assertion it excused is gone with the control, replaced
+    // by the TESTED band (CONTENT_Y..PAGE_TOP = PAGER_H + 4), which clears the floor on
+    // both boards - 46 >= 40 here, 58 >= 46 there. Deleted rather than left: a
+    // permission for a failure that no longer happens is a trap for whoever
+    // reintroduces that wording, which is what checkKnownUsed() exists to say.
     // TWO ENTRIES USED TO STAND HERE AND BOTH WERE STALE - the converse check
     // below is what found them. "action button 38px tall >= TAP_MIN 40" matched no
     // message this checker produces any more (H_BTN is 44 and the assertion that
@@ -1124,6 +1227,18 @@ if (SELFTEST) {
   // measuring one row can see it.
   B[2].HOME_ROW_H += 1;
   console.log("--selftest: board 2's HOME row height raised by 1; the pitch identity MUST fail");
+  // AND THE SAME FAULT ON BOARD 1, which is a different assertion firing even though
+  // it reads the same way: each board's HOME_* come from its OWN header, and until
+  // Task 3B this block ran on board 2 alone - so a board-1-only regression would have
+  // passed a green selftest, which this file's own rules call a defect.
+  // +1 is the smallest change there is and board 1 has the least room for it: six
+  // rows at 42 with 2px gaps are pitched to land EXACTLY on contentBottom(), so one
+  // extra row of height per card puts the sixth row 6px past the bottom of the content
+  // area and under the footer. Nothing measuring ONE row can see it - every row is
+  // still inside its own card, still clears both borders, and at 43 is still a touch
+  // target with MORE margin over TAP_MIN than it had. Only the pitch identity can.
+  B[1].HOME_ROW_H += 1;
+  console.log("--selftest: board 1's HOME row height raised by 1; the pitch identity MUST fail");
   // AND TWO ON THE DEVICE GROUP, whose stack lands EXACTLY on contentBottom() with
   // no slack at all.
   //
@@ -1242,24 +1357,53 @@ for (const b of [1, 2]) {
   const adv = advanceB(b, T_BODY), cellH = lineHB(b, T_BODY);
 
   // ================= SETTINGS: the pager band =================
-  const pagerKeyH = c.PAGER_H - 8;                 // drawPager: by = +4, bh = PAGER_H - 8
+  const pagerKeyH = c.PAGER_H - 8;                 // the band: by = +4, bh = PAGER_H - 8
   const region = contentBottom - c.PAGE_TOP;
-  console.log(`pager ${c.CONTENT_Y}..${c.CONTENT_Y + c.PAGER_H - 1} (key ${c.PAGER_BTN_W}x${pagerKeyH}), page region ${c.PAGE_TOP}..${contentBottom} = ${region}px`);
+  console.log(`band ${c.CONTENT_Y}..${c.CONTENT_Y + c.PAGER_H - 1} (key ${c.PAGER_BTN_W}x${pagerKeyH}), page region ${c.PAGE_TOP}..${contentBottom} = ${region}px`);
   chk(c.PAGE_TOP === c.CONTENT_Y + c.PAGER_H + 4, `PAGE_TOP ${c.PAGE_TOP} == CONTENT_Y + PAGER_H + 4`);
-  chk(pagerKeyH >= c.TAP_MIN, `pager key ${pagerKeyH}px tall >= TAP_MIN ${c.TAP_MIN}`);
+  // THE TESTED BAND, NOT THE DRAWN KEY, AND TASK 3B IS WHY THAT CHANGED. What stood
+  // here was `pagerKeyH >= TAP_MIN` - drawPager()'s prev/next key - with a KNOWN entry
+  // excusing board 1's 34. That was the right rule for TWO keys: the 45/55 split meant
+  // the drawn key told you which half you were aiming at. Both boards navigate from
+  // HOME now, the band holds ONE back key, and handleSettingsTouch claims the WHOLE
+  // band for it (`if (sy < PAGE_TOP) settingsBack()`), so the target is CONTENT_Y..
+  // PAGE_TOP - PAGER_H + 4 tall - and THAT is what has to clear the floor. The drawn
+  // key is an affordance inside it, bounded below by the two clearance assertions.
+  // Parsed from the touch handler rather than assumed, because the band being the
+  // whole target is the premise this assertion stands on: touchArm() cannot reach it
+  // (handleSettingsTouch's #if arms leave fnSrc unbalanced - the documented case), so
+  // the guard is matched in the file with the settingsBack() call it must guard.
+  {
+    const backBand = c.PAGE_TOP - c.CONTENT_Y;
+    const touchSrc = settingsTouchSrc();
+    const bandGuards = (touchSrc.match(/if \(sy < PAGE_TOP\) \{ settingsBack\(\); return; \}/g) || []).length;
+    chk(bandGuards === 1,
+        `the WHOLE band above PAGE_TOP is the back target - exactly one \`if (sy < PAGE_TOP) { settingsBack(); return; }\` in handleSettingsTouch (found ${bandGuards}), no 45/55 split and no dead lane`);
+    chk(backBand >= c.TAP_MIN,
+        `the back band is a touch target: ${backBand}px (CONTENT_Y..PAGE_TOP) >= TAP_MIN ${c.TAP_MIN}`);
+  }
   // ITS WIDTH TOO. Only the height was checked, which geom-sweep.mjs surfaced as
   // PAGER_BTN_W being unguarded on both boards - and a tap floor that holds in one
   // dimension is not a tap floor, as this file's own history with the history chip
-  // (40 wide in one state, 32 in the other) already showed.
-  chk(c.PAGER_BTN_W >= c.TAP_MIN, `pager key ${c.PAGER_BTN_W}px wide >= TAP_MIN ${c.TAP_MIN}`);
-  chk(c.PAGER_BTN_X0 > 0, `pager keys are inset ${c.PAGER_BTN_X0}px from each edge (0 or less draws off the panel)`);
+  // (40 wide in one state, 32 in the other) already showed. The back key is
+  // BACK_BTN_W == PAGER_BTN_W, so this bounds the drawn key's one dimension that IS
+  // the target's: the band is full width, but nothing left of the key is back.
+  chk(c.PAGER_BTN_W >= c.TAP_MIN, `the band's key is ${c.PAGER_BTN_W}px wide >= TAP_MIN ${c.TAP_MIN}`);
+  chk(c.PAGER_BTN_X0 > 0, `the band's key is inset ${c.PAGER_BTN_X0}px from the edge (0 or less draws off the panel)`);
   {
     const cy = c.CONTENT_Y + Math.floor(c.PAGER_H / 2);
     chk(c.CONTENT_Y + 4 + pagerKeyH <= c.PAGE_TOP, `pager key ends ${c.CONTENT_Y + 4 + pagerKeyH} inside the band cleared to ${c.PAGE_TOP}`);
-    // THE DOTS AND THE CENTRED TITLE ARE drawPager()'S, AND BOARD 2 NO LONGER
-    // COMPILES drawPager(). Checking them there measured a band that is not drawn:
-    // its back band has ONE key and a LEFT-ALIGNED title, so the constraint is a
-    // different one and it is asserted separately below.
+    // THE DOTS AND THE CENTRED TITLE ARE drawPager()'S, AND NEITHER BOARD COMPILES
+    // drawPager() SINCE TASK 3B. This block therefore certifies DEAD CODE, which is
+    // deliberate and is the same treatment the pre-3A page-0 DEVICE card block gets
+    // below: the text is still in the tree, Task 4 deletes it together with these
+    // assertions, and deleting the assertions first would leave the constants
+    // unread while the code that uses them still compiles on a flag flip. It stays
+    // under `b === 1` because PAGER_BTN_W / PAGER_BTN_X0 / the dot spacing are board
+    // 1's - the dead arm was only ever reachable with board 1's header.
+    // (Board 2 was excluded from it for the same reason when the roles were the other
+    // way round: its BACK band has ONE key and a LEFT-ALIGNED title, a different
+    // constraint, asserted separately below - and that is now both boards' live rule.)
     if (b === 1) {
       chk(cy + 8 + 3 < c.PAGE_TOP, `page dots end ${cy + 11} inside the band cleared to ${c.PAGE_TOP}`);
       const laneL = c.PAGER_BTN_X0 + c.PAGER_BTN_W, laneR = W - c.PAGER_BTN_X0 - c.PAGER_BTN_W;
@@ -1325,9 +1469,9 @@ for (const b of [1, 2]) {
       // The table above must cover every row the list draws, or a group's title and
       // summary are measured by nothing - which is how Messages and About went
       // unmeasured for their whole lives.
-      chk(GROUP_TITLES.length === c.SET_GROUP_COUNT && HOME_SUMMARIES.length === c.SET_GROUP_COUNT,
+      chk(GROUP_TITLES.length === c.SET_GROUP_COUNT && HOME_SUMMARIES_B[b].length === c.SET_GROUP_COUNT,
           `one title and one worst-case summary per group: ${GROUP_TITLES.length} titles, ` +
-          `${HOME_SUMMARIES.length} summaries, SET_GROUP_COUNT ${c.SET_GROUP_COUNT}`);
+          `${HOME_SUMMARIES_B[b].length} summaries, SET_GROUP_COUNT ${c.SET_GROUP_COUNT}`);
       for (let i = 0; i < ids.length; i++)
         chk(ids[i][1] === c.SET_HOME + 1 + i,
             `${ids[i][0]} is HOME + ${1 + i} (${ids[i][1]} == ${c.SET_HOME + 1 + i}): HOME's row ${i} draws SET_DEVICE + ${i}`);
@@ -1343,21 +1487,32 @@ for (const b of [1, 2]) {
             "openSettingsGroup clamps into SET_DEVICE..SET_DANGER, the same run HOME draws");
       }
     }
-    // ---- BOARD 1's NAVIGATION READS THE SAME RUN ----
+    // ---- THE DEAD PAGER ARM STILL READS THE SAME RUN ----
     // The pager's ring, its dot count and its title all come from SET_GROUP_COUNT
-    // and SET_DEVICE now rather than from an 0..4 ordinal of its own. Bound to the
+    // and SET_DEVICE rather than from an 0..4 ordinal of its own. Bound to the
     // FUNCTION BODIES, because a neighbouring line can satisfy a file-wide regex:
     // gotoSettingsPage's own body has to base the ring at SET_DEVICE, and
     // drawPager's own body has to convert settingsPage into a slot the same way.
-    if (BFLAG[b].HOME === 0) {
-      chk(c.SETTINGS_PAGES === c.SET_GROUP_COUNT,
-          `board ${b}: SETTINGS_PAGES ${c.SETTINGS_PAGES} == SET_GROUP_COUNT ${c.SET_GROUP_COUNT} - the pager walks the group set, not a count of its own`);
+    //
+    // THE GATE WAS `BFLAG[b].HOME === 0` AND THAT IS NOW FALSE ON BOTH BOARDS, which
+    // would have made every assertion below silently stop running - and taken three
+    // armed SOURCE FAULTS down with it, so --selftest would have reported teeth it no
+    // longer had. It runs once, on board 1, for as long as the `#if !BOARD_SETTINGS_
+    // HOME` arm is in the tree; Task 4 deletes the arm and this block together.
+    // EVERY ASSERTION HERE READS THE RAW SOURCE rather than a preprocessed constant,
+    // which it has to: SETTINGS_PAGES is itself inside the dead arm, so consts()
+    // returns undefined for it on both boards now and `undefined === 6` would fail as
+    // if the group set had changed. Parsed as TEXT instead, which is what the rule was
+    // always about - that there is not a second record of the group count.
+    if (b === 1) {
+      chk(/^const int SETTINGS_PAGES = SET_GROUP_COUNT;$/m.test(SRC_MAIN),
+          "SETTINGS_PAGES is declared as SET_GROUP_COUNT itself, not a count of its own - the dead pager arm walks the group set");
       const goto_ = fnSrc(SETTINGS_INO, "void gotoSettingsPage");
       chk(goto_.length > 0, "the pager's ring parses out of gotoSettingsPage's own body - an empty body would satisfy the rule below vacuously");
       chk(/settingsPage = SET_DEVICE \+/.test(goto_) && /% SETTINGS_PAGES/.test(goto_),
-          "gotoSettingsPage bases its ring at SET_DEVICE and wraps on SETTINGS_PAGES - a ring based at 0 would land on SET_HOME, a surface this board does not draw");
+          "the dead pager arm's gotoSettingsPage bases its ring at SET_DEVICE and wraps on SETTINGS_PAGES - a ring based at 0 would have landed on SET_HOME, which was a surface board 1 did not draw when this arm was live");
       const pager = fnSrc(SETTINGS_INO, "void drawPager");
-      chk(pager.length > 0, "drawPager parses - an empty body would satisfy the three rules below vacuously");
+      chk(pager.length > 0, "the dead pager arm's drawPager parses - an empty body would satisfy the three rules below vacuously");
       chk(/const int slot = settingsPage - SET_DEVICE;/.test(pager),
           "drawPager converts settingsPage into a slot ONCE, at SET_DEVICE - the dots and the title would otherwise each carry their own offset");
       chk(/drawString\(settingsGroupTitle\(settingsPage\)/.test(pager) && !/titles\[/.test(pager),
@@ -1369,19 +1524,77 @@ for (const b of [1, 2]) {
       // arm must name SET_DEVICE rather than the 0 it used to set.
       const tab = fnSrc(SETTINGS_INO, "void drawSettingsTab");
       chk(tab.length > 0 && /settingsPage = SET_DEVICE;/.test(tab),
-          "drawSettingsTab enters at SET_DEVICE on this board - entering at 0 would draw a pager over SET_HOME, a page nothing paints");
+          "the dead pager arm still enters at SET_DEVICE - entering at 0 would have drawn a pager over SET_HOME, a page nothing paints");
+    }
+    // ---- AND THE LIVE ENTRY POINT, ON BOTH BOARDS ----
+    // `int settingsPage = 0;` is SET_HOME (asserted above against the declaration
+    // itself), but drawSettingsTab() is reached again on every tab change and must SET
+    // it - "always enter at HOME, never a group you last left". Bound to the function's
+    // own body: the `#else` arm one line below it sets SET_DEVICE, so a file-wide regex
+    // would be satisfied by the dead arm next door.
+    if (BFLAG[b].HOME) {
+      const tab = fnSrc(SETTINGS_INO, "void drawSettingsTab");
+      chk(tab.length > 0 && /settingsPage = SET_HOME;/.test(tab),
+          "drawSettingsTab enters at SET_HOME on both boards - a tab change returns to the menu, not to the group you last opened");
+      // AND THE WAY BACK. settingsBack() is the other setter of SET_HOME and the two
+      // are DIFFERENT claims - one is "entering the tab lands on the menu", the other
+      // is "the band's key leaves the group you are in". Each is parsed from its OWN
+      // body, which is what stops one standing in for the other: fnSrc brace-matches,
+      // and drawSettingsTab is defined after settingsBack, so neither slice can reach
+      // the other's line. Both halves are proven by injection (SOURCE_FAULTS), and the
+      // pair is also the negative-isolation evidence: perturbing either is caught by
+      // its own name and by nothing else.
+      const back = fnSrc(SETTINGS_INO, "void settingsBack");
+      chk(back.length > 0 && /settingsPage = SET_HOME;/.test(back),
+          "settingsBack's OWN BODY returns to SET_HOME - the back key leaves the group, and a key that set anything else would navigate sideways");
+      // ---- HOME's HIT TEST WALKS THE ROWS THE DRAW SITE DRAWS ----
+      // Never asserted before, because until Task 3B this surface was board 2's and
+      // nothing here read its touch path at all. It is the P2_MIC_Y rule in its
+      // strongest form: the rows are drawn by settingsHomeRowY(i) at HOME_ROW_H and
+      // the hit test has to claim EXACTLY that, or a tap opens the group above or
+      // below the one under the finger - which is invisible to every geometry
+      // assertion, since all the constants are still right.
+      // THE GAPS MUST STAY INERT. Board 1's gap is 2px and board 2's is 10; claiming
+      // `HOME_ROW_H + HOME_GAP` instead would be free rows on board 2 and nearly free
+      // on board 1, and it would hand a tap that landed on nothing to the row above.
+      const homeTouch = settingsTouchSrc();
+      chk(/int y = settingsHomeRowY\(i\);\s*\n\s*if \(sy >= y && sy < y \+ HOME_ROW_H\)/.test(homeTouch),
+          "HOME's hit test claims exactly settingsHomeRowY(i)..+HOME_ROW_H - the same two terms the draw site uses, so the gaps stay inert and no row can drift off its card");
+      chk(/openSettingsGroup\(SET_DEVICE \+ i\)/.test(homeTouch),
+          "HOME's row i opens SET_DEVICE + i, the same expression drawSettingsHomeStatic names it with");
     }
   }
-  if (b === 2) {
+  // ================= SETTINGS: HOME and the back band (BOTH boards) =================
+  // GATED `b === 2` UNTIL TASK 3B, and correctly so - board 1 had no HOME surface and
+  // declared none of these constants, so running this there would have compared
+  // against undefined and reported NaN, which LOOKS like a layout failure and is a
+  // parse gap. BOARD_SETTINGS_HOME is 1 in both headers now, both boards draw HOME and
+  // a back band, and both declare their OWN HOME_* out of their OWN header - which is
+  // exactly the case where a board-1-only regression would pass a green run. Gated on
+  // the PARSED flag rather than on a board number, so if either board's navigation
+  // were flipped back the block follows it instead of reporting NaN.
+  if (BFLAG[b].HOME) {
     // HOME's pitch is derived to land exactly on contentBottom(). Asserting the
     // IDENTITY rather than the number is what makes a row-height change fail here
     // instead of silently eating the bottom row. The row COUNT is SET_GROUP_COUNT,
     // not a literal 5 - the loop that draws them counts with it, and transcribing
     // the 5 here left that constant unswept.
+    //
+    // BOARD 1's SIX ROWS ARE THE TIGHTEST FIT ON EITHER BOARD and the identity is
+    // most of what holds them: 38 + 6*42 + 5*2 + 2 == 302 in a 268px region, where
+    // HOME_ROW_H 42 is TAP_MIN + 2 and the gap is BORDER_CARD exactly. Board 2's is
+    // 54 + 6*58 + 5*10 + 8 == 460 in 414px. The search that produced board 1's is
+    // written out in board_e32r28t.h; what is asserted here is the landing.
     const homeRows = c.SET_GROUP_COUNT;
     const homeEnd = c.HOME_Y0 + homeRows * c.HOME_ROW_H + (homeRows - 1) * c.HOME_GAP + c.HOME_Y0_BOT;
+    // THE BOARD NUMBER IS IN THE MESSAGE AND THAT IS NOT DECORATION. FAILED[] is a
+    // FLAT list and --selftest matches WANT's regexes against it, so once this
+    // assertion runs on BOTH boards the two injections (B[1].HOME_ROW_H and
+    // B[2].HOME_ROW_H) produce the same-shaped message and one regex would claim
+    // whichever fired first - reporting two faults caught when only one was. The
+    // prefix is what keeps each injection's proof its own.
     chk(homeEnd === contentBottom,
-        `HOME's ${homeRows} rows land exactly on contentBottom: ${homeEnd} == ${contentBottom}`);
+        `board ${b}: HOME's ${homeRows} rows land exactly on contentBottom: ${homeEnd} == ${contentBottom}`);
     chk(c.HOME_ROW_H >= c.TAP_MIN,
         `a HOME row is a touch target: ${c.HOME_ROW_H} >= TAP_MIN ${c.TAP_MIN}`);
     // The row's own stack must clear its 2px card border at both ends.
@@ -1394,31 +1607,55 @@ for (const b of [1, 2]) {
     chk(nameEnd < c.HOME_SUB_DY,
         `HOME's name and summary share no pixel row: ${nameEnd} < ${c.HOME_SUB_DY}`);
     // The back band must be the pager band's height, or every group body moves.
+    // ON BOTH BOARDS, and on board 1 that is the property that made Task 3B cost
+    // nothing below the band: PAGE_TOP is CONTENT_Y + PAGER_H + 4 there too (asserted
+    // in the band block above), so the six group bodies Task 3A derived dropped in
+    // under the new band untouched.
     chk(c.BACK_BTN_W === c.PAGER_BTN_W,
-        `the back key is the pager key's width: ${c.BACK_BTN_W} == ${c.PAGER_BTN_W}`);
-    // ---- ALL FIVE GROUPS START LEVEL UNDER THE BACK BAND ----
+        `the back key is the band key's width: ${c.BACK_BTN_W} == ${c.PAGER_BTN_W}`);
+    // ---- EVERY GROUP'S FIRST CONTENT, WALKED ON BOTH BOARDS ----
     // Actions used to start 4px lower than the other four (P2_TOP 16 against
     // P1_TOP/PS_TOP 12), reproducing settings.js's own inconsistency rather than a
     // decision anybody made - so moving between groups jogged everything down and
-    // back up again. The rule is asserted as an EQUALITY across the five parsed
+    // back up again. The rule is asserted as an EQUALITY across the six parsed
     // tops, never against a literal 116: what matters is that they agree, and this
     // way a perturbation of ANY one of them breaks it. That also closes the gap the
     // note in the Actions block used to describe, where P2_TOP and P2_SETUP_CAP_Y
     // were pure page translations no relative bound could see.
     // Device and Pairing are absolute y's rather than PAGE_TOP + <top> offsets, so
     // they enter as themselves; the equality is over what the draw sites use.
+    //
+    // THE EQUALITY IS BOARD 2's ALONE AND BOARD 1 CANNOT HAVE IT, which is arithmetic
+    // rather than an oversight: board 1's Macs page spends 212 of its 222px on the ANY
+    // row plus four Mac cards, so that group has to open at PAGE_TOP + 2 and a common
+    // top would have to be 2 for all six. Its tops are Device 12 / Display 6 / Sound 6
+    // / Macs 2 / Messages 12 / Danger 12, and board_e32r28t.h records the cause at
+    // P3_ANY_Y. THE WALK ITSELF RUNS ON BOTH, because the two assertions that do not
+    // depend on levelling are exactly the ones that catch a group left out of the
+    // table or a group whose content starts UNDER the band it is supposed to sit below
+    // - and running neither on board 1 is what "an assertion that cannot fail" looks
+    // like from the other side.
     {
-      const firsts = [["Device", c.ST_CONN_Y], ["Display", c.PAGE_TOP + c.P1_TOP],
-                      ["Sound", c.PAGE_TOP + c.PS_TOP], ["Pairing", c.P3_ANY_CAP_Y],
-                      ["Messages", c.PAGE_TOP + c.P4_TOP], ["Danger", c.PAGE_TOP + c.P2_TOP]];
+      const firsts = b === 1
+        ? [["Device", c.ST_CONN_Y], ["Display", c.PAGE_TOP + c.P1_TOP],
+           ["Sound", c.PAGE_TOP + c.PS_TOP], ["Pairing", c.P3_ANY_Y],
+           ["Messages", c.PAGE_TOP + c.P4_TOP], ["Danger", c.PAGE_TOP + c.P2_TOP]]
+        : [["Device", c.ST_CONN_Y], ["Display", c.PAGE_TOP + c.P1_TOP],
+           ["Sound", c.PAGE_TOP + c.PS_TOP], ["Pairing", c.P3_ANY_CAP_Y],
+           ["Messages", c.PAGE_TOP + c.P4_TOP], ["Danger", c.PAGE_TOP + c.P2_TOP]];
       const y0 = firsts[0][1];
       chk(firsts.length === c.SET_GROUP_COUNT,
-          `every group is in the levelling walk: ${firsts.length} tops, SET_GROUP_COUNT ${c.SET_GROUP_COUNT} - a group left out of this list is a group whose top nothing bounds`);
-      chk(firsts.every(([, y]) => y === y0),
-          `all ${firsts.length} groups' first content starts level at ${y0}: ` +
-          firsts.map(([n, y]) => `${n} ${y}`).join(", "));
-      chk(y0 > c.PAGE_TOP,
-          `the groups' first content starts below the back band: ${y0} > PAGE_TOP ${c.PAGE_TOP}`);
+          `every group is in the walk: ${firsts.length} tops, SET_GROUP_COUNT ${c.SET_GROUP_COUNT} - a group left out of this list is a group whose top nothing bounds`);
+      if (b === 2)
+        chk(firsts.every(([, y]) => y === y0),
+            `all ${firsts.length} groups' first content starts level at ${y0}: ` +
+            firsts.map(([n, y]) => `${n} ${y}`).join(", "));
+      else
+        console.log(`  board 1's groups do NOT start level and cannot (see P3_ANY_Y): ` +
+                    firsts.map(([n, y]) => `${n} ${y - c.PAGE_TOP}`).join(", ") + " above PAGE_TOP");
+      for (const [n, y] of firsts)
+        chk(y > c.PAGE_TOP,
+            `${n}'s first content starts below the back band: ${y} > PAGE_TOP ${c.PAGE_TOP}`);
     }
     // THE BACK BAND'S TITLE IS ML_DATUM at BACK_BTN_X0 + BACK_BTN_W + BACK_TITLE_DX
     // and drawn at T_HEAD, so it is measured against the panel's right edge rather
@@ -1460,6 +1697,27 @@ for (const b of [1, 2]) {
       console.log(`  HOME row: text lane ${lane}px, padded summary ${c.HOME_SUB_CHARS} chars = ${subW}px`);
       chk(subW <= lane,
           `HOME's padded summary ${subW}px fits the lane left of the chevron (${lane}px)`);
+      // AND THE ERASE BOX, WHICH IS WIDER THAN THE TEXT AND IS THE BOUND THAT ACTUALLY
+      // BINDS. The rule above divides a lane by an ADVANCE; drawIfChanged clears
+      // fillRect(fx - 1, fy - 1, tw + 2, th + 2) with tw the padded string's REAL
+      // width, whose last glyph is charged xOffset + width rather than the advance -
+      // 7 for a space on board 1's Cozette, and the padding means the last glyph IS a
+      // space. So the cleared box runs one pixel left of the text and two past it.
+      // WHY IT MATTERS MORE THAN A SPILL: the chevron is drawn ONCE, by
+      // drawSettingsHomeStatic(), and the summary repaints on every change - so a box
+      // that reaches the chevron rubs it out and nothing ever draws it again. That is
+      // the confirm-dialog defect ("a note wider than the card RUBS OUT THE CARD
+      // BORDER") arriving on a row instead of a card.
+      // IT HAS TEETH ON BOTH BOARDS AND IT IS THE TIGHTER RULE ON BOTH: board 2's
+      // shipped 30 is the largest cap that passes it (31 - which the lane division
+      // above allows - ends at 279 against ink starting 278), and board 1's 29 is
+      // likewise its largest (30 ends at 208 against ink at 204).
+      const padded = "M".repeat(c.HOME_SUB_CHARS - 1) + " ";
+      const eraseR = (c.CARD_X + c.PAD) + widthB(b, T_META, padded) + 1;
+      const chevInkL = (c.CARD_X + c.CARD_W - c.PAD) - widthB(b, T_HEAD, ">");
+      chk(eraseR < chevInkL,
+          `HOME's summary erase box ends ${eraseR}, clear of the chevron's ink at ${chevInkL} ` +
+          `(${chevInkL - eraseR - 1}px of background between them)`);
       for (const t of GROUP_TITLES)
         chk(widthB(b, T_HEAD, t) <= lane, `HOME row name "${t}" ${widthB(b, T_HEAD, t)}px fits the ${lane}px lane`);
       // The cache is what drawIfChanged COMPARES, so it has to hold the padded
@@ -1473,9 +1731,23 @@ for (const b of [1, 2]) {
       // Every summary this device can COMPOSE, at its own worst case, measured
       // against the pad it is truncated to. A summary longer than the pad is not a
       // spill - it is a silent truncation mid-word, which reads as a wrong reading.
-      for (const t of HOME_SUMMARIES)
+      for (const t of HOME_SUMMARIES_B[b])
         chk(t.length <= c.HOME_SUB_CHARS,
             `HOME summary "${t}" is ${t.length} of the ${c.HOME_SUB_CHARS} characters the row pads to`);
+      // AND THE GUARD ITSELF, parsed from settingsHomeSummary()'s own body. The table
+      // above is TRANSCRIBED, so nothing in it can notice the temperature arriving on
+      // board 1 (or leaving board 2): the strings would simply be measured against a
+      // cap they still fit, and the row would promise a fact its page does not have.
+      // Bound to the function body, since `#if !BOARD_USES_TFT_ESPI` appears three
+      // times in this file and a file-wide test would bind to whichever came first.
+      {
+        const sum = fnSrc(SETTINGS_INO, "void settingsHomeSummary");
+        chk(sum.length > 0, "settingsHomeSummary parses - an empty body would satisfy the rule below vacuously");
+        chk(/#if !BOARD_USES_TFT_ESPI\n[\s\S]*?dieTempRead[\s\S]*?\n#else\n\s*snprintf\(buf, n, "%s   %s", links, pctS\);\n#endif/.test(sum),
+            "the Device summary's die-temperature arm is behind the SAME flag dieTempRead() carries and the OTHER arm composes without it, so board 1's row cannot promise a reading that board has no sensor for");
+        chk((sum.match(/dieTempRead/g) || []).length === 1,
+            "settingsHomeSummary reads dieTempRead exactly once, inside that arm - a second call outside it would compile on board 2 and fail to compile on board 1");
+      }
     }
   }
 
@@ -5414,7 +5686,12 @@ if (SELFTEST) {
   // non-zero total and pass.
   const WANT = [
     ["the moved keyboard meta row", /^meta row ends \d+ before the first text line/],
-    ["the raised HOME row height", /^HOME's \d+ rows land exactly on contentBottom/],
+    ["board 2's raised HOME row height", /^board 2: HOME's \d+ rows land exactly on contentBottom/],
+    // BOARD 1's IS A SEPARATE ENTRY, not the same one firing twice - see the note at
+    // the assertion. Each board derives HOME's pitch from its OWN header and board 1's
+    // is the tighter of the two (a 268px region against 414), so the two prove
+    // different arithmetic even though the assertion reads the same.
+    ["board 1's raised HOME row height", /^board 1: HOME's \d+ rows land exactly on contentBottom/],
     ["the pairing countdown moved onto the label",
      /^pairing panel: the Mac's label ends \d+, clear of the countdown/],
     ["the widened pairing button",
