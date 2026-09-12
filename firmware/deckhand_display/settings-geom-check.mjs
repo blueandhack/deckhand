@@ -88,6 +88,46 @@ const SOURCE_FAULTS = [
   ["the notch fill starts at the bubble's top rather than the later of the two",
     "keyboard.ino", (t) => t.replace(/(ny\s*=\s*)by > notchY \? by : notchY/, "$1by"),
     "starts at the LATER of the bubble's top and the notch row"],
+  // ---- Task 3A: board 1 joins the six group bodies ----
+  // FIVE SOURCE FAULTS, because everything Task 3A added on board 1's side is a
+  // SOURCE claim that perturbing a constant cannot reach: which table the pager
+  // names a group from, where its ring is based, and whether CALIBRATE TOUCH's
+  // button and its tap target are behind the SAME flag.
+  //
+  // The pager grows a titles[] of its own again. That was the state before this
+  // task - two records of one group set, and a rename that reaches one of them -
+  // and it is invisible to every geometry assertion, because a hard-coded string
+  // of the same width measures identically.
+  ["drawPager draws a hard-coded title instead of settingsGroupTitle()",
+    "settings.ino", (t) => t.replace(/drawString\(settingsGroupTitle\(settingsPage\), tft\.width\(\) \/ 2, cy - 5\)/,
+                                    'drawString("Device", tft.width() / 2, cy - 5)'),
+    "carries no titles[] of its own"],
+  // The ring goes back to base 0. Every group is then one id low: SET_MESSAGES's
+  // surface is reached at 4, SETTINGS_PAGE_MESSAGES still points at 5, and the
+  // first page is SET_HOME - a surface this board does not draw. No geometry moves.
+  ["gotoSettingsPage bases its ring at 0 again, so every group is one id low",
+    "settings.ino", (t) => t.replace(/settingsPage = SET_DEVICE \+\n                 \(\(p - SET_DEVICE\)/,
+                                    "settingsPage = 0 +\n                 ((p - 0)"),
+    "bases its ring at SET_DEVICE"],
+  // The dot walk is indexed by the id rather than by the slot, so the filled dot is
+  // one place right of the page you are on - and off the end on the last group.
+  ["drawPager fills the dot for settingsPage rather than for its slot",
+    "settings.ino", (t) => t.replace(/if \(i == slot\) tft\.fillSmoothCircle/, "if (i == settingsPage) tft.fillSmoothCircle"),
+    "fills the dot for `slot`"],
+  // CALIBRATE TOUCH's hit test survives its button. This is the P2_MIC_Y defect
+  // exactly: the band is still claimed, the button is not drawn, and every
+  // arithmetic assertion on the page still passes because the constants are all
+  // still there.
+  ["CALIBRATE TOUCH is no longer drawn, but its hit test still claims the band",
+    "settings.ino", (t) => t.replace(/  uiButton\(CARD_X, DEV_CAL_Y, CARD_W, H_BTN, "CALIBRATE TOUCH", COLOR_ACCENT\);\n/, ""),
+    "exactly one button and it is CALIBRATE TOUCH"],
+  // And the converse: the tested band widens off the drawn one. The button is still
+  // drawn at DEV_CAL_Y and is still H_BTN tall, so nothing about the PAGE changes -
+  // only the strip of background under it starts raising a confirm dialog.
+  ["the SET_DEVICE hit test claims a taller band than the button it is for",
+    "settings.ino", (t) => t.replace(/sy < DEV_CAL_Y \+ H_BTN\) \{\n      pendingConfirm = CFM_RECAL/,
+                                    "sy < DEV_CAL_Y + H_BTN + 20) {\n      pendingConfirm = CFM_RECAL"),
+    "the tested band is exactly DEV_CAL_Y..+H_BTN"],
   // ---- Task 11: one surface, one state, one draft ----
   // Each of these four LOCATES ITS TARGET STRUCTURALLY - by the function's own
   // signature or by the expression it perturbs - and not by a transcribed line.
@@ -142,6 +182,7 @@ if (SOURCE_FAULT_INDEX >= 0) {
 preflight();
 
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
+const SETTINGS_INO_EARLY = readSource(`settings.ino`);
 // The board header FIRST, then deckhand_display.ino seeded with it - the order the
 // compiler sees, and what makes the derived P1_/P2_/P3_/CFM_ offsets resolve.
 const B = {}, CMP = {};
@@ -160,6 +201,24 @@ const SET_CACHE = cacheSizes("deckhand_display.ino");   // the settings caches l
 // it beside the device name, so it is a term in a character budget - and a
 // transcribed "ES3C35P" would go on measuring the old string after a rename, which
 // is the drift every table in this file is written to avoid.
+// THE PER-BOARD CONTENT FLAGS, PARSED OUT OF THE HEADERS THEMSELVES. Every one of
+// them is a #define rather than a const int, because `#if` on a C++ const int is
+// silently false with no -Wall warning - so consts() cannot see them and they have
+// to be read as text. A THROW rather than a chk when one is missing: if a flag is
+// renamed the fix is to move this parse with it, not to leave every assertion below
+// branching on `undefined` and quietly taking the wrong arm.
+const BFLAG = Object.fromEntries([1, 2].map((b) => {
+  const src = readSource(HDR[b]);
+  const one = (n) => {
+    const m = src.match(new RegExp(`^#define ${n}\\s+(\\d+)`, "m"));
+    if (!m) throw new Error(`settings-geom-check: ${HDR[b]} declares no #define ${n} - ` +
+      "the assertions below branch on it, so a missing flag would silently take one board's arm on both");
+    return +m[1];
+  };
+  return [b, { GROUPS: one("BOARD_SETTINGS_GROUPS"), HOME: one("BOARD_SETTINGS_HOME"),
+               CAPTIONS: one("BOARD_SETTINGS_CAPTIONS"), DIAG: one("BOARD_DEVICE_DIAGNOSTICS"),
+               CAL: one("BOARD_TOUCH_NEEDS_CAL"), TFT: one("BOARD_USES_TFT_ESPI") }];
+}));
 const BOARD_NAME = Object.fromEntries([1, 2].map((b) => {
   const m = readSource(HDR[b]).match(/#define BOARD_NAME "([^"]+)"/);
   if (!m) throw new Error(`settings-geom-check: BOARD_NAME not found in ${HDR[b]}`);
@@ -329,7 +388,7 @@ const ACT_GAP = (() => {
 // as everywhere else in this repo, arriving from a new direction: a checker must
 // PARSE THE SITE IT CERTIFIES, the way sessions-geom-check.mjs parses the TYPE chip's
 // hit-test slack term out of sessions.ino instead of restating a 24.
-const SETTINGS_INO = readSource(`settings.ino`);
+const SETTINGS_INO = SETTINGS_INO_EARLY;
 const SPINE_ARGS = (() => {
   const src = SETTINGS_INO.replace(/^[ \t]*\/\/.*$/gm, "");   // a commented-out call is not a call
   const i = src.indexOf("void drawSeverityAction(");
@@ -736,14 +795,28 @@ const HIST_ARENA = +readSource(`deckhand_display.ino`)
 
 // The real strings, so a label that outgrows its lane fails here rather than on
 // the glass. Kept as data next to the assertions that use them.
-const PAGER_TITLES = ["STATUS", "DISPLAY & SOUND", "ACTIONS", "PAIRED MACS"];
+// THE GROUP NAMES, PARSED OUT OF settingsGroupTitle()'S OWN BODY rather than
+// transcribed. There were TWO tables until this task - that function's, and board
+// 1's drawPager() `titles[]` of five UPPERCASE strings - which is two records of one
+// group set and two things to forget when a group is renamed. The pager reads the
+// function now, so this parse is what the pager's lane, the back band's lane and
+// HOME's row lane are all measured against. A THROW if it stops parsing.
+const GROUP_TITLES = (() => {
+  const src = fnSrc(SETTINGS_INO_EARLY, "const char* settingsGroupTitle");
+  if (!src.length) throw new Error("settings-geom-check: settingsGroupTitle() not found in " +
+    "settings.ino - every surface that names a group measures its lane against that table, " +
+    "so move this parse with it rather than leaving the widths asserted against nothing");
+  const out = [...src.matchAll(/return "([^"]+)";/g)].map(m => m[1]);
+  if (out.length < 2) throw new Error("settings-geom-check: settingsGroupTitle() returned " +
+    `${out.length} parsed name(s) - the table is what the lane assertions measure`);
+  return out;
+})();
 const STEP_LABELS = ["BRIGHTNESS", "SLEEP AFTER", "VOLUME"];
 const TOGGLES = ["SOUND", "MUTED", "FLIPPED", "NORMAL", "DARK", "LIGHT", "AUTO"];
 // BOARD 2's settings tree: the SIX group names (one table serving both the back
 // band's title and HOME's row name - they must be the same word or the screen you
 // tapped into is not the one you tapped on), the labels its split Display and Sound
 // groups draw, and the WORST CASE of each of HOME's six composed summaries.
-const GROUP_TITLES = ["Device", "Display", "Sound", "Pairing", "Messages", "Danger"];
 const THEME_SEGS = ["DARK", "LIGHT", "AUTO"];
 const SOUND_LABELS = ["SOUND ON", "SOUND OFF", "TEST BEEP", "MIC TEST",
                       "SCREEN FLIPPED", "SCREEN NORMAL"];
@@ -1116,6 +1189,39 @@ if (SELFTEST) {
   // closing term itself rather than only on the chain it pins.
   B[2].PAIR_AIR_LEFT += 1;
   console.log("--selftest: board 2's pairing surplus widened by 1; the stack no longer lands on the button row and that identity MUST fail");
+  // ================= AND FOUR ON BOARD 1 =================
+  // EVERY INJECTION ABOVE IS B[2], and until Task 3A that was defensible: board 2
+  // was the only board with group pages. It is not any more - board 1 draws the
+  // same six bodies - so a board-1-only regression would have passed a GREEN
+  // selftest, which is the state this file's own rules call a defect. Four faults,
+  // one per page this task rebuilt, each the smallest change that page admits.
+  //
+  // DEVICE. One pixel on the surplus that closes the stack, and on this board the
+  // stack ends on CALIBRATE TOUCH with DEV_AIR_BOT of 1 - the tightest closing term
+  // on either board. Nothing else can see it: the button is still a touch target,
+  // still inside the page, and still one caption step under SETUP.
+  B[1].DEV_AIR_BOT += 1;
+  console.log("--selftest: board 1's DEVICE surplus widened by 1; the CALIBRATE TOUCH stack no longer lands on contentBottom and that identity MUST fail");
+  // DISPLAY. One pixel on ITS closing term. This page has no caption and no hint,
+  // so P1_TOP, P1_GAP and the two top-gaps are pure translations that nothing
+  // relative to the page can see - the closing identity is the only thing that
+  // gives any of them teeth, and it is board 1's alone.
+  B[1].P1_AIR_BOT += 1;
+  console.log("--selftest: board 1's DISPLAY surplus widened by 1; the flip toggle no longer closes the page and that identity MUST fail");
+  // SOUND. Two pixels on the gap between the VOLUME card and TEST BEEP, which moves
+  // the DRAWN gap off PS_BEEP_GAP while leaving both controls inside the page, both
+  // touch targets and both clear of each other. Only the drawn-gap assertion sees
+  // it - and that assertion is what keeps the ONE shared chain line in
+  // deckhand_display.ino describing what each board actually draws.
+  B[1].PS_BEEP_Y += 2;
+  console.log("--selftest: board 1's TEST BEEP nudged 2px down; the drawn VOLUME-to-TEST-BEEP gap MUST stop matching PS_BEEP_GAP");
+  // MACS. One pixel on the row STEP. Four cards at 44 end on 297 with 4 rows to
+  // spare, so +1 puts the fourth card's last row at 301 - still on the panel, still
+  // a touch target, still clear of its neighbour: the only assertion that can see it
+  // is the one that walks all MAX_HOSTS slots against contentBottom, and the
+  // four-Mac case is the case this geometry exists to survive.
+  B[1].P3_ROW_STEP += 2;
+  console.log("--selftest: board 1's Mac row step widened by 2; the fourth card now runs under the footer and the MAX_HOSTS walk MUST fail");
 }
 
 console.log(`\nvoice-confirm panel (lane CARD_W - 8, NOT the keyboard's CARD_W - 12), ` +
@@ -1158,11 +1264,13 @@ for (const b of [1, 2]) {
     if (b === 1) {
       chk(cy + 8 + 3 < c.PAGE_TOP, `page dots end ${cy + 11} inside the band cleared to ${c.PAGE_TOP}`);
       const laneL = c.PAGER_BTN_X0 + c.PAGER_BTN_W, laneR = W - c.PAGER_BTN_X0 - c.PAGER_BTN_W;
-      for (const t of PAGER_TITLES) {
-        // widthB, not textWidth: the pager title lane is the last board-agnostic
-        // measurement in this file. "DISPLAY & SOUND" is 90px at Cozette's 6px
-        // advance and 120px at Spleen's 8 - it still fits board 2's 184px lane, but
-        // the header comment claiming 90px there has been corrected too.
+      // THE PAGER'S TITLES ARE settingsGroupTitle()'S NOW, parsed rather than
+      // transcribed - board 1 pages through the SAME six groups board 2 lists, so
+      // there is one table and one place a rename has to reach. The strings this
+      // measures are therefore the ones the back band and HOME's rows measure too.
+      for (const t of GROUP_TITLES) {
+        // widthB, not textWidth: the pager draws at T_META (setUIFont(1)), so the
+        // lane is measured at this board's own 6px advance.
         const w = widthB(b, T_META, t);
         const x0 = Math.floor(W / 2 - w / 2);
         chk(x0 > laneL && x0 + w < laneR, `pager title "${t}" ${w}px spans ${x0}..${x0 + w} inside the keys' lane ${laneL}..${laneR}`);
@@ -1170,8 +1278,13 @@ for (const b of [1, 2]) {
     }
   }
 
-  // ================= SETTINGS: HOME and the back band (board 2 only) =================
-  if (b === 2) {
+  // ================= SETTINGS: the six group ids (BOTH boards) =================
+  // THEY WERE BOARD 2's AND THEY ARE SHARED NOW. Board 1 declares the same run and
+  // its pager walks it, so every claim below is about a fact both boards depend on -
+  // and asserting it on one board only was how a board-1 regression would have
+  // passed a green run. The HOME and back-band blocks that used to be inside this
+  // same `if (b === 2)` stay board 2's, because board 1 has no HOME surface yet.
+  {
     // ---- the six group ids, which are an ORDINAL RANGE and not just names ----
     // Nothing here is geometry, and that is exactly why it was uncovered: the sweep
     // reported all seven of these as constants the branch ADDED and no assertion
@@ -1231,6 +1344,36 @@ for (const b of [1, 2]) {
             "openSettingsGroup clamps into SET_DEVICE..SET_DANGER, the same run HOME draws");
       }
     }
+    // ---- BOARD 1's NAVIGATION READS THE SAME RUN ----
+    // The pager's ring, its dot count and its title all come from SET_GROUP_COUNT
+    // and SET_DEVICE now rather than from an 0..4 ordinal of its own. Bound to the
+    // FUNCTION BODIES, because a neighbouring line can satisfy a file-wide regex:
+    // gotoSettingsPage's own body has to base the ring at SET_DEVICE, and
+    // drawPager's own body has to convert settingsPage into a slot the same way.
+    if (BFLAG[b].HOME === 0) {
+      chk(c.SETTINGS_PAGES === c.SET_GROUP_COUNT,
+          `board ${b}: SETTINGS_PAGES ${c.SETTINGS_PAGES} == SET_GROUP_COUNT ${c.SET_GROUP_COUNT} - the pager walks the group set, not a count of its own`);
+      const goto_ = fnSrc(SETTINGS_INO, "void gotoSettingsPage");
+      chk(goto_.length > 0, "the pager's ring parses out of gotoSettingsPage's own body - an empty body would satisfy the rule below vacuously");
+      chk(/settingsPage = SET_DEVICE \+/.test(goto_) && /% SETTINGS_PAGES/.test(goto_),
+          "gotoSettingsPage bases its ring at SET_DEVICE and wraps on SETTINGS_PAGES - a ring based at 0 would land on SET_HOME, a surface this board does not draw");
+      const pager = fnSrc(SETTINGS_INO, "void drawPager");
+      chk(pager.length > 0, "drawPager parses - an empty body would satisfy the three rules below vacuously");
+      chk(/const int slot = settingsPage - SET_DEVICE;/.test(pager),
+          "drawPager converts settingsPage into a slot ONCE, at SET_DEVICE - the dots and the title would otherwise each carry their own offset");
+      chk(/drawString\(settingsGroupTitle\(settingsPage\)/.test(pager) && !/titles\[/.test(pager),
+          "drawPager draws settingsGroupTitle(settingsPage) and carries no titles[] of its own - one table for every surface that names a group");
+      chk(/if \(i == slot\)/.test(pager),
+          "drawPager fills the dot for `slot`, not for settingsPage - an id-indexed dot would light the wrong one on every page");
+      // AND THE ENTRY POINT. settingsPage's declared initial value is SET_HOME, which
+      // this board cannot draw, so drawSettingsTab has to move off it - the `else`
+      // arm must name SET_DEVICE rather than the 0 it used to set.
+      const tab = fnSrc(SETTINGS_INO, "void drawSettingsTab");
+      chk(tab.length > 0 && /settingsPage = SET_DEVICE;/.test(tab),
+          "drawSettingsTab enters at SET_DEVICE on this board - entering at 0 would draw a pager over SET_HOME, a page nothing paints");
+    }
+  }
+  if (b === 2) {
     // HOME's pitch is derived to land exactly on contentBottom(). Asserting the
     // IDENTITY rather than the number is what makes a row-height change fail here
     // instead of silently eating the bottom row. The row COUNT is SET_GROUP_COUNT,
@@ -1337,8 +1480,14 @@ for (const b of [1, 2]) {
     }
   }
 
-  // ================= SETTINGS page 0: the DEVICE card (board 1) =================
-  // BOARD 1 KEEPS THIS PAGE. Board 2's STATUS group replaced the DEVICE and LINK
+  // ============ SETTINGS: the PRE-3A page 0 DEVICE card (board 1) ============
+  // BOARD 1 NO LONGER DRAWS THIS PAGE. Task 3A put the six group bodies behind
+  // BOARD_SETTINGS_GROUPS and set it on both boards, so drawStatusPageStatic() and
+  // renderStatusPage() are dead code and everything below measures them. It is kept
+  // for exactly one task: Task 4 deletes the dead arms and these constants together,
+  // and this block goes with them - deleting the assertions first would leave the
+  // constants unread while the text that uses them is still in the tree.
+  // BOARD 1 KEEPS THESE CONSTANTS. Board 2's DEVICE group replaced the DEVICE and LINK
   // cards with three of its own and moved the per-Mac rows to Pairing, so it
   // declares none of DEV_CARD_*, DROW_*, CONN_TEXT_* or MAC_ROW_W any more -
   // running this arm there would compare against undefined and report NaN, which
@@ -1419,9 +1568,11 @@ for (const b of [1, 2]) {
       chk(c.DROW_BATT_VAL_DY === battDyForBaseline,
           `DROW_BATT_VAL_DY ${c.DROW_BATT_VAL_DY} puts the reading on the "Battery" label's own baseline ` +
           `(needs ${battDyForBaseline} = ascent ${ascentB(b, T_BODY)} - ${ascentB(b, T_META)})`);
-      // BATT_ROW_CACHE, the BOARD's constant - not the parsed array size, which now
-      // reads through a per-board name and would report one board's value for both.
-      chk(c.BATT_ROW_CACHE >= 16, `BATT_ROW_CACHE ${c.BATT_ROW_CACHE} holds 15 chars + NUL`);
+      // BATT_ROW_CACHE IS NOT BOUNDED HERE ANY MORE. It was measured against the
+      // 15-character "100% 4.20V ~99h" this dead page drew; the live DEVICE group
+      // gives the runtime estimate a line of its own, so the field the cache now
+      // holds is ST_BIG_CHARS wide and it is bounded in the DEVICE group block
+      // against the header's own constant, on both boards.
       // The trailing-label buffer, on BOTH boards: board 1 needs only the discharge
       // label, whose widest is "~119m".
       chk(c.BATT_LEFT_BYTES >= 6, `BATT_LEFT_BYTES ${c.BATT_LEFT_BYTES} holds "~119m" + NUL (6)`);
@@ -1576,12 +1727,18 @@ for (const b of [1, 2]) {
           `Messages: row "${t}" says what the option MEANS, not just what it is called - a bare "NEXT" tells the person tapping nothing`);
   }
 
-  // ================= SETTINGS: the DEVICE group (board 2) =================
-  // TWO CARDS AND SIX DIAGNOSTIC LINES, asserted as CLEAR BOXES
-  // rather than glyphs. Every value here goes through drawIfChanged, whose erase
-  // rect is one row taller than the cell at each end - which is why the printed
-  // gaps are not the differences between the ST_*/DEV_* constants.
-  if (b === 2) {
+  // ================= SETTINGS: the DEVICE group (BOTH boards) =================
+  // TWO LIVE CARDS ON BOTH BOARDS, and then what each board has room for: six
+  // DIAGNOSTIC lines on board 2, CALIBRATE TOUCH under a SETUP caption on board 1.
+  // Asserted as CLEAR BOXES rather than glyphs - every value here goes through
+  // drawIfChanged, whose erase rect is one row taller than the cell at each end,
+  // which is why the printed gaps are not the differences between the constants.
+  //
+  // THE TWO TAILS ARE GATED ON THE HEADERS' OWN FLAGS, parsed rather than on
+  // `b === 1`: BOARD_DEVICE_DIAGNOSTICS is what the draw site, the definition, the
+  // cache and its reset are all guarded on, so a flag flipped in a header without
+  // the constants following it fails here by name.
+  {
     const stCards = [["CONNECTION", c.ST_CONN_Y, c.ST_CONN_H],
                      ["POWER", c.ST_PWR_Y, c.ST_PWR_H]];
     // The diagnostics block's last line, as INK and as the box drawIfChanged really
@@ -1589,10 +1746,11 @@ for (const b of [1, 2]) {
     const diagLast  = c.DEV_DIAG_Y + (c.DEV_DIAG_LINES - 1) * c.DEV_DIAG_STEP;
     const diagEnd   = diagLast + lineHB(b, T_META) - 1;
     const diagPaint = fieldBox(b, T_META, diagLast)[1];
-    console.log(`  Device: ${stCards.map(x => `${x[0]} ${x[1]}..${x[1] + x[2] - 1}`).join(", ")}, ` +
-                `DIAGNOSTICS cap ${c.DEV_DIAG_CAP_Y}, ${c.DEV_DIAG_LINES} lines ` +
-                `${c.DEV_DIAG_Y}..${diagEnd} step ${c.DEV_DIAG_STEP} (boxes to ${diagPaint}), ` +
-                `surplus ${c.DEV_AIR_BOT}`);
+    console.log(`  Device: ${stCards.map(x => `${x[0]} ${x[1]}..${x[1] + x[2] - 1}`).join(", ")}` +
+                (BFLAG[b].DIAG ? `, DIAGNOSTICS cap ${c.DEV_DIAG_CAP_Y}, ${c.DEV_DIAG_LINES} lines ` +
+                                 `${c.DEV_DIAG_Y}..${diagEnd} step ${c.DEV_DIAG_STEP} (boxes to ${diagPaint})`
+                               : ", no DIAGNOSTICS block (there is a serial console on this board)") +
+                `, surplus ${c.DEV_AIR_BOT}`);
     chk(stCards[0][1] >= c.PAGE_TOP,
         `Device: the first card starts ${stCards[0][1]}, at or below PAGE_TOP ${c.PAGE_TOP}`);
     for (let i = 1; i < stCards.length; i++)
@@ -1660,21 +1818,42 @@ for (const b of [1, 2]) {
     // extrapolates through the CV knee) are never rendered as one another, so the
     // labels are what set the width.
     {
+      // THE CHARGING HALF IS BOARD 2's ONLY, and the flag is the same one power.ino
+      // scopes the estimator with. battChargeLabel() and battChargeMinutesToFull()
+      // are inside `#if !BOARD_USES_TFT_ESPI` there, so board 1's POWER card cannot
+      // draw ">=119m" or "topping up" at all and its line reads "charging". Measuring
+      // board 1 against strings its binary cannot produce would size a buffer for a
+      // case that does not exist - the "assert what is drawn" rule, from the other
+      // side. BOARD_USES_TFT_ESPI is parsed from the header, not assumed from `b`.
+      const chargeHere = BFLAG[b].TFT === 0;
       const dis = ["~119m", "~99h"], chg = ["topping up", ">=119m", ">=99h"];
+      const cases = chargeHere ? [...dis, ...chg] : dis;
       const estWorst = Math.max(...dis.map(l => `${l} left on battery`.length),
-                                ...chg.map(l => l[0] === ">" ? `charging, ${l} to full`.length
-                                                             : `charging, ${l}`.length));
+                                ...(chargeHere ? chg.map(l => l[0] === ">" ? `charging, ${l} to full`.length
+                                                                           : `charging, ${l}`.length)
+                                               : ["charging".length]));
       chk(c.ST_LINE_CHARS >= estWorst,
-          `ST_LINE_CHARS ${c.ST_LINE_CHARS} holds the widest runtime estimate (${estWorst} chars)`);
-      const labelWorst = [...dis, ...chg].reduce((a, l) => l.length > a.length ? l : a, "");
+          `Device: ST_LINE_CHARS ${c.ST_LINE_CHARS} holds the widest runtime estimate (${estWorst} chars)`);
+      const labelWorst = cases.reduce((a, l) => l.length > a.length ? l : a, "");
       chk(c.BATT_LEFT_BYTES >= labelWorst.length + 1,
-          `BATT_LEFT_BYTES ${c.BATT_LEFT_BYTES} holds "${labelWorst}" + NUL (${labelWorst.length + 1})`);
+          `Device: BATT_LEFT_BYTES ${c.BATT_LEFT_BYTES} holds "${labelWorst}" + NUL (${labelWorst.length + 1})`);
+      // AND ON THE BOARD THAT CANNOT DRAW THEM, IT MUST NOT BE SIZED AS IF IT
+      // COULD. The failure this catches is not a spill, it is a size justified by
+      // nothing: raising this to board 2's 12 "to be safe" would be sizing a buffer
+      // for "topping up", a string this binary has no code to compose - the same
+      // shape as the shared literal 12 that moved board 1's binary at +0 bytes once.
+      // Headroom over the real worst case is fine; room for the OTHER board's worst
+      // case is what is refused.
+      if (!chargeHere)
+        chk(c.BATT_LEFT_BYTES < "topping up".length + 1,
+            `Device: BATT_LEFT_BYTES ${c.BATT_LEFT_BYTES} is not sized for "topping up" (11) - battChargeLabel() is inside power.ino's #if !BOARD_USES_TFT_ESPI and this board cannot compose that string`);
     }
 
-    // ---- DIAGNOSTICS: the block's own chain ----
-    // It is NOT a card: the caption and the four lines sit on COLOR_BG at the same
+    // ---- DIAGNOSTICS: the block's own chain (BOARD_DEVICE_DIAGNOSTICS) ----
+    // It is NOT a card: the caption and the six lines sit on COLOR_BG at the same
     // CARD_X + PAD the cards' text uses, so the lane is the card lane and the right
     // bound is the card's right text edge rather than a border.
+    if (BFLAG[b].DIAG) {
     chk(c.DEV_DIAG_CAP_Y >= c.ST_PWR_Y + c.ST_PWR_H,
         `Device: the DIAGNOSTICS caption at ${c.DEV_DIAG_CAP_Y} is clear of the POWER card (ends ${c.ST_PWR_Y + c.ST_PWR_H - 1})`);
     chk(c.DEV_DIAG_Y - c.DEV_DIAG_CAP_Y === c.SET_CAP_STEP,
@@ -1714,10 +1893,45 @@ for (const b of [1, 2]) {
     // would let the last line's erase rect reach into the footer.
     chk(diagPaint + 1 + c.DEV_AIR_BOT === contentBottom,
         `Device: the stack lands exactly - the ${c.DEV_DIAG_LINES}th diagnostics line's box ends ${diagPaint}, + 1 + named surplus DEV_AIR_BOT ${c.DEV_AIR_BOT} == contentBottom ${contentBottom} (got ${diagPaint + 1 + c.DEV_AIR_BOT})`);
+    }
+    // ---- CALIBRATE TOUCH, and the page's closing term on the board that has it ----
+    // RULING 12: the button is on the DEVICE page, not in the DANGER group, which is
+    // what leaves that group holding exactly the two destructive verbs on BOTH
+    // boards. The gate is BOARD_TOUCH_NEEDS_CAL, parsed - the same flag the draw
+    // site and the hit test carry, so a board that grows a calibration routine gets
+    // the button, the caption, the tap target and these assertions in one move.
+    if (BFLAG[b].CAL) {
+      const capBox = tlBox(b, T_META, c.DEV_CAL_CAP_Y);
+      const btnEnd = c.DEV_CAL_Y + c.H_BTN - 1;
+      console.log(`  Device: SETUP cap ${capBox[0]}..${capBox[1]}, CALIBRATE TOUCH ${c.DEV_CAL_Y}..${btnEnd}, surplus ${c.DEV_AIR_BOT}`);
+      chk(c.DEV_CAL_CAP_Y >= c.ST_PWR_Y + c.ST_PWR_H,
+          `Device: the SETUP caption at ${c.DEV_CAL_CAP_Y} is clear of the POWER card (ends ${c.ST_PWR_Y + c.ST_PWR_H - 1})`);
+      chk(capBox[1] < c.DEV_CAL_Y,
+          `Device: the SETUP caption's own text box ends ${capBox[1]}, clear of CALIBRATE TOUCH at ${c.DEV_CAL_Y}`);
+      chk(c.DEV_CAL_Y - c.DEV_CAL_CAP_Y === c.SET_CAP_STEP,
+          `Device: "SETUP" takes the one caption step: ${c.DEV_CAL_Y - c.DEV_CAL_CAP_Y} == SET_CAP_STEP ${c.SET_CAP_STEP}`);
+      chk(c.H_BTN >= c.TAP_MIN,
+          `Device: CALIBRATE TOUCH is ${c.H_BTN}px tall, at least TAP_MIN ${c.TAP_MIN}`);
+      chk(widthB(b, 2, "CALIBRATE TOUCH") + 2 * c.SP_3 <= c.CARD_W,
+          `Device: "CALIBRATE TOUCH" ${widthB(b, 2, "CALIBRATE TOUCH")}px inside the ${c.CARD_W}px button`);
+      chk(btnEnd + 1 + c.DEV_AIR_BOT === contentBottom,
+          `Device: the stack lands exactly - CALIBRATE TOUCH ends ${btnEnd}, + 1 + named surplus DEV_AIR_BOT ${c.DEV_AIR_BOT} == contentBottom ${contentBottom} (got ${btnEnd + 1 + c.DEV_AIR_BOT})`);
+    } else {
+      // THE ABSENCES, BY NAME - the P2_MIC_Y treatment. runCalibration() on this
+      // board is a stub that prints and returns (the controller is factory-aligned
+      // inside the display IC), so the control cannot work and is not offered: a
+      // constant a draw site no longer uses but a hit test still does is how a page
+      // comes to claim taps for a button it does not draw.
+      for (const [n, why] of [["DEV_CAL_CAP_Y", "there is no SETUP section on this board"],
+                              ["DEV_CAL_Y", "CALIBRATE TOUCH is not offered here - runCalibration() is a stub"],
+                              ["P1_CAL_Y", "CALIBRATE TOUCH was never on the Display group on either board"]])
+        chk(c[n] === undefined, `board ${b} has no ${n}: ${why} (got ${c[n]})`);
+    }
     chk(c.DEV_AIR_BOT >= 0,
         `Device: the surplus is not negative (${c.DEV_AIR_BOT}) - a negative one means the page is over-subscribed and the fix is to displace something, not to shrink a face`);
 
     // ---- the diagnostics lane, and every pair of columns that has to fit in it ----
+    if (BFLAG[b].DIAG) {
     // ONE PADDED FIELD PER LINE, so the width that has to fit is DEV_DIAG_CHARS and
     // not whichever pair happens to be longest today. The cap is DERIVED from the
     // lane in the header; what is asserted here is that the derivation agrees with
@@ -1829,6 +2043,15 @@ for (const b of [1, 2]) {
         chk((r === "") === (i === c.DEV_DIAG_TEMP_LINE),
             `Device DIAGNOSTICS ${n}: line ${i} has ${r === "" ? "no" : "a"} right column, and line ${c.DEV_DIAG_TEMP_LINE} (the coloured one) is the only line that may have none`);
     }
+    } else {
+      // The block's own constants are ABSENT here, not merely unread - the guard is
+      // around the DEFINITION of drawDeviceDiagnostics() as well as its call site,
+      // so an unguarded body would fail to compile rather than draw nothing.
+      for (const n of ["DEV_DIAG_CAP_Y", "DEV_DIAG_Y", "DEV_DIAG_STEP", "DEV_DIAG_LINES",
+                       "DEV_DIAG_TEMP_LINE", "DEV_DIAG_CHARS", "DEV_DIAG_BYTES"])
+        chk(c[n] === undefined,
+            `board ${b} has no ${n}: this board has a serial console, so the DIAGNOSTICS block is not drawn and its constants are not declared (got ${c[n]})`);
+    }
 
     // THE CACHES ARE PARSED FROM THEIR DECLARATIONS, not restated: each must be the
     // header's own *_BYTES for the field it holds, and that constant must hold the
@@ -1853,7 +2076,7 @@ for (const b of [1, 2]) {
       // draw different strings: board 1's row carries the estimate on the same line,
       // board 2's POWER card gives it a line of its own.
       chk(c.BATT_ROW_CACHE >= c.ST_BIG_CHARS + 1,
-          `BATT_ROW_CACHE ${c.BATT_ROW_CACHE} holds the POWER headline's ${c.ST_BIG_CHARS} chars + NUL`);
+          `Device: BATT_ROW_CACHE ${c.BATT_ROW_CACHE} holds the POWER headline's ${c.ST_BIG_CHARS} chars + NUL`);
     }
   }
   // ---- the DEVICE group's DRAW SITES and HIT TEST, bound to their own bodies ----
@@ -1875,12 +2098,55 @@ for (const b of [1, 2]) {
     // a caption or a spine left behind would be chrome for a control that is not
     // there, and a hit test left behind would be a tap that powers the device down
     // from a page with no button on it.
-    chk(!/CANNOT BE UNDONE|drawSeverityAction|uiButton/.test(stat),
-        "Device: nothing destructive is drawn on this page - no CANNOT BE UNDONE caption, no severity spine, no button");
+    chk(!/CANNOT BE UNDONE|drawSeverityAction/.test(stat),
+        "Device: nothing DESTRUCTIVE is drawn on this page - no CANNOT BE UNDONE caption and no severity spine; both destructive verbs are in the Danger group, on both boards");
+    // THE ONE BUTTON THIS PAGE MAY DRAW IS CALIBRATE TOUCH, AND IT IS GUARDED.
+    // RULING 12 put it here rather than in Danger - it rewrites a touch mapping and
+    // keeps the old one if the run fails, so it destroys nothing and a group named
+    // for what cannot be undone was the wrong home for it. Bound to the draw site's
+    // own text: exactly one uiButton in this body, at DEV_CAL_Y, and the guard over
+    // it is the exact flag the hit test carries.
+    {
+      const btns = [...stat.matchAll(/uiButton\(([^;]*?)\);/gs)];
+      chk(btns.length === 1 && /CARD_X, DEV_CAL_Y, CARD_W, H_BTN, "CALIBRATE TOUCH"/.test(btns[0][1]),
+          `Device: the page draws exactly one button and it is CALIBRATE TOUCH at DEV_CAL_Y (found ${btns.length})`);
+      chk(/#if BOARD_TOUCH_NEEDS_CAL\n(?:[^\n]*\n)*?\s*drawGroupCaption\("SETUP", DEV_CAL_CAP_Y\);\n\s*uiButton\(CARD_X, DEV_CAL_Y,/.test(stat),
+          "Device: the SETUP caption and CALIBRATE TOUCH are both inside `#if BOARD_TOUCH_NEEDS_CAL` - the caption heading a button that is not drawn is chrome for a control that is not there");
+      chk(/#if BOARD_DEVICE_DIAGNOSTICS\n\s*drawGroupCaption\("DIAGNOSTICS", DEV_DIAG_CAP_Y\);\n#endif/.test(stat),
+          "Device: the DIAGNOSTICS caption is guarded on BOARD_DEVICE_DIAGNOSTICS, the same flag as the block it heads");
+    }
     chk(!/ST_HOST_Y|drawIfChanged/.test(stat),
         "Device: no live value is drawn on the STATIC side - it would be painted once and never repainted, since the change-only cache would then report it unchanged");
-    chk(touchArm("SET_DEVICE") === "",
-        "Device: handleSettingsTouch has NO SET_DEVICE arm - the page is read-only, so it claims no taps at all rather than carrying an empty branch that invites one back");
+    // THE HIT TEST, AND IT MOVES WITH THE BUTTON. The arm exists in the text and is
+    // WHOLLY behind `#if BOARD_TOUCH_NEEDS_CAL` - not just the test inside it -
+    // because the alternative is an empty branch on the board that draws no button,
+    // which is the invitation this page's own note refuses. touchArm() bounds the
+    // slice to this arm alone, so a rule a neighbouring arm could satisfy is not a
+    // rule; and the arm must claim EXACTLY the band the draw site fills.
+    {
+      const arm = touchArm("SET_DEVICE");
+      chk(arm.length > 0,
+          "Device: handleSettingsTouch has a SET_DEVICE arm - it is the only route to CALIBRATE TOUCH, and an absent arm is a drawn button nothing answers");
+      // ANCHORED ON THE CLOSING PAREN, and that is not pedantry: without it the
+      // regex matched `sy < DEV_CAL_Y + H_BTN + 20` as happily as `sy < DEV_CAL_Y +
+      // H_BTN`, so a band 20px taller than the button - a strip of page background
+      // that raises a confirm dialog - passed. The --selftest source fault below
+      // injects exactly that, and it went UNCAUGHT until this anchor was added.
+      chk(/sy >= DEV_CAL_Y && sy < DEV_CAL_Y \+ H_BTN\)/.test(arm),
+          "Device: the tested band is exactly DEV_CAL_Y..+H_BTN, the same two constants the draw site uses - so the button and its target cannot drift apart");
+      chk(/pendingConfirm = CFM_RECAL/.test(arm),
+          "Device: the tap raises the CFM_RECAL confirm rather than running the calibration outright - 5 taps is a consequence worth stating first");
+      chk(!/CFM_POWER_OFF|CFM_RESET_PAIRING|CFM_FORGET_HOST/.test(arm),
+          "Device: the arm claims NOTHING destructive - it is one band for one non-destructive control");
+      // AND THE ARM AS A WHOLE IS GUARDED, not merely the test inside it. Matched on
+      // the text immediately before the arm's own `} else if`, so an unguarded arm
+      // (which would leave board 2 with an empty branch, and would not compile there
+      // at all since DEV_CAL_Y is absent) fails here by name.
+      const guarded = /#if BOARD_TOUCH_NEEDS_CAL\n(?:[^\n]*\n)*?\s*\} else if \(settingsPage == SET_DEVICE\) \{/
+        .test(SETTINGS_INO.replace(/^[ \t]*\/\/.*$/gm, ""));
+      chk(guarded,
+          "Device: the WHOLE SET_DEVICE touch arm is inside `#if BOARD_TOUCH_NEEDS_CAL` - an empty arm on a read-only page is the branch that invites a control back onto it");
+    }
     // AND THE CONVERSE, which is what stops the assertion above passing because
     // somebody renamed the id: POWER OFF raises its confirm from exactly TWO places
     // in this file - board 1's Actions arm and board 2's Danger arm, one per board -
@@ -1974,24 +2240,56 @@ for (const b of [1, 2]) {
   }
 
 
-  // ================= SETTINGS: the PAIRING group (board 2) =================
-  if (b === 2) {
+  // ================= SETTINGS: the PAIRING group (BOTH boards) =================
+  // ONE IMPLEMENTATION ON BOTH BOARDS NOW. Board 1's list was one-line uiListRows
+  // with a "* " live marker; it draws the same two-line CARDS board 2 does, and it
+  // costs nothing vertically - two 13px lines fit a 40px row where board 2's two
+  // 16px lines need 52, so the pitch is the H_ROW + SP_1 the one-line list already
+  // used. What board 1 does NOT carry is the two section captions: the page spends
+  // 212 of its 222px on the ANY row and four Mac rows, and the captions want 42
+  // more. That is the arithmetic the spec's AMENDMENT used to reject the five-group
+  // set, and it is why they are behind BOARD_SETTINGS_CAPTIONS rather than dropped
+  // silently.
+  {
     const pairEnd = c.P3_LIST_Y + (MAX_HOSTS - 1) * c.P3_ROW_STEP + c.P3_ROW_H - 1;
     console.log(`  Pairing: ANY at ${c.P3_ANY_Y}, ${MAX_HOSTS} Mac cards ${c.P3_LIST_Y}..${pairEnd} of ${contentBottom}`);
-    chk(c.P3_ANY_CAP_Y >= c.PAGE_TOP,
-        `Pairing: the first caption is at ${c.P3_ANY_CAP_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
-    // A caption's own text box must clear the control it heads - the same
-    // constraint the DISPLAY and SOUND groups' captions answer to.
-    chk(c.P3_ANY_CAP_Y + lineHB(b, T_META) - 1 < c.P3_ANY_Y,
-        `Pairing: "ANSWER PROMPTS FROM" ends ${c.P3_ANY_CAP_Y + lineHB(b, T_META) - 1}, clear of the ANY row at ${c.P3_ANY_Y}`);
-    chk(c.P3_LIST_CAP_Y >= c.P3_ANY_Y + c.H_ROW,
-        `Pairing: "PAIRED MACS" at ${c.P3_LIST_CAP_Y}, clear of the ANY row (ends ${c.P3_ANY_Y + c.H_ROW - 1})`);
-    chk(c.P3_LIST_CAP_Y + lineHB(b, T_META) - 1 < c.P3_LIST_Y,
-        `Pairing: "PAIRED MACS" ends ${c.P3_LIST_CAP_Y + lineHB(b, T_META) - 1}, clear of the first card at ${c.P3_LIST_Y}`);
+    const pairCaps = BFLAG[b].CAPTIONS === 1;
+    for (const n of ["P3_ANY_CAP_Y", "P3_LIST_CAP_Y"])
+      chk((c[n] !== undefined) === pairCaps,
+          `board ${b}: ${n} is ${pairCaps ? "declared" : "ABSENT"}, matching BOARD_SETTINGS_CAPTIONS ${BFLAG[b].CAPTIONS} (got ${c[n]})`);
+    if (pairCaps) {
+      chk(c.P3_ANY_CAP_Y >= c.PAGE_TOP,
+          `Pairing: the first caption is at ${c.P3_ANY_CAP_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
+      // A caption's own text box must clear the control it heads - the same
+      // constraint the DISPLAY and SOUND groups' captions answer to.
+      chk(c.P3_ANY_CAP_Y + lineHB(b, T_META) - 1 < c.P3_ANY_Y,
+          `Pairing: "ANSWER PROMPTS FROM" ends ${c.P3_ANY_CAP_Y + lineHB(b, T_META) - 1}, clear of the ANY row at ${c.P3_ANY_Y}`);
+      chk(c.P3_LIST_CAP_Y >= c.P3_ANY_Y + c.H_ROW,
+          `Pairing: "PAIRED MACS" at ${c.P3_LIST_CAP_Y}, clear of the ANY row (ends ${c.P3_ANY_Y + c.H_ROW - 1})`);
+      chk(c.P3_LIST_CAP_Y + lineHB(b, T_META) - 1 < c.P3_LIST_Y,
+          `Pairing: "PAIRED MACS" ends ${c.P3_LIST_CAP_Y + lineHB(b, T_META) - 1}, clear of the first card at ${c.P3_LIST_Y}`);
+    } else {
+      // With no caption over it the ANY row IS the page's first content, so the only
+      // thing bounding it from above is the band - and the list still has to clear it.
+      chk(c.P3_ANY_Y >= c.PAGE_TOP,
+          `Pairing: the ANY row is at ${c.P3_ANY_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
+      chk(c.P3_LIST_Y >= c.P3_ANY_Y + c.H_ROW,
+          `Pairing: the first Mac card at ${c.P3_LIST_Y} is clear of the ANY row (ends ${c.P3_ANY_Y + c.H_ROW - 1})`);
+      // AND P3_EMPTY_HINT_Y IS ABSENT: it positions the empty-list hint one slot
+      // BELOW the PAIR NEW MAC button, and this board has no such button
+      // (BOARD_HAS_WIRELESS_PAIR is 0), so its own arm draws the hint at
+      // P3_LIST_Y + P3_ROW_H / 2. A constant only the other arm reads is P2_MIC_Y.
+      chk(c.P3_EMPTY_HINT_Y === undefined,
+          `board ${b} has no P3_EMPTY_HINT_Y: there is no PAIR NEW MAC button for the hint to sit below (got ${c.P3_EMPTY_HINT_Y})`);
+    }
     chk(pairEnd < contentBottom, `Pairing: ${MAX_HOSTS} Macs end ${pairEnd}, inside the region (${contentBottom})`);
     chk(c.P3_ROW_STEP >= c.P3_ROW_H, `Pairing: rows do not overlap (step ${c.P3_ROW_STEP} >= height ${c.P3_ROW_H})`);
     chk(c.P3_ROW_H >= c.TAP_MIN, `a pairing row is a touch target: ${c.P3_ROW_H} >= TAP_MIN ${c.TAP_MIN}`);
-    chk(c.P3_X_W >= c.TAP_MIN, `the "forget" x zone (${c.P3_X_W}) clears TAP_MIN (${c.TAP_MIN})`);
+    // c.TAP_MIN, THIS BOARD'S OWN - 40 here and 46 there. The constant was once
+    // asserted against the WRONG board's fingertip floor, which is the defect this
+    // page has already paid for, so it is derived from the board rather than from a
+    // number and board 1's 40 is NOT board 2's 46 transcribed down.
+    chk(c.P3_X_W >= c.TAP_MIN, `the "forget" x zone (${c.P3_X_W}) clears this board's own TAP_MIN (${c.TAP_MIN})`);
     // THE ROW'S OWN STACK. The name is a plain drawString (tlBox); the state line
     // goes through drawIfChanged (fieldBox, a row taller at each end).
     {
@@ -2049,6 +2347,8 @@ for (const b of [1, 2]) {
           `pairing row: the "x" ink +${xt}..+${xb} inside the card's border`);
     }
 
+  }
+  if (b === 2) {
     // ============ the WIRELESS-PAIRING panel and its way in ============
     //
     // CONFIRM ON THIS GLASS IS THE SECURITY PROPERTY. The pairing key is committed
@@ -2407,87 +2707,44 @@ for (const b of [1, 2]) {
       chk(x0 + w < hitR, `stepper value "${v}" ends ${x0 + w}, clear of the right hit third (${hitR})`);
     }
   }
-  // ================= SETTINGS page 1: the stepper page and what board 2 split it into ===
-  // BOARD 1 KEEPS THE FOUR-ROW PAGE: three steppers and a row of three third-width
-  // toggles. Board 2 no longer declares P1_VOL_Y, P1_SOUND_Y, P1_SOUND_H, P1_THIRD_W,
-  // P1_FLIP_X or P1_THEME_X at all - VOLUME and SOUND moved to their own group - so
-  // running this arm there would compare against undefined and report NaN, which
-  // LOOKS like a failure and is a parse gap. The two arms are separate assertions,
-  // not one loop with holes in it.
-  if (b === 1) {
-    {
-      const rows = 3 * c.STEPPER_CARD_H + c.P1_SOUND_H;
-      const used = c.P1_TOP + rows + 3 * c.P1_GAP;
-      const below = region - used;
-      console.log(`  page 1: ${rows}px of rows + ${c.P1_TOP} top + 3x${c.P1_GAP} = ${used} of ${region}, ${below} below`);
-      chk(below > 0, `page 1: toggle row ends ${c.P1_SOUND_Y + c.P1_SOUND_H}, ${below}px above the footer (must be > 0, or MUTE/NORMAL/LIGHT read as the status line)`);
-      // THE ASSERTION ABOVE TESTS A RE-DERIVED TOTAL, NOT THE ROWS THE DEVICE ACTUALLY
-      // DRAWS AT, and that is exactly the gap geom-sweep.mjs found: P1_BRIGHT_Y,
-      // P1_SLEEP_Y, P1_VOL_Y and P1_SOUND_Y are the four y's every draw site and hit
-      // test uses, and all four could move 16px with nothing failing, because `used`
-      // is computed from P1_TOP/P1_GAP instead. Same shape as the page-2 chain the
-      // preprocessor-blind parser used to mis-read: a sum that agrees with the layout
-      // only as long as nobody breaks the chain. So the chain itself is pinned, and
-      // the last row's own bottom edge - the thing the message claims - is asserted.
-      const p1Y = [c.P1_BRIGHT_Y, c.P1_SLEEP_Y, c.P1_VOL_Y, c.P1_SOUND_Y];
-      const p1H = [c.STEPPER_CARD_H, c.STEPPER_CARD_H, c.STEPPER_CARD_H, c.P1_SOUND_H];
-      const p1N = ["BRIGHTNESS", "SLEEP AFTER", "VOLUME", "SOUND/FLIP/THEME"];
-      chk(p1Y[0] === c.PAGE_TOP + c.P1_TOP, `page 1: ${p1N[0]} at ${p1Y[0]} == PAGE_TOP + P1_TOP (${c.PAGE_TOP + c.P1_TOP})`);
-      for (let i = 1; i < 4; i++)
-        chk(p1Y[i] === p1Y[i - 1] + p1H[i - 1] + c.P1_GAP,
-            `page 1: ${p1N[i]} at ${p1Y[i]} == ${p1N[i - 1]} (${p1Y[i - 1]}) + ${p1H[i - 1]} + gap ${c.P1_GAP}`);
-      chk(p1Y[3] + p1H[3] <= contentBottom,
-          `page 1: the toggle row's own bottom edge ${p1Y[3] + p1H[3]} is inside the region (${contentBottom})`);
-      chk(c.P1_GAP <= c.P1_SOUND_H, `page 1 gap ${c.P1_GAP} <= its shortest row ${c.P1_SOUND_H} (a wider gap stops reading as one list)`);
-      chk(c.P1_SOUND_H >= c.TAP_MIN, `toggle row ${c.P1_SOUND_H} >= TAP_MIN ${c.TAP_MIN}`);
-      // THE THREE CONTROLS THEMSELVES, measured from the constants the draw sites and
-      // the hit tests actually use (CARD_X / P1_FLIP_X / P1_THEME_X, each P1_THIRD_W
-      // wide - settings.ino lines 263/267/281 and the three touch branches). Only a
-      // locally re-derived `third` was checked before, so all three constants were
-      // unread by any checker: SOUND, FLIPPED and the theme button could have
-      // overlapped each other or run off the card and nothing would have said so.
-      // They are also the touch boundaries - `sx < P1_FLIP_X`, `sx < P1_THEME_X`,
-      // `sx >= P1_THEME_X` - so a control overlapping its neighbour is a tap landing
-      // on the wrong setting, not merely a cosmetic collision.
-      const third = Math.floor((c.CARD_W - 16) / 3);
-      chk(c.P1_THIRD_W === third, `P1_THIRD_W ${c.P1_THIRD_W} == floor((CARD_W - 16) / 3) = ${third}`);
-      const cols = [["SOUND", c.CARD_X], ["FLIP", c.P1_FLIP_X], ["THEME", c.P1_THEME_X]];
-      for (let i = 1; i < cols.length; i++)
-        chk(cols[i][1] >= cols[i - 1][1] + c.P1_THIRD_W,
-            `toggle row: ${cols[i][0]} starts ${cols[i][1]}, clear of ${cols[i - 1][0]} ending ${cols[i - 1][1] + c.P1_THIRD_W - 1}`);
-      chk(cols[2][1] + c.P1_THIRD_W <= c.CARD_X + c.CARD_W,
-          `toggle row: THEME ends ${cols[2][1] + c.P1_THIRD_W - 1}, inside the card's right edge (${c.CARD_X + c.CARD_W - 1})`);
-      chk(c.P1_THIRD_W >= c.TAP_MIN, `toggle ${c.P1_THIRD_W}px wide >= TAP_MIN ${c.TAP_MIN}`);
-      // MEASURED at the board's advance, and against T_TITLE - which is the id
-      // uiButton actually sets, not T_BODY. They alias today on both boards; naming
-      // the real one is what makes the T_TITLE -> T_HEAD migration fail here.
-      for (const t of TOGGLES) chk(widthB(b, 2, t) + 8 <= c.P1_THIRD_W, `toggle label "${t}" ${widthB(b, 2, t)}px inside a ${c.P1_THIRD_W}px third`);
-      // uiButton centres its label with MC_DATUM at y + h/2, and MC_DATUM biases the
-      // box LOW - so a label in an exactly-sized control overflows the bottom before
-      // it overflows the top. Both edges, against the row's own height.
-      {
-        const [t0, t1] = mcBox(b, 2, Math.floor(c.P1_SOUND_H / 2));
-        const bias = Math.floor(lineHB(b, 2) / 2) - Math.floor(ascentB(b, 2) / 2);
-        chk(t0 >= 0 && t1 <= c.P1_SOUND_H - 1,
-            `toggle label box +${t0}..+${t1} inside the ${c.P1_SOUND_H}px row (MC_DATUM biases it ${bias}px low)`);
-      }
-    }
-  } else {
-    // ---------------- board 2: the DISPLAY group ----------------
-    // Two steppers, a caption, three theme segments, the AUTO hint, the flip toggle.
-    // THE BLOCKS ARE LAID OUT AND WALKED, not summed: a re-derived total agrees with
-    // the layout only for as long as nobody breaks the chain, which is the gap
-    // geom-sweep.mjs found in the arm above. Every band here is what the control
-    // actually PAINTS - mcBox for the hint, because uiHint centres on the ASCENT and
-    // so sits low of a symmetric centre by half the descent.
+  // ============ SETTINGS: the DISPLAY and SOUND groups (BOTH boards) ============
+  // BOARD 1's THREE-STEPPER PAGE IS GONE. It was BRIGHTNESS, SLEEP AFTER and VOLUME
+  // plus a row of three third-width toggles (SOUND | FLIPPED | theme) - 208 of 222px
+  // with 14px across five gaps, over-subscribed by its own comment's admission. It
+  // is two groups now, the same two board 2 has, so the block that measured it is
+  // replaced rather than kept beside this one: P1_VOL_Y, P1_SOUND_Y, P1_SOUND_H,
+  // P1_THIRD_W, P1_FLIP_X and P1_THEME_X are not declared on either board any more,
+  // and an arm reading them would report NaN, which LOOKS like a layout failure and
+  // is a parse gap.
+  {
+    // ---------------- the DISPLAY group ----------------
+    // Two steppers, three theme segments and the flip toggle on BOTH boards; board 2
+    // additionally frames the segments with a "THEME" caption above and the AUTO hint
+    // below. THE BLOCKS ARE LAID OUT AND WALKED, not summed: a re-derived total
+    // agrees with the layout only for as long as nobody breaks the chain, which is
+    // the gap geom-sweep.mjs found in the arm this replaced. Every band here is what
+    // the control actually PAINTS - mcBox for the hint, because uiHint centres on the
+    // ASCENT and so sits low of a symmetric centre by half the descent.
+    const caps = BFLAG[b].CAPTIONS === 1;
     const disp = [
       ["BRIGHTNESS", c.P1_BRIGHT_Y, c.P1_BRIGHT_Y + c.STEPPER_CARD_H - 1],
       ["SLEEP AFTER", c.P1_SLEEP_Y, c.P1_SLEEP_Y + c.STEPPER_CARD_H - 1],
-      ["THEME caption", ...tlBox(b, T_META, c.P1_THEME_CAP_Y)],
+      ...(caps ? [["THEME caption", ...tlBox(b, T_META, c.P1_THEME_CAP_Y)]] : []),
       ["theme segments", c.P1_THEME_Y, c.P1_THEME_Y + c.H_ROW - 1],
-      ["AUTO hint", ...mcBox(b, T_META, c.P1_AUTO_HINT_Y)],
+      ...(caps ? [["AUTO hint", ...mcBox(b, T_META, c.P1_AUTO_HINT_Y)]] : []),
       ["flip toggle", c.P1_FLIP_Y, c.P1_FLIP_Y + c.H_ROW - 1],
     ];
+    // THE FRAMING CONSTANTS EXIST EXACTLY WHERE THE FRAMING IS DRAWN, both ways. A
+    // caption y left behind on the board that draws no caption is the P2_MIC_Y
+    // defect; a gap constant left behind is worse, because a later edit can re-derive
+    // the chain through a term that means nothing. Asserted against the header's own
+    // parsed BOARD_SETTINGS_CAPTIONS, so flag and constants cannot disagree.
+    for (const n of ["P1_THEME_CAP_Y", "P1_AUTO_HINT_Y", "P1_THEME_CAP_GAP", "P1_AUTO_HINT_GAP", "P1_FLIP_GAP"])
+      chk((c[n] !== undefined) === caps,
+          `board ${b}: ${n} is ${caps ? "declared" : "ABSENT"}, matching BOARD_SETTINGS_CAPTIONS ${BFLAG[b].CAPTIONS} (got ${c[n]})`);
+    for (const n of ["P1_THEME_TOP_GAP", "P1_FLIP_TOP_GAP", "P1_AIR_BOT"])
+      chk((c[n] !== undefined) === !caps,
+          `board ${b}: ${n} is ${caps ? "ABSENT" : "declared"} - the uncaptioned chain steps from each control's painted bottom, which is a DIFFERENT relation from P1_FLIP_GAP's step off the hint's centre, so it carries a different name (got ${c[n]})`);
     for (const [n, a, z] of disp) console.log(`    Display ${n.padEnd(15)} ${a}..${z}`);
     chk(disp[0][1] === c.PAGE_TOP + c.P1_TOP,
         `Display: BRIGHTNESS at ${disp[0][1]} == PAGE_TOP + P1_TOP (${c.PAGE_TOP + c.P1_TOP})`);
@@ -2497,6 +2754,16 @@ for (const b of [1, 2]) {
     // The Display group's last control must clear the footer.
     const dispEnd = c.P1_FLIP_Y + c.H_ROW - 1;
     chk(dispEnd < contentBottom, `Display's flip toggle clears the footer: ${dispEnd} < ${contentBottom}`);
+    // AND ON THE BOARD WITH NO FRAMING, IT CLOSES ON A NAMED SURPLUS. Without a
+    // closing term P1_TOP, P1_GAP and the two top-gaps are pure translations that no
+    // relative bound can see - the sweep's "unguarded though this checker reads it"
+    // report, and the same shape HOME_Y0_BOT, P4_AIR_BOT and DEV_AIR_BOT already have.
+    if (!caps) {
+      chk(dispEnd + 1 + c.P1_AIR_BOT === contentBottom,
+          `Display: the page lands exactly - the flip toggle ends ${dispEnd}, + 1 + P1_AIR_BOT ${c.P1_AIR_BOT} == contentBottom ${contentBottom} (got ${dispEnd + 1 + c.P1_AIR_BOT})`);
+      chk(c.P1_AIR_BOT > 0,
+          `Display: the trailing air is positive (${c.P1_AIR_BOT}) - a control ending flush on contentBottom reads as joined to the footer, which board 1 shipped once and named P1_TOP's bottom gap to fix`);
+    }
     // The three theme segments fit the card with their gaps, and each is still a
     // touch target - they are also the touch boundaries (the hit test divides by
     // the PITCH), so a segment wider than its share is a tap landing on the wrong
@@ -2510,8 +2777,14 @@ for (const b of [1, 2]) {
     // What the gap actually decides is whether the row lands FLUSH on the card -
     // and it has to, because the flip toggle directly under it is CARD_W wide and a
     // theme row a few pixels short would read as a different, narrower control.
-    chk(segTotal === c.CARD_W,
-        `the theme row is flush with the card: 3x${c.P1_THEME_SEG_W} + 2x${c.P1_THEME_GAP} = ${segTotal} == ${c.CARD_W}`);
+    // BOARD 2's LANE DIVIDES BY THREE AND BOARD 1's DOES NOT: 296 - 2*4 = 288 = 3*96
+    // exactly, where 216 - 2*4 = 208 leaves a remainder of 1. So the rule is not
+    // "flush" but "flush to within a stroke": the flip toggle directly under this row
+    // is CARD_W wide, and a theme row short by more than a border reads as a
+    // different, narrower control. It CAN fail - the remainder is (CARD_W - 2*GAP)
+    // mod 3, which is 2 for several gaps this board might otherwise have chosen.
+    chk(c.CARD_W - segTotal <= c.BORDER_CTRL,
+        `the theme row is flush with the card to within a stroke: 3x${c.P1_THEME_SEG_W} + 2x${c.P1_THEME_GAP} = ${segTotal} of ${c.CARD_W} (${c.CARD_W - segTotal} short, at most BORDER_CTRL ${c.BORDER_CTRL})`);
     // And that the gap exists at all: a filled segment abutting an outlined one
     // with no air between them reads as one control, which is the whole thing three
     // segments are for.
@@ -2529,19 +2802,29 @@ for (const b of [1, 2]) {
           `theme/flip label box +${t0}..+${t1} inside the ${c.H_ROW}px row`);
     }
 
-    // ---------------- board 2: the SOUND group ----------------
+    // ---------------- the SOUND group ----------------
+    // FOUR CONTROLS ON BOTH BOARDS - SOUND toggle, VOLUME stepper, TEST BEEP, MIC
+    // TEST - and on board 2 the two captions and the hint that frame them. Board 1
+    // has 38px of slack across five gaps against the ~55 those three want, so it
+    // carries none of them; see BOARD_SETTINGS_CAPTIONS in its header.
     const snd = [
-      ["ALERTS caption", ...tlBox(b, T_META, c.PS_ALERTS_Y)],
+      ...(caps ? [["ALERTS caption", ...tlBox(b, T_META, c.PS_ALERTS_Y)]] : []),
       ["SOUND toggle", c.PS_SOUND_Y, c.PS_SOUND_Y + c.H_ROW - 1],
-      ["what hint", ...mcBox(b, T_META, c.PS_WHAT_HINT_Y)],
+      ...(caps ? [["what hint", ...mcBox(b, T_META, c.PS_WHAT_HINT_Y)]] : []),
       ["VOLUME stepper", c.PS_VOL_Y, c.PS_VOL_Y + c.STEPPER_CARD_H - 1],
       ["TEST BEEP", c.PS_BEEP_Y, c.PS_BEEP_Y + c.PS_BTN_H - 1],
-      ["MIC caption", ...tlBox(b, T_META, c.PS_MIC_CAP_Y)],
+      ...(caps ? [["MIC caption", ...tlBox(b, T_META, c.PS_MIC_CAP_Y)]] : []),
       ["MIC TEST", c.PS_MIC_Y, c.PS_MIC_Y + c.PS_BTN_H - 1],
     ];
     for (const [n, a, z] of snd) console.log(`    Sound   ${n.padEnd(15)} ${a}..${z}`);
+    for (const n of ["PS_ALERTS_Y", "PS_WHAT_HINT_Y", "PS_MIC_CAP_Y", "PS_HINT_GAP", "PS_MIC_CAP_GAP"])
+      chk((c[n] !== undefined) === caps,
+          `board ${b}: ${n} is ${caps ? "declared" : "ABSENT"}, matching BOARD_SETTINGS_CAPTIONS ${BFLAG[b].CAPTIONS} (got ${c[n]})`);
+    for (const n of ["PS_MIC_GAP", "PS_AIR_BOT"])
+      chk((c[n] !== undefined) === !caps,
+          `board ${b}: ${n} is ${caps ? "ABSENT" : "declared"} - the uncaptioned chain steps TEST BEEP's bottom straight to MIC TEST, where the captioned one steps to a caption (got ${c[n]})`);
     chk(snd[0][1] === c.PAGE_TOP + c.PS_TOP,
-        `Sound: the ALERTS caption at ${snd[0][1]} == PAGE_TOP + PS_TOP (${c.PAGE_TOP + c.PS_TOP})`);
+        `Sound: the first block at ${snd[0][1]} == PAGE_TOP + PS_TOP (${c.PAGE_TOP + c.PS_TOP})`);
     for (let i = 1; i < snd.length; i++)
       chk(snd[i][1] > snd[i - 1][2],
           `Sound: ${snd[i][0]} starts ${snd[i][1]}, clear of ${snd[i - 1][0]} ending ${snd[i - 1][2]}`);
@@ -2549,6 +2832,22 @@ for (const b of [1, 2]) {
     const soundEnd = c.PS_MIC_Y + c.PS_BTN_H - 1;
     chk(soundEnd < contentBottom, `Sound's last button clears the footer: ${soundEnd} < ${contentBottom}`);
     chk(c.PS_BTN_H >= c.TAP_MIN, `Sound's action buttons ${c.PS_BTN_H}px tall >= TAP_MIN ${c.TAP_MIN}`);
+    // THE ONE GAP THE CHAIN SPELLS AS A NAME ON BOTH BOARDS, so the shared line in
+    // deckhand_display.ino is one line rather than two. It was the literal SP_3 there
+    // and board 2's value is still SP_3; board 1 spends 8. Asserted as the DRAWN gap.
+    {
+      const beepGap = c.PS_BEEP_Y - (c.PS_VOL_Y + c.STEPPER_CARD_H);
+      chk(beepGap === c.PS_BEEP_GAP,
+          `Sound: the VOLUME card's bottom to TEST BEEP is ${beepGap}px == PS_BEEP_GAP ${c.PS_BEEP_GAP}`);
+      chk(c.PS_BEEP_GAP > 0,
+          `Sound: TEST BEEP is separated from the VOLUME card (${c.PS_BEEP_GAP}px) - a button abutting a card reads as part of it`);
+    }
+    if (!caps) {
+      chk(soundEnd + 1 + c.PS_AIR_BOT === contentBottom,
+          `Sound: the page lands exactly - MIC TEST ends ${soundEnd}, + 1 + PS_AIR_BOT ${c.PS_AIR_BOT} == contentBottom ${contentBottom} (got ${soundEnd + 1 + c.PS_AIR_BOT})`);
+      chk(c.PS_AIR_BOT > 0,
+          `Sound: the trailing air is positive (${c.PS_AIR_BOT}) - without a closing term PS_TOP and all three gaps are pure translations nothing on this page can see`);
+    }
     // EACH CAPTION'S OWN TEXT BOX MUST CLEAR THE CONTROL IT HEADS. The equality
     // this replaced (`PS_SOUND_Y - PS_ALERTS_Y === SET_CAP_STEP`) was vacuous:
     // both sides are DERIVED in deckhand_display.ino as `<caption> + SET_CAP_STEP`,
@@ -2559,10 +2858,10 @@ for (const b of [1, 2]) {
     // THEME is deliberately NOT here: the Display walk above already asserts its
     // caption's own tlBox clears the segments, and a second copy of one constraint
     // is how a checker's count grows without its coverage doing the same.
-    const capPairs = [
+    const capPairs = caps ? [
       ["ALERTS", c.PS_ALERTS_Y, c.PS_SOUND_Y],
       ["MICROPHONE", c.PS_MIC_CAP_Y, c.PS_MIC_Y],
-    ];
+    ] : [];
     for (const [name, capY, controlY] of capPairs) {
       const capBottom = capY + lineHB(b, T_BODY) - 1;
       chk(capBottom < controlY,
@@ -2577,12 +2876,24 @@ for (const b of [1, 2]) {
     // lists at once is how a step stops being one step. P1_THEME_CAP_STEP was
     // a second name for the same concept and is gone; asserting the identity is
     // what makes re-introducing it fail here rather than merely look inconsistent.
-    for (const [name, capY, controlY] of
-         [["THEME", c.P1_THEME_CAP_Y, c.P1_THEME_Y],
-          ["ALERTS", c.PS_ALERTS_Y, c.PS_SOUND_Y],
-          ["MICROPHONE", c.PS_MIC_CAP_Y, c.PS_MIC_Y],
-          ["DIAGNOSTICS", c.DEV_DIAG_CAP_Y, c.DEV_DIAG_Y],
-          ["CANNOT BE UNDONE", c.P2_DANGER_CAP_Y, c.P2_PAIR_Y]])
+    // ONE STEP FOR EVERY CAPTIONED CONTROL ON THIS BOARD, and the LIST is per board
+    // because the set of captions is. What must not happen is a caption dropping out
+    // of this walk without dropping out of the page - so the walk is built from the
+    // same two flags the draw sites are guarded on, and its LENGTH is asserted: a
+    // board whose captions all vanished from this list would otherwise pass an empty
+    // loop silently.
+    const capSteps = [
+      ...(caps ? [["THEME", c.P1_THEME_CAP_Y, c.P1_THEME_Y],
+                  ["ALERTS", c.PS_ALERTS_Y, c.PS_SOUND_Y],
+                  ["MICROPHONE", c.PS_MIC_CAP_Y, c.PS_MIC_Y]] : []),
+      ...(BFLAG[b].DIAG ? [["DIAGNOSTICS", c.DEV_DIAG_CAP_Y, c.DEV_DIAG_Y]] : []),
+      ...(BFLAG[b].CAL ? [["SETUP", c.DEV_CAL_CAP_Y, c.DEV_CAL_Y]] : []),
+      ["CANNOT BE UNDONE", c.P2_DANGER_CAP_Y, c.P2_PAIR_Y],
+      ["HOW MY MESSAGES LAND", c.P4_CAP_Y, c.P4_ROW_Y],
+    ];
+    chk(capSteps.length === (caps ? 3 : 0) + BFLAG[b].DIAG + BFLAG[b].CAL + 2,
+        `board ${b}: the caption-step walk covers ${capSteps.length} captions - a caption that leaves this list without leaving the page is a step nothing measures`);
+    for (const [name, capY, controlY] of capSteps)
       chk(controlY - capY === c.SET_CAP_STEP,
           `"${name}" takes the one caption step: ${controlY - capY} == SET_CAP_STEP ${c.SET_CAP_STEP}`);
     // Captions are TL_DATUM at CARD_X + PAD; the labels go through uiButton.
@@ -2598,30 +2909,15 @@ for (const b of [1, 2]) {
           `hint "${t}" ${widthB(b, T_META, t)}px inside the ${W}px panel`);
   }
 
-  // ================= SETTINGS page 2: actions =================
-  // BOARD 1 is a single evenly-gapped column of FOUR buttons; BOARD 2's Actions
-  // group is two CAPTIONED sections of three, so the two are checked apart. An
-  // assertion that still RESOLVES on the other board is worse than one that fails
-  // there: the old chain walk (`P2_PAIR_Y === P2_CAL_Y + P2_BTN_H + P2_GAP`) holds
-  // by construction on board 1 and would simply be FALSE on board 2 for a page
-  // that is correct, which is the wrong kind of failure - it measures the formula
-  // rather than the geometry.
-  if (b === 1) {
-    const hintY = c.P2_PWR_Y + c.P2_BTN_H + c.SP_3;
-    const hintEnd = mcBox(b, T_META, hintY)[1];
-    const p2 = [["MIC TEST", c.P2_MIC_Y], ["CALIBRATE", c.P2_CAL_Y],
-                ["RESET PAIRING", c.P2_PAIR_Y], ["POWER OFF", c.P2_PWR_Y]];
-    console.log(`  page 2: ${p2.length} buttons ${p2[0][1]}..${c.P2_PWR_Y + c.P2_BTN_H - 1} (h ${c.P2_BTN_H}), hint inks ..${hintEnd}`);
-    chk(p2[0][1] === c.PAGE_TOP + c.P2_TOP, `page 2: ${p2[0][0]} at ${p2[0][1]} == PAGE_TOP + P2_TOP (${c.PAGE_TOP + c.P2_TOP})`);
-    for (let i = 1; i < p2.length; i++)
-      chk(p2[i][1] === p2[i - 1][1] + c.P2_BTN_H + c.P2_GAP,
-          `page 2: ${p2[i][0]} at ${p2[i][1]} == ${p2[i - 1][0]} (${p2[i - 1][1]}) + ${c.P2_BTN_H} + gap ${c.P2_GAP}`);
-    chk(hintEnd < contentBottom, `page 2 hint ends ${hintEnd} above the footer ${contentBottom}`);
-    {
-      const [t0, t1] = mcBox(b, T_META, hintY);
-      chk(t1 < contentBottom, `page 2 hint box ${t0}..${t1} above the footer ${contentBottom}`);
-    }
-  } else {
+  // ================= SETTINGS: the DANGER group (BOTH boards) =================
+  // BOARD 1's FOUR-BUTTON ACTIONS PAGE IS GONE. It was MIC TEST, CALIBRATE TOUCH,
+  // RESET PAIRING and POWER OFF in one evenly-gapped column at P2_BTN_H 38 - under
+  // that board's own TAP_MIN of 40 - plus a hint. MIC TEST is on the Sound group,
+  // CALIBRATE TOUCH is on the Device group (RULING 12), and what is left on both
+  // boards is one captioned section holding exactly the two controls that destroy
+  // state. So the arm that measured the column is replaced rather than kept beside
+  // this one: P2_MIC_Y, P2_CAL_Y and P2_GAP are declared on neither board now.
+  {
     // ---------------- board 2: the DANGER group ----------------
     // Captions are drawn in T_META, which on this board is the SAME face as T_BODY
     // (Spleen 8x16 - see UI_FONTS), so the two measure identically here. T_META is
@@ -2869,45 +3165,12 @@ for (const b of [1, 2]) {
   for (const l of (b === 1 ? P2_LABELS : P2_LABELS_B2))
     chk(widthB(b, 2, l) + 2 * c.SP_3 <= c.CARD_W, `action label "${l}" ${widthB(b, 2, l)}px inside the ${c.CARD_W}px button`);
 
-  // ================= SETTINGS page 3: paired Macs (board 1) =================
-  // BOARD 1 ONLY. Board 2's Pairing group is two captions and a list of two-line
-  // CARDS at P3_ROW_STEP, so nothing here derives from H_ROW + SP_1 any more - and
-  // an assertion that still RESOLVES on the other board is worse than one that
-  // fails there: at board 2's own P3_LIST_Y the row walk below passes while
-  // measuring a layout that board no longer draws. Board 2's arm is under the
-  // STATUS group above.
-  if (b === 1) {
-      const last = c.P3_LIST_Y + (MAX_HOSTS - 1) * (c.H_ROW + c.SP_1) + c.H_ROW;
-      console.log(`  page 3: ANY at ${c.P3_ANY_Y}, ${MAX_HOSTS} Macs end ${last} of ${contentBottom}`);
-      chk(last <= contentBottom, `page 3: ANY + ${MAX_HOSTS} Macs end ${last} inside the region (${contentBottom})`);
-      chk(c.H_ROW >= c.TAP_MIN, `list row ${c.H_ROW} >= TAP_MIN ${c.TAP_MIN}`);
-      // The ANY MAC row sits above the list and nothing separated the two: only the
-      // list's own end was bounded, so P3_ANY_Y and P3_LIST_Y were both unguarded and
-      // the first Mac row could have been drawn straight over "ANY MAC".
-      chk(c.P3_ANY_Y >= c.PAGE_TOP, `page 3: ANY row at ${c.P3_ANY_Y}, at or below PAGE_TOP ${c.PAGE_TOP}`);
-      chk(c.P3_LIST_Y >= c.P3_ANY_Y + c.H_ROW + c.SP_1,
-          `page 3: list starts ${c.P3_LIST_Y}, clear of the ANY row (${c.P3_ANY_Y}..${c.P3_ANY_Y + c.H_ROW - 1}) plus SP_1`);
-      chk(c.P3_X_W >= 40, `the "forget" x zone is ${c.P3_X_W}px wide`);
-      // uiListRow's LABEL LANE, which nothing measured: the label is drawn at x+SP_3
-      // with NO fitText, and the "ONLY" tag is right-aligned to x+w-rightInset where
-      // drawHostsPageStatic passes P3_X_W + SP_2. hosts[].label is char[20], and the
-      // row prepends "\xB7 ", so the widest row is 21 characters.
-      const rowStr = "\xB7 " + "M".repeat(HOST_LABEL_MAX);
-      const rowW = widthB(b, 2, rowStr);
-      const tagX = c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2) - widthB(b, T_META, "ONLY");
-      chk(c.CARD_X + c.SP_3 + rowW < tagX,
-          `page 3: widest row (${rowStr.length} chars, ${rowW}px) ends ${c.CARD_X + c.SP_3 + rowW}, clear of the ONLY tag at ${tagX}`);
-      // The tag's own right edge against the "x", which is drawn MC at
-      // CARD_X + CARD_W - P3_X_W/2 - that is the overlap rightInset exists to prevent.
-      const xGlyphL = c.CARD_X + c.CARD_W - Math.floor(c.P3_X_W / 2) - Math.floor(widthB(b, 2, "x") / 2);
-      chk(c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2) < xGlyphL,
-          `page 3: ONLY tag ends ${c.CARD_X + c.CARD_W - (c.P3_X_W + c.SP_2)}, clear of the "x" at ${xGlyphL}`);
-      // The row's own label box, MC-biased low like every other centred label.
-      {
-        const [t0, t1] = mcBox(b, 2, Math.floor(c.H_ROW / 2));
-        chk(t0 >= 0 && t1 <= c.H_ROW - 1, `page 3: row label box +${t0}..+${t1} inside the ${c.H_ROW}px row`);
-      }
-  }
+  // THE PRE-3A PAGE 3 BLOCK IS GONE. It measured board 1's one-line uiListRow list
+  // at a pitch of H_ROW + SP_1 with a "* " live marker in the label - a layout no
+  // board draws now that board 1 uses the shared two-line cards. It would still have
+  // PASSED, because every constant it read still exists under the same names with
+  // new values, which is the worst kind of assertion to leave behind: green, and
+  // about nothing. Its claims are covered by the PAIRING block above, on both boards.
 
   // ================= SETTINGS: the confirm dialog =================
   {
@@ -5165,6 +5428,15 @@ if (SELFTEST) {
      /^Danger: the stack lands exactly - the hint's ink ends \d+/],
     ["the nudged POWER OFF button",
      /^Danger: the two buttons are \d+px apart == SP_3/],
+    // ---- the four board-1 faults ----
+    ["board 1's widened DEVICE surplus",
+     /^Device: the stack lands exactly - CALIBRATE TOUCH ends \d+/],
+    ["board 1's widened DISPLAY surplus",
+     /^Display: the page lands exactly - the flip toggle ends \d+/],
+    ["board 1's nudged TEST BEEP",
+     /^Sound: the VOLUME card's bottom to TEST BEEP is \d+px == PS_BEEP_GAP/],
+    ["board 1's widened Mac row step",
+     /^Pairing: \d+ Macs end \d+, inside the region/],
   ];
   let missed = 0;
   for (const [what, re] of WANT) {

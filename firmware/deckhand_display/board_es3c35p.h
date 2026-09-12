@@ -42,7 +42,23 @@
 #define BOARD_HAS_SD         1   // microSD slot on the SDMMC bus; no SD code exists
 #define BOARD_HAS_RGBLED     1   // WS2812 on GPIO40; nothing drives it
 #define BOARD_TOUCH_NEEDS_CAL 0  // capacitive, factory-aligned
-#define BOARD_SETTINGS_HOME  1   // a HOME screen plus five drill-down groups
+// TWO FLAGS, NOT ONE - see board_e32r28t.h for the split and why it was made.
+// BOTH are 1 here, so nothing on this board moves: GROUPS gates the six page
+// BODIES and their geometry chains, HOME gates the HOME list, the back band,
+// drawPager()'s absence and gotoSettingsPage()'s absence.
+#define BOARD_SETTINGS_GROUPS 1  // the six group PAGES
+#define BOARD_SETTINGS_HOME  1   // ...reached from a HOME screen, not a pager
+// THE DIAGNOSTICS BLOCK IS THIS BOARD'S, and the reason is written at its own
+// section below: the four host facts "earn their place on this board specifically
+// because there is no serial console in normal operation here". Board 1 has a
+// CH340 and declares no DEV_DIAG_* at all, so the block's DEFINITION is guarded
+// as well as its call site.
+#define BOARD_DEVICE_DIAGNOSTICS 1
+// The section captions and the hints that frame a control block - Display's
+// "THEME" and AUTO hint, Sound's "ALERTS"/"MICROPHONE" and hint, the Macs group's
+// two. This board has the rows for all six; board 1 has 222px of page against
+// this board's 356 and carries none of them (its header has the arithmetic).
+#define BOARD_SETTINGS_CAPTIONS 1
 // Pairing a Mac without the cable: an ephemeral X25519 exchange plus a 6-digit
 // code derived from the shared secret, so the 128-bit pairing key is NEVER
 // transmitted - both ends derive it. This is an ADDITION: PROVISION over USB is
@@ -2251,6 +2267,13 @@ const int PS_TOP         = 12;   // PAGE_TOP -> the first caption
 const int PS_HINT_GAP    = 11;   // the SOUND toggle's bottom -> the hint's centre
 const int PS_VOL_GAP     = 21;   // hint centre -> the VOLUME card
 const int PS_BTN_H       = H_BTN;   // the two actions; H_BTN is TAP_MIN + 4
+// The VOLUME card's bottom -> TEST BEEP. It WAS the literal SP_3 at the chain in
+// deckhand_display.ino, and it is a name now only so the chain can be ONE line on
+// both boards: board 1 spends 8 here rather than 12, because its page carries the
+// same four controls in 222px against this board's 356. 12 is SP_3, spelled as a
+// literal because SP_1..SP_4 are declared below board.h and no header can name
+// them. The VALUE on this board is unchanged, so nothing here moves.
+const int PS_BEEP_GAP    = 12;
 const int PS_MIC_CAP_GAP = 14;   // TEST BEEP's bottom -> the MICROPHONE caption
 
 // ---------- SETTINGS group: Pairing ----------

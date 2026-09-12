@@ -67,7 +67,14 @@ void drawGroupCaption(const char* text, int y) {
 // The pager band: < chevron, page title + dots, > chevron.
 void drawPager() {
   tft.fillRect(0, CONTENT_Y, tft.width(), PAGER_H + 4, COLOR_BG);
-  const char* titles[SETTINGS_PAGES] = {"STATUS", "DISPLAY & SOUND", "ACTIONS", "PAIRED MACS", "MESSAGES"};
+  // THE RING IS SET_DEVICE..SET_DANGER, NOT 0..SETTINGS_PAGES-1, and `slot` is the
+  // one place that conversion happens. settingsPage is ONE global shared with board
+  // 2, where SET_HOME is 0 and the groups are 1..6 - so a pager numbering its own
+  // pages from 0 would have put MESSAGES at 4 here and 5 there, i.e. two numberings
+  // of one group set, which is exactly what SETTINGS_PAGE_MESSAGES existed to stop.
+  // The ring's BASE is SET_DEVICE because SET_HOME is a surface this board does not
+  // have: there is no row for it and no title for it, so it must not be reachable.
+  const int slot = settingsPage - SET_DEVICE;
   int cy = CONTENT_Y + PAGER_H / 2;
   // Draw the prev/next targets as actual BUTTONS. A bare "<" glyph gave no clue
   // how big the tappable area was, so people aimed at the glyph itself and
@@ -85,10 +92,14 @@ void drawPager() {
   setUIFont(1);
   tft.setTextColor(COLOR_VALUE, COLOR_BG);
   tft.setTextDatum(MC_DATUM);
-  tft.drawString(titles[settingsPage], tft.width() / 2, cy - 5);
+  // settingsGroupTitle(), not a titles[] of its own - one table for every surface
+  // that names a group. The case is the table's ("Device", not "DEVICE"): the two
+  // boards now show the same word in the same case, and a second casing would be a
+  // second thing to keep in step for no reading anybody gains.
+  tft.drawString(settingsGroupTitle(settingsPage), tft.width() / 2, cy - 5);
   int spacing = 12, startX = tft.width() / 2 - (SETTINGS_PAGES - 1) * spacing / 2;
   for (int i = 0; i < SETTINGS_PAGES; i++) {
-    if (i == settingsPage) tft.fillSmoothCircle(startX + i * spacing, cy + 8, 3, COLOR_ACCENT, COLOR_BG);
+    if (i == slot) tft.fillSmoothCircle(startX + i * spacing, cy + 8, 3, COLOR_ACCENT, COLOR_BG);
     else tft.drawSmoothCircle(startX + i * spacing, cy + 8, 3, COLOR_LABEL, COLOR_BG);
   }
   tft.setTextDatum(TL_DATUM);
@@ -114,8 +125,15 @@ void drawBackBand(const char* title) {
   tft.drawString(title, PAGER_BTN_X0 + BACK_BTN_W + BACK_TITLE_DX, CONTENT_Y + PAGER_H / 2);
   tft.setTextDatum(TL_DATUM);
 }
-// ONE table, two uses: the back band's title and HOME's row name. They must be the
-// same word or the screen you tapped into is not the one you tapped on.
+#endif
+// ONE table, THREE uses: board 1's pager title, board 2's back band title, and
+// HOME's row name. They must be the same word or the screen you tapped into is not
+// the one you tapped on - and now that board 1 pages through the SAME six groups,
+// "the same word" has to hold across two boards as well as across two surfaces.
+// MOVED OUT OF THE BOARD_SETTINGS_HOME ARM for that third use: board 1's pager
+// carried its own `titles[]` of five UPPERCASE strings, which was a second record
+// of the group set and a second thing to forget when one is renamed. Its band now
+// draws this, so a rename reaches every surface that names a group.
 const char* settingsGroupTitle(int g) {
   switch (g) {
     case SET_DEVICE:  return "Device";
@@ -133,6 +151,7 @@ const char* settingsGroupTitle(int g) {
     default:          return "Danger";
   }
 }
+#if BOARD_SETTINGS_HOME
 int settingsHomeRowY(int i) { return HOME_Y0 + i * (HOME_ROW_H + HOME_GAP); }
 // HOME owns the whole content area - no band above it, because the tab bar already
 // says SETTINGS and a second title would be chrome repeating itself. The six cards,
@@ -228,7 +247,7 @@ void renderSettingsHome() {
 }
 #endif
 // ----- Page 0 / the DEVICE group -----
-#if BOARD_SETTINGS_HOME
+#if BOARD_SETTINGS_GROUPS
 // TWO CARDS AND FIVE DIAGNOSTIC LINES (board 2). board_es3c35p.h's ST_*/DEV_*
 // section carries the geometry and the reasoning; what matters here is the split of
 // labour. The two facts you came for - is the host talking to me, and how is the
@@ -254,11 +273,31 @@ void drawDevicePageStatic() {
   tft.setTextDatum(TL_DATUM);
   tft.drawString("CONNECTION", CARD_X + PAD, ST_CONN_Y + ST_CAP_DY);
   tft.drawString("POWER",      CARD_X + PAD, ST_PWR_Y  + ST_CAP_DY);
-  // The caption below sits on COLOR_BG, not on a card, so it goes through
-  // drawGroupCaption like every other page caption on this board rather than
-  // through the two drawString calls above.
+  // The captions below sit on COLOR_BG, not on a card, so they go through
+  // drawGroupCaption like every other page caption rather than through the two
+  // drawString calls above.
+  //
+  // THE TWO BOARDS CARRY DIFFERENT THINGS UNDER THE CARDS, and each is guarded on
+  // the flag that names the reason rather than on "which board this is":
+  // BOARD_DEVICE_DIAGNOSTICS is 0 where there is a serial console to read those
+  // facts from, and BOARD_TOUCH_NEEDS_CAL is 0 where runCalibration() is a stub
+  // because the controller is factory-aligned inside the display IC. Only the
+  // fragment that differs is behind each guard - no brace is opened in either.
+#if BOARD_DEVICE_DIAGNOSTICS
   drawGroupCaption("DIAGNOSTICS", DEV_DIAG_CAP_Y);
+#endif
+#if BOARD_TOUCH_NEEDS_CAL
+  // RULING 12: CALIBRATE TOUCH LIVES HERE, not in the DANGER group. It destroys
+  // nothing - it rewrites a touch mapping and keeps the old one if the run fails -
+  // so a group named for what cannot be undone is the wrong place for it, and
+  // moving it out is what leaves DANGER holding exactly two destructive verbs on
+  // BOTH boards. The button and its hit test are under the same one flag, so they
+  // cannot come apart; board 2 declares neither DEV_CAL_CAP_Y nor DEV_CAL_Y at all.
+  drawGroupCaption("SETUP", DEV_CAL_CAP_Y);
+  uiButton(CARD_X, DEV_CAL_Y, CARD_W, H_BTN, "CALIBRATE TOUCH", COLOR_ACCENT);
+#endif
 }
+#if BOARD_DEVICE_DIAGNOSTICS
 // THE TWO COLUMNS OF ONE DIAGNOSTIC LINE, composed into ONE padded string: the
 // left value from the lane's left edge, the right value flush to its right edge,
 // and the space between them filled. One field rather than two, because both faces
@@ -411,6 +450,7 @@ void drawDeviceDiagnostics(int y) {
   drawIfChanged(devDiagCache[5], DEV_DIAG_BYTES, line, x, y + 5 * DEV_DIAG_STEP, T_META, 1,
                 COLOR_VALUE, COLOR_BG);
 }
+#endif  // BOARD_DEVICE_DIAGNOSTICS
 void renderDevicePage() {
   char buf[40];
   const int xLeft  = CARD_X + PAD;
@@ -487,7 +527,18 @@ void renderDevicePage() {
     // placeholder duration.
     char left[BATT_LEFT_BYTES] = "";
     if (bst == BATT_DISCHARGING) battLeftLabel(left, sizeof(left), battMinutesLeft());
+    // THE CHARGE ESTIMATOR IS BOARD 2's, and the guard here is the same flag it
+    // carries in power.ino - not a second opinion about which board this is. It is
+    // board-agnostic arithmetic that has never been verified on board 1, and
+    // power.ino's own note says the scoping is "ordinary unverified work" rather
+    // than something that could not work; bringing it over is a change to the
+    // POWER estimator, not to the SETTINGS redesign, so it is left alone here.
+    // Board 1's card therefore reads "charging" with no duration, which is the
+    // same sentence the empty-label case already produces - a missing estimate,
+    // never a placeholder one. Only the one statement is behind the guard.
+#if !BOARD_USES_TFT_ESPI
     else if (bst == BATT_CHARGING) battChargeLabel(left, sizeof(left), battChargeMinutesToFull());
+#endif
     if (bst == BATT_NONE)                 snprintf(buf, sizeof(buf), "no battery fitted");
     else if (bst == BATT_FULL)            snprintf(buf, sizeof(buf), "battery full");
     else if (bst == BATT_CHARGING) {
@@ -517,7 +568,16 @@ void renderDevicePage() {
   // otherwise unanswerable from the device itself. Host LIVENESS is not among them
   // - it leads the CONNECTION card above, which is where it belongs and where it
   // stopped being a fifth diagnostic among equals.
+  //
+  // BOARD 1 DRAWS NO BLOCK AND DECLARES NONE OF ITS CONSTANTS, which is why the
+  // guard is around the DEFINITION above as well as around this call: a guarded
+  // call with an unguarded body would not merely draw nothing there, it would fail
+  // to compile on DEV_DIAG_Y. See BOARD_DEVICE_DIAGNOSTICS in board_e32r28t.h for
+  // the reason - that board has a CH340 console and these facts are a `screen`
+  // away, where this one has none in normal operation.
+#if BOARD_DEVICE_DIAGNOSTICS
   drawDeviceDiagnostics(DEV_DIAG_Y);
+#endif
 }
 #else
 // BOARD 1's STATUS page, unchanged: the DEVICE card, its connection rows and the
@@ -687,7 +747,7 @@ void renderMacLinkRows() {
 }
 #endif
 // ----- Page 1: CONTROLS -----
-#if !BOARD_SETTINGS_HOME
+#if !BOARD_SETTINGS_GROUPS
 void drawControlsPageStatic() {
   drawStepperCard(P1_BRIGHT_Y, "BRIGHTNESS");
   drawStepperCard(P1_SLEEP_Y, "SLEEP AFTER");
@@ -769,11 +829,19 @@ void renderControlsPage() {
 void drawDisplayPageStatic() {
   drawStepperCard(P1_BRIGHT_Y, "BRIGHTNESS");
   drawStepperCard(P1_SLEEP_Y, "SLEEP AFTER");
-  drawGroupCaption("THEME", P1_THEME_CAP_Y);
-  // AUTO is a CLOCK, not a sensor - every ADC1 channel on this board is spoken for,
+  // THE CAPTION AND THE HINT ARE ONE BLOCK WITH THE SEGMENTS, which is why one
+  // flag gates both: board 1's page has 30px across four gaps after the two
+  // steppers, the segments and the flip toggle, and the two text parts want ~46.
+  // See BOARD_SETTINGS_CAPTIONS in each header for that arithmetic. The SEGMENTS
+  // are not gated - both boards draw all three options at once.
+  //
+  // AUTO is a CLOCK, not a sensor - every ADC1 channel on board 2 is spoken for,
   // so there is no light to measure. Saying so is the same rule that stops the
-  // farewell screen promising a touch wake this board does not have.
+  // farewell screen promising a touch wake a board does not have.
+#if BOARD_SETTINGS_CAPTIONS
+  drawGroupCaption("THEME", P1_THEME_CAP_Y);
   uiHint("AUTO = light 07:00 to 19:00", P1_AUTO_HINT_Y);
+#endif
   // The segments and the flip toggle are drawn by renderDisplayPage - their look
   // changes with state, so they belong on the change-only side.
 }
@@ -832,11 +900,19 @@ void renderDisplayPage() {
 // Output and input together, because a mic test IS a sound test - and it is the one
 // action you run repeatedly, since MICMON is how MIC_GAIN gets settled.
 void drawSoundPageStatic() {
+  // The two captions and the hint are the framing, not the controls: board 1 has
+  // 38px of slack across five gaps and they want ~55. See BOARD_SETTINGS_CAPTIONS.
+  // What that board loses is the output/input separation MICROPHONE drew and the
+  // one line saying what a beep MEANS; the four controls name themselves.
+#if BOARD_SETTINGS_CAPTIONS
   drawGroupCaption("ALERTS", PS_ALERTS_Y);
   uiHint("beeps when a session needs input", PS_WHAT_HINT_Y);
+#endif
   drawStepperCard(PS_VOL_Y, "VOLUME");
   uiButton(CARD_X, PS_BEEP_Y, CARD_W, PS_BTN_H, "TEST BEEP", COLOR_ACCENT);
+#if BOARD_SETTINGS_CAPTIONS
   drawGroupCaption("MICROPHONE", PS_MIC_CAP_Y);
+#endif
   uiButton(CARD_X, PS_MIC_Y, CARD_W, PS_BTN_H, "MIC TEST", COLOR_ACCENT);
   // The SOUND toggle is drawn by renderSoundPage - its look changes with state.
 }
@@ -911,7 +987,7 @@ void resetPairing() {
   renderSettingsTab();
 }
 // ----- Page 2: ACTIONS (board 1) / the DANGER group (board 2) -----
-#if BOARD_SETTINGS_HOME
+#if BOARD_SETTINGS_GROUPS
 // ----- The DANGER group (board 2) -----
 // TWO buttons, in ONE captioned section, and both of them destroy state. MIC TEST
 // is not here - it lives on the SOUND group, where a mic test belongs and where it
@@ -1096,7 +1172,7 @@ void handleMessagesTouch(int sx, int sy) {
 }
 
 // ----- Page 3 / the PAIRING group -----
-#if BOARD_SETTINGS_HOME
+#if BOARD_SETTINGS_GROUPS
 // THE LIVE MAC ROWS LAND HERE (board 2). They used to be on the STATUS page too,
 // in a second format keyed off hostLinks[] rather than off hosts[] - so the list
 // that owns the destructive controls was the one list that could not say whether
@@ -1344,12 +1420,23 @@ void pairPanelTouch(int sx, int sy) {
 #endif  // BOARD_HAS_WIRELESS_PAIR
 void drawHostsPageStatic() {
   tft.fillRect(0, PAGE_TOP, tft.width(), contentBottom() - PAGE_TOP, COLOR_BG);
+  // THE TWO SECTION CAPTIONS ARE GATED and board 1 draws neither, which the spec's
+  // own AMENDMENT predicted: this page spends 212 of that board's 222px on the ANY
+  // row and four Mac rows, and the captions want 42 more. It is the same table that
+  // rejected the five-group set, arriving at the same answer. See
+  // BOARD_SETTINGS_CAPTIONS. What board 1 loses is "ANSWER PROMPTS FROM" over the
+  // ANY row - which it never had - so the row's own "ANY MAC"/"SELECTED" pair is
+  // what has to say what it does, as it always has here.
+#if BOARD_SETTINGS_CAPTIONS
   drawGroupCaption("ANSWER PROMPTS FROM", P3_ANY_CAP_Y);
+#endif
   // The ANY row keeps the component and the height it always had: it is a choice,
   // not a Mac, so it stays a uiListRow where the rows under it are cards.
   bool any = (allowedHost[0] == 0);
   uiListRow(CARD_X, P3_ANY_Y, CARD_W, H_ROW, "ANY MAC", any, any ? "SELECTED" : nullptr);
+#if BOARD_SETTINGS_CAPTIONS
   drawGroupCaption("PAIRED MACS", P3_LIST_CAP_Y);
+#endif
   // THE LIVE CACHES ARE DROPPED HERE, before the early return rather than after the
   // loop, for the reason drawSettingsStatic() resets caches inside itself: this
   // function repaints the cards those fields are drawn ON, so they are stale by
@@ -1685,15 +1772,24 @@ void drawSettingsStatic() {
   // there, so after a confirm dialog its card survived in every gap between
   // them (three visible bands on the ACTIONS page). Callers that already clear
   // just do it twice - harmless - and no caller can forget any more.
-#if BOARD_SETTINGS_HOME
-  // FROM CONTENT_Y, not PAGE_TOP: HOME occupies the band's own rows, so a clear
-  // that started at PAGE_TOP would leave the group you came from wearing its back
-  // band. Every entry path (openSettingsGroup, settingsBack, drawSettingsTab,
-  // forceFullRepaint) comes through here, so this is the one clear and the two
-  // navigation helpers deliberately do not repeat it.
+#if BOARD_SETTINGS_GROUPS
+  // FROM CONTENT_Y, not PAGE_TOP: on board 2 HOME occupies the band's own rows, so
+  // a clear that started at PAGE_TOP would leave the group you came from wearing
+  // its back band; on board 1 the pager band is repainted by drawPager() itself and
+  // clearing it first costs nothing. Every entry path (openSettingsGroup,
+  // settingsBack, gotoSettingsPage, drawSettingsTab, forceFullRepaint) comes
+  // through here, so this is the one clear and the navigation helpers deliberately
+  // do not repeat it.
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
+  // THE BAND IS THE ONLY THING THAT DIFFERS, and only the fragment that differs is
+  // guarded - neither arm opens a brace, so every brace-counting reader still
+  // balances. Below it the six group bodies are ONE dispatch on both boards.
+#if BOARD_SETTINGS_HOME
   if (settingsPage == SET_HOME) { drawSettingsHomeStatic(); return; }
   drawBackBand(settingsGroupTitle(settingsPage));
+#else
+  drawPager();
+#endif
   if      (settingsPage == SET_DEVICE)  drawDevicePageStatic();
   else if (settingsPage == SET_DISPLAY) drawDisplayPageStatic();
   else if (settingsPage == SET_SOUND)   drawSoundPageStatic();
@@ -1721,9 +1817,12 @@ void renderSettingsTab() {
   if (pairPanelActive) return;
 #endif
   if (pendingConfirm != CFM_NONE) return;  // a modal owns the page area
+#if BOARD_SETTINGS_GROUPS
 #if BOARD_SETTINGS_HOME
-  if      (settingsPage == SET_HOME)    renderSettingsHome();
-  else if (settingsPage == SET_DEVICE)  renderDevicePage();
+  if (settingsPage == SET_HOME) { renderSettingsHome(); }
+  else
+#endif
+  if      (settingsPage == SET_DEVICE)  renderDevicePage();
   else if (settingsPage == SET_DISPLAY) renderDisplayPage();
   else if (settingsPage == SET_SOUND)   renderSoundPage();
   // Pairing's rows carry a LIVE state line now ("connected, 3s ago"), so the page
@@ -1746,7 +1845,7 @@ void renderSettingsTab() {
 #endif
 }
 void resetSettingsCaches() {
-#if !BOARD_SETTINGS_HOME
+#if !BOARD_SETTINGS_GROUPS
   // BOARD 1's DEVICE card only - its two connection dots and its one-line battery
   // reading. Board 2's DEVICE group has neither, so declaring and resetting them
   // there was state nothing can ever read; same treatment macRowCache below has.
@@ -1764,13 +1863,13 @@ void resetSettingsCaches() {
   battRowColorCache = 0;
   brightPctCache[0] = '\0'; sleepValCache[0] = '\0'; volValCache[0] = '\0';
   for (int i = 0; i < 6; i++) stepGlyphCache[i] = -1;
-#if !BOARD_SETTINGS_HOME
+#if !BOARD_SETTINGS_GROUPS
   // Without this a page repaint (e.g. PAGE away and back) leaves both Mac
   // rows BLANK - drawSettingsStatic() clears the chrome they're drawn on but
   // drawIfChanged sees an unchanged cached string and skips redrawing it.
   for (int i = 0; i < MAX_LINKS; i++) macRowCache[i][0] = '\0';
 #endif
-#if BOARD_SETTINGS_HOME
+#if BOARD_SETTINGS_GROUPS
   // Same rule for the DEVICE group's two cards and four diagnostic lines and the
   // Pairing group's live rows: the static half repaints the surface all of these
   // are drawn ON, so leaving a cache set leaves that field BLANK - the value has
@@ -1779,11 +1878,17 @@ void resetSettingsCaches() {
   // impossible to forget.
   stVerdictCache[0] = '\0'; stVerdictColorCache = 0;
   stLinksCache[0] = '\0'; stLeftCache[0] = '\0';
+  // The DIAGNOSTICS block's own caches, on the board that has one. Guarded on the
+  // same flag as the block's definition and its call, because board 1 declares
+  // neither devDiagCache nor DEV_DIAG_LINES - a reset left unguarded here would
+  // not merely clear nothing, it would fail to compile.
+#if BOARD_DEVICE_DIAGNOSTICS
   for (int i = 0; i < DEV_DIAG_LINES; i++) devDiagCache[i][0] = '\0';
   // The die temperature's COLOUR joins them, the stVerdictColorCache shape: it is
   // compared against, not drawn from, so leaving it set is not a blank field - it is
   // a band crossing that never repaints because the two agreed.
   devDiagTempColorCache = 0;
+#endif
   for (int i = 0; i < MAX_HOSTS; i++) { p3SubCache[i][0] = '\0'; p3LiveCache[i] = -1; }
   // The row COUNT joins them: this runs from drawSettingsStatic() before the page
   // chrome is repainted, so "how many rows are drawn" is stale here in exactly the
@@ -1799,11 +1904,18 @@ void resetSettingsCaches() {
 #endif
   // HOME's six summaries, and the Device row's colour beside them. Same rule as
   // every cache above: drawSettingsHomeStatic() repaints the cards these are drawn
-  // ON, so leaving them set leaves all six rows BLANK.
+  // ON, so leaving them set leaves all six rows BLANK. On BOARD_SETTINGS_HOME only -
+  // board 1 has the six group PAGES but no HOME list, so it declares neither.
+#if BOARD_SETTINGS_HOME
   for (int i = 0; i < SET_GROUP_COUNT; i++) homeSubCache[i][0] = '\0';
   homeStatusColorCache = 0;
 #endif
+#endif
 }
+// ----- NAVIGATION, and NAVIGATION ONLY -----
+// BOARD_SETTINGS_HOME, not BOARD_SETTINGS_GROUPS: both boards draw the six group
+// PAGES now, and what this pair of flags separates is how you REACH them. HOME's
+// open/back go here; board 1's chevron ring goes in the other arm.
 #if BOARD_SETTINGS_HOME
 // HOME -> a group, and back. Both go through drawSettingsStatic(), which clears
 // from CONTENT_Y and resets every cache itself, so neither calls
@@ -1823,9 +1935,22 @@ void settingsBack() {
 }
 #else
 void gotoSettingsPage(int p) {
-  settingsPage = (p + SETTINGS_PAGES) % SETTINGS_PAGES;
-  tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
-  resetSettingsCaches();
+  // THE RING RUNS SET_DEVICE..SET_DANGER, NOT 0..SETTINGS_PAGES-1. settingsPage is
+  // one global shared with board 2 and SET_HOME is 0 there, so a ring based at 0
+  // would put every group one id low and land MESSAGES somewhere SETTINGS_PAGE_
+  // MESSAGES does not point. Based at SET_DEVICE, the same run HOME's rows walk,
+  // it also makes SET_HOME unreachable here - which is right, because this board
+  // has no HOME surface to draw. The double modulo is for the backward step: C's
+  // % keeps the sign of the dividend, so `<` from the first group gives -1.
+  settingsPage = SET_DEVICE +
+                 ((p - SET_DEVICE) % SETTINGS_PAGES + SETTINGS_PAGES) % SETTINGS_PAGES;
+  // NO CLEAR AND NO CACHE RESET HERE, the same as openSettingsGroup() and
+  // settingsBack() on the other board. drawSettingsStatic() now clears from
+  // CONTENT_Y itself (it has to, so a group cannot be left wearing the band it came
+  // from) and resets every cache on the way in, so both lines that used to stand
+  // here were work it was about to do again - and a caller that repeats work the
+  // callee already does invites a reader to trust the comment over the code, which
+  // is what drawSettingsStatic()'s own note says about exactly this pair.
   drawSettingsStatic();
   renderSettingsTab();
 }
@@ -1898,7 +2023,7 @@ void handleSettingsTouch(int sx, int sy) {
     return;
   }
 #endif
-#if BOARD_SETTINGS_HOME
+#if BOARD_SETTINGS_GROUPS
   if (settingsPage == SET_DISPLAY) {
     int dir;
     if (stepperHit(sx, sy, P1_BRIGHT_Y, &dir)) {
@@ -1990,6 +2115,27 @@ void handleSettingsTouch(int sx, int sy) {
     } else if (sy >= P2_PWR_Y && sy < P2_PWR_Y + P2_BTN_H) {
       pendingConfirm = CFM_POWER_OFF;     drawPendingConfirm();
     }
+#if BOARD_TOUCH_NEEDS_CAL
+  // THE DEVICE GROUP CLAIMS ONE TAP, AND ONLY WHERE THE BUTTON IS DRAWN. The whole
+  // ARM is behind the guard rather than just the hit test, because the alternative
+  // is an empty branch on board 2 - and an empty arm on a read-only page is exactly
+  // the invitation the Device block's own note refuses. It is the same guard the
+  // draw site carries, so the button and its target cannot come apart; board 2
+  // declares no DEV_CAL_Y at all, so this arm could not compile there even if the
+  // flag were wrong.
+  //
+  // This is the one place in this file where a guarded fragment is not brace-
+  // balanced, and it is deliberate: handleSettingsTouch ALREADY has that shape (its
+  // band branch has one arm per board), which is why settings-geom-check.mjs reads
+  // this function through touchArm() rather than through brace matching. Adding a
+  // second instance inside the same function costs nothing that the first did not.
+  } else if (settingsPage == SET_DEVICE) {
+    // Recalibrating costs 5 taps and keeps the current mapping if it fails, so it
+    // asks first - the same rule the other three confirmable actions follow.
+    if (sy >= DEV_CAL_Y && sy < DEV_CAL_Y + H_BTN) {
+      pendingConfirm = CFM_RECAL; drawPendingConfirm();
+    }
+#endif
   } else if (settingsPage == SET_PAIRING) {
     // ANY row: drop the restriction so every remembered Mac may answer
     if (sy >= P3_ANY_Y && sy < P3_ANY_Y + H_ROW) {
@@ -2140,7 +2286,10 @@ void drawSettingsTab() {
 #if BOARD_SETTINGS_HOME
   settingsPage = SET_HOME;   // always enter at HOME, never a group you last left
 #else
-  settingsPage = 0; // always enter on the STATUS page
+  // ALWAYS ENTER ON THE FIRST GROUP, never a group you last left - and it is
+  // SET_DEVICE rather than 0, because 0 is SET_HOME and this board has no HOME
+  // surface: entering there would draw a pager over a page nothing paints.
+  settingsPage = SET_DEVICE;
 #endif
   resetSettingsCaches();
   drawSettingsStatic();

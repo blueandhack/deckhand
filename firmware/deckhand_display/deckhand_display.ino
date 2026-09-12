@@ -3384,26 +3384,24 @@ const int VOICE_TEXT_LINES = 6;
 //   3 PAIRED MACS
 //   4 MESSAGES - how a message sent from here lands on the Mac
 #if !BOARD_SETTINGS_HOME
-// FIVE, and the page it counts was ADDED rather than squeezed into one of the
-// four - board_e32r28t.h's P4 section carries the arithmetic showing none of them
-// had 40 spare rows. drawPager() reads this for its titles[] bound AND for its
-// dot count, and gotoSettingsPage() wraps on it, so the three stay in step from
-// one constant.
-const int SETTINGS_PAGES = 5;
-// ONE NAME FOR THE MESSAGES SURFACE ON BOTH BOARDS. Board 2 already has an id
-// for every group (SET_MESSAGES); board 1's pages are bare ordinals, and a bare 4
-// in a dispatch chain, a render chain, a touch chain and a "is it showing?" test
-// is four transcriptions of one fact. The alias means the three shared functions
-// below (drawMessagesPageStatic, renderMessagesPage, handleMessagesTouch) are
-// reached by the same expression on both boards.
-const int SETTINGS_PAGE_MESSAGES = 4;
-#else
-const int SETTINGS_PAGE_MESSAGES = SET_MESSAGES;
+// SIX, AND IT IS THE GROUP COUNT RATHER THAN A NUMBER OF ITS OWN. Board 1's pager
+// walks the SAME six groups HOME lists on board 2 - board_e32r28t.h's SET_* run -
+// so the pager's title count, its dot count and gotoSettingsPage()'s wrap all come
+// from SET_GROUP_COUNT. A literal here would be a second place the group set is
+// recorded, and the whole point of Task 3A is that there is only one.
+const int SETTINGS_PAGES = SET_GROUP_COUNT;
 #endif
-// On board 2 this carries SET_HOME plus six group ids instead (board_es3c35p.h),
-// and nothing outside settings.ino assumes the 0..3 range - SETTINGS_PAGES itself
-// is read only by drawPager() and gotoSettingsPage(), both of which board 2 does
-// not compile.
+// ONE NAME FOR THE MESSAGES SURFACE ON BOTH BOARDS, and it is now the SAME
+// EXPRESSION on both rather than an alias for a bare ordinal. Board 1's pages
+// used to be 0..4 with MESSAGES at 4; they are the group ids now, so the alias
+// resolves through SET_MESSAGES everywhere and the `#if` that carried board 1's
+// own 4 is gone. The three shared functions (drawMessagesPageStatic,
+// renderMessagesPage, handleMessagesTouch) are reached by one expression.
+const int SETTINGS_PAGE_MESSAGES = SET_MESSAGES;
+// SET_HOME on both boards. Board 1 never lands on it - drawSettingsTab() enters at
+// SET_DEVICE and gotoSettingsPage() wraps inside SET_DEVICE..SET_DANGER - but the
+// declared initial value is what the checker binds SET_HOME to, so it stays the
+// one id that means "no group open".
 int settingsPage = 0;
 
 // PAGER_BTN_W/X0, PAGER_H and PAGE_TOP moved to board_e32r28t.h (via
@@ -3438,22 +3436,51 @@ int settingsPage = 0;
 // group there, and THEME becomes a full-width 3-segment selector rather than a
 // third-width cycle button. Its own chain is below; the offsets both arms read
 // come from the board headers, as they already did.
-#if BOARD_SETTINGS_HOME
-// ---- board 2: the DISPLAY group ----
+#if BOARD_SETTINGS_GROUPS
+// ---- the DISPLAY group ----
+// TWO STEPPERS, THE THEME SEGMENTS AND THE FLIP TOGGLE, on both boards. What
+// differs is the FRAMING, not the controls: board 2 heads the segments with a
+// "THEME" caption and explains AUTO in a hint under them, and board 1 has room
+// for neither (BOARD_SETTINGS_CAPTIONS, whose arithmetic is in each header). So
+// the two arms differ in the two constants the caption and the hint contribute,
+// and in nothing else - the segments and the toggle are one implementation.
 const int P1_BRIGHT_Y = PAGE_TOP + P1_TOP;
 const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
+#if BOARD_SETTINGS_CAPTIONS
 const int P1_THEME_CAP_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_THEME_CAP_GAP;
 const int P1_THEME_Y = P1_THEME_CAP_Y + SET_CAP_STEP;
 const int P1_AUTO_HINT_Y = P1_THEME_Y + H_ROW + P1_AUTO_HINT_GAP;
 const int P1_FLIP_Y = P1_AUTO_HINT_Y + P1_FLIP_GAP;
-// ---- board 2: the SOUND group ----
+#else
+// NO P1_THEME_CAP_Y AND NO P1_AUTO_HINT_Y on this board, rather than two y's
+// nothing draws at: the P2_MIC_Y rule, and settings-geom-check.mjs asserts both
+// absences by name. The two gaps below are the gap ABOVE each control, measured
+// from the painted bottom of whatever is over it - a different relation from
+// board 2's P1_FLIP_GAP (which steps from the hint's CENTRE), which is why it
+// carries a different name rather than the same one meaning two things.
+const int P1_THEME_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_THEME_TOP_GAP;
+const int P1_FLIP_Y = P1_THEME_Y + H_ROW + P1_FLIP_TOP_GAP;
+#endif
+// ---- the SOUND group ----
+// SOUND toggle, VOLUME stepper, TEST BEEP, MIC TEST on both boards; board 2 adds
+// the ALERTS and MICROPHONE captions and the "beeps when a session needs input"
+// hint, which board 1 has no rows for.
+#if BOARD_SETTINGS_CAPTIONS
 const int PS_ALERTS_Y = PAGE_TOP + PS_TOP;
 const int PS_SOUND_Y = PS_ALERTS_Y + SET_CAP_STEP;
 const int PS_WHAT_HINT_Y = PS_SOUND_Y + H_ROW + PS_HINT_GAP;
 const int PS_VOL_Y = PS_WHAT_HINT_Y + PS_VOL_GAP;
-const int PS_BEEP_Y = PS_VOL_Y + STEPPER_CARD_H + SP_3;
+#else
+const int PS_SOUND_Y = PAGE_TOP + PS_TOP;
+const int PS_VOL_Y = PS_SOUND_Y + H_ROW + PS_VOL_GAP;
+#endif
+const int PS_BEEP_Y = PS_VOL_Y + STEPPER_CARD_H + PS_BEEP_GAP;
+#if BOARD_SETTINGS_CAPTIONS
 const int PS_MIC_CAP_Y = PS_BEEP_Y + PS_BTN_H + PS_MIC_CAP_GAP;
 const int PS_MIC_Y = PS_MIC_CAP_Y + SET_CAP_STEP;
+#else
+const int PS_MIC_Y = PS_BEEP_Y + PS_BTN_H + PS_MIC_GAP;
+#endif
 #else
 const int P1_BRIGHT_Y = PAGE_TOP + P1_TOP;
 const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
@@ -3481,8 +3508,8 @@ const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
 // exists there - which is why the #if below is on BOARD_SETTINGS_HOME and not on
 // BOARD_HAS_MIC, a flag that is 1 on both boards and therefore cannot tell them
 // apart. Board 1's arm is the text that was always here.
-#if BOARD_SETTINGS_HOME
-// ---- board 2: the DANGER group ----
+#if BOARD_SETTINGS_GROUPS
+// ---- the DANGER group ----
 // ONE captioned section, two buttons. The gap between them is SP_3, the page
 // rhythm, rather than a P2_GAP or a P2_SECTION_GAP of their own: they are inside
 // one section, and both the constants that named the OTHER two relationships went
@@ -3523,16 +3550,12 @@ const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
 // below at all: its Pairing group is two captions plus a list of two-line CARDS,
 // so nothing about it derives from H_ROW + SP_1 any more. The #if emits no code,
 // so board 1's arm is the text that was always here.
-#if !BOARD_SETTINGS_HOME
-// Rows use the shared H_ROW (per-board, == TAP_MIN). On board 1 this is the
-// tightest page in the UI - ANY plus 4 Macs at H_ROW + SP_1 is EXACTLY the
-// height available, which is what set H_ROW's value rather than the other way
-// round. Board 2 spends 246 of its 358px region on the same five rows, so the
-// page stops being the binding constraint on H_ROW there.
-const int P3_ANY_Y  = PAGE_TOP + SP_1 / 2;
-const int P3_LIST_Y = P3_ANY_Y + H_ROW + SP_1;
-const int P3_X_W    = 40;   // "forget" hit zone at the right edge (>= a fingertip)
-#endif
+// BOTH BOARDS DERIVE THEIR P3_* IN THEIR OWN HEADER NOW. Board 1's three used to
+// be here, under `#if !BOARD_SETTINGS_HOME`, because its Pairing page was a list
+// of one-line uiListRows with no row-internal geometry to name. It draws board
+// 2's two-line CARDS now, so it needs the same P3_ROW_* set - and those belong
+// beside the page's own arithmetic in the header, where CLAUDE.md requires every
+// layout constant to live, rather than half here and half there.
 
 // Page 4 / the MESSAGES group - how a message SENT FROM THIS DEVICE lands on the
 // Mac. ONE CHAIN FOR BOTH BOARDS, unlike pages 2 and 3, and that is worth saying
@@ -3603,17 +3626,16 @@ const int CFM_YES_X = CFM_NO_X + CFM_BTN_W + SP_3;
 // own caches - so declaring and resetting these there is state nothing can ever
 // read, which is the "declared-but-unwired, with comments claiming it works"
 // defect class this file already deleted a dead macEmojiId for.
-#if !BOARD_SETTINGS_HOME
+#if !BOARD_SETTINGS_GROUPS
 int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
 #endif
-// THE GUARD IS BOARD_SETTINGS_HOME, NOT !BOARD_USES_TFT_ESPI, and the difference is
-// not cosmetic: the size below is ST_LINE_BYTES, which only the BOARD_SETTINGS_HOME
-// arm of the board headers defines. The two flags agree on both boards that exist
-// today, so the mismatched guard compiled - but it says this row belongs to "the
-// board that draws through the shim" when it actually belongs to "the board whose
-// DEVICE group has a POWER card", and the first board to have one and not the other
-// would fail to compile on a line whose comment blames the wrong flag.
-#if BOARD_SETTINGS_HOME
+// THE GUARD IS BOARD_DEVICE_DIAGNOSTICS, and picking the right flag here is the
+// same care the previous note recorded: the guard was once !BOARD_USES_TFT_ESPI,
+// which said "the board that draws through the shim" where what was meant was
+// "the board whose DEVICE group has this field". Both boards draw the DEVICE
+// group now, and only board 2 draws the DIAGNOSTICS block this colour belongs to -
+// so the flag that gates the block is the flag that gates its cache.
+#if BOARD_DEVICE_DIAGNOSTICS
 // THE SoC TEMP'S WARM/HOT BAND IS BACK, and the note that used to stand here
 // recorded exactly why it had gone: the reading shared a DIAGNOSTICS line with the
 // flush figure, a line is ONE padded field with one colour, and colouring it by
@@ -3641,11 +3663,11 @@ uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
 // renderMacLinkRows() is: board 2's per-Mac rows moved to the Pairing group,
 // where a row is a two-line card keyed off hosts[] rather than a padded line
 // keyed off hostLinks[].
-#if !BOARD_SETTINGS_HOME
+#if !BOARD_SETTINGS_GROUPS
 char macRowCache[MAX_LINKS][40] = {"", ""};
 #endif
-#if BOARD_SETTINGS_HOME
-// THE DEVICE GROUP'S FIELDS (board 2). Every size is its field's PADDED width plus
+#if BOARD_SETTINGS_GROUPS
+// THE DEVICE GROUP'S FIELDS (both boards now). Every size is its field's PADDED width plus
 // NUL, taken from the board header rather than restated here, because a cache
 // shorter than the string it holds silently stops noticing changes past that
 // point - this file's oldest bug, and the reason settings-geom-check.mjs asserts
@@ -3664,7 +3686,13 @@ char stLeftCache[ST_LINE_BYTES] = "";
 // a short list is legal and silent - which is exactly how a 4 -> 6 bump leaves a
 // declaration still describing the old count. settings-geom-check.mjs counts them
 // against DEV_DIAG_LINES so the next bump cannot.
+// GUARDED, because board 1 declares no DEV_DIAG_LINES and no DEV_DIAG_BYTES: its
+// DEVICE page has no diagnostics block (BOARD_DEVICE_DIAGNOSTICS, whose reasoning
+// is in board_e32r28t.h). Only the declaration is behind the guard, so no brace is
+// opened in either direction.
+#if BOARD_DEVICE_DIAGNOSTICS
 char devDiagCache[DEV_DIAG_LINES][DEV_DIAG_BYTES] = {"", "", "", "", "", ""};
+#endif
 // THE VERDICT LINE'S COLOUR, cached beside its text and busting it on a flip -
 // the guard battRowColorCache documents, and needed here for a reason that is not
 // hypothetical: "Both links up" is ONE string across a COLOR_GOOD -> COLOR_WARN
@@ -3672,7 +3700,7 @@ char devDiagCache[DEV_DIAG_LINES][DEV_DIAG_BYTES] = {"", "", "", "", "", ""};
 // the host is still ticking. drawIfChanged compares text only, so without this the
 // colour change would never reach the panel.
 uint16_t stVerdictColorCache = 0;
-// THE PAIRING GROUP'S LIVE ROWS (board 2). One state line per remembered Mac, and
+// THE PAIRING GROUP'S LIVE ROWS (both boards now). One state line per remembered Mac, and
 // one cache per row saying whether that Mac was live when the row was last drawn.
 // The live flag busts the text cache rather than merely redrawing the dot: the
 // line's COLOUR is a function of it, and drawIfChanged compares text only. Today
@@ -7136,15 +7164,15 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     }
     int pg = buf.substring(5).toInt();
 #if BOARD_SETTINGS_HOME
-    // PAGE 0 is HOME here, 1..6 the six groups - the same numbering settingsPage
-    // uses, so a capture script names a group rather than counting chevron taps.
-    // Board 1's arm below wraps modulo SETTINGS_PAGES (5), so the same MESSAGES
-    // surface is PAGE 4 there and PAGE 5 here. The two boards' page numbering has
-    // never agreed and this does not make it worse; what it does mean is that a
-    // capture script aimed at one board's number lands somewhere else on the other.
+    // PAGE 1..6 ARE THE SIX GROUPS ON BOTH BOARDS NOW, which they were not: board 1
+    // numbered its own pages 0..4 and wrapped modulo 5, so the MESSAGES surface was
+    // PAGE 4 there and PAGE 5 here and a capture script aimed at one board landed
+    // somewhere else on the other. Both arms address settingsPage's own ids now.
+    // PAGE 0 is HOME here; board 1 has no HOME surface, so its arm clamps 0 up to
+    // the first group rather than inventing one.
     if (currentTab == TAB_SETTINGS) { if (pg <= SET_HOME) settingsBack(); else openSettingsGroup(pg); }
 #else
-    if (currentTab == TAB_SETTINGS) gotoSettingsPage(pg);
+    if (currentTab == TAB_SETTINGS) gotoSettingsPage(constrain(pg, SET_DEVICE, SET_DANGER));
 #endif
   } else if (buf == "POWERPROBE" || buf.startsWith("POWERPROBE ")) {
     // Passive mV/h measurement of whatever state the device is in, labelled so
