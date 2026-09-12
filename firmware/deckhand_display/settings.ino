@@ -49,13 +49,38 @@ void drawStepGlyph(int cacheIdx, int x, int btnY, const char* glyph, bool enable
 // A GROUP CAPTION: T_META in COLOR_LABEL at CARD_X + PAD, TL_DATUM, on the page
 // background rather than on a card - the treatment board_es3c35p.h describes once
 // for every one of them, and the step from its datum to the control it heads is
-// SET_CAP_STEP. All seven live sites go through here (Display's THEME, Sound's
+// SET_CAP_STEP. NINE live sites go through here, and only TWO of them are
+// unconditional - which is why no single sentence in shared code can list them:
+//
+//   both boards    Danger's CANNOT BE UNDONE, Messages' HOW MY MESSAGES LAND
+//   board 2 only   Display's THEME, Sound's ALERTS and MICROPHONE, Pairing's
+//                  ANSWER PROMPTS FROM and PAIRED MACS - all five on
+//                  BOARD_SETTINGS_FITS_CAPTIONS - plus Device's DIAGNOSTICS on
+//                  BOARD_DEVICE_DIAGNOSTICS
+//   board 1 only   Device's SETUP, over CALIBRATE TOUCH, on BOARD_TOUCH_NEEDS_CAL
+//
+// So board 2 compiles eight of the nine and board 1 compiles three.
+//
+// CORRECTED, 2026-09-12 (whole-branch final review, IMPORTANT 3). The sentence that
+// stood here read "All seven live sites go through here (Display's THEME, Sound's
 // ALERTS and MICROPHONE, Pairing's ANSWER PROMPTS FROM and PAIRED MACS, Actions'
-// SETUP and CANNOT BE UNDONE); six of them were four inline lines each, and four
-// identical lines repeated seven times is how one page comes to draw its caption
-// in a different colour or off a different datum with nothing saying which is
-// right. It is named for what it DRAWS rather than for the page that first needed
-// it - this was drawActionCaption(), on the group that happened to add it last.
+// SETUP and CANNOT BE UNDONE)". Kept marked rather than deleted, per this repo's
+// rule about descriptions that turned out to be wrong. It was wrong three ways at
+// once: it UNDERCOUNTED by two (DIAGNOSTICS and HOW MY MESSAGES LAND were never in
+// the list); it named `Actions`, a group commit b5ecd6b deleted and renamed to
+// Danger eleven commits before this branch's tip; and it put SETUP in that group
+// when RULING 12 had put it on board 1's DEVICE page, board-1-only, which an
+// unconditional sentence cannot say. It is written down because it is this branch's
+// OWN signature class - ten stale-prose instances found and corrected across six
+// tasks, and a write-up of the class in commands-and-checks.md - left live in the
+// first fifty lines of the most-read file in the tree.
+//
+// Six of the seven sites that existed when this was extracted were four inline
+// lines each, and four identical lines repeated that many times is how one page
+// comes to draw its caption in a different colour or off a different datum with
+// nothing saying which is right. It is named for what it DRAWS rather than for the
+// page that first needed it - this was drawActionCaption(), on the group that
+// happened to add it last.
 //
 // MOVED OUT OF THE BOARD-2 ARM, unchanged, because board 1's MESSAGES page needs
 // the same caption and the alternative was a second copy of four lines under the
@@ -913,7 +938,7 @@ void saveMsgPriority() { prefs.putUChar("msgpri", msgPriority); }
 // while the USAGE tab was showing would have painted three option rows across
 // the quota cards.
 bool messagesPageShowing() {
-  return currentTab == TAB_SETTINGS && settingsPage == SETTINGS_PAGE_MESSAGES;
+  return currentTab == TAB_SETTINGS && settingsPage == SET_MESSAGES;
 }
 void setMsgPriority(uint8_t v) {
   if (v >= MSG_PRI_COUNT || v == msgPriority) return;
@@ -1497,7 +1522,7 @@ void drawSettingsStatic() {
   else if (settingsPage == SET_DISPLAY) drawDisplayPageStatic();
   else if (settingsPage == SET_SOUND)   drawSoundPageStatic();
   else if (settingsPage == SET_PAIRING) drawHostsPageStatic();
-  else if (settingsPage == SETTINGS_PAGE_MESSAGES) drawMessagesPageStatic();
+  else if (settingsPage == SET_MESSAGES) drawMessagesPageStatic();
   else                                  drawDangerPageStatic();
 }
 void renderSettingsTab() {
@@ -1522,7 +1547,7 @@ void renderSettingsTab() {
   // The three option rows change with the setting, so like the THEME segments
   // they are on the change-only side; drawMessagesPageStatic draws only the
   // caption and the hint.
-  else if (settingsPage == SETTINGS_PAGE_MESSAGES) renderMessagesPage();
+  else if (settingsPage == SET_MESSAGES) renderMessagesPage();
   // Danger is static
 #if !BOARD_USES_TFT_ESPI
   tft.flush();
@@ -1734,7 +1759,7 @@ void handleSettingsTouch(int sx, int sy) {
       // a mic test in, so put SETTINGS back explicitly.
       if (!everReceived) forceFullRepaint();
     }
-  } else if (settingsPage == SETTINGS_PAGE_MESSAGES) {
+  } else if (settingsPage == SET_MESSAGES) {
     handleMessagesTouch(sx, sy);
   } else if (settingsPage == SET_DANGER) {
     // NO MIC TEST AND NO CALIBRATE BRANCH, on EITHER board, and the two are absent

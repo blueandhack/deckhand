@@ -1041,9 +1041,10 @@ const int STEP_BAR_GAP   = 10;   // between a key's edge and the bar
 // seven of them. `settingsPage` is ONE global shared by both boards and SET_HOME is
 // 0, which is also the initialiser that global is declared with - so BOTH boards now
 // boot SETTINGS into HOME and every group is SET_DEVICE..SET_DANGER on both.
-// SETTINGS_PAGE_MESSAGES is one expression everywhere (SET_MESSAGES), and HOME's
-// rows address exactly the ids the dispatch addresses rather than a second
-// numbering nobody can see.
+// The MESSAGES surface is addressed as SET_MESSAGES everywhere, and HOME's rows
+// address exactly the ids the dispatch addresses rather than a second numbering
+// nobody can see. (The SETTINGS_PAGE_MESSAGES alias that carried board 1's own
+// ordinal 4 is gone; deckhand_display.ino records what it was for.)
 //
 // TWO SENTENCES STOOD HERE FOR ONE TASK AND ARE KEPT MARKED RATHER THAN DELETED,
 // because they are the record of what Task 3A deliberately built and Task 3B
@@ -1189,8 +1190,8 @@ const int HOME_SUB_BYTES = HOME_SUB_CHARS + 1;
 // The key keeps the pager's own PAGER_BTN_W so the two boards' chrome stays one
 // size, and the WHOLE band is the back target - there is nothing else in it, so the
 // 45/55 split the chevron pager needed to separate two keys is not needed and is not
-// declared (drawPager() itself went in Task 4). THAT IS ALSO
-// WHAT RETIRED A DOCUMENTED SHORTFALL: the drawn key is PAGER_H - 8 = 34px, under
+// declared (drawPager() itself went in Task 4). THAT IS ALSO WHAT RETIRED A
+// DOCUMENTED SHORTFALL: the drawn key is PAGER_H - 8 = 34px, under
 // this board's TAP_MIN of 40, and settings-geom-check.mjs carried a KNOWN entry
 // excusing it while it was one of TWO keys you had to hit. It is an affordance
 // inside a 46px single target now (CONTENT_Y..PAGE_TOP), the entry is deleted, and
@@ -1391,8 +1392,38 @@ const int PS_AIR_BOT  = 8;
 // than inherit a workaround for a page it deleted. (This is the "a comment is not
 // parsed" class this file has paid for repeatedly: the sentence stayed true-
 // looking while the page it described was being dissolved one commit at a time.)
+//
+// AND THE HALF RULING 13 DID NOT ASK, ANSWERED HERE (final review, MINOR 5): board 2
+// makes its destructive buttons TALLER than its ordinary ones - P2_BTN_H 56 against
+// H_BTN 50, "TAP_MIN + 10; these are the destructive ones" - and this board does NOT.
+// P2_BTN_H is exactly H_BTN here. THE STEP WAS CONSIDERED AND DECLINED; it is not an
+// omission, and the room for it exists (P2_AIR_BOT is 69 rows, 12.3mm), so without
+// this clause the next reader has to guess.
+//
+// MEASURED, at the two panels' own px/mm (5.624 here, 6.489 there, both derived in
+// board_es3c35p.h from the diagonals): board 2's H_BTN 50 is 7.71mm and its P2_BTN_H
+// 56 is 8.63mm, a 0.92mm step. THIS BOARD'S ORDINARY H_BTN 44 IS ALREADY 7.82mm -
+// physically LARGER than board 2's ordinary button - and holding board 2's step
+// physically would give 0.92 * 5.624 = 5.2 -> 49, i.e. H_BTN + 5, not + 6.
+//
+// Three reasons the step is declined rather than taken:
+//   (1) IT SIGNALS ACROSS PAGES, NOT WITHIN ONE. The Danger group is the only page on
+//       either board that holds these two buttons, and it holds NOTHING ELSE, so there
+//       is no ordinary button beside them to be taller than. The contrast is a
+//       comparison with a page you have left - the same argument Ruling 10 accepted
+//       when it kept the destructive group LAST rather than relying on page position.
+//   (2) THE SEVERITY SIGNALS THAT DO READ WITHOUT A REFERENCE ARE ALREADY HERE, all
+//       three of them: the CANNOT BE UNDONE caption, the P2_SPINE_W 4 severity spine
+//       (derived for this panel, not copied - see just below), and the confirm dialog.
+//   (3) 5px HERE IS 0.89mm. Taking it would move a page every checker has closed and
+//       cost a re-baseline of board 1's binary at the very end of an 18-commit branch
+//       for a cross-page cue at the edge of discrimination. NOT MEASURED: whether a
+//       person reads the two heights as different at all. That is a legibility claim
+//       and no instrument in this repo settles one.
+// If a person looks at the Danger page and wants the step, H_BTN + 5 is the derived
+// value and the page closes: 69 rows of P2_AIR_BOT absorb 10 of them.
 const int P2_TOP     = 12;   // PAGE_TOP -> the danger caption
-const int P2_BTN_H   = H_BTN;
+const int P2_BTN_H   = H_BTN;   // NOT H_BTN + 5 - the step is declined just above
 // The severity spine's width. 4, THE SAME AS BOARD 2, and it was DERIVED here
 // rather than copied: physical parity would have given 3 (board 2's 4 at 6.489
 // px/mm is 0.62mm, and 0.62mm at this board's 5.624 is 3.47), but 3 does not

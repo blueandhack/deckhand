@@ -2251,8 +2251,14 @@ for (const b of [1, 2]) {
         chk(SET_CACHE[dead] === undefined,
             `${dead} is gone with the field it held (got [${SET_CACHE[dead]}])`);
       // battRowTextCache is SHARED with board 1 and sized per board, because the two
-      // draw different strings: board 1's row carries the estimate on the same line,
-      // board 2's POWER card gives it a line of its own.
+      // boards are free to draw different strings here. CORRECTED 2026-09-12 (final
+      // review, IMPORTANT 4): this said "board 1's row carries the estimate on the
+      // same line, board 2's POWER card gives it a line of its own", which described
+      // the pre-branch STATUS page. Task 3A converged board 1's POWER card on board
+      // 2's two-line form, so BOTH headlines are "100%  4.20V" today. The assertion
+      // below is unchanged and was always right: it is derived PER BOARD from each
+      // header's own ST_BIG_CHARS, never from this comment, which is why it stayed
+      // green while the prose beside it went stale.
       chk(c.BATT_ROW_CACHE >= c.ST_BIG_CHARS + 1,
           `Device: BATT_ROW_CACHE ${c.BATT_ROW_CACHE} holds the POWER headline's ${c.ST_BIG_CHARS} chars + NUL`);
     }

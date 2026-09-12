@@ -3388,13 +3388,16 @@ const int VOICE_TEXT_LINES = 6;
 // Task 3B. The surfaces now are SET_HOME plus SET_DEVICE..SET_DANGER, declared in
 // each board header, and the resistive-panel argument for discrete surfaces over
 // drag-scroll still holds - it is why board 1 keeps a paged reader (BOARD_HISTORY_SCROLL).
-// ONE NAME FOR THE MESSAGES SURFACE ON BOTH BOARDS, and it is now the SAME
-// EXPRESSION on both rather than an alias for a bare ordinal. Board 1's pages
-// used to be 0..4 with MESSAGES at 4; they are the group ids now, so the alias
-// resolves through SET_MESSAGES everywhere and the `#if` that carried board 1's
-// own 4 is gone. The three shared functions (drawMessagesPageStatic,
-// renderMessagesPage, handleMessagesTouch) are reached by one expression.
-const int SETTINGS_PAGE_MESSAGES = SET_MESSAGES;
+// SETTINGS_PAGE_MESSAGES STOOD HERE AND IS GONE (final review, MINOR 6). It was the
+// bridge between board 1's pager ordinals and board 2's group ids: board 1's pages
+// used to be 0..4 with MESSAGES at 4, so a `#if` gave the name a different value per
+// board and the three shared functions (drawMessagesPageStatic, renderMessagesPage,
+// handleMessagesTouch) could be reached by one expression. Task 3B made both boards
+// use the group ids, Task 4 deleted the `#if`, and what was left was
+// a plain `const int` initialised from SET_MESSAGES - a pure alias with four readers
+// (settings.ino 916, 1500, 1525, 1737), each of which now says SET_MESSAGES and reads
+// better for it. This is the branch's one instance of "introduced early, made dead
+// later": the value it carried survives, only the second name for it is gone.
 // SET_HOME on both boards, and both boards LAND on it: drawSettingsTab() enters
 // there on every tab change and settingsBack() returns there from a group. (The
 // sentence here said "board 1 never lands on it - drawSettingsTab() enters at
@@ -3626,13 +3629,30 @@ const int CFM_YES_X = CFM_NO_X + CFM_BTN_W + SP_3;
 // is a text change while 54.9 -> 55.0 crossing into COLOR_WARN need not be one.
 uint16_t devDiagTempColorCache = 0;
 #endif
-// PER BOARD, because the two boards genuinely draw different strings here and a
-// cache shorter than its string silently stops noticing changes past that point.
-// Board 1's row is one line carrying percentage, volts AND the runtime estimate,
-// whose widest is the discharge case "100% 4.20V ~99h" (15 + NUL) - 20, not 16,
-// because 16 fitted that EXACTLY. Board 2's POWER card gives the estimate a line
-// of its own, so this cache holds only "100%  4.20V" there (ST_BIG_CHARS + NUL).
-// settings-geom-check.mjs derives both bounds rather than trusting this comment.
+// PER BOARD, because a cache shorter than its string silently stops noticing
+// changes past that point, and the two boards are free to draw different strings
+// here. TODAY THEY DO NOT: BOTH boards' POWER card gives the runtime estimate a
+// line of its own, so this cache holds only the headline "100%  4.20V" - the
+// board's own ST_BIG_CHARS (11 on both) padded, plus NUL. BATT_ROW_CACHE is
+// therefore 12 on both, written as a literal on board 1 (board_e32r28t.h:964, with
+// its own note on why) and as ST_BIG_CHARS + 1 on board 2.
+// settings-geom-check.mjs asserts BATT_ROW_CACHE >= ST_BIG_CHARS + 1 PER BOARD,
+// parsed from each header, so the bound is CHECKED rather than trusted here.
+//
+// CORRECTED, 2026-09-12 (whole-branch final review, IMPORTANT 4). This read "Board
+// 1's row is one line carrying percentage, volts AND the runtime estimate, whose
+// widest is the discharge case "100% 4.20V ~99h" (15 + NUL) - 20, not 16, because
+// 16 fitted that EXACTLY." Kept marked rather than deleted. It described the
+// PRE-BRANCH STATUS page; Task 3A converged board 1's POWER card on board 2's
+// two-line form and the widest string here became 11 + NUL. NOTHING WAS EVER
+// BROKEN - the checker bound it per board throughout - but a cache DECLARED 12
+// under a comment claiming its string needs 16 reads as a live instance of
+// CLAUDE.md's oldest named bug, and a reader who believed it would either raise
+// the constant to 20 for nothing (a re-baseline for a string this binary cannot
+// produce) or conclude board 1 still draws a runtime estimate it no longer draws.
+// The same block also used to imply board 1 draws a charging duration: it does
+// not, because battChargeLabel() is inside power.ino's `#if !BOARD_USES_TFT_ESPI`
+// and is not compiled here - Task 3A's own concern (5), recorded at BATT_LEFT_BYTES.
 char battRowTextCache[BATT_ROW_CACHE] = "";
 uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
 // macRowCache STOOD HERE AND TASK 4 DELETED IT, with renderMacLinkRows() and the

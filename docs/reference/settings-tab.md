@@ -30,6 +30,19 @@ for exactly two commits each and Task 4 deleted both, along with `drawPager()`,
 `renderMacLinkRows()`. Both binaries came out of that deletion **byte-identical**,
 which is the proof the preprocessor was already excluding what it removed.
 
+**THE FOURTH GROUP IS CALLED `Pairing`, AND THE NAME IS A DECISION RATHER THAN AN
+OVERSIGHT (RULING 23).** `settingsGroupTitle()` returns `"Pairing"` for `SET_PAIRING`;
+the design spec's
+five-group body called it `Macs`, and so did amendment 1's own group-set line. That
+rename belonged to the five-group design, where the group was gaining `RESET PAIRING`
+and being re-cut - **it stopped happening when Ruling 10 made that page untouched**,
+and the page stopping is why nobody noticed the name stopping. Renaming the code at the
+end of an 18-commit branch would cost compiled bytes and a re-baseline to satisfy a
+naming preference, so the name stays and the documents were corrected instead. This
+file said both names for eleven commits, including in its own unverified list. Do not
+re-propose the rename as a tidy-up; if it is ever wanted, it is one commit plus
+`--update 1` and `--update 2`.
+
 **THE ACCURATE CLAIM, because "one surface" is narrower than it sounds:** one
 implementation, one navigation, one group set, and one geometry SOURCE (each board's
 own header) - with board 2 additionally carrying six lines of explanation its panel
@@ -39,7 +52,7 @@ has room for. See *what board 1 does not carry* below.
 
 **THE FIVE-GROUP SET WAS PROVEN IMPOSSIBLE ON BOARD 1, by arithmetic rather than by
 taste.** The plan was to fold RESET PAIRING and POWER OFF into Pairing and Device and
-finish at five groups. Board 1's Macs page **spends 216 of its 222px**: `P3_ANY_Y` 82
+finish at five groups. Board 1's Pairing page **spends 216 of its 222px**: `P3_ANY_Y` 82
 plus `H_ROW` 40, `P3_LIST_Y` 126, four Mac rows at `P3_ROW_STEP` 44 ending at 298, in
 a page region of `PAGE_TOP` 80..302. RESET PAIRING needs caption 13 +
 `SET_CAP_STEP` 21 + `P2_BTN_H` 44 = **78px that do not exist**. Abutting the rows
@@ -95,7 +108,7 @@ looks like proof and carries none.
 
 **One honest cost, recorded because nothing hides it: BOARD 1'S GROUPS CANNOT ALL
 START LEVEL.** Board 2's header states that every group starts level under the back
-band; on board 1 the Macs group has to start at `PAGE_TOP + 2` to fit four rows, so
+band; on board 1 the Pairing group has to start at `PAGE_TOP + 2` to fit four rows, so
 there is a real jog as you move between groups. It is 2px and it has not been seen.
 
 ### The DIAGNOSTICS compression, and what board 1 does not carry
@@ -143,11 +156,11 @@ name** rather than silently ignored.
 
 **`BOARD_SETTINGS_FITS_CAPTIONS` IS PERMANENT, AND IT IS NAMED FOR THE CAUSE.** Board
 1's settings pages are 222px against board 2's 356px, and that 134px is a physical
-fact about two panels that no refactor removes. Board 1's Display, Sound and Macs
+fact about two panels that no refactor removes. Board 1's Display, Sound and Pairing
 groups want **46, 55 and 42 more rows** than they have, so board 1 draws **none of
 board 2's six section captions and hints**: "THEME" and the AUTO explanation on
 Display, "ALERTS"/"MICROPHONE" and the beep hint on Sound, "ANSWER PROMPTS FROM" and
-"PAIRED MACS" on Macs. **Nothing regresses - board 1 never had them**; its combined
+"PAIRED MACS" on Pairing. **Nothing regresses - board 1 never had them**; its combined
 DISPLAY & SOUND page was three stepper cards and a row of three third-width buttons
 with no captions at all. The convergence gives board 1 board 2's *controls*, its
 *grouping* and its *navigation*; it does not give it board 2's *prose*, and it
@@ -196,12 +209,36 @@ layout and the wrong one for colour, and it is no instrument at all for touch.
   uncalled on both boards until this branch and have never been seen.
 - **Board 1's HOME at 42px rows**, and its `P3_ROW_H` at exactly `TAP_MIN` - the two
   places where the arithmetic clears the floor by 2 and by 0.
-- **The board-1 group jog**: its Macs group starts at `PAGE_TOP + 2` where the others
+- **The board-1 group jog**: its Pairing group starts at `PAGE_TOP + 2` where the others
   start level.
 - **Colour anywhere on board 2, even with a device attached.** `SCREENSHOT` reads the
   **shadow framebuffer** - the same buffer the renderer just wrote - so a capture is
   correct by construction even when the panel is wrong. `COLORTEST` is the instrument
-  for colour and **a person is the authority**.
+  for colour and **a person is the authority**. This bullet is complete **for board 2**
+  and says nothing about board 1; see the theme bullet below, which is a different kind
+  of unverified.
+- **Board 1's `HOME_GAP` is 2 - exactly `BORDER_CARD`, one full background row - and
+  whether six cards that close together still READ as six cards has never been seen.**
+  `board_e32r28t.h` records the constant as "the floor: one full background row", and
+  Task 3B's implementer raised it at the time. **The 42px-rows bullet above does not
+  cover this**, because the two claims are different in kind: that one is a TOUCH claim
+  (the row clears the fingertip floor by 2) and this one is a LEGIBILITY claim. Every
+  row can clear the floor and the list can still read as one undifferentiated block.
+  Nothing in this repo can test it - a geometry checker asserts the gap is 2, which is
+  the thing in question - and a person has not looked.
+- **NEITHER THEME HAS BEEN RENDERED ON BOARD 1, AND THAT VERIFICATION IS AVAILABLE,
+  CHEAP AND SIMPLY NOT DONE.** It is worth separating the two kinds of unverified on
+  this list, because a reader deserves to know which one each item is. Most items here
+  are unverified because no instrument in this repo CAN settle them: touch has no remote
+  tap, the severity spine is a shape and nothing tests a shape, colour on board 2 is
+  defeated by the shadow framebuffer. **Board 1 is not in that class.** `SCREENSHOT`
+  there reads a real TFT_eSPI panel rather than a shadow of it, so a capture on board 1
+  *can* settle colour; it costs about 18 seconds, and `THEME dark` / `THEME light`
+  drives both palettes from the Mac with no reflash. The spec's own verification section
+  lists exactly that step. So the six new group pages have never been seen in either
+  palette on the one board that could have shown them - **undone, not impossible**,
+  which is precisely the "a bug someone will believe was checked" shape this list exists
+  to prevent. Board 2's pages are unverified for colour in the other, harder sense.
 
 The previous SETTINGS redesign shipped with nothing on the glass and said so. So does
 this one.
