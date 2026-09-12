@@ -30,7 +30,7 @@ td.no{color:var(--bad);font-weight:600} td.yes{color:var(--ok);font-weight:600}
 #asciicheck.bad{background:rgba(180,35,24,.14);color:var(--bad)}
 </style>
 <body>
-<h1>Settings, redesigned</h1>
+<h1>Settings, redesigned &mdash; as shipped</h1>
 <p class="sub">Board 2, 320&times;480. Every glyph below is the <b>real Spleen bitmap</b> read out of
 <code>Spleen8x16.h</code> and <code>Spleen12x24.h</code>; every position is a constant parsed from
 <code>board_es3c35p.h</code>. No Mac font is used anywhere — the last mockup that reached for Menlo
@@ -45,83 +45,141 @@ flattered the design by about 30% more ink than the device can put on the glass.
   <label><input type="checkbox" id="boxes"> show text clear boxes</label>
 </div>
 
-<h2>The design <span>&mdash; A + B, all six screens</span></h2>
-<p>HOME plus five groups. The pager band becomes a <b>back band of exactly the same height</b>, so
-every group keeps <code>PAGE_TOP</code> 104 and the existing page code drops in under it. Each HOME
-row carries its group's current value, so the common question &mdash; what brightness, how many Macs,
-is the host talking to me &mdash; is answered with <b>no tap at all</b>.</p>
-<div class="row" id="s-ab"></div>
+<h2>What ships <span>&mdash; HOME and six groups, on both boards</span></h2>
+<p>HOME plus <b>Device, Display, Sound, Pairing, Messages and Danger</b>. The pager band became a
+<b>back band of exactly the same height</b>, so every group keeps <code>PAGE_TOP</code> 104 and not
+one page body had to be re-derived. Each HOME row carries its group's current value, so the common
+question &mdash; what brightness, how many Macs, is the host talking to me &mdash; is answered with
+<b>no tap at all</b>. Drawn here at board 2's geometry; board 1 draws the same surfaces from its own
+header, in a 222px page region against this board's 356px.</p>
+<div class="row" id="s-now"></div>
 
 <div class="note good">
-<b>Every page now lands between 16 and 48px of slack</b>, against 10&ndash;121 today. Measured by the
-headless checker that renders all ten screens:
+<b>Every page lands between 14 and 174px of slack, and the loose ones are NAMED.</b> Measured by the
+headless checker that renders all fifteen screens:
 <table>
-<tr><th></th><th>HOME</th><th>Status</th><th>Display</th><th>Sound</th><th>Pairing</th><th>Actions</th></tr>
-<tr><td>slack above the footer</td><td>18</td><td>24</td><td>31</td><td>27</td><td>16</td><td>48</td></tr>
+<tr><th></th><th>HOME</th><th>Device</th><th>Display</th><th>Sound</th><th>Pairing</th><th>Messages</th><th>Danger</th></tr>
+<tr><td>slack above the footer</td><td>14</td><td>50</td><td>27</td><td>27</td><td>29</td><td>80</td><td>174</td></tr>
 </table>
-Actions is the loosest at 48 and that is honest rather than padded &mdash; it holds three buttons,
-so they are drawn at 56px instead of 50 and given room to separate.
+Danger's 174 and Messages' 80 are not padding and not an oversight: a page with enough air in it is
+a page whose constants are constrained by nothing, so each surplus has a name in the header
+(<code>P2_AIR_BOT</code>, <code>P4_AIR_BOT</code>, <code>P1_AIR_BOT</code>, <code>PS_AIR_BOT</code>,
+<code>DEV_AIR_BOT</code>, <code>HOME_Y0_BOT</code>) and <code>settings-geom-check.mjs</code> asserts
+the closing SUM rather than the individual numbers. The Pairing figure is for three Macs and the
+button; with all four slots filled it is 16, which is the case the geometry actually has to survive
+and the case where PAIR NEW MAC is correctly absent.
+</div>
+
+<div class="note">
+<b>DEVICE is two slimmed cards over a six-line diagnostics block.</b> The two live cards went
+112&nbsp;&rarr;&nbsp;70 each, because each lost a line that was not about the question the card
+answers: the device name and the paired count moved to Pairing (a setting, beside the Macs it
+counts), and the SoC temperature became a diagnostics column. That paid for <b>eleven facts</b>
+&mdash; four host diagnostics, five About rows, the device's own name and the die temperature
+&mdash; which were previously a full card plus a whole About page, about 416px, for values nobody
+watches. Two facts do <i>not</i> reach the glass and that is written down rather than implied: the
+BT MAC's own line carries it, but the build TIME sits beside the date on the last line and the
+eleven facts fit eight two-column slots only because line
+<code>DEV_DIAG_TEMP_LINE</code> is deliberately solo.
+<br><br>
+<b>That line is solo because it is the one whose COLOUR means something.</b> A diagnostics line is
+one padded field with one colour, so a temperature sharing a line with the flush figure would have
+coloured the flush figure by temperature too. Giving it its own line is what let
+<code>colorForDieTemp()</code>'s warm/hot band come back &mdash; it had been left uncalled on
+<i>both</i> boards, so no warm/hot signal existed anywhere on the device.
+<br><br>
+<b>Board 1 draws no diagnostics block at all</b> and declares none of its constants
+(<code>BOARD_DEVICE_DIAGNOSTICS</code>), because that board has a CH340 console and these facts are
+a <code>screen</code> away. It carries CALIBRATE TOUCH under a SETUP caption instead.
+</div>
+
+<div class="note">
+<b>DANGER holds exactly two controls, and both of them destroy state.</b> It was called Actions and
+was a bag of verbs; MIC TEST left for Sound and CALIBRATE TOUCH left for board 1's Device group
+(board 2 does not offer it at all &mdash; the touch controller is factory-aligned inside the display
+IC, <code>runCalibration()</code> is not compiled there and <code>RECAL</code> is refused by name).
+What is left is RESET PAIRING and POWER OFF, so the name says what the page is for, which is the one
+thing standing between a finger and a destructive control.
+<br><br>
+<b>The severity spine exists because that page was breaking this repo's own rule.</b> Every action
+button was an identically shaped outlined slab differing only in stroke hue, on a device where
+session status gets a filled square, a hollow ring and a distinct mark precisely so that meaning is
+never carried by colour alone. A solid <code>P2_SPINE_W</code> (4px) bar carries severity as
+<b>ink mass</b>; the caption carries it as <b>position</b>; colour is the third cue rather than the
+only one. What keeps the bar off the corner arcs is its Y-inset, not its width. <b>The greyscale
+claim is ARGUED, not measured</b> &mdash; <code>palette-check.mjs</code> can test a colour pair and
+nothing in this repo tests a SHAPE.
+</div>
+
+<div class="note">
+<b>PAIRING gained the two things it lacked.</b> The live Mac rows moved here from the old page 0,
+where they were a second, differently-formatted copy of this same list; what the list gained with
+them is whether a remembered Mac is talking <i>right now</i>. And <b>PAIR NEW MAC takes the list's
+next free slot</b>, so its absence at four Macs is how the page says "full" &mdash; the same limit
+twice over, since the slot with no room on the screen is also the slot with no room in NVS. The
+<code>ONLY</code> tag rides beside the name rather than replacing anything, because selection here
+is the card's border <i>plus</i> a tag: two carriers, never hue alone.
 </div>
 
 <div class="note">
 <b>SOUND is a real group, not a leftover.</b> It carries output <i>and</i> input, because a mic test
 is a sound test &mdash; and it is the one action you run repeatedly, since <code>MIC_GAIN</code> is
-settled by watching <code>MICMON</code> while speaking rather than computed. Moving MIC TEST here is
-what takes ACTIONS down to three, so ACTIONS becomes purely <b>things that change or end state</b>.
-<ul style="margin:8px 0 0;padding-left:20px">
-<li><b>TEST BEEP</b> earns its place: the ES8311's volume scale is linear in dB, so LOW/MED/HIGH are
-<code>{55, 70, 85}</code> out of 100 and roughly 13dB apart, with everything under ~40 inaudible on
-this hardware. A word cannot tell you what a volume sounds like &mdash; the same reason the menu
-bar's sound picker plays on select, and the reason <code>TONELADDER</code> exists at all.</li>
-<li><b>No bar under VOLUME</b>, deliberately. <code>board_es3c35p.h</code> records that only
-BRIGHTNESS gets one, being the single continuous 0&ndash;100 setting; three named presets with a bar
-under them would be decoration. I kept that decision rather than quietly overriding it.</li>
-<li>The line under the toggle says <b>what actually beeps</b> &mdash; a needs-input transition, which
-is the beeper's only job. 32 characters at 8px is 256px centred on 320.</li>
-</ul>
+settled by watching <code>MICMON</code> while speaking rather than computed. <b>TEST BEEP</b> earns
+its place for the same reason: the ES8311's volume scale is linear in dB, so LOW/MED/HIGH are
+roughly 13dB apart and everything under ~40 is inaudible on this hardware &mdash; a word cannot tell
+you what a volume sounds like. There is no bar under VOLUME, deliberately: only BRIGHTNESS gets one,
+because it is the single continuous 0&ndash;100 setting and a bar under three named presets would be
+decoration.
 </div>
 
-<div class="note">
-<b>DISPLAY did not just lose VOLUME &mdash; it spent the 92px.</b> My first pass moved volume out and
-left the page with 127px of dead space, which is the exact defect this redesign exists to fix. So
-THEME stops being a cramped third-width <b>cycle</b> button and becomes a 3-segment selector that
-shows all three options at once. It was never a <code>uiToggle</code> anyway &mdash; it has three
-states, and a cycle button shows one while hiding the other two.
+<h2>The seven-group design <span>&mdash; superseded by the amendment of 2026-09-12</span></h2>
+<p>This mock drew seven groups until board 1 was measured. Kept and marked rather than deleted,
+which is this repo's rule about descriptions that turned out to be wrong: a reader comparing the
+spec's body against its amendment can see both pictures instead of taking the difference on trust.
+Display, Sound and Pairing were identical in both designs, so only the three screens the amendment
+actually moved are drawn.</p>
+<div class="row" id="s-g7"></div>
+
+<div class="note red">
+<b>THE FIVE-GROUP SET WAS IMPOSSIBLE ON BOARD 1, and so was folding the destructive verbs into
+Pairing.</b> Measured, from <code>board_e32r28t.h</code>: board 1's Macs page spends
+<b>216 of its 222px</b> &mdash; the ANY MAC row at 82, four Mac rows at step 44 ending at 298, in a
+region of 80..302. RESET PAIRING needs caption 13 + <code>SET_CAP_STEP</code> 21 +
+<code>P2_BTN_H</code> 38 = <b>72px that do not exist</b>. Abutting the rows saves 12; deleting the
+ANY MAC row saves 44 <i>and deletes a real setting</i>; both together still leave it 14 short; and
+capping the list at three slots breaks the four-Mac case, which is the only case the geometry has to
+survive. So the sixth group stayed, holding both destructive verbs, and it was renamed
+<b>Danger</b> &mdash; which is what it now is.
 <br><br>
-And AUTO finally says what it means: <code>AUTO = light 07:00 to 19:00</code>. <b>AUTO is a clock,
-not a sensor</b> &mdash; every ADC1 channel on this board is spoken for (touch, battery, mic) and
-ADC2 is unusable while BT is up, so there is no light to measure and never will be. Labelling it
-AUTO with nothing beside it implies hardware that does not exist, which is the same rule that stops
-the farewell screen promising a touch wake this board cannot do.
+<b>Three things that bought, none of them consolation prizes.</b> The "destructive group LAST" rule
+is <i>preserved</i> rather than reversed, so this design no longer contradicts a written rule
+anywhere. Board 2's HOME stayed at the 58/10 six-row pitch. And Device regained the ~80px POWER OFF
+was occupying, which is exactly what the SoC temperature needed to get its own line and its colour
+band back.
+<br><br>
+<b>The cost is written down too:</b> board 1's HOME carries six rows at 42px, which is
+<code>TAP_MIN</code>&nbsp;+&nbsp;2 &mdash; its rows sit near the fingertip floor rather than at the
+roomy five-row pitch. <code>42</code> is the only row height in the whole solution space with any
+margin over that floor, and the space was <b>searched and enumerated</b> (six (row, gap) pairs, 46
+four-tuples) rather than claimed unique. Board 2's own six-row space has <b>281</b> (R,&nbsp;G)
+pairs, so the uniqueness this spec once asserted for it was never there either.
 </div>
 
-<div class="note">
-<b>What else moved, and why.</b>
-<ul style="margin:8px 0 0;padding-left:20px">
-<li><b>STATUS leads with the two facts you came for</b> &mdash; is the host talking to me, and how is
-the battery &mdash; each a 12x24 line with its detail dimmed underneath. The eight diagnostic values
-collapse into one two-column card instead of eight full-width rows.</li>
-<li><b>The live Mac rows move to PAIRING.</b> Today they are on page 0 <i>and</i> page 3.
-Consolidating frees two rows on the busiest page and gives the pairing list the one thing it lacked:
-whether each remembered Mac is connected right now.</li>
-<li><b>ACTIONS gets captions and a severity spine.</b> The two destructive buttons sit under
-<code>CANNOT BE UNDONE</code> and carry a solid 4px bar &mdash; the same visual language the session
-rows already use &mdash; so severity survives greyscale and colour-blindness.</li>
-</ul>
-</div>
-
-<h2>What ships today <span>&mdash; for comparison</span></h2>
+<h2>What shipped before the branch <span>&mdash; for comparison</span></h2>
 <div class="row" id="s-cur"></div>
 
 <div class="note">
-<b>The pager costs 58px of every page and gives no overview.</b> <code>CONTENT_Y</code> 46 to
+<b>The pager cost 58px of every page and gave no overview.</b> <code>CONTENT_Y</code> 46 to
 <code>contentBottom()</code> 460 is 414px; <code>PAGER_H</code> 54 plus its 4px gap is
-<b>14% of it</b>, spent identically on all four pages purely to say where you are. There is no
-screen that shows what is set, the dots are not tappable, and STATUS to PAIRED MACS is three taps.
+<b>14% of it</b>, spent identically on all four pages purely to say where you are. There was no
+screen that showed what is set, the dots were not tappable, and STATUS to PAIRED MACS was three
+taps. Reaching any group is now exactly one tap, and zero for the questions HOME's summaries already
+answer. <b>The honest cost is the adjacent case:</b> moving between two groups is back-then-in, two
+taps, where the pager moved to a neighbour in one. That trade was taken knowingly.
 </div>
 
 <div class="note">
-<b>And the space it buys is distributed almost at random.</b>
+<b>And the space it bought was distributed almost at random.</b>
 <table>
 <tr><th>page</th><th>lowest ink</th><th>dead space above the footer (460)</th></tr>
 <tr><td>0 STATUS</td><td>449</td><td>10px</td></tr>
@@ -129,49 +187,37 @@ screen that shows what is set, the dots are not tappable, and STATUS to PAIRED M
 <tr><td>2 ACTIONS</td><td>373</td><td class="no">86px</td></tr>
 <tr><td>3 PAIRED MACS</td><td>338</td><td class="no">121px</td></tr>
 </table>
-Page 0 is packed while page 3 &mdash; shown above with all four pairing slots filled &mdash; wastes
-121px, nearly a third of the content area. Page 0 also carries <b>eleven identical label:value
-rows</b> across two cards, so <code>Bluetooth Connected</code> weighs exactly as much as
+Page 0 was packed while page 3 &mdash; shown above with all four pairing slots filled &mdash; wasted
+121px, nearly a third of the content area. Page 0 also carried <b>eleven identical label:value
+rows</b> across two cards, so <code>Bluetooth Connected</code> weighed exactly as much as
 <code>UPTIME 4h 12m</code>.
 </div>
 
 <div class="note red">
-<b>Two real defects found while measuring this, neither cosmetic.</b>
-<br><br>
-<b>1. <code>board_es3c35p.h:1689</code> describes a page that no longer compiles.</b> Its comment
-opens <i>"THREE buttons, not four: BOARD_HAS_MIC is 0 here"</i> &mdash; but line 18 of that same
-header is <code>#define BOARD_HAS_MIC 1</code>, set when the ES8311 capture path landed. So ACTIONS
-really has <b>four</b> buttons today, and the comment's arithmetic goes with it: it puts the hint at
-y=302 with 148px clear, where the real values are <b>364 and 86px</b>. It even scolds an earlier
-revision for copying board 1's four-button chain, and is now wrong in the opposite direction. Prose
-is not parsed, so no checker caught it.
-<br><br>
-<b>2. CLAUDE.md still calls MIC TEST an "open inconsistency"</b> that "reaches
-<code>micMonitor()</code>'s stub" and paints nothing. That was true before the capture path existed;
-the same file now documents that path as measured and working. The button is fine &mdash; the note
-about it is stale.
+<b>A defect found while measuring this, and it is the reason this mock is bound to the header at
+all.</b> <code>board_es3c35p.h</code>'s ACTIONS note opened <i>"THREE buttons, not four:
+BOARD_HAS_MIC is 0 here"</i> &mdash; and line 18 of that same header was
+<code>#define BOARD_HAS_MIC 1</code>, set when the ES8311 capture path landed. The whole arithmetic
+chain went with the premise: it put the hint at y=302 with 148px clear, where the real values were
+<b>364 and 86px</b>. Nothing could have caught it &mdash; every checker in this repo parses
+<code>const int</code> declarations and macros, and <b>a comment is neither</b>. It is worse than a
+wrong number, because it is the paragraph a reader consults BEFORE the constants and its arithmetic
+was internally consistent. That class was corrected <b>ten times</b> on this branch, the tenth
+inside the commit that swept fifteen sites for it.
 </div>
 
 <div class="note grey">
-<b>Severity on the ACTIONS page is carried by outline hue alone.</b>
-<code>uiButton</code>'s signature is <code>(..., uint16_t tint = COLOR_ACCENT, bool filled = false, ...)</code>
-and page 2's four calls all omit <code>filled</code> &mdash; so MIC TEST, CALIBRATE TOUCH, RESET
-PAIRING and POWER OFF are four <b>identically shaped outlined slabs</b> differing only in stroke
-colour. That is the one thing this repo's own rule forbids: status is never carried by colour alone,
-which is why session state gets a filled circle / filled square / hollow ring and the palette is
-checked for greyscale separability. The buttons never got that treatment.
-</div>
-
-<div class="note grey">
-<b>Not verified, and the honest list.</b> None of this is on the glass. The geometry is arithmetic
-from the header and the type is the real bitmap, but three things need checking before any of it is
-built: the <b>repaint cost</b> of a HOME&rarr;group transition (a full flush is ~30ms on this board,
-the same as today's page switch &mdash; no regression, but not free); whether
-<code>drawSettingsStatic()</code>'s cache-reset discipline extends cleanly to a screen enum rather
-than a page index; and the <b>RAM</b> for HOME's summary strings, which should be zero if they are
-composed into an existing scratch buffer rather than stored. The severity spine and HOME's 70px
-pitch also need <code>settings-geom-check.mjs</code> assertions, or they are constants no checker
-parses &mdash; which is exactly how the stale comment above happened.
+<b>Not verified, and this is the whole honest list. NOTHING HERE HAS BEEN ON THE GLASS.</b> No
+device was attached for any of the six tasks that built this. The evidence is arithmetic, bitmaps
+and binaries, which is the right instrument for layout and the wrong one for colour. Specifically
+unverified: <b>every touch path</b> on HOME and in all six groups on both boards, since the device
+deliberately has no remote tap; the severity spine's <b>greyscale claim</b>
+(<code>palette-check.mjs</code> can test a colour pair and nothing in this repo tests a shape); the
+SoC temperature band's <b>three colours</b>; board 1's HOME at 42px rows and its
+<code>P3_ROW_H</code> at exactly <code>TAP_MIN</code>; the board-1 group jog (its Macs group cannot
+start level with the others); and on board 2 <code>SCREENSHOT</code> <b>cannot settle colour at
+all</b>, because it reads the shadow framebuffer the renderer just wrote. <code>COLORTEST</code> is
+the instrument for colour and a person is the authority.
 </div>
 
 <script src="spleenfonts.js"></script>

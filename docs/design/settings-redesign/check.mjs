@@ -11,14 +11,14 @@
 // the geometry checkers' own consts() parser, so a header change that the mock
 // does not follow fails HERE, by name, with both numbers printed.
 import fs from "node:fs";
-import { consts } from "../../../firmware/deckhand_display/geom-common.mjs";
+import { consts, fnBody, readSource } from "../../../firmware/deckhand_display/geom-common.mjs";
 const D=new URL("./",import.meta.url).pathname;
 globalThis.document={getElementById:()=>null,querySelectorAll:()=>[],createElement:()=>({appendChild(){},style:{},getContext:()=>null})};
 globalThis.addEventListener=()=>{};
 const src=fs.readFileSync(D+"spleenfonts.js","utf8")+fs.readFileSync(D+"settings.js","utf8")
-  +"\nglobalThis.__X={SCREENS,P,K,WAS,BAD_CHARS,ADV,CELL,F};";
+  +"\nglobalThis.__X={SCREENS,P,K,WAS,HOME_ROWS,BAD_CHARS,ADV,CELL,F};";
 new Function(src)();
-const {SCREENS,P,K,WAS,BAD_CHARS,ADV,CELL,F}=globalThis.__X;
+const {SCREENS,P,K,WAS,HOME_ROWS,BAD_CHARS,ADV,CELL,F}=globalThis.__X;
 let fail=0,n=0;
 const chk=(c,m)=>{n++; if(!c){fail++; console.log("  FAIL "+m);}};
 
@@ -42,24 +42,61 @@ const chk=(c,m)=>{n++; if(!c){fail++; console.log("  FAIL "+m);}};
   // same way, so what is asserted is the identity rather than the number.
   chk(K.contentBottom===H.BOARD_H-H.FOOTER_H,
       `contentBottom ${K.contentBottom} == BOARD_H - FOOTER_H (${H.BOARD_H-H.FOOTER_H})`);
-  // WAS is the REPLACED page's geometry and is deliberately unbound - a before
-  // picture that tracked the header would stop being a before picture the moment
-  // the header moved. Sharing a NAME with K is expected and not a fault: the
-  // redesign kept most of the names and moved the values, which is exactly what a
-  // before picture has to show. What must not happen is a WAS entry that says
-  // nothing - one whose value the header (or K) already gives, which is a
-  // duplicate free to drift and is how a live constant gets parked out of the
-  // bind. So every entry has to EARN its place by differing from what ships.
+  // WAS holds the geometry of pages this mock still DRAWS and the firmware no
+  // longer has - the pre-branch pager pages under their plain names, and the
+  // SEVEN-GROUP design the 2026-09-12 amendment replaced under a G7_ prefix. It is
+  // deliberately unbound: a before picture that tracked the header would stop being
+  // a before picture the moment the header moved. Sharing a NAME with K is expected
+  // and not a fault - the redesign kept most of the names and moved the values,
+  // which is exactly what a before picture has to show.
+  //
+  // WHAT MUST NOT HAPPEN is a WAS entry that says nothing: one whose value the
+  // header (or K) already gives is a duplicate free to drift, and is how a live
+  // constant gets parked out of the bind. So every entry EARNS its place by
+  // differing from what ships. THE G7_ PREFIX IS RESOLVED BEFORE THAT TEST rather
+  // than exempted from it - a marker that bought an entry its way out of the rule
+  // would be the escape hatch the rule exists to close.
+  let g7 = 0;
   for(const [name,val] of Object.entries(WAS)){
-    if(name in K)
-      chk(WAS[name]!==K[name],
-          `WAS.${name} is ${val}, the same as K.${name} - it records nothing and belongs in K`);
+    const base = name.replace(/^G7_/, "");
+    if(base !== name) g7++;
+    if(base in K)
+      chk(val!==K[base],
+          `WAS.${name} is ${val}, the same as K.${base} - it records nothing and belongs in K`);
     else
-      chk(!(name in H),
-          `WAS.${name} is still a live constant (header says ${H[name]}) - it belongs in K`);
+      chk(!(base in H),
+          `WAS.${name} is still a live constant (header says ${base} is ${H[base]}) - it belongs in K`);
   }
   console.log(`  header bind: ${bound} of ${Object.keys(K).length-1} mock constants `
-             +`checked against board_es3c35p.h, ${Object.keys(WAS).length} in WAS (the replaced page)`);
+             +`checked against board_es3c35p.h, ${Object.keys(WAS).length} in WAS `
+             +`(${Object.keys(WAS).length-g7} pre-branch, ${g7} seven-group)`);
+
+  // ---- HOME's rows against the firmware's OWN table -----------------------
+  // The picture below draws six named rows. The names are not the mock's to
+  // choose: settingsGroupTitle() is the one table the back band's title and HOME's
+  // row name both read, so a group renamed there and not here would leave this
+  // mock drawing a menu the device does not have. Parsed out of that function's
+  // body, in its own order, rather than transcribed - the same rule the geometry
+  // checkers follow for constants, arriving on the strings.
+  {
+    const body = fnBody(readSource("settings.ino"),
+                        "const char* settingsGroupTitle", "settings.ino");
+    const titles = [...body.matchAll(/return "([^"]+)";/g)].map(m => m[1]);
+    chk(titles.length === H.SET_GROUP_COUNT,
+        `settingsGroupTitle() yields ${titles.length} names, SET_GROUP_COUNT is ${H.SET_GROUP_COUNT}`);
+    chk(HOME_ROWS.length === H.SET_GROUP_COUNT,
+        `HOME draws ${HOME_ROWS.length} rows, SET_GROUP_COUNT is ${H.SET_GROUP_COUNT}`);
+    HOME_ROWS.forEach(([name], i) => {
+      chk(titles[i] === name,
+          `HOME row ${i} is "${name}", settingsGroupTitle() says "${titles[i]}"`);
+    });
+    // And the summaries fit the lane the header sizes: HOME_SUB_CHARS is what
+    // renderSettingsHome() pads to, so a summary longer than it is a summary the
+    // device truncates - invisible in a mock that does not measure it.
+    for(const [name, sub] of HOME_ROWS)
+      chk(sub.length <= H.HOME_SUB_CHARS,
+          `HOME's "${name}" summary is ${sub.length} chars, HOME_SUB_CHARS is ${H.HOME_SUB_CHARS}`);
+  }
 }
 
 // ---- the picture ----------------------------------------------------------
