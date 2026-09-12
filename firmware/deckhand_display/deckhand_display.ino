@@ -3474,29 +3474,29 @@ const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
 // own on either board rather than shrinking these further.
 //
 // BOARD 2 DERIVES ITS OWN CHAIN and does not compile the arm below at all: its
-// Actions group is a captioned SAFE section and a captioned DESTRUCTIVE one, so
-// nothing about it is a single evenly-gapped column any more. MIC TEST lives on
-// its SOUND group there, so P2_MIC_Y does not exist on that board - which is why
-// the #if below is on BOARD_SETTINGS_HOME and not on BOARD_HAS_MIC, a flag that
-// is 1 on both boards and therefore cannot tell them apart. Board 1's arm is the
-// text that was always here.
+// DANGER group is ONE captioned section holding the two controls that destroy
+// state, so nothing about it is a four-button evenly-gapped column any more. MIC
+// TEST lives on its SOUND group there and CALIBRATE TOUCH is not offered at all
+// (runCalibration() is a stub on that board), so neither P2_MIC_Y nor P2_CAL_Y
+// exists there - which is why the #if below is on BOARD_SETTINGS_HOME and not on
+// BOARD_HAS_MIC, a flag that is 1 on both boards and therefore cannot tell them
+// apart. Board 1's arm is the text that was always here.
 #if BOARD_SETTINGS_HOME
-// ---- board 2: the ACTIONS group ----
-// Two captioned sections. The gap between them is P2_SECTION_GAP rather than
-// P2_GAP: separation is one of the three carriers of severity here (position,
-// ink mass, hue), so the destructive pair must not read as a continuation of the
-// column CALIBRATE TOUCH sits in.
-const int P2_SETUP_CAP_Y = PAGE_TOP + P2_TOP;
-const int P2_CAL_Y = P2_SETUP_CAP_Y + SET_CAP_STEP;
-const int P2_DANGER_CAP_Y = P2_CAL_Y + P2_BTN_H + P2_SECTION_GAP;
+// ---- board 2: the DANGER group ----
+// ONE captioned section, two buttons. The gap between them is SP_3, the page
+// rhythm, rather than a P2_GAP or a P2_SECTION_GAP of their own: they are inside
+// one section, and both the constants that named the OTHER two relationships went
+// with the sections they separated. P2_SETUP_CAP_Y and P2_CAL_Y are gone with
+// CALIBRATE TOUCH rather than left computing a y nothing draws at, for the reason
+// P2_MIC_Y's absence is asserted one board over - a constant a draw site no longer
+// uses but a hit test still does is how a page comes to claim taps for a button it
+// does not draw. settings-geom-check.mjs asserts each absence by name.
+const int P2_DANGER_CAP_Y = PAGE_TOP + P2_TOP;
 const int P2_PAIR_Y = P2_DANGER_CAP_Y + SET_CAP_STEP;
-// THE CHAIN STOPS HERE ON THIS BOARD. P2_PWR_Y and P2_HINT_Y are gone with POWER
-// OFF and the hint that explained it, which are drawn at the foot of the DEVICE
-// group now - and they are DELETED rather than left computing a y nothing draws
-// at, for the reason P2_MIC_Y's absence is asserted one board over: a constant a
-// draw site no longer uses but a hit test still does is how a page comes to claim
-// taps for a button it does not draw. settings-geom-check.mjs asserts both are
-// undefined on this board.
+const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + SP_3;
+// AND NO P2_HINT_Y ON THIS BOARD. "power off = deep sleep, RESET to wake" is in the
+// confirm dialog POWER OFF raises here, which is nearer the decision than a line
+// under the button ever was; board 1 keeps the hint because its dialog is smaller.
 #else
 #if BOARD_HAS_MIC
 const int P2_MIC_Y = PAGE_TOP + P2_TOP;
@@ -3614,15 +3614,18 @@ int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
 // DEVICE group has a POWER card", and the first board to have one and not the other
 // would fail to compile on a line whose comment blames the wrong flag.
 #if BOARD_SETTINGS_HOME
-// THE SoC TEMP'S TWO CACHES ARE GONE FROM THIS BOARD, and so is its colour. The
-// reading shares a DIAGNOSTICS line with the flush figure now, and a line is ONE
-// padded field with one colour - so colouring it by temperature would be colouring
-// the flush figure by temperature too, which is a claim about the wrong number.
-// What is lost is the warm/hot BAND, not the reading: the value is still on this
-// page, still on HOME's DEVICE summary row, and still what TEMP reports.
-// colorForDieTemp() is left where it is in power.ino; it was already uncalled on
-// board 1 and is now uncalled on both, which is a re-home for whoever wants the
-// band back rather than a deletion that would move board 1's binary.
+// THE SoC TEMP'S WARM/HOT BAND IS BACK, and the note that used to stand here
+// recorded exactly why it had gone: the reading shared a DIAGNOSTICS line with the
+// flush figure, a line is ONE padded field with one colour, and colouring it by
+// temperature would have been colouring the flush figure by temperature too. That
+// reasoning was right and the consequence was not acceptable - colorForDieTemp()
+// ended up uncalled on BOTH boards, so the device had a temperature on the glass
+// and no warm/hot SIGNAL anywhere at all. POWER OFF leaving this group for DANGER
+// buys the line, so the temperature has one to itself (DEV_DIAG_TEMP_LINE) and its
+// colour is about its own value again. The cache below is what makes the colour
+// REACH the panel: drawIfChanged compares text only, and "SoC 56.0 C" -> "SoC 56.1 C"
+// is a text change while 54.9 -> 55.0 crossing into COLOR_WARN need not be one.
+uint16_t devDiagTempColorCache = 0;
 #endif
 // PER BOARD, because the two boards genuinely draw different strings here and a
 // cache shorter than its string silently stops noticing changes past that point.
@@ -3650,14 +3653,14 @@ char macRowCache[MAX_LINKS][40] = {"", ""};
 char stVerdictCache[ST_VERDICT_BYTES] = "";
 char stLinksCache[ST_LINE_BYTES] = "";
 char stLeftCache[ST_LINE_BYTES] = "";
-// THE DIAGNOSTICS BLOCK'S FOUR LINES, one cache each. They replace stIdCache (the
+// THE DIAGNOSTICS BLOCK'S FIVE LINES, one cache each. They replace stIdCache (the
 // CONNECTION card's second line, whose two halves went to DIAGNOSTICS and to the
 // Pairing group) and the HOST card's stPayload/stFlush/stUptime/stMacs, which were
 // four caches for four HALF-lines; a line is one padded field here, so it is one
 // cache. Every one of the four is composed each tick and compared here, the fixed
 // ones included - a value on the static side is a value that goes stale silently,
 // and "Deckhand-C114 ES3C35P" is only fixed until someone renames the device.
-char devDiagCache[DEV_DIAG_LINES][DEV_DIAG_BYTES] = {"", "", "", ""};
+char devDiagCache[DEV_DIAG_LINES][DEV_DIAG_BYTES] = {"", "", "", "", ""};
 // THE VERDICT LINE'S COLOUR, cached beside its text and busting it on a flip -
 // the guard battRowColorCache documents, and needed here for a reason that is not
 // hypothetical: "Both links up" is ONE string across a COLOR_GOOD -> COLOR_WARN

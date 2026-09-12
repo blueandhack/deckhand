@@ -1787,36 +1787,53 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 // name the constant each is measured from rather than standing on their own.
 // Trailing air today, from the last thing each group draws to contentBottom():
 //   HOME     0   the six rows land EXACTLY on 460, by construction
-//   DEVICE   0   DEV_PWR_BTN_Y + P2_BTN_H = 460, exactly, and DEV_AIR_BOT says so
+//   DEVICE  49   the 6th DIAGNOSTICS line's box ends 410; DEV_AIR_BOT says so
 //   DISPLAY 14   P1_FLIP_Y + H_ROW = 446
 //   SOUND   12   PS_MIC_Y + PS_BTN_H = 448
 //   PAIRING 10   P3_LIST_Y + 3*P3_ROW_STEP + P3_ROW_H = 450, with four Macs
-//   ACTIONS 158  RESET PAIRING ends 302; POWER OFF and its hint left for DEVICE
+//   DANGER  196  POWER OFF ends 263; P2_AIR_BOT says so
 // Growing the gaps until every group's last row lands 8px above the footer, the
 // way the USAGE column does, is still rejected on the same arithmetic: it needs a
-// gap wider than the 16px rows it separates. ACTIONS keeps its 56 deliberately -
-// the hint takes SET_CAP_STEP from the button it explains, and floating it down to
-// the footer would make it read as page furniture.
+// gap wider than the 16px rows it separates. DEVICE and DANGER keep their air
+// deliberately and each block says why - floating either down to the footer would
+// make it read as page furniture rather than as the top of its group.
 
 // ---------- SETTINGS: HOME and the six groups ----------
 // settingsPage carries HOME plus six group ids rather than a second state
 // variable, because two variables tracking one screen is how a UI ends up
 // drawing one page while hit-testing another.
 //
-// MESSAGES SITS AFTER PAIRING AND BEFORE ACTIONS, and the position is an
+// MESSAGES SITS AFTER PAIRING AND BEFORE DANGER, and the position is an
 // argument rather than a preference. It is about the Mac relationship, which is
 // what Pairing is about - which Macs exist, which may answer, and now how what
 // this device sends lands in the one it is talking to - so it reads as the next
-// sentence rather than as a stray. And Actions stays LAST because it is the only
+// sentence rather than as a stray. And DANGER stays LAST because it is the only
 // group that destroys state; a destructive group in the middle of a menu is the
 // one thing this list's order actually has to protect.
+//
+// ACTIONS IS CALLED DANGER NOW, AND THE RENAME IS THE GROUP FINALLY MATCHING ITS
+// CONTENTS. "Actions" was a bag of verbs that each belonged to another group, and
+// this repo conceded that once already when MIC TEST left for SOUND on the grounds
+// that a mic test IS a sound test. CALIBRATE TOUCH leaves next (board 1's DISPLAY
+// group; on this board it is dropped outright, because runCalibration() here is a
+// stub - the touch controller is factory-aligned inside the display IC). What is
+// left is exactly the two controls that DESTROY STATE: RESET PAIRING and POWER OFF.
+//
+// SO THE ORDERING RULE ABOVE IS PRESERVED RATHER THAN REVERSED, and that is worth
+// saying because the redesign this branch is executing planned the opposite. The
+// plan was to dissolve the group and re-home both verbs beside the things they act
+// on - RESET PAIRING at the foot of MACS, POWER OFF at the foot of DEVICE - moving
+// the protection from MENU ORDER to PAGE POSITION. It was tried and it does not
+// fit: see the DANGER block below for board 1's arithmetic, which is what decided
+// it. The group survives, the rule survives with it, and this comment is the only
+// record either way.
 // ONE LINE, and it has to stay one line: geom-common.mjs parses `const int`
 // declarations with /^const int (...);/m, so a wrapped one is invisible to every
 // checker that reads these ids. It failed loudly when this was split (seven
 // assertions reporting `undefined == NaN`) rather than passing over half of them,
 // which is the only reason this is a note instead of a defect.
-const int SET_HOME = 0, SET_DEVICE = 1, SET_DISPLAY = 2, SET_SOUND = 3, SET_PAIRING = 4, SET_MESSAGES = 5, SET_ACTIONS = 6;
-const int SET_GROUP_COUNT = 6;   // SET_DEVICE..SET_ACTIONS, contiguous by design
+const int SET_HOME = 0, SET_DEVICE = 1, SET_DISPLAY = 2, SET_SOUND = 3, SET_PAIRING = 4, SET_MESSAGES = 5, SET_DANGER = 6;
+const int SET_GROUP_COUNT = 6;   // SET_DEVICE..SET_DANGER, contiguous by design
 // STATUS IS CALLED DEVICE NOW AND ABOUT IS GONE AS A GROUP, which is one change
 // rather than two: About's five facts were a page you opened once, and the four
 // HOST diagnostics beside them were a card of the same kind. They are four
@@ -1899,12 +1916,19 @@ const int SET_CAP_STEP = 24;
 // well. The mock is re-drawn against these constants in its own task; until then
 // it is the record of the page this one replaced.
 //
-// TWO CARDS, A BLOCK OF DIAGNOSTICS AND ONE BUTTON, and the shape is what made
-// three pages fit on one. The two facts you actually came for - is the host
-// talking to me, and how is the battery - lead a card each as a T_HEAD line with
-// one dimmed detail under it. The nine you read almost never are four monospace
-// lines under a caption. The one destructive control on this board that is not
-// about pairing is last, under a caption of its own.
+// TWO CARDS AND A BLOCK OF DIAGNOSTICS, and the shape is what made three pages fit
+// on one. The two facts you actually came for - is the host talking to me, and how
+// is the battery - lead a card each as a T_HEAD line with one dimmed detail under
+// it. The eleven you read almost never are five monospace lines under a caption.
+//
+// POWER OFF IS NOT ON THIS PAGE ANY MORE. It was, for exactly one commit of this
+// branch, while ACTIONS was being dissolved; ACTIONS survives as DANGER (see its
+// own block for the arithmetic that decided that), so the button went back to the
+// group that holds the other control which destroys state. What the page KEEPS
+// from that round is the compression that paid for it - About's five facts and the
+// HOST card's four are DIAGNOSTICS lines here, not two pages - so the 80 rows POWER
+// OFF took with it are spent on the two facts that compression dropped and on
+// giving the die temperature a line, and a COLOUR, of its own.
 //
 // THE PER-MAC ROWS ARE GONE FROM THIS PAGE - they moved to the Pairing group,
 // where the Macs already are. They were on BOTH pages, and that duplication is
@@ -1915,15 +1939,21 @@ const int SET_CAP_STEP = 24;
 //   116..185  CONNECTION        ST_CONN_Y, ST_CONN_H
 //   198..267  POWER             ST_PWR_Y,  ST_PWR_H      (12px gap, SP_3)
 //   280..295  "DIAGNOSTICS"     DEV_DIAG_CAP_Y           (12px gap, SP_3)
-//   304..373  four lines        DEV_DIAG_Y, DEV_DIAG_STEP, DEV_DIAG_LINES
-//   380..395  "CANNOT BE UNDONE" DEV_PWR_CAP_Y           (6px gap)
-//   404..459  POWER OFF         DEV_PWR_BTN_Y, P2_BTN_H
-//   460       contentBottom(), reached EXACTLY - see DEV_AIR_BOT
+//   304..409  six lines         DEV_DIAG_Y, DEV_DIAG_STEP, DEV_DIAG_LINES
+//   411..459  49 rows clear     DEV_AIR_BOT, and it is NAMED rather than left over
 //
-// THE PAGE IS FULL, and that is stated rather than left to be discovered. There
-// are six rows of slack in the whole stack and all six are inside the two cards'
-// pads; every gap between blocks is named and asserted. A seventh fact cannot be
-// added here by nudging something - it has to displace something.
+// THE PAGE IS NO LONGER FULL, and the previous revision of this paragraph said it
+// was - which was true while POWER OFF ended the stack on 460 with nothing spare.
+// It does not, so the claim is corrected rather than deleted: there are 49 rows
+// under the last diagnostics line. They are not spent on a sixth line, because the
+// eleven facts fit in five and a blank right column is a line that reads as a
+// rendering fault; they are not spent on widening the gaps, for the reason the
+// rhythm paragraph further up already gives; and they are not spent by floating the
+// block down to the footer, because every group on this board is TOP-ALIGNED under
+// the band. So the air is named, asserted as the closing term, and available to
+// whoever brings the next fact - which is the state this page was in before About
+// was folded into it, and the state the "a seventh fact has to DISPLACE something"
+// sentence was written to describe.
 //
 // THE TWO LIVE CARDS CARRY ONE DETAIL LINE EACH, not two, and 112 -> 70 is what
 // paid for the rest of the page. CONNECTION shed `deviceName, N paired`: the name
@@ -1970,22 +2000,45 @@ const int ST_VERDICT_BYTES = ST_VERDICT_CHARS + 1;
 const int ST_BIG_CHARS     = 11;
 const int ST_LINE_CHARS    = 28;
 const int ST_LINE_BYTES    = ST_LINE_CHARS + 1;
-// ---- DIAGNOSTICS: nine facts you read almost never, in four lines ----
+// ---- DIAGNOSTICS: eleven facts you read almost never, in five lines ----
 // They used to be the HOST card's four (payload, flush, uptime, live Macs) plus
 // About's five (build, time, commit, board, BT MAC), the first in a 92px card and
 // the second in five 46px uiListRows under their own caption and hint - ~416px of
-// page for nine values nobody watches. Here they are four lines under one caption:
-// both faces on this board are monospace, so column alignment does the work
-// uiListRow's 46px of chrome was doing, and ~416px becomes 94.
+// page for values nobody watches. Here they are five lines under one caption: both
+// faces on this board are monospace, so column alignment does the work uiListRow's
+// 46px of chrome was doing, and ~416px becomes 112.
 //
-// TWO OF THE ELEVEN DID NOT SURVIVE, and that is a decision rather than an
-// oversight. Eleven facts do not fit eight two-column slots, so the build TIME
-// (__TIME__, which only distinguishes two builds made on the same day - the build
-// DATE and the commit both already do that better) and the BT MAC (which the Mac
-// end knows, and which WHOAMI and the boot HELLO both report) are off the glass.
+// ALL ELEVEN ARE HERE NOW. Two were dropped when this block was four lines - the
+// build TIME and the BT MAC - because eleven facts do not fit eight two-column
+// slots. POWER OFF leaving for the DANGER group buys two more lines, and the two
+// facts come back the way they were dropped: named, with the arithmetic.
+//
+// AND THE DEVICE NAME AND THE BOARD NAME NO LONGER SHARE A COLUMN. They did, and
+// the argument was "they are one fact - which device this is" AND "nine facts do
+// not fit eight slots". The second half was the load-bearing one and it is gone, so
+// the pairing is re-cut on what each column actually says next to its neighbour:
+//   0  payload      | flush          how big a frame is, and how slow
+//   1  SoC temp                      alone, and COLOURED - see DEV_DIAG_TEMP_LINE
+//   2  BT address   | live Macs      the radio, and how many Macs are on it
+//   3  device name  | uptime         what it calls itself, and how long it has been
+//   4  board        | commit         which board, and which build
+//   5  build date   | build time     when that build was made
+// Every pair is measured against DEV_DIAG_CHARS by settings-geom-check.mjs at each
+// column's own worst case, so "it fits" is asserted rather than eyeballed here; the
+// widest is line 0 at 30 of 32.
+//
+// THE DIE TEMPERATURE HAS A LINE TO ITSELF, and that is the only reason a line here
+// is ever allowed a blank right column. A line is ONE padded field with ONE colour
+// (see DEV_DIAG_CHARS), so a temperature sharing a line with the flush figure means
+// colouring the flush figure by temperature - a claim about the wrong number. That
+// is why the warm/hot band was lost when this block was built, and colorForDieTemp()
+// has been uncalled on BOTH boards ever since: the reading was on the glass and the
+// SIGNAL was not. Alone on its line, the field's colour is about its own value
+// again. The cost is one half-line of air; the alternative was a band that exists
+// in power.ino and nowhere a person can see.
 //
 // The block is NOT a card. It sits on COLOR_BG at the same CARD_X + PAD the cards'
-// text uses, so the four lines align with the two cards above them.
+// text uses, so the six lines align with the two cards above them.
 const int DEV_DIAG_CAP_Y = 280;   // 12px (SP_3) under the POWER card
 const int DEV_DIAG_Y     = 304;   // DEV_DIAG_CAP_Y + SET_CAP_STEP, the one caption step
 // 18 IS THE SMALLEST STEP THAT KEEPS TWO LINES APART, and it is smallest for a
@@ -1994,7 +2047,22 @@ const int DEV_DIAG_Y     = 304;   // DEV_DIAG_CAP_Y + SET_CAP_STEP, the one capt
 // row +16 and each repaint erases a row of its neighbour. Derived from the cell,
 // not chosen: T_META is 16 here (Spleen 8x16, see UI_FONTS), so 16 + 2.
 const int DEV_DIAG_STEP  = 18;
-const int DEV_DIAG_LINES = 4;
+// SIX, up from four, and the two extra lines are what POWER OFF's 80 rows bought.
+// Six rather than five, which is what the page was costed at: eleven facts in two
+// columns is five lines ONLY if the die temperature shares one, and it cannot (see
+// DEV_DIAG_TEMP_LINE). Ten paired facts is five lines, plus the solo one is six.
+// The count is not a free parameter: drawDeviceDiagnostics() draws exactly this many
+// drawIfChanged fields and settings-geom-check.mjs counts them out of that
+// function's own body, so a line added to one side and not the other fails by name
+// rather than painting through the air below the block.
+const int DEV_DIAG_LINES = 6;
+// WHICH LINE CARRIES THE COLOURED FIELD, zero-based, and it is a CONSTANT because
+// two places have to agree about it: drawDeviceDiagnostics() colours that line by
+// colorForDieTemp() and busts its cache from devDiagTempColorCache, and the checker
+// asserts the pairing table has no right-hand column for it. A literal 1 in the
+// draw site is how the temperature ends up coloured on a line that now holds the
+// uptime.
+const int DEV_DIAG_TEMP_LINE = 1;
 // ONE PADDED FIELD PER LINE, not one per column. Both columns of a line go into a
 // single fixed-width string with the right value flush to the lane's right edge -
 // which is exact here because the face is monospace - so the columns cannot drift
@@ -2004,38 +2072,28 @@ const int DEV_DIAG_LINES = 4;
 // right margin of 289.
 const int DEV_DIAG_CHARS = (CARD_W - 2 * PAD) / TEXT_ADV;   // 32
 const int DEV_DIAG_BYTES = DEV_DIAG_CHARS + 1;
-// ---- POWER OFF, last on the page, under its own caption ----
-// Actions is not dissolved yet, but this control has left it, so the "destructive
-// group last" rule that list leaned on no longer protects this button. The
-// protection is now POSITION (last on the page, under a caption of its own), the
-// severity spine's INK MASS, and the confirm dialog - all three adjacent to the
-// control instead of being a property of a list you have already left.
+// ---- the page's closing term ----
+// DEV_PWR_CAP_STEP, DEV_PWR_CAP_Y AND DEV_PWR_BTN_Y ARE GONE WITH THE BUTTON, not
+// left computing a y nothing draws at. That is the P2_MIC_Y rule, which this page
+// invoked from the other side one commit ago: a constant a draw site no longer uses
+// but a hit test still does is exactly how a page comes to claim taps for a button
+// it does not draw. settings-geom-check.mjs asserts all three are undefined on this
+// board, and the Device group's touch arm is deleted outright rather than left
+// empty - this page is read-only now and claims no taps at all.
 //
-// THE HINT THAT USED TO EXPLAIN IT DID NOT COME WITH IT. "power off = deep sleep,
-// RESET to wake" needed 24 more rows than this page has, and the fact is not lost:
-// the confirm dialog this button raises says "deep sleep - press RESET to wake" at
-// the moment the choice is actually made, which is nearer the decision than a hint
-// under the button ever was.
-// DERIVED FROM THE DIAGNOSTICS CHAIN, not placed beside it, and that is what gives
-// DEV_AIR_BOT its teeth. With these as literals a widened DEV_DIAG_STEP left POWER
-// OFF exactly where it was: the lines grew into the gap under them, every block was
-// still inside the page, and the closing identity below - the assertion that exists
-// to catch precisely that - saw nothing at all. Derived, one extra pixel of line
-// pitch moves the button 3px past the footer and the identity fails by name.
-const int DEV_PWR_CAP_STEP = 22;  // the LAST line's datum -> the caption's own datum:
-                                  // its 16px cell plus 6, and > the cell is asserted
-const int DEV_PWR_CAP_Y = DEV_DIAG_Y + (DEV_DIAG_LINES - 1) * DEV_DIAG_STEP + DEV_PWR_CAP_STEP;
-const int DEV_PWR_BTN_Y = DEV_PWR_CAP_Y + SET_CAP_STEP;
-// THE NAMED SURPLUS THAT CLOSES THE STACK, and it is ZERO here rather than absent.
-// Same shape as HOME_Y0_BOT, P4_AIR_BOT and PAIR_AIR_LEFT, and it exists for the
-// reason geom-sweep found rather than one anybody argued: air that is not named is
-// slack no assertion constrains, and every constant above it reads as unguarded at
-// +-16. Zero is the honest value - the page ends exactly on contentBottom() - and
-// the assertion is the IDENTITY, so any term in the chain above moving fails here.
-// The "a block ending flush on contentBottom reads as joined to the footer" rule
-// that P4_AIR_BOT answers to does not bite: what ends here is a BUTTON with its own
-// border, not a line of text, and the footer is chrome of a different weight.
-const int DEV_AIR_BOT   = 0;      // DEV_PWR_BTN_Y + P2_BTN_H == 404 + 56 == 460
+// THE NAMED SURPLUS THAT CLOSES THE STACK. Same shape as HOME_Y0_BOT, P4_AIR_BOT
+// and PAIR_AIR_LEFT, and it exists for the reason geom-sweep found rather than one
+// anybody argued: air that is not named is slack no assertion constrains, and every
+// constant above it reads as unguarded at +-16. It was 0 while POWER OFF ended the
+// page; what it closes now is the DIAGNOSTICS BLOCK, so it is measured from the
+// last line's drawIfChanged box (which clears y-1..y+cellH, one row past the cell
+// at each end) and not from its ink:
+//   DEV_DIAG_Y + (DEV_DIAG_LINES - 1) * DEV_DIAG_STEP  = 394, box 393..410
+//   410 + 1 + DEV_AIR_BOT == contentBottom()           = 411 + 49 == 460
+// The identity is what settings-geom-check.mjs asserts, at the board's own parsed
+// cell height rather than against this comment's 410 - so one extra pixel of line
+// pitch, or a seventh line, fails by name here instead of painting into the footer.
+const int DEV_AIR_BOT   = 49;
 // percentage and the voltage and nothing else - the runtime estimate that used to
 // share that row with them has a line of its own now, so the 24 this was (sized
 // for "90% 4.10V topping up") is no longer what the field can draw. Board 1 keeps
@@ -2430,33 +2488,62 @@ const int P4_AIR_BOT  = 80;
 // name (SP_1..SP_4 are declared in deckhand_display.ino after board.h), and it
 // is the same expression on both boards. It lives with the P4 chain there, once.
 
-// ---------- SETTINGS group: Actions ----------
-// Geometry is settings.js `bActions`.
+// ---------- SETTINGS group: Danger ----------
+// Geometry was settings.js `bActions`, which drew four buttons in two captioned
+// sections. There is ONE section now and it holds the two controls that destroy
+// state.
 //
-// TWO buttons, not four, and each departure is recorded where it happened rather
-// than inferred from what is left. MIC TEST moved to the SOUND group (a mic test
-// IS a sound test, and it is the one action you run repeatedly). POWER OFF moved
-// to the foot of the DEVICE group, which is where the thing it powers off is
-// described. So neither P2_MIC_Y nor P2_PWR_Y exists on this board and no slot is
-// reserved for either - the same rule tabsW() follows when fabVisible() is
-// compiled out, and settings-geom-check.mjs asserts both absences by name, because
-// a constant a draw site no longer uses but a hit test still does is exactly how a
-// page comes to claim taps for a button it does not draw. P2_HINT_Y went with
-// POWER OFF (the hint explained it) and P2_GAP with it (nothing on this page puts
-// two buttons inside one section any more). Board 1 still draws all four and keeps
-// its own chain in deckhand_display.ino.
+// EVERY DEPARTURE IS RECORDED WHERE IT HAPPENED rather than inferred from what is
+// left. MIC TEST moved to the SOUND group (a mic test IS a sound test, and it is
+// the one action you run repeatedly). CALIBRATE TOUCH is DROPPED on this board -
+// runCalibration() here is a stub that prints and returns, because the touch
+// controller is factory-aligned inside the display IC, and this repo's rule is that
+// a control which cannot work is never offered (the same rule that stopped the
+// farewell screen promising a touch wake this board lacks). So none of P2_MIC_Y,
+// P2_SETUP_CAP_Y or P2_CAL_Y exists here and no slot is reserved for any of them -
+// the same rule tabsW() follows when fabVisible() is compiled out, and
+// settings-geom-check.mjs asserts each absence by name, because a constant a draw
+// site no longer uses but a hit test still does is exactly how a page comes to
+// claim taps for a button it does not draw. Board 1 still draws all four through
+// its pager and keeps its own chain in deckhand_display.ino.
 //
-//   116..131  "SETUP"                          P2_SETUP_CAP_Y, T_META, TL_DATUM
-//   140..195  CALIBRATE TOUCH                  P2_CAL_Y, P2_BTN_H
-//   222..237  "CANNOT BE UNDONE"               P2_DANGER_CAP_Y
-//   246..301  RESET PAIRING  + warn spine      P2_PAIR_Y
-//   302..459  158 rows clear to contentBottom()
+// POWER OFF IS BACK, and the round trip is the point of this block's name. The
+// redesign this branch is executing planned to DISSOLVE this group: RESET PAIRING
+// to the foot of MACS, POWER OFF to the foot of DEVICE, the protection moving from
+// menu order to page position. POWER OFF made that move and it worked; RESET
+// PAIRING could not follow, and the blocker is BOARD 1, whose Macs page has no room
+// for it. Measured there, not argued:
+//   page region 80..302 = 222px; P3_ANY_Y 82 + H_ROW 40 -> the list at 126;
+//   four Mac rows at P3_ROW_STEP 44 end 126 + 3*44 + 40 = 298, i.e. 216 of 222.
+//   RESET PAIRING needs caption 13 + SET_CAP_STEP 21 + P2_BTN_H 38 = 72px.
+// Abutting the rows saves 12; deleting the ANY MAC row saves 44 and deletes a real
+// setting; both together are still 14 short; capping the list at three Macs breaks
+// the only case the geometry exists to survive. So the five-group set is impossible
+// on board 1, this group stays on BOTH boards, and POWER OFF comes back to sit
+// beside the other verb that cannot be undone.
 //
-// THE TRAILING AIR IS LARGE AND IT IS NOT A MISTAKE. This group is on its way out
-// - the redesign that moved MIC TEST and POWER OFF off it dissolves it entirely
-// and re-homes CALIBRATE TOUCH and RESET PAIRING - so re-pitching two buttons to
-// fill 158 rows would be work spent on a page scheduled for deletion, and it would
-// move both of them away from the positions the next step wants them measured at.
+//   116..131  "CANNOT BE UNDONE"               P2_DANGER_CAP_Y, T_META, TL_DATUM
+//   140..195  RESET PAIRING  + warn spine      P2_PAIR_Y, P2_BTN_H
+//   208..263  POWER OFF      + bad  spine      P2_PWR_Y   (12px gap, SP_3)
+//   264..459  196 rows clear                   P2_AIR_BOT
+//
+// POWER OFF IS LAST BECAUSE IT IS THE MORE SEVERE, which is the same escalation the
+// four-button page used and the only ordering argument a two-item list can make: a
+// reset costs you the keys, a power-off costs you the device until someone presses
+// RESET. Both go through drawSeverityAction(), so both carry the P2_SPINE_W bar,
+// and both raise a confirm dialog.
+//
+// THE TRAILING AIR IS LARGE AND IT IS NAMED. It was 158 rows and excused as "this
+// group is on its way out"; the group is not on its way out, so the excuse is
+// replaced by the argument. Two controls is all this group is. Filling 196 rows
+// would mean floating the buttons toward the footer, which makes them read as page
+// furniture rather than as the top of a captioned section and breaks the rule that
+// every group on this board is TOP-ALIGNED under the band; or inventing a third
+// control, which is precisely how this group became a bag of verbs the first time.
+// So it is named as P2_AIR_BOT and asserted as the closing identity - the
+// HOME_Y0_BOT / DEV_AIR_BOT / PAIR_AIR_LEFT shape - because air that is not named
+// is slack no assertion constrains and geom-sweep reports every constant above it
+// as unguarded at +-16.
 //
 // THE SPINE IS THE POINT OF THIS PAGE, not decoration. Every one of these buttons
 // is uiButton with `filled` false, so before this they were identically shaped
@@ -2479,22 +2566,25 @@ const int P4_AIR_BOT  = 80;
 // uiFillRound(...) arguments, because the four assertions it used to make were about
 // these CONSTANTS and passed a draw call rewritten to span the whole button.
 //
-// P2_BTN_H is 56 rather than H_BTN's 50, and it stays 56 now that POWER OFF is
-// drawn on the DEVICE group instead: these are the most consequential controls on
-// the device - two of them destroy state - and they are one size wherever they are
-// drawn, or "which button is this" stops being answerable by its shape. TAP_MIN is
-// 46, so this is 10 over the fingertip floor. DEVICE's stack is derived against
-// this 56; it was once derived against 50 by mistake and came out 6px past the
-// footer, which is the whole reason DEV_AIR_BOT is asserted as an identity.
+// P2_BTN_H is 56 rather than H_BTN's 50: these are the most consequential controls
+// on the device - both of them destroy state - and they are one size wherever they
+// are drawn, or "which button is this" stops being answerable by its shape. TAP_MIN
+// is 46, so this is 10 over the fingertip floor.
 //
 // P2_TOP IS 12, THE SAME AS P1_TOP AND PS_TOP, AND THAT IS THE POINT. It was 16,
 // reproducing settings.js's own inconsistency: every other group starts its first
 // content at PAGE_TOP + 12 = 116 and this one started at 120, so moving between
-// groups jogged everything 4px. Nobody chose that. All five groups' first content
-// now starts level, and settings-geom-check.mjs asserts the equality across the
-// five rather than the value of any one - so a perturbation of any single group's
-// top breaks it. It cost nothing: Actions had 48 rows of trailing air and now has
-// 56, and the hint moved FURTHER from the footer it must not read as part of.
+// groups jogged everything 4px. Nobody chose that. All five drawn groups' first
+// content now starts level, and settings-geom-check.mjs asserts the equality across
+// them rather than the value of any one - so a perturbation of any single group's
+// top breaks it.
+//
+// P2_SECTION_GAP IS GONE WITH THE SECOND SECTION. It was "a button's bottom -> the
+// NEXT section's caption", and there is one section here now: the two buttons sit
+// inside it at SP_3, the page rhythm, which is where the chain in
+// deckhand_display.ino takes it from. Keeping a constant alive so an assertion has
+// something to compare against is the shape this file has already had to unpick
+// once (P1_THEME_CAP_STEP), so it is deleted and its absence asserted.
 //
 // The caption step is SET_CAP_STEP, shared with the SOUND group, rather than a
 // P2_CAP_STEP of its own. That constant was 26 against SET_CAP_STEP's 24, defended
@@ -2502,10 +2592,14 @@ const int P4_AIR_BOT  = 80;
 // an argument that died with the levelling above, which moves every button 4px off
 // the mock anyway. Two names for one concept (a caption's top -> the control it
 // heads) inside one redesign is a drift waiting to happen.
-const int P2_TOP         = 12;   // PAGE_TOP -> the SETUP caption, level with P1/PS
+const int P2_TOP         = 12;   // PAGE_TOP -> the danger caption, level with P1/PS
 const int P2_BTN_H       = 56;   // TAP_MIN + 10; these are the destructive ones
-const int P2_SECTION_GAP = 26;   // a button's bottom -> the NEXT section's caption
 const int P2_SPINE_W     = 4;    // the severity bar's width
+// The closing term, and the ONLY thing that gives P2_TOP and the gap between the
+// two buttons any teeth at all: both are pure translations of a page with nothing
+// anchored to its foot, so no bound relative to this page can see them.
+//   P2_PWR_Y + P2_BTN_H + P2_AIR_BOT == contentBottom()   (208 + 56 + 196 == 460)
+const int P2_AIR_BOT     = 196;
 
 // ---------- SETTINGS: the confirm dialog ----------
 // 28, board 1's 24 held physically (24 / 5.624 * 6.489 = 27.7). Top-anchored to

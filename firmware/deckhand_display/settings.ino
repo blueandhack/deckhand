@@ -123,7 +123,14 @@ const char* settingsGroupTitle(int g) {
     case SET_SOUND:   return "Sound";
     case SET_PAIRING: return "Pairing";
     case SET_MESSAGES: return "Messages";
-    default:          return "Actions";
+    // "Danger", not "Actions": the group holds exactly the two controls that
+    // destroy state now, and a name that says what a page is for is the one thing
+    // standing between a finger and RESET PAIRING. Reached through the DEFAULT arm
+    // rather than a case of its own, which is deliberate - an id that drifts out of
+    // the SET_DEVICE..SET_DANGER run lands here rather than erroring, so the word
+    // this returns is also the word a drifted row would wear. settings-geom-check
+    // asserts the run is contiguous for exactly that reason.
+    default:          return "Danger";
   }
 }
 int settingsHomeRowY(int i) { return HOME_Y0 + i * (HOME_ROW_H + HOME_GAP); }
@@ -190,8 +197,13 @@ void settingsHomeSummary(int g, char* buf, size_t n, uint16_t* col) {
     case SET_MESSAGES:
       snprintf(buf, n, "send %s", MSG_PRI_LABELS[msgPriority < MSG_PRI_COUNT ? msgPriority : MSG_PRI_NEXT]);
       break;
+    // The DANGER row names its two controls rather than describing the group. A
+    // summary reading "destructive" would say only what the row's own name already
+    // says; what a person wants before tapping into a page they cannot undo is
+    // WHICH two things are in there. Fixed text, because both controls are always
+    // present on this board - there is nothing live to read off.
     default:
-      snprintf(buf, n, "calibrate, pairing, power");
+      snprintf(buf, n, "reset pairing, power off");
       break;
   }
 }
@@ -217,21 +229,23 @@ void renderSettingsHome() {
 #endif
 // ----- Page 0 / the DEVICE group -----
 #if BOARD_SETTINGS_HOME
-// TWO CARDS, FOUR DIAGNOSTIC LINES AND ONE BUTTON (board 2). board_es3c35p.h's
-// ST_*/DEV_* section carries the geometry and the reasoning; what matters here is
-// the split of labour. The two facts you came for - is the host talking to me, and
-// how is the battery - LEAD a card each as a T_HEAD line with one dimmed detail
-// under it. The nine you read almost never are four monospace lines under a
-// DIAGNOSTICS caption: they were the HOST card's four and the About page's five
-// before this, ~416px of page for values nobody watches. And POWER OFF is last,
-// under a caption of its own, because this is the page that describes the thing it
-// powers off.
+// TWO CARDS AND FIVE DIAGNOSTIC LINES (board 2). board_es3c35p.h's ST_*/DEV_*
+// section carries the geometry and the reasoning; what matters here is the split of
+// labour. The two facts you came for - is the host talking to me, and how is the
+// battery - LEAD a card each as a T_HEAD line with one dimmed detail under it. The
+// eleven you read almost never are five monospace lines under a DIAGNOSTICS
+// caption: they were the HOST card's four and the About page's five before this,
+// ~416px of page for values nobody watches.
+//
+// THERE IS NO CONTROL ON THIS PAGE. POWER OFF was here for one commit of this
+// branch and is on the DANGER group again; the page is read-only, so
+// handleSettingsTouch has no SET_DEVICE arm at all rather than an empty one.
 //
 // The per-Mac rows are not here at all: they are on the Pairing group, where the
 // Macs already are.
 //
-// Only the cards, the two captions and the button are static; every value below is
-// live and goes through renderDevicePage()'s change-only fields.
+// Only the cards and the one caption are static; every value below is live and
+// goes through renderDevicePage()'s change-only fields.
 void drawDevicePageStatic() {
   uiCard(CARD_X, ST_CONN_Y, CARD_W, ST_CONN_H);
   uiCard(CARD_X, ST_PWR_Y,  CARD_W, ST_PWR_H);
@@ -240,12 +254,10 @@ void drawDevicePageStatic() {
   tft.setTextDatum(TL_DATUM);
   tft.drawString("CONNECTION", CARD_X + PAD, ST_CONN_Y + ST_CAP_DY);
   tft.drawString("POWER",      CARD_X + PAD, ST_PWR_Y  + ST_CAP_DY);
-  // The two captions below sit on COLOR_BG, not on a card, so they go through
+  // The caption below sits on COLOR_BG, not on a card, so it goes through
   // drawGroupCaption like every other page caption on this board rather than
   // through the two drawString calls above.
   drawGroupCaption("DIAGNOSTICS", DEV_DIAG_CAP_Y);
-  drawGroupCaption("CANNOT BE UNDONE", DEV_PWR_CAP_Y);
-  drawSeverityAction(DEV_PWR_BTN_Y, "POWER OFF", COLOR_BAD);
 }
 // THE TWO COLUMNS OF ONE DIAGNOSTIC LINE, composed into ONE padded string: the
 // left value from the lane's left edge, the right value flush to its right edge,
@@ -266,32 +278,26 @@ void devDiagLine(char* out, size_t n, const char* left, const char* right) {
   snprintf(out, n, "%-*.*s", at, at, left);     // left, padded AND truncated to `at`
   snprintf(out + at, n - at, "%.*s", rl, right);
 }
-// THE NINE FACTS, as four lines under one caption. They were the HOST card's four
+// THE ELEVEN FACTS, as SIX lines under one caption. They were the HOST card's four
 // (payload, flush, uptime, live Macs) and the About page's five (build, time,
-// commit, board, BT MAC) - two of which did not survive the compression and are
-// named in board_es3c35p.h's DIAGNOSTICS note rather than quietly dropped.
+// commit, board, BT MAC), plus the device's own name and the die temperature - two
+// pages and a card, ~416px, for values nobody watches. board_es3c35p.h's
+// DIAGNOSTICS note carries the pairing table and the argument for each pair; what
+// matters here is that line DEV_DIAG_TEMP_LINE is the one with no right column,
+// because it is the one whose COLOUR means something.
 //
 // EVERY LINE IS COMPOSED EACH TICK AND GOES THROUGH drawIfChanged, the fixed ones
 // included. Splitting them into a static half for the build stamp and a live half
 // for the uptime would save one comparison per line and cost the thing this whole
 // file's redraw discipline exists to protect: a value on the static side is a value
-// that goes stale silently, and "Deckhand-C114 ES3C35P" is only fixed until the
-// device is renamed.
+// that goes stale silently, and "Deckhand-C114" is only fixed until the device is
+// renamed.
 void drawDeviceDiagnostics(int y) {
   char l[DEV_DIAG_BYTES], r[DEV_DIAG_BYTES], line[DEV_DIAG_BYTES];
   const int x = CARD_X + PAD;
-  // ---- 0: how big a frame is, and how long this has been up ----
+  // ---- 0: how big a frame is, and how slow ----
   if (lastPayloadBytes == 0) snprintf(l, sizeof(l), "no payload yet");
   else snprintf(l, sizeof(l), "%u B per tick", (unsigned) lastPayloadBytes);
-  {
-    unsigned long mins = millis() / 60000UL;
-    if (mins > 99UL * 60 + 59) mins = 99UL * 60 + 59;
-    snprintf(r, sizeof(r), "up %luh %02lum", mins / 60, mins % 60);
-  }
-  devDiagLine(line, sizeof(line), l, r);
-  drawIfChanged(devDiagCache[0], DEV_DIAG_BYTES, line, x, y, T_META, 1,
-                COLOR_VALUE, COLOR_BG);
-  // ---- 1: how slow a frame is, and how hot the die is ----
   {
     // Milliseconds to one decimal, clamped at 999.9 so the width is fixed. This
     // field PARTLY MEASURES ITS OWN REPAINT and never settles - see the note in
@@ -299,26 +305,51 @@ void drawDeviceDiagnostics(int y) {
     uint32_t us = tft.lastFlushUs();
     unsigned long ms = us / 1000, tenth = (us % 1000) / 100;
     if (ms > 999) { ms = 999; tenth = 9; }
-    snprintf(l, sizeof(l), "flush %lu.%lu ms", ms, tenth);
-  }
-  {
-    // "--" when the sensor never came up, never a plausible 0.0 - a measurement and
-    // a failure must not render identically. It says SoC, never "Temp", because the
-    // sensor is inside the package and cannot see the charger or the cell: the
-    // label is the only place a reader learns which temperature this is.
-    float dieC = 0;
-    if (dieTempRead(&dieC)) snprintf(r, sizeof(r), "SoC %.1f C", dieC);
-    else                    snprintf(r, sizeof(r), "SoC --");
+    snprintf(r, sizeof(r), "flush %lu.%lu ms", ms, tenth);
   }
   devDiagLine(line, sizeof(line), l, r);
-  drawIfChanged(devDiagCache[1], DEV_DIAG_BYTES, line, x, y + DEV_DIAG_STEP, T_META, 1,
+  drawIfChanged(devDiagCache[0], DEV_DIAG_BYTES, line, x, y, T_META, 1,
                 COLOR_VALUE, COLOR_BG);
-  // ---- 2: what this thing is, and how many Macs are on it ----
-  // The name and the board share ONE column because they are one fact - which
-  // device this is - and because nine facts do not fit eight slots. The count is
-  // usedLinkCount(), the LIVE links, which is a different number from the paired
-  // hostCount the Pairing group shows: this is a diagnostic, that is a setting.
-  snprintf(l, sizeof(l), "%s %s", deviceName, BOARD_NAME);
+  // ---- 1: how hot the die is, AND THE ONE FIELD ON THIS PAGE WITH A COLOUR ----
+  // ALONE ON ITS LINE, which is the whole reason the band could come back: a line
+  // here is ONE padded field with ONE colour, so a temperature sharing a line with
+  // the flush figure would have coloured the flush figure by temperature too.
+  //
+  // "--" when the sensor never came up, never a plausible 0.0 - a measurement and a
+  // failure must not render identically. It says SoC, never "Temp", because the
+  // sensor is inside the package and cannot see the charger or the cell: the label
+  // is the only place a reader learns which temperature this is. A failed read is
+  // COLOR_LABEL rather than any band - "no reading" is not a temperature, and
+  // colouring it good would be the same lie the 0.0 would have been.
+  {
+    float dieC = 0;
+    uint16_t tcol = COLOR_LABEL;
+    if (dieTempRead(&dieC)) {
+      snprintf(l, sizeof(l), "SoC %.1f C", dieC);
+      tcol = colorForDieTemp(dieC);
+    } else {
+      snprintf(l, sizeof(l), "SoC --");
+    }
+    // THE COLOUR BUSTS THE TEXT CACHE, because drawIfChanged compares TEXT ONLY.
+    // The reading moves in tenths so most band crossings do change the string - but
+    // 54.9 -> 55.0 is exactly one tenth and is also the crossing into COLOR_WARN, so
+    // "the text happens to change too" is the reasoning that made battRowTextCache
+    // correct by accident until it was not.
+    if (tcol != devDiagTempColorCache) {
+      devDiagTempColorCache = tcol;
+      devDiagCache[DEV_DIAG_TEMP_LINE][0] = '\0';
+    }
+    devDiagLine(line, sizeof(line), l, "");
+    drawIfChanged(devDiagCache[1], DEV_DIAG_BYTES, line, x, y + DEV_DIAG_STEP, T_META, 1,
+                  tcol, COLOR_BG);
+  }
+  // ---- 2: the radio's address, and how many Macs are on it ----
+  // btMacAddress is set once in setupBLE(); empty means BLE has not come up yet, so
+  // the row says "--" rather than drawing a blank cell that reads as a rendering
+  // fault. The count is usedLinkCount(), the LIVE links, which is a different number
+  // from the paired hostCount the Pairing group shows: this is a diagnostic, that is
+  // a setting.
+  snprintf(l, sizeof(l), "BT %s", btMacAddress.length() ? btMacAddress.c_str() : "--");
   {
     int live = usedLinkCount();
     if (live == 0) snprintf(r, sizeof(r), "no Macs");
@@ -327,13 +358,31 @@ void drawDeviceDiagnostics(int y) {
   devDiagLine(line, sizeof(line), l, r);
   drawIfChanged(devDiagCache[2], DEV_DIAG_BYTES, line, x, y + 2 * DEV_DIAG_STEP, T_META, 1,
                 COLOR_VALUE, COLOR_BG);
-  // ---- 3: which build this is ----
+  // ---- 3: what this device calls itself, and how long it has been up ----
+  snprintf(l, sizeof(l), "%s", deviceName);
+  {
+    unsigned long mins = millis() / 60000UL;
+    if (mins > 99UL * 60 + 59) mins = 99UL * 60 + 59;
+    snprintf(r, sizeof(r), "up %luh %02lum", mins / 60, mins % 60);
+  }
+  devDiagLine(line, sizeof(line), l, r);
+  drawIfChanged(devDiagCache[3], DEV_DIAG_BYTES, line, x, y + 3 * DEV_DIAG_STEP, T_META, 1,
+                COLOR_VALUE, COLOR_BG);
+  // ---- 4: which board, and which build ----
   // `unknown` is the honest answer and it is a WORD rather than an empty cell: it
   // means this binary was not the one flash.sh stamped, so any SHA in NVS belongs
   // to another build. A blank here would read as a rendering fault, and this is the
   // one field a reader cannot check against anything else.
-  devDiagLine(line, sizeof(line), __DATE__, fwCommit[0] ? fwCommit : "unknown");
-  drawIfChanged(devDiagCache[3], DEV_DIAG_BYTES, line, x, y + 3 * DEV_DIAG_STEP, T_META, 1,
+  devDiagLine(line, sizeof(line), BOARD_NAME, fwCommit[0] ? fwCommit : "unknown");
+  drawIfChanged(devDiagCache[4], DEV_DIAG_BYTES, line, x, y + 4 * DEV_DIAG_STEP, T_META, 1,
+                COLOR_VALUE, COLOR_BG);
+  // ---- 5: when that build was made ----
+  // The TIME is back beside the DATE. It was dropped when this block was four lines
+  // on the grounds that it "only distinguishes two builds made on the same day" -
+  // which is precisely the case a person flashing this repeatedly is in, and the
+  // commit does not cover it either (a dirty tree stamps the same SHA twice).
+  devDiagLine(line, sizeof(line), __DATE__, __TIME__);
+  drawIfChanged(devDiagCache[5], DEV_DIAG_BYTES, line, x, y + 5 * DEV_DIAG_STEP, T_META, 1,
                 COLOR_VALUE, COLOR_BG);
 }
 void renderDevicePage() {
@@ -835,18 +884,19 @@ void resetPairing() {
   drawSettingsStatic();
   renderSettingsTab();
 }
-// ----- Page 2: ACTIONS -----
+// ----- Page 2: ACTIONS (board 1) / the DANGER group (board 2) -----
 #if BOARD_SETTINGS_HOME
-// ----- The ACTIONS group (board 2) -----
-// THREE buttons, in TWO captioned sections. MIC TEST is not here - it lives on the
-// SOUND group, where a mic test belongs and where it is the one action you run
-// repeatedly. What that buys is the room to say WHICH of these is safe.
+// ----- The DANGER group (board 2) -----
+// TWO buttons, in ONE captioned section, and both of them destroy state. MIC TEST
+// is not here - it lives on the SOUND group, where a mic test belongs and where it
+// is the one action you run repeatedly - and CALIBRATE TOUCH is not offered on this
+// board at all. What that leaves is a group whose NAME is the warning.
 //
 // Before this the four were uiButton with `filled` false, i.e. four identically
 // shaped outlined slabs differing only in stroke HUE - and this repo's rule is
 // that meaning never rests on colour alone. Severity now has three carriers:
-// POSITION (a captioned section of its own, separated by P2_SECTION_GAP), INK
-// MASS (a solid spine, which survives greyscale and every colour-vision
+// POSITION (a captioned section that holds nothing else, and the page's own name),
+// INK MASS (a solid spine, which survives greyscale and every colour-vision
 // deficiency), and hue last.
 // The spine sits BORDER_CTRL inside the button's own left edge and runs from R_MD
 // to P2_BTN_H - R_MD, so it can never cross the rounded corner and paint over the
@@ -859,18 +909,22 @@ void drawSeverityAction(int y, const char* label, uint16_t tint) {
   uiFillRound(CARD_X + BORDER_CTRL, y + R_MD, P2_SPINE_W, P2_BTN_H - 2 * R_MD,
               P2_SPINE_W / 2, tint, COLOR_CARD);
 }
-// TWO buttons. POWER OFF is drawn at the foot of the DEVICE group now - see
-// drawDevicePageStatic - and the hint that explained it did not follow it there:
-// DEVICE's stack lands exactly on contentBottom() with nothing left over, and the
-// fact the hint carried is in the confirm dialog POWER OFF raises ("deep sleep -
-// press RESET to wake"), which is nearer the decision than a line under the button
-// ever was. The rule that hint answered to - a board that cannot wake on touch
-// must not promise one - is answered there instead, by the same #if.
-void drawActionsPageStatic() {
-  drawGroupCaption("SETUP", P2_SETUP_CAP_Y);
-  uiButton(CARD_X, P2_CAL_Y, CARD_W, P2_BTN_H, "CALIBRATE TOUCH", COLOR_ACCENT);
+// TWO buttons, ONE caption, and both buttons destroy state - which is what the
+// group is called Danger for. CALIBRATE TOUCH is not here: runCalibration() on this
+// board is a stub that prints and returns, because the touch controller is
+// factory-aligned inside the display IC, and a control that cannot work is never
+// offered. POWER OFF is LAST because it is the more severe of the two - a reset
+// costs you the keys, a power-off costs you the device until someone presses RESET.
+//
+// NO HINT UNDER POWER OFF. "power off = deep sleep, RESET to wake" is in the confirm
+// dialog this button raises ("deep sleep - press RESET to wake"), which is nearer
+// the decision than a line under the button ever was - and the rule that hint
+// answered to, that a board which cannot wake on touch must not promise one, is
+// answered there by the same #if. Board 1 keeps the hint on its own page.
+void drawDangerPageStatic() {
   drawGroupCaption("CANNOT BE UNDONE", P2_DANGER_CAP_Y);
   drawSeverityAction(P2_PAIR_Y, "RESET PAIRING", COLOR_WARN);
+  drawSeverityAction(P2_PWR_Y,  "POWER OFF",     COLOR_BAD);
 }
 #else
 void drawActionsPageStatic() {
@@ -1600,7 +1654,7 @@ void drawSettingsStatic() {
   else if (settingsPage == SET_SOUND)   drawSoundPageStatic();
   else if (settingsPage == SET_PAIRING) drawHostsPageStatic();
   else if (settingsPage == SETTINGS_PAGE_MESSAGES) drawMessagesPageStatic();
-  else                                  drawActionsPageStatic();
+  else                                  drawDangerPageStatic();
 #else
   tft.fillRect(0, PAGE_TOP, tft.width(), contentBottom() - PAGE_TOP, COLOR_BG);
   drawPager();
@@ -1635,7 +1689,7 @@ void renderSettingsTab() {
   // they are on the change-only side; drawMessagesPageStatic draws only the
   // caption and the hint.
   else if (settingsPage == SETTINGS_PAGE_MESSAGES) renderMessagesPage();
-  // Actions is static
+  // Danger is static
 #else
   if (settingsPage == 0) renderStatusPage();
   else if (settingsPage == 1) renderControlsPage();
@@ -1681,6 +1735,10 @@ void resetSettingsCaches() {
   stVerdictCache[0] = '\0'; stVerdictColorCache = 0;
   stLinksCache[0] = '\0'; stLeftCache[0] = '\0';
   for (int i = 0; i < DEV_DIAG_LINES; i++) devDiagCache[i][0] = '\0';
+  // The die temperature's COLOUR joins them, the stVerdictColorCache shape: it is
+  // compared against, not drawn from, so leaving it set is not a blank field - it is
+  // a band crossing that never repaints because the two agreed.
+  devDiagTempColorCache = 0;
   for (int i = 0; i < MAX_HOSTS; i++) { p3SubCache[i][0] = '\0'; p3LiveCache[i] = -1; }
   // The row COUNT joins them: this runs from drawSettingsStatic() before the page
   // chrome is repainted, so "how many rows are drawn" is stale here in exactly the
@@ -1709,7 +1767,7 @@ void resetSettingsCaches() {
 // but a caller that repeats work drawSettingsStatic() already does on its own
 // invites a reader to trust the comment over the code.
 void openSettingsGroup(int g) {
-  settingsPage = constrain(g, SET_DEVICE, SET_ACTIONS);
+  settingsPage = constrain(g, SET_DEVICE, SET_DANGER);
   drawSettingsStatic();
   renderSettingsTab();
 }
@@ -1868,34 +1926,23 @@ void handleSettingsTouch(int sx, int sy) {
     }
   } else if (settingsPage == SETTINGS_PAGE_MESSAGES) {
     handleMessagesTouch(sx, sy);
-  } else if (settingsPage == SET_ACTIONS) {
-    // NO MIC TEST BRANCH: the button is drawn on the SOUND group now, and this
-    // page reserves no slot for it. A `sy >= P2_MIC_Y` test left behind here would
-    // not merely be dead - P2_MIC_Y does not exist on this board at all, and had
-    // it survived as a stale constant it would claim taps belonging to whatever
-    // now sits in that band. Removing the constant and the branch in one change is
-    // what makes the two unable to disagree.
+  } else if (settingsPage == SET_DANGER) {
+    // NO MIC TEST AND NO CALIBRATE BRANCH: MIC TEST is drawn on the SOUND group and
+    // CALIBRATE TOUCH is not offered on this board at all, and this page reserves no
+    // slot for either. A `sy >= P2_MIC_Y` or `sy >= P2_CAL_Y` test left behind here
+    // would not merely be dead - neither constant exists on this board, and had
+    // either survived as a stale constant it would claim taps belonging to whatever
+    // now sits in that band. Removing the constants and the branches in one change
+    // is what makes the two unable to disagree.
     //
-    // All three ask first: recalibrating costs 5 taps, resetting pairing wipes
-    // every key, and powering off interrupts the display. The gap between
-    // CALIBRATE and the destructive pair is inert rather than claimed by either -
-    // the same rule HOME's gaps and the Pairing cards follow, and it matters most
-    // here because the two rows below it destroy state.
-    if (sy >= P2_CAL_Y && sy < P2_CAL_Y + P2_BTN_H) {
-      pendingConfirm = CFM_RECAL;         drawPendingConfirm();
-    } else if (sy >= P2_PAIR_Y && sy < P2_PAIR_Y + P2_BTN_H) {
+    // BOTH ask first: resetting pairing wipes every key, and powering off
+    // interrupts the display. The 12px between them is inert rather than claimed by
+    // either - the same rule HOME's gaps and the Pairing cards follow, and it
+    // matters most here because both rows destroy state, so a tap that lands in the
+    // gap and is rounded to a neighbour is rounded to something irreversible.
+    if (sy >= P2_PAIR_Y && sy < P2_PAIR_Y + P2_BTN_H) {
       pendingConfirm = CFM_RESET_PAIRING; drawPendingConfirm();
-    }
-  } else if (settingsPage == SET_DEVICE) {
-    // THE ONE CONTROL ON THIS PAGE, and its hit test moved here in the same change
-    // that moved the button - the rule the P2_MIC_Y note states from the other
-    // side. P2_PWR_Y does not exist on this board any more, so an Actions branch
-    // left behind would not compile rather than quietly claiming a band.
-    //
-    // Everything above the button is read-only, and the gaps around it are inert
-    // rather than claimed - the same rule HOME's gaps follow, and it matters most
-    // here because what it would be guessing at powers the device down.
-    if (sy >= DEV_PWR_BTN_Y && sy < DEV_PWR_BTN_Y + P2_BTN_H) {
+    } else if (sy >= P2_PWR_Y && sy < P2_PWR_Y + P2_BTN_H) {
       pendingConfirm = CFM_POWER_OFF;     drawPendingConfirm();
     }
   } else if (settingsPage == SET_PAIRING) {
