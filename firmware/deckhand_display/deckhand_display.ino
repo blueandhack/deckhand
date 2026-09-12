@@ -6053,6 +6053,17 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board, so there are no "
     "scroll frames to time; see SCROLLTO." },
 #endif
+#if !BOARD_TOUCH_NEEDS_CAL
+  { "RECAL",
+    "it runs the 5-tap affine calibration in touch_cal.ino: readRawTouch() against the XPT2046, "
+    "fitAffine()'s least-squares solve, and the six coefficients written to NVS under the key "
+    "cal5. This board is BOARD_TOUCH_NEEDS_CAL 0 - its touch controller lives inside the ST77922 "
+    "and is factory-aligned, so there is no raw ADC pair to map and no mapping of ours to fit. "
+    "runCalibration() is not compiled here at all; it was a stub that printed a notice and "
+    "returned, which answered this verb the way a successful run would. CALIBRATE TOUCH is absent "
+    "from the Device group on this board under the same flag, so the button and the verb are gone "
+    "together." },
+#endif
   // TERMINATOR, and it is what makes an all-#if'd array legal: on board 2 every
   // block above is skipped and `UnavailableCommand[] = {}` would not compile.
   // The walk below stops on the null verb rather than on a sizeof() count, so
@@ -6104,12 +6115,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
   // rather than adding a parameter to handleLine(const String&), whose fixed
   // signature MULTITEST already calls directly.
   curLineFromUsb = fromUsb;
-  if (buf == "RECAL") {
-    runCalibration();
-    applyScreenRotation(); // calibration runs unflipped - restore the user's choice
-    everReceived = false;
-    drawWaitingScreen();
-  } else if (buf == "WHOAMI") {
+  if (buf == "WHOAMI") {
     // "Which board is on this cable?" - the host asks when a USB link is still
     // anonymous after HELLO_GRACE_MS. HELLO is a BOOT-ONLY 15s burst, so a host
     // that attached to an already-running board (its own restart, a watchdog
@@ -6146,6 +6152,36 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // arm logs only on a CHANGE, so the duplicate a cabled board receives costs
     // one short line and alters nothing.
     announceMsgPriority();
+#if BOARD_TOUCH_NEEDS_CAL
+  } else if (buf == "RECAL") {
+    // THE 5-TAP AFFINE CALIBRATION. Guarded rather than shared, because the
+    // mechanism it drives exists on one board only: runCalibration() is inside
+    // touch_cal.ino's own `#if BOARD_TOUCH_NEEDS_CAL`, and on a board whose touch
+    // controller lives in the display IC there is no raw ADC pair to map, so there
+    // is no function here to call. That board REFUSES the verb BY NAME out of
+    // UNAVAILABLE_COMMANDS[], under the exact negation of this guard.
+    //
+    // IT USED TO BE HANDLED ON BOTH, with a stub behind it that printed a notice
+    // and returned - which from the Mac is indistinguishable from the calibration
+    // having run, which is the one thing CLAUDE.md's refusal rule exists to stop.
+    //
+    // MOVED OUT OF THE CHAIN'S FIRST POSITION to get here, and that is the whole
+    // reason WHOAMI leads now. A guard around the leading `if (` would leave board
+    // 2's chain starting on an `else if`, and the `#if`/`#else` pair that avoids
+    // that opens a brace in both arms - the shape that leaves every brace-counting
+    // checker here seeing one more open brace than close. Only the fragment that
+    // differs sits behind the guard.
+    //
+    // NO EARLY RETURN AND NO `buf = ""` OF ITS OWN: this arm falls through to the
+    // tail's clear, like every arm that is not a refusal. The host delivers each
+    // trigger-file line over BOTH transports, so a cabled board runs this twice -
+    // tolerable because a calibration is a fresh 5-tap run either way, and the
+    // second one simply asks for five more taps rather than corrupting the first.
+    runCalibration();
+    applyScreenRotation(); // calibration runs unflipped - restore the user's choice
+    everReceived = false;
+    drawWaitingScreen();
+#endif
   } else if (buf == "MSGPRI" || buf.startsWith("MSGPRI ")) {
     // The instrument for the setting the SETTINGS tab owns, so a capture is not
     // the only way to see it and a change can be driven without a fingertip.
@@ -7138,15 +7174,62 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       return;
     }
     int pg = buf.substring(5).toInt();
-    // PAGE 0..6 MEANS THE SAME THING ON BOTH BOARDS NOW: 0 is HOME and 1..6 are the
-    // six groups, the ids settingsPage itself carries. They were not always the same -
-    // board 1 numbered its own pages 0..4 and wrapped modulo 5, so the MESSAGES
-    // surface was PAGE 4 there and PAGE 5 here and a capture script aimed at one
-    // board landed somewhere else on the other. THE SENTENCE "board 1 has no HOME
-    // surface, so its arm clamps 0 up to the first group" was true for exactly one
-    // task (Task 3A); since Task 3B both boards take this path and PAGE 0 is HOME on
-    // both, and Task 4 deleted the `#else` that clamped, along with the flag over it.
-    if (currentTab == TAB_SETTINGS) { if (pg <= SET_HOME) settingsBack(); else openSettingsGroup(pg); }
+    // ONE RANGE ON BOTH BOARDS, AND THE BOUND IS DERIVED RATHER THAN WRITTEN. 0 is
+    // HOME and 1..SET_GROUP_COUNT are the groups, the ids settingsPage itself
+    // carries. They were not always the same - board 1 numbered its own pages 0..4
+    // and wrapped modulo 5, so the MESSAGES surface was PAGE 4 there and PAGE 5 here
+    // and a capture script aimed at one board landed somewhere else on the other.
+    // THE SENTENCE "board 1 has no HOME surface, so its arm clamps 0 up to the first
+    // group" was true for exactly one task (Task 3A); since Task 3B both boards take
+    // this path and PAGE 0 is HOME on both, and Task 4 deleted the `#else` that
+    // clamped, along with the flag over it.
+    //
+    // A LITERAL 6 HERE WOULD BE A TRANSCRIPTION, and the group set has been re-cut
+    // three times on this branch alone - seven, then five, then six - so the one
+    // thing this bound must not do is need editing again when it is re-cut a fourth
+    // time. It reads the count, and the static_assert below ties the count to the
+    // last id, which is the half a derivation from SET_GROUP_COUNT alone cannot see:
+    // the ids are contiguous from SET_HOME BY DESIGN (both headers say so on the
+    // declaring line), and if a future group is inserted non-contiguously the bound
+    // and openSettingsGroup()'s own constrain() would silently disagree about which
+    // ids exist. This fails the compile instead.
+    static_assert(SET_DANGER == SET_HOME + SET_GROUP_COUNT,
+                  "settings group ids must stay contiguous from SET_HOME: PAGE's bound is "
+                  "derived from SET_GROUP_COUNT and openSettingsGroup() clamps to SET_DANGER");
+    const int pgMax = SET_HOME + SET_GROUP_COUNT;
+    // NAME THE RANGE, NOT JUST "out of range". Before this, PAGE 9 reached
+    // openSettingsGroup(), whose constrain() quietly delivered the DANGER group -
+    // so from the Mac a typo and a hit were the same screenshot, and PAGE 7 silently
+    // meant PAGE 6 for as long as board 2 had seven pages to remember. The line
+    // carries the bound it actually checked against, so a caller written for the
+    // seven-page numbering is told what the numbering is now rather than that it
+    // guessed wrong.
+    if (pg < SET_HOME || pg > pgMax) {
+      Serial.printf("PAGE refused: %d is outside PAGE %d..%d - %d is the SETTINGS HOME menu "
+                    "and %d..%d are its %d groups\n",
+                    pg, SET_HOME, pgMax, SET_HOME, SET_DEVICE, pgMax, SET_GROUP_COUNT);
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
+    // AND THE WRONG-TAB CASE IS A REFUSAL TOO. This was `if (currentTab ==
+    // TAB_SETTINGS)` with no else, so PAGE 3 sent while USAGE was up did nothing and
+    // said nothing - the silence CLAUDE.md's rule is about, and the easier half of it
+    // to hit, since TAB and PAGE are used together and the tab switch is the step a
+    // script forgets. It names the live tab so the caller knows what to send instead.
+    if (currentTab != TAB_SETTINGS) {
+      Serial.printf("PAGE refused: SETTINGS is not the live tab (tab %d is; SETTINGS is %d) "
+                    "- send TAB %d first\n", (int) currentTab, (int) TAB_SETTINGS, (int) TAB_SETTINGS);
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
+    // NEITHER REFUSAL IS DEDUPED, and neither is the surface refusal above. The host
+    // writes every trigger-file line to BOTH transports, so a cabled board answers a
+    // bad PAGE twice - two identical lines, which is noise rather than the corruption
+    // the deduped cases carry (POWERPROBE's four lines came from a MEASUREMENT being
+    // restarted; a duplicated scrollback fetch corrupted its own buffer). The success
+    // path is idempotent for the same reason: opening the page that is already open
+    // repaints it.
+    if (pg == SET_HOME) settingsBack(); else openSettingsGroup(pg);
   } else if (buf == "POWERPROBE" || buf.startsWith("POWERPROBE ")) {
     // Passive mV/h measurement of whatever state the device is in, labelled so
     // two runs can be compared. Both boards: the question "what is this costing"

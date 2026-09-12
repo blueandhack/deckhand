@@ -290,9 +290,10 @@ void drawDevicePageStatic() {
   // THE TWO BOARDS CARRY DIFFERENT THINGS UNDER THE CARDS, and each is guarded on
   // the flag that names the reason rather than on "which board this is":
   // BOARD_DEVICE_DIAGNOSTICS is 0 where there is a serial console to read those
-  // facts from, and BOARD_TOUCH_NEEDS_CAL is 0 where runCalibration() is a stub
-  // because the controller is factory-aligned inside the display IC. Only the
-  // fragment that differs is behind each guard - no brace is opened in either.
+  // facts from, and BOARD_TOUCH_NEEDS_CAL is 0 where the controller is factory-
+  // aligned inside the display IC, so there is no runCalibration() to reach at all
+  // and RECAL is refused by name there. Only the fragment that differs is behind
+  // each guard - no brace is opened in either.
 #if BOARD_DEVICE_DIAGNOSTICS
   drawGroupCaption("DIAGNOSTICS", DEV_DIAG_CAP_Y);
 #endif
@@ -797,10 +798,10 @@ void drawSeverityAction(int y, const char* label, uint16_t tint) {
 // device until someone presses RESET (or touches the glass - see the hint's #if).
 //
 // CALIBRATE TOUCH IS NOT HERE, and the reason is now different on each board, which
-// is exactly why both are written down. Board 2 does not offer it AT ALL:
-// runCalibration() there is a stub that prints and returns, because the touch
-// controller is factory-aligned inside the display IC, and a control that cannot
-// work is never offered. Board 1 DOES offer it - on the DEVICE group, under a SETUP
+// is exactly why both are written down. Board 2 does not offer it AT ALL: the touch
+// controller is factory-aligned inside the display IC, so there is nothing to
+// calibrate, runCalibration() is not compiled there and RECAL is refused by name -
+// a control that cannot work is never offered, and neither is the verb behind it. Board 1 DOES offer it - on the DEVICE group, under a SETUP
 // caption, guarded on BOARD_TOUCH_NEEDS_CAL - because it is not destructive: it
 // rewrites a touch mapping and keeps the old one if the run fails. Either way this
 // group holds exactly the two verbs that destroy state, which is what makes its name
@@ -1423,27 +1424,30 @@ void drawPendingConfirm() {
                   hosts[pendingArg].label[0] ? hosts[pendingArg].label : hosts[pendingArg].id,
                   "its key is deleted; re-pairs over USB", "FORGET", COLOR_BAD);
       break;
-    case CFM_RECAL:
-      // THE SAME RULE AS CFM_POWER_OFF BELOW, and for the same reason: a confirm
-      // dialog's entire job is stating the consequence, so it is the last place
-      // that may describe behaviour this silicon does not have. On a board whose
-      // touch controller lives inside the display IC, runCalibration() is a stub
-      // that prints and returns - there is no 5-tap run and no previous mapping to
-      // keep, so both halves of board 1's note are false here.
-      //
-      // THE BUTTON ITSELF IS DELIBERATELY LEFT IN PLACE. Whether this board should
-      // offer CALIBRATE TOUCH at all is a real question under this repo's own
-      // "never offer a control that cannot work" rule - but the mock the user
-      // approved carries it, so that call is theirs. What is fixed here is only
-      // the dialog telling them something untrue about it.
 #if BOARD_TOUCH_NEEDS_CAL
+    // THE WHOLE ARM IS BEHIND THE FLAG, label included, and it is the same flag the
+    // draw site and the hit test carry - so the button, the tap that raises this
+    // dialog and the dialog itself cannot come apart. Nothing on board 2 can set
+    // pendingConfirm to CFM_RECAL: CALIBRATE TOUCH is not drawn there, handleSettingsTouch's
+    // SET_DEVICE arm is guarded, and RECAL is refused by name out of UNAVAILABLE_COMMANDS[].
+    //
+    // THE `#else` THAT USED TO SIT INSIDE HERE drew the same dialog with the honest
+    // caption "factory-aligned; there is nothing to do". It is deleted rather than
+    // kept, because the control it described is gone: a dialog explaining that a
+    // control does nothing describes a control that no longer exists. The note that
+    // stood above it - "THE BUTTON ITSELF IS DELIBERATELY LEFT IN PLACE ... the mock
+    // the user approved carries it" - was true of the mock that preceded this
+    // redesign; the approved six-group mock drops CALIBRATE TOUCH on board 2.
+    case CFM_RECAL:
+      // THE SAME RULE AS CFM_POWER_OFF BELOW: a confirm dialog's entire job is
+      // stating the consequence, so it is the last place that may describe
+      // behaviour this silicon does not have. Both halves of this caption are true
+      // on board 1 - runCalibration() there really does want 5 taps, and it really
+      // does keep the previous affine mapping if the fit fails.
       drawConfirm("Recalibrate touch?", nullptr,
                   "5 taps; current setup kept if it fails", "CALIBRATE", COLOR_ACCENT);
-#else
-      drawConfirm("Recalibrate touch?", nullptr,
-                  "factory-aligned; there is nothing to do", "CALIBRATE", COLOR_ACCENT);
-#endif
       break;
+#endif
     case CFM_RESET_PAIRING:
       drawConfirm("Reset all pairing?", nullptr,
                   "every paired Mac is forgotten", "RESET", COLOR_WARN);
@@ -1623,6 +1627,11 @@ void handleSettingsTouch(int sx, int sy) {
           forgetHost(pendingArg);
           drawHostsPageStatic();
           return;
+#if BOARD_TOUCH_NEEDS_CAL
+        // Under the same flag as the dialog that raises it, for the same reason -
+        // and here it is also a compile requirement rather than only tidiness:
+        // runCalibration() is not declared at all on a board that needs no
+        // calibration, so an unguarded call would not link.
         case CFM_RECAL:
           runCalibration();
           applyScreenRotation();   // calibration runs unflipped - restore the choice
@@ -1634,6 +1643,7 @@ void handleSettingsTouch(int sx, int sy) {
           drawSettingsStatic();
           renderSettingsTab();
           return;
+#endif
         case CFM_RESET_PAIRING: resetPairing(); return;
         case CFM_POWER_OFF:     powerOff();     return;
         default: break;

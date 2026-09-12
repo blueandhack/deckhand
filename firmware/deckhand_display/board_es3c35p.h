@@ -1853,9 +1853,10 @@ const int PAGE_TOP = CONTENT_Y + PAGER_H + 4;   // 104
 // ACTIONS IS CALLED DANGER NOW, AND THE RENAME IS THE GROUP FINALLY MATCHING ITS
 // CONTENTS. "Actions" was a bag of verbs that each belonged to another group, and
 // this repo conceded that once already when MIC TEST left for SOUND on the grounds
-// that a mic test IS a sound test. CALIBRATE TOUCH leaves next (board 1's DISPLAY
-// group; on this board it is dropped outright, because runCalibration() here is a
-// stub - the touch controller is factory-aligned inside the display IC). What is
+// that a mic test IS a sound test. CALIBRATE TOUCH leaves next (board 1's DEVICE
+// group, under a SETUP caption; on this board it is dropped outright, because the
+// touch controller is factory-aligned inside the display IC - there is no
+// runCalibration() here and RECAL is refused by name). What is
 // left is exactly the two controls that DESTROY STATE: RESET PAIRING and POWER OFF.
 //
 // SO THE ORDERING RULE ABOVE IS PRESERVED RATHER THAN REVERSED, and that is worth
@@ -2572,9 +2573,10 @@ const int P4_AIR_BOT  = 80;
 // EVERY DEPARTURE IS RECORDED WHERE IT HAPPENED rather than inferred from what is
 // left. MIC TEST moved to the SOUND group (a mic test IS a sound test, and it is
 // the one action you run repeatedly). CALIBRATE TOUCH is DROPPED on this board -
-// runCalibration() here is a stub that prints and returns, because the touch
-// controller is factory-aligned inside the display IC, and this repo's rule is that
-// a control which cannot work is never offered (the same rule that stopped the
+// the touch controller is factory-aligned inside the display IC, so there is nothing
+// to fit, no runCalibration() is compiled here (it was a stub that printed and
+// returned, and RECAL is refused by name instead), and this repo's rule is that a
+// control which cannot work is never offered (the same rule that stopped the
 // farewell screen promising a touch wake this board lacks). So none of P2_MIC_Y,
 // P2_SETUP_CAP_Y or P2_CAL_Y exists here and no slot is reserved for any of them -
 // the same rule tabsW() follows when fabVisible() is compiled out, and
