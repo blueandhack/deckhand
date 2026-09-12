@@ -359,3 +359,48 @@ Everything else in the body of this spec: the DIAGNOSTICS compression, the slimm
 board 1 carrying no diagnostics block, dropping CALIBRATE TOUCH on board 2, the `RECAL` refusal,
 `BOARD_SETTINGS_HOME`'s deletion and the self-proving no-op that follows it, and the verification
 discipline. The Macs page is now simply **untouched** on both boards.
+
+---
+
+# AMENDMENT 2, 2026-09-12: "one surface" is qualified, and which flags are scaffolding
+
+The body of this spec says the `#if` pairs "collapse to one implementation each" and that the
+boards become one surface. **That is true of the code and the navigation, and NOT true of the
+explanatory chrome.** Recorded here rather than left to be discovered, because a claim a reader
+can disprove by grepping is worse than a narrower claim that holds.
+
+## What board 1 does not carry
+
+Board 1's settings pages are `PAGE_TOP(80)..contentBottom(302)` = **222px**. Board 2's are
+`104..460` = **356px**. That 134px gap is a physical fact about two panels and no refactor
+removes it. Board 1's Display, Sound and Macs groups want **46, 55 and 42 more rows** than they
+have, so board 1 carries none of board 2's six section captions and hints.
+
+**Nothing regresses**: board 1 never had them. Its combined DISPLAY & SOUND page was three
+stepper cards and a row of three third-width buttons, with no captions at all. The convergence
+gives board 1 board 2's *controls*, its *grouping* and its *navigation*; it does not give it
+board 2's *prose*, and it cannot.
+
+## The flag, and which flags are temporary
+
+`BOARD_SETTINGS_FITS_CAPTIONS` gates them — named for the cause (does this board's page fit
+them) rather than the symptom, in the shape of `BOARD_HAS_MIC` and `BOARD_TOUCH_NEEDS_CAL`.
+
+**Three settings flags exist during this branch and only one survives it:**
+
+| flag | board 1 | board 2 | fate |
+|---|---|---|---|
+| `BOARD_SETTINGS_GROUPS` | 0 -> 1 in Task 3A | 1 | **deleted in Task 4** — scaffolding |
+| `BOARD_SETTINGS_HOME` | 0 -> 1 in Task 3B | 1 | **deleted in Task 4** — scaffolding |
+| `BOARD_SETTINGS_FITS_CAPTIONS` | 0 | 1 | **permanent** |
+
+The two scaffolding flags exist so that content and navigation converge in separate commits with
+separately attributable binary movement. Task 4 deletes both, and its binaries must come out
+byte-identical because the preprocessor was already excluding what it removes. The third is not
+scaffolding and Task 4 must not delete it.
+
+## So the accurate claim
+
+**One implementation, one navigation, one group set, and one geometry SOURCE (each board's own
+header) — with board 2 additionally carrying six lines of explanation its panel has room for.**
+That is what shipped, and it is what `docs/reference/settings-tab.md` should say.
