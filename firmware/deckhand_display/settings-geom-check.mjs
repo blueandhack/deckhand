@@ -51,6 +51,17 @@ import { fileURLToPath } from "url";
 // brings back the orange corner specks 3cb63fb fixed on this same branch.
 // ---------------------------------------------------------------------------
 const SOURCE_FAULTS = [
+  // ---- Task 6 / RULING 22: the reference file's allowlist count ----
+  // board-1-known-state.md states what KNOWN[1] holds, and that cell had been a
+  // hand count wrong TWICE. It is parsed now, so this fault proves the parse rather
+  // than the prose: perturb the number in the document and the assertion must name
+  // it. The converse - a row that cannot be found at all - is the other branch of
+  // the same block and fails by name too.
+  ["board-1-known-state.md's settings allowlist count is nudged off KNOWN[1].length",
+    "../../docs/reference/board-1-known-state.md",
+    (t) => t.replace(/(\|\s*`settings-geom-check\.mjs`\s*\|\s*\*\*)(\d+)(\*\*)/,
+                     (m, a, n, b) => a + (Number(n) + 1) + b),
+    "board-1-known-state.md says settings-geom-check holds"],
   // ---- Task 2 fix round: the payload column's worst case ----
   // The checker parsed this cap from the WHOLE FILE and bound to an unrelated
   // `buf.length() > 7 ? buf.substring(7) : ...` nine guards earlier, certifying a
@@ -5582,6 +5593,47 @@ for (const b of [1, 2]) {
     chk(advanceB(b, 1) === c.TEXT_ADV,
       "scrollback: the body face's advance is TEXT_ADV, so the lane is exact");
   }
+}
+// THE REFERENCE FILE'S COUNT, PARSED RATHER THAN TRANSCRIBED. RULING 22.
+// docs/reference/board-1-known-state.md carries a table of what each geometry
+// checker's board-1 allowlist holds, and its settings row has now been wrong TWICE
+// for the same reason: it was a hand count. It said 10 when the checker held 11
+// (corrected 2026-09-05, and the correction's own note says "the count was
+// transcribed rather than parsed, which is the checkers' own rule arriving on the
+// prose side of it"), and it said 11 when this branch had taken it to 9.
+//
+// A THIRD hand correction would be the same defect a third time, so the number is
+// bound here instead: this checker knows KNOWN[1].length and the document is the
+// thing that can drift. ANCHORED ON THE CHECKER'S OWN FILENAME inside the row, so a
+// reflowed table or a moved section does not silently stop this from checking
+// anything - a row that cannot be found is a FAILURE, never a skip.
+//
+// SCOPE, stated because the asymmetry is deliberate: only the settings row is bound.
+// The usage and sessions rows sit in the same table and are still transcriptions -
+// reading two other checkers' source from inside this one would couple three files
+// to make one sentence true, and usage's allowlist is not even the same shape (it
+// is keyed by overlapping PAIR, not by message). Those two rows carry the date they
+// were taken and the command that re-derives them, which is the other half of the
+// rule: a number is either parsed or it says out loud that it is not.
+{
+  // Through readSource(), not fs.readFileSync: a direct read silently opts a file
+  // out of its own --selftest teeth, which is how usageCodexShown()'s body once
+  // stayed unproven. The path is relative to firmware/deckhand_display, the way
+  // every other read in this checker is.
+  const md = readSource("../../docs/reference/board-1-known-state.md");
+  const row = md.match(/^\|\s*`settings-geom-check\.mjs`\s*\|\s*\*\*(\d+)\*\*\s*\|/m);
+  const CUR_SAVE = CUR;
+  CUR = 1;
+  if (!row) {
+    chk(false, "board-1-known-state.md has no `settings-geom-check.mjs` allowlist row to bind - " +
+      "the count it states is what this checker holds, so move this parse with the row rather " +
+      "than leaving the figure asserted against nothing");
+  } else {
+    chk(+row[1] === KNOWN[1].length,
+      `board-1-known-state.md says settings-geom-check holds ${+row[1]} board-1 allowlist ` +
+      `entries; KNOWN[1] holds ${KNOWN[1].length}`);
+  }
+  CUR = CUR_SAVE;
 }
 checkKnownUsed();
 faultChildEpilogue();

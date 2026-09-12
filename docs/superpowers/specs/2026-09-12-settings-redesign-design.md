@@ -356,6 +356,14 @@ five-row set would have given. **Search the (row height, gap) space rather than 
 > `HOME_Y0` and `HOME_Y0_BOT` free, `6R + 5G + pads = 414` over `R >= TAP_MIN 46` is satisfied by
 > `R=59 / G=2 / pads 42` among others.
 >
+> **MEASURED, 2026-09-12, because one counterexample disproves a uniqueness claim but does not say
+> how far from true it was: board 2's six-row space holds 281 `(R, G)` pairs**, under the same four
+> floors board 1's search below uses. The live `58/10` is one of 281, not one of one, and the
+> sentence this correction replaces was wrong by a factor of 281 rather than by a rounding. The
+> figure was computed during Task 3B's fix round and lived only in that round's report; it is
+> carried here because the spec is the binding authority and a number nobody can find is a number
+> nobody can check.
+>
 > **THE REAL STANDARD, and it is stricter than the one it replaces: search the space, report the
 > solutions, state the tie-break, and never claim a uniqueness you have not computed.** A
 > derivation that reports "one solution" without the enumeration behind it is the same defect as
