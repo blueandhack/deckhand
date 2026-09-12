@@ -1740,10 +1740,10 @@ void handleSettingsTouch(int sx, int sy) {
     // NO MIC TEST AND NO CALIBRATE BRANCH, on EITHER board, and the two are absent
     // for different reasons - which is why both are written down rather than one
     // standing in for the other. MIC TEST is drawn on the SOUND group on both.
-    // CALIBRATE TOUCH is not offered AT ALL on board 2 (runCalibration() there is a
-    // stub, and a control that cannot work is never offered) and IS offered on board
-    // 1 - but on the DEVICE group, under BOARD_TOUCH_NEEDS_CAL, because it destroys
-    // nothing. Either way this page reserves no slot for it. An earlier revision of
+    // CALIBRATE TOUCH is not offered AT ALL on board 2 (there is no runCalibration()
+    // compiled there, RECAL is refused by name, and a control that cannot work is
+    // never offered) and IS offered on board 1 - but on the DEVICE group, under
+    // BOARD_TOUCH_NEEDS_CAL, because it destroys nothing. Either way this page reserves no slot for it. An earlier revision of
     // this note said "CALIBRATE TOUCH is not offered on this board at all" full stop,
     // which stopped being true of one of the two boards the moment this arm became
     // shared.

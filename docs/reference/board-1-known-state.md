@@ -211,6 +211,18 @@ place rather than deleted**, because the only thing worse than an unrecorded gap
   real open question, listed here rather than settled — but the mock the user approved carries the
   button, so it is their call and not a fix to make in passing.
 
+  > **SETTLED, AND THE WHOLE PARAGRAPH ABOVE IS NOW HISTORY (settings-redesign, Task 5,
+  > 2026-09-12).** Kept and marked rather than deleted, per this file's own rule. The user's
+  > answer to the open question was to drop the control: the approved six-group mock carries no
+  > CALIBRATE TOUCH on board 2. So on that board the button is gone, its hit test is gone, both
+  > `CFM_RECAL` arms are behind `#if BOARD_TOUCH_NEEDS_CAL`, the `#else` dialog is deleted (a
+  > dialog explaining that a control does nothing describes a control that no longer exists),
+  > `runCalibration()` is not compiled at all, and `RECAL` is refused BY NAME out of
+  > `UNAVAILABLE_COMMANDS[]`. **The board-conditional dialog this entry was written to celebrate
+  > no longer exists on either arm.** THE ENTRY ITSELF THEN BECAME AN INSTANCE OF THE CLASS IT
+  > SITS UNDER — it was found by the mechanical sweep described in that task's report, not by
+  > anybody reading it.
+
 **TWO SHARED-CODE BUGS WERE FIXED DELIBERATELY, and both are the same lesson in different
 clothes.** Board 1's binary moved for each, which is why the byte-identity check is now
 `board-baseline.mjs` (see Commands).

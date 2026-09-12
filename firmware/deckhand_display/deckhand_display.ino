@@ -5498,7 +5498,8 @@ int bleFrameSlot = -1;
 // Called from drainBleRx() every loop() iteration (normal operation), AND
 // directly from inside every OTHER loop that can hold loopTask away from
 // loop() for longer than a moment - micStream (up to 120s), micMonitor/
-// MICTEST (until tapped), the SCREENSHOT readback (~18s), runCalibration.
+// MICTEST (until tapped), the SCREENSHOT readback (~18s), runCalibration
+// (BOARD 1 ONLY - board 2 compiles none and refuses RECAL by name).
 // All of those already run on loopTask, so calling this from inside them is
 // exactly as safe as calling it from drainBleRx() itself - a disconnect
 // queued mid-recording would otherwise sit unreaped for the whole blocking
@@ -5513,7 +5514,8 @@ int bleFrameSlot = -1;
 // disconnect, and the loop() watchdog is the net behind THAT - and must
 // advertise ONLY on the path neither of those two can reach: a blocking
 // call (micStream up to 120s, micMonitor up to 180s, runCalibration waiting
-// on a person, the SCREENSHOT readback) that starves loop() - and therefore
+// on a person - board 1 only, board 2 compiles none - the SCREENSHOT readback)
+// that starves loop() - and therefore
 // the watchdog - for its entire duration, during which a refusal caused by
 // a still-pending slot would otherwise leave BLE un-advertised until the
 // blocking call finally returns.
@@ -5526,8 +5528,8 @@ void reapBleLinks(bool mayAdvertise) {
   // Drained here (not in a dedicated function) so it rides the exact same
   // deferred hand-off releasePending already uses, and reaches loopTask from
   // every call site that already calls this - the ordinary drainBleRx() path
-  // AND the blocking-loop call sites (micStream, micMonitor, runCalibration,
-  // the SCREENSHOT readback) - so a refusal during a long recording is not
+  // AND the blocking-loop call sites (micStream, micMonitor, runCalibration
+  // on board 1 only, the SCREENSHOT readback) - so a refusal during a long recording is not
   // silenced until the recording ends.
   if (bleRefusalPending) {
     bleRefusalPending = false;
@@ -7173,7 +7175,6 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
       return;
     }
-    int pg = buf.substring(5).toInt();
     // ONE RANGE ON BOTH BOARDS, AND THE BOUND IS DERIVED RATHER THAN WRITTEN. 0 is
     // HOME and 1..SET_GROUP_COUNT are the groups, the ids settingsPage itself
     // carries. They were not always the same - board 1 numbered its own pages 0..4
@@ -7197,6 +7198,26 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
                   "settings group ids must stay contiguous from SET_HOME: PAGE's bound is "
                   "derived from SET_GROUP_COUNT and openSettingsGroup() clamps to SET_DANGER");
     const int pgMax = SET_HOME + SET_GROUP_COUNT;
+    // THE ARGUMENT IS CHECKED BEFORE IT IS CONVERTED, because String::toInt() answers
+    // 0 for anything it cannot parse - so "PAGE foo", "PAGE" with a trailing space and
+    // "PAGE 0" were three ways of saying the same thing, and two of them were typos
+    // that opened HOME and said nothing. Refusing the NUMBER out of range while
+    // silently accepting a non-number would have left the easier mistake as the quiet
+    // one. This is deliberately local to PAGE: TAB, DETAIL and MULTITEST convert the
+    // same way and are NOT fixed here, because a shared argument parser is a change to
+    // the whole chain rather than to this arm.
+    String pgArg = buf.substring(5);
+    pgArg.trim();
+    bool pgNumeric = pgArg.length() > 0;
+    for (unsigned int i = 0; i < pgArg.length(); i++)
+      if (pgArg[i] < '0' || pgArg[i] > '9') pgNumeric = false;
+    if (!pgNumeric) {
+      Serial.printf("PAGE refused: \"%s\" is not a page number - PAGE %d..%d\n",
+                    pgArg.c_str(), SET_HOME, pgMax);
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
+    const int pg = pgArg.toInt();
     // NAME THE RANGE, NOT JUST "out of range". Before this, PAGE 9 reached
     // openSettingsGroup(), whose constrain() quietly delivered the DANGER group -
     // so from the Mac a typo and a hit were the same screenshot, and PAGE 7 silently

@@ -96,6 +96,8 @@ function suite(ok, over = {}) {
   const hdr = {};
   for (const b of [1, 2])
     hdr[b] = over[`h${b}`] != null ? over[`h${b}`] : fs.readFileSync(`${DIR}/${HDR[b]}`, "utf8");
+  const claudeMd = over.claudemd != null ? over.claudemd
+                 : fs.readFileSync(`${DIR}/../../CLAUDE.md`, "utf8");
 
   // ---- the flags, out of each header ------------------------------------
   // NUMERIC #defines only: BOARD_NAME is a string and BOARD_W/BOARD_H are sizes,
@@ -380,6 +382,15 @@ function suite(ok, over = {}) {
          /PAGE refused:[^"]*outside PAGE %d\.\.%d/.test(arm) && /\bpg,\s*SET_HOME,\s*pgMax\b/.test(arm));
       ok("PAGE refuses the wrong-tab case by name too, instead of the silent no-op it was",
          /currentTab\s*!=\s*TAB_SETTINGS/.test(arm) && /PAGE refused:[^"]*live tab/.test(arm));
+      // String::toInt() answers 0 for anything it cannot parse, so a non-numeric
+      // argument opened HOME and said nothing while a numeric one out of range was
+      // refused - the quiet answer left on the EASIER mistake. The digits test must
+      // come before the conversion, or it is testing the conversion's own default.
+      const digitsAt = arm.search(/pgArg\[i\]\s*<\s*'0'/);
+      const convAt = arm.search(/pgArg\.toInt\(\)/);
+      ok("PAGE validates its argument is digits BEFORE converting, so \"PAGE foo\" is not read as PAGE 0",
+         digitsAt > 0 && convAt > digitsAt &&
+         /is not a page number - PAGE %d\.\.%d/.test(arm));
       // The contiguity the derivation rests on, enforced by the compiler rather than
       // by this comment: SET_GROUP_COUNT alone cannot see whether the ids run
       // unbroken from SET_HOME, and openSettingsGroup() clamps to SET_DANGER.
@@ -406,6 +417,26 @@ function suite(ok, over = {}) {
     }
     ok(`PAGE means the same thing on both boards: 0..${ids[1].SET_HOME + ids[1].SET_GROUP_COUNT} here and 0..${ids[2].SET_HOME + ids[2].SET_GROUP_COUNT} there`,
        ids[1].SET_HOME === ids[2].SET_HOME && ids[1].SET_GROUP_COUNT === ids[2].SET_GROUP_COUNT);
+    // ...AND CLAUDE.md'S COPY OF THE NUMBER, which is the one place it is a bare
+    // numeral. The command table's PAGE row names SET_GROUP_COUNT for the range
+    // itself, so the range cannot go stale - but it quotes today's value once, for a
+    // reader who wants to know what to type without opening a header, and NOTHING
+    // PARSED THAT. The group set has been re-cut three times on this branch; a
+    // fourth would leave that numeral wrong with no assertion anywhere noticing,
+    // which is exactly the hazard the static_assert now defends against in code.
+    // board-baseline.mjs --doc-check binds four numbers in CLAUDE.md the same way
+    // and for the same reason. The phrase is fixed so this can find it.
+    const docM = /SET_GROUP_COUNT is (\d+) today/.exec(claudeMd);
+    ok(`CLAUDE.md's command table states SET_GROUP_COUNT's value in the parseable phrase this binds to ${docM ? "" : "[phrase not found - see the PAGE row]"}`,
+       docM != null);
+    if (docM)
+      ok(`CLAUDE.md's quoted SET_GROUP_COUNT (${docM[1]}) matches both headers (${ids[1].SET_GROUP_COUNT} / ${ids[2].SET_GROUP_COUNT})`,
+         Number(docM[1]) === ids[1].SET_GROUP_COUNT && Number(docM[1]) === ids[2].SET_GROUP_COUNT);
+    // And the range itself must be written as the CONSTANT, not as numbers: a row
+    // reading "PAGE 0..6" would satisfy the two assertions above and still be the
+    // transcription this is here to prevent.
+    ok("CLAUDE.md's PAGE row names the range by its constant (PAGE 0..SET_GROUP_COUNT), not by a numeral",
+       /`PAGE 0\.\.SET_GROUP_COUNT`/.test(claudeMd) && !/`PAGE 0\.\.\d/.test(claudeMd));
   }
 
   // ---- (4) the causes ----------------------------------------------------
@@ -622,6 +653,7 @@ const realMain = stripComments("deckhand_display.ino");
 const realH1 = fs.readFileSync(`${DIR}/${HDR[1]}`, "utf8");
 const realHost = fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
   .replace(/^[ \t]*\/\/.*$/gm, "");
+const realClaudeMd = fs.readFileSync(`${DIR}/../../CLAUDE.md`, "utf8");
 // One arm of host/index.mjs's device-line handler, LOCATED by its own literal and
 // brace-matched, with the `[device/...]` log removed from it - i.e. the shape
 // 28795e3 fixed for BLEMTU, put back.
@@ -789,6 +821,12 @@ const faults = [
     { main: realMain.replace(/PAGE refused: %d is outside PAGE %d\.\.%d[^"]*/, "PAGE refused: out of range") }],
   ["one board's group set is re-cut and the other's is not, so PAGE n means two different screens again",
     { h1: realH1.replace(/const int SET_GROUP_COUNT = 6;/, "const int SET_GROUP_COUNT = 5;") }],
+  ["CLAUDE.md's quoted SET_GROUP_COUNT goes stale after a fourth re-cut of the group set",
+    { claudemd: realClaudeMd.replace(/SET_GROUP_COUNT is \d+ today/, "SET_GROUP_COUNT is 7 today") }],
+  ["CLAUDE.md's PAGE row goes back to transcribing the range as numbers",
+    { claudemd: realClaudeMd.replace(/`PAGE 0\.\.SET_GROUP_COUNT`/, "`PAGE 0..6`") }],
+  ["PAGE goes back to trusting String::toInt(), so \"PAGE foo\" silently means PAGE 0",
+    { main: realMain.replace(/\n\s*if \(pgArg\[i\][^\n]*\n/, "\n") }],
   // ---- m6: the CLASS the BLEMTU fix closed only one instance of ----
   ["the Mac's BLEMTU arm goes back to returning before it logs (28795e3, reverted)",
     { host: unlogArm(realHost, "BLEMTU ") }],
@@ -801,7 +839,8 @@ let caught = 0;
 for (const [name, over] of faults) {
   const unchanged = (over.main == null || over.main === realMain) &&
                     (over.h1 == null || over.h1 === realH1) &&
-                    (over.host == null || over.host === realHost);
+                    (over.host == null || over.host === realHost) &&
+                    (over.claudemd == null || over.claudemd === realClaudeMd);
   if (unchanged) { console.log(`  MISSED  ${name}  <- the injection did not apply (anchor moved)`); continue; }
   const r = run(over, true);
   if (r.failures.length) {

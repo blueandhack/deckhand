@@ -2087,13 +2087,14 @@ for (const b of [1, 2]) {
       chk(btnEnd + 1 + c.DEV_AIR_BOT === contentBottom,
           `Device: the stack lands exactly - CALIBRATE TOUCH ends ${btnEnd}, + 1 + named surplus DEV_AIR_BOT ${c.DEV_AIR_BOT} == contentBottom ${contentBottom} (got ${btnEnd + 1 + c.DEV_AIR_BOT})`);
     } else {
-      // THE ABSENCES, BY NAME - the P2_MIC_Y treatment. runCalibration() on this
-      // board is a stub that prints and returns (the controller is factory-aligned
-      // inside the display IC), so the control cannot work and is not offered: a
-      // constant a draw site no longer uses but a hit test still does is how a page
-      // comes to claim taps for a button it does not draw.
+      // THE ABSENCES, BY NAME - the P2_MIC_Y treatment. This board's controller is
+      // factory-aligned inside the display IC, so there is nothing to fit, no
+      // runCalibration() is compiled here (Task 5 deleted the stub that was, and
+      // RECAL is refused by name instead), the control cannot work and is not
+      // offered: a constant a draw site no longer uses but a hit test still does is
+      // how a page comes to claim taps for a button it does not draw.
       for (const [n, why] of [["DEV_CAL_CAP_Y", "there is no SETUP section on this board"],
-                              ["DEV_CAL_Y", "CALIBRATE TOUCH is not offered here - runCalibration() is a stub"],
+                              ["DEV_CAL_Y", "CALIBRATE TOUCH is not offered here - no runCalibration() is compiled on this board and RECAL is refused by name"],
                               ["P1_CAL_Y", "CALIBRATE TOUCH was never on the Display group on either board"]])
         chk(c[n] === undefined, `board ${b} has no ${n}: ${why} (got ${c[n]})`);
     }
@@ -3113,9 +3114,10 @@ for (const b of [1, 2]) {
     // directions, and why P2_AIR_BOT below closes the page from the other end.
     //
     // FIVE ABSENCES, ASSERTED BY NAME rather than described. MIC TEST went to the
-    // Sound group; CALIBRATE TOUCH is not offered on this board at all, because
-    // runCalibration() here is a stub and a control that cannot work is never
-    // drawn - so P2_SETUP_CAP_Y went with the section it headed; P2_HINT_Y went
+    // Sound group; CALIBRATE TOUCH is not offered on this board at all, because no
+    // runCalibration() is compiled here (Task 5 deleted the stub that was, and RECAL
+    // is refused by name) and a control that cannot work is never drawn - so
+    // P2_SETUP_CAP_Y went with the section it headed; P2_HINT_Y went
     // with the fact it carried, which is in POWER OFF's confirm dialog; and
     // P2_GAP and P2_SECTION_GAP both went with the relationships they named, since
     // there is one section here and the two buttons inside it sit at SP_3. Each is

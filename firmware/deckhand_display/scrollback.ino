@@ -841,8 +841,11 @@ void drawScrollback() {
   tft.flush();
 }
 
-// A BLOCKING loop, the pattern micMonitor, micStream and runCalibration already
-// use - chosen over extending handleTouch() for two reasons. handleTouch() is
+// A BLOCKING loop, the pattern micMonitor, micStream and (on board 1)
+// runCalibration already use - chosen over extending handleTouch() for two
+// reasons. The runCalibration half of that precedent is BOARD 1'S: this file is
+// board 2 only and no runCalibration() is compiled here, so the pattern is cited
+// from the shared files rather than from anything this board can call. handleTouch() is
 // SHARED CODE and returns immediately on `touching && wasTouching` ("a finger
 // still down has nothing left to do"), so putting drag state there risks board
 // 1's binary for a board-2 feature. And the precedent already exists three times.
