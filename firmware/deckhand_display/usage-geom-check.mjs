@@ -31,6 +31,8 @@ import { cacheSizes, consts, deadGuards, DIR, evalInt, faultChildEpilogue, fnBod
          lineH, PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX,
          splitArgs, stripComments, sweepSourceFaults, textWidth } from "./geom-common.mjs";
 import fs from "fs";
+import { spawnSync } from "child_process";
+import { fileURLToPath } from "url";
 
 // ---------------------------------------------------------------------------
 // SOURCE FAULTS. This file's --selftest used to inject exactly ONE fault - a
@@ -325,21 +327,68 @@ const BASELINE_FAILURES = 0;
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0;
 let known = 0, total = 0;
+// THE MESSAGES, not just the count. `fail` alone cannot tell the assertion that
+// exists for the injected fault from an unrelated one, which is what let this
+// selftest be green while measuring nothing - see CONST_FAULT below.
+const FAILED = [];
 function chk(cond, msg, allow) {
   total++;
   if (!cond && allow) { known++; console.log(` known  ${msg}`); return; }
   console.log(`${cond ? "  ok  " : " FAIL "} ${msg}`);
-  if (!cond) fail++;
+  if (!cond) { fail++; FAILED.push(msg); }
 }
 
-if (SELFTEST) {
+// ---------------------------------------------------------------------------
+// THE CONSTANT FAULT, AND HOW IT IS CREDITED.
+//
+// WHAT WAS WRONG. This selftest injected one constant and then credited it on
+// `fail > BASELINE_FAILURES` - i.e. on SOMETHING having failed, anywhere. Three
+// things passed that were not catches, all three demonstrated by execution rather
+// than suspected:
+//   - aim the injection at an unrelated constant (B[2].CARD_X += 3) and the run
+//     was still green: the ceiling assertion this fault exists for PASSED;
+//   - rename CARD_FOOT_Y out of board_es3c35p.h and `B[2].CARD_FOOT_Y += 8` is
+//     `undefined + 8` = NaN, which perturbs nothing and poisons every comparison
+//     that reads it - two assertions failed and the run reported `selftest ok`;
+//   - and neither run told you the tree itself was red, because the injected run
+//     IS the run. sessions-geom-check.mjs had the same three, and its NaN case
+//     printed `selftest ok` with FORTY-FIVE assertions failing.
+// The source half of this file never had any of it: sweepSourceFaults() re-execs
+// one child per fault, requires that fault's own `expect` fragment in a FAIL line,
+// and reports ANCHOR MOVED when a mutation changes nothing. This is the same three
+// rules arriving on the constant side.
+//
+// WHAT IS DIFFERENT NOW. The parent runs CLEAN and re-execs ONE child with the
+// fault applied; the child must exit non-zero AND print the assertion named below.
+// So a green --selftest now also says the tree is green, which the old one could
+// not claim. NOT a fault TABLE: there is exactly one constant fault here and a
+// table for one entry would be shape for its own sake. If a second is ever added,
+// this is already the design that keeps the two from crediting each other.
+//
+// `bump` is what makes an injection that has STOPPED APPLYING fail loudly instead
+// of reading as a catch - the ANCHOR MOVED rule, on the constant side.
+function bump(board, name, delta) {
+  if (typeof B[board][name] !== "number")
+    throw new Error(`--selftest: B[${board}].${name} is not a number (${B[board][name]}) - ` +
+      `the injection has stopped applying, and an injection that changes nothing proves nothing`);
+  B[board][name] += delta;
+}
+const CONST_FAULT = {
   // 8px lower and the foot row's clear box lands on the card's 2px border - the
   // exact defect board 1 shipped once. 8 rather than 1 because the real layout
   // leaves 7 rows of slack below the foot row deliberately, so a 1px nudge is
   // WITHIN spec and must not fail; 8 is the first offset that actually breaches
   // the ceiling. If this passes, the checker is blind.
-  B[2].CARD_FOOT_Y += 8;
-  console.log("--selftest: board 2's CARD_FOOT_Y pushed 8px down; the ceiling assertion MUST fail");
+  what: "board 2's CARD_FOOT_Y pushed 8px down; the ceiling assertion MUST fail",
+  apply: () => bump(2, "CARD_FOOT_Y", 8),
+  // The ceiling assertion itself, and ONLY it. Board 1 has its own CARD_FOOT_Y and
+  // is not perturbed, so in a clean tree this can only be board 2's line.
+  want: [/^nothing on the card ends past \+\d+ /],
+};
+const CONST_FAULT_ON = process.env.DECK_CONST_FAULT === "1";
+if (CONST_FAULT_ON) {
+  CONST_FAULT.apply();
+  console.log(`--selftest child: ${CONST_FAULT.what}`);
 }
 
 // A CAPABILITY FLAG MUST BE A #define, NEVER A const int. `#if FOO` on a C++
@@ -1760,12 +1809,48 @@ for (const b of [1, 2]) {
 faultChildEpilogue();
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 overlaps`);
 if (SELFTEST) {
-  if (fail <= BASELINE_FAILURES) {
-    console.log(`SELFTEST FAILED: the checker did not notice a moved row ` +
-                `(${fail} failure(s), and ${BASELINE_FAILURES} already stand without any fault injected)`);
+  // THE PARENT RAN CLEAN. Everything above this line had no injection at all, so
+  // `fail` is the honest state of the tree - and a fault injected on top of a red
+  // tree proves nothing, which is precisely how the old design came to print
+  // `selftest ok` while assertions were failing.
+  if (fail > BASELINE_FAILURES) {
+    console.log(`\nSELFTEST FAILED: the UNINJECTED run has ${fail} failure(s) ` +
+                `(${BASELINE_FAILURES} may stand) - fix those first.`);
     process.exit(1);
   }
-  console.log(`selftest ok - the injected fault produced ${fail} failure(s)`);
+  console.log("\n--selftest: the constant fault (re-execs this checker and must FAIL BY NAME)");
+  const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+    env: { ...process.env, DECK_CONST_FAULT: "1" }, encoding: "utf8", maxBuffer: 64e6,
+  });
+  const out = `${r.stdout || ""}${r.stderr || ""}`;
+  const fails = out.split("\n").filter((l) => /^\s*FAIL/.test(l)).map((l) => l.replace(/^\s*FAIL\s*/, "").trim());
+  let missed = 0;
+  // A THROWN child is not a catch: bump() throws when its constant is gone, and a
+  // crash fails everything at once, which is the shape a real catch must never be
+  // confused with.
+  if (/is not a number/.test(out)) {
+    console.log(`  MISSED  ${CONST_FAULT.what}\n            <- the injection has stopped applying (constant renamed?)`);
+    missed++;
+  } else if (r.status === 0) {
+    console.log(`  MISSED  ${CONST_FAULT.what}\n            <- no assertion notices this`);
+    missed++;
+  } else {
+    // ONE LINE PER REQUIRED PROOF, each naming the pattern it stands for. Two
+    // proofs printing the same sentence is the lesson this whole change is about,
+    // one level up: an output a reader cannot tell apart is an output that cannot
+    // say which half held.
+    CONST_FAULT.want.forEach((want, i) => {
+      const tag = CONST_FAULT.want.length > 1 ? ` [proof ${i + 1}/${CONST_FAULT.want.length}: ${want}]` : "";
+      const hit = fails.find((m) => want.test(m));
+      if (hit) console.log(`  caught  ${CONST_FAULT.what}${tag}\n            by: ${hit.slice(0, 150)}`);
+      else {
+        console.log(`  MISSED  ${CONST_FAULT.what}${tag}\n            <- ${fails.length} assertion(s) failed but NONE matched ` +
+                    `(first: ${(fails[0] || "").slice(0, 90)})`);
+        missed++;
+      }
+    });
+  }
+  if (missed) process.exit(1);
   // ...and the SOURCE half, which the constant perturbation above cannot reach.
   console.log("\n--selftest: source faults (each re-execs this checker and must FAIL)");
   process.exit(sweepSourceFaults(import.meta.url, SOURCE_FAULTS) ? 0 : 1);

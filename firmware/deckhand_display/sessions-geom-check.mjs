@@ -22,6 +22,8 @@ import { cacheSizes, consts, deadGuards, DIR, faultChildEpilogue, fnBody, lineH,
          PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX, splitArgs,
          stripComments, sweepSourceFaults, textWidth } from "./geom-common.mjs";
 import fs from "fs";
+import { spawnSync } from "child_process";
+import { fileURLToPath } from "url";
 
 // ---------------------------------------------------------------------------
 // SOURCE FAULTS. This checker's --selftest injected exactly ONE perturbed
@@ -400,16 +402,54 @@ const DETAIL_META_FACTS = {
 
 const SELFTEST = process.argv.includes("--selftest");
 let fail = 0, known = 0, total = 0;
+// THE MESSAGES, not just the count. `fail` alone cannot tell the assertion that
+// exists for the injected fault from an unrelated one - see CONST_FAULT below.
+const FAILED = [];
 function chk(cond, msg, allow) {
   total++;
   if (!cond && allow) { known++; console.log(` known  ${msg}`); return; }
   console.log(`${cond ? "  ok  " : " FAIL "} ${msg}`);
-  if (!cond) fail++;
+  if (!cond) { fail++; FAILED.push(msg); }
 }
 function isKnown(b, msg) { return KNOWN[b].includes(msg); }
 
-if (SELFTEST) {
-  // Raise the bottom-anchored pill by 10px on board 2. That is the exact shape of
+// ---------------------------------------------------------------------------
+// THE CONSTANT FAULT, AND HOW IT IS CREDITED.
+//
+// WHAT WAS WRONG, demonstrated by execution rather than suspected. This selftest
+// injected one constant and credited it on `fail === 0` being false - i.e. on
+// SOMETHING having failed, anywhere. Three things passed that were not catches:
+//   - aim the injection at an unrelated constant (B[2].SESSION_ROW_X += 3) and the
+//     run was still green: the nine assertions this fault exists for all PASSED;
+//   - rename SESSION_PILL_UP_T out of deckhand_display.ino and
+//     `B[2].SESSION_PILL_UP_T += 12` is `undefined + 12` = NaN, which perturbs
+//     nothing and poisons every comparison reading it - the run then printed
+//     `selftest ok - the injected fault produced 45 failure(s)` AND EXITED 0. A
+//     checker whose selftest is green while forty-five of its own assertions are
+//     failing is reporting the opposite of its state;
+//   - and neither case could tell you the tree was red, because the injected run
+//     IS the run. usage-geom-check.mjs had all three as well.
+// The source half of this file never had any of it: sweepSourceFaults() re-execs
+// one child per fault, requires that fault's own `expect` fragment in a FAIL line,
+// and reports ANCHOR MOVED when a mutation changes nothing. All ten of its entries
+// carry an expect. This is those same three rules arriving on the constant side.
+//
+// WHAT IS DIFFERENT NOW. The parent runs CLEAN and re-execs ONE child with the
+// fault applied; the child must exit non-zero AND print the assertions named below.
+// NOT a fault TABLE: there is one constant fault here and a table for one entry
+// would be shape for its own sake - but this is already the design that keeps two
+// faults from crediting each other, if a second is ever added.
+//
+// `bump` is what makes an injection that has STOPPED APPLYING fail loudly instead
+// of reading as a catch - the ANCHOR MOVED rule, on the constant side.
+function bump(board, name, delta) {
+  if (typeof B[board][name] !== "number")
+    throw new Error(`--selftest: B[${board}].${name} is not a number (${B[board][name]}) - ` +
+      `the injection has stopped applying, and an injection that changes nothing proves nothing`);
+  B[board][name] += delta;
+}
+const CONST_FAULT = {
+  // Raise the bottom-anchored pill by 12px on board 2. That is the exact shape of
   // the defect this tab is prone to - the pill drawn over the model/branch line -
   // and it is injected into the OFFSET rather than into a threshold on purpose:
   // it can only be caught by actually laying the bands out and comparing them, so
@@ -420,8 +460,20 @@ if (SELFTEST) {
   // packed stack; the re-derived ladder leaves that rung 6px of margin, so 10 now
   // fails only the threshold band table and no longer exercises the PER-RUNG path -
   // which is the one that actually caught the FOOTER_H regression. 12 fails both.
-  B[2].SESSION_PILL_UP_T += 12;
-  console.log("--selftest: board 2's pill raised 12px into the sub-line; the threshold AND per-rung band assertions MUST fail");
+  what: "board 2's pill raised 12px into the sub-line; the threshold AND per-rung band assertions MUST fail",
+  apply: () => bump(2, "SESSION_PILL_UP_T", 12),
+  // BOTH, because the comment above claims both and a claim nothing tests is the
+  // defect this file is full of assertions about. The first is the packed-stack
+  // THRESHOLD; the second is the PER-RUNG band walk, which is the path that caught
+  // the FOOTER_H regression and the reason the magnitude was raised from 10 to 12.
+  // Crediting on either alone would let the walk be deleted with this still green.
+  want: [/^SESSION_TITLE_MIN_H: pill top \+\d+ clears sub-line ending \+\d+ by -?\d+$/,
+         /^(?:strip )?\d+x\d+ \(title\): sub-line -> pill gap -?\d+$/],
+};
+const CONST_FAULT_ON = process.env.DECK_CONST_FAULT === "1";
+if (CONST_FAULT_ON) {
+  CONST_FAULT.apply();
+  console.log(`--selftest child: ${CONST_FAULT.what}`);
 }
 
 // A tall row's vertical bands, as [name, top, bottom-inclusive]. `kind` picks
@@ -4305,8 +4357,47 @@ for (const b of [1, 2]) {
 faultChildEpilogue();
 console.log(`\n${total} assertions, ${fail} failures, ${known} known-and-documented board-1 compromises`);
 if (SELFTEST) {
-  if (fail === 0) { console.log("SELFTEST FAILED: the checker did not notice a 1px threshold change"); process.exit(1); }
-  console.log(`selftest ok - the injected fault produced ${fail} failure(s)`);
+  // THE PARENT RAN CLEAN. Everything above this line had no injection at all, so
+  // `fail` is the honest state of the tree - and a fault injected on top of a red
+  // tree proves nothing, which is exactly how this selftest came to print
+  // `selftest ok` with forty-five assertions failing.
+  if (fail) {
+    console.log(`\nSELFTEST FAILED: the UNINJECTED run has ${fail} failure(s) - fix those first.`);
+    process.exit(1);
+  }
+  console.log("\n--selftest: the constant fault (re-execs this checker and must FAIL BY NAME)");
+  const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+    env: { ...process.env, DECK_CONST_FAULT: "1" }, encoding: "utf8", maxBuffer: 64e6,
+  });
+  const out = `${r.stdout || ""}${r.stderr || ""}`;
+  const fails = out.split("\n").filter((l) => /^\s*FAIL/.test(l)).map((l) => l.replace(/^\s*FAIL\s*/, "").trim());
+  let missed = 0;
+  // A THROWN child is not a catch: bump() throws when its constant is gone, and a
+  // crash fails everything at once, which is the shape a real catch must never be
+  // confused with.
+  if (/is not a number/.test(out)) {
+    console.log(`  MISSED  ${CONST_FAULT.what}\n            <- the injection has stopped applying (constant renamed?)`);
+    missed++;
+  } else if (r.status === 0) {
+    console.log(`  MISSED  ${CONST_FAULT.what}\n            <- no assertion notices this`);
+    missed++;
+  } else {
+    // ONE LINE PER REQUIRED PROOF, each naming the pattern it stands for. Two
+    // proofs printing the same sentence is the lesson this whole change is about,
+    // one level up: an output a reader cannot tell apart is an output that cannot
+    // say which half held.
+    CONST_FAULT.want.forEach((want, i) => {
+      const tag = CONST_FAULT.want.length > 1 ? ` [proof ${i + 1}/${CONST_FAULT.want.length}: ${want}]` : "";
+      const hit = fails.find((m) => want.test(m));
+      if (hit) console.log(`  caught  ${CONST_FAULT.what}${tag}\n            by: ${hit.slice(0, 150)}`);
+      else {
+        console.log(`  MISSED  ${CONST_FAULT.what}${tag}\n            <- ${fails.length} assertion(s) failed but NONE matched ` +
+                    `(first: ${(fails[0] || "").slice(0, 90)})`);
+        missed++;
+      }
+    });
+  }
+  if (missed) process.exit(1);
   console.log("\n--selftest: source faults (each re-execs this checker and must FAIL BY NAME)");
   process.exit(sweepSourceFaults(import.meta.url, SOURCE_FAULTS) ? 0 : 1);
 }
