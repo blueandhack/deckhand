@@ -1919,7 +1919,7 @@ const int SET_CAP_STEP = 24;
 // TWO CARDS AND A BLOCK OF DIAGNOSTICS, and the shape is what made three pages fit
 // on one. The two facts you actually came for - is the host talking to me, and how
 // is the battery - lead a card each as a T_HEAD line with one dimmed detail under
-// it. The eleven you read almost never are five monospace lines under a caption.
+// it. The eleven you read almost never are six monospace lines under a caption.
 //
 // POWER OFF IS NOT ON THIS PAGE ANY MORE. It was, for exactly one commit of this
 // branch, while ACTIONS was being dissolved; ACTIONS survives as DANGER (see its
@@ -1945,9 +1945,10 @@ const int SET_CAP_STEP = 24;
 // THE PAGE IS NO LONGER FULL, and the previous revision of this paragraph said it
 // was - which was true while POWER OFF ended the stack on 460 with nothing spare.
 // It does not, so the claim is corrected rather than deleted: there are 49 rows
-// under the last diagnostics line. They are not spent on a sixth line, because the
-// eleven facts fit in five and a blank right column is a line that reads as a
-// rendering fault; they are not spent on widening the gaps, for the reason the
+// under the last diagnostics line. They are not spent on a SEVENTH line, because
+// the eleven facts fit in six exactly - see DEV_DIAG_LINES for that arithmetic -
+// and a seventh would have BOTH of its columns blank, which reads as a rendering
+// fault; they are not spent on widening the gaps, for the reason the
 // rhythm paragraph further up already gives; and they are not spent by floating the
 // block down to the footer, because every group on this board is TOP-ALIGNED under
 // the band. So the air is named, asserted as the closing term, and available to
@@ -2000,13 +2001,14 @@ const int ST_VERDICT_BYTES = ST_VERDICT_CHARS + 1;
 const int ST_BIG_CHARS     = 11;
 const int ST_LINE_CHARS    = 28;
 const int ST_LINE_BYTES    = ST_LINE_CHARS + 1;
-// ---- DIAGNOSTICS: eleven facts you read almost never, in five lines ----
+// ---- DIAGNOSTICS: eleven facts you read almost never, in six lines ----
 // They used to be the HOST card's four (payload, flush, uptime, live Macs) plus
 // About's five (build, time, commit, board, BT MAC), the first in a 92px card and
 // the second in five 46px uiListRows under their own caption and hint - ~416px of
-// page for values nobody watches. Here they are five lines under one caption: both
+// page for values nobody watches. Here they are six lines under one caption: both
 // faces on this board are monospace, so column alignment does the work uiListRow's
-// 46px of chrome was doing, and ~416px becomes 112.
+// 46px of chrome was doing, and ~416px becomes 131 - the caption's own box at
+// 280..295 plus six drawIfChanged fields painting 303..410.
 //
 // ALL ELEVEN ARE HERE NOW. Two were dropped when this block was four lines - the
 // build TIME and the BT MAC - because eleven facts do not fit eight two-column
@@ -2048,20 +2050,28 @@ const int DEV_DIAG_Y     = 304;   // DEV_DIAG_CAP_Y + SET_CAP_STEP, the one capt
 // not chosen: T_META is 16 here (Spleen 8x16, see UI_FONTS), so 16 + 2.
 const int DEV_DIAG_STEP  = 18;
 // SIX, up from four, and the two extra lines are what POWER OFF's 80 rows bought.
-// Six rather than five, which is what the page was costed at: eleven facts in two
-// columns is five lines ONLY if the die temperature shares one, and it cannot (see
-// DEV_DIAG_TEMP_LINE). Ten paired facts is five lines, plus the solo one is six.
-// The count is not a free parameter: drawDeviceDiagnostics() draws exactly this many
+// SIX RATHER THAN THE FIVE THIS PAGE WAS COSTED AT, and the arithmetic is the whole
+// reason to say so: the five came from dividing eleven facts by two columns and
+// rounding up, which is right only if EVERY line has two columns. One cannot. The
+// die temperature has to be ALONE on its line for its colour to be about its own
+// value (see DEV_DIAG_TEMP_LINE), so it spends a whole line on one fact, leaving
+// TEN facts to pair - five two-column lines, and 5 + 1 = 6.
+//   at 5: four paired lines = 8 slots for 10 facts, so two facts are dropped
+//         again - and the two that would go are the two this revision brings BACK
+//   at 6: five paired lines = 10 slots for 10 facts, exact, with no blank column
+//         anywhere except the temperature's own, which is the point of it
+// A SEVENTH line would have both columns empty. The count is not a free parameter: drawDeviceDiagnostics() draws exactly this many
 // drawIfChanged fields and settings-geom-check.mjs counts them out of that
 // function's own body, so a line added to one side and not the other fails by name
 // rather than painting through the air below the block.
 const int DEV_DIAG_LINES = 6;
 // WHICH LINE CARRIES THE COLOURED FIELD, zero-based, and it is a CONSTANT because
-// two places have to agree about it: drawDeviceDiagnostics() colours that line by
-// colorForDieTemp() and busts its cache from devDiagTempColorCache, and the checker
-// asserts the pairing table has no right-hand column for it. A literal 1 in the
-// draw site is how the temperature ends up coloured on a line that now holds the
-// uptime.
+// three places have to agree about it: drawDeviceDiagnostics() indexes devDiagCache
+// with it, colours that line by colorForDieTemp(), and busts that same cache entry
+// from devDiagTempColorCache - and the checker asserts the pairing table gives that
+// line, and only that line, no right-hand column. The draw site USES THIS NAME
+// rather than a literal 1, because a literal is how the temperature ends up
+// coloured on a line that has since come to hold the uptime.
 const int DEV_DIAG_TEMP_LINE = 1;
 // ONE PADDED FIELD PER LINE, not one per column. Both columns of a line go into a
 // single fixed-width string with the right value flush to the lane's right edge -
@@ -2525,7 +2535,8 @@ const int P4_AIR_BOT  = 80;
 //   116..131  "CANNOT BE UNDONE"               P2_DANGER_CAP_Y, T_META, TL_DATUM
 //   140..195  RESET PAIRING  + warn spine      P2_PAIR_Y, P2_BTN_H
 //   208..263  POWER OFF      + bad  spine      P2_PWR_Y   (12px gap, SP_3)
-//   264..459  196 rows clear                   P2_AIR_BOT
+//   270..285  "power off = deep sleep, ..."    uiHint at P2_PWR_Y + P2_BTN_H + SP_3
+//   286..459  174 rows clear                   P2_AIR_BOT
 //
 // POWER OFF IS LAST BECAUSE IT IS THE MORE SEVERE, which is the same escalation the
 // four-button page used and the only ordering argument a two-item list can make: a
@@ -2533,9 +2544,18 @@ const int P4_AIR_BOT  = 80;
 // RESET. Both go through drawSeverityAction(), so both carry the P2_SPINE_W bar,
 // and both raise a confirm dialog.
 //
+// THE HINT UNDER POWER OFF IS BACK. It was dropped when POWER OFF moved to DEVICE,
+// on the grounds that DEVICE's stack landed exactly on contentBottom() with nothing
+// left over and the fact was in the confirm dialog anyway. Neither half survives the
+// move home: this group has room, and the dialog says what POWER OFF does AFTER the
+// tap, which is too late to be the affordance that stops the tap. It costs 28 of the
+// air below and sits 174 rows clear of the footer, so it reads as a line under the
+// button rather than as page furniture - the thing the old note was right to worry
+// about and wrong to conclude from.
+//
 // THE TRAILING AIR IS LARGE AND IT IS NAMED. It was 158 rows and excused as "this
 // group is on its way out"; the group is not on its way out, so the excuse is
-// replaced by the argument. Two controls is all this group is. Filling 196 rows
+// replaced by the argument. Two controls is all this group is. Filling 174 rows
 // would mean floating the buttons toward the footer, which makes them read as page
 // furniture rather than as the top of a captioned section and breaks the rule that
 // every group on this board is TOP-ALIGNED under the band; or inventing a third
@@ -2597,9 +2617,12 @@ const int P2_BTN_H       = 56;   // TAP_MIN + 10; these are the destructive ones
 const int P2_SPINE_W     = 4;    // the severity bar's width
 // The closing term, and the ONLY thing that gives P2_TOP and the gap between the
 // two buttons any teeth at all: both are pure translations of a page with nothing
-// anchored to its foot, so no bound relative to this page can see them.
-//   P2_PWR_Y + P2_BTN_H + P2_AIR_BOT == contentBottom()   (208 + 56 + 196 == 460)
-const int P2_AIR_BOT     = 196;
+// anchored to its foot, so no bound relative to this page can see them. Measured
+// from the HINT's own MC_DATUM ink box, the P4_AIR_BOT shape, because the hint is
+// now the last thing this page paints:
+//   uiHint at P2_PWR_Y + P2_BTN_H + SP_3 = 276, T_META ink 270..285
+//   285 + 1 + P2_AIR_BOT == contentBottom()                (286 + 174 == 460)
+const int P2_AIR_BOT     = 174;
 
 // ---------- SETTINGS: the confirm dialog ----------
 // 28, board 1's 24 held physically (24 / 5.624 * 6.489 = 27.7). Top-anchored to

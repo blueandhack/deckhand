@@ -233,7 +233,7 @@ void renderSettingsHome() {
 // section carries the geometry and the reasoning; what matters here is the split of
 // labour. The two facts you came for - is the host talking to me, and how is the
 // battery - LEAD a card each as a T_HEAD line with one dimmed detail under it. The
-// eleven you read almost never are five monospace lines under a DIAGNOSTICS
+// eleven you read almost never are six monospace lines under a DIAGNOSTICS
 // caption: they were the HOST card's four and the About page's five before this,
 // ~416px of page for values nobody watches.
 //
@@ -340,8 +340,12 @@ void drawDeviceDiagnostics(int y) {
       devDiagCache[DEV_DIAG_TEMP_LINE][0] = '\0';
     }
     devDiagLine(line, sizeof(line), l, "");
-    drawIfChanged(devDiagCache[1], DEV_DIAG_BYTES, line, x, y + DEV_DIAG_STEP, T_META, 1,
-                  tcol, COLOR_BG);
+    // devDiagCache[DEV_DIAG_TEMP_LINE], not devDiagCache[1]: this is the one line
+    // whose index a second site (the cache bust three lines up) also has to know,
+    // and the header's own note says a literal here is how the temperature ends up
+    // coloured on a line that has since come to hold something else.
+    drawIfChanged(devDiagCache[DEV_DIAG_TEMP_LINE], DEV_DIAG_BYTES, line, x,
+                  y + DEV_DIAG_STEP, T_META, 1, tcol, COLOR_BG);
   }
   // ---- 2: the radio's address, and how many Macs are on it ----
   // btMacAddress is set once in setupBLE(); empty means BLE has not come up yet, so
@@ -381,6 +385,28 @@ void drawDeviceDiagnostics(int y) {
   // on the grounds that it "only distinguishes two builds made on the same day" -
   // which is precisely the case a person flashing this repeatedly is in, and the
   // commit does not cover it either (a dirty tree stamps the same SHA twice).
+  //
+  // THIS IS THE SKETCH'S ONLY STANDALONE __TIME__ AND IT WAS MEASURED, because a
+  // second varying literal outside board-baseline.mjs's mask would make `--check 2`
+  // report CHANGED on every rebuild for ever - and a CHANGED you have learned to
+  // expect is a CHANGED you stop reading. Two builds of IDENTICAL source, forced to
+  // recompile by dropping the sketch cache so the stamps really differ:
+  //   Sep 12 2026 03:33:10  raw md5 5c96d281...  masked 78210786e9bc4c8c  1063360
+  //   Sep 12 2026 03:34:59  raw md5 ba52be45...  masked 78210786e9bc4c8c  1063360
+  // Same masked hash, so the baseline is STABLE. The reason is that the linker
+  // TAIL-MERGES this literal into BUILD_STAMP's (`__DATE__ " " __TIME__`, the one
+  // the mask covers): the build time plus its NUL occurs exactly ONCE in each image,
+  // at BUILD_STAMP's own tail. __DATE__ beside it is a separate literal - a prefix
+  // cannot be tail-merged - but it only moves at midnight, which is the one-day
+  // shelf life the baseline already documents and pays for.
+  //
+  // TAIL-MERGING IS THE LINKER'S CHOICE, NOT THIS SKETCH'S, which is the same thing
+  // that went wrong when the mask relied on the date and time being ADJACENT
+  // literals and a few NVS keys slid between them. If `--check 2` ever reports
+  // CHANGED with no source change, this is the first place to look, and the fix is
+  // to compose both columns from BUILD_STAMP (`sizeof(__DATE__) - 1` gives the split
+  // point without emitting a literal) rather than to widen the mask - a mask hides
+  // the symptom, the concatenation removes the cause.
   devDiagLine(line, sizeof(line), __DATE__, __TIME__);
   drawIfChanged(devDiagCache[5], DEV_DIAG_BYTES, line, x, y + 5 * DEV_DIAG_STEP, T_META, 1,
                 COLOR_VALUE, COLOR_BG);
@@ -925,6 +951,25 @@ void drawDangerPageStatic() {
   drawGroupCaption("CANNOT BE UNDONE", P2_DANGER_CAP_Y);
   drawSeverityAction(P2_PAIR_Y, "RESET PAIRING", COLOR_WARN);
   drawSeverityAction(P2_PWR_Y,  "POWER OFF",     COLOR_BAD);
+  // THE HINT IS THE ONLY THING THAT SAYS WHAT POWER OFF DOES BEFORE THE TAP. The
+  // confirm dialog says it after, which is too late to be the affordance - the
+  // decision to reach for the button has already been made by then. It sits at the
+  // same P2_PWR_Y + P2_BTN_H + SP_3 board 1 draws it at, so it reads as a line under
+  // the button rather than as page furniture: this group has 174 rows of air BELOW
+  // it (P2_AIR_BOT), so nothing here is anywhere near the footer.
+  //
+  // Only the FRAGMENT that differs is behind the #if - neither arm opens a brace, so
+  // the brace-counting readers every checker here uses still balance. The rule it
+  // answers to is that a board which cannot wake on touch must not promise one:
+  // reading "touch to wake" on a device that will not is worse than reading nothing,
+  // because it turns a hardware fact into what looks like broken firmware.
+  uiHint(
+#if BOARD_HAS_TOUCH_SLEEP_WAKE
+         "power off = deep sleep, touch to wake",
+#else
+         "power off = deep sleep, RESET to wake",
+#endif
+         P2_PWR_Y + P2_BTN_H + SP_3);
 }
 #else
 void drawActionsPageStatic() {

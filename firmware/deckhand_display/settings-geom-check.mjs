@@ -53,9 +53,13 @@ const SOURCE_FAULTS = [
   // temperature on the glass and no warm/hot SIGNAL anywhere. Both faults below put
   // it back in that state and each is invisible to geometry: the line is still
   // drawn, still the right width, still in the right place.
+  // ANCHORED ON THE COMPUTED COLOUR ITSELF, not on the surrounding call's layout:
+  // `tcol` is the only non-palette colour argument in this file, so the injection
+  // cannot stop applying because the call was reflowed - which is exactly what
+  // happened to its first spelling, and a fault that stops injecting is a selftest
+  // reporting teeth it no longer has.
   ["the temperature line is drawn COLOR_VALUE again (the band is on the glass in name only)",
-    "settings.ino", (t) => t.replace(/(drawIfChanged\(devDiagCache\[1\], DEV_DIAG_BYTES, line, x, y \+ DEV_DIAG_STEP, T_META, 1,\n\s*)tcol/,
-                                     "$1COLOR_VALUE"),
+    "settings.ino", (t) => t.replace(/T_META, 1, tcol, COLOR_BG\)/, "T_META, 1, COLOR_VALUE, COLOR_BG)"),
     "drawn with a COMPUTED colour"],
   ["the temperature's colour cache stops busting its text (a band crossing that changes no text never repaints)",
     "settings.ino", (t) => t.replace(/if \(tcol != devDiagTempColorCache\) \{/, "if (false) {"),
@@ -1746,8 +1750,16 @@ for (const b of [1, 2]) {
       // order it is drawn, and the count is asserted against DEV_DIAG_LINES: a line
       // this table forgets is a line measured by nothing, which is how the name+board
       // column went unmeasured against a 20-byte buffer once.
+      // THE PAYLOAD FIGURE IS PARSED, not transcribed. feedChar() drops any line
+      // longer than this, so it is the largest number the "%u B per tick" column can
+      // ever render - and line 0 is the WIDEST pair on this page (31 of 32), so a
+      // raised guard would spill this line first and a transcribed 16000 would go on
+      // certifying the old one.
+      const payloadCap = (SRC_MAIN.match(/buf\.length\(\) > (\d+)/) || [])[1];
+      chk(payloadCap != null,
+          `Device: the payload cap parses out of feedChar's own guard (got ${payloadCap}) - a transcribed width here would certify nothing`);
       const PAIRS = [
-        [0, "payload / flush", "16000 B per tick", "flush 999.9 ms"],
+        [0, "payload / flush", `${payloadCap || "?"} B per tick`, "flush 999.9 ms"],
         [0, "payload / flush", "no payload yet", "flush 999.9 ms"],
         [1, "SoC (solo)", "SoC -10.0 C", ""],
         [1, "SoC (solo)", "SoC --", ""],
@@ -1838,11 +1850,18 @@ for (const b of [1, 2]) {
     // below while every arithmetic assertion still passed.
     chk(/drawDeviceDiagnostics\(DEV_DIAG_Y\)/.test(rend),
         "Device: renderDevicePage draws the block at DEV_DIAG_Y, so geometry and drawing cannot disagree about where it starts");
-    const drawn = [...diag.matchAll(/drawIfChanged\(devDiagCache\[(\d)\], DEV_DIAG_BYTES, line, x, ([^,]+), T_META, 1,\s*([^,]+),/g)];
+    // THE INDEX MAY BE A NAME. The coloured line is drawn at
+    // devDiagCache[DEV_DIAG_TEMP_LINE] rather than at a literal, because a second
+    // site (the cache bust) has to agree about which line it is - so the walk below
+    // resolves that token to the header's own value instead of demanding a digit.
+    // A checker that only matched digits would silently see one line FEWER and fail
+    // the count, which reads as a missing line rather than as a parse gap.
+    const drawn = [...diag.matchAll(/drawIfChanged\(devDiagCache\[(\d+|DEV_DIAG_TEMP_LINE)\], DEV_DIAG_BYTES, line, x,\s*([^,]+), T_META, 1,\s*([^,]+),/g)]
+      .map(m => [m[0], m[1] === "DEV_DIAG_TEMP_LINE" ? String(B[2].DEV_DIAG_TEMP_LINE) : m[1], m[2], m[3], m[1]]);
     chk(drawn.length === B[2].DEV_DIAG_LINES,
         `Device: drawDeviceDiagnostics draws ${drawn.length} lines, and DEV_DIAG_LINES is ${B[2].DEV_DIAG_LINES} - the two cannot be allowed to disagree`);
     for (let i = 0; i < drawn.length; i++) {
-      chk(+drawn[i][1] === i, `Device: line ${i} compares against devDiagCache[${drawn[i][1]}] - one cache per line, in order`);
+      chk(+drawn[i][1] === i, `Device: line ${i} compares against devDiagCache[${drawn[i][4]}] - one cache per line, in order`);
       const want = i === 0 ? "y" : i === 1 ? "y + DEV_DIAG_STEP" : `y + ${i} * DEV_DIAG_STEP`;
       chk(drawn[i][2].trim() === want,
           `Device: line ${i} is drawn at \`${want}\` (got \`${drawn[i][2].trim()}\`) - on the chain the geometry above asserts`);
@@ -1860,6 +1879,9 @@ for (const b of [1, 2]) {
       // text and are asserted once - so the board-2 constant has to be named
       // explicitly, the same way DEV_DIAG_LINES is two assertions up.
       const tline = drawn.find(m => +m[1] === B[2].DEV_DIAG_TEMP_LINE);
+      // AND IT IS INDEXED BY NAME, not by the literal the header warns against.
+      chk(tline != null && tline[4] === "DEV_DIAG_TEMP_LINE",
+          `Device: the coloured line is indexed devDiagCache[DEV_DIAG_TEMP_LINE] (got \`${tline ? tline[4] : "no such line"}\`) - the cache bust three lines up uses that same name, and a literal is how the two come to disagree`);
       chk(tline != null && !/^COLOR_/.test(tline[3].trim()),
           `Device: the temperature line (line ${B[2].DEV_DIAG_TEMP_LINE}) is drawn with a COMPUTED colour (got \`${tline ? tline[3].trim() : "no such line"}\`), not a palette constant - a fixed colour here is the band being lost again`);
       chk(/colorForDieTemp\(/.test(diag),
@@ -2581,10 +2603,17 @@ for (const b of [1, 2]) {
                             ["P2_GAP", "the two buttons sit at SP_3, the page rhythm"],
                             ["P2_SECTION_GAP", "there is one section on this page"]])
       chk(c[n] === undefined, `board 2 has no ${n}: ${why} (got ${c[n]})`);
+    // THE HINT'S y IS DERIVED THE WAY BOARD 1 DERIVES IT - at the draw site, from
+    // the button it explains - so there is no P2_HINT_Y on either board and the
+    // absence asserted below stays true. uiHint is MC_DATUM, so mcBox is the box it
+    // really paints, and it is the LAST thing this page draws.
+    const p2HintY = c.P2_PWR_Y + c.P2_BTN_H + c.SP_3;
+    const [p2HintTop, p2HintBot] = mcBox(b, T_META, p2HintY);
     const act = [
       ["danger caption", ...tlBox(b, T_META, c.P2_DANGER_CAP_Y)],
       ["RESET PAIRING", c.P2_PAIR_Y, c.P2_PAIR_Y + c.P2_BTN_H - 1],
       ["POWER OFF", c.P2_PWR_Y, c.P2_PWR_Y + c.P2_BTN_H - 1],
+      ["the hint", p2HintTop, p2HintBot],
     ];
     for (const [n, a, z] of act) console.log(`    Danger ${n.padEnd(16)} ${a}..${z}`);
     console.log(`    Danger surplus ${c.P2_AIR_BOT} to contentBottom ${contentBottom}`);
@@ -2631,8 +2660,13 @@ for (const b of [1, 2]) {
     // THE CLOSING IDENTITY, the HOME_Y0_BOT / DEV_AIR_BOT / PAIR_AIR_LEFT shape.
     // Nothing on this page is anchored to its foot, so without this term P2_TOP and
     // the gap above are pure translations the sweep reports as unguarded at +-16.
-    chk(c.P2_PWR_Y + c.P2_BTN_H + c.P2_AIR_BOT === contentBottom,
-        `Danger: the stack lands exactly - POWER OFF ends ${c.P2_PWR_Y + c.P2_BTN_H - 1}, + named surplus P2_AIR_BOT ${c.P2_AIR_BOT} == contentBottom ${contentBottom} (got ${c.P2_PWR_Y + c.P2_BTN_H + c.P2_AIR_BOT})`);
+    chk(p2HintBot + 1 + c.P2_AIR_BOT === contentBottom,
+        `Danger: the stack lands exactly - the hint's ink ends ${p2HintBot}, + 1 + named surplus P2_AIR_BOT ${c.P2_AIR_BOT} == contentBottom ${contentBottom} (got ${p2HintBot + 1 + c.P2_AIR_BOT})`);
+    // AND THE HINT IS NOT FOOTER CHROME. The rule P4_AIR_BOT answers to: a line of
+    // text ending flush on contentBottom reads as part of the footer rather than as
+    // part of the page. It must clear the footer by more than the page's own rhythm.
+    chk(c.P2_AIR_BOT > c.SP_3,
+        `Danger: the hint ends ${p2HintBot}, ${c.P2_AIR_BOT} rows clear of the footer - more than SP_3 ${c.SP_3}, so it reads as a line under the button rather than as page furniture`);
     chk(c.P2_AIR_BOT >= 0,
         `Danger: the surplus is not negative (${c.P2_AIR_BOT})`);
     // ---- THE DRAW SITE AND THE HIT TEST, bound to their own bodies ----
@@ -2654,8 +2688,30 @@ for (const b of [1, 2]) {
           "Danger: RESET PAIRING is drawn at P2_PAIR_Y through drawSeverityAction, so it carries its severity spine");
       chk(/drawSeverityAction\(P2_PWR_Y,\s+"POWER OFF",\s+COLOR_BAD\)/.test(stat),
           "Danger: POWER OFF is drawn at P2_PWR_Y through drawSeverityAction, so it carries its severity spine too");
-      chk(!/CALIBRATE TOUCH|uiButton|uiHint/.test(stat),
-          "Danger: nothing else is drawn on this page - no CALIBRATE TOUCH (it cannot work on this board), no plain button, no hint");
+      chk(!/CALIBRATE TOUCH|uiButton/.test(stat),
+          "Danger: no CALIBRATE TOUCH and no plain button is drawn on this page - the one cannot work on this board, and both of the controls that remain carry a spine");
+      // ---- THE HINT, AND BOTH ARMS OF ITS #if ----
+      // It is the ONLY thing that says what POWER OFF does BEFORE the tap; the
+      // confirm dialog says it after, which is too late to be the affordance. Bound
+      // to the draw site's own y EXPRESSION, so a hint floated toward the footer
+      // fails here as well as failing the surplus identity above.
+      chk(new RegExp(`uiHint\\([^;]*P2_PWR_Y \\+ P2_BTN_H \\+ SP_3\\)`).test(stat),
+          "Danger: the hint is drawn at P2_PWR_Y + P2_BTN_H + SP_3, the same place board 1 draws it - under the button it explains, not floated down to the footer");
+      for (const h of P2_HINTS)
+        chk(stat.includes(`"${h}"`),
+            `Danger: the draw site carries the "${h.slice(-14)}" arm - a board that cannot wake on touch must not promise one, and the #if is what keeps that per-board`);
+      // ONLY THE FRAGMENT THAT DIFFERS IS BEHIND THE GUARD. An #if whose two arms
+      // each open a brace leaves every brace-counting reader in this repo seeing one
+      // more { than } - the hazard that makes handleSettingsTouch unreadable to
+      // fnSrc() and sends every assertion bound to it passing vacuously. This
+      // function IS read through fnSrc (`stat` above), so the property is not
+      // theoretical here: it is what lets the four assertions above see anything.
+      {
+        const i = stat.indexOf("#if BOARD_HAS_TOUCH_SLEEP_WAKE"), j = stat.indexOf("#endif", i);
+        const guard = i >= 0 && j > i ? stat.slice(i, j + 6) : "";
+        chk(guard.length > 0 && !/[{}]/.test(guard),
+            "Danger: the hint's #if carries only the two strings - neither arm opens a brace, so the brace-counting readers this file uses still balance (an #if that duplicates a whole statement is what makes handleSettingsTouch unreadable to fnSrc, and every assertion above is bound to fnSrc's read of THIS function)");
+      }
       // THE BUTTONS AND THEIR HIT TESTS MOVE TOGETHER, each band keyed off the SAME
       // constant its draw site uses.
       chk(/sy >= P2_PAIR_Y && sy < P2_PAIR_Y \+ P2_BTN_H/.test(hit),
@@ -2758,13 +2814,10 @@ for (const b of [1, 2]) {
   // with MC_DATUM on the panel, so the box is symmetric in x and the constraint is
   // the panel width - and the string board 2 draws is the one board 1 does not
   // compile, so checking only the touch-wake arm measured nothing about it.
-  // BOARD 2 NO LONGER DRAWS EITHER - its DANGER group carries no hint, because the
-  // fact is in POWER OFF's own confirm dialog there - and both are still measured on
-  // both boards deliberately: board 2's panel is
-  // the wider of the two, so its half of this loop is now a bound on nothing, while
-  // board 1's is the one that binds. Dropping board 2's half would save two
-  // assertions and cost the property that this loop covers the strings wherever
-  // they are drawn, which is exactly how board 2's own arm went unmeasured before.
+  // BOARD 2 DRAWS ONE OF THEM AGAIN - its DANGER group carries the hint under POWER
+  // OFF, at the same P2_PWR_Y + P2_BTN_H + SP_3 board 1 uses - so both strings are
+  // measured on both boards for the reason they always were: the string a board does
+  // NOT compile is the one that goes unmeasured, and this loop is what covers it.
   for (const h of P2_HINTS)
     chk(widthB(b, T_META, h) <= W - 8, `page 2 hint "...${h.slice(-18)}" ${widthB(b, T_META, h)}px inside the ${W}px panel`);
   for (const l of (b === 1 ? P2_LABELS : P2_LABELS_B2))
@@ -5063,7 +5116,7 @@ if (SELFTEST) {
     ["the widened DEVICE surplus",
      /^Device: the stack lands exactly - the \d+th diagnostics line's box ends \d+/],
     ["the widened DANGER surplus",
-     /^Danger: the stack lands exactly - POWER OFF ends \d+/],
+     /^Danger: the stack lands exactly - the hint's ink ends \d+/],
     ["the nudged POWER OFF button",
      /^Danger: the two buttons are \d+px apart == SP_3/],
   ];

@@ -3653,14 +3653,18 @@ char macRowCache[MAX_LINKS][40] = {"", ""};
 char stVerdictCache[ST_VERDICT_BYTES] = "";
 char stLinksCache[ST_LINE_BYTES] = "";
 char stLeftCache[ST_LINE_BYTES] = "";
-// THE DIAGNOSTICS BLOCK'S FIVE LINES, one cache each. They replace stIdCache (the
+// THE DIAGNOSTICS BLOCK'S SIX LINES, one cache each. They replace stIdCache (the
 // CONNECTION card's second line, whose two halves went to DIAGNOSTICS and to the
 // Pairing group) and the HOST card's stPayload/stFlush/stUptime/stMacs, which were
 // four caches for four HALF-lines; a line is one padded field here, so it is one
-// cache. Every one of the four is composed each tick and compared here, the fixed
+// cache. Every one of the six is composed each tick and compared here, the fixed
 // ones included - a value on the static side is a value that goes stale silently,
-// and "Deckhand-C114 ES3C35P" is only fixed until someone renames the device.
-char devDiagCache[DEV_DIAG_LINES][DEV_DIAG_BYTES] = {"", "", "", "", ""};
+// and "Deckhand-C114" is only fixed until someone renames the device.
+// ONE INITIALISER PER ROW, and that is not decoration: C++ zero-fills the rest, so
+// a short list is legal and silent - which is exactly how a 4 -> 6 bump leaves a
+// declaration still describing the old count. settings-geom-check.mjs counts them
+// against DEV_DIAG_LINES so the next bump cannot.
+char devDiagCache[DEV_DIAG_LINES][DEV_DIAG_BYTES] = {"", "", "", "", "", ""};
 // THE VERDICT LINE'S COLOUR, cached beside its text and busting it on a flip -
 // the guard battRowColorCache documents, and needed here for a reason that is not
 // hypothetical: "Both links up" is ONE string across a COLOR_GOOD -> COLOR_WARN
