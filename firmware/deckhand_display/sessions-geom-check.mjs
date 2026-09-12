@@ -19,7 +19,7 @@
 //   node sessions-geom-check.mjs             check both boards
 //   node sessions-geom-check.mjs --selftest  prove the checker has teeth
 import { cacheSizes, consts, deadGuards, DIR, faultChildEpilogue, fnBody, lineH,
-         PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX, splitArgs,
+         makeBump, PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX, splitArgs,
          stripComments, sweepSourceFaults, textWidth } from "./geom-common.mjs";
 import fs from "fs";
 import { spawnSync } from "child_process";
@@ -442,12 +442,7 @@ function isKnown(b, msg) { return KNOWN[b].includes(msg); }
 //
 // `bump` is what makes an injection that has STOPPED APPLYING fail loudly instead
 // of reading as a catch - the ANCHOR MOVED rule, on the constant side.
-function bump(board, name, delta) {
-  if (typeof B[board][name] !== "number")
-    throw new Error(`--selftest: B[${board}].${name} is not a number (${B[board][name]}) - ` +
-      `the injection has stopped applying, and an injection that changes nothing proves nothing`);
-  B[board][name] += delta;
-}
+const bump = makeBump(B);
 const CONST_FAULT = {
   // Raise the bottom-anchored pill by 12px on board 2. That is the exact shape of
   // the defect this tab is prone to - the pill drawn over the model/branch line -

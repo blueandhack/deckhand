@@ -33,7 +33,8 @@
 //   node settings-geom-check.mjs             check both boards
 //   node settings-geom-check.mjs --selftest  prove the checker has teeth
 import { advanceB, ascentB, cacheSizes, consts, countWrappedLinesB, deadGuards, DIR,
-         evalInt, faultChildEpilogue, fieldBox, fnBody, lineHB, mcBox, PANEL, preflight,
+         evalInt, faultChildEpilogue, fieldBox, fnBody, lineHB, makeBump, mcBox, PANEL,
+         preflight,
          readSource, setSourceFault, SOURCE_FAULT_INDEX, splitArgs, stripComments,
          sweepSourceFaults, tlBox, widthB } from "./geom-common.mjs";
 import fs from "fs";
@@ -1221,12 +1222,7 @@ function checkKnownUsed() {
 // that has stopped applying fail loudly: a constant that was renamed away reads as
 // `undefined + 1` = NaN, which fails EVERYTHING and looks exactly like a caught
 // fault. It throws instead - the ANCHOR MOVED rule, arriving on the constant side.
-function bump(board, name, delta) {
-  if (typeof B[board][name] !== "number")
-    throw new Error(`--selftest: B[${board}].${name} is not a number (${B[board][name]}) - ` +
-      `the injection has stopped applying, and an injection that changes nothing proves nothing`);
-  B[board][name] += delta;
-}
+const bump = makeBump(B);
 const CONST_FAULTS = [
   // Push board 2's keyboard meta row down by 9. The gap between the meta row and
   // the first text line is 8 rows, so 9 is the FIRST offset that puts the two on a

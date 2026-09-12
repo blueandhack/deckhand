@@ -28,7 +28,7 @@
 // with sessions-geom-check.mjs (geom-common.mjs) - one copy of the measurement
 // rule, checked once against the device's own numbers.
 import { cacheSizes, consts, deadGuards, DIR, evalInt, faultChildEpilogue, fnBody,
-         lineH, PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX,
+         lineH, makeBump, PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX,
          splitArgs, stripComments, sweepSourceFaults, textWidth } from "./geom-common.mjs";
 import fs from "fs";
 import { spawnSync } from "child_process";
@@ -367,12 +367,7 @@ function chk(cond, msg, allow) {
 //
 // `bump` is what makes an injection that has STOPPED APPLYING fail loudly instead
 // of reading as a catch - the ANCHOR MOVED rule, on the constant side.
-function bump(board, name, delta) {
-  if (typeof B[board][name] !== "number")
-    throw new Error(`--selftest: B[${board}].${name} is not a number (${B[board][name]}) - ` +
-      `the injection has stopped applying, and an injection that changes nothing proves nothing`);
-  B[board][name] += delta;
-}
+const bump = makeBump(B);
 const CONST_FAULT = {
   // 8px lower and the foot row's clear box lands on the card's 2px border - the
   // exact defect board 1 shipped once. 8 rather than 1 because the real layout

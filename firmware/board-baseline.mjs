@@ -124,6 +124,44 @@ function buildStampRange(buf) {
   return { range: { from, to, why: "__DATE__/__TIME__" }, count: 1 };
 }
 
+// THE SKETCH'S BUILD TIME MUST OCCUR EXACTLY ONCE PER IMAGE, AND THAT IS AN
+// ASSERTION NOW RATHER THAN A COMMENT (RULING 16). settings.ino's DIAGNOSTICS block
+// draws `devDiagLine(line, sizeof(line), __DATE__, __TIME__)`, which is the sketch's
+// only STANDALONE __TIME__ - a second varying literal, outside the single range the
+// mask above covers. It does not vary the image, because the linker TAIL-MERGES it
+// into BUILD_STAMP's own tail (`__DATE__ " " __TIME__` ends in the same eight
+// characters plus a NUL, and a suffix is mergeable where a prefix is not), so the
+// build time plus its NUL appears once.
+//
+// THAT WAS MEASURED IN TASK 2 - two forced rebuilds of identical source, stamps
+// 03:33:10 and 03:34:59, masked hashes both 78210786e9bc4c8c - AND THEN RECORDED
+// ONLY IN A COMMENT, which is the exact class this branch corrected ten times.
+// Tail-merging is the LINKER's choice and not the sketch's: if a future toolchain,
+// a -fno-merge-constants, or a second format that breaks the common suffix stops it,
+// the standalone literal becomes a second unmasked varying range and `--check 2`
+// reports CHANGED on every rebuild for ever - "a CHANGED you have learned to expect
+// is a CHANGED you stop reading". So it fails HERE, by name, at the first build that
+// breaks the merge, instead of degrading into noise.
+//
+// THE ONE LEGITIMATE SECOND COPY IS THE CORE'S, and it is admitted BY POSITION
+// rather than by widening the count: the core's own `Compile Date/Time` stamp is a
+// separate literal that carries the same eight characters whenever the core archive
+// and the sketch were compiled inside the same second (a --clean build can do it).
+// That occurrence sits at coreStampRange()'s own offset, so it is recognised there
+// and nowhere else - an extra copy one byte away is still a failure.
+function buildTimeCheck(buf, stampRange, coreRange) {
+  const text = buf.toString("latin1");
+  // BUILD_STAMP is "Mmm dd yyyy hh:mm:ss\0" and stampRange covers all of it, so the
+  // time plus its NUL is the last nine bytes. Taken from the MATCH rather than
+  // written out, so this cannot drift from BUILD_STAMP_RE.
+  const needle = text.slice(stampRange.to - 8, stampRange.to + 1);
+  const at = [];
+  for (let i = text.indexOf(needle); i >= 0; i = text.indexOf(needle, i + 1)) at.push(i);
+  const allowed = [stampRange.to - 8];
+  if (text.startsWith(needle, coreRange.from)) allowed.push(coreRange.from);
+  return { time: needle.slice(0, 8), at, allowed, extra: at.filter((i) => !allowed.includes(i)) };
+}
+
 // THE ESP32 CORE STAMPS THE IMAGE TOO, AND THE NOTE ABOVE WAS WRONG ABOUT IT.
 // The line above attributes the second time\0date\0 pair to "prebuilt LittleFS"
 // and calls it FIXED. Both halves are wrong, and it took a --clean build to see:
@@ -200,6 +238,28 @@ function maskedHash(file, board) {
       `FAIL: expected exactly one core "Compile Date/Time" stamp in ${path.basename(file)}, found ${core.count}.\n` +
       "That stamp is masked by CONTENT too. If a core upgrade changed the wording,\n" +
       "fix CORE_STAMP_RE; if the core stopped printing it, drop this mask.",
+    );
+    process.exit(1);
+  }
+  // RULING 16, enforced on every hash this script takes - --check, --update and the
+  // bare print alike - because a merge that breaks is a baseline that stops meaning
+  // anything, and the first place it would show up is a check somebody is running
+  // for another reason entirely.
+  const bt = buildTimeCheck(buf, stamp.range, core.range);
+  if (bt.extra.length) {
+    console.error(
+      `FAIL: the build time "${bt.time}" occurs ${bt.at.length} times in ${path.basename(file)}, ` +
+      `expected ${bt.allowed.length}.\n` +
+      `  masked (BUILD_STAMP's tail, and the core's stamp when it shares the second): ` +
+      bt.allowed.map((i) => "0x" + i.toString(16).toUpperCase()).join(", ") + "\n" +
+      `  UNMASKED: ` + bt.extra.map((i) => "0x" + i.toString(16).toUpperCase()).join(", ") + "\n" +
+      "The sketch's standalone __TIME__ (settings.ino's DIAGNOSTICS line) is no longer\n" +
+      "TAIL-MERGED into BUILD_STAMP, so the image now carries a varying literal this\n" +
+      "script does not mask and every rebuild will read as CHANGED. Fix the CAUSE, not\n" +
+      "the mask: compose both diagnostics columns out of BUILD_STAMP itself\n" +
+      "(`sizeof(__DATE__) - 1` gives the split point without emitting a literal), which\n" +
+      "is what settings.ino's own note says to do. Widening the mask would hide a real\n" +
+      "second stamp and spend the sensitivity that makes this baseline worth having.",
     );
     process.exit(1);
   }
