@@ -279,3 +279,83 @@ If no device is available for a task, that is **written down as unverified**, no
 - Macs at `P3_ROW_H 46` has **zero margin over `TAP_MIN`**. If the re-cut will not close
   honestly, the fallback is option (b) from the design discussion - a sixth group holding both
   destructive verbs - not a 44px row.
+
+---
+
+# AMENDMENT, 2026-09-12: the group set is SIX, not five
+
+**Everything above stands as the reasoning; this section overrides its conclusion.** Kept in
+place rather than rewritten, per this repo's rule that a description which turned out to be wrong
+is marked rather than deleted — the five-group argument is still the right argument, and it is
+board 1's arithmetic rather than the argument that defeated it.
+
+## What was measured
+
+The five-group set required `RESET PAIRING` to live at the foot of the Macs group. **It cannot, on
+board 1.** From `deckhand_display.ino:3532-3534` and `board_e32r28t.h`:
+
+    P3_ANY_Y  = PAGE_TOP + SP_1/2            = 82
+    P3_LIST_Y = P3_ANY_Y + H_ROW + SP_1      = 126
+    four Mac rows at step 44                 -> 126 + 3*44 + 40 = 298
+    page region                                 PAGE_TOP(80)..contentBottom(302) = 222px
+
+That is **216 of 222px already spent**. `RESET PAIRING` needs `cap(13) + SET_CAP_STEP(21) +
+P2_BTN_H(38)` = **72px that do not exist**, and there is nowhere honest to take them from:
+
+| source | saves | verdict |
+|---|---|---|
+| abut the Mac rows (step 44 -> 40) | 12 | still 60 short |
+| delete the ANY MAC row | 44 | still 28 short, and deletes a real setting |
+| both together | 56 | still 14 short |
+| cap the list at 3 slots | 44 | breaks the 4-Mac case, the only case the geometry must survive |
+
+The section-caption trick that closed board 2's page has no equivalent here: board 1's Macs page
+has no section captions to spend.
+
+## The set
+
+    Device | Display | Sound | Macs | Messages | Danger
+
+`Danger` is the old Actions group, renamed and reduced to exactly what destroys state:
+`RESET PAIRING` and `POWER OFF`. It is no longer a bag of verbs — MIC TEST left for Sound before
+this branch, and CALIBRATE TOUCH leaves for board 1's Display. The name says so, and it matches
+the `CANNOT BE UNDONE` caption already inside it.
+
+## Three things this changes, and they are not consolation
+
+1. **The destructive-order reversal is CANCELLED.** The body of this spec records a knowing
+   reversal of `board_es3c35p.h`'s rule that "a destructive group in the middle of a menu is the
+   one thing this list's order actually has to protect". With Danger surviving and staying last,
+   that rule is **preserved intact**. The one place this design deliberately contradicted a
+   written rule no longer does.
+2. **Board 2's HOME does not move.** It stays at the six-row `58/10` pitch, which is where the
+   first task already left it. The `50/8 -> 58/10 -> 70/12` walk-back stops one step early.
+3. **The Device page gets ~80px back**, because POWER OFF is not on it. That is spent on the
+   thing the first task's review flagged as a real loss: the SoC temp regains its own line and
+   its warm/hot colour band. `colorForDieTemp()` was left uncalled on **both** boards, meaning no
+   warm/hot signal existed anywhere on the device.
+
+## Board 1's HOME, re-derived for six rows
+
+    HOME_Y0 + 6*HOME_ROW_H + 5*HOME_GAP + HOME_Y0_BOT == contentBottom()
+    38      + 6*42         + 5*2        + 2           == 302
+
+42 is `TAP_MIN + 2`. This is the cost the body of this spec predicted for the fallback and
+accepted in advance: board 1's rows sit near the fingertip floor rather than the roomy 46/6/6 the
+five-row set would have given. **Search the (row height, gap) space rather than nudging** — the
+seven-row derivation on board 2 returned exactly one integer solution, and that is the standard
+here. Row internals at 42, mirroring board 2's stack at this board's type scale:
+
+    +0..+1    border
+    +4..+21   name    (T_HEAD, Terminus 10x18)
+    +22..+23  gap 2
+    +24..+36  summary (T_BODY, Cozette 6x13)
+    +37..+39  pad
+    +40..+41  border                                   = 42
+
+## What did NOT change
+
+Everything else in the body of this spec: the DIAGNOSTICS compression, the slimmed live cards,
+board 1 carrying no diagnostics block, dropping CALIBRATE TOUCH on board 2, the `RECAL` refusal,
+`BOARD_SETTINGS_HOME`'s deletion and the self-proving no-op that follows it, and the verification
+discipline. The Macs page is now simply **untouched** on both boards.
