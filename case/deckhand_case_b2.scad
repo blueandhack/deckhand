@@ -367,6 +367,23 @@ cover_screws = true;
 // lip, which also means it MERGES with the lip rather than approaching the wall
 // independently, so the pillar never gets nearer the wall than the lip already is.
 screw_boss_d = 6.0;   // the pillar - see the assert by the plateau
+// ---------- SINKING THE SCREW HEADS ----------
+// MEASURED ON THE SCREWS IN HAND: 5..6 mm across, 3..4 tall - a socket cap.
+//
+// IT CANNOT BE HIDDEN AT THIS HOLE POSITION, and the reason is the board's, not a
+// choice here: the mounting holes sit 6.05 from the case edge and the head is
+// nearly that wide. A counterbore for a 6.0 head leaves 0.85 of plate to the edge
+// and - even with the pillar opened to its 7.1 maximum, which the lip caps - only
+// 0.45 of pillar wall. There is no version of a cap head that disappears here.
+// A COUNTERSUNK M3 WOULD sit flush (a 90 deg cone is 6.0 at the surface and 3.4 at
+// 1.30 deep, inside the plate with 0.76 to spare, and its length arithmetic is
+// identical) - that was offered and declined in favour of keeping these screws.
+//
+// So the head is SUNK AS FAR AS THE PLATE ALLOWS and stands proud of the rest.
+// The floor stops at the plate's inner face because one millimetre lower the
+// counterbore is wider than the pillar it is cut into and severs it.
+screw_head_d = 6.0;   // the head, measured. Clearance is added below.
+screw_cb_d   = screw_head_d + 0.2;
 // HOW FAR THE PILLAR STOPS SHORT OF THE BOARD'S BACK.
 //
 // Reported as "I think you did not count board thickness". It IS counted, and
@@ -474,7 +491,14 @@ screw_lead   = 0.6;  // conical lead-in at the column top, so the screw centres 
 // screw did not, so the x 16 stopped reaching the column - see the assert on
 // screw_engage_min, which is what now brackets this from BOTH ends. At 20 the screw
 // leaves 1.70 of front face (min 0.60) and takes 3.60 of thread in the column.
-screw_len        = cover_screws ? 20.0 : 6.0;  // M3 x 20 through the whole stack, or x 6 board-only
+// 20 -> 18 BECAUSE THE HEAD MOVED DOWN. Sinking it by the counterbore's depth
+// sinks the TIP by the same amount, and at 20 the pilot came out the front face
+// (skin -0.4 against a 0.6 floor). This is the cost of the recess and there is no
+// way round it: an M3 x 18 is a different screw from the x 20 the last commit
+// specified. Keeping the x 20 is possible if the recess is cut to 0.8 instead of
+// 2.06 - see screw_cb_z - but that leaves a 3 mm head 2.2 proud instead of 0.9,
+// which is most of the problem still there.
+screw_len        = cover_screws ? 18.0 : 6.0;  // M3 x 18 through the whole stack, or x 6 board-only
 screw_tip_margin = 0.2;  // clear air past the tip, so it clamps rather than bottoms
 screw_skin_min   = 0.6;  // least front-face material to leave; see the assert
                     // (kept small — a big taper on a thin pin leaves a point)
@@ -1398,7 +1422,27 @@ assert(!cover_screws ||
 // WHERE THE SCREW ENTERS moved when the cover joined the stack: at the landing
 // cut into the cover, not at the board's back. Everything downstream reads this,
 // so clearing cover_screws restores the short-screw geometry exactly.
-screw_entry = cover_screws ? total_th - screw_pad_z : z_pcb_b;
+// How deep the head sinks: everything the rim plate has between the landing and
+// its inner face. Derived, not typed - one millimetre lower and the counterbore
+// is wider than the pillar and cuts it in half.
+screw_cb_z  = cover_screws && cover_rise > 0 ? (cover_rise + cover_th) - screw_pad_z : 0;
+assert(!cover_screws || cover_rise == 0 ||
+       (bx0 + hole_ins_x) - screw_cb_d/2 >= (wall - 0.1) + 0.8,
+       str("screw_cb_d is too wide for a hole this close to the edge: only ",
+           (bx0 + hole_ins_x) - screw_cb_d/2 - (wall - 0.1),
+           " mm of plate would be left. A countersunk head is the way out."));
+// WHAT THIS BINDS, stated because it holds trivially as written: screw_cb_z is
+// DERIVED from the same expression, so while it stays derived this can never
+// fail. What it catches is the derivation being replaced by a hand-typed depth -
+// checked, and at a literal 3.5 it fires by name. That is the edit worth guarding,
+// because one millimetre past the plate the counterbore is wider than the pillar
+// and cuts it in half, and nothing else in the file would notice.
+// It also means the CHECKER cannot test the severing geometrically: the model
+// refuses the build first, exactly as it does for screw_len 16.
+assert(!cover_screws || cover_rise == 0 || screw_cb_z <= (cover_rise + cover_th) - screw_pad_z + 1e-9,
+       "the counterbore is deeper than the rim plate - below that it is wider than the pillar and severs it.");
+// The head now bears on the counterbore's FLOOR, not on the landing.
+screw_entry = cover_screws ? total_th - screw_pad_z - screw_cb_z : z_pcb_b;
 screw_skin  = screw_entry - screw_len - screw_tip_margin;
 assert(screw_skin >= screw_skin_min,
        str("screw_len is too long: the pilot would leave ", screw_skin,
@@ -2204,6 +2248,9 @@ module cover(){
     if (cover_screws)
       for (c = holes()) {
         translate([c[0], c[1], -1]) cylinder(d = screw_boss_d, h = screw_pad_z + 1);
+        // the head's pocket, sunk into the rim plate - see screw_head_d
+        if (screw_cb_z > 0)
+          translate([c[0], c[1], -1]) cylinder(d = screw_cb_d, h = screw_pad_z + screw_cb_z + 1);
         translate([c[0], c[1], -1]) cylinder(d = m3_clear, h = (total_th - z_pcb_b) + 2);
       }
     // The hole starts ABOVE the outer surface wherever that surface has got to,

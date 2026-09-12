@@ -1065,6 +1065,44 @@ at the column top — and their combined extent is 3.61 mm, indistinguishable fr
 bore. It now measures **volume over the bore's own area**, an equivalent depth that two thin
 slices cannot fake. The fault injection is the only reason that was caught.
 
+## The screw heads are sunk as far as they can go, which is not out of sight
+
+Asked to hide them. **They cannot be hidden at this hole position**, and the reason is the
+board's rather than a choice here: the mounting holes sit **6.05 mm from the case edge** and
+the head measures 5-6 across. A counterbore for a 6.0 head leaves 0.85 of plate to the edge
+and - even with the pillar opened to its 7.1 maximum, which the lip caps - only **0.45 mm of
+pillar wall**. There is no version of a cap head that disappears here.
+
+**A countersunk M3 would sit flush**: a 90 deg cone is 6.0 at the surface and 3.4 at 1.30
+deep, inside the 2.06 mm of plate with 0.76 to spare, 1.30 of wall at the cone's bottom, and
+its length arithmetic is identical because a countersunk screw is measured *including* its
+head. That was offered and declined in favour of keeping the screws in hand.
+
+So the head is sunk as far as the plate allows: **Ø6.2 × 2.06 deep**, stopping at the plate's
+inner face because one millimetre lower the counterbore is wider than the pillar and severs it.
+
+| head | was proud | now proud |
+|---|---|---|
+| 3.0 mm | 3.00 | **0.94** |
+| 4.0 mm | 4.00 | **1.94** |
+
+**The screw goes M3×20 → M3×18**, and that is not optional: sinking the head sinks the tip by
+the same amount, and at ×20 the pilot came out of the front face (skin −0.4 against a 0.6
+floor). Skin is now 1.60 and engagement 4.60. Keeping the ×20 is possible by cutting the
+recess to 0.8 instead of 2.06, which leaves a 3 mm head 2.2 proud — most of the problem still
+there.
+
+**The counterbore does not undermine the case edge**, which was the thing worth checking.
+Walking the profile outward from the pocket at y 6.4, the material is *identical* with and
+without it out to x 2.95; the 0.14 mm at x 2.40 is the plate's own chamfer and is there
+either way. The only material the counterbore removes is its own 2.06 mm pocket.
+
+The depth guard is an assert, and it is honest about what it binds: `screw_cb_z` is derived
+from the same expression, so it holds trivially as written. What it catches is that derivation
+being replaced by a hand-typed depth — verified, at a literal 3.5 it fires by name. It also
+means the checker cannot test the severing geometrically, because the model refuses the build
+first, exactly as it does for `screw_len` 16.
+
 ## The bezel was pressing the screen, and had been all along
 
 Reported as *"I saw the screen pressed due to print error"*. The print error is real, but it
