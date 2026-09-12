@@ -525,8 +525,10 @@ present(bodyFn, /scrollNewBelow > 0 && !scrollAtBottom\(\)/,
   "structural: the new-below badge reads the same predicate the follow rule does");
 
 // THE DRAG LOOP'S OBLIGATIONS. It blocks loop(), the pattern micMonitor,
-// micStream and runCalibration already use - so it inherits their duties, and
-// each has a named failure if it is missing.
+// micStream and - on board 1 - runCalibration already use, so it inherits their
+// duties, and each has a named failure if it is missing. (runCalibration is not
+// compiled on the board this file checks; the precedent is cited from the shared
+// files, not from a call this board could make.)
 const dragBody = fnBody(INO, "void scrollDragLoop(int sy0)", "scrollback.ino");
 s(dragBody !== null, "structural: scrollDragLoop is findable");
 s(/reapBleLinks\(true\)/.test(dragBody),

@@ -2541,7 +2541,7 @@ bool fabPressed = false;           // the press currently down started on the bu
 // permission decision is a genuine hazard, not just a cosmetic one.
 // Now that it is part of the tab bar, it is drawn whenever the bar is, and the
 // old per-screen exclusions are gone with the hazards that motivated them: it
-// cannot overlap Allow/Deny, a card, or the pager, because it is not over the
+// cannot overlap Allow/Deny, a card, or the SETTINGS band, because it is not over the
 // content area at all. Chrome that blinks in and out reads as a glitch, so the
 // only things that hide it are the states where the bar itself is gone.
 bool fabVisible() {
@@ -3375,35 +3375,36 @@ const int VOICE_TEXT_LINES = 6;
 
 // ---------- Settings tab ----------
 
-// SETTINGS is paginated (3 pages), not scrollable - drag-scroll misfires on
-// this resistive panel, so discrete pages with a prev/next pager are used
-// (same reasoning as the ask-detail reader). Pages:
-//   0 STATUS   - device connections, battery, pairing (read-only)
-//   1 CONTROLS - brightness, sleep-after, volume steppers + sound toggle
-//   2 ACTIONS  - calibrate touch, power off
-//   3 PAIRED MACS
-//   4 MESSAGES - how a message sent from here lands on the Mac
-#if !BOARD_SETTINGS_HOME
-// FIVE, and the page it counts was ADDED rather than squeezed into one of the
-// four - board_e32r28t.h's P4 section carries the arithmetic showing none of them
-// had 40 spare rows. drawPager() reads this for its titles[] bound AND for its
-// dot count, and gotoSettingsPage() wraps on it, so the three stay in step from
-// one constant.
-const int SETTINGS_PAGES = 5;
-// ONE NAME FOR THE MESSAGES SURFACE ON BOTH BOARDS. Board 2 already has an id
-// for every group (SET_MESSAGES); board 1's pages are bare ordinals, and a bare 4
-// in a dispatch chain, a render chain, a touch chain and a "is it showing?" test
-// is four transcriptions of one fact. The alias means the three shared functions
-// below (drawMessagesPageStatic, renderMessagesPage, handleMessagesTouch) are
-// reached by the same expression on both boards.
-const int SETTINGS_PAGE_MESSAGES = 4;
-#else
-const int SETTINGS_PAGE_MESSAGES = SET_MESSAGES;
-#endif
-// On board 2 this carries SET_HOME plus six group ids instead (board_es3c35p.h),
-// and nothing outside settings.ino assumes the 0..3 range - SETTINGS_PAGES itself
-// is read only by drawPager() and gotoSettingsPage(), both of which board 2 does
-// not compile.
+// SETTINGS OPENS ON A HOME MENU ON BOTH BOARDS and each row opens one of six group
+// pages, with a back band where the pager used to be. THE COMMENT THAT STOOD HERE
+// DESCRIBED A SURFACE THAT NO LONGER EXISTS ON EITHER BOARD and is kept marked
+// rather than deleted, because it is the record of what this tab was:
+//   "SETTINGS is paginated (3 pages), not scrollable - drag-scroll misfires on
+//    this resistive panel, so discrete pages with a prev/next pager are used
+//    (same reasoning as the ask-detail reader). Pages:
+//      0 STATUS / 1 CONTROLS / 2 ACTIONS / 3 PAIRED MACS / 4 MESSAGES"
+// It said THREE pages over a list of FIVE, which is the "nothing parses a comment"
+// class exactly; the five pages themselves went in Task 3A, and the pager went in
+// Task 3B. The surfaces now are SET_HOME plus SET_DEVICE..SET_DANGER, declared in
+// each board header, and the resistive-panel argument for discrete surfaces over
+// drag-scroll still holds - it is why board 1 keeps a paged reader (BOARD_HISTORY_SCROLL).
+// SETTINGS_PAGE_MESSAGES STOOD HERE AND IS GONE (final review, MINOR 6). It was the
+// bridge between board 1's pager ordinals and board 2's group ids: board 1's pages
+// used to be 0..4 with MESSAGES at 4, so a `#if` gave the name a different value per
+// board and the three shared functions (drawMessagesPageStatic, renderMessagesPage,
+// handleMessagesTouch) could be reached by one expression. Task 3B made both boards
+// use the group ids, Task 4 deleted the `#if`, and what was left was
+// a plain `const int` initialised from SET_MESSAGES - a pure alias with four readers
+// (settings.ino 916, 1500, 1525, 1737), each of which now says SET_MESSAGES and reads
+// better for it. This is the branch's one instance of "introduced early, made dead
+// later": the value it carried survives, only the second name for it is gone.
+// SET_HOME on both boards, and both boards LAND on it: drawSettingsTab() enters
+// there on every tab change and settingsBack() returns there from a group. (The
+// sentence here said "board 1 never lands on it - drawSettingsTab() enters at
+// SET_DEVICE and gotoSettingsPage() wraps inside SET_DEVICE..SET_DANGER", which was
+// the chevron pager's ring; Task 3B flipped that board's navigation and Task 4
+// deleted gotoSettingsPage() outright.) The declared initial value is also what the
+// checker binds SET_HOME to, so it stays the one id that means "no group open".
 int settingsPage = 0;
 
 // PAGER_BTN_W/X0, PAGER_H and PAGE_TOP moved to board_e32r28t.h (via
@@ -3438,96 +3439,106 @@ int settingsPage = 0;
 // group there, and THEME becomes a full-width 3-segment selector rather than a
 // third-width cycle button. Its own chain is below; the offsets both arms read
 // come from the board headers, as they already did.
-#if BOARD_SETTINGS_HOME
-// ---- board 2: the DISPLAY group ----
+// ---- the DISPLAY group ----
+// TWO STEPPERS, THE THEME SEGMENTS AND THE FLIP TOGGLE, on both boards. What
+// differs is the FRAMING, not the controls: board 2 heads the segments with a
+// "THEME" caption and explains AUTO in a hint under them, and board 1 has room
+// for neither (BOARD_SETTINGS_FITS_CAPTIONS, whose arithmetic is in each header). So
+// the two arms differ in the two constants the caption and the hint contribute,
+// and in nothing else - the segments and the toggle are one implementation.
+//
+// THE ARMS BELOW REPEAT WHOLE `const int` STATEMENTS, AND THAT IS ALLOWED HERE.
+// CLAUDE.md's rule is that an `#if`/`#else` must not OPEN A BRACE in both arms,
+// because a brace-counting reader then sees one more `{` than `}` and runs off the
+// end - the failure that made fnSrc() return "" for handleSettingsTouch. Nothing in
+// these four chains opens a brace: they are declarations, each arm balanced at zero,
+// so every checker that reads this file still balances. Splitting them into a shared
+// prefix plus a guarded fragment is not available anyway - what differs is the
+// RIGHT-HAND SIDE of each derivation, and a `const int` has one of those.
 const int P1_BRIGHT_Y = PAGE_TOP + P1_TOP;
 const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
+#if BOARD_SETTINGS_FITS_CAPTIONS
 const int P1_THEME_CAP_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_THEME_CAP_GAP;
 const int P1_THEME_Y = P1_THEME_CAP_Y + SET_CAP_STEP;
 const int P1_AUTO_HINT_Y = P1_THEME_Y + H_ROW + P1_AUTO_HINT_GAP;
 const int P1_FLIP_Y = P1_AUTO_HINT_Y + P1_FLIP_GAP;
-// ---- board 2: the SOUND group ----
+#else
+// NO P1_THEME_CAP_Y AND NO P1_AUTO_HINT_Y on this board, rather than two y's
+// nothing draws at: the P2_MIC_Y rule, and settings-geom-check.mjs asserts both
+// absences by name. The two gaps below are the gap ABOVE each control, measured
+// from the painted bottom of whatever is over it - a different relation from
+// board 2's P1_FLIP_GAP (which steps from the hint's CENTRE), which is why it
+// carries a different name rather than the same one meaning two things.
+const int P1_THEME_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_THEME_TOP_GAP;
+const int P1_FLIP_Y = P1_THEME_Y + H_ROW + P1_FLIP_TOP_GAP;
+#endif
+// ---- the SOUND group ----
+// SOUND toggle, VOLUME stepper, TEST BEEP, MIC TEST on both boards; board 2 adds
+// the ALERTS and MICROPHONE captions and the "beeps when a session needs input"
+// hint, which board 1 has no rows for.
+#if BOARD_SETTINGS_FITS_CAPTIONS
 const int PS_ALERTS_Y = PAGE_TOP + PS_TOP;
 const int PS_SOUND_Y = PS_ALERTS_Y + SET_CAP_STEP;
 const int PS_WHAT_HINT_Y = PS_SOUND_Y + H_ROW + PS_HINT_GAP;
 const int PS_VOL_Y = PS_WHAT_HINT_Y + PS_VOL_GAP;
-const int PS_BEEP_Y = PS_VOL_Y + STEPPER_CARD_H + SP_3;
+#else
+const int PS_SOUND_Y = PAGE_TOP + PS_TOP;
+const int PS_VOL_Y = PS_SOUND_Y + H_ROW + PS_VOL_GAP;
+#endif
+const int PS_BEEP_Y = PS_VOL_Y + STEPPER_CARD_H + PS_BEEP_GAP;
+#if BOARD_SETTINGS_FITS_CAPTIONS
 const int PS_MIC_CAP_Y = PS_BEEP_Y + PS_BTN_H + PS_MIC_CAP_GAP;
 const int PS_MIC_Y = PS_MIC_CAP_Y + SET_CAP_STEP;
 #else
-const int P1_BRIGHT_Y = PAGE_TOP + P1_TOP;
-const int P1_SLEEP_Y = P1_BRIGHT_Y + STEPPER_CARD_H + P1_GAP;
-const int P1_VOL_Y = P1_SLEEP_Y + STEPPER_CARD_H + P1_GAP;
-const int P1_SOUND_Y = P1_VOL_Y + STEPPER_CARD_H + P1_GAP;
-const int P1_SOUND_H = H_ROW;   // toggles; H_ROW is TAP_MIN and cannot shrink
-// Three toggles share the bottom row: SOUND | FLIPPED | theme. (216-16)/3 = 66px each
-// against a longest label of 42px (FLIPPED at Cozette's 6px advance), so no new page and
-// no geometry growth were needed to add the theme switch.
-const int P1_THIRD_W = (CARD_W - 16) / 3;
-const int P1_FLIP_X  = CARD_X + P1_THIRD_W + 8;
-const int P1_THEME_X = CARD_X + 2 * (P1_THIRD_W + 8);
+const int PS_MIC_Y = PS_BEEP_Y + PS_BTN_H + PS_MIC_GAP;
 #endif
 
-// Page 2 - the ACTION buttons plus a hint. P2_TOP, P2_BTN_H and P2_GAP moved to
-// the board headers (via board.h): board 1's button height had to come DOWN to 38
-// to fit four of them and a hint. Going to five buttons would need a page of its
-// own on either board rather than shrinking these further.
+// Page 2 - the DANGER group. P2_TOP and P2_BTN_H are in the board headers (via
+// board.h); board 1's button height came DOWN to 38 for the four-button ACTIONS
+// column this page used to be, and it stays there. P2_GAP, which spaced that
+// column, is declared on neither board now - board_e32r28t.h records why.
 //
-// BOARD 2 DERIVES ITS OWN CHAIN and does not compile the arm below at all: its
-// Actions group is a captioned SAFE section and a captioned DESTRUCTIVE one, so
-// nothing about it is a single evenly-gapped column any more. MIC TEST lives on
-// its SOUND group there, so P2_MIC_Y does not exist on that board - which is why
-// the #if below is on BOARD_SETTINGS_HOME and not on BOARD_HAS_MIC, a flag that
-// is 1 on both boards and therefore cannot tell them apart. Board 1's arm is the
-// text that was always here.
-#if BOARD_SETTINGS_HOME
-// ---- board 2: the ACTIONS group ----
-// Two captioned sections. The gap between them is P2_SECTION_GAP rather than
-// P2_GAP: separation is one of the three carriers of severity here (position,
-// ink mass, hue), so the destructive pair must not read as a continuation of the
-// column CALIBRATE TOUCH sits in.
-const int P2_SETUP_CAP_Y = PAGE_TOP + P2_TOP;
-const int P2_CAL_Y = P2_SETUP_CAP_Y + SET_CAP_STEP;
-const int P2_DANGER_CAP_Y = P2_CAL_Y + P2_BTN_H + P2_SECTION_GAP;
+// ONE CHAIN FOR BOTH BOARDS NOW. What stood here described a `#if
+// BOARD_SETTINGS_GROUPS` split whose `#else` held board 1's four-button evenly-
+// gapped column, and it explained why the guard was that flag rather than
+// BOARD_HAS_MIC (which is 1 on both boards and so cannot tell them apart). Board 1
+// took the same arm from Task 3A and Task 4 deleted the flag and the dead column
+// with it. The DANGER group below is ONE captioned section holding the two controls
+// that destroy state, on both boards: MIC TEST lives on SOUND and CALIBRATE TOUCH
+// on board 1's DEVICE group, so neither P2_MIC_Y nor P2_CAL_Y is declared anywhere -
+// an absence settings-geom-check.mjs asserts BY NAME rather than describing.
+// ---- the DANGER group ----
+// ONE captioned section, two buttons. The gap between them is SP_3, the page
+// rhythm, rather than a P2_GAP or a P2_SECTION_GAP of their own: they are inside
+// one section, and both the constants that named the OTHER two relationships went
+// with the sections they separated. P2_SETUP_CAP_Y and P2_CAL_Y are gone with
+// CALIBRATE TOUCH rather than left computing a y nothing draws at, for the reason
+// P2_MIC_Y's absence is asserted one board over - a constant a draw site no longer
+// uses but a hit test still does is how a page comes to claim taps for a button it
+// does not draw. settings-geom-check.mjs asserts each absence by name.
+const int P2_DANGER_CAP_Y = PAGE_TOP + P2_TOP;
 const int P2_PAIR_Y = P2_DANGER_CAP_Y + SET_CAP_STEP;
-const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
-const int P2_HINT_Y = P2_PWR_Y + P2_BTN_H + P2_HINT_GAP;
-#else
-#if BOARD_HAS_MIC
-const int P2_MIC_Y = PAGE_TOP + P2_TOP;
-const int P2_CAL_Y = P2_MIC_Y + P2_BTN_H + P2_GAP;
-#else
-// No capture path on this board, so no MIC TEST button - and no slot reserved
-// for one either. The three remaining actions move UP rather than leaving a
-// 50px hole at the top of the page, the same reason tabsW() reclaims the record
-// slot when fabVisible() is compiled out. Gating the CHAIN here rather than the
-// four draw sites and four hit tests is what keeps those eight call sites
-// identical on both boards - and keeps the button and its touch zone from ever
-// disagreeing, which is the failure mode a per-site #if invites.
-const int P2_CAL_Y = PAGE_TOP + P2_TOP;
-#endif
-const int P2_PAIR_Y = P2_CAL_Y + P2_BTN_H + P2_GAP;
-const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + P2_GAP;
-#endif
+const int P2_PWR_Y = P2_PAIR_Y + P2_BTN_H + SP_3;
+// AND NO P2_HINT_Y ON EITHER BOARD. "power off = deep sleep, RESET to wake" is in
+// the confirm dialog POWER OFF raises, which is nearer the decision than a line
+// under the button ever was. (This said "on THIS board ... board 1 keeps the hint
+// because its dialog is smaller", which was true of the four-button ACTIONS page
+// board 1 drew until Task 3A; it takes this chain now and the constant is declared
+// nowhere.)
 
 // Page 3 - the Macs this device is paired with. One row each: tap the row to
 // restrict answering to just that Mac (tap again for "any"), tap the X to
 // forget it. The ANY row at the top clears the restriction.
 //
-// BOARD 2 DERIVES ITS OWN P3_* IN board_es3c35p.h and does not compile the arm
-// below at all: its Pairing group is two captions plus a list of two-line CARDS,
-// so nothing about it derives from H_ROW + SP_1 any more. The #if emits no code,
-// so board 1's arm is the text that was always here.
-#if !BOARD_SETTINGS_HOME
-// Rows use the shared H_ROW (per-board, == TAP_MIN). On board 1 this is the
-// tightest page in the UI - ANY plus 4 Macs at H_ROW + SP_1 is EXACTLY the
-// height available, which is what set H_ROW's value rather than the other way
-// round. Board 2 spends 246 of its 358px region on the same five rows, so the
-// page stops being the binding constraint on H_ROW there.
-const int P3_ANY_Y  = PAGE_TOP + SP_1 / 2;
-const int P3_LIST_Y = P3_ANY_Y + H_ROW + SP_1;
-const int P3_X_W    = 40;   // "forget" hit zone at the right edge (>= a fingertip)
-#endif
+// BOTH BOARDS DERIVE THEIR P3_* IN THEIR OWN HEADER, and there is no chain here at
+// all. Board 1's three used to be, inside a guarded arm, because its Pairing page
+// was a list of one-line uiListRows with no row-internal geometry to name. It draws
+// board 2's two-line CARDS now, so it needs the same P3_ROW_* set - and those belong
+// beside the page's own arithmetic in the header, where CLAUDE.md requires every
+// layout constant to live, rather than half here and half there. (A paragraph above
+// this one said "board 2 does not compile the arm below at all ... the #if emits no
+// code, so board 1's arm is the text that was always here". Task 3A made both boards
+// take one arm and Task 4 deleted the guard; there is no arm below.)
 
 // Page 4 / the MESSAGES group - how a message SENT FROM THIS DEVICE lands on the
 // Mac. ONE CHAIN FOR BOTH BOARDS, unlike pages 2 and 3, and that is worth saying
@@ -3555,14 +3566,11 @@ const int P4_HINT_Y  = P4_ROW_Y + (MSG_PRI_COUNT - 1) * P4_ROW_STEP + H_ROW + P4
 const int P4_LABEL_CHARS = (CARD_W - 2 * SP_3 - 2 * TEXT_ADV) / TEXT_ADV;
 
 #if !BOARD_USES_TFT_ESPI
-// ---- About: derived, the same chain shape P4 uses -------------------------
-const int P5_CAP_Y    = PAGE_TOP + P5_TOP;
-const int P5_ROW_Y    = P5_CAP_Y + SET_CAP_STEP;
-const int P5_ROW_STEP = H_ROW + P5_ROW_GAP;
-// From the LAST row's bottom, like P4's: the hint explains the block, so a
-// sixth row must MOVE it rather than have the row drawn through it.
-const int P5_HINT_Y   = P5_ROW_Y + (P5_ROWS - 1) * P5_ROW_STEP + H_ROW + P5_HINT_GAP;
-
+// BOARD 2 ONLY, and it shares this guard with the About chain that used to sit
+// above it - which is why deleting that chain took the `#if` with it and left this
+// `#endif` orphaned for one compile. The DIAGNOSTICS line that draws the commit is
+// board 2's, and so is FWSTAMP's store.
+//
 // THE COMMIT IS STORED AT FLASH TIME, NOT COMPILED IN, and that is a deliberate
 // trade against the board-baseline contract. A baked-in SHA changes both
 // binaries on EVERY commit, so --check would report CHANGED for ever unless the
@@ -3581,7 +3589,7 @@ char fwCommit[16] = {0};   // "" means: not this build, so do not claim it
 
 // Every consequential action confirms first. They all reach the same modal, so
 // the dialog is one component rather than one per action: it lives above the
-// page, swallows all other touches (including the pager) while it is up, and is
+// page, swallows all other touches (including the SETTINGS band) while it is up, and is
 // cleared whenever a page is redrawn so it can never be re-entered stale.
 enum ConfirmAction : uint8_t { CFM_NONE, CFM_FORGET_HOST, CFM_RECAL, CFM_RESET_PAIRING, CFM_POWER_OFF };
 ConfirmAction pendingConfirm = CFM_NONE;
@@ -3594,65 +3602,90 @@ const int CFM_BTN_W = (CARD_W - 3 * SP_3) / 2;
 const int CFM_NO_X  = CARD_X + SP_3;
 const int CFM_YES_X = CFM_NO_X + CFM_BTN_W + SP_3;
 
-// BOARD 1 ONLY, the same treatment macRowCache below already has: these three are
-// read by board 1's renderStatusPage() and by nothing else. On board 2 the DEVICE
-// card's connection rows and its one-line battery reading are gone - the CONNECTION
-// and POWER cards draw a verdict, two detail lines and a temperature through their
-// own caches - so declaring and resetting these there is state nothing can ever
-// read, which is the "declared-but-unwired, with comments claiming it works"
-// defect class this file already deleted a dead macEmojiId for.
-#if !BOARD_SETTINGS_HOME
-int btDotCache = -1, usbDotCache = -1, battRowCache = -1;
+// THREE CACHES STOOD HERE (btDotCache, usbDotCache, battRowCache) AND TASK 4
+// DELETED THEM. They were read by board 1's pre-redesign renderStatusPage() - the
+// DEVICE card's two connection dots and its one-line battery reading - and by
+// nothing else; both boards draw the CONNECTION and POWER cards now, which carry a
+// verdict, two detail lines and a temperature through their own caches. Deleted
+// rather than left declared, because a global nothing reads with a comment claiming
+// it works is the defect class this file already deleted a dead macEmojiId for.
+// THE GUARD IS BOARD_DEVICE_DIAGNOSTICS, and picking the right flag here is the
+// same care the previous note recorded: the guard was once !BOARD_USES_TFT_ESPI,
+// which said "the board that draws through the shim" where what was meant was
+// "the board whose DEVICE group has this field". Both boards draw the DEVICE
+// group now, and only board 2 draws the DIAGNOSTICS block this colour belongs to -
+// so the flag that gates the block is the flag that gates its cache.
+#if BOARD_DEVICE_DIAGNOSTICS
+// THE SoC TEMP'S WARM/HOT BAND IS BACK, and the note that used to stand here
+// recorded exactly why it had gone: the reading shared a DIAGNOSTICS line with the
+// flush figure, a line is ONE padded field with one colour, and colouring it by
+// temperature would have been colouring the flush figure by temperature too. That
+// reasoning was right and the consequence was not acceptable - colorForDieTemp()
+// ended up uncalled on BOTH boards, so the device had a temperature on the glass
+// and no warm/hot SIGNAL anywhere at all. POWER OFF leaving this group for DANGER
+// buys the line, so the temperature has one to itself (DEV_DIAG_TEMP_LINE) and its
+// colour is about its own value again. The cache below is what makes the colour
+// REACH the panel: drawIfChanged compares text only, and "SoC 56.0 C" -> "SoC 56.1 C"
+// is a text change while 54.9 -> 55.0 crossing into COLOR_WARN need not be one.
+uint16_t devDiagTempColorCache = 0;
 #endif
-// THE GUARD IS BOARD_SETTINGS_HOME, NOT !BOARD_USES_TFT_ESPI, and the difference is
-// not cosmetic: the size below is ST_LINE_BYTES, which only the BOARD_SETTINGS_HOME
-// arm of the board headers defines. The two flags agree on both boards that exist
-// today, so the mismatched guard compiled - but it says this row belongs to "the
-// board that draws through the shim" when it actually belongs to "the board whose
-// STATUS group has a POWER card", and the first board to have one and not the other
-// would fail to compile on a line whose comment blames the wrong flag.
-#if BOARD_SETTINGS_HOME
-// BOARD 2 ONLY - the SoC die temp line, which is now the POWER card's second
-// detail line ("SoC 46.6 C") rather than a right-aligned reading in a row of its
-// own. It is padded to ST_LINE_CHARS like every other detail line on that page,
-// so its cache is the same ST_LINE_BYTES they use - a cache shorter than its own
-// padded string silently stops noticing changes past that point, and
-// settings-geom-check.mjs asserts the size against the header's constant rather
-// than trusting this comment.
-char tempRowTextCache[ST_LINE_BYTES] = "";
-// The colour is cached BESIDE the text for the reason battRowColorCache documents:
-// drawIfChanged compares text only, so crossing a threshold while the digits stay
-// identical would never reach the panel.
-uint16_t tempRowColorCache = 0;
-#endif
-// PER BOARD, because the two boards genuinely draw different strings here and a
-// cache shorter than its string silently stops noticing changes past that point.
-// Board 1's row is one line carrying percentage, volts AND the runtime estimate,
-// whose widest is the discharge case "100% 4.20V ~99h" (15 + NUL) - 20, not 16,
-// because 16 fitted that EXACTLY. Board 2's POWER card gives the estimate a line
-// of its own, so this cache holds only "100%  4.20V" there (ST_BIG_CHARS + NUL).
-// settings-geom-check.mjs derives both bounds rather than trusting this comment.
+// PER BOARD, because a cache shorter than its string silently stops noticing
+// changes past that point, and the two boards are free to draw different strings
+// here. TODAY THEY DO NOT: BOTH boards' POWER card gives the runtime estimate a
+// line of its own, so this cache holds only the headline "100%  4.20V" - the
+// board's own ST_BIG_CHARS (11 on both) padded, plus NUL. BATT_ROW_CACHE is
+// therefore 12 on both, written as a literal on board 1 (board_e32r28t.h:964, with
+// its own note on why) and as ST_BIG_CHARS + 1 on board 2.
+// settings-geom-check.mjs asserts BATT_ROW_CACHE >= ST_BIG_CHARS + 1 PER BOARD,
+// parsed from each header, so the bound is CHECKED rather than trusted here.
+//
+// CORRECTED, 2026-09-12 (whole-branch final review, IMPORTANT 4). This read "Board
+// 1's row is one line carrying percentage, volts AND the runtime estimate, whose
+// widest is the discharge case "100% 4.20V ~99h" (15 + NUL) - 20, not 16, because
+// 16 fitted that EXACTLY." Kept marked rather than deleted. It described the
+// PRE-BRANCH STATUS page; Task 3A converged board 1's POWER card on board 2's
+// two-line form and the widest string here became 11 + NUL. NOTHING WAS EVER
+// BROKEN - the checker bound it per board throughout - but a cache DECLARED 12
+// under a comment claiming its string needs 16 reads as a live instance of
+// CLAUDE.md's oldest named bug, and a reader who believed it would either raise
+// the constant to 20 for nothing (a re-baseline for a string this binary cannot
+// produce) or conclude board 1 still draws a runtime estimate it no longer draws.
+// The same block also used to imply board 1 draws a charging duration: it does
+// not, because battChargeLabel() is inside power.ino's `#if !BOARD_USES_TFT_ESPI`
+// and is not compiled here - Task 3A's own concern (5), recorded at BATT_LEFT_BYTES.
 char battRowTextCache[BATT_ROW_CACHE] = "";
 uint16_t battRowColorCache = 0;   // see battTextColorCache - text-only compare
-// MAC_ROW_W (and its derivation comment) moved to board_e32r28t.h (via
-// board.h) - it also explains macRowCache's sizing below. BOARD 1 ONLY, because
-// renderMacLinkRows() is: board 2's per-Mac rows moved to the Pairing group,
-// where a row is a two-line card keyed off hosts[] rather than a padded line
-// keyed off hostLinks[].
-#if !BOARD_SETTINGS_HOME
-char macRowCache[MAX_LINKS][40] = {"", ""};
-#endif
-#if BOARD_SETTINGS_HOME
-// THE STATUS GROUP'S FIELDS (board 2). Every size is its field's PADDED width plus
+// macRowCache STOOD HERE AND TASK 4 DELETED IT, with renderMacLinkRows() and the
+// pre-redesign page 0 it painted: a per-Mac row was a padded line keyed off
+// hostLinks[] there. Both boards draw the Pairing group's two-line CARDS now, keyed
+// off hosts[] and cached in p3SubCache/p3LiveCache below. MAC_ROW_W, which sized
+// that cache, is board_e32r28t.h's and nothing reads it any more either.
+// THE DEVICE GROUP'S FIELDS (both boards now). Every size is its field's PADDED width plus
 // NUL, taken from the board header rather than restated here, because a cache
 // shorter than the string it holds silently stops noticing changes past that
 // point - this file's oldest bug, and the reason settings-geom-check.mjs asserts
 // each declaration against the header's own constant.
 char stVerdictCache[ST_VERDICT_BYTES] = "";
-char stLinksCache[ST_LINE_BYTES] = "", stIdCache[ST_LINE_BYTES] = "";
+char stLinksCache[ST_LINE_BYTES] = "";
 char stLeftCache[ST_LINE_BYTES] = "";
-char stPayloadCache[ST_HOST_L_BYTES] = "", stFlushCache[ST_HOST_L_BYTES] = "";
-char stUptimeCache[ST_HOST_R_BYTES] = "", stMacsCache[ST_HOST_R_BYTES] = "";
+// THE DIAGNOSTICS BLOCK'S SIX LINES, one cache each. They replace stIdCache (the
+// CONNECTION card's second line, whose two halves went to DIAGNOSTICS and to the
+// Pairing group) and the HOST card's stPayload/stFlush/stUptime/stMacs, which were
+// four caches for four HALF-lines; a line is one padded field here, so it is one
+// cache. Every one of the six is composed each tick and compared here, the fixed
+// ones included - a value on the static side is a value that goes stale silently,
+// and "Deckhand-C114" is only fixed until someone renames the device.
+// ONE INITIALISER PER ROW, and that is not decoration: C++ zero-fills the rest, so
+// a short list is legal and silent - which is exactly how a 4 -> 6 bump leaves a
+// declaration still describing the old count. settings-geom-check.mjs counts them
+// against DEV_DIAG_LINES so the next bump cannot.
+// GUARDED, because board 1 declares no DEV_DIAG_LINES and no DEV_DIAG_BYTES: its
+// DEVICE page has no diagnostics block (BOARD_DEVICE_DIAGNOSTICS, whose reasoning
+// is in board_e32r28t.h). Only the declaration is behind the guard, so no brace is
+// opened in either direction.
+#if BOARD_DEVICE_DIAGNOSTICS
+char devDiagCache[DEV_DIAG_LINES][DEV_DIAG_BYTES] = {"", "", "", "", "", ""};
+#endif
 // THE VERDICT LINE'S COLOUR, cached beside its text and busting it on a flip -
 // the guard battRowColorCache documents, and needed here for a reason that is not
 // hypothetical: "Both links up" is ONE string across a COLOR_GOOD -> COLOR_WARN
@@ -3660,7 +3693,7 @@ char stUptimeCache[ST_HOST_R_BYTES] = "", stMacsCache[ST_HOST_R_BYTES] = "";
 // the host is still ticking. drawIfChanged compares text only, so without this the
 // colour change would never reach the panel.
 uint16_t stVerdictColorCache = 0;
-// THE PAIRING GROUP'S LIVE ROWS (board 2). One state line per remembered Mac, and
+// THE PAIRING GROUP'S LIVE ROWS (both boards now). One state line per remembered Mac, and
 // one cache per row saying whether that Mac was live when the row was last drawn.
 // The live flag busts the text cache rather than merely redrawing the dot: the
 // line's COLOUR is a function of it, and drawIfChanged compares text only. Today
@@ -3679,7 +3712,6 @@ int p3LiveCache[MAX_HOSTS] = {-1, -1, -1, -1};
 // render into it, which is the same invariant drawSettingsStatic() enforces by
 // resetting caches inside itself rather than at its call sites.
 int p3CountCache = -1;
-#endif
 int soundBtnCache = -1, flipBtnCache = -1, themeBtnCache = -1;
 // The MESSAGES page's three option rows. ONE cache for the whole block, not one
 // per row, because the three are a single mutually-exclusive control: exactly one
@@ -3692,22 +3724,25 @@ char brightPctCache[8] = "";
 int brightBarCache = -1;
 char sleepValCache[8] = "";
 char volValCache[8] = "";
-#if BOARD_SETTINGS_HOME
-// HOME's five summaries. They are COMPOSED from live globals every tick and drawn
+// BOTH BOARDS SINCE TASK 3B, at each board's own HOME_SUB_BYTES: 30 here on board 1
+// (HOME_SUB_CHARS 29, derived from its 178px lane at Cozette's 6px advance) and 31 on
+// board 2 (30 at Spleen's 8px). The array is sized from whichever header is in play,
+// which is what keeps "a cache shorter than its string" impossible to reintroduce by
+// transcribing the other board's number.
+// HOME's six summaries. They are COMPOSED from live globals every tick and drawn
 // through drawIfChanged, so they need a cache each - without one the row would be
 // repainted on every 5s tick, which is the flicker this file's whole redraw
 // discipline exists to prevent. HOME_SUB_BYTES is HOME_SUB_CHARS + NUL, and the
 // text is padded to HOME_SUB_CHARS so the opaque box is a constant width and a
 // shrinking summary cannot leave the tail of a longer one behind.
-char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", "", "", ""};
-// The Status summary's colour is cached beside its text and busts it, the guard
+char homeSubCache[SET_GROUP_COUNT][HOME_SUB_BYTES] = {"", "", "", "", "", ""};
+// The Device summary's colour is cached beside its text and busts it, the guard
 // battRowColorCache documents. Today the two cannot disagree - the colour keys off
 // the same link count the row's leading phrase spells out, so a flip always
 // changes the string too - but "the text happens to change as well" is precisely
 // what made battRowTextCache correct by accident until it wasn't, and the cost of
 // not relying on it is two bytes.
 uint16_t homeStatusColorCache = 0;
-#endif
 
 
 
@@ -5483,7 +5518,8 @@ int bleFrameSlot = -1;
 // Called from drainBleRx() every loop() iteration (normal operation), AND
 // directly from inside every OTHER loop that can hold loopTask away from
 // loop() for longer than a moment - micStream (up to 120s), micMonitor/
-// MICTEST (until tapped), the SCREENSHOT readback (~18s), runCalibration.
+// MICTEST (until tapped), the SCREENSHOT readback (~18s), runCalibration
+// (BOARD 1 ONLY - board 2 compiles none and refuses RECAL by name).
 // All of those already run on loopTask, so calling this from inside them is
 // exactly as safe as calling it from drainBleRx() itself - a disconnect
 // queued mid-recording would otherwise sit unreaped for the whole blocking
@@ -5498,7 +5534,8 @@ int bleFrameSlot = -1;
 // disconnect, and the loop() watchdog is the net behind THAT - and must
 // advertise ONLY on the path neither of those two can reach: a blocking
 // call (micStream up to 120s, micMonitor up to 180s, runCalibration waiting
-// on a person, the SCREENSHOT readback) that starves loop() - and therefore
+// on a person - board 1 only, board 2 compiles none - the SCREENSHOT readback)
+// that starves loop() - and therefore
 // the watchdog - for its entire duration, during which a refusal caused by
 // a still-pending slot would otherwise leave BLE un-advertised until the
 // blocking call finally returns.
@@ -5511,8 +5548,8 @@ void reapBleLinks(bool mayAdvertise) {
   // Drained here (not in a dedicated function) so it rides the exact same
   // deferred hand-off releasePending already uses, and reaches loopTask from
   // every call site that already calls this - the ordinary drainBleRx() path
-  // AND the blocking-loop call sites (micStream, micMonitor, runCalibration,
-  // the SCREENSHOT readback) - so a refusal during a long recording is not
+  // AND the blocking-loop call sites (micStream, micMonitor, runCalibration
+  // on board 1 only, the SCREENSHOT readback) - so a refusal during a long recording is not
   // silenced until the recording ends.
   if (bleRefusalPending) {
     bleRefusalPending = false;
@@ -6038,6 +6075,17 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board, so there are no "
     "scroll frames to time; see SCROLLTO." },
 #endif
+#if !BOARD_TOUCH_NEEDS_CAL
+  { "RECAL",
+    "it runs the 5-tap affine calibration in touch_cal.ino: readRawTouch() against the XPT2046, "
+    "fitAffine()'s least-squares solve, and the six coefficients written to NVS under the key "
+    "cal5. This board is BOARD_TOUCH_NEEDS_CAL 0 - its touch controller lives inside the ST77922 "
+    "and is factory-aligned, so there is no raw ADC pair to map and no mapping of ours to fit. "
+    "runCalibration() is not compiled here at all; it was a stub that printed a notice and "
+    "returned, which answered this verb the way a successful run would. CALIBRATE TOUCH is absent "
+    "from the Device group on this board under the same flag, so the button and the verb are gone "
+    "together." },
+#endif
   // TERMINATOR, and it is what makes an all-#if'd array legal: on board 2 every
   // block above is skipped and `UnavailableCommand[] = {}` would not compile.
   // The walk below stops on the null verb rather than on a sizeof() count, so
@@ -6089,12 +6137,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
   // rather than adding a parameter to handleLine(const String&), whose fixed
   // signature MULTITEST already calls directly.
   curLineFromUsb = fromUsb;
-  if (buf == "RECAL") {
-    runCalibration();
-    applyScreenRotation(); // calibration runs unflipped - restore the user's choice
-    everReceived = false;
-    drawWaitingScreen();
-  } else if (buf == "WHOAMI") {
+  if (buf == "WHOAMI") {
     // "Which board is on this cable?" - the host asks when a USB link is still
     // anonymous after HELLO_GRACE_MS. HELLO is a BOOT-ONLY 15s burst, so a host
     // that attached to an already-running board (its own restart, a watchdog
@@ -6131,6 +6174,36 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // arm logs only on a CHANGE, so the duplicate a cabled board receives costs
     // one short line and alters nothing.
     announceMsgPriority();
+#if BOARD_TOUCH_NEEDS_CAL
+  } else if (buf == "RECAL") {
+    // THE 5-TAP AFFINE CALIBRATION. Guarded rather than shared, because the
+    // mechanism it drives exists on one board only: runCalibration() is inside
+    // touch_cal.ino's own `#if BOARD_TOUCH_NEEDS_CAL`, and on a board whose touch
+    // controller lives in the display IC there is no raw ADC pair to map, so there
+    // is no function here to call. That board REFUSES the verb BY NAME out of
+    // UNAVAILABLE_COMMANDS[], under the exact negation of this guard.
+    //
+    // IT USED TO BE HANDLED ON BOTH, with a stub behind it that printed a notice
+    // and returned - which from the Mac is indistinguishable from the calibration
+    // having run, which is the one thing CLAUDE.md's refusal rule exists to stop.
+    //
+    // MOVED OUT OF THE CHAIN'S FIRST POSITION to get here, and that is the whole
+    // reason WHOAMI leads now. A guard around the leading `if (` would leave board
+    // 2's chain starting on an `else if`, and the `#if`/`#else` pair that avoids
+    // that opens a brace in both arms - the shape that leaves every brace-counting
+    // checker here seeing one more open brace than close. Only the fragment that
+    // differs sits behind the guard.
+    //
+    // NO EARLY RETURN AND NO `buf = ""` OF ITS OWN: this arm falls through to the
+    // tail's clear, like every arm that is not a refusal. The host delivers each
+    // trigger-file line over BOTH transports, so a cabled board runs this twice -
+    // tolerable because a calibration is a fresh 5-tap run either way, and the
+    // second one simply asks for five more taps rather than corrupting the first.
+    runCalibration();
+    applyScreenRotation(); // calibration runs unflipped - restore the user's choice
+    everReceived = false;
+    drawWaitingScreen();
+#endif
   } else if (buf == "MSGPRI" || buf.startsWith("MSGPRI ")) {
     // The instrument for the setting the SETTINGS tab owns, so a capture is not
     // the only way to see it and a change can be driven without a fingertip.
@@ -7098,7 +7171,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     //
     // REFUSED WHILE ANOTHER FULL-SCREEN SURFACE OWNS THE GLASS, which it was not
     // before and which is the SAME defect EMOJITEST's own escape exists for.
-    // gotoSettingsPage()/openSettingsGroup() paint the settings page into the content
+    // settingsBack()/openSettingsGroup() paint the settings page into the content
     // area and clear nobody's flag, so with the icon grid up this reproduced exactly
     // the freeze that costs a reflash: a page drawn over a surface whose flag still
     // absorbs every payload and every tick. Both of PAGE's callees only act while
@@ -7122,18 +7195,82 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
       return;
     }
-    int pg = buf.substring(5).toInt();
-#if BOARD_SETTINGS_HOME
-    // PAGE 0 is HOME here, 1..6 the six groups - the same numbering settingsPage
-    // uses, so a capture script names a group rather than counting chevron taps.
-    // Board 1's arm below wraps modulo SETTINGS_PAGES (5), so the same MESSAGES
-    // surface is PAGE 4 there and PAGE 5 here. The two boards' page numbering has
-    // never agreed and this does not make it worse; what it does mean is that a
-    // capture script aimed at one board's number lands somewhere else on the other.
-    if (currentTab == TAB_SETTINGS) { if (pg <= SET_HOME) settingsBack(); else openSettingsGroup(pg); }
-#else
-    if (currentTab == TAB_SETTINGS) gotoSettingsPage(pg);
-#endif
+    // ONE RANGE ON BOTH BOARDS, AND THE BOUND IS DERIVED RATHER THAN WRITTEN. 0 is
+    // HOME and 1..SET_GROUP_COUNT are the groups, the ids settingsPage itself
+    // carries. They were not always the same - board 1 numbered its own pages 0..4
+    // and wrapped modulo 5, so the MESSAGES surface was PAGE 4 there and PAGE 5 here
+    // and a capture script aimed at one board landed somewhere else on the other.
+    // THE SENTENCE "board 1 has no HOME surface, so its arm clamps 0 up to the first
+    // group" was true for exactly one task (Task 3A); since Task 3B both boards take
+    // this path and PAGE 0 is HOME on both, and Task 4 deleted the `#else` that
+    // clamped, along with the flag over it.
+    //
+    // A LITERAL 6 HERE WOULD BE A TRANSCRIPTION, and the group set has been re-cut
+    // three times on this branch alone - seven, then five, then six - so the one
+    // thing this bound must not do is need editing again when it is re-cut a fourth
+    // time. It reads the count, and the static_assert below ties the count to the
+    // last id, which is the half a derivation from SET_GROUP_COUNT alone cannot see:
+    // the ids are contiguous from SET_HOME BY DESIGN (both headers say so on the
+    // declaring line), and if a future group is inserted non-contiguously the bound
+    // and openSettingsGroup()'s own constrain() would silently disagree about which
+    // ids exist. This fails the compile instead.
+    static_assert(SET_DANGER == SET_HOME + SET_GROUP_COUNT,
+                  "settings group ids must stay contiguous from SET_HOME: PAGE's bound is "
+                  "derived from SET_GROUP_COUNT and openSettingsGroup() clamps to SET_DANGER");
+    const int pgMax = SET_HOME + SET_GROUP_COUNT;
+    // THE ARGUMENT IS CHECKED BEFORE IT IS CONVERTED, because String::toInt() answers
+    // 0 for anything it cannot parse - so "PAGE foo", "PAGE" with a trailing space and
+    // "PAGE 0" were three ways of saying the same thing, and two of them were typos
+    // that opened HOME and said nothing. Refusing the NUMBER out of range while
+    // silently accepting a non-number would have left the easier mistake as the quiet
+    // one. This is deliberately local to PAGE: TAB, DETAIL and MULTITEST convert the
+    // same way and are NOT fixed here, because a shared argument parser is a change to
+    // the whole chain rather than to this arm.
+    String pgArg = buf.substring(5);
+    pgArg.trim();
+    bool pgNumeric = pgArg.length() > 0;
+    for (unsigned int i = 0; i < pgArg.length(); i++)
+      if (pgArg[i] < '0' || pgArg[i] > '9') pgNumeric = false;
+    if (!pgNumeric) {
+      Serial.printf("PAGE refused: \"%s\" is not a page number - PAGE %d..%d\n",
+                    pgArg.c_str(), SET_HOME, pgMax);
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
+    const int pg = pgArg.toInt();
+    // NAME THE RANGE, NOT JUST "out of range". Before this, PAGE 9 reached
+    // openSettingsGroup(), whose constrain() quietly delivered the DANGER group -
+    // so from the Mac a typo and a hit were the same screenshot, and PAGE 7 silently
+    // meant PAGE 6 for as long as board 2 had seven pages to remember. The line
+    // carries the bound it actually checked against, so a caller written for the
+    // seven-page numbering is told what the numbering is now rather than that it
+    // guessed wrong.
+    if (pg < SET_HOME || pg > pgMax) {
+      Serial.printf("PAGE refused: %d is outside PAGE %d..%d - %d is the SETTINGS HOME menu "
+                    "and %d..%d are its %d groups\n",
+                    pg, SET_HOME, pgMax, SET_HOME, SET_DEVICE, pgMax, SET_GROUP_COUNT);
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
+    // AND THE WRONG-TAB CASE IS A REFUSAL TOO. This was `if (currentTab ==
+    // TAB_SETTINGS)` with no else, so PAGE 3 sent while USAGE was up did nothing and
+    // said nothing - the silence CLAUDE.md's rule is about, and the easier half of it
+    // to hit, since TAB and PAGE are used together and the tab switch is the step a
+    // script forgets. It names the live tab so the caller knows what to send instead.
+    if (currentTab != TAB_SETTINGS) {
+      Serial.printf("PAGE refused: SETTINGS is not the live tab (tab %d is; SETTINGS is %d) "
+                    "- send TAB %d first\n", (int) currentTab, (int) TAB_SETTINGS, (int) TAB_SETTINGS);
+      buf = "";       // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
+    // NEITHER REFUSAL IS DEDUPED, and neither is the surface refusal above. The host
+    // writes every trigger-file line to BOTH transports, so a cabled board answers a
+    // bad PAGE twice - two identical lines, which is noise rather than the corruption
+    // the deduped cases carry (POWERPROBE's four lines came from a MEASUREMENT being
+    // restarted; a duplicated scrollback fetch corrupted its own buffer). The success
+    // path is idempotent for the same reason: opening the page that is already open
+    // repaints it.
+    if (pg == SET_HOME) settingsBack(); else openSettingsGroup(pg);
   } else if (buf == "POWERPROBE" || buf.startsWith("POWERPROBE ")) {
     // Passive mV/h measurement of whatever state the device is in, labelled so
     // two runs can be compared. Both boards: the question "what is this costing"

@@ -1780,6 +1780,169 @@ is what the operand names in that last assertion are pinned against — an unpin
 version of it let an inverted comparator pass clean). This split is why the pass line reports
 `9 mirror + 3 source assertions pass` rather than one undifferentiated total.
 
+---
+
+## THE STALE-COMMENT CLASS: ten instances on one branch, and the check that would find them
+
+**A COMMENT IS NOT PARSED, so nothing in this repo can catch prose that has stopped being true.**
+Every checker here reads `const int` declarations, macros, and function bodies; a sentence is none
+of those. This is not a soft problem: the paragraph a reader consults BEFORE the constants is
+exactly the one that survives review, because its arithmetic is internally consistent and only its
+premise is wrong. `board_es3c35p.h:1689` once opened *"THREE buttons, not four: `BOARD_HAS_MIC` is
+0 here"* while line 18 of that same header said `#define BOARD_HAS_MIC 1`, and the whole chain went
+with it - the hint placed at y=302 with 148px clear, against a real page whose hint sat at 364 with
+86px clear.
+
+**THE SETTINGS-REDESIGN BRANCH CORRECTED THIS CLASS TEN TIMES**, and the tenth was found *inside
+the commit that swept fifteen sites for it*. The instances were not one kind of mistake: flipping a
+board flag creates them wholesale (eight in one round, when board 1 began compiling shared code
+whose comments described board 2 alone), and so does deleting a function (a comment naming it
+survives the deletion by definition).
+
+### The decisive measurement
+
+Task 5 deleted `runCalibration()` on board 2 and then asked how the surviving mentions were
+actually found:
+
+| method | mentions found |
+|---|---|
+| a careful reviewer reading the diff | **5** |
+| the implementer's own follow-up sweep | **4** (a different, overlapping 4) |
+| `git grep -n runCalibration` | **15** |
+
+**One grep found all fifteen.** The three nobody had were the ones diligence structurally cannot
+reach: `scrollback.ino:843` and `scrollback-check.mjs:527` cited `runCalibration` as an existing
+*precedent* in board-2-only code, and `docs/reference/board-1-known-state.md:204` said "the
+CALIBRATE TOUCH button itself is deliberately still there" - **both halves of which had become
+false**. None of the three is in the diff, so no amount of diff-reading reaches them.
+
+### The class splits three ways, and only one of them is mechanical
+
+- **(a) DEAD IDENTIFIER.** The comment names a symbol whose definition no longer exists.
+  **Mechanically checkable**, and cheaply: the name is a token and the definition either resolves
+  or does not.
+- **(b) ALIVE ON ONE BOARD, prose sitting in the OTHER board's arm.** The symbol exists, so (a)
+  cannot see it; the comment is false only under one set of macro values. **Checkable inside the
+  firmware** - `preprocess()` in `geom-common.mjs` already resolves both boards' arms, so a
+  comment can be attributed to the arm it sits in. **NOT checkable in the `.mjs` checkers**, which
+  have no `#if` and no board to resolve against.
+- **(c) FALSE PREDICATE.** "`runCalibration()` is a stub", "174 rows of air", "all seven live
+  sites". The symbol exists, the arm is right, and the *claim about it* is wrong. **Not
+  mechanically checkable at all** - it needs a reader who knows what is true.
+
+**THE FRAMING THAT LOOKS RIGHT AND AIMS ONE STEP SHORT** is a state-based check: "find comments
+naming symbols that do not exist". `runCalibration()` **still exists on board 1**, so a
+state-based check finds none of the fifteen. What made them suspect was not the state of the tree
+but a **change to it**.
+
+### The buildable check, designed and NOT built
+
+**It is DIFF-DRIVEN: for every symbol whose DEFINITION a commit removes, enumerate every surviving
+comment or string mention of that symbol anywhere in the tree.** It judges no sentence and asserts
+nothing about meaning; it hands a human a list of suspects, which is exactly the scope at which the
+problem is tractable.
+
+Its limits, stated so nobody expects more of it:
+
+- It catches **(a)** completely and **(c)** only when the false predicate happens to name the
+  removed symbol (which is how "is a stub" would have been caught - it names `runCalibration`).
+- It catches **(b)** not at all: a flag flip removes no definition.
+- It is **per-commit**, so it cannot audit the tree as it stands; a mention that went stale three
+  commits ago is invisible to it.
+- Its output is suspects, never failures. A mention of a deleted symbol in a *historical* note -
+  "an entry stood here and Task 3B retired it" - is correct and must survive, so the check cannot
+  be a gate without producing exactly the stale-permission problem `checkKnownUsed()` exists to
+  prevent.
+
+**NOT BUILT.** A new repo-wide checker is a piece of machinery with its own maintenance and its own
+failure modes, and it belongs to a deliberate decision rather than to the tail of a docs task. It
+is recorded here so the next person does not re-derive it - the derivation, not the code, is what
+cost something. Until then the discipline is the one that actually worked: **when a commit deletes
+a definition, grep the tree for its name before writing the commit message.**
+
+---
+
+## SERIAL-ONLY REFUSALS: a pre-existing whole-chain defect, newly instantiated
+
+**`PAGE`'s refusals go out through `Serial.println`/`Serial.printf`, so they are INVISIBLE to a
+cable-less BLE session.** All FOUR of them - another full-screen surface is up, a non-numeric
+argument, out of range, and "SETTINGS is not the live tab" - name their cause correctly and reach
+nobody who is driving the device over Bluetooth alone. This is the same property CLAUDE.md already
+records as making `SCREENSHOT` USB-only in practice: the rows go out through `Serial.printf`, so
+with the cable out the whole capture goes nowhere.
+
+**It is not cosmetic and it is not undocumented elsewhere: `commands-check.mjs` ships a selftest
+fault named *"the refusal is printed to Serial, so a cable-less BLE session sees nothing"*** -
+which rewrites a `sendLineToHost(out.c_str())` to `Serial.println(out)` and requires the checker to
+catch it. So the checker can already say that this shape is wrong. What it cannot do is fail the
+EXISTING instances, because the arm those refusals live in used `Serial` before this branch and the
+new ones match it. (Cited by its text rather than by a line number on purpose: a fault anchored to
+a line number stops naming what it names the moment the line moves.)
+
+**The settings-redesign branch added TWO new instances** - `PAGE`'s non-numeric-argument refusal
+and its wrong-tab refusal, both of which were previously SILENT no-ops, which is the one thing
+worse - and **deliberately did not fix the transport.** The reasoning, recorded because "we chose not to"
+and "we did not notice" are indistinguishable from the outside:
+
+- The fix is whole-chain, not local. `PAGE`'s arm has four refusals and the arm is one of many;
+  routing one verb's refusals over both transports means either a new send helper every refusing
+  arm has to be taught, or a change to how the dispatcher reports.
+- **Splitting one arm's four refusals across two transports is worse than either whole.** A verb
+  that answers over BLE for one cause and over serial for another is a verb whose silence means
+  two different things, which is precisely the "silence and impossible-here look identical" failure
+  the refusal-by-name rule exists to close.
+- Doing it inside a task whose gate was byte-level binary attribution would have mixed a
+  behavioural change into a commit whose whole value was that nothing else moved.
+
+**So it stands, named, as a whole-chain item.** Anyone fixing it should fix the CHAIN - every
+refusal site at once, with `commands-check.mjs`'s existing fault turned into a live assertion over
+all of them - and not one verb.
+
+---
+
+## AN ASSERTION THAT CANNOT FAIL IS A DEFECT - and the strongest instance was in the INSTRUMENT
+
+**`sessions-geom-check.mjs` printed "selftest ok" while 45 of its own assertions were failing.**
+Not a hypothetical: rename `SESSION_PILL_UP_T` away in the header and the checker reported
+`SELFTEST OK WITH 45 ASSERTIONS FAILING` and exited 0. `usage-geom-check.mjs` had the same shape -
+rename `CARD_FOOT_Y` away, `undefined + 8` evaluates to `NaN`, `NaN` fails every comparison it
+reaches, and the selftest credited that as a catch.
+
+**The cause was one line in each: the selftest credited its injected fault with `fail > 0`.** That
+binds the fault to *nothing*. Any failure anywhere satisfies it, so the injection could be aimed at
+the wrong constant, aimed at a constant that no longer exists, or neutered entirely, and all three
+read as a perfect catch. A checker that credits any failure credits none.
+
+**Found and fixed mid-branch in commit `5ae1eda`**, scoped to checker integrity with no geometry
+change, on the argument that decided it: a checker printing "selftest ok" while 45 of its own
+assertions fail is not a weak test, it is an **actively misleading** one, and the next person to
+run it before shipping gets a false green. These two guard the USAGE tab and the session rows -
+the surfaces a person looks at all day - so a disarmed fault there is worth more than anything in
+SETTINGS.
+
+**The fix, and the proof it is real.** Each fault is credited **BY MESSAGE**, matched against the
+assertion that exists for it, and the bump **THROWS** when its constant is gone rather than
+poisoning the run with `NaN`. The assertion counts did not move - `usage` 359/0/3 -> 359/0/3,
+`sessions` 2114/0/9 -> 2114/0/9, no `chk()` call site added, removed or reworded - which is the
+proof no geometry assertion changed. All four probes now MISS and exit 1 where all four were green:
+
+| probe | what it now says |
+|---|---|
+| injection aimed at the wrong constant | `MISSED ... <- no assertion notices this` |
+| anchor renamed in the firmware | `the UNINJECTED run has 45 failure(s) - fix those first` |
+| anchor renamed only in the injection | `<- the injection has stopped applying (constant renamed?)` |
+| injection neutered to `() => {}` | `MISSED ... <- no assertion notices this` |
+
+**Two structural lessons, both paid for on this branch.** First, **no two faults may share a
+process**: `settings-geom-check.mjs` had FOUR colliding injection pairs, and three of the four were
+two faults on the same BOARD, where a board-number discriminator cannot reach - each let its
+partner be deleted with the selftest still green. The constant half was rebuilt as a
+`CONST_FAULTS` table with one child process per fault, the way the source half already worked, and
+the parent runs the uninjected tree first so a red tree cannot be mistaken for a catch. Second,
+`bump()` lives in `geom-common.mjs` as `makeBump(B)` - **one copy, three callers** - because three
+copies of a detector whose entire job is "this must not silently stop working" is the one
+duplication that cannot be allowed to drift.
+
 There is no test suite or linter in this repo; verification is "compile, flash, watch the
 Serial Monitor / host log, and check the physical screen." **On board 2, read that last clause
 literally — see the SCREENSHOT trap under Two boards, because a capture there cannot see the

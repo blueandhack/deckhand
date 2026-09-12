@@ -46,6 +46,21 @@ shrinks" are one requirement, not two.
 
     Device | Display | Sound | Macs | Messages
 
+> **CORRECTION, RULING 23 (2026-09-12).** The fourth group is called **`Pairing`**, not
+> `Macs`, and that is what shipped: `settingsGroupTitle()` in `settings.ino` returns
+> `"Pairing"` for `SET_PAIRING`. The `Macs`
+> rename belonged to the five-group design, where the group was gaining `RESET PAIRING`
+> and being re-cut; **when Ruling 10 made that page untouched, the page stopped changing
+> and the rename silently stopped with it** and no ruling covered the gap. Ruling 23
+> KEEPS `Pairing` and corrects the documents: renaming the code at the end of an
+> 18-commit branch costs compiled bytes and a re-baseline to satisfy a naming
+> preference, while correcting the prose costs nothing and removes the contradiction
+> just as completely. Recorded here so the next reader does not re-propose the rename as
+> an oversight. `Macs` is kept above, marked, because it is the record of what the
+> five-group design intended. Read every `Macs` **group** name in this document as
+> `Pairing`; `Macs` as a plural of "Mac" (the machines, `%d Macs`, `PAIRED MACS`) is
+> unaffected.
+
 `BOARD_SETTINGS_HOME` is **deleted**, not flipped - all 28 sites in `settings.ino` and
 `deckhand_display.ino` go, and the `#if`/`#else` page-body pairs collapse to one
 implementation each. Per-board geometry stays in the two headers, where CLAUDE.md requires it.
@@ -161,6 +176,37 @@ deliberate per-board content difference, not an oversight, and the reference doc
 Brightness stepper, sleep stepper, THEME segments, SCREEN FLIPPED toggle. On **board 1 only**,
 `CALIBRATE TOUCH` under a `SETUP` caption.
 
+> **CORRECTION, RULING 12 (2026-09-12).** `CALIBRATE TOUCH` ships on board 1's **Device**
+> page, not on Display - `drawDevicePageStatic()` in `settings.ino` draws the `SETUP`
+> caption at `DEV_CAL_CAP_Y` under `#if BOARD_TOUCH_NEEDS_CAL`. The sentence above is kept and marked rather than
+> deleted, but **do not act on it**: it instructs a reader to put a control on a page
+> that provably cannot hold it.
+>
+> **MEASURED, and this is why.** After the Display/Sound split board 1's Display page is
+> two stepper cards (`STEPPER_CARD_H` 56 each = 112) plus the THEME segments and the
+> SCREEN FLIPPED toggle, in `81..302` = 221px, which leaves **~61px**. The block needs
+> `cap(13) + SET_CAP_STEP(21) + P2_BTN_H` = **72px at the old `P2_BTN_H` 38 and 78px at
+> Ruling 13's `H_BTN` 44**. It does not fit, at either height.
+>
+> **And Device is right rather than merely available.** Under Ruling 10 board 1's Device
+> page loses POWER OFF to Danger and ends at 223 with two 60px cards, leaving **78px of
+> otherwise unconstrained air** in `92..302` - the "a page with enough air in it is a page
+> whose constants are constrained by nothing" smell this repo names. `CALIBRATE TOUCH`
+> fits it to the pixel: `SETUP` cap 236 (ink 236..248), button 257 (`236 + SET_CAP_STEP`),
+> `+44` = 301, `AIR_BOT` 1. Calibrating this device's own touchscreen **is** a
+> device-maintenance action, and board 1's Device group already differs from board 2's for
+> a written reason (no diagnostics block, because this board has a CH340 console), so this
+> uses an established per-board seam rather than opening a new one.
+>
+> **Why this correction exists at all**, since the decision was never in doubt: Ruling 12
+> is the only substantial ruling on this branch that never reached the binding authority.
+> Rulings 10/11 became amendment 1, Ruling 18 became amendment 2, Ruling 19 became a marked
+> correction inside amendment 1 - and this one stayed in the controller's ledger while the
+> spec went on saying Display in two places. `docs/reference/settings-tab.md:234` had it
+> right, so for eleven commits the reference doc was correct and the AUTHORITY was wrong,
+> which is the more dangerous direction. Cost if the decision itself is ever revisited:
+> someone looks for CALIBRATE TOUCH under a verbs group and finds it under Device.
+
 Board 2 drops CALIBRATE TOUCH, guarded on `BOARD_TOUCH_NEEDS_CAL`. `settings.ino:1531-1535`
 recorded this as an open question - `runCalibration()` there is a stub that prints and returns,
 because the touch controller is factory-aligned inside the display IC - and left the call to
@@ -177,7 +223,7 @@ treatment on board 2.
 Unchanged from board 2's today: SOUND ON toggle, VOLUME stepper, TEST BEEP, MIC TEST. Board 1
 gains it as a page of its own, splitting today's combined `DISPLAY & SOUND`.
 
-### Macs
+### Macs (SHIPPED AS `Pairing` - see the Ruling 23 correction above)
 
 Today's Pairing page - pair panel, ANY MAC row, the Mac list with its forget zones - plus
 `RESET PAIRING` last, under `CANNOT BE UNDONE` with the severity spine.
@@ -279,3 +325,192 @@ If no device is available for a task, that is **written down as unverified**, no
 - Macs at `P3_ROW_H 46` has **zero margin over `TAP_MIN`**. If the re-cut will not close
   honestly, the fallback is option (b) from the design discussion - a sixth group holding both
   destructive verbs - not a 44px row.
+
+---
+
+# AMENDMENT, 2026-09-12: the group set is SIX, not five
+
+**Everything above stands as the reasoning; this section overrides its conclusion.** Kept in
+place rather than rewritten, per this repo's rule that a description which turned out to be wrong
+is marked rather than deleted — the five-group argument is still the right argument, and it is
+board 1's arithmetic rather than the argument that defeated it.
+
+## What was measured
+
+The five-group set required `RESET PAIRING` to live at the foot of the Macs group. **It cannot, on
+board 1.** From `deckhand_display.ino:3532-3534` and `board_e32r28t.h`:
+
+    P3_ANY_Y  = PAGE_TOP + SP_1/2            = 82
+    P3_LIST_Y = P3_ANY_Y + H_ROW + SP_1      = 126
+    four Mac rows at step 44                 -> 126 + 3*44 + 40 = 298
+    page region                                 PAGE_TOP(80)..contentBottom(302) = 222px
+
+That is **216 of 222px already spent**. `RESET PAIRING` needs `cap(13) + SET_CAP_STEP(21) +
+P2_BTN_H(38)` = **72px that do not exist**, and there is nowhere honest to take them from:
+
+| source | saves | verdict |
+|---|---|---|
+| abut the Mac rows (step 44 -> 40) | 12 | still 60 short |
+| delete the ANY MAC row | 44 | still 28 short, and deletes a real setting |
+| both together | 56 | still 14 short |
+| cap the list at 3 slots | 44 | breaks the 4-Mac case, the only case the geometry must survive |
+
+The section-caption trick that closed board 2's page has no equivalent here: board 1's Macs page
+has no section captions to spend.
+
+## The set
+
+    Device | Display | Sound | Pairing | Messages | Danger
+
+`Danger` is the old Actions group, renamed and reduced to exactly what destroys state:
+`RESET PAIRING` and `POWER OFF`. It is no longer a bag of verbs — MIC TEST left for Sound before
+this branch, and CALIBRATE TOUCH leaves for board 1's Device page. The name says so, and it
+matches the `CANNOT BE UNDONE` caption already inside it.
+
+> **TWO CORRECTIONS, 2026-09-12, applied to the lines above rather than left below them,
+> because this is the group-set line a reader copies.**
+>
+> **RULING 23.** This line said `Macs`. The fourth group shipped as **`Pairing`**
+> (`settingsGroupTitle()`) and keeps that name; the full reasoning is in the Ruling 23
+> correction in the body of this spec. The rename belonged to the five-group design and
+> stopped happening when Ruling 10 - the amendment this very section IS - made the page
+> untouched. The amendment restating `Macs` after cancelling the change that motivated it
+> is the drift's own fingerprint, and it is why the correction is repeated here.
+>
+> **RULING 12.** This said CALIBRATE TOUCH "leaves for board 1's Display". It leaves for
+> board 1's **Device** page, under a `SETUP` caption, guarded on `BOARD_TOUCH_NEEDS_CAL`.
+> Display leaves ~61px against the 78 the block needs at `H_BTN` 44; Device had 78px of
+> unconstrained air and takes it to the pixel. Measured detail is in the Ruling 12
+> correction in the body. **Nothing about the Danger group changes either way** - the point
+> this sentence was making, that Danger holds exactly the two destructive verbs on both
+> boards, is unaffected and still true.
+
+## Three things this changes, and they are not consolation
+
+1. **The destructive-order reversal is CANCELLED.** The body of this spec records a knowing
+   reversal of `board_es3c35p.h`'s rule that "a destructive group in the middle of a menu is the
+   one thing this list's order actually has to protect". With Danger surviving and staying last,
+   that rule is **preserved intact**. The one place this design deliberately contradicted a
+   written rule no longer does.
+2. **Board 2's HOME does not move.** It stays at the six-row `58/10` pitch, which is where the
+   first task already left it. The `50/8 -> 58/10 -> 70/12` walk-back stops one step early.
+3. **The Device page gets ~80px back**, because POWER OFF is not on it. That is spent on the
+   thing the first task's review flagged as a real loss: the SoC temp regains its own line and
+   its warm/hot colour band. `colorForDieTemp()` was left uncalled on **both** boards, meaning no
+   warm/hot signal existed anywhere on the device.
+
+## Board 1's HOME, re-derived for six rows
+
+    HOME_Y0 + 6*HOME_ROW_H + 5*HOME_GAP + HOME_Y0_BOT == contentBottom()
+    38      + 6*42         + 5*2        + 2           == 302
+
+42 is `TAP_MIN + 2`. This is the cost the body of this spec predicted for the fallback and
+accepted in advance: board 1's rows sit near the fingertip floor rather than the roomy 46/6/6 the
+five-row set would have given. **Search the (row height, gap) space rather than nudging.**
+
+> **CORRECTION, RULING 19 (2026-09-12).** The sentence that stood here read "the seven-row
+> derivation on board 2 returned exactly one integer solution, and that is the standard here."
+> **That is false and the error is the dispatching side's, not the implementer's.** Kept marked
+> rather than deleted, per this repo's rule about descriptions that turned out to be wrong.
+>
+> Three things are wrong with it. `board_es3c35p.h` makes **no uniqueness claim** for its live
+> six-row pitch — it calls 58/10 "the six-row pitch RESTORED". The uniqueness sentence belonged
+> to the **original seven-row comment**, for a pitch Task 1 deleted, so a dead comment about a
+> deleted pitch was promoted into a general standard. And **58/10 is not unique anyway**: with
+> `HOME_Y0` and `HOME_Y0_BOT` free, `6R + 5G + pads = 414` over `R >= TAP_MIN 46` is satisfied by
+> `R=59 / G=2 / pads 42` among others.
+>
+> **MEASURED, 2026-09-12, because one counterexample disproves a uniqueness claim but does not say
+> how far from true it was: board 2's six-row space holds 281 `(R, G)` pairs**, under the same four
+> floors board 1's search below uses. The live `58/10` is one of 281, not one of one, and the
+> sentence this correction replaces was wrong by a factor of 281 rather than by a rounding. The
+> figure was computed during Task 3B's fix round and lived only in that round's report; it is
+> carried here because the spec is the binding authority and a number nobody can find is a number
+> nobody can check.
+>
+> **THE REAL STANDARD, and it is stricter than the one it replaces: search the space, report the
+> solutions, state the tie-break, and never claim a uniqueness you have not computed.** A
+> derivation that reports "one solution" without the enumeration behind it is the same defect as
+> an assertion that cannot fail — it looks like proof and carries none.
+>
+> Task 3B is the precedent. Board 1's six-row space, under four floors (row `>= TAP_MIN`; gap
+> `>= BORDER_CARD`, or two cards read as one rule; both pads `>= BORDER_CARD`; the row interior
+> holding `T_HEAD + T_BODY + 2*BORDER_CARD` without shrinking a face) is **six (row height, gap)
+> pairs and 46 four-tuples**:
+>
+> | row height | over `TAP_MIN` | gap | pads | splits |
+> |---|---|---|---|---|
+> | **42** | **+2** | **2** | **6** | 3 |
+> | 41 | +1 | 3 | 7 | 4 |
+> | 41 | +1 | 2 | 12 | 9 |
+> | 40 | +0 | 4 | 8 | 5 |
+> | 40 | +0 | 3 | 13 | 10 |
+> | 40 | +0 | 2 | 18 | 15 |
+>
+> 42 is the **only row height with any margin over the fingertip floor**, and taking that margin
+> is what fixes the gap at 2 and the pads at 6. **The tie-break is stated rather than implied:
+> the row is the touch target and the gap is inert, and this panel is resistive** — `PAGER_H`'s
+> own comment records that under-floor controls here were "the most missed control on the
+> device". `40/4` and `41/3` both close; both spend the margin on space between two cards.
+>
+> Everything else in the derivation below stands: 42 is still the answer, `38 + 6*42 + 5*2 + 2
+> == 302` is still the identity, and the row internals are unchanged. Row internals at 42, mirroring board 2's stack at this board's type scale:
+
+    +0..+1    border
+    +4..+21   name    (T_HEAD, Terminus 10x18)
+    +22..+23  gap 2
+    +24..+36  summary (T_BODY, Cozette 6x13)
+    +37..+39  pad
+    +40..+41  border                                   = 42
+
+## What did NOT change
+
+Everything else in the body of this spec: the DIAGNOSTICS compression, the slimmed live cards,
+board 1 carrying no diagnostics block, dropping CALIBRATE TOUCH on board 2, the `RECAL` refusal,
+`BOARD_SETTINGS_HOME`'s deletion and the self-proving no-op that follows it, and the verification
+discipline. The Pairing page (`Macs` above; Ruling 23) is now simply **untouched** on both boards.
+
+---
+
+# AMENDMENT 2, 2026-09-12: "one surface" is qualified, and which flags are scaffolding
+
+The body of this spec says the `#if` pairs "collapse to one implementation each" and that the
+boards become one surface. **That is true of the code and the navigation, and NOT true of the
+explanatory chrome.** Recorded here rather than left to be discovered, because a claim a reader
+can disprove by grepping is worse than a narrower claim that holds.
+
+## What board 1 does not carry
+
+Board 1's settings pages are `PAGE_TOP(80)..contentBottom(302)` = **222px**. Board 2's are
+`104..460` = **356px**. That 134px gap is a physical fact about two panels and no refactor
+removes it. Board 1's Display, Sound and Pairing groups want **46, 55 and 42 more rows** than they
+have, so board 1 carries none of board 2's six section captions and hints.
+
+**Nothing regresses**: board 1 never had them. Its combined DISPLAY & SOUND page was three
+stepper cards and a row of three third-width buttons, with no captions at all. The convergence
+gives board 1 board 2's *controls*, its *grouping* and its *navigation*; it does not give it
+board 2's *prose*, and it cannot.
+
+## The flag, and which flags are temporary
+
+`BOARD_SETTINGS_FITS_CAPTIONS` gates them — named for the cause (does this board's page fit
+them) rather than the symptom, in the shape of `BOARD_HAS_MIC` and `BOARD_TOUCH_NEEDS_CAL`.
+
+**Three settings flags exist during this branch and only one survives it:**
+
+| flag | board 1 | board 2 | fate |
+|---|---|---|---|
+| `BOARD_SETTINGS_GROUPS` | 0 -> 1 in Task 3A | 1 | **deleted in Task 4** — scaffolding |
+| `BOARD_SETTINGS_HOME` | 0 -> 1 in Task 3B | 1 | **deleted in Task 4** — scaffolding |
+| `BOARD_SETTINGS_FITS_CAPTIONS` | 0 | 1 | **permanent** |
+
+The two scaffolding flags exist so that content and navigation converge in separate commits with
+separately attributable binary movement. Task 4 deletes both, and its binaries must come out
+byte-identical because the preprocessor was already excluding what it removes. The third is not
+scaffolding and Task 4 must not delete it.
+
+## So the accurate claim
+
+**One implementation, one navigation, one group set, and one geometry SOURCE (each board's own
+header) — with board 2 additionally carrying six lines of explanation its panel has room for.**
+That is what shipped, and it is what `docs/reference/settings-tab.md` should say.

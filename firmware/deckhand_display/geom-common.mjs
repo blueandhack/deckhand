@@ -642,3 +642,27 @@ export function countWrappedLinesB(b, text, id, maxW) {
   }
   return lines;
 }
+
+// ---------- selftest: a constant injection that cannot go quietly inert ----------
+// ONE COPY, THREE CALLERS. This was written three times - once in each geometry
+// checker - as the fix for the same defect in each: an injection aimed at a constant
+// that has since been RENAMED evaluates `undefined + 1` to NaN, NaN fails every
+// assertion it reaches, and a selftest that credits failures therefore reads a dead
+// injection as a perfect catch. Three identical copies of a guard whose entire job is
+// "this detector must not silently stop working" is the one duplication that cannot
+// be allowed to drift: the copy that loses its typeof test is the checker that goes
+// quiet, and nothing would say which.
+//
+// It is a FACTORY rather than a plain function because each checker owns its own
+// mutable per-board table `B` - the thing the injection perturbs - and passing that
+// table on every call would put the one argument that must never vary at every call
+// site. `const bump = makeBump(B);` binds it once, and every call site reads exactly
+// as it did before.
+export function makeBump(B) {
+  return function bump(board, name, delta) {
+    if (typeof B[board][name] !== "number")
+      throw new Error(`--selftest: B[${board}].${name} is not a number (${B[board][name]}) - ` +
+        `the injection has stopped applying, and an injection that changes nothing proves nothing`);
+    B[board][name] += delta;
+  };
+}

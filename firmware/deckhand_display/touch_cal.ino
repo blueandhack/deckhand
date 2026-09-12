@@ -10,11 +10,13 @@
 // board-1-only by definition rather than by convenience: board 2's touch
 // controller is integrated into the ST77922 display IC and is factory-aligned,
 // so there is no raw ADC pair to map and no fit to solve. Board 2 keeps only
-// runCalibration()/loadOrRunCalibration(), which say so rather than drawing
-// crosshairs nobody needs - RECAL is documented as the escape hatch for
-// misaligned touch, and on that panel the honest answer is that there is
-// nothing to calibrate. The one entry point both boards share, getTouchPoint(),
-// moved to touch_hal.ino alongside touchPressed() and touchBegin().
+// loadOrRunCalibration(), which opens the NVS namespace every other loader in
+// setup() reads from and validates nothing, because there is nothing to validate.
+// It used to keep a runCalibration() stub as well; that is deleted, and RECAL -
+// documented as the escape hatch for misaligned touch - is refused BY NAME on that
+// board instead, so the honest answer reaches the Mac rather than only the glass.
+// The one entry point both boards share, getTouchPoint(), moved to touch_hal.ino
+// alongside touchPressed() and touchBegin().
 
 void loadScreenFlip() { screenFlipped = prefs.getBool("flip", false); }
 void saveScreenFlip() { prefs.putBool("flip", screenFlipped); }
@@ -185,34 +187,23 @@ void loadOrRunCalibration() {
 }
 #else   // !BOARD_TOUCH_NEEDS_CAL - board 2's capacitive, factory-aligned panel
 
-// Not a silent no-op, and not a stub. RECAL is the documented escape hatch for
-// touch that lands in the wrong place, so someone reaching for it here is owed
-// an answer - and the answer is that this panel has no mapping to fix. It says
-// so on the serial console AND on the glass, because whoever typed RECAL may
-// well be standing in front of the device rather than reading the log.
+// THERE IS NO runCalibration() ON THIS BOARD, and its absence is the point rather
+// than an omission. It used to be a stub here: it printed a line and drew "Touch is
+// factory-aligned / nothing to calibrate" for 1200ms, because RECAL is the
+// documented escape hatch for touch that lands in the wrong place and someone
+// reaching for it was owed an answer.
 //
-// It must also not leave the caller waiting for taps: both call sites
-// (processCompletedLine's RECAL, and SETTINGS -> CALIBRATE TOUCH) repaint
-// immediately after this returns, so the notice needs its own dwell to be
-// readable at all, and is then painted over by that repaint.
-void runCalibration() {
-  Serial.println("CAL: nothing to calibrate - this panel's touch controller is "
-                 "integrated into the ST77922 and is factory-aligned");
-  tft.fillScreen(COLOR_BG);
-  setUIFont(2);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(COLOR_VALUE, COLOR_BG);
-  tft.drawString("Touch is factory-aligned", tft.width() / 2, tft.height() / 2 - 12);
-  tft.setTextColor(COLOR_LABEL, COLOR_BG);
-  tft.drawString("nothing to calibrate", tft.width() / 2, tft.height() / 2 + 12);
-  tft.setTextDatum(TL_DATUM);
-#if !BOARD_USES_TFT_ESPI
-  tft.flush();   // nothing else runs before the delay below, so without this the
-                 // notice would only reach the glass after it - i.e. never, for
-                 // a caller that repaints straight afterwards.
-#endif
-  delay(1200);
-}
+// THAT ANSWER WENT TO THE GLASS AND NOT TO THE MAC, which is the half that
+// mattered. RECAL is driven from ~/.claude/deckhand-device-command far more often
+// than by someone standing at the device, and over the wire a stub that printed and
+// returned was indistinguishable from a calibration that had run - the exact shape
+// CLAUDE.md's "every refusal must NAME ITS CAUSE" exists to stop. So the verb is now
+// refused by name from UNAVAILABLE_COMMANDS[] under `#if !BOARD_TOUCH_NEEDS_CAL`,
+// which reaches the Mac over whichever transport asked, and with CALIBRATE TOUCH
+// absent from this board's Device group and its CFM_RECAL arms behind the same flag
+// there is no caller left. A function nothing can reach is not a gentler answer than
+// a refusal; it is a second place for the truth to drift from.
+//
 // prefs.begin() still has to happen here, and ONLY here: every loader called
 // after this in setup() (theme, brightness, sleep timeout, beep, volume, screen
 // flip) reads that same namespace, and this is where board 1 opens it. Dropping

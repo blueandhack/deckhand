@@ -36,12 +36,68 @@ const SELFTEST = process.argv.includes("--selftest");
 const HDR = { 1: "board_e32r28t.h", 2: "board_es3c35p.h" };
 
 // ---------------------------------------------------------------------------
+// THE PREPROCESSOR GUARD STACK OF EVERY LINE, as a structure rather than as text.
+// geom-common's preprocess() answers "does this board see this line", which is the
+// per-board question; this answers "under what condition does ANY board see it",
+// which is what an exact-negation claim needs. One level per open `#if`, carrying
+// the arm that is currently open (`null` for an `#else` with no condition of its
+// own) and the earlier arms it must not have taken.
+function guardStacks(src) {
+  const lines = src.split("\n");
+  const out = new Array(lines.length).fill(null);
+  const stack = [];
+  const snap = () => stack.map((f) => ({ cur: f.cur, prior: f.prior.slice() }));
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    let m;
+    if ((m = /^#ifdef\s+(\S+)/.exec(t))) stack.push({ cur: `defined(${m[1]})`, prior: [] });
+    else if ((m = /^#ifndef\s+(\S+)/.exec(t))) stack.push({ cur: `!defined(${m[1]})`, prior: [] });
+    else if ((m = /^#if\s+(.+)$/.exec(t))) stack.push({ cur: m[1].trim(), prior: [] });
+    else if ((m = /^#elif\s+(.+)$/.exec(t))) { const f = stack[stack.length - 1]; if (f) { if (f.cur) f.prior.push(f.cur); f.cur = m[1].trim(); } }
+    else if (/^#else\b/.test(t)) { const f = stack[stack.length - 1]; if (f) { if (f.cur) f.prior.push(f.cur); f.cur = null; } }
+    else if (/^#endif\b/.test(t)) stack.pop();
+    else { out[i] = snap(); continue; }
+  }
+  return out;
+}
+function stackFlags(stack) {
+  const out = [];
+  for (const f of stack)
+    for (const e of [f.cur, ...f.prior])
+      if (e) for (const m of e.matchAll(/\b(BOARD_[A-Z0-9_]+)\b/g)) out.push(m[1]);
+  return out;
+}
+// One guard expression under one hypothetical flag assignment. An identifier the
+// assignment does not carry THROWS by name rather than defaulting to 0: a guard
+// silently read as false makes any negation claim over it meaningless, and a
+// checker that reports a meaningless claim as a pass is the defect this whole
+// family of files exists to avoid.
+function evalGuard(expr, assign) {
+  let e = expr.replace(/defined\s*\(\s*([A-Za-z_0-9]+)\s*\)/g, (_, n) => (n in assign ? "1" : "0"));
+  e = e.replace(/[A-Za-z_][A-Za-z_0-9]*/g, (n) => {
+    if (n in assign) return String(assign[n]);
+    throw new Error(`guard "${expr}" names ${n}, which is not a BOARD_* flag this comparison varies`);
+  });
+  if (!/^[\s0-9!&|()<>=+*/-]*$/.test(e)) throw new Error(`guard "${expr}" is not a plain flag expression`);
+  return !!eval(e);
+}
+function stackHolds(stack, assign) {
+  for (const f of stack) {
+    if (f.cur != null && !evalGuard(f.cur, assign)) return false;
+    for (const p of f.prior) if (evalGuard(p, assign)) return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 function suite(ok, over = {}) {
   const main = over.main != null ? over.main
              : stripComments("deckhand_display.ino");
   const hdr = {};
   for (const b of [1, 2])
     hdr[b] = over[`h${b}`] != null ? over[`h${b}`] : fs.readFileSync(`${DIR}/${HDR[b]}`, "utf8");
+  const claudeMd = over.claudemd != null ? over.claudemd
+                 : fs.readFileSync(`${DIR}/../../CLAUDE.md`, "utf8");
 
   // ---- the flags, out of each header ------------------------------------
   // NUMERIC #defines only: BOARD_NAME is a string and BOARD_W/BOARD_H are sizes,
@@ -200,6 +256,188 @@ function suite(ok, over = {}) {
   // ... and a refusal for a verb NO board has is an entry describing nothing.
   for (const v of [...allRefused].sort())
     ok(`${v}: the refusal names a verb the dispatch chain really has`, allHandled.has(v));
+
+  // ---- (3b) THE TWO GUARDS ARE EXACT NEGATIONS ---------------------------
+  // Section (3) proves the handler and the refusal do not overlap AND do not both
+  // go missing ON THESE TWO BOARDS. That is weaker than the rule the table states
+  // about itself - "EACH ENTRY'S GUARD IS THE EXACT NEGATION OF ITS HANDLER'S" -
+  // and the gap is a real one: an entry guarded `!BOARD_TOUCH_NEEDS_CAL ||
+  // BOARD_HISTORY_SCROLL` is correct on both boards today and stops being correct
+  // the moment a third board sets both flags, at which point the verb is handled
+  // AND refused. The table's whole promise is that "a future board that turns one
+  // of those on gets the handler and loses the refusal in the same edit", and two
+  // boards cannot witness that promise.
+  //
+  // So both guard STACKS are parsed out of the source - the conjunction of every
+  // enclosing `#if`, with the earlier arms of an `#if`/`#elif`/`#else` negated -
+  // and compared over EVERY assignment of the BOARD_* flags either one names, not
+  // over the two the headers happen to declare. De Morgan is expected rather than
+  // forbidden: `BOARD_USES_TFT_ESPI || !BOARD_HAS_WIRELESS_PAIR` is the exact
+  // negation of `!BOARD_USES_TFT_ESPI && BOARD_HAS_WIRELESS_PAIR` and four live
+  // entries are written that way, so this compares MEANINGS and not text.
+  const guards = guardStacks(main);
+  const dispAt = main.indexOf(DISPATCH_SIG);
+  const dispEnd = dispAt + rawDispatch.length;
+  const tabAt = main.indexOf(TABLE_SIG);
+  const tabEnd = main.indexOf("\n};", tabAt);
+  const lineOf = (() => {
+    const nl = [];
+    for (let i = 0, n = 0; i < main.length; i++) if (main[i] === "\n") nl.push(i);
+    return (off) => { let lo = 0, hi = nl.length; while (lo < hi) { const m = (lo + hi) >> 1; if (nl[m] < off) lo = m + 1; else hi = m; } return lo; };
+  })();
+  // FIRST occurrence inside each region, located rather than listed: the dispatch
+  // spells one verb three different ways and the table spells it once.
+  const firstLine = (from, to, re) => {
+    re.lastIndex = 0;
+    const hay = main.slice(from, to);
+    const m = re.exec(hay);
+    return m ? lineOf(from + m.index) : -1;
+  };
+  const pairs = [];
+  for (const v of [...allRefused].sort()) {
+    const hLine = firstLine(dispAt, dispEnd, new RegExp(`buf\\s*(?:==|\\.startsWith\\(|\\.equalsIgnoreCase\\()\\s*"${v}\\s?"`));
+    const eLine = firstLine(tabAt, tabEnd, new RegExp(`\\{\\s*"${v}"\\s*,`));
+    ok(`${v}: its handler arm and its refusal entry are both located in the source (lines ${hLine + 1} / ${eLine + 1})`,
+       hLine >= 0 && eLine >= 0 && guards[hLine] != null && guards[eLine] != null);
+    if (hLine < 0 || eLine < 0 || !guards[hLine] || !guards[eLine]) continue;
+    pairs.push([v, guards[hLine], guards[eLine]]);
+  }
+  // POSITIVE CONTROL. A guardStacks() that returned an empty stack for every line
+  // would make every pair "true vs true" - which is not a negation, so it would
+  // fail loudly rather than pass - but a stack that silently lost only the NESTED
+  // levels would still reduce several entries to a true negation by accident. So
+  // the parse is required to have found nesting at all.
+  ok(`sanity: the guard-stack parse sees nesting (deepest stack ${Math.max(0, ...pairs.map(([, h, e]) => Math.max(h.length, e.length)))} levels)`,
+     pairs.some(([, h]) => h.length >= 1) && pairs.some(([, , e]) => e.length >= 1));
+  for (const [v, h, e] of pairs) {
+    const names = [...new Set([...stackFlags(h), ...stackFlags(e)])].sort();
+    ok(`${v}: its two guards name at least one flag between them [${names.join(", ") || "none"}]`,
+       names.length >= 1 && names.length <= 12);
+    if (!names.length || names.length > 12) continue;
+    const bad = [];
+    for (let mask = 0; mask < (1 << names.length); mask++) {
+      const a = {};
+      names.forEach((n, i) => { a[n] = (mask >> i) & 1; });
+      let hv, ev;
+      try { hv = stackHolds(h, a); ev = stackHolds(e, a); }
+      catch (err) { bad.push(err.message); break; }
+      if (hv === ev) bad.push(names.map((n) => `${n}=${a[n]}`).join(" ") + ` -> handler ${hv ? "live" : "absent"}, refusal ${ev ? "live" : "absent"}`);
+    }
+    ok(`${v}: the refusal's guard is the EXACT NEGATION of the handler's, over every assignment of the flags they name ${bad.length ? "[" + bad[0] + "]" : ""}`,
+       bad.length === 0);
+  }
+
+  // ---- (3c) RECAL, BY NAME - the one verb this file knows in advance ------
+  // EVERY OTHER ASSERTION HERE IS BLIND TO THE COMMAND SET, and that is the
+  // property this block is a deliberate exception to, so it is worth saying why.
+  // Sections (3) and (3b) only ever speak about a verb SOME board has: delete the
+  // handler and the table entry together and RECAL leaves `allHandled` and
+  // `allRefused` at the same time, and not one assertion above mentions it again.
+  // That is precisely how this verb got into trouble in the first place - it was
+  // handled on both boards with a stub behind it that printed a notice and
+  // returned, so from the Mac it was indistinguishable from a calibration that had
+  // run, which is the exact failure CLAUDE.md's refusal rule names.
+  //
+  // THE GUARD MUST NAME THE CAPABILITY, NOT THE BOARD, and on these two headers
+  // BOARD_USES_TFT_ESPI would pass (3) and (3b) just as happily while saying the
+  // wrong thing about why: board 1 has a 5-tap affine fit because its touch is a
+  // separate resistive controller, not because it draws through real TFT_eSPI.
+  {
+    const hLine = firstLine(dispAt, dispEnd, /buf\s*==\s*"RECAL"/);
+    const eLine = firstLine(tabAt, tabEnd, /\{\s*"RECAL"\s*,/);
+    ok("RECAL: handled on board 1, where touch_cal.ino's 5-tap affine fit against the XPT2046 exists",
+       state[1].handled.has("RECAL"));
+    ok("RECAL: NOT handled on board 2 - a handler with a printing stub behind it answers the Mac the way a successful run would",
+       !state[2].handled.has("RECAL"));
+    ok('RECAL: refused BY NAME on board 2 - from the Mac, silence and "impossible here" look identical',
+       state[2].refused.has("RECAL"));
+    const hFlags = hLine >= 0 && guards[hLine] ? [...new Set(stackFlags(guards[hLine]))] : [];
+    const eFlags = eLine >= 0 && guards[eLine] ? [...new Set(stackFlags(guards[eLine]))] : [];
+    ok(`RECAL: both guards name BOARD_TOUCH_NEEDS_CAL and nothing else, so they name the CAPABILITY rather than the board [handler ${hFlags.join("+") || "none"} / refusal ${eFlags.join("+") || "none"}]`,
+       hFlags.length === 1 && hFlags[0] === "BOARD_TOUCH_NEEDS_CAL" &&
+       eFlags.length === 1 && eFlags[0] === "BOARD_TOUCH_NEEDS_CAL");
+  }
+
+  // ---- (3d) PAGE: ONE RANGE, DERIVED, AND NAMED IN ITS OWN REFUSAL -------
+  // PAGE is not in UNAVAILABLE_COMMANDS[] - both boards have it - but its
+  // out-of-range answer is the same rule this file exists for one level down. It
+  // used to have none: PAGE 9 reached openSettingsGroup(), whose constrain()
+  // delivered the last group, so a typo and a hit produced the same screenshot.
+  //
+  // AND THE BOUND IS THE THING MOST LIKELY TO GO STALE. The group set has been
+  // re-cut three times on this branch (seven, five, six), and the two boards
+  // numbered their pages differently until Task 3B - so both the derivation and the
+  // "same range on both boards" claim are asserted here rather than trusted.
+  {
+    const pAt = rawDispatch.indexOf('buf.startsWith("PAGE ")');
+    const pEnd = rawDispatch.indexOf("\n  } else if", pAt);
+    ok("the PAGE arm is located in the dispatch chain", pAt > 0 && pEnd > pAt);
+    if (pAt > 0 && pEnd > pAt) {
+      const arm = rawDispatch.slice(pAt, pEnd);
+      ok("PAGE's upper bound is DERIVED from SET_GROUP_COUNT, never written as a number - the group set has been re-cut three times on this branch",
+         /const int pgMax\s*=\s*SET_HOME\s*\+\s*SET_GROUP_COUNT\s*;/.test(arm));
+      ok("PAGE range-checks against that derived bound rather than letting openSettingsGroup()'s constrain() swallow the overflow",
+         /pg\s*<\s*SET_HOME\s*\|\|\s*pg\s*>\s*pgMax/.test(arm));
+      ok("PAGE's out-of-range refusal NAMES the range it checked against, and prints it from the same two terms it compared",
+         /PAGE refused:[^"]*outside PAGE %d\.\.%d/.test(arm) && /\bpg,\s*SET_HOME,\s*pgMax\b/.test(arm));
+      ok("PAGE refuses the wrong-tab case by name too, instead of the silent no-op it was",
+         /currentTab\s*!=\s*TAB_SETTINGS/.test(arm) && /PAGE refused:[^"]*live tab/.test(arm));
+      // String::toInt() answers 0 for anything it cannot parse, so a non-numeric
+      // argument opened HOME and said nothing while a numeric one out of range was
+      // refused - the quiet answer left on the EASIER mistake. The digits test must
+      // come before the conversion, or it is testing the conversion's own default.
+      const digitsAt = arm.search(/pgArg\[i\]\s*<\s*'0'/);
+      const convAt = arm.search(/pgArg\.toInt\(\)/);
+      ok("PAGE validates its argument is digits BEFORE converting, so \"PAGE foo\" is not read as PAGE 0",
+         digitsAt > 0 && convAt > digitsAt &&
+         /is not a page number - PAGE %d\.\.%d/.test(arm));
+      // The contiguity the derivation rests on, enforced by the compiler rather than
+      // by this comment: SET_GROUP_COUNT alone cannot see whether the ids run
+      // unbroken from SET_HOME, and openSettingsGroup() clamps to SET_DANGER.
+      ok("a static_assert ties SET_DANGER to SET_HOME + SET_GROUP_COUNT, so a non-contiguous group id fails the compile rather than the range check",
+         /static_assert\(\s*SET_DANGER\s*==\s*SET_HOME\s*\+\s*SET_GROUP_COUNT/.test(arm));
+      // THE ACCUMULATOR. Every refusal in this arm returns, and a return that does
+      // not clear `buf` leaves the refused text for the next bytes to be APPENDED
+      // to - one DETAIL 9 produced 63 refusal lines and ~100s of no payloads at all.
+      const rets = (arm.match(/\breturn\s*;/g) || []).length;
+      const clears = (arm.match(/buf\s*=\s*""\s*;/g) || []).length;
+      ok(`every early return in the PAGE arm clears buf first (${clears} clears / ${rets} returns)`,
+         rets > 0 && clears >= rets);
+    }
+    // ...and the range itself, PARSED from both headers rather than read off the
+    // source above, so "one range on both boards" is a measurement.
+    const ids = {};
+    for (const b of [1, 2]) {
+      ids[b] = {};
+      for (const m of hdr[b].matchAll(/\b(SET_[A-Z_]+)\s*=\s*(\d+)/g)) ids[b][m[1]] = Number(m[2]);
+      ok(`board ${b}: SET_HOME/SET_DANGER/SET_GROUP_COUNT all parse out of ${HDR[b]}`,
+         ["SET_HOME", "SET_DANGER", "SET_GROUP_COUNT"].every((k) => Number.isInteger(ids[b][k])));
+      ok(`board ${b}: the group ids are contiguous from SET_HOME, which is what makes SET_HOME + SET_GROUP_COUNT the last valid PAGE (${ids[b].SET_HOME} + ${ids[b].SET_GROUP_COUNT} == ${ids[b].SET_DANGER})`,
+         ids[b].SET_DANGER === ids[b].SET_HOME + ids[b].SET_GROUP_COUNT);
+    }
+    ok(`PAGE means the same thing on both boards: 0..${ids[1].SET_HOME + ids[1].SET_GROUP_COUNT} here and 0..${ids[2].SET_HOME + ids[2].SET_GROUP_COUNT} there`,
+       ids[1].SET_HOME === ids[2].SET_HOME && ids[1].SET_GROUP_COUNT === ids[2].SET_GROUP_COUNT);
+    // ...AND CLAUDE.md'S COPY OF THE NUMBER, which is the one place it is a bare
+    // numeral. The command table's PAGE row names SET_GROUP_COUNT for the range
+    // itself, so the range cannot go stale - but it quotes today's value once, for a
+    // reader who wants to know what to type without opening a header, and NOTHING
+    // PARSED THAT. The group set has been re-cut three times on this branch; a
+    // fourth would leave that numeral wrong with no assertion anywhere noticing,
+    // which is exactly the hazard the static_assert now defends against in code.
+    // board-baseline.mjs --doc-check binds four numbers in CLAUDE.md the same way
+    // and for the same reason. The phrase is fixed so this can find it.
+    const docM = /SET_GROUP_COUNT is (\d+) today/.exec(claudeMd);
+    ok(`CLAUDE.md's command table states SET_GROUP_COUNT's value in the parseable phrase this binds to ${docM ? "" : "[phrase not found - see the PAGE row]"}`,
+       docM != null);
+    if (docM)
+      ok(`CLAUDE.md's quoted SET_GROUP_COUNT (${docM[1]}) matches both headers (${ids[1].SET_GROUP_COUNT} / ${ids[2].SET_GROUP_COUNT})`,
+         Number(docM[1]) === ids[1].SET_GROUP_COUNT && Number(docM[1]) === ids[2].SET_GROUP_COUNT);
+    // And the range itself must be written as the CONSTANT, not as numbers: a row
+    // reading "PAGE 0..6" would satisfy the two assertions above and still be the
+    // transcription this is here to prevent.
+    ok("CLAUDE.md's PAGE row names the range by its constant (PAGE 0..SET_GROUP_COUNT), not by a numeral",
+       /`PAGE 0\.\.SET_GROUP_COUNT`/.test(claudeMd) && !/`PAGE 0\.\.\d/.test(claudeMd));
+  }
 
   // ---- (4) the causes ----------------------------------------------------
   const causeOf = {};
@@ -415,6 +653,7 @@ const realMain = stripComments("deckhand_display.ino");
 const realH1 = fs.readFileSync(`${DIR}/${HDR[1]}`, "utf8");
 const realHost = fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
   .replace(/^[ \t]*\/\/.*$/gm, "");
+const realClaudeMd = fs.readFileSync(`${DIR}/../../CLAUDE.md`, "utf8");
 // One arm of host/index.mjs's device-line handler, LOCATED by its own literal and
 // brace-matched, with the `[device/...]` log removed from it - i.e. the shape
 // 28795e3 fixed for BLEMTU, put back.
@@ -470,6 +709,38 @@ function weakenCondition(src, verb) {
   }
   if (d !== 0) return src;
   return `${src.slice(0, s0 + 4)}false && (${src.slice(s0 + 4, j)})${src.slice(j)}`;
+}
+// THE `#if` LINE THAT OPENS THE BLOCK A LITERAL SITS IN, and the `#endif` that
+// closes it - both LOCATED from the literal rather than quoted, for dropEntry's
+// reason: a fault that transcribes the guard it edits stops injecting the next time
+// the guard is reworded, and an injection that applies nothing leaves the property
+// it was proving unproven while the selftest still prints a pass.
+function guardSpan(src, lit) {
+  const at = src.indexOf(lit);
+  if (at < 0) return null;
+  const g0 = src.lastIndexOf("\n#if", at);
+  if (g0 < 0) return null;
+  const g1 = src.indexOf("\n", g0 + 1);
+  let depth = 1, i = g1, end = -1;
+  while (i < src.length && depth > 0) {
+    const nx = src.indexOf("\n#", i + 1);
+    if (nx < 0) break;
+    const line = src.slice(nx + 1, src.indexOf("\n", nx + 1));
+    if (/^#if/.test(line)) depth++;
+    else if (/^#endif/.test(line)) { depth--; if (!depth) end = nx; }
+    i = nx;
+  }
+  return end < 0 ? null : { g0: g0 + 1, g1, text: src.slice(g0 + 1, g1), end, endLine: src.indexOf("\n", end + 1) };
+}
+function rewriteGuard(src, lit, fn) {
+  const sp = guardSpan(src, lit);
+  if (!sp) return src;
+  return src.slice(0, sp.g0) + fn(sp.text) + src.slice(sp.g1);
+}
+function dropGuardedArm(src, lit) {
+  const sp = guardSpan(src, lit);
+  if (!sp) return src;
+  return src.slice(0, sp.g0) + src.slice(sp.endLine + 1);
 }
 const faults = [
   // ---- M1: the walker's BODY. This is the one the whole file exists for: an
@@ -531,6 +802,31 @@ const faults = [
     { h1: realH1.replace("#define BOARD_HISTORY_SCROLL 0", "const int BOARD_HISTORY_SCROLL = 0;") }],
   ["the refusal is printed to Serial, so a cable-less BLE session sees nothing",
     { main: realMain.replace("      sendLineToHost(out.c_str());", "      Serial.println(out);") }],
+  // ---- Task 5: RECAL, and the three ways its refusal can come undone ----
+  // The first two are caught by the blind cross-board sections; the third and
+  // fourth exist because those sections CANNOT see them, which is what (3b) and
+  // (3c) were added for.
+  ["RECAL's refusal entry is deleted, so board 2 answers a calibration it cannot run with silence",
+    { main: dropEntry(realMain, "RECAL") }],
+  ["RECAL's handler loses its guard, so board 2 handles it again with nothing behind it",
+    { main: rewriteGuard(realMain, '} else if (buf == "RECAL") {', () => "#if 1") }],
+  ["RECAL's refusal is guarded on a WIDER condition than the negation of its handler's - correct on today's two boards, wrong on any board that sets both flags",
+    { main: rewriteGuard(realMain, '{ "RECAL",', (g) => `${g} || BOARD_HISTORY_SCROLL`) }],
+  ["RECAL disappears entirely - handler and refusal deleted together, which every section that speaks only about verbs SOME board has is blind to",
+    { main: dropEntry(dropGuardedArm(realMain, '} else if (buf == "RECAL") {'), "RECAL") }],
+  // ---- Task 5: PAGE's bound ----
+  ["PAGE's bound is transcribed as a literal, so the next group re-cut leaves it stale",
+    { main: realMain.replace("const int pgMax = SET_HOME + SET_GROUP_COUNT;", "const int pgMax = 6;") }],
+  ["PAGE's out-of-range refusal stops naming the range it checked against",
+    { main: realMain.replace(/PAGE refused: %d is outside PAGE %d\.\.%d[^"]*/, "PAGE refused: out of range") }],
+  ["one board's group set is re-cut and the other's is not, so PAGE n means two different screens again",
+    { h1: realH1.replace(/const int SET_GROUP_COUNT = 6;/, "const int SET_GROUP_COUNT = 5;") }],
+  ["CLAUDE.md's quoted SET_GROUP_COUNT goes stale after a fourth re-cut of the group set",
+    { claudemd: realClaudeMd.replace(/SET_GROUP_COUNT is \d+ today/, "SET_GROUP_COUNT is 7 today") }],
+  ["CLAUDE.md's PAGE row goes back to transcribing the range as numbers",
+    { claudemd: realClaudeMd.replace(/`PAGE 0\.\.SET_GROUP_COUNT`/, "`PAGE 0..6`") }],
+  ["PAGE goes back to trusting String::toInt(), so \"PAGE foo\" silently means PAGE 0",
+    { main: realMain.replace(/\n\s*if \(pgArg\[i\][^\n]*\n/, "\n") }],
   // ---- m6: the CLASS the BLEMTU fix closed only one instance of ----
   ["the Mac's BLEMTU arm goes back to returning before it logs (28795e3, reverted)",
     { host: unlogArm(realHost, "BLEMTU ") }],
@@ -543,7 +839,8 @@ let caught = 0;
 for (const [name, over] of faults) {
   const unchanged = (over.main == null || over.main === realMain) &&
                     (over.h1 == null || over.h1 === realH1) &&
-                    (over.host == null || over.host === realHost);
+                    (over.host == null || over.host === realHost) &&
+                    (over.claudemd == null || over.claudemd === realClaudeMd);
   if (unchanged) { console.log(`  MISSED  ${name}  <- the injection did not apply (anchor moved)`); continue; }
   const r = run(over, true);
   if (r.failures.length) {

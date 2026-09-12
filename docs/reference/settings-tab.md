@@ -1,15 +1,335 @@
-# SETTINGS: board 2's HOME screen and six groups
+# SETTINGS: one HOME screen and six groups, on both boards
 
-> Extracted verbatim from CLAUDE.md. **The measurements are the point** - they were
-> taken on real hardware at a specific commit, so do not paraphrase or "tidy" them.
-> If you change the behaviour, change the number and say what you measured.
+> **The measurements are the point** - do not paraphrase or "tidy" them. If you change
+> the behaviour, change the number and say what you measured.
 
 Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay in
 [`CLAUDE.md`](../../CLAUDE.md).
 
+**This file has two halves and they are different vintages.** The section immediately
+below is what ships after the `settings-redesign` branch (2026-09-12). Everything
+under *THE 2026-09-06 RECORD* further down describes the shape that preceded it -
+board 2 alone, five groups, board 1 on a chevron pager - and is **kept and marked
+rather than deleted**, per this repo's rule: a described state that no longer exists
+costs the next reader either the time to disprove it or a no-op "fix", so entries
+that turned out wrong are corrected in place with a dated note beside them, never
+removed. Several of its findings name a CLASS rather than an instance and are still
+live; the corrections say which sentences are not.
+
 ---
 
+## WHAT SHIPS: SETTINGS after the settings-redesign branch, 2026-09-12
+
+**SIX GROUPS, ONE SURFACE, BOTH BOARDS: Device, Display, Sound, Pairing, Messages,
+Danger.** SETTINGS opens on a **HOME menu** of six cards - each carrying the group's
+name, a live summary of what is inside it, and a plain ASCII `>` - and tapping a row
+opens that group with a **back band** where the chevron pager used to be. There is no
+flag: `BOARD_SETTINGS_HOME` and `BOARD_SETTINGS_GROUPS` were scaffolding that existed
+for exactly two commits each and Task 4 deleted both, along with `drawPager()`,
+`SETTINGS_PAGES`, `gotoSettingsPage()`, the 45/55 band split, `drawConnRow()` and
+`renderMacLinkRows()`. Both binaries came out of that deletion **byte-identical**,
+which is the proof the preprocessor was already excluding what it removed.
+
+**THE FOURTH GROUP IS CALLED `Pairing`, AND THE NAME IS A DECISION RATHER THAN AN
+OVERSIGHT (RULING 23).** `settingsGroupTitle()` returns `"Pairing"` for `SET_PAIRING`;
+the design spec's
+five-group body called it `Macs`, and so did amendment 1's own group-set line. That
+rename belonged to the five-group design, where the group was gaining `RESET PAIRING`
+and being re-cut - **it stopped happening when Ruling 10 made that page untouched**,
+and the page stopping is why nobody noticed the name stopping. Renaming the code at the
+end of an 18-commit branch would cost compiled bytes and a re-baseline to satisfy a
+naming preference, so the name stays and the documents were corrected instead. This
+file said both names for eleven commits, including in its own unverified list. Do not
+re-propose the rename as a tidy-up; if it is ever wanted, it is one commit plus
+`--update 1` and `--update 2`.
+
+**THE ACCURATE CLAIM, because "one surface" is narrower than it sounds:** one
+implementation, one navigation, one group set, and one geometry SOURCE (each board's
+own header) - with board 2 additionally carrying six lines of explanation its panel
+has room for. See *what board 1 does not carry* below.
+
+### Why the destructive group survived, and why it is called Danger
+
+**THE FIVE-GROUP SET WAS PROVEN IMPOSSIBLE ON BOARD 1, by arithmetic rather than by
+taste.** The plan was to fold RESET PAIRING and POWER OFF into Pairing and Device and
+finish at five groups. Board 1's Pairing page **spends 216 of its 222px**: `P3_ANY_Y` 82
+plus `H_ROW` 40, `P3_LIST_Y` 126, four Mac rows at `P3_ROW_STEP` 44 ending at 298, in
+a page region of `PAGE_TOP` 80..302. RESET PAIRING needs caption 13 +
+`SET_CAP_STEP` 21 + `P2_BTN_H` 44 = **78px that do not exist**. Abutting the rows
+saves 12; deleting the ANY MAC row saves 44 *and deletes a real setting*; both
+together still leave it short; and capping the list at three slots breaks the
+four-Mac case, which is the only case the geometry has to survive.
+
+So the sixth group stayed and was renamed **Danger**, which is what it now is: MIC
+TEST left for Sound before this branch and CALIBRATE TOUCH left for board 1's Device
+group (RULING 12), so what remains is exactly the two controls that destroy state, on
+both boards. **Three things that bought, none of them consolation prizes:**
+
+- **The "destructive group LAST" rule `board_es3c35p.h` states is PRESERVED, not
+  reversed.** The five-group design knowingly contradicted it; this one does not
+  contradict any written rule.
+- Board 2's HOME **did not move** - it stays at the `58/10` six-row pitch.
+- Device regained the ~80px POWER OFF was occupying, which is what let the SoC
+  temperature have its own diagnostics line and **its warm/hot colour band back**.
+  `colorForDieTemp()` had been left uncalled on *both* boards, so no warm/hot signal
+  existed anywhere on the device.
+
+### Board 1's own derivation, and the 268-vs-222 distinction
+
+**HOME GETS MORE ROOM THAN A GROUP PAGE DOES, and that is not an inconsistency - it
+is what having no band means.** A group page runs `PAGE_TOP`..`contentBottom()`, which
+is **80..302 = 222px** on board 1 and 104..460 = 356px on board 2. HOME has no band
+over it, because the tab bar already says SETTINGS and a second title would be chrome
+repeating itself, so HOME runs `CONTENT_Y`..`contentBottom()` - **34..302 = 268px**
+here and 46..460 = 414px there. Reading 222 as HOME's budget is how a six-row pitch
+gets declared impossible when it is not.
+
+    HOME_Y0 + 6*HOME_ROW_H + 5*HOME_GAP + HOME_Y0_BOT == contentBottom()
+    38      + 6*42         + 5*2        + 2           == 302
+
+**42 is `TAP_MIN` + 2, and it is the ONLY row height in the whole solution space with
+any margin over the fingertip floor.** The space was searched and enumerated rather
+than nudged: under four floors (row >= `TAP_MIN`; gap >= `BORDER_CARD`; both pads >=
+`BORDER_CARD`; the row interior holding `T_HEAD + T_BODY + 2*BORDER_CARD` without
+shrinking a face) it holds **six (row height, gap) pairs and 46 four-tuples** - 42/2,
+41/3, 41/2, 40/4, 40/3, 40/2. `40/4` and `41/3` both close and both spend the margin
+on space *between* two cards. **The tie-break is STATED rather than implied: the row
+is the touch target and the gap is inert, and this panel is resistive.** The checker
+asserts the closing IDENTITY, not the number, which is what makes a row-height change
+fail there instead of silently eating the bottom row.
+
+**Board 2's own six-row space is 281 `(R, G)` pairs**, measured - so the uniqueness
+the spec once claimed for `58/10` was never there either, and board 1's
+search-and-tie-break treatment is the more rigorous of the two. The standard is:
+search the space, report the solutions, state the tie-break, and **never claim a
+uniqueness you have not computed.** A derivation that reports "one solution" without
+the enumeration behind it is the same defect as an assertion that cannot fail - it
+looks like proof and carries none.
+
+**One honest cost, recorded because nothing hides it: BOARD 1'S GROUPS CANNOT ALL
+START LEVEL.** Board 2's header states that every group starts level under the back
+band; on board 1 the Pairing group has to start at `PAGE_TOP + 2` to fit four rows, so
+there is a real jog as you move between groups. It is 2px and it has not been seen.
+
+### The DIAGNOSTICS compression, and what board 1 does not carry
+
+**ELEVEN FACTS BECAME SIX LINES UNDER ONE CAPTION ON BOARD 2.** They were the HOST
+card's four (payload, flush, uptime, live Macs), the About page's five (build date,
+build time, commit, board, BT MAC), the device's own name and the die temperature -
+a whole card plus a whole page, about 416px, for values nobody watches. They are now
+`DEV_DIAG_LINES` 6 lines at `DEV_DIAG_STEP` 18 from `DEV_DIAG_Y` 304, each composed
+by `devDiagLine()` into **ONE padded field** rather than two: both faces here are
+monospace, so the right column lands on an exact character cell without a second
+padded width to keep in step, and one opaque box cannot leave a seam down the middle
+the way two adjacent ones can.
+
+**Line `DEV_DIAG_TEMP_LINE` is ALONE on its line, and that is the whole reason the
+colour band could come back.** A line here is one padded field with one colour, so a
+temperature sharing a line with the flush figure would have coloured the flush figure
+by temperature too. The colour also **busts the text cache explicitly**, because
+`drawIfChanged` compares text only and `54.9 -> 55.0` is one tenth *and* the crossing
+into `COLOR_WARN`.
+
+Paying for the block took the two live cards from **112 to 70** each, and neither
+card lost a fact it was answering for: `deviceName, N paired` left CONNECTION (the
+name reads as one of the diagnostics; the paired COUNT belongs on Pairing, beside the
+Macs it counts), and the SoC temperature left POWER (the sensor is inside the package
+and cannot see the charger or the cell - it sat there only because that was the page
+with a card on it). **Two facts do not reach the glass at all and that is written
+down rather than implied:** eleven facts do not fit eight two-column slots, so the
+build TIME shares the last line with the date and the BT MAC takes a line of its own;
+both remain reachable over serial and in `WHOAMI`.
+
+**BOARD 1 CARRIES NO DIAGNOSTICS BLOCK AND DECLARES NONE OF ITS CONSTANTS**
+(`BOARD_DEVICE_DIAGNOSTICS` 0), because that board has a CH340 console in normal
+operation and these facts are a `screen` away, where board 2 has none. The guard is
+around the **definition** of `drawDeviceDiagnostics()` as well as its call site: an
+unguarded body would not merely draw nothing there, it would fail to compile on
+`DEV_DIAG_Y`. In its place board 1 carries **CALIBRATE TOUCH under a SETUP caption**
+(`DEV_CAL_CAP_Y` 236, `DEV_CAL_Y` 257, +44 = 301, `DEV_AIR_BOT` 1), which is where
+RULING 12 put it: it destroys nothing - it rewrites a touch mapping and keeps the old
+one if the run fails - so a group named for what cannot be undone was the wrong place
+for it, and moving it out is what leaves Danger holding exactly two verbs on both
+boards. Board 2 does not offer it at all: the controller is factory-aligned inside
+the ST77922, `runCalibration()` is not compiled there, and `RECAL` is **refused by
+name** rather than silently ignored.
+
+**`BOARD_SETTINGS_FITS_CAPTIONS` IS PERMANENT, AND IT IS NAMED FOR THE CAUSE.** Board
+1's settings pages are 222px against board 2's 356px, and that 134px is a physical
+fact about two panels that no refactor removes. Board 1's Display, Sound and Pairing
+groups want **46, 55 and 42 more rows** than they have, so board 1 draws **none of
+board 2's six section captions and hints**: "THEME" and the AUTO explanation on
+Display, "ALERTS"/"MICROPHONE" and the beep hint on Sound, "ANSWER PROMPTS FROM" and
+"PAIRED MACS" on Pairing. **Nothing regresses - board 1 never had them**; its combined
+DISPLAY & SOUND page was three stepper cards and a row of three third-width buttons
+with no captions at all. The convergence gives board 1 board 2's *controls*, its
+*grouping* and its *navigation*; it does not give it board 2's *prose*, and it
+cannot. The flag is named in the shape of `BOARD_HAS_MIC` and `BOARD_TOUCH_NEEDS_CAL`
+so the name carries WHY it exists rather than only what it gates. It and
+`BOARD_DEVICE_DIAGNOSTICS` are the two flags that survive this branch.
+
+### Board 1's destructive buttons came back above the fingertip floor
+
+**`P2_BTN_H` WENT 38 -> 44 ON BOARD 1, which is `H_BTN`, which is `TAP_MIN` + 4.**
+`board_e32r28t.h` had recorded 38 as deliberate, "because four buttons and a hint
+would not fit at 44" - a real constraint from the four-button ACTIONS page, which put
+this board's **destructive** controls 2px *under* its own fingertip floor. That page
+no longer exists: Danger carries TWO buttons. The redesign handed the height back
+rather than inheriting a workaround for a page it had deleted, and the header comment
+explaining the 38 was rewritten rather than left to rot. Board 1's Danger page at 44:
+caption 92 (ink 92..104), RESET PAIRING 113..156, POWER OFF 169..212, the hint at
+`P2_PWR_Y + P2_BTN_H + SP_3`, and `P2_AIR_BOT` 69 rows of **named** trailing air
+(174 on board 2 - both figures, deliberately, because a single number here is a
+number that becomes false the next time a flag moves, which is exactly what "174 rows
+of air" did the moment board 1 began compiling this page).
+
+**One shortfall remains and it is in the allowlist rather than hidden:** board 1's
+`P3_ROW_H` is 40, which is exactly `TAP_MIN` - zero margin, not under the floor.
+
+### NOTHING IN THIS BRANCH HAS BEEN ON THE GLASS
+
+> **CORRECTION, 2026-09-12 19:31-19:35 - THE HEADING ABOVE IS NO LONGER TRUE OF BOARD 2.**
+> It is kept rather than rewritten because it was true for all six tasks and for the whole
+> of the final review, which is the fact a reader of those commits needs. **Board 2
+> (`Deckhand-C114`) was flashed with `55cc817` after the branch was finished** and driven
+> through every group. The device's own DIAGNOSTICS block reports `55cc817` and
+> `Sep 12 2026 09:24:24`, which is the fix wave's verification compile, so the image on the
+> panel is the branch HEAD rather than a cached older build.
+>
+> **SETTLED, on board 2 only:** HOME's six rows with six live summaries, landing inside the
+> footer; DEVICE's two one-line cards and its six-line two-column DIAGNOSTICS block; DANGER's
+> caption, both severity spines and the wake hint, correctly reading `RESET to wake` because
+> `BOARD_HAS_TOUCH_SLEEP_WAKE` is 0 here; DISPLAY with **no** CALIBRATE TOUCH; PAIRING with
+> **both** section captions intact; MESSAGES; and **both palettes**. Roughly twenty commands
+> produced **zero refusals and zero errors**.
+>
+> **THE SEVERITY SPINE'S GREYSCALE CLAIM IS NOW MEASURED, and the bullet below saying it is
+> ARGUED is superseded.** The capture was converted to greyscale and the spine's luminance
+> read against the button interior it sits on:
+>
+> | control | spine | interior | contrast |
+> |---|---|---|---|
+> | RESET PAIRING | 162 | 24.6 | **5.64:1** |
+> | POWER OFF | 142 | 24.6 | **4.97:1** |
+>
+> Both clear the 3:1 floor for a non-text mark comfortably, so **the spine does survive
+> greyscale**. But the two spines are 162 against 142 - **1.14:1 against EACH OTHER** - so the
+> spine marks *"this destroys state"* without colour and **does NOT rank the two controls**.
+> That ranking is carried by POSITION (POWER OFF last, under `CANNOT BE UNDONE`), which is
+> what the design claimed and which survives greyscale for free. The instrument is three lines
+> of Pillow over a `SCREENSHOT` and is repeatable; the file said "there is no instrument in
+> this repo that tests a SHAPE", and for this particular shape there now is one.
+>
+> **The SoC temperature band has been seen** - `SoC 39.6 C` renders in its own colour on its
+> own line, so `colorForDieTemp()` is reached. One band of three; the warm and hot arms have
+> still never been rendered.
+>
+> **STILL UNVERIFIED, and the list below stands for all of it:** every touch path on both
+> boards (this was driven entirely through `PAGE`; the device has no remote tap); colour
+> FIDELITY on board 2, because `SCREENSHOT` reads the shadow framebuffer and everything above
+> vouches for what the renderer COMPOSED rather than for what the panel shows; and **the whole
+> of board 1**, which was not attached - its six-row HOME at 42px, its `P3_ROW_H` at exactly
+> `TAP_MIN`, its group jog, CALIBRATE TOUCH on its Device page, and `P2_BTN_H` at 44.
+>
+> **One observation, not a defect:** with `THEME light` live, HOME's Display summary still
+> reads `DARK`. `THEME` overrides the live palette without touching the stored `themeMode`,
+> which is documented, and the summary reads the SETTING. Correct, and mildly confusing while
+> the instrument is in use.
+
+**Stated plainly rather than implied: NO DEVICE WAS ATTACHED FOR ANY OF THE SIX
+TASKS.** `/dev/cu.usbserial-*` and `/dev/cu.usbmodem*` were both empty at the start
+of the session and no board was connected at any point. Every claim on this branch is
+**arithmetic, bitmaps and binaries**: `settings-geom-check.mjs` (1546 assertions,
+15 constant + 26 source selftest faults), `commands-check.mjs`, `geom-sweep.mjs`, the
+committed pixel-accurate mock (`docs/design/settings-redesign/`, 241 assertions bound
+to `board_es3c35p.h`), and the two board baselines. That is the right instrument for
+layout and the wrong one for colour, and it is no instrument at all for touch.
+
+**What remains unverified, specifically:**
+
+- **Every touch path**, on HOME and in all six groups, on both boards. The device
+  deliberately has no remote tap, so nothing in this repo can exercise one. `DETAIL`,
+  `PAGE` and `TAB` can put a surface on the glass; none of them can press it.
+- **The severity spine's greyscale claim.** It is ARGUED, not measured:
+  `palette-check.mjs` can test a colour PAIR for greyscale and colour-blind
+  separability, and **there is no instrument in this repo that tests a SHAPE**.
+- **The SoC temperature band's three colours** (`colorForDieTemp()`), which were
+  uncalled on both boards until this branch and have never been seen.
+- **Board 1's HOME at 42px rows**, and its `P3_ROW_H` at exactly `TAP_MIN` - the two
+  places where the arithmetic clears the floor by 2 and by 0.
+- **The board-1 group jog**: its Pairing group starts at `PAGE_TOP + 2` where the others
+  start level.
+- **Colour anywhere on board 2, even with a device attached.** `SCREENSHOT` reads the
+  **shadow framebuffer** - the same buffer the renderer just wrote - so a capture is
+  correct by construction even when the panel is wrong. `COLORTEST` is the instrument
+  for colour and **a person is the authority**. This bullet is complete **for board 2**
+  and says nothing about board 1; see the theme bullet below, which is a different kind
+  of unverified.
+- **Board 1's `HOME_GAP` is 2 - exactly `BORDER_CARD`, one full background row - and
+  whether six cards that close together still READ as six cards has never been seen.**
+  `board_e32r28t.h` records the constant as "the floor: one full background row", and
+  Task 3B's implementer raised it at the time. **The 42px-rows bullet above does not
+  cover this**, because the two claims are different in kind: that one is a TOUCH claim
+  (the row clears the fingertip floor by 2) and this one is a LEGIBILITY claim. Every
+  row can clear the floor and the list can still read as one undifferentiated block.
+  Nothing in this repo can test it - a geometry checker asserts the gap is 2, which is
+  the thing in question - and a person has not looked.
+- **NEITHER THEME HAS BEEN RENDERED ON BOARD 1, AND THAT VERIFICATION IS AVAILABLE,
+  CHEAP AND SIMPLY NOT DONE.** It is worth separating the two kinds of unverified on
+  this list, because a reader deserves to know which one each item is. Most items here
+  are unverified because no instrument in this repo CAN settle them: touch has no remote
+  tap, the severity spine is a shape and nothing tests a shape, colour on board 2 is
+  defeated by the shadow framebuffer. **Board 1 is not in that class.** `SCREENSHOT`
+  there reads a real TFT_eSPI panel rather than a shadow of it, so a capture on board 1
+  *can* settle colour; it costs about 18 seconds, and `THEME dark` / `THEME light`
+  drives both palettes from the Mac with no reflash. The spec's own verification section
+  lists exactly that step. So the six new group pages have never been seen in either
+  palette on the one board that could have shown them - **undone, not impossible**,
+  which is precisely the "a bug someone will believe was checked" shape this list exists
+  to prevent. Board 2's pages are unverified for colour in the other, harder sense.
+
+The previous SETTINGS redesign shipped with nothing on the glass and said so. So does
+this one.
+
+---
+
+## THE 2026-09-06 RECORD: board 2's HOME and five groups, board 1 on a chevron pager
+
+> **SUPERSEDED 2026-09-12 by the section above.** Kept and marked rather than deleted.
+> The numbered findings at the end of it name CLASSES and are still live; the
+> narrative in front of them describes a shape that no longer exists. The specific
+> sentences that are now false are corrected in place below, each with a dated note.
+> Read the corrections - do not "fix" the paragraphs they annotate.
+
 #### SETTINGS on board 2: a HOME screen and five groups, where board 1 keeps its chevron pager
+
+> **THE CORRECTIONS, 2026-09-12.** Every sentence below that is now false, named once
+> here so a reader meets the list before the narrative. The paragraphs themselves are
+> left standing - correcting a description in place means annotating it, not rewriting
+> it until the record of what was believed disappears.
+>
+> | what this half says | what is true after settings-redesign |
+> |---|---|
+> | board 1 keeps a chevron pager, five pages | **both boards** open on HOME; `drawPager()`, `SETTINGS_PAGES`, `gotoSettingsPage()` and the 45/55 split are **deleted** |
+> | five groups: Status, Display, Sound, Pairing, Actions | **six**: Device, Display, Sound, Pairing, Messages, Danger. Status became **Device**; Actions became **Danger** |
+> | the guard is `BOARD_SETTINGS_HOME`, 1 / 0 | **there is no guard.** It and `BOARD_SETTINGS_GROUPS` were scaffolding; Task 4 deleted both and both binaries came out byte-identical |
+> | `SET_HOME` 0 and the five groups 1..5; `SET_STATUS`..`SET_ACTIONS` | `SET_DEVICE`..`SET_DANGER` = 1..6, `SET_GROUP_COUNT` 6, with a `static_assert` tying `SET_DANGER` to it |
+> | HOME's pitch `54 + 350 + 48 + 8 = 460` for five rows | six rows at `58/10`: `54 + 6*58 + 5*10 + 8 = 460` on board 2, `38 + 6*42 + 5*2 + 2 = 302` on board 1 |
+> | `renderMacLinkRows()` is board 1's alone now | **deleted** in Task 4, along with `drawConnRow()` |
+> | ACTIONS has three buttons, `SETUP` and `CANNOT BE UNDONE`, `P2_SECTION_GAP` | Danger has **two**, one caption, no `SETUP` - CALIBRATE TOUCH is on board 1's **Device** group (RULING 12) and board 2 does not offer it at all |
+> | `P2_MIC_Y` does not exist on board 2 | still true, and `P2_CAL_Y`, `P2_SETUP_CAP_Y` and `P2_HINT_Y` do not either |
+> | `--selftest` injects **two** faults | **15 constant faults, one child process each**, plus 26 source faults. Two faults sharing a process is the defect Task 3B found four instances of |
+> | `settings-geom-check.mjs` went 990 -> 1700-odd lines | 1546 assertions today; **run it for the number** rather than reading one here |
+> | the mock asserts **87** shared constants, four before-picture screens | **103** constants and **241** assertions over **fifteen** screens, in three columns, with HOME's names parsed from `settingsGroupTitle()` too |
+> | COST: board 2 992,122 -> 993,814; board 1 `0cc2e77b...` / 1,387,200 | those numbers predate two whole branches. **Both boards move on this branch and both are re-baselined** - board 1 `17569b48...` / 1,419,408, board 2 `0fea08f5...` / 1,064,304. `node firmware/board-baseline.mjs --doc-check` binds CLAUDE.md to them |
+> | "no device was attached for any of the **five** tasks" | still true, and now **six** tasks. The full unverified list is in the as-shipped section above |
+>
+> **What is NOT corrected, because it is still true:** the five numbered review
+> findings, the sixth whole-branch finding (`renderHostsPage()` drawing a control into
+> chrome that did not exist), the `BOARD_HAS_MIC` stale-comment paragraph, and the
+> severity spine's reasoning. Those name CLASSES, and every one of them recurred on
+> the settings-redesign branch.
+
 
 Board 1 keeps its prev/next pager (**five** pages now — see the MESSAGES note at the foot). Board 2 opens SETTINGS on **HOME** —
 five cards, one per group (Status, Display, Sound, Pairing, Actions), each carrying the group's
@@ -179,6 +499,10 @@ and every previous instance of it was. The other two live groups were audited ag
 rule and are safe by construction: Status draws exactly three cards and HOME exactly
 `SET_GROUP_COUNT` rows, neither derived from anything that can move at runtime.
 
+> **CORRECTED 2026-09-12: the counts here are stale (103 constants, 241 assertions,
+> fifteen screens) and the mock now draws what SHIPS. The argument is unchanged and
+> was extended - the row NAMES are parsed out of `settingsGroupTitle()` too.**
+
 **AND THE MOCK IS BOUND TO THE HEADER NOW.** `docs/design/settings-redesign/check.mjs` checked the
 PICTURE — ASCII-ness, panel bounds, footer clearance — against a hand-transcribed `K` table nobody
 compared to `board_es3c35p.h`. A committed spec whose numbers can drift while it still reports
@@ -190,12 +514,18 @@ entry there must actually DIFFER from what ships, so a live constant cannot be p
 escape the bind. Proven by injection: `SET_CAP_STEP` 24 → 25 in the header fails 15 assertions by
 name, all the way down the derivation chain.
 
+> **CORRECTED 2026-09-12: every figure in this paragraph is two branches stale.** See
+> the corrections table at the head of this half; `--doc-check` binds today's.
+
 **COST, MEASURED.** Board 2 **+1,696 bytes of flash and +296 RAM** across the whole branch
 (992,122 / 65,604 → 993,814 / 65,900) — the final fix round gave 160 bytes back, mostly by routing
 all seven group captions through one `drawGroupCaption()` instead of six inline copies of the same
 four lines. **Board 1 is `UNCHANGED` at every commit** —
 `0cc2e77b66fb6947...`, size 1,387,200 — which is the only reason the scoping is what it is: every
 shared-code change is an `#if BOARD_SETTINGS_HOME` around text board 1 never sees.
+
+> **STILL TRUE, and truer: the settings-redesign branch also put nothing on the glass,
+> across six tasks. The specific list is in the as-shipped section above.**
 
 **WHAT IS NOT VERIFIED, stated plainly. NOTHING IN THIS BRANCH HAS BEEN ON THE GLASS** — no device
 was attached for any of the five tasks. The evidence is the three geometry checkers, the sweep, the
@@ -218,6 +548,17 @@ MAC does with what the panel sends** — so it is the first setting on the devic
 channel off it at all. It chooses the `priority` on the session-inbox frame
 (`now` | `next` | `later`, default `next`), travels as `MSGPRI <word>`, and is stored in NVS
 under `msgpri` alongside `theme`.
+
+> **CORRECTED 2026-09-12.** Board 1 no longer has a pager, so "gained a fifth page,
+> which costs one `titles[]` entry and one pager dot" describes machinery that is
+> deleted: `titles[]` went in Task 3A (the pager was made to draw
+> `settingsGroupTitle()` instead, so there is one table rather than two) and
+> `drawPager()` itself in Task 4. **MESSAGES is the fifth of SIX GROUPS on both
+> boards now**, reached from HOME in one tap. The page's own geometry - three
+> `uiListRow`s, the hint, and the NAMED trailing air - is unchanged and everything
+> else in this section still holds. Board 2's "Measured on both boards' glass"
+> below refers to the 2026-09-06 work; nothing on the settings-redesign branch
+> reached a device.
 
 **It is a WHOLE PAGE on both boards, and that is arithmetic rather than taste.** Board 1's page
 region is `PAGE_TOP(80)..contentBottom(302)` = 222px and not one of the four existing pages has

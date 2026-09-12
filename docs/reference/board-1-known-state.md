@@ -88,25 +88,63 @@ automatically; `KB_PEEK_LINES` is a HAND-WRITTEN header constant and does not. M
 silently.** Today's 13 reproduces from the same formula at the old height, which is what makes
 the formula the right one. Board 2's `KB_ROWS_Y` did not move, so its 15 stands.
 
-**THE `KNOWN` ALLOWLISTS ARE THE BOARD-1 BACKLOG, AND THIS IS THE RECONCILED INVENTORY** (run the
-checkers for the live count — these are what they hold at the close of `compose-surface`):
+**THE `KNOWN` ALLOWLISTS ARE THE BOARD-1 BACKLOG, AND THIS IS THE RECONCILED INVENTORY.**
 
-| checker | `KNOWN[1]` | `KNOWN[2]` |
-|---|---|---|
-| `usage-geom-check.mjs` | 3 clear-box overlaps (`-2`/`-3`/`-1`), as `KNOWN_OVERLAPS` | empty |
-| `sessions-geom-check.mjs` | **8** (9 tolerations - one entry is reached at two sites) | empty |
-| `settings-geom-check.mjs` | **11** | empty |
+| checker | `KNOWN[1]` | `KNOWN[2]` | how this number is kept |
+|---|---|---|---|
+| `usage-geom-check.mjs` | 3 clear-box overlaps (`-2`/`-3`/`-1`), as `KNOWN_OVERLAPS` | empty | **TRANSCRIBED**, taken 2026-09-12 |
+| `sessions-geom-check.mjs` | **8** (9 tolerations - one entry is reached at two sites) | empty | **TRANSCRIBED**, taken 2026-09-12 |
+| `settings-geom-check.mjs` | **9** | empty | **PARSED** - `settings-geom-check.mjs` reads this row |
+
+**THE SETTINGS ROW IS PARSED NOW, AND THAT IS RULING 22's ANSWER TO ITS OWN THIRD OCCURRENCE.**
+That cell has been wrong twice for the same reason - it said 10 while the checker held 11 (corrected
+2026-09-05, whose correction note already said "the count was transcribed rather than parsed, which
+is the checkers' own rule arriving on the prose side of it"), and then said 11 while the
+settings-redesign branch took it to 9. A third hand correction would be the same defect a third
+time, so `settings-geom-check.mjs` binds it: it parses this row, anchored on its own filename so a
+reflowed table cannot silently stop the check, and **fails by name** when the figure disagrees with
+`KNOWN[1].length`. Proven on the stale text before it was fixed —
+`FAIL board-1-known-state.md says settings-geom-check holds 11 board-1 allowlist entries; KNOWN[1] holds 9`.
+
+**THE OTHER TWO ROWS ARE TRANSCRIPTIONS AND SAY SO, WHICH IS THE OTHER HALF OF THE SAME RULE:** a
+number is either parsed or it states out loud that it is not, and when it was taken. They were read
+off the checkers' own summary lines on 2026-09-12 and are not bound to anything. Re-derive them with
+`node firmware/deckhand_display/{usage,sessions}-geom-check.mjs` and read the last line. They were
+left unbound deliberately rather than overlooked: reading two other checkers' source from inside
+`settings-geom-check.mjs` would couple three files to make one sentence true, and `usage`'s
+allowlist is not even the same shape - it is keyed by overlapping PAIR rather than by message, so
+"3" is a count of a different kind of thing from the other two.
 
 `sessions`: prompt/path wrapping (2 lines holding 62 of 100 and 62 of 64 chars), the ask badge
 row at +27 inside a +28 header band, the ask option 32px against `TAP_MIN` 40, the 4px option
 gap, the voice card's 12px label step and its 6 lines holding 198 of 200 transcript chars, and
-the 28px chip tap zone. `settings`: the 34px pager key, the history chip's 40/32 widths and its
+the 28px chip tap zone. `settings`: the history chip's 40/32 widths and its
 25px tap band, the 16px scrubber band, the chip tap band ending 24 above the rule, `KB_COLS` 34
 against a measured 33 and the 205-in-204px last-character overrun, the reader's 36 against a
-measured 35, the history empty-state y, `DROW_BATT_VAL_DY`'s 4px stagger, and the stepper's `-1`
+measured 35, the history empty-state y, and the stepper's `-1`
 label-to-value gap. (**CORRECTED 2026-09-05:** this list said `settings` held **10** and omitted
 `DROW_BATT_VAL_DY`. It holds 11, which is what the checker prints - the count was transcribed
 rather than parsed, which is the checkers' own rule arriving on the prose side of it.)
+
+> **CORRECTED AGAIN, settings-redesign Task 6, 2026-09-12: the `settings` list above held ELEVEN
+> and now holds NINE, and the two that left are named here rather than silently dropped.**
+>
+> - **"pager key 34px tall >= `TAP_MIN` 40"** excused `drawPager()`'s DRAWN prev/next key. Both
+>   boards navigate SETTINGS from a HOME menu since Task 3B and Task 4 deleted `drawPager()`
+>   outright, so the control the entry excused does not exist. What replaced it is not a smaller
+>   shortfall but none at all: the back band holds ONE key and the WHOLE band is the tap target
+>   (`CONTENT_Y..PAGE_TOP` = `PAGER_H + 4`), which clears the floor on both boards - 46 >= 40 here,
+>   58 >= 46 there.
+> - **"`DROW_BATT_VAL_DY` 4 puts the reading on the Battery label's own baseline"** documented a
+>   4px stagger on the pre-Task-3A page 0 DEVICE card. Neither board has drawn that card since Task
+>   3A and Task 4 deleted its code and its assertion block together.
+>
+> **Both entries were deleted by the commits that removed what they excused, and `checkKnownUsed()`
+> is what made that non-optional:** it FAILS BY NAME when an allowlist entry excuses nothing on a
+> run, so the pager entry failed on the first run after its assertion went. That is the point of it
+> - a permission for a failure that no longer happens is not documentation, it is a trap for
+> whoever reintroduces that wording. The paragraph above is kept and marked rather than rewritten,
+> per this file's own rule, so a reader who remembers eleven can see which two left and why.
 
 **BYTE-IDENTITY JUSTIFICATIONS REMAINING IN THE THREE ALLOWLISTS: ZERO, from eleven.** Five of
 those defects were fixed outright and the rest kept with TRUE arithmetic in place of the retired
@@ -210,6 +248,18 @@ place rather than deleted**, because the only thing worse than an unrecorded gap
   file's own "never offer a control that cannot work" rule it arguably should not be — that is a
   real open question, listed here rather than settled — but the mock the user approved carries the
   button, so it is their call and not a fix to make in passing.
+
+  > **SETTLED, AND THE WHOLE PARAGRAPH ABOVE IS NOW HISTORY (settings-redesign, Task 5,
+  > 2026-09-12).** Kept and marked rather than deleted, per this file's own rule. The user's
+  > answer to the open question was to drop the control: the approved six-group mock carries no
+  > CALIBRATE TOUCH on board 2. So on that board the button is gone, its hit test is gone, both
+  > `CFM_RECAL` arms are behind `#if BOARD_TOUCH_NEEDS_CAL`, the `#else` dialog is deleted (a
+  > dialog explaining that a control does nothing describes a control that no longer exists),
+  > `runCalibration()` is not compiled at all, and `RECAL` is refused BY NAME out of
+  > `UNAVAILABLE_COMMANDS[]`. **The board-conditional dialog this entry was written to celebrate
+  > no longer exists on either arm.** THE ENTRY ITSELF THEN BECAME AN INSTANCE OF THE CLASS IT
+  > SITS UNDER — it was found by the mechanical sweep described in that task's report, not by
+  > anybody reading it.
 
 **TWO SHARED-CODE BUGS WERE FIXED DELIBERATELY, and both are the same lesson in different
 clothes.** Board 1's binary moved for each, which is why the byte-identity check is now
