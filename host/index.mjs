@@ -1531,6 +1531,23 @@ function histFlatten(v, max = HIST_PREVIEW_CAP) {
 // present them. What is removed is markdown that carries no meaning without a
 // bold face - `**`, `__` and inline backticks - and only OUTSIDE fenced code,
 // where those characters are part of the program.
+
+// A LINK THAT CANNOT BE FOLLOWED STILL HAS TO SAY IT EXISTED. Collapsing
+// `[text](url)` to `text` destroys that fact silently, and from the Mac silence
+// and "there was never a link here" are indistinguishable. One ASCII character,
+// inside Spleen's range, is the whole cost. Tapping it is Option D.
+const SCROLL_LINK_MARK = "~";
+// A bare URL has no space in it, so the device's word-wrap gives up and hard-cuts
+// it mid-token at column 34. Shortened here instead: the host and the tail are
+// what identify it, and the middle never survived the lane anyway.
+function histShortUrl(u) {
+  const b = u.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  if (b.length <= 28) return b;
+  const p = b.split("/");
+  if (p.length < 3) return b.slice(0, 25) + "...";
+  return p[0] + "/.../" + p[p.length - 1];
+}
+
 function histBlockText(v, max = HIST_FULL_CAP) {
   const lines = toAscii(v).replace(/\r\n?/g, "\n").split("\n");
   const out = [];
@@ -1574,6 +1591,11 @@ function histBlockText(v, max = HIST_FULL_CAP) {
       // glob is not emphasis.
       const spans = [];
       t = t.replace(/`([^`\n]+)`/g, (_, inner) => `\u0001${spans.push(inner) - 1}\u0002`);
+      // AFTER the spans are protected, so a URL inside a code span is left exactly
+      // as written, and BEFORE the emphasis strip, so an asterisk inside a URL is
+      // not read as a marker.
+      t = t.replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, (_, txt) => txt + SCROLL_LINK_MARK);
+      t = t.replace(/https?:\/\/[^\s)\]]+/g, (u) => histShortUrl(u) + SCROLL_LINK_MARK);
       // DOUBLE MARKERS ARE STRIPPED OUTRIGHT, not matched as pairs. A pair regex
       // needs both markers on ONE line, and markdown bold routinely spans a line
       // break in the source - which is why `**The counter reports...` was still

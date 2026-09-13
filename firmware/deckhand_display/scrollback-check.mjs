@@ -328,6 +328,10 @@ if (SELFTEST) {
     HOSTSRC = HOSTSRC.replace(/out\.push\("```" \+ lang\)/, 'out.push("```")');
   if (hf === "backtick-restore")
     HOSTSRC = HOSTSRC.replace(/=> "`" \+ spans\[\+i\] \+ "`"/, "=> spans[+i]");
+  if (hf === "no-link-collapse")
+    HOSTSRC = HOSTSRC.replace(/\+ SCROLL_LINK_MARK/g, "");
+  if (hf === "no-url-shorten")
+    HOSTSRC = HOSTSRC.replace(/function histShortUrl\(/, "function histShortUrlDisabled(");
 }
 
 // A CHECKER MUST PARSE THE CONSTANT IT CERTIFIES, NEVER TRANSCRIBE IT - and this
@@ -580,6 +584,17 @@ s(/spans\[\+i\]\s*\+\s*"`"/.test(hbtBody) || /"`"\s*\+\s*spans\[\+i\]/.test(hbtB
   "structural: an inline code span is restored WITH its backticks - there is no bold " +
   "face on this board, so stripping them leaves nothing in their place");
 
+s(/SCROLL_LINK_MARK/.test(hbtBody),
+  "structural: link markdown is collapsed inside histBlockText - [text](url) whole spends " +
+  "two of 27 rows on brackets and a path");
+s(/function histShortUrl\(/.test(HOSTSRC),
+  "structural: a bare URL is shortened by its own named function - the device's word-wrap " +
+  "gives up on a spaceless token and hard-cuts it mid-path");
+const mark = /const SCROLL_LINK_MARK = "(.)"/.exec(HOSTSRC);
+s(mark != null && mark[1].charCodeAt(0) >= 0x20 && mark[1].charCodeAt(0) <= 0x7e,
+  "structural: the link mark is inside Spleen's 0x20..0x7E - an out-of-range mark draws " +
+  "nothing AND advances nothing");
+
 console.log(`\n${mirror} mirror + ${structural} structural assertions, ${fail} failures`);
 if (SELFTEST) {
   const WANT = {
@@ -598,6 +613,8 @@ if (SELFTEST) {
     "host-dropack": /result is bound to a name, not awaited and dropped/,
     "no-lang": /an OPENING fence keeps its info string/,
     "backtick-restore": /an inline code span is restored WITH its backticks/,
+    "no-link-collapse": /link markdown is collapsed inside histBlockText/,
+    "no-url-shorten": /a bare URL is shortened by its own named function/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }
