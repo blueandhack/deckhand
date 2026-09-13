@@ -92,8 +92,8 @@ if (SELFTEST) {
 // already records for a mirror: it proves the ALGORITHM and binds nothing, so it
 // can agree with itself while the device does something else.
 function walk(t, cols) {
-  const rows = [];                       // {text, code, cont, head}
-  if (!t.length) return [{ text: "", code: false, cont: false, head: false }];
+  const rows = [];                       // {text, code, cont, head, ind}
+  if (!t.length) return [{ text: "", code: false, cont: false, head: false, ind: 0 }];
   let pos = 0, inCode = false;
   while (pos < t.length) {
     let eol = pos;
@@ -111,24 +111,35 @@ function walk(t, cols) {
       while (off < srcLen && t[pos + off] === " ") off++;
     }
     let q = pos + off, rem = srcLen - off, first = true;
+    // THE HANGING INDENT, decided once per source line, mirroring scrollWalk's
+    // own hang: code hangs to its own leading whitespace plus one, capped at
+    // SCROLL_HANG_MAX.
+    let hang = 0;
+    if (inCode) {
+      let lead = 0;
+      while (lead < srcLen && t[pos + lead] === " ") lead++;
+      hang = lead + 1;
+    }
+    if (hang > c.SCROLL_HANG_MAX) hang = c.SCROLL_HANG_MAX;
     do {
+      const room = cols - (first ? 0 : hang);
       let n;
-      if (rem <= cols) n = rem;
-      else if (inCode) n = cols;
+      if (rem <= room) n = rem;
+      else if (inCode) n = room;
       else {
-        n = cols;
+        n = room;
         let b = n;
-        while (b > Math.floor(cols / 2) && t[q + b - 1] !== " ") b--;
-        if (b > Math.floor(cols / 2)) n = b;
+        while (b > Math.floor(room / 2) && t[q + b - 1] !== " ") b--;
+        if (b > Math.floor(room / 2)) n = b;
       }
       if (n <= 0 && rem > 0) n = 1;
-      rows.push({ text: t.slice(q, q + n), code: inCode, cont: !first, head });
+      rows.push({ text: t.slice(q, q + n), code: inCode, cont: !first, head, ind: first ? 0 : hang });
       q += n; rem -= n; first = false;
       if (!inCode) while (rem > 0 && t[q] === " ") { q++; rem--; }
     } while (rem > 0);
     pos = eol < t.length ? eol + 1 : eol;
   }
-  return rows.length ? rows : [{ text: "", code: false, cont: false, head: false }];
+  return rows.length ? rows : [{ text: "", code: false, cont: false, head: false, ind: 0 }];
 }
 const wrapLines = (t, cols) => walk(t, cols).length;
 
@@ -169,6 +180,11 @@ m(walk("## Title", COLS)[0].text === "Title", "mirror: the heading's markers are
   m(proseHard[0].text.length === COLS,
     "mirror: prose hard-breaks when the only space is before cols/2 - never stalls");
 }
+
+m(walk("```\n  int b = n;\n```", 10)[1].ind === 3,
+  "mirror: a wrapped code row hangs to its own indent + 1");
+m(walk("```\n" + " ".repeat(40) + "x".repeat(40) + "\n```", COLS)[1].ind === c.SCROLL_HANG_MAX,
+  "mirror: a deeply indented line is capped at SCROLL_HANG_MAX");
 
 // The index: lineFirst accumulates lines PLUS the spacer, and a result tucks
 // against its own call with no spacer - the pair reads as one unit.
@@ -230,6 +246,23 @@ s(walkFn != null, "structural: scrollWalk is findable");
 s(/int\* indent/.test(walkFn ? walkFn[0] : ""),
   "structural: scrollWalk reports the column its row starts at - a renderer that cannot " +
   "ask cannot draw a hanging indent");
+
+// THE HANGING INDENT (Task 6). A wrapped code row restarts under its own
+// source indent, or it reads as a real line at column 0 - which is most of
+// how code is misread.
+s(c.SCROLL_HANG_MAX !== undefined, "structural: the hanging-indent cap is a named constant");
+s(c.SCROLL_HANG_MAX > 0 && c.SCROLL_HANG_MAX < c.SCROLL_COLS / 2,
+  `structural: SCROLL_HANG_MAX (${c.SCROLL_HANG_MAX}) leaves over half the lane for text - ` +
+  "past that the wrap itself becomes the unreadable thing");
+const walkBody = walkFn ? walkFn[0] : "";
+s(/hang = lead \+ 1;/.test(walkBody),
+  "structural: a wrapped code row hangs to its source line's own indent plus one");
+s(/if \(hang > SCROLL_HANG_MAX\) hang = SCROLL_HANG_MAX;/.test(walkBody),
+  "structural: the hang is capped by the named constant, not by a literal");
+s(/drawString\(buf, SCROLL_TXT_X \+ li \* TEXT_ADV, y\)/.test(INO),
+  "structural: the renderer DRAWS at the column scrollWalk reported - a hang that is " +
+  "computed and not drawn changes line counts and nothing else");
+
 // And ONE rule, not two: the counter must delegate to the same walker the
 // renderer drives, or the index says one thing and the screen draws another.
 const wlBody = body(INO, "int scrollWrapLines(const char* t, int cols)", "scrollback.ino");

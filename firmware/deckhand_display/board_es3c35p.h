@@ -3119,6 +3119,12 @@ const int READER_TAP_1 = 108, READER_TAP_2 = 210;
 const int SCROLL_GUT_X     = 12;
 const int SCROLL_TXT_X     = SCROLL_GUT_X + 2 * TEXT_ADV;
 const int SCROLL_COLS      = 34;
+// THE HANGING INDENT'S CEILING. A wrapped code row restarts under its own source
+// indent so it cannot be misread as a real line at that depth - but a line nested
+// six levels deep would leave ten columns for text, and at that point the wrap is
+// the unreadable thing rather than the fix. Deep code keeps 12 columns of shape
+// and loses the rest, which is the honest trade at 34 columns.
+const int SCROLL_HANG_MAX = 12;
 const int SCROLL_RAIL_AIR  = 6;
 const int SCROLL_RAIL_X    = SCROLL_TXT_X + SCROLL_COLS * TEXT_ADV + SCROLL_RAIL_AIR;
 // 6, not 4: at 4px the rail was easy to miss entirely - reported as there being

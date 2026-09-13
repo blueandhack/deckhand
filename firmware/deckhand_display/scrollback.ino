@@ -112,15 +112,26 @@ static int scrollWalk(const char* t, int cols, int want,
 
     int q = pos + off, rem = srcLen - off;
     bool first = true;
+    // THE HANGING INDENT, decided ONCE per source line and applied to every row
+    // after the first. Code hangs to its own leading whitespace plus one, so a
+    // wrapped row cannot be read as a real line at that depth.
+    int hang = 0;
+    if (inCode) {
+      int lead = 0;
+      while (lead < srcLen && t[pos + lead] == ' ') lead++;
+      hang = lead + 1;
+    }
+    if (hang > SCROLL_HANG_MAX) hang = SCROLL_HANG_MAX;
     do {
+      const int room = cols - (first ? 0 : hang);
       int n;
-      if (rem <= cols) n = rem;
-      else if (inCode) n = cols;                // HARD
+      if (rem <= room) n = rem;
+      else if (inCode) n = room;                // HARD
       else {
-        n = cols;
+        n = room;
         int b = n;
-        while (b > cols / 2 && t[q + b - 1] != ' ') b--;
-        if (b > cols / 2) n = b;                // word-friendly, else fall back
+        while (b > room / 2 && t[q + b - 1] != ' ') b--;
+        if (b > room / 2) n = b;                // word-friendly, else fall back
       }
       if (n <= 0 && rem > 0) n = 1;             // never stall
       if (drawn == want) {
@@ -132,7 +143,7 @@ static int scrollWalk(const char* t, int cols, int want,
         if (flags) *flags = (inCode ? SCROLL_F_CODE : 0)
                           | (first ? 0 : SCROLL_F_CONT)
                           | (head ? SCROLL_F_HEAD : 0);
-        if (indent) *indent = 0;
+        if (indent) *indent = first ? 0 : hang;
         if (found) *found = true;
         return drawn + 1;                       // caller only reads this when counting
       }
@@ -613,7 +624,7 @@ void scrollDrawBody() {
     // own # markers were stripped by the walker.
     tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
     tft.setTextDatum(TL_DATUM);
-    tft.drawString(buf, SCROLL_TXT_X, y);
+    tft.drawString(buf, SCROLL_TXT_X + li * TEXT_ADV, y);
   }
 
   // NEW-BELOW BADGE, over the bottom row and only while the view is held away
@@ -780,7 +791,7 @@ void scrollDrawBand(int shift) {
     // own # markers were stripped by the walker.
     tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
     tft.setTextDatum(TL_DATUM);
-    tft.drawString(buf, SCROLL_TXT_X, y);
+    tft.drawString(buf, SCROLL_TXT_X + li * TEXT_ADV, y);
   }
 
   // The rail, repainted WHOLE - the shift moved the viewport's fraction of
