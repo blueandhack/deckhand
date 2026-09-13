@@ -643,9 +643,15 @@ void scrollDrawBody() {
     // text-width: a ragged right edge would not read as a block.
     const bool isCode = (lf & SCROLL_F_CODE) != 0;
     const uint16_t bg = isCode ? COLOR_CARD : COLOR_BG;
-    if (isCode)
+    if (isCode) {
       tft.fillRect(SCROLL_GUT_X, y, SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_GUT_X,
                    CODE_LINE_H, COLOR_CARD);
+      // THE BLOCK'S OWN EDGE, which a per-row fill cannot be. COLOR_LABEL because
+      // this is structure and accent already carries five jobs here. No top or
+      // bottom flag is needed: a block is always separated from what surrounds it
+      // by a blank or a prose row, so the bar breaks by itself.
+      tft.fillRect(SCROLL_CODE_EDGE_X, y, SCROLL_CODE_EDGE_W, CODE_LINE_H, COLOR_LABEL);
+    }
 
     setUIFont(1);
     if (k == 0) {
@@ -816,9 +822,15 @@ void scrollDrawBand(int shift) {
     // text-width: a ragged right edge would not read as a block.
     const bool isCode = (lf & SCROLL_F_CODE) != 0;
     const uint16_t bg = isCode ? COLOR_CARD : COLOR_BG;
-    if (isCode)
+    if (isCode) {
       tft.fillRect(SCROLL_GUT_X, y, SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_GUT_X,
                    CODE_LINE_H, COLOR_CARD);
+      // THE BLOCK'S OWN EDGE, which a per-row fill cannot be. COLOR_LABEL because
+      // this is structure and accent already carries five jobs here. No top or
+      // bottom flag is needed: a block is always separated from what surrounds it
+      // by a blank or a prose row, so the bar breaks by itself.
+      tft.fillRect(SCROLL_CODE_EDGE_X, y, SCROLL_CODE_EDGE_W, CODE_LINE_H, COLOR_LABEL);
+    }
 
     setUIFont(1);
     if (k == 0) {

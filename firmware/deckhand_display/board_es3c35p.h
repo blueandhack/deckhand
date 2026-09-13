@@ -3118,6 +3118,13 @@ const int READER_TAP_1 = 108, READER_TAP_2 = 210;
 // rows, and it is the whole trade this surface makes.
 const int SCROLL_GUT_X     = 12;
 const int SCROLL_TXT_X     = SCROLL_GUT_X + 2 * TEXT_ADV;
+// THE CODE BLOCK'S EDGE. A per-row COLOR_CARD fill says "this row is code" and
+// cannot say where a block starts or ends - a one-line block reads as a
+// highlighted prose line. Two pixels between the gutter mark's cell and the text
+// column, touching neither: the `+` continuation mark still needs its 8px cell at
+// SCROLL_GUT_X, and the text still starts at SCROLL_TXT_X.
+const int SCROLL_CODE_EDGE_X = 20;
+const int SCROLL_CODE_EDGE_W = 2;
 const int SCROLL_COLS      = 34;
 // THE HANGING INDENT'S CEILING. A wrapped code row restarts under its own source
 // indent so it cannot be misread as a real line at that depth - but a line nested

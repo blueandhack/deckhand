@@ -100,6 +100,15 @@ if (SELFTEST) {
   // fallback's own effect must fail, not the "is findable" check above it.
   if (fault === "no-seam")
     INO = INO.replace(/if \(c2 > room \/ 2\) n = c2;/, "");
+  // TASK 10: proves the edge-bar assertion actually binds rather than passing on a
+  // single surviving copy. A plain, non-global replace hits only the FIRST
+  // occurrence of the fillRect in the comment-stripped file - scrollDrawBody's -
+  // leaving scrollDrawBand's intact, so bars.length drops from 2 to 1 and the
+  // assertion must fail BY NAME rather than pass because one path still draws it.
+  if (fault === "edge-one-path")
+    INO = INO.replace(
+      /tft\.fillRect\(SCROLL_CODE_EDGE_X, y, SCROLL_CODE_EDGE_W, CODE_LINE_H, COLOR_LABEL\);/,
+      "");
 }
 
 // MIRRORS scrollListHang: the width of a list marker at the start of a source
@@ -681,6 +690,26 @@ s(toolArms != null && toolArms.length === 2,
   "outside the row loop, so without this a $ or | row after a code row inherits " +
   "SCROLL_F_CODE and its card ground");
 
+// TASK 10: A PER-ROW COLOR_CARD FILL SAYS "this row is code" AND CANNOT SAY WHERE
+// A BLOCK STARTS OR ENDS - a one-line block reads as a highlighted prose line.
+// The edge bar is COLOR_LABEL, not COLOR_ACCENT: this is structure, not emphasis,
+// and accent already carries five jobs on this surface. No top/bottom flag is
+// needed or wanted - a block is always separated from what surrounds it by a
+// blank or prose row, so the bar breaks by itself; those two flags were designed
+// and deliberately deleted.
+s(c.SCROLL_CODE_EDGE_X !== undefined && c.SCROLL_CODE_EDGE_W !== undefined,
+  "structural: the code block's edge bar is two named constants");
+s(c.SCROLL_CODE_EDGE_X >= c.SCROLL_GUT_X + c.TEXT_ADV &&
+  c.SCROLL_CODE_EDGE_X + c.SCROLL_CODE_EDGE_W <= c.SCROLL_TXT_X,
+  `structural: the edge bar (${c.SCROLL_CODE_EDGE_X}..` +
+  `${c.SCROLL_CODE_EDGE_X + c.SCROLL_CODE_EDGE_W}) sits between the gutter mark's cell and ` +
+  "the text column, touching neither");
+const bars = INO.match(
+  /fillRect\(SCROLL_CODE_EDGE_X, y, SCROLL_CODE_EDGE_W, CODE_LINE_H, COLOR_LABEL\)/g);
+s(bars != null && bars.length === 2,
+  "structural: BOTH draw paths draw the edge bar, and it is COLOR_LABEL - structure, not " +
+  "emphasis; accent already carries five jobs on this surface");
+
 // THE LIVE TAIL'S POLICY, bound because its HELD branch has never executed on
 // hardware: new chat entries only appear when a turn completes, so every
 // observed append so far was the FOLLOWING case. These assertions are what
@@ -802,6 +831,7 @@ if (SELFTEST) {
     "tool-arm-inherit": /BOTH draw paths' one-line tool arms CLEAR the flags/,
     "list-hang-drop": /a prose line's hang comes from its list marker/,
     "no-seam": /falls back to a seam BEFORE hard-cutting/,
+    "edge-one-path": /BOTH draw paths draw the edge bar/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }
