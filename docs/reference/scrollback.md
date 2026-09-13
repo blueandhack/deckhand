@@ -81,6 +81,39 @@ links look healthy.
 - **BLE gets a bounded tail** (`SCROLL_TAIL_BYTES_BLE` 8192, ~12s at ~666 B/s; the full 122KB
   would be over three minutes), and the top of the scroll states what is missing.
 
+**THE TRANSCRIPT IS LIVE, AND IT FOLLOWS ONLY AT THE BOTTOM.** `HISTORY <id> <chat|all>
+since:<n>` is the fourth request form: while the surface is open the device asks for anything
+newer than it holds every `SCROLL_TAIL_POLL_MS` (**5000**, matching the host's own tick so the
+two do not beat against each other), and the usual reply while nothing is happening is an empty
+array. **It is its own parser arm, not a reuse of the chunked fetch** - that arm RESETS the
+store on `seq 0` and owns `scrollNextSeq`, so routing an append through it would wipe the
+transcript the reader is looking at. The tail carries no `seq`/`of` at all: the host sends what
+fits one reply and the next poll collects the rest, which is self-correcting and keeps a burst
+of activity from becoming a multi-chunk handshake on a 5-second cadence.
+- **AT-BOTTOM IS DECIDED BEFORE THE APPEND, and that ordering is the whole policy.** The append
+  grows `scrollMaxY()`, so asking afterwards always answers "no" and the tail would follow
+  exactly once and then stop. For the same reason it needs a TOLERANCE rather than equality -
+  `SCROLL_AT_BOTTOM_PX` is one line, the smallest span that cannot be an accident.
+- **Held away from the bottom the view does not move by a pixel** and a `-- N new below --`
+  badge appears over the bottom row instead; reaching the bottom clears it. Moving the page
+  under someone reading history is the one behaviour this surface has already been asked twice
+  to stop doing. `scrollAtBottom()` is ONE spelling read by both the follow rule and the badge -
+  a rule and an indicator that disagreed about the bottom would show "3 new below" while sitting
+  on them.
+- **The double delivery duplicates entries here, and an insert is not idempotent.** The device
+  transmits on every live transport, so a cabled board asks twice and two replies to the same
+  `since:` would append the SAME entries twice - every new message doubled. Deduped at the host
+  on the identical request within 1500ms, the same guard the `tail:` path already had.
+- **MEASURED:** host `Scrollback: tail +1 of 1 new`, device `SCROLL tail +1 entries
+  (following)`, each appending once. Watched again on 2026-09-12 against a running session:
+  `HISTORY <id> chat since:2` every ~5s through the host log, with the append landing when the
+  turn completed. **The granularity is the TRANSCRIPT ENTRY, not the token** - an assistant
+  message reaches the glass when Claude Code writes it to the JSONL, and the host's
+  `histItems` cache is keyed on that file's mtime so a poll never serves a stale parse.
+- **BOARD 1 HAS NO EQUIVALENT.** Its paged reader is a snapshot per request: `requestHistory`
+  runs on open, page turn, filter toggle and scrubber jump, and nothing polls. A page already on
+  the glass does not grow.
+
 **MEASURED, ON HARDWARE, AND THE FLUSH IS NOW THE FRAME.** One fetch: **225 entries, 3817
 wrapped lines, 108318 bytes, 11 chunks, 0 dropped**, repeatable.
 
@@ -167,4 +200,11 @@ form. **Board 1 is `UNCHANGED` at every commit** - `8f64b7f7...`, 1387024.
   because the gutter leans on five palette roles.
 - **The BLE path has never been exercised at all** - no fetch has run with the cable out, so the
   8192-byte tail, the ~12s wait and the "need USB" note are argued rather than watched.
-- **Live tailing and momentum are deliberately out**, each for a stated reason in the spec.
+- **Momentum is deliberately out**, for a stated reason in the spec. **Live tailing was out
+  there too and is now IN** - the spec's "the transcript is a snapshot taken when the screen
+  opens" was superseded by `d7f994d`; see the live tail section above. The spec is left as
+  written, being a dated record of what was decided then.
+- **THE HELD BRANCH OF THE LIVE TAIL HAS NEVER EXECUTED.** Every append observed was the
+  following case, because new chat entries only appear when a turn completes. Eight
+  assertions in `scrollback-check.mjs` stand in for it and two were proven to fail by
+  injection, but no person has watched the badge appear.
