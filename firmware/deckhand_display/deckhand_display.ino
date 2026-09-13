@@ -640,6 +640,15 @@ bool saveLoopIdle = false;
 bool panelSleptApplied = false;
 bool cpuSlowApplied = false;
 bool bleSlowApplied = false;
+// ---- the dynamic-frequency mode, runtime selectable ------------------------
+// 0 means DYNAMIC; any other value is a fixed frequency in MHz. Runtime rather
+// than a build flag for the reason every other measurement here is: a frequency
+// sweep costs one battery session per setting, so a reflash per guess costs a
+// day. 240 is the default because it is TODAY'S behaviour - the baseline every
+// other setting has to beat, unmeasured until it does.
+uint32_t cpuMode = 240;
+unsigned long cpuBoostUntil = 0;   // millis deadline; 0 = not boosted
+uint32_t cpuMhzNow = 240;          // what is actually set, so we never re-set it
 const uint32_t CPU_MHZ_AWAKE = 240;
 const uint32_t CPU_MHZ_BLANKED = 80;   // the floor BLE still runs at
 
@@ -3900,6 +3909,12 @@ void stopOctopus() {
 // so the only correct way to reveal it is a full repaint of the tab. Moving is
 // rare, so the cost is irrelevant.
 void forceFullRepaint() {
+#if !BOARD_USES_TFT_ESPI
+  // The programmatic repaints a touch does NOT precede - a payload that changes
+  // the layout, a theme switch, a wake. PERF measures this at 58-79ms of
+  // CPU-bound gather at 240MHz, so it is exactly the work worth the clock.
+  cpuBoost();
+#endif
   drawTabBar();
   drawFooterChrome();
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
@@ -4062,6 +4077,12 @@ void closeSessionDetail() {
 }
 
 void handleTouch() {
+#if !BOARD_USES_TFT_ESPI
+  // ONE call site covers nearly everything interactive, because every tab
+  // switch, drag, keystroke and button press begins with a finger. Boosting
+  // here rather than at each of them is fewer places to forget.
+  cpuBoost();
+#endif
   static bool wasTouching = false;
   // 15ms, not 40. At 40 the UI polled at 25Hz: up to 40ms before a press was even
   // seen, and a tap shorter than 40ms could fall between two polls and be lost
@@ -5851,6 +5872,7 @@ void setup() {
 #if !BOARD_USES_TFT_ESPI
   loadLightIdle();
   loadPwrOffMode();
+  loadCpuMode();
   loadFwCommit();
   loadPwrOffRecord();
   // Best effort: on the common path a power-off ends by plugging USB in, so
@@ -5996,6 +6018,11 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "board's settings are numeric pages with no About group (settings.ino), so nothing here "
     "would ever display what it stored. The same build stamp is printed in this board's boot "
     "BUILD line instead." },
+  { "CPUMODE",
+    "it scales the core clock between CPU_MHZ_BASE and CPU_MHZ_BOOST while awake. That is "
+    "safe on board 2 because the ESP32-S3 holds APB at 80MHz whatever the CPU does; on this "
+    "ESP32 the APB clock FOLLOWS the CPU below 80MHz, so the same trick would move the SPI, "
+    "I2C and LEDC clocks under TFT_eSPI and the touch driver. Use POWERPROBE here instead." },
   { "PWROFFMODE",
     "it selects which teardown steps board 2's POWER OFF performs - sleeping the ST77922, "
     "holding it in reset, powering down the ES8311, isolating the QSPI bus - none of which "
@@ -7334,6 +7361,40 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
                fwCommit[0] ? "" : " (no stamp for THIS build - flashed another way)");
       sendLineToHost(line);
     }
+  } else if (buf == "CPUMODE" || buf.startsWith("CPUMODE ")) {
+    // Bare = report and write NOTHING, the rule LIGHTIDLE paid for.
+    String arg = buf.length() > 7 ? buf.substring(7) : String("");
+    arg.trim();
+    char line[190];
+    bool bad = false;
+    if (arg.length()) {
+      uint32_t want = (arg == "dyn") ? 0 : (uint32_t) arg.toInt();
+      // ONLY THE PLL FREQUENCIES. 240/160/80 keep APB at 80MHz; anything below
+      // drops to an XTAL divisor and APB goes WITH it, which would move the QSPI,
+      // I2C, LEDC and I2S clocks underneath their drivers. Refused by name rather
+      // than clamped: a silently-adjusted frequency would make every measurement
+      // taken afterwards a measurement of something else.
+      if (want == 0 || want == 80 || want == 160 || want == 240) {
+        cpuMode = want;
+        saveCpuMode();
+        cpuBoostUntil = 0;
+        cpuTick();
+      } else {
+        bad = true;
+        snprintf(line, sizeof(line),
+                 "CPUMODE refused: \"%s\" - want dyn, 240, 160 or 80. Below 80 the S3 "
+                 "clocks APB off the XTAL too, moving QSPI/I2C/LEDC/I2S with it.",
+                 arg.c_str());
+        sendLineToHost(line);
+      }
+    }
+    if (!bad) {
+      snprintf(line, sizeof(line),
+               "CPUMODE %s (now %lu MHz, base %d boost %d, boost holds %d ms)",
+               cpuMode ? "fixed" : "dyn", (unsigned long) cpuMhzNow,
+               CPU_MHZ_BASE, CPU_MHZ_BOOST, CPU_BOOST_MS);
+      sendLineToHost(line);
+    }
   } else if (buf == "PWROFFMODE" || buf.startsWith("PWROFFMODE ")) {
     // BARE = REPORT, and it writes nothing. LIGHTIDLE taught that one the
     // expensive way: with no read-only form, a set command gets used to read
@@ -8139,6 +8200,10 @@ void loop() {
 #endif
     }
   }
+
+#if !BOARD_USES_TFT_ESPI
+  cpuTick();   // no-op at a fixed frequency, and never while blanked
+#endif
 
   // Safety net: some ESP32 BLE library versions can leave advertising
   // stopped after a failed/incomplete connection attempt, with no event to

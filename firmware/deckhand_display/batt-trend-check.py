@@ -945,6 +945,73 @@ check("...and writes NOTHING unless an argument was given",
       is not None)
 
 # --------------------------------------------------------------------------
+# DYNAMIC CPU FREQUENCY, board 2 only.
+#
+# Reachable at all only because the ESP32-S3 holds APB at 80MHz whatever the
+# core is set to, so QSPI/I2C/LEDC/I2S do not move with it. Below 80 the S3
+# clocks APB off the XTAL and they WOULD move, which is why the command refuses
+# anything but the three PLL frequencies rather than clamping to them.
+for nm, lo, hi in (("CPU_MHZ_BASE", 80, 240), ("CPU_MHZ_BOOST", 80, 240),
+                   ("CPU_BOOST_MS", 100, 10000)):
+    m = re.search(rf"#define\s+{nm}\s+(\d+)", B2H)
+    check(f"{nm} is a #define in board 2's header", m is not None)
+    check(f"{nm} is in range", m is not None and lo <= int(m.group(1)) <= hi)
+_base = int(re.search(r"#define\s+CPU_MHZ_BASE\s+(\d+)", B2H).group(1))
+_boost = int(re.search(r"#define\s+CPU_MHZ_BOOST\s+(\d+)", B2H).group(1))
+check("base is BELOW boost, or the scaling has no direction", _base < _boost)
+# 240/160/80 all keep APB at 80MHz. Anything else does not.
+check("both are PLL frequencies that leave APB at 80MHz",
+      _base in (80, 160, 240) and _boost in (80, 160, 240))
+
+cs = fnbody(POWER, "void cpuSet(")
+ct = fnbody(POWER, "void cpuTick()")
+cb = fnbody(POWER, "void cpuBoost()")
+check("cpuSet/cpuBoost/cpuTick all exist", all(x is not None for x in (cs, ct, cb)))
+# setCpuFrequencyMhz reconfigures the PLL; calling it every loop with the value
+# it already has would cost more than the scaling saves.
+check("cpuSet is a no-op when the frequency is already right",
+      cs is not None and "if (mhz == cpuMhzNow) return;" in cs)
+# THE LATCH. A missed boost costs one slow repaint; a missed RESTORE would strand
+# the clock high and cost the entire saving silently, so there is no paired
+# restore to miss.
+check("cpuBoost sets a DEADLINE rather than requiring a paired restore",
+      cb is not None and "cpuBoostUntil = millis() + CPU_BOOST_MS" in cb)
+check("cpuTick is the only thing that lowers the clock back",
+      ct is not None and "CPU_MHZ_BASE" in ct)
+# CPUSLOW owns the clock while blanked; these two must not fight over it.
+check("cpuTick defers to savingsSync while blanked",
+      ct is not None and re.search(r"if\s*\(isAsleep\)\s*return;", ct) is not None)
+check("a fixed mode really pins the clock, so a sweep measures what it says",
+      ct is not None and re.search(r"if\s*\(cpuMode\s*!=\s*0\)", ct) is not None)
+
+lp3 = fnbody(MAIN, "void loop()")
+check("loop() drives cpuTick()", lp3 is not None and "cpuTick();" in lp3)
+# ONE call site covers nearly every interaction, because they all begin with a
+# finger. Asserted so it is not quietly removed as redundant.
+ht = fnbody(MAIN, "void handleTouch()")
+check("a touch boosts the clock - every interaction starts with one",
+      ht is not None and "cpuBoost();" in ht)
+ffr = fnbody(MAIN, "void forceFullRepaint()")
+check("a full repaint boosts too - the work PERF measures at 58-79ms",
+      ffr is not None and "cpuBoost();" in ffr)
+
+cm = arm(MAIN, 'buf == "CPUMODE"')
+check("the CPUMODE arm is locatable", cm is not None)
+check("an out-of-range frequency is REFUSED, never clamped - a silently adjusted "
+      "clock would make every later measurement one of something else",
+      cm is not None and "CPUMODE refused" in cm)
+check("only the three PLL frequencies are accepted",
+      cm is not None and re.search(r"want\s*==\s*80", cm) is not None
+      and re.search(r"want\s*==\s*160", cm) is not None
+      and re.search(r"want\s*==\s*240", cm) is not None)
+_cmc = strip_comments(cm) if cm else None
+check("a bare CPUMODE writes NOTHING",
+      _cmc is not None and re.search(r"if\s*\(arg\.length\(\)\)\s*\{[^}]*saveCpuMode", _cmc)
+      is not None)
+check("the default is 240 - today's behaviour, the baseline a sweep must beat",
+      re.search(r"uint32_t\s+cpuMode\s*=\s*240\s*;", MAIN) is not None)
+
+# --------------------------------------------------------------------------
 # THE SESSION-GATED IDLE LADDER: lit -> dim -> blank.
 #
 # The point is that this device is a STATUS display, so it should stay readable

@@ -207,6 +207,35 @@ void saveFwCommit(const char* sha) {
 // threw away whatever pwrOffMode was initialised to, so changing the C++ default
 // changed NOTHING on a fresh NVS. Found by asking the device after a flash - it
 // answered 0x7 where the source said 0x37.
+#if !BOARD_USES_TFT_ESPI
+// Set the core clock, and ONLY when it actually differs. setCpuFrequencyMhz()
+// reconfigures the PLL and is not free; calling it every loop at the same value
+// would spend more than the scaling saves.
+void cpuSet(uint32_t mhz) {
+  if (mhz == cpuMhzNow) return;
+  setCpuFrequencyMhz(mhz);
+  cpuMhzNow = mhz;
+}
+// Raise the clock for work somebody is waiting on. A DEADLINE, not a paired
+// restore: a missed boost costs one slow repaint, while a missed RESTORE would
+// strand the clock high and silently cost the entire saving. The latch makes the
+// failure mode the harmless one.
+void cpuBoost() {
+  if (cpuMode != 0) return;            // fixed frequency: nothing to boost
+  cpuBoostUntil = millis() + CPU_BOOST_MS;
+  cpuSet(CPU_MHZ_BOOST);
+}
+// Driven from loop(). Blanked is savingsSync()'s business, not this - CPUSLOW
+// owns the clock while asleep and the two must not fight over it.
+void cpuTick() {
+  if (isAsleep) return;
+  if (cpuMode != 0) { cpuSet(cpuMode); return; }
+  if (cpuBoostUntil && (long)(millis() - cpuBoostUntil) >= 0) cpuBoostUntil = 0;
+  cpuSet(cpuBoostUntil ? CPU_MHZ_BOOST : CPU_MHZ_BASE);
+}
+void loadCpuMode() { cpuMode = prefs.getUInt("cpuMode", cpuMode); }
+void saveCpuMode() { prefs.putUInt("cpuMode", cpuMode); }
+#endif
 void loadPwrOffMode() { pwrOffMode = prefs.getUInt("pwroffMode", pwrOffMode); }
 void savePwrOffMode() { prefs.putUInt("pwroffMode", pwrOffMode); }
 

@@ -152,6 +152,67 @@ false reading — exactly the "a checker must PARSE the constant it certifies, n
 rule, arriving from a new direction. All three mutations (`BATT_ROW_CACHE` → 20, `DEV_CARD_H` → 176,
 `DROW_TEMP` removed) fail by name.
 
+#### CPU FREQUENCY: the die runs 3.5C cooler at 80MHz, and the BATTERY effect could not be measured
+
+`CPUMODE` scales the core between `CPU_MHZ_BASE` (80) and `CPU_MHZ_BOOST` (240) while awake,
+boosting on touch and on `forceFullRepaint()` and dropping back 1.5s later. `dyn` or a fixed
+240/160/80; **default 240**, which is the unchanged behaviour, because nothing measured beats it.
+
+**SAFE ON THE S3 IN A WAY IT IS NOT ON BOARD 1's CHIP.** The S3 holds APB at 80MHz whatever the
+core is set to (arduino-esp32 #7086: `getApbFrequency()` still reports 80MHz with the CPU at 10),
+so QSPI, I2C, LEDC and I2S do not move. Below 80 both chips clock APB off the XTAL and everything
+downstream shifts, which is why the command REFUSES anything but the three PLL frequencies rather
+than clamping - a silently adjusted clock would make every later measurement one of something else.
+This also **retracts an earlier guess in this file's history** that `CPUSLOW` might have caused a
+spurious touch by disturbing I2C timing. On this silicon it cannot.
+
+**THE RENDER COST, measured over USB so no cell is involved and no drift can reach it:**
+
+| clock | tab switch (3 tabs) | vs 240 |
+|---|---|---|
+| 240 MHz | 65 / 75 / 76 ms | - |
+| 160 MHz | 85 / 85 / 99 ms | +25% |
+| 80 MHz | 144 / 148 / 171 ms | +114% |
+
+A 3x slower clock costs only 2.1x the time. Fitting `T = C/f + K` gives **~41ms of CPU work at
+240MHz plus ~31ms of fixed QSPI transfer** (predicts 92ms at 160, measured 90). That is why 80MHz
+hurts less than feared - and why boosting helps less than hoped, since a third of the work is
+bus-bound and no clock touches it.
+
+**THE DIE TEMPERATURE, A-B-A, AND THIS ONE HELD:**
+
+```
+240 MHz  die 46.6C  |  80 MHz  die 42.6C  |  240 MHz  die 45.6C   (charging throughout)
+```
+
+**3.5C cooler at 80MHz against 1.0C of bracket drift** - the effect is 3.5x the noise. The FIRST
+power measurement on this board where the bracket closed and the effect cleared it.
+
+**BUT THE DIE IS NOT THE CASE**, which is the same trap `SCREENSHOT` sets one layer down: the
+sensor is inside the S3 package and cannot see the charger IC or the cell. Warmth in the hand
+while charging is the charger burning `(5V - Vbat) x Icharge` - about half a watt - plus the
+backlight. Scaling the clock cools the CORE 3.5C and does little for the case.
+
+**THE BATTERY EFFECT IS NOT ESTABLISHED, AND TWO ATTEMPTS FAILED IN INSTRUCTIVE WAYS.**
+A straight sweep 240/160/80/dyn/240 reported an apparent **45% saving at 80MHz** - and its closing
+bracket read **-52.7 mV/h against the opening leg's -126.1 for the SAME setting**. The run began
+7 minutes after unplugging, where this file already says the fit is "still walking at 11 minutes":
+the opening leg ate the relaxation tail. **The sweep also confounded order with setting** - 240 ran
+first and 80 third, so drift and effect had the same shape, which no amount of settling fixes.
+Re-run INTERLEAVED as 240/80/240/80 with a 3-minute settle after each mode change (a mode change is
+a load step, and the first attempt let every probe eat one), the two pairs disagreed outright:
+
+```
+pair 1: 240 - 80 =  -2.4 +/- 6.4 mV/h      pair 2: 240 - 80 = -36.9 +/- 6.1 mV/h
+```
+
+Two estimates of one quantity, six error bars apart. Notably the two **80MHz legs were identical**
+(-64.3, -64.3) while the two 240MHz legs differed by 35 mV/h - so it is not simple drift, which
+would move both. **The awake state carries ~35 mV/h of unexplained instability, half its own total
+drain**, and no 10-minute probe can resolve a smaller effect through it. An alternating long-run
+comparison (`cpuflip.sh`, 2h per mode, aggregated by `cpuverdict.py` over discharging segments
+only) is running instead; hours of ordinary use average over noise a short window cannot.
+
 #### AUTO POWER-OFF: the saving existed and was simply never REACHED
 
 Power-off measures at **-3.6 mV/h** and light sleep at **-6.9**, and the everyday pattern - unplug

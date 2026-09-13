@@ -137,6 +137,26 @@ const int PAIR_HOSTID_CHARS = 8;     // a hostId is EXACTLY 8 hex characters (th
 // overnight absence spends almost all of itself in the cheaper state.
 #define AUTO_POWEROFF_MS (2UL * 60 * 60 * 1000)
 
+// ---- Dynamic CPU frequency -------------------------------------------------
+// SAFE ON THIS SILICON IN A WAY IT IS NOT ON THE PLAIN ESP32, and that is the
+// whole reason this is reachable: on the S3 the APB clock stays at 80MHz no
+// matter what the CPU is set to (arduino-esp32 #7086 - getApbFrequency() still
+// reports 80MHz with the CPU at 10). So QSPI, I2C, the LEDC backlight PWM and
+// I2S do not move when the core does. On the classic ESP32 APB follows the CPU
+// below 80 and every one of those would shift underneath the driver.
+// This also RETRACTS a guess made earlier in this repo's history: that CPUSLOW
+// might have produced a spurious touch by disturbing I2C timing. It cannot.
+//
+// BASE is where the core idles; BOOST is for work a person is waiting on.
+// 240 -> 80 is about 15-20mA, so this is a single-digit-percent saving on the
+// awake state, not a transformation - written down here so the next reader does
+// not expect one.
+#define CPU_MHZ_BASE   80
+#define CPU_MHZ_BOOST 240
+// How long a boost is held after its trigger. Long enough to cover a repaint
+// and the tail of a drag; short enough that idling returns quickly.
+#define CPU_BOOST_MS  1500
+
 // How long loop() yields per iteration while the screen is BLANKED, so the core
 // can actually idle. It is a yield, not a sleep: the Arduino loop task never
 // blocks on its own, so the FreeRTOS idle task on this core never runs and the
