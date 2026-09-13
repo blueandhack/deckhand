@@ -166,6 +166,12 @@ CONFIRM is inert until a request has actually arrived — there is nothing to co
 showing **its own derived code** and asking whether the device shows the same, with Match / Don't
 match → success or a named failure. The user compares; nothing is typed.
 
+> **Shipped as a WINDOW, not a submenu and a dialog** — the steps and the security property are
+> unchanged, but AppKit dismisses a menu on every item action, so the flow above cost two to three
+> trips to the menu bar and stacked three `NSAlert`s. One non-modal window now owns all of it.
+> See *THE MAC'S HALF OF WIRELESS PAIRING IS A WINDOW* in
+> [`docs/reference/commands-and-checks.md`](../../reference/commands-and-checks.md).
+
 ## What this does not do
 
 - It does not encrypt the BLE link. Payload confidentiality is unchanged and still absent by
