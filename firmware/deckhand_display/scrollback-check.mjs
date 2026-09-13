@@ -329,11 +329,13 @@ if (SELFTEST) {
   if (hf === "backtick-restore")
     HOSTSRC = HOSTSRC.replace(/=> "`" \+ spans\[\+i\] \+ "`"/, "=> spans[+i]");
   if (hf === "no-link-collapse")
-    HOSTSRC = HOSTSRC.replace(/\(\_, txt\) => txt \+ SCROLL_LINK_MARK/, "(_, txt) => txt");  // disable link mark
+    // Change the callback to ignore link groups, only shortening bare URLs
+    HOSTSRC = HOSTSRC.replace(/\(txt !== undefined \? txt : histShortUrl\(m\)\)/, "histShortUrl(m)");  // disable link handling
   if (hf === "no-url-shorten")
     HOSTSRC = HOSTSRC.replace(/function histShortUrl\(/, "function histShortUrlDisabled(");
   if (hf === "double-mark")
-    HOSTSRC = HOSTSRC.replace(/const isAlreadyMarked = [\s\S]*?SCROLL_LINK_MARK\);/, "return histShortUrl(u) + SCROLL_LINK_MARK);");
+    // Break the alternation by making the URL arm never match, so only links work
+    HOSTSRC = HOSTSRC.replace(/\|https\?:\\\/\\\//, "|(?!)https?:\\/\\/");  // URL arm never matches
 }
 
 // A CHECKER MUST PARSE THE CONSTANT IT CERTIFIES, NEVER TRANSCRIBE IT - and this
@@ -586,7 +588,7 @@ s(/spans\[\+i\]\s*\+\s*"`"/.test(hbtBody) || /"`"\s*\+\s*spans\[\+i\]/.test(hbtB
   "structural: an inline code span is restored WITH its backticks - there is no bold " +
   "face on this board, so stripping them leaves nothing in their place");
 
-s(/\(_, txt\) => txt.*SCROLL_LINK_MARK/.test(hbtBody),
+s(/\(m, txt\).*txt !== undefined.*SCROLL_LINK_MARK/.test(hbtBody),
   "structural: link markdown is collapsed inside histBlockText - [text](url) whole spends " +
   "two of 27 rows on brackets and a path");
 s(/function histShortUrl\(/.test(HOSTSRC),
@@ -596,9 +598,9 @@ const mark = /const SCROLL_LINK_MARK = "(.)"/.exec(HOSTSRC);
 s(mark != null && mark[1].charCodeAt(0) >= 0x20 && mark[1].charCodeAt(0) <= 0x7e,
   "structural: the link mark is inside Spleen's 0x20..0x7E - an out-of-range mark draws " +
   "nothing AND advances nothing");
-s(/isAlreadyMarked/.test(hbtBody),
-  "structural: when a bare URL follows a link mark from a marked link, no double-mark - " +
-  "link text that is itself a URL gets ONE mark total, not two");
+s(/\)\|https\?:/.test(hbtBody),
+  "structural: link markdown and bare URLs are matched in ONE alternation, not two passes - " +
+  "preventing double-marks and tilde-path regressions by matching once left-to-right");
 
 console.log(`\n${mirror} mirror + ${structural} structural assertions, ${fail} failures`);
 if (SELFTEST) {
@@ -620,7 +622,7 @@ if (SELFTEST) {
     "backtick-restore": /an inline code span is restored WITH its backticks/,
     "no-link-collapse": /link markdown is collapsed inside histBlockText/,
     "no-url-shorten": /a bare URL is shortened by its own named function/,
-    "double-mark": /when a bare URL follows a link mark.*no double-mark/,
+    "double-mark": /link markdown and bare URLs are matched in ONE alternation/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

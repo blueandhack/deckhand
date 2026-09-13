@@ -1539,12 +1539,9 @@ function histFlatten(v, max = HIST_PREVIEW_CAP) {
 const SCROLL_LINK_MARK = "~";
 // A bare URL has no space in it, so the device's word-wrap gives up and hard-cuts
 // it mid-token at column 34. Shortened here instead: the host and the tail are
-// what identify it, and the middle never survived the lane anyway. TRAILING
-// punctuation (.,;:?!) is sentence markup, not part of the URL, so strip it
-// BEFORE shortening so a comma landing after a URL stays in prose.
+// what identify it, and the middle never survived the lane anyway.
 function histShortUrl(u) {
-  let b = u.replace(/^https?:\/\//, "").replace(/\/+$/, "");
-  b = b.replace(/[.,;:?!~]+$/, "");
+  const b = u.replace(/^https?:\/\//, "").replace(/\/+$/, "");
   if (b.length <= 28) return b;
   const p = b.split("/");
   if (p.length < 3) return b.slice(0, 25) + "...";
@@ -1597,13 +1594,17 @@ function histBlockText(v, max = HIST_FULL_CAP) {
       // AFTER the spans are protected, so a URL inside a code span is left exactly
       // as written, and BEFORE the emphasis strip, so an asterisk inside a URL is
       // not read as a marker.
-      t = t.replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, (_, txt) => txt + SCROLL_LINK_MARK);
-      t = t.replace(/https?:\/\/[^\s)\]~]+/g, (u, offset, str) => {
-        // If this URL was already marked by the link pass (mark comes right after),
-        // return the shortened URL without adding another mark.
-        const isAlreadyMarked = str[offset + u.length] === SCROLL_LINK_MARK;
-        return histShortUrl(u) + (isAlreadyMarked ? "" : SCROLL_LINK_MARK);
-      });
+      // ONE PASS, ONE ALTERNATION. Two sequential replaces cannot work here:
+      // the second re-scans what the first just wrote, and every guard against
+      // that has an input which defeats it - a tilde is legal in a URL path.
+      // An alternation matches each construct once and replace() never
+      // re-scans its own output. The URL arm may not END on sentence
+      // punctuation, so a comma after a URL stays in the prose where it
+      // belongs rather than being eaten or deleted.
+      t = t.replace(
+        /\[([^\]\n]+)\]\(([^)\n]+)\)|https?:\/\/[^\s)\]]*[^\s)\].,;:?!]/g,
+        (m, txt) => (txt !== undefined ? txt : histShortUrl(m)) + SCROLL_LINK_MARK
+      );
       // DOUBLE MARKERS ARE STRIPPED OUTRIGHT, not matched as pairs. A pair regex
       // needs both markers on ONE line, and markdown bold routinely spans a line
       // break in the source - which is why `**The counter reports...` was still
