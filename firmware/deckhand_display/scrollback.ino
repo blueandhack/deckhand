@@ -94,6 +94,15 @@ static int scrollListHang(const char* s, int len) {
   return 0;
 }
 
+// WHERE A SPACELESS TOKEN MAY BE BROKEN. The word-wrap scans back for a space and
+// gives up past half the lane - and a path or a URL has no space in it at all, so
+// it fell through to a hard cut that landed mid-word. These four are where a
+// reader's eye already expects a seam, and the character STAYS on the row it ends,
+// so the break reads as deliberate rather than as a dropped character.
+static bool scrollBreakAfter(char c) {
+  return c == '/' || c == '.' || c == '-' || c == '_';
+}
+
 static int scrollWalk(const char* t, int cols, int want,
                       char* out, int outSize, uint8_t* flags, int* indent, bool* found) {
   if (found) *found = false;
@@ -149,7 +158,14 @@ static int scrollWalk(const char* t, int cols, int want,
         n = room;
         int b = n;
         while (b > room / 2 && t[q + b - 1] != ' ') b--;
-        if (b > room / 2) n = b;                // word-friendly, else fall back
+        if (b > room / 2) n = b;                // word-friendly
+        else {
+          // NO SPACE IN THE LANE AT ALL. Rather than hard-cut mid-word, look for
+          // a seam - and only then give up.
+          int c2 = room;
+          while (c2 > room / 2 && !scrollBreakAfter(t[q + c2 - 1])) c2--;
+          if (c2 > room / 2) n = c2;
+        }
       }
       if (n <= 0 && rem > 0) n = 1;             // never stall
       if (drawn == want) {

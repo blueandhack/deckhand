@@ -94,6 +94,12 @@ if (SELFTEST) {
   // check above it.
   if (fault === "list-hang-drop")
     INO = INO.replace(/hang = scrollListHang\(t \+ pos, srcLen\);/, "hang = 0;");
+  // TASK 9: proves the seam-fallback assertion actually binds. Deleting just the
+  // `if` that applies c2 leaves scrollBreakAfter itself still defined and called
+  // in the loop condition above it - so only the ONE assertion bound to the
+  // fallback's own effect must fail, not the "is findable" check above it.
+  if (fault === "no-seam")
+    INO = INO.replace(/if \(c2 > room \/ 2\) n = c2;/, "");
 }
 
 // MIRRORS scrollListHang: the width of a list marker at the start of a source
@@ -101,6 +107,12 @@ if (SELFTEST) {
 // ordered marker is its digits plus ". ". Leading spaces are counted IN, so a
 // nested item hangs to its own text column rather than the outer list's - which
 // is why this takes the whole line, not a pre-trimmed one.
+// MIRRORS scrollBreakAfter: the four seam characters a spaceless token may be
+// broken after when the space scan gives up.
+function breakAfter(c) {
+  return c === "/" || c === "." || c === "-" || c === "_";
+}
+
 function listHang(s) {
   let i = 0;
   while (i < s.length && s[i] === " ") i++;
@@ -164,6 +176,11 @@ function walk(t, cols) {
         let b = n;
         while (b > Math.floor(room / 2) && t[q + b - 1] !== " ") b--;
         if (b > Math.floor(room / 2)) n = b;
+        else {
+          let c2 = room;
+          while (c2 > Math.floor(room / 2) && !breakAfter(t[q + c2 - 1])) c2--;
+          if (c2 > Math.floor(room / 2)) n = c2;
+        }
       }
       if (n <= 0 && rem > 0) n = 1;
       rows.push({ text: t.slice(q, q + n), code: inCode, cont: !first, head, ind: first ? 0 : hang });
@@ -228,6 +245,12 @@ m(walk("12. one two three four five", 12)[1].ind === 4,
   "mirror: an ordered marker's width includes its digits and its dot");
 m(walk("plain prose that wraps here", 12)[1].ind === 0,
   "mirror: prose that is not a list does not hang - wrapping is simply how prose reads");
+
+// TASK 9: a spaceless token breaks at a seam (/ . - _) rather than mid-word.
+m(walk("docs/reference/scrollback.md", 20)[0].text === "docs/reference/",
+  "mirror: a spaceless path breaks after the last separator inside the lane");
+m(walk("x".repeat(30), 10).length === 3,
+  "mirror: a token with no space and no seam still hard-cuts, and never stalls");
 
 // The index: lineFirst accumulates lines PLUS the spacer, and a result tucks
 // against its own call with no spacer - the pair reads as one unit.
@@ -309,6 +332,21 @@ s(/static int scrollListHang\(/.test(INO),
   "structural: the list marker's width is measured by its own named function");
 s(/hang = scrollListHang\(t \+ pos, srcLen\);/.test(walkBody),
   "structural: a prose line's hang comes from its list marker");
+
+// TASK 9: a spaceless token (a path or a URL) has no space to scan back for, so
+// prose fell through to a hard cut mid-word. The seam predicate is its own named
+// function, not four literals inlined at the call site, and the wrap tries it
+// ONLY after the space scan gives up.
+s(/static bool scrollBreakAfter\(char c\)/.test(INO),
+  "structural: the extra break points are their own named predicate, not four literals " +
+  "inlined in the wrap");
+// Bound to BOTH the scan and its use: a fault that deletes only the
+// `if (c2 > room / 2) n = c2;` assignment leaves scrollBreakAfter still CALLED
+// in the while condition above it, which is exactly the "neighbouring line
+// satisfies it" trap this file's own header warns about - so the regex requires
+// the assignment to immediately follow the scan, not merely to exist somewhere.
+s(/scrollBreakAfter\(t\[q \+ c2 - 1\]\)\) c2--;\s*if \(c2 > room \/ 2\) n = c2;/.test(walkBody),
+  "structural: prose that found no space falls back to a seam BEFORE hard-cutting");
 
 s(/drawString\(buf, SCROLL_TXT_X \+ li \* TEXT_ADV, y\)/.test(INO),
   "structural: the renderer DRAWS at the column scrollWalk reported - a hang that is " +
@@ -763,6 +801,7 @@ if (SELFTEST) {
     "draw-path-drift": /the two draw paths draw a row IDENTICALLY/,
     "tool-arm-inherit": /BOTH draw paths' one-line tool arms CLEAR the flags/,
     "list-hang-drop": /a prose line's hang comes from its list marker/,
+    "no-seam": /falls back to a seam BEFORE hard-cutting/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }
