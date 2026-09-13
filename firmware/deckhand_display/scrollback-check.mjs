@@ -80,6 +80,13 @@ if (SELFTEST) {
   // `drawString(buf, SCROLL_TXT_X, y);`) and nowhere else - editing exactly
   // one of the two compared regions, which is what makes them stop matching.
   if (fault === "draw-path-drift") INO = INO.replace(/SCROLL_TXT_X/, "SCROLL_GUT_X");
+  // TASK 7: proves the tool-arm reset assertion actually binds rather than
+  // passing vacuously. A plain, non-global replace hits only the FIRST
+  // occurrence in the comment-stripped file - scrollDrawBody's arm - leaving
+  // scrollDrawBand's intact, so toolArms.length drops from 2 to 1 and the
+  // assertion must fail BY NAME rather than pass on the surviving copy.
+  if (fault === "tool-arm-inherit")
+    INO = INO.replace(/lf = 0;\s*li = 0;/, "");
 }
 
 // ---------------- MIRROR: the wrap rule and the line index ----------------
@@ -578,6 +585,20 @@ s(regBody != null && regBody === regBand,
   "structural: the two draw paths draw a row IDENTICALLY - fixing only scrollDrawBody " +
   "has already broken this surface's pixel-for-pixel equivalence once");
 
+// A TOOL ROW MUST NOT INHERIT THE PREVIOUS ROW'S FLAGS. `lf` and `li` are
+// declared OUTSIDE the per-row loop in both paths, and the drawRegion() check
+// above starts at `const bool isCode` - BELOW this arm - so it does not cover
+// it. Without an explicit reset, a `$ ran` / `| result` / `! denied` row drawn
+// right after a code row inherits SCROLL_F_CODE and is painted on COLOR_CARD -
+// reachable whenever a message ends in a code block and the next entry is the
+// tool call it describes. Two occurrences required: one per draw path.
+const flat = INO.replace(/\s+/g, " ");
+const toolArms = flat.match(/if \(e\.role >= 2\) \{ if \(k > 0\) continue; lf = 0; li = 0;/g);
+s(toolArms != null && toolArms.length === 2,
+  "structural: BOTH draw paths' one-line tool arms CLEAR the flags - lf is declared " +
+  "outside the row loop, so without this a $ or | row after a code row inherits " +
+  "SCROLL_F_CODE and its card ground");
+
 // THE LIVE TAIL'S POLICY, bound because its HELD branch has never executed on
 // hardware: new chat entries only appear when a turn completes, so every
 // observed append so far was the FOLLOWING case. These assertions are what
@@ -696,6 +717,7 @@ if (SELFTEST) {
     "no-url-shorten": /a bare URL is shortened by its own named function/,
     "double-mark": /link markdown and bare URLs are matched in ONE alternation/,
     "draw-path-drift": /the two draw paths draw a row IDENTICALLY/,
+    "tool-arm-inherit": /BOTH draw paths' one-line tool arms CLEAR the flags/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

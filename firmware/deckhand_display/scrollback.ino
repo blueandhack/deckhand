@@ -583,6 +583,12 @@ void scrollDrawBody() {
     // sign that anything was missing.
     if (e.role >= 2) {
       if (k > 0) continue;
+      // `lf` AND `li` ARE DECLARED OUTSIDE THIS LOOP, so a row that does not set
+      // them keeps the PREVIOUS row's. A tool row after a code row was inheriting
+      // SCROLL_F_CODE and being painted on the card ground - reachable whenever a
+      // message ends in a code block and the next entry is the call it describes.
+      lf = 0;
+      li = 0;
       const char* t = scrollTextAt(ei);
       int n = strlen(t);
       if (n > SCROLL_COLS) {
@@ -750,6 +756,12 @@ void scrollDrawBand(int shift) {
 
     if (e.role >= 2) {
       if (k > 0) continue;
+      // `lf` AND `li` ARE DECLARED OUTSIDE THIS LOOP, so a row that does not set
+      // them keeps the PREVIOUS row's. A tool row after a code row was inheriting
+      // SCROLL_F_CODE and being painted on the card ground - reachable whenever a
+      // message ends in a code block and the next entry is the call it describes.
+      lf = 0;
+      li = 0;
       const char* t = scrollTextAt(ei);
       int tn = strlen(t);
       if (tn > SCROLL_COLS) {
