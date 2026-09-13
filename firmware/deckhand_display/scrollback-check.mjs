@@ -143,7 +143,7 @@ function listHang(s) {
 // can agree with itself while the device does something else.
 function walk(t, cols) {
   const rows = [];                       // {text, code, cont, head, ind}
-  if (!t.length) return [{ text: "", code: false, cont: false, head: false, ind: 0 }];
+  if (!t.length) return [{ text: "", code: false, cont: false, head: false, headEnd: false, ind: 0 }];
   let pos = 0, inCode = false;
   while (pos < t.length) {
     let eol = pos;
@@ -192,13 +192,17 @@ function walk(t, cols) {
         }
       }
       if (n <= 0 && rem > 0) n = 1;
-      rows.push({ text: t.slice(q, q + n), code: inCode, cont: !first, head, ind: first ? 0 : hang });
+      // THE LAST ROW OF THIS SOURCE LINE, mirroring scrollWalk's own `last`:
+      // decided from what remains AFTER this row takes its share, before rem
+      // is updated below.
+      const headEnd = head && (rem - n) <= 0;
+      rows.push({ text: t.slice(q, q + n), code: inCode, cont: !first, head, headEnd, ind: first ? 0 : hang });
       q += n; rem -= n; first = false;
       if (!inCode) while (rem > 0 && t[q] === " ") { q++; rem--; }
     } while (rem > 0);
     pos = eol < t.length ? eol + 1 : eol;
   }
-  return rows.length ? rows : [{ text: "", code: false, cont: false, head: false, ind: 0 }];
+  return rows.length ? rows : [{ text: "", code: false, cont: false, head: false, headEnd: false, ind: 0 }];
 }
 const wrapLines = (t, cols) => walk(t, cols).length;
 
@@ -356,6 +360,23 @@ s(/static bool scrollBreakAfter\(char c\)/.test(INO),
 // the assignment to immediately follow the scan, not merely to exist somewhere.
 s(/scrollBreakAfter\(t\[q \+ c2 - 1\]\)\) c2--;\s*if \(c2 > room \/ 2\) n = c2;/.test(walkBody),
   "structural: prose that found no space falls back to a seam BEFORE hard-cutting");
+
+// TASK 11: a heading is distinguished by accent COLOUR alone, and colour is the
+// one thing a board-2 capture cannot verify - SCREENSHOT reads the shadow
+// framebuffer, not the panel. A 1px rule under the heading's LAST row survives a
+// greyscale reading; a rule between a wrapped heading's two rows would instead
+// read as two headings, so `last` must be decided from what is left AFTER this
+// row takes its share - the only point at which the answer is knowable.
+s(/#define SCROLL_F_HEADEND 0x8/.test(INO),
+  "structural: the heading's last row has its own flag");
+s(/\(head && last\) \? SCROLL_F_HEADEND : 0/.test(walkBody),
+  "structural: SCROLL_F_HEADEND is set on the LAST row of a heading, by operand - a rule " +
+  "between a wrapped heading's two rows reads as two headings");
+const headEndRules = INO.match(/lf & SCROLL_F_HEADEND\)[\s\S]{0,120}?CODE_LINE_H - 2/g);
+s(headEndRules != null && headEndRules.length === 2,
+  "structural: BOTH draw paths draw the rule under the row carrying SCROLL_F_HEADEND");
+m(walk("## a heading long enough to wrap here", 12).filter((r) => r.headEnd).length === 1,
+  "mirror: exactly one row of a wrapped heading is its last");
 
 s(/drawString\(buf, SCROLL_TXT_X \+ li \* TEXT_ADV, y\)/.test(INO),
   "structural: the renderer DRAWS at the column scrollWalk reported - a hang that is " +
@@ -664,8 +685,10 @@ function drawRegion(fnName) {
   const fn = new RegExp("void " + fnName + "\\([\\s\\S]*?\\n}\\n").exec(INO);
   if (!fn) return null;
   // Task 11 extends the region: widen this line's end anchor past drawString,
-  // not the isCode start above - that is the only edit it should need.
-  const r = /const bool isCode[\s\S]*?drawString\(buf,[^;]*;/.exec(fn[0]);
+  // not the isCode start above - that is the only edit it should need. The new
+  // rule falls under this row's own drawString, inside the SAME per-row region,
+  // so the equivalence check below still covers it in both paths.
+  const r = /const bool isCode[\s\S]*?SCROLL_F_HEADEND\)[\s\S]*?COLOR_LABEL\);/.exec(fn[0]);
   return r ? r[0].replace(/\s+/g, " ").trim() : null;
 }
 const regBody = drawRegion("scrollDrawBody");

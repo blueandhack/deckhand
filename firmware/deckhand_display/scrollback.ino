@@ -79,6 +79,7 @@ uint16_t scrollTextColor(uint8_t r) {
 #define SCROLL_F_CODE 0x1
 #define SCROLL_F_CONT 0x2
 #define SCROLL_F_HEAD 0x4
+#define SCROLL_F_HEADEND 0x8
 
 // THE WIDTH OF A LIST MARKER at the start of a source line, or 0 for a line that
 // is not a list item. `* ` and `- ` are two; an ordered marker is its digits plus
@@ -174,9 +175,13 @@ static int scrollWalk(const char* t, int cols, int want,
           memcpy(out, t + q, cap);
           out[cap] = '\0';
         }
+        // THE LAST ROW OF THIS SOURCE LINE, decided from what is left AFTER this
+        // row takes its share - the only point at which the answer is knowable.
+        const bool last = (rem - n) <= 0;
         if (flags) *flags = (inCode ? SCROLL_F_CODE : 0)
                           | (first ? 0 : SCROLL_F_CONT)
-                          | (head ? SCROLL_F_HEAD : 0);
+                          | (head ? SCROLL_F_HEAD : 0)
+                          | ((head && last) ? SCROLL_F_HEADEND : 0);
         if (indent) *indent = first ? 0 : hang;
         if (found) *found = true;
         return drawn + 1;                       // caller only reads this when counting
@@ -671,6 +676,12 @@ void scrollDrawBody() {
     tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
     tft.setTextDatum(TL_DATUM);
     tft.drawString(buf, SCROLL_TXT_X + li * TEXT_ADV, y);
+    // THE HEADING'S RULE, under its LAST row only - a rule between a wrapped
+    // heading's two rows reads as two headings. COLOR_LABEL under accent text: a
+    // rule is structure, and orange under orange reads as one thicker heading.
+    if (lf & SCROLL_F_HEADEND)
+      tft.fillRect(SCROLL_TXT_X, y + CODE_LINE_H - 2,
+                   SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_TXT_X, 1, COLOR_LABEL);
   }
 
   // NEW-BELOW BADGE, over the bottom row and only while the view is held away
@@ -850,6 +861,12 @@ void scrollDrawBand(int shift) {
     tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
     tft.setTextDatum(TL_DATUM);
     tft.drawString(buf, SCROLL_TXT_X + li * TEXT_ADV, y);
+    // THE HEADING'S RULE, under its LAST row only - a rule between a wrapped
+    // heading's two rows reads as two headings. COLOR_LABEL under accent text: a
+    // rule is structure, and orange under orange reads as one thicker heading.
+    if (lf & SCROLL_F_HEADEND)
+      tft.fillRect(SCROLL_TXT_X, y + CODE_LINE_H - 2,
+                   SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_TXT_X, 1, COLOR_LABEL);
   }
 
   // The rail, repainted WHOLE - the shift moved the viewport's fraction of
