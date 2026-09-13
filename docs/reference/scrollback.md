@@ -208,3 +208,196 @@ form. **Board 1 is `UNCHANGED` at every commit** - `8f64b7f7...`, 1387024.
   following case, because new chat entries only appear when a turn completes. Eight
   assertions in `scrollback-check.mjs` stand in for it and two were proven to fail by
   injection, but no person has watched the badge appear.
+
+---
+
+#### SCROLLBACK MARKUP: code, lists and links that read on the glass
+
+Board 2's transcript above rendered code, lists and links as flat prose in the 34-column lane -
+`SCROLL_COLS`. Spec: `docs/superpowers/specs/2026-09-12-scrollback-markup-design.md`. Mock:
+`docs/design/scrollback-markup/` (the earlier five-treatment comparison mock is superseded; this
+one renders only what shipped, bound to `board_es3c35p.h` the same way its predecessor is).
+
+**THE SIX FINDINGS AND THE COMMIT THAT CLOSED EACH.** Written as history, not as open defects:
+
+1. **Fence language discarded on the Mac.** `histBlockText` normalised every fence to a bare
+   ` ``` `, so the device could not label a block even if it wanted to. Closed by `c2e8077`,
+   "Keep the fence language the Mac was throwing away."
+2. **Inline code erased.** Spans were protected during emphasis stripping and then restored
+   without their backticks, so `SCROLL_COLS` reached the glass indistinguishable from prose.
+   Closed by `7acb726`, "Give inline code its backticks back - nothing else marks it here."
+3. **Code lost its indentation on wrap.** A continuation restarted at column 0, and
+   indentation is most of how code is read. Closed by `705f3be`, "A wrapped code row restarts
+   under its own indent" - `SCROLL_HANG_MAX` is 12: past that the ~22 remaining columns make
+   the wrap itself the unreadable thing, so deeply indented code keeps 12 columns of shape and
+   loses the rest.
+4. **A block had no edges.** A per-row `COLOR_CARD` fill made a one-line block indistinguishable
+   from a highlighted prose line, and a block straddling the viewport had no top or bottom.
+   Closed by `2524300`, "Give a code block edges a per-row fill cannot draw" -
+   `SCROLL_CODE_EDGE_X` 20, `SCROLL_CODE_EDGE_W` 2, `COLOR_LABEL`.
+5. **Link markdown reached the glass whole, and a spaceless URL hard-cut mid-token.** Closed
+   across two commits: `4693723`/`7640bf4`/`29cf364` (collapsing links and eliding bare URLs,
+   fixing two regressions the first attempt introduced along the way - a doubled mark and a
+   tilde-path breakage) and `0203f9f`, "Break a spaceless path at a seam instead of mid-word."
+6. **A wrapped bullet had no hanging indent.** Its continuation began at the same column as its
+   `*`, so a two-item list and a four-line item looked alike. Closed by `73db7ea`, "A wrapped
+   list item hangs to its text, so two items stop looking like one."
+
+Between findings 4 and 6, two more commits changed the wire and the renderer without closing a
+numbered finding on their own: `f3d02bf` threaded the row's start column through `scrollWalk`
+(drawing nothing new yet - the foundation `705f3be` and `73db7ea` both build on), and
+`b97e6f2` bound `scrollDrawBody` and `scrollDrawBand` to each other with an equivalence
+assertion before any of the row-shape changes landed, because this surface had already broken
+that equivalence once by fixing only one of the two paths. `bc85e75` + `a4f54d3` added the
+heading rule (`SCROLL_F_HEADEND`, under the LAST row of a wrapped heading only - a rule between
+a wrapped heading's two rows would read as two headings) and gave its two structural assertions
+their own selftest faults, a gap the plan itself had left open for this one task. `8d7ee25`
+added the language label row (`SCROLL_F_LANG`) as the final commit.
+
+**TWO HOST CHANGES, NO WIRE VERSION BUMP.** `histBlockText`'s fence-language and link/URL
+changes are both read by a firmware function whose own toggle test is unaffected by them:
+`scrollWalk`'s fence test reads the first three backticks of a line and ignores the rest, so a
+board running firmware from before this work simply drops the language rather than printing
+it. Nothing about the wire's shape changed; a board on either side of this branch's sixteen
+commits reads the same bytes and disagrees only on how much of them it draws.
+
+**THE `~` LINK MARK EXISTS BECAUSE COLLAPSING A LINK OTHERWISE DESTROYS THE FACT THAT A TARGET
+EXISTED, SILENTLY** - and from the Mac, silence and "there was never a link here" are
+indistinguishable, the exact class this repo's refusal messages exist for. One ASCII character,
+inside Spleen's range, is the whole cost of saying "there was a URL here" instead. It cannot be
+followed from the device; that is Option D, out of scope.
+
+**THE LINK/URL TRANSFORM IS ONE REGEX ALTERNATION, NOT TWO PASSES.** Two sequential
+`String.replace` calls cannot work here: the second re-scans what the first just wrote, and
+every guard against that has an input that defeats it - the first attempt's own guard was
+defeated by a tilde, which is legal in a URL path (`https://example.com/~alice/page` broke
+under it). An alternation matches each construct once, left to right, and `replace()` never
+re-scans its own output, so the class of bug cannot recur by construction.
+
+**THE EDGE BAR AND THE HEADING RULE ARE `COLOR_LABEL`, NOT `COLOR_ACCENT`, AND THAT WAS A
+DELIBERATE CHOICE, NOT A DEFAULT.** Accent already carries five jobs on this surface (heading
+text, the rail knob, the `-- N new below --` badge, the back key border, the filter chip fill),
+and a sixth would dilute all of them - the reader's eye should land on the code, not on its
+margin. The bar sits at x 20..22 (`SCROLL_CODE_EDGE_X` 20, `SCROLL_CODE_EDGE_W` 2), in the
+otherwise-unused SECOND gutter cell (20..28), touching neither the glyph cell (12..20, where
+the role mark and the `+` continuation live) nor the text column (28, `SCROLL_TXT_X`).
+
+**THE EDGE BAR NEEDS NO TOP/BOTTOM FLAGS, AND THAT WAS DESIGNED AND THEN DELETED - RECORDED
+HERE SO THE NEXT READER DOES NOT RE-ADD THEM BELIEVING THEY WERE OVERLOOKED.** A block is
+always separated from what surrounds it by a blank or a prose row, so the bar breaks by itself;
+two flags and their two selftest faults were designed for this and then deliberately removed
+because nothing ever needed them. Confirmed on glass: the bar runs continuously down a block
+and breaks between two blocks (a `SCROLLTO 1060` capture showing block, then a prose heading
+with no bar, then the bar resuming).
+
+**THE `+` CONTINUATION MARK STAYS ALONGSIDE THE NEW INDENT, DELIBERATELY.** They state
+different facts: `+` says THIS ROW WRAPPED, the indent says WHERE IT SAT. Dropping `+` once the
+indent existed would let a wrapped continuation pass as a real nested line - the exact
+misreading a hanging indent alone would invite, and the reason the two are kept together rather
+than the indent replacing the mark.
+
+**THE LANGUAGE LABEL ROW COSTS ONE ROW OUT OF 27 PER BLOCK, AND IT IS THE MOST DROPPABLE ITEM IN
+THIS DESIGN - said plainly rather than defended.** A `bash` block and a `cpp` block are read
+differently, and that is the entire argument for it; a block whose fence names nothing costs
+nothing (`opening && ln > 0` gates it). It can be removed later without touching anything else
+in this design.
+
+**A PRE-EXISTING DEFECT WAS CLOSED IN PASSING, AND IT PREDATES THIS WORK.** `uint8_t lf` and
+`int li` are declared OUTSIDE the per-row loop in both draw paths, and the one-line tool-row arm
+never reset them. So a `$` or `|` row drawn immediately after a code row INHERITED
+`SCROLL_F_CODE` and was painted on the card ground - reachable whenever a message ends in a code
+block and the next entry is the call it describes. Closed by `7a41767`, "A tool row was
+inheriting the code row above it, and the edge bar would have shown it" - named for Task 10's
+edge bar (`2524300`, landing after this fix), which did not exist yet but would have painted a
+grey bar beside exactly such a tool row had this been left unfixed.
+
+**MEASURED ROW COST, ON A REAL TRANSCRIPT FROM THIS PROJECT'S OWN HISTORY.** `histBlockText`
+cannot be imported directly - requiring `host/index.mjs` starts the host - so both the
+pre-branch (`3fa4831`) and HEAD (`8d7ee25`) versions of `histBlockText` and `histShortUrl` were
+extracted from their source text and run in an isolated `vm` context against the same input,
+and the resulting wire text was wrapped with each side's own `scrollWalk` mirror at
+`SCROLL_COLS` 34 - the same two mirrors `scrollback-check.mjs` already carries (the pre-branch
+one restored from `git show 3fa4831:firmware/deckhand_display/scrollback-check.mjs`, since
+HEAD's mirror no longer models the old behaviour). Two real assistant turns from this
+project's own session history (`~/.claude/projects/-Users-yujia-projects-deckhand/`) were
+measured, neither reproduced here since a design doc is not where session content belongs:
+- A 2246-byte turn (two headings, a three-item bulleted list, one `json`-labelled fence, bold
+  text, several inline-code spans, no link): **84 rows before, 90 after, +6** - one row is the
+  language label, the rest is backticks and hanging indents pushing a handful of lines past
+  their wrap boundary.
+- A 3818-byte turn (one `js`-labelled fence, a bulleted list, a table, bold text, several
+  inline-code spans, **two markdown links**, no bare heading): **143 rows before, 144 after,
+  +1**. The language row and the restored backticks still cost rows, but collapsing both
+  `[text](url)` links to `text~` SAVES more than that costs - `[host/index.mjs:4120](host/index.mjs#L4120)`
+  alone drops from 43 characters to 20. Finding 5's fix is not a pure cost the way findings 2-4
+  are; it can net negative.
+
+The direction is consistent (fence language and inline code always cost a little, hanging
+indents cost only where a line was already near the wrap boundary) but the SIZE of the net
+change depends entirely on how much of the turn was links versus code - +1 row in 143 for one
+turn, +6 in 84 for another. **This is an offline measurement, not an on-glass count**: no
+transcript was loaded onto the physical device and counted by eye for this step; see WHAT IS
+NOT VERIFIED below.
+
+**BINARY COST.** Board 1 is `UNCHANGED` at every one of the sixteen commits from `3fa4831`
+through `8d7ee25` - `365406b8ad175a01...`, 1419776 - and re-verified at the commit this section
+belongs to, which touches no firmware. Board 2 moved at every one of the eight commits that
+touched `scrollback.ino`, each measured and explained in its own commit message:
+
+| commit | change | board 2 delta | board 2 size | board 2 hash |
+|---|---|---|---|---|
+| `f3d02bf` | thread the start column through `scrollWalk` | +64 | 1065280 | `873053cf...` |
+| `705f3be` | code keeps its indent on wrap | +48 | 1065328 | `fc347531...` |
+| `7a41767` | tool-row flag reset (the pre-existing defect) | +16 | 1065344 | `a8898052...` |
+| `73db7ea` | bullets hang | +112 | 1065456 | `86bff6a6...` |
+| `0203f9f` | break a spaceless path at a seam | +96 | 1065552 | `d2bcb710...` |
+| `2524300` | the block's edge bar | +48 | 1065600 | `25eeca37...` |
+| `a4f54d3` | the heading rule (+ its selftest faults) | +48 | 1065648 | `4dcbca24...` |
+| `8d7ee25` | the language label row | +96 | 1065744 | `2bd7ac34...` |
+
+ending at `2bd7ac344932a800...`, 1065744 - **528 bytes over the eight commits** (64+48+16+112+
+96+48+48+96), none of it a surprise: each row in this table is the commit message that explains
+its own delta.
+
+**GLASS.** Read directly by the coordinator, not reported secondhand: capture
+`shot-2026-09-13T09-25-22-Deckhand-C114.png` shows five treatments in one frame - a dim
+`markdown` language row above a block on the card ground with the edge bar running through it;
+heading rules under two separate headings; wrapped bullets hanging to their text column;
+wrapped code rows carrying `+` in the gutter and hanging to indent; the card ground behind the
+block. Emphasis markers were correctly NOT stripped inside the fence. **Geometry only** - the
+capture reads the shadow framebuffer, so it vouches for composition and nothing about colour.
+Separately, a `SCROLLTO 1060` capture confirmed the edge bar breaking between two blocks (block,
+then a prose heading with no bar, then the bar resuming).
+
+**WHAT IS NOT VERIFIED, STATED PLAINLY.**
+- **NO CLAIM HERE COVERS COLOUR.** `SCREENSHOT` reads the shadow framebuffer on board 2, so
+  every capture (this section's included) vouches for the geometry the renderer composed and
+  nothing about the panel. Whether `COLOR_LABEL` grey reads against `COLOR_CARD` on the real
+  glass is a `COLORTEST` question and **a person is the authority**, not any checker in this
+  repo.
+- **THE ABSENCE OF AN EDGE BAR BESIDE A `$`/`|` TOOL ROW HAS NEVER BEEN SEEN, ONLY GUARANTEED
+  STRUCTURALLY.** The CHAT filter excludes tool rows at the FETCH level, and switching to ALL
+  needs a physical tap - there is no device command for it. Task 7's `lf = 0; li = 0;` reset
+  runs before `isCode` is computed in both draw paths, and a count-2 assertion binds that in
+  both, so the guarantee is real; no one has looked at the actual pixels.
+- **A BARE, LANGUAGE-LESS FENCE COSTING NO ROW HAS NEVER BEEN PHOTOGRAPHED.** It rests on the
+  mirror assertion and the `opening && ln > 0` guard, both green, neither a picture.
+- **NO FINGER HAS TOUCHED ANY OF IT** - consistent with the rest of this surface. The drag,
+  the rail tap and the filter toggle over this new content are exercised only by the mirror,
+  the structural assertions and `SCROLLPERF`'s synthetic offsets.
+- **THE ROW-COST MEASUREMENT ABOVE IS OFFLINE**, run against extracted source in an isolated
+  `vm` context, not a live transcript loaded onto the physical device and counted by eye. The
+  arithmetic is the firmware's own (`scrollWalk`, mirrored, not re-derived), but no screen was
+  read for it.
+- **NO SCROLLBACK CONSTANT HAS EVER BEEN FAULT-SWEPT, INCLUDING THE ONES ADDED HERE.**
+  `geom-sweep.mjs`'s `CHECKERS` map holds only usage/sessions/settings and has never included
+  `scrollback-check.mjs`, so every scrollback constant - `SCROLL_HANG_MAX`,
+  `SCROLL_CODE_EDGE_X`, `SCROLL_CODE_EDGE_W` included - reports "unguarded, read by no
+  checker" when the sweep runs. Partly mitigated: `scrollback-check.mjs` carries its own
+  closing identities and selftest faults for these constants specifically. But the sweep's own
+  value is proving an assertion CAN fail under perturbation, and this surface has never had
+  that. Expect `geom-sweep.mjs` to keep reporting these three unguarded; that is this
+  pre-existing gap, not a new defect.
+- **`scrollFindCode()` NOW LANDS ON THE LANGUAGE ROW** rather than the first line of code text,
+  because the label row also carries `SCROLL_F_CODE`. Diagnostic-only (`SCROLLPERF code`'s
+  parking position), no assertion binds it either way.
