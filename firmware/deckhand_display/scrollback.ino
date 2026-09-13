@@ -79,12 +79,37 @@ uint16_t scrollTextColor(uint8_t r) {
 #define SCROLL_F_CODE 0x1
 #define SCROLL_F_CONT 0x2
 #define SCROLL_F_HEAD 0x4
+#define SCROLL_F_HEADEND 0x8
+#define SCROLL_F_LANG 0x10
+
+// THE WIDTH OF A LIST MARKER at the start of a source line, or 0 for a line that
+// is not a list item. `* ` and `- ` are two; an ordered marker is its digits plus
+// ". ". Leading spaces are counted in, so a nested item hangs to ITS OWN text
+// column rather than to the outer list's.
+static int scrollListHang(const char* s, int len) {
+  int i = 0;
+  while (i < len && s[i] == ' ') i++;
+  if (i + 1 < len && (s[i] == '*' || s[i] == '-') && s[i + 1] == ' ') return i + 2;
+  int d = i;
+  while (d < len && s[d] >= '0' && s[d] <= '9') d++;
+  if (d > i && d + 1 < len && s[d] == '.' && s[d + 1] == ' ') return d + 2;
+  return 0;
+}
+
+// WHERE A SPACELESS TOKEN MAY BE BROKEN. The word-wrap scans back for a space and
+// gives up past half the lane - and a path or a URL has no space in it at all, so
+// it fell through to a hard cut that landed mid-word. These four are where a
+// reader's eye already expects a seam, and the character STAYS on the row it ends,
+// so the break reads as deliberate rather than as a dropped character.
+static bool scrollBreakAfter(char c) {
+  return c == '/' || c == '.' || c == '-' || c == '_';
+}
 
 static int scrollWalk(const char* t, int cols, int want,
-                      char* out, int outSize, uint8_t* flags, bool* found) {
+                      char* out, int outSize, uint8_t* flags, int* indent, bool* found) {
   if (found) *found = false;
   if (!t[0]) {                                  // an empty entry still owns a row
-    if (want == 0 && out && outSize > 0) { out[0] = '\0'; if (flags) *flags = 0; if (found) *found = true; }
+    if (want == 0 && out && outSize > 0) { out[0] = '\0'; if (flags) *flags = 0; if (indent) *indent = 0; if (found) *found = true; }
     return 1;
   }
   int pos = 0, drawn = 0;
@@ -94,9 +119,28 @@ static int scrollWalk(const char* t, int cols, int want,
     while (t[eol] && t[eol] != '\n') eol++;
     const int srcLen = eol - pos;
 
-    // A fence toggles the mode and is never drawn.
+    // A fence toggles the mode. It draws NOTHING unless it is an OPENING fence
+    // that names a language, in which case that name is one dim row above the
+    // block. A bare fence costs exactly what it costs today.
     if (srcLen >= 3 && t[pos] == '`' && t[pos + 1] == '`' && t[pos + 2] == '`') {
+      const bool opening = !inCode;
       inCode = !inCode;
+      int ln = srcLen - 3;
+      if (ln > cols) ln = cols;
+      if (opening && ln > 0) {
+        if (drawn == want) {
+          if (out && outSize > 0) {
+            int cap = ln < outSize - 1 ? ln : outSize - 1;
+            memcpy(out, t + pos + 3, cap);
+            out[cap] = '\0';
+          }
+          if (flags) *flags = SCROLL_F_CODE | SCROLL_F_LANG;
+          if (indent) *indent = 0;
+          if (found) *found = true;
+          return drawn + 1;
+        }
+        drawn++;
+      }
       pos = t[eol] ? eol + 1 : eol;
       continue;
     }
@@ -112,15 +156,37 @@ static int scrollWalk(const char* t, int cols, int want,
 
     int q = pos + off, rem = srcLen - off;
     bool first = true;
+    // THE HANGING INDENT, decided ONCE per source line and applied to every row
+    // after the first. Code hangs to its own leading whitespace plus one, so a
+    // wrapped row cannot be read as a real line at that depth. A list item hangs
+    // to its marker's width, so a wrapped bullet's second row does not start at
+    // the same column as its `*` - the cap below applies to both arms.
+    int hang = 0;
+    if (inCode) {
+      int lead = 0;
+      while (lead < srcLen && t[pos + lead] == ' ') lead++;
+      hang = lead + 1;
+    } else {
+      hang = scrollListHang(t + pos, srcLen);
+    }
+    if (hang > SCROLL_HANG_MAX) hang = SCROLL_HANG_MAX;
     do {
+      const int room = cols - (first ? 0 : hang);
       int n;
-      if (rem <= cols) n = rem;
-      else if (inCode) n = cols;                // HARD
+      if (rem <= room) n = rem;
+      else if (inCode) n = room;                // HARD
       else {
-        n = cols;
+        n = room;
         int b = n;
-        while (b > cols / 2 && t[q + b - 1] != ' ') b--;
-        if (b > cols / 2) n = b;                // word-friendly, else fall back
+        while (b > room / 2 && t[q + b - 1] != ' ') b--;
+        if (b > room / 2) n = b;                // word-friendly
+        else {
+          // NO SPACE IN THE LANE AT ALL. Rather than hard-cut mid-word, look for
+          // a seam - and only then give up.
+          int c2 = room;
+          while (c2 > room / 2 && !scrollBreakAfter(t[q + c2 - 1])) c2--;
+          if (c2 > room / 2) n = c2;
+        }
       }
       if (n <= 0 && rem > 0) n = 1;             // never stall
       if (drawn == want) {
@@ -129,9 +195,14 @@ static int scrollWalk(const char* t, int cols, int want,
           memcpy(out, t + q, cap);
           out[cap] = '\0';
         }
+        // THE LAST ROW OF THIS SOURCE LINE, decided from what is left AFTER this
+        // row takes its share - the only point at which the answer is knowable.
+        const bool last = (rem - n) <= 0;
         if (flags) *flags = (inCode ? SCROLL_F_CODE : 0)
                           | (first ? 0 : SCROLL_F_CONT)
-                          | (head ? SCROLL_F_HEAD : 0);
+                          | (head ? SCROLL_F_HEAD : 0)
+                          | ((head && last) ? SCROLL_F_HEADEND : 0);
+        if (indent) *indent = first ? 0 : hang;
         if (found) *found = true;
         return drawn + 1;                       // caller only reads this when counting
       }
@@ -150,15 +221,16 @@ static int scrollWalk(const char* t, int cols, int want,
 // entry - well over a hundred lines here - cannot pass through it at all.
 // Raising either would move board 1's binary for a board-2 feature.
 int scrollWrapLines(const char* t, int cols) {
-  return scrollWalk(t, cols, -1, nullptr, 0, nullptr, nullptr);
+  return scrollWalk(t, cols, -1, nullptr, 0, nullptr, nullptr, nullptr);
 }
 
 // The `want`-th DRAWN line of `t`, with what kind of line it is. O(lines) per
 // call, so drawing the last line of a long entry walks it - a few thousand
 // iterations of a trivial loop per frame, nothing beside one flush.
-bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize, uint8_t* flags) {
+bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize,
+                  uint8_t* flags, int* indent) {
   bool found = false;
-  scrollWalk(t, cols, want, out, outSize, flags, &found);
+  scrollWalk(t, cols, want, out, outSize, flags, indent, &found);
   if (!found && out && outSize > 0) out[0] = '\0';
   return found;
 }
@@ -510,6 +582,7 @@ void scrollDrawBody() {
 
   char buf[SCROLL_COLS + 2];
   uint8_t lf = 0;
+  int li = 0;
   int ei = scrollEntryAtLine((uint32_t) (firstLine > 0 ? firstLine - SCROLL_HEAD_LINES : 0));
   for (int row = 0; row <= SCROLL_LINES; row++) {
     const int line = firstLine + row;
@@ -569,6 +642,12 @@ void scrollDrawBody() {
     // sign that anything was missing.
     if (e.role >= 2) {
       if (k > 0) continue;
+      // `lf` AND `li` ARE DECLARED OUTSIDE THIS LOOP, so a row that does not set
+      // them keeps the PREVIOUS row's. A tool row after a code row was inheriting
+      // SCROLL_F_CODE and being painted on the card ground - reachable whenever a
+      // message ends in a code block and the next entry is the call it describes.
+      lf = 0;
+      li = 0;
       const char* t = scrollTextAt(ei);
       int n = strlen(t);
       if (n > SCROLL_COLS) {
@@ -580,7 +659,7 @@ void scrollDrawBody() {
         buf[sizeof(buf) - 1] = '\0';
       }
     } else {
-      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf), &lf);
+      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf), &lf, &li);
     }
 
     // CODE SITS ON A PANEL, the treatment ask details already give code - and it
@@ -589,9 +668,15 @@ void scrollDrawBody() {
     // text-width: a ragged right edge would not read as a block.
     const bool isCode = (lf & SCROLL_F_CODE) != 0;
     const uint16_t bg = isCode ? COLOR_CARD : COLOR_BG;
-    if (isCode)
+    if (isCode) {
       tft.fillRect(SCROLL_GUT_X, y, SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_GUT_X,
                    CODE_LINE_H, COLOR_CARD);
+      // THE BLOCK'S OWN EDGE, which a per-row fill cannot be. COLOR_LABEL because
+      // this is structure and accent already carries five jobs here. No top or
+      // bottom flag is needed: a block is always separated from what surrounds it
+      // by a blank or a prose row, so the bar breaks by itself.
+      tft.fillRect(SCROLL_CODE_EDGE_X, y, SCROLL_CODE_EDGE_W, CODE_LINE_H, COLOR_LABEL);
+    }
 
     setUIFont(1);
     if (k == 0) {
@@ -607,10 +692,20 @@ void scrollDrawBody() {
       tft.drawString("+", SCROLL_GUT_X, y);
     }
     // A heading takes the accent so sections are findable while scrolling; its
-    // own # markers were stripped by the walker.
-    tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
+    // own # markers were stripped by the walker. A LANGUAGE ROW is dim: it labels
+    // the block, it is not part of it.
+    const uint16_t fg = (lf & SCROLL_F_HEAD) ? COLOR_ACCENT
+                      : (lf & SCROLL_F_LANG) ? COLOR_LABEL
+                      : scrollTextColor(e.role);
+    tft.setTextColor(fg, bg);
     tft.setTextDatum(TL_DATUM);
-    tft.drawString(buf, SCROLL_TXT_X, y);
+    tft.drawString(buf, SCROLL_TXT_X + li * TEXT_ADV, y);
+    // THE HEADING'S RULE, under its LAST row only - a rule between a wrapped
+    // heading's two rows reads as two headings. COLOR_LABEL under accent text: a
+    // rule is structure, and orange under orange reads as one thicker heading.
+    if (lf & SCROLL_F_HEADEND)
+      tft.fillRect(SCROLL_TXT_X, y + CODE_LINE_H - 2,
+                   SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_TXT_X, 1, COLOR_LABEL);
   }
 
   // NEW-BELOW BADGE, over the bottom row and only while the view is held away
@@ -681,6 +776,7 @@ void scrollDrawBand(int shift) {
 
   char buf[SCROLL_COLS + 2];
   uint8_t lf = 0;
+  int li = 0;
   int ei = scrollEntryAtLine((uint32_t) (firstLine > 0 ? firstLine - SCROLL_HEAD_LINES : 0));
   for (int row = 0; row <= SCROLL_LINES; row++) {
     const int line = firstLine + row;
@@ -735,6 +831,12 @@ void scrollDrawBand(int shift) {
 
     if (e.role >= 2) {
       if (k > 0) continue;
+      // `lf` AND `li` ARE DECLARED OUTSIDE THIS LOOP, so a row that does not set
+      // them keeps the PREVIOUS row's. A tool row after a code row was inheriting
+      // SCROLL_F_CODE and being painted on the card ground - reachable whenever a
+      // message ends in a code block and the next entry is the call it describes.
+      lf = 0;
+      li = 0;
       const char* t = scrollTextAt(ei);
       int tn = strlen(t);
       if (tn > SCROLL_COLS) {
@@ -746,7 +848,7 @@ void scrollDrawBand(int shift) {
         buf[sizeof(buf) - 1] = '\0';
       }
     } else {
-      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf), &lf);
+      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf), &lf, &li);
     }
 
     // CODE SITS ON A PANEL, the treatment ask details already give code - and it
@@ -755,9 +857,15 @@ void scrollDrawBand(int shift) {
     // text-width: a ragged right edge would not read as a block.
     const bool isCode = (lf & SCROLL_F_CODE) != 0;
     const uint16_t bg = isCode ? COLOR_CARD : COLOR_BG;
-    if (isCode)
+    if (isCode) {
       tft.fillRect(SCROLL_GUT_X, y, SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_GUT_X,
                    CODE_LINE_H, COLOR_CARD);
+      // THE BLOCK'S OWN EDGE, which a per-row fill cannot be. COLOR_LABEL because
+      // this is structure and accent already carries five jobs here. No top or
+      // bottom flag is needed: a block is always separated from what surrounds it
+      // by a blank or a prose row, so the bar breaks by itself.
+      tft.fillRect(SCROLL_CODE_EDGE_X, y, SCROLL_CODE_EDGE_W, CODE_LINE_H, COLOR_LABEL);
+    }
 
     setUIFont(1);
     if (k == 0) {
@@ -773,10 +881,20 @@ void scrollDrawBand(int shift) {
       tft.drawString("+", SCROLL_GUT_X, y);
     }
     // A heading takes the accent so sections are findable while scrolling; its
-    // own # markers were stripped by the walker.
-    tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
+    // own # markers were stripped by the walker. A LANGUAGE ROW is dim: it labels
+    // the block, it is not part of it.
+    const uint16_t fg = (lf & SCROLL_F_HEAD) ? COLOR_ACCENT
+                      : (lf & SCROLL_F_LANG) ? COLOR_LABEL
+                      : scrollTextColor(e.role);
+    tft.setTextColor(fg, bg);
     tft.setTextDatum(TL_DATUM);
-    tft.drawString(buf, SCROLL_TXT_X, y);
+    tft.drawString(buf, SCROLL_TXT_X + li * TEXT_ADV, y);
+    // THE HEADING'S RULE, under its LAST row only - a rule between a wrapped
+    // heading's two rows reads as two headings. COLOR_LABEL under accent text: a
+    // rule is structure, and orange under orange reads as one thicker heading.
+    if (lf & SCROLL_F_HEADEND)
+      tft.fillRect(SCROLL_TXT_X, y + CODE_LINE_H - 2,
+                   SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_TXT_X, 1, COLOR_LABEL);
   }
 
   // The rail, repainted WHOLE - the shift moved the viewport's fraction of
@@ -856,10 +974,11 @@ void drawScrollback() {
 long scrollFindCode() {
   char tmp[SCROLL_COLS + 2];
   uint8_t f = 0;
+  int fi = 0;
   for (int i = 0; i < scrollCount; i++) {
     const ScrollEntry& e = scrollIdx[i];
     for (int k = 0; k < e.lines; k++) {
-      if (scrollLineAt(scrollTextAt(i), SCROLL_COLS, k, tmp, sizeof(tmp), &f) && (f & SCROLL_F_CODE))
+      if (scrollLineAt(scrollTextAt(i), SCROLL_COLS, k, tmp, sizeof(tmp), &f, &fi) && (f & SCROLL_F_CODE))
         return (long) e.lineFirst + k + SCROLL_HEAD_LINES;
     }
   }

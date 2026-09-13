@@ -1531,6 +1531,23 @@ function histFlatten(v, max = HIST_PREVIEW_CAP) {
 // present them. What is removed is markdown that carries no meaning without a
 // bold face - `**`, `__` and inline backticks - and only OUTSIDE fenced code,
 // where those characters are part of the program.
+
+// A LINK THAT CANNOT BE FOLLOWED STILL HAS TO SAY IT EXISTED. Collapsing
+// `[text](url)` to `text` destroys that fact silently, and from the Mac silence
+// and "there was never a link here" are indistinguishable. One ASCII character,
+// inside Spleen's range, is the whole cost. Tapping it is Option D.
+const SCROLL_LINK_MARK = "~";
+// A bare URL has no space in it, so the device's word-wrap gives up and hard-cuts
+// it mid-token at column 34. Shortened here instead: the host and the tail are
+// what identify it, and the middle never survived the lane anyway.
+function histShortUrl(u) {
+  const b = u.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  if (b.length <= 28) return b;
+  const p = b.split("/");
+  if (p.length < 3) return b.slice(0, 25) + "...";
+  return p[0] + "/.../" + p[p.length - 1];
+}
+
 function histBlockText(v, max = HIST_FULL_CAP) {
   const lines = toAscii(v).replace(/\r\n?/g, "\n").split("\n");
   const out = [];
@@ -1545,7 +1562,21 @@ function histBlockText(v, max = HIST_FULL_CAP) {
     t = t.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
          .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
          .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
-    if (/^\s*```/.test(t)) { inFence = !inFence; out.push("```"); continue; }
+    // THE INFO STRING SURVIVES THE OPENING FENCE. It was normalised away here, so
+    // the device could not label a block with a language it never received. No
+    // version bump: scrollWalk's fence test reads the first three backticks and
+    // ignores the rest, so a board on older firmware drops the language rather
+    // than printing it. The CLOSING fence stays bare - a language on it means
+    // nothing and would only be a second thing to keep in step.
+    const fence = /^\s*```(\S*)/.exec(t);
+    if (fence) {
+      const lang = inFence
+        ? ""
+        : toAscii(fence[1]).replace(/[^A-Za-z0-9+#_.-]/g, "").slice(0, 12);
+      inFence = !inFence;
+      out.push("```" + lang);
+      continue;
+    }
     if (!inFence) {
       // Emphasis markers carry nothing without a bold face. Doubles first, then
       // SINGLES - `*fall*` was reaching the screen with its asterisks because
@@ -1560,6 +1591,20 @@ function histBlockText(v, max = HIST_FULL_CAP) {
       // glob is not emphasis.
       const spans = [];
       t = t.replace(/`([^`\n]+)`/g, (_, inner) => `\u0001${spans.push(inner) - 1}\u0002`);
+      // AFTER the spans are protected, so a URL inside a code span is left exactly
+      // as written, and BEFORE the emphasis strip, so an asterisk inside a URL is
+      // not read as a marker.
+      // ONE PASS, ONE ALTERNATION. Two sequential replaces cannot work here:
+      // the second re-scans what the first just wrote, and every guard against
+      // that has an input which defeats it - a tilde is legal in a URL path.
+      // An alternation matches each construct once and replace() never
+      // re-scans its own output. The URL arm may not END on sentence
+      // punctuation, so a comma after a URL stays in the prose where it
+      // belongs rather than being eaten or deleted.
+      t = t.replace(
+        /\[([^\]\n]+)\]\(([^)\n]+)\)|https?:\/\/[^\s)\]]*[^\s)\].,;:?!]/g,
+        (m, txt) => (txt !== undefined ? txt : histShortUrl(m)) + SCROLL_LINK_MARK
+      );
       // DOUBLE MARKERS ARE STRIPPED OUTRIGHT, not matched as pairs. A pair regex
       // needs both markers on ONE line, and markdown bold routinely spans a line
       // break in the source - which is why `**The counter reports...` was still
@@ -1569,7 +1614,10 @@ function histBlockText(v, max = HIST_FULL_CAP) {
       // asterisk matches here and the single rule below requires its text hugged.
       t = t.replace(/\*\*/g, "").replace(/__/g, "");
       t = t.replace(/(^|[^\w*])\*([^\s*][^*\n]*?)\*(?![\w*])/g, "$1$2");
-      t = t.replace(/\u0001(\d+)\u0002/g, (_, i) => spans[+i]);
+      // THE BACKTICKS COME BACK. They were dropped here, which left an inline span
+      // indistinguishable from prose on a board that has no bold face to put in
+      // their place. They are ASCII, inside Spleen's range, one column each side.
+      t = t.replace(/\u0001(\d+)\u0002/g, (_, i) => "`" + spans[+i] + "`");
     }
     out.push(t);
   }

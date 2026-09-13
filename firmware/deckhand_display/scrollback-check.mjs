@@ -72,6 +72,112 @@ if (SELFTEST) {
   if (fault === "seq-append")
     SKETCH = SKETCH.replace(/if \(seq != scrollNextSeq\) \{[\s\S]*?\n      \}/, "if (seq != scrollNextSeq) {\n      }");
   if (fault === "wide-marker") INO = INO.replace(/"\$"/, '"·"');
+  // TASK 5: proves the two-draw-paths equivalence assertion below actually
+  // binds rather than passing vacuously. A plain, non-global replace hits
+  // only the FIRST occurrence of the pattern in the whole (comment-stripped)
+  // file. SCROLL_TXT_X is spelled nowhere else in scrollback.ino, so that
+  // first hit lands inside scrollDrawBody's own row-drawing region (its
+  // `drawString(buf, SCROLL_TXT_X, y);`) and nowhere else - editing exactly
+  // one of the two compared regions, which is what makes them stop matching.
+  if (fault === "draw-path-drift") INO = INO.replace(/SCROLL_TXT_X/, "SCROLL_GUT_X");
+  // TASK 7: proves the tool-arm reset assertion actually binds rather than
+  // passing vacuously. A plain, non-global replace hits only the FIRST
+  // occurrence in the comment-stripped file - scrollDrawBody's arm - leaving
+  // scrollDrawBand's intact, so toolArms.length drops from 2 to 1 and the
+  // assertion must fail BY NAME rather than pass on the surviving copy.
+  if (fault === "tool-arm-inherit")
+    INO = INO.replace(/lf = 0;\s*li = 0;/, "");
+  // TASK 8: proves the list-hang assertion actually binds rather than passing
+  // on an unrelated line. Reverting the else arm to a plain 0 leaves
+  // scrollListHang itself still defined and callable - so only the ONE
+  // assertion bound to walkBody's own text must fail, not the "is findable"
+  // check above it.
+  if (fault === "list-hang-drop")
+    INO = INO.replace(/hang = scrollListHang\(t \+ pos, srcLen\);/, "hang = 0;");
+  // TASK 9: proves the seam-fallback assertion actually binds. Deleting just the
+  // `if` that applies c2 leaves scrollBreakAfter itself still defined and called
+  // in the loop condition above it - so only the ONE assertion bound to the
+  // fallback's own effect must fail, not the "is findable" check above it.
+  if (fault === "no-seam")
+    INO = INO.replace(/if \(c2 > room \/ 2\) n = c2;/, "");
+  // TASK 10: proves the edge-bar assertion actually binds rather than passing on a
+  // single surviving copy. A plain, non-global replace hits only the FIRST
+  // occurrence of the fillRect in the comment-stripped file - scrollDrawBody's -
+  // leaving scrollDrawBand's intact, so bars.length drops from 2 to 1 and the
+  // assertion must fail BY NAME rather than pass because one path still draws it.
+  if (fault === "edge-one-path")
+    INO = INO.replace(
+      /tft\.fillRect\(SCROLL_CODE_EDGE_X, y, SCROLL_CODE_EDGE_W, CODE_LINE_H, COLOR_LABEL\);/,
+      "");
+  // TASK 11 FIX ROUND 1: falsifiability for the two new structural assertions
+  // had been shown once, by hand, at Step 2 - with no fault to keep it proven
+  // as the surface changes underneath it. Reverting `(head && last)` to plain
+  // `head` puts SCROLL_F_HEADEND on EVERY row of a wrapped heading rather than
+  // its last - exactly the "rule between a wrapped heading's two rows reads
+  // as two headings" bug the operand assertion exists to keep out.
+  if (fault === "headend-wrong-row")
+    INO = INO.replace(/\(head && last\) \? SCROLL_F_HEADEND : 0/, "head ? SCROLL_F_HEADEND : 0");
+  // A plain, non-global replace hits only the FIRST occurrence of the rule's
+  // fillRect in the comment-stripped file - scrollDrawBody's - leaving
+  // scrollDrawBand's intact. Confirmed by hand that the exact call (args
+  // included, not just the `if`) appears exactly twice before relying on
+  // that: Task 7's fault once nearly matched a declaration instead of the
+  // reset it was aiming at, and only an intervening `int` saved it. Expected
+  // to trip BOTH the count-2 assertion below AND Task 5's drawRegion
+  // equivalence, since the extended region now spans this rule too - that is
+  // double coverage working, not a defect.
+  if (fault === "headend-one-path")
+    INO = INO.replace(
+      /tft\.fillRect\(SCROLL_TXT_X, y \+ CODE_LINE_H - 2,\s*SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_TXT_X, 1, COLOR_LABEL\);/,
+      "");
+  // TASK 12: falsifiability for its three new structural assertions, each with
+  // its own fault - the previous task shipped two assertions with none, which
+  // this plan's own outer instructions call out as a defect, not repeated here.
+  // `lang-no-flag`: the flag itself is gone. Nothing else in this file's
+  // structural checks reads the literal `#define SCROLL_F_LANG` text, so this
+  // must trip exactly the one assertion bound to it, not cascade.
+  if (fault === "lang-no-flag")
+    INO = INO.replace("#define SCROLL_F_LANG 0x10\n", "");
+  // `lang-any-fence`: the operand that restricts the row to an OPENING fence is
+  // dropped, so a CLOSING fence would draw one too - the exact "decide it by
+  // operand, not by comment" bug the assertion exists to keep out.
+  if (fault === "lang-any-fence")
+    INO = INO.replace("const bool opening = !inCode;", "const bool opening = true;");
+  // `lang-one-path`: a plain (non-regex) String.replace hits only the FIRST
+  // occurrence of the block in the comment-stripped file - scrollDrawBody's,
+  // since it appears first - leaving scrollDrawBand's intact, so `dims.length`
+  // drops from 2 to 1 and the assertion must fail BY NAME rather than pass on
+  // the surviving copy. Also expected to trip the drawRegion equivalence check,
+  // since the reverted path's text no longer matches its twin - the same
+  // double coverage `headend-one-path` above produced.
+  if (fault === "lang-one-path")
+    INO = INO.replace(
+      "const uint16_t fg = (lf & SCROLL_F_HEAD) ? COLOR_ACCENT\n" +
+      "                      : (lf & SCROLL_F_LANG) ? COLOR_LABEL\n" +
+      "                      : scrollTextColor(e.role);\n" +
+      "    tft.setTextColor(fg, bg);",
+      "tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);");
+}
+
+// MIRRORS scrollListHang: the width of a list marker at the start of a source
+// line, or 0 for a line that is not a list item. `* ` and `- ` are two; an
+// ordered marker is its digits plus ". ". Leading spaces are counted IN, so a
+// nested item hangs to its own text column rather than the outer list's - which
+// is why this takes the whole line, not a pre-trimmed one.
+// MIRRORS scrollBreakAfter: the four seam characters a spaceless token may be
+// broken after when the space scan gives up.
+function breakAfter(c) {
+  return c === "/" || c === "." || c === "-" || c === "_";
+}
+
+function listHang(s) {
+  let i = 0;
+  while (i < s.length && s[i] === " ") i++;
+  if (i + 1 < s.length && (s[i] === "*" || s[i] === "-") && s[i + 1] === " ") return i + 2;
+  let d = i;
+  while (d < s.length && s[d] >= "0" && s[d] <= "9") d++;
+  if (d > i && d + 1 < s.length && s[d] === "." && s[d + 1] === " ") return d + 2;
+  return 0;
 }
 
 // ---------------- MIRROR: the wrap rule and the line index ----------------
@@ -84,15 +190,26 @@ if (SELFTEST) {
 // already records for a mirror: it proves the ALGORITHM and binds nothing, so it
 // can agree with itself while the device does something else.
 function walk(t, cols) {
-  const rows = [];                       // {text, code, cont, head}
-  if (!t.length) return [{ text: "", code: false, cont: false, head: false }];
+  const rows = [];                       // {text, code, cont, head, ind}
+  if (!t.length) return [{ text: "", code: false, cont: false, head: false, headEnd: false, ind: 0, lang: false }];
   let pos = 0, inCode = false;
   while (pos < t.length) {
     let eol = pos;
     while (eol < t.length && t[eol] !== "\n") eol++;
     const srcLen = eol - pos;
+    // MIRRORS scrollWalk's fence arm (Task 12): a fence toggles the mode and
+    // draws NOTHING unless it is an OPENING fence that names a language, in
+    // which case that name is ONE dim row above the block - `opening` is
+    // read BEFORE the toggle, matching the firmware's own ordering.
     if (srcLen >= 3 && t.slice(pos, pos + 3) === "```") {
+      const opening = !inCode;
       inCode = !inCode;
+      let ln = srcLen - 3;
+      if (ln > cols) ln = cols;
+      if (opening && ln > 0) {
+        rows.push({ text: t.slice(pos + 3, pos + 3 + ln), code: true, cont: false,
+                    head: false, headEnd: false, ind: 0, lang: true });
+      }
       pos = eol < t.length ? eol + 1 : eol;
       continue;
     }
@@ -103,24 +220,48 @@ function walk(t, cols) {
       while (off < srcLen && t[pos + off] === " ") off++;
     }
     let q = pos + off, rem = srcLen - off, first = true;
+    // THE HANGING INDENT, decided once per source line, mirroring scrollWalk's
+    // own hang: code hangs to its own leading whitespace plus one, capped at
+    // SCROLL_HANG_MAX. A prose line instead hangs to its list marker's width,
+    // via listHang - counting leading spaces IN, so a nested item hangs to its
+    // own text column rather than the outer list's.
+    let hang = 0;
+    if (inCode) {
+      let lead = 0;
+      while (lead < srcLen && t[pos + lead] === " ") lead++;
+      hang = lead + 1;
+    } else {
+      hang = listHang(t.slice(pos, pos + srcLen));
+    }
+    if (hang > c.SCROLL_HANG_MAX) hang = c.SCROLL_HANG_MAX;
     do {
+      const room = cols - (first ? 0 : hang);
       let n;
-      if (rem <= cols) n = rem;
-      else if (inCode) n = cols;
+      if (rem <= room) n = rem;
+      else if (inCode) n = room;
       else {
-        n = cols;
+        n = room;
         let b = n;
-        while (b > Math.floor(cols / 2) && t[q + b - 1] !== " ") b--;
-        if (b > Math.floor(cols / 2)) n = b;
+        while (b > Math.floor(room / 2) && t[q + b - 1] !== " ") b--;
+        if (b > Math.floor(room / 2)) n = b;
+        else {
+          let c2 = room;
+          while (c2 > Math.floor(room / 2) && !breakAfter(t[q + c2 - 1])) c2--;
+          if (c2 > Math.floor(room / 2)) n = c2;
+        }
       }
       if (n <= 0 && rem > 0) n = 1;
-      rows.push({ text: t.slice(q, q + n), code: inCode, cont: !first, head });
+      // THE LAST ROW OF THIS SOURCE LINE, mirroring scrollWalk's own `last`:
+      // decided from what remains AFTER this row takes its share, before rem
+      // is updated below.
+      const headEnd = head && (rem - n) <= 0;
+      rows.push({ text: t.slice(q, q + n), code: inCode, cont: !first, head, headEnd, ind: first ? 0 : hang, lang: false });
       q += n; rem -= n; first = false;
       if (!inCode) while (rem > 0 && t[q] === " ") { q++; rem--; }
     } while (rem > 0);
     pos = eol < t.length ? eol + 1 : eol;
   }
-  return rows.length ? rows : [{ text: "", code: false, cont: false, head: false }];
+  return rows.length ? rows : [{ text: "", code: false, cont: false, head: false, headEnd: false, ind: 0, lang: false }];
 }
 const wrapLines = (t, cols) => walk(t, cols).length;
 
@@ -161,6 +302,27 @@ m(walk("## Title", COLS)[0].text === "Title", "mirror: the heading's markers are
   m(proseHard[0].text.length === COLS,
     "mirror: prose hard-breaks when the only space is before cols/2 - never stalls");
 }
+
+m(walk("```\n  int b = n;\n```", 10)[1].ind === 3,
+  "mirror: a wrapped code row hangs to its own indent + 1");
+m(walk("```\n" + " ".repeat(40) + "x".repeat(40) + "\n```", COLS)[1].ind === c.SCROLL_HANG_MAX,
+  "mirror: a deeply indented line is capped at SCROLL_HANG_MAX");
+
+// TASK 8: a list item hangs to its own text column, reusing the same `hang`
+// mechanism Task 6 built for code - so a wrapped bullet's second row does not
+// start at the same column as its marker.
+m(walk("* one two three four five", 12)[1].ind === 2,
+  "mirror: a wrapped bullet hangs to its text column, not to its marker");
+m(walk("12. one two three four five", 12)[1].ind === 4,
+  "mirror: an ordered marker's width includes its digits and its dot");
+m(walk("plain prose that wraps here", 12)[1].ind === 0,
+  "mirror: prose that is not a list does not hang - wrapping is simply how prose reads");
+
+// TASK 9: a spaceless token breaks at a seam (/ . - _) rather than mid-word.
+m(walk("docs/reference/scrollback.md", 20)[0].text === "docs/reference/",
+  "mirror: a spaceless path breaks after the last separator inside the lane");
+m(walk("x".repeat(30), 10).length === 3,
+  "mirror: a token with no space and no seam still hard-cuts, and never stalls");
 
 // The index: lineFirst accumulates lines PLUS the spacer, and a result tucks
 // against its own call with no spacer - the pair reads as one unit.
@@ -211,12 +373,101 @@ m(bad === null, `mirror: the binary search lands in range for every line${bad ==
 // selftest went BLIND at the same moment. The rule they exist for lives wherever
 // the loop is.
 const wrapBody = body(INO, "static int scrollWalk(const char* t, int cols, int want,", "scrollback.ino");
+// scrollWalk must be able to report WHICH COLUMN a wrapped row starts at, so a
+// renderer can keep a code line's indentation or hang a list item - a renderer
+// that cannot ask cannot draw a hanging indent. Bound to scrollWalk's own text,
+// not a neighbouring line, via a regex over the raw (comment-stripped) INO
+// rather than through body()'s exact-signature match, since the signature
+// itself is part of what is being asserted here.
+const walkFn = /static int scrollWalk\([\s\S]*?\n}\n/.exec(INO);
+s(walkFn != null, "structural: scrollWalk is findable");
+s(/int\* indent/.test(walkFn ? walkFn[0] : ""),
+  "structural: scrollWalk reports the column its row starts at - a renderer that cannot " +
+  "ask cannot draw a hanging indent");
+
+// THE HANGING INDENT (Task 6). A wrapped code row restarts under its own
+// source indent, or it reads as a real line at column 0 - which is most of
+// how code is misread.
+s(c.SCROLL_HANG_MAX !== undefined, "structural: the hanging-indent cap is a named constant");
+s(c.SCROLL_HANG_MAX > 0 && c.SCROLL_HANG_MAX < c.SCROLL_COLS / 2,
+  `structural: SCROLL_HANG_MAX (${c.SCROLL_HANG_MAX}) leaves over half the lane for text - ` +
+  "past that the wrap itself becomes the unreadable thing");
+const walkBody = walkFn ? walkFn[0] : "";
+s(/hang = lead \+ 1;/.test(walkBody),
+  "structural: a wrapped code row hangs to its source line's own indent plus one");
+s(/if \(hang > SCROLL_HANG_MAX\) hang = SCROLL_HANG_MAX;/.test(walkBody),
+  "structural: the hang is capped by the named constant, not by a literal");
+
+// TASK 8: a list item's hang comes from its own named function, not a copy of
+// the code arm's arithmetic, and the cap still applies to both arms.
+s(/static int scrollListHang\(/.test(INO),
+  "structural: the list marker's width is measured by its own named function");
+s(/hang = scrollListHang\(t \+ pos, srcLen\);/.test(walkBody),
+  "structural: a prose line's hang comes from its list marker");
+
+// TASK 9: a spaceless token (a path or a URL) has no space to scan back for, so
+// prose fell through to a hard cut mid-word. The seam predicate is its own named
+// function, not four literals inlined at the call site, and the wrap tries it
+// ONLY after the space scan gives up.
+s(/static bool scrollBreakAfter\(char c\)/.test(INO),
+  "structural: the extra break points are their own named predicate, not four literals " +
+  "inlined in the wrap");
+// Bound to BOTH the scan and its use: a fault that deletes only the
+// `if (c2 > room / 2) n = c2;` assignment leaves scrollBreakAfter still CALLED
+// in the while condition above it, which is exactly the "neighbouring line
+// satisfies it" trap this file's own header warns about - so the regex requires
+// the assignment to immediately follow the scan, not merely to exist somewhere.
+s(/scrollBreakAfter\(t\[q \+ c2 - 1\]\)\) c2--;\s*if \(c2 > room \/ 2\) n = c2;/.test(walkBody),
+  "structural: prose that found no space falls back to a seam BEFORE hard-cutting");
+
+// TASK 11: a heading is distinguished by accent COLOUR alone, and colour is the
+// one thing a board-2 capture cannot verify - SCREENSHOT reads the shadow
+// framebuffer, not the panel. A 1px rule under the heading's LAST row survives a
+// greyscale reading; a rule between a wrapped heading's two rows would instead
+// read as two headings, so `last` must be decided from what is left AFTER this
+// row takes its share - the only point at which the answer is knowable.
+s(/#define SCROLL_F_HEADEND 0x8/.test(INO),
+  "structural: the heading's last row has its own flag");
+s(/\(head && last\) \? SCROLL_F_HEADEND : 0/.test(walkBody),
+  "structural: SCROLL_F_HEADEND is set on the LAST row of a heading, by operand - a rule " +
+  "between a wrapped heading's two rows reads as two headings");
+const headEndRules = INO.match(/lf & SCROLL_F_HEADEND\)[\s\S]{0,120}?CODE_LINE_H - 2/g);
+s(headEndRules != null && headEndRules.length === 2,
+  "structural: BOTH draw paths draw the rule under the row carrying SCROLL_F_HEADEND");
+m(walk("## a heading long enough to wrap here", 12).filter((r) => r.headEnd).length === 1,
+  "mirror: exactly one row of a wrapped heading is its last");
+
+s(/drawString\(buf, SCROLL_TXT_X \+ li \* TEXT_ADV, y\)/.test(INO),
+  "structural: the renderer DRAWS at the column scrollWalk reported - a hang that is " +
+  "computed and not drawn changes line counts and nothing else");
+
+// TASK 12: the language label row. THE MOST DROPPABLE ITEM IN THE DESIGN - one
+// dim row out of 27 per block, kept because a `bash` block and a `cpp` block
+// are read differently, and removable later without touching anything else.
+// Emitted on the OPENING fence ONLY (by operand, not by comment) - a closing
+// fence still draws nothing, so a fence that names nothing still costs
+// nothing. The colour decision lands in BOTH draw paths.
+s(/#define SCROLL_F_LANG 0x10/.test(INO), "structural: a language row has its own flag");
+s(/const bool opening = !inCode;/.test(walkBody),
+  "structural: the language row is emitted on the OPENING fence only - a closing fence " +
+  "still draws nothing");
+const dims = INO.match(/lf & SCROLL_F_LANG\) \? COLOR_LABEL/g);
+s(dims != null && dims.length === 2,
+  "structural: BOTH draw paths draw a language row dim - it labels the block, it is not " +
+  "part of it");
+m(walk("```cpp\nint x;\n```", COLS).length === 2,
+  "mirror: a fence that names a language costs ONE row; the block below is unchanged");
+m(walk("```\nint x;\n```", COLS).length === 1,
+  "mirror: a fence that names nothing still costs nothing");
+m(walk("```cpp\nint x;\n```", COLS)[0].lang === true,
+  "mirror: the language row is flagged as one");
+
 // And ONE rule, not two: the counter must delegate to the same walker the
 // renderer drives, or the index says one thing and the screen draws another.
 const wlBody = body(INO, "int scrollWrapLines(const char* t, int cols)", "scrollback.ino");
 present(wlBody, /scrollWalk\(/,
   "structural: scrollWrapLines delegates to the walker rather than wrapping itself");
-const laBody = body(INO, "bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize, uint8_t* flags)", "scrollback.ino");
+const laBody = body(INO, "bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize,\n                  uint8_t* flags, int* indent)", "scrollback.ino");
 present(laBody, /scrollWalk\(/,
   "structural: scrollLineAt drives the SAME walker, so both agree by construction");
 // The walker must be fence-aware, or code and prose wrap by one rule and the
@@ -324,6 +575,18 @@ if (SELFTEST) {
   // The quieter one: the ACK is still awaited, and its answer is thrown away.
   if (hf === "host-dropack")
     HOSTSRC = HOSTSRC.replace(/const\s+(\w+)\s*=\s*(await waitForScrollAck\()/, "$2");
+  if (hf === "no-lang")
+    HOSTSRC = HOSTSRC.replace(/out\.push\("```" \+ lang\)/, 'out.push("```")');
+  if (hf === "backtick-restore")
+    HOSTSRC = HOSTSRC.replace(/=> "`" \+ spans\[\+i\] \+ "`"/, "=> spans[+i]");
+  if (hf === "no-link-collapse")
+    // Change the callback to ignore link groups, only shortening bare URLs
+    HOSTSRC = HOSTSRC.replace(/\(txt !== undefined \? txt : histShortUrl\(m\)\)/, "histShortUrl(m)");  // disable link handling
+  if (hf === "no-url-shorten")
+    HOSTSRC = HOSTSRC.replace(/function histShortUrl\(/, "function histShortUrlDisabled(");
+  if (hf === "double-mark")
+    // Break the alternation by making the URL arm never match, so only links work
+    HOSTSRC = HOSTSRC.replace(/\|https\?:\\\/\\\//, "|(?!)https?:\\/\\/");  // URL arm never matches
 }
 
 // A CHECKER MUST PARSE THE CONSTANT IT CERTIFIES, NEVER TRANSCRIBE IT - and this
@@ -494,6 +757,62 @@ for (const [fn, sig] of [["scrollDrawBody", "void scrollDrawBody()"],
   present(b, /y < SCROLL_TOP/, `structural: ${fn} clips the top edge`);
 }
 
+// THE TWO DRAW PATHS ARE ONE PATH WRITTEN TWICE, and the second is the one that
+// gets forgotten. Compare the per-row DRAWING region of each - from the isCode
+// decision to the drawString of the row's text - with whitespace collapsed, so a
+// reflow is allowed and a behaviour change is not.
+function drawRegion(fnName) {
+  const fn = new RegExp("void " + fnName + "\\([\\s\\S]*?\\n}\\n").exec(INO);
+  if (!fn) return null;
+  // Task 11 extends the region: widen this line's end anchor past drawString,
+  // not the isCode start above - that is the only edit it should need. The new
+  // rule falls under this row's own drawString, inside the SAME per-row region,
+  // so the equivalence check below still covers it in both paths.
+  const r = /const bool isCode[\s\S]*?SCROLL_F_HEADEND\)[\s\S]*?COLOR_LABEL\);/.exec(fn[0]);
+  return r ? r[0].replace(/\s+/g, " ").trim() : null;
+}
+const regBody = drawRegion("scrollDrawBody");
+const regBand = drawRegion("scrollDrawBand");
+s(regBody != null, "structural: scrollDrawBody's row-drawing region is findable");
+s(regBand != null, "structural: scrollDrawBand's row-drawing region is findable");
+s(regBody != null && regBody === regBand,
+  "structural: the two draw paths draw a row IDENTICALLY - fixing only scrollDrawBody " +
+  "has already broken this surface's pixel-for-pixel equivalence once");
+
+// A TOOL ROW MUST NOT INHERIT THE PREVIOUS ROW'S FLAGS. `lf` and `li` are
+// declared OUTSIDE the per-row loop in both paths, and the drawRegion() check
+// above starts at `const bool isCode` - BELOW this arm - so it does not cover
+// it. Without an explicit reset, a `$ ran` / `| result` / `! denied` row drawn
+// right after a code row inherits SCROLL_F_CODE and is painted on COLOR_CARD -
+// reachable whenever a message ends in a code block and the next entry is the
+// tool call it describes. Two occurrences required: one per draw path.
+const flat = INO.replace(/\s+/g, " ");
+const toolArms = flat.match(/if \(e\.role >= 2\) \{ if \(k > 0\) continue; lf = 0; li = 0;/g);
+s(toolArms != null && toolArms.length === 2,
+  "structural: BOTH draw paths' one-line tool arms CLEAR the flags - lf is declared " +
+  "outside the row loop, so without this a $ or | row after a code row inherits " +
+  "SCROLL_F_CODE and its card ground");
+
+// TASK 10: A PER-ROW COLOR_CARD FILL SAYS "this row is code" AND CANNOT SAY WHERE
+// A BLOCK STARTS OR ENDS - a one-line block reads as a highlighted prose line.
+// The edge bar is COLOR_LABEL, not COLOR_ACCENT: this is structure, not emphasis,
+// and accent already carries five jobs on this surface. No top/bottom flag is
+// needed or wanted - a block is always separated from what surrounds it by a
+// blank or prose row, so the bar breaks by itself; those two flags were designed
+// and deliberately deleted.
+s(c.SCROLL_CODE_EDGE_X !== undefined && c.SCROLL_CODE_EDGE_W !== undefined,
+  "structural: the code block's edge bar is two named constants");
+s(c.SCROLL_CODE_EDGE_X >= c.SCROLL_GUT_X + c.TEXT_ADV &&
+  c.SCROLL_CODE_EDGE_X + c.SCROLL_CODE_EDGE_W <= c.SCROLL_TXT_X,
+  `structural: the edge bar (${c.SCROLL_CODE_EDGE_X}..` +
+  `${c.SCROLL_CODE_EDGE_X + c.SCROLL_CODE_EDGE_W}) sits between the gutter mark's cell and ` +
+  "the text column, touching neither");
+const bars = INO.match(
+  /fillRect\(SCROLL_CODE_EDGE_X, y, SCROLL_CODE_EDGE_W, CODE_LINE_H, COLOR_LABEL\)/g);
+s(bars != null && bars.length === 2,
+  "structural: BOTH draw paths draw the edge bar, and it is COLOR_LABEL - structure, not " +
+  "emphasis; accent already carries five jobs on this surface");
+
 // THE LIVE TAIL'S POLICY, bound because its HELD branch has never executed on
 // hardware: new chat entries only appear when a turn completes, so every
 // observed append so far was the FOLLOWING case. These assertions are what
@@ -562,6 +881,34 @@ s(/scrollEnd\(\)/.test(exitBody),
 s(/scrollActive = false/.test(exitBody),
   "structural: exiting clears scrollActive");
 
+// ---- the Mac's side: what histBlockText is allowed to discard ----
+// HOSTSRC already exists in this file and is COMMENT-STRIPPED. Do not read
+// host/index.mjs a second time: a raw read lets a regex be satisfied by a
+// comment, which is this repo's "a rule a neighbouring line can satisfy" trap.
+const hbt = /function histBlockText\([\s\S]*?\n}\n/.exec(HOSTSRC);
+s(hbt != null, "structural: histBlockText is findable");
+const hbtBody = hbt ? hbt[0] : "";
+s(/out\.push\("```"\s*\+\s*\w+\)/.test(hbtBody),
+  "structural: an OPENING fence keeps its info string - the device cannot label a block " +
+  "with a language the Mac threw away");
+s(/spans\[\+i\]\s*\+\s*"`"/.test(hbtBody) || /"`"\s*\+\s*spans\[\+i\]/.test(hbtBody),
+  "structural: an inline code span is restored WITH its backticks - there is no bold " +
+  "face on this board, so stripping them leaves nothing in their place");
+
+s(/\(m, txt\).*txt !== undefined.*SCROLL_LINK_MARK/.test(hbtBody),
+  "structural: link markdown is collapsed inside histBlockText - [text](url) whole spends " +
+  "two of 27 rows on brackets and a path");
+s(/function histShortUrl\(/.test(HOSTSRC),
+  "structural: a bare URL is shortened by its own named function - the device's word-wrap " +
+  "gives up on a spaceless token and hard-cuts it mid-path");
+const mark = /const SCROLL_LINK_MARK = "(.)"/.exec(HOSTSRC);
+s(mark != null && mark[1].charCodeAt(0) >= 0x20 && mark[1].charCodeAt(0) <= 0x7e,
+  "structural: the link mark is inside Spleen's 0x20..0x7E - an out-of-range mark draws " +
+  "nothing AND advances nothing");
+s(/\)\|https\?:/.test(hbtBody),
+  "structural: link markdown and bare URLs are matched in ONE alternation, not two passes - " +
+  "preventing double-marks and tilde-path regressions by matching once left-to-right");
+
 console.log(`\n${mirror} mirror + ${structural} structural assertions, ${fail} failures`);
 if (SELFTEST) {
   const WANT = {
@@ -578,6 +925,21 @@ if (SELFTEST) {
     "host-nosig":  /signature is PARSED out of host\/index\.mjs/,
     "host-noack":   /carries a dead-code guard/,
     "host-dropack": /result is bound to a name, not awaited and dropped/,
+    "no-lang": /an OPENING fence keeps its info string/,
+    "backtick-restore": /an inline code span is restored WITH its backticks/,
+    "no-link-collapse": /link markdown is collapsed inside histBlockText/,
+    "no-url-shorten": /a bare URL is shortened by its own named function/,
+    "double-mark": /link markdown and bare URLs are matched in ONE alternation/,
+    "draw-path-drift": /the two draw paths draw a row IDENTICALLY/,
+    "tool-arm-inherit": /BOTH draw paths' one-line tool arms CLEAR the flags/,
+    "list-hang-drop": /a prose line's hang comes from its list marker/,
+    "no-seam": /falls back to a seam BEFORE hard-cutting/,
+    "edge-one-path": /BOTH draw paths draw the edge bar/,
+    "headend-wrong-row": /SCROLL_F_HEADEND is set on the LAST row of a heading, by operand/,
+    "headend-one-path": /BOTH draw paths draw the rule under the row carrying SCROLL_F_HEADEND/,
+    "lang-no-flag": /a language row has its own flag/,
+    "lang-any-fence": /the language row is emitted on the OPENING fence only/,
+    "lang-one-path": /BOTH draw paths draw a language row dim/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

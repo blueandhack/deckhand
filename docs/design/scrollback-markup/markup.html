@@ -1,0 +1,327 @@
+<title>Deckhand Scrollback Markup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ink:#14171c; --ink-2:#464f5c; --ink-3:#7c8798; --rule:#d9d5cf;
+  --ground:#f3f1ed; --panel:#fffefc;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --ink:#eceef2; --ink-2:#a4adbb; --ink-3:#6d7787; --rule:#2b3039;
+  --ground:#0e1013; --panel:#161a1f;
+}}
+:root[data-theme="dark"]{
+  --ink:#eceef2; --ink-2:#a4adbb; --ink-3:#6d7787; --rule:#2b3039;
+  --ground:#0e1013; --panel:#161a1f;
+}
+*{box-sizing:border-box}
+body{background:var(--ground); color:var(--ink); font-family:"IBM Plex Sans",system-ui,sans-serif;
+  font-size:15px; line-height:1.5;}
+.wrap{max-width:920px; margin:0 auto; padding:32px 20px 60px}
+h1{font-family:Archivo,system-ui,sans-serif; font-weight:800; font-size:26px; margin:0 0 6px; letter-spacing:-.01em}
+.lede{color:var(--ink-2); max-width:62ch; margin:0 0 22px}
+.mono{font-family:"IBM Plex Mono",monospace}
+.row{display:flex; gap:28px; flex-wrap:wrap; align-items:flex-start}
+.panelcol{flex:0 0 auto}
+.legend{flex:1 1 260px; min-width:240px}
+.legend h2{font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--ink-3); margin:0 0 10px}
+.legend ol{margin:0; padding-left:20px}
+.legend li{margin:0 0 12px; font-size:13.5px; color:var(--ink-2)}
+.legend b{color:var(--ink)}
+.hint{margin-top:14px; font-size:12.5px; color:var(--ink-3)}
+
+/* ---- the device panel: real 320x480 pixels, one Spleen 8x16 grid ---- */
+#device{
+  position:relative; width:320px; height:480px; overflow:hidden;
+  background:#000; border-radius:6px; box-shadow:0 8px 30px rgba(0,0,0,.35);
+  font-family:"IBM Plex Mono",monospace; font-size:13px; line-height:1;
+  cursor:grab; user-select:none; touch-action:none;
+}
+#device.dragging{cursor:grabbing}
+#hdr{position:absolute; left:0; top:0; width:320px}
+#body{position:absolute; left:0; top:0; width:320px; overflow:hidden}
+#rows{position:absolute; left:0; top:0; width:320px}
+.rowline{position:absolute; left:0; width:320px; white-space:pre}
+.scrollhint{position:absolute; right:2px; font-size:10px; color:#666; font-family:"IBM Plex Mono",monospace}
+</style>
+
+<div class="wrap">
+<h1>Scrollback markup, shipped rendering</h1>
+<p class="lede">Board 2's transcript at real 320x480, one Spleen 8x16 cell per character. This is
+<b>not</b> the five-treatment comparison the design spec walked through - that mock is
+superseded. This is Option B as it shipped, geometry only: drag the panel to scroll the
+same synthetic turn the numbers below describe.</p>
+
+<div class="row">
+  <div class="panelcol">
+    <div id="device"></div>
+    <div class="hint">drag up/down to scroll - it is the same wrap arithmetic as <code>scrollWalk</code></div>
+  </div>
+  <div class="legend">
+    <h2>What is on the glass</h2>
+    <ol>
+      <li><b>Heading rule.</b> One <code>COLOR_LABEL</code> pixel under the last row of a heading
+      only - a rule between a wrapped heading's two rows would read as two headings.</li>
+      <li><b>Hanging bullets.</b> A wrapped list item's continuation starts at its own text
+      column, not back at the marker.</li>
+      <li><b>The block's edge.</b> A 2px <code>COLOR_LABEL</code> bar at the block's own x, every
+      row of it, breaking on its own between blocks - no top/bottom flag exists.</li>
+      <li><b>The language row.</b> Dim, on the card ground, costing one row - only when the
+      fence named a language.</li>
+      <li><b>Wrapped code keeps its shape.</b> A continuation hangs to the source line's own
+      indent and carries <code>+</code> in the gutter, capped at <code>SCROLL_HANG_MAX</code>.</li>
+      <li><b>Collapsed links keep the fact they existed.</b> <code>text~</code> for markdown,
+      a shortened host/.../tail~ for a bare URL.</li>
+      <li><b>A tool row beside a code block carries no edge bar.</b> The pre-existing
+      flag-inheritance defect this branch closed in passing (Task 7).</li>
+    </ol>
+  </div>
+</div>
+</div>
+
+<script>
+// ---- geometry, bound to board_es3c35p.h by check.mjs - parse this block, never transcribe it ----
+var W=320, H=480, ADV=8, LH=16;
+var GUT_X=12, TXT_X=28, COLS=34;
+var SB_W=6;
+var HDR_H=42, TOP=44, LINES=27, BOT=476, BOT_AIR=4;
+var EDGE_X=20, EDGE_W=2, HANG_MAX=12;
+var BACK_X=12, BACK_W=46, NAME_X=66;
+var CHIP_W=60, CHIP_Y=4, CHIP_H=46;
+
+// board2 dark palette, approximated for a computer screen - COLOUR IS NOT A CLAIM HERE.
+// SCREENSHOT reads the shadow framebuffer on real hardware, so a capture (and this mock
+// alike) vouches for GEOMETRY only. COLORTEST and a person are the instrument for colour.
+var COL = { bg:"#000000", card:"#181821", label:"#848284", value:"#ffffff",
+            accent:"#ffa600", good:"#3aa0e6", bad:"#ce79a5" };
+
+// ---- scrollWalk, mirrored exactly from firmware/deckhand_display/scrollback.ino ----
+// (the same mirror scrollback-check.mjs proves against the firmware's own text - a mirror
+// PROVES THE ALGORITHM and binds nothing; the numbers above are what bind this page.)
+function breakAfter(c){ return c === "/" || c === "." || c === "-" || c === "_"; }
+function listHang(s){
+  var i = 0;
+  while (i < s.length && s[i] === " ") i++;
+  if (i + 1 < s.length && (s[i] === "*" || s[i] === "-") && s[i + 1] === " ") return i + 2;
+  var d = i;
+  while (d < s.length && s[d] >= "0" && s[d] <= "9") d++;
+  if (d > i && d + 1 < s.length && s[d] === "." && s[d + 1] === " ") return d + 2;
+  return 0;
+}
+function walk(t, cols){
+  var rows = [];
+  if (!t.length) return [{text:"",code:false,cont:false,head:false,headEnd:false,ind:0,lang:false}];
+  var pos = 0, inCode = false;
+  while (pos < t.length) {
+    var eol = pos;
+    while (eol < t.length && t[eol] !== "\n") eol++;
+    var srcLen = eol - pos;
+    if (srcLen >= 3 && t.slice(pos, pos + 3) === "```") {
+      var opening = !inCode;
+      inCode = !inCode;
+      var ln = srcLen - 3;
+      if (ln > cols) ln = cols;
+      if (opening && ln > 0)
+        rows.push({text:t.slice(pos+3,pos+3+ln),code:true,cont:false,head:false,headEnd:false,ind:0,lang:true});
+      pos = eol < t.length ? eol + 1 : eol;
+      continue;
+    }
+    var head = !inCode && srcLen > 0 && t[pos] === "#";
+    var off = 0;
+    if (head) {
+      while (off < srcLen && t[pos+off] === "#") off++;
+      while (off < srcLen && t[pos+off] === " ") off++;
+    }
+    var q = pos + off, rem = srcLen - off, first = true;
+    var hang = 0;
+    if (inCode) {
+      var lead = 0;
+      while (lead < srcLen && t[pos+lead] === " ") lead++;
+      hang = lead + 1;
+    } else {
+      hang = listHang(t.slice(pos, pos + srcLen));
+    }
+    if (hang > HANG_MAX) hang = HANG_MAX;
+    do {
+      var room = cols - (first ? 0 : hang);
+      var n;
+      if (rem <= room) n = rem;
+      else if (inCode) n = room;
+      else {
+        n = room;
+        var b = n;
+        while (b > Math.floor(room/2) && t[q+b-1] !== " ") b--;
+        if (b > Math.floor(room/2)) n = b;
+        else {
+          var c2 = room;
+          while (c2 > Math.floor(room/2) && !breakAfter(t[q+c2-1])) c2--;
+          if (c2 > Math.floor(room/2)) n = c2;
+        }
+      }
+      if (n <= 0 && rem > 0) n = 1;
+      var headEnd = head && (rem - n) <= 0;
+      rows.push({text:t.slice(q,q+n),code:inCode,cont:!first,head:head,headEnd:headEnd,
+                 ind:first?0:hang,lang:false});
+      q += n; rem -= n; first = false;
+      if (!inCode) while (rem > 0 && t[q] === " ") { q++; rem--; }
+    } while (rem > 0);
+    pos = eol < t.length ? eol + 1 : eol;
+  }
+  return rows.length ? rows : [{text:"",code:false,cont:false,head:false,headEnd:false,ind:0,lang:false}];
+}
+
+// ---- a synthetic turn, shaped like a real one, none of it a real transcript ----
+// role: 0 you, 1 claude, 2 ran, 3 result
+var ENTRIES = [
+  { role:0, text:"How should the retry loop back off?" },
+  { role:1, text:
+`## Retry backoff
+
+Refresh the token before each attempt, back off, and give up cleanly instead of repeating
+the same 401 forever.
+
+- refresh the token before each attempt
+- cap the delay at 30 seconds
+- give up after 6 tries and raise RetryExhausted
+
+\`\`\`js
+async function withRetry(fn, tries = 6) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      await sleep(Math.min(30000, 500 * 2 ** i));
+    }
+  }
+  throw new Error("RetryExhausted");
+}
+\`\`\`` },
+  { role:2, text:"grep -n withRetry host/index.mjs" },
+  { role:3, text:"12 matches" },
+  { role:1, text:"See [the retry design](docs/reference/retry.md) and https://example.com/deckhand/docs/retry-notes-and-appendix for the appendix." },
+];
+
+// SCROLL_LINK_MARK - collapsed markdown keeps the fact a target existed rather than
+// destroying it silently. Applied here so the mock's SOURCE matches what histBlockText
+// would have produced on the wire; scrollWalk itself never sees raw markdown.
+function shortUrl(u){
+  var b = u.replace(/^https?:\/\//,"").replace(/\/+$/,"");
+  if (b.length <= 28) return b;
+  var p = b.split("/");
+  if (p.length < 3) return b.slice(0,25) + "...";
+  return p[0] + "/.../" + p[p.length-1];
+}
+function collapseLinks(t){
+  return t.replace(/\[([^\]\n]+)\]\(([^)\n]+)\)|https?:\/\/[^\s)\]]*[^\s)\].,;:?!]/g,
+    function(m, txt){ return (txt !== undefined ? txt : shortUrl(m)) + "~"; });
+}
+ENTRIES.forEach(function(e){ if (e.role < 2) e.text = collapseLinks(e.text); });
+
+function markFor(role){ return role===0?">":role===1?"*":role===2?"$":role===3?"|":"!"; }
+function markColor(role){ return role===0?COL.accent:role===1?COL.good:role===2||role===3?COL.label:COL.bad; }
+function textColor(role){ return (role===0||role===1) ? COL.value : COL.label; }
+
+// ---- build the full row list: entries, walked, spacers between them ----
+var allRows = [];
+ENTRIES.forEach(function(e, i){
+  if (e.role >= 2) {
+    // Tool rows are ONE line, clipped - and carry NO code flags, ever. This is
+    // Task 7's fix rendered directly: lf/li are reset for this arm in both real
+    // draw paths, so a tool row right after a code block does not inherit
+    // SCROLL_F_CODE and does not get painted on the card ground.
+    var t = e.text.length > COLS ? e.text.slice(0, COLS - 3) + "..." : e.text;
+    allRows.push({text:t, code:false, cont:false, head:false, headEnd:false, ind:0, lang:false, role:e.role, k:0});
+  } else {
+    walk(e.text, COLS).forEach(function(r, k){
+      var row = Object.assign({role:e.role, k:k}, r);
+      allRows.push(row);
+    });
+  }
+  var next = ENTRIES[i+1];
+  var last = i === ENTRIES.length - 1;
+  var spacer = !last && !(e.role === 2 && next && next.role === 3);
+  if (spacer) allRows.push({text:"", code:false, cont:false, head:false, headEnd:false, ind:0, lang:false, role:-1, k:0});
+});
+
+// ---- render: header, then the row list inside a clipped, draggable viewport ----
+var device = document.getElementById("device");
+device.style.background = COL.bg;
+
+var hdr = document.createElement("div");
+hdr.id = "hdr";
+hdr.style.height = HDR_H + "px";
+hdr.innerHTML =
+  '<div style="position:absolute;left:'+BACK_X+'px;top:13px;width:'+BACK_W+'px;height:20px;' +
+    'border:1px solid '+COL.accent+';border-radius:3px;color:'+COL.accent+';font-size:11px;' +
+    'display:flex;align-items:center;justify-content:center">BACK</div>' +
+  '<div style="position:absolute;left:'+NAME_X+'px;top:13px;color:'+COL.accent+';font-size:13px">Deckhand-C114</div>' +
+  '<div style="position:absolute;right:12px;top:'+CHIP_Y+'px;width:'+CHIP_W+'px;height:'+CHIP_H+'px;' +
+    'display:flex;align-items:center;justify-content:center;border:1px solid '+COL.accent+';' +
+    'border-radius:4px;color:'+COL.accent+';font-size:11px">CHAT</div>' +
+  '<div style="position:absolute;left:0;top:'+(HDR_H-1)+'px;width:'+W+'px;height:1px;background:'+COL.label+'"></div>';
+device.appendChild(hdr);
+
+var bodyDiv = document.createElement("div");
+bodyDiv.id = "body";
+bodyDiv.style.top = TOP + "px";
+bodyDiv.style.height = (LINES * LH) + "px";
+device.appendChild(bodyDiv);
+
+var rowsDiv = document.createElement("div");
+rowsDiv.id = "rows";
+bodyDiv.appendChild(rowsDiv);
+
+allRows.forEach(function(row, idx){
+  var y = idx * LH;
+  var line = document.createElement("div");
+  line.className = "rowline";
+  line.style.top = y + "px";
+  line.style.height = LH + "px";
+
+  var isCode = row.code;
+  var bg = isCode ? COL.card : "transparent";
+  var pieces = "";
+  if (isCode) {
+    pieces += '<div style="position:absolute;left:'+GUT_X+'px;top:0;width:'+(TXT_X+COLS*ADV-8-GUT_X)+'px;height:'+LH+'px;background:'+COL.card+'"></div>';
+    // THE BLOCK'S OWN EDGE - COLOR_LABEL, not accent, and no top/bottom flag:
+    // a block is always separated by a blank or prose row, so it breaks by itself.
+    pieces += '<div style="position:absolute;left:'+EDGE_X+'px;top:0;width:'+EDGE_W+'px;height:'+LH+'px;background:'+COL.label+'"></div>';
+  }
+  var mark = "";
+  if (row.k === 0 && row.role >= 0) {
+    mark = '<div style="position:absolute;left:'+GUT_X+'px;top:0;color:'+markColor(row.role)+'">'+markFor(row.role)+'</div>';
+  } else if (isCode && row.cont) {
+    mark = '<div style="position:absolute;left:'+GUT_X+'px;top:0;color:'+COL.label+'">+</div>';
+  }
+  var fg = row.head ? COL.accent : row.lang ? COL.label : textColor(row.role);
+  var textX = TXT_X + row.ind * ADV;
+  var text = '<div style="position:absolute;left:'+textX+'px;top:0;color:'+fg+';white-space:pre">' +
+             row.text.replace(/&/g,"&amp;").replace(/</g,"&lt;") + '</div>';
+  var rule = row.headEnd ?
+    '<div style="position:absolute;left:'+TXT_X+'px;top:'+(LH-2)+'px;width:'+(COLS*ADV-14)+'px;height:1px;background:'+COL.label+'"></div>' : "";
+
+  line.innerHTML = pieces + mark + text + rule;
+  rowsDiv.appendChild(line);
+});
+
+var totalH = allRows.length * LH;
+var scrollY = Math.max(0, totalH - LINES * LH);   // open on the newest, like the real device
+rowsDiv.style.transform = "translateY(-" + scrollY + "px)";
+
+var dragging = false, startY = 0, startScroll = 0;
+device.addEventListener("pointerdown", function(ev){
+  dragging = true; startY = ev.clientY; startScroll = scrollY;
+  device.classList.add("dragging");
+  device.setPointerCapture(ev.pointerId);
+});
+device.addEventListener("pointermove", function(ev){
+  if (!dragging) return;
+  var dy = ev.clientY - startY;
+  scrollY = Math.min(Math.max(0, startScroll - dy), Math.max(0, totalH - LINES * LH));
+  rowsDiv.style.transform = "translateY(-" + scrollY + "px)";
+});
+["pointerup","pointercancel"].forEach(function(ev){
+  device.addEventListener(ev, function(){ dragging = false; device.classList.remove("dragging"); });
+});
+</script>
