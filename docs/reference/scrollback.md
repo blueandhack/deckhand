@@ -184,7 +184,14 @@ empty, so the flag looked supported and did nothing.
 full-entry pager from board 2's build gave back **1088 flash and 4008 RAM**, almost all of it
 `histFull[4000]`. Nothing is deleted from the repository: board 1 keeps every line and the host
 keeps `sendHistoryItem` and `item:<n>`, because it serves both boards and branches on the request
-form. **Board 1 is `UNCHANGED` at every commit** - `8f64b7f7...`, 1387024.
+form. **Board 1 was `UNCHANGED` at every commit of this section** - `8f64b7f7...`, 1387024,
+measured 2026-09-03 when this section was first written. **That value is dated, not current**:
+board 1's binary has moved since, for reasons unrelated to this feature (shared-code work under
+`compose-surface`). The current figure is `365406b8ad175a01...`, 1419776 - see BINARY COST
+below, which re-verifies it for the markup section, and CLAUDE.md's own quoted figure. Kept
+here rather than silently overwritten, per this repo's rule against deleting a measurement that
+turned out superseded; a reader auditing board 1 today should check against the current figure,
+not this one.
 
 **WHAT IS NOT VERIFIED, STATED PLAINLY.**
 - **EVERY FINGER-TOUCH PATH IS STRUCTURALLY VERIFIED ONLY.** This codebase deliberately has no
@@ -248,11 +255,14 @@ numbered finding on their own: `f3d02bf` threaded the row's start column through
 (drawing nothing new yet - the foundation `705f3be` and `73db7ea` both build on), and
 `b97e6f2` bound `scrollDrawBody` and `scrollDrawBand` to each other with an equivalence
 assertion before any of the row-shape changes landed, because this surface had already broken
-that equivalence once by fixing only one of the two paths. `bc85e75` + `a4f54d3` added the
-heading rule (`SCROLL_F_HEADEND`, under the LAST row of a wrapped heading only - a rule between
-a wrapped heading's two rows would read as two headings) and gave its two structural assertions
-their own selftest faults, a gap the plan itself had left open for this one task. `8d7ee25`
-added the language label row (`SCROLL_F_LANG`) as the final commit.
+that equivalence once by fixing only one of the two paths. `bc85e75` added the heading rule
+(`SCROLL_F_HEADEND`, under the LAST row of a wrapped heading only - a rule between a wrapped
+heading's two rows would read as two headings). `a4f54d3` followed it, giving the rule's two
+structural assertions their own selftest faults, a gap the plan itself had left open for this
+one task - checker-only, touching `scrollback-check.mjs` alone, so it moved NEITHER binary. It
+is absent from the byte-cost table below by design, not by omission: that table lists the eight
+commits that touched `scrollback.ino`, and `a4f54d3` never did. `8d7ee25` added the language
+label row (`SCROLL_F_LANG`) as the final commit.
 
 **TWO HOST CHANGES, NO WIRE VERSION BUMP.** `histBlockText`'s fence-language and link/URL
 changes are both read by a firmware function whose own toggle test is unaffected by them:
@@ -260,6 +270,19 @@ changes are both read by a firmware function whose own toggle test is unaffected
 board running firmware from before this work simply drops the language rather than printing
 it. Nothing about the wire's shape changed; a board on either side of this branch's sixteen
 commits reads the same bytes and disagrees only on how much of them it draws.
+
+**THE MAC AND THE DEVICE DO NOT ALWAYS AGREE ON WHAT COUNTS AS A FENCE, AND THIS BRANCH WIDENED
+THAT GAP.** The Mac's fence test is `/^\s*```(\S*)/` - a line starting with `**` or another
+emphasis marker is not a fence to it. But the Mac then strips the emphasis markers, leaving
+three backticks at column 0, and the device's test (`t[pos]=='`' && t[pos+1]=='`' &&
+t[pos+2]=='`'`) DOES fire on that. The device enters code mode where the host never did, and
+everything up to the next fence in that entry is painted on the card ground - now with Task
+10's edge bar running beside it. **This class is PRE-EXISTING**, not introduced by this branch:
+Task 2's backtick restore widened it rather than creating it. An exhaustive search over short
+strings found exactly 27 minimal new-only forms, all requiring an emphasis marker at column 0
+immediately abutting three backticks - `**```x`, `__```x`, `` *```x* `` and 24 siblings. A fix
+is one character wide: anchor the host's fence test on the line AFTER emphasis is stripped, or
+have the host test for three backticks anywhere the device would, not just at column 0.
 
 **THE `~` LINK MARK EXISTS BECAUSE COLLAPSING A LINK OTHERWISE DESTROYS THE FACT THAT A TARGET
 EXISTED, SILENTLY** - and from the Mac, silence and "there was never a link here" are
@@ -331,6 +354,12 @@ measured, neither reproduced here since a design doc is not where session conten
   `[text](url)` links to `text~` SAVES more than that costs - `[host/index.mjs:4120](host/index.mjs#L4120)`
   alone drops from 43 characters to 20. Finding 5's fix is not a pure cost the way findings 2-4
   are; it can net negative.
+- **THE WORST CASE RUNS THE OPPOSITE DIRECTION: SHORT AND FENCE-HEAVY**, where the language row
+  has nothing to amortise against. Measured with an independent port of `scrollWalk`: five
+  one-line labelled shell fences in one turn go from **5 rows to 10** - the fenced lines double
+  outright - which is roughly **+50%** of a short reply built mostly of such fences. Worst case,
+  not typical, and like the two turns above this is an offline measurement, not an on-glass
+  count.
 
 The direction is consistent (fence language and inline code always cost a little, hanging
 indents cost only where a line was already near the wrap boundary) but the SIZE of the net
@@ -352,7 +381,7 @@ touched `scrollback.ino`, each measured and explained in its own commit message:
 | `73db7ea` | bullets hang | +112 | 1065456 | `86bff6a6...` |
 | `0203f9f` | break a spaceless path at a seam | +96 | 1065552 | `d2bcb710...` |
 | `2524300` | the block's edge bar | +48 | 1065600 | `25eeca37...` |
-| `a4f54d3` | the heading rule (+ its selftest faults) | +48 | 1065648 | `4dcbca24...` |
+| `bc85e75` | the heading rule | +48 | 1065648 | `4dcbca24...` |
 | `8d7ee25` | the language label row | +96 | 1065744 | `2bd7ac34...` |
 
 ending at `2bd7ac344932a800...`, 1065744 - **528 bytes over the eight commits** (64+48+16+112+
@@ -380,6 +409,19 @@ then a prose heading with no bar, then the bar resuming).
   needs a physical tap - there is no device command for it. Task 7's `lf = 0; li = 0;` reset
   runs before `isCode` is computed in both draw paths, and a count-2 assertion binds that in
   both, so the guarantee is real; no one has looked at the actual pixels.
+- **THE TOOL-ROW ARM'S OWN TRUNCATION IS COMPARED BY NOTHING.** `drawRegion()` in
+  `scrollback-check.mjs` starts at `const bool isCode`, below the `e.role >= 2` arm, and the
+  separate tool-arm binding (Task 7's `lf = 0; li = 0;` fix, above) matches only that far. The
+  REST of that arm - the `SCROLL_COLS - 3` truncation - differs textually between the two draw
+  paths (`int n` in `scrollDrawBody`, `int tn` in `scrollDrawBand`, to dodge the outer `const int
+  n`), so no equivalence assertion reads either copy. A one-path change to that truncation is the
+  one row-drawing edit both guards would miss.
+- **THE HEADING RULE PAINTS OVER ITS OWN HEADING'S DESCENDERS, AND NOBODY HAS LOOKED.** It draws
+  at `y + CODE_LINE_H - 2`, AFTER `drawString`, so on a heading whose last row contains a `g`,
+  `y` or `p` the rule overwrites whatever that descender put on that scanline. Geometry-correct
+  and correctly clipped - the rule is exactly where `SCROLL_F_HEADEND`'s row math says it should
+  land - but no heading with a descender on its last row has been captured since this shipped, so
+  whether the clipped descender still reads or simply vanishes into the rule is unverified.
 - **A BARE, LANGUAGE-LESS FENCE COSTING NO ROW HAS NEVER BEEN PHOTOGRAPHED.** It rests on the
   mirror assertion and the `opening && ln > 0` guard, both green, neither a picture.
 - **NO FINGER HAS TOUCHED ANY OF IT** - consistent with the rest of this surface. The drag,
