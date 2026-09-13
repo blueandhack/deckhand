@@ -4117,6 +4117,13 @@ function startBle() {
     } else if (name !== "Deckhand" && !name.startsWith("Deckhand-")) {
       return;
     }
+    // Cleared by the finally below, so a connect that fails cannot strand it.
+    // bleCharacteristic is the "link is live" test rather than blePeripheral
+    // because it is what liveLinks() keys off and what the write-failure breaker
+    // clears - so a link that goes dead without a disconnect event still reopens
+    // this path rather than locking it shut for the life of the process.
+    if (bleConnectBusy || bleCharacteristic) return;
+    bleConnectBusy = true;
     await noble.stopScanningAsync().catch(() => {});
     console.log(`BLE: found ${name}, connecting...`);
     // Declared out here so the catch can UNregister it. ES modules are strict:
@@ -4222,10 +4229,19 @@ function startBle() {
       // "connected" state survives the retry and the next attempt fails identically -
       // which is the loop this comment exists because of. Disconnecting resets noble's
       // state so the rescan gets a genuinely fresh link.
-      await peripheral.disconnectAsync().catch(() => {});
+      // WITH A DEADLINE, like every other await on this path. This was the one
+      // without one, and it only became load-bearing with bleConnectBusy above:
+      // noble's promises do not reject when the adapter goes stale, they simply
+      // never settle, so a hang here would hold the flag for ever and no connect
+      // would be attempted again for the life of the host - a worse wedge than
+      // the churn this commit removes.
+      await withTimeout(peripheral.disconnectAsync(), BLE_CONNECT_TIMEOUT_MS,
+                        "BLE retry disconnect").catch(() => {});
       // A small pause too: a tight scan/connect/fail cycle spins the radio and fills
       // the log with thousands of identical lines, which buries whatever else is wrong.
       setTimeout(startBleScan, 2000);
+    } finally {
+      bleConnectBusy = false;
     }
   });
 }
@@ -4247,6 +4263,22 @@ const BLE_CONNECT_TIMEOUT_MS = 15000;
 const BLE_WRITE_FAIL_LIMIT = 3;
 let bleWriteFailStreak = 0;
 let bleTearingDown = false;
+// ONE CONNECT AT A TIME, AND NONE WHILE A LINK IS ALREADY LIVE. noble emits
+// `discover` once per scan session, and a scan is (re)started from three places -
+// the adapter's stateChange, the teardown's rescan, and the catch below's 2s
+// retry - so two sessions overlapping deliver the SAME peripheral twice. The
+// handler is async and its first await came AFTER it had committed to connect, so
+// both copies ran the sequence concurrently against one peripheral object, and the
+// second saw `state === "connected"` from the first and DISCONNECTED IT on purpose,
+// believing it was clearing a corpse. MEASURED in host.log: 1004 `found Deckhand`
+// against 12 `connected`, every good link torn down within a second of becoming
+// ready, and `via=none` for twenty minutes with the cable out. The two copies also
+// raced on one noble Characteristic - a second discover/subscribe over the first,
+// and `removeAllListeners("data")` deleting the listener the first had installed -
+// which is where `subscribe timed out` came from 156 times. That was written off
+// as a macOS or NimBLE fault; it was this. SET BEFORE THE FIRST AWAIT, or the
+// duplicate slips through the same window all over again.
+let bleConnectBusy = false;
 // ONE teardown, reached from the disconnect event AND from the write-failure
 // circuit breaker. It used to live inline in the disconnect handler, which meant
 // the ONLY way back to a working link was an event that a wedged connect never

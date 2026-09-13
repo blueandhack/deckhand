@@ -1131,6 +1131,56 @@ async function main({ indexPath = INDEX } = {}) {
         iChar >= 0 && iForget > iChar);
     }
 
+    // --- ONE CONNECT AT A TIME, AND NONE OVER A LIVE LINK ---
+    // noble emits `discover` once per scan SESSION, and a scan is started from
+    // three places, so two overlapping sessions deliver the same peripheral twice.
+    // The handler is async; with no guard both copies ran the connect sequence
+    // against one peripheral object, and the second saw `state === "connected"`
+    // from the first and disconnected it on purpose, taking it for a corpse.
+    // MEASURED in host.log: 1004 `found Deckhand` against 12 `connected`, and
+    // `via=none` for twenty minutes with the cable out - no transport at all,
+    // while the host logged a healthy-looking scan/connect cycle throughout. The
+    // duplicate also raced the first on one noble Characteristic, which is where
+    // the 156 `subscribe timed out` lines came from.
+    // BOUND TO THE DISCOVER HANDLER'S OWN BODY, brace-matched. bleConnectBusy is
+    // declared next door and a file-wide match would read as passing with the
+    // guard deleted from the one place it has to be.
+    {
+      const at = src.indexOf('noble.on("discover", async (peripheral) => {');
+      ok("STRUCTURE: the BLE discover handler is found", at >= 0);
+      let disc = "";
+      if (at >= 0) {
+        const open = src.indexOf("{", src.indexOf("=> {", at));
+        let d = 0;
+        for (let i = open; i < src.length; i++) {
+          if (src[i] === "{") d++;
+          else if (src[i] === "}" && --d === 0) { disc = src.slice(open, i + 1); break; }
+        }
+      }
+      ok("STRUCTURE: the discover handler's own body is delimited", disc.length > 400);
+      ok("STRUCTURE: a duplicate discover is refused while a connect is in flight OR a link " +
+         "is already live - without the second test the guard still tears down a ready link",
+        /if \(bleConnectBusy \|\| bleCharacteristic\) return;/.test(disc));
+      // ORDER, because the guard is worthless a millisecond late: the handler's
+      // first await is the stopScanning, and a flag set after it leaves exactly the
+      // window the duplicate came through.
+      const iFlag = disc.indexOf("bleConnectBusy = true");
+      const iAwait = disc.indexOf("await ");
+      ok("STRUCTURE: the flag is raised BEFORE the handler's first await, or both copies " +
+         "pass the guard while the first is suspended and nothing has changed",
+        iFlag >= 0 && iAwait >= 0 && iFlag < iAwait);
+      ok("STRUCTURE: and it is cleared in a finally - cleared only on success, one failed " +
+         "connect would block every later one for the life of the host",
+        /\}\s*finally\s*\{\s*bleConnectBusy = false;\s*\}/.test(disc));
+      // The flag is only safe because nothing on this path can hang for ever. The
+      // retry disconnect was the last await without a deadline, and noble's
+      // promises do not reject when the adapter goes stale - they never settle.
+      ok("STRUCTURE: every await on the connect path has a deadline, the retry disconnect " +
+         "included - an unbounded one holds the guard for ever and wedges the host harder " +
+         "than the churn it replaces",
+        /withTimeout\(peripheral\.disconnectAsync\(\),\s*BLE_CONNECT_TIMEOUT_MS,\s*\n?\s*"BLE retry disconnect"\)/.test(disc));
+    }
+
     // --- THE BLE CHUNK SIZE IS NOT TUNED FROM SOMEONE ELSE'S LINK ---
     // The device answers every command on EVERY live transport and reports each BLE
     // link separately (`BLEMTU link=<i> mtu=<m>`), broadcasting all of them. So a
@@ -1314,6 +1364,22 @@ async function selftest() {
   const orig = fs.readFileSync(INDEX, "utf8");
 
   const faults = [
+    // ---- the BLE connect guard ----
+    ["no guard at all: two discover events connect concurrently and the second " +
+     "disconnects the link the first just made",
+     (s) => s.replace("    if (bleConnectBusy || bleCharacteristic) return;\n", "")],
+    ["the guard ignores a live link, so a fresh scan still tears down a ready one",
+     (s) => s.replace("if (bleConnectBusy || bleCharacteristic) return;",
+                      "if (bleConnectBusy) return;")],
+    ["the flag raised after the first await - the same window, still open",
+     (s) => s.replace("    bleConnectBusy = true;\n    await noble.stopScanningAsync().catch(() => {});",
+                      "    await noble.stopScanningAsync().catch(() => {});\n    bleConnectBusy = true;")],
+    ["the flag cleared on success only, so one failed connect wedges the host for good",
+     (s) => s.replace("    } finally {\n      bleConnectBusy = false;\n    }", "    }")],
+    ["the retry disconnect loses its deadline - a never-settling await holds the guard forever",
+     (s) => s.replace("await withTimeout(peripheral.disconnectAsync(), BLE_CONNECT_TIMEOUT_MS,\n                        \"BLE retry disconnect\").catch(() => {});",
+                      "await peripheral.disconnectAsync().catch(() => {});")],
+
     // ---- the second per-device store ----
     ["the send priority filed GLOBALLY, so whichever board spoke last decides for both",
      (s) => s.replace(/msgPriByDevice\.set\(key, \{ device: dev, priority: msgPri, at: Date\.now\(\) \}\);/,
