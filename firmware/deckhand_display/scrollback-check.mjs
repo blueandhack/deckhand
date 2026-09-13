@@ -326,6 +326,8 @@ if (SELFTEST) {
     HOSTSRC = HOSTSRC.replace(/const\s+(\w+)\s*=\s*(await waitForScrollAck\()/, "$2");
   if (hf === "no-lang")
     HOSTSRC = HOSTSRC.replace(/out\.push\("```" \+ lang\)/, 'out.push("```")');
+  if (hf === "backtick-restore")
+    HOSTSRC = HOSTSRC.replace(/=> "`" \+ spans\[\+i\] \+ "`"/, "=> spans[+i]");
 }
 
 // A CHECKER MUST PARSE THE CONSTANT IT CERTIFIES, NEVER TRANSCRIBE IT - and this
@@ -574,6 +576,9 @@ const hbtBody = hbt ? hbt[0] : "";
 s(/out\.push\("```"\s*\+\s*\w+\)/.test(hbtBody),
   "structural: an OPENING fence keeps its info string - the device cannot label a block " +
   "with a language the Mac threw away");
+s(/spans\[\+i\]\s*\+\s*"`"/.test(hbtBody) || /"`"\s*\+\s*spans\[\+i\]/.test(hbtBody),
+  "structural: an inline code span is restored WITH its backticks - there is no bold " +
+  "face on this board, so stripping them leaves nothing in their place");
 
 console.log(`\n${mirror} mirror + ${structural} structural assertions, ${fail} failures`);
 if (SELFTEST) {
@@ -592,6 +597,7 @@ if (SELFTEST) {
     "host-noack":   /carries a dead-code guard/,
     "host-dropack": /result is bound to a name, not awaited and dropped/,
     "no-lang": /an OPENING fence keeps its info string/,
+    "backtick-restore": /an inline code span is restored WITH its backticks/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

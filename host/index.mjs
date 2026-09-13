@@ -1583,7 +1583,10 @@ function histBlockText(v, max = HIST_FULL_CAP) {
       // asterisk matches here and the single rule below requires its text hugged.
       t = t.replace(/\*\*/g, "").replace(/__/g, "");
       t = t.replace(/(^|[^\w*])\*([^\s*][^*\n]*?)\*(?![\w*])/g, "$1$2");
-      t = t.replace(/\u0001(\d+)\u0002/g, (_, i) => spans[+i]);
+      // THE BACKTICKS COME BACK. They were dropped here, which left an inline span
+      // indistinguishable from prose on a board that has no bold face to put in
+      // their place. They are ASCII, inside Spleen's range, one column each side.
+      t = t.replace(/\u0001(\d+)\u0002/g, (_, i) => "`" + spans[+i] + "`");
     }
     out.push(t);
   }
