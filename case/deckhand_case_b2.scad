@@ -100,6 +100,21 @@ batt_rib_h  = 6.0;   // how far a rib stands off the cover's inner face
 batt_rib_t  = 2.0;   // rib thickness
 batt_rib_l  = 14.0;  // rib length along the edge it guards
 batt_rib_gap = 0.6;  // clearance to the pack, per side
+// ---------- THE BATTERY FENCE ----------
+// The four ribs above became a CONTINUOUS RING, because with the wall at +6 there
+// is no plateau and therefore no other corral: four 14 mm ribs hold the middle of
+// each side and leave every corner free to walk.
+//
+// THE HEIGHT IS BOUNDED FROM BELOW. The fence hangs off the cover's inner face at
+// z_floor 21.8 and its floor must clear the board's back components, which reach
+// z_pcb_b + comp_back = 13.8 - a hard stop at 8.0. At 6.0 there is 2.0 of margin,
+// and it grips the pack's top 5 mm, half its height. The margin is against
+// comp_back, which is a stated maximum for the whole board rather than a
+// measurement of what sits under the fence's own footprint, so it is a floor with
+// an asterisk rather than a proven clearance.
+batt_fence_h   = 6.0;
+batt_fence_t   = 2.0;    // wall thickness
+batt_fence_gap = 0.6;    // clearance to the pack, per side - as the ribs had
 $fn = 72;
 
 // ---------- Board (mm) — MEASURE YOURS AND EDIT ----------
@@ -173,7 +188,18 @@ cable_exit = 2.0;   // room above a mated plug for its cable to leave and turn
 // is the only step on the ladder where the screw does not change - the window at
 // 4.0 is 18.46..20.16 and the M3 x 20 already specified sits inside it. Every
 // value below 3.0 needs an M3 x 18 or x 16 instead.
-rim_extra = 4.0;    // 2 + 1 + 2, less 1 for the plateau - see the ladder above.
+// 4.0 -> 6.0, ASKED FOR AS ANOTHER +2 ON THE WALL. The wall now stands 21.80
+// above the front face, i.e. +7 on the 14.90 it started at.
+//
+// AND IT EXTINGUISHES THE PLATEAU AGAIN, which was restored two commits ago at
+// this same constant. cover_rise is cavity_d - rim_clear and the cell fixes
+// cavity_d at 13, so any rim_extra at or past 5 leaves nothing over: the cover
+// goes flat and total_th starts growing instead, 22.8 -> 23.8. That was shown
+// before the ask was confirmed rather than discovered afterwards.
+//
+// The plateau's cavity walls were the cell's ONLY corral, and they went with it -
+// so the fence below is not an addition, it is what replaces them.
+rim_extra = 6.0;    // 2 + 1 + 2 + 2, less 1 - see the ladder above.
                     // WHAT IT COSTS, AND WHAT IT DOES NOT. cover_rise is
                     // cavity_d - rim_clear, and cavity_d is set by the CELL
                     // (batt_seat + batt_t = 13) not by the rim, so every mm the body
@@ -384,6 +410,19 @@ screw_boss_d = 6.0;   // the pillar - see the assert by the plateau
 // counterbore is wider than the pillar it is cut into and severs it.
 screw_head_d = 6.0;   // the head, measured. Clearance is added below.
 screw_cb_d   = screw_head_d + 0.2;
+// A SHELF OF PLATE IS LEFT UNDER THE POCKET, and this is not a refinement - it is
+// the whole reason the pillars stay on. The counterbore is WIDER than the pillar
+// it is cut into (6.2 into 6.0), so a pocket taken all the way to the plate's
+// inner face removes the pillar's entire top and leaves it hanging. Printed, that
+// is exactly what happened: measured on the mesh, plate [0.73..2.73] and pillar
+// [3.00..15.00] - a 0.27 mm gap, four pillars attached to nothing but the lip
+// they happen to graze.
+screw_cb_shelf = 0.5;   // plate left below the pocket, so the pillar has something to hang from
+// ...AND THE SHELL CAVITY MUST NOT EAT THAT SHELF. The cavity hollows the plate's
+// underside to 2.73 wherever it reaches, which is inside the counterbore's own
+// radius - so the keep-out has to be wider than the pocket, not merely wider than
+// the pillar. At screw_boss_d it was the second half of the same failure.
+screw_keep_d = max(screw_boss_d, screw_cb_d + 1.6);
 // HOW FAR THE PILLAR STOPS SHORT OF THE BOARD'S BACK.
 //
 // Reported as "I think you did not count board thickness". It IS counted, and
@@ -498,7 +537,17 @@ screw_lead   = 0.6;  // conical lead-in at the column top, so the screw centres 
 // specified. Keeping the x 20 is possible if the recess is cut to 0.8 instead of
 // 2.06 - see screw_cb_z - but that leaves a 3 mm head 2.2 proud instead of 0.9,
 // which is most of the problem still there.
-screw_len        = cover_screws ? 18.0 : 6.0;  // M3 x 18 through the whole stack, or x 6 board-only
+// 18 -> 22, FORCED BY THE TALLER WALL. The screw spans from its head down to the
+// pilot, so every millimetre added to the body wall is a millimetre it has to
+// cross: the valid window at rim_extra 6 is 20.4..23 and the x 18 falls out of it
+// at the SHORT end - it would no longer reach the column. Asserted both ways.
+//
+// AND THE HEAD IS PROUD AGAIN, which is worth saying out loud rather than letting
+// it be noticed on the print. The counterbore that sank it lives in the rim
+// PLATE, and screw_cb_z is gated on cover_rise > 0 - so when the plateau went, the
+// landing and the pocket went with it. A flat cover has no plate to sink a head
+// into that is not also the only thing above the pillar.
+screw_len        = cover_screws ? 22.0 : 6.0;  // M3 x 22 through the whole stack, or x 6 board-only
 screw_tip_margin = 0.2;  // clear air past the tip, so it clamps rather than bottoms
 screw_skin_min   = 0.6;  // least front-face material to leave; see the assert
                     // (kept small — a big taper on a thin pin leaves a point)
@@ -1219,7 +1268,11 @@ plat_wall   = 2.0;    // and the thickness of that wall
 // LOCATED and being merely bolted: at lip_h 0 the only thing setting it laterally
 // is the slop of four M3 clearance holes (m3_clear 3.4 on a 3.0 screw = 0.2 mm a
 // side), and the seam becomes a butt joint where any mismatch shows as a step.
-lip_h    = 1.0;     // cover lip depth; 0 removes it. Shared with the retainer risers
+// 1.0 -> 3.0, ASKED BACK. It was cut 4.0 -> 1.0 on request, and the reasoning
+// below still holds - a 1 mm spigot binds on a quarter of the bow. What changed is
+// the ask: the cover is LOCATED by this edge and 1 mm was not enough of it. 3.0
+// keeps a millimetre of the reduction rather than undoing it wholesale.
+lip_h    = 3.0;     // cover lip depth; 0 removes it. Shared with the retainer risers
 oc_r     = 7.0;
 soft_r   = 1.6;
 
@@ -1425,7 +1478,13 @@ assert(!cover_screws ||
 // How deep the head sinks: everything the rim plate has between the landing and
 // its inner face. Derived, not typed - one millimetre lower and the counterbore
 // is wider than the pillar and cuts it in half.
-screw_cb_z  = cover_screws && cover_rise > 0 ? (cover_rise + cover_th) - screw_pad_z : 0;
+screw_cb_z  = cover_screws && cover_rise > 0
+            ? (cover_rise + cover_th) - screw_cb_shelf - screw_pad_z : 0;
+assert(!cover_screws || cover_rise == 0 || screw_cb_shelf >= 0.4,
+       "screw_cb_shelf is under one extrusion width - the pocket would sever the pillar again.");
+assert(!cover_screws || cover_rise == 0 || screw_keep_d > screw_cb_d,
+       str("screw_keep_d (", screw_keep_d, ") must exceed screw_cb_d (", screw_cb_d,
+           ") or the shell cavity undercuts the shelf the pillar hangs from."));
 assert(!cover_screws || cover_rise == 0 ||
        (bx0 + hole_ins_x) - screw_cb_d/2 >= (wall - 0.1) + 0.8,
        str("screw_cb_d is too wide for a hole this close to the edge: only ",
@@ -2129,22 +2188,27 @@ module cover(){
       // Battery corral - see batt_ribs. Positioned off the SAME expression the
       // preview ghost and the retainer use, so all three agree by construction
       // rather than by three transcriptions of the same arithmetic.
-      // REDUNDANT ONCE THERE IS A PLATEAU: its cavity walls stand plat_gap off
-      // the pack on all four sides, which is exactly the job the ribs did - and
-      // they do it over the pack's full height rather than its top 6 mm.
+      // THE BATTERY FENCE - a CONTINUOUS ring, where this was four short ribs.
+      // Only reached when there is no plateau, because the plateau's cavity walls
+      // do the same job when it exists. With rim_extra at 6 there is no plateau,
+      // so this is the cell's ONLY corral and four 14 mm ribs are not enough of
+      // one: they touch the middle of each side and leave every corner free.
+      //
+      // batt_fence_h 6.0 is bounded BELOW, not above. Its floor must clear the
+      // components on the board's back, which reach z_pcb_b + comp_back = 13.8,
+      // and the ceiling it hangs from is z_floor = 21.8 - so 8.0 is the hard stop
+      // and 6.0 leaves 2.0 of margin. It grips the cell's top 5 mm (the first
+      // millimetre crosses the gap above the pack), which is half its height.
       if (batt_ribs && cover_rise == 0) {
         bxr = wall + (in_w - batt_w)/2 - batt_dx;   // pack's low-X edge
         byr = batt_y0;                              // pack's low-Y edge
-        cxr = bxr + batt_w/2;  cyr = byr + batt_h/2;
-        for (r = [
-              // [x, y, sizeX, sizeY] - one rib at the middle of each side
-              [bxr - batt_rib_gap - batt_rib_t, cyr - batt_rib_l/2, batt_rib_t, batt_rib_l],
-              [bxr + batt_w + batt_rib_gap,     cyr - batt_rib_l/2, batt_rib_t, batt_rib_l],
-              [cxr - batt_rib_l/2, byr - batt_rib_gap - batt_rib_t, batt_rib_l, batt_rib_t],
-              [cxr - batt_rib_l/2, byr + batt_h + batt_rib_gap,     batt_rib_l, batt_rib_t],
-            ])
-          translate([r[0], r[1], cover_th - 0.01])
-            cube([r[2], r[3], batt_rib_h + 0.01]);
+        g = batt_fence_gap; t = batt_fence_t;
+        translate([bxr - g - t, byr - g - t, cover_th - 0.01])
+          difference(){
+            cube([batt_w + 2*(g+t), batt_h + 2*(g+t), batt_fence_h + 0.01]);
+            translate([t, t, -0.5])
+              cube([batt_w + 2*g, batt_h + 2*g, batt_fence_h + 1.01]);
+          }
       }
       // inner lip (straight wall; looser in the length direction via gy).
       // GUARDED: lip_h = 0 is a supported setting and linear_extrude(0) is not.
@@ -2233,7 +2297,7 @@ module cover(){
         if (cover_screws)
           for (c = holes())
             translate([c[0], c[1], cover_th - 1])
-              cylinder(d = screw_boss_d, h = rimI - cover_th + 2);
+              cylinder(d = screw_keep_d, h = rimI - cover_th + 2);   // wider than the POCKET, not the pillar
       }
     }
     // A FLAT LANDING FOR EACH BUTTON - see btn_pad_z. Cut square to the board and

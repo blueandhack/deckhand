@@ -1065,6 +1065,114 @@ at the column top — and their combined extent is 3.61 mm, indistinguishable fr
 bore. It now measures **volume over the bore's own area**, an equivalent depth that two thin
 slices cannot fake. The fault injection is the only reason that was caught.
 
+## Wall +2, lip 3, fence 6 — and the plateau goes with them
+
+Three asks together. **"Skirt" turned out to mean the cover's LIP**, its inner edge — not the
+outer taper I first read it as, which is why an earlier analysis reported a conflict between
+the wall and the skirt that does not exist. The lip hangs off the cover's underside and has
+nothing to do with how tall the body wall is.
+
+| | before | now |
+|---|---|---|
+| body wall (`rim_extra`) | 19.80 | **21.80** |
+| cover lip (`lip_h`) | 1.0 | **3.0** |
+| battery fence | 1.0 | **6.0** |
+| whole device | 22.8 | **23.8** |
+
+### The fence is a ring now, not four ribs
+
+It replaces `batt_ribs`, which held the middle of each side over 14 mm and **left every corner
+free**. That was tolerable while the plateau's cavity walls were the real corral; with the wall
+at +6 there is no plateau, so this is the cell's only restraint and it has to be continuous.
+Measured on the mesh, all four sides *and the corner* read `[0.00 .. 8.00]` — 2 mm plate plus
+6 mm of fence, unbroken.
+
+**Its height is bounded from below, not above.** The floor must clear the board's back
+components at `z_pcb_b + comp_back` = 13.8, and it hangs from `z_floor` 21.8 — a hard stop at
+**8.0**. At 6.0 there is 2.0 of margin and it grips the cell's top 5 mm, half its height. That
+margin is against `comp_back`, a stated maximum for the whole board rather than a measurement
+of what sits under the fence's own footprint.
+
+### Two knock-ons, both stated before the ask was confirmed
+
+**The plateau flattens to zero.** `cover_rise` is `cavity_d − rim_clear` and the cell fixes
+`cavity_d` at 13, so any `rim_extra` at or past 5 leaves nothing over. It was restored two
+commits ago at this same constant; the taller wall spends it again, and `total_th` starts
+growing instead.
+
+**The screw goes M3 × 18 → M3 × 22.** The screw spans head to pilot, so every millimetre on the
+wall is one it must cross. The valid window at `rim_extra` 6 is 20.4–23 and the × 18 falls out
+at the **short** end — it would no longer reach the column.
+
+**And the heads are proud again**, which follows from the first: the counterbore that sank them
+lives in the rim plate and is gated on the plateau existing.
+
+### Raising the wall silently disarmed four fault injections
+
+Four of the checker's faults test plateau-dependent features, so they already selected
+`rim_extra: 4`. They carried no `screw_len` — so at the new base the model's own length assert
+refused the build, and each fault "passed" by never running. `--selftest` reported
+**4 faults NOT caught**, which is the only reason it was noticed. Each now carries a length
+valid at the config it selects. *An assertion that cannot fail is a defect*, and so is one that
+cannot even be attempted.
+
+## The head pocket severed the pillars, and a passing check said otherwise
+
+Reported from a print: *"the four pillars did not connect to cover."* They did not.
+
+**The counterbore is wider than the pillar it is cut into** — Ø6.2 into Ø6.0 — so taking it to
+the plate's inner face removed the pillar's entire top. The shell cavity then hollowed the
+plate's underside to 2.73 outside the Ø6.0 keep-out. Measured on the mesh, walking out from a
+screw axis:
+
+```
+r >= 3.15   plate    [0.73 .. 2.73]
+r <= 2.90   pillar   [3.00 .. 15.00]
+                      ^^^^ 0.27 mm gap
+```
+
+Two of my own changes compounded, and neither was caught.
+
+### The component count was answering a different question
+
+`case-b2-check.mjs` counted connected components and reported **one solid** — on a part with
+four floating pillars. Each pillar still grazes the **lip** on its case-edge side, so there is
+a topological path from pillar to plate. **A topological path is not a structural one.**
+
+It is replaced by a measurement of the **junction**: an annulus at the pillar's own radius,
+spanning the pocket floor down to the board, differenced with the cover. Whole, the annulus
+lies entirely inside material and the void is **0.000 mm³**; severed it reads **7.612**,
+against a 0.05 threshold. Its injected fault deepens the *pocket* while every constant still
+reads correct — the geometry going wrong behind valid arithmetic, which is exactly what the
+mesh half is for. (Not `screw_cb_shelf = 0`: the model asserts that at ≥ 0.4, so the build
+would refuse and the checker would never run.)
+
+### The repair: a shelf, and a keep-out wider than the pocket
+
+`screw_cb_shelf` **0.5** stops the pocket short of the plate's inner face, so the pillar has
+something to hang from. That alone is not enough — the shell cavity hollows the plate to 2.73
+wherever it reaches, which is *inside* the counterbore's radius — so `screw_keep_d` is now
+`screw_cb_d + 1.6` = **7.8**, wider than the **pocket** rather than merely wider than the
+pillar. Both halves are asserted.
+
+Verified by the same walk that found the fault — one unbroken span across the whole pillar:
+
+| r | material |
+|---|---|
+| 2.00 – 2.90 | **[2.50 .. 15.00]** one span |
+| 3.05 | [2.50 .. 3.01] |
+| 3.20 – 3.60 | [0.73 .. 3.01] |
+| 3.90+ | plate hollowed again — the keep-out's edge, by design |
+
+The recess drops **2.06 → 1.56**, so a 3 mm head stands **1.44** proud rather than 0.94, and
+0.94 was never real. Screw stays M3 × 18; skin 2.10, engagement 4.10.
+
+**A countersunk M3 × 20 avoids all of this** — the cone narrows to Ø3.4 inside the plate, so it
+only cuts the pillar where the plate still surrounds it, and it sits flush. Offered twice,
+declined twice in favour of the cap heads in hand. Recorded because option B is the one where
+a future change to the keep-out can silently re-break the pillar, and the countersink is the
+one where it cannot.
+
 ## The screw heads are sunk as far as they can go, which is not out of sight
 
 Asked to hide them. **They cannot be hidden at this hole position**, and the reason is the

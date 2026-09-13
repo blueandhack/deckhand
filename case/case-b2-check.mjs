@@ -281,6 +281,42 @@ function run(scadPath, defines = {}) {
     `(glass_recess ${v.glass_recess} vs front_th ${v.front_th}; the bezel lies over ` +
     `the border by design, so any overlap here is the screen being crushed)`);
 
+  // ---- THE PILLAR MUST BE CONTINUOUS WITH THE PLATE ----
+  // THE CHECK THIS REPLACES COUNTED CONNECTED COMPONENTS AND PASSED ON A BROKEN
+  // PART. The head's counterbore is WIDER than the pillar it is cut into (6.2 into
+  // 6.0), so taking it to the plate's inner face removed the pillar's top; the
+  // shell cavity then hollowed the plate to 2.73, and the two ended 0.27 mm apart.
+  // Four floating pillars - and the component count still said ONE SOLID, because
+  // each pillar grazes the LIP on its case-edge side. A topological path is not a
+  // structural one, and that is the whole lesson: the count was answering a
+  // different question from the one being asked of it.
+  //
+  // So this measures the JUNCTION. An annulus at the pillar's own radius, spanning
+  // the pocket floor down to the board, is differenced with the cover: if the
+  // pillar is whole the annulus lies entirely inside material and the void is zero.
+  // A 0.27 gap over this annulus is 3.4 mm3, which no threshold can miss.
+  writeFileSync(join(dir,'j.scad'),
+    `part="none";\ninclude <${scadPath}>\n` +
+    `c0 = holes()[0];\n` +
+    `z0 = screw_pad_z + screw_cb_z;  h = (total_th - z_pcb_b) - z0;\n` +
+    `difference(){\n` +
+    `  difference(){\n` +
+    `    translate([c0[0],c0[1],z0]) cylinder(d=screw_boss_d-0.6, h=h, $fn=48);\n` +
+    `    translate([c0[0],c0[1],z0-1]) cylinder(d=m3_clear+0.2, h=h+2, $fn=48);\n` +
+    `  }\n` +
+    `  cover();\n` +
+    `}\n`);
+  const jf = join(dir,'joint.stl');
+  let jv = 0;
+  try {
+    execFileSync('openscad', ['--export-format=binstl','-o',jf,'-D','$fn=48',
+      '-D','part="none"', ...dArgs, join(dir,'j.scad')], { stdio:['ignore','ignore','ignore'] });
+    jv = stlVolume(jf);
+  } catch (e) { jv = 0; }   // empty export = nothing missing = whole
+  check('the screw pillar is CONTINUOUS with the plate', jv < 0.05,
+    `void inside the pillar's own annulus ${jv.toFixed(3)} mm3 ` +
+    `(a severed pillar reads ~3.4; a component count reads ONE either way)`);
+
   const tris = stlTris(st);
   const y0 = v.ks_lug_y + 18, y1 = v.ks_lug_y + v.ks_leaf_l - 14;
   const hs = [];
@@ -480,11 +516,11 @@ const FAULTS = [
               linear_extrude(0.01) rrect_c(in_w+0.2, in_h+0.2, max(oc_r-wall,2));
           }`),
     expect: 'the outside never steps back inward - no perimeter flange',
-    defines: { rim_extra: 4 } },
+    defines: { rim_extra: 4, screw_len: 18 } },
   { name: 'ks_leaf_margin stops tracking the top fillet (blade too WIDE)',
     patch: s => s.replace(/^ks_leaf_margin = 0\.6 \+ edge_t1\([^;]+;/m, 'ks_leaf_margin = 0.6;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet',
-    defines: { rim_extra: 4 } },
+    defines: { rim_extra: 4, screw_len: 18 } },
   // NOT out_h*0.60, which is what this used to inject. That literal produced a
   // 0.12 mm margin when cover_rise was 5; at 3 the top fillet bites less and the
   // same literal happens to FIT, so the fault stopped reproducing a defect and the
@@ -495,7 +531,7 @@ const FAULTS = [
     patch: s => s.replace(/^ks_leaf_l  = plat_y1 - edge_t1\([\s\S]*?cover_rise\) - ks_lug_y - 0\.6;/m,
                           'ks_leaf_l  = plat_y1 - ks_lug_y;'),
     expect: 'the folded blade lands on FLAT plateau, not on the top fillet',
-    defines: { rim_extra: 4 } },
+    defines: { rim_extra: 4, screw_len: 18 } },
   { name: 'the pillar drives INTO the board',
     patch: s => s.replace(/^screw_pillar_gap = 0\.0;/m, 'screw_pillar_gap = -0.5;'),
     expect: 'the screw pillar does not reach past the board' },
@@ -520,6 +556,19 @@ const FAULTS = [
   { name: 'a mounting column is moved under the display',
     patch: s => s.replace(/^hole_ins_y = 3\.40;/m, 'hole_ins_y = 14.0;'),
     expect: 'the bezel does not press the glass' },
+  // NOT "screw_cb_shelf back to 0": the .scad asserts that at >= 0.4, so the build
+  // refuses and this checker never runs. The fault deepens the POCKET ITSELF while
+  // every constant still reads correct - the geometry going wrong behind valid
+  // arithmetic, which is precisely what the mesh half exists to catch.
+  // The pocket only exists where there is a plateau to sink it into, and the base
+  // config has none (rim_extra 6). So this fault SELECTS one - and has to carry a
+  // screw_len that is valid there, or the model's own length assert refuses the
+  // build and the fault proves nothing. That trap cost four uncaught faults once.
+  { name: 'the head pocket is deepened until it eats the shelf',
+    patch: s => s.replace(/cylinder\(d = screw_cb_d, h = screw_pad_z \+ screw_cb_z \+ 1\);/,
+                          'cylinder(d = screw_cb_d, h = screw_pad_z + screw_cb_z + 1.6);'),
+    defines: { rim_extra: 4, screw_len: 18 },
+    expect: 'the screw pillar is CONTINUOUS with the plate' },
   { name: 'the axle is dropped so the blade buries itself',
     patch: s => s.replace(/^ks_axle_z\s*=\s*-ks_bz;/m, 'ks_axle_z  = -ks_bz + 3.0;'),
     expect: 'the folded blade does not penetrate the cover' },
