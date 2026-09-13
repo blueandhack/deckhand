@@ -109,6 +109,27 @@ if (SELFTEST) {
     INO = INO.replace(
       /tft\.fillRect\(SCROLL_CODE_EDGE_X, y, SCROLL_CODE_EDGE_W, CODE_LINE_H, COLOR_LABEL\);/,
       "");
+  // TASK 11 FIX ROUND 1: falsifiability for the two new structural assertions
+  // had been shown once, by hand, at Step 2 - with no fault to keep it proven
+  // as the surface changes underneath it. Reverting `(head && last)` to plain
+  // `head` puts SCROLL_F_HEADEND on EVERY row of a wrapped heading rather than
+  // its last - exactly the "rule between a wrapped heading's two rows reads
+  // as two headings" bug the operand assertion exists to keep out.
+  if (fault === "headend-wrong-row")
+    INO = INO.replace(/\(head && last\) \? SCROLL_F_HEADEND : 0/, "head ? SCROLL_F_HEADEND : 0");
+  // A plain, non-global replace hits only the FIRST occurrence of the rule's
+  // fillRect in the comment-stripped file - scrollDrawBody's - leaving
+  // scrollDrawBand's intact. Confirmed by hand that the exact call (args
+  // included, not just the `if`) appears exactly twice before relying on
+  // that: Task 7's fault once nearly matched a declaration instead of the
+  // reset it was aiming at, and only an intervening `int` saved it. Expected
+  // to trip BOTH the count-2 assertion below AND Task 5's drawRegion
+  // equivalence, since the extended region now spans this rule too - that is
+  // double coverage working, not a defect.
+  if (fault === "headend-one-path")
+    INO = INO.replace(
+      /tft\.fillRect\(SCROLL_TXT_X, y \+ CODE_LINE_H - 2,\s*SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_TXT_X, 1, COLOR_LABEL\);/,
+      "");
 }
 
 // MIRRORS scrollListHang: the width of a list marker at the start of a source
@@ -855,6 +876,8 @@ if (SELFTEST) {
     "list-hang-drop": /a prose line's hang comes from its list marker/,
     "no-seam": /falls back to a seam BEFORE hard-cutting/,
     "edge-one-path": /BOTH draw paths draw the edge bar/,
+    "headend-wrong-row": /SCROLL_F_HEADEND is set on the LAST row of a heading, by operand/,
+    "headend-one-path": /BOTH draw paths draw the rule under the row carrying SCROLL_F_HEADEND/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }
