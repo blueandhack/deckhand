@@ -80,6 +80,7 @@ uint16_t scrollTextColor(uint8_t r) {
 #define SCROLL_F_CONT 0x2
 #define SCROLL_F_HEAD 0x4
 #define SCROLL_F_HEADEND 0x8
+#define SCROLL_F_LANG 0x10
 
 // THE WIDTH OF A LIST MARKER at the start of a source line, or 0 for a line that
 // is not a list item. `* ` and `- ` are two; an ordered marker is its digits plus
@@ -118,9 +119,28 @@ static int scrollWalk(const char* t, int cols, int want,
     while (t[eol] && t[eol] != '\n') eol++;
     const int srcLen = eol - pos;
 
-    // A fence toggles the mode and is never drawn.
+    // A fence toggles the mode. It draws NOTHING unless it is an OPENING fence
+    // that names a language, in which case that name is one dim row above the
+    // block. A bare fence costs exactly what it costs today.
     if (srcLen >= 3 && t[pos] == '`' && t[pos + 1] == '`' && t[pos + 2] == '`') {
+      const bool opening = !inCode;
       inCode = !inCode;
+      int ln = srcLen - 3;
+      if (ln > cols) ln = cols;
+      if (opening && ln > 0) {
+        if (drawn == want) {
+          if (out && outSize > 0) {
+            int cap = ln < outSize - 1 ? ln : outSize - 1;
+            memcpy(out, t + pos + 3, cap);
+            out[cap] = '\0';
+          }
+          if (flags) *flags = SCROLL_F_CODE | SCROLL_F_LANG;
+          if (indent) *indent = 0;
+          if (found) *found = true;
+          return drawn + 1;
+        }
+        drawn++;
+      }
       pos = t[eol] ? eol + 1 : eol;
       continue;
     }
@@ -672,8 +692,12 @@ void scrollDrawBody() {
       tft.drawString("+", SCROLL_GUT_X, y);
     }
     // A heading takes the accent so sections are findable while scrolling; its
-    // own # markers were stripped by the walker.
-    tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
+    // own # markers were stripped by the walker. A LANGUAGE ROW is dim: it labels
+    // the block, it is not part of it.
+    const uint16_t fg = (lf & SCROLL_F_HEAD) ? COLOR_ACCENT
+                      : (lf & SCROLL_F_LANG) ? COLOR_LABEL
+                      : scrollTextColor(e.role);
+    tft.setTextColor(fg, bg);
     tft.setTextDatum(TL_DATUM);
     tft.drawString(buf, SCROLL_TXT_X + li * TEXT_ADV, y);
     // THE HEADING'S RULE, under its LAST row only - a rule between a wrapped
@@ -857,8 +881,12 @@ void scrollDrawBand(int shift) {
       tft.drawString("+", SCROLL_GUT_X, y);
     }
     // A heading takes the accent so sections are findable while scrolling; its
-    // own # markers were stripped by the walker.
-    tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);
+    // own # markers were stripped by the walker. A LANGUAGE ROW is dim: it labels
+    // the block, it is not part of it.
+    const uint16_t fg = (lf & SCROLL_F_HEAD) ? COLOR_ACCENT
+                      : (lf & SCROLL_F_LANG) ? COLOR_LABEL
+                      : scrollTextColor(e.role);
+    tft.setTextColor(fg, bg);
     tft.setTextDatum(TL_DATUM);
     tft.drawString(buf, SCROLL_TXT_X + li * TEXT_ADV, y);
     // THE HEADING'S RULE, under its LAST row only - a rule between a wrapped

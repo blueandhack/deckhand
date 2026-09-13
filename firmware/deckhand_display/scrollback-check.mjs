@@ -130,6 +130,33 @@ if (SELFTEST) {
     INO = INO.replace(
       /tft\.fillRect\(SCROLL_TXT_X, y \+ CODE_LINE_H - 2,\s*SCROLL_RAIL_X - SCROLL_RAIL_AIR - SCROLL_TXT_X, 1, COLOR_LABEL\);/,
       "");
+  // TASK 12: falsifiability for its three new structural assertions, each with
+  // its own fault - the previous task shipped two assertions with none, which
+  // this plan's own outer instructions call out as a defect, not repeated here.
+  // `lang-no-flag`: the flag itself is gone. Nothing else in this file's
+  // structural checks reads the literal `#define SCROLL_F_LANG` text, so this
+  // must trip exactly the one assertion bound to it, not cascade.
+  if (fault === "lang-no-flag")
+    INO = INO.replace("#define SCROLL_F_LANG 0x10\n", "");
+  // `lang-any-fence`: the operand that restricts the row to an OPENING fence is
+  // dropped, so a CLOSING fence would draw one too - the exact "decide it by
+  // operand, not by comment" bug the assertion exists to keep out.
+  if (fault === "lang-any-fence")
+    INO = INO.replace("const bool opening = !inCode;", "const bool opening = true;");
+  // `lang-one-path`: a plain (non-regex) String.replace hits only the FIRST
+  // occurrence of the block in the comment-stripped file - scrollDrawBody's,
+  // since it appears first - leaving scrollDrawBand's intact, so `dims.length`
+  // drops from 2 to 1 and the assertion must fail BY NAME rather than pass on
+  // the surviving copy. Also expected to trip the drawRegion equivalence check,
+  // since the reverted path's text no longer matches its twin - the same
+  // double coverage `headend-one-path` above produced.
+  if (fault === "lang-one-path")
+    INO = INO.replace(
+      "const uint16_t fg = (lf & SCROLL_F_HEAD) ? COLOR_ACCENT\n" +
+      "                      : (lf & SCROLL_F_LANG) ? COLOR_LABEL\n" +
+      "                      : scrollTextColor(e.role);\n" +
+      "    tft.setTextColor(fg, bg);",
+      "tft.setTextColor((lf & SCROLL_F_HEAD) ? COLOR_ACCENT : scrollTextColor(e.role), bg);");
 }
 
 // MIRRORS scrollListHang: the width of a list marker at the start of a source
@@ -164,14 +191,25 @@ function listHang(s) {
 // can agree with itself while the device does something else.
 function walk(t, cols) {
   const rows = [];                       // {text, code, cont, head, ind}
-  if (!t.length) return [{ text: "", code: false, cont: false, head: false, headEnd: false, ind: 0 }];
+  if (!t.length) return [{ text: "", code: false, cont: false, head: false, headEnd: false, ind: 0, lang: false }];
   let pos = 0, inCode = false;
   while (pos < t.length) {
     let eol = pos;
     while (eol < t.length && t[eol] !== "\n") eol++;
     const srcLen = eol - pos;
+    // MIRRORS scrollWalk's fence arm (Task 12): a fence toggles the mode and
+    // draws NOTHING unless it is an OPENING fence that names a language, in
+    // which case that name is ONE dim row above the block - `opening` is
+    // read BEFORE the toggle, matching the firmware's own ordering.
     if (srcLen >= 3 && t.slice(pos, pos + 3) === "```") {
+      const opening = !inCode;
       inCode = !inCode;
+      let ln = srcLen - 3;
+      if (ln > cols) ln = cols;
+      if (opening && ln > 0) {
+        rows.push({ text: t.slice(pos + 3, pos + 3 + ln), code: true, cont: false,
+                    head: false, headEnd: false, ind: 0, lang: true });
+      }
       pos = eol < t.length ? eol + 1 : eol;
       continue;
     }
@@ -217,13 +255,13 @@ function walk(t, cols) {
       // decided from what remains AFTER this row takes its share, before rem
       // is updated below.
       const headEnd = head && (rem - n) <= 0;
-      rows.push({ text: t.slice(q, q + n), code: inCode, cont: !first, head, headEnd, ind: first ? 0 : hang });
+      rows.push({ text: t.slice(q, q + n), code: inCode, cont: !first, head, headEnd, ind: first ? 0 : hang, lang: false });
       q += n; rem -= n; first = false;
       if (!inCode) while (rem > 0 && t[q] === " ") { q++; rem--; }
     } while (rem > 0);
     pos = eol < t.length ? eol + 1 : eol;
   }
-  return rows.length ? rows : [{ text: "", code: false, cont: false, head: false, headEnd: false, ind: 0 }];
+  return rows.length ? rows : [{ text: "", code: false, cont: false, head: false, headEnd: false, ind: 0, lang: false }];
 }
 const wrapLines = (t, cols) => walk(t, cols).length;
 
@@ -402,6 +440,27 @@ m(walk("## a heading long enough to wrap here", 12).filter((r) => r.headEnd).len
 s(/drawString\(buf, SCROLL_TXT_X \+ li \* TEXT_ADV, y\)/.test(INO),
   "structural: the renderer DRAWS at the column scrollWalk reported - a hang that is " +
   "computed and not drawn changes line counts and nothing else");
+
+// TASK 12: the language label row. THE MOST DROPPABLE ITEM IN THE DESIGN - one
+// dim row out of 27 per block, kept because a `bash` block and a `cpp` block
+// are read differently, and removable later without touching anything else.
+// Emitted on the OPENING fence ONLY (by operand, not by comment) - a closing
+// fence still draws nothing, so a fence that names nothing still costs
+// nothing. The colour decision lands in BOTH draw paths.
+s(/#define SCROLL_F_LANG 0x10/.test(INO), "structural: a language row has its own flag");
+s(/const bool opening = !inCode;/.test(walkBody),
+  "structural: the language row is emitted on the OPENING fence only - a closing fence " +
+  "still draws nothing");
+const dims = INO.match(/lf & SCROLL_F_LANG\) \? COLOR_LABEL/g);
+s(dims != null && dims.length === 2,
+  "structural: BOTH draw paths draw a language row dim - it labels the block, it is not " +
+  "part of it");
+m(walk("```cpp\nint x;\n```", COLS).length === 2,
+  "mirror: a fence that names a language costs ONE row; the block below is unchanged");
+m(walk("```\nint x;\n```", COLS).length === 1,
+  "mirror: a fence that names nothing still costs nothing");
+m(walk("```cpp\nint x;\n```", COLS)[0].lang === true,
+  "mirror: the language row is flagged as one");
 
 // And ONE rule, not two: the counter must delegate to the same walker the
 // renderer drives, or the index says one thing and the screen draws another.
@@ -878,6 +937,9 @@ if (SELFTEST) {
     "edge-one-path": /BOTH draw paths draw the edge bar/,
     "headend-wrong-row": /SCROLL_F_HEADEND is set on the LAST row of a heading, by operand/,
     "headend-one-path": /BOTH draw paths draw the rule under the row carrying SCROLL_F_HEADEND/,
+    "lang-no-flag": /a language row has its own flag/,
+    "lang-any-fence": /the language row is emitted on the OPENING fence only/,
+    "lang-one-path": /BOTH draw paths draw a language row dim/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }
