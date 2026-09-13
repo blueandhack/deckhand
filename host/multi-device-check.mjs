@@ -1089,18 +1089,29 @@ async function main({ indexPath = INDEX } = {}) {
     // called from the USB handler next door and a file-wide match reads as passing
     // while this handler does nothing.
     {
-      const at = src.indexOf('peripheral.once("disconnect", () => {');
-      ok("STRUCTURE: the BLE disconnect handler is found", at >= 0);
+      // THE BODY MOVED, AND THIS FOLLOWS IT RATHER THAN BEING RELAXED. It used to
+      // brace-match the inline `peripheral.once("disconnect", () => {` callback.
+      // That callback is now one line delegating to bleTeardown(), because the
+      // teardown needed a SECOND caller: the write-failure circuit breaker. The
+      // binding is the point - assert the function that does the work, never the
+      // file - so this brace-matches bleTeardown() instead.
+      const at = src.indexOf("function bleTeardown(");
+      ok("STRUCTURE: the BLE teardown is found", at >= 0);
       let disc = "";
       if (at >= 0) {
-        const open = src.indexOf("{", src.indexOf("=> {", at));
+        const open = src.indexOf("{", at);
         let d = 0;
         for (let i = open; i < src.length; i++) {
           if (src[i] === "{") d++;
           else if (src[i] === "}" && --d === 0) { disc = src.slice(open, i + 1); break; }
         }
       }
-      ok("STRUCTURE: the BLE disconnect handler's own body is delimited", disc.length > 60);
+      ok("STRUCTURE: the BLE teardown's own body is delimited", disc.length > 60);
+      // ...and that the disconnect event still REACHES it. Without this the
+      // assertions below would pass over a function nothing calls.
+      ok("STRUCTURE: the disconnect event still routes into that teardown",
+        /peripheral\.once\("disconnect", onDisc\)/.test(src)
+        && /onDisc = \(\) => bleTeardown\(/.test(src));
       ok("STRUCTURE: it drops that device's battery reading too, the way the USB close " +
          "handler does - otherwise a board off the cable republishes a phantom `batts` " +
          "entry in the heartbeat for ever",
@@ -1159,8 +1170,13 @@ async function main({ indexPath = INDEX } = {}) {
       // Without the ask the link silently stays at the 20-byte floor: 2.7 KB/s
       // where 8.4 is available, which is a slow scrollback rather than a broken
       // one and so has nothing to report itself.
-      const ready = src.slice(src.indexOf("bleDeviceName = name;"),
-                              src.indexOf('peripheral.once("disconnect"'));
+      // BOUNDED BY THE CATCH, not by the disconnect registration. That
+      // registration used to sit at the END of the connect and was a convenient
+      // terminator; it now happens immediately after connectAsync(), because a
+      // subscribe that hung otherwise left NO recovery handler armed at all. So
+      // the old slice ran BACKWARDS and found nothing.
+      const readyAt = src.indexOf("bleDeviceName = name;");
+      const ready = readyAt < 0 ? "" : src.slice(readyAt, src.indexOf("} catch (err) {", readyAt));
       ok("STRUCTURE: the host SOLICITS BLEMTU once the BLE link is ready, over that link, " +
          "rather than depending on catching the unsolicited report",
         /sendToLink\(BLE_LINK, "BLEMTU/.test(ready));

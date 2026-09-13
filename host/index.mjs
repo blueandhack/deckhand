@@ -4119,6 +4119,9 @@ function startBle() {
     }
     await noble.stopScanningAsync().catch(() => {});
     console.log(`BLE: found ${name}, connecting...`);
+    // Declared out here so the catch can UNregister it. ES modules are strict:
+    // assigning an undeclared name would throw rather than create a global.
+    let onDisc = null;
     try {
       // noble keeps its own idea of the peripheral's state, and it can still say
       // "connected" from a link that no longer exists - after the host restarts while
@@ -4127,17 +4130,32 @@ function startBle() {
       // failure and retried by rescanning - finding the SAME stale object and throwing
       // again, forever. Observed wedged in exactly that loop with USB unplugged, so the
       // device had no transport at all while the host looked perfectly healthy.
-      if (peripheral.state !== "connected") await peripheral.connectAsync();
-      const { characteristics } = await peripheral.discoverSomeServicesAndCharacteristicsAsync(
-        [BLE_SERVICE_UUID],
-        [BLE_RX_CHAR_UUID, BLE_TX_CHAR_UUID]
-      );
-      bleCharacteristic = characteristics.find((c) => c.uuid === BLE_RX_CHAR_UUID) ?? null;
-            if (!bleCharacteristic) {
-        console.error("BLE: RX characteristic not found on peripheral");
-        await peripheral.disconnectAsync().catch(() => {});
-        return;
+      // A STALE "connected" IS NOT A LINK, and trusting it is what wedged this.
+      // noble keeps its own idea of the peripheral's state and can still say
+      // "connected" from a link that no longer exists - after a host restart, or
+      // after the Mac sleeps and the BT adapter power-cycles. The old code SKIPPED
+      // connectAsync() in that case to dodge "Peripheral already connected", and so
+      // went on to discover and subscribe on a corpse. Disconnect first instead:
+      // it costs one round trip and gets a genuinely fresh link.
+      if (peripheral.state === "connected") {
+        await withTimeout(peripheral.disconnectAsync(), BLE_CONNECT_TIMEOUT_MS,
+                          "BLE stale-state disconnect").catch(() => {});
       }
+      await withTimeout(peripheral.connectAsync(), BLE_CONNECT_TIMEOUT_MS, "BLE connect");
+      // ARMED HERE, NOT AT THE END. Registering the recovery after the subscribe
+      // meant a subscribe that hung left NO disconnect handler at all, so the one
+      // path back to a working link was never installed. Armed immediately after
+      // the connect, every later failure can still recover.
+      onDisc = () => bleTeardown("disconnected");
+      peripheral.once("disconnect", onDisc);
+      const { characteristics } = await withTimeout(
+        peripheral.discoverSomeServicesAndCharacteristicsAsync(
+          [BLE_SERVICE_UUID],
+          [BLE_RX_CHAR_UUID, BLE_TX_CHAR_UUID]
+        ), BLE_CONNECT_TIMEOUT_MS, "BLE discover");
+      // LOCAL until the whole sequence succeeds - see the publish below.
+      const rxChar = characteristics.find((c) => c.uuid === BLE_RX_CHAR_UUID) ?? null;
+      if (!rxChar) throw new Error("RX characteristic not found on peripheral");
       // Subscribe to the device's TX notifications - the device->host lane
       // that carries remote answers (and anything else it wants logged).
       const txChar = characteristics.find((c) => c.uuid === BLE_TX_CHAR_UUID);
@@ -4166,12 +4184,20 @@ function startBle() {
             if (line) handleDeviceLine(line, "ble");
           }
         });
-        await txChar.subscribeAsync().catch((err) => {
-          console.error("BLE: TX subscribe failed:", err.message);
-        });
+        // THROWS rather than logging and carrying on. A swallowed failure here
+        // produced "connected and ready" over a link with no device->host lane,
+        // which is half a link presented as a whole one - and it is the exact
+        // step that hung for 15 minutes at a time with no timeout on it.
+        await withTimeout(txChar.subscribeAsync(), BLE_CONNECT_TIMEOUT_MS, "BLE subscribe");
       }
+      // PUBLISHED ONLY NOW, because liveLinks() keys off bleCharacteristic: set it
+      // before the sequence completes and `via=` advertises a half-open link that
+      // the 5s tick writes into. That is precisely what produced thousands of
+      // timed-out writes while the host looked perfectly healthy.
       blePeripheral = peripheral;
       bleDeviceName = name; // answers over BLE are verified with THIS device's key
+      bleWriteFailStreak = 0;
+      bleCharacteristic = rxChar;
       console.log(`BLE: connected to ${name} and ready.`);
       // ASK FOR THE MTU RATHER THAN RACING THE UNSOLICITED REPORT. The device
       // reports a link's negotiated MTU from loop() the moment it settles, which
@@ -4184,33 +4210,11 @@ function startBle() {
       // cannot answer refuses it BY NAME, which is the behaviour the refusal table
       // exists for.
       await sendToLink(BLE_LINK, "BLEMTU\n").catch(() => {});
-      peripheral.once("disconnect", () => {
-        console.log("BLE: disconnected, re-scanning...");
-        // The key the BATT arm filed this link's reading under, taken BEFORE
-        // bleDeviceName is cleared - senderKey() reads it, and afterwards this
-        // link's key is the bare "ble" rather than the board's own name. Exactly
-        // the same two-step the USB close handler does, and it was missing here:
-        // a board 2 taken off the cable kept republishing a stale `batts` entry in
-        // the 5s heartbeat for ever, with a growing ageSec, which is the phantom
-        // board the prune's own comment says it removes. Not unbounded growth (the
-        // key is stable per device, and boundBatteryStore caps the map anyway) -
-        // a claim the code did not keep.
-        const battKey = senderKey("ble");
-        bleMtuByLink.clear();      // indices are reused; a stale one would pin the floor
-        bleChunkSize = BLE_CHUNK_MIN;
-        bleCharacteristic = null;
-        blePeripheral = null;
-        bleDeviceName = "";
-        // AFTER the teardown, never before: forgetBatteryFor keeps the reading if
-        // any LIVE link still answers to that key, and liveLinks() counts the BLE
-        // link while bleCharacteristic is set. Called first, it would find this
-        // very link and decline to prune every time.
-        forgetBatteryFor(battKey);
-        forgetMsgPriorityFor(battKey);   // likewise, and likewise AFTER the teardown
-        startBleScan();
-      });
     } catch (err) {
       console.error("BLE: connect failed:", err.message);
+      // UNARM before tearing down, or the disconnectAsync() below fires the
+      // handler AND the rescan at the bottom runs - two scans racing each other.
+      if (onDisc) peripheral.removeListener("disconnect", onDisc);
       bleCharacteristic = null;
       blePeripheral = null;
       bleDeviceName = "";
@@ -4230,6 +4234,49 @@ function startBle() {
 // disappears mid-write - it does not reject, it simply never calls back - and an
 // await that never settles is not something try/catch can save you from.
 const BLE_WRITE_TIMEOUT_MS = 3000;
+// EVERY step of the connect gets a deadline. The PAIRING path below has always
+// wrapped its connect/discover/subscribe in withTimeout; this path never did,
+// and that asymmetry cost a dead display twice. noble's promises do not reject
+// when the adapter's state goes stale - they simply never settle - so an
+// unbounded await here hangs the connect FOREVER with nothing logged.
+const BLE_CONNECT_TIMEOUT_MS = 15000;
+// A link that cannot carry three payloads in a row is not a link. Without this
+// the tick wrote into a half-open characteristic every 5s and logged a failure
+// each time - 2332 of them in one stretch, the device reading "stale 86m", and
+// nothing anywhere attempting recovery.
+const BLE_WRITE_FAIL_LIMIT = 3;
+let bleWriteFailStreak = 0;
+let bleTearingDown = false;
+// ONE teardown, reached from the disconnect event AND from the write-failure
+// circuit breaker. It used to live inline in the disconnect handler, which meant
+// the ONLY way back to a working link was an event that a wedged connect never
+// produced - the handler was registered after the subscribe that hung.
+// Re-entrant-safe: disconnectAsync() below fires the very event that calls this.
+function bleTeardown(why) {
+  if (bleTearingDown) return;
+  bleTearingDown = true;
+  console.log(`BLE: ${why}, re-scanning...`);
+  // The key the BATT arm filed this link's reading under, taken BEFORE
+  // bleDeviceName is cleared - senderKey() reads it, and afterwards this link's
+  // key is the bare "ble" rather than the board's own name.
+  const battKey = senderKey("ble");
+  bleMtuByLink.clear();      // indices are reused; a stale one would pin the floor
+  bleChunkSize = BLE_CHUNK_MIN;
+  bleCharacteristic = null;
+  blePeripheral = null;
+  bleDeviceName = "";
+  bleWriteFailStreak = 0;
+  // AFTER the teardown, never before: forgetBatteryFor keeps the reading if any
+  // LIVE link still answers to that key, and liveLinks() counts the BLE link
+  // while bleCharacteristic is set. Called first it would find this very link.
+  bleTearingDown = false;
+  // These three stay ADJACENT on purpose: session-inbox-check asserts the order
+  // (key, prune, rescan) as one block, because pruning before the teardown means
+  // liveLinks() still counts the link being torn down and the prune declines.
+  forgetBatteryFor(battKey);
+  forgetMsgPriorityFor(battKey);
+  startBleScan();
+}
 function withTimeout(promise, ms, what) {
   let timer;
   return Promise.race([
@@ -4295,8 +4342,22 @@ async function bleWriteRaw(text, gapMs) {
         BLE_WRITE_TIMEOUT_MS,
         "BLE write"
       );
+      bleWriteFailStreak = 0;   // a chunk got through; this link is alive
     } catch (err) {
       console.error("BLE: write failed:", err.message);
+      // NOTHING USED TO ACT ON THIS. Each 5s tick logged one of these and tried
+      // again for ever - 2332 times in one stretch - while `via=` still claimed a
+      // BLE link and the device sat on stale data. Three in a row is not a link.
+      if (++bleWriteFailStreak >= BLE_WRITE_FAIL_LIMIT) {
+        console.error(`BLE: ${bleWriteFailStreak} consecutive write failures - dropping the link`);
+        const p = blePeripheral;
+        // Cleared FIRST so liveLinks() stops counting this link immediately and
+        // the next tick writes nothing. Without it the breaker would re-fire on
+        // every tick while the disconnect is still in flight.
+        bleCharacteristic = null;
+        if (p) p.disconnectAsync().catch(() => bleTeardown("write failures"));
+        else bleTeardown("write failures");
+      }
       return;
     }
   }
