@@ -72,6 +72,14 @@ if (SELFTEST) {
   if (fault === "seq-append")
     SKETCH = SKETCH.replace(/if \(seq != scrollNextSeq\) \{[\s\S]*?\n      \}/, "if (seq != scrollNextSeq) {\n      }");
   if (fault === "wide-marker") INO = INO.replace(/"\$"/, '"·"');
+  // TASK 5: proves the two-draw-paths equivalence assertion below actually
+  // binds rather than passing vacuously. A plain, non-global replace hits
+  // only the FIRST occurrence of the pattern in the whole (comment-stripped)
+  // file. SCROLL_TXT_X is spelled nowhere else in scrollback.ino, so that
+  // first hit lands inside scrollDrawBody's own row-drawing region (its
+  // `drawString(buf, SCROLL_TXT_X, y);`) and nowhere else - editing exactly
+  // one of the two compared regions, which is what makes them stop matching.
+  if (fault === "draw-path-drift") INO = INO.replace(/SCROLL_TXT_X/, "SCROLL_GUT_X");
 }
 
 // ---------------- MIRROR: the wrap rule and the line index ----------------
@@ -517,6 +525,26 @@ for (const [fn, sig] of [["scrollDrawBody", "void scrollDrawBody()"],
   present(b, /y < SCROLL_TOP/, `structural: ${fn} clips the top edge`);
 }
 
+// THE TWO DRAW PATHS ARE ONE PATH WRITTEN TWICE, and the second is the one that
+// gets forgotten. Compare the per-row DRAWING region of each - from the isCode
+// decision to the drawString of the row's text - with whitespace collapsed, so a
+// reflow is allowed and a behaviour change is not.
+function drawRegion(fnName) {
+  const fn = new RegExp("void " + fnName + "\\([\\s\\S]*?\\n}\\n").exec(INO);
+  if (!fn) return null;
+  // Task 11 extends the region: widen this line's end anchor past drawString,
+  // not the isCode start above - that is the only edit it should need.
+  const r = /const bool isCode[\s\S]*?drawString\(buf,[^;]*;/.exec(fn[0]);
+  return r ? r[0].replace(/\s+/g, " ").trim() : null;
+}
+const regBody = drawRegion("scrollDrawBody");
+const regBand = drawRegion("scrollDrawBand");
+s(regBody != null, "structural: scrollDrawBody's row-drawing region is findable");
+s(regBand != null, "structural: scrollDrawBand's row-drawing region is findable");
+s(regBody != null && regBody === regBand,
+  "structural: the two draw paths draw a row IDENTICALLY - fixing only scrollDrawBody " +
+  "has already broken this surface's pixel-for-pixel equivalence once");
+
 // THE LIVE TAIL'S POLICY, bound because its HELD branch has never executed on
 // hardware: new chat entries only appear when a turn completes, so every
 // observed append so far was the FOLLOWING case. These assertions are what
@@ -634,6 +662,7 @@ if (SELFTEST) {
     "no-link-collapse": /link markdown is collapsed inside histBlockText/,
     "no-url-shorten": /a bare URL is shortened by its own named function/,
     "double-mark": /link markdown and bare URLs are matched in ONE alternation/,
+    "draw-path-drift": /the two draw paths draw a row IDENTICALLY/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }
