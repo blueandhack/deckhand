@@ -324,6 +324,8 @@ if (SELFTEST) {
   // The quieter one: the ACK is still awaited, and its answer is thrown away.
   if (hf === "host-dropack")
     HOSTSRC = HOSTSRC.replace(/const\s+(\w+)\s*=\s*(await waitForScrollAck\()/, "$2");
+  if (hf === "no-lang")
+    HOSTSRC = HOSTSRC.replace(/out\.push\("```" \+ lang\)/, 'out.push("```")');
 }
 
 // A CHECKER MUST PARSE THE CONSTANT IT CERTIFIES, NEVER TRANSCRIBE IT - and this
@@ -562,6 +564,17 @@ s(/scrollEnd\(\)/.test(exitBody),
 s(/scrollActive = false/.test(exitBody),
   "structural: exiting clears scrollActive");
 
+// ---- the Mac's side: what histBlockText is allowed to discard ----
+// HOSTSRC already exists in this file and is COMMENT-STRIPPED. Do not read
+// host/index.mjs a second time: a raw read lets a regex be satisfied by a
+// comment, which is this repo's "a rule a neighbouring line can satisfy" trap.
+const hbt = /function histBlockText\([\s\S]*?\n}\n/.exec(HOSTSRC);
+s(hbt != null, "structural: histBlockText is findable");
+const hbtBody = hbt ? hbt[0] : "";
+s(/out\.push\("```"\s*\+\s*\w+\)/.test(hbtBody),
+  "structural: an OPENING fence keeps its info string - the device cannot label a block " +
+  "with a language the Mac threw away");
+
 console.log(`\n${mirror} mirror + ${structural} structural assertions, ${fail} failures`);
 if (SELFTEST) {
   const WANT = {
@@ -578,6 +591,7 @@ if (SELFTEST) {
     "host-nosig":  /signature is PARSED out of host\/index\.mjs/,
     "host-noack":   /carries a dead-code guard/,
     "host-dropack": /result is bound to a name, not awaited and dropped/,
+    "no-lang": /an OPENING fence keeps its info string/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

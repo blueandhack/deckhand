@@ -1545,7 +1545,21 @@ function histBlockText(v, max = HIST_FULL_CAP) {
     t = t.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
          .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
          .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
-    if (/^\s*```/.test(t)) { inFence = !inFence; out.push("```"); continue; }
+    // THE INFO STRING SURVIVES THE OPENING FENCE. It was normalised away here, so
+    // the device could not label a block with a language it never received. No
+    // version bump: scrollWalk's fence test reads the first three backticks and
+    // ignores the rest, so a board on older firmware drops the language rather
+    // than printing it. The CLOSING fence stays bare - a language on it means
+    // nothing and would only be a second thing to keep in step.
+    const fence = /^\s*```(\S*)/.exec(t);
+    if (fence) {
+      const lang = inFence
+        ? ""
+        : toAscii(fence[1]).replace(/[^A-Za-z0-9+#_.-]/g, "").slice(0, 12);
+      inFence = !inFence;
+      out.push("```" + lang);
+      continue;
+    }
     if (!inFence) {
       // Emphasis markers carry nothing without a bold face. Doubles first, then
       // SINGLES - `*fall*` was reaching the screen with its asterisks because
