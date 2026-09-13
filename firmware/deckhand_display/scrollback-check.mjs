@@ -211,12 +211,23 @@ m(bad === null, `mirror: the binary search lands in range for every line${bad ==
 // selftest went BLIND at the same moment. The rule they exist for lives wherever
 // the loop is.
 const wrapBody = body(INO, "static int scrollWalk(const char* t, int cols, int want,", "scrollback.ino");
+// scrollWalk must be able to report WHICH COLUMN a wrapped row starts at, so a
+// renderer can keep a code line's indentation or hang a list item - a renderer
+// that cannot ask cannot draw a hanging indent. Bound to scrollWalk's own text,
+// not a neighbouring line, via a regex over the raw (comment-stripped) INO
+// rather than through body()'s exact-signature match, since the signature
+// itself is part of what is being asserted here.
+const walkFn = /static int scrollWalk\([\s\S]*?\n}\n/.exec(INO);
+s(walkFn != null, "structural: scrollWalk is findable");
+s(/int\* indent/.test(walkFn ? walkFn[0] : ""),
+  "structural: scrollWalk reports the column its row starts at - a renderer that cannot " +
+  "ask cannot draw a hanging indent");
 // And ONE rule, not two: the counter must delegate to the same walker the
 // renderer drives, or the index says one thing and the screen draws another.
 const wlBody = body(INO, "int scrollWrapLines(const char* t, int cols)", "scrollback.ino");
 present(wlBody, /scrollWalk\(/,
   "structural: scrollWrapLines delegates to the walker rather than wrapping itself");
-const laBody = body(INO, "bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize, uint8_t* flags)", "scrollback.ino");
+const laBody = body(INO, "bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize,\n                  uint8_t* flags, int* indent)", "scrollback.ino");
 present(laBody, /scrollWalk\(/,
   "structural: scrollLineAt drives the SAME walker, so both agree by construction");
 // The walker must be fence-aware, or code and prose wrap by one rule and the

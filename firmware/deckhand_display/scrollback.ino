@@ -81,10 +81,10 @@ uint16_t scrollTextColor(uint8_t r) {
 #define SCROLL_F_HEAD 0x4
 
 static int scrollWalk(const char* t, int cols, int want,
-                      char* out, int outSize, uint8_t* flags, bool* found) {
+                      char* out, int outSize, uint8_t* flags, int* indent, bool* found) {
   if (found) *found = false;
   if (!t[0]) {                                  // an empty entry still owns a row
-    if (want == 0 && out && outSize > 0) { out[0] = '\0'; if (flags) *flags = 0; if (found) *found = true; }
+    if (want == 0 && out && outSize > 0) { out[0] = '\0'; if (flags) *flags = 0; if (indent) *indent = 0; if (found) *found = true; }
     return 1;
   }
   int pos = 0, drawn = 0;
@@ -132,6 +132,7 @@ static int scrollWalk(const char* t, int cols, int want,
         if (flags) *flags = (inCode ? SCROLL_F_CODE : 0)
                           | (first ? 0 : SCROLL_F_CONT)
                           | (head ? SCROLL_F_HEAD : 0);
+        if (indent) *indent = 0;
         if (found) *found = true;
         return drawn + 1;                       // caller only reads this when counting
       }
@@ -150,15 +151,16 @@ static int scrollWalk(const char* t, int cols, int want,
 // entry - well over a hundred lines here - cannot pass through it at all.
 // Raising either would move board 1's binary for a board-2 feature.
 int scrollWrapLines(const char* t, int cols) {
-  return scrollWalk(t, cols, -1, nullptr, 0, nullptr, nullptr);
+  return scrollWalk(t, cols, -1, nullptr, 0, nullptr, nullptr, nullptr);
 }
 
 // The `want`-th DRAWN line of `t`, with what kind of line it is. O(lines) per
 // call, so drawing the last line of a long entry walks it - a few thousand
 // iterations of a trivial loop per frame, nothing beside one flush.
-bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize, uint8_t* flags) {
+bool scrollLineAt(const char* t, int cols, int want, char* out, int outSize,
+                  uint8_t* flags, int* indent) {
   bool found = false;
-  scrollWalk(t, cols, want, out, outSize, flags, &found);
+  scrollWalk(t, cols, want, out, outSize, flags, indent, &found);
   if (!found && out && outSize > 0) out[0] = '\0';
   return found;
 }
@@ -510,6 +512,7 @@ void scrollDrawBody() {
 
   char buf[SCROLL_COLS + 2];
   uint8_t lf = 0;
+  int li = 0;
   int ei = scrollEntryAtLine((uint32_t) (firstLine > 0 ? firstLine - SCROLL_HEAD_LINES : 0));
   for (int row = 0; row <= SCROLL_LINES; row++) {
     const int line = firstLine + row;
@@ -580,7 +583,7 @@ void scrollDrawBody() {
         buf[sizeof(buf) - 1] = '\0';
       }
     } else {
-      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf), &lf);
+      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf), &lf, &li);
     }
 
     // CODE SITS ON A PANEL, the treatment ask details already give code - and it
@@ -681,6 +684,7 @@ void scrollDrawBand(int shift) {
 
   char buf[SCROLL_COLS + 2];
   uint8_t lf = 0;
+  int li = 0;
   int ei = scrollEntryAtLine((uint32_t) (firstLine > 0 ? firstLine - SCROLL_HEAD_LINES : 0));
   for (int row = 0; row <= SCROLL_LINES; row++) {
     const int line = firstLine + row;
@@ -746,7 +750,7 @@ void scrollDrawBand(int shift) {
         buf[sizeof(buf) - 1] = '\0';
       }
     } else {
-      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf), &lf);
+      scrollLineAt(scrollTextAt(ei), SCROLL_COLS, k, buf, sizeof(buf), &lf, &li);
     }
 
     // CODE SITS ON A PANEL, the treatment ask details already give code - and it
@@ -856,10 +860,11 @@ void drawScrollback() {
 long scrollFindCode() {
   char tmp[SCROLL_COLS + 2];
   uint8_t f = 0;
+  int fi = 0;
   for (int i = 0; i < scrollCount; i++) {
     const ScrollEntry& e = scrollIdx[i];
     for (int k = 0; k < e.lines; k++) {
-      if (scrollLineAt(scrollTextAt(i), SCROLL_COLS, k, tmp, sizeof(tmp), &f) && (f & SCROLL_F_CODE))
+      if (scrollLineAt(scrollTextAt(i), SCROLL_COLS, k, tmp, sizeof(tmp), &f, &fi) && (f & SCROLL_F_CODE))
         return (long) e.lineFirst + k + SCROLL_HEAD_LINES;
     }
   }
