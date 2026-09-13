@@ -87,6 +87,28 @@ if (SELFTEST) {
   // assertion must fail BY NAME rather than pass on the surviving copy.
   if (fault === "tool-arm-inherit")
     INO = INO.replace(/lf = 0;\s*li = 0;/, "");
+  // TASK 8: proves the list-hang assertion actually binds rather than passing
+  // on an unrelated line. Reverting the else arm to a plain 0 leaves
+  // scrollListHang itself still defined and callable - so only the ONE
+  // assertion bound to walkBody's own text must fail, not the "is findable"
+  // check above it.
+  if (fault === "list-hang-drop")
+    INO = INO.replace(/hang = scrollListHang\(t \+ pos, srcLen\);/, "hang = 0;");
+}
+
+// MIRRORS scrollListHang: the width of a list marker at the start of a source
+// line, or 0 for a line that is not a list item. `* ` and `- ` are two; an
+// ordered marker is its digits plus ". ". Leading spaces are counted IN, so a
+// nested item hangs to its own text column rather than the outer list's - which
+// is why this takes the whole line, not a pre-trimmed one.
+function listHang(s) {
+  let i = 0;
+  while (i < s.length && s[i] === " ") i++;
+  if (i + 1 < s.length && (s[i] === "*" || s[i] === "-") && s[i + 1] === " ") return i + 2;
+  let d = i;
+  while (d < s.length && s[d] >= "0" && s[d] <= "9") d++;
+  if (d > i && d + 1 < s.length && s[d] === "." && s[d + 1] === " ") return d + 2;
+  return 0;
 }
 
 // ---------------- MIRROR: the wrap rule and the line index ----------------
@@ -120,12 +142,16 @@ function walk(t, cols) {
     let q = pos + off, rem = srcLen - off, first = true;
     // THE HANGING INDENT, decided once per source line, mirroring scrollWalk's
     // own hang: code hangs to its own leading whitespace plus one, capped at
-    // SCROLL_HANG_MAX.
+    // SCROLL_HANG_MAX. A prose line instead hangs to its list marker's width,
+    // via listHang - counting leading spaces IN, so a nested item hangs to its
+    // own text column rather than the outer list's.
     let hang = 0;
     if (inCode) {
       let lead = 0;
       while (lead < srcLen && t[pos + lead] === " ") lead++;
       hang = lead + 1;
+    } else {
+      hang = listHang(t.slice(pos, pos + srcLen));
     }
     if (hang > c.SCROLL_HANG_MAX) hang = c.SCROLL_HANG_MAX;
     do {
@@ -192,6 +218,16 @@ m(walk("```\n  int b = n;\n```", 10)[1].ind === 3,
   "mirror: a wrapped code row hangs to its own indent + 1");
 m(walk("```\n" + " ".repeat(40) + "x".repeat(40) + "\n```", COLS)[1].ind === c.SCROLL_HANG_MAX,
   "mirror: a deeply indented line is capped at SCROLL_HANG_MAX");
+
+// TASK 8: a list item hangs to its own text column, reusing the same `hang`
+// mechanism Task 6 built for code - so a wrapped bullet's second row does not
+// start at the same column as its marker.
+m(walk("* one two three four five", 12)[1].ind === 2,
+  "mirror: a wrapped bullet hangs to its text column, not to its marker");
+m(walk("12. one two three four five", 12)[1].ind === 4,
+  "mirror: an ordered marker's width includes its digits and its dot");
+m(walk("plain prose that wraps here", 12)[1].ind === 0,
+  "mirror: prose that is not a list does not hang - wrapping is simply how prose reads");
 
 // The index: lineFirst accumulates lines PLUS the spacer, and a result tucks
 // against its own call with no spacer - the pair reads as one unit.
@@ -266,6 +302,14 @@ s(/hang = lead \+ 1;/.test(walkBody),
   "structural: a wrapped code row hangs to its source line's own indent plus one");
 s(/if \(hang > SCROLL_HANG_MAX\) hang = SCROLL_HANG_MAX;/.test(walkBody),
   "structural: the hang is capped by the named constant, not by a literal");
+
+// TASK 8: a list item's hang comes from its own named function, not a copy of
+// the code arm's arithmetic, and the cap still applies to both arms.
+s(/static int scrollListHang\(/.test(INO),
+  "structural: the list marker's width is measured by its own named function");
+s(/hang = scrollListHang\(t \+ pos, srcLen\);/.test(walkBody),
+  "structural: a prose line's hang comes from its list marker");
+
 s(/drawString\(buf, SCROLL_TXT_X \+ li \* TEXT_ADV, y\)/.test(INO),
   "structural: the renderer DRAWS at the column scrollWalk reported - a hang that is " +
   "computed and not drawn changes line counts and nothing else");
@@ -718,6 +762,7 @@ if (SELFTEST) {
     "double-mark": /link markdown and bare URLs are matched in ONE alternation/,
     "draw-path-drift": /the two draw paths draw a row IDENTICALLY/,
     "tool-arm-inherit": /BOTH draw paths' one-line tool arms CLEAR the flags/,
+    "list-hang-drop": /a prose line's hang comes from its list marker/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

@@ -80,6 +80,20 @@ uint16_t scrollTextColor(uint8_t r) {
 #define SCROLL_F_CONT 0x2
 #define SCROLL_F_HEAD 0x4
 
+// THE WIDTH OF A LIST MARKER at the start of a source line, or 0 for a line that
+// is not a list item. `* ` and `- ` are two; an ordered marker is its digits plus
+// ". ". Leading spaces are counted in, so a nested item hangs to ITS OWN text
+// column rather than to the outer list's.
+static int scrollListHang(const char* s, int len) {
+  int i = 0;
+  while (i < len && s[i] == ' ') i++;
+  if (i + 1 < len && (s[i] == '*' || s[i] == '-') && s[i + 1] == ' ') return i + 2;
+  int d = i;
+  while (d < len && s[d] >= '0' && s[d] <= '9') d++;
+  if (d > i && d + 1 < len && s[d] == '.' && s[d + 1] == ' ') return d + 2;
+  return 0;
+}
+
 static int scrollWalk(const char* t, int cols, int want,
                       char* out, int outSize, uint8_t* flags, int* indent, bool* found) {
   if (found) *found = false;
@@ -114,12 +128,16 @@ static int scrollWalk(const char* t, int cols, int want,
     bool first = true;
     // THE HANGING INDENT, decided ONCE per source line and applied to every row
     // after the first. Code hangs to its own leading whitespace plus one, so a
-    // wrapped row cannot be read as a real line at that depth.
+    // wrapped row cannot be read as a real line at that depth. A list item hangs
+    // to its marker's width, so a wrapped bullet's second row does not start at
+    // the same column as its `*` - the cap below applies to both arms.
     int hang = 0;
     if (inCode) {
       int lead = 0;
       while (lead < srcLen && t[pos + lead] == ' ') lead++;
       hang = lead + 1;
+    } else {
+      hang = scrollListHang(t + pos, srcLen);
     }
     if (hang > SCROLL_HANG_MAX) hang = SCROLL_HANG_MAX;
     do {
