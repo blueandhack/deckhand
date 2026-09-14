@@ -790,8 +790,23 @@ function minutesUntilMs(epochMs) {
   return Math.max(0, Math.round((epochMs - Date.now()) / 60000));
 }
 
-function minutesUntil(epochSeconds) {
-  return minutesUntilMs(epochSeconds ? epochSeconds * 1000 : null);
+// One quota window as the tick line and the device receive it. Two things the
+// raw sources do not guarantee:
+// - A WHOLE percent. Claude Code's statusLine cache has written
+//   `28.000000000000004`, which reached the tick line verbatim as
+//   `5h=28.000000000000004%`; the menu bar's integer parse rejected it and the 5h
+//   figure vanished from the bar and the menu while 7d (a clean `3`) survived.
+// - A window that has not ALREADY RESET. That same cache carried a five_hour whose
+//   resets_at was 20 hours in the past, so the host reported `28% (resets 0m)` - a
+//   percentage from a window that no longer exists. quotaAgeSec could not flag it:
+//   the file had been written a minute earlier. Past its reset the used figure is
+//   unknown, not the old one, so both fields go null and every surface shows `?`.
+function quotaWindow(pct, resetsAtMs) {
+  if (resetsAtMs && resetsAtMs <= Date.now()) return { pct: null, resetInMin: null };
+  return {
+    pct: typeof pct === "number" && Number.isFinite(pct) ? Math.round(pct) : null,
+    resetInMin: minutesUntilMs(resetsAtMs),
+  };
 }
 
 // ---------- OAuth usage polling ----------
@@ -2357,17 +2372,21 @@ async function readUsage() {
   const cacheAt = rateLimits.written_at ?? 0;
   const useOauth = !!oauthUsage && oauthAt >= cacheAt;
   const quotaAt = useOauth ? oauthAt : cacheAt;
+  const five = quotaWindow(
+    useOauth ? oauthUsage.fiveHourPct : fiveHour?.used_percentage,
+    useOauth ? oauthUsage.fiveHourResetsAtMs : fiveHour?.resets_at ? fiveHour.resets_at * 1000 : null
+  );
+  const seven = quotaWindow(
+    useOauth ? oauthUsage.sevenDayPct : sevenDay?.used_percentage,
+    useOauth ? oauthUsage.sevenDayResetsAtMs : sevenDay?.resets_at ? sevenDay.resets_at * 1000 : null
+  );
 
   return {
-    fiveHourPct: useOauth ? oauthUsage.fiveHourPct : (fiveHour?.used_percentage ?? null),
-    fiveHourResetInMin: useOauth
-      ? minutesUntilMs(oauthUsage.fiveHourResetsAtMs)
-      : minutesUntil(fiveHour?.resets_at),
+    fiveHourPct: five.pct,
+    fiveHourResetInMin: five.resetInMin,
     sessionTokens: tokens.sessionTokens,
-    sevenDayPct: useOauth ? oauthUsage.sevenDayPct : (sevenDay?.used_percentage ?? null),
-    sevenDayResetInMin: useOauth
-      ? minutesUntilMs(oauthUsage.sevenDayResetsAtMs)
-      : minutesUntil(sevenDay?.resets_at),
+    sevenDayPct: seven.pct,
+    sevenDayResetInMin: seven.resetInMin,
     weekAllTokens: tokens.weekAllTokens,
     weekFableTokens: tokens.weekFableTokens,
     weekFablePct: useOauth ? oauthUsage.weekFablePct : null,

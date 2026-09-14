@@ -198,7 +198,13 @@ func field(_ line: Substring, _ key: String) -> String? {
 func pctReset(_ line: Substring, _ key: String) -> (Int, Int?)? {
     guard let r = line.range(of: key) else { return nil }
     let rest = line[r.upperBound...]
-    guard let pctEnd = rest.firstIndex(of: "%"), let pct = Int(rest[..<pctEnd]) else { return nil }
+    // Through Double, not Int: `Int("28.000000000000004")` is nil, and a float the
+    // host once passed through verbatim hid the 5h figure from the bar AND the menu
+    // with nothing saying why. The host rounds now; this keeps a regression there
+    // from blanking the Mac again.
+    guard let pctEnd = rest.firstIndex(of: "%"), let raw = Double(rest[..<pctEnd]), raw.isFinite
+    else { return nil }
+    let pct = Int(raw.rounded())
     var reset: Int? = nil
     let after = rest[rest.index(after: pctEnd)...]
     if let rr = after.prefix(24).range(of: "(resets "),
@@ -3337,6 +3343,13 @@ if CommandLine.arguments.contains("--pace-check") {
     eq(codexWindowMin(withWin), 10080, "codex=44%/7d is seven days of minutes")
     eq(codexWindowMin(noWin), nil, "no /Nd means no window")
     eq(codexWindowMin(unknown), nil, "an unmeasured codex has no window")
+
+    // A float percentage must still parse - it once blanked the 5h figure.
+    let floaty: Substring = "5h=28.000000000000004% (resets 0m) 7d=3% (resets 5174m) via=ble"
+    eq(pctReset(floaty, "5h=")?.0, 28, "5h=28.000000000000004% reads as 28")
+    eq(pctReset(floaty, "5h=")?.1, 0, "and keeps its reset")
+    eq(pctReset(unknown, "5h=")?.0, 1, "a whole percent still reads")
+    eq(pctReset("5h=?% (resets ?m)", "5h=")?.0, nil, "an unknown 5h is nil, not zero")
 
     // Staleness suppresses the pace on BOTH surfaces, because the percentage has
     // stopped moving while the clock has not.
