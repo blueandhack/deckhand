@@ -1,0 +1,17 @@
+# Whisper vocabulary priming. THE ONE COPY - host/index.mjs and host/mic-stt.sh both
+# read this file, because they used to hold the same literal twice and could drift.
+# Override at runtime with WHISPER_PROMPT; this file is only the default.
+#
+# WHY IT IS ONE LINE AND WHY IT LOOKS FULL: whisper.cpp truncates an initial prompt to
+# the LAST ~223 tokens (n_text_ctx/2 - 1) and says NOTHING when it does. Over-fill this
+# and the terms at the FRONT are silently dropped - measured, not assumed: a canary term
+# placed before 120 filler words stopped taking effect while the same term placed after
+# them still worked. So terms are ordered LEAST important first: if it ever does
+# overflow, the cheapest terms are the ones that fall off the front.
+#
+# 44 terms, measured to fit with the 43-term budget plus headroom. Commas, not spaces:
+# comma-separated fit 42 terms where space-separated fit only 34 (measured 2026-09-14),
+# and commas also keep sentence-final punctuation in the output.
+#
+# BEFORE ADDING TERMS run: node host/whisper-prompt-check.mjs
+deadlock, mutex, eslint, npm, TypeScript, Python, Kubernetes, kubectl, Docker, PostgreSQL, regex, JSON, API, CLI, GitHub Actions, CI, lint, async, await, HTTP, OAuth, kernel, merge conflict, pull request, rebase, git commit, refactor, repository, UART, NVS, PSRAM, QSPI, ESP32, firmware, flash, BLE, ADPCM, transcript, session, microphone, Whisper, README.md, CLAUDE.md, Deckhand.

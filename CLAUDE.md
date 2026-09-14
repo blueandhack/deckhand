@@ -211,6 +211,8 @@ node host/{wire-bytes,ask-chips,ask-optdescs,pair-crypto,pair-exchange,voice-ans
 node host/{codex-refresh,line-address,session-lookup}-check.mjs
 node host/session-inbox-check.mjs                       # the inbox frame, over a stand-in socket
 node host/{host-tag,mac-emoji,run-ledger,watchdog,ccusage}-check.mjs
+node host/whisper-prompt-check.mjs                      # the dictation vocabulary, vs whisper's SILENT prompt cap
+node host/whisper-prompt-check.mjs --live               # ... and whether its leading terms still bite
 node firmware/board-baseline.mjs --doc-check           # the quote above vs the JSON
 node host/multi-device-check.mjs                        # two boards on two cables at once
 node claude-hooks/answer-status-check.mjs

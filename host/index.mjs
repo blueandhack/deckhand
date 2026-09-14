@@ -2672,10 +2672,26 @@ const WHISPER_BIN = process.env.WHISPER_BIN || "/opt/homebrew/bin/whisper-cli";
 // prompt biases the decoder toward expected terms and costs nothing - no bigger
 // model, no extra time. --carry-initial-prompt re-applies it to every window, which
 // matters for a 30s+ dictation (otherwise it only conditions the first 30s).
-const WHISPER_PROMPT =
-  process.env.WHISPER_PROMPT ||
-  "Deckhand, CLAUDE.md, README.md, ESP32, firmware, flash, BLE, ADPCM, Whisper, " +
+// The list lives in host/whisper-prompt.txt, NOT in a literal here: mic-stt.sh needs
+// the same string and the two copies could drift. The literal below is a fallback for
+// a partial checkout only - dictation must not stop working because a file is absent,
+// and a silently EMPTY prompt would look like "priming stopped helping" rather than
+// like a missing file, so the fallback is the old list rather than "".
+const WHISPER_PROMPT_FILE = path.join(__dirname, "whisper-prompt.txt");
+function loadWhisperPrompt() {
+  if (process.env.WHISPER_PROMPT) return process.env.WHISPER_PROMPT;
+  try {
+    const text = readFileSync(WHISPER_PROMPT_FILE, "utf8")
+      .split("\n").filter((l) => !l.startsWith("#")).join(" ").trim();
+    if (text) return text;
+    console.error(`Voice: ${WHISPER_PROMPT_FILE} has no prompt line - using the built-in list.`);
+  } catch {
+    console.error(`Voice: ${WHISPER_PROMPT_FILE} missing - using the built-in list.`);
+  }
+  return "Deckhand, CLAUDE.md, README.md, ESP32, firmware, flash, BLE, ADPCM, Whisper, " +
     "git commit, refactor, repository, session, transcript, host script, microphone.";
+}
+const WHISPER_PROMPT = loadWhisperPrompt();
 // What dictation needs, checked as TWO separate things because they fail in
 // identically-looking ways. `brew install whisper-cpp` deliberately ships no model, so a
 // binary-only install turns "whisper-cli: ENOENT" into "failed to load model". On this
