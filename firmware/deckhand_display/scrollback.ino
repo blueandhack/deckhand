@@ -290,7 +290,14 @@ bool scrollAppend(uint8_t role, const char* t) {
   scrollTextUsed += (uint32_t) len + 1;
 
   e.role = role;
-  e.lines = (uint16_t) scrollWrapLines(dst, SCROLL_COLS);
+  // A TOOL ROW IS CLIPPED TO ONE LINE, SO IT RESERVES ONE LINE. Both draw paths
+  // paint only row 0 for role >= 2 (`if (k > 0) continue;`), but this reserved the
+  // entry's FULL wrapped height, so every row after the first was reserved by the
+  // index and drawn by nobody - blank. Invisible under CHAT, which excludes these
+  // roles at the fetch level; under ALL it was most of the screen. Measured over a
+  // real 4656-entry transcript: 92658 of 124912 reserved rows blank, 74.2%, with
+  // one `out` entry reserving 204 rows to draw one - 7.6 screens of black.
+  e.lines = (role >= 2) ? 1 : (uint16_t) scrollWrapLines(dst, SCROLL_COLS);
   e.spacer = 0;                              // the last entry has no trailing blank
   if (scrollCount == 0) {
     e.lineFirst = 0;

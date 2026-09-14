@@ -57,6 +57,10 @@ const present = (b, re, msg) => s(b !== null && re.test(b), msg);
 if (SELFTEST) {
   const fault = process.env.SB_FAULT || "wrap-cap";
   if (fault === "wrap-cap") INO = INO.replace(/while \(t\[pos\]\) \{/, "while (t[pos] && drawn < 80) {");
+  // Reverts the index to reserving a tool row's full wrapped height, which is what
+  // left the ALL filter mostly black. Must fail BY NAME, not merely shift a count.
+  if (fault === "tool-rows-reserve-all")
+    INO = INO.replace(/e\.lines = \(role >= 2\) \? 1 : /, "e.lines = ");
   if (fault === "no-reap") INO = INO.replace(/reapBleLinks\(true\);/g, "");
   if (fault === "no-activity") INO = INO.replace(/lastActivityMillis = millis\(\);/g, "");
   // FIXED IN TASK 3: this line was added in Task 2, forward-provisioned for an
@@ -329,7 +333,9 @@ m(walk("x".repeat(30), 10).length === 3,
 function buildIndex(entries, cols) {
   const idx = [];
   for (let i = 0; i < entries.length; i++) {
-    const e = { role: entries[i].r, lines: wrapLines(entries[i].t, cols), spacer: 0 };
+    // role >= 2 is clipped to one drawn row, so it reserves one - see scrollAppend.
+    const e = { role: entries[i].r, spacer: 0,
+                lines: entries[i].r >= 2 ? 1 : wrapLines(entries[i].t, cols) };
     if (i === 0) e.lineFirst = 0;
     else {
       const p = idx[i - 1];
@@ -357,6 +363,19 @@ m(IX[3].spacer === 0, "mirror: the last entry has no trailing blank");
 m(IX.map(e => e.lineFirst).join(",") === "0,2,3,5", "mirror: lineFirst accumulates lines plus spacers");
 // EXHAUSTIVE over every reachable line, because the binary search is the one
 // thing a frame calls every time and an off-by-one there shows as text jumping.
+// A TOOL ROW IS CLIPPED TO ONE LINE BY BOTH DRAW PATHS, so the index must reserve
+// ONE line for it. EV above cannot see this - every one of its texts already wraps
+// to a single line - so the bug it guards against was invisible here for the life
+// of the file. Reserving a tool entry's full wrapped height and then drawing only
+// row 0 left 74.2% of the ALL filter's scroll space blank, measured over a real
+// 4656-entry transcript, with one `out` entry reserving 204 rows to draw one.
+const EVLONG = [{ r: 0, t: "q" }, { r: 3, t: "x".repeat(COLS * 20) }, { r: 1, t: "a" }];
+const IXL = buildIndex(EVLONG, COLS);
+m(IXL[1].lines === 1,
+  `mirror: a role >= 2 entry occupies ONE line in the index, not its wrapped height (${IXL[1].lines})`);
+m(IXL[2].lineFirst === 4,
+  `mirror: the entry after a clipped tool row starts right below it (${IXL[2].lineFirst}, want 4)`);
+
 const totalLines = IX[IX.length - 1].lineFirst + IX[IX.length - 1].lines;
 let bad = null;
 for (let L = 0; L < totalLines; L++) {
@@ -488,6 +507,9 @@ present(appendBody, /SCROLL_MAX_ENTRIES/,
   "structural: scrollAppend bounds itself against SCROLL_MAX_ENTRIES");
 present(appendBody, /p\.role == 2 && role == 3/,
   "structural: the result-after-ran spacer rule is in scrollAppend, by operand");
+present(appendBody, /e\.lines = \(role >= 2\) \? 1 : \(uint16_t\) scrollWrapLines\(/,
+  "structural: the index reserves ONE line for a clipped tool row - both draw paths paint " +
+  "only row 0 for role >= 2, so reserving its full wrapped height reserves rows nothing draws");
 
 // The whole feature must be inside ONE #if, so board 1 never sees the TEXT of it.
 s(/^\s*#if BOARD_HISTORY_SCROLL/m.test(INO), "structural: scrollback.ino opens with #if BOARD_HISTORY_SCROLL");
@@ -915,6 +937,7 @@ if (SELFTEST) {
     "wrap-cap":    /scrollWrapLines carries NO line cap/,
     "wide-marker": /every gutter marker is ASCII/,
     "seq-append":  /flags scrollFetchFailed rather than appending into a hole/,
+    "tool-rows-reserve-all": /the index reserves ONE line for a clipped tool row/,
     "no-reap":     /the drag loop reaps BLE links/,
     "no-activity": /the drag loop refreshes lastActivityMillis/,
     // The rule this file broke: a TRANSCRIBED signature. The fault renames
