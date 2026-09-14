@@ -37,7 +37,14 @@ echo
 echo "--- transcript (whisper.cpp, $(basename "$MODEL")) ---"
 # Vocabulary priming: "update CLAUDE.md" came back as "update core code MD5"
 # without it. Costs nothing and needs no bigger model.
-PROMPT="${WHISPER_PROMPT:-Deckhand, CLAUDE.md, README.md, ESP32, firmware, flash, BLE, ADPCM, Whisper, git commit, refactor, repository, session, transcript, host script, microphone.}"
+# Read the SAME file host/index.mjs reads. This used to be a SECOND copy of the same
+# literal. The two had not actually drifted - they were still identical when this
+# changed - but nothing kept them that way, and a term added for dictation and not
+# here would have shown up only as "the CLI heard it wrong".
+PROMPT="${WHISPER_PROMPT:-$(grep -v '^#' whisper-prompt.txt 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g;s/^ //;s/ $//')}"
+if [ -z "$PROMPT" ]; then
+  echo "warning: whisper-prompt.txt missing or empty - transcribing WITHOUT vocabulary priming" >&2
+fi
 whisper-cli -m "$MODEL" -f "$OUT/latest-clean.wav" -nt \
   --prompt "$PROMPT" --carry-initial-prompt 2>/dev/null | sed '/^$/d'
 echo "-------------------------------------------------------"

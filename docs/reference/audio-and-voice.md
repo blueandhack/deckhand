@@ -362,6 +362,92 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   without it only the first window is conditioned. Priming alone did NOT fix `base.en`
   ("update, CLAUDE and D5"); priming plus turbo did. Both overridable via `WHISPER_MODEL` /
   `WHISPER_PROMPT`.
+  **MEASURED 2026-09-14, and the size of the effect is now known.** Priming was re-tested on a
+  HELD-OUT SPLIT - the prompt listed 33 terms drawn only from the first half of the corpus, and
+  recall was scored separately on those 33 and on the 32 terms that appear only in the second half.
+  Primed terms went **87.9% -> 93.9%** (58/66 -> 62/66); held-out terms moved 79.7% -> 81.3%
+  (51/64 -> 52/64), which is one term and inside the noise. So the gain is real and it is
+  SPECIFIC to what the prompt names - which also means **the shipping prompt only helps the
+  fifteen-odd nouns it happens to list.** Terms missed in BOTH voices with the current prompt:
+  `kubectl`, `await`, `log n`, `kernel` (heard as "colonel"), `baud`. Widening
+  `WHISPER_PROMPT` toward a general dev glossary is the cheapest accuracy left on the table.
+- **THE LIST NOW LIVES IN `host/whisper-prompt.txt`, AND IT HAS A HARD CEILING NOBODY
+  ANNOUNCES (2026-09-14).** It was a literal in **two** places - `host/index.mjs` and
+  `host/mic-stt.sh`. They had NOT actually drifted - both copies were still identical when
+  this changed - but nothing kept them so, and a term added for dictation and not for the
+  CLI would have surfaced only as "the CLI heard it wrong". Both now read the one file;
+  `host/whisper-prompt-check.mjs` fails BY NAME if either stops doing so.
+  **whisper.cpp truncates an initial prompt to the LAST ~223 tokens (`n_text_ctx/2 - 1`)
+  and says NOTHING** - no error, no warning, no timing change, just quietly worse
+  transcripts. **It drops the FRONT, not the tail**, measured with a canary term placed
+  before and after 120 filler words, so the file is ordered LEAST important first and the
+  cheapest terms are the ones that fall off. **Commas beat spaces**: comma-separated,
+  42 terms of a 51-term list fit; space-separated only 34 - the opposite of the guess that
+  separators were wasting the budget - and commas also keep sentence-final punctuation,
+  which an unpunctuated prompt strips from the output. The list went 16 -> 44 terms, worth
+  **114/134 -> 118/134 key terms and 16.9% -> 16.2% WER**, with hallucination-over-silence
+  unchanged (still "Thank you." on three of four silent clips) and no speed cost.
+  **The first canary measurement was WRONG and the reason is worth keeping**: the probe
+  term was also inside the list being measured, so the list's own copy satisfied the probe
+  and it reported that 120 terms fit. A probe a neighbouring line can satisfy is not a probe.
+- **PRIMING ONLY RESCUES A NARROW CLASS OF ERROR - it is not a general accuracy dial.**
+  Measured per-term: it flips `NBS` -> `NVS`, where the acoustics are ambiguous and the
+  right answer is merely unlikely. It does **not** fix `kernel` heard as "colonel" or
+  `baud` heard as "VOD" - cases where Whisper confidently hears a different REAL word, and
+  listing the term you wanted changes nothing. So a term missing from the list is worth
+  adding; a term already in the list that still comes out wrong will not be fixed by
+  saying it louder, and needs the audio or the model to change instead.
+- **FOUR ENGINES RE-BENCHMARKED 2026-09-14, and turbo + prompt KEEPS the job.** The earlier
+  comparison only ever put turbo against `base.en`, so it said nothing about the two engines that
+  did not exist when it was written. Corpus: 22 CS-heavy sentences x 2 voices (`say` Samantha and
+  Daniel), 158.6s, **134 key terms**, pushed through `host/mic-wav.mjs` itself - synthesised as a
+  `codec=pcm16 rate=16000` capture file and decoded by the production code, not a re-implementation
+  of it. Scored on WER over a normalised word stream and on term recall over a DESPACED string, so
+  an engine is judged on whether it heard `ESP32` rather than on whether it wrote `ESP 32`.
+  **The scorer is oracle-checked**: fed the references it returns 0.00% WER and 134/134, so the
+  numbers below are model error and not normalisation.
+
+  | engine | WER% | key terms | per-dictation | throughput |
+  |---|---|---|---|---|
+  | whisper turbo-q5_0 + prompt (SHIPPING) | 17.6 | **113/134** | 0.81s | 7x |
+  | whisper turbo-q8_0 + prompt (874MB) | 17.8 | 115/134 | 0.87s | 7x |
+  | Parakeet TDT 0.6b v3 (MLX) | 20.0 | 111/134 | 0.92s | 17x |
+  | Apple `SpeechTranscriber` (macOS 26) | 31.0 | 88/134 | **0.18s** | **37x** |
+
+  Apple's is the interesting loss: it is **4.5x faster per dictation than turbo with no model to
+  download at all**, and it is not close on vocabulary - "async await" as "Asinka weight", `kernel`
+  as "colonel", `lint` as "length", `CLAUDE.md` as "cloth.md". **Its contextual-biasing API does
+  nothing here**: 33 terms passed as `AnalysisContext.contextualStrings[.general]`, by BOTH
+  `setContext()` and the `init(inputAudioFile:analysisContext:)` route, left all 44 outputs
+  **byte-identical**. That is measured, not inferred - but it is a negative result about this
+  usage, not proof the API is inert. `turbo-q8_0` buys 2 terms for 300MB and is not worth it.
+- **ONLY WHISPER INVENTS WORDS OVER SILENCE - the other two return nothing.** Four silent clips
+  (digital zeros, a real `peak=0` device stream, and two real captures at 1.6dB and 2.4dB filtered
+  SNR) went to all three engines. Whisper answered **"Thank you."** to three of the four; Apple and
+  Parakeet returned an empty string to all four. This is the exact failure `MIN_CAPTURE_SNR_DB`
+  was added to prevent, and it is a property of Whisper specifically rather than of ASR in general.
+  On a real capture Apple also produced a fluent invention - "Yes, Harry. I'll open it tomorrow."
+  over audio the other two heard as punctuation - so the 8dB gate stays earning its keep whichever
+  engine runs behind it.
+- **THE DE-RUMBLE PASS COSTS ACCURACY, IN BOTH CONDITIONS, AND THAT IS WORTH A LOOK.** The same
+  speech was scored with and without `mic-wav.mjs`'s clean pass (180Hz HP x2 + **3kHz LP** +
+  de-comb). It lost ground every time, including on speech mixed with this mic's own real noise bed
+  - the case the filter exists for:
+
+  | | WER before -> after | key terms before -> after |
+  |---|---|---|
+  | clean speech, whisper | 15.0 -> 17.6 | 118 -> 113 |
+  | speech + real noise bed, whisper | 18.3 -> 20.4 | **121 -> 108** |
+  | speech + real noise bed, Parakeet | 18.3 -> 24.2 | 113 -> 100 |
+
+  The likely mechanism is already written down two bullets above the filter itself: 16kHz was
+  chosen because "that band is where consonants separate (s/f/th)" - and then the clean pass
+  low-passes at **3kHz**, well below where it said the consonants live. **This is NOT yet a reason
+  to change the pipeline.** The noise here was mixed in digitally, so it is uncorrelated with the
+  speech in a way a real rail-coupled BLE comb is not, and the de-comb stage had no real comb to
+  find. What it does say is that feeding Whisper `latest.wav` rather than `latest-clean.wav` is
+  worth one measurement on a real capture with known ground truth - which needs somebody to read a
+  scripted line into the mic, because no such recording exists today.
 - **Parakeet is a dead end for now, despite the runtime being installed.** whisper-cpp 1.9.2 ships
   `parakeet-cli`, `parakeet-quantize`, `libparakeet.dylib` and `parakeet.h`, and `parakeet-cli`
   defaults to `ggml-parakeet-tdt-0.6b-v3.bin` — but no compatible model is published. The only GGUF
@@ -370,6 +456,17 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   script, so producing one means converting NVIDIA's NeMo checkpoint with torch/NeMo. Worth
   revisiting only if someone publishes a real ggml `.bin` — Parakeet TDT is a transducer, so it
   would be faster than Whisper, but turbo already solves the accuracy problem.
+  **PARTLY CORRECTED 2026-09-14.** Still true of `parakeet-cli`: the GGUFs that now exist
+  (`handy-computer/parakeet-tdt-0.6b-v3-gguf`, six quants, ~587k downloads) are `GGUF` v3 built for
+  **`transcribe.cpp`**, and brew's `libparakeet.dylib` rejects them with the same `invalid model
+  data (bad magic)` — so the bullet above is right about the binary and wrong about Parakeet.
+  It RUNS, via `uv tool install parakeet-mlx` + `mlx-community/parakeet-tdt-0.6b-v3`, and on the
+  corpus below it is the most accurate engine tested **on unfiltered audio** (119/134 key terms vs
+  turbo's 118) at 3-4x turbo's throughput. Two things keep it from replacing Whisper today: it has
+  **no vocabulary-priming mechanism** (a transducer takes no initial prompt), which is precisely
+  where turbo earns its place here; and `parakeet-mlx` shells out to `ffmpeg`, a third dependency
+  for `install-voice.sh` to check. Not evaluated: `transcribe.cpp` itself, and the CoreML build
+  (`FluidInference/parakeet-tdt-0.6b-v3-coreml`).
 - **A DICTATION BECOMES AN EDITABLE DRAFT ON THE DEVICE (`DECKHAND_VOICE_DELIVERY`, default
   `draft`, since 2026-09-13).** ~~default `inbox`, since 2026-09-05~~ — the immediate post is
   still there and is now one env var away, but it is no longer what happens when you speak.
