@@ -388,96 +388,17 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   polls). Sessions are matched across polls **by id, never by name** — two sessions on the
   same project share a name, and name-matching once made an asking session look newly-asking
   every poll (endless beeping).
-- The device line buffers (`feedChar`'s 16000-**BYTE** guard, the 16384-byte BLE stream buffer) are
-  sized for payloads carrying `ask` objects; shrinking them silently drops whole updates. They
-  were bumped from 8000/8192 when the ask caps grew (title 34, detail 1400, options 4×32,
-  `askDetail[1424]`/`askTitle[36]`/`askOpts[4][34]`) so up to 6 simultaneous asks with full
-  1400-char details can't overflow one JSON line. ArduinoJson v7's `JsonDocument` is elastic, so
-  the parse side has no fixed capacity - the line guard and RAM (`SessionInfo`×6 plus a
-  `prevSessions`×6 diff copy) are the real ceilings.
-  **THAT GUARD COUNTS BYTES AND EVERY CAP ABOVE IT COUNTED CHARACTERS, AND THIS FILE CALLED IT A
-  "16000-char guard" FOR AS LONG AS THE MISMATCH EXISTED.** `buf.length()` on an Arduino String is
-  bytes; `title` 34, `detail` 1400 and `options` 32 were all JS `.slice()`, i.e. UTF-16 code units,
-  and `clean()`/`cleanMultiline()` stripped control bytes only — so everything from U+0080 up
-  crossed at up to **3 bytes each**. The two units were never reconciled, and the device's own
-  `askDetail[1424]`/`askOpts[4][34]` have the same disease, since `copyField` truncates by BYTE.
-  **Measured, not modelled from the caps:** six asking sessions of all-wide text with **no new
-  fields at all** is **37,425 bytes against a 16,000 guard — 2.3x over**. And it does not take six:
-  **ONE session carrying a multi-byte question at the 1400-char cap is 17,893 bytes.** A single
-  question asked in CJK does it.
-  **THE FAILURE MODE IS THE IMPORTANT PART, AND IT IS NOT A DROPPED LINE.** The guard **CLEARS THE
-  BUFFER MID-LINE**, so the remainder of that same line accumulates into the emptied buffer,
-  `processCompletedLine()` gets a JSON fragment, `handleLine()` returns early on the parse error,
-  and **every tick carrying that prompt is lost**. The screen freezes at its last good state for as
-  long as the prompt is pending, while both links, both heartbeats and both menu bars look perfectly
-  healthy and nothing anywhere logs why — the "healthy process doing no useful work" shape this file
-  already documents three times over (the stalled tick, the `ccusage` all-or-nothing tick, the
-  nvm-PATH `readUsage()` throw).
-  **FIX, LAYER 1: device-bound text is ASCII on the host, so characters and bytes are ONE UNIT BY
-  CONSTRUCTION.** Not a bigger guard — `askDetail[1424]` and friends are fixed too, so raising it
-  only moves the truncation. The justification is that the bytes were never worth anything:
-  **both fonts declare `0x20..0x7E`, and an out-of-range byte draws nothing and advances nothing**,
-  so every non-ASCII byte was budget spent on an invisible glyph. Stripping them costs no
-  information the device could ever have shown, and it makes every character cap exact in bytes at
-  once rather than patching one and leaving the next wrong. `toAscii()` transliterates what actually
-  appears — em-dashes, curly quotes, ellipses, arrows, accented Latin via NFD — and marks anything
-  else with a single `?`, **collapsing a RUN to one** so a CJK sentence does not become a wall of
-  them. In the hook it goes inside `clean()`/`cleanMultiline()`, the single funnel every ask field
-  already takes; in the host at each device-bound cap site. **Transliterate THEN cap, never the
-  reverse**: the ellipsis is one character in and three out, so capping first lets a field grow back
-  past its own cap. Result: WIDE **37,425 → 14,237**, and the ASCII floor is **unchanged at
-  14,237** — the two are now the same number, and that identity IS the reconciliation. **Every
-  payload that was already fine is byte-identical**, verified against 267 real captured payloads.
-  **FIX, LAYER 2: `host/wire-fit.mjs` — the host REFUSES to emit a line the device cannot receive.**
-  It measures every tick line against `feedChar`'s own 16,000-byte guard before writing it and sheds
-  until it fits: largest `ask.detail` first (the prompt survives and stays answerable, with a marker
-  saying where to read it), then `optDescs`, then whole sessions off the urgency-sorted **TAIL**,
-  with any `asking` row it drops counted into `hiddenAsking`. Tier 3 is what makes this **TOTAL**
-  where the transliteration is merely thorough: a 200KB session still yields a sendable line, and it
-  covers any future field, any hook version, and — the case no checker can reach — **a STALE hook
-  still installed in `~/.claude`, emitting untransliterated text until someone runs `install.sh`**.
-  Everything shed is LOGGED, because a silent truncation would be the same class of defect as the
-  freeze. Both shedding loops are bounded by the session count: this runs inside the 5s tick and a
-  spin there would be worse than the freeze it prevents, which a fault-injection run proved by
-  hanging on an unbounded one.
-  **`ask.voiceText` BYPASSED layer 1, and the obvious fix was WRONG.** It is parked by
-  `handleVoiceAnswer` under `capUtf8`'s byte cap and assigned straight into the payload, so it never
-  met `clean()` — and Whisper is the densest non-ASCII source in the system. The budget never
-  noticed, because 150 bytes is 150 bytes either way; what it cost was the GLASS. *"Yes - let's go
-  ahead... but don't touch the cache"* reached the wire at 47 chars / 55 bytes and drew as
-  `Yes  lets go ahead but dont touch the cache` — **holes exactly where the punctuation was**, on
-  the one screen whose entire purpose is proving a human read THESE EXACT WORDS before signing them.
-  Now 49 chars / 49 bytes and drawn in full. **The fix had to be at the PARK SITE, before
-  `voiceSha()`.** Transliterating in the payload builder — where `item.ask.voiceText` is assigned,
-  which is the obvious place — desyncs the text the device DISPLAYS from the text that gets signed.
-  **This file used to say the host would then REJECT valid answers. It would not, and the correction
-  matters more than the original claim did.** `sessions.ino:2259` builds `nonce:pid:TEXT:<sha16>`
-  from the `voiceSha` the host SENT — the device does not re-hash what it draws — and the host
-  verifies by re-hashing its own PARKED copy, which still matches. So the answer is **ACCEPTED**:
-  the human reads one string and authorises another, with a valid signature and nothing logged.
-  A rejection would have been loud and self-limiting; this is a silent divergence on the one screen
-  whose entire purpose is binding what was read to what was signed. That is why the send-time guard
-  (`host/wire-ascii.mjs`) **suppresses** `voiceText`/`voiceSha` rather than repairing them when the
-  park site has failed — a missing confirm screen is a visible, safe failure. That ordering is
-  asserted, and the plausible wrong fix is one of the injected faults: moving it fails 6 assertions
-  by name.
-  **Found en route:** `histFlatten`'s truncation marker was **U+2026**, outside both fonts, so a
-  truncated history preview showed no sign whatsoever of having been cut. Three ASCII dots now — the
-  fourth instance of the trap this file already records for `fitText`'s ellipsis, the `CLAUDE/air`
-  tag separator and the PAIRED MACS middle dot.
-  **Worth recording as METHOD: on a finite domain, EXHAUSTIVE beats fuzz and costs under a second.**
-  The drift guard between `host/to-ascii.mjs` and the hook's forced inline copy runs over **71,738
-  strings** — a hand-written corpus, a seeded fuzz sweep including lone surrogates on both sides,
-  every map key PARSED out of the module, every BMP code point, and an astral stride. A mutated
-  `"Ø": "O"` → `"0"` was caught by the exhaustive half and **missed entirely by 5,000 fuzz
-  strings**. The copy is duplicated rather than imported for the reason `capBytes()` duplicates
-  `capUtf8()`: `install.sh` copies that hook alone into `~/.claude`, so it can only ever import node
-  builtins.
-  **A TRIPWIRE deliberately asserts that something is STILL WRONG.** With `optDescs` at its cap on
-  all four options of all six sessions, the line is over the guard **even in pure ASCII** — a
-  residue no transliteration can reach, because it is a CAP decision. It is far outside real traffic
-  (one asking session at the cap is 3,741 bytes) and `wire-fit.mjs` now handles it at send time, but
-  the assertion stays: **if it ever fits, the reasoning behind these caps must be re-derived.**
+- **~~`ask.voiceText` bypasses layer 1, and the fix had to be at the PARK SITE.~~ SUPERSEDED
+  2026-09-13.** The whole of this entry described `ask.voiceText` — a transcript the host parked,
+  republished every tick, and the device signed a hash of. None of that exists: a spoken answer
+  is an insert into the compose surface's draft and comes back over the TYPED frame, and
+  `ask.voiceText`/`ask.voiceSha` are no longer emitted at all. **What survives is the rule the
+  entry was an instance of**, and it is worth more than the instance: transliteration must
+  happen where the text is CAPPED, not where it is drawn, because a cap applied after a repair
+  measures different bytes. `host/index.mjs` still does exactly that, and
+  `wire-bytes-check.mjs` still binds it — see
+  [`audio-and-voice.md`](audio-and-voice.md) for the current shape.
+
 - The ask/answer screen: tapping an asking session's row opens option buttons wired to
   `sendAnswerToHost()` (which transmits on USB **and** BLE TX notify, in ≤20-byte chunks).
   Long detail text pages by tapping the text block — deliberate: drag-scrolling flickers and
@@ -738,8 +659,10 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   — a checker asserting the DRAWN key against `TAP_MIN` passed only while board 1's `KB_ROW_H` was
   44 (drawn 40, exactly the floor) and was found the moment it went to 41. Sub-floor controls are
   a NAMED list (`EXCEPTIONS`) that is exact in BOTH directions: an unlisted sub-floor control
-  fails, and a listed one that is no longer sub-floor fails too. The panel has exactly one entry,
-  the draft line, sub-floor in HEIGHT only (its tested zone is `TAP_MIN` wide).
+  fails, and a listed one that is no longer sub-floor fails too. The panel has **two** entries,
+  `SPK` and `CLR`, both on the draft line and both sub-floor in HEIGHT only (each tested zone is
+  `TAP_MIN` wide). They are LABELLED entries rather than one band-wide permission, so a third
+  control appearing on that line fails instead of inheriting their reason.
   - **The action row takes PROPORTIONS, not cells.** `uiActionRow`'s `fracs` are `{1,1,2}`, so
     `SEND` is 50% of the lane and the destructive control 25% — "SEND twice DISCARD" exactly, and
     the checker parses that initialiser rather than restating it. Columns close on the panel:
@@ -817,6 +740,25 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   PANEL`, and `composeRecentsFit()` is asked at the HIT TEST as well as the draw — without that, a
   tap on board 1's 31px residual would replace the draft out of a ring that is nowhere on its
   glass.
+- **THE DRAFT LINE CARRIES TWO KEYS SINCE 2026-09-13: `SPK` AND `CLR`.** Speech fills this
+  surface's draft now rather than a separate confirm screen
+  (`docs/superpowers/specs/2026-09-13-voice-draft-design.md`), so the panel needed a way to
+  record again after a bad transcript. `SPK` sits one `TAP_MIN` cell left of `CLR`
+  (`composeSpkX()` is `composeClrX() - TAP_MIN`). **This line was chosen because it was ALREADY
+  the one named sub-floor exception** — a second key on it is the same exception rather than a
+  new one. The two alternatives were rejected on arithmetic: a fourth action column gives 38px
+  against a 40px floor, and keyboard row 3 is exactly `[?123 | 2][SPACE | 6][. | 2]` = 10 cells
+  closing on `BOARD_W`, so `SPK` there would cost SPACE a cell.
+  **What it costs is the draft's visible text lane**, and that number had never been asserted
+  anywhere — the firmware computed it inside `drawComposeDraft`, the mock computed its own, and
+  no checker compared them. It is now `composeDraftLaneW()`, `CARD_W - 12 - 2 * TAP_MIN`:
+  **164 -> 124px on board 1 (27 -> 20 characters) and 238 -> 192px on board 2 (29 -> 24)**.
+  `settings-geom-check.mjs` parses that accessor and asserts it, with three selftest faults.
+  The whole draft is always one `TYPE...` tap away, where the card wraps it to `KB_TEXT_LINES`.
+  **`CLR` is tested FIRST and keeps its open-ended `sx >= composeClrX()`**, so the right screen
+  edge still belongs to it; `SPK` is a bounded cell to its left. Reversing that order would let
+  an open-ended `SPK` test swallow `CLR` entirely.
+
 - **THE ASK SCREEN'S BUTTON SAYS `REPLY` NOW, NOT `TYPE`, because it stopped opening a keyboard.**
   It opens the compose surface at its ROOT — the panel, where this ask's own options and tokens are
   one tap each — and the keyboard is the sheet behind that panel's own `TYPE...`, one further tap

@@ -391,7 +391,7 @@ dispatch; the rest is grouped by what it draws:
 
 | file | what |
 |---|---|
-| `deckhand_display.ino` | types, globals, components, tab bar, record button, setup/loop, protocol |
+| `deckhand_display.ino` | types, globals, components, tab bar, setup/loop, protocol |
 | `usage.ino` | USAGE tab, Codex row, footer |
 | `sessions.ino` | session rows, detail screen, ask/answer |
 | `reader.ino` | history browser and full-screen reader (board 1); board-2 arms delegate to `scrollback.ino` |

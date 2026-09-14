@@ -729,7 +729,23 @@ function run() {
           `${label}: uiActionRow derives its lane as BOARD_W - 2*CARD_X = ${lane}, but `
         + `${HEADER[b]}'s CARD_W is ${H[b].CARD_W} - the row and the panel would use `
         + `different lanes`);
-      if (sc.screen === "reply" && !/-sent$/.test(sc.key)) {
+      // THE KEYS SCREEN'S ACTION ROW HAD NO ASSERTION AT ALL - not its count, not its
+    // labels. The block below is gated `sc.screen === "reply"`, so the keyboard's own
+    // row was unbound in both, which is how the mock could keep drawing two columns
+    // after the firmware grew a third and still report green.
+    if (sc.screen === "keyboard") {
+      chk(act.length === 3, "act",
+          `${label}: the keyboard's action band has ${act.length} controls, not the three the row draws (BACK, SPK, SEND)`);
+      if (act.length === 3) {
+        const [left, spk, send] = act;
+        chk(left.label === "BACK", "act", `${label}: the left action is "${left.label}", expected BACK - the destructive control lives on the panel`);
+        chk(spk.label === "SPK", "act", `${label}: the middle action is "${spk.label}", expected SPK`);
+        chk(send.label === "SEND", "act", `${label}: the right action is "${send.label}"`);
+        chk(send.drawn.w === 2 * left.drawn.w && send.drawn.w === 2 * spk.drawn.w, "act",
+            `${label}: SEND is drawn ${send.drawn.w}px against BACK's ${left.drawn.w} and SPK's ${spk.drawn.w} - {1,1,2} asks for exactly twice`);
+      }
+    }
+    if (sc.screen === "reply" && !/-sent$/.test(sc.key)) {
         chk(act.length === 3, "act",
             `${label}: the reply panel's action band has ${act.length} controls, not the three `
           + `the design needs (CLOSE/DISCARD, TYPE..., SEND) - TYPE... is the only bridge from `
@@ -799,7 +815,7 @@ function run() {
       }
     }
     // AND, STATED DIRECTLY RATHER THAN LEFT TO THE EXCEPTION MACHINERY: on the
-    // reply panel every control except CLR clears TAP_MIN in BOTH axes. This
+    // reply panel every control except SPK and CLR clears TAP_MIN in BOTH axes. This
     // fails if anything else goes sub-floor AND if CLR stops being sub-floor, so
     // it cannot rot into a description of whatever the mock happens to draw.
     if (sc.screen === "reply") {
@@ -809,7 +825,10 @@ function run() {
       const sub = p.controls
         .filter(c => c.tested.h < k.TAP_MIN || c.tested.w < k.TAP_MIN)
         .map(c => c.label);
-      const want = /-sent$/.test(sc.key) ? [] : ["CLR"];
+      // SPK joined CLR on this line. Still exact in both directions: a third
+      // sub-floor control fails, and so does either of these two ceasing to be
+      // sub-floor, so the list cannot rot into a description of what is drawn.
+      const want = /-sent$/.test(sc.key) ? [] : ["SPK", "CLR"];
       chk(sub.length === want.length && sub.every(l => want.includes(l)), "tapmin",
           `${label}: the sub-floor controls are [${sub.join(", ")}], expected `
         + `[${want.join(", ") || "none"}] - on this screen only CLR may be short, and only in `

@@ -111,7 +111,7 @@ void micDumpBase64(const uint8_t* data, size_t len) {
     if ((off / PER_LINE) % 16 == 0) {
       char pctTxt[12];
       snprintf(pctTxt, sizeof(pctTxt), "%d%%", (int) (off * 100 / (len ? len : 1)));
-      micPillMeter((int) (off * 1000 / (len ? len : 1)), pctTxt, "sending to your Mac");
+      micPillMeter((int) (off * 1000 / (len ? len : 1)), pctTxt, 0, 0);
 #if !BOARD_USES_TFT_ESPI
       // ~9s of base64 lines with nothing else returning to loop() in between -
       // without this the progress bar would sit at its first frame the whole
@@ -124,17 +124,24 @@ void micDumpBase64(const uint8_t* data, size_t len) {
 }
 const char* voiceStateLabel() {
   if (!strcmp(voiceState, "heard")) return "TRANSCRIBED";
-  if (!strcmp(voiceState, "memo")) return "SAVED AS MEMO";
+  // ~~"SAVED AS MEMO"~~ - IT WAS NOT SAVED. The host's memo branch logs the
+  // transcript and returns; nothing writes it anywhere a person can retrieve it (the
+  // WAV survives under ~/Deckhand-audio, the words do not). The label now says where
+  // the text actually is. A memo is no longer reachable from the UI at all - the REC
+  // button that produced one is gone - but MICREC still hardcodes target="-", so the
+  // state and this label are kept for that diagnostic path.
+  if (!strcmp(voiceState, "memo")) return "NOT SENT - LOG ONLY";
   if (!strcmp(voiceState, "sent")) return "SENT TO SESSION";
-  // Delivery is the clipboard by default now - the host hands it to the user rather than
-  // running it headlessly. (An older device just falls through to "VOICE", so the host
-  // change is safe to ship on its own.)
+  // ~~"Delivery is the clipboard by default now"~~ - IT IS THE DRAFT. host/index.mjs
+  // reads DECKHAND_VOICE_DELIVERY || "draft", so `clip`, `sent` and `done` are only
+  // reachable under a non-default env var; the label is kept because those modes
+  // still work and an older device falls through to "VOICE" either way.
   if (!strcmp(voiceState, "clip")) return "COPIED - PASTE IT";
   if (!strcmp(voiceState, "done")) return "CLAUDE REPLIED";
   if (!strcmp(voiceState, "error")) return "FAILED";
   // Answer-flow states: without these, "capture incomplete", "transcription
   // failed" and "nothing recognised" were invisible - the user tapped SPEAK,
-  // spoke, and nothing happened at all, burning the 90s hook budget with no
+  // spoke, and nothing happened at all, burning the hook's wait with no
   // signal to retry. "askheard" deliberately has no card (the confirm screen
   // is already about to show the text) so it isn't listed here as a raise
   // state, but it falls through to "VOICE" harmlessly if ever drawn.
@@ -264,14 +271,21 @@ const char* micProcTitle() {
 char micProcTitleShown[20] = "";
 
 void drawMicProcessingFrame() {
-  micPillFrame(micProcTitle());
+  // THE FOOTER FOLLOWS THE TITLE. Past MIC_PROC_STALE_MS the title says the Mac never
+  // answered, and a hardcoded "GOES TO YOUR DRAFT" under it promised the words were
+  // on their way at the one moment the device knows they are not - the bar reporting
+  // a failure and a success at once. In that state the only true thing left to say
+  // is how to get rid of it, which is also what the removed "TAP TO DISMISS" was
+  // right about: it was wrong as a HEADLINE, not as a last resort.
+  const bool stale = (millis() - micProcStartMs) > MIC_PROC_STALE_MS;
+  micPillFrame(micProcTitle(), stale ? "TAP TO DISMISS" : "GOES TO YOUR DRAFT");
   snprintf(micProcTitleShown, sizeof(micProcTitleShown), "%s", micProcTitle());
-  int x = micPillX(), y = micPillY(), w = micPillW();
-  setUIFont(T_META);
-  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-  tft.setTextDatum(TC_DATUM);
-  tft.drawString("TAP TO DISMISS", x + w / 2, y + MIC_PILL_H - 15);
-  tft.setTextDatum(TL_DATUM);
+  // ~~"TAP TO DISMISS"~~ STOOD HERE AND IS GONE. It was the one line of guidance on
+  // screen at the moment you are waiting for your own words, and it offered to throw
+  // them away - while not even being true: a tap hides this bar, the transcript still
+  // arrives and still lands in the draft. The footer bar micPillFrame draws says
+  // where the words are going instead. A tap still dismisses; it is simply no longer
+  // the headline.
 }
 
 void drawMicProcessingUpdate() {
@@ -291,7 +305,8 @@ void drawMicProcessingUpdate() {
 
   // The sweep, inside the track micPillFrame already drew. Ping-pongs so it reads as
   // activity rather than as progress towards a right-hand edge.
-  int bx = x + SP_3 + 2, by = y + 28, bw = w - 2 * SP_3 - 4, bh = 10;
+  int bx = x + SP_3 + 2, bw = w - 2 * SP_3 - 4;
+  int by = micPillMeterY() + 2, bh = MIC_PILL_METER_H - 4;
   int segW = bw / 4;
   int span = bw - segW;
   int t = (int) ((millis() / 12) % (unsigned long) (2 * span));
@@ -337,16 +352,66 @@ void micProcessingDone() {
 }
 
 void micRestoreUi() {
+  // THE COMPOSE SURFACE OWNS THE SCREEN, AND forceFullRepaint() WOULD PAINT A TAB
+  // OVER IT. That matters now in the ordinary case rather than the exotic one: a
+  // spoken answer is captured FROM this surface, so ending the capture by throwing
+  // away the draft it just filled would defeat the whole feature. It also closes a
+  // hole that predates this change - a serial MICSTREAM raised over the keyboard
+  // ended, 35s later, with a tab on the glass, composeActive still true underneath,
+  // and every subsequent tap routed into controls nobody could see.
+  if (composeActive) {
+    drawKeyboard();               // routes on composeScreen - panel or keys
+    return;
+  }
   if (!everReceived) { // nothing to show yet - back to the standalone screen
     drawWaitingScreen();
     return;
   }
   forceFullRepaint();
 }
+// THE STUCK-PANEL BACKSTOP, and the trade it makes. Arming the stop on a RELEASE
+// fixed a capture that died 20ms in, and introduced the opposite failure: if
+// touchPressed() NEVER reads false the stop never arms and the take runs to its cap
+// with nothing on the device able to end it. Two ways in - a finger held on the chip
+// (push-to-talk is what people try first, and the footer's "TAP ANYWHERE TO STOP" is
+// then a lie for the whole take), and the false positive this file already records
+// ("a resistive panel throws occasional false positives, and one of them ended a 99s
+// take early") arriving as a CONTINUOUS read rather than a single one. Board 1's
+// stream loop discards everything the host sends for the duration, so the Mac cannot
+// end it either: touch is the only exit, and it was gated on a release that may
+// never come.
+//
+// 15s, not 3: under it a deliberate hold still records, which is the interaction the
+// release-arming exists to protect. Over it, the take ends ~40ms later (the two-vote
+// debounce still applies). Against the 20s compose cap that costs the last 5s of a
+// held take; against a 120s dictation it turns "unstoppable for two minutes" into
+// "fifteen seconds". Both are better than a recorder that will not stop.
+const unsigned long MIC_STOP_STUCK_MS = 15000;
 int micPillX() { return 14; }
 int micPillW() { return tft.width() - 28; }
 int micPillY() { return contentBottom() - MIC_PILL_H - 8; }
-void micPillFrame(const char* title) {
+// THE PILL'S INTERNAL COLUMN, named here so the four bands are derived once rather
+// than re-spelled as literals at each draw. MIC_PILL_H is 64 on both boards and the
+// bands close inside it with air: title 9..21 (board 1) / 9..24 (board 2, whose face
+// is a 16-row cell), meter 24..35, time 37..40, footer bar 46..60 (board 1) / 43..60
+// (board 2, whose footer is taller for the same reason). BOARD 2'S TITLE AND METER
+// TRACK SHARE ROW 24 and that is not air - it is zero clearance, survived only
+// because micPillFrame draws the title BEFORE the track, so the track's fill takes
+// the row. Written down rather than left as an unstated ordering dependency; the
+// numbers above used to be board 1's alone while reading as both boards'.
+// The FOOTER BAR is the change of 2026-09-13: the stop instruction used to be a grey
+// 6px hint under a bright meter, which is exactly where an eye does not go.
+int micPillMeterY() { return micPillY() + 24; }
+int micPillTimeY()  { return micPillMeterY() + MIC_PILL_METER_H + 1; }
+int micPillBarH()   { return CODE_LINE_H + 2; }
+int micPillBarY()   { return micPillY() + MIC_PILL_H - micPillBarH() - 3; }
+
+// `footer` is the instruction, and it is drawn INVERTED - the background colour on a
+// filled accent bar - because the question it answers ("how do I finish?") was the
+// one thing the old pill never said loudly. It lives in the FRAME rather than the
+// per-frame update for the same reason the meter's track does: repainting a filled
+// bar 8x a second is the flicker this firmware redraws by value to avoid.
+void micPillFrame(const char* title, const char* footer) {
   int x = micPillX(), y = micPillY(), w = micPillW();
   uiFillRound(x, y, w, MIC_PILL_H, R_MD, COLOR_CARD, COLOR_BG);
   uiStrokeRound(x, y, w, MIC_PILL_H, R_MD, BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
@@ -359,31 +424,62 @@ void micPillFrame(const char* title) {
   tft.drawString(title, x + SP_3 + 12, y + 9);
   // Draw the meter's TRACK once, here, so the per-frame update only has to paint
   // the bar itself - repainting a rounded track 8x a second would flicker.
-  int bx = x + SP_3, by = y + 26, bw = w - 2 * SP_3, bh = 14;
-  uiFillRound(bx, by, bw, bh, R_SM, COLOR_BG, COLOR_CARD);
-  uiStrokeRound(bx, by, bw, bh, R_SM, BORDER_CTRL, COLOR_LABEL, COLOR_CARD);
+  int bx = x + SP_3, bw = w - 2 * SP_3;
+  uiFillRound(bx, micPillMeterY(), bw, MIC_PILL_METER_H, R_SM, COLOR_BG, COLOR_CARD);
+  uiStrokeRound(bx, micPillMeterY(), bw, MIC_PILL_METER_H, R_SM, BORDER_CTRL, COLOR_LABEL, COLOR_CARD);
+  // The TIME BUDGET's own track. Empty unless a cap is in force - see micPillMeter,
+  // where the two callers that pass no cap are named.
+  tft.fillRect(bx, micPillTimeY(), bw, MIC_PILL_TIME_H, COLOR_BG);
+  // THE FOOTER BAR.
+  const int barH = micPillBarH(), barY = micPillBarY();
+  uiFillRound(x + 3, barY, w - 6, barH, R_SM, COLOR_ACCENT, COLOR_CARD);
+  setUIFont(T_META);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(COLOR_BG, COLOR_ACCENT);
+  tft.drawString(footer, x + w / 2, barY + barH / 2);
+  tft.setTextDatum(TL_DATUM);
 }
-// level 0..1000. `right` is the elapsed/percentage readout, `hint` the caption.
-void micPillMeter(int level1000, const char* right, const char* hint) {
+// level 0..1000. `right` is the elapsed/percentage readout. (A third parameter,
+// `hint`, drew a grey caption under the meter; the FOOTER BAR replaced it on
+// 2026-09-13 and this line went on describing it for a while afterwards.)
+//
+// `capMs` 0 means "no cap in force" and draws no budget bar. THAT IS NOT THE FREE
+// DICTATION, which this comment used to claim: both micStream arms pass
+// `composeActive ? MIC_ANSWER_MAX_MS : MIC_STREAM_MAX_MS`, so a free dictation has a
+// 120s cap and does draw a bar creeping across two minutes. The only callers that
+// pass 0 are micDumpBase64 and micRecord, which are bounded by heap and bytes rather
+// than by a clock and have no budget to show.
+void micPillMeter(int level1000, const char* right, unsigned long elapsedMs,
+                  unsigned long capMs) {
   int x = micPillX(), y = micPillY(), w = micPillW();
   // Elapsed time in the bigger font and in white: it's the number you actually
   // watch while talking, so it earns the visual weight.
   setUIFont(2);
   tft.setTextDatum(TR_DATUM);
   tft.setTextColor(COLOR_VALUE, COLOR_CARD);
-  char pad[16];
-  snprintf(pad, sizeof(pad), "%-8s", right); // fixed width: no clear-then-redraw
+  // 12, not 8: the string carries "0:04 / 0:20" now and an 8-wide pad cut the cap
+  // off. Still fixed-width, so no clear-then-redraw.
+  char pad[20];
+  snprintf(pad, sizeof(pad), "%-12s", right);
   tft.drawString(pad, x + w - SP_3, y + 6);
 
-  int bx = x + SP_3 + 2, by = y + 28, bw = w - 2 * SP_3 - 4, bh = 10;
-  int fill = constrain(level1000, 0, 1000) * bw / 1000;
-  tft.fillRect(bx, by, fill, bh, COLOR_GOOD);
-  tft.fillRect(bx + fill, by, bw - fill, bh, COLOR_BG);
+  int bx = x + SP_3 + 2, bw = w - 2 * SP_3 - 4;
+  int by = micPillMeterY() + 2, bh = MIC_PILL_METER_H - 4;
+  int lvl = constrain(level1000, 0, 1000) * bw / 1000;
+  tft.fillRect(bx, by, lvl, bh, COLOR_GOOD);
+  tft.fillRect(bx + lvl, by, bw - lvl, bh, COLOR_BG);
 
-  setUIFont(1);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
-  tft.drawString(hint, x + w / 2, y + MIC_PILL_H - 11);
+  // THE BUDGET, DEPLETING. It drains rather than fills on purpose: what you want to
+  // know mid-sentence is how much is LEFT, and a bar that grows answers the other
+  // question. The cap is MIC_ANSWER_MAX_MS whenever a capture feeds a draft, which
+  // is short enough that the bar visibly moves - the reason showing it is worth the
+  // 4px at all.
+  if (capMs > 0) {
+    int tw = x + w - SP_3 - (x + SP_3);
+    int left = capMs > elapsedMs ? (int) (((capMs - elapsedMs) * (unsigned long) tw) / capMs) : 0;
+    tft.fillRect(x + SP_3, micPillTimeY(), left, MIC_PILL_TIME_H, COLOR_ACCENT);
+    tft.fillRect(x + SP_3 + left, micPillTimeY(), tw - left, MIC_PILL_TIME_H, COLOR_BG);
+  }
   tft.setTextDatum(TL_DATUM);
 }
 // Standard IMA ADPCM: 4 bits per sample, and the encoder tracks the same
@@ -733,7 +829,17 @@ void micStream() {
   ledcWrite(AUDIO_OUT_PIN, 0);
   digitalWrite(AUDIO_EN_PIN, HIGH);
   delay(250);
-  micPillFrame(showingDetail ? "DICTATING" : "LISTENING");
+  // composeActive, NOT micAnswerPid[0], AND THIS IS THE SECOND CORRECTION TO IT.
+  // The boards first disagreed (one asked showingDetail, the other micAnswerPid) and
+  // were aligned onto micAnswerPid - which was right while the only two kinds of
+  // capture were "an answer" and "a free dictation". It stopped being right the
+  // moment a MESSAGE could be spoken: a message deliberately leaves micAnswerPid
+  // empty, because that field is what puts `answer=<pid>` on the wire, so tapping
+  // SPEAK showed DICTATING and a user watching for "LISTENING" reasonably concluded
+  // nothing was happening - then tapped again and stopped their own recording.
+  // composeActive is the honest question, and it is the SAME predicate the duration
+  // cap already uses: a capture feeding a draft is LISTENING for something.
+  micPillFrame(composeActive ? "LISTENING" : "DICTATING", "TAP ANYWHERE TO STOP");
 
   adc_continuous_start(adc);
   uint8_t frame[1024]; // matches conv_frame_size
@@ -759,8 +865,21 @@ void micStream() {
   // the FAB press and this point (a 5s tick landing while voiceCardActive or
   // micProcessing is up), so a stale index could aim this dictation at
   // whatever session slid into that slot instead of the one actually opened.
+  //
+  // A COMPOSE SURFACE ANSWERS THIS QUESTION ITSELF, and must be asked first. The
+  // block below reads showingDetail, a DETAIL-SCREEN global with no relation to the
+  // draft this transcript has to come back to; it agreed with the draft only because
+  // SPEAK happens to be tapped on a detail screen. Opened any other way - KBTEST msg,
+  // the COMPOSE verb - showingDetail is false, the header said `target=-`, the host
+  // took its "recorded from a tab" branch and published `memo`, and `memo` is neither
+  // askheard nor msgheard: composeAbsorbVoice consumed the seq and inserted nothing,
+  // with no refusal printed. Twenty seconds of speech, no text, no message, silence.
+  // The answer path was already draft-derived (micAnswerPid <- kbPid); this is the
+  // message path's half of the same rule.
   const char* target = "-";
-  if (showingDetail) {
+  if (composeActive && kbIsMessage() && kbSessionId[0]) {
+    target = kbSessionId;
+  } else if (showingDetail) {
     detailIndex = resolveDetailIndex();
     if (detailIndex >= 0 && detailIndex < sessionCount) target = sessions[detailIndex].id;
   }
@@ -802,11 +921,18 @@ void micStream() {
   unsigned long start = millis(), lastUi = 0, lastStopPoll = 0;
   bool stoppedByUser = false;
   int stopVotes = 0;
+  bool stopArmed = false;   // set the first time the panel reads UNTOUCHED
   unsigned long windowBlockedAt = 0;
   String inLine;
 
   // 20s for an answer, 120s for a dictation - see MIC_ANSWER_MAX_MS.
-  const unsigned long cap = micAnswerPid[0] ? MIC_ANSWER_MAX_MS : MIC_STREAM_MAX_MS;
+  // composeActive, NOT micAnswerPid[0]. The cap is about what the transcript BECOMES,
+  // and every capture started from the compose surface becomes a KB_MAX_BYTES draft -
+  // an answer's and a message's alike. Keyed on the answer pid, a spoken message ran
+  // to MIC_STREAM_MAX_MS 120s and produced far more words than a 150-byte draft can
+  // hold, so the tail was capped off host-side with the user watching a sentence end
+  // early. A free dictation with no surface up still gets the full 120s.
+  const unsigned long cap = composeActive ? MIC_ANSWER_MAX_MS : MIC_STREAM_MAX_MS;
   while (millis() - start < cap) {
     uint32_t len = 0;
     if (adc_continuous_read(adc, frame, sizeof(frame), &len, 100) == ESP_OK) {
@@ -875,7 +1001,8 @@ void micStream() {
     // 99s take early, reported as "by=tap" when nothing had been touched. At
     // 20ms apart that debounce costs ~40ms instead of 240ms, and a normal tap
     // spans several polls rather than risking a gap between two.
-    // The 400ms grace stops the finger lifting off the START tap ending it.
+    // What stops the finger lifting off the START tap from ending it is the RELEASE
+    // ARMING below, not a grace period - see the note at the poll.
     if (millis() - lastStopPoll >= STOP_POLL_MS) {
       lastStopPoll = millis();
       // Same cadence as the touch poll it rides alongside: drainBleRx() (and
@@ -885,11 +1012,20 @@ void micStream() {
       // reason the touch poll is: this loop runs entirely on loopTask.
       // true: loop()'s watchdog can't reach here, so this IS the recovery.
       reapBleLinks(true);
-      if (millis() - start > 400 && touchPressed()) {
-        if (++stopVotes >= 2) { stoppedByUser = true; break; }
-      } else {
-        stopVotes = 0;
-      }
+      // THE STOP ARMS ON A RELEASE, NOT ON A CLOCK. ~~millis() - start > 400~~ was a
+      // GUESS at how long the starting finger would stay down, and it was wrong in
+      // both directions: board 2 never had it at all, so a capture begun from a chip
+      // died 20ms later (measured: `streamend samples=1536 secs=0.0 by=tap`, twice,
+      // from a real SPEAK tap); and on board 1 holding the chip past 400ms killed it
+      // just the same. Waiting for touchPressed() to read FALSE once removes the
+      // guess: the finger that started this cannot stop it, however long it rests,
+      // and the two-vote debounce that exists because a stray touch once ended a 99s
+      // take still applies to every tap after it.
+      const bool down = touchPressed();
+      if (!down) { stopArmed = true; stopVotes = 0; }
+      else if (!stopArmed && millis() - start > MIC_STOP_STUCK_MS) {
+        stopArmed = true; stopVotes = 0;   // MIC_STOP_STUCK_MS: never released, so stop waiting
+      } else if (stopArmed && ++stopVotes >= 2) { stoppedByUser = true; break; }
     }
 
     if (millis() - lastUi >= 120) {
@@ -898,14 +1034,19 @@ void micStream() {
       lvlMin = 32767; lvlMax = -32768;
       char t[16];
       unsigned long el = millis() - start;
-      snprintf(t, sizeof(t), "%lu:%02lu", el / 60000, (el / 1000) % 60);
-      micPillMeter(pp * 1000 / 600, t, "TAP ANYWHERE TO STOP");
-#if !BOARD_USES_TFT_ESPI
-      // This capture can run up to MIC_STREAM_MAX_MS (120s) without ever
-      // returning to loop(), so its own end-of-iteration flush is the only
-      // thing that gets the meter onto the glass at all.
-      tft.flush();
-#endif
+      snprintf(t, sizeof(t), "%lu:%02lu / %lu:%02lu", el / 60000, (el / 1000) % 60,
+               cap / 60000, (cap / 1000) % 60);
+      micPillMeter(pp * 1000 / 600, t, el, cap);
+      // A `#if !BOARD_USES_TFT_ESPI` flush STOOD HERE AND COULD NEVER COMPILE. This
+      // whole function is inside `#if BOARD_HAS_MIC && BOARD_USES_TFT_ESPI`, so the
+      // negation is always false - the flush was written for BOARD 2 and left in
+      // BOARD 1's arm, where it is dead. Its comment was right about the hazard and
+      // wrong about the board: a capture blocks loop() for its whole duration, so
+      // without an end-of-iteration flush the shadow framebuffer never reaches the
+      // panel and board 2 showed NO recording UI at all - the pill, the meter and
+      // the footer all painted into PSRAM and stayed there, which is why a user saw
+      // PROCESSING (drawn later, from loop()) and never LISTENING. The real flush is
+      // now in board 2's own arm. Board 1 draws straight to glass and needs none.
     }
   }
 
@@ -917,7 +1058,7 @@ void micStream() {
   if (nibbleHigh && ringUsed < MIC_STREAM_RING) {
     ring[head] = partial; head = (head + 1) % MIC_STREAM_RING; ringUsed++;
   }
-  micPillFrame("SENDING");
+  micPillFrame("SENDING", "GOES TO YOUR DRAFT");
   while (ringUsed > 0) {
     int n = ringUsed < MIC_STREAM_CHUNK ? ringUsed : MIC_STREAM_CHUNK;
     Serial.printf("AUDIO bin %lu %d\n", (unsigned long) seqSent, n);
@@ -1016,7 +1157,7 @@ void micRecord() {
   ledcWrite(AUDIO_OUT_PIN, 0);
   digitalWrite(AUDIO_EN_PIN, HIGH);
   delay(250);
-  micPillFrame("LISTENING");
+  micPillFrame("LISTENING", "TAP ANYWHERE TO STOP");
   Serial.printf("AUDIO recording up to %ds at %dHz - SPEAK NOW\n", secs, MIC_REC_RATE_OUT);
 
   adc_continuous_start(adc);
@@ -1053,6 +1194,7 @@ void micRecord() {
   const unsigned long STOP_POLL_MS = 10;   // see micStream: poll != repaint
   int lvlMin = 32767, lvlMax = -32768;
   int stopVotes = 0;
+  bool stopArmed = false;   // set the first time the panel reads UNTOUCHED
   bool stoppedByUser = false;
   while (got < nOut && millis() < deadline) {
     uint32_t len = 0;
@@ -1062,8 +1204,8 @@ void micRecord() {
     // costs no audio.
     // Stop check on its own cadence, and now with the same two-vote debounce the
     // streaming path uses - a single read here could be ended by the same panel
-    // false positive.  400ms grace so the finger lifting off the START tap
-    // cannot stop it instantly.
+    // false positive. The START tap is handled by the RELEASE ARMING below, not by
+    // a grace period - see the note at the poll.
     if (millis() - lastStopPoll >= STOP_POLL_MS) {
       lastStopPoll = millis();
       // See the identical call in micStream() - same reasoning, smaller
@@ -1071,11 +1213,20 @@ void micRecord() {
       // added anyway since it costs nothing and shares the exact pattern.
       // true: same reason as micStream()'s call - this is a blocking path.
       reapBleLinks(true);
-      if (millis() - recStart > 400 && touchPressed()) {
-        if (++stopVotes >= 2) { stoppedByUser = true; break; }
-      } else {
-        stopVotes = 0;
-      }
+      // THE STOP ARMS ON A RELEASE, NOT ON A CLOCK. ~~millis() - start > 400~~ was a
+      // GUESS at how long the starting finger would stay down, and it was wrong in
+      // both directions: board 2 never had it at all, so a capture begun from a chip
+      // died 20ms later (measured: `streamend samples=1536 secs=0.0 by=tap`, twice,
+      // from a real SPEAK tap); and on board 1 holding the chip past 400ms killed it
+      // just the same. Waiting for touchPressed() to read FALSE once removes the
+      // guess: the finger that started this cannot stop it, however long it rests,
+      // and the two-vote debounce that exists because a stray touch once ended a 99s
+      // take still applies to every tap after it.
+      const bool down = touchPressed();
+      if (!down) { stopArmed = true; stopVotes = 0; }
+      else if (!stopArmed && millis() - recStart > MIC_STOP_STUCK_MS) {
+        stopArmed = true; stopVotes = 0;   // MIC_STOP_STUCK_MS: never released, so stop waiting
+      } else if (stopArmed && ++stopVotes >= 2) { stoppedByUser = true; break; }
     }
     if (millis() - lastUi >= 120) {
       lastUi = millis();
@@ -1084,13 +1235,14 @@ void micRecord() {
       char t[16];
       unsigned long el = millis() - recStart;
       snprintf(t, sizeof(t), "%lu.%lus / %ds", el / 1000, (el % 1000) / 100, secs);
-      micPillMeter(pp * 1000 / 600, t, "TAP ANYWHERE TO STOP");
-#if !BOARD_USES_TFT_ESPI
-      // Same reason as micStream()'s flush: this loop is heap-capped to a
-      // few seconds rather than 120s, but it still never returns to loop()
-      // while recording, so nothing else will ever push this meter update.
-      tft.flush();
-#endif
+      micPillMeter(pp * 1000 / 600, t, 0, 0);   // MICREC is heap-capped, not clock-capped
+      // A SECOND `#if !BOARD_USES_TFT_ESPI` FLUSH STOOD HERE, and it is the same
+      // defect as micStream()'s: nested inside this function's own
+      // `#if BOARD_HAS_MIC && BOARD_USES_TFT_ESPI` arm, therefore always false,
+      // therefore never compiled. Its comment ("Same reason as micStream()'s flush")
+      // is the tell - the same reasoning was applied twice and landed on the wrong
+      // board both times. Board 2's micRecord() has the real one. Found by the
+      // dead-guard assertion in sessions-geom-check.mjs, not by reading.
     }
     for (uint32_t i = 0; i + SOC_ADC_DIGI_RESULT_BYTES <= len && got < nOut;
          i += SOC_ADC_DIGI_RESULT_BYTES) {
@@ -1124,7 +1276,7 @@ void micRecord() {
                 (millis() - recStart) / 1000.0);
   Serial.printf("AUDIO begin rate=%d bits=8 codec=%s scale=8 samples=%u dc=%d min=%d max=%d\n",
                 MIC_REC_RATE_OUT, MIC_REC_CODEC, (unsigned) got, dc, mn, mx);
-  micPillFrame("SENDING");
+  micPillFrame("SENDING", "GOES TO YOUR DRAFT");
   micDumpBase64(pcm, got);
   Serial.println("AUDIO end");
   free(pcm);
@@ -1201,13 +1353,12 @@ void micMonitor() {
     tft.setTextColor(COLOR_LABEL, COLOR_BG);
     tft.drawString("target: under 120 when silent", 12, BAR_Y + BAR_H + 10);
 
-#if !BOARD_USES_TFT_ESPI
-    // Up to 180s blocking, entirely outside loop() - without this the bar
-    // and readout drawn above would never leave the shadow framebuffer, and
-    // the one thing this screen exists for (watching the floor WHILE turning
-    // the trimmer) would show a frozen first frame instead.
-    tft.flush();
-#endif
+    // A THIRD `#if !BOARD_USES_TFT_ESPI` FLUSH STOOD HERE, dead for the same reason
+    // as the two in micStream() and micRecord(): this whole function is inside board
+    // 1's `#if BOARD_HAS_MIC && BOARD_USES_TFT_ESPI` arm, so its own negation never
+    // compiles. Its comment describes board 2's shadow framebuffer, which board 1
+    // does not have. Board 2's micMonitor() carries the real one. Three instances of
+    // one mistake in one file, none of them visible to a compiler or a reader.
 
     // TWO consecutive reads to exit - the same false-positive this panel produced
     // when a single read ended a 99s recording that nobody had touched. Being
@@ -1441,8 +1592,21 @@ void micStream() {
   // Same target resolution as board 1, and re-resolved by id for the same reason:
   // a 5s tick can compact the sessions array between the button press and here,
   // so a stale index would aim the dictation at whatever slid into that slot.
+  //
+  // A COMPOSE SURFACE ANSWERS THIS QUESTION ITSELF, and must be asked first. The
+  // block below reads showingDetail, a DETAIL-SCREEN global with no relation to the
+  // draft this transcript has to come back to; it agreed with the draft only because
+  // SPEAK happens to be tapped on a detail screen. Opened any other way - KBTEST msg,
+  // the COMPOSE verb - showingDetail is false, the header said `target=-`, the host
+  // took its "recorded from a tab" branch and published `memo`, and `memo` is neither
+  // askheard nor msgheard: composeAbsorbVoice consumed the seq and inserted nothing,
+  // with no refusal printed. Twenty seconds of speech, no text, no message, silence.
+  // The answer path was already draft-derived (micAnswerPid <- kbPid); this is the
+  // message path's half of the same rule.
   const char* target = "-";
-  if (showingDetail) {
+  if (composeActive && kbIsMessage() && kbSessionId[0]) {
+    target = kbSessionId;
+  } else if (showingDetail) {
     detailIndex = resolveDetailIndex();
     if (detailIndex >= 0 && detailIndex < sessionCount) target = sessions[detailIndex].id;
   }
@@ -1457,13 +1621,21 @@ void micStream() {
   uint32_t seqSent = 0, seqAcked = 0, samples = 0, dropped = 0;
   unsigned long windowBlockedAt = 0, lastMeter = 0, lastTouchPoll = 0;
   int touchVotes = 0;
+  bool touchArmed = false;  // set the first time the panel reads UNTOUCHED
   bool stoppedByUser = false;
   int lvlMin = 32767, lvlMax = -32768;
   String inLine = "";
   const unsigned long t0 = millis();
-  const unsigned long cap = micAnswerPid[0] ? MIC_ANSWER_MAX_MS : MIC_STREAM_MAX_MS;
+  // composeActive, NOT micAnswerPid[0]. The cap is about what the transcript BECOMES,
+  // and every capture started from the compose surface becomes a KB_MAX_BYTES draft -
+  // an answer's and a message's alike. Keyed on the answer pid, a spoken message ran
+  // to MIC_STREAM_MAX_MS 120s and produced far more words than a 150-byte draft can
+  // hold, so the tail was capped off host-side with the user watching a sentence end
+  // early. A free dictation with no surface up still gets the full 120s.
+  const unsigned long cap = composeActive ? MIC_ANSWER_MAX_MS : MIC_STREAM_MAX_MS;
 
-  micPillFrame(micAnswerPid[0] ? "LISTENING" : "DICTATING");
+  micPillFrame(composeActive ? "LISTENING" : "DICTATING", "TAP ANYWHERE TO STOP");   // see board 1's note
+  tft.flush();   // the frame, before the first 120ms meter tick - see the flush below
 
   while (millis() - t0 < cap) {
     // 1. Drain the codec. This must never wait on the window, or the I2S DMA
@@ -1523,18 +1695,41 @@ void micStream() {
     //    80-150ms tap fail to register at all, which reads as a dead button.
     if (millis() - lastTouchPoll >= 10) {
       lastTouchPoll = millis();
-      if (touchPressed()) {
-        if (++touchVotes >= 2) { stoppedByUser = true; break; }
-      } else {
-        touchVotes = 0;
-      }
+      // THE STOP ARMS ON A RELEASE, NOT ON A CLOCK. ~~millis() - start > 400~~ was a
+      // GUESS at how long the starting finger would stay down, and it was wrong in
+      // both directions: board 2 never had it at all, so a capture begun from a chip
+      // died 20ms later (measured: `streamend samples=1536 secs=0.0 by=tap`, twice,
+      // from a real SPEAK tap); and on board 1 holding the chip past 400ms killed it
+      // just the same. Waiting for touchPressed() to read FALSE once removes the
+      // guess: the finger that started this cannot stop it, however long it rests,
+      // and the two-vote debounce that exists because a stray touch once ended a 99s
+      // take still applies to every tap after it.
+      const bool down = touchPressed();
+      if (!down) { touchArmed = true; touchVotes = 0; }
+      else if (!touchArmed && millis() - t0 > MIC_STOP_STUCK_MS) {
+        touchArmed = true; touchVotes = 0;  // MIC_STOP_STUCK_MS: never released, so stop waiting
+      } else if (touchArmed && ++touchVotes >= 2) { stoppedByUser = true; break; }
     }
 
     if (millis() - lastMeter >= 120) {
       lastMeter = millis();
       const int swing = lvlMax - lvlMin;
       const int level = swing > 0 ? (swing > 6000 ? 1000 : swing * 1000 / 6000) : 0;
-      micPillMeter(level, String((millis() - t0) / 1000).c_str(), "tap to stop");
+      // ~~"tap to stop"~~ - board 2 said that in lower case while board 1 said
+      // "TAP ANYWHERE TO STOP". One instruction, two spellings, on the one control
+      // whose whole problem was that nobody could find it. The string now lives in
+      // the FOOTER BAR both boards draw from micPillFrame, so there is one copy.
+      {
+        unsigned long el2 = millis() - t0;
+        char t2[20];
+        snprintf(t2, sizeof(t2), "%lu:%02lu / %lu:%02lu", el2 / 60000, (el2 / 1000) % 60,
+                 cap / 60000, (cap / 1000) % 60);
+        micPillMeter(level, t2, el2, cap);
+      }
+      // THE FLUSH THIS BOARD ACTUALLY NEEDS. micStream() blocks loop() for the whole
+      // capture, and loop() is what normally pushes the shadow framebuffer, so
+      // nothing drawn in here reaches the panel without this.
+      tft.flush();
       lvlMin = 32767; lvlMax = -32768;
     }
     reapBleLinks(true);
@@ -1542,6 +1737,13 @@ void micStream() {
 
   // Flush whatever the ring still holds, ignoring the window - the stream is over
   // and there is nothing left to pace against.
+  //
+  // SAY SO FIRST, as board 1 does. This tail can take a noticeable moment, and
+  // without the frame the pill still read LISTENING with a live meter through all
+  // of it - the glass saying "still recording" while the mic was already closed.
+  // One frame, one flush, because this loop blocks the one that would push it.
+  micPillFrame("SENDING", "GOES TO YOUR DRAFT");
+  tft.flush();
   while (ringUsed > 0) {
     const int n = ringUsed < MIC2_STREAM_CHUNK ? ringUsed : MIC2_STREAM_CHUNK;
     Serial.printf("AUDIO bin %lu %d\n", (unsigned long) seqSent, n);
@@ -1599,7 +1801,8 @@ void micRecord() {
   delay(350);
   Serial.printf("AUDIO recording %ds at %d Hz mono PCM16 - SPEAK NOW\n",
                 MIC2_REC_SECONDS, TONE_SAMPLE_HZ);
-  micPillFrame("LISTENING");
+  micPillFrame("LISTENING", "TAP ANYWHERE TO STOP");
+  tft.flush();   // same reason as micStream's: this path blocks loop() too
 
   size_t got = 0;
   int32_t mn = 32767, mx = -32768;
@@ -1621,7 +1824,16 @@ void micRecord() {
       lastMeter = millis();
       const int32_t swing = mx - mn;
       const int level = swing > 0 ? (int) ((swing > 6000 ? 6000 : swing) * 1000 / 6000) : 0;
-      micPillMeter(level, String((int) ((got * 100) / MIC2_REC_FRAMES)).c_str(), "recording");
+      micPillMeter(level, String((int) ((got * 100) / MIC2_REC_FRAMES)).c_str(), 0, 0);
+      // AND PUSH IT. The OPENING frame above was flushed and every one of the ~83
+      // updates in this loop was not, so the glass held LISTENING, a meter at zero
+      // and 0% frozen for the full MIC2_REC_SECONDS while the shadow framebuffer
+      // filled with the real thing. micStream and micMonitor already flush inside
+      // their loops; this was the sibling that did not, and no checker saw it
+      // because the assertion asked whether the FUNCTION contained a flush - which
+      // the opening one satisfied. SCREENSHOT cannot see it either: it reads the
+      // shadow buffer, so the capture was correct while the panel was wrong.
+      tft.flush();
       mn = 32767; mx = -32768;              // per-meter-window, not per-take
     }
     reapBleLinks(true);
@@ -1642,7 +1854,7 @@ void micRecord() {
   const int dc = (int) (sum / (int64_t) got);
   Serial.printf("AUDIO begin rate=%d bits=16 codec=pcm16 scale=1 samples=%u dc=%d "
                 "min=%d max=%d\n", TONE_SAMPLE_HZ, (unsigned) got, dc, (int) mn, (int) mx);
-  micPillFrame("SENDING");
+  micPillFrame("SENDING", "GOES TO YOUR DRAFT");
   micDumpBase64((const uint8_t*) pcm, got * sizeof(int16_t));
   Serial.println("AUDIO end");
   free(pcm);

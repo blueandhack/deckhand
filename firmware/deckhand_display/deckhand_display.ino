@@ -843,6 +843,12 @@ struct HostLink {
   // pattern pairingSlotForRow() uses for answer signing.
   long voiceSeq = 0;
   long voiceSeqShown = 0;
+  // Highest seq whose TRANSCRIPT has been inserted into the compose draft. Kept
+  // apart from voiceSeqShown because they answer different questions: that one is
+  // "did we raise a card", this one is "did we paste these words". Per-link for the
+  // same reason as its two neighbours - two Macs run independent counters, and one
+  // shared mark would let host B's seq 3 suppress host A's seq 3.
+  long voiceSeqApplied = 0;
 };
 HostLink hostLinks[MAX_LINKS];
 int curLink = -1;   // which link the payload being parsed came from
@@ -1310,18 +1316,13 @@ struct SessionInfo {
   // live buttons for a hook that already returned, or a read-only list for one
   // that is still waiting (which would hang the prompt for 90s).
   bool askAnswerable;
-  bool askVoice;              // this ask may be answered by voice (question only)
-  char askVoiceText[204];     // transcript awaiting confirmation ("" = none)
-  char askVoiceSha[20];       // hash of exactly the text above
-  // Device-local suppression, not host protocol: the host parks a transcribed
-  // answer for up to 5 minutes and keeps republishing it every tick regardless
-  // of what the device does with it. Set on CANCEL to the sha being rejected;
-  // handleLine then treats a republished ask carrying this same sha as if no
-  // transcript had arrived, so a cancelled answer can never be sent by a tap
-  // that lands on what looks like a normal option button underneath. Cleared
-  // the moment askPid changes, so it can never suppress a later prompt's
-  // transcript.
-  char askVoiceCancelSha[20];
+  // This ask may be answered by voice (question only). The three fields that used
+  // to sit here - askVoiceText[204], askVoiceSha[20] and askVoiceCancelSha[20],
+  // 244 bytes per session and 1,464 across MAX_SESSIONS - are gone with the
+  // confirm screen. A transcript is no longer something the device HOLDS and
+  // signs a hash of; it is an insert into the compose surface's draft, which
+  // lives in kbText and belongs to the surface rather than to a session row.
+  bool askVoice;
   // Seconds the hook will still wait, published by the host. Advisory: it drives
   // the keyboard's countdown only, and -1 means the host did not send one.
   int askSec;
@@ -1348,8 +1349,6 @@ struct PrevSession {
   uint8_t beepsLeft;
   unsigned long nextBeepMillis;
   char askPid[12];
-  char askVoiceCancelSha[20];
-  bool hadVoiceText;   // askVoiceText is only ever tested for non-empty
 };
 // Declared here explicitly rather than leaning on Arduino's generated prototypes -
 // those land above SessionInfo's own declaration, and a function naming it in its
@@ -1405,17 +1404,22 @@ char detailId[16] = "";
 // 384: re-derived for the icon id appended after dispMacTag(). Field-by-field, in
 // bytes (content only, NUL counted separately at the end): name(23) + status(9) +
 // path(67) + model(23) + branch(23) + askPid(11) + answeredIdx as %d(2, "-1") +
-// title(43) + prompt(103) + startSec as %ld(5, "86399") + askVoiceSha(19) = 328,
-// plus 10 "|" separators between those 11 fields = 338; plus the msgOffered flag
-// "|%c" (2) = 340; plus dispMacTag() "|%s" (up to 7 chars, so 8) = 348; plus the
-// icon id "|%d" (id is -1..15, so up to 2 digits, plus the separator = 3) = 351;
-// plus the agent "|%s" (agent[4] holds 3, so 4) = 355. +1 for the NUL terminator =
-// 356, which is what 384 was chosen against.
+// title(43) + prompt(103) + startSec as %ld(5, "86399") = 308,
+// plus 9 "|" separators between those 10 fields = 317; plus the msgOffered flag
+// "|%c" (2) = 319; plus dispMacTag() "|%s" (up to 7 chars, so 8) = 327; plus the
+// icon id "|%d" (id is -1..15, so up to 2 digits, plus the separator = 3) = 330;
+// plus the agent "|%s" (agent[4] holds 3, so 4) = 334. +1 for the NUL terminator =
+// 335.
 //
-// THAT 356 IS A HISTORICAL FIGURE AND MUST NOT BE BUDGETED AGAINST - the live
-// numbers are the checker's 372 (board 1) and 381 (board 2), which is why the cache
-// is 448 and not 384 (see the paragraph below). Two terms have joined since: the
-// option-description hash and the chip hash.
+// THE FIELD COUNT WENT 11 -> 10 AND THE SEPARATORS 10 -> 9 when askVoiceSha left
+// with the voice confirm screen, and this paragraph's running totals were stale by
+// 21 for one commit because only the first line was updated. If you add or remove a
+// field here, re-walk every total below it - they are a chain, not a list.
+//
+// THESE ARE HISTORICAL FIGURES AND MUST NOT BE BUDGETED AGAINST - the live numbers
+// are the checker's 352 (board 1) and 361 (board 2), which is why the cache is 448
+// and not 384 (see the paragraph below). Two terms have joined since the 384 was
+// chosen: the option-description hash and the chip hash.
 //
 // AND THE AGENT IS SIGNED ON BOTH BOARDS. This paragraph used to say "ON BOARD 2
 // ONLY ... board 1 still draws that column and is held byte-identical, so it does
@@ -1850,6 +1854,7 @@ char voiceState[12] = "";
 // per-link fields in the voice block of handleLine().
 long voiceSeq = 0;          // highest seq seen (legacy/no-hostId fallback)
 long voiceSeqShown = 0;     // highest seq we actually raised the card for (ditto)
+long voiceSeqApplied = 0;   // highest seq whose transcript reached the draft (ditto)
 bool voiceCardActive = false;
 
 
@@ -1862,6 +1867,12 @@ bool voiceCardActive = false;
 // ~13s a capture takes hides the thing you bought it for. The pill leaves the tab
 // content visible, and the real content is repainted on completion.
 const int MIC_PILL_H = 64;
+// The pill's two inner bands, HERE rather than beside their accessors in audio.ino:
+// the .ino files are one translation unit and drawMicProcessingUpdate() reads them
+// ~70 lines above where those accessors live. Functions survive that through
+// Arduino's generated prototypes; a file-scope `const int` does not.
+const int MIC_PILL_METER_H = 12;   // the level meter's track
+const int MIC_PILL_TIME_H  = 4;    // the depleting time budget under it
 
 // ---- Processing stage of the recording bar ----
 // The bar used to vanish the instant SENDING finished - which is exactly the moment
@@ -1928,9 +1939,17 @@ const int MIC_STREAM_CHUNK = 1024;      // bytes per frame on the wire
 const int MIC_STREAM_RING = 16384;      // ~2s of slack, absorbs host jitter
 const int MIC_STREAM_WINDOW = 8;        // unacked chunks allowed in flight
 const unsigned long MIC_STREAM_MAX_MS = 120000UL;
-// An ANSWER recording is capped far shorter than a dictation. The hook blocks
-// for REMOTE_WAIT_MS (90s) and that is the whole budget for record + transfer +
-// transcribe + read + confirm; 20s of speech is far more than an answer needs.
+// An ANSWER recording is capped far shorter than a dictation, and the REASON HAS
+// BEEN CORRECTED. ~~The hook blocks for REMOTE_WAIT_MS (90s) and that is the whole
+// budget for record + transfer + transcribe + read + confirm.~~ It is not 90s:
+// readRemoteWaitMs() (claude-hooks/deckhand-session-hook.mjs) reads
+// ~/.claude/deckhand-remote-wait and, with that file absent - the default - returns
+// REMOTE_WAIT_CAP_MS, (HOOK_TIMEOUT_S - 60) * 1000 = 23h59m. So there is no clock
+// to race for Claude Code. CODEX still returns a hard 15_000 before the config is
+// consulted, which is why Codex is excluded from answering here at all. The cap
+// stays at 20s on its own merits: that is ~60 words, far more than an answer needs,
+// and the transcript now lands in an editable draft rather than a screen you can
+// only accept or discard.
 const unsigned long MIC_ANSWER_MAX_MS = 20000UL;
 char micAnswerPid[24] = "";   // non-empty => this capture answers that prompt
 
@@ -2528,123 +2547,23 @@ void tickWaitingWheel() {
   drawWaitingLogo();
 }
 
-// ---------- Record button ----------
-// TAB_REC_W (and its derivation comment) moved to board_e32r28t.h (via board.h).
-// Width the 3 tabs share. With no capture path there is no record button (see
-// fabVisible()), so the slot it would have occupied goes back to the tabs rather
-// than sitting as a 40px dead gap at the right end - the bar is chrome, and
-// chrome with an unexplained hole in it reads as a rendering fault. fabHit()
-// tests `sx >= tabsW()`, which this makes unsatisfiable, and that is harmless
-// belt-and-braces: fabVisible() already refuses first.
-#if BOARD_HAS_MIC
-inline int tabsW() { return tft.width() - TAB_REC_W; }
-#else
+// ---------- The tab bar's full width ----------
+// THE RECORD SLOT IS GONE, and the tabs have it back: 66 -> 80px on board 1,
+// 93 -> 106 on board 2. The button was in the TAB BAR - global chrome - while the
+// thing it did was per-session: it aimed at whichever session DETAIL happened to be
+// open and, with none open, produced a "memo" that was logged and dropped. Same
+// glyph, two destinations, one of them a dead end that said "SAVED AS MEMO".
+// Speaking to a session now starts from that session, next to TYPE.
+//
+// tabsW() SURVIVES AS A FUNCTION rather than being folded into tft.width() at its
+// seven call sites: two of sessions-geom-check's source faults are whitespace-exact
+// regexes over the detail screen's `int tabW = tabsW() / TAB_COUNT;` block, and
+// rewriting those lines would make the faults stop injecting - a selftest counting
+// teeth it no longer has.
 inline int tabsW() { return tft.width(); }
-#endif
-inline int recCX() { return tabsW() + TAB_REC_W / 2; }
-inline int recCY() { return TAB_BAR_H / 2; }
-bool fabPressed = false;           // the press currently down started on the button
 
-// Hidden wherever it could cover something that must not be covered: the ask
-// screen's Allow/Deny buttons above all - a floating control overlapping a
-// permission decision is a genuine hazard, not just a cosmetic one.
-// Now that it is part of the tab bar, it is drawn whenever the bar is, and the
-// old per-screen exclusions are gone with the hazards that motivated them: it
-// cannot overlap Allow/Deny, a card, or the SETTINGS band, because it is not over the
-// content area at all. Chrome that blinks in and out reads as a glitch, so the
-// only things that hide it are the states where the bar itself is gone.
-bool fabVisible() {
-  // composeActive joins isAsleep/octoActive rather than being handled by touch-order
-  // alone: drawKeyboard() fillScreens over the slot, so the button is already
-  // invisible the moment the keyboard opens, but fabHit() only checks THIS
-  // function - without this line it kept claiming taps in that corner (the
-  // keyboard's countdown sits right under the old slot), silently starting a
-  // mic capture and, on release, forceFullRepaint()ing a tab over the keyboard
-  // while composeActive stayed true. Same invariant isAsleep/octoActive already
-  // rely on: fabVisible() means "actually visible AND tappable", not just drawn.
-  if (isAsleep || octoActive || composeActive) return false;
-#if !BOARD_HAS_MIC
-  // No capture path on this board, so no button. BOARD_HAS_MIC describes the
-  // SOFTWARE, not the hardware: board 2 has an ES8311 I2S codec with a real mic
-  // input (and a speaker), but until that capture path exists a REC button is a
-  // control that cannot work - and this file already refuses those elsewhere,
-  // where a read-only ask draws its options as a flat list under "ANSWER ON YOUR
-  // MAC" and swallows taps for exactly this reason. Gating in fabVisible()
-  // rather than at the two draw sites also stops fabHit() claiming taps in that
-  // corner: drawn-but-dead and tappable-but-dead are different bugs and this
-  // closes both. One flag flip turns the button back on when the path lands.
-  return false;
-#endif
-  // Shown on the session detail screen too - that is how a dictation is aimed at
-  // a specific session. It used to be hidden there whenever an ask was pending,
-  // because a control floating over Allow/Deny is a hazard; in the tab bar it is
-  // nowhere near those buttons, so that exclusion went away with the float.
-  return true;
-}
 
-bool fabHit(int sx, int sy) {
-  if (!fabVisible()) return false;
-  // The whole slot is the target, not just the ring: a 26px circle is well under
-  // a fingertip, and the slot is the only thing in that corner of the bar.
-  return sy < TAB_BAR_H && sx >= tabsW();
-}
 
-// TRANSPARENT by construction, not by alpha: this panel is written directly with
-// no framebuffer and no blending, so real translucency would mean reading pixels
-// back (slow, and unreliable on this ILI9341 wiring). An UNFILLED ring is the
-// honest equivalent - the content simply shows through, and only ~15% of the
-// button's area is ever painted.
-//
-// The 1px COLOR_BG haloes either side of the ring are what make that work: an
-// outline control over arbitrary content can otherwise vanish wherever the two
-// happen to share a tone. The haloes guarantee contrast against anything.
-//
-// state: 0 idle, 1 pressed, 2 dragging
-//
-// RING + DOT - the universal record symbol, chosen for being unmistakable at 48px
-// while staying see-through (only the 2px ring and a small centre dot are painted,
-// so ~90% of the button's area shows the content beneath).
-//
-// Idle is neutral on purpose: a GREY ring with a WHITE dot, matching the chrome
-// the rest of the UI is drawn in, so a control that floats over content recedes
-// until you look for it. Earlier revisions used Claude orange here, which competed
-// with the accent already used for active tabs, badges and pill borders.
-//
-// Pressed fills solid ACCENT - the one moment orange is right, because it marks the
-// action actually happening. Dragging goes WHITE with arrow stubs: it must differ
-// from idle by SHAPE as well as tone, since this display's palette rule is that
-// colour is never the only carrier of meaning.
-void drawFab(int state) {
-  if (!fabVisible()) return;
-
-  // Drawn as a FOURTH TAB, using the tab bar's own vocabulary rather than a
-  // shape of its own: same Cozette 6x13 label, same COLOR_LABEL / COLOR_VALUE
-  // pair, and the same 3px COLOR_ACCENT underline inset 8px that marks a tab as
-  // active. Pressed here means what active means there, so the two states are
-  // told apart the same way across the whole bar.
-  //
-  // The one deliberate difference is the leading dot. A bare "REC" among three
-  // navigation labels reads as a fourth destination; the dot is the universal
-  // record mark and says this one DOES something instead of going somewhere.
-  // Dot and label are laid out as one group and centred together, so the pair
-  // stays optically centred in the slot rather than the text alone being centred
-  // with the dot hanging off its left.
-  const int cy = recCY();
-  const uint16_t fg = (state == 1) ? COLOR_VALUE : COLOR_LABEL;
-  tft.fillRect(tabsW(), 0, TAB_REC_W, TAB_BAR_H, COLOR_CARD);
-  setUIFont(1);
-  tft.setTextColor(fg, COLOR_CARD);
-  const int dotR = 3, gap = 3;
-  const int groupW = dotR * 2 + gap + tft.textWidth("REC");
-  const int x0 = recCX() - groupW / 2;
-  tft.fillSmoothCircle(x0 + dotR, cy, dotR, fg, COLOR_CARD);
-  tft.setTextDatum(ML_DATUM);
-  tft.drawString("REC", x0 + dotR * 2 + gap, cy);
-  tft.setTextDatum(TL_DATUM);
-  if (state == 1) {
-    tft.fillRect(tabsW() + 8, TAB_BAR_H - 3, TAB_REC_W - 16, 3, COLOR_ACCENT);
-  }
-}
 
 // Picked up: hand the content area over to a blank placement canvas (see the note
 // above on why the drag can't happen over live content).
@@ -2697,7 +2616,6 @@ void drawTabBar() {
   // this is the only place that puts it back. Leaving it out is what made the
   // button vanish on a tab switch or a full repaint and reappear only when some
   // unrelated path happened to call drawFab().
-  drawFab(0);
 }
 
 
@@ -3346,21 +3264,17 @@ bool detailLooksLikeCode(const char* kind, const char* detail) {
 // drawSessionDetail's own cursor advances, and those differ per board because the
 // line caps and the air between blocks do.
 
-// The voice-answer confirm screen's transcript panel: how many wrapped lines of the
-// code face it will show, and therefore how much text SEND can be made to sign.
-// Board-agnostic - 8 lines is 116px on board 1 and 140 on board 2, and both clear
-// askVoiceSendY() (the arithmetic is at the draw site in sessions.ino, together with
-// the static_assert that pins it).
-//
-// IT IS DECLARED HERE RATHER THAN BESIDE ITS THREE USES, and the reason is
-// geom-sweep.mjs: a checker's own parse is the sweep's universe of constants, so a
-// constant no checker can see is one the sweep silently never perturbs - and
-// sessions-geom-check.mjs cannot simply add sessions.ino to its parse chain,
-// because geom-common caches each file's TEXT per module instance and the sweep
-// re-imports the checker ~1400 times. Another 82KB a run took that child from
-// ~800MB to a V8 heap OOM, measured. So this is the one file-scope `const int` in
-// the four tab files, and it moved rather than the sweep growing a heap flag.
-const int ASK_VOICE_MAX_LINES = 8;
+// ASK_VOICE_MAX_LINES USED TO BE HERE, and it is worth saying what its removal
+// costs rather than letting it vanish. It capped the voice-answer confirm screen's
+// transcript panel, and it lived in THIS file rather than beside its three uses in
+// sessions.ino for one reason: geom-sweep.mjs perturbs only constants a checker
+// parses, and sessions-geom-check.mjs cannot add sessions.ino to its parse chain
+// (geom-common caches each file's text per module instance, and the sweep
+// re-imports the checker ~1400 times - another 82KB a run took a child from ~800MB
+// to a V8 heap OOM, measured). So the sweep loses a perturbation target here. The
+// confirm screen it bounded no longer exists; the draft's own KB_MAX_BYTES cap is
+// the only cap on answer text now, and settings-geom-check.mjs binds that to the
+// host's ANSWER_TEXT_MAX_BYTES.
 
 // The VOICE RESULT CARD's transcript panel: how many wrapped lines of the code face it
 // shows (drawVoiceCard, audio.ino). Board-agnostic at 6, and unchanged - what changed
@@ -4067,7 +3981,6 @@ void closeSessionDetail() {
   // drawSessionsAll() repaints the content area but not the bar, so the button
   // is untouched here - this is belt and braces, kept because closing a detail
   // screen is exactly where the button used to go missing.
-  drawFab(0);
 #if !BOARD_USES_TFT_ESPI
   // drawSessionsAll() -> renderSessionsList() already flushed its own dirty
   // rect; this covers drawFab()'s tab-bar slot too, which is a different
@@ -4115,13 +4028,11 @@ void handleTouch() {
   // otherwise, if the press started on the record button, that was a tap on it.
   if (!touching && wasTouching) {
     wasTouching = false;
-    const bool onFab = fabPressed;
-    fabPressed = false;
+    // The FAB's release arm stood here. The `composeOnKeys() && kbRelease()` line
+    // below is NOT part of it and must stay: settings-geom-check binds the keystroke
+    // commit to this exact line as "the RELEASE path - the one the record FAB already
+    // used".
     if (composeOnKeys() && kbRelease()) { lastActivityMillis = millis(); return; }
-    if (onFab) {
-      drawFab(0);
-      micStream(); // streams for as long as you talk; MICREC is the short fallback
-    }
     return;
   }
   if (!touching) return;
@@ -4181,6 +4092,16 @@ void handleTouch() {
     // The reply panel takes the whole tap: every target on it clears TAP_MIN in
     // both axes, so nothing there needs the arm-then-commit the 4.3mm key band
     // needs, and press-commit is what the rest of the device already uses.
+    // THE PROCESSING BAR IS OVER THIS SURFACE AND OWNS THE TAP. Without this the
+    // composeActive branch dispatches straight into controls the bar is covering:
+    // micPillY() is contentBottom() - MIC_PILL_H - 8, which on board 1 is y230..294
+    // against an action band at 280..319, so a tap at y285 lands on the panel's
+    // SEND or DISCARD with the bar drawn on top of it. Invisible controls taking
+    // taps is the exact class fabVisible()'s own composeActive check was already
+    // paid for once. Elsewhere a tap dismisses the bar (see the micProcessing arm
+    // further down, which this branch returns before reaching), so it does that
+    // here too rather than inventing a third behaviour.
+    if (micProcessing) { micProcessingDone(); lastActivityMillis = millis(); return; }
     if (composeScreen == COMPOSE_SCREEN_PANEL) composeTouch(sx, sy);
     else if (!kbArm(sx, sy)) kbTouch(sx, sy);
     lastActivityMillis = millis();
@@ -4230,11 +4151,6 @@ void handleTouch() {
   // BEFORE the detail/ask handler, which treats any unclaimed tap as "close this
   // page". This only ARMS it; recording starts on release, at the top of this
   // function.
-  if (fabHit(sx, sy)) {
-    fabPressed = true;
-    drawFab(1); // immediate pressed feedback
-    return;
-  }
 
   if (showingDetail) {
     // THE TAB BAR IS DRAWN ON THIS SCREEN, AND IT USED TO LIE ABOUT WHAT IT DOES.
@@ -4754,8 +4670,6 @@ void handleLine(const String& line) {
     dst.beepsLeft = src.beepsLeft;
     dst.nextBeepMillis = src.nextBeepMillis;
     memcpy(dst.askPid, src.askPid, sizeof(dst.askPid));
-    memcpy(dst.askVoiceCancelSha, src.askVoiceCancelSha, sizeof(dst.askVoiceCancelSha));
-    dst.hadVoiceText = src.askVoiceText[0] != '\0';
     dst.hostSlot = src.hostSlot;
   }
   int prevCount = sessionCount;
@@ -4771,12 +4685,7 @@ void handleLine(const String& line) {
   }
   sessionCount = keep;
   bool newlyAsking = false;
-  // The Mac usually wins the race for a pending voice confirmation: its hook
-  // bails the moment the ask disappears. Detected below, acted on once this
-  // loop has fully rebuilt sessions[]/sessionCount for this tick - closing
-  // the detail screen from partway through would repaint the sessions list
-  // from a half-updated array.
-  bool voiceConfirmGone = false;
+
   JsonArray arr = doc["sessions"].as<JsonArray>();
   if (!arr.isNull()) {
     for (JsonObject s : arr) {
@@ -4831,11 +4740,6 @@ void handleLine(const String& line) {
       for (int k = 0; k < 4; k++) info.askChips[k][0] = '\0';
       info.askAnswerable = remoteAnswerEnabled;
       info.askVoice = false;
-      info.askVoiceText[0] = '\0';
-      info.askVoiceSha[0] = '\0';
-      // Default: not suppressing anything. Carried forward from prevSessions
-      // below, but ONLY while askPid stays the same prompt - see there.
-      info.askVoiceCancelSha[0] = '\0';
       info.askSec = -1;
       JsonObject ask = s["ask"];
       if (!ask.isNull()) {
@@ -4848,21 +4752,13 @@ void handleLine(const String& line) {
         copyField(info.askTitle, sizeof(info.askTitle), ask["title"] | "");
         copyField(info.askDetail, sizeof(info.askDetail), ask["detail"] | "");
         info.askVoice = ask["voice"] | false;
-        copyField(info.askVoiceText, sizeof(info.askVoiceText), ask["voiceText"] | "");
-        copyField(info.askVoiceSha, sizeof(info.askVoiceSha), ask["voiceSha"] | "");
         info.askSec = ask["sec"] | -1;
-        // The confirm screen keys off askVoiceText alone, so a transcript that
-        // somehow arrives for a non-question ask must not be able to raise it.
-        if (strcmp(info.askKind, "question") != 0) info.askVoiceText[0] = '\0';
         // Defense in depth: the host already flattens control bytes, but any
         // that slip through render as garbage glyphs on this font, so blank
         // them to spaces here too. The detail keeps '\n' (it drives code-block
         // line breaks in the wrapper); the title is always single-line.
         for (char* p = info.askTitle; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
         for (char* p = info.askDetail; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
-        // Control bytes would corrupt the line we later HMAC, and the sha must
-        // be over exactly what is displayed.
-        for (char* p = info.askVoiceText; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
         JsonArray opts = ask["options"].as<JsonArray>();
         if (!opts.isNull()) {
           for (JsonVariant o : opts) {
@@ -4954,37 +4850,13 @@ void handleLine(const String& line) {
           // and leaves the `if` with no else, which is what it had.
           else startSessionXfade(info.id, prevSessions[j].status);
 #endif
-          // Carry the voice-cancel suppression forward, but ONLY while this
-          // is still the SAME prompt (askPid unchanged) - a different askPid
-          // is a later question, and a stale cancelled-hash must never be
-          // able to suppress ITS transcript. Gated on info.askPid[0] too: an
-          // ask that's gone entirely has nothing left to suppress.
-          if (info.askPid[0] && strcmp(prevSessions[j].askPid, info.askPid) == 0) {
-            copyField(info.askVoiceCancelSha, sizeof(info.askVoiceCancelSha),
-                      prevSessions[j].askVoiceCancelSha);
-            // The host parks a transcribed answer for up to 5 minutes and
-            // keeps republishing it every tick regardless of what the device
-            // did with it - CANCEL only clears the LOCAL askVoiceText, so
-            // without this the very next tick would silently repopulate it
-            // with the transcript the user just rejected, and a tap on what
-            // looks like a normal option button underneath would send it. A
-            // genuinely new recording produces a different sha and is
-            // unaffected.
-            if (info.askVoiceCancelSha[0] &&
-                strcmp(info.askVoiceSha, info.askVoiceCancelSha) == 0) {
-              info.askVoiceText[0] = '\0';
-            }
-          }
-          // The prompt was answered elsewhere (usually on the Mac, which is
-          // the common case). info.askVoiceText already reflects THIS tick
-          // (cleared above, together with askPid, whenever the ask is gone
-          // entirely) so the confirm screen's old state can only be read
-          // from prevSessions - matched by id here, not array index, since
-          // urgency-sort can reorder the list between ticks.
-          if (showingDetail && strcmp(detailId, info.id) == 0 && !info.askPid[0] &&
-              prevSessions[j].hadVoiceText) {
-            voiceConfirmGone = true;
-          }
+          // NOTHING TO CARRY FORWARD ANY MORE. This is where the voice-cancel
+          // suppression lived: the host parked a transcript for five minutes and
+          // republished it every tick, so CANCEL had to remember the rejected hash
+          // or the next tick silently put the same words back. With the transcript
+          // delivered once and owned by the draft, a rejected answer is cleared with
+          // CLR and stays cleared - and the dead end that came with it is gone too
+          // (say the same words again, hash identically, and be suppressed forever).
           break;
         }
       }
@@ -5074,6 +4946,32 @@ void handleLine(const String& line) {
     }
     kbSessionIdx = idx;
     bool gone = (idx < 0);
+    // THE TRANSCRIPT ARRIVES ON THE SCREEN THAT WAS DEAF TO IT. Everything above
+    // absorbs the tick and returns, and the whole voice block sits BELOW this
+    // return - so with the surface up the device used to parse no voice object at
+    // all: no transcript, no "working" upgrade, no result. That was survivable
+    // while speech and the compose surface were different screens. It is fatal now
+    // that a spoken answer lands in this surface's own draft, so the voice object
+    // is absorbed here, before the return, by the one function that owns it.
+    //
+    // AND IT IS THE FIRST THING THE TICK DOES, above the window-closed transition
+    // rather than below it. That transition's panel arm ends in `return`, so on
+    // the one tick where an ask's window closes the voice object went unparsed -
+    // recoverable, because the seq survives to the next tick, but only by luck and
+    // only five seconds later. The transcript is the thing a person is waiting for;
+    // a repaint is not, and the ordering should say which of the two can be dropped.
+    // The fields are pulled apart HERE rather than passing the JsonObject down,
+    // because a function whose signature names a type is hostage to where Arduino
+    // inserts its generated prototypes - the trap this file's header comment
+    // already records for HostPairing, Theme, Usage and SessionInfo. Primitives
+    // cannot be caught by it, and compose.ino stays free of JSON.
+    JsonObject cv = doc["voice"];
+    composeAbsorbVoice(cv.isNull() ? -1L : (long) (cv["seq"] | 0),
+                       cv.isNull() ? "" : (const char*) (cv["state"] | ""),
+                       cv.isNull() ? "" : (const char*) (cv["text"] | ""),
+                       cv.isNull() ? "" : (const char*) (cv["pid"] | ""),
+                       cv.isNull() ? "" : (const char*) (cv["reply"] | ""),
+                       cv.isNull() ? "" : (const char*) (cv["session"] | ""));
     // The band is cleared on the TRANSITION, before the row is redrawn: the
     // closed-window message fills KB_ACT_DRAWN exactly and the button that
     // replaces it has rounded corners, so a few px of the old message's first
@@ -5107,12 +5005,7 @@ void handleLine(const String& line) {
     return;
   }
 
-  // Close the confirm screen rather than leaving a SEND button that can no
-  // longer do anything - see voiceConfirmGone above. sessions[]/sessionCount
-  // are fully rebuilt for this tick now, so this repaints a consistent list.
-  // (Now behind the composeActive guard above - this used to run whether or not
-  // the keyboard was up, and it repaints straight over it.)
-  if (voiceConfirmGone) closeSessionDetail();
+
 
   // Voice result. Raise the card only on a NEW exchange (host timestamp), so it
   // appears once and a later tick can't resurrect a card the user dismissed.
@@ -5133,6 +5026,13 @@ void handleLine(const String& line) {
   // other's seq as a backwards jump on nearly every tick - see the HostLink comment.
   long &vSeq = (curLink >= 0) ? hostLinks[curLink].voiceSeq : voiceSeq;
   long &vSeqShown = (curLink >= 0) ? hostLinks[curLink].voiceSeqShown : voiceSeqShown;
+  // The compose surface's own mark, bound here so an exchange seen while the surface
+  // is DOWN is marked as dealt with. `voice` is republished every tick for the life
+  // of the host and lastVoice is never cleared, so without this the mark drifted
+  // arbitrarily far behind while compose was closed - and the next time the panel
+  // opened on that same still-pending ask, the very next tick pasted an abandoned
+  // transcript into a draft the user was typing by hand.
+  long &vApplied = (curLink >= 0) ? hostLinks[curLink].voiceSeqApplied : voiceSeqApplied;
   if (!v.isNull()) {
     int seq = v["seq"] | 0;
     // The host's voiceSeq is HOST-LIFETIME: it restarts at 1 when the host does. Held
@@ -5143,7 +5043,10 @@ void handleLine(const String& line) {
     if (seq < vSeq) {
       vSeq = 0;
       vSeqShown = 0;
+      vApplied = 0;
     }
+    // Consumed, whether or not it raises anything below: see vApplied's note.
+    if (seq > vApplied) vApplied = seq;
     copyField(voiceState, sizeof(voiceState), v["state"] | "");
     copyField(voiceText, sizeof(voiceText), v["text"] | "");
     copyField(voiceReply, sizeof(voiceReply), v["reply"] | "");
@@ -6157,6 +6060,51 @@ bool refuseUnavailableCommand(const String& line) {
     return true;
   }
   return false;
+}
+
+// THE FOUR MIC VERBS HAD NO FULL-SCREEN-SURFACE GUARD, and every other stateful
+// instrument here has one. That was survivable while nothing could reach a capture
+// from the compose surface; it is not now that SPK does, and the failure it
+// produced was the ugly kind. Measured by reading the paths rather than by running
+// it: micStream() blocks loop() for up to 120s painting its pill over whatever is
+// there, touch inside it is a STOP vote so a tap on what still looks like a
+// keyboard ends the recording instead of typing, handleLine returns early while
+// composeActive so the host can never end the bar, a tap cannot dismiss it either,
+// and the only exit is tickMicProcessing's 35s give-up - which calls micRestoreUi()
+// and, before this change, painted a tab over a still-composeActive device with
+// every later tap going to controls nobody could see.
+//
+// Takes the verb so the refusal NAMES ITSELF: from the Mac, silence and "impossible
+// here" look identical. EVERY CALL SITE CLEARS `buf` BEFORE RETURNING - see DETAIL's
+// note on the accumulator: processCompletedLine takes buf by REFERENCE, so a handler
+// that returns early without clearing it leaves the refused text for the next bytes
+// to be appended to, which matches the same verb and refuses again for ever. One
+// DETAIL 9 once produced 63 refusal lines and ~100 seconds in which neither board
+// parsed a payload at all.
+bool micSurfaceBusy(const char* verb) {
+  // THIS FILE'S CANONICAL SET, not a shorter one. octoActive and the pairing panel
+  // were missing from the first version of this guard, and the pairing panel is the
+  // worst omission available: a capture over it paints the pill across a 120s
+  // window with CONFIRM live underneath, and swallows that panel's taps as stop
+  // votes - precisely the failure this function exists to prevent.
+  bool up = composeActive || readerActive || histActive || emojiTestActive || octoActive;
+#if BOARD_HAS_WIRELESS_PAIR
+  up = up || pairPanelActive;
+#endif
+  if (!up) return false;
+  // ONE LINE PER COMMAND, not one per transport. The host writes every command to
+  // both live transports, so a single MICSTREAM arrives twice - the shape that made
+  // POWERPROBE print four refusals. Same 2000ms window refuseUnavailableCommand uses.
+  static String lastMicRefusal = "\x01";
+  static unsigned long lastMicRefusalMs = 0;
+  const unsigned long now = millis();
+  if (!(lastMicRefusal == verb && now - lastMicRefusalMs < 2000)) {
+    Serial.printf("%s refused: another full-screen surface is up - close it first "
+                  "(the capture would paint over it and its stop-tap would be swallowed)\n", verb);
+  }
+  lastMicRefusal = verb;
+  lastMicRefusalMs = now;
+  return true;
 }
 
 void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool fromUsb) {
@@ -7769,12 +7717,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     }
     Serial.println("SHOT end");
   } else if (buf == "MICTEST") {
+    if (micSurfaceBusy("MICTEST")) { buf = ""; return; }
     micLevelTest();
   } else if (buf == "MICMON") {
+    if (micSurfaceBusy("MICMON")) { buf = ""; return; }
     micMonitor();
   } else if (buf == "MICREC") {
+    if (micSurfaceBusy("MICREC")) { buf = ""; return; }
     micRecord();
   } else if (buf == "MICSTREAM") {
+    if (micSurfaceBusy("MICSTREAM")) { buf = ""; return; }
     micStream();
   } else if (buf.startsWith("PROVISION ")) {
     // Set the shared secret - ONLY over USB. A BLE peer must never be able to

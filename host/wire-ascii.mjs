@@ -11,7 +11,7 @@
 // But the units coincide BY ACCIDENT OF THE TRANSLITERATION, not by declaration.
 // Nothing structural stops a NEW field - or an old one on a path that skips
 // deviceText() - from re-introducing the mismatch, and that is not hypothetical:
-// `ask.voiceText` did exactly that. It is parked by handleVoiceAnswer under a
+// `ask.voiceText` did exactly that. It was parked by handleVoiceAnswer under a
 // BYTE cap (capUtf8), so every size assertion in the repo was satisfied while the
 // text itself was still full of Whisper's curly quotes and em-dashes; it was
 // caught only because a reviewer went looking. A checker that enumerates the
@@ -44,14 +44,20 @@
 //   is the "healthy process doing no useful work" shape this repo has documented
 //   repeatedly.
 //
-// ONE FIELD MUST FAIL SAFE INSTEAD, AND IT IS `ask.voiceText`.
+// ONE FIELD MUST FAIL SAFE INSTEAD, AND IT WAS `ask.voiceText`. **That field is no
+// longer emitted** - see the note on UNSAFE_TO_REPAIR below. The argument is kept
+// verbatim because it is the reasoning the mechanism exists for, and a reader who
+// re-derives it for a FUTURE signed field must reach exactly this conclusion.
+// EVERY sessions.ino LINE NUMBER BELOW IS HISTORICAL. That file lost ~130 lines when
+// the confirm screen went, so each one now points at unrelated code; they are kept
+// only to show where the argument came from, and must not be followed.
 //
 // Repair is right everywhere the device merely DRAWS the text. It is wrong where
 // the device SIGNS it. The voice confirm screen exists to prove a person read
 // THESE EXACT WORDS before authorising them, and the device signs
 // HMAC(secret, "nonce:pid:TEXT:<sha16>") using the `voiceSha` the host SENT -
-// sessions.ino:2259 builds that string from s.askVoiceSha verbatim, it does NOT
-// re-hash what it displays. So repairing here produces:
+// sessions.ino's sendVoiceAnswerToHost() built that string from s.askVoiceSha
+// verbatim, it did NOT re-hash what it displays. So repairing here produces:
 //
 //   host parks T, computes sha(T) -> boundary repairs T to T' -> device DISPLAYS
 //   T', signs sha(T) -> host re-hashes its parked T, matches, ACCEPTS
@@ -63,9 +69,9 @@
 //
 // So a non-ASCII voiceText is NOT repaired. It is SUPPRESSED - voiceText and
 // voiceSha are both dropped - and the device falls back to its ordinary ask
-// screen, which sessions.ino:2308 already calls "back to the option buttons".
+// screen, which sessions.ino (line 2308 as it then was) already calls "back to the option buttons".
 // Nothing is stranded by that: with voiceText absent the device re-offers SPEAK
-// (sessions.ino:1747) and TYPE (:1737), and the Mac's own dialog is up throughout.
+// (sessions.ino (line 1747 as it then was)) and TYPE (:1737), and the Mac's own dialog is up throughout.
 // A missing confirm screen is a visible, safe failure; a confirm screen showing
 // text that does not match the signature is not.
 //
@@ -101,6 +107,20 @@ const MAX_DEPTH = 24;
 // failing open is safe and a check-list failing open is not. `drop` names every
 // key that has to go with it: leaving `voiceSha` behind would hand the device a
 // hash for text it no longer has.
+// THE ONE ENTRY IS NOW DEAD IN PRODUCTION, AND IS KEPT DELIBERATELY. Since
+// 2026-09-13 the host emits no `ask.voiceText` at all: a transcript travels once on
+// the `voice` object and becomes an EDITABLE DRAFT, and the device hashes the draft
+// it actually holds rather than signing a sha the host computed. Repair is therefore
+// safe for a transcript now - the divergence the whole mechanism exists to prevent
+// cannot occur, because there is no host-held copy to diverge FROM.
+//
+// It stays for two reasons, and neither is sentiment. The MECHANISM is the thing
+// worth keeping: the next field the device signs on the host's word needs exactly
+// this, and rediscovering "suppress, do not repair" is a one-afternoon mistake with
+// a silent failure at the end of it. And wire-bytes-check.mjs exercises it with
+// SYNTHETIC payloads, so it is still a tested code path rather than an untested one
+// - what it no longer is, is a path real traffic reaches. If you add a field here,
+// say which one and why the device signs it.
 const UNSAFE_TO_REPAIR = [{
   field: "voiceText",
   drop: ["voiceText", "voiceSha"],

@@ -636,11 +636,14 @@ for (const b of [1, 2]) {
   chk(4 + BODY_H[b] <= c.FOOTER_H,
       `footer band ${c.FOOTER_H} holds a ${BODY_H[b]}px line at +4`);
   // --- tab bar ---
-  const tabW = Math.floor((W - c.TAB_REC_W) / 3);
+  // THE THREE TABS HAVE THE WHOLE WIDTH since the record slot was removed
+  // (2026-09-13): tabsW() is tft.width() now, so there is no TAB_REC_W to subtract
+  // and no REC group to measure. The divisor is TAB_COUNT rather than the literal 3
+  // it used to be - this file is the ONLY place in the tree that asserts tab-bar
+  // geometry at all, so a transcribed count here had nothing behind it.
+  const tabW = Math.floor(W / c.TAB_COUNT);
   chk(bodyTextWidth(b, "SESSIONS") < tabW - 16,
-      `tab label "SESSIONS" ${bodyTextWidth(b, "SESSIONS")}px inside a ${tabW}px tab`);
-  const grp = 6 + 3 + bodyTextWidth(b, "REC");
-  chk(grp <= c.TAB_REC_W, `REC group ${grp}px inside the ${c.TAB_REC_W}px slot`);
+      `tab label "SESSIONS" ${bodyTextWidth(b, "SESSIONS")}px inside a ${tabW}px tab (${c.TAB_COUNT} tabs share ${W})`);
 
   // --- the STANDALONE WAITING SCREEN, which lives on this tab ---
   //

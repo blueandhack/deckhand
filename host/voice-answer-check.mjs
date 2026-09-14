@@ -2,7 +2,11 @@
 // Checks for the answer crypto - spoken AND typed. Run: node host/voice-answer-check.mjs
 // Deliberately covers the REJECT cases, not just the happy path: this is the
 // code that decides whether a remote answer is allowed to reach Claude.
-import { voiceSha, voiceAnswerHmac, verifyVoiceAnswer, capUtf8 } from "./voice-answer.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import url from "node:url";
+import { voiceSha, capUtf8 } from "./voice-answer.mjs";
 import {
   TYPED_TEXT_MAX_BYTES,
   typedAnswerHmac,
@@ -23,37 +27,17 @@ const nonce = "a1b2c3d4e5f60718";
 const pid = "54321";
 const text = "use the second approach, but keep the existing tests";
 const sha = voiceSha(text);
-const mac = voiceAnswerHmac(secret, nonce, pid, sha);
-
-check("a valid answer is accepted",
-  verifyVoiceAnswer({ secret, nonce, pid, sha16: sha, mac, text }).ok);
-
-check("tampered TEXT is rejected (sha no longer matches)",
-  !verifyVoiceAnswer({ secret, nonce, pid, sha16: sha, mac, text: text + " and delete the repo" }).ok);
-
-check("a tampered SHA is rejected (hmac no longer matches)",
-  !verifyVoiceAnswer({ secret, nonce, pid, sha16: voiceSha("something else"), mac, text }).ok);
-
-check("a wrong nonce is rejected",
-  !verifyVoiceAnswer({ secret, nonce: "ffffffffffffffff", pid, sha16: sha, mac, text }).ok);
-
-check("a wrong pid is rejected",
-  !verifyVoiceAnswer({ secret, nonce, pid: "99999", sha16: sha, mac, text }).ok);
-
-check("a different device's secret is rejected",
-  !verifyVoiceAnswer({ secret: "ffffffffffffffffffffffffffffffff", nonce, pid, sha16: sha, mac, text }).ok);
-
-check("a missing mac is rejected",
-  !verifyVoiceAnswer({ secret, nonce, pid, sha16: sha, mac: "", text }).ok);
-
-check("a mac of the wrong length is rejected without throwing",
-  !verifyVoiceAnswer({ secret, nonce, pid, sha16: sha, mac: "abc", text }).ok);
-
-check("the sha is over the EXACT string (trailing space matters)",
-  voiceSha(text) !== voiceSha(text + " "));
-
-check("hmac is 16 hex chars", /^[0-9a-f]{16}$/.test(mac));
+// THE TEXT FORM IS GONE, and with it nine of this file's assertions. It signed
+// "nonce:pid:TEXT:<sha16>" over a transcript the HOST was holding, which is what
+// let one signature prove both that the paired device authorised the answer and
+// that a human had read exactly those words. A spoken answer is now an editable
+// draft and comes back through the TYPED form below, so the second claim is not
+// available to make and the frame was removed rather than left as a weaker second
+// way to author an answer. What the two surviving forms still need from
+// voice-answer.mjs is asserted here: the digest they HMAC over, and the cap.
 check("sha is 16 hex chars", /^[0-9a-f]{16}$/.test(sha));
+check("the sha is over the EXACT string - a trailing space is a different answer",
+  voiceSha("yes") !== voiceSha("yes "));
 
 // capUtf8 must never split a multi-byte codepoint, even when the byte budget
 // lands mid-character - an em-dash is 3 bytes, so a cap of "N + 1 byte into
@@ -165,11 +149,13 @@ check("sha is 16 hex chars", /^[0-9a-f]{16}$/.test(sha));
                                  mac: typedAnswerHmac(secret, nonce, pid, voiceSha(at)) }).ok;
     })());
 
-  // The two forms sign DIFFERENT strings ("...:TEXT:..." vs "...:TYPED:..."), so a
-  // signature minted for one must not authenticate the other.
-  check("a voice-form mac does not authenticate a typed answer",
+  // The live forms sign DIFFERENT strings ("...:TYPED:..." vs "...:PROMPT:..."),
+  // so a signature minted for one must not authenticate the other. This used to be
+  // stated against the TEXT form; with that gone, PROMPT is the other signature
+  // over the same digest and carries the same protection.
+  check("a PROMPT-form mac does not authenticate a typed answer",
     !verifyTypedAnswer({ secret, nonce, pid, b64: tB64,
-                         mac: voiceAnswerHmac(secret, nonce, pid, voiceSha(tText)) }).ok);
+                         mac: promptHmac(secret, nonce, pid, voiceSha(tText)) }).ok);
 }
 
 // ---- PROMPT form: typed text sent to a READY session ----
@@ -215,6 +201,67 @@ check("sha is 16 hex chars", /^[0-9a-f]{16}$/.test(sha));
     !verifyPrompt({ secret, nonce: pNonce, id12, b64: pB64, mac: answerMac }).ok);
   check("TYPED: a PROMPT signature cannot authenticate an answer",
     !verifyTypedAnswer({ secret, nonce: pNonce, pid: id12, b64: pB64, mac: pMac }).ok);
+}
+
+// A --selftest, which this file has never had - and it must INJECT A FAULT, not
+// restate an assertion. The first version of this block did the latter: five
+// "faults" that were verbatim copies of checks 20-150 lines above, so deleting
+// every check() in the file still printed "5/5 caught". It tested the library, not
+// the checker. This one copies both modules into a temp dir, rewrites one line of
+// the copy, imports it, and re-runs the assertions that should now fail.
+if (process.argv.includes("--selftest")) {
+  const here = path.dirname(url.fileURLToPath(import.meta.url));
+  const FAULTS = [
+    ["typedTextOk stops rejecting non-printable bytes", "typed-answer.mjs",
+      (t) => t.replace("/^[\\x20-\\x7E]+$/.test(text)", "true"),
+      (m) => m.typedTextOk("a\x07b") === false],
+    ["typedTextOk stops enforcing the byte cap", "typed-answer.mjs",
+      (t) => t.replace(/Buffer\.byteLength\(text, "utf8"\) <= TYPED_TEXT_MAX_BYTES/,
+                       "true"),
+      (m) => m.typedTextOk("x".repeat(200)) === false],
+    ["decodeTypedText stops re-encoding to reject non-canonical base64", "typed-answer.mjs",
+      (t) => t.replace('if (buf.toString("base64") !== b64) return null;', ""),
+      (m) => m.decodeTypedText("YWJjZA") === null],
+    // The LABEL is the only thing separating the two live signatures. Swapped, not
+    // deleted: deleting it leaves a string that still differs from PROMPT's, so the
+    // fault would not express the collision it claims to.
+    ["the TYPED label becomes PROMPT, so the two signatures collide",
+      "typed-answer.mjs", (t) => t.replace("${nonce}:${pid}:TYPED:${sha16}",
+                                           "${nonce}:${pid}:PROMPT:${sha16}"),
+      (m) => m.typedAnswerHmac("s".repeat(32), "n", "p", "0".repeat(16))
+             !== m.promptHmac("s".repeat(32), "n", "p", "0".repeat(16))],
+    ["capUtf8 stops walking back to a codepoint boundary", "voice-answer.mjs",
+      (t) => t.replace(/while \(end > 0 && \(buf\[end\] & 0xc0\) === 0x80\) end--;.*/, ""),
+      (m) => Buffer.from(m.capUtf8("\u2014".repeat(60), 151), "utf8").length === 150],
+  ];
+  let uncaught = 0;
+  for (const [name, file, mutate, stillHolds] of FAULTS) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "va-check-"));
+    for (const f of ["voice-answer.mjs", "typed-answer.mjs"]) {
+      const src = fs.readFileSync(path.join(here, f), "utf8");
+      fs.writeFileSync(path.join(dir, f), f === file ? mutate(src) : src);
+    }
+    const before = fs.readFileSync(path.join(here, file), "utf8");
+    const after = fs.readFileSync(path.join(dir, file), "utf8");
+    if (before === after) {
+      console.log(`  UNCAUGHT  ${name}  <- THE FAULT DID NOT APPLY (pattern drifted)`);
+      uncaught++; continue;
+    }
+    let held = false;
+    try {
+      const mod = await import(url.pathToFileURL(path.join(dir, file)).href);
+      held = stillHolds(mod);          // true means the assertion would STILL pass
+    } catch { held = false; }          // a throw is a catch
+    console.log(`  ${held ? "UNCAUGHT" : "caught  "}  ${name}`);
+    if (held) uncaught++;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  console.log(uncaught ? `\n${uncaught} fault(s) UNCAUGHT`
+                       : `\nfaults: ${FAULTS.length}/${FAULTS.length} caught`);
+  // `failed` too: a --selftest run that passes its faults while the ordinary
+  // assertions are RED must still exit non-zero, or CI reports green over a broken
+  // checker. The first version of this block consulted only `uncaught`.
+  process.exit(uncaught || failed ? 1 : 0);
 }
 
 console.log(failed ? `\n${failed} check(s) FAILED` : "\nall checks passed");

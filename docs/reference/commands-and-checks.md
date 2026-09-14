@@ -710,7 +710,7 @@ order; `INV` flips the display inversion. Four combinations, seconds each, again
 guess otherwise. Neither toggle persists, deliberately: the answer belongs in the board header once
 it has been SEEN.
 
-The on-screen record button runs the STREAMING path (`micStream`), not `MICREC` - tap to start,
+The on-screen SPEAK controls run the STREAMING path (`micStream`), not `MICREC` - tap to start,
 tap to stop, up to 120s. `MICREC` is the short one-shot fallback. Captures land
 in `~/Deckhand-audio/capture-<ts>.txt`. Turn one into a playable WAV and measure what's in it
 (de-combs the BLE interference, band-passes for speech, prints before/after SNR, refuses anything

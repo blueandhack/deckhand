@@ -1821,9 +1821,9 @@ unsigned long askChipsHash(int idx) {
 //
 // So: a 32-bit FNV-1a over all four slots, printed as 8 hex characters. Nine bytes
 // with its separator, and it changes if and only if some description does. It is
-// the same trade askVoiceSha already makes one field up - a 19-char hash standing
-// in for up to 204 characters of transcript - and the only difference is that the
-// host computes that one while nothing on the wire carries this one.
+// the same trade askVoiceSha used to make one field up - a 19-char hash standing
+// in for up to 204 characters of transcript - until the confirm screen it served
+// was replaced by an editable draft and the field went with it.
 //
 // WHAT A COLLISION COSTS, stated rather than waved at: two different description
 // sets hashing equal means one missed repaint of a card whose every other field is
@@ -1852,17 +1852,17 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
   // actSec deliberately is NOT: it changes on every event, and a full card repaint per
   // tick is exactly the flicker this discipline exists to prevent. It reaches the screen
   // through renderDetailDuration's own per-second cache instead.
-  // askVoiceSha MUST be here too, and for the identical reason as title/prompt: a
-  // transcript arriving is the ONLY thing that changes when a voice confirm screen
-  // is meant to appear (askPid stays the same prompt throughout), so leaving it out
-  // means the confirm screen would never actually draw. The hash, not the up-to-204
-  // char text it stands for, because it changes if and only if the text does and
-  // costs 20 bytes instead of 204 in this signature.
-  snprintf(out, outSize, "%s|%s|%s|%s|%s|%s|%d|%s|%s|%ld|%s", sessions[idx].name,
+  // askVoiceSha USED TO BE HERE, as the 11th field, because a transcript arriving
+  // was the only thing that changed when the voice confirm screen was meant to
+  // appear - askPid stays the same prompt throughout, so without the hash the
+  // screen never drew at all. There is no confirm screen now: a transcript lands in
+  // the compose surface's draft, and the surface repaints itself from
+  // composeAbsorbVoice rather than through this card's change-only signature. The
+  // field it stood for is gone from SessionInfo entirely.
+  snprintf(out, outSize, "%s|%s|%s|%s|%s|%s|%d|%s|%s|%ld", sessions[idx].name,
            sessions[idx].status, sessions[idx].path, sessions[idx].model,
            sessions[idx].branch, sessions[idx].askPid, answeredPid[0] ? answeredIdx : -1,
-           sessions[idx].title, sessions[idx].prompt, sessions[idx].startSec,
-           sessions[idx].askVoiceSha);
+           sessions[idx].title, sessions[idx].prompt, sessions[idx].startSec);
   // Whether the TYPE chip is showing MUST be in the signature: a session going
   // READY while you are looking at it changes nothing else on this card, so without
   // this the chip would not appear until something else happened to repaint.
@@ -1920,7 +1920,8 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
   // so a prompt can gain its descriptions mid-life - a host restarting or being
   // upgraded under a pending ask, with askPid unchanged throughout - and without
   // this term that card would never repaint to show them. Identical reasoning to
-  // askVoiceSha's, which is in this signature for exactly that shape of event.
+  // askVoiceSha's, which was in this signature for exactly that shape of event
+  // until the confirm screen was replaced by a draft (see the note at the snprintf).
   //
   // BOARD 1 IS DELIBERATELY EXCLUDED, and unlike the agent term above the reason is
   // no longer byte-identity: this task moves board 1's binary on purpose. It is that
@@ -1942,7 +1943,7 @@ void buildDetailSignature(int idx, char* out, size_t outSize) {
 bool askTypeOffered(int idx) {
   const SessionInfo& s = sessions[idx];
   return s.askAnswerable && strcmp(s.askKind, "question") == 0 &&
-         strcmp(s.agent, "cx") != 0 && !s.askVoiceText[0];
+         strcmp(s.agent, "cx") != 0;
 }
 // 1 when this ask offers an input row (SPEAK and/or TYPE), 0 otherwise. Used by
 // BOTH askOptionsTop() and the draw, so the buttons and their hit tests can never
@@ -1950,10 +1951,20 @@ bool askTypeOffered(int idx) {
 // offset would drift. SPEAK and TYPE SHARE one row (half-width each, the way
 // SOUND and NORMAL/FLIPPED share the settings page's bottom row) so adding typing
 // costs the options no space at all.
-int askInputRows(int idx) {
+// ONE ACCESSOR, because this predicate was written out three times - in
+// askInputRows, in the draw and in the hit test - and three copies of a rule are
+// three chances for the draw and the touch to disagree about whether a button is
+// there. askTypeOffered has always had one; this is its sibling. The
+// `!askVoiceText[0]` term the three copies used to carry is gone with the confirm
+// screen: SPEAK is no longer withheld while a transcript is pending, because a
+// transcript no longer pends - it is already in the draft, and speaking again just
+// appends to it.
+bool askSpeakOffered(int idx) {
   const SessionInfo& s = sessions[idx];
-  bool speak = s.askVoice && s.askAnswerable && !s.askVoiceText[0];
-  return (speak || askTypeOffered(idx)) ? 1 : 0;
+  return s.askVoice && s.askAnswerable;
+}
+int askInputRows(int idx) {
+  return (askSpeakOffered(idx) || askTypeOffered(idx)) ? 1 : 0;
 }
 // ---- TYPE A MESSAGE, on a plain READY detail screen ----
 //
@@ -1982,47 +1993,45 @@ int askInputRows(int idx) {
 // used to be refused because the binary was held byte-identical, and now it is
 // refused because moving a live tap target wants its own change and its own look.
 int msgBtnX() { return CARD_X + CARD_W - MSG_BTN_W; }
-int msgBtnY() {
-#if BOARD_USES_TFT_ESPI
-  return CONTENT_Y + 2;
-#else
-  return CONTENT_Y + (DETAIL_HEAD_H - MSG_BTN_H) / 2;
-#endif
-}
+// SPEAK sits one chip and one gap left of TYPE, and the header row is the ONLY
+// place either can go: the comment above records that a full-width button below the
+// card has no band to live in (the card's cursor reaches ~284 and the history hint
+// owns 285..299 against a contentBottom() of 302). The pair mirrors the ask screen's
+// own SPEAK|REPLY row, which is the same choice on the screen next door.
+//   board 1  "< Back" 12..47, SPEAK 68..143, TYPE 152..227, lane ends 228
+//   board 2  "< Back" 12..59, SPEAK 148..223, TYPE 232..307, lane ends 308
+int spkBtnX() { return msgBtnX() - MSG_BTN_W - SP_2; }
+// Where the header's right end stops being SPEAK's and becomes TYPE's: the middle
+// of the 8px gap between them. Both zones are the full DETAIL_HEAD_H tall, and
+// TYPE's still runs to the screen edge with no right bound.
+int hdrChipSplitX() { return msgBtnX() - SP_2 / 2; }
+// BOTH BOARDS CENTRE THE CHIPS NOW, and the `#if BOARD_USES_TFT_ESPI` that kept
+// board 1 on a literal `+ 2` is gone. Its own note said why it stayed: (28-22)/2 is
+// 3, not 2, so switching board 1 over MOVES THE CHIP BY A PIXEL, and that "wants its
+// own change and its own look" - first because the binary was held byte-identical,
+// then because a live tap target should not drift under a finger as a side effect.
+// THIS IS THAT CHANGE. The row is being rebuilt around a second chip, board 1's
+// binary moves on purpose, and what actually moves is only the DRAWN chip: the
+// tested zone is the whole DETAIL_HEAD_H band and does not come from the chip's y at
+// all, so no target moves under anyone's finger. One formula, both boards.
+int msgBtnY() { return CONTENT_Y + (DETAIL_HEAD_H - MSG_BTN_H) / 2; }
 bool msgOffered(int idx) {
   if (idx < 0 || idx >= sessionCount) return false;
   const SessionInfo& s = sessions[idx];
-  return !s.askPid[0] && strcmp(s.status, "waiting") == 0 && s.promptNonce[0];
+  // WAITING **OR** WORKING since 2026-09-13, matching the host's MSG_OK_STATUS. The
+  // useful case is watching a session work and leaving it a note to pick up AFTER the
+  // turn it is in - postToSessionInbox defaults to priority `next`, which queues
+  // rather than interrupting. The promptNonce test is still the real gate and still
+  // does the work: the host publishes one for exactly these statuses, so a device
+  // holding one is a device the host will accept a frame from. The status check is
+  // belt and braces, because a gate that exists only on the far end is not a gate.
+  const bool okStatus = strcmp(s.status, "waiting") == 0 || strcmp(s.status, "working") == 0;
+  return !s.askPid[0] && okStatus && s.promptNonce[0];
 }
 
 int askOptionsTop(int idx) {
   return contentBottom() -
          (sessions[idx].askOptCount + askInputRows(idx)) * (ASK_OPT_H + ASK_OPT_GAP);
-}
-// The confirm screen (SEND / RE-RECORD / CANCEL) draws no option buttons - it
-// returns early out of drawAskDetail - so its two rows anchor to the bottom of
-// the content area rather than to a fixed offset, the same reason
-// askOptionsTop() does.
-inline int askVoiceRedoY() { return contentBottom() - H_BTN; }
-inline int askVoiceSendY() { return askVoiceRedoY() - H_BTN - SP_2; }
-// True when the transcript doesn't fit within the confirm screen's line cap -
-// the belt-and-braces case the host's 150-byte cap is meant to prevent, but
-// that must never be the ONLY thing standing between a person and signing
-// text they can't fully see. Shared by the draw and the touch handler so they
-// can never disagree about whether SEND is actually offered.
-//
-// ASK_VOICE_MAX_LINES lives in deckhand_display.ino, not here - see the note there.
-// BOARD_H rather than tft.height() because only the former is a constant
-// expression; they are equal at SCREEN_ROTATION 0, the same substitution the
-// reader's page-budget asserts make.
-static_assert(CONTENT_Y + 22 + ASK_VOICE_MAX_LINES * CODE_LINE_H + 12
-                  < (BOARD_H - FOOTER_H) - H_BTN - H_BTN - SP_2,
-              "the voice-answer confirm panel now overlaps its own SEND button - "
-              "either lower ASK_VOICE_MAX_LINES or the panel will sign text the "
-              "user cannot see");
-bool askVoiceTooLong(int idx) {
-  return countWrappedLines(sessions[idx].askVoiceText, FONT_CODE, CARD_W - 8) >
-         ASK_VOICE_MAX_LINES;
 }
 // ---- WHAT THE HEADER CHIP OFFERS - ONE CHIP, ONE READER, TWO SECTIONS ----
 // The ask header has exactly ONE top-right slot and READ ALL already owned it.
@@ -2084,62 +2093,6 @@ void drawAskDetail(int idx) {
                   (uint8_t) answeredHostSlot == s.hostSlot;
   bool isPerm = strcmp(s.askKind, "perm") == 0;
   bool isPlan = strcmp(s.askKind, "plan") == 0;
-
-  // A transcript is waiting: the screen becomes a confirmation, because the
-  // confirm tap IS the authorisation - it signs a hash of exactly this text.
-  // This has to run BEFORE the "< Back"/badge header below rather than after
-  // it (the header row's text and this screen's own "YOU SAID" label share
-  // the same font and the same top-left corner, so stacking under it would
-  // overlap rather than read as two lines) - drawSessionDetail already
-  // cleared the content area before calling us, same as every other early
-  // return in this function.
-  if (s.askVoiceText[0]) {
-    setUIFont(T_META);
-    tft.setTextColor(COLOR_LABEL, COLOR_BG);
-    tft.setTextDatum(TL_DATUM);
-    tft.drawString("YOU SAID", CARD_X, CONTENT_Y + 6);
-    // The code face on a panel: this is verbatim quoted text, the same treatment
-    // code and commands already get. The host caps an answer transcript at 150
-    // UTF-8 bytes (VOICE_ANSWER_TEXT_MAX_BYTES), which needs at most ~5 lines
-    // even with word-wrap losses, so the cap of 8 is real headroom on both boards.
-    //
-    // THE LINE STEP IS CODE_LINE_H, NOT A LITERAL 13, and the literal was a
-    // live defect rather than dead code. It was left alone as "board 2 has no mic",
-    // but neither this draw nor the ask parse it reads is guarded by BOARD_HAS_MIC:
-    // askVoiceText comes from a transcript the HOST parks and republishes in every
-    // tick, and MAX_LINKS is 2 - so board 1 could speak an answer and board 2 would
-    // draw the reply at a 13px pitch under a 16px cell, each line's opaque box
-    // eating the previous line's bottom 3 rows, with the panel 24px short of its
-    // own text. Unexercised is not unreachable.
-    //   board 1  lane CARD_W-8 = 208px / 6 = 34 cols, panel 8*13+12 = 116 tall,
-    //            56..172 against a SEND at 206  -> 34px clear
-    //   board 2  lane CARD_W-8 = 288px / 8 = 36 cols, panel 8*16+12 = 140 tall,
-    //            68..208 against a SEND at 352  -> 144px clear
-    int lines = countWrappedLines(s.askVoiceText, FONT_CODE, CARD_W - 8);
-    if (lines > ASK_VOICE_MAX_LINES) lines = ASK_VOICE_MAX_LINES;
-    uiFillRound(CARD_X - 4, CONTENT_Y + 22, CARD_W + 8, lines * CODE_LINE_H + 12, R_SM,
-                COLOR_CARD, COLOR_BG);
-    drawWrappedText(s.askVoiceText, CARD_X, CONTENT_Y + 28, FONT_CODE, CODE_LINE_H, CARD_W - 8,
-                    0, lines, COLOR_VALUE, COLOR_CARD);
-    // Belt-and-braces: the host's byte cap is meant to guarantee this always
-    // fits, but that guarantee must not be the only gate. If it somehow
-    // doesn't, never offer SEND for text the user cannot fully see -
-    // RE-RECORD and CANCEL still work.
-    if (askVoiceTooLong(idx)) {
-      tft.setTextColor(COLOR_BAD, COLOR_BG);
-      setUIFont(T_META);
-      tft.setTextDatum(MC_DATUM);
-      tft.drawString("TOO LONG - ANSWER ON YOUR MAC", tft.width() / 2,
-                      askVoiceSendY() + H_BTN / 2);
-      tft.setTextDatum(TL_DATUM);
-    } else {
-      uiButton(CARD_X, askVoiceSendY(), CARD_W, H_BTN, "SEND", COLOR_ACCENT, true);
-    }
-    uiButton(CARD_X, askVoiceRedoY(), (CARD_W - SP_2) / 2, H_BTN, "RE-RECORD", COLOR_LABEL);
-    uiButton(CARD_X + (CARD_W + SP_2) / 2, askVoiceRedoY(), (CARD_W - SP_2) / 2, H_BTN,
-             "CANCEL", COLOR_LABEL);
-    return;
-  }
 
   tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
   setUIFont(2);
@@ -2360,8 +2313,9 @@ void drawAskDetail(int idx) {
   // already reserved the room for it via askInputRows), so it can never
   // overlap them regardless of askOptCount.
   if (askInputRows(idx)) {
-    const SessionInfo& s = sessions[idx];
-    bool speak = s.askVoice && s.askAnswerable && !s.askVoiceText[0];
+    // (The `const SessionInfo& s` that stood here went unused when the two chips
+    // moved to askSpeakOffered()/askTypeOffered(), which read the row themselves.)
+    bool speak = askSpeakOffered(idx);
     bool type  = askTypeOffered(idx);
     int y = contentBottom() - ASK_OPT_H;
     // THE LABEL SAYS REPLY, NOT TYPE, BECAUSE THE BUTTON STOPPED OPENING A
@@ -2480,68 +2434,17 @@ void sendAnswerToHost(int idx, int optIdx) {
   snprintf(line, sizeof(line), "ANSWER %s %s %d %s", s.id, s.askPid, optIdx, mac.c_str());
   sendLineToHost(line, s.hostSlot);
 }
-// Signs a hash of the text the screen is SHOWING, not the audio and not an
-// index. That single signature carries both facts the host needs: the paired
-// device authorised this, and this is the text a human read.
-void sendVoiceAnswerToHost(int idx) {
-  const SessionInfo& s = sessions[idx];
-  if (!s.askVoiceSha[0]) return;
-  String payload = String(s.askNonce) + ":" + s.askPid + ":TEXT:" + s.askVoiceSha;
-  String mac = authHmacFor(pairingSlotForRow(s.hostSlot), payload);
-  // "0" when unprovisioned, matching sendAnswerToHost. Deliberately NOT a silent
-  // return: the host logs the rejection, so an unpaired device shows up as a
-  // refused answer in the log rather than a SEND button that quietly does
-  // nothing.
-  if (mac.length() == 0) mac = "0";
-  char line[160];
-  snprintf(line, sizeof(line), "ANSWER %s %s TEXT %s %s",
-           s.id, s.askPid, s.askVoiceSha, mac.c_str());
-  sendLineToHost(line, s.hostSlot);
-}
 // Touch on the detail screen when an ask is showing. Returns true if the
 // tap was consumed (option chosen or page flipped); false = treat as back.
 bool handleAskTouch(int sx, int sy) {
   if (detailIndex < 0 || detailIndex >= sessionCount) return false;
   SessionInfo& s = sessions[detailIndex];
-  // The confirm screen (a transcript pending approval) is modal: it is checked
-  // before anything else in this function, and swallows every tap that isn't
-  // one of its own three buttons so a stray tap can never fall through to the
-  // option buttons underneath and send a DIFFERENT answer.
-  if (s.askVoiceText[0]) {
-    if (sy >= askVoiceSendY() && sy < askVoiceSendY() + H_BTN) {
-      // No SEND button is drawn in the "too long" belt-and-braces case (see
-      // drawAskDetail) - mirror that here so a tap in the same rectangle can
-      // never sign text the screen didn't actually offer to send.
-      if (!askVoiceTooLong(detailIndex)) sendVoiceAnswerToHost(detailIndex);
-      return true;
-    }
-    if (sy >= askVoiceRedoY() && sy < askVoiceRedoY() + H_BTN) {
-      if (sx < CARD_X + CARD_W / 2) {          // RE-RECORD
-        // Starting a fresh recording is an explicit request to see a new
-        // transcript, so any earlier CANCEL suppression for this prompt is
-        // spent - otherwise saying the same words again would hash identically
-        // and be silently swallowed forever (handleLine suppresses a republish
-        // matching this sha).
-        s.askVoiceCancelSha[0] = '\0';
-        copyField(micAnswerPid, sizeof(micAnswerPid), s.askPid);
-        micStream();                 // capped at 20s because micAnswerPid is set
-        micAnswerPid[0] = '\0';      // one capture only; never leaks into a dictation
-      } else {                                  // CANCEL
-        // Remember the rejected hash: the host parks this transcript for up
-        // to 5 minutes and keeps republishing it every tick regardless of
-        // what we do here, so clearing askVoiceText alone would only last
-        // until the next tick silently repopulates it - and a tap on what
-        // then looks like a normal option button underneath would send the
-        // very answer just rejected. handleLine suppresses any republish
-        // carrying this sha; a genuinely new recording gets a different one.
-        copyField(s.askVoiceCancelSha, sizeof(s.askVoiceCancelSha), s.askVoiceSha);
-        s.askVoiceText[0] = '\0';               // back to the option buttons
-        drawAskDetail(detailIndex);
-      }
-      return true;
-    }
-    return true;   // modal: swallow everything else (including "< Back")
-  }
+  // ~~The confirm screen (a transcript pending approval) is modal: it is checked
+  // before anything else in this function.~~ THERE IS NO CONFIRM SCREEN. A spoken
+  // answer goes to the compose surface's draft, which is a different surface
+  // entirely - handleTouch routes to it before reaching this function at all. The
+  // paragraph is struck rather than deleted because a reader who finds the old
+  // reasoning elsewhere would otherwise go looking here for a modal that is gone.
   if (!s.askPid[0]) {
     // Plain detail screen: ONLY the header's "< Back" goes back. This used to be
     // "tap anywhere", which collided head-on with a recording's "tap anywhere to
@@ -2557,8 +2460,13 @@ bool handleAskTouch(int sx, int sy) {
       // the chip were the target, which bought nothing this zone did not already
       // give and cost the header row all its air.
       // Everything else in this row is still back.
-      if (msgOffered(detailIndex) && sx >= msgBtnX() - 24) {
+      // ANCHORED ON spkBtnX() NOW, because SPEAK is the leftmost of the two and the
+      // 24px of slack belongs to whichever chip is on that edge. Right of the split
+      // is TYPE, left of it is SPEAK; both open the same surface, and SPEAK starts a
+      // capture into its draft the way the ask screen's own SPEAK does.
+      if (msgOffered(detailIndex) && sx >= spkBtnX() - 24) {
         openComposeForMessage(detailIndex);
+        if (sx < hdrChipSplitX()) composeSpeak();
         return true;
       }
       return false; // header row = back
@@ -2575,7 +2483,7 @@ bool handleAskTouch(int sx, int sy) {
   // the option hit-testing below, at the same y the draw used, so the two can
   // never disagree about where the button is.
   if (askInputRows(detailIndex) && sy >= contentBottom() - ASK_OPT_H) {
-    bool speak = s.askVoice && s.askAnswerable && !s.askVoiceText[0];
+    bool speak = askSpeakOffered(detailIndex);
     bool type  = askTypeOffered(detailIndex);
     int gapX0 = CARD_X + (CARD_W - 8) / 2;   // SPEAK's right edge when both buttons show
     int gapX1 = gapX0 + 8;                    // REPLY's left edge
@@ -2597,14 +2505,15 @@ bool handleAskTouch(int sx, int sy) {
     // to the SPEAK branch below and started an unwanted 20s recording.
     if (speak && type && sx >= gapX0 && sx < gapX1) return true;
     if (!speak) return true;                 // nothing offered here at all
-    // Same reasoning as RE-RECORD above: this is the path a CANCEL actually
-    // returns to (it reverts to the option buttons, SPEAK row included), so a
-    // suppression from an earlier CANCEL on this prompt must not survive a
-    // fresh recording started here.
-    s.askVoiceCancelSha[0] = '\0';
-    copyField(micAnswerPid, sizeof(micAnswerPid), s.askPid);
-    micStream();                 // capped at 20s because micAnswerPid is set
-    micAnswerPid[0] = '\0';      // one capture only; never leaks into a dictation
+    // SPEAK OPENS THE COMPOSE SURFACE AND RECORDS INTO ITS DRAFT. It used to
+    // record in place and hand the transcript to a confirm screen that could only
+    // accept or discard it. Both buttons on this row now lead to the same place,
+    // which is the whole point: a spoken answer and a typed one are one draft, and
+    // the chips that can spell the filename Whisper just mangled are one tap away.
+    // openCompose() resets the draft first, so SPEAK from here always starts clean;
+    // speaking AGAIN, from the panel's own SPK key, appends instead.
+    openCompose(detailIndex);
+    composeSpeak();
     return true;
   }
   if (sy >= optTop) {
@@ -2705,8 +2614,14 @@ void drawSessionDetail(int idx) {
   tft.drawString("< Back", CARD_X, CONTENT_Y + DETAIL_BACK_Y);
   // Outlined, not filled: it opens a screen whose own primary action is SEND, and
   // the filled treatment belongs to that one.
-  if (msgOffered(idx))
+  // BOTH CHIPS OR NEITHER - one gate, because they lead to the same surface and
+  // differ only in whether a capture starts with it. msgOffered() is that gate, and
+  // since 2026-09-13 it covers WORKING sessions too, so you can leave a note for a
+  // session to pick up after the turn it is in.
+  if (msgOffered(idx)) {
+    uiButton(spkBtnX(), msgBtnY(), MSG_BTN_W, MSG_BTN_H, "SPEAK", COLOR_ACCENT, false, COLOR_BG);
     uiButton(msgBtnX(), msgBtnY(), MSG_BTN_W, MSG_BTN_H, "TYPE", COLOR_ACCENT, false, COLOR_BG);
+  }
 
   uiFillRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, COLOR_CARD, COLOR_BG);
   uiStrokeRound(CARD_X, cardY, CARD_W, DETAIL_CARD_H, RADIUS, BORDER_CARD, color, COLOR_BG);

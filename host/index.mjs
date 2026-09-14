@@ -21,8 +21,6 @@ import { SerialPort } from "serialport";
 import noble from "@abandonware/noble";
 import { mergeById } from "./sessions-merge.mjs";
 import {
-  voiceSha,
-  verifyVoiceAnswer,
   capUtf8,
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
 } from "./voice-answer.mjs";
@@ -298,6 +296,38 @@ const POLL_INTERVAL_MS = 5000;
 // same hazard as an un-timed await: it does not throw, it just never returns.
 const KEYCHAIN_TIMEOUT_MS = 10_000;   // `security` blocks on a locked keychain
 const VOICE_CHILD_TIMEOUT_MS = 180_000; // whisper/mic-wav are slow but not endless
+// THE FLOOR BELOW WHICH WHISPER IS GUESSING, NOT HEARING. mic-wav.mjs already
+// measures the loudest 100ms RMS against the quietest and prints the ratio, with its
+// own note that "speech needs ~15-20dB to transcribe well" - and the host threw that
+// number away. It should not have: on near-silence Whisper does not return an empty
+// string, it INVENTS a plausible one. Three consecutive 1.3-1.9s captures of a user
+// who had stopped talking all came back "Thank you." - a phrase the model is known to
+// emit over silence, indistinguishable from a real answer once it is in the draft.
+// This repo already refuses a capture under 98% complete for exactly this reason; a
+// capture with no signal in it is the same hazard arriving by a different road.
+//
+// 8dB, not the 15-20 mic-wav names: that figure is "transcribes WELL", and rejecting
+// everything below it would throw away marginal speech that is still the user's. This
+// is the "nothing was said" floor - silence measures 0-3dB, real speech measured 13.3
+// raw on this hardware.
+const MIN_CAPTURE_SNR_DB = 8;
+// MEASURE THE FILE WHISPER IS ACTUALLY GIVEN. mic-wav prints TWO figures and the
+// first one - `=> signal-to-noise:` - is the RAW capture, taken before the de-rumble
+// pass. Whisper is then run on latest-clean.wav, the FILTERED one, whose own figure
+// mic-wav prints on the `filtered :` line. mic-wav's notes put the gap at +10 to
+// +12dB, and this floor is 8: so the raw reading refused takes whose filtered signal
+// was comfortably fine, and the margin it left against real speech (13.3 raw on this
+// hardware) was ~5dB - a fan, a fridge, or holding the board further away.
+//
+// `n/a` on either line means the ratio was UNDEFINED, not zero (see mic-wav): null is
+// returned and nothing is refused, which is the only safe reading of "no measurement".
+function captureSnrDb(stdout) {
+  const t = String(stdout || "");
+  // The filtered line first; the raw one only if the filter never ran.
+  const m = /filtered\s*:.*?=>\s*(-?[\d.]+)\s*dB/.exec(t) ||
+            /signal-to-noise:\s*(-?[\d.]+)\s*dB/.exec(t);
+  return m ? Number(m[1]) : null;   // null = mic-wav said nothing; never refuse on that
+}
 const RECONNECT_INTERVAL_MS = 3000;
 // Mirrors REMOTE_WAIT_MS in claude-hooks/deckhand-session-hook.mjs, per agent.
 // ADVISORY ONLY - it drives the keyboard's countdown and nothing else. If the
@@ -329,6 +359,12 @@ const HOOK_WAIT_MS = { cc: configuredWaitMs(), cx: 15_000 };
 // pulses the CH340's reset line and reboots the ESP32, which is not what you
 // want when e.g. triggering recalibration - the command has to ride an
 // already-open connection instead.
+// WHICH SESSION STATES ACCEPT A MESSAGE FROM THE DEVICE, defined ONCE because two
+// places read it and they must not drift: the tick publishes `pnonce` for exactly
+// these, and handleTypedPrompt refuses anything else on arrival. `asking` is absent
+// on purpose - a session with a pending prompt is answered through the ask screen,
+// which has its own frame, its own nonce and its own kind check.
+const MSG_OK_STATUS = new Set(["waiting", "working"]);
 const COMMAND_TRIGGER_PATH = path.join(os.homedir(), ".claude", "deckhand-device-command");
 
 // Nordic UART Service - must match the UUIDs in deckhand_display.ino exactly.
@@ -669,10 +705,12 @@ async function rememberDevice(name, secret = "") {
 // prompt. Same nonce is sent for a given pid across ticks (the device HMACs
 // whatever it last received); pruned once the prompt is long gone.
 const askNonces = new Map(); // pid -> { nonce, seen, first }
-// A transcript waiting for the human to confirm it on the device. Keyed by the
-// ask's pid, so a second dictation for the same prompt simply replaces the
-// first. Pruned with the nonces - once a prompt is gone, so is any text for it.
-const pendingVoiceAnswers = new Map(); // pid -> { text, sha, at }
+// There is deliberately NO parked-transcript store any more. A spoken answer used to
+// be held here for five minutes, republished as ask.voiceText on every tick, and
+// confirmed by the device signing a hash of it. The transcript now goes to the
+// device ONCE, as voice.text on the exchange that produced it, and becomes an
+// ordinary editable draft - so a copy kept here could only ever disagree with what
+// the human actually sends back.
 // Nonce for a typed MESSAGE to a READY session. askNonces cannot serve this: it is
 // keyed by an ask's pid, and a READY session has no pending prompt and therefore no
 // pid at all. Keyed by the FULL session id, since the payload's id is truncated to
@@ -713,9 +751,6 @@ function pruneNonces() {
   // Same window: a session that stops being READY stops having its nonce refreshed
   // below, so it must not leave a usable credential behind.
   for (const [id, e] of promptNonces) if (now - e.seen > 60_000) promptNonces.delete(id);
-  for (const [pid, e] of pendingVoiceAnswers) {
-    if (Date.now() - e.at > 5 * 60_000) pendingVoiceAnswers.delete(pid);
-  }
 }
 
 // Keyed with the secret of the DEVICE that sent the answer, so a device we're
@@ -2165,11 +2200,21 @@ async function readSessions() {
       // Pending question (already truncated by the hook) rides along so the
       // device can display it and offer the options as buttons. We attach a
       // per-prompt nonce; the device HMACs it back so we can trust the answer.
-      // A nonce for a typed MESSAGE, present ONLY while this session is READY.
-      // Omitted otherwise, so the device is never holding a credential for a state
-      // in which it must not offer typing - the same reason ask.answerable is
-      // stamped per prompt rather than read from a live global.
-      if (record.status === "waiting" && record.id) item.pnonce = nonceForSession(record.id);
+      // A nonce for a typed or spoken MESSAGE. ~~Present ONLY while this session is
+      // READY.~~ WIDENED 2026-09-13 to cover `working` as well, deliberately and at
+      // the user's direction: the useful case is watching a session work and adding
+      // "also check X" for it to pick up AFTER this turn, and the inbox is built for
+      // exactly that - postToSessionInbox defaults to priority `next`, which QUEUES
+      // rather than interrupting (`now` is the one that interrupts). Voice could
+      // already reach a working session, because it posts from the host and needs no
+      // device credential at all; typing could not, purely because this line withheld
+      // the nonce. That asymmetry was the accident, not the capability.
+      //
+      // STILL OMITTED for every other status, so the device is never holding a
+      // credential for a state in which it must not offer the control - the same
+      // reason ask.answerable is stamped per prompt rather than read from a live
+      // global. handleTypedPrompt re-checks the status on arrival regardless.
+      if (MSG_OK_STATUS.has(record.status) && record.id) item.pnonce = nonceForSession(record.id);
       if (record.ask) {
         // A SPREAD, not a field list, and that is what carries the hook's newer
         // fields through untouched - `optDescs` (the per-option descriptions,
@@ -2216,11 +2261,11 @@ async function readSessions() {
           const budget = HOOK_WAIT_MS[item.agent];
           item.ask.sec = Math.max(0, Math.round((budget - (Date.now() - ne.first)) / 1000));
         }
-        const pend = pendingVoiceAnswers.get(record.ask.pid);
-        if (pend) {
-          item.ask.voiceText = pend.text;
-          item.ask.voiceSha = pend.sha;
-        }
+        // NO voiceText/voiceSha here any more. A transcript used to ride the ask
+        // object on every tick so the device could raise a confirm screen from it;
+        // it now travels once, on the `voice` object, and lands in an editable
+        // draft. Republishing it here would paste the same sentence into that draft
+        // every 5 seconds.
       }
       return item;
     })
@@ -2510,7 +2555,7 @@ async function pruneAudioCaptures() {
 // information", inverting half the instruction. Handing it to you costs hands-free
 // operation and fixes all three: it arrives as an ordinary message, in one voice, with
 // permissions behaving normally, and you get to read it before anything acts on it.
-const VOICE_DELIVERY = process.env.DECKHAND_VOICE_DELIVERY || "inbox";
+const VOICE_DELIVERY = process.env.DECKHAND_VOICE_DELIVERY || "draft";
 
 // ---------- how a device message LANDS in the queue ----------
 // The inbox frame carries a `priority`, and the receiver's own line is
@@ -2652,10 +2697,26 @@ async function transcribeAndDispatch(captureFile, target, via = null) {
   try {
     // process.execPath, not "node": this process is the node copy inside
     // DeckhandBLE.app and has no PATH to find a bare "node" with.
-    await execFileAsync(process.execPath, [path.join(__dirname, "mic-wav.mjs"), captureFile, wav],
-      { timeout: VOICE_CHILD_TIMEOUT_MS });
+    const dec = await execFileAsync(process.execPath,
+      [path.join(__dirname, "mic-wav.mjs"), captureFile, wav], { timeout: VOICE_CHILD_TIMEOUT_MS });
+    const snr = captureSnrDb(dec.stdout);
+    if (snr !== null && snr < MIN_CAPTURE_SNR_DB) {
+      console.error(
+        `Voice: REFUSED - the capture carries ${snr.toFixed(1)}dB of signal, under the ` +
+          `${MIN_CAPTURE_SNR_DB}dB floor. Nothing was said loudly enough to transcribe, and ` +
+          `Whisper invents words over silence rather than returning none.`
+      );
+      setVoice("msgerror", { reply: "too quiet - speak closer", session: target });
+      return;
+    }
   } catch (err) {
+    // SAY SO ON THE GLASS, not only here. This return used to publish nothing at
+    // all, and "nothing" is the one thing the device cannot distinguish from a
+    // capture still in flight: its bar sat on PROCESSING until MIC_PROC_GIVEUP_MS
+    // and then reported NO REPLY FROM MAC, which is a lie about WHERE it failed.
+    // The answer path has always set askerror in this exact place.
     console.error(`Voice: decode failed (truncated capture?): ${err.message.split("\n")[0]}`);
+    setVoice("msgerror", { reply: "capture incomplete", session: target });
     return;
   }
   let text = "";
@@ -2670,13 +2731,17 @@ async function transcribeAndDispatch(captureFile, target, via = null) {
   } catch (err) {
     const miss = voiceMissing();
     console.error(`Voice: whisper failed: ${miss || err.message.split("\n")[0]}`);
-    setVoice("error", {
-      reply: miss ? `${miss} - run host/install-voice.sh` : "transcription failed",
+    setVoice("msgerror", {
+      reply: miss ? "whisper not installed" : "transcription failed",
+      session: target,
     });
     return;
   }
   if (!text) {
+    // Same reason as the decode failure above: silence here read on the device as a
+    // capture that never arrived.
     console.log("Voice: nothing recognised - not dispatching.");
+    setVoice("msgerror", { reply: "nothing recognised", session: target });
     return;
   }
   console.log(`Voice: transcript = "${text}"`);
@@ -2684,6 +2749,35 @@ async function transcribeAndDispatch(captureFile, target, via = null) {
   if (!target || target === "-") {
     console.log("Voice: no target session (recorded from a tab, not a session) - kept as a memo.");
     setVoice("memo", { text });
+    return;
+  }
+  // THE DEFAULT IS NOW A DRAFT, NOT A DELIVERY. A dictation used to reach the
+  // session in ~120ms with nothing between the microphone and Claude - and the one
+  // thing this device could not do was let you read it first. That cost something
+  // real once: a mis-heard "make sure there is no sensitive data and SOME sensitive
+  // information" went to work with half the instruction inverted. The transcript now
+  // goes to the device as an editable draft in the compose surface's message mode,
+  // where SPK re-records it, the keyboard fixes a word and SEND is a deliberate act.
+  // `inbox` restores the old immediate post; `clipboard` and `dispatch` are unchanged.
+  if (VOICE_DELIVERY === "draft") {
+    // CAPPED IN BYTES, exactly as the answer path is, and for a reason the answer
+    // path did not have to spell out: deviceText() above caps `voice.text` at 200
+    // CHARACTERS, while the draft it is about to become holds KB_MAX_BYTES 150. Sent
+    // uncapped, kbInsert would take what fits and drop the tail - a sentence
+    // truncated on the glass with nothing saying so. Truncating HERE is visible in
+    // the log and leaves the device holding exactly what it can show.
+    const capped = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);
+    if (capped !== text) {
+      console.log(
+        `Voice: transcript capped ${Buffer.byteLength(text, "utf8")} -> ${capped.length} bytes ` +
+          `for the device's draft (KB_MAX_BYTES). The tail is in this log and not on the glass.`
+      );
+    }
+    setVoice("msgheard", { text: capped, session: target });
+    console.log(
+      `Voice: transcript published to ${target} as a DRAFT - nothing sent. ` +
+        `Read it on the device and tap SEND. (DECKHAND_VOICE_DELIVERY=inbox posts immediately instead.)`
+    );
     return;
   }
   await deliverTextToSession(target, text, "Voice", via);
@@ -2831,9 +2925,13 @@ const child = execFile(
 child.unref?.();
 }
 
-// Same decode-and-transcribe as a dictation, but the result is PARKED for
-// confirmation rather than delivered. Nothing here writes an answer file - the
-// device has to sign the text first.
+// Same decode-and-transcribe as a dictation, but the result is PUBLISHED TO THE
+// DEVICE rather than delivered to a session. Nothing here writes an answer file: the
+// transcript becomes an editable draft on the device, and whatever the human sends
+// back arrives as ordinary device-authored text through handleTypedAnswer. (It used
+// to be PARKED here for a confirm screen to sign a hash of, which is why the name
+// still says "ForAnswer" rather than "ForDraft" - the pid it is keyed on is still an
+// ask's.)
 async function transcribeForAnswer(captureFile, pid) {
   const wav = path.join(AUDIO_DIR, "latest.wav");
   const clean = path.join(AUDIO_DIR, "latest-clean.wav");
@@ -2844,13 +2942,23 @@ async function transcribeForAnswer(captureFile, pid) {
   // NOT one of the states that raises the result card - it is progress, not a result.
   setVoice("working", {});
   try {
-    await execFileAsync(process.execPath, [path.join(__dirname, "mic-wav.mjs"), captureFile, wav],
-      { timeout: VOICE_CHILD_TIMEOUT_MS });
+    const dec = await execFileAsync(process.execPath,
+      [path.join(__dirname, "mic-wav.mjs"), captureFile, wav], { timeout: VOICE_CHILD_TIMEOUT_MS });
+    // THE SAME FLOOR THE DICTATION PATH USES, and it matters more here: this text is
+    // on its way to becoming a DECISION. See MIN_CAPTURE_SNR_DB.
+    const snr = captureSnrDb(dec.stdout);
+    if (snr !== null && snr < MIN_CAPTURE_SNR_DB) {
+      console.error(
+        `Voice answer: REFUSED - ${snr.toFixed(1)}dB of signal, under the ${MIN_CAPTURE_SNR_DB}dB floor.`
+      );
+      setVoice("askerror", { reply: "too quiet - record again", pid });
+      return;
+    }
   } catch (err) {
     // mic-wav.mjs refuses a capture under 98% complete, because a truncated one
     // transcribes as confident nonsense - exactly what must not become an answer.
     console.error(`Voice answer: decode failed (truncated capture?): ${err.message.split("\n")[0]}`);
-    setVoice("askerror", { reply: "capture incomplete - record again" });
+    setVoice("askerror", { reply: "capture incomplete", pid });
     return;
   }
   let text = "";
@@ -2863,11 +2971,11 @@ async function transcribeForAnswer(captureFile, pid) {
   } catch (err) {
     const missA = voiceMissing();
     console.error(`Voice answer: whisper failed: ${missA || err.message.split("\n")[0]}`);
-    setVoice("askerror", { reply: "transcription failed" });
+    setVoice("askerror", { reply: "transcription failed", pid });
     return;
   }
   if (!text) {
-    setVoice("askerror", { reply: "nothing recognised - record again" });
+    setVoice("askerror", { reply: "nothing recognised", pid });
     return;
   }
   // TRANSLITERATE HERE, AT THE PARK SITE, AND NOWHERE ELSE. Whisper is the
@@ -2879,24 +2987,34 @@ async function transcribeForAnswer(captureFile, pid) {
   // "Yes  lets go ahead". Both fonts are 0x20..0x7E, so an out-of-range byte draws
   // nothing and advances nothing.
   //
-  // THE OBVIOUS FIX IS THE WRONG ONE: doing this in the payload builder, where
-  // `item.ask.voiceText = pend.text` is assigned, would desync the text the device
-  // DISPLAYS from the text that gets signed. It does NOT produce a rejection -
-  // sessions.ino:2259 builds "nonce:pid:TEXT:<sha16>" from the voiceSha the host
-  // SENT rather than re-hashing what it draws, and this host verifies against its
-  // own parked copy, which still matches - so the answer is ACCEPTED and the human
-  // has authorised words they never read, silently. It has to happen before
-  // voiceSha() below, which is why it is on this line and not that one.
+  // ~~It has to happen before voiceSha() below, or the text the device DISPLAYS
+  // desyncs from the text that gets signed and the host accepts words nobody read.~~
+  // THAT REASON IS GONE with the signed-hash confirm screen, and is struck rather
+  // than deleted because it was true for a year and a reader re-deriving it would
+  // reach the same place. THE LINE STAYS, for a reason that is if anything harder:
+  // the transcript now becomes an editable DRAFT and comes back as device-authored
+  // text through typedTextOk(), which admits printable ASCII ONLY
+  // (/^[\x20-\x7E]+$/). So a curly quote that survives to the glass is no longer an
+  // ugly answer - it is a REJECTED one, refused at the far end with the user
+  // watching a SEND that silently did nothing. Transliteration moved from cosmetic
+  // to load-bearing for acceptance.
   //
-  // Cap AFTER, and cap in BYTES: the device displays the capped string, so that is
-  // the string that must be signed, and hashing before capping would sign text the
-  // human never saw. capUtf8 stays even though its input is now ASCII - it is the
-  // last line of defence and costs nothing on ASCII (see VOICE_ANSWER_TEXT_MAX_BYTES;
-  // the device stores this in a fixed char[204]).
+  // Cap AFTER, and cap in BYTES, because the device stores this in a fixed buffer
+  // and KB_MAX_BYTES is the same 150 on both sides (settings-geom-check.mjs binds
+  // the two). capUtf8 costs nothing on ASCII and is the last line of defence.
   text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);
-  pendingVoiceAnswers.set(pid, { text, sha: voiceSha(text), at: Date.now() });
+  // PUBLISHED, NOT PARKED. The host used to hold this text for five minutes and
+  // republish it on every tick as ask.voiceText, because the device could only
+  // display it and sign a hash of it. Now the device OWNS it: the transcript is an
+  // insert into the compose surface's draft, which the user may then edit, so there
+  // is nothing here worth keeping a copy of - whatever comes back arrives as
+  // ordinary device-authored text over the TYPED frame and is verified on its own
+  // merits. The cap and toAscii above stay: the device stores this in a fixed
+  // buffer, and typedTextOk() will refuse anything that is not printable ASCII, so
+  // a transcript that reached the glass with a curly quote in it would be a
+  // REJECTED answer rather than an ugly one.
   console.log(`Voice answer: pid=${pid} transcript = "${text}"`);
-  setVoice("askheard", { text });
+  setVoice("askheard", { text, pid });
 }
 
 // { header, lines: [], started }, per link - see finishShot's note.
@@ -2949,17 +3067,18 @@ async function finishAudioCapture(link, complete) {
 // had said - or whether Claude acted on it - was to tail the host log.
 // Text is capped: the device's line buffer has to hold a whole payload, and asks
 // already claim up to 1400 chars of it.
-let lastVoice = null; // { seq, at, state, text, reply, session }
+let lastVoice = null; // { seq, at, state, text, reply, session, pid }
 let voiceSeq = 0;
 const VOICE_TEXT_MAX = 200;
 const VOICE_REPLY_MAX = 420;
 // An answer transcript is capped by BYTES, not characters, and lower than a
-// dictation's: the device stores it in a fixed char[204] and DISPLAYS it on one
-// screen, and the whole design rests on the signed hash covering exactly the
-// text a human read. Whisper emits multi-byte punctuation freely, so a
-// character cap can overflow the device buffer and be silently truncated there
-// while the host hashes the full string - verification would pass and the host
-// would write text nobody saw.
+// dictation's. ~~The device stores it in a fixed char[204] and the whole design
+// rests on the signed hash covering exactly the text a human read.~~ Both of those
+// went with the confirm screen: it lands in the compose surface's draft (kbText,
+// KB_MAX_BYTES) and the device hashes what it holds. The cap survives for a harder
+// reason - the draft comes BACK through typedTextOk(), which admits printable ASCII
+// only and <= ANSWER_TEXT_MAX_BYTES, so a transcript that overflows or carries
+// Whisper's multi-byte punctuation is a REJECTED answer, not a truncated one.
 function setVoice(state, fields = {}) {
   lastVoice = {
     // Small monotonic counter for the DEVICE. Date.now() is ~1.79e12 and `long` on
@@ -2971,6 +3090,15 @@ function setVoice(state, fields = {}) {
     text: deviceText(fields.text ?? lastVoice?.text ?? "", VOICE_TEXT_MAX),
     reply: deviceText(fields.reply ?? "", VOICE_REPLY_MAX),
     session: fields.session ?? lastVoice?.session ?? "",
+    // WHICH ASK this exchange belongs to, and deliberately NOT sticky the way
+    // `text` and `session` are. `voice` is one object per host while asks are per
+    // session, so a transcript carries no session of its own: the device inserts it
+    // into the draft only when this pid matches the ask its compose surface was
+    // opened for. Inheriting a previous exchange's pid would do exactly the damage
+    // the field exists to prevent - paste an answer meant for one pending prompt
+    // into a draft being composed for another - so it resets to "" on every state
+    // that does not name one.
+    pid: fields.pid ?? "",
   };
 }
 
@@ -3039,8 +3167,8 @@ async function finishAudioStream(link, tail) {
   );
   // Fire and forget: transcription plus a dictated task can take a while, and the
   // serial reader must keep draining throughout.
-  // An answer capture never dispatches: its text has to be confirmed on the
-  // device before it is allowed to become a decision.
+  // An answer capture never dispatches: its text goes to the device, becomes a
+  // draft, and only becomes a decision if a human sends it back.
   if (st.answerPid) {
     transcribeForAnswer(file, st.answerPid).catch((e) => console.error("Voice answer:", e.message));
   } else {
@@ -3049,73 +3177,14 @@ async function finishAudioStream(link, tail) {
   pruneAudioCaptures().catch(() => {});
 }
 
-// A confirmed spoken answer. The device signs a hash of the text it DISPLAYED,
-// so verifying here proves both that the paired device authorised it and that
-// the text is the one a human read.
-async function handleVoiceAnswer(parts, via) {
-  const [, id12, pid, , sha16, mac] = parts;
-  const entry = askNonces.get(pid);
-  const from = deviceNameFor(via);
-  const dev = from ? deviceEntry(from) : null;
-  const pend = pendingVoiceAnswers.get(pid);
-
-  if (!pend) {
-    console.error(`Voice answer: no pending transcript for prompt ${pid} - ignoring.`);
-    return;
-  }
-  const v = verifyVoiceAnswer({
-    secret: dev?.secret, nonce: entry?.nonce, pid, sha16, mac, text: pend.text,
-  });
-  if (!v.ok) {
-    // Loud on purpose: "text does not match the signed hash" is the tamper case
-    // and must not look like an ordinary rejection.
-    console.error(
-      `Voice answer REJECTED (${v.why}) for prompt ${pid} ` +
-        `${senderDescription(via, from)} - ignoring.`
-    );
-    return;
-  }
-  askNonces.delete(pid);          // single-use, as with an option answer
-  pendingVoiceAnswers.delete(pid);
-
-  try {
-    const files = await fs.readdir(SESSIONS_DIR);
-    const file = files.find((f) => f.endsWith(".json") && f.startsWith(id12));
-    if (!file) {
-      console.error(`Voice answer: no session matching ${id12}`);
-      return;
-    }
-    const sessionId = path.basename(file, ".json");
-    let rec = null;
-    try {
-      rec = JSON.parse(await fs.readFile(path.join(SESSIONS_DIR, file), "utf8"));
-    } catch (err) {
-      console.error(`Voice answer: could not read session record for ${sessionId}: ${err.message}`);
-      return;
-    }
-    // Defence in depth: ask.voice gates the BUTTON, not the write. A transcript
-    // parked against a plan would land as idx:0, which emitDecision turns into
-    // {behavior:"allow"} - silently approving a plan. The kind is re-checked
-    // here so the device is not the only thing standing between a stray pid and
-    // an auto-approval.
-    if (rec?.ask?.kind !== "question" || rec?.ask?.pid !== pid) {
-      console.error(`Voice answer REJECTED (not a pending question) for prompt ${pid} - ignoring.`);
-      return;
-    }
-    await fs.mkdir(ANSWERS_DIR, { recursive: true });
-    // idx 0 and the transcript as `label`: emitDecision builds its message from
-    // `answer.label || \`option ${idx+1}\``, so the spoken text flows through the
-    // existing question path untouched. The hook is NOT modified.
-    await fs.writeFile(
-      path.join(ANSWERS_DIR, `${sessionId}.json`),
-      JSON.stringify({ pid, idx: 0, label: pend.text, voice: true, written_at: Date.now() })
-    );
-    console.log(`Voice answer accepted for ${sessionId} (pid ${pid}): "${pend.text}"`);
-    setVoice("asksent", { text: pend.text, reply: "sent to Claude" });
-  } catch (err) {
-    console.error(`Voice answer: could not write answer file: ${err.message}`);
-  }
-}
+// handleVoiceAnswer IS GONE, and the reason it is gone is the design rather than
+// tidiness. It verified `nonce:pid:TEXT:<sha16>` against a transcript THIS host was
+// holding, which proved the device displayed exactly the words the host had. A draft
+// the user can edit cannot make that claim by construction, so keeping the frame
+// would have left a second, weaker way to author an answer - and two wire forms for
+// one act is how the askVoiceCancelSha dead end happened. A spoken answer now comes
+// back as ordinary device-authored text through handleTypedAnswer below, which
+// carries the identical ask.kind === "question" re-check for the identical reason.
 
 // The typed sibling of handleVoiceAnswer. Same shape, one real difference: there is
 // no parked transcript to look up, because the text arrives in the frame. Every
@@ -3153,12 +3222,18 @@ async function handleTypedPrompt(line, via) {
     return;
   }
 
-  // RE-CHECK READY HERE. The device gates its own button on status too, but a gate
-  // that exists only on the device is not a gate - the same reason handleVoiceAnswer
-  // re-reads the record before writing an answer file. A missing or non-waiting
-  // status must REJECT, never fall through.
-  if (record.status !== "waiting") {
-    console.error(`Prompt: session ${id12} is "${record.status}", not waiting - refusing.`);
+  // RE-CHECK THE STATUS HERE. The device gates its own button on status too, but a
+  // gate that exists only on the device is not a gate - the same reason the answer
+  // handlers re-read the record before writing an answer file. A missing or
+  // out-of-set status must REJECT, never fall through.
+  //
+  // MSG_OK_STATUS, not a literal "waiting", and it is the SAME set the nonce above
+  // is published for. Two copies of that rule would let the device hold a credential
+  // this refuses, which presents as a SEND that authenticates and then vanishes.
+  if (!MSG_OK_STATUS.has(record.status)) {
+    console.error(
+      `Prompt: session ${id12} is "${record.status}", not one of ${[...MSG_OK_STATUS].join("/")} - refusing.`
+    );
     return;
   }
 
@@ -3498,11 +3573,10 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       const tm = line.match(/target=(\S+)/);
       const am = line.match(/answer=(\S+)/);
       const answerPid = am && am[1] !== "-" ? am[1] : "";
-      // A new answer recording supersedes any transcript already parked for
-      // this prompt. Cleared on ARRIVAL rather than on success, so a failed
-      // attempt cannot leave the previous text confirmable - RE-RECORD exists
-      // to discard text, and must never end up transmitting it.
-      if (answerPid) pendingVoiceAnswers.delete(answerPid);
+      // Nothing to supersede any more: there is no parked transcript to invalidate,
+      // because a second recording simply produces a second insert into a draft the
+      // user can already edit or CLR. The delete that used to be here existed so a
+      // failed RE-RECORD could not leave the PREVIOUS text still confirmable.
       link.audioStream = {
         header: line,
         target: tm ? tm[1] : "-",
@@ -3616,14 +3690,23 @@ async function handleDeviceLine(line, via, pairGen = 0) {
   // The device sends on USB and BLE simultaneously - process one copy PER DEVICE.
   if (isDuplicateFrom(lastAnswerBySender, via, line)) return;
   const parts = line.trim().split(/\s+/);
-  // Voice form: ANSWER <id12> <pid> TEXT <sha16> <hmac>. Checked before the
-  // option form so the two parsers never see each other's shape.
+  // AN OLD DEVICE'S VOICE FRAME, REFUSED BY NAME. The TEXT form went with
+  // handleVoiceAnswer. Falling through to the option parser is SAFE - parts[3] is
+  // "TEXT", parseInt gives NaN and the Number.isInteger guard below returns without
+  // writing anything, so it can never be mis-read as option 0 and turned into an
+  // {behavior:"allow"} - but falling through SILENTLY is not acceptable in this
+  // file: from the Mac, "that board is running old firmware" and "the link is down"
+  // would look identical. Two boards on one key with only one reflashed is the case.
   if (parts[3] === "TEXT") {
-    await handleVoiceAnswer(parts, via);
+    console.error(
+      `Answer REJECTED (legacy TEXT frame) for prompt ${parts[2]} ` +
+        `${senderDescription(via, deviceNameFor(via))} - that device is running firmware ` +
+        `from before the voice confirm screen was replaced by an editable draft. Reflash it.`
+    );
     return;
   }
-  // Typed form: ANSWER <id12> <pid> TYPED <base64text> <hmac>. Like TEXT this is
-  // checked before the option form, so the two parsers never see each other's shape.
+  // Typed form: ANSWER <id12> <pid> TYPED <base64text> <hmac>. Checked before the
+  // option form so the two parsers never see each other's shape.
   if (parts[3] === "TYPED") {
     await handleTypedAnswer(parts, via);
     return;
@@ -5416,8 +5499,23 @@ console.log(
     ? "Voice: dictation will RUN HEADLESSLY (claude -p --resume). Set DECKHAND_VOICE_DELIVERY=clipboard to hand it to you instead."
     : VOICE_DELIVERY === "clipboard"
       ? "Voice: dictation goes to the CLIPBOARD + a notification; paste it yourself. Unset DECKHAND_VOICE_DELIVERY to post into the live session instead."
-      : "Voice: dictation is POSTED INTO THE LIVE SESSION, and falls back to the clipboard (naming why) if that cannot be confirmed. Set DECKHAND_VOICE_DELIVERY=clipboard to always hand it to you."
+      : VOICE_DELIVERY === "inbox"
+        ? "Voice: dictation is POSTED INTO THE LIVE SESSION IMMEDIATELY, with nothing between the microphone and Claude. Unset DECKHAND_VOICE_DELIVERY for a reviewable draft instead."
+        : "Voice: dictation becomes a DRAFT on the device - read it, fix it, tap SEND. Nothing reaches Claude until you do. Set DECKHAND_VOICE_DELIVERY=inbox for the old post-immediately behaviour."
 );
+// AN UNRECOGNISED VALUE IS NOT SILENTLY THE DEFAULT. Every other knob in this file
+// that falls back says so by name (see DECKHAND_INBOX_PRIORITY), because a mode that
+// quietly does something other than what the environment asked for is worse than one
+// that refuses. `draft` is what an unset variable resolves to and is the safe end of
+// the range, so the fallback itself is not dangerous - being unable to tell a typo
+// from a default is.
+if (process.env.DECKHAND_VOICE_DELIVERY &&
+    !["draft", "inbox", "clipboard", "dispatch"].includes(VOICE_DELIVERY)) {
+  console.log(
+    `Voice: DECKHAND_VOICE_DELIVERY="${process.env.DECKHAND_VOICE_DELIVERY}" is not one of ` +
+      `draft/inbox/clipboard/dispatch - using draft (the default).`
+  );
+}
 // SAID AT BOOT, the way the voice modes above are, and THREE-WAY rather than
 // two: unset, set to something valid, and set to something that is not. The
 // third is the one that has to be loud - a typo resolves to the same "next" as

@@ -1,7 +1,15 @@
-// Voice-answer crypto, kept as pure functions so it can be tested without a
-// device. The device signs a hash of the text it DISPLAYED, so one signature
-// proves two things: the paired device authorised this, and this is the text a
-// human actually read. See docs/superpowers/specs/2026-08-15-voice-answers-design.md.
+// Shared answer-text primitives, kept as pure functions so they can be tested
+// without a device.
+//
+// THIS FILE NO LONGER OWNS A WIRE FORM. It used to carry the voice-only
+// "nonce:pid:TEXT:<sha16>" signature, whose point was that the device signed a hash
+// of text the HOST was holding - one signature proving both that the paired device
+// authorised the answer and that a human had read exactly those words. A spoken
+// answer is now an editable draft (2026-09-13-voice-draft-design.md), which cannot
+// make the second claim by construction, so the form was removed rather than left
+// beside typed-answer.mjs as a second, weaker way to author an answer.
+// What survives is what both remaining forms need: the byte cap, the hash they
+// sign, and a UTF-8-safe truncation.
 import crypto from "node:crypto";
 
 // The cap on a remote answer's text, in BYTES (not characters - the device stores
@@ -10,50 +18,22 @@ import crypto from "node:crypto";
 // a second copy that drifted would let the host accept text the device cannot hold.
 export const ANSWER_TEXT_MAX_BYTES = 150;
 
-// 16 hex chars is 64 bits. This is an integrity check against a transcript
-// being swapped between display and confirmation - not a password - and it
-// travels in a line the device also HMACs, so a collision would have to survive
-// both.
+// 16 hex chars is 64 bits. Not a password: it is the digest both remaining wire
+// forms HMAC over (TYPED and PROMPT) instead of signing the text itself, so a
+// collision would have to survive the HMAC as well.
 export function voiceSha(text) {
   return crypto.createHash("sha256").update(String(text), "utf8").digest("hex").slice(0, 16);
 }
 
-export function voiceAnswerHmac(secret, nonce, pid, sha16) {
-  return crypto
-    .createHmac("sha256", secret)
-    .update(`${nonce}:${pid}:TEXT:${sha16}`)
-    .digest("hex")
-    .slice(0, 16);
-}
-
 // Caps a string to at most maxBytes of UTF-8, never splitting a codepoint in
 // half. Kept here (not inline in index.mjs) so it can be exercised without a
-// device: the whole design rests on the signed hash covering exactly the text
-// a human read, and a cap that could slice a multi-byte character would leave
-// the device holding a truncated/mangled tail while the host had already
-// capped (and would hash) the full, untruncated string.
+// device. A cap that could slice a multi-byte character would hand the device a
+// mangled tail - and since the device's text now comes BACK through typedTextOk(),
+// which admits printable ASCII only, a split codepoint is a rejected answer.
 export function capUtf8(s, maxBytes) {
   const buf = Buffer.from(s, "utf8");
   if (buf.length <= maxBytes) return s;
   let end = maxBytes;
   while (end > 0 && (buf[end] & 0xc0) === 0x80) end--; // never split a codepoint
   return buf.subarray(0, end).toString("utf8");
-}
-
-// Returns a reason as well as a verdict: a rejected answer must be logged with
-// WHY, because the difference between "wrong device" and "text was altered" is
-// the difference between a misconfiguration and an attack.
-export function verifyVoiceAnswer({ secret, nonce, pid, sha16, mac, text }) {
-  if (!secret || !nonce || !pid) return { ok: false, why: "missing pairing/nonce state" };
-  if (typeof mac !== "string" || !/^[0-9a-f]{16}$/.test(mac)) return { ok: false, why: "malformed mac" };
-  if (typeof sha16 !== "string" || !/^[0-9a-f]{16}$/.test(sha16)) return { ok: false, why: "malformed sha" };
-
-  // The text must hash to what was signed. This is what stops a transcript
-  // being altered between the device showing it and the answer being written.
-  if (voiceSha(text) !== sha16) return { ok: false, why: "text does not match the signed hash" };
-
-  const want = voiceAnswerHmac(secret, nonce, pid, sha16);
-  // Equal lengths are guaranteed by the regex above, so timingSafeEqual cannot throw.
-  const ok = crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want));
-  return ok ? { ok: true, why: "" } : { ok: false, why: "bad hmac" };
 }

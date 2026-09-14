@@ -1,13 +1,17 @@
 // Typed-answer crypto and validation, kept as pure functions so it can be tested
 // without a device. See docs/superpowers/specs/2026-08-15-keyboard-answers-design.md.
 //
-// This differs from the voice path in the one way that matters: the host holds NO
-// copy of typed text, so there is nothing to compare against. handleVoiceAnswer
-// opens with pendingVoiceAnswers.get(pid) and re-hashes its own copy; a typed
-// answer instead CARRIES the text and is trusted only because the HMAC proves it
-// came from the paired device. That makes this the first place the host accepts
-// device-authored text, which is why the sanitising below is not optional: the
-// signature proves origin, never that the bytes are sensible.
+// THIS IS NOW THE ONLY WAY AN ANSWER IS AUTHORED. The voice TEXT form that used to
+// sit beside it is gone: a spoken answer is an editable draft and comes back through
+// THIS frame (see voice-answer.mjs, and 2026-09-13-voice-draft-design.md).
+//
+// What that form had and this one cannot is a host-held copy to compare against - it
+// opened with pendingVoiceAnswers.get(pid) and re-hashed the transcript the host was
+// already holding, so one signature proved both origin AND that a human had read
+// exactly those words. A typed answer instead CARRIES the text, and is trusted only
+// because the HMAC proves it came from the paired device. That makes this the place
+// the host accepts device-authored text, which is why the sanitising below is not
+// optional: the signature proves origin, never that the bytes are sensible.
 import crypto from "node:crypto";
 import { voiceSha, ANSWER_TEXT_MAX_BYTES } from "./voice-answer.mjs";
 
@@ -15,9 +19,10 @@ import { voiceSha, ANSWER_TEXT_MAX_BYTES } from "./voice-answer.mjs";
 // both and the device's fixed buffers are sized once.
 export const TYPED_TEXT_MAX_BYTES = ANSWER_TEXT_MAX_BYTES;
 
-// Note the "TYPED" tag: the voice form signs "nonce:pid:TEXT:sha". Signing a
-// different string for each form is what stops a signature minted for one being
-// replayed as the other.
+// Note the "TYPED" tag: the OTHER surviving form, a message, signs
+// "nonce:id12:PROMPT:sha". (A third, "nonce:pid:TEXT:sha", was the voice confirm
+// screen's and no longer exists.) Signing a different string for each form is what
+// stops a signature minted for one being replayed as the other.
 export function typedAnswerHmac(secret, nonce, pid, sha16) {
   return crypto
     .createHmac("sha256", secret)

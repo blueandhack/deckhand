@@ -624,6 +624,75 @@ function suite(ok, over = {}) {
   // look identical, and so do "refused" and "refused, but by which board, for what".
   ok("the refusal line names the verb and the board it was refused on",
      outExpr != null && /u->verb/.test(outExpr[1]) && /BOARD_NAME/.test(outExpr[1]));
+
+  // ---- (8) NO ARM IS DEAD ON BOTH BOARDS ---------------------------------
+  // A `#if !BOARD_USES_TFT_ESPI` nested inside a `#if BOARD_HAS_MIC &&
+  // BOARD_USES_TFT_ESPI` is false on board 1 (the outer excludes it) and false on
+  // board 2 (the outer is not taken). It compiles to NOTHING, on both boards, and
+  // neither compiler warns - the same silence CLAUDE.md records for `#if` on a
+  // `const int`, arriving by a different road. Three such arms held the
+  // `tft.flush()` calls board 2's blocking mic paths needed, so LISTENING never
+  // reached the glass: the fix had been written, guarded into nonexistence, and
+  // read as present by everyone who grepped for it.
+  //
+  // THE FLAGS ARE FULLY CORRELATED - BOARD_USES_TFT_ESPI, BOARD_TOUCH_NEEDS_CAL and
+  // !BOARD_HISTORY_SCROLL all pick board 1 - so a rule spelled against ONE flag name
+  // catches one spelling of the defect and misses its synonyms. The first version of
+  // this was scoped to audio.ino and to BOARD_USES_TFT_ESPI alone; it would not have
+  // seen reader.ino's two (nested under BOARD_HISTORY_SCROLL) or touch_cal.ino's
+  // (nested under BOARD_TOUCH_NEEDS_CAL). So the question asked here is not about
+  // spelling at all: EVALUATE each line's whole guard stack under each board's own
+  // flag values, and report the lines no board compiles.
+  //
+  // THE ALLOWLIST IS ONE ENTRY AND IT IS DELIBERATE. touch_cal.ino's arm is kept on
+  // purpose and says so at length: a resistive panel on a shimmed surface would need
+  // that flush, and the only board with a resistive panel is also the only one
+  // without a shim, so the pairing does not exist YET. Kept as an entry rather than
+  // deleted from the rule, because "this arm is dead and we know" is a different
+  // claim from "no arm is dead", and only the first one survives someone adding a
+  // board 3.
+  // ...plus the THIRD-CASE STUBS. audio.ino and power.ino each split on
+  // `#if HAS && USES_TFT / #elif HAS / #else`, and the `#else` holds the no-mic and
+  // no-beeper bodies. Both boards have both peripherals, so that arm is dead today -
+  // and audio.ino says so itself ("THREE cases share these four signatures, not
+  // two"). These are kept for the same reason touch_cal's is: they are the correct
+  // code for a board that does not exist yet, and the four signatures must exist for
+  // the sketch to link if one ever does.
+  const DEAD_OK = [
+    ["touch_cal.ino", "tft.flush();"],
+    ["audio.ino", "no microphone on this board"],
+    ["power.ino", "void startBeep() {}"],
+    ["power.ino", "void updateBeep() {}"],
+  ];
+  const SRC_FILES = fs.readdirSync(DIR).filter((f) => /\.(ino|cpp)$/.test(f)).sort();
+  const deadArms = [];
+  let scanned = 0;
+  for (const f of SRC_FILES) {
+    const src = over[`src:${f}`] != null ? over[`src:${f}`] : stripComments(f);
+    const stacks = guardStacks(src);
+    const lines = src.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const st = stacks[i];
+      if (!st || !st.length) continue;              // unguarded line: always compiled
+      const body = lines[i].trim();
+      if (!body || body.startsWith("#")) continue;  // a directive is not a compiled line
+      const names = new Set(stackFlags(st));
+      if (!names.size) continue;                    // no BOARD_* flag: not our question
+      scanned++;
+      let live = false;
+      for (const b of [1, 2]) {
+        try { if (stackHolds(st, flags[b])) { live = true; break; } }
+        catch { live = true; break; }               // a flag we cannot evaluate is not a claim
+      }
+      if (live) continue;
+      if (DEAD_OK.some(([df, dt]) => df === f && body.includes(dt))) continue;
+      deadArms.push(`${f}:${i + 1} ${body.slice(0, 40)}`);
+    }
+  }
+  ok(`${scanned} BOARD_*-guarded lines were evaluated against both headers (gate)`, scanned > 100);
+  ok(`no guarded line is dead on BOTH boards - such an arm compiles to nothing everywhere ` +
+     `and warns nowhere${deadArms.length ? ` [${deadArms.join(", ")}]` : ""}`,
+     deadArms.length === 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +723,7 @@ const realH1 = fs.readFileSync(`${DIR}/${HDR[1]}`, "utf8");
 const realHost = fs.readFileSync(`${DIR}/../../host/index.mjs`, "utf8")
   .replace(/^[ \t]*\/\/.*$/gm, "");
 const realClaudeMd = fs.readFileSync(`${DIR}/../../CLAUDE.md`, "utf8");
+const realReader = stripComments("reader.ino");
 // One arm of host/index.mjs's device-line handler, LOCATED by its own literal and
 // brace-matched, with the `[device/...]` log removed from it - i.e. the shape
 // 28795e3 fixed for BLEMTU, put back.
@@ -833,6 +903,17 @@ const faults = [
   ["a new host arm swallows a verb's refusal on its way to the log",
     { host: realHost.replace("\n  console.log(`[device/${linkLabel(via)}] ${line}`);",
         '\n  if (line.startsWith("TEMP")) return;\n  console.log(`[device/${linkLabel(via)}] ${line}`);') }],
+  // ---- (8)'s fault: the dead arm, PUT BACK where it actually shipped ----
+  // Not a synthetic `#if 0`: this is the exact shape that hid three tft.flush()
+  // calls from board 2 - a guard nested inside a condition that excludes it, spelled
+  // with a DIFFERENT flag from the one the first version of this rule looked for.
+  // reader.ino's drawHistory() is inside `#if BOARD_HISTORY_SCROLL / #else`, which is
+  // board 1; `!BOARD_USES_TFT_ESPI` inside it is false there and the arm is not
+  // reached at all on board 2.
+  ["a flush is guarded back into an arm no board compiles (reader.ino, the shape that hid three)",
+    { "src:reader.ino": realReader.replace(
+        "#endif  // BOARD_HISTORY_SCROLL",
+        "#if !BOARD_USES_TFT_ESPI\n  tft.flush();\n#endif\n#endif  // BOARD_HISTORY_SCROLL") }],
 ];
 
 let caught = 0;
@@ -840,7 +921,12 @@ for (const [name, over] of faults) {
   const unchanged = (over.main == null || over.main === realMain) &&
                     (over.h1 == null || over.h1 === realH1) &&
                     (over.host == null || over.host === realHost) &&
-                    (over.claudemd == null || over.claudemd === realClaudeMd);
+                    (over.claudemd == null || over.claudemd === realClaudeMd) &&
+                    // ...and the per-source overrides section (8) reads. Without this
+                    // arm a `src:` fault that stopped applying would be run anyway and
+                    // credited to whatever else happened to fail.
+                    Object.keys(over).filter((k) => k.startsWith("src:"))
+                      .every((k) => over[k] === stripComments(k.slice(4)));
   if (unchanged) { console.log(`  MISSED  ${name}  <- the injection did not apply (anchor moved)`); continue; }
   const r = run(over, true);
   if (r.failures.length) {

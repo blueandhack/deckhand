@@ -18,7 +18,7 @@
 //
 //   node sessions-geom-check.mjs             check both boards
 //   node sessions-geom-check.mjs --selftest  prove the checker has teeth
-import { cacheSizes, consts, deadGuards, DIR, faultChildEpilogue, fnBody, lineH,
+import { cacheSizes, consts, deadGuards, DIR, evalInt, faultChildEpilogue, fnBody, lineH,
          makeBump, PANEL, preflight, readSource, setSourceFault, SOURCE_FAULT_INDEX, splitArgs,
          stripComments, sweepSourceFaults, textWidth } from "./geom-common.mjs";
 import fs from "fs";
@@ -72,6 +72,42 @@ const SOURCE_FAULTS = [
     "deckhand_display.ino",
     (t) => t.replace(/else                     switchTab\(tapped\);/, "else                     closeSessionDetail();"),
     "calls switchTab(tapped)"],
+  // ---- the three that came out of the 2026-09-13 voice work ----
+  // Each is a REVERSION to the exact code that shipped the defect, not a synthetic
+  // break: that is what makes the catch mean "this assertion would have caught it".
+  ["board 2's micRecord loses the flush inside its metering loop (10s of frozen pill)",
+    "audio.ino",
+    (t) => t.replace(/(micPillMeter\(level, String\(\(int\) \(\(got \* 100\)[^;]*;\n)([\s\S]{0,1400}?)\n\s*tft\.flush\(\);/,
+                     "$1$2"),
+    "DRAWS and FLUSHES"],
+  ["board 2's stop goes back to a 400ms clock, so a chip-started capture dies instantly",
+    "audio.ino",
+    (t) => t.replace(/      const bool down = touchPressed\(\);\n      if \(!down\) \{ touchArmed = true; touchVotes = 0; \}\n      else if \(!touchArmed[\s\S]*?\n      \} else if \(touchArmed && \+\+touchVotes >= 2\) \{ stoppedByUser = true; break; \}/,
+                     "      if (millis() - t0 > 400 && touchPressed()) { stoppedByUser = true; break; }"),
+    "arms on a RELEASE"],
+  ["the detail header loses its SPEAK chip, so voice is reachable only through the keyboard",
+    "sessions.ino",
+    (t) => t.replace(/\n\s*uiButton\(spkBtnX\(\)[^;]*;/, ""),
+    "expected SPEAK and TYPE"],
+  // The pill's footer bar is CODE_LINE_H + 2 and board 2 has 2px of air over the time
+  // budget, so a code cell one leading taller eats it. Injected into CODE_LINE_H
+  // rather than into the pill, because the pill never names the number: that is the
+  // coupling worth proving, and it is invisible to anyone reading audio.ino.
+  ["board 2's code cell grows by 3, walking the pill's footer bar onto the time budget",
+    "board_es3c35p.h", (t) => t.replace(/(const int CODE_LINE_H\s*=\s*)16/, "$119"),
+    "clears the footer bar"],
+  // The prose's two figures, one fault each, because they are two claims: the
+  // parenthesis drifted on its own once already.
+  ["board-1-known-state.md's sessions allowlist ENTRY count is nudged off KNOWN[1].length",
+    "../../docs/reference/board-1-known-state.md",
+    (t) => t.replace(/(\|\s*`sessions-geom-check\.mjs`\s*\|\s*\*\*)(\d+)(\*\*)/,
+                     (m, a, n, b) => a + (Number(n) + 1) + b),
+    "board-1-known-state.md says sessions-geom-check holds"],
+  ["board-1-known-state.md's sessions TOLERATION count is nudged off the run's own",
+    "../../docs/reference/board-1-known-state.md",
+    (t) => t.replace(/(\|\s*`sessions-geom-check\.mjs`[^\n]*?\()(\d+)( tolerations)/,
+                     (m, a, n, b) => a + (Number(n) + 1) + b),
+    "those entries are reached at"],
 ];
 if (SOURCE_FAULT_INDEX >= 0) {
   const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
@@ -217,7 +253,7 @@ const CHIP_DECL = DISPLAY_INO.match(/char askChips\[(\d+)\]\[(\d+)\];/);
 // not the truncated text drawn from it.
 const CAP = {
   name: 23, status: 9, title: 43, path: 67, prompt: 103, model: 23, branch: 23,
-  askPid: 11, askVoiceSha: 19, sub: 35 /* char sub[36] in drawSessionRow */,
+  askPid: 11, sub: 35 /* char sub[36] in drawSessionRow */,
   agent: 3 /* char agent[4] - "cc" | "cx" */,
   // THE DEVICE'S BUFFER IS AUTHORITATIVE, NOT THE HOST'S CAP. This was 6 - macTag()'s
   // cap on the Mac side - while the width arithmetic further down read 7 off
@@ -3110,10 +3146,24 @@ for (const b of [1, 2]) {
   // MSG_BTN_W (msgBtnX() in sessions.ino). Nothing checked that they clear each
   // other - the width was only ever printed - so a chip wide enough to reach the
   // label would have drawn straight over it.
-  chk(c.CARD_X + c.CARD_W - c.MSG_BTN_W > c.CARD_X + widthB(b, T_BODY, "< Back"),
-      `TYPE chip starts x=${c.CARD_X + c.CARD_W - c.MSG_BTN_W}, "< Back" ends x=${c.CARD_X + widthB(b, T_BODY, "< Back")}`);
-  chk(widthB(b, T_BODY, "TYPE") + 8 <= c.MSG_BTN_W,
-      `"TYPE" ${widthB(b, T_BODY, "TYPE")}px inside the ${c.MSG_BTN_W}px chip`);
+  // THE HEADER ROW HOLDS THREE THINGS SINCE 2026-09-13: "< Back", then SPEAK, then
+  // TYPE right-aligned. The old guard compared "< Back" against msgBtnX() alone,
+  // which a second chip slides straight underneath - it would have kept passing
+  // while SPEAK drew over the label. Both labels are PARSED out of the draw rather
+  // than written here; "TYPE" was a literal on this side with nothing binding it.
+  const hdrLabels = [...fnSrc("void drawSessionDetail")
+    .matchAll(/uiButton\((?:spkBtnX|msgBtnX)\(\)[^;]*?"([^"]+)"/gs)].map((m) => m[1]);
+  chk(hdrLabels.length === 2,
+      `the detail header draws ${hdrLabels.length} chip(s) through spkBtnX()/msgBtnX() - expected SPEAK and TYPE (gate)`);
+  const spkX = c.CARD_X + c.CARD_W - 2 * c.MSG_BTN_W - c.SP_2;
+  chk(spkX > c.CARD_X + widthB(b, T_BODY, "< Back"),
+      `the leftmost header chip starts x=${spkX}, "< Back" ends x=${c.CARD_X + widthB(b, T_BODY, "< Back")} - ` +
+      `${spkX - (c.CARD_X + widthB(b, T_BODY, "< Back"))}px clear`);
+  for (const l of hdrLabels)
+    chk(widthB(b, T_BODY, l) + 8 <= c.MSG_BTN_W,
+        `"${l}" ${widthB(b, T_BODY, l)}px inside the ${c.MSG_BTN_W}px chip`);
+  chk(spkX + c.MSG_BTN_W + c.SP_2 === c.CARD_X + c.CARD_W - c.MSG_BTN_W,
+      `SPEAK ${spkX}..${spkX + c.MSG_BTN_W - 1} + SP_2 ${c.SP_2} meets TYPE at ${c.CARD_X + c.CARD_W - c.MSG_BTN_W}`);
   chk(c.DETAIL_BACK_Y >= c.BORDER_CARD,
       `"< Back" starts +${c.DETAIL_BACK_Y}, clear of the header row's top`);
   chk(c.DETAIL_BACK_Y + lineHB(b, T_BODY) <= c.DETAIL_HEAD_H,
@@ -3134,15 +3184,19 @@ for (const b of [1, 2]) {
     // file is the explanatory COMMENT two screens above the real code (`// ...see
     // the sx >= msgBtnX() - 24 test below...`), so it silently parsed prose
     // instead of the compiled statement. Proven with the two mutations below.
-    const hm = SESSIONS_INO.match(/msgOffered\(detailIndex\)\s*&&\s*sx\s*>=\s*msgBtnX\(\)\s*-\s*(\d+)/);
-    chk(!!hm, "the TYPE chip's hit test is anchored on msgBtnX() with a slack term");
+    // ANCHORED ON spkBtnX() SINCE 2026-09-13: the header carries TWO chips now and
+    // the 24px of slack belongs to the LEFTMOST, the one on the row's open edge.
+    // Anchoring on msgBtnX() still MATCHED after the change and measured the wrong
+    // chip's margin, so the pattern had to move with it.
+    const hm = SESSIONS_INO.match(/msgOffered\(detailIndex\)\s*&&\s*sx\s*>=\s*spkBtnX\(\)\s*-\s*(\d+)/);
+    chk(!!hm, "the header chips' hit test is anchored on spkBtnX() - the LEFTMOST chip - with a slack term");
     const slack = hm ? +hm[1] : 0;
     // msgBtnX() = CARD_X + CARD_W - MSG_BTN_W, and the zone runs from there to the
     // card's own right edge - so its width is the chip's width PLUS the slack, not
     // the chip's width alone.
     const zoneW = c.MSG_BTN_W + slack;
     chk(zoneW >= c.TAP_MIN,
-        `TYPE tap zone ${zoneW}px wide (chip ${c.MSG_BTN_W} + ${slack} slack) >= TAP_MIN ${c.TAP_MIN}`);
+        `SPEAK tap zone ${zoneW}px wide (chip ${c.MSG_BTN_W} + ${slack} slack) >= TAP_MIN ${c.TAP_MIN}`);
     // THE ABOVE HAS NO BITE ON ITS OWN: MSG_BTN_W (76) already clears TAP_MIN (46)
     // with slack = 0, so it cannot tell a real slack term from a vanished one. This
     // one depends on the slack SPECIFICALLY - it fails if the slack shrinks toward
@@ -3154,7 +3208,7 @@ for (const b of [1, 2]) {
     // noise next to it.
     const minSlack = c.MSG_BTN_W / 4;
     chk(slack >= minSlack,
-        `TYPE zone's slack (${slack}px) is a meaningful margin beyond the chip - at least a quarter of its ${c.MSG_BTN_W}px width (${minSlack})`);
+        `SPEAK zone's slack (${slack}px) is a meaningful margin beyond the chip - at least a quarter of its ${c.MSG_BTN_W}px width (${minSlack})`);
     chk(c.DETAIL_HEAD_H >= c.TAP_MIN,
         `TYPE tap zone ${c.DETAIL_HEAD_H}px tall (the whole header row) >= TAP_MIN ${c.TAP_MIN}`);
     chk(c.MSG_BTN_H < c.DETAIL_HEAD_H,
@@ -4048,21 +4102,215 @@ for (const b of [1, 2]) {
   // 16px cell too, so it reported 9 lines where the board can draw 7.
   const vis = Math.floor((optTop2 - 8 - textTop - 14) / c.CODE_LINE_H);
   chk(vis >= 1, `2-option ask shows ${vis} lines of code detail (board 1 shows 4)`);
-  // The voice-confirm panel: ASK_VOICE_MAX_LINES wrapped lines plus padding, above
-  // SEND. THE LINE STEP IS CODE_LINE_H, NOT A LITERAL 13 - this assertion carried
-  // the same Cozette literal the firmware did, so it agreed with the defect rather
-  // than catching it, and measured a panel 24px shorter than board 2 would draw.
+  // THE VOICE-CONFIRM PANEL'S ASSERTIONS STOOD HERE. They measured a screen this
+  // branch deleted: ASK_VOICE_MAX_LINES, askVoiceTooLong() and the panel itself all
+  // went with it, so the "8-line cap" they named had nothing behind it. The
+  // CODE_LINE_H claim that opened the block is KEPT - it is about the FONT and was
+  // only living here; it caught a real defect where a Cozette literal of 13 was
+  // measured against board 2's 16px cell.
   chk(c.CODE_LINE_H === lineHB(b, T_BODY),
       `CODE_LINE_H ${c.CODE_LINE_H} is uiLineH(FONT_CODE) - FONT_CODE aliases T_BODY`);
-  const panelEnd = c.CONTENT_Y + 22 + c.ASK_VOICE_MAX_LINES * c.CODE_LINE_H + 12;
-  const sendY = contentBottom - c.H_BTN - c.H_BTN - c.SP_2;
-  chk(panelEnd < sendY,
-      `voice transcript panel (${c.ASK_VOICE_MAX_LINES} x ${c.CODE_LINE_H}) ends ${panelEnd}, SEND starts ${sendY}`);
-  // The panel's LANE, for the same reason: the cap of 8 lines is only headroom if a
-  // 150-byte transcript really wraps under it. Columns at this board's own advance.
-  const voiceCols = Math.floor((c.CARD_W - 8) / advanceB(b, T_BODY));
-  chk(Math.ceil(150 / voiceCols) <= c.ASK_VOICE_MAX_LINES,
-      `a 150-byte transcript wraps to ${Math.ceil(150 / voiceCols)} of ${c.ASK_VOICE_MAX_LINES} lines (${voiceCols} cols)`);
+
+  // ---- THE CAPTURE'S STOP, AND WHAT BLOCKS loop() (audio.ino, board 1 pass only) ----
+  // Three user-visible defects lived here and none was visible to any checker.
+  //
+  // 1. A capture started from a CHIP begins with the finger still on the glass, and
+  //    a stop armed on a CLOCK is a guess about how long it stays there. Board 2 had
+  //    no grace at all and died 20ms in (measured: `streamend samples=1536 secs=0.0
+  //    by=tap`); board 1's 400ms grace merely moved the failure to a longer hold.
+  //    The rule is now: arm on a RELEASE - with a STUCK-PANEL BACKSTOP behind it,
+  //    because "never arm until it reads false" makes a panel that never reads false
+  //    into a recorder that cannot be stopped (board 1's stream loop discards host
+  //    input for the duration, so the Mac cannot end it either).
+  // 2. Board 2 draws into a PSRAM shadow framebuffer that loop() pushes, so a path
+  //    BLOCKING loop() while drawing must flush itself or its pixels never land.
+  //
+  // EACH ASSERTION IS BOUND TO THE BLOCK IT IS ABOUT. The first version of this
+  // counted `stopArmed = true;` across the WHOLE FILE and asserted the ABSENCE of a
+  // 400ms regex over the whole file, which breaks two of CLAUDE.md's four rules at
+  // once: three armings anywhere satisfied a claim about three loops (delete
+  // micRecord's and duplicate micStream's - still green), and a negative regex over
+  // a file passes for any rewording, including a reworded 400ms clock. It found the
+  // flush bug for the same bad reason: `micRecord`'s opening flush satisfied a test
+  // that asked only whether the FUNCTION contained one, while the 10s metering loop
+  // inside it pushed nothing for the whole take.
+  if (b === 1) {
+    const au = stripComments("audio.ino");
+    // The innermost brace-balanced block containing `needle`, so a claim lands on
+    // the loop it is about and not on its neighbour.
+    const blockAround = (src, needle, what) => {
+      const i = src.indexOf(needle);
+      if (i < 0) throw new Error(`no ${needle} in ${what}`);
+      let open = -1, depth = 0;
+      for (let k = i; k >= 0; k--) {
+        if (src[k] === "}") depth++;
+        else if (src[k] === "{") { if (depth === 0) { open = k; break; } depth--; }
+      }
+      if (open < 0) throw new Error(`no enclosing block for ${needle} in ${what}`);
+      let d = 0;
+      for (let k = open; k < src.length; k++) {
+        if (src[k] === "{") d++;
+        else if (src[k] === "}" && --d === 0) return src.slice(open, k + 1);
+      }
+      throw new Error(`unbalanced block for ${needle} in ${what}`);
+    };
+    // The three arms, sliced apart so a function name that exists twice cannot be
+    // read out of the wrong board's copy.
+    const b1Start = au.indexOf("#if BOARD_HAS_MIC && BOARD_USES_TFT_ESPI");
+    const b2Start = au.indexOf("#elif BOARD_HAS_MIC");
+    const b2End = au.indexOf("\n#else", b2Start);
+    chk(b1Start >= 0 && b2Start > b1Start && b2End > b2Start,
+        "audio.ino's two mic arms are locatable (gate)");
+    const ARM = { 1: au.slice(b1Start, b2Start), 2: au.slice(b2Start, b2End) };
+
+    // ---- the STOP, per capture loop ----
+    // The three loops that poll touch, named as [board, function, the clock the
+    // backstop is measured from]. board 2's micRecord is NOT here: it has no stop
+    // poll at all, which is pre-existing and bounded by MIC2_REC_SECONDS.
+    const STOPPERS = [[1, "void micStream()"], [1, "void micRecord()"], [2, "void micStream()"]];
+    for (const [arm, fn] of STOPPERS) {
+      const body = fnSrcIn(ARM[arm], fn, `audio.ino board-${arm} arm`);
+      // `touchPressed()` WITHOUT the semicolon, so a reverted stop - which calls it
+      // inside an `if` rather than assigning it - is still FOUND and still fails by
+      // name. Anchored on the call the loop cannot do without: a needle the mutation
+      // deletes turns a catch into a thrown Error, which is not a named failure.
+      const poll = blockAround(body, "touchPressed()", `${fn} (board ${arm})`);
+      const armVar = /touchArmed/.test(poll) ? "touchArmed" : "stopArmed";
+      const voteVar = armVar === "touchArmed" ? "touchVotes" : "stopVotes";
+      chk(new RegExp(`if\\s*\\(!down\\)\\s*\\{\\s*${armVar}\\s*=\\s*true;`).test(poll),
+          `board ${arm} ${fn}: its stop arms on a RELEASE (!down), so the finger that ` +
+          `started the capture can never also end it`);
+      chk(!/>\s*400\b/.test(poll),
+          `board ${arm} ${fn}: no 400ms clock in the stop poll - that was a guess at how ` +
+          `long the starting finger rests, wrong in both directions`);
+      chk(new RegExp(`\\+\\+${voteVar}\\s*>=\\s*2`).test(poll),
+          `board ${arm} ${fn}: the two-vote debounce survives - it exists because a stray ` +
+          `touch once ended a 99s take, and arming on release does not replace it`);
+      chk(/MIC_STOP_STUCK_MS/.test(poll),
+          `board ${arm} ${fn}: the stuck-panel backstop is in the SAME poll - without it a ` +
+          `panel that never reads false makes this capture unstoppable for its whole cap`);
+    }
+    // ...and the backstop's magnitude is PARSED, never restated. Under ~10s it would
+    // cut a deliberate hold, which is the interaction release-arming exists to protect.
+    const stuck = evalInt((au.match(/MIC_STOP_STUCK_MS\s*=\s*(\d+)/) || [])[1] || "NaN");
+    chk(stuck >= 10000 && stuck <= 30000,
+        `MIC_STOP_STUCK_MS is ${stuck}ms - long enough that a deliberate hold still records, ` +
+        `short enough that a stuck panel cannot run a 120s dictation to its cap`);
+
+    // ---- the FLUSH, per BLOCKING LOOP, not per function ----
+    // board 2 only: on board 1 TFT_eSPI writes the panel directly and there is no
+    // flush() to call at all (an unguarded one is a compile error there).
+    //
+    // THE SUBJECT IS THE LOOP, because the hazard is the loop: while one of these
+    // runs, loop() is not running, and loop() is what pushes the shadow framebuffer.
+    // So a `while` that DRAWS and does not FLUSH puts its pixels in PSRAM and leaves
+    // the glass on whatever was there when it started. Asking whether the FUNCTION
+    // contains a flush is what let micRecord's 10s metering loop go unpushed: its
+    // OPENING frame was flushed, and a regex over the body could not tell the two
+    // apart. SCREENSHOT cannot tell them apart either - it reads the same shadow
+    // buffer - so nothing but a person at the device would have found it.
+    const drawsIn = (t) => /micPill\w*\(|tft\.(draw|fill)\w*\(/.test(t);
+    for (const fn of ["void micStream()", "void micRecord()", "void micMonitor()"]) {
+      const body = fnSrcIn(ARM[2], fn, "audio.ino board-2 arm");
+      let found = 0;
+      for (let i = body.indexOf("while ("); i >= 0; i = body.indexOf("while (", i + 1)) {
+        const open = body.indexOf("{", i);
+        if (open < 0) continue;
+        let d = 0, end = -1;
+        for (let k = open; k < body.length; k++) {
+          if (body[k] === "{") d++;
+          else if (body[k] === "}" && --d === 0) { end = k; break; }
+        }
+        if (end < 0) continue;
+        const loop = body.slice(open, end + 1);
+        if (!drawsIn(loop)) continue;
+        found++;
+        chk(/tft\.flush\(\)/.test(loop),
+            `board 2 ${fn}: the blocking loop at +${i} both DRAWS and FLUSHES - it holds ` +
+            `loop(), which is what would otherwise push the shadow framebuffer, so every ` +
+            `update inside it would sit in PSRAM while the glass held the opening frame`);
+      }
+      chk(found > 0, `board 2 ${fn}: it has a drawing loop for that rule to land on (gate)`);
+    }
+  }
+
+
+  // ---- THE RECORDING PILL'S COLUMN, which nothing in the tree bound ----
+  // `grep -l 'micPill\|MIC_PILL' **/*.mjs` returned NOTHING before this: the surface
+  // the 2026-09-13 redesign is entirely about - the thing on the glass while you
+  // speak - had no checker on either board. Four bands share 64px and three of them
+  // are derived from a per-board font cell, so the arithmetic differs per board and
+  // the only written record of it was a comment carrying board 1's numbers while
+  // reading as both boards'.
+  {
+    const pillH = c.MIC_PILL_H, meterH = c.MIC_PILL_METER_H, timeH = c.MIC_PILL_TIME_H;
+    // The four bands, as offsets from micPillY(), derived the way audio.ino derives
+    // them rather than transcribed: meter at +24, time bar directly under it, footer
+    // bar bottom-anchored with 3px of air, title drawn TL at +9 in font 1.
+    const meterY = 24;
+    const timeY = meterY + meterH + 1;
+    const barH = c.CODE_LINE_H + 2;
+    const barY = pillH - barH - 3;
+    const titleTop = 9, titleBot = titleTop + lineHB(b, 1) - 1;
+    chk(titleBot <= meterY,
+        `pill title +${titleTop}..+${titleBot} (font 1, ${lineHB(b, 1)}px cell) reaches the meter ` +
+        `track at +${meterY}${titleBot === meterY ? " and SHARES its first row - survived only " +
+        "because micPillFrame draws the title BEFORE the track, so the track's fill takes it" : ""}`);
+    chk(timeY + timeH <= barY,
+        `pill time budget +${timeY}..+${timeY + timeH - 1} clears the footer bar at +${barY} ` +
+        `by ${barY - (timeY + timeH)}px - the bar is CODE_LINE_H + 2, so a taller code cell ` +
+        `walks it up onto the budget`);
+    chk(barY + barH <= pillH - 1,
+        `pill footer bar ends +${barY + barH - 1}, inside the ${pillH}px pill`);
+    // ...and the footer STRINGS fit the bar they are centred in. Three of them are
+    // drawn on this path and all three are new: the bar exists because "how do I
+    // finish?" was the question the old pill never answered.
+    const barW = (PANEL[b][0] - 28) - 6;
+    for (const f of ["TAP ANYWHERE TO STOP", "GOES TO YOUR DRAFT", "TAP TO DISMISS"]) {
+      chk(widthB(b, T_META, f) <= barW,
+          `pill footer "${f}" is ${widthB(b, T_META, f)}px in a ${barW}px bar`);
+    }
+    // THE TITLES, parsed off audio.ino rather than listed here, and each measured
+    // against the lane the %-12s elapsed readout leaves. That readout is anchored at
+    // a FIXED column (TR_DATUM, 12 monospace advances in from the right), so a long
+    // title runs into it rather than pushing it along.
+    const au = stripComments("audio.ino");
+    // Two sources, because one call site passes a FUNCTION: micPillFrame's literal
+    // arguments, plus every string micProcTitle() can return. Listing them here
+    // instead would be the transcription rule's exact failure - "NO REPLY FROM MAC"
+    // is the widest of them and is the one that would go unmeasured.
+    const titles = [...new Set([
+      ...[...au.matchAll(/micPillFrame\(([^,]+),/g)]
+        .flatMap((m) => [...m[1].matchAll(/"([^"]+)"/g)].map((q) => q[1])),
+      // EVERY literal in that function, not just the ones behind a bare `return`:
+      // two of the three arrive through a ternary, and "TRANSCRIBING" is one of them.
+      ...[...fnSrcIn(au, "const char* micProcTitle()", "audio.ino")
+        .matchAll(/"([^"]+)"/g)].map((m) => m[1]),
+    ])];
+    chk(titles.length >= 5,
+        `the pill's titles are parsed off micPillFrame's call sites AND micProcTitle's returns (${titles.join(", ")})`);
+    const lane = (PANEL[b][0] - 28) - 12 - 12 - 12 * advanceB(b, 2);
+    for (const t of titles) {
+      chk(widthB(b, 1, t) <= lane,
+          `pill title "${t}" is ${widthB(b, 1, t)}px in the ${lane}px the 12-char elapsed ` +
+          `readout leaves`);
+    }
+    // AND THE TITLE SAYS WHICH KIND OF CAPTURE THIS IS. LISTENING vs DICTATING is
+    // the one thing on the glass that tells a spoken ANSWER from a free dictation,
+    // and the user reported its absence twice before it was found.
+    chk(/composeActive \? "LISTENING" : "DICTATING"/.test(au),
+        "the capture pill's title is composeActive ? LISTENING : DICTATING - the surface " +
+        "a capture was started from is what the person watching needs named");
+    const listen = (au.match(/composeActive \? "LISTENING" : "DICTATING"/g) || []).length;
+    chk(listen >= 2, `both boards' micStream open on that title (${listen} sites)`);
+    // ...and the compose cap is the ANSWER cap on both, so the budget bar means the
+    // same thing on both boards.
+    const caps = (au.match(/composeActive \? MIC_ANSWER_MAX_MS : MIC_STREAM_MAX_MS/g) || []).length;
+    chk(caps >= 2,
+        `both boards' micStream cap a compose capture at MIC_ANSWER_MAX_MS (${caps} sites) - ` +
+        `the free dictation's 120s would make the budget bar creep for two minutes`);
+  }
+
 
   // ---- the VOICE RESULT CARD (drawVoiceCard, audio.ino) ----
   // Checked HERE rather than in a fourth checker, and the reason is that it is the same
@@ -4182,7 +4430,8 @@ for (const b of [1, 2]) {
   // assumed still true.
   let detSig = CAP.name + CAP.status + CAP.path + CAP.model + CAP.branch + CAP.askPid +
                2 /* answeredIdx */ + CAP.title + CAP.prompt + 11 /* startSec */ +
-               CAP.askVoiceSha + 10 /* separators */ + 2 /* |M */ +
+               9 /* separators - askVoiceSha was the 11th field and its 19 bytes
+                     plus one separator left with the confirm screen */ + 2 /* |M */ +
                1 + CAP.macTag + 1 + CAP.emojiId + 1 /* NUL */;
   // THE AGENT IS BOTH BOARDS' TERM NOW, and it is parsed from the arm rather than
   // branched on the board number for the same reason the walk above is. It joined
@@ -4347,6 +4596,36 @@ for (const b of [1, 2]) {
   chk(/showingDetail\s*=\s*false/.test(fnSrcIn(DISPLAY_INO, "void switchTab(Tab newTab) {", "deckhand_display.ino")),
       "switchTab() clears showingDetail itself, which is why the different-tab" +
       " arm does not call closeSessionDetail() first");
+}
+
+// ---- THE PROSE'S COUNT, PARSED OFF THE DOC RATHER THAN LEFT TO ROT ----
+// This row was a TRANSCRIPTION and it went stale within a day of being taken: it
+// read "9 (10 tolerations)" while the allowlist held 8 and 9, because the voice work
+// removed an entry and nothing made the sentence follow. settings-geom-check.mjs has
+// the same parse for the same row, for the same reason, after the settings cell was
+// hand-corrected twice - "a number is either parsed or it says out loud that it is
+// not". BOTH figures are bound: the parenthesis is a second claim, and a rule that
+// checked only the first would let it drift alone.
+//
+// Run LAST, because `known` is only final once every assertion has had its chance at
+// the allowlist.
+{
+  // readSource(), not fs.readFileSync: a direct read opts the file out of its own
+  // --selftest teeth. Relative to firmware/deckhand_display, like every other read here.
+  const md = readSource("../../docs/reference/board-1-known-state.md");
+  const row = md.match(/^\|\s*`sessions-geom-check\.mjs`\s*\|\s*\*\*(\d+)\*\*\s*\((\d+) tolerations/m);
+  if (!row) {
+    chk(false, "board-1-known-state.md has no `sessions-geom-check.mjs` allowlist row to bind - " +
+      "the counts it states are what this checker holds, so move this parse with the row rather " +
+      "than leaving the figures asserted against nothing");
+  } else {
+    chk(+row[1] === KNOWN[1].length,
+        `board-1-known-state.md says sessions-geom-check holds ${+row[1]} board-1 allowlist ` +
+        `entries; KNOWN[1] holds ${KNOWN[1].length}`);
+    chk(+row[2] === known,
+        `board-1-known-state.md says those entries are reached at ${+row[2]} sites; this run ` +
+        `took the allowlist ${known} times`);
+  }
 }
 
 faultChildEpilogue();

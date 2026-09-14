@@ -508,7 +508,10 @@ const int FOOTER_H = 20;
 // the target is 40x46 rather than 40x34. The three tabs get
 // (320 - 40) / 3 = 93px each against a longest label of 48px ("SESSIONS" at
 // Cozette's 6px advance), so they have room to spare either way.
-const int TAB_REC_W = 40;
+// TAB_REC_W STOOD HERE - the 40px slot the record button owned at the right end
+// of the tab bar. The button is gone (2026-09-13): it was global chrome doing a
+// per-session job, and speaking to a session now starts from that session's own
+// detail screen. The three tabs share the whole width again.
 
 // ---------- USAGE tab: the card column ----------
 // Side margin unchanged at 12: a margin's job is keeping the card off the bezel
@@ -1772,10 +1775,11 @@ const int H_ROW = 46;     // list rows - exactly the fingertip floor
 // would give the box room - and cost every tall row 2px, which the ladder's
 // four-session rung has 6px of margin for and its five-session rung does not.
 const int PILL_H = 18;
-// Consequence outside SETTINGS, and a wanted one: the voice-answer confirm screen
-// (sessions.ino, askVoiceSendY()/askVoiceRedoY()) sizes SEND / RE-RECORD / CANCEL
-// from H_BTN, so those three go 44 -> 50 and clear TAP_MIN, where on board 1 they
-// sit 4px under it.
+// ~~Consequence outside SETTINGS: the voice-answer confirm screen sizes SEND /
+// RE-RECORD / CANCEL from H_BTN.~~ THAT SCREEN IS GONE (2026-09-13) and this header
+// must not justify a constant by it. H_BTN's remaining shared users are the confirm
+// DIALOG and the keyboard's action row; settings-geom-check.mjs asserts
+// H_BTN >= TAP_MIN directly, which is the claim that paragraph was reaching for.
 
 // ============================================================================
 // SETTINGS - HOME AND THE SIX GROUPS
@@ -2789,10 +2793,11 @@ const int CFM_H   = 160;
 // in host/voice-answer.mjs, re-exported for the typed form), so only the columns
 // and the resulting line count move.
 //
-// THE OTHER PAIRING THIS COULD HAVE BROKEN, re-measured rather than reasoned: the
-// voice-answer confirm screen caps its transcript panel at 8 WORD-wrapped lines
-// (askVoiceTooLong() in sessions.ino, measured against CARD_W - 8), and CLAUDE.md
-// records that cap and the 150-byte one as consistent by arithmetic. A wider lane
+// THE OTHER PAIRING THIS COULD HAVE BROKEN - KEPT AS METHOD, THOUGH ITS SUBJECT IS
+// GONE. It re-measured the voice-answer confirm screen's 8-line transcript cap
+// (askVoiceTooLong(), against CARD_W - 8). That screen and that constant were
+// deleted on 2026-09-13; what survives is the REASON the re-measurement was needed,
+// which applies to any lane-dependent wrap budget on this board. A wider lane
 // does NOT automatically loosen that, because word wrap's worst case depends on the
 // lane: wrapLineLen breaks no further back than halfway, so the adversarial word
 // length is per-board and a board-1 string measures nothing about a 288px lane.

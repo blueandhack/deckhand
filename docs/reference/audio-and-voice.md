@@ -133,7 +133,7 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   gate would fire on every OTHER iteration and quietly cost 64ms for two votes. Two votes now cost
   ~32ms and a normal tap spans 5-9 polls. The debounce itself is unchanged - still two consecutive
   reads, which is what stops a single spurious `ts.touched()` ending a 99s take.
-- **Recording is user-terminated and shows a live meter.** Tap the floating button to start, tap
+- **Recording is user-terminated and shows a live meter.** Tap a SPEAK control to start, tap
   again to stop; it also stops when the buffer fills, and the log says which (`AUDIO stopped by
   tap|buffer full`). A fixed length is the wrong default for dictation. Meter and transfer progress
   live in a **pill over the bottom of the content area, not a full-screen takeover** — this device
@@ -152,7 +152,10 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   silently truncated by `copyField` and could then compare EQUAL to a *different* id or askPid -
   the same class of bug as a change-only cache shorter than the string it stores. The one field that
   deliberately changes shape is `askVoiceText`, which the diff only ever tests for non-empty, so it
-  becomes a single `hadVoiceText` bool rather than 204 bytes.
+  becomes a single `hadVoiceText` bool rather than 204 bytes. **BOTH FIELDS ARE GONE since
+  2026-09-13** — the rule they illustrate is not, and is why this sentence is corrected rather
+  than cut: any field copied into `PrevSession` must match `SessionInfo`'s width exactly, and a
+  field the diff only tests for non-empty may legitimately narrow to a bool.
 - **The recording bar has a FOURTH stage, because it used to vanish exactly when the wait
   began.** LISTENING/DICTATING -> SENDING -> **PROCESSING** -> result. The bar was torn down
   the instant the transfer finished, which is the moment the Mac starts the slow part -
@@ -263,7 +266,7 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     touched. Stopping now needs **two consecutive** touch reads — the panel throws occasional false
     positives, and one of them shouldn't end a long dictation.
 - **`MICREC` (4s, mu-law, base64) is deliberately KEPT** alongside `micStream()` as a known-good
-  short path to fall back on, and it is what the `MICREC` command still runs. The floating button and
+  short path to fall back on, and it is what the `MICREC` command still runs. The SPEAK controls and
   `MICSTREAM` use the streaming path. The 120s cap (`MIC_STREAM_MAX_MS`) and tap-only stop are
   arbitrary choices, not constraints.
 - **The BLE radio puts a 33.3Hz comb across the speech band, and it's cancelled in software.**
@@ -367,10 +370,35 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   script, so producing one means converting NVIDIA's NeMo checkpoint with torch/NeMo. Worth
   revisiting only if someone publishes a real ggml `.bin` — Parakeet TDT is a transducer, so it
   would be faster than Whisper, but turbo already solves the accuracy problem.
-- **A dictation or typed message is POSTED INTO THE LIVE SESSION (`DECKHAND_VOICE_DELIVERY`,
-  default `inbox`, since 2026-09-05).** The host writes it to that session's own Unix domain
-  messaging socket and it lands in the running conversation — see the correction below, and
-  `host/session-inbox.mjs`. `clipboard` forces the previous behaviour and is the escape hatch;
+- **A DICTATION BECOMES AN EDITABLE DRAFT ON THE DEVICE (`DECKHAND_VOICE_DELIVERY`, default
+  `draft`, since 2026-09-13).** ~~default `inbox`, since 2026-09-05~~ — the immediate post is
+  still there and is now one env var away, but it is no longer what happens when you speak.
+  The transcript is published as `msgheard` carrying the session it was captured for, the device
+  splices it into the compose surface's draft at the caret, and SEND is a separate deliberate
+  act. The reason is in `docs/superpowers/specs/2026-09-13-voice-draft-design.md` and it is one
+  sentence: a mis-heard "make sure there is no sensitive data and SOME sensitive information"
+  went to work with half the instruction inverted, and the one thing this device could not do
+  was let you read it first.
+- **A CAPTURE UNDER 8dB IS REFUSED BEFORE WHISPER SEES IT (`MIN_CAPTURE_SNR_DB`, since
+  2026-09-13).** Whisper INVENTS words over silence rather than returning none - the field report
+  that prompted this was a board showing "Thank you." after a capture that recorded nothing - and
+  an invented sentence is indistinguishable from a real one once it is in the draft. 8dB, not the
+  15-20 `mic-wav.mjs` names for "transcribes well": this is the "nothing was said" floor.
+  **The figure is read off the `filtered :` line, not the `=> signal-to-noise:` one.** `mic-wav`
+  prints both; the first is the raw capture and the second is `latest-clean.wav`, which is the
+  file Whisper is actually given, with +10 to +12dB more headroom after the de-rumble pass.
+  Parsing the raw one (as this shipped, for a day) refused takes whose filtered signal was fine
+  and left about 5dB of margin against real speech - a fan or a fridge was enough.
+  **`n/a` means the ratio is UNDEFINED and refuses nothing.** It used to print `0.0 dB`, so a
+  single 100ms window of digital silence - which board 2's I2S produces before the ES8311 settles
+  - threw away a capture with 900 RMS of speech in it. The mirror case showed neither had been
+  considered: a capture shorter than one window printed `-Infinity dB`, which the host's regex
+  did not match, so total silence was waved through while loud speech was refused.
+
+- **`inbox` POSTS INTO THE LIVE SESSION, and was the default from 2026-09-05 to 2026-09-13.**
+  The host writes it to that session's own Unix domain messaging socket and it lands in the
+  running conversation — see the correction below, and
+  `host/session-inbox.mjs`. `clipboard` forces the older behaviour and is the escape hatch;
   `dispatch` restores the original headless behaviour below. **Every failure falls back to the
   clipboard and names its cause in the log** — there are four (no socket on the session record, a
   socket whose session exited, a failed write, and a write that succeeded and delivered nothing),
@@ -498,97 +526,75 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     cap, at most 50 queued messages, and the connection is closed if a complete line does not
     arrive within 30 seconds. Deckhand's own cap is 150 bytes, so only the last applies — the
     host opens the socket only once it has the text, writes both lines, and closes.
-- **A pending QUESTION can be answered by speaking, and the confirm tap is what authorises it.**
-  The device records with the ask's pid in the stream header (`answer=<pid>`), the host transcribes
-  and PARKS the text rather than dispatching it, publishes it back on the ask (`voiceText`,
-  `voiceSha`), and the device shows it. Tapping SEND signs
-  `HMAC(secret, "nonce:pid:TEXT:<sha16>")` over a hash of **exactly the text on screen**, so one
-  signature proves both that the paired device authorised the answer and that a human read those
-  words. The host re-hashes the transcript it still holds and refuses a mismatch.
-  Nine things are load-bearing:
-  - **Questions only, and the HOST enforces that — `ask.voice` gates the BUTTON, not the write.**
-    `emitDecision` carries free text for a question (`{behavior:"deny", message: carriedAnswer}`)
-    but for a plan takes the `answer.idx === 0` branch — `{behavior:"allow"}` — since a voice answer
-    always writes `idx: 0`; a spoken answer to a plan would therefore be silently APPROVED,
-    discarding the words entirely, not merely replaced with a generic string. That is the worst
-    failure shape available: indistinguishable from working. A permission prompt can only be DENIED,
-    so speaking "yes, go ahead" there would deny the call with that as the reason.
-    So `handleVoiceAnswer` re-reads the session record and requires `ask.kind === "question"` **and**
-    a matching `ask.pid` before it writes an answer file, and the device clears `askVoiceText` for a
-    non-question ask so the confirm screen cannot be raised at all. Both halves are deliberate:
-    parking a transcript is **unauthenticated** (any peer on the link can send
-    `AUDIO stream … answer=<pid>` against a pid of its choosing), so if the device's gate were the
-    only gate, a chosen pid would reach `{behavior:"allow"}`. A read failure on the record aborts
-    rather than falling through — `undefined !== "question"` must reject, not pass.
-  - **The hook is NOT modified.** The answer file carries `idx: 0` with the transcript as `label`,
-    and `chose = answer.label || ...` does the rest. That file's stdout is a decision channel.
-  - **Cap the transcript BEFORE hashing it, and cap it in BYTES.** The device displays the capped
-    string, so that is the string that must be signed; hashing first would sign text the human never
-    saw. The cap has to be `capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES)` (150, on a codepoint
-    boundary) rather than a `slice()` on characters, because the device stores the answer in a fixed
-    `char[204]` and `copyField` truncates by BYTES. Whisper emits curly quotes and em-dashes freely
-    at 3 bytes each, so a 200-*character* transcript overflows that buffer: the device would display
-    a truncated string — possibly cut mid-codepoint — while signing the host's hash of the FULL one.
-    Verification passes and the host writes text nobody read, which defeats the entire point of the
-    confirm step. `capUtf8` lives in `host/voice-answer.mjs` rather than inline so
-    `voice-answer-check.mjs` exercises it; removing its boundary walk fails 3 of its 4 checks.
-  - **If the transcript will not FIT on the confirm screen, SEND is withheld rather than offered.**
-    The panel wraps to at most 8 lines and `askVoiceTooLong()` reports an overflow, which draws
-    "TOO LONG - ANSWER ON YOUR MAC" and omits SEND (RE-RECORD and CANCEL stay). The touch handler
-    tests the same helper, so the button's rectangle is inert too — a hidden control whose hit
-    region still fires is worse than a visible one. Belt and braces in practice, not load-bearing:
-    every Cozette 6x13 glyph advances 6px, and this screen's lane is `CARD_W - 8` = 208px on board
-    1, whose worst case is **exactly 8 lines** — measured by searching word lengths rather than
-    assumed (17-character words; 9 lines is unreachable because after 7x18 bytes only 24 remain).
-    The two caps are therefore consistent **by arithmetic**, and any change to either must
-    re-derive the other — a 6-line cap was what let SEND sign text scrolled off the bottom with no
-    indicator that anything was missing. Board 2's wider 288px lane gives a worst case of **6**, so
-    the shared cap of 8 holds looser there and did not have to move.
-    **THE CONFIRM SCREEN AND THE KEYBOARD DO NOT SHARE A LANE, and this file used to say they did.**
-    The confirm screen wraps against `CARD_W - 8` (`sessions.ino`, `askVoiceTooLong`); the keyboard
-    hard-slices against `CARD_W - 12` (`keyboard.ino`, and board 1's own header comment always said
-    `(CARD_W - 12) / 6`). **At board 1's `CARD_W` of 216 both give 34, which is exactly why the
-    error survived** — they diverge at any other width, and board 2 is the first thing in this repo
-    to have another width: at 296 they give **36 versus 35**. The wrong lane was written into the
-    one place this file claims a budget is provable "by arithmetic", which is the worst place for
-    it. If you quote a column count here, quote the file it comes from with it.
-  - **20s cap on an answer recording** (`MIC_ANSWER_MAX_MS`) against 120s for a dictation. The hook
-    blocks for `REMOTE_WAIT_MS` (90s) and that is the whole budget for record, transfer, transcribe,
-    read and confirm. If confirmations start landing late, shorten the cap - do NOT raise
-    `REMOTE_WAIT_MS`, which is matched to the settings.json hook timeout and breaks silently if
-    raised alone.
-  - **A transcript arriving does not change `askPid`, so `askVoiceSha` had to join
-    `buildDetailSignature`.** Without it the change-only redraw never repaints and the confirm screen
-    never appears at all — the feature looks implemented and does nothing. Same trap the detail
-    signature already documents for `title` and `prompt`.
-  - **CANCEL remembers the rejected hash, because clearing the text is not enough.** The host holds
-    a parked transcript for five minutes and republishes it every tick, and `handleAskTouch` checks
-    `askVoiceText[0]` BEFORE option handling while the confirm rows overlap the option rows — so
-    after a CANCEL, a tap on what looked like an ordinary option button could transmit the transcript
-    the user had just rejected. `askVoiceCancelSha` suppresses a republished transcript carrying that
-    hash, carried across ticks by the id-matched `prevSessions` block. A genuinely new recording has
-    a different hash and still displays. Device-local on purpose: a new host command would be more
-    wire surface and another thing to authenticate.
-  - **The cancel-suppression clears when a recording STARTS, not when `askPid` changes.** Keyed off
-    `askPid` alone it was a permanent dead end: CANCEL, then say the same words again, and the
-    identical transcript hashes identically and is suppressed forever for that prompt — the user
-    re-records and nothing appears, with no way out but the Mac. Starting a recording is an explicit
-    request to see a new transcript, so it spends the suppression; both entry points (SPEAK and
-    RE-RECORD) clear it, and missing either leaves the dead end half-open.
-  - **The failure states have to reach the SCREEN, or a failure is indistinguishable from nothing
-    happening.** `askerror` (capture under 98% complete, whisper failed, nothing recognised) and
-    `asksent` raise the voice card and have labels in `voiceStateLabel()`; without that the user
-    taps SPEAK, speaks, and watches an unchanged screen burn the 90s hook budget with no signal to
-    retry. `askheard` deliberately raises **no** card — it fires the instant a transcript is parked
-    and the confirm screen carrying that same text is already about to draw, so a card on top of it
-    is noise.
-  `host/voice-answer-check.mjs` covers the reject cases (tampered text, tampered hash, wrong nonce,
-  wrong pid, wrong device, malformed mac) plus `capUtf8`'s codepoint safety, and can be run without
-  hardware.
+- **A pending QUESTION IS ANSWERED BY SPEAKING INTO THE COMPOSE SURFACE'S DRAFT.**
+  REPLACED 2026-09-13 (`docs/superpowers/specs/2026-09-13-voice-draft-design.md`). The whole
+  of the previous design — a confirm screen offering SEND / RE-RECORD / CANCEL over a
+  transcript the host PARKED and the device signed a hash of — is gone. **The old text is
+  not reproduced here**, because every one of its nine load-bearing points described
+  machinery that no longer exists; what IS kept below is the reasoning that outlived it,
+  because a reader re-deriving those points would otherwise reach the same removed place.
+  - **What happens now.** `SPEAK` on the ask screen opens the compose surface at its panel
+    and starts a capture with the ask's pid in the stream header (`answer=<pid>`, unchanged).
+    The host transcribes and **publishes** the transcript once, as `voice.state = "askheard"`
+    with `voice.text` and `voice.pid`; the device inserts it into `kbText` at the caret. From
+    there it is an ordinary draft: edit it, `CLR` it, tap a chip to paste the token Whisper
+    mangled, or tap `SPK` on the draft line to speak again and append. `SEND` transmits it
+    over the frame that already carries device-authored text,
+    `ANSWER <id12> <pid> TYPED <base64text> <hmac>`.
+  - **The transcript is keyed on `voice.seq`, and that is the whole correctness argument.**
+    The payload is republished every ~5s and delivered over BOTH transports, so an insert
+    keyed on the STATE would paste the same sentence in again on every tick and once more per
+    link. `composeAbsorbVoice()` (`compose.ino`) holds a per-link `voiceSeqApplied`, and a seq
+    going BACKWARDS is read as a host restart exactly as `voiceSeq` already was.
+  - **`voice.pid` is equally load-bearing, and for a different reason.** `voice` is ONE object
+    per host while asks are per session, so a transcript carries no session of its own. The
+    insert happens only when `voice.pid` matches the `kbPid` the surface was opened for; a
+    transcript that matches nothing is DROPPED and says so on the serial log. `setVoice`
+    deliberately does NOT make `pid` sticky the way `text` and `session` are — an inherited
+    pid would paste an answer meant for one pending prompt into a draft for another.
+  - **`handleLine()` returns early while `composeActive`, and the voice block is BELOW that
+    return.** So the surface that now receives transcripts was the one screen that never
+    parsed them. `composeAbsorbVoice()` is called from inside that branch, before the return.
+    This is the single change without which none of the rest functions.
+  - **`micRestoreUi()` has a `composeActive` arm** — without it, `forceFullRepaint()` ends
+    every capture by painting a tab over the draft it just filled. It also closes a hole that
+    predates this work: a serial `MICSTREAM` over the keyboard used to end, 35s later, with a
+    tab on the glass and `composeActive` still true underneath.
+  - **The `MIC*` verbs now refuse while a full-screen surface is up**, naming the cause, like
+    `SCROLLOPEN` and `EMOJITEST` already did. They never had that guard.
+  - **STILL TRUE, and still the reason the host cannot trust the device's gate:** the host
+    re-reads the session record and requires `ask.kind === "question"` and a matching
+    `ask.pid` before writing an answer file. `emitDecision` carries free text for a question
+    but takes the `answer.idx === 0` branch — `{behavior:"allow"}` — for a plan, so a typed or
+    spoken answer against a plan would SILENTLY APPROVE it, discarding the words. That guard
+    lives in `handleTypedAnswer` now and is the identical check `handleVoiceAnswer` carried.
+  - **STILL TRUE: cap the text in BYTES, on a codepoint boundary, before it reaches the
+    device.** `capUtf8(toAscii(text), ANSWER_TEXT_MAX_BYTES)` survives, and its job got
+    HARDER rather than easier: the draft comes back through `typedTextOk()`, which admits
+    printable ASCII only (`/^[\x20-\x7E]+$/`), so a curly quote that reaches the glass is a
+    **rejected answer**, not merely an ugly one. Transliteration moved from cosmetic to
+    load-bearing for acceptance.
+  - **GONE, and worth naming so nobody rebuilds it:** `askVoiceText[204]`, `askVoiceSha`,
+    `askVoiceCancelSha` and `hadVoiceText` (1,584 bytes of DRAM freed, measured by compiling
+    both boards); `askVoiceTooLong()` and `ASK_VOICE_MAX_LINES` with its `static_assert`;
+    `voiceConfirmGone`; the host's `pendingVoiceAnswers` store and its 5-minute prune;
+    `handleVoiceAnswer`; and the `nonce:pid:TEXT:<sha16>` signing form with
+    `voiceAnswerHmac`/`verifyVoiceAnswer`. **The cancel-suppression dead end went with them** —
+    CANCEL remembered a rejected hash, so re-speaking the same words hashed identically and
+    stayed invisible for that prompt for ever.
+  - **What was LOST, stated plainly.** One HMAC used to prove two things: that the paired
+    device authorised the answer, and that a human had read exactly those words. It now
+    proves only the first. That is inherent to letting the text be edited — the host has no
+    copy to re-hash against — and it is the price of being able to fix a mis-heard filename
+    at all. The second claim was always thin: SEND is one tap and reading is not enforceable.
+  - `geom-sweep.mjs` **loses a perturbation target** with `ASK_VOICE_MAX_LINES`, which is why
+    that constant's removal is named here rather than dropped quietly.
+
 - **A pending QUESTION can also be answered by TYPING it, and the wire format is not the voice
   path's format wearing a different label.** The design spec assumed a keyboard would reuse the
   voice wire format verbatim; it can't, because the voice form signs a hash of a transcript the
-  HOST already holds (`handleVoiceAnswer` bails at once without a parked one), while typed text
+  HOST already held (`handleVoiceAnswer` bailed at once without a parked one — **both are gone
+  since 2026-09-13, and the typed frame below is now the only answer frame**), while typed text
   exists nowhere but the device until it's sent — so the frame has to carry the text itself:
   `ANSWER <id12> <pid> TYPED <base64text> <hmac>`. That difference makes this **the first place
   the host accepts device-authored text**, which is why `typedTextOk()` (`host/typed-answer.mjs`)
@@ -792,17 +798,26 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     dead lane between keys. This file and board 1's header both said **968** (22x44), i.e. they used
     the DRAWN width for a band the code tests at the pitch. Understated in the safe direction, but
     wrong in two files, and corrected in both.
-- **A READY session can be sent a typed MESSAGE, and it is the keyboard half of a path the
-  mic already had.** The record button is visible on a plain detail screen so a dictation can be
-  aimed at a session; **TYPE** in that screen's header row does the same with the keyboard.
+- **A READY OR WORKING session can be sent a MESSAGE, by voice or by keyboard, and both start
+  from the same header row.** ~~The record button is visible on a plain detail screen so a
+  dictation can be aimed at a session.~~ **That button is gone since 2026-09-13.** The detail
+  header now carries TWO chips, `SPEAK` and `TYPE`, and both open the compose surface in message
+  mode - SPEAK starts a capture into its draft, TYPE opens the keys. **WORKING sessions are
+  included since the same date** (the host publishes `pnonce` for `MSG_OK_STATUS`), so a note can
+  be left for a session to pick up after the turn it is in; the inbox queues it at priority
+  `next` rather than interrupting.
   **That `TYPE` chip is still called TYPE and is still right** — a READY session has no ask, so no
   reply panel is built for it and the button really does open the keyboard. **The ASK screen's
   button is a different one and it says `REPLY` now**, because since the compose surface landed it
   opens the panel rather than a keyboard; see
   [`sessions-and-asks.md`](sessions-and-asks.md#the-compose-surface).
   Delivery is the SAME function for both (`deliverTextToSession`) driven by the same
-  `DECKHAND_VOICE_DELIVERY` - so with the default, SEND **copies the text to the Mac and
-  notifies you**; it runs nothing until that is set to `dispatch`. One copy of that logic is what
+  `DECKHAND_VOICE_DELIVERY`. ~~so with the default, SEND **copies the text to the Mac and
+  notifies you**~~ - **that was true of the `clipboard` default and has not been since
+  2026-09-05**: `inbox` POSTS into the live session, and it is `inbox` that a SEND from the glass
+  reaches. What changed on 2026-09-13 is upstream of SEND, not SEND itself - a SPOKEN message now
+  stops at the draft (`draft`) instead of being delivered the moment Whisper returns, so the
+  delivery this paragraph describes happens when you tap SEND and not before. One copy of that logic is what
   stops the two drifting, and only the log prefix differs (the `setVoice` states are identical,
   because the device's result card and the menu bar row key off those strings).
   - **READY only, and enforced on BOTH sides.** READY (`status:"waiting"`) means nobody is
@@ -810,11 +825,15 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
     alongside an active turn becomes a second author on one conversation with neither able to see
     the other. The device gates the button, and `handleTypedPrompt` **re-reads the record and
     refuses anything that is not `waiting`**: a gate that exists only on the device is not a
-    gate, the identical reason `handleVoiceAnswer` re-reads before writing an answer file.
+    gate, the identical reason `handleTypedAnswer` re-reads before writing an answer file.
+    (This sentence said `handleVoiceAnswer` until that function was deleted; the guard moved
+    rather than went away.)
   - **The wire form is `PROMPT <id12> <base64text> <hmac>`, signing `nonce:id12:PROMPT:sha16`.**
-    The LABEL is the whole point: `TEXT` (voice answer), `TYPED` (typed answer) and `PROMPT` all
-    sign a 16-hex hash of their text with the same key, so without it a signature minted to
-    answer a question would authenticate one that starts work. `voice-answer-check.mjs` asserts
+    The LABEL is the whole point: `TYPED` (an answer) and `PROMPT` (a message) both sign a
+    16-hex hash of their text with the same key, so without it a signature minted to answer a
+    question would authenticate one that starts work. **There were THREE labels until
+    2026-09-13** - `TEXT` was the voice answer's, and it went with the confirm screen, so the
+    cross-form assertion that used to pair TEXT against TYPED now pairs PROMPT against TYPED. `voice-answer-check.mjs` asserts
     both directions of that.
   - **A per-session nonce, because `askNonces` is keyed by an ask's PID and a READY session has
     none.** `promptNonces` is keyed by the FULL session id and published as `pnonce` **only while
@@ -932,9 +951,15 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
   bootloader and panic handler always print at **115200** regardless, so at any other rate a crash
   dump reads as garbage — its own debugging trap. The fix for throughput is flow control
   (chunk + ACK), not a bigger number.
-- **The record button lives IN THE TAB BAR, in a reserved slot at the right end.** Tap to start,
-  tap to stop. It is chrome, not a floating control, and that is what removes every hazard the
-  floating versions kept running into. Three earlier homes were all wrong:
+- **~~The record button lives IN THE TAB BAR, in a reserved slot at the right end.~~ IT IS GONE
+  SINCE 2026-09-13, AND THE SLOT WITH IT.** The four homes below are kept because each records a
+  hazard that is still real for anything placed on this device - but the button no longer exists
+  in any of them, and `TAB_REC_W` is no longer a constant. **Why it went:** it was global chrome
+  doing a per-session job. It aimed at whichever session DETAIL happened to be open, and with none
+  open it produced a "memo" that was logged and dropped behind a card reading `SAVED AS MEMO`.
+  One glyph, two destinations, one of them a dead end. Speaking to a session now starts from that
+  session's own header, beside TYPE, where it cannot be ambiguous - and the three tabs got the
+  40px back (66 -> 80 on board 1, 93 -> 106 on board 2). The four homes it had:
   - **BOOT key (GPIO0) - abandoned, and it bricked the device twice.** GPIO0 is also the serial
     bootloader strap and is driven by the USB adapter's **DTR** line, so it goes LOW after every
     reset and whenever the host merely opens the port. A tap handler therefore fired recordings by
