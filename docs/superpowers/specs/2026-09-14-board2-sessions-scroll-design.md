@@ -178,3 +178,57 @@ goes *inside them*, so tap targets cannot drift from the layout.
 
 Free pixel scrolling (§4), lean rows in the compose/recents surfaces, and any change to
 board 1's row count.
+
+---
+
+## What implementation changed, and why (2026-09-14, same day)
+
+Kept rather than edited away, because a design note that quietly matches the code it
+produced teaches the next reader nothing about which parts were actually hard.
+
+**§3 WAS WRONG ABOUT THE ONE-SHOT REPLY BEING ENOUGH.** It argued a pin would need to
+age out and would reorder the list, and chose a one-shot `sdetail` line instead. The
+reply fills the card - and the NEXT TICK BLANKS IT. The host's full set is a fixed
+prefix that knows nothing about the focus, so five seconds later the row arrives lean
+again and `applySessionFields()`'s `copyField()`s overwrite the prompt, path and ask
+with the empty values a lean row carries. A retained `lean` flag would not have saved
+it: the fields are already gone by then. Both mechanisms ship: **the reply fills the
+card in ~100ms, the pin keeps it filled.**
+
+**AND THE FIRST PIN WAS WRONG TOO.** It displaced the last of the full prefix to hold
+the count at six - tidy, and a defect: the displaced row is the sixth most urgent
+session, and with two boards on one host, board 1 (which takes the first six rows)
+would silently lose row 5's prompt and ask to a pin set by board 2. The pin now ADDS a
+seventh full record. Nothing on the device is sized by `MAX_SESSIONS` any more, and
+`fitPayload`'s new tier 0 sheds lean rows first if the line ever runs long.
+
+**THE RELEASE IS RECONCILED, NOT FIRED FROM THE CLOSE.** Four paths clear
+`showingDetail` and only one is named "close"; a release in `closeSessionDetail()`
+leaked the pin through `switchTab()`, `exitReaderToList()` and the voice card - the
+commonest being "tap a different tab". `tickFocusPin()` compares the recorded id
+against what is on the glass once per loop instead.
+
+**BOARD 1'S BINARY MOVED (+928 bytes), WHICH §1 SAID IT WOULD NOT.** Deliberate: it
+shares the whole lean/`FOCUS` path. It has no scroll, but a pin set by board 2 can put
+a lean row inside its six, and a lean row it could not fill would be a card with no
+prompt and no way to ask for one. Re-baselined.
+
+**THE PROMISED `host/session-lean-check.mjs` DOES NOT EXIST.** Its assertions went into
+`host/wire-bytes-check.mjs`, which already owns "what travels on the wire" and already
+had the fault-injection harness they needed. A second file would have split that
+ownership for no gain. The assertions themselves are all there, with faults: the lean
+record's field set, the missing `pnonce`, the tier-0 ordering, and `hiddenAsking` at
+the 20 boundary.
+
+**THE SPINNER DEFECT §4 DID NOT ANTICIPATE.** The snap makes a partial row unreachable
+for anything drawn through `sessionRowYAt()` *inside the render pass* - but the row
+stack has five readers, and two of them (`tickWorkingSpinner()` in
+`deckhand_display.ino`, `tickSessionAnim()`'s shimmer loop) run on their own timers in
+another file. Row 5's spinner drew at y 460 - the footer's first row - and stamped an
+orange starburst over the clock four times a second. Found on the glass with all 2,195
+geometry assertions green.
+
+**STILL UNVERIFIED:** the drag itself. Every scroll position in this work was reached
+with `SESSIONSCROLL`, which drives `sessionScrollTo()` directly and never enters
+`sessionDragLoop()`. The tap/drag threshold, the rail's absolute scrub and the "a press
+on the rail is never a row tap" guard are unmeasured on hardware - they need a finger.

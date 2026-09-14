@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1421824, RAM 72004 | flash 1067296, RAM 71860 |
+| size today | flash 1422752, RAM 72044 | flash 1069488, RAM 54964 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -61,7 +61,10 @@ under *BOARD 1'S BINARY IS A CONTRACT* against `firmware/board-baseline.json`, a
 **flash** figures on the row above are those same sizes - so `--update` rewrites all of them and
 they cannot go stale again (that copy went stale five times in one day). The two **RAM** figures
 are `arduino-cli`'s own "Global variables use N bytes", are NOT bound by anything, and are
-hand-maintained: check them after any compile that moves `.bss`. `arduino-cli`'s "Sketch uses N" is a
+hand-maintained: check them after any compile that moves `.bss`. **Board 2's fell 16,896
+bytes on 2026-09-14** and that is not a typo: `sessions[]` moved to PSRAM when the
+sessions list learned to scroll, so ~23.5KB of `SessionInfo` left `.bss` and ~6.6KB of
+per-row caches grew to `SESSION_SLOTS`. `arduino-cli`'s "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
 
@@ -123,7 +126,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `df7c67783d3cfe46...`, size 1421824 (board 2: `431563b9638b0654...`, size 1067296).
+Today: `b37bd9c09fff8e76...`, size 1422752 (board 2: `0582bf616685c453...`, size 1069488).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -271,6 +274,7 @@ one is neither handled nor refused.
 | `AUDIOPROBE` / `TONETEST [vol]` / `TONELADDER` | a ladder of claims: on the bus / configured and playing / find the audible floor |
 | `SCROLLFETCH` / `SCROLLOPEN` / `SCROLLTO [line]` / `SCROLLPERF [top\|code\|line]` / `SCROLLCLOSE` | board 2 transcript: fetch without drawing, open, park, measure, close |
 | `BLEMTU` | board 2: the negotiated ATT MTU per link |
+| `SESSIONSCROLL <n>` | board 2: park the SCROLLING session list at step `n` so a capture can see a position other than the top. The unit is STEPS, not pixels - the offset is only ever a multiple of `SESSION_SCROLL_STEP` - and it reports the rows now on screen. Refuses BY NAME on a non-numeric or out-of-range argument (quoting the range), on SESSIONS not being the live tab, on a full-screen surface, and on a list of six or fewer that is not scrolling at all. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |
 | `MSGPRI` / `MSGPRI now\|next\|later` | report or set how a message sent FROM this device lands in the Mac's session queue. NVS-backed, on the SETTINGS tab; the device announces it at boot and on `WHOAMI`, and the host asks for it when a HELLO names a link it has no priority for |
 | `WHOAMI` | re-emits the boot `HELLO <name> v2` line on demand, over USB. Both boards. The host sends it to an anonymous link before considering a reset - `HELLO` is a boot-only burst, so a host that attached to an already-running board otherwise had to REBOOT it to learn its name |
 | `MULTITEST <n>` / `PAIRVECTOR` | inject a synthetic second Mac; check the pairing crypto against RFC 7748 |

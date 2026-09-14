@@ -78,6 +78,36 @@ export function fitPayload(payload, guard = DEVICE_LINE_GUARD_BYTES) {
     return best;
   };
 
+  // TIER 0. THE LEAN TAIL GOES FIRST, AHEAD OF ANY ASK. Sessions past the
+  // full-payload set carry only what a row draws - no prompt, no ask, no chips - so
+  // each is ~120 bytes of OVERVIEW, and the list arrives urgency-sorted so they are
+  // by construction the least urgent things on the line.
+  //
+  // ORDERED AHEAD OF TIER 1 DELIBERATELY, because the tiers are ranked by what costs
+  // least to LOSE rather than by what frees the most bytes. Tier 1 sheds an
+  // ask.detail - the body of a question the user is being asked to answer, on a
+  // prompt that is blocking a session right now. Shedding fourteen rows nobody may
+  // even scroll to, to keep that, is the right trade every time; the reverse would
+  // free more bytes per pass and lose the thing that matters.
+  //
+  // OFF THE TAIL, so what survives is the most urgent prefix - the same rule tier 3
+  // follows. A shed `asking` row IS counted into hiddenAsking, exactly as tier 3
+  // counts its own: hiddenAsking means "needs input and you cannot see it", and a
+  // row dropped here is a row the device will not draw. The host's own count covers
+  // only what fell beyond SESSION_ROW_CAP before the payload was built, so these
+  // would otherwise vanish silently - which is the one thing the field exists to
+  // prevent. (It takes more than SESSION_FULL_SLOTS simultaneous asks to put an
+  // `asking` session in the lean tail at all, so this is rare rather than dead.)
+  while (sessions().length) {
+    line = JSON.stringify(obj);
+    if (bytes(line) <= guard) break;
+    const last = sessions()[sessions().length - 1];
+    if (!last?.lean) break;                 // the tail is all full records now
+    obj.sessions.pop();
+    if (last.status === "asking") obj.hiddenAsking = (obj.hiddenAsking ?? 0) + 1;
+    dropped.push(`lean session ${last.id ?? "?"} (${last.status ?? "?"}) off the tail`);
+  }
+
   // Tier 1. BOUNDED by the session count rather than `for(;;)`: each pass retires
   // one distinct session's detail, so n passes is a termination PROOF. This loop
   // runs inside the 5s tick, and a spin here would be far worse than the freeze it

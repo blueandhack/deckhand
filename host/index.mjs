@@ -2114,6 +2114,172 @@ async function sendScrollback(id, filter, maxBytes, link) {
   );
 }
 
+// NAMED, AND REUSED BY THE `FOCUS` REPLY. This used to be an inline arrow inside
+// the map, which was fine while the only caller was the tick - but a lean row the
+// device taps has to be answered with a FULL record built exactly the same way,
+// and a second copy of this is how the two would come to disagree about a field.
+async function buildSessionItem(record) {
+  // One tail read per session per tick, giving both the live model and the session
+  // title. Codex has neither in this shape, so it doesn't pay for the read.
+  const tx =
+    record.agent === "codex"
+      ? { model: "", title: "", prompt: "", startedMs: 0 }
+      : await transcriptInfo(record.transcript);
+  const item = {
+    id: (record.id || "").slice(0, 12), // 12 uuid chars is plenty to disambiguate
+    // 22, matching what the device can actually draw: a tall row's name lane fits 22
+    // characters once it drops to the small font, and SessionInfo.name is char[24].
+    // Sending more would only be trimmed to "..." on arrival.
+    name: deviceText(await projectName(record.cwd || ""), 22),
+    status: record.status,
+    // 64, not 48: the detail screen gives the path two lines of ~31 characters, and
+    // the old cap threw away the middle of any deep worktree path.
+    path: truncatePath(toAscii(record.cwd || ""), 64),
+    model: deviceText(
+      record.agent === "codex" ? record.model || "" : tx.model || record.model || "",
+      20,
+    ),
+    branch: deviceText(await gitBranch(record.cwd || ""), 20),
+    // Only sent when there IS one, so a titleless session costs no payload bytes.
+    // 40 chars: the device's title lane fits ~28 and trims the rest with "...", and
+    // this rides in every tick alongside asks that can claim 1400 chars.
+    ...(tx.title ? { title: deviceText(tx.title, 40) } : {}),
+    // WHICH APP owns this session, stamped by the hook from the environment it
+    // inherits (see owningApp() there). Passed through for the MENU-BAR app,
+    // which uses the bundle id to jump to that app rather than only revealing
+    // the folder; the device ignores it. Only-when-present for the same reason
+    // as `title`, and absent for a Codex thread read off a rollout, where no
+    // hook ran to observe an environment.
+    // Transliterated but NOT capped: the menu bar resolves this bundle id to
+    // jump to the owning app, so a truncated one would break that, while a
+    // multi-byte one would still be spending the device's line budget.
+    ...(record.app?.id ? { app: toAscii(record.app.id) } : {}),
+    ...(record.app?.entry ? { appEntry: toAscii(record.app.entry) } : {}),
+    // Detail-screen extras. Short keys and only-when-present, because these ride in
+    // EVERY tick: the prompt is the expensive one at ~100 chars x 6 sessions.
+    ...(tx.prompt ? { prompt: deviceText(tx.prompt, 100) } : {}),
+    // Wall-clock times as seconds-since-local-midnight (see secondsSinceMidnight):
+    // when the session began, and when it last did anything.
+    startSec: secondsSinceMidnight(tx.startedMs),
+    actSec: secondsSinceMidnight(record.updated_at),
+    // Short on purpose: this rides in every payload, and the device's line
+    // buffer is sized for asks carrying 1400-char details.
+    agent: record.agent === "codex" ? "cx" : "cc",
+  };
+  // Remember where this session's transcript lives, keyed by the SAME truncated id
+  // the device sees - that id is all it can send back when asking for history.
+  if (record.transcript) transcriptById.set(item.id, record.transcript);
+  // Pending question (already truncated by the hook) rides along so the
+  // device can display it and offer the options as buttons. We attach a
+  // per-prompt nonce; the device HMACs it back so we can trust the answer.
+  // A nonce for a typed or spoken MESSAGE. ~~Present ONLY while this session is
+  // READY.~~ WIDENED 2026-09-13 to cover `working` as well, deliberately and at
+  // the user's direction: the useful case is watching a session work and adding
+  // "also check X" for it to pick up AFTER this turn, and the inbox is built for
+  // exactly that - postToSessionInbox defaults to priority `next`, which QUEUES
+  // rather than interrupting (`now` is the one that interrupts). Voice could
+  // already reach a working session, because it posts from the host and needs no
+  // device credential at all; typing could not, purely because this line withheld
+  // the nonce. That asymmetry was the accident, not the capability.
+  //
+  // STILL OMITTED for every other status, so the device is never holding a
+  // credential for a state in which it must not offer the control - the same
+  // reason ask.answerable is stamped per prompt rather than read from a live
+  // global. handleTypedPrompt re-checks the status on arrival regardless.
+  if (MSG_OK_STATUS.has(record.status) && record.id) item.pnonce = nonceForSession(record.id);
+  if (record.ask) {
+    // A SPREAD, not a field list, and that is what carries the hook's newer
+    // fields through untouched - `optDescs` (the per-option descriptions,
+    // parallel to `options`) rides here with no code of its own. Do not
+    // turn this into an allow-list of named fields: every future field the
+    // hook learns to publish would then have to be added in two places, and
+    // forgetting the second one is silent - the device simply never sees it.
+    item.ask = { ...record.ask, nonce: nonceForPid(record.ask.pid) };
+    // Only questions can be answered by voice: emitDecision carries free
+    // text for a question and discards it for a plan, and a spoken answer to
+    // a permission prompt could only ever be a DENY.
+    item.ask.voice = record.ask.kind === "question";
+    // THE TAPPABLE TOKENS. Extracted HERE and not on the device, because the
+    // ESP32 only ever draws buttons and never re-derives what they say - the
+    // hardest thing to type there is exactly the token the question already
+    // printed, and this process has already parsed the ask.
+    //
+    // toAscii FIRST, askChips SECOND, and that order is load-bearing: CHIP_BYTES
+    // is a BYTE cap, so capping before the transliteration would cap a string
+    // whose byte count then changes under the cap (a multi-byte character
+    // transliterating to a shorter or longer ASCII run), and the cap would not be
+    // a byte cap at all. Same reasoning, same shape, as session.path's
+    // truncatePath(toAscii(...)) above. `options` rides along so a chip that
+    // merely restates a button already on the screen does not spend one of four
+    // scarce slots on a duplicate.
+    //
+    // ONLY-WHEN-PRESENT, for the same reason `title` and `prompt` are: this rides
+    // in EVERY tick, and a prompt with no tappable token in it must cost no
+    // payload bytes at all.
+    //
+    // THE LINE'S HEADROOM WAS MEASURED BEFORE THIS FIELD WAS ADDED, not assumed
+    // (task 9's report has the numbers): 214 bytes is the most one session's
+    // chips can be, 1,284 for all six, against the 1,763 bytes the saturated
+    // 6-session line leaves under feedChar's 16,000-byte guard - and the worst
+    // real cost over the 133 ask-carrying ticks in the host log was 40 bytes.
+    // host/wire-bytes-check.mjs now asserts that arithmetic rather than trusting
+    // this comment.
+    const chips = askChips(toAscii(record.ask.detail ?? ""), record.ask.options ?? []);
+    if (chips.length) item.ask.chips = chips;
+    // Seconds left before the hook stops waiting, for the keyboard countdown.
+    const ne = askNonces.get(record.ask.pid);
+    // No budget configured (the "forever" default) means no countdown to draw.
+    if (ne && HOOK_WAIT_MS[item.agent] != null) {
+      const budget = HOOK_WAIT_MS[item.agent];
+      item.ask.sec = Math.max(0, Math.round((budget - (Date.now() - ne.first)) / 1000));
+    }
+    // NO voiceText/voiceSha here any more. A transcript used to ride the ask
+    // object on every tick so the device could raise a confirm screen from it;
+    // it now travels once, on the `voice` object, and lands in an editable
+    // draft. Republishing it here would paste the same sentence into that draft
+    // every 5 seconds.
+  }
+  return item;
+}
+
+// ---------- How many sessions travel, and how much of each ----------
+// TWO NUMBERS, NOT ONE, and the distinction is the whole shape of the sessions
+// payload since board 2 learned to scroll.
+//
+// SESSION_FULL_SLOTS is how many sessions carry a FULL record - prompt, ask, chips,
+// options, nonce. It is the firmware's own MAX_SESSIONS and must stay equal to it:
+// that is the number the device sizes its ask buffers by, and a host sending seven
+// full records would simply have the seventh's ask dropped on arrival.
+//
+// SESSION_ROW_CAP is how many travel at all. Board 2 holds SESSION_SLOTS (20) of
+// them in PSRAM and scrolls; board 1 keeps six and ignores the tail, which costs it
+// only the bytes - its parse loop fills its six slots and stops.
+//
+// TRANSCRIBED HERE, BOUND BY A CHECKER. This process cannot parse the firmware at
+// runtime, so host/session-lean-check.mjs parses both out of the real headers and
+// fails by name if either drifts - the same discipline wire-fit.mjs's
+// DEVICE_LINE_GUARD_BYTES is held to, and for the same reason: a silent divergence
+// here is a truncation nobody sees.
+const SESSION_FULL_SLOTS = 6;
+const SESSION_ROW_CAP = 20;
+// The tick's records, keyed by the truncated id the device sees - see readSessions().
+const focusRecords = new Map();
+// THE SESSION THE DEVICE HAS A DETAIL CARD OPEN ON, or "". While it is set, that
+// session is built as a FULL record even if the urgency sort puts it in the lean
+// tail - which is what keeps the card filled rather than blanking it five seconds
+// later when the next tick re-sends the row lean.
+//
+// THE ONE-SHOT `sdetail` REPLY IS STILL WHAT FILLS THE CARD, and this is what KEEPS
+// it filled. The two are not redundant: the reply lands in ~100ms where the next
+// tick could be five seconds away, and the pin outlives the reply. Neither alone is
+// enough - a reply with no pin blanks on the next tick, a pin with no reply leaves
+// the card empty for up to five seconds after the tap.
+//
+// ONE id, not a set: the device has one detail card. Cleared by `FOCUS -` when that
+// card closes, and harmless if it is ever missed - a stale id simply names a session
+// that is built full for nothing, and one that has ended is not in `top` at all.
+let focusPinnedId = "";
+
 async function readSessions() {
   let files;
   try {
@@ -2158,139 +2324,112 @@ async function readSessions() {
   // there are more, a session that NEEDS INPUT must never be the hidden one.
   const rank = (r) => (r.status === "asking" ? 0 : r.status === "waiting" ? 1 : 2);
   records.sort((a, b) => rank(a) - rank(b) || b.updated_at - a.updated_at);
-  const top = records.slice(0, 6);
+  const top = records.slice(0, SESSION_ROW_CAP);
 
+
+  // THE LEAN TAIL. Sessions past the full-payload set carry ONLY what the device's
+  // ROW draws - verified against every field drawSessionRow() and
+  // buildSessionSubline() actually read - and nothing the DETAIL card needs. No
+  // prompt, no ask, no chips, no nonce.
+  //
+  // ~120 bytes each against ~900 for a full one, so the fourteen of them cost about
+  // 1.7KB per 5s tick. That is the number that decides this design: the BLE link is
+  // the measured bottleneck (~666 B/s at the 20-byte chunks and 30ms interval macOS
+  // negotiates), and fourteen FULL records would have been ~12KB a tick - most of
+  // feedChar's 16,000-byte line guard, every five seconds, to show rows nobody is
+  // looking at most of the time.
+  //
+  // NO pnonce, DELIBERATELY, and it is a credential rather than an oversight: the
+  // device must never hold one for a session it cannot correctly offer the control
+  // for. A lean row gets its nonce when it is FOCUSed, from the same builder above,
+  // which re-reads the status at that moment.
+  const buildLeanItem = async (record) => {
+    // THE TRANSCRIPT IS STILL READ, and that is a deliberate split between the two
+    // costs this design trades. The expensive thing is the WIRE - the BLE link is
+    // the measured bottleneck - and that is what stays lean. transcriptInfo() is a
+    // 64KB tail read and four regexes against a page-cached file; doing fourteen
+    // more of them every 5s is a local cost the Mac does not notice.
+    //
+    // It is read for ONE field: `model`. The row's sub-line is model + branch, and
+    // for a Claude session `model` is empty in the hook's own record - it only
+    // exists in the transcript. Skipping the read would have shipped lean rows with
+    // a half-empty sub-line, and the sub-line is precisely why the scrolling row is
+    // 79px rather than the 65px rung that fits six on screen. Sending a row whose
+    // distinguishing line is blank would have given that height back for nothing.
+    const tx =
+      record.agent === "codex"
+        ? { model: record.model || "" }
+        : await transcriptInfo(record.transcript);
+    return {
+      id: (record.id || "").slice(0, 12),
+      name: deviceText(await projectName(record.cwd || ""), 22),
+      status: record.status,
+      model: deviceText(tx.model || record.model || "", 20),
+      branch: deviceText(await gitBranch(record.cwd || ""), 20),
+      // NO `title`, and it is absent by DERIVATION rather than by economy: a 79px
+      // scrolling row draws the sub-line layout, not the title one (79 is below
+      // SESSION_TITLE_MIN_H), so a title sent here could not be drawn by anything.
+      // A FOCUSed row gets one from the full builder, which is also the only screen
+      // that would show it.
+      actSec: secondsSinceMidnight(record.updated_at),
+      agent: record.agent === "codex" ? "cx" : "cc",
+      // THE FLAG THE DEVICE READS TO KNOW ITS CARD WOULD BE EMPTY. Without it a
+      // lean row and a genuinely promptless session are indistinguishable there,
+      // and the detail card would say "no prompt" for a session that has one.
+      lean: true,
+    };
+  };
+
+  // EVERY RECORD THAT TRAVELLED, FINDABLE BY THE ID THE DEVICE SEES - which is the
+  // truncated 12-character one, because that is all it can send back. This is what
+  // lets `FOCUS <id>` rebuild a FULL record for a row that shipped lean, using the
+  // same builder the tick uses rather than a second copy of it.
+  //
+  // REBUILT EACH TICK rather than accumulated: a session that has ended must stop
+  // being focusable, and a map that only ever grew would answer FOCUS for a session
+  // the list no longer has.
+  focusRecords.clear();
+  for (const r of top) if (r.id) focusRecords.set(r.id.slice(0, 12), r);
+
+  // WHICH ROWS ARE FULL. The first SESSION_FULL_SLOTS by urgency, PLUS whichever
+  // session the device has a card open on.
+  //
+  // ADDED, NOT SWAPPED IN, and the first version of this got it wrong. Displacing
+  // the last of the prefix keeps the full-record count at exactly six - which looks
+  // tidy and is a real defect: the displaced row is the SIXTH MOST URGENT session,
+  // and its own detail card would blank while somebody reads a card on row twelve.
+  // With two boards on one host it is worse, because board 1 takes the first six
+  // rows and would silently lose row 5's prompt and ask to a pin set by board 2 -
+  // a regression on a board that does not even have this feature.
+  //
+  // THE EXTRA RECORD IS AFFORDABLE BY CONSTRUCTION. Nothing on the device is sized
+  // by MAX_SESSIONS any more - every one of the SESSION_SLOTS SessionInfos carries
+  // full ask buffers - so a seventh full row lands correctly in whatever slot it
+  // arrives in. And if it ever pushes the line over feedChar's guard, fitPayload's
+  // tier 0 sheds LEAN ROWS first, which is exactly the right thing to give up.
+  //
+  // THE WIRE ORDER IS UNTOUCHED. This decides how much of each row travels, never
+  // where it sits, so the full set is no longer a prefix and the list does not
+  // reorder under the user's finger. The device reads `lean` per row and never
+  // assumes a prefix, which is what makes that safe.
+  const fullIdx = new Set(top.slice(0, SESSION_FULL_SLOTS).map((_, i) => i));
+  if (focusPinnedId) {
+    const pin = top.findIndex((r) => (r.id || "").slice(0, 12) === focusPinnedId);
+    if (pin >= 0) fullIdx.add(pin);
+  }
   const list = await Promise.all(
-    top.map(async (record) => {
-      // One tail read per session per tick, giving both the live model and the session
-      // title. Codex has neither in this shape, so it doesn't pay for the read.
-      const tx =
-        record.agent === "codex"
-          ? { model: "", title: "", prompt: "", startedMs: 0 }
-          : await transcriptInfo(record.transcript);
-      const item = {
-        id: (record.id || "").slice(0, 12), // 12 uuid chars is plenty to disambiguate
-        // 22, matching what the device can actually draw: a tall row's name lane fits 22
-        // characters once it drops to the small font, and SessionInfo.name is char[24].
-        // Sending more would only be trimmed to "..." on arrival.
-        name: deviceText(await projectName(record.cwd || ""), 22),
-        status: record.status,
-        // 64, not 48: the detail screen gives the path two lines of ~31 characters, and
-        // the old cap threw away the middle of any deep worktree path.
-        path: truncatePath(toAscii(record.cwd || ""), 64),
-        model: deviceText(
-          record.agent === "codex" ? record.model || "" : tx.model || record.model || "",
-          20,
-        ),
-        branch: deviceText(await gitBranch(record.cwd || ""), 20),
-        // Only sent when there IS one, so a titleless session costs no payload bytes.
-        // 40 chars: the device's title lane fits ~28 and trims the rest with "...", and
-        // this rides in every tick alongside asks that can claim 1400 chars.
-        ...(tx.title ? { title: deviceText(tx.title, 40) } : {}),
-        // WHICH APP owns this session, stamped by the hook from the environment it
-        // inherits (see owningApp() there). Passed through for the MENU-BAR app,
-        // which uses the bundle id to jump to that app rather than only revealing
-        // the folder; the device ignores it. Only-when-present for the same reason
-        // as `title`, and absent for a Codex thread read off a rollout, where no
-        // hook ran to observe an environment.
-        // Transliterated but NOT capped: the menu bar resolves this bundle id to
-        // jump to the owning app, so a truncated one would break that, while a
-        // multi-byte one would still be spending the device's line budget.
-        ...(record.app?.id ? { app: toAscii(record.app.id) } : {}),
-        ...(record.app?.entry ? { appEntry: toAscii(record.app.entry) } : {}),
-        // Detail-screen extras. Short keys and only-when-present, because these ride in
-        // EVERY tick: the prompt is the expensive one at ~100 chars x 6 sessions.
-        ...(tx.prompt ? { prompt: deviceText(tx.prompt, 100) } : {}),
-        // Wall-clock times as seconds-since-local-midnight (see secondsSinceMidnight):
-        // when the session began, and when it last did anything.
-        startSec: secondsSinceMidnight(tx.startedMs),
-        actSec: secondsSinceMidnight(record.updated_at),
-        // Short on purpose: this rides in every payload, and the device's line
-        // buffer is sized for asks carrying 1400-char details.
-        agent: record.agent === "codex" ? "cx" : "cc",
-      };
-      // Remember where this session's transcript lives, keyed by the SAME truncated id
-      // the device sees - that id is all it can send back when asking for history.
-      if (record.transcript) transcriptById.set(item.id, record.transcript);
-      // Pending question (already truncated by the hook) rides along so the
-      // device can display it and offer the options as buttons. We attach a
-      // per-prompt nonce; the device HMACs it back so we can trust the answer.
-      // A nonce for a typed or spoken MESSAGE. ~~Present ONLY while this session is
-      // READY.~~ WIDENED 2026-09-13 to cover `working` as well, deliberately and at
-      // the user's direction: the useful case is watching a session work and adding
-      // "also check X" for it to pick up AFTER this turn, and the inbox is built for
-      // exactly that - postToSessionInbox defaults to priority `next`, which QUEUES
-      // rather than interrupting (`now` is the one that interrupts). Voice could
-      // already reach a working session, because it posts from the host and needs no
-      // device credential at all; typing could not, purely because this line withheld
-      // the nonce. That asymmetry was the accident, not the capability.
-      //
-      // STILL OMITTED for every other status, so the device is never holding a
-      // credential for a state in which it must not offer the control - the same
-      // reason ask.answerable is stamped per prompt rather than read from a live
-      // global. handleTypedPrompt re-checks the status on arrival regardless.
-      if (MSG_OK_STATUS.has(record.status) && record.id) item.pnonce = nonceForSession(record.id);
-      if (record.ask) {
-        // A SPREAD, not a field list, and that is what carries the hook's newer
-        // fields through untouched - `optDescs` (the per-option descriptions,
-        // parallel to `options`) rides here with no code of its own. Do not
-        // turn this into an allow-list of named fields: every future field the
-        // hook learns to publish would then have to be added in two places, and
-        // forgetting the second one is silent - the device simply never sees it.
-        item.ask = { ...record.ask, nonce: nonceForPid(record.ask.pid) };
-        // Only questions can be answered by voice: emitDecision carries free
-        // text for a question and discards it for a plan, and a spoken answer to
-        // a permission prompt could only ever be a DENY.
-        item.ask.voice = record.ask.kind === "question";
-        // THE TAPPABLE TOKENS. Extracted HERE and not on the device, because the
-        // ESP32 only ever draws buttons and never re-derives what they say - the
-        // hardest thing to type there is exactly the token the question already
-        // printed, and this process has already parsed the ask.
-        //
-        // toAscii FIRST, askChips SECOND, and that order is load-bearing: CHIP_BYTES
-        // is a BYTE cap, so capping before the transliteration would cap a string
-        // whose byte count then changes under the cap (a multi-byte character
-        // transliterating to a shorter or longer ASCII run), and the cap would not be
-        // a byte cap at all. Same reasoning, same shape, as session.path's
-        // truncatePath(toAscii(...)) above. `options` rides along so a chip that
-        // merely restates a button already on the screen does not spend one of four
-        // scarce slots on a duplicate.
-        //
-        // ONLY-WHEN-PRESENT, for the same reason `title` and `prompt` are: this rides
-        // in EVERY tick, and a prompt with no tappable token in it must cost no
-        // payload bytes at all.
-        //
-        // THE LINE'S HEADROOM WAS MEASURED BEFORE THIS FIELD WAS ADDED, not assumed
-        // (task 9's report has the numbers): 214 bytes is the most one session's
-        // chips can be, 1,284 for all six, against the 1,763 bytes the saturated
-        // 6-session line leaves under feedChar's 16,000-byte guard - and the worst
-        // real cost over the 133 ask-carrying ticks in the host log was 40 bytes.
-        // host/wire-bytes-check.mjs now asserts that arithmetic rather than trusting
-        // this comment.
-        const chips = askChips(toAscii(record.ask.detail ?? ""), record.ask.options ?? []);
-        if (chips.length) item.ask.chips = chips;
-        // Seconds left before the hook stops waiting, for the keyboard countdown.
-        const ne = askNonces.get(record.ask.pid);
-        // No budget configured (the "forever" default) means no countdown to draw.
-        if (ne && HOOK_WAIT_MS[item.agent] != null) {
-          const budget = HOOK_WAIT_MS[item.agent];
-          item.ask.sec = Math.max(0, Math.round((budget - (Date.now() - ne.first)) / 1000));
-        }
-        // NO voiceText/voiceSha here any more. A transcript used to ride the ask
-        // object on every tick so the device could raise a confirm screen from it;
-        // it now travels once, on the `voice` object, and lands in an editable
-        // draft. Republishing it here would paste the same sentence into that draft
-        // every 5 seconds.
-      }
-      return item;
-    })
+    top.map((record, i) => (fullIdx.has(i) ? buildSessionItem(record) : buildLeanItem(record))),
   );
+  // A lean row's transcript is registered too, so a FOCUSed row can open its history
+  // the same way a full one can. Keyed by the SAME truncated id the device sees.
+  for (const r of top) if (r.transcript && r.id) transcriptById.set(r.id.slice(0, 12), r.transcript);
   return {
     list,
     total: records.length,
-    // Only nonzero with 7+ simultaneously-asking sessions, but if that ever
+    // Sessions that did not fit AT ALL - now beyond twenty rather than beyond six.
+    // Only nonzero with 21+ simultaneously-asking sessions, but if that ever
     // happens the device must say so rather than hide it.
-    hiddenAsking: records.slice(6).filter((r) => r.status === "asking").length,
+    hiddenAsking: records.slice(SESSION_ROW_CAP).filter((r) => r.status === "asking").length,
   };
 }
 
@@ -3490,6 +3629,67 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       );
       bleChunkSize = want;
     }
+    return;
+  }
+  // `FOCUS <id>` - the device tapped a row that shipped LEAN and wants the rest of
+  // it. Answered with ONE `sdetail` line carrying a full record for that session,
+  // built by readSessions()'s own builder rather than a second copy.
+  //
+  // A ONE-SHOT REPLY, NOT A PIN. The obvious alternative - remember this id and put
+  // it in the full set on the next tick - was rejected for two reasons. It would
+  // have to age out (state with a lifetime nobody can see), and promoting a session
+  // into the top six either reorders the list under the user's finger or requires
+  // the full set to stop being a prefix. A one-shot line changes nothing about the
+  // tick: the wire order stays the sort order, the row does not move, and the device
+  // fills the slot it already has.
+  if (line.startsWith("FOCUS ")) {
+    const id = line.slice(6).trim();
+    const replyLink = replyLinkFor(via);
+    // `FOCUS -` IS THE CLOSE. The card is gone, so the pin must go with it - a
+    // session left pinned is built full for nobody, and worse, it holds the last of
+    // the full prefix hostage so a genuinely urgent row ships lean instead.
+    // NOT deduped and it does not need to be: clearing twice clears once.
+    if (id === "-") {
+      if (focusPinnedId) console.log(`FOCUS: released ${focusPinnedId}`);
+      focusPinnedId = "";
+      return;
+    }
+    // DEDUPED BY SENDER, because the device sends on every live transport at once
+    // and a cabled one therefore asks TWICE. Two `sdetail` lines for the same id are
+    // harmless on arrival (the fill is idempotent), but they are ~1.5KB each on a
+    // link measured at ~666 B/s - so the second one costs the next tick's payload
+    // its timing for nothing. Same window and same map as the scrollback requests.
+    const now = Date.now();
+    for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
+    const reqKey = `${scrollSenderKey(via)}|focus|${id}`;
+    if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
+    scrollReqSeen.set(reqKey, now);
+    const record = focusRecords.get(id);
+    console.log(`[device/${linkLabel(via)}] ${line}`);
+    // PINNED BEFORE THE REPLY IS BUILT, so the very next tick already carries this
+    // session full - even if the reply below is what actually fills the card first.
+    // Set even when the record is unknown: it costs nothing (an id that is not in
+    // `top` never matches) and it means a session that reappears next tick is
+    // already pinned rather than needing a second tap.
+    focusPinnedId = id;
+    if (!record) {
+      // NAMED, not silent. From the device a host that does not know this id and a
+      // host that never answers look identical, and the card would sit on "..."
+      // for ever with nothing saying why.
+      await sendToLink(replyLink, JSON.stringify({ sdetail: { id, gone: true } }) + "\n");
+      console.log(`FOCUS: ${id} is not in this tick's list - told the device so`);
+      return;
+    }
+    const item = await buildSessionItem(record);
+    // Through fitPayload for the same reason the tick is: feedChar CLEARS ITS WHOLE
+    // BUFFER past 16,000 bytes, mid-line, and a single ask detail can be 1,400
+    // characters. A reply that overran the guard would not merely be dropped - it
+    // would take the REMAINDER of itself into the next line and wedge the parser.
+    const fitted = fitPayload({ sdetail: item });
+    if (fitted.dropped.length)
+      console.log(`FOCUS: ${id} shed ${fitted.dropped.join("; ")}`);
+    await sendToLink(replyLink, fitted.line);
+    console.log(`FOCUS: sent ${fitted.bytes} bytes for ${id} via ${linkLabel(replyLink?.id ?? "none")}`);
     return;
   }
   if (line.startsWith("SCROLLACK ")) {

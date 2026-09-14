@@ -93,6 +93,19 @@
 // A #define, NOT a const int - the preprocessor cannot see a C++ const int, so
 // `#if` on one is silently false with no warning. That has shipped here twice.
 #define BOARD_HISTORY_SCROLL 0
+// The SESSIONS tab does not scroll here, and this board's list stays at six rows.
+// Not a panel limit and not a port that has not happened yet: the cap is the
+// PROTOCOL's (host/index.mjs truncates before the payload is built), and lifting it
+// would cost this board ~44KB of SessionInfo against ~26KB of free heap - it has no
+// PSRAM to put them in, which is the resource board 2's version of this feature is
+// built on. See board_es3c35p.h's SESSION_SLOTS note and
+// docs/superpowers/specs/2026-09-14-board2-sessions-scroll-design.md.
+#define BOARD_SESSIONS_SCROLL 0
+// One slot per row this board draws. SESSION_SLOTS is the ARRAY SIZE and
+// MAX_SESSIONS is the full-ask-payload WIRE CAP; on this board they are the same
+// number, and deckhand_display.ino carries a static_assert that SESSION_SLOTS is
+// never the SMALLER of the two - which is the direction that would overflow.
+#define SESSION_SLOTS 6
 #define BOARD_HAS_WIRELESS_PAIR 0  // PROVISION over USB is the only pairing path here; see board_es3c35p.h
 // The USAGE tab's NOW / WEEK / CODEX layout is board 2 only: it needs a trend
 // ring (~165 bytes of DRAM against board 1's ~26KB of free heap, which the audio

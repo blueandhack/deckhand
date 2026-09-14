@@ -1281,8 +1281,21 @@ async function main({ indexPath = INDEX } = {}) {
        "senderKey falls back to the LINK ID, which is what split one device in two",
       (hello.match(/\$\{scrollSenderKey\(via\)\}\|\$\{id\}/g) || []).length === 2 &&
       !/\$\{senderKey\(via\)\}\|\$\{id\}/.test(hello));
-    ok("STRUCTURE: a dropped duplicate NAMES ITS CAUSE rather than returning in silence",
-      (hello.match(/return scrollReqDropped\(via, reqKey\)/g) || []).length === 2 &&
+    // EVERY DEDUPE SITE, not a count of two. This asserted `=== 2` - the two history
+    // arms - which made it fail the moment a THIRD request learned to dedupe
+    // (`FOCUS`, which asks for a lean row's detail and is answered with a ~1.5KB
+    // line, so a cabled device's double delivery would send it twice). The rule was
+    // never "there are two": it is that a dedupe which DROPS must say so, because
+    // from the device a dropped duplicate and a host that never answered look
+    // identical. Bound to the guard instead, so a fourth arm is covered by
+    // construction and a silent one fails by name.
+    const dedupeGuards = (hello.match(/if \(scrollReqSeen\.has\(reqKey\)\)/g) || []).length;
+    const dedupeDrops = (hello.match(/if \(scrollReqSeen\.has\(reqKey\)\) return scrollReqDropped\(via, reqKey\);/g) || []).length;
+    ok("STRUCTURE: there ARE dedupe guards to check - an empty match set would pass the rule below vacuously",
+      dedupeGuards >= 2);
+    ok(`STRUCTURE: a dropped duplicate NAMES ITS CAUSE rather than returning in silence ` +
+       `(${dedupeDrops} of ${dedupeGuards} dedupe guards drop loudly)`,
+      dedupeGuards === dedupeDrops &&
       /console\.log\(/.test(extractBody(src, "function scrollReqDropped(via, reqKey)")));
     ok("STRUCTURE: the BATT arm bounds the store it writes into",
       /boundBatteryStore\(\);/.test(hello));

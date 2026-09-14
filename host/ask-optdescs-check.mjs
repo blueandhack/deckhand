@@ -82,7 +82,12 @@ function readCaps(hookSrc, hostSrc, fwSrc, b2Src) {
   c.titleChars = grab(hookSrc, "the ask TITLE cap (hook)", /clean\(q\.header \?\? "Question", (\d+)\)/);
   c.detailChars = grab(hookSrc, "the ask DETAIL cap (hook)", /cleanMultiline\(q\.question \?\? "", (\d+)\)/);
   c.maxOptions = grab(hookSrc, "the option-count slice (hook)", /const opts = \(q\.options \?\? \[\]\)\.slice\(0, (\d+)\)/);
-  c.maxSessionsHost = grab(hostSrc, "the session-list slice (host)", /const top = records\.slice\(0, (\d+)\);/);
+  // SESSION_FULL_SLOTS, NOT THE SLICE. The host slices SESSION_ROW_CAP (20) records
+  // and builds only the first SESSION_FULL_SLOTS (6) as FULL ones; the rest ship lean
+  // and carry no ask, no options and no optDescs at all. Every budget in this file is
+  // about optDescs, so this is the number it means - reading the slice would predict
+  // fourteen sessions' worth of descriptions that cannot exist.
+  c.maxSessionsHost = grab(hostSrc, "SESSION_FULL_SLOTS (host)", /const SESSION_FULL_SLOTS = (\d+);/);
   c.maxSessionsFw = grab(fwSrc, "MAX_SESSIONS (firmware)", /#define MAX_SESSIONS (\d+)/);
   c.lineGuard = grab(fwSrc, "feedChar's line guard (firmware)", /if \(buf\.length\(\) > (\d+)\) buf = "";/);
   c.askDetailBuf = grab(fwSrc, "SessionInfo.askDetail size (firmware)", /char askDetail\[(\d+)\];/);
@@ -269,7 +274,7 @@ function main({ hookPath = HOOK_SRC, quiet = false } = {}) {
   ok(c.hostSpreads, "STRUCTURE: host/index.mjs must pass the ask through by SPREAD, or optDescs is dropped silently");
   ok(c.conditionalEmit, "STRUCTURE: optDescs must be emitted only when something is described, so an Allow/Deny payload does not grow");
   ok(c.maxSessionsHost === c.maxSessionsFw,
-     `STRUCTURE: the host sends ${c.maxSessionsHost} sessions and the device holds ${c.maxSessionsFw} - the budget is meaningless if they disagree`);
+     `STRUCTURE: the host builds ${c.maxSessionsHost} FULL records and the device sizes its ask buffers for ${c.maxSessionsFw} - the budget is meaningless if they disagree`);
 
   // ---- THE CAP'S TWO REAL BOUNDS ------------------------------------------
   // What used to live here was the LABEL convention (cap <= 32 chars x 3 bytes),

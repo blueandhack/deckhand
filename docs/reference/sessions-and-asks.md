@@ -9,6 +9,113 @@ Index: [`docs/README.md`](../README.md). The rules an agent must not miss stay i
 
 ---
 
+## The list scrolls past six on board 2 (2026-09-14)
+
+**THE SESSIONS TAB WAS NEVER CAPPED BY THE PANEL.** It was capped by the PROTOCOL:
+`host/index.mjs` urgency-sorted every known session and `records.slice(0, 6)` before
+the payload was built, so adding scroll to the glass alone would have shown nothing
+new - the device only ever HELD six. The design note is
+[`docs/superpowers/specs/2026-09-14-board2-sessions-scroll-design.md`](../superpowers/specs/2026-09-14-board2-sessions-scroll-design.md).
+
+**TWENTY ROWS, SIX OF THEM FULL.** The host now sends `SESSION_ROW_CAP` 20 rows; the
+first `SESSION_FULL_SLOTS` 6 carry a full record and 7..20 ship LEAN - only the fields
+the ROW draws (`id`, `name`, `status`, `model`, `branch`, `agent`, `actSec`, `lean`).
+Measured on the wire with 20 live sessions: **3,900 bytes**, of which the lean tail is
+~1.5KB. Fourteen FULL records would have been ~12KB of a 16,000-byte line every five
+seconds on a link measured at ~666 B/s.
+
+- **A lean row carries NO `pnonce`.** It is a credential, and a lean row draws no
+  controls, so a nonce on one is a capability handed out for a screen that cannot
+  exist. `host/wire-bytes-check.mjs` asserts this against `buildLeanItem()`'s body
+  and fails by name if it ever appears.
+- **The transcript IS still read for a lean row**, for `model` alone. The expensive
+  thing is the WIRE; `transcriptInfo()` is a 64KB tail read on a page-cached file.
+  Skipping it would have shipped rows with a half-empty sub-line - and the sub-line
+  is exactly why the scrolling row is 79px rather than the 65px rung that fits six.
+
+**MAX_SESSIONS STAYS 6 AND NOW MEANS SOMETHING ELSE**: "how many sessions carry a full
+ask payload on the wire". `SESSION_SLOTS` (20 on board 2, 6 on board 1) is the array
+size. Both are parsed by checkers rather than transcribed; `sessions-geom-check.mjs`
+used to hold `const MAX_SESSIONS = 6` as a LITERAL, so reverting the firmware's own
+define would not have failed a single assertion. That is fixed.
+
+**THE SCROLL SNAPS TO 82px STEPS, AND THAT IS NOT AESTHETIC.** This board has no
+region clip - `PanelShim::clipLogicalRect` clips to the SCREEN and so does
+`drawString` - and `scrollback.ino` has paid for that twice. Rows sit at multiples of
+`SESSION_SCROLL_STEP` and so does the offset, so **every row is wholly inside the
+window or wholly outside it, at every scroll position**. A partial row is unreachable
+by arithmetic rather than by a guard somebody has to remember, and `drawSessionRow` is
+reused with no clipping of its own. `sessions-geom-check.mjs` sweeps all 280 reachable
+scroll positions and fails if any row is ever partly visible.
+
+```
+avail 410 = contentBottom(460) - SESSION_ROW_Y0(50)
+row 79 + gap 3 = 82 per step;  5 rows = 407, 3 spare
+20 rows = 1637 -> 15 steps;  20 + the "+N more" strip = 1659 -> 16 steps
+```
+
+- **1..6 sessions are PIXEL-IDENTICAL to before.** The ladder still owns them, with
+  the expanded band card and no rail. The scroll begins at SEVEN.
+- **79, not 65.** 79 >= `SESSION_SUB_MIN_H` (74), so the scrolling row keeps its
+  model/branch sub-line. The 65px rung fits a sixth row on screen and drops that
+  line, which is the wrong trade in a list you are scrolling THROUGH.
+- **The rail is in the margin that already existed** (card ends at 308, panel is
+  320), so `SESSION_ROW_W` and `SESSION_SUB_LANE_W` are untouched. Measured on the
+  glass at three positions: thumb 101px tall, y 50 / 205 / 301 for steps 0 / 8 / 13,
+  against a predicted `50 + 310 * step/16`.
+- **It STEPS rather than glides.** The alternative - all 20 rows into a ~970KB PSRAM
+  sprite, blitting a 410px window - is affordable on this board and is DEFERRED, not
+  dismissed. It needs a sprite path this file does not have.
+
+**A SPINNER PAINTED THE FOOTER CLOCK, AND EVERY CHECKER WAS GREEN.** Found on the
+glass with 2,195 assertions passing. `tickWorkingSpinner()` lives in
+`deckhand_display.ino` and walks display positions on its own 4Hz timer; at scroll 0
+it drew row 5's spinner at `SESSION_ROW_Y0 + 5*82 = 460` - the footer's first row -
+and the spinner is a 32x32 blit that paints its own background, so an orange starburst
+was stamped over the clock and nothing ever wiped it. `tickSessionAnim()`'s shimmer
+loop had the same shape. **The row stack has FIVE readers, not three**, and the two
+that live outside `sessions.ino` are the ones that were missed; the checker now names
+each loop and asserts its `sessionRowVisible()` guard, with a fault per loop.
+
+**TAPPING A LEAN ROW FETCHES ITS DETAIL** - `FOCUS <id>`, answered with one `sdetail`
+line (~200 bytes to 1.5KB, through `fitPayload` like any other). Two mechanisms, and
+neither alone is enough:
+
+- **The reply FILLS the card**, in ~100ms where the next tick could be 5s away.
+- **The pin KEEPS it filled.** Without it the next tick re-sends the row lean and the
+  `copyField()`s overwrite its prompt, path and ask with the empty values a lean row
+  carries - the card would blank five seconds after it filled in. A stale `lean` flag
+  would not have saved it: the fields are already gone by then.
+- **The pin ADDS a seventh full record, it does not displace the sixth.** The first
+  version swapped it in to keep the count at six, which is tidy and wrong: the
+  displaced row is the sixth most urgent session, and with two boards on one host,
+  BOARD 1 - which takes the first six rows - would silently lose row 5's prompt and
+  ask to a pin set by board 2. Measured: 6 full with no card open, **7 with one**.
+- **The release is RECONCILED, not fired from the close.** FOUR paths clear
+  `showingDetail` - `closeSessionDetail()`, `switchTab()`, `exitReaderToList()` and
+  the voice card taking the content area - and only one is named "close". A release
+  in the close path leaks the pin through the other three, the commonest being
+  "tap a different tab". `tickFocusPin()` compares the recorded id against what is
+  on the glass once per loop instead. Verified on the device: switching tabs logged
+  `FOCUS: released synth08-0008` and the payload went back to 6 full rows.
+- **Board 1 shares the whole lean/FOCUS path**, which is why its binary moved. It has
+  no scroll, but a pin set by board 2 can put a lean row inside its six, and a lean
+  row it could not fill would be a card with no prompt and no way to ask for one.
+
+**`applySessionFields()` is the one parser**, split out of the tick's loop so the
+reply lands in a slot exactly the way a tick does. It deliberately does NOT touch
+`hostSlot` (the reply says nothing about which Mac owns the row) or anything derived
+from a DIFF against the previous tick - `statusSinceMillis`, the beep budget, the
+crossfade. A reply is not a tick and must not restart a duration or fire a beep.
+
+**UNVERIFIED:** the drag itself has not been exercised by a finger - every scroll
+position in this work was reached with `SESSIONSCROLL`, which drives
+`sessionScrollTo()` directly and does not touch `sessionDragLoop()`. The tap/drag
+threshold, the rail's absolute scrub and the "a press on the rail is never a row tap"
+guard are therefore UNMEASURED on hardware.
+
+---
+
 - **BOARD 1 HAS THE STATUS BAND CARD NOW, DERIVED FROM ITS OWN CELLS.** It was board 2's
   alone, and the sentence explaining why - "board 1 has no surplus height to give" - was
   false: its list area is 264px and its tallest ordinary row is 90, so ONE session (69% of
