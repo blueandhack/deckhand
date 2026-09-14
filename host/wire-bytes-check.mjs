@@ -99,11 +99,29 @@ function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc, chipsSrc) {
   // ACCEPTED and the human has authorised words they never read. A silent
   // divergence, which is why the boundary guard SUPPRESSES this field.
   c.voiceParkXlate = /text = capUtf8\(toAscii\(text\), VOICE_ANSWER_TEXT_MAX_BYTES\);/.test(hostSrc);
-  c.voiceParkBeforeHash =
+  // THE TRANSCRIPT MUST REACH setVoice ALREADY TRANSLITERATED. The old pair of
+  // assertions here bound the transliteration to the PARK SITE, before voiceSha();
+  // there is no park site and no voiceSha on this path any more, so what is bound
+  // now is the surviving ordering that still matters: toAscii runs before the
+  // transcript is published to the device.
+  c.voiceXlateBeforePublish =
     hostSrc.indexOf("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);") >= 0 &&
     hostSrc.indexOf("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);") <
-      hostSrc.indexOf("pendingVoiceAnswers.set(pid, { text, sha: voiceSha(text)");
-  c.voiceBuilderRaw = /item\.ask\.voiceText = pend\.text;/.test(hostSrc);
+      // ANCHORED ON THE CALL, NOT ITS ARGUMENTS. Spelled with the full argument list
+      // this returned -1 the moment the pid field moved, so it "caught" a pid fault
+      // that belongs to voiceCarriesPid below - a catch by coincidence, which is a
+      // checker reporting the wrong cause.
+      hostSrc.indexOf('setVoice("askheard"');
+  // AND THE ASK OBJECT MUST NOT CARRY IT AT ALL. The transcript travels once, on
+  // the voice object; republishing it per-tick on the ask would paste the same
+  // sentence into the draft every 5 seconds and once more per transport.
+  c.askCarriesNoTranscript =
+    !/item\.ask\.voiceText\s*=/.test(hostSrc) && !/item\.ask\.voiceSha\s*=/.test(hostSrc);
+  // The pid is what addresses it: `voice` is one object per host while asks are per
+  // session, so without this a transcript captured for one pending prompt could
+  // paste into a draft being composed for another.
+  c.voiceCarriesPid = /setVoice\("askheard", \{ text, pid \}\)/.test(hostSrc) &&
+                      /\bpid: fields\.pid \?\? ""/.test(hostSrc);
   // firmware: the guard the whole budget is measured against
   c.maxSessionsFw = grab(fwSrc, "MAX_SESSIONS (firmware)", /#define MAX_SESSIONS (\d+)/);
   c.lineGuard = grab(fwSrc, "feedChar's line guard (firmware)", /if \(buf\.length\(\) > (\d+)\) buf = "";/);
@@ -161,7 +179,7 @@ const HOST_SITES = [
   ["histFlatten (the history reader's previews and full entries)", /const t = toAscii\(v\)/],
   ["histFlatten's truncation marker is three ASCII dots, not U+2026, which draws as NOTHING",
    /t\.slice\(0, max - 3\) \+ "\.\.\."/],
-  ["ask.voiceText, at the PARK SITE (Whisper output is the densest non-ASCII source there is)",
+  ["the answer transcript, where it is CAPPED (Whisper output is the densest non-ASCII source there is, and this text comes back through typedTextOk which admits printable ASCII only)",
    /text = capUtf8\(toAscii\(text\), VOICE_ANSWER_TEXT_MAX_BYTES\);/],
   // The same shape as session.path's entry above: the transliteration is the INNER
   // call, so the composition itself is the ordering. CHIP_BYTES is measured in BYTES
@@ -263,7 +281,10 @@ function tickBytes(caps, toAscii, capUtf8, { descCap = null, parkedVoice = false
   // of them if fill is wide". The MIXED case is the one actually reported: an
   // otherwise ordinary tick line with ONE question containing CJK.
   const nWide = wideSessions ?? (fill === "wide" ? n : 0);
-  // The confirm-screen transcript, built the way handleVoiceAnswer builds it:
+  // A synthetic transcript in the shape handleVoiceAnswer USED to park. The field is
+  // no longer emitted; this payload exists to exercise wire-ascii's retained
+  // suppression mechanism, which is still a live code path even though no real tick
+  // reaches it. See UNSAFE_TO_REPAIR's own note.
   // (optionally) transliterated, then capped in BYTES by capUtf8.
   const parkedVoiceText = capUtf8(
     caps.voiceParkXlate ? toAscii("—".repeat(caps.voiceAnswerMaxBytes)) : "—".repeat(caps.voiceAnswerMaxBytes),
@@ -284,7 +305,7 @@ function tickBytes(caps, toAscii, capUtf8, { descCap = null, parkedVoice = false
     ...(chips ? { chips: Array.from({ length: caps.chipMax }, () => "x".repeat(caps.chipBytes)) } : {}),
     nonce: "x".repeat(32), voice: true,
     // NOT S(): this field does not take the caps above. It is parked by
-    // handleVoiceAnswer under a BYTE cap, so the model has to follow the real
+    // handleVoiceAnswer under a BYTE cap (historically), so the model has to follow the real
     // path - whether the park site transliterates is PARSED, not assumed. Model
     // it as fixed and a reverted fix is invisible here, which is exactly how this
     // bypass survived the first round.
@@ -678,15 +699,20 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
   // screen whose entire purpose is proving a human read THESE EXACT WORDS before
   // signing them.
   ok(c.voiceParkXlate,
-     "VOICETEXT: the parked transcript must be transliterated at the PARK SITE (handleVoiceAnswer), " +
-     "or the confirm screen renders gaps where Whisper's punctuation was");
-  ok(c.voiceParkBeforeHash,
-     "VOICETEXT: it must happen BEFORE voiceSha() - hashing first would sign text the device never shows");
-  ok(c.voiceBuilderRaw,
-     "VOICETEXT: the payload builder must assign `item.ask.voiceText = pend.text` UNCHANGED. " +
-     "Transliterating there desyncs the text the device DISPLAYS from the text that gets signed. It does not REJECT the answer - " +
-     "sessions.ino:2259 signs the sha the host SENT and this host re-hashes its own parked copy, so it is ACCEPTED and the human " +
-     "authorised words they never read. That silent divergence is why host/wire-ascii.mjs suppresses this field rather than repairing it");
+     "VOICETEXT: the transcript must be transliterated where it is capped, or the draft " +
+     "receives Whisper's curly quotes - and since it comes BACK through typedTextOk(), " +
+     "which admits printable ASCII only, that is a REJECTED answer rather than an ugly one");
+  ok(c.voiceXlateBeforePublish,
+     "VOICETEXT: toAscii must run BEFORE setVoice publishes the transcript to the device - " +
+     "publishing first would put the raw string on the wire and the cap would arrive too late");
+  ok(c.askCarriesNoTranscript,
+     "VOICETEXT: the ask object must carry NO voiceText/voiceSha. The transcript travels once " +
+     "on the voice object and is inserted into the draft; the ask is republished every ~5s over " +
+     "BOTH transports, so a transcript there would paste the same sentence in again on every tick");
+  ok(c.voiceCarriesPid,
+     "VOICETEXT: the voice object must carry the ask's pid, and setVoice must NOT make it sticky. " +
+     "`voice` is one object per host while asks are per session, so an inherited pid would paste " +
+     "an answer meant for one pending prompt into a draft being composed for another");
   {
     const parked = capUtf8(toAscii("Yes — let's go ahead… but don't touch the cache"), c.voiceAnswerMaxBytes);
     ok(!/[^\x00-\x7f]/.test(parked), `VOICETEXT: a real transcript reaches the wire as pure ASCII, got ${JSON.stringify(parked)}`);
@@ -1078,12 +1104,17 @@ async function selftest() {
     ["a host cap site bypasses the transliteration",
      { host: (s) => s.replace(/name: deviceText\(await projectName\(record\.cwd \|\| ""\), (\d+)\)/,
                               'name: (await projectName(record.cwd || "")).slice(0, $1)') }],
-    ["ask.voiceText bypasses it at the PARK SITE - the confirm screen draws gaps where the punctuation was",
+    ["the answer transcript reaches the device untransliterated, so Whisper's curly quotes come back through typedTextOk() and the answer is REJECTED",
      { host: (s) => s.replace("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);",
                               "text = capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES);") }],
-    ["ask.voiceText transliterated in the PAYLOAD BUILDER instead - the plausible wrong fix. It does NOT reject the answer: the device displays the repaired text and signs the sha it was sent, the host re-hashes its parked copy and ACCEPTS, and the human has authorised words they never read",
-     { host: (s) => s.replace("text = capUtf8(toAscii(text), VOICE_ANSWER_TEXT_MAX_BYTES);", "text = capUtf8(text, VOICE_ANSWER_TEXT_MAX_BYTES);")
-                     .replace("item.ask.voiceText = pend.text;", "item.ask.voiceText = toAscii(pend.text);") }],
+    // THIS FAULT USED TO BE "transliterated in the PAYLOAD BUILDER instead", whose
+    // second replacement targeted `item.ask.voiceText = pend.text;`. That line no
+    // longer exists, so the replacement became a no-op and the fault silently
+    // degraded into a DUPLICATE of the one above - two entries, one behaviour, and a
+    // count of 42 that was really 41. Replaced with a distinct fault against the
+    // field that carries the transcript's address now.
+    ["the voice object stops carrying the ask's pid, so a transcript pastes into whichever draft is open",
+     { host: (s) => s.replace('setVoice("askheard", { text, pid })', 'setVoice("askheard", { text })') }],
     ["the tick line is no longer measured before it is written",
      { host: (s) => s.replace("const fitted = fitPayload(wire.payload);", "const fitted = ((p) => ({ line: JSON.stringify(p) + \"\\n\", bytes: 0, was: 0, dropped: [] }))(wire.payload);") }],
     ["the refusal's guard constant drifts from the firmware's",

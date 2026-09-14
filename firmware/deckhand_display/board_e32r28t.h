@@ -388,7 +388,10 @@ const int TAP_MIN = 40;   // 7.1mm
 // the old 48. Its tap target is the full slot. That is under TAP_MIN (40) in
 // height - unavoidable, and no worse than the three tabs beside it, which have
 // always been 34 tall.
-const int TAB_REC_W = 40;                       // slot reserved at the right end
+// TAB_REC_W STOOD HERE - the 40px slot the record button owned at the right end
+// of the tab bar. The button is gone (2026-09-13): it was global chrome doing a
+// per-session job, and speaking to a session now starts from that session's own
+// detail screen. The three tabs share the whole width again.
 
 // ---------- Sessions tab ----------
 // EVERY NUMBER IN THIS SECTION IS THE LITERAL THAT WAS ALREADY HERE (or already

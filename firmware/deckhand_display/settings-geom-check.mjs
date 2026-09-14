@@ -227,6 +227,43 @@ const SOURCE_FAULTS = [
     "compose.ino", (t) => t.replace(/(void composeUseRecent\(int k\)\s*\{)/,
                                     "$1\n  sendTypedAnswerToHost();"),
     "sends NOTHING"],
+  // The draft line's two keys. Before this change the line carried one key and the
+  // only width claim about it was CLR's, measured from composeClrX() to the lane's
+  // right edge - a number that GROWS when a key is added to its left and passes
+  // either way. These three faults are the ones that blind spot allowed through.
+  ["the draft line's text lane still assumes ONE key, so the text runs under SPK",
+    "compose.ino", (t) => t.replace(/return CARD_W - 12 - 2 \* TAP_MIN;/,
+                                    "return CARD_W - 12 - TAP_MIN;"),
+    "the draft's text lane"],
+  ["SPK is placed half a key left of CLR, so their tested zones overlap and CLR's open-ended test swallows it",
+    "compose.ino", (t) => t.replace(/int composeSpkX\(\) \{ return composeClrX\(\) - TAP_MIN; \}/,
+                                    "int composeSpkX() { return composeClrX() - TAP_MIN / 2; }"),
+    "exactly one TAP_MIN"],
+  ["composeAbsorbVoice stops walking sessions[] for a duplicate pid, so a transcript lands in whichever draft is open",
+    // Anchored on the ASSIGNMENT rather than its right-hand side: the first version
+    // of this fault spelled out `= isHeard && sharing > 1;` and stopped injecting the
+    // moment that read `isAsk` instead - a fault silently doing nothing while the
+    // selftest still counted it.
+    "compose.ino", (t) => t.replace(/int sharing = 0;[\s\S]*?const bool ambiguous = [^;]*;/,
+                                    "const bool ambiguous = false;"),
+    "REFUSES a pid that more than one visible ask carries"],
+  ["composeAbsorbVoice stops keying the insert on the host's seq, so the ~5s republish pastes it again every tick",
+    "compose.ino", (t) => t.replace("if (seq <= applied) return;", ""),
+    "gates the insert on the host's seq"],
+  ["composeAbsorbVoice stops requiring the pid to match the ask this panel was opened for",
+    "compose.ino", (t) => t.replace("strcmp(pid, kbPid) == 0", "true"),
+    "match the ask this surface was opened for"],
+  ["the keyboard's SPK column loses its own branch, so a tap on it SENDS the draft instead of re-recording",
+    "keyboard.ino", (t) => t.replace(/      if \(i == 1\) \{[\s\S]*?\n      \}\n/, ""),
+    "claims column 1 for SPK by index"],
+  ["the keyboard's action row goes back to two columns, so SPK has nowhere to live",
+    "keyboard.ino", (t) => t.replace("const uint8_t fracs[KB_ACT_COLS] = {1, 1, 2};",
+                                     "const uint8_t fracs[KB_ACT_COLS] = {1, 2};"),
+    "must name the same row"],
+  ["SPK is pushed off the left edge of the lane",
+    "compose.ino", (t) => t.replace(/int composeSpkX\(\) \{ return composeClrX\(\) - TAP_MIN; \}/,
+                                    "int composeSpkX() { return CARD_X - TAP_MIN; }"),
+    "inside the lane's left edge"],
 ];
 if (SOURCE_FAULT_INDEX >= 0) {
   const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
@@ -847,6 +884,15 @@ const parseCLit = (lit) => JSON.parse(lit.replace(/\\x([0-9a-fA-F]{2})/g, "\\u00
 // checker's side, "SEND is at least twice the destructive control" is computed
 // from the checker's own numbers and CANNOT FAIL - relabelling the row {1, 1}
 // would leave it green. Parsed, that mutation fails by name.
+// KB_ACT_COLS, out of keyboard.ino's own declaration. Parsed rather than
+// transcribed so the fracs initialiser, the array bounds and this checker cannot
+// disagree about how many columns the row has - which is what let a 2-column
+// assumption survive an inserted column and report nonsense instead of failing.
+const KB_ACT_COLS_FW = (() => {
+  const m = KB_SRC.match(/const int KB_ACT_COLS\s*=\s*(\d+)\s*;/);
+  if (!m) throw new Error("settings-geom-check: keyboard.ino no longer declares `const int KB_ACT_COLS = <n>;`");
+  return +m[1];
+})();
 const KB_ACT_FRACS = (() => {
   const src = fnSrc(KB_SRC, "void drawKbActions");
   if (!src.length) throw new Error("settings-geom-check: drawKbActions() not found in keyboard.ino");
@@ -1051,11 +1097,9 @@ function maxCols(b, id, lane) {
   while (widthB(b, id, "M".repeat(n) + widest) <= lane) n++;
   return { cols: n, widest };
 }
-const voiceLines = {}, voiceWord = {};
-for (const b of [1, 2]) {
-  const r = worstWrappedLines(b, B[b].CARD_W - 8);
-  voiceLines[b] = r.worst; voiceWord[b] = r.at;
-}
+// voiceLines/voiceWord lived here and fed the voice-confirm report below, which is
+// gone with the screen. worstWrappedLines() is KEPT: it is a general per-board
+// adversarial wrap measure and the keyboard's own budget still calls it.
 
 // Documented, deliberately-unfixed board-1 facts. Every one is a place board 1's
 // packed layout gives something up; an entry appearing under 2 would mean a
@@ -1375,13 +1419,13 @@ if (CONST_FAULT_INDEX >= 0) {
   console.log(`--selftest child: ${name}`);
 }
 
-console.log(`\nvoice-confirm panel (lane CARD_W - 8, NOT the keyboard's CARD_W - 12), ` +
-            `${KB_MAX_BYTES} bytes at each board's OWN adversarial word length:\n` +
-            `  board 1: ${voiceLines[1]} lines (lane ${B[1].CARD_W - 8}px, worst at ${voiceWord[1]}-char words)\n` +
-            `  board 2: ${voiceLines[2]} lines (lane ${B[2].CARD_W - 8}px, worst at ${voiceWord[2]}-char words)`);
-CUR = 2;
-chk(voiceLines[2] <= voiceLines[1],
-    `board 2's wider lane cannot loosen the 8-line voice-confirm cap: ${voiceLines[2]} <= ${voiceLines[1]}`);
+// THE VOICE-CONFIRM PANEL'S REPORT AND ITS ONE ASSERTION ARE GONE. They measured a
+// screen this branch deleted: ASK_VOICE_MAX_LINES, askVoiceTooLong() and the panel
+// itself all went with it, so the "8-line cap" the assertion named had nothing left
+// behind it - a bare literal no revert could move, which is the unfalsifiable shape
+// this file exists to refuse. sessions-geom-check.mjs deleted its half of the pair;
+// this was the other half. Answer text is now bounded by KB_MAX_BYTES in the draft,
+// which §the keyboard's own lane assertions already bind to the host's cap.
 
 for (const b of [1, 2]) {
   CUR = b;
@@ -4495,11 +4539,30 @@ for (const b of [1, 2]) {
     // every number below would still agree with itself.
     const fracs = KB_ACT_FRACS, fracTotal = fracs.reduce((t, f) => t + f, 0);
     const lane2 = W - c.CARD_X * 2, avail = lane2 - ACT_GAP * (fracs.length - 1);
-    chk(fracs.length === 2,
-        `drawKbActions draws ${fracs.length} column(s) - the CANCEL/SEND reasoning below assumes 2`);
-    const wLeft = Math.trunc(avail * fracs[0] / fracTotal);
-    const xSend = c.CARD_X + wLeft + ACT_GAP, wSend = c.CARD_X + lane2 - xSend;
-    console.log(`    action band ${c.KB_ACT_Y}..${c.KB_ACT_Y + c.KB_ACT_H - 1}, button ${c.KB_ACT_DRAWN}px at +${c.KB_ACT_DY}; columns ${wLeft} + ${ACT_GAP} + ${wSend} = ${lane2} (lane ${lane2}, CARD_W ${c.CARD_W})`);
+    // THE COLUMN COUNT IS PARSED, NOT ASSUMED. It was `=== 2` while the row had two,
+    // which made every number below silently wrong the moment SPK was inserted rather
+    // than failing on the count alone. KB_ACT_COLS is read out of keyboard.ino and
+    // the fracs initialiser must agree with it - two ways of saying how many columns
+    // there are is one way too many.
+    chk(fracs.length === KB_ACT_COLS_FW,
+        `drawKbActions' fracs[] has ${fracs.length} entries against KB_ACT_COLS ${KB_ACT_COLS_FW} - the initialiser and the bound must name the same row`);
+    chk(fracs.length >= 2,
+        `drawKbActions draws ${fracs.length} column(s) - a row needs at least a way out and a way to send`);
+    // uiActionRow's loop, mirrored for ANY n: every column but the last takes its
+    // truncated share of `avail`, and the last takes the remainder to the lane's edge.
+    const actCols = [];
+    { let x = c.CARD_X;
+      for (let i = 0; i < fracs.length; i++) {
+        const last = i === fracs.length - 1;
+        const w = last ? (c.CARD_X + lane2 - x) : Math.trunc(avail * fracs[i] / fracTotal);
+        actCols.push({ x, w });
+        x += w + ACT_GAP;
+      } }
+    const wLeft = actCols[0].w;
+    const xSend = actCols[actCols.length - 1].x, wSend = actCols[actCols.length - 1].w;
+    console.log(`    action band ${c.KB_ACT_Y}..${c.KB_ACT_Y + c.KB_ACT_H - 1}, button ${c.KB_ACT_DRAWN}px at +${c.KB_ACT_DY}; columns ${actCols.map((k) => k.w).join(` + ${ACT_GAP} + `)} = ${lane2} (lane ${lane2}, CARD_W ${c.CARD_W})`);
+    chk(actCols.reduce((t, k) => t + k.w, 0) + ACT_GAP * (fracs.length - 1) === lane2,
+        `the ${fracs.length} columns and their ${fracs.length - 1} gaps close on the ${lane2}px lane`);
     chk(lane2 === c.CARD_W,
         `uiActionRow's lane ${lane2} (tft.width() - 2*CARD_X) == CARD_W ${c.CARD_W}`);
     // B4. `chk(wLeft + ACT_GAP + wSend === lane2)` STOOD HERE AND IS GONE. wSend
@@ -4522,9 +4585,16 @@ for (const b of [1, 2]) {
     // here by name rather than agreeing with a pair restated on this side.
     chk(wSend >= 2 * wLeft && wSend - 2 * wLeft <= ACT_GAP,
         `SEND ${wSend}px is twice the destructive control's ${wLeft}px plus the ${wSend - 2 * wLeft}px remainder`);
+    // AND EVERY MIDDLE COLUMN CLEARS THE FLOOR. There were none to check while the
+    // row had two, and SPK is the first: a column that is neither the destructive one
+    // nor the wide one has nothing else asserting its width.
+    for (let i = 1; i < actCols.length - 1; i++)
+      chk(actCols[i].w >= c.TAP_MIN,
+          `action column ${i} is ${actCols[i].w}px wide >= TAP_MIN ${c.TAP_MIN}`);
     // DISCARD is the new label and it has to fit the NARROWER column - the one
     // risk the relabelling introduces.
-    for (const [l, w] of [["CANCEL", wLeft], ["DISCARD", wLeft], ["SEND", wSend]])
+    for (const [l, w] of [["CANCEL", wLeft], ["DISCARD", wLeft], ["BACK", wLeft],
+                          ["SPK", actCols[1] ? actCols[1].w : wLeft], ["SEND", wSend]])
       chk(widthB(b, T_BODY, l) + 8 <= w, `"${l}" ${widthB(b, T_BODY, l)}px inside its ${w}px column`);
     // B7. THE BUTTON IS 26px TALL ON BOARD 1 AND 32 ON BOARD 2, AND NOTHING
     // CHECKED THAT ANYTHING FITS IN IT. Two claims, neither of which any line
@@ -4552,7 +4622,17 @@ for (const b of [1, 2]) {
     // The closed-window message: SEND's own column is its lane now, and its budget
     // is KB_ACT_DRAWN (the drawn button) rather than KB_ACT_H (the tested band) -
     // it is centred where the SEND button it replaces stood.
-    for (const why of ["NO LONGER READY", "WINDOW CLOSED - ANSWER ON YOUR MAC"]) {
+    // BOTH STRINGS ARE PARSED OUT OF drawKbActions rather than written here, because
+    // the one that no longer fits is exactly the one a transcription would have kept:
+    // SEND's lane narrowed from 139 to 100px on board 1 when the row gained SPK, and
+    // "WINDOW CLOSED - ANSWER ON YOUR MAC" wraps to THREE lines there - 39px against a
+    // 26px drawn button. Reverting the firmware to the long string fails here by name.
+    const whySrc = fnSrc(KB_SRC, "void drawKbActions");
+    const whys = [...whySrc.matchAll(/const char\* why = [^;]*?"([^"]+)"\s*:\s*"([^"]+)"/gs)]
+      .flatMap((m) => [m[1], m[2]]);
+    chk(whys.length === 2,
+        `drawKbActions' closed-window strings parsed (${whys.length}) - both arms of the kbIsMessage ternary (gate)`);
+    for (const why of whys) {
       const n = countWrappedLinesB(b, why, T_META, wSend - 8);
       chk(n * c.KB_LINE_PITCH <= c.KB_ACT_DRAWN, `"${why}" wraps to ${n} line(s) = ${n * c.KB_LINE_PITCH}px in the ${wSend - 8}px lane, inside the ${c.KB_ACT_DRAWN}px DRAWN button (the band is ${c.KB_ACT_H})`);
     }
@@ -4592,15 +4672,15 @@ for (const b of [1, 2]) {
       // gated first, because indexing past the end yields undefined and
       // `!/re/.test(undefined)` is not a failure anyone would read.
       const labelCols = splitArgs(labelsInit), tintCols = splitArgs(tintsInit);
-      chk(labelCols.length === 2 && tintCols.length === 2,
+      chk(labelCols.length === KB_ACT_COLS_FW && tintCols.length === KB_ACT_COLS_FW,
           `drawKbActions' labels[]/tints[] split into ${labelCols.length}/${tintCols.length} ` +
-          `columns, expected 2 each (gate)`);
-      if (labelCols.length === 2 && tintCols.length === 2) {
+          `columns, expected ${KB_ACT_COLS_FW} each (gate)`);
+      if (labelCols.length === KB_ACT_COLS_FW && tintCols.length === KB_ACT_COLS_FW) {
         chk(/DISCARD/.test(labelCols[0]) && !/DISCARD/.test(labelCols[1]),
             "drawKbActions' labels[] puts DISCARD in COLUMN 0 and nowhere else - the destructive control is the LEFT one, the narrow one, the one furthest from the finger that has been tapping SEND");
         chk(/COLOR_WARN/.test(tintCols[0]) && !/COLOR_WARN/.test(tintCols[1]),
             "drawKbActions' tints[] puts COLOR_WARN on COLUMN 0 - the same column the DISCARD label is in, so label and colour name the same key");
-        chk(/SEND/.test(labelCols[1]) && !/SEND/.test(labelCols[0]),
+        chk(/SEND/.test(labelCols[labelCols.length - 1]) && !/SEND/.test(labelCols[0]),
             "drawKbActions' labels[] puts SEND in COLUMN 1 - the wide one, and the one uiActionRow gives the remainder to");
       }
       // B5. OVER THE fracs[] INITIALISER, NOT THE WHOLE BODY. This was
@@ -4610,7 +4690,8 @@ for (const b of [1, 2]) {
       // instead over KB_ACT_FRACS, which is parsed FROM that initialiser, and as
       // the RULE rather than the pair - relabelling the row {1, 1} fails, {2, 1}
       // (SEND narrow, DISCARD wide) fails, and {1, 3} correctly does not.
-      chk(KB_ACT_FRACS.length === 2 && KB_ACT_FRACS[1] >= 2 * KB_ACT_FRACS[0],
+      chk(KB_ACT_FRACS.length === KB_ACT_COLS_FW &&
+          KB_ACT_FRACS[KB_ACT_FRACS.length - 1] >= 2 * KB_ACT_FRACS[0],
           `drawKbActions' OWN fracs[] initialiser is {${KB_ACT_FRACS.join(", ")}} - SEND's share ` +
           `must be at least twice the destructive control's, which is what stops the two being ` +
           `equal halves again`);
@@ -4622,7 +4703,7 @@ for (const b of [1, 2]) {
       chk(!/halfW/.test(touchSrc), "kbTouch's OWN BODY no longer computes a halfW");
       chk(/kbActX\[/.test(touchSrc) && /kbActW\[/.test(touchSrc),
           "kbTouch's OWN BODY hit-tests the columns drawKbActions stored, so the draw and the test cannot disagree");
-      chk(/kbActW\[1\]/.test(actSrc),
+      chk(/kbActW\[KB_ACT_COLS - 1\]/.test(actSrc),
           "the closed-window message takes its lane from SEND's returned column, not from a second derivation");
       chk(/countWrappedLines\(/.test(actSrc),
           "the closed-window wrap is still MEASURED - it was `const int lines = 3;` once");
@@ -4651,6 +4732,12 @@ for (const b of [1, 2]) {
           "drawKbActions' uiActionRow CALL draws KB_ACT_DRAWN tall, inset by KB_ACT_DY - the split, at the call site");
       chk(callArgs[9] === "kbActX" && callArgs[10] === "kbActW",
           "drawKbActions' uiActionRow CALL writes its bands into the very arrays kbTouch hit-tests");
+      // SPK'S COLUMN MUST BE CLAIMED BY INDEX. kbTouch's SEND arm is reached by
+      // EXHAUSTION - there is no `i == 2` - so a middle column with no branch of its
+      // own silently BECOMES SEND: a key that sends the draft instead of recording
+      // over it, with nothing failing to compile.
+      chk(/if \(i == 1\)/.test(touchSrc) && /composeSpeak\(\)/.test(touchSrc),
+          "kbTouch's OWN BODY claims column 1 for SPK by index - the SEND arm below it is reached by exhaustion, so an unclaimed middle column becomes SEND");
       chk(/KB_ACT_H/.test(touchSrc) && !/KB_ACT_DRAWN/.test(touchSrc),
           "kbTouch tests the BAND (KB_ACT_H) and not the drawn button - the 7px of air belongs to the control");
       // The gap-swallow and the remainder, in uiActionRow's own body: these two
@@ -4851,8 +4938,9 @@ for (const b of [1, 2]) {
     chk(subFloor.join("|") === SUB_FLOOR_OK.join("|"),
         `reply panel: the tested bands under TAP_MIN ${c.TAP_MIN} are [${subFloor.join(", ")}], and the ` +
         `only one this design permits is [${SUB_FLOOR_OK.join(", ")}] - the draft line is one text cell ` +
-        `plus its air (COMPOSE_DRAFT_H ${c.COMPOSE_DRAFT_H}) and carries CLR, a RECOVERY for a draft you ` +
-        `can still see, so a miss costs one tap and loses nothing`);
+        `plus its air (COMPOSE_DRAFT_H ${c.COMPOSE_DRAFT_H}) and carries SPK and CLR - one starts a ` +
+        `recording you can stop, the other clears a draft you can still see, so a miss on either costs ` +
+        `one tap and loses nothing`);
     for (const [n, t, h, tap] of bands)
       if (tap && !SUB_FLOOR_OK.includes(n))
         chk(h >= c.TAP_MIN, `reply panel: ${n} is ${h}px tall >= TAP_MIN ${c.TAP_MIN}`);
@@ -4862,6 +4950,52 @@ for (const b of [1, 2]) {
     const clrW = c.CARD_X + c.CARD_W - yOf("composeClrX");
     chk(clrW >= c.TAP_MIN,
         `reply panel: CLR's tested zone is ${clrW}px wide >= TAP_MIN ${c.TAP_MIN} - it is sub-floor in HEIGHT alone`);
+    // SPK, THE SECOND KEY ON THIS LINE, and the three claims the first one never
+    // had to make. THIS WAS A BLIND SPOT: clrW above is `CARD_X + CARD_W -
+    // composeClrX()`, so moving CLR left to make room would have made that number
+    // GROW and still pass, while silently measuring a zone containing both keys.
+    const spkX = yOf("composeSpkX"), clrX = yOf("composeClrX");
+    const spkW = clrX - spkX;
+    // EXACTLY one cell, not merely "at least". `spkW` is derived as clrX - spkX, so
+    // `spkX + spkW <= clrX` would be true by construction - the vacuous shape this
+    // file exists to refuse. The falsifiable claim is that the gap between the two
+    // keys IS a whole TAP_MIN: narrower and SPK is sub-floor in the axis CLR is
+    // not, wider and it eats lane that the draft text is measured against.
+    chk(spkW === c.TAP_MIN,
+        `reply panel: SPK's tested zone is ${spkW}px, exactly one TAP_MIN ${c.TAP_MIN} cell between its left edge and CLR's - ` +
+        `it is sub-floor in HEIGHT alone, like CLR, and CLR's hit test is open-ended to the right so anything wider would be swallowed`);
+    chk(spkX >= c.CARD_X,
+        `reply panel: SPK starts at ${spkX}, inside the lane's left edge ${c.CARD_X}`);
+
+    // THE DRAFT'S TEXT LANE, WHICH NOTHING ANYWHERE USED TO ASSERT. The firmware
+    // computed `CARD_W - 12 - TAP_MIN` inside drawComposeDraft, the committed mock
+    // computed its own, and no checker compared them - so the one number this
+    // design deliberately trades away was the one number nobody was watching.
+    // Parsed from the firmware's own accessor, never restated here.
+    const laneW = yOf("composeDraftLaneW");
+    chk(laneW === c.CARD_W - 12 - 2 * c.TAP_MIN,
+        `reply panel: the draft's text lane is ${laneW}px = CARD_W ${c.CARD_W} - 12 - two TAP_MIN keys`);
+    // THE TEXT MUST NOT RUN UNDER SPK. Written out properly: the previous version of
+    // this line read `laneW + 6 <= spkX - c.CARD_X + c.CARD_X`, where the two CARD_X
+    // terms cancel - so it asserted `-6 <= CARD_X` and could not fail, while its
+    // MESSAGE printed the real right edge. A lane of CARD_W - 12 - 2*TAP_MIN + CARD_X
+    // would have run the text 6px under SPK and passed it.
+    const textRight = c.CARD_X + 6 + laneW;
+    chk(textRight <= spkX,
+        `reply panel: the draft text ends ${textRight} at or before SPK starts ${spkX} (drawn from CARD_X + 6)`);
+    // WHAT THE SECOND KEY COSTS, against a budget rather than against itself. laneW
+    // is pinned exactly two lines up and advanceB is a constant, so `laneCols >= 12`
+    // was fully determined and could not fail either - and its message TRANSCRIBED
+    // "27 -> 20", numbers this checker computed nowhere. Both counts are derived
+    // here, and the claim is that the cost stays inside the budget the design
+    // accepted; widening the key or the gap moves it and fails by name.
+    const adv = advanceB(b, T_BODY);
+    const oneKeyCols = Math.floor((c.CARD_W - 12 - c.TAP_MIN) / adv);
+    const laneCols = Math.floor(laneW / adv);
+    chk(oneKeyCols - laneCols <= 7,
+        `reply panel: the second key costs ${oneKeyCols - laneCols} characters of visible draft ` +
+        `(${oneKeyCols} -> ${laneCols} at advance ${adv}), within the 7 this design accepted - ` +
+        `the whole draft is one TYPE... tap away where the card wraps it to KB_TEXT_LINES`);
     // THE DRAWN BUTTON IS STRICTLY INSIDE ITS BAND, and the panel reuses the
     // action row's three numbers rather than deriving new ones - so this is the
     // claim that they still centre in a TAP_MIN band, which is what every band on
@@ -4987,6 +5121,7 @@ for (const b of [1, 2]) {
       const promptSrc = fnSrc(KB_SRC, "bool sendPromptToHost");
       const optSrc = fnSrc(COMPOSE_SRC, "void composeSendOption");
       const draftSrc = fnSrc(COMPOSE_SRC, "void drawComposeDraft");
+      const absorbSrc = fnSrc(COMPOSE_SRC, "void composeAbsorbVoice");
       const kbDrawSrc = fnSrc(KB_SRC, "void drawKeyboard");
       const kbCloseSrc = fnSrc(KB_SRC, "void closeCompose");
       const kbOpenSrc = fnSrc(KB_SRC, "void openComposeOn");
@@ -5002,6 +5137,7 @@ for (const b of [1, 2]) {
                               ["drawComposeControl", ctlSrc], ["composeTouch", cTouchSrc],
                               ["drawComposeActions", actSrc2], ["drawComposeRecents", recSrc],
                               ["composeRecentsFit", fitSrc], ["drawComposeDraft", draftSrc],
+                              ["composeAbsorbVoice", absorbSrc],
                               ["drawKeyboard", kbDrawSrc], ["closeCompose", kbCloseSrc],
                               ["kbInsert", kbInsSrc], ["handleTouch", htSrc],
                               ["openComposeOn", kbOpenSrc], ["drawKbActions", kbActSrc],
@@ -5188,6 +5324,64 @@ for (const b of [1, 2]) {
       // one that changes most.
       chk(/fillRect\(CARD_X,\s*(?:y|composeDraftY\(\)),\s*CARD_W,\s*COMPOSE_DRAFT_H/.test(draftSrc),
           "drawComposeDraft's OWN BODY clears its own band before redrawing it, so a shorter draft cannot leave the tail of a longer one behind");
+      // THE TRANSCRIPT'S THREE OWNERSHIP TESTS, bound to composeAbsorbVoice's own body.
+      // Each closed a defect that no other assertion here can see, and each is a line
+      // a later edit could delete while everything still compiled and every other
+      // check stayed green.
+      //
+      // 1. SEQ. The payload is republished every ~5s over BOTH transports, so an
+      //    insert keyed on the STATE pastes the same sentence again on every tick.
+      chk(/seq <= applied/.test(absorbSrc) && /applied = seq;/.test(absorbSrc),
+          "composeAbsorbVoice's OWN BODY gates the insert on the host's seq and records it - keyed on anything else, the ~5s republish pastes the transcript again on every tick and once more per transport");
+      // 2. PID. `voice` is one object per host while asks are per session.
+      // BOUND TO `mineAsk`, not to the file. A second `strcmp(pid, kbPid) == 0` now
+      // lives a few lines below in mineErrAsk (the addressed askerror), and a test
+      // for the expression alone was satisfied by that neighbour with the real one
+      // replaced by `true` - the selftest caught it, which is what it is for.
+      chk(/mineAsk = [^;]*strcmp\(pid, kbPid\) == 0/.test(absorbSrc.replace(/\s+/g, " ")),
+          "composeAbsorbVoice's OWN `mineAsk` requires the transcript's pid to match the ask this surface was opened for");
+      // 3. AMBIGUITY, which pid-matching alone cannot provide: pids are per-MACHINE,
+      //    so two Macs can raise the same one. The walk over sessions[] is what makes
+      //    the pid test sound, and it cannot be replaced by a curLink == kbHostSlot
+      //    check because audio leaves over Serial to whichever Mac holds the cable.
+      chk(/for \(int i = 0; i < sessionCount; i\+\+\)/.test(absorbSrc) &&
+          /sharing\+\+/.test(absorbSrc) && /sharing > 1/.test(absorbSrc),
+          "composeAbsorbVoice's OWN BODY walks sessions[] and REFUSES a pid that more than one visible ask carries - pids are per-Mac, so without this a transcript lands in whichever draft happens to be open");
+      // ---- AND THE MESSAGE HALF OF THE SAME FUNCTION, which nothing bound at all ----
+      // The three above are the ASK path. The MESSAGE path - `msgheard`, addressed by
+      // session id rather than pid - shipped with no assertion anywhere in the tree
+      // (`grep -rn msgheard **/*.mjs` found one line, in host/index.mjs), which is
+      // why four of its failures were silent at once: the transcript addressed by the
+      // wrong global, the failure states unaddressed, the failure legend drawn on a
+      // screen a message never reaches, and the bar torn down by any host's payload.
+      //
+      // 4. SESSION. A message has no pid at all (openComposeForMessage clears kbPid),
+      //    so the pid test above would drop every message transcript on the floor.
+      chk(/strcmp\(session, kbSessionId\) == 0/.test(absorbSrc) && /kbIsMessage\(\)/.test(absorbSrc),
+          "composeAbsorbVoice's OWN BODY addresses a msgheard by SESSION ID against the draft's own kbSessionId - a message carries no pid, so the ask path's test would drop every one of them");
+      // 5. THE FAILURES ARE ADDRESSED TOO, and by the same keys. They used to carry
+      //    nothing, so the surface admitted plain `error` as a stand-in - a state the
+      //    dictation path publishes and every host republishes on every tick, which
+      //    means another Mac's minutes-old failure drew VOICE: over a draft that was
+      //    fine, and took down an in-flight capture's bar with it.
+      chk(/askerror/.test(absorbSrc) && /msgerror/.test(absorbSrc) &&
+          /mineErrAsk/.test(absorbSrc) && /mineErrMsg/.test(absorbSrc),
+          "composeAbsorbVoice's OWN BODY tests askerror against kbPid and msgerror against kbSessionId - an UNADDRESSED failure state cannot be told from another Mac's");
+      chk(!/!strcmp\(state, "error"\)/.test(absorbSrc),
+          "...and plain `error` is NOT admitted - it is the dictation path's state, unaddressed and republished by every host on every tick");
+      // 6. THE BAR IS THIS DEVICE'S OWN. micProcessing is one global while `applied`
+      //    is per-link, so any host's FIRST payload after the surface opens carries a
+      //    seq above that link's zero and reached the teardown.
+      const absorbFlat = absorbSrc.replace(/\s+/g, " ");
+      chk(/const bool ours = mine \|\| oursFailed;/.test(absorbFlat) &&
+          /if \(ours\) \{ micProcessing = false; micProcConfirmed = false; \}/.test(absorbFlat),
+          "composeAbsorbVoice's OWN BODY takes the processing bar down only for an exchange it can ADDRESS - cabled to Mac A and composing for Mac B, B's next tick used to kill A's in-flight capture's bar and repaint the surface mid-keystroke");
+      // 7. THE REPAINT GUARD ASKS WHETHER THE LEGEND CHANGED, not whether one is up.
+      //    `composeVoiceMsg[0]` as a term made a standing failure repaint the whole
+      //    surface on every new seq from any host - the guard defeated by its own
+      //    third term, three lines under the comment explaining why it exists.
+      chk(/strcmp\(vmWas, composeVoiceMsg\)/.test(absorbSrc),
+          "composeAbsorbVoice's OWN BODY repaints on a CHANGE to the failure legend, not on one being present - a standing message made the guard permanently true");
       chk(/composeOnPanel\(\)/.test(kbDrawSrc) && /drawCompose\(\)/.test(kbDrawSrc),
           "drawKeyboard's OWN BODY routes to the panel on composeOnPanel() - ONE screen-painting entry point for both screens of the compose surface");
       chk(/composeScreen\s*=\s*COMPOSE_SCREEN_PANEL/.test(kbCloseSrc),

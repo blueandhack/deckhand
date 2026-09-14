@@ -31,7 +31,7 @@ const TH = {}; for (const k in RAW) { TH[k] = {}; RAW[k].forEach((v,i) => TH[k][
 const K = {
   BOARD_W:320, BOARD_H:480, TAB_BAR_H:46, CONTENT_Y:46, FOOTER_H:20,
   CARD_X:12, CARD_W:296, PAD:18, BAR_H:12, R_MD:12, BORDER_CARD:2,
-  TAB_REC_W:40, TAB_COUNT:3, SP_2:8,
+  TAB_COUNT:3, SP_2:8,
   // CARD_H/CODEX_H/CARD1_Y are unchanged by the column move (Task 9): CARD_H
   // stays declared in the header - v1's, unread there now - and CARD1_Y is
   // CONTENT_Y+8 under both layouts. CARD2_Y/CODEX_Y are NOT still v1's: Task
@@ -316,14 +316,13 @@ const staleTxt = d => { const m=(d.age/60)|0; return m<60 ? `stale ${m}m` : `sta
 function chrome(p,d) {
   const t = p.t; p.fill(t.bg); p.chromeMode = true;
   p.rect(0,0,K.BOARD_W,K.TAB_BAR_H,t.card);
-  const tabsW = K.BOARD_W-K.TAB_REC_W, tabW = Math.floor(tabsW/K.TAB_COUNT);
+  // THE RECORD SLOT IS GONE (2026-09-13) - the three tabs share the whole width.
+  // Speaking to a session starts from that session's own detail header now.
+  const tabW = Math.floor(K.BOARD_W/K.TAB_COUNT);
   ["USAGE","SESSIONS","SETTINGS"].forEach((L,i) => {
     p.text(L,i*tabW+Math.floor(tabW/2),Math.floor(K.TAB_BAR_H/2),1,i===0?t.value:t.label,t.card,"MC","string");
     if (i===0) p.rect(i*tabW+8,K.TAB_BAR_H-3,tabW-16,3,t.accent);
   });
-  const rx = tabsW+Math.floor((K.TAB_REC_W-27)/2), cy = Math.floor(K.TAB_BAR_H/2);
-  p.ops.push(["r",rx,cy-3,6,6,t.label]); // record dot, approximated as a small square - cosmetic only
-  p.text("REC",rx+9,cy-8,1,t.label,null,"TL","string");
   // footer
   p.hline(0,K.contentBottom,K.BOARD_W,t.label);
   p.rect(0,K.contentBottom+1,K.BOARD_W,K.FOOTER_H-1,t.bg);

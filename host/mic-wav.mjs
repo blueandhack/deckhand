@@ -176,9 +176,20 @@ for (let w = 0; w + win <= n; w += win) {
   if (rms < quiet) quiet = rms;
   if (rms > loud) loud = rms;
 }
-const snrDb = quiet > 0 ? 20 * Math.log10(loud / quiet) : 0;
+// UNDEFINED IS NOT ZERO, and printing it as zero made a LOUD capture look silent.
+// `quiet` is the quietest 100ms window; one window of digital silence - board 2's
+// I2S before the ES8311 settles, a DMA gap - makes the ratio undefined, and the
+// old `: 0` reported that as "0.0 dB". index.mjs refuses under 8dB, so a take with
+// 900 RMS of speech in it was thrown away as "nothing was said loudly enough".
+// The mirror case proves neither was considered: a capture shorter than one window
+// leaves quiet=Infinity and loud=0, printed "-Infinity dB", which the host's own
+// regex does not match and therefore waves through. `n/a` is now BOTH of them, and
+// it reads as "this number could not be taken" at every consumer.
+const snrDb = quiet > 0 && Number.isFinite(quiet) && loud > 0
+  ? 20 * Math.log10(loud / quiet) : null;
 console.log(`quietest 100ms RMS: ${quiet.toFixed(1)}   loudest: ${loud.toFixed(1)}   peak: ${peak}`);
-console.log(`=> signal-to-noise: ${snrDb.toFixed(1)} dB   (speech needs ~15-20dB to transcribe well)`);
+console.log(`=> signal-to-noise: ${snrDb === null ? "n/a" : snrDb.toFixed(1)} dB` +
+            `   (speech needs ~15-20dB to transcribe well)`);
 
 // ---- de-rumble: the noise and the voice are in different bands ----
 // Measured on a real capture: the noise floor is dominated by a ~70Hz rumble
@@ -302,11 +313,13 @@ function measure(arr) {
     if (r < q) q = r;
     if (r > l) l = r;
   }
-  return { q, l, pk, db: q > 0 ? 20 * Math.log10(l / q) : 0 };
+  // See the `n/a` note at the raw measurement above: an undefined ratio is not 0dB.
+  return { q, l, pk, db: q > 0 && Number.isFinite(q) && l > 0 ? 20 * Math.log10(l / q) : null };
 }
+const dbStr = (m) => (m.db === null ? "n/a" : m.db.toFixed(1));
 const mRaw = measure(sig), mCln = measure(clean);
-console.log(`raw      : quiet ${mRaw.q.toFixed(1)}  loud ${mRaw.l.toFixed(1)}  => ${mRaw.db.toFixed(1)} dB`);
-console.log(`filtered : quiet ${mCln.q.toFixed(1)}  loud ${mCln.l.toFixed(1)}  => ${mCln.db.toFixed(1)} dB   (180Hz HP x2 + 3kHz LP)`);
+console.log(`raw      : quiet ${mRaw.q.toFixed(1)}  loud ${mRaw.l.toFixed(1)}  => ${dbStr(mRaw)} dB`);
+console.log(`filtered : quiet ${mCln.q.toFixed(1)}  loud ${mCln.l.toFixed(1)}  => ${dbStr(mCln)} dB   (180Hz HP x2 + 3kHz LP)`);
 
 // ---- write the WAV, normalised so it's actually audible ----
 // The device deliberately sends raw ADC counts with no gain, so a quiet signal

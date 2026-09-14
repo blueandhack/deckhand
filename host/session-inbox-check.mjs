@@ -1045,8 +1045,15 @@ async function selftest() {
                       "  msgPriByDevice.delete(key);")],
     ["host", "the USB close handler stops pruning it",
      (s) => s.replace(/    forgetMsgPriorityFor\(battKey\);   \/\/ the same key, the same rule - see its own note\n/, "")],
+    // PRE-EXISTING BREAKAGE, found 2026-09-13 and not caused by that work: this
+    // pattern wanted an 8-space indent and a trailing "// likewise, and likewise
+    // AFTER the teardown" comment, and the line it targets has neither - so the fault
+    // had stopped injecting and the selftest was reporting teeth it no longer had
+    // (70/70 of 71 DEFINED, which exits 1 and is easy to read past). Re-anchored on
+    // startBleScan(), which is what makes this call site unique - the other
+    // forgetMsgPriorityFor(battKey) is the USB one, targeted by the fault above.
     ["host", "the BLE disconnect handler stops pruning it",
-     (s) => s.replace(/        forgetMsgPriorityFor\(battKey\);   \/\/ likewise, and likewise AFTER the teardown\n/, "")],
+     (s) => s.replace(/\n  forgetMsgPriorityFor\(battKey\);\n(  startBleScan\(\);)/, "\n$1")],
 
     ["host", "the inbox call removed, so every message goes back to the clipboard",
      (s) => s.replace(/    r = await postToSessionInbox\(record, text[^;]*\);/,
@@ -1071,8 +1078,12 @@ async function selftest() {
     ["host", "the failure logged WITHOUT its cause, so all four failure modes read alike",
      (s) => s.replace(/`\$\{tag\}: session inbox unavailable \(\$\{r\.why\}\)/,
                       "`${tag}: session inbox unavailable")],
-    ["host", "the default left at \"clipboard\", so the inbox path is unreachable without opting in",
-     (s) => s.replace(/const VOICE_DELIVERY = process\.env\.DECKHAND_VOICE_DELIVERY \|\| "inbox";/,
+    // The default went "inbox" -> "draft" on 2026-09-13 (a dictation becomes a
+    // reviewable draft rather than posting immediately), and this fault's pattern
+    // still named "inbox" - so it stopped injecting and quietly stopped counting.
+    // Anchored on the DECLARATION rather than on the value it holds.
+    ["host", "the delivery default left at \"clipboard\", so neither the draft nor the inbox path is reachable without opting in",
+     (s) => s.replace(/const VOICE_DELIVERY = process\.env\.DECKHAND_VOICE_DELIVERY \|\| "[a-z]+";/,
                       'const VOICE_DELIVERY = process.env.DECKHAND_VOICE_DELIVERY || "clipboard";')],
     ["host", "DECKHAND_VOICE_DELIVERY=clipboard no longer skips the socket - the escape hatch removed",
      (s) => s.replace(/if \(VOICE_DELIVERY !== "clipboard"\) \{\n  \/\/ WRAPPED,/,

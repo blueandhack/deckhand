@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1419776, RAM 73492 | flash 1065744, RAM 73348 |
+| size today | flash 1421824, RAM 72004 | flash 1067280, RAM 71860 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -123,7 +123,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `365406b8ad175a01...`, size 1419776 (board 2: `2bd7ac344932a800...`, size 1065744).
+Today: `df7c67783d3cfe46...`, size 1421824 (board 2: `b6ecc9d8a38bcff7...`, size 1067280).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -255,7 +255,7 @@ one is neither handled nor refused.
 
 | command | what it does |
 |---|---|
-| `RECAL` / `MICTEST` / `MICMON` / `MICREC` / `MICSTREAM` | touch calibration; mic level, live meter, one-shot and streaming capture. **`RECAL` is BOARD 1 ONLY** and board 2 refuses it BY NAME (`BOARD_TOUCH_NEEDS_CAL`): its touch is inside the ST77922 and factory-aligned, so there is no mapping to fit, no `runCalibration()` compiled and no `CALIBRATE TOUCH` on its Device group. It used to be handled on both with a stub behind it that printed and returned - from the Mac, indistinguishable from a run that worked |
+| `RECAL` / `MICTEST` / `MICMON` / `MICREC` / `MICSTREAM` | touch calibration; mic level, live meter, one-shot and streaming capture. **The four MIC verbs REFUSE BY NAME while a full-screen surface is up** (compose, reader, history, emoji grid, pairing panel) - a capture paints its pill over whatever is there and swallows that surface's taps as stop votes; they had no such guard until 2026-09-13. **`RECAL` is BOARD 1 ONLY** and board 2 refuses it BY NAME (`BOARD_TOUCH_NEEDS_CAL`): its touch is inside the ST77922 and factory-aligned, so there is no mapping to fit, no `runCalibration()` compiled and no `CALIBRATE TOUCH` on its Device group. It used to be handled on both with a stub behind it that printed and returned - from the Mac, indistinguishable from a run that worked |
 | `TAB 0..2` / `PAGE 0..SET_GROUP_COUNT` (`0` is the SETTINGS HOME menu, `1..SET_GROUP_COUNT` its groups, the same ids on BOTH boards now - and the firmware DERIVES that bound rather than writing it, under a `static_assert` tying `SET_DANGER` to it. `SET_GROUP_COUNT is 6 today`, and that numeral is the only transcription in this row: `commands-check.mjs` parses this line against both headers and fails by name if it drifts, because the group set has already been re-cut three times on this branch. Out of range, a non-numeric argument, and "SETTINGS is not the live tab" all REFUSE BY NAME, the first two quoting the range they checked) / `KBTEST` / `EMOJITEST` / `EMOJITEST off` / `READTEST` | put a surface on the glass, since a capture can only record what is already there. **`EMOJITEST off` is the escape** - the flag gates payload absorption AND the tick, and without it a `TAB` painted over the grid left a board that looked alive with a frozen footer, recoverable only by reflashing. `TAB` now clears the grid and REFUSES over a reader/transcript rather than stranding its flag |
 | `DETAIL <n>` | session `n`'s detail card, or its ask screen, WITHOUT the keyboard over it - the only route to either from the Mac (`KBTEST msg` opens the keyboard over it). Refuses by name on no sessions, an out-of-range `n`, or another full-screen surface |
 | `COMPOSE` + `type <text>` / `chip <n>` / `page` / `keys` / `back` / `sent` / `recent <t>` / `off` | the reply panel over the first pending ask, then the draft, a token tap, the pager, the two SCREEN MOVES, the receipt state and the recents ring. `sent` and `recent` SEND NOTHING. `chip`/`page` dedupe the double delivery BY NAME (an insert is not idempotent); opening and the screen moves do not, and say why (they are). **Nothing here can tap a control** - see `KBBUBBLE` |

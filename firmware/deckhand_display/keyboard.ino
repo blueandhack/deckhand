@@ -689,7 +689,26 @@ void drawKbText() {
   // to run out, and a timer implying otherwise would be a lie.
   int sec = (!kbIsMessage() && kbSessionIdx >= 0 && kbSessionIdx < sessionCount)
               ? sessions[kbSessionIdx].askSec : -1;
-  if (sec >= 0) {
+  // WHY THE LAST CAPTURE PRODUCED NOTHING, ON THIS SCREEN TOO. composeVoiceMsg was
+  // written by composeAbsorbVoice and read in exactly one place - drawCompose()'s
+  // INSERT legend, which is on the PANEL. A message never has a panel
+  // (composeHasPanel() is !kbIsMessage()) and SPEAK opens straight onto the keys,
+  // so every message-capture failure composed its sentence and drew it nowhere:
+  // the bar came down, the draft was unchanged, and the glass said nothing. It
+  // TAKES THE COUNTDOWN'S END OF THE META ROW while it is set - the countdown is
+  // advisory and never decides whether SEND works, this is the only report of a
+  // capture that failed, and it is cleared by the next edit or the next capture so
+  // the timer comes back within one keystroke.
+  if (composeVoiceMsg[0]) {
+    char vm[KB_COLS + 1];
+    setUIFont(T_META);
+    // The lane the counter leaves, with 8px between them so the two never touch.
+    const int lane = CARD_W - 12 - tft.textWidth(cnt) - 8;
+    fitText(vm, sizeof(vm), composeVoiceMsg, lane);
+    tft.setTextColor(COLOR_WARN, COLOR_CARD);
+    tft.setTextDatum(TR_DATUM);
+    tft.drawString(vm, CARD_X + CARD_W - 6, KB_META_Y);
+  } else if (sec >= 0) {
     char buf[12];
     snprintf(buf, sizeof(buf), "%ds", sec);
     setUIFont(T_META);
@@ -767,8 +786,15 @@ void drawKbText() {
 // column from, and these are where the answer is kept. Zero-width until the row
 // has been drawn once, which kbTouch() treats as "no control here" rather than
 // as column 0.
-const int KB_ACT_COLS = 2;
-int kbActX[KB_ACT_COLS] = {0, 0}, kbActW[KB_ACT_COLS] = {0, 0};
+// THREE COLUMNS SINCE 2026-09-13, and in BOTH modes rather than only the one that
+// needs it. Message mode needs SPK because the keyboard is its ROOT - there is no
+// panel behind it holding the draft-line key - and answer mode gets it because the
+// alternative was two `labels[KB_ACT_COLS]` initialisers, which settings-geom-check
+// reads as one: it takes the FIRST and asserts BACK, DISCARD and CANCEL all live in
+// it, so a per-mode split would have silently checked half the row. Answer mode also
+// gains something real: re-record without leaving the keys.
+const int KB_ACT_COLS = 3;
+int kbActX[KB_ACT_COLS] = {0, 0, 0}, kbActW[KB_ACT_COLS] = {0, 0, 0};
 
 void drawKbActions() {
   // OUTLINED, where both buttons used to be filled and so had no hierarchy.
@@ -792,14 +818,20 @@ void drawKbActions() {
   // lose, CANCEL when there is nothing to destroy.
   const bool draft = kbLen > 0;
   const bool back = composeHasPanel();
+  // SPK is nullptr rather than dim when it cannot work - the treatment SEND already
+  // gets from kbWindowClosed. uiActionRow still measures and stores the column, so
+  // kbTouch's band survives to refuse the tap BY NAME, and nothing is drawn that
+  // would advertise a control that does nothing.
   const char* labels[KB_ACT_COLS] = { back ? "BACK" : (draft ? "DISCARD" : "CANCEL"),
+                                      composeSpeakOffered() ? "SPK" : nullptr,
                                       kbWindowClosed ? nullptr : "SEND" };
   // An empty answer would reach Claude as a blank deny message, which reads as
   // a refusal with no reason. Offer SEND only when there is something to send.
   const uint16_t tints[KB_ACT_COLS] = { (!back && draft) ? COLOR_WARN : COLOR_ACCENT,
+                                        COLOR_ACCENT,
                                         draft ? COLOR_GOOD : COLOR_LABEL };
-  const uint8_t fills[KB_ACT_COLS] = { 0, (uint8_t)(draft ? 1 : 0) };
-  const uint8_t fracs[KB_ACT_COLS] = {1, 2};
+  const uint8_t fills[KB_ACT_COLS] = { 0, 0, (uint8_t)(draft ? 1 : 0) };
+  const uint8_t fracs[KB_ACT_COLS] = {1, 1, 2};
   uiActionRow(KB_ACT_Y, KB_ACT_H, KB_ACT_DRAWN, KB_ACT_DY, labels, tints, fills,
               fracs, KB_ACT_COLS, kbActX, kbActW);
   if (kbWindowClosed) {
@@ -813,7 +845,10 @@ void drawKbActions() {
     // the lane instead, same rule CLAUDE.md states for the confirm dialog's card
     // text. It was halfW - 104px on board 1, 144 here - and is now the wider
     // SEND column: 139 and 192, less the 4px inset on each side.
-    const int laneX = kbActX[1], laneW = kbActW[1];
+    // THE LAST COLUMN, which is SEND's - it was kbActW[1] while the row had two.
+    // Indexed off KB_ACT_COLS rather than written as 2, so a fourth column cannot
+    // leave this pointing at the wrong lane.
+    const int laneX = kbActX[KB_ACT_COLS - 1], laneW = kbActW[KB_ACT_COLS - 1];
     // Clear first: SEND (a full uiButton fill) or an earlier draw of this same
     // message may have left pixels here that the new wrapped text won't cover -
     // it's narrower than the lane at every line. The clear is the full BAND,
@@ -822,7 +857,12 @@ void drawKbActions() {
     tft.fillRect(laneX, KB_ACT_Y, laneW, KB_ACT_H, COLOR_BG);
     // In message mode the prompt did not expire - the SESSION stopped being READY,
     // and "answer on your Mac" would be answering a question nobody asked.
-    const char* why = kbIsMessage() ? "NO LONGER READY" : "WINDOW CLOSED - ANSWER ON YOUR MAC";
+    // "ANSWER ON YOUR MAC", not "WINDOW CLOSED - ANSWER ON YOUR MAC", and the cut is
+    // FORCED rather than editorial: SEND's lane went 139 -> 100px on board 1 when the
+    // row gained SPK, and the old string wraps to THREE lines there - 39px against a
+    // 26px drawn button, measured on both boards. The half that went is the redundant
+    // one: a SEND that is not drawn already says the window is closed.
+    const char* why = kbIsMessage() ? "NO LONGER READY" : "ANSWER ON YOUR MAC";
     // MEASURED, not hardcoded. This was `const int lines = 3;` beside a comment
     // telling the next person to re-measure when the string changed - exactly the
     // instruction that gets missed, and there are two strings now. RE-MEASURED
@@ -902,6 +942,14 @@ void openComposeOn(int idx, uint8_t screen) {
   kbPeekPage = -1;
   kbRepeatRow = kbRepeatCol = -1;
   kbWindowClosed = false;
+  // A FAILURE BELONGS TO THE CAPTURE THAT CAUSED IT AND TO NO LATER SURFACE. This
+  // was missing from the one function whose own header says every reset lives in
+  // it, so "VOICE: whisper not installed" from an ask on session A was still in the
+  // legend when the panel opened for an unrelated ask on session B - and worse, the
+  // repaint guard at the end of composeAbsorbVoice has `composeVoiceMsg[0]` as its
+  // third term, so a permanently-set message made EVERY new voice.seq from ANY host
+  // repaint the whole surface mid-keystroke: the guard defeated by its own term.
+  composeVoiceMsg[0] = '\0';
   composeResetPanel();          // the reply panel's four, defined in compose.ino
   copyField(kbPid, sizeof(kbPid), sessions[idx].askPid);
   kbHostSlot = sessions[idx].hostSlot;
@@ -1010,6 +1058,14 @@ void kbInsert(char c) {
   // key (or a chip) that stops inserting with no visible reason reads as a
   // dropped press.
   if (kbLen >= KB_MAX_BYTES) {
+    // ...ONCE, not once per dropped byte. composeInsertChip spools a token in one
+    // kbInsert at a time with composeBatching up, so a 150-byte transcript arriving
+    // into a full draft took this branch 150 times and repainted the text card 150
+    // times in a tight loop - strobing on board 1, which draws straight to glass.
+    // composeAfterEdit() has always returned early on the flag; drawKbText() had no
+    // such guard, and the keys screen is the ONLY screen a message transcript can
+    // arrive on. composeInsertChip's trailing composeAfterEdit() pays the repaint.
+    if (composeBatching) return;
     if (composeOnPanel()) composeAfterEdit();
     else drawKbText();
     return;
@@ -1033,7 +1089,16 @@ void kbInsert(char c) {
   // keyboard's text card and the reply panel's draft line are different pixels -
   // and drawKbText() would paint that card over the panel's prompt card and reply
   // buttons, which is a full-width repaint of the wrong screen.
+  // THE NEXT EDIT CLEARS THE VOICE FAILURE, which is what composeVoiceMsg's own
+  // comment has always claimed and nothing did: only composeSpeak() and a clean
+  // insert cleared it, so "VOICE FAILED - nothing recognised" sat over an entire
+  // typing pass. `composeBatching` is the discriminator and not an optimisation:
+  // a transcript arrives through this same function one byte at a time with the
+  // flag up, and composeAbsorbVoice sets the DRAFT FULL message AFTER that spool -
+  // so clearing unconditionally here would be clearing a message not yet written.
+  if (!composeBatching) composeVoiceMsg[0] = '\0';
   if (composeOnPanel()) { composeAfterEdit(); return; }
+  if (composeBatching) return;   // see the cap branch above: one repaint, at the end
   drawKbText();
   drawKbActions();      // SEND becomes live on the first character
 }
@@ -1046,6 +1111,7 @@ void kbBackspace() {
   memmove(kbText + pos - 1, kbText + pos, kbLen - pos + 1);
   kbLen--;
   if (kbCaret >= 0) kbCaret--;  // moves left with the byte it just deleted
+  composeVoiceMsg[0] = '\0';                              // see kbInsert
   if (composeOnPanel()) { composeAfterEdit(); return; }   // see kbInsert
   drawKbText();
   drawKbActions();      // SEND goes inert again at zero
@@ -1083,6 +1149,18 @@ bool kbTouch(int sx, int sy) {
       if (i == 0) {
         if (composeHasPanel()) composeBackToPanel();
         else closeCompose();
+        return true;
+      }
+      // COLUMN 1 IS SPK, AND IT HAS TO BE TESTED EXPLICITLY. The SEND arm below is
+      // reached by EXHAUSTION rather than by an `i == 2`, so without this branch an
+      // inserted column would silently BECOME SEND - a new key that sends the draft
+      // instead of recording over it, with no compile error to say so.
+      if (i == 1) {
+        if (composeSpeakOffered()) composeSpeak();
+        else if (kbIsMessage())
+          Serial.println("KB: SPK refused: this session is no longer accepting messages");
+        else
+          Serial.println("KB: SPK refused: this ask does not accept a spoken answer");
         return true;
       }
       // SEND from the KEYBOARD leaves the surface, which is what it has always
@@ -1624,7 +1702,9 @@ bool sendTypedAnswerToHost() {
   // one old enough to send no hostId at all - answerable, by falling back to
   // activeHost exactly the way the pre-multi-pairing authHmac() always did.
   String mac = authHmacFor(pairingSlotForRow(sessions[idx].hostSlot), payload);
-  // "0" when unprovisioned, matching sendAnswerToHost and sendVoiceAnswerToHost.
+  // "0" when unprovisioned, matching sendAnswerToHost. (It used to say "and
+  // sendVoiceAnswerToHost" too; that function went with the voice confirm screen -
+  // a spoken answer is an ordinary draft and leaves through THIS sender now.)
   // Deliberately NOT a silent return: the host logs the rejection, so an unpaired
   // device shows up as a refused answer rather than a SEND that quietly does nothing.
   if (mac.length() == 0) mac = "0";

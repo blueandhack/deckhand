@@ -123,9 +123,13 @@ void drawHistory() {
     tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + READER_BTN_H / 2);
     tft.setTextDatum(TL_DATUM);
   }
-#if !BOARD_USES_TFT_ESPI
-  tft.flush();
-#endif
+// ~~#if !BOARD_USES_TFT_ESPI / tft.flush()~~ STOOD HERE AND WAS DEAD ON BOTH BOARDS.
+// This arm of drawHistory() is the `#else` of `#if BOARD_HISTORY_SCROLL`, i.e.
+// board 1 only - and board 1 is the board that uses TFT_eSPI, so `!BOARD_USES_TFT_ESPI`
+// inside it can never be true. Board 2 never reaches this arm at all. It compiled to
+// nothing everywhere and warned nowhere. Removed rather than corrected: board 1 draws
+// straight to the glass and has no flush() to call. Found by the dead-arm rule in
+// commands-check.mjs, which evaluates every guard stack against both headers.
 #endif  // BOARD_HISTORY_SCROLL
 }
 // `HISTORY <id> <chat|all> <page|last>`. Every page turn is a round trip - instant over
@@ -176,9 +180,9 @@ void drawHistFull() {
     tft.drawString(btns[i].label, btns[i].x + btns[i].w / 2, READER_CTRL_Y + READER_BTN_H / 2);
     tft.setTextDatum(TL_DATUM);
   }
-#if !BOARD_USES_TFT_ESPI
-  tft.flush();
-#endif
+// ~~#if !BOARD_USES_TFT_ESPI / tft.flush()~~ - dead on both boards, for the reason
+// given at the end of drawHistory() above: this whole function is inside
+// `#if !BOARD_HISTORY_SCROLL`, which is board 1, which is the TFT_eSPI board.
 }
 #endif  // !BOARD_HISTORY_SCROLL
 // THE DEVICE TELLS THE HOST HOW BIG ITS READER IS, as a trailing `<cols>x<lines>`

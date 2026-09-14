@@ -93,7 +93,7 @@ the formula the right one. Board 2's `KB_ROWS_Y` did not move, so its 15 stands.
 | checker | `KNOWN[1]` | `KNOWN[2]` | how this number is kept |
 |---|---|---|---|
 | `usage-geom-check.mjs` | 3 clear-box overlaps (`-2`/`-3`/`-1`), as `KNOWN_OVERLAPS` | empty | **TRANSCRIBED**, taken 2026-09-12 |
-| `sessions-geom-check.mjs` | **8** (9 tolerations - one entry is reached at two sites) | empty | **TRANSCRIBED**, taken 2026-09-12 |
+| `sessions-geom-check.mjs` | **8** (9 tolerations - one entry is reached at two sites) | empty | **PARSED** - `sessions-geom-check.mjs` reads this row |
 | `settings-geom-check.mjs` | **9** | empty | **PARSED** - `settings-geom-check.mjs` reads this row |
 
 **THE SETTINGS ROW IS PARSED NOW, AND THAT IS RULING 22's ANSWER TO ITS OWN THIRD OCCURRENCE.**
@@ -106,7 +106,16 @@ reflowed table cannot silently stop the check, and **fails by name** when the fi
 `KNOWN[1].length`. Proven on the stale text before it was fixed —
 `FAIL board-1-known-state.md says settings-geom-check holds 11 board-1 allowlist entries; KNOWN[1] holds 9`.
 
-**THE OTHER TWO ROWS ARE TRANSCRIPTIONS AND SAY SO, WHICH IS THE OTHER HALF OF THE SAME RULE:** a
+**AND THE SESSIONS ROW IS PARSED TOO, AS OF 2026-09-13.** It was transcribed, and it was wrong
+within a day of being taken - it said 9 entries and 10 tolerations while the checker held 8 and 9,
+because the voice work removed an entry and the prose did not follow. That is the same defect the
+settings row paid for twice, so it gets the same fix rather than a fourth hand correction:
+`sessions-geom-check.mjs` parses BOTH figures out of this row - the entry count against
+`KNOWN[1].length` and the toleration count against the number of `chk()` calls that actually took
+the allowlist - and fails by name on either. The two numbers differ on purpose, and asserting only
+the first would leave the parenthesis free to drift.
+
+**THE REMAINING TRANSCRIPTION SAYS SO OUT LOUD, WHICH IS THE OTHER HALF OF THE SAME RULE:** a
 number is either parsed or it states out loud that it is not, and when it was taken. They were read
 off the checkers' own summary lines on 2026-09-12 and are not bound to anything. Re-derive them with
 `node firmware/deckhand_display/{usage,sessions}-geom-check.mjs` and read the last line. They were

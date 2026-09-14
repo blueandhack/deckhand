@@ -87,6 +87,18 @@ char composeSentText[KB_MAX_BYTES + 1] = "";
 // ONCE at the end instead of once per byte. A 38-byte path would otherwise repaint
 // that line 38 times on a panel that draws straight to the glass.
 bool composeBatching = false;
+// WHY THE LAST CAPTURE PRODUCED NOTHING, shown where the INSERT legend goes.
+// handleLine's voice-card raise is gated on !composeActive, and SPEAK now ALWAYS
+// raises this surface - so that card is unreachable for every answer exchange and
+// askerror had no way to reach the glass at all. Without this the user taps SPEAK,
+// speaks, the bar vanishes and the draft is unchanged: identical glass for "nothing
+// recognised", "whisper is not installed" and "the cable fell out". Cleared by the
+// next capture or the next edit, so it never outlives the thing it explains.
+// 64, not 48: the widest thing written here is the DRAFT FULL report, whose two
+// %d fields the compiler must assume are 11 digits each, and at 48 that was a real
+// -Wformat-truncation. fitText trims it to the lane at draw time either way, so the
+// buffer's job is only to hold what snprintf composes.
+char composeVoiceMsg[64] = "";
 // The action row's TESTED zones, written by drawComposeActions and read by
 // composeTouch - the same contract kbActX/kbActW have with drawKbActions and
 // kbTouch, and for the same reason: two functions computing one column width
@@ -290,6 +302,26 @@ void drawComposeTokens(int idx) {
 // editable character by character. It is TAP_MIN WIDE, so it is short in one axis.
 // ---------------------------------------------------------------------------
 int composeClrX() { return CARD_X + CARD_W - TAP_MIN; }
+// SPEAK sits immediately left of CLR, and the two keys are the reason the draft
+// line is the right home for it: this band is ALREADY the one named entry in the
+// sub-floor list (21px against a TAP_MIN of 40, short in height with a full-width
+// tested zone), so a second key here is the SAME exception rather than a new one.
+// The alternatives both cost more - keyboard row 3 is exactly 10 cells and closes
+// on BOARD_W, so SPK there takes a cell from SPACE; a fourth action column gives
+// 38px against a 40px floor and simply fails.
+int composeSpkX() { return composeClrX() - TAP_MIN; }
+// The text lane, DERIVED FROM THE KEYS rather than written out again. Two keys cost
+// board 1 SEVEN characters of visible draft (164 -> 124px, 27 -> 20 at a 6px advance)
+// and board 2 FIVE (238 -> 192px, 29 -> 24 at 8). The advance is named rather than
+// spelled TEXT_ADV, because that constant exists only in board_es3c35p.h - quoting it
+// here would name a board-2 symbol while giving a board-1 value. The whole draft is
+// always one TYPE... tap away, where the card wraps it to KB_TEXT_LINES at KB_COLS.
+// THE WORST CASE - both keys - which is what settings-geom-check.mjs binds. The
+// draw adds a TAP_MIN back when SPK is not offered (a message has no prompt to
+// answer, and a sent panel is a receipt): subtracting for a key that is not drawn
+// would leave a 40px hole and cost 7 characters for nothing. Derived from this one
+// expression rather than written out again, so the two cannot drift.
+int composeDraftLaneW() { return CARD_W - 12 - 2 * TAP_MIN; }
 void drawComposeDraft() {
   const int y = composeDraftY();
   tft.fillRect(CARD_X, y, CARD_W, COMPOSE_DRAFT_H, COLOR_BG);
@@ -306,12 +338,25 @@ void drawComposeDraft() {
     tft.drawString(shown, CARD_X + 6, y + 4);
     return;
   }
-  fitText(shown, sizeof(shown), kbLen > 0 ? kbText : "(empty)", CARD_W - 12 - TAP_MIN);
+  fitText(shown, sizeof(shown), kbLen > 0 ? kbText : "(empty)",
+          composeDraftLaneW() + (composeSpeakOffered() ? 0 : TAP_MIN));
   tft.setTextColor(kbLen > 0 ? COLOR_VALUE : COLOR_LABEL, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(shown, CARD_X + 6, y + 4);
-  // The KEY's radius, not the card's: this is a key-sized control on a tight line.
+  // The KEY's radius, not the card's: these are key-sized controls on a tight line.
   const int cw = TAP_MIN - COMPOSE_KEY_GAP, ch = COMPOSE_DRAFT_H - 2;
+  // SPEAK is offered only where it can actually work: a pending ask (message mode
+  // has no prompt to answer), a host that says this ask takes voice, and a panel
+  // that has not already sent. A control that is drawn but refuses is exactly what
+  // the ask screen's own read-only path exists to avoid.
+  if (composeSpeakOffered()) {
+    uiFillRound(composeSpkX(), y, cw, ch, KB_KEY_R, COLOR_CARD, COLOR_BG);
+    uiStrokeRound(composeSpkX(), y, cw, ch, KB_KEY_R, BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
+    setUIFont(T_META);
+    tft.setTextColor(COLOR_VALUE, COLOR_CARD);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("SPK", composeSpkX() + cw / 2, y + ch / 2);
+  }
   uiFillRound(composeClrX(), y, cw, ch, KB_KEY_R, COLOR_CARD, COLOR_BG);
   uiStrokeRound(composeClrX(), y, cw, ch, KB_KEY_R, BORDER_CTRL, COLOR_ACCENT, COLOR_BG);
   setUIFont(T_META);
@@ -319,6 +364,45 @@ void drawComposeDraft() {
   tft.setTextDatum(MC_DATUM);
   tft.drawString("CLR", composeClrX() + cw / 2, y + ch / 2);
   tft.setTextDatum(TL_DATUM);
+}
+
+// Whether the SPK key is live on this panel. Mirrors the ask screen's own `speak`
+// predicate (askVoice && askAnswerable) with the surface's two extra facts: a
+// message has no prompt to answer, and a panel that has sent is a receipt.
+bool composeSpeakOffered() {
+  const int idx = kbSessionIdx;
+  // kbWindowClosed joins the list: with SEND already withheld there is nothing a
+  // recording could become, and offering it would be the "control that cannot work"
+  // the read-only ask path exists to refuse.
+  if (composeSent || kbWindowClosed) return false;
+  if (idx < 0 || idx >= sessionCount) return false;
+  // A MESSAGE asks a different question than an ANSWER. There is no pid and no
+  // ask.voice to consult - what matters is whether the session still takes messages
+  // at all, which is exactly msgOffered()'s job and is the same gate the TYPE chip
+  // and SEND already stand behind. Since 2026-09-13 that includes WORKING sessions,
+  // so you can speak a note for a session to pick up after the turn it is in.
+  if (kbIsMessage()) return msgOffered(idx);
+  if (!kbPid[0]) return false;
+  return sessions[idx].askVoice && sessions[idx].askAnswerable;
+}
+
+// Starts an answer capture for the prompt this panel is composing for. The
+// micAnswerPid idiom is the ask screen's, verbatim: set it, run the blocking
+// capture, clear it immediately so it can never leak into a later dictation.
+void composeSpeak() {
+  if (!composeSpeakOffered()) {
+    Serial.println("COMPOSE: SPK refused: this panel has no pending question to answer by voice");
+    return;
+  }
+  composeVoiceMsg[0] = '\0';   // the previous failure is not this capture's news
+  // micAnswerPid IS THE ANSWER FLAG, so a MESSAGE must leave it empty. It is what
+  // puts `answer=<pid>` in the stream header, and the host switches on that alone:
+  // with it the transcript comes back as `askheard` for an ask's draft, without it
+  // as `msgheard` for a message's. Setting it for a message would park the words
+  // against a prompt that does not exist.
+  if (!kbIsMessage()) copyField(micAnswerPid, sizeof(micAnswerPid), kbPid);
+  micStream();                 // capped by composeActive - see MIC_ANSWER_MAX_MS
+  micAnswerPid[0] = '\0';
 }
 
 // ---------------------------------------------------------------------------
@@ -552,8 +636,10 @@ void drawCompose() {
     drawComposeLegend(composeLegend1Y(), sessions[idx].askOptCount ? "REPLY - ONE TAP SENDS"
                                                                   : "REPLY: THIS ASK OFFERS NO OPTIONS");
     drawComposeReplies(idx);
-    drawComposeLegend(composeLegend2Y(), sessions[idx].askChipCount ? "INSERT AT THE CARET"
-                                                                   : "INSERT: NO TOKENS IN THIS ASK");
+    drawComposeLegend(composeLegend2Y(),
+                      composeVoiceMsg[0] ? composeVoiceMsg
+                                         : (sessions[idx].askChipCount ? "INSERT AT THE CARET"
+                                                                       : "INSERT: NO TOKENS IN THIS ASK"));
     drawComposeTokens(idx);
   } else {
     drawComposeGone();
@@ -624,6 +710,13 @@ void composeBackToPanel() {
 // only two things on this screen a keystroke can change.
 void composeAfterEdit() {
   if (composeBatching) return;
+  // THE PANEL'S SEAM, AND ONLY THE PANEL'S. kbInsert already asks composeOnPanel()
+  // before calling this, for the reason its own comment gives - the wrong screen's
+  // full-width repaint lands on top of the other one. composeInsertChip did not, and
+  // once a transcript could arrive from composeAbsorbVoice with either screen up,
+  // that omission became reachable: the panel's draft line and action row painted
+  // over the keyboard. Guarded HERE so every caller inherits it.
+  if (!composeOnPanel()) return;
   drawComposeDraft();
   drawComposeActions();
 }
@@ -765,11 +858,36 @@ bool composeTouch(int sx, int sy) {
   }
   // THE DRAFT LINE: CLR alone, and only while there is a draft to clear.
   if (sy >= composeDraftY() && sy < composeLegend3Y()) {
-    if (!composeSent && sx >= composeClrX() && kbLen > 0) {
-      kbLen = 0;
-      kbText[0] = '\0';
-      kbCaret = -1;            // back to the pin, not to a stated 0 that means the same
-      composeAfterEdit();
+    // CLR FIRST, and it keeps its open-ended `sx >=` so the right screen edge still
+    // belongs to it. SPK is tested as a bounded cell to its left, which is why the
+    // order matters: an open-ended SPK test would swallow CLR.
+    if (!composeSent && sx >= composeClrX()) {
+      if (kbLen > 0) {
+        kbLen = 0;
+        kbText[0] = '\0';
+        kbCaret = -1;          // back to the pin, not to a stated 0 that means the same
+        composeAfterEdit();
+      }
+      return true;
+    }
+    if (sx >= composeSpkX() && sx < composeClrX()) {
+      // NAME THE REFUSAL. With SPK not offered no key is drawn here, but the band
+      // still consumes the tap - and a control that declines in silence is exactly
+      // what every other branch of this function refuses to be.
+      if (composeSpeakOffered()) composeSpeak();
+      else if (composeSent)
+        Serial.println("COMPOSE: SPK refused: this prompt has already been answered from this panel");
+      else if (kbIsMessage())
+        // A MESSAGE CAN BE SPOKEN SINCE 2026-09-13 - composeSpeakOffered() returns
+        // msgOffered(idx) for one. This line used to say a message had no question
+        // to answer and therefore no voice, which was the pre-draft rule stated as
+        // if it were current; reaching it now means the SESSION stopped taking
+        // messages (it finished, or its prompt nonce expired), which is a different
+        // fact and needs different words.
+        Serial.println("COMPOSE: SPK refused: this session is no longer taking messages");
+      else
+        Serial.println("COMPOSE: SPK refused: this ask does not accept a spoken answer");
+      return true;
     }
     return true;
   }
@@ -864,4 +982,222 @@ void composeResetPanel() {
   composeSentText[0] = '\0';
   composeChipPage = 0;
   composeActDrawn = 0;
+}
+
+// ---------------------------------------------------------------------------
+// THE VOICE OBJECT, ABSORBED BY THE COMPOSE SURFACE. Called from handleLine()'s
+// composeActive branch, which returns before the main voice block ever runs - so
+// this is the ONLY thing that reads a voice exchange while the surface is up, and
+// a transcript's only route into the draft it was spoken for.
+//
+// Takes primitives, not a JsonObject: a signature naming a type is hostage to
+// where Arduino inserts its generated prototypes. `seq < 0` means the payload
+// carried no voice object at all.
+//
+// THE SEQ GUARD IS THE WHOLE CORRECTNESS ARGUMENT. The payload is republished
+// every ~5s and delivered over BOTH transports, so an insert keyed on the STATE
+// would paste the same sentence again on every tick and once more per link. It is
+// keyed on the host's monotonic seq instead, and the mark is per-link for the same
+// reason voiceSeq/voiceSeqShown are: two Macs run independent counters.
+void composeAbsorbVoice(long seq, const char* state, const char* text, const char* pid,
+                        const char* reply, const char* session) {
+  long &applied = (curLink >= 0) ? hostLinks[curLink].voiceSeqApplied : voiceSeqApplied;
+  long &vSeq = (curLink >= 0) ? hostLinks[curLink].voiceSeq : voiceSeq;
+  long &vSeqShown = (curLink >= 0) ? hostLinks[curLink].voiceSeqShown : voiceSeqShown;
+  // A seq going BACKWARDS is a host restart, not an old message: the host's counter
+  // is process-lifetime and restarts at 1. Held as a high-water mark without this,
+  // every transcript from the new generation would be suppressed until it climbed
+  // past the old one - the same trap voiceSeq already documents.
+  if (seq >= 0 && seq < applied) applied = 0;
+
+  // No voice object means the host holds no record of any exchange. Time-guarded
+  // exactly as the main block's own null branch is, and for the same reason: it is
+  // also briefly true for the first capture of a host's life.
+  if (seq < 0) {
+    if (micProcessing && millis() - micProcStartMs > 12000) {
+      micProcessing = false;
+      micProcConfirmed = false;
+      drawKeyboard();                 // routes to whichever screen is up
+    }
+    return;
+  }
+  // "working" is the Mac confirming it received the capture and started on it. It
+  // is progress, not an outcome, so it never ends the bar and never inserts.
+  if (!strcmp(state, "working")) {
+    if (micProcessing && !micProcConfirmed) micProcConfirmed = true;
+    return;
+  }
+  if (seq <= applied) return;         // already dealt with this exchange
+
+  // THE PID MUST MATCH THE ASK THIS SURFACE WAS OPENED FOR. `voice` is one object
+  // per host while asks are per session, so a transcript carries no session of its
+  // own. Without this a capture made against one pending prompt would paste into a
+  // draft being composed for another.
+  //
+  // IT IS PID ALONE, AND THAT IS NARROWER THAN handleLine's OWN SESSION MATCH forty
+  // lines up, which also requires hostSlot == kbHostSlot "because PIDs are
+  // per-machine, so two Macs can raise the SAME pid". The same test cannot be used
+  // here: audio streams over Serial to whichever Mac holds the CABLE, regardless of
+  // which host owns the ask, so a link check would break composing for Mac B while
+  // cabled to Mac A. What protects the two-Mac case instead is that `applied`,
+  // `vSeq` and `vSeqShown` are all per-link, so B's counter cannot consume A's
+  // exchange. A pid collision ACROSS Macs within one link's stream is the residual
+  // hole, and it is written down rather than papered over.
+  // TWO KINDS OF TRANSCRIPT, told apart by the host and addressed differently.
+  // `askheard` answers a pending prompt and is addressed by PID; `msgheard` is a
+  // message to a session and is addressed by SESSION ID. They cannot share one test:
+  // a message has no pid at all (openComposeForMessage clears kbPid), so a pid test
+  // would drop every message transcript on the floor.
+  const bool isAsk = !strcmp(state, "askheard");
+  const bool isMsg = !strcmp(state, "msgheard");
+  const bool isHeard = isAsk || isMsg;
+  // AND THE PID MUST BE UNAMBIGUOUS. Matching on pid alone was the residual hole this
+  // design shipped with named rather than closed: pids are per-machine, so two Macs
+  // can raise the SAME one, and a transcript carrying it would land in whichever
+  // draft happened to be open. The obvious guard - require curLink == kbHostSlot -
+  // CANNOT be used, and that is why this took a different shape: audio leaves over
+  // Serial to whichever Mac holds the CABLE, regardless of which host owns the ask,
+  // so the transcript legitimately arrives on a link that is not the draft's host
+  // whenever you are cabled to A and composing for B. Rejecting that would break the
+  // ordinary two-Mac case to close a rare one.
+  //
+  // So the test is AMBIGUITY, not identity: if exactly one visible ask carries this
+  // pid, there is nothing to confuse it with and the cabled case still works. If two
+  // do, the device cannot know which was spoken for and REFUSES rather than guessing
+  // - the one outcome that is never wrong. Bounded by MAX_SESSIONS, so it is a
+  // six-iteration walk on a path that already blocked for seconds in micStream.
+  int sharing = 0;
+  for (int i = 0; i < sessionCount; i++)
+    if (sessions[i].askPid[0] && strcmp(sessions[i].askPid, pid) == 0) sharing++;
+  const bool ambiguous = isAsk && sharing > 1;
+  // A MESSAGE IS ADDRESSED BY SESSION ID AND NEEDS NO AMBIGUITY WALK, which is worth
+  // saying rather than leaving as an omission: session ids are uuid-derived and
+  // unique across Macs, where pids are per-machine counters that collide by design.
+  // The id the host echoes here is the one the device put in the capture header, and
+  // kbSessionId is the same field copied from the same session row.
+  const bool mineMsg = isMsg && kbIsMessage() && kbSessionId[0] && session[0] &&
+                       strcmp(session, kbSessionId) == 0;
+  const bool mineAsk = isAsk && !ambiguous && pid[0] && kbPid[0] && strcmp(pid, kbPid) == 0;
+  const bool mine = mineAsk || mineMsg;
+  if (ambiguous) {
+    Serial.printf("COMPOSE: transcript dropped - %d visible asks share prompt id %s, so which "
+                  "one was spoken for cannot be known from the pid alone (pids are per-Mac)\n",
+                  sharing, pid);
+  } else if (isMsg && !mine) {
+    Serial.printf("COMPOSE: transcript dropped - it was captured for session %s and this "
+                  "surface is composing a %s for %s\n", session[0] ? session : "(none)",
+                  kbIsMessage() ? "message" : "an ANSWER, not a message",
+                  kbSessionId[0] ? kbSessionId : "(none)");
+  } else if (isHeard && !mine) {
+    Serial.printf("COMPOSE: transcript dropped - it was captured for prompt %s and this "
+                  "panel is composing for %s\n", pid[0] ? pid : "(none)",
+                  kbPid[0] ? kbPid : "(none)");
+  }
+  applied = seq;
+  // KEEP THE MAIN BLOCK'S MARKS IN STEP. They are only advanced below handleLine's
+  // composeActive return, which never runs while this surface is up - so without
+  // this, closing the surface let a card fire for an exchange this function had
+  // already consumed ("NOTHING RECOGNISED" over the sessions list, minutes late).
+  if (seq > vSeq) vSeq = seq;
+  if (seq > vSeqShown) vSeqShown = seq;
+
+  // ONLY THIS DEVICE'S OWN EXCHANGE MAY TAKE THE BAR DOWN. `micProcessing` is a
+  // single global while `applied` is per-link, so any host's FIRST payload after
+  // this surface opens carries a seq above that link's zero - and `voice` is
+  // republished on every 5s tick for ever, so that payload can be an exchange from
+  // minutes ago belonging to another Mac. Unconditional teardown meant: cabled to
+  // A, composing for B, B's next tick killed A's in-flight capture's bar and
+  // repainted the whole surface mid-keystroke. The pid-ambiguity walk above was
+  // built for exactly this two-Mac case; the bar state was not, until now.
+  //
+  // The error states are addressed for the same reason and by the same key as the
+  // transcripts: askerror carries its ask's pid and msgerror its session (host
+  // index.mjs). Both used to carry nothing, which is why plain `error` had to be
+  // admitted here as a stand-in for a message failure - it is not admitted any
+  // more, because an unaddressed state cannot be told from another Mac's.
+  const bool isErrAsk = !strcmp(state, "askerror");
+  const bool isErrMsg = !strcmp(state, "msgerror");
+  const bool mineErrAsk = isErrAsk && !kbIsMessage() && pid[0] && kbPid[0] &&
+                          strcmp(pid, kbPid) == 0;
+  const bool mineErrMsg = isErrMsg && kbIsMessage() && kbSessionId[0] && session[0] &&
+                          strcmp(session, kbSessionId) == 0;
+  const bool oursFailed = mineErrAsk || mineErrMsg;
+  const bool ours = mine || oursFailed;
+  if ((isErrAsk || isErrMsg) && !oursFailed) {
+    Serial.printf("COMPOSE: voice failure ignored - it belongs to %s and this surface is "
+                  "composing %s\n",
+                  isErrMsg ? (session[0] ? session : "(no session)")
+                           : (pid[0] ? pid : "(no prompt)"),
+                  kbIsMessage() ? "a message" : "an answer");
+  }
+  const bool barWasUp = micProcessing && ours;
+  if (ours) {
+    micProcessing = false;
+    micProcConfirmed = false;
+  }
+
+  bool inserted = false, truncated = false;
+  // WHAT THE LEGEND SAID BEFORE THIS EXCHANGE. The repaint guard below used to read
+  // `composeVoiceMsg[0]`, i.e. "there is a failure on screen" - which is true for as
+  // long as the failure is on screen, so every new voice.seq from any host (the
+  // OTHER board's dictation, cited three lines above it as the reason the guard
+  // exists) repainted the whole surface. The question is whether the legend CHANGED.
+  char vmWas[sizeof(composeVoiceMsg)];
+  copyField(vmWas, sizeof(vmWas), composeVoiceMsg);
+  if (mine && text[0]) {
+    // A SEPARATOR, BUT ONLY WHERE ONE IS MISSING - AND MEASURED AT THE CARET, NOT
+    // AT THE END. kbInsert splices at kbCaret when it is >= 0, and the caret
+    // survives the panel<->keyboard move by design, so testing kbText[kbLen - 1]
+    // asked about a byte the insert was not going near: put the caret mid-draft,
+    // speak, and the space landed there while the real join got none.
+    const int at = (kbCaret >= 0 && kbCaret <= kbLen) ? kbCaret : kbLen;
+    if (at > 0 && kbText[at - 1] != ' ') kbInsert(' ');
+    const int before = kbLen;
+    composeInsertChip(text);          // the generic spool: batched, then one repaint
+    inserted = kbLen > before;
+    const int took = kbLen - before, had = (int) strlen(text);
+    Serial.printf("COMPOSE: transcript took %d bytes of %d (draft %d/%d)\n",
+                  took, had, kbLen, KB_MAX_BYTES);
+    // AND SAY SO WHERE IT HAPPENED. kbInsert takes what fits and drops the tail, so
+    // a full draft swallowed the end of a sentence with nothing on the glass saying
+    // which words were lost - the spec's "inserts what fits and says so" had only
+    // the first half. This reuses the failure legend, since a partial insert is the
+    // one case where the words on screen are NOT what was spoken.
+    truncated = took < had;
+    if (truncated)
+      snprintf(composeVoiceMsg, sizeof(composeVoiceMsg),
+               "VOICE: draft full, %d of %d chars in", took, had);
+  }
+
+  // A FAILURE HAS TO REACH THE GLASS. The voice card cannot: its raise is gated on
+  // !composeActive and SPEAK always raises this surface, so askerror had nowhere to
+  // go. The host's own words are used rather than a generic string - "nothing
+  // recognised - record again" and "whisper is not installed" need different
+  // actions from the person reading them.
+  // `msgerror` JOINS `askerror` HERE, and plain `error` has LEFT. The answer path
+  // reports askerror and the message path used to report plain `error`, which is
+  // the dictation path's state too - unaddressed, published by every host, and
+  // republished on every tick, so admitting it meant another Mac's stale failure
+  // drew "VOICE FAILED" over a draft that was fine. The message path now reports
+  // msgerror carrying its session, so both failures are addressed and both are
+  // checked above.
+  if (oursFailed) {
+    // "VOICE: ", not "VOICE FAILED - ". The lane this lands in is CARD_W - 12, which
+    // is 34 characters on board 1 and 35 on board 2, and the old prefix spent 15 of
+    // them - so every message was cut at exactly the half that says what to DO:
+    // "VOICE FAILED - nothing recognis...", "VOICE FAILED - whisper is not i...".
+    // Seven characters, and the host's replies were shortened to match, so all five
+    // of them now fit whole on both boards.
+    snprintf(composeVoiceMsg, sizeof(composeVoiceMsg), "VOICE: %s",
+             reply && reply[0] ? reply : "nothing heard");
+  } else if (inserted && !truncated) {
+    composeVoiceMsg[0] = '\0';
+  }
+
+  // REPAINT ONLY WHEN SOMETHING ACTUALLY CHANGED. drawKeyboard() goes through
+  // drawCompose()'s fillScreen, and running it on every new seq meant a dictation
+  // from the OTHER board flashed this one's whole surface mid-keystroke - the
+  // clear-then-redraw of a large area this firmware's second rule exists to
+  // prevent. The bar coming down still owes a repaint; nothing else here does.
+  if (barWasUp || inserted || strcmp(vmWas, composeVoiceMsg) != 0) drawKeyboard();
 }

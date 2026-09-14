@@ -310,6 +310,15 @@ const EXCEPTIONS = [
   // TYPE... is the only bridge from the reply panel to free text, so making it
   // the hardest control on the screen to hit inverts the design's own priority.
   // It is in the action band now, and if it ever comes back here it FAILS.
+  // SPK's own entry, LABELLED like CLR's rather than widening CLR's to the band.
+  // The two keys earn the same exemption for the same reason and both are
+  // recoveries: a mis-tapped SPK starts a recording you stop with another tap.
+  { screen:"reply", band:"draft line", label:"SPK", axis:"h",
+    why:"SPK shares CLR's line and therefore CLR's constraint - one text cell plus "
+       +"its air, which cannot be TAP_MIN tall without a band board 1 does not "
+       +"have. It is TAP_MIN WIDE, so it is short in one axis only. It is the "
+       +"right control to spend that on for the same reason CLR is: a miss starts "
+       +"a capture you can stop with one tap, and loses nothing." },
   { screen:"reply", band:"draft line", label:"CLR", axis:"h",
     why:"CLR sits on a line that is one text cell plus its air, so it cannot be "
        +"TAP_MIN tall without a band board 1 does not have (12 spare pixels in "
@@ -498,8 +507,14 @@ function drawKeyboard(p, opt = {}) {
   // the split the action row never had, and the reason KB_ACT_H stopped being
   // defined as KB_ROW_H. The left key is BACK, not a destructive control:
   // DISCARD lives on the reply panel, one surface away from a full draft.
+  // THREE COLUMNS SINCE 2026-09-13. SPK is the middle one and exists in BOTH modes:
+  // message mode needs it because the keyboard is its root and there is no panel
+  // behind it holding the draft-line key, and answer mode gets it because the
+  // firmware's labels[] is one initialiser that settings-geom-check reads whole.
+  // {1,1,2} keeps SEND exactly twice the others - 50/50/100 and 70/70/140.
   actionRow(p, S.find("action band"), [
     { label:"BACK", kind:"navigate", frac:1 },
+    { label:"SPK",  kind:"navigate", frac:1 },
     { label:"SEND", kind:"send", frac:2 },
   ]);
 }
@@ -622,21 +637,32 @@ function drawReply(p, opt = {}) {
   // it holds silently stops noticing changes past that point, and this string
   // changes per character. In the sent state it becomes a SENT: receipt.
   //
-  // CLR IS THE ONLY CONTROL ON THIS LINE. TYPE... is in the action band, where a
-  // full TAP_MIN band is - see actionRow() above for why the earlier "no room for
-  // a third control" reading was wrong.
+  // TWO CONTROLS ON THIS LINE NOW: SPK and CLR. TYPE... is still in the action
+  // band, where a full TAP_MIN band is - see actionRow() above for why the earlier
+  // "no room for a third control" reading was wrong. SPK is here rather than in the
+  // action row because a fourth column there gives 38px against a 40px floor, and
+  // rather than on keyboard row 3 because that row is exactly 10 cells and closes
+  // on BOARD_W, so it would cost SPACE a cell. This line was ALREADY the one named
+  // sub-floor exception, so a second key on it is the same exception, not a new one.
   const dl = S.find("draft line");
   // CLR is TAP_MIN WIDE even though it is three characters: the height is
   // already sub-floor and there is no reason to be short in both axes when the
   // lane has the pixels.
   const clrW = k.TAP_MIN;
-  const dlLane = k.CARD_W - 12 - (sent ? 0 : clrW);
+  // The lane loses BOTH keys, which is the cost this placement pays: board 1 drops
+  // from 27 characters to 20, board 2 from 29 to 24. composeDraftLaneW() in the
+  // firmware is the same expression, and settings-geom-check.mjs now asserts it.
+  const dlLane = k.CARD_W - 12 - (sent ? 0 : 2 * clrW);
   p.rect(k.CARD_X, dl.y, k.CARD_W, dl.h, t.bg);
   if (sent) {
     p.text(p.fit("SENT: " + draft, dlLane, 2), k.CARD_X+6, dl.y + 4, 2, t.good);
   } else {
     p.text(p.fit(draft || "(empty)", dlLane, 2), k.CARD_X+6, dl.y + 4, 2, t.value);
     const clrX = k.CARD_X + k.CARD_W - clrW;
+    const spkX = clrX - clrW;
+    p.control(dl.name, "navigate", "SPK",
+      { x:spkX, y:dl.y, w:clrW, h:dl.h },
+      { x:spkX, y:dl.y, w:clrW - keyGap(b), h:dl.h - 2 }, 1, { radius:k.KB_KEY_R });
     p.control(dl.name, "navigate", "CLR",
       { x:clrX, y:dl.y, w:clrW, h:dl.h },
       { x:clrX, y:dl.y, w:clrW - keyGap(b), h:dl.h - 2 }, 1, { radius:k.KB_KEY_R });
