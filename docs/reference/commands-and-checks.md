@@ -990,8 +990,10 @@ $B --legibility-check          # every row carrying a READING renders at full st
 $B --menu-shot out.png         # THE REAL MENU, off the glass - captured by window id
 $B --menu-preview out.png      # the bar label AND the menu, rendered light and dark
 $B --icon-preview out.png      # the boat at every size and style, 6x nearest-neighbour
-$B --pair-check                # the wireless-pairing menu and its dialog; prints its own count
-$B --pair-shot out.png [code] [device] [light|dark]   # THE REAL compare dialog, off the glass
+$B --pair-check                # the wireless-pairing window, its model and its real controls
+$B --pair-shot out.png [phase] [light|dark]           # THE REAL pairing window, off the glass
+                               # phase: compare (default) browse empty scanning connecting
+                               #        confirming cancelling done failed nohost
 $B --open-session [<id>] [go]  # what a click on each session row would do (prints; acts only on `go`)
 node host/mac-emoji-check.mjs  # the four hand-transcribed icon tables agree
 DECKHAND_TMP=<dir> $B --menu-dump   # drive the REAL parser with a synthetic host-alive + host.log
@@ -1442,48 +1444,86 @@ naming `mbedtls_ecp_group` is unknown to its own prototype and the build fails a
 with "does not name a type". Measured - that is the error this first produced - and it is the same
 rule the `BleCbParam` typedef already records.
 
-**THE MAC'S HALF OF WIRELESS PAIRING IS A MENU AND A DIALOG, AND NEITHER CAN BE CLICKED FROM A
-SCRIPT.** `Settings > Pair new device...` writes `PAIRSCAN`, lists the heartbeat's `pairing.devices`
-as rows, and `PAIRSTART <name>` on a pick; when the host publishes a derived code the app raises an
-`NSAlert` showing **this Mac's own six digits** and asking whether the device shows the same, with
-Match -> `PAIRCONFIRM` and Don't match -> `PAIRCANCEL`. Five things are load-bearing:
+**THE MAC'S HALF OF WIRELESS PAIRING IS A WINDOW, AND IT CANNOT BE CLICKED FROM A SCRIPT.**
+`Settings > Pair new device...` opens it; opening writes `PAIRSCAN`, the heartbeat's
+`pairing.devices` render as rows, a pick writes `PAIRSTART <name>`, and when the host publishes a
+derived code the SAME window shows **this Mac's own six digits** and asks whether the device shows
+the same - `They match` -> `PAIRCONFIRM`, `They don't match` -> `PAIRCANCEL`.
+
+**IT WAS A SUBMENU AND THREE STACKED `NSAlert`s, AND THE REASON IT IS NOT ANY MORE IS STRUCTURAL:
+AppKit DISMISSES A MENU ON EVERY ITEM ACTION**, so each step of a multi-step flow cost a trip back
+to the menu bar. Measured on the surface this replaced: open the bar, hover `Pair new device...`
+(which fires a 5s `PAIRSCAN`), click Scan -> **the menu closes**, open the bar again, hover, click a
+device -> **the menu closes again**, wait up to one 3s refresh for a modal, answer it, dismiss a
+second modal, tap `CONFIRM` on the glass, dismiss a third. **Two to three visits to the menu bar and
+three modals for one 30-second task**, with the 120-second deadline visible only by reopening the
+menu and hovering the status row. The window owns the whole exchange instead and raises NO modal at
+all. Eight things are load-bearing:
 
 - **THERE IS NO TEXT FIELD, AND THERE MUST NEVER BE ONE.** The typed-code design was broken (see the
   spec): the proof derives from the shared secret, so any peer that completes the ECDH computes a
-  valid one without ever seeing the code. `--pair-check` asserts the accessory view is
+  valid one without ever seeing the code. `--pair-check` asserts the real rendered field is
   **not editable**, and putting an editable field back fails by name.
 - **THE COMPARISON IS THE SECURITY PROPERTY, so legibility is a security cost.** The digits are
   drawn at `PAIR_CODE_FONT_PT` (44) in SF Mono, and **ungrouped** - exactly as `settings.ino` draws
   `pairCodeDigits` in one `T_HERO` `drawString`. Rendering `482 913` against a device showing
   `482913` is two shapes for one number, i.e. two things to compare wrongly; the checker asserts the
-  field's string IS the code. `--pair-shot` captures the real dialog (by window id, and it can
-  FORCE an appearance, since a capture otherwise shows only the one the Mac is set to).
+  field's string IS the code. **The kern is applied to five of the six digits**, because kerning is
+  a TRAILING advance: on the last digit it pads the line and shoves a centred code off centre by
+  `PAIR_CODE_KERN`. Caught on a capture, then bound - both the centring and the missing tail fail by
+  name when reverted.
+- **NEITHER ANSWER IS THE RETURN KEY'S**, and that survived the move: a stray Return must never
+  assert "I compared two numbers". Escape declines, because refusing has to stay the cheap option.
+  Asserted on the MODEL and then again on the REAL button after a real `render()` - a model that
+  agrees with itself binds nothing, so `render()` ignoring the model's key equivalents fails by name.
 - **`awaiting-code` IS NOT ENOUGH TO SHOW A CODE.** `pairStart()` sets that state the moment it
-  begins connecting - `code` stays `""` until the device answers - so the dialog waits for six
-  actual digits. Asserted with a SEEDED prior code, because from an empty `seen` the guard is masked
-  by the empty code equalling the empty token it is compared against: the assertion passed under the
-  fault until it was seeded, which is the vacuous-assertion trap this file keeps paying for.
+  begins connecting - `code` stays `""` until the device answers - so the window shows a
+  `connecting` screen and waits for six actual digits. Asserted with a SEEDED prior code, because
+  from an empty `seen` the guard is masked by the empty code equalling the empty token it is
+  compared against: the assertion passed under the fault until it was seeded, which is the
+  vacuous-assertion trap this file keeps paying for.
 - **The code token is spent when the state leaves `awaiting-code`, and the outcome token when it
   passes through `awaiting-code`.** Six digits collide once in a million, so a second exchange
   deriving the last one's code would otherwise raise nothing at all; and `PAIRSTART` is accepted
   straight out of `failed`, so retrying a device whose window is shut fails twice with a
-  byte-identical cause and the second report is the one that would go missing.
-- **A host predating this feature publishes no `pairing` block, and the row DIMS rather than
-  writing a `PAIRSCAN` that host forwards to the device as an unknown line.** Same rule as the
-  device's read-only ask path: never offer a control that cannot work.
+  byte-identical cause and the second report is the one that would go missing. **`pairNext` did not
+  change meaning, only consequence**: the edge it finds used to raise a modal and now brings the
+  window FORWARD, which is the same question ("is this new?") about a gentler act.
+- **A STALE OUTCOME MUST NOT OPEN A WINDOW AT LOGIN.** The host's `pairing` block outlives the app,
+  so a `done` or `failed` from an hour ago is not news - and the login item makes "the app starts
+  while the heartbeat still says `done`" the COMMON case. `pairWorthRaising` swallows a terminal
+  state on the first tick only. **A live `compare` is exempt**: it has a 120-second deadline running
+  under it and nowhere else to be shown.
+- **THE LOCAL HALF EXPIRES ON ITS OWN.** The ~1s between clicking `They match` and the host
+  republishing `verifying` would otherwise re-render the comparison with two LIVE buttons over a
+  question already answered, and Cancel would leave the exchange looking untouched for a tick.
+  `PairLocal` bridges it and `pairLocalNext` retires it - an answer belongs to the CODE it answered,
+  so a new exchange with new digits clears it, and any terminal state clears the lot.
+- **A host predating this feature publishes no `pairing` block - and the window OPENS ANYWAY and
+  says so.** This is the one place the old rule was inverted deliberately. The submenu row DIMMED,
+  and a grey row states nothing: from the Mac "it did not work" and "it is not possible here" look
+  identical. The window is reachable with the host stopped and against a host too old to pair, and
+  each names its own cause and what to do about it. Nothing inside it is offered that the host would
+  refuse - rows are dead while the radio is scanning, exactly as before.
 
 **And `--legibility-check` had to learn what "reachable" means.** MEASURED: `NSMenuItem.isEnabled`'s
 GETTER reflects the parent chain, so every row inside a submenu whose parent is disabled reports
 `false` whatever was set on it - which made the check FAIL, with the host down, for a row nobody can
-open. An instrument that fails for the wrong reason is worse than none, so that row is skipped when
-its parent is dimmed and checked whenever it is not (proven both ways: disabling it with the host up
-fails by name).
+open. An instrument that fails for the wrong reason is worse than none, so that row was skipped when
+its parent was dimmed and checked whenever it was not (proven both ways: disabling it with the host
+up failed by name). **That row no longer exists** - the pairing reading is the window's now, and
+AppKit's ~31% does not apply to an `NSTextField`. The lesson did not go away with it: the check
+still asserts the pairing CAUSE renders in full-strength ink, now by asserting its COLOUR is one of
+the two full-strength semantic ones, and setting the cause field to `tertiaryLabelColor` fails by
+name.
 
-**What is NOT verified: no real exchange has run through this menu.** The supervised host is the
+**What is NOT verified: no real exchange has run through this window.** The supervised host is the
 main checkout's, where pairing does not exist (`grep -c PAIRSCAN` is 0), so every state was driven
-through `DECKHAND_TMP` with a synthetic `host-alive` - the documented seam - and the dialog was
-captured but never answered against a device. The click paths (`PAIRSCAN`/`PAIRSTART`/`PAIRCONFIRM`/
-`PAIRCANCEL` reaching the host) are structural, not executed.
+through `DECKHAND_TMP` with a synthetic `host-alive` - the documented seam - and through
+`pairDemoStatus`, and the window was captured in every screen but never answered against a device.
+The click paths (`PAIRSCAN`/`PAIRSTART`/`PAIRCONFIRM`/`PAIRCANCEL` reaching the host) are
+structural, not executed. **So is the window's own close-cancels-the-exchange path**, which is
+stated in the window's footer while it is true but has never been run against a live exchange.
 
 **THE HOST'S SCAN HOLDS NOBLE'S OWN PERIPHERAL HANDLE, WHICH IS ONLY AS GOOD AS THE ADVERTISEMENT IT
 CAME FROM.** `PAIRSCAN` runs a 5s scan into a `name -> {rssi, peripheral, at}` map; `PAIRSTART`
@@ -1521,23 +1561,35 @@ Nothing is stored until step 5, and the device tap there is the whole presence p
    already paired). If it is not there, all four slots are full - forget one first. This is the
    first of the two taps and it opens a **120-second** window; the panel takes the screen and reads
    `waiting for a Mac` / `pick this device on your Mac`, with CANCEL on the right and a countdown.
-2. **On the MAC: menu bar > Settings > `Pair new device...`.** It writes `PAIRSCAN`; ~5s later the
-   submenu lists what it heard, strongest first, as `Deckhand-XXXX (-44 dBm)`. Pick the one whose
-   name matches the device - it is on SETTINGS > Status and on the boot waiting screen.
+2. **On the MAC: menu bar > Settings > `Pair new device...`.** A window opens and **opening it is
+   what writes `PAIRSCAN`** - looking for devices is the only thing anyone opens it to do. ~5s later
+   it lists what it heard, strongest first, as `Deckhand-XXXX  ·  -44 dBm`. Pick the one whose name
+   matches the device - it is on SETTINGS > Status and on the boot waiting screen.
+   **Every remaining step happens in that same window. It is never dismissed and never stacks a
+   modal**, and the menu bar is not visited again.
 3. **The exchange runs on its own.** The Mac sends `PAIRREQ`, the device answers `PAIRPUB`, and both
    ends derive the same key and the same six digits. The device's panel changes to
    `does your Mac show this?` with the digits at 32x64 and the requesting Mac's name under them; the
-   Mac raises a dialog with ITS own six digits at 44pt SF Mono. Neither code was transmitted.
+   window switches to ITS own six digits at 44pt SF Mono, with the 120-second countdown under them.
+   Neither code was transmitted. **While an exchange is live the window reads the heartbeat every
+   `PAIR_TICK_SEC` (1s) rather than the menu's 3s**, because the digits arrive in one tick and the
+   person is standing at the device waiting for them.
 4. **COMPARE THE TWO SIX-DIGIT CODES.** This is the security property, not a formality. They are
    drawn UNGROUPED on both sides on purpose, so `482913` is one shape in both places.
-5. **If they match: click `They match` on the Mac, then tap `CONFIRM` on the device.** Either order
-   works and BOTH are required - the Mac's click only sends the proof, and the device stores nothing
-   until a finger on its glass says so. The Mac then tells you so as well
+5. **If they match: click `They match` in the window, then tap `CONFIRM` on the device.** Either
+   order works and BOTH are required - the Mac's click only sends the proof, and the device stores
+   nothing until a finger on its glass says so. The window says so itself, in place
    (`Now tap CONFIRM on ...`). The device shows `PAIRED WITH <name>` and drops back to the Pairing
    list with the new Mac in it; the key is in NVS in the same 32-hex form `PROVISION` writes, so
-   that Mac answers prompts through the identical path with no second format anywhere.
-6. **If they DIFFER, tap `CANCEL` on the device** (or `They don't match` on the Mac) and start
+   that Mac answers prompts through the identical path with no second format anywhere. The window
+   then reads `Paired with <name>` with the sighting list still under it, so a second device costs
+   one click rather than a reopening.
+6. **If they DIFFER, tap `CANCEL` on the device** (or `They don't match` in the window) and start
    again. A mismatch is the one signal that something other than your Mac answered the window.
+   A failure leaves the window on its own `failed` screen carrying the host's OWN cause, with the
+   sightings still live - the retry is one click, and `PAIRSTART` is accepted straight out of
+   `failed`. **Closing the window mid-exchange CANCELS it** rather than leaving a 120-second
+   exchange running with no surface; the footer says so while that is true.
 
 **WHAT IS NOT VERIFIED IN THIS FEATURE, STATED PLAINLY - AND IT INCLUDES THE MAIN EVENT.**
 

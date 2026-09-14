@@ -1209,6 +1209,22 @@ func pairNext(_ p: PairInfo, _ seen: PairSeen) -> (action: PairAction, seen: Pai
     }
 }
 
+/// WHETHER AN ACTION IS WORTH INTERRUPTING FOR, which is a different question
+/// from whether it is new. The host's pairing block OUTLIVES THIS APP: a `done` or
+/// `failed` sitting in the heartbeat from an hour ago is not news, and raising it
+/// would open a window over whatever the person was doing at login - the login
+/// item makes that the common case, not a corner one.
+///
+/// An exchange still IN FLIGHT is news even on the first tick: it has a
+/// 120-second deadline running under it and nowhere else to be shown.
+func pairWorthRaising(_ action: PairAction, firstTick: Bool) -> Bool {
+    switch action {
+    case .none: return false
+    case .compare: return true
+    case .done, .failed: return !firstTick
+    }
+}
+
 /// The one row inside the submenu that says where the exchange stands. It carries
 /// a READING, so it is enabled (see `--legibility-check`): a disabled row is drawn
 /// at ~31% of full strength, and "Failed: bluetooth is poweredOff" in grey is a
@@ -1232,15 +1248,21 @@ func pairStatusText(_ s: HostStatus) -> String {
     case "done":
         return "Paired with \(who)"
     case "failed":
-        return "Failed: \(p.error.isEmpty ? "no reason given" : p.error)"
+        return "Failed: \(p.error.isEmpty ? PAIR_NO_REASON : p.error)"
     default:
-        if p.devices.isEmpty { return "No devices found yet - choose Scan" }
+        if p.devices.isEmpty { return "No devices found yet - open this to scan" }
         return "\(p.devices.count) device\(p.devices.count == 1 ? "" : "s") found - pick one"
     }
 }
 
 func pairDeviceRowTitle(_ d: PairDevice) -> String { "\(d.name)  ·  \(d.rssi) dBm" }
 
+
+/// What a failure with NO cause says. One phrase, shared by the menu's row and the
+/// window's body: both have to say something, or they render "Failed: " and read
+/// as a truncated message rather than a missing one - and two spellings of one
+/// fact drift.
+let PAIR_NO_REASON = "no reason given"
 /// Devices are only pickable when a new exchange could actually START. Offering a
 /// row that the host would refuse ("an exchange is already running") is exactly
 /// the control-that-cannot-work this repo refuses to draw on the device.
@@ -1254,48 +1276,509 @@ func pairInFlight(_ s: HostStatus) -> Bool {
     s.running && s.pairing.supported && (s.pairing.state == "awaiting-code" || s.pairing.state == "verifying")
 }
 
-/// THE DIALOG, built by a factory so `--pair-check` can inspect the real thing
-/// rather than a description of it. Everything a person needs in order to answer
-/// correctly has to be IN it: which device is asking, this Mac's own six digits,
-/// and the fact that the device must show the SAME ones.
-func pairCompareAlert(code: String, device: String, label: String) -> NSAlert {
-    let a = NSAlert()
-    a.messageText = device.isEmpty ? "Does the device show this code?" : "Does \(device) show this code?"
-    a.informativeText =
-        "This Mac derived the code below from its exchange with \(device.isEmpty ? "the device" : device)"
-        + (label.isEmpty ? "" : " (\(label))")
-        + ". The device's screen shows its own.\n\n"
-        + "If the two are identical, choose \u{201C}They match\u{201D} - then tap CONFIRM on the device "
-        + "itself to store the key. If they differ, something else answered: choose "
-        + "\u{201C}They don\u{2019}t match\u{201D} and nothing is stored."
-    let field = NSTextField(labelWithString: code)
-    field.attributedStringValue = NSAttributedString(string: code, attributes: [
-        // SF Mono, not `monospacedDigitSystemFont`: that one is the system face
-        // with tabular figures, which lines the digits up but is not a fixed-pitch
-        // face - and this is the same family (F_MONO) every other reading in this
-        // menu is drawn in, against a device face that is a fixed 8x16 cell.
-        .font: NSFont.monospacedSystemFont(ofSize: PAIR_CODE_FONT_PT, weight: .semibold),
-        // SEMANTIC, so it is legible in both appearances - the same rule every
-        // other colour in this file follows.
-        .foregroundColor: NSColor.labelColor,
-        .kern: PAIR_CODE_KERN,
-    ])
-    field.alignment = .center
-    field.sizeToFit()
-    field.frame = NSRect(x: 0, y: 0, width: max(260, field.frame.width), height: field.frame.height)
-    a.accessoryView = field
-    a.addButton(withTitle: "They match")
-    a.addButton(withTitle: "They don\u{2019}t match")
-    // NEITHER ANSWER IS THE RETURN KEY'S. AppKit makes the first button the
-    // default, so a stray Return would assert "I compared two numbers" without
-    // anyone having looked - which is the one input this whole design rests on.
-    // Escape still declines, because refusing must stay the cheap option.
-    a.buttons[0].keyEquivalent = ""
-    a.buttons[1].keyEquivalent = "\u{1b}"
-    return a
+// ---------------------------------------------------------------------------
+// THE PAIRING WINDOW.
+//
+// THE SURFACE IS A WINDOW BECAUSE AN NSMenu CANNOT HOLD A MULTI-STEP FLOW, and
+// that is a structural fact rather than a preference: AppKit dismisses a menu on
+// every item action, so each step of pairing cost a trip back to the menu bar.
+// Measured on the submenu this replaces: open the bar, hover Pair (which fires a
+// 5s PAIRSCAN), click Scan -> THE MENU CLOSES, open the bar again, hover, click a
+// device -> THE MENU CLOSES AGAIN, then wait up to one refresh for a modal, answer
+// it, dismiss a second modal, tap CONFIRM on the glass, dismiss a third. Two to
+// three visits to the menu bar and three stacked NSAlerts for one 30-second task,
+// with the 120-second deadline visible only by reopening the menu and hovering.
+//
+// So: ONE window that owns the whole exchange - the scan list refreshing in
+// place, the comparison, the countdown, and the outcome - and NOT ONE MODAL. It
+// re-renders from the host's heartbeat on a ticker of its own (PAIR_TICK_SEC),
+// because the six digits arriving up to 3s after the device sent them reads as the
+// device being slow.
+//
+// WHAT DID NOT CHANGE IS THE SECURITY PROPERTY, and none of it may: the user types
+// nothing, the digits are drawn exactly as the device draws them, both answers are
+// explicit words, and NEITHER ANSWER IS THE RETURN KEY'S. See the note above
+// PAIR_CODE_DIGITS, and docs/superpowers/specs/2026-08-30-wireless-pairing.md.
+
+/// While the window is open the heartbeat is read every second instead of every
+/// three. THE CODE'S LATENCY IS THE REASON: `code` appears in one tick and the
+/// person is standing at the device waiting for it, so a 3s read spends a tenth of
+/// the 120s window doing nothing visible. It runs only while the window is up.
+let PAIR_TICK_SEC: TimeInterval = 1
+
+/// Which of the seven screens the window is showing. Derived, never stored - the
+/// host's `state` plus `PairLocal` decide it, so there is no second state machine
+/// here to drift from the host's.
+enum PairPhase: String, Equatable {
+    case unavailable   // no host, or a host that predates the feature
+    case browse        // idle or scanning: the list, and Scan
+    case connecting    // PAIRSTART sent, the device has not answered with its key yet
+    case compare       // six digits are in and unanswered - THE screen this feature exists for
+    case confirming    // the proof is sent; the device owes a CONFIRM tap
+    case cancelling    // this Mac asked for the exchange to be dropped
+    case done
+    case failed
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+/// A button's JOB, carried as a tag so one selector serves every phase. The raw
+/// values are AppKit tags and must stay distinct; `.none` is 0 so an untagged
+/// button can never be mistaken for a live one.
+enum PairButtonRole: Int, Equatable {
+    case none = 0, match, decline, cancel, close
+}
+
+/// Title, job, and key equivalent together, because on this surface the KEY IS
+/// PART OF THE MEANING: "They match" must not be reachable by a stray Return.
+struct PairButtonSpec: Equatable {
+    var title: String
+    var role: PairButtonRole
+    var key: String = ""
+}
+
+/// The half of the window's state that the HOST does not publish: what this Mac
+/// has already answered, and whether it has asked to cancel.
+///
+/// It exists only to bridge the ~1s between a click here and the host republishing
+/// what it did about it. Without it the comparison re-renders with two LIVE
+/// buttons over a question already answered, and Cancel leaves the exchange
+/// looking untouched for a tick - both of which invite a second click that the
+/// host would refuse.
+struct PairLocal: Equatable {
+    var answered = ""     // the six digits this Mac said "They match" to
+    var cancelling = false
+}
+
+/// THE LOCAL HALF MUST EXPIRE ON ITS OWN, or it becomes a second state machine.
+/// Pure, so `--pair-check` drives it: an answer belongs to the CODE it answered
+/// (a new exchange with new digits clears it), and any terminal or pre-exchange
+/// state clears the lot.
+func pairLocalNext(_ p: PairInfo, _ local: PairLocal) -> PairLocal {
+    switch p.state {
+    case "awaiting-code", "verifying":
+        var l = local
+        if !l.answered.isEmpty && l.answered != p.code { l.answered = "" }
+        return l
+    default:
+        return PairLocal()
+    }
+}
+
+/// EVERYTHING THE WINDOW SHOWS, as data. The window itself only paints this, so
+/// `--pair-check` can assert what a person would see in every state without a
+/// host, a device, a radio or a click - the same reason `pairNext` is pure.
+struct PairWindowModel: Equatable {
+    var phase: PairPhase = .browse
+    var title = ""
+    var detail = ""
+    var footer = ""
+    var code = ""
+    var devices: [PairDevice] = []
+    var showsList = false
+    var rowsEnabled = false
+    var scanTitle = "Scan for devices"
+    var scanEnabled = false
+    var scanShown = false
+    var busy = false
+    /// Floating only while an exchange is live. The comparison is made by looking
+    /// AWAY from the Mac, at the device, so the window must not be lost behind a
+    /// browser in the two seconds that takes; a window left open at rest has no
+    /// business sitting above everything.
+    var floats = false
+    var primary: PairButtonSpec?
+    var secondary: PairButtonSpec?
+}
+
+func pairWindowModel(_ s: HostStatus, _ local: PairLocal = PairLocal()) -> PairWindowModel {
+    var m = PairWindowModel()
+    let p = s.pairing
+    m.devices = Array(p.devices.prefix(MAX_PAIR_ROWS))
+    let close = PairButtonSpec(title: "Close", role: .close, key: "\r")
+
+    // THE WINDOW IS REACHABLE IN BOTH OF THESE, which the dimmed submenu row it
+    // replaces was not: a control that is merely grey states nothing, and from the
+    // Mac "it did not work" and "it is not possible here" look identical.
+    guard s.running else {
+        m.phase = .unavailable
+        m.title = "The host is not running"
+        m.detail = "Pairing is the host's half of the exchange - it owns the Bluetooth radio, so "
+            + "with it stopped there is nothing here for this window to drive.\n\n"
+            + "Choose Start Deckhand in the menu, then try again."
+        m.primary = close
+        return m
+    }
+    guard p.supported else {
+        m.phase = .unavailable
+        m.title = "This host is too old for wireless pairing"
+        m.detail = "Its heartbeat carries no pairing block at all, which is how a host says it "
+            + "speaks this protocol. Anything offered here would be forwarded to the device as an "
+            + "unknown line and do nothing.\n\n"
+            + "Update the host and restart it. Until then a device is paired over USB."
+        m.primary = close
+        return m
+    }
+
+    let who = p.name.isEmpty ? "the device" : p.name
+    let cancel = PairButtonSpec(title: "Cancel pairing", role: .cancel, key: "\u{1b}")
+    // The deadline is the DEVICE's 120-second window, and it is the one fact that
+    // decides whether to hurry. It was previously visible only by reopening the
+    // menu and hovering the submenu.
+    let left = p.sec > 0 ? "\(p.sec)s left" : ""
+    let closing = "Closing this window cancels the exchange."
+    let flightFooter = left.isEmpty ? closing : "\(left)  \u{00B7}  \(closing)"
+
+    // TWO ROUTES INTO ONE SCREEN: the host has republished `verifying`, or it has
+    // not yet and this Mac knows it answered. Rendering the comparison again in
+    // that gap would put two live buttons over a question already answered.
+    let answeredHere = p.state == "awaiting-code" && pairCodeReady(p) && p.code == local.answered
+    let state = answeredHere ? "verifying" : p.state
+
+    if local.cancelling && (state == "awaiting-code" || state == "verifying") {
+        m.phase = .cancelling
+        m.title = "Cancelling\u{2026}"
+        m.detail = "The host has been asked to drop the exchange with \(who). Nothing was stored, "
+            + "and nothing will be.\n\nThe list comes back as soon as the link is closed."
+        m.busy = true
+        m.floats = true
+        m.footer = left
+        return m
+    }
+
+    switch state {
+    case "awaiting-code" where pairCodeReady(p):
+        m.phase = .compare
+        m.code = p.code
+        m.title = "Does \(who) show this code?"
+        m.detail = "This Mac derived the code below from its exchange with \(who)"
+            + (p.label.isEmpty ? "" : " (\(p.label))")
+            + ". The device's screen shows its own.\n\n"
+            + "If the two are identical, choose \u{201C}They match\u{201D} - then tap CONFIRM on the "
+            + "device itself to store the key. If they differ, something else answered: choose "
+            + "\u{201C}They don\u{2019}t match\u{201D} and nothing is stored."
+        // The order puts the denial on the LEFT, where Cancel lives, so the hand
+        // that reaches for the safe answer finds it where it always is.
+        m.secondary = PairButtonSpec(title: "They don\u{2019}t match", role: .decline, key: "\u{1b}")
+        // NOT THE RETURN KEY'S, and this is the single input the whole design
+        // rests on: a stray Return must never assert "I compared two numbers".
+        // Escape still declines, because refusing has to stay the cheap option.
+        m.primary = PairButtonSpec(title: "They match", role: .match, key: "")
+        m.footer = flightFooter
+        m.floats = true
+    case "awaiting-code":
+        // `pairStart()` sets this state the moment it begins connecting, so the
+        // STATE arrives before the digits do - the trap that would otherwise show
+        // an empty comparison. See pairCodeReady().
+        m.phase = .connecting
+        m.title = "Waiting for \(who) to answer"
+        m.detail = "The Mac has connected and sent its half of the exchange. The six digits appear "
+            + "here the moment the device answers with its own - which needs \(who)'s "
+            + "Settings \u{203A} Pairing screen open and waiting."
+        m.busy = true
+        m.floats = true
+        m.secondary = cancel
+        m.footer = flightFooter
+    case "verifying":
+        m.phase = .confirming
+        m.title = "Now tap CONFIRM on \(who)"
+        m.detail = "The Mac has sent its proof. NOTHING IS STORED until someone standing at the "
+            + "device taps CONFIRM on its screen - that tap is what replaces plugging it in, and "
+            + "it is what commits the key at both ends.\n\n"
+            + "It expires with the device's 120-second pairing window."
+        m.busy = true
+        m.floats = true
+        m.secondary = cancel
+        m.footer = flightFooter
+    case "done":
+        m.phase = .done
+        m.title = "Paired with \(who)"
+        m.detail = "Both ends derived the same key from the exchange - it was never transmitted. "
+            + "This Mac can now answer that device's prompts, and the pairing shows up under "
+            + "Device in the menu."
+        m.primary = close
+        m.showsList = true
+        m.rowsEnabled = pairCanStart(s)
+        m.scanShown = true
+        m.scanTitle = "Pair another device"
+        m.scanEnabled = pairCanStart(s)
+    case "failed":
+        m.phase = .failed
+        m.title = "Pairing with \(who) failed"
+        // THE CAUSE IS THE HOST'S OWN WORDS, always named and never invented here
+        // - the rule POWERPROBE's "not on battery (unplug USB; state=2 mv=3866)"
+        // refusal exists for.
+        m.detail = (p.error.isEmpty ? "The host gave \(PAIR_NO_REASON)." : p.error)
+            + "\n\nNothing was stored. Open Settings \u{203A} Pairing on the device, tap PAIR NEW MAC, "
+            + "and pick it below - the sightings are still good, so a retry costs one click."
+        m.primary = close
+        m.showsList = true
+        m.rowsEnabled = pairCanStart(s)
+        m.scanShown = true
+        m.scanTitle = "Scan again"
+        m.scanEnabled = pairCanStart(s)
+    case "scanning":
+        m.phase = .browse
+        m.title = "Scanning for nearby devices\u{2026}"
+        m.detail = "Anything advertising as a Deckhand appears below as it is heard, strongest "
+            + "signal first. The scan takes a few seconds."
+        m.busy = true
+        m.showsList = true
+        m.rowsEnabled = false      // the host refuses PAIRSTART while its radio is scanning
+        m.scanShown = true
+        m.scanEnabled = false
+    default:
+        m.phase = .browse
+        m.showsList = true
+        m.rowsEnabled = pairCanStart(s)
+        m.scanShown = true
+        m.scanEnabled = pairCanStart(s)
+        if p.devices.isEmpty {
+            m.title = "No devices found yet"
+            m.detail = "Nothing nearby advertised as a Deckhand. Check the device is powered on "
+                + "and in range, then choose Scan again.\n\n"
+                + "Before picking one: open Settings \u{203A} Pairing on it and tap PAIR NEW MAC. The "
+                + "exchange needs that screen open at the other end, and it lasts 120 seconds."
+        } else {
+            m.title = "\(p.devices.count) device\(p.devices.count == 1 ? "" : "s") found \u{2013} pick one"
+            m.detail = "First open Settings \u{203A} Pairing on the device you want and tap PAIR NEW MAC: "
+                + "the exchange needs that screen open at the other end, and it lasts 120 seconds. "
+                + "Then choose it below.\n\n"
+                + "Strongest signal first, so -52 dBm is nearer than -77 dBm."
+        }
+    }
+
+    // The menu's own list was capped at MAX_PAIR_ROWS and simply stopped; a window
+    // can at least say what it is not showing.
+    let hidden = p.devices.count - m.devices.count
+    if m.showsList && hidden > 0 {
+        let note = "\(hidden) further device\(hidden == 1 ? "" : "s") heard but not shown."
+        m.footer = m.footer.isEmpty ? note : "\(m.footer)  \u{00B7}  \(note)"
+    }
+    return m
+}
+
+/// THE WINDOW ITSELF, built by a factory so `--pair-check` can inspect the real
+/// controls after a real `render()` rather than a description of them. A model
+/// that agrees with itself proves nothing: the assertions that matter run the
+/// model THROUGH this and then read the buttons back.
+///
+/// Nothing here decides anything. Every title, every enablement and every key
+/// equivalent comes from the model, and the device rows are a FIXED POOL shown or
+/// hidden - the same discipline the menu's rows follow, and for a sharper reason
+/// here: this list is re-rendered every second under a pointer that may be resting
+/// on a row, and rows that are added and removed move under it.
+final class PairWindow: NSObject, NSWindowDelegate {
+    let window: NSWindow
+    let titleField = NSTextField(labelWithString: "")
+    let detailField = NSTextField(wrappingLabelWithString: "")
+    let codeField = NSTextField(labelWithString: "")
+    let footerField = NSTextField(wrappingLabelWithString: "")
+    let spinner = NSProgressIndicator()
+    let scanButton: NSButton
+    let primaryButton: NSButton
+    let secondaryButton: NSButton
+    var rows: [NSButton] = []
+    let stack = NSStackView()
+    let listStack = NSStackView()
+    let buttonRow = NSStackView()
+    /// Assigned in init. `isDisplayedWhenStopped = false` stops a spinner DRAWING,
+    /// not occupying layout, so an idle browse screen indented Scan by the width of
+    /// a spinner that was not there.
+    private var busyRow = NSStackView()
+    private(set) var model = PairWindowModel()
+    /// Set by the delegate; the window has no opinion about what closing MEANS.
+    var onClose: (() -> Void)?
+
+    init(target: AnyObject?) {
+        scanButton = NSButton(title: "Scan for devices", target: target,
+                              action: #selector(AppDelegate.pairScan))
+        primaryButton = NSButton(title: "", target: target, action: #selector(AppDelegate.pairButton(_:)))
+        secondaryButton = NSButton(title: "", target: target, action: #selector(AppDelegate.pairButton(_:)))
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: PAIR_WIN_W, height: 260),
+                          styleMask: [.titled, .closable],
+                          backing: .buffered, defer: false)
+        super.init()
+        window.title = "Pair a new device"
+        // The app is an .accessory, so nothing else keeps this object alive and
+        // AppKit's default would free the window on the first close.
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+
+        titleField.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        titleField.textColor = .labelColor
+        titleField.lineBreakMode = .byTruncatingTail
+        detailField.font = F_BODY
+        detailField.textColor = .secondaryLabelColor
+        detailField.preferredMaxLayoutWidth = PAIR_WIN_W - 2 * PAIR_WIN_PAD
+        footerField.font = F_SMALL
+        footerField.textColor = .tertiaryLabelColor
+        footerField.preferredMaxLayoutWidth = PAIR_WIN_W - 2 * PAIR_WIN_PAD
+        codeField.alignment = .center
+        // `.center` centres within the FIELD, and a leading-aligned stack sizes a
+        // label to its own text - so without a width the alignment had nothing to
+        // act on and the digits sat hard left under the prose. Measured on the
+        // first capture.
+        codeField.translatesAutoresizingMaskIntoConstraints = false
+        codeField.widthAnchor.constraint(equalToConstant: PAIR_WIN_W - 2 * PAIR_WIN_PAD).isActive = true
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+
+        for b in [scanButton, primaryButton, secondaryButton] { b.bezelStyle = .rounded }
+        scanButton.target = target
+
+        listStack.orientation = .vertical
+        listStack.alignment = .leading
+        listStack.spacing = 4
+        rows = (0..<MAX_PAIR_ROWS).map { i in
+            let b = NSButton(title: "", target: target, action: #selector(AppDelegate.pairRow(_:)))
+            b.bezelStyle = .rounded
+            b.alignment = .left
+            // The INDEX, not the name: the handler reads the device out of the
+            // model it just rendered, so a row can never start an exchange with a
+            // device that has since dropped off the list.
+            b.tag = i
+            b.isHidden = true
+            b.translatesAutoresizingMaskIntoConstraints = false
+            b.widthAnchor.constraint(equalToConstant: PAIR_WIN_W - 2 * PAIR_WIN_PAD).isActive = true
+            listStack.addArrangedSubview(b)
+            return b
+        }
+
+        let busyRow = NSStackView(views: [spinner, scanButton])
+        busyRow.orientation = .horizontal
+        busyRow.spacing = 8
+        self.busyRow = busyRow
+
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 10
+        buttonRow.addArrangedSubview(NSView())      // pushes the pair to the right
+        buttonRow.addArrangedSubview(secondaryButton)
+        buttonRow.addArrangedSubview(primaryButton)
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: PAIR_WIN_PAD, left: PAIR_WIN_PAD,
+                                        bottom: PAIR_WIN_PAD, right: PAIR_WIN_PAD)
+        for v in [titleField, detailField, codeField, listStack, busyRow, footerField, buttonRow] {
+            stack.addArrangedSubview(v)
+        }
+        buttonRow.widthAnchor.constraint(equalToConstant: PAIR_WIN_W - 2 * PAIR_WIN_PAD).isActive = true
+        window.contentView = stack
+    }
+
+    func windowWillClose(_ n: Notification) { onClose?() }
+
+    /// Paint the model. Called every PAIR_TICK_SEC while the window is up, so it
+    /// must be idempotent and must not disturb anything the pointer is on.
+    func render(_ m: PairWindowModel) {
+        model = m
+        titleField.stringValue = m.title
+        detailField.stringValue = m.detail
+        footerField.stringValue = m.footer
+        footerField.isHidden = m.footer.isEmpty
+
+        // THE DIGITS, drawn EXACTLY as settings.ino draws them: ungrouped, no
+        // separators, and spaced by KERNING - which inserts no character, so the
+        // string stays the six the device shows. Two renderings of one number are
+        // two things to compare wrongly.
+        codeField.isHidden = m.code.isEmpty
+        if !m.code.isEmpty {
+            // THE PARAGRAPH STYLE IS WHAT CENTRES IT, not the field's `alignment`:
+            // an attributed string with no style of its own defaults to natural
+            // alignment and OVERRIDES the property, which left the digits hard
+            // against the left margin under centred-looking prose. Measured on a
+            // capture, after the width constraint alone changed nothing.
+            let para = NSMutableParagraphStyle()
+            para.alignment = .center
+            let a = NSMutableAttributedString(string: m.code, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: PAIR_CODE_FONT_PT, weight: .semibold),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: para,
+            ])
+            // KERNING IS A TRAILING ADVANCE, so applying it to the last digit too
+            // pads the string on the right and pushes a "centred" line left of
+            // centre by PAIR_CODE_KERN. Visible on the capture. Six digits still
+            // get five gaps either way - no character is inserted or lost.
+            a.addAttribute(.kern, value: PAIR_CODE_KERN,
+                           range: NSRange(location: 0, length: max(0, m.code.count - 1)))
+            codeField.attributedStringValue = a
+        }
+
+        listStack.isHidden = !m.showsList
+        for (i, b) in rows.enumerated() {
+            guard i < m.devices.count else { b.isHidden = true; continue }
+            b.isHidden = false
+            b.attributedTitle = pairRowTitle(m.devices[i])
+            b.isEnabled = m.rowsEnabled
+        }
+        scanButton.isHidden = !m.scanShown
+        scanButton.title = m.scanTitle
+        scanButton.isEnabled = m.scanEnabled
+        spinner.isHidden = !m.busy
+        if m.busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        busyRow.isHidden = !m.scanShown && !m.busy
+
+        apply(m.primary, to: primaryButton)
+        apply(m.secondary, to: secondaryButton)
+        buttonRow.isHidden = m.primary == nil && m.secondary == nil
+
+        window.level = m.floats ? .floating : .normal
+        fit()
+    }
+
+    private func apply(_ spec: PairButtonSpec?, to button: NSButton) {
+        guard let spec else {
+            button.isHidden = true
+            // A hidden button must not keep a key equivalent: Escape would still
+            // fire it, which is how an invisible control answers for someone.
+            button.keyEquivalent = ""
+            button.tag = PairButtonRole.none.rawValue
+            return
+        }
+        button.isHidden = false
+        button.title = spec.title
+        button.tag = spec.role.rawValue
+        button.keyEquivalent = spec.key
+    }
+
+    /// Grow DOWNWARD. AppKit resizes a window about its bottom-left corner, so a
+    /// screen that needs more room would otherwise walk the title bar up the
+    /// display on every phase change.
+    private func fit() {
+        stack.layoutSubtreeIfNeeded()
+        let h = stack.fittingSize.height
+        var f = window.frame
+        let top = f.maxY
+        f.size = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: PAIR_WIN_W, height: h)).size
+        f.origin.y = top - f.size.height
+        window.setFrame(f, display: true)
+    }
+
+    func show(activate: Bool) {
+        if !window.isVisible { window.center() }
+        window.makeKeyAndOrderFront(nil)
+        // An .accessory app has no Dock tile and is never frontmost on its own, so
+        // without this the window opens BEHIND whatever the person was reading.
+        if activate { NSApp.activate(ignoringOtherApps: true) }
+    }
+}
+
+let PAIR_WIN_W: CGFloat = 430
+let PAIR_WIN_PAD: CGFloat = 20
+
+/// A device row's title. The name and the signal, left-aligned so the list reads
+/// as a list; `pairDeviceRowTitle` is the wording, shared with the menu's tooltip
+/// so there is one spelling of a sighting in this app.
+func pairRowTitle(_ d: PairDevice) -> NSAttributedString {
+    let para = NSMutableParagraphStyle()
+    para.alignment = .left
+    return NSAttributedString(string: pairDeviceRowTitle(d), attributes: [
+        .font: F_BODY, .foregroundColor: NSColor.labelColor, .paragraphStyle: para,
+    ])
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let deviceLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -1326,23 +1809,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let colourItem = NSMenuItem(title: "Colourful icon", action: #selector(toggleColourfulIcon), keyEquivalent: "")
     let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
     let settingsMenu = NSMenu()
-    // Wireless pairing. Same "built once, only re-titled" discipline as the icon
-    // and sound pickers: the menu can be OPEN while the 3s refresh runs, and
-    // adding or removing rows under the cursor makes the list jump.
-    let pairItem = NSMenuItem(title: "Pair new device\u{2026}", action: nil, keyEquivalent: "")
-    let pairMenu = NSMenu()
-    let pairStatusItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    var pairRows: [NSMenuItem] = []
-    let pairScanItem = NSMenuItem(title: "Scan for devices", action: #selector(pairScan), keyEquivalent: "")
-    let pairCancelItem = NSMenuItem(title: "Cancel pairing", action: #selector(pairCancel), keyEquivalent: "")
+    // Wireless pairing. ONE ROW, and it opens a window rather than a submenu - see
+    // the note above PAIR_TICK_SEC for why a menu cannot hold this flow. It is
+    // never dimmed: with no host, or against a host too old to pair, the WINDOW
+    // says so in words, which a grey row cannot.
+    let pairItem = NSMenuItem(title: "Pair new device\u{2026}", action: #selector(openPairWindow), keyEquivalent: "")
+    var pairWindow: PairWindow?
+    // The window's own state: what this Mac has answered, and whether it has asked
+    // to cancel. Expired by pairLocalNext() rather than by hand.
+    var pairLocal = PairLocal()
+    // Runs only while the window is up, at PAIR_TICK_SEC instead of the menu's 3s.
+    var pairTicker: Timer?
     // What has already been put in front of the user. Outlives a refresh for the
     // same reason askWatcher does - a decision about what is NEW cannot be made
-    // from a local.
+    // from a local. It no longer gates a modal; it gates BRINGING THE WINDOW
+    // FORWARD, which is the same question ("is this new?") about a gentler act.
     var pairSeen = PairSeen()
-    // NSAlert.runModal spins the run loop, so the 3s timer fires again INSIDE it
-    // and refresh() re-enters. Without this a second identical dialog stacks on
-    // top of the first every three seconds.
-    var pairAlertOpen = false
+    // False until the first refresh has looked at the pairing block once. See
+    // pairWorthRaising.
+    var pairPrimed = false
     let soundItem = NSMenuItem(title: "Needs-input sound", action: nil, keyEquivalent: "")
     let soundMenu = NSMenu()
     var soundItems: [(String, NSMenuItem)] = []
@@ -1420,36 +1905,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // informational and dim them.
         settingsMenu.autoenablesItems = false
         settingsItem.submenu = settingsMenu
-        pairMenu.autoenablesItems = false
-        pairItem.submenu = pairMenu
-        // Opening this submenu STARTS A SCAN, because "look for devices" is the
-        // only thing anyone opens it to do and a menu that needs a second click
-        // before it can list anything is a menu that looks broken. The delegate
-        // is what makes that possible at all: a submenu PARENT's own action never
-        // fires - clicking it just opens the submenu. Guarded in pairScan() so
-        // hovering past it during an exchange cannot disturb one.
-        pairMenu.delegate = self
-        // A fixed pool, hidden rather than removed (see sessionRows).
-        pairRows = (0..<MAX_PAIR_ROWS).map { _ in
-            let it = NSMenuItem(title: "", action: #selector(pairStart(_:)), keyEquivalent: "")
-            it.target = self
-            it.isHidden = true
-            pairMenu.addItem(it)
-            return it
-        }
-        pairMenu.addItem(.separator())
-        // The status row carries a READING (which device, how long is left, why it
-        // failed), so it is ENABLED - see --legibility-check and the ~31% note in
-        // buildMenu below. It has no action, which is the exception that rule
-        // documents rather than a control that does nothing.
-        pairStatusItem.target = self
-        pairStatusItem.isEnabled = true
-        pairMenu.addItem(pairStatusItem)
-        for it in [pairScanItem, pairCancelItem] {
-            it.target = self
-            it.isEnabled = true
-            pairMenu.addItem(it)
-        }
         for it in [remoteItem, colourItem, barItem, soundItem, iconItem, pairItem, loginItem] {
             it.target = self
             it.isEnabled = true
@@ -1701,7 +2156,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         remoteItem.state = s.remoteAnswer ? .on : .off
         rebuildDeviceMenu(s)
         rebuildIconMenu(s)
-        rebuildPairMenu(s)
+        rebuildPairRow(s)
         startStop.title = s.running ? "Stop Deckhand" : "Start Deckhand"
         // Naming the supervisor matters: with launchd in charge, a stop is permanent
         // until Start, whereas unsupervised the app's own watchdog may bring it back.
@@ -1739,7 +2194,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // build the real menu and refresh it, and a diagnostic that pops a modal
         // dialog on someone's desktop is the same class of problem as one that
         // makes a noise.
-        runPairAlerts(s)
+        pairTick(s)
         if wantRunning && !s.running && !isSupervised() {
             if downSince == nil { downSince = Date() }
             else if Date().timeIntervalSince(downSince!) > 20,
@@ -1996,6 +2451,95 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // ---- wireless pairing --------------------------------------------------
 
+    /// The one pairing row in the menu. It is never disabled - `openPairWindow`
+    /// works in every state, and the window explains the ones it cannot act in.
+    /// The title carries the live state so the menu still ANSWERS "is something
+    /// pairing right now?" without opening anything.
+    func rebuildPairRow(_ s: HostStatus) {
+        pairItem.isEnabled = true
+        pairItem.title = pairInFlight(s)
+            ? "Pairing with \(s.pairing.name.isEmpty ? "a device" : s.pairing.name)\u{2026}"
+            : "Pair new device\u{2026}"
+        // One wording for a sighting and for a state, shared with the window.
+        pairItem.toolTip = pairStatusText(s)
+    }
+
+    /// Build it once and keep it: an .accessory app has nothing else holding the
+    /// window alive, and re-creating it would drop the scroll position, the key
+    /// view and the frame every time the phase changed.
+    func pairWindowEnsured() -> PairWindow {
+        if let w = pairWindow { return w }
+        let w = PairWindow(target: self)
+        w.onClose = { [weak self] in self?.pairWindowClosed() }
+        pairWindow = w
+        return w
+    }
+
+    func pairRender(_ s: HostStatus) {
+        pairWindow?.render(pairWindowModel(s, pairLocal))
+    }
+
+    /// OPENING THE WINDOW STARTS A SCAN, for the reason the submenu did: looking
+    /// for devices is the only thing anyone opens it to do, and a surface that
+    /// needs a second click before it can list anything looks broken. Guarded, so
+    /// arriving here during an exchange (the window can be re-raised by
+    /// `pairTick`) cannot disturb one.
+    @objc func openPairWindow() {
+        let s = readStatus()
+        let w = pairWindowEnsured()
+        pairLocal = pairLocalNext(s.pairing, pairLocal)
+        w.render(pairWindowModel(s, pairLocal))
+        w.show(activate: true)
+        startPairTicker()
+        if pairCanStart(s) && s.pairing.state != "scanning" && !dryRun { pairSend("PAIRSCAN") }
+    }
+
+    /// While the window is up the heartbeat is read every second. Nothing else
+    /// changes - `refresh()` is the same function the 3s timer calls, and it is
+    /// idempotent; this only shortens the wait for the six digits.
+    func startPairTicker() {
+        guard pairTicker == nil, !dryRun else { return }
+        pairTicker = Timer.scheduledTimer(withTimeInterval: PAIR_TICK_SEC, repeats: true) {
+            [weak self] _ in self?.refresh()
+        }
+    }
+
+    /// AN EXCHANGE MUST NEVER BE LEFT RUNNING WITH NO SURFACE. Closing the window
+    /// mid-exchange therefore cancels it rather than hiding it - the window says
+    /// so in its footer while that is true, so it is a stated consequence and not
+    /// a surprise. Nothing was stored either way; the cost of being wrong is one
+    /// more click on Scan.
+    func pairWindowClosed() {
+        pairTicker?.invalidate()
+        pairTicker = nil
+        let s = readStatus()
+        if pairInFlight(s) && !dryRun { pairSend("PAIRCANCEL") }
+        pairLocal = PairLocal()
+    }
+
+    /// The window's own re-render, plus the one thing that still needs an EDGE:
+    /// whether to bring it in front of the person. `pairNext` decides that, and it
+    /// decides it exactly as it decided whether to raise a modal - including the
+    /// rule that two identical failures in a row are both reported, because a
+    /// second attempt that says nothing is indistinguishable from a slow one.
+    func pairTick(_ s: HostStatus) {
+        pairLocal = pairLocalNext(s.pairing, pairLocal)
+        let (action, seen) = pairNext(s.pairing, pairSeen)
+        pairSeen = seen
+        if let w = pairWindow, w.window.isVisible { w.render(pairWindowModel(s, pairLocal)) }
+        // A scan or a sighting is not worth interrupting for; a comparison, a
+        // success and a failure are - and a comparison has a 120-second deadline
+        // running under it. Except on the very first tick, where a terminal state
+        // is left over from before this app started: see pairWorthRaising.
+        let first = !pairPrimed
+        pairPrimed = true
+        guard pairWorthRaising(action, firstTick: first) else { return }
+        let w = pairWindowEnsured()
+        w.render(pairWindowModel(s, pairLocal))
+        w.show(activate: true)
+        startPairTicker()
+    }
+
     /// Every pairing verb goes out through the same trigger file `SELECT`,
     /// `FORGET` and `EMOJI` already use. The host intercepts all four; none is
     /// forwarded to the device.
@@ -2004,100 +2548,47 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
     }
 
-    /// The submenu's rows, re-titled per refresh. Nothing is added or removed:
-    /// the pool is fixed and rows past the sighting count are hidden.
-    func rebuildPairMenu(_ s: HostStatus) {
-        // Enabled only while the host is running, for the reason the Device
-        // submenu beside it already dims: with no host there is nothing to write
-        // a command TO, and the trigger file would simply sit there until one
-        // started and then run a scan nobody asked for.
-        pairItem.isEnabled = s.running && s.pairing.supported
-        let devices = s.pairing.devices.prefix(MAX_PAIR_ROWS)
-        for (i, it) in pairRows.enumerated() {
-            guard i < devices.count else { it.isHidden = true; continue }
-            let d = devices[devices.startIndex + i]
-            it.isHidden = false
-            it.title = pairDeviceRowTitle(d)
-            it.representedObject = d.name
-            // A row that the host would refuse is dimmed rather than drawn live -
-            // the same "never offer a control that cannot work" rule the device's
-            // read-only ask path pays for.
-            it.isEnabled = pairCanStart(s)
-        }
-        pairStatusItem.attributedTitle = menuTitle([(pairStatusText(s), F_SMALL, .secondaryLabelColor)])
-        pairScanItem.title = s.pairing.devices.isEmpty ? "Scan for devices" : "Scan again"
-        pairScanItem.isEnabled = pairCanStart(s) && s.pairing.state != "scanning"
-        pairCancelItem.isEnabled = pairInFlight(s)
-    }
-
-    /// Opening the submenu scans, so the list is there by the time the pointer
-    /// reaches it. Guarded rather than unconditional: during an exchange the host
-    /// would refuse a PAIRSCAN anyway, and writing one would clobber whatever
-    /// command is sitting in the trigger file.
-    func menuWillOpen(_ menu: NSMenu) {
-        guard menu === pairMenu, !dryRun else { return }
-        let s = readStatus()
-        guard pairCanStart(s), s.pairing.state != "scanning" else { return }
+    @objc func pairScan() {
+        pairLocal = PairLocal()
         pairSend("PAIRSCAN")
     }
 
-    @objc func pairScan() { pairSend("PAIRSCAN") }
-
     /// Picking a device names it explicitly, the way SELECT and FORGET do, so the
-    /// host starts the exchange with the row that was clicked rather than with
-    /// whatever is topmost by the time it reads the file.
-    @objc func pairStart(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String, !name.isEmpty else { return }
+    /// host starts the exchange with the row that was CLICKED rather than with
+    /// whatever is topmost by the time it reads the file - and the name comes out
+    /// of the model the window last rendered, so a row can never start an exchange
+    /// with a sighting that has since dropped off the list.
+    @objc func pairRow(_ sender: NSButton) {
+        guard let m = pairWindow?.model, sender.tag >= 0, sender.tag < m.devices.count else { return }
+        let name = m.devices[sender.tag].name
+        guard !name.isEmpty else { return }
+        pairLocal = PairLocal()
         pairSend("PAIRSTART \(name)")
     }
 
-    @objc func pairCancel() { pairSend("PAIRCANCEL") }
-
-    /// THE COMPARISON, and the two reports that follow it.
-    ///
-    /// Everything about WHAT to do is decided by `pairNext`, which is pure and
-    /// driven end to end by `--pair-check`; this function is only the modal part,
-    /// which a script can never click.
-    func runPairAlerts(_ s: HostStatus) {
-        guard !pairAlertOpen else { return }
-        let (action, seen) = pairNext(s.pairing, pairSeen)
-        pairSeen = seen
-        guard action != .none else { return }
-        pairAlertOpen = true
-        defer { pairAlertOpen = false }
-        switch action {
-        case .compare(let code, let device, let label):
-            let matched = pairCompareAlert(code: code, device: device, label: label).runModal()
-                == .alertFirstButtonReturn
-            // NOTHING IS COMMITTED BY EITHER BUTTON. Match sends the proof, which
-            // only tells the device that the peer it did the ECDH with is the one
-            // that answered; the key is stored when a finger touches CONFIRM on
-            // the glass. That is the presence proof the cable used to be.
-            pairSend(matched ? "PAIRCONFIRM" : "PAIRCANCEL")
-            if matched {
-                let a = NSAlert()
-                a.messageText = "Now tap CONFIRM on \(device.isEmpty ? "the device" : device)"
-                a.informativeText = "The Mac has sent its proof. Nothing is stored until someone standing at the device taps CONFIRM on its screen - that tap is what replaces plugging it in.\n\nIt expires with the device's 120-second pairing window."
-                a.runModal()
-            }
-        case .done(let device):
-            let a = NSAlert()
-            a.messageText = "Paired with \(device.isEmpty ? "the device" : device)"
-            a.informativeText = "Both ends derived the same key from the exchange - it was never transmitted. This Mac can now answer that device's prompts, and the pairing shows up under Device."
-            a.runModal()
-        case .failed(let device, let reason):
-            let a = NSAlert()
-            a.alertStyle = .warning
-            a.messageText = "Pairing with \(device.isEmpty ? "the device" : device) failed"
-            // THE CAUSE IS NAMED, always. From the Mac, "it did not work" and "it
-            // is not possible here" look identical - the rule POWERPROBE's
-            // "not on battery (unplug USB; state=2 mv=3866)" refusal exists for.
-            a.informativeText = (reason.isEmpty ? "The host gave no reason." : reason)
-                + "\n\nNothing was stored. Open the device's Settings › Pairing, tap PAIR NEW MAC, and try again."
-            a.runModal()
+    /// One selector for every phase's pair of buttons; the ROLE is the tag the
+    /// model put there. Each arm updates `pairLocal` BEFORE sending, because the
+    /// host republishes on its own clock and the window re-renders in the gap -
+    /// leaving two live buttons over a question already answered.
+    @objc func pairButton(_ sender: NSButton) {
+        switch PairButtonRole(rawValue: sender.tag) ?? .none {
+        case .match:
+            // NOTHING IS COMMITTED BY THIS BUTTON. It sends the proof, which only
+            // tells the device that the peer it did the ECDH with is the one that
+            // answered; the key is stored when a finger touches CONFIRM on the
+            // glass. That tap is the presence proof the cable used to be.
+            pairLocal.answered = pairWindow?.model.code ?? ""
+            pairSend("PAIRCONFIRM")
+        case .decline, .cancel:
+            pairLocal = PairLocal(answered: "", cancelling: true)
+            pairSend("PAIRCANCEL")
+        case .close:
+            pairWindow?.window.performClose(nil)
+            return
         case .none:
-            break
+            return
         }
+        pairRender(readStatus())
     }
 
     @objc func openLog() {
@@ -2535,19 +3026,48 @@ if CommandLine.arguments.contains("--legibility-check") {
     // The third element is "is this row REACHABLE", and it is not padding.
     // MEASURED: NSMenuItem.isEnabled's GETTER reflects the parent chain - every
     // item inside a submenu whose parent item is disabled reports false, whatever
-    // was set on it. The pairing status row lives inside `Pair new device…`, which
-    // dims with the host, so with the host down this check FAILED for a row that
-    // cannot be opened at all. An instrument that fails for the wrong reason is
-    // worse than none, and this file has earned that sentence twice already.
+    // was set on it. The pairing status row used to live inside `Pair new device…`,
+    // which dimmed with the host, so with the host down this check FAILED for a
+    // row that could not be opened at all. An instrument that fails for the wrong
+    // reason is worse than none, and this file has earned that sentence twice
+    // already. That row is gone - the pairing reading is now the window's, and is
+    // checked below where AppKit's ~31% does not apply to it.
     for (name, it, reachable) in [("5h", d.q5, { true }), ("7d", d.q7, { true }),
-                                  ("Codex", d.cxLine, { true }), ("battery", d.battLine, { true }),
-                                  // Carries WHY a pairing failed, and a cause
-                                  // rendered in grey is a cause nobody reads.
-                                  ("pairing status", d.pairStatusItem, { d.pairItem.isEnabled })]
+                                  ("Codex", d.cxLine, { true }), ("battery", d.battLine, { true })]
                                  as [(String, NSMenuItem, () -> Bool)] {
         guard !it.isHidden, reachable() else { continue }
         if it.isEnabled { print("  \(name): full strength"); continue }
         print("FAIL \(name) is DISABLED, so AppKit draws its reading at ~31% - grey, unreadable")
+        failed += 1
+    }
+    // THE PAIRING CAUSE MOVED OFF THE MENU, so the ~31% rule no longer reaches it -
+    // but the reason that rule exists does: "Failed: bluetooth is poweredOff" in
+    // grey is a cause nobody reads. In the window it is an NSTextField, whose ink
+    // is whatever colour it was given, so the assertion is on the colour: the
+    // reading must be drawn in one of the two FULL-strength semantic colours and
+    // never in tertiary or disabled ink.
+    let cause = "bluetooth is poweredOff"
+    var fh = HostStatus()
+    fh.running = true
+    fh.pairing = PairInfo(supported: true, state: "failed", name: "Deckhand-C114", error: cause)
+    let pw = PairWindow(target: nil)
+    pw.render(pairWindowModel(fh, PairLocal()))
+    for (name, field, want) in [("pairing headline", pw.titleField, [NSColor.labelColor]),
+                                ("pairing cause", pw.detailField,
+                                 [NSColor.labelColor, NSColor.secondaryLabelColor])] {
+        if field.isHidden {
+            print("FAIL \(name) is HIDDEN, so the reading is not on screen at all")
+            failed += 1
+        } else if !want.contains(where: { $0 == field.textColor }) {
+            print("FAIL \(name) is drawn in \(field.textColor?.description ?? "no colour") - "
+                  + "a reading must be full-strength ink, not tertiary or disabled")
+            failed += 1
+        } else {
+            print("  \(name): full strength")
+        }
+    }
+    if !pw.detailField.stringValue.contains(cause) {
+        print("FAIL the pairing window does not carry the host's cause at all")
         failed += 1
     }
     print(failed == 0 ? "legibility: every reading renders at full strength"
@@ -2942,7 +3462,7 @@ if CommandLine.arguments.contains("--pair-check") {
     // truncated message rather than as a missing one.
     var noReason = HostStatus(); noReason.running = true
     noReason.pairing = PairInfo(supported: true, state: "failed", name: "Deckhand-C114")
-    ok(pairStatusText(noReason).contains("no reason given"), "an empty error still says so")
+    ok(pairStatusText(noReason).contains(PAIR_NO_REASON), "an empty error still says so")
 
     // THE REPEAT CASE, which is why the outcome token is cleared on the way past
     // idle/scanning/awaiting-code: two identical failures in a row must both be
@@ -3015,91 +3535,301 @@ if CommandLine.arguments.contains("--pair-check") {
     eq(pairDeviceRowTitle(PairDevice(name: "Deckhand-C114", rssi: -52)), "Deckhand-C114  ·  -52 dBm",
        "a row names the device and how strong it is")
 
-    // ---- THE DIALOG ITSELF, inspected rather than described -----------------
-    let a = pairCompareAlert(code: "001472", device: "Deckhand-C114", label: "studio")
-    let field = a.accessoryView as? NSTextField
-    ok(field != nil, "the code is shown in the dialog's accessory view")
-    if let field {
-        // THE USER TYPES NOTHING. An editable field here would be the broken
-        // first design walking back in: the HMAC proof derives from the shared
-        // secret, so a typed code proves nothing to the device.
-        ok(!field.isEditable, "the code field is NOT editable - there is nothing to type here")
-        // Drawn EXACTLY as settings.ino draws it: ungrouped, no separators. Two
-        // renderings of one number are two things to compare wrongly.
-        eq(field.stringValue, "001472", "the six digits are shown verbatim, ungrouped and unpadded")
-        let f = field.attributedStringValue.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
-        ok(f != nil, "the code has a font of its own")
-        if let f {
-            ok(f.pointSize >= 32,
-               "the code is big enough to read across a desk (got \(f.pointSize)pt) - "
-               + "a comparison nobody can make is a comparison nobody makes")
-            ok(f.isFixedPitch || f.fontDescriptor.postscriptName?.contains("Mono") == true,
-               "and monospaced, so digit N lines up with digit N on the device")
-        }
-        let kern = field.attributedStringValue.attribute(.kern, at: 0, effectiveRange: nil) as? CGFloat
-        ok((kern ?? 0) > 0, "the digits are spaced apart by KERNING, which inserts no character")
+    // ---- THE WINDOW'S MODEL: what a person would see, in every state --------
+    // The window replaced three stacked NSAlerts and a submenu, so everything the
+    // alerts used to be asserted on is asserted here - and then AGAIN through the
+    // real controls below, because a model that agrees with itself binds nothing.
+    func model(_ state: String, code: String = "", name: String = "Deckhand-C114",
+               label: String = "", error: String = "", sec: Int = 0, devices: [PairDevice] = [],
+               running: Bool = true, supported: Bool = true,
+               local: PairLocal = PairLocal()) -> PairWindowModel {
+        var h = HostStatus()
+        h.running = running
+        h.pairing = PairInfo(supported: supported, state: state, devices: devices,
+                             name: name, label: label, code: code, error: error, sec: sec)
+        return pairWindowModel(h, local)
     }
-    eq(a.buttons.count, 2, "two answers: they match, or they do not")
-    eq(a.buttons[0].title, "They match", "and the first says so in words, not Yes/OK")
-    ok(a.buttons[1].title.contains("don"), "the second is an explicit denial, not Cancel")
-    // NEITHER IS THE RETURN KEY'S. AppKit defaults the first button, and a stray
-    // Return would assert that two numbers were compared by someone who never
-    // looked - the single input this design rests on.
-    eq(a.buttons[0].keyEquivalent, "", "Return does not answer for the user")
-    eq(a.buttons[1].keyEquivalent, "\u{1b}", "Escape declines, so refusing stays the cheap option")
-    ok(a.messageText.contains("Deckhand-C114"), "the dialog names the device it is asking about")
-    ok(a.informativeText.contains("studio"), "and the label that device is showing beside its own code")
-    ok(a.informativeText.contains("CONFIRM"),
-       "and says the device's own tap is what stores the key - the Mac's button commits nothing")
-    let anon = pairCompareAlert(code: "482913", device: "", label: "")
-    ok(!anon.messageText.contains("()"), "an unnamed device does not leave empty brackets on screen")
+
+    // The two states the old submenu could only DIM. A grey row states nothing,
+    // and from the Mac "it did not work" and "it is not possible here" look the
+    // same - so the window opens in both and names the cause.
+    let noHost = model("idle", running: false)
+    eq(noHost.phase, .unavailable, "with the host down the window still opens, and says so")
+    ok(noHost.title.contains("not running"), "and names that as the cause")
+    ok(noHost.detail.contains("Start Deckhand"), "and says what to do about it")
+    ok(!noHost.rowsEnabled && !noHost.scanEnabled, "with nothing to send a command to, nothing is live")
+    let oldHost = model("idle", supported: false)
+    eq(oldHost.phase, .unavailable, "against a host predating the feature, likewise")
+    ok(oldHost.title.contains("too old"), "and THAT is the cause it names, not a failed scan")
+
+    eq(model("scanning").phase, .browse, "a scan is the browse screen")
+    ok(model("scanning").busy, "with the spinner running, since a scan has no other sign of life")
+    ok(!model("scanning").rowsEnabled,
+       "and no row is live: the host refuses PAIRSTART while its own radio is scanning")
+    ok(!model("scanning").scanEnabled, "nor a second scan")
+    let found = model("idle", devices: [PairDevice(name: "Deckhand-C114", rssi: -52),
+                                        PairDevice(name: "Deckhand-0528", rssi: -77)])
+    eq(found.phase, .browse, "idle with sightings is the browse screen")
+    ok(found.rowsEnabled && found.scanEnabled, "and both the rows and Scan are live")
+    ok(found.title.contains("2 devices"), "the headline counts them")
+    ok(found.detail.contains("PAIR NEW MAC"),
+       "and says what has to be open at the OTHER end before a row will work")
+    ok(model("idle").title.contains("No devices found"), "an empty list says so rather than sitting blank")
+    ok(model("idle").detail.contains("Scan again"), "and points at the control that fixes it")
+
+    // THE TRAP THE OLD DIALOG PAID FOR: pairStart() sets `awaiting-code` the
+    // moment it starts connecting, so the STATE arrives before the digits.
+    let connecting = model("awaiting-code", sec: 119)
+    eq(connecting.phase, .connecting, "awaiting-code with no digits is NOT the comparison")
+    eq(connecting.code, "", "and shows no code at all - never an EMPTY comparison")
+    ok(connecting.secondary?.role == .cancel, "it offers Cancel, which is the only useful act there")
+    ok(connecting.footer.contains("119s"), "and the deadline, which the menu could only show on hover")
+
+    let compare = model("awaiting-code", code: "001472", label: "studio", sec: 97)
+    eq(compare.phase, .compare, "six digits are what raises the comparison")
+    eq(compare.code, "001472", "shown verbatim - a leading zero is part of the number")
+    ok(compare.title.contains("Deckhand-C114"), "it names the device it is asking about")
+    ok(compare.detail.contains("studio"), "and the label that device shows beside its own code")
+    ok(compare.detail.contains("CONFIRM"),
+       "and says the device's own tap stores the key - this window commits nothing")
+    ok(!compare.showsList, "the list is gone: there is one question on screen and it is this one")
+    ok(compare.footer.contains("97s"), "the 120s deadline is ON the screen making the decision")
+    eq(compare.primary?.title, "They match", "the answer is a word, not OK")
+    eq(compare.secondary?.title, "They don\u{2019}t match", "and so is the denial, not Cancel")
+    // NEITHER ANSWER IS THE RETURN KEY'S - the single input this design rests on.
+    eq(compare.primary?.key, "", "Return does not answer for the user")
+    eq(compare.secondary?.key, "\u{1b}", "Escape declines, so refusing stays the cheap option")
+    ok(compare.floats, "and it floats, because the comparison is made by looking AWAY from the Mac")
+    ok(!model("idle").floats, "a window at rest does not sit above everything")
+    ok(pairWindowModel(HostStatus(), PairLocal()).floats == false,
+       "nor does one with no host behind it")
+
+    // The ~1s between clicking They match and the host republishing `verifying`.
+    let answered = model("awaiting-code", code: "001472", sec: 96, local: PairLocal(answered: "001472"))
+    eq(answered.phase, .confirming,
+       "an answered comparison is NOT re-offered while the host catches up")
+    ok(answered.primary == nil,
+       "so there is no second chance to answer a question already answered")
+    eq(answered.secondary?.role, .cancel, "only Cancel remains live there")
+    eq(model("verifying", sec: 90).phase, .confirming, "and the host's own verifying is the same screen")
+    ok(model("verifying").detail.contains("NOTHING IS STORED"),
+       "which says what is still outstanding: a finger on the device's glass")
+
+    let cancelling = model("verifying", sec: 88, local: PairLocal(cancelling: true))
+    eq(cancelling.phase, .cancelling, "Cancel takes effect on screen before the host confirms it")
+    ok(cancelling.primary == nil && cancelling.secondary == nil,
+       "with nothing left to click - a second PAIRCANCEL is a command the host would refuse")
+    eq(model("idle", local: PairLocal(cancelling: true)).phase, .browse,
+       "and the flag means nothing once the exchange is actually over")
+
+    let done = model("done")
+    eq(done.phase, .done, "done is its own screen, not a modal over the last one")
+    ok(done.title.contains("Paired with Deckhand-C114"), "naming what it paired with")
+    ok(done.showsList && done.scanEnabled, "and the next pairing costs no reopening")
+    eq(done.scanTitle, "Pair another device", "which is what the button then says")
+
+    for reason in ["bluetooth is poweredOff", "refused: full", "refused: badproof"] {
+        let f = model("failed", error: reason)
+        eq(f.phase, .failed, "a failure is a screen too")
+        ok(f.detail.contains(reason), "carrying the host's OWN cause, never an invented one")
+        ok(f.rowsEnabled, "with the sightings still live, so a retry is one click")
+    }
+    ok(model("failed", error: "").detail.contains(PAIR_NO_REASON),
+       "an empty error still says something rather than rendering a truncated sentence")
+    ok(pairStatusText(noReason).contains(PAIR_NO_REASON),
+       "in the SAME words the menu's tooltip uses - one phrase, two surfaces, no drift")
+
+    // An unnamed device must not leave punctuation with nothing in it.
+    let anon = model("awaiting-code", code: "482913", name: "")
+    ok(!anon.title.contains("()") && !anon.title.contains("  "),
+       "an unnamed device does not leave empty brackets or a double space on screen")
+    ok(anon.title.contains("the device"), "it says \u{201C}the device\u{201D} instead")
+    ok(!model("awaiting-code", code: "001472", label: "").detail.contains("()"),
+       "and an unlabelled one leaves none either")
+
+    // The cap the menu could only hit in silence.
+    let many = model("idle", devices: (0..<(MAX_PAIR_ROWS + 3)).map {
+        PairDevice(name: "Deckhand-\($0)", rssi: -40 - $0)
+    })
+    eq(many.devices.count, MAX_PAIR_ROWS, "the list is capped")
+    ok(many.footer.contains("3 further devices"), "and SAYS what it is not showing")
+
+    // ---- what is worth opening a window over -------------------------------
+    // The login item makes "the app starts while the heartbeat still says done"
+    // the COMMON case, so this is not a corner.
+    ok(!pairWorthRaising(.done(device: "Deckhand-C114"), firstTick: true),
+       "a `done` left over from before launch does not open a window over someone's work")
+    ok(!pairWorthRaising(.failed(device: "Deckhand-C114", reason: "refused: full"), firstTick: true),
+       "nor does a stale failure")
+    ok(pairWorthRaising(.done(device: "Deckhand-C114"), firstTick: false),
+       "but a `done` that HAPPENS while the app is up is reported")
+    ok(pairWorthRaising(.failed(device: "Deckhand-C114", reason: "refused: full"), firstTick: false),
+       "and so is a failure")
+    // The exception, and it is the important one: an exchange in flight at launch
+    // has a running deadline and nowhere else to be shown.
+    ok(pairWorthRaising(.compare(code: "482913", device: "Deckhand-C114", label: ""), firstTick: true),
+       "a LIVE comparison is raised even on the first tick - its 120s window is already running")
+    ok(!pairWorthRaising(.none, firstTick: false), "and a scan is never worth interrupting for")
+
+    // ---- the local half expires on its own ---------------------------------
+    eq(pairLocalNext(PairInfo(state: "idle"), PairLocal(answered: "001472", cancelling: true)),
+       PairLocal(), "idle clears everything this Mac was remembering")
+    for s in ["scanning", "done", "failed"] {
+        eq(pairLocalNext(PairInfo(state: s), PairLocal(answered: "001472", cancelling: true)),
+           PairLocal(), "\(s) clears it too - the exchange it belonged to is over")
+    }
+    eq(pairLocalNext(PairInfo(state: "awaiting-code", code: "001472"), PairLocal(answered: "001472")),
+       PairLocal(answered: "001472"), "an answer survives while its own exchange does")
+    eq(pairLocalNext(PairInfo(state: "awaiting-code", code: "482913"), PairLocal(answered: "001472")),
+       PairLocal(), "but NOT into an exchange with different digits - it answered the other one")
+
+    // ---- THE REAL WINDOW, rendered and then read back ----------------------
+    // Everything above is a model, and a model is a mirror: it would keep passing
+    // with render() deleted. These read the actual controls after the actual
+    // render, which is the only half that binds the window to the decisions.
+    let w = PairWindow(target: nil)
+    w.render(compare)
+    ok(!w.codeField.isHidden, "the rendered window shows the code")
+    // THE USER TYPES NOTHING. An editable field here would be the broken first
+    // design walking back in: the HMAC proof derives from the shared secret, so a
+    // typed code proves nothing to the device.
+    ok(!w.codeField.isEditable, "the code field is NOT editable - there is nothing to type here")
+    eq(w.codeField.stringValue, "001472", "the six digits are drawn verbatim, ungrouped and unpadded")
+    let f = w.codeField.attributedStringValue.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+    ok(f != nil, "the code has a font of its own")
+    if let f {
+        ok(f.pointSize >= 32,
+           "the code is big enough to read across a desk (got \(f.pointSize)pt) - "
+           + "a comparison nobody can make is a comparison nobody makes")
+        ok(f.isFixedPitch || f.fontDescriptor.postscriptName?.contains("Mono") == true,
+           "and monospaced, so digit N lines up with digit N on the device")
+    }
+    let kern = w.codeField.attributedStringValue.attribute(.kern, at: 0, effectiveRange: nil) as? CGFloat
+    ok((kern ?? 0) > 0, "the digits are spaced apart by KERNING, which inserts no character")
+    // ...and NOT on the last one, where it is a trailing advance that pads the
+    // string on the right and shoves a centred line off centre. Caught on a
+    // capture; asserted here so the capture is not the only thing that can.
+    let tail = w.codeField.attributedStringValue.attribute(.kern, at: 5, effectiveRange: nil) as? CGFloat
+    eq(tail ?? 0, 0, "the LAST digit carries no kern - it would pad the line and break the centring")
+    let para = w.codeField.attributedStringValue
+        .attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+    eq(para?.alignment, .center, "the digits are centred, as the device centres its own")
+    eq(w.titleField.stringValue, compare.title, "the headline is the model's")
+    eq(w.primaryButton.title, "They match", "and so are the two answers")
+    eq(w.secondaryButton.title, "They don\u{2019}t match", "in words, not OK/Cancel")
+    eq(w.primaryButton.keyEquivalent, "", "Return does not answer for the user - IN THE REAL BUTTON")
+    eq(w.secondaryButton.keyEquivalent, "\u{1b}", "and Escape declines, in the real one too")
+    eq(w.primaryButton.tag, PairButtonRole.match.rawValue, "the button carries its JOB as its tag")
+    eq(w.secondaryButton.tag, PairButtonRole.decline.rawValue, "each of them")
+    ok(w.listStack.isHidden, "and the device list is off screen while the question is up")
+    eq(w.window.level, .floating, "the window floats while an exchange is live")
+
+    // A hidden button must surrender its key equivalent, or Escape still fires an
+    // invisible control - which is a control answering for someone.
+    w.render(done)
+    ok(w.secondaryButton.isHidden, "the done screen has no second button")
+    eq(w.secondaryButton.keyEquivalent, "",
+       "and the hidden one keeps NO key - Escape must not fire a control nobody can see")
+    eq(w.primaryButton.tag, PairButtonRole.close.rawValue, "its one button closes")
+    ok(w.codeField.isHidden, "the code is gone once there is nothing to compare")
+    eq(w.window.level, .normal, "and the window stops floating over everything")
+
+    w.render(found)
+    eq(w.rows.filter { !$0.isHidden }.count, 2, "two sightings render two rows")
+    eq(w.rows.count, MAX_PAIR_ROWS, "out of a FIXED pool - a list re-rendered every second under a "
+       + "pointer must not add and remove rows")
+    ok(w.rows[0].attributedTitle.string.contains("Deckhand-C114"), "each naming its device")
+    ok(w.rows[0].attributedTitle.string.contains("-52 dBm"), "and how strong it is")
+    ok(w.rows[0].isEnabled, "and live, because this is a state the host would accept")
+    eq(w.rows[0].tag, 0, "a row carries its INDEX, so it starts the exchange that was clicked")
+    eq(w.rows[1].tag, 1, "each of them")
+    w.render(model("scanning", devices: found.devices))
+    ok(!w.rows[0].isEnabled, "and dead while the host is scanning, rather than offering a refusal")
 
     print(failed == 0 ? "pair: all \(ran) checks passed" : "pair: \(failed) of \(ran) FAILED")
     exit(failed == 0 ? 0 : 1)
 }
 
-/// `--pair-shot <out.png> [code] [device]`: THE REAL COMPARISON DIALOG, off the
+/// A synthetic host state for each screen the pairing window can show, so
+/// `--pair-shot` can photograph one without a host, a device or a radio. Named
+/// rather than hand-built at the call site: the phase names are what a person
+/// types, and this is the only place they map to a heartbeat.
+func pairDemoStatus(_ phase: String) -> (HostStatus, PairLocal) {
+    var h = HostStatus()
+    h.running = true
+    var p = PairInfo(supported: true, state: "idle")
+    var local = PairLocal()
+    let found = [PairDevice(name: "Deckhand-C114", rssi: -52),
+                 PairDevice(name: "Deckhand-0528", rssi: -77)]
+    switch phase {
+    case "scanning":   p.state = "scanning"; p.devices = found
+    case "empty":      p.state = "idle"
+    case "connecting": p.state = "awaiting-code"; p.name = "Deckhand-C114"; p.sec = 119
+    case "confirming": p.state = "verifying"; p.name = "Deckhand-C114"; p.sec = 90
+    case "cancelling": p.state = "verifying"; p.name = "Deckhand-C114"; p.sec = 88
+                       local.cancelling = true
+    case "done":       p.state = "done"; p.name = "Deckhand-C114"; p.devices = found
+    case "failed":     p.state = "failed"; p.name = "Deckhand-C114"; p.devices = found
+                       p.error = "the device never confirmed - its CONFIRM button has to be tapped inside the 120s window"
+    case "nohost":     h.running = false
+    case "browse":     p.state = "idle"; p.devices = found
+    default:           // "compare", and anything unrecognised: the screen this feature exists for
+        p.state = "awaiting-code"; p.name = "Deckhand-C114"; p.label = "studio"
+        p.code = "001472"; p.sec = 97
+    }
+    h.pairing = p
+    return (h, local)
+}
+
+/// `--pair-shot <out.png> [phase] [light|dark]`: THE REAL PAIRING WINDOW, off the
 /// glass, captured by window id.
 ///
 /// `--pair-check` can assert that the face is monospaced and 44pt; it cannot say
-/// whether six digits at that size, in that dialog, beside that wording, are
-/// actually easy to compare with a device across a desk. That judgement needs a
-/// person and therefore a picture - and this dialog is otherwise reachable only
-/// by running a real exchange with a real device.
+/// whether six digits at that size, in that window, beside that wording, are
+/// actually easy to compare with a device across a desk - nor whether the browse
+/// screen reads as a list. That judgement needs a person and therefore a picture,
+/// and these screens are otherwise reachable only by running a real exchange with
+/// a real device.
+///
+/// Phases: compare (the default), browse, empty, scanning, connecting, confirming,
+/// cancelling, done, failed, nohost.
 ///
 /// Same two orderings `--menu-shot` documents and for the same reasons: the
-/// capture is dispatched BEFORE runModal (which blocks the main thread for
-/// exactly as long as the window exists), and it captures the window this process
-/// OWNS rather than a guessed screen region - a guessed region cheerfully writes a
-/// PNG of whatever was behind a dialog that never appeared.
+/// capture is dispatched AFTER the window is on screen, and it captures the window
+/// this process OWNS rather than a guessed screen region - a guessed region
+/// cheerfully writes a PNG of whatever was behind a window that never appeared.
 if let i = CommandLine.arguments.firstIndex(of: "--pair-shot") {
     let args = CommandLine.arguments
     let path = args.count > i + 1 ? args[i + 1] : "pair-shot.png"
-    let code = args.count > i + 2 ? args[i + 2] : "001472"
-    let device = args.count > i + 3 ? args[i + 3] : "Deckhand-C114"
+    let phase = args.count > i + 2 && !["light", "dark"].contains(args[i + 2]) ? args[i + 2] : "compare"
     // FORCED, because a capture can only show the appearance the Mac is set to
-    // and this dialog has to be legible in both - the same gap --menu-preview
+    // and this window has to be legible in both - the same gap --menu-preview
     // exists to close for the menu. Omitted, it follows the system.
     let forced: NSAppearance? = args.contains("light") ? NSAppearance(named: .aqua)
         : args.contains("dark") ? NSAppearance(named: .darkAqua) : nil
     final class Shot: NSObject, NSApplicationDelegate {
-        let path: String, code: String, device: String, forced: NSAppearance?
-        init(_ p: String, _ c: String, _ d: String, _ ap: NSAppearance?) {
-            path = p; code = c; device = d; forced = ap
-        }
+        let path: String, phase: String, forced: NSAppearance?
+        var win: PairWindow?
+        init(_ p: String, _ ph: String, _ ap: NSAppearance?) { path = p; phase = ph; forced = ap }
         func applicationDidFinishLaunching(_ n: Notification) {
             NSApp.setActivationPolicy(.accessory)
-            let a = pairCompareAlert(code: code, device: device, label: "studio")
-            if let forced { a.window.appearance = forced }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.2) {
+            let w = PairWindow(target: nil)
+            // The capture must not be able to trigger the close path's PAIRCANCEL.
+            w.onClose = nil
+            win = w
+            if let forced { w.window.appearance = forced }
+            let (status, local) = pairDemoStatus(phase)
+            w.render(pairWindowModel(status, local))
+            w.show(activate: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 let mine = ProcessInfo.processInfo.processIdentifier
                 let list = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
                             as? [[String: Any]]) ?? []
-                let win = list.first { ($0[kCGWindowOwnerPID as String] as? Int32) == mine
-                                       && ((($0[kCGWindowBounds as String] as? [String: Any])?["Height"]
-                                            as? Double) ?? 0) > 60 }
-                guard let id = win?[kCGWindowNumber as String] as? Int else {
-                    print("pair-shot FAILED: this process owns no on-screen window, so the dialog never appeared - NOT writing \(self.path)")
+                let found = list.first { ($0[kCGWindowOwnerPID as String] as? Int32) == mine
+                                         && ((($0[kCGWindowBounds as String] as? [String: Any])?["Height"]
+                                              as? Double) ?? 0) > 60 }
+                guard let id = found?[kCGWindowNumber as String] as? Int else {
+                    print("pair-shot FAILED: this process owns no on-screen window, so the window never appeared - NOT writing \(self.path)")
                     exit(1)
                 }
                 let cap = Process()
@@ -3108,21 +3838,19 @@ if let i = CommandLine.arguments.firstIndex(of: "--pair-shot") {
                 try? cap.run()
                 cap.waitUntilExit()
                 let ok = FileManager.default.fileExists(atPath: self.path)
-                print(ok ? "wrote \(self.path)  (the real compare dialog, off the glass)"
+                print(ok ? "wrote \(self.path)  (the real pairing window, \(self.phase), off the glass)"
                          : "pair-shot FAILED: screencapture wrote nothing for window \(id)")
-                DispatchQueue.main.async { NSApp.abortModal(); exit(ok ? 0 : 1) }
+                exit(ok ? 0 : 1)
             }
             // The backstop --menu-shot needed for the same reason: without it a
-            // failure above leaves a modal dialog sitting on someone's desktop.
+            // failure above leaves a window sitting on someone's desktop.
             Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { _ in
-                print("pair-shot FAILED: timed out with the dialog still up")
-                NSApp.abortModal()
+                print("pair-shot FAILED: timed out with the window still up")
                 exit(1)
             }
-            _ = a.runModal()
         }
     }
-    let shot = Shot(path, code, device, forced)
+    let shot = Shot(path, phase, forced)
     app.delegate = shot
     app.run()
 }
