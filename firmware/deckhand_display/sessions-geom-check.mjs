@@ -96,6 +96,73 @@ const SOURCE_FAULTS = [
   ["board 2's code cell grows by 3, walking the pill's footer bar onto the time budget",
     "board_es3c35p.h", (t) => t.replace(/(const int CODE_LINE_H\s*=\s*)16/, "$119"),
     "clears the footer bar"],
+  // ---- the scrolling list (board 2), one fault per decision it rests on ----
+  // Each is a REVERSION to a version of the code that would ship a real defect, not
+  // a synthetic break - which is what makes a catch mean "this assertion would have
+  // caught it" rather than "this assertion noticed something".
+  ["the scrolling row drops to the 65px rung, losing every row's model/branch line",
+    "board_es3c35p.h", (t) => t.replace(/(const int SESSION_SCROLL_ROW_H\s*=\s*)79/, "$165"),
+    "so it keeps its model/branch line"],
+  // THE ONE THAT PROVES THE SWEEP HAS TEETH. A view height that is not a whole
+  // number of steps is the only way a PARTIAL row can arise, and it is exactly what
+  // writing the obvious `= SESSION_SCROLL_AVAIL` here would produce at other
+  // numbers. Without this fault the sweep would be a tautology - rows at multiples
+  // of the step, offsets at multiples of the step - and a tautology is the "assertion
+  // that cannot fail" this file's own header calls a defect.
+  ["the view height stops being a whole number of steps, so a row is cut in half",
+    "board_es3c35p.h",
+    (t) => t.replace(/(const int SESSION_SCROLL_VIEW_H\s*=\s*)[^;]+;/, "$1SESSION_SCROLL_AVAIL + 1;"),
+    "no row is ever PARTIALLY visible"],
+  ["sessionScrollTo() loses its snap, so the offset can land between rows",
+    "sessions.ino",
+    (t) => t.replace(/int step = \(px \+ SESSION_SCROLL_STEP \/ 2\) \/ SESSION_SCROLL_STEP;[\s\S]*?int v = step \* SESSION_SCROLL_STEP;/,
+                     "int v = px;"),
+    "sessionScrollTo() snaps to SESSION_SCROLL_STEP"],
+  ["sessionRowYAt() loses the scroll offset, so the list draws but never moves",
+    "sessions.ino",
+    (t) => t.replace(/return SESSION_ROW_Y0 \+ pos \* SESSION_SCROLL_STEP - sessionScroll;/,
+                     "return SESSION_ROW_Y0 + pos * SESSION_SCROLL_STEP;"),
+    "sessionRowYAt() subtracts sessionScroll"],
+  ["renderSessionsList() draws every row again, so scrolled-past rows paint over the chrome",
+    "sessions.ino",
+    // ANCHORED ON THE LINE THAT FOLLOWS, because the identical guard appears in
+    // sessionRowAtY() FIRST and an unanchored replace removed that one instead -
+    // which the hit-test assertion then caught, crediting this fault to the wrong
+    // rule and leaving the draw's own guard unproven. Exactly the "a rule a
+    // neighbouring line can satisfy is not a rule" trap, met from the fault side.
+    (t) => t.replace(/    if \(!sessionRowVisible\(pos\)\) continue;\n(\s*int i = sessionAt\(pos\);)/, "$1"),
+    "renderSessionsList() skips rows that are not visible"],
+  ["sessionRowAtY() stops skipping invisible rows, so a scrolled-past row claims taps",
+    "sessions.ino",
+    (t) => t.replace(/    if \(!sessionRowVisible\(pos\)\) continue;\n(\s*int y = sessionRowYAt\(pos\);)/, "$1"),
+    "a scrolled-past row is not a tap target"],
+  // THE ONE MOST LIKELY TO SHIP. A scroll step changes which session each display
+  // position holds; rowSigCache is keyed by position, so without the bust the text
+  // compares equal and stands still while the chrome scrolls under it.
+  ["the scroll step stops busting rowSigCache, so the list scrolls its chrome and not its text",
+    "sessions.ino",
+    (t) => t.replace(/  if \(sessionScroll != sessionScrollCache\) \{/, "  if (false) {"),
+    "busts every rowSigCache entry"],
+  ["a cache-bust loop reverts to MAX_SESSIONS, overrunning rowSigCache at the seventh row",
+    "sessions.ino",
+    (t) => t.replace(/for \(int i = 0; i < sessionSlotCount; i\+\+\) rowSigCache/,
+                     "for (int i = 0; i < MAX_SESSIONS; i++) rowSigCache"),
+    "bounded by sessionSlotCount"],
+  // THE DEFECT THIS FEATURE ACTUALLY SHIPPED, reverted exactly. Found on the glass
+  // with every geometry assertion green: the spinner is a 32x32 blit that paints its
+  // own background, so a scrolled-past row stamped an orange starburst over the
+  // footer clock four times a second and nothing wiped it.
+  ["tickWorkingSpinner() drops its visibility guard, stamping a spinner over the footer clock",
+    "deckhand_display.ino",
+    (t) => t.replace(/    if \(!sessionRowVisible\(pos\)\) continue;\n(\s*int i = sessionAt\(pos\);\n\s*if \(strcmp\(sessions\[i\]\.status, "working"\))/, "$1"),
+    "tickWorkingSpinner() skips rows that are not visible"],
+  ["tickSessionAnim()'s shimmer loop drops its visibility guard",
+    "sessions.ino",
+    (t) => t.replace(/      if \(!sessionRowVisible\(pos\)\) continue;\n(\s*const int i = sessionAt\(pos\);)/, "$1"),
+    "tickSessionAnim() skips rows that are not visible"],
+  ["board 1 is quietly given a seventh slot it has neither the heap nor the renderer for",
+    "board_e32r28t.h", (t) => t.replace(/(#define SESSION_SLOTS )6/, "$17"),
+    "exactly the ladder's"],
   // The prose's two figures, one fault each, because they are two claims: the
   // parenthesis drifted on its own once already.
   ["board-1-known-state.md's sessions allowlist ENTRY count is nudged off KNOWN[1].length",
@@ -222,6 +289,16 @@ const OPT_DESC_MAX_BYTES = +readSource(`../../claude-hooks/deckhand-session-hook
 // change that couples the chip's drawn size back to the tap zone.
 const SESSIONS_INO = readSource(`sessions.ino`);
 const DISPLAY_INO  = readSource(`deckhand_display.ino`);
+// THE FULL-ASK-PAYLOAD WIRE CAP, out of the firmware's own #define. It is NOT the
+// array size any more - SESSION_SLOTS is, and on board 2 they differ (6 vs 20) - so
+// the two are parsed separately and every assertion below says which one it means.
+// A missing or unparseable define is a hard error rather than a NaN that propagates
+// into comparisons and reads as a layout bug.
+const maxSessionsFw = (() => {
+  const m = DISPLAY_INO.match(/^#define MAX_SESSIONS (\d+)$/m);
+  if (!m) throw new Error("sessions-geom-check: cannot parse #define MAX_SESSIONS out of deckhand_display.ino");
+  return Number(m[1]);
+})();
 // The reader is a fourth file this checker has to read: the ask screen's chip and
 // the screen it opens are one feature, and the assertions that matter are about
 // the seam between them (which predicate opens it, and on which line grid the
@@ -812,6 +889,14 @@ function armFor(src, b) {
   // it through would hand these assertions a body that is neither board's. It
   // reaches this file through detailBandVisible's own pairPanelActive refusal.
   const WP = b === 2;
+  // BOARD_SESSIONS_SCROLL splits the same way WP does - board 2 only - and is
+  // resolved here for exactly the reason the header comment gives rather than being
+  // waved through: it guards the scroll offset inside sessionRowYAt() and the
+  // uniform height inside sessionRowHAt(), which are two of the three helpers every
+  // assertion below reads the row stack through. Passing it through unresolved would
+  // hand those assertions a body that is neither board's, which is the failure the
+  // #elif note records having actually happened.
+  const SS = b === 2;
   const out = [], stack = [];
   for (const line of src.split("\n")) {
     const t = line.trim();
@@ -819,6 +904,8 @@ function armFor(src, b) {
       if (/^#if\s+!\s*BOARD_USES_TFT_ESPI$/.test(t))     stack.push(!ON);
       else if (/^#if\s+BOARD_USES_TFT_ESPI$/.test(t))     stack.push(ON);
       else if (/^#if\s+BOARD_HAS_WIRELESS_PAIR$/.test(t)) stack.push(WP);
+      else if (/^#if\s+!\s*BOARD_SESSIONS_SCROLL$/.test(t)) stack.push(!SS);
+      else if (/^#if\s+BOARD_SESSIONS_SCROLL$/.test(t))  stack.push(SS);
       else throw new Error(`armFor(): unresolvable directive "${t}"`);
       continue;
     }
@@ -1528,7 +1615,13 @@ for (const b of [1, 2]) {
       `ladder cap ${c.SESSION_ROW_H_MAX} >= the title threshold ${c.SESSION_TITLE_MIN_H} (or no row ever gets a title)`);
 
   // ---- THE LADDER, exactly as renderSessionsList computes it ----
-  const MAX_SESSIONS = 6;
+  // PARSED, NEVER TRANSCRIBED. This read `const MAX_SESSIONS = 6;` - a literal on
+  // the checker's side, which means changing the firmware's own #define would not
+  // have failed a single assertion here. That is the rule this file already states
+  // for every other constant, and it had been broken for this one; it matters more
+  // now that MAX_SESSIONS is no longer the same number as SESSION_SLOTS, so the two
+  // can genuinely diverge.
+  const MAX_SESSIONS = maxSessionsFw;
   for (const strip of [false, true]) {
     const avail = contentBottom - c.SESSION_ROW_Y0 - (strip ? c.SESSION_OVERFLOW_H : 0);
     const tags = [];
@@ -1659,6 +1752,172 @@ for (const b of [1, 2]) {
           `every row offset drawn through is a constant this board declares` +
           (unknownY.length ? ` [${unknownY.join(", ")}]` : ""));
     }
+  }
+
+  // ---- THE SCROLLING LIST (board 2 only) ----
+  // The ladder above owns 1..MAX_SESSIONS. Past that the list is uniform and scrolls,
+  // and the property that has to hold is not a band table but an ARITHMETIC one:
+  // no row is ever PARTIALLY visible. That is what lets drawSessionRow be reused
+  // with no clipping on a board whose only clip is the screen edge - see
+  // board_es3c35p.h, and scrollback.ino for the two defects that cost.
+  chk(c.SESSION_SLOTS >= maxSessionsFw,
+      `SESSION_SLOTS ${c.SESSION_SLOTS} holds at least the full-payload set (MAX_SESSIONS ${maxSessionsFw})`);
+  if (!c.BOARD_SESSIONS_SCROLL) {
+    // THE BOARD THAT DOES NOT SCROLL IS ASSERTED TOO, not merely skipped. Board 1's
+    // list must stay exactly six rows laid out by the ladder, and "we did not touch
+    // it" is not evidence - a SESSION_SLOTS that drifted up here would silently give
+    // it a seventh row it has neither the heap nor the renderer for.
+    chk(c.SESSION_SLOTS === maxSessionsFw,
+        `board ${b} does not scroll, so its slots (${c.SESSION_SLOTS}) are exactly the ladder's ${maxSessionsFw} rows`);
+  } else {
+    const RH = c.SESSION_SCROLL_ROW_H, STEP = c.SESSION_SCROLL_STEP;
+    const ROWS = c.SESSION_SCROLL_ROWS, VIEW = c.SESSION_SCROLL_VIEW_H;
+    const AVAIL = c.SESSION_SCROLL_AVAIL;
+    console.log(`scroll: row ${RH} step ${STEP} rows ${ROWS} view ${VIEW} avail ${AVAIL} ` +
+                `slots ${c.SESSION_SLOTS}`);
+    // The avail this feature derives must BE the list area the ladder divides, or
+    // the two halves of the tab are laid out against different columns.
+    chk(AVAIL === contentBottom - c.SESSION_ROW_Y0,
+        `SESSION_SCROLL_AVAIL ${AVAIL} == contentBottom(${contentBottom}) - SESSION_ROW_Y0(${c.SESSION_ROW_Y0})`);
+    chk(STEP === RH + c.SESSION_ROW_GAP,
+        `step ${STEP} == row ${RH} + gap ${c.SESSION_ROW_GAP}`);
+    // THE ROW KEEPS ITS MODEL/BRANCH LINE. This is the whole reason the scrolling
+    // row is 79 and not the 65 that would fit a sixth row on screen: below
+    // SESSION_SUB_MIN_H drawSessionRow stops drawing the sub-line, and in a list you
+    // are scrolling THROUGH that line is most of what tells two rows apart.
+    chk(RH >= c.SESSION_SUB_MIN_H,
+        `scrolling row ${RH} >= SESSION_SUB_MIN_H ${c.SESSION_SUB_MIN_H}, so it keeps its model/branch line`);
+    chk(RH >= c.SESSION_ROW_H_MIN && RH <= c.SESSION_ROW_H_MAX,
+        `scrolling row ${RH} is inside the ladder's own floor/cap (${c.SESSION_ROW_H_MIN}..${c.SESSION_ROW_H_MAX})`);
+    // ROWS is DERIVED in the header, so this checks the derivation lands where the
+    // panel actually allows - and that one more row genuinely does NOT fit. The
+    // second half is what makes this able to fail: `n rows fit` is satisfied by any
+    // n small enough, so without it the assertion would hold for ROWS = 1.
+    chk(ROWS * RH + (ROWS - 1) * c.SESSION_ROW_GAP <= AVAIL,
+        `${ROWS} rows (${ROWS * RH + (ROWS - 1) * c.SESSION_ROW_GAP}px) fit the ${AVAIL}px list area`);
+    chk((ROWS + 1) * RH + ROWS * c.SESSION_ROW_GAP > AVAIL,
+        `${ROWS + 1} rows (${(ROWS + 1) * RH + ROWS * c.SESSION_ROW_GAP}px) do NOT - so ${ROWS} is the most that fit, not merely some number that does`);
+    chk(VIEW === ROWS * STEP - c.SESSION_ROW_GAP,
+        `view height ${VIEW} is the ${ROWS} rows themselves, not the ${AVAIL}px area ` +
+        `(using the area would admit a sixth row's first ${AVAIL - VIEW}px - a PARTIAL row)`);
+    // ---- THE NO-PARTIAL-ROW SWEEP ----
+    // Every reachable session count, every scroll position, every row. This is the
+    // assertion the whole snapped-scroll design exists to satisfy, so it is checked
+    // exhaustively rather than argued: a row must be wholly inside the window or
+    // wholly outside it, with no third case.
+    const maxScrollFor = (n, hidden) => {
+      const contentH = n * STEP - c.SESSION_ROW_GAP +
+                       (hidden ? c.SESSION_ROW_GAP + c.SESSION_OVERFLOW_H : 0);
+      const over = contentH - VIEW;
+      return over <= 0 ? 0 : Math.ceil(over / STEP) * STEP;
+    };
+    let partials = 0, positions = 0, stripUnreachable = [];
+    for (let n = maxSessionsFw + 1; n <= c.SESSION_SLOTS; n++) {
+      for (const hidden of [false, true]) {
+        const mx = maxScrollFor(n, hidden);
+        let stripSeen = !hidden;
+        for (let s = 0; s <= mx; s += STEP) {
+          positions++;
+          const top = s, bot = s + VIEW;
+          for (let i = 0; i < n; i++) {
+            const ry = i * STEP, rb = ry + RH;
+            const inside = ry >= top && rb <= bot;
+            const outside = rb <= top || ry >= bot;
+            if (!inside && !outside) partials++;
+          }
+          const sy = n * STEP;
+          if (hidden && sy >= top && sy + c.SESSION_OVERFLOW_H <= bot) stripSeen = true;
+        }
+        if (!stripSeen) stripUnreachable.push(`${n}${hidden ? "+strip" : ""}`);
+      }
+    }
+    chk(positions > 0, `the sweep actually ran (${positions} scroll positions over counts ${maxSessionsFw + 1}..${c.SESSION_SLOTS}) - an empty sweep would pass vacuously`);
+    chk(partials === 0,
+        `no row is ever PARTIALLY visible, at any of ${positions} scroll positions ` +
+        `(found ${partials}) - this is what lets drawSessionRow draw without a clip`);
+    // THE STRIP MUST BE READABLE, NOT MERELY COUNTED. This is what sessionScrollMax()
+    // rounds UP for: rounding down leaves the list's last element permanently below
+    // the window, so "+N more" could be computed and never seen.
+    chk(stripUnreachable.length === 0,
+        `the "+N more" strip is reachable at every count that has one ` +
+        (stripUnreachable.length ? `[unreachable at ${stripUnreachable.join(", ")}]` : ""));
+    // ---- THE RAIL ----
+    chk(c.SESSION_RAIL_X >= c.SESSION_ROW_X + c.SESSION_ROW_W,
+        `rail x ${c.SESSION_RAIL_X} is clear of the card's right edge ${c.SESSION_ROW_X + c.SESSION_ROW_W}`);
+    chk(c.SESSION_RAIL_X + c.SESSION_RAIL_W <= W,
+        `rail ends ${c.SESSION_RAIL_X + c.SESSION_RAIL_W} inside the ${W}px panel`);
+    // The rail lives in the margin that ALREADY existed, which is the claim that
+    // keeps SESSION_SUB_LANE_W (derived from SESSION_ROW_W) untouched by this
+    // feature. If the rail ever needed the card to narrow, this is what would say so.
+    chk(c.SESSION_SUB_LANE_W === c.SESSION_ROW_W - c.SESSION_NAME_DX - 12,
+        `the row's text lane is still derived from the full SESSION_ROW_W - the rail took no width from it`);
+    // ---- THE STRUCTURAL HALF ----
+    // A MIRROR PROVES THE ALGORITHM AND BINDS NOTHING: everything above is JS and
+    // would keep passing with sessions.ino's scroll deleted. These read the
+    // firmware's own text, and each is bound to a FUNCTION BODY rather than to the
+    // file - a rule a neighbouring line can satisfy is not a rule.
+    const yAt = fnSrc("int sessionRowYAt(int pos) {");
+    chk(/sessionsScrollActive\(\)/.test(yAt) && /-\s*sessionScroll/.test(yAt),
+        `sessionRowYAt() subtracts sessionScroll under sessionsScrollActive() - the offset is INSIDE the helper the draw and the hit test share`);
+    const hAt = fnSrc("int sessionRowHAt(int pos) {");
+    chk(/sessionsScrollActive\(\)\s*\)\s*return SESSION_SCROLL_ROW_H/.test(hAt),
+        `sessionRowHAt() returns SESSION_SCROLL_ROW_H when scrolling, so the hit test cannot use a height the draw did not`);
+    // THE VISIBILITY GUARD MUST BE IN BOTH PLACES. In the draw it is what keeps a
+    // partial row off the glass; in the hit test it is what stops a scrolled-past
+    // row claiming a tap. One without the other is a list you can tap through.
+    const atY = fnSrc("int sessionRowAtY(int sy) {");
+    chk(/sessionRowVisible\(pos\)/.test(atY),
+        `sessionRowAtY() skips rows that are not visible - a scrolled-past row is not a tap target`);
+    const render = fnSrc("void renderSessionsList() {");
+    chk(/if\s*\(!sessionRowVisible\(pos\)\)\s*continue;/.test(render),
+        `renderSessionsList() skips rows that are not visible - the guard that makes the snap pay off`);
+    // ---- EVERY READER OF THE ROW STACK, NOT JUST THE DRAW ----
+    // FOUND ON THE GLASS WITH ALL 2195 ASSERTIONS GREEN, which is why this is
+    // enumerated rather than left to the three helpers. tickWorkingSpinner() lives
+    // in deckhand_display.ino and walks display positions on its own 4Hz timer; at
+    // scroll 0 it drew row 5's spinner at y = SESSION_ROW_Y0 + 5*82 = 460 - the
+    // footer's first row - and the spinner is a 32x32 blit that paints its own
+    // background, so an orange starburst was stamped over the clock and nothing
+    // ever wiped it. The shimmer loop in tickSessionAnim() had the same shape.
+    //
+    // A LIST OF THE LOOPS, checked by NAME, because the failure is not that some
+    // guard is missing somewhere - it is that a FIFTH reader of the row stack can
+    // be added in another file and nobody notices until a capture shows paint in
+    // the footer. Each entry names its function and the file it lives in.
+    for (const [fname, src, where] of [
+      ["tickWorkingSpinner()", fnSrcIn(DISPLAY_INO, "void tickWorkingSpinner() {", "deckhand_display.ino"), "deckhand_display.ino"],
+      ["tickSessionAnim()", fnSrc("void tickSessionAnim() {"), "sessions.ino"],
+    ]) {
+      // The loop must EXIST to be guarded - an assertion over a function that no
+      // longer walks rows would pass vacuously, which is this file's own rule.
+      chk(/for \(int pos = 0; pos < sessionCount; pos\+\+\)/.test(src),
+          `${fname} (${where}) still walks display positions - the gate for the guard below`);
+      chk(/if \(!sessionRowVisible\(pos\)\) continue;/.test(src),
+          `${fname} skips rows that are not visible - it draws at sessionRowYAt(pos), which is off-list for a scrolled-past row`);
+    }
+    // THE CACHE BUST. A scroll step changes which SESSION each display position
+    // holds, and rowSigCache is keyed by position - so without a wholesale bust the
+    // list scrolls its chrome and leaves its text standing still. This is the single
+    // most likely way for this feature to ship looking broken.
+    chk(/sessionScroll\s*!=\s*sessionScrollCache/.test(render) &&
+        /sessionScrollCache\s*=\s*sessionScroll;[\s\S]{0,400}?rowSigCache\[i\]\[0\]\s*=\s*'\\0';/.test(render),
+        `a scroll step busts every rowSigCache entry - a position change reaches no text-comparing cache`);
+    // Every cache loop in the renderer must walk the SLOTS, not the wire cap: sized
+    // to MAX_SESSIONS they would be written past the end by the seventh row.
+    chk(!/rowSigCache\[i\]\[0\][\s\S]{0,4}$/.test("") &&
+        [...render.matchAll(/for \(int i = 0; i < (\w+); i\+\+\) rowSigCache/g)].every(m => m[1] === "sessionSlotCount"),
+        `every rowSigCache bust loop is bounded by sessionSlotCount, not MAX_SESSIONS`);
+    chk([...render.matchAll(/for \(int i = 0; i < (\w+); i\+\+\) rowSigCache/g)].length >= 3,
+        `all 3 cache-bust loops were found and checked (an empty match set would pass the bound test vacuously)`);
+    // The scroll offset has exactly ONE writer, which is what keeps its step
+    // invariant true by construction rather than by every caller remembering.
+    const writers = [...SESSIONS_INO.matchAll(/^\s*sessionScroll\s*=(?!=)/gm)];
+    chk(writers.length === 1,
+        `sessionScroll is assigned in exactly one place outside sessionScrollTo() ` +
+        `(found ${writers.length}; the one is renderSessionsList's reset when the list stops scrolling)`);
+    const to = fnSrc("void sessionScrollTo(int px) {");
+    chk(/SESSION_SCROLL_STEP/.test(to) && /sessionScrollMax\(\)/.test(to),
+        `sessionScrollTo() snaps to SESSION_SCROLL_STEP and clamps to sessionScrollMax() - the invariant's one gate`);
   }
 
   // ---- THE EXPANDED FIRST ROW ----

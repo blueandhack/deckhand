@@ -4,6 +4,123 @@
 
 bool sessionRowsLarge() { return sessionRowH >= SESSION_LARGE_MIN_H; }
 
+// ---------- The scrolling list ----------
+// IS THE LIST SCROLLING RIGHT NOW? The threshold is MAX_SESSIONS - SEVEN or more -
+// and NOT "does the content overflow the panel", which is the test it would be
+// natural to write and is wrong here.
+//
+// One to six sessions keep the LADDER, and that is the point of the boundary: the
+// ladder is what gives a FOURTH session its title line and a fifth its model/branch
+// line on this panel, and it is why a lone session gets the expanded band card. A
+// scroll that replaced all of that everywhere would have thrown away the whole
+// return on this panel's extra height to solve a problem only the seventh session
+// has. At six or fewer, this board draws exactly what it drew before the scroll
+// existed - same rungs, same card, no rail, and no scroll state consulted anywhere.
+//
+// Board 1 returns a compile-time false, so every caller below collapses to the code
+// it had. Only the FRAGMENT is guarded, never the whole function: an #if/#else that
+// opens a brace in both arms leaves every brace-counting checker here seeing one
+// more { than }, which has already made an unrelated assertion report a defect that
+// did not exist.
+bool sessionsScrollActive() {
+#if BOARD_SESSIONS_SCROLL
+  return sessionCount > MAX_SESSIONS;
+#else
+  return false;
+#endif
+}
+// IS THIS ROW ON THE GLASS? There is no third answer, and that is the invariant the
+// whole feature rests on: rows sit at multiples of SESSION_SCROLL_STEP and so does
+// the offset, so a row is either wholly inside the window or wholly outside it. A
+// row that is partly visible cannot arise - see the header for why that matters on
+// a board whose only clip is the screen edge.
+bool sessionRowVisible(int pos) {
+#if BOARD_SESSIONS_SCROLL
+  if (sessionsScrollActive()) {
+    const int top = sessionScroll / SESSION_SCROLL_STEP;
+    return pos >= top && pos < top + SESSION_SCROLL_ROWS;
+  }
+#endif
+  return true;
+}
+#if BOARD_SESSIONS_SCROLL
+// The list's full height in CONTENT coordinates - what the window slides over. The
+// "+N more" strip is part of it, because it is the list's last element and scrolls
+// with it rather than being pinned: pinning it would cost the visible window its
+// bottom 19px at every position, which is 19px the five rows are already using.
+int sessionScrollContentH() {
+  int h = sessionCount * SESSION_SCROLL_STEP - SESSION_ROW_GAP;
+  if (sessionsTotal > sessionCount) h += SESSION_ROW_GAP + SESSION_OVERFLOW_H;
+  return h;
+}
+// THE LARGEST LEGAL OFFSET, ROUNDED UP to a whole step. Up and not down, because
+// rounding DOWN would make the last element unreachable whenever the overflow is
+// not an exact multiple of the step - which is exactly the case the strip creates
+// (20 rows plus a strip is 1659, and 1659 - 407 = 1252 is 15.3 steps). Rounding up
+// leaves some background below the final row instead, which is the cheap direction:
+// the alternative is a "+N more" strip that can be counted but never read.
+int sessionScrollMax() {
+  const int over = sessionScrollContentH() - SESSION_SCROLL_VIEW_H;
+  if (over <= 0) return 0;
+  return ((over + SESSION_SCROLL_STEP - 1) / SESSION_SCROLL_STEP) * SESSION_SCROLL_STEP;
+}
+// THE ONE PLACE sessionScroll IS EVER WRITTEN, which is what keeps its invariant
+// true by construction rather than by every caller remembering. Snap to the NEAREST
+// step, then clamp - and the clamp cannot break the snap, because sessionScrollMax()
+// is itself a multiple of the step.
+void sessionScrollTo(int px) {
+  int step = (px + SESSION_SCROLL_STEP / 2) / SESSION_SCROLL_STEP;
+  if (step < 0) step = 0;           // C truncates toward zero, so a negative px can
+                                    // still land on step 0 - clamped rather than
+                                    // trusted, because it is read as an array bound
+  int v = step * SESSION_SCROLL_STEP;
+  const int mx = sessionScrollMax();
+  if (v > mx) v = mx;
+  sessionScroll = v;
+}
+// ---------- The rail ----------
+// WHAT THE RAIL IS FOR, and it is not decoration: without it a five-row window onto
+// twenty rows gives no sign that there are twenty, how far down you are, or that
+// dragging does anything at all. It is also the fast way to the bottom - a drag
+// that STARTS on the rail scrubs absolutely, so reaching row 20 costs one gesture
+// instead of fifteen.
+//
+// FOUR CACHED VALUES, NOT A PACKED KEY. The rail is redrawn only when it would
+// actually look different, which is this file's rule for every field - but the
+// naive version of that cache (compare the thumb's y and height) has a hole: a full
+// clear WIPES the rail while leaving those two unchanged, and an integer-divided
+// thumb height can come out identical across a count change. So the count and the
+// total are compared too, and every clear path below resets these to -1 explicitly.
+// Four ints beat a packed key that has to be argued about.
+int railYCache = -1, railHCache = -1, railCountCache = -1, railTotalCache = -1;
+void drawSessionRail() {
+  if (!sessionsScrollActive()) {
+    railYCache = railHCache = railCountCache = railTotalCache = -1;
+    return;
+  }
+  const int trackY = SESSION_ROW_Y0;
+  const int trackH = SESSION_SCROLL_AVAIL;
+  const int contentH = sessionScrollContentH();
+  // The visible fraction of the whole list, floored so a very long list still shows
+  // something grabbable. Inert at twenty rows (407 * 407/1637 = 101px).
+  int thumbH = contentH > 0 ? (int) ((long) trackH * SESSION_SCROLL_VIEW_H / contentH) : trackH;
+  if (thumbH < SESSION_RAIL_MIN_THUMB) thumbH = SESSION_RAIL_MIN_THUMB;
+  if (thumbH > trackH) thumbH = trackH;
+  // POSITIONED AGAINST sessionScrollMax(), NOT AGAINST contentH. The max overshoots
+  // the content by design (it rounds up to a whole step), so a thumb placed by
+  // content fraction would stop short of the bottom of its track at the bottom of
+  // the list - the rail would say "there is more" when there is not.
+  const int mx = sessionScrollMax();
+  const int thumbY = trackY + (mx > 0 ? (int) ((long) (trackH - thumbH) * sessionScroll / mx) : 0);
+  if (thumbY == railYCache && thumbH == railHCache &&
+      sessionCount == railCountCache && sessionsTotal == railTotalCache) return;
+  railYCache = thumbY; railHCache = thumbH;
+  railCountCache = sessionCount; railTotalCache = sessionsTotal;
+  tft.fillRect(SESSION_RAIL_X, trackY, SESSION_RAIL_W, trackH, COLOR_CARD);
+  tft.fillRect(SESSION_RAIL_X, thumbY, SESSION_RAIL_W, thumbH, COLOR_LABEL);
+}
+#endif
+
 // ---------- The expanded first row ----------
 // THE MOST URGENT SESSION ABSORBS THE HEIGHT THE LADDER LEAVES EMPTY. With one
 // session board 2 drew a 100px row and 307px of nothing; the top row of the
@@ -88,6 +205,19 @@ int sessionExpPromptLines(int bodyH) {
 // second copy of the ladder formula that could drift from it.
 int sessionExpCandidateH(int count) {
   if (count < 1) return 0;
+  // NO EXPANDED CARD IN A SCROLLING LIST. The card exists to absorb the height the
+  // ladder leaves EMPTY, and a scrolling list has none to absorb - its problem is
+  // the opposite one. A variable-height first row would also break the step
+  // invariant every other part of this feature is built on: rows would no longer
+  // sit at multiples of SESSION_SCROLL_STEP, and partial rows - the exact thing the
+  // snap exists to make unreachable - would come straight back.
+  //
+  // STATED AS A GUARD RATHER THAN LEFT TO THE ARITHMETIC. It is true today by
+  // accident: at 20 rows the leftover below is deeply negative and the
+  // SESSION_EXP_MIN_H test already returns 0. But that is a coincidence of the
+  // current numbers, not a property anybody chose, and a future row height could
+  // quietly make it false while every checker still passed.
+  if (sessionsScrollActive()) return 0;
   int leftover = sessionListAvail(count) - (count - 1) * (sessionRowH + SESSION_ROW_GAP);
   if (leftover < SESSION_EXP_MIN_H) return 0;   // the ladder already fills the column
   return leftover > SESSION_EXP_MAX_H ? SESSION_EXP_MAX_H : leftover;
@@ -160,6 +290,10 @@ bool sessionRowExpanded(int pos) { return pos == 0 && sessionExpandedH(sessionCo
 // the hit test disagree with the layout - the uniform-height assumption those four
 // sites used to share independently.
 int sessionRowHAt(int pos) {
+#if BOARD_SESSIONS_SCROLL
+  // Uniform, and the expanded card does not exist here - see sessionExpCandidateH.
+  if (sessionsScrollActive()) return SESSION_SCROLL_ROW_H;
+#endif
   int e = sessionExpandedH(sessionCount);
   return (pos == 0 && e > 0) ? e : sessionRowH;
 }
@@ -196,6 +330,15 @@ int sessionSubcYAt(int rowH) {
   return SESSION_SUBC_Y < lim ? SESSION_SUBC_Y : lim;
 }
 int sessionRowYAt(int pos) {
+#if BOARD_SESSIONS_SCROLL
+  // THE SCROLL OFFSET GOES INSIDE THIS FUNCTION, not at the call sites, and that is
+  // the reason the touch hit test cannot drift from the layout: the draw, the
+  // duration field, the spinner tick and sessionRowAtY() all read this one helper,
+  // so there is no second place for the offset to be forgotten. The same argument
+  // the file already makes for the expanded row's height.
+  if (sessionsScrollActive())
+    return SESSION_ROW_Y0 + pos * SESSION_SCROLL_STEP - sessionScroll;
+#endif
   int e = sessionExpandedH(sessionCount);
   if (e <= 0) return SESSION_ROW_Y0 + pos * (sessionRowH + SESSION_ROW_GAP);
   if (pos == 0) {
@@ -219,6 +362,13 @@ int sessionRowYAt(int pos) {
 // The display row a y lands in, or -1 for a gap or for anything past the list.
 int sessionRowAtY(int sy) {
   for (int pos = 0; pos < sessionCount; pos++) {
+    // OFF-SCREEN ROWS ARE NOT TAP TARGETS. Without this the scrolled-past rows
+    // still have a y - a NEGATIVE one, or one below the footer - and while no real
+    // touch reports those coordinates, relying on that is relying on the toucher
+    // rather than on the layout. The rule the rest of this file already follows is
+    // that the hit test consults the same helpers the draw does; "is it drawn" is
+    // one of them now.
+    if (!sessionRowVisible(pos)) continue;
     int y = sessionRowYAt(pos);
     if (sy >= y && sy < y + sessionRowHAt(pos)) return pos;
   }
@@ -864,6 +1014,9 @@ void tickSessionAnim() {
       // The band card has no spine - its status vocabulary is the band - and the
       // same skip tickWorkingSpinner makes, for the same reason.
       if (sessionRowExpanded(pos)) continue;
+      // A scrolled-past row's spine would be drawn at a y outside the list - see the
+      // same guard in tickWorkingSpinner(), where it was found painting the footer.
+      if (!sessionRowVisible(pos)) continue;
       const int i = sessionAt(pos);
       if (strcmp(sessions[i].status, "working") != 0) continue;
       drawSpineShimmer(SESSION_ROW_X + BORDER_CARD, sessionRowYAt(pos) + BORDER_CARD,
@@ -1534,6 +1687,15 @@ void renderSessionsList() {
   int hiddenCount = sessionsTotal - sessionCount;
   if (hiddenCount < 0) hiddenCount = 0;
   int layoutCode = sessionCount * 2 + (hiddenCount > 0 ? 1 : 0);
+#if BOARD_SESSIONS_SCROLL
+  // CLAMPED BEFORE ANYTHING READS THE GEOMETRY, because sessionScrollMax() moves
+  // when the count does: a payload that drops the list from 20 sessions to 8 while
+  // the view is parked at step 15 would otherwise leave the offset past the end and
+  // the list looking empty. Re-snapping through sessionScrollTo() also
+  // re-establishes the step invariant if anything has put an unaligned value here.
+  if (sessionsScrollActive()) sessionScrollTo(sessionScroll);
+  else sessionScroll = 0;
+#endif
   if (layoutCode != rowCountCache) {
     rowCountCache = layoutCode;
     if (sessionCount > 0) {
@@ -1547,9 +1709,18 @@ void renderSessionsList() {
       // full ladder written out in each board header beside SESSION_ROW_H_MAX.
       sessionRowH = constrain((avail - SESSION_ROW_GAP * (sessionCount - 1)) / sessionCount,
                               SESSION_ROW_H_MIN, SESSION_ROW_H_MAX);
+#if BOARD_SESSIONS_SCROLL
+      // THE LADDER DOES NOT APPLY TO A SCROLLING LIST - it divides the column by the
+      // count, and past six that drives every row under its own floor. The height is
+      // fixed instead, and the assignment is left to overwrite the line above rather
+      // than branching around it: sessionRowH must be written exactly once per layout
+      // pass, and a second writer is how the ladder and the scroll would come to
+      // disagree about a height four other functions read.
+      if (sessionsScrollActive()) sessionRowH = SESSION_SCROLL_ROW_H;
+#endif
     }
     tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
-    for (int i = 0; i < MAX_SESSIONS; i++) rowSigCache[i][0] = '\0';
+    for (int i = 0; i < sessionSlotCount; i++) rowSigCache[i][0] = '\0';
     overflowCache[0] = '\0';
     if (sessionCount == 0) {
       int cy = (CONTENT_Y + contentBottom()) / 2 - 20;
@@ -1587,10 +1758,45 @@ void renderSessionsList() {
   if (expNow != expHCache) {
     expHCache = expNow;
     tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
-    for (int i = 0; i < MAX_SESSIONS; i++) rowSigCache[i][0] = '\0';
+    for (int i = 0; i < sessionSlotCount; i++) rowSigCache[i][0] = '\0';
     overflowCache[0] = '\0';
   }
+#if BOARD_SESSIONS_SCROLL
+  // THE SCROLL POSITION GETS THE SAME WHOLESALE TREATMENT THE CARD'S HEIGHT DOES,
+  // keyed the same way, one cache each - and for a sharper reason than the card's.
+  // rowSigCache is keyed by DISPLAY POSITION, so after one step position 0 holds
+  // what was row 5's signature; row 5's own text then compares EQUAL to it and the
+  // row is never repainted. The list would scroll its chrome and leave its text
+  // standing still, which reads as corruption rather than as a scroll.
+  //
+  // A COLOUR- OR POSITION-ONLY CHANGE REACHES NO TEXT-COMPARING CACHE AT ALL. That
+  // is this file's oldest trap and the reason this is a bust rather than something
+  // cleverer: five rows repainting per step is well inside the deferred flush, and
+  // the alternative - rotating the cache by the step delta - is an optimisation
+  // whose failure mode is silent stale text.
+  if (sessionScroll != sessionScrollCache) {
+    sessionScrollCache = sessionScroll;
+    tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
+    for (int i = 0; i < sessionSlotCount; i++) rowSigCache[i][0] = '\0';
+    overflowCache[0] = '\0';
+    railYCache = -1;   // the clear above wiped the rail with everything else
+  }
+  // ONE CALL PER RENDER PASS, after every clear path above has had its say, and it
+  // is the cache inside it that decides whether anything is actually painted. Called
+  // unconditionally rather than from inside the busts because the rail has to APPEAR
+  // when the seventh session arrives - and that is a count change, which moves
+  // neither the scroll offset nor the card height.
+  drawSessionRail();
+#endif
   for (int pos = 0; pos < sessionCount; pos++) {
+    // OFF-SCREEN ROWS ARE NOT DRAWN, and this is the guard that makes the snap pay
+    // off: every row that survives it is WHOLLY inside the list area, so
+    // drawSessionRow needs no clipping of its own on a board whose only clip is the
+    // screen edge. Skipped before the signature is built, which is only safe
+    // BECAUSE a scroll step busts every signature above: a row skipped here keeps
+    // its stale cache entry, and without that bust scrolling back would find it
+    // "unchanged" and leave the slot blank. The two belong together.
+    if (!sessionRowVisible(pos)) continue;
     int i = sessionAt(pos);
     // rowSigCache is keyed by DISPLAY POSITION, which is what it has always
     // been - so pass pos where the cache is indexed and i where the row's data
@@ -1698,15 +1904,44 @@ void renderSessionsList() {
       snprintf(buf, sizeof(buf), "+%d more session%s", hiddenCount, hiddenCount == 1 ? "" : "s");
     }
     padTo(buf, sizeof(buf), 26);
+    // WHERE THE STRIP LIVES. Pinned to the footer when the list does not scroll -
+    // its original home, and the derivation below is unchanged. In a scrolling list
+    // it is the list's LAST ELEMENT instead, at content y sessionCount*STEP, and it
+    // scrolls with the rows: pinning it there would cost the visible window its
+    // bottom 19px at every position, which is 19px the five rows are already
+    // spending, and it is also why sessionScrollMax() rounds UP - so the strip can
+    // actually be reached rather than merely counted.
+    //
     // contentBottom() - SESSION_OVERFLOW_H + 4, not a literal -12: the strip's own
     // reserved band already tracks the face (16px on board 1, 19 on board 2), and
     // -12 would have put a 16px line plus drawIfChanged's 1px margins into the
     // footer's first drawn row. Board 1's 16 - 4 = 12 reproduces its own offset
     // exactly, so both boards keep the same single row of overhang into the
     // footer's padding.
-    drawIfChanged(overflowCache, sizeof(overflowCache), buf, SESSION_ROW_X + 2,
-                  contentBottom() - SESSION_OVERFLOW_H + 4, 1, 1,
-                  hiddenAskingCount > 0 ? COLOR_BAD : COLOR_LABEL, COLOR_BG);
+    int stripY = contentBottom() - SESSION_OVERFLOW_H + 4;
+    bool stripVisible = true;
+#if BOARD_SESSIONS_SCROLL
+    if (sessionsScrollActive()) {
+      const int top = SESSION_ROW_Y0 + sessionCount * SESSION_SCROLL_STEP - sessionScroll;
+      stripY = top + 4;
+      // Drawn only when it fits WHOLLY inside the list area - the same rule the rows
+      // follow, and for the same reason: drawString clips to the SCREEN, so a strip
+      // hanging past the bottom would paint into the footer, where nothing wipes it.
+      stripVisible = top >= SESSION_ROW_Y0 &&
+                     top + SESSION_OVERFLOW_H <= SESSION_ROW_Y0 + SESSION_SCROLL_AVAIL;
+    }
+#endif
+    if (stripVisible) {
+      drawIfChanged(overflowCache, sizeof(overflowCache), buf, SESSION_ROW_X + 2,
+                    stripY, 1, 1,
+                    hiddenAskingCount > 0 ? COLOR_BAD : COLOR_LABEL, COLOR_BG);
+    } else {
+      // Scrolled out of view. The cache is cleared rather than left alone so that
+      // scrolling BACK repaints it: a cache still holding the text would compare
+      // equal and the strip would never return. The same trap the rows' wholesale
+      // bust exists for, reached by a different route.
+      overflowCache[0] = '\0';
+    }
   }
 #if !BOARD_USES_TFT_ESPI
   // This is the leaf that actually draws session rows, reached from both
@@ -1719,8 +1954,80 @@ void renderSessionsList() {
 }
 void drawSessionsAll() {
   rowCountCache = -1;
+#if BOARD_SESSIONS_SCROLL
+  // THE FORCED-REPAINT ENTRY POINT HAS TO FORCE THE RAIL TOO. This is reached on a
+  // tab switch and when the detail screen closes, and it repaints a list whose COUNT
+  // has not changed - so every value the rail's cache compares is identical, and the
+  // clear that rowCountCache = -1 triggers would wipe the rail and leave it wiped.
+  // The one path where the four-value cache is not enough on its own.
+  railYCache = -1;
+#endif
   renderSessionsList();
 }
+#if BOARD_SESSIONS_SCROLL
+// ---------- The drag ----------
+// Runs while the finger is DOWN and returns whether the gesture was a DRAG - so the
+// caller opens a session's detail card only when it was a TAP. That distinction is
+// the whole reason this is a blocking loop rather than state threaded through
+// handleTouch(): "did this press move" is not answerable until the finger lifts, and
+// a row is a 79px target whose misread costs the user the WRONG session's card.
+//
+// The shape is scrollback.ino's scrollDragLoop(), deliberately - the same two
+// housekeeping calls at the top of every poll, the same 15ms rate, the same
+// decided-once rail test - because that loop has already been through the failures
+// this one would otherwise repeat.
+bool sessionDragLoop(int sx0, int sy0) {
+  // DECIDED ONCE from where the press LANDED, never re-tested per poll: a gesture
+  // that changed meaning because the finger drifted out of a 6px column would be
+  // unusable. The margin widens the target to the left - the rail is 6px and a
+  // fingertip is not.
+  const bool onRail = sx0 >= SESSION_RAIL_X - SESSION_RAIL_W;
+  // A PRESS ON THE RAIL IS NEVER A ROW TAP, even if it never moves. Without this a
+  // still finger on the rail would fall through to the caller's hit test, which
+  // tests only Y - and would open whichever session happened to share that row band.
+  bool dragged = onRail;
+  const int scroll0 = sessionScroll;
+  int moved = 0;
+  int lastY = sy0;
+  while (true) {
+    // drainBleRx() only runs from loop(), so for the whole drag nothing else would
+    // reap a pending BLE slot - leaving the device un-advertised with no log line
+    // saying why. Every blocking loop here does this.
+    reapBleLinks(true);
+    // The 30s backlight blank sits well inside a drag's life, and the waking tap
+    // would be swallowed rather than scrolling.
+    lastActivityMillis = millis();
+    int sx, sy;
+    if (!getTouchPoint(sx, sy)) break;          // released: the drag is over
+    moved += sy > lastY ? sy - lastY : lastY - sy;
+    lastY = sy;
+    if (moved > SESSION_DRAG_TAP_PX) dragged = true;
+    if (onRail) {
+      // ABSOLUTE SCRUB, and it is what keeps twenty rows to one gesture instead of
+      // fifteen: dragging the BODY moves the list by the finger's own delta, so
+      // crossing the list that way costs a gesture per screen.
+      const int usable = SESSION_SCROLL_AVAIL - 1;
+      const long f = (long) (sy - SESSION_ROW_Y0) * sessionScrollMax() /
+                     (usable > 0 ? usable : 1);
+      sessionScrollTo((int) f);
+    } else {
+      // Finger down moves the content down, i.e. back UP the list - so the offset
+      // falls as sy rises. Computed from the gesture's ORIGIN rather than
+      // accumulated per frame: accumulating would drift, because every frame's
+      // delta is re-snapped to a step and the roundings would compound.
+      sessionScrollTo(scroll0 - (sy - sy0));
+    }
+    // renderSessionsList() notices the offset moved, busts every row signature and
+    // repaints the five visible rows - and flushes on its way out, so there is no
+    // second flush here. When the offset did NOT move (the common case mid-step),
+    // its own caches make this very close to free.
+    renderSessionsList();
+    // 15ms, matching handleTouch()'s own rate and scrollDragLoop's.
+    delay(15);
+  }
+  return dragged;
+}
+#endif
 // Current array index of the session under the detail view, found by its
 // stable id, or -1 if it's no longer in the list.
 int resolveDetailIndex() {
@@ -2775,6 +3082,29 @@ void drawSessionDetail(int idx) {
   tft.drawFastHLine(LX, cy, maxW, COLOR_LABEL);
   cy += DETAIL_RULE_STEP;
 
+  // THE ROW'S DETAIL HAS NOT TRAVELLED YET. A lean row carries everything the LIST
+  // draws and nothing this card draws, so without this the card would show a session
+  // with no prompt, no path and no ask - indistinguishable from a session that
+  // genuinely has none, and reading as a broken session rather than as a fetch in
+  // flight. From the glass, "waiting" and "never coming" look identical, so the two
+  // states say different things: `FOCUS` is in flight, or it came back empty.
+  //
+  // THREE ASCII DOTS, NEVER U+2026 - the fonts here are 0x20..0x7E and an
+  // out-of-range codepoint draws nothing AND advances nothing.
+  if (s.lean) {
+    setUIFont(1);
+    tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+    tft.drawString(s.focusPending ? "FETCHING DETAIL..." : "DETAIL UNAVAILABLE", LX, cy);
+    cy += DETAIL_LBL_STEP;
+    drawWrappedText(s.focusPending
+                        ? "This row arrived without its detail. Asking the Mac for it."
+                        : "The Mac no longer has this session in its list.",
+                    LX, cy, T_META, DETAIL_TEXT_LINE_H, maxW, 0,
+                    2, COLOR_VALUE, COLOR_CARD);
+    cy += detailTextStep(2);
+    tft.drawFastHLine(LX, cy, maxW, COLOR_LABEL);
+    cy += DETAIL_RULE_STEP;
+  }
   // LAST PROMPT - the most useful text on the screen: what you actually asked.
   if (s.prompt[0]) {
     setUIFont(1);

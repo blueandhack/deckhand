@@ -1136,6 +1136,120 @@ const int SESSION_LARGE_MIN_H = 56;
 // hiddenCount > 0 implies sessionCount == 6. The others are checked anyway.
 const int SESSION_ROW_H_MIN = 47;
 const int SESSION_ROW_H_MAX = 100;
+
+// ---------- Sessions tab: the SCROLLING list (board 2 only) ----------
+// THE LADDER ABOVE STILL OWNS ONE TO SIX SESSIONS. Everything from here down
+// applies only at SEVEN or more, and at six or fewer this board draws exactly what
+// it drew before the scroll existed - same rungs, same expanded lone card, no rail.
+// That is a deliberate boundary, not an implementation detail: the ladder is the
+// reason a fourth session keeps its title line on this panel, and a scroll that
+// replaced it everywhere would have thrown that away to solve a problem only the
+// seventh session has.
+//
+// The count is no longer the panel's business at all. The list is capped at
+// SESSION_SLOTS by the PROTOCOL - see the long note above SESSION_ROW_X and
+// docs/superpowers/specs/2026-09-14-board2-sessions-scroll-design.md - and 20 is
+// where the host's slice now lands.
+//
+// BOTH OF THESE ARE #define AND NOT const int, and that is not a style choice:
+// `#if` on a C++ const int is SILENTLY FALSE with no -Wall warning, and this repo
+// has shipped that bug twice (panel_shim.cpp's BOARD_PANEL_INVERT, and
+// BOARD_USAGE_V2 mid-redesign, where every guarded arm would have taken board 1's
+// branch on board 2). BOARD_SESSIONS_SCROLL guards real code in sessions.ino.
+#define BOARD_SESSIONS_SCROLL 1
+// HOW MANY SessionInfo SLOTS EXIST, which is NOT MAX_SESSIONS and must not be
+// confused with it. MAX_SESSIONS stays 6 and is re-read as "how many sessions carry
+// a FULL ASK PAYLOAD on the wire"; it still sizes nothing here, but three checkers
+// (host/wire-bytes-check.mjs, host/ask-optdescs-check.mjs) and the DRAM derivations
+// in both board headers are built on that number, so changing it would silently
+// re-point every one of them. SESSION_SLOTS is the array size, and it is 20.
+//
+// 20 x sizeof(SessionInfo) IS ~44KB, WHICH DOES NOT FIT IN DRAM - measured free
+// heap after the BLE stack is ~26KB, and the audio path allocates its capture
+// buffer out of that. It goes in PSRAM instead (heap_caps_malloc with
+// MALLOC_CAP_SPIRAM, this repo's established idiom - audio.ino, scrollback.ino and
+// panel_shim.cpp all use it), where 44KB is 0.5% of 8MB.
+//
+// THAT IS WHAT BUYS THE WHOLE DESIGN ITS SIMPLICITY. The first draft carried a
+// parallel lean row struct and a dedicated focus slot to stay inside DRAM; with
+// real slots, a "lean" session is just a SessionInfo whose ask fields arrived
+// empty, so drawSessionRow, sessionAt, resolveDetailIndex, buildSessionSubline,
+// sendAnswerToHost and the entire detail/ask path work UNCHANGED - and a lean
+// session that is asking stays ANSWERABLE, because sendAnswerToHost takes an index
+// and that session already has one.
+#define SESSION_SLOTS 20
+// 79, WHICH IS THE LADDER'S OWN FIVE-SESSION RUNG rather than a new number. It is
+// picked for one property: 79 >= SESSION_SUB_MIN_H (74), so the scrolling row keeps
+// its model/branch sub-line. The 65px six-session rung would fit a sixth row on
+// screen and drop that line, which is the wrong trade for a list you are scrolling
+// THROUGH - the sub-line is most of what distinguishes two rows of the same project.
+const int SESSION_SCROLL_ROW_H = 79;
+// THE STEP, DERIVED, and it is the load-bearing quantity in the whole feature.
+// 79 + 3 = 82.
+const int SESSION_SCROLL_STEP = SESSION_SCROLL_ROW_H + SESSION_ROW_GAP;
+// THE LIST AREA, DERIVED FROM THE PANEL rather than written as the 410 it comes to
+// today: BOARD_H - FOOTER_H is contentBottom()'s own definition, and SESSION_ROW_Y0
+// is where the first row starts. A literal here would be a hardcoded panel
+// dimension in everything but name, and three separate bugs in this board's port
+// were exactly that.
+const int SESSION_SCROLL_AVAIL = BOARD_H - FOOTER_H - SESSION_ROW_Y0;
+// HOW MANY ROWS ARE ON THE GLASS AT ONCE, from that same avail: the last row needs
+// no gap after it, so floor((410 + 3) / 82) = 5, i.e. 5*79 + 4*3 = 407 with 3 spare.
+const int SESSION_SCROLL_ROWS = (SESSION_SCROLL_AVAIL + SESSION_ROW_GAP) / SESSION_SCROLL_STEP;
+// THE VISIBLE WINDOW'S HEIGHT IN CONTENT COORDINATES. 407, NOT 410: the window is
+// the five rows themselves, and using the full 410 here would let a scroll position
+// admit a sixth row's first 3 pixels - a partial row, which is the one thing this
+// geometry exists to make impossible (see below).
+const int SESSION_SCROLL_VIEW_H = SESSION_SCROLL_ROWS * SESSION_SCROLL_STEP - SESSION_ROW_GAP;
+//
+// WHY THE SCROLL OFFSET IS ALWAYS A MULTIPLE OF SESSION_SCROLL_STEP, and this is
+// the reason the feature is shaped the way it is rather than a preference:
+//
+//   THIS BOARD HAS NO REGION CLIP. PanelShim::clipLogicalRect clips to the SCREEN,
+//   and drawString does the same. scrollback.ino has paid for that TWICE and says
+//   so in two comments - a partial first line painted over the header and the rule,
+//   and a partial last line painted into the bottom air where nothing ever wiped
+//   it, accumulating an afterimage because every drag frame added more. Its fix is
+//   the only one available here: draw an element only when it falls WHOLLY inside
+//   the body.
+//
+//   For a 16px line of text, skipping a partial one costs a 16px sliver of
+//   background. For a 79px CARD it would cost a 79px hole - a fifth of the list.
+//
+//   So the rows and the offsets are both multiples of 82, which makes every row
+//   either wholly inside the window or wholly outside it AT EVERY SCROLL POSITION:
+//   row i occupies [82i, 82i+79) and the window is [82s, 82s+407), so a row is
+//   visible exactly when s <= i <= s+4 and there is no third case. The partial-draw
+//   defect class is unreachable by ARITHMETIC rather than by a guard somebody has
+//   to remember, and drawSessionRow is reused with no clipping of its own.
+//   sessions-geom-check.mjs sweeps every scroll position of every reachable count
+//   and fails if any row is ever partially visible.
+//
+// WHAT IT COSTS, stated plainly: the list STEPS rather than glides. The alternative
+// is real and this board could afford it - render all 20 rows into a ~970KB PSRAM
+// sprite and blit a 410px window - and it is deferred rather than dismissed. If the
+// stepping reads badly on the glass, that is the upgrade, and it needs a sprite
+// path this file does not have today.
+//
+// THE RAIL lives in the margin that ALREADY EXISTS to the right of the card: the
+// card is SESSION_ROW_X..+SESSION_ROW_W = 12..307 and the panel is 320 wide, so
+// 310..315 leaves 4px to the bezel and NOTHING about the row moves. Deriving the
+// rail from the card's own right edge rather than from BOARD_W is what keeps that
+// true if the card's width ever changes - and SESSION_SUB_LANE_W, which is derived
+// from SESSION_ROW_W, is untouched either way.
+const int SESSION_RAIL_W = 6;
+const int SESSION_RAIL_X = SESSION_ROW_X + SESSION_ROW_W + 2;
+// The thumb never shrinks past this however long the list gets: at 20 rows the
+// proportional thumb is 407 * 410/1637 = 101px, so this floor is inert today and
+// exists for the list that is longer than the protocol currently permits.
+const int SESSION_RAIL_MIN_THUMB = 24;
+// A TAP IS A DRAG THAT MOVED LESS THAN THIS - the same named threshold, and the
+// same reasoning, as scrollback.ino's: without one, "tap a row" and "drag the list"
+// are not separable, because every real tap moves a pixel or two. 8 rather than
+// scrollback's value because a row is a 79px target and a misread drag here opens
+// the WRONG SESSION'S detail card, which is a worse outcome than a transcript
+// scrolling when it should not have.
+const int SESSION_DRAG_TAP_PX = 8;
 // Centre of the status indicator, and the +23 is NOT scaled - it is the same
 // constraint board 1 documents, against the same art. The working spinner is a
 // 32x32 BLIT that paints its own background, so its rect (x 20..51 here) has to

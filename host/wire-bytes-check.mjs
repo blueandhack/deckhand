@@ -50,6 +50,9 @@ const ASCII_SRC = path.join(REPO, "host", "wire-ascii.mjs");
 const VOICE_SRC = path.join(REPO, "host", "voice-answer.mjs");
 const CHIPS_SRC = path.join(REPO, "host", "ask-chips.mjs");
 const FW_SRC = path.join(REPO, "firmware", "deckhand_display", "deckhand_display.ino");
+// Board 2's header, for SESSION_SLOTS. Read here rather than inside readCaps so
+// --selftest can point it at a mutated copy like every other source this file binds.
+const B2_SRC = FW_SRC.replace(/deckhand_display\.ino$/, "board_es3c35p.h");
 
 // The most UTF-8 bytes ONE UTF-16 code unit can become, i.e. what a character cap
 // was worth in bytes BEFORE the fix. A BMP char in U+0800..U+FFFF is 1 unit and 3
@@ -70,7 +73,7 @@ function grab(src, label, re, cast = Number) {
   return m ? cast(m[1]) : NaN;
 }
 
-function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc, chipsSrc) {
+function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc, chipsSrc, b2Src) {
   const _voice = voiceSrc;
   const c = {};
   // hook: the ask fields
@@ -89,7 +92,15 @@ function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc, chipsSrc) {
   c.voiceTextChars = grab(hostSrc, "VOICE_TEXT_MAX (host)", /const VOICE_TEXT_MAX = (\d+);/);
   c.voiceReplyChars = grab(hostSrc, "VOICE_REPLY_MAX (host)", /const VOICE_REPLY_MAX = (\d+);/);
   c.tagChars = grab(hostSrc, "the host TAG cap (host-tag)", /hostTag = macTag\(/, () => 6);
-  c.maxSessionsHost = grab(hostSrc, "the session-list slice (host)", /const top = records\.slice\(0, (\d+)\);/);
+  // THE FULL-PAYLOAD SET, WHICH IS NO LONGER THE SAME AS THE SLICE. The host now
+  // slices SESSION_ROW_CAP (20) records and builds only the first SESSION_FULL_SLOTS
+  // (6) of them as FULL records; the rest ship lean - no ask, no chips, no optDescs.
+  // Every byte budget in this file is about a FULL record, so this is the number it
+  // means, and reading the slice would now overstate the saturated line by 14
+  // sessions' worth of asks that cannot exist.
+  c.fullSlotsHost = grab(hostSrc, "SESSION_FULL_SLOTS (host)", /const SESSION_FULL_SLOTS = (\d+);/);
+  c.rowCapHost = grab(hostSrc, "SESSION_ROW_CAP (host)", /const SESSION_ROW_CAP = (\d+);/);
+  c.maxSessionsHost = c.fullSlotsHost;
   // THE CONFIRM SCREEN'S TEXT, and the two halves of getting its fix in the right
   // place. It must be transliterated at the PARK SITE, before voiceSha() runs, and
   // it must NOT be transliterated in the payload builder - doing it there would
@@ -124,6 +135,13 @@ function readCaps(hookSrc, hostSrc, fwSrc, voiceSrc, chipsSrc) {
                       /\bpid: fields\.pid \?\? ""/.test(hostSrc);
   // firmware: the guard the whole budget is measured against
   c.maxSessionsFw = grab(fwSrc, "MAX_SESSIONS (firmware)", /#define MAX_SESSIONS (\d+)/);
+  // HOW MANY ROWS THE SCROLLING BOARD CAN HOLD, out of its own header. The host
+  // transcribes this as SESSION_ROW_CAP because it cannot parse the firmware at
+  // runtime; binding the two here is what stops that transcription going stale, and
+  // a host sending more rows than the device has slots would have them silently
+  // evicted on arrival by the urgency rule - a list that is quietly short with
+  // nothing anywhere saying so.
+  c.slotsB2 = grab(b2Src, "SESSION_SLOTS (board 2)", /#define SESSION_SLOTS (\d+)/);
   c.lineGuard = grab(fwSrc, "feedChar's line guard (firmware)", /if \(buf\.length\(\) > (\d+)\) buf = "";/);
   // The cap itself lives in host/voice-answer.mjs as ANSWER_TEXT_MAX_BYTES and is
   // re-exported into index.mjs under the VOICE_ prefix; parse the DEFINITION.
@@ -449,7 +467,7 @@ function runBehaviour(hookPath, caps) {
 }
 
 // ---------------------------------------------------------------------------
-async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC, hostPath = HOST_SRC, asciiPath = ASCII_SRC, chipsPath = CHIPS_SRC, fwPath = FW_SRC, quiet = false } = {}) {
+async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC, hostPath = HOST_SRC, asciiPath = ASCII_SRC, chipsPath = CHIPS_SRC, fwPath = FW_SRC, b2Path = B2_SRC, quiet = false } = {}) {
   // COMMENTS STRIPPED BEFORE ANY OF THE STRUCTURE REGEXES BELOW RUN. They are
   // file-wide matches, so a COMMENTED-OUT COPY of the correct line left standing
   // above a broken one satisfies every one of them - measured on this very file:
@@ -479,7 +497,7 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
   // A source only ever reachable at its repo path is a source no fault can be
   // injected into, and an assertion no fault can reach is an assertion with no teeth.
   const fwSrc = fs.readFileSync(fwPath, "utf8");
-  const c = readCaps(hookSrc, hostSrc, fwSrc, fs.readFileSync(VOICE_SRC, "utf8"), fs.readFileSync(chipsPath, "utf8"));
+  const c = readCaps(hookSrc, hostSrc, fwSrc, fs.readFileSync(VOICE_SRC, "utf8"), fs.readFileSync(chipsPath, "utf8"), fs.readFileSync(b2Path, "utf8"));
   const bust = `?v=${Date.now()}${Math.random()}`;
   const { toAscii, deviceText } = await import(`${pathToFileURL(modPath).href}${bust}`);
   const { capUtf8 } = await import(`${pathToFileURL(VOICE_SRC).href}${bust}`);
@@ -489,8 +507,75 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
   // ---- STRUCTURE: no bypass -----------------------------------------------
   for (const [name, re] of HOOK_SITES) ok(re.test(hookLive), `STRUCTURE (hook): ${name}`);
   for (const [name, re] of HOST_SITES) ok(re.test(hostLive), `STRUCTURE (host): ${name}`);
+  // ---- EVERY SITE, NOT ONE SITE ----
+  // HOST_SITES above are EXISTENCE tests, and that was sound while each field was
+  // built in exactly one place. It stopped being sound when the lean tail arrived:
+  // there are now TWO builders that cap a project name, so a fault that strips the
+  // transliteration off one of them leaves the other matching and the assertion
+  // passes. Measured - the "a host cap site bypasses the transliteration" fault went
+  // from caught to MISSED on exactly that change, which is this repo's "a rule a
+  // neighbouring line can satisfy is not a rule" in its purest form.
+  //
+  // So these count instead: every call must be wrapped, and there must BE calls. The
+  // second half is not ceremony - a regex that matches nothing makes the equality
+  // 0 === 0 and the assertion passes vacuously over a function that has been deleted.
+  // SCOPED TO THE PAYLOAD FIELD, not to the helper: projectName() is also called to
+  // build a log line and a spoken reply on the MAC, which are not device-bound and
+  // rightly carry no cap at all. Counting bare calls flagged that one as a bypass -
+  // a false positive, and a checker that cries wolf gets its failures read past.
+  for (const [field, fn] of [["name", "projectName"], ["branch", "gitBranch"]]) {
+    const all = (hostLive.match(new RegExp(`${field}: [^,\\n]*\\b${fn}\\(`, "g")) ?? []).length;
+    const wrapped = (hostLive.match(new RegExp(`${field}: deviceText\\(await ${fn}\\(`, "g")) ?? []).length;
+    ok(all > 1, `STRUCTURE (host): session.${field} is built at ${all} sites - more than one, so the count below is a real constraint`);
+    ok(all === wrapped,
+       `STRUCTURE (host): all ${all} session.${field} sites go through deviceText (${wrapped} do) - ` +
+       `one bypass is the whole transliteration bug back through one field`);
+  }
   ok(c.maxSessionsHost === c.maxSessionsFw,
-     `STRUCTURE: the host sends ${c.maxSessionsHost} sessions and the device holds ${c.maxSessionsFw} - the budget is meaningless if they disagree`);
+     `STRUCTURE: the host builds ${c.maxSessionsHost} FULL records and the device sizes its ask buffers for ${c.maxSessionsFw} - the budget is meaningless if they disagree`);
+  // THE SECOND HALF OF THE SAME STRUCTURE, and it is a different claim: the first
+  // says the host does not build more ASKS than the device can hold, this says it
+  // does not send more ROWS than the device has slots for. A drift here is silent -
+  // the device's parse loop evicts the least urgent row to make space and nothing
+  // logs it - so the list would simply be short.
+  ok(c.rowCapHost === c.slotsB2,
+     `STRUCTURE: the host sends up to ${c.rowCapHost} rows and board 2 holds ${c.slotsB2} slots`);
+  // ---- WHAT A LEAN ROW MAY AND MAY NOT CARRY ----
+  // Bound to the FUNCTION BODY, not to the file: `buildSessionItem` next door emits
+  // every one of these legitimately, so a rule phrased over host source would be
+  // satisfied by the wrong function - "a rule a neighbouring line can satisfy is not
+  // a rule", which this file has already been bitten by once today.
+  {
+    const m = hostLive.match(/const buildLeanItem = async \(record\) => \{[\s\S]*?\n  \};/);
+    ok(!!m, "STRUCTURE (host): buildLeanItem() is parseable - the gate for the field rules below");
+    const lean = m?.[0] ?? "";
+    // pnonce IS A CREDENTIAL, and this is the assertion that matters most here. The
+    // device must never hold one for a session it cannot correctly offer the control
+    // for; a lean row draws no controls at all, so a nonce on one is a capability
+    // handed out for a screen that cannot exist. It gets one when it is FOCUSed,
+    // from the full builder, which re-reads the status at that moment.
+    ok(!/pnonce/.test(lean),
+       "STRUCTURE (host): a lean row carries NO pnonce - a credential for a screen it cannot draw");
+    // The rest is the economy the whole design rests on: these are the expensive
+    // fields, and a lean row exists precisely to not pay for them.
+    for (const f of ["ask", "prompt", "chips", "optDescs", "path"])
+      ok(!new RegExp(`\\b${f}\\b`).test(lean),
+         `STRUCTURE (host): a lean row carries no \`${f}\` - it is the row's payload, not the card's`);
+    // ...and the fields the ROW genuinely needs, without which the sub-line is blank
+    // and the 79px scrolling row gives up its height for nothing.
+    for (const f of ["id", "name", "status", "model", "branch", "agent", "lean"])
+      ok(new RegExp(`\\b${f}:`).test(lean) || f === "lean",
+         `STRUCTURE (host): a lean row carries \`${f}\` - the row draws it`);
+    ok(/lean: true/.test(lean),
+       "STRUCTURE (host): a lean row is FLAGGED - the device cannot otherwise tell it from a session with no prompt");
+  }
+  // hiddenAsking now counts from the ROW CAP, not the full set: a session in the
+  // lean tail is one the device CAN see, so counting it as hidden would make the
+  // "+N more" strip claim rows that are on the glass.
+  ok(new RegExp(`records\\.slice\\(SESSION_ROW_CAP\\)`).test(hostLive),
+     "STRUCTURE (host): hiddenAsking counts what fell beyond SESSION_ROW_CAP - a lean row is visible, not hidden");
+  ok(c.rowCapHost >= c.fullSlotsHost,
+     `STRUCTURE: the row cap ${c.rowCapHost} is at least the full-payload set ${c.fullSlotsHost} - below it the lean tail would be negative`);
 
   // ---- FIDELITY ------------------------------------------------------------
   for (const s of CORPUS) {
@@ -760,6 +845,40 @@ async function main({ hookPath = HOOK_SRC, modPath = MOD_SRC, fitPath = FIT_SRC,
     ok(small.bytes === small.was, "REFUSAL: and its size is unchanged");
     ok(JSON.stringify(JSON.parse(small.line)) === JSON.stringify(JSON.parse(JSON.stringify(mk(6, { detail: 1400 })))),
        "REFUSAL: an under-guard payload comes back byte-for-byte identical - the common path must not rewrite anything");
+    // ---- TIER 0: THE LEAN TAIL GOES BEFORE ANY ASK ----
+    // THE ORDERING IS THE CLAIM, not the shedding. Both tiers can free bytes; the
+    // question this asserts is WHICH goes first, and the answer has to be the
+    // fourteen overview rows rather than the body of a question that is blocking a
+    // session right now. A payload built to be over the guard by a margin only ONE
+    // of the two can close proves it: whichever tier runs first is the one that
+    // acts, and the other is left with nothing to do.
+    const mkMixed = () => ({
+      hostId: "x".repeat(8), hiddenAsking: 0,
+      sessions: [
+        // One full, answerable session whose detail is the single largest field.
+        { id: "full0", status: "asking", name: "N".repeat(10),
+          ask: { pid: "p0", detail: "D".repeat(3000) } },
+        // ...and a lean tail heavy enough that shedding it alone gets under the guard.
+        ...Array.from({ length: 14 }, (_, i) => ({
+          id: `lean${i}`, status: "working", name: "L".repeat(900), lean: true,
+        })),
+      ],
+    });
+    const t0 = fitPayload(mkMixed());
+    const t0out = JSON.parse(t0.line);
+    ok(t0.bytes <= c.lineGuard, `REFUSAL (tier 0): the lean tail is shed until the line fits, got ${t0.bytes}`);
+    ok(t0.dropped.length > 0 && t0.dropped.every((d) => d.startsWith("lean session")),
+       `REFUSAL (tier 0): and ONLY lean rows were shed - nothing else was touched, got ${JSON.stringify(t0.dropped)}`);
+    ok(t0out.sessions[0]?.ask?.detail?.length === 3000,
+       `REFUSAL (tier 0): the answerable ask.detail SURVIVES intact - the whole point of the ordering ` +
+       `(got ${t0out.sessions[0]?.ask?.detail?.length} chars)`);
+    ok(t0out.sessions.every((s) => s.id === "full0" || s.lean),
+       "REFUSAL (tier 0): what survives is still the urgency-sorted PREFIX - rows come off the tail, not the middle");
+    // The gate: a payload this test did not actually push over the guard would make
+    // every assertion above pass while proving nothing.
+    ok(fitPayload(mkMixed()).was > c.lineGuard,
+       "REFUSAL (tier 0): the fixture really is over the guard before fitting - otherwise no tier runs at all");
+
     // Tier 1: the detail is the field that can be 1400 characters.
     const t1 = fitPayload(mk(6, { detail: 4000 }));
     ok(t1.bytes <= c.lineGuard, `REFUSAL (tier 1): oversized details are shed until the line fits, got ${t1.bytes}`);
@@ -1101,6 +1220,17 @@ async function selftest() {
      { hook: (s) => s.replace('cleanMultiline(q.question ?? "", 1400)', 'cleanMultiline(q.question ?? "", 1800)') }],
     ["a line written to stdout, which on a PermissionRequest can auto-answer a real dialog",
      { hook: (s) => s.replace(/^function buildAsk\(data\) \{$/m, 'function buildAsk(data) {\n  console.log("");') }],
+    // THE CREDENTIAL LEAK. A lean row draws no controls, so a nonce on one is a
+    // capability handed out for a screen that cannot exist - and it would travel in
+    // every 5s tick for fourteen sessions at once.
+    ["a lean row is given a pnonce, handing out a credential for a screen it cannot draw",
+     { host: (s) => s.replace("      lean: true,", "      pnonce: nonceForSession(record.id),\n      lean: true,") }],
+    ["a lean row starts carrying the prompt, which is the whole cost the lean tail exists to avoid",
+     { host: (s) => s.replace("      lean: true,", "      prompt: deviceText(tx.prompt ?? \"\", 100),\n      lean: true,") }],
+    ["the lean flag is dropped, so the device cannot tell a lean row from a session with no prompt",
+     { host: (s) => s.replace("      lean: true,", "") }],
+    ["hiddenAsking reverts to counting from the full set, so the strip claims rows that are on screen",
+     { host: (s) => s.replace("records.slice(SESSION_ROW_CAP)", "records.slice(SESSION_FULL_SLOTS)") }],
     ["a host cap site bypasses the transliteration",
      { host: (s) => s.replace(/name: deviceText\(await projectName\(record\.cwd \|\| ""\), (\d+)\)/,
                               'name: (await projectName(record.cwd || "")).slice(0, $1)') }],
@@ -1119,8 +1249,18 @@ async function selftest() {
      { host: (s) => s.replace("const fitted = fitPayload(wire.payload);", "const fitted = ((p) => ({ line: JSON.stringify(p) + \"\\n\", bytes: 0, was: 0, dropped: [] }))(wire.payload);") }],
     ["the refusal's guard constant drifts from the firmware's",
      { fit: (s) => s.replace("export const DEVICE_LINE_GUARD_BYTES = 16000;", "export const DEVICE_LINE_GUARD_BYTES = 32000;") }],
+    // ANCHORED ON `// Tier 3`, because String.replace swaps only the FIRST match and
+    // the lean tail's tier 0 loop now opens with the same line. Unanchored, this
+    // fault neutered TIER 0 instead - which tier 3 then covers, so the refusal stayed
+    // total and the fault went MISSED while reading as though it still had teeth.
     ["the refusal loses its last tier, so it is merely likely rather than TOTAL",
-     { fit: (s) => s.replace("  while (sessions().length) {", "  while (false) {") }],
+     { fit: (s) => s.replace("  // Tier 3\n  while (sessions().length) {",
+                             "  // Tier 3\n  while (false) {") }],
+    // Tier 0's own fault, so the lean tail is not merely present but LOAD-BEARING:
+    // without it the fourteen cheapest rows on the line survive while an
+    // answerable ask.detail is shed instead.
+    ["the lean tail stops being shed first, so an answerable ask.detail goes before fourteen overview rows",
+     { fit: (s) => s.replace("  // TIER 0. THE LEAN TAIL GOES FIRST", "  // TIER 0 (disabled)\n  if (false)\n  // TIER 0. THE LEAN TAIL GOES FIRST") }],
     ["the refusal replaces SHORT details too, so fitting can GROW the line",
      { fit: (s) => s.replace("bytes(d) > DROPPED_BYTES ?", "bytes(d) > 0 ?") }],
     ["the refusal is off by one and lets a guard+1 line through - the exact size at which feedChar clears its buffer",

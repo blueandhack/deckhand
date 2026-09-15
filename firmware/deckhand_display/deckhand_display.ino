@@ -1326,6 +1326,20 @@ struct SessionInfo {
   // Seconds the hook will still wait, published by the host. Advisory: it drives
   // the keyboard's countdown only, and -1 means the host did not send one.
   int askSec;
+  // THIS ROW ARRIVED WITHOUT ITS DETAIL. Past the host's full-payload set
+  // (SESSION_FULL_SLOTS, which is MAX_SESSIONS) sessions ship LEAN - everything the
+  // row draws and nothing the CARD draws - because fourteen full records would be
+  // ~12KB of a 16,000-byte line every 5 seconds on a link measured at ~666 B/s.
+  //
+  // IT IS A FLAG AND NOT AN INFERENCE, and that is the point: a lean session and a
+  // session that genuinely has no prompt are indistinguishable from their fields, so
+  // without this the card would say "no prompt" for a session that has one. The
+  // device asks for the rest with `FOCUS <id>` when the row is tapped.
+  bool lean;
+  // A FOCUS has gone out for this row and its answer has not arrived. Purely so the
+  // card can say "loading" rather than sit on an empty one that looks broken, and so
+  // a second tap does not send a second request.
+  bool focusPending;
 };
 // The ten fields the per-tick diff actually READS from the previous tick. This
 // used to be a whole SessionInfo[MAX_SESSIONS] - 13,392 bytes of DRAM, plus a 13KB
@@ -1354,7 +1368,33 @@ struct PrevSession {
 // those land above SessionInfo's own declaration, and a function naming it in its
 // signature won't compile there (same reason hostNowSec() is forward-declared above).
 bool sessionSortsBefore(const SessionInfo& b, const SessionInfo& a, unsigned long now);
-SessionInfo sessions[MAX_SESSIONS];
+void applySessionFields(SessionInfo& info, JsonObject s);
+// SESSION_SLOTS SLOTS, NOT MAX_SESSIONS. The two are the same number on board 1 and
+// differ on board 2 (20 vs 6), and they mean different things: SESSION_SLOTS is how
+// many sessions this board can HOLD, MAX_SESSIONS is how many carry a full ask
+// payload on the wire. Asserted rather than commented, because the direction that
+// matters silently overflows: the parse loop below fills slots and the host's own
+// full-payload set is MAX_SESSIONS wide, so SESSION_SLOTS must never be the smaller.
+static_assert(SESSION_SLOTS >= MAX_SESSIONS,
+              "SESSION_SLOTS must hold at least the full-payload set (MAX_SESSIONS)");
+#if BOARD_SESSIONS_SCROLL
+// 20 x ~2.2KB = ~44KB, which does NOT fit in this board's ~26KB of free DRAM - so it
+// lives in PSRAM and this is a POINTER, allocated once in setup(). Board 1 keeps the
+// static array it has always had: it has no PSRAM, its SESSION_SLOTS is 6, and
+// putting its list behind a pointer would change its codegen for a feature it does
+// not compile. Only the DECLARATION differs - every reader below says sessions[i]
+// either way, which is exactly why the fan-out of this change is so small.
+SessionInfo* sessions = nullptr;
+#else
+SessionInfo sessions[SESSION_SLOTS];
+#endif
+// HOW MANY SLOTS ACTUALLY EXIST, as opposed to how many were asked for. On board 2
+// the PSRAM allocation can fail, and the honest response is a SHORTER list rather
+// than a halt: sessionSlotCount falls back to MAX_SESSIONS' worth of DRAM and the
+// tab behaves exactly as it did before this feature. Every bound below reads THIS,
+// never SESSION_SLOTS directly, so a fallback cannot leave a loop walking off the
+// end of a smaller allocation.
+int sessionSlotCount = SESSION_SLOTS;
 int sessionCount = 0;
 // The host sends at most MAX_SESSIONS (urgency-sorted: asking > waiting >
 // working, then recency); these say what it had to leave out.
@@ -1388,8 +1428,16 @@ int hiddenAskingCount = 0;
 // prints the headroom, so "it still fits" is measured rather than assumed - and
 // reverting either widening now fails by name instead of passing in silence.
 const int SESSION_SIG_MARGIN = 64;
-char rowSigCache[MAX_SESSIONS][SESSION_ROW_SIG_LEN]; // sized per board - see the header
-char rowDurCache[MAX_SESSIONS][8];
+// SESSION_SLOTS, NOT MAX_SESSIONS: these are indexed by DISPLAY POSITION, and a
+// display position now runs to sessionCount, which runs to the slot count. Sized to
+// MAX_SESSIONS they would be written past the end by the seventh row on board 2 -
+// and rowSigCache is 368 bytes a side, so the overrun would land in whatever
+// followed and present as corruption somewhere else entirely.
+// The extra 14 slots cost (20-6) * 376 = 5.3KB of .bss on board 2, which is an
+// ESP32-S3 with 512KB of SRAM; board 1's SESSION_SLOTS is 6, so it allocates
+// exactly what it allocated before.
+char rowSigCache[SESSION_SLOTS][SESSION_ROW_SIG_LEN]; // sized per board - see the header
+char rowDurCache[SESSION_SLOTS][8];
 char overflowCache[32] = "";
 int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
 
@@ -1401,6 +1449,22 @@ int rowCountCache = -1; // layout code: sessionCount*2 + overflow-strip flag
 bool showingDetail = false;
 int detailIndex = -1;
 char detailId[16] = "";
+// THE SESSION WE ASKED THE HOST TO PIN, or "". While it is set the host is building
+// that session as a FULL record for us, and something has to tell it to stop.
+//
+// RECONCILED, NOT RELEASED AT THE CLOSE, and that is the whole point of it being a
+// recorded id rather than a `sendLineToHost` in closeSessionDetail(). FOUR separate
+// paths clear showingDetail - closeSessionDetail(), switchTab(), exitReaderToList()
+// and the voice card taking over the content area - and only one of them is named
+// "close". A release fired from the close path leaks the pin through the other
+// three, and the most common of those is simply tapping a different tab.
+//
+// So tickFocusPin() compares this against what is actually on the glass, once per
+// loop, and a pin that no longer has a card releases itself. A fifth close path
+// added later needs to know nothing about any of this. Same reasoning as the pulse
+// repainting on a change of colour rather than on a timer, and as bandFillShown
+// being a RECORD of what was painted rather than a request.
+char focusSentId[16] = "";
 // 384: re-derived for the icon id appended after dispMacTag(). Field-by-field, in
 // bytes (content only, NUL counted separately at the end): name(23) + status(9) +
 // path(67) + model(23) + branch(23) + askPid(11) + answeredIdx as %d(2, "-1") +
@@ -3043,6 +3107,32 @@ int expCardH = 0;        // 0 = no card, or not measured yet
 int expCardPrompt = 0;   // prompt lines this card's height paid for
 int expHCache = 0;       // the height the list was last laid out at
 
+// ---------- The scrolling list's position (board 2 only) ----------
+// DECLARED HERE RATHER THAN IN sessions.ino because the touch handler in THIS file
+// reads it, and the .ino files are one translation unit concatenated with this one
+// FIRST - so a global defined in sessions.ino would need an extern here anyway.
+//
+// ALWAYS A MULTIPLE OF SESSION_SCROLL_STEP. That invariant is the whole feature:
+// it is what makes every row either wholly visible or wholly absent, on a board
+// whose only clip is the screen edge. The header carries the derivation and the two
+// scrollback.ino defects that motivate it. Every write goes through
+// sessionScrollTo(), which is the one place that re-establishes it.
+//
+// GUARDED, so board 1 does not carry two ints of .bss for a feature it does not
+// compile. A global has external linkage and is emitted whether or not anything
+// reads it, and board 1's binary is a contract: every movement of it has to be
+// measured, expected and explained, so not moving it at all is cheaper than
+// explaining eight bytes.
+#if BOARD_SESSIONS_SCROLL
+int sessionScroll = 0;
+// The offset the list was last LAID OUT at. A scroll step changes which session
+// each screen slot shows, and a position change reaches no text-comparing cache -
+// so this is compared like rowCountCache and expHCache, and a difference busts
+// every row signature wholesale. Without it the rows would keep whatever they were
+// last drawn with and the list would scroll its CHROME while its TEXT stood still.
+int sessionScrollCache = -1;
+#endif
+
 // Kept as the "force a full repaint" entry point (tab switch, closing the
 // detail screen): invalidating the count cache makes renderSessionsList
 // clear the area and rebuild every row.
@@ -3073,6 +3163,18 @@ void tickWorkingSpinner() {
   // holds today can differ once two Macs are merged and re-ranked, so it is
   // resolved through sessionAt(pos) the same way drawSessionRow does.
   for (int pos = 0; pos < sessionCount; pos++) {
+    // OFF-SCREEN ROWS HAVE NO INDICATOR TO ADVANCE, and this one was found on the
+    // GLASS with all 2195 geometry assertions green. A scrolled-past row still has
+    // a y - row 5 at the top of the list is y = 50 + 5*82 = 460, which is the
+    // FOOTER'S first row - and the working spinner is a 32x32 blit that paints its
+    // own background, so it stamped an orange starburst over the clock four times a
+    // second. Nothing wiped it, because the footer's own change-only fields only
+    // repaint the characters they own.
+    //
+    // The draw loop, the duration, the hit test and the shimmer all consult
+    // sessionRowVisible(); this loop is a FIFTH reader of the row stack that lives
+    // in another file, which is exactly why it was the one missed.
+    if (!sessionRowVisible(pos)) continue;
     int i = sessionAt(pos);
     if (strcmp(sessions[i].status, "working") != 0) continue;
     // Same two helpers as the draw: the first row's height can differ from the
@@ -3969,6 +4071,25 @@ void openSessionDetail(int idx) {
   copyField(detailId, sizeof(detailId), sessions[idx].id); // anchor by id, not index
   readerActive = false;
   readerPage = 0;
+  // A ROW THAT ARRIVED LEAN HAS NO CARD TO DRAW YET - ask for one. Past the host's
+  // full-payload set every row ships with only what the LIST draws, so opening one
+  // without this would show a card with no prompt, no path and no ask, which reads
+  // as a broken session rather than as a row whose detail has not travelled.
+  //
+  // The request also PINS this session full on the host for as long as the card is
+  // open (see `FOCUS` in host/index.mjs), so the next tick does not blank what the
+  // reply is about to fill in.
+  //
+  // GUARDED ON focusPending so a second tap does not send a second request: the
+  // reply is ~1.5KB on a link measured at ~666 B/s, and the host dedups the double
+  // delivery but not a genuine second tap.
+  if (sessions[idx].lean && !sessions[idx].focusPending) {
+    sessions[idx].focusPending = true;
+    copyField(focusSentId, sizeof(focusSentId), sessions[idx].id);
+    char req[32];
+    snprintf(req, sizeof(req), "FOCUS %s", sessions[idx].id);
+    sendLineToHost(req);
+  }
   drawSessionDetail(idx);
   buildDetailSignature(idx, detailSigCache, sizeof(detailSigCache));
 }
@@ -4245,6 +4366,14 @@ void handleTouch() {
     // rather than guessed. ONE walk on both boards now - board 1's arm was the
     // division, kept while its binary was held byte-identical, and it would report
     // the wrong row for every tap below a band card.
+#if BOARD_SESSIONS_SCROLL
+    // A PRESS IN A SCROLLING LIST IS A DRAG UNTIL IT PROVES OTHERWISE. The loop
+    // blocks until the finger lifts and reports which it was; a drag has already
+    // done its work and there is nothing left to do here. A tap falls through to
+    // the hit test below with its ORIGINAL sy, which is still the right coordinate
+    // precisely because a tap did not move the list.
+    if (sessionsScrollActive() && sessionDragLoop(sx, sy)) return;
+#endif
     int row = sessionRowAtY(sy);
     if (row >= 0) openSessionDetail(sessionAt(row));
   }
@@ -4329,7 +4458,7 @@ const char* dispMacTag(int hostSlot) {
 // with two Macs the cross-host ranking has to happen here. An index sort,
 // deliberately: a SessionInfo is 2.2KB and a value sort would memmove tens of
 // KB every tick.
-uint8_t sessionOrder[MAX_SESSIONS];
+uint8_t sessionOrder[SESSION_SLOTS];
 int urgencyRank(const char* status) {
   if (strcmp(status, "asking") == 0) return 0;
   if (strcmp(status, "waiting") == 0) return 1;
@@ -4396,6 +4525,149 @@ void pruneStaleLinks() {
   }
 }
 
+// EVERY FIELD A SESSION CARRIES, PARSED IN ONE PLACE. Split out of the tick's own
+// loop when the `FOCUS` reply arrived: that reply is a full record for a row that
+// shipped lean, and it has to land in the slot the SAME way a tick lands - a second
+// copy of this is how one field would come to be populated one way here and another
+// way there, silently, in whichever path is used less.
+//
+// WHAT IT DELIBERATELY DOES NOT TOUCH: hostSlot (which Mac owns the row - the
+// sdetail reply says nothing about that, and overwriting it would re-tag the session
+// to whichever link answered), and everything downstream of it in the tick -
+// statusSinceMillis, the beep budget and the crossfade, which are all derived from a
+// DIFF against the previous tick rather than from the payload. A reply is not a tick
+// and must not restart a duration or fire a beep.
+//
+// DECLARED ABOVE, NOT LEFT TO ARDUINO'S GENERATED PROTOTYPES: its signature names
+// SessionInfo, and those prototypes land above SessionInfo's own declaration - the
+// same reason sessionSortsBefore() and hostNowSec() are forward-declared.
+void applySessionFields(SessionInfo& info, JsonObject s) {
+  copyField(info.id, sizeof(info.id), s["id"] | "");
+  copyField(info.name, sizeof(info.name), s["name"] | "?");
+  copyField(info.status, sizeof(info.status), s["status"] | "waiting");
+  copyField(info.path, sizeof(info.path), s["path"] | "");
+  copyField(info.title, sizeof(info.title), s["title"] | "");
+  copyField(info.prompt, sizeof(info.prompt), s["prompt"] | "");
+  info.startSec = s["startSec"] | -1;
+  info.actSec = s["actSec"] | -1;
+  copyField(info.model, sizeof(info.model), s["model"] | "");
+  copyField(info.branch, sizeof(info.branch), s["branch"] | "");
+  // Absent = a host too old to tag sessions, and everything it sends is Claude.
+  copyField(info.agent, sizeof(info.agent), s["agent"] | "cc");
+  // ABSENT MEANS FULL, which is what keeps a host too old to send the field
+  // working exactly as it did: every row it sends is a complete one.
+  //
+  // TAKEN AT FACE VALUE, with no "but we already filled this one" exception -
+  // and that is only correct because the host PINS a focused session into its
+  // full set for as long as the card is open (see `FOCUS` in host/index.mjs).
+  // Without the pin this line would blank a card the user is reading five
+  // seconds after it filled in, because the tick would re-send the row lean and
+  // the copyField()s above would overwrite its prompt, path and ask with the
+  // empty values a lean row carries. Keeping a stale `lean` flag here would NOT
+  // have fixed that: the fields are already gone by this point.
+  info.lean = s["lean"] | false;
+  info.focusPending = false;
+  info.askPid[0] = '\0';
+  info.askKind[0] = '\0';
+  info.askNonce[0] = '\0';
+  // A sibling of `status`, not a member of `ask` - a READY session has no ask.
+  info.promptNonce[0] = '\0';
+  if (s["pnonce"].is<const char*>())
+    copyField(info.promptNonce, sizeof(info.promptNonce), s["pnonce"]);
+  info.askTitle[0] = '\0';
+  info.askDetail[0] = '\0';
+  for (int k = 0; k < 4; k++) info.askOptDesc[k][0] = '\0';
+  info.askOptCount = 0;
+  // Reset every tick for exactly the reason askDetail is reset one line up: a
+  // chip left behind from the last time this slot held an ask would survive
+  // into a session that has no ask at all, and the reply panel would offer a
+  // token belonging to a prompt that is already answered. askChipCount gates
+  // every read, so it is the one that must be zeroed; the slots are blanked
+  // with it so nothing can read a stale label out from under a count that a
+  // later change forgot to keep in step.
+  info.askChipCount = 0;
+  for (int k = 0; k < 4; k++) info.askChips[k][0] = '\0';
+  info.askAnswerable = remoteAnswerEnabled;
+  info.askVoice = false;
+  info.askSec = -1;
+  JsonObject ask = s["ask"];
+  if (!ask.isNull()) {
+    // Absent = fall back to the host-wide flag (a hook too old to stamp the
+    // ask blocks unconditionally, so its prompts ARE answerable here).
+    info.askAnswerable = ask["answerable"] | remoteAnswerEnabled;
+    copyField(info.askPid, sizeof(info.askPid), ask["pid"] | "");
+    copyField(info.askKind, sizeof(info.askKind), ask["kind"] | "");
+    copyField(info.askNonce, sizeof(info.askNonce), ask["nonce"] | "");
+    copyField(info.askTitle, sizeof(info.askTitle), ask["title"] | "");
+    copyField(info.askDetail, sizeof(info.askDetail), ask["detail"] | "");
+    info.askVoice = ask["voice"] | false;
+    info.askSec = ask["sec"] | -1;
+    // Defense in depth: the host already flattens control bytes, but any
+    // that slip through render as garbage glyphs on this font, so blank
+    // them to spaces here too. The detail keeps '\n' (it drives code-block
+    // line breaks in the wrapper); the title is always single-line.
+    for (char* p = info.askTitle; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
+    for (char* p = info.askDetail; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
+    JsonArray opts = ask["options"].as<JsonArray>();
+    if (!opts.isNull()) {
+      for (JsonVariant o : opts) {
+        if (info.askOptCount >= 4) break;
+        copyField(info.askOpts[info.askOptCount], sizeof(info.askOpts[0]), o | "");
+        info.askOptCount++;
+      }
+    }
+    // The descriptions, walked BY INDEX rather than beside the loop above,
+    // because the two arrays are parallel but not the same array: the hook
+    // omits optDescs entirely when every description is empty (so an
+    // Allow/Deny payload is byte-identical to what it always was), and a host
+    // that predates the field never sends it. Either way the slots stay empty,
+    // which is the "no description" case and not an error to report.
+    // It is DENSE on the wire - an option with no description gets "", never a
+    // hole - so index k here really is option k. Bounded by 4 and not by
+    // askOptCount so a longer array cannot walk past the buffer, and no slot
+    // past askOptCount is ever read.
+    JsonArray descs = ask["optDescs"].as<JsonArray>();
+    if (!descs.isNull()) {
+      int k = 0;
+      for (JsonVariant d : descs) {
+        if (k >= 4) break;
+        copyField(info.askOptDesc[k], sizeof(info.askOptDesc[0]), d | "");
+        // Defence in depth, exactly as the title and detail get above: the host
+        // flattens control bytes and transliterates to ASCII now, but one that
+        // slipped through would render as garbage glyphs on this font. These are
+        // single-line, so unlike askDetail there is no '\n' to preserve.
+        for (char* p = info.askOptDesc[k]; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
+        k++;
+      }
+    }
+    // THE TAPPABLE TOKENS, walked exactly like the descriptions above and for
+    // the same two reasons: bounded by this buffer's own 4 slots rather than by
+    // anything on the wire, so a longer array cannot walk past it, and COUNTED,
+    // so nothing past askChipCount is ever read. Absent = a host too old to
+    // extract them, which leaves the count at 0 - the same "no chips" state as a
+    // prompt with no tappable token in it, and not an error to report.
+    JsonArray chips = ask["chips"].as<JsonArray>();
+    if (!chips.isNull()) {
+      for (JsonVariant ch : chips) {
+        if (info.askChipCount >= 4) break;
+        copyField(info.askChips[info.askChipCount], sizeof(info.askChips[0]), ch | "");
+        // Defence in depth, exactly as the title, detail and descriptions get
+        // above. The host transliterates and flattens control bytes now, but one
+        // that slipped through draws NOTHING AND ADVANCES NOTHING on this font,
+        // so the label would come out short with an invisible hole in it rather
+        // than with a visible replacement glyph. Single-line, so unlike
+        // askDetail there is no '\n' to preserve.
+        for (char* p = info.askChips[info.askChipCount]; *p; p++)
+          if ((uint8_t) *p < 0x20) *p = ' ';
+        // A chip that arrived empty is a button with no label. Don't count it -
+        // it would spend one of four scarce slots on a target that says nothing
+        // and types nothing. The slot is already "" and stays that way.
+        if (info.askChips[info.askChipCount][0]) info.askChipCount++;
+      }
+    }
+  }
+}
+
 void handleLine(const String& line) {
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, line);
@@ -4444,6 +4716,53 @@ void handleLine(const String& line) {
   // nowhere. Any current host states it explicitly.
   remoteAnswerEnabled = doc["remoteAnswer"] | true;
   if (curLink >= 0) hostLinks[curLink].remoteAnswer = remoteAnswerEnabled;
+
+  // FOCUS reply: its own line, `sdetail` the only key - the full record for a row
+  // that shipped lean. Handled HERE, beside `hist`, and for the identical reason:
+  // everything below this point parses a TICK, and falling through would reset every
+  // usage field to "missing" and re-run the session merge against a one-session
+  // array - which would drop every other row on the device.
+  JsonObject sdet = doc["sdetail"];
+  if (!sdet.isNull()) {
+    const char* sid = sdet["id"] | "";
+    for (int i = 0; i < sessionCount; i++) {
+      if (strcmp(sessions[i].id, sid) != 0) continue;
+      // The host could not find it - it ended, or it fell out of the list between
+      // the tap and the reply. Say so rather than leaving the card on "loading"
+      // for ever: from the glass, a slow reply and a reply that will never come
+      // look identical.
+      if (sdet["gone"] | false) {
+        sessions[i].focusPending = false;
+        break;
+      }
+      // Filled through the SAME parser the tick uses, so a field can never be
+      // populated one way here and another way there - the defect a second copy of
+      // this would invite, and the reason the host builds this reply with its own
+      // tick builder too. hostSlot is deliberately NOT touched: this reply says
+      // nothing about which Mac owns the row, and overwriting it would re-tag the
+      // session to whichever link happened to answer.
+      applySessionFields(sessions[i], sdet);
+      sessions[i].lean = false;
+      sessions[i].focusPending = false;
+      // Bust the row AND the card: the card is what asked for this, and the row's
+      // own signature does not carry the fields that just arrived, so without the
+      // reset a repaint would leave the card showing what it had when it opened.
+      if (i < sessionSlotCount) rowSigCache[i][0] = '\0';
+      detailSigCache[0] = '\0';
+      if (showingDetail && strcmp(detailId, sid) == 0) {
+        detailIndex = resolveDetailIndex();
+        if (detailIndex >= 0) {
+          drawSessionDetail(detailIndex);
+          buildDetailSignature(detailIndex, detailSigCache, sizeof(detailSigCache));
+#if !BOARD_USES_TFT_ESPI
+          tft.flush();
+#endif
+        }
+      }
+      break;
+    }
+    return;
+  }
 
   // History reply: its own line, `hist` the only key. Bail out before any of the usage
   // parsing below, which would otherwise reset every field to "missing".
@@ -4659,8 +4978,8 @@ void handleLine(const String& line) {
   // Snapshot the previous list so statusSinceMillis survives across polls
   // for sessions whose status didn't change (matched by name).
   // Only the fields the diff below reads - see PrevSession for why.
-  static PrevSession prevSessions[MAX_SESSIONS];
-  for (int i = 0; i < sessionCount && i < MAX_SESSIONS; i++) {
+  static PrevSession prevSessions[SESSION_SLOTS];
+  for (int i = 0; i < sessionCount && i < sessionSlotCount; i++) {
     const SessionInfo& src = sessions[i];
     PrevSession& dst = prevSessions[i];
     memcpy(dst.id, src.id, sizeof(dst.id));
@@ -4690,12 +5009,12 @@ void handleLine(const String& line) {
   if (!arr.isNull()) {
     for (JsonObject s : arr) {
       int dst = sessionCount;
-      if (dst >= MAX_SESSIONS) {
+      if (dst >= sessionSlotCount) {
         // Full: evict the globally least-urgent row, but ONLY if this incoming
         // row beats it. The incoming list is sorted, so once one fails every
         // later one fails too.
         int worst = -1, worstRank = -1;
-        for (int i = 0; i < MAX_SESSIONS; i++) {
+        for (int i = 0; i < sessionSlotCount; i++) {
           int r = urgencyRank(sessions[i].status);
           if (r > worstRank) { worstRank = r; worst = i; }
         }
@@ -4706,117 +5025,7 @@ void handleLine(const String& line) {
       }
       SessionInfo& info = sessions[dst];
       info.hostSlot = (uint8_t) curLink;
-      copyField(info.id, sizeof(info.id), s["id"] | "");
-      copyField(info.name, sizeof(info.name), s["name"] | "?");
-      copyField(info.status, sizeof(info.status), s["status"] | "waiting");
-      copyField(info.path, sizeof(info.path), s["path"] | "");
-      copyField(info.title, sizeof(info.title), s["title"] | "");
-      copyField(info.prompt, sizeof(info.prompt), s["prompt"] | "");
-      info.startSec = s["startSec"] | -1;
-      info.actSec = s["actSec"] | -1;
-      copyField(info.model, sizeof(info.model), s["model"] | "");
-      copyField(info.branch, sizeof(info.branch), s["branch"] | "");
-      // Absent = a host too old to tag sessions, and everything it sends is Claude.
-      copyField(info.agent, sizeof(info.agent), s["agent"] | "cc");
-      info.askPid[0] = '\0';
-      info.askKind[0] = '\0';
-      info.askNonce[0] = '\0';
-      // A sibling of `status`, not a member of `ask` - a READY session has no ask.
-      info.promptNonce[0] = '\0';
-      if (s["pnonce"].is<const char*>())
-        copyField(info.promptNonce, sizeof(info.promptNonce), s["pnonce"]);
-      info.askTitle[0] = '\0';
-      info.askDetail[0] = '\0';
-      for (int k = 0; k < 4; k++) info.askOptDesc[k][0] = '\0';
-      info.askOptCount = 0;
-      // Reset every tick for exactly the reason askDetail is reset one line up: a
-      // chip left behind from the last time this slot held an ask would survive
-      // into a session that has no ask at all, and the reply panel would offer a
-      // token belonging to a prompt that is already answered. askChipCount gates
-      // every read, so it is the one that must be zeroed; the slots are blanked
-      // with it so nothing can read a stale label out from under a count that a
-      // later change forgot to keep in step.
-      info.askChipCount = 0;
-      for (int k = 0; k < 4; k++) info.askChips[k][0] = '\0';
-      info.askAnswerable = remoteAnswerEnabled;
-      info.askVoice = false;
-      info.askSec = -1;
-      JsonObject ask = s["ask"];
-      if (!ask.isNull()) {
-        // Absent = fall back to the host-wide flag (a hook too old to stamp the
-        // ask blocks unconditionally, so its prompts ARE answerable here).
-        info.askAnswerable = ask["answerable"] | remoteAnswerEnabled;
-        copyField(info.askPid, sizeof(info.askPid), ask["pid"] | "");
-        copyField(info.askKind, sizeof(info.askKind), ask["kind"] | "");
-        copyField(info.askNonce, sizeof(info.askNonce), ask["nonce"] | "");
-        copyField(info.askTitle, sizeof(info.askTitle), ask["title"] | "");
-        copyField(info.askDetail, sizeof(info.askDetail), ask["detail"] | "");
-        info.askVoice = ask["voice"] | false;
-        info.askSec = ask["sec"] | -1;
-        // Defense in depth: the host already flattens control bytes, but any
-        // that slip through render as garbage glyphs on this font, so blank
-        // them to spaces here too. The detail keeps '\n' (it drives code-block
-        // line breaks in the wrapper); the title is always single-line.
-        for (char* p = info.askTitle; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
-        for (char* p = info.askDetail; *p; p++) if ((uint8_t) *p < 0x20 && *p != '\n') *p = ' ';
-        JsonArray opts = ask["options"].as<JsonArray>();
-        if (!opts.isNull()) {
-          for (JsonVariant o : opts) {
-            if (info.askOptCount >= 4) break;
-            copyField(info.askOpts[info.askOptCount], sizeof(info.askOpts[0]), o | "");
-            info.askOptCount++;
-          }
-        }
-        // The descriptions, walked BY INDEX rather than beside the loop above,
-        // because the two arrays are parallel but not the same array: the hook
-        // omits optDescs entirely when every description is empty (so an
-        // Allow/Deny payload is byte-identical to what it always was), and a host
-        // that predates the field never sends it. Either way the slots stay empty,
-        // which is the "no description" case and not an error to report.
-        // It is DENSE on the wire - an option with no description gets "", never a
-        // hole - so index k here really is option k. Bounded by 4 and not by
-        // askOptCount so a longer array cannot walk past the buffer, and no slot
-        // past askOptCount is ever read.
-        JsonArray descs = ask["optDescs"].as<JsonArray>();
-        if (!descs.isNull()) {
-          int k = 0;
-          for (JsonVariant d : descs) {
-            if (k >= 4) break;
-            copyField(info.askOptDesc[k], sizeof(info.askOptDesc[0]), d | "");
-            // Defence in depth, exactly as the title and detail get above: the host
-            // flattens control bytes and transliterates to ASCII now, but one that
-            // slipped through would render as garbage glyphs on this font. These are
-            // single-line, so unlike askDetail there is no '\n' to preserve.
-            for (char* p = info.askOptDesc[k]; *p; p++) if ((uint8_t) *p < 0x20) *p = ' ';
-            k++;
-          }
-        }
-        // THE TAPPABLE TOKENS, walked exactly like the descriptions above and for
-        // the same two reasons: bounded by this buffer's own 4 slots rather than by
-        // anything on the wire, so a longer array cannot walk past it, and COUNTED,
-        // so nothing past askChipCount is ever read. Absent = a host too old to
-        // extract them, which leaves the count at 0 - the same "no chips" state as a
-        // prompt with no tappable token in it, and not an error to report.
-        JsonArray chips = ask["chips"].as<JsonArray>();
-        if (!chips.isNull()) {
-          for (JsonVariant ch : chips) {
-            if (info.askChipCount >= 4) break;
-            copyField(info.askChips[info.askChipCount], sizeof(info.askChips[0]), ch | "");
-            // Defence in depth, exactly as the title, detail and descriptions get
-            // above. The host transliterates and flattens control bytes now, but one
-            // that slipped through draws NOTHING AND ADVANCES NOTHING on this font,
-            // so the label would come out short with an invisible hole in it rather
-            // than with a visible replacement glyph. Single-line, so unlike
-            // askDetail there is no '\n' to preserve.
-            for (char* p = info.askChips[info.askChipCount]; *p; p++)
-              if ((uint8_t) *p < 0x20) *p = ' ';
-            // A chip that arrived empty is a button with no label. Don't count it -
-            // it would spend one of four scarce slots on a target that says nothing
-            // and types nothing. The slot is already "" and stays that way.
-            if (info.askChips[info.askChipCount][0]) info.askChipCount++;
-          }
-        }
-      }
+  applySessionFields(info, s);
       info.statusSinceMillis = millis();
       info.beepsLeft = 0;
       info.nextBeepMillis = 0;
@@ -5617,6 +5826,31 @@ void setup() {
 #endif
   Serial.begin(115200);
 
+  // ---- THE SESSION SLOTS, BEFORE ANY PAYLOAD CAN ARRIVE ----
+  // First thing after the port is up, because handleLine() writes into sessions[]
+  // and a null pointer there is a panic rather than a missing feature. Cheap and
+  // unconditional on board 1, where it compiles to nothing at all.
+#if BOARD_SESSIONS_SCROLL
+  sessions = (SessionInfo*) heap_caps_malloc(
+      (size_t) SESSION_SLOTS * sizeof(SessionInfo), MALLOC_CAP_SPIRAM);
+  if (!sessions) {
+    // A SHORTER LIST, NOT A HALT, and not a silent one either. The tab still works
+    // at MAX_SESSIONS - exactly what it did before this feature existed - so losing
+    // PSRAM costs the scroll and nothing else. sessionSlotCount is what every bound
+    // reads, so the smaller allocation cannot be walked off the end of.
+    // NAMED ON THE WIRE, because from the Mac a failed allocation and a host that
+    // simply has six sessions look identical - the same class of "say why" refusal
+    // SCROLL allocfail and POWERPROBE's battery guard exist for.
+    sessions = (SessionInfo*) malloc((size_t) MAX_SESSIONS * sizeof(SessionInfo));
+    sessionSlotCount = sessions ? MAX_SESSIONS : 0;
+    Serial.printf("SESSIONS allocfail psram, fell back to %d slots\n", sessionSlotCount);
+  }
+  // calloc semantics by hand: heap_caps_malloc does not zero, and the parse loop
+  // only fills the slots a payload actually carries - so an unwritten slot read by
+  // sessionCount's own bound would be whatever PSRAM held at boot.
+  if (sessions) memset(sessions, 0, (size_t) sessionSlotCount * sizeof(SessionInfo));
+#endif
+
   // ---- WAKE GUARD, before anything expensive ----
   // ext0 fires on ANY PENIRQ edge, so a sleeve, a bag or a knock used to wake
   // the device fully: radio up, panel out of SLPIN, backlight to 100%. On a
@@ -5861,6 +6095,18 @@ const unsigned long PAYLOAD_DEDUP_MS = 1000;
 struct UnavailableCommand { const char* verb; const char* cause; };
 
 static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
+// THE EXACT NEGATION OF THE HANDLER'S OWN GUARD, which is what commands-check.mjs
+// evaluates against both headers - not !BOARD_USES_TFT_ESPI, which happens to agree
+// today and would stop agreeing the moment a third board existed.
+#if !BOARD_SESSIONS_SCROLL
+  { "SESSIONSCROLL",
+    "it parks the SCROLLING session list at a given step so a capture can see a position "
+    "other than the top. This board is BOARD_SESSIONS_SCROLL 0: its list is six rows laid "
+    "out by the ladder and there is no offset to park. The cap is the PROTOCOL's, not this "
+    "panel's, and lifting it here would cost ~44KB of SessionInfo against ~26KB of free "
+    "heap on a board with no PSRAM - see board_e32r28t.h's SESSION_SLOTS note. DETAIL <n> "
+    "reaches every row this board has." },
+#endif
 #if BOARD_USES_TFT_ESPI
   { "SHIMBENCH",
     "it times a full-screen and a dirty-rect flush of the PSRAM shadow framebuffer. "
@@ -6380,6 +6626,92 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
 #endif
     Serial.printf("DETAIL: session %d (%s) %s\n", di, sessions[di].name,
                   sessions[di].askPid[0] ? "ask screen" : "detail card");
+#if BOARD_SESSIONS_SCROLL
+  } else if (buf.startsWith("SESSIONSCROLL")) {
+    // PARKS THE SCROLLING SESSION LIST AT A GIVEN STEP, so a capture can see a
+    // position other than the top. Exactly the argument TAB, PAGE, DETAIL and
+    // COMPOSE are in the table for: a capture can only record what is ALREADY on
+    // the glass, and until this existed the only way to see row 12 was a finger.
+    //
+    // THE UNIT IS STEPS, NOT PIXELS, and that is deliberate rather than terse. The
+    // offset is only ever a multiple of SESSION_SCROLL_STEP - the invariant the
+    // whole feature rests on - so a pixel argument would invite a value that cannot
+    // exist and would be silently snapped to one that can, which is the class of
+    // "asked for 4, silently given 0" the DETAIL handler refuses rather than clamps.
+    //
+    // NOT DEDUPED, and it says so: the host delivers every command over BOTH
+    // transports, so a cabled device receives this twice. Parking at a step is
+    // IDEMPOTENT - the second arrival re-parks at the same place and the second
+    // renderSessionsList() finds every cache already matching - so there is nothing
+    // to suppress. Contrast COMPOSE's chip/page arms, where an insert is not
+    // idempotent and the dedup is load-bearing.
+    String arg = buf.length() > 13 ? buf.substring(13) : String("");
+    arg.trim();
+    // The same four surfaces TAB refuses under, plus the detail card: each paints
+    // over the list, and repainting the list beneath one would either do nothing
+    // visible or tear a hole in whatever is on top.
+    // showingDetail, NOT detailId[0]. detailId is the card's ANCHOR and deliberately
+    // outlives it - switchTab() clears showingDetail and leaves the id behind - so
+    // testing the id refused this command for the rest of the session after a single
+    // detail card had ever been opened. Caught on the device: the refusal fired with
+    // the sessions list plainly on the glass and nothing on top of it.
+    bool surfaceUp = composeActive || readerActive || histActive || scrollActive || showingDetail;
+    if (surfaceUp) {
+      Serial.println("SESSIONSCROLL refused: a full-screen surface is up (the list is "
+                     "underneath it, so scrolling it now would paint into whatever is on top)");
+      buf = "";   // see DETAIL's note: a refusal that returns without this repeats forever
+      return;
+    }
+    if (currentTab != TAB_SESSIONS) {
+      Serial.println("SESSIONSCROLL refused: SESSIONS is not the live tab (send TAB 1 first)");
+      buf = "";
+      return;
+    }
+    if (!sessionsScrollActive()) {
+      Serial.printf("SESSIONSCROLL refused: the list is not scrolling - %d session%s, and it "
+                    "takes more than %d. At or below that the ladder lays the list out and "
+                    "there is nothing to scroll; \"MULTITEST %d\" puts a scrolling list up.\n",
+                    sessionCount, sessionCount == 1 ? "" : "s", MAX_SESSIONS, SESSION_SLOTS);
+      buf = "";
+      return;
+    }
+    const int maxStep = sessionScrollMax() / SESSION_SCROLL_STEP;
+    // Validated CHARACTER BY CHARACTER rather than through toInt(), which returns 0
+    // for anything unparseable - so "SESSIONSCROLL top" would silently park at the
+    // top and report success. Both refusals quote the range they checked.
+    bool numeric = arg.length() > 0;
+    for (unsigned int i = 0; i < arg.length(); i++)
+      if (arg[i] < '0' || arg[i] > '9') numeric = false;
+    if (!numeric) {
+      Serial.printf("SESSIONSCROLL refused: \"%s\" is not a step number (0..%d)\n",
+                    arg.c_str(), maxStep);
+      buf = "";
+      return;
+    }
+    const int step = arg.toInt();
+    if (step > maxStep) {
+      Serial.printf("SESSIONSCROLL refused: step %d is out of range (0..%d at %d sessions)\n",
+                    step, maxStep, sessionCount);
+      buf = "";
+      return;
+    }
+    sessionScrollTo(step * SESSION_SCROLL_STEP);
+    renderSessionsList();
+    const int top = sessionScroll / SESSION_SCROLL_STEP;
+    // CLAMPED TO THE LAST ROW THAT EXISTS. At the bottom of a list whose final step
+    // is short - which is every list whose overflow is not an exact multiple of the
+    // step, i.e. every list carrying the "+N more" strip - the window has room for
+    // SESSION_SCROLL_ROWS but fewer rows remain. Unclamped this reported
+    // "rows 16..20 of 20", naming a row that does not exist. An instrument that
+    // overstates what is on the glass is worse than none: a capture script would
+    // report the wrong row as the right one.
+    int last = top + SESSION_SCROLL_ROWS - 1;
+    if (last > sessionCount - 1) last = sessionCount - 1;
+    Serial.printf("SESSIONSCROLL: step %d/%d, showing rows %d..%d of %d, offset %dpx\n",
+                  top, maxStep, top, last, sessionCount, sessionScroll);
+    buf = "";
+    return;
+#endif
   } else if (buf.startsWith("THEME")) {
     // WHICH PALETTE IS ON THE GLASS, FROM THE MAC. Every "confirm this reads in
     // LIGHT and in DARK" step in this repo has, until now, needed a person to tap
@@ -7773,7 +8105,12 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // poll last reported (usually minutes to hours old).
     int n = buf.substring(9).toInt();
     if (n < 0) n = 0;
-    if (n > MAX_SESSIONS) n = MAX_SESSIONS;
+    // sessionSlotCount, not MAX_SESSIONS: this harness is the ONLY way to put a
+    // seven-plus-session list on the glass without seven real sessions running, so
+    // capping it at the full-payload set would have made the scrolling list
+    // untestable from the Mac - and a capture is the only instrument that can see
+    // whether the rows landed where the arithmetic says they did.
+    if (n > sessionSlotCount) n = sessionSlotCount;
     String line = "{\"hostId\":\"feedfeed\",\"hostTag\":\"studio\",\"remoteAnswer\":true,"
                   "\"fiveHourPct\":11,\"sevenDayPct\":22,\"quotaAgeSec\":1,"
                   "\"cxPct\":33,\"cxResetMin\":120,\"cxWin\":10080,\"cxAgeSec\":1,"
@@ -7890,6 +8227,21 @@ void pumpStream(Stream& s, String& buf, unsigned long* lastRxTimestamp) {
   }
 }
 
+// RELEASE A PIN THAT NO LONGER HAS A CARD. Compares what we asked the host to hold
+// open against what is actually on the glass; if they disagree, the pin is stale and
+// goes. Reconciling rather than firing from the close path is what makes this
+// correct across all FOUR paths that clear showingDetail - only one of which is
+// called "close" - and across the fifth somebody adds later.
+//
+// Cheap enough to run every loop: two comparisons against a 16-byte buffer, and the
+// send happens once per release rather than once per pass.
+void tickFocusPin() {
+  if (!focusSentId[0]) return;
+  if (showingDetail && strcmp(detailId, focusSentId) == 0) return;
+  focusSentId[0] = '\0';
+  sendLineToHost("FOCUS -");
+}
+
 void loop() {
   pumpStream(Serial, serialBufUSB, &lastRxUSBMillis);
   // BLE bytes were buffered by onWrite() on the Bluetooth task; parse and
@@ -7935,6 +8287,7 @@ void loop() {
   // mutually exclusive and only one of them advances animPhase in any frame.
   tickDetailBandAnim();
   tickWorkingSpinner();
+  tickFocusPin();
   tickMicProcessing();  // no-op unless a capture is being processed
   tickWaitingWheel();   // no-op unless the standalone screen is on the glass
   tickAutoTheme();      // no-op unless the theme is set to AUTO
