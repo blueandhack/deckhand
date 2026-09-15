@@ -13,8 +13,14 @@ screen, `render-hero.py` renders the assembly and composites a real screenshot i
 the window:
 
 ```
-python3 render-hero.py ../docs/screenshot-sessions.png ../docs/device-hero.png
+python3 render-hero.py ../docs/screenshot-sessions-board1.png ../docs/device-hero-board1.png
 ```
+
+The input is a **board 1** capture and the renderer now enforces that, comparing the
+PNG against `BOARD_W`/`BOARD_H` in `board_e32r28t.h`: this case holds the CYD and its
+window is a 240x320 panel, so a 320x480 board 2 capture would otherwise be squashed
+into it without complaint. `--board 2` renders the other case, which is the one the
+repo README leads with (`../docs/device-hero.png`).
 
 It finds the screen by painting it magenta in `hero.scad` and looking for those
 pixels, rather than working out where the window lands in the image &mdash; so the

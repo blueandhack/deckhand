@@ -10,6 +10,22 @@ openscad -o stl/deckhand_b2_body.stl -D 'part="body"' deckhand_case_b2.scad
 # parts: body | cover | retainer | stand | buttons | btngauge | coupon | section | all
 ```
 
+![assembled, with a real capture on the screen](../docs/device-hero.png)
+
+That is the image the repo README leads with, and it is a render rather than a photo:
+`render-hero.py` runs `hero-b2.scad` (this file with an opaque magenta screen quad in
+place of assembly()'s ghosted one), finds the quad by its colour, and draws a real
+device capture into it.
+
+```
+python3 render-hero.py --board 2 ../docs/screenshot-sessions.png ../docs/device-hero.png
+```
+
+The capture is checked against `BOARD_W`/`BOARD_H` in `board_es3c35p.h`, so board 1's
+240x320 screenshot is refused here rather than stretched into a 320x480 window. The
+camera is straight-on because it has to be - see `case/README.md`, which explains that
+and the rest of the mechanism for both cases.
+
 ## The cover is a touch long — twice now
 
 Reported once as "the cover felt a touch long" (which set `gy = g + 0.1`) and again

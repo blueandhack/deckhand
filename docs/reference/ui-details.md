@@ -302,7 +302,7 @@ detail-card lane against board 1's 31, so every existing character-budget argume
 - **The standalone screen (`drawWaitingScreen()`) — what shows before the host has ever spoken.**
   The ship's-wheel mark turning, the wordmark, the device's own name, a state line, and the
   command to run on a Cozette panel. It is the first thing anyone sees, and three things about
-  it are load-bearing:
+  it are load-bearing - plus a fourth, at the end, about looking at it at all:
   - **The old instruction was a command that RELIABLY FAILS.** It read "Run host/index.mjs on
     your Mac" — the exact thing macOS TCC SIGABRTs the moment noble touches CoreBluetooth. The
     screen now says `open DeckhandBLE.app`. Anything added here has to be a command that works
@@ -322,6 +322,17 @@ detail-card lane against board 1's 31, so every existing character-budget argume
     its own boxes, so a 64px mark, a wordmark and a command panel survive underneath it. The old
     two lines of text sat inside card 1 and were mostly overdrawn by luck; at this size the
     residue is guaranteed.
+  - **`SCREENSHOT` cannot reach it from the Mac while the host is ticking**, which is why the
+    README's board 2 screenshots are three tabs and not four. The capture's rows go out TO the
+    host, and this screen only shows while `everReceived` is false - and the first payload sets
+    it, within one 5s tick of any host being up. Only three things clear it again
+    (`grep -n "everReceived = false"`): `RECAL` and its confirm dialog, both **board 1 only**,
+    and the SETTINGS orientation toggle, which is a fingertip and repaints immediately. So on
+    board 2 there is no route from the Mac at all, and on board 1 the window is the ~5s before
+    the next payload. A host that is CONNECTED but sending nothing (`readUsage()` throwing -
+    see `host-runtime.md`) is the one state where both halves are true at once; that is the
+    state to arrange if a fresh capture is ever wanted. NOT VERIFIED: whether
+    `docs/screenshot-waiting.png`, the board 1 capture kept for this reason, was taken that way.
   It lives on USAGE (`waitingScreenVisible()`), because `renderUsageTab` bails on `!everReceived`
   and that tab would otherwise be empty card outlines. SETTINGS stays reachable and useful while
   waiting — it shows the link and pairing state, which is exactly what you want when nothing is

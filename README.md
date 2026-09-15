@@ -4,26 +4,26 @@
 
 <p align="center">
   <img src="docs/device-hero.png" width="270"
-       alt="The 3D-printed case, front on, running the real firmware: the SESSIONS tab showing one working Claude Code session">
+       alt="The 3D-printed board 2 case, front on, running the real firmware: the SESSIONS tab with a WAITING FOR YOU card and a second session still working">
   <br>
-  <em>The printable case from <code>case/</code>, with a real capture on its screen &mdash;
-  rendered from the OpenSCAD model, not a mockup (<code>case/render-hero.py</code>).</em>
+  <em>The printable case from <code>case/</code> &mdash; board 2's, with a real capture on its
+  screen, rendered from the OpenSCAD model rather than mocked up
+  (<code>case/render-hero.py --board 2</code>). Board 1's case renders the same way
+  (<a href="docs/device-hero-board1.png">docs/device-hero-board1.png</a>).</em>
 </p>
 
 <p align="center">
   <img src="docs/screenshot-usage.png" width="200"
-       alt="USAGE tab: a 5-hour window card at 9%, a 7-day card at 22%, a Codex row, and the footer">
+       alt="USAGE tab: a 5-hour window card at 5% still measuring its burn rate with 4h 50m left, a 7-day card at 6% projected empty in about 2d 4h, a Fable row, and the footer">
   <img src="docs/screenshot-sessions.png" width="200"
-       alt="SESSIONS tab: one working session showing the animated Claude spark, project name, title, model and branch">
+       alt="SESSIONS tab: a WAITING FOR YOU card for the deckhand project with its title, last prompt and path, and below it a second deckhand session still working">
   <img src="docs/screenshot-settings.png" width="200"
-       alt="SETTINGS tab: brightness, sleep and volume steppers, and the sound, orientation and theme toggles">
-  <img src="docs/screenshot-waiting.png" width="200"
-       alt="Standalone screen before the host connects: the Deckhand logo with its wheel turning, the wordmark, the device name, the paired Mac by name, and the command to run">
+       alt="SETTINGS tab: the group menu - Device, Display, Sound, Pairing, Messages and Danger - each with its current state on a second line">
   <br>
-  <em>USAGE, SESSIONS, SETTINGS, and the standalone screen before the host connects -
+  <em>USAGE, SESSIONS and SETTINGS on board 2 (320x480, dark theme) &mdash;
   real captures read back off the panel, not mockups.
   <code>echo SCREENSHOT &gt; ~/.claude/deckhand-device-command</code> writes a PNG to
-  <code>~/Deckhand-shots/</code>.</em>
+  <code>~/Deckhand-shots/</code>. The capture in the case above is the middle one of these three.</em>
 </p>
 
 [github.com/blueandhack/deckhand](https://github.com/blueandhack/deckhand) &middot; MIT
