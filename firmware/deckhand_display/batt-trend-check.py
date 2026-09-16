@@ -1008,8 +1008,49 @@ _cmc = strip_comments(cm) if cm else None
 check("a bare CPUMODE writes NOTHING",
       _cmc is not None and re.search(r"if\s*\(arg\.length\(\)\)\s*\{[^}]*saveCpuMode", _cmc)
       is not None)
-check("the default is 240 - today's behaviour, the baseline a sweep must beat",
-      re.search(r"uint32_t\s+cpuMode\s*=\s*240\s*;", MAIN) is not None)
+# The default MOVED to dynamic, on a decision rather than a finished measurement:
+# 80MHz is measured 3.5C cooler at the die and the battery comparison never closed
+# its gate. Still pinned to an exact value rather than relaxed to "any digit" -
+# 160 or 240 slipping in here would ship a fixed clock while every comment around
+# it claims dynamic, and nothing else in the tree would notice.
+check("the default is 0, meaning DYNAMIC - the shipped behaviour, not a fixed clock",
+      re.search(r"uint32_t\s+cpuMode\s*=\s*0\s*;", MAIN) is not None)
+# ...and that 0 REACHES the hardware as dynamic rather than as a literal 0 MHz.
+# cpuTick()'s fixed-frequency arm is `cpuMode != 0`, so the whole meaning of the
+# default rests on that one comparison; were it `>= 0` or absent, the default
+# would call setCpuFrequencyMhz(0). The assertion above cannot see that.
+# THE BOOST MUST BE GATED ON A FINGER, and this is bound to handleTouch()'s own
+# brace-matched body because a cpuBoost() anywhere else in the file would satisfy
+# a file-wide match while this function re-armed the latch every loop. That is
+# not hypothetical: it is precisely what shipped. loop() calls handleTouch() every
+# iteration, cpuBoost() was its FIRST statement, so the 1500ms deadline was re-armed
+# thousands of times a second and the clock never left 240 - dynamic mode reported
+# itself active while doing nothing at all, and the dyn-vs-240 comparison was
+# measuring one state against itself.
+def _body(src, sig):
+    at = src.index(sig); open_ = src.index("{", at); d = 0
+    for i in range(open_, len(src)):
+        if src[i] == "{": d += 1
+        elif src[i] == "}":
+            d -= 1
+            if d == 0: return src[open_:i+1]
+    return ""
+_ht = _body(MAIN, "void handleTouch()")
+check("handleTouch()'s body is delimited", len(_ht) > 400)
+check("the CPU boost is GATED ON A TOUCH, not run once per loop - ungated it re-arms "
+      "the deadline forever and dynamic mode never leaves 240MHz",
+      re.search(r"if\s*\(\s*touching\s*\)\s*cpuBoost\s*\(\s*\)\s*;", _ht) is not None)
+check("...and EVERY cpuBoost() in handleTouch() is that guarded one, so a bare call "
+      "cannot be reintroduced beside it",
+      len(re.findall(r"cpuBoost\s*\(\s*\)", _ht)) ==
+      len(re.findall(r"if\s*\(\s*touching\s*\)\s*cpuBoost\s*\(\s*\)", _ht)))
+check("...and it sits AFTER getTouchPoint(), because the gate cannot be evaluated "
+      "before the thing it tests is read - position WAS the defect",
+      _ht.index("getTouchPoint") < _ht.index("cpuBoost"))
+
+check("0 is read as DYNAMIC by cpuTick, never passed to setCpuFrequencyMhz as a frequency",
+      re.search(r"void\s+cpuTick\s*\([^)]*\)\s*\{[^}]*?if\s*\(\s*cpuMode\s*!=\s*0\s*\)",
+                POWER, re.S) is not None)
 
 # --------------------------------------------------------------------------
 # THE SESSION-GATED IDLE LADDER: lit -> dim -> blank.

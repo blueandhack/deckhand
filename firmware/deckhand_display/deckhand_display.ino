@@ -644,9 +644,24 @@ bool bleSlowApplied = false;
 // 0 means DYNAMIC; any other value is a fixed frequency in MHz. Runtime rather
 // than a build flag for the reason every other measurement here is: a frequency
 // sweep costs one battery session per setting, so a reflash per guess costs a
-// day. 240 is the default because it is TODAY'S behaviour - the baseline every
-// other setting has to beat, unmeasured until it does.
-uint32_t cpuMode = 240;
+// day.
+//
+// DYNAMIC IS THE DEFAULT ON A DECISION, NOT ON A FINISHED MEASUREMENT, and that
+// distinction is the point of writing it down. What IS measured is thermal: the
+// die runs 3.5C cooler at 80MHz (cabb7aa), against a device that was reported as
+// uncomfortably warm in the hand. What is NOT measured is the battery effect. The
+// A/B rig alternating dyn against 240 never closed its gate - twice. The first run
+// confounded order with setting, giving dyn the flat upper part of the discharge
+// curve (4068-3962 mV) and 240 the steeper part below it (3961-3903), so an
+// unknown share of the 22 mV/h gap was chemistry rather than clock. The second run
+// was erased outright when a macOS upgrade cleared the rig out of /tmp. So the
+// honest claim is "cooler, and not known to be worse", not "saves battery".
+//
+// THE STORED VALUE WINS OVER THIS. loadCpuMode() falls back to this default only
+// when NVS has none, so a device that was left on a fixed frequency KEEPS it
+// across this flash and must be told `CPUMODE dyn` once. Changing this line alone
+// changes nothing on a device that has an opinion already.
+uint32_t cpuMode = 0;
 unsigned long cpuBoostUntil = 0;   // millis deadline; 0 = not boosted
 uint32_t cpuMhzNow = 240;          // what is actually set, so we never re-set it
 const uint32_t CPU_MHZ_AWAKE = 240;
@@ -4111,12 +4126,6 @@ void closeSessionDetail() {
 }
 
 void handleTouch() {
-#if !BOARD_USES_TFT_ESPI
-  // ONE call site covers nearly everything interactive, because every tab
-  // switch, drag, keystroke and button press begins with a finger. Boosting
-  // here rather than at each of them is fewer places to forget.
-  cpuBoost();
-#endif
   static bool wasTouching = false;
   // 15ms, not 40. At 40 the UI polled at 25Hz: up to 40ms before a press was even
   // seen, and a tap shorter than 40ms could fall between two polls and be lost
@@ -4128,6 +4137,23 @@ void handleTouch() {
 
   int sx, sy;
   bool touching = getTouchPoint(sx, sy);
+#if !BOARD_USES_TFT_ESPI
+  // GATED ON A FINGER, and that gate is the entire feature. This call used to be
+  // the first statement of handleTouch(), which loop() runs EVERY iteration - so
+  // the 1500ms deadline was re-armed a few thousand times a second and cpuTick()
+  // never once saw it expire. MEASURED after the flash that shipped dynamic as the
+  // default: five CPUMODE samples twelve seconds apart, idle, all "now 240 MHz".
+  // The mode reported itself as `dyn` throughout while the clock had never left
+  // 240 - a feature that was pure overhead, and an A/B whose two arms were the
+  // same state, which is why "the battery effect resisted two attempts" (cabb7aa).
+  //
+  // Placed after getTouchPoint() rather than before it so the test can exist at
+  // all, and still before every handler below, so the press that starts an
+  // interaction is already at 240 when the work runs. The deadline latch then
+  // covers the lift and the repaint it triggers, 1500ms past the last frame with
+  // a finger on the glass - no need to test wasTouching as well.
+  if (touching) cpuBoost();
+#endif
 
   // A finger still down: on every surface but the keyboard's key band there is
   // nothing left to do, because the target acted on the press. On the key band a

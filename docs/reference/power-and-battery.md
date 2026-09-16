@@ -156,7 +156,24 @@ rule, arriving from a new direction. All three mutations (`BATT_ROW_CACHE` → 2
 
 `CPUMODE` scales the core between `CPU_MHZ_BASE` (80) and `CPU_MHZ_BOOST` (240) while awake,
 boosting on touch and on `forceFullRepaint()` and dropping back 1.5s later. `dyn` or a fixed
-240/160/80; **default 240**, which is the unchanged behaviour, because nothing measured beats it.
+240/160/80; **default `dyn` since 2026-09-16** (it was 240), on a DECISION rather than a finished
+measurement - see the correction immediately below and the unmeasured battery effect further down.
+
+**CORRECTED 2026-09-16: `dyn` NEVER LEFT 240MHz, SO EVERY `dyn` FIGURE IN THIS FILE IS A 240
+FIGURE.** The paragraph above described the intent; the code did not do it. `cpuBoost()` was the
+FIRST statement of `handleTouch()`, and `loop()` calls that every iteration - so the 1500ms boost
+deadline was re-armed thousands of times a second and `cpuTick()` never once saw it expire. The
+mode reported itself as `dyn` throughout. **Measured:** five `CPUMODE` samples twelve seconds
+apart on an idle device, all `now 240 MHz`; after gating the boost on an actual finger
+(`if (touching) cpuBoost();`, placed after `getTouchPoint()` so the test can exist), five more,
+all `now 80 MHz`. Die temperature followed, 42.6C -> 40.6C in the same charging state. Three
+assertions in `batt-trend-check.py`, bound to `handleTouch()`'s brace-matched body because the
+other `cpuBoost()` in `forceFullRepaint()` satisfies a file-wide match, now fail by name if the
+call is ungated, unguarded, or moved back ahead of `getTouchPoint()`.
+
+This is why an instrument pointed at the label rather than the glass is worse than none: `CPUMODE`
+answered `dyn` correctly - that WAS the mode - while the clock it was describing had never moved.
+Only `now <n> MHz` in the same reply told the truth, and only when read on an idle device.
 
 **SAFE ON THE S3 IN A WAY IT IS NOT ON BOARD 1's CHIP.** The S3 holds APB at 80MHz whatever the
 core is set to (arduino-esp32 #7086: `getApbFrequency()` still reports 80MHz with the CPU at 10),
@@ -193,7 +210,16 @@ sensor is inside the S3 package and cannot see the charger IC or the cell. Warmt
 while charging is the charger burning `(5V - Vbat) x Icharge` - about half a watt - plus the
 backlight. Scaling the clock cools the CORE 3.5C and does little for the case.
 
-**THE BATTERY EFFECT IS NOT ESTABLISHED, AND TWO ATTEMPTS FAILED IN INSTRUCTIVE WAYS.**
+**THE BATTERY EFFECT IS NOT ESTABLISHED, AND FOUR ATTEMPTS FAILED IN INSTRUCTIVE WAYS.** The
+first three share one fatal defect discovered on 2026-09-16 and recorded above: **`dyn` was 240**,
+so every leg below that compares `dyn` against `240` compares 240 against itself, and the flat
+result is not evidence of "no difference" - it is the arithmetic of measuring one state twice.
+That is the real reason the effect "resisted two attempts". A fourth attempt, an hourly-alternating
+rig, was erased before it closed its gate when a macOS upgrade cleared `/tmp`; its one usable pair
+also gave `dyn` the flat upper part of the discharge curve (4068-3962 mV) and `240` the steeper
+part below it (3961-3903), confounding order with setting exactly as the first sweep did.
+**Nothing here has yet compared a real 80MHz idle against a real 240MHz idle.**
+
 A straight sweep 240/160/80/dyn/240 reported an apparent **45% saving at 80MHz** - and its closing
 bracket read **-52.7 mV/h against the opening leg's -126.1 for the SAME setting**. The run began
 7 minutes after unplugging, where this file already says the fit is "still walking at 11 minutes":
