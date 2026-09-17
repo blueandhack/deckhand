@@ -275,6 +275,11 @@ volatile bool bleRefusalPending = false;
 // to 30ms with no latency - for its entire life. That is every link, on the
 // overwhelmingly common path.
 #if !BOARD_USES_TFT_ESPI
+// Which advertising rate is actually programmed: -1 none yet, 0 fast, 1 slow.
+// An APPLIED state rather than a wanted one, the same shape savingsSync() uses,
+// because the rate is only reprogrammable across a stop/start and doing that on
+// every advertise would be far worse than the rate itself.
+int8_t bleAdvRateApplied = -1;
 volatile bool bleParamsPending = false;
 // Is a finger on the glass RIGHT NOW. Written by handleTouch() from its own
 // 15ms poll, read by loop()'s awake yield - a drag must keep the loop running
@@ -5556,7 +5561,7 @@ class BLEServerCallbacksImpl : public BLEServerCallbacks {
 #if !BOARD_USES_TFT_ESPI
     bleParamsPending = true;
 #endif
-    if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
+    if (bleLinkCount() < MAX_LINKS) bleStartAdvertising();
   }
   // Marks the slot pending release - nothing else. The Bluetooth stack's task
   // must never clear .used or touch .buf itself (loopTask may be mid-append into
@@ -5583,7 +5588,7 @@ class BLEServerCallbacksImpl : public BLEServerCallbacks {
     if (slot < 0) return;   // a refusal's own disconnect - see comment above
     bleLinks[slot].releasePending = true;
     bleConnected = bleLinkCount() > 0;
-    if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
+    if (bleLinkCount() < MAX_LINKS) bleStartAdvertising();
   }
   // Both backends call the one-argument form AND the parameter form, in that
   // order, for every connect and every disconnect (BLEServer.cpp: 531/532 and
@@ -5609,7 +5614,7 @@ class BLEServerCallbacksImpl : public BLEServerCallbacks {
     // it would need this callback to know WHY it was called, which the library
     // does not tell it, and the 5s advertising watchdog is what actually
     // guarantees recovery either way.
-    if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
+    if (bleLinkCount() < MAX_LINKS) bleStartAdvertising();
   }
 };
 
@@ -5709,6 +5714,41 @@ int bleFrameSlot = -1;
 // exactly as safe as calling it from drainBleRx() itself - a disconnect
 // queued mid-recording would otherwise sit unreaped for the whole blocking
 // call, turning a millisecond window into up to two minutes.
+// EVERY startAdvertising() in this firmware goes through here, so the rate
+// policy has exactly one home and no call site has to remember it. The guards on
+// the call sites are untouched: this changes HOW FAST the beacon repeats, never
+// WHETHER or WHEN advertising starts - which matters, because a duplicate start
+// is measured to cost 323-697ms of reconnect discovery against a consistent
+// 50-60ms, and that pathology is about extra STARTS, not about the interval.
+//
+// Fast whenever somebody could plausibly be looking: no link at all (the host is
+// scanning to get back in), or a pairing window open (a Mac is being added right
+// now). Slow once a link is up and no pairing is underway - the only peer left
+// is a second Mac that may never come.
+//
+// Board 1 keeps its stock rate and its byte-identical binary: it has no wireless
+// pairing window to consult (BOARD_HAS_WIRELESS_PAIR is 0) and it is not the
+// board anyone is measuring a battery on.
+void bleStartAdvertising() {
+#if !BOARD_USES_TFT_ESPI
+  const int8_t want = (bleLinkCount() > 0 && !pairWindowOpen()) ? 1 : 0;
+  if (bleAdvRateApplied != want) {
+    BLEAdvertising* adv = BLEDevice::getAdvertising();
+    adv->setMinInterval(want ? BLE_ADV_SLOW_MIN : BLE_ADV_FAST_MIN);
+    adv->setMaxInterval(want ? BLE_ADV_SLOW_MAX : BLE_ADV_FAST_MAX);
+    // The setters only write the parameter block. A start() while already
+    // advertising is refused by the stack, so without stopping first a rate
+    // change would sit unapplied until something else happened to restart the
+    // beacon - which for the slow direction is never. Paid ONLY on a genuine
+    // rate change, which happens on connect, on last-disconnect, and when a
+    // pairing window opens or closes.
+    BLEDevice::stopAdvertising();
+    bleAdvRateApplied = want;
+  }
+#endif
+  BLEDevice::startAdvertising();
+}
+
 // mayAdvertise exists because a duplicate BLEDevice::startAdvertising() is
 // NOT the "harmless no-op" round 4 assumed - measured, not guessed: calling
 // it twice in quick succession (the immediate call already made by
@@ -5759,7 +5799,7 @@ void reapBleLinks(bool mayAdvertise) {
     if (bleFrameSlot == i) bleFrameSlot = -1;
     freedAny = true;
   }
-  if (mayAdvertise && freedAny && bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
+  if (mayAdvertise && freedAny && bleLinkCount() < MAX_LINKS) bleStartAdvertising();
 }
 void drainBleRx() {
   static uint8_t hdr[4];
@@ -5841,7 +5881,7 @@ void setupBLE() {
   // it overflows the 31-byte advertisement, which drops the name - and the
   // host matches by name, not UUID. Leaving the UUID out keeps the full name
   // in the packet. (The service is still discoverable after connecting.)
-  BLEDevice::startAdvertising();
+  bleStartAdvertising();
 
   btMacAddress = BLEDevice::getAddress().toString();
   Serial.printf("BLE: advertising as \"%s\" at %s\n", deviceName, btMacAddress.c_str());
@@ -7814,7 +7854,7 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       gpio_wakeup_disable((gpio_num_t) PIN_TOUCH_INT);
 
       // Immediate rather than waiting up to 5s for the advertising watchdog.
-      if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
+      if (bleLinkCount() < MAX_LINKS) bleStartAdvertising();
 
       for (int i = 0; i < 12; i++) sampleBattery();
       const int mv1 = batteryMv;
@@ -8578,7 +8618,7 @@ void loop() {
   static unsigned long lastAdvCheck = 0;
   if (bleLinkCount() < MAX_LINKS && millis() - lastAdvCheck > 5000) {
     lastAdvCheck = millis();
-    BLEDevice::startAdvertising();
+    bleStartAdvertising();
   }
 
 #if !BOARD_USES_TFT_ESPI

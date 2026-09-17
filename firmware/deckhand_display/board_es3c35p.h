@@ -205,6 +205,24 @@ const int PAIR_HOSTID_CHARS = 8;     // a hostId is EXACTLY 8 hex characters (th
 // set, so there is room for this and a good deal more.
 #define BLE_AWAKE_LATENCY 4
 
+// ADVERTISING RATE, in the 0.625ms units the BLE library takes. The stock values
+// are 0x20/0x40 - 20 to 40ms - and they run CONTINUOUSLY, including the whole
+// time a Mac is connected, because the advertisement is what lets a SECOND Mac
+// attach. That is 25-50 three-channel transmits a second, sustained, for a peer
+// that on most days never arrives: a heavier radio duty than the connection
+// events themselves.
+//
+// It is SLOWED, NEVER STOPPED. pairing-and-multi-mac.md is explicit that without
+// advertising while connected "a second Mac can never attach - and the symptom is
+// not an error anywhere, it is a second Mac whose BLE scan simply never finds a
+// device that is sitting right there". Stopping would trade a measurable saving
+// for a silent capability loss; slowing costs a second Mac up to ~1.2s of extra
+// discovery against the 53-697ms that file measured, and degrades gracefully.
+#define BLE_ADV_FAST_MIN 0x20     // 20ms  - stock, when someone is actually looking
+#define BLE_ADV_FAST_MAX 0x40     // 40ms
+#define BLE_ADV_SLOW_MIN 0x640    // 1000ms - a link is up and no pairing is underway
+#define BLE_ADV_SLOW_MAX 0x780    // 1200ms
+
 // The ST77922 takes RGB565 HIGH BYTE FIRST, while the shadow framebuffer holds
 // native little-endian uint16 - so the strip copy in PanelShim::flush() swaps
 // every pixel on the way out. Getting this wrong is not subtle once you know the

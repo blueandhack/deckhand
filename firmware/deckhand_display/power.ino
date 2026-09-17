@@ -166,7 +166,7 @@ void enterLightIdle() {
   // The radio went down with the CPU, so the link is gone and the Mac is
   // re-scanning. Advertise at once rather than waiting up to 5s for loop()'s
   // watchdog: this is the path a person is standing in front of.
-  if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
+  if (bleLinkCount() < MAX_LINKS) bleStartAdvertising();
 }
 // ONE emitter for both the setter and the read-only query. Two snprintf sites
 // would drift, and the whole point of the query is that it reports exactly what

@@ -34,10 +34,13 @@ B2H = pathlib.Path(__file__).with_name("board_es3c35p.h").read_text()
 
 
 def board_const(src, name, where):
-    m = re.search(rf"#define\s+{name}\s+(\d+)", src)
+    # 0x-prefixed AND plain decimal: the BLE advertising intervals are written in
+    # hex because the library's units are, and a decimal-only pattern matched the
+    # leading "0" of "0x20" and returned 0 for every one of them.
+    m = re.search(rf"#define\s+{name}\s+(0[xX][0-9a-fA-F]+|\d+)", src)
     if not m:
         sys.exit(f"FAIL: {name} not found in {where} - was it renamed, or un-split?")
-    return int(m.group(1))
+    return int(m.group(1), 0)
 
 
 MIN_SPAN_MS = firmware_const("BATT_TREND_MIN_SPAN_MS")
@@ -732,7 +735,7 @@ check("a sleep too short to rate prints NO rate",
 check("LIGHTSLEEP does NOT deinit the BLE stack",
       ls is not None and "BLEDevice::deinit" not in ls)
 check("...but it does re-assert advertising on wake",
-      ls is not None and "BLEDevice::startAdvertising()" in ls)
+      ls is not None and "bleStartAdvertising()" in ls)
 
 # --------------------------------------------------------------------------
 # LIGHTIDLE: light sleep while blanked, and POWER OFF's two board-2 additions.
@@ -766,7 +769,7 @@ check("the touch wake is LEVEL-triggered, so a tap cannot be missed",
 check("the wake source is DISARMED after waking",
       li is not None and "gpio_wakeup_disable" in li)
 check("it re-advertises on wake - the radio died with the CPU",
-      li is not None and "BLEDevice::startAdvertising()" in li)
+      li is not None and "bleStartAdvertising()" in li)
 check("LIGHTIDLE is PERSISTED, unlike the measurement toggles",
       re.search(r'prefs\.putBool\("lightIdle"', POWER) is not None
       and re.search(r'prefs\.getBool\("lightIdle"', POWER) is not None)
@@ -1089,6 +1092,44 @@ check("the awake arm carries the latency and the slow arm does not - asleep the 
       "interval is already 180-210ms and stacking latency only adds inbound delay",
       re.search(r"latency = slow \? 0 : BLE_AWAKE_LATENCY", _bsi) is not None
       and re.search(r"p\.latency = latency;", _bsi) is not None)
+
+# ---- THE ADVERTISING RATE -------------------------------------------------
+ADV_FAST_MIN = board_const(B2H, "BLE_ADV_FAST_MIN", "board_es3c35p.h")
+ADV_FAST_MAX = board_const(B2H, "BLE_ADV_FAST_MAX", "board_es3c35p.h")
+ADV_SLOW_MIN = board_const(B2H, "BLE_ADV_SLOW_MIN", "board_es3c35p.h")
+ADV_SLOW_MAX = board_const(B2H, "BLE_ADV_SLOW_MAX", "board_es3c35p.h")
+check("the slow advertising rate is actually slower than the fast one, both ends - "
+      "inverted, this costs radio instead of saving it and nothing else would notice",
+      ADV_SLOW_MIN > ADV_FAST_MIN and ADV_SLOW_MAX > ADV_FAST_MAX)
+check("...and min does not exceed max in either pair, which the controller rejects",
+      ADV_FAST_MIN <= ADV_FAST_MAX and ADV_SLOW_MIN <= ADV_SLOW_MAX)
+_adv = _body(MAIN, "void bleStartAdvertising()")
+check("the advertising policy has a body", len(_adv) > 200)
+# SLOWED, NEVER STOPPED. pairing-and-multi-mac.md: without advertising while
+# connected "a second Mac can never attach - and the symptom is not an error
+# anywhere". An early return here would buy a bigger saving and lose that
+# silently, so the call must be unconditional and there must be no way past it.
+check("advertising is SLOWED, never STOPPED - the start is unconditional and the "
+      "policy has no early return, or a second Mac silently stops being able to attach",
+      "BLEDevice::startAdvertising();" in _adv and "return" not in _adv)
+check("fast whenever somebody could be looking - no link at all, or a pairing "
+      "window open; slow only once a link is up and no pairing is underway",
+      re.search(r"\(bleLinkCount\(\) > 0 && !pairWindowOpen\(\)\) \? 1 : 0", _adv) is not None)
+# The setters only write the parameter block; a start() while already advertising
+# is refused, so without the stop the slow rate would never actually apply.
+check("a rate change stops the beacon so the new interval is applied, rather than "
+      "being written to a parameter block nothing re-reads",
+      "stopAdvertising" in _adv)
+check("...and that stop is paid ONLY on a real rate change, never on every "
+      "advertise - a duplicate start is measured at 323-697ms of reconnect "
+      "discovery against 50-60ms",
+      _adv.index("bleAdvRateApplied != want") < _adv.index("stopAdvertising"))
+# EVERY start must go through the policy. A new raw call site would bypass it
+# entirely and advertise at whatever rate was last programmed.
+check("every startAdvertising() in the firmware routes through the policy - exactly "
+      "one raw call survives and it is the policy's own",
+      (MAIN + POWER).count("BLEDevice::startAdvertising();") == 1
+      and "BLEDevice::startAdvertising();" in _adv)
 
 # THE BOOST MUST BE GATED ON A FINGER, and this is bound to handleTouch()'s own
 # brace-matched body because a cpuBoost() anywhere else in the file would satisfy
