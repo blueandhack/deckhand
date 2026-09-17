@@ -175,6 +175,36 @@ const int PAIR_HOSTID_CHARS = 8;     // a hostId is EXACTLY 8 hex characters (th
 // finger can perceive.
 #define BLANKED_LOOP_IDLE_MS 20
 
+// THE AWAKE LOOP YIELDS TOO, and for the same reason the blanked one does: a
+// loop() that never blocks keeps the core at full duty even at 80MHz, because
+// the FreeRTOS idle task - the only thing that reaches WAITI - never gets to
+// run. Only the blanked case yielded until now, so the state the device spends
+// its working life in was the one state that span flat out.
+//
+// 4ms is chosen AGAINST THE TOUCH POLL, not picked for feel: handleTouch()
+// throttles itself to 15ms internally, so every iteration sooner than that
+// already does nothing for touch. A 4ms yield cannot cost more than 4ms of
+// added detection latency on a 15ms poll, and buys back the other ~99% of
+// iterations that existed only to re-evaluate branches nothing had changed.
+// It is skipped outright while a finger is down - see touchIsDown - so a drag
+// still runs the loop flat out.
+#define AWAKE_LOOP_IDLE_MS 4
+
+// Slave latency for the AWAKE link. The peripheral may skip up to this many
+// connection events when it has nothing to send, so the radio stops waking
+// 33-66 times a second to hear a payload that arrives every FIVE SECONDS.
+//
+// THIS DOES NOT DELAY ANYTHING THE DEVICE SENDS. Latency only permits skipping
+// events the peripheral has no data for; a tap still transmits at the very next
+// event, so the reply path a person is waiting on is untouched. Only host->device
+// is delayed, by at most latency x interval - 4 x 30ms = 120ms against a 5s
+// payload cadence, which is under one tick's jitter.
+//
+// The supervision timeout must exceed (1 + latency) * interval * 2 or the link
+// is dropped by the spec's own rule: 5 * 30ms * 2 = 300ms against the 4s already
+// set, so there is room for this and a good deal more.
+#define BLE_AWAKE_LATENCY 4
+
 // The ST77922 takes RGB565 HIGH BYTE FIRST, while the shadow framebuffer holds
 // native little-endian uint16 - so the strip copy in PanelShim::flush() swaps
 // every pixel on the way out. Getting this wrong is not subtle once you know the

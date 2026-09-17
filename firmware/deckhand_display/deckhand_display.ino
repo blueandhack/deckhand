@@ -266,6 +266,24 @@ bool bleConnected = false;         // still a bool: == (bleLinkCount() > 0)
 // this a refused third Mac fails SILENTLY - no line in either log - and
 // presents indistinguishably from a flaky link rather than "already full".
 volatile bool bleRefusalPending = false;
+// Set by onConnect (BTC_TASK), drained by reapBleLinks() on loopTask - the same
+// hand-off, and for the same reason: ble_gap_update_params() is not something to
+// call from the Bluetooth stack's own callback. WITHOUT THIS THE AWAKE PARAMETERS
+// NEVER REACH A LINK AT ALL: bleSetSlowInterval() was only ever called from
+// savingsSync(), which runs on a sleep/wake TRANSITION, so a link that connected
+// while awake and never saw the device blank kept whatever macOS negotiated - 15
+// to 30ms with no latency - for its entire life. That is every link, on the
+// overwhelmingly common path.
+#if !BOARD_USES_TFT_ESPI
+volatile bool bleParamsPending = false;
+// Is a finger on the glass RIGHT NOW. Written by handleTouch() from its own
+// 15ms poll, read by loop()'s awake yield - a drag must keep the loop running
+// flat out, and this is the only thing outside handleTouch() that knows. It
+// deliberately holds its value BETWEEN polls: handleTouch() returns early on the
+// throttle without re-reading the panel, and treating those iterations as
+// "not touching" would yield in the middle of a drag.
+bool touchIsDown = false;
+#endif
 // Vestigial: nothing currently reads this. It predates the per-link
 // bleLinks[].lastRxMillis and was kept (not deleted) rather than assumed
 // dead - a later task may still want "freshest of any link" for the
@@ -4138,6 +4156,9 @@ void handleTouch() {
   int sx, sy;
   bool touching = getTouchPoint(sx, sy);
 #if !BOARD_USES_TFT_ESPI
+  touchIsDown = touching;
+#endif
+#if !BOARD_USES_TFT_ESPI
   // GATED ON A FINGER, and that gate is the entire feature. This call used to be
   // the first statement of handleTouch(), which loop() runs EVERY iteration - so
   // the 1500ms deadline was re-armed a few thousand times a second and cpuTick()
@@ -5530,6 +5551,11 @@ class BLEServerCallbacksImpl : public BLEServerCallbacks {
       return;
     }
     bleConnected = true;
+    // A bit, nothing more - see bleParamsPending. loopTask pushes the actual
+    // connection parameters once it gets there.
+#if !BOARD_USES_TFT_ESPI
+    bleParamsPending = true;
+#endif
     if (bleLinkCount() < MAX_LINKS) BLEDevice::startAdvertising();
   }
   // Marks the slot pending release - nothing else. The Bluetooth stack's task
@@ -5714,6 +5740,16 @@ void reapBleLinks(bool mayAdvertise) {
     bleRefusalPending = false;
     Serial.println("BLE: refused a third central - already at MAX_LINKS");
   }
+  // Pushed from here rather than from onConnect, and to EVERY live link rather
+  // than the new one: ble_gap_update_params() is idempotent at the GAP level, the
+  // loop is two slots, and picking the new link out would mean passing a conn id
+  // through the same flag that exists precisely to carry nothing but a bit.
+#if !BOARD_USES_TFT_ESPI
+  if (bleParamsPending) {
+    bleParamsPending = false;
+    bleSetSlowInterval(isAsleep && saveBleSlow);
+  }
+#endif
   bool freedAny = false;
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!bleLinks[i].releasePending) continue;
@@ -8565,5 +8601,11 @@ void loop() {
   // enterLightIdle() returns only after a wake, so the delay must not also run.
   if (isAsleep && saveLightIdle && !usbLinkActive()) enterLightIdle();
   else if (isAsleep && saveLoopIdle) delay(BLANKED_LOOP_IDLE_MS);
+  // AWAKE, AND NOT UNDER A FINGER. The three branches are one chain on purpose:
+  // the blanked arms must win, and enterLightIdle() in particular returns only
+  // after a wake, so a second yield after it would be a yield the person is
+  // waiting through. Skipping this while touchIsDown keeps a drag at full loop
+  // rate, which is the one interaction a 4ms hitch would be visible in.
+  else if (!isAsleep && !touchIsDown) delay(AWAKE_LOOP_IDLE_MS);
 #endif
 }

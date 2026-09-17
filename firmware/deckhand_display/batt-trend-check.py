@@ -1019,14 +1019,9 @@ check("the default is 0, meaning DYNAMIC - the shipped behaviour, not a fixed cl
 # cpuTick()'s fixed-frequency arm is `cpuMode != 0`, so the whole meaning of the
 # default rests on that one comparison; were it `>= 0` or absent, the default
 # would call setCpuFrequencyMhz(0). The assertion above cannot see that.
-# THE BOOST MUST BE GATED ON A FINGER, and this is bound to handleTouch()'s own
-# brace-matched body because a cpuBoost() anywhere else in the file would satisfy
-# a file-wide match while this function re-armed the latch every loop. That is
-# not hypothetical: it is precisely what shipped. loop() calls handleTouch() every
-# iteration, cpuBoost() was its FIRST statement, so the 1500ms deadline was re-armed
-# thousands of times a second and the clock never left 240 - dynamic mode reported
-# itself active while doing nothing at all, and the dyn-vs-240 comparison was
-# measuring one state against itself.
+# Brace-matched extraction of one function's body. Every assertion below that
+# says "in function X" uses it, because a file-wide match is satisfied by any
+# neighbouring line and proves nothing about the function that must do the work.
 def _body(src, sig):
     at = src.index(sig); open_ = src.index("{", at); d = 0
     for i in range(open_, len(src)):
@@ -1035,6 +1030,74 @@ def _body(src, sig):
             d -= 1
             if d == 0: return src[open_:i+1]
     return ""
+
+# ---- THE AWAKE LOOP YIELDS, AND THE AWAKE LINK CARRIES SLAVE LATENCY --------
+# Both constants are PARSED from the board header. A literal here would mean
+# reverting them in the firmware leaves this passing, which is the failure this
+# file has already paid for four times.
+AWAKE_IDLE_MS = board_const(B2H, "AWAKE_LOOP_IDLE_MS", "board_es3c35p.h")
+AWAKE_LATENCY = board_const(B2H, "BLE_AWAKE_LATENCY", "board_es3c35p.h")
+check("the awake yield is shorter than handleTouch()'s own 15ms poll, or it adds "
+      "detection latency instead of merely filling the gap between polls",
+      0 < AWAKE_IDLE_MS < 15)
+check("slave latency is actually enabled - 0 is the stock value and saves nothing",
+      AWAKE_LATENCY > 0)
+_tail = MAIN[MAIN.index("if (isAsleep && saveLightIdle"):]
+check("the awake yield exists and is gated on BOTH !isAsleep and !touchIsDown - "
+      "ungated by sleep it fights the blanked arms, ungated by touch it hitches a drag",
+      re.search(r"else if \(!isAsleep && !touchIsDown\) delay\(AWAKE_LOOP_IDLE_MS\);", _tail)
+      is not None)
+# ORDER, because the arms are one else-if chain and the blanked ones must win:
+# enterLightIdle() returns only after a wake, so an awake yield reached first
+# would be a yield the person is waiting through.
+check("...and it comes AFTER both blanked arms in the same chain",
+      _tail.index("saveLightIdle") < _tail.index("!touchIsDown")
+      and _tail.index("saveLoopIdle") < _tail.index("!touchIsDown"))
+# The gate is worthless if nothing maintains it. Bound to handleTouch()'s body:
+# a `touchIsDown =` anywhere else would satisfy a file-wide match while the one
+# place that reads the panel never published what it saw.
+_htb = _body(MAIN, "void handleTouch()")
+check("touchIsDown is published from handleTouch()'s own panel read - assigned from "
+      "`touching`, not a constant, or the gate never changes and the yield either "
+      "never runs or never stops",
+      re.search(r"touchIsDown = touching;", _htb) is not None)
+check("...and published AFTER the panel is read, not from a stale value",
+      "getTouchPoint" in _htb and _htb.index("getTouchPoint") < _htb.index("touchIsDown"))
+# The latency must REACH a link. bleSetSlowInterval() is only called from
+# savingsSync(), which runs on a sleep/wake TRANSITION - so without a push at
+# connect time a link that never saw the device blank keeps macOS's own 15-30ms
+# with no latency for its entire life, which is every link on the common path.
+check("connection parameters are pushed when a link CONNECTS, not only across a "
+      "sleep transition - otherwise the awake latency never reaches any link",
+      re.search(r"bleParamsPending = true;", MAIN) is not None
+      and re.search(r"if \(bleParamsPending\) \{\s*\n\s*bleParamsPending = false;\s*\n"
+                    r"\s*bleSetSlowInterval\(", MAIN) is not None)
+check("...and that push is raised on the BLUETOOTH TASK but applied on loopTask, "
+      "the same deferred hand-off bleRefusalPending uses",
+      MAIN.index("bleParamsPending = true;") < MAIN.index("if (bleParamsPending)"))
+# THE SPEC'S OWN RULE, computed rather than eyeballed: a supervision timeout
+# that does not exceed (1 + latency) * interval * 2 gets the link dropped. This
+# fails if someone raises the latency and forgets the timeout - the whole point
+# of deriving it instead of asserting the timeout is "400".
+_bsi = _body(POWER, "void bleSetSlowInterval(bool slow)")
+_itvl_max = int(re.search(r"maxItvl = slow \? \d+ : (\d+)", _bsi).group(1))
+_timeout  = int(re.search(r"supervision_timeout = (\d+)", _bsi).group(1))
+check(f"the supervision timeout ({_timeout * 10}ms) clears the spec floor of "
+      f"(1+{AWAKE_LATENCY}) x {_itvl_max * 1.25:.0f}ms x 2, or the link is dropped by rule",
+      _timeout * 10 > (1 + AWAKE_LATENCY) * (_itvl_max * 1.25) * 2)
+check("the awake arm carries the latency and the slow arm does not - asleep the "
+      "interval is already 180-210ms and stacking latency only adds inbound delay",
+      re.search(r"latency = slow \? 0 : BLE_AWAKE_LATENCY", _bsi) is not None
+      and re.search(r"p\.latency = latency;", _bsi) is not None)
+
+# THE BOOST MUST BE GATED ON A FINGER, and this is bound to handleTouch()'s own
+# brace-matched body because a cpuBoost() anywhere else in the file would satisfy
+# a file-wide match while this function re-armed the latch every loop. That is
+# not hypothetical: it is precisely what shipped. loop() calls handleTouch() every
+# iteration, cpuBoost() was its FIRST statement, so the 1500ms deadline was re-armed
+# thousands of times a second and the clock never left 240 - dynamic mode reported
+# itself active while doing nothing at all, and the dyn-vs-240 comparison was
+# measuring one state against itself.
 _ht = _body(MAIN, "void handleTouch()")
 check("handleTouch()'s body is delimited", len(_ht) > 400)
 check("the CPU boost is GATED ON A TOUCH, not run once per loop - ungated it re-arms "

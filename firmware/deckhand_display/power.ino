@@ -76,12 +76,19 @@ void formatSleepValue(char* buf, size_t n) {
 void bleSetSlowInterval(bool slow) {
   uint16_t minItvl = slow ? 144 : 12;   // 180ms vs 15ms
   uint16_t maxItvl = slow ? 168 : 24;   // 210ms vs 30ms
+  // THE AWAKE ARM CARRIES SLAVE LATENCY, the slow arm does not. Awake, the
+  // interval stays short so anything the DEVICE sends still goes out at the next
+  // event - latency permits skipping events, never delays a transmit - while the
+  // radio stops listening 33-66 times a second for a payload that arrives every
+  // five seconds. Asleep the interval is already 180-210ms and doing the same job,
+  // so stacking latency on top would only add inbound delay for nothing.
+  uint16_t latency = slow ? 0 : BLE_AWAKE_LATENCY;
   for (int i = 0; i < MAX_LINKS; i++) {
     if (!bleLinks[i].used || bleLinks[i].releasePending) continue;
     struct ble_gap_upd_params p = {};
     p.itvl_min = minItvl;
     p.itvl_max = maxItvl;
-    p.latency = 0;
+    p.latency = latency;
     p.supervision_timeout = 400;        // 4s, comfortably over the slow interval
     ble_gap_update_params(bleLinks[i].connId, &p);
   }
