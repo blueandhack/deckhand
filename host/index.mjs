@@ -25,6 +25,7 @@ import {
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
 } from "./voice-answer.mjs";
 import { resolveSessionId } from "./session-lookup.mjs";
+import { pickTranscript } from "./project-index.mjs";
 import { postToSessionInbox } from "./session-inbox.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
@@ -285,6 +286,9 @@ const OAUTH_CACHE_FILE = path.join(RUNTIME_DIR, "oauth-usage.json");
 // SessionEnd. This is what powers the SESSIONS tab.
 const SESSIONS_DIR = path.join(os.homedir(), ".claude", "deckhand-sessions");
 const SESSION_STALE_MS = 20 * 60 * 1000; // 20 min with no update = treat as dead
+// Every transcript ever written, live or long ended - the fallback transcriptPathFor
+// scans when a session isn't in the live map.
+const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
 // Must match Serial.begin() in the firmware exactly - a mismatch yields pure
 // garbage, not a degraded link. Stays at 115200: every higher rate silently drops
@@ -1690,6 +1694,25 @@ function histToolSummary(name, input, max = HIST_PREVIEW_CAP) {
 // session id -> transcript path, learned while building each payload (the hook puts the path
 // in the session record; the device only ever sends us the id).
 const transcriptById = new Map();
+
+// ANY session id, live or dead. transcriptById only ever held the live ranked
+// list, so an ended session - which is 131 of 132 of them, because the hook
+// deletes the record on SessionEnd - was unreachable. The live map stays as the
+// fast path; the project scan is the fallback, and it is only ever walked for a
+// row the user actually tapped.
+async function transcriptPathFor(id12) {
+  const live = transcriptById.get(id12);
+  if (live) return live;
+  let dirs = [];
+  try { dirs = await fs.readdir(PROJECTS_DIR); } catch { return null; }
+  for (const d of dirs) {
+    let files = [];
+    try { files = await fs.readdir(path.join(PROJECTS_DIR, d)); } catch { continue; }
+    const hit = pickTranscript(files, id12);
+    if (hit.ok) return path.join(PROJECTS_DIR, d, hit.file);
+  }
+  return null;
+}
 // id -> { mtimeMs, items } so a transcript is parsed once per version, not once per page
 // turn. Paging through 300 screens must not re-read a megabyte each time.
 // BOUNDED, because a parsed transcript is big: a real one is 2500 entries / ~600KB of
@@ -1700,7 +1723,7 @@ const HIST_CACHE_MAX = 2;
 const histCache = new Map();
 
 async function histItems(id) {
-  const transcript = transcriptById.get(id);
+  const transcript = await transcriptPathFor(id);
   if (!transcript) return [];
   let st;
   try {

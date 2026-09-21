@@ -15,8 +15,19 @@
 // string literal - a MIRROR that never called cwdFromLines, projectLabel or
 // pickTranscript at all, and would have passed with project-index.mjs deleted.
 import * as realModule from "./project-index.mjs";
+import fs from "node:fs";
 
 const SELFTEST = process.argv.includes("--selftest");
+
+// The STRUCTURAL half, added for Task 2: transcriptPathFor is what makes a
+// DEAD session's transcript reachable, and the defect it guards against is a
+// function that exists but only ever falls back to the live map - which reads
+// as "handled" and leaves every ended session unreadable. So this reads
+// index.mjs's own TEXT rather than calling anything, and is bound to
+// transcriptPathFor's FUNCTION BODY specifically (never the whole file), per
+// "a rule a neighbouring line can satisfy is not a rule" - a stray
+// `pickTranscript(` anywhere else in the file must not make this pass.
+const HOST_SRC = fs.readFileSync(new URL("./index.mjs", import.meta.url), "utf8");
 
 // ---------------------------------------------------------------------------
 function suite(mod, check) {
@@ -89,10 +100,47 @@ function run(mod, quiet) {
   return { pass, failures };
 }
 
+// The structural suite, over index.mjs's own source text rather than a module's
+// exports - a different KIND of assertion from `suite` above, so it gets its own
+// runner (`runHost`) and its own fault set below, following the house pattern in
+// firmware/deckhand_display/commands-check.mjs (`over.main` supplies substitute
+// source text; `run(over, quiet)` runs the same suite against it).
+function suiteHost(check, hostSrc) {
+  const body = (name) => {
+    const at = hostSrc.indexOf(`function ${name}(`);
+    if (at < 0) return "";
+    return hostSrc.slice(at, hostSrc.indexOf("\n}", at));
+  };
+  check("transcriptPathFor exists", body("transcriptPathFor").length > 0, true);
+  // Bound to the FUNCTION BODY: a fallback that only consults the live map would
+  // leave every dead session unreadable, which is the whole defect.
+  check("transcriptPathFor consults the project index, not only the live map",
+    /pickTranscript\(/.test(body("transcriptPathFor")), true);
+}
+
+function runHost(hostSrc, quiet) {
+  const failures = [];
+  let pass = 0;
+  const check = (name, got, want) => {
+    const ok = JSON.stringify(got) === JSON.stringify(want);
+    if (ok) { pass++; if (!quiet) console.log(`  PASS  ${name}`); }
+    else {
+      failures.push(name);
+      if (!quiet) console.log(`  FAIL  ${name}` +
+        `\n        got  ${JSON.stringify(got)}\n        want ${JSON.stringify(want)}`);
+    }
+  };
+  try { suiteHost(check, hostSrc); }
+  catch (e) { failures.push(`THREW: ${e.message}`); if (!quiet) console.log(`  FAIL  THREW: ${e.message}`); }
+  return { pass, failures };
+}
+
 if (!SELFTEST) {
   const r = run(realModule, false);
-  console.log(`\n${r.failures.length} failure(s)`);
-  process.exit(r.failures.length ? 1 : 0);
+  const rh = runHost(HOST_SRC, false);
+  const total = r.failures.length + rh.failures.length;
+  console.log(`\n${total} failure(s)`);
+  process.exit(total ? 1 : 0);
 }
 
 // --- teeth. Each fault is a broken STAND-IN for one exported function, built by
@@ -142,5 +190,44 @@ for (const [name, mod] of faults) {
     console.log(`  MISSED  ${name}  <- no assertion notices this`);
   }
 }
-console.log(`\nselftest: ${caught}/${faults.length} faults caught`);
-process.exit(caught === faults.length ? 0 : 1);
+
+// Host structural faults: substitute SOURCE TEXT lacking the pattern each
+// assertion certifies, so --selftest proves those assertions can fail too, not
+// just the behavioural ones above.
+const hostFaults = [
+  ["transcriptPathFor is deleted outright",
+    HOST_SRC.replace(
+      /async function transcriptPathFor\(id12\) \{[\s\S]*?\n\}\n/,
+      ""
+    )],
+  // transcriptPathFor still exists but was rewritten to only ever answer from
+  // the live map - the exact regression this task exists to prevent: every
+  // dead session goes back to being unreachable, while the function still
+  // "handles" the id and nothing crashes.
+  ["transcriptPathFor exists but never consults the project index (live-map only)",
+    (() => {
+      const at = HOST_SRC.indexOf("function transcriptPathFor(");
+      const end = HOST_SRC.indexOf("\n}", at);
+      const body = HOST_SRC.slice(at, end);
+      const stripped = body.replace(/pickTranscript\(/g, "liveMapOnlyLookup(");
+      return HOST_SRC.slice(0, at) + stripped + HOST_SRC.slice(end);
+    })()],
+];
+
+let hostCaught = 0;
+for (const [name, hostSrc] of hostFaults) {
+  const r = runHost(hostSrc, true);
+  if (r.failures.length) {
+    hostCaught++;
+    console.log(`  caught  ${name}`);
+    console.log(`            by: ${r.failures[0]}` +
+      (r.failures.length > 1 ? ` (+${r.failures.length - 1} more)` : ""));
+  } else {
+    console.log(`  MISSED  ${name}  <- no assertion notices this`);
+  }
+}
+
+const totalFaults = faults.length + hostFaults.length;
+const totalCaught = caught + hostCaught;
+console.log(`\nselftest: ${totalCaught}/${totalFaults} faults caught`);
+process.exit(totalCaught === totalFaults ? 0 : 1);
