@@ -439,6 +439,21 @@ function suite(ok, over = {}) {
        /`PAGE 0\.\.SET_GROUP_COUNT`/.test(claudeMd) && !/`PAGE 0\.\.\d/.test(claudeMd));
   }
 
+  // ---- (3e) TAB: CLAUDE.md's copy of the range, bound to enum Tab -----------
+  // CLAUDE.md's `TAB 0..2` was UNBOUND PROSE until this existed - the PAGE row got
+  // its binding above after going stale, and this is the same shape one verb over.
+  // Parsed from the firmware, never transcribed here: a fourth tab added to
+  // `enum Tab` without updating the doc row now fails BY NAME instead of leaving a
+  // range a caller can quietly send past.
+  {
+    const m = /enum Tab \{([^}]*)\}/.exec(main);
+    ok("enum Tab is located in deckhand_display.ino", !!m);
+    const n = m ? m[1].split(",").filter((s) => s.trim().length).length : 0;
+    const doc = /`TAB 0\.\.(\d+)`/.exec(claudeMd);
+    ok(`CLAUDE.md's TAB range matches enum Tab (${n} tabs, so TAB 0..${n - 1})`,
+       !!doc && Number(doc[1]) === n - 1);
+  }
+
   // ---- (4) the causes ----------------------------------------------------
   const causeOf = {};
   for (const b of [1, 2]) for (const v of [...state[b].refused].sort()) {
@@ -897,6 +912,9 @@ const faults = [
     { claudemd: realClaudeMd.replace(/`PAGE 0\.\.SET_GROUP_COUNT`/, "`PAGE 0..6`") }],
   ["PAGE goes back to trusting String::toInt(), so \"PAGE foo\" silently means PAGE 0",
     { main: realMain.replace(/\n\s*if \(pgArg\[i\][^\n]*\n/, "\n") }],
+  // ---- Task 4: TAB's range in CLAUDE.md goes stale against enum Tab ----
+  ["CLAUDE.md's TAB row goes stale against enum Tab (a fifth tab added with no doc update)",
+    { claudemd: realClaudeMd.replace(/`TAB 0\.\.\d+`/, "`TAB 0..9`") }],
   // ---- m6: the CLASS the BLEMTU fix closed only one instance of ----
   ["the Mac's BLEMTU arm goes back to returning before it logs (28795e3, reverted)",
     { host: unlogArm(realHost, "BLEMTU ") }],

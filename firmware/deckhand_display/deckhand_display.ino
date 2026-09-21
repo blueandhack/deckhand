@@ -315,7 +315,7 @@ StreamBufferHandle_t bleRxStream = nullptr;
 // prototypes and inserts them before these types would otherwise be defined,
 // which breaks compilation for any function taking/returning them. (Keep
 // these enums above the first function definition in the file.)
-enum Tab { TAB_USAGE = 0, TAB_SESSIONS = 1, TAB_SETTINGS = 2 };
+enum Tab { TAB_USAGE = 0, TAB_SESSIONS = 1, TAB_PROJECTS = 2, TAB_SETTINGS = 3 };
 Tab currentTab = TAB_USAGE;
 enum BattState { BATT_NONE = 0, BATT_DISCHARGING = 1, BATT_CHARGING = 2, BATT_FULL = 3 };
 
@@ -2631,7 +2631,7 @@ void drawSparkle(int cx, int cy, int r, uint16_t color) {
   tft.fillTriangle(cx + r, cy, cx, cy - a, cx, cy + a, color);
 }
 
-const int TAB_COUNT = 3;
+const int TAB_COUNT = 4;
 
 // The easter-egg flag lives further down with the crab code; forward-declared so
 // fabVisible() can hide the button while the crab has the screen.
@@ -2708,7 +2708,7 @@ void tickAutoTheme() {
 
 void drawTabBar() {
   tft.fillRect(0, 0, tft.width(), TAB_BAR_H, COLOR_CARD);
-  const char* labels[TAB_COUNT] = {"USAGE", "SESSIONS", "SETTINGS"};
+  const char* labels[TAB_COUNT] = {"USAGE", "SESSIONS", "PROJECTS", "SETTINGS"};
   int tabW = tabsW() / TAB_COUNT;   // the record slot owns the rest
   for (int i = 0; i < TAB_COUNT; i++) {
     bool active = (i == (int) currentTab);
@@ -3959,6 +3959,8 @@ void stopOctopus() {
     renderUsageTab();
   } else if (currentTab == TAB_SESSIONS) {
     drawSessionsAll();
+  } else if (currentTab == TAB_PROJECTS) {
+    renderProjectsTab();
   } else {
     drawSettingsTab();
   }
@@ -3966,6 +3968,17 @@ void stopOctopus() {
 }
 
 // ---------- Tab switching ----------
+// PROJECTS is scaffolding: TAB_PROJECTS exists and the tab bar reaches it, but the
+// tab itself is filled in a later task. Both stubs are empty ON PURPOSE - the point
+// of landing them now is that every dispatch site below already has its own branch
+// for TAB_PROJECTS, so the render/touch content can be filled in without touching
+// switchTab(), forceFullRepaint(), stopOctopus(), handleTouch() or the once-a-second
+// tick again. An empty body here must never be reached through the SETTINGS-shaped
+// `else` a 3-tab dispatch used to end on - that would silently draw or route
+// SETTINGS for a tab that is not SETTINGS, which is exactly the kind of wrong
+// answer CLAUDE.md's redraw-discipline rule exists to prevent.
+void renderProjectsTab() {}
+void handleProjectsTouch(int sx, int sy) {}
 // Repaint the current tab from scratch. Needed after the floating button MOVES:
 // the change-only redraw discipline has no record of what the button was covering,
 // so the only correct way to reveal it is a full repaint of the tab. Moving is
@@ -3986,6 +3999,8 @@ void forceFullRepaint() {
     renderUsageTab();
   } else if (currentTab == TAB_SESSIONS) {
     drawSessionsAll();
+  } else if (currentTab == TAB_PROJECTS) {
+    renderProjectsTab();
   } else {
     drawSettingsStatic(); // resets its own caches
     renderSettingsTab();
@@ -4102,6 +4117,8 @@ void switchTab(Tab newTab) {
 #endif
   } else if (currentTab == TAB_SESSIONS) {
     drawSessionsAll();
+  } else if (currentTab == TAB_PROJECTS) {
+    renderProjectsTab();
   } else {
     drawSettingsTab();
   }
@@ -4437,6 +4454,8 @@ void handleTouch() {
     int row = sessionRowAtY(sy);
     if (row >= 0) openSessionDetail(sessionAt(row));
   }
+
+  if (currentTab == TAB_PROJECTS) handleProjectsTouch(sx, sy);
 
   if (currentTab == TAB_SETTINGS) handleSettingsTouch(sx, sy);
 }
@@ -5435,6 +5454,7 @@ void handleLine(const String& line) {
     drawFooterChrome();
     if (currentTab == TAB_USAGE) drawUsageStatic();
     else if (currentTab == TAB_SESSIONS) drawSessionsAll();
+    else if (currentTab == TAB_PROJECTS) renderProjectsTab();
     else drawSettingsStatic();
   }
   if (voiceCardActive) { // the card owns the content area until dismissed
@@ -5450,6 +5470,7 @@ void handleLine(const String& line) {
   }
   if (currentTab == TAB_USAGE) renderUsageTab();
   else if (currentTab == TAB_SESSIONS) renderSessionsTab();
+  else if (currentTab == TAB_PROJECTS) renderProjectsTab();
   else renderSettingsTab();
   renderFooter();
   // No drawFab() here any more. It used to be repainted last on every tick,
@@ -8795,6 +8816,7 @@ void loop() {
       // Cheap when nothing changed (per-row/per-field caches); keeps the
       // "in this state for Xm" durations ticking between host polls.
       if (everReceived && currentTab == TAB_SESSIONS) renderSessionsTab();
+      if (everReceived && currentTab == TAB_PROJECTS) renderProjectsTab();
 #if !BOARD_USES_TFT_ESPI
       lastTickFlushUs = micros() - tickT0;
 #endif
