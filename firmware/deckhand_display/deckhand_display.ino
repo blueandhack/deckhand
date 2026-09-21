@@ -55,6 +55,14 @@
 #endif
 #include <ArduinoJson.h>
 #include <SPI.h>
+#if BOARD_HAS_SD
+// SDPROBE's only dependency, and BEHIND THE CAPABILITY FLAG rather than behind
+// !BOARD_USES_TFT_ESPI, which agrees today and is not the reason: what this
+// include needs is a slot on the SDMMC bus, which is exactly what BOARD_HAS_SD
+// claims. Board 1 is BOARD_HAS_SD 0, so it links no FATFS and no SDMMC driver
+// and its binary must not move by a byte when this lands.
+#include <SD_MMC.h>
+#endif
 #if BOARD_TOUCH_NEEDS_CAL
 // Board 1's resistive panel only. Board 2's controller lives inside the
 // ST77922 display IC and speaks I2C - see st77922_touch.h, included from
@@ -6364,6 +6372,17 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "from the Device group on this board under the same flag, so the button and the verb are gone "
     "together." },
 #endif
+#if !BOARD_HAS_SD
+  { "SDPROBE",
+    "it mounts the microSD over the SDMMC bus and reports the card's width, type and size. "
+    "This board is BOARD_HAS_SD 0, and that is NOT a claim that it has no card slot - it has "
+    "one, and docs/reference/audio-and-voice.md reserves IO18/IO19 for a possible INMP441 mic "
+    "on the strength of the slot being unused. The flag says the slot is wired for SPI (IO18 "
+    "SCK, IO19 MISO, IO23 MOSI, plus a CS), not for SDMMC: board_e32r28t.h declares no PIN_SD_* "
+    "for setPins() to take, SD_MMC.h is not included here, and no FATFS or SDMMC driver is "
+    "linked into this binary at all. Probing this slot needs an SPI-mode probe against the SD "
+    "library, which is a different command and does not exist yet." },
+#endif
   // TERMINATOR, and it is what makes an all-#if'd array legal: on board 2 every
   // block above is skipped and `UnavailableCommand[] = {}` would not compile.
   // The walk below stops on the null verb rather than on a sizeof() count, so
@@ -6559,6 +6578,86 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
         setMsgPriority((uint8_t) want);
       }
     }
+#if BOARD_HAS_SD
+  } else if (buf == "SDPROBE") {
+    // MOUNTS, REPORTS, AND UNMOUNTS. Nothing else in this firmware touches
+    // GPIO 2..7: board_es3c35p.h declares the six PIN_SD_* and no other site in
+    // the tree reads them, so the probe has to hand those lines back in the
+    // state it found them or it becomes a standing candidate cause for every
+    // later symptom on this board. Same property BLEMTU claims for itself - a
+    // probe that configures nothing cannot be blamed for a surprising number.
+    //
+    // SITS UNDER BOARD_HAS_SD, not under the !BOARD_USES_TFT_ESPI arm it could
+    // have joined. The two agree today and would stop agreeing the moment a
+    // third board existed, and UNAVAILABLE_COMMANDS[] needs the EXACT NEGATION
+    // of this guard to be a one-flag expression - see that table's own note.
+    //
+    // Via sendLineToHost, NOT Serial.printf, for the reason TEMP gives: Serial
+    // reaches the Mac only over USB, and the state most worth probing is a
+    // board on battery with the cable out - exactly when a printf goes nowhere.
+    //
+    // NOT DEDUPED against the host's double delivery, deliberately. chip/page
+    // dedupe because an insert is not idempotent; mount-report-unmount is, the
+    // two copies run in sequence inside loop(), and end() clears _card so the
+    // second mounts as cleanly as the first. Two identical reports are the
+    // honest answer rather than a second copy silently dropped - commands-check
+    // records one TEMP producing four lines for the same reason.
+    char line[160];
+    // FROM THE HEADER'S CONSTANTS. A literal six-tuple here is the exact defect
+    // the board-2 port paid for three times, and this is its worst shape yet: it
+    // would still compile and still mount on any board wired the same way, so
+    // the first board that was not would report "no card" and send somebody
+    // looking at the slot.
+    if (!SD_MMC.setPins(PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0, PIN_SD_D1, PIN_SD_D2, PIN_SD_D3)) {
+      snprintf(line, sizeof(line),
+               "SDPROBE failed: setPins(clk=%d cmd=%d d0=%d d1=%d d2=%d d3=%d) was rejected - "
+               "one of those is not routable to the SDMMC host",
+               PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0, PIN_SD_D1, PIN_SD_D2, PIN_SD_D3);
+      sendLineToHost(line);
+    } else {
+      // FOUR-BIT FIRST, THEN ONE-BIT, AND THE WIDTH THAT WON IS REPORTED. The
+      // two failures are different hardware stories - "4-bit failed, 1-bit
+      // worked" says D1/D2/D3 are not landing, "both failed" says no card or no
+      // CLK/CMD - and a single ok/failed boolean throws away the only
+      // distinction the next person would have to go and rediscover.
+      int width = 4;
+      bool up = SD_MMC.begin("/sd", false);
+      if (!up) {
+        SD_MMC.end();
+        width = 1;
+        up = SD_MMC.begin("/sd", true);
+      }
+      if (!up) {
+        snprintf(line, sizeof(line),
+                 "SDPROBE failed: begin() rejected the bus at 4-bit AND 1-bit - no card seated, "
+                 "or clk=%d/cmd=%d are not this slot's", PIN_SD_CLK, PIN_SD_CMD);
+      } else {
+        const sdcard_type_t t = SD_MMC.cardType();
+        if (t == CARD_NONE) {
+          // ITS OWN OUTCOME, neither ok nor failed. The host controller came up
+          // and the slot answered nothing, which is what an EMPTY slot looks
+          // like - and a reader told "failed" here goes and checks the pins.
+          snprintf(line, sizeof(line),
+                   "SDPROBE none: mounted at width=%d but cardType()==CARD_NONE - the slot is empty",
+                   width);
+        } else {
+          const char* name = t == CARD_MMC  ? "MMC"
+                           : t == CARD_SD   ? "SDSC"
+                           : t == CARD_SDHC ? "SDHC"
+                                            : "UNKNOWN";
+          snprintf(line, sizeof(line), "SDPROBE ok width=%d type=%s size=%lluMB",
+                   width, name, (unsigned long long) (SD_MMC.cardSize() >> 20));
+        }
+      }
+      // ON EVERY PATH. Note this is a NO-OP after a failed begin() - end() is
+      // guarded on _card, which a failure leaves NULL - so the failure arms
+      // release nothing of ours and IDF's mount helper owns that cleanup. It is
+      // the success path that matters here: without this the next SDPROBE would
+      // take begin()'s `if (_card) return true` and report a stale mount.
+      SD_MMC.end();
+      sendLineToHost(line);
+    }
+#endif
 #if !BOARD_USES_TFT_ESPI
   } else if (buf == "SHIMBENCH") {
     // Board 2 only. Times a full-screen flush and a small dirty-rect flush,

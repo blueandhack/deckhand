@@ -722,3 +722,55 @@ silent hang**: `SHOT begin` logged, then nothing — no rows, no `SHOT end`, and
 destroyed. All three are now sized from `BOARD_W`, which is 240 on board 1 so nothing moved there.
 **Any buffer sized to a panel dimension must be sized from `BOARD_W`/`BOARD_H`**, and a smashed
 reporting path is why this one presented as a hang rather than as corruption.
+
+## The microSD slot, measured 2026-09-20
+
+**The slot works at full 4-bit SDMMC, and `SDPROBE` is what says so.** The port spec listed microSD
+as considered-and-left-alone, and `board_es3c35p.h` carried `BOARD_HAS_SD 1` beside the comment
+"no SD code exists" for the whole of that time — so the flag was a claim nothing had ever tested.
+With a card seated, on the first attempt:
+
+```
+SDPROBE ok width=4 type=SDHC size=14911MB
+```
+
+**Four-bit succeeded without falling back**, which is the part worth recording: `PIN_SD_D1`/`D2`/`D3`
+(GPIO 7/2/3) all land, so a future feature is not restricted to 1-bit. The probe tries 4-bit then
+1-bit and **reports which width won**, because "4-bit failed, 1-bit worked" is a wiring story and
+"both failed" is a card-or-slot story, and a single ok/failed boolean discards the only distinction
+worth having. `CARD_NONE` after a successful mount is a **third** outcome — the host controller came
+up and the slot answered nothing, which is an empty slot, and a reader told "failed" there goes and
+checks the pins instead.
+
+**It mounts, reports and unmounts.** Nothing else in this firmware reads GPIO 2..7, so the probe has
+to return those lines as it found them or become a standing candidate cause for every later symptom
+on this board. `SD_MMC.end()` runs on every path — though note it is a **no-op after a failed
+`begin()`**, which leaves `_card` NULL; it is the success path that needs it, since `begin()` opens
+with `if (_card) return true` and would otherwise report a stale mount to the next caller.
+
+**`SDPROBE` is not deduped against the host's double delivery, deliberately**, and the log shows
+what that looks like: one trigger-file line produced **four** replies (two copies × two transports).
+`chip`/`page` dedupe because an insert is not idempotent; mount-report-unmount is.
+
+**The GPIO3 strapping question is settled empirically, not by datasheet reasoning.** `PIN_SD_D3` is
+GPIO3, an ESP32-S3 strapping pin (JTAG source select) with no internal pull at reset, and an SD
+card's internal DAT3 pull-up holds it high while seated — so the concern was that a card changes the
+strap at boot. **The board was flashed and hard-reset with the card in and came up normally**, HELLO
+burst and all. Observed once, on one card; not swept across card brands.
+
+**What board 1 pays for this, and it is not zero.** Board 1 refuses `SDPROBE` from
+`UNAVAILABLE_COMMANDS[]`, and carrying the text of that refusal cost its binary **+704 bytes — all
+of it `.flash.rodata`**. `.flash.text` came out byte-identical (1006372 both ways) and `.dram0.bss`
+unchanged, and a diff across all 12,509 symbols found exactly one that moved: `UNAVAILABLE_COMMANDS`,
+0x108 → 0x110, one more two-pointer entry. **Every refusal entry costs board 1 its own cause string**
+— that is inherent to refusing BY NAME, and it means "board 1 UNCHANGED" is the wrong expectation for
+any change that adds one.
+
+**Board 2 pays 76,304 bytes of flash and 480 bytes of RAM** for the FATFS + SDMMC stack
+(1069712 → 1146016, 36% of the huge_app partition; RAM 54964 → 55444). That is the standing cost of
+having the answer re-checkable instead of having to rebuild a throwaway probe to ask again.
+
+**Board 1's refusal is structurally asserted and NOT verified on hardware.** `commands-check.mjs`
+evaluates the two guards against both headers and proves the refusal's guard is the exact negation
+of the handler's, but no board 1 was attached when this landed, so the refusal line has never been
+seen on a cable.

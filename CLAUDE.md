@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1422736, RAM 72044 | flash 1069712, RAM 54964 |
+| size today | flash 1423440, RAM 72044 | flash 1146016, RAM 55444 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -64,7 +64,10 @@ are `arduino-cli`'s own "Global variables use N bytes", are NOT bound by anythin
 hand-maintained: check them after any compile that moves `.bss`. **Board 2's fell 16,896
 bytes on 2026-09-14** and that is not a typo: `sessions[]` moved to PSRAM when the
 sessions list learned to scroll, so ~23.5KB of `SessionInfo` left `.bss` and ~6.6KB of
-per-row caches grew to `SESSION_SLOTS`. `arduino-cli`'s "Sketch uses N" is a
+per-row caches grew to `SESSION_SLOTS`. It then **rose 480 bytes on 2026-09-20**, when
+`SDPROBE` linked the FATFS + SDMMC stack for the first time (that also cost 76,304 bytes of
+flash - board 1 took +704 for the same change, all of it the refusal's own cause string in
+`.flash.rodata`, with `.flash.text` byte-identical). `arduino-cli`'s "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
 
@@ -126,7 +129,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `b4ec506ab8718b7b...`, size 1422736 (board 2: `d4c17d115a70a6f1...`, size 1069712).
+Today: `407ae4402515a040...`, size 1423440 (board 2: `e1fa1bca3219a8a9...`, size 1146016).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -274,6 +277,7 @@ one is neither handled nor refused.
 | `AUDIOPROBE` / `TONETEST [vol]` / `TONELADDER` | a ladder of claims: on the bus / configured and playing / find the audible floor |
 | `SCROLLFETCH` / `SCROLLOPEN` / `SCROLLTO [line]` / `SCROLLPERF [top\|code\|line]` / `SCROLLCLOSE` | board 2 transcript: fetch without drawing, open, park, measure, close |
 | `BLEMTU` | board 2: the negotiated ATT MTU per link |
+| `SDPROBE` | board 2: mount the microSD over SDMMC, report, unmount. Tries 4-bit then 1-bit and REPORTS WHICH WIDTH WON - "4-bit failed, 1-bit worked" is a wiring story and "both failed" is a card-or-slot story. `CARD_NONE` after a successful mount is a THIRD outcome (the slot is empty), not a failure. Measured 2026-09-20: `ok width=4 type=SDHC size=14911MB`. Leaves GPIO 2..7 as it found them, which nothing else in this firmware touches. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` - and that refusal is NOT "board 1 has no slot", it has one, wired for SPI rather than SDMMC |
 | `SESSIONSCROLL <n>` | board 2: park the SCROLLING session list at step `n` so a capture can see a position other than the top. The unit is STEPS, not pixels - the offset is only ever a multiple of `SESSION_SCROLL_STEP` - and it reports the rows now on screen. Refuses BY NAME on a non-numeric or out-of-range argument (quoting the range), on SESSIONS not being the live tab, on a full-screen surface, and on a list of six or fewer that is not scrolling at all. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |
 | `MSGPRI` / `MSGPRI now\|next\|later` | report or set how a message sent FROM this device lands in the Mac's session queue. NVS-backed, on the SETTINGS tab; the device announces it at boot and on `WHOAMI`, and the host asks for it when a HELLO names a link it has no priority for |
 | `WHOAMI` | re-emits the boot `HELLO <name> v2` line on demand, over USB. Both boards. The host sends it to an anonymous link before considering a reset - `HELLO` is a boot-only burst, so a host that attached to an already-running board otherwise had to REBOOT it to learn its name |
