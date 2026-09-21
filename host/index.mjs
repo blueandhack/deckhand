@@ -3889,6 +3889,57 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     );
     return;
   }
+  // `PROJSESS <key>` - level 2 of the device's PROJECTS tab: one project's
+  // own sessions, requested when that level opens
+  // (firmware/deckhand_display/projects.ino's requestProjSessions(), called
+  // from a level-1 row tap or the PROJOPEN trigger-file command). Answered
+  // with ONE `projsess` line built by host/project-replies.mjs's own
+  // buildProjSessReply - never re-derived here, PROJECTS' own rule just
+  // above.
+  //
+  // NOT IN THE ORIGINAL TASK BRIEF'S FILE LIST - task-5-report.md's own
+  // "Deviation 3" precedent for this exact situation: buildProjSessReply()
+  // is exported and imported into this file (the `makeProjectReplies(...)`
+  // call above) but nothing ever CALLED it, so a device PROJOPEN would go
+  // out over the wire and get no answer, stranding level 2 on "Loading
+  // sessions..." forever - a real, observable, on-glass defect, not a
+  // theoretical gap. Added rather than left for a later task, the same
+  // judgment call Task 5 made for PROJECTS itself.
+  //
+  // `key` IS THE OPAQUE PROJECT DIRECTORY NAME, taken verbatim from
+  // everything after the first space - never split, decoded or otherwise
+  // interpreted (project-replies.mjs's own header: a hyphen in a project's
+  // real name is indistinguishable from the path separator that produced
+  // this same key, so it can only ever be handled as one opaque unit).
+  if (line.startsWith("PROJSESS ")) {
+    const key = line.slice("PROJSESS ".length).trim();
+    const replyLink = replyLinkFor(via);
+    // DEDUPED LIKE PROJECTS/HISTORY/FOCUS - the device sends on every live
+    // transport, so a cabled board asks twice within milliseconds. Keyed on
+    // the KEY too (not just the verb), since two DIFFERENT projects opened
+    // in quick succession are two different requests, never the same one.
+    const now = Date.now();
+    for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
+    const reqKey = `${scrollSenderKey(via)}|projsess|${key}`;
+    if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
+    scrollReqSeen.set(reqKey, now);
+    console.log(`[device/${linkLabel(via)}] ${line}`);
+    // transcriptById's OWN KEY SET is exactly "every session id currently
+    // in the live ranked list" - it is populated ONLY from that list (the
+    // tick builder and the lean-row loop, both above) and never from
+    // anywhere else, so it is already the `liveIds` buildProjSessReply()
+    // wants, with no separate computation needed.
+    const liveIds = [...transcriptById.keys()];
+    const reply = await buildProjSessReply(key, liveIds);
+    const fitted = fitPayload(reply);
+    if (fitted.dropped.length) console.log(`PROJSESS: shed ${fitted.dropped.join("; ")}`);
+    await sendToLink(replyLink, fitted.line);
+    console.log(
+      `PROJSESS: sent ${fitted.bytes} bytes (${reply.projsess.items.length}/${reply.projsess.total} ` +
+      `session(s) for "${key}") via ${linkLabel(replyLink?.id ?? "none")}`
+    );
+    return;
+  }
   // Audio first, and deliberately unlogged - see the note above.
   //
   // EVERY BUFFER HERE HANGS OFF THE LINK, not off a module global. One

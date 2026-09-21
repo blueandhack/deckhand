@@ -86,6 +86,82 @@ char projRowSigCache[PROJ_SLOTS][48];
 char projMsgCache[32] = "";
 char projMsg2Cache[16] = "";
 
+// ---------- Level 2: one project's sessions ----------
+// projLevel/projOpenKey/PSessInfo/psess[]/psessCount/psessTotal are DEFINED
+// here for real and merely `extern`-declared in deckhand_display.ino, the
+// same split ProjInfo/projects[]/projectCount use and for the identical
+// reason (handleLine()'s `projsess` absorption needs the type and the
+// storage before this file's own text is concatenated in).
+int projLevel = 0;
+char projOpenKey[64] = "";
+
+PSessInfo psess[PSESS_SLOTS];
+int psessCount = 0;
+int psessTotal = 0;
+// Has a `projsess` reply EVER arrived for the CURRENTLY OPEN key? Reset to
+// false the moment a NEW key is opened (projOpenLevel1()) - projectsEverReceived's
+// own shape, scoped to "for THIS project" rather than "ever, for any
+// project", because level 1 stays open across many different level-2 visits
+// and each one starts with nothing to show for the NEW key even though the
+// OLD key's data (still sitting in psess[] until the reply overwrites it)
+// would otherwise make this look answered already.
+bool psessEverReceived = false;
+
+// Level 2's own fetch-timeout state, INDEPENDENT of level 1's
+// projectsPending/projectsFetchFailed/projectsFetchStart - not a
+// duplication of the MECHANISM (see checkFetchTimeout() and
+// tickProjectsFetch() below, both shared with level 1 verbatim), but a
+// second copy of the STATE is unavoidable: switchTab()'s own background
+// PROJECTS refresh and a level-2 open can be genuinely in flight AT THE
+// SAME TIME (the brief's own verification sequence does exactly this -
+// "TAB 2 then PROJOPEN 0" - and the two are not the same request answered
+// twice, so sharing one pending flag between them would have the second
+// one silently swallowed by the first's own busy guard for as long as the
+// first is still in flight).
+bool psessPending = false;
+unsigned long psessFetchStart = 0;
+bool psessFetchFailed = false;
+
+// projLevel PAINTED, not projLevel wanted - projScrollCache's own "last
+// actually painted" shape (this file's own header note on why a
+// position-only change needs an explicit bust), extended from a scroll
+// offset to the level itself. A level change repaints COMPLETELY DIFFERENT
+// content into the same content area, so nothing about EITHER level's own
+// per-row caches has any business surviving the switch - see
+// renderProjectsTab()'s own use of this below.
+int projLevelPainted = -1;
+
+// Per-DISPLAY-POSITION signature cache, "title|turns|tod|live" (or
+// "MORE|shown|total" for the one honesty row past the real sessions - see
+// drawPSessRow()'s own note). PSESS_SLOTS + 1, not PSESS_SLOTS: position
+// PSESS_SLOTS itself is that honesty row's own slot when psessCount has
+// filled every real slot AND there is still more beyond it, so the array
+// must hold one MORE position than there are session slots or that exact
+// case indexes off the end of it.
+//
+// 80 bytes: the host caps title at 40 (so up to 43 with room for an
+// ellipsis plus NUL, PSessInfo.title's own size), turns and tod each print
+// at most a handful of digits, and the separators and the live flag cost
+// four more - comfortably inside 80 with margin, projRowSigCache's own
+// "margin is the right side to err on" reasoning (CLAUDE.md: a cache
+// shorter than the string it holds silently stops noticing changes past
+// that point).
+char psessRowSigCache[PSESS_SLOTS + 1][80];
+char psessMsgCache[32] = "";
+char psessMsg2Cache[16] = "";
+// projRowCountCache's own three-sub-states-of-"nothing to draw" shape,
+// reusing PROJ_STATE_PENDING/FAILED/EMPTY rather than declaring a second,
+// identically-shaped trio - these are level-agnostic BUCKET NAMES, not
+// level-1-specific values, and level 2's own tri-state logic
+// (renderPSessLevel()) needs exactly the same three buckets for exactly
+// the same reason.
+int psessRowCountCache = -1;
+// Scroll offset, in content pixels, always a multiple of PSESS_STEP -
+// projScroll's own shape, see psessScrollTo() (the one place it is
+// written).
+int psessScroll = 0;
+int psessScrollCache = -1;
+
 void requestProjects() {
   // A SECOND REQUEST WHILE ONE IS IN FLIGHT IS A NO-OP THAT REPORTS PROGRESS,
   // not a second fetch - the exact shape requestScrollback() uses, for the
@@ -121,31 +197,60 @@ void requestProjects() {
   sendLineToHost("PROJECTS");
 }
 
-// Called from loop() - tickScrollFetch()'s own shape (scrollback.ino),
-// mirrored rather than reinvented. A lost reply is a NORMAL event on BLE,
-// not an exotic one, and left unhandled it is an UNRECOVERABLE state
-// reachable by a single dropped packet: projectsPending stays true forever,
-// so every later PROJFETCH and every later tab-open logs "busy" and fetches
-// nothing - the tab is stuck on "Loading projects..." until the board
-// reboots, with nothing anywhere saying why. This is what breaks that.
+// THE ONE PLACE THE TIMEOUT ARITHMETIC AND ITS REPORT LIVE, shared by BOTH
+// PROJECTS levels rather than copied for level 2 - CLAUDE.md, on this exact
+// task: "reuse the existing mechanism rather than duplicating it... if you
+// find yourself writing the same condition twice, extract it, because a
+// comment claiming a shared predicate that was not shared was a finding on
+// this very file one round ago." `pending` is taken by REFERENCE so this
+// function is the one and only place either level's own pending flag is
+// cleared on a timeout; the CALLER still owns setting its own *FetchFailed
+// flag and repainting, because those two differ per level in a way this
+// helper has no business reaching into (see tickProjectsFetch() below,
+// which is what actually ties a level's identity to its own flags).
 //
-// THE FIRST LINE IS THE WHOLE COST GUARANTEE: no fetch outstanding, nothing
-// below it ever runs. tickScrollFetch() states the identical guarantee for
-// the identical reason.
-void tickProjectsFetch() {
-  if (!projectsPending) return;
+// THE FIRST LINE IS THE WHOLE COST GUARANTEE for whichever level calls
+// this with nothing outstanding: tickScrollFetch()'s own guarantee, mirrored
+// rather than reinvented, extended to cover two independent callers instead
+// of one.
+bool checkFetchTimeout(bool& pending, unsigned long start, const char* label) {
+  if (!pending) return false;
   const unsigned long cap = usbLinkActive() ? PROJ_FETCH_TIMEOUT_MS : PROJ_FETCH_TIMEOUT_BLE_MS;
-  if (millis() - projectsFetchStart < cap) return;
+  if (millis() - start < cap) return false;
   // sendLineToHost, NOT Serial.printf - tickScrollFetch()'s own choice, and
   // for the same reason: with the cable out, Serial reaches nothing, and a
   // BLE-only session is EXACTLY when this report needs to be visible - it is
   // the transport most likely to have lost the reply in the first place.
-  char m[64];
-  snprintf(m, sizeof(m), "PROJECTS timeout ms=%lu", millis() - projectsFetchStart);
+  char m[80];
+  snprintf(m, sizeof(m), "%s timeout ms=%lu", label, millis() - start);
   sendLineToHost(m);
-  projectsPending = false;
-  projectsFetchFailed = true;
-  if (currentTab == TAB_PROJECTS) renderProjectsTab();
+  pending = false;
+  return true;
+}
+
+// Called from loop() - tickScrollFetch()'s own shape (scrollback.ino),
+// mirrored rather than reinvented. A lost reply is a NORMAL event on BLE,
+// not an exotic one, and left unhandled it is an UNRECOVERABLE state
+// reachable by a single dropped packet: *Pending stays true forever, so
+// every later request for that level logs "busy" and fetches nothing - the
+// screen is stuck on "Loading..." until the board reboots, with nothing
+// anywhere saying why. This is what breaks that, for BOTH levels: level 1's
+// own PROJECTS fetch, and level 2's own PROJSESS fetch - two independent
+// pending/failed/start trios (projects.ino's own header note on why they
+// cannot share ONE set of flags), but ONE tick, ONE helper, and the SAME
+// PROJ_FETCH_TIMEOUT_MS/_BLE_MS allowance for both, because both are
+// single-chunk fetches of the same measured order of magnitude (the
+// design's own projection: ~175ms for 16 projects, ~200ms for one
+// project's 22 sessions).
+void tickProjectsFetch() {
+  if (checkFetchTimeout(projectsPending, projectsFetchStart, "PROJECTS")) {
+    projectsFetchFailed = true;
+    if (currentTab == TAB_PROJECTS) renderProjectsTab();
+  }
+  if (checkFetchTimeout(psessPending, psessFetchStart, "PROJSESS")) {
+    psessFetchFailed = true;
+    if (currentTab == TAB_PROJECTS) renderProjectsTab();
+  }
 }
 
 // IS THE FAILED STATE ON THE GLASS RIGHT NOW, THE ONE A TAP CAN RETRY?
@@ -169,6 +274,13 @@ void tickProjectsFetch() {
 // this predicate says and nothing more.
 bool projFetchFailed() {
   return projectsFetchFailed && !projectsPending;
+}
+
+// LEVEL 2'S OWN INSTANCE OF THE SAME PREDICATE, over its own independent
+// pending/failed pair - projFetchFailed()'s reasoning above applies verbatim,
+// substituting "one project's sessions" for "the project list" throughout.
+bool psessDeadEnd() {
+  return psessFetchFailed && !psessPending;
 }
 
 // ---------- Scrolling (board 2's only shape at this level - see the header
@@ -312,14 +424,221 @@ void drawProjectRow(int pos) {
   tft.setTextDatum(TL_DATUM);
 }
 
+// WHICH DISPLAY POSITION IS UNDER THIS y, OR -1 - sessionRowAtY()'s own
+// question, answered by plain division rather than a per-row walk because
+// every row on this level is the same height (this file's own header note:
+// no ladder, no band card, one height for every position).
+int projRowAtY(int sy) {
+  if (sy < PROJ_ROW_Y0) return -1;
+  const int rel = sy - PROJ_ROW_Y0 + projScroll;
+  const int pos = rel / PROJ_STEP;
+  if (pos < 0 || pos >= projectCount) return -1;
+  if (rel - pos * PROJ_STEP >= PROJ_ROW_H) return -1; // the gap between rows
+  if (!projRowVisible(pos)) return -1;
+  return pos;
+}
+
+// OPENS LEVEL 2 ON PROJECT `pos` (a display-order index into projects[]) -
+// the ONE place either a level-1 row tap or the PROJOPEN command (both in
+// deckhand_display.ino) enters level 2, so the two can never drift into
+// two different ideas of what "opening a project" resets.
+//
+// projOpenKey IS SET HERE, BEFORE requestProjSessions() is called, NOT
+// inside that function - deliberately, so the key on screen is always
+// accurate to what the level is DISPLAYING even on the rare tick where
+// requestProjSessions() finds its own fetch slot busy (a level-1
+// background refresh from switchTab() still in flight - the brief's own
+// verification sequence, "TAB 2 then PROJOPEN 0", can land close enough
+// together to hit this) and defers rather than sending immediately. The
+// JSON absorption in deckhand_display.ino's handleLine() compares an
+// incoming `projsess` reply's own key against THIS value, so it has to be
+// right the instant the level opens, not only once the wire request
+// actually goes out.
+void projOpenLevel1(int pos) {
+  strncpy(projOpenKey, projects[pos].key, sizeof(projOpenKey) - 1);
+  projOpenKey[sizeof(projOpenKey) - 1] = '\0';
+  psessEverReceived = false;
+  psessCount = 0;
+  psessTotal = 0;
+  psessScroll = 0;
+  projLevel = 1;
+  requestProjSessions(projOpenKey);
+  renderProjectsTab();
+}
+
+// RETURNS TO LEVEL 0 WITHOUT RE-FETCHING - the task's own requirement. The
+// project list already sitting in projects[] (from whichever PROJECTS
+// fetch last filled it - the tab-open, or a background refresh) is still
+// good: nothing about backing OUT of a project changes what projects exist,
+// so re-asking the Mac for the exact same answer it already gave would
+// just be latency with no new information. Contrast switchTab()'s own
+// TAB_PROJECTS arm, which DOES re-fetch every time, because leaving the
+// tab and coming back is a different gesture with no such guarantee (the
+// list could genuinely be stale by then).
+void projBack() {
+  projLevel = 0;
+  renderProjectsTab();
+}
+
+void requestProjSessions(const char* key) {
+  // A SECOND REQUEST WHILE ONE IS IN FLIGHT IS A NO-OP THAT REPORTS
+  // PROGRESS, not a second fetch - requestProjects()'s own shape, for the
+  // identical reason: the host delivers every trigger-file command (and
+  // PROJOPEN, deckhand_display.ino) over BOTH transports, so a cabled board
+  // can run this twice within milliseconds. psessPending is its OWN flag,
+  // independent of level 1's projectsPending - see this file's header note
+  // on why the two levels cannot share one fetch slot.
+  if (psessPending) {
+    char m[96];
+    snprintf(m, sizeof(m), "PROJSESS %s busy ms=%lu", key, millis() - psessFetchStart);
+    sendLineToHost(m);
+    return;
+  }
+  psessPending = true;
+  psessFetchFailed = false;
+  psessFetchStart = millis();
+  char m[80];
+  snprintf(m, sizeof(m), "PROJSESS %s", key);
+  sendLineToHost(m);
+}
+
+// ---------- Level 2 scrolling - projScroll*'s own shape at a second list,
+// over psessListLen() (real sessions plus, when there is more than fits,
+// ONE extra position for the honesty row drawPSessRow() draws in its
+// place) rather than psessCount alone. ----------
+// THE ONE PLACE psessCount AND psessTotal ARE COMPARED to decide whether
+// there is anything past the last row this device actually stored -
+// pulled out to one name so drawPSessRow(), the scroll math below, and
+// renderPSessLevel() cannot drift into disagreeing about which position is
+// the honesty row and which are real sessions.
+bool psessHasMore() { return psessTotal > psessCount; }
+int psessListLen() { return psessCount + (psessHasMore() ? 1 : 0); }
+
+bool psessScrollActive() { return psessListLen() > PSESS_ROWS; }
+
+bool psessRowVisible(int pos) {
+  if (!psessScrollActive()) return true;
+  const int top = psessScroll / PSESS_STEP;
+  return pos >= top && pos < top + PSESS_ROWS;
+}
+
+int psessScrollContentH() { return psessListLen() * PSESS_STEP - PSESS_ROW_GAP; }
+
+int psessScrollMax() {
+  const int over = psessScrollContentH() - PSESS_SCROLL_VIEW_H;
+  if (over <= 0) return 0;
+  return ((over + PSESS_STEP - 1) / PSESS_STEP) * PSESS_STEP;
+}
+
+void psessScrollTo(int px) {
+  int step = (px + PSESS_STEP / 2) / PSESS_STEP;
+  if (step < 0) step = 0;
+  int v = step * PSESS_STEP;
+  const int mx = psessScrollMax();
+  if (v > mx) v = mx;
+  psessScroll = v;
+}
+
+int psessRowAtY(int sy) {
+  if (sy < PSESS_ROW_Y0) return -1;
+  const int rel = sy - PSESS_ROW_Y0 + psessScroll;
+  const int pos = rel / PSESS_STEP;
+  if (pos < 0 || pos >= psessListLen()) return -1;
+  if (rel - pos * PSESS_STEP >= PSESS_ROW_H) return -1;
+  if (!psessRowVisible(pos)) return -1;
+  return pos;
+}
+
+// WHOLESALE REPAINT OF ONE ROW - drawProjectRow()'s own split, gated by the
+// caller's signature check. TWO LINES, not one (board_es3c35p.h's own
+// derivation of PSESS_ROW_H): a title line, trimmed with fitText() against
+// the row's REAL pixel budget (not merely the checker's promised 24-
+// character minimum - this board's Spleen face fits closer to 34 at this
+// row's own width), and a meta line carrying the turn count, the age, and
+// the LIVE/ended tag - "Title, age, turn count, and a LIVE / ended tag"
+// (docs/superpowers/specs/2026-09-20-sessions-manager-design.md, "Level 2").
+void drawPSessRow(int pos) {
+  const int y = PSESS_ROW_Y0 + pos * PSESS_STEP - psessScroll;
+
+  uiFillRound(PSESS_ROW_X, y, PSESS_ROW_W, PSESS_ROW_H, R_MD, COLOR_CARD, COLOR_BG);
+  uiStrokeRound(PSESS_ROW_X, y, PSESS_ROW_W, PSESS_ROW_H, R_MD, BORDER_CARD, COLOR_LABEL, COLOR_BG);
+
+  setUIFont(T_BODY);
+  const int lh = uiLineH(T_BODY);
+  // CENTRED AS A PAIR, from PSESS_ROW_H/PSESS_LINE_GAP directly rather than
+  // a literal 7 - board_es3c35p.h's own derivation (56 = 16 + 10 + 16 +
+  // 2*7) stated as arithmetic here rather than transcribed, so a change to
+  // the body face's line height or PSESS_LINE_GAP keeps both lines
+  // centred instead of silently drifting off the "2x7 padding" the header
+  // promises.
+  const int topY = y + (PSESS_ROW_H - 2 * lh - PSESS_LINE_GAP) / 2;
+  const int metaY = topY + lh + PSESS_LINE_GAP;
+
+  // THE HONESTY ROW - "a capped list that shows the capped number as the
+  // total is a silent lie" (this task's own brief). PSESS_ROWS*PSESS_STEP
+  // already lands EXACTLY on the footer with zero slack (board_es3c35p.h),
+  // so there is no fixed line anywhere on this screen with room to spare
+  // for a floating count the way SESSIONS' own ghost-row design sketches
+  // one; this joins the SAME scrollable rhythm every real row uses instead,
+  // reachable by scrolling past the last session exactly where a person
+  // looking for more would already be looking.
+  if (pos == psessCount) {
+    const int more = psessTotal - psessCount;
+    char line1[40];
+    snprintf(line1, sizeof(line1), "%d more session%s", more, more == 1 ? "" : "s");
+    char line2[24];
+    snprintf(line2, sizeof(line2), "showing %d of %d", psessCount, psessTotal);
+    tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+    tft.setTextDatum(TC_DATUM);
+    tft.drawString(line1, PSESS_ROW_X + PSESS_ROW_W / 2, topY);
+    tft.drawString(line2, PSESS_ROW_X + PSESS_ROW_W / 2, metaY);
+    tft.setTextDatum(TL_DATUM);
+    return;
+  }
+
+  const PSessInfo& s = psess[pos];
+  const uint16_t titleColor = s.live ? COLOR_VALUE : COLOR_LABEL;
+
+  char titleBuf[sizeof(s.title) + 4]; // fitText()'s own worst case: the full stored title plus "..."
+  fitText(titleBuf, sizeof(titleBuf), s.title, PSESS_ROW_W - 2 * PSESS_PAD);
+  tft.setTextColor(titleColor, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(titleBuf, PSESS_ROW_X + PSESS_PAD, topY);
+
+  // Clamped to four digits for DISPLAY ONLY - PSessInfo.turns itself is
+  // untouched - drawProjectRow()'s own "clamp what's shown, not what's
+  // stored" rule, applied to a field with a wider realistic range (a turn
+  // count, not a transcript count).
+  char timeStr[8];
+  formatProjTime(s.tod, timeStr, sizeof(timeStr));
+  unsigned dispTurns = s.turns > 9999 ? 9999 : s.turns;
+  char meta[16];
+  snprintf(meta, sizeof(meta), "%ut %s", dispTurns, timeStr);
+  tft.setTextColor(COLOR_LABEL, COLOR_CARD);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(meta, PSESS_ROW_X + PSESS_PAD, metaY);
+
+  // LIVE/ended - drawProjectRow()'s own live/COLOR_VALUE convention,
+  // reused rather than invented: unlike level 1's projectIsLive() (a
+  // device-side forward-encoding heuristic, imprecise at the edges - see
+  // its own note), this `live` bit comes straight off the wire from the
+  // host's own liveIds check, so it is exact.
+  const char* tag = s.live ? "LIVE" : "ended";
+  tft.setTextColor(s.live ? COLOR_VALUE : COLOR_LABEL, COLOR_CARD);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString(tag, PSESS_ROW_X + PSESS_ROW_W - PSESS_PAD, metaY);
+  tft.setTextDatum(TL_DATUM);
+}
+
 #endif  // BOARD_HAS_PROJECTS
 
-// The two functions every dispatch site in deckhand_display.ino already
-// calls unconditionally (switchTab(), forceFullRepaint(), stopOctopus(),
-// handleTouch(), the once-a-second tick) - see that file's own note on why
-// the `#if` sits INSIDE each body rather than around the whole function.
-void renderProjectsTab() {
 #if BOARD_HAS_PROJECTS
+// LEVEL 0 (the project list) - renderProjectsTab()'s ENTIRE body until this
+// task, unchanged below except for its own name: the level dispatch and the
+// level-transition clear now live in renderProjectsTab() itself, so this
+// function only ever runs its own content, exactly as it did before level
+// 2 existed.
+void renderProjLevel0() {
   // NOT SESSIONSCROLL'S SHAPE for the loading/failed/empty message: this is
   // a STRUCTURAL state (is there a list to draw at all), so it gets the same
   // wholesale-clear-and-bust treatment a session count change gets, keyed by
@@ -408,6 +727,116 @@ void renderProjectsTab() {
       }
     }
   }
+}
+
+// LEVEL 1 (one project's own sessions) - renderProjLevel0()'s own tri-state
+// shape, over psess*/PSESS_* instead of projects*/PROJ_*, and psessDeadEnd()
+// where level 0 reads projFetchFailed(). The one real difference:
+// psessListLen() (real sessions plus, when capped, the one honesty row) is
+// what the "how many positions to draw" and "did the count change" logic
+// below reads, never psessCount alone - see drawPSessRow()'s own note on
+// why that extra position exists at all.
+void renderPSessLevel() {
+  if (!psessEverReceived || psessCount == 0) {
+    const int state = psessPending  ? PROJ_STATE_PENDING
+                     : psessDeadEnd() ? PROJ_STATE_FAILED
+                                      : PROJ_STATE_EMPTY;
+    if (psessRowCountCache != state) {
+      tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
+      for (int i = 0; i <= PSESS_SLOTS; i++) psessRowSigCache[i][0] = '\0';
+      psessRowCountCache = state;
+      psessMsgCache[0] = '\0';
+      psessMsg2Cache[0] = '\0';
+    }
+    const char* msg = state == PROJ_STATE_PENDING ? "Loading sessions..."
+                     : state == PROJ_STATE_FAILED  ? "-- could not reach the Mac --"
+                                                    : "No sessions found";
+    const char* msg2 = state == PROJ_STATE_FAILED ? "tap to retry" : "";
+    setUIFont(T_BODY);
+    const int msgY1 = CONTENT_Y + 40;
+    drawIfChanged(psessMsgCache, sizeof(psessMsgCache), msg, tft.width() / 2, msgY1,
+                  T_BODY, 1, COLOR_LABEL, COLOR_BG, TC_DATUM);
+    if (msg2[0]) {
+      drawIfChanged(psessMsg2Cache, sizeof(psessMsg2Cache), msg2, tft.width() / 2,
+                    msgY1 + uiLineH(T_BODY) + 8, T_BODY, 1, COLOR_LABEL, COLOR_BG, TC_DATUM);
+    }
+  } else {
+    if (psessScrollActive()) psessScrollTo(psessScroll); else psessScroll = 0;
+    if (psessRowCountCache != psessCount) {
+      psessRowCountCache = psessCount;
+      tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
+      for (int i = 0; i <= PSESS_SLOTS; i++) psessRowSigCache[i][0] = '\0';
+    }
+    if (psessScroll != psessScrollCache) {
+      psessScrollCache = psessScroll;
+      tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
+      for (int i = 0; i <= PSESS_SLOTS; i++) psessRowSigCache[i][0] = '\0';
+    }
+    for (int pos = 0; pos < psessListLen(); pos++) {
+      if (!psessRowVisible(pos)) continue;
+      char sig[80];
+      if (pos == psessCount) {
+        // THE HONESTY ROW'S OWN SIGNATURE - psessCount and psessTotal are
+        // the only two things it draws, so they are the only two things
+        // that need to bust it. Both only ever change together with a
+        // fresh reply, which already busts every cache via the
+        // psessRowCountCache check above - this still gives it a real
+        // signature, per CLAUDE.md's "every field you draw must be in the
+        // row's signature", rather than relying solely on that wholesale
+        // bust to keep it correct.
+        snprintf(sig, sizeof(sig), "MORE|%d|%d", psessCount, psessTotal);
+      } else {
+        const PSessInfo& s = psess[pos];
+        // EVERY FIELD DRAWN MUST BE IN THIS SIGNATURE - title, turns and
+        // tod are drawn directly; `live` is not itself drawn as text but
+        // its VALUE is (the title's colour AND the tag's own text/colour),
+        // and a colour-only change reaches no text-comparing cache at all
+        // (CLAUDE.md) unless it is signed explicitly - drawProjectRow()'s
+        // own rule, restated here because `live` is a REAL wire bit at
+        // this level rather than a device-side heuristic.
+        snprintf(sig, sizeof(sig), "%s|%u|%ld|%d", s.title, (unsigned) s.turns, s.tod, s.live);
+      }
+      if (strncmp(sig, psessRowSigCache[pos], sizeof(psessRowSigCache[pos])) != 0) {
+        strncpy(psessRowSigCache[pos], sig, sizeof(psessRowSigCache[pos]) - 1);
+        psessRowSigCache[pos][sizeof(psessRowSigCache[pos]) - 1] = '\0';
+        drawPSessRow(pos);
+      }
+    }
+  }
+}
+#endif  // BOARD_HAS_PROJECTS
+
+// The two functions every dispatch site in deckhand_display.ino already
+// calls unconditionally (switchTab(), forceFullRepaint(), stopOctopus(),
+// handleTouch(), the once-a-second tick) - see that file's own note on why
+// the `#if` sits INSIDE each body rather than around the whole function.
+void renderProjectsTab() {
+#if BOARD_HAS_PROJECTS
+  // LEVEL TRANSITIONS GET THE SAME WHOLESALE-CLEAR-AND-BUST TREATMENT the
+  // tri-state loading/failed/empty sentinel gets inside EACH level's own
+  // render function, for the identical CLAUDE.md reason: a level change
+  // repaints COMPLETELY DIFFERENT content into the same content area, and
+  // no per-row cache from the OTHER level has any business surviving the
+  // switch - a psess row's cache slot 3 and a proj row's cache slot 3
+  // describe unrelated things. projLevelPainted is what was last actually
+  // PAINTED (never rendered = -1) - projScrollCache's own "last painted,
+  // not last requested" shape, extended from a scroll position to the
+  // level itself.
+  if (projLevelPainted != projLevel) {
+    tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
+    projLevelPainted = projLevel;
+    projRowCountCache = -1;
+    for (int i = 0; i < PROJ_SLOTS; i++) projRowSigCache[i][0] = '\0';
+    projMsgCache[0] = '\0';
+    projMsg2Cache[0] = '\0';
+    projScrollCache = -1;
+    psessRowCountCache = -1;
+    for (int i = 0; i <= PSESS_SLOTS; i++) psessRowSigCache[i][0] = '\0';
+    psessMsgCache[0] = '\0';
+    psessMsg2Cache[0] = '\0';
+    psessScrollCache = -1;
+  }
+  if (projLevel == 1) renderPSessLevel(); else renderProjLevel0();
 #if !BOARD_USES_TFT_ESPI
   tft.flush();
 #endif
@@ -416,6 +845,7 @@ void renderProjectsTab() {
 
 void handleProjectsTouch(int sx, int sy) {
 #if BOARD_HAS_PROJECTS
+  if (projLevel == 1) { handlePSessTouch(sx, sy); return; }
   // Nothing to touch before the first reply, or with a genuinely empty
   // inventory - EXCEPT the failed state's own escape: a tap anywhere retries,
   // since the screen has nothing else on it to hit-test against.
@@ -471,10 +901,63 @@ void handleProjectsTouch(int sx, int sy) {
     if (dragged) return;
   }
 
-  // A TAP: level 2 (a project's own sessions, PROJOPEN) is not built yet -
-  // it is a later task's interface, not this one's - so a tap on a row does
-  // nothing here rather than guessing at a wire verb that does not exist.
+  // A TAP OPENS LEVEL 2 - projRowAtY() answers "which row, if any" the same
+  // way sessionRowAtY() does for SESSIONS; -1 (a gap, or below the last
+  // row) is ignored rather than guessed. projOpenLevel1() is the ONE place
+  // this and PROJOPEN (deckhand_display.ino) both enter level 2, so the two
+  // routes can never drift into two different ideas of what "opening a
+  // project" resets.
+  int pos = projRowAtY(sy);
+  if (pos >= 0) projOpenLevel1(pos);
 #else
   (void) sx; (void) sy;
 #endif  // BOARD_HAS_PROJECTS
 }
+
+#if BOARD_HAS_PROJECTS
+// LEVEL 1's own touch handler - handleProjectsTouch()'s level-0 shape,
+// mirrored over psess*/PSESS_*. The one thing it does NOT need of its own:
+// a "back" affordance - that lives in deckhand_display.ino's handleTouch()
+// (tapping the PROJECTS tab a second time), the same "same tab is still
+// back" idiom the SESSIONS detail card already uses, so nothing INSIDE the
+// content area needs to reserve a control for it.
+void handlePSessTouch(int sx, int sy) {
+  (void) sx;
+  if (!psessEverReceived || psessCount == 0) {
+    if (psessDeadEnd()) {
+      requestProjSessions(projOpenKey);
+      renderProjectsTab();
+    }
+    return;
+  }
+  if (sy < PSESS_ROW_Y0) return;
+
+  if (psessScrollActive()) {
+    const int scroll0 = psessScroll;
+    int moved = 0;
+    int lastY = sy;
+    bool dragged = false;
+    while (true) {
+      reapBleLinks(true);
+      lastActivityMillis = millis();
+      int nx, ny;
+      if (!getTouchPoint(nx, ny)) break; // released
+      (void) nx;
+      moved += ny > lastY ? ny - lastY : lastY - ny;
+      lastY = ny;
+      if (moved > PSESS_DRAG_TAP_PX) dragged = true;
+      psessScrollTo(scroll0 - (ny - sy));
+      renderProjectsTab();
+      delay(15);
+    }
+    if (dragged) return;
+  }
+
+  // A TAP: level 3 (this session's own transcript) is a later task's
+  // interface, not this one's - level 1's own boundary until THIS task,
+  // now level 2's - so a tap on a row does nothing here rather than
+  // guessing at a wire verb that does not exist yet.
+  int pos = psessRowAtY(sy);
+  (void) pos;
+}
+#endif  // BOARD_HAS_PROJECTS

@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1424288, RAM 72044 | flash 1151408, RAM 58988 |
+| size today | flash 1424288, RAM 72044 | flash 1155248, RAM 63764 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -78,7 +78,16 @@ same task): a lost PROJECTS reply left `projectsPending` stuck true forever with
 retry, so the fetch gained a timeout (`tickProjectsFetch()`, mirroring `tickScrollFetch()`'s own
 shape) and a named on-glass failure state, whose two message lines (`projMsgCache[32]`,
 `projMsg2Cache[16]`) plus one new bool account for it. Board 1 took none of this either, for the
-same reason. `arduino-cli`'s "Sketch uses N" is a
+same reason. It then **rose 4,776 bytes on 2026-09-21** (later the same day), when PROJECTS'
+level 2 (one project's own sessions) landed: `PSessInfo psess[PSESS_SLOTS]` (30 x 72 bytes =
+2,160) and its per-row signature cache `psessRowSigCache[PSESS_SLOTS + 1][80]` (31 x 80 =
+2,480 - one row longer than `PSESS_SLOTS` itself, for the "N more, showing X of Y" honesty row
+past a capped list) account for most of it, the rest level 2's own independent fetch-timeout
+trio (`psessPending`, `psessFetchStart`, `psessFetchFailed` - a SEPARATE pair from level 1's,
+not a shared one, even though both route through the same `checkFetchTimeout()`) plus
+`projLevel`, `projOpenKey[64]`, `psessCount`/`psessTotal`/`psessEverReceived` and two more
+message caches. Board 1 took none of it - same `#if BOARD_HAS_PROJECTS` boundary. `arduino-cli`'s
+"Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
 
@@ -140,7 +149,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `2aab6e66ff89bd9f...`, size 1424288 (board 2: `d7425cf2a15ad59b...`, size 1151408).
+Today: `2aab6e66ff89bd9f...`, size 1424288 (board 2: `25d8020185b40693...`, size 1155248).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size

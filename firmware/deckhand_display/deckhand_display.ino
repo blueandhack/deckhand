@@ -1469,7 +1469,8 @@ int hiddenAskingCount = 0;
 struct ProjInfo {
   char key[64];   // opaque directory name - NEVER decoded, split, or shown;
                   // see host/project-replies.mjs. Sent back verbatim to ask
-                  // for this project's sessions (PROJOPEN, a later task).
+                  // for this project's sessions (PROJOPEN and a level-1 row
+                  // tap both go through projOpenLevel1(), projects.ino).
   char name[24];  // host caps at 22 (deviceText(label, 22)) plus NUL and one
                   // spare byte
   uint16_t count; // transcripts in this project (jsonl files, not turns)
@@ -1489,6 +1490,67 @@ extern bool projectsEverReceived;
 // "Loading projects..." on the glass with nothing that ever changes it.
 extern bool projectsFetchFailed;
 void requestProjects();
+
+// ---------- PROJECTS level 2: one project's sessions ----------
+// 0 = the project list (level 1 in the task briefs' own numbering, though
+// this file's variable calls it what it IS - the level PROJECTS opens on),
+// 1 = a project's own sessions. Never anything else - level 3 (a session's
+// transcript, opened by tapping a row here) is a later task's interface,
+// the same boundary level 1 itself had for THIS level until now.
+extern int projLevel;
+// The key of the project level 1 is currently open on - OPAQUE, exactly
+// like ProjInfo.key: never decoded, only ever echoed back on the wire and
+// compared against an incoming `projsess` reply's own `k` to catch a stale
+// reply landing after the level moved on (projects.ino's own JSON
+// absorption). 64, matching ProjInfo.key's own size - it holds the SAME
+// string.
+extern char projOpenKey[64];
+
+struct PSessInfo {
+  char id[16];    // the wire's 12-char session id + NUL, +3 spare - the
+                  // same headroom shape ProjInfo.key keeps over its own
+                  // real maximum.
+  char title[44]; // host caps at 40 (deviceText(info.title, 40),
+                  // host/project-replies.mjs) plus NUL and 3 spare - sized
+                  // for fitText()'s own worst case (the full cap PLUS an
+                  // ellipsis) the same way SESSION_ROW_SIG_LEN's own note
+                  // reasons about margin.
+  uint16_t turns; // the REAL user-turn count (countUserTurns(), never a
+                  // raw line count - Ruling T3-C, host/project-replies.mjs:
+                  // a raw count over-reported by 64x on this Mac's own
+                  // largest transcript). Displayed, not second-guessed.
+  long tod;       // seconds since LOCAL midnight of this session's own
+                  // mtime, or -1 - the same convention ProjInfo.tod uses.
+  uint8_t live;   // is this session in the CURRENT sessions[] list right
+                  // now - the HOST's own check (against its live-ranked
+                  // list), not a device-side forward-encoding heuristic
+                  // like projectIsLive() has to use for level 1, because
+                  // the wire actually carries this bit at level 2. A
+                  // COLOUR difference (drawPSessRow colours the title and
+                  // the tag by it), so it belongs in the row's own
+                  // signature same as level 1's `live` does - CLAUDE.md: a
+                  // colour-only change reaches no text-comparing cache
+                  // unless it is signed explicitly.
+};
+extern PSessInfo psess[PSESS_SLOTS];
+extern int psessCount;   // how many of `psess[]` actually hold data (<= PSESS_SLOTS)
+// The TRUE count the host held before capping to PROJSESS_CAP(60) or this
+// device further capping to PSESS_SLOTS - never the capped count re-stated
+// as though it were the total. "A capped list that shows the capped number
+// as the total is a silent lie" (this task's own brief).
+extern int psessTotal;
+extern bool psessEverReceived;
+// Level 2's own fetch-timeout state - projects.ino's checkFetchTimeout()/
+// tickProjectsFetch() own note on why these are a SEPARATE pair from
+// level 1's projectsPending/projectsFetchFailed rather than a shared one.
+// psessPending is read (and cleared) here in handleLine()'s own `projsess`
+// absorption below, the same way projectsPending is by the `projs` block
+// just above it.
+extern bool psessPending;
+extern bool psessFetchFailed;
+void requestProjSessions(const char* key);
+void projOpenLevel1(int pos);
+void projBack();
 #endif
 
 // Per-row render caches: a row only redraws when its own signature changes,
@@ -4174,7 +4236,15 @@ void switchTab(Tab newTab) {
     // is "the level opened" - only a genuine tab switch is, which is exactly
     // what switchTab() reaching this branch means (the early return above
     // already declined a same-tab call).
+    //
+    // ALWAYS BACK TO LEVEL 0 ON A FRESH TAB SWITCH, even if the user had
+    // drilled into a project's sessions before leaving PROJECTS - a switch
+    // AWAY and back is not the same gesture as the in-tab "back" (tapping
+    // PROJECTS again while already on it, handleTouch()'s own "same tab is
+    // still back" arm), which is the one place level 1 is re-entered
+    // WITHOUT this reset and WITHOUT a re-fetch.
 #if BOARD_HAS_PROJECTS
+    projLevel = 0;
     requestProjects();
 #endif
     renderProjectsTab();
@@ -4458,6 +4528,21 @@ void handleTouch() {
     // screen where the tab bar itself is inert.
     int tabW = tabsW() / TAB_COUNT;
     Tab tapped = (Tab) constrain(sx / tabW, 0, TAB_COUNT - 1);
+#if BOARD_HAS_PROJECTS
+    // SAME TAB IS STILL BACK, PROJECTS' own instance of the rule the
+    // SESSIONS detail card already established two branches up this same
+    // function: the underline says PROJECTS, so a tap on PROJECTS meaning
+    // "the PROJECTS tab" is what the bar already claims, and level 1 (one
+    // project's own sessions) is not that - it is a screen INSIDE the tab.
+    // projBack() repaints from the project list already held in
+    // projects[], never a re-fetch (see projBack()'s own note) - a fresh
+    // fetch belongs to switchTab()'s "the level opened" rule, and tapping
+    // the tab you are already on opens nothing.
+    if (tapped == currentTab && currentTab == TAB_PROJECTS && projLevel == 1) {
+      projBack();
+      return;
+    }
+#endif
     switchTab(tapped);
     return;
   }
@@ -4945,6 +5030,68 @@ void handleLine(const String& line) {
     // reply follows above, and for the same reason: a reply that lands while
     // the user is on a different tab must not paint over it.
     if (currentTab == TAB_PROJECTS) renderProjectsTab();
+    return;
+  }
+
+  // PROJSESS reply: its own line, `projsess` the only key. Level 2 of the
+  // same tab, same "bail out before the usage parsing below" reason `projs`
+  // states above.
+  JsonObject projsess = doc["projsess"];
+  if (!projsess.isNull()) {
+    // SOME reply for THIS tab's fetch slot has arrived, ending psessPending
+    // regardless of whether it turns out to be the one we are still
+    // waiting for - see the key check below for why those can differ, and
+    // requestProjSessions()/checkFetchTimeout() (projects.ino) for the
+    // other side of this flag.
+    psessPending = false;
+    const char* k = projsess["k"] | "";
+    // THE ECHOED KEY MUST MATCH projOpenKey, OR THIS REPLY IS STALE AND IS
+    // DISCARDED RATHER THAN DRAWN. projOpenLevel1() sets projOpenKey to the
+    // key it is about to request BEFORE calling requestProjSessions(), so
+    // under ordinary operation the two always agree - but PROJSESS carries
+    // no sequence number the way SCROLL's chunked fetch does, and this is
+    // the one guard standing between a slow, since-superseded reply and it
+    // silently overwriting whatever project the screen has moved on to
+    // showing. Never decoded either side of this comparison - see
+    // ProjInfo.key's own note and host/project-replies.mjs's header on why
+    // that would be unsafe.
+    if (strcmp(k, projOpenKey) == 0) {
+      psessEverReceived = true;
+      JsonArray items = projsess["items"].as<JsonArray>();
+      int n = 0, overflow = 0;
+      if (!items.isNull()) {
+        for (JsonObject it : items) {
+          // PSESS_SLOTS IS THIS DEVICE'S OWN CEILING - see its own note in
+          // board_es3c35p.h. The host may already have capped at
+          // PROJSESS_CAP(60) before this ever reached the wire; either way
+          // an item past OUR ceiling is COUNTED, not silently dropped,
+          // exactly as `projs`' own overflow counter above does.
+          if (n >= PSESS_SLOTS) { overflow++; continue; }
+          PSessInfo& s = psess[n];
+          copyField(s.id, sizeof(s.id), it["id"] | "");
+          copyField(s.title, sizeof(s.title), it["t"] | "");
+          s.turns = it["n"] | 0;
+          s.tod = it["w"] | -1L;
+          s.live = (it["live"] | 0) ? 1 : 0;
+          n++;
+        }
+      }
+      psessCount = n;
+      // THE WIRE'S OWN `total`, NOT n - see PSessInfo's own note on
+      // psessTotal and this task's brief: showing the capped count as the
+      // total would be the silent lie CLAUDE.md's cap-honesty rule exists
+      // to prevent. Falls back to n only if the host's own reply is
+      // missing the field, which host/project-replies-check.mjs's own
+      // wire-shape assertion means should not happen in practice.
+      psessTotal = projsess["total"] | n;
+      if (overflow > 0)
+        Serial.printf("PROJSESS: %d session(s) beyond PSESS_SLOTS(%d) were not stored\n",
+                      overflow, PSESS_SLOTS);
+      if (currentTab == TAB_PROJECTS) renderProjectsTab();
+    } else {
+      Serial.printf("PROJSESS: reply for \"%s\" arrived while viewing \"%s\" - discarded as stale\n",
+                    k, projOpenKey);
+    }
     return;
   }
 #endif
@@ -6351,6 +6498,11 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "(docs/superpowers/specs/2026-09-20-sessions-manager-design.md, \"Out of scope: Board "
     "1\") - TAB 2 still switches cleanly to it, but its content area stays empty, so there "
     "is no project list here to fetch." },
+  { "PROJOPEN",
+    "it opens level 2 of the PROJECTS tab - one project's own sessions - for the n-th "
+    "project in display order. This board is BOARD_HAS_PROJECTS 0, for the identical reason "
+    "PROJFETCH above states: there is no project list here for an index to name a row of, "
+    "and no PSessInfo/psess[] storage compiled in to hold what PROJSESS would answer with." },
 #endif
 #if BOARD_USES_TFT_ESPI
   { "SHIMBENCH",
@@ -8598,6 +8750,61 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     // inside requestProjects() itself, the same shape requestScrollback()
     // uses for the identical reason, so this arm needs none of its own.
     requestProjects();
+  } else if (buf.startsWith("PROJOPEN")) {
+    // THE OPERATOR'S OWN ROUTE INTO LEVEL 2, DETAIL's own reason applied to
+    // PROJECTS' second level: a capture of a project's own sessions needs
+    // no finger on the glass, and until this existed the only way there
+    // was a tap on a level-1 row. "PROJOPEN <n>" opens the n-th project in
+    // DISPLAY order - projects[], the same order the list draws and the
+    // same indexing DETAIL/SCROLLOPEN already use for their own lists.
+    //
+    // EVERY REFUSAL NAMES ITS CAUSE - three of them: PROJECTS is not the
+    // live tab, a non-numeric argument, an out-of-range index. n is
+    // REFUSED, never clamped, for the identical reason DETAIL refuses
+    // rather than silently opening project 0 - a capture script asking for
+    // project 4 and silently being handed project 0 would report the
+    // wrong screen as the right one.
+    //
+    // EVERY EARLY RETURN CLEARS buf FIRST - see DETAIL's own note above:
+    // processCompletedLine's accumulator is passed by REFERENCE, and a
+    // refusal that returns without emptying it leaves the refused text
+    // sitting there for the next bytes to be appended to, refusing again
+    // forever.
+    //
+    // NO DUPLICATE GUARD, DELIBERATELY - DETAIL's own reasoning: the host
+    // delivers every trigger-file command over BOTH transports, so a
+    // cabled board runs this twice within milliseconds, and opening the
+    // SAME project twice is idempotent (projOpenLevel1() resets and
+    // re-requests; requestProjSessions()'s own busy guard turns the second
+    // of the two into a harmless logged no-op rather than a second wire
+    // request).
+    String arg = buf.length() > 8 ? buf.substring(8) : String("");
+    arg.trim();
+    if (currentTab != TAB_PROJECTS) {
+      Serial.println("PROJOPEN refused: PROJECTS is not the live tab (send TAB 2 first)");
+      buf = "";
+      return;
+    }
+    // Character-by-character, not toInt() - SESSIONSCROLL's own reason:
+    // toInt() returns 0 for anything unparseable, so "PROJOPEN abc" would
+    // silently open project 0 and report success.
+    bool numeric = arg.length() > 0;
+    for (unsigned int i = 0; i < arg.length(); i++)
+      if (arg[i] < '0' || arg[i] > '9') numeric = false;
+    if (!numeric) {
+      Serial.printf("PROJOPEN refused: \"%s\" is not a project index (0..%d)\n",
+                    arg.c_str(), projectCount - 1);
+      buf = "";
+      return;
+    }
+    int pi = arg.toInt();
+    if (pi < 0 || pi >= projectCount) {
+      Serial.printf("PROJOPEN refused: project %d is out of range (0..%d)\n", pi, projectCount - 1);
+      buf = "";
+      return;
+    }
+    projOpenLevel1(pi);
+    Serial.printf("PROJOPEN: project %d (%s)\n", pi, projects[pi].name);
 #endif
   } else if (refuseUnavailableCommand(buf)) {
     // A COMMAND THIS BOARD DOES NOT HAVE. Reached only after every real handler

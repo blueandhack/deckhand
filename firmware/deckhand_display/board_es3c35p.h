@@ -1476,6 +1476,74 @@ const int PROJ_META_W = 88;
 const int PROJ_FETCH_TIMEOUT_MS     = 8000;
 const int PROJ_FETCH_TIMEOUT_BLE_MS = 12000;
 
+// ---------- Projects tab: level 2, a project's sessions ----------
+// TWO-LINE ROWS, unlike level 1's one-liner. Level 1 has only a name and a
+// scalar pair to show side by side; level 2 promises a TITLE (which needs
+// real width to read as a title rather than a fragment), an age, a turn
+// count AND a live/ended tag, and no single T_BODY line fits all four
+// legibly. So the row is title-line-over-meta-line: T_BODY(16) title +
+// PSESS_LINE_GAP(10) + T_BODY(16) meta + 2x7 padding = 56 - the task
+// brief's own derivation, not a taste pick. projects.ino's drawPSessRow()
+// centres the pair vertically from PSESS_ROW_H and PSESS_LINE_GAP directly
+// (uiLineH(T_BODY), never a literal 16) so this stays correct if the body
+// face ever changes.
+const int PSESS_ROW_H = 56;
+const int PSESS_ROW_GAP = 3;              // matches PROJ_ROW_GAP - one list rhythm on this board
+const int PSESS_ROW_X = PROJ_ROW_X;       // 12, the one left margin this board uses
+const int PSESS_ROW_W = PROJ_ROW_W;       // 296
+// SAME LANE LEVEL 1 DRAWS IN, not a shifted-down "page top" the way
+// SETTINGS' PAGE_TOP makes room for its own back band. There is no back
+// band here - see the zero-slack note on PSESS_ROWS below for why, and
+// where the back affordance actually lives instead (deckhand_display.ino's
+// handleTouch(): tapping the PROJECTS tab a second time while a level-2
+// screen is up, the same "same tab is still back" idiom the SESSIONS
+// detail card already uses).
+const int PSESS_ROW_Y0 = PROJ_ROW_Y0;     // 50
+const int PSESS_STEP = PSESS_ROW_H + PSESS_ROW_GAP;              // 59
+const int PSESS_AVAIL = BOARD_H - FOOTER_H - PSESS_ROW_Y0;       // 410, same as PROJ_AVAIL (same Y0)
+const int PSESS_ROWS = (PSESS_AVAIL + PSESS_ROW_GAP) / PSESS_STEP; // 7
+// ZERO SLACK, ACCEPTED RATHER THAN OVERLOOKED. PSESS_ROW_Y0 + PSESS_ROWS *
+// PSESS_STEP - PSESS_ROW_GAP lands EXACTLY on contentBottom(): 50 + 7*59 - 3
+// = 460 = 480 - FOOTER_H(20). projects-geom-check.mjs asserts this with a
+// `<=`, so it passes - with nothing to spare. Do NOT shave PSESS_ROW_H to
+// buy margin: it is already exactly TAP_MIN(46) + 10, and this level draws
+// TWO lines of real information per row (a title, and a turn/age/live
+// line) where level 1 draws one - the fingertip floor is not the part of
+// this row that has slack to give. If a later change needs a header row
+// here (a project-name caption, a back band matching SETTINGS' own), drop
+// PSESS_ROWS to 6 instead - the row stays TAP_MIN-safe either way.
+const int PSESS_SCROLL_VIEW_H = PSESS_ROWS * PSESS_STEP - PSESS_ROW_GAP; // 410, equal to PSESS_AVAIL (zero slack, see above)
+const int PSESS_DRAG_TAP_PX = PROJ_DRAG_TAP_PX;
+const int PSESS_PAD = PROJ_PAD;           // 12
+// The gap between the title line and the meta line - the "10" in the
+// PSESS_ROW_H derivation above. A named constant rather than a literal
+// baked into drawPSessRow() so the 56 = 16+10+16+2*7 arithmetic in that
+// comment stays checkable rather than merely asserted.
+const int PSESS_LINE_GAP = 10;
+
+// The device's own ceiling on how many of one project's sessions it will
+// hold at once - NOT a mirror of the wire's own PROJSESS_CAP(60,
+// host/project-replies.mjs). The largest project measured on this Mac
+// carries 22 transcripts (docs/superpowers/specs/2026-09-20-sessions-
+// manager-design.md, "transcripts in this one project | 22", the same
+// measurement PROJ_SLOTS(24) was sized against for level 1's own project
+// count). 30 keeps that same "measured worst case plus real headroom, well
+// under the wire's own cap" shape PROJ_SLOTS uses (24 against a measured
+// 16) rather than simply matching PROJSESS_CAP, because matching it would
+// buy nothing today (no project anywhere near 30, let alone 60) and cost
+// more RAM for no observed benefit. A project with more sessions than this
+// (or than the host is willing to send) is not silently truncated: the
+// absorb loop in deckhand_display.ino's handleLine() counts what did not
+// fit, exactly as PROJ_SLOTS' own overflow counter does, and the level-2
+// screen shows an honest "N more, showing X of Y" using the wire's own
+// `total` field rather than the capped count it actually received. The RAM
+// arithmetic (PSessInfo's own measured size, its per-row signature cache,
+// and the before/after `arduino-cli` figures) is in the task-6 report
+// rather than transcribed here, for the same reason this file's own "size
+// today" table in CLAUDE.md is hand-maintained rather than baked into a
+// comment a later edit could silently leave stale.
+#define PSESS_SLOTS 30
+
 // ---------- §3 THE STATUS BAND ----------
 // The card head becomes a FILLED BAND in the status colour. Filled bands are new
 // vocabulary for this UI - nothing else here fills a region with a status colour -
