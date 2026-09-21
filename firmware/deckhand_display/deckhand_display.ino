@@ -2717,7 +2717,8 @@ void drawTabBar() {
     tft.setTextDatum(MC_DATUM);
     tft.drawString(labels[i], i * tabW + tabW / 2, TAB_BAR_H / 2);
     if (active) {
-      tft.fillRect(i * tabW + 8, TAB_BAR_H - 3, tabW - 16, 3, COLOR_ACCENT);
+      tft.fillRect(i * tabW + TAB_UNDERLINE_INSET, TAB_BAR_H - 3,
+                   tabW - 2 * TAB_UNDERLINE_INSET, 3, COLOR_ACCENT);
     }
   }
   tft.setTextDatum(TL_DATUM);

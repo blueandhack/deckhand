@@ -77,6 +77,16 @@ function bodyOf(src, sig, replacement) {
   if (z < 0) return src;
   return src.slice(0, i + 1) + replacement + src.slice(z);
 }
+// One `const int NAME = <number>;` declaration, located by NAME rather than by
+// the number it holds, so the fault survives the constant's own value changing
+// later. Used for the tab-underline fault below rather than hand-editing
+// B[1].TAB_UNDERLINE_INSET in process: this file's constant faults are perturbed
+// through consts()'s own parse (a source edit), not poked into the parsed object,
+// because CONST_FAULT above is deliberately kept to the one entry it already has.
+function bumpConstInt(src, name, add) {
+  return src.replace(new RegExp(`(const int ${name}\\s*=\\s*)(-?\\d+)(\\s*;)`),
+    (_, pre, num, semi) => `${pre}${Number(num) + add}${semi}`);
+}
 const SOURCE_FAULTS = [
   ["usageCodexShown() is neutered to `return true;` (board 1 draws CODEX -- for ever)",
     "usage.ino", (t) => bodyOf(t, "bool usageCodexShown()", "\n  return true;\n"),
@@ -107,6 +117,14 @@ const SOURCE_FAULTS = [
       return e < 0 ? t : t.slice(0, e) + smother(t.slice(e), "if (codexShownCache != codexShownNow)");
     },
     "board 1's flip block carries a dead-code guard"],
+  // Task 4 fix round 1: TAB_UNDERLINE_INSET grows past the point where board 1's
+  // accent underline (tabW - 2*inset = 60 - 2*10 = 40) stays WIDER than the label
+  // it sits under (SESSIONS/PROJECTS/SETTINGS, 48px) - the exact inversion the
+  // 4-tab layout produced with the old transcribed-16 margin, now reachable only
+  // by editing the header rather than by adding a fifth tab.
+  ["board 1's TAB_UNDERLINE_INSET widens until its accent underline goes narrower than the label above it",
+    "board_e32r28t.h", (t) => bumpConstInt(t, "TAB_UNDERLINE_INSET", 6),
+    'tab label "SESSIONS"'],
 ];
 if (SOURCE_FAULT_INDEX >= 0) {
   const f = SOURCE_FAULTS[SOURCE_FAULT_INDEX];
@@ -641,9 +659,21 @@ for (const b of [1, 2]) {
   // and no REC group to measure. The divisor is TAB_COUNT rather than the literal 3
   // it used to be - this file is the ONLY place in the tree that asserts tab-bar
   // geometry at all, so a transcribed count here had nothing behind it.
+  //
+  // THE MARGIN IS 2*TAB_UNDERLINE_INSET, NOT A TRANSCRIBED 16 - the same rule,
+  // one constant over. A literal 16 here would satisfy this assertion forever
+  // regardless of what drawTabBar() actually insets its underline by, which is
+  // exactly how a fourth tab went unnoticed until it inverted the invariant this
+  // line exists to hold: the accent underline (tabW - 2*inset) must stay WIDER
+  // than the word it sits under, or it reads as a rendering glitch rather than a
+  // style choice. c.TAB_UNDERLINE_INSET is parsed out of the board header by
+  // consts() like every other constant this file reads - it is not re-derived
+  // here.
   const tabW = Math.floor(W / c.TAB_COUNT);
-  chk(bodyTextWidth(b, "SESSIONS") < tabW - 16,
-      `tab label "SESSIONS" ${bodyTextWidth(b, "SESSIONS")}px inside a ${tabW}px tab (${c.TAB_COUNT} tabs share ${W})`);
+  const underlineW = tabW - 2 * c.TAB_UNDERLINE_INSET;
+  chk(bodyTextWidth(b, "SESSIONS") < underlineW,
+      `tab label "SESSIONS" ${bodyTextWidth(b, "SESSIONS")}px inside a ${underlineW}px underline `
+      + `(${tabW}px tab, ${c.TAB_COUNT} tabs share ${W}, inset ${c.TAB_UNDERLINE_INSET})`);
 
   // --- the STANDALONE WAITING SCREEN, which lives on this tab ---
   //

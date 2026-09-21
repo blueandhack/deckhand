@@ -242,6 +242,16 @@ const int HERO_LINE_H = 26;
 // rows of a real 12-row ascent, which is not the same trade at all.
 const int VOICE_LBL_STEP = 12;
 const int TAB_BAR_H = 34;
+// The active tab's accent underline, drawTabBar()'s
+// `fillRect(i*tabW + TAB_UNDERLINE_INSET, TAB_BAR_H - 3, tabW - 2*TAB_UNDERLINE_INSET, 3)`.
+// An 8px inset (the value this replaced) was sized for a 3-tab, ~106px-wide slot; at 4
+// tabs (60px here) it made the underline (tabW - 16 = 44) NARROWER than an 8-character
+// label like SESSIONS/PROJECTS/SETTINGS (48px) - an underline shorter than the word it
+// underlines reads as a rendering glitch, not a style choice. 4 gives 60 - 8 = 52 > 48.
+// Declared per board, even though today's value matches board 2's: everything
+// board-specific lives in the headers, and the two boards' tab counts/widths/fonts can
+// diverge from each other later even if they don't today.
+const int TAB_UNDERLINE_INSET = 4;
 const int CONTENT_Y = TAB_BAR_H;
 // Persistent footer (clock + last-updated), visible under both tabs. Content
 // clearing/redraw on either tab must stop above this band, not paint over it.

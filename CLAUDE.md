@@ -129,7 +129,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `278f0e3e57e07748...`, size 1423920 (board 2: `4010965bdecbb0c8...`, size 1148768).
+Today: `f5c7bbf1218eb946...`, size 1423920 (board 2: `b7b9e29ef6908baf...`, size 1148768).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size

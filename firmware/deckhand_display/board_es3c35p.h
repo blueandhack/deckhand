@@ -534,6 +534,18 @@ const int TAP_MIN = 46;   // 7.1mm, the same fingertip floor board 1 targets
 // underlines at TAB_BAR_H - 3, and drawFab() sits at recCY() = TAB_BAR_H / 2 -
 // every offset in the bar is already derived from this constant.
 const int TAB_BAR_H = 46;
+// The active tab's accent underline, drawTabBar()'s
+// `fillRect(i*tabW + TAB_UNDERLINE_INSET, TAB_BAR_H - 3, tabW - 2*TAB_UNDERLINE_INSET, 3)`.
+// An 8px inset (the value this replaced) was sized for a 3-tab, ~106px-wide slot; at 4
+// tabs (80px here) it made the underline (tabW - 16 = 64) exactly as wide as an
+// 8-character label like SESSIONS/PROJECTS/SETTINGS (64px, Spleen 8x16) - zero slack,
+// which the strict `<` in usage-geom-check.mjs's tab-bar assertion reads as a fail: an
+// underline the same width as the word it sits under is indistinguishable from one
+// narrower than it. 4 gives 80 - 8 = 72 > 64. Declared per board, even though today's
+// value matches board 1's: everything board-specific lives in the headers, and the two
+// boards' tab counts/widths/fonts can diverge from each other later even if they don't
+// today.
+const int TAB_UNDERLINE_INSET = 4;
 const int CONTENT_Y = TAB_BAR_H;
 // 20, up from 18, because T_BODY is now a 16px line and drawIfChanged clears
 // th + 2 = 18 rows - which fits an 18px band EXACTLY, with no room for the 1px
