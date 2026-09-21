@@ -209,6 +209,47 @@ that reads as a call to action:
 The band costs vertical space, which on a 5-row scrolling list is a real price. It is paid
 because the alternative is a screen that lies.
 
+### THE LIVE TAB DOES NOT CHANGE. THE CODE THAT DRAWS IT DOES, AND THE CACHE WILL BITE.
+
+Online, this feature changes nothing on the SESSIONS tab: same five rows, same ranking, same
+colours, same signatures. That is deliberate and it is the user's call.
+
+But offline mode is rendered by the SAME row painter, and that painter is change-only. A row
+repaints solely when this string changes (`sessions.ino`):
+
+```c
+snprintf(sig, sizeof(sig), "%s|%s|%s|%s|%s|%d", sessions[i].name, sessions[i].status, sub,
+         sessions[i].title, dispMacTag(sessions[i].hostSlot), emojiIdForLink(sessions[i].hostSlot));
+```
+
+**The dot COLOUR is not in that signature** - it is derived from `status`. So forcing every dot
+to `COLOR_UNKNOWN` on going offline changes no signed field: `status` is still `asking`, the
+signature compares EQUAL, the row is skipped, and every dot keeps its live colour under a band
+that says OFFLINE. That is CLAUDE.md's rule firing exactly as it is written - "A colour-only
+change reaches no text-comparing cache at all and must bust it explicitly" - and it would
+present as "the grey dots did not work" rather than as a caching bug.
+
+The band is also a LAYOUT change: it shifts every row down by its height. `sessions.ino` already
+knows this class - a scroll step clears all of `rowSigCache[]` in three separate places because
+"a new row pushes every row below it up" is something row signatures alone cannot carry.
+
+Therefore, and these are requirements, not suggestions:
+
+1. **Offline-ness is IN the row signature**, as its own field. Not inferred, not implied by
+   `status` - a flag in the signed string, so every row's signature differs between the two
+   modes by construction.
+2. **The offline transition calls `forceFullRepaint()`**, in both directions. It is a mode
+   change with a layout shift and a palette change in it; nothing smaller is safe, and the
+   transition is rare enough that a full repaint costs nothing anyone will see.
+3. **The band gets its own `drawIfChanged` cache**, and that cache is reset when the band's
+   chrome is repainted - the other half of the same rule: "a field whose CHROME is repainted
+   must have its cache reset or the value is left BLANK".
+
+A checker assertion belongs on (1): that the signature built in the row painter names the
+offline flag. It is exactly the shape `sessions-geom-check.mjs` already asserts for the title
+and the Mac tag, both of which were added to the signature after shipping stale for the same
+reason.
+
 ## Writes: never on the tick
 
 | what | when |
