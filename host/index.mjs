@@ -27,7 +27,7 @@ import {
 } from "./voice-answer.mjs";
 import { resolveSessionId } from "./session-lookup.mjs";
 import { pickTranscript } from "./project-index.mjs";
-import { makeProjectReplies } from "./project-replies.mjs";
+import { makeProjectReplies, countUserTurns } from "./project-replies.mjs";
 import { postToSessionInbox } from "./session-inbox.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
 import { macTag } from "./host-tag.mjs";
@@ -1741,11 +1741,23 @@ async function headLines(dir, file, n) {
 }
 // Title comes straight from transcriptInfo() - the existing 64KB-tail read -
 // rather than a second parser here; turn count is the one piece nothing
-// upstream computes, so it is counted from the same streamed lines.
+// upstream computes, so it is counted from the same streamed lines, via
+// countUserTurns() (host/project-replies.mjs) rather than a raw line count -
+// see that function's own comment for why (a raw count over-reports by ~64x).
+//
+// THE FULL-FILE READ STAYS UNBOUNDED, ON PURPOSE, and was priced rather than
+// assumed: `cat *.jsonl | wc -l`, warm, over this Mac's own largest project
+// directory (~/.claude/projects/-Users-yujia-projects-deckhand, 321,900 KB
+// across 22 files) took 0.103s; the second largest (-Users-yujia-work-
+// synthropic-agent-ui, 311,528 KB across 54 files) is the same order of
+// magnitude. Measured 2026-09-21. Against a PROJSESS request that already
+// costs ~200ms on the wire, that is affordable - and a bounded (tail-only)
+// read would make the turn count approximate for precisely the long sessions
+// where it is most worth having right.
 async function sessionInfo(dir, file) {
   const tx = await transcriptInfo(path.join(PROJECTS_DIR, dir, file));
   const lines = await headLines(dir, file, Number.MAX_SAFE_INTEGER);
-  return { title: tx.title, turns: lines.filter((l) => l.trim().length > 0).length };
+  return { title: tx.title, turns: countUserTurns(lines) };
 }
 const { buildProjectsReply, buildProjSessReply, countInventory } = makeProjectReplies({
   listDirs: () => fs.readdir(PROJECTS_DIR),

@@ -61,6 +61,51 @@ function secondsSinceMidnight(ms) {
   return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
 }
 
+// A session's transcript is one JSON record per line, and most of those
+// records are NOT something the person typed: tool_use, tool_result, system
+// and summary/meta lines (queue-operation and friends) all share the file.
+// Counting every non-blank line - the first version of this did - measured
+// 10,992 on this repo's own largest session against 171 lines a person
+// actually wrote: 64x too high, and entirely PLAUSIBLE on a session row, so
+// nobody would have caught it without independently counting.
+//
+// A genuine user turn is a record with type "user" whose content is NOT a
+// tool result. Claude Code's own transcript format has no field that says
+// "this is what the user typed" more directly than that - a "user"-typed
+// record with an array `content` made only of tool_result blocks is the
+// SDK feeding a tool's output back in, not the person; there is no existing
+// helper elsewhere in host/ for this distinction (histItems() in index.mjs
+// branches on `b.type === "tool_result"` per content BLOCK for a different
+// purpose - building the scrollback/reader preview - so this reuses that
+// same field-level test rather than inventing a new one).
+export function countUserTurns(lines) {
+  let n = 0;
+  for (const line of lines) {
+    if (!line || !line.trim()) continue;
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    if (d.type !== "user") continue;
+    const c = d.message?.content;
+    if (typeof c === "string") { n++; continue; } // a plain-text user turn
+    if (!Array.isArray(c)) continue;
+    if (c.some((b) => b && b.type === "tool_result")) continue; // the tool's own output, not the person
+    n++;
+  }
+  return n;
+}
+
+// THE FONTS ARE ASCII 0x20..0x7E AND NOTHING ELSE (CLAUDE.md) - an
+// out-of-range byte draws nothing and advances nothing, so it is invisible
+// corruption rather than a fallback glyph. Every other device-bound string in
+// this module goes through deviceText(), but `k` cannot: the device stores it
+// and sends it back verbatim to ask for that project's sessions (PROJSESS
+// <key>), so transliterating it would break the round-trip to the real
+// directory - toAscii() is lossy (e.g. every unmappable character collapses
+// to the same '?'), and a wire key must be exact or it is wrong. So a
+// directory name outside the device's own font range is skipped entirely
+// rather than mangled - see the skip site below.
+const DEVICE_ASCII = /^[\x20-\x7e]*$/;
+
 export function makeProjectReplies({ listDirs, listFiles, statMs, headLines, sessionInfo }) {
   // Keyed by directory: a project's cwd never changes once written, so
   // resolving it costs a bounded read (headLines, not the whole file) at most
@@ -105,6 +150,14 @@ export function makeProjectReplies({ listDirs, listFiles, statMs, headLines, ses
       try { files = await listFiles(d); } catch { continue; }
       const jsonls = files.filter((f) => f.endsWith(".jsonl"));
       if (!jsonls.length) continue; // a project dir with no transcript is not a project
+      // SKIPPED, NOT TRANSLITERATED - see DEVICE_ASCII's comment above: `k`
+      // must round-trip to this exact directory, which toAscii() cannot
+      // guarantee. Named so silence here is never mistaken for "impossible" -
+      // the device end has no other way to learn a project went missing.
+      if (!DEVICE_ASCII.test(d)) {
+        console.error(`PROJECTS: skipping "${d}" - its directory name is not pure device-ASCII (0x20-0x7E) and cannot be sent as a wire key without corrupting the round-trip.`);
+        continue;
+      }
       let newestMs = 0;
       for (const f of jsonls) {
         let ms = 0;
@@ -185,6 +238,9 @@ export function makeProjectReplies({ listDirs, listFiles, statMs, headLines, ses
     try { dirs = await listDirs(); } catch { return { projectCount: 0, sessionTotal: 0 }; }
     let projectCount = 0, sessionTotal = 0;
     for (const d of dirs) {
+      // Kept in step with buildProjectsReply's own skip, so this counter
+      // never claims more projects than PROJECTS would ever list.
+      if (!DEVICE_ASCII.test(d)) continue;
       let files = [];
       try { files = await listFiles(d); } catch { continue; }
       const n = files.filter((f) => f.endsWith(".jsonl")).length;

@@ -49,6 +49,9 @@ function readersFrom(fixture) {
 // unshortened, so an equality assertion against it proves the module used the
 // key WHOLE rather than decoding or truncating it for an unrelated reason.
 const OPAQUE_KEY = "-a-b-c";
+// A directory name outside the device's font range (0x20-0x7E) - ö is
+// 'o' with an umlaut/diaeresis.
+const NON_ASCII_KEY = "-Users-yujia-wörk";
 
 function fixtureBasic() {
   return {
@@ -87,6 +90,13 @@ function fixtureBasic() {
     "-Users-yujia-not-a-project": {
       files: { "notes.txt": { ms: 1, lines: [] } },
     },
+    // a directory name that is itself outside the device's font range
+    // (0x20-0x7E) - `k` must be skipped rather than mangled, since it has to
+    // round-trip exactly for PROJSESS to work. Has a real .jsonl, so if the
+    // skip were missing this WOULD otherwise be listed.
+    [NON_ASCII_KEY]: {
+      files: { "eeeeeeeeeeee.jsonl": { ms: 999, lines: [] } },
+    },
   };
 }
 
@@ -111,7 +121,9 @@ function suite(makeMod, check) {
       Object.keys(res.projs).sort(), ["items"]);
     check("a project with no .jsonl at all is not listed",
       res.projs.items.some((it) => it.k === "-Users-yujia-not-a-project"), false);
-    check("every project with at least one .jsonl is listed",
+    check("a project whose directory name is outside device-ASCII is skipped, not shipped",
+      res.projs.items.some((it) => it.k === NON_ASCII_KEY), false);
+    check("every ASCII project with at least one .jsonl is listed, and only those",
       res.projs.items.length, 3);
 
     for (const it of res.projs.items) {
@@ -129,6 +141,20 @@ function suite(makeMod, check) {
       byKey["-Users-yujia-work-cafe"].n, "cafe");
     check("a project's session count (c) is the number of its .jsonl files",
       byKey["-Users-yujia-work-claude-plugins"].c, 2);
+
+    // The skip must be NAMED, not silent - CLAUDE.md's rule that "silence and
+    // 'impossible here' must never look alike from the other end" applies to
+    // this Mac's own log just as much as to the wire. Captured rather than
+    // just trusted, so a fix that skips quietly still fails this suite.
+    {
+      const seen = [];
+      const realError = console.error;
+      console.error = (...args) => seen.push(args.join(" "));
+      try { await mod.buildProjectsReply(); }
+      finally { console.error = realError; }
+      check("the skipped non-ASCII directory is logged BY NAME",
+        seen.some((line) => line.includes(NON_ASCII_KEY)), true);
+    }
 
     // -----------------------------------------------------------------
     const withInventory = await mod.countInventory();
@@ -221,6 +247,43 @@ async function run(makeMod, quiet) {
 }
 
 // ---------------------------------------------------------------------------
+// countUserTurns() IN ISOLATION - it has no readers to fake, so it gets its
+// own tiny suite/run rather than being folded into suite()/run() above (which
+// only ever exercises whatever a `makeMod(readers)` factory produces, and
+// countUserTurns is a plain exported function, not part of that factory's
+// output). A user turn, a tool_result masquerading as a "user" record, an
+// assistant turn, and a queue-operation meta line - exactly the mix that made
+// a raw non-blank-line count 64x too high on a real transcript (measured:
+// 10,992 shipped vs. 171 lines a person actually wrote). Only the first is a
+// turn a PERSON authored.
+const TURN_LINES = [
+  '{"type":"user","message":{"content":"hello there"}}',
+  '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","is_error":false}]}}',
+  '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}',
+  '{"type":"queue-operation","operation":"enqueue"}',
+  "", // a blank line, as real transcripts have between some records
+];
+
+function runTurns(countUserTurnsFn, quiet) {
+  const failures = [];
+  let pass = 0;
+  const check = (name, got, want) => {
+    const ok = JSON.stringify(got) === JSON.stringify(want);
+    if (ok) { pass++; if (!quiet) console.log(`  PASS  ${name}`); }
+    else {
+      failures.push(name);
+      if (!quiet) console.log(`  FAIL  ${name}` +
+        `\n        got  ${JSON.stringify(got)}\n        want ${JSON.stringify(want)}`);
+    }
+  };
+  try {
+    check("countUserTurns counts only user-authored turns, not tool_result/assistant/meta lines",
+      countUserTurnsFn(TURN_LINES), 1);
+  } catch (e) { failures.push(`THREW: ${e.message}`); if (!quiet) console.log(`  FAIL  THREW: ${e.message}`); }
+  return { pass, failures };
+}
+
+// ---------------------------------------------------------------------------
 // THE STRUCTURAL HALF. Bound to readUsage's FUNCTION BODY specifically (never
 // the whole file - "a rule a neighbouring line can satisfy is not a rule"),
 // via brace-depth matching rather than the first "\n}" - readUsage is long
@@ -249,6 +312,17 @@ function suiteHost(check, hostSrc) {
     body.length > 0, true);
   check("the tick payload does not carry the project inventory (readUsage never builds buildProjectsReply or a projsess reply)",
     body.length > 0 && !/buildProjectsReply|projsess/.test(body), true);
+
+  // sessionInfo() is index.mjs's real-fs wiring for a session's turn count -
+  // bound to ITS body, again paired with a "found" assertion, so a
+  // regression back to a raw non-blank-line count (the 64x-too-high defect
+  // this fix round exists to close) fails by name rather than the suite
+  // simply going quiet on it.
+  const siBody = bodyOf(hostSrc, "sessionInfo");
+  check("sessionInfo's own function body was found (not empty, not renamed away)",
+    siBody.length > 0, true);
+  check("sessionInfo counts turns via countUserTurns(), not a raw line count",
+    siBody.length > 0 && /countUserTurns\(/.test(siBody), true);
 }
 
 function runHost(hostSrc, quiet) {
@@ -271,8 +345,9 @@ function runHost(hostSrc, quiet) {
 // ---------------------------------------------------------------------------
 if (!SELFTEST) {
   const r = await run(realModule.makeProjectReplies, false);
+  const rt = runTurns(realModule.countUserTurns, false);
   const rh = runHost(HOST_SRC, false);
-  const total = r.failures.length + rh.failures.length;
+  const total = r.failures.length + rt.failures.length + rh.failures.length;
   console.log(`\n${total} failure(s)`);
   process.exit(total ? 1 : 0);
 }
@@ -442,6 +517,27 @@ const faults = [
         return { projectCount, sessionTotal };
       },
     })],
+  ["a non-ASCII directory name ships anyway instead of being skipped",
+    (readers) => ({
+      ...realModule.makeProjectReplies(readers),
+      buildProjectsReply: async () => {
+        // Same shape as the real function, minus the DEVICE_ASCII guard -
+        // the exact regression finding 3 exists to prevent: `k` corrupted
+        // (or here, merely un-filtered) on its way to the wire.
+        let dirs = [];
+        try { dirs = await readers.listDirs(); } catch { return { projs: { items: [] } }; }
+        const out = [];
+        for (const d of dirs) {
+          let files = [];
+          try { files = await readers.listFiles(d); } catch { continue; }
+          const jsonls = files.filter((f) => f.endsWith(".jsonl"));
+          if (!jsonls.length) continue;
+          out.push({ k: d, n: d.slice(0, 22), c: jsonls.length, t: -1 }); // BUG: no ASCII guard
+        }
+        out.sort((a, b) => b.c - a.c);
+        return { projs: { items: out } };
+      },
+    })],
 ];
 
 let caught = 0;
@@ -449,6 +545,26 @@ for (const [name, makeMod] of faults) {
   const r = await run(makeMod, true);
   if (r.failures.length) {
     caught++;
+    console.log(`  caught  ${name}`);
+    console.log(`            by: ${r.failures[0]}` +
+      (r.failures.length > 1 ? ` (+${r.failures.length - 1} more)` : ""));
+  } else {
+    console.log(`  MISSED  ${name}  <- no assertion notices this`);
+  }
+}
+
+// countUserTurns faults - its own small loop, mirroring the pattern above but
+// against runTurns() rather than run().
+const turnFaults = [
+  ["countUserTurns reverts to counting every non-blank line, tool_result/assistant/meta included",
+    (lines) => lines.filter((l) => l && l.trim().length > 0).length],
+];
+
+let turnCaught = 0;
+for (const [name, fn] of turnFaults) {
+  const r = runTurns(fn, true);
+  if (r.failures.length) {
+    turnCaught++;
     console.log(`  caught  ${name}`);
     console.log(`            by: ${r.failures[0]}` +
       (r.failures.length > 1 ? ` (+${r.failures.length - 1} more)` : ""));
@@ -475,6 +591,11 @@ const hostFaults = [
       "async function readUsage() {",
       "async function readUsage() {\n  await buildProjectsReply(); // regression: inventory back on the tick\n"
     )],
+  ["sessionInfo regresses to a raw non-blank-line count instead of countUserTurns()",
+    HOST_SRC.replace(
+      "return { title: tx.title, turns: countUserTurns(lines) };",
+      'return { title: tx.title, turns: lines.filter((l) => l.trim().length > 0).length };'
+    )],
 ];
 
 let hostCaught = 0;
@@ -490,7 +611,7 @@ for (const [name, hostSrc] of hostFaults) {
   }
 }
 
-const totalFaults = faults.length + hostFaults.length;
-const totalCaught = caught + hostCaught;
+const totalFaults = faults.length + turnFaults.length + hostFaults.length;
+const totalCaught = caught + turnCaught + hostCaught;
 console.log(`\nselftest: ${totalCaught}/${totalFaults} faults caught`);
 process.exit(totalCaught === totalFaults ? 0 : 1);
