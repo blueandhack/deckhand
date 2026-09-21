@@ -26,7 +26,7 @@ import {
   ANSWER_TEXT_MAX_BYTES as VOICE_ANSWER_TEXT_MAX_BYTES,
 } from "./voice-answer.mjs";
 import { resolveSessionId } from "./session-lookup.mjs";
-import { pickTranscript } from "./project-index.mjs";
+import { pickTranscript, cwdFromLines, SCAN_LINES } from "./project-index.mjs";
 import { makeProjectReplies, countUserTurns } from "./project-replies.mjs";
 import { postToSessionInbox } from "./session-inbox.mjs";
 import { verifyPrompt, verifyTypedAnswer } from "./typed-answer.mjs";
@@ -3938,6 +3938,103 @@ async function handleDeviceLine(line, via, pairGen = 0) {
       `PROJSESS: sent ${fitted.bytes} bytes (${reply.projsess.items.length}/${reply.projsess.total} ` +
       `session(s) for "${key}") via ${linkLabel(replyLink?.id ?? "none")}`
     );
+    return;
+  }
+  // `RESUME <id> <text>` - a HEADLESS continuation of ANY session, live or
+  // ended, sent by deckhand_display.ino's own RESUME <text> device command
+  // (the id is scrollLoadedId - whichever transcript the scrollback surface
+  // currently has open). THIS IS NOT AN INTERACTIVE SESSION: `claude -p
+  // --resume` runs ONE headless turn and exits - the session hook
+  // republishes the record afterwards, which is how it reappears in the live
+  // list. There is no terminal on the Mac for this to open, and the device's
+  // own RESUME handler refuses before ever sending this line when the
+  // transcript it has open is LIVE (the design's own warning: a headless run
+  // appending to a session someone is actively driving becomes a second,
+  // concurrent author of it) - this handler does not re-derive that guard,
+  // the same division of labour PROJSESS's key-staleness check draws between
+  // device and host.
+  //
+  // `id` IS THE OPAQUE 12-CHAR SESSION ID, taken verbatim - never split,
+  // decoded or otherwise interpreted, PROJSESS's own `key` precedent for why
+  // an id (or here, a directory name derived FROM one) is handled as one
+  // opaque unit. Everything after the first space is `text`, UNTRIMMED
+  // except for its own surrounding whitespace - it is a prompt, not a
+  // wire token, and may itself contain spaces.
+  if (line.startsWith("RESUME ")) {
+    const rest = line.slice("RESUME ".length).trim();
+    const sp = rest.indexOf(" ");
+    const id = sp < 0 ? rest : rest.slice(0, sp);
+    const text = sp < 0 ? "" : rest.slice(sp + 1).trim();
+    console.log(`[device/${linkLabel(via)}] ${line}`);
+    if (!id || !text) {
+      console.log(`RESUME refused: ${!id ? "no session id" : "no text"} in "${line}"`);
+      return;
+    }
+    // DEDUPED LIKE PROJECTS/PROJSESS/HISTORY, and it matters MORE here: unlike
+    // a read, this is NOT idempotent - it is a real headless turn - and the
+    // trigger-file path delivers every command over BOTH transports, so a
+    // cabled device sends this twice within milliseconds. A missed dedupe
+    // here does not stall a fetch, it sends the SAME prompt into the SAME
+    // conversation twice.
+    const now = Date.now();
+    for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
+    const reqKey = `${scrollSenderKey(via)}|resume|${id}|${text}`;
+    if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
+    scrollReqSeen.set(reqKey, now);
+
+    // BROADCAST FROM THE DEVICE, SO RESOLVED THE SAME WAY HERE - the device
+    // does not know which paired Mac's filesystem holds this session
+    // (scrollOpenById()'s own note: the project inventory is not owned by
+    // whichever Mac is "active"), so every paired Mac's host process sees
+    // this line and only the one that actually HAS the transcript acts on
+    // it; the rest refuse below, by name, and do nothing.
+    const transcript = await transcriptPathFor(id);
+    if (!transcript) {
+      console.log(`RESUME ${id}: not found on this Mac - refusing (another paired Mac may hold it)`);
+      return;
+    }
+    // THE SESSION'S OWN cwd, so the resumed turn runs FROM the right project -
+    // buildProjectsReply()'s own cwdForProject() reads this same way (SCAN_LINES
+    // lines, cwdFromLines()), just against the ONE transcript file this request
+    // already resolved rather than the newest in its directory. Left undefined
+    // (execFile's own default: this process's cwd) rather than refused when it
+    // cannot be found - a resume that runs from the wrong cwd is still better
+    // than one refused outright over a field this device does not need to see
+    // succeed.
+    let cwd;
+    try {
+      const dir = path.basename(path.dirname(transcript));
+      const file = path.basename(transcript);
+      cwd = cwdFromLines(await headLines(dir, file, SCAN_LINES)) || undefined;
+    } catch {
+      cwd = undefined;
+    }
+
+    console.log(`RESUME ${id}: claude -p --resume ${id} (headless turn, cwd ${cwd || "unresolved"})`);
+    // Detached, the transcribeAndDispatch() dispatch arm's own shape: a
+    // resumed turn can run for minutes and must not block this poller.
+    // stdin ignored: `claude -p` otherwise waits on it and warns "no stdin
+    // data received in 3s" before proceeding.
+    const child = execFile(
+      CLAUDE_BIN,
+      ["-p", "--resume", id, text],
+      { cwd, maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] },
+      (err, stdout, stderr) => {
+        if (err) {
+          console.error(`RESUME ${id}: claude failed: ${(stderr || err.message).split("\n")[0]}`);
+          return;
+        }
+        // Log the reply itself, not just its length - transcribeAndDispatch()'s
+        // own note: without it a resume is a black hole, and the session hook's
+        // own republish is the only OTHER place this reply becomes visible.
+        const reply = stdout.trim().replace(/\s+/g, " ");
+        console.log(
+          `RESUME ${id}: claude replied (${reply.length} chars): ` +
+            (reply.length > 400 ? reply.slice(0, 400) + " ..." : reply)
+        );
+      }
+    );
+    child.unref?.();
     return;
   }
   // Audio first, and deliberately unlogged - see the note above.

@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1424640, RAM 72044 | flash 1155248, RAM 63764 |
+| size today | flash 1425248, RAM 72044 | flash 1157376, RAM 63812 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -149,7 +149,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `13be1f3a5662db85...`, size 1424640 (board 2: `e4976e956dd034bd...`, size 1155248).
+Today: `fb974d9e5f9d3e00...`, size 1425248 (board 2: `c7dc76b6c89d34c4...`, size 1157376).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size
@@ -296,6 +296,8 @@ one is neither handled nor refused.
 | `POWERPROBE <label>` | mV/h in the current state; **battery only**, refuses on USB with the cause |
 | `AUDIOPROBE` / `TONETEST [vol]` / `TONELADDER` | a ladder of claims: on the bus / configured and playing / find the audible floor |
 | `SCROLLFETCH` / `SCROLLOPEN` / `SCROLLTO [line]` / `SCROLLPERF [top\|code\|line]` / `SCROLLCLOSE` | board 2 transcript: fetch without drawing, open, park, measure, close |
+| `PROJFETCH` / `PROJOPEN <n>` / `PSESSOPEN <n>` | board 2 PROJECTS: fetch level 1 without a tap, open project `n`'s own sessions (level 2), open session `n`'s transcript (level 3, the EXISTING scrollback surface via `scrollOpenById()` - no new reader). Each refuses BY NAME on a non-numeric or out-of-range index, PROJECTS not being the live tab, `PSESSOPEN` additionally on level 2 not being open yet or another full-screen surface being up. Board 1 refuses all three from `UNAVAILABLE_COMMANDS[]` |
+| `RESUME <text>` | a HEADLESS continuation (`claude -p --resume <id> <text>`) of whichever transcript is open, addressed to `scrollLoadedId`. **This does not open a session on the Mac** - one turn runs, replies, and exits; the session hook republishes the record afterwards, which is how it reappears in the live list. Refuses BY NAME on no transcript open, on a LIVE session (a headless turn would become a second, concurrent author of it - `scrollFromProjects`/`scrollProjLive` gate this), and on empty text. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]`. Not yet reachable from a tap - see `docs/reference/scrollback.md` |
 | `BLEMTU` | board 2: the negotiated ATT MTU per link |
 | `SDPROBE` | board 2: mount the microSD over SDMMC, report, unmount. Tries 4-bit then 1-bit and REPORTS WHICH WIDTH WON - "4-bit failed, 1-bit worked" is a wiring story and "both failed" is a card-or-slot story. `CARD_NONE` after a successful mount is a THIRD outcome (the slot is empty), not a failure. Measured 2026-09-20: `ok width=4 type=SDHC size=14911MB`. Leaves GPIO 2..7 as it found them, which nothing else in this firmware touches. Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` - and that refusal is NOT "board 1 has no slot", it has one, wired for SPI rather than SDMMC |
 | `SDPERF` | board 2: times SD writes, reads and an APPEND, from a PSRAM source buffer because that is where `scrollText` lives - a DRAM-sourced write measures a path the real code never takes. Measured 2026-09-20: write 2048/49152/262144 B in 9/23/66ms, read in 2/9/40ms, append 2048 to a 262144 B file in 9ms, open+close 5ms. **The append costing the same as a small write, not the same as the 66ms rewrite, is what the offline-sessions hybrid write policy stands on.** Board 1 refuses it from `UNAVAILABLE_COMMANDS[]` |

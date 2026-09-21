@@ -154,6 +154,16 @@ if (SELFTEST) {
   // the surviving copy. Also expected to trip the drawRegion equivalence check,
   // since the reverted path's text no longer matches its twin - the same
   // double coverage `headend-one-path` above produced.
+  // TASK 7 (sessions manager): proves scrollOpenById's id-source assertion
+  // actually binds rather than passing because sessions[detailIndex].id
+  // happens to appear nowhere in the file. Routes the fetch through
+  // detailIndex instead of the function's own id12 argument - exactly the
+  // defect that made a PROJECTS-opened, non-live session show whichever
+  // session SESSIONS' own detail card happened to be behind (or crash on
+  // detailIndex == -1). The string is unique in the comment-stripped file
+  // (scrollOpenById's own call), so a plain replace hits only it.
+  if (fault === "scrollopenbyid-detailindex")
+    INO = INO.replace("scrollFetch(id12, 0, true);", "scrollFetch(sessions[detailIndex].id, 0, true);");
   if (fault === "lang-one-path")
     INO = INO.replace(
       "const uint16_t fg = (lf & SCROLL_F_HEAD) ? COLOR_ACCENT\n" +
@@ -748,10 +758,45 @@ present(parseArmBody, /seq != scrollNextSeq/,
   "structural: the discontinuity is tested on seq against the expected next, by operand");
 
 // The request picks its budget by TRANSPORT - BLE cannot have the whole thing.
-const reqBody = body(INO, "void requestScrollback(int idx)", "scrollback.ino");
+// Bound to scrollFetch(), NOT requestScrollback(): Task 7 pulled the busy
+// guard/cache-check/wire-line logic (this budget selection included) out of
+// requestScrollback() into a shared core both it and scrollOpenById() call,
+// so requestScrollback()'s own body is now four lines and this assertion
+// moved to where the logic actually lives - the identical maintenance
+// PROJSESS's own psessPending fix round required elsewhere on this branch.
+const reqBody = body(INO, "void scrollFetch(const char* id, uint8_t hostSlot, bool broadcast)", "scrollback.ino");
 present(reqBody, /usbLinkActive\(\)/, "structural: the fetch budget is chosen by transport, not fixed");
 present(reqBody, /SCROLL_TAIL_BYTES_USB/, "structural: the USB tail budget is a named constant");
 present(reqBody, /SCROLL_TAIL_BYTES_BLE/, "structural: the BLE tail budget is a named constant");
+
+// ---------------- STRUCTURAL: scrollOpenById (Task 7) ----------------
+//
+// THE WHOLE POINT OF THIS ENTRY POINT: scrollLoadedId, the id the transcript
+// is fetched and later re-fetched/matched by, must come from scrollOpenById's
+// OWN id12 argument - NEVER from sessions[detailIndex].id. detailIndex names
+// whichever session SESSIONS' own detail card is behind, which has no
+// relationship to a PROJECTS-opened row (the two can disagree - a PROJECTS
+// open can happen with an unrelated, or no, detail card behind it), and
+// reading through it here would silently show the WRONG transcript. Bound to
+// scrollOpenById's OWN body, not to the file, per this task's own
+// instruction - a `sessions[detailIndex].id` sitting somewhere else in
+// scrollback.ino (requestScrollback's own, legitimate use of it) must not
+// satisfy an assertion about THIS function.
+const openBody = body(INO, "void scrollOpenById(const char* id12, const char* title)", "scrollback.ino");
+absent(openBody, /sessions\[/,
+  "structural: scrollOpenById never reads sessions[] for the id it loads - detailIndex has no meaning for a PROJECTS-opened id");
+absent(openBody, /detailIndex/, "structural: scrollOpenById never reads detailIndex");
+present(openBody, /scrollFetch\(id12,/,
+  "structural: scrollOpenById passes its OWN id12 argument to the fetch, not a derived one");
+
+// scrollFetch() IS THE ONE PLACE scrollLoadedId IS EVER WRITTEN (both
+// requestScrollback() and scrollOpenById() route through it) - bound here
+// too (reusing reqBody, scrollFetch's own body, parsed just above), so the
+// invariant holds even though the actual assignment is not textually inside
+// scrollOpenById's own body.
+present(reqBody, /strncpy\(scrollLoadedId, id,/,
+  "structural: scrollLoadedId is set from scrollFetch's own id argument");
+absent(reqBody, /sessions\[/, "structural: scrollFetch itself never reads sessions[] either - every caller resolves an id first");
 
 // ---------------- STRUCTURAL: touch (Task 5) ----------------
 
@@ -963,6 +1008,7 @@ if (SELFTEST) {
     "lang-no-flag": /a language row has its own flag/,
     "lang-any-fence": /the language row is emitted on the OPENING fence only/,
     "lang-one-path": /BOTH draw paths draw a language row dim/,
+    "scrollopenbyid-detailindex": /scrollOpenById never reads sessions\[\] for the id it loads/,
   }[process.env.SB_FAULT || "wrap-cap"];
   const hit = FAILED.find(x => WANT.test(x));
   if (!hit) { console.log(`SELFTEST FAILED: fault ${process.env.SB_FAULT || "wrap-cap"} was not caught`); process.exit(1); }

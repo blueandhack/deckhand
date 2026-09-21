@@ -953,11 +953,24 @@ void handlePSessTouch(int sx, int sy) {
     if (dragged) return;
   }
 
-  // A TAP: level 3 (this session's own transcript) is a later task's
-  // interface, not this one's - level 1's own boundary until THIS task,
-  // now level 2's - so a tap on a row does nothing here rather than
-  // guessing at a wire verb that does not exist yet.
+  // A TAP OPENS LEVEL 3 - this session's own transcript, in the EXISTING
+  // scrollback surface (scrollback.ino's scrollOpenById()), the whole point
+  // of this task ("no new reader"). psessRowAtY() answers "which row, if
+  // any" the same way projRowAtY()/sessionRowAtY() do for their own lists;
+  // -1 (a gap) and the honesty row past the last real session (pos ==
+  // psessCount, "N more sessions" - drawPSessRow()'s own note) both do
+  // nothing, the identical reason a tap on SESSIONS' own overflow row is
+  // inert: there is no session at that position to open.
   int pos = psessRowAtY(sy);
-  (void) pos;
+  if (pos >= 0 && pos < psessCount) {
+    // scrollProjLive SET FIRST, BEFORE scrollOpenById() - that function's
+    // own two-argument signature has no room for the wire's `live` bit, and
+    // scrollOpenById()'s own header explains why the caller states it here
+    // rather than scrollOpenById() trying to re-derive it. RESUME's guard
+    // (deckhand_display.ino) reads it to refuse a headless turn against a
+    // session someone may be driving interactively right now.
+    scrollProjLive = psess[pos].live != 0;
+    scrollOpenById(psess[pos].id, psess[pos].title);
+  }
 }
 #endif  // BOARD_HAS_PROJECTS

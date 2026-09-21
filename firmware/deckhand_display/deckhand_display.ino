@@ -1892,6 +1892,14 @@ extern int      scrollTotal;
 extern int      scrollDropped;
 extern uint8_t  scrollHostSlot;
 extern int      scrollNewBelow;
+// Task 7's own additions to the same forward-declared set, for the same
+// reason: projects.ino (BEFORE scrollback.ino in the concatenation order)
+// sets scrollProjLive ahead of scrollOpenById(), and the RESUME command
+// below (this file) reads scrollLoadedId/scrollFromProjects/scrollProjLive
+// directly, all three defined for real in scrollback.ino.
+extern char scrollLoadedId[16];
+extern bool scrollFromProjects;
+extern bool scrollProjLive;
 #endif
 
 // Second level: ONE entry, in full, in its own pager. The list rows are previews, and an
@@ -6514,6 +6522,11 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "project in display order. This board is BOARD_HAS_PROJECTS 0, for the identical reason "
     "PROJFETCH above states: there is no project list here for an index to name a row of, "
     "and no PSessInfo/psess[] storage compiled in to hold what PROJSESS would answer with." },
+  { "PSESSOPEN",
+    "it opens level 3 - a PROJECTS session's own transcript, in the scrolling scrollback "
+    "surface - for the n-th session of the currently open project. This board is "
+    "BOARD_HAS_PROJECTS 0, for the identical reason PROJOPEN above states: there is no "
+    "psess[] here for an index to name a row of." },
 #endif
 #if BOARD_USES_TFT_ESPI
   { "SHIMBENCH",
@@ -6644,6 +6657,19 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
   { "SCROLLFETCH",
     "the scrolling transcript is BOARD_HISTORY_SCROLL 0 on this board, so there is nothing "
     "to fetch a transcript into; see SCROLLTO." },
+  // RESUME'S HANDLER SITS IN THE SAME NESTED REGION SCROLLFETCH'S DOES - inside
+  // the outer `#if !BOARD_USES_TFT_ESPI` that also wraps BOARD_HAS_WIRELESS_PAIR
+  // and BOARD_BLE_NIMBLE above it in the dispatch chain - so its guard is
+  // `!BOARD_USES_TFT_ESPI && BOARD_HISTORY_SCROLL` too, not BOARD_HISTORY_SCROLL
+  // alone the way SCROLLPERF's is (SCROLLPERF's own handler sits OUTSIDE that
+  // wrapper, elsewhere in the chain - checked by commands-check.mjs, not
+  // assumed, which is what caught this entry sitting in the wrong block on the
+  // first pass).
+  { "RESUME",
+    "it sends a headless `claude -p --resume <id> <text>` turn for whichever transcript "
+    "the scrolling scrollback surface has open. This board is BOARD_HISTORY_SCROLL 0: there "
+    "is no scrollLoadedId here to resume, and no scrolling transcript for one to belong to; "
+    "see SCROLLTO." },
 #endif
 #if !BOARD_HISTORY_SCROLL
   // SCROLLPERF's own guard is BOARD_HISTORY_SCROLL ALONE, where its four neighbours
@@ -7782,6 +7808,57 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
       requestScrollback(idx);
       Serial.printf("SCROLLFETCH: asked for session %d (%s)\n", idx, sessions[idx].name);
     }
+  } else if (buf.startsWith("RESUME")) {
+    // A HEADLESS CONTINUATION OF WHICHEVER TRANSCRIPT IS OPEN - COMPOSE's own
+    // `type <text>` shape (compose.ino), applied to scrollLoadedId, because
+    // that is the ONE session this screen is currently showing and the ONE a
+    // person reading it would mean by "resume this". THIS DOES NOT OPEN A
+    // SESSION ON THE MAC: the host runs `claude -p --resume <id> <text>`, ONE
+    // headless turn that starts, replies and exits - there is no interactive
+    // session for this, or any command, to open. The session hook
+    // republishes the record afterwards, which is how a resumed session
+    // reappears in the live list. Stated here so the log carries it even
+    // before this reaches a tappable control on the glass - see this task's
+    // own report for that gap.
+    //
+    // buf = "" before every early return - DETAIL's own note: buf is the
+    // accumulator, taken by REFERENCE, and a refusal that leaves it set
+    // refuses the same text again for ever.
+    if (!scrollActive || scrollLoadedId[0] == '\0') {
+      Serial.println("RESUME refused: no transcript is open (open one from PROJECTS first)");
+      buf = "";
+      return;
+    }
+    // A LIVE SESSION IS REFUSED BY NAME - the design's own warning: a
+    // headless run appending to a session someone may be driving
+    // interactively right now becomes a SECOND, CONCURRENT AUTHOR of the
+    // same conversation, neither able to see the other. scrollFromProjects
+    // is required too: a transcript opened the ordinary way (SESSIONS' own
+    // openScrollback()) is BY DEFINITION live - it came from sessions[] -
+    // and scrollProjLive defaults true besides, so either flag holding its
+    // default still refuses rather than silently allowing this.
+    if (!scrollFromProjects || scrollProjLive) {
+      Serial.println("RESUME refused: this session is LIVE - a headless turn "
+                     "would become a second, concurrent author of it");
+      buf = "";
+      return;
+    }
+    String arg = buf.length() > 6 ? buf.substring(6) : String("");
+    arg.trim();
+    if (arg.length() == 0) {
+      Serial.println("RESUME refused: no text (RESUME <text>)");
+      buf = "";
+      return;
+    }
+    // BROADCAST - scrollOpenById()'s own reasoning: the device has no
+    // hostSlot on file for a PROJECTS-opened id, so whichever paired Mac's
+    // filesystem actually holds this transcript is the one that acts on it
+    // (host/index.mjs's RESUME handler, via transcriptPathFor()).
+    String line = String("RESUME ") + scrollLoadedId + " " + arg;
+    sendLineToHost(line.c_str());
+    Serial.printf("RESUME: sent a headless turn for %s (%u chars) - no session "
+                  "opens on the Mac; the reply lands in its log, not here\n",
+                  scrollLoadedId, (unsigned) arg.length());
 #endif
   } else if (buf.startsWith("READTEST")) {
     // THE ASK READER IS OTHERWISE UNCAPTURABLE, and that is the same argument
@@ -8816,6 +8893,69 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     }
     projOpenLevel1(pi);
     Serial.printf("PROJOPEN: project %d (%s)\n", pi, projects[pi].name);
+  } else if (buf.startsWith("PSESSOPEN")) {
+    // THE OPERATOR'S OWN ROUTE INTO LEVEL 3, PROJOPEN's own reason applied
+    // one level deeper: SCROLLOPEN already does this for SESSIONS' own rows
+    // (this file, the BOARD_HISTORY_SCROLL block below), and until this
+    // existed the only way into a PROJECTS-opened transcript was a tap on a
+    // level-2 row. "PSESSOPEN <n>" opens the n-th session of the CURRENTLY
+    // OPEN project in display order - psess[], the same order the list
+    // draws and handlePSessTouch()'s own tap handler indexes.
+    //
+    // EVERY REFUSAL NAMES ITS CAUSE - four of them: PROJECTS is not the live
+    // tab, no project is open yet, a non-numeric argument, an out-of-range
+    // index (the honesty "N more" row past psessCount is not a session and
+    // is refused the identical way). n is REFUSED, never clamped - PROJOPEN's
+    // own reasoning: a capture script asking for session 4 and silently
+    // being handed session 0 would report the wrong screen as the right one.
+    //
+    // EVERY EARLY RETURN CLEARS buf FIRST - see DETAIL's own note above.
+    if (currentTab != TAB_PROJECTS) {
+      Serial.println("PSESSOPEN refused: PROJECTS is not the live tab (send TAB 2 first)");
+      buf = "";
+      return;
+    }
+    if (projLevel != 1) {
+      Serial.println("PSESSOPEN refused: no project is open (send PROJOPEN <n> first)");
+      buf = "";
+      return;
+    }
+    // ANOTHER FULL-SCREEN SURFACE - SCROLLOPEN's own guard, verbatim: opening
+    // the transcript over compose/reader/voice/octopus/the emoji grid would
+    // paint over whatever is there and swallow that surface's own taps as
+    // scrollback's own drag gestures.
+    if (composeActive || readerActive || voiceCardActive || octoActive || emojiTestActive) {
+      Serial.println("PSESSOPEN refused: another full-screen surface is up");
+      buf = "";
+      return;
+    }
+    String arg = buf.length() > 9 ? buf.substring(9) : String("");
+    arg.trim();
+    // Character-by-character, not toInt() - PROJOPEN's own reason: toInt()
+    // returns 0 for anything unparseable, so "PSESSOPEN abc" would silently
+    // open session 0 and report success.
+    bool sNumeric = arg.length() > 0;
+    for (unsigned int i = 0; i < arg.length(); i++)
+      if (arg[i] < '0' || arg[i] > '9') sNumeric = false;
+    if (!sNumeric) {
+      Serial.printf("PSESSOPEN refused: \"%s\" is not a session index (0..%d)\n",
+                    arg.c_str(), psessCount - 1);
+      buf = "";
+      return;
+    }
+    int si = arg.toInt();
+    if (si < 0 || si >= psessCount) {
+      Serial.printf("PSESSOPEN refused: session %d is out of range (0..%d)\n", si, psessCount - 1);
+      buf = "";
+      return;
+    }
+    // scrollProjLive SET FIRST - scrollOpenById()'s own header note: its
+    // two-argument signature has no room for the wire's `live` bit, so the
+    // caller states it here, immediately before the call, the same
+    // convention projOpenLevel1() already uses for projOpenKey.
+    scrollProjLive = psess[si].live != 0;
+    scrollOpenById(psess[si].id, psess[si].title);
+    Serial.printf("PSESSOPEN: session %d (%s)\n", si, psess[si].title);
 #endif
   } else if (refuseUnavailableCommand(buf)) {
     // A COMMAND THIS BOARD DOES NOT HAVE. Reached only after every real handler

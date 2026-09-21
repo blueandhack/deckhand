@@ -33,6 +33,30 @@ unsigned long scrollTailPolledAt = 0;
 int scrollNewBelow = 0;
 char scrollLoadedId[16] = "";
 bool scrollLoadedChat = true;
+// TRUE when the CURRENTLY OPEN transcript was reached through scrollOpenById()
+// rather than openScrollback() - a PROJECTS level-2 row, whose id may not be
+// (and, for the whole point of that entry point, very often is not) in
+// sessions[] at all. Read by drawScrollback() (there is no
+// sessions[detailIndex] to draw a title from), by exitScrollback() (there is
+// no SESSIONS detail card to return to - PROJECTS level 2 is), by
+// scrollRefetch() (detailIndex names the wrong session to re-ask for), and by
+// the RESUME command's own guard (deckhand_display.ino) - see scrollProjLive.
+bool scrollFromProjects = false;
+// Set by the CALLER, IMMEDIATELY BEFORE scrollOpenById() - projOpenKey's own
+// precedent (projects.ino): scrollOpenById()'s two-argument signature has no
+// room for a third fact its caller already knows (PSessInfo.live, the wire's
+// own bit), so the caller states it here rather than scrollOpenById() trying
+// to re-derive it from nothing. DEFAULTS TRUE - "assume live" - so a caller
+// that forgets to set it gets RESUME refused rather than silently offered on
+// a session somebody may be driving interactively right now (the design's
+// own warning: a headless run would become a SECOND, concurrent author of
+// it). The safe direction for a flag nobody remembered to set.
+bool scrollProjLive = true;
+// The header's title when scrollFromProjects is true - sessions[detailIndex].name
+// has no meaning for an id sessions[] does not hold. Sized to PSessInfo.title's
+// own shape (host caps at 40, +NUL, +3 spare) - the same margin every other
+// fixed buffer here keeps past its measured worst case.
+char scrollProjTitle[48] = "";
 
 const char* scrollMark(uint8_t r) {
   // ASCII ONLY. Claude Code's own markers are U+23FA and U+257C, and Spleen
@@ -338,8 +362,14 @@ uint8_t scrollHostSlot = 0;
 uint32_t scrollY = 0;             // pixel scroll offset from the top of the transcript
 int scrollTapX = 0;                // sx carried from PRESS to release, for the rail tap
 
-void requestScrollback(int idx) {
-  if (idx < 0 || idx >= sessionCount) return;
+// THE SHARED CORE of every scrollback fetch - requestScrollback() (a
+// sessions[] index, addressed to that session's OWN Mac) and scrollOpenById()
+// (any id, BROADCAST - see that function's own note on why) each build one
+// call to this rather than duplicating the busy guard, the "already held in
+// PSRAM" cache check and the wire line itself. `broadcast` selects
+// sendLineToHost's one- vs two-argument form; `hostSlot` is read only when it
+// is false.
+void scrollFetch(const char* id, uint8_t hostSlot, bool broadcast) {
   // A SECOND REQUEST WHILE ONE IS IN FLIGHT IS A NO-OP, and this is not a
   // nicety: the host delivers every trigger-file command over BOTH transports,
   // so one SCROLLFETCH reaches loop() twice. Two fetches then interleave chunks
@@ -360,7 +390,7 @@ void requestScrollback(int idx) {
   // Already held: answer from PSRAM. The filter is part of the identity because
   // CHAT and ALL are different entry sets, so a toggle must genuinely re-fetch.
   if (scrollCount > 0 && histChatOnly == scrollLoadedChat &&
-      strcmp(scrollLoadedId, sessions[idx].id) == 0) {
+      strcmp(scrollLoadedId, id) == 0) {
     char m[64];
     snprintf(m, sizeof(m), "SCROLL held entries=%d", scrollCount);
     sendLineToHost(m);
@@ -378,15 +408,32 @@ void requestScrollback(int idx) {
   scrollChunksIn = 0;
   scrollChunksOf = 1;
   scrollFetchStart = millis();
-  scrollHostSlot = sessions[idx].hostSlot;
-  strncpy(scrollLoadedId, sessions[idx].id, sizeof(scrollLoadedId) - 1);
+  scrollHostSlot = hostSlot;
+  strncpy(scrollLoadedId, id, sizeof(scrollLoadedId) - 1);
   scrollLoadedId[sizeof(scrollLoadedId) - 1] = '\0';
   scrollLoadedChat = histChatOnly;
   char line[72];
-  snprintf(line, sizeof(line), "HISTORY %s %s tail:%ld", sessions[idx].id,
+  snprintf(line, sizeof(line), "HISTORY %s %s tail:%ld", id,
            histChatOnly ? "chat" : "all", budget);
-  // Addressed to the session's own Mac - only it holds that transcript.
-  sendLineToHost(line, sessions[idx].hostSlot);
+  if (broadcast) sendLineToHost(line);
+  else sendLineToHost(line, hostSlot);   // addressed to the session's own Mac
+}
+
+void requestScrollback(int idx) {
+  if (idx < 0 || idx >= sessionCount) return;
+  scrollFetch(sessions[idx].id, sessions[idx].hostSlot, false);
+}
+
+// THE RETRY/RE-FETCH THIS SCREEN'S OWN TWO CALLERS SHARE (the dead-end tap and
+// the CHAT/ALL filter toggle, both in handleScrollTouch()) - requestScrollback
+// (detailIndex) is WRONG here whenever scrollFromProjects is true: detailIndex
+// names whichever session SESSIONS' own detail card is behind, which has no
+// relationship to a PROJECTS-opened id and can even be -1 (no card open at
+// all). scrollLoadedId is what THIS screen is actually showing, however it got
+// opened, so it is what "re-fetch the same thing" has to mean here.
+void scrollRefetch() {
+  if (scrollFromProjects) scrollFetch(scrollLoadedId, 0, true);
+  else requestScrollback(detailIndex);
 }
 
 // Called from loop(). A stalled fetch must say so rather than leaving
@@ -434,6 +481,12 @@ bool scrollAtBottom() {
 // interleave with it through the same parser.
 void tickScrollTail() {
   if (!scrollActive || scrollPending || scrollFetchFailed || scrollCount == 0) return;
+  // OUT OF SCOPE FOR A PROJECTS-OPENED TRANSCRIPT: detailIndex names
+  // whichever session SESSIONS' own detail card is behind, not the id this
+  // screen is actually showing, and sessions[detailIndex] is the wrong (or,
+  // with no card open, an out-of-range) read for it. A PROJECTS-opened
+  // transcript simply does not live-tail today - see this task's own report.
+  if (scrollFromProjects) return;
   if (detailIndex < 0 || detailIndex >= sessionCount) return;
   if (millis() - scrollTailPolledAt < (unsigned long) SCROLL_TAIL_POLL_MS) return;
   scrollTailPolledAt = millis();
@@ -946,13 +999,16 @@ void drawScrollback() {
   // what is left - the same order the detail card's meta line uses, and the
   // reason is the same: a change-only field that MOVES cannot be cached, so the
   // fixed-width one is measured first and the flexible one takes the remainder.
-  if (detailIndex >= 0 && detailIndex < sessionCount) {
+  // scrollProjTitle WHEN THIS CAME FROM PROJECTS - sessions[detailIndex].name
+  // has no meaning for an id sessions[] does not hold, and detailIndex itself
+  // can be stale or -1 here (scrollFromProjects's own header note).
+  if (scrollFromProjects || (detailIndex >= 0 && detailIndex < sessionCount)) {
     const int nameW = SCROLL_POS_X - 8 - SCROLL_NAME_X;
     char nm[SCROLL_NAME_COLS + 6];
     // setUIFont BEFORE fitText: it measures with tft.textWidth, so the font has
     // to be the one the string will actually be drawn in.
     setUIFont(1);
-    fitText(nm, sizeof(nm), sessions[detailIndex].name, nameW);
+    fitText(nm, sizeof(nm), scrollFromProjects ? scrollProjTitle : sessions[detailIndex].name, nameW);
     tft.setTextColor(COLOR_VALUE, COLOR_BG);
     tft.drawString(nm, SCROLL_NAME_X, SCROLL_HDR_TEXT_Y);
   }
@@ -1094,7 +1150,7 @@ bool handleScrollTouch(int sx, int sy) {
     if (sx >= tft.width() - 12 - HIST_CHIP_W_CHAT - 8) {
       histChatOnly = !histChatOnly;
       scrollY = 0;
-      requestScrollback(detailIndex);   // entry counts differ per filter
+      scrollRefetch();   // entry counts differ per filter
       drawScrollback();
       return true;
     }
@@ -1106,8 +1162,17 @@ bool handleScrollTouch(int sx, int sy) {
     // a second meaning for the gesture so much as the only one available here.
     if (scrollDeadEnd()) {
       scrollFetchFailed = false;
+      // SNAPSHOT BEFORE scrollEnd(): that call clears scrollLoadedId itself
+      // ("the store is gone; it holds nothing" - its own comment), so
+      // scrollRefetch()'s broadcast arm would otherwise read the id AFTER it
+      // has already been wiped to "" and re-fetch nothing.
+      const bool wasFromProjects = scrollFromProjects;
+      char savedId[16];
+      strncpy(savedId, scrollLoadedId, sizeof(savedId) - 1);
+      savedId[sizeof(savedId) - 1] = '\0';
       scrollEnd();                 // drop the empty store so the fetch re-allocates
-      requestScrollback(detailIndex);
+      if (wasFromProjects) scrollFetch(savedId, 0, true);
+      else requestScrollback(detailIndex);
       drawScrollback();
       return true;
     }
@@ -1120,12 +1185,33 @@ bool handleScrollTouch(int sx, int sy) {
 
 void exitScrollback() {
   scrollActive = false;
+  // READ, THEN CLEARED, BEFORE scrollEnd() (which touches neither, but the
+  // order is stated because scrollEnd() DOES clear scrollLoadedId, and a
+  // future edit moving this flag's own clear next to that one should not
+  // silently start reading it after it is already gone).
+  const bool wasFromProjects = scrollFromProjects;
+  scrollFromProjects = false;
   scrollEnd();                    // 304KB of PSRAM back; only one session is ever open
   histActive = false;
   tft.fillScreen(COLOR_BG);
   drawTabBar();
   drawFooterChrome();
-  if (showingDetail && detailIndex >= 0 && detailIndex < sessionCount) {
+  if (wasFromProjects) {
+    // BACK TO PROJECTS LEVEL 2, NOT SESSIONS - this transcript was opened
+    // from a psess row, and detailIndex (SESSIONS' own "which card is open")
+    // has no relationship to it and can even be -1. projLevel is untouched by
+    // any of this (level 2 is still "open" the whole time the transcript was
+    // on top of it), so returning to it needs no re-fetch - only a repaint.
+    // projLevelPainted FORCED STALE: the fillScreen above just wiped the
+    // pixels renderProjectsTab()'s own row-signature caches still believe are
+    // on the glass, and without this its level-2 branch would see "nothing
+    // changed" and redraw NOTHING - a wholesale-clear-and-bust case
+    // (CLAUDE.md, the same shape switchTab()'s own tab-change clear needs),
+    // reusing renderProjectsTab()'s EXISTING level-transition bust rather
+    // than duplicating it.
+    projLevelPainted = -1;
+    renderProjectsTab();
+  } else if (showingDetail && detailIndex >= 0 && detailIndex < sessionCount) {
     drawSessionDetail(detailIndex);
     buildDetailSignature(detailIndex, detailSigCache, sizeof(detailSigCache));
   } else {
@@ -1140,6 +1226,12 @@ void exitScrollback() {
 // drag/tap machinery lives in scrollDragLoop()/handleScrollTouch(), not here.
 void openScrollback(int idx) {
   if (idx < 0 || idx >= sessionCount) return;
+  // DEFENSIVE, belt and braces (projFetchFailed()'s own reasoning: it costs
+  // nothing): exitScrollback() always clears this on the way out, but a path
+  // that opens straight through here (SCROLLPERF, SCROLLOPEN) rather than via
+  // exitScrollback first must not inherit a stale TRUE left by a PROJECTS open
+  // that never got a chance to close cleanly.
+  scrollFromProjects = false;
   scrollActive = true;
   // histActive TOO, and this is not redundancy. Roughly ten guard lists in shared
   // code already name histActive as "the history surface owns the glass", and
@@ -1158,6 +1250,41 @@ void openScrollback(int idx) {
   // has no completion callback to place the view - so a second open showed the
   // OLDEST message instead of the latest. Deciding where to land is the opener's
   // job, not the fetch's, which is why it is here and not in both branches.
+  if (!scrollPending) scrollY = scrollMaxY();
+  drawScrollback();
+}
+
+// OPENS THIS SAME SURFACE FOR AN ID THAT MAY NOT BE IN sessions[] AT ALL - a
+// PROJECTS level-2 row (projects.ino's handlePSessTouch(), or the PSESSOPEN
+// trigger-file command, deckhand_display.ino), live or long ended. This is
+// the whole point of Task 7: no new reader. requestScrollback()/openScrollback()
+// stay exactly as they were, addressed by a sessions[] INDEX to that session's
+// own Mac; this is their sibling, addressed by an ID DIRECTLY, broadcast,
+// because a PROJECTS-opened id may belong to any paired Mac's own
+// ~/.claude/projects/ tree and may not be live at all - there is no hostSlot
+// on file for it the way there is for a sessions[] row.
+//
+// scrollLoadedId IS SET FROM id12 - THE ARGUMENT - NEVER FROM
+// sessions[detailIndex].id, and this function's own body is where that has to
+// be checked: detailIndex names whichever session SESSIONS' own detail card
+// is behind, which has NO relationship to which project row was tapped (the
+// two can disagree - a PROJECTS open can happen with an unrelated, or no,
+// detail card behind it) - reading through it here would silently show the
+// WRONG transcript. scrollback-check.mjs binds this to THIS function's own
+// body and fails BY NAME if a later edit routes the id through sessions[] or
+// detailIndex instead of its own id12 parameter.
+void scrollOpenById(const char* id12, const char* title) {
+  scrollFromProjects = true;
+  strncpy(scrollProjTitle, title, sizeof(scrollProjTitle) - 1);
+  scrollProjTitle[sizeof(scrollProjTitle) - 1] = '\0';
+  scrollActive = true;
+  histActive = true;             // openScrollback()'s own note on why this joins too
+  scrollY = 0;
+  scrollFetch(id12, 0, true);    // broadcast - see this function's own header note
+  // LAND AT THE NEWEST EVEN WHEN THE FETCH DID NOT RUN - openScrollback()'s
+  // own reasoning, verbatim: scrollFetch() answers locally when the
+  // transcript is already held in PSRAM, and that path has no completion
+  // callback to place the view.
   if (!scrollPending) scrollY = scrollMaxY();
   drawScrollback();
 }

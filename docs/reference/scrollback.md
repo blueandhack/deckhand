@@ -443,3 +443,40 @@ then a prose heading with no bar, then the bar resuming).
 - **`scrollFindCode()` NOW LANDS ON THE LANGUAGE ROW** rather than the first line of code text,
   because the label row also carries `SCROLL_F_CODE`. Diagnostic-only (`SCROLLPERF code`'s
   parking position), no assertion binds it either way.
+
+---
+
+#### SCROLLBACK OPENED BY ID: a dead session, and RESUME (2026-09-21)
+
+`scrollOpenById(const char* id12, const char* title)` is this surface's SECOND entry point,
+beside `openScrollback(int idx)` - the same renderer, wrap, index, drag and CHAT/ALL filter, now
+addressable by an id that need not be (and, for `docs/superpowers/specs/2026-09-20-sessions-
+manager-design.md`'s whole point, very often is not) in `sessions[]` at all. `projects.ino`'s
+`handlePSessTouch()` is the tap route (a level-2 row); `PSESSOPEN <n>` and `RESUME <text>`
+(both `deckhand_display.ino`) are the Mac-drivable ones. `scrollFetch()` is the busy-guard/
+already-held/wire-line core both `requestScrollback()` and `scrollOpenById()` now build one
+call to; the latter's is BROADCAST (no `hostSlot` on file for an id that may not be live),
+`requestProjects()`'s own reasoning applied one level deeper.
+
+**RESUME IS WIRE-COMPLETE AND NOT YET A TAP.** `RESUME <text>` sends a headless `claude -p
+--resume <scrollLoadedId> <text>` for whichever transcript is open, refusing by name with no
+transcript open, on a LIVE one (`scrollFromProjects`/`scrollProjLive`, defaulting to the SAFE
+"live" reading so a caller that forgets to set the latter gets a refusal rather than a silent
+turn on a session someone may be driving interactively), or on empty text. There is deliberately
+no chip or button reaching it yet - see the Task 7 report for why (no way to verify new hit-test
+geometry against real panel pixels without flashing and looking, and the header has no free
+room without a fresh geometry pass this task did not do). `PSESSOPEN <n>` is the same shape one
+level up: the operator's own route into level 3, PROJOPEN's own reasoning.
+
+**NOT VERIFIED, STATED PLAINLY:**
+- **No dead session's transcript has been read on the glass through this path yet.** The wire
+  side (`transcriptPathFor`'s project-directory fallback) was confirmed once, separately, before
+  this task; this is the first firmware capable of exercising it from a tap or `PSESSOPEN`.
+- **`exitScrollback()`'s PROJECTS-return arm (`projLevelPainted = -1;` forcing a repaint) has
+  not been watched repaint on real hardware** - only reasoned from `renderProjectsTab()`'s own
+  existing level-transition bust, which it deliberately reuses rather than duplicating.
+- **The SCROLLACK addressing for a broadcast-opened (PROJECTS) fetch is unresolved for a
+  genuine two-Mac pairing.** `scrollHostSlot` is set to 0 (no real slot) when `scrollOpenById()`
+  broadcasts; a single paired Mac is unaffected (there is nothing to misaddress to), but two
+  Macs paired at once could see a per-chunk ack's `to=` suffix name the wrong one. Out of scope
+  for this task; flagged rather than fixed.
