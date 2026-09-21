@@ -31,6 +31,28 @@
 // same condition twice, extract it, because a comment claiming a shared
 // predicate that was not shared was a finding on this very file one round
 // ago").
+//
+// TASK 6 FIX ROUND 1 added the assertion over deckhand_display.ino's own
+// `projsess` absorption in handleLine() (NOT projects.ino - the one place
+// this checker reads a second firmware file). The shipped version cleared
+// `psessPending = false;` UNCONDITIONALLY, before the `strcmp(k,
+// projOpenKey)` staleness check that decides whether the REPLY'S DATA is
+// stale. That check protected the data correctly but not the flag: a late,
+// stale reply (wrong project) would still force the pending flag false out
+// from under a DIFFERENT, genuinely in-flight request for the CURRENT
+// project - defeating that request's busy guard and, because
+// checkFetchTimeout() returns early on `!pending`, permanently disabling
+// its own timeout. That is the exact stuck-forever defect this whole
+// mechanism exists to prevent, re-entered through the one door the
+// existing assertions did not watch (they bind to projects.ino's
+// checkFetchTimeout()/tickProjectsFetch(), never to the CALL SITE in
+// handleLine() that decides which branch actually clears the flag) - so a
+// regression here was invisible to every assertion in this file, to every
+// OTHER geometry checker, and to a screenshot. The new assertion binds to
+// the absorption block's own text (extractBlock() below, the same
+// throw-rather-than-guess discipline fnBody() uses) and checks the
+// STRUCTURE directly: `psessPending = false;` must not appear before the
+// `strcmp(...) == 0) {` branch opens, and must appear inside it.
 import { consts, fnBody, stripComments, DIR } from "./geom-common.mjs";
 import fs from "fs";
 
@@ -41,6 +63,22 @@ function assert(fails, name, cond, detail) {
     console.log(`  FAIL  ${name}: ${detail}`);
     fails.push(name);
   }
+}
+
+// ONE ANCHOR TO A MATCHING SECOND ANCHOR, both required - fnBody()'s own
+// "throw rather than guess" discipline, for a block that is not a whole
+// function (handleLine() is thousands of lines and binding to ALL of it
+// would satisfy "a rule a neighbouring line can satisfy is not a rule" in
+// exactly the way CLAUDE.md warns against: almost anything in that
+// function would make a regex "pass"). THROWS if either anchor is missing,
+// rather than silently returning empty text that would let a caller read
+// an assertion as vacuously true.
+function extractBlock(src, startMarker, endMarker, label) {
+  const a = src.indexOf(startMarker);
+  if (a < 0) throw new Error(`extractBlock: start marker not found for ${label}`);
+  const b = src.indexOf(endMarker, a);
+  if (b < 0) throw new Error(`extractBlock: end marker not found for ${label}`);
+  return src.slice(a, b + endMarker.length);
 }
 
 // `c` is the header's own parsed constants, OPTIONALLY with PROJ_ROW_H/
@@ -68,12 +106,13 @@ function assert(fails, name, cond, detail) {
 // terms and pairs it with ROWS AS DECLARED, which is exactly the
 // combination a source edit to ROW_H alone would produce before anyone
 // touched ROWS - and exactly what --selftest's const faults inject.
-// `projSrc` is projects.ino's text with comments stripped (real, unless
-// --selftest's structural fault below is overriding it) - passed in rather
-// than read here so the SAME checkAll() serves both the ordinary run and the
-// faulted one, which is what makes "does reverting the fix make this fail,
-// by name" a real question rather than a rhetorical one.
-function checkAll(c, projSrc) {
+// `projSrc`/`mainSrc` are projects.ino's/deckhand_display.ino's text with
+// comments stripped (real, unless --selftest's structural faults below are
+// overriding one of them) - passed in rather than read here so the SAME
+// checkAll() serves both the ordinary run and every faulted one, which is
+// what makes "does reverting the fix make this fail, by name" a real
+// question rather than a rhetorical one.
+function checkAll(c, projSrc, mainSrc) {
   const fails = [];
 
   // ---- Level 1: the project list ----
@@ -222,28 +261,91 @@ function checkAll(c, projSrc) {
       "\"reuse the existing mechanism rather than duplicating it\")");
   }
 
+  // ---- fix round 1: the stale-reply guard must protect the PENDING FLAG,
+  // not only the DATA ----
+  //
+  // Bound to the `projsess` absorption block in deckhand_display.ino's
+  // handleLine() - extractBlock() THROWS if either anchor is missing, so a
+  // renamed/restructured block fails this loudly rather than silently
+  // reading something else nearby. The end anchor is the `#endif` that
+  // already closes this block today (verified against the real file, not
+  // assumed) - it is unique enough in this narrow a window that a false
+  // match would require another `#if BOARD_HAS_PROJECTS` region to open
+  // and close entirely between the two anchors, which nothing here does.
+  let projsessBlock = "";
+  try {
+    projsessBlock = extractBlock(
+      mainSrc,
+      'JsonObject projsess = doc["projsess"];',
+      "\n#endif\n",
+      "deckhand_display.ino's `projsess` absorption");
+  } catch (e) {
+    fails.push("psessPending is cleared only inside the key-matched branch");
+    console.log(`  FAIL  psessPending is cleared only inside the key-matched branch: ${e.message}`);
+  }
+  if (projsessBlock) {
+    // THE BRANCH ITSELF must exist and `psessPending = false;` must sit
+    // STRICTLY AFTER where it opens - never before it (the shipped bug:
+    // clearing the flag unconditionally, ahead of the check that decides
+    // whether this reply's DATA is even current). Locating the branch by
+    // its own opening line, not merely searching for the assignment
+    // anywhere in the block, is what makes this a structural check on
+    // WHERE the clear happens rather than merely THAT it happens somewhere
+    // - "a rule a neighbouring line can satisfy is not a rule" applied to
+    // this task's own regression.
+    const branchOpen = "strcmp(k, projOpenKey) == 0) {";
+    const branchAt = projsessBlock.indexOf(branchOpen);
+    const beforeBranch = branchAt >= 0 ? projsessBlock.slice(0, branchAt) : projsessBlock;
+    const insideAndAfter = branchAt >= 0 ? projsessBlock.slice(branchAt) : "";
+    assert(fails, "psessPending is cleared only inside the key-matched branch",
+      branchAt >= 0 &&
+        !/psessPending\s*=\s*false;/.test(beforeBranch) &&
+        /psessPending\s*=\s*false;/.test(insideAndAfter),
+      branchAt < 0
+        ? "could not locate the `strcmp(k, projOpenKey) == 0)` branch at all inside the " +
+          "`projsess` absorption block"
+        : /psessPending\s*=\s*false;/.test(beforeBranch)
+        ? "`psessPending = false;` appears BEFORE the key-matched branch opens - a stale " +
+          "reply (wrong key, correctly DISCARDED as data) would still clear the pending flag " +
+          "for a DIFFERENT, currently in-flight request, defeating its busy guard and " +
+          "permanently disabling its own timeout (checkFetchTimeout() returns early on " +
+          "`!pending`) - the exact stuck-forever defect this mechanism exists to prevent"
+        : "`psessPending = false;` does not appear anywhere inside the key-matched branch - " +
+          "a fresh, CURRENT reply would never clear the flag it set, leaving every later " +
+          "request for this level refused as \"busy\" forever");
+  }
+
   return fails;
 }
 
-// projects.ino's real text, comments stripped - read once, reused by the
-// ordinary run. --selftest's structural faults below read and mutate their
-// own copy rather than this one, so the two never interfere.
+// projects.ino's/deckhand_display.ino's real text, comments stripped - each
+// read once, reused by the ordinary run. --selftest's structural faults
+// below read and mutate their own copy rather than these, so the two never
+// interfere.
 function loadProjSrc() {
   return stripComments("projects.ino");
+}
+
+function loadMainSrc() {
+  return stripComments("deckhand_display.ino");
 }
 
 function loadConsts() {
   return consts("board_es3c35p.h");
 }
 
-// A MUTATED copy of projects.ino's text, comments stripped, for the
+// A MUTATED copy of ONE firmware file's text, comments stripped, for the
 // structural faults below - reads the file itself (not through geom-common's
 // read(), whose own fault machinery this checker deliberately does not use;
 // a plain in-process string replace is enough when the fault is a literal
 // text removal). Each fault throws if its own anchor text is not found
 // exactly once, rather than silently matching nothing (or the wrong thing).
-function faultedProjSrc(pattern, replacement, label) {
-  const raw = fs.readFileSync(`${DIR}/projects.ino`, "utf8");
+// `file` is the firmware source's bare name ("projects.ino" or
+// "deckhand_display.ino") - the two fetch-timeout mechanisms this checker
+// proves span both files, so this needed generalizing past projects.ino
+// alone (it used to be named faultedProjSrc() and take no `file` argument).
+function faultedSrc(file, pattern, replacement, label) {
+  const raw = fs.readFileSync(`${DIR}/${file}`, "utf8");
   const mutated = raw.replace(pattern, replacement);
   if (mutated === raw) throw new Error(`fault "${label}" did not match anything - the anchor text moved or was renamed`);
   return mutated.replace(/^[ \t]*\/\/.*$/gm, ""); // stripComments()'s own transform
@@ -254,7 +356,7 @@ function main() {
 
   if (!selftest) {
     console.log("PROJECTS geometry (board 2):");
-    const fails = checkAll(loadConsts(), loadProjSrc());
+    const fails = checkAll(loadConsts(), loadProjSrc(), loadMainSrc());
     console.log(fails.length ? `${fails.length} FAILED` : "all assertions passed");
     process.exit(fails.length ? 1 : 0);
   }
@@ -303,12 +405,13 @@ function main() {
       { PSESS_PAD: 60 }, "the title lane holds at least 24 characters"],
   ];
   const projSrc = loadProjSrc();
+  const mainSrc = loadMainSrc();
   for (const [label, override, want] of constFaults) {
     console.log(`selftest: ${label}`);
     const base = loadConsts();
     const applied = typeof override === "function" ? override(base) : override;
     const c = { ...base, ...applied };
-    const fails = checkAll(c, projSrc);
+    const fails = checkAll(c, projSrc, mainSrc);
     if (fails.includes(want)) {
       console.log(`  caught  ${want}`);
     } else {
@@ -317,31 +420,46 @@ function main() {
     }
   }
 
-  // Structural faults - real constants (unfaulted), mutated SOURCE. The two
-  // fault mechanisms (const overrides above, source mutations here) are
-  // independent, so each proves its own assertion on its own.
+  // Structural faults - real constants (unfaulted), mutated SOURCE in ONE
+  // of the two firmware files (`file` says which; the OTHER file is passed
+  // through real/unmutated). The fault mechanisms here are independent of
+  // the const overrides above AND of each other, so each proves its own
+  // assertion on its own.
   const structuralFaults = [
     // Fix round 1's original regression, relocated: the one line that makes
     // a retry possible after a timeout now lives in checkFetchTimeout()
     // (shared by both levels) rather than in tickProjectsFetch() itself,
     // so the fault has to target the NEW location to still mean anything -
     // a fault still aimed at the old text would silently match nothing
-    // (faultedProjSrc() throws rather than let that pass as "caught").
-    [/  pending = false;\n/, "",
+    // (faultedSrc() throws rather than let that pass as "caught").
+    ["projects.ino", /  pending = false;\n/, "",
       "checkFetchTimeout() loses `pending = false;` (fix round 1's original bug, relocated)",
       "checkFetchTimeout() clears its own pending flag on timeout"],
     // Task 6's own regression to guard against: level 2 stops being routed
     // through the shared helper at all (as if it had grown its own separate,
     // un-timed-out fetch, or a duplicated tick nobody wired up correctly).
-    [/\n  if \(checkFetchTimeout\(psessPending, psessFetchStart, "PROJSESS"\)\) \{\n    psessFetchFailed = true;\n    if \(currentTab == TAB_PROJECTS\) renderProjectsTab\(\);\n  \}\n/, "\n",
+    ["projects.ino",
+      /\n  if \(checkFetchTimeout\(psessPending, psessFetchStart, "PROJSESS"\)\) \{\n    psessFetchFailed = true;\n    if \(currentTab == TAB_PROJECTS\) renderProjectsTab\(\);\n  \}\n/, "\n",
       "tickProjectsFetch() loses its level-2 (PROJSESS) arm entirely",
       "tickProjectsFetch() covers level 2's PROJSESS fetch too, not a separate duplicated tick"],
+    // Task 6 FIX ROUND 1's own regression, reproduced exactly: the fix
+    // moved `psessPending = false;` from BEFORE the key-matched branch to
+    // INSIDE it. This fault moves it back - the precise text this round
+    // shipped before the finding, so "does reverting the fix make this
+    // fail, by name" is a literal statement here, not a metaphor.
+    ["deckhand_display.ino",
+      '    if (strcmp(k, projOpenKey) == 0) {\n      psessPending = false;\n      psessEverReceived = true;',
+      '    psessPending = false;\n    if (strcmp(k, projOpenKey) == 0) {\n      psessEverReceived = true;',
+      "psessPending = false; moved back outside the key-matched branch (this round's own shipped bug)",
+      "psessPending is cleared only inside the key-matched branch"],
   ];
-  for (const [pattern, replacement, label, want] of structuralFaults) {
+  for (const [file, pattern, replacement, label, want] of structuralFaults) {
     console.log(`selftest: ${label}`);
     let fails;
     try {
-      fails = checkAll(loadConsts(), faultedProjSrc(pattern, replacement, label));
+      const faultedProjSrc = file === "projects.ino" ? faultedSrc(file, pattern, replacement, label) : projSrc;
+      const faultedMainSrc = file === "deckhand_display.ino" ? faultedSrc(file, pattern, replacement, label) : mainSrc;
+      fails = checkAll(loadConsts(), faultedProjSrc, faultedMainSrc);
     } catch (e) {
       console.log(`  MISSED  fault injection itself failed: ${e.message}`);
       ok = false;

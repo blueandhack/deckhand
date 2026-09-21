@@ -5038,24 +5038,35 @@ void handleLine(const String& line) {
   // states above.
   JsonObject projsess = doc["projsess"];
   if (!projsess.isNull()) {
-    // SOME reply for THIS tab's fetch slot has arrived, ending psessPending
-    // regardless of whether it turns out to be the one we are still
-    // waiting for - see the key check below for why those can differ, and
-    // requestProjSessions()/checkFetchTimeout() (projects.ino) for the
-    // other side of this flag.
-    psessPending = false;
     const char* k = projsess["k"] | "";
     // THE ECHOED KEY MUST MATCH projOpenKey, OR THIS REPLY IS STALE AND IS
-    // DISCARDED RATHER THAN DRAWN. projOpenLevel1() sets projOpenKey to the
-    // key it is about to request BEFORE calling requestProjSessions(), so
-    // under ordinary operation the two always agree - but PROJSESS carries
-    // no sequence number the way SCROLL's chunked fetch does, and this is
-    // the one guard standing between a slow, since-superseded reply and it
+    // DISCARDED RATHER THAN DRAWN - AND THAT DISCARD MUST TOUCH NO STATE AT
+    // ALL, THE FLAG INCLUDED. projOpenLevel1() sets projOpenKey to the key
+    // it is about to request BEFORE calling requestProjSessions(), so under
+    // ordinary operation the two always agree - but PROJSESS carries no
+    // sequence number the way SCROLL's chunked fetch does, and this is the
+    // one guard standing between a slow, since-superseded reply and it
     // silently overwriting whatever project the screen has moved on to
     // showing. Never decoded either side of this comparison - see
     // ProjInfo.key's own note and host/project-replies.mjs's header on why
     // that would be unsafe.
+    //
+    // psessPending IS CLEARED ONLY INSIDE THIS BRANCH - fix round 1's own
+    // finding, and worth stating exactly why the unconditional version was
+    // wrong rather than merely that it was: clearing it BEFORE the key
+    // check means a late, STALE reply for a project the level has already
+    // moved on from (timed out, then re-opened as a DIFFERENT project) would
+    // force psessPending back to false out from under the NEW, genuinely
+    // in-flight request for the CURRENT key - defeating requestProjSessions()'s
+    // own busy guard (a re-open now fires a second wire request) and, worse,
+    // making checkFetchTimeout() return early on `!pending` forever after,
+    // so the NEW request's own timeout could never fire again. That is the
+    // exact stuck-forever defect this whole mechanism exists to prevent,
+    // re-entered through the one door it was not watching - discarding a
+    // stale reply must change NO state at all, the pending flag included,
+    // exactly as it already changes none of psess[]/psessCount/psessTotal.
     if (strcmp(k, projOpenKey) == 0) {
+      psessPending = false;
       psessEverReceived = true;
       JsonArray items = projsess["items"].as<JsonArray>();
       int n = 0, overflow = 0;
