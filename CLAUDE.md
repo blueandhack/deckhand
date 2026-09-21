@@ -53,7 +53,7 @@ panel, which reads as a layout bug rather than a build mistake.
 | mic / beeper | both fitted and working | both work, via the ES8311 |
 | flash it | `./flash.sh` | `./flash.sh --board 2` |
 | type scale | Cozette 6x13 / Terminus 10x18b / Cozette 12x26 | Spleen 8x16 / 12x24 / 32x64 |
-| size today | flash 1423920, RAM 72044 | flash 1148768, RAM 55444 |
+| size today | flash 1424288, RAM 72044 | flash 1151040, RAM 58956 |
 
 **FOUR of the six numbers this file quotes about the binaries are BOUND and two are not.**
 `node firmware/board-baseline.mjs --doc-check` asserts the two **hashes** and the two **sizes**
@@ -67,7 +67,13 @@ sessions list learned to scroll, so ~23.5KB of `SessionInfo` left `.bss` and ~6.
 per-row caches grew to `SESSION_SLOTS`. It then **rose 480 bytes on 2026-09-20**, when
 `SDPROBE` linked the FATFS + SDMMC stack for the first time (that also cost 76,304 bytes of
 flash - board 1 took +704 for the same change, all of it the refusal's own cause string in
-`.flash.rodata`, with `.flash.text` byte-identical). `arduino-cli`'s "Sketch uses N" is a
+`.flash.rodata`, with `.flash.text` byte-identical). It then **rose 3,512 bytes on
+2026-09-21**, when the PROJECTS tab's level 1 (the project list) landed: `ProjInfo
+projects[PROJ_SLOTS]` (24 x 96 bytes = 2,304) and its per-row signature cache
+`projRowSigCache[PROJ_SLOTS][48]` (1,152) account for nearly all of it, with the rest a
+handful of scalar globals (`projectCount`, `projScroll` and its caches). Board 1 took none of
+it - the struct, the array and every function around them sit behind `#if BOARD_HAS_PROJECTS`,
+which is a real `0` there. `arduino-cli`'s "Sketch uses N" is a
 slightly smaller number than the `.bin` - the same image without its trailing padding - so do
 not expect the compile summary to print these.
 
@@ -129,7 +135,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
 node firmware/board-baseline.mjs /tmp/b1/deckhand_display.ino.bin --check 1
 ```
 
-Today: `f5c7bbf1218eb946...`, size 1423920 (board 2: `b7b9e29ef6908baf...`, size 1148768).
+Today: `2aab6e66ff89bd9f...`, size 1424288 (board 2: `c67b35cb9460525c...`, size 1151040).
 
 It compares **BYTES, not sizes**, and that matters: a default argument on a shared function
 once changed board 1's codegen with **no size change whatsoever** - invisible to a size

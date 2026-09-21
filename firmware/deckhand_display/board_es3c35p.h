@@ -1357,6 +1357,87 @@ const int SESSION_SUB_LANE_W = SESSION_ROW_W - SESSION_NAME_DX - 12;
 // boards keep the same 1-row overhang into the footer's padding and no more.
 const int SESSION_OVERFLOW_H = 19;
 
+// ---------- Projects tab: the project list (level 1) ----------
+// EVERY ROW IS THE SAME HEIGHT - unlike SESSIONS there is no ladder here, no
+// hero rung competing for a name band, no band card. A project row draws one
+// name and one line of metadata (a session count and a last-activity time)
+// and neither of those grows with how urgent the project is - there is no
+// such thing at this level. So the SCROLLING shape SESSIONS only reaches at
+// its seventh row is this level's ONLY shape, from its very first project.
+//
+// #define, NOT const int, for the reason BOARD_SESSIONS_SCROLL above is: `#if`
+// on a C++ const int is silently false with no -Wall warning, and that has
+// shipped twice already (panel_shim.cpp's BOARD_PANEL_INVERT, and
+// BOARD_USAGE_V2 mid-redesign). board_e32r28t.h states this flag as an
+// explicit 0 - PROJECTS is out of scope for board 1 by design
+// (docs/superpowers/specs/2026-09-20-sessions-manager-design.md, "Out of
+// scope: Board 1" - the tab arithmetic works there, the CONTENT does not),
+// and board 1's own header has no PROJ_* constants to guard with it, but
+// commands-check.mjs's guard evaluator THROWS on a flag neither header
+// #defines (its own rule: "a guard silently read as false makes any
+// negation claim over it meaningless"), so it needs a real value on both
+// boards to evaluate this file's #if BOARD_HAS_PROJECTS guards at all.
+#define BOARD_HAS_PROJECTS 1
+
+// >= the 16 measured on this Mac (docs/superpowers/specs/2026-09-20-sessions-
+// manager-design.md), with headroom. This is the DEVICE's own ceiling, not a
+// mirror of a host-side cap - host/project-replies.mjs's buildProjectsReply()
+// ships every project with at least one transcript, uncapped. A reply with
+// more than PROJ_SLOTS items is not silently lost: projects.ino's absorb loop
+// counts and logs whatever did not fit.
+#define PROJ_SLOTS 24
+// T_BODY (16px, Spleen 8x16) + 2*15 padding = 46, and 46 is this board's own
+// TAP_MIN - not merely over it. A project row carries no title, no band, no
+// ask, so nothing about it needs more than one line of name and one of meta,
+// and the fingertip floor is exactly what that one line costs once padded.
+const int PROJ_ROW_H = 46;
+// Matches SESSION_ROW_GAP - one scrolling-list rhythm on this board, not a
+// second gap value to keep in step with it by hand.
+const int PROJ_ROW_GAP = 3;
+// One left edge on this board - see SESSION_ROW_X's own note on why 12 rather
+// than two different margins for the same physical bezel.
+const int PROJ_ROW_X = SESSION_ROW_X;   // 12
+const int PROJ_ROW_W = SESSION_ROW_W;   // 296
+const int PROJ_ROW_Y0 = CONTENT_Y + 4;  // 50, matches SESSION_ROW_Y0
+const int PROJ_STEP = PROJ_ROW_H + PROJ_ROW_GAP;               // 49
+// FROM THE PANEL, NEVER A LITERAL - BOARD_H - FOOTER_H is contentBottom()'s
+// own definition and PROJ_ROW_Y0 is where the first row starts. A literal
+// here would be a hardcoded panel dimension in everything but name, and three
+// separate bugs in this board's port were exactly that.
+const int PROJ_AVAIL = BOARD_H - FOOTER_H - PROJ_ROW_Y0;       // 410
+const int PROJ_ROWS = (PROJ_AVAIL + PROJ_ROW_GAP) / PROJ_STEP; // 8
+// THE VISIBLE WINDOW'S HEIGHT IN CONTENT COORDINATES - the same "not the full
+// avail" reasoning SESSION_SCROLL_VIEW_H documents, for the identical reason:
+// this board has no region clip (PanelShim::clipLogicalRect clips to the
+// SCREEN, not to a rect), so a scroll position that admitted a ninth row's
+// first few pixels would leave a hole nothing wipes. 8*49-3 = 389.
+const int PROJ_SCROLL_VIEW_H = PROJ_ROWS * PROJ_STEP - PROJ_ROW_GAP;
+// A DRAG THAT MOVED LESS THAN THIS IS A TAP, not a scroll - same threshold,
+// same reasoning, as SESSION_DRAG_TAP_PX just above, and reused rather than
+// re-judged: a project row is not a smaller target than a session row.
+const int PROJ_DRAG_TAP_PX = SESSION_DRAG_TAP_PX;
+// The row's own left/right text inset, matched to the session row's visual
+// margin inside its rounded card - used by projects-geom-check.mjs to bound
+// the name lane against the meta lane and the row's own edges.
+const int PROJ_PAD = 12;
+// The longest project name this row promises to show WHOLE rather than
+// trimmed with "..." - the host caps `n` at 22
+// (host/project-replies.mjs's deviceText(label, 22)), so 22 is what this
+// board commits to, not a taste pick.
+const int PROJ_NAME_CHARS = 22;
+// THE META FIELD'S OWN WORST CASE, MEASURED rather than assumed - the same
+// rule SESSION_SUB_LANE_W is derived by. The device's own vocabulary for this
+// field is "<count>x <time>", and the widest real string it draws is
+// "999x 23:59" (a count clamped to three digits for display - see
+// projects.ino's drawProjectRow - plus a 24-hour HH:MM) at 10 characters,
+// TEXT_ADV(8)'s 80px. 88 leaves one character of margin over that, which the
+// "old" fallback (a project whose newest activity was not today) never needs.
+const int PROJ_META_W = 88;
+// Must fail if it does not hold - the name lane and the meta lane sharing the
+// row's own text width, less its left/right pad: 22*8 + 88 = 264 <=
+// 296 - 2*12 = 272, 8px of slack. projects-geom-check.mjs asserts this from
+// the parsed constants rather than trusting the arithmetic in this comment.
+
 // ---------- §3 THE STATUS BAND ----------
 // The card head becomes a FILLED BAND in the status colour. Filled bands are new
 // vocabulary for this UI - nothing else here fills a region with a status colour -

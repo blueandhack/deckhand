@@ -1447,6 +1447,44 @@ int sessionCount = 0;
 int sessionsTotal = 0;
 int hiddenAskingCount = 0;
 
+// ---------- Projects tab (board 2 only; see projects.ino) ----------
+// The struct lives here rather than in projects.ino because handleLine()'s
+// `projs` absorption, further down in THIS file, needs the full type before
+// projects.ino's own text appears - projects.ino is concatenated AFTER
+// deckhand_display.ino (power.ino < projects.ino alphabetically), so a plain
+// forward reference would not compile. `projects[]` and `projectCount` are
+// DEFINED in projects.ino and merely declared `extern` here, the same shape
+// CLAUDE.md documents for scrollback.ino's own globals ("the .ino files are
+// one translation unit... a global defined in a later file needs an extern").
+//
+// Guarded by BOARD_HAS_PROJECTS, a #define (never a const int - "#if on a
+// const int is silently false" has shipped twice already), stated as 0 in
+// board_e32r28t.h - PROJECTS is out of scope on board 1 by design
+// (docs/superpowers/specs/2026-09-20-sessions-manager-design.md, "Out of
+// scope: Board 1") and that header has no PROJ_* constants this struct
+// could size itself from - see board_es3c35p.h's own note on why the flag
+// is stated explicitly there rather than left for the preprocessor's
+// undefined-is-0 default to cover.
+#if BOARD_HAS_PROJECTS
+struct ProjInfo {
+  char key[64];   // opaque directory name - NEVER decoded, split, or shown;
+                  // see host/project-replies.mjs. Sent back verbatim to ask
+                  // for this project's sessions (PROJOPEN, a later task).
+  char name[24];  // host caps at 22 (deviceText(label, 22)) plus NUL and one
+                  // spare byte
+  uint16_t count; // transcripts in this project (jsonl files, not turns)
+  long tod;       // seconds since LOCAL midnight of the newest transcript's
+                  // mtime, or -1 when that moment was not today - the same
+                  // unit and the same "-1 means not today" rule every other
+                  // on-device clock field uses.
+};
+extern ProjInfo projects[PROJ_SLOTS];
+extern int projectCount;
+extern bool projectsPending;
+extern bool projectsEverReceived;
+void requestProjects();
+#endif
+
 // Per-row render caches: a row only redraws when its own signature changes,
 // so one session flipping status doesn't flash the whole list. The duration
 // field ticks on its own cache, independent of the rest of the row.
@@ -3969,17 +4007,19 @@ void stopOctopus() {
 }
 
 // ---------- Tab switching ----------
-// PROJECTS is scaffolding: TAB_PROJECTS exists and the tab bar reaches it, but the
-// tab itself is filled in a later task. Both stubs are empty ON PURPOSE - the point
-// of landing them now is that every dispatch site below already has its own branch
-// for TAB_PROJECTS, so the render/touch content can be filled in without touching
-// switchTab(), forceFullRepaint(), stopOctopus(), handleTouch() or the once-a-second
-// tick again. An empty body here must never be reached through the SETTINGS-shaped
-// `else` a 3-tab dispatch used to end on - that would silently draw or route
-// SETTINGS for a tab that is not SETTINGS, which is exactly the kind of wrong
-// answer CLAUDE.md's redraw-discipline rule exists to prevent.
-void renderProjectsTab() {}
-void handleProjectsTouch(int sx, int sy) {}
+// PROJECTS is filled in for real now (level 1, the project list) -
+// renderProjectsTab() and handleProjectsTouch() are no longer the empty
+// scaffolding Task 4 left here. Both are DEFINED IN projects.ino instead of
+// here, because every dispatch site below (switchTab(), forceFullRepaint(),
+// stopOctopus(), handleTouch(), the once-a-second tick further down) already
+// calls them with no `#if` of its own - Arduino auto-prototypes a plain
+// function regardless of which .ino file defines it, so nothing here needs
+// to know that. Each definition's own BODY carries the `#if BOARD_HAS_
+// PROJECTS`, never its signature or its outer braces, so board 1 still links
+// against a real (empty) body: an `#if`/`#else` that opened a brace in each
+// arm would leave any brace-counting checker here seeing one more `{` than
+// `}` (CLAUDE.md; it has broken an unrelated assertion this way once
+// already), where a guard confined to the body's own fragment cannot.
 // Repaint the current tab from scratch. Needed after the floating button MOVES:
 // the change-only redraw discipline has no record of what the button was covering,
 // so the only correct way to reveal it is a full repaint of the tab. Moving is
@@ -4119,6 +4159,18 @@ void switchTab(Tab newTab) {
   } else if (currentTab == TAB_SESSIONS) {
     drawSessionsAll();
   } else if (currentTab == TAB_PROJECTS) {
+    // THE LEVEL OPENED - fetch, never on the tick (the design's own wire
+    // section: "Request/response when a level opens, like the scrollback").
+    // Guarded here rather than inside renderProjectsTab() itself: that
+    // function also runs from forceFullRepaint()/stopOctopus() (recovering
+    // an ALREADY-open tab from a full-screen overlay closing over it, not
+    // opening it fresh) and from the once-a-second tick, and none of those
+    // is "the level opened" - only a genuine tab switch is, which is exactly
+    // what switchTab() reaching this branch means (the early return above
+    // already declined a same-tab call).
+#if BOARD_HAS_PROJECTS
+    requestProjects();
+#endif
     renderProjectsTab();
   } else {
     drawSettingsTab();
@@ -4843,6 +4895,53 @@ void handleLine(const String& line) {
     }
     return;
   }
+
+#if BOARD_HAS_PROJECTS
+  // PROJECTS reply: its own line, `projs` the only key. Handled here, beside
+  // `sdetail` and `hist`, for the identical reason: everything past this
+  // point parses a TICK, and falling through would reset every usage field
+  // to "missing" over a payload that carries none of them. Wholesale
+  // replace, never a merge - the host's own list is already the complete,
+  // most-active-first inventory (host/project-replies.mjs's
+  // buildProjectsReply has no per-project identity for a merge to key on
+  // that would be cheaper than just re-filling the array).
+  JsonObject projs = doc["projs"];
+  if (!projs.isNull()) {
+    projectsPending = false;
+    projectsEverReceived = true;
+    JsonArray items = projs["items"].as<JsonArray>();
+    int n = 0, overflow = 0;
+    if (!items.isNull()) {
+      for (JsonObject it : items) {
+        // PROJ_SLOTS IS THIS DEVICE'S OWN CEILING, not a mirror of a host-side
+        // cap - buildProjectsReply ships every project with a transcript,
+        // uncapped. An item past the ceiling is COUNTED rather than silently
+        // walked off the end of the array, the same "say what did not fit"
+        // rule SESSIONS' hiddenCount follows.
+        if (n >= PROJ_SLOTS) { overflow++; continue; }
+        ProjInfo& p = projects[n];
+        copyField(p.key, sizeof(p.key), it["k"] | "");
+        copyField(p.name, sizeof(p.name), it["n"] | "");
+        p.count = it["c"] | 0;
+        p.tod = it["t"] | -1L;
+        n++;
+      }
+    }
+    projectCount = n;
+    // Unreached today - PROJ_SLOTS(24) is over the 16 measured
+    // (docs/superpowers/specs/2026-09-20-sessions-manager-design.md) - but
+    // named rather than assumed impossible, per this codebase's "every
+    // refusal must name its cause" rule applied to a truncation instead.
+    if (overflow > 0)
+      Serial.printf("PROJECTS: %d project(s) beyond PROJ_SLOTS(%d) were not stored\n",
+                    overflow, PROJ_SLOTS);
+    // Repaint only if this tab is actually showing - the same rule sdetail's
+    // reply follows above, and for the same reason: a reply that lands while
+    // the user is on a different tab must not paint over it.
+    if (currentTab == TAB_PROJECTS) renderProjectsTab();
+    return;
+  }
+#endif
 
   // History reply: its own line, `hist` the only key. Bail out before any of the usage
   // parsing below, which would otherwise reset every field to "missing".
@@ -6238,6 +6337,14 @@ static const UnavailableCommand UNAVAILABLE_COMMANDS[] = {
     "panel's, and lifting it here would cost ~44KB of SessionInfo against ~26KB of free "
     "heap on a board with no PSRAM - see board_e32r28t.h's SESSION_SLOTS note. DETAIL <n> "
     "reaches every row this board has." },
+#endif
+#if !BOARD_HAS_PROJECTS
+  { "PROJFETCH",
+    "it fetches the PROJECTS tab's project list from ~/.claude/projects/. This board is "
+    "BOARD_HAS_PROJECTS 0: PROJECTS is out of scope here by design "
+    "(docs/superpowers/specs/2026-09-20-sessions-manager-design.md, \"Out of scope: Board "
+    "1\") - TAB 2 still switches cleanly to it, but its content area stays empty, so there "
+    "is no project list here to fetch." },
 #endif
 #if BOARD_USES_TFT_ESPI
   { "SHIMBENCH",
@@ -8476,6 +8583,16 @@ void processCompletedLine(String& buf, unsigned long* lastRxTimestamp, bool from
     handleLine(line);
     curLineFromUsb = savedFromUsb;
     activeHost = savedActiveHost;
+#if BOARD_HAS_PROJECTS
+  } else if (buf == "PROJFETCH") {
+    // THE OPERATOR'S OWN ROUTE TO THE SAME FETCH switchTab() sends when the
+    // tab is genuinely opened - so a capture of the loading/empty/loaded
+    // states needs no finger on the glass. The double-delivery guard (the
+    // host sends every trigger-file command over BOTH transports) lives
+    // inside requestProjects() itself, the same shape requestScrollback()
+    // uses for the identical reason, so this arm needs none of its own.
+    requestProjects();
+#endif
   } else if (refuseUnavailableCommand(buf)) {
     // A COMMAND THIS BOARD DOES NOT HAVE. Reached only after every real handler
     // has declined the line, so this arm can never shadow one - and placed here,

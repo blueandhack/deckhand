@@ -107,6 +107,18 @@
 // never the SMALLER of the two - which is the direction that would overflow.
 #define SESSION_SLOTS 6
 #define BOARD_HAS_WIRELESS_PAIR 0  // PROVISION over USB is the only pairing path here; see board_es3c35p.h
+// PROJECTS is out of scope on this board by design
+// (docs/superpowers/specs/2026-09-20-sessions-manager-design.md, "Out of
+// scope: Board 1") - the tab arithmetic works here (TAB 2 switches cleanly
+// to an empty content area) but there is no project list behind it, and it
+// refuses PROJFETCH by name from UNAVAILABLE_COMMANDS[]. Stated explicitly
+// as 0, unlike some other board-2-only flags this header leaves undefined,
+// because commands-check.mjs's guard evaluator THROWS on an identifier
+// neither header #defines, by design ("a guard silently read as false makes
+// any negation claim over it meaningless") - so this one flag needs a real
+// value here for that checker to evaluate deckhand_display.ino's own #if
+// BOARD_HAS_PROJECTS guards at all.
+#define BOARD_HAS_PROJECTS 0
 // The USAGE tab's NOW / WEEK / CODEX layout is board 2 only: it needs a trend
 // ring (~165 bytes of DRAM against board 1's ~26KB of free heap, which the audio
 // path already competes for) and a 64px native hero this board does not have.

@@ -3857,6 +3857,38 @@ async function handleDeviceLine(line, via, pairGen = 0) {
     else await sendHistory(id, filter, want, histBudget(budgetTok), replyLink);
     return;
   }
+  // `PROJECTS` - level 1 of the device's PROJECTS tab, requested when it
+  // opens (firmware/deckhand_display/projects.ino's requestProjects(), also
+  // reachable standalone via the PROJFETCH trigger-file command for
+  // capturing the tab with no finger on the glass). Answered with ONE
+  // `projs` line built by host/project-replies.mjs's own buildProjectsReply
+  // - never re-derived here, the same rule FOCUS's `sdetail` reply and
+  // HISTORY's replies both follow.
+  if (line === "PROJECTS") {
+    const replyLink = replyLinkFor(via);
+    // DEDUPED LIKE HISTORY/FOCUS: the device sends on every live transport,
+    // so a cabled board asks twice within milliseconds. This request takes
+    // no argument, so the whole verb is the dedupe key - two PROJECTS
+    // within the window are the same request, never two different ones.
+    const now = Date.now();
+    for (const [k, t] of scrollReqSeen) if (now - t > SCROLL_REQ_DEDUP_MS) scrollReqSeen.delete(k);
+    const reqKey = `${scrollSenderKey(via)}|projects`;
+    if (scrollReqSeen.has(reqKey)) return scrollReqDropped(via, reqKey);
+    scrollReqSeen.set(reqKey, now);
+    console.log(`[device/${linkLabel(via)}] ${line}`);
+    const reply = await buildProjectsReply();
+    // Through fitPayload for the same reason every other on-demand reply is
+    // - see FOCUS's own comment - though the design's own projection
+    // (~1.1KB for 16 projects, one wire chunk) means this should never
+    // actually have to shed anything.
+    const fitted = fitPayload(reply);
+    if (fitted.dropped.length) console.log(`PROJECTS: shed ${fitted.dropped.join("; ")}`);
+    await sendToLink(replyLink, fitted.line);
+    console.log(
+      `PROJECTS: sent ${fitted.bytes} bytes (${reply.projs.items.length} project(s)) via ${linkLabel(replyLink?.id ?? "none")}`
+    );
+    return;
+  }
   // Audio first, and deliberately unlogged - see the note above.
   //
   // EVERY BUFFER HERE HANGS OFF THE LINK, not off a module global. One
