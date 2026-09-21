@@ -16,7 +16,20 @@
 //
 //   node projects-geom-check.mjs             check board 2
 //   node projects-geom-check.mjs --selftest  prove the checker has teeth
-import { consts } from "./geom-common.mjs";
+//
+// FIX ROUND 1 added two more assertions, over the fetch-timeout mechanism
+// (board_es3c35p.h's PROJ_FETCH_TIMEOUT_MS/_BLE_MS, projects.ino's
+// tickProjectsFetch()) that replaced an unrecoverable stuck-forever
+// "Loading projects..." state reachable by one dropped BLE reply. One reads
+// the parsed constants (BLE's own allowance must be longer than USB's - the
+// same relationship SCROLL_FETCH_TIMEOUT_BLE_MS/_MS holds, mirrored rather
+// than reinvented); the other is STRUCTURAL, bound to tickProjectsFetch()'s
+// own function body (never to the file at large - "a rule a neighbouring
+// line can satisfy is not a rule", CLAUDE.md) via geom-common's fnBody(),
+// which throws rather than reading someone else's line if the function
+// cannot be found at all.
+import { consts, fnBody, stripComments, DIR } from "./geom-common.mjs";
+import fs from "fs";
 
 function assert(fails, name, cond, detail) {
   if (cond) {
@@ -52,7 +65,12 @@ function assert(fails, name, cond, detail) {
 // terms and pairs it with PROJ_ROWS AS DECLARED, which is exactly the
 // combination a source edit to PROJ_ROW_H alone would produce before anyone
 // touched PROJ_ROWS - and exactly what --selftest's first fault injects.
-function checkAll(c) {
+// `projSrc` is projects.ino's text with comments stripped (real, unless
+// --selftest's structural fault below is overriding it) - passed in rather
+// than read here so the SAME checkAll() serves both the ordinary run and the
+// faulted one, which is what makes "does reverting the fix make this fail,
+// by name" a real question rather than a rhetorical one.
+function checkAll(c, projSrc) {
   const fails = [];
 
   const step = c.PROJ_ROW_H + c.PROJ_ROW_GAP;
@@ -91,11 +109,71 @@ function checkAll(c) {
     c.PROJ_ROWS === Math.floor((c.PROJ_AVAIL + c.PROJ_ROW_GAP) / c.PROJ_STEP),
     `${c.PROJ_ROWS} != floor((${c.PROJ_AVAIL} + ${c.PROJ_ROW_GAP}) / ${c.PROJ_STEP})`);
 
+  // ---- fetch timeout (fix round 1: a lost reply must not hang forever) ----
+  assert(fails, "PROJECTS' BLE fetch timeout is longer than its USB one",
+    c.PROJ_FETCH_TIMEOUT_BLE_MS > c.PROJ_FETCH_TIMEOUT_MS,
+    `BLE ${c.PROJ_FETCH_TIMEOUT_BLE_MS}ms <= USB ${c.PROJ_FETCH_TIMEOUT_MS}ms - BLE's 20-byte ` +
+    `notifies are the slower, less reliable pipe and need the longer allowance ` +
+    `(SCROLL_FETCH_TIMEOUT_BLE_MS/_MS's own relationship)`);
+
+  // STRUCTURAL, bound to the function's own BODY. fnBody() THROWS if the
+  // signature is not found at all - a renamed or deleted tickProjectsFetch()
+  // fails this assertion loudly (via the catch below) rather than silently
+  // reading whichever OTHER function happens to sit nearby, which is exactly
+  // the class of vacuous pass CLAUDE.md's "bind to a function body, not the
+  // file" rule exists to rule out. requestProjects() ALSO touches
+  // projectsPending (setting it true) - a check that merely grepped the
+  // whole file for `projectsPending = false;` would still pass if
+  // tickProjectsFetch() itself never cleared it, as long as SOME other
+  // function happened to.
+  let tickBody = "";
+  try {
+    tickBody = fnBody(projSrc, "void tickProjectsFetch() {", "projects.ino");
+  } catch (e) {
+    fails.push("tickProjectsFetch() clears projectsPending on timeout");
+    fails.push("tickProjectsFetch() sets projectsFetchFailed on timeout");
+    console.log(`  FAIL  tickProjectsFetch() clears projectsPending on timeout: ${e.message}`);
+    console.log(`  FAIL  tickProjectsFetch() sets projectsFetchFailed on timeout: ${e.message}`);
+  }
+  if (tickBody) {
+    assert(fails, "tickProjectsFetch() clears projectsPending on timeout",
+      /projectsPending\s*=\s*false;/.test(tickBody),
+      "no `projectsPending = false;` inside tickProjectsFetch()'s own body - a fetch that " +
+      "times out would leave every LATER request refused as \"busy\" forever");
+    assert(fails, "tickProjectsFetch() sets projectsFetchFailed on timeout",
+      /projectsFetchFailed\s*=\s*true;/.test(tickBody),
+      "no `projectsFetchFailed = true;` inside tickProjectsFetch()'s own body - the tab " +
+      "would silently keep showing \"Loading projects...\" with nothing that ever explains it");
+  }
+
   return fails;
+}
+
+// projects.ino's real text, comments stripped - read once, reused by the
+// ordinary run. --selftest's structural fault below reads and mutates its
+// own copy rather than this one, so the two never interfere.
+function loadProjSrc() {
+  return stripComments("projects.ino");
 }
 
 function loadConsts() {
   return consts("board_es3c35p.h");
+}
+
+// A MUTATED copy of projects.ino's text, comments stripped, for the
+// structural fault below - reads the file itself (not through geom-common's
+// read(), whose own fault machinery this checker deliberately does not use;
+// see the header note on why a plain in-process string replace is enough
+// when the fault is a numeric override, and is extended here to a literal
+// text removal for the one structural fault that needs it). The negative
+// lookbehind excludes `bool projectsPending = false;` (the declaration,
+// line ~28) - there is exactly one OTHER occurrence, the assignment inside
+// tickProjectsFetch(), which is the one this fault removes.
+function faultedProjSrcNoPendingClear() {
+  const raw = fs.readFileSync(`${DIR}/projects.ino`, "utf8");
+  const mutated = raw.replace(/(?<!bool )projectsPending = false;\n/, "");
+  if (mutated === raw) throw new Error("fault did not match anything - the line moved or was renamed");
+  return mutated.replace(/^[ \t]*\/\/.*$/gm, ""); // stripComments()'s own transform
 }
 
 function main() {
@@ -103,29 +181,37 @@ function main() {
 
   if (!selftest) {
     console.log("PROJECTS geometry (board 2):");
-    const fails = checkAll(loadConsts());
+    const fails = checkAll(loadConsts(), loadProjSrc());
     console.log(fails.length ? `${fails.length} FAILED` : "all assertions passed");
     process.exit(fails.length ? 1 : 0);
   }
 
-  // --selftest: two faults, each a POST-PARSE override of PROJ_ROW_H alone -
-  // simulating a source edit to that one constant with PROJ_ROWS (a separate
+  let ok = true;
+
+  // Two faults, each a POST-PARSE override of PROJ_ROW_H alone - simulating
+  // a source edit to that one constant with PROJ_ROWS (a separate
   // declaration) left as the real header states it, which is what the long
   // note above checkAll() explains is the only way to make the footer check
   // fail at all. Each fault must break the ONE assertion the brief names, BY
   // THAT ASSERTION'S NAME - not merely "something failed" - or the checker
   // has no teeth.
-  let ok = true;
-  const faults = [
+  const constFaults = [
     ["PROJ_ROW_H bumped to 60 (a taller row than PROJ_ROWS was sized for)",
-      60, "the last project row fits above the footer"],
+      { PROJ_ROW_H: 60 }, "the last project row fits above the footer"],
     ["PROJ_ROW_H dropped to 30 (under this board's TAP_MIN)",
-      30, "a project row is at least a fingertip"],
+      { PROJ_ROW_H: 30 }, "a project row is at least a fingertip"],
+    // Fix round 1: BLE's own timeout dropped to (incorrectly) equal USB's -
+    // proves the relational assertion actually compares the two rather than
+    // merely checking each is positive, which any real declared value would
+    // pass regardless of which board's own number it was.
+    ["PROJ_FETCH_TIMEOUT_BLE_MS dropped to equal PROJ_FETCH_TIMEOUT_MS",
+      { PROJ_FETCH_TIMEOUT_BLE_MS: 20000 }, "PROJECTS' BLE fetch timeout is longer than its USB one"],
   ];
-  for (const [label, rowH, want] of faults) {
+  const projSrc = loadProjSrc();
+  for (const [label, override, want] of constFaults) {
     console.log(`selftest: ${label}`);
-    const c = { ...loadConsts(), PROJ_ROW_H: rowH };
-    const fails = checkAll(c);
+    const c = { ...loadConsts(), ...override };
+    const fails = checkAll(c, projSrc);
     if (fails.includes(want)) {
       console.log(`  caught  ${want}`);
     } else {
@@ -133,7 +219,34 @@ function main() {
       ok = false;
     }
   }
-  console.log(ok ? "selftest: both faults caught by name" : "selftest: FAILED");
+
+  // STRUCTURAL fault (fix round 1): tickProjectsFetch() loses the one line
+  // that makes a retry possible after a timeout - the exact regression this
+  // whole fix round exists to prevent from ever shipping silently again.
+  // Real constants (unfaulted), mutated SOURCE - the two fault mechanisms
+  // are independent and this proves the structural assertion on its own.
+  {
+    const label = "tickProjectsFetch() loses `projectsPending = false;` " +
+                  "(the exact bug this fix round was filed to prevent)";
+    const want = "tickProjectsFetch() clears projectsPending on timeout";
+    console.log(`selftest: ${label}`);
+    let fails;
+    try {
+      fails = checkAll(loadConsts(), faultedProjSrcNoPendingClear());
+    } catch (e) {
+      console.log(`  MISSED  fault injection itself failed: ${e.message}`);
+      ok = false;
+      fails = [];
+    }
+    if (fails.includes(want)) {
+      console.log(`  caught  ${want}`);
+    } else {
+      console.log(`  MISSED  expected "${want}" to fail, by name, and it did not`);
+      ok = false;
+    }
+  }
+
+  console.log(ok ? "selftest: all faults caught by name" : "selftest: FAILED");
   process.exit(ok ? 0 : 1);
 }
 

@@ -1438,6 +1438,21 @@ const int PROJ_META_W = 88;
 // 296 - 2*12 = 272, 8px of slack. projects-geom-check.mjs asserts this from
 // the parsed constants rather than trusting the arithmetic in this comment.
 
+// A STALLED FETCH MUST SAY SO rather than leaving "Loading projects..." on
+// the glass forever - SCROLL_FETCH_TIMEOUT_MS/_BLE_MS's own reasoning
+// (scrollback.ino's requestScrollback()/tickScrollFetch()), mirrored here
+// rather than reinvented: two figures for the same reason (BLE's 20-byte
+// notifies are a slower, less reliable pipe than USB, so BLE gets the
+// longer allowance), and the same numbers, because this fetch has never
+// been measured slower than the transcript one - if anything it should be
+// faster (the design's own projection: ~175ms for 16 projects, one wire
+// chunk, against the transcript's own multi-chunk fetches). Read by
+// tickProjectsFetch() (projects.ino), called from loop() beside
+// tickScrollFetch(), under the identical `if (!pending) return;` guard so a
+// fetch that is not outstanding costs nothing per tick.
+const int PROJ_FETCH_TIMEOUT_MS     = 20000;
+const int PROJ_FETCH_TIMEOUT_BLE_MS = 40000;
+
 // ---------- §3 THE STATUS BAND ----------
 // The card head becomes a FILLED BAND in the status colour. Filled bands are new
 // vocabulary for this UI - nothing else here fills a region with a status colour -

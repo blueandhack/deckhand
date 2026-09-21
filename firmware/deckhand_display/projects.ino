@@ -32,6 +32,15 @@ bool projectsPending = false;
 // "No projects found" the very first time the tab opens.
 bool projectsEverReceived = false;
 unsigned long projectsFetchStart = 0;
+// SET BY tickProjectsFetch() ON TIMEOUT, CLEARED BY requestProjects() ON A
+// FRESH SEND - scrollFetchFailed's own shape (scrollback.ino), for the
+// identical reason: a lost reply must become a NAMED failure the person can
+// act on, not an unbounded wait. Mutually exclusive with projectsPending in
+// practice (one tick sets this and clears that in the same breath), but they
+// are not merged into one tri-state on purpose - a third caller reading
+// "not pending" would otherwise have to ask separately whether that means
+// "succeeded" or "never tried", and this way it never has to.
+bool projectsFetchFailed = false;
 
 // Scroll offset, in content pixels, always a multiple of PROJ_STEP - see
 // projScrollTo(), the one place it is written.
@@ -41,10 +50,22 @@ int projScroll = 0;
 // row's cache - the same shape sessionScrollCache is, for the identical
 // reason: a position-only change reaches no text-comparing cache at all.
 int projScrollCache = -1;
-// The layout state last painted: -1 (never rendered), -2 (the loading/empty
-// message is showing), or the project count the rows were drawn for. Any
-// change to this value means the content area needs a wholesale clear
-// before anything is redrawn into it - see renderProjectsTab()'s own note.
+// THREE SUB-STATES OF "NO ROWS TO DRAW", named so a transition between them
+// gets the same wholesale-clear-and-bust treatment a genuine row-count
+// change gets. Merging them into one bucket (an earlier version of this file
+// did) is exactly the trap CLAUDE.md names for a colour- or shape-only
+// change: drawIfChanged's own box-clear is sized to the NEW text, and
+// "-- could not reach the Mac --\ntap to retry" (two lines) shrinking to
+// "Loading projects..." (one line) on a retry would leave the second line's
+// old, wider ink standing - a ghost nothing ever wipes, because neither
+// message's own per-field cache saw itself as the thing that changed.
+const int PROJ_STATE_PENDING = -2;
+const int PROJ_STATE_FAILED  = -3;
+const int PROJ_STATE_EMPTY   = -4;
+// The layout state last painted: -1 (never rendered), one of the three
+// states above, or the project count the rows were drawn for. Any change to
+// this value means the content area needs a wholesale clear before anything
+// is redrawn into it - see renderProjectsTab()'s own note.
 int projRowCountCache = -1;
 // Per-DISPLAY-POSITION signature cache, "name|count|tod|live" - see
 // drawProjectRow()'s own note on why `live` belongs here despite never
@@ -55,6 +76,15 @@ int projRowCountCache = -1;
 // shorter than the string it holds silently stops noticing changes past
 // that point).
 char projRowSigCache[PROJ_SLOTS][48];
+// The loading/failed/empty message's own two lines. Sized to their real
+// worst cases ("-- could not reach the Mac --" is 30 characters, "tap to
+// retry" 12) with margin, per this file's own rule above - see
+// PROJ_STATE_PENDING's comment for why a shared, generic-length cache would
+// not be enough on its own to keep the second line from ghosting on a
+// shrink; the explicit bust on a projRowCountCache transition is what
+// actually prevents that, these caches are reset there too.
+char projMsgCache[32] = "";
+char projMsg2Cache[16] = "";
 
 void requestProjects() {
   // A SECOND REQUEST WHILE ONE IS IN FLIGHT IS A NO-OP THAT REPORTS PROGRESS,
@@ -74,6 +104,13 @@ void requestProjects() {
     return;
   }
   projectsPending = true;
+  // CLEARED ON EVERY FRESH SEND, not just on success - scrollFetchFailed's
+  // own reset in requestScrollback(). Without this, a retry after a timeout
+  // would set projectsPending back to true while projectsFetchFailed stayed
+  // true too, and the two would briefly (correctly, since pending is
+  // checked first) agree on what to SHOW but disagree about what actually
+  // HAPPENED - state worth not leaving to sort itself out.
+  projectsFetchFailed = false;
   projectsFetchStart = millis();
   // BROADCAST (link -1), not addressed to one Mac: unlike a session's
   // transcript, the project inventory is not owned by whichever Mac is
@@ -82,6 +119,33 @@ void requestProjects() {
   // second Mac's reply lands as an ordinary re-fetch (wholesale replace) a
   // moment later.
   sendLineToHost("PROJECTS");
+}
+
+// Called from loop() - tickScrollFetch()'s own shape (scrollback.ino),
+// mirrored rather than reinvented. A lost reply is a NORMAL event on BLE,
+// not an exotic one, and left unhandled it is an UNRECOVERABLE state
+// reachable by a single dropped packet: projectsPending stays true forever,
+// so every later PROJFETCH and every later tab-open logs "busy" and fetches
+// nothing - the tab is stuck on "Loading projects..." until the board
+// reboots, with nothing anywhere saying why. This is what breaks that.
+//
+// THE FIRST LINE IS THE WHOLE COST GUARANTEE: no fetch outstanding, nothing
+// below it ever runs. tickScrollFetch() states the identical guarantee for
+// the identical reason.
+void tickProjectsFetch() {
+  if (!projectsPending) return;
+  const unsigned long cap = usbLinkActive() ? PROJ_FETCH_TIMEOUT_MS : PROJ_FETCH_TIMEOUT_BLE_MS;
+  if (millis() - projectsFetchStart < cap) return;
+  // sendLineToHost, NOT Serial.printf - tickScrollFetch()'s own choice, and
+  // for the same reason: with the cable out, Serial reaches nothing, and a
+  // BLE-only session is EXACTLY when this report needs to be visible - it is
+  // the transport most likely to have lost the reply in the first place.
+  char m[64];
+  snprintf(m, sizeof(m), "PROJECTS timeout ms=%lu", millis() - projectsFetchStart);
+  sendLineToHost(m);
+  projectsPending = false;
+  projectsFetchFailed = true;
+  if (currentTab == TAB_PROJECTS) renderProjectsTab();
 }
 
 // ---------- Scrolling (board 2's only shape at this level - see the header
@@ -233,26 +297,54 @@ void drawProjectRow(int pos) {
 // the `#if` sits INSIDE each body rather than around the whole function.
 void renderProjectsTab() {
 #if BOARD_HAS_PROJECTS
-  // NOT SESSIONSCROLL'S SHAPE for the loading/empty message: this is a
-  // STRUCTURAL state (is there a list to draw at all), so it gets the same
+  // NOT SESSIONSCROLL'S SHAPE for the loading/failed/empty message: this is
+  // a STRUCTURAL state (is there a list to draw at all), so it gets the same
   // wholesale-clear-and-bust treatment a session count change gets, keyed by
-  // a sentinel (-2) distinct from -1 (never rendered) only so the FIRST
-  // entry into "loading" or "no projects" also clears - which happens
-  // naturally since -1 != -2 too. Re-entering the SAME message on a later
-  // call (the once-a-second tick, while still pending) must NOT re-clear -
-  // that would flicker the same text every second - and drawIfChanged below
-  // is what keeps that call nearly free.
+  // one of PROJ_STATE_PENDING/FAILED/EMPTY - three, not one, and that split
+  // is what actually matters here: an earlier version of this file merged
+  // them into a single sentinel, which meant retrying after a timeout
+  // (failed's two lines -> pending's one) triggered NO clear at all, since
+  // both states shared the same bucket - and drawIfChanged's own box-clear
+  // is sized to the NEW, narrower text, so the failed message's second line
+  // ("tap to retry") would still be standing where "Loading projects..."
+  // had nothing to say about it. Re-entering the SAME state on a later call
+  // (the once-a-second tick, while still pending) must NOT re-clear - that
+  // would flicker the same text every second - and drawIfChanged below is
+  // what keeps that call nearly free once the state itself has settled.
   if (!projectsEverReceived || projectCount == 0) {
-    if (projRowCountCache != -2) {
+    const int state = projectsPending  ? PROJ_STATE_PENDING
+                     : projectsFetchFailed ? PROJ_STATE_FAILED
+                                            : PROJ_STATE_EMPTY;
+    if (projRowCountCache != state) {
       tft.fillRect(0, CONTENT_Y, tft.width(), contentBottom() - CONTENT_Y, COLOR_BG);
       for (int i = 0; i < PROJ_SLOTS; i++) projRowSigCache[i][0] = '\0';
-      projRowCountCache = -2;
+      projRowCountCache = state;
+      projMsgCache[0] = '\0';
+      projMsg2Cache[0] = '\0';
     }
-    static char msgCache[24] = "";
-    const char* msg = !projectsEverReceived ? "Loading projects..." : "No projects found";
+    // ASCII ONLY - three ASCII dots/hyphens, never U+2026 or an em dash: an
+    // out-of-range codepoint draws NOTHING AND ADVANCES NOTHING on this
+    // board's fonts, which is invisible rather than merely wrong-looking.
+    // "--" either side of the failure text matches scrollback.ino's own
+    // dead-end vocabulary (scrollNote's "-- could not reach the Mac --"),
+    // reused rather than invented, so the device says the same thing about
+    // the same failure everywhere it can happen.
+    const char* msg = state == PROJ_STATE_PENDING ? "Loading projects..."
+                     : state == PROJ_STATE_FAILED  ? "-- could not reach the Mac --"
+                                                    : "No projects found";
+    const char* msg2 = state == PROJ_STATE_FAILED ? "tap to retry" : "";
     setUIFont(T_BODY);
-    drawIfChanged(msgCache, sizeof(msgCache), msg, tft.width() / 2, CONTENT_Y + 40,
+    const int msgY1 = CONTENT_Y + 40;
+    drawIfChanged(projMsgCache, sizeof(projMsgCache), msg, tft.width() / 2, msgY1,
                   T_BODY, 1, COLOR_LABEL, COLOR_BG, TC_DATUM);
+    // Only drawn (and only ever compared) when there IS a second line - the
+    // clear above already blanked it for every OTHER state, and comparing
+    // an empty string against an empty cache would never fire drawIfChanged
+    // anyway, so this guard is for clarity, not correctness.
+    if (msg2[0]) {
+      drawIfChanged(projMsg2Cache, sizeof(projMsg2Cache), msg2, tft.width() / 2,
+                    msgY1 + uiLineH(T_BODY) + 8, T_BODY, 1, COLOR_LABEL, COLOR_BG, TC_DATUM);
+    }
   } else {
     // A SCROLL-CAPABLE COUNT CHANGE (or the count changing at all) GETS THE
     // SAME WHOLESALE TREATMENT sessions.ino's rowCountCache/sessionScrollCache
@@ -299,8 +391,22 @@ void renderProjectsTab() {
 void handleProjectsTouch(int sx, int sy) {
 #if BOARD_HAS_PROJECTS
   // Nothing to touch before the first reply, or with a genuinely empty
-  // inventory.
-  if (!projectsEverReceived || projectCount == 0) return;
+  // inventory - EXCEPT the failed state's own escape: a tap anywhere retries,
+  // since the screen has nothing else on it to hit-test against. The SAME
+  // predicate renderProjectsTab() draws by (scrollDeadEnd()'s own precedent:
+  // "one predicate, read by the draw site and the hit test both"), so a
+  // retry is offered exactly when, and only when, the glass says one is.
+  // Guarded on !projectsPending so a tap during the brief window between a
+  // fresh send and its own pending flag settling cannot fire twice - though
+  // requestProjects()'s own busy-guard would catch that anyway, belt and
+  // braces costs nothing here.
+  if (!projectsEverReceived || projectCount == 0) {
+    if (projectsFetchFailed && !projectsPending) {
+      requestProjects();
+      renderProjectsTab(); // immediate feedback - "Loading..." without a 1s wait for the next tick
+    }
+    return;
+  }
   if (sy < PROJ_ROW_Y0) return;
 
   if (projScrollActive()) {

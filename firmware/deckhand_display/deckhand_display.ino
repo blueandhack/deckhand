@@ -1482,6 +1482,12 @@ extern ProjInfo projects[PROJ_SLOTS];
 extern int projectCount;
 extern bool projectsPending;
 extern bool projectsEverReceived;
+// A fetch that timed out - see tickProjectsFetch() (projects.ino) and
+// board_es3c35p.h's PROJ_FETCH_TIMEOUT_MS. Distinct from projectsPending
+// (which it always follows: the tick clears one and sets the other in the
+// same breath), so the tab can show a NAMED failure instead of leaving
+// "Loading projects..." on the glass with nothing that ever changes it.
+extern bool projectsFetchFailed;
 void requestProjects();
 #endif
 
@@ -8733,6 +8739,9 @@ void loop() {
 #endif
 #if BOARD_HISTORY_SCROLL
   tickScrollTail();
+#endif
+#if BOARD_HAS_PROJECTS
+  tickProjectsFetch();  // no-op unless a PROJECTS fetch is outstanding
 #endif
 #if BOARD_HAS_WIRELESS_PAIR
   pairTick();           // no-op unless a pairing window is open; closes it at 120s
